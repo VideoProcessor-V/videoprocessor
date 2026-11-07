@@ -472,7 +472,7 @@ namespace Tests
 							SourceIdentity::Record rec;
 							const bool have = l->consensus && l->monitor.SourceIdRecord(rec);
 							const bool engaged = l->fx < 1.0 - 1e-9 || l->fy < 1.0 - 1e-9;
-							const char* state = engaged ? "LATCHED" : (s.declaredRatio < 0.999 ? "CANDIDATE" : "UNKNOWN");
+							const char* state = engaged ? "LATCHED" : (s.declaredRatio < 0.999 ? "DECLARED" : "UNKNOWN");
 							const long nx = std::lround(l->fx * W), ny = std::lround(l->fy * H);
 							const char* reasonV = have ? SourceIdentity::ReasonText(static_cast<SourceIdentity::ReasonCode>(rec.reason[static_cast<int>(SourceIdentity::Field::AxisV)])) : "none";
 							const char* reasonH = have ? SourceIdentity::ReasonText(static_cast<SourceIdentity::ReasonCode>(rec.reason[static_cast<int>(SourceIdentity::Field::AxisH)])) : "none";

@@ -118,25 +118,24 @@ namespace Tests
 			in.tapAttached = true;
 			in.haveRecord = true;
 			in.last.c1 = 15.0;
-			in.last.c2 = 18.0;
 			return in;
 		}
 
 		static std::string Line(const Input& in) { return SourceIdentity::Chain::ChainStatusLine(in); }
 
-		TEST_METHOD(ADecidedUpscaleNamesTheRungTheKernelFamilyAndTheSharpening)
+		TEST_METHOD(AConfidentUpscaleNamesTheRungTheKernelFamilyAndTheSharpening)
 		{
 			Input in = Running();
 			in.record.applied[0] = GeoFx::AppliedAxis(1920, 3840, 5);   // lanczos3
 			in.record.applied[1] = GeoFx::AppliedAxis(1080, 2160, 5);
 			in.record.applied[1].sharpen.present = true;
 			in.record.applied[0].conf = in.record.applied[1].conf = 0.99f;
-			Assert::AreEqual(std::string("Source identity: 1080 -> 2160 lanczos-like + sharpening, latched 0.99"), Line(in));
+			Assert::AreEqual(std::string("Source identity: 1080 -> 2160 lanczos-like + sharpening, confident"), Line(in));
 			in.record.applied[1].sharpen.present = false;
 			in.record.applied[0].kernelIndex = in.record.applied[1].kernelIndex = -1;
-			Assert::AreEqual(std::string("Source identity: 1080 -> 2160 kernel unsure, latched 0.99"), Line(in));
+			Assert::AreEqual(std::string("Source identity: 1080 -> 2160 kernel unsure, confident"), Line(in));
 			in.shadow = true;
-			Assert::AreEqual(std::string("Source identity: 1080 -> 2160 kernel unsure, latched 0.99 [shadow: would-be, classical decides]"), Line(in));
+			Assert::AreEqual(std::string("Source identity: 1080 -> 2160 kernel unsure, confident [shadow: would-be, classical decides]"), Line(in));
 		}
 
 		TEST_METHOD(NativeAndDisagreeingAxesAreSaidPlainly)
@@ -145,21 +144,21 @@ namespace Tests
 			in.record.applied[0] = GeoFx::AppliedAxis(3840, 3840, -1);
 			in.record.applied[1] = GeoFx::AppliedAxis(2160, 2160, -1);
 			in.record.applied[0].conf = in.record.applied[1].conf = 0.97f;
-			Assert::AreEqual(std::string("Source identity: native, latched 0.97"), Line(in));
+			Assert::AreEqual(std::string("Source identity: native, confident"), Line(in));
 			in.record.applied[0] = GeoFx::AppliedAxis(1920, 3840, 1);   // bicubic
 			in.record.applied[1] = GeoFx::AppliedAxis(1440, 2160, 8);   // spline36
 			in.record.applied[0].conf = in.record.applied[1].conf = 0.98f;
-			Assert::AreEqual(std::string("Source identity: H 1920 -> 3840 bicubic-like; V 1440 -> 2160 spline-like, latched 0.98"), Line(in));
+			Assert::AreEqual(std::string("Source identity: H 1920 -> 3840 bicubic-like; V 1440 -> 2160 spline-like, confident (axes differ)"), Line(in));
 		}
 
-		TEST_METHOD(OneDecidedAxisAndTheOtherUnsure)
+		TEST_METHOD(OneConfidentAxisAndTheOtherUnsure)
 		{
 			Input in = Running();
 			in.record.applied[0] = GeoFx::AppliedAxis(1080, 2160, 5);
 			in.record.applied[0].conf = 0.99f;
 			in.record.measured[1] = GeoFx::MeasuredAxis(GG::LatchState::Abstain, 0, 2160);
 			in.record.measured[1].reasonBits = SourceIdentity::Chain::kReasonDark;
-			Assert::AreEqual(std::string("Source identity: H 1080 -> 2160 lanczos-like, latched 0.99; V unsure (dark)"), Line(in));
+			Assert::AreEqual(std::string("Source identity: H 1080 -> 2160 lanczos-like, confident; V unsure (dark)"), Line(in));
 		}
 
 		TEST_METHOD(NoPowerHoldAndAcquiringHaveTheirOwnWords)
@@ -213,7 +212,7 @@ namespace Tests
 			in.tapLost = true;
 			in.tapAttached = false;
 			Assert::AreEqual(std::string("Source identity: classical only (frame tap lost: no new frames reach the estimator)"), Line(in),
-				L"a registration that vanished is not shown as a healthy latch");
+				L"a registration that vanished is not shown as a healthy tap");
 			Input slow = Running();
 			slow.governor.intervalSec = 10.0;   // a stretched cadence: the stall limit follows the planned interval
 			slow.wallMsSinceLastEvaluation = 20000.0;
@@ -232,7 +231,7 @@ namespace Tests
 			in.last.active.w = 3840;
 			in.last.active.h = 2160;
 			SourceIdentity::Chain::LogAxis& a = in.last.axis[0];
-			a.state = GG::LatchState::Candidate;
+			a.state = GG::LatchState::Provisional;
 			a.N = 3840;
 			a.measuredN = 1920;
 			a.measuredKernel = 5;
@@ -262,7 +261,7 @@ namespace Tests
 			in.evidenceText = "evidence: log+lines, 1.5 MB in sid-evidence (cap 2048 MB), 1 dumps";
 			const std::string t = SourceIdentity::Chain::ChainDetailText(in);
 			Assert::IsTrue(t.find("eval seq 1234") != std::string::npos);
-			Assert::IsTrue(t.find("H: candidate, measured 1920/3840 lanczos3 llr 12.5 (c1 15.0, c2 18.0)") != std::string::npos);
+			Assert::IsTrue(t.find("H: provisional, measured 1920/3840 lanczos3 llr 12.5 (c1 15.0)") != std::string::npos);
 			Assert::IsTrue(t.find("probe unseen, lines 20/32 informative, 2 masked, reasons: no power") != std::string::npos);
 			Assert::IsTrue(t.find("candidate 1920: stat -0.250, increment 2.50, kernel lanczos3") != std::string::npos);
 			Assert::IsTrue(t.find("governor: interval 4.00 s (nominal 1.0 s, share 15%, acquiring), cost 600.0 ms") != std::string::npos);

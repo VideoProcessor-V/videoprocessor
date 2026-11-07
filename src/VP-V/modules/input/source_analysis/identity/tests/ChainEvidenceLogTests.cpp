@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // The shadow-deploy evidence log (SID-C2b, doc 78 section 9b, identity/chain/ChainEvidenceLog.h): segment / state / aggregate rows, the
-// RAM ring of the last 30 evaluations' lines dumped on the triggers (disagreement, flap, thin latch, HOLD, UNSTABLE, power unseen,
-// coverage bucket, hotkey) with their rate limits (<= 1 per 5 min, <= 20 per day), the frames level, the 2 GB FIFO cap (tested small),
+// RAM ring of the last 30 evaluations' lines dumped on the triggers (a confident reading that disagrees with the classical decision, HOLD,
+// power unseen, coverage bucket, hotkey) with their rate limits (<= 1 per 5 min, <= 20 per day), the frames level, the 2 GB FIFO cap (tested small),
 // the off states, the one-time notice, a failing disk reported once. In-memory file system, injected clock, hand-made evaluations.
 #include "pch.h"
 #include "CppUnitTest.h"
@@ -67,7 +67,6 @@ namespace Tests
 			e.active.w = 3840;
 			e.active.h = 2160;
 			e.c1 = 15.0;
-			e.c2 = 18.0;
 			e.stepCodes = 4;
 			e.intervalSec = 1.0;
 			for (int a = 0; a < 2; ++a)
@@ -87,7 +86,7 @@ namespace Tests
 
 		C::LogEval MakeEval(uint64_t seq, double sec) { return MakeEval(seq, sec, Snap(seq, 100)); }
 
-		void SetLatched(C::LogEval& e, int axis, int n, double llr)
+		void SetConfident(C::LogEval& e, int axis, int n, double llr)
 		{
 			C::LogAxis& L = e.axis[axis];
 			L.state = G::LatchState::Latched;
@@ -100,13 +99,16 @@ namespace Tests
 			L.measuredLlr = llr;
 			L.appliedChanged = true;
 			L.stateChanged = true;
-			L.latchReason = static_cast<int>(C::LatchReason::Latched);
+			L.readingReason = static_cast<int>(C::ReadingReason::Confident);
 		}
 
-		void SetUnstable(C::LogEval& e)
+		// A confident reading of axis 0 that the classical decision (native) contradicts: the disagreement trigger, every time it is called.
+		void SetDisagree(C::LogEval& e)
 		{
-			e.axis[0].state = G::LatchState::Unstable;
-			e.axis[0].stateChanged = true;
+			e.classicalValid = true;
+			e.classicalRatio[0] = 1.0;
+			e.classicalRatio[1] = 1.0;
+			SetConfident(e, 0, 1080, 20.0);
 		}
 
 		struct Env
@@ -189,19 +191,21 @@ namespace Tests
 				C::LogEval e = MakeEval(static_cast<uint64_t>(i), static_cast<double>(i));
 				if (i == 3)
 				{
-					e.axis[0].state = G::LatchState::Candidate;
+					e.axis[0].state = G::LatchState::Abstain;
 					e.axis[0].stateChanged = true;
 				}
 				if (i == 6)
-					SetLatched(e, 0, 1080, 20.0);
+					SetConfident(e, 0, 1080, 20.0);
+				if (i == 9)
+					SetConfident(e, 0, 720, 20.0);   // the confident size changed (an UNSURE gap would not close the segment)
 				env.log->OnEvaluation(e, nullptr);
 			}
 			env.log->Close(25000000, "test end");
 			const std::string rows = env.Jsonl();
-			Assert::AreEqual(2, Count(rows, "\"t\":\"state\""), L"one row per state change, full detail");
-			Assert::AreEqual(2, Count(rows, "\"t\":\"segment\""), L"closed at the applied change, and at the end");
+			Assert::AreEqual(3, Count(rows, "\"t\":\"state\""), L"one row per state change, full detail");
+			Assert::AreEqual(2, Count(rows, "\"t\":\"segment\""), L"closed at the change of the confident size, and at the end");
 			Assert::AreEqual(2, Count(rows, "\"t\":\"agg\""), L"one aggregate row per 10 s of source time");
-			Assert::IsTrue(rows.find("\"end\":\"applied change\"") != std::string::npos);
+			Assert::IsTrue(rows.find("\"end\":\"confident size change\"") != std::string::npos);
 			Assert::IsTrue(rows.find("\"end\":\"test end\"") != std::string::npos);
 			Assert::IsTrue(rows.find("\"t\":\"trigger\"") != std::string::npos, L"the coverage bucket was empty: a trigger row");
 			Assert::IsTrue(rows.find("skipped: level log") != std::string::npos);
@@ -213,19 +217,19 @@ namespace Tests
 			Env env;
 			for (int i = 1; i <= 35; ++i)
 				env.log->OnEvaluation(MakeEval(static_cast<uint64_t>(i), static_cast<double>(i)), nullptr);
-			C::LogEval thin = MakeEval(36, 36.0);
-			SetLatched(thin, 0, 1080, 15.5);   // c1 = 15: LLR <= c1 + 1 nat is a thin latch
-			env.log->OnEvaluation(thin, nullptr);
+			C::LogEval wrong = MakeEval(36, 36.0);
+			SetDisagree(wrong);   // a confident reading against the classical decision
+			env.log->OnEvaluation(wrong, nullptr);
 			const std::string name = env.fs->FirstWithSuffix(kFolder, ".sidl");
 			Assert::IsFalse(name.empty());
-			Assert::IsTrue(name.find("thin") != std::string::npos);
+			Assert::IsTrue(name.find("disagree") != std::string::npos);
 			std::string header;
 			std::vector<C::LineSnapshot> snaps;
 			Assert::IsTrue(C::ParseDump(env.fs->Get(kFolder, name), header, snaps));
 			Assert::AreEqual<size_t>(30, snaps.size());
 			Assert::AreEqual<uint64_t>(7, snaps.front().seq);
 			Assert::AreEqual<uint64_t>(36, snaps.back().seq);
-			Assert::IsTrue(header.find("\"trigger\":\"thin") != std::string::npos);
+			Assert::IsTrue(header.find("\"trigger\":\"disagree") != std::string::npos);
 			Assert::AreEqual<uint64_t>(1, env.log->GetStatus().dumps);
 		}
 
@@ -235,7 +239,7 @@ namespace Tests
 			auto fire = [&env](uint64_t seq, double clockMs) {
 				env.clk.Set(clockMs);
 				C::LogEval e = MakeEval(seq, static_cast<double>(seq));
-				SetUnstable(e);
+				SetDisagree(e);
 				env.log->OnEvaluation(e, nullptr);
 			};
 			fire(1, 0.0);
@@ -266,7 +270,7 @@ namespace Tests
 			auto fireDay = [&day](uint64_t seq, double clockMs) {
 				day.clk.Set(clockMs);
 				C::LogEval e = MakeEval(seq, static_cast<double>(seq));
-				SetUnstable(e);
+				SetDisagree(e);
 				day.log->OnEvaluation(e, nullptr);
 			};
 			fireDay(1, 0.0);
@@ -318,7 +322,7 @@ namespace Tests
 					f.seq = static_cast<uint64_t>(i);
 					C::LogEval e = MakeEval(static_cast<uint64_t>(i), static_cast<double>(i));
 					if (i == 5)
-						SetUnstable(e);
+						SetDisagree(e);
 					env.log->OnEvaluation(e, &f);
 				}
 				if (pass == 0)
@@ -396,7 +400,7 @@ namespace Tests
 			Assert::IsTrue(env.log->TakeNotice(text));   // the start notice
 			auto changed = [&env](uint64_t seq, double sec) {
 				C::LogEval e = MakeEval(seq, sec);
-				e.axis[0].state = G::LatchState::Candidate;
+				e.axis[0].state = G::LatchState::Abstain;
 				e.axis[0].stateChanged = true;   // a state row: something to write
 				env.log->OnEvaluation(e, nullptr);
 			};
@@ -456,33 +460,38 @@ namespace Tests
 			{
 				env.clk.Set(1000.0 * i);
 				C::LogEval e = MakeEval(static_cast<uint64_t>(i), 10.0 * i);
-				SetLatched(e, 1, 1080, 20.0);   // 1080 of 2160 = 1/2, lanczos, 8-bit: the same bucket every time; LLR 20 is not thin
+				SetConfident(e, 1, 1080, 20.0);   // 1080 of 2160 = 1/2, lanczos, 8-bit: the same bucket every time
 				env.log->OnEvaluation(e, nullptr);
 			}
 			env.log->Close(40000000, "end");
-			Assert::AreEqual<uint64_t>(2, env.log->GetStatus().triggers, L"the bucket needed 2 latches: the first two trigger, the rest do not");
+			Assert::AreEqual<uint64_t>(2, env.log->GetStatus().triggers, L"the bucket needed 2 confident readings: the first two trigger, the rest do not");
 			const std::string cov = env.fs->Get(kFolder, "coverage.txt");
 			Assert::IsTrue(cov.find("1/2|lanczos|8bit|unclassified|na 4") != std::string::npos);
 		}
 
-		TEST_METHOD(AFlapPowerAndHoldTriggersFire)
+		TEST_METHOD(AHoldAndPowerTriggersFireAndTheRemovedLatchTriggersDoNot)
 		{
 			{
+				// A confident reading that changes its size (or drops to UNSURE) is no trigger by itself: the flap / thin / unstable triggers
+				// belonged to the parked latch. Only the disagreement and the coverage bucket look at a confident reading.
 				C::EvidenceLogSettings s;
 				s.triggerGapMs = 0.0;
 				s.maxPerDay = 100;
+				s.coverageTarget = 0;
 				Env env(s, C::EvidenceLevel::Log);
 				C::LogEval a = MakeEval(1, 0.0);
-				SetLatched(a, 0, 1080, 20.0);
+				SetConfident(a, 0, 1080, 20.0);
 				env.log->OnEvaluation(a, nullptr);
-				C::LogEval b = MakeEval(2, 30.0);   // a revert 30 s after the latch
-				b.axis[0].appliedChanged = true;
-				b.axis[0].appliedState = G::LatchState::Latched;
-				b.axis[0].appliedN = 2160;
+				C::LogEval b = MakeEval(2, 30.0);   // the confident size changes 30 s later, with no classical decision to disagree with
+				SetConfident(b, 0, 2160, 15.2);
 				b.axis[0].N = 2160;
-				b.axis[0].latchReason = static_cast<int>(C::LatchReason::Reverted);
 				env.log->OnEvaluation(b, nullptr);
-				Assert::IsTrue(env.log->GetStatus().lastTrigger.find("flap") != std::string::npos, L"a revert within 60 s of a latch");
+				C::LogEval c = MakeEval(3, 31.0);   // and the reading drops to UNSURE
+				c.axis[0].appliedChanged = true;
+				c.axis[0].state = G::LatchState::Abstain;
+				c.axis[0].stateChanged = true;
+				env.log->OnEvaluation(c, nullptr);
+				Assert::AreEqual<uint64_t>(0, env.log->GetStatus().triggers, L"no flap, thin or unstable trigger any more");
 			}
 			{
 				Env env(C::EvidenceLogSettings(), C::EvidenceLevel::Log);
@@ -520,9 +529,9 @@ namespace Tests
 			s.coverageTarget = 0;   // keep the coverage trigger out of the way
 			Env env(s, C::EvidenceLevel::Log);
 			C::LogEval e = MakeEval(1, 1.0);
-			SetLatched(e, 0, 1080, 20.0);
+			SetConfident(e, 0, 1080, 20.0);
 			e.classicalValid = true;
-			e.classicalRatio[0] = 1.0;   // the classical decision says native on H, the chain latched 1080 of 2160... (axis 0 N is 3840 here)
+			e.classicalRatio[0] = 1.0;   // the classical decision says native on H, the chain reads 1080 of 2160 confidently (axis 0 N is 3840 here)
 			e.axis[0].N = 2160;
 			env.log->OnEvaluation(e, nullptr);
 			Assert::IsTrue(env.log->GetStatus().lastTrigger.find("disagree") != std::string::npos);

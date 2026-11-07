@@ -246,6 +246,14 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\chain\ChainEstimator.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\chain\ChainEvidenceLog.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\repair\deband\VpDebander.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -385,6 +393,15 @@
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdConsensusTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\AbrStepDetectorTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainUnitTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainReadingTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceGeometryRecordTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceGeometryViewTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdChainVoterTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdChainGateTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainEstimatorTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainEvidenceLogTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainGovernorStatusTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainEvalRegistrationTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceWiringTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelMetadataExtensionTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\DetailRestoreConfigTests.cpp" />

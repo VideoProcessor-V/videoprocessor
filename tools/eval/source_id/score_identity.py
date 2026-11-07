@@ -8,23 +8,28 @@ doc 78 section 9.
 
 Inputs : reels.json (truth per segment, events), <eval-dir>/evaluations.csv, events.csv, reels_done.csv (harness output).
 Outputs: <out>/summary.md and <out>/gates.json (default out = eval dir).
-Lanes  : "off" / "on" = the classical monitor without / with consensus (an engaged re-base factor is the LATCHED state, its n is
-         factor x raster); "chain" = the SID-C2 chain estimator when it plugs into the harness seam. The GO table is computed for
+Lanes  : "off" / "on" = the classical monitor without / with consensus (an engaged re-base factor of the ORIGINAL latch is the LATCHED
+         state, its n is factor x raster; DECLARED = the tracker declared a lower ratio that is not engaged yet); "chain" = the chain
+         estimator when it plugs into the harness seam (CONFIDENT = the reading is above c1, everything else is UNSURE). The GO table is computed for
          --gate-lane (default: chain when present, else on). Every lane gets the metric tables.
 
 Metric definitions (all per lane; n = original size per axis, compared with the reel truth `truth_n`, exact integers):
-  confident-wrong episode   a maximal run of evaluation rows in state LATCHED whose (n_x, n_y) differs from the truth of the segment, rows
-                            within --boundary-grace seconds after a truth change are not judged (the latch may still hold the old value)
+  confident-wrong episode   a maximal run of evaluation rows in state CONFIDENT (chain lane) or LATCHED (classical lanes) whose (n_x, n_y)
+                            differs from the truth of the segment, rows within --boundary-grace seconds after a truth change are not
+                            judged (the reading / the original latch may still hold the old value)
   per title-hour / per reel episodes / reel-hours ; share of reels with >= 1 episode
-  latch latency             seconds from the segment start to the first LATCHED row whose n is exact (segments with a player upscale;
-                            a native segment is "latched" when the lane reports LATCHED at the canvas size)
-  exact-n accuracy          among segments whose last row is LATCHED: share with exact n
-  flaps/h                   a latched value that changes to another value or to unlatched with NO truth change in the preceding
-                            --flap-window seconds (default 60), per reel-hour
-  UNSURE share by reason    share of rows in state UNKNOWN / ABSTAIN / PROVISIONAL split by the reason column
-  false CANDIDATE/h         entries into CANDIDATE whose candidate n differs from the truth (classical lanes: declared ratio vs truth)
+  time to confident         seconds from the segment start to the first CONFIDENT / LATCHED row whose n is exact (segments with a player
+                            upscale; a native segment counts when the lane reports it at the canvas size)
+  exact-n accuracy          among segments whose last row is CONFIDENT / LATCHED: share with exact n
+  flaps/h                   a confident (chain) value that changes to ANOTHER value with no truth change in the preceding --flap-window
+                            seconds (default 60), per reel-hour; for the classical lanes also an engaged value that is released
+                            (engage / revert of the ORIGINAL latch). A chain reading that drops to UNSURE is honest abstention, never a flap.
+  UNSURE rate / by reason   share of rows in state UNKNOWN / ABSTAIN / PROVISIONAL split by the reason column (the chain lane is
+                            non-sticky: UNSURE publishes no value, so its rate is a result, not an error)
+  false DECLARED/h          entries into DECLARED (classical lanes: the original latch declared a lower ratio) whose ratio differs from
+                            the truth; the chain lane declares nothing
   notice false positives    one-time notices with no truth quality/geometry event within [-1 s, +--abr-tol s], per reel-hour
-  menu re-base violation    a LATCHED n below the raster persisting > --menu-persist seconds in a native (menu/black) segment
+  menu re-base violation    a CONFIDENT / LATCHED n below the raster persisting > --menu-persist seconds in a native (menu/black) segment
 """
 import argparse
 import csv
@@ -35,7 +40,7 @@ import sys
 import tempfile
 from collections import defaultdict
 
-LATCH_T = 15.0           # R2 clean: latched correct within this many seconds
+LATCH_T = 15.0           # R2 clean: confident (engaged) and correct within this many seconds
 DIRTY_T = 10.0
 DARK_MIN_MINUTES = 30.0
 HOURS_PHASE_A = 10.0       # target H_A: smoke gate, licenses SHADOW mode only
@@ -182,7 +187,7 @@ def score_reel_lane(reel, rows, events, cfg):
         cu = fnum(row.get("cuts"))
         if cu is not None and cu > st["cuts"]:
             st["cuts"] = int(cu)
-        latched = state == "LATCHED"
+        latched = state in ("CONFIDENT", "LATCHED")   # chain lane: confident; classical lanes: an engaged re-base of the original latch
         in_grace = (t - seg["t0"]) < cfg["boundary_grace"] and si > 0
         wrong = latched and n != tn and not in_grace
         if latched:
@@ -218,23 +223,20 @@ def score_reel_lane(reel, rows, events, cfg):
                     run[2] = True
             else:
                 menu_run.pop(key, None)
-        # flaps: a latched value that reverts / changes with no truth change in the window
+        # flaps: a confident / engaged value that changes (or, for the original latch, is released) with no truth change in the window.
+        # A chain reading that drops to UNSURE is honest abstention (non-sticky by design), never a flap.
         cur = (latched, n if latched else None)
-        if prev_state is not None and prev_state[0] and cur != prev_state:
+        if prev_state is not None and prev_state[0] and cur != prev_state and not (row.get("lane") == "chain" and not cur[0]):
             recent = [c for c in truth_changes if t - cfg["flap_window"] < c <= t]
             if not recent:
                 st["flaps"] += 1
         prev_state = cur
-        # candidate entries
-        if state == "CANDIDATE" and (prev_n is None or prev_n != "CANDIDATE"):
+        # DECLARED entries (the original latch's declaration of a lower ratio, classical lanes)
+        if state == "DECLARED" and (prev_n is None or prev_n != "DECLARED"):
             st["cand_entries"] += 1
-            cand_ok = False
-            if n and n[1] is not None and n[1] > 0 and (state == "CANDIDATE") and row.get("lane") == "chain":
-                cand_ok = (n == tn)
-            else:
-                dec = fnum(row.get("declared"))
-                cand_ok = dec is not None and abs(dec - tn[1] / float(reel["H"])) < 0.01 and not is_native_truth(reel, seg)
-            if not cand_ok:
+            dec = fnum(row.get("declared"))
+            decl_ok = dec is not None and abs(dec - tn[1] / float(reel["H"])) < 0.01 and not is_native_truth(reel, seg)
+            if not decl_ok:
                 st["false_cand"] += 1
         prev_n = state
         # kernel / sharpening / double / active (chain lane columns)
@@ -257,7 +259,7 @@ def score_reel_lane(reel, rows, events, cfg):
             st["abr"].append(dict(t=e["t"], event_t=e.get("event_t", e["t"]), direction=e.get("a", "")))
         elif typ == "geometry":
             st["geo"].append(dict(t=e["t"], event_t=e.get("event_t", e["t"]), direction=""))
-        elif typ in ("latch", "revert", "hold", "unstable"):
+        elif typ in ("confident", "change", "unsure", "hold", "engage", "revert"):
             st["state_events"][typ] += 1
     # HOLD enforcement: rows inside the overlay windows of hold_expected segments
     for si, seg in enumerate(reel["segs"]):
@@ -334,20 +336,20 @@ def aggregate(reels, per, lane, pred, cfg):
                     out["lat"].append(ss["first_correct"])
                     if ss["first_correct"] <= LATCH_T:
                         out["seg_up_correct_T"] += 1
-            if last and last["state"] == "LATCHED":
+            if last and last["state"] in ("CONFIDENT", "LATCHED"):
                 out["seg_latched_end"] += 1
                 if last["n"] == truth_n(seg):
                     out["seg_latched_exact"] += 1
             if seg.get("hold_expected"):
                 out["hold_segs"] += 1
                 out["hold_rows"] += ss["hold_rows"]
-            # dirty outcome: latched correct, or UNSURE with a reason, never wrong
+            # dirty outcome: confident correct, or UNSURE with a reason, never wrong
             if not native:
                 out["dirty_segs"] += 1
                 if ss["wrong_rows"] == 0 and (ss["first_correct"] is not None or (ss["unsure_rows"] > 0 and ss["unsure_reason_rows"] * 2 >= ss["unsure_rows"])):
                     out["dirty_ok"] += 1
             # kernel (10-bit segments with a player kernel)
-            if seg.get("kernel") and last and last["state"] == "LATCHED":
+            if seg.get("kernel") and last and last["state"] in ("CONFIDENT", "LATCHED"):
                 if ss["kernel_last"]:
                     out["kernel_cov"] += 1
                     if seg["bits"] == 10:
@@ -358,7 +360,7 @@ def aggregate(reels, per, lane, pred, cfg):
                         else:
                             out["kernel_wrong"] += 1
             # sharpening
-            if last and last["state"] == "LATCHED" and ss["sharp_last"] is not None:
+            if last and last["state"] in ("CONFIDENT", "LATCHED") and ss["sharp_last"] is not None:
                 if seg.get("sharpening") and seg["sharpening"]["amount"] >= 0.3:
                     out["sharp_up"] += 1
                     if ss["sharp_last"] > 0:
@@ -368,7 +370,7 @@ def aggregate(reels, per, lane, pred, cfg):
                     if ss["sharp_last"] > 0:
                         out["sharp_false"] += 1
             # double scaling
-            if seg.get("double") and last and last["state"] == "LATCHED" and ss["n1_last"] is not None:
+            if seg.get("double") and last and last["state"] in ("CONFIDENT", "LATCHED") and ss["n1_last"] is not None:
                 out["dbl_cov"] += 1
                 if ss["n1_last"] == (seg["double"]["n1"]["x"], seg["double"]["n1"]["y"]):
                     out["dbl_ok"] += 1
@@ -376,7 +378,7 @@ def aggregate(reels, per, lane, pred, cfg):
                 out["dbl_n"] += 1
             # active area
             aa = seg["active_area_out"]
-            if (aa["w"], aa["h"]) != (r["W"], r["H"]) and last and last["state"] == "LATCHED" and ss["active_last"] is not None:
+            if (aa["w"], aa["h"]) != (r["W"], r["H"]) and last and last["state"] in ("CONFIDENT", "LATCHED") and ss["active_last"] is not None:
                 out["act_cov"] += 1
                 tol = 2
                 if all(abs(a - b) <= tol for a, b in zip(ss["active_last"], (aa["x"], aa["y"], aa["w"], aa["h"]))):
@@ -470,8 +472,13 @@ def go_table(reels, per, lane, cfg, masters_info=None):
                   "(%.2f h) the bound is <= %s per hour; the design target (1 per 100 title-hours) needs phase B" %
                   (("%.1f" % bound) if bound else "n/a", h, uniq_h, ("%.1f" % bound_u) if bound_u else "n/a")))
     st = "NA" if r1["reels"] == 0 else ("PASS" if frac(r1["false_cand"], h) is not None and r1["false_cand"] / h <= 1.0 else "FAIL")
-    g.append(gate("axes.r1.false_candidate", "Axes - R1 native", "false CANDIDATE <= 1 per hour",
+    g.append(gate("axes.r1.false_declared", "Axes - R1 native", "false DECLARED (the original latch declares a lower ratio the truth does not have; the chain lane declares nothing) <= 1 per hour",
                   dict(per_hour=round(frac(r1["false_cand"], h) or 0.0, 3), count=r1["false_cand"], hours=round(h, 3)), st))
+    st = "NA" if r1["reels"] == 0 else "PASS"
+    g.append(gate("axes.r1.unsure_rate", "Axes - R1 native", "UNSURE rate reported (no threshold: honest abstention is allowed, a confident-wrong reading is not)",
+                  dict(unsure_share=(round(frac(r1["unsure_rows"], r1["rows"]), 3) if frac(r1["unsure_rows"], r1["rows"]) is not None else None),
+                       confident_share=(round(frac(r1["latched_rows"], r1["rows"]), 3) if frac(r1["latched_rows"], r1["rows"]) is not None else None),
+                       rows=r1["rows"]), st))
     dk = A(idpred("R8.dark2", "R8.credits", "R8.flat"))
     # a failure is a FAIL at any amount of evidence; a PASS needs >= 30 min of such reels, else INSUFFICIENT
     st = "NA" if dk["reels"] == 0 else ("FAIL" if (dk["flaps"] > 0 or dk["episodes"] > 0) else ("PASS" if dk["hours"] * 60.0 >= DARK_MIN_MINUTES else "INSUFFICIENT"))
@@ -488,8 +495,8 @@ def go_table(reels, per, lane, cfg, masters_info=None):
         st = "INSUFFICIENT"
     else:
         st = "PASS"
-    g.append(gate("axes.r2.clean", "Axes - R2 clean chains", ">= 95%% latched correct <= %g s; 0 wrong (>= 20 clips, >= 3 content types, 20 min)" % LATCH_T,
-                  dict(latched_correct_within=(round(ok, 3) if ok is not None else None), wrong=c["episodes"], clips=c["reels"], content_types=c["classes"],
+    g.append(gate("axes.r2.clean", "Axes - R2 clean chains", ">= 95%% confident and correct <= %g s; 0 wrong (>= 20 clips, >= 3 content types, 20 min)" % LATCH_T,
+                  dict(confident_correct_within=(round(ok, 3) if ok is not None else None), wrong=c["episodes"], clips=c["reels"], content_types=c["classes"],
                        seconds=round(secs)), st, "; ".join(c["bad"][:5])))
     d = A(lambda r: r["id"].startswith("R2.dirty") or r["id"].startswith("R2.usm"))
     ok = frac(d["dirty_ok"], d["dirty_segs"])
@@ -500,8 +507,8 @@ def go_table(reels, per, lane, cfg, masters_info=None):
         st = "FAIL"
     else:
         st = "PASS"
-    g.append(gate("axes.dirty", "Axes - dirty chains", ">= 80%% latched or UNSURE with reason; 0 wrong; 0 flaps; 1080 latched <= %g s or UNSURE" % DIRTY_T,
-                  dict(latched_or_unsure_with_reason=(round(ok, 3) if ok is not None else None), latched_within_10s=(round(lat_ok, 3) if lat_ok is not None else None),
+    g.append(gate("axes.dirty", "Axes - dirty chains", ">= 80%% confident or UNSURE with reason; 0 wrong; 0 flaps; 1080 confident <= %g s or UNSURE" % DIRTY_T,
+                  dict(confident_or_unsure_with_reason=(round(ok, 3) if ok is not None else None), confident_within_10s=(round(lat_ok, 3) if lat_ok is not None else None),
                        wrong=d["episodes"], flaps=d["flaps"], segments=d["dirty_segs"]), st, "; ".join(d["bad"][:5])))
     m = A(family_pred("R7"))
     if m["reels"] == 0:
@@ -642,7 +649,7 @@ def render(reels, per, lanes, gate_lane, gates, done, cfg, ab):
         L.append("")
         L.append("## Lane %s by family" % lane)
         L.append("")
-        L.append("| Family | Reels | Hours | Confident-wrong | Reels with wrong | Wrong/h | Latency median s | p95 s | Exact-n when latched | Flaps/h | UNSURE share |")
+        L.append("| Family | Reels | Hours | Confident-wrong | Reels with wrong | Wrong/h | Time to confident median s | p95 s | Exact-n when confident | Flaps/h | UNSURE rate |")
         L.append("|---|---|---|---|---|---|---|---|---|---|---|")
         for row in family_table(reels, per, lane, cfg):
             L.append("| " + " | ".join(fmt(x, 3) if isinstance(x, float) else str(x) if x is not None else "-" for x in row) + " |")
@@ -650,7 +657,7 @@ def render(reels, per, lanes, gate_lane, gates, done, cfg, ab):
         if a["reasons"]:
             tot = float(sum(a["reasons"].values()))
             L.append("")
-            L.append("UNSURE share by reason (rows in UNKNOWN / ABSTAIN / PROVISIONAL): " + ", ".join("%s %.1f%%" % (k, 100 * v / tot) for k, v in sorted(a["reasons"].items(), key=lambda kv: -kv[1])[:10]))
+            L.append("UNSURE rate by reason (rows in UNKNOWN / ABSTAIN / PROVISIONAL): " + ", ".join("%s %.1f%%" % (k, 100 * v / tot) for k, v in sorted(a["reasons"].items(), key=lambda kv: -kv[1])[:10]))
         if a["bad"]:
             L.append("")
             L.append("Confident-wrong episodes (first 20):")
@@ -721,6 +728,7 @@ def selftest():
         reel("R6.D", "R6", [seg(0, 0, 360, up), seg(1, 360, 360, (1280, 720))], master="m1",
              events=[dict(frame=360, kind="geometry", cls="major", direction="drop", from_seg=0, to_seg=1, t=0)]),
         reel("R2.clean.E", "R2", [seg(0, 0, 720, up)], master="m2"),
+        reel("R2.dirty.E2", "R2", [seg(0, 0, 720, up)], master="m2"),
         reel("R7.F", "R7", [seg(0, 0, 240, up), seg(1, 240, 240, (W, H), regime="menu"), seg(2, 480, 240, up)], master="m3"),
         reel("R7.G", "R7", [seg(0, 0, 720, up, hold_expected=True, overlays=[dict(type="pip", start=6.0, end=24.0)])], master="m3"),
     ])
@@ -735,43 +743,47 @@ def selftest():
                  kernel="", sharpen_amount="", double_n1_x="", double_n1_y="", active_x="", active_y="", active_w="", active_h="", llr_x="", llr_y="")
         r.update(kw)
         ev.append(r)
-    # A: unknown for 6 s then latched correct with the right kernel
+    # A: unknown for 6 s then confident and correct with the right kernel
     for i in range(60):
         t = i * 0.5
         if t < 6:
             add("R2.clean.A", "chain", t, "UNKNOWN", None, "no_power")
         else:
-            add("R2.clean.A", "chain", t, "LATCHED", up, kernel="lanczos3")
+            add("R2.clean.A", "chain", t, "CONFIDENT", up, kernel="lanczos3")
     # B: native reel never latched (UNKNOWN) -> no wrong
     for i in range(60):
         add("R1.B", "chain", i * 0.5, "UNKNOWN", None, "dark")
-    # C: dirty reel latched at the wrong n after 5 s -> one confident-wrong episode
+    # C: dirty reel confident at the wrong n after 5 s -> one confident-wrong episode
     for i in range(60):
         t = i * 0.5
-        add("R2.dirty.C", "chain", t, "UNKNOWN" if t < 5 else "LATCHED", None if t < 5 else (1280, 720), "sharpened")
-    # D: latches 1080 then follows the truth change to 720 at 15 s (after the grace) and flaps once in the second segment is NOT expected
+        add("R2.dirty.C", "chain", t, "UNKNOWN" if t < 5 else "CONFIDENT", None if t < 5 else (1280, 720), "sharpened")
+    # D: confident in 1080 then follows the truth change to 720 at 15 s (after the grace); one wrong episode while it is stale
     for i in range(60):
         t = i * 0.5
         if t < 4:
             add("R6.D", "chain", t, "UNKNOWN", None)
         elif t < 15.5:
-            add("R6.D", "chain", t, "LATCHED", up)
+            add("R6.D", "chain", t, "CONFIDENT", up)
         elif t < 20:
-            add("R6.D", "chain", t, "LATCHED", up)       # stale for 5 s: judged wrong after the 3 s grace
+            add("R6.D", "chain", t, "CONFIDENT", up)       # stale for 5 s: judged wrong after the 3 s grace
         else:
-            add("R6.D", "chain", t, "LATCHED", (1280, 720))
-    # E: latched correct then reverts with no truth change -> one flap
+            add("R6.D", "chain", t, "CONFIDENT", (1280, 720))
+    # E: confident and correct, then an UNSURE stretch with no truth change: honest abstention, NOT a flap
     for i in range(60):
         t = i * 0.5
-        add("R2.clean.E", "chain", t, "LATCHED" if (t < 10 or t >= 12) else "UNKNOWN", up if (t < 10 or t >= 12) else None)
+        add("R2.clean.E", "chain", t, "CONFIDENT" if (t < 10 or t >= 12) else "UNKNOWN", up if (t < 10 or t >= 12) else None)
+    # E2: confident and correct, then the confident value changes with no truth change -> one flap (and a wrong episode)
+    for i in range(60):
+        t = i * 0.5
+        add("R2.dirty.E2", "chain", t, "CONFIDENT", up if t < 10 else (1280, 720))
     # F: menu segment (10-20 s) still re-based > 3 s -> violation
     for i in range(60):
         t = i * 0.5
-        add("R7.F", "chain", t, "LATCHED", up)
+        add("R7.F", "chain", t, "CONFIDENT", up)
     # R7.G: HOLD shown only 60% of the large-PiP window -> the R7 gate must fail on HOLD alone
     for i in range(60):
         t = i * 0.5
-        add("R7.G", "chain", t, "HOLD" if (t < 6 or t >= 24 or (t - 6) % 5 < 3) else "LATCHED", None if (t < 6 or t >= 24 or (t - 6) % 5 < 3) else up)
+        add("R7.G", "chain", t, "HOLD" if (t < 6 or t >= 24 or (t - 6) % 5 < 3) else "CONFIDENT", None if (t < 6 or t >= 24 or (t - 6) % 5 < 3) else up)
     # R6.D geometry event and a quality-boundary abr event with event_t
     # per-reel directory layout for R7.G (the harness layout), flat files for the rest (older runs)
     gdir = os.path.join(tmp, "reels", "R7.G")
@@ -820,7 +832,9 @@ def selftest():
     D = per[("R6.D", "chain")]
     assert len(D["episodes"]) == 1 and D["seg"][1]["first_correct"] is not None and D["seg"][1]["first_correct"] == 5.0, (D["episodes"], D["seg"][1])
     E = per[("R2.clean.E", "chain")]
-    assert E["flaps"] == 1, E["flaps"]
+    assert E["flaps"] == 0 and not E["episodes"] and E["unsure_rows"] > 0, (E["flaps"], E["episodes"], E["unsure_rows"])   # abstention is not a flap
+    E2 = per[("R2.dirty.E2", "chain")]
+    assert E2["flaps"] == 1, E2["flaps"]
     Fm = per[("R7.F", "chain")]
     assert Fm["menu_violations"] >= 1, Fm["menu_violations"]
     by = {g["id"]: g for g in gates}

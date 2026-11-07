@@ -277,7 +277,7 @@ namespace Tests
 			Assert::AreEqual<uint64_t>(2, Newest(est).streamKey);
 		}
 
-		TEST_METHOD(AChangedActiveAreaRestartsTheLatchAtTheFirstFrameOfTheNewArea)
+		TEST_METHOD(AChangedActiveAreaRestartsTheReadingAtTheFirstFrameOfTheNewArea)
 		{
 			ManualClock clk;
 			C::ChainEstimator est(C::EstimatorSettings(), clk.Fn());
@@ -474,10 +474,10 @@ namespace Tests
 			est.PauseForTest(false);
 			Assert::IsTrue(est.WaitIdle(30000));
 			Assert::AreEqual<uint64_t>(1, est.GetCounters().evaluations);
-			Assert::AreEqual<uint32_t>(C::kEvCut | C::kEvBlank, est.StatusInput().last.flags, L"the latch still sees the cut and the blank on its first Step");
+			Assert::AreEqual<uint32_t>(C::kEvCut | C::kEvBlank, est.StatusInput().last.flags, L"the first evaluation after the drop carries the cut and the blank");
 		}
 
-		TEST_METHOD(ALateEventIsCarriedByTheNextEvaluationWithItsOwnTime)
+		TEST_METHOD(ALateEventIsCarriedByTheNextEvaluation)
 		{
 			ManualClock clk;
 			C::ChainEstimator est(C::EstimatorSettings(), clk.Fn());
@@ -498,7 +498,7 @@ namespace Tests
 			Assert::AreEqual<uint32_t>(0u, est.StatusInput().last.flags, L"and only once");
 		}
 
-		TEST_METHOD(AnEventPullsTheNextEvaluationForwardWhileLatchedAtMostOncePerSecond)
+		TEST_METHOD(AnEventPullsTheNextEvaluationForwardWhileConfidentAtMostOncePerSecond)
 		{
 			ManualClock clk;
 			C::ChainEstimator est(C::EstimatorSettings(), clk.Fn());
@@ -507,11 +507,11 @@ namespace Tests
 			Feed(est, plane, 10, 1.0);
 			Assert::IsFalse(est.Wants());
 			est.NoteEvent(C::EstimatorEvent::Cut, 11);
-			Assert::IsFalse(est.Wants(), L"not latched: the acquiring cadence is already short, nothing is pulled");
+			Assert::IsFalse(est.Wants(), L"not confident: the acquiring cadence is already short, nothing is pulled");
 			est.ForceLatchedPowerForTest(true);
 			clk.Set(100.0);
 			est.NoteEvent(C::EstimatorEvent::Cut, 12);
-			Assert::IsTrue(est.Wants(), L"latched: a cut makes the next frame due at once");
+			Assert::IsTrue(est.Wants(), L"confident: a cut makes the next frame due at once");
 			Feed(est, plane, 20, 2.0);   // evaluated at 100 ms (the evaluation itself recomputes the power flag)
 			Assert::IsFalse(est.Wants());
 			est.ForceLatchedPowerForTest(true);
@@ -709,7 +709,7 @@ namespace Tests
 			m.Discontinuity("before enable");
 			Assert::IsTrue(m.ChainEstimatorRef().WaitIdle(5000));
 			Assert::AreEqual<uint64_t>(0, m.ChainEstimatorRef().GetCounters().discontinuities);
-			Assert::IsFalse(m.GeometryView().latched.fromRecord, L"no record: the delivered geometry stands in, visibly");
+			Assert::IsFalse(m.GeometryView().confident.fromRecord, L"no record: the delivered geometry stands in, visibly");
 			Assert::IsTrue(m.Read().chainNote.empty(), L"disabled: the stats line is the one it was");
 			m.SetChainEnabled(true);
 			Assert::IsTrue(m.ChainEstimatorRef().Running());

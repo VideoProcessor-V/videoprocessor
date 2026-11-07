@@ -3,22 +3,22 @@
 #pragma once
 
 // The ONE read API of the P14g record's CONTENT (doc 78 D14, section 6): every consumer that wants the geometry of the delivered
-// picture calls Latched() or Provisional(), never the record's fields directly. Registered as a shared unit (tools/check_shared_units.py,
+// picture calls Confident() or Provisional(), never the record's fields directly. Registered as a shared unit (tools/check_shared_units.py,
 // U21). It reads through the skeleton's SourceGeometry::Read() (SourceGeometryProduct.h): the cause of an unusable record (absent, stale,
 // another unit version, not sealed yet, interval not measured) and its visible fallback decision come from there.
 //
-//   Latched(rec, delivered, nowUs)      the APPLIED (sticky) geometry: only fields the latch has decided. For re-base, TD's coded
+//   Confident(rec, delivered, nowUs)    the APPLIED geometry: only axes the chain reads CONFIDENT (above c1; not sticky). For re-base, TD's coded
 //                                       raster, the adaptive scaler and the chroma stage.
 //   Provisional(rec, delivered, nowUs)  the MEASURED geometry (the current best, moves at boundaries). For the frame-pattern
 //                                       (quality_pattern / coding_evidence) detector's grid placement and for discontinuity gens.
 //
-// The two return DIFFERENT types (LatchedGeometry, ProvisionalGeometry; neither converts to the other), so a consumer cannot hand a
+// The two return DIFFERENT types (ConfidentGeometry, ProvisionalGeometry; neither converts to the other), so a consumer cannot hand a
 // provisional value to code that needs a decision by accident.
 //
 // Record absent, unusable (see Read()): the DELIVERED geometry (ratio 1, n = N = the delivered size) and an engaged FallbackCatalog
 // decision `product.source_geometry` naming the consumer and the cause (Ctrl+I line, Config status, Ctrl+Alt+D); it recovers by itself
-// when a fresh record returns (the next call). A fresh record whose fields are not latched yet is NOT a fallback: the axis simply makes
-// no claim (latched = false, delivered values). LatchedOf() is the single definition of "which axes carry a claim" (the consensus voter
+// when a fresh record returns (the next call). A fresh record whose axis is UNSURE is NOT a fallback: the axis simply makes
+// no claim (confident = false, delivered values). ConfidentOf() is the single definition of "which axes carry a claim" (the consensus voter
 // and the gate use it too).
 //
 // Pure functions over plain structs (no monitor, no clock: `nowUs` is passed in). Header-only, C++14.
@@ -46,9 +46,9 @@ namespace SourceGeometry
 		bool Known() const { return index >= 0; }
 	};
 
-	struct LatchedAxis
+	struct ConfidentAxis
 	{
-		bool latched = false;           // the latch has decided this axis (applied state Latched, or Unstable: the higher n)
+		bool confident = false;         // the reading is CONFIDENT on this axis (applied state Latched = the reserved numeric of confident)
 		LatchState state = LatchState::Unknown;
 		int n = 0, N = 0;               // n == N when native or when no claim is made
 		double ratio = 1.0;
@@ -61,17 +61,17 @@ namespace SourceGeometry
 		uint32_t reasonBits = 0;
 	};
 
-	struct LatchedGeometry
+	struct ConfidentGeometry
 	{
 		bool fromRecord = false;        // false: the delivered geometry stands in (see fallback / reason)
-		LatchedAxis axis[2];
+		ConfidentAxis axis[2];
 		uint64_t appliedGen = 0;        // bumps when an applied field changed (0 without a record)
 		ActiveArea area;
 		CodedRaster codedRaster = CodedRaster::Unknown;
 		unsigned cause = 0;             // kCause* when the delivered geometry stands in
 		std::string reason;             // CauseWord(cause) ("" with a usable record)
 		FallbackCatalog::Decision fallback;   // engaged exactly when !fromRecord
-		bool AnyLatched() const { return axis[0].latched || axis[1].latched; }
+		bool AnyConfident() const { return axis[0].confident || axis[1].confident; }
 	};
 
 	struct ProvisionalAxis
@@ -142,11 +142,11 @@ namespace SourceGeometry
 		constexpr uint64_t kAnySeq = (std::numeric_limits<uint64_t>::max)();
 	}
 
-	// Which axes carry a claim (applied state Latched or Unstable with a size), with their applied values. No freshness check: the caller
+	// Which axes carry a claim (applied state Latched = confident, with a size), with their applied values. No freshness check: the caller
 	// has one (Read() / Record::Cause()). The delivered values stand in for an axis without a claim.
-	inline LatchedGeometry LatchedOf(const Record& rec, const Delivered& delivered)
+	inline ConfidentGeometry ConfidentOf(const Record& rec, const Delivered& delivered)
 	{
-		LatchedGeometry g;
+		ConfidentGeometry g;
 		g.fromRecord = true;
 		g.fallback = FallbackCatalog::Released(kFallbackId);
 		g.appliedGen = rec.appliedGen;
@@ -155,15 +155,15 @@ namespace SourceGeometry
 		for (int a = 0; a < 2; ++a)
 		{
 			const AxisGeom& s = rec.applied[a];
-			LatchedAxis& o = g.axis[a];
+			ConfidentAxis& o = g.axis[a];
 			o.n = o.N = detail::DeliveredSize(delivered, a);
 			o.state = s.state;
 			o.conf = s.conf;
 			o.llr = s.llr;
 			o.reasonBits = s.reasonBits;
 			// Only a decided axis makes a claim; Unstable applies the higher n by design (visible through the state).
-			o.latched = (s.state == LatchState::Latched || s.state == LatchState::Unstable) && s.n > 0 && s.N > 0;
-			if (!o.latched)
+			o.confident = s.state == LatchState::Latched && s.n > 0 && s.N > 0;
+			if (!o.confident)
 				continue;
 			o.n = s.n;
 			o.N = s.N;
@@ -176,13 +176,13 @@ namespace SourceGeometry
 		return g;
 	}
 
-	inline LatchedGeometry Latched(const Record* rec, const Delivered& delivered, int64_t nowUs,
+	inline ConfidentGeometry Confident(const Record* rec, const Delivered& delivered, int64_t nowUs,
 		Consumer consumer = Consumer::Status, uint64_t frameSeq = detail::kAnySeq, unsigned readCause = 0)
 	{
 		const ReadResult rr = detail::ReadOf(rec, readCause, consumer, frameSeq, nowUs);
 		if (!rr.usable)
 		{
-			LatchedGeometry g;
+			ConfidentGeometry g;
 			for (int a = 0; a < 2; ++a)
 				g.axis[a].n = g.axis[a].N = detail::DeliveredSize(delivered, a);   // the delivered geometry stands in
 			g.cause = rr.cause;
@@ -190,7 +190,7 @@ namespace SourceGeometry
 			g.fallback = rr.fallback;
 			return g;
 		}
-		return LatchedOf(*rec, delivered);
+		return ConfidentOf(*rec, delivered);
 	}
 
 	inline ProvisionalGeometry Provisional(const Record* rec, const Delivered& delivered, int64_t nowUs,
@@ -255,9 +255,9 @@ namespace SourceGeometry
 		return w;
 	}
 
-	// The chain part of the Ctrl+I / Config status line (doc 78 section 7): the latched geometry per axis, or why the classical
-	// voters decide ("classical (chain: <state>: <reasons>)"). `p` supplies the measured state and reasons of an unlatched axis.
-	inline std::string ChainStatusText(const LatchedGeometry& g, const ProvisionalGeometry& p)
+	// The chain part of the Ctrl+I / Config status line (doc 78 section 7): the confident geometry per axis, or why the classical
+	// voters decide ("classical (chain: <state>: <reasons>)"). `p` supplies the measured state and reasons of an UNSURE axis.
+	inline std::string ChainStatusText(const ConfidentGeometry& g, const ProvisionalGeometry& p)
 	{
 		if (!g.fromRecord)
 			return std::string("classical (chain: ") + g.reason + ")";
@@ -268,7 +268,7 @@ namespace SourceGeometry
 		{
 			if (!out.empty())
 				out += "; ";
-			if (g.axis[a].latched)
+			if (g.axis[a].confident)
 			{
 				any = true;
 				out += kAxisName[a];
@@ -279,8 +279,6 @@ namespace SourceGeometry
 					out += " " + std::to_string(g.axis[a].n) + "->" + std::to_string(g.axis[a].N) + " ";
 					out += g.axis[a].kernel.Known() ? SourceIdentity::Chain::Kernel(g.axis[a].kernel.index).name : "kernel unsure";
 				}
-				if (g.axis[a].state == LatchState::Unstable)
-					out += " (unstable)";
 			}
 			else
 			{
@@ -294,8 +292,8 @@ namespace SourceGeometry
 		return any ? "chain: " + out : "classical (chain: " + std::string(StateText(p.axis[0].state)) + ")";
 	}
 
-	// The status wording of the latched view: its fallback while the delivered geometry stands in, else the per-axis states.
-	inline std::string StatusText(const LatchedGeometry& g)
+	// The status wording of the confident view: its fallback while the delivered geometry stands in, else the per-axis states.
+	inline std::string StatusText(const ConfidentGeometry& g)
 	{
 		if (!g.fromRecord)
 			return std::string("Source geometry: delivered (") + g.reason + ")";

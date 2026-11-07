@@ -63,7 +63,7 @@ namespace SourceIdentity
 			EstimatorSettings cfg;
 			NowMsFn nowMs;
 			Thresholds thr;
-			LatchLevels levels;
+			ReadingLevels levels;
 
 			// ---- inputs and the queue (m: leaf lock, never held across work or I/O) ----------------------------------
 			mutable std::mutex m;
@@ -115,7 +115,7 @@ namespace SourceIdentity
 
 			// ---- the worker's own state (procMutex: one processing thread at a time) ---------------------------------------
 			mutable std::mutex procMutex;
-			ChainLatch latch[2];
+			AxisReader reader[2];
 			ChainEvidence evidence;
 			PolyphaseProposer proposer[2];
 			std::unique_ptr<DescaleVerifier> verifier;
@@ -150,14 +150,14 @@ namespace SourceIdentity
 			bool threadStarted = false;
 
 			State(const EstimatorSettings& s, NowMsFn n, std::shared_ptr<IEvidenceFs> fs, StampFn stamp)
-				: cfg(s), nowMs(n ? n : NowMsFn(&SteadyMs)), thr(ComputeThresholds(s.evidence)), levels(LatchLevels::From(thr, s.evidence)),
+				: cfg(s), nowMs(n ? n : NowMsFn(&SteadyMs)), thr(ComputeThresholds(s.evidence)), levels(ReadingLevels::From(thr)),
 				evidence(s.evidence), gov(s.governor), log(s.log, std::move(fs), nowMs, std::move(stamp))
 			{
 				cfg.queueDepth = ClampInt(cfg.queueDepth, 1, 2);
 				cfg.clockRing = ClampInt(cfg.clockRing, 4, 4096);
 				for (int a = 0; a < 2; ++a)
 				{
-					latch[a] = ChainLatch(cfg.latch, levels);
+					reader[a] = AxisReader(cfg.reading, levels);
 					proposer[a] = PolyphaseProposer(cfg.proposer);
 				}
 				BuildVerifiers();
@@ -593,8 +593,6 @@ namespace SourceIdentity
 						return;   // a discontinuity during the copy: this frame belongs to the old source
 					uint32_t flags = 0;
 					int32_t cuts = 0;
-					bool haveEventSeq = false;
-					uint64_t newestEventSeq = 0;
 					for (size_t i = 0; i < events.size();)
 					{
 						if (events[i].seq <= v.seq)
@@ -602,15 +600,10 @@ namespace SourceIdentity
 							if (events[i].kind == static_cast<int>(EstimatorEvent::Cut))
 							{
 								flags |= kEvCut;
-								++cuts;   // each cut is a shot (the latch contract)
+								++cuts;   // each cut is a shot (ChainEvidence's per-shot cap)
 							}
 							else
 								flags |= events[i].kind == static_cast<int>(EstimatorEvent::Blank) ? kEvBlank : kEvFade;
-							if (!haveEventSeq || events[i].seq > newestEventSeq)
-							{
-								haveEventSeq = true;
-								newestEventSeq = events[i].seq;
-							}
 							events.erase(events.begin() + static_cast<std::ptrdiff_t>(i));
 						}
 						else
@@ -618,25 +611,16 @@ namespace SourceIdentity
 					}
 					snap->flags = flags;
 					snap->cuts = cuts;
-					if (haveEventSeq)
-					{
-						double eventSeconds = 0.0;
-						LineRect eventRect;
-						if (ResolveClock(newestEventSeq, eventSeconds, eventRect))
-							snap->eventTimeUs = static_cast<int64_t>(std::llround(eventSeconds * 1e6));
-					}
 					job.snap = snap;
 					while (static_cast<int>(jobs.size()) >= cfg.queueDepth)
 					{
 						// Newest wins, but the events the dropped job carried were consumed from the pending list: they move to the new
-						// snapshot, so the latch still sees them on its first Step (ChainLatch contract).
+						// snapshot, so the shot count and the flags in the log still see them.
 						const std::shared_ptr<const LineSnapshot>& old = jobs.front().snap;
 						if (old)
 						{
 							snap->flags |= old->flags;
 							snap->cuts += old->cuts;
-							if (snap->eventTimeUs < 0)
-								snap->eventTimeUs = old->eventTimeUs;
 						}
 						jobs.pop_front();
 						cDropped.fetch_add(1, std::memory_order_relaxed);
@@ -781,7 +765,7 @@ namespace SourceIdentity
 			{
 				for (int a = 0; a < 2; ++a)
 				{
-					latch[a] = ChainLatch(cfg.latch, levels);
+					reader[a] = AxisReader(cfg.reading, levels);
 					proposer[a].Reset();
 					lastAxisLen[a] = 0;
 				}
@@ -822,9 +806,9 @@ namespace SourceIdentity
 				nextDueMs.store(0.0, std::memory_order_release);
 			}
 
-			static bool AxisLatched(const ChainLatch& l) { return l.HasApplied(); }
+			static bool AxisConfident(const AxisReader& r) { return r.HasConfident(); }
 
-			Geometry::Record MakeRecord(const LatchOutput out[2], uint64_t seq, int64_t timeUs, uint64_t recordStreamKey, const LineRect& area,
+			Geometry::Record MakeRecord(const ReadingOutput out[2], uint64_t seq, int64_t timeUs, uint64_t recordStreamKey, const LineRect& area,
 				double costMs, double intervalSec)
 			{
 				Geometry::Record rec;
@@ -847,8 +831,8 @@ namespace SourceIdentity
 				rec.area.w = area.w;
 				rec.area.h = area.h;
 				rec.area.conf = area.w > 0 ? 1.0f : 0.0f;
-				const bool l0 = out[0].applied.state == Geometry::LatchState::Latched || out[0].applied.state == Geometry::LatchState::Unstable;
-				const bool l1 = out[1].applied.state == Geometry::LatchState::Latched || out[1].applied.state == Geometry::LatchState::Unstable;
+				const bool l0 = out[0].applied.state == Geometry::LatchState::Latched;   // Latched = the reserved numeric of CONFIDENT
+				const bool l1 = out[1].applied.state == Geometry::LatchState::Latched;
 				const bool up = (l0 && out[0].applied.n < out[0].applied.N) || (l1 && out[1].applied.n < out[1].applied.N);
 				if (up)
 					rec.codedRaster = Geometry::CodedRaster::PlayerUpscaled;
@@ -862,7 +846,7 @@ namespace SourceIdentity
 			{
 				++discontinuities;
 				cDiscontinuities.fetch_add(1, std::memory_order_relaxed);
-				LatchOutput out[2];
+				ReadingOutput out[2];
 				for (int a = 0; a < 2; ++a)
 				{
 					FieldEvidence fe;
@@ -871,7 +855,7 @@ namespace SourceIdentity
 					ctx.seq = lastSeq;
 					ctx.timeUs = lastTimeUs;
 					ctx.discontinuity = true;
-					out[a] = latch[a].Step(fe, ctx);
+					out[a] = reader[a].Step(fe, ctx);
 					proposer[a].Reset();
 				}
 				evidence.Reset();
@@ -913,7 +897,7 @@ namespace SourceIdentity
 				statusPlan = gov.Plan(false);
 			}
 
-			void FillLogAxis(LogAxis& L, const AxisRun& run, const LatchOutput& out, int axisLen) const
+			void FillLogAxis(LogAxis& L, const AxisRun& run, const ReadingOutput& out, int axisLen) const
 			{
 				L.evaluated = run.have;
 				L.informative = run.up.informative;
@@ -929,11 +913,10 @@ namespace SourceIdentity
 				L.appliedLlr = out.applied.llr;
 				L.kernelConf = out.measured.kernelConf;
 				L.reasonBits = out.reasonBits;
-				L.latchReason = static_cast<int>(out.reason);
+				L.readingReason = static_cast<int>(out.reason);
 				L.stateChanged = out.stateChanged;
 				L.measuredChanged = out.measuredChanged;
 				L.appliedChanged = out.appliedChanged;
-				L.bypassedTMin = out.bypassedTMin;
 				if (!run.have)
 					return;
 				L.lines = run.ls.count;
@@ -1024,8 +1007,8 @@ namespace SourceIdentity
 								return;
 						caller[cc++] = n;
 					};
-					if (latch[a].HasApplied() && !latch[a].AppliedNative())
-						addCaller(latch[a].AppliedN());
+					if (reader[a].HasConfident() && !reader[a].ConfidentNative())
+						addCaller(reader[a].ConfidentN());
 					const AxisSummary prev = evidence.Summary(a);
 					if (prev.hasBest)
 						addCaller(prev.n);
@@ -1039,8 +1022,8 @@ namespace SourceIdentity
 					VerifyOptions opt;
 					if (latchedMode)
 						opt.exactLines = cfg.latchedExactLines;
-					if (latch[a].HasApplied() && !latch[a].AppliedNative())
-						opt.forceExactN = latch[a].AppliedN();
+					if (reader[a].HasConfident() && !reader[a].ConfidentNative())
+						opt.forceExactN = reader[a].ConfidentN();
 					verifier->Evaluate(r.ls, cands, pc, opt, r.vr);
 					PowerProbe::Run(*probeVerifier, r.ls, floorCodes, static_cast<double>(step), cfg.probe, r.pr);
 				}
@@ -1056,6 +1039,7 @@ namespace SourceIdentity
 					obs.probeSeen = run[a].pr.seen;
 					obs.probeReason = run[a].pr.reason;
 					obs.shotId = shotId;
+					obs.timeUs = s.timeUs;   // the recent window (N3) follows the measured evaluation rate in source time
 					evidence.Submit(a, obs, run[a].up);
 				}
 				if (observer)
@@ -1097,7 +1081,7 @@ namespace SourceIdentity
 								if (cr.lineCount >= 1 && k < run[a].up.candidateCount)
 								{
 									cd.linesGated = run[a].up.cand[k].linesGated;
-									cd.informative = run[a].up.cand[k].informative && run[a].up.cand[k].statValid;
+									cd.informative = run[a].up.cand[k].informative && run[a].up.cand[k].statValid && !run[a].up.hold;   // a HOLD evaluation accumulates nothing (SID-CAL r2 M1)
 									cd.evJudged = run[a].up.cand[k].statValid;
 									cd.evStat = run[a].up.cand[k].stat;
 									++k;
@@ -1108,7 +1092,7 @@ namespace SourceIdentity
 					}
 					observer(d);
 				}
-				LatchOutput out[2];
+				ReadingOutput out[2];
 				bool anyReset = false;
 				for (int a = 0; a < 2; ++a)
 				{
@@ -1116,19 +1100,14 @@ namespace SourceIdentity
 					if (run[a].have)
 					{
 						const AxisSummary sum = evidence.Summary(a);
-						fe = MakeFieldEvidence(sum, run[a].up, run[a].ls.axisLen, cfg.latch, &run[a].vr);
+						fe = MakeFieldEvidence(sum, run[a].up, run[a].ls.axisLen, cfg.reading, &run[a].vr);
 						lastAxisLen[a] = run[a].ls.axisLen;
 					}
 					EvalContext ctx;
 					ctx.seq = s.seq;
 					ctx.timeUs = s.timeUs;
-					ctx.cut = cutsNow > 0;
-					ctx.cuts = cutsNow;
-					ctx.eventTimeUs = s.eventTimeUs;
-					ctx.blank = (flags & kEvBlank) != 0u;
-					ctx.fade = (flags & kEvFade) != 0u;
 					ctx.activeAreaChanged = (flags & kEvAreaChanged) != 0u;
-					out[a] = latch[a].Step(fe, ctx);
+					out[a] = reader[a].Step(fe, ctx);
 					if (out[a].resetEvidence)
 					{
 						evidence.ResetAxis(a);
@@ -1152,15 +1131,11 @@ namespace SourceIdentity
 						cold = true;
 				const double cost = nowMs() - t0;
 				gov.NoteCost(cost, cold);
-				const bool bothLatched = AxisLatched(latch[0]) && AxisLatched(latch[1]);
-				latchedPower.store(bothLatched, std::memory_order_release);
-				// A regime switch needs several near-maximum evaluations: while contrary evidence builds (or waits for T_min) the planned
-				// interval is the acquiring one, and maxAgeUs follows the PLANNED interval, not the nominal one (ChainLatch contract).
-				bool contrary = false;
-				for (int a = 0; a < 2; ++a)
-					if (out[a].reason == LatchReason::ContraryBuilding || out[a].reason == LatchReason::HeldMinHold)
-						contrary = true;
-				const GovernorPlan plan = gov.Plan(bothLatched && !contrary);
+				// Both axes CONFIDENT: the long cadence (5 s, 2% share); anything else evaluates at the acquiring cadence. maxAgeUs follows
+				// the PLANNED interval, not the nominal one.
+				const bool bothConfident = AxisConfident(reader[0]) && AxisConfident(reader[1]);
+				latchedPower.store(bothConfident, std::memory_order_release);
+				const GovernorPlan plan = gov.Plan(bothConfident);
 				nextDueMs.store(t0 + plan.intervalSec * 1000.0, std::memory_order_release);
 				intervalMs.store(plan.intervalSec * 1000.0, std::memory_order_release);
 
@@ -1184,7 +1159,6 @@ namespace SourceIdentity
 				le.cold = cold;
 				le.intervalSec = plan.intervalSec;
 				le.c1 = thr.c1;
-				le.c2 = thr.c2;
 				le.stepCodes = step;
 				le.classicalValid = classicalOk;
 				le.classicalRatio[0] = classical[0];

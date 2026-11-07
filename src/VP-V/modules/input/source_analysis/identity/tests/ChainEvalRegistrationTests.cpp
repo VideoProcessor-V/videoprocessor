@@ -479,7 +479,7 @@ namespace Tests
 			return "";
 		}
 
-		inline bool IsLatched(G::LatchState s) { return s == G::LatchState::Latched || s == G::LatchState::Unstable; }
+		inline bool IsConfident(G::LatchState s) { return s == G::LatchState::Latched; }   // Latched = the reserved numeric of CONFIDENT
 
 		inline void TrackEvents(Rig& r, const G::Record& rec, const double measuredN[2], const double appliedN[2])
 		{
@@ -492,24 +492,24 @@ namespace Tests
 				{
 					SidChain::ChainEvent e;
 					e.axis = axisName[a];
-					if (IsLatched(applied) && !IsLatched(r.lastApplied[a]))
+					if (IsConfident(applied) && !IsConfident(r.lastApplied[a]))
 					{
-						e.type = "latch";
+						e.type = "confident";
 						e.toN = appliedN[a];
 						r.pending.push_back(e);
 					}
-					else if (IsLatched(applied) && IsLatched(r.lastApplied[a]) && std::fabs(appliedN[a] - r.lastAppliedN[a]) > 0.5)
+					else if (IsConfident(applied) && IsConfident(r.lastApplied[a]) && std::fabs(appliedN[a] - r.lastAppliedN[a]) > 0.5)
 					{
-						e.type = "revert";
+						e.type = "change";
 						e.fromN = r.lastAppliedN[a];
 						e.toN = appliedN[a];
 						r.pending.push_back(e);
 					}
-					else if (!IsLatched(applied) && IsLatched(r.lastApplied[a]))
+					else if (!IsConfident(applied) && IsConfident(r.lastApplied[a]))
 					{
-						e.type = "revert";
+						e.type = "unsure";
 						e.fromN = r.lastAppliedN[a];
-						e.detail = "latch released";
+						e.detail = "no longer confident";
 						r.pending.push_back(e);
 					}
 					if (state == G::LatchState::Hold && r.lastState[a] != G::LatchState::Hold)
@@ -519,14 +519,7 @@ namespace Tests
 						h.axis = axisName[a];
 						r.pending.push_back(h);
 					}
-					if (state == G::LatchState::Unstable && r.lastState[a] != G::LatchState::Unstable)
-					{
-						SidChain::ChainEvent u;
-						u.type = "unstable";
-						u.axis = axisName[a];
-						r.pending.push_back(u);
-					}
-					if (measuredN[a] > 0 && r.lastMeasuredN[a] > 0 && std::fabs(measuredN[a] - r.lastMeasuredN[a]) > 1.5 && IsLatched(applied))
+					if (measuredN[a] > 0 && r.lastMeasuredN[a] > 0 && std::fabs(measuredN[a] - r.lastMeasuredN[a]) > 1.5 && IsConfident(applied))
 					{
 						SidChain::ChainEvent g;
 						g.type = "geometry";
@@ -565,7 +558,7 @@ namespace Tests
 				ar.state = Upper(G::StateText(m.state));
 				if (m.n > 0 && m.N > 0)
 					measuredN[a] = static_cast<double>(m.n) / m.N * dims[a];   // raster-referenced
-				if (IsLatched(p.state) && p.n > 0 && p.N > 0)
+				if (IsConfident(p.state) && p.n > 0 && p.N > 0)
 					appliedN[a] = static_cast<double>(p.n) / p.N * dims[a];
 				ar.measuredN = measuredN[a];
 				ar.appliedN = appliedN[a];
@@ -580,14 +573,10 @@ namespace Tests
 					ar.spatialAgreement = 1.0 - static_cast<double>(in.last.axis[a].maskedLines) / in.last.axis[a].gatedLines;
 			}
 			const G::LatchState sx = rec.measured[0].state, sy = rec.measured[1].state;
-			if (IsLatched(rec.applied[0].state) && IsLatched(rec.applied[1].state))
-				row.state = (sx == G::LatchState::Unstable || sy == G::LatchState::Unstable) ? "UNSTABLE" : "LATCHED";
+			if (IsConfident(rec.applied[0].state) && IsConfident(rec.applied[1].state))
+				row.state = "CONFIDENT";
 			else if (sx == G::LatchState::Hold || sy == G::LatchState::Hold)
 				row.state = "HOLD";
-			else if (sx == G::LatchState::Unstable || sy == G::LatchState::Unstable)
-				row.state = "UNSTABLE";
-			else if (sx == G::LatchState::Candidate || sy == G::LatchState::Candidate)
-				row.state = "CANDIDATE";
 			else if (sx == G::LatchState::Provisional || sy == G::LatchState::Provisional)
 				row.state = "PROVISIONAL";
 			else if (sx == G::LatchState::Abstain || sy == G::LatchState::Abstain)

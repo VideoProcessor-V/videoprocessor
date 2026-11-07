@@ -9,18 +9,18 @@
 //        |                                                   copies just the LineSampler lines (integer codes, ~0.4 MB at 4K),
 //        |                                                   attaches the consumed events + the source time, releases the plane.
 //        v   bounded queue (1-2 jobs, NEWEST WINS, counted)
-//   estimator worker thread       proposer -> verifier -> power probe -> ChainEvidence -> ChainLatch (per axis) -> HeldState::Publish.
+//   estimator worker thread       proposer -> verifier -> power probe -> ChainEvidence -> AxisReader (per axis: confident / UNSURE) -> HeldState::Publish.
 //
 // Nothing here runs on the render thread beyond three leaf-lock notes (NoteFrame, NoteEvent, NoteDiscontinuity) and the sealed-record
 // read. The evaluation is a pure function of (lines, source time, flags): the same job sequence gives byte-identical records (the tests
 // pin it; a dumped evidence ring replays exactly). Wall-clock reads only decide WHEN an evaluation runs (the CPU-share governor) and
 // the reported cost; tests inject the clock.
 //
-// Event contract (doc 78 section 5 / ChainLatch.h): the monitor calls NoteEvent(Cut | Blank | Fade, seq) when its analysis sees one; the
-// event is consumed by the FIRST evaluation of a frame with seq >= the event's seq (so the latch gets the flag on the first Step after the
-// event; a job replaced by a newer one hands its consumed events to the replacement; while latched an event pulls the next evaluation
-// forward, at most once per second). The monitor reports events from its own analysis worker, so an evaluation that already ran may
-// miss one: the next evaluation carries it with the event's own time (chain/README.md, EVENT TIMING LIMIT). A discontinuity
+// Event contract: the monitor calls NoteEvent(Cut | Blank | Fade, seq) when its analysis sees one; the event is consumed by the FIRST
+// evaluation of a frame with seq >= the event's seq (each cut is a shot for ChainEvidence's per-shot cap and the flags go to the log; a job
+// replaced by a newer one hands its consumed events to the replacement; while both axes are confident an event pulls the next evaluation
+// forward, at most once per second). The monitor reports events from its own analysis worker, so an evaluation that already ran may miss
+// one: the next evaluation carries it (the readings are not timed by events any more). A discontinuity
 // (NoteDiscontinuity, a stream-key change, a format change) resets everything at once and publishes a reset record whose evalSeq is the
 // era's first sequence (one past the newest announced frame). A repeat (NoteRepeat) is
 // skipped without consuming the due slot. The active area and the source time of a frame come from NoteFrame (the monitor's per-frame
@@ -33,8 +33,8 @@
 #include "ChainEvidence.h"
 #include "ChainEvidenceLog.h"
 #include "ChainGovernor.h"
-#include "ChainLatch.h"
 #include "ChainLines.h"
+#include "ChainReading.h"
 #include "ChainStatus.h"
 #include "DescaleVerifier.h"
 #include "PolyphaseProposer.h"
@@ -60,17 +60,17 @@ namespace SourceIdentity
 		struct EstimatorSettings
 		{
 			SamplerSettings sampler;                                     // lines while acquiring (32 + 32)
-			SamplerSettings samplerLatched = SamplerSettings::Latched(); // lines while latched (16 + 16)
+			SamplerSettings samplerLatched = SamplerSettings::Latched(); // lines while both axes are confident (16 + 16)
 			VerifierSettings verifier;
 			ProposerSettings proposer;
 			ProbeSettings probe;
 			EvidenceSettings evidence;
-			LatchSettings latch;
+			ReadingSettings reading;
 			GovernorSettings governor;
 			EvidenceLogSettings log;
 			int queueDepth = 1;                  // jobs waiting for the worker (1..2); a newer job replaces the oldest, counted
 			int outputStepOverride = 0;          // 0 = detect from the samples; 4 = an 8-bit picture; 1 = 10-bit
-			int latchedExactLines = 16;          // exact-stage lines while latched (the latched n always gets the exact stage)
+			int latchedExactLines = 16;          // exact-stage lines while confident (a confident n always gets the exact stage)
 			int clockRing = 64;                  // frames of (seq, source time, active area) remembered
 			int eventCap = 64;                   // pending events kept (oldest dropped)
 			int repeatCap = 16;                  // pending repeat marks kept
@@ -198,7 +198,7 @@ namespace SourceIdentity
 			bool WaitIdle(int timeoutMs) const;
 			// Holds the worker back (jobs queue up, newest wins, nothing is processed) / lets it go on. Synchronous mode ignores it.
 			void PauseForTest(bool pause);
-			// Sets the "both axes latched" power flag (the long cadence, the event pull-forward) without a real latch; the next evaluation recomputes it.
+			// Sets the "both axes confident" power flag (the long cadence, the event pull-forward) without a real reading; the next evaluation recomputes it.
 			void ForceLatchedPowerForTest(bool on);
 			// The replay entry: feeds a (dumped) snapshot to the worker as if it had been delivered - its flags, source time and active
 			// rectangle included, no due check, no clock lookup. False when the estimator does not run.

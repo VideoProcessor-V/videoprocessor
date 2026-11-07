@@ -837,8 +837,8 @@ namespace SourceIdentity
 						++A.probeSeen;
 				}
 				A.last = L;
-				g.chainLatched[a] = L.appliedState == Geometry::LatchState::Latched && L.appliedN > 0 && L.N > 0;
-				g.chainRatio[a] = g.chainLatched[a] ? static_cast<double>(L.appliedN) / static_cast<double>(L.N) : 1.0;
+				g.chainConfident[a] = L.appliedState == Geometry::LatchState::Latched && L.appliedN > 0 && L.N > 0;
+				g.chainRatio[a] = g.chainConfident[a] ? static_cast<double>(L.appliedN) / static_cast<double>(L.N) : 1.0;
 			}
 		}
 
@@ -896,7 +896,7 @@ namespace SourceIdentity
 			j.EndArr();
 			bool disagree = false;
 			for (int a = 0; a < 2; ++a)
-				if (g.classicalValid && g.chainLatched[a])
+				if (g.classicalValid && g.chainConfident[a])
 				{
 					const double c = g.classicalRatio[a];
 					const double m = (std::max)(c, g.chainRatio[a]);
@@ -907,7 +907,7 @@ namespace SourceIdentity
 			j.Key("ratio");
 			if (g.classicalValid) j.Arr().Num(g.classicalRatio[0]).Num(g.classicalRatio[1]).EndArr(); else j.Null();
 			j.Key("wouldBeRatio");
-			if (g.chainLatched[0] || g.chainLatched[1]) j.Arr().Num(g.chainRatio[0]).Num(g.chainRatio[1]).EndArr(); else j.Null();
+			if (g.chainConfident[0] || g.chainConfident[1]) j.Arr().Num(g.chainRatio[0]).Num(g.chainRatio[1]).EndArr(); else j.Null();
 			j.Key("disagree").Bool(disagree);
 			j.EndObj();
 			// Not wired yet (reserved, null): the encoder tier, the ABR events, the would-be notices and the quality-pattern summary.
@@ -946,16 +946,14 @@ namespace SourceIdentity
 				j.Key("seq").UInt(e.seq);
 				j.Key("axis").Str(AxisName(a));
 				j.Key("state").Str(Geometry::StateText(L.state));
-				j.Key("reason").Str(LatchReasonText(static_cast<LatchReason>(L.latchReason < 0 ? 0 : (L.latchReason >= static_cast<int>(LatchReason::Count) ? 0 : L.latchReason))));
+				j.Key("reason").Str(ReadingReasonText(static_cast<ReadingReason>(L.readingReason < 0 ? 0 : (L.readingReason >= static_cast<int>(ReadingReason::Count) ? 0 : L.readingReason))));
 				j.Key("reasonBits").UInt(L.reasonBits);
 				j.Key("measured");
 				WriteAxisGeom(j, L, false);
 				j.Key("applied");
 				WriteAxisGeom(j, L, true);
 				j.Key("kernelConf").Num(L.kernelConf);
-				j.Key("bypassedTMin").Bool(L.bypassedTMin);
 				j.Key("c1").Num(e.c1);
-				j.Key("c2").Num(e.c2);
 				j.Key("candidates");
 				WriteCandidates(j, L);
 				j.Key("probe").Obj();
@@ -1097,44 +1095,28 @@ namespace SourceIdentity
 					hotkeyPending_ = false;
 				}
 			}
-			bool disagree = false, flap = false, thin = false, unstable = false, hold = false, coverage = false;
+			bool disagree = false, hold = false, coverage = false;
 			for (int a = 0; a < 2; ++a)
 			{
 				const LogAxis& L = e.axis[a];
-				if (L.appliedChanged && (L.appliedState == Geometry::LatchState::Latched || L.appliedState == Geometry::LatchState::Unstable))
+				if (L.appliedChanged && L.appliedState == Geometry::LatchState::Latched)
 				{
-					const LatchReason reason = static_cast<LatchReason>(L.latchReason);
-					const bool latchEvent = reason == LatchReason::Latched;
-					const bool revert = reason == LatchReason::Reverted || reason == LatchReason::RegimeNative || reason == LatchReason::Unstable;
-					if (latchEvent)
+					// A CONFIDENT reading (n, N and the confident ratio come from the geometry): compare with the classical decision.
+					if (e.classicalValid && L.appliedN > 0 && L.N > 0)
 					{
-						if (e.classicalValid && L.appliedN > 0 && L.N > 0)
-						{
-							const double chain = static_cast<double>(L.appliedN) / static_cast<double>(L.N);
-							const double c = e.classicalRatio[a];
-							const double m = (std::max)(c, chain);
-							if (m > 0.0 && std::fabs(c - chain) > s_.disagreeTolerance * m)
-								disagree = true;
-						}
-						if (L.appliedLlr <= e.c1 + s_.thinMarginNats)
-							thin = true;
-						const std::string key = CoverageKey(e, a);
-						int& count = coverage_[key];
-						if (count < s_.coverageTarget)
-							coverage = true;
-						++count;
-						coverageDirty_ = true;
+						const double chain = static_cast<double>(L.appliedN) / static_cast<double>(L.N);
+						const double c = e.classicalRatio[a];
+						const double m = (std::max)(c, chain);
+						if (m > 0.0 && std::fabs(c - chain) > s_.disagreeTolerance * m)
+							disagree = true;
 					}
-					if (revert && haveAppliedChange_[a] && e.timeUs - lastAppliedChangeUs_[a] <= s_.flapWindowUs)
-						flap = true;
+					const std::string key = CoverageKey(e, a);
+					int& count = coverage_[key];
+					if (count < s_.coverageTarget)
+						coverage = true;
+					++count;
+					coverageDirty_ = true;
 				}
-				if (L.appliedChanged)
-				{
-					haveAppliedChange_[a] = true;
-					lastAppliedChangeUs_[a] = e.timeUs;
-				}
-				if (L.stateChanged && L.state == Geometry::LatchState::Unstable)
-					unstable = true;
 				if (L.state == Geometry::LatchState::Hold)
 				{
 					if (holdSinceUs_[a] < 0)
@@ -1177,9 +1159,6 @@ namespace SourceIdentity
 				}
 			}
 			if (disagree) why.push_back("disagree");
-			if (flap) why.push_back("flap");
-			if (thin) why.push_back("thin");
-			if (unstable) why.push_back("unstable");
 			if (hold) why.push_back("hold");
 			if (power) why.push_back("power");
 			if (coverage) why.push_back("coverage");
@@ -1263,7 +1242,6 @@ namespace SourceIdentity
 			h.Key("outputStepCodes").Int(e.stepCodes);
 			h.Key("mode").Str(mode_);
 			h.Key("c1").Num(e.c1);
-			h.Key("c2").Num(e.c2);
 			h.Key("format_info").Str(format_);
 			h.EndObj();
 			const std::string bytes = SerializeDump(h.s, ring_);
@@ -1310,16 +1288,17 @@ namespace SourceIdentity
 			std::string boundaryWhy;
 			for (int a = 0; a < 2; ++a)
 			{
-				if (e.axis[a].appliedChanged)
+				// The segment closes when the CONFIDENT size changes (not when the reading drops to UNSURE and returns).
+				const LogAxis& L = e.axis[a];
+				if (L.appliedState != Geometry::LatchState::Latched || L.appliedN <= 0)
+					continue;
+				if (haveConfidentN_[a] && lastConfidentN_[a] != L.appliedN)
 				{
 					boundary = true;
-					boundaryWhy = "applied change";
+					boundaryWhy = "confident size change";
 				}
-				else if (e.axis[a].latchReason == static_cast<int>(LatchReason::RegimeNative))
-				{
-					boundary = true;
-					boundaryWhy = "regime boundary";
-				}
+				haveConfidentN_[a] = true;
+				lastConfidentN_[a] = L.appliedN;
 			}
 			if (boundary)
 				CloseSegment(e.timeUs, boundaryWhy);
@@ -1340,7 +1319,7 @@ namespace SourceIdentity
 			{
 				holdSinceUs_[a] = -1;
 				holdRaised_[a] = false;
-				haveAppliedChange_[a] = false;
+				haveConfidentN_[a] = false;
 			}
 			FlushRows();
 			PublishStatus();

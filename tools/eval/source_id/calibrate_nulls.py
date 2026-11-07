@@ -39,7 +39,7 @@ TARGET_RATE_PER_HOUR, THRESHOLD_INTERVAL_S = 0.01, 10.0
 CANDIDATE_COUNT, KERNEL_COUNT = 8, 10   # multiplicity of c1
 SHOT_CAP_FRACTION = 0.5
 MAX_HYPOTHESES = 16
-MIN_EVALS_CANDIDATE = 4                 # README: CANDIDATE needs >= 4 informative evaluations
+MIN_EVALS_CANDIDATE = 4                 # a c1 crossing needs >= 4 informative evaluations (non-binding: the per-shot cap already needs 2 shots)
 REQUIRED_V2 = ["reel_id", "title", "eval_seq", "time_s", "axis", "N", "n", "class", "T", "stage", "best_kernel",
                "kernel_margin", "lines_passed", "lines", "power_seen", "floor_codes", "truth_n", "bit_depth",
                "truth_kernel", "truth_sharpen", "shot_id"]
@@ -307,7 +307,7 @@ def median(xs):
 
 def null_sd(xs, floor):
     """Tail-matched null spread: the largest of the MAD sd and the dip-side spread matched at 1, 2 and 2.5 sigma
-    (the false-CANDIDATE risk sits in the dip tail, not at one sigma)."""
+    (the false-confident risk sits in the dip tail, not at one sigma)."""
     med = median(xs)
     mad = 1.4826 * median([abs(x - med) for x in xs])
     return max(mad, med - quantile(xs, 0.1587), (med - quantile(xs, 0.0228)) / 2.0,
@@ -701,7 +701,7 @@ def render_report(tabs, diag, prov, cv, fold_of, c1, stats):
             tail = "n/a" if not nl else "%.2f / %.2f" % (quantile(nl, 0.99), quantile(nl, 0.999))
             L.append("| %s | %d/%d | %s | %s |" % (CLASS_NAMES[c], len(nl), len(cv["pos"][c]),
                                                   "n/a" if a != a else "%.3f" % a, tail))
-        L += ["", "False CANDIDATE entries on native segments (both axes jointly with the agreement prior; reset after each;"
+        L += ["", "False c1 crossings (false confident readings) on native segments (both axes jointly with the agreement prior; reset after each;"
               " held-out only):", "| tables, shot cap | entries | hours H | per hour | upper 95% (3/H if 0) | by class k8/k16/rat/gen |",
               "|---|---|---|---|---|---|"]
         for (name, cf), v in sorted(cv["fa"].items(), key=lambda kv: (kv[0][0], kv[0][1])):
@@ -991,7 +991,7 @@ def selftest():
         check(a > 0.9, "generic held-out AUC %.3f" % a)
         check(auc(cv["pos"][2], cv["neg"][2]) > 0.9, "rational held-out AUC > 0.9")
         fa = cv["fa"][("cal", SHOT_CAP_FRACTION)]
-        check(fa["hours"] > 0 and fa["events"] == 0, "no false CANDIDATE on pure-noise natives (%d in %.3f h)" % (fa["events"], fa["hours"]))
+        check(fa["hours"] > 0 and fa["events"] == 0, "no false confident reading on pure-noise natives (%d in %.3f h)" % (fa["events"], fa["hours"]))
         check("3/H" in rep and "upper 95%" in rep and "%.3f /h" % (3.0 / fa["hours"]) in rep, "report prints the 3/H bound (%.1f /h)" % (3.0 / fa["hours"]))
         for b in (8, 10):
             r = cv["reached"][b]

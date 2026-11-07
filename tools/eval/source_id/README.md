@@ -78,12 +78,12 @@ none: menu / black frames, x264, AV1, as-is masters), `repeat` 1 when the output
 * `evaluations.csv`: one row per analysis (every 0.5 s of source time) per lane `off` / `on` (classical monitor, consensus off / on) and, once SID-C2 registers into the
   seam, `chain`. Columns: `reel,lane,out_frame,t,seg,bits,fx,fy,n_x,n_y,state,declared,conf,frame_quality,noise,classical_quality,tier,level,rec_ratio_h,rec_ratio_v,gen,reason,reason_h,ms,cuts,latched_axes,`
   `kernel,sharpen_amount,double_n1_x,double_n1_y,active_x,active_y,active_w,active_h,measured_n_x,measured_n_y,state_x,state_y,llr_x,llr_y,power_x,power_y,spatial_x,spatial_y,reason_bits_x,reason_bits_y,reason_x,reason_y`.
-  Classical lanes: `n` = applied re-base factor x raster (the engaged AutoFactors decision), `state` LATCHED when engaged, CANDIDATE when a ratio is declared but not engaged, else UNKNOWN;
-  `reason` = the AxisV reason, `reason_h` = AxisH, `latched_axes` = the record's latched bits, `cuts` = the monitor's cut counter. Chain lane: states UNKNOWN PROVISIONAL CANDIDATE LATCHED HOLD UNSTABLE
-  ABSTAIN (doc 78 section 4), per axis state / measured n / applied n / kernel / sharpening / LLR / power / spatial agreement / reason bits. `n_x`, `n_y` are RASTER-referenced (raster x coded / active-picture
+  Classical lanes: `n` = applied re-base factor x raster (the engaged AutoFactors decision), `state` LATCHED when engaged (the ORIGINAL latch), DECLARED when a ratio is declared but not engaged, else UNKNOWN;
+  `reason` = the AxisV reason, `reason_h` = AxisH, `latched_axes` = the record's latched bits, `cuts` = the monitor's cut counter. Chain lane: states UNKNOWN PROVISIONAL CONFIDENT HOLD
+  ABSTAIN (doc 78 section 5; everything but CONFIDENT is UNSURE and applies no value), per axis state / measured n / applied n / kernel / sharpening / LLR / power / spatial agreement / reason bits. `n_x`, `n_y` are RASTER-referenced (raster x coded / active-picture
   ratio = the truth's `truth_n`), not window or active-area sizes.
 * `events.csv`: `reel,lane,t,event_t,out_frame,seg,type,a,b,detail`: `engage` (factor change), `declared`, `abr` (`event_t` = the rung-change boundary the detector reports: matched against the truth boundary at
-  +-1.0 s like replay.py), `notice`, and from the chain lane `latch`, `revert`, `hold`, `unstable`, `geometry` (matched within 2 s after the truth boundary), `note`.
+  +-1.0 s like replay.py), `notice`, and from the chain lane `confident`, `change`, `unsure`, `hold`, `geometry` (matched within 2 s after the truth boundary), `note`.
 * The evaluator seam is the header `identity/tests/ChainEvalSeam.h`: SID-C2's own test file registers with `static Tests::SidChain::Registrar reg(...)` (frame callback with 10-bit luma codes, `reelBegin` / `reelEnd`,
   `chainRow` filling a typed `ChainRow`, `chainEvents`); the harness never needs editing.
 
@@ -118,10 +118,10 @@ Writes `NullTables.generated.h` (an inline `GeneratedNullTables()` returning the
   0.1 until its clamped increment is nowhere larger than the placeholder's on T in [-2, max(1, largest observed T)]. Every number is a
   field of `Policy`.
 * Validation: 2-fold CV BY MASTER (sha1-ordered, alternating; all reels of a footage, native or upscaled, share a fold). Held out: per
-  class ROC AUC of the LLR and the null LLR P99 / P99.9 against c1; false CANDIDATE entries per native hour, simulated per truth segment with
+  class ROC AUC of the LLR and the null LLR P99 / P99.9 against c1; false c1 crossings (false confident readings) per native hour, simulated per truth segment with
   both axes jointly (agreement prior +-2 nats, per-shot cap c1/2 and c1 by the estimator's own `cut_id`, nearest-slot match,
   16 hypotheses, >= 4 informative evaluations over >= 2 shots), calibrated and placeholder side by side, with the upper 95% bound
   (3/H when no event: zero events in H hours supports only that bound); wrong-n entries on alt segments; evaluations to c1 on alt segment-axes
   (every one is a denominator; inf = never), 8- and 10-bit separately. Segments are maximal runs of one truth; evaluations without
   truth are boundaries. c1 = -ln(rate x 10 s / 3600) + ln(8 x 10) = 14.87 nats.
-* Not simulated: the native hypothesis (it cannot raise a candidate) and HOLD masking (`informative` already removes those evaluations).
+* Not simulated: the native hypothesis (it cannot raise a false size) and HOLD masking. The writer (ChainEvalRegistrationTests) marks NO candidate `informative` in an evaluation the estimator judged HOLD (it accumulates nothing there, SID-CAL r2 M1), so those evaluations never reach the fit.

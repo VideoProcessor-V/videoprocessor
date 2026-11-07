@@ -965,7 +965,6 @@ namespace Tests
 			using namespace SourceIdentity::Chain;
 			const Thresholds t = ComputeThresholds(EvidenceSettings());
 			Assert::IsTrue(t.c1 > 14.7 && t.c1 < 15.0, L"1 per 100 h, 10 s, 8 candidates x 10 kernels is about 15 nats");
-			Assert::AreEqual(t.c1 + 3.0, t.c2, 1e-12);
 			EvidenceSettings s;
 			s.targetRatePerHour = 1.0;
 			const Thresholds t2 = ComputeThresholds(s);
@@ -1021,12 +1020,99 @@ namespace Tests
 				for (int e = 0; e < 3; ++e)
 					ev.Submit(1, Observe(vr, 1080, shot, false), u);
 			s = ev.Summary(1);
-			Assert::IsTrue(s.aboveC1 && s.aboveC2, L"four shots of decisive evidence pass c1 and c2");
+			Assert::IsTrue(s.aboveC1, L"four shots of decisive evidence pass c1");
 			Assert::IsTrue(s.shots == 4 && s.informativeEvals == 15);
 			Assert::IsTrue(s.otherAxisAbstains, L"the other axis gave nothing: relaxed, no prior");
 			Assert::AreEqual(0.0, s.prior, 0.0);
 			Assert::IsTrue((u.reason & kReasonNoPower) != 0, L"unseen probe is reported");
 			Assert::IsFalse(u.nativeCounted);
+		}
+
+		// ---- N3 (SID train r2): the recent window in seconds, derived from the measured evaluation rate ----------------------------------
+		// One evaluation of the axis (1080 px) at second `t`: candidate `n` with a decisive dip, the probe unseen, shot `shot`.
+		static void FeedAt(SourceIdentity::Chain::ChainEvidence& ev, int n, int t, uint32_t shot, bool timed, int64_t stepUs = 1000000)
+		{
+			using namespace ChainSynth;
+			VerifyResult vr;
+			vr.candidates.push_back(MakeCandidate(n, -1.2, 5.0));
+			AxisObservation o = Observe(vr, 1080, shot, false);
+			if (timed)
+				o.timeUs = static_cast<int64_t>(t) * stepUs;
+			EvidenceUpdate u;
+			ev.Submit(1, o, u);
+		}
+
+		TEST_METHOD(AnAbrRungChangeMidPlayReConvergesWithinTheRecentWindowButNotWithoutOne)
+		{
+			using namespace SourceIdentity::Chain;
+			ChainEvidence windowed, unlimited;
+			// 40 s of a 540 upscale (4 shots), then the truth is 720 (shots 5, 6, ...; 540 is no longer evaluated).
+			for (int t = 0; t < 40; ++t)
+			{
+				FeedAt(windowed, 540, t, 1 + static_cast<uint32_t>(t / 10), true);
+				FeedAt(unlimited, 540, t, 1 + static_cast<uint32_t>(t / 10), false);
+			}
+			Assert::IsTrue(windowed.Summary(1).aboveC1 && windowed.Summary(1).n == 540 && unlimited.Summary(1).n == 540);
+			for (int t = 40; t <= 65; ++t)
+			{
+				FeedAt(windowed, 720, t, 5 + static_cast<uint32_t>((t - 40) / 10), true);
+				FeedAt(unlimited, 720, t, 5 + static_cast<uint32_t>((t - 40) / 10), false);
+			}
+			const AxisSummary w = windowed.Summary(1), u = unlimited.Summary(1);
+			Assert::IsTrue(w.hasBest && w.n == 720 && w.aboveC1, L"the old 540 shots expired: the new rung reaches c1 inside the window");
+			Assert::IsTrue(u.n == 540, L"without a window the old evidence still outvotes the new rung (the failure N3 removes)");
+		}
+
+		TEST_METHOD(TheWindowIsInSecondsDerivedFromTheMeasuredRateNeverAFrameCount)
+		{
+			using namespace SourceIdentity::Chain;
+			ChainEvidence a, b, none;
+			Assert::AreEqual(0.0, a.WindowSeconds(1), 0.0, L"no rate measured yet: no window");
+			for (int t = 0; t < 12; ++t)
+			{
+				FeedAt(a, 540, t, 1, true, 1000000);        // one evaluation per second
+				FeedAt(b, 540, t, 1, true, 5000000);        // one every five seconds
+				FeedAt(none, 540, t, 1, false);
+			}
+			const EvidenceSettings s;
+			const double c1 = ComputeThresholds(s).c1;
+			const double w1 = s.windowMargin * (c1 / s.windowYieldNats) * 1.0;
+			Assert::AreEqual(w1, a.WindowSeconds(1), 1e-6, L"margin x (c1 / yield) evaluation intervals");
+			Assert::AreEqual(5.0 * w1, b.WindowSeconds(1), 1e-6, L"five times the interval, five times the window: seconds, not counts");
+			Assert::AreEqual(0.0, none.WindowSeconds(1), 0.0, L"no source time given: nothing expires");
+			EvidenceSettings fast;
+			ChainEvidence f(fast);
+			for (int t = 0; t < 4; ++t)
+				FeedAt(f, 540, t, 1, true, 1000);           // 1 ms apart: clamped to the minimum
+			Assert::AreEqual(fast.windowMinSec, f.WindowSeconds(1), 1e-9);
+		}
+
+		TEST_METHOD(AHoldEvaluationForgetsTheAccumulationOfThatAxisOnly)
+		{
+			using namespace SourceIdentity::Chain;
+			using namespace ChainSynth;
+			ChainEvidence ev;
+			for (int t = 0; t < 40; ++t)
+			{
+				FeedAt(ev, 540, t, 1 + static_cast<uint32_t>(t / 10), true);
+				VerifyResult other;
+				other.candidates.push_back(MakeCandidate(540, -1.2, 5.0));
+				EvidenceUpdate u0;
+				ev.Submit(0, Observe(other, 1920, 1 + static_cast<uint32_t>(t / 10), false), u0);
+			}
+			Assert::IsTrue(ev.Summary(1).hasBest && ev.Summary(1).aboveC1);
+			VerifyResult many;
+			many.candidates.push_back(MakeCandidate(720, -0.6, 5.0));
+			for (int j = 0; j < 10; ++j)
+				many.candidates[0].lineStat[static_cast<size_t>(j)] = 0.0;      // 10 of 32 lines contradict: an overlay
+			AxisObservation o = Observe(many, 1080, 5, true);
+			o.timeUs = 40 * 1000000LL;
+			EvidenceUpdate u;
+			Assert::IsTrue(ev.Submit(1, o, u));
+			Assert::IsTrue(u.hold, L"fixture: the overlay is a HOLD");
+			Assert::IsFalse(ev.Summary(1).hasBest, L"an overlay / menu / PiP starts the accumulation of that axis over");
+			Assert::IsTrue(ev.Summary(1).informativeEvals == 0 && ev.Summary(1).nativeEvals == 0);
+			Assert::IsTrue(ev.Summary(0).hasBest, L"the other axis is untouched");
 		}
 
 		TEST_METHOD(NoDipEvidenceAccumulatesAgainstTheUpscaleAndForNativeOnlyWithPower)

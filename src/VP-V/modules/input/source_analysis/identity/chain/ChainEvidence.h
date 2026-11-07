@@ -3,8 +3,8 @@
 #pragma once
 
 // ChainEvidence (SID-C1 unit 4): turns verifier results into calibrated evidence, per axis. It is an
-// ACCUMULATOR with reason bits; the latch state machine (UNKNOWN / PROVISIONAL / CANDIDATE / LATCHED / HOLD ...)
-// is NOT here, it lives in the consensus (C2) and reads the summaries.
+// ACCUMULATOR with reason bits; the per-axis reading (confident vs UNSURE, ChainReading.h) reads its summaries. There is no latch
+// state machine anywhere (doc 78 section 5: parked).
 //
 // floorCodes (AxisObservation) is the dof-NORMALISED sigma of the rounding/dither noise (1.155 for an 8-bit output,
 // 0.289 for 10-bit), the same unit as the verifier's line baselines; the verifier's CandidateResult.floorCodes is
@@ -29,10 +29,16 @@
 // Accumulation: per hypothesis (a latent size, or native) the increments of one SHOT (shotId from the caller,
 // bumped at every cut) are summed and the shot's sum is capped at +-shotCapFraction*c1 (temporal correlation:
 // frames of one shot are not independent), so c1 can only be reached over at least two shots.
+// RECENT WINDOW (SID train r2, N3): the closed shots of a hypothesis expire after a window of SECONDS derived from the MEASURED
+// evaluation rate (never a frame count): windowMargin x (c1 / windowYieldNats) evaluation intervals, clamped to
+// [windowMinSec, windowMaxSec]; the interval is a running mean of the source-time gaps between submitted evaluations. So an ABR rung
+// change mid-play is not outvoted for ever by hundreds of nats of old evidence. The window needs the evaluation's source time
+// (AxisObservation::timeUs; -1 = unknown: nothing expires). The accumulation of an axis is RESET by ResetAxis (resync, format change,
+// discontinuity) and by a HOLD evaluation (an overlay / menu / PiP over the picture: what came before says nothing about what is shown).
 // Two axes: when both axes' best hypotheses are positive, agreeing ratios add +agreementBonus to each and
 // disagreeing ones subtract it; when one axis abstains nothing is added or subtracted (relaxed).
-// Thresholds: c1 = -ln(alpha) + ln(candidates x kernels), alpha = target rate per hour x interval / 3600;
-// c2 = c1 + c2ExtraNats.
+// Threshold: c1 = -ln(alpha) + ln(candidates x kernels), alpha = target rate per hour x interval / 3600. It is the DETECTION-confidence
+// level (reading vs UNSURE); it adds no timing.
 #include "ChainNullTables.h"
 #include "DescaleVerifier.h"
 
@@ -46,7 +52,6 @@ namespace SourceIdentity
 			double thresholdIntervalSec = 10.0;  // T in alpha = rate * T / 3600
 			int candidateCount = kMaxCandidates; // hypotheses searched (multiplicity of the threshold)
 			int kernelCount = kKernelCount;
-			double c2ExtraNats = 3.0;
 			double shotCapFraction = 0.5;
 			double agreementBonus = 2.0;
 			double agreementTolerance = 0.015;   // relative difference of n/N counted as agreeing
@@ -63,13 +68,18 @@ namespace SourceIdentity
 			double nativeNoCandidate = 0.5;
 			double trimFraction = 0.2;
 			int maxHypotheses = 16;
+			// The recent window (N3): seconds = windowMargin x (c1 / windowYieldNats) x measured evaluation interval, clamped.
+			double windowYieldNats = 1.4;        // F0: the hard 8-bit grainy cases gain about 1.4 nats per evaluation
+			double windowMargin = 3.0;           // the window spans this many times the time that yield needs to reach c1
+			double windowMinSec = 10.0;
+			double windowMaxSec = 600.0;
+			double rateSmoothing = 0.25;         // weight of the newest gap in the running mean of the evaluation interval
 		};
 
 		struct Thresholds
 		{
 			double alpha = 0.0;
 			double c1 = 0.0;
-			double c2 = 0.0;
 		};
 
 		inline Thresholds ComputeThresholds(const EvidenceSettings& s)
@@ -83,7 +93,6 @@ namespace SourceIdentity
 			t.alpha = alpha;
 			const double multiplicity = static_cast<double>((std::max)(1, s.candidateCount)) * static_cast<double>((std::max)(1, s.kernelCount));
 			t.c1 = -std::log(alpha) + std::log(multiplicity);
-			t.c2 = t.c1 + s.c2ExtraNats;
 			return t;
 		}
 
@@ -96,6 +105,7 @@ namespace SourceIdentity
 			bool probeSeen = false;
 			uint32_t probeReason = 0;     // reason bits of the PowerProbe (flat / dark / soft)
 			uint32_t shotId = 0;          // bumped by the caller at every cut
+			int64_t timeUs = -1;          // source time of the evaluation (non-decreasing); -1 = unknown: the recent window cannot expire anything
 		};
 
 		struct CandidateEvidence
@@ -144,7 +154,6 @@ namespace SourceIdentity
 			int nativeEvals = 0;
 			uint32_t lastReason = 0;
 			bool aboveC1 = false;
-			bool aboveC2 = false;
 			bool otherAxisAbstains = false;
 		};
 
@@ -188,6 +197,7 @@ namespace SourceIdentity
 				if (st.axisLen != 0 && st.axisLen != obs.axisLen)
 					st = AxisState();   // the axis changed size (active area / zoom): old hypotheses mean nothing
 				st.axisLen = obs.axisLen;
+				NoteTime(st, obs.timeUs);
 				bool anyUsable = false;
 				for (size_t i = 0; i < vr.candidates.size() && out.candidateCount < kMaxCandidates; ++i)
 				{
@@ -258,7 +268,8 @@ namespace SourceIdentity
 				{
 					out.reason |= kReasonMixed;
 					st.lastReason = out.reason;
-					return true;   // HOLD hint: nothing accumulated
+					ForgetAccumulation(st);   // an overlay / menu / PiP: nothing accumulated, and what came before says nothing about it
+					return true;
 				}
 
 				// Native hypothesis: only with proven power.
@@ -283,10 +294,10 @@ namespace SourceIdentity
 					{
 						Hypothesis& h = FindSlot(st, out.cand[i].n);
 						h.n = out.cand[i].n;   // the slot follows the latest best exact size
-						Add(st, h, out.cand[i].increment, obs.shotId, cap);
+						Add(h, out.cand[i].increment, obs.shotId, obs.timeUs, cap);
 					}
 				if (out.nativeCounted)
-					Add(st, st.native, out.nativeIncrement, obs.shotId, cap);
+					Add(st.native, out.nativeIncrement, obs.shotId, obs.timeUs, cap);
 
 				out.informative = anyInformative || out.nativeCounted;
 				if (out.informative)
@@ -302,6 +313,9 @@ namespace SourceIdentity
 				return true;
 			}
 
+			// The recent window of an axis in seconds (N3): derived from the measured evaluation rate; 0 = the rate is not measured yet (no window).
+			double WindowSeconds(int axis) const { return WindowUs(ax_[axis == 0 ? 0 : 1]) / 1e6; }
+
 			AxisSummary Summary(int axis) const
 			{
 				const int a = axis == 0 ? 0 : 1;
@@ -315,16 +329,22 @@ namespace SourceIdentity
 				}
 				r.llrWithPrior = r.llr + r.prior;
 				r.aboveC1 = r.hasBest && r.llrWithPrior >= thr_.c1;
-				r.aboveC2 = r.hasBest && r.llrWithPrior >= thr_.c2;
 				return r;
 			}
 
 		private:
+			struct ClosedShot
+			{
+				int64_t timeUs = -1;     // source time of the shot's newest increment (-1: unknown, never expires)
+				double value = 0.0;      // the shot's sum, capped
+			};
+
 			struct Hypothesis
 			{
 				int n = 0;               // 0 = the native hypothesis
-				double llr = 0.0;        // closed shots, each capped
+				std::vector<ClosedShot> closed;   // closed shots inside the recent window, each capped
 				double shotSum = 0.0;    // the open shot
+				int64_t shotTimeUs = -1; // source time of the open shot's newest increment
 				uint32_t shotId = 0;
 				int shots = 0;
 				int evals = 0;
@@ -332,6 +352,8 @@ namespace SourceIdentity
 
 			struct AxisState
 			{
+				int64_t lastTimeUs = -1;     // source time of the newest submitted evaluation
+				double intervalUs = 0.0;     // running mean of the gaps between submitted evaluations (0: not measured yet)
 				std::vector<Hypothesis> slots;
 				Hypothesis native;
 				int informativeEvals = 0;
@@ -380,20 +402,97 @@ namespace SourceIdentity
 
 			static double Total(const Hypothesis& h, double cap)
 			{
-				return h.llr + ClampD(h.shotSum, -cap, cap);
+				double t = ClampD(h.shotSum, -cap, cap);
+				for (size_t i = 0; i < h.closed.size(); ++i)
+					t += h.closed[i].value;
+				return t;
 			}
 
-			static void Add(AxisState&, Hypothesis& h, double inc, uint32_t shotId, double cap)
+			static void Add(Hypothesis& h, double inc, uint32_t shotId, int64_t timeUs, double cap)
 			{
 				if (h.shots == 0 || h.shotId != shotId)
 				{
-					h.llr += ClampD(h.shotSum, -cap, cap);
+					if (h.shots > 0)
+					{
+						ClosedShot c;
+						c.timeUs = h.shotTimeUs;
+						c.value = ClampD(h.shotSum, -cap, cap);
+						h.closed.push_back(c);
+					}
 					h.shotSum = 0.0;
 					h.shotId = shotId;
 					++h.shots;
 				}
 				h.shotSum += inc;
+				h.shotTimeUs = timeUs;
 				++h.evals;
+			}
+
+			// The running mean of the gaps between submitted evaluations (source time) and the window it implies; expires the closed
+			// shots (and an open shot) older than the window. Without a time nothing expires.
+			double WindowUs(const AxisState& st) const
+			{
+				if (!(st.intervalUs > 0.0))
+					return 0.0;   // not measured: no window
+				const double yield = s_.windowYieldNats > 1e-9 ? s_.windowYieldNats : 1e-9;
+				const double sec = ClampD(s_.windowMargin * (thr_.c1 / yield) * (st.intervalUs / 1e6), s_.windowMinSec, s_.windowMaxSec);
+				return sec * 1e6;
+			}
+
+			void NoteTime(AxisState& st, int64_t timeUs)
+			{
+				if (timeUs < 0)
+					return;
+				if (st.lastTimeUs >= 0 && timeUs > st.lastTimeUs)
+				{
+					const double gap = static_cast<double>(timeUs - st.lastTimeUs);
+					st.intervalUs = st.intervalUs > 0.0 ? (1.0 - s_.rateSmoothing) * st.intervalUs + s_.rateSmoothing * gap : gap;
+				}
+				if (st.lastTimeUs < 0 || timeUs > st.lastTimeUs)
+					st.lastTimeUs = timeUs;
+				const double window = WindowUs(st);
+				if (!(window > 0.0))
+					return;
+				const double cutoff = static_cast<double>(st.lastTimeUs) - window;
+				for (size_t i = 0; i < st.slots.size();)
+				{
+					Expire(st.slots[i], cutoff);
+					if (st.slots[i].closed.empty() && st.slots[i].shots == 0)
+						st.slots.erase(st.slots.begin() + static_cast<std::ptrdiff_t>(i));
+					else
+						++i;
+				}
+				Expire(st.native, cutoff);
+			}
+
+			static void Expire(Hypothesis& h, double cutoff)
+			{
+				size_t keep = 0;
+				while (keep < h.closed.size() && h.closed[keep].timeUs >= 0 && static_cast<double>(h.closed[keep].timeUs) < cutoff)
+					++keep;
+				if (keep > 0)
+					h.closed.erase(h.closed.begin(), h.closed.begin() + static_cast<std::ptrdiff_t>(keep));
+				if (h.shots > 0 && h.shotTimeUs >= 0 && static_cast<double>(h.shotTimeUs) < cutoff)
+				{
+					// The open shot itself is outside the window: the hypothesis has no live evidence left.
+					if (h.closed.empty())
+						h = Hypothesis();
+					else
+					{
+						h.shotSum = 0.0;
+						h.shotTimeUs = -1;
+					}
+				}
+			}
+
+			// HOLD / overlay: the accumulation of this axis starts over (the rate measurement and the axis length stay).
+			static void ForgetAccumulation(AxisState& st)
+			{
+				st.slots.clear();
+				st.native = Hypothesis();
+				st.informativeEvals = 0;
+				st.shots = 0;
+				st.lastInformativeShot = 0;
 			}
 
 			AxisSummary Own(const AxisState& st) const

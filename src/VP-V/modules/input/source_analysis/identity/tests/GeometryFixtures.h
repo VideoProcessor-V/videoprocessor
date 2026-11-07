@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// Shared fixtures of the SID-C2a tests: P14g records and latch evidence built by hand (no estimator needed).
+// Shared fixtures of the SID tests: P14g records and reading evidence built by hand (no estimator needed).
 #include <VP-V/modules/input/source_analysis/identity/SourceGeometryProduct.h>
-#include <VP-V/modules/input/source_analysis/identity/chain/ChainLatch.h>
+#include <VP-V/modules/input/source_analysis/identity/chain/ChainReading.h>
 
 #include <cstdint>
 
@@ -15,7 +15,7 @@ namespace Tests
 		namespace G = SourceIdentity::Geometry;
 		namespace C = SourceIdentity::Chain;
 
-		// A decided (applied) axis: n of N, KernelBank index `kernel` (-1 = unsure).
+		// A CONFIDENT (applied) axis: n of N, KernelBank index `kernel` (-1 = unsure).
 		inline G::AxisGeom AppliedAxis(int n, int N, int kernel)
 		{
 			G::AxisGeom a;
@@ -57,11 +57,11 @@ namespace Tests
 			return r;
 		}
 
-		// Latch levels like the shipped evidence settings (c1 about 14.9, c2 = c1 + 3, per-shot cap = c1 / 2).
-		inline C::LatchLevels Levels()
+		// Reading level like the shipped evidence settings (c1 about 14.9).
+		inline C::ReadingLevels Levels()
 		{
 			C::EvidenceSettings es;
-			return C::LatchLevels::From(C::ComputeThresholds(es), es);
+			return C::ReadingLevels::From(C::ComputeThresholds(es));
 		}
 
 		// One informative evaluation of an axis of N pixels: the accumulated totals (best n with `bestLlr`, native with `nativeLlr`) and
@@ -76,6 +76,7 @@ namespace Tests
 				e.axisLen = N;
 			}
 			Ev& Best(int n, double llr) { e.hasBest = true; e.bestN = n; e.bestLlr = llr; return *this; }
+			Ev& Prior(double prior) { e.prior = prior; return *this; }   // the two-axis prior INSIDE bestLlr (negative: the axes disagree)
 			Ev& Native(double llr, int evals = 1) { e.nativeLlr = llr; e.nativeEvals = evals; return *this; }
 			Ev& Inc(int n, double inc, int kernel = -1, double kconf = 0.0, uint32_t kernelClass = 0)
 			{
@@ -88,12 +89,11 @@ namespace Tests
 			Ev& NotInformative(uint32_t reason) { e.informative = false; e.reason = reason; return *this; }
 		};
 
-		inline C::EvalContext Ctx(int64_t timeUs, bool cut = false)
+		inline C::EvalContext Ctx(int64_t timeUs)
 		{
 			C::EvalContext c;
 			c.timeUs = timeUs;
 			c.seq = static_cast<uint64_t>(timeUs / 1000);
-			c.cut = cut;
 			return c;
 		}
 	}

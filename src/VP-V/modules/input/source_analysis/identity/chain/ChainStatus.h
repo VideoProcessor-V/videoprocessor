@@ -6,12 +6,12 @@
 // plain input struct (the estimator fills it; the tests fill it by hand). No clock, no threads, header-only, C++14.
 //
 // Line, e.g.:
-//   "Source identity: 1080 -> 2160 lanczos-like + sharpening, latched 0.99"      the upscale and the kernel family
-//   "Source identity: native, latched 0.97"
-//   "Source identity: H 1280 -> 1920 bicubic-like, latched 0.98; V unsure (dark)" axes that disagree or are not both decided
+//   "Source identity: 1080 -> 2160 lanczos-like + sharpening, confident"           the upscale and the kernel family
+//   "Source identity: native, confident"
+//   "Source identity: H 1280 -> 1920 bicubic-like, confident; V unsure (dark)"      axes that disagree or are not both confident
 //   "Source identity: unsure (dark, flat)"                                         no power: the reasons in words
 //   "Source identity: holding (overlay)"                                           HOLD: > 20% of the lines contradict
-//   "Source identity: acquiring, 7.2 of 15.0 nats"
+//   "Source identity: acquiring, 7.2 of 15.0 nats"                                 UNSURE: the best hypothesis is below c1
 //   "Source identity: classical only (<reason>)"                                   the estimator does not run
 //   shadow: "<line> [shadow: would-be, classical decides]"
 #include "ChainEvidenceLog.h"
@@ -67,7 +67,7 @@ namespace SourceIdentity
 
 			inline bool Decided(const Geometry::AxisGeom& a)
 			{
-				return (a.state == Geometry::LatchState::Latched || a.state == Geometry::LatchState::Unstable) && a.n > 0 && a.N > 0;
+				return a.state == Geometry::LatchState::Latched && a.n > 0 && a.N > 0;   // Latched = the reserved numeric of CONFIDENT
 			}
 
 			// "1080 -> 2160 lanczos-like + sharpening" / "native" for one decided axis.
@@ -80,8 +80,6 @@ namespace SourceIdentity
 					s += " + sharpening";
 				if (a.dbl.present)
 					s += " (double scaled)";
-				if (a.state == Geometry::LatchState::Unstable)
-					s += " (unstable)";
 				return s;
 			}
 
@@ -135,17 +133,16 @@ namespace SourceIdentity
 				const double ra = r.applied[0].ratio, rb = r.applied[1].ratio;
 				const double m = (std::max)(ra, rb);
 				const bool agree = m > 0.0 && std::fabs(ra - rb) <= 0.015 * m;
-				const double conf = (std::min)(r.applied[0].conf, r.applied[1].conf);
 				if (agree)
-					body = AxisWords(r.applied[1]) + ", latched " + Conf(conf);   // the vertical axis names the rung (1080, 2160)
+					body = AxisWords(r.applied[1]) + ", confident";   // the vertical axis names the rung (1080, 2160)
 				else
-					body = std::string("H ") + AxisWords(r.applied[0]) + "; V " + AxisWords(r.applied[1]) + ", latched " + Conf(conf);
+					body = std::string("H ") + AxisWords(r.applied[0]) + "; V " + AxisWords(r.applied[1]) + ", confident (axes differ)";
 			}
 			else if (dec0 || dec1)
 			{
 				const int d = dec0 ? 0 : 1, o = 1 - d;
 				const std::string why = Geometry::ReasonWords(r.measured[o].reasonBits);
-				body = std::string(AxisName(d)) + " " + AxisWords(r.applied[d]) + ", latched " + Conf(r.applied[d].conf) + "; " +
+				body = std::string(AxisName(d)) + " " + AxisWords(r.applied[d]) + ", confident; " +
 					AxisName(o) + (r.measured[o].state == Geometry::LatchState::Hold ? " holding (overlay)" : " unsure") +
 					(why.empty() || r.measured[o].state == Geometry::LatchState::Hold ? std::string() : " (" + why + ")");
 			}
@@ -160,7 +157,7 @@ namespace SourceIdentity
 					if (r.measured[a].state == Geometry::LatchState::Hold)
 						hold = true;
 					bits |= r.measured[a].reasonBits;
-					if (r.measured[a].state == Geometry::LatchState::Provisional || r.measured[a].state == Geometry::LatchState::Candidate)
+					if (r.measured[a].state == Geometry::LatchState::Provisional)
 					{
 						anyAcquiring = true;
 						llr = (std::max)(llr, static_cast<double>(r.measured[a].llr));
@@ -204,12 +201,12 @@ namespace SourceIdentity
 					const LogAxis& L = in.last.axis[a];
 					t += std::string("  ") + AxisName(a) + ": " + Geometry::StateText(L.state) + ", measured " + std::to_string(L.measuredN) + "/" +
 						std::to_string(L.N) + " " + KernelText(L.measuredKernel) + " llr " + Num(L.measuredLlr) + " (c1 " + Num(in.last.c1) +
-						", c2 " + Num(in.last.c2) + "), applied " + std::to_string(L.appliedN) + " " + KernelText(L.appliedKernel) + " llr " +
+						"), confident " + std::to_string(L.appliedN) + " " + KernelText(L.appliedKernel) + " llr " +
 						Num(L.appliedLlr) + "\n";
 					t += "     power: probe " + std::string(L.probeRan ? (L.probeSeen ? "seen" : "unseen") : "not run") + ", lines " +
 						std::to_string(L.gatedLines) + "/" + std::to_string(L.lines) + " informative, " + std::to_string(L.maskedLines) +
 						" masked, reasons: " + (Geometry::ReasonWords(L.reasonBits).empty() ? std::string("none") : Geometry::ReasonWords(L.reasonBits)) +
-						", latch: " + LatchReasonText(static_cast<LatchReason>(L.latchReason < 0 || L.latchReason >= static_cast<int>(LatchReason::Count) ? 0 : L.latchReason)) + "\n";
+						", reading: " + ReadingReasonText(static_cast<ReadingReason>(L.readingReason < 0 || L.readingReason >= static_cast<int>(ReadingReason::Count) ? 0 : L.readingReason)) + "\n";
 					for (int i = 0; i < L.candCount && i < 3; ++i)
 						t += "     candidate " + std::to_string(L.top[i].n) + ": stat " + Num(L.top[i].stat, "%.3f") + ", increment " +
 							Num(L.top[i].increment, "%.2f") + ", kernel " + KernelText(L.top[i].kernel) + (L.top[i].informative ? "" : " (not informative)") + "\n";

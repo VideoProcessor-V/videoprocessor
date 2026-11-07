@@ -11,8 +11,7 @@
 //
 // What it writes into one `sid-evidence` folder (beside the log), all named `<yyyymmdd-hhmmss>-...` so the file name order is the age
 // order (the 2 GB cap evicts the oldest first, FIFO):
-//   <stamp>-log-NNN.jsonl   JSON lines: one row per SEGMENT (the span between discontinuities, regime boundaries and applied
-//                           changes), one row per state change (full detail), one aggregate row per 10 s of source time, one
+//   <stamp>-log-NNN.jsonl   JSON lines: one row per SEGMENT (the span between discontinuities and changes of the confident size), one row per state change (full detail), one aggregate row per 10 s of source time, one
 //                           row per trigger. Rotates at rotateBytes.
 //   <stamp>-dump-NN-<why>.sidl      the RAM ring of the last 30 evaluations' sampled lines, uncompressed binary with a small
 //                           JSON header, written on a TRIGGER (level log+lines and above). Format: see SerializeDump.
@@ -20,15 +19,15 @@
 //                           local only, never committed or uploaded (film-frame rule).
 //   coverage.txt            the coverage bucket counts (not subject to the FIFO).
 // Triggers (rate limited: <= 1 per 5 minutes and <= 20 per 24 hours; the report-a-problem hotkey is exempt from the gap and the day
-// budget, with a 5 s debounce, so a deliberate press is never silently dropped): a latch that disagrees with the classical decision,
-// a revert within 60 s of a latch (flap suspect), a latch with LLR <= c1 + 1 nat (thin), HOLD for more than 60 s, UNSTABLE, power
-// unseen in more than 80% of the probes over 5 minutes, a coverage bucket below its target count, the hotkey.
+// budget, with a 5 s debounce, so a deliberate press is never silently dropped): a CONFIDENT reading that disagrees with the classical
+// decision (the confident-wrong suspect), HOLD for more than 60 s, power unseen in more than 80% of the probes over 5 minutes, a coverage
+// bucket below its target count, the hotkey.
 // Guardrails: off when `active` is false (the Original pathway, consensus off, level off); a one-time notice when it starts
 // ("Source identity: evidence logging on (shadow)") and a status text with the folder size; a failed write is a visible notice, once
 // per failure episode.
 //
 // Header + .cpp (Win32 file system behind IEvidenceFs; tests use an in-memory one). C++14.
-#include "ChainLatch.h"
+#include "ChainReading.h"
 #include "ChainLines.h"
 
 #include <cstdint>
@@ -85,12 +84,10 @@ namespace SourceIdentity
 			int64_t aggregateEveryUs = 10 * 1000000ll;                // one aggregate row per 10 s of source time
 			uint64_t rotateBytes = 20ull * 1024ull * 1024ull;         // the JSON-lines file rotates here
 			int framesPerDump = 4;
-			double thinMarginNats = 1.0;                              // latch with LLR <= c1 + this = thin
-			int64_t flapWindowUs = 60 * 1000000ll;                    // a revert within this of a latch
 			int64_t holdTriggerUs = 60 * 1000000ll;                   // HOLD longer than this
 			int64_t powerWindowUs = 5 * 60 * 1000000ll;               // the power-probe window
 			double powerUnseenShare = 0.8;
-			int coverageTarget = 3;                                   // latches wanted per coverage bucket
+			int coverageTarget = 3;                                   // confident readings wanted per coverage bucket
 			double disagreeTolerance = 0.02;                          // relative ratio difference from the classical decision
 		};
 
@@ -105,7 +102,7 @@ namespace SourceIdentity
 			bool informative = false;
 		};
 
-		// One axis of one evaluation, in plain terms (built by the estimator from LatchOutput, EvidenceUpdate and the verifier).
+		// One axis of one evaluation, in plain terms (built by the estimator from ReadingOutput, EvidenceUpdate and the verifier).
 		struct LogAxis
 		{
 			bool evaluated = false;
@@ -118,8 +115,8 @@ namespace SourceIdentity
 			int measuredKernel = -1, appliedKernel = -1;
 			double measuredLlr = 0.0, appliedLlr = 0.0, kernelConf = 0.0;
 			uint32_t reasonBits = 0;
-			int latchReason = 0;                                                   // LatchReason as an int
-			bool stateChanged = false, measuredChanged = false, appliedChanged = false, bypassedTMin = false;
+			int readingReason = 0;                                                 // ReadingReason as an int
+			bool stateChanged = false, measuredChanged = false, appliedChanged = false;
 			int lines = 0, gatedLines = 0, maskedLines = 0;                        // best candidate's line counts
 			bool probeRan = false, probeSeen = false;
 			int candCount = 0;
@@ -137,7 +134,7 @@ namespace SourceIdentity
 			double costMs = 0.0;
 			bool cold = false;
 			double intervalSec = 0.0;
-			double c1 = 0.0, c2 = 0.0;
+			double c1 = 0.0;
 			int stepCodes = 1;                   // 4 = an 8-bit picture, 1 = 10-bit
 			bool classicalValid = false;         // the classical decision's ratios (1 = native)
 			double classicalRatio[2] = { 1.0, 1.0 };
@@ -206,7 +203,7 @@ namespace SourceIdentity
 			// Worker. Free text for the segment rows: the input format (size, rate, bit depth, colour format, transfer).
 			void SetFormatInfo(const std::string& text) { format_ = text; }
 
-			// Worker, once per evaluation, after the latch. `frame` (optional, frames level) is the evaluated plane.
+			// Worker, once per evaluation, after the reading. `frame` (optional, frames level) is the evaluated plane.
 			void OnEvaluation(const LogEval& eval, const FrameRef* frame);
 			// Worker. A discontinuity / reset: the open segment is closed with this cause.
 			void OnDiscontinuity(int64_t timeUs, const std::string& cause);
@@ -257,7 +254,7 @@ namespace SourceIdentity
 				bool classicalValid = false;
 				double classicalRatio[2] = { 1.0, 1.0 };
 				double chainRatio[2] = { 1.0, 1.0 };
-				bool chainLatched[2] = { false, false };
+				bool chainConfident[2] = { false, false };
 			};
 
 			void OpenSegment(const LogEval& e);
@@ -319,8 +316,8 @@ namespace SourceIdentity
 			std::vector<double> dumpTimesMs_;
 			int64_t holdSinceUs_[2] = { -1, -1 };
 			bool holdRaised_[2] = { false, false };
-			int64_t lastAppliedChangeUs_[2] = { 0, 0 };
-			bool haveAppliedChange_[2] = { false, false };
+			int lastConfidentN_[2] = { 0, 0 };          // the newest CONFIDENT size per axis (a segment closes when it changes)
+			bool haveConfidentN_[2] = { false, false };
 			struct ProbePoint { int64_t timeUs; bool seen; };
 			std::vector<ProbePoint> probes_;
 			bool powerRaised_ = false;

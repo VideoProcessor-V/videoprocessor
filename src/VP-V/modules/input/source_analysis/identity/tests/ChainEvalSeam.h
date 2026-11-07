@@ -10,7 +10,7 @@
 //       s.reelBegin = [](const std::string& reel) { /* reset the estimator */ };
 //       s.frame     = [](const uint16_t* luma, int w, int h, int stride, uint64_t seq, double t) { /* offer the plane */ };
 //       s.chainRow  = [](double t, Tests::SidChain::ChainRow& row) { /* fill; return true to write a "chain" lane row */ return false; };
-//       s.chainEvents = [](double t, std::vector<Tests::SidChain::ChainEvent>& out) { /* append latch / revert / hold / unstable ... */ };
+//       s.chainEvents = [](double t, std::vector<Tests::SidChain::ChainEvent>& out) { /* append confident / change / unsure / hold / geometry ... */ };
 //   });
 //
 // The harness applies every registration once at the start of the run (ApplyRegistrations) and calls the callbacks on its own thread.
@@ -22,10 +22,13 @@
 //    active-picture size) exactly like the reel truth `truth_n`. They are NOT window or active-area sizes: a 1080p picture shown in a 2560x1440
 //    window on a 3840x2160 desktop has truth n = 2880x1620; a letterboxed rung's n is its coded raster (1920x1080), its active picture is reported
 //    in the active_* fields (raster coordinates of the active area).
-//  * state values: UNKNOWN PROVISIONAL CANDIDATE LATCHED HOLD UNSTABLE ABSTAIN. `state` of the row is the overall state the scorer uses
-//    (LATCHED only when both axes are latched); the per-axis states are in x / y.
-//  * Event types (chainEvents): latch, revert, hold, unstable (state transitions of an axis), geometry (the measured geometry changed: ABR /
-//    rung change; compared with the truth boundary at +-2 s), plus any text the estimator wants kept (type "note").
+//  * state values of the chain lane: UNKNOWN PROVISIONAL CONFIDENT HOLD ABSTAIN. `state` of the row is the overall state the scorer uses
+//    (CONFIDENT only when both axes read confident; everything else is UNSURE); the per-axis states are in x / y. The classical lanes
+//    (consensus off / on) write LATCHED for an engaged re-base factor of the ORIGINAL latch and DECLARED while the tracker has declared a
+//    lower ratio that is not engaged yet.
+//  * Event types (chainEvents): confident (an axis became confident), change (the confident size changed), unsure (an axis stopped being
+//    confident), hold (a mixed picture), geometry (the measured geometry changed: ABR / rung change; compared with the truth boundary at
+//    +-2 s), plus any text the estimator wants kept (type "note").
 #include <cstdint>
 #include <functional>
 #include <utility>
@@ -39,10 +42,10 @@ namespace Tests
 		// One axis of a chain-estimator evaluation. Unknown numbers are negative / 0 and are written empty.
 		struct AxisRow
 		{
-			std::string state = "UNKNOWN";   // UNKNOWN PROVISIONAL CANDIDATE LATCHED HOLD UNSTABLE ABSTAIN
+			std::string state = "UNKNOWN";   // UNKNOWN PROVISIONAL CONFIDENT HOLD ABSTAIN
 			double measuredN = 0;            // provisional / measured original size (0 = none)
-			double appliedN = 0;             // the latched (applied) original size (0 = none)
-			std::string kernel;              // kernel family of the latched hypothesis ("" = unknown)
+			double appliedN = 0;             // the CONFIDENT (applied) original size (0 = none: UNSURE)
+			std::string kernel;              // kernel family of the confident hypothesis ("" = unknown)
 			double sharpenAmount = -1;       // fitted unsharp amount (-1 = not reported, 0 = none seen)
 			double llr = 0;                  // log-likelihood ratio of the leading hypothesis (nats)
 			std::string power;               // "seen" / "unseen" / "" (power-by-injection result)
@@ -63,7 +66,7 @@ namespace Tests
 
 		struct ChainEvent
 		{
-			std::string type;                // latch revert hold unstable geometry note
+			std::string type;                // confident change unsure hold geometry note
 			std::string axis;                // "x", "y", "both" or ""
 			double fromN = 0, toN = 0;       // n before / after (0 = none)
 			double eventTime = -1;           // source time the event refers to (-1 = same as the call time)
