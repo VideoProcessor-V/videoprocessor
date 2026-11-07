@@ -13,8 +13,8 @@ Today the classical source-resolution monitor (`input.source_analysis`) decides 
 - `AbrStepDetector.h`: ABR boundary timing from per-frame quality samples.
 - `AbrNoticePolicy.h`: the one-time notice and its wording.
 - `SourceIdProduct.h`, `FrameQuality.h`, `SourceIdPipeline.h`, `SourceQualityView.h`: the P14 record and holder, the frame-level quality signal, the worker pipeline and the consumer read API (sections below).
-- `chain/`: the scaling-chain estimator units (line sampler, polyphase proposer, descale verifier, chain evidence, power probe), pure and not wired yet; see `chain/README.md`.
-- `SourceGeometryProduct.h`: the P14g `source_geometry` reservation (wave S2, section below): unit version, size bound, byte order, staleness rule, the absent placeholder and the one read API.
+- `chain/`: the scaling-chain estimator (line sampler, polyphase proposer, descale verifier, chain evidence, power probe, the per-axis reading `ChainReading.h`, the worker `ChainEstimator`, governor, status texts and the evidence log); see `chain/README.md`.
+- `SourceGeometryProduct.h`: the P14g `source_geometry` product: unit version, size bound, byte order, staleness rule, the record (per axis MEASURED and the CONFIDENT applied reading), its codec, the holder and the absent placeholder. `SourceGeometryView.h`: the one read API of the record's content (`Confident()` / `Provisional()`, shared unit U21).
 - `SourceIdReplay.h`: replays a source-resolution history CSV through the pipeline (section "History CSV and replay").
 
 ## Voters and trust
@@ -25,6 +25,7 @@ Today the classical source-resolution monitor (`input.source_analysis`) decides 
 | ClassicalKernel | Kernel | Confidence = agreeing fraction, ramped up over the first fitted votes. |
 | BitrateQuality | Quality | Tier from the bitrate reading through `qualityTierEdges`; indirect evidence, trust 0.5. |
 | IdNet | all | Known trust profile held as settings: axes trusted, kernel only at confidence 0.9 or more, codec capped at 0.25, bitrate-tier head ignored (trust 0) until re-validated. |
+| Chain | AxisH, AxisV, Kernel | The chain estimator's CONFIDENT reading, read from the latest sealed P14g record (`ChainReadingOf`, `ChainVote`): only axes it reads confident (above c1) are voted, the kernel only when verified and invertible; confidence = LLR / c1 capped at 1. An ordinary weighted voter, no authority; trust 0.5 is a conservative placeholder (it can only make the consensus abstain more) until the calibration run sets it. |
 
 Each vote carries a confidence per field; weight = confidence x voter trust. The net is event driven, so its maximum evidence age is long (30 s) while the classical voters expire after a few seconds. Stale votes are ignored and reported (`held: stale`), never used.
 
@@ -40,6 +41,8 @@ Votes sit in slots indexed by `VoterId`, so the order of `Submit` calls never ma
 A pending candidate is kept while its dissent stays at or below `exitDissent`, a lower bar than entering (hysteresis). A safety veto (detail above the re-based size) sets the voted axes native at once, bypassing dwell and hold; votes from any other voter cannot veto.
 
 A pending candidate's dwell restarts when it is held for disagreement (intentional: only a steady candidate latches).
+
+The Chain voter's dwell counts DISTINCT informative evaluations (N4): the chain's vote joins the groups only after the same value was seen from `chainMinDistinctEvaluations` (2) different evaluations (`Vote::evidenceSeq` = the record's evaluation sequence), so a record that is read again for every analysed frame - an estimator that stopped, a held record - never satisfies the dwell by repetition; the consensus dwell in time then applies as for any voter. The chain's vote is judged fresh by the record's OWN maximum age (the writer's planned interval x 2), not by the consensus evidence age.
 
 After an ABR boundary (`NoteAbrBoundary`) the dwell is shortened to `abrDwellUs` for `abrWindowUs`, because a rendition switch is sudden.
 
@@ -89,12 +92,11 @@ for P14 and P14g (`ProductDecl::heldState`: lag >= 1 readers only, no live pool)
 ceiling incl. the effective bandwidth per axis, 311 B + header, pinned by a test; `PutU16/32/64`, `GetU16/32/64`); its fields (per axis the
 measured and the applied state, n, N, ratio, phase, kernel and parameters, sharpening, double scaling, confidence; the active area; the coded-raster
 class; the reserved chroma chain; geometryGen / appliedGen) are laid out by the source-identity build inside that bound, which bumps the unit version and
-the catalog expectation with any layout change. This wave holds only the reservation: the id, the catalog row, the catalog readers and an ABSENT
-placeholder (`PlaceholderEntry()` publishes nothing).
+the catalog expectation with any layout change. The record (SID train r2, unit v1, 371 B payload) is: per axis a MEASURED geometry (the diagnostic best hypothesis, whatever its strength) and an APPLIED geometry (the CONFIDENT reading, written only while the evidence is above c1 and the evaluation informative; an UNSURE axis applies nothing, state Unknown; not sticky); the states `Candidate` and `Unstable` are reserved numerics of the parked latch design and are never written (no unit bump). The writer is the chain estimator (`chain/ChainEstimator`), published after every evaluation; the ABSENT placeholder stays as the producer of a build without the estimator wired.
 
 Provisional readers (catalog rows, all lag-1 held reads): quality_pattern and coding_evidence and temporal detail (one row of the temporal-detail family),
 the adaptive scaler, the chroma stage, status. Each has an absent-tested read (`SourceGeometry::Read(consumer, entry, requested, frameSeq, nowUs)`): not
-requested (today: no key asks for the estimate, `kRequestedToday` = false) = byte-identical, nothing engaged, no string built; requested with the record
+requested (`Requested(consensusOn)`: only source_id_consensus On asks) = byte-identical, nothing engaged, no string built; requested with the record
 absent / stale / of another unit version / not yet sealed = the delivered raster and the reader's classical form, VISIBLY (`product.source_geometry`, the
 reason names the consumer and the cause; `Combine()` is the one decision over every consumer so one reader's recovery cannot release another's entry).
 
@@ -105,7 +107,7 @@ reason names the consumer and the cause; `Combine()` is the one decision over ev
 | adaptive scaler, chroma stage | today's behaviour, byte-identical | "<reader>: classical form (source geometry: <cause>)" |
 | status | classical only | "Source identity: classical only (<reason>)" |
 
-The shared accessor `identity/SourceGeometryView.h` (type-separated `Latched()` / `Provisional()`) belongs to the source-identity build and reads through `Read()`.
+The shared accessor `identity/SourceGeometryView.h` (type-separated `Confident()` / `Provisional()`; shared unit U21) reads through `Read()`: a fresh record whose axis is UNSURE is no fallback, the axis simply makes no claim.
 
 ## Frame-level quality (the signal the ABR detector needed)
 
@@ -135,9 +137,13 @@ The shared accessor `identity/SourceGeometryView.h` (type-separated `Latched()` 
 
 The Bill-file call sites (LVR `snap.bitrateQuality` readers) are NOT edited here (VP-V files only); they are listed for P11 in the package report. The VP-V parameter structs they feed (`EntranceSegment`, `AdaptiveDownscaleStage`, `VpDebander::Strength`) already take the value as a plain number, so the swap is the single expression above.
 
-## Auto engage (SourceResolutionMonitor, VP-V file)
+## Auto engage (SourceResolutionMonitor, VP-V file; SID train r2, N1)
 
-With `source_id_consensus` on and a fresh record, `AutoFactor` / `AutoFactors` engage a lower re-base only for a LATCHED axis, at the consensus's ratio; the classical confidence minimum (`source_resolution_auto_min_confidence`) still applies (consensus can delay, veto or refine an engage, never add one), and the latch / crossfade still decide WHEN. A stale or absent record: the classical decision, with `Monitor::SourceIdGateFallback()` engaged. Off: the worker skips the pipeline and the noise measurement; every decision is unchanged (only a cheap reset on a discontinuity and an uncontended gate lock remain). Consensus moves only TOWARDS native: the target is never deeper than the classical reading. The consensus safety veto is fed by the classical trackers: it fires when every tracker is back to native with nothing gathered below it on an informative frame. The SRM history CSV is written in every mode with the replay columns (the `sid_*` columns are filled while the pipeline runs, shadow or on; see source_analysis/README.md "History CSV"). A shadow `would_be` row is written per consensus change.
+With `source_id_consensus` On and a fresh record, the CONSENSUS (chain + classical voters) feeds `AutoFactor` / `AutoFactors` IN PLACE OF the tracker's declared value (WHAT): a latched uniform ratio below native is the wish (per axis in `AutoFactors`: the latched ratio of each axis, native for an axis it has not latched), anything else is native. WHEN stays the ORIGINAL latch's: the same engage moments (cut, black, low detail, fast pan, else the crossfade after the max wait), look-ahead, dwell and the same immediate / gentle revert paths. So a chain-only detection (the classical trackers declared nothing) creates a re-base only through the consensus. A stale or absent record: the classical decision, with `Monitor::SourceIdGateFallback()` engaged. Off: the original, byte for byte. Shadow: the original decides, the consensus is computed, published and logged as `would_be` lines.
+
+Native-evidence clear (N2): while the consensus is On (the veto suppression also in Shadow, so the would-be is what On decides) and the chain's latest usable record reads an axis CONFIDENTLY below native, ONE native-looking informative frame neither ends the trackers' window / declaration (`Tracker::SetChainContradictsNative`, the frame is counted in `ChainHeld()` / `Monitor::NativeFramesHeldByChain()`) nor raises the classical safety veto (`detailAbove` is then false; otherwise the veto would pin the consensus native on every such frame and the chain could never be adopted). A genuine native source (the chain reads native or UNSURE, or no usable record) reverts exactly as before. The incident of the 6.3 h run (one native-looking frame cleared the declaration two seconds after the engage) stays OPEN until a shadow-deploy CSV captures the frame.
+
+Earlier text kept for the unchanged parts: the latch / crossfade still decide WHEN. Off: the worker skips the pipeline and the noise measurement; every decision is unchanged (only a cheap reset on a discontinuity and an uncontended gate lock remain). The consensus safety veto is fed by the classical trackers: it fires when every tracker is back to native with nothing gathered below it on an informative frame (and the chain does not contradict native, N2). The SRM history CSV is written in every mode with the replay columns (the `sid_*` columns are filled while the pipeline runs, shadow or on; see source_analysis/README.md "History CSV"). A shadow `would_be` row is written per consensus change.
 
 ## Config keys (module side)
 
@@ -153,7 +159,8 @@ With `source_id_consensus` on and a fresh record, `AutoFactor` / `AutoFactors` e
 
 ## Status and fallbacks
 
-- Ctrl+I / Config line `Source identity: ...` (off, shadow, classical only (<reason>), consensus).
+- Ctrl+I / Config line `Source identity: ...` (off, off (Original pathway), shadow, classical only (<reason>), consensus), followed by ` | chain: H 1920->3840 lanczos3; V ...` or ` | classical (chain: <state>: <reasons>)` while a chain estimator is wired; the estimator's own line (`Snapshot::chainNote`) rides on the existing stats line.
+- `product.source_geometry` (engaged while the consensus is On and the geometry record is absent, stale, of another unit version or corrupt): `Monitor::SourceIdGeometryFallback()`.
 - Shadow: log line "source_id would-be: <field> <from> -> <to> (<reason>, support <s>)" per consensus change.
 - Consumers fall back to the classical value, visibly (`product.source_quality`), whenever the record is absent, stale, unlatched or another version; in shadow they always use the classical value.
 
@@ -163,7 +170,7 @@ The SRM history CSV (`SourceHistoryLog.h/.cpp` in the parent folder, see source_
 
 ## Still to do (call sites outside this module)
 
-1. LVR (Bill file, P11): construct/refresh the setters from the settings; call `ApplySourceIdRebase(indicatorPort)` once per frame; swap the `snap.bitrateQuality` readers (LVR 27075 / 27141 / 27880) to `monitor.QualityView().quality`; show a fired notice (`TakeSourceIdNotice`) through the one-time FallbackStatus notice `abr_quality_drop`; print `SourceIdStatusLine()` on the Ctrl+I line and `Stats` in Ctrl+Alt+D.
+1. LVR (Bill file, P11): construct/refresh the setters from the settings (`SetSourceIdMode`, `SetOriginalPathway`, `SetChainEnabled`, `SetChainEvidence`, optionally `SetChainTap(this)`); call `ApplySourceIdRebase(indicatorPort)` once per frame; swap the `snap.bitrateQuality` readers (LVR 27075 / 27141 / 27880) to `monitor.QualityView().quality`; show a fired notice (`TakeSourceIdNotice`) through the one-time FallbackStatus notice `abr_quality_drop`; print `SourceIdStatusLine()` on the Ctrl+I line and `Stats` in Ctrl+Alt+D.
 2. The Indicator adapter for `IndicatorPort` (`Advance(kRebaseH/V, Cause::RebaseDecision, fromSeq)`) when I0 is wired in the renderer.
 3. Later: the ID-net runtime calls `IdNetVote` on its events.
 

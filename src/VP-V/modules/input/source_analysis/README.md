@@ -59,6 +59,10 @@ VP owns two file pairs in this folder (moved by `git mv` in M2 step 10): `Source
 
 `SourceHistoryLog.h/.cpp` (C++14, Win32 file calls with wide paths): `Append` only queues a row in a bounded in-memory queue under a short lock and never waits on the disk (it is called from the render thread too); the analysis worker flushes (`FlushHistory`), appending. `Open` does no disk work either: the first flush creates the folder, deletes the earlier sessions beyond the newest 4, and creates the base file with the header and the session row. At `kDefaultRotateBytes` (20 MB) it continues in the next numbered file of the same session (each starts with the header; a row never straddles files). A failed write or dropped rows (queue bound `kDefaultQueueRows` 20000: the OLDEST rows are dropped, counted) are reported once as a log line and stay on the stats line (`Snapshot::historyNote`) while they last. Free-text notes are CSV-quoted and every row (also session / auto / discontinuity / would_be rows) has the full 39 columns. Columns after `note`: `mode, t_src, seq, frame_ratio_v, frame_ratio_h, detail_above, mixed, blank, cut, fade, apl, axis_x, axis_y, axis_conf, kernel_id, kernel, kernel_votes, kernel_agree, frame_quality, frame_noise, sid_tier, sid_level, sid_ratio_h, sid_ratio_v, sid_reason`; `mode` is the source-identity mode (off / shadow / on), the `sid_*` columns are filled while the pipeline runs, and `detail_above` is the classical safety veto flag as it was fed to the consensus. Behaviour changes (VP's own file, not Bill's): the file is appended, not rewritten (the whole session is kept, not the newest ~10 minutes); a session may span several files; rows have 25 more columns.
 
+### Chain estimator and the consensus (SID train r2)
+
+`Monitor::SetChainEnabled(true)` (default OFF: nothing runs, every value is byte-identical to before) makes the monitor own a `ChainEstimator` (`identity/chain/`): `Frame()` feeds it the frame clock and the active rectangle (a leaf lock), the analysis worker its cuts, blanks, discontinuities and the classical decision; it follows `SetSourceIdMode` (Off / Shadow / On) and `SetOriginalPathway` (forces Off). The estimator publishes the P14g record (`GeometryView()` reads it: `Confident()` / `Provisional()`); the pipeline reads it as the chain voter of the consensus. The chain has no latch, no engage gate and no hold of its own: the CONSENSUS decides WHAT (`AutoFactor` / `AutoFactors` use the consensus ratio in place of the tracker's declared value when On, N1) and the original latch decides WHEN (engage moments, dwell, crossfade, revert paths). With the consensus On, a native-looking frame that confident chain evidence contradicts neither clears the trackers (`Tracker::SetChainContradictsNative`) nor raises the classical safety veto (N2). `Monitor::NativeFramesHeldByChain()` counts the frames left out. See [identity/README.md](identity/README.md) and [identity/chain/README.md](identity/chain/README.md).
+
 ### Threading (VP)
 
 - Two threads per `Monitor`, started in the constructor: `Worker` (analysis, trackers, kernel fits, history file) and `AheadWorker` (look-ahead target frames).
@@ -210,9 +214,11 @@ Code defaults of the history CSV that are not config keys (each fixed in code):
 | Name | Purpose | Default | Scope (test/debug/runtime) |
 |---|---|---|---|
 | history CSV | `source-resolution <stamp>[-NNN].csv` beside vp.log (the replay input) | on when the log folder is set | debug |
+| `VP_SOURCE_ID_CONSENSUS` / `VP_SOURCE_ID_EVIDENCE` | read once by the Monitor constructor: `shadow` / `on` sets `source_id_consensus` and switches the chain estimator on; `off`, `log`, `log+lines`, `log+lines+frames` for the evidence log (see identity/chain/README.md) | unset | test / debug |
 
 ## Status lines (history CSV)
 
+- Chain estimator (while enabled): `Snapshot::chainNote` is appended to the stats line (`Source identity: ... confident / unsure (<reasons>) ...`).
 - A failed history write or dropped rows: `source history CSV: write failed (<reason>)` / `source history CSV: rows dropped: N` (one log line each, and the stats line while it lasts).
 
 ## Settings
