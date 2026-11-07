@@ -14,6 +14,7 @@
 #include "GlobalModelGeometry.h"
 #include "GlobalModelObjects.h"
 #include "GlobalModelTemporal.h"
+#include "StaticHypothesis.h"
 
 namespace CameraModel
 {
@@ -117,6 +118,12 @@ namespace CameraModel
 		// reported Ambiguous with verdictFlags & kVerdictDynamicTexture and a confidence below 0.5, never usable.
 		bool dynTexture = false;
 		DynTextureConfig dynTextureCfg;
+		// Static-camera hypothesis (R1-STATIC). false = records are byte-identical to the fitter without it (nothing is
+		// evaluated). true: a valid, usable-reason, non-identity fit whose border ring is explained by the identity model at
+		// least as well as by the fit (and mostly) is reported Ambiguous with verdictFlags & kVerdictStaticCamera and a
+		// confidence below 0.5. It only demotes: it never creates a usable verdict.
+		bool staticCamera = false;
+		StaticCameraConfig staticCfg;
 		Clock clock = nullptr;
 	};
 

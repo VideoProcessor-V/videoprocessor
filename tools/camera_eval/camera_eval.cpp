@@ -131,9 +131,17 @@ static double g_tl[5] = { -1, -1, -1, -1, -1 };
 // Dynamic-texture detector overrides (tuning): minShare, minTemporal, minSpatial, agreeRatio. Negative = Config default.
 static double g_dt[4] = { -1, -1, -1, -1 };
 
+// Static-camera hypothesis overrides (tuning): minShare, margin, ringFraction. Negative = Config default.
+static double g_sc[3] = { -1, -1, -1 };
+static bool g_static = false;
+
 static Config MakeConfig(bool phase1, bool twoLayer = false, bool dynTexture = false)
 {
 	Config c;
+	c.staticCamera = g_static;
+	if (g_sc[0] >= 0) c.staticCfg.minStaticShare = g_sc[0];
+	if (g_sc[1] >= 0) c.staticCfg.margin = g_sc[1];
+	if (g_sc[2] >= 0) c.staticCfg.ringFraction = g_sc[2];
 	c.twoLayer = twoLayer;
 	c.dynTexture = dynTexture;
 	if (g_dt[0] >= 0) c.dynTextureCfg.minShare = g_dt[0];
@@ -207,6 +215,10 @@ static bool Parse(int argc, char** argv, Args& a)
 		else if (s == "--phase1") a.phase1 = true;
 		else if (s == "--two-layer") a.twoLayer = true;
 		else if (s == "--dyn-texture") a.dynTexture = true;
+		else if (s == "--static-camera") g_static = true;
+		else if (s == "--sc-share") g_sc[0] = atof(next());
+		else if (s == "--sc-margin") g_sc[1] = atof(next());
+		else if (s == "--sc-ring") g_sc[2] = atof(next());
 		else if (s == "--dt-share") g_dt[0] = atof(next());
 		else if (s == "--dt-temporal") g_dt[1] = atof(next());
 		else if (s == "--dt-spatial") g_dt[2] = atof(next());
@@ -235,7 +247,7 @@ static int RunFit(const Args& a)
 	{
 		csv = fopen(a.csv.c_str(), "wb");
 		if (!csv) { Fail("cannot write " + a.csv); return 2; }
-		fprintf(csv, "pair,valid,type,reason,confidence,samples,hypotheses,inlierShare,precision,coverage,temporal,conditioning,engineAgreement,inverse,ambiguity,logit,h0,h1,h2,h3,h4,h5,h6,h7,h8,labUnknown,labCamera,labObject,labOverlay,fitUs,layerFlags,layerRisk,border,continuity,haveObject,objId,objBlocks,objH2,objH5,dynShare,dynTemporal,dynSpatial,dynField,verdictFlags\n");
+		fprintf(csv, "pair,valid,type,reason,confidence,samples,hypotheses,inlierShare,precision,coverage,temporal,conditioning,engineAgreement,inverse,ambiguity,logit,h0,h1,h2,h3,h4,h5,h6,h7,h8,labUnknown,labCamera,labObject,labOverlay,fitUs,layerFlags,layerRisk,border,continuity,haveObject,objId,objBlocks,objH2,objH5,dynShare,dynTemporal,dynSpatial,dynField,verdictFlags,staticRing,staticFit\n");
 	}
 	struct Rec { int valid, type; double conf, h[9]; std::vector<uint8_t> label; };
 	std::vector<Rec> recs;
@@ -261,8 +273,8 @@ static int RunFit(const Args& a)
 			for (int i = 0; i < 9; ++i) fprintf(csv, ",%.9g", r.h[i]);
 			fprintf(csv, ",%.5f,%.5f,%.5f,%.5f", nl[0] / nb, nl[1] / nb, nl[2] / nb, nl[3] / nb);
 			const ObjectModel& ol = m.objectLayer;
-			fprintf(csv, ",%.1f,%u,%.4f,%.4f,%.4f,%d,%u,%u,%.6g,%.6g,%.4f,%.4f,%.4f,%.4f,%u\n", fitUs, (unsigned)m.layerFlags, m.layerRisk, s.border, s.continuity,
-				m.haveObjectLayer ? 1 : 0, (unsigned)ol.id, ol.blocks, ol.h[2], ol.h[5], s.dynShare, s.dynTemporal, s.dynSpatial, s.dynField, (unsigned)m.verdictFlags);
+			fprintf(csv, ",%.1f,%u,%.4f,%.4f,%.4f,%d,%u,%u,%.6g,%.6g,%.4f,%.4f,%.4f,%.4f,%u,%.4f,%.4f\n", fitUs, (unsigned)m.layerFlags, m.layerRisk, s.border, s.continuity,
+				m.haveObjectLayer ? 1 : 0, (unsigned)ol.id, ol.blocks, ol.h[2], ol.h[5], s.dynShare, s.dynTemporal, s.dynSpatial, s.dynField, (unsigned)m.verdictFlags, s.staticRing, s.staticFit);
 		}
 	}
 	if (csv) fclose(csv);
@@ -424,10 +436,8 @@ static int RunMatch(const Args& a)
 					skippedPairs.push_back(t);
 					if (FILE* sk = fopen((a.dumpFlo + "/skipped.txt").c_str(), "wb"))
 					{
-						fprintf(sk, "# pairs whose plan skipped the matcher; pred_on.flo holds the plan seed field (zeros if none)
-");
-						for (int sp : skippedPairs) fprintf(sk, "%d
-", sp);
+						fprintf(sk, "# pairs whose plan skipped the matcher; pred_on.flo holds the plan seed field (zeros if none)\n");
+						for (int sp : skippedPairs) fprintf(sk, "%d\n", sp);
 						fclose(sk);
 					}
 				}

@@ -24,6 +24,7 @@ texture), and to narrow the matcher's search.
 | `GlobalModelFit.h/.cpp` | `PairInput`, `Config`, `Fitter` (plan section 1 steps 1-11) |
 | `GlobalModelTemporal.h/.cpp` | `TemporalFilter` (prediction + consistency only), `FixedLagSmoother` |
 | `DynamicTexture.h/.cpp` | `DetectDynamicTexture`: water-like whole-frame dynamic-texture detector (`Config::dynTexture`; Ambiguous + `verdictFlags`) |
+| `StaticHypothesis.h/.cpp` | `EvaluateStaticCamera`: the competing static (identity) camera hypothesis on the border ring (`Config::staticCamera`; Ambiguous + `verdictFlags`, demotes only) |
 | `GlobalModelObjects.h/.cpp` | 1-3 object models with persistent ids (only when `Config::objects`) |
 | `PixelResidualReference.h/.cpp` | CPU reference / shader-mirror spec of the tiny-mover measure (not on the runtime path yet) |
 | `CameraAccessor.h` | per-consumer policy, blend state, `FieldVector` (pure, header-only) |
@@ -260,6 +261,39 @@ cut, on stale input, on a flash and on any **invalid fit**. Defaults are set so 
 fitter calls usable is turned Ambiguous. Signals: `dynShare`, `dynTemporal`, `dynSpatial`, `dynField`. Evaluation:
 `camera_eval fit --dyn-texture`.
 
+## Static-camera hypothesis (R1-STATIC)
+`Config::staticCamera` (default **off**; off = nothing evaluated, record byte-identical, whatever `staticCfg` holds). A coherent
+foreground object (a boat over water) can be fitted as the camera. After the fit, `StaticHypothesis.h/.cpp` scores two models on the
+**border ring** of the active picture (width `ringFraction` = 1/8 of each dimension, min 1 block; the part of the picture where a
+foreground object rarely sits and a real camera motion moves every block): the identity (static) model and the fitted model. A
+trusted ring block is explained by the static model when `|v| <= absSigmas * precision` and by the fit when `|v - model| <=
+max(absSigmas * precision, rel * |model|)` (the fit's own rule). The fit is demoted when the fitted model really moves the ring (more
+than half of the ring blocks have a model displacement above the static threshold, `requireMotion`) AND the static model explains at
+least `minStaticShare` (0.4) of the trusted ring blocks AND at least (the fit's ring share - `margin` (0.2)). Demoted = `Reason::Ambiguous`, `verdictFlags |=
+kVerdictStaticCamera`, confidence x 0.495, status text "ambiguous (static background explains the motion better: foreground
+object)", and the pair does not feed the camera prediction. **It only demotes**: only records whose reason is Ok or LowConfidence are
+judged, no record becomes usable, and an already Ambiguous record is never touched. Cost: one pass over the ring blocks (about 0.1 ms
+at the 120 x 68 grid, 0.4 ms at 240 x 135, one core). Signals: `staticRing`, `staticFit`. Evaluation: `camera_eval fit --static-camera
+[--sc-share F --sc-margin F --sc-ring F]`, `run_eval.py --vs static` (second column = hypothesis on).
+
+Result on the real clips (R1-STATIC, `tools/camera_eval`, truth pinned to the default fits; WRONG = region metric at max(1 px, 10 %), in
+brackets the pairs beyond the 1.5 px noise tier). The base fitter's own ambiguity signal already refuses every synthetic case where the
+static background is a coherent second motion, so the hypothesis only acts in the band where the fit is confident but the ring is
+mostly (not coherently) still, which is what the boat clip does:
+
+| setting (minStaticShare / margin) | boat usable | boat WRONG (>1.5 px) | crowd usable | sol | tos | synthetic WRONG |
+|---|---|---|---|---|---|---|
+| off (base) | 0.59 | 14 of 323 (2) | 0.91 | 0.81 | 0.98 | 0 |
+| 0.5 / 0.0 | 0.59 | 14 (2) | 0.90 | 0.81 | 0.98 | 0 |
+| 0.4 / 0.1 | 0.59 | 14 (2) | 0.90 | 0.81 | 0.98 | 0 |
+| 0.4 / 0.2 (shipped values) | 0.57 | 9 of 317 (0) | 0.90 | 0.81 | 0.98 | 0 |
+| 0.4 / 0.3 | 0.51 | 7 of 288 (0) | 0.90 | 0.81 | 0.98 | 0 |
+
+A demoted fit still seeds the next pair's prediction state (`m_previous`), exactly like a dynamic-texture demotion (accepted; it never feeds the temporal filter). The boat gate (confident-wrong <= 1 %, that is <= 3 of 323) is **not met** (9 of 317, 2.8 %): the remaining wrong pairs are near-threshold misses
+(1.0 to 1.3 px error against a 1 px floor, true camera motion not zero) whose ring statistics are the same as the correct pairs
+(static share 0.44 vs 0.45, fit share 0.72 vs 0.82), so no ring statistic separates them. The two pairs beyond the 1.5 px tier are removed. Hence the
+default stays **off**: the hypothesis is an option with visible status, not a shipped default.
+
 ## Noise-tier metric (camera_eval)
 The real-clip region metric is reported at two error floors: `WRONG@true-cam` (max(1 px, 10 %)) and `>1.5 px@true-cam`
 (max(1.5 px, 10 %), `xcheck_real.NOISE_TIER_PX`). A pair wrong only between 1 and 1.5 px is a near-threshold miss (vector noise
@@ -273,15 +307,23 @@ the guided-matching scheduler, governor and `p7g_camera_guide` product. All of i
 one set shared by `BlendState::ForcesZero` and the guidance gate (Ok, PostCutSeeded, FlashBridged); Ambiguous, InverseMismatch,
 Degenerate, TooFewSamples and LowConfidence records are published for diagnostics and never used.
 
-## All settings (complete list)
+## Settings
 
 The fitter has no runtime config key yet: `Config` fields are set by the tests and `tools/camera_eval`. K3 adds the `camera_*` keys. Config placement for the keys that exist (`camera_link`, `analysis_lane`): see `control/skeleton/README.md`. "Original (Bill)" = the Original pathway builds no camera link (`camera_link` off).
 
-| Key | Section | Type | Range | Default | Config placement | What Original (Bill) does | Visible fallbacks / status lines | Tier differences |
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|
 | `camera_link` (see `link/README.md`) | `[vpv.skeleton]` | choice | off, report | off | none yet (master VP-V page, Pipeline) | off | `camera_link` entry (cannot report); status line | none |
 | `Config::twoLayer` (internal; no key yet, K3 adds `camera_*` keys) | internal | bool | false, true | false | none (internal) | not built | foreground-suspect records are `Ambiguous` (`ForegroundSuspect`) in the camera status text; never usable | same on every tier |
 | `Config::dynTexture` (internal; no key yet, K3 adds `camera_*` keys) | internal | bool | false, true | false | none (internal) | not built | `Ambiguous` with the dynamic-texture reason text; never usable (visible fallback) | same on every tier |
+| `Config::staticCamera` (internal; no key yet, K3 adds `camera_*` keys) | internal | bool | false, true | false | none (internal) | not built | `Ambiguous` with the static-background reason text (foreground object); never usable (visible fallback) | same on every tier |
+| `Config::staticCfg.minStaticShare` | internal | float | 0..1 | 0.4 | none (internal) | not built | none | same on every tier |
+| `Config::staticCfg.margin` | internal | float | 0..1 | 0.2 | none (internal) | not built | none | same on every tier |
+| `Config::staticCfg.ringFraction` | internal | float | 0..0.5 | 0.125 | none (internal) | not built | none | same on every tier |
+| `Config::staticCfg.minRingBlocks` | internal | int | >= 1 | 48 | none (internal) | not built | fewer trusted ring blocks: no verdict, record unchanged | same on every tier |
+| `Config::staticCfg.absSigmas` | internal | float | > 0 | 3.0 | none (internal) | not built | none | same on every tier |
+| `Config::staticCfg.rel` | internal | float | 0..1 | 0.05 | none (internal) | not built | none | same on every tier |
+| `Config::staticCfg.requireMotion` | internal | bool | false, true | true | none (internal) | not built | none | same on every tier |
 | `Config::dynTextureCfg` (minShare, minTemporal, minSpatial, agreeRatio, absSigmas, rel, minBlocks, minCompared) | internal | numbers | 0.5 / 0.6 / 0.5 / 0.5 / 3 / 0.05 / 64 / 48 | as listed | none (internal) | not built | none | none |
 
 Tiers: the fit is cheap CPU work and is not tiered (cost lines `CAMERA_COST`).

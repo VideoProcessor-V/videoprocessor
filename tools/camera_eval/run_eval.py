@@ -113,8 +113,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--exe', required=True)
     ap.add_argument('--out', required=True)
-    ap.add_argument('--vs', choices=['two-layer', 'phase1'], default='two-layer',
-                    help='second configuration: two-layer (Config::twoLayer on; default) or phase1 (--phase1)')
+    ap.add_argument('--vs', choices=['two-layer', 'phase1', 'static'], default='two-layer',
+                    help='second configuration: two-layer (Config::twoLayer on; default), phase1 (--phase1) or static (Config::staticCamera on)')
     ap.add_argument('--synth-root')
     ap.add_argument('--real-root', default='D:/codex/td-real-vectors-out')
     ap.add_argument('--synth-pairs', type=int, default=40)
@@ -125,7 +125,12 @@ def main():
     ap.add_argument('--match-count', type=int, default=40)
     ap.add_argument('--match-clips', default='crowd,tos,sol,boat')
     a = ap.parse_args()
-    B, flagsB, L2 = ('phase1', ['--phase1'], 'p1') if a.vs == 'phase1' else ('two', ['--two-layer'] + a.tl_args.split(), 'two')
+    if a.vs == 'phase1':
+        B, flagsB, L2 = 'phase1', ['--phase1'], 'p1'
+    elif a.vs == 'static':
+        B, flagsB, L2 = 'static', ['--static-camera'] + a.tl_args.split(), 'static'
+    else:
+        B, flagsB, L2 = 'two', ['--two-layer'] + a.tl_args.split(), 'two'
     base = a.all_args.split()
     CONFIGS = [('new', list(base)), (B, flagsB + base)]
     exe = os.path.abspath(a.exe)
@@ -164,6 +169,7 @@ def main():
         real[tag] = ({(r['seq'], r['src']): r for r in rows}, truths)
 
     title = ('# Camera model evaluation: new defaults vs phase 1' if B == 'phase1'
+             else '# Camera model evaluation: staticCamera off (new) vs staticCamera on (static)' if B == 'static'
              else '# Camera model evaluation: twoLayer off (new) vs twoLayer on (two)')
     L = [title, '',
          'Synthetic: %d pairs per scenario at 1920x1080, %d fps. WRONG = a usable fit (valid, confidence >= 0.5) on a scene with no dominant camera '
@@ -242,11 +248,13 @@ def main():
     for tag, _ in CONFIGS:
         rows_ = real[tag][0]
         far = ['%s/%s/t%d:%.2f' % (k[0], k[1], t, p90) for k in sorted(rows_) for (t, p90, thr) in rows_[k]['wrong_pairs'] if p90 > xcheck_real.NOISE_TIER_PX]
-        nd = 0
+        nd = ns = 0
         for fn in sorted(os.listdir(os.path.join(out, tag, 'real'))):
             if fn.endswith('.csv'):
-                nd += sum(1 for r in csv.DictReader(open(os.path.join(out, tag, 'real', fn))) if int(r.get('verdictFlags') or 0) & 1)
-        L.append('- %s: %d pairs > 1.5 px %s; dynamic-texture Ambiguous pairs: %d' % (tag, len(far), ('(' + ', '.join(far) + ')') if far else '', nd))
+                for r in csv.DictReader(open(os.path.join(out, tag, 'real', fn))):
+                    nd += int(r.get('verdictFlags') or 0) & 1
+                    ns += (int(r.get('verdictFlags') or 0) >> 1) & 1
+        L.append('- %s: %d pairs > 1.5 px %s; dynamic-texture Ambiguous pairs: %d; static-camera demoted pairs: %d' % (tag, len(far), ('(' + ', '.join(far) + ')') if far else '', nd, ns))
     if a.match:
         res = run_match(exe, out, a.real_root, a.match_clips.split(','), a.match_count, CONFIGS)
         L += ['', '## Matcher: plan from the previous pair (narrow window + guided candidate) vs full search', '',
