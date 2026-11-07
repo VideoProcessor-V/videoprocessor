@@ -22,9 +22,19 @@ namespace CameraModel
 		const bool prevOk = state.have && state.gridW == gw && state.gridH == gh && state.picture == in.picture && state.seconds > 0;
 		const double k = prevOk ? in.pairSeconds / state.seconds : 1.0;
 
-		std::vector<float> rx(nb, 0.0f), ry(nb, 0.0f), vx(nb, 0.0f), vy(nb, 0.0f);
-		std::vector<uint8_t> valid(nb, 0), dis(nb, 0);
-		std::vector<float> thr(nb, 0.0f);
+		DynTextureBuffers& cb = state.cur;
+		if (cb.valid.size() != nb)
+		{
+			cb.rx.assign(nb, 0.0f); cb.ry.assign(nb, 0.0f); cb.vx.assign(nb, 0.0f); cb.vy.assign(nb, 0.0f); cb.thr.assign(nb, 0.0f);
+			cb.valid.assign(nb, 0); cb.dis.assign(nb, 0);
+		}
+		else
+		{
+			std::fill(cb.valid.begin(), cb.valid.end(), static_cast<uint8_t>(0));
+			std::fill(cb.dis.begin(), cb.dis.end(), static_cast<uint8_t>(0));
+		}
+		std::vector<float>& rx = cb.rx; std::vector<float>& ry = cb.ry; std::vector<float>& vx = cb.vx; std::vector<float>& vy = cb.vy;
+		std::vector<float>& thr = cb.thr; std::vector<uint8_t>& valid = cb.valid; std::vector<uint8_t>& dis = cb.dis;
 		int trusted = 0, disagree = 0;
 		int tCompared = 0, tIncoh = 0, fCompared = 0, fIncoh = 0;
 		for (int by = 0; by < gh; ++by)
@@ -46,6 +56,8 @@ namespace CameraModel
 				double x, y, mx, my;
 				BlockCentre(bx, by, in.blockSize, in.picture, &x, &y);
 				Displacement(model, x, y, &mx, &my);
+				if (!IsFiniteBits(mx) || !IsFiniteBits(my))
+					continue;
 				const double rxv = in.fwdX[b] - mx, ryv = in.fwdY[b] - my;
 				const double t = std::max(absThr, cfg.rel * std::hypot(mx, my));
 				rx[b] = static_cast<float>(rxv);
@@ -59,16 +71,16 @@ namespace CameraModel
 				const bool d = rm > t;
 				dis[b] = d ? 1 : 0;
 				disagree += d ? 1 : 0;
-				if (prevOk && state.valid[b])
+				if (prevOk && state.prev.valid[b])
 				{
 					{
-						const double qx = state.vx[b] * k, qy = state.vy[b] * k;
+						const double qx = state.prev.vx[b] * k, qy = state.prev.vy[b] * k;
 						const double vm = std::hypot(static_cast<double>(in.fwdX[b]), static_cast<double>(in.fwdY[b]));
 						++fCompared;
 						if (std::hypot(in.fwdX[b] - qx, in.fwdY[b] - qy) > std::max(absThr, cfg.agreeRatio * std::max(vm, std::hypot(qx, qy))))
 							++fIncoh;
 					}
-					const double px = state.rx[b] * k, py = state.ry[b] * k;
+					const double px = state.prev.rx[b] * k, py = state.prev.ry[b] * k;
 					const double pm = std::hypot(px, py);
 					if (d || pm > t)
 					{
@@ -82,7 +94,7 @@ namespace CameraModel
 		}
 		// Spatial: right and lower neighbours that both disagree with the model.
 		int sCompared = 0, sIncoh = 0;
-		if (trusted >= cfg.minBlocks)
+		if (trusted >= std::max(1, cfg.minBlocks))
 		{
 			for (int by = 0; by < gh; ++by)
 				for (int bx = 0; bx < gw; ++bx)
@@ -107,7 +119,7 @@ namespace CameraModel
 					}
 				}
 		}
-		if (trusted >= cfg.minBlocks)
+		if (trusted >= std::max(1, cfg.minBlocks))
 		{
 			out.computed = true;
 			out.share = static_cast<double>(disagree) / trusted;
@@ -122,12 +134,11 @@ namespace CameraModel
 			state.gridH = gh;
 			state.picture = in.picture;
 			state.seconds = in.pairSeconds;
-			state.vx.swap(vx);
-			state.vy.swap(vy);
-			state.rx.swap(rx);
-			state.ry.swap(ry);
-			state.valid.swap(valid);
+			state.prev.rx.swap(cb.rx); state.prev.ry.swap(cb.ry); state.prev.vx.swap(cb.vx); state.prev.vy.swap(cb.vy);
+			state.prev.valid.swap(cb.valid);
 		}
+		else
+			state.Reset();   // too few trusted blocks: the history is stale for the next pair
 		return out;
 	}
 }

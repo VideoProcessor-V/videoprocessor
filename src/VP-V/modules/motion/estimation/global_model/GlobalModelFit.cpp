@@ -1696,6 +1696,7 @@ namespace CameraModel
 
 			if (in.flash)
 			{
+				m_dyn.Reset();   // the pair after a flash has a different intensity field
 				rec.valid = false;
 				rec.reason = Reason::Flash;
 				rec.confidence = 0;
@@ -1782,7 +1783,8 @@ namespace CameraModel
 				m_previous = fit;
 				m_havePrevious = true;
 				m_seedPending = false;
-				m_temporal.Update(in.pairSeconds, fit.rates, updateFloor(in));
+				if ((fit.verdictFlags & kVerdictDynamicTexture) == 0)
+					m_temporal.Update(in.pairSeconds, fit.rates, updateFloor(in));   // a water-locked fit never feeds the camera prediction
 			}
 			if (m_config.twoLayer)
 				Impl::ApplyTl(*this, in, fit, tlNext);
