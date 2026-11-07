@@ -60,7 +60,7 @@ No `VP_*` variable changes the module's behaviour.
   Shadow, Off, the Original pathway and a missing/unusable render device construct none: no GPU call is ever made (tested), and the status says why.
 * The Bundle (built when the source size is known) registers the three `GpuComputeLaneJob`s (`FixedStepsTag`, steps = `StepsFor(id, dims)`) as lane
   producers before the worker threads start, only with `skeleton_gpu_gap = after_render`; P12 carries a `LightLevelBeginGate` on `ReadOf(P12, seq-1)`
-  ("waits for P12(N-1)"). Their predicted cost is the larger of the dispatcher's measured time and a conservative figure derived from the
+  ("waits for P12(N-1)"). A previous frame whose live fill is still *pending* for the Entrance phase is read as not made until G6 drives `RunDeferredLive` (the gate must never wait for work nothing runs): P12(N) then starts without a previous frame and the one-pole resets, shown as `light_level_smoothing`. Their predicted cost is the larger of the dispatcher's measured time and a conservative figure derived from the
   declaration's reference ms and the pixel count (never a fixed resolution or rate). The lane is configured on `TapFormProducts(SkeletonProducts(compact))`
   when a dispatcher is wired (the plain registry otherwise): P13 (RenderOnly, never filled) is dropped from P10/P11 or P10 would be InputMissing every frame.
 * The declining live fill is installed only when there is no dispatcher (a live fill would win over it). With a dispatcher the lane defers GPU live
