@@ -228,6 +228,7 @@ namespace ProductGraphTestsNs
 			Assert::IsFalse(g.valid);
 			Assert::IsTrue(std::string(g.error).find("ring slots") != std::string::npos);
 			Assert::IsTrue(g.nodes.empty() && g.errorProduct == 0);
+			Assert::IsTrue(g.ErrorText().find("(deep)") != std::string::npos, L"the reason names the product");
 			// The same product with room is built, and its ring is exactly the formula (no clamp involved).
 			const Graph ok = BuildGraph(DeepHistoryRegistry(250), { Consumer(1, 1) }, Settings(2, 1));
 			Assert::IsTrue(ok.valid);
@@ -244,6 +245,7 @@ namespace ProductGraphTestsNs
 			Assert::IsFalse(g.valid);
 			Assert::IsTrue(std::string(g.error).find("live-pool buffers") != std::string::npos);
 			Assert::IsTrue(g.nodes.empty() && g.errorProduct == 0);
+			Assert::IsTrue(g.ErrorText().find("(deep)") != std::string::npos, L"the reason names the product");
 			gs.laneJobsInFlight = 1;
 			const Graph ok = BuildGraph(DeepHistoryRegistry(250), { Consumer(1, 1) }, gs);
 			Assert::IsTrue(ok.valid);

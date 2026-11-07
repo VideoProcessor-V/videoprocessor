@@ -198,6 +198,7 @@ struct Graph {
     std::vector<Node> nodes;       // topological over lag-0 edges, ties by product id
     GraphSettings settings;
     ProductId errorProduct = kNoProduct;   // the product a slot-count overflow names (kNoProduct for other errors)
+    std::string errorProductName;          // its token
     size_t framesInFlight = 0;     // audit 25a N6: sizes the Indicator's event ring
     uint64_t totalRingBytes = 0;
     uint64_t totalLiveBytes = 0;
@@ -250,6 +251,11 @@ struct Graph {
     {
         const int i = IndexOf(id);
         return i < 0 ? nullptr : &nodes[size_t(i)];
+    }
+    // The reason for status / Fallbacks: `error` plus the product a slot-count overflow names.
+    std::string ErrorText() const
+    {
+        return std::string(error) + (errorProductName.empty() ? std::string() : " (" + errorProductName + ")");
     }
     size_t IndicatorCapacity() const { return VpIndicator::Indicator::RequiredCapacity(framesInFlight); }
 };
@@ -468,6 +474,7 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
             // Never clamped: a ring smaller than history + 1 would starve the lane with no sign of it. Same visible reject as an overflowing read list.
             g.error = "a product needs more than 255 ring slots (history, render-ahead and lane lead together); the analysis graph was not built";
             g.errorProduct = p;
+            g.errorProductName = d.token;
             g.nodes.clear();
             g.totalRingBytes = 0;
             g.totalLiveBytes = 0;
@@ -479,6 +486,7 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         if (live > kSlotCountMax) {
             g.error = "a product needs more than 255 live-pool buffers (history, render-ahead and lane readers together); the analysis graph was not built";
             g.errorProduct = p;
+            g.errorProductName = d.token;
             g.nodes.clear();
             g.totalRingBytes = 0;
             g.totalLiveBytes = 0;
@@ -513,6 +521,14 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
                        + maxLead;
     g.valid = true;
     return g;
+}
+
+// The visible cap note for the record histories of the products THIS graph holds ("" when none is capped or none is in the closure).
+inline std::string GraphHistoryCapNote(const Graph& g, double sourcePeriodMs)
+{
+    if (!g.valid)
+        return std::string();
+    return RecordHistoryCapNote(sourcePeriodMs, g.Has(kQualityPattern) || g.Has(kQualityPatternCausal), g.Has(kTdTrailSummary));
 }
 
 // Owns the current graph; rebuilds on a trigger and advances the Indicator's `graph` counter.

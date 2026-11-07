@@ -118,7 +118,7 @@ namespace Tests
 
 			TEST_METHOD(RecordHistoriesAreSecondsOfTheMeasuredSourceRate)
 			{
-				// 24000/1001 p, 25 p, 30 p, 59.94 p, 120 p: frames = ceil(seconds / period), within [structural floor, 255].
+				// 24000/1001 p, 25 p, 30 p, 59.94 p, 120 p: frames = ceil(seconds / period), within [structural floor, kRecordHistoryMax (223)].
 				const double periods[] = { 1001.0 / 24.0, 40.0, 1001.0 / 30.0, 1001.0 / 60.0, 1000.0 / 120.0 };
 				for (double period : periods)
 				{
@@ -214,7 +214,7 @@ namespace Tests
 				const Budget floor = BudgetAt(d4k, false);
 				Assert::AreEqual(uint64_t(54950656), floor.vram);
 				Assert::AreEqual(uint64_t(24883200), floor.transient, L"anchor pass arena peak: 3 B/px");
-				Assert::AreEqual(uint64_t((64 + 64 + 256) * 255), floor.systemRam, L"quality pattern, causal, trail summary at the unmeasured bound (history 255 counted)");
+				Assert::AreEqual(uint64_t((64 + 64 + 256) * int(kRecordHistoryMax)), floor.systemRam, L"quality pattern, causal, trail summary at the unmeasured bound (history kRecordHistoryMax counted)");
 				{   // Measured 24000/1001 p: quality pattern + causal 48 frames, trail summary 6 (2 s and 0.25 s of source time).
 					const Budget at24 = BudgetAt(VpSkeleton::SkeletonProducts(false, false, 1001.0 / 24.0), d4k, false);
 					Assert::AreEqual(uint64_t(64 * 48 * 2 + 256 * 6), at24.systemRam);

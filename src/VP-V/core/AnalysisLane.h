@@ -599,7 +599,7 @@ public:
         const std::shared_ptr<LaneState> cur = std::atomic_load(&state_);
         const Graph& g = owner_.Current();
         if (!g.valid) {
-            error_ = g.error;
+            error_ = g.ErrorText();
             std::atomic_store(&state_, std::shared_ptr<LaneState>());
             renderState_.reset();
             return reasons;

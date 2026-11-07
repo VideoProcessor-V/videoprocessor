@@ -894,13 +894,14 @@ inline uint8_t QualityPatternHistoryFrames(double sourcePeriodMs) { return Histo
 inline uint8_t TdTrailSummaryHistoryFrames(double sourcePeriodMs) { return HistoryFramesFor(kTdTrailSummaryHistorySeconds, sourcePeriodMs, kTdTrailSummaryMinFrames); }
 // "" when no record history is capped at this measured period, else the plain note for status / Fallbacks (the cap is never silent):
 // "quality pattern history capped at 223 frames (source rate above 111.5 fps)". The rate where the cap starts is frames / seconds.
-inline std::string RecordHistoryCapNote(double sourcePeriodMs)
+// `qualityPattern` / `trailSummary`: only the records that are actually in the graph being described (ProductGraph.h GraphHistoryCapNote).
+inline std::string RecordHistoryCapNote(double sourcePeriodMs, bool qualityPattern = true, bool trailSummary = true)
 {
     std::string note;
-    const struct { const char* name; double seconds; } records[] = {
-        { "quality pattern", kQualityPatternHistorySeconds }, { "td trail summary", kTdTrailSummaryHistorySeconds } };
+    const struct { const char* name; double seconds; bool present; } records[] = {
+        { "quality pattern", kQualityPatternHistorySeconds, qualityPattern }, { "td trail summary", kTdTrailSummaryHistorySeconds, trailSummary } };
     for (const auto& r : records) {
-        if (!RecordHistoryCapped(r.seconds, sourcePeriodMs))
+        if (!r.present || !RecordHistoryCapped(r.seconds, sourcePeriodMs))
             continue;
         char text[160] = {};
         std::snprintf(text, sizeof(text), "%s history capped at %u frames (source rate above %.1f fps)", r.name,

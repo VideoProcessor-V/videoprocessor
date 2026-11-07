@@ -43,7 +43,7 @@ Consumer fallback when absent: each consumer's classical form, byte-identical to
 **Budget-governed, no fixed tiers.** The registry declares each large buffer at its FLOOR (stage 0: the repair of the still / dark regions
 plus the full-resolution mid band at the true source resolution, the least the budget grants). `TdProductContracts.h` lists the larger stages
 (`td.memory` full, `td.anchor_refs` 3 anchors, `td.delta` with the full-resolution atlas); the governor adds them while VRAM and ms headroom
-last and sheds them in reverse order, each step visible. Declared totals at 4K: floor 54.95 MB GPU (+ 24.9 MB arena peak; the CPU records scale with the measured source rate: 7.7 KB at 24 p, at most 97.9 KB unmeasured), full
+last and sheds them in reverse order, each step visible. Declared totals at 4K: floor 54.95 MB GPU (+ 24.9 MB arena peak; the CPU records scale with the measured source rate: 7.7 KB at 24 p, at most 85.6 KB unmeasured: 384 B of quality-pattern records and 256 B of trail summary per frame of `kRecordHistoryMax` = 223), full
 241.6 MB (`TdProducts::BudgetAt`, pinned by a test). Ring multipliers come from the graph.
 
 **Inputs beyond what the registry declares.** The framework limit is now 16 inputs per product (`kMaxInputs`) and 10 consumed products per consumer
