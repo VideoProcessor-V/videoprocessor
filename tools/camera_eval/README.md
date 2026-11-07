@@ -59,3 +59,13 @@ override the constants for tuning; `run_eval.py --tl-args "..."` passes them thr
 per Fit call), `layerFlags`, `layerRisk`, `border`, `continuity`, `haveObject`, `objId`, `objBlocks`, `objH2`, `objH5`; the
 summary reports a per-clip table and the fit time (p50 / p95 / max). Synthetic foreground scenarios (camera = background):
 `obj6040_pan`, `vehicle_pan`, `tracked_subject`; `water_boat` has no camera truth (any usable fit is WRONG).
+
+## Noise tier and dynamic-texture detector (R1-GATES)
+- **Noise tier**: the region metric is reported at two error floors. `WRONG@true-cam` uses max(1 px, 10 %); `>1.5 px@true-cam` uses
+  max(1.5 px, 10 %) (`xcheck_real.NOISE_TIER_PX`). A pair that is wrong only between 1 and 1.5 px is a near-threshold miss (vector noise
+  against a 1 px metric), not a foreground lock. `run_eval.py` adds the column to the per-sequence and per-clip tables, a summary count,
+  and lists the pairs beyond 1.5 px (sequence/source/pair: p90 error) per configuration.
+- **Dynamic-texture detector** (`Config::dynTexture`, `DynamicTexture.h/.cpp`): `camera_eval fit --dyn-texture [--dt-share F --dt-temporal F
+  --dt-spatial F --dt-agree F]`; `run_eval.py --all-args "--dyn-texture"` turns it on for both configurations. The CSV gains `dynShare`,
+  `dynTemporal`, `dynSpatial`, `dynField` (the raw-vector temporal incoherence) and `verdictFlags` (bit 1 = Ambiguous because of a dynamic
+  texture). The summary counts the real pairs it turned Ambiguous.

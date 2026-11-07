@@ -31,6 +31,9 @@ DEFAULT_ROOT = 'D:/codex/td-real-vectors-out'
 CLIPS = ['boat', 'crowd', 'sol', 'tos']
 TIERS = ['master', '1080p', '1080p_low', '1080p_vlow']
 SOURCES = ['disref', 'nvof']
+# NOISE TIER (R1-GATES): confident-wrong is reported at the 1 px metric AND at this larger error floor. A pair that is wrong only
+# between 1 and 1.5 px is a near-threshold (noise-tier) miss, not a foreground lock.
+NOISE_TIER_PX = 1.5
 
 
 def frame_sizes(real_root=DEFAULT_ROOT):
@@ -98,7 +101,8 @@ def evaluate(camdir, real_root=DEFAULT_ROOT, truth_dir=None):
                     continue
                 recs = c[3]
                 usable = wrong = 0
-                rj = rw_true = rw_own = 0
+                rj = rw_true = rw_own = rw15 = rw15_own = 0
+                wrong_pairs = []
                 errs, cam_errs = [], []
                 for t, x in enumerate(recs):
                     u = x['valid'] and x['conf'] >= 0.5
@@ -109,11 +113,18 @@ def evaluate(camdir, real_root=DEFAULT_ROOT, truth_dir=None):
                         e = np.hypot(gx - rt['tx'], gy - rt['ty'])
                         thr = max(1.0, 0.1 * np.percentile(np.hypot(rt['tx'], rt['ty'])[rt['cam']], 90))
                         rj += 1
-                        if np.percentile(e[rt['cam']], 90) > thr:
+                        p90 = np.percentile(e[rt['cam']], 90)
+                        thr15 = max(NOISE_TIER_PX, 0.1 * np.percentile(np.hypot(rt['tx'], rt['ty'])[rt['cam']], 90))
+                        if p90 > thr:
                             rw_true += 1
+                            wrong_pairs.append((t, float(p90), float(thr)))
+                        if p90 > thr15:
+                            rw15 += 1
                         own = x['label'] == 1
                         if own.sum() and np.percentile(e[own], 90) > thr:
                             rw_own += 1
+                        if own.sum() and np.percentile(e[own], 90) > thr15:
+                            rw15_own += 1
                     if not (u and t in truth):
                         continue
                     tt = truth[t]
@@ -132,7 +143,8 @@ def evaluate(camdir, real_root=DEFAULT_ROOT, truth_dir=None):
                 rows.append(dict(clip=clip, seq='%s_%s' % (clip, tier), src=src, pairs=len(recs), usable=usable / len(recs), judged=len(errs),
                                  err_med=float(np.median(errs)) if errs else None, err_p90=float(np.percentile(errs, 90)) if errs else None,
                                  cam_err_med=float(np.median(cam_errs)) if cam_errs else None, wrong=wrong,
-                                 region_judged=rj, region_wrong=rw_true, region_wrong_own=rw_own))
+                                 region_judged=rj, region_wrong=rw_true, region_wrong_own=rw_own,
+                                 region_wrong15=rw15, region_wrong15_own=rw15_own, wrong_pairs=wrong_pairs))
     return rows, truths
 
 
@@ -145,9 +157,9 @@ def main():
     for c, (n, m, k) in truths.items():
         print('%s: region truth on %d/%d pairs, corner truth on %d' % (c, k, m, n))
     for r in rows:
-        print('   %-18s %-6s usable=%.2f judged=%d err med=%s p90=%s camblk err med=%s | region judged=%d WRONG@true-camera=%d WRONG@own-labels=%d | extrapolated corner WRONG=%d' % (
+        print('   %-18s %-6s usable=%.2f judged=%d err med=%s p90=%s camblk err med=%s | region judged=%d WRONG@true-camera=%d WRONG@own-labels=%d | >1.5px %d/%d | extrapolated corner WRONG=%d' % (
             r['seq'], r['src'], r['usable'], r['judged'], fmt(r['err_med']), fmt(r['err_p90']), fmt(r['cam_err_med']),
-            r['region_judged'], r['region_wrong'], r['region_wrong_own'], r['wrong']))
+            r['region_judged'], r['region_wrong'], r['region_wrong_own'], r['region_wrong15'], r['region_wrong15_own'], r['wrong']))
 
 
 if __name__ == '__main__':
