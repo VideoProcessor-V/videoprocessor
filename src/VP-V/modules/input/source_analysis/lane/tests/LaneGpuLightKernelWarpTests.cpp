@@ -417,7 +417,17 @@ namespace VideoProcessorTest
 				const double err = std::fabs(double(got[i]) - double(want[i])) / (std::max)(std::fabs(double(want[i])), 1.0);
 				worst = (std::max)(worst, err);
 				if (err > 2e-4)
+				{
+					if (bad < 4)
+					{
+						char first[160];
+						snprintf(first, sizeof(first), "P12_KERNEL %s first bad value %zu (component %zu): got %.6g want %.6g
+", label, i, i % 4,
+							double(got[i]), double(want[i]));
+						Logger::WriteMessage(first);
+					}
 					++bad;
+				}
 			}
 			char msg[200];
 			snprintf(msg, sizeof(msg), "P12_KERNEL %s values=%zu bad=%d worst=%.2e\n", label, got.size(), bad, worst);
@@ -544,6 +554,11 @@ namespace VideoProcessorTest
 			Assert::IsFalse(r.kernel->LastFull(), L"reduced");
 			const std::vector<float> got = r.Out(false, 0);
 			const std::vector<float> want = r.Mirror(r.stats[0], texels, nullptr, false, true);
+			{
+				const std::string reason = Find(r.kernel->Fallbacks(), "light_level_frame").reason;
+				Logger::WriteMessage(("P12_KERNEL frame-level reason: " + reason + "
+").c_str());
+			}
 			Assert::IsTrue(Compare(got, want, "frame_level") == 0, L"the frame level differs from the mirror");
 			FallbackCatalog::Decision d = Find(r.kernel->Fallbacks(), "light_level_frame");
 			Assert::IsTrue(!d.id.empty() && d.engaged, L"P12 frame-level is visible");
