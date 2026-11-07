@@ -1764,6 +1764,8 @@ namespace CameraModel
 				fit.confidence = 0;
 				fit.reason = Reason::DeadlineMissed;
 			}
+			if (m_config.dynTexture && !fit.valid)
+				m_dyn.Reset();   // an invalid pair breaks the sequence: the next pair has no previous residual field to compare against
 			if (m_config.dynTexture && fit.valid)
 			{
 				const DynTextureResult dt = DetectDynamicTexture(m_config.dynTextureCfg, in, fit.params, m_dyn);

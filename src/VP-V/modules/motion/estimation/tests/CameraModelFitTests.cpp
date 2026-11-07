@@ -1297,6 +1297,25 @@ namespace VideoProcessorTest
 			}
 		}
 
+		// An invalid fit between two water pairs resets the detector history: the pair after it has no previous residual field.
+		TEST_METHOD(InvalidFitResetsTheDetectorHistory)
+		{
+			Fitter fitter(DT());
+			const CameraMotion a = fitter.Fit(AnchoredWater(900, 3.0).Input(kPairSeconds, 5));
+			Require(a.valid, "premise: first water pair fits: " + Describe(a));
+			Field empty(Grid4K());
+			empty.FromModel(Pan4K());
+			for (size_t i = 0; i < empty.trust.size(); ++i) empty.trust[i] = 0.0f;
+			const CameraMotion bad = fitter.Fit(empty.Input(kPairSeconds, 6));
+			Require(!bad.valid, "premise: a field without trusted blocks is not a valid fit: " + Describe(bad));
+			const CameraMotion c = fitter.Fit(AnchoredWater(901, 3.0).Input(kPairSeconds, 7));
+			Require(c.valid && c.signals.dynTemporal == 0.0, "no temporal term across an invalid pair, got " + std::to_string(c.signals.dynTemporal));
+			Fitter control(DT());
+			control.Fit(AnchoredWater(900, 3.0).Input(kPairSeconds, 5));
+			const CameraMotion d = control.Fit(AnchoredWater(901, 3.0).Input(kPairSeconds, 6));
+			Require(d.signals.dynTemporal > 0.0, "control: consecutive valid pairs do have a temporal term");
+		}
+
 		// Real-looking content stays usable: a pan, a pan with a coherent 40 % foreground, a pan with a small-object crowd
 		// (45 % of the blocks in 2 x 2 movers with random vectors).
 		TEST_METHOD(PansCrowdsAndForegroundsAreNotFlagged)
