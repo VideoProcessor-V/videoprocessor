@@ -9,6 +9,10 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
     const std::function<void(bool, const char*)>& require, const std::function<void(ConfigEditorWindow&)>& save);
 int RunHookLayerConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
     const std::function<void(bool, const char*)>& require, const std::function<void(ConfigEditorWindow&)>& save);   // VPV-HOOK
+int RunCalibrationPageTests(const std::function<int(const char*, const std::function<void()>&)>& run,
+    const std::function<void(bool, const char*)>& require, const std::function<void(ConfigEditorWindow&)>& save);   // VPV-HOOK
+int WriteConfigIdentity(const QString& outPath, const QStringList& extraFiles);   // VPV-HOOK identity kit (ConfigIdentityDump.cpp)
+#include <VP-V/config/VpvConfigProviders.h>   // VPV-HOOK
 #include "../VideoProcessor-Config/ToneChartPanel.h"
 #include <QElapsedTimer>
 #include <QImage>
@@ -10557,8 +10561,9 @@ void testPagesAreAddressedByName()
     }
     require(window.pageIndex(QStringLiteral("No such page")) == -1, "An unknown page name resolved");
     // Navigation buttons carry the name: they open the same page whatever the order.
+    // (Calibration is a sub-page of the VP-V page: no leaf of its own; CalibrationPageTests covers it.)
     for (const QString& name : { QStringLiteral("Display"), QStringLiteral("Updates"), QStringLiteral("Dynamic Drive"),
-            QStringLiteral("Calibration"), QStringLiteral("VP-V") })
+            QStringLiteral("VP-V") })
     {
         QPushButton* found = nullptr;
         for (auto* button : window.findChildren<QPushButton*>())
@@ -12271,6 +12276,7 @@ int main(int argc, char** argv)
         }
     }
     QApplication application(argc, argv);
+    Vpv::RegisterConfigProviders();   // VPV-HOOK (the editors below need the VP-V page providers)
     // Not tests: the settings coverage inventory (--inventory <file>) and the preview's re-save (--resave <file>).
     for (int i = 1; i + 1 < argc; ++i)
         if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--inventory"))
@@ -12284,6 +12290,14 @@ int main(int argc, char** argv)
             QApplication::setStyle(VpTheme::CreateStyle());
             application.setStyleSheet(VpTheme::StyleSheet());
             return writeSettingsScreens(QString::fromLocal8Bit(argv[i + 1]), QString::fromLocal8Bit(argv[i + 2]));
+        }
+        else if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--identity"))   // VPV-HOOK identity kit
+        {
+            QApplication::setStyle(VpTheme::CreateStyle());
+            application.setStyleSheet(VpTheme::StyleSheet());
+            QStringList extra;
+            for (int k = i + 2; k < argc; ++k) extra << QString::fromLocal8Bit(argv[k]);
+            return WriteConfigIdentity(QString::fromLocal8Bit(argv[i + 1]), extra);
         }
         else if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--resave"))
         {
@@ -12541,6 +12555,7 @@ int main(int argc, char** argv)
     failures += run("hunt 3: legacy queue fold targets [queue]", testHunt3LegacyQueueFoldTargetsQueueSection);
     failures += run("hunt 3: remote discard folds like a load", testHunt3RemoteDiscardFoldsLikeALoad);
     failures += RunVpvConfigTests(run, require, save);   // VP-V section (VpvConfigTests.cpp)
+    failures += RunCalibrationPageTests(run, require, save);   // VPV-HOOK Calibration page provider
     failures += RunHookLayerConfigTests(run, require, save);   // VPV-HOOK generic hook layer (HookLayerConfigTests.cpp)
     if ((!testNameFilter.isEmpty() || !testNameMatches.isEmpty()) && selectedTestsRun == 0)
         return 2;
