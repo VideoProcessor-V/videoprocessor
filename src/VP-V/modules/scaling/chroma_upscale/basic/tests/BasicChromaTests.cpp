@@ -222,7 +222,7 @@ namespace BasicChromaTestsNs
 
 		TEST_METHOD(SitingIsHonouredOnALinearRamp)
 		{
-			// A linear ramp is reproduced (within a couple of codes) at the coordinate the siting says: co-sited left puts output x at
+			// A linear ramp is reproduced (within ~2% of one chroma step) at the coordinate the siting says: co-sited left puts output x at
 			// chroma x / 2, centred puts it at (x - 0.5) / 2. A wrong siting shifts the ramp by a quarter chroma step (160 codes).
 			Plane16 c(24, 4);
 			for (int y = 0; y < 4; ++y)
@@ -235,7 +235,7 @@ namespace BasicChromaTestsNs
 				for (int x = 8; x < 40; ++x)   // interior: the taps do not reach the clamped edge
 				{
 					const double j = (x + 0.5 - sx) / 2 - 0.5;
-					Assert::AreEqual(10000.0 + 640.0 * j, double(o.at(x, 1)), 3.0);
+					Assert::AreEqual(10000.0 + 640.0 * j, double(o.at(x, 1)), 20.0);   // windowed sinc is not exact on a ramp (~13 codes); a wrong siting is 160
 				}
 			}
 		}
