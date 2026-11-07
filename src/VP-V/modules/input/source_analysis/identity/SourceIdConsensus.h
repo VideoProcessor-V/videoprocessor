@@ -25,8 +25,8 @@
 //   - T_min = max(2 x dwell, minHoldAfterChange): a field that changed cannot change again within it, whatever
 //     moved it (candidate or veto), except through Discontinuity() or a REGIME BOUNDARY towards native: the
 //     contrary hypothesis has persisted for >= regimeEvaluations evaluations after a cut / blank / fade flag
-//     (NoteRegimeFlag, fed from the QualitySample flags) that came after the field's last change and not more
-//     than one dwell before the hypothesis first appeared. A boundary bypasses T_min only, never the dwell.
+//     (NoteRegimeFlag, fed from the QualitySample flags) that came after the field's last change, with the
+//     hypothesis starting at or after the flag and within one dwell of it. A boundary bypasses T_min only, never the dwell.
 // Time is always SOURCE time passed by the caller; there is no clock, no thread, no randomness.
 //
 // The ONLY way consensus moves a re-base stamp is IndicatorPort::AdvanceRebase, once per changed
@@ -291,7 +291,10 @@ namespace SourceIdentity
 		// last change and the hypothesis appeared no later than one dwell after that flag.
 		void CountRegime(const FieldState& st, int64_t now, int64_t sinceUs, int& evals) const
 		{
-			if (haveFlag_ && now >= flagUs_ && (!st.hasChanged || flagUs_ > st.lastChangeUs) && sinceUs <= flagUs_ + s_.dwellUs)
+			// Two-sided: the hypothesis must START at or after the flag (one that began before the boundary never
+			// bypasses T_min) and no later than one dwell after it, and it counts only inside that dwell window.
+			if (haveFlag_ && now >= flagUs_ && now - flagUs_ <= s_.dwellUs && (!st.hasChanged || flagUs_ > st.lastChangeUs) &&
+				sinceUs >= flagUs_ && sinceUs - flagUs_ <= s_.dwellUs)
 				++evals;
 		}
 

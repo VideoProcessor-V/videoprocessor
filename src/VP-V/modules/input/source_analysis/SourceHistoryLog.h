@@ -13,14 +13,14 @@
 // snapshot behind the votes and the source time of every analysed frame (tools/eval/source_id/replay.py and
 // SourceIdReplayTests read it).
 //
-// Not thread-safe by itself except Append / Flush / the accessors, which share one mutex.
-#include <algorithm>
+// Threading: Append (any thread, including the render thread) only pushes into a bounded in-memory queue under a short
+// lock and never touches the disk. Flush (the analysis worker, or a test) swaps the queue out under that lock and writes
+// OUTSIDE it. When the queue bound is exceeded the OLDEST rows are dropped and counted; a failed write is counted and
+// reported (TakeNotice), never silent. C++14, no <filesystem>: the file operations are Win32 in SourceHistoryLog.cpp.
 #include <cstdint>
-#include <cstdio>
-#include <filesystem>
+#include <cstdlib>
 #include <mutex>
 #include <string>
-#include <system_error>
 #include <vector>
 
 namespace SourceHistory
@@ -37,7 +37,7 @@ namespace SourceHistory
 	constexpr int kExtraColumns = 25;      // the replay / identity columns after note
 	constexpr int kColumns = kBaseColumns + kExtraColumns;
 
-	// `n` empty trailing fields (a row of another event than "reading"): ",,,,".
+	// `kExtraColumns` empty trailing fields (a row of another event than "reading").
 	inline std::string EmptyExtras() { return std::string(static_cast<size_t>(kExtraColumns), ','); }
 
 	// A free-text field made safe for the CSV (commas, quotes and newlines in a note).
@@ -46,8 +46,9 @@ namespace SourceHistory
 		if (text.find_first_of(",\"\r\n") == std::string::npos)
 			return text;
 		std::string out = "\"";
-		for (char c : text)
+		for (size_t i = 0; i < text.size(); ++i)
 		{
+			const char c = text[i];
 			if (c == '"') out += "\"\"";
 			else if (c == '\r' || c == '\n') out += ' ';
 			else out += c;
@@ -58,6 +59,18 @@ namespace SourceHistory
 
 	constexpr uint64_t kDefaultRotateBytes = 20ull * 1024ull * 1024ull;
 	constexpr size_t kDefaultSessions = 5;
+	constexpr size_t kDefaultQueueRows = 20000;   // the bound of the in-memory queue between two Flush calls
+
+	// The disk operations (Win32, wide paths; paths are UTF-8 here). Implemented in SourceHistoryLog.cpp.
+	namespace Os
+	{
+		bool CreateDirectories(const std::string& folder);
+		std::vector<std::string> ListNames(const std::string& folder);                          // file names only
+		bool Remove(const std::string& path);
+		// Creates (append = false) or appends; false + `error` on failure.
+		bool Write(const std::string& path, const std::string& data, bool append, std::string& error);
+		std::string Join(const std::string& folder, const std::string& name);
+	}
 
 	class Log
 	{
@@ -66,190 +79,58 @@ namespace SourceHistory
 		// The session stamp is the 15 characters "yyyymmdd-hhmmss" after the prefix.
 		static constexpr size_t kStampLength = 15;
 
-		static std::string FileName(const std::string& stamp, int index)
-		{
-			char tail[24];
-			if (index <= 1) tail[0] = '\0';
-			else std::snprintf(tail, sizeof(tail), "-%03d", index);
-			return Prefix() + stamp + tail + ".csv";
-		}
-
+		static std::string FileName(const std::string& stamp, int index);
 		// The session stamp of a file name of this family ("" = not one).
-		static std::string StampOf(const std::string& fileName)
-		{
-			const std::string prefix = Prefix();
-			if (fileName.size() < prefix.size() + kStampLength + 4 || fileName.compare(0, prefix.size(), prefix) != 0)
-				return std::string();
-			if (fileName.compare(fileName.size() - 4, 4, ".csv") != 0)
-				return std::string();
-			return fileName.substr(prefix.size(), kStampLength);
-		}
-
+		static std::string StampOf(const std::string& fileName);
 		// The files of one session in write order (base file first, then -002, -003, ...).
-		static std::vector<std::string> SessionFiles(const std::string& folder, const std::string& stamp)
-		{
-			std::vector<std::string> names;
-			std::error_code ec;
-			for (std::filesystem::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec))
-			{
-				const std::string name = it->path().filename().string();
-				if (StampOf(name) == stamp) names.push_back(name);
-			}
-			// "<stamp>.csv" sorts after "<stamp>-002.csv" ('.' > '-'): order by the rotation index instead.
-			std::sort(names.begin(), names.end(), [&](const std::string& a, const std::string& b) { return IndexOf(a) < IndexOf(b); });
-			return names;
-		}
-
+		static std::vector<std::string> SessionFiles(const std::string& folder, const std::string& stamp);
 		// Deletes the oldest sessions so that at most `keep` remain. Returns the number of sessions deleted.
-		static int Prune(const std::string& folder, size_t keep)
-		{
-			std::vector<std::string> stamps;
-			std::error_code ec;
-			for (std::filesystem::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec))
-			{
-				const std::string stamp = StampOf(it->path().filename().string());
-				if (!stamp.empty() && std::find(stamps.begin(), stamps.end(), stamp) == stamps.end()) stamps.push_back(stamp);
-			}
-			std::sort(stamps.begin(), stamps.end());   // stamps sort by time
-			int deleted = 0;
-			while (stamps.size() > keep)
-			{
-				for (const std::string& name : SessionFiles(folder, stamps.front()))
-					std::filesystem::remove(std::filesystem::path(folder) / name, ec);
-				stamps.erase(stamps.begin());
-				++deleted;
-			}
-			return deleted;
-		}
+		static int Prune(const std::string& folder, size_t keep);
 
 		// Starts a session: the earlier sessions beyond `sessions - 1` are deleted, the base file is created with the
 		// header and `firstRow` (a complete row, no newline). An empty folder turns the log off.
 		bool Open(const std::string& folder, const std::string& stamp, const std::string& firstRow, size_t sessions = kDefaultSessions,
-			uint64_t rotateBytes = kDefaultRotateBytes)
-		{
-			std::lock_guard<std::mutex> lock(m_);
-			pending_.clear();
-			folder_.clear();
-			path_.clear();
-			if (folder.empty()) return false;
-			std::error_code ec;
-			std::filesystem::create_directories(folder, ec);
-			// A restart inside the same second reuses the stamp: its earlier files go first.
-			for (const std::string& name : SessionFiles(folder, stamp))
-				std::filesystem::remove(std::filesystem::path(folder) / name, ec);
-			Prune(folder, sessions > 0 ? sessions - 1 : 0);
-			folder_ = folder;
-			stamp_ = stamp;
-			rotateBytes_ = rotateBytes > 0 ? rotateBytes : kDefaultRotateBytes;
-			index_ = 1;
-			bytes_ = 0;
-			path_ = (std::filesystem::path(folder_) / FileName(stamp_, 1)).string();
-			dirty_ = false;
-			// A fresh file: the header and the first row.
-			std::FILE* f = nullptr;
-			if (fopen_s(&f, path_.c_str(), "wb") != 0 || !f) { path_.clear(); return false; }
-			const std::string head = std::string(Header()) + "\n" + firstRow + "\n";
-			std::fwrite(head.data(), 1, head.size(), f);
-			std::fclose(f);
-			bytes_ = head.size();
-			freshBytes_ = bytes_;
-			return true;
-		}
+			uint64_t rotateBytes = kDefaultRotateBytes, size_t queueRows = kDefaultQueueRows);
 
-		bool IsOpen() const { std::lock_guard<std::mutex> lock(m_); return !path_.empty(); }
-		std::string CurrentPath() const { std::lock_guard<std::mutex> lock(m_); return path_; }
-		int FileIndex() const { std::lock_guard<std::mutex> lock(m_); return index_; }
-		bool Dirty() const { std::lock_guard<std::mutex> lock(m_); return dirty_; }
+		bool IsOpen() const;
+		std::string CurrentPath() const;
+		int FileIndex() const;
+		bool Dirty() const;
 
-		// Queues one row (without the newline).
-		void Append(const std::string& row)
-		{
-			std::lock_guard<std::mutex> lock(m_);
-			if (path_.empty()) return;
-			pending_.push_back(row);
-			dirty_ = true;
-		}
+		// Queues one row (without the newline). Never waits for the disk.
+		void Append(const std::string& row);
 
-		// Appends the queued rows to the current file (one write per file), rotating to the next numbered file of the
-		// session whenever the size limit is reached. Returns the rows written.
-		size_t Flush()
-		{
-			std::lock_guard<std::mutex> lock(m_);
-			if (path_.empty() || pending_.empty()) { dirty_ = false; return 0; }
-			size_t written = 0;
-			size_t i = 0;
-			while (i < pending_.size())
-			{
-				// As many rows as fit below the limit, in one write.
-				std::string chunk;
-				size_t count = 0;
-				while (i + count < pending_.size() && bytes_ + chunk.size() + pending_[i + count].size() + 1 <= rotateBytes_)
-				{
-					chunk += pending_[i + count];
-					chunk += '\n';
-					++count;
-				}
-				if (count == 0)
-				{
-					// The next row does not fit: continue in the next numbered file (a row never straddles files). A row
-					// larger than the whole limit still goes into a fresh file, alone.
-					if (bytes_ > freshBytes_)
-					{
-						if (!Rotate()) break;
-						continue;
-					}
-					chunk = pending_[i] + '\n';
-					count = 1;
-				}
-				std::FILE* f = nullptr;
-				if (fopen_s(&f, path_.c_str(), "ab") != 0 || !f) break;
-				const bool ok = std::fwrite(chunk.data(), 1, chunk.size(), f) == chunk.size();
-				std::fclose(f);
-				if (!ok) break;
-				bytes_ += chunk.size();
-				i += count;
-				written += count;
-			}
-			pending_.erase(pending_.begin(), pending_.begin() + static_cast<std::ptrdiff_t>(i));
-			dirty_ = !pending_.empty();
-			return written;
-		}
+		// Writes the queued rows (the caller is the worker, never the render thread), rotating to the next numbered file of
+		// the session whenever the size limit is reached. Returns the rows written.
+		size_t Flush();
+
+		// Rows dropped (queue bound) and failed writes, since Open.
+		uint64_t DroppedRows() const;
+		uint64_t FailedWrites() const;
+		// One-time messages: "source history CSV: write failed (<reason>)" once per failure episode, "source history CSV: rows
+		// dropped: N" when rows were dropped since the last notice. False when there is nothing new.
+		bool TakeNotice(std::string& text);
+		// The standing status ("" = fine): a failure is cleared by the next successful write.
+		std::string Status() const;
 
 	private:
-		static int IndexOf(const std::string& fileName)
-		{
-			// "<prefix><stamp>.csv" = 1, "<prefix><stamp>-NNN.csv" = NNN.
-			const size_t at = Prefix().size() + kStampLength;
-			if (fileName.size() > at + 4 && fileName[at] == '-')
-				return std::atoi(fileName.c_str() + at + 1);
-			return 1;
-		}
+		static int IndexOf(const std::string& fileName);
+		bool Rotate();   // caller holds io_
 
-		// Caller holds m_. The next numbered file of this session, with the header and a continuation row.
-		bool Rotate()
-		{
-			const int next = index_ + 1;
-			const std::string path = (std::filesystem::path(folder_) / FileName(stamp_, next)).string();
-			std::FILE* f = nullptr;
-			if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return false;
-			std::string head = std::string(Header()) + "\n";
-			head += ",session" + std::string(12, ',') + "session continued in file " + std::to_string(next) + std::string(static_cast<size_t>(kExtraColumns), ',') + "\n";
-			std::fwrite(head.data(), 1, head.size(), f);
-			std::fclose(f);
-			index_ = next;
-			path_ = path;
-			bytes_ = head.size();
-			freshBytes_ = bytes_;
-			return true;
-		}
-
-		mutable std::mutex m_;
+		mutable std::mutex q_;    // the queue and its counters: short holds only
+		mutable std::mutex io_;   // the files: folder_, stamp_, path_, bytes_, index_ ... (never taken by Append)
 		std::string folder_, stamp_, path_;
 		uint64_t rotateBytes_ = kDefaultRotateBytes;
 		uint64_t bytes_ = 0;
 		uint64_t freshBytes_ = 0;   // the size right after a file was created (header + first / continuation row)
 		int index_ = 1;
-		bool dirty_ = false;
-		std::vector<std::string> pending_;
+		bool open_ = false;          // guarded by q_
+		size_t queueRows_ = kDefaultQueueRows;
+		std::string pathCopy_;       // path_ for CurrentPath(), guarded by q_
+		int indexCopy_ = 1;          // index_ for FileIndex(), guarded by q_
+		std::vector<std::string> pending_;   // guarded by q_
+		uint64_t dropped_ = 0, droppedReported_ = 0, failed_ = 0;   // guarded by q_
+		bool failing_ = false, failureReported_ = false;            // guarded by q_
+		std::string failureText_;                                    // guarded by q_
 	};
 }

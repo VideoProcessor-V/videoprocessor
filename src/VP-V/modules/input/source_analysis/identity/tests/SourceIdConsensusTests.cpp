@@ -255,6 +255,16 @@ namespace Tests
 			SourceIdentity::Stats se;
 			run(true, 1000000, early, se);
 			Assert::IsTrue(early == 13000000, L"a flag before the last change is not a regime boundary");
+			// A hypothesis that began BEFORE the flag (native from 3.5 s, a cut flagged at 8 s) never bypasses T_min.
+			int64_t late = -1;
+			SourceIdentity::Stats sl;
+			run(true, 8000000, late, sl);
+			Assert::IsTrue(late == 13000000 && sl.regimeBypasses == 0, L"a flag after the hypothesis began is not a regime boundary");
+			// And a flag at the change time is not one either.
+			int64_t atChange = -1;
+			SourceIdentity::Stats sf;
+			run(true, 3000000, atChange, sf);   // a flag at the change itself (3.0 s): not after the last change
+			Assert::IsTrue(atChange == 13000000, L"a flag at the change time is the change's own boundary, not the next one's");
 		}
 
 		// The boundary is towards native only: a deeper re-base after a flag still waits for T_min.

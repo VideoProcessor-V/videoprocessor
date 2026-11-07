@@ -357,8 +357,15 @@ if (tile < int(tiles) && g.y < ts) {
 			if (!historyLog.IsOpen() || !historyLog.Dirty() || (!force && now - lastFlush < std::chrono::seconds(5))) return;
 			lastFlush = now;
 		}
-		// Append the queued rows (the log has its own lock; rotation happens inside).
+		// Append the queued rows (worker thread only; the log's queue lock is never held across the disk write).
 		historyLog.Flush();
+		// A failed write or dropped rows are visible: one log line each, and the standing note on the status line.
+		std::string note;
+		while (historyLog.TakeNotice(note))
+			DebugLog::Log("%s", note.c_str());
+		const std::string status = historyLog.Status();
+		std::lock_guard<std::mutex> lock(mutex);
+		snapshot.historyNote = status;
 	}
 
 	void Monitor::Release(pl_gpu g)
@@ -1120,6 +1127,9 @@ if (tile < int(tiles) && g.y < ts) {
 		snapshot.nativeHeight = j.nativeHeight;
 		snapshot.frameRatio = frame.ratio;
 		snapshot.frameBlank = !frame.informative();
+		// SID-B: a mixed frame while a lower reading is declared = the declaration stands (visible hold).
+		snapshot.frameMixed = frame.mixed;
+		snapshot.holdingMixed = frame.mixed && (tracker.Ratio() < 1.0 || trackerV.Ratio() < 1.0 || trackerH.Ratio() < 1.0);
 		snapshot.frameBlack = frame.black;
 		snapshot.liveRatio = ratios.empty() ? 1.0 : Median(ratios);
 		// Latch precision (2026-10-17): the declared rate as the exact rendition behind it - an even
@@ -1218,10 +1228,11 @@ if (tile < int(tiles) && g.y < ts) {
 				}
 		}
 		char row[256];
-		snprintf(row, sizeof(row), "reading,%.4f,%.3f,%.3f,%.4f,%.4f,%.2f,%.2f,%.1f,%llu,%d/%d,%.4f,%.1f ms",
+		snprintf(row, sizeof(row), "reading,%.4f,%.3f,%.3f,%.4f,%.4f,%.2f,%.2f,%.1f,%llu,%d/%d,%.4f,%.1f ms%s",
 			frame.ratio, frame.vertical.coherence, frame.horizontal.coherence, snapshot.liveRatio, snapshot.declaredRatio,
 			snapshot.confidence, snapshot.bitrateQuality, snapshot.effectiveBits, snapshot.cuts, frame.informativeTiles,
-			frame.tiles, autoAppliedShared.load(std::memory_order_acquire), snapshot.analyseMs);
+			frame.tiles, autoAppliedShared.load(std::memory_order_acquire), snapshot.analyseMs,
+			snapshot.holdingMixed ? "; holding: mixed picture (overlay)" : "");
 		{
 			// The replay / identity columns (SourceHistory::Header): the frame's own readings and flags, the classical snapshot
 			// behind the votes, then the consensus record (sid_*) when the pipeline runs.
@@ -1345,7 +1356,8 @@ if (tile < int(tiles) && g.y < ts) {
 				disengageSince = now;
 				disengageCuts = s.moments;
 				disengageFrames = s.frames;
-				why = "confidence fell: native at the next cut or black (within 5 s)";
+				why = s.reading ? "confidence fell: native at the next cut or black (within 5 s)" :
+					"no reading: native at the next cut or black (within 5 s)";
 			}
 			else if (s.moments != disengageCuts || (s.frameBlank && s.frames != disengageFrames) || now - disengageSince >= kDisengageWaitSeconds)
 			{
@@ -1429,6 +1441,14 @@ if (tile < int(tiles) && g.y < ts) {
 				why = "engaged during a black or flat frame";
 			}
 		}
+		// SID-B: a mixed/overlay screen over a declared re-base: the declaration stands - say so once per hold.
+		if (autoApplied < 1.0 && s.holdingMixed)
+		{
+			if (!mixedHoldLogged && why.empty()) why = kHoldingMixedText;
+			mixedHoldLogged = true;
+		}
+		else if (!s.holdingMixed)
+			mixedHoldLogged = false;
 		autoAppliedShared.store(autoApplied, std::memory_order_release);
 		if (!why.empty())
 		{
@@ -1452,6 +1472,7 @@ if (tile < int(tiles) && g.y < ts) {
 		{
 			axisDiscontinuities = s.discontinuities;
 			axisApplied[0] = axisApplied[1] = axisPending[0] = axisPending[1] = 1.0;
+			axisDisengagePending = false;
 		}
 		if (uniform < 1.0)
 		{
@@ -1483,18 +1504,44 @@ if (tile < int(tiles) && g.y < ts) {
 		const double tolerance = 0.01;
 		std::string axisWhy;
 		const bool up = wanted[0] > axisApplied[0] + tolerance || wanted[1] > axisApplied[1] + tolerance;
-		if (up)
-		{
-			// Detail returned on an axis, or the confidence fell: native at once (the
-			// conservative direction; the per-axis path is the stricter one).
+		// SID-B (D17): only a RISEN axis reading (the tracker's sustained rule) or a discontinuity (the reset above) is
+		// immediate; a confidence-only fall or a missing reading takes the gentle path, as the uniform path does.
+		const bool risen = s.reading && ((s.axisRatioX > axisApplied[0] + tolerance && wanted[0] > axisApplied[0] + tolerance) ||
+			(s.axisRatioY > axisApplied[1] + tolerance && wanted[1] > axisApplied[1] + tolerance));
+		if (!up) axisDisengagePending = false;
+		auto applyUp = [&]() {
 			axisApplied[0] = (std::max)(axisApplied[0], wanted[0]);
 			axisApplied[1] = (std::max)(axisApplied[1], wanted[1]);
 			if (wanted[0] >= 1.0) axisApplied[0] = 1.0;
 			if (wanted[1] >= 1.0) axisApplied[1] = 1.0;
 			axisPending[0] = axisApplied[0];
 			axisPending[1] = axisApplied[1];
-			axisWhy = "per axis: back towards native at once";
 			nextFadeSeconds = LatchFixes() ? ReleaseFade() : 0.0;
+		};
+		if (up && (risen || !LatchFixes()))
+		{
+			// Detail returned on an axis: native at once (the conservative direction).
+			axisDisengagePending = false;
+			applyUp();
+			axisWhy = "per axis: back towards native at once";
+		}
+		else if (up)
+		{
+			if (!axisDisengagePending)
+			{
+				axisDisengagePending = true;
+				axisDisengageSince = now;
+				axisDisengageCuts = s.moments;
+				axisDisengageFrames = s.frames;
+				axisWhy = s.reading ? "per axis: confidence fell: native at the next cut or black (within 5 s)" :
+					"per axis: no reading: native at the next cut or black (within 5 s)";
+			}
+			else if (s.moments != axisDisengageCuts || (s.frameBlank && s.frames != axisDisengageFrames) || now - axisDisengageSince >= kDisengageWaitSeconds)
+			{
+				axisDisengagePending = false;
+				applyUp();
+				axisWhy = "per axis: native at the next cut, black or after 5 s (confidence fell)";
+			}
 		}
 		else if (wanted[0] < axisApplied[0] - tolerance || wanted[1] < axisApplied[1] - tolerance)
 		{
@@ -1526,6 +1573,11 @@ if (tile < int(tiles) && g.y < ts) {
 				axisApplied[1] = wanted[1];
 				axisWhy = s.moments != axisPendingCuts ? "per axis: engaged at a cut" : "per axis: engaged during a black or flat frame";
 			}
+		}
+		if ((axisApplied[0] < 1.0 || axisApplied[1] < 1.0) && s.holdingMixed)
+		{
+			if (!mixedHoldLogged && axisWhy.empty()) axisWhy = kHoldingMixedText;
+			mixedHoldLogged = true;
 		}
 		if (!axisWhy.empty())
 		{
@@ -1904,7 +1956,9 @@ if (tile < int(tiles) && g.y < ts) {
 
 	std::string Describe(const Snapshot& s, double autoRatio, bool autoSelected)
 	{
-		const std::string text = DescribeBase(s, autoRatio, autoSelected);
+		std::string text = DescribeBase(s, autoRatio, autoSelected);
+		if (s.holdingMixed) text += std::string("; ") + kHoldingMixedText;
+		if (!s.historyNote.empty()) text += "; " + s.historyNote;
 		if (!s.frameBound) return text;
 		char bound[200];
 		snprintf(bound, sizeof(bound), "; frame-bound D=%u: held %u, dropped %llu, stale %llu, jobs dropped %llu, copies skipped %llu, waits missed %llu, clock steps back %llu",

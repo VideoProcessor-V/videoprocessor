@@ -37,6 +37,9 @@
 // source or format change, seek / live queue reset) or a confidence drop.
 namespace SourceResolutionMonitor
 {
+	// The status / decision / CSV-note text while a mixed (overlay) screen holds a declared re-base (SID-B).
+	constexpr const char* kHoldingMixedText = "holding: mixed picture (overlay)";
+
 	struct Snapshot
 	{
 		bool reading = false;          // at least one frame analysed since the last discontinuity
@@ -63,6 +66,12 @@ namespace SourceResolutionMonitor
 		// and its raw noise sigma (8-bit units, -1 = none).
 		double frameQuality = 1.0;
 		double frameNoise = -1.0;
+		// SID-B: the last frame was a mixed screen (native UI over the video); holdingMixed: ... while a lower reading is
+		// declared, so the declaration STANDS (a mixed frame is no native evidence): the status says "holding: mixed picture
+		// (overlay)". historyNote: the history CSV's one-time status ("" = fine).
+		bool frameMixed = false;
+		bool holdingMixed = false;
+		std::string historyNote;
 		double effectiveBits = 0.0;    // spec 2d (0 = unknown)
 		double coherenceV = 0.0, coherenceH = 0.0;
 		unsigned long long frames = 0, cuts = 0, discontinuities = 0;
@@ -216,7 +225,8 @@ namespace SourceResolutionMonitor
 		// Render thread: apply the consensus's re-base requests to the Indicator port, each generation exactly once.
 		int ApplySourceIdRebase(SourceIdentity::IndicatorPort& port);
 		// Render thread: true once per firing of the one-time "stream quality dropped" notice (`seen`: the caller's serial).
-		bool TakeSourceIdNotice(uint64_t& seen, std::string& text) const { return sourceId.TakeNotice(seen, text); }
+		// Only in On: a shadow ABR notice never reaches the user.
+		bool TakeSourceIdNotice(uint64_t& seen, std::string& text) const { return SourceIdConsensus() && sourceId.TakeNotice(seen, text); }
 		unsigned long long SourceIdEvents() const { return sourceIdEvents.load(std::memory_order_relaxed); }
 		// Bug hunt 34 item 1: true while the tiles are read back without waiting (D3D11 staging);
 		// false before the first frame, on another API, or when the staging could not be made on
@@ -566,6 +576,11 @@ namespace SourceResolutionMonitor
 		void Transit(double factorX, double factorY, double now);
 		double engageMaxWait = 20.0, crossfade = 1.5, releaseFade = 0.25;
 		double autoPendingSince = 0.0, axisPendingSince = 0.0;
+		// SID-B: the per-axis gentle revert (a confidence-only fall or a missing reading), as the uniform path's disengage*.
+		bool axisDisengagePending = false;
+		bool mixedHoldLogged = false;   // render thread: the "holding: mixed picture (overlay)" decision text was given
+		double axisDisengageSince = 0.0;
+		unsigned long long axisDisengageCuts = 0, axisDisengageFrames = 0;
 		unsigned long long cutsNotUsable = ~0ull;   // a cut whose moment is not known (a lost copy): not switched on
 		double nextFadeSeconds = 0.0;
 		double fadeFromX = 1.0, fadeFromY = 1.0, lastFactorX = 1.0, lastFactorY = 1.0, fadeStart = 0.0, fadeDuration = 0.0;

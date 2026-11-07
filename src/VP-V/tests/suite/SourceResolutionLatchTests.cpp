@@ -1519,7 +1519,7 @@ namespace VideoProcessorTest
 			// Each overlay in its own run: five upscaled shots (engaged by ~12 s), the overlay on the
 			// sixth shot's picture from mid-shot (no cut) for 6 s, then without it.
 			const struct { Overlay overlay; const char* name; bool mustUnlatch, mustStay; } overlays[] = {
-				{ Overlay::Menu, "native menu", false, false }, { Overlay::Subtitles, "subtitles", false, true },
+				{ Overlay::Menu, "native menu", false, true }, { Overlay::Subtitles, "subtitles", false, true },
 				{ Overlay::Osd, "transport bar", false, false }, { Overlay::Credits, "credits over black", false, false } };
 			for (const auto& ov : overlays)
 			{
@@ -2732,6 +2732,54 @@ namespace VideoProcessorTest
 			x.Mixed();
 			x.Native();
 			Assert::AreEqual(1.0, x.tracker.Ratio(), 1e-9, L"the third native reading (mixed frames neutral) reverts it");
+		}
+
+		// The readings of a sustained run are at most maximumGapSeconds apart: a lone native reading, a long stretch of
+		// non-informative frames and two more readings are NOT sustained (it would revert on effectively one reading).
+		TEST_METHOD(ARunOfNativeReadingsRestartsAfterASilence)
+		{
+			SidBTracker x;
+			x.Native();
+			for (int k = 0; k < 40; ++k)   // 20 s of frames with no informative tile (no gap discontinuity: they keep arriving)
+			{
+				SourceResolution::FrameReading f;
+				f.tiles = 8; f.informativeTiles = 0;
+				f.mean = 0.3 + 0.001 * k; f.signature = f.mean * 10.0 + k * 1e-6;
+				x.tracker.Update(f, x.t);
+				x.t += 0.5; ++x.i;
+			}
+			x.Native();
+			x.Native();
+			Assert::AreEqual(0.5, x.tracker.Ratio(), 1e-9, L"one reading, 20 s of silence, two readings: not sustained");
+			Assert::IsFalse(x.tracker.SustainedNative());
+			x.Native();
+			Assert::AreEqual(1.0, x.tracker.Ratio(), 1e-9, L"three readings in a row after the silence revert it");
+			Assert::IsTrue(x.tracker.SustainedNative());
+			// The state goes stale: after a silence the veto source is no longer sustained.
+			for (int k = 0; k < 8; ++k)
+			{
+				SourceResolution::FrameReading f;
+				f.tiles = 8; f.informativeTiles = 0;
+				f.mean = 0.6 + 0.001 * k; f.signature = f.mean * 10.0 + k * 1e-6;
+				x.tracker.Update(f, x.t);
+				x.t += 0.5;
+			}
+			Assert::IsFalse(x.tracker.SustainedNative(), L"stale after more than maximumGapSeconds without a native reading");
+		}
+
+		TEST_METHOD(AMixedFrameOverADeclarationIsAVisibleHold)
+		{
+			SidBTracker x;
+			Assert::IsFalse(x.tracker.HoldingMixed());
+			x.Mixed();
+			Assert::IsTrue(x.tracker.HoldingMixed(), L"a mixed frame while a lower reading is declared: holding");
+			Assert::AreEqual(0.5, x.tracker.Ratio(), 1e-9);
+			x.Lower();
+			Assert::IsFalse(x.tracker.HoldingMixed(), L"a plain frame ends the hold");
+			// A full-screen native menu is NOT mixed: its native readings revert the declaration once sustained.
+			x.Native(); x.Native(); x.Native();
+			Assert::AreEqual(1.0, x.tracker.Ratio(), 1e-9);
+			Assert::IsFalse(x.tracker.HoldingMixed());
 		}
 
 		TEST_METHOD(ADeclaredRiseNeedsTheSameSustainedRule)

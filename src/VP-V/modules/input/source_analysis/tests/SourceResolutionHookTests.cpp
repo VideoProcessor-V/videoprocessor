@@ -307,7 +307,7 @@ namespace VideoProcessorTest
 				WIN32_FIND_DATAA found{};
 				HANDLE search = FindFirstFileA((historyFolder + "\\source-resolution *.csv").c_str(), &found);
 				if (search != INVALID_HANDLE_VALUE) { do ++kept; while (FindNextFileA(search, &found)); FindClose(search); }
-				Assert::AreEqual(4, kept, L"the newest 4 earlier sessions kept before this one is written (5 with it)");
+				Assert::AreEqual(5, kept, L"the newest 4 earlier sessions kept, plus this one (its file is created at once with the header)");
 			}
 			double seconds = 0.0;
 			uint64_t sequence = 0;

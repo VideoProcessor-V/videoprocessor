@@ -1441,6 +1441,7 @@ namespace SourceResolution
 		pending = Pending{};
 		nativeRun.Reset();
 		riseRun.Reset();
+		holdingMixed = false;
 		++discontinuities;
 		lastReason = reason ? reason : "";
 	}
@@ -1677,11 +1678,12 @@ namespace SourceResolution
 			window.pop_front();
 		}
 		if (window.empty()) evidence = 0.0;
-		if (!frame.informative()) return;
+		if (!frame.informative()) { holdingMixed = false; return; }
 		// SID-B: a mixed screen (native UI over the video) is never native evidence for a declaration: while a lower
 		// reading is declared it is neutral (it neither clears nor raises it, and does not touch the evidence count).
 		// With nothing declared it still restarts the window below, as before (no lower reading gathers across a menu).
-		if (settings.latchFixes && frame.mixed && declared < 1.0) return;
+		holdingMixed = settings.latchFixes && frame.mixed && declared < 1.0;
+		if (holdingMixed) return;
 		const double ratio = frame.ratio >= settings.nativeAbove ? 1.0 : frame.ratio;
 		// Variable bitrate (owner 2026-10-16): native needs detail above the rate in
 		// question - the declared one, else the lower one the window is gathering.
@@ -1730,11 +1732,11 @@ namespace SourceResolution
 				// SID-B: a DECLARATION is cleared (or raised) only by sustained native evidence
 				// (Settings::nativeEvidenceReadings over nativeEvidenceSeconds); with nothing declared the
 				// window simply starts again, as before.
-				if (!frame.mixed) nativeRun.Add(1.0, seconds, dt);   // (a mixed frame only gets here with nothing declared)
+				if (!frame.mixed) nativeRun.Add(1.0, seconds, dt, settings);   // (a mixed frame only gets here with nothing declared)
 				if (declared < 1.0)
 				{
-					riseRun.Add(1.0, seconds, dt);
-					if (!riseRun.Met(seconds, settings))
+					riseRun.Add(1.0, seconds, dt, settings);
+					if (!riseRun.Met(settings))
 						return;   // one reading is not enough: the declaration stands, the window is kept
 					declared = riseRun.minimum;   // 1.0 when every reading was native
 					riseRun.Reset();
@@ -1792,8 +1794,8 @@ namespace SourceResolution
 		{
 			if (settings.latchFixes)
 			{
-				riseRun.Add(ratio, seconds, dt);
-				if (!riseRun.Met(seconds, settings))
+				riseRun.Add(ratio, seconds, dt, settings);
+				if (!riseRun.Met(settings))
 					return;
 				declared = riseRun.minimum;
 				riseRun.Reset();
@@ -1837,7 +1839,8 @@ namespace SourceResolution
 	bool Tracker::SustainedNative() const
 	{
 		if (!settings.latchFixes) return true;
-		return nativeRun.Met(lastSeconds, settings);
+		// Not stale: the run's newest reading is within maximumGapSeconds of the newest frame of any kind.
+		return nativeRun.Met(settings) && lastSeconds - nativeRun.last <= settings.maximumGapSeconds;
 	}
 
 	double Tracker::Candidate() const

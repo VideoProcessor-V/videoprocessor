@@ -576,6 +576,9 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.5, beforeOn, 0.03, L"the film is declared before the panel");
 			Assert::AreEqual(0.5, firstPanelOn, 0.03, L"the declaration stands on the panel's first frame (a mixed frame is no native evidence)");
 			Assert::AreEqual(0.5, panelLowestOn, 0.03, L"and while the short panel stays");
+			// The hold only applies to frames the guard flags as mixed: the panel's 12 frames all are (a plain native panel
+			// frame would revert the declaration after the sustained readings).
+			Assert::IsTrue(on.mixed >= 12, L"the panel frames are flagged mixed (a visible hold, not a silent one)");
 		}
 
 		// (c) Picture-in-picture.

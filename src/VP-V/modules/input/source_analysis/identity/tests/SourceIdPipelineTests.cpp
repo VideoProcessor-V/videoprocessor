@@ -572,6 +572,8 @@ namespace Tests
 			snprintf(line, sizeof(line), "shadow vs off: %d differing decisions; engaged frames %d\n", differences, engagedFrames);
 			Logger::WriteMessage(line);
 			Assert::AreEqual(0, differences, L"AutoFactors, the snapshot and the quality view are byte-identical to Off");
+			Assert::IsTrue(engagedFrames > 0, L"the fixture really engages a re-base, so the equality above is not vacuous");
+			Assert::IsTrue(shadow.Read().declaredRatio < 1.0 || engagedFrames > 0);
 			SourceIdentity::Record rec;
 			Assert::IsTrue(shadow.SourceIdRecord(rec), L"the record is published in shadow");
 			Assert::IsTrue((rec.flags & SourceIdentity::kFlagShadow) != 0, L"and flagged as shadow");
@@ -580,6 +582,110 @@ namespace Tests
 			struct Port : SourceIdentity::IndicatorPort { int n = 0; void AdvanceRebase(int, uint64_t, const char*) override { ++n; } } port;
 			Assert::AreEqual(0, shadow.ApplySourceIdRebase(port), L"shadow never moves a re-base stamp");
 			Assert::AreEqual(0, port.n);
+		}
+
+		// SID-B (D17): the per-axis path has no one-frame revert either. A scripted result is published exactly as the worker would
+		// (InjectResultForTest); the factors are asked for as the renderer does.
+		TEST_METHOD(PerAxisConfidenceFallAndMissingReadingTakeTheGentlePath)
+		{
+			using SourceResolutionMonitor::Snapshot;
+			auto engaged = [](SourceResolutionMonitor::Monitor& m, double& t, double& fx, double& fy) {
+				Snapshot s;
+				s.reading = true; s.nativeWidth = 1920; s.nativeHeight = 1080;
+				s.axisRatioX = 1.0; s.axisRatioY = 0.5; s.axisConfidence = 0.9;
+				s.frames = 1;
+				std::string why;
+				m.InjectResultForTest(s, 1);
+				m.AutoFactors(1920, 1080, 0.8, why, fx, fy, t += 0.5);   // pending
+				s.frames = 2; s.frameBlank = true;                        // a low-detail moment: the engage
+				m.InjectResultForTest(s, 2);
+				m.AutoFactors(1920, 1080, 0.8, why, fx, fy, t += 0.5);
+				Assert::AreEqual(0.5, fy, 1e-9, L"fixture: the vertical axis is engaged");
+			};
+			// A confidence-only fall (the ratio did not rise): not at once; at the next cut / black / after 5 s.
+			{
+				SourceResolutionMonitor::Monitor m;
+				double t = 0.0, fx = 1.0, fy = 1.0;
+				engaged(m, t, fx, fy);
+				Snapshot s;
+				s.reading = true; s.nativeWidth = 1920; s.nativeHeight = 1080;
+				s.axisRatioX = 1.0; s.axisRatioY = 0.5; s.axisConfidence = 0.4; s.frames = 3;
+				std::string why;
+				m.InjectResultForTest(s, 3);
+				m.AutoFactors(1920, 1080, 0.8, why, fx, fy, t += 0.5);
+				Assert::AreEqual(0.5, fy, 1e-9, L"one frame's confidence dip does not revert the axis");
+				Assert::IsTrue(why.find("confidence fell") != std::string::npos, L"and says why it waits");
+				s.frames = 4;
+				m.InjectResultForTest(s, 4);
+				m.AutoFactors(1920, 1080, 0.8, why, fx, fy, t += 0.5);
+				Assert::AreEqual(0.5, fy, 1e-9, L"still waiting");
+				s.frames = 5;
+				m.InjectResultForTest(s, 5);
+				m.AutoFactors(1920, 1080, 0.8, why, fx, fy, t + SourceResolutionMonitor::Monitor::kDisengageWaitSeconds + 0.1);
+				Assert::AreEqual(1.0, fy, 1e-9, L"native after the bounded wait");
+			}
+			// A missing reading: the same gentle path, with its own reason.
+			{
+				SourceResolutionMonitor::Monitor m;
+				double t = 0.0, fx = 1.0, fy = 1.0;
+				engaged(m, t, fx, fy);
+				Snapshot s;   // reading = false
+				s.nativeWidth = 1920; s.nativeHeight = 1080; s.frames = 3;
+				std::string why;
+				m.InjectResultForTest(s, 3);
+				m.AutoFactors(1920, 1080, 0.8, why, fx, fy, t += 0.5);
+				Assert::AreEqual(0.5, fy, 1e-9, L"one missing reading does not revert the axis");
+				Assert::IsTrue(why.find("no reading") != std::string::npos);
+			}
+			// A RISEN axis reading (the tracker's sustained rule passed): back at once.
+			{
+				SourceResolutionMonitor::Monitor m;
+				double t = 0.0, fx = 1.0, fy = 1.0;
+				engaged(m, t, fx, fy);
+				Snapshot s;
+				s.reading = true; s.nativeWidth = 1920; s.nativeHeight = 1080;
+				s.axisRatioX = 1.0; s.axisRatioY = 1.0; s.axisConfidence = 0.0; s.frames = 3;
+				std::string why;
+				m.InjectResultForTest(s, 3);
+				m.AutoFactors(1920, 1080, 0.8, why, fx, fy, t += 0.5);
+				Assert::AreEqual(1.0, fy, 1e-9, L"a risen axis reading is native at once");
+				Assert::IsTrue(why.find("at once") != std::string::npos);
+			}
+		}
+
+		// SID-B: a mixed / overlay screen over a declared re-base holds it VISIBLY (decision text once per hold, stats line, CSV note).
+		TEST_METHOD(AMixedScreenHoldingADeclaredRebaseIsSaid)
+		{
+			using SourceResolutionMonitor::Snapshot;
+			SourceResolutionMonitor::Monitor m;
+			double t = 0.0, fx = 1.0, fy = 1.0;
+			Snapshot s;
+			s.reading = true; s.nativeWidth = 1920; s.nativeHeight = 1080;
+			s.declaredRatio = 0.5; s.confidence = 0.9; s.axisRatioX = s.axisRatioY = 1.0; s.frames = 1;
+			std::string why;
+			m.InjectResultForTest(s, 1);
+			m.AutoFactors(1920, 1080, 0.8, why, fx, fy, t += 0.5);
+			s.frames = 2; s.frameBlank = true;
+			m.InjectResultForTest(s, 2);
+			m.AutoFactors(1920, 1080, 0.8, why, fx, fy, t += 0.5);
+			Assert::AreEqual(0.5, fx, 1e-9, L"fixture: engaged");
+			s.frameBlank = false;
+			s.frames = 3; s.frameMixed = true; s.holdingMixed = true;
+			m.InjectResultForTest(s, 3);
+			m.AutoFactors(1920, 1080, 0.8, why, fx, fy, t += 0.5);
+			Assert::AreEqual(0.5, fx, 1e-9, L"the declared re-base stands under the overlay");
+			Assert::AreEqual(std::string(SourceResolutionMonitor::kHoldingMixedText), why, L"the decision says it is holding");
+			Assert::AreEqual(std::string("holding: mixed picture (overlay)"), std::string(SourceResolutionMonitor::kHoldingMixedText));
+			s.frames = 4;
+			m.InjectResultForTest(s, 4);
+			m.AutoFactors(1920, 1080, 0.8, why, fx, fy, t += 0.5);
+			Assert::IsTrue(why.empty(), L"said once per hold, not every frame");
+			const std::string line = SourceResolutionMonitor::Describe(m.Read(), 0.5, true);
+			Assert::IsTrue(line.find("holding: mixed picture (overlay)") != std::string::npos, L"the stats / Ctrl+I line says it");
+			s.frames = 5; s.frameMixed = false; s.holdingMixed = false;
+			m.InjectResultForTest(s, 5);
+			m.AutoFactors(1920, 1080, 0.8, why, fx, fy, t += 0.5);
+			Assert::IsTrue(SourceResolutionMonitor::Describe(m.Read(), 0.5, true).find("holding") == std::string::npos, L"and clears after the overlay");
 		}
 
 		TEST_METHOD(WouldBeLinesNameTheFieldTheChangeAndTheReason)

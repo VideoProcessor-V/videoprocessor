@@ -605,6 +605,8 @@ namespace SourceResolution
 		// covering nativeEvidenceSeconds, with no lower reading since (the classical safety veto's source).
 		// Always true with the latch fixes off (the behaviour before).
 		bool SustainedNative() const;
+		// The mixed-screen hold: the last analysed frame was mixed while a lower reading is declared (the declaration stands).
+		bool HoldingMixed() const { return holdingMixed; }
 		int NativeReadings() const { return nativeRun.count; }
 		double Candidate() const;                                // the window's evidence so far
 		// The window's median DetailAbove for frames reading `ratio`; +infinity when none.
@@ -673,20 +675,25 @@ namespace SourceResolution
 		struct Run
 		{
 			int count = 0;
-			double start = 0.0, firstDt = 0.0, minimum = 1.0;
+			double start = 0.0, firstDt = 0.0, last = 0.0, minimum = 1.0;
 			void Reset() { *this = Run(); }
-			void Add(double ratio, double seconds, double dt)
+			// The readings of one run are at most maximumGapSeconds apart: a longer silence (dark or non-informative
+			// frames, repeats) restarts it, so a lone reading and two more 30 s later are not "sustained".
+			void Add(double ratio, double seconds, double dt, const Settings& s)
 			{
-				if (count == 0) { start = seconds; firstDt = dt; minimum = ratio; }
+				if (count > 0 && seconds - last > s.maximumGapSeconds) Reset();
+				if (count == 0) { start = seconds; firstDt = (std::min)(dt, s.maximumGapSeconds); minimum = ratio; }
 				else minimum = (std::min)(minimum, ratio);
+				last = seconds;
 				++count;
 			}
-			bool Met(double seconds, const Settings& s) const
+			bool Met(const Settings& s) const
 			{
-				return count >= s.nativeEvidenceReadings && (seconds - start) + firstDt >= s.nativeEvidenceSeconds - 1e-9;
+				return count >= s.nativeEvidenceReadings && (last - start) + firstDt >= s.nativeEvidenceSeconds - 1e-9;
 			}
 		};
 		Run nativeRun, riseRun;
+		bool holdingMixed = false;
 	};
 
 	// h3-latch: the look-ahead's per-frame cut judge (source_resolution_cut_fixes). Every queued frame's

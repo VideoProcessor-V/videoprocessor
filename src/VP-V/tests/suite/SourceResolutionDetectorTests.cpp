@@ -1000,10 +1000,10 @@ namespace VideoProcessorTest
 			Assert::IsTrue(declaredAt >= SourceResolution::Tracker::Settings{}.minimumSeconds, L"not before the standard evidence time");
 			// SID-B: one frame of detail no longer reverts the declaration; sustained native readings do (the
 			// default: 3 readings over 1.5 s - at this 0.25 s spacing the sixth reading).
-			tracker.Update(Frame(1.0, 0.25), t += 0.25);
+			tracker.Update(Frame(1.0, 0.25), t += 0.25);   // (each frame its own mean: identical frames are dropped as repeats)
 			Assert::AreEqual(0.5, tracker.Ratio(), 1e-9, L"one native frame does not revert");
 			int readings = 1;
-			while (tracker.Ratio() < 1.0 && readings < 20) { tracker.Update(Frame(1.0, 0.25), t += 0.25); ++readings; }
+			while (tracker.Ratio() < 1.0 && readings < 20) { tracker.Update(Frame(1.0, 0.25 + 0.001 * readings), t += 0.25); ++readings; }
 			Assert::AreEqual(1.0, tracker.Ratio(), L"sustained native readings revert");
 			Assert::IsTrue(readings <= 7, L"within about 1.5 s of native readings");
 		}

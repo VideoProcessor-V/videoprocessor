@@ -16,7 +16,6 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -28,12 +27,11 @@ namespace Tests
 {
 	namespace SidReplay
 	{
-		namespace fs = std::filesystem;
-
 		inline std::string FixtureText()
 		{
-			const fs::path path = fs::path(__FILE__).parent_path() / "fixtures" / "srm-history-replay.csv";
-			std::ifstream in(path, std::ios::binary);
+			const std::string file = __FILE__;
+			const std::string path = file.substr(0, file.find_last_of("\\/")) + "\\fixtures\\srm-history-replay.csv";
+			std::ifstream in(path.c_str(), std::ios::binary);
 			Assert::IsTrue(in.good(), L"the committed fixture opens");
 			return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 		}
@@ -87,21 +85,28 @@ namespace Tests
 
 		struct TempFolder
 		{
-			fs::path path;
+			std::string path;
 			TempFolder()
 			{
-				path = fs::temp_directory_path() / ("vp-sidb-history-" + std::to_string(reinterpret_cast<uintptr_t>(this)));
-				std::error_code ec;
-				fs::remove_all(path, ec);
-				fs::create_directories(path, ec);
+				char temp[MAX_PATH] = {};
+				GetTempPathA(MAX_PATH, temp);
+				path = std::string(temp) + "vp-sidb-history-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount());
+				Clear();
+				SourceHistory::Os::CreateDirectories(path);
 			}
-			~TempFolder() { std::error_code ec; fs::remove_all(path, ec); }
-			std::string Str() const { return path.string(); }
+			void Clear()
+			{
+				const std::vector<std::string> names = SourceHistory::Os::ListNames(path);
+				for (size_t i = 0; i < names.size(); ++i) SourceHistory::Os::Remove(Join(names[i]));
+			}
+			~TempFolder() { Clear(); RemoveDirectoryA(path.c_str()); }
+			std::string Str() const { return path; }
+			std::string Join(const std::string& name) const { return SourceHistory::Os::Join(path, name); }
 		};
 
-		inline std::string ReadAll(const fs::path& p)
+		inline std::string ReadAll(const std::string& p)
 		{
-			std::ifstream in(p, std::ios::binary);
+			std::ifstream in(p.c_str(), std::ios::binary);
 			return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 		}
 
@@ -226,7 +231,7 @@ namespace Tests
 			std::vector<std::string> collected;
 			for (const std::string& name : files)
 			{
-				const std::string text = ReadAll(dir.path / name);
+				const std::string text = ReadAll(dir.Join(name));
 				Assert::IsTrue(text.size() <= limit, L"no file exceeds the limit (a row never straddles files)");
 				const std::vector<std::string> lines = Lines(text);
 				Assert::AreEqual(std::string(SourceHistory::Header()), lines[0], L"every file starts with the header");
@@ -239,7 +244,7 @@ namespace Tests
 				Assert::IsTrue(rows[i] == collected[i], L"in order");
 			// The files of a rotated session read back as one replay input (the headers repeat).
 			std::string joined;
-			for (const std::string& name : files) joined += ReadAll(dir.path / name);
+			for (const std::string& name : files) joined += ReadAll(dir.Join(name));
 			SourceIdentity::Pipeline pipeline;
 			std::vector<SourceIdentity::ReplayStep> steps;
 			std::string error;
@@ -265,9 +270,10 @@ namespace Tests
 				Assert::IsTrue(SourceHistory::Log::SessionFiles(dir.Str(), stamp).size() >= 2, L"each session rotated");
 			}
 			std::vector<std::string> stamps;
-			for (const fs::directory_entry& e : fs::directory_iterator(dir.path))
+			const std::vector<std::string> present = SourceHistory::Os::ListNames(dir.Str());
+			for (size_t n = 0; n < present.size(); ++n)
 			{
-				const std::string stamp = SourceHistory::Log::StampOf(e.path().filename().string());
+				const std::string stamp = SourceHistory::Log::StampOf(present[n]);
 				Assert::IsFalse(stamp.empty());
 				if (std::find(stamps.begin(), stamps.end(), stamp) == stamps.end()) stamps.push_back(stamp);
 			}
@@ -282,6 +288,56 @@ namespace Tests
 				for (size_t i = 0; i < files.size(); ++i)
 					Assert::AreEqual(SourceHistory::Log::FileName(stamp, static_cast<int>(i) + 1), files[i]);
 			}
+		}
+
+		// Append never waits on the disk and never grows without bound: past the bound the OLDEST rows are dropped, counted and reported.
+		TEST_METHOD(AppendIsBoundedDropsTheOldestAndReportsIt)
+		{
+			using namespace SidReplay;
+			TempFolder dir;
+			SourceHistory::Log log;
+			Assert::IsTrue(log.Open(dir.Str(), "20261107-130000", "12:00:00.000,session" + std::string(12, ',') + "x" + SourceHistory::EmptyExtras(),
+				SourceHistory::kDefaultSessions, SourceHistory::kDefaultRotateBytes, 20));
+			for (int i = 0; i < 100; ++i)
+				log.Append("row-" + std::to_string(i));   // no Flush: nothing touches the disk
+			Assert::IsTrue(log.DroppedRows() >= 80, L"rows beyond the bound were dropped");
+			std::string notice;
+			Assert::IsTrue(log.TakeNotice(notice));
+			Assert::IsTrue(notice.find("rows dropped") != std::string::npos, L"visibly");
+			Assert::IsFalse(log.TakeNotice(notice), L"once");
+			Assert::IsTrue(log.Status().find("rows dropped") != std::string::npos);
+			log.Flush();
+			const std::string text = ReadAll(dir.Join(SourceHistory::Log::FileName("20261107-130000", 1)));
+			Assert::IsTrue(text.find("row-99") != std::string::npos, L"the newest row is kept");
+			Assert::IsTrue(text.find("row-0\n") == std::string::npos, L"the oldest was dropped");
+		}
+
+		// A failed write is counted, reported once, keeps the rows, and the log recovers when the file can be written again.
+		TEST_METHOD(AFailedWriteIsReportedOnceKeepsTheRowsAndRecovers)
+		{
+			using namespace SidReplay;
+			TempFolder dir;
+			SourceHistory::Log log;
+			const std::string stamp = "20261107-140000";
+			Assert::IsTrue(log.Open(dir.Str(), stamp, "12:00:00.000,session" + std::string(12, ',') + "x" + SourceHistory::EmptyExtras()));
+			const std::string path = dir.Join(SourceHistory::Log::FileName(stamp, 1));
+			HANDLE lockHandle = CreateFileA(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);   // exclusive: no share
+			Assert::IsTrue(lockHandle != INVALID_HANDLE_VALUE);
+			for (int i = 0; i < 5; ++i) log.Append("held-" + std::to_string(i));
+			Assert::AreEqual(size_t(0), log.Flush());
+			Assert::IsTrue(log.FailedWrites() >= 1);
+			Assert::IsTrue(log.Dirty(), L"the unwritten rows are kept");
+			std::string notice;
+			Assert::IsTrue(log.TakeNotice(notice));
+			Assert::IsTrue(notice.find("write failed") != std::string::npos);
+			Assert::IsFalse(log.TakeNotice(notice), L"reported once per failure episode");
+			log.Flush();
+			Assert::IsFalse(log.TakeNotice(notice), L"a second failed Flush in the same episode is not reported again");
+			Assert::IsTrue(log.Status().find("write failed") != std::string::npos, L"but the standing status stays");
+			CloseHandle(lockHandle);
+			Assert::AreEqual(size_t(5), log.Flush(), L"recovered: the kept rows are written");
+			Assert::IsTrue(log.Status().empty());
+			Assert::IsTrue(ReadAll(path).find("held-4") != std::string::npos);
 		}
 
 		TEST_METHOD(AFreeTextNoteIsQuotedSoTheColumnsStayAligned)

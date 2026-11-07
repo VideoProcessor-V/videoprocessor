@@ -67,7 +67,7 @@ With the latch fixes on (the default), the classical `SourceResolution::Tracker`
 - In the monitor, one missing reading no longer forces native at once (`AutoFactor` takes the pending path: native at the next cut or black, or after 5 s); a discontinuity still does.
 - With the latch fixes off the behaviour is as before (one native frame reverts at once).
 
-This is a VP-V behaviour change of VP's own classical path (not Bill's): a declared re-base now lasts about 1.5 s longer under native evidence, and a menu or panel over a declared film no longer reverts it on its first frame.
+Behaviour changes of VP's own classical path (not Bill's): (1) a declared re-base lasts about 1.5 s longer under native evidence (and a lone reading followed by a silence of more than `maximumGapSeconds` does not count); (2) a mixed/overlay screen (panel, menu preview) over a declared film no longer reverts it on its first frame - it is a visible HOLD (`holding: mixed picture (overlay)`) until sustained native readings arrive; a full-screen native menu (not mixed) reverts after the sustained readings; (3) one missing reading, or a confidence-only fall, takes the gentle path (native at the next cut or black, or after 5 s; reasons "no reading: ..." / "confidence fell: ...") on the uniform AND the per-axis path - only a risen reading or a discontinuity is immediate; (4) the history CSV is appended (not rewritten), has 25 more columns, quoted notes and full-width rows for every event, and a session may span several files (5 sessions kept, each up to 20 MB per file and unbounded in files); (5) with `source_id_consensus` on, a consensus change can be held up to T_min = 10 s after the previous change (P14 can say re-based while the classical tracker already reads native).
 
 ### Source identity mode (`source_id_consensus`: off / shadow / on)
 
@@ -222,17 +222,24 @@ Cost when off: zero detection work. `type` = `off` and `classic` both leave `Sub
 | `source_resolution_evidence_shots` | input group | int | 1..10 | 3 | Input tab (Picture slider) | n/a (VP-only) | - | same on all |
 | `source_resolution_evidence_seconds` | input group | float | 2..120 | 10 | Input tab (Picture slider) | n/a (VP-only) | - | same on all |
 | `source_resolution_latch_fixes` | input group | bool | on, off | on | Input tab | forced off | off = the behaviour before, INCLUDING the pre-SID-B instant revert (the sustained native rule needs it on) | same on all |
-| `source_resolution_mixed_guard` | input group | bool | on, off | on | Input tab | n/a (VP-only) | a mixed frame is native for new declarations and neutral for a declared one (SID-B) | same on all |
+| `source_resolution_mixed_guard` | input group | bool | on, off | on | Input tab | n/a (VP-only) | a mixed frame is native for new declarations and a visible HOLD (`holding: mixed picture (overlay)`) for a declared one (SID-B) | same on all |
 | `source_resolution_cut_fixes` | input group | bool | on, off | on | Input tab | forced off | needs latch fixes | same on all |
-| `source_id_consensus` | input group (SID-5 plumbing pending: Monitor setter only) | enum | off, shadow, on | off (shadow after phase A, doc 78 D16) | not in Config yet (SID-5, P3 settings mixin) | forced off | "Source identity: off" / "Source identity: shadow (classical decides)" / "Source identity: classical only (<reason>)" | same on all (cost: the worker pipeline, a fraction of one core) |
-| `source_id_abr_notice` | input group (SID-5 plumbing pending) | bool | on, off | on | not in Config yet (SID-5) | forced off | one-time notice `abr_quality_drop` | same on all |
-| `Tracker::Settings::nativeEvidenceReadings` | code default (not a config key) | int | >= 1 | 3 (= the shots standard) | not in Config (derived: k readings; a Picture-slider candidate later) | n/a (VP-only) | - | same on all |
-| `Tracker::Settings::nativeEvidenceSeconds` | code default (not a config key) | float | > 0 | 1.5 (= 3 readings x the 0.5 s cadence) | not in Config (derived) | n/a (VP-only) | - | same on all |
-| `SourceIdentity::Settings::regimeEvaluations` | code default (not a config key) | int | >= 1 | 3 | not in Config (doc 78 D12) | n/a (VP-only) | - | same on all |
-| `SourceIdentity::Settings::MinTimeBetweenChangesUs` (T_min) | derived (not a config key) | us | max(2 x dwell, minHoldAfterChange) | 10 s | not in Config (derived from the settings) | n/a (VP-only) | a held change reads "held: min hold" | same on all |
-| `SourceHistory::kDefaultRotateBytes` / `Monitor::kHistorySessions` | code constants (not config keys) | bytes / int | - | 20 MB / 5 sessions | not in Config | n/a (VP-only) | - | same on all |
 
-### Environment and diagnostics
+## Tuning (not in Config)
+
+Code defaults that are not config keys (not in the Settings table above; each is derived or fixed in code):
+
+| Name | Meaning | Default |
+|---|---|---|
+| `Tracker::Settings::nativeEvidenceReadings` | native readings that clear or raise a declaration (SID-B) | 3 (= the shots standard) |
+| `Tracker::Settings::nativeEvidenceSeconds` | time those readings must cover; a run's readings are at most `maximumGapSeconds` apart | 1.5 s (3 readings x the 0.5 s cadence) |
+| `SourceHistory::kDefaultRotateBytes` | the history CSV rotates to the next numbered file | 20 MB |
+| `Monitor::kHistorySessions` | history sessions kept (all their files) | 5 |
+| `SourceHistory::kDefaultQueueRows` | in-memory rows between two flushes; beyond it the oldest are dropped, counted and reported | 20000 |
+
+The `source_id_consensus` / `source_id_abr_notice` keys and the consensus tuning (dwell, T_min, `regimeEvaluations`) are documented in [identity/README.md](identity/README.md).
+
+## Environment and diagnostics
 
 | Name | Purpose | Default | Scope (test/debug/runtime) |
 |---|---|---|---|
@@ -241,8 +248,9 @@ Cost when off: zero detection work. `type` = `off` and `classic` both leave `Sub
 | `VP_SOURCE_ID_EVAL_FFMPEG` / `VP_SOURCE_ID_EVAL_ONLY` | ffmpeg path / reel filter of that evaluation | D:\tools\ffmpeg-full\bin\ffmpeg.exe / all | test |
 | history CSV | `source-resolution <stamp>[-NNN].csv` beside vp.log; replay with `python -I tools/eval/source_id/replay.py --srm <file>` | on when the log folder is set | debug |
 
-### Status lines (this module)
+## Status lines (this module)
 
+- A mixed/overlay screen over a declared re-base: the stats / Ctrl+I line, the CSV note and the decision text say `holding: mixed picture (overlay)`; a failed history write or dropped rows: `source history CSV: write failed (<reason>)` / `rows dropped: N` (one log line each, and the stats line while it lasts).
 - Ctrl+I / Config: `Source identity: off`, `Source identity: shadow (classical decides)`, `Source identity: classical only (<reason>)`, `Source identity: consensus (tier N, level L)`.
 - vp.log (shadow): `source_id would-be: <field> <from> -> <to> (<reason>, support <s>)`, one line per consensus change.
 - Auto decisions with their reasons are in the history CSV (`auto` rows) and the stats line.
