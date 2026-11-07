@@ -575,12 +575,16 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
     return g;
 }
 
+// The configured queue's frames: R + L + the look-ahead walk (the term the record histories are derived from, Products.h).
+inline unsigned QueueFrames(const GraphSettings& gs) { return QueueFramesFor(gs.renderAhead, gs.laneLead, gs.lookAheadWalk); }
+
 // The visible cap note for the record histories of the products THIS graph holds ("" when none is capped or none is in the closure).
 inline std::string GraphHistoryCapNote(const Graph& g, double sourcePeriodMs)
 {
     if (!g.valid)
         return std::string();
-    return RecordHistoryCapNote(sourcePeriodMs, g.Has(kQualityPattern) || g.Has(kQualityPatternCausal), g.Has(kTdTrailSummary));
+    return RecordHistoryCapNote(sourcePeriodMs, g.Has(kQualityPattern) || g.Has(kQualityPatternCausal), g.Has(kTdTrailSummary),
+                                QueueFrames(g.settings));
 }
 
 // Owns the current graph; rebuilds on a trigger and advances the Indicator's `graph` counter.

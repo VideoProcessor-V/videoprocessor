@@ -35,6 +35,8 @@ namespace PrivateTextureScanTestsNs
 		{ "src/VP-V/modules/repair/grain_split/GrainSplitGpu.cpp", "src/VP-V/modules/repair/grain_split/README.md" },
 		{ "src/VP-V/modules/repair/temporal_detail/TemporalDetailGpu.cpp", "src/VP-V/modules/repair/temporal_detail/README.md" },
 		{ "src/VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.cpp", "src/VP-V/modules/scaling/chroma_upscale/README.md" },
+		// BasicChromaGpu::Module::m_out: the stage's OUTPUT texture, handed to the caller and kept across frames (not a per-call temporary).
+		{ "src/VP-V/modules/scaling/chroma_upscale/basic/BasicChromaGpu.cpp", "src/VP-V/modules/scaling/chroma_upscale/README.md" },
 	};
 
 	static const char* const kScanDirs[] = {

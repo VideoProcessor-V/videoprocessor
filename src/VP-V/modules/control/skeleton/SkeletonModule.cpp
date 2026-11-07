@@ -134,6 +134,7 @@ namespace Vpv
 			// Render thread.
 			uint32_t configuredGen = 0;
 			double configuredPeriodMs = 0.0;
+			SkeletonModule::QueueShape configuredQueue;
 			uint64_t framesSinceConfigure = 0;
 		};
 
@@ -180,6 +181,7 @@ namespace Vpv
 			std::string waiting;
 			std::string shownWaiting;
 			bool shownBundle = false;
+			uint8_t shownQueueWired = 0xFF;   // the queue-delivery state the cached status text was built for
 
 			// The render-thread status cache, read by any thread.
 			std::mutex statusMutex;
@@ -293,6 +295,7 @@ namespace Vpv
 				Reconcile(f.host, -1);
 				break;
 			case RE::Lifecycle::SettingsApplied:
+				PublishLookAheadWalk(f.value);   // the host passes the motion look-ahead depth (frames) here: the one queue term it delivers
 				Reconcile(f.host, f.code != 0 ? 1 : 0);   // code != 0: the Original pathway
 				break;
 			case RE::Lifecycle::GpuReleased:
@@ -552,7 +555,9 @@ namespace Vpv
 			const bool periodMoved = b->configuredPeriodMs > 0.0 && st.periodMs > 0.0 &&
 				std::abs(st.periodMs - b->configuredPeriodMs) > 0.3 * b->configuredPeriodMs;
 			const bool periodKnown = b->configuredPeriodMs <= 0.0 && st.periodMs > 0.0;
-			if (rebuild || b->configuredGen != gen || ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
+			const QueueShape queue = CurrentQueue();   // one snapshot per frame: a feed on another thread never races the graph build
+			const bool queueMoved = b->configuredQueue != queue;   // the record histories follow the queue (R + L + look-ahead)
+			if (rebuild || b->configuredGen != gen || queueMoved || ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
 			{
 				CardProfile card;
 				std::string why;
@@ -564,11 +569,11 @@ namespace Vpv
 				tier.framePeriodMs = st.periodMs;
 				GraphSettings gs;
 				gs.dims = dims;
-				gs.renderAhead = 0;
-				gs.laneLead = 1;
+				gs.renderAhead = queue.renderAhead;
+				gs.laneLead = queue.laneLead;
 				const size_t capacity = resync->queueCapacity.load(std::memory_order_acquire);
 				gs.queueDepth = static_cast<uint16_t>((std::max<size_t>)(4u, (std::min<size_t>)(capacity, 64u)));
-				gs.lookAheadWalk = 0;
+				gs.lookAheadWalk = queue.lookAheadWalk;
 				gs.ofaPresent = false;
 				gs.cardProfileKey = card.Identity();
 				ConsumerDecl report;
@@ -580,10 +585,11 @@ namespace Vpv
 					VpSkeleton::AddConsume(report, p);
 				const std::vector<ConsumerDecl> consumers{ report };
 				b->lane.SetStormHold(Resync::ResyncExtension::StormHeld(st.host));
-				// The record histories (quality_pattern, td.trail_summary) are seconds of source time: frames follow the measured period.
-				b->lane.Configure(st.settings.lane, VpSkeleton::SkeletonProducts(false, false, st.periodMs), consumers, gs, card, tier, seq, false);
+				// The record histories (quality_pattern, td.trail_summary): max(floor seconds, queue x period); frames follow the measured period.
+				b->lane.Configure(st.settings.lane, VpSkeleton::SkeletonProducts(false, false, st.periodMs, VpSkeleton::QueueFrames(gs)), consumers, gs, card, tier, seq, false);
 				b->configuredGen = gen;
 				b->configuredPeriodMs = st.periodMs;
+				b->configuredQueue = queue;
 				b->framesSinceConfigure = 0;
 				++st.configures;
 			}
@@ -642,10 +648,12 @@ namespace Vpv
 		{
 			const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
 			const bool hasBundle = b != nullptr;
+			const uint8_t queueWired = CurrentQueue().wired;
 			const bool due = st.frames <= kEarlyRefreshFrames || st.frames % kRefreshEvery == 1 || st.waiting != st.shownWaiting ||
-				hasBundle != st.shownBundle;
+				hasBundle != st.shownBundle || queueWired != st.shownQueueWired;
 			if (!due)
 				return;
+			st.shownQueueWired = queueWired;
 			st.shownWaiting = st.waiting;
 			st.shownBundle = hasBundle;
 
@@ -660,6 +668,7 @@ namespace Vpv
 			for (const std::string& p : st.settings.laneProblems)
 				problems += (problems.empty() ? "" : "; ") + p;
 			addDecision(FallbackCatalog::SkeletonKeys(problems));
+			addDecision(QueueDecision(queueWired));   // visible: the record histories sit at their floors until the queue is delivered
 			if (st.sealLateHook)
 				fb.push_back("skeleton_lane: switched on after the first frame; the lane binds the shared seal at the next source era");
 			if (!st.cardNote.empty())

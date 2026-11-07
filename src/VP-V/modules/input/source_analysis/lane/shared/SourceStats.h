@@ -11,6 +11,7 @@
 //   rect       evidence rect: rows/cols whose mean exceeds p1 + (p99 - p1) / 16 (NOT Bill's active picture; see U8)
 //   grain      median over 8x8 blocks of the RMS second difference
 //   distance   half the L1 distance of two normalised histograms (HalfL1Distance), the input of U7
+//   coarse     the matcher's 16-bin luma histogram of the 1/32 level (CoarseBin / CoarseL1 and its GLSL, the M3 cut input)
 // Determinism: integer sums in a fixed row order; a finished record never depends on how the rows were chunked.
 //
 // Header-only, C++14, no Windows or GPU headers.
@@ -296,6 +297,69 @@ struct Histogram10 {
     // First code whose cumulative count reaches `target` (double compare, as the veto's p99.9), or -1.
     int CodeReaching(double target) const { return FirstBinReaching<double>(bins, static_cast<int>(kHistBins), target); }
 };
+
+// ---- the matcher's coarse luma histogram (M3) --------------------------------------------------------------------------------
+// The matcher's 1/32 luma (8-bit-like codes) counted in 16 bins of 16 codes over the texels whose centres are inside the active
+// picture (the picture's own rect, U8); the distance of two frames is the L1 of the INTEGER counts over the picture's texel
+// count, 0..2 (a cut changes it, a hard pan does not). It is the histogram input of U7's matcher cut rule
+// (CutFadeJudge::TrustCut). CoarseBin / CoarseL1 are the CPU twin; CoarseHistHeader / CoarseHistBody are the matcher's GPU
+// text, moved byte-for-byte from motion/consumers/DejudderWarp.cpp (FRAME_TRUST_HEADER / FRAME_TRUST_BODY, M3 block): one work
+// group of 256, the kernel provides `i` (local index), samplers hist_a / hist_b (the 1/32 luma of A and B), the helpers
+// in_picture_(centre) and picture_texels_(size, 32.0), and consumes the result as `hist_d`.
+constexpr int kCoarseBins = 16;
+constexpr float kCoarseBinCodes = 16.0f;   // codes per bin
+
+inline int CoarseBin(float code)
+{
+    const int b = static_cast<int>(code / kCoarseBinCodes);   // truncates towards zero, like GLSL int()
+    return (std::min)((std::max)(b, 0), kCoarseBins - 1);
+}
+
+// L1 of two kCoarseBins-bin integer-count histograms over the picture's texel count (floor 1), float arithmetic in bin order.
+inline float CoarseL1(const uint32_t* a, const uint32_t* b, float pictureTexels)
+{
+    float d = 0.0f;
+    for (int j = 0; j < kCoarseBins; ++j)
+        d += std::fabs(static_cast<float>(a[j]) - static_cast<float>(b[j]));
+    return d / (std::max)(pictureTexels, 1.0f);
+}
+
+// The shared-memory declaration (the kernel guards it with its own `#ifdef REGIONAL`; no leading newline).
+inline const char* CoarseHistHeader()
+{
+    return R"GLSL(shared uint hist_bins_[32];   // M3: A's 16 bins, then B's (integer counts)
+)GLSL";
+}
+
+// The histogram sweep and the distance `hist_d` (no leading newline; the kernel guards it with `#ifdef REGIONAL`).
+inline const char* CoarseHistBody()
+{
+    return R"GLSL(// M3: the change of the 1/32 luma histograms (16 bins of 16 codes), L1 of
+// the normalised histograms (0..2): a cut changes it, a hard pan does not.
+float hist_d = 0.0;
+ivec2 ls_ = textureSize(hist_a, 0);
+int lc_ = ls_.x * ls_.y;
+float hist_n = picture_texels_(ls_, 32.0);   // 1/32 texels inside the picture
+// One sweep into shared integer bins (efficiency, owner 2026-10-14: was 16
+// sweeps with a reduction each); the counts and so the result are the same.
+if (i < 32u)
+    hist_bins_[i] = 0u;
+barrier();
+for (int k = int(i); k < lc_; k += 256) {
+    ivec2 p = ivec2(k % ls_.x, k / ls_.x);
+    if (!in_picture_((vec2(p) + vec2(0.5)) * 32.0))
+        continue;
+    atomicAdd(hist_bins_[clamp(int(texelFetch(hist_a, p, 0).r / 16.0), 0, 15)], 1u);
+    atomicAdd(hist_bins_[16 + clamp(int(texelFetch(hist_b, p, 0).r / 16.0), 0, 15)], 1u);
+}
+barrier();
+if (i == 0u) {
+    for (int j = 0; j < 16; j++)
+        hist_d += abs(float(hist_bins_[j]) - float(hist_bins_[16 + j]));
+    hist_d /= max(hist_n, 1.0);
+}
+)GLSL";
+}
 
 } // namespace SourceStats
 } // namespace VpUnit

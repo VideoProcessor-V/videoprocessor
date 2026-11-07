@@ -522,7 +522,7 @@ namespace ProductCatalogTestsNs
 			for (double period : periods) {
 				const Registry reg = SkeletonProducts(false, false, period);
 				Assert::IsTrue(reg.Validate());
-				for (uint8_t lane : { uint8_t(0), uint8_t(1), uint8_t(3) }) {
+				for (uint8_t lane : { uint8_t(0), uint8_t(1), uint8_t(2), uint8_t(3) }) {
 					GraphSettings gs = Settings(Dims{ 3840, 2160 }, lane);
 					gs.renderAhead = 8;
 					gs.laneJobsInFlight = 4;
@@ -537,12 +537,18 @@ namespace ProductCatalogTestsNs
 						else
 							Assert::IsTrue(int(n.livePool) >= int(n.history) + 1, L"live pool >= history + 1");
 					}
-					// The look-ahead form (quality_pattern) needs lane lead >= 3 (effective lead = min(declared 2, lane lead - 1)); a shorter queue
-					// resolves it to the causal substitute (a visible reduced mode). Both carry the same derived history depth.
+					// The look-ahead form (quality_pattern) stays in the graph while the queue supplies any lead: effective lead = min(declared 2,
+					// lane lead - 1), so lane 2 gives effective lead 1 (still quality_pattern, a shorter look-ahead) and lane >= 3 gives 2. Only a
+					// lane lead of 0 or 1 gives no lead and resolves it to the causal substitute (a visible reduced mode). Both carry the same derived history depth.
 					const Node* qp = g.Find(kQualityPattern);
 					const Node* qc = g.Find(kQualityPatternCausal);
-					Assert::IsTrue((qp != nullptr) == (lane >= 3), L"quality_pattern is in the graph exactly when the queue supplies its lead");
-					Assert::IsTrue(lane >= 3 || qc != nullptr, L"otherwise the causal substitute stands in");
+					Assert::IsTrue((qp != nullptr) == (lane >= 2), L"quality_pattern is in the graph exactly when the queue supplies some lead (lane lead >= 2)");
+					Assert::IsTrue(lane >= 2 || qc != nullptr, L"otherwise the causal substitute stands in");
+					if (qp) {
+						Assert::AreEqual(int(lane == 2 ? 1 : 2), int(qp->lead), L"effective lead = min(declared 2, lane lead - 1): lane 2 gives 1, lane 3 gives 2");
+						Assert::AreEqual(2, int(qp->declaredLead));
+						Assert::IsFalse(qp->shortQueue, L"a shortened look-ahead is not the causal substitute");
+					}
 					const Node* record = qp ? qp : qc;
 					Assert::IsNotNull(record);
 					Assert::AreEqual(int(QualityPatternHistoryFrames(period)), int(record->history), L"the node carries the derived depth, no silent change");
@@ -558,6 +564,60 @@ namespace ProductCatalogTestsNs
 			Assert::AreEqual(223, int(QualityPatternHistoryFrames(1000.0 / 240.0)));
 			Assert::IsFalse(FallbackCatalog::SkeletonHistoryCapped(note).reason.empty());
 			Assert::IsFalse(FallbackCatalog::SkeletonHistoryCapped("").engaged);
+		}
+
+		TEST_METHOD(RecordHistoriesAreDerivedFromTheConfiguredQueue)
+		{
+			// history_seconds = max(floor, queue multiple x (R + L + look-ahead) x period); frames = ceil(seconds / period), capped at kRecordHistoryMax.
+			const double p24 = 1001.0 / 24.0;
+			const double p60 = 1001.0 / 60.0;
+			Assert::AreEqual(unsigned(100), QueueFramesFor(8, 4, 88));
+			// The floors hold on a short queue. At 24 p (41.708 ms) the floors are 2 s = ceil(47.95) = 48 frames of quality pattern and
+			// 0.25 s = ceil(5.994) = 6 frames of trail summary. A queue of 3 frames (0.125 s) is under both floors; a queue of 7 frames
+			// (7 x 41.708 = 291.96 ms) is far under the 2 s floor but ABOVE the 0.25 s floor, so the trail summary follows it: 7 frames.
+			const unsigned shortQ = QueueFramesFor(2, 3, 2);
+			const unsigned tinyQ = QueueFramesFor(0, 1, 2);
+			Assert::AreEqual(unsigned(7), shortQ);
+			Assert::AreEqual(48, int(QualityPatternHistoryFrames(p24, shortQ)));
+			Assert::AreEqual(int(QualityPatternHistoryFrames(p24)), int(QualityPatternHistoryFrames(p24, shortQ)));
+			Assert::AreEqual(6, int(TdTrailSummaryHistoryFrames(p24, tinyQ)));
+			Assert::AreEqual(int(TdTrailSummaryHistoryFrames(p24)), int(TdTrailSummaryHistoryFrames(p24, tinyQ)));
+			Assert::AreEqual(7, int(TdTrailSummaryHistoryFrames(p24, shortQ)), L"7 queue frames exceed the 0.25 s floor (6 frames): the queue sets the depth");
+			// A long queue gives a longer history: 100 frames = 4.17 s at 24 p, above both floors. The same 100 frames are only 1.67 s at 60 p,
+			// below the 2 s floor, so the quality pattern keeps its floor there (120 frames) while the trail summary follows the queue.
+			Assert::AreEqual(100, int(QualityPatternHistoryFrames(p24, 100)));
+			Assert::AreEqual(100, int(TdTrailSummaryHistoryFrames(p24, 100)));
+			Assert::AreEqual(int(QualityPatternHistoryFrames(p60)), int(QualityPatternHistoryFrames(p60, 100)));
+			Assert::AreEqual(100, int(TdTrailSummaryHistoryFrames(p60, 100)));
+			// The registry carries the derived depths (the quality pattern, its causal substitute and the trail summary).
+			const Registry reg100 = SkeletonProducts(false, false, p24, 100);
+			Assert::IsTrue(reg100.Validate());
+			Assert::AreEqual(100, int(reg100.Get(kQualityPattern).history));
+			Assert::AreEqual(100, int(reg100.Get(kQualityPatternCausal).history));
+			Assert::AreEqual(100, int(reg100.Get(kTdTrailSummary).history));
+			Assert::AreEqual(48, int(SkeletonProducts(false, false, p24, 0).Get(kQualityPattern).history));
+			// Unmeasured period: today's behaviour (the field maximum), whatever the queue.
+			Assert::AreEqual(int(kRecordHistoryMax), int(QualityPatternHistoryFrames(0.0, 300)));
+			Assert::IsTrue(RecordHistoryCapNote(0.0, true, true, 300).empty());
+			// The cap and its visible note: exactly kRecordHistoryMax frames of queue is not capped, one more is, and the note names the queue.
+			Assert::IsTrue(RecordHistoryCapNote(p24, true, true, kRecordHistoryMax).empty());
+			const std::string over = RecordHistoryCapNote(p24, true, true, unsigned(kRecordHistoryMax) + 1u);
+			Assert::IsTrue(over.find("quality pattern history capped at 223 frames (the configured queue asks for 224 frames)") != std::string::npos, L"the queue cap is named");
+			Assert::IsTrue(over.find("td trail summary history capped at 223 frames (the configured queue asks for 224 frames)") != std::string::npos);
+			Assert::AreEqual(int(kRecordHistoryMax), int(QualityPatternHistoryFrames(p24, 300)));
+			// A rate-driven cap keeps its own wording, whatever a short queue adds.
+			Assert::IsTrue(RecordHistoryCapNote(1000.0 / 240.0, true, true, 7).find("quality pattern history capped at 223 frames (source rate above 111.5 fps)") != std::string::npos);
+			// Through a built graph: the note reads the graph's own queue (R + L + look-ahead walk), and the capped node holds the cap.
+			GraphSettings gs = Settings(Dims{ 3840, 2160 }, 1);
+			gs.renderAhead = 0;
+			gs.lookAheadWalk = 300;
+			const Registry regCap = SkeletonProducts(false, false, p24, QueueFrames(gs));
+			const Graph g = FullGraph(gs, regCap);
+			Assert::IsTrue(g.valid, L"a queue-driven cap still fits the slot counts at a lane lead of 1");
+			const Node* causal = g.Find(kQualityPatternCausal);
+			Assert::IsNotNull(causal);
+			Assert::AreEqual(int(kRecordHistoryMax), int(causal->history));
+			Assert::IsTrue(GraphHistoryCapNote(g, p24).find("(the configured queue asks for 301 frames)") != std::string::npos);
 		}
 
 		TEST_METHOD(GeneratedDocRegionMatchesTheCatalog)

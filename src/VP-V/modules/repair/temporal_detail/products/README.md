@@ -28,13 +28,13 @@ Registry ids (doc 72 section 1.1; ids 16-18 keep their numbers with new tokens a
 | 18 | `td.anchor_pass` (v1: td.admission) | anchor repair, Transient arena | T2 gap job | TemporalDetail (2) | T2 | 24.9 MB arena peak |
 | 20 | `p7g_camera_guide` | camera guidance, now REGISTERED (was claimed as `kSkeletonProductEnd`) | lane / camera worker | camera (1) | T0 | 0.6 MB |
 | 21 | `coding_evidence` (P16) | per 8x8 block 8 B + 256 B summary | lane (fused with P11) / TD / abstain | U13 CodingEvidence (1) | T0 | 1.04 MB |
-| 22 | `quality_pattern` (P15) | per-frame LANE product, role at lead 2 (NOT P14's held state) | lane CPU / TD / P15c | QualityPattern (1) | T0 | 64 B x history (2 s of the measured source rate) |
-| 23 | `quality_pattern.causal` (P15c) | the short-queue substitute of P15 | same | QualityPattern (1) | T0 | 64 B x history (2 s of the measured source rate) |
+| 22 | `quality_pattern` (P15) | per-frame LANE product, role at lead 2 (NOT P14's held state) | lane CPU / TD / P15c | QualityPattern (1) | T0 | 64 B x history (max(2 s, configured queue) of the measured source rate, at most 223 frames) |
+| 23 | `quality_pattern.causal` (P15c) | the short-queue substitute of P15 | same | QualityPattern (1) | T0 | 64 B x history (max(2 s, configured queue) of the measured source rate, at most 223 frames) |
 | 24 | `refined_field` (P3r) | DMVR-style per-block vectors + confidence; per-pixel offsets are NOT stored (derived on the fly) | lane after P3 / TD / unrefined P3 | U15 FieldRefine (1) | T0 | 1.04 MB |
 | 25 | `td.anchor_refs` | received luma of the last anchors | TD copy | TemporalDetail (2) | T1 | 0 (governed) |
 | 26 | `td.delta` | lane -> render hand-off of the repair delta | lane / TD apply / carry-forward | TemporalDetail (2) | T1 | 3.24 MB (stage 0) |
 | 27 | `td.maps` | THE consumer-facing per-block map product (12 fields, U19) | lane / TD apply / classical | U19 TdMapsView (1) | T1 | 0.78 MB |
-| 28 | `td.trail_summary` | CPU record per frame for source identity / status | TD job | TemporalDetail (2) | T1 | 256 B x history (0.25 s of the measured source rate) |
+| 28 | `td.trail_summary` | CPU record per frame for source identity / status | TD job | TemporalDetail (2) | T1 | 256 B x history (max(0.25 s, configured queue) of the measured source rate, at most 223 frames) |
 
 The seven per-block map reservations of the first list (trail confidence, residual + validity, real detail, grain level, stability,
 lighting view, I-to-I drift) are FIELDS of `td.maps` (`TdMapsView::Field`); the per-pixel BDOF/PROF offsets are dropped (derived by U15's accessor).
@@ -43,7 +43,7 @@ Consumer fallback when absent: each consumer's classical form, byte-identical to
 **Budget-governed, no fixed tiers.** The registry declares each large buffer at its FLOOR (stage 0: the repair of the still / dark regions
 plus the full-resolution mid band at the true source resolution, the least the budget grants). `TdProductContracts.h` lists the larger stages
 (`td.memory` full, `td.anchor_refs` 3 anchors, `td.delta` with the full-resolution atlas); the governor adds them while VRAM and ms headroom
-last and sheds them in reverse order, each step visible. Declared totals at 4K: floor 54.95 MB GPU (+ 24.9 MB arena peak; the CPU records scale with the measured source rate: 7.7 KB at 24 p, at most 85.6 KB unmeasured: 384 B of quality-pattern records and 256 B of trail summary per frame of `kRecordHistoryMax` = 223), full
+last and sheds them in reverse order, each step visible. Declared totals at 4K: floor 54.95 MB GPU (+ 24.9 MB arena peak; the CPU records scale with the measured source rate and the configured queue (history_seconds = max(floor, queue multiple x (render-ahead + lane lead + look-ahead frames) x period)): 7.7 KB at 24 p on a short queue, at most 85.6 KB unmeasured: 384 B of quality-pattern records and 256 B of trail summary per frame of `kRecordHistoryMax` = 223), full
 241.6 MB (`TdProducts::BudgetAt`, pinned by a test). Ring multipliers come from the graph.
 
 **Inputs beyond what the registry declares.** The framework limit is now 16 inputs per product (`kMaxInputs`) and 10 consumed products per consumer

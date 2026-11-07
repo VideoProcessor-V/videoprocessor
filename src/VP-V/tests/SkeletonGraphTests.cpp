@@ -1414,14 +1414,14 @@ namespace SkeletonGraphTestsNs
 			lane.Configure(ls, SingleStoreRegistry(), OneConsumer(kStoreReader), Rig::MakeSettings(2), BigCard(1ull << 30), tier, 0, false);
 			Assert::IsTrue(lane.Active());
 			for (const std::string& l : lane.StatusLines())
-				Assert::IsFalse(Has(l, "single-store reader frames"), L"nothing to show yet");
+				Assert::IsFalse(Has(l, "held-state reader frames"), L"nothing to show yet");
 			const std::shared_ptr<LaneState> st = lane.State();
 			const int store = st->IndexOf(kStore);
 			Assert::IsTrue(store >= 0);
 			st->table->At(size_t(store)).MutableCounters().storeWaitRejected.fetch_add(3, std::memory_order_relaxed);
 			bool shown = false;
 			for (const std::string& l : lane.StatusLines())
-				shown = shown || (Has(l, "3 single-store reader frames waited on a rejected store frame") && Has(l, "no live fill"));
+				shown = shown || (Has(l, "3 single-store / held-state reader frames waited on a rejected store frame") && Has(l, "no live fill"));
 			Assert::IsTrue(shown, L"shown in plain language");
 		}
 

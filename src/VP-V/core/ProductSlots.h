@@ -1037,7 +1037,7 @@ public:
                     // A reader of a SINGLE-STORE or HELD-STATE product (P14 / P14g: livePool 0) whose frame is Rejected (the seal refused it or the writer made none): it has no live pool, so the
                     // frame never gets content and the reader's lane job does not run for that frame (this call returns false; the render makes
                     // the reader live in its declared reduced form, or it is unavailable). Counted once per reader frame AND per store input (not
-                    // per poll) on the store's set, so the wait is visible (status line "single-store reader frames waited ...").
+                    // per poll) on the store's set, so the wait is visible (status line "single-store / held-state reader frames waited ...").
                     const Node* src = NodeOf(in.product);
                     const int ni = IndexOfNode(id);
                     if (src && (src->singletonStore || src->heldState) && ni >= 0 && set->RejectedAwaitingLive(aseq)) {
