@@ -9,6 +9,7 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
     const std::function<void(bool, const char*)>& require, const std::function<void(ConfigEditorWindow&)>& save);
 int RunHookLayerConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
     const std::function<void(bool, const char*)>& require, const std::function<void(ConfigEditorWindow&)>& save);   // VPV-HOOK
+int WriteConfigIdentity(const QString& outPath, const QStringList& extraFiles);   // VPV-HOOK identity kit (ConfigIdentityDump.cpp)
 #include "../VideoProcessor-Config/ToneChartPanel.h"
 #include <QElapsedTimer>
 #include <QImage>
@@ -12284,6 +12285,14 @@ int main(int argc, char** argv)
             QApplication::setStyle(VpTheme::CreateStyle());
             application.setStyleSheet(VpTheme::StyleSheet());
             return writeSettingsScreens(QString::fromLocal8Bit(argv[i + 1]), QString::fromLocal8Bit(argv[i + 2]));
+        }
+        else if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--identity"))   // VPV-HOOK identity kit
+        {
+            QApplication::setStyle(VpTheme::CreateStyle());
+            application.setStyleSheet(VpTheme::StyleSheet());
+            QStringList extra;
+            for (int k = i + 2; k < argc; ++k) extra << QString::fromLocal8Bit(argv[k]);
+            return WriteConfigIdentity(QString::fromLocal8Bit(argv[i + 1]), extra);
         }
         else if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--resave"))
         {
