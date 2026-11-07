@@ -100,6 +100,18 @@ REGISTRY = [
      "owning_unit": ["src/VP-V/modules/input/source_analysis/identity"],
      "signatures": _c(r"snap(shot)?\.bitrateQuality", r"\.bitrateQuality.*(strength|allowance|tier)"),
      "allow": _c(r"SourceQuality::")},
+    # R1-W1-RES: the reserved temporal-detail engine products (one read API, TdProducts::Read; the engine itself is reset 2).
+    {"id": "U13", "name": "temporal_detail_products",
+     "owning_unit": ["src/VP-V/modules/repair/temporal_detail/products"],
+     "signatures": _c(r"trail[_ ]?confidence", r"real[_ ]?detail[_ ]?(map|product)", r"i[-_ ]to[-_ ]i[_ ]drift",
+                      r"quality[_ ]?pattern", r"reference[_ ]?(set[_ ]?)?mirror", r"refined[_ ]?vectors?",
+                      r"\btd\.(residual|validity|stability|lighting|drift|mirror|base_long|base_short|refine_pixel)\b"),
+     "allow": _c(r"TdProducts::\w+")},
+    # R1-W1-RES: the basic polyphase chroma upsample (a stand-in for the hybrid CfL + MV chroma of reset 2).
+    {"id": "U14", "name": "chroma_upsample_polyphase",
+     "owning_unit": ["src/VP-V/modules/scaling/chroma_upscale/basic"],
+     "signatures": _c(r"polyphase", r"\blanczos\w*\s*\(", r"chroma[_ ]?siting"),
+     "allow": _c(r"BasicChroma::\w+")},
 ]
 
 DECLARATION_PATHS = _c(

@@ -1,0 +1,40 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "scaling.chroma_upscale.basic",
+  "unit": "scaling",
+  "order": 121,
+  "status": "draft",
+  "code_location": "migrated",
+  "shared_unit": {
+    "name": "BasicChroma",
+    "id": "U14",
+    "version": 1,
+    "product": "none: 4:4:4 chroma planes (Cb Cr or P T) handed to libplacebo with zero shifts"
+  },
+  "live_files": [
+    "src/VP-V/modules/scaling/chroma_upscale/basic/BasicChroma.h",
+    "src/VP-V/modules/scaling/chroma_upscale/basic/BasicChromaGpu.h",
+    "src/VP-V/modules/scaling/chroma_upscale/basic/BasicChromaGpu.cpp",
+    "src/VP-V/modules/scaling/chroma_upscale/basic/README.md",
+    "src/VP-V/modules/scaling/chroma_upscale/basic/tests/BasicChromaTests.cpp"
+  ],
+  "forwarding_headers": [],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [],
+    "upstream_modules": [
+      "scaling.chroma_upscale",
+      "scaling.rebase"
+    ]
+  },
+  "fallback_when_missing": "Not wired in reset 1. When wired: off = libplacebo's chroma upscaler (Original pathway); a refused geometry keeps it for that frame and says why.",
+  "fallback_entry": "Chroma upscale: libplacebo (<reason>)"
+}

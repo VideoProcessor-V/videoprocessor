@@ -84,6 +84,9 @@ constexpr uint32_t kExpectedRebaseUnit = 1;
 constexpr uint32_t kExpectedHalfLumaUnit = 1;
 constexpr uint32_t kExpectedMonitorUnit = 1;
 constexpr uint32_t kExpectedSourceIdentityUnit = 1;
+// The reserved temporal-detail engine products (repair/temporal_detail/products, TdProducts::kUnitVersion): reset 1 reserves the
+// ids / layouts / fill rules, reset 2 builds the producers.
+constexpr uint32_t kExpectedTdProductsUnit = 1;
 
 inline const std::vector<ProductRow>& ProductRows()
 {
@@ -109,6 +112,23 @@ inline const std::vector<ProductRow>& ProductRows()
         { kTdAdmission, "repair/temporal_detail", kExpectedTemporalDetailUnit, "td admission cleaner" },
         // P14 is a HELD-STATE product: the monitor worker publishes it on each consensus evaluation, no lane producer, no live fill.
         { kSourceIdentity, "input/source_analysis/identity", kExpectedSourceIdentityUnit, "" },
+        // The reserved temporal-detail engine products: no producer in reset 1 (a placeholder publishes nothing), so every
+        // consumer's read path finds them absent and takes its classical form visibly (TdProductReads.h).
+        { kTdQualityPattern, "repair/temporal_detail/products", kExpectedTdProductsUnit, "reserved (engine: reset 2)" },
+        { kTdTrailConfidence, "repair/temporal_detail/products", kExpectedTdProductsUnit, "reserved (engine: reset 2)" },
+        { kTdResidual, "repair/temporal_detail/products", kExpectedTdProductsUnit, "reserved (engine: reset 2)" },
+        { kTdValidity, "repair/temporal_detail/products", kExpectedTdProductsUnit, "reserved (engine: reset 2)" },
+        { kTdRealDetail, "repair/temporal_detail/products", kExpectedTdProductsUnit, "reserved (engine: reset 2)" },
+        { kTdGrainLevel, "repair/temporal_detail/products", kExpectedTdProductsUnit, "reserved (engine: reset 2)" },
+        { kTdStability, "repair/temporal_detail/products", kExpectedTdProductsUnit, "reserved (engine: reset 2)" },
+        { kTdLighting, "repair/temporal_detail/products", kExpectedTdProductsUnit, "reserved (engine: reset 2)" },
+        { kTdDrift, "repair/temporal_detail/products", kExpectedTdProductsUnit, "reserved (engine: reset 2)" },
+        { kTdMotionModel, "repair/temporal_detail/products", kExpectedTdProductsUnit, "" },
+        { kTdMirror, "repair/temporal_detail/products", kExpectedTdProductsUnit, "" },
+        { kTdBaseLong, "repair/temporal_detail/products", kExpectedTdProductsUnit, "reserved (engine: reset 2)" },
+        { kTdBaseShort, "repair/temporal_detail/products", kExpectedTdProductsUnit, "reserved (engine: reset 2)" },
+        { kTdRefinedVectors, "repair/temporal_detail/products", kExpectedTdProductsUnit, "reserved (engine: reset 2)" },
+        { kTdRefinePixel, "repair/temporal_detail/products", kExpectedTdProductsUnit, "reserved (engine: reset 2)" },
     };
     return rows;
 }
@@ -276,6 +296,33 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
                             {}, own, "product.dither_need", false, { kSourceIdentity }));
         r.push_back(MakeRow(4, "sigma-delta (analysis field mapped)", "VP-V/modules/output/dither", PathwayUnit::Output, 10,
                             { kP3AnalysisField }, own, "product.sigma_delta", true));
+        // The consumers' READ PATHS of the reserved temporal-detail engine products (R1-W1-RES). Each reads the products it will use
+        // when the engine exists, finds them absent in reset 1 and runs its classical form (byte-identical; visible once the engine is
+        // requested). The sets equal TdProducts::NeededBy (a test compares). Family names are separate from the module rows above: the
+        // read path is its own reader (a module row reads the shared analysis products, this reads the engine's).
+        r.push_back(MakeRow(19, "adaptive scaling (temporal-detail read path)", "VP-V/modules/scaling/output/AdaptiveDownscaleStage",
+                            PathwayUnit::Scaling, 21, { kTdTrailConfidence, kTdRealDetail, kTdGrainLevel, kTdStability }, own,
+                            "product.td_scaler", false, { kTdMotionModel }));
+        r.push_back(MakeRow(20, "dither need (temporal-detail read path)", "VP-V/modules/output/dither/DitherNeed",
+                            PathwayUnit::Output, 16, { kTdTrailConfidence, kTdGrainLevel, kTdStability }, own,
+                            "product.td_dither", false, { kTdMotionModel }));
+        r.push_back(MakeRow(21, "chroma upscale (temporal-detail read path)", "VP-V/modules/scaling/chroma_upscale/basic/BasicChroma",
+                            PathwayUnit::Scaling, 11, { kTdBaseLong, kTdBaseShort, kTdRefinedVectors, kTdTrailConfidence, kTdRealDetail },
+                            own, "product.td_chroma", false, { kTdMirror }));
+        // The engine's side: three rows of ONE family ("temporal detail", the component of the module row at repair 10; one reader,
+        // at its earliest position) so the engine is the live-fill owner of every engine map (the products of its own pass), while
+        // the held records (quality pattern, motion model, mirror) are read at lag 1 and have no live fill (the P14 rule).
+        r.push_back(MakeRow(22, "temporal detail engine (reserved: residual, lighting, drift)", "VP-V/modules/repair/temporal_detail/products",
+                            PathwayUnit::Repair, 13, { kTdResidual, kTdValidity, kTdLighting, kTdDrift, kTdRefinePixel }, own,
+                            "product.td_engine", false, { kTdQualityPattern }));
+        r.back().family = "temporal detail";
+        r.push_back(MakeRow(23, "temporal detail engine (reserved: confidence, detail, grain, stability)", "VP-V/modules/repair/temporal_detail/products",
+                            PathwayUnit::Repair, 14, { kTdTrailConfidence, kTdRealDetail, kTdGrainLevel, kTdStability, kTdRefinedVectors }, own,
+                            "product.td_engine", false, { kTdMotionModel }));
+        r.back().family = "temporal detail";
+        r.push_back(MakeRow(24, "temporal detail engine (reserved: base buffers)", "VP-V/modules/repair/temporal_detail/products",
+                            PathwayUnit::Repair, 15, { kTdBaseLong, kTdBaseShort }, own, "product.td_engine", false, { kTdMirror }));
+        r.back().family = "temporal detail";
         // VectorDemand consumers: ids and reads from VectorDemandProducts.h
         for (int i = 0; i < VectorDemand::kConsumerCount; ++i) {
             const VectorDemand::Consumer c = VectorDemand::ConsumerAt(i);

@@ -110,6 +110,13 @@
   },
   {
    "kind": "class",
+   "value": "BasicChromaGpuTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/scaling/chroma_upscale/basic/tests/BasicChromaTests.cpp",
+   "note": "The GLSL pass vs the CPU model byte for byte; WARP unless VP_TEST_GPU=hardware (the chain gate runs it with VP_TEST_ADAPTER=NVIDIA)."
+  },
+  {
+   "kind": "class",
    "value": "CaptureUnpackHookTests",
    "category": "GpuWarp",
    "file": "src/VP-V/modules/input/capture/tests/CaptureUnpackHookTests.cpp",

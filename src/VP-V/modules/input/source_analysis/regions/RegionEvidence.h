@@ -890,6 +890,7 @@ namespace RegionEvidence
 			AppendSourceRingProduct(decls);
 			AppendTemporalDetailProducts(decls);
 			AppendSourceIdentityProduct(decls);
+			AppendTemporalDetailReservedProducts(decls);   // R1-W1-RES: the reserved engine products complete the skeleton set
 		}
 		ProductIds ids;
 		ids.grainSplit = kP10GrainSplit;

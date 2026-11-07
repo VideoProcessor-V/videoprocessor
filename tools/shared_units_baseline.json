@@ -5,7 +5,14 @@
    "name": "grain_estimate",
    "blocking": false,
    "baseline_duplicates": 37,
-   "known_false_positive": []
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/repair/temporal_detail/products/TdProductContracts.h",
+     "pattern": "kTdGrainLevel|td\\.grain_level|grain rms",
+     "kind": "false_positive",
+     "reason": "the reserved td.grain_level product's id and contract text (own grain vs coding noise, produced by the engine in reset 2), not a grain estimator"
+    }
+   ]
   },
   "U2": {
    "name": "gaussian_band_split",
@@ -229,6 +236,18 @@
    "name": "source_quality",
    "blocking": false,
    "baseline_duplicates": 0,
+   "known_false_positive": []
+  },
+  "U13": {
+   "name": "temporal_detail_products",
+   "blocking": false,
+   "baseline_duplicates": 0,
+   "known_false_positive": []
+  },
+  "U14": {
+   "name": "chroma_upsample_polyphase",
+   "blocking": false,
+   "baseline_duplicates": 8,
    "known_false_positive": []
   }
  }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscale.h>
 
 #include <libplacebo/renderer.h>
@@ -141,6 +142,13 @@ namespace AdaptiveDownscaleStage
 			return FallbackCatalog::OutputScaling(requested, failureHeld ? 1u : 0u, ssimMissing);
 		}
 
+		// R1-W1-RES: the read path of the temporal-detail engine's products (confidence, real detail, grain, stability, motion
+		// model). Reset 1: the placeholder producer publishes nothing and the engine is not requested, so this is "not requested"
+		// (classical weights, byte-identical, no status line). Once the engine is requested and a product is absent, the classical
+		// bitrate-quality weights stand in VISIBLY: the "product.td_scaler" decision is engaged and StatusLines() carries its line.
+		const TdProducts::ReadResult& TemporalDetailRead() const { return tdRead; }
+		FallbackCatalog::Decision TemporalDetailFallback() const { return tdRead.fallback; }
+
 	private:
 		AdaptiveDownscale::Module& module;
 		bool upscaleThisFrame = false;   // Stage 8b on the frame being built
@@ -158,5 +166,6 @@ namespace AdaptiveDownscaleStage
 		unsigned long long failuresSeen = 0;
 		unsigned long long lastFailureTick = 0;   // GetTickCount64() of the last frame with new failures
 		bool failureHeld = false;          // a failure within kFailureHoldMs
+		TdProducts::ReadResult tdRead;     // the temporal-detail read path of the frame just registered (nothing used in reset 1)
 	};
 }

@@ -65,7 +65,7 @@ class CheckSharedUnitsTest(unittest.TestCase):
 
     def test_every_unit_registered(self):
         ids = [e["id"] for e in csu.REGISTRY]
-        self.assertEqual(ids, ["U%d" % i for i in range(1, 13)])
+        self.assertEqual(ids, ["U%d" % i for i in range(1, 15)])
 
     def test_default_run_exits_zero_even_with_duplicates(self):
         rc, out = _run(["--root", self.root])

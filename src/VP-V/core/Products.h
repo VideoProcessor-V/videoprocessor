@@ -72,6 +72,24 @@ enum : ProductId {
     kTdRefstore,
     kTdAdmission,
     kSourceIdentity,      // P14 (doc 61 D-SID1): HELD-STATE source identity record; appended last so every earlier id is unchanged
+    // RESERVED temporal-detail engine products (R1-W1-RES; the engine is built in reset 2, doc 67v2 section 13). Declared now so the
+    // consumers' read paths (adaptive scaler, dither need / sigma-delta, chroma stage) are wired against fixed ids, contracts and
+    // unit versions, and reset 2 only fills producers. Contracts, fill rules and the VRAM budget: modules/repair/temporal_detail/products.
+    kTdQualityPattern,    // td.quality_pattern   frame quality pattern (from the source identity record, doc 68v2)
+    kTdTrailConfidence,   // td.trail_confidence  per-block confidence of the carried trail
+    kTdResidual,          // td.residual          residual map of the re-prediction
+    kTdValidity,          // td.validity          validity map of the carried data
+    kTdRealDetail,        // td.real_detail       validated carried structure versus rounding noise and blocking
+    kTdGrainLevel,        // td.grain_level       own grain versus coding noise, per block
+    kTdStability,         // td.stability         anchor-held regions
+    kTdLighting,          // td.lighting          lighting layer state
+    kTdDrift,             // td.drift             I-to-I drift map
+    kTdMotionModel,       // td.motion_model      camera / object model state, near-I calibrated (held state)
+    kTdMirror,            // td.mirror            reference-set mirror record (held state)
+    kTdBaseLong,          // td.base_long         long-term low-res base buffers (+ chroma 4:2:0 planes)
+    kTdBaseShort,         // td.base_short        short-term low-res base buffers = the reference mirror's pictures (+ chroma)
+    kTdRefinedVectors,    // td.refined_vectors   refined per-block vectors + confidence (DMVR-style)
+    kTdRefinePixel,       // td.refine_pixel      optional per-pixel refinement offsets (BDOF/PROF-style; store vs recompute TBD)
     kSkeletonProductEnd
 };
 
@@ -794,8 +812,180 @@ inline void AppendSourceIdentityProduct(std::vector<ProductDecl>& decls)
     decls.push_back(p);
 }
 
-// The registry the skeleton runs with: the first products, the camera products, then P10..P13 and the TemporalDetail
-// products, in fixed id order. THE one assembly point.
+// The RESERVED temporal-detail engine products (see the enum above). Planning sizes per slot: block maps at the 8 px edge
+// (shift 3), 16 px (shift 4), half-resolution maps (shift 1) and the low-res BASE at 1/4 per axis (shift 2, doc 67v2 section 6:
+// "1/4 to 1/8 per axis"; the 1/4 form is the upper bound) with the chroma 4:2:0 planes at 1/8 per axis. The history of the base
+// products is their slot count. No producer exists in reset 1: the graph never reaches them unless a consumer that reads them is
+// active, and the three consumer read paths treat an absent product as "classical form" (visible, never log-only).
+constexpr uint8_t kTdLongSlots = 2;    // long-term: the repaired I-frame + the previous I (doc 67v2 6.1)
+constexpr uint8_t kTdShortSlots = 6;   // short-term: one reference about every mini-GOP (4-8 frames, doc 67v2 6.2)
+constexpr uint32_t kTdMirrorRecordBytes = 2048;
+constexpr uint32_t kTdMotionModelBytes = 4096;
+constexpr uint32_t kTdQualityPatternBytes = 256;
+inline void AppendTemporalDetailReservedProducts(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    const CounterMask content = Bit(kFull) | Bit(kContinuity);
+    const CounterMask tdSettings = Bit(kSettingsRebase) | Bit(kSettingsAnalysis);
+    const CounterMask rebased = content | Bit(kRebaseH) | Bit(kRebaseV);
+
+    // Quality pattern: a small per-frame record derived from the held source identity record (system RAM, lag-1 read of P14).
+    ProductDecl qp = Make(kTdQualityPattern, "td.quality_pattern", "td frame quality pattern", Backend::Cpu, 1, Tier::T0,
+                          content, Bit(kSettingsAnalysis));
+    AddInput(qp, kSourceIdentity, 1);
+    qp.size.fixedBytes = kTdQualityPatternBytes;
+    qp.residency = Residency::SystemRam;
+    qp.rarelyTouched = true;
+    qp.missingInputForm = true;
+    decls.push_back(qp);
+
+    // Trail confidence: R16F per 8 px block.
+    ProductDecl tc = Make(kTdTrailConfidence, "td.trail_confidence", "td trail confidence", Backend::GpuCompute, 1, Tier::T1,
+                          rebased, tdSettings);
+    AddInput(tc, kTdAnalysis, 0);
+    AddInput(tc, kP3AnalysisField, 0);
+    AddTerm(tc, 3, 2);
+    tc.rebasedPlane = true;
+    tc.refRenderMs = 0.1f;
+    decls.push_back(tc);
+
+    // Residual: R16F at half resolution (the residual of the re-prediction against the received picture).
+    ProductDecl rs = Make(kTdResidual, "td.residual", "td residual map", Backend::GpuCompute, 1, Tier::T1, rebased, tdSettings);
+    AddInput(rs, kTdAnalysis, 0);
+    AddInput(rs, kP13SourceRing, 0);
+    AddTerm(rs, 1, 2);
+    rs.rebasedPlane = true;
+    rs.refRenderMs = 0.4f;
+    decls.push_back(rs);
+
+    // Validity: R8 per 8 px block (valid / refresh / fade / invalidate state of the carried data).
+    ProductDecl va = Make(kTdValidity, "td.validity", "td validity map", Backend::GpuCompute, 1, Tier::T1, rebased, tdSettings);
+    AddInput(va, kTdResidual, 0);
+    AddInput(va, kTdTrailConfidence, 0);
+    AddTerm(va, 3, 1);
+    va.rebasedPlane = true;
+    va.refRenderMs = 0.05f;
+    decls.push_back(va);
+
+    // Real detail: R8 at half resolution.
+    ProductDecl rd = Make(kTdRealDetail, "td.real_detail", "td real-detail map", Backend::GpuCompute, 1, Tier::T1, rebased,
+                          tdSettings);
+    AddInput(rd, kTdResidual, 0);
+    AddInput(rd, kTdValidity, 0);
+    AddInput(rd, kP10GrainSplit, 0);
+    AddTerm(rd, 1, 1);
+    rd.rebasedPlane = true;
+    rd.refRenderMs = 0.3f;
+    decls.push_back(rd);
+
+    // Grain level: RG16F per 16 px block (own grain, coding noise).
+    ProductDecl gl = Make(kTdGrainLevel, "td.grain_level", "td grain level", Backend::GpuCompute, 1, Tier::T1, rebased, tdSettings);
+    AddInput(gl, kP10GrainSplit, 0);
+    AddInput(gl, kTdResidual, 0);
+    AddInput(gl, kTdQualityPattern, 0);
+    AddTerm(gl, 4, 4);
+    gl.rebasedPlane = true;
+    gl.refRenderMs = 0.05f;
+    decls.push_back(gl);
+
+    // Stability: R8 per 8 px block (anchor-held regions).
+    ProductDecl st = Make(kTdStability, "td.stability", "td stability map", Backend::GpuCompute, 1, Tier::T1, rebased, tdSettings);
+    AddInput(st, kTdValidity, 0);
+    AddInput(st, kTdTrailConfidence, 0);
+    AddTerm(st, 3, 1);
+    st.rebasedPlane = true;
+    st.refRenderMs = 0.05f;
+    decls.push_back(st);
+
+    // Lighting layer state: RGBA16F per 16 px block.
+    ProductDecl li = Make(kTdLighting, "td.lighting", "td lighting layer state", Backend::GpuCompute, 1, Tier::T1, rebased,
+                          tdSettings | Bit(kSettingsOutput));
+    AddInput(li, kP12LightLevel, 0);
+    AddInput(li, kTdValidity, 0);
+    AddTerm(li, 4, 8);
+    li.rebasedPlane = true;
+    li.refRenderMs = 0.1f;
+    decls.push_back(li);
+
+    // I-to-I drift: RG16F per 16 px block (drift magnitude, direction class). T2: a diagnostic of the re-verification.
+    ProductDecl dr = Make(kTdDrift, "td.drift", "td I-to-I drift map", Backend::GpuCompute, 1, Tier::T2, rebased, tdSettings);
+    AddInput(dr, kTdBaseLong, 0);
+    AddInput(dr, kTdValidity, 0);
+    AddTerm(dr, 4, 4);
+    dr.rebasedPlane = true;
+    dr.refRenderMs = 0.2f;
+    decls.push_back(dr);
+
+    // Motion model state: held, CPU (camera / object model calibrated near the I-frame).
+    ProductDecl mm = Make(kTdMotionModel, "td.motion_model", "td motion model state (held)", Backend::Cpu, 1, Tier::T0, content,
+                          Bit(kSettingsMotion));
+    AddInput(mm, kP9CameraSmoothed, 0);
+    AddInput(mm, kP8CameraLabels, 0);
+    mm.size.fixedBytes = kTdMotionModelBytes;
+    mm.residency = Residency::SystemRam;
+    mm.missingInputForm = true;
+    decls.push_back(mm);
+
+    // Reference-set mirror: held record of the stream's reference set (slot handles, source sequence, quality, age).
+    ProductDecl mi = Make(kTdMirror, "td.mirror", "td reference-set mirror (held)", Backend::Cpu, 1, Tier::T0, content,
+                          Bit(kSettingsAnalysis));
+    AddInput(mi, kSourceIdentity, 1);
+    AddInput(mi, kP4SourceStats, 0);
+    mi.size.fixedBytes = kTdMirrorRecordBytes;
+    mi.residency = Residency::SystemRam;
+    mi.missingInputForm = true;
+    decls.push_back(mi);
+
+    // Long-term / short-term low-res base buffers: luma R16 at 1/4 per axis + Cb and Cr planes (4:2:0) R16 at 1/8 per axis.
+    // history = the slot count (each slot is a stored picture, not a previous frame of a per-frame product).
+    ProductDecl bl = Make(kTdBaseLong, "td.base_long", "td long-term low-res base (+chroma)", Backend::GpuCompute, kTdLongSlots,
+                          Tier::T1, rebased, tdSettings);
+    AddInput(bl, kP10GrainSplit, 0);
+    AddInput(bl, kP13SourceRing, 0);
+    AddTerm(bl, 2, 2);
+    AddTerm(bl, 3, 4);
+    bl.rebasedPlane = true;
+    bl.refRenderMs = 0.1f;
+    decls.push_back(bl);
+
+    ProductDecl bs = Make(kTdBaseShort, "td.base_short", "td short-term low-res base (+chroma)", Backend::GpuCompute, kTdShortSlots,
+                          Tier::T1, rebased, tdSettings);
+    AddInput(bs, kP10GrainSplit, 0);
+    AddInput(bs, kP13SourceRing, 0);
+    AddInput(bs, kTdMirror, 0);
+    AddTerm(bs, 2, 2);
+    AddTerm(bs, 3, 4);
+    bs.rebasedPlane = true;
+    bs.refRenderMs = 0.1f;
+    decls.push_back(bs);
+
+    // Refined per-block vectors + confidence (DMVR-style): 2 x int16 vector + u8 confidence + u8 flags = 6 B, padded to 8 B per 8 px block.
+    ProductDecl rv = Make(kTdRefinedVectors, "td.refined_vectors", "td refined vectors + confidence", Backend::GpuCompute, 1,
+                          Tier::T1, rebased | Bit(kSettingsMotion), tdSettings | Bit(kSettingsMotion));
+    AddInput(rv, kP3AnalysisField, 0);
+    AddInput(rv, kP2VectorPair, 0);
+    AddInput(rv, kTdBaseShort, 1);
+    AddTerm(rv, 3, 8);
+    rv.rebasedPlane = true;
+    rv.refRenderMs = 0.5f;
+    decls.push_back(rv);
+
+    // Per-pixel refinement offsets (BDOF/PROF-style). STORE vs RECOMPUTE is decided by measurement: the declared size is the STORE
+    // worst case (RG16F at half resolution); the recompute form needs no storage and the declaration shrinks to 0 with it.
+    ProductDecl rp = Make(kTdRefinePixel, "td.refine_pixel", "td per-pixel refinement offsets (store vs recompute TBD)",
+                          Backend::GpuCompute, 0, Tier::T2, rebased, tdSettings);
+    AddInput(rp, kTdRefinedVectors, 0);
+    AddTerm(rp, 1, 4);
+    rp.rebasedPlane = true;
+    rp.refRenderMs = 0.4f;
+    decls.push_back(rp);
+}
+
+// The registry the skeleton runs with: the first products, the camera products, then P10..P13, the TemporalDetail
+// products, P14 and the reserved temporal-detail engine products, in fixed id order. THE one assembly point.
 // `compactGrain` / `compactChroma`: the GRANTED storage of P10 (luma) and P10c (chroma planes).
 inline Registry SkeletonProducts(bool compactGrain, bool compactChroma)
 {
@@ -806,6 +996,7 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma)
     AppendSourceRingProduct(d);
     AppendTemporalDetailProducts(d);
     AppendSourceIdentityProduct(d);
+    AppendTemporalDetailReservedProducts(d);
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }
