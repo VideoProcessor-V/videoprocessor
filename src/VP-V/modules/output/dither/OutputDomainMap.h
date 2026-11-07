@@ -155,7 +155,7 @@ namespace OutputDomainMap
 				const double h11 = -4.0 * t3 + 7.0 * t4 - 3.0 * t5;
 				const double startPosition = centerProtection * ratio;
 				const double startSlope = ratio;
-				const double edgeSlope = std::max(0.20, 1.0 - 0.5 * (ratio - 1.0) * curve);
+				const double edgeSlope = (std::max)(0.20, 1.0 - 0.5 * (ratio - 1.0) * curve);
 				mapped = h00 * startPosition + h10 * span * startSlope + h01 + h11 * span * edgeSlope;
 			}
 			return (centered < 0.0 ? -mapped : mapped) * 0.5 + 0.5;
@@ -232,7 +232,7 @@ namespace OutputDomainMap
 		r.y = y;
 		if (!detail::Valid(c) || !detail::Fin(x) || !detail::Fin(y))
 		{
-			r.valid = detail::Valid(c);
+			r.valid = false;   // the input is returned unchanged
 			return r;
 		}
 		const Box a = detail::ActiveOf(c), o = detail::OutputOf(c);
@@ -274,7 +274,7 @@ namespace OutputDomainMap
 	}
 
 	// The record's model vectors (one per block, P8 modelX / modelY, source px at the block centre) to output-px vectors.
-	// outVx / outVy are resized to the grid; blocks whose start or end leave the active picture get 0 and outInside = 0.
+	// outVx / outVy are resized to the grid; a block whose start or end leaves the active picture keeps its (linearly extended) vector and has outInside = 0.
 	// Returns false (outputs zero) when the map is not valid.
 	inline bool MapBlockVectors(const Config& c, const CameraModel::Rect& picture, int gridW, int gridH, double blockSize,
 		const std::vector<float>& modelX, const std::vector<float>& modelY,
@@ -293,12 +293,9 @@ namespace OutputDomainMap
 				double cx = 0, cy = 0;
 				CameraModel::BlockCentre(bx, by, blockSize, picture, &cx, &cy);
 				const Result r = MapVector(c, cx + picture.CentreX(), cy + picture.CentreY(), modelX[i], modelY[i]);
-				outInside[i] = r.inside ? 1 : 0;
-				if (r.inside)
-				{
-					outVx[i] = static_cast<float>(r.x);
-					outVy[i] = static_cast<float>(r.y);
-				}
+				outInside[i] = r.inside ? 1 : 0;   // the vector is kept (linear extension) even when 0: a consumer decides
+				outVx[i] = static_cast<float>(r.x);
+				outVy[i] = static_cast<float>(r.y);
 			}
 		return true;
 	}

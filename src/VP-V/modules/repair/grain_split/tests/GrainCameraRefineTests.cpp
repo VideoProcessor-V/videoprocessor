@@ -203,6 +203,46 @@ namespace GrainCameraRefineTestsNs
 			Require(v == 1.0f && ok == 0, L"untrusted after a reset: 1");
 		}
 
+		TEST_METHOD(TodaysVectorFetchHandNumbers)
+		{
+			// Hand-computed from MAP_BODY: trusted, v = 17 px, alpha 0.5. Row 0 previous values 0.2, 0.4, 0.6, 0.8 (valid).
+			// Block 2 centre 40 - 17 = 23 -> cell 1 (0.4): out = 0.4 + (1.0 - 0.4) * 0.5 = 0.7.
+			Grid prev, out;
+			prev.Resize(4, 1);
+			for (int x = 0; x < 4; ++x) { prev.value[x] = 0.2f + 0.2f * x; prev.valid[x] = 1; }
+			BlockInputs in;
+			in.target.assign(4, 1.0f);
+			in.trusted.assign(4, 1);
+			in.vx.assign(4, 17.0f);
+			in.vy.assign(4, 0.0f);
+			Settings s;
+			s.alpha = 0.5f;
+			CameraModel::BlendState st;
+			RefineFrame(GrainPolicy(false), st, nullptr, false, prev, in, s, out);
+			Require(std::fabs(out.value[2] - 0.7f) < 1e-6f && std::fabs(out.value[3] - 0.8f) < 1e-6f, L"hand numbers");
+			Require(std::fabs(out.value[0] - 0.6f) < 1e-6f, L"block 0: position clamps to cell 0 (0.2): 0.2 + 0.8 * 0.5 = 0.6");
+		}
+
+		TEST_METHOD(GridMismatchIsLateAndBadShapeKeepsThePreviousMap)
+		{
+			const CameraModel::Policy on = GrainPolicy(true);
+			auto rec = Record(0.95, Blocks(16.0, 0.0, CameraModel::Label::Camera));
+			CameraModel::BlendState st;
+			Settle(on, rec.get(), st);
+			Grid prev, out;
+			prev.Resize(kGw - 1, kGh);   // not P8's grid
+			BlockInputs in;
+			const size_t n = static_cast<size_t>(kGw - 1) * kGh;
+			in.target.assign(n, 0.7f); in.trusted.assign(n, 1); in.vx.assign(n, 0.0f); in.vy.assign(n, 0.0f);
+			Settings s;
+			FrameResult r = RefineFrame(on, st, rec.get(), true, prev, in, s, out);
+			Require(r.cameraLate && r.variant == Variant::Uncompensated, L"a different grid: flagged late, uncompensated");
+			prev.Resize(kGw, kGh, 0.3f);
+			BlockInputs bad;
+			r = RefineFrame(on, st, rec.get(), true, prev, bad, s, out);
+			Require(r.badShape && out.value == prev.value, L"bad inputs: the previous map is carried, flagged");
+		}
+
 		TEST_METHOD(CameraOffEqualsTodaysRule)
 		{
 			// Switch off: no camera blocks, no flag, and the map equals a run whose P8 never exists.

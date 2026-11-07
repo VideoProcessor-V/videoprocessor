@@ -203,13 +203,31 @@ namespace OutputDomainMapTestsNs
 			Require(Near(ox[static_cast<size_t>(25) * gw + 60], 40.0, 1e-4) && Near(oy[static_cast<size_t>(25) * gw + 60], 0.0, 1e-4), L"mid block");
 			Require(inside[static_cast<size_t>(25) * gw + 60] == 1, L"mid block inside");
 			// The last column's vector ends beyond the right edge: flagged and zeroed.
-			Require(inside[static_cast<size_t>(25) * gw + 119] == 0 && ox[static_cast<size_t>(25) * gw + 119] == 0.0f, L"edge block leaving the picture");
+			Require(inside[static_cast<size_t>(25) * gw + 119] == 0 && Near(ox[static_cast<size_t>(25) * gw + 119], 40.0, 1e-3), L"edge block leaving the picture: flagged, vector kept");
 			// Invalid map: zeros and false.
 			Config bad;
 			Require(!MapBlockVectors(bad, pic, gw, gh, 16.0, mx, my, ox, oy, inside) && ox[0] == 0.0f, L"invalid map: no vectors");
 			// Picture-centred points agree with raster points.
 			const Result a = MapPictureCentred(c, pic, 0.0, 0.0), b = MapPoint(c, 960.0, 540.0);
 			Require(a.x == b.x && a.y == b.y, L"picture centre is the raster point");
+		}
+
+		TEST_METHOD(NlsMonotoneAtTheParameterCorners)
+		{
+			for (double ratio : { 1.05, 1.5 })
+				for (double curve : { 1.0, 2.9 })
+					for (double prot : { 0.0, 0.2, 0.45 })
+						for (int geometry = 0; geometry < 2; ++geometry)
+						{
+							double prev = -1.0;
+							for (int i = 0; i <= 1000; ++i)
+							{
+								const double f = detail::NlsForward(i / 1000.0, ratio, curve, geometry, prot);
+								Require(f >= prev - 1e-12, L"hook map is monotone at the corners");
+								prev = f;
+							}
+						}
+			Require(!MapPoint(Config::Identity(100, 100), std::nan(""), 1.0).valid, L"non-finite input: valid = false");
 		}
 
 		TEST_METHOD(Deterministic)

@@ -20,7 +20,7 @@
 //
 // What it changes: WHERE the previous statistic is fetched, for camera blocks the P8 accessor lets through (policy enabled, weight
 // above 0, i.e. confidence above the policy floor): at the camera model position (accessor blend of today's vector and the model
-// vector) instead of the measured vector (trusted blocks) or the same cell (untrusted blocks, which now carry their statistic
+// vector; first order: the forward block-centre vector is used as c - v, exact for a pan, approximate for zoom / rotation) instead of the measured vector (trusted blocks) or the same cell (untrusted blocks, which now carry their statistic
 // along with the camera). Object blocks, Unknown/Overlay blocks, blocks below the trust floor and every block when P8 is absent or
 // late keep today's rule exactly. It touches smoothing parameters only: no grain layer, no split input, no re-add; the grain
 // statistics of the picture are preserved by construction. A measured change means the split leaks: fix the split, not the gate.
@@ -92,6 +92,7 @@ namespace GrainCameraRefine
 		Variant variant = Variant::Uncompensated;
 		bool cameraWanted = false;           // the consumer switch (policy.enabled) is on
 		bool cameraLate = false;             // wanted, but P8 absent or late for this frame: uncompensated, show "grain: camera late"
+		bool badShape = false;               // inputs did not match the grid: the previous map is carried unchanged
 		uint32_t cameraBlocks = 0;           // blocks that fetched at the camera position
 		uint32_t carriedBlocks = 0;          // of those, untrusted blocks that carried their statistic along
 		uint32_t stamp = VariantStamp(Variant::Uncompensated);
@@ -129,7 +130,7 @@ namespace GrainCameraRefine
 		}
 		else
 		{
-			outValue = pv + (target - pv) * alpha;   // mix(prev, target, alpha)
+			outValue = pv * (1.0f - alpha) + target * alpha;   // mix(prev, target, alpha) (GLSL: compare with a tolerance)
 			outValid = 1;
 		}
 	}
@@ -145,14 +146,21 @@ namespace GrainCameraRefine
 	{
 		FrameResult r;
 		r.cameraWanted = policy.enabled;
-		const bool usable = policy.enabled && p8Available && CameraModel::ModelUsable(policy, record);
+		// P8 must describe the same block grid as the map (same block size and grid), else it is as good as late.
+		const bool gridOk = record && record->blocks && record->blocks->gridW == prev.w && record->blocks->gridH == prev.h &&
+			record->blocks->blockSize == s.blockSize;
+		const bool usable = policy.enabled && p8Available && CameraModel::ModelUsable(policy, record) && gridOk;
 		r.cameraLate = policy.enabled && !usable;
 		out.Resize(prev.w, prev.h);
 		const size_t n = static_cast<size_t>(prev.w) * static_cast<size_t>(prev.h);
 		const bool shapeOk = in.target.size() >= n && in.trusted.size() >= n && in.vx.size() >= n && in.vy.size() >= n &&
 			prev.value.size() >= n && prev.valid.size() >= n;
 		if (!shapeOk)
+		{
+			out = prev;
+			r.badShape = true;
 			return r;
+		}
 		for (int by = 0; by < prev.h; ++by)
 		{
 			for (int bx = 0; bx < prev.w; ++bx)
@@ -193,7 +201,7 @@ namespace GrainCameraRefine
 	// GLSL of the previous-position rule. Emitted ONLY when the consumer switch is on (a consumer that is off gives no define and
 	// no text, so its shader and cache key are unchanged); it needs CameraFieldVectorGlsl() and the six accessor uniforms in the
 	// same shader (CameraConsumerBinding). `todays` is today's vector (zero for an untrusted block). Returns the position, in the
-	// same pixel space as `c`, at which the previous statistic is fetched; `compensated` says the camera rule applied.
+	// same pixel space as `c` (the host must check that camera_grid equals the map grid, as RefineFrame does), at which the previous statistic is fetched; `compensated` says the camera rule applied.
 	inline std::string GlslText(bool consumerEnabled)
 	{
 		if (!consumerEnabled)
