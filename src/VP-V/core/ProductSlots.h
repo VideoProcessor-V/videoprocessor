@@ -236,7 +236,7 @@ struct SlotCounters {
     std::atomic<uint64_t> leadLaterRejected{ 0 }; // a frame accepted as a lead ancestor was rejected at its own seal later (residual K1 risk)
     std::atomic<uint64_t> chainWaitRejected{ 0 }; // ordered chain: frames whose job waited on a REJECTED predecessor (counted once per frame)
     std::atomic<uint64_t> chainWaitUnsealed{ 0 }; // ordered chain: frames whose job waited because the predecessor was only Published (its seal not done yet; counted once per frame)
-    std::atomic<uint64_t> storeWaitRejected{ 0 }; // single store: (reader, store) pairs whose lane job waited on a REJECTED store frame: a store has no live fill, so the reader's lane job does not run for that frame (the render makes the reader in its declared reduced form, or it is unavailable); counted once per reader frame and per store input, on the store's set
+    std::atomic<uint64_t> storeWaitRejected{ 0 }; // single store / held state: (reader, product) pairs whose lane job waited on a REJECTED store frame: a store has no live fill, so the reader's lane job does not run for that frame (the render makes the reader in its declared reduced form, or it is unavailable); counted once per reader frame and per store input, on the store's set
     std::atomic<uint64_t> writeWaitPinned{ 0 };   // lane jobs that found their claimed slot still pinned by a late reader of the previous tenant (counted once per job, by the LaneRunner)
 };
 
@@ -1034,13 +1034,13 @@ public:
                     }
                 }
                 if (!chainSelf && set && haveSeq) {
-                    // A reader of a SINGLE-STORE product whose store frame is Rejected (the seal refused it): a store has no live pool, so the
+                    // A reader of a SINGLE-STORE or HELD-STATE product (P14 / P14g: livePool 0) whose frame is Rejected (the seal refused it or the writer made none): it has no live pool, so the
                     // frame never gets content and the reader's lane job does not run for that frame (this call returns false; the render makes
                     // the reader live in its declared reduced form, or it is unavailable). Counted once per reader frame AND per store input (not
                     // per poll) on the store's set, so the wait is visible (status line "single-store reader frames waited ...").
                     const Node* src = NodeOf(in.product);
                     const int ni = IndexOfNode(id);
-                    if (src && src->singletonStore && ni >= 0 && set->RejectedAwaitingLive(aseq)) {
+                    if (src && (src->singletonStore || src->heldState) && ni >= 0 && set->RejectedAwaitingLive(aseq)) {
                         uint64_t& seen = storeWaitSeen_[size_t(ni) * kMaxInputs + k];
                         if (seen != seq + 1u) {
                             seen = seq + 1u;

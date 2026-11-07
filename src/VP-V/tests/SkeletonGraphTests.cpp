@@ -1516,6 +1516,14 @@ namespace SkeletonGraphTestsNs
 			Assert::IsFalse(q.table.LaneAncestors(kPairR2, 1, scratch, pins));
 			Assert::AreEqual(uint64_t(2), q.Set(kPairA).Counters().storeWaitRejected.load(), L"two readers of one store are two pairs");
 			Assert::AreEqual(uint64_t(0), q.Set(kPairB).Counters().storeWaitRejected.load(), L"B is behind A's wait: not reached, not counted");
+			// A HELD-STATE record (livePool 0, no live fill) the writer did not publish is Unavailable: its lag-1 reader is counted the same way.
+			Rig h(HeldRegistry(1), OneConsumer(kHeldReader), 2);
+			h.Resolve(0);
+			Assert::IsTrue(h.Set(kHeld).RejectedAwaitingLive(0), L"held(0) was never published: Rejected, no live fill");
+			Assert::AreEqual(uint64_t(0), h.Set(kHeld).Counters().storeWaitRejected.load());
+			for (int poll = 0; poll < 3; ++poll)
+				Assert::IsFalse(h.table.LaneAncestors(kHeldReader, 1, scratch, pins));
+			Assert::AreEqual(uint64_t(1), h.Set(kHeld).Counters().storeWaitRejected.load(), L"once per reader frame, not per poll");
 		}
 	};
 }
