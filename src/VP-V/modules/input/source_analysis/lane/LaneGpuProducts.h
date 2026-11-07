@@ -17,7 +17,7 @@
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/GpuAllocator.h>
-#include <VP-V/modules/control/gpu_memory/PlTexBackend.h>
+#include <VP-V/modules/control/gpu_memory/GpuProductTexBackend.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuJobs.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
@@ -33,40 +33,6 @@
 
 namespace VpLaneProducts
 {
-	// The texture backend of the dispatcher's product textures: PlTexBackend, optionally host-readable (tests only).
-	struct GpuTexBackend : VpSkeleton::PlTexBackend
-	{
-		explicit GpuTexBackend(pl_gpu g = nullptr, bool readable = false) : VpSkeleton::PlTexBackend(g), hostReadable(readable) {}
-		// Host readback (tests only) is requested only when the format supports it (PL_FMT_CAP_HOST_READABLE): asking for a
-		// capability the format lacks makes pl_tex_create refuse. No blit capability is requested (nothing here blits). A
-		// failed create records WHY (lastError, shown by the dispatcher's status entry), never a bare "could not allocate".
-		Handle Create(const VpSkeleton::TexShape& s)
-		{
-			const pl_fmt fmt = FindFormat(gpu, s.fmt);
-			if (!fmt)
-			{
-				lastError = "no sampleable and storable texture format for the product texture (format " +
-					std::to_string(int(s.fmt)) + ", " + std::to_string(s.w) + "x" + std::to_string(s.h) + ")";
-				return nullptr;
-			}
-			pl_tex_params tp{};
-			tp.w = int(s.w);
-			tp.h = int(s.h);
-			tp.format = fmt;
-			tp.sampleable = true;
-			tp.storable = true;
-			tp.host_readable = hostReadable && (fmt->caps & PL_FMT_CAP_HOST_READABLE) != 0;
-			const Handle h = pl_tex_create(gpu, &tp);
-			if (!h)
-				lastError = std::string("the GPU refused a product texture ") + std::to_string(s.w) + "x" + std::to_string(s.h) + " " +
-					(fmt->name ? fmt->name : "?") + (tp.host_readable ? " (host readable)" : "");
-			else if (hostReadable && !tp.host_readable)
-				lastError = std::string("note: ") + (fmt->name ? fmt->name : "?") + " has no host readback; products in it cannot be read back";
-			return h;
-		}
-		bool hostReadable;
-		std::string lastError;
-	};
 	using GpuProductTextures = VpSkeleton::ProductTextures<GpuTexBackend>;
 
 	// The picture rect of the full plane from product P4 (its rect is on the half plane, end exclusive); the whole frame
@@ -149,11 +115,28 @@ namespace VpLaneProducts
 		}
 	};
 
+	// The product store's small textures: constants a kernel binds but does not own (stand-ins for unused inputs, a LUT).
+	// The store (the dispatcher) creates and destroys them, so kernels never create textures themselves (the skeleton's
+	// private-texture rule: product textures and the arena are the only creators). Render thread only.
+	class IStaticTextures
+	{
+	public:
+		virtual ~IStaticTextures() {}
+		// A sampleable rgba32f texture w x h, filled with `rgba` (w * h * 4 floats), named by (owner, slot). An existing slot is
+		// returned as it is unless `replace` (then it is re-created with the new data). Null on failure (LastError()).
+		virtual pl_tex Rgba32f(const void* owner, int slot, int w, int h, const float* rgba, bool replace) = 0;
+		// Destroys every texture of `owner` (the kernel was released); the kernel forgets its pointers.
+		virtual void Forget(const void* owner) = 0;
+		virtual std::string LastError() const = 0;
+	};
+
 	// One product's kernel. All calls on the render thread, with the device the dispatcher was built on.
 	class IProductKernel
 	{
 	public:
 		virtual ~IProductKernel() {}
+		// The dispatcher hands every kernel its texture store when the kernel is added (before any Prepare).
+		virtual void SetStaticTextures(IStaticTextures* store) { (void)store; }
 		virtual VpSkeleton::ProductId Product() const = 0;
 		// The product's texture layout at `dims`: must match its declaration (ProductTextures refuses otherwise, visibly).
 		virtual VpSkeleton::ProductTexLayout Layout(VpSkeleton::Dims dims) const = 0;

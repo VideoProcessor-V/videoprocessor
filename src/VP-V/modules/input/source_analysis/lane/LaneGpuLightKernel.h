@@ -7,7 +7,7 @@
 // shader of the CPU twin LightLevelBlocks.h). Inputs: P11's grids S0 / S3 / S4 (terms 0, 3, 4 of its layout), the product's
 // own previous frame (history 1, the one-pole state) and the 1024 x 1 rgba32f light-level LUT, which is part of the
 // product: built on the CPU (LightLevel::Build / PackTexels) at Prepare() / the first Step after SetSettings(), uploaded
-// by this kernel, freed in Release(). The product is one rgba32f grid (J_surround, J_local, V, conf) at the block edge
+// through the dispatcher's texture store (IStaticTextures: kernels create no textures) and freed with it (Release()). The product is one rgba32f grid (J_surround, J_local, V, conf) at the block edge
 // RegionEvidence::BlockSizeFor(height), 16 B per cell: the declaration of P12 (core/Products.h).
 //
 // The previous frame is used (ll_reset 0) only when the dispatcher found P12(N-1) (ownPrev*), it is not the output slot,
@@ -23,6 +23,7 @@
 // (the LUT is built from the default settings and an SDR context until SetSettings supplies them) and "P12 smoothing
 // reset" (the previous frame was not available although this kernel had produced frames).
 
+#include <VP-V/core/AnalysisLane.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuProducts.h>
 #include <VP-V/modules/input/source_analysis/light_level/LightLevelLut.h>
 #include <VP-V/modules/input/source_analysis/light_level/LightLevelSettings.h>
@@ -39,6 +40,22 @@ namespace VpLaneProducts
 	// None (never made / shed) and Failed will not become readable by waiting, so P12(N) starts without a previous frame and the
 	// kernel resets the one-pole (ll_reset = 1, shown as light_level_smoothing). The integrator maps AnalysisLane::ProductRead::State onto this enum.
 	enum class LightPrevState : uint8_t { None, Pending, Failed, Ring, Live };
+
+	// The mapping the skeleton's P12 begin gate uses (AnalysisLane::ProductRead::State -> LightPrevState). Pending (a live fill
+	// recorded for the Entrance phase) reads as None until G6 drives RunDeferredLive: nothing runs it before, so waiting for
+	// it would hold P12(N) forever; P12(N) starts without a previous frame and the one-pole resets (shown). At G6, map
+	// Pending to LightPrevState::Pending here.
+	inline LightPrevState LightPrevStateOf(VpSkeleton::AnalysisLane::ProductRead::State s)
+	{
+		switch (s)
+		{
+		case VpSkeleton::AnalysisLane::ProductRead::Ring: return LightPrevState::Ring;
+		case VpSkeleton::AnalysisLane::ProductRead::Live: return LightPrevState::Live;
+		case VpSkeleton::AnalysisLane::ProductRead::Failed: return LightPrevState::Failed;
+		case VpSkeleton::AnalysisLane::ProductRead::Pending: return LightPrevState::None;
+		default: return LightPrevState::None;
+		}
+	}
 
 	inline bool LightPrevReadable(LightPrevState s) { return s == LightPrevState::Ring || s == LightPrevState::Live; }
 	// Only a previous frame still in progress holds the next one back.
@@ -67,6 +84,7 @@ namespace VpLaneProducts
 		uint32_t Steps(VpSkeleton::Dims dims) const override { return StepsFor(Product(), dims); }
 		bool NeedsTap() const override { return false; }
 		// Builds the LUT (CPU) and uploads it; forgets the frame history (a size or settings change resets the one-pole).
+		void SetStaticTextures(IStaticTextures* store) override { m_store = store; }
 		bool Prepare(pl_gpu gpu, pl_dispatch dispatch, VpSkeleton::Dims dims) override;
 		bool Step(KernelContext& c, uint32_t step) override;
 		void Release(pl_gpu gpu) override;
@@ -107,8 +125,10 @@ namespace VpLaneProducts
 		// The S0 / S3 / S4 / previous-frame stand-ins (1 x 1, never read in the modes that bind them). FOUR textures, not one:
 		// libplacebo refuses to bind one object to two descriptors of a pass (the frame-level pass binds all four stand-ins).
 		static constexpr size_t kDummies = 4;
+		// All of them (and the LUT) are owned by the texture store (m_store: the dispatcher), never created here.
 		pl_tex m_dummy[kDummies] = { nullptr, nullptr, nullptr, nullptr };
 		pl_tex m_lutTex = nullptr;
+		IStaticTextures* m_store = nullptr;
 		LightLevel::Settings m_settings = LightLevel::Read([](const std::string&, std::string&) { return false; });
 		LightLevel::Context m_context;
 		float m_lastFrameJ = 0.0f, m_lastFrameV = 0.0f;

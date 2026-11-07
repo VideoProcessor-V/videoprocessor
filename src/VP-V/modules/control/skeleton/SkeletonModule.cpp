@@ -168,18 +168,8 @@ namespace Vpv
 								if (!disp->Available(VpSkeleton::kP12LightLevel))
 									return false;   // refused / not allocated yet: declined, shown by the dispatcher's own entry
 								return VpLaneProducts::LightLevelBeginGate(job.seq, [l](uint64_t s) {
-									switch (l->ReadOf(VpSkeleton::kP12LightLevel, s).state)
-									{
-									case AnalysisLane::ProductRead::Ring: return VpLaneProducts::LightPrevState::Ring;
-									case AnalysisLane::ProductRead::Live: return VpLaneProducts::LightPrevState::Live;
-									// Pending = a live fill RECORDED for the Entrance phase. Nothing runs it before G6 (Entrance forwarding),
-									// so waiting on it would hold P12(N) forever (livelock). Until G6 it is treated as never made (None): P12(N)
-									// starts without a previous frame and the kernel resets the one-pole (shown as light_level_smoothing).
-									// G6: map Pending to LightPrevState::Pending here once RunDeferredLive is driven by the hub.
-									case AnalysisLane::ProductRead::Pending: return VpLaneProducts::LightPrevState::None;
-									case AnalysisLane::ProductRead::Failed: return VpLaneProducts::LightPrevState::Failed;
-									default: return VpLaneProducts::LightPrevState::None;
-									}
+									// LightPrevStateOf: Pending reads as None until G6 (a pending live fill is run by nothing before it).
+									return VpLaneProducts::LightPrevStateOf(l->ReadOf(VpSkeleton::kP12LightLevel, s).state);
 								});
 							});
 						}

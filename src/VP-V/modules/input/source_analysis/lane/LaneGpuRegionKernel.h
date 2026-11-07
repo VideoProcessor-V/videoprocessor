@@ -30,6 +30,7 @@ namespace VpLaneProducts
 		VpSkeleton::ProductTexLayout Layout(VpSkeleton::Dims dims) const override;
 		uint32_t Steps(VpSkeleton::Dims dims) const override { return StepsFor(Product(), dims); }
 		bool NeedsTap() const override { return true; }
+		void SetStaticTextures(IStaticTextures* store) override { m_store = store; }
 		bool Prepare(pl_gpu gpu, pl_dispatch dispatch, VpSkeleton::Dims dims) override;
 		bool Step(KernelContext& c, uint32_t step) override;
 		void Release(pl_gpu gpu) override;
@@ -54,7 +55,8 @@ namespace VpLaneProducts
 		bool Fail(KernelContext& c, const std::string& why);
 		bool EnsureDummy(pl_gpu gpu);
 
-		pl_tex m_dummy = nullptr;           // the bands stand-in when P10 has none (1 x 1, never read)
+		pl_tex m_dummy = nullptr;           // the bands stand-in when P10 has none (1 x 1, never read); owned by the texture store
+		IStaticTextures* m_store = nullptr;
 		std::string m_header, m_body;
 		std::string m_error;
 		std::string m_bandsWhy;

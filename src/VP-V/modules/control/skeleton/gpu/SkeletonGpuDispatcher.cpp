@@ -22,11 +22,14 @@ namespace Vpv
 		{
 			uint64_t Mix(uint64_t h, uint64_t v) { return (h ^ v) * 0x100000001B3ull; }
 
-			bool CreateR16(pl_gpu gpu, pl_tex& tex, int w, int h, bool readable)
+			bool CreateR16(pl_gpu gpu, pl_tex& tex, int w, int h, bool readable, std::string& why)
 			{
 				const pl_fmt fmt = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::R16);
 				if (!fmt)
+				{
+					why = "the device has no sampleable and storable 16-bit single-channel texture format for the tap plane";
 					return false;
+				}
 				pl_tex_params tp{};
 				tp.w = w;
 				tp.h = h;
@@ -35,7 +38,11 @@ namespace Vpv
 				tp.storable = true;
 				tp.host_writable = true;
 				tp.host_readable = readable && (fmt->caps & PL_FMT_CAP_HOST_READABLE) != 0;   // only what the format supports
-				return pl_tex_recreate(gpu, &tex, &tp);
+				if (pl_tex_recreate(gpu, &tex, &tp))
+					return true;
+				why = std::string("the GPU refused the tap plane texture ") + std::to_string(w) + "x" + std::to_string(h) + " " +
+					(fmt->name ? fmt->name : "?") + (tp.host_readable ? " (host readable)" : "");
+				return false;
 			}
 		}
 
@@ -56,7 +63,10 @@ namespace Vpv
 		void SkeletonGpuDispatcher::AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel> kernel)
 		{
 			if (kernel)
+			{
+				kernel->SetStaticTextures(&m_statics);
 				m_kernels.push_back(std::move(kernel));
+			}
 		}
 
 		VpLaneProducts::IProductKernel* SkeletonGpuDispatcher::KernelOf(ProductId id) const
@@ -114,6 +124,7 @@ namespace Vpv
 					ProductState& ps = m_products[n.id];
 					ps.history = n.history;
 					ps.tex.reset(new GpuProductTextures(m_backend));
+					m_backend.lastError.clear();
 					if (!ps.tex->Allocate(n, reg.Get(n.id), k->Layout(dims), dims, plan))
 					{
 						ps.refusal = ps.tex->LastRefusal().empty()
@@ -157,6 +168,76 @@ namespace Vpv
 			return ok;
 		}
 
+		pl_tex SkeletonGpuDispatcher::StaticStore::Rgba32f(const void* owner, int slot, int w, int h, const float* rgba, bool replace)
+		{
+			m_error.clear();
+			const pl_gpu gpu = m_gpu != nullptr ? *m_gpu : nullptr;
+			if (!gpu)
+			{
+				m_error = "no GPU device";
+				return nullptr;
+			}
+			const auto key = std::make_pair(owner, slot);
+			const auto it = m_tex.find(key);
+			if (it != m_tex.end())
+			{
+				if (!replace)
+					return it->second;
+				pl_tex_destroy(gpu, &it->second);
+				m_tex.erase(it);
+			}
+			const pl_fmt fmt = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RGBA32F);
+			if (!fmt)
+			{
+				m_error = "the device has no sampleable and storable rgba32f texture format";
+				return nullptr;
+			}
+			pl_tex_params tp{};
+			tp.w = w;
+			tp.h = h;
+			tp.format = fmt;
+			tp.sampleable = true;
+			tp.initial_data = rgba;
+			pl_tex tex = pl_tex_create(gpu, &tp);
+			if (!tex)
+			{
+				m_error = std::string("the GPU refused a ") + std::to_string(w) + "x" + std::to_string(h) + " rgba32f texture";
+				return nullptr;
+			}
+			m_tex[key] = tex;
+			return tex;
+		}
+
+		void SkeletonGpuDispatcher::StaticStore::Forget(const void* owner)
+		{
+			const pl_gpu gpu = m_gpu != nullptr ? *m_gpu : nullptr;
+			for (auto it = m_tex.begin(); it != m_tex.end();)
+			{
+				if (it->first.first == owner)
+				{
+					if (gpu)
+						pl_tex_destroy(gpu, &it->second);
+					it = m_tex.erase(it);
+				}
+				else
+					++it;
+			}
+		}
+
+		void SkeletonGpuDispatcher::StaticStore::Clear()
+		{
+			const pl_gpu gpu = m_gpu != nullptr ? *m_gpu : nullptr;
+			for (auto& kv : m_tex)
+				if (gpu && kv.second)
+					pl_tex_destroy(gpu, &kv.second);
+			m_tex.clear();
+		}
+
+		void SkeletonGpuDispatcher::StaticStore::Abandon()
+		{
+			m_tex.clear();
+		}
+
 		void SkeletonGpuDispatcher::FlushReleases()
 		{
 			m_counters.releasesDone += m_graveyard.size();
@@ -186,6 +267,7 @@ namespace Vpv
 			for (const auto& k : m_kernels)
 				if (m_gpu)
 					k->Release(m_gpu);
+			m_statics.Clear();   // the kernels' stand-ins and LUT (their Release asked for it; this catches the rest)
 			m_graphKey = 0;
 			m_dims = Dims{ 0, 0 };
 		}
@@ -219,6 +301,7 @@ namespace Vpv
 			m_backend.gpu = nullptr;
 			m_dispatch = nullptr;
 			m_lane = nullptr;
+			m_statics.Abandon();
 			for (Tap& t : m_taps)
 			{
 				t.tap = nullptr;
@@ -252,8 +335,12 @@ namespace Vpv
 				if (t.used && t.seq == seq)
 					return &t;
 			if (!create)
+			{
+				m_tapError = "the tap plane of frame " + std::to_string(seq) + " is not there (evicted, or its first chunk did not run)";
 				return nullptr;
+			}
 			Tap* victim = &m_taps[0];
+			m_tapError.clear();
 			for (Tap& t : m_taps)
 			{
 				if (!t.used)
@@ -266,8 +353,12 @@ namespace Vpv
 			}
 			const int w = int(m_dims.width), h = int(m_dims.height);
 			const bool readable = m_backend.hostReadable;
-			if (!CreateR16(m_gpu, victim->tap, w, h, readable) || !CreateR16(m_gpu, victim->extended, w, h, readable))
+			std::string why;
+			if (!CreateR16(m_gpu, victim->tap, w, h, readable, why) || !CreateR16(m_gpu, victim->extended, w, h, readable, why))
+			{
+				m_tapError = why;
 				return nullptr;
+			}
 			victim->used = true;
 			victim->seq = seq;
 			victim->bands = 0;
@@ -407,7 +498,7 @@ namespace Vpv
 					return Fail("the lane job has no source frame");
 				Tap* t = TapFor(job.seq, chunk == 0);
 				if (!t)
-					return Fail("the tap plane is missing (evicted or not created)");
+					return Fail("the tap plane is missing: " + m_tapError);
 				if (chunk == 0)
 				{
 					// A new job for this seq (a graph swap hands an unfinished job to the next runner, possibly for the same
@@ -434,7 +525,7 @@ namespace Vpv
 			{
 				Tap* t = TapFor(job.seq, !ownsTap);
 				if (!t)
-					return Fail("the tap plane is missing (evicted or not created)");
+					return Fail("the tap plane is missing: " + m_tapError);
 				if (!ownsTap)
 				{
 					if (job.source == nullptr || !job.source->Valid())
@@ -481,7 +572,9 @@ namespace Vpv
 				if (!have)
 					return Fail("the live fill has no source frame");
 				Tap* t = TapFor(seq, true);
-				if (!t || !EnsureTap(*t, view, c.picture))
+				if (!t)
+					return Fail("the tap plane could not be made: " + m_tapError);
+				if (!EnsureTap(*t, view, c.picture))
 					return Fail(m_error.empty() ? "the tap plane could not be made" : m_error);
 				c.tap = t->tap;
 				c.extended = t->extended;

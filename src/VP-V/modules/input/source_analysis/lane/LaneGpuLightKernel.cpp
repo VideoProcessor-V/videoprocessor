@@ -61,23 +61,22 @@ namespace VpLaneProducts
 
 	bool LightLevelKernel::EnsureDummy(pl_gpu gpu)
 	{
-		const pl_fmt fmt = gpu ? VpvGpu::FloatFormat(gpu, 4) : nullptr;
-		if (!fmt)
+		if (m_store == nullptr || gpu == nullptr)
+		{
+			m_error = "no texture store for the light level stand-ins";
 			return false;
+		}
 		const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 		for (size_t i = 0; i < kDummies; ++i)
 		{
 			if (m_dummy[i])
 				continue;
-			pl_tex_params tp{};
-			tp.w = 1;
-			tp.h = 1;
-			tp.format = fmt;
-			tp.sampleable = true;
-			tp.initial_data = zero;
-			m_dummy[i] = pl_tex_create(gpu, &tp);
+			m_dummy[i] = m_store->Rgba32f(this, int(i), 1, 1, zero, false);
 			if (!m_dummy[i])
+			{
+				m_error = "no rgba32f stand-in texture: " + m_store->LastError();
 				return false;
+			}
 		}
 		return true;
 	}
@@ -86,24 +85,20 @@ namespace VpLaneProducts
 	{
 		if (m_lutTex && m_builtGeneration == m_generation)
 			return true;
-		const pl_fmt fmt = gpu ? VpvGpu::FloatFormat(gpu, 4) : nullptr;
-		if (!fmt)
+		if (m_store == nullptr || gpu == nullptr)
+		{
+			m_error = "no texture store for the light level LUT";
 			return false;
+		}
 		std::unique_ptr<LightLevel::Lut> lut(new LightLevel::Lut(LightLevel::Build(m_settings, m_context)));
 		m_texels = LightLevel::PackTexels(*lut);
 		m_fingerprint = lut->fingerprint;
-		if (m_lutTex)
-			pl_tex_destroy(gpu, &m_lutTex);
-		m_lutTex = nullptr;
-		pl_tex_params tp{};
-		tp.w = LightLevel::kLutSize;
-		tp.h = 1;
-		tp.format = fmt;
-		tp.sampleable = true;
-		tp.initial_data = m_texels.data();
-		m_lutTex = pl_tex_create(gpu, &tp);
+		m_lutTex = m_store->Rgba32f(this, int(kDummies), LightLevel::kLutSize, 1, m_texels.data(), true);   // replaces the old LUT
 		if (!m_lutTex)
+		{
+			m_error = "the light level LUT could not be uploaded: " + m_store->LastError();
 			return false;
+		}
 		m_builtGeneration = m_generation;
 		m_history.clear();   // a new context: the one-pole starts again (the CPU twin's Context reset)
 		return true;
@@ -114,16 +109,10 @@ namespace VpLaneProducts
 		m_header = HeaderGlsl();
 		m_body = BodyGlsl();
 		if (!EnsureDummy(gpu))
-		{
-			m_error = "no rgba32f format for the light level stand-in";
-			return false;
-		}
+			return false;   // m_error says why
 		m_builtGeneration = 0;   // rebuild and upload the LUT
 		if (!EnsureLut(gpu))
-		{
-			m_error = "the light level LUT could not be uploaded";
-			return false;
-		}
+			return false;   // m_error says why
 		m_history.clear();   // also on a size change
 		m_error.clear();
 		return true;
@@ -252,11 +241,9 @@ namespace VpLaneProducts
 
 	void LightLevelKernel::Release(pl_gpu gpu)
 	{
-		for (size_t i = 0; i < kDummies; ++i)
-			if (m_dummy[i] && gpu)
-				pl_tex_destroy(gpu, &m_dummy[i]);
-		if (m_lutTex && gpu)
-			pl_tex_destroy(gpu, &m_lutTex);
+		(void)gpu;
+		if (m_store != nullptr)
+			m_store->Forget(this);   // the store destroys the stand-ins and the LUT
 		for (size_t i = 0; i < kDummies; ++i)
 			m_dummy[i] = nullptr;
 		m_lutTex = nullptr;

@@ -63,17 +63,15 @@ namespace VpLaneProducts
 	{
 		if (m_dummy)
 			return true;
-		const pl_fmt fmt = gpu ? VpvGpu::FloatFormat(gpu, 4) : nullptr;
-		if (!fmt)
+		if (m_store == nullptr || gpu == nullptr)
+		{
+			m_error = "no texture store for the bands stand-in";
 			return false;
+		}
 		const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-		pl_tex_params tp{};
-		tp.w = 1;
-		tp.h = 1;
-		tp.format = fmt;
-		tp.sampleable = true;
-		tp.initial_data = zero;
-		m_dummy = pl_tex_create(gpu, &tp);
+		m_dummy = m_store->Rgba32f(this, 0, 1, 1, zero, false);
+		if (!m_dummy)
+			m_error = "no rgba32f stand-in texture: " + m_store->LastError();
 		return m_dummy != nullptr;
 	}
 
@@ -82,10 +80,7 @@ namespace VpLaneProducts
 		m_header = HeaderGlsl();
 		m_body = BodyGlsl();
 		if (!EnsureDummy(gpu))
-		{
-			m_error = "no rgba32f format for the bands stand-in";
-			return false;
-		}
+			return false;   // m_error says why
 		m_error.clear();
 		return true;
 	}
@@ -163,8 +158,9 @@ namespace VpLaneProducts
 
 	void RegionStatsKernel::Release(pl_gpu gpu)
 	{
-		if (m_dummy && gpu)
-			pl_tex_destroy(gpu, &m_dummy);
+		(void)gpu;
+		if (m_store != nullptr)
+			m_store->Forget(this);   // the store destroys the stand-in
 		m_dummy = nullptr;
 	}
 

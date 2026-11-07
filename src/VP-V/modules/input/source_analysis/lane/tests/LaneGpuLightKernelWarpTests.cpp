@@ -624,6 +624,24 @@ namespace VideoProcessorTest
 				L"readable states");
 		}
 
+		// (d2) The mapping the skeleton's gate uses (the real function, not a test lambda): Pending reads as None until G6, so the
+		// gate never waits for a live fill nothing runs; Ring / Live stay readable, Failed stays Failed.
+		TEST_METHOD(GateMappingReadsPendingAsNotMade)
+		{
+			using VpLaneProducts::LightLevelBeginGate;
+			using VpLaneProducts::LightPrevState;
+			using VpLaneProducts::LightPrevStateOf;
+			using PR = VpSkeleton::AnalysisLane::ProductRead;
+			Assert::IsTrue(LightPrevStateOf(PR::Ring) == LightPrevState::Ring, L"Ring");
+			Assert::IsTrue(LightPrevStateOf(PR::Live) == LightPrevState::Live, L"Live");
+			Assert::IsTrue(LightPrevStateOf(PR::Failed) == LightPrevState::Failed, L"Failed");
+			Assert::IsTrue(LightPrevStateOf(PR::None) == LightPrevState::None, L"None");
+			Assert::IsTrue(LightPrevStateOf(PR::Pending) == LightPrevState::None, L"Pending is None until G6");
+			const PR::State all[] = { PR::None, PR::Ring, PR::Live, PR::Pending, PR::Failed };
+			for (const PR::State st : all)
+				Assert::IsTrue(LightLevelBeginGate(5, [st](uint64_t) { return LightPrevStateOf(st); }, nullptr), L"no read state holds P12(N) back before G6");
+		}
+
 		// (e) The pass GLSL is pinned (FNV-1a 64 over header, newline, body). pinned from the first WARP run; re-pin deliberately
 		// (the value is logged).
 		BEGIN_TEST_METHOD_ATTRIBUTE(PassFingerprintIsPinned)

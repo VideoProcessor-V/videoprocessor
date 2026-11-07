@@ -121,15 +121,34 @@ namespace Vpv
 				uint64_t lastNs = 0;
 			};
 
-			Tap* TapFor(uint64_t seq, bool create);
+			Tap* TapFor(uint64_t seq, bool create);   // null: m_tapError says why (not there, no format, the GPU refused)
 			bool EnsureTap(Tap& t, const VpSkeleton::SourceFrameView& view, const RegionEvidence::Rect& picture);
 			bool BuildContext(VpLaneProducts::KernelContext& c, const VpSkeleton::Node& node, uint64_t seq, bool live,
 				const VpSkeleton::LaneJobContext* job, uint32_t missing);
 			bool Fail(const std::string& why);
 			void PollTimer(ProductState& ps);
 
+			// The product store's small textures for the kernels (stand-ins, the light level LUT): created and destroyed here.
+			class StaticStore : public VpLaneProducts::IStaticTextures
+			{
+			public:
+				explicit StaticStore(const pl_gpu* gpu) : m_gpu(gpu) {}
+				~StaticStore() { Clear(); }
+				pl_tex Rgba32f(const void* owner, int slot, int w, int h, const float* rgba, bool replace) override;
+				void Forget(const void* owner) override;
+				std::string LastError() const override { return m_error; }
+				void Clear();       // destroys everything (the device is alive)
+				void Abandon();     // the device is gone: forget without calling it
+			private:
+				const pl_gpu* m_gpu;
+				std::map<std::pair<const void*, int>, pl_tex> m_tex;
+				std::string m_error;
+			};
+
 			pl_gpu m_gpu = nullptr;
 			pl_dispatch m_dispatch = nullptr;
+			StaticStore m_statics{ &m_gpu };
+			std::string m_tapError;
 			VpLaneProducts::GpuTexBackend m_backend;
 			const VpSkeleton::AnalysisLane* m_lane = nullptr;
 			std::function<bool(uint64_t, VpSkeleton::SourceFrameView*)> m_liveSource;
