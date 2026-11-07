@@ -105,7 +105,7 @@ See `docs/agent-reports/ci-hardware-skip.md`.
 
 ### Chain gate clip and rig labels
 
-- `VP_TEST_FILTER_CLIP` (a path) selects the clip for the file-source graph test. Default: `D:	estclips\gate\gate_h264.mp4`. When it is absent or the path does not exist, the test reports SKIP-NO-CLIP, which fails the run under `VP_TEST_REQUIRE_GPU=1`.
-- `tools/make_gate_clips.ps1` writes the synthetic `testsrc2` gate clips (no film frames) to `D:	estclips\gate`.
+- `VP_TEST_FILTER_CLIP` (a path) selects the clip for the file-source graph test. Default: `D:\testclips\gate\gate_h264.mp4`. When it is absent or the path does not exist, the test reports SKIP-NO-CLIP, which fails the run under `VP_TEST_REQUIRE_GPU=1`.
+- `tools/make_gate_clips.ps1` writes the synthetic `testsrc2` gate clips (no film frames) to `D:\testclips\gate`.
 - When the primary display is not on the render adapter, `run_chain_gate.ps1` prints a WARNING. It is console only and does not change the adapter choice.
 - Timing-test failures labelled `rig: no display timing` are still counted as failures. The label reads `(suspected, ...)` when only the test name matched, not the message.

@@ -170,7 +170,7 @@ foreach ($name in $knownFailures.Keys) {
 }
 "Chain gate: $($bad.Count) new failure(s), $($known.Count) known failure(s) (allow-listed)"
 if ($rigNoTiming.Count -gt 0) {
-    "Chain gate: $($rigNoTiming.Count) of those failure(s) are 'rig: no display timing' (the display gave VP no frame statistics; timing tests are invalid on this rig, see the WARNING at the start)"
+    "Chain gate: $($rigNoTiming.Count) of those failure(s) (including suspected) are 'rig: no display timing' (the display gave VP no frame statistics; timing tests are invalid on this rig, see the WARNING at the start)"
 }
 $markers = @(Select-String -Path $trx -Pattern 'SKIP-[A-Z-]+ [A-Za-z0-9_]+' -AllMatches | ForEach-Object { $_.Matches } |
     ForEach-Object { $_.Value } | Sort-Object -Unique)
