@@ -78,6 +78,65 @@ def extract_field_table_keys(text):
     return keys
 
 
+_CONST = re.compile(r'(\w+)\s*(?:\[\s*\])?\s*=\s*"([^"]*)"')
+_BARE_SECTIONS = ("vprenderer", "vpv")
+
+
+def collect_constants(text):
+    """name -> string value of `const char* NAME = "value"` style constants."""
+    out = {}
+    for ln in strip_comments(text).splitlines():
+        if "const" in ln:
+            for m in _CONST.finditer(ln):
+                if re.fullmatch(r"k[A-Z]\w*|[A-Z][A-Z0-9_]*", m.group(1)):   # constants only, never a local variable
+                    out[m.group(1)] = m.group(2)
+    return out
+
+
+def _norm_section(name):
+    return name[:-len(".default")] if name.endswith(".default") else name
+
+
+def qualify(section, key):
+    """Key id for a key read from `section`: bare for profile/[vpv] keys, else section-qualified."""
+    if section == "vpv" or section == "vprenderer" or section.startswith("vprenderer."):
+        return key
+    return "%s.%s" % (_norm_section(section), key)
+
+
+def extract_file_keys(text, consts, schema_file):
+    """Keys read or declared by one file: schema validators (schema files only), ConfigSchema:: entries,
+    `for (const char* key : {...})` lists, TryGet*(section, key) reads (literal or constant names; the file's
+    own first *SECTION constant stands in for a `section` variable) and `{"key", "label", number...}` tables."""
+    t = strip_comments(text)
+    own = re.search(r'\w*SECTION\w*\s*=\s*"([^"]+)"', t)
+    owner = own.group(1) if own else None
+    bare = extract_schema_keys(text) if schema_file else set()
+    cand = set()   # (section or None, key)
+    if not schema_file:
+        cand |= {(owner, k) for k in re.findall(r'ConfigSchema::\w+\(\s*"(' + KEY_RE + r')"', t)}
+        for m in re.finditer(r'for\s*\(\s*const\s+char\s*\*\s*key\s*:\s*\{([^}]*)\}', t):
+            cand |= {(owner, k) for k in _NAME.findall(m.group(1))}
+    arg = r'(?:"[^"]*"|[\w:]+)'
+    for m in re.finditer(r'TryGet\w+\(\s*(' + arg + r')\s*,\s*(' + arg + r')', t):
+        def res(tok):
+            if tok.startswith('"'):
+                return tok[1:-1]
+            return consts.get(tok.split("::")[-1])
+        sec, key = res(m.group(1)), res(m.group(2))
+        if key is None or not re.fullmatch(KEY_RE, key):
+            continue
+        cand.add((sec if sec is not None else owner, key))
+    out = set(bare)
+    for sec, key in cand:
+        if sec is None:
+            out.add(key)
+        elif key not in bare:
+            out.add(qualify(sec, key))
+    out |= set(re.findall(r'\{\s*"([a-z][a-z0-9_]*)"\s*,\s*"[^"]*"\s*,\s*-?[0-9.]', t))
+    return out
+
+
 def extract_namespaced_keys(text):
     """Keys of a VP-V namespaced section: `kSection = "vpv.x"` files (SkeletonSettings.h style)."""
     t = strip_comments(text)
@@ -109,20 +168,34 @@ def extract_code_keys(root):
         for k in keys:
             found.setdefault(k, set()).add(rel)
 
+    schema = []
     for rel in SCHEMA_FILES:
         p = os.path.join(root, *rel.split("/"))
         if os.path.isfile(p):
-            add(extract_schema_keys(read_text(p)), rel)
+            schema.append((rel, read_text(p)))
+    vpv = [(os.path.relpath(p, root).replace(os.sep, "/"), read_text(p)) for p in sorted(_iter_vpv_sources(root))]
+    consts = {}
+    for _, text in schema + vpv:
+        consts.update(collect_constants(text))
+    schema_bare = set()
+    for rel, text in schema:
+        ks = extract_file_keys(text, consts, True)
+        schema_bare |= {k for k in ks if "." not in k}
+        add(ks, rel)
     tables = set()
     for pat in FIELD_TABLE_GLOBS:
         tables |= set(glob.glob(os.path.join(root, *pat.split("/")), recursive=True))
     for p in sorted(tables):
         rel = os.path.relpath(p, root).replace(os.sep, "/")
         add(extract_field_table_keys(read_text(p)), rel)
-    for p in sorted(_iter_vpv_sources(root)):
-        text = read_text(p)
+    for rel, text in vpv:
+        add(extract_file_keys(text, consts, False), rel)
         if "kSection" in text and '"vpv.' in text:
-            add(extract_namespaced_keys(text), os.path.relpath(p, root).replace(os.sep, "/"))
+            add(extract_namespaced_keys(text), rel)
+    # A key already declared bare by the schema validators is that key; drop its section-qualified read.
+    for k in [k for k in found if "." in k and not k.startswith("vpv.")]:
+        if k.split(".", 1)[1] in found and k.split(".", 1)[1] in schema_bare:
+            del found[k]
     return {k: sorted(v) for k, v in found.items()}
 
 
@@ -229,9 +302,9 @@ def _unquote(cell):
 
 
 def row_key_id(key, section):
-    sec = re.search(r"vpv\.[A-Za-z0-9_.]+", section or "")
-    if sec and not key.startswith("vpv."):
-        return sec.group(0) + "." + key
+    m = re.search(r"\[([A-Za-z0-9_.]+)\]", section or "")
+    if m and not key.startswith(_norm_section(m.group(1)) + "."):
+        return qualify(m.group(1), key)
     return key
 
 
@@ -257,7 +330,7 @@ def parse_readme_settings(text, readme_rel):
             continue
         if in_settings and ln.strip().startswith("|"):
             hdr = _split_row(ln)
-            if [h.lower() for h in hdr] == [h.lower() for h in HEADER_COLS]:
+            if hdr == HEADER_COLS:
                 i += 1
                 if i < len(lines) and re.fullmatch(r"\|?[\s:\-|]+\|?", lines[i].strip()):
                     i += 1
@@ -371,10 +444,14 @@ def analyse(root):
         "default_mismatch": [],
     }
     for k, rs in sorted(by_id.items()):
-        if k in golden and (k in code or not is_planned(rs[0])):
-            lit = doc_default_literal(rs[0]["default"])
-            if lit is not None and norm_default(lit) != norm_default(golden[k]):
-                gaps["default_mismatch"].append(k)
+        if k in golden:
+            for r in rs:
+                if is_planned(r) and k not in code:
+                    continue
+                lit = doc_default_literal(r["default"])
+                if lit is not None and norm_default(lit) != norm_default(golden[k]):
+                    gaps["default_mismatch"].append(k)
+                    break
     return {
         "modules": mods, "rows": rows, "by_id": by_id, "code": code, "upstream": upstream,
         "scope": scope, "golden": golden, "errors": errors, "gaps": gaps,

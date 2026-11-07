@@ -59,14 +59,19 @@ def baseline_text(gaps):
 
 
 def write_upstream(root, ref):
-    keys = set()
+    keys, texts = set(), []
     for rel in C.SCHEMA_FILES:
         p = subprocess.run(["git", "-C", root, "show", "%s:%s" % (ref, rel)],
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
         if p.returncode != 0:
             print("git show %s:%s failed: %s" % (ref, rel, p.stderr.strip()), file=sys.stderr)
             return 1
-        keys |= C.extract_schema_keys(p.stdout)
+        texts.append(p.stdout)
+    consts = {}
+    for text in texts:
+        consts.update(C.collect_constants(text))
+    for text in texts:
+        keys |= C.extract_file_keys(text, consts, True)
     path = os.path.join(root, *C.UPSTREAM_REL.split("/"))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
@@ -85,6 +90,8 @@ def base_ref_errors(root, ref, baseline):
     """Ratchet against a git ref (merge base): the baseline and upstream list may only shrink."""
     errs = []
     old = git_show(root, ref, BASELINE_REL)
+    if old is None:
+        print("note: %s has no %s; baseline growth is not checked" % (ref, BASELINE_REL))
     if old is not None and baseline is not None:
         og = json.loads(old).get("gaps", {})
         for k in GAP_KINDS:

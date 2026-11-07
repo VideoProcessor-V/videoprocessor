@@ -234,6 +234,28 @@ class RatchetTests(Fixture):
         self.assertIn("swapped_key", out)
 
 
+class TryGetExtractionTests(Fixture):
+    def test_tryget_literal_constant_variable_and_table_keys(self):
+        lines = [
+            'constexpr const char* DRIVE_SECTION = "led_drive.default";',
+            'constexpr const char* kKey = "const_key";',
+            'void f(){ c.TryGetString(section, "var_key", v); c.TryGetBool("ambient", "lit_key", b);',
+            ' c.TryGetString(DRIVE_SECTION, kKey, v); c.TryGetString("vprenderer", "profile_key", v); }',
+            'static const X t[] = { {"table_key", "Label", 0.0, 1.0} };',
+        ]
+        _w(self.root, "src/VP-V/modules/drive/x/Cfg.h", chr(10).join(lines) + chr(10))
+        ids = set(C.extract_code_keys(self.root))
+        self.assertTrue({"led_drive.var_key", "ambient.lit_key", "led_drive.const_key", "profile_key", "table_key"} <= ids, ids)
+
+    def test_local_variable_named_section_is_not_a_constant(self):
+        self.assertEqual(C.collect_constants('const std::string section = "event_actions.";'), {})
+        self.assertEqual(C.collect_constants('constexpr const char* kSection = "vpv.x";'), {"kSection": "vpv.x"})
+
+    def test_qualified_row_ids(self):
+        self.assertEqual(C.row_key_id("k", "[led_drive.default]"), "led_drive.k")
+        self.assertEqual(C.row_key_id("k", "[calibration]"), "calibration.k")
+
+
 class HardeningTests(Fixture):
     def test_fenced_table_is_ignored_and_bad_header_is_an_error(self):
         self.readme('```' + chr(10) + HDR + row("vp_key") + '```')
@@ -293,6 +315,7 @@ class GeneratorTests(Fixture):
         self.assertEqual(a, C.render_master(self.root))
 
 
+@unittest.skipUnless(os.environ.get("VP_MS_REAL") == "1", "set VP_MS_REAL=1 to run the repository's own gate")
 class RealRepoTests(unittest.TestCase):
     """The committed tree must satisfy its own gate."""
 

@@ -5,6 +5,7 @@ active_picture_lookahead_frames
 alias
 allowed_modes
 anamorphic_scale
+arguments
 automatic_crop
 background_edge
 background_fallback_side_pixels
@@ -22,6 +23,7 @@ capture_input
 chroma_downsampling
 chroma_upscaler
 cleanup_fill
+coalesce_role
 container_colorspace
 contrast_recovery
 conversion_method
@@ -35,10 +37,12 @@ deband
 deband_strength
 debug
 debug_log_retention
+default
 deinterlace
 deinterlace_algorithm
 deinterlace_cadence
 deinterlace_skip_spatial
+delay_seconds
 diagnostic_allow_full_g22
 diagnostic_allow_limited_g22
 diagnostic_disable_compute
@@ -53,6 +57,7 @@ downscaler
 dynamic_target
 enabled
 event_action_delay_seconds
+event_actions.actions
 field_order
 fixed_crop_aspect
 foreground_only
@@ -88,6 +93,7 @@ no_ui
 noui
 off_zoom_hold_seconds
 offset_pixels
+on
 output_diagnostics
 output_gamma
 output_path_profile
@@ -101,6 +107,8 @@ presentation_lead_frames
 presentation_queue_depth
 profile_change_display_seconds
 profile_update_mode
+profiles
+program
 quality
 queue_size
 renderer
@@ -117,6 +125,7 @@ rgb_10bit_packing
 rgb_12bit_packing
 rgb_8bit_packing
 rounded_corners
+run
 scale_osd
 scene
 scene_correction_basic
@@ -130,6 +139,7 @@ sdr_input_transfer
 sdr_lut_input_gamma
 sdr_target_nits
 sdr_target_primaries
+shader_type
 shortcut
 sigmoid
 smooth_motion
@@ -182,3 +192,4 @@ video_conversion
 when
 windowed_fullscreen_mode
 windowedfullscreenmode
+working_directory

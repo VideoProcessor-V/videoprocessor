@@ -13,9 +13,9 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 |---|---|
 | Modules | 37 |
 | Documented rows | 2 |
-| VP-V keys in code (outside Bill's schema lists) | 201 |
+| VP-V keys in code (outside Bill's schema lists) | 332 |
 | of which documented | 2 |
-| of which undocumented (appendix A) | 199 |
+| of which undocumented (appendix A) | 330 |
 | Documented keys with no code entry (appendix B) | 0 |
 
 ## Modules index
@@ -98,8 +98,8 @@ Modules: `colour.tone_gamut`, `colour.extended_range`, `colour.sdr_tone_shape`, 
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `extended_range_more_cases` | `colour.extended_range` | profile ([vprenderer.Default] and matching profiles) | enum | on, off | `on` |  | VP Renderer > Rendering > Processing > Below-black / above-white: also BT.1886, sRGB, wide-gamut SDR, LUT, HDR (VP-V > Proposed retirement, group A) | n/a (VP-only) | fix under test, proposed for retirement (group A); `off` = the Stage 10 eligibility; the Original pathway sets it `off` | same on all (not tiered) |
-| `preserve_extended_range` | `colour.extended_range` | profile ([vprenderer.Default] and matching profiles) | enum | on, off | `on` | on | VP-V > Colour > Keep below-black and above-white (SDR); also VP Renderer > Rendering > Processing | n/a (VP-only): libplacebo's standard path clips below-black and above-white | `BTB/WTW: clipped (<reason>)` (FallbackCatalog::BtbWtw); the Original pathway sets it `off` | same on all (not tiered) |
+| `extended_range_more_cases` | `colour.extended_range` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | `on` |  | VP Renderer > Rendering > Processing > Below-black / above-white: also BT.1886, sRGB, wide-gamut SDR, LUT, HDR (VP-V > Proposed retirement, group A) | n/a (VP-only) | fix under test, proposed for retirement (group A); `off` = the Stage 10 eligibility; the Original pathway sets it `off` | same on all (not tiered) |
+| `preserve_extended_range` | `colour.extended_range` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | `on` | on | VP-V > Colour > Keep below-black and above-white (SDR); also VP Renderer > Rendering > Processing | n/a (VP-only): libplacebo's standard path clips below-black and above-white | `BTB/WTW: clipped (<reason>)` (FallbackCatalog::BtbWtw); the Original pathway sets it `off` | same on all (not tiered) |
 
 ## Dynamic drive
 
@@ -189,6 +189,9 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `adaptive_upscale_superres_scale` | scaling.output |  |  | RendererProfileConfig.h |
 | `adaptive_upscale_w_base` | scaling.output |  |  | RendererProfileConfig.h |
 | `adaptive_w_base` | scaling.output | 1.0 |  | RendererProfileConfig.h |
+| `ambient.baud` | unassigned |  |  | AmbientConfig.h |
+| `ambient.port` | unassigned |  |  | AmbientConfig.h |
+| `ambient.room` | unassigned |  |  | AmbientConfig.h |
 | `ambient_adapt` | unassigned | off | VP-V > Colour > Room-light adaptation (experimental) | RendererProfileConfig.h |
 | `ambient_adapt_strength` | unassigned | 1 |  | RendererProfileConfig.h |
 | `ambient_max_black_nits` | unassigned | 1 |  | RendererProfileConfig.h |
@@ -196,17 +199,56 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `ambient_tau_down_s` | unassigned | 90 |  | RendererProfileConfig.h |
 | `ambient_tau_up_s` | unassigned | 15 |  | RendererProfileConfig.h |
 | `auto_report` | control.diagnostics |  |  | MainConfigSchema.h |
+| `b_structure` | unassigned |  |  | NetPackage.cpp |
+| `baud` | unassigned |  |  | AmbientConfig.h |
 | `blank_bottom` | unassigned |  |  | RendererProfileConfig.h |
 | `blank_left` | unassigned |  |  | RendererProfileConfig.h |
 | `blank_right` | unassigned |  |  | RendererProfileConfig.h |
 | `blank_top` | unassigned |  |  | RendererProfileConfig.h |
+| `c_structure` | unassigned |  |  | NetPackage.cpp |
 | `cadence_class_fixes` | input.queue_timing, motion.consumers | on |  | RendererProfileConfig.h |
+| `calibration.argyll_path` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.background_percent` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.display_kind` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.display_name` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.display_type` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.drift_interval` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.hdr_verify_source_peak` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.hdr_verify_tone_curve` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.led_cntr_dwell_ms` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.led_cntr_sweep_max` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.led_dwell_ms` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.led_flux_step` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.led_reads_per_level` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.led_sensor_baud` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.led_sensor_port` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.led_step_repeats` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.lut_size` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.meter_model` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.meter_port` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.near_black_max_reads` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.patch_window_percent` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.plan` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.read_timeout_s` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.record_transcripts` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.refresh_mode` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.repeat_tolerance_percent` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.settle_ms` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.spectral_correction` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.target_gamma` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.target_transfer` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.target_white_percent` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.transcript_folder` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.verify_after` | unassigned |  |  | CalibrationConfig.h |
+| `calibration.warmup_minutes` | unassigned |  |  | CalibrationConfig.h |
 | `calibration_lut_stage` | output.calibration_lut |  |  | RendererProfileConfig.h |
+| `camera_link` | unassigned |  |  | SkeletonSettings.h |
 | `capture_display_fixes` | unassigned |  |  | MainConfigSchema.h |
 | `capture_path` | input.capture | gpu | VP-V > Input > Capture unpack on the GPU | RendererProfileConfig.h |
 | `capture_upload` | input.capture | auto | VP-V > Input > Upload frames as they arrive | RendererProfileConfig.h |
 | `chroma_upscale_vp` | scaling.chroma_upscale |  |  | RendererProfileConfig.h |
 | `cnn_residual_stabilise` | scaling.output | on | VP-V > Scaling > Steady the upscaler's added detail along motion | RendererProfileConfig.h |
+| `cntr_latency_ms` | unassigned |  |  | VpvSection.cpp |
 | `deband_grain` | repair.deband | off |  | RendererProfileConfig.h |
 | `deband_vp` | repair.deband | off |  | RendererProfileConfig.h |
 | `deband_vp_exclusive` | repair.deband | on | VP-V > Repair > VP deband replaces libplacebo's | RendererProfileConfig.h |
@@ -278,7 +320,8 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `frame_analysis_store` | input.source_analysis |  |  | RendererProfileConfig.h |
 | `general_rate_fixes` | input.queue_timing, motion.estimation, motion.vector_delivery, motion.consumers | on |  | RendererProfileConfig.h |
 | `global_hotkeys` | unassigned |  |  | MainConfigSchema.h |
-| `hdr_inference` | input.signal | vp |  | RendererProfileConfig.h |
+| `hdr_inference` | input.signal | vp |  | HdrInferenceChoice.h, RendererProfileConfig.h |
+| `hold_s` | unassigned |  |  | AmbientConfig.h |
 | `intent_black` | drive.led_compensation | off |  | RendererProfileConfig.h |
 | `intent_content` | unassigned | off | VP-V > Input > Content labels for profile rules (film / video / sports) | RendererProfileConfig.h |
 | `intent_content_hold_seconds` | unassigned | 5 |  | RendererProfileConfig.h |
@@ -292,8 +335,15 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `interpolation_fallback` | motion.consumers | hold | VP-V > Motion > Where motion is not trusted: hold or blend | RendererProfileConfig.h |
 | `interpolation_fill_gaps` | motion.consumers | on | VP-V > Motion > Fill dropped frames (hiccup repair) | RendererProfileConfig.h |
 | `interpolation_grain` | motion.consumers | preserve |  | RendererProfileConfig.h |
+| `led_latency_ms` | unassigned |  |  | VpvSection.cpp |
+| `light_level_ambient_nits` | input.light_level |  |  | LightLevelSettings.h |
+| `light_level_display_black_nits` | input.light_level |  |  | LightLevelSettings.h |
+| `light_level_display_white_nits` | input.light_level |  |  | LightLevelSettings.h |
+| `light_level_weber` | input.light_level |  |  | LightLevelSettings.h |
 | `low_bitrate_handling` | repair.deband | auto | VP-V > Repair > Deband reacts to compression | RendererProfileConfig.h |
 | `low_latency_path` | input.queue_timing |  |  | MainConfigSchema.h, RendererProfileConfig.h |
+| `lux_dark` | unassigned |  |  | AmbientConfig.h |
+| `lux_lit` | unassigned |  |  | AmbientConfig.h |
 | `magewell_recover_faults` | unassigned |  |  | MainConfigSchema.h |
 | `motion_ahead_frames` | motion.estimation | 4 |  | RendererProfileConfig.h |
 | `motion_engine` | motion.estimation, motion.vector_delivery |  |  | RendererProfileConfig.h |
@@ -310,12 +360,90 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `output_segments_merged` | output.dither |  |  | RendererProfileConfig.h |
 | `pipeline_entrance_once` | unassigned |  |  | RendererProfileConfig.h |
 | `pipeline_order` | unassigned |  |  | RendererProfileConfig.h |
-| `pipeline_original_pathway` | unassigned |  |  | RendererProfileConfig.h |
+| `pipeline_original_pathway` | unassigned |  |  | SkeletonSettings.h, HdrInferenceChoice.h, RendererProfileConfig.h |
 | `pipeline_slots_off` | unassigned |  |  | RendererProfileConfig.h |
+| `projector.ack_timeout_ms` | unassigned |  |  | LedDriveConfig.h |
+| `projector.adaptive_gamma` | unassigned |  |  | LedDriveConfig.h |
+| `projector.apl_weights` | unassigned |  |  | LedDriveConfig.h |
+| `projector.baud` | unassigned |  |  | LedDriveConfig.h |
+| `projector.bright_cut_dump` | unassigned |  |  | LedDriveConfig.h |
+| `projector.burst_commands` | unassigned |  |  | LedDriveConfig.h |
+| `projector.burst_pause_ms` | unassigned |  |  | LedDriveConfig.h |
+| `projector.cntr_assist` | unassigned |  |  | LedDriveConfig.h |
+| `projector.cntr_latency_ms` | unassigned |  |  | LedDriveConfig.h |
+| `projector.cntr_max_usable` | unassigned |  |  | LedDriveConfig.h |
+| `projector.cntr_pair_predict` | unassigned |  |  | LedDriveConfig.h |
+| `projector.cntr_settle_ms` | unassigned |  |  | LedDriveConfig.h |
+| `projector.command_source` | unassigned |  |  | LedDriveConfig.h |
+| `projector.correction_weight_by_time` | unassigned |  |  | LedDriveConfig.h |
+| `projector.curve` | unassigned |  |  | LedDriveConfig.h |
+| `projector.cut_cntr_dump` | unassigned |  |  | LedDriveConfig.h |
+| `projector.cut_jump` | unassigned |  |  | LedDriveConfig.h |
+| `projector.cut_lead` | unassigned |  |  | LedDriveConfig.h |
+| `projector.dmd_clip_cntr` | unassigned |  |  | LedDriveConfig.h |
+| `projector.early_ramp` | unassigned |  |  | LedDriveConfig.h |
+| `projector.echo` | unassigned |  |  | LedDriveConfig.h |
+| `projector.fade_min_slope` | unassigned |  |  | LedDriveConfig.h |
+| `projector.fade_ms` | unassigned |  |  | LedDriveConfig.h |
+| `projector.flux_table` | unassigned |  |  | LedDriveConfig.h |
+| `projector.ftb_custom_dim` | unassigned |  |  | LedDriveConfig.h |
+| `projector.ftb_custom_floor` | unassigned |  |  | LedDriveConfig.h |
+| `projector.ftb_custom_start` | unassigned |  |  | LedDriveConfig.h |
+| `projector.gamma_boost` | unassigned |  |  | LedDriveConfig.h |
+| `projector.highlight_area_large` | unassigned |  |  | LedDriveConfig.h |
+| `projector.highlight_area_small` | unassigned |  |  | LedDriveConfig.h |
+| `projector.lead_ms` | unassigned |  |  | LedDriveConfig.h |
+| `projector.led_btb_passthrough` | unassigned |  |  | LedDriveConfig.h |
+| `projector.led_ceiling` | unassigned |  |  | LedDriveConfig.h |
+| `projector.led_floor` | unassigned |  |  | LedDriveConfig.h |
+| `projector.led_floor_black` | unassigned |  |  | LedDriveConfig.h |
+| `projector.led_highlight_grain_suppress` | unassigned |  |  | LedDriveConfig.h |
+| `projector.led_landing_ms` | unassigned |  |  | LedDriveConfig.h |
+| `projector.led_latency_ms` | unassigned |  |  | LedDriveConfig.h |
+| `projector.led_peak_full_coverage` | unassigned |  |  | LedDriveConfig.h |
+| `projector.led_picture_only` | unassigned |  |  | LedDriveConfig.h |
+| `projector.led_response_ms` | unassigned |  |  | LedDriveConfig.h |
+| `projector.led_settle_ms` | unassigned |  |  | LedDriveConfig.h |
+| `projector.led_wtw_passthrough` | unassigned |  |  | LedDriveConfig.h |
+| `projector.light_max` | unassigned |  |  | LedDriveConfig.h |
+| `projector.light_min` | unassigned |  |  | LedDriveConfig.h |
+| `projector.lookahead` | unassigned |  |  | LedDriveConfig.h |
+| `projector.max_levels_per_command` | unassigned |  |  | LedDriveConfig.h |
+| `projector.min_command_gap_ms` | unassigned |  |  | LedDriveConfig.h |
+| `projector.port` | unassigned |  |  | AmbientConfig.h, LedDriveConfig.h |
+| `projector.preposition_black_only` | unassigned |  |  | LedDriveConfig.h |
+| `projector.profile_file` | unassigned |  |  | LedDriveConfig.h |
+| `projector.protocol` | unassigned |  |  | LedDriveConfig.h |
+| `projector.rate_max_down` | unassigned |  |  | LedDriveConfig.h |
+| `projector.rate_max_up` | unassigned |  |  | LedDriveConfig.h |
+| `projector.rate_min_down` | unassigned |  |  | LedDriveConfig.h |
+| `projector.rate_min_up` | unassigned |  |  | LedDriveConfig.h |
+| `projector.rate_preset` | unassigned |  |  | LedDriveConfig.h |
+| `projector.read_back` | unassigned |  |  | LedDriveConfig.h |
+| `projector.script_lookahead` | unassigned |  |  | LedDriveConfig.h |
+| `projector.script_pacing` | unassigned |  |  | LedDriveConfig.h |
+| `projector.script_resend_failed_writes` | unassigned |  |  | LedDriveConfig.h |
+| `projector.script_smoothing` | unassigned |  |  | LedDriveConfig.h |
+| `projector.shaped_recovery` | unassigned |  |  | LedDriveConfig.h |
+| `projector.software_first` | unassigned |  |  | LedDriveConfig.h |
+| `projector.steps_down` | unassigned |  |  | LedDriveConfig.h |
+| `projector.steps_up_bright` | unassigned |  |  | LedDriveConfig.h |
+| `projector.steps_up_dark` | unassigned |  |  | LedDriveConfig.h |
+| `projector.terminator` | unassigned |  |  | LedDriveConfig.h |
 | `pulldown_fixes` | input.queue_timing | on |  | RendererProfileConfig.h |
 | `queue_auto_reset` | input.queue_timing |  |  | MainConfigSchema.h |
 | `queue_timing_fixes` | input.queue_timing | on |  | RendererProfileConfig.h |
+| `rate_gain_down` | unassigned |  |  | VpvSection.cpp |
+| `rate_gain_up` | unassigned |  |  | VpvSection.cpp |
+| `rate_max_down` | unassigned |  |  | VpvSection.cpp |
+| `rate_max_up` | unassigned |  |  | VpvSection.cpp |
+| `rate_min_down` | unassigned |  |  | VpvSection.cpp |
+| `rate_min_up` | unassigned |  |  | VpvSection.cpp |
+| `read_back` | unassigned |  |  | VpvSection.cpp |
 | `rebase_kernel_match` | scaling.rebase | on | VP-V > Scaling > Re-base: undo the player's upscaler | RendererProfileConfig.h |
+| `recovery_rate_gain` | unassigned |  |  | VpvSection.cpp |
+| `recovery_rate_max` | unassigned |  |  | VpvSection.cpp |
+| `recovery_rate_min` | unassigned |  |  | VpvSection.cpp |
 | `render_ahead` | output.presentation | off | VP-V > Motion > De-judder: render ahead (under test) | RendererProfileConfig.h |
 | `render_ahead_queue_credit` | output.presentation | off |  | RendererProfileConfig.h |
 | `render_ahead_utilisation` | output.presentation | 0.85 |  | RendererProfileConfig.h |
@@ -328,12 +456,15 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `retirement_b` | unassigned |  |  | RendererProfileConfig.h |
 | `retirement_c` | unassigned |  |  | RendererProfileConfig.h |
 | `retirement_d` | unassigned |  |  | RendererProfileConfig.h |
+| `room` | unassigned |  |  | AmbientConfig.h |
 | `saturation` | unassigned |  |  | RendererProfileConfig.h |
 | `sdr_contrast_recovery` | colour.sdr_tone_shape |  |  | RendererProfileConfig.h |
 | `sdr_knee_start` | input.light_level, colour.sdr_tone_shape | 0.8 |  | RendererProfileConfig.h |
 | `sdr_knee_strength` | input.light_level, colour.sdr_tone_shape | 0.5 |  | RendererProfileConfig.h |
 | `sdr_tone_shape` | input.light_level, colour.sdr_tone_shape | off | VP-V > Colour > SDR tone shape | RendererProfileConfig.h |
 | `sdr_white_headroom` | input.light_level, colour.sdr_tone_shape |  |  | RendererProfileConfig.h |
+| `shortcuts.global_actions` | unassigned |  |  | MainConfigSchema.h |
+| `shortcuts.state_report` | unassigned |  |  | StateReportSettings.h |
 | `source_class` | motion.consumers | legacy |  | RendererProfileConfig.h |
 | `source_coding_fixes` | input.source_analysis | on |  | RendererProfileConfig.h |
 | `source_range` | unassigned | auto | VP-V > Input > Source range (when the source mislabels it) | RendererProfileConfig.h |
@@ -375,4 +506,4 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 
 ## Appendix C: Original (Bill) keys
 
-181 key(s) belong to Bill's schema files (`docs/settings/UPSTREAM-KEYS.txt`) and are not part of this list.
+192 key(s) belong to Bill's schema files (`docs/settings/UPSTREAM-KEYS.txt`) and are not part of this list.

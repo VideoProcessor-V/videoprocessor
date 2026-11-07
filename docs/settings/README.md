@@ -48,6 +48,12 @@ compares them with the README rows.
   `--strict` fails on any gap that is not in the baseline; the baseline only shrinks.
 - CI should also run `--strict --base-ref <merge-base>`: the baseline and `UPSTREAM-KEYS.txt` may not grow
   relative to it (otherwise a gap could be hidden by editing either file).
-- Known limits: keys are matched by bare name; keys defined only in other validator headers
-  (e.g. RendererConfigView.h, FileHostSettings.h) are not scanned; fenced example tables are ignored.
-- Tests: `python -I tools/test_check_master_settings.py` (fixture trees, plus the repository's own gate).
+- Key ids: profile and `[vpv]` keys are bare; keys read from any other section are `section.key` (`.default` dropped),
+  e.g. `calibration.lut_size`, `ambient.mode`. Keys read via a `section` variable take the file's first `*SECTION`
+  constant (so led_drive keys read in `LedDriveConfig.h` are listed under `projector.`; give the README row the
+  Section `[projector]` to match, or split the constants later).
+- Known limits: keys defined only in other validator headers (e.g. RendererConfigView.h, FileHostSettings.h) are
+  not scanned; fenced example tables are ignored.
+- Tests: `python -I tools/test_check_master_settings.py` (hermetic fixture trees). The repository's own gate is the
+  train command `python -I tools/check_master_settings.py --strict --base-ref <merge-base>`; the same check as a
+  unit test runs with `VP_MS_REAL=1`.
