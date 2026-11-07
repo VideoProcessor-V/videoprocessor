@@ -95,24 +95,33 @@ per input, filter graph 2 threads (1 for graphs with the noise filter), x265 `fr
 Writes `NullTables.generated.h` (an inline `GeneratedNullTables()` returning the `NullTables` struct of
 `identity/chain/ChainNullTables.h`, C++14) and `calibration-report.md` (<= 60 lines) from the calibration dumps.
 
-* Input: `VP_SOURCE_ID_CAL_DUMP` directory, one CSV per reel, one row per evaluation x axis x tested candidate; columns
-  `reel_id,title,eval_seq,time_s,axis,N,n,class,T,stage(coarse|exact),best_kernel,kernel_margin,lines_passed,lines,power_seen,floor_codes,truth_n(0=native),bit_depth,truth_kernel,truth_sharpen`.
-  An optional `shot_id` column is used for the per-shot cap; without it a shot is `--shot-seconds` (3 s) of source time.
+* Input: dump v3 (contract `vp-handover/sid/cal-dump-v3-contract.md`): `VP_SOURCE_ID_CAL_DUMP` directory, one CSV per reel, one
+  row per evaluation x axis x tested candidate, 27 columns, ALL required (a v1/v2 dump is refused: "dump v2 - regenerate with v3
+  writer"): the 21 v2 columns `reel_id,title,eval_seq,time_s,axis,N,n,class,T,stage,best_kernel,kernel_margin,lines_passed,lines,power_seen,floor_codes,truth_n,bit_depth,truth_kernel,truth_sharpen,shot_id`
+  then `T_ev,informative,master,has_truth,truth_n1,cut_id`. `T_ev` is the statistic the LLR sees (used for every fit and
+  simulation; `T` is diagnostic only). `title` is a per-reel description and is ignored: folds and counts use `master`.
 * Run: `python -I tools/eval/source_id/calibrate_nulls.py --dump <dir> --out <dir>` (options: `--require-power`,
-  `--null-side below`, `--shot-seconds`, `--seed`, `--date`). Test: `python -I tools/eval/source_id/calibrate_nulls.py --selftest`.
-* Samples (stage exact only): the estimator's line gate (`lines_passed >= max(3, ceil(lines/4))`), then candidates of one
-  evaluation and axis within +-1 px are clustered and the lowest T kept, as `ChainEvidence` does. NULL = native-truth reels, plus
-  clusters more than 1 px from `truth_n` on upscaled reels; ALT = within +-1 of `truth_n`. The class is recomputed from (n, N)
-  with a port of `ClassifyLatent` (mismatches with the dump's column are counted in the report). The power rule is NOT applied
-  to candidate rows by default (the estimator applies it only to the native hypothesis); `--require-power` applies it to all.
-* Fit per class: null mean = median, sd = 1.4826 MAD or the dip-side spread (median - P16) if larger, widened x1.25 and by
-  (1 + 2/sqrt(n)); alt = median / max(MAD sd, upper-side spread), shrunk toward the null by min(1, n_alt/150).
-* Conservative rules: a class with fewer than 40 null or 30 alt clusters, fewer than 3 titles on either side, or an alt not
-  0.25 null-sd below the null KEEPS THE PLACEHOLDER. A class below the full counts (300 null / 150 alt) is "thin": it is
-  blended toward the placeholder (steps of 0.1) until its clamped increment is nowhere larger than the placeholder's on
-  T in [-2, 0.05]. Every number is a field of `Policy`.
-* Validation: 2-fold CV BY TITLE (sha1-ordered, alternating; all reels of a title, native or upscaled, share a fold). Held out per
-  class: ROC AUC of the LLR; false CANDIDATE entries per native hour with the per-shot cap c1/2 (default) and c1 (sensitivity),
-  calibrated and placeholder side by side; wrong-n entries on alt reels; evaluations to c1 on alt reels, 8- and 10-bit
-  separately (inf = never). c1 = -ln(rate x 10 s / 3600) + ln(8 x 10) = 14.87 nats.
-* Not simulated: the native hypothesis, the two-axis prior, HOLD/mixed masking (not in the dump).
+  `--null-side below`, `--seed`, `--date`). Test: `python -I tools/eval/source_id/calibrate_nulls.py --selftest` (about 20 s).
+* Samples (stage exact only): `has_truth == 1`, `informative == 1` and the line gate (`lines_passed >= max(3, ceil(lines/4))`),
+  then candidates of one evaluation and axis within +-1 px are clustered and the lowest `T_ev` kept, as `ChainEvidence` does.
+  NULL = native-truth (`truth_n == 0`), plus clusters more than 1 px from `truth_n` on upscaled rows; ALT = within +-1 of
+  `truth_n` (or of `truth_n1` of a double-scaled reel); off-latent rows of a double-scaled reel are dropped, never null. The class
+  is recomputed from (n, N) (port of `ClassifyLatent`; mismatches with the dump are counted). The power rule is NOT applied to
+  candidate rows by default (the estimator applies it to the native hypothesis only); `--require-power` applies it to all.
+* Effective sample size: consecutive evaluations of one shot are near-identical, so every count (minimum, full, standard-error
+  term) is the number of distinct (reel, axis, truth `shot_id`) groups, and at least 5 masters must contribute on each side.
+* Fit per class: null mean = median; sd = the largest of 1.4826 MAD and the dip-side spread matched at 1, 2 and 2.5 sigma
+  (median - P15.9, (median - P2.3)/2, (median - P0.6)/2.5), widened x1.25 and by (1 + 2/sqrt(n_eff)); alt = median /
+  max(MAD sd, upper-side spread), shrunk toward the null by min(1, n_eff_alt/75).
+* Conservative rules: fewer than 30 null or 20 alt effective samples, fewer than 5 masters, or an alt not 0.25 null-sd below the null
+  KEEPS THE PLACEHOLDER. Below the full counts (150 null / 75 alt) a class is "thin": blended toward the placeholder in steps of
+  0.1 until its clamped increment is nowhere larger than the placeholder's on T in [-2, max(1, largest observed T)]. Every number is a
+  field of `Policy`.
+* Validation: 2-fold CV BY MASTER (sha1-ordered, alternating; all reels of a footage, native or upscaled, share a fold). Held out: per
+  class ROC AUC of the LLR and the null LLR P99 / P99.9 against c1; false CANDIDATE entries per native hour, simulated per truth segment with
+  both axes jointly (agreement prior +-2 nats, per-shot cap c1/2 and c1 by the estimator's own `cut_id`, nearest-slot match,
+  16 hypotheses, >= 4 informative evaluations over >= 2 shots), calibrated and placeholder side by side, with the upper 95% bound
+  (3/H when no event: zero events in H hours supports only that bound); wrong-n entries on alt segments; evaluations to c1 on alt segment-axes
+  (every one is a denominator; inf = never), 8- and 10-bit separately. Segments are maximal runs of one truth; evaluations without
+  truth are boundaries. c1 = -ln(rate x 10 s / 3600) + ln(8 x 10) = 14.87 nats.
+* Not simulated: the native hypothesis (it cannot raise a candidate) and HOLD masking (`informative` already removes those evaluations).
