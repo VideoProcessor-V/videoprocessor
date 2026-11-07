@@ -13,6 +13,7 @@ Today the classical source-resolution monitor (`input.source_analysis`) decides 
 - `AbrStepDetector.h`: ABR boundary timing from per-frame quality samples.
 - `AbrNoticePolicy.h`: the one-time notice and its wording.
 - `SourceIdProduct.h`, `FrameQuality.h`, `SourceIdPipeline.h`, `SourceQualityView.h`: the P14 record and holder, the frame-level quality signal, the worker pipeline and the consumer read API (sections below).
+- `SourceIdReplay.h`: replays a source-resolution history CSV through the pipeline (section "History CSV and replay").
 
 ## Voters and trust
 
@@ -123,6 +124,10 @@ With `source_id_consensus` on and a fresh record, `AutoFactor` / `AutoFactors` e
 - Ctrl+I / Config line `Source identity: ...` (off, shadow, classical only (<reason>), consensus).
 - Shadow: log line "source_id would-be: <field> <from> -> <to> (<reason>, support <s>)" per consensus change.
 - Consumers fall back to the classical value, visibly (`product.source_quality`), whenever the record is absent, stale, unlatched or another version; in shadow they always use the classical value.
+
+## History CSV and replay (SID-B0)
+
+The SRM history CSV (`SourceHistoryLog.h/.cpp` in the parent folder, see source_analysis/README.md "History CSV") is session-long, appended and rotated, and carries what the consensus needs: `mode, t_src, seq, frame_ratio_v, frame_ratio_h, detail_above, mixed, blank, cut, fade, apl, axis_x, axis_y, axis_conf, kernel_id, kernel, kernel_votes, kernel_agree, frame_quality, frame_noise, sid_tier, sid_level, sid_ratio_h, sid_ratio_v, sid_reason` (with the older `declared`, `confidence`, `bitrate_quality`, `frame_ratio`). `SourceIdReplay.h` (`SrmReplay::Run`; columns by NAME, never by position) feeds a file (or the concatenated files of a session; the repeated headers and `session` rows are skipped, a `discontinuity` row resets the pipeline) through `Pipeline` in source time, using the recorded frame quality (`Pipeline::Push(in, &quality)`); the same CSV always gives the same trace (`SrmReplay::Trace`), so a captured session can be re-run against changed thresholds. `python -I tools/eval/source_id/replay.py --srm <file>` reads the same files (a rotated session's continuations are followed) and prints a SUMMARY; the replay itself is `SrmReplay`. Limits: CSV values are rounded (`%.4f` ratios, `%.6f` times and frame quality), so a replay can differ from the live run at a threshold edge; the relative-noise tiles are not stored (the recorded frame quality stands in); a file written with the pipeline off has no `frame_quality` (it defaults to 1.0) - replay files written in shadow or on. Tests: `SourceIdReplayTests` (a committed fixture, `tests/fixtures/srm-history-replay.csv`).
 
 ## Still to do (call sites outside this module)
 
