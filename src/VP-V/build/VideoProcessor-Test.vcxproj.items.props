@@ -654,6 +654,32 @@
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\FieldReadbackRingWarpTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\tests\FieldRefineTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\tests\FieldRefineWarpTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\tests\LongPairTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\tests\LongPairBenchDump.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\longpair\NvOpticalFlowHinted.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\longpair\LongPairService.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\PairTimingTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <LanguageStandard>stdcpp17</LanguageStandard>
