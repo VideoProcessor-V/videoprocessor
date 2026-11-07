@@ -126,7 +126,7 @@ namespace Tests
 		}
 
 		// 1/f-like scene: octave j is a Gaussian grid of (h, w) x 0.59^j resized to (h, w); amplitude hf x 1.35^j.
-		inline Image Scene(int h, int w, double hf, uint32_t seed, double grain)
+		inline Image Scene(int h, int w, double hf, uint32_t seed, double grain, int maxOctaves = 99)
 		{
 			Lcg g(seed);
 			Image img;
@@ -135,6 +135,8 @@ namespace Tests
 			img.v.assign(static_cast<size_t>(h) * static_cast<size_t>(w), 0.0);
 			for (int j = 0;; ++j)
 			{
+				if (j >= maxOctaves)
+					break;
 				const int sh = static_cast<int>(std::floor(static_cast<double>(h) * std::pow(0.59, j) + 0.5));
 				const int sw = static_cast<int>(std::floor(static_cast<double>(w) * std::pow(0.59, j) + 0.5));
 				if (sh < 4 || sw < 4)
@@ -487,6 +489,34 @@ namespace Tests
 				}
 				return 0.0;
 			};
+			auto spline64 = [](double x) {
+				x = x < 0 ? -x : x;
+				if (x < 1.0)
+					return ((49.0 / 41.0 * x - 6387.0 / 2911.0) * x - 3.0 / 2911.0) * x + 1.0;
+				if (x < 2.0)
+				{
+					x -= 1.0;
+					return ((-24.0 / 41.0 * x + 4032.0 / 2911.0) * x - 2328.0 / 2911.0) * x;
+				}
+				if (x < 3.0)
+				{
+					x -= 2.0;
+					return ((6.0 / 41.0 * x - 1008.0 / 2911.0) * x + 582.0 / 2911.0) * x;
+				}
+				if (x < 4.0)
+				{
+					x -= 3.0;
+					return ((-1.0 / 41.0 * x + 168.0 / 2911.0) * x - 97.0 / 2911.0) * x;
+				}
+				return 0.0;
+			};
+			for (size_t i = 0; i < sizeof(ts) / sizeof(ts[0]); ++i)
+			{
+				double w64[8];
+				TapWeights(9, ts[i], w64);
+				for (int s = 0; s < 8; ++s)
+					Assert::AreEqual(spline64(ts[i] - static_cast<double>(s - 3)), w64[s], 1e-12, L"spline64 matches its closed form");
+			}
 			for (size_t i = 0; i < sizeof(ts) / sizeof(ts[0]); ++i)
 			{
 				double w36[8];
@@ -761,6 +791,47 @@ namespace Tests
 			}
 		}
 
+		TEST_METHOD(LatchedSizeIsAlwaysVerifiedAndFewerLinesAreHonoured)
+		{
+			using namespace ChainSynth;
+			const Axes& a = FullChain(720, 1280, kBicubic, 232u, 10);
+			VerifierSettings st;
+			st.maxExactCandidates = 1;
+			DescaleVerifier v(st);
+			const int cand[4] = { 720, 360, 540, 810 };
+			VerifyOptions opt;
+			opt.forceExactN = 810;
+			VerifyResult r;
+			Assert::IsTrue(v.Evaluate(a.v, cand, 4, opt, r));
+			int exact = 0;
+			bool has720 = false;
+			bool has810 = false;
+			for (size_t i = 0; i < r.candidates.size(); ++i)
+			{
+				const CandidateResult& c = r.candidates[i];
+				if (c.exactDone)
+				{
+					++exact;
+					if (c.nProposed == 720)
+						has720 = true;
+					if (c.nProposed == 810)
+						has810 = true;
+				}
+				else
+					Assert::IsTrue((c.reason & kReasonCoarseOnly) != 0 || !c.valid, L"others stay coarse only");
+			}
+			Assert::IsTrue(exact == 2 && has720 && has810, L"the best candidate and the caller latched size reach the exact stage");
+			VerifyOptions few;
+			few.exactLines = 16;
+			DescaleVerifier v2;
+			VerifyResult r2;
+			const int one[1] = { 720 };
+			Assert::IsTrue(v2.Evaluate(a.v, one, 1, few, r2));
+			Assert::IsTrue(r2.candidates[0].exactDone && r2.candidates[0].lineCount == 16 && r2.candidates[0].n == 720);
+			Assert::IsTrue(r2.candidates[0].stat < -0.5, L"16 lines still show the dip");
+			Assert::IsTrue(r2.candidates[0].lineStat.size() == 16 && r2.candidates[0].segStat.size() == 16u * static_cast<size_t>(r2.candidates[0].segCount));
+		}
+
 		TEST_METHOD(SameLinesGiveByteIdenticalResultsInAnyCandidateOrderAndWithAWarmCache)
 		{
 			using namespace ChainSynth;
@@ -827,6 +898,16 @@ namespace Tests
 				prop.AddEvaluation(a.h);
 				PeriodScore ps[kMaxCandidates];
 				Assert::IsTrue(prop.Periods(ps, kMaxCandidates) == 0, L"a native picture has no phase period");
+				PeriodScore all[32];
+				const int na = prop.AllScores(all, 32);
+				double maxRatio = 0.0;
+				for (int k = 0; k < na; ++k)
+					if (all[k].ratio > maxRatio)
+						maxRatio = all[k].ratio;
+				std::ostringstream mr;
+				mr << "native max per-dof ratio over q = 2.." << (na + 1) << ": " << maxRatio << " (ratioMin 5)";
+				Logger::WriteMessage(mr.str().c_str());
+				Assert::IsTrue(maxRatio < 4.5, L"natives keep a safe margin below ratioMin");
 			}
 		}
 
@@ -969,23 +1050,35 @@ namespace Tests
 		{
 			using namespace ChainSynth;
 			VerifyResult vr;
-			vr.candidates.push_back(MakeCandidate(540, -1.0, 0.5));   // detail 0.5 codes < 3 x 0.29 floor... gate is 0.87
+			vr.candidates.push_back(MakeCandidate(540, -1.0, 0.3));   // detail 0.3 codes: below 1.5 x the 10-bit floor (0.29) = 0.43
 			ChainEvidence ev;
 			EvidenceUpdate u;
 			Assert::IsTrue(ev.Submit(1, Observe(vr, 1080, 1, false), u));
 			Assert::IsFalse(u.informative);
 			Assert::IsTrue((u.reason & kReasonLowDetail) != 0);
 			Assert::IsFalse(ev.Summary(1).hasBest, L"abstaining leaves no hypothesis");
-			// An 8-bit floor (1.15 codes) raises the gate to 3.5 codes.
+			// An 8-bit floor (1.155 codes) puts the gate at 1.73 codes.
 			VerifyResult vr2;
-			vr2.candidates.push_back(MakeCandidate(540, -1.0, 2.0));
+			vr2.candidates.push_back(MakeCandidate(540, -1.0, 1.5));
 			AxisObservation o = Observe(vr2, 1080, 1, false);
 			o.floorCodes = 1.155;
 			Assert::IsTrue(ev.Submit(1, o, u));
-			Assert::IsFalse(u.informative);
-			o.floorCodes = 0.29;
+			Assert::IsFalse(u.informative, L"1.5 codes of detail is below the 8-bit gate");
+			VerifyResult vr3;
+			vr3.candidates.push_back(MakeCandidate(540, -1.0, 2.0));
+			o = Observe(vr3, 1080, 1, false);
+			o.floorCodes = 1.155;
 			Assert::IsTrue(ev.Submit(1, o, u));
-			Assert::IsTrue(u.informative, L"the same detail passes at a 10-bit floor");
+			Assert::IsTrue(u.informative, L"2 codes of detail passes the 8-bit gate (1.73)");
+			// The old default (3 x the floor) would have abstained: the gate factor is a tunable.
+			EvidenceSettings strict;
+			strict.lineGateFactor = 3.0;
+			ChainEvidence ev3(strict);
+			Assert::IsTrue(ev3.Submit(1, o, u));
+			Assert::IsFalse(u.informative);
+			Assert::IsTrue((u.reason & kReasonLowDetail) != 0);
+			Assert::AreEqual(1.5, EvidenceSettings().lineGateFactor, 0.0, L"default gate");
+			Assert::AreEqual(1.5, ProbeSettings().lineGateFactor, 0.0, L"default probe gate");
 		}
 
 		TEST_METHOD(ContradictingLinesAreMaskedBelowTwentyPercentAndHoldAbove)
@@ -1019,6 +1112,127 @@ namespace Tests
 			ChainEvidence ev3;
 			Assert::IsTrue(ev3.Submit(1, Observe(segs, 1080, 1, true), u));
 			Assert::IsTrue(u.hold && (u.reason & kReasonMixed) != 0, L"overlay over part of the line is a HOLD hint too");
+		}
+
+		TEST_METHOD(LoopNightHalfSizeUpscalesAt8BitsReachC1WithinFifteenEvaluations)
+		{
+			using namespace ChainSynth;
+			const int kernels[2] = { kBilinear, kBicubic };
+			const double floorCodes = 4.0 / std::sqrt(12.0);
+			for (int ki = 0; ki < 2; ++ki)
+			{
+				const int kernel = kernels[ki];
+				std::ostringstream key;
+				key << "loopnight" << kernel;
+				const Axes& a = Cached(key.str(), [=]() {
+					Image sc = Scene(540, 960, 10.0, 1201u + static_cast<uint32_t>(kernel), kGrain);
+					Image up = ResizeAxis(ResizeAxis(sc, 0, kFrameH, kernel), 1, kFrameW, kernel);
+					Quantize(up, 8);
+					return up;
+				}, MakeRect(0, 0, kFrameW, kFrameH));
+				for (int axis = 0; axis < 2; ++axis)
+				{
+					const LineSet& ls = axis == 0 ? a.h : a.v;
+					DescaleVerifier verifier;
+					const AxisRun run = Analyse(ls, std::vector<int>(), verifier);
+					ChainEvidence ev;
+					EvidenceUpdate u;
+					int reached = 0;
+					for (int e = 1; e <= 15 && reached == 0; ++e)
+					{
+						AxisObservation o;
+						o.verify = &run.vr;
+						o.axisLen = ls.axisLen;
+						o.floorCodes = floorCodes;
+						o.shotId = 1u + static_cast<uint32_t>((e - 1) / 2);   // a new shot every 2 evaluations
+						ev.Submit(axis, o, u);
+						if (ev.Summary(axis).aboveC1)
+							reached = e;
+					}
+					std::ostringstream m;
+					m << "loop night, kernel " << Kernel(kernel).name << ", axis " << axis << ": c1 reached after " << reached << " evaluations";
+					Logger::WriteMessage(m.str().c_str());
+					Assert::IsTrue(reached > 0 && reached <= 15, L"a textured 8-bit half-size upscale reaches c1 within 15 evaluations");
+					const AxisSummary sm = ev.Summary(axis);
+					Assert::IsTrue(sm.hasBest && sm.n == ls.axisLen / 2, L"at the true size");
+					// Regression pin: the old 3 x floor gate abstains on exactly these lines.
+					EvidenceSettings strict;
+					strict.lineGateFactor = 3.0;
+					ChainEvidence ev3(strict);
+					AxisObservation o3;
+					o3.verify = &run.vr;
+					o3.axisLen = ls.axisLen;
+					o3.floorCodes = floorCodes;
+					o3.shotId = 1;
+					ev3.Submit(axis, o3, u);
+					Assert::IsFalse(u.informative, L"the 3x gate abstains on 8-bit lines of this detail");
+					Assert::IsTrue((u.reason & kReasonLowDetail) != 0);
+				}
+			}
+		}
+
+		TEST_METHOD(SizesWithinOnePixelShareOneHypothesis)
+		{
+			using namespace ChainSynth;
+			ChainEvidence ev;
+			EvidenceUpdate u;
+			const NullTables t = NullTables::Placeholder();
+			const double one = ClampD(t.LogLikelihoodRatio(ClassifyLatent(450, 1080), -0.2), -3.0, 5.0);
+			Assert::IsTrue(one > 1.0 && one < 4.0, L"a moderate dip: not clamped");
+			// Within one evaluation: 450 and 451 are one cluster, counted once (the better one).
+			VerifyResult both;
+			both.candidates.push_back(MakeCandidate(450, -0.12, 5.0));
+			both.candidates.push_back(MakeCandidate(451, -0.2, 5.0));
+			Assert::IsTrue(ev.Submit(1, Observe(both, 1080, 1, false), u));
+			Assert::IsTrue(u.cand[0].clustered && !u.cand[0].informative && u.cand[1].informative, L"the weaker neighbour is clustered away");
+			Assert::AreEqual(one, ev.Summary(1).llr, 1e-9, L"counted once");
+			Assert::IsTrue(ev.Summary(1).n == 451);
+			// Across shots: the refined size jitters 451 -> 450 -> 451: still one hypothesis, the value follows.
+			VerifyResult a450;
+			a450.candidates.push_back(MakeCandidate(450, -0.2, 5.0));
+			VerifyResult a451;
+			a451.candidates.push_back(MakeCandidate(451, -0.2, 5.0));
+			ev.Submit(1, Observe(a450, 1080, 2, false), u);
+			ev.Submit(1, Observe(a451, 1080, 3, false), u);
+			const AxisSummary s = ev.Summary(1);
+			Assert::AreEqual(3.0 * one, s.llr, 1e-9, L"the jitter does not split the evidence");
+			Assert::IsTrue(s.n == 451, L"the hypothesis value is the latest best exact size");
+			// Two apart are two hypotheses.
+			ChainEvidence ev2;
+			VerifyResult far1;
+			far1.candidates.push_back(MakeCandidate(450, -0.2, 5.0));
+			VerifyResult far2;
+			far2.candidates.push_back(MakeCandidate(452, -0.2, 5.0));
+			ev2.Submit(1, Observe(far1, 1080, 1, false), u);
+			ev2.Submit(1, Observe(far2, 1080, 2, false), u);
+			Assert::AreEqual(one, ev2.Summary(1).llr, 1e-9, L"2 px apart: separate hypotheses, no sharing");
+		}
+
+		TEST_METHOD(OnlyTheTopHypothesisCanHoldTheEvaluation)
+		{
+			using namespace ChainSynth;
+			VerifyResult vr;
+			vr.candidates.push_back(MakeCandidate(720, -1.0, 5.0));     // the true one: clean, deepest
+			vr.candidates.push_back(MakeCandidate(360, 0.0, 5.0));      // a wrong one: most lines flat, a quarter of them dip
+			for (int j = 0; j < 8; ++j)
+				vr.candidates[1].lineStat[static_cast<size_t>(j * 4)] = -0.4;
+			ChainEvidence ev;
+			EvidenceUpdate u;
+			Assert::IsTrue(ev.Submit(1, Observe(vr, 1080, 1, false), u));
+			Assert::IsTrue(u.cand[1].mixed, L"the wrong candidate is mixed");
+			Assert::IsFalse(u.hold, L"but it never holds the evaluation");
+			Assert::IsTrue((u.reason & kReasonMixed) == 0);
+			Assert::IsTrue(u.informative && u.cand[0].informative && !u.cand[1].informative);
+			Assert::IsTrue(ev.Summary(1).hasBest && ev.Summary(1).n == 720);
+			// The same mixed lines on the top hypothesis do hold.
+			VerifyResult top;
+			top.candidates.push_back(MakeCandidate(720, -1.0, 5.0));
+			for (int j = 0; j < 10; ++j)
+				top.candidates[0].lineStat[static_cast<size_t>(j)] = 0.0;
+			top.candidates.push_back(MakeCandidate(360, 0.0, 5.0));
+			ChainEvidence ev2;
+			Assert::IsTrue(ev2.Submit(1, Observe(top, 1080, 1, false), u));
+			Assert::IsTrue(u.hold && (u.reason & kReasonMixed) != 0);
 		}
 
 		TEST_METHOD(TwoAxisAgreementAddsAPriorAndDisagreementSubtractsIt)
@@ -1224,62 +1438,71 @@ namespace Tests
 	TEST_CLASS(ChainTimingTests)
 	{
 	public:
-		// Logs milliseconds per evaluation at 3840x2160; no timing assertion (the budget is measured at C2).
+		// Logs milliseconds for ONE evaluation (both axes) at 3840x2160 with 1 and with 3 candidates per axis, cold and
+		// warm operator cache; no timing assertion (the budget is measured at C2). The scene is small (5 octaves).
 		TEST_METHOD(LogsTheCostOfOneEvaluationAtUltraHd)
 		{
 			using namespace ChainSynth;
 			using Clock = std::chrono::steady_clock;
-			Image latent = Scene(1080, 1920, kHf, 1101u, kGrain);
+			Image latent = Scene(1080, 1920, kHf, 1101u, kGrain, 5);
 			Image up = ResizeAxis(ResizeAxis(latent, 0, 2160, kLanczos3), 1, 3840, kLanczos3);
 			Quantize(up, 10);
 			Axes ax = MakeAxes(up, MakeRect(0, 0, 3840, 2160), 1);
 			Assert::IsTrue(ax.ok);
-			DescaleVerifier verifier;
-			PolyphaseProposer prop[2];
-			ChainEvidence ev;
-			double totalMs = 0.0;
-			for (int pass = 0; pass < 2; ++pass)
+			auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+			const int counts[2] = { 1, 3 };
+			for (int ci = 0; ci < 2; ++ci)
 			{
+				DescaleVerifier verifier;
+				DescaleVerifier probeVerifier;   // the probe has its own cache
+				PolyphaseProposer prop[2];
+				ChainEvidence ev;
 				std::ostringstream m;
-				m << "pass " << (pass == 0 ? "cold" : "warm") << ":";
-				for (int axis = 0; axis < 2; ++axis)
+				m << counts[ci] << " candidate(s) per axis:";
+				for (int pass = 0; pass < 2; ++pass)
 				{
-					const LineSet& ls = axis == 0 ? ax.h : ax.v;
-					const Clock::time_point t0 = Clock::now();
-					prop[axis].AddEvaluation(ls);
-					ProposedCandidate pc[kMaxCandidates];
-					const int caller[1] = { ls.axisLen / 2 };
-					const int np = prop[axis].Propose(ls.axisLen, caller, 1, pc, kMaxCandidates);
-					const Clock::time_point t1 = Clock::now();
-					std::vector<int> cand;
-					for (int i = 0; i < np; ++i)
-						cand.push_back(pc[i].n);
-					VerifyResult vr;
-					verifier.Evaluate(ls, cand.data(), static_cast<int>(cand.size()), VerifyOptions(), vr);
-					const Clock::time_point t2 = Clock::now();
-					ProbeResult pr;
-					PowerProbe::Run(verifier, ls, 0.29, 1.0, ProbeSettings(), pr);
-					const Clock::time_point t3 = Clock::now();
-					AxisObservation o;
-					o.verify = &vr;
-					o.axisLen = ls.axisLen;
-					o.floorCodes = 0.29;
-					o.probeRan = pr.ran;
-					o.probeSeen = pr.seen;
-					o.shotId = 1;
-					EvidenceUpdate u;
-					ev.Submit(axis, o, u);
-					const Clock::time_point t4 = Clock::now();
-					auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
-					m << " axis" << axis << "(proposer " << ms(t0, t1) << " ms, verifier " << ms(t1, t2) << " ms for " << cand.size()
-						<< " candidates, probe " << ms(t2, t3) << " ms, evidence " << ms(t3, t4) << " ms)";
-					totalMs += ms(t0, t4);
+					double total = 0.0;
+					m << (pass == 0 ? " [cold" : " [warm");
+					for (int axis = 0; axis < 2; ++axis)
+					{
+						const LineSet& ls = axis == 0 ? ax.h : ax.v;
+						const Clock::time_point t0 = Clock::now();
+						prop[axis].AddEvaluation(ls);
+						const Clock::time_point t1 = Clock::now();
+						std::vector<int> cand;
+						cand.push_back(ls.axisLen / 2);
+						if (counts[ci] == 3)
+						{
+							cand.push_back(ls.axisLen * 2 / 3);
+							cand.push_back(ls.axisLen * 3 / 4);
+						}
+						VerifyOptions opt;
+						opt.forceExactN = ls.axisLen / 2;
+						VerifyResult vr;
+						verifier.Evaluate(ls, cand.data(), static_cast<int>(cand.size()), opt, vr);
+						const Clock::time_point t2 = Clock::now();
+						ProbeResult pr;
+						PowerProbe::Run(probeVerifier, ls, 0.29, 1.0, ProbeSettings(), pr);
+						const Clock::time_point t3 = Clock::now();
+						AxisObservation o;
+						o.verify = &vr;
+						o.axisLen = ls.axisLen;
+						o.floorCodes = 0.29;
+						o.probeRan = pr.ran;
+						o.probeSeen = pr.seen;
+						o.shotId = 1;
+						EvidenceUpdate u;
+						ev.Submit(axis, o, u);
+						const Clock::time_point t4 = Clock::now();
+						m << " axis" << axis << "(proposer " << ms(t0, t1) << ", verifier " << ms(t1, t2) << ", probe " << ms(t2, t3)
+							<< ", evidence " << ms(t3, t4) << ")";
+						total += ms(t0, t4);
+					}
+					m << " total " << total << " ms]";
 				}
+				m << " cached operators " << verifier.CachedOperators();
 				Logger::WriteMessage(m.str().c_str());
 			}
-			std::ostringstream tot;
-			tot << "total of both passes: " << totalMs << " ms; cached operators: " << verifier.CachedOperators();
-			Logger::WriteMessage(tot.str().c_str());
 		}
 	};
 }

@@ -20,6 +20,10 @@
 // relative ridge for numerical safety), and for a line y solves A z = U^T y and returns the residual
 // y - U z summed over the INNER rows only (a margin of about 1.5 kernel supports at each end is ignored, as the
 // edge nodes are poorly constrained there), plus its per-256-px segment sums.
+// Build memoises the tap weights per distinct fractional position (quantised to 2^-30, so a rational ratio
+// costs a handful of weight evaluations, not one per row); the factor stores the RECIPROCAL of its diagonal.
+#include <map>
+
 #include "ChainCommon.h"
 
 namespace SourceIdentity
@@ -207,11 +211,31 @@ namespace SourceIdentity
 				int cmin = 0;
 				int cmax = 0;
 				const double ratio = static_cast<double>(n) / static_cast<double>(N);
+				std::map<int64_t, size_t> memoIdx;
+				std::vector<double> memoW;
 				for (int j = 0; j < L_; ++j)
 				{
 					const double p = (static_cast<double>(origin + j) + 0.5) * ratio - 0.5 + phase;
 					const double fl = std::floor(p);
-					TapWeights(kernel, p - fl, &w_[static_cast<size_t>(j) * static_cast<size_t>(taps_)]);
+					const int64_t key = static_cast<int64_t>(std::floor((p - fl) * 1073741824.0 + 0.5));
+					const double tq = static_cast<double>(key) / 1073741824.0;
+					double* row = &w_[static_cast<size_t>(j) * static_cast<size_t>(taps_)];
+					auto it = memoIdx.find(key);
+					if (it != memoIdx.end())
+					{
+						for (int s = 0; s < taps_; ++s)
+							row[s] = memoW[it->second * static_cast<size_t>(taps_) + static_cast<size_t>(s)];
+					}
+					else
+					{
+						TapWeights(kernel, tq, row);
+						if (memoIdx.size() < 256)
+						{
+							memoIdx[key] = memoW.size() / static_cast<size_t>(taps_);
+							for (int s = 0; s < taps_; ++s)
+								memoW.push_back(row[s]);
+						}
+					}
 					const int c = static_cast<int>(fl) - r_ + 1;
 					cl_[static_cast<size_t>(j)] = c;
 					if (j == 0 || c < cmin)
@@ -240,7 +264,7 @@ namespace SourceIdentity
 				if (!(maxDiag > 0.0))
 					return false;
 				double ridge = 1e-12 * maxDiag;
-				for (int attempt = 0; attempt < 5; ++attempt)
+				for (int attempt = 0; attempt < 3; ++attempt)   // 1e-12, 1e-9, 1e-6 of the largest diagonal, then give up
 				{
 					chol_ = A;
 					for (int i = 0; i < m_; ++i)
@@ -278,7 +302,7 @@ namespace SourceIdentity
 					const int k0 = i - u_ > 0 ? i - u_ : 0;
 					for (int k = k0; k < i; ++k)
 						v -= chol_[static_cast<size_t>(i) * bw + static_cast<size_t>(i - k)] * z[k];
-					z[i] = v / chol_[static_cast<size_t>(i) * bw];
+					z[i] = v * chol_[static_cast<size_t>(i) * bw];
 				}
 				// Backward: L^T x = v.
 				for (int i = m_ - 1; i >= 0; --i)
@@ -287,7 +311,7 @@ namespace SourceIdentity
 					const int k1 = i + u_ < m_ - 1 ? i + u_ : m_ - 1;
 					for (int k = i + 1; k <= k1; ++k)
 						v -= chol_[static_cast<size_t>(k) * bw + static_cast<size_t>(k - i)] * z[k];
-					z[i] = v / chol_[static_cast<size_t>(i) * bw];
+					z[i] = v * chol_[static_cast<size_t>(i) * bw];
 				}
 				for (int s = 0; s < kMaxSegs; ++s)
 				{
@@ -331,7 +355,8 @@ namespace SourceIdentity
 					if (!(s > 1e-300))
 						return false;
 					const double d = std::sqrt(s);
-					chol_[static_cast<size_t>(j) * bw] = d;
+					const double inv = 1.0 / d;
+					chol_[static_cast<size_t>(j) * bw] = inv;   // the reciprocal diagonal is stored
 					const int i1 = j + u_ < m_ - 1 ? j + u_ : m_ - 1;
 					for (int i = j + 1; i <= i1; ++i)
 					{
@@ -339,7 +364,7 @@ namespace SourceIdentity
 						const int kk0 = i - u_ > 0 ? i - u_ : 0;
 						for (int k = kk0; k < j; ++k)
 							v -= chol_[static_cast<size_t>(i) * bw + static_cast<size_t>(i - k)] * chol_[static_cast<size_t>(j) * bw + static_cast<size_t>(j - k)];
-						chol_[static_cast<size_t>(i) * bw + static_cast<size_t>(i - j)] = v / d;
+						chol_[static_cast<size_t>(i) * bw + static_cast<size_t>(i - j)] = v * inv;
 					}
 				}
 				return true;
@@ -354,7 +379,7 @@ namespace SourceIdentity
 			int margin_ = 0;
 			std::vector<double> w_;      // L x taps
 			std::vector<int> cl_;        // first latent node (relative) of every row
-			std::vector<double> chol_;   // m x (u + 1) banded Cholesky factor, L(i, i-d) at [i * (u+1) + d]
+			std::vector<double> chol_;   // m x (u + 1) banded Cholesky factor, L(i, i-d) at [i * (u+1) + d]; the diagonal holds 1 / L(i, i)
 		};
 	}
 }

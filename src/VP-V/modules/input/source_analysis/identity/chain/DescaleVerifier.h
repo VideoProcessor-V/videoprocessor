@@ -21,12 +21,15 @@
 //   1. coarse scan, short windows (about N/8 rows at each end of the lines, the notch of a short window is a
 //      few integers wide and alias free at the line ends), every integer within +-4 of the candidate, the four
 //      representative kernels, 16 lines. It refines the candidate to n^ and ranks candidates.
-//   2. exact stage on the best `maxExactCandidates` candidates: the full lines, integers n^ +-3 with the
-//      representative kernels, then at the best integer every kernel of the best two families (optionally at
+//   2. exact stage on the best `maxExactCandidates` candidates (plus the caller's latched size, `forceExactN`): the
+//      full lines, integers n^ +-1 (the coarse stage already centres it) with the representative kernels, then at the best integer every kernel of the best two families (optionally at
 //      several sub-sample phases). Outputs the best kernel, its margin to the runner-up kernel and to the best
 //      kernel of another family, the residual floor in 10-bit codes, per-line values, and per-256-px segment sums.
 //
 // Operators are cached by (N, n, kernel, phase step, window); the cache only saves time, never changes a result.
+// Degrees of freedom: s uses 1 - nodes/rows of the operator (the unknowns of the fit), not 1 - n/N, so short
+// windows are not biased. Give the PowerProbe its own verifier instance (its 1.64x longer operators would
+// otherwise push the candidates' operators out of the cache).
 // Not thread safe (one instance per worker). No clock inside: the caller times it.
 #include <cstdlib>
 #include <map>
@@ -45,7 +48,7 @@ namespace SourceIdentity
 			int coarseLines = 16;               // lines used by the coarse stage
 			double coarseWindowFraction = 0.125;   // coarse window = this fraction of N ...
 			int coarseMinWindow = 160;          // ... but at least this many rows
-			int exactHalfWidth = 3;             // integers scanned each side by the exact stage
+			int exactHalfWidth = 1;             // integers scanned each side by the exact stage
 			int maxExactCandidates = 2;         // candidates promoted to the exact stage
 			int exactFamilies = 2;              // kernel families evaluated in full at the best integer
 			double refFraction1 = 0.04;         // baseline sizes n (1 +- f1), n (1 +- f2)
@@ -56,7 +59,7 @@ namespace SourceIdentity
 			double maxLatentRatio = 0.985;      // n / N above this is not an upscale
 			int phaseCount = 1;                 // odd; sub-sample phases tried at the best integer
 			double phaseStep = 0.25;            // latent samples between phases
-			size_t cacheLimit = 64;             // operators kept
+			size_t cacheLimit = 512;            // operators kept (about 70 MB at 3840x2160 with 3 candidates per axis; time only)
 		};
 
 		struct VerifyOptions
@@ -64,6 +67,9 @@ namespace SourceIdentity
 			bool exactOnly = false;     // skip the coarse stage (n is known exactly, e.g. the power probe)
 			int onlyKernel = -1;        // >= 0: evaluate only this kernel
 			int exactHalfWidth = -1;    // >= 0 overrides the settings value
+			int forceExactN = 0;        // > 0: the candidate asked for with exactly this size always goes to the exact stage
+			                            // (the caller's latched size), on top of the best maxExactCandidates
+			int exactLines = 0;         // > 0: the exact stage uses only this many (evenly spread) lines, e.g. 16 when latched
 		};
 
 		struct CandidateResult
@@ -79,7 +85,9 @@ namespace SourceIdentity
 			double coarseStat = 0.0;
 			double kernelMargin = 0.0;      // T(runner-up kernel) - T(best), >= 0
 			double familyMargin = 0.0;      // T(best kernel of another family) - T(best), >= 0
-			double floorCodes = 0.0;        // trimmed mean over lines of the raw rms residual at the best (n, kernel), 10-bit codes
+			double floorCodes = 0.0;        // trimmed mean over lines of the RAW rms residual at the best (n, kernel), 10-bit codes.
+			                            // NOT dof-normalised: the rounding floor the evidence gate wants (AxisObservation.floorCodes,
+			                            // 1.155 for an 8-bit output, 0.289 for 10-bit) is a different, normalised quantity
 			double baselineMedian = 0.0;    // median line baseline (codes): the line's detail level above the floor
 			uint32_t reason = 0;
 			int lineCount = 0;
@@ -189,7 +197,8 @@ namespace SourceIdentity
 				for (int i = 0; i < static_cast<int>(order.size()); ++i)
 				{
 					CandidateResult& cr = out.candidates[static_cast<size_t>(order[static_cast<size_t>(i)])];
-					if (i < promote)
+					const bool forced = opt.forceExactN > 0 && cr.nProposed == opt.forceExactN;
+					if (i < promote || forced)
 					{
 						const uint32_t why = ExactStage(ls, cr.n, opt, cr);
 						if (why != 0u)
@@ -244,7 +253,7 @@ namespace SourceIdentity
 
 			// s of one window of one line at (n, kernel, phase). false when the operator is unusable.
 			bool SolveLine(const LineSet& ls, int line, int winOff, int winLen, int n, int kernel, double phase,
-				double& s, double& ms, double* segSum, int* segRows)
+				double& s, double& ms, double& dof, double* segSum, int* segRows)
 			{
 				OpKey key;
 				key.N = ls.axisLen;
@@ -253,7 +262,7 @@ namespace SourceIdentity
 				key.phaseQ = PhaseQ(phase);
 				key.origin = ls.origin + winOff;
 				key.length = winLen;
-				const DescaleOperator* op = Op(key, phase);
+				const DescaleOperator* op = Op(key, static_cast<double>(key.phaseQ) / 1024.0);
 				if (op == nullptr)
 					return false;
 				double rss = 0.0;
@@ -262,7 +271,9 @@ namespace SourceIdentity
 				if (rows <= 0)
 					return false;
 				ms = rss / static_cast<double>(rows);
-				const double dof = 1.0 - static_cast<double>(n) / static_cast<double>(ls.axisLen);
+				dof = 1.0 - static_cast<double>(op->Nodes()) / static_cast<double>(op->Length());   // rows minus the fit unknowns
+				if (dof < 0.02)
+					dof = 0.02;
 				s = std::sqrt((ms + s_.epsCodes * s_.epsCodes) / dof);
 				return true;
 			}
@@ -283,8 +294,8 @@ namespace SourceIdentity
 			}
 
 			// Per-line baseline of one window geometry: the median over the reference sizes of the smallest s over `reps`.
-			// refSeg (optional, nref x nl x kMaxSegs) receives the segment level (mean square per row / dof + eps^2) of the
-			// winning kernel at every reference, -1 where the segment has no rows.
+			// refSeg (optional, nref x nl x kMaxSegs) receives the segment level of the
+			// winning kernel at every reference ((mean square per row + eps^2) / dof, as the line level), -1 where the segment has no rows.
 			bool Baseline(const LineSet& ls, const int* lineIdx, int nl, int winOff, int winLen, int n0, const int* reps, int nrep,
 				double* base, std::vector<double>* refSeg, int& nref)
 			{
@@ -301,20 +312,22 @@ namespace SourceIdentity
 				int bestRows[kMaxSegs];
 				for (int r = 0; r < nref; ++r)
 				{
-					const double dof = 1.0 - static_cast<double>(refs[r]) / static_cast<double>(ls.axisLen);
 					for (int i = 0; i < nl; ++i)
 					{
 						double best = 0.0;
+						double bestDof = 1.0;
 						bool have = false;
 						for (int q = 0; q < nrep; ++q)
 						{
 							double s = 0.0;
 							double ms = 0.0;
-							if (!SolveLine(ls, lineIdx[i], winOff, winLen, refs[r], reps[q], 0.0, s, ms, segSum, segRows))
+							double dofv = 0.0;
+							if (!SolveLine(ls, lineIdx[i], winOff, winLen, refs[r], reps[q], 0.0, s, ms, dofv, segSum, segRows))
 								return false;
 							if (!have || s < best)
 							{
 								best = s;
+								bestDof = dofv;
 								have = true;
 								for (int g = 0; g < kMaxSegs; ++g)
 								{
@@ -328,7 +341,7 @@ namespace SourceIdentity
 							for (int g = 0; g < kMaxSegs; ++g)
 								if (bestRows[g] > 0)
 									(*refSeg)[(static_cast<size_t>(r) * static_cast<size_t>(nl) + static_cast<size_t>(i)) * kMaxSegs + static_cast<size_t>(g)]
-										= bestSeg[g] / static_cast<double>(bestRows[g]) / dof + s_.epsCodes * s_.epsCodes;
+										= (bestSeg[g] / static_cast<double>(bestRows[g]) + s_.epsCodes * s_.epsCodes) / bestDof;
 					}
 				}
 				std::vector<double> col(static_cast<size_t>(nref));
@@ -384,7 +397,8 @@ namespace SourceIdentity
 							{
 								double s = 0.0;
 								double ms = 0.0;
-								if (!SolveLine(ls, idx[static_cast<size_t>(i)], winOff[w], Lc, n, reps[q], 0.0, s, ms, segSum, segRows))
+								double dofv = 0.0;
+								if (!SolveLine(ls, idx[static_cast<size_t>(i)], winOff[w], Lc, n, reps[q], 0.0, s, ms, dofv, segSum, segRows))
 								{
 									ok = false;
 									break;
@@ -418,10 +432,11 @@ namespace SourceIdentity
 			{
 				const int N = ls.axisLen;
 				const int L = ls.length;
-				const int nl = std::min(ls.count, kMaxLines);
+				const int avail = std::min(ls.count, kMaxLines);
+				const int nl = (opt.exactLines > 0 && opt.exactLines < avail) ? opt.exactLines : avail;
 				std::vector<int> idx(static_cast<size_t>(nl));
 				for (int i = 0; i < nl; ++i)
-					idx[static_cast<size_t>(i)] = i;
+					idx[static_cast<size_t>(i)] = (i * avail) / nl;
 				int repAll = 0;
 				const int* repsAll = RepresentativeKernels(repAll);
 				int repOne[1] = { opt.onlyKernel };
@@ -458,7 +473,8 @@ namespace SourceIdentity
 						{
 							double s = 0.0;
 							double ms = 0.0;
-							if (!SolveLine(ls, idx[static_cast<size_t>(i)], 0, L, ns[ni], reps[q], 0.0, s, ms, segSum, segRows))
+							double dofv = 0.0;
+							if (!SolveLine(ls, idx[static_cast<size_t>(i)], 0, L, ns[ni], reps[q], 0.0, s, ms, dofv, segSum, segRows))
 								return kReasonShortLines;
 							scanS[ni * stride + static_cast<size_t>(q) * static_cast<size_t>(nl) + static_cast<size_t>(i)] = s;
 							if (q == 0 || s < best)
@@ -531,6 +547,7 @@ namespace SourceIdentity
 						{
 							double s = 0.0;
 							double ms = 0.0;
+							double dofv = 0.0;
 							// Reuse the scan value when it is the same operator (phase 0, a representative kernel).
 							bool reused = false;
 							if (pi == 0)
@@ -541,7 +558,7 @@ namespace SourceIdentity
 										reused = true;
 										break;
 									}
-							if (!reused && !SolveLine(ls, idx[static_cast<size_t>(i)], 0, L, nStar, kernels[ki], phases[pi], s, ms, segSum, segRows))
+							if (!reused && !SolveLine(ls, idx[static_cast<size_t>(i)], 0, L, nStar, kernels[ki], phases[pi], s, ms, dofv, segSum, segRows))
 								return kReasonShortLines;
 							vals[static_cast<size_t>(i)] = std::log(s / base[static_cast<size_t>(i)]);
 						}
@@ -598,14 +615,14 @@ namespace SourceIdentity
 				cr.segRows.assign(cells, 0);
 				cr.segStat.assign(cells, 0.0);
 				cr.segBase.assign(cells, 0.0);
-				const double dof = 1.0 - static_cast<double>(nStar) / static_cast<double>(N);
 				const double e2 = s_.epsCodes * s_.epsCodes;
 				std::vector<double> refCol(static_cast<size_t>(nref));
 				for (int i = 0; i < nl; ++i)
 				{
 					double s = 0.0;
 					double ms = 0.0;
-					if (!SolveLine(ls, idx[static_cast<size_t>(i)], 0, L, nStar, cr.kernel, cr.phase, s, ms, segSum, segRows))
+					double dofv = 0.0;
+					if (!SolveLine(ls, idx[static_cast<size_t>(i)], 0, L, nStar, cr.kernel, cr.phase, s, ms, dofv, segSum, segRows))
 						return kReasonShortLines;
 					cr.lineStat[static_cast<size_t>(i)] = std::log(s / base[static_cast<size_t>(i)]);
 					cr.lineBase[static_cast<size_t>(i)] = base[static_cast<size_t>(i)];
@@ -627,7 +644,7 @@ namespace SourceIdentity
 						if (nv < 1)
 							continue;
 						const double baseMs = MedianOf(refCol.data(), nv);
-						const double levelMs = segSum[g] / static_cast<double>(segRows[g]) / dof + e2;
+						const double levelMs = (segSum[g] / static_cast<double>(segRows[g]) + e2) / dofv;
 						cr.segStat[cell] = 0.5 * std::log(levelMs / baseMs);
 						cr.segBase[cell] = std::sqrt(baseMs);
 					}

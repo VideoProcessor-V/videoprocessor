@@ -19,7 +19,8 @@
 //
 // A period q says the ratio is m/q for some m coprime to q; the candidates are n = round(N m / q) for every such
 // m with n/N in [minNRatio, maxNRatio], those nearest 1/2 first (the verifier decides; the order inside one
-// period carries no evidence). `lowVarPhase` reports the phase class with the smallest residual variance.
+// period carries no evidence). The slots are filled by strength: periods in dBIC order, ONE size per period per
+// round (round robin), so a weaker period is not starved by a stronger one with many sizes. `lowVarPhase` reports the phase class with the smallest residual variance.
 // Caller-supplied sizes (the previous latched n, rationals of the active size) are listed first. At most
 // kMaxCandidates are returned.
 //
@@ -116,6 +117,9 @@ namespace SourceIdentity
 					mean /= static_cast<double>(ls.length);
 					for (int k = 0; k < ls.length; ++k)
 						v[static_cast<size_t>(k)] = y[k] - mean;
+					int ph[33];
+					for (int q = 2; q <= s_.qMax; ++q)
+						ph[q] = (origin_ + 3) % q;   // phase class of sample k = 3; advanced by 1 per sample (no division in the loop)
 					for (int k = 3; k <= ls.length - 3; ++k)
 					{
 						const double f[kTaps] = { v[static_cast<size_t>(k - 3)], v[static_cast<size_t>(k - 2)], v[static_cast<size_t>(k - 1)],
@@ -129,12 +133,13 @@ namespace SourceIdentity
 							tm[15 + i] = f[i] * t;
 						tm[20] = t * t;
 						tm[21] = 1.0;
-						const int pos = origin_ + k;
 						for (int q = 2; q <= s_.qMax; ++q)
 						{
-							double* dst = &stats_[(static_cast<size_t>(off_[q]) + static_cast<size_t>(pos % q)) * kTerms];
+							double* dst = &stats_[(static_cast<size_t>(off_[q]) + static_cast<size_t>(ph[q])) * kTerms];
 							for (int e = 0; e < kTerms; ++e)
 								dst[e] += tm[e];
+							if (++ph[q] == q)
+								ph[q] = 0;
 						}
 					}
 				}
@@ -146,6 +151,17 @@ namespace SourceIdentity
 					evals_ = s_.windowEvaluations / 2;
 				}
 				return true;
+			}
+
+			// Every tested period (q = 2 .. qMax) with its gain, ratio and dBIC, in q order: diagnostics and tests.
+			int AllScores(PeriodScore* out, int cap) const
+			{
+				std::vector<PeriodScore> all;
+				Scores(all);
+				int n = 0;
+				for (size_t i = 0; i < all.size() && n < cap; ++i)
+					out[n++] = all[i];
+				return n;
 			}
 
 			// All periods that reach ratioMin, accepted order (dBIC descending, multiples of accepted periods skipped).
@@ -194,10 +210,12 @@ namespace SourceIdentity
 				}
 				PeriodScore per[kMaxCandidates];
 				const int np = Periods(per, kMaxCandidates);
+				std::vector<std::vector<int>> sizes(static_cast<size_t>(np));
+				size_t longest = 0;
 				for (int p = 0; p < np; ++p)
 				{
 					const int q = per[p].q;
-					std::vector<int> ms;
+					std::vector<int>& ms = sizes[static_cast<size_t>(p)];
 					for (int m = 1; m < q; ++m)
 					{
 						const double r = static_cast<double>(m) / static_cast<double>(q);
@@ -211,20 +229,27 @@ namespace SourceIdentity
 							return da < db;
 						return a < b;
 					});
-					for (size_t i = 0; i < ms.size() && n < cap; ++i)
+					if (ms.size() > longest)
+						longest = ms.size();
+				}
+				for (size_t rank = 0; rank < longest && n < cap; ++rank)
+					for (int p = 0; p < np && n < cap; ++p)
 					{
-						const int cn = RoundToInt(static_cast<double>(N) * static_cast<double>(ms[i]) / static_cast<double>(q));
+						const std::vector<int>& ms = sizes[static_cast<size_t>(p)];
+						if (rank >= ms.size())
+							continue;
+						const int q = per[p].q;
+						const int cn = RoundToInt(static_cast<double>(N) * static_cast<double>(ms[rank]) / static_cast<double>(q));
 						if (cn < s_.minLatent || cn > maxN || Has(out, n, cn, 1))
 							continue;
 						ProposedCandidate c;
 						c.n = cn;
 						c.q = q;
-						c.m = ms[i];
+						c.m = ms[rank];
 						c.source = kSourcePolyphase;
 						c.score = per[p].dBic;
 						out[n++] = c;
 					}
-				}
 				return n;
 			}
 

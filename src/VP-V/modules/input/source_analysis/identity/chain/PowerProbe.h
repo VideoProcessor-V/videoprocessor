@@ -14,6 +14,9 @@
 // The synthetic axis has N' = round(N / ratio) pixels; the real picture plays the latent signal (size N). The
 // ratio is off every simple rational and every k/8, k/16 size on purpose, so the probe never lands on a class
 // where natives are known to dip.
+//
+// Use a verifier instance of its own for the probe: its operators are 1.64x longer than the candidates' and would
+// otherwise push them out of a shared operator cache.
 #include "DescaleVerifier.h"
 
 namespace SourceIdentity
@@ -27,7 +30,7 @@ namespace SourceIdentity
 			double seenThreshold = -0.15;   // T at or below this = the injected upscale was seen
 			double darkMeanCodes = 100.0;   // mean line level (10-bit codes) below this = dark
 			double flatStdCodes = 3.0;      // median line standard deviation below this = flat
-			double lineGateFactor = 3.0;
+			double lineGateFactor = 1.5;        // as the evidence stage
 			double minGateFraction = 0.25;
 			int minGateLinesFloor = 3;
 			double trimFraction = 0.2;

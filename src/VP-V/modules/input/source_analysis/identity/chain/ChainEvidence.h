@@ -6,14 +6,20 @@
 // ACCUMULATOR with reason bits; the latch state machine (UNKNOWN / PROVISIONAL / CANDIDATE / LATCHED / HOLD ...)
 // is NOT here, it lives in the consensus (C2) and reads the summaries.
 //
+// floorCodes (AxisObservation) is the dof-NORMALISED sigma of the rounding/dither noise (1.155 for an 8-bit output,
+// 0.289 for 10-bit), the same unit as the verifier's line baselines; the verifier's CandidateResult.floorCodes is
+// the raw rms residual and must not be fed here.
+// Clustering: exact sizes within +-1 of each other are ONE hypothesis (the best of them per evaluation counts, the
+// slot follows its value), so refinement jitter cannot split the evidence.
 // Per submitted evaluation and candidate:
 //   line gate      a line is informative only when its baseline (detail above the rounding/dither floor) is at
-//                  least lineGateFactor x floorCodes; fewer than max(3, 8/32 of the lines) informative lines =>
+//                  least lineGateFactor (1.5) x floorCodes; fewer than max(3, 8/32 of the lines) informative lines =>
 //                  the candidate is not informative (kReasonLowDetail), abstain.
 //   spatial        among the informative lines, those contradicting the majority (a robust distance from the
 //                  median in the opposite direction: subtitles, PiP, menus, logos) are MASKED when they are
-//                  below maskLimit (20%) of the lines, otherwise the evaluation is a HOLD hint (kReasonMixed):
-//                  no evidence at all is accumulated. The per-256-px segment map is judged the same way along
+//                  below maskLimit (20%) of the lines, otherwise the candidate is mixed. The evaluation is a HOLD hint
+//                  (kReasonMixed, no evidence accumulated) ONLY when the TOP hypothesis (the informative candidate
+//                  with the lowest median line value) is mixed; a wrong candidate that happens to be mixed is just dropped. The per-256-px segment map is judged the same way along
 //                  the lines (segments of informative content only).
 //   increment      LLR from the NullTables class of n (ChainNullTables.h) of the masked trimmed-mean statistic,
 //                  clamped to [incrementMin, incrementMax].
@@ -44,7 +50,7 @@ namespace SourceIdentity
 			double shotCapFraction = 0.5;
 			double agreementBonus = 2.0;
 			double agreementTolerance = 0.015;   // relative difference of n/N counted as agreeing
-			double lineGateFactor = 3.0;
+			double lineGateFactor = 1.5;        // detail baseline must reach this x the rounding/dither floor (a cliff: tune with care)
 			double minGateFraction = 0.25;       // 8 of 32
 			int minGateLinesFloor = 3;
 			double maskLimit = 0.20;
@@ -99,6 +105,10 @@ namespace SourceIdentity
 			bool informative = false;
 			int linesGated = 0;
 			int linesMasked = 0;
+			bool gatedOk = false;         // enough informative lines
+			bool mixed = false;           // line or segment disagreement beyond the mask limit
+			bool clustered = false;       // dropped: a neighbour within +-1 px has more evidence
+			double median = 0.0;          // median line value of the informative lines (the top hypothesis has the lowest)
 			double stat = 0.0;            // masked trimmed mean
 			double increment = 0.0;
 			int kernel = -1;
@@ -178,24 +188,65 @@ namespace SourceIdentity
 					st = AxisState();   // the axis changed size (active area / zoom): old hypotheses mean nothing
 				st.axisLen = obs.axisLen;
 				bool anyUsable = false;
-				bool anyInformative = false;
-				double maxInc = -1e300;
 				for (size_t i = 0; i < vr.candidates.size() && out.candidateCount < kMaxCandidates; ++i)
 				{
 					const CandidateResult& cr = vr.candidates[i];
 					if (!cr.valid || !cr.exactDone || cr.lineCount < 1)
 						continue;
 					anyUsable = true;
-					CandidateEvidence& ce = out.cand[out.candidateCount++];
-					Judge(cr, obs.axisLen, floorC, ce);
-					out.reason |= ce.reason;
-					if (ce.reason & kReasonMixed)
-						out.hold = true;
-					if (ce.informative)
+					Judge(cr, obs.axisLen, floorC, out.cand[out.candidateCount++]);
+				}
+				// The top hypothesis (informative lines, lowest median line value; ties: smaller n) decides HOLD.
+				int top = -1;
+				for (int i = 0; i < out.candidateCount; ++i)
+				{
+					if (!out.cand[i].gatedOk)
+						continue;
+					if (top < 0 || out.cand[i].median < out.cand[top].median
+						|| (out.cand[i].median == out.cand[top].median && out.cand[i].n < out.cand[top].n))
+						top = i;
+				}
+				for (int i = 0; i < out.candidateCount; ++i)
+				{
+					uint32_t r = out.cand[i].reason;
+					if (i != top)
+						r &= ~kReasonMixed;   // a wrong candidate's disagreement never holds the evaluation
+					out.reason |= r;
+				}
+				if (top >= 0 && out.cand[top].mixed)
+					out.hold = true;
+				// Cluster informative candidates within +-1 px: the one with the larger increment (then the smaller n) stays.
+				for (int i = 0; i < out.candidateCount; ++i)
+				{
+					if (!out.cand[i].informative)
+						continue;
+					for (int j = 0; j < out.candidateCount; ++j)
+					{
+						if (j == i || !out.cand[j].informative)
+							continue;
+						const int d = out.cand[i].n > out.cand[j].n ? out.cand[i].n - out.cand[j].n : out.cand[j].n - out.cand[i].n;
+						if (d > 1)
+							continue;
+						const bool jBetter = out.cand[j].increment > out.cand[i].increment
+							|| (out.cand[j].increment == out.cand[i].increment && out.cand[j].n < out.cand[i].n);
+						if (jBetter)
+						{
+							out.cand[i].clustered = true;
+							break;
+						}
+					}
+				}
+				bool anyInformative = false;
+				double maxInc = -1e300;
+				for (int i = 0; i < out.candidateCount; ++i)
+				{
+					if (out.cand[i].clustered)
+						out.cand[i].informative = false;
+					if (out.cand[i].informative)
 					{
 						anyInformative = true;
-						if (ce.increment > maxInc)
-							maxInc = ce.increment;
+						if (out.cand[i].increment > maxInc)
+							maxInc = out.cand[i].increment;
 					}
 				}
 				out.reason |= vr.reason;
@@ -228,7 +279,11 @@ namespace SourceIdentity
 				const double cap = s_.shotCapFraction * thr_.c1;
 				for (int i = 0; i < out.candidateCount; ++i)
 					if (out.cand[i].informative)
-						Add(st, FindSlot(st, out.cand[i].n), out.cand[i].increment, obs.shotId, cap);
+					{
+						Hypothesis& h = FindSlot(st, out.cand[i].n);
+						h.n = out.cand[i].n;   // the slot follows the latest best exact size
+						Add(st, h, out.cand[i].increment, obs.shotId, cap);
+					}
 				if (out.nativeCounted)
 					Add(st, st.native, out.nativeIncrement, obs.shotId, cap);
 
@@ -287,9 +342,21 @@ namespace SourceIdentity
 
 			Hypothesis& FindSlot(AxisState& st, int n)
 			{
+				int near = -1;
+				int nearD = 0;
 				for (size_t i = 0; i < st.slots.size(); ++i)
-					if (st.slots[i].n == n)
-						return st.slots[i];
+				{
+					const int d = st.slots[i].n > n ? st.slots[i].n - n : n - st.slots[i].n;
+					if (d > 1)
+						continue;
+					if (near < 0 || d < nearD || (d == nearD && st.slots[i].n < st.slots[static_cast<size_t>(near)].n))
+					{
+						near = static_cast<int>(i);
+						nearD = d;
+					}
+				}
+				if (near >= 0)
+					return st.slots[static_cast<size_t>(near)];
 				Hypothesis h;
 				h.n = n;
 				if (static_cast<int>(st.slots.size()) < std::max(1, s_.maxHypotheses))
@@ -383,6 +450,7 @@ namespace SourceIdentity
 					ce.reason |= kReasonLowDetail;
 					return;
 				}
+				ce.gatedOk = true;
 				// Spatial agreement across lines.
 				std::vector<double> v;
 				std::vector<int> who;
@@ -393,6 +461,7 @@ namespace SourceIdentity
 						who.push_back(j);
 					}
 				const double med = MedianOf(v.data(), static_cast<int>(v.size()));
+				ce.median = med;
 				std::vector<double> dev(v.size());
 				for (size_t i = 0; i < v.size(); ++i)
 					dev[i] = std::abs(v[i] - med);
@@ -449,6 +518,7 @@ namespace SourceIdentity
 				}
 				if (mixed)
 				{
+					ce.mixed = true;
 					ce.reason |= kReasonMixed;
 					return;
 				}

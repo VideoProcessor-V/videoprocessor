@@ -32,6 +32,15 @@ namespace SourceIdentity
 			int cols = 32;      // column lines (axis 1)
 			int margin = 48;    // px between the active rectangle edge and the first/last sample
 			int minRun = 64;    // a line shorter than this (inner extent) is not worth analysing
+
+			// The cheap preset used while a value is latched (steady state): 16 + 16 lines instead of 32 + 32.
+			static SamplerSettings Latched()
+			{
+				SamplerSettings s;
+				s.rows = 16;
+				s.cols = 16;
+				return s;
+			}
 		};
 
 		struct LinePlan
