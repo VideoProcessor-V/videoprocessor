@@ -155,15 +155,18 @@ slot per pixel (the template's own sampling), ~0.5-1 ms per admission frame, ~0.
 Memory +33 MB per slot (+166 MB for K = 5); folding the gates onto the cleaned bands (raw energy = cleaned + a per-block
 removed-energy grid) would drop the raw bands and make it ~0.
 
-## Settings (declared, not wired)
+## Settings
 
-| Key | Values | Default |
-|---|---|---|
-| `temporal_detail` | off, steady, auto | off (draft) |
-| `temporal_detail_boost` | on, off (the fallback boost) | off (owner 2026-10-31: re-validate on real encodes first) |
-| `temporal_detail_strength` | 0.0 .. 1.0 | 1.0 |
-| `temporal_detail_max_age` | 0.25 .. 4.0 s | 2.0 |
-| `temporal_detail_boost_max` | 0.0 .. 0.3 | 0.15 |
+Declared, not wired (no renderer call site yet; `TemporalDetail::ParseSettings` validates them). No key was added by the
+scratch-arena work (SA6): the arena is passed by the host in `Gpu::Params::arena`, not set by a key.
+
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `temporal_detail` | profile | enum | off, steady, auto | off | not in Config (module not wired) | n/a (VP-only) | declared: "Temporal detail: inactive (<reason>)"; `Status()` line | budget-governed: the VRAM governor keeps fewer reference slots first (5 down to 1, `Params::slots`), then drops the scratch-arena temporaries (T1), then the module; nothing is fixed to a GPU model |
+| `temporal_detail_boost` | profile | bool | on, off (the fallback boost) | off | not in Config (module not wired) | n/a (VP-only) | declared: off unless re-validated on real encodes (owner 2026-10-31) | same as `temporal_detail` |
+| `temporal_detail_strength` | profile | float | 0.0 .. 1.0 | 1.0 | not in Config (module not wired) | n/a (VP-only) | declared | same as `temporal_detail` |
+| `temporal_detail_max_age` | profile | float | 0.25 .. 4.0 (seconds) | 2.0 | not in Config (module not wired) | n/a (VP-only) | declared | same as `temporal_detail` |
+| `temporal_detail_boost_max` | profile | float | 0.0 .. 0.3 | 0.15 | not in Config (module not wired) | n/a (VP-only) | declared; used when the boost is on | same as `temporal_detail` |
 
 **auto** (owner 2026-10-31): `AutoGate` (TemporalDetail.h) reads the source-ID consensus quality tier
 (input.source_analysis identity, `SourceIdConsensus` Result.value.qualityTier, 0 = lowest .. 3, -1 unknown) and engages
@@ -184,6 +187,50 @@ identically in the model and the GPU passes (`TemporalDetailGpuBlockGatesFollowT
 
 `TemporalDetail::ParseSettings` validates them (an invalid value keeps the previous one). They are not in
 RendererProfileConfig, slots.json, the tier table or the Config editor yet.
+
+## Environment and diagnostics
+
+| Name | Purpose | Default | Scope |
+|---|---|---|---|
+| (none) | | | |
+
+## Products
+
+Declared products and their sizes: see "Declared products" above. What the GPU module reads and holds (SA6):
+
+| Item | Id / owner | Fill rule | Consumer fallback when absent |
+|---|---|---|---|
+| grain split | P10 `grain.split` (unit version `GrainSplit::kUnitVersion`), read through `gs_fetch` / `gs_blocks` | lane precompute or first-consumer live fill (the host's node) | the module's own Full split, visible ("grain split (temporal detail)"); its output textures are freed once the shared product has fitted for `kSplitReleaseSeconds` (1 s of content at the measured rate), and re-created, visibly, if it drops out again |
+| scratch temporaries | arena scope `kArenaScope` (0x0401), owner `temporal_detail`, tier T1: 3 x rg32f at the active picture's size (two cleaner accumulators, the transferred delta; 1 without the cleaner) | requested by `Module::ArenaRequests(gpu, w, h, planeLines, templateClean, ownSplit)`; acquired per Apply after the own split's scope has closed | no arena (`Params::arena` null): private textures, byte-identical output; arena short: the frame fails visibly (see below) |
+| own split intermediates | `grain_split` T0 requests of `Splitter::ArenaRequests` (merged into the list when `ownSplit`) | the Splitter's own scope | as above |
+| previous-frame grain `prevg` | module texture (rg32f, persistent) | written by the recompose pass of every frame | the guard's lag-1 sums are skipped for a frame without it (`TD_LAG` off) |
+
+Sizes at 4K (estimates, decimal MB): the arena temporaries are 3 x 66 = 199 MB plus the own split's bands 133 MB; they are the
+arena's (`TextureBytes(..., tempsInArena = true)` is 332 MB smaller than the private form). The arena keeps one pool per texture
+shape sized by its busiest scope, so a temporary only saves memory where another stage uses the same shape in another scope (the
+own split's bands share the grain split producer's; the rg32f picture-size pool has no other user today). The freed own split
+output (16 B per pixel, 133 MB at 4K) is a saving whenever the shared product fits.
+
+`prevg` stays a module texture. It is not derivable from the shared product: its input half is `Y(N-1) - (base + s1 + s2)(N-1)`
+and needs the previous frame's source luma, and its output half includes this module's own delta of that frame. Moving it to a
+P10 history ring needs the P13 source ring (SA10) and a deliberate change of the guard's lag-1 law (new unit version), not a
+move of the same arithmetic; it is left as an open item of SA6.
+
+## Status and fallbacks
+
+| Visible downgrade | Where it shows |
+|---|---|
+| own grain split instead of the shared product (Missing, Stale, WrongSize, Shed) | `Status()` "own grain split", catalog entry "grain split (temporal detail)", Ctrl+I line |
+| scratch memory short (arena empty, T1 shed by the governor, nested scope, other thread) | `Apply` returns false for the frame: `LastError()` "temporal detail: scratch memory short (...)", `ScratchShort()`, the arena's catalog entry "scratch_arena" naming `temporal_detail` or `grain_split`, the failure counted in `Failures()`; the host renders the frame as it was; the next frame restarts the store (the skipped frame breaks the sequence) and recovers by itself once a larger plan is reserved |
+| fewer reference slots (memory tier) | `Status()` "store N of 5 slots (memory tier)" |
+| look-ahead / camera model not on the GPU path | `Status()` "not on GPU: ..." |
+
+## Tests
+
+Classes `TemporalDetailGpuTests` (GPU passes on WARP in the CPU tier unless `VP_TEST_GPU=hardware`) and `TemporalDetailModelTests`
+(CPU model). SA6: `TemporalDetailGpuArenaIsByteIdentical` (arena output equals private output: own split, shared product, product
+from frame 3), `TemporalDetailGpuArenaShortageIsVisibleAndRecovers` (empty plan and tier shed), `TemporalDetailGpuReleasesTheOwnSplitOnceTheSharedProductFits`, `TemporalDetailGpuTextureBytesCountsTheArenaTemporaries` (CPU). Command:
+`vstest.console.exe x64\Release\VideoProcessor-Test.dll /TestCaseFilter:"Name~TemporalDetailGpu" /Logger:trx` (read the TRX counters).
 
 ## Determinism, generality, known limits
 
@@ -299,4 +346,4 @@ split runs. Off / auto idle read no grain: Ring. Tests: TemporalDetailGpuGrainPr
 
 ## Private GPU textures (skeleton rule)
 
-This module still creates its own GPU textures through the `Ensure` wrapper (its persistent state and, when no shared product fits, its own grain split; see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): kept state moves to skeleton product nodes and per-render temporaries to the shared scratch arena (src/VP-V/core/ScratchArena.h). Its grain reads already go through the one accessor (`gs_fetch` / `gs_blocks`); a shared product that is Missing, Stale (another frame or unit version, `Params::grainSeq`), WrongSize or Shed (`Params::grainShed`) makes it use its own split, visibly (FallbackCatalog "grain split (...)"), and it recovers on the first fitting frame.
+This module still creates its own GPU textures through the `Ensure` wrapper (its persistent state, `prevg`, the output, the block grids and, when no shared product fits, its own grain split; see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): kept state moves to skeleton product nodes and per-render temporaries to the shared scratch arena (src/VP-V/core/ScratchArena.h). SA6 (reduced) moved the per-render temporaries (cleaner accumulators, delta, own split intermediates) to the arena behind `Params::arena`; the reference store (`td.refstore`), `prevg` and the output remain, see "Products" above. Its grain reads already go through the one accessor (`gs_fetch` / `gs_blocks`); a shared product that is Missing, Stale (another frame or unit version, `Params::grainSeq`), WrongSize or Shed (`Params::grainShed`) makes it use its own split, visibly (FallbackCatalog "grain split (...)"), and it recovers on the first fitting frame.

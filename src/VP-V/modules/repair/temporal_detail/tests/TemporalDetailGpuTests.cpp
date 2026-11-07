@@ -9,6 +9,9 @@
 #include "CppUnitTest.h"
 #include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
 
+#include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/ScratchArena.h>
+#include <VP-V/modules/control/gpu_memory/PlTexBackend.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
@@ -451,6 +454,77 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 		for (size_t t = 0; t < a.size(); ++t)
 			for (size_t i = 0; i < a[t].v.size(); ++i) worst = (std::max)(worst, std::fabs(a[t].v[i] - b[t].v[i]));
 		return worst;
+	}
+
+	// SA6: the same grainy stream through one module, with or without the scratch arena. Frame t reads a shared Full grain product
+	// (built on that frame's luma) when sharedAt(t), else the module computes its own split. The arena counters are read before
+	// the arena is released.
+	struct TdArenaRun
+	{
+		std::vector<Plane> out;
+		std::vector<bool> ownHeld;
+		std::vector<std::string> status;
+		unsigned long long failures = 0;
+		uint64_t acquired = 0, exhausted = 0;
+	};
+
+	TdArenaRun RunTdArena(GpuDevice& dev, const std::vector<Plane>& frames, bool useArena, const std::function<bool(size_t)>& sharedAt, double contentHz = 0.0)
+	{
+		pl_gpu gpu = dev.Gpu();
+		pl_tex bwdTex = UploadPair(gpu, MotionPair::Uniform(kW, kH, 16.0, -0.3, 0.0));
+		VpSkeleton::PlTexBackend backend(gpu);
+		VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+		if (useArena)
+		{
+			const auto requests = Gpu::Module::ArenaRequests(gpu, kW, kH, 1080.0);
+			Assert::IsFalse(requests.empty(), L"the float formats map to arena formats");
+			Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T2)), L"arena reserve");
+		}
+		Gpu::Module module;
+		GrainSplit::Gpu::Splitter producer;
+		TdArenaRun r;
+		for (size_t t = 0; t < frames.size(); ++t)
+		{
+			pl_tex tex = UploadLuma(gpu, frames[t]);
+			RegionEvidence::GrainProduct product;
+			const bool shared = sharedAt(t);
+			if (shared)
+			{
+				Assert::IsTrue(producer.Compute(gpu, dev.dispatch, tex, 0, 64.0 / 65535.0, 1.0, 16), Wide(producer.LastError()).c_str());
+				product.gpu[0] = &producer.Out();
+			}
+			Gpu::Params gp;
+			gp.settings = Steady();
+			gp.seq = t;
+			gp.planeLines = 1080.0;
+			gp.contentHz = contentHz;
+			gp.backward.tex = bwdTex;
+			if (shared) gp.grain = RegionEvidence::GrainView(&product);
+			if (useArena)
+			{
+				gp.arena = &arena;
+				arena.BeginFrame();
+			}
+			pl_frame o{};
+			Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, o), Wide(module.LastError()).c_str());
+			if (useArena)
+			{
+				Assert::IsFalse(module.ScratchShort(), L"no shortage");
+				Assert::IsFalse(arena.FrameDecision().engaged, L"scratch_arena released");
+			}
+			r.out.push_back(DownloadLuma(gpu, o.planes[0].texture));
+			r.ownHeld.push_back(module.OwnSplitHeld());
+			r.status.push_back(module.Status());
+			pl_tex_destroy(gpu, &tex);
+		}
+		r.failures = module.Failures();
+		r.acquired = arena.Acquired();
+		r.exhausted = arena.Exhausted();
+		module.Release(gpu);
+		producer.Release(gpu);
+		arena.Release();
+		pl_tex_destroy(gpu, &bwdTex);
+		return r;
 	}
 }
 
@@ -1075,6 +1149,130 @@ namespace VideoProcessorTest
 			const TdGrainRun rec = RunTdGrain(dev, frames, [](size_t t) { return t < 3 ? TdShared::Shed : TdShared::Full; });
 			for (size_t t = 0; t < frames.size(); ++t)
 				Assert::IsTrue(rec.engaged[t] == (t < 3), L"released the frame the product is back");
+		}
+
+		TEST_METHOD(TemporalDetailGpuArenaIsByteIdentical)
+		{
+			// SA6: the accumulators, the delta and the own split's intermediates from the scratch arena change nothing: the same
+			// stream through a module without an arena and with one gives exactly equal planes (own split every frame, the shared
+			// product every frame, and the product from frame 3 on).
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const std::vector<Plane> frames = TdGrainFrames();
+			struct Case { const char* name; std::function<bool(size_t)> shared; };
+			const Case cases[] = {
+				{ "own split", [](size_t) { return false; } },
+				{ "shared product", [](size_t) { return true; } },
+				{ "product from frame 3", [](size_t t) { return t >= 3; } } };
+			for (const Case& c : cases)
+			{
+				const TdArenaRun priv = RunTdArena(dev, frames, false, c.shared);
+				const TdArenaRun ar = RunTdArena(dev, frames, true, c.shared);
+				Assert::IsTrue(priv.out.size() == frames.size() && ar.out.size() == frames.size(), L"every frame processed");
+				Assert::IsTrue(WorstDiff(priv.out, ar.out) == 0.0, (std::wstring(L"arena output equals private output: ") + Wide(c.name)).c_str());
+				Assert::IsTrue(priv.failures == 0 && ar.failures == 0, L"no failures");
+				Assert::AreEqual(uint64_t(0), ar.exhausted, L"the arena never ran short");
+				Assert::IsTrue(ar.acquired >= 3 * frames.size(), L"the arena was really used (two accumulators and the delta per frame)");
+				LogF("%.0f frames identical, arena acquired %.0f", static_cast<double>(frames.size()), static_cast<double>(ar.acquired));
+				Logger::WriteMessage(c.name);
+			}
+		}
+
+		TEST_METHOD(TemporalDetailGpuArenaShortageIsVisibleAndRecovers)
+		{
+			// SA6: no scratch texture (an empty plan, or the tier shed) = the frame fails visibly (Apply false, ScratchShort, the
+			// failure counted, scratch_arena engaged); the next frame under a proper plan restarts by itself and equals a private
+			// module's output on the same frame.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			const std::vector<Plane> frames = TdGrainFrames();
+			pl_tex bwdTex = UploadPair(gpu, MotionPair::Uniform(kW, kH, 16.0, -0.3, 0.0));
+			const auto requests = Gpu::Module::ArenaRequests(gpu, kW, kH, 1080.0);
+			Assert::IsFalse(requests.empty(), L"the float formats map to arena formats");
+			for (int tierCase = 0; tierCase < 2; ++tierCase)
+			{
+				VpSkeleton::PlTexBackend backend(gpu);
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+				// 0: an empty plan; 1: a plan whose tier (T0) is below the module's (T1): shed (the own split's T0 request is admitted).
+				if (tierCase == 0)
+					arena.Reserve(VpSkeleton::PlanArena(std::vector<VpSkeleton::ArenaRequest>(), VpSkeleton::Tier::T2));
+				else
+					arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T0));
+				Gpu::Module module;
+				pl_tex tex0 = UploadLuma(gpu, frames[0]), tex1 = UploadLuma(gpu, frames[1]);
+				Gpu::Params gp;
+				gp.settings = Steady();
+				gp.seq = 0;
+				gp.planeLines = 1080.0;
+				gp.backward.tex = bwdTex;
+				gp.arena = &arena;
+				pl_frame out{};
+				arena.BeginFrame();
+				const unsigned long long before = module.Failures();
+				Assert::IsFalse(module.Apply(gpu, dev.dispatch, LumaFrame(tex0), gp, out), L"no scratch texture: Apply fails");
+				Assert::IsTrue(module.ScratchShort(), L"ScratchShort");
+				Assert::IsTrue(module.LastError().find("scratch memory short") != std::string::npos, Wide(module.LastError()).c_str());
+				Assert::IsTrue(module.Failures() == before + 1, L"one failure counted");
+				const FallbackCatalog::Decision d = arena.FrameDecision();
+				Assert::IsTrue(d.engaged && d.id == "scratch_arena", L"scratch_arena engaged");
+				Assert::IsTrue(arena.Shed() > 0 || arena.Exhausted() > 0, L"counted");
+				// Recovery: a proper plan, a new frame.
+				arena.BeginFrame();
+				Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T2)), L"arena reserve");
+				Assert::IsFalse(arena.FrameDecision().engaged, L"released after BeginFrame");
+				gp.seq = 1;
+				pl_frame out2{};
+				Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex1), gp, out2), Wide(module.LastError()).c_str());
+				Assert::IsFalse(module.ScratchShort(), L"recovered");
+				Assert::IsFalse(arena.FrameDecision().engaged, L"no shortage after recovery");
+				const Plane got = DownloadLuma(gpu, out2.planes[0].texture);
+				Gpu::Module fresh;
+				Gpu::Params pf = gp;
+				pf.arena = nullptr;
+				pl_frame outF{};
+				Assert::IsTrue(fresh.Apply(gpu, dev.dispatch, LumaFrame(tex1), pf, outF), Wide(fresh.LastError()).c_str());
+				Assert::IsTrue(got.v == DownloadLuma(gpu, outF.planes[0].texture).v, L"the recovered frame equals a private-texture module's");
+				Logger::WriteMessage(tierCase == 0 ? "empty plan: visible, recovered" : "tier shed: visible, recovered");
+				module.Release(gpu);
+				fresh.Release(gpu);
+				arena.Release();
+				pl_tex_destroy(gpu, &tex0);
+				pl_tex_destroy(gpu, &tex1);
+			}
+			pl_tex_destroy(gpu, &bwdTex);
+		}
+
+		TEST_METHOD(TemporalDetailGpuReleasesTheOwnSplitOnceTheSharedProductFits)
+		{
+			// SA6: the module's own split output is freed after the shared product has fitted for kSplitReleaseSeconds of content (at
+			// the measured rate: 4 frames at 4 Hz), and comes back (visibly: the own-split fallback) when the product drops out.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const std::vector<Plane> frames = Stream(12, "IBBBPBBB", 0.3, 0.0, 29u, 1.2);
+			const int hold = Frames(Gpu::kSplitReleaseSeconds, 4.0);
+			Assert::AreEqual(4, hold, L"1 s at 4 Hz");
+			for (int useArena = 0; useArena < 2; ++useArena)
+			{
+				const TdArenaRun r = RunTdArena(dev, frames, useArena != 0, [](size_t t) { return t >= 3 && t < 10; }, 4.0);
+				for (size_t t = 0; t < frames.size(); ++t)
+				{
+					const bool shared = t >= 3 && t < 10;
+					const int streak = shared ? static_cast<int>(t) - 2 : 0;   // consecutive shared frames up to and including t
+					const bool expectHeld = !shared || streak < hold;
+					Assert::IsTrue(r.ownHeld[t] == expectHeld, (L"own split held at frame " + std::to_wstring(t) + (useArena ? L" (arena)" : L"")).c_str());
+					Assert::IsTrue(shared == (r.status[t].find("own grain split") == std::string::npos), L"the status names the own split exactly while it runs");
+				}
+			}
+		}
+
+		TEST_METHOD(TemporalDetailGpuTextureBytesCountsTheArenaTemporaries)
+		{
+			// SA6: with the temporaries in the arena the module's own bytes drop by 40 per pixel (own split bands 16, two
+			// accumulators 2 x 8, delta 8); the default form is the private-texture form, unchanged.
+			const uint64_t priv = Gpu::Module::TextureBytes(3840, 2160, 2160), inArena = Gpu::Module::TextureBytes(3840, 2160, 2160, kSlots, true);
+			Assert::IsTrue(priv == Gpu::Module::TextureBytes(3840, 2160, 2160, kSlots, false), L"the default is the private form");
+			Assert::IsTrue(priv - inArena == uint64_t(40) * 3840 * 2160, L"40 bytes per pixel move to the arena");
 		}
 	};
 }

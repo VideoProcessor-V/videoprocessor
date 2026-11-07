@@ -63,9 +63,40 @@ An empty rectangle means the whole plane.
 ## Settings
 
 - Key `chroma_upscale_vp` = `off` | `cfl` (case-insensitive), default **off** (until GPU-validated); Original pathway: off.
+
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `chroma_upscale_vp` | profile | enum | off, cfl | off | Config editor > Scaling > VP chroma upscale (candidate) | libplacebo's own chroma upscaler (`chroma_upscaler`) | "Chroma upscale: libplacebo (<reason>)"; `Status()`; "grain split (chroma-from-luma)" while an own split runs | budget-governed: the VRAM governor drops the scratch-arena temporaries (T1) before the T0 ones; the module then fails visibly for the frame and libplacebo's chroma upscaler runs; nothing is fixed to a GPU model |
 - Existing key `chroma_upscaler` (libplacebo's own chroma upscaler) applies whenever this module is off or has failed.
 - Fixed law (not user settings): radius 2, `epsFrac` 0.002, neighbour range 3 x 3. The model-only knob `CflParams::grainGuard`
   (false = regression on the raw planes, no add-back) exists for tests.
+
+## Environment and diagnostics
+
+| Name | Purpose | Default | Scope |
+|---|---|---|---|
+| (none) | | | |
+
+## Products
+
+| Item | Id / owner | Fill rule | Consumer fallback when absent |
+|---|---|---|---|
+| luma and chroma grain split | P10 / P10c `grain.split`, one product per plane (`Params::grain`), read through the accessor | lane precompute or first-consumer live fill (the host's node) | the module's own Full split per plane, visible ("grain split (chroma-from-luma)") |
+| scratch temporaries (SA7) | arena scope `kArenaScope` (0x0501), owner `chroma_cfl`, tier T1: 4 x rgba32f + 2 x rg32f at the chroma crop's size (lo, ab, lohi, avg; gc, rho) | requested by `CflModule::ArenaRequests(gpu, rw, rh, pcw, pch, lumaLines, chromaLines, ownSplit)`; acquired per Apply after the own splits' scope has closed | no arena (`Params::arena` null): private textures, byte-identical output; arena short: the frame fails visibly (see below) |
+| own split intermediates | `grain_split` T0 requests of `Splitter::ArenaRequests`, one per distinct shape (the three splits run one after the other) | the Splitter's own scope | as above |
+
+Sizes at 4K luma with 4:2:0 chroma (decimal MB, estimates): the six chroma-grid temporaries are 1920 x 1080 x 80 B = 166 MB; the three
+own splits' bands add 133 + 2 x 33 MB. `TextureBytes(..., tempsInArena = true)` is 16 B per luma pixel and 112 B per chroma pixel
+smaller than the private form (299 MB at 4K). The arena keeps one pool per shape sized by its busiest scope: the rgba32f
+chroma-size pool is shared with the chroma own splits' bands (the splits finish before the temporaries are acquired). The
+module keeps no state between frames; its output texture stays private (it is the frame handed to libplacebo).
+
+## Status and fallbacks
+
+| Visible downgrade | Where it shows |
+|---|---|
+| own grain split instead of the shared product (Missing, Stale, WrongSize, Shed) | `Status()` "ok; own grain split", catalog entry "grain split (chroma-from-luma)", Ctrl+I line |
+| scratch memory short (arena empty, T1 shed by the governor, nested scope, other thread) | `Apply` returns false for the frame: `LastError()` / `Status()` "chroma upscale: scratch memory short (...)", `ScratchShort()`, the arena's catalog entry "scratch_arena" naming `chroma_cfl` or `grain_split`, the failure counted; the caller renders the frame with libplacebo's chroma upscaler and shows "Chroma upscale: libplacebo (<reason>)"; the next frame retries (no state to restart) and recovers once a larger plan is reserved |
 
 ## Cost (estimates; ChromaCflGpuTiming measures on hardware)
 
@@ -172,4 +203,4 @@ ChromaCflGpuGrainProduct*, ...FittingFullProduct*, ...CompactProducts*, ...Grain
 
 ## Private GPU textures (skeleton rule)
 
-This module still creates its own GPU textures through the `Ensure` wrapper (its persistent state and, when no shared product fits, its own grain split; see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): kept state moves to skeleton product nodes and per-render temporaries to the shared scratch arena (src/VP-V/core/ScratchArena.h). Its grain reads already go through the one accessor (`gs_fetch` / `gs_blocks`); a shared product that is Missing, Stale (another frame or unit version, `Params::grainSeq`), WrongSize or Shed (`Params::grainShed`) makes it use its own split, visibly (FallbackCatalog "grain split (...)"), and it recovers on the first fitting frame.
+This module still creates its own GPU textures through the `Ensure` wrapper (its output, the active-picture crops and, when no shared product fits, its own grain splits; see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): kept state moves to skeleton product nodes and per-render temporaries to the shared scratch arena (src/VP-V/core/ScratchArena.h). SA7 moved the per-render temporaries (lo, gc, ab, rho, lohi, avg and the own splits' intermediates) to the arena behind `Params::arena`; the crops are not arena textures (they hold plane data across the splits' scopes and use the plane's own format). Arena tests (WARP, CPU tier): ChromaCflGpuArenaIsByteIdentical, ChromaCflGpuArenaShortageIsVisibleAndRecovers, ChromaCflGpuTextureBytesCountsTheArenaTemporaries; command `vstest.console.exe x64\\Release\\VideoProcessor-Test.dll /TestCaseFilter:"Name~ChromaCflGpuArena|Name~ChromaCflGpuTextureBytes" /Logger:trx`. Its grain reads already go through the one accessor (`gs_fetch` / `gs_blocks`); a shared product that is Missing, Stale (another frame or unit version, `Params::grainSeq`), WrongSize or Shed (`Params::grainShed`) makes it use its own split, visibly (FallbackCatalog "grain split (...)"), and it recovers on the first fitting frame.

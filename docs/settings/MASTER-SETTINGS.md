@@ -12,10 +12,10 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Count | Value |
 |---|---|
 | Modules | 43 |
-| Documented rows | 5 |
+| Documented rows | 11 |
 | VP-V keys in code (outside Bill's schema lists) | 364 |
-| of which documented | 2 |
-| of which undocumented (appendix A) | 362 |
+| of which documented | 8 |
+| of which undocumented (appendix A) | 356 |
 | Documented keys with no code entry (appendix B) | 0 |
 
 ## Modules index
@@ -38,14 +38,14 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Repair | `repair.deband` | built | [README](../../src/VP-V/modules/repair/deband/README.md) | 0 | 7 | 0/7 |
 | Repair | `repair.grain_split` | draft | [README](../../src/VP-V/modules/repair/grain_split/README.md) | 0 | 0 | 0/0 |
 | Repair | `repair.grain_split.shared.band_from_base` | draft | [README](../../src/VP-V/modules/repair/grain_split/shared/README.md) | 0 | 0 | 0/0 |
-| Repair | `repair.temporal_detail` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/README.md) | 0 | 5 | 0/5 |
+| Repair | `repair.temporal_detail` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/README.md) | 5 | 5 | 5/5 |
 | Repair | `repair.texture_restore` | built | [README](../../src/VP-V/modules/repair/texture_restore/README.md) | 0 | 5 | 0/5 |
 | Repair | `repair.temporal_detail.products` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/products/README.md) | 1 | 0 | 0/0 |
 | Repair | `repair.temporal_detail.shared` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/shared/README.md) | 0 | 0 | 0/0 |
 | Scaling | `scaling.rebase` | built | [README](../../src/VP-V/modules/scaling/rebase/README.md) | 0 | 4 | 0/4 |
 | Scaling | `scaling.route_4k` | placeholder | [README](../../src/VP-V/modules/scaling/route_4k/README.md) | 0 | 1 | 0/1 |
 | Scaling | `scaling.refine` | placeholder | [README](../../src/VP-V/modules/scaling/refine/README.md) | 0 | 1 | 0/1 |
-| Scaling | `scaling.chroma_upscale` | placeholder | [README](../../src/VP-V/modules/scaling/chroma_upscale/README.md) | 0 | 2 | 0/2 |
+| Scaling | `scaling.chroma_upscale` | placeholder | [README](../../src/VP-V/modules/scaling/chroma_upscale/README.md) | 1 | 2 | 1/2 |
 | Scaling | `scaling.chroma_upscale.basic` | draft | [README](../../src/VP-V/modules/scaling/chroma_upscale/basic/README.md) | 1 | 0 | 0/0 |
 | Scaling | `scaling.geometry` | built | [README](../../src/VP-V/modules/scaling/geometry/README.md) | 0 | 8 | 0/8 |
 | Scaling | `scaling.output` | partial | [README](../../src/VP-V/modules/scaling/output/README.md) | 0 | 30 | 0/30 |
@@ -88,7 +88,12 @@ Modules: `repair.encoding`, `repair.deband`, `repair.grain_split`, `repair.grain
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
+| `temporal_detail` | `repair.temporal_detail` | profile | enum | off, steady, auto | off |  | not in Config (module not wired) | n/a (VP-only) | declared: "Temporal detail: inactive (<reason>)"; `Status()` line | budget-governed: the VRAM governor keeps fewer reference slots first (5 down to 1, `Params::slots`), then drops the scratch-arena temporaries (T1), then the module; nothing is fixed to a GPU model |
+| `temporal_detail_boost` | `repair.temporal_detail` | profile | bool | on, off (the fallback boost) | off |  | not in Config (module not wired) | n/a (VP-only) | declared: off unless re-validated on real encodes (owner 2026-10-31) | same as `temporal_detail` |
+| `temporal_detail_boost_max` | `repair.temporal_detail` | profile | float | 0.0 .. 0.3 | 0.15 |  | not in Config (module not wired) | n/a (VP-only) | declared; used when the boost is on | same as `temporal_detail` |
 | `temporal_detail_engine` | `repair.temporal_detail.products` | deferred (profile; SCHEMA lock held by W1-P3, reset 2 adds it) | enum | off, auto | off (`TdProducts::kEngineRequestedToday = false`) |  | deferred: VP-V > Repair > Temporal detail | n/a (VP-only) | Declared (deferred key; reset 2 adds it): `product.adaptive_downscale`, `product.dither_need`, `product.sigma_delta`, `product.chroma_cfl`, `product.debander`, `product.td_engine`; status lines "<consumer>: classical form (temporal-detail products: <reason>)" | budget-governed: the VRAM / ms governor decides which stage of each governed buffer fits (see Products) |
+| `temporal_detail_max_age` | `repair.temporal_detail` | profile | float | 0.25 .. 4.0 (seconds) | 2.0 |  | not in Config (module not wired) | n/a (VP-only) | declared | same as `temporal_detail` |
+| `temporal_detail_strength` | `repair.temporal_detail` | profile | float | 0.0 .. 1.0 | 1.0 |  | not in Config (module not wired) | n/a (VP-only) | declared | same as `temporal_detail` |
 
 ## Scaling
 
@@ -97,6 +102,7 @@ Modules: `scaling.rebase`, `scaling.route_4k`, `scaling.refine`, `scaling.chroma
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `chroma_upscale_basic` | `scaling.chroma_upscale.basic` | deferred (profile; added when the SCHEMA lock is free) | enum | off, lanczos | off |  | deferred: VP-V > Scaling > Chroma upscale | libplacebo's chroma upscaler (either/or: Original = libplacebo chroma) | Declared (deferred key): "Chroma upscale: libplacebo (<reason>)" | same on all (one pass, ~36 texel fetches per output pixel and plane pair) |
+| `chroma_upscale_vp` | `scaling.chroma_upscale` | profile | enum | off, cfl | off |  | Config editor > Scaling > VP chroma upscale (candidate) | libplacebo's own chroma upscaler (`chroma_upscaler`) | "Chroma upscale: libplacebo (<reason>)"; `Status()`; "grain split (chroma-from-luma)" while an own split runs | budget-governed: the VRAM governor drops the scratch-arena temporaries (T1) before the T0 ones; the module then fails visibly for the frame and libplacebo's chroma upscaler runs; nothing is fixed to a GPU model |
 
 ## Colour
 
@@ -251,7 +257,6 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `capture_display_fixes` | unassigned |  |  | MainConfigSchema.h |
 | `capture_path` | input.capture | gpu | VP-V > Input > Capture unpack on the GPU | RendererProfileConfig.h |
 | `capture_upload` | input.capture | auto | VP-V > Input > Upload frames as they arrive | RendererProfileConfig.h |
-| `chroma_upscale_vp` | scaling.chroma_upscale |  |  | ChromaCfl.h, RendererProfileConfig.h |
 | `cnn_residual_stabilise` | scaling.output | on | VP-V > Scaling > Steady the upscaler's added detail along motion | RendererProfileConfig.h |
 | `deband_grain` | repair.deband | off |  | RendererProfileConfig.h |
 | `deband_vp` | repair.deband | off |  | RendererProfileConfig.h |
@@ -517,11 +522,6 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `ssim_residual_stabilise` | scaling.output | on | VP-V > Scaling > Steady the downscaler's added detail along motion | RendererProfileConfig.h |
 | `stats_overlay` | unassigned |  |  | MainConfigSchema.h |
 | `target_latency_ms` | input.queue_timing |  |  | MainConfigSchema.h, RendererProfileConfig.h |
-| `temporal_detail` | repair.temporal_detail |  |  | TemporalDetail.h |
-| `temporal_detail_boost` | repair.temporal_detail |  |  | TemporalDetail.h |
-| `temporal_detail_boost_max` | repair.temporal_detail |  |  | TemporalDetail.h |
-| `temporal_detail_max_age` | repair.temporal_detail |  |  | TemporalDetail.h |
-| `temporal_detail_strength` | repair.temporal_detail |  |  | TemporalDetail.h |
 | `temporal_dither` | output.dither | auto |  | RendererProfileConfig.h |
 | `texture_restore` | repair.texture_restore | off |  | RendererProfileConfig.h |
 | `texture_restore_cap` | repair.texture_restore | 1.5 |  | RendererProfileConfig.h |

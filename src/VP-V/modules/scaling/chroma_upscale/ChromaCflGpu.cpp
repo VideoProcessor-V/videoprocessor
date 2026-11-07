@@ -3,6 +3,8 @@
 //
 // scaling.chroma_upscale GPU passes (ChromaCflGpu.h). Mirrors ChromaUpscale::Upsample (ChromaCfl.h) pass by pass; the model's
 // steps are named in the comments (A grain guard, B luma at the sites, C regression, D upsample, E bars).
+// SA7: with Params::arena the chroma-grid temporaries (lo, gc, ab, rho, lohi, avg) and the own splits' intermediates are
+// arena temporaries (one scope per Apply, opened after the own splits, whose scope is their own).
 #include <pch.h>
 
 #include <VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.h>
@@ -211,6 +213,18 @@ if (p.x < CFL_W && p.y < CFL_H) {
 
 			int Groups(int n) { return (n + 15) / 16; }
 
+			// SA7: opens the arena scope of one Apply and closes it on every exit path. A refused (nested) scope is not ours to close;
+			// its Acquires then fail visibly (the arena counts it).
+			struct ArenaScopeGuard
+			{
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena;
+				bool opened = false;
+				ArenaScopeGuard(VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* a, uint16_t scope) : arena(a) { if (arena) opened = arena->BeginScope(scope); }
+				~ArenaScopeGuard() { if (arena && opened) arena->EndScope(); }
+				ArenaScopeGuard(const ArenaScopeGuard&) = delete;
+				ArenaScopeGuard& operator=(const ArenaScopeGuard&) = delete;
+			};
+
 			// One plane's grain accessor under its own names (the luma, Cb and Cr frames may differ in layout, and one shader
 			// binds several). The ONE read accessor (GrainSplit::Gpu::ViewGlsl / BindView) with every name prefixed per plane:
 			// plane 0 "gsL_", 1 "gsB_", 2 "gsR_" (not "gl_": reserved in GLSL). Appends the prelude to `glsl` and the
@@ -269,7 +283,7 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			m_impl = nullptr;
 		}
 
-		uint64_t CflModule::TextureBytes(int W, int H, int cw, int ch)
+		uint64_t CflModule::TextureBytes(int W, int H, int cw, int ch, bool tempsInArena)
 		{
 			const uint64_t px = static_cast<uint64_t>(W) * static_cast<uint64_t>(H);
 			const uint64_t cpx = static_cast<uint64_t>(cw) * static_cast<uint64_t>(ch);
@@ -281,13 +295,58 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			b += cpx * (4 + 2 * 32);                      // chroma crop (rg16), two chroma splits
 			b += nbC * 2 * 32;                            // chroma split block grids
 			b += cpx * (16 + 8 + 16 + 8 + 16 + 16);       // lo, gc, ab, rho, lohi, avg
+			// SA7: lo..avg (80 B per chroma pixel) and the splits' bands (16 per luma pixel, 2 x 16 per chroma pixel) are the arena's.
+			if (tempsInArena) b -= 16 * px + 112 * cpx;
 			return b;
+		}
+
+		std::vector<VpSkeleton::ArenaRequest> CflModule::ArenaRequests(pl_gpu gpu, int rw, int rh, int pcw, int pch, double lumaLines,
+			double chromaLines, bool ownSplit)
+		{
+			std::vector<VpSkeleton::ArenaRequest> r;
+			VpSkeleton::TexFormat t4{}, t2{};
+			if (!gpu || rw < 1 || rh < 1 || pcw < 1 || pch < 1 ||
+				!VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 4), &t4) || !VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 2), &t2))
+				return r;
+			auto add = [&](VpSkeleton::TexFormat f, uint8_t count) {
+				VpSkeleton::ArenaRequest q;
+				q.scope = kArenaScope;
+				q.owner = kArenaOwner;
+				q.tier = VpSkeleton::Tier::T1;
+				q.shape.w = static_cast<uint32_t>(pcw);
+				q.shape.h = static_cast<uint32_t>(pch);
+				q.shape.fmt = f;
+				q.count = count;
+				r.push_back(q);
+			};
+			add(t4, 4);   // lo, ab, lohi, avg
+			add(t2, 2);   // gc, rho
+			if (ownSplit)
+			{
+				// The three splits run one after the other, each in its own scope: one request per distinct shape is enough.
+				std::vector<VpSkeleton::ArenaRequest> splits = GrainSplit::Gpu::Splitter::ArenaRequests(gpu, rw, rh, BlockPx(lumaLines), GrainSplit::Storage::Full);
+				const std::vector<VpSkeleton::ArenaRequest> chroma = GrainSplit::Gpu::Splitter::ArenaRequests(gpu, pcw, pch, BlockPx(chromaLines), GrainSplit::Storage::Full);
+				splits.insert(splits.end(), chroma.begin(), chroma.end());
+				for (const VpSkeleton::ArenaRequest& s : splits)
+				{
+					bool merged = false;
+					for (VpSkeleton::ArenaRequest& have : r)
+						if (have.scope == s.scope && have.shape == s.shape && std::string(have.owner) == std::string(s.owner))
+						{
+							have.count = (std::max)(have.count, s.count);
+							merged = true;
+						}
+					if (!merged) r.push_back(s);
+				}
+			}
+			return r;
 		}
 
 		bool CflModule::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& result)
 		{
 			using namespace VpvGpu;
 			m_error.clear();
+			m_scratchShort = false;
 			if (params.settings.mode == Mode::Off)
 			{
 				m_status = "off";
@@ -355,10 +414,14 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			const pl_fmt f4 = FloatFormat(gpu, 4), f2 = FloatFormat(gpu, 2), outFmt = StorableLike(gpu, cbTex->params.format, 2);
 			if (!f4 || !f2) return fail("no float storage texture");
 			if (!outFmt) return fail("no 16-bit two-component output format");
-			if (!Ensure(gpu, m.lo, pcw, pch, f4) || !Ensure(gpu, m.gc, pcw, pch, f2) || !Ensure(gpu, m.ab, pcw, pch, f4) ||
-				!Ensure(gpu, m.rho, pcw, pch, f2) || !Ensure(gpu, m.lohi, pcw, pch, f4) || !Ensure(gpu, m.avg, pcw, pch, f4) ||
+			const bool useArena = params.arena != nullptr;   // SA7: lo, gc, ab, rho, lohi, avg and the own splits' intermediates
+			if (!(useArena || (Ensure(gpu, m.lo, pcw, pch, f4) && Ensure(gpu, m.gc, pcw, pch, f2) && Ensure(gpu, m.ab, pcw, pch, f4) &&
+				Ensure(gpu, m.rho, pcw, pch, f2) && Ensure(gpu, m.lohi, pcw, pch, f4) && Ensure(gpu, m.avg, pcw, pch, f4))) ||
 				!Ensure(gpu, m.out, W, H, outFmt, true))
 				return fail("no storage texture for the module");
+			if (useArena)
+				for (pl_tex* t : { &m.lo, &m.gc, &m.ab, &m.rho, &m.lohi, &m.avg })   // the private temporaries of the non-arena path: free them
+					if (*t) pl_tex_destroy(gpu, t);
 
 			// --- The active picture, bit-exact in the planes' own formats ---
 			auto crop = [&](pl_tex src, pl_tex& dst, int x0, int y0, int w, int h, const char* what) -> bool {
@@ -440,7 +503,17 @@ if (p.x < CFL_W && p.y < CFL_H) {
 					if (shared && !params.grainShed) misfit = true;
 					if (fit == GrainSplit::Gpu::FitResult::Stale) stale = true;
 					m_grainStatus = shedNow ? GrainSplit::GrainStatus::Shed : stale ? GrainSplit::GrainStatus::Stale : (misfit ? GrainSplit::GrainStatus::WrongSize : GrainSplit::GrainStatus::Missing);
-					if (!own.Compute(gpu, dispatch, tex, comp, cu, Scale(ln), BlockPx(ln))) return false;
+					// With an arena the split's intermediates come from it (its own scope, closed before ours opens); without, the call is
+					// the one without options, byte for byte.
+					GrainSplit::Gpu::Options splitOptions;
+					splitOptions.arena = params.arena;
+					const bool splitOk = params.arena ? own.Compute(gpu, dispatch, tex, comp, cu, Scale(ln), BlockPx(ln), GrainSplit::Params(), splitOptions)
+						: own.Compute(gpu, dispatch, tex, comp, cu, Scale(ln), BlockPx(ln));
+					if (!splitOk)
+					{
+						if (own.ScratchShort()) m_scratchShort = true;
+						return false;
+					}
 					outF = &own.Out();
 					return true;
 				};
@@ -448,6 +521,32 @@ if (p.x < CFL_W && p.y < CFL_H) {
 				if (!pick(params.grain.Gpu(GrainPlane::Luma), m.splitL, lumaIn, 0, cuL, lines, gL)) return fail(m.splitL.LastError());
 				if (!pick(params.grain.Gpu(GrainPlane::Cb), m.splitB, cbIn, cbComp, cuC, linesC, gB)) return fail(m.splitB.LastError());
 				if (!pick(params.grain.Gpu(GrainPlane::Cr), m.splitR, crIn, crComp, cuC, linesC, gR)) return fail(m.splitR.LastError());
+			}
+
+			// --- The per-frame temporaries: the arena's (SA7) or this module's own ---
+			// One scope for the rest of the Apply, opened only now: the own splits' scope above is closed, so they never nest.
+			ArenaScopeGuard arenaScope(params.arena, kArenaScope);
+			pl_tex loTex = m.lo, gcTex = m.gc, abTex = m.ab, rhoTex = m.rho, lohiTex = m.lohi, avgTex = m.avg;
+			if (useArena)
+			{
+				loTex = gcTex = abTex = rhoTex = lohiTex = avgTex = nullptr;
+				VpSkeleton::TexFormat t4{}, t2{};
+				if (VpSkeleton::PlTexBackend::FormatOf(f4, &t4) && VpSkeleton::PlTexBackend::FormatOf(f2, &t2))
+				{
+					const VpSkeleton::TexShape s4{ static_cast<uint32_t>(pcw), static_cast<uint32_t>(pch), t4 };
+					const VpSkeleton::TexShape s2{ static_cast<uint32_t>(pcw), static_cast<uint32_t>(pch), t2 };
+					loTex = params.arena->Acquire(kArenaOwner, s4);   // fixed order per shape: lo, ab, lohi, avg / gc, rho
+					abTex = params.arena->Acquire(kArenaOwner, s4);
+					lohiTex = params.arena->Acquire(kArenaOwner, s4);
+					avgTex = params.arena->Acquire(kArenaOwner, s4);
+					gcTex = params.arena->Acquire(kArenaOwner, s2);
+					rhoTex = params.arena->Acquire(kArenaOwner, s2);
+				}
+				if (!loTex || !abTex || !lohiTex || !avgTex || !gcTex || !rhoTex)
+				{
+					m_scratchShort = true;
+					return fail("scratch memory short (the chroma-grid temporaries)");
+				}
 			}
 
 			// --- Headers ---
@@ -494,19 +593,19 @@ if (p.x < CFL_W && p.y < CFL_H) {
 					d.push_back(Sampled("ysrc", lumaIn));
 				d.push_back(Sampled("craw0", cbIn));
 				if (!sameTex) d.push_back(Sampled("craw1", crIn));
-				d.push_back(Storage("o_lo", m.lo));
-				d.push_back(Storage("o_gc", m.gc));
+				d.push_back(Storage("o_lo", loTex));
+				d.push_back(Storage("o_gc", gcTex));
 				if (!Pass(dispatch, "VideoProcessor chroma upscale: luma at the sites", hdr, LO_BODY, d.data(), static_cast<int>(d.size()), nullptr, 0, cgx, cgy, 0))
 					return fail("luma-at-sites pass failed");
 			}
 			// --- C: regression and neighbour range ---
 			{
-				const pl_shader_desc d[4] = { Sampled("t_lo", m.lo), Storage("o_ab", m.ab), Storage("o_rho", m.rho), Storage("o_lohi", m.lohi) };
+				const pl_shader_desc d[4] = { Sampled("t_lo", loTex), Storage("o_ab", abTex), Storage("o_rho", rhoTex), Storage("o_lohi", lohiTex) };
 				if (!Pass(dispatch, "VideoProcessor chroma upscale: regression", geo + STATS_FUNCS, STATS_BODY, d, 4, nullptr, 0, cgx, cgy, 0))
 					return fail("regression pass failed");
 			}
 			{
-				const pl_shader_desc d[2] = { Sampled("t_ab", m.ab), Storage("o_avg", m.avg) };
+				const pl_shader_desc d[2] = { Sampled("t_ab", abTex), Storage("o_avg", avgTex) };
 				if (!Pass(dispatch, "VideoProcessor chroma upscale: averaging", geo, AVG_BODY, d, 2, nullptr, 0, cgx, cgy, 0))
 					return fail("averaging pass failed");
 			}
@@ -516,11 +615,11 @@ if (p.x < CFL_W && p.y < CFL_H) {
 				std::vector<pl_shader_desc> d;
 				if (guard) d.insert(d.end(), lumaDescs.begin(), lumaDescs.end());
 				else d.push_back(Sampled("ysrc", lumaIn));
-				d.push_back(Sampled("t_avg", m.avg));
-				d.push_back(Sampled("t_rho", m.rho));
-				d.push_back(Sampled("t_lohi", m.lohi));
-				d.push_back(Sampled("t_lo", m.lo));
-				d.push_back(Sampled("t_gc", m.gc));
+				d.push_back(Sampled("t_avg", avgTex));
+				d.push_back(Sampled("t_rho", rhoTex));
+				d.push_back(Sampled("t_lohi", lohiTex));
+				d.push_back(Sampled("t_lo", loTex));
+				d.push_back(Sampled("t_gc", gcTex));
 				d.push_back(Sampled("csrc0", cbTex));
 				if (!sameTex) d.push_back(Sampled("csrc1", crTex));
 				d.push_back(Storage("o_up", m.out));

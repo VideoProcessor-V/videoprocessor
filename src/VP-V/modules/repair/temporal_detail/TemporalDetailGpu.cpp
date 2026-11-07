@@ -6,6 +6,8 @@
 //   classes (4a) -> FINISH + BASECOPY + COPYBLK (4: the new slot) -> WEIGHT (7, pass 2) -> PROJ (8: projections) ->
 //   TRANSFER (8) -> GUARD_SUMS / GUARD_EMA / GUARD_POOL (10) -> STATS -> APPLY (9, 10a).
 // The block state ping-pongs between two textures; four state passes per frame leave it in set 0.
+// SA6: with Params::arena the cleaner accumulators and the delta are arena temporaries (one scope per Apply, opened after the
+// module's own grain split, whose scope is its own); the own split's output is freed once the shared product fits again.
 #include <pch.h>
 
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailGpu.h>
@@ -76,6 +78,18 @@ namespace TemporalDetail
 				if (storeBase) s += "void td_base_store(int k, ivec2 p, vec4 v) { imageStore(sbases_out, p + td_slot_org(k), v); }\n";
 				return s;
 			}
+
+			// SA6: opens the arena scope of one Apply and closes it on every exit path. A refused (nested) scope is not ours to close;
+			// its Acquires then fail visibly (the arena counts it).
+			struct ArenaScopeGuard
+			{
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena;
+				bool opened = false;
+				ArenaScopeGuard(VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* a, uint16_t scope) : arena(a) { if (arena) opened = arena->BeginScope(scope); }
+				~ArenaScopeGuard() { if (arena && opened) arena->EndScope(); }
+				ArenaScopeGuard(const ArenaScopeGuard&) = delete;
+				ArenaScopeGuard& operator=(const ArenaScopeGuard&) = delete;
+			};
 		}
 
 		struct Module::Impl
@@ -94,6 +108,7 @@ namespace TemporalDetail
 			ActiveRect rect;
 			bool baseUnorm = true;
 			int slots = 0;
+			int sharedStreak = 0;   // consecutive frames that read the shared grain product (frees the own split's output)
 		};
 
 		Module::~Module() { delete m_impl; }
@@ -122,7 +137,7 @@ namespace TemporalDetail
 			m_impl = nullptr;
 		}
 
-		uint64_t Module::TextureBytes(int w, int h, double planeLines, int slots)
+		uint64_t Module::TextureBytes(int w, int h, double planeLines, int slots, bool tempsInArena)
 		{
 			const int K = (std::max)(1, (std::min)(kMaxK, slots));
 			const Geometry g = MakeGeometry(w, h, planeLines);
@@ -136,7 +151,37 @@ namespace TemporalDetail
 			b += 8 * px + 8 * px + 2 * px + 2 * px;       // delta, prevg (rg32f), output and active-picture crop (16-bit; bars excluded)
 			b += nb * 16 * (2 + 1 + 2 * K + 2 * K + 16 + 1 + 3 + 2 + 1) + nb * 4 * (K + 1);   // block grids
 			b += static_cast<uint64_t>(g.npx) * static_cast<uint64_t>(g.npy) * 8;          // patch statistics
+			// SA6: the own split's bands (16 B/px), the cleaner accumulators (2 x 8) and the delta (8) are the arena's, counted in its plan.
+			if (tempsInArena) b -= (16 + 2 * 8 + 8) * px;
 			return b;
+		}
+
+		std::vector<VpSkeleton::ArenaRequest> Module::ArenaRequests(pl_gpu gpu, int w, int h, double planeLines, bool templateClean, bool ownSplit)
+		{
+			std::vector<VpSkeleton::ArenaRequest> r;
+			VpSkeleton::TexFormat t2{};
+			if (!gpu || w < 1 || h < 1 || !VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 2), &t2)) return r;
+			VpSkeleton::ArenaRequest q;
+			q.scope = kArenaScope;
+			q.owner = kArenaOwner;
+			q.tier = VpSkeleton::Tier::T1;
+			q.shape.w = static_cast<uint32_t>(w);
+			q.shape.h = static_cast<uint32_t>(h);
+			q.shape.fmt = t2;
+			q.count = templateClean ? 3 : 1;   // accumulators 0 and 1 (cleaner), then the delta
+			r.push_back(q);
+			if (ownSplit)
+			{
+				const Geometry g = MakeGeometry(w, h, planeLines);
+				for (const VpSkeleton::ArenaRequest& s : GrainSplit::Gpu::Splitter::ArenaRequests(gpu, w, h, g.B, GrainSplit::Storage::Full))
+					r.push_back(s);
+			}
+			return r;
+		}
+
+		bool Module::OwnSplitHeld() const
+		{
+			return m_impl && m_impl->split.Out().split != nullptr;
 		}
 
 		int Module::SlotsForBudget(uint64_t budgetBytes, int w, int h, double planeLines)
@@ -181,6 +226,7 @@ namespace TemporalDetail
 		{
 			using namespace VpvGpu;
 			m_error.clear();
+			m_scratchShort = false;
 			const Settings& set = params.settings;
 			if (set.mode == Mode::Off)
 			{
@@ -283,12 +329,13 @@ namespace TemporalDetail
 			m.baseUnorm = baseFmt != nullptr;
 			if (!baseFmt) baseFmt = f1;
 			const int kbw = K * g.bw;
+			const bool useArena = params.arena != nullptr;   // SA6: the accumulators, the delta and the own split's intermediates
 			bool ok = f4 && f2 && f1 && h4 &&
 				Ensure(gpu, m.out, W, H, StorableLike(gpu, luma->params.format), true) &&
 				Ensure(gpu, m.meas, g.bw, g.bh, f4) && Ensure(gpu, m.slotBlk, kbw, g.bh, f4) &&
 				Ensure(gpu, m.evA, kbw, g.bh, f4) && Ensure(gpu, m.evB, kbw, g.bh, f4) && Ensure(gpu, m.work, g.bw, g.bh, f4) &&
 				Ensure(gpu, m.coef, kbw, g.bh, f1) && Ensure(gpu, m.cw, g.bw, g.bh, f4) && Ensure(gpu, m.cf, g.bw, g.bh, f4) &&
-				Ensure(gpu, m.ct, g.bw, g.bh, f4) && Ensure(gpu, m.delta, w, h, f2) && Ensure(gpu, m.gsum, 2 * g.bw, g.bh, f4) &&
+				Ensure(gpu, m.ct, g.bw, g.bh, f4) && (useArena || Ensure(gpu, m.delta, w, h, f2)) && Ensure(gpu, m.gsum, 2 * g.bw, g.bh, f4) &&
 				Ensure(gpu, m.kback, g.bw, g.bh, f1) && Ensure(gpu, m.gflag, g.bw, g.bh, f4) && Ensure(gpu, m.prevg, w, h, f2);
 			// The slot atlas within the largest 2-D texture the card allows (else visibly fewer slots would be needed).
 			const int maxDim = static_cast<int>(gpu->limits.max_tex_2d_dim > 0 ? gpu->limits.max_tex_2d_dim : 16384);
@@ -299,7 +346,7 @@ namespace TemporalDetail
 			for (int i = 0; ok && i < 2; ++i)
 				ok = Ensure(gpu, m.mot[i], kbw, g.bh, f4) && Ensure(gpu, m.tab[i], K + 2, 1, f4) && Ensure(gpu, m.state[i], 8 * g.bw, g.bh, f4);
 			if (ok && params.templateClean)
-				ok = Ensure(gpu, m.acc[0], w, h, f2) && Ensure(gpu, m.acc[1], w, h, f2) && Ensure(gpu, m.patches, g.npx, g.npy, f2);
+				ok = (useArena || (Ensure(gpu, m.acc[0], w, h, f2) && Ensure(gpu, m.acc[1], w, h, f2))) && Ensure(gpu, m.patches, g.npx, g.npy, f2);
 			if (ok && !m.counters[0])
 			{
 				// Zero-initialised (the guard-trip count is cumulative over the stream, as the model's).
@@ -314,6 +361,9 @@ namespace TemporalDetail
 				}
 			}
 			if (!ok) return fail("no storage texture for the module");
+			if (useArena)
+				for (pl_tex* t : { &m.delta, &m.acc[0], &m.acc[1] })   // the private temporaries of the non-arena path are not used any more: free them
+					if (*t) pl_tex_destroy(gpu, t);
 			pl_tex work = luma;
 			if (!whole)
 			{
@@ -345,10 +395,54 @@ namespace TemporalDetail
 			m_grainStatus = params.grainShed ? GrainSplit::GrainStatus::Shed : shared ? GrainSplit::GrainStatus::Ring :
 				(fit == GrainSplit::Gpu::FitResult::Stale ? GrainSplit::GrainStatus::Stale :
 				(fit == GrainSplit::Gpu::FitResult::WrongSize ? GrainSplit::GrainStatus::WrongSize : GrainSplit::GrainStatus::Missing));
-			if (!shared && !m.split.Compute(gpu, dispatch, work, 0, cu, g.scale, g.B, sp)) return fail(m.split.LastError().c_str());
+			if (shared)
+			{
+				// The shared product is read: once it has fitted for a while the own split's output textures are not needed (a product
+				// that drops out again costs one re-creation, visible as the own-split fallback it is).
+				m.sharedStreak = (std::min)(m.sharedStreak + 1, 1 << 30);
+				if (m.sharedStreak >= Frames(kSplitReleaseSeconds, hz)) m.split.Release(gpu);
+			}
+			else
+			{
+				m.sharedStreak = 0;
+				// With an arena the split's intermediates come from it (its own scope, closed before ours opens); without, the call is
+				// the one without options, byte for byte.
+				GrainSplit::Gpu::Options splitOptions;
+				splitOptions.arena = params.arena;
+				const bool splitOk = params.arena ? m.split.Compute(gpu, dispatch, work, 0, cu, g.scale, g.B, sp, splitOptions)
+					: m.split.Compute(gpu, dispatch, work, 0, cu, g.scale, g.B, sp);
+				if (!splitOk)
+				{
+					m_scratchShort = m.split.ScratchShort();
+					return fail(m.split.LastError().c_str());
+				}
+			}
 			const GrainSplit::Gpu::Frame& gs = shared ? *sharedSplit : m.split.Out();
 			// THE ONE READ ACCESSOR: every grain read goes through gs_fetch / gs_blocks (the prelude + BindView of the frame's layout).
 			const std::string view = GrainSplit::Gpu::ViewGlsl(gs.storage, gs.codeUnit);
+
+			// --- The per-frame temporaries: the arena's (SA6) or this module's own ---
+			// One scope for the rest of the Apply, opened only now: the own split's scope above is closed, so they never nest.
+			ArenaScopeGuard arenaScope(params.arena, kArenaScope);
+			pl_tex deltaTex = m.delta, accTex[2] = { m.acc[0], m.acc[1] };
+			if (useArena)
+			{
+				deltaTex = nullptr;
+				accTex[0] = accTex[1] = nullptr;
+				VpSkeleton::TexFormat t2{};
+				if (VpSkeleton::PlTexBackend::FormatOf(f2, &t2))
+				{
+					const VpSkeleton::TexShape shape{ static_cast<uint32_t>(w), static_cast<uint32_t>(h), t2 };
+					accTex[0] = params.templateClean ? params.arena->Acquire(kArenaOwner, shape) : nullptr;   // fixed order: acc 0, acc 1, delta
+					accTex[1] = params.templateClean ? params.arena->Acquire(kArenaOwner, shape) : nullptr;
+					deltaTex = params.arena->Acquire(kArenaOwner, shape);
+				}
+				if (!deltaTex || (params.templateClean && (!accTex[0] || !accTex[1])))
+				{
+					m_scratchShort = true;
+					return fail("scratch memory short (the cleaner accumulators and the delta)");
+				}
+			}
 
 			// --- Headers ---
 			const std::string geo = DefineInt("TD_W", w) + DefineInt("TD_H", h) + DefineInt("TD_B", g.B) + DefineInt("TD_BW", g.bw) +
@@ -475,8 +569,8 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 					const int ex = q & 1, ey = q >> 1;
 					const int gx = (g.npx - ex + 1) / 2, gy = (g.npy - ey + 1) / 2;
 					withGrain({ Sampled("mot", m.mot[motNew]), Sampled("tab_new", m.tab[tabNew]),
-						Sampled("ev_a", m.evA), Sampled("ev_b", m.evB), Storage("patch_out", m.patches), Storage("acc_out", m.acc[q & 1]) });
-					if (q > 0) d.push_back(Sampled("acc_in", m.acc[(q - 1) & 1]));
+						Sampled("ev_a", m.evA), Sampled("ev_b", m.evB), Storage("patch_out", m.patches), Storage("acc_out", accTex[q & 1]) });
+					if (q > 0) d.push_back(Sampled("acc_in", accTex[(q - 1) & 1]));
 					slotDescs();
 					const std::string hdr = baseG + DefineInt("TD_EX", ex) + DefineInt("TD_EY", ey) + (q > 0 ? "#define TD_ACC_IN 1\n" : "") + chdr +
 						Shaders::kMot + slots + Shaders::kOrder + Shaders::kCleanHeader;
@@ -488,7 +582,7 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 			const std::string cleanedDef = params.templateClean ? "#define TD_CLEANED 1\n" : "";
 			// 4: the new slot (admission frames only)
 			withGrain({ Sampled("tab_new", m.tab[tabNew]) });
-			if (params.templateClean) d.push_back(Sampled("acc_in", m.acc[1]));
+			if (params.templateClean) d.push_back(Sampled("acc_in", accTex[1]));
 			d.push_back(Storage("slots_out", m.atlasPix));
 			if (!run("VideoProcessor temporal detail: store slot", baseG + cleanedDef + SlotFunctions(false, true, false), Shaders::kFinishBody, pgx, pgy, 0))
 				return fail("slot store pass failed");
@@ -520,11 +614,11 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 				return fail("projection pass failed");
 			// 8: TRANSFER
 			withGrain({ Sampled("cf", m.cf), Sampled("ct", m.ct), Sampled("coef", m.coef), Sampled("tab_new", m.tab[tabNew]),
-				Sampled("mot", m.mot[motNew]), Storage("delta_out", m.delta) });
+				Sampled("mot", m.mot[motNew]), Storage("delta_out", deltaTex) });
 			slotDescs();
 			if (!run("VideoProcessor temporal detail: transfer", baseG + tmpl, Shaders::kTransferBody, pgx, pgy, 0)) return fail("transfer pass failed");
 			// 10: GUARD
-			withGrain({ Sampled("src", work), Sampled("delta", m.delta), Storage("gsum_out", m.gsum) });
+			withGrain({ Sampled("src", work), Sampled("delta", deltaTex), Storage("gsum_out", m.gsum) });
 			if (lagOk) { d.push_back(Sampled("bwd", params.backward.tex)); d.push_back(Sampled("prevg", m.prevg)); }
 			if (!run("VideoProcessor temporal detail: grain guard sums",
 				baseG + (lagOk ? std::string(Shaders::kPairBwd) + Shaders::kPrevG : std::string()) + Shaders::kReduce, Shaders::kGuardSumsBody, g.bw, g.bh, redShmem))
@@ -540,7 +634,7 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 			if (!run("VideoProcessor temporal detail: counters", base + Shaders::kStatsHeader, Shaders::kStatsBody, 1, 1, sizeof(float) * 4 * 256))
 				return fail("counter pass failed");
 			// 9: APPLY
-			withGrain({ Sampled("src", luma), Sampled("delta", m.delta), Sampled("kback", m.kback), Storage("dst", m.out),
+			withGrain({ Sampled("src", luma), Sampled("delta", deltaTex), Sampled("kback", m.kback), Storage("dst", m.out),
 				Storage("prevg_out", m.prevg) });
 			if (!run("VideoProcessor temporal detail: recompose", baseG, Shaders::kApplyBody, (W + 15) / 16, (H + 15) / 16, 0)) return fail("recompose pass failed");
 

@@ -20,8 +20,16 @@
 //
 // Off: the output is the source frame itself and no pass runs. On any failure Apply returns false with LastError and the
 // output untouched: the caller renders the original frame and shows "Chroma upscale: libplacebo (<reason>)".
+//
+// Memory (SA7): every texture between the passes is a per-frame temporary (the module keeps no state from frame to frame
+// but its output). With Params::arena the six chroma-grid temporaries (lo, gc, ab, rho, lohi, avg) and the own grain
+// splits' intermediates come from the shared scratch arena (null = private textures, byte-identical to before). An arena
+// shortage is never silent: Apply fails for that frame (ScratchShort(), "scratch memory short (...)"), the caller shows the
+// libplacebo fallback line, and the arena's FrameDecision() is the catalog entry "scratch_arena"; the next frame retries.
 #pragma once
 
+#include <VP-V/core/ScratchArena.h>
+#include <VP-V/modules/control/gpu_memory/PlTexBackend.h>
 #include <VP-V/modules/scaling/chroma_upscale/ChromaCfl.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 #include <VP-V/modules/repair/grain_split/GrainNode.h>
@@ -31,11 +39,17 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace ChromaUpscale
 {
 	namespace Gpu
 	{
+		// Scratch-arena scope of one Apply (one render stage = one scope; GpuAllocator.h) and the owner name its temporaries
+		// are requested under. The own grain splits open their own scope (GrainSplit::Gpu::kArenaScope) BEFORE this one.
+		constexpr uint16_t kArenaScope = 0x0501;
+		constexpr const char* kArenaOwner = "chroma_cfl";
+
 		struct Params
 		{
 			Settings settings;
@@ -52,6 +66,10 @@ namespace ChromaUpscale
 			uint64_t grainSeq = GrainSplit::Gpu::kAnySeq;
 			// The governor dropped the shared product (GrainNode::Shed()): the module uses its own split and says so (Shed).
 			bool grainShed = false;
+			// SA7: the render thread's scratch arena (the owner thread; BeginFrame per frame is the host's). Non-null: the chroma-grid
+			// temporaries and the own splits' intermediates come from it (the module destroys its private copies). Null: private
+			// textures, exactly as before.
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena = nullptr;
 		};
 
 		class CflModule
@@ -80,9 +98,22 @@ namespace ChromaUpscale
 			// The visible fallback ("grain split (chroma-from-luma)"): engaged while any plane runs its own grain split.
 			FallbackCatalog::Decision GrainFallbackDecision() const { return GrainSplit::ReaderFallback("chroma-from-luma", m_grainStatus); }
 			unsigned long long Failures() const { return m_failures; }
+			// True when the LAST Apply failed because the scratch arena had no texture (Params::arena set).
+			bool ScratchShort() const { return m_scratchShort; }
+
+			// The scratch-arena requests of one Apply for an active picture of rw x rh luma pixels whose chroma crop is pcw x pch
+			// (the module's working sizes; lumaLines / chromaLines = the picture's lines in each plane, as Params::lumaLines and
+			// lumaLines / the vertical subsampling): scope kArenaScope, owner kArenaOwner, tier T1 (an optional upsampler: shed
+			// before the T0 temporaries): four rgba32f and two rg32f pcw x pch textures; plus, when ownSplit, the three own
+			// splits' intermediates (GrainSplit::Gpu::Splitter::ArenaRequests, T0; one request per distinct shape because the
+			// splits run one after the other). Empty when the formats do not map to arena formats.
+			static std::vector<VpSkeleton::ArenaRequest> ArenaRequests(pl_gpu gpu, int rw, int rh, int pcw, int pch, double lumaLines,
+				double chromaLines, bool ownSplit = true);
 
 			// VRAM of the module's textures for a W x H luma plane and a cw x ch chroma plane (bytes; with the three splits').
-			static uint64_t TextureBytes(int W, int H, int cw, int ch);
+			// tempsInArena: the chroma-grid temporaries and the splits' bands are the arena's (counted in its plan, not here):
+			// 16 bytes per luma pixel and 112 per chroma pixel less. The default is the private-texture form, unchanged.
+			static uint64_t TextureBytes(int W, int H, int cw, int ch, bool tempsInArena = false);
 
 		private:
 			struct Impl;
@@ -90,6 +121,7 @@ namespace ChromaUpscale
 			std::string m_error, m_status = "off";
 			GrainSplit::GrainStatus m_grainStatus = GrainSplit::GrainStatus::Ring;
 			unsigned long long m_failures = 0;
+			bool m_scratchShort = false;
 		};
 	}
 }

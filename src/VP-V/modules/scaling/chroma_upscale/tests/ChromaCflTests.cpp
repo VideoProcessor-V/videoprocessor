@@ -8,6 +8,9 @@
 #include "CppUnitTest.h"
 #include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
 
+#include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/ScratchArena.h>
+#include <VP-V/modules/control/gpu_memory/PlTexBackend.h>
 #include <VP-V/modules/scaling/chroma_upscale/ChromaCfl.h>
 #include <VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.h>
 
@@ -246,7 +249,8 @@ namespace ChromaCflTestsNs
 
 	// One Apply on a fresh module. threePlane: Cb and Cr as separate planes.
 	// shared: pass the grain.split products computed once outside the module (one producer, many readers).
-	GpuOut RunGpu(GpuDevice& dev, const Scene& s, double sx, double sy, const ActiveRect& rect, bool threePlane = false, bool guard = true, bool shared = false)
+	GpuOut RunGpu(GpuDevice& dev, const Scene& s, double sx, double sy, const ActiveRect& rect, bool threePlane = false, bool guard = true, bool shared = false,
+		VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena = nullptr)
 	{
 		GpuOut o;
 		pl_gpu gpu = dev.Gpu();
@@ -267,6 +271,7 @@ namespace ChromaCflTestsNs
 		gp.settings.mode = ChromaUpscale::Mode::Cfl;
 		gp.active = rect;
 		gp.cfl.grainGuard = guard;
+		gp.arena = arena;   // SA7: null = private textures
 		GrainSplit::Gpu::Splitter pL, pB, pR;
 		RegionEvidence::GrainProduct sharedProduct;   // the one grain.split node, GPU form per plane
 		if (shared && !threePlane)
@@ -280,6 +285,7 @@ namespace ChromaCflTestsNs
 			gp.grain = RegionEvidence::GrainView(&sharedProduct);
 		}
 		pl_frame out{};
+		if (arena) arena->BeginFrame();
 		o.ok = module.Apply(gpu, dev.dispatch, src, gp, out);
 		o.error = module.LastError();
 		o.status = module.Status();
@@ -981,6 +987,103 @@ namespace VideoProcessorTest
 			Assert::IsTrue(r[1].grain == GrainSplit::GrainStatus::Shed && r[1].engaged && r[1].id == "grain split (chroma-from-luma)", L"Shed, engaged, named");
 			Assert::IsTrue(CflWorstDiff(r[0], r[1]) == 0.0, L"the shed product is not read");
 			Assert::IsTrue(!r[2].engaged && r[2].grain == GrainSplit::GrainStatus::Ring, L"recovers when the products are back");
+		}
+
+		TEST_METHOD(ChromaCflGpuArenaIsByteIdentical)
+		{
+			// SA7: the chroma-grid temporaries and the own splits' intermediates from the scratch arena change nothing: the same scene
+			// through a module without an arena and with one gives exactly equal planes (own splits, and the shared products).
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			const Scene sc = MakeScene(128, 96, 64, 48, -0.5, 0.0, 41u, 1.5, 2.0);
+			for (int shared = 0; shared < 2; ++shared)
+			{
+				VpSkeleton::PlTexBackend backend(gpu);
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+				const auto requests = ChromaUpscale::Gpu::CflModule::ArenaRequests(gpu, 128, 96, 64, 48, 96.0, 48.0, shared == 0);
+				Assert::IsFalse(requests.empty(), L"the float formats map to arena formats");
+				Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T2)), L"arena reserve");
+				const GpuOut priv = RunGpu(dev, sc, -0.5, 0.0, ActiveRect(), false, true, shared != 0);
+				const GpuOut ar = RunGpu(dev, sc, -0.5, 0.0, ActiveRect(), false, true, shared != 0, &arena);
+				Assert::IsTrue(priv.ok && ar.ok, Wide(priv.error + ar.error).c_str());
+				Assert::IsTrue(priv.cb.v == ar.cb.v && priv.cr.v == ar.cr.v, L"arena output equals private output");
+				Assert::AreEqual(priv.status, ar.status, L"the same status");
+				Assert::AreEqual(uint64_t(0), arena.Exhausted(), L"the arena never ran short");
+				Assert::IsFalse(arena.FrameDecision().engaged, L"scratch_arena released");
+				Assert::IsTrue(arena.Acquired() >= 6, L"the arena was really used (six chroma-grid temporaries)");
+				LogF("%.0f arena acquires, %.0f exhausted (shared products: %.0f)", static_cast<double>(arena.Acquired()), static_cast<double>(arena.Exhausted()), static_cast<double>(shared));
+				arena.Release();
+			}
+		}
+
+		TEST_METHOD(ChromaCflGpuArenaShortageIsVisibleAndRecovers)
+		{
+			// SA7: no scratch texture (an empty plan, or the tier shed) = the frame fails visibly (Apply false, ScratchShort, the
+			// failure counted, scratch_arena engaged); the next frame under a proper plan equals a private module's output.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			const Scene sc = MakeScene(128, 96, 64, 48, -0.5, 0.0, 42u, 1.5, 2.0);
+			pl_tex luma = UploadR16(gpu, sc.y), chroma = UploadRg16(gpu, sc.cb, sc.cr);
+			const pl_frame src = Frame2(luma, chroma, -0.5, 0.0);
+			const auto requests = ChromaUpscale::Gpu::CflModule::ArenaRequests(gpu, 128, 96, 64, 48, 96.0, 48.0, true);
+			Assert::IsFalse(requests.empty(), L"the float formats map to arena formats");
+			const GpuOut want = RunGpu(dev, sc, -0.5, 0.0, ActiveRect());
+			Assert::IsTrue(want.ok, Wide(want.error).c_str());
+			for (int tierCase = 0; tierCase < 2; ++tierCase)
+			{
+				VpSkeleton::PlTexBackend backend(gpu);
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+				// 0: an empty plan; 1: a plan whose tier (T0) is below the module's (T1): shed (the own splits' T0 requests are admitted).
+				if (tierCase == 0)
+					arena.Reserve(VpSkeleton::PlanArena(std::vector<VpSkeleton::ArenaRequest>(), VpSkeleton::Tier::T2));
+				else
+					arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T0));
+				ChromaUpscale::Gpu::CflModule module;
+				ChromaUpscale::Gpu::Params gp;
+				gp.settings.mode = ChromaUpscale::Mode::Cfl;
+				gp.arena = &arena;
+				pl_frame out{};
+				arena.BeginFrame();
+				const unsigned long long before = module.Failures();
+				Assert::IsFalse(module.Apply(gpu, dev.dispatch, src, gp, out), L"no scratch texture: Apply fails");
+				Assert::IsTrue(module.ScratchShort(), L"ScratchShort");
+				Assert::IsTrue(module.LastError().find("scratch memory short") != std::string::npos, Wide(module.LastError()).c_str());
+				Assert::IsTrue(module.Failures() == before + 1, L"one failure counted");
+				const FallbackCatalog::Decision d = arena.FrameDecision();
+				Assert::IsTrue(d.engaged && d.id == "scratch_arena", L"scratch_arena engaged");
+				Assert::IsTrue(arena.Shed() > 0 || arena.Exhausted() > 0, L"counted");
+				// Recovery: a proper plan, a new frame.
+				arena.BeginFrame();
+				Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T2)), L"arena reserve");
+				Assert::IsFalse(arena.FrameDecision().engaged, L"released after BeginFrame");
+				pl_frame out2{};
+				Assert::IsTrue(module.Apply(gpu, dev.dispatch, src, gp, out2), Wide(module.LastError()).c_str());
+				Assert::IsFalse(module.ScratchShort(), L"recovered");
+				Assert::IsFalse(arena.FrameDecision().engaged, L"no shortage after recovery");
+				std::vector<uint16_t> raw;
+				int nc = 0;
+				Assert::IsTrue(DownloadRaw(gpu, out2.planes[1].texture, raw, nc), L"the output is readable");
+				Plane cb(out2.planes[1].texture->params.w, out2.planes[1].texture->params.h), cr = cb;
+				for (size_t i = 0; i < cb.v.size(); ++i) { cb.v[i] = raw[i * nc] / 64.0; cr.v[i] = raw[i * nc + 1] / 64.0; }
+				Assert::IsTrue(cb.v == want.cb.v && cr.v == want.cr.v, L"the recovered frame equals a private-texture module's");
+				Logger::WriteMessage(tierCase == 0 ? "empty plan: visible, recovered" : "tier shed: visible, recovered");
+				module.Release(gpu);
+				arena.Release();
+			}
+			pl_tex_destroy(gpu, &luma);
+			pl_tex_destroy(gpu, &chroma);
+		}
+
+		TEST_METHOD(ChromaCflGpuTextureBytesCountsTheArenaTemporaries)
+		{
+			// SA7: with the temporaries in the arena the module's own bytes drop by 16 per luma pixel (the luma split's bands) and 112
+			// per chroma pixel (lo..avg 80 + two chroma splits' bands 32); the default form is the private-texture form, unchanged.
+			const int W = 3840, H = 2160, cw = 1920, ch = 1080;
+			const uint64_t priv = ChromaUpscale::Gpu::CflModule::TextureBytes(W, H, cw, ch), inArena = ChromaUpscale::Gpu::CflModule::TextureBytes(W, H, cw, ch, true);
+			Assert::IsTrue(priv == ChromaUpscale::Gpu::CflModule::TextureBytes(W, H, cw, ch, false), L"the default is the private form");
+			Assert::IsTrue(priv - inArena == uint64_t(16) * W * H + uint64_t(112) * cw * ch, L"the temporaries move to the arena");
 		}
 	};
 }

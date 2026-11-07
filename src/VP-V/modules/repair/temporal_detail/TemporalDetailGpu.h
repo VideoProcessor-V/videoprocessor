@@ -19,8 +19,18 @@
 // Off: Apply returns the source frame itself (byte-identical) and no pass runs. Deterministic: fixed reduction
 // orders, no atomics. Status counters are read on request (ReadCounters: a small blocking download, for
 // diagnostics and tests; the render path never needs it).
+//
+// Memory (SA6): the per-frame temporaries (the cleaner's two accumulators and the transferred delta) can come from the
+// shared scratch arena (Params::arena; null = private textures, byte-identical to before). The module's own grain
+// split (the visible fallback when no shared product fits) takes its intermediates from the same arena and its private
+// output is freed once the shared product has fitted for kSplitReleaseSeconds of content. An arena shortage is never
+// silent: Apply fails for that frame (ScratchShort(), LastError "scratch memory short (...)") and the arena's own
+// FrameDecision() is the catalog entry "scratch_arena". The previous-frame grain (prevg) stays a module texture: it
+// needs the previous frame's SOURCE luma and the module's own delta, neither of which the shared product holds.
 #pragma once
 
+#include <VP-V/core/ScratchArena.h>
+#include <VP-V/modules/control/gpu_memory/PlTexBackend.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 #include <VP-V/modules/repair/grain_split/GrainNode.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
@@ -30,11 +40,21 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace TemporalDetail
 {
 	namespace Gpu
 	{
+		// Scratch-arena scope of one Apply (one render stage = one scope; GpuAllocator.h) and the owner name its
+		// temporaries are requested under. The module's own grain split opens its own scope (GrainSplit::Gpu::kArenaScope)
+		// BEFORE this one, so the two never nest.
+		constexpr uint16_t kArenaScope = 0x0401;
+		constexpr const char* kArenaOwner = "temporal_detail";
+		// The shared grain product must have fitted for this long (in content time, Frames(seconds, measured rate)) before
+		// the module frees its own split's output textures; a product that drops out again costs one re-creation.
+		constexpr double kSplitReleaseSeconds = 1.0;
+
 		// A motion pair on its own grid (gridW x gridH texels, rgba32f or any float: x = vx, y = vy, z = trust 0..1) in
 		// pixels of the re-based plane (TemporalDetailMotion.h: MotionPair). The host scales the vectors to the plane.
 		struct MotionTex
@@ -83,6 +103,10 @@ namespace TemporalDetail
 			// The governor dropped the shared product (GrainNode::Shed()): the module uses its own split and says so (Shed).
 			bool grainShed = false;
 			bool autoEngaged = false;      // temporal_detail = auto: the host's AutoGate decision (idle = the input, no pass)
+			// SA6: the render thread's scratch arena (the owner thread; BeginFrame per frame is the host's). Non-null: the
+			// cleaner accumulators, the transferred delta and the own split's intermediates come from it (the module
+			// destroys its private copies). Null: private textures, exactly as before.
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena = nullptr;
 		};
 
 		struct Counters
@@ -120,9 +144,25 @@ namespace TemporalDetail
 			void Release(pl_gpu gpu);
 			const std::string& LastError() const { return m_error; }
 			unsigned long long Failures() const { return m_failures; }
+			// True when the LAST Apply failed because the scratch arena had no texture (Params::arena set). The frame is
+			// then rendered as it was; the store restarts at the next frame (a skipped frame breaks the sequence anyway).
+			bool ScratchShort() const { return m_scratchShort; }
+			// Whether the module currently holds its own grain split's output textures (diagnostics and tests): true after a
+			// frame that computed its own split, false once the shared product has fitted for kSplitReleaseSeconds.
+			bool OwnSplitHeld() const;
+
+			// The scratch-arena requests of one Apply for an ACTIVE PICTURE of w x h (the module's working size): scope
+			// kArenaScope, owner kArenaOwner, tier T1 (an optional repair: shed before the T0 temporaries), count 3 of one
+			// rg32f w x h texture with the template cleaner (two accumulators + delta), else 1; plus, when ownSplit, the
+			// grain split's own intermediates (GrainSplit::Gpu::Splitter::ArenaRequests, T0) so the visible fallback runs
+			// inside the budget too. Empty when the formats do not map to arena formats.
+			static std::vector<VpSkeleton::ArenaRequest> ArenaRequests(pl_gpu gpu, int w, int h, double planeLines,
+				bool templateClean = true, bool ownSplit = true);
 
 			// VRAM of the module's textures at w x h (bytes; with the shared grain split's), for the cost table.
-			static uint64_t TextureBytes(int w, int h, double planeLines, int slots = kSlots);
+			// tempsInArena: the accumulators, the delta and the own split's intermediates are the arena's (counted in its
+			// plan, not here): 40 bytes per pixel less. The default is the private-texture form, unchanged.
+			static uint64_t TextureBytes(int w, int h, double planeLines, int slots = kSlots, bool tempsInArena = false);
 			// The largest slot count whose textures fit in budgetBytes (at least 1).
 			static int SlotsForBudget(uint64_t budgetBytes, int w, int h, double planeLines);
 
@@ -132,6 +172,7 @@ namespace TemporalDetail
 			std::string m_error, m_status = "off";
 			GrainSplit::GrainStatus m_grainStatus = GrainSplit::GrainStatus::Ring;
 			unsigned long long m_failures = 0;
+			bool m_scratchShort = false;
 		};
 	}
 }
