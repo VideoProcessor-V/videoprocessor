@@ -120,12 +120,14 @@ def main():
     ap.add_argument('--synth-pairs', type=int, default=40)
     ap.add_argument('--real-frames', type=int, default=72)
     ap.add_argument('--tl-args', default='', help='extra camera_eval flags for the two-layer configuration, e.g. "--tl-floor 0.5 --tl-veto 0.3"')
+    ap.add_argument('--all-args', default='', help='extra camera_eval flags for BOTH configurations, e.g. "--dyn-texture" (dynamic-texture detector on)')
     ap.add_argument('--match', action='store_true')
     ap.add_argument('--match-count', type=int, default=40)
     ap.add_argument('--match-clips', default='crowd,tos,sol,boat')
     a = ap.parse_args()
     B, flagsB, L2 = ('phase1', ['--phase1'], 'p1') if a.vs == 'phase1' else ('two', ['--two-layer'] + a.tl_args.split(), 'two')
-    CONFIGS = [('new', []), (B, flagsB)]
+    base = a.all_args.split()
+    CONFIGS = [('new', list(base)), (B, flagsB + base)]
     exe = os.path.abspath(a.exe)
     out = os.path.abspath(a.out)
     repo = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
@@ -184,17 +186,17 @@ def main():
     L += ['', 'Region metric (primary): truth = pairs where master DIS and NVOF fits are valid, share >= 50 camera blocks, p90 block difference <= 0.5 px. '
           'WRONG = confident fit whose p90 block error over the true-camera blocks (or over the fit own camera labels) exceeds max(1 px, 10 % of the p90 truth magnitude). '
           '"Extrapolated corner" columns use the max picture-corner error and include non-camera regions.', '',
-          '| sequence | source | usable new | usable %s | region judged new/%s | WRONG@true-cam new | %s | WRONG@own-labels new | %s | extrapolated corner err med new | %s | master-camera-block err med new | %s | extrapolated corner WRONG new | %s |' % ((L2,) * 7),
-          '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
+          '| sequence | source | usable new | usable %s | region judged new/%s | WRONG@true-cam new | %s | >1.5 px@true-cam new | %s | WRONG@own-labels new | %s | extrapolated corner err med new | %s | master-camera-block err med new | %s | extrapolated corner WRONG new | %s |' % ((L2,) * 8),
+          '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
     rn, rp = real['new'][0], real[B][0]
-    agg = {t: dict(u=[], w=0, j=0, rj=0, rw=0, ro=0) for t in ('new', B)}
+    agg = {t: dict(u=[], w=0, j=0, rj=0, rw=0, ro=0, r15=0) for t in ('new', B)}
     clip_agg = {}
     for k in sorted(rn):
         x, y = rn[k], rp.get(k)
         if y is None:
             continue
-        L.append('| %s | %s | %s | %s | %d/%d | %d | %d | %d | %d | %s | %s | %s | %s | %d | %d |' % (k[0], k[1], f(x['usable']), f(y['usable']), x['region_judged'], y['region_judged'],
-                 x['region_wrong'], y['region_wrong'], x['region_wrong_own'], y['region_wrong_own'],
+        L.append('| %s | %s | %s | %s | %d/%d | %d | %d | %d | %d | %d | %d | %s | %s | %s | %s | %d | %d |' % (k[0], k[1], f(x['usable']), f(y['usable']), x['region_judged'], y['region_judged'],
+                 x['region_wrong'], y['region_wrong'], x['region_wrong15'], y['region_wrong15'], x['region_wrong_own'], y['region_wrong_own'],
                  f(x['err_med']), f(y['err_med']), f(x['cam_err_med']), f(y['cam_err_med']), x['wrong'], y['wrong']))
         clip = k[0].split('_')[0]
         for t, r in (('new', x), (B, y)):
@@ -204,22 +206,26 @@ def main():
             agg[t]['rj'] += r['region_judged']
             agg[t]['rw'] += r['region_wrong']
             agg[t]['ro'] += r['region_wrong_own']
-            c = clip_agg.setdefault((clip, t), dict(u=[], rj=0, rw=0, ro=0))
+            agg[t]['r15'] += r['region_wrong15']
+            c = clip_agg.setdefault((clip, t), dict(u=[], rj=0, rw=0, ro=0, r15=0))
             c['u'].append(r['usable'])
             c['rj'] += r['region_judged']
             c['rw'] += r['region_wrong']
             c['ro'] += r['region_wrong_own']
+            c['r15'] += r['region_wrong15']
     L += ['', 'Mean usable share over all real candidates: new %s, %s %s. Region metric WRONG-confident (true-camera blocks / own labels): new %d / %d of %d judged, %s %d / %d of %d judged. '
+        'NOISE TIER (> 1.5 px, pairs wrong beyond the near-threshold band): new %d, %s %d. '
         'Extrapolated corner WRONG-confident: new %d of %d judged, %s %d of %d judged.' % (
         f(mean(agg['new']['u'])), L2, f(mean(agg[B]['u'])), agg['new']['rw'], agg['new']['ro'], agg['new']['rj'], L2, agg[B]['rw'], agg[B]['ro'], agg[B]['rj'],
+        agg['new']['r15'], L2, agg[B]['r15'],
         agg['new']['w'], agg['new']['j'], L2, agg[B]['w'], agg[B]['j']), '',
         '### Per clip (all tiers and sources)', '',
-        '| clip | usable new | usable %s | WRONG@true-cam new | %s | judged new | %s | WRONG rate new | %s |' % ((L2,) * 4), '|---|---|---|---|---|---|---|---|---|']
+        '| clip | usable new | usable %s | WRONG@true-cam new | %s | >1.5 px new | %s | judged new | %s | WRONG rate new | %s |' % ((L2,) * 5), '|---|---|---|---|---|---|---|---|---|---|---|']
     for clip in xcheck_real.CLIPS:
         cn, cb = clip_agg.get((clip, 'new')), clip_agg.get((clip, B))
         if not cn or not cb:
             continue
-        L.append('| %s | %s | %s | %d | %d | %d | %d | %s | %s |' % (clip, f(mean(cn['u'])), f(mean(cb['u'])), cn['rw'], cb['rw'], cn['rj'], cb['rj'],
+        L.append('| %s | %s | %s | %d | %d | %d | %d | %d | %d | %s | %s |' % (clip, f(mean(cn['u'])), f(mean(cb['u'])), cn['rw'], cb['rw'], cn['r15'], cb['r15'], cn['rj'], cb['rj'],
                  f(cn['rw'] / cn['rj'] if cn['rj'] else None, 3), f(cb['rw'] / cb['rj'] if cb['rj'] else None, 3)))
 
     def pct(v, q):
@@ -230,6 +236,17 @@ def main():
         v = fit_us[tag]
         L.append('| %s | %d | %s | %s | %s |' % (tag, len(v), f(pct(v, 50), 0), f(pct(v, 95), 0), f(max(v) if v else None, 0)))
 
+    L += ['', '### Noise tier and dynamic-texture verdicts (real clips)', '',
+          'Confident-wrong pairs beyond the noise tier (p90 error > 1.5 px) per configuration (sequence/source/pair: p90 error px), and the number of '
+          'real pairs the dynamic-texture detector turned Ambiguous (verdictFlags bit 1).', '']
+    for tag, _ in CONFIGS:
+        rows_ = real[tag][0]
+        far = ['%s/%s/t%d:%.2f' % (k[0], k[1], t, p90) for k in sorted(rows_) for (t, p90, thr) in rows_[k]['wrong_pairs'] if p90 > xcheck_real.NOISE_TIER_PX]
+        nd = 0
+        for fn in sorted(os.listdir(os.path.join(out, tag, 'real'))):
+            if fn.endswith('.csv'):
+                nd += sum(1 for r in csv.DictReader(open(os.path.join(out, tag, 'real', fn))) if int(r.get('verdictFlags') or 0) & 1)
+        L.append('- %s: %d pairs > 1.5 px %s; dynamic-texture Ambiguous pairs: %d' % (tag, len(far), ('(' + ', '.join(far) + ')') if far else '', nd))
     if a.match:
         res = run_match(exe, out, a.real_root, a.match_clips.split(','), a.match_count, CONFIGS)
         L += ['', '## Matcher: plan from the previous pair (narrow window + guided candidate) vs full search', '',

@@ -63,3 +63,13 @@ summary reports a per-clip table and the fit time (p50 / p95 / max). Synthetic f
 `match --dump-flo DIR` also writes, per judged pair t, `DIR/pair_%06d/pred_off.flo` and `pred_on.flo` (Middlebury .flo, full picture, source px,
 frame t-1 -> t as in the convention above; each matcher block vector is expanded over its `block` x `block` source pixels, the strip beyond the last
 whole block repeats the edge block). The CSV is unchanged. `DIR` must exist.
+
+## Noise tier and dynamic-texture detector (R1-GATES)
+- **Noise tier**: the region metric is reported at two error floors. `WRONG@true-cam` uses max(1 px, 10 %); `>1.5 px@true-cam` uses
+  max(1.5 px, 10 %) (`xcheck_real.NOISE_TIER_PX`). A pair that is wrong only between 1 and 1.5 px is a near-threshold miss (vector noise
+  against a 1 px metric), not a foreground lock. `run_eval.py` adds the column to the per-sequence and per-clip tables, a summary count,
+  and lists the pairs beyond 1.5 px (sequence/source/pair: p90 error) per configuration.
+- **Dynamic-texture detector** (`Config::dynTexture`, `DynamicTexture.h/.cpp`): `camera_eval fit --dyn-texture [--dt-share F --dt-temporal F
+  --dt-spatial F --dt-agree F]`; `run_eval.py --all-args "--dyn-texture"` turns it on for both configurations. The CSV gains `dynShare`,
+  `dynTemporal`, `dynSpatial`, `dynField` (the raw-vector temporal incoherence) and `verdictFlags` (bit 1 = Ambiguous because of a dynamic
+  texture). The summary counts the real pairs it turned Ambiguous.
