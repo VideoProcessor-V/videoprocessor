@@ -13,6 +13,7 @@ Today the classical source-resolution monitor (`input.source_analysis`) decides 
 - `AbrStepDetector.h`: ABR boundary timing from per-frame quality samples.
 - `AbrNoticePolicy.h`: the one-time notice and its wording.
 - `SourceIdProduct.h`, `FrameQuality.h`, `SourceIdPipeline.h`, `SourceQualityView.h`: the P14 record and holder, the frame-level quality signal, the worker pipeline and the consumer read API (sections below).
+- `chain/`: the scaling-chain estimator units (line sampler, polyphase proposer, descale verifier, chain evidence, power probe), pure and not wired yet; see `chain/README.md`.
 
 ## Voters and trust
 
