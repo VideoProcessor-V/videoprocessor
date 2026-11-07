@@ -243,6 +243,29 @@ the camera layer is the one with the best `support x continuity x border evidenc
   `Signals::border` / `continuity` diagnostics. State (reference, object id, hold count) resets with the fitter, on a cut
   and on a generation reset; a flash leaves it untouched. Evaluation: `tools/camera_eval` (`--two-layer`).
 
+Default stays **off**: `twoLayer` can create new usable verdicts (a foreground-suspect layer becomes the camera), so the
+acceptance bar (no new confident-wrong) is not met; the opus gate rejected the default flip. It is a tuning/evaluation option
+until the keys exist (K3).
+
+## Dynamic-texture detector (R1-GATES)
+`Config::dynTexture` (default **off**; off = state never touched, record byte-identical, whatever `dynTextureCfg` holds).
+Water, foliage and similar textures give block vectors that are valid-looking but different in every pair, so a clean
+anchor set can still make the fit "usable". `DynamicTexture.h/.cpp` takes the share of trusted blocks that disagree with the
+fitted model, the **temporal** incoherence of that disagreeing field against the previous pair's residuals, and the
+**spatial** incoherence between neighbouring disagreeing blocks. When share >= `minShare` (0.5), temporal >= `minTemporal`
+(0.6, only when a previous field exists) and spatial >= `minSpatial` (0.5) the record becomes `Reason::Ambiguous` with
+`verdictFlags |= kVerdictDynamicTexture`, confidence x 0.495 (below 0.5), the status text names a dynamic texture, and the
+pair does not feed the camera prediction. Never usable by a consumer (visible fallback). History resets with the fitter, on a
+cut, on stale input, on a flash and on any **invalid fit**. Defaults are set so that no real pair of the camera_eval clips the
+fitter calls usable is turned Ambiguous. Signals: `dynShare`, `dynTemporal`, `dynSpatial`, `dynField`. Evaluation:
+`camera_eval fit --dyn-texture`.
+
+## Noise-tier metric (camera_eval)
+The real-clip region metric is reported at two error floors: `WRONG@true-cam` (max(1 px, 10 %)) and `>1.5 px@true-cam`
+(max(1.5 px, 10 %), `xcheck_real.NOISE_TIER_PX`). A pair wrong only between 1 and 1.5 px is a near-threshold miss (vector noise
+against a 1 px metric), not a foreground lock; a confident pair beyond 1.5 px is a real error. Acceptance uses both columns.
+See `tools/camera_eval/README.md`.
+
 ## Link layer (K1 / K2 / K4, module side)
 `link/` holds the fit runner (P7 producer, worker thread, readback ring, pool), the P8 producer / fill / per-consumer binding and
 the guided-matching scheduler, governor and `p7g_camera_guide` product. All of it is inert until the H1 adapter registers it; see
