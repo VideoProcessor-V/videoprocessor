@@ -102,7 +102,7 @@ inline uint32_t StepsFor(ProductId id, Dims d)
     }
 }
 
-// 70b §3 / doc 70 §6.2: until the source ring (P13, M2 P10) exists, P10 and P11 are computed from the TAP plane (the
+// 70b section 3 / doc 70 section 6.2: until the source ring (P13, M2 P10) exists, P10 and P11 are computed from the TAP plane (the
 // lane's analysis luma), not from the queued source planes: the registry the lane is built on drops their P13 input.
 // The tap form has its own unit version and provenance tag (kTapFormUnitVersion, kTapProvenance); at the migration to
 // P13 both change and consumers CheckFit and fall back visibly (WrongSize / Stale). Every other declaration is kept.
