@@ -245,6 +245,7 @@ private:
             *out = StepOutcome::Late;
             return false;
         }
+        // Only Refused gates here; the CarryForward verdict is informational (the slot table decides the reduced form).
         if (st.node->orderedChain && st.chain.Admit(seq) == ChainOrder::Verdict::Refused) {
             // Out of order for the chain (not after the last published frame): refused visibly, the lane moves on.
             st.nextSeq = seq + 1u;

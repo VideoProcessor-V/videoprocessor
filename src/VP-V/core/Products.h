@@ -226,6 +226,16 @@ struct ProductDecl {
     // Node::history at run time). kHistoryFixed = not governed (today's behaviour). A consumer's or reader's lag
     // always wins: the depth never drops below the largest lag anything reads the product at.
     uint8_t historyFloor = kHistoryFixed;
+    // One persistent store (W1-RES, doc 72): the product declares history 0 and is not self-reading, yet keeps ONE
+    // buffer that readers read at lag 1 (the store is rewritten in place by the producer after the readers of the
+    // previous frame are done). Its depth stays max(0, largest lag read) as for any product. It is never governed
+    // (no historyFloor: shedding the single store would drop the product, not reduce it). Registry::Validate: history
+    // 0, no historyFloor, no self input.
+    bool singletonStore = false;
+    // Set by detail::AddInput/AddLead when a declaration named more than kMaxInputs reads: the extra read was NOT
+    // recorded. Registry::Validate rejects the declaration with a plain reason (fail closed, visible; Release has no
+    // assert).
+    bool overflow = false;
 };
 
 // The input's frame for a reader at frame `seq`: seq - lag, or seq + lead. False when seq - lag would be negative.
@@ -283,12 +293,14 @@ inline ProductDecl Make(ProductId id, const char* token, const char* name, Backe
 
 inline void AddInput(ProductDecl& d, ProductId p, uint8_t lag)
 {
-    assert(d.inputCount < kMaxInputs);   // a declaration never silently drops a read
+    assert(d.inputCount < kMaxInputs);   // a declaration never silently drops a read (debug); Release: see below
     if (d.inputCount < kMaxInputs) {
         d.inputs[d.inputCount].product = p;
         d.inputs[d.inputCount].lag = lag;
         d.inputs[d.inputCount].lead = 0;
         ++d.inputCount;
+    } else {
+        d.overflow = true;   // Registry::Validate rejects the declaration: never a silently dropped read
     }
 }
 
@@ -301,6 +313,8 @@ inline void AddLead(ProductDecl& d, ProductId p, uint8_t lead)
         d.inputs[d.inputCount].lag = 0;
         d.inputs[d.inputCount].lead = lead;
         ++d.inputCount;
+    } else {
+        d.overflow = true;
     }
 }
 
@@ -340,8 +354,8 @@ public:
             const ProductDecl& d = decls_[i];
             if (d.id != i)
                 return fail("product ids are not dense");
-            if (d.inputCount > kMaxInputs)
-                return fail("too many inputs");
+            if (d.inputCount > kMaxInputs || d.overflow)
+                return fail("a product declares more inputs than the seam allows (an extra read was dropped)");
             bool hasLead = false;
             for (size_t k = 0; k < d.inputCount; ++k) {
                 const InputRef& in = d.inputs[k];
@@ -372,6 +386,15 @@ public:
             }
             if (d.historyFloor != kHistoryFixed && d.historyFloor > d.history)
                 return fail("history floor above the full history");
+            if (d.singletonStore) {
+                if (d.history != 0)
+                    return fail("a single-store product declares history 0");
+                if (d.historyFloor != kHistoryFixed)
+                    return fail("a single-store product is not governed (no history floor)");
+                for (size_t k = 0; k < d.inputCount; ++k)
+                    if (d.inputs[k].product == d.id)
+                        return fail("a single-store product does not read itself");
+            }
             if (d.shortQueueSubstitute != kNoProduct) {
                 if (!Has(d.shortQueueSubstitute) || d.shortQueueSubstitute == d.id)
                     return fail("bad short-queue substitute");
@@ -802,6 +825,9 @@ struct ConsumerDecl {
     std::array<ConsumeRef, kMaxConsumes> consumes{};
     bool holdsSpan = false;       // holds the next frame's product through the presentation span
     bool hasReducedMode = false;  // can run visibly reduced when a product is dropped (regulator)
+    // Set by AddConsume when more than kMaxConsumes reads were named: the extra read was NOT recorded.
+    // BuildGraph rejects the graph with a plain reason (fail closed, visible; Release has no assert).
+    bool overflow = false;
 };
 
 inline void AddConsume(ConsumerDecl& c, ProductId p, uint8_t lag = 0)
@@ -811,6 +837,8 @@ inline void AddConsume(ConsumerDecl& c, ProductId p, uint8_t lag = 0)
         c.consumes[c.count].product = p;
         c.consumes[c.count].lag = lag;
         ++c.count;
+    } else {
+        c.overflow = true;
     }
 }
 

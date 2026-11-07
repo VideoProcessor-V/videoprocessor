@@ -417,6 +417,7 @@ struct LaneState {
     std::vector<uint64_t> lateSeen;                   // per node index (render thread)
     std::vector<uint64_t> missSeen;                   // per node index (render thread)
     uint64_t firstSeq = 0;                            // the first frame this graph serves
+    std::string capsMismatch;                         // non-empty: the real plan's history caps differ from the trial's
 
     int IndexOf(ProductId id) const { return id < indexOfId.size() ? indexOfId[id] : -1; }
 };
@@ -619,6 +620,14 @@ public:
         }
 
         std::shared_ptr<LaneState> st = BuildState(reg, consumers, gs, card, tier, fromSeq);
+        if (!st->capsMismatch.empty()) {
+            // The graph was sized for the trial's history grant but the real plan grants otherwise: the memory plan
+            // does not describe the rings. Fail closed and visibly (Analysis lane unavailable + the Fallbacks entry).
+            error_ = st->capsMismatch;
+            std::atomic_store(&state_, std::shared_ptr<LaneState>());
+            renderState_.reset();
+            return reasons;
+        }
         // Regulator products from the new graph.
         ConfigureRegulatorFor(*st, reg, consumers, gs, card, tier);
         lateRingSize_ = periodMs_ > 0.0 ? size_t(std::max(1.0, 10000.0 / periodMs_ + 0.5)) : size_t(0);
@@ -986,11 +995,12 @@ public:
             skipped += st->runner->Counters(st->table->NodeAt(i).id).skippedDropped.load(std::memory_order_relaxed);
         if (skipped > 0)
             out.push_back("Analysis: " + std::to_string(skipped) + " frames skipped (source gone)");
-        uint64_t carried = 0, refused = 0;
+        uint64_t carried = 0, refused = 0, chainWait = 0;
         for (size_t i = 0; i < st->table->Count(); ++i) {
             const LaneProductCounters& pc = st->runner->Counters(st->table->NodeAt(i).id);
             carried += pc.chainCarryForward.load(std::memory_order_relaxed);
             refused += pc.chainRefused.load(std::memory_order_relaxed);
+            chainWait += st->table->At(i).Counters().chainWaitRejected.load(std::memory_order_relaxed);
         }
         uint64_t laterRejected = 0;
         for (size_t i = 0; i < st->table->Count(); ++i)
@@ -1003,6 +1013,9 @@ public:
                           + " ordered-chain frames ran in the reduced form (no predecessor result)");
         if (refused > 0)
             out.push_back("Analysis: " + std::to_string(refused) + " out-of-order chain frames refused");
+        if (chainWait > 0)
+            out.push_back("Analysis: " + std::to_string(chainWait)
+                          + " ordered-chain frames waited on a rejected predecessor (its live fill pending, declined or without a buffer)");
         const GapReport& gt = st->gap.Totals();
         if (gt.capNoFit > 0)
             out.push_back("Analysis: " + std::to_string(gt.capNoFit) + " lane chunks deferred (too big for the chunk cap)");
@@ -1100,7 +1113,6 @@ private:
                                           uint64_t fromSeq)
     {
         (void)consumers;
-        (void)gs;
         std::shared_ptr<LaneState> st = std::make_shared<LaneState>();
         st->graph = owner_.Current();
         st->firstSeq = fromSeq;
@@ -1130,6 +1142,10 @@ private:
         st->missSeen.assign(st->graph.nodes.size(), 0u);
 
         st->plan = governor_.Update(reg, st->graph, card, tier);
+        // The graph was built with the trial probe's history caps (Configure); the real plan must grant the same: a cheap
+        // equality check (the caps are short, sorted by id) so the rings and the memory plan cannot silently disagree.
+        if (st->plan.historyCaps != gs.historyCaps)
+            st->capsMismatch = "the history grant changed between the trial plan and the real plan (graph sized for another grant)";
         ApplyLaneGrants(st->plan, *st->table);
 
         st->indHold = indHandle_;

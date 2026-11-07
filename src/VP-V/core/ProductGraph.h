@@ -74,6 +74,7 @@ struct Node {
     uint8_t historyFull = 0;           // the depth without a governor cap: max(declared, largest lag read)
     uint8_t historyMin = 0;            // the lowest depth the governor may grant (== historyFull: not governed)
     bool orderedChain = false;         // ProductDecl::orderedChain
+    bool singletonStore = false;       // ProductDecl::singletonStore (one persistent store, read at lag 1; never governed)
     bool holdsSpan = false;
     uint8_t ring = 0;
     uint8_t livePool = 0;
@@ -135,7 +136,7 @@ inline uint64_t ConsumerFingerprint(const std::vector<ConsumerDecl>& consumers)
         mix(c.count);
         for (size_t k = 0; k < c.count && k < kMaxConsumes; ++k)
             mix((uint64_t(c.consumes[k].product) << 8) | c.consumes[k].lag);
-        mix((c.holdsSpan ? 1u : 0u) | (c.hasReducedMode ? 2u : 0u));
+        mix((c.holdsSpan ? 1u : 0u) | (c.hasReducedMode ? 2u : 0u) | (c.overflow ? 4u : 0u));
     }
     return h;
 }
@@ -353,6 +354,11 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
     };
 
     for (const ConsumerDecl& c : consumers)
+        if (c.overflow || c.count > kMaxConsumes) {
+            g.error = "a consumer declares more reads than the seam allows (an extra read was dropped)";
+            return g;
+        }
+    for (const ConsumerDecl& c : consumers)
         for (size_t k = 0; k < c.count && k < kMaxConsumes; ++k)
             if (!want(c.consumes[k].product, c.consumes[k].lag, c.holdsSpan, 0)) {
                 g.error = "a consumer asks for an unknown product";
@@ -445,6 +451,7 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
                 }
         }
         node.orderedChain = d.orderedChain;
+        node.singletonStore = d.singletonStore;
         node.holdsSpan = span[p] != 0;
         const bool lane = d.backend != Backend::RenderOnly;
         const unsigned L = lane ? gs.laneLead : 0u;

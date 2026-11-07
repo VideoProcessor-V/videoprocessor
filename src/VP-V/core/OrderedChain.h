@@ -10,7 +10,10 @@
 //
 //   Admit(seq)     InOrder        the predecessor (seq - 1) was the last frame this chain published
 //                  CarryForward   the predecessor is not the last published (chain start, a late or abandoned job,
-//                                 a skipped range): the job may run, in its declared reduced form
+//                                 a skipped range): the job may run, in its declared reduced form. INFORMATIONAL:
+//                                 LaneRunner acts only on Refused; whether a job runs reduced is decided by the
+//                                 slot table (SlotTable::LaneAncestors: the self input is truly Absent), which is
+//                                 the authority, so a verdict here never gates or counts anything.
 //                  Refused        seq is not after the last published frame (a late N+0 after N+1, a repeat):
 //                                 out-of-order work is refused, never run and never published
 //   Published(seq) records the publish (the new tail of the chain)

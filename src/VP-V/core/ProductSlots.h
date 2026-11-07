@@ -234,6 +234,7 @@ struct SlotCounters {
     std::atomic<uint64_t> chainCarryForward{ 0 }; // ordered chain: sealed in the declared reduced form (self ancestor absent)
     std::atomic<uint64_t> leadAccepted{ 0 };      // lead ancestors accepted at a SEALED reader (Published, stamp == StampOf(N+k))
     std::atomic<uint64_t> leadLaterRejected{ 0 }; // a frame accepted as a lead ancestor was rejected at its own seal later (residual K1 risk)
+    std::atomic<uint64_t> chainWaitRejected{ 0 }; // ordered chain: frames whose job waited on a REJECTED predecessor (counted once per frame)
 };
 
 class SlotSet {
@@ -733,6 +734,14 @@ public:
         }
     }
 
+    // Lane: frame `seq` is Rejected (the render owns it, no content yet): the live fill has not made it, or declined,
+    // or found no live buffer. An ordered-chain successor then waits (Transient), visibly (chainWaitRejected).
+    bool RejectedAwaitingLive(uint64_t seq) const
+    {
+        const SlotWord w = Unpack(slots_[SlotOf(seq)].word.load(std::memory_order_acquire));
+        return w.seq == Biased(seq) && (w.state == SlotState::Rejected || w.state == SlotState::RejectedLaneOwned);
+    }
+
     // Lane: why PinRef(seq) failed. Absent = the frame will never have content from this lane (never claimed, abandoned,
     // released, or the slot moved on); Transient = it may still get content (being written, rejected awaiting the live
     // fill, or the word changed under the pin). An ordered chain carries forward only on Absent.
@@ -917,6 +926,7 @@ public:
         sealed_.resize(maxRing + 1);
         results_.resize(nodes_.size());
         leadMark_.resize(nodes_.size());
+        chainWaitSeen_.assign(nodes_.size(), 0u);
         for (size_t i = 0; i < nodes_.size(); ++i)
             leadMark_[i].assign(size_t(nodes_[i].ring == 0 ? 1 : nodes_[i].ring), 0u);
     }
@@ -985,6 +995,16 @@ public:
                     hdr.ancestorCount = uint8_t(k + 1);
                     hdr.chainReduced = true;
                     continue;
+                }
+                if (chainSelf && set && haveSeq && set->RejectedAwaitingLive(aseq)) {
+                    // Waiting on a Rejected predecessor: it waits for the live fill (which may decline or find no live
+                    // buffer: then it never comes and this chain stalls until the frame is released). Counted once per
+                    // frame, not per poll: the entry is private to this product's lane thread.
+                    const int ni = IndexOfNode(id);
+                    if (ni >= 0 && chainWaitSeen_[size_t(ni)] != seq + 1u) {
+                        chainWaitSeen_[size_t(ni)] = seq + 1u;
+                        set->MutableCounters().chainWaitRejected.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
                 pins.Unpin();
                 hdr.ancestorCount = 0;
@@ -1186,8 +1206,13 @@ private:
     }
 
     // The seal's validation of a published lane header for frame `seq` (design B4 (a)/(b)).
+    // RENDER THREAD ONLY (the single caller of Resolve -> Seal -> Check): leadMark_, pendingLead_ and pendingChain_ are
+    // plain members with no synchronisation. Check may run more than once per product and frame (SlotSet::Seal retries
+    // the CAS), so it starts from empty pending state: counts are taken once, by Resolve, after the seal took effect.
     SealReason Check(const Node& n, uint64_t seq, const VpIndicator::Stamp& stampN, const Header& h)
     {
+        pendingLead_.clear();
+        pendingChain_ = false;
         if (stampN.ancient || h.honoured.ancient)
             return SealReason::AncientStamp;
         if (h.seq != seq || h.cgen == 0)
@@ -1254,9 +1279,11 @@ private:
     bool valid_ = true;
     const char* error_ = "";
     StampSource stampOf_;
-    std::vector<ProductId> pendingLead_;   // render thread: lead ancestors seen by the Check in flight (counted on Accepted)
-    bool pendingChain_ = false;
+    // Render thread only (see Check): the single caller contract for the three members below.
+    std::vector<ProductId> pendingLead_;   // lead ancestors seen by the Check in flight (counted on Accepted)
+    bool pendingChain_ = false;            // the Check in flight accepted a chain carry-forward
     std::vector<std::vector<uint64_t>> leadMark_;   // per node, per slot: frame + 1 accepted as a lead ancestor
+    std::vector<uint64_t> chainWaitSeen_;   // per node: frame + 1 last counted in chainWaitRejected (that product's lane thread only)
     std::vector<Node> nodes_;
     std::vector<SlotSet*> sets_;
     std::vector<SealedRecord> sealed_;

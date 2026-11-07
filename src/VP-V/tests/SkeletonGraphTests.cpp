@@ -323,9 +323,10 @@ namespace SkeletonGraphTestsNs
 			const Registry reg = ManyInputsRegistry();
 			ConsumerDecl c;
 			c.id = 3;
-			for (size_t i = 0; i < 12; ++i)
-				AddConsume(c, ProductId(i));   // 12 asked, 10 fit
+			for (size_t i = 0; i < kMaxConsumes; ++i)
+				AddConsume(c, ProductId(i));   // exactly the limit (one more is an overflow, rejected: see below)
 			Assert::AreEqual(int(kMaxConsumes), int(c.count));
+			Assert::IsFalse(c.overflow);
 			GraphSettings gs = Rig::MakeSettings(1);
 			const Graph g = BuildGraph(reg, std::vector<ConsumerDecl>(1, c), gs);
 			Assert::IsTrue(g.valid);
@@ -646,6 +647,34 @@ namespace SkeletonGraphTestsNs
 			Assert::IsTrue(r.Set(kChain).AbsenceOf(5) == SlotSet::Absence::Absent);
 		}
 
+		TEST_METHOD(AChainWaitingOnARejectedPredecessorIsCountedOncePerFrame)
+		{
+			Rig r(ChainRegistry(), OneConsumer(kChain), 2);
+			r.Lane(kChainBase, 0);
+			r.Lane(kChainBase, 1);
+			// The live fill of chain(0) is DECLINED: the slot stays Rejected with no content.
+			const Stamp st = r.ind.Seal(0);
+			const auto& res = r.table.Resolve(0, st, [](const Node& n, uint64_t, int, Header&, uint32_t) { return n.id != kChain; });
+			Assert::IsTrue(r.Result(res, kChain).final == SealOutcome::Unavailable
+				&& r.Result(res, kChain).finalReason == SealReason::FillDeclined);
+			Assert::IsTrue(r.Set(kChain).RejectedAwaitingLive(0));
+			Assert::AreEqual(uint64_t(0), r.Set(kChain).Counters().chainWaitRejected.load());
+			Header scratch;
+			LaneInputs pins;
+			for (int poll = 0; poll < 5; ++poll)
+				Assert::IsFalse(r.table.LaneAncestors(kChain, 1, scratch, pins), L"the successor job waits");
+			Assert::AreEqual(uint64_t(1), r.Set(kChain).Counters().chainWaitRejected.load(), L"one frame waited, not five polls");
+			// A frame that was never claimed is Absent, not Rejected: carried forward, nothing counted.
+			Assert::IsFalse(r.Set(kChain).RejectedAwaitingLive(5));
+			// The same through the seal-only path (no live buffer was ever begun: the NoLiveBuffer shape).
+			Rig q(ChainRegistry(), OneConsumer(kChain), 2);
+			q.Lane(kChainBase, 0);
+			q.Lane(kChainBase, 1);
+			q.Set(kChain).Seal(0, [](const Header&) { return SealReason::StampMismatch; });
+			Assert::IsFalse(q.table.LaneAncestors(kChain, 1, scratch, pins));
+			Assert::AreEqual(uint64_t(1), q.Set(kChain).Counters().chainWaitRejected.load());
+		}
+
 		TEST_METHOD(ARealPredecessorIsPinnedNotCarriedForward)
 		{
 			Rig r(ChainRegistry(), OneConsumer(kChain), 2);
@@ -656,6 +685,119 @@ namespace SkeletonGraphTestsNs
 			Assert::IsTrue(r.Set(kChain).Read(0, true).header->chainReduced);
 			Assert::IsFalse(r.Set(kChain).Read(1, true).header->chainReduced);
 			Assert::IsTrue(r.Set(kChain).Read(1, true).header->ancestors[1].cgen != 0u);
+		}
+
+		// ---- declaration overflow fails closed (also in Release, where the assert is compiled out) ----
+
+		TEST_METHOD(AnInputOverflowIsRejectedByTheRegistryWithAPlainReason)
+		{
+			std::vector<ProductDecl> d = ManyInputsRegistry().All();
+			ProductDecl& sink = d[kSources];
+			Assert::IsFalse(sink.overflow, L"exactly the limit is not an overflow");
+			Assert::IsTrue(Registry(d).Validate());
+#ifdef NDEBUG   // the helper asserts in a Debug build; in Release it must set the flag, not drop the read silently
+			detail::AddInput(sink, ProductId(0), 0);
+			Assert::IsTrue(sink.overflow);
+			Assert::AreEqual(size_t(kMaxInputs), size_t(sink.inputCount), L"the extra read was not recorded");
+#else
+			sink.overflow = true;
+#endif
+			const char* why = "";
+			Assert::IsFalse(Registry(d).Validate(&why));
+			Assert::IsTrue(Has(why, "more inputs"));
+			const Graph g = BuildGraph(Registry(d), OneConsumer(ProductId(kSources)), Rig::MakeSettings(1));
+			Assert::IsFalse(g.valid);
+			Assert::IsTrue(Has(g.error, "more inputs"));
+			// A look-ahead overflow too.
+			d = ManyInputsRegistry().All();
+#ifdef NDEBUG
+			detail::AddLead(d[kSources], ProductId(0), 1);
+			Assert::IsTrue(d[kSources].overflow);
+#else
+			d[kSources].overflow = true;
+#endif
+			Assert::IsFalse(Registry(d).Validate());
+		}
+
+		TEST_METHOD(AConsumerOverflowFailsTheGraphWithAPlainReason)
+		{
+			ConsumerDecl c;
+			c.id = 1;
+			c.name = "greedy";
+			for (size_t i = 0; i < kMaxConsumes; ++i)
+				AddConsume(c, kBase);
+			Assert::IsFalse(c.overflow, L"exactly the limit is not an overflow");
+			Assert::IsTrue(BuildGraph(LeadRegistry(), std::vector<ConsumerDecl>(1, c), Rig::MakeSettings(2)).valid);
+#ifdef NDEBUG
+			AddConsume(c, kBase);
+			Assert::IsTrue(c.overflow);
+			Assert::AreEqual(size_t(kMaxConsumes), size_t(c.count), L"the extra read was not recorded");
+#else
+			c.overflow = true;
+#endif
+			const Graph g = BuildGraph(LeadRegistry(), std::vector<ConsumerDecl>(1, c), Rig::MakeSettings(2));
+			Assert::IsFalse(g.valid);
+			Assert::IsTrue(Has(g.error, "more reads"));
+		}
+
+		TEST_METHOD(AnOverflowedDeclarationMakesTheLaneUnavailableAndSaysSo)
+		{
+			std::vector<ProductDecl> d = ManyInputsRegistry().All();
+#ifdef NDEBUG
+			detail::AddInput(d[kSources], ProductId(0), 0);
+#else
+			d[kSources].overflow = true;
+#endif
+			Indicator ind(9, 256);
+			AnalysisLane lane(&ind, []() { return uint64_t(0); });
+			LaneSettings ls;
+			ls.mode = LaneSettings::Mode::On;
+			TierInput tier;
+			tier.framePeriodMs = 40.0;
+			lane.Configure(ls, Registry(d), OneConsumer(ProductId(kSources)), Rig::MakeSettings(1), BigCard(1ull << 30), tier, 0, false);
+			Assert::IsFalse(lane.Active());
+			bool shown = false;
+			for (const FallbackCatalog::Decision& f : lane.Fallbacks())
+				shown = shown || (f.engaged && Has(f.reason, "more inputs"));
+			Assert::IsTrue(shown, L"the reason reaches the Fallbacks list (Config status)");
+			Assert::IsTrue(Has(lane.StatusLines().front(), "more inputs"));
+		}
+
+		// ---- single store (W1-RES) ----
+
+		TEST_METHOD(ASingleStoreIsValidatedAndCopiedToTheNode)
+		{
+			using namespace VpIndicator;
+			std::vector<ProductDecl> d;
+			ProductDecl store = detail::Make(0, "store", "single store", Backend::Cpu, 0, Tier::T0, Bit(kFull), 0);
+			store.singletonStore = true;
+			store.size.fixedBytes = 64;
+			d.push_back(store);
+			ProductDecl reader = detail::Make(1, "reader", "store reader", Backend::Cpu, 0, Tier::T0, Bit(kFull), 0);
+			detail::AddInput(reader, 0, 1);
+			reader.size.fixedBytes = 64;
+			d.push_back(reader);
+			Assert::IsTrue(Registry(d).Validate());
+			const Graph g = BuildGraph(Registry(d), OneConsumer(1), Rig::MakeSettings(1));
+			Assert::IsTrue(g.valid);
+			Assert::IsTrue(g.Find(0)->singletonStore);
+			Assert::IsFalse(g.Find(1)->singletonStore);
+			Assert::AreEqual(1, int(g.Find(0)->history), L"depth stays max(0, largest lag read)");
+			Assert::AreEqual(1, int(g.Find(0)->historyMin), L"never governed: no shedding below the lag");
+
+			const char* why = "";
+			std::vector<ProductDecl> bad = d;
+			bad[0].history = 2;
+			Assert::IsFalse(Registry(bad).Validate(&why));
+			Assert::IsTrue(Has(why, "single-store"));
+			bad = d;
+			bad[0].historyFloor = 0;
+			Assert::IsFalse(Registry(bad).Validate(&why));
+			Assert::IsTrue(Has(why, "single-store"));
+			bad = d;
+			detail::AddInput(bad[0], 0, 1);
+			Assert::IsFalse(Registry(bad).Validate(&why));
+			Assert::IsTrue(Has(why, "single-store"));
 		}
 
 		// ---- budget-governed history ----
