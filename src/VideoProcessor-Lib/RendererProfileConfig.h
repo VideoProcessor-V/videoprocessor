@@ -715,13 +715,9 @@ namespace RendererProfileConfig
         }
 		if (group == "scaling")
 		{
+            if(key=="chroma_upscaler")return IsChoice(value,{"auto","upscaler","ewa_lanczossharp","ewa_lanczos","lanczos","catmull_rom","bicubic","bilinear"});   // VPV: owner 2026-10-13 - auto = Catmull-Rom (default), upscaler = the main upscaler; Bill's list plus these (divergence register)
 			if (key == "quality") return IsChoice(value, { "fast", "balanced", "high" });
 			if (key == "upscaler") return IsChoice(value, { "auto", "none", "nearest", "bilinear", "oversample", "bicubic", "gaussian", "catmull_rom", "lanczos", "ewa_lanczos", "ewa_lanczossharp", "ewa_lanczos4sharpest" });
-			// Owner 2026-10-13 efficiency: chroma's own upscaler (4:2:0 / 4:2:2
-			// planes to the luma size). auto = Catmull-Rom (owner: visually identical
-			// to the polar filter on his clip, about 1/7 of its cost); upscaler = the
-			// main upscaler (Bill's VP).
-			if (key == "chroma_upscaler") return IsChoice(value, { "auto", "upscaler", "ewa_lanczossharp", "ewa_lanczos", "lanczos", "catmull_rom", "bicubic", "bilinear" });
 			if (key == "downscaler")
 			{
 				// Accept the two removed spellings only as legacy input so an old
@@ -1419,12 +1415,12 @@ namespace RendererProfileConfig
 				return false;
 			}
 
-		const std::set<std::string> expressionVariables = {
+		const std::set<std::string> expressionVariables = ProfileSchemaHooks::WithExpressionVariables({   // VPV-HOOK: the host's list, then the VP-V variables
 			"eotf", "transfer", "colorspace", "primaries", "format",
-			"hdr_metadata", "hdr_inferred", "interlaced", "scan", "source_rate",
+			"hdr_metadata", "interlaced", "scan", "source_rate",
 			"cadence", "width", "height", "resolution", "renderer", "actual_refresh",
-			"key", "ambient", "content", "source"
-		};
+			"key"
+		});
 
 		for (const auto& spec : ProfileGroups::Definitions())
 		{
@@ -1999,7 +1995,17 @@ namespace RendererProfileConfig
 	inline bool Read(const ConfigFile& config, Model& model, std::string& error)
 	{
 		if (!ReadUnchecked(config, model, error))
+		{
+			// VPV-HOOK: the VP-V keys are checked in place, so a VP-V fault can precede a host fault in the
+			// file. The host's own order decides: a host-only pass (the VP-V keys accepted unchecked) reports
+			// the host's first fault when there is one; a file with only VP-V faults keeps the VP-V message.
+			const ProfileSchemaHooks::HostOnlyScope hostOnly;
+			Model hostModel;
+			std::string hostError;
+			if (!ReadUnchecked(config, hostModel, hostError))
+				error = hostError;
 			return false;
+		}
 		AppendContentGateWarnings(model);
 		return true;
 	}
@@ -2103,8 +2109,8 @@ namespace RendererProfileConfig
                 "subtitle_detection_optimization", "subtitle_near_bar_px", "subtitle_hold_ms", "subtitle_box_padding_sides", "subtitle_box_padding_top", "subtitle_box_padding_bottom", "subtitle_move_inset",
 				"switch_refresh_rate",
 				"quality", "tone_mapping", "gamut_mapping", "peak_detection",
-				"dynamic_target", "custom_tone_mapping", "contrast_recovery", "upscaler", "chroma_upscaler", "downscaler", "deband",
-				"deband_strength", "deband_grain", "sigmoid", "downscale_light", "dithering", "display_bit_depth", "output_presentation",
+				"dynamic_target", "custom_tone_mapping", "contrast_recovery", "upscaler", "downscaler", "deband",
+				"deband_strength", "sigmoid", "dithering", "display_bit_depth", "output_presentation",
 				"output_range", "output_gamma", "output_path_profile",
 				"target_primaries", "sdr_target_primaries", "report_bt2020_to_display",
 				"sdr_input_transfer", "sdr_adjust_gamma", "output_diagnostics",
@@ -2136,6 +2142,7 @@ namespace RendererProfileConfig
 						{ return ValidateBaseSetting(key, value); },
 					"a valid renderer value"
 				});
+			ProfileSchemaHooks::AppendLegacyDisplayRules(displayRules);   // VPV-HOOK: the VP-V keys of the legacy section, after the host's
 			if (!ConfigSchema::ValidateSection(
 				config, displaySection, displayRules, error))
 				return false;
@@ -2269,10 +2276,11 @@ namespace RendererProfileConfig
 				if (!profile.when.empty() &&
 					(!profile.whenExpression.Compile(profile.when, error, true) ||
 					 !ValidateExpressionVariables(profile.whenExpression,
-						{ "eotf", "transfer", "colorspace", "primaries", "format",
-						  "hdr_metadata", "hdr_inferred", "interlaced", "scan", "source_rate",
+						ProfileSchemaHooks::WithExpressionVariables({   // VPV-HOOK: the host's list, then the VP-V variables
+						  "eotf", "transfer", "colorspace", "primaries", "format",
+						  "hdr_metadata", "interlaced", "scan", "source_rate",
 						  "cadence", "width", "height", "resolution", "renderer",
-						  "actual_refresh", "key", "ambient", "content", "source" },
+						  "actual_refresh", "key" }),
 						"[" + profileSection + "] when=", error)))
 					return false;
 				model.profiles.emplace(groupName + "." + profileName, std::move(profile));

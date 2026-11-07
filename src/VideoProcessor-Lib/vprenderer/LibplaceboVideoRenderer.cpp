@@ -11964,11 +11964,11 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.hasContrastRecovery != next.hasContrastRecovery ||
 			current.contrastRecovery != next.contrastRecovery, "contrast_recovery");
 		changed(current.upscaler != next.upscaler, "upscaler");
-		changed(current.chromaUpscaler != next.chromaUpscaler, "chroma_upscaler");
 		changed(current.downscaler != next.downscaler, "downscaler");
 		changed(current.debandStrength != next.debandStrength ||
 			current.deband != next.deband, "deband");
 		changed(current.sigmoid != next.sigmoid, "sigmoid");
+        changed(current.chromaUpscaler != next.chromaUpscaler,"chroma_upscaler");
         changed(current.motion.Fingerprint()!=next.motion.Fingerprint(),"motion");
 		changed(current.dithering != next.dithering, "dithering");
 		changed(current.displayBitDepth != next.displayBitDepth, "display_bit_depth");
@@ -12071,7 +12071,6 @@ struct LibplaceboVideoRenderer::Impl
 			current.scopeSubtitlePaddingPixels != next.scopeSubtitlePaddingPixels ||
 			current.scopeSubtitleTargetBufferPixels !=
 				next.scopeSubtitleTargetBufferPixels, "viewport");
-		RendererSettingsHooks::AppendDelta(current, next, fields);   // VPV-HOOK: the VP-V settings names
 		if (fields.empty())
 			return "none";
 		std::ostringstream description;
@@ -12321,6 +12320,7 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		changedFields = DescribeProfileSettingsDelta(
 			publishedActiveSettings, settings);
+		RendererSettingsHooks::AppendDeltaText(publishedActiveSettings, settings, changedFields);   // VPV-HOOK: the VP-V names, after the host's complete text
 		return LiveProfileSettingsCompatible(publishedActiveSettings, settings);
 	}
 

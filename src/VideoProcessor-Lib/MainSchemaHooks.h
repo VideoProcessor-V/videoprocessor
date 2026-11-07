@@ -16,7 +16,8 @@
 
 // Startup-schema extension point (H2). A build that defines MAIN_SCHEMA_EXTENSION_HEADER (the VP-V
 // Directory.Build.targets) includes that header, which defines MainConfigSchema::SchemaHooks (extra
-// sections, keys appended after the host's positional rule lists, extra validation). Without the define
+// sections, the extra keys of a rule list as the host validates it, extra validation after all of the
+// host's checks, and the host-only pass that keeps the host's validation order). Without the define
 // the hooks below own and add nothing, so every result is exactly the host's.
 #ifdef MAIN_SCHEMA_EXTENSION_HEADER
 #include MAIN_SCHEMA_EXTENSION_HEADER
@@ -30,6 +31,7 @@ namespace MainConfigSchema
 		inline bool OwnsRendererSection(const std::string&) { return false; }
 		inline void AppendRules(const char*, std::vector<ConfigSchema::KeyRule>&) {}
 		inline bool Validate(const ConfigFile&, std::string&) { return true; }
+		struct HostOnlyScope { HostOnlyScope() {} };
 	}
 }
 #endif

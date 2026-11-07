@@ -78,6 +78,31 @@ namespace RendererSettingsHooks
 		RE::SettingsLoad(c);
 	}
 
+	// Appends the extension's names to the host's COMPLETE delta text as a suffix, so the host's part stays
+	// byte-identical to the host's own ("none" included): "<host text>; vp_fields=a,b". Nothing is appended
+	// when no name is given.
+	inline void AppendDeltaNames(std::string& text, const std::vector<const char*>& names)
+	{
+		if (names.empty())
+			return;
+		text += "; vp_fields=";
+		for (size_t index = 0; index < names.size(); ++index)
+		{
+			if (index != 0)
+				text += ',';
+			text += names[index];
+		}
+	}
+
+	// AppendDelta, as that suffix of the host's delta text.
+	inline void AppendDeltaText(const RendererSettingsExtension& current, const RendererSettingsExtension& next,
+		std::string& text)
+	{
+		std::vector<const char*> names;
+		AppendDelta(current, next, names);
+		AppendDeltaNames(text, names);
+	}
+
 	// The live-applied settings: dst takes src's.
 	inline void CopyLive(RendererSettingsExtension& dst, const RendererSettingsExtension& src) noexcept
 	{

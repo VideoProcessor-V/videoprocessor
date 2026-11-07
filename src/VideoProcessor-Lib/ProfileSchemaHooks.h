@@ -12,8 +12,10 @@
 // Renderer-profile schema extension point (H2), included by RendererProfileConfig.h inside namespace
 // RendererProfileConfig after the Is*/Parse* helpers. A build that defines PROFILE_SCHEMA_EXTENSION_HEADER
 // (the VP-V Directory.Build.targets) includes that header, which defines ProfileSchemaHooks: the setting
-// keys it owns per profile group and the [vpv] section check. Without the define nothing is claimed and
-// the host's validators answer alone.
+// keys it owns per profile group, the [vpv] section check, the extra expression variables and legacy
+// [display] keys, and the host-only pass (HostOnlyScope: the VP-V keys are accepted unchecked, so only the
+// host's faults can be reported - the host's validation order stays the host's). Without the define nothing
+// is claimed and the host's validators answer alone.
 #ifdef PROFILE_SCHEMA_EXTENSION_HEADER
 #include PROFILE_SCHEMA_EXTENSION_HEADER
 #else
@@ -23,5 +25,8 @@ namespace ProfileSchemaHooks
 	enum class Verdict { NotMine, Valid, Invalid };
 	inline Verdict Validate(const std::string&, const std::string&, const std::string&) { return Verdict::NotMine; }
 	inline bool ValidateSections(const ConfigFile&, std::string&) { return true; }
+	inline std::set<std::string> WithExpressionVariables(std::set<std::string> host) { return host; }
+	inline void AppendLegacyDisplayRules(std::vector<ConfigSchema::KeyRule>&) {}
+	struct HostOnlyScope { HostOnlyScope() {} };
 }
 #endif

@@ -23,14 +23,18 @@ The VP-V members of the renderer settings live here, not in `LibplaceboVideoRend
   (`ValidateProfileSetting`, `ValidateBaseSetting`) ask it only about a key they rejected or do not know.
 - `VpvStartupSchema.h`: the VP-V startup sections and keys (`[ambient]`, `[led_drive*]`, `[calibration*]`, VP-V keys of
   `[general]`, `[queue]`, `[decklink]`, `[logging]`, `[shortcuts]`, the file-filter constants, the shortcut
-  `global_actions` check). `MainSchemaHooks.h` includes it when `MAIN_SCHEMA_EXTENSION_HEADER` is defined; keys are
-  appended after the host's positional rule lists.
+  `global_actions` check). `MainSchemaHooks.h` includes it when `MAIN_SCHEMA_EXTENSION_HEADER` is defined. The host's
+  list functions (`GeneralRules` ... `LoggingRules`) hold Bill's keys only; the VP-V keys are added to a copy that
+  `Validate` uses (`MainConfigSchema::WithVpKeys`, `SchemaHooks::AppendRules`).
 - Why headers and not a runtime registry (R2): the schema headers are compiled into the GUI, the Config editor, both
   renderer DLLs and the tests. A start-up registry would be a separate copy per binary and need a registration and
   link entry in each project; the compile-time seam (both macros come from `Directory.Build.targets`) gives every binary
   the same rules. Without the macros the hooks are inert stubs and the host answers alone.
-- Known behaviour difference: the VP-V startup checks run as one group after `[directshow.ppm]`, so a startup file with
-  several faults may name a different first fault; one fault gives the same text (schema golden).
+- Validation order is Bill's (owner decision 2026-11-07, `BillIdenticalSchemaTests`): `MainConfigSchema::Validate` runs
+  Bill's checks, then the VP-V group (`SchemaHooks::Validate`); on any fault it re-runs Bill's checks with the VP-V keys
+  accepted unchecked (`SchemaHooks::HostOnlyScope`) and reports Bill's first fault if there is one. `RendererProfileConfig::Read`
+  does the same (`ProfileSchemaHooks::HostOnlyScope`: VP-V profile keys, the `[vpv]` check). A file with only VP-V faults
+  reports the VP-V text (schema golden); a file with several faults reports the fault Bill's build reports for Bill's keys.
 
 ## Settings table (moved settings)
 
@@ -294,8 +298,9 @@ Still in host files after P3, each reported as a Bill-line edit or a data/model 
   names `chroma_upscaler`, `deband_grain`, `downscale_light`). A Bill behaviour change; divergence register. `PostLoad`
   returns the Original value (`bicubic`) through `Overrides`.
 - `ApplyProfileSettingsLiveLocked` side effects (capture atomics, DV formatter): move with P10 (capture) and P11.
-- `debandGrain` delta term moved to `AppendDelta`; the host's "profile delta" line now lists the VP names after the
-  host's (risk 2); no test asserts that order.
+- `debandGrain` delta term moved to `AppendDelta`; the host's "profile delta" text stays Bill's (`DescribeProfileSettingsDelta`
+  is Bill's function) and the VP names follow as `; vp_fields=a,b` appended at its one call site
+  (`RendererSettingsHooks::AppendDeltaText`); `BillIdenticalSchemaTests` compares Bill's function with the baseline text.
 - Data/model edits in `RendererProfileConfig.h` that are not validators: queue profile fields (`targetLatencyMs`,
   `lowLatencyPath`), viewport `blank_*`, `IsContentClassifierInput/IsContentGated`, `DefaultSectionNotAppliedWarning`,
   the `persist_profile_selection` default (opt-in), the `F<n>` key grammar, extra `when:` variables (`hdr_inferred`,
@@ -307,7 +312,7 @@ Still in host files after P3, each reported as a Bill-line edit or a data/model 
 - `#include "RetiredSettings.h"` and `#include "SettingsExtension.h"` in `RendererProfileConfig.h`; `RefreshKey` in
   `ConfigFile.cpp`.
 - `QueueRules()`, `GeneralRules()`, ... in `MainConfigSchema.h` are the VP refactor of Bill's inline rule lists (exposed
-  for the Config coverage test); they stay as skeletons with an `AppendRules` call each.
+  for the Config coverage test); they hold Bill's keys in Bill's order (`bill-hunks.golden.txt`).
 - Registry form of R2 (`GroupOf`, `KnownGlobalKeys`, `GeneralRules`) is the compile-time seam above; `GroupOf` is
   `ProfileSchemaHooks::Validate(group, ...)`, `KnownGlobalKeys("vpv")` is `IsKnownGlobalKey`.
 

@@ -23,6 +23,25 @@ namespace ProfileSchemaHooks
 {
 	enum class Verdict { NotMine, Valid, Invalid };
 
+	// True while a HostOnlyScope exists on this thread: the VP-V keys are accepted unchecked, so a pass under it
+	// can report only the host's faults (RendererProfileConfig::Read re-runs under it after any fault, so the
+	// host's validation order decides which fault is reported - owner decision 2026-11-07, Bill-identical).
+	inline bool& HostOnlyFlag()
+	{
+		static thread_local bool flag = false;
+		return flag;
+	}
+
+	struct HostOnlyScope
+	{
+		HostOnlyScope() : previous_(HostOnlyFlag()) { HostOnlyFlag() = true; }
+		~HostOnlyScope() { HostOnlyFlag() = previous_; }
+		HostOnlyScope(const HostOnlyScope&) = delete;
+		HostOnlyScope& operator=(const HostOnlyScope&) = delete;
+	private:
+		bool previous_;
+	};
+
 	namespace Detail
 	{
 		inline Verdict V(bool valid) { return valid ? Verdict::Valid : Verdict::Invalid; }
@@ -294,13 +313,40 @@ namespace ProfileSchemaHooks
 	// `group` is the host's profile group name; "base" asks about a key outside any group.
 	inline Verdict Validate(const std::string& group, const std::string& key, const std::string& value)
 	{
-		if (group == "input") return Detail::Input(key, value);
-		if (group == "motion") return Detail::Motion(key, value);
-		if (group == "scaling") return Detail::Scaling(key, value);
-		if (group == "viewport") return Detail::Viewport(key, value);
-		if (group == "queue") return Detail::Queue(key, value);
-		if (group == "base") return Detail::Base(key, value);
-		return Verdict::NotMine;
+		Verdict verdict = Verdict::NotMine;
+		if (group == "input") verdict = Detail::Input(key, value);
+		else if (group == "motion") verdict = Detail::Motion(key, value);
+		else if (group == "scaling") verdict = Detail::Scaling(key, value);
+		else if (group == "viewport") verdict = Detail::Viewport(key, value);
+		else if (group == "queue") verdict = Detail::Queue(key, value);
+		else if (group == "base") verdict = Detail::Base(key, value);
+		// Host-only pass: an owned key is accepted whatever its value.
+		if (verdict == Verdict::Invalid && HostOnlyFlag()) return Verdict::Valid;
+		return verdict;
+	}
+
+	// The variables the VP-V profile rules (when=) may read, added to the host's list.
+	inline std::set<std::string> WithExpressionVariables(std::set<std::string> host)
+	{
+		for (const char* variable : { "hdr_inferred", "ambient", "content", "source" })
+			host.insert(variable);
+		return host;
+	}
+
+	// The VP-V keys the legacy [display] section accepts besides the host's own set; each is validated like
+	// the same key anywhere else (accepted unchecked in a host-only pass).
+	inline void AppendLegacyDisplayRules(std::vector<ConfigSchema::KeyRule>& rules)
+	{
+		for (const char* key : { "chroma_upscaler", "deband_grain", "downscale_light" })
+		{
+			const std::string name = key;
+			ConfigSchema::KeyRule rule;
+			rule.key = name;
+			if (!HostOnlyFlag())
+				rule.validator = [name](const std::string& value) { return ValidateBaseSetting(name, value); };
+			rule.expected = "a valid renderer value";
+			rules.push_back(std::move(rule));
+		}
 	}
 
 	// The global keys of the [vpv] section (ADR-0023): not per renderer profile, so Config's profile
@@ -320,6 +366,7 @@ namespace ProfileSchemaHooks
 	// error, as in every owned section.
 	inline bool ValidateSections(const ConfigFile& config, std::string& error)
 	{
+		if (HostOnlyFlag()) return true;   // host-only pass: the host's own checks only
 		if (const auto* vpvValues = config.GetSectionValues("vpv"))
 			for (const auto& value : *vpvValues)
 			{

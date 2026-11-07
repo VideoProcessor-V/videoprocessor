@@ -14,13 +14,19 @@
 //   OwnsSection(section)     the sections the startup schema owns beyond the host's ([ambient], [led_drive...],
 //                            [calibration...]),
 //   OwnsRendererSection      [vpv] and [vpv.*], owned by the renderer profile reader,
-//   AppendRules(list, rules) the VP-V keys appended AFTER the host's positional rule lists
-//                            (Validate() and DirectShowRules() index those lists by position),
-//   Validate(config, error)  the VP-V sections and the [shortcuts] VP-V keys, called once after the host's
-//                            own [directshow.ppm] check.
-// Known behaviour difference against the pre-move code: the VP-V checks now run as one group at that point,
-// so a configuration with SEVERAL faults may report a different first fault; a configuration with one
-// fault reports the same text (src/VP-V/tests/golden/schema-validation.golden.txt).
+//   AppendRules(list, rules) the VP-V keys of a rule list, appended to a COPY the host validates with
+//                            (MainConfigSchema::WithVpKeys); the host's own list functions (GeneralRules,
+//                            QueueRules, ...) hold the host's keys only, in the host's order,
+//   Validate(config, error)  the VP-V sections and the [shortcuts] VP-V keys, called once after ALL of the
+//                            host's checks,
+//   HostOnlyScope            while one exists on the thread the VP-V keys are accepted unchecked
+//                            (AppendRules strips their validators), so a pass under it can report only the host's
+//                            faults.
+// Validation order (owner decision 2026-11-07, Bill-identical): MainConfigSchema::Validate runs the host's
+// checks and then Validate() above; if anything fails it re-runs the host's checks under HostOnlyScope and
+// reports the host's first fault when there is one. A file with several faults therefore reports the same
+// first fault as the host's own build would for its host faults; a file with only VP-V faults reports the
+// VP-V fault (the same text as before the move: src/VP-V/tests/golden/schema-validation.golden.txt).
 
 #include "ConfigSchema.h"
 #include "AmbientConfig.h"
@@ -30,6 +36,7 @@
 
 #include <climits>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace MainConfigSchema
@@ -66,6 +73,23 @@ namespace MainConfigSchema
 
 	namespace SchemaHooks
 	{
+		// True while a HostOnlyScope exists on this thread.
+		inline bool& HostOnlyFlag()
+		{
+			static thread_local bool flag = false;
+			return flag;
+		}
+
+		struct HostOnlyScope
+		{
+			HostOnlyScope() : previous_(HostOnlyFlag()) { HostOnlyFlag() = true; }
+			~HostOnlyScope() { HostOnlyFlag() = previous_; }
+			HostOnlyScope(const HostOnlyScope&) = delete;
+			HostOnlyScope& operator=(const HostOnlyScope&) = delete;
+		private:
+			bool previous_;
+		};
+
 		inline bool OwnsSection(const std::string& section)
 		{
 			return section == "ambient" ||
@@ -80,8 +104,11 @@ namespace MainConfigSchema
 			return section == "vpv" || section.rfind("vpv.", 0) == 0;
 		}
 
-		inline void AppendRules(const char* list, std::vector<ConfigSchema::KeyRule>& rules)
+		// The VP-V keys of one startup rule list ("general", "queue", "shortcuts", "decklink", "logging"),
+		// with their validators (Config coverage and the schema goldens read them here).
+		inline std::vector<ConfigSchema::KeyRule> VpRules(const char* list)
 		{
+			std::vector<ConfigSchema::KeyRule> rules;
 			const std::string name = list;
 			if (name == "general")
 			{
@@ -128,6 +155,18 @@ namespace MainConfigSchema
 				// Report-a-problem (StateReportSettings.h), both default off.
 				rules.push_back(ConfigSchema::Boolean("auto_report"));
 				rules.push_back(ConfigSchema::Boolean("report_thumbnail"));
+			}
+			return rules;
+		}
+
+		// Appends the VP-V keys of `list` to `rules` (the host's keys stay first and unchanged). Under a
+		// HostOnlyScope the keys are accepted without a value check.
+		inline void AppendRules(const char* list, std::vector<ConfigSchema::KeyRule>& rules)
+		{
+			for (ConfigSchema::KeyRule& rule : VpRules(list))
+			{
+				if (HostOnlyFlag()) rule.validator = nullptr;
+				rules.push_back(std::move(rule));
 			}
 		}
 

@@ -106,17 +106,17 @@ namespace SchemaValidationGoldenTest
 		std::vector<std::pair<std::string, std::vector<ConfigSchema::KeyRule>>> MainRuleLists()
 		{
 			return {
-				{ "general", MainConfigSchema::GeneralRules() },
-				{ "command_line", MainConfigSchema::GeneralRules() },
-				{ "queue", MainConfigSchema::QueueRules() },
+				{ "general", MainConfigSchema::WithVpKeys("general", MainConfigSchema::GeneralRules()) },
+				{ "command_line", MainConfigSchema::WithVpKeys("general", MainConfigSchema::GeneralRules()) },
+				{ "queue", MainConfigSchema::WithVpKeys("queue", MainConfigSchema::QueueRules()) },
 				{ "directshow", MainConfigSchema::DirectShowRules() },
 				{ "vprenderer.input_processing", MainConfigSchema::VpRendererInputRules() },
-				{ "decklink", MainConfigSchema::DeckLinkRules() },
+				{ "decklink", MainConfigSchema::WithVpKeys("decklink", MainConfigSchema::DeckLinkRules()) },
 				{ "directshow.conversion", MainConfigSchema::ConversionRules() },
 				{ "directshow.ppm", MainConfigSchema::PpmRules() },
 				{ "queue_recovery", MainConfigSchema::RecoveryRules() },
 				{ "lldv", MainConfigSchema::LldvRules() },
-				{ "logging", MainConfigSchema::LoggingRules() },
+				{ "logging", MainConfigSchema::WithVpKeys("logging", MainConfigSchema::LoggingRules()) },
 			};
 		}
 

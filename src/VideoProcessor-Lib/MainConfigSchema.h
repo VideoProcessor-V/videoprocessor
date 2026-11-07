@@ -119,7 +119,6 @@ namespace MainConfigSchema
             ConfigSchema::Boolean("present_every_vsync"),
             ConfigSchema::Integer("presentation_queue_depth", 1, 8)
 		};
-		SchemaHooks::AppendRules("general", rules);   // VPV-HOOK: VP-V keys, appended after the positional list
 		return rules;
 	}
 
@@ -146,7 +145,6 @@ namespace MainConfigSchema
 			ConfigSchema::Integer("reset_after_render_restart_seconds", 1, INT_MAX),
 			ConfigSchema::Integer("reset_queue_too_large_percent", 1, 200)
 		};
-		SchemaHooks::AppendRules("queue", rules);   // VPV-HOOK
 		return rules;
 	}
 
@@ -185,7 +183,6 @@ namespace MainConfigSchema
 	inline std::vector<ConfigSchema::KeyRule> ShortcutSwitchRules()
 	{
 		std::vector<ConfigSchema::KeyRule> rules = { ConfigSchema::Boolean("foreground_only") };
-		SchemaHooks::AppendRules("shortcuts", rules);   // VPV-HOOK
 		return rules;
 	}
 
@@ -197,7 +194,6 @@ namespace MainConfigSchema
 			ConfigSchema::Choice("rgb_10bit_packing", { "AUTO", "R210", "R10B", "R10L" }),
 			ConfigSchema::Choice("rgb_12bit_packing", { "AUTO", "R12B", "R12L" })
 		};
-		SchemaHooks::AppendRules("decklink", rules);   // VPV-HOOK
 		return rules;
 	}
 
@@ -270,11 +266,22 @@ namespace MainConfigSchema
 			ConfigSchema::Boolean("debug"),
 			ConfigSchema::Any("debug_log_retention")
 		};
-		SchemaHooks::AppendRules("logging", rules);   // VPV-HOOK
 		return rules;
 	}
 
-	inline bool Validate(const ConfigFile& config, std::string& error)
+	// VPV-HOOK: a rule list as the host validates it: the host's own rules (the list functions above are
+	// exactly the host's, in its order) followed by the VP-V keys of that list. In a host-only pass
+	// (SchemaHooks::HostOnlyScope) the VP-V keys are accepted without a value check, so that only the
+	// host's faults can be reported.
+	inline std::vector<ConfigSchema::KeyRule> WithVpKeys(const char* list, std::vector<ConfigSchema::KeyRule> rules)
+	{
+		SchemaHooks::AppendRules(list, rules);
+		return rules;
+	}
+
+	// The host's startup checks, in the host's order and with the host's texts. (VPV-HOOK: this is the host's
+	// Validate, renamed; Validate below runs it and then the VP-V group.)
+	inline bool ValidateHostChecks(const ConfigFile& config, std::string& error)
 	{
 		error.clear();
 		const auto recoveryRule = BoundedInvalidCaptureRecoveryRule();
@@ -285,7 +292,7 @@ namespace MainConfigSchema
 			error = "[general] key 'bounded_invalid_capture_recovery' must be a Boolean";
 			return false;
 		}
-		const std::vector<ConfigSchema::KeyRule> commandLineRules = GeneralRules();
+		const std::vector<ConfigSchema::KeyRule> commandLineRules = WithVpKeys("general", GeneralRules());   // VPV-HOOK
 		if (!ConfigSchema::ValidateSection(
 			config, "command_line", commandLineRules, error))
 			return false;
@@ -310,7 +317,7 @@ namespace MainConfigSchema
 		// Queue policy is deliberately expressed in whole frames and capped so
 		// a config typo cannot create an impractically deep live queue. The old
 		// names remain accepted for configuration-file compatibility.
-		const std::vector<ConfigSchema::KeyRule> queueRules = QueueRules();
+		const std::vector<ConfigSchema::KeyRule> queueRules = WithVpKeys("queue", QueueRules());   // VPV-HOOK
 		std::string defaultQueueSection;
 		const bool hasDefaultQueue = QueueConfiguration::ResolveDefaultSection(
 			config, defaultQueueSection);
@@ -334,7 +341,7 @@ namespace MainConfigSchema
 		// [vprenderer.input_processing] may independently override any of its fields, so overlap
 		// is deliberate and resolved by the runtime rather than rejected here.
 
-		const std::vector<ConfigSchema::KeyRule> deckLinkRules = DeckLinkRules();
+		const std::vector<ConfigSchema::KeyRule> deckLinkRules = WithVpKeys("decklink", DeckLinkRules());   // VPV-HOOK
 		if (!ConfigSchema::ValidateSection(
 			config, "decklink", deckLinkRules, error))
 			return false;
@@ -352,8 +359,6 @@ namespace MainConfigSchema
 		const std::vector<ConfigSchema::KeyRule> ppmRules = PpmRules();
 		if (!ConfigSchema::ValidateSection(
 			config, "directshow.ppm", ppmRules, error))
-			return false;
-		if (!SchemaHooks::Validate(config, error))   // VPV-HOOK: the VP-V sections and keys
 			return false;
 		if (const auto* aliases = config.GetSectionValues("renderer_alias"))
 			for (const auto& alias : *aliases)
@@ -428,8 +433,22 @@ namespace MainConfigSchema
 		// Debug-log retention deliberately defaults safely instead of making an
 		// otherwise usable configuration fatal. Resolution validates 1-200
 		// before logger startup; the schema still rejects unknown logging keys.
-		const std::vector<ConfigSchema::KeyRule> loggingRules = LoggingRules();
+		const std::vector<ConfigSchema::KeyRule> loggingRules = WithVpKeys("logging", LoggingRules());   // VPV-HOOK
 		return ConfigSchema::ValidateSection(
 			config, "logging", loggingRules, error);
+	}
+
+	// VPV-HOOK: the host's checks come first and alone decide which fault is reported when the host finds one,
+	// whatever VP-V faults the file also has (the VP-V keys are checked in place, in their own section order,
+	// so a VP-V fault can precede a host fault in the file; a host-only pass reports the host's first).
+	inline bool Validate(const ConfigFile& config, std::string& error)
+	{
+		if (ValidateHostChecks(config, error) && SchemaHooks::Validate(config, error))
+			return true;
+		const SchemaHooks::HostOnlyScope hostOnly;
+		std::string hostError;
+		if (!ValidateHostChecks(config, hostError))
+			error = hostError;
+		return false;
 	}
 }
