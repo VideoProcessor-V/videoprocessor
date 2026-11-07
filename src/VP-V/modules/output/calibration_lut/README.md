@@ -132,7 +132,7 @@ Config placement: the master VP-V page (`calibration_lut_stage`, Expert) and Out
 | `calibration_lut_enabled` | `[vprenderer.color.<name>]` (and base) | bool | true/false | false | Output > Calibration | same (libplacebo target LUT) | invalid value: log + false; Ctrl+I `LUT:` line |
 | `calibration_lut_bt709` / `_p3_d65` / `_bt2020` | same | path | file relative to the cfg, or `none` | empty (no LUT) | Output > Calibration | same | `Rejected: <reason>` / `Inactive: <reason>` status (not a downgrade) |
 | `calibration_lut_input_transfer` | same (Rendering alias) | choice | as `hdr_tone_map_target_gamma` | empty | Colour / Output page | accepted alias | migration notice in the log |
-| `hdr_tone_map_target_gamma` | same | choice | bt1886, srgb, 1.8..2.8 | empty (resolves to 2.2) | Colour / Output page | same | none |
+| `hdr_tone_map_target_gamma` | same | choice | bt1886, srgb, 1.8..2.8 | 2.2 in the shipped cfg (empty resolves to 2.2) | Colour / Output page | same | none |
 | `sdr_lut_input_gamma` | same | choice | passthrough, bt1886, srgb, 1.8..2.8 | passthrough | Colour / Output page | same | none |
 | `calibration_lut_input_gamma` | same | retired | any | display | none | accepted, no effect | log line |
 | `calibration_lut_stage` | `[vpv]`, then `[vprenderer]` (global) | choice | libplacebo, vp | libplacebo | master VP-V page, Expert | always libplacebo (Original pathway) | invalid: `pipeline settings` entry; VP stage failure: `calibration LUT (the VP stage failed; ...)` |

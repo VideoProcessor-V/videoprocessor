@@ -36,6 +36,10 @@ the adapter's mutex-guarded or atomic state (never the GPU).
 | P5 | `GetCalibrationOutput` (LVR 32860): try-locks `renderMutex` (one try while patterns show), publishes `OutputFacts` (`PublishOutputFacts`), returns `FillOutputInfo` | **(design)** stays an `IVideoRenderer` method; the facts are produced by a generic `GetOutputFacts()` renderer view (**proposed**) | none | `PatternOutputInfo` (format, range, transfer, refresh, presented generation, read-back, HDR tone curve) | Called from the RPC/worker thread; reads atomics and a cached copy | **Done W1-CAL-B:** `Adapter::CollectOutputInfo(renderMutex, patternsActive, gather, info)` holds the try-lock loop; the renderer only supplies `gather` (runs under `renderMutex`).
 | P6 | Output-format notes: `NoteVideoTarget` (LVR 22956), `NoteToneCurve` (LVR 27790, PQ output only) | **(proposed)** `OnFrameTarget(target, source)` (read-only observer inside the colour stage collection of doc 52 item f) | the frame's target transfer; source and target `pl_color_space`, libplacebo colour-map parameters | the cached tone curve for `PatternOutputInfo` | Render thread | **Open:** `NoteToneCurve` (LVR ~27790) is in zone Z2 (held by another team) and `NoteVideoTarget` (~22956) is a one-line adapter call; both unchanged.
 
+Status after W1-CAL-B (renderer side):
+
+
+
 Fidelity contract of a patch (do not break when moving the call site): the module writes **raw integer codes**
 into the swapchain backbuffer in its format. No libplacebo pass, tone/gamut mapping, LUT, deband, dither or
 sigma-delta touches it; swapchain format, range, DXGI colour space and HDR signalling stay as VP set them for
