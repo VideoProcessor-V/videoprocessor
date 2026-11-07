@@ -61,20 +61,25 @@ namespace VpLaneProducts
 
 	bool LightLevelKernel::EnsureDummy(pl_gpu gpu)
 	{
-		if (m_dummy)
-			return true;
 		const pl_fmt fmt = gpu ? VpvGpu::FloatFormat(gpu, 4) : nullptr;
 		if (!fmt)
 			return false;
 		const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-		pl_tex_params tp{};
-		tp.w = 1;
-		tp.h = 1;
-		tp.format = fmt;
-		tp.sampleable = true;
-		tp.initial_data = zero;
-		m_dummy = pl_tex_create(gpu, &tp);
-		return m_dummy != nullptr;
+		for (size_t i = 0; i < kDummies; ++i)
+		{
+			if (m_dummy[i])
+				continue;
+			pl_tex_params tp{};
+			tp.w = 1;
+			tp.h = 1;
+			tp.format = fmt;
+			tp.sampleable = true;
+			tp.initial_data = zero;
+			m_dummy[i] = pl_tex_create(gpu, &tp);
+			if (!m_dummy[i])
+				return false;
+		}
+		return true;
 	}
 
 	bool LightLevelKernel::EnsureLut(pl_gpu gpu)
@@ -235,8 +240,8 @@ namespace VpLaneProducts
 			{ pl_var_float("ll_gate"), &gate, true }, { pl_var_int("ll_reset"), &reset, true },
 			{ pl_var_float("ll_alpha"), &alpha, true }, { pl_var_int("ll_mode"), &mode, true },
 			{ pl_var_float("ll_frame_v"), &frameVOut, true }, { pl_var_float("ll_frame_conf"), &frameConf, true } };
-		const pl_shader_desc desc[6] = { VpvGpu::Sampled("re_s0", full ? s0 : m_dummy), VpvGpu::Sampled("re_s3", full ? s3 : m_dummy),
-			VpvGpu::Sampled("re_s4", full ? s4 : m_dummy), VpvGpu::Sampled("ll_prev", usePrev ? prev : m_dummy),
+		const pl_shader_desc desc[6] = { VpvGpu::Sampled("re_s0", full ? s0 : m_dummy[0]), VpvGpu::Sampled("re_s3", full ? s3 : m_dummy[1]),
+			VpvGpu::Sampled("re_s4", full ? s4 : m_dummy[2]), VpvGpu::Sampled("ll_prev", usePrev ? prev : m_dummy[3]),
 			VpvGpu::Sampled("light_level_lut", m_lutTex), VpvGpu::Storage("ll_out", c.out[0]) };
 		if (!VpvGpu::Pass(c.dispatch, "VideoProcessor P12 light level blocks", m_header, m_body.c_str(), desc, 6, vars, 10,
 				(g.gw + 7) / 8, (g.gh + 7) / 8, 0, 8, 8, c.timer))
@@ -247,11 +252,13 @@ namespace VpLaneProducts
 
 	void LightLevelKernel::Release(pl_gpu gpu)
 	{
-		if (m_dummy && gpu)
-			pl_tex_destroy(gpu, &m_dummy);
+		for (size_t i = 0; i < kDummies; ++i)
+			if (m_dummy[i] && gpu)
+				pl_tex_destroy(gpu, &m_dummy[i]);
 		if (m_lutTex && gpu)
 			pl_tex_destroy(gpu, &m_lutTex);
-		m_dummy = nullptr;
+		for (size_t i = 0; i < kDummies; ++i)
+			m_dummy[i] = nullptr;
 		m_lutTex = nullptr;
 		m_builtGeneration = 0;
 		m_history.clear();

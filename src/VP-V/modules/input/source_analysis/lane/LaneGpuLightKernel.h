@@ -104,7 +104,10 @@ namespace VpLaneProducts
 		bool FullRecorded(uint64_t seq) const;
 		void Record(uint64_t seq, bool full);
 
-		pl_tex m_dummy = nullptr;    // the S0 / S3 / S4 / previous-frame stand-in (1 x 1, never read in the modes that bind it)
+		// The S0 / S3 / S4 / previous-frame stand-ins (1 x 1, never read in the modes that bind them). FOUR textures, not one:
+		// libplacebo refuses to bind one object to two descriptors of a pass (the frame-level pass binds all four stand-ins).
+		static constexpr size_t kDummies = 4;
+		pl_tex m_dummy[kDummies] = { nullptr, nullptr, nullptr, nullptr };
 		pl_tex m_lutTex = nullptr;
 		LightLevel::Settings m_settings = LightLevel::Read([](const std::string&, std::string&) { return false; });
 		LightLevel::Context m_context;
