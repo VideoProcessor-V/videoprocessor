@@ -50,16 +50,23 @@ namespace CameraModel
 	};
 
 	// The previous pair's residual field (measured minus model per block, source px per pair), for the temporal term.
+	struct DynTextureBuffers
+	{
+		std::vector<float> rx, ry;     // residuals (measured minus model)
+		std::vector<float> vx, vy;     // raw vectors
+		std::vector<float> thr;        // per-block agreement threshold (scratch)
+		std::vector<uint8_t> valid, dis;
+	};
+
 	struct DynTextureState
 	{
 		bool have = false;
 		int gridW = 0, gridH = 0;
 		Rect picture;
 		double seconds = 0;
-		std::vector<float> rx, ry;     // residuals
-		std::vector<float> vx, vy;     // raw vectors
-		std::vector<uint8_t> valid;
-		void Reset() { *this = DynTextureState(); }
+		DynTextureBuffers prev;        // the previous pair (valid when have)
+		DynTextureBuffers cur;         // scratch, swapped with prev after each computed pair (no per-pair allocation once sized)
+		void Reset() { have = false; seconds = 0; }   // keeps the buffers
 	};
 
 	// Evaluates one pair against `model` and the previous residuals in `state`, then stores this pair's residuals in
