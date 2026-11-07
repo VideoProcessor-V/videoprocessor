@@ -134,6 +134,7 @@ Listed with their design note: `vprenderer/LibplaceboVideoRenderer.{h,cpp}` (doc
 | DIV-D-04 | `MotionConfig.h` | `motion_engine` auto/vp/smooth_motion | `smooth_motion` | verify `auto` under the Original pathway (sweep item 12) |
 | DIV-D-05 | `vprenderer/LibplaceboVideoRenderer.cpp` calibration LUT reload (hunk 11159) | policy `CalibrationLutHostPolicy` | Bill's explicit Apply is the other choice (note says "Bill's explicit Apply") | confirm default equals Bill's 1 s probe under the Original pathway |
 | DIV-D-06 | `ConfigurationLiveApply.h` `global_hotkeys` | on = every configured key global (Bill's rule) | `global_hotkeys on` | default is off: sweep item 6 |
+| DIV-D-07 | `vprenderer/LibplaceboVideoRenderer.cpp` `EffectiveSettingsFingerprint` (return line) | `RendererSettingsHooks::Fingerprint` | Bill's string is the same text (his terms, his order) followed by the VP-V terms; the old VP string interleaved them and reordered some of Bill's | order only; every consumer is memory-only and compares strings of one process, so no one-time invalidation (docs/audit/p3-cpu-defaults-regolden.md, Consumers) |
 
 ## Open (not yet a row)
 

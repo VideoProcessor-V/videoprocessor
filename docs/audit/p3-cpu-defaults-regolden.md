@@ -35,3 +35,25 @@ inside Bill's body, so it is not possible with call sites only.
 Row 101 says cpu-defaults.golden.txt is "unchanged"; row 102 says the fingerprint string order may
 change and only the equivalence partition must hold. The two rows conflict for the positional fp lines.
 Row 102 governs the fp order; the multiset proof above shows no value was added, dropped or altered.
+
+## Consumers of the fingerprint string (checked 2026-11-07)
+The string is built only by `EffectiveSettingsFingerprint` (LibplaceboVideoRenderer.cpp) and is never hashed or written out.
+Every consumer compares two strings produced by the same running renderer DLL, so a change of layout between builds cannot
+be seen by any of them.
+
+| Consumer | Use | Memory-only? |
+|---|---|---|
+| `PublishSettingsState` / `GetPublishedSettingsState` (Impl, ~12088, ~12282) | stores the live and restart strings of the active settings | yes, in-process members under a mutex |
+| Renderer restart decision (~28579-28589, ~30058-30068) | new restart string vs the published one; new live string vs the published one | yes |
+| `shaderProcessingChanged` (~12407), transport compare (~11937) | restart string of active vs next settings | yes |
+| `IsSubtitlePresentationOnlyUpdate` (SubtitleProfileUpdatePolicy.h; callers ~12302, ~12484) | equality of two strings, current vs normalised copy | yes, equality only, no parsing |
+| `subtitlePipelinePreparationKey` (~12830) | key of the in-memory `NlsPipelinePreparation` state; the key is rebuilt each run | yes (no file I/O in NlsPipelinePreparation) |
+| Test exports `VideoProcessorLibplaceboSettingsFingerprintForTest`, `@@fingerprint-live/-restart` dump (~4632-4658) | tests only | yes |
+
+Nothing persisted is keyed on it: no shader or pipeline cache, calibration/LUT or state file, profile cache, crash state ring,
+render-ahead or latch state, or written configuration. The host executable never reads the string (only the renderer DLL does).
+Other things named "fingerprint" in the tree (light-level LUT, net fingerprints, MadVR shader state, display gamma hash,
+MotionConfig/ToneMappingTuning terms) are separate values and unaffected; ToneMappingTuning and MotionConfig terms remain inside Bill's part.
+Effect of the new order: none across restarts, so no one-time invalidation.
+Within one session a settings change is detected exactly as before: the equality partition over configurations is unchanged
+(RendererSettingsIdentityTests).
