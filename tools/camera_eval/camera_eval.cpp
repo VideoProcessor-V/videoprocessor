@@ -424,10 +424,8 @@ static int RunMatch(const Args& a)
 					skippedPairs.push_back(t);
 					if (FILE* sk = fopen((a.dumpFlo + "/skipped.txt").c_str(), "wb"))
 					{
-						fprintf(sk, "# pairs whose plan skipped the matcher; pred_on.flo holds the plan seed field (zeros if none)
-");
-						for (int sp : skippedPairs) fprintf(sk, "%d
-", sp);
+						fprintf(sk, "# pairs whose plan skipped the matcher; pred_on.flo holds the plan seed field (zeros if none)\n");
+						for (int sp : skippedPairs) fprintf(sk, "%d\n", sp);
 						fclose(sk);
 					}
 				}
