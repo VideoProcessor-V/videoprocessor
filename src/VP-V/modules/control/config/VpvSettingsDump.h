@@ -1,0 +1,293 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
+#pragma once
+
+// P3-0 identity kit: a name=value dump of EVERY field of the renderer's settings struct (Bill fields
+// first, then VP-V fields, each group in declaration order), used by RendererSettingsIdentityTests to
+// prove that moving the VP-V settings out of LibplaceboVideoRenderer.cpp changes nothing. It names
+// each field through `s.<name>`, so it compiles unchanged before and after the move (RendererSettings
+// inherits the VP-V fields from RendererSettingsExtension). Included by LibplaceboVideoRenderer.cpp
+// right after the RendererSettings definition (it needs that type); not a general header.
+
+#include <ostream>
+#include <string>
+#include <type_traits>
+
+namespace VpvSettingsDump
+{
+	template <class T> inline void Put(std::ostream& o, const char* name, const T& v)
+	{
+		o << name << '=';
+		if constexpr (std::is_enum_v<T>) o << static_cast<long long>(v);
+		else if constexpr (std::is_same_v<T, bool>) o << (v ? 1 : 0);
+		else o << v;
+		o << '\n';
+	}
+}
+
+inline void VpvDumpRendererSettings(const RendererSettings& s, std::ostream& o)
+{
+	using VpvSettingsDump::Put;
+	// Bill fields (declaration order)
+	Put(o, "sdrTargetNits", s.sdrTargetNits);
+	Put(o, "sdrBlackNits", s.sdrBlackNits);
+	Put(o, "profileUpdateMode", s.profileUpdateMode);
+	Put(o, "switchRefreshRate", s.switchRefreshRate);
+	Put(o, "presentEveryVsync", s.presentEveryVsync);
+	Put(o, "presentationQueueDepth", s.presentationQueueDepth);
+	Put(o, "refreshRateSwitchMode", s.refreshRateSwitchMode);
+	Put(o, "outputDisplayAdvanced", s.outputDisplayAdvanced);
+	Put(o, "restorePreviousDisplayMode", s.restorePreviousDisplayMode);
+	o << "allowedDisplayModes="; for (const DisplayOutputMode& m : s.allowedDisplayModes) o << m.width << 'x' << m.height << 'p' << m.refreshRate.numerator << '/' << m.refreshRate.denominator << ','; o << "\n";
+	Put(o, "outputDisplayProfile", s.outputDisplayProfile);
+	Put(o, "outputDisplayMonitor", s.outputDisplayMonitor);
+	Put(o, "scaleOsd", s.scaleOsd);
+	Put(o, "statsOsdSizePercent", s.statsOsdSizePercent);
+	Put(o, "quality", s.quality);
+	Put(o, "toneMapping", s.toneMapping);
+	Put(o, "gamutMapping", s.gamutMapping);
+	Put(o, "peakDetection", s.peakDetection);
+	o << "toneTuning=" << ToneMappingTuning::Fingerprint(s.toneTuning) << "\n";
+	Put(o, "dynamicTarget", s.dynamicTarget);
+	Put(o, "customToneMapping", s.customToneMapping);
+	Put(o, "hasContrastRecovery", s.hasContrastRecovery);
+	Put(o, "contrastRecovery", s.contrastRecovery);
+	Put(o, "upscaler", s.upscaler);
+	Put(o, "chromaUpscaler", s.chromaUpscaler);
+	Put(o, "downscaler", s.downscaler);
+	o << "motion=" << s.motion.Fingerprint() << "\n";
+	Put(o, "debandStrength", s.debandStrength);
+	Put(o, "deband", s.deband);
+	Put(o, "sigmoid", s.sigmoid);
+	Put(o, "dithering", s.dithering);
+	Put(o, "displayBitDepth", s.displayBitDepth);
+	Put(o, "outputPresentation", s.outputPresentation);
+	Put(o, "outputRange", s.outputRange);
+	Put(o, "outputTransportGamma", s.outputTransportGamma);
+	Put(o, "outputGamma", s.outputGamma);
+	Put(o, "calibrationLutInputGamma", s.calibrationLutInputGamma);
+	Put(o, "calibrationLutInputTransfer", s.calibrationLutInputTransfer);
+	Put(o, "hdrToneMapTargetGamma", s.hdrToneMapTargetGamma);
+	Put(o, "sdrLutInputGamma", s.sdrLutInputGamma);
+	Put(o, "configurationIdentity", s.configurationIdentity);
+	Put(o, "configurationPath", s.configurationPath);
+	Put(o, "sdrTargetPrimaries", s.sdrTargetPrimaries);
+	Put(o, "reportBt2020ToDisplay", s.reportBt2020ToDisplay);
+	Put(o, "sdrInputTransfer", s.sdrInputTransfer);
+	Put(o, "sdrAdjustGamma", s.sdrAdjustGamma);
+	Put(o, "outputDiagnostics", s.outputDiagnostics);
+	Put(o, "diagnosticDisableShaderCache", s.diagnosticDisableShaderCache);
+	Put(o, "subtitleBoxTest", s.subtitleBoxTest);
+	Put(o, "subtitleCutPasteTest", s.subtitleCutPasteTest);
+	o << "subtitleBoxPadding=" << s.subtitleBoxPadding.sides << ',' << s.subtitleBoxPadding.top << ',' << s.subtitleBoxPadding.bottom << "\n";
+	o << "subtitlePaddingPolicy=" << s.subtitlePaddingPolicy.glyphRelative << ',' << s.subtitlePaddingPolicy.sidesPercent << ',' << s.subtitlePaddingPolicy.topPercent << ',' << s.subtitlePaddingPolicy.bottomPercent << ',' << s.subtitlePaddingPolicy.minimumHeadroomPixels << "\n";
+	Put(o, "subtitleMoveInset", s.subtitleMoveInset);
+	Put(o, "subtitleTextReductionPercent", s.subtitleTextReductionPercent);
+	Put(o, "subtitleRoundedCorners", s.subtitleRoundedCorners);
+	Put(o, "subtitleFloatBackground", s.subtitleFloatBackground);
+	o << "subtitleBackgroundGuard=" << s.subtitleBackgroundGuard.enabled << "\n";
+	Put(o, "subtitleTemporalFill", s.subtitleTemporalFill);
+	Put(o, "subtitleSpatialFill", s.subtitleSpatialFill);
+	Put(o, "subtitleMode", s.subtitleMode);
+	o << "subtitleProfileSettings="; for (const auto& kv : s.subtitleProfileSettings) o << kv.first << '=' << kv.second << ';'; o << "\n";
+	Put(o, "subtitleProfileSelected", s.subtitleProfileSelected);
+	Put(o, "subtitleHoldMs", s.subtitleHoldMs);
+	Put(o, "subtitleNearBarDistance", s.subtitleNearBarDistance);
+	Put(o, "subtitleDetectionOptimization", s.subtitleDetectionOptimization);
+	Put(o, "subtitleScriptHint", s.subtitleScriptHint);
+	Put(o, "subtitleCutPasteBackground", s.subtitleCutPasteBackground);
+	{ const auto& g = s.subtitleGeneratedGray; o << "subtitleGeneratedGray=" << g.color[0] << ',' << g.color[1] << ',' << g.color[2] << '|' << g.textColor[0] << ',' << g.textColor[1] << ',' << g.textColor[2] << '|' << g.opacity << ',' << g.blurPixels << ',' << g.maxLuminance << '|' << g.borderColor[0] << ',' << g.borderColor[1] << ',' << g.borderColor[2] << '|' << g.borderOpacity << ',' << g.borderWidth << "\n"; }
+	Put(o, "diagnosticDisableCompute", s.diagnosticDisableCompute);
+	Put(o, "diagnosticForce8BitSdrSwapchain", s.diagnosticForce8BitSdrSwapchain);
+	Put(o, "diagnosticAllowLimitedG22", s.diagnosticAllowLimitedG22);
+	Put(o, "diagnosticAllowFullG22", s.diagnosticAllowFullG22);
+	Put(o, "diagnosticVpOwnedDxgiPresenter", s.diagnosticVpOwnedDxgiPresenter);
+	Put(o, "configuredScreenAspect", s.configuredScreenAspect);
+	Put(o, "configuredScreenTarget", s.configuredScreenTarget);
+	Put(o, "verticalAlignment", s.verticalAlignment);
+	Put(o, "screenEdgePadding", s.screenEdgePadding);
+	Put(o, "anamorphicScale", s.anamorphicScale);
+	Put(o, "automaticSourceCrop", s.automaticSourceCrop);
+	Put(o, "automaticSourceCropRequested", s.automaticSourceCropRequested);
+	Put(o, "cropNarrowerContentToFillScreen", s.cropNarrowerContentToFillScreen);
+	Put(o, "cropNarrowerContentAspectLimitConfigured", s.cropNarrowerContentAspectLimitConfigured);
+	Put(o, "cropNarrowerContentAspectLimit", s.cropNarrowerContentAspectLimit);
+	Put(o, "cropWiderContentToFillScreen", s.cropWiderContentToFillScreen);
+	Put(o, "cropWiderContentAspectLimitConfigured", s.cropWiderContentAspectLimitConfigured);
+	Put(o, "cropWiderContentAspectLimit", s.cropWiderContentAspectLimit);
+	Put(o, "fixedCropAspectConfigured", s.fixedCropAspectConfigured);
+	Put(o, "fixedCropAspect", s.fixedCropAspect);
+	Put(o, "scopeSubtitleFit", s.scopeSubtitleFit);
+	Put(o, "hdrPeakAnalysisPictureOnly", s.hdrPeakAnalysisPictureOnly);
+	Put(o, "hdrPeakAnalysisMotionCompensation", s.hdrPeakAnalysisMotionCompensation);
+	Put(o, "hdrPeakAnalysisHeightPercent", s.hdrPeakAnalysisHeightPercent);
+	Put(o, "hdrPeakAnalysisPosition", s.hdrPeakAnalysisPosition);
+	Put(o, "scopeSubtitleHoldMs", s.scopeSubtitleHoldMs);
+	Put(o, "scopeSubtitleEngageDriftMs", s.scopeSubtitleEngageDriftMs);
+	Put(o, "scopeSubtitleReleaseDriftMs", s.scopeSubtitleReleaseDriftMs);
+	Put(o, "scopeSubtitlePaddingPixels", s.scopeSubtitlePaddingPixels);
+	Put(o, "scopeSubtitleTargetBufferPixels", s.scopeSubtitleTargetBufferPixels);
+	Put(o, "refreshRateCommandDelayMs", s.refreshRateCommandDelayMs);
+	o << "refreshRateCommandRules="; for (const RefreshRateCommandRule& r : s.refreshRateCommandRules) o << r.minimumRate << '-' << r.maximumRate << '=' << r.commandLine << ';'; o << "\n";
+	Put(o, "calibrationLutEnabled", s.calibrationLutEnabled);
+	Put(o, "calibrationLutBt709Path", s.calibrationLutBt709Path);
+	Put(o, "calibrationLutP3D65Path", s.calibrationLutP3D65Path);
+	Put(o, "calibrationLutBt2020Path", s.calibrationLutBt2020Path);
+	Put(o, "calibrationLutBt709PathRejected", s.calibrationLutBt709PathRejected);
+	Put(o, "calibrationLutP3D65PathRejected", s.calibrationLutP3D65PathRejected);
+	Put(o, "calibrationLutBt2020PathRejected", s.calibrationLutBt2020PathRejected);
+	Put(o, "calibrationLutConstrainedBaseDirectory", s.calibrationLutConstrainedBaseDirectory);
+	// VP-V fields (declaration order)
+	Put(o, "presentEveryVsyncWithheld", s.presentEveryVsyncWithheld);
+	Put(o, "saturation", s.saturation);
+	Put(o, "dejudderStrength", s.dejudderStrength);
+	Put(o, "dejudderStrengthEven", s.dejudderStrengthEven);
+	Put(o, "dejudderEvenIncludes1001", s.dejudderEvenIncludes1001);
+	Put(o, "dejudderMatchTolerance", s.dejudderMatchTolerance);
+	Put(o, "dejudderFrameTrust", s.dejudderFrameTrust);
+	Put(o, "occlusionMask", s.occlusionMask);
+	Put(o, "repeatRenderReuse", s.repeatRenderReuse);
+	Put(o, "dejudderGlobalPrior", s.dejudderGlobalPrior);
+	Put(o, "dejudderMotionScaleLo", s.dejudderMotionScaleLo);
+	Put(o, "dejudderMotionScaleHi", s.dejudderMotionScaleHi);
+	Put(o, "dejudderVectorSmooth", s.dejudderVectorSmooth);
+	Put(o, "dejudderTrustScale", s.dejudderTrustScale);
+	Put(o, "dejudderOcclusionFill", s.dejudderOcclusionFill);
+	Put(o, "dejudderEstCandidates", s.dejudderEstCandidates);
+	Put(o, "dejudderEstLambda", s.dejudderEstLambda);
+	Put(o, "dejudderEstQpel", s.dejudderEstQpel);
+	Put(o, "dejudderEstStillZero", s.dejudderEstStillZero);
+	Put(o, "dejudderEstGate", s.dejudderEstGate);
+	Put(o, "dejudderEstSplit", s.dejudderEstSplit);
+	Put(o, "dejudderEstSplitSad", s.dejudderEstSplitSad);
+	Put(o, "dejudderMotionRolloff", s.dejudderMotionRolloff);
+	Put(o, "dejudderRollLo", s.dejudderRollLo);
+	Put(o, "dejudderRollHi", s.dejudderRollHi);
+	Put(o, "dejudderRollFloor", s.dejudderRollFloor);
+	Put(o, "dejudderObjectStrength", s.dejudderObjectStrength);
+	Put(o, "dejudderTextureTolerance", s.dejudderTextureTolerance);
+	Put(o, "dejudderGlobalTwo", s.dejudderGlobalTwo);
+	Put(o, "dejudderRegionalHold", s.dejudderRegionalHold);
+	Put(o, "dejudderCutHistogram", s.dejudderCutHistogram);
+	Put(o, "dejudderSearchRange", s.dejudderSearchRange);
+	Put(o, "dejudderConsistencyPx", s.dejudderConsistencyPx);
+	Put(o, "dejudderFadeMatch", s.dejudderFadeMatch);
+	Put(o, "dejudderFadeFloor", s.dejudderFadeFloor);
+	Put(o, "dejudderVerify", s.dejudderVerify);
+	Put(o, "dejudderVerifyShare", s.dejudderVerifyShare);
+	Put(o, "dejudderPixelTrust", s.dejudderPixelTrust);
+	Put(o, "dejudderLandingCheck", s.dejudderLandingCheck);
+	Put(o, "nativeRgbIngest", s.nativeRgbIngest);
+	Put(o, "dvTunnelGpuUnpack", s.dvTunnelGpuUnpack);
+	Put(o, "dvTrims", s.dvTrims);
+	Put(o, "dvToneMapping", s.dvToneMapping);
+	Put(o, "dvCompareCaptureFolder", s.dvCompareCaptureFolder);
+	Put(o, "dvTunnelFixes", s.dvTunnelFixes);
+	Put(o, "dejudderPulldown", s.dejudderPulldown);
+	Put(o, "dejudderPixelTrustLo", s.dejudderPixelTrustLo);
+	Put(o, "dejudderPixelTrustHi", s.dejudderPixelTrustHi);
+	Put(o, "dejudderLowRes", s.dejudderLowRes);
+	Put(o, "dejudderEstimateAhead", s.dejudderEstimateAhead);
+	Put(o, "capturePath", s.capturePath);
+	Put(o, "captureUpload", s.captureUpload);
+	Put(o, "profileValues", s.profileValues);
+	Put(o, "sourceRange", s.sourceRange);
+	Put(o, "sourceResolution", s.sourceResolution);
+	Put(o, "sourceResolutionAutoMinConfidence", s.sourceResolutionAutoMinConfidence);
+	Put(o, "sourceResolutionEvidenceShots", s.sourceResolutionEvidenceShots);
+	Put(o, "sourceResolutionEvidenceSeconds", s.sourceResolutionEvidenceSeconds);
+	Put(o, "debandVp", s.debandVp);
+	Put(o, "lowBitrateHandling", s.lowBitrateHandling);
+	Put(o, "ssimBitrateAware", s.ssimBitrateAware);
+	Put(o, "ssimBitrateFloor", s.ssimBitrateFloor);
+	Put(o, "motionAheadFrames", s.motionAheadFrames);
+	Put(o, "opticalFlow", s.opticalFlow);
+	Put(o, "opticalFlowGlobal", s.opticalFlowGlobal);
+	Put(o, "opticalFlowGlobalFallback", s.opticalFlowGlobalFallback);
+	Put(o, "opticalFlowCostTrust", s.opticalFlowCostTrust);
+	Put(o, "opticalFlowFbCheck", s.opticalFlowFbCheck);
+	Put(o, "interpolation", s.interpolation);
+	Put(o, "interpolationFallback", s.interpolationFallback);
+	Put(o, "interpolationFillGaps", s.interpolationFillGaps);
+	Put(o, "sourceClass", s.sourceClass);
+	Put(o, "intentContent", s.intentContent);
+	Put(o, "intentContentHoldSeconds", s.intentContentHoldSeconds);
+	Put(o, "intentMotion", s.intentMotion);
+	Put(o, "intentMotionPolicy", s.intentMotionPolicy);
+	Put(o, "intentMotionMin", s.intentMotionMin);
+	Put(o, "intentMotionMinShotSeconds", s.intentMotionMinShotSeconds);
+	Put(o, "intentEaseSeconds", s.intentEaseSeconds);
+	Put(o, "ambientAdapt", s.ambientAdapt);
+	Put(o, "ambientAdaptStrength", s.ambientAdaptStrength);
+	Put(o, "ambientScreenReflect", s.ambientScreenReflect);
+	Put(o, "ambientMaxBlackNits", s.ambientMaxBlackNits);
+	Put(o, "ambientTauUpSeconds", s.ambientTauUpSeconds);
+	Put(o, "ambientTauDownSeconds", s.ambientTauDownSeconds);
+	Put(o, "intentBlack", s.intentBlack);
+	Put(o, "intentDisplay", s.intentDisplay);
+	Put(o, "interpolationGrain", s.interpolationGrain);
+	Put(o, "debandVpGrainGuard", s.debandVpGrainGuard);
+	Put(o, "debandVpGrainSplit", s.debandVpGrainSplit);
+	Put(o, "debandVpExclusive", s.debandVpExclusive);
+	Put(o, "detailPulseStabilise", s.detailPulseStabilise);
+	Put(o, "detailPulseCap", s.detailPulseCap);
+	Put(o, "detailPulseFast", s.detailPulseFast);
+	Put(o, "textureRestore", s.textureRestore);
+	Put(o, "textureRestoreCap", s.textureRestoreCap);
+	Put(o, "dejudderSourceWarpCatmull", s.dejudderSourceWarpCatmull);
+	Put(o, "nlsSamplingCatmull", s.nlsSamplingCatmull);
+	Put(o, "temporalDither", s.temporalDither);
+	Put(o, "pipelineOriginalPathway", s.pipelineOriginalPathway);
+	Put(o, "pipelineOrder", s.pipelineOrder);
+	Put(o, "pipelineSlotsOff", s.pipelineSlotsOff);
+	Put(o, "calibrationLutStage", s.calibrationLutStage);
+	Put(o, "hdrInference", s.hdrInference);
+	Put(o, "pipelineEntranceOnce", s.pipelineEntranceOnce);
+	Put(o, "frameAnalysisStore", s.frameAnalysisStore);
+	Put(o, "resyncEvent", s.resyncEvent);
+	Put(o, "entranceGpuDrain", s.entranceGpuDrain);
+	Put(o, "pipelineSettingsProblems", s.pipelineSettingsProblems);
+	Put(o, "rebaseKernelMatch", s.rebaseKernelMatch);
+	Put(o, "sourceResolutionTextGuard", s.sourceResolutionTextGuard);
+	Put(o, "sourceResolutionMixedGuard", s.sourceResolutionMixedGuard);
+	Put(o, "sourceCodingFixes", s.sourceCodingFixes);
+	Put(o, "sourceResolutionLatchFixes", s.sourceResolutionLatchFixes);
+	Put(o, "sourceResolutionCutFixes", s.sourceResolutionCutFixes);
+	Put(o, "activePictureStartupHold", s.activePictureStartupHold);
+	Put(o, "sourceResolutionEngageMaxWait", s.sourceResolutionEngageMaxWait);
+	Put(o, "sourceResolutionCrossfade", s.sourceResolutionCrossfade);
+	Put(o, "sourceResolutionReleaseFade", s.sourceResolutionReleaseFade);
+	Put(o, "pulldownFixes", s.pulldownFixes);
+	Put(o, "timingContinuityFixes", s.timingContinuityFixes);
+	Put(o, "cadenceClassFixes", s.cadenceClassFixes);
+	Put(o, "motionHistoryFixes", s.motionHistoryFixes);
+	Put(o, "vectorDemand", s.vectorDemand);
+	Put(o, "queueTimingFixes", s.queueTimingFixes);
+	Put(o, "generalRateFixes", s.generalRateFixes);
+	Put(o, "efficiencyFixes", s.efficiencyFixes);
+	Put(o, "renderAhead", s.renderAhead);
+	Put(o, "dejudderGate", s.dejudderGate);
+	Put(o, "renderAheadUtilisation", s.renderAheadUtilisation);
+	Put(o, "renderAheadQueueCredit", s.renderAheadQueueCredit);
+	Put(o, "dejudderHoldFeatherPx", s.dejudderHoldFeatherPx);
+	Put(o, "dejudderHoldHysteresis", s.dejudderHoldHysteresis);
+	Put(o, "dejudderBlockTaper", s.dejudderBlockTaper);
+	Put(o, "dejudderTaperSad", s.dejudderTaperSad);
+	Put(o, "ditherGrainToleranceScale", s.ditherGrainToleranceScale);
+	Put(o, "ditherVectorsOwn", s.ditherVectorsOwn);
+	Put(o, "fboFloat32", s.fboFloat32);
+	Put(o, "preserveExtendedRange", s.preserveExtendedRange);
+	Put(o, "extendedRangeMoreCases", s.extendedRangeMoreCases);
+	o << "sdrTone=" << s.sdrTone.knee << ',' << s.sdrTone.headroom << ',' << s.sdrTone.kneeStart << ',' << s.sdrTone.kneeStrength << ',' << s.sdrTone.recovery << "\n";
+	Put(o, "dejudderWarpRendered", s.dejudderWarpRendered);
+	Put(o, "outputSegmentsMerged", s.outputSegmentsMerged);
+	Put(o, "downscaleLight", s.downscaleLight);
+	Put(o, "adaptiveDownscale", s.adaptiveDownscale);
+	Put(o, "adaptiveUpscale", s.adaptiveUpscale);
+	Put(o, "adaptiveUpscaleWBase", s.adaptiveUpscaleWBase);
+	Put(o, "adaptiveUpscaleSuperresScale", s.adaptiveUpscaleSuperresScale);
+	Put(o, "upscaleLight", s.upscaleLight);
+	o << "adaptive=" << s.adaptive.wBase << ',' << s.adaptive.edgeLo << ',' << s.adaptive.edgeHi << ',' << s.adaptive.grainLo << ',' << s.adaptive.grainHi << ',' << s.adaptive.grainFloor << ',' << s.adaptive.grainSmoothMs << ',' << s.adaptive.shadowBias << ',' << s.adaptive.chromaSsim << ',' << s.adaptive.antiring << ',' << s.adaptive.grainMap << ',' << s.adaptive.grainMapSmoothMs << ',' << s.adaptive.faithfulOrtho << ',' << s.adaptive.faithfulAuto << ',' << s.adaptive.cnnResidualStabilise << ',' << s.adaptive.ssimResidualStabilise << ',' << s.adaptive.residualGrainGuard << ',' << s.adaptive.residualCodingNoiseCodes << ',' << s.adaptive.float32Picture << ',' << s.adaptive.motionAdaptive << ',' << s.adaptive.motionSpeedLo << ',' << s.adaptive.motionSpeedHi << ',' << s.adaptive.motionFloor << ',' << s.adaptive.motionSmoothMs << "\n";
+	Put(o, "debandGrain", s.debandGrain);
+	o << "edgeBlanking=" << s.edgeBlanking.left << ',' << s.edgeBlanking.top << ',' << s.edgeBlanking.right << ',' << s.edgeBlanking.bottom << "\n";
+}

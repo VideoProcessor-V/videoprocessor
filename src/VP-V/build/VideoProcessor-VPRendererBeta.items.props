@@ -48,6 +48,7 @@
   <ItemGroup>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\core\hub\ExtensionHub.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\core\hub\HubBootstrap.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\config\VpvSettingsExports.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\signal\ResyncExtension.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\skeleton\SkeletonModule.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraExtension.cpp" />

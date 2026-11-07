@@ -1632,6 +1632,7 @@ namespace
 		std::string calibrationLutConstrainedBaseDirectory;
 	};
 
+#include <VP-V/modules/control/config/VpvSettingsDump.h>   // VPV-HOOK: P3-0 identity kit (tests only)
 	AlphaSourceCrop::VerticalPictureAlignment ResolveVerticalPictureAlignment(
 		const std::string& alignment)
 	{
@@ -6049,6 +6050,26 @@ std::string LibplaceboRendererSettingsFingerprintForTest(const char* configPath)
 	VideoState state;
 	std::string rule;
 	return EffectiveSettingsFingerprint(LoadRendererSettings(config, state, rule));
+}
+
+// P3-0 identity kit (tests only): every settings field (Bill first, then VP-V), then both effective
+// fingerprints; exported by VP-V/modules/control/config/VpvSettingsExports.cpp.
+std::string LibplaceboRendererSettingsDumpForTest(const char* configPath)   // VPV-HOOK
+{
+	ConfigFile config;
+	if (!configPath || !config.Load(configPath, ConfigFile::ReadPolicy::Fresh))
+		return std::string();
+	VideoState state;
+	std::string rule;
+	const RendererSettings settings = LoadRendererSettings(config, state, rule);
+	std::ostringstream out;
+	out.imbue(std::locale::classic());
+	out.precision(17);
+	out << "rule=" << rule << "\n";
+	VpvDumpRendererSettings(settings, out);
+	out << "@@fingerprint-live\n" << EffectiveSettingsFingerprint(settings) << "\n"
+		<< "@@fingerprint-restart\n" << EffectiveSettingsFingerprint(settings, false) << "\n";
+	return out.str();
 }
 
 
