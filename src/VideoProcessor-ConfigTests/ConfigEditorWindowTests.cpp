@@ -40,6 +40,7 @@ int RunHookLayerConfigTests(const std::function<int(const char*, const std::func
 #include <cstring>
 #include <RendererConfigView.h>
 #include <RetiredSettings.h>
+#include <VP-V/tests/SchemaKeyScan.h>
 #include <ToneMappingTuning.h>
 
 #include <QApplication>
@@ -10840,16 +10841,10 @@ static std::set<std::string> RendererValidatedKeys()
         for (std::sregex_iterator it(body.begin(), body.end(), marker), last; it != last; ++it)
             keys.insert((*it)[1].str());
     }
-    // M2 P3-7: the VP-V profile keys moved out of those validators into the schema extension header the
-    // host includes (VpvSchemaKeys.h); its whole text is validator code, so every `key == "x"` counts.
-    {
-        std::ifstream vpvFile(path + "VP-V/modules/control/config/VpvSchemaKeys.h", std::ios::binary);
-        const std::string vpvText((std::istreambuf_iterator<char>(vpvFile)), std::istreambuf_iterator<char>());
-        require(!vpvText.empty(), "VpvSchemaKeys.h was not found from __FILE__");
-        static const std::regex vpvMarker(R"re(\bkey\s*==\s*"([^"]+)")re");
-        for (std::sregex_iterator it(vpvText.begin(), vpvText.end(), vpvMarker), last; it != last; ++it)
-            keys.insert((*it)[1].str());
-    }
+    // M2 P3-7: the VP-V profile keys live in VpvSchemaKeys.h (the schema extension header the host includes).
+    const std::set<std::string> vpvKeys = SchemaKeyScan::VpvProfileKeys(path);
+    require(!vpvKeys.empty(), "VpvSchemaKeys.h was not found from __FILE__");
+    keys.insert(vpvKeys.begin(), vpvKeys.end());
     return keys;
 }
 
