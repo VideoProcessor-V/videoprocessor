@@ -28,8 +28,12 @@ The one law of the P4 source-stats record (doc 62, section 1.2 U6): `SourceStats
   `HalfL1Distance` (the input of U7).
 - Migrated (identity): the lane producer and live fill (`LaneProductsTests`, `AnalysisLaneTests`), the `VpFrameAnalysis` percentile scan,
   the HdrInference veto grid (bin law, active-rows histogram, p99.9, histogram distance), proven in `SharedUnitsW1Tests.cpp`.
-- Not migrated: the `VpFrameAnalysis` Reducer (studio-code domain, flat-decile grain law: a different law, kept), the matcher M3 16-bin
-  GPU histogram, LED look-ahead (output domain), SRM histograms, picture-only peak and the LED 32x18 / HDR grid cells (SA3, needs SK-W).
+- Migrated (GPU text): the matcher's M3 coarse luma histogram (16 bins of 16 codes of the 1/32 luma, L1 of the integer counts over the
+  picture's texels): `CoarseBin` / `CoarseL1` (CPU twin) and `CoarseHistHeader` / `CoarseHistBody` (the GLSL, moved byte-for-byte from
+  `DejudderWarp.cpp` and spliced into its frame-trust kernel; the cut rule that reads it is U7 `CutFadeJudge::TrustCut`). No unit version
+  bump (additive, byte-identical); fragment hashes pinned in `SharedUnitsW1Tests`.
+- Not migrated: the `VpFrameAnalysis` Reducer (studio-code domain, flat-decile grain law: a different law, kept), LED look-ahead (output domain),
+  SRM histograms, picture-only peak and the LED 32x18 / HDR grid cells (SA3, needs SK-W).
 - Deferred key: `source_stats_authority` (original|p4) belongs to SA3 and the SCHEMA lock (RendererProfileConfig.h / MainConfigSchema.h).
 - Plan deviation: `OpticalFlowTrust.h` (a 256-bin histogram of match COSTS, median / MAD) is reclassified out of U6 as a known false
   positive: it is not a luma histogram.

@@ -2,6 +2,8 @@
 #include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
 #include <vprenderer/GrainPreserve.h>
 #include <VP-V/modules/input/source_analysis/picture/shared/PictureRect.h>
+#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
@@ -55,64 +57,10 @@ if (p.x < size.x && p.y < size.y) {
 }
 )GLSL";
 
-		// M4: the fade test on the 1/32 pyramids (one work group): A's and B's
-		// mean and spread; active when the mean moves smoothly (the same
-		// direction as the last pair's, 0.75 to 24 codes) with both spreads
-		// above a code. state_io: gain, offset, active, this pair's change.
-		const char* const FADE_HEADER = R"GLSL(
-shared vec4 fm_[256];
-shared float fn_[256];
-)GLSL";
-
-		const char* const FADE_BODY = R"GLSL(
-uint i = gl_LocalInvocationIndex;
-ivec2 ls = textureSize(l2_a, 0);
-int lc = ls.x * ls.y;
-vec4 acc = vec4(0.0);
-float an = 0.0;
-#ifdef PICTURE
-vec4 pa_r = texelFetch(picture, ivec2(0), 0);
-#endif
-for (int k = int(i); k < lc; k += 256) {
-    ivec2 p = ivec2(k % ls.x, k / ls.x);
-#ifdef PICTURE
-    // Black bars: the picture's mean and spread only.
-    vec2 c_ = (vec2(p) + vec2(0.5)) * 32.0;
-    if (c_.x < pa_r.x || c_.y < pa_r.y || c_.x >= pa_r.z || c_.y >= pa_r.w)
-        continue;
-#endif
-    float a = texelFetch(l2_a, p, 0).r, b = texelFetch(l2_b, p, 0).r;
-    acc += vec4(a, b, a * a, b * b);
-    an += 1.0;
-}
-fm_[i] = acc;
-fn_[i] = an;
-barrier();
-for (uint st = 128u; st > 0u; st >>= 1) {
-    if (i < st) {
-        fm_[i] += fm_[i + st];
-        fn_[i] += fn_[i + st];
-    }
-    barrier();
-}
-if (i == 0u) {
-    float n = max(fn_[0], 1.0);
-    float ma = fm_[0].x / n, mb = fm_[0].y / n;
-    float sa = sqrt(max(fm_[0].z / n - ma * ma, 0.0)), sb = sqrt(max(fm_[0].w / n - mb * mb, 0.0));
-    vec4 prev = imageLoad(state_io, ivec2(0));
-    float d = mb - ma;
-    // A fade scales the picture about its black level: B ~ black + g x (A -
-    // black), with g = B's spread over A's. A pan moves the mean with the
-    // content entering and leaving while the spread stays (g ~ 1), which puts
-    // the implied black level far outside the plausible range.
-    float g = sb / max(sa, 1e-3);
-    float black = abs(1.0 - g) > 0.01 ? (mb - g * ma) / (1.0 - g) : 1e9;
-    bool scaled = abs(1.0 - g) > 0.01 && black > -12.0 && black < 48.0;
-    bool fade_on = scaled && abs(d) > fade_lo && abs(d) < fade_hi && abs(prev.w) > fade_lo && sign(d) == sign(prev.w) && sa > 1.0 && sb > 1.0;
-    float gain = clamp(sa / max(sb, 1e-3), 0.5, 2.0);
-    imageStore(state_io, ivec2(0), vec4(gain, ma - gain * mb, fade_on ? 1.0 : 0.0, d));
-}
-)GLSL";
+		// M4: the fade test on the 1/32 pyramids (one work group): A's and B's mean and spread; active when the mean moves smoothly
+		// (the same direction as the last pair's, in the per-frame step window) with both spreads above a code. The kernel and its law
+		// are the shared unit U7 (VpUnit::CutFadeJudge::FadeKernelHeader / FadeKernelBody, events/shared/CutFadeJudge.h; moved
+		// unchanged; CPU twin FadeFit). state_io: gain, offset, active, this pair's change.
 
 		// Black bars (owner 2026-10-14): the picture rectangle in input pixels. The kernel and its law are the shared unit U8
 		// (VpUnit::PictureRect, input/source_analysis/picture/shared/PictureRect.h; moved unchanged).
@@ -1817,7 +1765,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		// between A and B holds the whole frame without a read-back.
 		// D2/D4: the same reduction also sums the trusted |v| and writes the
 		// strength scale (g), rate-limited against the last one (state_io).
-		const char* const FRAME_TRUST_HEADER = R"GLSL(
+		const char* const FRAME_TRUST_HEADER_A = R"GLSL(
 shared float partial_[256];
 shared float partial_v_[256];
 shared float partial_n_[256];
@@ -1839,14 +1787,24 @@ float picture_texels_(ivec2 ls, float scale)
 #endif
 }
 #ifdef REGIONAL
-shared uint hist_bins_[32];   // M3: A's 16 bins, then B's (integer counts)
-#endif
+)GLSL";
+
+		const char* const FRAME_TRUST_HEADER_B = R"GLSL(#endif
 #if defined(CAMERA_OUT) || defined(ROLLOFF_GLOBAL)
 shared vec3 partial_c_[256];
 #endif
 )GLSL";
 
-		const char* const FRAME_TRUST_BODY = R"GLSL(
+		// The header with the M3 histogram declaration of the shared unit U6 (SourceStats::CoarseHistHeader) spliced in; the
+		// text is the one the matcher always carried.
+		const std::string& FrameTrustHeader()
+		{
+			static const std::string header = std::string(FRAME_TRUST_HEADER_A) + VpUnit::SourceStats::CoarseHistHeader() +
+				FRAME_TRUST_HEADER_B;
+			return header;
+		}
+
+		const char* const FRAME_TRUST_BODY_A = R"GLSL(
 uint i = gl_LocalInvocationIndex;
 ivec2 blocks = textureSize(field, 0);
 int count = blocks.x * blocks.y;
@@ -1895,39 +1853,19 @@ for (uint stride = 128u; stride > 0u; stride >>= 1) {
 }
 #endif
 #ifdef REGIONAL
-// M3: the change of the 1/32 luma histograms (16 bins of 16 codes), L1 of
-// the normalised histograms (0..2): a cut changes it, a hard pan does not.
-float hist_d = 0.0;
-ivec2 ls_ = textureSize(hist_a, 0);
-int lc_ = ls_.x * ls_.y;
-float hist_n = picture_texels_(ls_, 32.0);   // 1/32 texels inside the picture
-// One sweep into shared integer bins (efficiency, owner 2026-10-14: was 16
-// sweeps with a reduction each); the counts and so the result are the same.
-if (i < 32u)
-    hist_bins_[i] = 0u;
-barrier();
-for (int k = int(i); k < lc_; k += 256) {
-    ivec2 p = ivec2(k % ls_.x, k / ls_.x);
-    if (!in_picture_((vec2(p) + vec2(0.5)) * 32.0))
-        continue;
-    atomicAdd(hist_bins_[clamp(int(texelFetch(hist_a, p, 0).r / 16.0), 0, 15)], 1u);
-    atomicAdd(hist_bins_[16 + clamp(int(texelFetch(hist_b, p, 0).r / 16.0), 0, 15)], 1u);
-}
-barrier();
-if (i == 0u) {
-    for (int j = 0; j < 16; j++)
-        hist_d += abs(float(hist_bins_[j]) - float(hist_bins_[16 + j]));
-    hist_d /= max(hist_n, 1.0);
-}
-#endif
+)GLSL";
+
+		const char* const FRAME_TRUST_BODY_B = R"GLSL(#endif
 if (i == 0u) {
     float share = partial_[0] / max(partial_n_[0], 1.0);
 #ifdef REGIONAL
-    bool cut = share < min_share && (hist_d > cut_hist || share < 0.05);
-    float ramp_lo = 0.0;
+)GLSL";
+
+		const char* const FRAME_TRUST_BODY_C = R"GLSL(    float ramp_lo = 0.0;
 #else
-    bool cut = share < min_share;
-    float ramp_lo = min_share;
+)GLSL";
+
+		const char* const FRAME_TRUST_BODY_D = R"GLSL(    float ramp_lo = min_share;
 #endif
     float mean_v = partial_[0] > 0.0 ? partial_v_[0] / partial_[0] : 0.0;
     float scale = 1.0;
@@ -1979,6 +1917,17 @@ if (i == 0u) {
 }
 #endif
 )GLSL";
+
+		// The trust pass: the M3 histogram sweep (U6, SourceStats::CoarseHistBody) and the cut lines (U7, CutFadeJudge::
+		// TrustCutRegionalLine / TrustCutPlainLine) are the shared units' text, spliced between the matcher's own pieces; the
+		// assembled kernel is the text the matcher always carried.
+		const std::string& FrameTrustBody()
+		{
+			static const std::string body = std::string(FRAME_TRUST_BODY_A) + VpUnit::SourceStats::CoarseHistBody() +
+				FRAME_TRUST_BODY_B + VpUnit::CutFadeJudge::TrustCutRegionalLine() + FRAME_TRUST_BODY_C +
+				VpUnit::CutFadeJudge::TrustCutPlainLine() + FRAME_TRUST_BODY_D;
+			return body;
+		}
 
 		// The vector at a source-luma position: bilinear between the four
 		// nearest block centres, trusted blocks only; the position's own
@@ -3817,16 +3766,17 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const bool withPicture = settings.pictureArea && picture;
 		const pl_shader_desc d[4] = { Sampled("l2_a", l2A, false), Sampled("l2_b", l2B, false), stateDesc,
 			Sampled("picture", picture, false) };
-		const std::string header = std::string(withPicture ? "#define PICTURE 1\n" : "") + FADE_HEADER;
+		const std::string header = std::string(withPicture ? "#define PICTURE 1\n" : "") + VpUnit::CutFadeJudge::FadeKernelHeader();
 		// The test, then B's pyramid again with the gain applied (unchanged
 		// when the test fails).
 		// The window per frame: 0.75 to 24 codes per frame at the reference
 		// rate, scaled to this source rate (general, owner 2026-10-14).
 		const float perFrame = settings.sourceHz > 0.0 && settings.referenceRateHz > 0.0 ?
 			static_cast<float>(settings.referenceRateHz / settings.sourceHz) : 1.0f;
-		const float fadeLo = 0.75f * perFrame, fadeHi = 24.0f * perFrame;
+		const VpUnit::CutFadeJudge::FadeParams fadeLaw;   // the unit's window (0.75 to 24 codes per reference frame)
+		const float fadeLo = fadeLaw.minStepCodes * perFrame, fadeHi = fadeLaw.maxStepCodes * perFrame;
 		const pl_shader_var fadeVars[2] = { { pl_var_float("fade_lo"), &fadeLo, true }, { pl_var_float("fade_hi"), &fadeHi, true } };
-		if (!Dispatch("VideoProcessor de-judder: fade test (M4)", header.c_str(), FADE_BODY, d, withPicture ? 4 : 3, fadeVars, 2, 16, 16, 16))
+		if (!Dispatch("VideoProcessor de-judder: fade test (M4)", header.c_str(), VpUnit::CutFadeJudge::FadeKernelBody(), d, withPicture ? 4 : 3, fadeVars, 2, 16, 16, 16))
 			return false;
 		// The uncorrected B stays in the K set for the next pair's A.
 		const int levels = keptLevels;
@@ -4272,9 +4222,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			const std::string trustHeader = std::string(settings.motionRolloff ? "#define ROLLOFF 1\n" : "") +
 				(rolloffGlobal ? "#define ROLLOFF_GLOBAL 1\n" : "") + (cameraOut ? "#define CAMERA_OUT 1\n" : "") +
 				(settings.regionalHold ? "#define REGIONAL 1\n" : "") + (fadeOn ? "#define FADE 1\n" : "") +
-				(trustPicture ? "#define PICTURE 1\n" : "") + FRAME_TRUST_HEADER;
+				(trustPicture ? "#define PICTURE 1\n" : "") + FrameTrustHeader();
 			const pl_shader_desc* trustDesc = trustDescs.data();
-			if (!Dispatch("VideoProcessor de-judder: frame trust", trustHeader.c_str(), FRAME_TRUST_BODY,
+			if (!Dispatch("VideoProcessor de-judder: frame trust", trustHeader.c_str(), FrameTrustBody().c_str(),
 				trustDesc, static_cast<int>(trustDescs.size()), trustVarList.data(), static_cast<int>(trustVarList.size()), 16, 16, 16))
 				return false;
 			if (settings.holdHysteresis > 1)

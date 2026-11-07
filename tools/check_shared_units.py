@@ -74,12 +74,15 @@ REGISTRY = [
      "allow": _c(r"vpu_band_energy")},
     {"id": "U6", "name": "histogram_apl",
      "owning_unit": ["src/VP-V/modules/input/source_analysis"],
-     "signatures": _c(r"histogram", r"\bAPL\b", r"average[_ ]?picture[_ ]?level"),
+     "signatures": _c(r"histogram", r"\bAPL\b", r"average[_ ]?picture[_ ]?level",
+                      r"\bhist_bins_\b", r"\bhist_d\b"),   # the matcher's M3 GLSL histogram (SourceStats::CoarseHist*)
      "allow": _c(r"SourceStats::", r"shared/SourceStats\.h")},
     {"id": "U7", "name": "cut_fade_flash_judge",
      "owning_unit": ["src/VP-V/modules/input/source_analysis"],
      "signatures": _c(r"cut[_ ]?(fade|detect|judge)", r"FrameCutJudge",
-                      r"fade[_ ]?(detect|judge|gain)", r"scene[_ ]?cut"),
+                      r"fade[_ ]?(detect|judge|gain)", r"scene[_ ]?cut",
+                      # the GLSL / CPU laws of the matcher's M4 fade test, M3 trust cut and AdaptiveDownscale's mean-step cut
+                      r"\bfade_on\b", r"f?abs\(1\.0f? - g\)", r"hist_d\s*>\s*cut_hist", r"luma_mean\s*-\s*prev"),
      "allow": _c(r"CutFadeJudge::", r"shared/CutFadeJudge\.h")},
     {"id": "U8", "name": "active_picture_rect",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/picture"],

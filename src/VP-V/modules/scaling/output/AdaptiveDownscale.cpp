@@ -7,6 +7,7 @@
 #include <libplacebo/shaders/custom.h>
 #include <libplacebo/shaders/sampling.h>
 
+#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 #include <VP-V/modules/drive/led_measure/NativeReadback.h>
@@ -111,7 +112,7 @@ if (q.x < size.x && q.y < size.y) {
 shared vec4 ad_total[256];
 )GLSL";
 
-		const char* const FINAL_BODY = R"GLSL(
+		const char* const FINAL_BODY_A = R"GLSL(
 uint li = gl_LocalInvocationIndex;
 ivec2 n = textureSize(partial_in, 0);
 vec4 acc = vec4(0.0);
@@ -131,8 +132,9 @@ if (li == 0u && advance > 0.5) {
     float luma_mean = t.w / max(total_pixels, 1.0);
     float target = mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, energy));
     vec4 prev = imageLoad(state_io, ivec2(0));
-    bool cut = prev.a < 0.5 || abs(luma_mean - prev.b) > 20.0;
-    float scale = cut ? target : mix(prev.r, target, smooth_alpha);
+)GLSL";
+
+		const char* const FINAL_BODY_B = R"GLSL(    float scale = cut ? target : mix(prev.r, target, smooth_alpha);
     // a: 1 initialised, 2 = a cut on this frame (the grain map resets too).
     imageStore(state_io, ivec2(0), vec4(scale, free_mean, luma_mean, cut ? 2.0 : 1.0));
     if (write_stats > 0.5) {
@@ -144,6 +146,14 @@ if (li == 0u && advance > 0.5) {
     }
 }
 )GLSL";
+
+		// The final pass with the cut line of the shared unit U7 (CutFadeJudge::MeanStepCutLine: first frame, or the mean luma
+		// moved more than CutFadeJudge::kMeanStepCutCodes) spliced in; the text is the one the pass always carried.
+		const std::string& FinalBody()
+		{
+			static const std::string body = std::string(FINAL_BODY_A) + VpUnit::CutFadeJudge::MeanStepCutLine() + FINAL_BODY_B;
+			return body;
+		}
 
 		// 8-3: the per-block map, once per source frame. Each block of A takes
 		// the ramp of its temporal error (shadow-weighted like the scalar) and
@@ -947,7 +957,7 @@ float rs_slope(float y)
 				{ pl_var_float("smooth_alpha"), &alpha, true } };
 			static const std::string finalImgHeader = std::string("#define AD_STATS_IMG 1\n") + FINAL_HEADER;
 			if (numDescriptors != 3 || !Compute(p->dispatch, "VideoProcessor adaptive downscale: grain",
-				native ? finalImgHeader.c_str() : FINAL_HEADER, FINAL_BODY, d, numDescriptors, v, 7, 1, 1))
+				native ? finalImgHeader.c_str() : FINAL_HEADER, FinalBody().c_str(), d, numDescriptors, v, 7, 1, 1))
 			{
 				if (statsSlot >= 0)
 					statsSchedule.Release(statsSlot);

@@ -206,7 +206,7 @@ double b = VpUnit::BandFromBase::Weight(1, 2.0, 3) + std::exp(-0.5 * k * k);
         self.assertEqual(new["units"]["U2"]["baseline_duplicates"], 1)
 
     # ---- the real repository ------------------------------------------------------------------
-    FLOOR = {"U2": 11, "U3": 18}   # frozen floor: blocking units may only shrink from here
+    FLOOR = {"U2": 11, "U3": 18, "U6": 0, "U7": 0}   # frozen floor: blocking units may only shrink from here
 
     def _reference_baseline(self):
         for ref in ("integ/batch1",):
