@@ -38,8 +38,8 @@ namespace SourceGeometry
 	// Bump on ANY change of the record layout or of the law behind a field; core/ProductCatalog.h holds the expected number.
 	constexpr uint32_t kUnitVersion = 1;
 
-	using VpSkeleton::ProductId;
-	constexpr ProductId kProduct = VpSkeleton::kSourceGeometry;
+	// The product id is the core catalogue's (VpSkeleton::kSourceGeometry, core/Products.h): a module header declares no descriptor and no
+	// id alias of its own (NoModuleHeaderDefinesItsOwnProductDescriptor); the registry row is core/Products.h AppendSourceGeometryProduct.
 
 	// The record is a fixed little-endian layout of at most this many bytes (the registry declares exactly this figure, system RAM).
 	constexpr size_t kRecordBytesMax = VpSkeleton::kSourceGeometryRecordBytes;

@@ -572,12 +572,17 @@ namespace ProductCatalogTestsNs
 			const double p24 = 1001.0 / 24.0;
 			const double p60 = 1001.0 / 60.0;
 			Assert::AreEqual(unsigned(100), QueueFramesFor(8, 4, 88));
-			// The floor holds on a short queue (7 frames = 0.29 s at 24 p): 2 s of quality pattern = 48 frames, 0.25 s of trail summary = 6.
+			// The floors hold on a short queue. At 24 p (41.708 ms) the floors are 2 s = ceil(47.95) = 48 frames of quality pattern and
+			// 0.25 s = ceil(5.994) = 6 frames of trail summary. A queue of 3 frames (0.125 s) is under both floors; a queue of 7 frames
+			// (7 x 41.708 = 291.96 ms) is far under the 2 s floor but ABOVE the 0.25 s floor, so the trail summary follows it: 7 frames.
 			const unsigned shortQ = QueueFramesFor(2, 3, 2);
+			const unsigned tinyQ = QueueFramesFor(0, 1, 2);
+			Assert::AreEqual(unsigned(7), shortQ);
 			Assert::AreEqual(48, int(QualityPatternHistoryFrames(p24, shortQ)));
 			Assert::AreEqual(int(QualityPatternHistoryFrames(p24)), int(QualityPatternHistoryFrames(p24, shortQ)));
-			Assert::AreEqual(6, int(TdTrailSummaryHistoryFrames(p24, shortQ)));
-			Assert::AreEqual(int(TdTrailSummaryHistoryFrames(p24)), int(TdTrailSummaryHistoryFrames(p24, shortQ)));
+			Assert::AreEqual(6, int(TdTrailSummaryHistoryFrames(p24, tinyQ)));
+			Assert::AreEqual(int(TdTrailSummaryHistoryFrames(p24)), int(TdTrailSummaryHistoryFrames(p24, tinyQ)));
+			Assert::AreEqual(7, int(TdTrailSummaryHistoryFrames(p24, shortQ)), L"7 queue frames exceed the 0.25 s floor (6 frames): the queue sets the depth");
 			// A long queue gives a longer history: 100 frames = 4.17 s at 24 p, above both floors. The same 100 frames are only 1.67 s at 60 p,
 			// below the 2 s floor, so the quality pattern keeps its floor there (120 frames) while the trail summary follows the queue.
 			Assert::AreEqual(100, int(QualityPatternHistoryFrames(p24, 100)));

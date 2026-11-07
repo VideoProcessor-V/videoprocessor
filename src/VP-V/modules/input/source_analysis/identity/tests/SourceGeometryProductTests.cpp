@@ -57,7 +57,6 @@ namespace Tests
 				Assert::AreEqual(29, int(kSourceGeometry), L"the new id follows it");
 				Assert::AreEqual(30, int(kSkeletonProductEnd));
 				Assert::AreEqual(size_t(kSkeletonProductEnd), reg.Size());
-				Assert::AreEqual(int(kProduct), int(kSourceGeometry));
 				Assert::AreEqual(std::string("source_geometry"), std::string(reg.Get(kSourceGeometry).token));
 			}
 
