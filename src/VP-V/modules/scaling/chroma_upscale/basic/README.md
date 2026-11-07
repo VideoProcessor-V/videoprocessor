@@ -9,7 +9,7 @@ Unit: scaling/chroma_upscale/basic (shared unit U20 `BasicChroma`, `kUnitVersion
 
 | Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|
-| `chroma_upscale_basic` | deferred (profile; added when the SCHEMA lock is free) | enum | off, lanczos | off | deferred: VP-V > Scaling > Chroma upscale | libplacebo's chroma upscaler (either/or: Original = libplacebo chroma) | "Chroma upscale: libplacebo (<reason>)" | same on all (one pass, ~36 texel fetches per output pixel and plane pair) |
+| `chroma_upscale_basic` | deferred (profile; added when the SCHEMA lock is free) | enum | off, lanczos | off | deferred: VP-V > Scaling > Chroma upscale | libplacebo's chroma upscaler (either/or: Original = libplacebo chroma) | Declared (deferred key): "Chroma upscale: libplacebo (<reason>)" | same on all (one pass, ~36 texel fetches per output pixel and plane pair) |
 
 ## Environment and diagnostics
 

@@ -9,7 +9,7 @@ Unit: repair/temporal_detail (products); shared accessor: `repair/temporal_detai
 
 | Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|
-| `temporal_detail_engine` | deferred (profile; SCHEMA lock held by W1-P3, reset 2 adds it) | enum | off, auto | off (`TdProducts::kEngineRequestedToday = false`) | deferred: VP-V > Repair > Temporal detail | n/a (VP-only) | `product.adaptive_downscale`, `product.dither_need`, `product.sigma_delta`, `product.chroma_cfl`, `product.debander`, `product.td_engine`; status lines "<consumer>: classical form (temporal-detail products: <reason>)" | budget-governed: the VRAM / ms governor decides which stage of each governed buffer fits (see Products) |
+| `temporal_detail_engine` | deferred (profile; SCHEMA lock held by W1-P3, reset 2 adds it) | enum | off, auto | off (`TdProducts::kEngineRequestedToday = false`) | deferred: VP-V > Repair > Temporal detail | n/a (VP-only) | Declared (deferred key; reset 2 adds it): `product.adaptive_downscale`, `product.dither_need`, `product.sigma_delta`, `product.chroma_cfl`, `product.debander`, `product.td_engine`; status lines "<consumer>: classical form (temporal-detail products: <reason>)" | budget-governed: the VRAM / ms governor decides which stage of each governed buffer fits (see Products) |
 
 ## Environment and diagnostics
 

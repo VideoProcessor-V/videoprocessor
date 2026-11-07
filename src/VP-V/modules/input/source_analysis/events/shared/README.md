@@ -12,7 +12,7 @@ Unit: input/source_analysis (events/shared)
 ## Settings
 | Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|
-| `source_stats_authority` | profile (deferred) | enum | original, p4 | original | not in Config (deferred to SA3; needs the SCHEMA lock, RendererProfileConfig.h / MainConfigSchema.h) | Original = Bill's SceneDetector and analysis | DEFERRED, not implemented in this package | same on all |
+| (none) | | | | | | | | |
 
 ## Environment and diagnostics
 | Name | Purpose | Default | Scope (test/debug/runtime) |

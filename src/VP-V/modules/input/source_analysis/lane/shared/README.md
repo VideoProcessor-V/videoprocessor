@@ -39,7 +39,7 @@ Unit: input/source_analysis (lane/shared)
 ## Settings
 | Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|
-| `source_stats_authority` | profile (deferred) | enum | original, p4 | original | not in Config (deferred to SA3; needs the SCHEMA lock, RendererProfileConfig.h / MainConfigSchema.h) | Original = Bill's SceneDetector and analysis | DEFERRED, not implemented in this package | same on all |
+| `source_stats_authority` | profile (deferred) | enum | original, p4 | original | not in Config (deferred to SA3; needs the SCHEMA lock, RendererProfileConfig.h / MainConfigSchema.h) | Original = Bill's SceneDetector and analysis | Declared: deferred to SA3, not implemented in this package (the key is documented once, here; events/shared shares it) | same on all |
 
 ## Environment and diagnostics
 | Name | Purpose | Default | Scope (test/debug/runtime) |

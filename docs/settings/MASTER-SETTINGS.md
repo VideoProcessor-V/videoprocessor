@@ -11,8 +11,8 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 
 | Count | Value |
 |---|---|
-| Modules | 37 |
-| Documented rows | 2 |
+| Modules | 43 |
+| Documented rows | 5 |
 | VP-V keys in code (outside Bill's schema lists) | 364 |
 | of which documented | 2 |
 | of which undocumented (appendix A) | 362 |
@@ -27,7 +27,10 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Input | `input.queue_timing` | built | [README](../../src/VP-V/modules/input/queue_timing/README.md) | 0 | 15 | 0/15 |
 | Input | `input.source_analysis` | partial | [README](../../src/VP-V/modules/input/source_analysis/README.md) | 0 | 19 | 0/19 |
 | Input | `input.light_level` | draft | [README](../../src/VP-V/modules/input/source_analysis/light_level/README.md) | 0 | 33 | 0/33 |
-| Input | `input.source_analysis.lane.shared.half_luma` | draft | [README](../../src/VP-V/modules/input/source_analysis/lane/shared/README.md) | 0 | 0 | 0/0 |
+| Input | `input.source_analysis.lane.shared.half_luma` | draft | [README](../../src/VP-V/modules/input/source_analysis/lane/shared/README.md) | 1 | 0 | 0/0 |
+| Input | `input.source_analysis.picture.shared.picture_rect` | draft | [README](../../src/VP-V/modules/input/source_analysis/picture/shared/README.md) | 0 | 0 | 0/0 |
+| Input | `input.source_analysis.events.shared.cut_fade_judge` | draft | [README](../../src/VP-V/modules/input/source_analysis/events/shared/README.md) | 0 | 0 | 0/0 |
+| Input | `input.source_analysis.identity.shared.source_quality` | draft | [README](../../src/VP-V/modules/input/source_analysis/identity/shared/README.md) | 0 | 0 | 0/0 |
 | Motion | `motion.estimation` | built | [README](../../src/VP-V/modules/motion/estimation/README.md) | 0 | 32 | 0/32 |
 | Motion | `motion.vector_delivery` | partial | [README](../../src/VP-V/modules/motion/vector_delivery/README.md) | 0 | 9 | 0/9 |
 | Motion | `motion.consumers` | built | [README](../../src/VP-V/modules/motion/consumers/README.md) | 0 | 35 | 0/35 |
@@ -37,10 +40,13 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Repair | `repair.grain_split.shared.band_from_base` | draft | [README](../../src/VP-V/modules/repair/grain_split/shared/README.md) | 0 | 0 | 0/0 |
 | Repair | `repair.temporal_detail` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/README.md) | 0 | 5 | 0/5 |
 | Repair | `repair.texture_restore` | built | [README](../../src/VP-V/modules/repair/texture_restore/README.md) | 0 | 5 | 0/5 |
+| Repair | `repair.temporal_detail.products` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/products/README.md) | 1 | 0 | 0/0 |
+| Repair | `repair.temporal_detail.shared` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/shared/README.md) | 0 | 0 | 0/0 |
 | Scaling | `scaling.rebase` | built | [README](../../src/VP-V/modules/scaling/rebase/README.md) | 0 | 4 | 0/4 |
 | Scaling | `scaling.route_4k` | placeholder | [README](../../src/VP-V/modules/scaling/route_4k/README.md) | 0 | 1 | 0/1 |
 | Scaling | `scaling.refine` | placeholder | [README](../../src/VP-V/modules/scaling/refine/README.md) | 0 | 1 | 0/1 |
 | Scaling | `scaling.chroma_upscale` | placeholder | [README](../../src/VP-V/modules/scaling/chroma_upscale/README.md) | 0 | 2 | 0/2 |
+| Scaling | `scaling.chroma_upscale.basic` | draft | [README](../../src/VP-V/modules/scaling/chroma_upscale/basic/README.md) | 1 | 0 | 0/0 |
 | Scaling | `scaling.geometry` | built | [README](../../src/VP-V/modules/scaling/geometry/README.md) | 0 | 8 | 0/8 |
 | Scaling | `scaling.output` | partial | [README](../../src/VP-V/modules/scaling/output/README.md) | 0 | 30 | 0/30 |
 | Colour | `colour.tone_gamut` | built | [README](../../src/VP-V/modules/colour/tone_gamut/README.md) | 0 | 5 | 0/5 |
@@ -62,11 +68,11 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 
 ## Input
 
-Modules: `input.capture`, `input.signal`, `input.queue_timing`, `input.source_analysis`, `input.light_level`, `input.source_analysis.lane.shared.half_luma`.
+Modules: `input.capture`, `input.signal`, `input.queue_timing`, `input.source_analysis`, `input.light_level`, `input.source_analysis.lane.shared.half_luma`, `input.source_analysis.picture.shared.picture_rect`, `input.source_analysis.events.shared.cut_fade_judge`, `input.source_analysis.identity.shared.source_quality`.
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
-| (none documented yet) | | | | | | | | | | |
+| `source_stats_authority` | `input.source_analysis.lane.shared.half_luma` | profile (deferred) | enum | original, p4 | original |  | not in Config (deferred to SA3; needs the SCHEMA lock, RendererProfileConfig.h / MainConfigSchema.h) | Original = Bill's SceneDetector and analysis | Declared: deferred to SA3, not implemented in this package (the key is documented once, here; events/shared shares it) | same on all |
 
 ## Motion
 
@@ -78,19 +84,19 @@ Modules: `motion.estimation`, `motion.vector_delivery`, `motion.consumers`.
 
 ## Repair
 
-Modules: `repair.encoding`, `repair.deband`, `repair.grain_split`, `repair.grain_split.shared.band_from_base`, `repair.temporal_detail`, `repair.texture_restore`.
+Modules: `repair.encoding`, `repair.deband`, `repair.grain_split`, `repair.grain_split.shared.band_from_base`, `repair.temporal_detail`, `repair.texture_restore`, `repair.temporal_detail.products`, `repair.temporal_detail.shared`.
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
-| (none documented yet) | | | | | | | | | | |
+| `temporal_detail_engine` | `repair.temporal_detail.products` | deferred (profile; SCHEMA lock held by W1-P3, reset 2 adds it) | enum | off, auto | off (`TdProducts::kEngineRequestedToday = false`) |  | deferred: VP-V > Repair > Temporal detail | n/a (VP-only) | Declared (deferred key; reset 2 adds it): `product.adaptive_downscale`, `product.dither_need`, `product.sigma_delta`, `product.chroma_cfl`, `product.debander`, `product.td_engine`; status lines "<consumer>: classical form (temporal-detail products: <reason>)" | budget-governed: the VRAM / ms governor decides which stage of each governed buffer fits (see Products) |
 
 ## Scaling
 
-Modules: `scaling.rebase`, `scaling.route_4k`, `scaling.refine`, `scaling.chroma_upscale`, `scaling.geometry`, `scaling.output`.
+Modules: `scaling.rebase`, `scaling.route_4k`, `scaling.refine`, `scaling.chroma_upscale`, `scaling.chroma_upscale.basic`, `scaling.geometry`, `scaling.output`.
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
-| (none documented yet) | | | | | | | | | | |
+| `chroma_upscale_basic` | `scaling.chroma_upscale.basic` | deferred (profile; added when the SCHEMA lock is free) | enum | off, lanczos | off |  | deferred: VP-V > Scaling > Chroma upscale | libplacebo's chroma upscaler (either/or: Original = libplacebo chroma) | Declared (deferred key): "Chroma upscale: libplacebo (<reason>)" | same on all (one pass, ~36 texel fetches per output pixel and plane pair) |
 
 ## Colour
 
