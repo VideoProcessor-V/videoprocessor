@@ -202,19 +202,19 @@
     },
     {
      "file": "src/VP-V/modules/input/signal/HdrInference.cpp",
-     "pattern": "HISTOGRAM_BINS> bins|stats\\.histogram|Histogram10 active|m_lastHistogram|limits\\.histogram|m_previous\\.histogram",
+     "pattern": "HISTOGRAM_BINS> bins\\{\\};|Histogram10 active;|m_lastHistogram = |SourceStats::HalfL1Distance<float>|stats\\.histogram\\.size\\(\\), 1\\.0f, 1\\.0f\\)|SourceStats::Fractions<float>|limits\\.histogram\\w* = HISTOGRAM_DISTANCE",
      "kind": "false_positive",
-     "reason": "veto signature storage and arguments of the unit calls (SourceStats::HistBin10 / Histogram10 / HalfL1Distance, CutFadeJudge::GridHistCut); the laws live in the unit"
+     "reason": "veto signature storage and arguments of the unit calls (SourceStats::Fractions / HalfL1Distance / Histogram10, CutFadeJudge::GridHistCut thresholds); anchored to those exact forms so a new private law in this file is still caught"
     },
     {
      "file": "src/VP-V/modules/input/signal/HdrInference.h",
-     "pattern": "HISTOGRAM_BINS|HISTOGRAM_DISTANCE|LastHistogramDistance|m_lastHistogram|histogram\\{\\}",
+     "pattern": "static constexpr int HISTOGRAM_BINS = 16;|std::array<float, HISTOGRAM_BINS> histogram\\{\\};|static constexpr float HISTOGRAM_DISTANCE(_ALONE)? = VpUnit::CutFadeJudge::|float LastHistogramDistance\\(\\) const|float m_lastHistogram = 0\\.0f;",
      "kind": "false_positive",
      "reason": "veto signature declarations and the detector tuning thresholds handed to CutFadeJudge::GridHistCut; no computation"
     },
     {
      "file": "src/VP-V/modules/input/signal/HdrVetoCaptureGate.h",
-     "pattern": "LastHistogramDistance",
+     "pattern": "float LastHistogramDistance\\(\\) const \\{ return m_cutDetector\\.LastHistogramDistance\\(\\); \\}",
      "kind": "false_positive",
      "reason": "diagnostic accessor forwarding the detector value"
     },
@@ -226,7 +226,7 @@
     },
     {
      "file": "src/VP-V/modules/motion/estimation/OpticalFlowTrust.h",
-     "pattern": "histogram\\[|size_t histogram",
+     "pattern": "size_t histogram\\[256\\] = \\{\\};|\\+\\+histogram\\[costs\\[i\\]\\]|seen \\+= histogram\\[m\\]|\\+= histogram\\[v\\]",
      "kind": "false_positive",
      "reason": "histogram of optical-flow MATCH COSTS (median and MAD of the cost), not a luma histogram"
     },
@@ -251,85 +251,85 @@
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/input/signal/HdrInference.cpp",
-     "pattern": "HdrVetoCutDetector::Observe",
+     "pattern": "^bool HdrVetoCutDetector::Observe\\(const HdrVetoFrameStats& stats\\)",
      "kind": "false_positive",
      "reason": "the veto detector's state machine (previous frame, entering/leaving black); its cut rule is CutFadeJudge::GridHistCut"
     },
     {
      "file": "src/VP-V/modules/input/signal/HdrInference.h",
-     "pattern": "HdrVetoCutDetector",
+     "pattern": "^class HdrVetoCutDetector\\b",
      "kind": "false_positive",
      "reason": "the veto detector's state machine (previous frame, entering/leaving black); its cut rule is CutFadeJudge::GridHistCut"
     },
     {
      "file": "src/VP-V/modules/input/signal/HdrVetoCaptureGate.h",
-     "pattern": "m_cutDetector|HdrVetoCutDetector",
+     "pattern": "m_cutDetector\\.(Reset|Observe|LastGridDifference|LastHistogramDistance)\\(|^\\s*HdrVetoCutDetector m_cutDetector;",
      "kind": "false_positive",
      "reason": "the veto detector's state machine (previous frame, entering/leaving black); its cut rule is CutFadeJudge::GridHistCut (owner member / forwarding)"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/global_model/CameraMotion.h",
-     "pattern": "fadeGain",
+     "pattern": "double fadeGain = 1, fadeOffset = 0;|\\.fadeGain = [\\w.]+;|\\.fadeGain = r\\.Get<double>\\(\\)|fadeGain, (in\\.)?fadeOffset|double fadeGain, double fadeOffset|Put\\(m\\.fadeGain\\)",
      "kind": "false_positive",
      "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/global_model/GlobalModelFit.cpp",
-     "pattern": "fadeGain",
+     "pattern": "double fadeGain = 1, fadeOffset = 0;|\\.fadeGain = [\\w.]+;|\\.fadeGain = r\\.Get<double>\\(\\)|fadeGain, (in\\.)?fadeOffset|double fadeGain, double fadeOffset|Put\\(m\\.fadeGain\\)",
      "kind": "false_positive",
      "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/global_model/GlobalModelFit.h",
-     "pattern": "fadeGain",
+     "pattern": "double fadeGain = 1, fadeOffset = 0;|\\.fadeGain = [\\w.]+;|\\.fadeGain = r\\.Get<double>\\(\\)|fadeGain, (in\\.)?fadeOffset|double fadeGain, double fadeOffset|Put\\(m\\.fadeGain\\)",
      "kind": "false_positive",
      "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/global_model/GlobalModelMeasurement.cpp",
-     "pattern": "fadeGain",
+     "pattern": "double fadeGain = 1, fadeOffset = 0;|\\.fadeGain = [\\w.]+;|\\.fadeGain = r\\.Get<double>\\(\\)|fadeGain, (in\\.)?fadeOffset|double fadeGain, double fadeOffset|Put\\(m\\.fadeGain\\)",
      "kind": "false_positive",
      "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/global_model/GlobalModelMeasurement.h",
-     "pattern": "fadeGain",
+     "pattern": "double fadeGain = 1, fadeOffset = 0;|\\.fadeGain = [\\w.]+;|\\.fadeGain = r\\.Get<double>\\(\\)|fadeGain, (in\\.)?fadeOffset|double fadeGain, double fadeOffset|Put\\(m\\.fadeGain\\)",
      "kind": "false_positive",
      "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/global_model/GlobalModelSearchHints.cpp",
-     "pattern": "fadeGain",
+     "pattern": "double fadeGain = 1, fadeOffset = 0;|\\.fadeGain = [\\w.]+;|\\.fadeGain = r\\.Get<double>\\(\\)|fadeGain, (in\\.)?fadeOffset|double fadeGain, double fadeOffset|Put\\(m\\.fadeGain\\)",
      "kind": "false_positive",
      "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/global_model/GlobalModelSearchHints.h",
-     "pattern": "fadeGain",
+     "pattern": "double fadeGain = 1, fadeOffset = 0;|\\.fadeGain = [\\w.]+;|\\.fadeGain = r\\.Get<double>\\(\\)|fadeGain, (in\\.)?fadeOffset|double fadeGain, double fadeOffset|Put\\(m\\.fadeGain\\)",
      "kind": "false_positive",
      "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/global_model/link/CameraRecordPool.h",
-     "pattern": "fadeGain",
+     "pattern": "double fadeGain = 1, fadeOffset = 0;|\\.fadeGain = [\\w.]+;|\\.fadeGain = r\\.Get<double>\\(\\)|fadeGain, (in\\.)?fadeOffset|double fadeGain, double fadeOffset|Put\\(m\\.fadeGain\\)",
      "kind": "false_positive",
      "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/global_model/link/GuidanceScheduler.cpp",
-     "pattern": "fadeGain",
+     "pattern": "double fadeGain = 1, fadeOffset = 0;|\\.fadeGain = [\\w.]+;|\\.fadeGain = r\\.Get<double>\\(\\)|fadeGain, (in\\.)?fadeOffset|double fadeGain, double fadeOffset|Put\\(m\\.fadeGain\\)",
      "kind": "false_positive",
      "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/global_model/link/GuidanceScheduler.h",
-     "pattern": "fadeGain",
+     "pattern": "double fadeGain = 1, fadeOffset = 0;|\\.fadeGain = [\\w.]+;|\\.fadeGain = r\\.Get<double>\\(\\)|fadeGain, (in\\.)?fadeOffset|double fadeGain, double fadeOffset|Put\\(m\\.fadeGain\\)",
      "kind": "false_positive",
      "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
     },
     {
      "file": "src/VP-V/modules/motion/estimation/global_model/link/PairAssembly.h",
-     "pattern": "fadeGain",
+     "pattern": "double fadeGain = 1, fadeOffset = 0;|\\.fadeGain = [\\w.]+;|\\.fadeGain = r\\.Get<double>\\(\\)|fadeGain, (in\\.)?fadeOffset|double fadeGain, double fadeOffset|Put\\(m\\.fadeGain\\)",
      "kind": "false_positive",
      "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
     },

@@ -15,6 +15,7 @@
 // Pure policy (no renderer, capture or UI state) so the CPU tests own it.
 
 #include <AnalysisLumaSource.h>
+#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <ColorSpace.h>
 #include <EOTF.h>
 
@@ -256,9 +257,9 @@ public:
 	bool Observe(const HdrVetoFrameStats& stats);
 	void Reset() { m_havePrevious = false; }
 
-	static constexpr float GRID_DIFFERENCE = 24.0f;
-	static constexpr float HISTOGRAM_DISTANCE = 0.15f;
-	static constexpr float HISTOGRAM_DISTANCE_ALONE = 0.35f;
+	static constexpr float GRID_DIFFERENCE = VpUnit::CutFadeJudge::kGridDifference;
+	static constexpr float HISTOGRAM_DISTANCE = VpUnit::CutFadeJudge::kHistogramDistance;
+	static constexpr float HISTOGRAM_DISTANCE_ALONE = VpUnit::CutFadeJudge::kHistogramDistanceAlone;
 
 	float LastGridDifference() const { return m_lastGrid; }
 	float LastHistogramDistance() const { return m_lastHistogram; }

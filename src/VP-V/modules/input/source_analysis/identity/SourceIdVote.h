@@ -95,8 +95,8 @@ namespace SourceIdentity
 	struct VoteSettings
 	{
 		int kernelMinVotes = 3;                 // kernel confidence ramps up to this many fitted votes
-		std::vector<double> qualityTierEdges = { 0.25, 0.5, 0.75 }; // tier = number of edges <= quality
-		double bitrateQualityConfidence = 0.6;  // a bitrate reading is indirect evidence of the tier
+		std::vector<double> qualityTierEdges = VpUnit::SourceQuality::DefaultTierEdges(); // tier = number of edges <= quality (U12)
+		double bitrateQualityConfidence = VpUnit::SourceQuality::kClassicalConfidence;  // a bitrate reading is indirect evidence of the tier (U12)
 		double netAxisTrust = 1.0;              // ID net: axes / factor
 		double netKernelMinConfidence = 0.9;    // ID net kernel head: below this the net abstains
 		double netCodecTrust = 0.25;            // ID net codec head: confidence capped here

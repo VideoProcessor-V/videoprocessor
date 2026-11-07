@@ -31,3 +31,28 @@ The one law of the P4 source-stats record (doc 62, section 1.2 U6): `SourceStats
 - Not migrated: the `VpFrameAnalysis` Reducer (studio-code domain, flat-decile grain law: a different law, kept), the matcher M3 16-bin
   GPU histogram, LED look-ahead (output domain), SRM histograms, picture-only peak and the LED 32x18 / HDR grid cells (SA3, needs SK-W).
 - Deferred key: `source_stats_authority` (original|p4) belongs to SA3 and the SCHEMA lock (RendererProfileConfig.h / MainConfigSchema.h).
+- Plan deviation: `OpticalFlowTrust.h` (a 256-bin histogram of match COSTS, median / MAD) is reclassified out of U6 as a known false
+  positive: it is not a luma histogram.
+
+Unit: input/source_analysis (lane/shared)
+
+## Settings
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `source_stats_authority` | profile (deferred) | enum | original, p4 | original | not in Config (deferred to SA3; needs the SCHEMA lock, RendererProfileConfig.h / MainConfigSchema.h) | Original = Bill's SceneDetector and analysis | DEFERRED, not implemented in this package | same on all |
+
+## Environment and diagnostics
+| Name | Purpose | Default | Scope (test/debug/runtime) |
+|---|---|---|---|
+| (none) | | | |
+
+## Products
+P1 half + quarter luma (U3, version 1) and P4 source stats (U6, version 1 = `kExpectedStatsUnit`). A reader built against another
+version engages the consumer's reduced path (FallbackCatalog `product.*`); the veto and the lane classifier have no reduced path of their own.
+
+## Status and fallbacks
+No downgrade of its own; the P4 walk either/or (`WalkSource`, Original = Bill's walk) shows `FallbackCatalog::SourceStatsWalk` when Lane is requested without P4.
+
+## Tests
+`LaneProductsTests`, `AnalysisLaneTests`, `HalfLumaUnitTests`, `SharedUnitsW1Tests` (CPU only), e.g.
+`vstest.console.exe x64\Release\VideoProcessor-Test.dll /TestCaseFilter:FullyQualifiedName~SharedUnitsW1Tests`.

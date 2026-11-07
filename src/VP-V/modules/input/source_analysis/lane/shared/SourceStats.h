@@ -273,6 +273,14 @@ inline bool ComputeRecord(const uint16_t* half, uint32_t hw, uint32_t hh, uint8_
     return true;
 }
 
+// counts[i] / total as `Acc` (the veto signature's normalised histogram); the division is in Acc, as the veto always did.
+template <class Acc, class C, class T>
+inline void Fractions(const C* counts, size_t n, T total, Acc* out)
+{
+    for (size_t i = 0; i < n; ++i)
+        out[i] = static_cast<Acc>(counts[i]) / total;
+}
+
 // A 1024-bin histogram of 10-bit codes (the veto grid's active-rows histogram, per-frame percentile reads).
 struct Histogram10 {
     uint32_t bins[kHistBins] = {};

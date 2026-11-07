@@ -371,8 +371,7 @@ HdrVetoFrameStats MeasureHdrVetoGrid(const uint16_t* grid, int columns, int rows
 	}
 	for (size_t i = 0; i < sums.size(); ++i)
 		stats.grid[i] = counts[i] ? static_cast<float>(sums[i] / counts[i]) : 0.0f;
-	for (size_t i = 0; i < bins.size(); ++i)
-		stats.histogram[i] = static_cast<float>(bins[i]) / stats.samples;
+	VpUnit::SourceStats::Fractions<float>(bins.data(), bins.size(), stats.samples, stats.histogram.data());
 
 	if (firstActive < 0 ||
 		lastActive - firstActive + 1 < thresholds.minimumActiveRows * rows)

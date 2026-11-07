@@ -115,7 +115,7 @@ namespace SourceIdentity
 	inline double DitherNeed(const QualityView& v) { return VpUnit::SourceQuality::DitherNeed(v.quality); }
 
 	// Contrast recovery gates OFF on a clean high-bitrate source (get out of the way): the best tier and a high quality.
-	inline bool ContrastRecoveryActive(const QualityView& v, const VoteSettings& vs = VoteSettings(), double cleanQuality = 0.9)
+	inline bool ContrastRecoveryActive(const QualityView& v, const VoteSettings& vs = VoteSettings(), double cleanQuality = VpUnit::SourceQuality::kCleanQuality)
 	{
 		VpUnit::SourceQuality::Params p;
 		p.tierEdges = vs.qualityTierEdges;

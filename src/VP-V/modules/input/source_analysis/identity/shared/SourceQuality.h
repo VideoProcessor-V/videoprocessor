@@ -28,10 +28,15 @@ namespace SourceQuality
 // Bump on ANY change of a tier edge, the combination rule or the meaning of an output.
 constexpr uint32_t kUnitVersion = 1;
 
+// The single source of the defaults (VoteSettings and SourceQualityView take them from here).
+inline std::vector<double> DefaultTierEdges() { return { 0.25, 0.5, 0.75 }; }   // tier = number of edges <= quality
+constexpr double kClassicalConfidence = 0.6;   // a bitrate reading is indirect evidence of the tier
+constexpr double kCleanQuality = 0.9;          // contrast recovery gates off above this on the best tier
+
 struct Params {
-    std::vector<double> tierEdges = { 0.25, 0.5, 0.75 };   // tier = number of edges <= quality
-    double classicalConfidence = 0.6;                       // a bitrate reading is indirect evidence of the tier
-    double cleanQuality = 0.9;                              // contrast recovery gates off above this on the best tier
+    std::vector<double> tierEdges = DefaultTierEdges();
+    double classicalConfidence = kClassicalConfidence;
+    double cleanQuality = kCleanQuality;
 };
 
 struct In {

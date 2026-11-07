@@ -3776,8 +3776,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		}
 		// Black in this matcher's luma codes (limited 16, full range 0) and
 		// the margin a bar's 1/8 average may have above it.
-		const float black = pictureFullRange ? 0.0f : 16.0f;
-		const float barCodes = 4.0f;
+		const VpUnit::PictureRect::Params rectParams = VpUnit::PictureRect::ForRange(pictureFullRange);
+		const float black = rectParams.blackCode;
+		const float barCodes = rectParams.barCodes;
 		const float given[4] = { static_cast<float>(pictureGiven[0]), static_cast<float>(pictureGiven[1]),
 			static_cast<float>(pictureGiven[2]), static_cast<float>(pictureGiven[3]) };
 		const float frameSize[2] = { static_cast<float>(width), static_cast<float>(height) };

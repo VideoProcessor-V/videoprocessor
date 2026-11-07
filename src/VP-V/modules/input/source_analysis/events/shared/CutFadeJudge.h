@@ -107,10 +107,15 @@ inline Strength StrengthOf(const EventSignals& e) { return e.cut ? Strength::Ful
 
 // ---- the veto detector's rule (HdrVetoCutDetector) ---------------------------------------------------------------------
 
+// The veto detector's thresholds, tuned on the HFR clips sampled at 10-20 Hz (the single source; HdrVetoCutDetector aliases them).
+constexpr float kGridDifference = 24.0f;          // mean absolute difference of the 16 x 9 cell means (10-bit codes)
+constexpr float kHistogramDistance = 0.15f;
+constexpr float kHistogramDistanceAlone = 0.35f;
+
 struct GridHistThresholds {
-    float gridDifference = 24.0f;        // mean absolute difference of the 16 x 9 cell means (10-bit codes)
-    float histogramDistance = 0.15f;
-    float histogramDistanceAlone = 0.35f;
+    float gridDifference = kGridDifference;
+    float histogramDistance = kHistogramDistance;
+    float histogramDistanceAlone = kHistogramDistanceAlone;
 };
 
 // Mean absolute difference of two equally long arrays (the grid difference), summed in index order.
