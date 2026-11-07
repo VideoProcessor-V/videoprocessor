@@ -31,6 +31,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <exception>
 #include <memory>
 #include <string>
 
@@ -498,7 +499,7 @@ QWidget* CalibrationPage::Build(State& st)
     if (!st.timer)
     {
         // One status poll per editor, as before: only while this page is showing or a run is active.
-        st.timer = new QTimer(k->window());
+        st.timer = new QTimer(k->window() ? static_cast<QObject*>(k->window()) : st.context);
         st.timer->setInterval(1000);
         QObject::connect(st.timer, &QTimer::timeout, st.context, [this, stp]()
         {
@@ -694,7 +695,17 @@ void CalibrationPage::AppendPages(ConfigPageHost::ConfigFormApi& api, std::vecto
     }
     ConfigPageHost::ConfigPage page;
     page.name = QStringLiteral("Calibration");
-    page.widget = Build(*slot);
+    try
+    {
+        page.widget = Build(*slot);
+    }
+    catch (const std::exception& error)
+    {
+        // Visible, not silent: the editor shows no Calibration page, says so, and the log has the reason.
+        qWarning("Calibration page could not be built: %s", error.what());
+        kit->setWarningStatus(QStringLiteral("The Calibration page could not be built: %1").arg(QString::fromUtf8(error.what())));
+        return;
+    }
     page.parentPage = QStringLiteral("VP-V");
     page.group = QStringLiteral("Output");
     page.description = QStringLiteral("Automatic display calibration with a meter: VP measures its own patches and writes 3D LUTs.");

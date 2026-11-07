@@ -145,6 +145,50 @@ Dependencies needed to lift it:
 
 `CalibrationPage.h/.cpp` is the Config editor's Calibration page, moved out of `ConfigEditorWindow` (R1 W1 CAL-C, P7-4): the `[calibration]` cards, the wizard, the calibration RPC and its status poll. It is a Config page provider (`ConfigPageHost.h`, registered by `Vpv::RegisterConfigProviders()` in `VP-V/config/VpvConfigProviders.h`): its page is a sub-page of the master VP-V page grouped under the Output unit (no navigation leaf of its own; the Output tab has an "Open Calibration" button), and it joins its RPC thread in `OnEditorClosing`. It reaches the editor only through `ConfigPageHost::EditorKit` (the editor's own field helpers, so object names, tooltips and the dirty path are the editor's). The Colour page's calibration rows (`refreshCalibrationControls`) are Bill's code and stay in the editor. Test seam: `ConfigPageHost::Find<Vpv::CalibrationPage>()`; tests in `config_ui/tests/CalibrationPageTests.cpp` (`--match CalibrationPageTests`).
 
+#### Settings of the Calibration page (`config_ui/`)
+
+Placement for every row: master VP-V page > Output > "Open Calibration" > card. Section `[calibration]`, object name `config.calibration.<key>` (rows with no key below are the wizard). Not tiered: no tier slider touches these keys. Bill's editor has no Calibration page and no `[calibration]` key; the Original pathway shows the same page (the keys are read by VP's own calibration run only) and Bill's Colour page rows ("Display calibration", LUT slots) are unchanged and stay in the editor. Defaults marked "schema" are CalibrationConfig.h's; spin boxes show the default when the key is absent.
+
+| Card | Key | Type, range | Default |
+|---|---|---|---|
+| Meter | `argyll_path` | text (folder or spotread.exe; Browse) | empty (search PATH) |
+| Meter | `meter_model` | choice (auto, i1d3, colormunki_display, i1d2, spyderx2, spyderx, spyder5, spyder4, dtp94, i1pro3, i1pro2, i1pro, colormunki_photo, jeti, klein_k10, other, simulated) | schema |
+| Meter | `meter_port` | integer 0-64 | 0 (First found) |
+| Meter | `display_type` | text | empty (meter default) |
+| Meter | `spectral_correction` | text (.ccss/.ccmx; Browse) | empty |
+| Meter | `refresh_mode` | choice auto / refresh / non_refresh | schema |
+| Meter | `read_timeout_s` | integer 5-600 s | 60 |
+| Display and patches | `display_kind` | choice projector / lcd / oled / other | schema |
+| Display and patches | `display_name` | text | empty |
+| Display and patches | `patch_window_percent` | number 0-100 (1 decimal) | 0 (Automatic) |
+| Display and patches | `background_percent` | number 0-100 (1 decimal) | 0 |
+| Display and patches | `settle_ms` | integer 0-30000 ms | 0 (Automatic) |
+| Display and patches | `near_black_max_reads` | integer 1-16 | 4 |
+| Display and patches | `repeat_tolerance_percent` | number 0.1-20 | 1.0 |
+| Display and patches | `warmup_minutes` | integer 0-180 min | 30 |
+| Display and patches | `drift_interval` | integer 0-1000 patches | 50 |
+| Target and LUT | `plan` | choice quick / cube5 / standard / cube13 / thorough | schema |
+| Target and LUT | `target_transfer` | choice bt1886 / gamma | schema |
+| Target and LUT | `target_gamma` | number 1.6-3.0 (2 decimals) | 2.4 |
+| Target and LUT | `target_white_percent` | number 25-100 | 100 |
+| Target and LUT | `lut_size` | choice 17 / 33 / 65 | schema (33 recommended) |
+| Target and LUT | `verify_after` | checkbox | true |
+| Dynamic Drive, room light and HDR runs | `led_flux_step` | integer 1-50 | 5 |
+| same | `led_dwell_ms` | integer 500-20000 ms | 3000 |
+| same | `led_reads_per_level` | integer 1-8 | 2 |
+| same | `led_cntr_sweep_max` | integer 50-100 | 74 |
+| same | `led_cntr_dwell_ms` | integer 200-20000 ms | 1500 |
+| same | `led_sensor_port` | text | empty (latency not measured) |
+| same | `led_sensor_baud` | integer 1200-2000000 | 115200 |
+| same | `led_step_repeats` | integer 1-10 | 3 |
+| same | `hdr_verify_tone_curve` | choice vp / bt2390 / none | schema |
+| same | `hdr_verify_source_peak` | number 100-10000 cd/m2 | 1000 |
+| same | `record_transcripts` | checkbox | false |
+| same | `transcript_folder` | text (Browse) | empty (luts\calibration	ranscripts) |
+| Calibrate (wizard) | `calibration.wizard.kind`, `.lux`, buttons Start / Continue / Skip warm-up / Apply / Discard / Cancel | run kind choice; room light 0-200000 lux (0 = Sensor) | Display calibration; Sensor |
+
+Status and fallback lines the page shows (none is a "Fallbacks engaged" entry; they are status text in the wizard or Config's status bar): "Connect to a running VideoProcessor to calibrate." (no target; all buttons disabled); "Settings preview: VP is not connected." (settings preview); "VideoProcessor did not answer: <reason> (calibration runs inside VideoProcessor; start it first)." (RPC failed); "Calibration uses the saved settings: Apply your changes first." (Start with unsaved edits); "Calibration applied: VP attached the new LUTs. Reloading the configuration." (after Apply in the run; reload only when the editor has no unsaved edits); "The Calibration page could not be built: <reason>" (the page failed to build; the editor shows no Calibration page).
+
 ### Test it standalone
 
 Build x64 Release (the AGENTS.md command), including `VideoProcessor-FakeSpotread`, which writes `x64\Release\test-tools\fake_spotread.exe`. Run tests single-threaded and read the TRX for the summary:
