@@ -33,9 +33,10 @@ Header: `clip,config,pairs,narrow_pct,escalated_pct,skipped_pct,gpu_ms_mean,epe_
 ## score_flow.py
 ```
 python -I score_flow.py --pred A.flo --gt B.flo [--camera-labels labels.npy|.csv] [--object-mask mask.png|.npy]
-                        [--prev-pred P.flo [--prev-gt G.flo]] --out scores.csv
+                        [--small-mask small.npy|.png] [--prev-pred P.flo [--prev-gt G.flo]] --out scores.csv
 python -I score_flow.py --self-test
 ```
+`--small-mask`: pixels of small fast objects (<= 32 px, >= 20 px/frame); adds the `smallfast` metric rows. `run_offline_matrix.ps1` treats `BatteryStatus` 11 (partially charged) as NOT mains.
 `.flo`: Middlebury (float32 magic 202021.25, int32 w,h, interleaved float32 u,v). Ground-truth entries >= 1e9 are unknown and skipped.
 Labels: (H,W) or a block grid that divides (H,W); 1 = camera, 2 = object, other = ignored. Mask: nonzero = occlusion-boundary pixel
 (`.png`: 8-bit, non-interlaced only).

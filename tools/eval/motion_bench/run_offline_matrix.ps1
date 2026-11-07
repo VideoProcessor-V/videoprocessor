@@ -39,7 +39,7 @@ function Invoke-Py {
 
 function Test-Mains {
     $b = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue
-    return (-not $b) -or (@($b | Where-Object { $_.BatteryStatus -notin 2, 3, 6, 7, 8, 9, 11 }).Count -eq 0)
+    return (-not $b) -or (@($b | Where-Object { $_.BatteryStatus -notin 2, 3, 6, 7, 8, 9 }).Count -eq 0)
 }
 
 function Invoke-GpuChunk {
