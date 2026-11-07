@@ -90,3 +90,29 @@ none: menu / black frames, x264, AV1, as-is masters), `repeat` 1 when the output
 Thread budget (owner cap: 4 CPU threads in total): the generator and the runner run at BelowNormal priority pinned to 4 logical processors (`--affinity-mask 0xF`, runner `-AffinityMask 0xF`); decoder `-threads 2`
 per input, filter graph 2 threads (1 for graphs with the noise filter), x265 `frame-threads=2:pools=4`. Only one generator or one vstest run at a time.
 
+## calibrate_nulls.py (SID-CAL: null / alt tables of the chain estimator)
+
+Writes `NullTables.generated.h` (an inline `GeneratedNullTables()` returning the `NullTables` struct of
+`identity/chain/ChainNullTables.h`, C++14) and `calibration-report.md` (<= 60 lines) from the calibration dumps.
+
+* Input: `VP_SOURCE_ID_CAL_DUMP` directory, one CSV per reel, one row per evaluation x axis x tested candidate; columns
+  `reel_id,title,eval_seq,time_s,axis,N,n,class,T,stage(coarse|exact),best_kernel,kernel_margin,lines_passed,lines,power_seen,floor_codes,truth_n(0=native),bit_depth,truth_kernel,truth_sharpen`.
+  An optional `shot_id` column is used for the per-shot cap; without it a shot is `--shot-seconds` (3 s) of source time.
+* Run: `python -I tools/eval/source_id/calibrate_nulls.py --dump <dir> --out <dir>` (options: `--require-power`,
+  `--null-side below`, `--shot-seconds`, `--seed`, `--date`). Test: `python -I tools/eval/source_id/calibrate_nulls.py --selftest`.
+* Samples (stage exact only): the estimator's line gate (`lines_passed >= max(3, ceil(lines/4))`), then candidates of one
+  evaluation and axis within +-1 px are clustered and the lowest T kept, as `ChainEvidence` does. NULL = native-truth reels, plus
+  clusters more than 1 px from `truth_n` on upscaled reels; ALT = within +-1 of `truth_n`. The class is recomputed from (n, N)
+  with a port of `ClassifyLatent` (mismatches with the dump's column are counted in the report). The power rule is NOT applied
+  to candidate rows by default (the estimator applies it only to the native hypothesis); `--require-power` applies it to all.
+* Fit per class: null mean = median, sd = 1.4826 MAD or the dip-side spread (median - P16) if larger, widened x1.25 and by
+  (1 + 2/sqrt(n)); alt = median / max(MAD sd, upper-side spread), shrunk toward the null by min(1, n_alt/150).
+* Conservative rules: a class with fewer than 40 null or 30 alt clusters, fewer than 3 titles on either side, or an alt not
+  0.25 null-sd below the null KEEPS THE PLACEHOLDER. A class below the full counts (300 null / 150 alt) is "thin": it is
+  blended toward the placeholder (steps of 0.1) until its clamped increment is nowhere larger than the placeholder's on
+  T in [-2, 0.05]. Every number is a field of `Policy`.
+* Validation: 2-fold CV BY TITLE (sha1-ordered, alternating; all reels of a title, native or upscaled, share a fold). Held out per
+  class: ROC AUC of the LLR; false CANDIDATE entries per native hour with the per-shot cap c1/2 (default) and c1 (sensitivity),
+  calibrated and placeholder side by side; wrong-n entries on alt reels; evaluations to c1 on alt reels, 8- and 10-bit
+  separately (inf = never). c1 = -ln(rate x 10 s / 3600) + ln(8 x 10) = 14.87 nats.
+* Not simulated: the native hypothesis, the two-axis prior, HOLD/mixed masking (not in the dump).
