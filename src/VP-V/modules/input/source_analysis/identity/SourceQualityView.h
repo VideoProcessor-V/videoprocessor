@@ -85,6 +85,8 @@ namespace SourceIdentity
 			why = "no record";
 		else if (record->unitVersion != kUnitVersion)
 			why = "unit version";
+		else if ((record->flags & kFlagShadow) != 0)
+			why = "shadow record";             // a shadow record is for logs only: never an input (defence in depth)
 		else if (record->maxAgeUs > 0 && (nowUs - record->timeUs > record->maxAgeUs || nowUs < record->timeUs - record->maxAgeUs))
 			why = "stale";
 		else if (record->tier < 0 || !record->Latched(Field::Quality))

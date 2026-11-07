@@ -90,7 +90,7 @@ def read_srm_history(path):
     rows = []
     for f in srm_session_files(path):
         with open(f, "r", encoding="utf-8", newline="") as fh:
-            rows.extend(csv.DictReader(fh))
+            rows.extend(r for r in csv.DictReader(fh) if r.get("event") != "event")   # a repeated header line is not a data row
     return rows
 
 
