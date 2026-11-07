@@ -6621,7 +6621,10 @@ namespace Tests
 					const int index = session->Status().patchIndex;
 					if (timeline.empty() || timeline.back().patchIndex != index) timeline.push_back({ t, index });
 				}
-				if (!started && t >= 1.0)
+				// Start only once the renderer reports a usable output: at a fixed 1 s the render thread can still be
+				// initialising (cold shader cache), and the session would fail with "the renderer is not running".
+				Calibration::PatternOutputInfo ready;
+				if (!started && t >= 1.0 && renderer.GetCalibrationOutput(ready) && ready.available)
 				{
 					started = true;
 					IVideoRenderer* raw = &renderer;
