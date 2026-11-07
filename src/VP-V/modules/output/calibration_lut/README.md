@@ -123,6 +123,24 @@ The module also holds the automatic calibration (the `calibration/` sub-folder).
 - Automatic calibration: the `[calibration]` section (see "How the code works").
 - Tiers: not tiered
 
+## All settings (complete list)
+
+Config placement: the master VP-V page (`calibration_lut_stage`, Expert) and Output > Calibration sub-page (the LUT rows and the wizard; the LUT rows are on the Colour / Output profile page today, the sub-page arrives with P7). "Original (Bill)" = what the Original pathway does with the key.
+
+| Key | Section | Type | Range | Default | Config placement | Original (Bill) | Fallback / status |
+|---|---|---|---|---|---|---|---|
+| `calibration_lut_enabled` | `[vprenderer.color.<name>]` (and base) | bool | true/false | false | Output > Calibration | same (libplacebo target LUT) | invalid value: log + false; Ctrl+I `LUT:` line |
+| `calibration_lut_bt709` / `_p3_d65` / `_bt2020` | same | path | file relative to the cfg, or `none` | empty (no LUT) | Output > Calibration | same | `Rejected: <reason>` / `Inactive: <reason>` status (not a downgrade) |
+| `calibration_lut_input_transfer` | same (Rendering alias) | choice | as `hdr_tone_map_target_gamma` | empty | Colour / Output page | accepted alias | migration notice in the log |
+| `hdr_tone_map_target_gamma` | same | choice | bt1886, srgb, 1.8..2.8 | empty (resolves to 2.2) | Colour / Output page | same | none |
+| `sdr_lut_input_gamma` | same | choice | passthrough, bt1886, srgb, 1.8..2.8 | passthrough | Colour / Output page | same | none |
+| `calibration_lut_input_gamma` | same | retired | any | display | none | accepted, no effect | log line |
+| `calibration_lut_stage` | `[vpv]`, then `[vprenderer]` (global) | choice | libplacebo, vp | libplacebo | master VP-V page, Expert | always libplacebo (Original pathway) | invalid: `pipeline settings` entry; VP stage failure: `calibration LUT (the VP stage failed; ...)` |
+| `pipeline_slots_off` (entry `output.calibration_lut`) | `[vpv]` / `[vprenderer]` | list | slot ids | empty | master VP-V page | n/a | stops the VP stage only; LUT runs as libplacebo's target LUT |
+| `calibration_lut_reload` (planned) | colour profile | choice | auto, apply | auto | Output > Calibration | apply | not read yet |
+
+Tiers: not tiered. Patch display and the wizard have no settings of their own here (the wizard's `[calibration]` section is in `calibration/CalibrationConfig.h`); the patch fallback is `calibration patch (full field ...)`.
+
 ## Fallbacks
 
 - "Fallbacks engaged" entries (implemented; each with the GUI's one-time notice, Ctrl+I, Config status and Ctrl+Alt+D):

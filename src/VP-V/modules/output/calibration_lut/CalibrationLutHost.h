@@ -14,6 +14,7 @@
 #include <libplacebo/swapchain.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -84,6 +85,33 @@ namespace CalibrationLutHost
 		explicit operator bool() const { return vpStage; }
 	};
 
+	// R33 TakeOverPresentation (render loop, before the dequeue). The loop gives its own queue lock,
+	// stop flag, wake-up and render lock; the module decides whether patches own the display.
+	struct TakeOverEnv
+	{
+		std::mutex& queueMutex;
+		const bool& stopRequested;               // guarded by queueMutex
+		std::condition_variable& queueChanged;
+		std::mutex& renderMutex;
+		std::function<bool()> present;           // one refresh of the patch (called with renderMutex held)
+	};
+	enum class TakeOver { NotTaking, Stop, Handled };   // Stop = leave the loop; Handled = `continue`
+
+	// The one predicate the capture thread (drop frames), the dequeue wait (wake) and the loop read.
+	inline bool IsTakingOver(const std::atomic_bool& patternsActive) { return patternsActive.load(std::memory_order_acquire); }
+	TakeOver TakeOverPresentation(const std::atomic_bool& patternsActive, const TakeOverEnv& env);
+
+	// The renderer-side effects of a patterns session beginning / ending (P1). Generic: the module
+	// does not know the renderer's types.
+	struct PatternLifecycle
+	{
+		std::function<bool()> suspendDrive;                  // stops the LED drive at full light; true = it was running
+		std::function<void(const char*)> beginQueueGeneration;
+		std::function<void()> notifyQueue;
+		std::function<void()> resumeDrive;
+		std::function<void()> releasePatchFallback;          // the full-field fallback lasts for the run
+	};
+
 	class Adapter
 	{
 	public:
@@ -132,6 +160,10 @@ namespace CalibrationLutHost
 
 		// ---- automatic calibration: patterns ------------------------------------------------------
 
+		// IVideoRenderer::SetCalibrationPattern after its state checks: stores the request (active) or
+		// ends the session; `patternsActive` is the renderer's flag. RPC thread.
+		bool SetPatterns(const Calibration::PatternRequest& request, std::atomic_bool& patternsActive,
+			const PatternLifecycle& lifecycle);
 		void SetPattern(const Calibration::PatternRequest& request);
 		void EndPattern();
 		void ResetPatternLogs();
@@ -150,6 +182,10 @@ namespace CalibrationLutHost
 		// GetCalibrationOutput: whether to try the render-thread facts now (patternsActive = a patch
 		// is being shown), the facts read under renderMutex, and the answer.
 		int FreshOutputAttempts(bool patternsActive) const;
+		// GetCalibrationOutput: try-locks renderMutex (FreshOutputAttempts times), publishes `gather()`
+		// under it, then answers from the cache. `gather` runs with renderMutex held.
+		bool CollectOutputInfo(std::mutex& renderMutex, bool patternsActive,
+			const std::function<OutputFacts()>& gather, Calibration::PatternOutputInfo& info);
 		void PublishOutputFacts(const OutputFacts& facts);
 		// Fills info from the cache and the atomics. fresh = facts were published by this call.
 		// False with a reason when nothing is known yet; otherwise info.available.
