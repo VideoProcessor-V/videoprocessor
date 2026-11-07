@@ -302,12 +302,13 @@ namespace VideoProcessorTest
 				std::ofstream(historyFolder + "\\source-resolution 2020010" + std::to_string(old) + "-000000.csv") << "old";
 			monitor.SetHistoryFolder(historyFolder);
 			const std::string historyPath = monitor.HistoryPath();
+			monitor.FlushHistoryNow();   // the session start (retention, the new file) happens on the first flush, not in SetHistoryFolder
 			{
 				int kept = 0;
 				WIN32_FIND_DATAA found{};
 				HANDLE search = FindFirstFileA((historyFolder + "\\source-resolution *.csv").c_str(), &found);
 				if (search != INVALID_HANDLE_VALUE) { do ++kept; while (FindNextFileA(search, &found)); FindClose(search); }
-				Assert::AreEqual(4, kept, L"the newest 4 earlier sessions kept before this one is written (5 with it)");
+				Assert::AreEqual(5, kept, L"the newest 4 earlier sessions kept, plus this one (its file is created by the first flush, with the header)");
 			}
 			double seconds = 0.0;
 			uint64_t sequence = 0;

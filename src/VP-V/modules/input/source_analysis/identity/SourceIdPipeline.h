@@ -105,6 +105,8 @@ namespace SourceIdentity
 			: s_(s), consensus_(s.consensus), detector_(s.detector), notice_(s.notice), signal_(s.quality) {}
 
 		void SetConsensusOn(bool on) { consensusOn_ = on; }
+		// SHADOW: the record is published (P14) and the would-be changes are logged, but the classical decision stands.
+		void SetShadow(bool on) { shadow_ = on; }
 		void SetNoticeEnabled(bool on)
 		{
 			s_.notice.enabled = on;
@@ -135,8 +137,9 @@ namespace SourceIdentity
 			lastQuality_ = 1.0;
 		}
 
-		// One analysed frame. Publishes the record and returns it.
-		Record Push(const FrameInput& in)
+		// One analysed frame. Publishes the record and returns it. `qualityOverride` (replay from the SRM history CSV): the
+		// frame quality recorded then, used instead of measuring it from `in.noise`.
+		Record Push(const FrameInput& in, const double* qualityOverride = nullptr)
 		{
 			if (!haveTitle_)
 			{
@@ -144,7 +147,7 @@ namespace SourceIdentity
 				titleKey_ = in.streamKey;
 				notice_.NewTitle(in.streamKey);
 			}
-			lastQuality_ = signal_.Push(in.deliveredRatio, in.noise);
+			lastQuality_ = qualityOverride ? *qualityOverride : signal_.Push(in.deliveredRatio, in.noise);
 			QualitySample sample;
 			sample.seq = in.seq;
 			sample.timeUs = in.timeUs;
@@ -204,7 +207,7 @@ namespace SourceIdentity
 			}
 
 			Record r;
-			r.flags = static_cast<uint16_t>((consensusOn_ ? kFlagConsensusOn : 0) | (in.classical.reading ? kFlagReading : 0) |
+			r.flags = static_cast<uint16_t>((consensusOn_ ? kFlagConsensusOn : 0) | (shadow_ ? kFlagShadow : 0) | (in.classical.reading ? kFlagReading : 0) |
 				(haveEvent_ && lastEvent_.direction == AbrDirection::Drop ? kFlagDropEventSeen : 0) |
 				(noticeFired_ ? kFlagNoticeFired : 0));
 			r.seq = in.seq;
@@ -274,6 +277,7 @@ namespace SourceIdentity
 		FrameQuality::Signal signal_;
 		HeldState held_;
 		bool consensusOn_ = false;
+		bool shadow_ = false;
 		double level_ = 1.0;
 		double lastQuality_ = 1.0;
 		bool haveEvent_ = false;

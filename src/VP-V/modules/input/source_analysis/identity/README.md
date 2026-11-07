@@ -15,6 +15,7 @@ Today the classical source-resolution monitor (`input.source_analysis`) decides 
 - `SourceIdProduct.h`, `FrameQuality.h`, `SourceIdPipeline.h`, `SourceQualityView.h`: the P14 record and holder, the frame-level quality signal, the worker pipeline and the consumer read API (sections below).
 - `chain/`: the scaling-chain estimator units (line sampler, polyphase proposer, descale verifier, chain evidence, power probe), pure and not wired yet; see `chain/README.md`.
 - `SourceGeometryProduct.h`: the P14g `source_geometry` reservation (wave S2, section below): unit version, size bound, byte order, staleness rule, the absent placeholder and the one read API.
+- `SourceIdReplay.h`: replays a source-resolution history CSV through the pipeline (section "History CSV and replay").
 
 ## Voters and trust
 
@@ -136,12 +137,29 @@ The Bill-file call sites (LVR `snap.bitrateQuality` readers) are NOT edited here
 
 ## Auto engage (SourceResolutionMonitor, VP-V file)
 
-With `source_id_consensus` on and a fresh record, `AutoFactor` / `AutoFactors` engage a lower re-base only for a LATCHED axis, at the consensus's ratio; the classical confidence minimum (`source_resolution_auto_min_confidence`) still applies (consensus can delay, veto or refine an engage, never add one), and the latch / crossfade still decide WHEN. A stale or absent record: the classical decision, with `Monitor::SourceIdGateFallback()` engaged. Off: the worker skips the pipeline and the noise measurement; behaviour and the CSV are unchanged (only a cheap reset on a discontinuity and an uncontended gate lock remain). Consensus moves only TOWARDS native: the target is never deeper than the classical reading. The consensus safety veto is fed by the classical trackers: it fires when every tracker is back to native with nothing gathered below it on an informative frame. The SRM history CSV gains `sid` columns only while consensus is on.
+With `source_id_consensus` on and a fresh record, `AutoFactor` / `AutoFactors` engage a lower re-base only for a LATCHED axis, at the consensus's ratio; the classical confidence minimum (`source_resolution_auto_min_confidence`) still applies (consensus can delay, veto or refine an engage, never add one), and the latch / crossfade still decide WHEN. A stale or absent record: the classical decision, with `Monitor::SourceIdGateFallback()` engaged. Off: the worker skips the pipeline and the noise measurement; every decision is unchanged (only a cheap reset on a discontinuity and an uncontended gate lock remain). Consensus moves only TOWARDS native: the target is never deeper than the classical reading. The consensus safety veto is fed by the classical trackers: it fires when every tracker is back to native with nothing gathered below it on an informative frame. The SRM history CSV is written in every mode with the replay columns (the `sid_*` columns are filled while the pipeline runs, shadow or on; see source_analysis/README.md "History CSV"). A shadow `would_be` row is written per consensus change.
 
 ## Config keys (module side)
 
-- `source_id_consensus` = off | on (default **off**): `Monitor::SetSourceIdConsensus`. The settings key plumbing (P3 settings mixin, validators, master-page row) is the SID-5 step and waits for P3 / the master page; until then the Monitor setters are the only entry.
+- `source_id_consensus` = off | shadow | on (default **off**; shadow after phase A, doc 78 D16): `Monitor::SetSourceIdMode` (`SetSourceIdConsensus(bool)` = on / off). **Shadow** runs the pipeline and the consensus, publishes P14 (record flag `kFlagShadow`, bit 4; `kFlagConsensusOn` stays clear) and the CSV `sid_*` columns, and logs one "source_id would-be: <field> <from> -> <to> (<reason>, support <s>)" line per consensus change (`WouldBeLines`), but `AutoFactor(s)`, `QualityView`, the re-base port and the ABR notice use the classical decision / stay silent, byte-identical to off. Status line "Source identity: shadow (classical decides)". The settings key plumbing (P3 settings mixin, validators, master-page row) is the SID-5 step and waits for P3 / the master page; until then the Monitor setters are the only entry.
 - `source_id_abr_notice` = on | off: `Monitor::SetSourceIdNotice`.
+
+## Settings
+
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `source_id_consensus` | input group (plumbing pending, SID-5: Monitor setter only) | enum | off, shadow, on | off (shadow after phase A, doc 78 D16) | not in Config yet (SID-5, P3 settings mixin) | forced off | "Source identity: off" / "Source identity: shadow (classical decides)" / "Source identity: classical only (<reason>)" / "Source identity: consensus (tier N, level L)"; FallbackCatalog `product.source_quality` | same on all |
+| `source_id_abr_notice` | input group (plumbing pending, SID-5) | bool | on, off | on | not in Config yet (SID-5) | forced off | one-time notice `abr_quality_drop` (only while `source_id_consensus` is on; never in shadow) | same on all |
+
+## Status and fallbacks
+
+- Ctrl+I / Config line `Source identity: ...` (off, shadow, classical only (<reason>), consensus).
+- Shadow: log line "source_id would-be: <field> <from> -> <to> (<reason>, support <s>)" per consensus change.
+- Consumers fall back to the classical value, visibly (`product.source_quality`), whenever the record is absent, stale, unlatched or another version; in shadow they always use the classical value.
+
+## History CSV and replay (SID-B0)
+
+The SRM history CSV (`SourceHistoryLog.h/.cpp` in the parent folder, see source_analysis/README.md "History CSV") is session-long, appended and rotated, and carries what the consensus needs: `mode, t_src, seq, frame_ratio_v, frame_ratio_h, detail_above, mixed, blank, cut, fade, apl, axis_x, axis_y, axis_conf, kernel_id, kernel, kernel_votes, kernel_agree, frame_quality, frame_noise, sid_tier, sid_level, sid_ratio_h, sid_ratio_v, sid_reason` (with the older `declared`, `confidence`, `bitrate_quality`, `frame_ratio`). `SourceIdReplay.h` (`SrmReplay::Run`; columns by NAME, never by position) feeds a file (or the concatenated files of a session; the repeated headers and `session` rows are skipped, a `discontinuity` row resets the pipeline) through `Pipeline` in source time, using the recorded frame quality (`Pipeline::Push(in, &quality)`); the same CSV always gives the same trace (`SrmReplay::Trace`), so a captured session can be re-run against changed thresholds. `python -I tools/eval/source_id/replay.py --srm <file>` reads the same files (a rotated session's continuations are followed) and prints a SUMMARY; the replay itself is `SrmReplay`. Limits: CSV values are rounded (`%.4f` ratios, `%.6f` times and frame quality), so a replay can differ from the live run at a threshold edge; the relative-noise tiles are not stored (the recorded frame quality stands in); a file written with the pipeline off has no `frame_quality` (it defaults to 1.0) - replay files written in shadow or on. Tests: `SourceIdReplayTests` (a committed fixture, `tests/fixtures/srm-history-replay.csv`).
 
 ## Still to do (call sites outside this module)
 
