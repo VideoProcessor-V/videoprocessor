@@ -22,7 +22,7 @@ namespace FallbackPlainTextTest
 	public:
 		TEST_METHOD(EveryCatalogIdHasItsOwnSentence)
 		{
-			const char* ids[] = { "dither", "BTB/WTW", "re-base", "detail pulse", "texture restore", "deband", "motion",
+			const char* ids[] = { "dither", "BTB/WTW", "re-base", "re-base warm-up", "detail pulse", "texture restore", "deband", "motion",
 				"motion consumers", "presentation", "refresh rate", "calibration LUT", "calibration patch", "output range",
 				"output request", "geometry", "subtitle detection", "SDR tone shape", "output scaling", "early upload",
 				"early upload frames", "vector_engine", "vector_engine_producer", "vector_engine_global" };

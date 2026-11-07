@@ -192,21 +192,26 @@ namespace RebaseWarmupTest
 			Assert::IsFalse(next.status.empty(), L"visible every frame");
 		}
 
-		TEST_METHOD(ThreeTimeoutsCountAsFailuresAndHandTheRebaseBackOnDemand)
+		// Each 45 s timeout is one counted, logged failure, visible well before the 135 s hold budget; removing
+		// the failure counting makes the "N of 3" log and the failed/"taking too long" status disappear.
+		TEST_METHOD(TimeoutsAreCountedAndLoggedBeforeTheBudget)
 		{
 			Gate gate;
 			gate.Evaluate(true, "k", "1920x1080", Status::Missing, 0.0);
 			const Step t1 = gate.Evaluate(true, "k", "1920x1080", Status::Pending, 46.0);
 			Assert::IsFalse(t1.allow);
+			Assert::IsFalse(t1.bypass, L"still before the budget");
 			Assert::IsTrue(t1.failed);
+			Assert::IsTrue(t1.log.find("1 of 3") != std::string::npos);
+			Assert::IsTrue(t1.status.find("taking too long") != std::string::npos);
+			const Step mid = gate.Evaluate(true, "k", "1920x1080", Status::Pending, 60.0);
+			Assert::IsFalse(mid.allow);
+			Assert::IsTrue(mid.log.empty(), L"logged once per failure");
 			const Step t2 = gate.Evaluate(true, "k", "1920x1080", Status::Pending, 92.0);
 			Assert::IsFalse(t2.allow);
+			Assert::IsFalse(t2.bypass, L"still before the budget");
+			Assert::IsTrue(t2.failed);
 			Assert::IsTrue(t2.log.find("2 of 3") != std::string::npos);
-			const Step t3 = gate.Evaluate(true, "k", "1920x1080", Status::Pending, 130.0);
-			Assert::IsFalse(t3.allow, L"third wait not over yet");
-			const Step t4 = gate.Evaluate(true, "k", "1920x1080", Status::Pending, 138.0);
-			Assert::IsTrue(t4.allow);
-			Assert::IsTrue(t4.bypass);
 		}
 
 		// Finding 1(b): a key the worker never accepts (Missing for ever) is bounded too.
@@ -323,7 +328,7 @@ namespace RebaseWarmupTest
 			Assert::AreEqual(1.0, keep.y);
 			Assert::IsFalse(inForce.Covers(0.5, 0.5, 11ULL), L"and nothing is in force any more");
 			// Back to the old contract: still native until a warm-up is allowed again.
-			const FactorsInForce::Factors again = inForce.Hold(1.0, 1.0, 11ULL);
+			const FactorsInForce::Factors again = inForce.Hold(0.5, 0.5, 11ULL);
 			Assert::AreEqual(1.0, again.x);
 		}
 

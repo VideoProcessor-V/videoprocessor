@@ -43,5 +43,5 @@
     ]
   },
   "fallback_when_missing": "A failed pass renders the native frame (already in code); unknown kernel -> Lanczos; off -> straight to output scaling.",
-  "fallback_entry": "re-base precision: <the re-base's float-intermediate note>"
+  "fallback_entry": "re-base precision: <the re-base's float-intermediate note>; re-base warm-up: <the hold status while shaders compile, or the visible bypass>"
 }
