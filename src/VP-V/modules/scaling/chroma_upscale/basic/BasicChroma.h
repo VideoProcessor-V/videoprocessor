@@ -235,6 +235,10 @@ namespace BasicChroma
 	inline Plane16 UpsamplePlane(const Plane16& c, const Geometry& g)
 	{
 		if (!Check(g).empty()) return Plane16();   // callers go through Upsample / Check; an unsupported geometry makes no picture
+		// The plane must be the geometry's chroma plane (cw = ceil(lumaW / fx) ...) and hold every sample: the loops below index it by the
+		// geometry, so a smaller or mislabelled plane would read outside it. No picture (an empty plane) rather than undefined reads.
+		if (c.w != g.chromaW() || c.h != g.chromaH() || c.w <= 0 || c.h <= 0 ||
+			c.v.size() < static_cast<size_t>(c.w) * static_cast<size_t>(c.h)) return Plane16();
 		const int W = g.lumaW, H = g.lumaH, cw = c.w, ch = c.h;
 		Plane16 out(W, H);
 		if (g.fx == 1 && g.fy == 1) { out.v = c.v; return out; }

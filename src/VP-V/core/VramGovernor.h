@@ -45,7 +45,7 @@ enum VramUserId : uint16_t {
     kUserRenderAhead,          // render-ahead swapchain depth
     kUserEarlyUpload,          // early-upload pool slots
     kUserNvofProducer,         // optical-flow engine + producer ring
-    kUserTemporalDetail,       // refstore (+ future slots)
+    kUserTemporalDetail,       // temporal-detail memory (v1 reference store + future slots today; td.memory stages in unit v2)
     kUserCameraModel,          // camera-model textures
     kUserInterpolator,         // interpolator engine + grain bands
     kUserEnhancers,            // texture restore, detail pulse, debander extras

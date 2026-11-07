@@ -7,7 +7,7 @@
 // read paths. This header is, per product, the part a registry entry cannot say:
 //   * the fill rule (lane / live / reduced) and the unit that makes it, with its unit version,
 //   * the BUDGET-GOVERNED STAGES of each large buffer: the registry declares the FLOOR (stage 0: the repair of the still / dark
-//     regions plus the full-resolution mid band at the true source resolution, as the laptop starts); the VRAM / ms governor
+//     regions plus the full-resolution mid band at the true source resolution, the least the budget grants); the VRAM / ms governor
 //     adds the larger stages while headroom lasts, each visible, shed in reverse order. There are NO fixed per-GPU tiers,
 //   * the INTENDED inputs. The framework holds 4 inputs per product (kMaxInputs); the registry declares the first four and this
 //     table records the full list, which a test compares (dependency: W1-SKG raises the limit, then the declarations catch up).
@@ -34,6 +34,10 @@ namespace TdProducts
 	constexpr uint32_t kMapsViewUnit = TdMapsView::kUnitVersion;   // U19 TdMapsView (td.maps)
 
 	using VpSkeleton::ProductId;
+
+	// Anchors td.anchor_refs holds at its full stage: structural (the reference candidates of a hybrid codec: LT-A, LT-P, one ST), not
+	// a frame count over time. R16 = 2 B/px per anchor.
+	constexpr uint32_t kAnchorRefCount = 3;
 
 	// The products of this table: ids 16-18 (redefined) and the engine products appended after p7g (doc 72 section 1.1).
 	constexpr int kAppended = int(VpSkeleton::kTdTrailSummary) - int(VpSkeleton::kCodingEvidence) + 1;   // 8
@@ -115,7 +119,7 @@ namespace TdProducts
 			  { { kP10GrainSplit, 0, 0 }, { kP11RegionBlockStats, 0, 0 }, { kP13SourceRing, 0, 0 }, { kCodingEvidence, 1, 0 }, { kCodingEvidence, 2, 0 } }, {} },
 			{ kQualityPattern, "quality_pattern", "input/source_analysis/identity/quality_pattern", kQualityPatternUnit, "lane CPU job when coding_evidence(N+2) is published",
 			  "temporal detail runs the same pure function", "quality_pattern.causal when the effective lead < 2 (visible \"frame pattern: provisional\")",
-			  "CPU POD ~64 B per unique source frame, history 128 (8 KB, system RAM); NOT part of P14's held state",
+			  "CPU POD ~64 B per unique source frame, history = kQualityPatternHistorySeconds of the measured source rate (system RAM); NOT part of P14's held state",
 			  { { kCodingEvidence, 0, 0 }, { kCodingEvidence, 0, 1 }, { kCodingEvidence, 0, 2 }, { kQualityPattern, 1, 0 } }, {} },
 			{ kQualityPatternCausal, "quality_pattern.causal", "input/source_analysis/identity/quality_pattern", kQualityPatternUnit, "same unit, causal (no lead)",
 			  "same", "n/a (it is the reduced form)", "same POD as quality_pattern", { { kCodingEvidence, 0, 0 }, { kQualityPatternCausal, 1, 0 } }, {} },
@@ -125,9 +129,11 @@ namespace TdProducts
 			  { { kP3AnalysisField, 0, 0 }, { kP1HalfLuma, 0, 0 }, { kP1HalfLuma, 1, 0 }, { kP8CameraLabels, 0, 0 } }, {} },
 			{ kTdAnchorRefs, "td.anchor_refs", "repair/temporal_detail", kUnitVersion, "TD job copy at anchor detection",
 			  "none", "absent: static / camera mode uses coding_evidence hashes and the P13 lag-1 view",
-			  "received full-resolution luma R16 of the last <= 3 anchors",
+			  // The "3" is STRUCTURAL, not a rate: the anchors a hybrid codec can reference at once (the long-term I, the previous I and one
+			  // short-term P, the LT-A / LT-P / ST slots of td.memory), whatever the source rate. How long ago they were is measured.
+			  "received full-resolution luma R16 of the last <= 3 anchors (kAnchorRefCount: the codec's reference candidates)",
 			  { { kP13SourceRing, 0, 0 }, { kQualityPattern, 0, 0 } },
-			  { { "floor: none", Rule({}) }, { "full: 3 anchors", Rule({ { 0, 6 } }) } } },
+			  { { "floor: none", Rule({}) }, { "full: 3 anchors", Rule({ { 0, 2 * kAnchorRefCount } }) } } },
 			{ kTdDelta, "td.delta", "repair/temporal_detail", kUnitVersion, "TD job", "TD apply runs the same job",
 			  "carry-forward (as td.blocks)", "Delta0 at 1/4 resolution (luma + 2 chroma R16F), per-block band weights RGBA8; ring = lane lead + 1",
 			  { { kTdBlocks, 0, 0 }, { kTdMemory, 1, 0 }, { kP13SourceRing, 0, 0 } },
@@ -138,7 +144,7 @@ namespace TdProducts
 			  "per 16 px block 3 x RGBA16F = 12 named fields (TdMapsView::Field); ring = lane lead + 1",
 			  { { kTdBlocks, 0, 0 }, { kP10GrainSplit, 0, 0 }, { kCodingEvidence, 0, 0 }, { kRefinedField, 0, 0 } }, {} },
 			{ kTdTrailSummary, "td.trail_summary", "repair/temporal_detail", kUnitVersion, "TD job (reduction + async readback)", "none",
-			  "absent: source identity keeps its record unchanged", "CPU record per frame, 256 B, history 8 (system RAM)",
+			  "absent: source identity keeps its record unchanged", "CPU record per frame, 256 B, history = kTdTrailSummaryHistorySeconds of the measured source rate (system RAM)",
 			  { { kTdBlocks, 0, 0 } }, {} },
 		};
 		return rows;
@@ -158,19 +164,21 @@ namespace TdProducts
 
 	// The products each consumer reads (the catalog rows in core/ProductCatalog.h state the same sets; a test compares them).
 	// Reads of td.maps go through TdMapsView (the fields: TdMapsView::FieldsOf).
-	inline std::vector<ProductId> NeededBy(Consumer c)
+	// Built once and returned by reference: the per-frame read of a consumer must not allocate.
+	inline const std::vector<ProductId>& NeededBy(Consumer c)
 	{
 		using namespace VpSkeleton;
-		switch (c)
-		{
-		case Consumer::AdaptiveScaler: return { kTdMaps, kRefinedField };
-		case Consumer::DitherNeed: return { kTdMaps, kQualityPattern };
-		case Consumer::SigmaDelta: return { kTdMaps, kRefinedField };
-		case Consumer::ChromaStage: return { kTdMaps, kTdDelta, kTdMemory, kRefinedField };
-		case Consumer::Deband: return { kTdMaps, kCodingEvidence };
-		case Consumer::Engine: return { kCodingEvidence, kQualityPattern, kRefinedField, kTdAnchorRefs, kTdDelta, kTdMaps, kTdTrailSummary };
-		}
-		return {};
+		static const std::vector<ProductId> sets[] = {
+			/* AdaptiveScaler */ { kTdMaps, kRefinedField },
+			/* DitherNeed     */ { kTdMaps, kQualityPattern },
+			/* SigmaDelta     */ { kTdMaps, kRefinedField },
+			/* ChromaStage    */ { kTdMaps, kTdDelta, kTdMemory, kRefinedField },
+			/* Deband         */ { kTdMaps, kCodingEvidence },
+			/* Engine         */ { kCodingEvidence, kQualityPattern, kRefinedField, kTdAnchorRefs, kTdDelta, kTdMaps, kTdTrailSummary },
+		};
+		static const std::vector<ProductId> none;
+		const size_t i = size_t(c);
+		return i < sizeof(sets) / sizeof(sets[0]) ? sets[i] : none;
 	}
 
 	inline TdMapsView::Reader MapsReaderOf(Consumer c)
@@ -187,8 +195,9 @@ namespace TdProducts
 		return TdMapsView::Reader::AdaptiveScaler;
 	}
 
-	// The classical form's fallback id: the consumer's own existing entry (doc 72 section 3), so its classical wording stays the
-	// one the owner already sees; the engine itself has its own.
+	// The consumer's BASE fallback id: its own existing entry (doc 72 section 3), the one its classical cause engages and the one
+	// the catalog rows name; the engine itself has its own. The temporal-detail read never engages this bare id: it keys per id +
+	// cause (TdProducts::FallbackKey in TdProductReads.h), so its entry cannot collide with the consumer's own cause.
 	inline const char* FallbackIdOf(Consumer c)
 	{
 		switch (c)

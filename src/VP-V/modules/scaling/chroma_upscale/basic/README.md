@@ -46,8 +46,8 @@ P and T (4:2:2, horizontally co-sited = `Siting::Left`), codes in the PQ-IPT cod
 
 ## Status and fallbacks
 
-"Chroma upscale: libplacebo (<reason>)" while a geometry is refused (factor, shift, plane size) or the GPU pass fails (`Module::LastError()`); `product.chroma_cfl` for the
-temporal-detail read path once the engine is requested. Both are visible, never log-only.
+"Chroma upscale: libplacebo (<reason>)" while a geometry is refused (factor, shift, plane size) or the GPU pass fails (`Module::LastError()`); `product.chroma_cfl [td: <cause>]`
+(keyed per id + cause, see the products README) for the temporal-detail read path once the engine is requested. Both are visible, never log-only.
 
 ## Tests
 
@@ -56,3 +56,16 @@ factor and siting; co-sited outputs equal the input exactly; siting on a ramp; m
 flat exact, BTB / WTW overshoot kept; bars flat and no read across the boundary; composed 12-bit IPT 4:2:2; refused geometries; the engine read path.
 `BasicChromaGpuTests` (GpuWarp): the GLSL pass is BYTE-identical to the CPU model for 9 geometries, refuses what the CPU refuses, GLSL arithmetic is integer only.
 Command: `vstest.console.exe x64\Release\VideoProcessor-Test.dll /TestCaseFilter:"FullyQualifiedName~BasicChroma"`; the chain gate runs the GPU class with `VP_TEST_ADAPTER=NVIDIA` while holding `D:\codex\GPU-QUIET`.
+
+## Shared-unit baseline (U20, `tools/shared_units_baseline.json`)
+
+`check_shared_units` reports 8 baseline duplicates of U20's signatures outside this unit. None is a copy of the chroma upsample kernel; they are other users of the same
+words, recorded so the count cannot grow (non-blocking until the re-base kernels share the unit):
+
+| # | Location | What it is |
+|---|---|---|
+| 1 | `core/ChromaSiting.h:13` | the plane-shift rule after a re-base resample (`ShiftAfterResample`); this unit CALLS it (`ShiftOf` / the law above), it is not a second copy |
+| 2-5 | `scaling/rebase/KernelInverse.cpp:86, 99, 100, 101` | the Lanczos 2 / 3 / 4 kernel table of the re-base inverse (a luma kernel-inverse design, not a chroma phase table) |
+| 6-8 | `scaling/rebase/SourceRebase.cpp:4, 343, 344` | the `ChromaSiting` include and the two plane-shift updates of the re-based frame (callers of the helper in 1) |
+
+Plus one Bill hit (`LibplaceboVideoRenderer.cpp:21625`, reported, never blocking).

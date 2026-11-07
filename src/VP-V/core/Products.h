@@ -4,8 +4,10 @@
 
 #include "Indicator.h"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -273,11 +275,6 @@ constexpr uint32_t kMonitorMaxTiles = 16;
 constexpr uint32_t kMonitorRingBuffers = 2;
 constexpr uint32_t kMonitorBufferBytes = kMonitorMaxTiles * kMonitorTileEdge * kMonitorTileEdge * 4u;   // 4 194 304
 constexpr uint32_t kMonitorRingBytes = kMonitorBufferBytes * kMonitorRingBuffers;                        // 8 388 608 (8.4 MB)
-
-// The reference store's slot figure the plan targets (SA6) and what the code allocates today (TemporalDetailGpu:
-// RGBA16F raw + cleaned bands 8 B/px + R16 base 2 B/px = 10 B/px, 83 MB per 4K slot). The declaration uses the target.
-constexpr uint32_t kRefstoreTargetBytesPerPixelX2 = 9;      // 4.5 B/px (4 B/px at full size + 0.5 B/px half-size base)
-constexpr uint32_t kRefstoreTodayBytesPerPixel = 10;
 
 // Products declared outside FirstProducts by their owning module (dense ids appended at plan time) keep a registered
 // token here so every reader names the same node.
@@ -738,11 +735,10 @@ inline void AppendSourceRingProduct(std::vector<ProductDecl>& decls)
 }
 
 // TemporalDetail's products, redefined by doc 72 (unit v2). Every size here is the BUDGET-GOVERNED FLOOR ("stage 0": the
-// repair of the still / dark regions plus the full-resolution mid band at the true source resolution, as the laptop starts); the
+// repair of the still / dark regions plus the full-resolution mid band at the true source resolution, the least the budget grants); the
 // governor adds stages while VRAM and ms headroom allow, each visible and each shed in the reverse order. The stages, their size
 // rules and the inputs the framework cannot hold yet (kMaxInputs = 4) are the contract table of
 // modules/repair/temporal_detail/products/TdProductContracts.h. No fixed per-GPU tiers.
-constexpr uint8_t kRefSlots = 5;   // v1 TemporalDetail::kSlots (the v1 module code still allocates its v1 store)
 inline void AppendTemporalDetailProducts(std::vector<ProductDecl>& decls)
 {
     using detail::AddInput;
@@ -763,6 +759,9 @@ inline void AppendTemporalDetailProducts(std::vector<ProductDecl>& decls)
     an.spanMask = content;          // a trail never crosses a slip / full change
     an.missingInputForm = true;     // after a resync the first frame has no lag-1 state: made from scratch (carry-forward / unknown)
     AddTerm(an, 4, 28);
+    // The 8 px quadtree pool holds at most 25% of the 8 px cells (about 6 B per 16 px block), but a size rule has no fraction term, so it is
+    // declared at 100% of the cells (6 B x 4 cells per block): an over-declaration of ~18 B per 16 px block (0.6 MB at 4K) on purpose,
+    // so the declared budget is never below the worst case. Documented in docs/design/product-graph.md.
     AddTerm(an, 3, 6);
     an.rebasedPlane = true;
     an.refRenderMs = 1.5f;
@@ -825,6 +824,9 @@ inline void AppendSourceIdentityProduct(std::vector<ProductDecl>& decls)
 // pure function of P7(N-d), the CPU field copy of that pair and P4(N), known ahead and declared as a lane product. d is fixed per
 // graph (CameraLink::GuideLagFor); the registry carries the floor d = kGuideDefaultLag and CameraLink::SkeletonProductsWithGuide(d)
 // sets the measured one on a graph rebuild.
+// kGuideDefaultLag is a STRUCTURAL minimum, not a rate: the guide of pair N needs P7(N-d) read back (one frame behind the fit that made
+// it) and its CPU field copy, so d >= 2 whatever the source rate. The rate-dependent part (readback + p95 fit over the measured source
+// period) is CameraLink::GuideLagFor, which replaces this floor on every graph rebuild (SetGuideLag).
 constexpr uint8_t kGuideDefaultLag = 2;
 constexpr uint32_t kGuideBytesPerBlock = 20;   // RGBA32F guide + R32F code per 16 px block
 inline void AppendCameraGuideProduct(std::vector<ProductDecl>& decls)
@@ -852,11 +854,29 @@ inline void AppendCameraGuideProduct(std::vector<ProductDecl>& decls)
 // modules/repair/temporal_detail/products/TdProductContracts.h. The inputs that exceed kMaxInputs (4) are listed there too
 // (dependency: W1-SKG raises the limit; this declaration never silently drops one: it declares the first four and the contract
 // table records the full intended list, which a test compares).
-constexpr uint8_t kQualityPatternHistory = 128;   // frames (8 KB of system RAM)
+// Record histories are SECONDS of source time; the frame count follows the measured source rate (the same rule as the guide lag).
+// `sourcePeriodMs <= 0` (unmeasured: the status/planning view, tests) declares the field's maximum, kRecordHistoryMax: the records
+// are tens of bytes, so the bound costs kilobytes and never under-declares. `minFrames` keeps the structural floor of the record
+// (the lags its readers use). A rebuild with the measured period replaces the figure (SkeletonProducts(..., sourcePeriodMs)).
+constexpr uint8_t kRecordHistoryMax = 255;
+inline uint8_t HistoryFramesFor(double seconds, double sourcePeriodMs, uint8_t minFrames)
+{
+    if (!(sourcePeriodMs > 0.0) || !(seconds > 0.0))
+        return kRecordHistoryMax;
+    const double frames = std::ceil(seconds * 1000.0 / sourcePeriodMs - 1e-9);
+    const double clamped = (std::min)(double(kRecordHistoryMax), (std::max)(double(minFrames), frames));
+    return static_cast<uint8_t>(clamped);
+}
+constexpr double kQualityPatternHistorySeconds = 2.0;   // P15 looks back over this much source time (GOP / mini-GOP structure)
+constexpr uint8_t kQualityPatternMinFrames = 8;         // structural: the lags the pattern readers use (lead 2 + lag 1 + the frame)
+constexpr double kTdTrailSummaryHistorySeconds = 0.25;  // source identity folds the last quarter second of trail summaries
+constexpr uint8_t kTdTrailSummaryMinFrames = 3;         // structural: the frame, lag 1 (source identity) and one in flight
+inline uint8_t QualityPatternHistoryFrames(double sourcePeriodMs) { return HistoryFramesFor(kQualityPatternHistorySeconds, sourcePeriodMs, kQualityPatternMinFrames); }
+inline uint8_t TdTrailSummaryHistoryFrames(double sourcePeriodMs) { return HistoryFramesFor(kTdTrailSummaryHistorySeconds, sourcePeriodMs, kTdTrailSummaryMinFrames); }
 constexpr uint32_t kQualityPatternBytes = 64;
 constexpr uint32_t kCodingEvidenceSummaryBytes = 256;
 constexpr uint32_t kTdTrailSummaryBytes = 256;
-inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls)
+inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, double sourcePeriodMs = 0.0)
 {
     using detail::AddInput;
     using detail::AddLead;
@@ -866,6 +886,8 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls)
     const CounterMask content = Bit(kFull) | Bit(kContinuity);
     const CounterMask tdSettings = Bit(kSettingsRebase) | Bit(kSettingsAnalysis);
     const CounterMask rebased = content | Bit(kRebaseH) | Bit(kRebaseV);
+    const uint8_t qualityPatternHistory = QualityPatternHistoryFrames(sourcePeriodMs);
+    const uint8_t trailSummaryHistory = TdTrailSummaryHistoryFrames(sourcePeriodMs);
 
     // coding_evidence (P16): per 8x8 block 8 B (hash32, blockiness u16, copy u8, phase u8) + a 256 B per-frame summary; history 2.
     ProductDecl ce = Make(kCodingEvidence, "coding_evidence", "coding evidence (P16)", Backend::GpuCompute, 2, Tier::T0, rebased,
@@ -882,9 +904,9 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls)
     ce.refRenderMs = 0.2f;
     decls.push_back(ce);
 
-    // quality_pattern (P15): a CPU POD (~64 B) per unique source frame, history 128, a per-frame LANE product (not P14's held state):
+    // quality_pattern (P15): a CPU POD (~64 B) per unique source frame, history = kQualityPatternHistorySeconds of the measured source rate, a per-frame LANE product (not P14's held state):
     // role at lead 2. Short-queue substitute: P15c (visible "frame pattern: provisional").
-    ProductDecl qp = Make(kQualityPattern, "quality_pattern", "frame quality pattern (P15)", Backend::Cpu, kQualityPatternHistory,
+    ProductDecl qp = Make(kQualityPattern, "quality_pattern", "frame quality pattern (P15)", Backend::Cpu, qualityPatternHistory,
                           Tier::T0, content, Bit(kSettingsAnalysis));
     AddInput(qp, kCodingEvidence, 0);
     AddLead(qp, kCodingEvidence, 1);
@@ -900,7 +922,7 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls)
 
     // quality_pattern.causal (P15c): no lead, may not read P15.
     ProductDecl qc = Make(kQualityPatternCausal, "quality_pattern.causal", "frame quality pattern, causal (P15c)", Backend::Cpu,
-                          kQualityPatternHistory, Tier::T0, content, Bit(kSettingsAnalysis));
+                          qualityPatternHistory, Tier::T0, content, Bit(kSettingsAnalysis));
     AddInput(qc, kCodingEvidence, 0);
     AddInput(qc, kQualityPatternCausal, 1);
     qc.size.fixedBytes = kQualityPatternBytes;
@@ -961,8 +983,8 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls)
     tm.refRenderMs = 0.1f;
     decls.push_back(tm);
 
-    // td.trail_summary: a CPU record per frame (256 B, history 8) for source identity (lag >= 1), status and logs.
-    ProductDecl ts = Make(kTdTrailSummary, "td.trail_summary", "td trail summary", Backend::Cpu, 8, Tier::T1, content,
+    // td.trail_summary: a CPU record per frame (256 B, history = kTdTrailSummaryHistorySeconds of the measured source rate) for source identity (lag >= 1), status and logs.
+    ProductDecl ts = Make(kTdTrailSummary, "td.trail_summary", "td trail summary", Backend::Cpu, trailSummaryHistory, Tier::T1, content,
                           Bit(kSettingsAnalysis));
     AddInput(ts, kTdBlocks, 0);
     ts.size.fixedBytes = kTdTrailSummaryBytes;
@@ -975,7 +997,8 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls)
 // The registry the skeleton runs with: the first products, the camera products, then P10..P13, the TemporalDetail
 // products, P14, p7g and the temporal-detail engine products, in fixed id order. THE one assembly point.
 // `compactGrain` / `compactChroma`: the GRANTED storage of P10 (luma) and P10c (chroma planes).
-inline Registry SkeletonProducts(bool compactGrain, bool compactChroma)
+// `sourcePeriodMs`: the measured source frame period (0 = unmeasured), which sets the frame counts of the record histories.
+inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double sourcePeriodMs = 0.0)
 {
     std::vector<ProductDecl> d = FirstProducts().All();
     AppendCameraProducts(d);
@@ -985,7 +1008,7 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma)
     AppendTemporalDetailProducts(d);
     AppendSourceIdentityProduct(d);
     AppendCameraGuideProduct(d);
-    AppendTemporalDetailEngineProducts(d);
+    AppendTemporalDetailEngineProducts(d, sourcePeriodMs);
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }

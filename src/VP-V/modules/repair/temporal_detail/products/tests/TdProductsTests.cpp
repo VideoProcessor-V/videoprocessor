@@ -99,12 +99,41 @@ namespace Tests
 					lead2 = lead2 || qp.inputs[k].lead == 2;
 				}
 				Assert::IsTrue(lead1 && lead2, L"role at lead 2 from coding_evidence(N+1), (N+2)");
-				Assert::AreEqual(int(kQualityPatternHistory), int(qp.history));
+				Assert::AreEqual(int(kRecordHistoryMax), int(qp.history), L"unmeasured rate: the field maximum, never a hard-coded rate");
 				for (size_t k = 0; k < reg.Get(kQualityPatternCausal).inputCount; ++k)
 					Assert::IsTrue(reg.Get(kQualityPatternCausal).inputs[k].lead == 0 && reg.Get(kQualityPatternCausal).inputs[k].product != kQualityPattern);
 				// td.anchor_pass is Transient (the arena); td.memory is the whole store with no history.
 				Assert::IsTrue(reg.Get(kTdAnchorPass).residency == Residency::Transient);
 				Assert::AreEqual(0, int(reg.Get(kTdMemory).history));
+			}
+
+			TEST_METHOD(RecordHistoriesAreSecondsOfTheMeasuredSourceRate)
+			{
+				// 24000/1001 p, 25 p, 30 p, 59.94 p, 120 p: frames = ceil(seconds / period), within [structural floor, 255].
+				const double periods[] = { 1001.0 / 24.0, 40.0, 1001.0 / 30.0, 1001.0 / 60.0, 1000.0 / 120.0 };
+				for (double period : periods)
+				{
+					const Registry reg = VpSkeleton::SkeletonProducts(false, false, period);
+					const int qp = int(reg.Get(VpSkeleton::kQualityPattern).history);
+					const int ts = int(reg.Get(VpSkeleton::kTdTrailSummary).history);
+					Assert::AreEqual(int(QualityPatternHistoryFrames(period)), qp);
+					Assert::AreEqual(int(TdTrailSummaryHistoryFrames(period)), ts);
+					Assert::IsTrue(qp >= int(kQualityPatternMinFrames) && qp <= int(kRecordHistoryMax));
+					Assert::IsTrue(ts >= int(kTdTrailSummaryMinFrames) && ts <= int(kRecordHistoryMax));
+					if (qp < int(kRecordHistoryMax))
+						Assert::IsTrue(qp * period >= kQualityPatternHistorySeconds * 1000.0 - 1e-6 && (qp - 1) * period < kQualityPatternHistorySeconds * 1000.0 + 1e-6,
+							L"the window is the seconds, to within one frame");
+					if (ts > int(kTdTrailSummaryMinFrames) && ts < int(kRecordHistoryMax))
+						Assert::IsTrue(ts * period >= kTdTrailSummaryHistorySeconds * 1000.0 - 1e-6 && (ts - 1) * period < kTdTrailSummaryHistorySeconds * 1000.0 + 1e-6);
+				}
+				// A faster source needs more frames for the same seconds; a slower one fewer.
+				Assert::IsTrue(QualityPatternHistoryFrames(1000.0 / 60) > QualityPatternHistoryFrames(1000.0 / 24));
+				Assert::IsTrue(TdTrailSummaryHistoryFrames(1000.0 / 60) > TdTrailSummaryHistoryFrames(1000.0 / 24));
+				// Unmeasured (<= 0) declares the maximum; the structural floor holds for an absurdly slow source.
+				Assert::AreEqual(int(kRecordHistoryMax), int(QualityPatternHistoryFrames(0.0)));
+				Assert::AreEqual(int(kRecordHistoryMax), int(TdTrailSummaryHistoryFrames(-1.0)));
+				Assert::AreEqual(int(kQualityPatternMinFrames), int(QualityPatternHistoryFrames(60000.0)));
+				Assert::AreEqual(int(kTdTrailSummaryMinFrames), int(TdTrailSummaryHistoryFrames(60000.0)));
 			}
 
 			TEST_METHOD(ContractsCoverEveryEngineProductAndTheRegistryIsAPrefixOfTheIntendedInputs)
@@ -154,7 +183,7 @@ namespace Tests
 				size_t governed = 0;
 				for (const Contract& c : Contracts()) governed += c.stages.empty() ? 0u : 1u;
 				Assert::AreEqual(size_t(3), governed);
-				// The memory floor is the laptop's: stage 0 + still/dark floor + full-resolution mid band (2 B/px at full resolution).
+				// The memory floor is the budget-governed stage 0: + still/dark floor + full-resolution mid band (2 B/px at full resolution).
 				Assert::AreEqual(uint64_t(960) * 540 * 55 + uint64_t(1920) * 1080 + uint64_t(3840) * 2160 * 2, BytesAt(reg, VpSkeleton::kTdMemory, d4k, 0));
 				Assert::AreEqual(uint64_t(0), BytesAt(reg, VpSkeleton::kTdAnchorRefs, d4k, 0));
 				// No fixed per-GPU tier wording anywhere in the table.
@@ -248,11 +277,17 @@ namespace Tests
 				{
 					const ReadResult r = Read(c, PlaceholderSnapshot(), false, 0);
 					Assert::IsFalse(r.requested || r.usable || r.fallback.engaged);
-					Assert::AreEqual(std::string(FallbackIdOf(c)), r.fallback.id);
+					Assert::AreEqual(std::string(), r.fallback.id, L"not requested: no id built (allocation-free per-frame read)");
+					Assert::AreEqual(0u, r.causeMask);
 					Assert::AreEqual(std::string(), r.reason);
 					Assert::AreEqual(std::string(), StatusLine(c, r));
 					const ReadResult t = ReadToday(c);
 					Assert::IsFalse(t.requested || t.usable || t.fallback.engaged);
+					// The per-frame read builds no heap string: the ids / reason stay in the small-string buffer, and the stored lists and keys are reused.
+					Assert::IsTrue(t.fallback.id.empty() && t.fallback.reason.empty() && t.reason.empty());
+					Assert::IsTrue(t.fallback.id.capacity() == std::string().capacity() && t.reason.capacity() == std::string().capacity());
+					Assert::IsTrue(&NeededBy(c) == &NeededBy(c), L"NeededBy returns the stored list");
+					Assert::IsTrue(&FallbackKey(c, kCauseAbsent) == &FallbackKey(c, kCauseAbsent), L"keys are built once");
 				}
 				Assert::IsFalse(kEngineRequestedToday, L"no configuration key exists in reset 1");
 				for (const Entry& e : PlaceholderSnapshot()->entry)
@@ -265,15 +300,72 @@ namespace Tests
 				{
 					const ReadResult placeholder = Read(c, PlaceholderSnapshot(), true, 0);
 					Assert::IsTrue(placeholder.requested && !placeholder.usable && placeholder.fallback.engaged);
-					Assert::AreEqual(std::string(FallbackIdOf(c)), placeholder.fallback.id);
+					Assert::AreEqual(FallbackKey(c, kCauseAbsent), placeholder.fallback.id, L"keyed by consumer + cause");
+					Assert::IsTrue(placeholder.fallback.id != std::string(FallbackIdOf(c)), L"never the consumer's bare id");
 					for (ProductId p : NeededBy(c))
 						Assert::IsTrue(placeholder.reason.find(ContractOf(p)->token) != std::string::npos);
 					Assert::IsFalse(StatusLine(c, placeholder).empty());
 					const ReadResult none = Read(c, nullptr, true, 0);
 					Assert::IsTrue(none.fallback.engaged);
 					Assert::AreEqual(std::string("engine not built"), none.reason);
+					Assert::AreEqual(FallbackKey(c, kCauseNoEngine), none.fallback.id);
 					Assert::AreEqual(placeholder.missingMask, none.missingMask);
 				}
+			}
+
+			TEST_METHOD(FallbackKeysArePerIdAndCauseAndNeverTheConsumersBareId)
+			{
+				const Consumer c = Consumer::ChromaStage;
+				Snapshot s = FreshAll(1000);
+				s.entry[IndexOf(VpSkeleton::kTdMaps)].published = false;
+				const ReadResult absent = Read(c, &s, true, 2000);
+				Snapshot t = FreshAll(1000);
+				t.entry[IndexOf(VpSkeleton::kTdDelta)].maxAgeUs = 100;
+				const ReadResult stale = Read(c, &t, true, 2000);
+				const ReadResult nothing = Read(c, nullptr, true, 2000);
+				Assert::AreEqual(unsigned(kCauseAbsent), absent.causeMask);
+				Assert::AreEqual(unsigned(kCauseStale), stale.causeMask);
+				Assert::AreEqual(unsigned(kCauseNoEngine), nothing.causeMask);
+				Assert::IsTrue(absent.fallback.id != stale.fallback.id && stale.fallback.id != nothing.fallback.id && absent.fallback.id != nothing.fallback.id);
+				for (const ReadResult* r : { &absent, &stale, &nothing })
+					Assert::IsTrue(r->fallback.id.compare(0, std::strlen(FallbackIdOf(c)), FallbackIdOf(c)) == 0 && r->fallback.id != FallbackIdOf(c));
+				// Every (consumer, cause set) has its own key; the keys carry no heading separator.
+				std::set<std::string> all;
+				for (Consumer k : { Consumer::AdaptiveScaler, Consumer::DitherNeed, Consumer::SigmaDelta, Consumer::ChromaStage, Consumer::Deband, Consumer::Engine })
+					for (unsigned m = 1; m <= kCauseAll; ++m)
+					{
+						const std::string& key = FallbackKey(k, m);
+						Assert::IsTrue(!key.empty() && key.find('(') == std::string::npos && key.find("; ") == std::string::npos);
+						Assert::IsTrue(all.insert(key).second, L"keys are unique");
+					}
+				Assert::IsTrue(FallbackKey(c, 0).empty());
+				// Registry: the consumer's own classical cause (bare id) and the engine's two causes are three entries, none overwrites another.
+				FallbackStatus::Registry reg;
+				FallbackCatalog::Sync(reg, FallbackCatalog::ProductFallback(FallbackIdOf(c), "chroma split unavailable"));
+				Assert::IsTrue(SyncRead(reg, c, absent));
+				Assert::AreEqual(size_t(2), reg.Entries().size());
+				Assert::IsFalse(SyncRead(reg, c, absent), L"unchanged read: heading unchanged");
+				Assert::IsTrue(SyncRead(reg, c, stale), L"another cause replaces the first");
+				Assert::AreEqual(size_t(2), reg.Entries().size());
+				Assert::IsFalse(reg.Engaged(absent.fallback.id));
+				Assert::IsTrue(reg.Engaged(stale.fallback.id));
+				Assert::IsTrue(reg.Engaged(FallbackIdOf(c)), L"the consumer's own cause is untouched");
+				// The GUI notice sees two distinct ids.
+				FallbackStatus::Notices notices;
+				Assert::AreEqual(size_t(2), notices.Take(reg.Heading()).size());
+				Assert::IsTrue(SyncRead(reg, c, absent));
+				Assert::AreEqual(size_t(1), notices.Take(reg.Heading()).size(), L"a new cause is announced once");
+				// Recovery releases the cause key only.
+				Assert::IsTrue(SyncRead(reg, c, ReadResult()));
+				Assert::AreEqual(size_t(1), reg.Entries().size());
+				Assert::IsTrue(reg.Engaged(FallbackIdOf(c)));
+				// A mixed read has its own key (both causes named).
+				Snapshot m2 = FreshAll(1000);
+				m2.entry[IndexOf(VpSkeleton::kTdMaps)].published = false;
+				m2.entry[IndexOf(VpSkeleton::kTdDelta)].maxAgeUs = 100;
+				const ReadResult mixed = Read(c, &m2, true, 2000);
+				Assert::AreEqual(unsigned(kCauseAbsent | kCauseStale), mixed.causeMask);
+				Assert::IsTrue(mixed.fallback.id.find("absent+stale") != std::string::npos);
 			}
 
 			TEST_METHOD(ReadRecoversByItselfAndRejectsStaleOrForeignVersions)
@@ -330,7 +422,8 @@ namespace Tests
 				Assert::AreEqual(plain.reset, asked.reset);
 				Assert::AreEqual(plain.off, asked.off);
 				Assert::IsTrue(asked.td.fallback.engaged);
-				Assert::AreEqual(std::string("product.dither_need"), asked.td.fallback.id);
+				Assert::AreEqual(FallbackKey(Consumer::DitherNeed, kCauseAbsent), asked.td.fallback.id);
+				Assert::AreEqual(std::string("product.dither_need [td: absent]"), asked.td.fallback.id);
 				Assert::IsTrue(asked.status.find(plain.status) == 0 && asked.status.size() > plain.status.size());
 				DitherNeed::FrameArgs off = r;
 				off.enabled = false;
@@ -348,7 +441,7 @@ namespace Tests
 				const ChromaUpscale::Result r = ChromaUpscale::Upsample(y, cb, cr, -0.5, 0.0, ChromaUpscale::ActiveRect(), 10, 32.0);
 				Assert::AreEqual(std::string("ok"), r.status);
 				Assert::IsFalse(r.td.requested || r.td.fallback.engaged);
-				Assert::AreEqual(std::string("product.chroma_cfl"), r.td.fallback.id);
+				Assert::AreEqual(std::string(), r.td.fallback.id, L"not requested: no id string is built per frame");
 			}
 
 			TEST_METHOD(AdaptiveStageSigmaDeltaAndDebanderReportNothingUntilTheEngineIsRequested)
@@ -361,12 +454,12 @@ namespace Tests
 				SigmaDeltaVectors::NextVectorGuard guard;
 				Assert::IsFalse(guard.Apply(nullptr, 0, nullptr), L"no hooks: nothing applied");
 				Assert::IsFalse(guard.TemporalDetailRead().requested || guard.TemporalDetailRead().fallback.engaged);
-				Assert::AreEqual(std::string("product.sigma_delta"), guard.TemporalDetailRead().fallback.id);
+				Assert::AreEqual(std::string(), guard.TemporalDetailRead().fallback.id);
 				VpDebander::Module deband;
 				pl_frame src{}, dst{};
 				Assert::IsFalse(deband.Apply(nullptr, nullptr, src, VpDebander::Params(), dst), L"nothing to deband");
 				Assert::IsFalse(deband.TemporalDetailRead().requested || deband.TemporalDetailRead().fallback.engaged);
-				Assert::AreEqual(std::string("product.debander"), deband.TemporalDetailRead().fallback.id);
+				Assert::AreEqual(std::string(), deband.TemporalDetailRead().fallback.id);
 			}
 		};
 	}

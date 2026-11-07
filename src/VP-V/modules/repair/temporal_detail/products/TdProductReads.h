@@ -8,8 +8,13 @@
 //
 //   engine not requested          -> not a fallback: usable = false, the classical form runs exactly as before (byte-identical).
 //   engine requested, a product the consumer needs is absent / stale / of another unit version, or there is no engine at all
-//                                 -> the classical form, VISIBLY: the returned Decision is engaged (FallbackCatalog
-//                                    "product.td_*") with the reason, and it recovers by itself when the products return.
+//                                 -> the classical form, VISIBLY: the returned Decision is engaged with the reason, and it
+//                                    recovers by itself when the products return. Its key is the consumer's id PLUS the cause
+//                                    (FallbackKey: "product.chroma_cfl [td: absent]"), never the consumer's bare id: the bare id
+//                                    belongs to the consumer's own classical cause (a missing chroma split, ...) and one entry may
+//                                    not stand for, overwrite or release the other. Two causes are two entries (the GUI notice and
+//                                    Registry.Engage key on the key). Recovery goes through SyncRead(), which releases every cause
+//                                    key of the consumer that no longer applies.
 //   engine requested, every needed product published, fresh and of this unit version -> usable = true (reset 2).
 //
 // Reset 1 ships the PLACEHOLDER producer: PlaceholderSnapshot() publishes nothing, and kEngineRequestedToday is false (no
@@ -24,6 +29,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace TdProducts
 {
@@ -52,24 +58,76 @@ namespace TdProducts
 	// Whether the engine is asked for. No configuration key exists in reset 1 (deferred, SCHEMA lock), so this is false.
 	constexpr bool kEngineRequestedToday = false;
 
+	// Why a product is not usable: one bit per cause. A read's causeMask is the OR over its missing products (a mixed read has a
+	// mixed key); kCauseNoEngine stands alone (no producer at all).
+	enum : unsigned { kCauseAbsent = 1u, kCauseUnitVersion = 2u, kCauseStale = 4u, kCauseNoEngine = 8u, kCauseAll = 15u };
+
 	struct ReadResult
 	{
 		bool requested = false;
 		bool usable = false;                  // the engine's products may be used by the consumer
 		unsigned missingMask = 0;             // bit i = product index i (IndexOf) not usable
+		unsigned causeMask = 0;               // kCause* of the missing products; 0 unless the classical form stands in
 		std::string reason;                   // "" unless the classical form stands in for a requested engine
-		FallbackCatalog::Decision fallback;   // engaged exactly when requested && !usable
+		// Engaged exactly when requested && !usable; its id is then FallbackKey(consumer, causeMask). While not engaged the id is
+		// EMPTY on purpose: the per-frame read of a consumer that is not requested must not build a string (allocation-free); release
+		// through SyncRead(), never through Sync() on this decision.
+		FallbackCatalog::Decision fallback;
 	};
+
+	inline unsigned CauseOf(const Entry& e, uint32_t expectedVersion, int64_t nowUs)
+	{
+		if (!e.published)
+			return kCauseAbsent;
+		if (e.unitVersion != expectedVersion)
+			return kCauseUnitVersion;
+		if (e.maxAgeUs > 0 && (nowUs - e.timeUs > e.maxAgeUs || nowUs < e.timeUs - e.maxAgeUs))
+			return kCauseStale;
+		return 0;
+	}
+
+	inline const char* CauseWord(unsigned cause)
+	{
+		switch (cause)
+		{
+		case kCauseAbsent: return "absent";
+		case kCauseUnitVersion: return "unit version";
+		case kCauseStale: return "stale";
+		case kCauseNoEngine: return "engine not built";
+		}
+		return "";
+	}
 
 	inline const char* WhyNotUsable(const Entry& e, uint32_t expectedVersion, int64_t nowUs)
 	{
-		if (!e.published)
-			return "absent";
-		if (e.unitVersion != expectedVersion)
-			return "unit version";
-		if (e.maxAgeUs > 0 && (nowUs - e.timeUs > e.maxAgeUs || nowUs < e.timeUs - e.maxAgeUs))
-			return "stale";
-		return nullptr;
+		const unsigned cause = CauseOf(e, expectedVersion, nowUs);
+		return cause ? CauseWord(cause) : nullptr;
+	}
+
+	constexpr size_t kConsumerCount = 6;   // Consumer::AdaptiveScaler .. Engine
+
+	// The key of a consumer's temporal-detail fallback for a cause set: "<consumer id> [td: absent+stale]". Built once for every
+	// (consumer, cause set) at first use, then returned by reference: the per-frame path never builds a string. The text has no "(", ")"
+	// or "; " (FallbackStatus::Ids splits on those), so the heading and the GUI notice keep the key whole.
+	inline const std::string& FallbackKey(Consumer consumer, unsigned causeMask)
+	{
+		static const std::vector<std::string> keys = []()
+		{
+			std::vector<std::string> k(kConsumerCount * (kCauseAll + 1));
+			for (size_t c = 0; c < kConsumerCount; ++c)
+				for (unsigned m = 1; m <= kCauseAll; ++m)
+				{
+					std::string causes;
+					for (unsigned bit : { unsigned(kCauseAbsent), unsigned(kCauseUnitVersion), unsigned(kCauseStale), unsigned(kCauseNoEngine) })
+						if (m & bit)
+							causes += (causes.empty() ? "" : "+") + std::string(CauseWord(bit));
+					k[c * (kCauseAll + 1) + m] = std::string(FallbackIdOf(Consumer(c))) + " [td: " + causes + "]";
+				}
+			return k;
+		}();
+		static const std::string none;
+		const size_t c = size_t(consumer);
+		return c < kConsumerCount && (causeMask & kCauseAll) != 0 ? keys[c * (kCauseAll + 1) + (causeMask & kCauseAll)] : none;
 	}
 
 	// `snapshot` may be null (no producer at all).
@@ -77,15 +135,12 @@ namespace TdProducts
 	{
 		ReadResult r;
 		r.requested = requested;
-		const char* id = FallbackIdOf(consumer);
 		if (!requested)
-		{
-			r.fallback = FallbackCatalog::Released(id);
 			return r;
-		}
 		if (!snapshot)
 		{
-			r.reason = "engine not built";
+			r.reason = CauseWord(kCauseNoEngine);
+			r.causeMask = kCauseNoEngine;
 			for (ProductId p : NeededBy(consumer))
 				r.missingMask |= 1u << unsigned(IndexOf(p));
 		}
@@ -93,23 +148,43 @@ namespace TdProducts
 		{
 			for (ProductId p : NeededBy(consumer))
 			{
-				const char* why = WhyNotUsable(snapshot->Of(p), ContractOf(p)->unitVersion, nowUs);
-				if (!why)
+				const unsigned cause = CauseOf(snapshot->Of(p), ContractOf(p)->unitVersion, nowUs);
+				if (!cause)
 					continue;
 				r.missingMask |= 1u << unsigned(IndexOf(p));
-				r.reason += (r.reason.empty() ? "" : "; ") + std::string(ContractOf(p)->token) + " " + why;
+				r.causeMask |= cause;
+				r.reason += (r.reason.empty() ? "" : "; ") + std::string(ContractOf(p)->token) + " " + CauseWord(cause);
 			}
 		}
 		if (r.missingMask == 0)
 		{
 			r.usable = true;
-			r.fallback = FallbackCatalog::Released(id);
 			return r;
 		}
-		// The consumer's own id (its status key) with the engine's wording: the existing entry's text names another cause (e.g. a
-		// missing chroma split) and would be false here.
-		r.fallback = FallbackCatalog::Engaged(id, std::string("temporal-detail products unavailable, classical form runs: ") + r.reason);
+		// Keyed by consumer + cause (never the consumer's bare id: that is the key of its own classical cause) and worded for the
+		// engine's cause: the existing entry's text names another cause (e.g. a missing chroma split) and would be false here.
+		r.fallback = FallbackCatalog::Engaged(FallbackKey(consumer, r.causeMask).c_str(),
+			std::string("temporal-detail products unavailable, classical form runs: ") + r.reason);
 		return r;
+	}
+
+	// Applies a read to a registry: engages the key of its cause, and releases every OTHER cause key of the consumer (a read that
+	// moved from "absent" to "stale" replaces the entry, one that recovered removes it). The consumer's bare id is never touched
+	// (it belongs to its own classical cause). True when the heading changed.
+	inline bool SyncRead(FallbackStatus::Registry& registry, Consumer consumer, const ReadResult& r)
+	{
+		bool changed = false;
+		const std::string& engagedKey = r.fallback.engaged ? FallbackKey(consumer, r.causeMask) : FallbackKey(consumer, 0);
+		for (unsigned m = 1; m <= kCauseAll; ++m)
+		{
+			const std::string& key = FallbackKey(consumer, m);
+			if (r.fallback.engaged && key == engagedKey)
+				continue;
+			changed = registry.Release(key) || changed;
+		}
+		if (r.fallback.engaged)
+			changed = FallbackCatalog::Sync(registry, r.fallback) || changed;
+		return changed;
 	}
 
 	// The status line of a consumer under a read: its fallback wording while the classical form stands in, "" otherwise.

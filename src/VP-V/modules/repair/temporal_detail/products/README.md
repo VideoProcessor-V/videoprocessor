@@ -28,20 +28,20 @@ Registry ids (doc 72 section 1.1; ids 16-18 keep their numbers with new tokens a
 | 18 | `td.anchor_pass` (v1: td.admission) | anchor repair, Transient arena | T2 gap job | TemporalDetail (2) | T2 | 24.9 MB arena peak |
 | 20 | `p7g_camera_guide` | camera guidance, now REGISTERED (was claimed as `kSkeletonProductEnd`) | lane / camera worker | camera (1) | T0 | 0.6 MB |
 | 21 | `coding_evidence` (P16) | per 8x8 block 8 B + 256 B summary | lane (fused with P11) / TD / abstain | U13 CodingEvidence (1) | T0 | 1.04 MB |
-| 22 | `quality_pattern` (P15) | per-frame LANE product, role at lead 2 (NOT P14's held state) | lane CPU / TD / P15c | QualityPattern (1) | T0 | 64 B x 128 history |
-| 23 | `quality_pattern.causal` (P15c) | the short-queue substitute of P15 | same | QualityPattern (1) | T0 | 64 B x 128 history |
+| 22 | `quality_pattern` (P15) | per-frame LANE product, role at lead 2 (NOT P14's held state) | lane CPU / TD / P15c | QualityPattern (1) | T0 | 64 B x history (2 s of the measured source rate) |
+| 23 | `quality_pattern.causal` (P15c) | the short-queue substitute of P15 | same | QualityPattern (1) | T0 | 64 B x history (2 s of the measured source rate) |
 | 24 | `refined_field` (P3r) | DMVR-style per-block vectors + confidence; per-pixel offsets are NOT stored (derived on the fly) | lane after P3 / TD / unrefined P3 | U15 FieldRefine (1) | T0 | 1.04 MB |
 | 25 | `td.anchor_refs` | received luma of the last anchors | TD copy | TemporalDetail (2) | T1 | 0 (governed) |
 | 26 | `td.delta` | lane -> render hand-off of the repair delta | lane / TD apply / carry-forward | TemporalDetail (2) | T1 | 3.24 MB (stage 0) |
 | 27 | `td.maps` | THE consumer-facing per-block map product (12 fields, U19) | lane / TD apply / classical | U19 TdMapsView (1) | T1 | 0.78 MB |
-| 28 | `td.trail_summary` | CPU record per frame for source identity / status | TD job | TemporalDetail (2) | T1 | 256 B x 8 history |
+| 28 | `td.trail_summary` | CPU record per frame for source identity / status | TD job | TemporalDetail (2) | T1 | 256 B x history (0.25 s of the measured source rate) |
 
 The seven per-block map reservations of the first list (trail confidence, residual + validity, real detail, grain level, stability,
 lighting view, I-to-I drift) are FIELDS of `td.maps` (`TdMapsView::Field`); the per-pixel BDOF/PROF offsets are dropped (derived by U15's accessor).
 Consumer fallback when absent: each consumer's classical form, byte-identical today (table in "Status and fallbacks").
 
 **Budget-governed, no fixed tiers.** The registry declares each large buffer at its FLOOR (stage 0: the repair of the still / dark regions
-plus the full-resolution mid band at the true source resolution, as the laptop starts). `TdProductContracts.h` lists the larger stages
+plus the full-resolution mid band at the true source resolution, the least the budget grants). `TdProductContracts.h` lists the larger stages
 (`td.memory` full, `td.anchor_refs` 3 anchors, `td.delta` with the full-resolution atlas); the governor adds them while VRAM and ms headroom
 last and sheds them in reverse order, each step visible. Declared totals at 4K: floor 54.95 MB GPU (+ 24.9 MB arena peak, 18.4 KB records), full
 241.6 MB (`TdProducts::BudgetAt`, pinned by a test). Ring multipliers come from the graph.
@@ -57,7 +57,7 @@ products absent (reset 1) it debands everywhere exactly as today. The order tabl
 
 ## Status and fallbacks
 
-| Consumer | Reads | Absent / stale / unit mismatch | Fallback id | Status text (once requested) |
+| Consumer | Reads | Absent / stale / unit mismatch | Base id (catalog row) | Status text (once requested) |
 |---|---|---|---|---|
 | adaptive scaling | `td.maps` (real detail, stability, coding noise), `refined_field` | today's behaviour | `product.adaptive_downscale` | "adaptive scaling: classical form (temporal-detail products: ...)" in the stage's status lines |
 | dither need | `td.maps` (own grain, stability), `quality_pattern` | today's grain path | `product.dither_need` | appended to the dither-need status |
@@ -68,6 +68,14 @@ products absent (reset 1) it debands everywhere exactly as today. The order tabl
 
 Today `kEngineRequestedToday` is false: nothing is requested, no line appears, every path is byte-identical. Requested with products absent: the
 Decision is engaged and the line says which product is absent / stale / of another unit version; it recovers by itself.
+
+**Keys are per id + cause.** The base id above is the consumer's OWN classical-cause entry (for example a missing chroma split) and the id the catalog row
+names. The temporal-detail read never engages that bare id: its entry is `TdProducts::FallbackKey(consumer, causeMask)`, for example
+`product.chroma_cfl [td: absent]` or `product.chroma_cfl [td: absent+stale]` (causes: absent, unit version, stale, engine not built; a mixed read names
+every cause present). The GUI's one-time notice and `Registry.Engage` key on that string, so the consumer's own cause and each engine cause are separate
+entries, none overwrites or releases another, and a new cause is announced once. `TdProducts::SyncRead(registry, consumer, read)` engages the key of the
+read and releases the consumer's other cause keys (recovery removes the entry); it never touches the base id. A read that is not engaged carries an empty
+id on purpose: the per-frame read of a consumer that is not requested builds no string (the keys are built once, `NeededBy` returns a stored vector).
 
 ## Tests
 

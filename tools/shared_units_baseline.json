@@ -239,7 +239,7 @@
   },
   "U19": {
    "name": "td_maps_view",
-   "blocking": false,
+   "blocking": true,
    "baseline_duplicates": 0,
    "known_false_positive": []
   },

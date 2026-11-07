@@ -377,6 +377,16 @@ namespace BasicChromaTestsNs
 			const Plane16 oc = UpsamplePlane(RandomPlane(9, 5, 4), oddG);
 			Assert::AreEqual(17, oc.w);
 			Assert::AreEqual(9, oc.h);
+			// UpsamplePlane guards the plane against the geometry (it is a public entry): wrong size or a short sample vector makes no picture.
+			Assert::AreEqual(0, UpsamplePlane(RandomPlane(8, 5, 4), oddG).w);
+			Assert::AreEqual(0, UpsamplePlane(RandomPlane(9, 4, 4), oddG).w);
+			Assert::AreEqual(0, UpsamplePlane(Plane16(), oddG).w);
+			Plane16 shortPlane = RandomPlane(9, 5, 4);
+			shortPlane.v.resize(10);
+			Assert::AreEqual(0, UpsamplePlane(shortPlane, oddG).w);
+			const Geometry sameG = Geo(8, 8, 1, 1, Siting::Center);
+			Assert::AreEqual(0, UpsamplePlane(Plane16(4, 4), sameG).w, L"4:4:4 copies only a plane of the right size");
+			Assert::AreEqual(8, UpsamplePlane(Plane16(8, 8, 7), sameG).w);
 		}
 
 		TEST_METHOD(TheEngineReadPathIsInertWhileNotRequestedAndVisibleWhenRequestedWithoutProducts)
@@ -388,7 +398,7 @@ namespace BasicChromaTestsNs
 			Assert::AreEqual(std::string(), TdProducts::StatusLine(TdProducts::Consumer::ChromaStage, plain.td));
 			const Result asked = Upsample(c1, c2, g, TdProducts::PlaceholderSnapshot(), true, 0);
 			Assert::IsTrue(asked.td.fallback.engaged);
-			Assert::AreEqual(std::string("product.chroma_cfl"), asked.td.fallback.id);
+			Assert::AreEqual(TdProducts::FallbackKey(TdProducts::Consumer::ChromaStage, TdProducts::kCauseAbsent), asked.td.fallback.id, L"keyed per id + cause, not the bare id");
 			Assert::IsTrue(asked.cb.v == plain.cb.v && asked.cr.v == plain.cr.v, L"the plain kernel runs either way: byte-identical");
 			const Result again = Upsample(c1, c2, g);
 			Assert::IsTrue(again.cb.v == plain.cb.v && again.cr.v == plain.cr.v, L"deterministic");

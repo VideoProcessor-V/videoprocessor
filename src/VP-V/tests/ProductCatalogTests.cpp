@@ -320,8 +320,8 @@ namespace ProductCatalogTestsNs
 				{ kP9CameraSmoothed, CameraLink::kCameraUnitVersion },
 				{ kP11RegionBlockStats, RegionEvidence::kUnitVersion },
 				{ kP12LightLevel, LightLevel::kUnitVersion },
-				{ kTdAnalysis, TemporalDetail::kUnitVersion }, { kTdRefstore, TemporalDetail::kUnitVersion },
-				{ kTdAdmission, TemporalDetail::kUnitVersion },
+				{ kTdAnalysis, TdProducts::kUnitVersion }, { kTdRefstore, TdProducts::kUnitVersion },
+				{ kTdAdmission, TdProducts::kUnitVersion },
 				{ kSourceIdentity, SourceIdentity::kUnitVersion },
 				{ kP10GrainSplit, GrainSplit::kUnitVersion }, { kP10cGrainSplitChroma, GrainSplit::kUnitVersion },
 			};
@@ -335,6 +335,8 @@ namespace ProductCatalogTestsNs
 			}
 			// The temporal-detail engine products: each contract's unit version is the catalog's expectation.
 			Assert::AreEqual(2u, kExpectedTemporalDetailUnit);
+			Assert::AreEqual(2u, TdProducts::kUnitVersion);
+			Assert::AreEqual(1u, TemporalDetail::kUnitVersion, L"the v1 module code (415 MB class store) stays v1 until the v2 engine replaces it");
 			Assert::AreEqual(TdProducts::kCodingEvidenceUnit, kExpectedCodingEvidenceUnit);
 			Assert::AreEqual(TdProducts::kQualityPatternUnit, kExpectedQualityPatternUnit);
 			Assert::AreEqual(TdProducts::kFieldRefineUnit, kExpectedFieldRefineUnit);
