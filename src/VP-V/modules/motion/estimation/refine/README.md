@@ -39,7 +39,7 @@ No config key is read. The behaviour follows its consumers (the lane runs the st
 ## Status and fallbacks
 
 * `FallbackCatalog` style entry `motion refinement` (`RefinedFieldProducer::Decision`): engaged when a consumer asked for `refined_field` and the producer is not Fresh; wording `motion: <refinement not bound ... | refinement late>; unrefined P3 vectors used`. The status line is `RefinedFieldProducer::StatusLine()`. Both are visible once bound to the Ctrl+I line / Config status at P5a.
-* U15 (`field_refine`) is registered in `tools/check_shared_units.py`: blocking, baseline 0; owner this folder; signatures `dmvr`, `bdof`, `prof`, `error[_ ]?surface`; allow `vpu_field_refine\w*`. `refined_field` (product id 24) stays declared by the W1-RES catalog: consumers read it, they never redeclare it.
+* U15 (`field_refine`) is registered in `tools/check_shared_units.py`: blocking, baseline 0; owner this folder; signatures `dmvr`, `bdof`, `\bprof\b`, `error[_ ]?surface`; allow `vpu_field_refine\w*`. `refined_field` (product id 24) stays declared by the W1-RES catalog: consumers read it, they never redeclare it.
 
 ## Tests
 
