@@ -34,6 +34,7 @@ namespace SourceIdentity
 			double minGateFraction = 0.25;
 			int minGateLinesFloor = 3;
 			double trimFraction = 0.2;
+			int maxLines = 16;              // lines used, evenly spread (F0: the size is still right down to 8 lines)
 		};
 
 		struct ProbeResult
@@ -47,6 +48,8 @@ namespace SourceIdentity
 			double medianLineStd = 0.0;
 			int syntheticAxisLen = 0;
 			int syntheticLength = 0;
+			double costMs = 0.0;            // wall time of this call, from the verifier clock hook (0 when none is set)
+			bool cold = false;              // operators had to be built (cache miss)
 		};
 
 		class PowerProbe
@@ -57,18 +60,34 @@ namespace SourceIdentity
 			static bool Run(DescaleVerifier& verifier, const LineSet& ls, double floorCodes, double roundStepCodes,
 				const ProbeSettings& ps, ProbeResult& out)
 			{
+				const VerifierSettings& vs = verifier.Settings();
+				const double t0 = vs.nowMs != nullptr ? vs.nowMs(vs.clockCtx) : 0.0;
+				const bool ok = RunImpl(verifier, ls, floorCodes, roundStepCodes, ps, out);
+				out.costMs = vs.nowMs != nullptr ? vs.nowMs(vs.clockCtx) - t0 : 0.0;
+				return ok;
+			}
+
+		private:
+			static bool RunImpl(DescaleVerifier& verifier, const LineSet& ls, double floorCodes, double roundStepCodes,
+				const ProbeSettings& ps, ProbeResult& out)
+			{
 				out = ProbeResult();
 				if (ls.count < 1 || ls.length < 128 || ls.axisLen < 64 || !(ps.ratio > 0.2) || !(ps.ratio < 0.95))
 				{
 					out.reason = kReasonBadInput | kReasonNoPower;
 					return false;
 				}
+				// The lines used: maxLines of them, evenly spread.
+				const int nl = std::min(ls.count, std::max(1, ps.maxLines));
+				std::vector<int> pick(static_cast<size_t>(nl));
+				for (int i = 0; i < nl; ++i)
+					pick[static_cast<size_t>(i)] = (i * ls.count) / nl;
 				// What the real lines look like (for the reason when the probe is unseen).
 				double sumMean = 0.0;
-				std::vector<double> stds(static_cast<size_t>(ls.count), 0.0);
-				for (int j = 0; j < ls.count; ++j)
+				std::vector<double> stds(static_cast<size_t>(nl), 0.0);
+				for (int j = 0; j < nl; ++j)
 				{
-					const double* y = ls.Line(j);
+					const double* y = ls.Line(pick[static_cast<size_t>(j)]);
 					double m = 0.0;
 					for (int i = 0; i < ls.length; ++i)
 						m += y[i];
@@ -79,8 +98,8 @@ namespace SourceIdentity
 					sumMean += m;
 					stds[static_cast<size_t>(j)] = std::sqrt(v / static_cast<double>(ls.length));
 				}
-				out.meanCode = sumMean / static_cast<double>(ls.count);
-				out.medianLineStd = MedianOf(stds.data(), ls.count);
+				out.meanCode = sumMean / static_cast<double>(nl);
+				out.medianLineStd = MedianOf(stds.data(), nl);
 
 				// Synthetic upscale of every line: N' output pixels from the N real ones.
 				const KernelInfo& ki = Kernel(ps.kernel);
@@ -121,11 +140,12 @@ namespace SourceIdentity
 				syn.axis = ls.axis;
 				syn.axisLen = Nn;
 				syn.origin = jlo;
-				syn.Resize(ls.count, L2);
-				syn.cross = ls.cross;
-				for (int l = 0; l < ls.count; ++l)
+				syn.Resize(nl, L2);
+				for (int l = 0; l < nl; ++l)
+					syn.cross[static_cast<size_t>(l)] = pick[static_cast<size_t>(l)] < static_cast<int>(ls.cross.size()) ? ls.cross[static_cast<size_t>(pick[static_cast<size_t>(l)])] : 0;
+				for (int l = 0; l < nl; ++l)
 				{
-					const double* y = ls.Line(l);
+					const double* y = ls.Line(pick[static_cast<size_t>(l)]);
 					double* o = syn.Line(l);
 					for (int j = 0; j < L2; ++j)
 					{
@@ -154,6 +174,7 @@ namespace SourceIdentity
 					return false;
 				}
 				out.ran = true;
+				out.cold = vr.cold;
 				const CandidateResult& cr = vr.candidates[0];
 				std::vector<double> gated;
 				const double floorC = floorCodes > 1e-3 ? floorCodes : 1e-3;

@@ -45,7 +45,7 @@ namespace SourceIdentity
 		{
 			int coarseHalfWidth = 4;            // integers scanned each side of a candidate by the coarse stage
 			int coarseStep = 1;                 // step of that scan (the notch of a short window is a few integers wide)
-			int coarseLines = 16;               // lines used by the coarse stage
+			int coarseLines = 8;                // lines used by the coarse stage (F0: the size is still right down to 8 lines)
 			double coarseWindowFraction = 0.125;   // coarse window = this fraction of N ...
 			int coarseMinWindow = 160;          // ... but at least this many rows
 			int exactHalfWidth = 1;             // integers scanned each side by the exact stage
@@ -59,6 +59,10 @@ namespace SourceIdentity
 			double maxLatentRatio = 0.985;      // n / N above this is not an upscale
 			int phaseCount = 1;                 // odd; sub-sample phases tried at the best integer
 			double phaseStep = 0.25;            // latent samples between phases
+			// Optional wall-clock hook for the cost the result reports (the units themselves never read a clock): returns
+			// milliseconds from any monotonic source; the caller (SID-C2) passes steady_clock. nullptr = costMs stays 0.
+			double (*nowMs)(void*) = nullptr;
+			void* clockCtx = nullptr;
 			size_t cacheLimit = 512;            // operators kept (about 70 MB at 3840x2160 with 3 candidates per axis; time only)
 		};
 
@@ -104,6 +108,10 @@ namespace SourceIdentity
 		struct VerifyResult
 		{
 			uint32_t reason = 0;
+			double costMs = 0.0;      // wall time of this Evaluate (needs VerifierSettings::nowMs), for a CPU-share governor
+			bool cold = false;        // operators were built during this call (a cache miss), so the cost is the cold one
+			int operatorBuilds = 0;   // deterministic work counters of this call
+			int solves = 0;
 			std::vector<CandidateResult> candidates;
 		};
 
@@ -119,7 +127,14 @@ namespace SourceIdentity
 			bool Evaluate(const LineSet& ls, const int* cand, int count, const VerifyOptions& opt, VerifyResult& out)
 			{
 				out.reason = 0;
+				out.costMs = 0.0;
+				out.cold = false;
+				out.operatorBuilds = 0;
+				out.solves = 0;
 				out.candidates.clear();
+				const double clock0 = s_.nowMs != nullptr ? s_.nowMs(s_.clockCtx) : 0.0;
+				const int builds0 = builds_;
+				const int solves0 = solves_;
 				if (ls.count < 1 || ls.axisLen < 64 || ls.length < 96 || cand == nullptr || count <= 0)
 				{
 					out.reason = (count <= 0) ? kReasonNoCandidates : kReasonBadInput;
@@ -212,6 +227,10 @@ namespace SourceIdentity
 				}
 				for (int c = 0; c < count; ++c)
 					out.reason |= out.candidates[static_cast<size_t>(c)].reason;
+				out.operatorBuilds = builds_ - builds0;
+				out.solves = solves_ - solves0;
+				out.cold = out.operatorBuilds > 0;
+				out.costMs = s_.nowMs != nullptr ? s_.nowMs(s_.clockCtx) - clock0 : 0.0;
 				return true;
 			}
 
@@ -237,6 +256,7 @@ namespace SourceIdentity
 					return it->second->Ok() ? it->second.get() : nullptr;
 				std::unique_ptr<DescaleOperator> op(new DescaleOperator());
 				op->Build(k.N, k.n, k.kernel, phase, k.origin, k.length);
+				++builds_;
 				const DescaleOperator* raw = op.get();
 				cache_[k] = std::move(op);
 				order_.push_back(k);
@@ -263,6 +283,7 @@ namespace SourceIdentity
 				key.origin = ls.origin + winOff;
 				key.length = winLen;
 				const DescaleOperator* op = Op(key, static_cast<double>(key.phaseQ) / 1024.0);
+				++solves_;
 				if (op == nullptr)
 					return false;
 				double rss = 0.0;
@@ -659,6 +680,8 @@ namespace SourceIdentity
 			std::map<OpKey, std::unique_ptr<DescaleOperator>> cache_;
 			std::vector<OpKey> order_;
 			std::vector<double> scratch_;
+			int builds_ = 0;
+			int solves_ = 0;
 		};
 	}
 }

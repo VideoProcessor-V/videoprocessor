@@ -768,7 +768,7 @@ namespace Tests
 					{
 						const CandidateResult& c = r.vr.candidates[k];
 						if (c.valid)
-							Assert::IsTrue(c.stat > -0.2, L"a native picture shows no dip at a common size");
+							Assert::IsTrue(c.stat > (c.exactDone ? -0.2 : -0.3), L"a native picture shows no dip at a common size (coarse-only values use 8 lines, so a wider margin)");
 					}
 					for (size_t k = 0; k < r.props.size(); ++k)
 						Assert::IsTrue(r.props[k].source == kSourceCaller, L"no polyphase evidence on a native picture");
@@ -829,6 +829,10 @@ namespace Tests
 			Assert::IsTrue(v2.Evaluate(a.v, one, 1, few, r2));
 			Assert::IsTrue(r2.candidates[0].exactDone && r2.candidates[0].lineCount == 16 && r2.candidates[0].n == 720);
 			Assert::IsTrue(r2.candidates[0].stat < -0.5, L"16 lines still show the dip");
+			Assert::IsTrue(r2.solves > 0 && r2.operatorBuilds > 0 && r2.cold, L"deterministic work counters: the first call builds operators");
+			VerifyResult r3;
+			Assert::IsTrue(v2.Evaluate(a.v, one, 1, few, r3));
+			Assert::IsTrue(r3.operatorBuilds == 0 && !r3.cold && r3.solves == r2.solves, L"the second call is warm and does the same solves");
 			Assert::IsTrue(r2.candidates[0].lineStat.size() == 16 && r2.candidates[0].segStat.size() == 16u * static_cast<size_t>(r2.candidates[0].segCount));
 		}
 
@@ -1435,6 +1439,15 @@ namespace Tests
 		}
 	};
 
+	namespace ChainSynth
+	{
+		inline double NowMs(void*)
+		{
+			using Clock = std::chrono::steady_clock;
+			return std::chrono::duration<double, std::milli>(Clock::now().time_since_epoch()).count();
+		}
+	}
+
 	TEST_CLASS(ChainTimingTests)
 	{
 	public:
@@ -1453,8 +1466,10 @@ namespace Tests
 			const int counts[2] = { 1, 3 };
 			for (int ci = 0; ci < 2; ++ci)
 			{
-				DescaleVerifier verifier;
-				DescaleVerifier probeVerifier;   // the probe has its own cache
+				VerifierSettings vsettings;
+				vsettings.nowMs = &NowMs;   // the cost the result reports, for the CPU-share governor
+				DescaleVerifier verifier(vsettings);
+				DescaleVerifier probeVerifier(vsettings);   // the probe has its own cache
 				PolyphaseProposer prop[2];
 				ChainEvidence ev;
 				std::ostringstream m;
@@ -1494,8 +1509,9 @@ namespace Tests
 						EvidenceUpdate u;
 						ev.Submit(axis, o, u);
 						const Clock::time_point t4 = Clock::now();
-						m << " axis" << axis << "(proposer " << ms(t0, t1) << ", verifier " << ms(t1, t2) << ", probe " << ms(t2, t3)
-							<< ", evidence " << ms(t3, t4) << ")";
+						m << " axis" << axis << "(proposer " << ms(t0, t1) << ", verifier " << ms(t1, t2) << " [reported " << vr.costMs
+							<< (vr.cold ? " cold, " : " warm, ") << vr.solves << " solves, " << vr.operatorBuilds << " builds], probe " << ms(t2, t3)
+							<< " [reported " << pr.costMs << (pr.cold ? " cold" : " warm") << "], evidence " << ms(t3, t4) << ")";
 						total += ms(t0, t4);
 					}
 					m << " total " << total << " ms]";

@@ -42,7 +42,7 @@ Every tunable is a member of a settings struct with its default in the header (h
 | chain_min_run | SamplerSettings::minRun | int px | 16.. | 64 | inner extent below this: plan invalid (kReasonShortLines); tiers: same on all |
 | chain_coarse_half_width | VerifierSettings::coarseHalfWidth | int | 0..16 | 4 | coarse stage scans n +- this; tiers: same on all |
 | chain_coarse_step | VerifierSettings::coarseStep | int | 1..8 | 1 | a short-window notch is only a few integers wide: step 1 (doc 78 said 4; measured, see Method); tiers: same on all |
-| chain_coarse_lines | VerifierSettings::coarseLines | int | 4..64 | 16 | lines of the coarse stage; tiers: budget-governed |
+| chain_coarse_lines | VerifierSettings::coarseLines | int | 4..64 | 8 | lines of the coarse stage (it only refines and ranks candidates; F0: the size is right down to 8 lines); tiers: budget-governed |
 | chain_coarse_window_fraction | VerifierSettings::coarseWindowFraction | float | 0.05..0.5 | 0.125 | coarse window = N x this; tiers: same on all |
 | chain_coarse_min_window | VerifierSettings::coarseMinWindow | int px | 64.. | 160 | lower bound of the coarse window; tiers: same on all |
 | chain_exact_half_width | VerifierSettings::exactHalfWidth | int | 0..8 | 1 | exact stage scans the refined n +- this (the coarse stage already centres it); tiers: same on all |
@@ -97,6 +97,7 @@ Every tunable is a member of a settings struct with its default in the header (h
 | chain_probe_min_gate_fraction | ProbeSettings::minGateFraction | float | 0.05..1 | 0.25 | gate as the evidence stage; tiers: same on all |
 | chain_probe_min_gate_lines_floor | ProbeSettings::minGateLinesFloor | int | 1..16 | 3 | gate as the evidence stage; tiers: same on all |
 | chain_probe_trim_fraction | ProbeSettings::trimFraction | float | 0..0.4 | 0.2 | trimmed mean of the probe statistic; tiers: same on all |
+| chain_probe_max_lines | ProbeSettings::maxLines | int | 4..64 | 16 | lines the probe uses, evenly spread (F0: the size is right down to 8 lines); tiers: budget-governed |
 
 ## Files
 
@@ -138,4 +139,4 @@ The sampled lines are upscaled at ratio 0.61 (bicubic, rounded to the delivered 
 
 ### Cost (estimate, NOT measured; one thread, 3840x2160, +-2x; the timing test logs the real numbers)
 
-One full line solve is about 40 us at 3744 samples after the reciprocal-diagonal change. Per evaluation (both axes): latched, one candidate, 16 lines, exact only: about 70 ms cold and 45 ms warm (cache) including the probe; acquiring, 3 candidates, 32 lines: about 330 ms cold and 230 ms warm (proposer 16, coarse 3 x 18 x 2, exact 2 x (60 + 33), probe 22). At the doc 78 budget of 250 ms per evaluation and 15% of a core while acquiring (about 1 evaluation per second) the acquiring case is over by about 1.5x; the knobs are `coarseLines` (16 to 8), the probe on 16 lines, `maxExactCandidates` 1, `exactFamilies` 1, and the evaluation interval. Cache memory is about 70 MB at 3 candidates per axis (`cacheLimit` 512).
+One full line solve is about 40 us at 3744 samples. Per evaluation (both axes), coarse stage on 8 lines and probe on 16 lines: latched, one candidate, exact stage only on 16 lines: about 63 ms cold and 40 ms warm (operator cache) including the probe; acquiring, 3 candidates, exact stage on 32 lines: about 270 ms cold and 190 ms warm (proposer 16, coarse 3 x 9 x 2, exact 2 x (60 + 33), probe 16). The result reports its own cost: `VerifyResult::costMs`, `cold`, `operatorBuilds`, `solves` (and `ProbeResult::costMs`, `cold`), with the wall time read through the optional `VerifierSettings::nowMs` hook (the units never read a clock; C2 passes steady_clock). A CPU-share governor in C2 sets the interval to max(nominal, cost / share budget): at 15% while acquiring that is about 1.3 to 1.8 s, at 2% latched about 2 to 3 s, shown in Ctrl+Alt+D. Cache memory is about 70 MB at 3 candidates per axis (`cacheLimit` 512).
