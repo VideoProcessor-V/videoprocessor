@@ -10,6 +10,9 @@
 
 #include "DriveConfigBase.h"
 
+#include <QPointer>
+#include <QThread>
+
 class QComboBox;
 class QDoubleSpinBox;
 class QFormLayout;
@@ -36,9 +39,11 @@ namespace Vpv
 
 		// The RS-232 test runs on a helper thread that outlives page rebuilds; the editor closing joins it.
 		void JoinTest();
-		bool TestRunning() const { return projectorTestThread_ != nullptr; }
+		bool TestRunning() const { return !projectorTestThread_.isNull(); }
+		// Test seam: stands in for a running RS-232 test (a thread the caller controls).
+		void AdoptTestThreadForTesting(QThread* thread) { projectorTestThread_ = thread; }
 
 	private:
-		QThread* projectorTestThread_ = nullptr;
+		QPointer<QThread> projectorTestThread_;
 	};
 }

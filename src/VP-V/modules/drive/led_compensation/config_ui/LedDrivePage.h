@@ -15,6 +15,9 @@
 
 #include <VideoProcessor-Config/ConfigPageHost.h>
 
+#include <QThread>
+#include <QWidget>
+
 #include <map>
 #include <memory>
 
@@ -32,7 +35,9 @@ namespace Vpv
 		// Test seams: the number of editors the provider currently serves; whether an editor's RS-232
 		// connection test is running.
 		int StateCountForTesting() const;
-		bool ProjectorTestRunningForTesting(ConfigPageHost::ConfigFormApi& api) const;
+		bool ProjectorTestRunningForTesting(QWidget* editorWindow) const;
+		// Makes the editor with this window believe an RS-232 test runs on `thread` (false: no such editor).
+		bool AdoptProjectorTestThreadForTesting(QWidget* editorWindow, QThread* thread);
 
 	private:
 		struct State;

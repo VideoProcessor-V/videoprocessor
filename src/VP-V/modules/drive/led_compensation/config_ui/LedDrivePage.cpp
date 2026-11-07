@@ -1234,10 +1234,23 @@ int LedDrivePage::StateCountForTesting() const
     return static_cast<int>(states_.size());
 }
 
-bool LedDrivePage::ProjectorTestRunningForTesting(ConfigPageHost::ConfigFormApi& api) const
+bool LedDrivePage::ProjectorTestRunningForTesting(QWidget* editorWindow) const
 {
-    const auto found = states_.find(&api);
-    return found != states_.end() && found->second->builder->projectorCards().TestRunning();
+    for (const auto& entry : states_)
+        if (entry.second->kit && entry.second->kit->window() == editorWindow)
+            return entry.second->builder->projectorCards().TestRunning();
+    return false;
+}
+
+bool LedDrivePage::AdoptProjectorTestThreadForTesting(QWidget* editorWindow, QThread* thread)
+{
+    for (auto& entry : states_)
+        if (entry.second->kit && entry.second->kit->window() == editorWindow)
+        {
+            entry.second->builder->projectorCards().AdoptTestThreadForTesting(thread);
+            return true;
+        }
+    return false;
 }
 
 LedDrivePage& LedDrivePageInstance()

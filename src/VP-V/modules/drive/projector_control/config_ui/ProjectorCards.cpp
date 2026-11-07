@@ -247,7 +247,7 @@ ProjectorCards::Connection ProjectorCards::BuildConnection()
         projectorTestThread_ = worker;
         connect(worker, &QThread::finished, this, [this, projector, worker, outcome, button, label]
         {
-            if (projectorTestThread_ == worker) projectorTestThread_ = nullptr;
+            if (projectorTestThread_ == worker) projectorTestThread_.clear();
             worker->deleteLater();
             // audit 2026-10-16: find the current page's controls by name when
             // the originals were rebuilt meanwhile.
@@ -392,7 +392,7 @@ void ProjectorCards::JoinTest()
     if (projectorTestThread_)
     {
         projectorTestThread_->wait();
-        projectorTestThread_ = nullptr;
+        projectorTestThread_.clear();
     }
 }
 }

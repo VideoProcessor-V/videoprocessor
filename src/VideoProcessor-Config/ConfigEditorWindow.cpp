@@ -1,16 +1,12 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <tlhelp32.h>
 #include <shellapi.h>
 #include <objbase.h>
 // REHEARSAL: unused atlbase.h dropped (ConfigTests toolset has no ATL)
 #include <dxgi1_2.h>
 
 #include "ConfigEditorWindow.h"
-#include <led/ConnectionTest.h>
-#include <led/LedDriveConfig.h>
-#include <led/SerialPort.h>
 #include "ConfigWheelGuard.h"
 #include "SettingsNavigationIcons.h"
 #include "DisplayMonitorInventory.h"
@@ -39,7 +35,6 @@
 #include <QueueLatency.h>
 #include <RefreshKey.h>
 #include <QueueLookahead.h>
-#include <led/LedDriveConfig.h>
 
 #include <QAbstractItemView>
 #include <QAbstractItemModel>
