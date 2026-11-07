@@ -30240,7 +30240,7 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 	if (m_state.load(std::memory_order_acquire) != RendererState::RENDERSTATE_RENDERING)
 		return;
 	// Automatic calibration: patches replace video; frames are not queued.
-	if (m_calibrationPatternActive.load(std::memory_order_acquire))
+	if (CalibrationLutHost::IsTakingOver(m_calibrationPatternActive))
 		return;
 	// The frame's hardware arrival on the QPC clock: the capture clock and
 	// QPC read back to back give the frame's age at this moment.
@@ -31040,7 +31040,7 @@ void LibplaceboVideoRenderer::WaitForDequeueLocked(std::unique_lock<std::mutex>&
 	// caller checks m_calibrationPatternActive and presents the patch instead.
 	const auto calibrationActive = [this, wakeOnCalibrationPattern]() {
 		return wakeOnCalibrationPattern &&
-			m_calibrationPatternActive.load(std::memory_order_acquire);
+			CalibrationLutHost::IsTakingOver(m_calibrationPatternActive);
 	};
 	for (;;)
 	{
@@ -32871,26 +32871,14 @@ bool LibplaceboVideoRenderer::GetCalibrationOutput(Calibration::PatternOutputInf
 		setReason("the VP Renderer is not rendering (start VP with any source)");
 		return false;
 	}
-	// The format fields are render-thread state: read under renderMutex, which
-	// the loop releases between refreshes; a cached copy answers when it stays busy.
-	bool fresh = false;
-	const int attempts = m_impl->calibrationHost.FreshOutputAttempts(m_calibrationPatternActive.load(std::memory_order_acquire));
-	for (int attempt = 0; attempt < attempts && !fresh; ++attempt)
-	{
-		std::unique_lock<std::mutex> guard(m_impl->renderMutex, std::try_to_lock);
-		if (!guard.owns_lock())
-		{
-			if (attempts > 1) Sleep(2);
-			continue;
-		}
-		double hz = m_impl->renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
-		if (!(hz > 0.0)) hz = MonitorRefreshHz(m_videoHwnd);
-		m_impl->calibrationHost.PublishOutputFacts({ m_impl->negotiatedSwapchainFormat, m_impl->activeSettings.displayBitDepth,
-			Impl::EncodingLevels(m_impl->actualOutput.encoding) == PL_COLOR_LEVELS_LIMITED, m_impl->TargetIsBt2020(), hz,
-			m_impl->swapchain != nullptr && !m_impl->outputResourcesRetired });
-		fresh = true;
-	}
-	return m_impl->calibrationHost.FillOutputInfo(info, fresh);
+	return m_impl->calibrationHost.CollectOutputInfo(m_impl->renderMutex, m_calibrationPatternActive.load(std::memory_order_acquire),
+		[this]() -> CalibrationLutHost::OutputFacts {   // runs with renderMutex held
+			double hz = m_impl->renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
+			if (!(hz > 0.0)) hz = MonitorRefreshHz(m_videoHwnd);
+			return { m_impl->negotiatedSwapchainFormat, m_impl->activeSettings.displayBitDepth,
+				Impl::EncodingLevels(m_impl->actualOutput.encoding) == PL_COLOR_LEVELS_LIMITED, m_impl->TargetIsBt2020(), hz,
+				m_impl->swapchain != nullptr && !m_impl->outputResourcesRetired };
+		}, info);
 }
 
 bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRequest& request, CString& reason)
@@ -32908,29 +32896,13 @@ bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRe
 			reason = TEXT("the VP Renderer is not rendering (start VP with any source)");
 			return false;
 		}
-		m_impl->calibrationHost.SetPattern(request);
-		if (!m_calibrationPatternActive.load(std::memory_order_acquire))
-		{
-			// The LED drive stops at full light for the patches (DynamicDriveHost::SuspendForCalibration).
-			const bool ledStopped = m_dynamicDrive.SuspendForCalibration(DynamicDriveContext());
-			m_impl->calibrationHost.ResetPatternLogs();
-			m_calibrationPatternActive.store(true, std::memory_order_release);
-			BeginQueueGeneration("calibration patterns");
-			DebugLog::Log("Calibration patterns: started (video paused, Dynamic Drive %s)",
-				ledStopped ? "stopped at full light" : "not running");
-		}
-		m_queueChanged.notify_all();
-		return true;
 	}
-	if (!m_calibrationPatternActive.exchange(false, std::memory_order_acq_rel))
-		return true;
-	m_impl->calibrationHost.EndPattern();
-	BeginQueueGeneration("calibration patterns ended");
-	m_queueChanged.notify_all();
-	m_dynamicDrive.ResumeAfterCalibration(DynamicDriveContext());
-	m_impl->ReleaseFallback("calibration patch");   // WP-12: the full-field fallback lasts for the run
-	DebugLog::Log("Calibration patterns: ended (video resumes)");
-	return true;
+	return m_impl->calibrationHost.SetPatterns(request, m_calibrationPatternActive,
+		{ [this]() { return m_dynamicDrive.SuspendForCalibration(DynamicDriveContext()); },
+		  [this](const char* why) { BeginQueueGeneration(why); },
+		  [this]() { m_queueChanged.notify_all(); },
+		  [this]() { m_dynamicDrive.ResumeAfterCalibration(DynamicDriveContext()); },
+		  [this]() { m_impl->ReleaseFallback("calibration patch"); } });
 }
 
 bool LibplaceboVideoRenderer::SuspendLedDriveForTest(CString& reason)
@@ -35537,25 +35509,15 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// frame alone with nothing queued); depth only, no scheduling change.
 		const bool intentWalkActive = m_impl && m_impl->intentInterpreter->Active();
 		size_t intentWantedLookahead = 0;
-		// Automatic calibration: while a patch is active it is presented every
-		// refresh instead of video (Present paces the loop at the display's rate).
-		if (m_impl && m_calibrationPatternActive.load(std::memory_order_acquire))
+		// R33 (output.calibration_lut): while a patch is active it is presented every refresh instead
+		// of video (Present paces the loop at the display's rate); the stop flag is checked first.
+		if (m_impl && CalibrationLutHost::IsTakingOver(m_calibrationPatternActive))
 		{
-			{
-				std::lock_guard<std::mutex> queueGuard(m_queueMutex);
-				if (m_stopRequested) break;
-			}
-			bool patternPresented = false;
-			{
-				std::lock_guard<std::mutex> renderGuard(m_impl->renderMutex);
-				patternPresented = m_impl->PresentCalibrationPattern();
-			}
-			if (!patternPresented)
-			{
-				std::unique_lock<std::mutex> idle(m_queueMutex);
-				m_queueChanged.wait_for(idle, std::chrono::milliseconds(20));
-			}
-			continue;
+			const auto takeOver = CalibrationLutHost::TakeOverPresentation(m_calibrationPatternActive,
+				{ m_queueMutex, m_stopRequested, m_queueChanged, m_impl->renderMutex,
+				  [this]() { return m_impl->PresentCalibrationPattern(); } });
+			if (takeOver == CalibrationLutHost::TakeOver::Stop) break;
+			if (takeOver == CalibrationLutHost::TakeOver::Handled) continue;
 		}
 		{
 			const auto waitStarted = SteadyClock::now();
@@ -35563,7 +35525,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			WaitForDequeueLocked(previewLock, true);   // ABI 37: file heads at their due time;
 			// calibration: also woken when a patch starts (handled below)
 			if (m_stopRequested) break;
-			if (m_calibrationPatternActive.load(std::memory_order_acquire)) continue;
+			if (CalibrationLutHost::IsTakingOver(m_calibrationPatternActive)) continue;
 			previewWaitMs = std::chrono::duration<double, std::milli>(
 				SteadyClock::now() - waitStarted).count();
             intentWantedLookahead = intentWalkActive ? IntentInterpreter::WantedWalkFrames(m_frameQueue.size()) : 0;

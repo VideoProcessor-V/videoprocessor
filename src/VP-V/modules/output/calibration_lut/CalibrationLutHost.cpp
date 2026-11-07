@@ -1,3 +1,5 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
 #include <pch.h>
 #include "CalibrationLutHost.h"
 
@@ -8,10 +10,82 @@
 
 #include <atlbase.h>
 
+#include <chrono>
 #include <cstring>
 
 namespace CalibrationLutHost
 {
+	TakeOver TakeOverPresentation(const std::atomic_bool& patternsActive, const TakeOverEnv& env)
+	{
+		if (!IsTakingOver(patternsActive))
+			return TakeOver::NotTaking;
+		{
+			std::lock_guard<std::mutex> queueGuard(env.queueMutex);
+			if (env.stopRequested) return TakeOver::Stop;
+		}
+		bool presented = false;
+		{
+			std::lock_guard<std::mutex> renderGuard(env.renderMutex);
+			presented = env.present();
+		}
+		if (!presented)
+		{
+			std::unique_lock<std::mutex> idle(env.queueMutex);
+			env.queueChanged.wait_for(idle, std::chrono::milliseconds(20));
+		}
+		return TakeOver::Handled;
+	}
+
+	bool Adapter::SetPatterns(const Calibration::PatternRequest& request, std::atomic_bool& patternsActive,
+		const PatternLifecycle& lifecycle)
+	{
+		if (request.active)
+		{
+			SetPattern(request);
+			if (!patternsActive.load(std::memory_order_acquire))
+			{
+				const bool driveStopped = lifecycle.suspendDrive();
+				ResetPatternLogs();
+				patternsActive.store(true, std::memory_order_release);
+				lifecycle.beginQueueGeneration("calibration patterns");
+				DebugLog::Log("Calibration patterns: started (video paused, Dynamic Drive %s)",
+					driveStopped ? "stopped at full light" : "not running");
+			}
+			lifecycle.notifyQueue();
+			return true;
+		}
+		if (!patternsActive.exchange(false, std::memory_order_acq_rel))
+			return true;
+		EndPattern();
+		lifecycle.beginQueueGeneration("calibration patterns ended");
+		lifecycle.notifyQueue();
+		lifecycle.resumeDrive();
+		lifecycle.releasePatchFallback();
+		DebugLog::Log("Calibration patterns: ended (video resumes)");
+		return true;
+	}
+
+	bool Adapter::CollectOutputInfo(std::mutex& renderMutex, bool patternsActive,
+		const std::function<OutputFacts()>& gather, Calibration::PatternOutputInfo& info)
+	{
+		// The format fields are render-thread state: read under renderMutex, which the loop releases
+		// between refreshes; a cached copy answers when it stays busy.
+		bool fresh = false;
+		const int attempts = FreshOutputAttempts(patternsActive);
+		for (int attempt = 0; attempt < attempts && !fresh; ++attempt)
+		{
+			std::unique_lock<std::mutex> guard(renderMutex, std::try_to_lock);
+			if (!guard.owns_lock())
+			{
+				if (attempts > 1) Sleep(2);
+				continue;
+			}
+			PublishOutputFacts(gather());
+			fresh = true;
+		}
+		return FillOutputInfo(info, fresh);
+	}
+
 	// ---- output.calibration_lut: the VP stage ----------------------------------------------------
 
 	TakeResult Adapter::TakeLut(const pl_custom_lut* lut, const StageFacts& facts, const std::string& path,
