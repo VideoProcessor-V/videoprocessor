@@ -78,7 +78,7 @@ namespace SourceIdentity
 					return false;
 				}
 				// The lines used: maxLines of them, evenly spread.
-				const int nl = std::min(ls.count, std::max(1, ps.maxLines));
+				const int nl = (std::min)(ls.count, (std::max)(1, ps.maxLines));
 				std::vector<int> pick(static_cast<size_t>(nl));
 				for (int i = 0; i < nl; ++i)
 					pick[static_cast<size_t>(i)] = (i * ls.count) / nl;
@@ -182,7 +182,7 @@ namespace SourceIdentity
 					if (cr.lineBase[static_cast<size_t>(j)] >= ps.lineGateFactor * floorC)
 						gated.push_back(cr.lineStat[static_cast<size_t>(j)]);
 				out.gatedLines = static_cast<int>(gated.size());
-				const int minGate = std::max(ps.minGateLinesFloor, static_cast<int>(std::ceil(ps.minGateFraction * static_cast<double>(cr.lineCount))));
+				const int minGate = (std::max)(ps.minGateLinesFloor, static_cast<int>(std::ceil(ps.minGateFraction * static_cast<double>(cr.lineCount))));
 				if (out.gatedLines >= minGate)
 				{
 					out.stat = TrimmedMeanOf(gated.data(), out.gatedLines, ps.trimFraction);

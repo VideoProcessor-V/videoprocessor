@@ -81,7 +81,7 @@ namespace SourceIdentity
 			if (alpha > 0.5)
 				alpha = 0.5;
 			t.alpha = alpha;
-			const double multiplicity = static_cast<double>(std::max(1, s.candidateCount)) * static_cast<double>(std::max(1, s.kernelCount));
+			const double multiplicity = static_cast<double>((std::max)(1, s.candidateCount)) * static_cast<double>((std::max)(1, s.kernelCount));
 			t.c1 = -std::log(alpha) + std::log(multiplicity);
 			t.c2 = t.c1 + s.c2ExtraNats;
 			return t;
@@ -342,24 +342,24 @@ namespace SourceIdentity
 
 			Hypothesis& FindSlot(AxisState& st, int n)
 			{
-				int near = -1;
+				int nearIdx = -1;
 				int nearD = 0;
 				for (size_t i = 0; i < st.slots.size(); ++i)
 				{
 					const int d = st.slots[i].n > n ? st.slots[i].n - n : n - st.slots[i].n;
 					if (d > 1)
 						continue;
-					if (near < 0 || d < nearD || (d == nearD && st.slots[i].n < st.slots[static_cast<size_t>(near)].n))
+					if (nearIdx < 0 || d < nearD || (d == nearD && st.slots[i].n < st.slots[static_cast<size_t>(nearIdx)].n))
 					{
-						near = static_cast<int>(i);
+						nearIdx = static_cast<int>(i);
 						nearD = d;
 					}
 				}
-				if (near >= 0)
-					return st.slots[static_cast<size_t>(near)];
+				if (nearIdx >= 0)
+					return st.slots[static_cast<size_t>(nearIdx)];
 				Hypothesis h;
 				h.n = n;
-				if (static_cast<int>(st.slots.size()) < std::max(1, s_.maxHypotheses))
+				if (static_cast<int>(st.slots.size()) < (std::max)(1, s_.maxHypotheses))
 				{
 					st.slots.push_back(h);
 					return st.slots.back();
@@ -444,7 +444,7 @@ namespace SourceIdentity
 						++gated;
 					}
 				ce.linesGated = gated;
-				const int minGate = std::max(s_.minGateLinesFloor, static_cast<int>(std::ceil(s_.minGateFraction * static_cast<double>(nl))));
+				const int minGate = (std::max)(s_.minGateLinesFloor, static_cast<int>(std::ceil(s_.minGateFraction * static_cast<double>(nl))));
 				if (gated < minGate)
 				{
 					ce.reason |= kReasonLowDetail;
@@ -466,7 +466,7 @@ namespace SourceIdentity
 				for (size_t i = 0; i < v.size(); ++i)
 					dev[i] = std::abs(v[i] - med);
 				const double mad = MedianOf(dev.data(), static_cast<int>(dev.size()));
-				const double tau = std::max(s_.contradictionMin, 3.0 * 1.4826 * mad);
+				const double tau = (std::max)(s_.contradictionMin, 3.0 * 1.4826 * mad);
 				const bool dipMajority = med < s_.majorityDip;
 				std::vector<double> kept;
 				int contradict = 0;
@@ -506,7 +506,7 @@ namespace SourceIdentity
 						for (size_t i = 0; i < segMed.size(); ++i)
 							d2[i] = std::abs(segMed[i] - m2);
 						const double mad2 = MedianOf(d2.data(), static_cast<int>(d2.size()));
-						const double tau2 = std::max(s_.contradictionMin, 3.0 * 1.4826 * mad2);
+						const double tau2 = (std::max)(s_.contradictionMin, 3.0 * 1.4826 * mad2);
 						const bool dip2 = m2 < s_.majorityDip;
 						int bad = 0;
 						for (size_t i = 0; i < segMed.size(); ++i)

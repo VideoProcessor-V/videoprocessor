@@ -105,7 +105,7 @@ namespace SourceIdentity
 					Reset();
 				axisLen_ = ls.axisLen;
 				origin_ = ls.origin;
-				const int nl = std::min(ls.count, std::max(1, s_.maxLines));
+				const int nl = (std::min)(ls.count, (std::max)(1, s_.maxLines));
 				std::vector<double> v(static_cast<size_t>(ls.length), 0.0);
 				double tm[kTerms];
 				for (int li = 0; li < nl; ++li)

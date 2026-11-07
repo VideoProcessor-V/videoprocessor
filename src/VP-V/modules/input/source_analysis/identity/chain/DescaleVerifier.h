@@ -208,7 +208,7 @@ namespace SourceIdentity
 					return a < b;
 				});
 				const int promote = opt.exactOnly ? static_cast<int>(order.size())
-					: std::min<int>(static_cast<int>(order.size()), s_.maxExactCandidates);
+					: (std::min<int>)(static_cast<int>(order.size()), s_.maxExactCandidates);
 				for (int i = 0; i < static_cast<int>(order.size()); ++i)
 				{
 					CandidateResult& cr = out.candidates[static_cast<size_t>(order[static_cast<size_t>(i)])];
@@ -379,12 +379,12 @@ namespace SourceIdentity
 			{
 				const int N = ls.axisLen;
 				const int L = ls.length;
-				int Lc = std::max(s_.coarseMinWindow, static_cast<int>(std::floor(s_.coarseWindowFraction * static_cast<double>(N))));
+				int Lc = (std::max)(s_.coarseMinWindow, static_cast<int>(std::floor(s_.coarseWindowFraction * static_cast<double>(N))));
 				if (Lc > L)
 					Lc = L;
 				const int nWin = (Lc >= L) ? 1 : 2;
 				const int winOff[2] = { 0, L - Lc };
-				const int nl = std::min(ls.count, std::max(1, s_.coarseLines));
+				const int nl = (std::min)(ls.count, (std::max)(1, s_.coarseLines));
 				std::vector<int> idx(static_cast<size_t>(nl));
 				for (int i = 0; i < nl; ++i)
 					idx[static_cast<size_t>(i)] = (i * ls.count) / nl;
@@ -453,7 +453,7 @@ namespace SourceIdentity
 			{
 				const int N = ls.axisLen;
 				const int L = ls.length;
-				const int avail = std::min(ls.count, kMaxLines);
+				const int avail = (std::min)(ls.count, kMaxLines);
 				const int nl = (opt.exactLines > 0 && opt.exactLines < avail) ? opt.exactLines : avail;
 				std::vector<int> idx(static_cast<size_t>(nl));
 				for (int i = 0; i < nl; ++i)
@@ -536,7 +536,7 @@ namespace SourceIdentity
 							return famT[a] < famT[b];
 						return a < b;
 					});
-					const int nf = std::max(1, std::min(s_.exactFamilies, kFamilyCount));
+					const int nf = (std::max)(1, (std::min)(s_.exactFamilies, kFamilyCount));
 					for (int k = 0; k < kKernelCount; ++k)
 						for (int f = 0; f < nf; ++f)
 							if (static_cast<int>(Kernel(k).family) == famOrder[f])
@@ -626,7 +626,7 @@ namespace SourceIdentity
 				cr.kernelMargin = haveSecond ? second - scores[bi].T : 0.0;
 				cr.familyMargin = haveOther ? otherFam - scores[bi].T : 0.0;
 				cr.lineCount = nl;
-				const int segCount = std::min(kMaxSegs, (L + kSegPx - 1) / kSegPx);
+				const int segCount = (std::min)(kMaxSegs, (L + kSegPx - 1) / kSegPx);
 				cr.segCount = segCount;
 				cr.lineStat.assign(static_cast<size_t>(nl), 0.0);
 				cr.lineBase.assign(static_cast<size_t>(nl), 0.0);
