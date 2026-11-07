@@ -1,72 +1,77 @@
 # Temporal-detail products (reserved): `repair/temporal_detail/products`
 
-Shared unit **U13** (`TemporalDetailProducts`, `TdProducts::kUnitVersion = 1`) | status: **draft, reserved** (R1-W1-RES, owner 2026-11-06).
-The engine itself (doc 67v2) is built in reset 2. Reset 1 reserves its **products** so that the ids, layouts, fill rules and unit
-version are fixed before any consumer is wired, and wires the consumers' **read paths** now, so reset 2 only fills producers.
+The skeleton products of the temporal-detail engine (doc 72) and the contract table that fixes their ids, layouts, fill rules, unit
+versions and budget-governed stages. The engine itself is built in reset 2; reset 1 declares the products and wires the consumers' read
+paths (adaptive scaling, dither need, sigma-delta, chroma, deband), so reset 2 only fills producers.
+Unit: repair/temporal_detail (products); shared accessor: `repair/temporal_detail/shared/TdMapsView.h` (U19).
 
-## What exists now
+## Settings
 
-| Piece | Where |
-|---|---|
-| 15 registry entries `td.*` (ids appended after P14, before `kSkeletonProductEnd`) | `core/Products.h` (`AppendTemporalDetailReservedProducts`) |
-| catalog rows (unit path, unit version 1, "reserved" producer) and 7 consumer rows | `core/ProductCatalog.h`, generated `docs/design/product-graph.md` |
-| contract table, fill rules, VRAM budget per tier | `TdProductContracts.h` |
-| the one read API, the placeholder producer, `kEngineRequestedToday = false` | `TdProductReads.h` |
-| fallback ids `product.td_scaler`, `td_dither`, `td_chroma`, `td_engine` | `core/FallbackCatalog.h` |
-| read paths wired | adaptive scaling (`scaling/output/AdaptiveDownscaleStage`), dither need (`output/dither/DitherNeed.h`, `FrameArgs::td`, `Decision::td`), chroma (`ChromaCfl.h` `Result::td`, `chroma_upscale/basic/BasicChroma.h`) |
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `temporal_detail_engine` | deferred (profile; SCHEMA lock held by W1-P3, reset 2 adds it) | enum | off, auto | off (`TdProducts::kEngineRequestedToday = false`) | deferred: VP-V > Repair > Temporal detail | n/a (VP-only) | `product.adaptive_downscale`, `product.dither_need`, `product.sigma_delta`, `product.chroma_cfl`, `product.debander`, `product.td_engine`; status lines "<consumer>: classical form (temporal-detail products: <reason>)" | budget-governed: the VRAM / ms governor decides which stage of each governed buffer fits (see Products) |
 
-## Products, fill rule, tier, declared size per slot
+## Environment and diagnostics
 
-Sizes are the registry's planning rule (`BytesOf`); block maps at 8 px (shift 3) or 16 px (shift 4), half-resolution maps (shift 1),
-the low-res base at 1/4 per axis (shift 2) with Cb/Cr 4:2:0 at 1/8 per axis (shift 3), 2 B per sample (R16).
+| Name | Purpose | Default | Scope |
+|---|---|---|---|
+| (none) | | | |
 
-| id | product | fill rule | tier | layout |
+## Products
+
+Registry ids (doc 72 section 1.1; ids 16-18 keep their numbers with new tokens and contracts, TemporalDetail unit version 2):
+
+| id | token | what | fill rule (lane / live / reduced) | unit (version) | tier | floor size per slot at 4K |
+|---|---|---|---|---|---|---|
+| 16 | `td.blocks` (v1: td.analysis) | per-block TD state: motion + lighting layer | lane (sequential) / TD apply / carry-forward | TemporalDetail (2) | T1 | 1.68 MB |
+| 17 | `td.memory` (v1: td.refstore) | the whole budget-governed store (slots, bands, chroma) | lane only | TemporalDetail (2) | T1 | 47.2 MB (stage 0) |
+| 18 | `td.anchor_pass` (v1: td.admission) | anchor repair, Transient arena | T2 gap job | TemporalDetail (2) | T2 | 24.9 MB arena peak |
+| 20 | `p7g_camera_guide` | camera guidance, now REGISTERED (was claimed as `kSkeletonProductEnd`) | lane / camera worker | camera (1) | T0 | 0.6 MB |
+| 21 | `coding_evidence` (P16) | per 8x8 block 8 B + 256 B summary | lane (fused with P11) / TD / abstain | U13 CodingEvidence (1) | T0 | 1.04 MB |
+| 22 | `quality_pattern` (P15) | per-frame LANE product, role at lead 2 (NOT P14's held state) | lane CPU / TD / P15c | QualityPattern (1) | T0 | 64 B x 128 history |
+| 23 | `quality_pattern.causal` (P15c) | the short-queue substitute of P15 | same | QualityPattern (1) | T0 | 64 B x 128 history |
+| 24 | `refined_field` (P3r) | DMVR-style per-block vectors + confidence; per-pixel offsets are NOT stored (derived on the fly) | lane after P3 / TD / unrefined P3 | U15 FieldRefine (1) | T0 | 1.04 MB |
+| 25 | `td.anchor_refs` | received luma of the last anchors | TD copy | TemporalDetail (2) | T1 | 0 (governed) |
+| 26 | `td.delta` | lane -> render hand-off of the repair delta | lane / TD apply / carry-forward | TemporalDetail (2) | T1 | 3.24 MB (stage 0) |
+| 27 | `td.maps` | THE consumer-facing per-block map product (12 fields, U19) | lane / TD apply / classical | U19 TdMapsView (1) | T1 | 0.78 MB |
+| 28 | `td.trail_summary` | CPU record per frame for source identity / status | TD job | TemporalDetail (2) | T1 | 256 B x 8 history |
+
+The seven per-block map reservations of the first list (trail confidence, residual + validity, real detail, grain level, stability,
+lighting view, I-to-I drift) are FIELDS of `td.maps` (`TdMapsView::Field`); the per-pixel BDOF/PROF offsets are dropped (derived by U15's accessor).
+Consumer fallback when absent: each consumer's classical form, byte-identical today (table in "Status and fallbacks").
+
+**Budget-governed, no fixed tiers.** The registry declares each large buffer at its FLOOR (stage 0: the repair of the still / dark regions
+plus the full-resolution mid band at the true source resolution, as the laptop starts). `TdProductContracts.h` lists the larger stages
+(`td.memory` full, `td.anchor_refs` 3 anchors, `td.delta` with the full-resolution atlas); the governor adds them while VRAM and ms headroom
+last and sheds them in reverse order, each step visible. Declared totals at 4K: floor 54.95 MB GPU (+ 24.9 MB arena peak, 18.4 KB records), full
+241.6 MB (`TdProducts::BudgetAt`, pinned by a test). Ring multipliers come from the graph.
+
+**Inputs beyond the framework's limit.** The framework holds 4 inputs per product (`kMaxInputs`) and 6 consumed products per consumer. The registry
+declares the first four of each intended input list (never silently dropping one) and the contract table records the full lists (`td.blocks` 16,
+`coding_evidence` 5, `td.anchor_pass` 5); a test compares prefix and order. **Dependency: W1-SKG** (lead edges in SlotTable, kMaxInputs >= 16,
+kMaxConsumes >= 10, ordered-chain lane jobs, history declarations): after it lands, the declarations catch up to the table.
+
+**Repair-stack order (WP9) recorded here: TD -> deband -> contrast recovery** (today's text: deband -> TD -> CR). Deband becomes the fallback layer under
+temporal detail: it reads `td.maps` validity and stability (and `coding_evidence` for its blocking need) so a TD-covered block is not debanded twice; with the
+products absent (reset 1) it debands everywhere exactly as today. The order table itself belongs to WP9 (`repair/stack/RepairStackOrder.h`).
+
+## Status and fallbacks
+
+| Consumer | Reads | Absent / stale / unit mismatch | Fallback id | Status text (once requested) |
 |---|---|---|---|---|
-| 0 | `td.quality_pattern` | held record (from the source identity record, 68v2) | T0 | 256 B system RAM |
-| 1 | `td.trail_confidence` | engine map | T1 | R16F / 8 px block |
-| 2 | `td.residual` | engine map | T1 | R16F half resolution |
-| 3 | `td.validity` | engine map | T1 | R8 / 8 px block |
-| 4 | `td.real_detail` | engine map | T1 | R8 half resolution |
-| 5 | `td.grain_level` | engine map (own grain vs coding noise) | T1 | RG16F / 16 px block |
-| 6 | `td.stability` | engine map | T1 | R8 / 8 px block |
-| 7 | `td.lighting` | engine map | T1 | RGBA16F / 16 px block |
-| 8 | `td.drift` (I-to-I) | engine map | T2 | RG16F / 16 px block |
-| 9 | `td.motion_model` | held record (camera/object, near-I calibrated) | T0 | 4 KB system RAM |
-| 10 | `td.mirror` (reference-set mirror) | held record | T0 | 2 KB system RAM |
-| 11 | `td.base_long` | anchor slot, 2 slots (repaired I, previous I) | T1 | R16 1/4 axis + 2 x R16 chroma 1/8 axis |
-| 12 | `td.base_short` | anchor slot, 6 slots (one reference per mini-GOP) | T1 | same as long |
-| 13 | `td.refined_vectors` (DMVR-style) | engine map | T1 | 8 B / 8 px block |
-| 14 | `td.refine_pixel` (BDOF/PROF-style) | optional map: **store vs recompute TBD by measurement** | T2 | RG16F half resolution (store worst case) |
+| adaptive scaling | `td.maps` (real detail, stability, coding noise), `refined_field` | today's behaviour | `product.adaptive_downscale` | "adaptive scaling: classical form (temporal-detail products: ...)" in the stage's status lines |
+| dither need | `td.maps` (own grain, stability), `quality_pattern` | today's grain path | `product.dither_need` | appended to the dither-need status |
+| sigma-delta | `td.maps` (stability), `refined_field` | today's vectors / own search | `product.sigma_delta` | `NextVectorGuard::TemporalDetailRead()` |
+| chroma upscale | `td.maps` (validity, trail confidence), `td.delta`, `td.memory`, `refined_field` | the plain kernel | `product.chroma_cfl` | `Result::td` (ChromaCfl, BasicChroma) |
+| debander (fallback layer) | `td.maps` (validity, stability), `coding_evidence` | deband everywhere | `product.debander` | `VpDebander::Module::TemporalDetailRead()` |
+| the engine | all of the above | classical forms | `product.td_engine` | |
 
-(ids are offsets from `kTdQualityPattern`.) Fill rules: a **held record** is published by the engine's worker and read at lag >= 1 (no live
-fill, the P14 rule); an **engine map** is filled by the engine in the render (live-fill owner: "temporal detail"); an **anchor slot** is
-filled by a GPU-side copy when an anchor arrives (slots are the history); the **optional map** is stored or recomputed at the point
-of use, decided by measurement (the declared size is the store worst case, 0 for recompute).
+Today `kEngineRequestedToday` is false: nothing is requested, no line appears, every path is byte-identical. Requested with products absent: the
+Decision is engaged and the line says which product is absent / stale / of another unit version; it recovers by itself.
 
-## VRAM budget per tier (stored slots counted, one slot of per-frame maps; ring multipliers come from the graph)
+## Tests
 
-| frame | T0 GPU | T1 GPU | T2 GPU | system RAM (records) |
-|---|---|---|---|---|
-| 1920x1080 | 0 | 5.2 MB | 2.1 MB | 6.4 KB |
-| 3840x2160 | 0 | 20.6 MB | 8.4 MB | 6.4 KB |
-| 7680x4320 | 0 | 82.4 MB | 33.7 MB | 6.4 KB |
-
-The base buffers dominate T1 (8 pictures: 1.56 MB per slot at 4K). `TdProducts::BudgetAt` computes this table from the registry (a test pins
-the hand-summed figures); the full-graph VRAM with every consumer active is in `docs/design/product-graph.md`.
-
-## The read rule (`TdProducts::Read`)
-
-- engine **not requested** (today: always, no configuration key exists): not a fallback, the classical form runs, byte-identical, no status line;
-- **requested** and a product the consumer needs is absent / stale / of another unit version, or there is no engine: the classical form runs
-  **visibly** (the `product.td_*` Decision is engaged, with the reason; consumers add the status line); it recovers by itself;
-- every needed product present and fresh: `usable` (reset 2 uses it).
-
-Consumers' sets (a test compares them with the catalog rows): scaler = trail confidence, real detail, grain level, stability, motion model;
-dither need = trail confidence, grain level, stability, motion model; chroma = base long/short (+chroma planes), mirror, refined vectors,
-trail confidence, real detail. The engine rows (family "temporal detail", repair 13-15) own the live fill of the engine maps.
-
-## Deferred
-
-- No configuration key now (SCHEMA lock held by W1-P3). Reset 2 adds the key that flips `kEngineRequestedToday` to a setting.
-- The sigma-delta amplitude read (`product.td_dither` also names it) is wired through dither need's `Decision::td` only.
-- Producers, and the per-region confidence product (doc 67v2 section 13 lists it; it folds into `td.validity` + `td.trail_confidence` until measured).
+`TdProductsTests` in `TdProductsTests.cpp` (CPU only, `VideoProcessor-Test`): ids, registry validity, contracts and intended-input prefixes, governed stages,
+the hand-summed budget, `TdMapsView`, the read rule and the five consumer read paths. `ProductCatalogTests` (catalog agreement, live-fill owners, unit
+versions). Command: `vstest.console.exe x64\Release\VideoProcessor-Test.dll /TestCaseFilter:"FullyQualifiedName~TdProductsTests|FullyQualifiedName~ProductCatalogTests"`.
+No GPU.

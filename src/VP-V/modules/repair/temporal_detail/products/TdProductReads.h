@@ -31,7 +31,7 @@ namespace TdProducts
 	struct Entry
 	{
 		bool published = false;
-		uint32_t unitVersion = 0;   // the unit version that made it (kUnitVersion expected)
+		uint32_t unitVersion = 0;   // the unit version that made it (the contract's unitVersion expected)
 		int64_t timeUs = 0;         // source time of the content
 		int64_t maxAgeUs = 0;       // 0 = no age limit (a stored slot); otherwise stale after this age
 	};
@@ -61,11 +61,11 @@ namespace TdProducts
 		FallbackCatalog::Decision fallback;   // engaged exactly when requested && !usable
 	};
 
-	inline const char* WhyNotUsable(const Entry& e, int64_t nowUs)
+	inline const char* WhyNotUsable(const Entry& e, uint32_t expectedVersion, int64_t nowUs)
 	{
 		if (!e.published)
 			return "absent";
-		if (e.unitVersion != kUnitVersion)
+		if (e.unitVersion != expectedVersion)
 			return "unit version";
 		if (e.maxAgeUs > 0 && (nowUs - e.timeUs > e.maxAgeUs || nowUs < e.timeUs - e.maxAgeUs))
 			return "stale";
@@ -93,7 +93,7 @@ namespace TdProducts
 		{
 			for (ProductId p : NeededBy(consumer))
 			{
-				const char* why = WhyNotUsable(snapshot->Of(p), nowUs);
+				const char* why = WhyNotUsable(snapshot->Of(p), ContractOf(p)->unitVersion, nowUs);
 				if (!why)
 					continue;
 				r.missingMask |= 1u << unsigned(IndexOf(p));

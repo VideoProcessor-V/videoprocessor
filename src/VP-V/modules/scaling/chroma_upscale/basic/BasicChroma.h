@@ -44,7 +44,7 @@
 namespace BasicChroma
 {
 	// Bump on ANY change of the law, a table or the GLSL (the catalog expectation lives with the unit's rows: the unit is a shared
-	// unit, tools/check_shared_units.py U14).
+	// unit, tools/check_shared_units.py U20).
 	constexpr uint32_t kUnitVersion = 1;
 
 	constexpr int kLobes = 3;

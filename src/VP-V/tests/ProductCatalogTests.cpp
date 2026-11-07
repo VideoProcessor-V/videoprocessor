@@ -175,33 +175,22 @@ namespace ProductCatalogTestsNs
 				{ kTdAnalysis, "temporal detail" },
 				{ kTdRefstore, "temporal detail" },
 				{ kTdAdmission, "temporal detail" },
-				// The reserved engine maps (R1-W1-RES): the engine rows (family "temporal detail", repair 13-15) read them at lag 0 and
-				// come before every Scaling / Output reader, so the engine is the live-fill owner of each.
-				{ kTdTrailConfidence, "temporal detail" },
-				{ kTdResidual, "temporal detail" },
-				{ kTdValidity, "temporal detail" },
-				{ kTdRealDetail, "temporal detail" },
-				{ kTdGrainLevel, "temporal detail" },
-				{ kTdStability, "temporal detail" },
-				{ kTdLighting, "temporal detail" },
-				{ kTdDrift, "temporal detail" },
-				{ kTdBaseLong, "temporal detail" },
-				{ kTdBaseShort, "temporal detail" },
-				{ kTdRefinedVectors, "temporal detail" },
-				{ kTdRefinePixel, "temporal detail" },
+				// Doc 72: p7g is read by the camera guidance row (motion 24); the engine products are read at lag 0 by the engine rows (family
+				// "temporal detail", repair 13-14) which come before every Scaling / Output / deband reader, so the engine is the live-fill owner.
+				{ kP7gCameraGuide, "camera guidance" },
+				{ kCodingEvidence, "temporal detail" },
+				{ kQualityPattern, "temporal detail" },
+				{ kRefinedField, "temporal detail" },
+				{ kTdAnchorRefs, "temporal detail" },
+				{ kTdDelta, "temporal detail" },
+				{ kTdMaps, "temporal detail" },
+				{ kTdTrailSummary, "temporal detail" },
 			};
 			const Registry reg = SkeletonProducts();
-			Assert::AreEqual(size_t(kSkeletonProductEnd) - 2u - 3u, sizeof(expected) / sizeof(expected[0]),
-				L"every product but the matcher pair, the held-state source identity and the three held engine records has an expectation");
-			// The reserved HELD records (quality pattern, motion model, mirror) are read at lag 1 like P14: no live fill, but readers.
-			for (ProductId held : { kTdQualityPattern, kTdMotionModel, kTdMirror }) {
-				Assert::IsNull(LiveFillOwner(held), L"no live fill for a held engine record");
-				Assert::IsFalse(ConsumersOf(held).empty());
-				for (const ConsumerRow* c : ConsumersOf(held))
-					for (size_t k = 0; k < c->decl.count; ++k)
-						if (c->decl.consumes[k].product == held)
-							Assert::IsTrue(c->decl.consumes[k].lag >= 1, L"a held-record read is lag >= 1");
-			}
+			Assert::AreEqual(size_t(kSkeletonProductEnd) - 3u, sizeof(expected) / sizeof(expected[0]),
+				L"every product but the matcher pair, the held-state source identity and the causal quality pattern has an expectation");
+			// The causal quality pattern is a substitute (read as P15 by its declared id): nobody reads it by its own id.
+			Assert::IsNull(LiveFillOwner(kQualityPatternCausal));
 			for (const Expect& e : expected) {
 				const ConsumerRow* owner = LiveFillOwner(e.id);
 				Assert::IsNotNull(owner, L"an owner exists");
@@ -221,7 +210,7 @@ namespace ProductCatalogTestsNs
 			for (const ProductDecl& d : reg.All())
 				if (ConsumersOf(d.id).empty() && d.backend != Backend::RenderOnly)
 					++unread;
-			Assert::AreEqual(size_t(1), unread);
+			Assert::AreEqual(size_t(2), unread, L"the matcher pair and the causal quality pattern (substitutes read by the declared id)");
 
 			// Over the ACTIVE consumers: with the temporal-detail camera row off, P7's owner is the next lag-0 reader.
 			std::vector<uint16_t> active;
@@ -240,10 +229,10 @@ namespace ProductCatalogTestsNs
 			Assert::IsTrue(families <= 1);
 		}
 
-		TEST_METHOD(ReservedEngineProductsAreWiredToTheThreeConsumerReadPathsAndTheEngineRows)
+		TEST_METHOD(EngineProductsAreWiredToTheFiveConsumerReadPathsAndTheEngineRows)
 		{
 			// The consumer rows state exactly the sets TdProducts::NeededBy states (the read paths in the modules use that function),
-			// and every reserved product is read by a consumer row or an engine row.
+			// and every engine product has a reader (consumer rows or engine rows).
 			auto readSet = [](uint16_t index, std::set<int>& into) {
 				const uint16_t id = uint16_t(kCatalogConsumerIdBase + index);
 				bool found = false;
@@ -256,52 +245,53 @@ namespace ProductCatalogTestsNs
 				Assert::IsTrue(found, L"consumer row present");
 			};
 			auto expectSet = [](TdProducts::Consumer who) {
-				std::set<int> s;
+				std::set<int> s2;
 				for (ProductId p : TdProducts::NeededBy(who))
-					s.insert(int(p));
-				return s;
+					s2.insert(int(p));
+				return s2;
 			};
-			std::set<int> scaler, dither, chroma, engine;
+			std::set<int> scaler, dither, chroma, sigma, deband, engine;
 			readSet(19, scaler);
 			readSet(20, dither);
 			readSet(21, chroma);
-			readSet(22, engine);
-			readSet(23, engine);
+			readSet(22, sigma);
+			readSet(23, deband);
 			readSet(24, engine);
+			readSet(25, engine);
 			Assert::IsTrue(scaler == expectSet(TdProducts::Consumer::AdaptiveScaler), L"adaptive scaling read path");
 			Assert::IsTrue(dither == expectSet(TdProducts::Consumer::DitherNeed), L"dither need read path");
 			Assert::IsTrue(chroma == expectSet(TdProducts::Consumer::ChromaStage), L"chroma read path");
-			std::set<int> all;
-			for (int i = 0; i < TdProducts::kCount; ++i)
-				all.insert(int(TdProducts::kFirstId) + i);
-			for (const std::set<int>* s : { &scaler, &dither, &chroma, &engine })
-				for (int p : *s)
-					Assert::IsTrue(all.count(p) == 1, L"a row reads only reserved engine products");
-			// The engine rows cover every product with a live-fill owner; with the consumer rows, every reserved product has a reader.
-			std::set<int> read = engine;
-			read.insert(scaler.begin(), scaler.end());
-			read.insert(dither.begin(), dither.end());
-			read.insert(chroma.begin(), chroma.end());
-			Assert::IsTrue(read == all, L"every reserved product has a reader");
-			// Each row names its consumer's fallback id and the three read paths sit where they run (scaling 21 / output 16 / scaling 11).
+			Assert::IsTrue(sigma == expectSet(TdProducts::Consumer::SigmaDelta), L"sigma-delta read path");
+			Assert::IsTrue(deband == expectSet(TdProducts::Consumer::Deband), L"deband read path");
+			Assert::IsTrue(engine == expectSet(TdProducts::Consumer::Engine), L"engine rows");
+			// Every engine-product id (the three redefined + the appended) is a registry product with a catalog row of the right unit.
+			const Registry reg = SkeletonProducts();
+			size_t seen = 0;
+			for (const TdProducts::Contract& c : TdProducts::Contracts()) {
+				++seen;
+				Assert::IsTrue(reg.Has(c.id));
+				Assert::AreEqual(std::string(c.token), std::string(reg.Get(c.id).token));
+				if (c.id == kQualityPatternCausal) continue;   // the substitute is read through the declared id of quality_pattern
+				Assert::IsFalse(ConsumersOf(c.id).empty(), L"every engine product has a reader");
+			}
+			Assert::AreEqual(size_t(TdProducts::kCount), seen);
+			// Each row names its consumer's fallback id (its own existing entry); the engine rows use the engine's.
 			for (const ConsumerRow& c : ConsumerRows()) {
 				const uint16_t index = uint16_t(c.decl.id - kCatalogConsumerIdBase);
+				if (c.decl.id < kCatalogConsumerIdBase || index > 25) continue;
 				if (index == 19) Assert::AreEqual(std::string(TdProducts::FallbackIdOf(TdProducts::Consumer::AdaptiveScaler)), std::string(c.fallbackId));
 				if (index == 20) Assert::AreEqual(std::string(TdProducts::FallbackIdOf(TdProducts::Consumer::DitherNeed)), std::string(c.fallbackId));
 				if (index == 21) Assert::AreEqual(std::string(TdProducts::FallbackIdOf(TdProducts::Consumer::ChromaStage)), std::string(c.fallbackId));
-				if (index >= 22 && index <= 24) {
+				if (index == 22) Assert::AreEqual(std::string(TdProducts::FallbackIdOf(TdProducts::Consumer::SigmaDelta)), std::string(c.fallbackId));
+				if (index == 23) Assert::AreEqual(std::string(TdProducts::FallbackIdOf(TdProducts::Consumer::Deband)), std::string(c.fallbackId));
+				if (index >= 24 && index <= 25) {
 					Assert::AreEqual(std::string(TdProducts::FallbackIdOf(TdProducts::Consumer::Engine)), std::string(c.fallbackId));
 					Assert::AreEqual(std::string("temporal detail"), std::string(c.family));
 				}
 			}
-			// Producers: none in reset 1. The registry ids sit after P14 and before the end marker.
-			const Registry reg = SkeletonProducts();
-			for (int i = 0; i < TdProducts::kCount; ++i) {
-				const ProductId id = ProductId(int(TdProducts::kFirstId) + i);
-				Assert::IsTrue(reg.Has(id));
-				Assert::AreEqual(std::string(TdProducts::ContractOf(id)->token), std::string(reg.Get(id).token));
-				Assert::IsTrue(std::string(RowOf(id)->unit) == "repair/temporal_detail/products");
-			}
+			// The registered p7g and its consumer row (id 20 of the registry: registered, not claimed).
+			Assert::AreEqual(int(kSourceIdentity) + 1, int(kP7gCameraGuide));
+			Assert::AreEqual(size_t(1), ConsumersOf(kP7gCameraGuide).size());
 		}
 
 		TEST_METHOD(EveryRegistryProductHasACatalogRow)
@@ -343,14 +333,18 @@ namespace ProductCatalogTestsNs
 				Assert::IsTrue(VerifyUnit(p.id, p.unit, &d));
 				Assert::IsFalse(d.engaged);
 			}
-			// The reserved temporal-detail engine products: one unit, one constant, in the catalog.
-			Assert::AreEqual(1u, kExpectedTdProductsUnit);
+			// The temporal-detail engine products: each contract's unit version is the catalog's expectation.
+			Assert::AreEqual(2u, kExpectedTemporalDetailUnit);
+			Assert::AreEqual(TdProducts::kCodingEvidenceUnit, kExpectedCodingEvidenceUnit);
+			Assert::AreEqual(TdProducts::kQualityPatternUnit, kExpectedQualityPatternUnit);
+			Assert::AreEqual(TdProducts::kFieldRefineUnit, kExpectedFieldRefineUnit);
+			Assert::AreEqual(TdProducts::kMapsViewUnit, kExpectedTdMapsViewUnit);
 			for (const TdProducts::Contract& c : TdProducts::Contracts()) {
-				Assert::AreEqual(TdProducts::kUnitVersion, RowOf(c.id)->unitVersion, L"catalog expectation equals the unit constant");
+				Assert::AreEqual(c.unitVersion, RowOf(c.id)->unitVersion, L"catalog expectation equals the unit constant");
 				FallbackCatalog::Decision d;
-				Assert::IsTrue(VerifyUnit(c.id, TdProducts::kUnitVersion, &d));
+				Assert::IsTrue(VerifyUnit(c.id, c.unitVersion, &d));
 				Assert::IsFalse(d.engaged);
-				Assert::IsFalse(VerifyUnit(c.id, TdProducts::kUnitVersion + 1, &d), L"a reader of another version engages the fallback");
+				Assert::IsFalse(VerifyUnit(c.id, c.unitVersion + 1, &d), L"a reader of another version engages the fallback");
 				Assert::IsTrue(d.engaged);
 			}
 			// P10/P10c: the grain split unit's own constant (SA2, GrainSplit::kUnitVersion = 2), checked above.
@@ -386,9 +380,10 @@ namespace ProductCatalogTestsNs
 			// P4: 8 KB today (the producer layout) of system RAM.
 			Assert::AreEqual(uint64_t(8192), BytesOf(reg.Get(kP4SourceStats).size, d4k));
 			Assert::IsTrue(reg.Get(kP4SourceStats).residency == Residency::SystemRam);
-			// td.refstore: today's 10 B/px per slot (83 MB at 4K), history = the slots.
-			Assert::AreEqual(uint64_t(3840ull * 2160 * 10), BytesOf(reg.Get(kTdRefstore).size, d4k));
-			Assert::AreEqual(int(kRefSlots), int(reg.Get(kTdRefstore).history));
+			// td.memory (id 17, doc 72): the budget-governed floor, the WHOLE store: {1/4 axis: 55 B, 1/2 axis: 1 B, full: 2 B}; no history.
+			Assert::AreEqual(uint64_t(960ull * 540 * 55 + 1920ull * 1080 * 1 + 3840ull * 2160 * 2), BytesOf(reg.Get(kTdMemory).size, d4k));
+			Assert::AreEqual(0, int(reg.Get(kTdMemory).history));
+			Assert::AreEqual(std::string("td.memory"), std::string(reg.Get(kTdMemory).token));
 			// P13: views only.
 			Assert::AreEqual(uint64_t(0), BytesOf(reg.Get(kP13SourceRing).size, d4k));
 			Assert::IsTrue(reg.Get(kP13SourceRing).backend == Backend::RenderOnly);

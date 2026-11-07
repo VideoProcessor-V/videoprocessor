@@ -1,20 +1,25 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// repair.temporal_detail / products: the reserved engine products (R1-W1-RES). CPU only: the registry entries, the contract table,
-// the VRAM budget per tier, the one read API (absent -> classical form, visible), and the three consumer read paths (adaptive
-// scaling, dither need, the chroma stage) being byte-identical to today while the engine is not requested.
+// repair.temporal_detail / products (doc 72, R1-W1-RES round 2). CPU only: the registry entries (ids appended after p7g in doc 72's
+// order, ids 16-18 redefined), the contract table and the intended inputs, the budget-governed stages, the U19 TdMapsView accessor,
+// the one read API (absent -> classical form, visible) and the five consumer read paths (adaptive scaling, dither need, sigma-delta,
+// chroma, deband) being byte-identical to today while the engine is not requested.
 #include "pch.h"
 #include "CppUnitTest.h"
 
 #include <VP-V/core/Products.h>
 #include <VP-V/modules/output/dither/DitherNeed.h>
+#include <VP-V/modules/output/dither/SigmaDeltaVectors.h>
+#include <VP-V/modules/repair/deband/VpDebander.h>
 #include <VP-V/modules/repair/temporal_detail/products/TdProductContracts.h>
 #include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
+#include <VP-V/modules/repair/temporal_detail/shared/TdMapsView.h>
 #include <VP-V/modules/scaling/chroma_upscale/ChromaCfl.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
 
 #include <cstdint>
+#include <cstring>
 #include <set>
 #include <string>
 #include <vector>
@@ -34,135 +39,220 @@ namespace Tests
 		Snapshot FreshAll(int64_t timeUs = 1000)
 		{
 			Snapshot s;
-			for (Entry& e : s.entry)
+			for (ProductId p = VpSkeleton::kTdBlocks; p <= VpSkeleton::kTdTrailSummary; ++p)
 			{
+				if (IndexOf(p) < 0) continue;
+				Entry& e = s.entry[IndexOf(p)];
 				e.published = true;
-				e.unitVersion = kUnitVersion;
+				e.unitVersion = ContractOf(p)->unitVersion;
 				e.timeUs = timeUs;
-				e.maxAgeUs = 0;
 			}
 			return s;
 		}
 
+		const Consumer kAllConsumers[] = { Consumer::AdaptiveScaler, Consumer::DitherNeed, Consumer::SigmaDelta, Consumer::ChromaStage, Consumer::Deband };
+
 		TEST_CLASS(TdProductsTests)
 		{
 		public:
-			TEST_METHOD(ReservedProductsAreDenseAfterTheLastSa0IdAndTheRegistryValidates)
+			TEST_METHOD(IdsFollowDoc72AndTheRegistryValidates)
 			{
+				using namespace VpSkeleton;
 				const Registry reg = SkeletonProducts();
 				const char* why = nullptr;
-				Assert::IsTrue(reg.Validate(&why));
-				Assert::AreEqual(15, kCount);
-				Assert::AreEqual(int(VpSkeleton::kSourceIdentity) + 1, int(kFirstId), L"appended after P14");
-				Assert::AreEqual(int(VpSkeleton::kSkeletonProductEnd), int(kFirstId) + kCount);
-				Assert::AreEqual(size_t(VpSkeleton::kSkeletonProductEnd), reg.Size());
-				for (int i = 0; i < kCount; ++i)
-					Assert::IsTrue(IsReserved(ProductId(int(kFirstId) + i)));
-				Assert::IsFalse(IsReserved(VpSkeleton::kSourceIdentity));
-				Assert::IsFalse(IsReserved(VpSkeleton::kSkeletonProductEnd));
+				Assert::IsTrue(reg.Validate(&why), L"dense ids, inputs known, no lag-0 cycle, look-ahead rules (P15 has the P15c substitute)");
+				// The append order of doc 72 section 1.1, after P14; ids 16-18 keep their numbers.
+				Assert::AreEqual(16, int(kTdBlocks));
+				Assert::AreEqual(17, int(kTdMemory));
+				Assert::AreEqual(18, int(kTdAnchorPass));
+				Assert::AreEqual(19, int(kSourceIdentity));
+				Assert::AreEqual(20, int(kP7gCameraGuide));
+				Assert::AreEqual(21, int(kCodingEvidence));
+				Assert::AreEqual(22, int(kQualityPattern));
+				Assert::AreEqual(23, int(kQualityPatternCausal));
+				Assert::AreEqual(24, int(kRefinedField));
+				Assert::AreEqual(25, int(kTdAnchorRefs));
+				Assert::AreEqual(26, int(kTdDelta));
+				Assert::AreEqual(27, int(kTdMaps));
+				Assert::AreEqual(28, int(kTdTrailSummary));
+				Assert::AreEqual(29, int(kSkeletonProductEnd));
+				Assert::AreEqual(size_t(kSkeletonProductEnd), reg.Size());
+				// The v1 names are aliases of the v2 ids.
+				Assert::AreEqual(int(kTdBlocks), int(kTdAnalysis));
+				Assert::AreEqual(int(kTdMemory), int(kTdRefstore));
+				Assert::AreEqual(int(kTdAnchorPass), int(kTdAdmission));
+				// The dropped products are gone: no per-pixel offsets, no per-map reservations.
+				for (const ProductDecl& d : reg.All())
+				{
+					const std::string t = d.token;
+					Assert::IsTrue(t != "td.refine_pixel" && t != "td.trail_confidence" && t != "td.grain_level" && t != "td.stability" && t != "td.residual");
+				}
+				// P15 is a per-frame lane product with leads and the causal substitute; it is NOT P14's held state.
+				const ProductDecl& qp = reg.Get(kQualityPattern);
+				Assert::IsTrue(qp.shortQueueSubstitute == kQualityPatternCausal);
+				Assert::IsTrue(qp.backend == Backend::Cpu && qp.residency == Residency::SystemRam);
+				bool lead1 = false, lead2 = false;
+				for (size_t k = 0; k < qp.inputCount; ++k)
+				{
+					Assert::IsTrue(qp.inputs[k].product != kSourceIdentity, L"quality_pattern does not read P14");
+					lead1 = lead1 || qp.inputs[k].lead == 1;
+					lead2 = lead2 || qp.inputs[k].lead == 2;
+				}
+				Assert::IsTrue(lead1 && lead2, L"role at lead 2 from coding_evidence(N+1), (N+2)");
+				Assert::AreEqual(int(kQualityPatternHistory), int(qp.history));
+				for (size_t k = 0; k < reg.Get(kQualityPatternCausal).inputCount; ++k)
+					Assert::IsTrue(reg.Get(kQualityPatternCausal).inputs[k].lead == 0 && reg.Get(kQualityPatternCausal).inputs[k].product != kQualityPattern);
+				// td.anchor_pass is Transient (the arena); td.memory is the whole store with no history.
+				Assert::IsTrue(reg.Get(kTdAnchorPass).residency == Residency::Transient);
+				Assert::AreEqual(0, int(reg.Get(kTdMemory).history));
 			}
 
-			TEST_METHOD(ContractsCoverEveryReservedProductWithTheRegistryToken)
+			TEST_METHOD(ContractsCoverEveryEngineProductAndTheRegistryIsAPrefixOfTheIntendedInputs)
 			{
 				const Registry reg = SkeletonProducts();
 				Assert::AreEqual(size_t(kCount), Contracts().size());
 				std::set<std::string> tokens;
 				for (const Contract& c : Contracts())
 				{
-					Assert::IsTrue(IsReserved(c.id));
+					Assert::IsTrue(IsEngineProduct(c.id));
 					Assert::AreEqual(std::string(reg.Get(c.id).token), std::string(c.token));
 					Assert::IsTrue(tokens.insert(c.token).second, L"unique tokens");
-					Assert::IsTrue(c.layout[0] != '\0' && c.meaning[0] != '\0');
+					Assert::IsTrue(c.layout[0] != '\0' && c.fillLane[0] != '\0' && c.fillLive[0] != '\0' && c.fillReduced[0] != '\0');
 					Assert::IsTrue(ContractOf(c.id) == &c);
-				}
-				// Exactly one product is store-vs-recompute TBD, and it is optional.
-				int tbd = 0;
-				for (const Contract& c : Contracts())
-					if (c.storeVsRecomputeTbd) { ++tbd; Assert::IsTrue(c.fill == FillRule::OptionalMap); Assert::IsTrue(c.id == VpSkeleton::kTdRefinePixel); }
-				Assert::AreEqual(1, tbd);
-				// Held records are CPU system-RAM products; anchor slots keep their slots as history.
-				for (const Contract& c : Contracts())
-				{
 					const VpSkeleton::ProductDecl& d = reg.Get(c.id);
-					if (c.fill == FillRule::HeldRecord)
+					// The registry never silently drops an input: it declares the first kMaxInputs of the intended list, in order.
+					const size_t want = c.intended.size() < VpSkeleton::kMaxInputs ? c.intended.size() : VpSkeleton::kMaxInputs;
+					Assert::AreEqual(want, size_t(d.inputCount), (std::wstring(L"declared inputs of ") + std::wstring(c.token, c.token + std::strlen(c.token))).c_str());
+					for (size_t k = 0; k < want; ++k)
 					{
-						Assert::IsTrue(d.backend == VpSkeleton::Backend::Cpu);
-						Assert::IsTrue(d.residency == VpSkeleton::Residency::SystemRam);
+						Assert::AreEqual(int(c.intended[k].product), int(d.inputs[k].product));
+						Assert::AreEqual(int(c.intended[k].lag), int(d.inputs[k].lag));
+						Assert::AreEqual(int(c.intended[k].lead), int(d.inputs[k].lead));
 					}
-					else
-						Assert::IsTrue(d.backend == VpSkeleton::Backend::GpuCompute);
-					if (c.fill == FillRule::AnchorSlot)
-						Assert::IsTrue(d.history == (c.id == VpSkeleton::kTdBaseLong ? VpSkeleton::kTdLongSlots : VpSkeleton::kTdShortSlots));
 				}
-				Assert::IsNull(ContractOf(VpSkeleton::kSourceIdentity));
+				// The dependency on the raised limits is recorded, not hidden: these three exceed the framework's 4 inputs today.
+				using namespace VpSkeleton;
+				Assert::IsTrue(ContractOf(kTdBlocks)->intended.size() > kMaxInputs);
+				Assert::IsTrue(ContractOf(kCodingEvidence)->intended.size() > kMaxInputs);
+				Assert::IsTrue(ContractOf(kTdAnchorPass)->intended.size() > kMaxInputs);
+				Assert::IsNull(ContractOf(kSourceIdentity));
+				Assert::AreEqual(2u, kUnitVersion);
 			}
 
-			TEST_METHOD(BaseBuffersCarryTheChroma420PlanesAtHalfTheLumaBaseResolution)
+			TEST_METHOD(GovernedStagesAreWholeBuffersFloorFirstAndTheRegistryDeclaresTheFloor)
 			{
 				const Registry reg = SkeletonProducts();
-				// Luma R16 at 1/4 per axis (2 B) + Cb and Cr at 1/8 per axis (2 x 2 B): 1/4 base of 4K = 960 x 540, chroma 480 x 270.
 				const Dims d4k = { 3840, 2160 };
-				Assert::AreEqual(uint64_t(960) * 540 * 2 + uint64_t(480) * 270 * 4, VpSkeleton::BytesOf(reg.Get(VpSkeleton::kTdBaseLong).size, d4k));
-				Assert::AreEqual(VpSkeleton::BytesOf(reg.Get(VpSkeleton::kTdBaseLong).size, d4k), VpSkeleton::BytesOf(reg.Get(VpSkeleton::kTdBaseShort).size, d4k));
-				// A stored picture is more than 10x smaller than the frame's luma at 2 B/px (4K: 1.56 MB per slot vs 16.6 MB).
-				Assert::IsTrue(VpSkeleton::BytesOf(reg.Get(VpSkeleton::kTdBaseLong).size, d4k) * 10 < uint64_t(3840) * 2160 * 2);
-			}
-
-			TEST_METHOD(VramBudgetPerTierIsTheHandSummedFigure)
-			{
-				// Hand sums (decimal bytes, stored slots counted: base_long x 2, base_short x 6), written from the layouts in the
-				// contract table, not from BytesOf. T0 holds only system-RAM records; T1 the maps and base buffers; T2 drift + offsets.
-				struct Row { Dims d; uint64_t t1, t2; };
-				const Row rows[] = {
-					{ { 1920, 1080 }, 5152320ull, 2106240ull },
-					{ { 3840, 2160 }, 20606400ull, 8424000ull },
-					{ { 7680, 4320 }, 82425600ull, 33696000ull },
-				};
-				for (const Row& r : rows)
+				for (const Contract& c : Contracts())
 				{
-					const TierBudget b = BudgetAt(r.d);
-					Assert::AreEqual(uint64_t(0), b.vram[0], L"T0 has no GPU bytes");
-					Assert::AreEqual(r.t1, b.vram[1]);
-					Assert::AreEqual(r.t2, b.vram[2]);
-					Assert::AreEqual(uint64_t(256 + 4096 + 2048), b.systemRam[0], L"quality pattern + motion model + mirror records");
-					Assert::AreEqual(uint64_t(0), b.systemRam[1] + b.systemRam[2]);
+					if (c.stages.empty()) continue;
+					Assert::AreEqual(VpSkeleton::BytesOf(reg.Get(c.id).size, d4k), VpSkeleton::BytesOf(c.stages[0].size, d4k), L"the registry declares stage 0");
+					for (size_t i = 1; i < c.stages.size(); ++i)
+						Assert::IsTrue(VpSkeleton::BytesOf(c.stages[i].size, d4k) >= VpSkeleton::BytesOf(c.stages[i - 1].size, d4k), L"stages only add");
 				}
-				// Even the 8K worst case (store form of the offsets included) is far below the K0 laptop figure for the whole lane.
-				Assert::IsTrue(BudgetAt(Dims{ 7680, 4320 }).Vram() < 200ull * 1000 * 1000);
+				// Only td.memory, td.anchor_refs and td.delta are governed (the large buffers).
+				size_t governed = 0;
+				for (const Contract& c : Contracts()) governed += c.stages.empty() ? 0u : 1u;
+				Assert::AreEqual(size_t(3), governed);
+				// The memory floor is the laptop's: stage 0 + still/dark floor + full-resolution mid band (2 B/px at full resolution).
+				Assert::AreEqual(uint64_t(960) * 540 * 55 + uint64_t(1920) * 1080 + uint64_t(3840) * 2160 * 2, BytesAt(reg, VpSkeleton::kTdMemory, d4k, 0));
+				Assert::AreEqual(uint64_t(0), BytesAt(reg, VpSkeleton::kTdAnchorRefs, d4k, 0));
+				// No fixed per-GPU tier wording anywhere in the table.
+				for (const Contract& c : Contracts())
+					for (const Stage& s : c.stages)
+					{
+						const std::string n = s.name;
+						Assert::IsTrue(n.find("3090") == std::string::npos && n.find("laptop") == std::string::npos);
+					}
 			}
 
-			TEST_METHOD(EveryConsumerReadsSomethingAndTheSetsAreDistinctFromTheEngine)
+			TEST_METHOD(BudgetAtThe4KFrameIsTheHandSummedFigure)
 			{
-				for (Consumer c : { Consumer::AdaptiveScaler, Consumer::DitherNeed, Consumer::ChromaStage, Consumer::Engine })
+				// Hand sums (decimal bytes) from the layouts, not from BytesOf. VRAM floor: td.blocks 1,684,800 + td.memory 47,174,400 +
+				// td.delta 3,240,000 + td.maps 777,600 + coding_evidence 1,037,056 + refined_field 1,036,800 (anchor_refs 0).
+				const Dims d4k = { 3840, 2160 };
+				const Budget floor = BudgetAt(d4k, false);
+				Assert::AreEqual(uint64_t(54950656), floor.vram);
+				Assert::AreEqual(uint64_t(24883200), floor.transient, L"anchor pass arena peak: 3 B/px");
+				Assert::AreEqual(uint64_t(64 * 128 + 64 * 128 + 256 * 8), floor.systemRam, L"quality pattern, causal, trail summary (history counted)");
+				// Full stages: td.memory 175,737,600, anchor_refs 49,766,400, delta 11,534,400.
+				const Budget full = BudgetAt(d4k, true);
+				Assert::AreEqual(uint64_t(241574656), full.vram);
+				Assert::AreEqual(floor.systemRam, full.systemRam);
+				Assert::IsTrue(full.vram > floor.vram);
+				// The floor at 1080p is smaller and at 8K larger (no hidden fixed tier).
+				Assert::IsTrue(BudgetAt(Dims{ 1920, 1080 }, false).vram < floor.vram);
+				Assert::IsTrue(BudgetAt(Dims{ 7680, 4320 }, false).vram > floor.vram);
+			}
+
+			TEST_METHOD(TdMapsViewTwelveNamedFieldsInThreePlanesWithOneAccessor)
+			{
+				using namespace TdMapsView;
+				Assert::AreEqual(1u, TdMapsView::kUnitVersion);
+				Assert::IsTrue(VersionMatches(1) && !VersionMatches(2) && !VersionMatches(0));
+				std::set<std::string> names;
+				for (int f = 0; f < kFields; ++f)
+				{
+					Assert::IsTrue(names.insert(Name(f)).second);
+					Assert::AreEqual(f / 4, PlaneOf(f));
+					Assert::AreEqual(f % 4, ComponentOf(f));
+				}
+				Block b;
+				for (int f = 0; f < kFields; ++f) b.f[f] = 0.01f * (f + 1);
+				float planes[kPlanes][4];
+				Pack(b, planes);
+				const Block r = Unpack(planes);
+				for (int f = 0; f < kFields; ++f) Assert::AreEqual(b.f[f], Fetch(r, Field(f)));
+				// Each reader reads only its fields (doc 72 section 1.2 card 10).
+				Assert::AreEqual(Bit(kRealDetail) | Bit(kStability) | Bit(kCodingNoise), FieldsOf(Reader::AdaptiveScaler));
+				Assert::AreEqual(Bit(kOwnGrain) | Bit(kStability), FieldsOf(Reader::DitherNeed));
+				Assert::AreEqual(Bit(kStability), FieldsOf(Reader::SigmaDelta));
+				Assert::AreEqual(Bit(kValidity) | Bit(kTrailConfidence0), FieldsOf(Reader::ChromaStage));
+				Assert::AreEqual(Bit(kValidity) | Bit(kStability), FieldsOf(Reader::Deband));
+				for (Consumer c : kAllConsumers)
+					Assert::IsTrue(FieldsOf(MapsReaderOf(c)) != 0u);
+				const std::string glsl = Glsl();
+				for (int f = 0; f < kFields; ++f)
+					Assert::IsTrue(glsl.find(std::string("vpu_td_maps_") + Name(f) + "(ivec2 b)") != std::string::npos);
+				Assert::IsTrue(glsl.find("2 * VPU_TD_MAPS_GH") != std::string::npos, L"plane 2 sits two block-heights down");
+			}
+
+			TEST_METHOD(EveryConsumerReadsTdMapsExceptTheEngineAndEveryEngineProductHasAReader)
+			{
+				for (Consumer c : kAllConsumers)
 				{
 					const std::vector<ProductId> need = NeededBy(c);
-					Assert::IsFalse(need.empty());
-					for (ProductId p : need)
-						Assert::IsTrue(IsReserved(p));
+					bool maps = false;
+					for (ProductId p : need) { Assert::IsTrue(IsEngineProduct(p)); maps = maps || p == VpSkeleton::kTdMaps; }
+					Assert::IsTrue(maps, L"every consumer reads td.maps through U19");
 					Assert::IsTrue(FallbackCatalog::FindProductEntry(FallbackIdOf(c)) != nullptr, L"the fallback id exists in the catalog table");
 				}
-				// Every reserved product is read by somebody (consumers + the engine).
+				Assert::AreEqual(std::string("product.adaptive_downscale"), std::string(FallbackIdOf(Consumer::AdaptiveScaler)));
+				Assert::AreEqual(std::string("product.debander"), std::string(FallbackIdOf(Consumer::Deband)));
+				Assert::IsTrue(FallbackCatalog::FindProductEntry(FallbackIdOf(Consumer::Engine)) != nullptr);
 				std::set<int> read;
-				for (Consumer c : { Consumer::AdaptiveScaler, Consumer::DitherNeed, Consumer::ChromaStage, Consumer::Engine })
-					for (ProductId p : NeededBy(c))
-						read.insert(int(p));
-				Assert::AreEqual(size_t(kCount), read.size());
+				for (Consumer c : { Consumer::AdaptiveScaler, Consumer::DitherNeed, Consumer::SigmaDelta, Consumer::ChromaStage, Consumer::Deband, Consumer::Engine })
+					for (ProductId p : NeededBy(c)) read.insert(int(p));
+				// td.blocks / td.memory / td.anchor_pass and the causal pattern are read by the module row / as the substitute.
+				for (const Contract& c : Contracts())
+				{
+					if (c.id == VpSkeleton::kTdBlocks || c.id == VpSkeleton::kTdMemory || c.id == VpSkeleton::kTdAnchorPass || c.id == VpSkeleton::kQualityPatternCausal)
+						continue;
+					Assert::IsTrue(read.count(int(c.id)) == 1, (std::wstring(L"no reader: ") + std::wstring(c.token, c.token + std::strlen(c.token))).c_str());
+				}
 			}
 
 			TEST_METHOD(NotRequestedIsNotAFallbackAndChangesNothing)
 			{
-				for (Consumer c : { Consumer::AdaptiveScaler, Consumer::DitherNeed, Consumer::ChromaStage })
+				for (Consumer c : kAllConsumers)
 				{
 					const ReadResult r = Read(c, PlaceholderSnapshot(), false, 0);
-					Assert::IsFalse(r.requested);
-					Assert::IsFalse(r.usable);
-					Assert::IsFalse(r.fallback.engaged);
+					Assert::IsFalse(r.requested || r.usable || r.fallback.engaged);
 					Assert::AreEqual(std::string(FallbackIdOf(c)), r.fallback.id);
 					Assert::AreEqual(std::string(), r.reason);
 					Assert::AreEqual(std::string(), StatusLine(c, r));
 					const ReadResult t = ReadToday(c);
 					Assert::IsFalse(t.requested || t.usable || t.fallback.engaged);
-					Assert::AreEqual(std::string(), StatusLine(c, t));
 				}
 				Assert::IsFalse(kEngineRequestedToday, L"no configuration key exists in reset 1");
 				for (const Entry& e : PlaceholderSnapshot()->entry)
@@ -171,12 +261,10 @@ namespace Tests
 
 			TEST_METHOD(RequestedWithoutTheEngineIsAVisibleFallbackNamingEveryMissingProduct)
 			{
-				for (Consumer c : { Consumer::AdaptiveScaler, Consumer::DitherNeed, Consumer::ChromaStage })
+				for (Consumer c : kAllConsumers)
 				{
 					const ReadResult placeholder = Read(c, PlaceholderSnapshot(), true, 0);
-					Assert::IsTrue(placeholder.requested);
-					Assert::IsFalse(placeholder.usable);
-					Assert::IsTrue(placeholder.fallback.engaged);
+					Assert::IsTrue(placeholder.requested && !placeholder.usable && placeholder.fallback.engaged);
 					Assert::AreEqual(std::string(FallbackIdOf(c)), placeholder.fallback.id);
 					for (ProductId p : NeededBy(c))
 						Assert::IsTrue(placeholder.reason.find(ContractOf(p)->token) != std::string::npos);
@@ -185,39 +273,37 @@ namespace Tests
 					Assert::IsTrue(none.fallback.engaged);
 					Assert::AreEqual(std::string("engine not built"), none.reason);
 					Assert::AreEqual(placeholder.missingMask, none.missingMask);
-					Assert::IsTrue(placeholder.fallback.reason.find("classical") != std::string::npos || !placeholder.fallback.reason.empty());
 				}
 			}
 
 			TEST_METHOD(ReadRecoversByItselfAndRejectsStaleOrForeignVersions)
 			{
-				const Consumer c = Consumer::AdaptiveScaler;
+				const Consumer c = Consumer::AdaptiveScaler;   // td.maps + refined_field
 				Snapshot s = FreshAll(1000);
 				Assert::IsTrue(Read(c, &s, true, 2000).usable);
 				Assert::IsFalse(Read(c, &s, true, 2000).fallback.engaged);
-				// One needed product absent: classical, naming it; an unneeded one absent changes nothing.
-				s.entry[IndexOf(VpSkeleton::kTdStability)].published = false;
+				s.entry[IndexOf(VpSkeleton::kTdMaps)].published = false;
 				ReadResult r = Read(c, &s, true, 2000);
 				Assert::IsFalse(r.usable);
-				Assert::IsTrue(r.reason.find("td.stability absent") != std::string::npos);
-				Assert::IsTrue(Read(Consumer::DitherNeed, &s, true, 2000).usable == false);   // dither needs it too
-				Assert::IsTrue(Read(Consumer::ChromaStage, &s, true, 2000).usable, L"chroma does not read stability");
-				s.entry[IndexOf(VpSkeleton::kTdStability)].published = true;
+				Assert::IsTrue(r.reason.find("td.maps absent") != std::string::npos);
+				Assert::IsFalse(Read(Consumer::DitherNeed, &s, true, 2000).usable);
+				Assert::IsFalse(Read(Consumer::Deband, &s, true, 2000).usable, L"deband reads td.maps too");
+				s.entry[IndexOf(VpSkeleton::kTdMaps)].published = true;
 				Assert::IsTrue(Read(c, &s, true, 2000).usable, L"recovers by itself");
-				// Another unit version.
-				s.entry[IndexOf(VpSkeleton::kTdRealDetail)].unitVersion = kUnitVersion + 1;
+				// Another unit version of the map's accessor unit (U19).
+				s.entry[IndexOf(VpSkeleton::kTdMaps)].unitVersion = TdMapsView::kUnitVersion + 1;
 				r = Read(c, &s, true, 2000);
 				Assert::IsFalse(r.usable);
-				Assert::IsTrue(r.reason.find("td.real_detail unit version") != std::string::npos);
-				s.entry[IndexOf(VpSkeleton::kTdRealDetail)].unitVersion = kUnitVersion;
-				// Stale (age limit) and from the future.
-				s.entry[IndexOf(VpSkeleton::kTdGrainLevel)].maxAgeUs = 500;
+				Assert::IsTrue(r.reason.find("td.maps unit version") != std::string::npos);
+				s.entry[IndexOf(VpSkeleton::kTdMaps)].unitVersion = TdMapsView::kUnitVersion;
+				// refined_field belongs to U15: its own version; a stale record; one from the future.
+				s.entry[IndexOf(VpSkeleton::kRefinedField)].unitVersion = kFieldRefineUnit + 1;
+				Assert::IsTrue(Read(c, &s, true, 2000).reason.find("refined_field unit version") != std::string::npos);
+				s.entry[IndexOf(VpSkeleton::kRefinedField)].unitVersion = kFieldRefineUnit;
+				s.entry[IndexOf(VpSkeleton::kRefinedField)].maxAgeUs = 500;
 				Assert::IsTrue(Read(c, &s, true, 1400).usable);
-				r = Read(c, &s, true, 1600);
-				Assert::IsFalse(r.usable);
-				Assert::IsTrue(r.reason.find("td.grain_level stale") != std::string::npos);
-				Assert::IsFalse(Read(c, &s, true, 400).usable, L"a record newer than the reader by more than its age is not trusted");
-				Assert::IsTrue(Read(c, &s, true, 1000).usable);
+				Assert::IsTrue(Read(c, &s, true, 1600).reason.find("refined_field stale") != std::string::npos);
+				Assert::IsFalse(Read(c, &s, true, 400).usable, L"newer than the reader by more than its age is not trusted");
 			}
 
 			TEST_METHOD(DitherNeedDecisionIsUnchangedWhileTheEngineIsNotRequested)
@@ -229,14 +315,12 @@ namespace Tests
 				DitherNeed::StateTracker t1, t2;
 				const DitherNeed::Decision plain = t1.Decide(a);
 				DitherNeed::FrameArgs b = a;
-				b.td = nullptr;   // even with no producer at all: not requested, so not a fallback
+				b.td = nullptr;
 				const DitherNeed::Decision viaNull = t2.Decide(b);
 				Assert::AreEqual(int(plain.result), int(viaNull.result));
 				Assert::AreEqual(plain.status, viaNull.status);
 				Assert::AreEqual(DitherNeed::StatusOf(true, 0, true), plain.status, L"the status is exactly the classical text");
-				Assert::IsFalse(plain.td.fallback.engaged);
-				Assert::IsFalse(plain.td.requested);
-				// Requested with the placeholder: the classical law still runs (result unchanged), the status says why.
+				Assert::IsFalse(plain.td.fallback.engaged || plain.td.requested);
 				DitherNeed::FrameArgs r = a;
 				r.tdRequested = true;
 				DitherNeed::StateTracker t3;
@@ -245,9 +329,8 @@ namespace Tests
 				Assert::AreEqual(plain.reset, asked.reset);
 				Assert::AreEqual(plain.off, asked.off);
 				Assert::IsTrue(asked.td.fallback.engaged);
-				Assert::AreEqual(std::string("product.td_dither"), asked.td.fallback.id);
+				Assert::AreEqual(std::string("product.dither_need"), asked.td.fallback.id);
 				Assert::IsTrue(asked.status.find(plain.status) == 0 && asked.status.size() > plain.status.size());
-				// Off (setting off): nothing is read, nothing is said.
 				DitherNeed::FrameArgs off = r;
 				off.enabled = false;
 				DitherNeed::StateTracker t4;
@@ -263,18 +346,26 @@ namespace Tests
 						cb.at(i, j) = 400.0 + 20.0 * i + 5.0 * j;
 				const ChromaUpscale::Result r = ChromaUpscale::Upsample(y, cb, cr, -0.5, 0.0, ChromaUpscale::ActiveRect(), 10, 32.0);
 				Assert::AreEqual(std::string("ok"), r.status);
-				Assert::IsFalse(r.td.requested);
-				Assert::IsFalse(r.td.fallback.engaged);
+				Assert::IsFalse(r.td.requested || r.td.fallback.engaged);
+				Assert::AreEqual(std::string("product.chroma_cfl"), r.td.fallback.id);
 			}
 
-			TEST_METHOD(AdaptiveStageReportsNothingUntilTheEngineIsRequested)
+			TEST_METHOD(AdaptiveStageSigmaDeltaAndDebanderReportNothingUntilTheEngineIsRequested)
 			{
 				AdaptiveDownscale::Module module;
 				AdaptiveDownscaleStage::Stage stage(module);
 				Assert::IsTrue(stage.StatusLines().empty());
 				Assert::IsFalse(stage.TemporalDetailRead().requested);
 				Assert::IsFalse(stage.TemporalDetailFallback().engaged);
-				Assert::AreEqual(std::string("product.td_scaler"), std::string(FallbackIdOf(Consumer::AdaptiveScaler)));
+				SigmaDeltaVectors::NextVectorGuard guard;
+				Assert::IsFalse(guard.Apply(nullptr, 0, nullptr), L"no hooks: nothing applied");
+				Assert::IsFalse(guard.TemporalDetailRead().requested || guard.TemporalDetailRead().fallback.engaged);
+				Assert::AreEqual(std::string("product.sigma_delta"), guard.TemporalDetailRead().fallback.id);
+				VpDebander::Module deband;
+				pl_frame src{}, dst{};
+				Assert::IsFalse(deband.Apply(nullptr, nullptr, src, VpDebander::Params(), dst), L"nothing to deband");
+				Assert::IsFalse(deband.TemporalDetailRead().requested || deband.TemporalDetailRead().fallback.engaged);
+				Assert::AreEqual(std::string("product.debander"), deband.TemporalDetailRead().fallback.id);
 			}
 		};
 	}

@@ -6,9 +6,10 @@
 // product: Cpu, T0, about 0.6 MB at 4K (RGBA32F guide + R32F code = 20 B per 16x16 block), inputs P7 at lag d and P4 at lag 0,
 // consumer "camera guidance" (the Measurement path). d is fixed per graph (GuideLagFor); it is recomputed only on a graph rebuild.
 //
-// Registration: the id follows the last SA0 id (kSkeletonProductEnd). It is NOT added to SkeletonProducts() / ProductRows() here:
-// those tables are pinned by the catalog tests and the wiring step owns the integration. SkeletonProductsWithGuide(d) is the
-// assembly with it; GuideRow() is its catalog row; GuideConsumerDecl(d) the consumer. Pure, header-only, C++14.
+// Registration (doc 72 item 1): the product is REGISTERED in core/Products.h (id kP7gCameraGuide, right after P14, with the floor
+// lag kGuideDefaultLag) and in the catalog (row and the "camera guidance" consumer). SkeletonProductsWithGuide(d) is the registry with
+// the MEASURED lag d set on its P7 input (a graph rebuild); GuideRow() is its catalog row; GuideConsumerDecl() the consumer.
+// Pure, header-only, C++14.
 #pragma once
 
 #include <VP-V/core/ProductCatalog.h>
@@ -22,7 +23,7 @@
 
 namespace CameraLink
 {
-	constexpr VpSkeleton::ProductId kP7gCameraGuide = VpSkeleton::kSkeletonProductEnd;   // "after the last SA0 id"
+	constexpr VpSkeleton::ProductId kP7gCameraGuide = VpSkeleton::kP7gCameraGuide;       // registered in core/Products.h
 	constexpr uint16_t kGuideConsumerId = kCameraConsumerIdBase + 0x40;                   // beside the 14 camera consumers
 	constexpr uint32_t kGuideBytesPerBlock = 20;                                          // RGBA32F guide + R32F code
 	constexpr uint8_t kMinGuideLag = 2;
@@ -39,30 +40,18 @@ namespace CameraLink
 		return static_cast<uint8_t>(clamped);
 	}
 
-	inline void AppendCameraGuideProduct(std::vector<VpSkeleton::ProductDecl>& decls, uint8_t lagD)
+	// Sets the measured lag d on the guide's P7 input (the registered declaration carries the floor lag).
+	inline void SetGuideLag(std::vector<VpSkeleton::ProductDecl>& decls, uint8_t lagD)
 	{
-		using VpSkeleton::detail::AddInput;
-		using VpSkeleton::detail::AddTerm;
-		using VpSkeleton::detail::Make;
-		using namespace VpIndicator;
-		const CounterMask content = Bit(kFull) | Bit(kContinuity);
-		VpSkeleton::ProductDecl p = Make(kP7gCameraGuide, "p7g_camera_guide", "camera guide", VpSkeleton::Backend::Cpu, 0,
-			VpSkeleton::Tier::T0, content, Bit(kSettingsMotion));
-		AddInput(p, VpSkeleton::kP7CameraFit, lagD < kMinGuideLag ? kMinGuideLag : lagD);
-		AddInput(p, VpSkeleton::kP4SourceStats, 0);
-		p.residency = VpSkeleton::Residency::SystemRam;
-		p.spanMask = content;   // a pair spanning a slip / full change has no guidance
-		AddTerm(p, 4, kGuideBytesPerBlock);
-		p.size.fixedBytes = 256;
-		p.refRenderMs = 0.05f;
-		decls.push_back(p);
+		VpSkeleton::ProductDecl& p = decls[kP7gCameraGuide];
+		p.inputs[0].lag = lagD < kMinGuideLag ? kMinGuideLag : lagD;
 	}
 
-	// The skeleton registry with the guide product appended (id kP7gCameraGuide).
+	// The skeleton registry with the guide's measured lag d.
 	inline VpSkeleton::Registry SkeletonProductsWithGuide(uint8_t lagD)
 	{
 		std::vector<VpSkeleton::ProductDecl> d = VpSkeleton::SkeletonProducts().All();
-		AppendCameraGuideProduct(d, lagD);
+		SetGuideLag(d, lagD);
 		return VpSkeleton::Registry(std::move(d));
 	}
 

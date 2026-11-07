@@ -54,11 +54,11 @@ namespace VideoProcessorTest
 		TEST_METHOD(DeclarationIsPinned)
 		{
 			using namespace VpSkeleton;
-			Assert::AreEqual(int(kSkeletonProductEnd), int(CameraLink::kP7gCameraGuide), L"id after the last SA0 id");
+			Assert::AreEqual(int(kSourceIdentity) + 1, int(CameraLink::kP7gCameraGuide), L"registered right after P14 (doc 72 item 1)");
 			const Registry reg = CameraLink::SkeletonProductsWithGuide(3);
 			const char* why = "";
 			Assert::IsTrue(reg.Validate(&why), L"dense, inputs known, no cycle");
-			Assert::AreEqual(size_t(kSkeletonProductEnd) + 1, reg.Size());
+			Assert::AreEqual(size_t(kSkeletonProductEnd), reg.Size());
 			const ProductDecl& p = reg.Get(CameraLink::kP7gCameraGuide);
 			Assert::AreEqual(std::string("p7g_camera_guide"), std::string(p.token));
 			Assert::IsTrue(p.backend == Backend::Cpu && p.tier == Tier::T0 && p.residency == Residency::SystemRam);
@@ -74,8 +74,9 @@ namespace VideoProcessorTest
 			// The lag floor.
 			const Registry low = CameraLink::SkeletonProductsWithGuide(0);
 			Assert::AreEqual(int(CameraLink::kMinGuideLag), int(low.Get(CameraLink::kP7gCameraGuide).inputs[0].lag));
-			// The first products are untouched (registry prefix identical to SkeletonProducts()).
+			// The registered declaration carries the floor lag; the measured d only changes that input (tokens identical everywhere).
 			const Registry base = SkeletonProducts();
+			Assert::AreEqual(int(kGuideDefaultLag), int(base.Get(CameraLink::kP7gCameraGuide).inputs[0].lag));
 			for (size_t i = 0; i < base.Size(); ++i)
 				Assert::AreEqual(std::string(base.All()[i].token), std::string(reg.All()[i].token));
 			// The row and the consumer.

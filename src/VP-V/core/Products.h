@@ -59,7 +59,7 @@ enum : ProductId {
 //   P11  region block stats   per-block statistics (mean/var/gradient/tensor/Laplacian) + reserved E1/E2/E3 band energies
 //   P12  light level          the 16 KB perceptual LUT + per-block light level (WP2 reserved)
 //   P13  source ring          VIEWS of the unpacked planes of the queued frames (owned by queue/upload): 0 extra bytes
-//   td.refstore / td.analysis / td.admission   TemporalDetail's module-owned history product and its lane products
+//   td.blocks / td.memory / td.anchor_pass     (v1: td.analysis / td.refstore / td.admission) TemporalDetail's products, redefined by doc 72 (unit v2)
 //   P14  source identity      the held-state source record (axes, kernel, codec class, quality tier; CPU, ~256 B). No live fill:
 //                             consumers read the latest sealed record and fall back to the classical value when it is stale
 enum : ProductId {
@@ -68,30 +68,27 @@ enum : ProductId {
     kP11RegionBlockStats,
     kP12LightLevel,
     kP13SourceRing,
-    kTdAnalysis,
-    kTdRefstore,
-    kTdAdmission,
-    kSourceIdentity,      // P14 (doc 61 D-SID1): HELD-STATE source identity record; appended last so every earlier id is unchanged
-    // RESERVED temporal-detail engine products (R1-W1-RES; the engine is built in reset 2, doc 67v2 section 13). Declared now so the
-    // consumers' read paths (adaptive scaler, dither need / sigma-delta, chroma stage) are wired against fixed ids, contracts and
-    // unit versions, and reset 2 only fills producers. Contracts, fill rules and the VRAM budget: modules/repair/temporal_detail/products.
-    kTdQualityPattern,    // td.quality_pattern   frame quality pattern (from the source identity record, doc 68v2)
-    kTdTrailConfidence,   // td.trail_confidence  per-block confidence of the carried trail
-    kTdResidual,          // td.residual          residual map of the re-prediction
-    kTdValidity,          // td.validity          validity map of the carried data
-    kTdRealDetail,        // td.real_detail       validated carried structure versus rounding noise and blocking
-    kTdGrainLevel,        // td.grain_level       own grain versus coding noise, per block
-    kTdStability,         // td.stability         anchor-held regions
-    kTdLighting,          // td.lighting          lighting layer state
-    kTdDrift,             // td.drift             I-to-I drift map
-    kTdMotionModel,       // td.motion_model      camera / object model state, near-I calibrated (held state)
-    kTdMirror,            // td.mirror            reference-set mirror record (held state)
-    kTdBaseLong,          // td.base_long         long-term low-res base buffers (+ chroma 4:2:0 planes)
-    kTdBaseShort,         // td.base_short        short-term low-res base buffers = the reference mirror's pictures (+ chroma)
-    kTdRefinedVectors,    // td.refined_vectors   refined per-block vectors + confidence (DMVR-style)
-    kTdRefinePixel,       // td.refine_pixel      optional per-pixel refinement offsets (BDOF/PROF-style; store vs recompute TBD)
+    kTdBlocks,            // id 16 (v1: td.analysis): per-block TD state (motion + lighting layer), unit v2
+    kTdMemory,            // id 17 (v1: td.refstore): the whole budget-governed store (slots, bands, chroma), unit v2
+    kTdAnchorPass,        // id 18 (v1: td.admission): the anchor-repair pass, Transient arena, unit v2
+    kSourceIdentity,      // P14 (doc 61 D-SID1): HELD-STATE source identity record
+    // Doc 72 (R1-W1-RES round 2): appended in the planned order after P14. Ids 16-18 above keep their numbers with new tokens.
+    kP7gCameraGuide,      // 20 p7g_camera_guide  camera guidance (doc 56; was claimed as kSkeletonProductEnd by CameraGuideProduct.h, unregistered)
+    kCodingEvidence,      // 21 coding_evidence (P16): per-8x8 coding evidence, fused with P11 (U13 CodingEvidence)
+    kQualityPattern,      // 22 quality_pattern (P15): per-frame LANE product, role at lead 2 (not P14's held state)
+    kQualityPatternCausal,// 23 quality_pattern.causal (P15c): the short-queue substitute of P15
+    kRefinedField,        // 24 refined_field (P3r): refined per-block vectors + confidence (U15 FieldRefine; owner: vector engine)
+    kTdAnchorRefs,        // 25 td.anchor_refs: received luma of the last anchors (budget-governed)
+    kTdDelta,             // 26 td.delta: lane -> render hand-off of the repair delta
+    kTdMaps,              // 27 td.maps: THE consumer-facing per-block map product (U19 TdMapsView)
+    kTdTrailSummary,      // 28 td.trail_summary: per-frame CPU summary for source identity / status
     kSkeletonProductEnd
 };
+
+// v1 names of ids 16-18 (kept so existing readers compile; the tokens and contracts are the v2 ones above).
+constexpr ProductId kTdAnalysis = kTdBlocks;
+constexpr ProductId kTdRefstore = kTdMemory;
+constexpr ProductId kTdAdmission = kTdAnchorPass;
 
 // Frames of look-ahead P9 reads from P7 at film depth (the declared lead; the effective lead is
 // capped by the lane lead of the graph).
@@ -740,9 +737,12 @@ inline void AppendSourceRingProduct(std::vector<ProductDecl>& decls)
     decls.push_back(p13);
 }
 
-// TemporalDetail's products (the module's former private descriptors, now registered): td.refstore is a module-owned
-// HISTORY product (history = the slots, kRefSlots), td.analysis a lane product, td.admission a T2 gap product.
-constexpr uint8_t kRefSlots = 5;   // TemporalDetail::kSlots
+// TemporalDetail's products, redefined by doc 72 (unit v2). Every size here is the BUDGET-GOVERNED FLOOR ("stage 0": the
+// repair of the still / dark regions plus the full-resolution mid band at the true source resolution, as the laptop starts); the
+// governor adds stages while VRAM and ms headroom allow, each visible and each shed in the reverse order. The stages, their size
+// rules and the inputs the framework cannot hold yet (kMaxInputs = 4) are the contract table of
+// modules/repair/temporal_detail/products/TdProductContracts.h. No fixed per-GPU tiers.
+constexpr uint8_t kRefSlots = 5;   // v1 TemporalDetail::kSlots (the v1 module code still allocates its v1 store)
 inline void AppendTemporalDetailProducts(std::vector<ProductDecl>& decls)
 {
     using detail::AddInput;
@@ -751,41 +751,48 @@ inline void AppendTemporalDetailProducts(std::vector<ProductDecl>& decls)
     using namespace VpIndicator;
     const CounterMask content = Bit(kFull) | Bit(kContinuity);
 
-    // td.analysis: E1/E2/F/q block maps (12 floats per 16 px block = 48 B), rebound counters, softening run. Reads the
-    // shared split, block stats and the source ring at lag 0. The reference frames "known one frame ahead" are a LEAD
-    // on P13 in the plan; until the K1 seal rule exists a lead edge fails closed, so the lag form is declared.
-    ProductDecl an = Make(kTdAnalysis, "td.analysis", "temporal detail analysis", Backend::GpuCompute, 1, Tier::T1,
+    // td.blocks (id 16): per 16 px block ~28 B (state, origin slot, trail, per-band confidence, lighting layer, motion class...)
+    // + the 8 px quadtree pool (<= 25%): {shift 4: 28 B}, {shift 3: 6 B}. SEQUENTIAL: it reads itself at lag 1 (ordered-chain lane
+    // job, W1-SKG). The framework holds 4 inputs; the intended ~14 are in the contract table.
+    ProductDecl an = Make(kTdBlocks, "td.blocks", "temporal detail blocks", Backend::GpuCompute, 1, Tier::T1,
                           content | Bit(kRebaseH) | Bit(kRebaseV), Bit(kSettingsRebase) | Bit(kSettingsAnalysis));
     AddInput(an, kP10GrainSplit, 0);
     AddInput(an, kP11RegionBlockStats, 0);
     AddInput(an, kP13SourceRing, 0);
-    AddTerm(an, 4, 48);
+    AddInput(an, kTdBlocks, 1);
+    AddTerm(an, 4, 28);
+    AddTerm(an, 3, 6);
     an.rebasedPlane = true;
     an.refRenderMs = 1.5f;
     decls.push_back(an);
 
-    // td.refstore: history = the slots. Declared at what the code allocates TODAY: kRefstoreTodayBytesPerPixel (10 B/px,
-    // 83 MB per slot at 4K: RGBA16F raw + cleaned bands 8 B/px + R16 base 2 B/px). The SA6 compact form targets
-    // <= 4.5 B/px (kRefstoreTargetBytesPerPixelX2 / 2); the declaration changes with it, never ahead of it.
-    ProductDecl rs = Make(kTdRefstore, "td.refstore", "temporal detail reference store", Backend::GpuCompute, kRefSlots,
+    // td.memory (id 17): the WHOLE store (slots LT-A, LT-P, ST, NA, FP; bands B0 at 1/4 per axis, B1 at FULL resolution; chroma at
+    // B0), module-owned through GpuAllocator / VramGovernor. Floor stage 0: {shift 2: 55 B}, {shift 1: 1 B}, {shift 0: 2 B}
+    // (the full-resolution mid band); the governor adds the larger stages (contract table). Whole-store rule, so history 0.
+    ProductDecl rs = Make(kTdMemory, "td.memory", "temporal detail memory (budget-governed store)", Backend::GpuCompute, 0,
                           Tier::T1, content | Bit(kRebaseH) | Bit(kRebaseV), Bit(kSettingsRebase) | Bit(kSettingsAnalysis));
-    AddInput(rs, kTdAnalysis, 0);
+    AddInput(rs, kTdBlocks, 0);
     AddInput(rs, kP10GrainSplit, 0);
     AddInput(rs, kP3AnalysisField, 0);
     AddInput(rs, kP13SourceRing, 0);
-    AddTerm(rs, 0, kRefstoreTodayBytesPerPixel);
+    AddTerm(rs, 2, 55);
+    AddTerm(rs, 1, 1);
+    AddTerm(rs, 0, 2);
     rs.rebasedPlane = true;
+    rs.planningSize = true;
     rs.refRenderMs = 1.0f;
     decls.push_back(rs);
 
-    // td.admission: the cleaner / template work on admission frames, a T2 gap product. Its residency is the
-    // transient arena (SA1); declared Vram until Residency::Transient exists. Per 16 px block templates: an estimate.
-    ProductDecl ad = Make(kTdAdmission, "td.admission", "temporal detail admission", Backend::GpuCompute, 0, Tier::T2,
+    // td.anchor_pass (id 18): the anchor-repair pass, a T2 gap job chunked <= 1 ms; Transient (the shared arena, peak ~6 B1 planes
+    // = 3 B/px; a shared maximum, not a sum). Shed first, visible ("anchor repair: light only").
+    ProductDecl ad = Make(kTdAnchorPass, "td.anchor_pass", "temporal detail anchor pass", Backend::GpuCompute, 0, Tier::T2,
                           content | Bit(kRebaseH) | Bit(kRebaseV), Bit(kSettingsRebase) | Bit(kSettingsAnalysis));
-    AddInput(ad, kTdAnalysis, 0);
-    AddInput(ad, kP10GrainSplit, 0);
     AddInput(ad, kP13SourceRing, 0);
-    AddTerm(ad, 4, 64);
+    AddInput(ad, kP10GrainSplit, 0);
+    AddInput(ad, kP11RegionBlockStats, 0);
+    AddInput(ad, kTdMemory, 1);
+    AddTerm(ad, 0, 3);
+    ad.residency = Residency::Transient;
     ad.rebasedPlane = true;
     ad.refRenderMs = 3.0f;
     decls.push_back(ad);
@@ -812,19 +819,45 @@ inline void AppendSourceIdentityProduct(std::vector<ProductDecl>& decls)
     decls.push_back(p);
 }
 
-// The RESERVED temporal-detail engine products (see the enum above). Planning sizes per slot: block maps at the 8 px edge
-// (shift 3), 16 px (shift 4), half-resolution maps (shift 1) and the low-res BASE at 1/4 per axis (shift 2, doc 67v2 section 6:
-// "1/4 to 1/8 per axis"; the 1/4 form is the upper bound) with the chroma 4:2:0 planes at 1/8 per axis. The history of the base
-// products is their slot count. No producer exists in reset 1: the graph never reaches them unless a consumer that reads them is
-// active, and the three consumer read paths treat an absent product as "classical form" (visible, never log-only).
-constexpr uint8_t kTdLongSlots = 2;    // long-term: the repaired I-frame + the previous I (doc 67v2 6.1)
-constexpr uint8_t kTdShortSlots = 6;   // short-term: one reference about every mini-GOP (4-8 frames, doc 67v2 6.2)
-constexpr uint32_t kTdMirrorRecordBytes = 2048;
-constexpr uint32_t kTdMotionModelBytes = 4096;
-constexpr uint32_t kTdQualityPatternBytes = 256;
-inline void AppendTemporalDetailReservedProducts(std::vector<ProductDecl>& decls)
+// p7g_camera_guide (doc 56, K4-1; claimed as id 20 by CameraGuideProduct.h, registered here): the measurement plan for pair N is a
+// pure function of P7(N-d), the CPU field copy of that pair and P4(N), known ahead and declared as a lane product. d is fixed per
+// graph (CameraLink::GuideLagFor); the registry carries the floor d = kGuideDefaultLag and CameraLink::SkeletonProductsWithGuide(d)
+// sets the measured one on a graph rebuild.
+constexpr uint8_t kGuideDefaultLag = 2;
+constexpr uint32_t kGuideBytesPerBlock = 20;   // RGBA32F guide + R32F code per 16 px block
+inline void AppendCameraGuideProduct(std::vector<ProductDecl>& decls)
 {
     using detail::AddInput;
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    const CounterMask content = Bit(kFull) | Bit(kContinuity);
+    ProductDecl p = Make(kP7gCameraGuide, "p7g_camera_guide", "camera guide", Backend::Cpu, 0, Tier::T0, content, Bit(kSettingsMotion));
+    AddInput(p, kP7CameraFit, kGuideDefaultLag);
+    AddInput(p, kP4SourceStats, 0);
+    p.residency = Residency::SystemRam;
+    p.spanMask = content;   // a pair spanning a slip / full change has no guidance
+    AddTerm(p, 4, kGuideBytesPerBlock);
+    p.size.fixedBytes = 256;
+    p.refRenderMs = 0.05f;
+    decls.push_back(p);
+}
+
+// The temporal-detail engine's products and the precursors it needs (doc 72, section 1; the engine itself is built in reset 2).
+// Reset 1 declares the ids, contracts, sizes and fill rules and wires the consumers' read paths against them; the placeholder
+// producers publish "absent" and every reader runs its classical form (visibly, once the engine is requested). Sizes are the
+// BUDGET-GOVERNED FLOOR (stage 0); the larger stages of each budget-governed buffer are in
+// modules/repair/temporal_detail/products/TdProductContracts.h. The inputs that exceed kMaxInputs (4) are listed there too
+// (dependency: W1-SKG raises the limit; this declaration never silently drops one: it declares the first four and the contract
+// table records the full intended list, which a test compares).
+constexpr uint8_t kQualityPatternHistory = 128;   // frames (8 KB of system RAM)
+constexpr uint32_t kQualityPatternBytes = 64;
+constexpr uint32_t kCodingEvidenceSummaryBytes = 256;
+constexpr uint32_t kTdTrailSummaryBytes = 256;
+inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::AddLead;
     using detail::AddTerm;
     using detail::Make;
     using namespace VpIndicator;
@@ -832,160 +865,110 @@ inline void AppendTemporalDetailReservedProducts(std::vector<ProductDecl>& decls
     const CounterMask tdSettings = Bit(kSettingsRebase) | Bit(kSettingsAnalysis);
     const CounterMask rebased = content | Bit(kRebaseH) | Bit(kRebaseV);
 
-    // Quality pattern: a small per-frame record derived from the held source identity record (system RAM, lag-1 read of P14).
-    ProductDecl qp = Make(kTdQualityPattern, "td.quality_pattern", "td frame quality pattern", Backend::Cpu, 1, Tier::T0,
-                          content, Bit(kSettingsAnalysis));
-    AddInput(qp, kSourceIdentity, 1);
-    qp.size.fixedBytes = kTdQualityPatternBytes;
+    // coding_evidence (P16): per 8x8 block 8 B (hash32, blockiness u16, copy u8, phase u8) + a 256 B per-frame summary; history 2.
+    ProductDecl ce = Make(kCodingEvidence, "coding_evidence", "coding evidence (P16)", Backend::GpuCompute, 2, Tier::T0, rebased,
+                          tdSettings);
+    AddInput(ce, kP10GrainSplit, 0);
+    AddInput(ce, kP11RegionBlockStats, 0);
+    AddInput(ce, kP13SourceRing, 0);
+    AddInput(ce, kCodingEvidence, 1);   // the hash history (lag 2 joins when kMaxInputs allows)
+    AddTerm(ce, 3, 8);
+    ce.size.fixedBytes = kCodingEvidenceSummaryBytes;
+    ce.rebasedPlane = true;
+    ce.missingInputForm = true;
+    ce.refRenderMs = 0.2f;
+    decls.push_back(ce);
+
+    // quality_pattern (P15): a CPU POD (~64 B) per unique source frame, history 128, a per-frame LANE product (not P14's held state):
+    // role at lead 2. Short-queue substitute: P15c (visible "frame pattern: provisional").
+    ProductDecl qp = Make(kQualityPattern, "quality_pattern", "frame quality pattern (P15)", Backend::Cpu, kQualityPatternHistory,
+                          Tier::T0, content, Bit(kSettingsAnalysis));
+    AddInput(qp, kCodingEvidence, 0);
+    AddLead(qp, kCodingEvidence, 1);
+    AddLead(qp, kCodingEvidence, 2);
+    AddInput(qp, kQualityPattern, 1);
+    qp.size.fixedBytes = kQualityPatternBytes;
     qp.residency = Residency::SystemRam;
-    qp.rarelyTouched = true;
-    qp.missingInputForm = true;
+    qp.variants = Variants::NonIdentical;
+    qp.spanMask = content;
+    qp.shortQueueSubstitute = kQualityPatternCausal;
     decls.push_back(qp);
 
-    // Trail confidence: R16F per 8 px block.
-    ProductDecl tc = Make(kTdTrailConfidence, "td.trail_confidence", "td trail confidence", Backend::GpuCompute, 1, Tier::T1,
-                          rebased, tdSettings);
-    AddInput(tc, kTdAnalysis, 0);
-    AddInput(tc, kP3AnalysisField, 0);
-    AddTerm(tc, 3, 2);
-    tc.rebasedPlane = true;
-    tc.refRenderMs = 0.1f;
-    decls.push_back(tc);
+    // quality_pattern.causal (P15c): no lead, may not read P15.
+    ProductDecl qc = Make(kQualityPatternCausal, "quality_pattern.causal", "frame quality pattern, causal (P15c)", Backend::Cpu,
+                          kQualityPatternHistory, Tier::T0, content, Bit(kSettingsAnalysis));
+    AddInput(qc, kCodingEvidence, 0);
+    AddInput(qc, kQualityPatternCausal, 1);
+    qc.size.fixedBytes = kQualityPatternBytes;
+    qc.residency = Residency::SystemRam;
+    qc.spanMask = content;
+    decls.push_back(qc);
 
-    // Residual: R16F at half resolution (the residual of the re-prediction against the received picture).
-    ProductDecl rs = Make(kTdResidual, "td.residual", "td residual map", Backend::GpuCompute, 1, Tier::T1, rebased, tdSettings);
-    AddInput(rs, kTdAnalysis, 0);
-    AddInput(rs, kP13SourceRing, 0);
-    AddTerm(rs, 1, 2);
-    rs.rebasedPlane = true;
-    rs.refRenderMs = 0.4f;
-    decls.push_back(rs);
-
-    // Validity: R8 per 8 px block (valid / refresh / fade / invalidate state of the carried data).
-    ProductDecl va = Make(kTdValidity, "td.validity", "td validity map", Backend::GpuCompute, 1, Tier::T1, rebased, tdSettings);
-    AddInput(va, kTdResidual, 0);
-    AddInput(va, kTdTrailConfidence, 0);
-    AddTerm(va, 3, 1);
-    va.rebasedPlane = true;
-    va.refRenderMs = 0.05f;
-    decls.push_back(va);
-
-    // Real detail: R8 at half resolution.
-    ProductDecl rd = Make(kTdRealDetail, "td.real_detail", "td real-detail map", Backend::GpuCompute, 1, Tier::T1, rebased,
-                          tdSettings);
-    AddInput(rd, kTdResidual, 0);
-    AddInput(rd, kTdValidity, 0);
-    AddInput(rd, kP10GrainSplit, 0);
-    AddTerm(rd, 1, 1);
-    rd.rebasedPlane = true;
-    rd.refRenderMs = 0.3f;
-    decls.push_back(rd);
-
-    // Grain level: RG16F per 16 px block (own grain, coding noise).
-    ProductDecl gl = Make(kTdGrainLevel, "td.grain_level", "td grain level", Backend::GpuCompute, 1, Tier::T1, rebased, tdSettings);
-    AddInput(gl, kP10GrainSplit, 0);
-    AddInput(gl, kTdResidual, 0);
-    AddInput(gl, kTdQualityPattern, 1);   // a held record: the latest sealed one (lag >= 1), like P14
-    AddTerm(gl, 4, 4);
-    gl.rebasedPlane = true;
-    gl.refRenderMs = 0.05f;
-    decls.push_back(gl);
-
-    // Stability: R8 per 8 px block (anchor-held regions).
-    ProductDecl st = Make(kTdStability, "td.stability", "td stability map", Backend::GpuCompute, 1, Tier::T1, rebased, tdSettings);
-    AddInput(st, kTdValidity, 0);
-    AddInput(st, kTdTrailConfidence, 0);
-    AddTerm(st, 3, 1);
-    st.rebasedPlane = true;
-    st.refRenderMs = 0.05f;
-    decls.push_back(st);
-
-    // Lighting layer state: RGBA16F per 16 px block.
-    ProductDecl li = Make(kTdLighting, "td.lighting", "td lighting layer state", Backend::GpuCompute, 1, Tier::T1, rebased,
-                          tdSettings | Bit(kSettingsOutput));
-    AddInput(li, kP12LightLevel, 0);
-    AddInput(li, kTdValidity, 0);
-    AddTerm(li, 4, 8);
-    li.rebasedPlane = true;
-    li.refRenderMs = 0.1f;
-    decls.push_back(li);
-
-    // I-to-I drift: RG16F per 16 px block (drift magnitude, direction class). T2: a diagnostic of the re-verification.
-    ProductDecl dr = Make(kTdDrift, "td.drift", "td I-to-I drift map", Backend::GpuCompute, 1, Tier::T2, rebased, tdSettings);
-    AddInput(dr, kTdBaseLong, 0);
-    AddInput(dr, kTdValidity, 0);
-    AddTerm(dr, 4, 4);
-    dr.rebasedPlane = true;
-    dr.refRenderMs = 0.2f;
-    decls.push_back(dr);
-
-    // Motion model state: held, CPU (camera / object model calibrated near the I-frame).
-    ProductDecl mm = Make(kTdMotionModel, "td.motion_model", "td motion model state (held)", Backend::Cpu, 1, Tier::T0, content,
+    // refined_field (P3r): DMVR-style per 8x8 block 8 B (vector RG16F, confidence u8, flags u8); runs only when P3 exists. The
+    // per-pixel BDOF/PROF offsets are NOT a product (dropped, doc 72): consumers derive them on the fly from U15's accessor.
+    ProductDecl rf = Make(kRefinedField, "refined_field", "refined field (P3r)", Backend::GpuCompute, 1, Tier::T0, content,
                           Bit(kSettingsMotion));
-    AddInput(mm, kP9CameraSmoothed, 0);
-    AddInput(mm, kP8CameraLabels, 0);
-    mm.size.fixedBytes = kTdMotionModelBytes;
-    mm.residency = Residency::SystemRam;
-    mm.missingInputForm = true;
-    decls.push_back(mm);
+    AddInput(rf, kP3AnalysisField, 0);
+    AddInput(rf, kP1HalfLuma, 0);
+    AddInput(rf, kP1HalfLuma, 1);
+    AddInput(rf, kP8CameraLabels, 0);
+    AddTerm(rf, 3, 8);
+    rf.spanMask = content;
+    rf.variants = Variants::NonIdentical;   // reduced = the unrefined P3 (visible "motion: refinement late")
+    rf.refRenderMs = 0.3f;
+    decls.push_back(rf);
 
-    // Reference-set mirror: held record of the stream's reference set (slot handles, source sequence, quality, age).
-    ProductDecl mi = Make(kTdMirror, "td.mirror", "td reference-set mirror (held)", Backend::Cpu, 1, Tier::T0, content,
+    // td.anchor_refs: received full-resolution luma of the last anchors (R16 per slot, up to 3). Budget-governed: the floor is 0
+    // (static / camera mode uses P16 hashes and the P13 lag-1 view); the governor adds slots.
+    ProductDecl ar = Make(kTdAnchorRefs, "td.anchor_refs", "td anchor references", Backend::GpuCompute, 0, Tier::T1, rebased,
+                          tdSettings);
+    AddInput(ar, kP13SourceRing, 0);
+    AddInput(ar, kQualityPattern, 0);
+    ar.rebasedPlane = true;
+    ar.planningSize = true;
+    ar.refRenderMs = 0.05f;
+    decls.push_back(ar);
+
+    // td.delta: the lane -> render hand-off (Delta0 at 1/4 resolution: 3 x R16F; band weights RGBA8 per 16 px block). Floor
+    // {shift 2: 6 B}, {shift 4: 4 B}; the full-resolution Delta1 atlas is a governed stage. Ring = lane lead + 1.
+    ProductDecl dl = Make(kTdDelta, "td.delta", "td repair delta", Backend::GpuCompute, 0, Tier::T1, rebased, tdSettings);
+    AddInput(dl, kTdBlocks, 0);
+    AddInput(dl, kTdMemory, 1);
+    AddInput(dl, kP13SourceRing, 0);
+    AddTerm(dl, 2, 6);
+    AddTerm(dl, 4, 4);
+    dl.rebasedPlane = true;
+    dl.planningSize = true;
+    dl.variants = Variants::NonIdentical;   // reduced = carry-forward (visible "temporal detail: lane late (carried)")
+    dl.refRenderMs = 0.4f;
+    decls.push_back(dl);
+
+    // td.maps: THE consumer-facing product: per 16 px block 3 x RGBA16F = 12 named fields (24 B), read only through U19 TdMapsView.
+    ProductDecl tm = Make(kTdMaps, "td.maps", "td consumer maps (U19 TdMapsView)", Backend::GpuCompute, 0, Tier::T1,
+                          rebased | Bit(kSettingsOutput), tdSettings | Bit(kSettingsOutput));
+    AddInput(tm, kTdBlocks, 0);
+    AddInput(tm, kP10GrainSplit, 0);
+    AddInput(tm, kCodingEvidence, 0);
+    AddInput(tm, kRefinedField, 0);
+    AddTerm(tm, 4, 24);
+    tm.rebasedPlane = true;
+    tm.variants = Variants::NonIdentical;
+    tm.refRenderMs = 0.1f;
+    decls.push_back(tm);
+
+    // td.trail_summary: a CPU record per frame (256 B, history 8) for source identity (lag >= 1), status and logs.
+    ProductDecl ts = Make(kTdTrailSummary, "td.trail_summary", "td trail summary", Backend::Cpu, 8, Tier::T1, content,
                           Bit(kSettingsAnalysis));
-    AddInput(mi, kSourceIdentity, 1);
-    AddInput(mi, kP4SourceStats, 0);
-    mi.size.fixedBytes = kTdMirrorRecordBytes;
-    mi.residency = Residency::SystemRam;
-    mi.missingInputForm = true;
-    decls.push_back(mi);
-
-    // Long-term / short-term low-res base buffers: luma R16 at 1/4 per axis + Cb and Cr planes (4:2:0) R16 at 1/8 per axis.
-    // history = the slot count (each slot is a stored picture, not a previous frame of a per-frame product).
-    ProductDecl bl = Make(kTdBaseLong, "td.base_long", "td long-term low-res base (+chroma)", Backend::GpuCompute, kTdLongSlots,
-                          Tier::T1, rebased, tdSettings);
-    AddInput(bl, kP10GrainSplit, 0);
-    AddInput(bl, kP13SourceRing, 0);
-    AddTerm(bl, 2, 2);
-    AddTerm(bl, 3, 4);
-    bl.rebasedPlane = true;
-    bl.refRenderMs = 0.1f;
-    decls.push_back(bl);
-
-    ProductDecl bs = Make(kTdBaseShort, "td.base_short", "td short-term low-res base (+chroma)", Backend::GpuCompute, kTdShortSlots,
-                          Tier::T1, rebased, tdSettings);
-    AddInput(bs, kP10GrainSplit, 0);
-    AddInput(bs, kP13SourceRing, 0);
-    AddInput(bs, kTdMirror, 1);   // a held record: the latest sealed one (lag >= 1)
-    AddTerm(bs, 2, 2);
-    AddTerm(bs, 3, 4);
-    bs.rebasedPlane = true;
-    bs.refRenderMs = 0.1f;
-    decls.push_back(bs);
-
-    // Refined per-block vectors + confidence (DMVR-style): 2 x int16 vector + u8 confidence + u8 flags = 6 B, padded to 8 B per 8 px block.
-    ProductDecl rv = Make(kTdRefinedVectors, "td.refined_vectors", "td refined vectors + confidence", Backend::GpuCompute, 1,
-                          Tier::T1, rebased | Bit(kSettingsMotion), tdSettings | Bit(kSettingsMotion));
-    AddInput(rv, kP3AnalysisField, 0);
-    AddInput(rv, kP2VectorPair, 0);
-    AddInput(rv, kTdBaseShort, 1);
-    AddTerm(rv, 3, 8);
-    rv.rebasedPlane = true;
-    rv.refRenderMs = 0.5f;
-    decls.push_back(rv);
-
-    // Per-pixel refinement offsets (BDOF/PROF-style). STORE vs RECOMPUTE is decided by measurement: the declared size is the STORE
-    // worst case (RG16F at half resolution); the recompute form needs no storage and the declaration shrinks to 0 with it.
-    ProductDecl rp = Make(kTdRefinePixel, "td.refine_pixel", "td per-pixel refinement offsets (store vs recompute TBD)",
-                          Backend::GpuCompute, 0, Tier::T2, rebased, tdSettings);
-    AddInput(rp, kTdRefinedVectors, 0);
-    AddTerm(rp, 1, 4);
-    rp.rebasedPlane = true;
-    rp.refRenderMs = 0.4f;
-    decls.push_back(rp);
+    AddInput(ts, kTdBlocks, 0);
+    ts.size.fixedBytes = kTdTrailSummaryBytes;
+    ts.residency = Residency::SystemRam;
+    ts.rarelyTouched = true;
+    ts.missingInputForm = true;
+    decls.push_back(ts);
 }
 
 // The registry the skeleton runs with: the first products, the camera products, then P10..P13, the TemporalDetail
-// products, P14 and the reserved temporal-detail engine products, in fixed id order. THE one assembly point.
+// products, P14, p7g and the temporal-detail engine products, in fixed id order. THE one assembly point.
 // `compactGrain` / `compactChroma`: the GRANTED storage of P10 (luma) and P10c (chroma planes).
 inline Registry SkeletonProducts(bool compactGrain, bool compactChroma)
 {
@@ -996,7 +979,8 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma)
     AppendSourceRingProduct(d);
     AppendTemporalDetailProducts(d);
     AppendSourceIdentityProduct(d);
-    AppendTemporalDetailReservedProducts(d);
+    AppendCameraGuideProduct(d);
+    AppendTemporalDetailEngineProducts(d);
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }

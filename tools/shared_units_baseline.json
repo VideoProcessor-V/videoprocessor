@@ -5,14 +5,7 @@
    "name": "grain_estimate",
    "blocking": false,
    "baseline_duplicates": 37,
-   "known_false_positive": [
-    {
-     "file": "src/VP-V/modules/repair/temporal_detail/products/TdProductContracts.h",
-     "pattern": "kTdGrainLevel|td\\.grain_level|grain rms",
-     "kind": "false_positive",
-     "reason": "the reserved td.grain_level product's id and contract text (own grain vs coding noise, produced by the engine in reset 2), not a grain estimator"
-    }
-   ]
+   "known_false_positive": []
   },
   "U2": {
    "name": "gaussian_band_split",
@@ -181,6 +174,12 @@
      "pattern": "kP1HalfLuma|HalfLumaProducer|ComputeHalfLuma",
      "kind": "false_positive",
      "reason": "registers/consumes the lane's own P1 producer (VpLaneProducts, the U3 owner); no private downsample"
+    },
+    {
+     "file": "src/VP-V/modules/repair/temporal_detail/products/TdProductContracts.h",
+     "pattern": "kP1HalfLuma",
+     "kind": "false_positive",
+     "reason": "the refined_field contract lists P1 (half luma) as an input reference, not a downsample"
     }
    ]
   },
@@ -238,13 +237,13 @@
    "baseline_duplicates": 0,
    "known_false_positive": []
   },
-  "U13": {
-   "name": "temporal_detail_products",
+  "U19": {
+   "name": "td_maps_view",
    "blocking": false,
    "baseline_duplicates": 0,
    "known_false_positive": []
   },
-  "U14": {
+  "U20": {
    "name": "chroma_upsample_polyphase",
    "blocking": false,
    "baseline_duplicates": 8,

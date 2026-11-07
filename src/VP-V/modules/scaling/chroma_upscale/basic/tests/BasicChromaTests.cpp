@@ -388,7 +388,7 @@ namespace BasicChromaTestsNs
 			Assert::AreEqual(std::string(), TdProducts::StatusLine(TdProducts::Consumer::ChromaStage, plain.td));
 			const Result asked = Upsample(c1, c2, g, TdProducts::PlaceholderSnapshot(), true, 0);
 			Assert::IsTrue(asked.td.fallback.engaged);
-			Assert::AreEqual(std::string("product.td_chroma"), asked.td.fallback.id);
+			Assert::AreEqual(std::string("product.chroma_cfl"), asked.td.fallback.id);
 			Assert::IsTrue(asked.cb.v == plain.cb.v && asked.cr.v == plain.cr.v, L"the plain kernel runs either way: byte-identical");
 			const Result again = Upsample(c1, c2, g);
 			Assert::IsTrue(again.cb.v == plain.cb.v && again.cr.v == plain.cr.v, L"deterministic");

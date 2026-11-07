@@ -1461,8 +1461,8 @@ namespace VideoProcessorTest
 			{   // TemporalDetail's products are registered in core/Products.h (its private descriptors were retired).
 				const VpSkeleton::Registry reg = VpSkeleton::SkeletonProducts();
 				Assert::IsTrue(reg.Has(VpSkeleton::kTdRefstore) && reg.Has(VpSkeleton::kTdAnalysis) && reg.Has(VpSkeleton::kTdAdmission), L"td products");
-				Assert::AreEqual(std::string("td.refstore"), std::string(reg.Get(VpSkeleton::kTdRefstore).token));
-				Assert::AreEqual(static_cast<int>(kSlots), static_cast<int>(reg.Get(VpSkeleton::kTdRefstore).history), L"history = slots");
+				Assert::AreEqual(std::string("td.memory"), std::string(reg.Get(VpSkeleton::kTdRefstore).token), L"id 17 is td.memory in unit v2 (doc 72)");
+				Assert::AreEqual(0, static_cast<int>(reg.Get(VpSkeleton::kTdRefstore).history), L"td.memory is the whole budget-governed store (v2): no per-slot history");
 				Assert::AreEqual(static_cast<int>(kSlots), static_cast<int>(VpSkeleton::kRefSlots), L"core slot count matches");
 			}
 			Assert::IsTrue(Shaders::kMeasBody != nullptr && Shaders::kCleanBody != nullptr && Shaders::kWeightBody != nullptr && Shaders::kTransferBody != nullptr, L"shaders declared");

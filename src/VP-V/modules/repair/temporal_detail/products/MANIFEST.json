@@ -7,9 +7,9 @@
   "code_location": "migrated",
   "shared_unit": {
     "name": "TemporalDetailProducts",
-    "id": "U13",
-    "version": 1,
-    "product": "15 reserved registry products td.* (core/Products.h); no producer in reset 1 (placeholder publishes nothing)"
+    "id": "(contract table; U19 TdMapsView is the accessor)",
+    "version": 2,
+    "product": "td.blocks, td.memory, td.anchor_pass, td.anchor_refs, td.delta, td.maps, td.trail_summary + precursors coding_evidence, quality_pattern(.causal), refined_field and p7g registered (doc 72); no producer in reset 1"
   },
   "live_files": [
     "src/VP-V/modules/repair/temporal_detail/products/TdProductContracts.h",
@@ -35,6 +35,6 @@
       "motion.estimation"
     ]
   },
-  "fallback_when_missing": "Engine products are not produced in reset 1: every reader runs its classical form; once the engine is requested the form is announced (product.td_scaler / td_dither / td_chroma / td_engine).",
+  "fallback_when_missing": "Engine products are not produced in reset 1: every consumer runs its classical form; once the engine is requested the form is announced under the consumer's own fallback id.",
   "fallback_entry": "Temporal-detail products: classical form (<reason>)"
 }

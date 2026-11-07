@@ -145,7 +145,7 @@ namespace AdaptiveDownscaleStage
 		// R1-W1-RES: the read path of the temporal-detail engine's products (confidence, real detail, grain, stability, motion
 		// model). Reset 1: the placeholder producer publishes nothing and the engine is not requested, so this is "not requested"
 		// (classical weights, byte-identical, no status line). Once the engine is requested and a product is absent, the classical
-		// bitrate-quality weights stand in VISIBLY: the "product.td_scaler" decision is engaged and StatusLines() carries its line.
+		// bitrate-quality weights stand in VISIBLY: the "product.adaptive_downscale" decision is engaged and StatusLines() carries its line.
 		const TdProducts::ReadResult& TemporalDetailRead() const { return tdRead; }
 		FallbackCatalog::Decision TemporalDetailFallback() const { return tdRead.fallback; }
 

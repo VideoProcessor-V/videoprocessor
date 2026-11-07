@@ -576,11 +576,9 @@ namespace FallbackCatalog
 			{ "product.light_level", "light-level users use the global level only (per-block light level unavailable)" },
 			{ "product.vector_demand", "vector consumer runs without vectors (the vector engine product is unavailable)" },
 			{ "product.camera", "camera consumer runs causal / without the camera model (camera products unavailable or short queue)" },
-			// Reserved temporal-detail engine products (repair/temporal_detail/products; the engine itself is built in reset 2). While the
-			// engine is requested but a product is absent, stale or of another unit version, each reader runs its classical form.
-			{ "product.td_scaler", "adaptive scaling uses its classical bitrate-quality weights (temporal-detail confidence / real-detail / grain / stability / motion products unavailable)" },
-			{ "product.td_dither", "dither need uses the classical grain and bitrate-quality terms (temporal-detail grain / stability / motion products unavailable)" },
-			{ "product.td_chroma", "chroma upscale runs the plain kernel without re-predicted chroma (temporal-detail base buffers / mirror / refined vectors unavailable)" },
+			// Temporal-detail engine (doc 72; repair/temporal_detail/products; the engine itself is built in reset 2). The consumers of its
+			// products (adaptive scaling, dither need, sigma-delta, chroma upscale, debander) keep their OWN entries above for the classical
+			// form; this one is the engine's own: its products are not produced, so repairs run their classical forms.
 			{ "product.td_engine", "temporal-detail engine products are not produced: repairs run their classical forms (engine reserved, not built)" },
 		};
 		if (count)

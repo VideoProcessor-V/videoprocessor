@@ -1,6 +1,7 @@
 #pragma once
 
 #include <VP-V/modules/output/dither/CustomHookChain.h>
+#include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
 
 #include <libplacebo/renderer.h>
 #include <libplacebo/shaders/custom.h>
@@ -69,6 +70,10 @@ namespace
 		// does not take the texture goes back to vector_source 0. True when any hook took them.
 		bool Apply(const pl_hook* const* hooks, int count, pl_tex vectors)
 		{
+			// R1-W1-RES (doc 72 item 2): the sigma-delta's read path of the temporal-detail engine's products (td.maps stability,
+			// refined_field). Reset 1: not requested, nothing used, the vectors below are exactly today's; a requested engine with a
+			// product absent leaves the sigma-delta on its own vector search / these vectors, said by TemporalDetailRead().
+			td = TdProducts::ReadToday(TdProducts::Consumer::SigmaDelta);
 			for (int i = 0; i < count; ++i)
 			{
 				const pl_hook* hook = hooks[i];
@@ -83,6 +88,9 @@ namespace
 			return !applied.empty();
 		}
 
+		// The engine read of the last Apply (its fallback decision is engaged only when requested and a product is absent).
+		const TdProducts::ReadResult& TemporalDetailRead() const { return td; }
+
 		void Release()
 		{
 			for (const pl_hook* hook : applied)
@@ -95,6 +103,7 @@ namespace
 
 	private:
 		std::vector<const pl_hook*> applied;
+		TdProducts::ReadResult td;
 	};
 }
 }
