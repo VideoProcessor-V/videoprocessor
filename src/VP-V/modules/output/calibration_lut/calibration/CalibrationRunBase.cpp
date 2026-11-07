@@ -548,9 +548,10 @@ namespace Calibration
 		{
 			PatternOutputInfo info;
 			std::string reason;
-			// The renderer may still be starting (cold shader cache): wait a little, visibly, before giving up.
+			// A renderer is attached but may still be starting (cold shader cache): wait a little, visibly, before giving up.
+			// Without a renderer there is nothing to wait for: fail at once, as before.
 			bool haveOutput = patterns.GetOutput(info) && info.available;
-			for (int waited = 0; !haveOutput && waited < 50 && !CancelPending(); ++waited)
+			for (int waited = 0; !haveOutput && waited < 50 && !CancelPending() && patterns.RendererAttached(); ++waited)
 			{
 				if (waited == 0)
 				{

@@ -90,6 +90,12 @@ namespace Calibration
 		return ok;
 	}
 
+	bool RendererPatternSink::RendererAttached()
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return !blocked && renderer && renderer();
+	}
+
 	bool RendererPatternSink::Show(const PatternRequest& request, std::string& error)
 	{
 		std::lock_guard<std::mutex> guard(mutex);

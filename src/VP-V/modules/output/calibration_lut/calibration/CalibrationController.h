@@ -42,6 +42,7 @@ namespace Calibration
 		using RendererFn = std::function<std::shared_ptr<IVideoRenderer>()>;
 		explicit RendererPatternSink(RendererFn renderer);
 		bool GetOutput(PatternOutputInfo& info) override;
+		bool RendererAttached() override;
 		bool Show(const PatternRequest& request, std::string& error) override;
 		void Block();
 		// The device signal of the patch last shown (the simulated meter's input).
