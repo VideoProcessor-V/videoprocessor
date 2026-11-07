@@ -35,6 +35,13 @@ namespace Tests
 		using VpSkeleton::ProductId;
 		using VpSkeleton::Registry;
 		using VpSkeleton::SkeletonProducts;
+		using VpSkeleton::kQualityPatternHistorySeconds;
+		using VpSkeleton::kQualityPatternMinFrames;
+		using VpSkeleton::kRecordHistoryMax;
+		using VpSkeleton::kTdTrailSummaryHistorySeconds;
+		using VpSkeleton::kTdTrailSummaryMinFrames;
+		using VpSkeleton::QualityPatternHistoryFrames;
+		using VpSkeleton::TdTrailSummaryHistoryFrames;
 
 		Snapshot FreshAll(int64_t timeUs = 1000)
 		{
@@ -49,6 +56,8 @@ namespace Tests
 			}
 			return s;
 		}
+
+		constexpr size_t kDeclaredInputsToday = 4;   // the registry's declared input prefix (the contract table has the full lists)
 
 		const Consumer kAllConsumers[] = { Consumer::AdaptiveScaler, Consumer::DitherNeed, Consumer::SigmaDelta, Consumer::ChromaStage, Consumer::Deband };
 
@@ -149,8 +158,10 @@ namespace Tests
 					Assert::IsTrue(c.layout[0] != '\0' && c.fillLane[0] != '\0' && c.fillLive[0] != '\0' && c.fillReduced[0] != '\0');
 					Assert::IsTrue(ContractOf(c.id) == &c);
 					const VpSkeleton::ProductDecl& d = reg.Get(c.id);
-					// The registry never silently drops an input: it declares the first kMaxInputs of the intended list, in order.
-					const size_t want = c.intended.size() < VpSkeleton::kMaxInputs ? c.intended.size() : VpSkeleton::kMaxInputs;
+					// The registry never silently drops an input: it declares the first kDeclaredInputsToday of the intended list, in order.
+					// W1-SKG raised the framework limit to kMaxInputs = 16, but the declarations have NOT caught up yet (open item of the
+					// hand-back: the lead / short-queue edges of the longer lists need their own decisions); the first four are declared.
+					const size_t want = c.intended.size() < kDeclaredInputsToday ? c.intended.size() : kDeclaredInputsToday;
 					Assert::AreEqual(want, size_t(d.inputCount), (std::wstring(L"declared inputs of ") + std::wstring(c.token, c.token + std::strlen(c.token))).c_str());
 					for (size_t k = 0; k < want; ++k)
 					{
@@ -159,11 +170,11 @@ namespace Tests
 						Assert::AreEqual(int(c.intended[k].lead), int(d.inputs[k].lead));
 					}
 				}
-				// The dependency on the raised limits is recorded, not hidden: these three exceed the framework's 4 inputs today.
+				// Recorded, not hidden: these three intended lists exceed the declared prefix today (the catch-up is an open item).
 				using namespace VpSkeleton;
-				Assert::IsTrue(ContractOf(kTdBlocks)->intended.size() > kMaxInputs);
-				Assert::IsTrue(ContractOf(kCodingEvidence)->intended.size() > kMaxInputs);
-				Assert::IsTrue(ContractOf(kTdAnchorPass)->intended.size() > kMaxInputs);
+				Assert::IsTrue(ContractOf(kTdBlocks)->intended.size() > kDeclaredInputsToday && size_t(reg.Get(kTdBlocks).inputCount) == kDeclaredInputsToday);
+				Assert::IsTrue(ContractOf(kCodingEvidence)->intended.size() > kDeclaredInputsToday);
+				Assert::IsTrue(ContractOf(kTdAnchorPass)->intended.size() > kDeclaredInputsToday);
 				Assert::IsNull(ContractOf(kSourceIdentity));
 				Assert::AreEqual(2u, kUnitVersion);
 			}
@@ -203,7 +214,12 @@ namespace Tests
 				const Budget floor = BudgetAt(d4k, false);
 				Assert::AreEqual(uint64_t(54950656), floor.vram);
 				Assert::AreEqual(uint64_t(24883200), floor.transient, L"anchor pass arena peak: 3 B/px");
-				Assert::AreEqual(uint64_t(64 * 128 + 64 * 128 + 256 * 8), floor.systemRam, L"quality pattern, causal, trail summary (history counted)");
+				Assert::AreEqual(uint64_t((64 + 64 + 256) * 255), floor.systemRam, L"quality pattern, causal, trail summary at the unmeasured bound (history 255 counted)");
+				{   // Measured 24000/1001 p: quality pattern + causal 48 frames, trail summary 6 (2 s and 0.25 s of source time).
+					const Budget at24 = BudgetAt(VpSkeleton::SkeletonProducts(false, false, 1001.0 / 24.0), d4k, false);
+					Assert::AreEqual(uint64_t(64 * 48 * 2 + 256 * 6), at24.systemRam);
+					Assert::AreEqual(floor.vram, at24.vram, L"the GPU figures do not depend on the rate");
+				}
 				// Full stages: td.memory 175,737,600, anchor_refs 49,766,400, delta 11,534,400.
 				const Budget full = BudgetAt(d4k, true);
 				Assert::AreEqual(uint64_t(241574656), full.vram);
