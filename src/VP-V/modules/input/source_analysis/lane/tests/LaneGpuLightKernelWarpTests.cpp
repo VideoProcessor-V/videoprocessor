@@ -542,6 +542,8 @@ namespace VideoProcessorTest
 		{
 			Rig r;
 			r.Init();
+			std::string plLog;
+			r.fixture.CaptureLog(&plLog);
 			const std::vector<float> texels = TexelsFor(Ctx(kSdr, 0.0));
 			const uint64_t seq = r.Seq0();
 			{
@@ -560,6 +562,7 @@ namespace VideoProcessorTest
 				snprintf(fj, sizeof(fj), "P12_KERNEL host frame J %.6g V %.6g (mirror J %.6g)\n", double(r.kernel->LastFrameJ()),
 					double(r.kernel->LastFrameV()), double(want[0]));
 				Logger::WriteMessage(fj);
+				Logger::WriteMessage(("P12_KERNEL libplacebo log: [" + plLog + "]\n").c_str());
 				r.RunKernel(seq, true, 0, -1, false, true);   // diagnostic: the live form before the comparison
 				const std::vector<float> liveDiag = r.Out(true, 0);
 				snprintf(fj, sizeof(fj), "P12_KERNEL live[0..3] %.6g %.6g %.6g %.6g lane[0..3] %.6g %.6g %.6g %.6g\n", double(liveDiag[0]),
