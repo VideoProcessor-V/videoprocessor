@@ -1274,7 +1274,6 @@ namespace Vpv
 					{ "scaling", "VP Renderer > Scaling (scaler filters and sharpness)", "VP Renderer", "Scaling" },
 					{ "colour", "VP Renderer > Rendering (tone mapping)", "VP Renderer", "Rendering" },
 					{ "colour", "VP Renderer > Color / Output", "VP Renderer", "Color / Output" },
-					{ "drive", "Dynamic Drive page", "Dynamic Drive", nullptr },
 					{ "output", "VP Renderer > Rendering (bit depth, libplacebo dither)", "VP Renderer", "Rendering" },
 				};
 				QStringList links;

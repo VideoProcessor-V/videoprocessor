@@ -55,6 +55,8 @@ namespace ConfigPageHost
 		virtual QCheckBox* bindCheckField(const QString& label, const QString& section, const QString& key, bool defaultValue)
 		{ (void)label; (void)section; (void)key; (void)defaultValue; return nullptr; }
 		virtual QString controlName(const QString& section, const QString& key) const { return QStringLiteral("config.%1.%2").arg(section, key); }
+		// The path of the configuration file being edited (empty when none).
+		virtual QString configPath() const { return QString(); }
 		virtual QLabel* helpLabel(const QString& text) { (void)text; return nullptr; }
 		virtual QWidget* createCard(const QString& title, const QString& description, QWidget* content) { (void)title; (void)description; return content; }
 		virtual QWidget* createPage(const QString& title, const QString& description, QWidget* body) { (void)title; (void)description; return body; }
@@ -63,6 +65,8 @@ namespace ConfigPageHost
 		virtual void addCard(QWidget* grid, QWidget* card) { (void)grid; (void)card; }
 		// Writes a known key of the document, adding the section when it is missing. Does not mark dirty.
 		virtual void setKnown(const QString& section, const QString& key, const QString& text) { (void)section; (void)key; (void)text; }
+		// Removes a key of the document (a missing section or key is not an error). Does not mark dirty.
+		virtual void removeKnown(const QString& section, const QString& key) { (void)section; (void)key; }
 		// Marks the document edited by `edited` (keeps the editor's edit order for validation messages).
 		virtual void markDirty(QObject* edited) { (void)edited; }
 

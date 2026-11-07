@@ -11,6 +11,8 @@ int RunHookLayerConfigTests(const std::function<int(const char*, const std::func
     const std::function<void(bool, const char*)>& require, const std::function<void(ConfigEditorWindow&)>& save);   // VPV-HOOK
 int RunCalibrationPageTests(const std::function<int(const char*, const std::function<void()>&)>& run,
     const std::function<void(bool, const char*)>& require, const std::function<void(ConfigEditorWindow&)>& save);   // VPV-HOOK
+int RunLedDrivePageTests(const std::function<int(const char*, const std::function<void()>&)>& run,
+    const std::function<void(bool, const char*)>& require, const std::function<void(ConfigEditorWindow&)>& save);   // VPV-HOOK
 int WriteConfigIdentity(const QString& outPath, const QStringList& extraFiles);   // VPV-HOOK identity kit (ConfigIdentityDump.cpp)
 #include <VP-V/config/VpvConfigProviders.h>   // VPV-HOOK
 #include "../VideoProcessor-Config/ToneChartPanel.h"
@@ -10683,9 +10685,9 @@ void testPagesAreAddressedByName()
     }
     require(window.pageIndex(QStringLiteral("No such page")) == -1, "An unknown page name resolved");
     // Navigation buttons carry the name: they open the same page whatever the order.
-    // (Calibration is a sub-page of the VP-V page: no leaf of its own; CalibrationPageTests covers it.)
-    for (const QString& name : { QStringLiteral("Display"), QStringLiteral("Updates"), QStringLiteral("Dynamic Drive"),
-            QStringLiteral("VP-V") })
+    // (Dynamic Drive and Calibration are sub-pages of the VP-V page: no leaf of their own; LedDrivePageTests and
+    // CalibrationPageTests cover them.)
+    for (const QString& name : { QStringLiteral("Display"), QStringLiteral("Updates"), QStringLiteral("VP-V") })
     {
         QPushButton* found = nullptr;
         for (auto* button : window.findChildren<QPushButton*>())
@@ -12723,6 +12725,7 @@ int main(int argc, char** argv)
     failures += run("hunt 3: legacy queue fold targets [queue]", testHunt3LegacyQueueFoldTargetsQueueSection);
     failures += run("hunt 3: remote discard folds like a load", testHunt3RemoteDiscardFoldsLikeALoad);
     failures += RunVpvConfigTests(run, require, save);   // VP-V section (VpvConfigTests.cpp)
+    failures += RunLedDrivePageTests(run, require, save);   // VPV-HOOK Dynamic Drive page provider
     failures += RunCalibrationPageTests(run, require, save);   // VPV-HOOK Calibration page provider
     failures += RunHookLayerConfigTests(run, require, save);   // VPV-HOOK generic hook layer (HookLayerConfigTests.cpp)
     if ((!testNameFilter.isEmpty() || !testNameMatches.isEmpty()) && selectedTestsRun == 0)
