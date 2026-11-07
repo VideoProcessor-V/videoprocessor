@@ -442,7 +442,7 @@ namespace SharedUnitsW1TestsNs2
 			Assert::IsFalse(InPicture(r, 10, 168));
 			Assert::AreEqual(1.0f, Coverage(r, 0, 32, 32, 64));
 			Assert::AreEqual(0.0f, Coverage(r, 0, 0, 32, 16));
-			Assert::AreEqual(0.5f, Coverage(r, 0, 16, 32, 32));   // 16 of 32 rows inside
+			Assert::AreEqual(0.75f, Coverage(r, 0, 16, 32, 48));   // rows 24..48 of 16..48: 24 of 32 inside
 			const PRect whole = Effective(PRect(), 320, 192);
 			Assert::AreEqual(320.0f, whole.x1); Assert::AreEqual(192.0f, whole.y1);
 			const int in[4] = { 5, 7, 11, 13 };

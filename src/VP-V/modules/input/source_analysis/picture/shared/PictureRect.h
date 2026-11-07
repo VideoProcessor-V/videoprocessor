@@ -185,26 +185,14 @@ if (i == 0u) {
 // Accessors for readers that hold the rect as a vec4 (x0, y0, x1, y1): vpu_in_picture / vpu_picture_coverage.
 inline std::string Glsl()
 {
-    return std::string("#define VPU_PICTURE_RECT_VERSION ") + std::to_string(kUnitVersion) + "
-"
-        "bool vpu_in_picture(vec4 rect, vec2 px)
-{
-"
-        "    return px.x >= rect.x && px.x < rect.z && px.y >= rect.y && px.y < rect.w;
-}
-"
-        "float vpu_picture_coverage(vec4 rect, vec2 b0, vec2 b1)
-{
-"
-        "    float area = (b1.x - b0.x) * (b1.y - b0.y);
-"
-        "    float w = min(b1.x, rect.z) - max(b0.x, rect.x);
-"
-        "    float h = min(b1.y, rect.w) - max(b0.y, rect.y);
-"
-        "    return (area > 0.0 && w > 0.0 && h > 0.0) ? min(1.0, (w * h) / area) : 0.0;
-}
-";
+    return std::string("#define VPU_PICTURE_RECT_VERSION ") + std::to_string(kUnitVersion) + "\n"
+        "bool vpu_in_picture(vec4 rect, vec2 px)\n{\n"
+        "    return px.x >= rect.x && px.x < rect.z && px.y >= rect.y && px.y < rect.w;\n}\n"
+        "float vpu_picture_coverage(vec4 rect, vec2 b0, vec2 b1)\n{\n"
+        "    float area = (b1.x - b0.x) * (b1.y - b0.y);\n"
+        "    float w = min(b1.x, rect.z) - max(b0.x, rect.x);\n"
+        "    float h = min(b1.y, rect.w) - max(b0.y, rect.y);\n"
+        "    return (area > 0.0 && w > 0.0 && h > 0.0) ? min(1.0, (w * h) / area) : 0.0;\n}\n";
 }
 
 } // namespace PictureRect

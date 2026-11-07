@@ -473,7 +473,7 @@ if (tile < int(tiles) && g.y < ts) {
 		const Snapshot s = Read();
 		SourceIdentity::ClassicalQuality c;
 		c.reading = s.reading;
-		c.bitrateQuality = s.bitrateQuality;
+		VpUnit::SourceQuality::CopyClassical(c, s);   // U12
 		c.effectiveBits = s.effectiveBits;
 		const bool on = SourceIdConsensus();
 		if (!on)
