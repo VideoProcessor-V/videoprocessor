@@ -45,7 +45,7 @@ namespace TdProducts
 	// The reset-1 placeholder producer: nothing is ever published.
 	inline const Snapshot* PlaceholderSnapshot()
 	{
-		static const Snapshot empty;
+		static const Snapshot empty{};
 		return &empty;
 	}
 

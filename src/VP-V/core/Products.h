@@ -885,7 +885,7 @@ inline void AppendTemporalDetailReservedProducts(std::vector<ProductDecl>& decls
     ProductDecl gl = Make(kTdGrainLevel, "td.grain_level", "td grain level", Backend::GpuCompute, 1, Tier::T1, rebased, tdSettings);
     AddInput(gl, kP10GrainSplit, 0);
     AddInput(gl, kTdResidual, 0);
-    AddInput(gl, kTdQualityPattern, 0);
+    AddInput(gl, kTdQualityPattern, 1);   // a held record: the latest sealed one (lag >= 1), like P14
     AddTerm(gl, 4, 4);
     gl.rebasedPlane = true;
     gl.refRenderMs = 0.05f;
@@ -955,7 +955,7 @@ inline void AppendTemporalDetailReservedProducts(std::vector<ProductDecl>& decls
                           Tier::T1, rebased, tdSettings);
     AddInput(bs, kP10GrainSplit, 0);
     AddInput(bs, kP13SourceRing, 0);
-    AddInput(bs, kTdMirror, 0);
+    AddInput(bs, kTdMirror, 1);   // a held record: the latest sealed one (lag >= 1)
     AddTerm(bs, 2, 2);
     AddTerm(bs, 3, 4);
     bs.rebasedPlane = true;

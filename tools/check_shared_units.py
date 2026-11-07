@@ -6,7 +6,7 @@ Usage: python -I tools/check_shared_units.py [--json] [--root PATH] [--strict]
                                              [--write-baseline] [--baseline FILE]
 
 Default run: report only, always exits 0. Every hit of a registered shared
-computation (units U1..U12 of doc 62) gets a role:
+computation (units U1..U14 of doc 62) gets a role:
 
   owner               inside the owning unit's folder (counted, not listed)
   declaration         catalogs, manifests, config, diagnostics, comment-only lines

@@ -19,7 +19,7 @@
 //              (a shift is a multiple of a quarter luma pixel: the re-base scales a shift by its factor). i0 = floor(n / 4f),
 //              phase = n - 4 f i0 in [0, 4f).
 //   kernel     Lanczos a = 3 (not stretched: it is an upsample), 6 taps i0-2 .. i0+3 at distances d = k - j; the weights of each
-//              of the 4f phases are computed in double, rounded to Q14 and the largest tap takes the rounding remainder so the
+//              of the 4f phases are computed in double, normalised, rounded to Q14 and the largest tap takes the (few-unit) rounding remainder so the
 //              sum is EXACTLY 16384 (flat stays flat, DC exact).
 //   passes     horizontal then vertical, each (sum + 8192) >> 14 in int32, the horizontal result kept as an integer (it may leave
 //              the signal range: overshoot is signal, BTB / WTW codes pass); only the final value is clamped to the 16-bit
@@ -114,11 +114,19 @@ namespace BasicChroma
 		for (int p = 0; p < t.phases && p < kMaxPhases; ++p)
 		{
 			const double frac = static_cast<double>(p) / t.phases;   // j - i0
-			int sum = 0, best = 0;
+			double raw[kTaps], dsum = 0.0;
 			for (int k = 0; k < kTaps; ++k)
 			{
 				const double d = (k - (kLobes - 1)) - frac;          // tap index i0 + (k - 2), distance to j
-				t.w[p][k] = static_cast<int>(std::floor(Lanczos(d) * kWeightOne + 0.5));
+				raw[k] = Lanczos(d);
+				dsum += raw[k];
+			}
+			// Normalise the truncated kernel first (its taps do not sum to 1), then round; only the true rounding remainder
+			// (a few units of 1/16384) goes to the largest tap.
+			int sum = 0, best = 0;
+			for (int k = 0; k < kTaps; ++k)
+			{
+				t.w[p][k] = static_cast<int>(std::floor(raw[k] / dsum * kWeightOne + 0.5));
 				sum += t.w[p][k];
 				if (std::abs(t.w[p][k]) > std::abs(t.w[p][best])) best = k;
 			}
@@ -226,6 +234,7 @@ namespace BasicChroma
 	// One chroma plane (Cb, Cr or P, T) to luma size. `c` is cw x ch with cw = ceil(lumaW / fx), ch = ceil(lumaH / fy).
 	inline Plane16 UpsamplePlane(const Plane16& c, const Geometry& g)
 	{
+		if (!Check(g).empty()) return Plane16();   // callers go through Upsample / Check; an unsupported geometry makes no picture
 		const int W = g.lumaW, H = g.lumaH, cw = c.w, ch = c.h;
 		Plane16 out(W, H);
 		if (g.fx == 1 && g.fy == 1) { out.v = c.v; return out; }

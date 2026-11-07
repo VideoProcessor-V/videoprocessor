@@ -163,14 +163,16 @@ namespace BasicChromaTestsNs
 				Assert::AreEqual(4 * f, t.phases);
 				for (int p = 0; p < t.phases; ++p)
 				{
-					int sum = 0, abssum = 0;
-					for (int k = 0; k < kTaps; ++k) { sum += t.w[p][k]; abssum += std::abs(t.w[p][k]); }
+					int sum = 0, pos = 0, neg = 0;
+					for (int k = 0; k < kTaps; ++k) { sum += t.w[p][k]; (t.w[p][k] > 0 ? pos : neg) += std::abs(t.w[p][k]); }
 					Assert::AreEqual(kWeightOne, sum, L"exactly one in Q14");
-					// 65535 x sum|w| must stay below 2^31 / (1 + 1.3) after the horizontal pass too: sum|w| <= 1.3.
-					Assert::IsTrue(abssum <= kWeightOne * 13 / 10, L"overflow bound of the int32 sums");
+					// Worst case of the vertical sum: hv spans [-65535 N, 65535 P] (horizontal pass), so |acc| <= 65535 (P^2 + N^2) / 16384 in
+					// weight units; it must stay below 2^31.
+					const double P = pos, N = neg;
+					Assert::IsTrue(65535.0 * (P * P + N * N) / kWeightOne < 2147483647.0, L"overflow bound of the int32 sums");
 					if (p > 0)
 						for (int k = 0; k < kTaps; ++k)
-							Assert::IsTrue(std::abs(t.w[p][k] - t.w[t.phases - p][kTaps - 1 - k]) <= 1, L"phases mirror within the rounding remainder");
+							Assert::IsTrue(std::abs(t.w[p][k] - t.w[t.phases - p][kTaps - 1 - k]) <= 4, L"phases mirror within the rounding remainder");
 				}
 				Assert::AreEqual(kWeightOne, t.w[0][kLobes - 1], L"phase 0 is the identity tap");
 			}
@@ -291,7 +293,12 @@ namespace BasicChromaTestsNs
 			Plane16 ext(16, 8);
 			for (int y = 0; y < 8; ++y)
 				for (int j = 0; j < 16; ++j) ext.at(j, y) = static_cast<uint16_t>((j & 1) ? 65535 : 0);
-			for (uint16_t v : UpsamplePlane(ext, g).v) Assert::IsTrue(v <= 65535);
+			{
+				const Plane16 eo = UpsamplePlane(ext, g);
+				int sat = 0;
+				for (uint16_t v : eo.v) sat += (v == 0 || v == 65535);
+				Assert::IsTrue(sat > 0, L"alternating extremes overshoot and saturate at the container instead of wrapping");
+			}
 		}
 
 		TEST_METHOD(BarsStayFlatAndNothingReadsAcrossThePictureBoundary)

@@ -104,7 +104,7 @@ namespace Tests
 				const Dims d4k = { 3840, 2160 };
 				Assert::AreEqual(uint64_t(960) * 540 * 2 + uint64_t(480) * 270 * 4, VpSkeleton::BytesOf(reg.Get(VpSkeleton::kTdBaseLong).size, d4k));
 				Assert::AreEqual(VpSkeleton::BytesOf(reg.Get(VpSkeleton::kTdBaseLong).size, d4k), VpSkeleton::BytesOf(reg.Get(VpSkeleton::kTdBaseShort).size, d4k));
-				// A stored picture is 16x smaller than the frame's luma at 2 B/px would be... (4K: 1.56 MB per slot vs 16.6 MB).
+				// A stored picture is more than 10x smaller than the frame's luma at 2 B/px (4K: 1.56 MB per slot vs 16.6 MB).
 				Assert::IsTrue(VpSkeleton::BytesOf(reg.Get(VpSkeleton::kTdBaseLong).size, d4k) * 10 < uint64_t(3840) * 2160 * 2);
 			}
 

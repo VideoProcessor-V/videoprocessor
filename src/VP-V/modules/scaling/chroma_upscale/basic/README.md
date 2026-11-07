@@ -21,9 +21,9 @@ SCHEMA lock (`RendererProfileConfig.h` + `MainConfigSchema.h`) is held by W1-P3.
 - Position: chroma sample j sits at luma `(j + 0.5) f + shift - 0.5` (libplacebo `pl_plane::shift_x / shift_y`, luma-pixel units, as `ChromaCfl.h`;
   co-sited = `-(f-1)/2`, centred 0). `ShiftOf(Siting, fx, fy)` maps a stated siting (left, centre, top-left, top, bottom-left, bottom) to the shift.
   With `n = 4x + 2 - s4 - 2f` (`s4 = 4 shift`: shifts are multiples of a quarter luma pixel, which covers a shift scaled by the re-base, `ChromaSiting::ShiftAfterResample`): `i0 = floor(n / 4f)`, `phase = n - 4f i0`.
-- Kernel: Lanczos a = 3, 6 taps `i0-2 .. i0+3`, 4f phases, Q14 weights summing exactly to 16384 (the largest tap takes the remainder).
-- Passes: horizontal then vertical, `(sum + 8192) >> 14` in int32 each; the horizontal result stays an integer. The int32 bound (65535 x sum|w|) is
-  asserted by a test (sum|w| <= 1.3).
+- Kernel: Lanczos a = 3, 6 taps `i0-2 .. i0+3`, 4f phases, Q14 weights, normalised before rounding, summing exactly to 16384 (the largest tap takes the few-unit rounding remainder).
+- Passes: horizontal then vertical, `(sum + 8192) >> 14` in int32 each; the horizontal result stays an integer. The int32 bound (65535 x 16384 x (P^2 + N^2), P / N the positive / negative weight sums) is
+  asserted by a test.
 - Range: only the 16-bit container is clamped (`[0, 65535]`); overshoot beyond the video range is signal (BTB / WTW preserved).
 - Edges: taps clamp to the plane; inside the active picture to the picture's rectangle, in the bars to the bar's side (nothing reads across).
 - Refused (visible status, the caller keeps libplacebo's upscaler): a factor other than 1, 2, 4; a siting shift that is not a multiple of a quarter pixel;
