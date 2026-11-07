@@ -9,8 +9,9 @@
 //   * the BUDGET-GOVERNED STAGES of each large buffer: the registry declares the FLOOR (stage 0: the repair of the still / dark
 //     regions plus the full-resolution mid band at the true source resolution, the least the budget grants); the VRAM / ms governor
 //     adds the larger stages while headroom lasts, each visible, shed in reverse order. There are NO fixed per-GPU tiers,
-//   * the INTENDED inputs. The framework holds 4 inputs per product (kMaxInputs); the registry declares the first four and this
-//     table records the full list, which a test compares (dependency: W1-SKG raises the limit, then the declarations catch up).
+//   * the INTENDED inputs. The framework holds 16 inputs per product (kMaxInputs) and 10 consumed products per consumer
+//     (kMaxConsumes); the registry still declares only the first four inputs (reset-2 open item: short-queue substitutes for the
+//     lead edges) and this table records the full list, which a test compares.
 // Header-only, pure C++14, no Windows, no GPU. A change of any layout, range or fill rule bumps the unit version of the unit that
 // makes the product AND the expectation in Catalog (the same commit); a reader built against another number takes its classical
 // form visibly (Catalog::VerifyUnit, TdProductReads.h).
@@ -79,7 +80,7 @@ namespace TdProducts
 		const char* fillLive;        // "live" rule (who runs the same unit once when the lane missed)
 		const char* fillReduced;     // the declared visible reduced form
 		const char* layout;
-		std::vector<Input> intended; // the intended inputs (the registry declares the first kMaxInputs of them)
+		std::vector<Input> intended; // the intended inputs (the registry declares the first four of them today)
 		std::vector<Stage> stages;   // governed stages, floor first; empty = not budget-governed (one size, the registry's)
 	};
 

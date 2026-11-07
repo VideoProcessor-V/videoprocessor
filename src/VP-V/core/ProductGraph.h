@@ -197,6 +197,7 @@ struct Graph {
     const char* error = "";        // plain reason when invalid (shown in status by the caller)
     std::vector<Node> nodes;       // topological over lag-0 edges, ties by product id
     GraphSettings settings;
+    ProductId errorProduct = kNoProduct;   // the product a slot-count overflow names (kNoProduct for other errors)
     size_t framesInFlight = 0;     // audit 25a N6: sizes the Indicator's event ring
     uint64_t totalRingBytes = 0;
     uint64_t totalLiveBytes = 0;
@@ -463,10 +464,27 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         node.shortQueue = reducedFrom[p] != kNoProduct;
         const unsigned ring = unsigned(node.history) + 1u + R + L + q + (node.holdsSpan ? 1u : 0u)
                               + unsigned(node.leadRead);
-        node.ring = uint8_t(ring > 255u ? 255u : ring);
+        if (ring > kSlotCountMax) {
+            // Never clamped: a ring smaller than history + 1 would starve the lane with no sign of it. Same visible reject as an overflowing read list.
+            g.error = "a product needs more than 255 ring slots (history, render-ahead and lane lead together); the analysis graph was not built";
+            g.errorProduct = p;
+            g.nodes.clear();
+            g.totalRingBytes = 0;
+            g.totalLiveBytes = 0;
+            return g;
+        }
+        node.ring = uint8_t(ring);
         const unsigned live = unsigned(node.history) + 1u + R + (node.holdsSpan ? 1u : 0u)
                               + laneReadRefs[p] * unsigned(gs.laneJobsInFlight == 0 ? 1u : gs.laneJobsInFlight);
-        node.livePool = uint8_t(live > 255u ? 255u : live);
+        if (live > kSlotCountMax) {
+            g.error = "a product needs more than 255 live-pool buffers (history, render-ahead and lane readers together); the analysis graph was not built";
+            g.errorProduct = p;
+            g.nodes.clear();
+            g.totalRingBytes = 0;
+            g.totalLiveBytes = 0;
+            return g;
+        }
+        node.livePool = uint8_t(live);
         node.inputCount = d.inputCount;
         for (size_t k = 0; k < d.inputCount; ++k) {
             node.inputs[k].product = Resolve(reg, d.inputs[k].product, gs);

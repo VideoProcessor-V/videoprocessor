@@ -686,6 +686,7 @@ namespace Vpv
 					addDecision(d);
 				addDecision(FallbackCatalog::SkeletonProductsDeclined("P10 grain split, P11 region stats, P12 light level",
 					SkeletonModule::kDeclinedReason));
+				addDecision(FallbackCatalog::SkeletonHistoryCapped(VpSkeleton::RecordHistoryCapNote(b->configuredPeriodMs)));
 				full = lane.StatusLines();
 				line = std::string("analysis lane ") + mode + " " + Dimensions(b->dims) + ", " + std::to_string(st.frames) +
 					" frames, ahead " + std::to_string(lane.TotalAhead()) + " in-render " + std::to_string(lane.TotalInRender()) +

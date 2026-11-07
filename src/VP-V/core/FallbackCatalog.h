@@ -530,6 +530,12 @@ namespace FallbackCatalog
 	{
 		return products.empty() ? Released("skeleton_products") : Engaged("skeleton_products", products + " declined: " + why);
 	}
+	// A record history (quality pattern, td trail summary) the measured source rate asked deeper than the slot counts allow; the note
+	// is VpSkeleton::RecordHistoryCapNote (plain text with the cap and the rate where it starts). Never capped silently.
+	inline Decision SkeletonHistoryCapped(const std::string& note)
+	{
+		return note.empty() ? Released("skeleton_history") : Engaged("skeleton_history", note);
+	}
 	// A [vpv.skeleton] key that could not be read (kept at its default).
 	inline Decision SkeletonKeys(const std::string& problems)
 	{

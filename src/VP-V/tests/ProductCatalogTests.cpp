@@ -400,6 +400,7 @@ namespace ProductCatalogTestsNs
 			// td.memory (id 17, doc 72): the budget-governed floor, the WHOLE store: {1/4 axis: 55 B, 1/2 axis: 1 B, full: 2 B}; no history.
 			Assert::AreEqual(uint64_t(960ull * 540 * 55 + 1920ull * 1080 * 1 + 3840ull * 2160 * 2), BytesOf(reg.Get(kTdMemory).size, d4k));
 			Assert::AreEqual(0, int(reg.Get(kTdMemory).history));
+			Assert::IsTrue(reg.Get(kTdMemory).singletonStore, L"td.memory is the one persistent store (read at lag 1, never governed as history)");
 			Assert::AreEqual(std::string("td.memory"), std::string(reg.Get(kTdMemory).token));
 			// P13: views only.
 			Assert::AreEqual(uint64_t(0), BytesOf(reg.Get(kP13SourceRing).size, d4k));
@@ -432,6 +433,40 @@ namespace ProductCatalogTestsNs
 			}
 			// Deterministic.
 			Assert::AreEqual(VramByTier(FullGraph(Settings(dims[1], 3))).Total(), VramByTier(FullGraph(Settings(dims[1], 3))).Total());
+		}
+
+		TEST_METHOD(EveryProductRingHoldsItsHistoryAtAnyMeasuredRateAndTheCapIsVisible)
+		{
+			// Unmeasured (the field maximum), 24p, 60p and 240 fps; a deep render-ahead and several lane jobs stress the extra slot terms.
+			const double periods[] = { 0.0, 1001.0 / 24.0, 1001.0 / 60.0, 1000.0 / 120.0, 1000.0 / 240.0 };
+			for (double period : periods) {
+				const Registry reg = SkeletonProducts(false, false, period);
+				Assert::IsTrue(reg.Validate());
+				for (uint8_t lane : { uint8_t(0), uint8_t(1), uint8_t(3) }) {
+					GraphSettings gs = Settings(Dims{ 3840, 2160 }, lane);
+					gs.renderAhead = 8;
+					gs.laneJobsInFlight = 4;
+					const Graph g = FullGraph(gs, reg);
+					Assert::IsTrue(g.valid, L"the catalog graph never overflows the slot counts at any rate");
+					for (const Node& n : g.nodes) {
+						Assert::IsTrue(int(n.ring) >= int(n.history) + 1, L"ring >= history + 1");
+						Assert::IsTrue(int(n.livePool) >= int(n.history) + 1, L"live pool >= history + 1");
+					}
+					const Node* qp = g.Find(kQualityPattern);
+					Assert::IsTrue(qp != nullptr);
+					Assert::AreEqual(int(QualityPatternHistoryFrames(period)), int(qp->history), L"the node carries the derived depth, no silent change");
+				}
+			}
+			// The cap: 223 frames of the 2 s window = 111.5 fps. Visible above it, silent when nothing is capped.
+			Assert::AreEqual(223, int(kRecordHistoryMax));
+			Assert::IsTrue(RecordHistoryCapNote(0.0).empty());
+			Assert::IsTrue(RecordHistoryCapNote(1001.0 / 24.0).empty());
+			Assert::IsTrue(RecordHistoryCapNote(1000.0 / 100.0).empty());
+			const std::string note = RecordHistoryCapNote(1000.0 / 240.0);
+			Assert::IsTrue(note.find("quality pattern history capped at 223 frames (source rate above 111.5 fps)") != std::string::npos, L"the cap is named, never silent");
+			Assert::AreEqual(223, int(QualityPatternHistoryFrames(1000.0 / 240.0)));
+			Assert::IsFalse(FallbackCatalog::SkeletonHistoryCapped(note).reason.empty());
+			Assert::IsFalse(FallbackCatalog::SkeletonHistoryCapped("").engaged);
 		}
 
 		TEST_METHOD(GeneratedDocRegionMatchesTheCatalog)

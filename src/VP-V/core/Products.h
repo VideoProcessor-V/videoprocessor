@@ -10,6 +10,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <string>
 #include <vector>
 
 // Skeleton S0: the product registry (design doc 25 section B1). A product is a piece of analysis
@@ -737,7 +739,8 @@ inline void AppendSourceRingProduct(std::vector<ProductDecl>& decls)
 // TemporalDetail's products, redefined by doc 72 (unit v2). Every size here is the BUDGET-GOVERNED FLOOR ("stage 0": the
 // repair of the still / dark regions plus the full-resolution mid band at the true source resolution, the least the budget grants); the
 // governor adds stages while VRAM and ms headroom allow, each visible and each shed in the reverse order. The stages, their size
-// rules and the inputs the framework cannot hold yet (kMaxInputs = 4) are the contract table of
+// rules and the full intended input lists (the framework limit is kMaxInputs = 16; the registry still declares only the first
+// four inputs of each, reset-2 open item) are the contract table of
 // modules/repair/temporal_detail/products/TdProductContracts.h. No fixed per-GPU tiers.
 inline void AppendTemporalDetailProducts(std::vector<ProductDecl>& decls)
 {
@@ -749,7 +752,7 @@ inline void AppendTemporalDetailProducts(std::vector<ProductDecl>& decls)
 
     // td.blocks (id 16): per 16 px block ~28 B (state, origin slot, trail, per-band confidence, lighting layer, motion class...)
     // + the 8 px quadtree pool (<= 25%): {shift 4: 28 B}, {shift 3: 6 B}. SEQUENTIAL: it reads itself at lag 1 (ordered-chain lane
-    // job, W1-SKG). The framework holds 4 inputs; the intended ~14 are in the contract table.
+    // job, W1-SKG). The framework holds 16 inputs; the registry declares the first 4 today, the intended ~14 are in the contract table.
     ProductDecl an = Make(kTdBlocks, "td.blocks", "temporal detail blocks", Backend::GpuCompute, 1, Tier::T1,
                           content | Bit(kRebaseH) | Bit(kRebaseV), Bit(kSettingsRebase) | Bit(kSettingsAnalysis));
     AddInput(an, kP10GrainSplit, 0);
@@ -852,14 +855,22 @@ inline void AppendCameraGuideProduct(std::vector<ProductDecl>& decls)
 // Reset 1 declares the ids, contracts, sizes and fill rules and wires the consumers' read paths against them; the placeholder
 // producers publish "absent" and every reader runs its classical form (visibly, once the engine is requested). Sizes are the
 // BUDGET-GOVERNED FLOOR (stage 0); the larger stages of each budget-governed buffer are in
-// modules/repair/temporal_detail/products/TdProductContracts.h. The inputs that exceed kMaxInputs (4) are listed there too
-// (dependency: W1-SKG raises the limit; this declaration never silently drops one: it declares the first four and the contract
-// table records the full intended list, which a test compares).
+// modules/repair/temporal_detail/products/TdProductContracts.h. The framework limit is now kMaxInputs = 16 / kMaxConsumes = 10,
+// but the registry still declares only the first 4 inputs of each intended list (kDeclaredInputsToday in the tests; a reset-2
+// open item: short-queue substitutes for the lead edges). Nothing is silently dropped: the contract table records the full
+// intended list, which a test compares.
 // Record histories are SECONDS of source time; the frame count follows the measured source rate (the same rule as the guide lag).
 // `sourcePeriodMs <= 0` (unmeasured: the status/planning view, tests) declares the field's maximum, kRecordHistoryMax: the records
 // are tens of bytes, so the bound costs kilobytes and never under-declares. `minFrames` keeps the structural floor of the record
 // (the lags its readers use). A rebuild with the measured period replaces the figure (SkeletonProducts(..., sourcePeriodMs)).
-constexpr uint8_t kRecordHistoryMax = 255;
+// Node::ring and Node::livePool are uint8_t: a graph that needs more slots is REJECTED by BuildGraph (visible reason), never clamped.
+// The record histories therefore stop short of 255 by kRingHeadroomFrames, the room the product's other slot terms need
+// (render-ahead R + lane lead L + the lane-owned buffer + the held-span slot + the look-ahead lead slots; for the live pool R + the
+// held-span slot + the spare per lane-read input reference x jobs in flight). 32 covers R, L and the spares of every catalog product
+// with a wide margin (tests pin ring >= history + 1 at unmeasured and 240 fps); a setting that needs more is rejected by BuildGraph.
+constexpr unsigned kSlotCountMax = 255;
+constexpr unsigned kRingHeadroomFrames = 32;
+constexpr uint8_t kRecordHistoryMax = static_cast<uint8_t>(kSlotCountMax - kRingHeadroomFrames);
 inline uint8_t HistoryFramesFor(double seconds, double sourcePeriodMs, uint8_t minFrames)
 {
     if (!(sourcePeriodMs > 0.0) || !(seconds > 0.0))
@@ -868,12 +879,36 @@ inline uint8_t HistoryFramesFor(double seconds, double sourcePeriodMs, uint8_t m
     const double clamped = (std::min)(double(kRecordHistoryMax), (std::max)(double(minFrames), frames));
     return static_cast<uint8_t>(clamped);
 }
+// True when the measured period asks for more frames than kRecordHistoryMax (the cap engaged); false when unmeasured.
+inline bool RecordHistoryCapped(double seconds, double sourcePeriodMs)
+{
+    if (!(sourcePeriodMs > 0.0) || !(seconds > 0.0))
+        return false;
+    return std::ceil(seconds * 1000.0 / sourcePeriodMs - 1e-9) > double(kRecordHistoryMax);
+}
 constexpr double kQualityPatternHistorySeconds = 2.0;   // P15 looks back over this much source time (GOP / mini-GOP structure)
 constexpr uint8_t kQualityPatternMinFrames = 8;         // structural: the lags the pattern readers use (lead 2 + lag 1 + the frame)
 constexpr double kTdTrailSummaryHistorySeconds = 0.25;  // source identity folds the last quarter second of trail summaries
 constexpr uint8_t kTdTrailSummaryMinFrames = 3;         // structural: the frame, lag 1 (source identity) and one in flight
 inline uint8_t QualityPatternHistoryFrames(double sourcePeriodMs) { return HistoryFramesFor(kQualityPatternHistorySeconds, sourcePeriodMs, kQualityPatternMinFrames); }
 inline uint8_t TdTrailSummaryHistoryFrames(double sourcePeriodMs) { return HistoryFramesFor(kTdTrailSummaryHistorySeconds, sourcePeriodMs, kTdTrailSummaryMinFrames); }
+// "" when no record history is capped at this measured period, else the plain note for status / Fallbacks (the cap is never silent):
+// "quality pattern history capped at 223 frames (source rate above 111.5 fps)". The rate where the cap starts is frames / seconds.
+inline std::string RecordHistoryCapNote(double sourcePeriodMs)
+{
+    std::string note;
+    const struct { const char* name; double seconds; } records[] = {
+        { "quality pattern", kQualityPatternHistorySeconds }, { "td trail summary", kTdTrailSummaryHistorySeconds } };
+    for (const auto& r : records) {
+        if (!RecordHistoryCapped(r.seconds, sourcePeriodMs))
+            continue;
+        char text[160] = {};
+        std::snprintf(text, sizeof(text), "%s history capped at %u frames (source rate above %.1f fps)", r.name,
+                      unsigned(kRecordHistoryMax), double(kRecordHistoryMax) / r.seconds);
+        note += (note.empty() ? "" : "; ") + std::string(text);
+    }
+    return note;
+}
 constexpr uint32_t kQualityPatternBytes = 64;
 constexpr uint32_t kCodingEvidenceSummaryBytes = 256;
 constexpr uint32_t kTdTrailSummaryBytes = 256;
@@ -896,7 +931,7 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
     AddInput(ce, kP10GrainSplit, 0);
     AddInput(ce, kP11RegionBlockStats, 0);
     AddInput(ce, kP13SourceRing, 0);
-    AddInput(ce, kCodingEvidence, 1);   // the hash history (lag 2 joins when kMaxInputs allows)
+    AddInput(ce, kCodingEvidence, 1);   // the hash history (lag 2 joins when the declarations catch up to the contract table)
     AddTerm(ce, 3, 8);
     ce.size.fixedBytes = kCodingEvidenceSummaryBytes;
     ce.rebasedPlane = true;

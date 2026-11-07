@@ -207,6 +207,49 @@ namespace ProductGraphTestsNs
 			Assert::AreEqual(std::string("a consumer asks for an unknown product"), std::string(g.error));
 		}
 
+		// A CPU store of history `h` read at lag 0 by a CPU reader: the smallest shape that can overflow the slot counts.
+		static Registry DeepHistoryRegistry(uint8_t h)
+		{
+			std::vector<ProductDecl> d;
+			ProductDecl deep = detail::Make(0, "deep", "deep history", Backend::Cpu, h, Tier::T0, Bit(VpIndicator::kFull), 0);
+			deep.size.fixedBytes = 64;
+			d.push_back(deep);
+			ProductDecl reader = detail::Make(1, "reader", "reader", Backend::Cpu, 0, Tier::T0, Bit(VpIndicator::kFull), 0);
+			detail::AddInput(reader, 0, 0);
+			reader.size.fixedBytes = 64;
+			d.push_back(reader);
+			return Registry(d);
+		}
+
+		TEST_METHOD(RingSlotOverflowIsRejectedVisiblyNeverClamped)
+		{
+			// ring = 250 + 1 + R 5 + L 1 + q 1 = 258 > 255: an invalid graph with a plain reason, not a ring smaller than history + 1.
+			const Graph g = BuildGraph(DeepHistoryRegistry(250), { Consumer(1, 1) }, Settings(5, 1));
+			Assert::IsFalse(g.valid);
+			Assert::IsTrue(std::string(g.error).find("ring slots") != std::string::npos);
+			Assert::IsTrue(g.nodes.empty() && g.errorProduct == 0);
+			// The same product with room is built, and its ring is exactly the formula (no clamp involved).
+			const Graph ok = BuildGraph(DeepHistoryRegistry(250), { Consumer(1, 1) }, Settings(2, 1));
+			Assert::IsTrue(ok.valid);
+			Assert::AreEqual(250 + 1 + 2 + 1 + 1, int(ok.Find(0)->ring));
+			Assert::IsTrue(ok.errorProduct == kNoProduct);
+		}
+
+		TEST_METHOD(LivePoolOverflowIsRejectedVisiblyNeverClamped)
+		{
+			// laneLead 0: ring = 250 + 1 + 0 + 0 + q 1 = 252 fits; live = 250 + 1 + R 0 + one reader x 8 jobs = 259 does not.
+			GraphSettings gs = Settings(0, 0);
+			gs.laneJobsInFlight = 8;
+			const Graph g = BuildGraph(DeepHistoryRegistry(250), { Consumer(1, 1) }, gs);
+			Assert::IsFalse(g.valid);
+			Assert::IsTrue(std::string(g.error).find("live-pool buffers") != std::string::npos);
+			Assert::IsTrue(g.nodes.empty() && g.errorProduct == 0);
+			gs.laneJobsInFlight = 1;
+			const Graph ok = BuildGraph(DeepHistoryRegistry(250), { Consumer(1, 1) }, gs);
+			Assert::IsTrue(ok.valid);
+			Assert::AreEqual(250 + 1 + 1, int(ok.Find(0)->livePool));
+		}
+
 		TEST_METHOD(RebuildTriggersEachReportTheirReason)
 		{
 			Indicator ind(7, 64);

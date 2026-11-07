@@ -43,6 +43,9 @@ pathway = off), on the render thread.
 * **Declined (visible):** P10 grain split, P11 region block stats, P12 light level. They have no producer and no live fill
   here yet: `skeleton_products: ... declined: render-thread GPU dispatch hook pending (M2 Upload/Entrance phase)`. Their
   consumers keep their own computation. Nothing reads the products yet (the `skeleton.report` consumer only declares them).
+* **Capped record history (visible):** the quality-pattern and td trail-summary histories are seconds of the measured source rate, bounded so
+  every ring fits 255 slots. When the rate asks for more, `skeleton_history: quality pattern history capped at 223 frames (source rate above
+  111.5 fps)` appears in Fallbacks; a graph whose slot counts still overflow is rejected (analysis lane unavailable, with the reason), never clamped.
 
 ## Why "skeleton first"
 

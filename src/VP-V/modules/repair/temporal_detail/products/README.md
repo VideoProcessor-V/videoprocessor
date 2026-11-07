@@ -46,10 +46,11 @@ plus the full-resolution mid band at the true source resolution, the least the b
 last and sheds them in reverse order, each step visible. Declared totals at 4K: floor 54.95 MB GPU (+ 24.9 MB arena peak; the CPU records scale with the measured source rate: 7.7 KB at 24 p, at most 97.9 KB unmeasured), full
 241.6 MB (`TdProducts::BudgetAt`, pinned by a test). Ring multipliers come from the graph.
 
-**Inputs beyond the framework's limit.** The framework holds 4 inputs per product (`kMaxInputs`) and 6 consumed products per consumer. The registry
-declares the first four of each intended input list (never silently dropping one) and the contract table records the full lists (`td.blocks` 16,
-`coding_evidence` 5, `td.anchor_pass` 5); a test compares prefix and order. **Dependency: W1-SKG** (lead edges in SlotTable, kMaxInputs >= 16,
-kMaxConsumes >= 10, ordered-chain lane jobs, history declarations): after it lands, the declarations catch up to the table.
+**Inputs beyond what the registry declares.** The framework limit is now 16 inputs per product (`kMaxInputs`) and 10 consumed products per consumer
+(`kMaxConsumes`; W1-SKG landed lead edges, the raised limits, ordered-chain lane jobs and history declarations). The registry still declares only the
+first four inputs of each intended input list (never silently dropping one: `kDeclaredInputsToday` in the tests) and the contract table records the full
+lists (`td.blocks` 16, `coding_evidence` 5, `td.anchor_pass` 5); a test compares prefix and order. **Reset-2 open item:** the declarations catch up to the
+table (short-queue substitutes for the lead edges).
 
 **Repair-stack order (WP9) recorded here: TD -> deband -> contrast recovery** (today's text: deband -> TD -> CR). Deband becomes the fallback layer under
 temporal detail: it reads `td.maps` validity and stability (and `coding_evidence` for its blocking need) so a TD-covered block is not debanded twice; with the
