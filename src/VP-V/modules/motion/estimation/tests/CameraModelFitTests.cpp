@@ -1161,7 +1161,9 @@ namespace VideoProcessorTest
 			Config odd;
 			odd.twoLayer = false;
 			odd.borderRingFraction = 0.3; odd.layerSwapSeconds = 2; odd.borderVetoRatio = 0.9; odd.continuityFloor = 0.9; odd.competitorMinRatio = 0.9;
-			const std::vector<CameraMotion> a = Sequence(Config()), b = Sequence(odd);
+			Config off;
+			off.twoLayer = false;
+			const std::vector<CameraMotion> a = Sequence(off), b = Sequence(odd);
 			for (size_t i = 0; i < a.size(); ++i)
 			{
 				Require(SameRecord(a[i], b[i]), "record " + std::to_string(i) + " differs");

@@ -98,7 +98,7 @@ namespace CameraModel
 		// two-layer path sits behind this). true: the best competing motion is kept as a second layer; the camera
 		// layer is the one with the best support x continuity x border evidence x area history; a foreground that
 		// fills the middle of the picture without touching the border is never reported as a confident camera.
-		bool twoLayer = false;
+		bool twoLayer = true;     // default ON after the R1-GATES re-audit (it is never more lenient than single-layer); false = single-layer records, byte-identical to the old fitter
 		// Border ring width per side = max(1 block, round(fraction * picture extent in blocks)).
 		double borderRingFraction = 0.125;
 		// Layer change hysteresis: M = max(1, lround(layerSwapSeconds / pairSeconds)) pairs (derived from the measured
