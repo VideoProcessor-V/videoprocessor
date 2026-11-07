@@ -86,6 +86,8 @@ enum : ProductId {
     kTdDelta,             // 26 td.delta: lane -> render hand-off of the repair delta
     kTdMaps,              // 27 td.maps: THE consumer-facing per-block map product (U19 TdMapsView)
     kTdTrailSummary,      // 28 td.trail_summary: per-frame CPU summary for source identity / status
+    // Wave S2 (SID lead request, doc 78 section 6): appended after the doc 72 list, never before it.
+    kSourceGeometry,      // 29 source_geometry (P14g): HELD-STATE measured + applied source geometry (SourceGeometry unit v1)
     kSkeletonProductEnd
 };
 
@@ -255,6 +257,13 @@ struct ProductDecl {
     // producer's job for frame N+1 reuses the slot of frame N-1 and waits (counted, SlotCounters::writeWaitPinned) while a
     // lag-1 reader still pins it. Its VRAM figure is 2x the store, not a ring.
     bool singletonStore = false;
+    // HELD STATE (wave S2 audit): a record the writer (outside the lane's frame loop, e.g. the source-resolution worker) publishes on its
+    // own evaluations and every reader takes as the latest SEALED one: a lag >= 1 read, never lag 0 and never a look-ahead. There is no
+    // live fill, so BuildGraph gives it NO live pool (livePool 0, like singletonStore) and an absent record is Unavailable for that frame:
+    // the reader runs its own visible fallback. Registry::Validate rejects a lag-0 or lead read of a held-state product in a product's inputs,
+    // BuildGraph the same in a consumer's reads (visible reason). Set on P14 source identity and P14g source geometry (every reader of both
+    // is a lag-1 held read in the catalog; a test pins it).
+    bool heldState = false;
     // Set by detail::AddInput/AddLead when a declaration named more than kMaxInputs reads: the extra read was NOT
     // recorded. Registry::Validate rejects the declaration with a plain reason (fail closed, visible; Release has no
     // assert).
@@ -347,6 +356,19 @@ inline void AddTerm(ProductDecl& d, uint8_t shift, uint16_t bytesPerCell)
 
 } // namespace detail
 
+// A LEAD read of an ORDERED-CHAIN product (a reader of N+k whose target reads itself at lag >= 1). WARNING level, never a reject: the chain
+// target runs at most one frame ahead of its seal (a chain job pins only a render-valid predecessor), so the target of N+k is not Published
+// when the reader of N is sealed; the seal falls to the reader's live fill, i.e. the reader live-fills its reduced form (visible, counted).
+// Registry::Validate reports it through its optional `warning` out, BuildGraph keeps the EFFECTIVE reads in Graph::leadChainReads (a reader
+// that resolved to its short-queue substitute has no lead), and the analysis lane shows both (status line + Fallbacks entry).
+// Design options for the removal (S2 / reset 2) are in core/README.md ("Lead reads of an ordered chain").
+constexpr const char* kLeadChainWarning = "lead read of an ordered chain: reader live-fills its reduced form";
+struct LeadChainRead {
+    ProductId reader = kNoProduct;
+    ProductId chain = kNoProduct;
+    uint8_t lead = 0;   // the largest lead the reader reads the chain at
+};
+
 // The registry: products indexed by their id (dense 0..n-1).
 class Registry {
 public:
@@ -361,8 +383,12 @@ public:
     // Ids dense and in place, inputs and substitutes known, at most one lag-0 path per pair (no
     // lag-0 cycle: the seal runs in topological order over lag-0 edges). Returns false with a
     // plain reason on the first problem.
-    bool Validate(const char** reason = nullptr) const
+    // `warning` (optional): cleared at the start and, when the registry is valid, set to LeadChainWarningText of the declared lead reads of
+    // ordered chains ("" = none). A warning never makes the registry invalid.
+    bool Validate(const char** reason = nullptr, std::string* warning = nullptr) const
     {
+        if (warning)
+            warning->clear();
         auto fail = [reason](const char* why) {
             if (reason)
                 *reason = why;
@@ -404,6 +430,8 @@ public:
             }
             if (d.historyFloor != kHistoryFixed && d.historyFloor > d.history)
                 return fail("history floor above the full history");
+            if (d.heldState && d.backend == Backend::RenderOnly)
+                return fail("a held-state product needs a lane backend (it has no live fill)");
             if (d.singletonStore) {
                 if (d.history != 0)
                     return fail("a single-store product declares history 0");
@@ -440,6 +468,13 @@ public:
                 const InputRef& in = d.inputs[k];
                 if (decls_[in.product].singletonStore && (in.lag > 1 || in.lead > 0))
                     return fail("a single-store product is read at lag 0 or 1 only (no deeper lag, no look-ahead)");
+            }
+        // A held-state product is read at lag >= 1 only: the latest sealed record, never the frame's own and never a look-ahead.
+        for (const ProductDecl& d : decls_)
+            for (size_t k = 0; k < d.inputCount; ++k) {
+                const InputRef& in = d.inputs[k];
+                if (decls_[in.product].heldState && (in.lag == 0 || in.lead > 0))
+                    return fail("a held-state product is read at lag >= 1 only (no lag-0 read, no look-ahead)");
             }
         // Look-ahead edges: no chains (the target has no lead inputs itself) and no loops (the target
         // cannot reach the reader through ANY edge, lag, lag 0 or lead): a frame-ahead read must end at
@@ -494,7 +529,53 @@ public:
             return fail("lag-0 cycle between products");
         if (reason)
             *reason = "";
+        if (warning)
+            *warning = LeadChainWarningText(LeadChainReads());
         return true;
+    }
+
+    // The DECLARED lead reads of ordered chains: one entry per (reader, chain) with the largest lead, in id order. Declaration level (the
+    // lane lead may cap it to 0 at run time: BuildGraph's Graph::leadChainReads is the effective set).
+    std::vector<LeadChainRead> LeadChainReads() const
+    {
+        std::vector<LeadChainRead> out;
+        for (const ProductDecl& d : decls_) {
+            const size_t n = d.inputCount < kMaxInputs ? size_t(d.inputCount) : kMaxInputs;
+            for (size_t k = 0; k < n; ++k) {
+                const InputRef& in = d.inputs[k];
+                if (in.lead == 0 || !Has(in.product) || !decls_[in.product].orderedChain)
+                    continue;
+                bool known = false;
+                for (LeadChainRead& r : out)
+                    if (r.reader == d.id && r.chain == in.product) {
+                        known = true;
+                        if (in.lead > r.lead)
+                            r.lead = in.lead;
+                    }
+                if (!known) {
+                    LeadChainRead r;
+                    r.reader = d.id;
+                    r.chain = in.product;
+                    r.lead = in.lead;
+                    out.push_back(r);
+                }
+            }
+        }
+        return out;
+    }
+
+    // "quality_pattern -> coding_evidence (lead 2): lead read of an ordered chain: reader live-fills its reduced form" (entries joined by
+    // "; "); "" when there are none.
+    std::string LeadChainWarningText(const std::vector<LeadChainRead>& reads) const
+    {
+        std::string text;
+        for (const LeadChainRead& r : reads) {
+            if (!Has(r.reader) || !Has(r.chain))
+                continue;
+            text += (text.empty() ? "" : "; ") + std::string(decls_[r.reader].token) + " -> " + decls_[r.chain].token + " (lead "
+                    + std::to_string(unsigned(r.lead)) + "): " + kLeadChainWarning;
+        }
+        return text;
     }
 
 private:
@@ -832,7 +913,33 @@ inline void AppendSourceIdentityProduct(std::vector<ProductDecl>& decls)
     ProductDecl p = Make(kSourceIdentity, "p14_source_identity", "source identity (held state)", Backend::Cpu, 1,
                          Tier::T0, Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
     AddInput(p, kP5MonitorTiles, 0);   // through the monitor snapshot (the tiles' analysis)
+    p.heldState = true;   // every catalog reader is a lag-1 held read (ProductCatalogTests pins it): no live pool
     p.size.fixedBytes = kSourceIdentityRecordBytes;
+    p.residency = Residency::SystemRam;
+    p.rarelyTouched = true;
+    p.refRenderMs = 0.0f;
+    decls.push_back(p);
+}
+
+// P14g: the source geometry record (doc 78 section 6, SID lead request; id 29, appended after the doc 72 list). Per axis the MEASURED and
+// the APPLIED geometry (state, n, N, ratio, phase, kernel, sharpening, double scale, confidence), the active area, the coded-raster class,
+// the reserved chroma chain, geometryGen / appliedGen. Like P14 it is HELD STATE: the source-resolution side (single writer) publishes it on
+// each evaluation, consumers read the latest sealed record (seq <= N: a lag >= 1 read), there is no live fill, and a record older than
+// its maximum age (SourceGeometry::MaxAgeUs: twice the longest evaluation interval) is stale and every consumer falls back to its
+// delivered-raster / classical form, visibly. Cpu, T0, history 1, fixed little-endian layout of at most kSourceGeometryRecordBytes (the
+// layout itself is the SourceGeometry unit, input/source_analysis/identity/SourceGeometryProduct.h; the SID build fills it). Provisional
+// consumers: quality_pattern, coding_evidence, temporal detail, the adaptive scaler, the chroma stage and status (catalog rows).
+constexpr uint32_t kSourceGeometryRecordBytes = 512;
+inline void AppendSourceGeometryProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::Make;
+    using namespace VpIndicator;
+    ProductDecl p = Make(kSourceGeometry, "source_geometry", "source geometry (held state)", Backend::Cpu, 1, Tier::T0,
+                         Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
+    AddInput(p, kP5MonitorTiles, 0);   // like P14: the same monitor evaluation (single writer, the source-resolution side)
+    p.heldState = true;
+    p.size.fixedBytes = kSourceGeometryRecordBytes;
     p.residency = Residency::SystemRam;
     p.rarelyTouched = true;
     p.refRenderMs = 0.0f;
@@ -1050,7 +1157,7 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
 }
 
 // The registry the skeleton runs with: the first products, the camera products, then P10..P13, the TemporalDetail
-// products, P14, p7g and the temporal-detail engine products, in fixed id order. THE one assembly point.
+// products, P14, p7g, the temporal-detail engine products and P14g source_geometry, in fixed id order. THE one assembly point.
 // `compactGrain` / `compactChroma`: the GRANTED storage of P10 (luma) and P10c (chroma planes).
 // `sourcePeriodMs`: the measured source frame period (0 = unmeasured), which sets the frame counts of the record histories.
 inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double sourcePeriodMs = 0.0)
@@ -1064,6 +1171,7 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double s
     AppendSourceIdentityProduct(d);
     AppendCameraGuideProduct(d);
     AppendTemporalDetailEngineProducts(d, sourcePeriodMs);
+    AppendSourceGeometryProduct(d);   // wave S2: P14g, appended after the doc 72 list
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }
