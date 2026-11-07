@@ -145,7 +145,8 @@ namespace Tests
 					Assert::AreEqual(std::string(), r.fallback.id);
 					Assert::AreEqual(std::string(), StatusLine(c, r));
 				}
-				Assert::IsFalse(kRequestedToday);
+				Assert::IsFalse(Requested(false), L"source_id_consensus off asks for nothing");
+				Assert::IsTrue(Requested(true), L"source_id_consensus on is the request");
 				Assert::IsFalse(PlaceholderEntry()->published, L"the placeholder publishes absent");
 				// Requested with the placeholder (absent): every consumer takes its classical form VISIBLY.
 				for (Consumer c : kAll)

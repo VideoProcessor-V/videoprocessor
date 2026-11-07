@@ -89,6 +89,11 @@ namespace SourceIdentity
 			double coarseStat = 0.0;
 			double kernelMargin = 0.0;      // T(runner-up kernel) - T(best), >= 0
 			double familyMargin = 0.0;      // T(best kernel of another family) - T(best), >= 0
+			// Per-kernel T at the refined size (exact stage): bit k of kernelMask says kernel k was evaluated, kernelT[k] is its T
+			// (smaller = better; the best of the evaluated ones equals `stat`). Only the kernels of the best exactFamilies families
+			// are evaluated. Deterministic. The latch builds its kernel equivalence class from these.
+			uint32_t kernelMask = 0;
+			double kernelT[kKernelCount] = {};
 			double floorCodes = 0.0;        // trimmed mean over lines of the RAW rms residual at the best (n, kernel), 10-bit codes.
 			                            // NOT dof-normalised: the rounding floor the evidence gate wants (AxisObservation.floorCodes,
 			                            // 1.155 for an 8-bit output, 0.289 for 10-bit) is a different, normalised quantity
@@ -597,6 +602,12 @@ namespace SourceIdentity
 				for (size_t k = 1; k < scores.size(); ++k)
 					if (scores[k].T < scores[bi].T)
 						bi = k;
+				cr.kernelMask = 0;
+				for (size_t k = 0; k < scores.size(); ++k)
+				{
+					cr.kernelMask |= 1u << scores[k].kernel;
+					cr.kernelT[scores[k].kernel] = scores[k].T;
+				}
 				double second = 0.0;
 				bool haveSecond = false;
 				double otherFam = 0.0;

@@ -109,7 +109,8 @@ namespace SourceIdentity
 			bool mixed = false;           // line or segment disagreement beyond the mask limit
 			bool clustered = false;       // dropped: a neighbour within +-1 px has more evidence
 			double median = 0.0;          // median line value of the informative lines (the top hypothesis has the lowest)
-			double stat = 0.0;            // masked trimmed mean
+			double stat = 0.0;            // masked trimmed mean (valid only when statValid)
+			bool statValid = false;       // the judge got as far as the statistic (the gate and the spatial agreement passed)
 			double increment = 0.0;
 			int kernel = -1;
 			int family = -1;
@@ -528,6 +529,7 @@ namespace SourceIdentity
 					return;
 				}
 				ce.stat = TrimmedMeanOf(kept.data(), static_cast<int>(kept.size()), s_.trimFraction);
+				ce.statValid = true;
 				ce.increment = ClampD(nulls_.LogLikelihoodRatio(ce.cls, ce.stat), s_.incrementMin, s_.incrementMax);
 				ce.informative = true;
 			}

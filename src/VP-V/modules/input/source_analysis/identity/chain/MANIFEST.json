@@ -14,8 +14,22 @@
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainNullTables.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainEvidence.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/PowerProbe.h",
+    "src/VP-V/modules/input/source_analysis/identity/chain/ChainLatch.h",
+    "src/VP-V/modules/input/source_analysis/identity/chain/ChainGovernor.h",
+    "src/VP-V/modules/input/source_analysis/identity/chain/ChainLines.h",
+    "src/VP-V/modules/input/source_analysis/identity/chain/ChainStatus.h",
+    "src/VP-V/modules/input/source_analysis/identity/chain/ChainEvidenceLog.h",
+    "src/VP-V/modules/input/source_analysis/identity/chain/ChainEvidenceLog.cpp",
+    "src/VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h",
+    "src/VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.cpp",
     "src/VP-V/modules/input/source_analysis/identity/chain/README.md",
-    "src/VP-V/modules/input/source_analysis/identity/tests/ChainUnitTests.cpp"
+    "src/VP-V/modules/input/source_analysis/identity/tests/ChainUnitTests.cpp",
+    "src/VP-V/modules/input/source_analysis/identity/tests/ChainLatchTests.cpp",
+    "src/VP-V/modules/input/source_analysis/identity/tests/ChainEstimatorFixtures.h",
+    "src/VP-V/modules/input/source_analysis/identity/tests/ChainEstimatorTests.cpp",
+    "src/VP-V/modules/input/source_analysis/identity/tests/ChainEvidenceLogTests.cpp",
+    "src/VP-V/modules/input/source_analysis/identity/tests/ChainGovernorStatusTests.cpp",
+    "src/VP-V/modules/input/source_analysis/identity/tests/ChainEvalRegistrationTests.cpp"
   ],
   "forwarding_headers": [],
   "components": {
@@ -25,6 +39,6 @@
     "config_keys": [],
     "upstream_modules": []
   },
-  "fallback_when_missing": "Draft: not wired (SID-C2 adds the worker and the consensus voter). Every abstention returns reason bits (low detail, flat, dark, soft, no power, mixed, no candidates, short lines); a native verdict is never produced without a seen power probe.",
+  "fallback_when_missing": "Draft: the worker (ChainEstimator) is built (SID-C2b) but off until Monitor::SetChainEnabled (key plumbing waits for P3). Every abstention returns reason bits (low detail, flat, dark, soft, no power, mixed, no candidates, short lines); a native verdict is never produced without a seen power probe.",
   "fallback_entry": "Source identity (chain): unsure (<reason>)"
 }

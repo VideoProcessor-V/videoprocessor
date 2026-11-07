@@ -35,7 +35,7 @@ namespace VpFrameAnalysis
 			if (const void* owner = m_owner.load(std::memory_order_acquire))
 			{
 				SourceFrameTap::SetStore(owner, nullptr);
-				SourceFrameTap::Unregister(owner);   // the store is going away: no sink may outlive it
+				SourceFrameTap::UnregisterAll(owner);   // the store is going away: no sink (of any name) may outlive it
 			}
 		}
 		Host(const Host&) = delete;
