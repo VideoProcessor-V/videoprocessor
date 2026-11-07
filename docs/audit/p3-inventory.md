@@ -205,3 +205,11 @@ The goldens committed in 43c01fdc were generated from the PRE-move code and veri
 - Built x64 Release there (VideoProcessor-Test.dll 04:56), run with `/Logger:trx`: `D:\codex\videoprocessor\r1w1-p3-trx-base\*.trx`, Counters total=2 passed=2 (SettingsDumpAndFingerprintPartitionMatchTheGolden, ValidationOfEveryKnownKeyMatchesTheCheckedInGolden); the goldens in that tree are untracked files written 05:01 by that run.
 - SHA-256 of `src/VP-V/tests/golden/settings-identity.golden.txt` = fc94651c0398a4be5f263a3bd24a029786ed5e8ea71d0712c34dc8e1b1ccfecf and of `schema-validation.golden.txt` = afa9bcea76808e666c3d77e2d11068fc78568c7025dbf2ba6244c2be2ce6f26d, identical in the pre-move tree and in 43c01fdc.
 - Not re-built in this session (D:\codex\GPU-QUIET present, rule: no builds); the proof is the existing build artefacts and hashes above. The post-move check is the same two tests in the verification build.
+
+## 10. Hub fan-out with the settings module (task 6)
+
+Checked in `src/VP-V/core/hub/ExtensionHub.{h,cpp}` and `VpvSettingsModule.cpp`:
+- `SettingsModule` overrides only `OnSettingsLoad`; every other `ISkeletonModule` callback keeps its default (`OnLifecycle`, `OnIngress`, `OnQueue`, `OnStatus` no-ops; `OnFrame` and `OnCommand` return false; `OnResolve` returns the host value unchanged; `Query` returns null), so the fan-out loops in `AddModule` order see nothing from it. It is registered first in `HubBootstrap.cpp`, so `OnFrame`/`OnCommand` "first handler wins" loops are not shifted (it never handles).
+- Every phase tolerates a missing out-parameter: `PostLoad` writes only when `c.result` is set, `Fingerprint` only when `c.out`, `Delta` only when `c.changed`.
+- With no module registered (`RendererExtension::SettingsLoad` returns at `!Any()`), the host's own values stand; the hub is process-local. `HookLayerTests` call `ResetModulesForTesting()` on the Test project's own hub copy (it compiles `ExtensionHub.cpp`, not `VpvSettingsModule.cpp`), so they cannot unregister the renderer DLL's settings module.
+- An exception from a module is contained per module (`Contain`) and reported as a worker fault; later modules still run.
