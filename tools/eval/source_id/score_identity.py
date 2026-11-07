@@ -37,6 +37,7 @@ from collections import defaultdict
 
 LATCH_T = 15.0           # R2 clean: latched correct within this many seconds
 DIRTY_T = 10.0
+DARK_MIN_MINUTES = 30.0
 HOURS_PHASE_A = 10.0       # target H_A: smoke gate, licenses SHADOW mode only
 TITLES_PHASE_A = 15
 SHOTS_PHASE_A = 1000
@@ -105,8 +106,12 @@ def load_eval(eval_dir):
     if os.path.isdir(rdir):
         for name in sorted(os.listdir(rdir)):
             d = os.path.join(rdir, name)
-            if os.path.isdir(d) and not name.endswith(".tmp"):
-                paths.append(d)
+            if not os.path.isdir(d) or name.endswith(".tmp"):
+                continue
+            # a stale <reel>.failed (an earlier failed attempt) is ignored once the reel's ok directory exists
+            if name.endswith(".failed") and os.path.isdir(os.path.join(rdir, name[:-len(".failed")])):
+                continue
+            paths.append(d)
     srcs = [(os.path.join(d, "evaluations.csv"), os.path.join(d, "events.csv"), os.path.join(d, "done.csv"), d.endswith(".failed")) for d in paths]
     if os.path.exists(os.path.join(eval_dir, "evaluations.csv")):
         srcs.append((os.path.join(eval_dir, "evaluations.csv"), os.path.join(eval_dir, "events.csv"), os.path.join(eval_dir, "reels_done.csv"), False))
@@ -468,7 +473,8 @@ def go_table(reels, per, lane, cfg, masters_info=None):
     g.append(gate("axes.r1.false_candidate", "Axes - R1 native", "false CANDIDATE <= 1 per hour",
                   dict(per_hour=round(frac(r1["false_cand"], h) or 0.0, 3), count=r1["false_cand"], hours=round(h, 3)), st))
     dk = A(idpred("R8.dark2", "R8.credits", "R8.flat"))
-    st = "NA" if dk["reels"] == 0 else ("FAIL" if (dk["flaps"] > 0 or dk["episodes"] > 0) else "PASS")
+    # a failure is a FAIL at any amount of evidence; a PASS needs >= 30 min of such reels, else INSUFFICIENT
+    st = "NA" if dk["reels"] == 0 else ("FAIL" if (dk["flaps"] > 0 or dk["episodes"] > 0) else ("PASS" if dk["hours"] * 60.0 >= DARK_MIN_MINUTES else "INSUFFICIENT"))
     g.append(gate("axes.r1.dark_credits", "Axes - R1 native", "dark / credits / flat reels (all of them, hours reported): 0 reverts, 0 wrong",
                   dict(reverts=dk["flaps"], wrong=dk["episodes"], reels=dk["reels"], hours=round(dk["hours"], 3)), st))
     c = A(lambda r: r["id"].startswith("R2.clean"))
@@ -780,6 +786,19 @@ def selftest():
         f.write("reel,lane,t,event_t,out_frame,seg,type,a,b,detail" + chr(10))
     with open(os.path.join(gdir, "done.csv"), "w") as f:
         f.write("reel,frames_expected,frames_decoded,wall_s,ffmpeg_stderr_lines,state" + chr(10) + "R7.G,720,720,1.0,0,ok" + chr(10))
+    # a stale R7.G.failed (earlier failed attempt, partial) next to the ok directory must be ignored by load_eval
+    fdir = gdir + ".failed"
+    os.makedirs(fdir)
+    with open(os.path.join(fdir, "evaluations.csv"), "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(grows[0].keys()))
+        w.writeheader()
+        w.writerows(grows[:5])
+    with open(os.path.join(fdir, "events.csv"), "w") as f:
+        f.write("reel,lane,t,event_t,out_frame,seg,type,a,b,detail" + chr(10))
+    with open(os.path.join(fdir, "done.csv"), "w") as f:
+        f.write("reel,frames_expected,frames_decoded,wall_s,ffmpeg_stderr_lines,state" + chr(10) + "R7.G,720,5,1.0,0,ffmpeg_exit" + chr(10))
+    rows_l, _ev_l, done_l = load_eval(tmp)
+    assert done_l["R7.G"]["state"] == "ok" and len(rows_l[("R7.G", "chain")]) == len(grows), (done_l["R7.G"], len(rows_l[("R7.G", "chain")]))
     with open(os.path.join(tmp, "evaluations.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(ev[0].keys()))
         w.writeheader()

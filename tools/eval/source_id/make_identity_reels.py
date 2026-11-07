@@ -41,6 +41,7 @@ FONT = "C:/Windows/Fonts/arial.ttf"
 MAJOR_RATE = 1.6            # rate step regarded as a MAJOR quality event (same as make_abr_reels.py)
 CLIPS_ROOT = "D:/testclips"
 EVAL_ROOT = CLIPS_ROOT + "/eval-2026-10-31"
+NATIVE_ROOT = CLIPS_ROOT + "/sourceid/native"
 
 # ---------------------------------------------------------------- masters
 # (id, class, parts[(relative path, ss seconds)], licence override or None). Parts are concatenated and looped (flagged) when
@@ -67,6 +68,24 @@ MASTERS = [
                                           (EVAL_ROOT + "/hdr_film_grain/nocturne_filmgrain_hdr_60p_t300/nocturne_filmgrain_hdr_60p_t300.mov", 0.0),
                                           (EVAL_ROOT + "/hdr_film_grain/nocturne_filmgrain_hdr_60p_t480/nocturne_filmgrain_hdr_60p_t480.mov", 0.0)], None),
     ("synth_credits", "credits_scroll24", [], {"lic": "synthetic (generated, no third-party content)", "url": ""}),
+    # SID-D5 native masters (D:/testclips/sourceid/native, README.md there lists source, licence and SHA256). Appended LAST: existing reel ids stay stable.
+    ("anim30_bbb", "animation_cg30", [(NATIVE_ROOT + "/bbb/bbb_sunflower_2160p_30fps_normal.mp4", 40.0)],
+     {"lic": "CC BY 3.0 (Blender Foundation, Peach)", "url": "https://download.blender.org/demo/movies/BBB/bbb_sunflower_2160p_30fps_normal.mp4.zip",
+      "author": "Blender Foundation / peach.blender.org"}),
+    ("film24_tos", "film_vfx24_letterbox", [(NATIVE_ROOT + "/tears_of_steel/tearsofsteel_4k.mov", 30.0)],
+     {"lic": "CC BY 3.0 (Blender Foundation, Mango)", "url": "https://download.blender.org/demo/movies/ToS/tearsofsteel_4k.mov.zip",
+      "author": "Blender Foundation / mango.blender.org", "pad_to": (3840, 2160)}),
+    ("docu30_roman", "documentary30", [(NATIVE_ROOT + "/nasa_svs/15064_RomanTransport_25mbps_4k.mp4", 5.0)],
+     {"lic": "NASA media usage guidelines (US government work; not an explicit per-item open licence)", "url": "https://svs.gsfc.nasa.gov/15064/",
+      "author": "NASA Scientific Visualization Studio"}),
+    ("docu25_eclipse_flight", "documentary25", [(NATIVE_ROOT + "/nasa_svs/15075_2026Eclipse_WB57GoPro_Flight_H264-4K.mp4", 30.0)],
+     {"lic": "NASA media usage guidelines (US government work; not an explicit per-item open licence)", "url": "https://svs.gsfc.nasa.gov/15075/",
+      "author": "NASA Scientific Visualization Studio"}),
+    ("dark25_eclipse_totality", "dark_lowkey25", [(NATIVE_ROOT + "/nasa_svs/15075_2026Eclipse_WB57GoPro_Totality_H264-4K.mp4", 60.0)],
+     {"lic": "NASA media usage guidelines (US government work; not an explicit per-item open licence)", "url": "https://svs.gsfc.nasa.gov/15075/",
+      "author": "NASA Scientific Visualization Studio"}),
+    # NOT used: D:/testclips/sourceid/native/netflix_dancers (Netflix Dancers 4K10, CC BY-NC-ND, internal only; 4096x2160 DCI raster, no row in native/README.md yet).
+    # Add it here only once that row exists.
 ]
 SYNTHETIC = {"synth_credits": dict(w=3840, h=2160, fps=(24000, 1001))}
 
@@ -168,6 +187,7 @@ def load_masters(ctx):
             m["lic"], m["url"] = lic_override["lic"], lic_override["url"]
             ctx.masters[mid] = m
             continue
+        pad_to = (lic_override or {}).get("pad_to")
         ok = True
         for path, ss in parts:
             if not os.path.exists(path):
@@ -189,7 +209,7 @@ def load_masters(ctx):
             except ValueError:
                 dur = 0.0
             w, h = int(st.get("width", 0)), int(st.get("height", 0))
-            if w < 3840 or float(fr) <= 0:
+            if w < 3840 or float(fr) <= 0 or (pad_to and (w != pad_to[0] or h > pad_to[1])):
                 m["skip"] = "not a >= 3840 wide native master: %s (%dx%d)" % (path, w, h)
                 ok = False
                 break
@@ -202,13 +222,20 @@ def load_masters(ctx):
                 except (OSError, ValueError):
                     src = {}
             m["parts"].append(dict(path=path, ss=ss, w=w, h=h, fps=float(fr), fr=fr, pix_fmt=st.get("pix_fmt", ""), duration=dur,
-                                   url=src.get("url", ""), lic=src.get("lic", ""), author=src.get("author", ""),
+                                   url=src.get("url", "") or (lic_override or {}).get("url", ""), lic=src.get("lic", "") or (lic_override or {}).get("lic", ""), author=src.get("author", "") or (lic_override or {}).get("author", ""),
                                    size_mb=round(os.path.getsize(path) / 1048576.0, 1)))
         if not ok:
             ctx.masters[mid] = m
             continue
         p0 = m["parts"][0]
         m.update(w=p0["w"], h=p0["h"], fps=fps_rational(p0["fps"], p0.get("fr")), pix_fmt=p0["pix_fmt"], eight_bit=all(p["pix_fmt"] == "yuv420p" for p in m["parts"]))
+        if pad_to:
+            # a letterboxed delivery (e.g. 3840x1714) is padded with black bars to the 2160 raster; the picture's active area goes into the truth
+            ph = m["parts"][0]["h"]
+            oy = even((pad_to[1] - ph) / 2.0)
+            m["h"] = pad_to[1]
+            m["pad"] = dict(src_w=m["parts"][0]["w"], src_h=ph, y=oy)
+            m["active"] = dict(x=0, y=oy, w=m["parts"][0]["w"], h=ph)
         m["lic"] = (lic_override or {}).get("lic") or "; ".join(sorted(set(p["lic"] for p in m["parts"] if p["lic"]))) or "see D:\\testclips\\eval-2026-10-31\\CATALOG.md"
         m["url"] = (lic_override or {}).get("url") or "; ".join(p["url"] for p in m["parts"] if p["url"])
         m["size_mb"] = round(sum(p["size_mb"] for p in m["parts"]), 1)
@@ -264,7 +291,8 @@ def master_graph(ctx, m, nframes, pix, label="m", ss0=False):
             ss = max(0.0, part["ss"] - 0.25 / part["fps"])
         inputs.append((part["path"], ss))
         lab = label if len(uses) == 1 else "p%d" % k
-        lines.append("[%d:v]fps=fps=%s:round=near,trim=start_frame=0:end_frame=%d,setpts=PTS-STARTPTS,format=%s[%s]" % (k, fstr(fps), take, pix, lab))
+        padf = ("pad=%d:%d:0:%d:color=black," % (m["w"], m["h"], m["pad"]["y"])) if m.get("pad") else ""
+        lines.append("[%d:v]fps=fps=%s:round=near,trim=start_frame=0:end_frame=%d,setpts=PTS-STARTPTS,%sformat=%s[%s]" % (k, fstr(fps), take, padf, pix, lab))
         labels.append(lab)
     if len(uses) > 1:
         lines.append("%sconcat=n=%d:v=1:a=0[%s]" % ("".join("[%s]" % x for x in labels), len(uses), label))
@@ -344,6 +372,9 @@ def need_rung(ctx, master, kind, ratio=None, codec="libx265", bits=10, rate=("cr
         studio = dict(kernel=kern, usm=(extra or {}).get("usm"))
     else:
         raise ValueError(kind)
+    if active is None and m.get("active") and kind in ("native", "down"):
+        a0 = m["active"]
+        active = dict(a0) if kind == "native" else dict(x=0, y=even(a0["y"] * cw / float(W)), w=cw, h=even(a0["h"] * cw / float(W)))
     r = Rung(ctx, master, kind, cw, ch, bits, codec, rate, tag, pre=pre, active=active, latent=latent, studio=studio,
              preset=(ctx.args.preset_override or preset or None), full=full, nframes=nframes)
     if r.id in ctx.rungs:
@@ -696,7 +727,8 @@ def gp(ctx, m, frac):
 
 
 R1_TITLES = ["film_dragon", "film_married", "nat30_nikon", "nat30_sequim", "nat24_steeple", "nat25_funchal", "sport60_k808", "sport30_torschuss",
-             "dark60_meridian", "nat30_halona", "film_bury", "nat50_natgeo", "nat30_rheinfall"]
+             "dark60_meridian", "nat30_halona", "film_bury", "nat50_natgeo", "nat30_rheinfall",
+             "anim30_bbb", "film24_tos", "docu30_roman", "docu25_eclipse_flight", "dark25_eclipse_totality"]
 R1_ASIS_ONLY = ["sport30_sidemen"]          # a real AV1 4K stream: played as-is, never re-encoded
 # (priority, codec, bits, rate, preset): the budget cutter drops the highest priority number first, never below 3
 R1_VARIANTS = [(1, "libx264", 8, ("kbps", 2500), "veryfast"),      # blocky low rate
@@ -742,7 +774,9 @@ def clean_chain(ctx, m, rung, kernel, **kw):
 
 
 CLEAN_MASTERS = ["nat30_nikon", "film_dragon", "nat30_sequim", "film_married", "nat24_steeple", "nat25_funchal", "dark60_meridian", "nat30_halona",
-                 "film_bury", "nat50_natgeo"]       # all >= 60 s after their start: no loops
+                 "film_bury", "nat50_natgeo",
+                 # SID-D5 native masters, appended last (existing ids stay). The totality clip is R1-only: a near-black corona gives the axes no picture to judge.
+                 "anim30_bbb", "film24_tos", "docu30_roman", "docu25_eclipse_flight"]       # all >= 60 s after their start: no loops
 
 
 def kernel_for(ctx, mi, ri):
@@ -1255,7 +1289,7 @@ def seg_truth(ctx, reel, cs):
         r = None
         t["src_id"] = "master:" + sid
         cw, ch = W, H
-        act = dict(x=0, y=0, w=W, h=H)
+        act = dict(m.get("active") or dict(x=0, y=0, w=W, h=H))
         t["bits"] = 8
     stages = chain.get("stages") or []
     win = chain.get("window")
@@ -1481,8 +1515,9 @@ def rung_seconds(r, fps4k):
     return r.nframes / fps
 
 
-def estimate_hours(ctx, fps4k):
-    return sum(rung_seconds(r, fps4k) for r in ctx.rungs.values() if not rung_kept(ctx, r)) / 3600.0
+def estimate_hours(ctx, fps4k, include_kept=False):
+    """Encode wall time of the rungs still to do (include_kept: of every rung, kept ones too)."""
+    return sum(rung_seconds(r, fps4k) for r in ctx.rungs.values() if include_kept or not rung_kept(ctx, r)) / 3600.0
 
 
 def prune_rungs(ctx):
@@ -1497,7 +1532,8 @@ def prune_rungs(ctx):
 def cut_to_budget(ctx, fps4k):
     """Drop R1 encode variants (highest priority number first, never below as-is + the blocky x264 encode; the lead is told which were cut) until the estimate fits --budget-hours."""
     cuts = []
-    while estimate_hours(ctx, fps4k) > ctx.args.budget_hours:
+    # the estimate covers kept AND missing rungs: after an interrupted run the cut set is the same, so cut variants never reappear
+    while estimate_hours(ctx, fps4k, include_kept=True) > ctx.args.budget_hours:
         prios = sorted(set(rl.prio for rl in ctx.reels if rl.family == "R1" and rl.prio > 1), reverse=True)
         if not prios:
             break
@@ -1538,7 +1574,9 @@ def detect_shots(ctx, m):
     cache = "%s/shots_%s.json" % (ctx.work_dir, m["id"])
     if os.path.exists(cache):
         with open(cache, "r", encoding="utf-8") as f:
-            return json.load(f)
+            doc = json.load(f)
+        if doc.get("ok"):
+            return doc
     part = m["parts"][0]
     f = master_fps(m)
     txt = "shots_%s.txt" % m["id"]
@@ -1555,8 +1593,11 @@ def detect_shots(ctx, m):
                     frames.append(int(round(float(mm.group(1)) * f)))
         os.remove(tp)
     doc = dict(method="ffmpeg scdet threshold=10 on a 480-wide proxy", cuts=sorted(set(x for x in frames if x > 0)), ok=(r.returncode == 0))
-    with open(cache, "w", encoding="utf-8", newline=NL) as fh:
-        json.dump(doc, fh)
+    if doc["ok"]:                      # a failure is never cached: the next run retries it
+        with open(cache, "w", encoding="utf-8", newline=NL) as fh:
+            json.dump(doc, fh)
+    elif os.path.exists(cache):
+        os.remove(cache)
     return doc
 
 
@@ -1564,7 +1605,9 @@ def detect_shots_cached(ctx, m):
     cache = "%s/shots_%s.json" % (ctx.work_dir, m["id"])
     if os.path.exists(cache):
         with open(cache, "r", encoding="utf-8") as f:
-            return json.load(f).get("cuts", [])
+            doc = json.load(f)
+        if doc.get("ok"):
+            return doc.get("cuts", [])
     return None
 
 
@@ -1607,7 +1650,7 @@ def masters_table(ctx):
             rows.append("| %s | %s | generated by the script (work/credits.txt, drawtext on black) | - | - | - | %s | - |" % (mid, m["cls"], m["lic"]))
             continue
         for p in m["parts"]:
-            sha = sha256_cached(ctx, p["path"]) if ctx.args.hash_masters else "not computed (run --readme-only --hash-masters)"
+            sha = sha256_cached(ctx, p["path"]) if ctx.args.hash_masters else "not computed (run --readme-only)"
             rows.append("| %s | %s | %s | %d | %s | %s | %s | %s |" % (mid, m["cls"], P(p["path"]), os.path.getsize(p["path"]), sha, p["url"] or "origin not recorded",
                                                                        p["lic"] or m["lic"], p["author"] or "-"))
     return NL.join(rows)
@@ -1718,7 +1761,8 @@ def main(argv=None):
     ap.add_argument("--gops-clean", type=int, default=30, help="GOPs of the R2.clean reels (30 = >= 60 s)")
     ap.add_argument("--readme-only", action="store_true", help="hash the masters and rewrite the masters table of <out>/README.md")
     ap.add_argument("--no-calibrate", action="store_true")
-    ap.add_argument("--hash-masters", action="store_true", help="SHA256 of every master (cached) into reels.json and the README table")
+    ap.add_argument("--hash-masters", dest="hash_masters", action="store_true", default=True, help="SHA256 of every master (cached in work/sha256.json) into reels.json and the README table (default on)")
+    ap.add_argument("--no-hash-masters", dest="hash_masters", action="store_false", help="skip the master hashes")
     ap.add_argument("--min-free-gb", type=float, default=40.0)
     ap.add_argument("--rung-budget-gb", type=float, default=20.0)
     ap.add_argument("--preset-override", default="")
@@ -1800,6 +1844,7 @@ def selftest():
             m["parts"].append(dict(path=path, ss=ss, w=3840, h=2160, fps=23.976, pix_fmt="yuv420p", duration=300.0, url="", lic="", author="", size_mb=1))
         m["full_frames"] = 0 if (m["synthetic"] or len(parts) != 1) else 3000
         ctx.masters[mid] = m
+    ctx.masters["film24_tos"].update(pad=dict(src_w=3840, src_h=1714, y=222), active=dict(x=0, y=222, w=3840, h=1714), fps=(24, 1))
     ctx.masters["sport60_k808"]["fps"] = (60000, 1001)
     ctx.masters["nat30_nikon"]["fps"] = (30000, 1001)
     ctx.masters["nat25_funchal"]["fps"] = (25, 1)
@@ -1868,6 +1913,16 @@ def selftest():
     reel = by["R7.menu_black250.nat30_nikon"]
     kinds = [s["kind"] for s in compile_reel(ctx, reel)["segs"]]
     assert kinds == ["stream", "black", "menu", "black", "stream"], kinds
+    # letterboxed native master (Tears of Steel 3840x1714 padded to 2160): the active area is in the truth, as-is and via a rung
+    assert "pad=3840:2160:0:222:color=black" in master_graph(ctx, ctx.masters["film24_tos"], 100, "yuv420p10le", "m", ss0=True)[1]
+    reel = by["R1.film24_tos.asis"]
+    t = seg_truth(ctx, reel, compile_reel(ctx, reel)["segs"][0])
+    assert t["active_area_out"] == dict(x=0, y=222, w=3840, h=1714) and t["n_active_coded"] == dict(x=3840, y=1714) and t["native_coded"], t
+    reel = [rl for rl in ctx.reels if rl.id.startswith("R2.clean.film24_tos.r1of2")][0]
+    t = seg_truth(ctx, reel, compile_reel(ctx, reel)["segs"][0])
+    aa = t["active_area_out"]      # even-rounded in the 1080 rung (111 -> 112, 857 -> 856): within 2 rows of the master's bars
+    assert abs(aa["y"] - 222) <= 2 and abs(aa["h"] - 1714) <= 2 and aa["w"] == 3840 and abs(t["n_active_coded"]["y"] - 857) <= 1 and t["truth_n"] == dict(x=1920, y=1080), t
+    assert not any(rl.master == "dark25_eclipse_totality" and rl.family == "R2" for rl in ctx.reels) and any(rl.master == "docu30_roman" and rl.family == "R2" for rl in ctx.reels)
     # rung budget estimate stays far below the 15 GB cap
     # Latin square: every kernel at every ratio among the clean reels; clean reels are 60 s; R1 is full length
     seen = {}

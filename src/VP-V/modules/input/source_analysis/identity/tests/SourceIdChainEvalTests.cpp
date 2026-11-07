@@ -222,20 +222,42 @@ namespace Tests
 			return n;
 		}
 
+		// Every file the harness writes into a reel directory. The writers below use these names, and RemoveTree
+		// deletes exactly this list: a new output file is added here once and cannot be left behind.
+		constexpr const char* kFileEvaluations = "evaluations.csv";
+		constexpr const char* kFileEvents = "events.csv";
+		constexpr const char* kFileDone = "done.csv";
+		constexpr const char* kFileStderr = "ffmpeg_stderr.txt";
+		constexpr const char* kFileGraph = "graph.fc.txt";
+
 		inline bool ReelDoneOk(const std::string& finalDir)
 		{
 			std::string text;
-			if (!ReadFile(finalDir + "\\done.csv", text))
+			if (!ReadFile(finalDir + "\\" + kFileDone, text))
 				return false;
 			return text.find(",ok") != std::string::npos;
 		}
 
-		inline void RemoveTree(const std::string& dir)
+		// true when the directory is gone afterwards
+		inline bool RemoveTree(const std::string& dir)
 		{
-			const char* names[] = { "evaluations.csv", "events.csv", "done.csv", "ffmpeg_stderr.txt" };
+			const char* names[] = { kFileEvaluations, kFileEvents, kFileDone, kFileStderr, kFileGraph };
 			for (const char* n : names)
 				DeleteFileA((dir + "\\" + n).c_str());
+			// a file this list does not know of (a future writer) goes too, so the directory itself can be removed
+			WIN32_FIND_DATAA fd;
+			HANDLE h = FindFirstFileA((dir + "\\*").c_str(), &fd);
+			if (h != INVALID_HANDLE_VALUE)
+			{
+				do
+				{
+					if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+						DeleteFileA((dir + "\\" + fd.cFileName).c_str());
+				} while (FindNextFileA(h, &fd));
+				FindClose(h);
+			}
 			RemoveDirectoryA(dir.c_str());
+			return GetFileAttributesA(dir.c_str()) == INVALID_FILE_ATTRIBUTES;
 		}
 
 		// Fields written empty when unknown.
@@ -345,12 +367,12 @@ namespace Tests
 				RemoveTree(tmpDir);
 				CreateDirectoryA(tmpDir.c_str(), nullptr);
 				const auto wall0 = std::chrono::steady_clock::now();
-				const std::string fcPath = tmpDir + "\\graph.fc.txt";
+				const std::string fcPath = tmpDir + "\\" + kFileGraph;
 				{
 					std::ofstream fc(fcPath, std::ios::binary);
 					fc << reel.filter;
 				}
-				const std::string errPath = tmpDir + "\\ffmpeg_stderr.txt";
+				const std::string errPath = tmpDir + "\\" + kFileStderr;
 				// threads: decoders per input, the filter graph 2 (1 with the noise filter: its output must not depend on slicing)
 				const std::string fgThreads = reel.filter.find("noise=") != std::string::npos ? "1" : "2";
 				std::ostringstream cmd;
@@ -364,7 +386,7 @@ namespace Tests
 				}
 				cmd << " -/filter_complex \"" << fcPath << "\" -map \"[vout]\" -pix_fmt gray16le -f rawvideo - 2> \"" << errPath << "\"\"";
 				FILE* pipe = _popen(cmd.str().c_str(), "rb");
-				std::ofstream evals(tmpDir + "\\evaluations.csv"), events(tmpDir + "\\events.csv"), done(tmpDir + "\\done.csv");
+				std::ofstream evals(tmpDir + "\\" + kFileEvaluations), events(tmpDir + "\\" + kFileEvents), done(tmpDir + "\\" + kFileDone);
 				evals << kEvalHeader;
 				events << "reel,lane,t,event_t,out_frame,seg,type,a,b,detail\n";
 				done << "reel,frames_expected,frames_decoded,wall_s,ffmpeg_stderr_lines,state\n";
@@ -375,6 +397,7 @@ namespace Tests
 				{
 					done << reel.id << ',' << reel.frames << ",0,0,0,popen_failed\n";
 					evals.close(); events.close(); done.close();
+					RemoveTree(finalDir + ".failed");
 					MoveFileExA(tmpDir.c_str(), (finalDir + ".failed").c_str(), MOVEFILE_REPLACE_EXISTING);
 					++failures;
 					continue;
@@ -536,21 +559,42 @@ namespace Tests
 				if (Seam().reelEnd)
 					Seam().reelEnd(reel.id);
 				const int errLines = CountLines(errPath);
-				const bool ok = (g == reel.frames) && exitCode == 0;
-				const char* st = ok ? "ok" : (g == 0 ? "no_frames" : (g != reel.frames ? "frame_count_mismatch" : "ffmpeg_exit"));
+				bool ok = (g == reel.frames) && exitCode == 0;
+				std::string st = ok ? "ok" : (g == 0 ? "no_frames" : (g != reel.frames ? "frame_count_mismatch" : "ffmpeg_exit"));
 				const double wall = MsSince(wall0) / 1000.0;
 				done << reel.id << ',' << reel.frames << ',' << g << ',' << wall << ',' << errLines << ',' << st << '\n';
 				evals.close();
 				events.close();
 				done.close();
 				// atomic: the directory appears under its final name only when complete (a partial reel stays *.failed for inspection)
-				RemoveTree(ok ? finalDir : finalDir + ".failed");
-				MoveFileExA(tmpDir.c_str(), ok ? finalDir.c_str() : (finalDir + ".failed").c_str(), MOVEFILE_REPLACE_EXISTING);
+				// A success also removes a stale <reel>.failed (the scorer would otherwise see both). A rename that fails is a reel
+				// FAILURE (logged, never "ok"): the finished output stays in <reel>.tmp and the reel is not counted as done.
+				bool moved = RemoveTree(ok ? finalDir : finalDir + ".failed");
+				if (moved)
+					moved = MoveFileExA(tmpDir.c_str(), ok ? finalDir.c_str() : (finalDir + ".failed").c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+				if (!moved)
+				{
+					const DWORD err = GetLastError();
+					st = "rename_failed(" + std::to_string(err) + ")";
+					Logger::WriteMessage((reel.id + ": could not place the reel directory (" + std::to_string(err) + "); output left in " + tmpDir).c_str());
+					ok = false;
+				}
+				else if (ok)
+					RemoveTree(finalDir + ".failed");
 				index << std::fixed << std::setprecision(1) << reel.id << ',' << reel.frames << ',' << g << ',' << wall << ',' << errLines << ',' << st << std::endl;
 				if (!ok)
 					++failures;
 				Logger::WriteMessage((reel.id + ": " + std::to_string(g) + "/" + std::to_string(reel.frames) + " frames, " + st).c_str());
 				++ran;
+			}
+			// STOP is consumed when the run ends, so the next run of the same output folder runs
+			if (FileExistsA(outDir + "\\STOP"))
+			{
+				SYSTEMTIME t;
+				GetLocalTime(&t);
+				char stamp[40];
+				sprintf_s(stamp, "%04d%02d%02d-%02d%02d%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+				MoveFileExA((outDir + "\\STOP").c_str(), (outDir + "\\STOP.done." + stamp).c_str(), MOVEFILE_REPLACE_EXISTING);
 			}
 			Logger::WriteMessage(("SourceIdChainEvalTests: " + std::to_string(ran) + " reels run, " + std::to_string(skipped) + " already complete, " + std::to_string(failures) +
 								  " failures" + (stopped ? ", stopped: " + stopWhy : std::string()) + "; output " + outDir).c_str());
