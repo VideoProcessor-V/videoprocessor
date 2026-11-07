@@ -62,7 +62,7 @@ namespace VpUnit
 
 		struct Input
 		{
-			const float* lumaA = nullptr;       // half luma 0..255 floats, w x h
+			const float* lumaA = nullptr;       // luma at half resolution, 0..255 floats, w x h
 			const float* lumaB = nullptr;
 			int w = 0, h = 0;
 			int gridW = 0, gridH = 0;           // blocks

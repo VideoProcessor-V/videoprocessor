@@ -70,7 +70,7 @@ namespace VpLongPair
 	}
 	inline float FromS105(int16_t v) { return static_cast<float>(v) / 32.0f; }
 
-	inline int GridOf(int halfLumaSize) { return (halfLumaSize + kGrid - 1) / kGrid; }
+	inline int GridOf(int planeSize) { return (planeSize + kGrid - 1) / kGrid; }
 
 	// The hint resampled onto the engine's hint grid (same grid as the output: 4 half-luma px per cell): bilinear between
 	// hint-cell centres, edge clamp, S10.5. Cell centres: hint cell c is centred at (c + 0.5) * cellPx.
