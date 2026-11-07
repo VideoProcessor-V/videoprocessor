@@ -29,7 +29,7 @@ GUIDE = ROOT / "docs" / "settings" / "VP-settings-reference.md"
 TIERS = ROOT / "docs" / "design" / "vpv-tiers.json"
 SRC = ROOT / "src"
 RUNTIME_DIRS = ["VideoProcessor-Lib", "VideoProcessor-GUI", "VideoProcessor-VPRenderer",
-                "VideoProcessor-VPRendererFilter", "VP-V/core"]
+                "VideoProcessor-VPRendererFilter", "VP-V/core", "VP-V/modules/control/config"]
 BEGIN = "<!-- BEGIN GENERATED (tools/settings_coverage_audit.py) -->"
 END = "<!-- END GENERATED -->"
 UI_SUFFIXES = {"auto", "value", "unset", "unit"}
