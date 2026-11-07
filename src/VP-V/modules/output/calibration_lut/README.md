@@ -132,7 +132,7 @@ What the user sees (wizard status in Config, plus the VP log; none is a "Fallbac
 External tools:
 - ArgyllCMS `spotread.exe` (AGPLv3; a separate process, never linked). Search order: `argyll_path`, `ARGYLL_PATH`, `PATH`, then `Argyll*` folders under the usual install roots (ArgyllInstall.h). Argyll 3.0 or newer is recommended.
 - Any meter Argyll supports. MeterCatalog.h only tunes sensor calibration, CCSS/CCMX and the low-light floor per family. `meter_model: simulated` = a dry run with the real renderer and a simulated display and meter.
-- Phase 2: the projector's RS-232 port (Barco F35 / FL35) and an optional fast light sensor on its own COM port.
+- Phase 2: the projector's RS-232 port (Barco F35 class) and an optional fast light sensor on its own COM port.
 
 Dependencies needed to lift it:
 - Windows (ConPTY, job objects, `MultiByteToWideChar`), the project's `pch.h`, `DebugLog`.
