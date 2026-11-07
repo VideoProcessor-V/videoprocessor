@@ -57,7 +57,7 @@ the renderer or GUI, delete the stale `.iobj` / `.ipdb` files under `x64\Release
 
 `RendererCaptureHarnessTests::CalibrationDryRunThroughTheRenderer` (`src/VP-V/tests/harness/RendererCaptureHarnessTests.cpp`)
 is the end-to-end test: it starts the real VP renderer on the GPU with a synthetic 10-bit 4:2:2 signal, starts a
-calibration session (Quick plan, `settle_ms` 40, no verify, 17-point LUT) at t = 1 s with a simulated meter that
+calibration session (Quick plan, `settle_ms` 40, no verify, 17-point LUT) at t >= 1 s, once GetCalibrationOutput reports available, with a simulated meter that
 reads the codes the renderer was asked to show, and expects the session to reach Review (more than 50 patches
 measured) and the renderer to log `Calibration patterns: ended` within 28 s. It proves the patch timing (present
 twice, then settle) and the end state (patterns off, video back) on a real swapchain.
@@ -66,8 +66,7 @@ Requirements: a desktop session with a real GPU (not a remote session), mains po
 the display it opens on at its normal mode. Then, after the build:
 
 ```
-set VP_TEST_GPU=hardware
-set VP_TEST_ADAPTER=NVIDIA
+$env:VP_TEST_GPU='hardware'; $env:VP_TEST_ADAPTER='NVIDIA'
 vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /Logger:"trx;LogFileName=dryrun.trx" /ResultsDirectory:<scratch folder> /TestCaseFilter:"Name=CalibrationDryRunThroughTheRenderer"
 ```
 

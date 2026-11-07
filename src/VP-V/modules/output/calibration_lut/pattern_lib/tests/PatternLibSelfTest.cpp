@@ -85,7 +85,7 @@ namespace
 		CHECK_EQ(ContainerValue(lim, 1), 4);
 		CHECK_EQ(ContainerValue(full, 0), 0);
 		CHECK_EQ(ContainerValue(full, 255), 1023);
-		CHECK_EQ(ContainerValue(full, 128), static_cast<int>(std::lround(128 * 1023.0 / 255.0)));
+		CHECK_EQ(ContainerValue(full, 128), 514);
 		// Out-of-range codes are clamped to the format, never wrapped.
 		CHECK_EQ(ContainerValue(full, 9999), 1023);
 		CHECK_EQ(ContainerValue(full, -5), 0);
