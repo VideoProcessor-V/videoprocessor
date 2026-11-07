@@ -15,3 +15,44 @@ Not migrated (GPU float shaders, no byte-identity proof without a GPU run): the 
 and the interpolator's LOW_HALF_BODY (`FrameInterpolator.cpp`); recorded as residuals in `tools/shared_units_baseline.json`.
 
 Determinism: integer arithmetic, fixed tap order. Any change of the grid, tap order, rounding or GLSL entry names bumps `kUnitVersion`.
+
+# SourceStats (shared unit U6, `VpUnit::SourceStats`)
+
+The one law of the P4 source-stats record (doc 62, section 1.2 U6): `SourceStats.h`, `kUnitVersion = 1` (= the record version and
+`kExpectedStatsUnit`). Moved unchanged from `LaneCpuProducts.h`; the lane names (`SourceStatsRecord`, `StatsAccumulator`,
+`ComputeSourceStats`, ...) are aliases of it.
+
+- Record (8 KB): 1024-bin histogram (top 10 bits of the 16-bit half plane), mean, min/max, p1/p50/p99 (bin centre), evidence rect
+  (rows/cols above p1 + (p99 - p1) / 16; NOT Bill's active picture, that is U8), grain (median 8x8 block RMS second difference).
+- Shared small laws: `FirstBinReaching` (percentile / p99.9 scan), `HistBin10` (N-bin histogram of 10-bit codes), `Histogram10`,
+  `HalfL1Distance` (the input of U7).
+- Migrated (identity): the lane producer and live fill (`LaneProductsTests`, `AnalysisLaneTests`), the `VpFrameAnalysis` percentile scan,
+  the HdrInference veto grid (bin law, active-rows histogram, p99.9, histogram distance), proven in `SharedUnitsW1Tests.cpp`.
+- Not migrated: the `VpFrameAnalysis` Reducer (studio-code domain, flat-decile grain law: a different law, kept), the matcher M3 16-bin
+  GPU histogram, LED look-ahead (output domain), SRM histograms, picture-only peak and the LED 32x18 / HDR grid cells (SA3, needs SK-W).
+- Deferred key: `source_stats_authority` (original|p4) belongs to SA3 and the SCHEMA lock (RendererProfileConfig.h / MainConfigSchema.h).
+- Plan deviation: `OpticalFlowTrust.h` (a 256-bin histogram of match COSTS, median / MAD) is reclassified out of U6 as a known false
+  positive: it is not a luma histogram.
+
+Unit: input/source_analysis (lane/shared)
+
+## Settings
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `source_stats_authority` | profile (deferred) | enum | original, p4 | original | not in Config (deferred to SA3; needs the SCHEMA lock, RendererProfileConfig.h / MainConfigSchema.h) | Original = Bill's SceneDetector and analysis | DEFERRED, not implemented in this package | same on all |
+
+## Environment and diagnostics
+| Name | Purpose | Default | Scope (test/debug/runtime) |
+|---|---|---|---|
+| (none) | | | |
+
+## Products
+P1 half + quarter luma (U3, version 1) and P4 source stats (U6, version 1 = `kExpectedStatsUnit`). A reader built against another
+version engages the consumer's reduced path (FallbackCatalog `product.*`); the veto and the lane classifier have no reduced path of their own.
+
+## Status and fallbacks
+No downgrade of its own; the P4 walk either/or (`WalkSource`, Original = Bill's walk) shows `FallbackCatalog::SourceStatsWalk` when Lane is requested without P4.
+
+## Tests
+`LaneProductsTests`, `AnalysisLaneTests`, `HalfLumaUnitTests`, `SharedUnitsW1Tests` (CPU only), e.g.
+`vstest.console.exe x64\Release\VideoProcessor-Test.dll /TestCaseFilter:FullyQualifiedName~SharedUnitsW1Tests`.

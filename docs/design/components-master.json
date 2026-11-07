@@ -215,7 +215,17 @@
         "src/VP-V/tests/suite/SourceResolutionFrameBoundTests.cpp",
         "src/VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h",
         "src/VP-V/modules/input/source_analysis/lane/shared/README.md",
-        "src/VP-V/modules/input/source_analysis/lane/shared/MANIFEST.json"
+        "src/VP-V/modules/input/source_analysis/lane/shared/MANIFEST.json",
+        "src/VP-V/modules/input/source_analysis/identity/shared/SourceQuality.h",
+        "src/VP-V/modules/input/source_analysis/identity/shared/README.md",
+        "src/VP-V/modules/input/source_analysis/identity/shared/MANIFEST.json",
+        "src/VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h",
+        "src/VP-V/modules/input/source_analysis/events/shared/README.md",
+        "src/VP-V/modules/input/source_analysis/events/shared/MANIFEST.json",
+        "src/VP-V/modules/input/source_analysis/picture/shared/PictureRect.h",
+        "src/VP-V/modules/input/source_analysis/picture/shared/README.md",
+        "src/VP-V/modules/input/source_analysis/picture/shared/MANIFEST.json",
+        "src/VP-V/modules/input/source_analysis/lane/shared/SourceStats.h"
       ],
       "components": {
         "files": {

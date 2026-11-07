@@ -20,6 +20,8 @@
 #include <cstdint>
 #include <vector>
 
+#include <VP-V/modules/input/source_analysis/identity/shared/SourceQuality.h>
+
 namespace SourceIdentity
 {
 	enum class Field { AxisH = 0, AxisV, Kernel, Codec, Quality, Count };
@@ -93,8 +95,8 @@ namespace SourceIdentity
 	struct VoteSettings
 	{
 		int kernelMinVotes = 3;                 // kernel confidence ramps up to this many fitted votes
-		std::vector<double> qualityTierEdges = { 0.25, 0.5, 0.75 }; // tier = number of edges <= quality
-		double bitrateQualityConfidence = 0.6;  // a bitrate reading is indirect evidence of the tier
+		std::vector<double> qualityTierEdges = VpUnit::SourceQuality::DefaultTierEdges(); // tier = number of edges <= quality (U12)
+		double bitrateQualityConfidence = VpUnit::SourceQuality::kClassicalConfidence;  // a bitrate reading is indirect evidence of the tier (U12)
 		double netAxisTrust = 1.0;              // ID net: axes / factor
 		double netKernelMinConfidence = 0.9;    // ID net kernel head: below this the net abstains
 		double netCodecTrust = 0.25;            // ID net codec head: confidence capped here
@@ -166,11 +168,7 @@ namespace SourceIdentity
 		v.evidenceTimeUs = r.timeUs;
 		if (!r.reading || !(r.bitrateQuality >= 0.0))
 			return v;
-		int tier = 0;
-		for (size_t i = 0; i < s.qualityTierEdges.size(); ++i)
-			if (r.bitrateQuality >= s.qualityTierEdges[i])
-				++tier;
-		v.h.qualityTier = tier;
+		v.h.qualityTier = VpUnit::SourceQuality::TierOf(r.bitrateQuality, s.qualityTierEdges);   // U12
 		SetField(v, Field::Quality, s.bitrateQualityConfidence);
 		return v;
 	}

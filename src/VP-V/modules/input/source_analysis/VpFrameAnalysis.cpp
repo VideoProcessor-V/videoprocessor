@@ -1,6 +1,7 @@
 #include <pch.h>
 #include "VpFrameAnalysis.h"
 #include "SourceFrameTap.h"
+#include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 
 #include <algorithm>
 #include <chrono>
@@ -26,15 +27,12 @@ namespace VpFrameAnalysis
 		uint16_t Percentile(const std::array<uint32_t, FrameAnalysis::kHistogramBins>& histogram, uint64_t samples,
 			double q)
 		{
-			// The smallest code whose cumulative count reaches q of the samples (at least one).
+			// The smallest code whose cumulative count reaches q of the samples (at least one): the shared law of
+			// U6 (VpUnit::SourceStats::FirstBinReaching).
 			const double target = (std::max)(1.0, q * static_cast<double>(samples));
-			uint64_t cumulative = 0;
-			for (int code = 0; code < FrameAnalysis::kHistogramBins; ++code)
-			{
-				cumulative += histogram[code];
-				if (static_cast<double>(cumulative) >= target)
-					return static_cast<uint16_t>(code);
-			}
+			const int code = VpUnit::SourceStats::FirstBinReaching<double>(histogram.data(), FrameAnalysis::kHistogramBins, target);
+			if (code >= 0)
+				return static_cast<uint16_t>(code);
 			return static_cast<uint16_t>(FrameAnalysis::kHistogramBins - 1);
 		}
 	}

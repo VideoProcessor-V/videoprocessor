@@ -75,16 +75,16 @@ REGISTRY = [
     {"id": "U6", "name": "histogram_apl",
      "owning_unit": ["src/VP-V/modules/input/source_analysis"],
      "signatures": _c(r"histogram", r"\bAPL\b", r"average[_ ]?picture[_ ]?level"),
-     "allow": _c(r"SourceStats::")},
+     "allow": _c(r"SourceStats::", r"shared/SourceStats\.h")},
     {"id": "U7", "name": "cut_fade_flash_judge",
      "owning_unit": ["src/VP-V/modules/input/source_analysis"],
      "signatures": _c(r"cut[_ ]?(fade|detect|judge)", r"FrameCutJudge",
                       r"fade[_ ]?(detect|judge|gain)", r"scene[_ ]?cut"),
-     "allow": _c(r"CutFadeJudge::")},
+     "allow": _c(r"CutFadeJudge::", r"shared/CutFadeJudge\.h")},
     {"id": "U8", "name": "active_picture_rect",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/picture"],
      "signatures": _c(r"\bPictureArea\b"),
-     "allow": _c(r"vpu_in_picture")},
+     "allow": _c(r"vpu_in_picture", r"vpu_picture_coverage", r"PictureRect::\w+", r"shared/PictureRect\.h")},
     {"id": "U9", "name": "light_level",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/light_level"],
      "signatures": [],
@@ -99,7 +99,7 @@ REGISTRY = [
     {"id": "U12", "name": "source_quality",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/identity"],
      "signatures": _c(r"snap(shot)?\.bitrateQuality", r"\.bitrateQuality.*(strength|allowance|tier)"),
-     "allow": _c(r"SourceQuality::")},
+     "allow": _c(r"SourceQuality::", r"shared/SourceQuality\.h")},
 ]
 
 DECLARATION_PATHS = _c(
