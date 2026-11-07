@@ -29,7 +29,7 @@
        Every project that compiles the schema headers gets the same rules, with no start-up registration. -->
   <ItemDefinitionGroup>
     <ClCompile>
-      <PreprocessorDefinitions>MAIN_SCHEMA_EXTENSION_HEADER=\&quot;VP-V/modules/control/config/VpvStartupSchema.h\&quot;;PROFILE_SCHEMA_EXTENSION_HEADER=\&quot;VP-V/modules/control/config/VpvSchemaKeys.h\&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>MAIN_SCHEMA_EXTENSION_HEADER=&quot;VP-V/modules/control/config/VpvStartupSchema.h&quot;;PROFILE_SCHEMA_EXTENSION_HEADER=&quot;VP-V/modules/control/config/VpvSchemaKeys.h&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
 

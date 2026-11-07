@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <set>
@@ -248,25 +249,29 @@ namespace BillIdenticalSchemaTest
 		// The same for the renderer profile reader (RendererProfileConfig::Read).
 		TEST_METHOD(MixedBillAndVpvProfileFaultsReportBillsFirstFault)
 		{
-			struct Case { const char* name; const char* mixed; const char* billOnly; };
+			// `expected` is Bill's text (RendererProfileConfig.h ReadTarget / the unknown-section check, a591ad3b).
+			struct Case { const char* name; const char* mixed; const char* billOnly; const char* expected; };
 			const Case cases[] = {
 				{ "VP key sorts before Bill key in one [vprenderer.scaling.*] section",
 					"[vprenderer.scaling.A]\nchroma_upscale_vp: zzz\nchroma_upscaler: zzz\n",
-					"[vprenderer.scaling.A]\nchroma_upscaler: zzz\n" },
+					"[vprenderer.scaling.A]\nchroma_upscaler: zzz\n",
+					"[vprenderer.scaling] key 'chroma_upscaler' is not a valid scaling setting" },
 				{ "VP group (input) before Bill group (scaling)",
 					"[vprenderer.input.A]\ndejudder_strength: zzz\n[vprenderer.scaling.B]\nupscaler: zzz\n",
-					"[vprenderer.scaling.B]\nupscaler: zzz\n" },
+					"[vprenderer.scaling.B]\nupscaler: zzz\n",
+					"[vprenderer.scaling] key 'upscaler' is not a valid scaling setting" },
 				{ "[vpv] section fault before Bill's unknown-section check",
 					"[vprenderer]\nquality: fast\n[vpv]\nzzz_unknown: 1\n[zzz_section]\na: 1\n",
-					"[vprenderer]\nquality: fast\n[zzz_section]\na: 1\n" },
+					"[vprenderer]\nquality: fast\n[zzz_section]\na: 1\n",
+					"VP-0079 configuration has unknown section [zzz_section]" },
 			};
 			Evaluator evaluator;
 			for (const Case& c : cases)
 			{
 				const std::string billOnly = evaluator.Profile(c.billOnly);
 				const std::string mixed = evaluator.Profile(c.mixed);
-				Assert::AreNotEqual(std::string("ok"), billOnly, W(std::string("Bill-only variant fails: ") + c.name).c_str());
-				Assert::AreEqual(billOnly, mixed, W(std::string("mixed faults: ") + c.name).c_str());
+				Assert::AreEqual(std::string(c.expected), billOnly, W(std::string("Bill-only variant: ") + c.name).c_str());
+				Assert::AreEqual(std::string(c.expected), mixed, W(std::string("mixed faults: ") + c.name).c_str());
 			}
 			// Only VP-V faults: still rejected, naming the key.
 			const std::string vpOnly = evaluator.Profile("[vprenderer.input.A]\ndejudder_strength: zzz\n");
@@ -275,6 +280,52 @@ namespace BillIdenticalSchemaTest
 			// Valid VP-V keys and sections are accepted.
 			Assert::AreEqual(std::string("ok"), evaluator.Profile(
 				"[vprenderer.scaling.A]\nchroma_upscale_vp: cfl\n[vprenderer.input.B]\ndejudder_strength: 0.5\n[vpv]\nhdr_inference: vp\n"));
+		}
+
+		// Startup runs Read and then MainConfigSchema::Validate; Config Save/Apply, the legacy editor and the dialog
+		// reload run Validate and then Read. Either way the first fault is the one Bill's build reports.
+		TEST_METHOD(CrossStageOrderIsBillsInBothDirections)
+		{
+			Evaluator evaluator;
+			// Startup (Read first): a VP-V profile fault does not beat a later host startup fault.
+			Assert::AreEqual(std::string("[logging] key 'enabled' must be true or false; got 'zzz'"),
+				evaluator.Profile("[vprenderer.input.A]\ndejudder_strength: zzz\n[logging]\nenabled: zzz\n"));
+			// Editor paths (Validate first): a VP-V startup-group fault does not beat a later host profile fault.
+			Assert::AreEqual(std::string("[vprenderer.scaling] key 'upscaler' is not a valid scaling setting"),
+				evaluator.Main("[ambient]\nzzz_unknown: 1\n[vprenderer.scaling.A]\nupscaler: zzz\n"));
+			// Only the VP-V fault: it is reported.
+			Assert::AreEqual(std::string("[ambient] unknown key 'zzz_unknown'"),
+				evaluator.Main("[ambient]\nzzz_unknown: 1\n[vprenderer.scaling.A]\nupscaler: bicubic\n"));
+		}
+
+		// Input Bill's build accepts stays accepted (the VP-V tightenings are reverted in the default path).
+		TEST_METHOD(BillValidProfileInputIsStillAccepted)
+		{
+			Evaluator evaluator;
+			Assert::AreEqual(std::string("ok"), evaluator.Profile("[vprenderer.scaling.A]\nshortcut: F004\nupscaler: bicubic\n"), L"F004");
+			Assert::AreEqual(std::string("ok"), evaluator.Profile("[vprenderer.scaling.A]\nwhen: ${hdr_metadata} false\nupscaler: bicubic\n"), L"bare Boolean then word");
+			Assert::AreEqual(std::string("ok"), evaluator.Profile("[vprenderer.scaling.A]\nwhen: ${ambient} == dark\nupscaler: bicubic\n"), L"VP-V when variable");
+		}
+
+		// R3 (latent): nothing registers a SettingsExtension in the product, so ConfigSchema.h's unknown-key
+		// hook (not gated by the host-only scope) answers NotMine for every key.
+		TEST_METHOD(NoProductCodeRegistersASettingsExtension)
+		{
+			const std::string root = RepoRoot() + "src";
+			int scanned = 0;
+			for (const auto& entry : std::filesystem::recursive_directory_iterator(root))
+			{
+				if (!entry.is_regular_file()) continue;
+				const std::string path = entry.path().string();
+				const std::string ext = entry.path().extension().string();
+				if ((ext != ".cpp" && ext != ".h") || path.find("\\tests\\") != std::string::npos ||
+					path.find("Tests.cpp") != std::string::npos || entry.path().filename() == "SettingsExtension.h")
+					continue;
+				++scanned;
+				Assert::IsTrue(NormaliseLf(ReadFile(path)).find("SettingsExtension::Register(") == std::string::npos,
+					W("SettingsExtension::Register in " + path).c_str());
+			}
+			Assert::IsTrue(scanned > 100, L"the source tree was scanned");
 		}
 
 		// A host-only scope accepts the VP-V keys unchecked and nothing else; it ends with the scope.

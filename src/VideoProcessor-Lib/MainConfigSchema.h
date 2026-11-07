@@ -448,10 +448,19 @@ namespace MainConfigSchema
 	{
 		if (ValidateHostChecks(config, error) && SchemaHooks::Validate(config, error))
 			return true;
-		const SchemaHooks::HostOnlyScope hostOnly;
-		std::string hostError;
-		if (!ValidateHostChecks(config, hostError))
-			error = hostError;
+		{
+			const SchemaHooks::HostOnlyScope hostOnly;
+			std::string hostError;
+			if (!ValidateHostChecks(config, hostError))
+			{
+				error = hostError;
+				return false;
+			}
+		}
+		// Only VP-V faults remain. Callers run Read after Validate: a host profile fault is reported first.
+		std::string profileError;
+		if (SchemaHooks::ProfileFault && SchemaHooks::ProfileFault(config, profileError))
+			error = profileError;
 		return false;
 	}
 	// VPV-HOOK-END

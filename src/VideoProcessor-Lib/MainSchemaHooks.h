@@ -32,6 +32,8 @@ namespace MainConfigSchema
 		inline void AppendRules(const char*, std::vector<ConfigSchema::KeyRule>&) {}
 		inline bool Validate(const ConfigFile&, std::string&) { return true; }
 		struct HostOnlyScope { HostOnlyScope() {} };
+		// Set by RendererProfileConfig.h (after Read): true with the host's first profile fault in `error`.
+		inline bool (*ProfileFault)(const ConfigFile&, std::string&) = nullptr;
 	}
 }
 #endif

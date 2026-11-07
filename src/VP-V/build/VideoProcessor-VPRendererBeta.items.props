@@ -67,7 +67,7 @@
   <!-- M2 P3 (H2): the host settings struct derives from RendererSettingsExtension; this header adds the VP-V members. -->
   <ItemDefinitionGroup>
     <ClCompile>
-      <PreprocessorDefinitions>RENDERER_SETTINGS_EXTENSION_HEADER=\&quot;VP-V/modules/control/config/VpvRendererExtension.h\&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>RENDERER_SETTINGS_EXTENSION_HEADER=&quot;VP-V/modules/control/config/VpvRendererExtension.h&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>

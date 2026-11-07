@@ -33,7 +33,10 @@ The VP-V members of the renderer settings live here, not in `LibplaceboVideoRend
 - Validation order is Bill's (owner decision 2026-11-07, `BillIdenticalSchemaTests`): `MainConfigSchema::Validate` runs
   Bill's checks, then the VP-V group (`SchemaHooks::Validate`); on any fault it re-runs Bill's checks with the VP-V keys
   accepted unchecked (`SchemaHooks::HostOnlyScope`) and reports Bill's first fault if there is one. `RendererProfileConfig::Read`
-  does the same (`ProfileSchemaHooks::HostOnlyScope`: VP-V profile keys, the `[vpv]` check). A file with only VP-V faults
+  does the same (`ProfileSchemaHooks::HostOnlyScope`: VP-V profile keys, the `[vpv]` check).
+  Across the two functions: startup runs `Read` then `Validate` (a VP-V profile fault also yields to a host startup fault); Config Save/Apply, the
+  legacy editor and the dialog reload run `Validate` then `Read` (`SchemaHooks::ProfileFault`, filled by `RendererProfileConfig.h`, lets a
+  VP-V startup-group fault yield to a host profile fault). A file with only VP-V faults
   reports the VP-V text (schema golden); a file with several faults reports the fault Bill's build reports for Bill's keys.
 
 ## Settings table (moved settings)
@@ -301,9 +304,10 @@ Still in host files after P3, each reported as a Bill-line edit or a data/model 
 - `debandGrain` delta term moved to `AppendDelta`; the host's "profile delta" text stays Bill's (`DescribeProfileSettingsDelta`
   is Bill's function) and the VP names follow as `; vp_fields=a,b` appended at its one call site
   (`RendererSettingsHooks::AppendDeltaText`); `BillIdenticalSchemaTests` compares Bill's function with the baseline text.
+  With only VP settings changed the text reads `none; vp_fields=x` (and `Renderer rebuild: none; vp_fields=x`): Bill's `none` is kept.
 - Data/model edits in `RendererProfileConfig.h` that are not validators: queue profile fields (`targetLatencyMs`,
   `lowLatencyPath`), viewport `blank_*`, `IsContentClassifierInput/IsContentGated`, `DefaultSectionNotAppliedWarning`,
-  the `persist_profile_selection` default (opt-in), the `F<n>` key grammar, extra `when:` variables (`hdr_inferred`,
+  the `persist_profile_selection` default (opt-in), extra `when:` variables (`hdr_inferred`,
   `ambient`, `content`, `source`), the `Read` / `ReadUnchecked` split. Divergence register entries; each is a bug fix or
   a VP data field and stays until the owner decides.
 - Other host-file lines P3 leaves: two VP includes in `LibplaceboVideoRenderer.cpp` (`VpvSettingsDump.h` mid-file,

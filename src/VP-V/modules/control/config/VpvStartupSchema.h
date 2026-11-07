@@ -19,6 +19,7 @@
 //                            QueueRules, ...) hold the host's keys only, in the host's order,
 //   Validate(config, error)  the VP-V sections and the [shortcuts] VP-V keys, called once after ALL of the
 //                            host's checks,
+//   ProfileFault             a slot RendererProfileConfig.h fills: the host's first profile fault of a file,
 //   HostOnlyScope            while one exists on the thread the VP-V keys are accepted unchecked
 //                            (AppendRules strips their validators), so a pass under it can report only the host's
 //                            faults.
@@ -79,6 +80,11 @@ namespace MainConfigSchema
 			static thread_local bool flag = false;
 			return flag;
 		}
+
+		// Set by RendererProfileConfig.h once Read is defined: true with the host's first profile fault in `error`
+		// (host-only pass). Lets Validate report a host profile fault before a VP-V startup-group fault on the
+		// paths that run Validate and then Read (Config Save/Apply, legacy editor, dialog reload), as Bill's build does.
+		inline bool (*ProfileFault)(const ConfigFile&, std::string&) = nullptr;
 
 		struct HostOnlyScope
 		{

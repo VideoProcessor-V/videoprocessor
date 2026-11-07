@@ -546,16 +546,8 @@ namespace RendererProfileConfig
 		else if (normalized == "enter" || normalized == "return") canonicalKey = "Enter";
 		else if (normalized.size() >= 2 && normalized[0] == 'f')
 		{
-			// Bug hunt 3 (SH10): exactly the player's grammar - F, then one or
-			// two digits, 1-24. ParseInteger also took "F004", "F 4" and "F+4"
-			// forms the player rejected (silently keeping its default).
-			const std::string digits = normalized.substr(1);
-			if (digits.empty() || digits.size() > 2 ||
-				!std::all_of(digits.begin(), digits.end(),
-					[](unsigned char c) { return std::isdigit(c) != 0; }))
-				return false;
-			const int number = std::stoi(digits);
-			if (number < 1 || number > 24) return false;
+			int number = 0;
+			if (!ParseInteger(normalized.substr(1), 1, 24, number)) return false;
 			canonicalKey = "F" + std::to_string(number);
 		}
 		else if (key.size() == 1 &&
@@ -2005,12 +1997,33 @@ namespace RendererProfileConfig
 			std::string hostError;
 			if (!ReadUnchecked(config, hostModel, hostError))
 				error = hostError;
+			else
+			{
+				// Startup runs Read before MainConfigSchema::Validate: a VP-V profile fault must not beat a
+				// host startup fault ([queue], [logging], ...) that Bill's build reports.
+				const MainConfigSchema::SchemaHooks::HostOnlyScope startupHostOnly;
+				std::string startupError;
+				if (!MainConfigSchema::ValidateHostChecks(config, startupError))
+					error = startupError;
+			}
 			// VPV-HOOK-END
 			return false;
 		}
 		AppendContentGateWarnings(model);
 		return true;
 	}
+
+	// VPV-HOOK
+	// The host's first profile fault (VP-V keys accepted unchecked): MainConfigSchema::Validate asks for it
+	// when only a VP-V startup-group fault is left, on the paths that run Validate and then Read.
+	inline bool HostProfileFault(const ConfigFile& config, std::string& error)
+	{
+		const ProfileSchemaHooks::HostOnlyScope hostOnly;
+		Model hostModel;
+		return !ReadUnchecked(config, hostModel, error);
+	}
+	inline const bool hostProfileFaultRegistered = (MainConfigSchema::SchemaHooks::ProfileFault = &HostProfileFault, true);
+	// VPV-HOOK-END
 
 	inline bool ReadUnchecked(const ConfigFile& config, Model& model, std::string& error)
 	{
