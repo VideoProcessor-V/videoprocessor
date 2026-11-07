@@ -642,8 +642,9 @@ namespace VideoProcessorTest
 				Assert::IsTrue(LightLevelBeginGate(5, [st](uint64_t) { return LightPrevStateOf(st); }, nullptr), L"no read state holds P12(N) back before G6");
 		}
 
-		// (d3) A2: the Pending -> None mapping is VISIBLE: each Pending read is counted and the skeleton shows
-		// skeleton_gpu_light_pending (id asserted) from the first one; no Pending read, no entry. Other states are not counted.
+		// (d3) A2: the Pending -> None mapping is counted, and the catalog entry built from the count carries the id
+		// skeleton_gpu_light_pending from the first Pending read (none before). This asserts the counter overload and the catalog function only;
+		// the module-level status line needs a dispatcher rig with a pl_gpu, which the skeleton fixture does not have yet. Other states are not counted.
 		TEST_METHOD(PendingReadAsNoneIsCountedAndShown)
 		{
 			using VpLaneProducts::LightPrevState;
