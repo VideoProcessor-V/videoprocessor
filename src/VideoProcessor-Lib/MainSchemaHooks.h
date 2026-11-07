@@ -33,7 +33,7 @@ namespace MainConfigSchema
 		inline bool Validate(const ConfigFile&, std::string&) { return true; }
 		struct HostOnlyScope { HostOnlyScope() {} };
 		// Set by RendererProfileConfig.h (after Read): true with the host's first profile fault in `error`.
-		inline bool (*ProfileFault)(const ConfigFile&, std::string&) = nullptr;
+		inline bool (*&ProfileFault())(const ConfigFile&, std::string&) { static bool (*slot)(const ConfigFile&, std::string&) = nullptr; return slot; }
 	}
 }
 #endif

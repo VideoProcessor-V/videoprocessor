@@ -84,7 +84,12 @@ namespace MainConfigSchema
 		// Set by RendererProfileConfig.h once Read is defined: true with the host's first profile fault in `error`
 		// (host-only pass). Lets Validate report a host profile fault before a VP-V startup-group fault on the
 		// paths that run Validate and then Read (Config Save/Apply, legacy editor, dialog reload), as Bill's build does.
-		inline bool (*ProfileFault)(const ConfigFile&, std::string&) = nullptr;
+		// A function-local static, not an inline variable (the Lib project compiles as C++14).
+		inline bool (*&ProfileFault())(const ConfigFile&, std::string&)
+		{
+			static bool (*slot)(const ConfigFile&, std::string&) = nullptr;
+			return slot;
+		}
 
 		struct HostOnlyScope
 		{

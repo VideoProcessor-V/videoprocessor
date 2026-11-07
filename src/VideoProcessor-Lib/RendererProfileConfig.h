@@ -2022,7 +2022,7 @@ namespace RendererProfileConfig
 		Model hostModel;
 		return !ReadUnchecked(config, hostModel, error);
 	}
-	inline const bool hostProfileFaultRegistered = (MainConfigSchema::SchemaHooks::ProfileFault = &HostProfileFault, true);
+	static const bool hostProfileFaultRegistered = (MainConfigSchema::SchemaHooks::ProfileFault() = &HostProfileFault, true);
 	// VPV-HOOK-END
 
 	inline bool ReadUnchecked(const ConfigFile& config, Model& model, std::string& error)

@@ -459,7 +459,7 @@ namespace MainConfigSchema
 		}
 		// Only VP-V faults remain. Callers run Read after Validate: a host profile fault is reported first.
 		std::string profileError;
-		if (SchemaHooks::ProfileFault && SchemaHooks::ProfileFault(config, profileError))
+		if (SchemaHooks::ProfileFault() && SchemaHooks::ProfileFault()(config, profileError))
 			error = profileError;
 		return false;
 	}
