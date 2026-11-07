@@ -35511,7 +35511,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		size_t intentWantedLookahead = 0;
 		// R33 (output.calibration_lut): while a patch is active it is presented every refresh instead
 		// of video (Present paces the loop at the display's rate); the stop flag is checked first.
-		if (m_impl)
+		if (m_impl && CalibrationLutHost::IsTakingOver(m_calibrationPatternActive))
 		{
 			const auto takeOver = CalibrationLutHost::TakeOverPresentation(m_calibrationPatternActive,
 				{ m_queueMutex, m_stopRequested, m_queueChanged, m_impl->renderMutex,
