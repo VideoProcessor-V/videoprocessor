@@ -219,6 +219,8 @@ namespace VpLaneProducts
 		m_resetUnexpected = full && !usePrev && !m_history.empty();
 		m_lastFull = full;
 		m_lastUsedPrev = usePrev;
+		m_lastFrameJ = frameJ;
+		m_lastFrameV = frameV;
 		if (!full)
 			m_frameWhy = why + (aplCode >= 0.0 ? "; one level for the whole frame from the source APL, confidence " +
 				std::to_string(p.frameLevelConf) : std::string("; no source APL either: code only (zeros, confidence 0)"));

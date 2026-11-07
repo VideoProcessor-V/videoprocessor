@@ -86,6 +86,9 @@ namespace VpLaneProducts
 		const std::string& LutFingerprint() const { return m_fingerprint; }
 		// The last Step: the full per-block mode (false = frame level / code only), whether the previous frame was used.
 		bool LastFull() const { return m_lastFull; }
+		// The frame-level (J, V) of the last Step (from the source APL; both 0 when none was read).
+		float LastFrameJ() const { return m_lastFrameJ; }
+		float LastFrameV() const { return m_lastFrameV; }
 		bool LastUsedPrev() const { return m_lastUsedPrev; }
 		bool DisplayFactsAreDefaults() const { return m_defaultFacts; }
 
@@ -105,6 +108,7 @@ namespace VpLaneProducts
 		pl_tex m_lutTex = nullptr;
 		LightLevel::Settings m_settings = LightLevel::Read([](const std::string&, std::string&) { return false; });
 		LightLevel::Context m_context;
+		float m_lastFrameJ = 0.0f, m_lastFrameV = 0.0f;
 		std::vector<float> m_texels;
 		std::string m_fingerprint;
 		std::string m_header, m_body;

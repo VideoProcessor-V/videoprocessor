@@ -556,6 +556,15 @@ namespace VideoProcessorTest
 			{
 				const std::string reason = Find(r.kernel->Fallbacks(), "light_level_frame").reason;
 				Logger::WriteMessage(("P12_KERNEL frame-level reason: " + reason + "\n").c_str());
+				char fj[160];
+				snprintf(fj, sizeof(fj), "P12_KERNEL host frame J %.6g V %.6g (mirror J %.6g)\n", double(r.kernel->LastFrameJ()),
+					double(r.kernel->LastFrameV()), double(want[0]));
+				Logger::WriteMessage(fj);
+				r.RunKernel(seq, true, 0, -1, false, true);   // diagnostic: the live form before the comparison
+				const std::vector<float> liveDiag = r.Out(true, 0);
+				snprintf(fj, sizeof(fj), "P12_KERNEL live[0..3] %.6g %.6g %.6g %.6g lane[0..3] %.6g %.6g %.6g %.6g\n", double(liveDiag[0]),
+					double(liveDiag[1]), double(liveDiag[2]), double(liveDiag[3]), double(got[0]), double(got[1]), double(got[2]), double(got[3]));
+				Logger::WriteMessage(fj);
 			}
 			Assert::IsTrue(Compare(got, want, "frame_level") == 0, L"the frame level differs from the mirror");
 			FallbackCatalog::Decision d = Find(r.kernel->Fallbacks(), "light_level_frame");
