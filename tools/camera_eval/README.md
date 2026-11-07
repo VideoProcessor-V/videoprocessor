@@ -73,3 +73,10 @@ whole block repeats the edge block). The CSV is unchanged. `DIR` must exist. Whe
   --dt-spatial F --dt-agree F]`; `run_eval.py --all-args "--dyn-texture"` turns it on for both configurations. The CSV gains `dynShare`,
   `dynTemporal`, `dynSpatial`, `dynField` (the raw-vector temporal incoherence) and `verdictFlags` (bit 1 = Ambiguous because of a dynamic
   texture). The summary counts the real pairs it turned Ambiguous.
+
+## Static-camera hypothesis (R1-STATIC)
+`camera_eval fit --static-camera [--sc-share F --sc-margin F --sc-ring F]` turns `Config::staticCamera` on (`StaticHypothesis.h/.cpp`); the CSV
+gains `staticRing` and `staticFit` (the identity model's and the fit's explained share of the trusted border-ring blocks).
+`run_eval.py --vs static` runs the default configuration against the hypothesis-on configuration (extra flags for the second
+configuration: `--tl-args "--sc-margin 0.3 --sc-share 0.4"`); truth stays pinned to the default fits. See `global_model/README.md` for the
+tuning table. Fixed on this base: two string literals in the `--dump-flo` skipped-list code had a raw newline inside the literal.

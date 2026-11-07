@@ -113,8 +113,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--exe', required=True)
     ap.add_argument('--out', required=True)
-    ap.add_argument('--vs', choices=['two-layer', 'phase1'], default='two-layer',
-                    help='second configuration: two-layer (Config::twoLayer on; default) or phase1 (--phase1)')
+    ap.add_argument('--vs', choices=['two-layer', 'phase1', 'static'], default='two-layer',
+                    help='second configuration: two-layer (Config::twoLayer on; default), phase1 (--phase1) or static (Config::staticCamera on)')
     ap.add_argument('--synth-root')
     ap.add_argument('--real-root', default='D:/codex/td-real-vectors-out')
     ap.add_argument('--synth-pairs', type=int, default=40)
@@ -125,7 +125,12 @@ def main():
     ap.add_argument('--match-count', type=int, default=40)
     ap.add_argument('--match-clips', default='crowd,tos,sol,boat')
     a = ap.parse_args()
-    B, flagsB, L2 = ('phase1', ['--phase1'], 'p1') if a.vs == 'phase1' else ('two', ['--two-layer'] + a.tl_args.split(), 'two')
+    if a.vs == 'phase1':
+        B, flagsB, L2 = 'phase1', ['--phase1'], 'p1'
+    elif a.vs == 'static':
+        B, flagsB, L2 = 'static', ['--static-camera'] + a.tl_args.split(), 'static'
+    else:
+        B, flagsB, L2 = 'two', ['--two-layer'] + a.tl_args.split(), 'two'
     base = a.all_args.split()
     CONFIGS = [('new', list(base)), (B, flagsB + base)]
     exe = os.path.abspath(a.exe)
@@ -164,6 +169,7 @@ def main():
         real[tag] = ({(r['seq'], r['src']): r for r in rows}, truths)
 
     title = ('# Camera model evaluation: new defaults vs phase 1' if B == 'phase1'
+             else '# Camera model evaluation: staticCamera off (new) vs staticCamera on (static)' if B == 'static'
              else '# Camera model evaluation: twoLayer off (new) vs twoLayer on (two)')
     L = [title, '',
          'Synthetic: %d pairs per scenario at 1920x1080, %d fps. WRONG = a usable fit (valid, confidence >= 0.5) on a scene with no dominant camera '

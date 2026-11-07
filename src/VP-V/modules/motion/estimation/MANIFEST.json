@@ -27,6 +27,8 @@
     "src/VP-V/modules/motion/estimation/global_model/GlobalModelTemporal.cpp",
     "src/VP-V/modules/motion/estimation/global_model/DynamicTexture.h",
     "src/VP-V/modules/motion/estimation/global_model/DynamicTexture.cpp",
+    "src/VP-V/modules/motion/estimation/global_model/StaticHypothesis.h",
+    "src/VP-V/modules/motion/estimation/global_model/StaticHypothesis.cpp",
     "src/VP-V/modules/motion/estimation/global_model/GlobalModelObjects.h",
     "src/VP-V/modules/motion/estimation/global_model/GlobalModelObjects.cpp",
     "src/VP-V/modules/motion/estimation/global_model/PixelResidualReference.h",
