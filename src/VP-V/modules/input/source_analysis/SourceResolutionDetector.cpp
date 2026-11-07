@@ -1677,6 +1677,14 @@ namespace SourceResolution
 		if (window.empty()) evidence = 0.0;
 		if (!frame.informative()) return;
 		const double ratio = frame.ratio >= settings.nativeAbove ? 1.0 : frame.ratio;
+		// N2 (SID train r2): the consensus holds an upscaled source with confident chain evidence. A native-looking frame is then no
+		// evidence that clears the window or the declaration: it is left out (counted), exactly like a starved frame, and nothing about
+		// the shot / cut bookkeeping above changes. Never set in Off / Shadow, so the original behaviour is untouched.
+		if (ratio >= 1.0 && chainContradictsNative)
+		{
+			++chainHeld;
+			return;
+		}
 		// Variable bitrate (owner 2026-10-16): native needs detail above the rate in
 		// question - the declared one, else the lower one the window is gathering.
 		// A mixed screen (ReadFrame's guard found native UI tiles) is native detail by itself:

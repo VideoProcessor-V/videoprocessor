@@ -296,6 +296,7 @@
     <ClCompile Include="..\VP-V\tests\suite\SourceResolutionDetectorTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\MixedScreenSourceResolutionTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SourceResolutionLatchTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\SourceResolutionChainClearTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\ExtendedRangeCarryTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\ChangeKeyTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\EfficiencyPolicyTests.cpp" />
