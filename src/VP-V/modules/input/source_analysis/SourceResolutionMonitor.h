@@ -187,8 +187,20 @@ namespace SourceResolutionMonitor
 		// worker feeds the consensus with every analysed frame and publishes the held-state record; AutoFactor(s) then ask the
 		// record which source it is (the latched axes) and engage only on a latched field, falling back to the classical
 		// value - visibly - while the record is absent or stale.
-		void SetSourceIdConsensus(bool on);
-		bool SourceIdConsensus() const { return sourceIdOn.load(std::memory_order_acquire); }
+		// SID-B: source_id_consensus is Off / Shadow / On.
+		//   Off    nothing runs; every value is byte-identical to before.
+		//   Shadow the pipeline and consensus run, P14 and the CSV sid columns are published, one "source_id would-be: ..." log
+		//          line is written per consensus change - but AutoFactor(s), QualityView and the re-base port use the CLASSICAL
+		//          decision, byte-identical to Off. Status line "Source identity: shadow (classical decides)".
+		//   On     as above, and the consensus decides (the gate, the quality view, the re-base requests).
+		enum class SourceIdMode { Off = 0, Shadow = 1, On = 2 };
+		void SetSourceIdMode(SourceIdMode mode);
+		SourceIdMode GetSourceIdMode() const { return static_cast<SourceIdMode>(sourceIdMode.load(std::memory_order_acquire)); }
+		void SetSourceIdConsensus(bool on) { SetSourceIdMode(on ? SourceIdMode::On : SourceIdMode::Off); }
+		// True only in On: the consensus decides. (Shadow computes it but does not decide.)
+		bool SourceIdConsensus() const { return GetSourceIdMode() == SourceIdMode::On; }
+		// True in Shadow and On: the pipeline runs and publishes.
+		bool SourceIdRunning() const { return GetSourceIdMode() != SourceIdMode::Off; }
 		void SetSourceIdNotice(bool on) { sourceIdNotice.store(on, std::memory_order_release); sourceIdNoticeDirty.store(true, std::memory_order_release); }
 		// Any thread: the newest record (seq <= `sequence`; 0 = newest). False: none published yet.
 		bool SourceIdRecord(SourceIdentity::Record& out, uint64_t sequence = 0) const { return sourceId.Held().ReadLatest(sequence, out); }
@@ -203,7 +215,8 @@ namespace SourceResolutionMonitor
 		// Render thread: apply the consensus's re-base requests to the Indicator port, each generation exactly once.
 		int ApplySourceIdRebase(SourceIdentity::IndicatorPort& port);
 		// Render thread: true once per firing of the one-time "stream quality dropped" notice (`seen`: the caller's serial).
-		bool TakeSourceIdNotice(uint64_t& seen, std::string& text) const { return sourceId.TakeNotice(seen, text); }
+		// Only in On: a shadow ABR notice never reaches the user.
+		bool TakeSourceIdNotice(uint64_t& seen, std::string& text) const { return SourceIdConsensus() && sourceId.TakeNotice(seen, text); }
 		unsigned long long SourceIdEvents() const { return sourceIdEvents.load(std::memory_order_relaxed); }
 		// Bug hunt 34 item 1: true while the tiles are read back without waiting (D3D11 staging);
 		// false before the first frame, on another API, or when the staging could not be made on
@@ -463,7 +476,7 @@ namespace SourceResolutionMonitor
 		SourceResolution::Tracker tracker;
 		// Source identity (worker side; Held() is the only part other threads read).
 		SourceIdentity::Pipeline sourceId;
-		std::atomic<bool> sourceIdOn{ false };
+		std::atomic<int> sourceIdMode{ 0 };   // SourceIdMode
 		std::atomic<bool> sourceIdNotice{ true };
 		std::atomic<bool> sourceIdNoticeDirty{ false };
 		std::atomic<bool> sourceIdResetPending{ false };

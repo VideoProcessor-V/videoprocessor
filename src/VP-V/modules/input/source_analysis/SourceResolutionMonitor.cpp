@@ -451,9 +451,10 @@ if (tile < int(tiles) && g.y < ts) {
 
 
 	// ---- source identity (doc 61, P14) -------------------------------------------------------------------------------
-	void Monitor::SetSourceIdConsensus(bool on)
+	void Monitor::SetSourceIdMode(SourceIdMode mode)
 	{
-		if (sourceIdOn.exchange(on, std::memory_order_acq_rel) != on && on)
+		const int was = sourceIdMode.exchange(static_cast<int>(mode), std::memory_order_acq_rel);
+		if (was == static_cast<int>(SourceIdMode::Off) && mode != SourceIdMode::Off)
 		{
 			sourceId.Held().Reset();   // records from before an off period must not read as fresh (HeldState is mutex-guarded)
 			sourceIdResetPending.store(true, std::memory_order_release);
@@ -485,6 +486,8 @@ if (tile < int(tiles) && g.y < ts) {
 
 	std::string Monitor::SourceIdStatusLine(double seconds) const
 	{
+		if (GetSourceIdMode() == SourceIdMode::Shadow)
+			return "Source identity: shadow (classical decides)";
 		const SourceIdentity::QualityView v = QualityView(seconds);
 		SourceIdentity::Record rec;
 		const bool have = sourceId.Held().ReadLatest(0, rec);
@@ -966,10 +969,12 @@ if (tile < int(tiles) && g.y < ts) {
 
 		// Source identity (doc 61 SID-2): the relative-noise measurement of the frame's informative tiles, taken BEFORE `mutex`
 		// is held (the render thread's Read() never waits for it). Off (the default): nothing is measured.
-		const bool idOn = sourceIdOn.load(std::memory_order_acquire);
+		const SourceIdMode idMode = GetSourceIdMode();
+		const bool idOn = idMode != SourceIdMode::Off;   // running (Shadow or On)
 		if (sourceIdResetPending.exchange(false, std::memory_order_acq_rel))
 			sourceId.Discontinuity(snapshot.frames, streamKey.load(std::memory_order_acquire));   // switched on: a clean start
-		sourceId.SetConsensusOn(idOn);
+		sourceId.SetConsensusOn(idMode == SourceIdMode::On);
+		sourceId.SetShadow(idMode == SourceIdMode::Shadow);
 		std::vector<SourceIdentity::FrameQuality::TileNoise> idNoise;
 		if (idOn)
 		{
@@ -1235,6 +1240,10 @@ if (tile < int(tiles) && g.y < ts) {
 				sourceIdEvents.fetch_add(sourceId.Events() - eventsBefore, std::memory_order_relaxed);
 			snapshot.frameQuality = sourceId.LastFrameQuality();
 			snapshot.frameNoise = sourceId.LastNoise();
+			// SHADOW: what the consensus would have changed, one line per field; the classical decision stands.
+			if (idMode == SourceIdMode::Shadow)
+				for (const std::string& line : SourceIdentity::WouldBeLines(sourceId.LastResult()))
+					DebugLog::Log("%s", line.c_str());
 		}
 		char row[256];
 		snprintf(row, sizeof(row), "reading,%.4f,%.3f,%.3f,%.4f,%.4f,%.2f,%.2f,%.1f,%llu,%d/%d,%.4f,%.1f ms",

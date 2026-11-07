@@ -108,8 +108,21 @@ With `source_id_consensus` on and a fresh record, `AutoFactor` / `AutoFactors` e
 
 ## Config keys (module side)
 
-- `source_id_consensus` = off | on (default **off**): `Monitor::SetSourceIdConsensus`. The settings key plumbing (P3 settings mixin, validators, master-page row) is the SID-5 step and waits for P3 / the master page; until then the Monitor setters are the only entry.
+- `source_id_consensus` = off | shadow | on (default **off**; shadow after phase A, doc 78 D16): `Monitor::SetSourceIdMode` (`SetSourceIdConsensus(bool)` = on / off). **Shadow** runs the pipeline and the consensus, publishes P14 (record flag `kFlagShadow`, bit 4; `kFlagConsensusOn` stays clear) and the CSV `sid_*` columns, and logs one "source_id would-be: <field> <from> -> <to> (<reason>, support <s>)" line per consensus change (`WouldBeLines`), but `AutoFactor(s)`, `QualityView`, the re-base port and the ABR notice use the classical decision / stay silent, byte-identical to off. Status line "Source identity: shadow (classical decides)". The settings key plumbing (P3 settings mixin, validators, master-page row) is the SID-5 step and waits for P3 / the master page; until then the Monitor setters are the only entry.
 - `source_id_abr_notice` = on | off: `Monitor::SetSourceIdNotice`.
+
+## Settings
+
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `source_id_consensus` | input group (plumbing pending, SID-5: Monitor setter only) | enum | off, shadow, on | off (shadow after phase A, doc 78 D16) | not in Config yet (SID-5, P3 settings mixin) | forced off | "Source identity: off" / "Source identity: shadow (classical decides)" / "Source identity: classical only (<reason>)" / "Source identity: consensus (tier N, level L)"; FallbackCatalog `product.source_quality` | same on all |
+| `source_id_abr_notice` | input group (plumbing pending, SID-5) | bool | on, off | on | not in Config yet (SID-5) | forced off | one-time notice `abr_quality_drop` (only while `source_id_consensus` is on; never in shadow) | same on all |
+
+## Status and fallbacks
+
+- Ctrl+I / Config line `Source identity: ...` (off, shadow, classical only (<reason>), consensus).
+- Shadow: log line "source_id would-be: <field> <from> -> <to> (<reason>, support <s>)" per consensus change.
+- Consumers fall back to the classical value, visibly (`product.source_quality`), whenever the record is absent, stale, unlatched or another version; in shadow they always use the classical value.
 
 ## Still to do (call sites outside this module)
 

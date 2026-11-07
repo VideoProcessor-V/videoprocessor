@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -116,6 +117,40 @@ namespace SourceIdentity
 			return o.str();
 		}
 	};
+
+	// SHADOW mode (Monitor: source_id_consensus = shadow): one log line per field the consensus changed.
+	inline const char* FieldLogName(Field f)
+	{
+		switch (f)
+		{
+		case Field::AxisH: return "ratioH";
+		case Field::AxisV: return "ratioV";
+		case Field::Kernel: return "kernel";
+		case Field::Codec: return "codec";
+		case Field::Quality: return "tier";
+		default: return "?";
+		}
+	}
+
+	inline std::vector<std::string> WouldBeLines(const Result& r)
+	{
+		std::vector<std::string> lines;
+		for (int i = 0; i < kFieldCount; ++i)
+		{
+			const Field f = static_cast<Field>(i);
+			if (!r.Changed(f))
+				continue;
+			char b[200];
+			if (IsAxis(f))
+				std::snprintf(b, sizeof(b), "source_id would-be: %s %.3f -> %.3f (%s, support %.2f)", FieldLogName(f),
+					FieldValue(r.before, f), FieldValue(r.value, f), r.field[i].reason.c_str(), r.field[i].support);
+			else
+				std::snprintf(b, sizeof(b), "source_id would-be: %s %d -> %d (%s, support %.2f)", FieldLogName(f),
+					static_cast<int>(FieldValue(r.before, f)), static_cast<int>(FieldValue(r.value, f)), r.field[i].reason.c_str(), r.field[i].support);
+			lines.push_back(b);
+		}
+		return lines;
+	}
 
 	struct Stats
 	{
