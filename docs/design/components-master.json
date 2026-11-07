@@ -359,7 +359,22 @@
         "src/VP-V/modules/motion/estimation/tests/GuidanceGovernorTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/GuidanceNullIdentityWarpTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/MotionBenchWriterTests.cpp",
-        "src/VP-V/modules/motion/estimation/tests/CameraLinkTestSupport.h"
+        "src/VP-V/modules/motion/estimation/tests/CameraLinkTestSupport.h",
+        "src/VP-V/modules/motion/estimation/refine/FieldRefineRef.h",
+        "src/VP-V/modules/motion/estimation/refine/FieldRefineGlsl.h",
+        "src/VP-V/modules/motion/estimation/refine/FieldRefineProducer.h",
+        "src/VP-V/modules/motion/estimation/refine/README.md",
+        "src/VP-V/modules/motion/estimation/longpair/LongPairTypes.h",
+        "src/VP-V/modules/motion/estimation/longpair/SeededSearch.h",
+        "src/VP-V/modules/motion/estimation/longpair/NvOpticalFlowHinted.h",
+        "src/VP-V/modules/motion/estimation/longpair/NvOpticalFlowHinted.cpp",
+        "src/VP-V/modules/motion/estimation/longpair/LongPairService.h",
+        "src/VP-V/modules/motion/estimation/longpair/LongPairService.cpp",
+        "src/VP-V/modules/motion/estimation/longpair/README.md",
+        "src/VP-V/modules/motion/estimation/tests/FieldRefineTests.cpp",
+        "src/VP-V/modules/motion/estimation/tests/FieldRefineWarpTests.cpp",
+        "src/VP-V/modules/motion/estimation/tests/LongPairTests.cpp",
+        "src/VP-V/modules/motion/estimation/tests/LongPairBenchDump.cpp"
       ],
       "components": {
         "files": {
