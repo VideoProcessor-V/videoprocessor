@@ -1261,8 +1261,9 @@ namespace VideoProcessorTest
 			const double t0 = rig.clock.Now();
 			rig.session->Start();
 			rig.StepOutOfOpening();
-			Assert::IsTrue(rig.session->Status().step == SessionStep::Placement,
-				std::wstring(rig.session->Status().message.begin(), rig.session->Status().message.end()).c_str());
+			const SessionStatus s = rig.session->Status();
+			const std::wstring w(s.message.begin(), s.message.end());
+			Assert::IsTrue(s.step == SessionStep::Placement, w.c_str());
 			Assert::AreEqual(std::string("waiting for VP's renderer"), midWait);   // visible while waiting
 			Assert::IsTrue(rig.screen->calls >= 11);   // 10 unavailable answers, then the available one
 			Assert::IsTrue(rig.clock.Now() - t0 >= 0.89 && rig.clock.Now() - t0 < 5.0);
