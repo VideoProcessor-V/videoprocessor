@@ -413,6 +413,12 @@
    "blocking": false,
    "baseline_duplicates": 8,
    "known_false_positive": []
+  },
+  "U21": {
+   "name": "source_geometry",
+   "blocking": false,
+   "baseline_duplicates": 0,
+   "known_false_positive": []
   }
  }
 }

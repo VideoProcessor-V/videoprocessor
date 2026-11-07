@@ -111,6 +111,11 @@ REGISTRY = [
      "owning_unit": ["src/VP-V/modules/scaling/chroma_upscale/basic"],
      "signatures": _c(r"polyphase", r"\blanczos\w*\s*\(", r"chroma[_ ]?siting"),
      "allow": _c(r"BasicChroma::\w+")},
+    # SID: U21 SourceGeometryView, the one read API of P14g source_geometry (U13-U19 are doc 72's; U20 is the basic chroma upsample).
+    {"id": "U21", "name": "source_geometry",
+     "owning_unit": ["src/VP-V/modules/input/source_analysis/identity"],
+     "signatures": _c(r"\.(applied|measured)\s*\[[^\]]*\]\s*\.(n|N|ratio|kernelIndex)\b"),
+     "allow": _c(r"Geometry::(Confident|ConfidentOf|Provisional)\b", r"SourceGeometryView")},
 ]
 
 DECLARATION_PATHS = _c(
