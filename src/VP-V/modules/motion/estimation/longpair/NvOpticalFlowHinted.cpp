@@ -5,6 +5,7 @@
 
 #include "../../../../../../3rdparty/nvidia-optical-flow/nvOpticalFlowD3D11.h"
 
+#include <cstring>
 #include <memory>
 
 namespace NvOpticalFlow
@@ -155,6 +156,28 @@ namespace NvOpticalFlow
 			error = std::string("optical flow (hinted) failed: ") + text;
 			return false;
 		}
+		return true;
+	}
+
+	bool ReadStagingRows(ID3D11DeviceContext* context, ID3D11Texture2D* staging, int rows, size_t rowBytes, uint8_t* dst, HRESULT& hr)
+	{
+		hr = E_POINTER;
+		if (!context || !staging || !dst || rows <= 0 || rowBytes == 0)
+			return false;
+		D3D11_MAPPED_SUBRESOURCE map{};
+		hr = context->Map(staging, 0, D3D11_MAP_READ, 0, &map);
+		if (FAILED(hr) || !map.pData)
+		{
+			if (SUCCEEDED(hr))
+			{
+				context->Unmap(staging, 0);
+				hr = E_FAIL;
+			}
+			return false;
+		}
+		for (int y = 0; y < rows; ++y)
+			std::memcpy(dst + static_cast<size_t>(y) * rowBytes, static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch, rowBytes);
+		context->Unmap(staging, 0);
 		return true;
 	}
 }

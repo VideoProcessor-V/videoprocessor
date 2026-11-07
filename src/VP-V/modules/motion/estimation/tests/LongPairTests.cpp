@@ -9,10 +9,21 @@
 // session OFF (no GPU touched) and the visibility of the fallback. The hinted NVOF session itself is GPU-only
 // (LongPairBenchDump / hardware).
 #include <VP-V/modules/motion/estimation/longpair/LongPairService.h>
+#include <VP-V/modules/motion/estimation/longpair/NvOpticalFlowHinted.h>
 
+#include <atlbase.h>
+#include <d3d11.h>
+#include <dxgi1_4.h>
+
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
+
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -59,6 +70,56 @@ namespace VideoProcessorTest
 			c.useNvof = false;
 			return c;
 		}
+	}
+
+	namespace
+	{
+		CComPtr<IDXGIAdapter> WarpAdapter()
+		{
+			CComPtr<IDXGIFactory4> factory;
+			CComPtr<IDXGIAdapter> adapter;
+			if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
+				factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter));
+			return adapter;
+		}
+
+		bool WaitStored(Service& svc, uint64_t n)
+		{
+			for (int i = 0; i < 400; ++i)
+			{
+				if (svc.GetStats().stored >= n)
+					return true;
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			}
+			return false;
+		}
+
+		// A backend that stays inside Run until released (or 5 s), to prove SetBackend waits for it.
+		struct BlockingBackend : ISeededBackend
+		{
+			std::mutex m;
+			std::condition_variable cv;
+			bool entered = false, release = false;
+			std::atomic<bool> finished{ false };
+			const char* Name() const override { return "blocking"; }
+			bool Run(const uint8_t*, const uint8_t*, int w, int h, const HintField*, Field& out, std::string&) override
+			{
+				{
+					std::unique_lock<std::mutex> lock(m);
+					entered = true;
+					cv.notify_all();
+					cv.wait_for(lock, std::chrono::seconds(5), [&] { return release; });
+				}
+				out.gridW = GridOf(w);
+				out.gridH = GridOf(h);
+				out.forward.assign(static_cast<size_t>(out.gridW) * out.gridH * 2, 0);
+				out.backward = out.forward;
+				out.forwardCost.assign(static_cast<size_t>(out.gridW) * out.gridH, 0);
+				out.backwardCost = out.forwardCost;
+				finished = true;
+				return true;
+			}
+		};
 	}
 
 	TEST_CLASS(LongPairTests)
@@ -266,6 +327,278 @@ namespace VideoProcessorTest
 			Assert::IsTrue(fake.sawHint);
 			Assert::IsTrue(r.ok && r.path == Path::SeededSearch);
 			Assert::AreEqual(7, static_cast<int>(r.field.forward[0]));
+		}
+	};
+
+	// The five pre-P5a fixes (opus gate): backend lifetime, Map-failure latch, device-removed recovery, SetAdapter required,
+	// eviction count. CPU / WARP only: no NVIDIA hardware needed.
+	TEST_CLASS(LongPairFixTests)
+	{
+	public:
+		// Fix 1: SetBackend returned while a pair was still inside the old backend (Process copied the raw pointer out of the
+		// lock), so the caller could destroy a backend that was in use.
+		TEST_METHOD(SetBackendWaitsForARunInFlightSoTheOldBackendCanBeDestroyed)
+		{
+			const int w = 48, h = 32;
+			std::vector<uint8_t> a, b;
+			Frames(w, h, 1.0, 1.0, a, b);
+			Service svc(CpuOnly());
+			BlockingBackend be;
+			svc.SetBackend(&be);
+			std::thread runner([&] { svc.RunNow(a.data(), b.data(), w, h, nullptr); });
+			{
+				std::unique_lock<std::mutex> lock(be.m);
+				Assert::IsTrue(be.cv.wait_for(lock, std::chrono::seconds(5), [&] { return be.entered; }), L"the backend was entered");
+			}
+			std::atomic<bool> setReturned{ false };
+			std::thread swapper([&] { svc.SetBackend(nullptr); setReturned = true; });
+			std::this_thread::sleep_for(std::chrono::milliseconds(150));
+			const bool returnedWhileInside = setReturned.load() && !be.finished.load();
+			{
+				std::lock_guard<std::mutex> lock(be.m);
+				be.release = true;
+			}
+			be.cv.notify_all();
+			runner.join();
+			swapper.join();
+			Assert::IsFalse(returnedWhileInside, L"SetBackend must not return while the old backend is still running");
+			Assert::IsTrue(be.finished.load());
+		}
+
+		TEST_METHOD(NoCallReachesTheOldBackendAfterSetBackendReturned)
+		{
+			const int w = 48, h = 32;
+			std::vector<uint8_t> a, b;
+			Frames(w, h, 1.0, 1.0, a, b);
+			Service svc(CpuOnly());
+			BlockingBackend be;
+			{
+				std::lock_guard<std::mutex> lock(be.m);
+				be.release = true;   // never blocks
+			}
+			svc.SetBackend(&be);
+			Assert::IsTrue(svc.RunNow(a.data(), b.data(), w, h, nullptr).ok);
+			Assert::IsTrue(be.finished.load());
+			be.finished = false;
+			svc.SetBackend(nullptr);
+			const Result r = svc.RunNow(a.data(), b.data(), w, h, nullptr);
+			Assert::IsTrue(r.ok && r.path == Path::SeededSearch);
+			Assert::IsFalse(be.finished.load(), L"the unbound backend is never called again");
+		}
+
+		TEST_METHOD(AFailedBackendDoesNotReturnTheFieldOfAnEarlierAttempt)
+		{
+			struct Failing : ISeededBackend
+			{
+				const char* Name() const override { return "failing"; }
+				bool Run(const uint8_t*, const uint8_t*, int, int, const HintField*, Field&, std::string& error) override
+				{
+					error = "backend down";
+					return false;
+				}
+			} failing;
+			const int w = 48, h = 32;
+			std::vector<uint8_t> a, b;
+			Frames(w, h, 1.0, 1.0, a, b);
+			Service svc(CpuOnly());
+			svc.SetBackend(&failing);
+			const Result r = svc.RunNow(a.data(), b.data(), w, h, nullptr);
+			Assert::IsFalse(r.ok);
+			Assert::IsTrue(r.path == Path::None);
+			Assert::IsTrue(r.field.forward.empty() && r.field.gridW == 0, L"a failed pair carries no field");
+			Assert::IsTrue(r.error == "backend down");
+			Assert::IsTrue(svc.StatusLine().find("long-pair flow failed (backend down)") != std::string::npos);
+		}
+
+		// Fix 2: a failed Map must latch a visible state and never read stale data. A DEFAULT texture without CPU access cannot
+		// be mapped, which is a real Map failure on WARP.
+		BEGIN_TEST_METHOD_ATTRIBUTE(AFailedMapReturnsFalseWithAnHresultAndLeavesTheDestinationUntouched)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(AFailedMapReturnsFalseWithAnHresultAndLeavesTheDestinationUntouched)
+		{
+			CComPtr<ID3D11Device> device;
+			CComPtr<ID3D11DeviceContext> context;
+			Assert::IsTrue(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context)));
+			D3D11_TEXTURE2D_DESC desc{};
+			desc.Width = 8; desc.Height = 4; desc.MipLevels = 1; desc.ArraySize = 1; desc.Format = DXGI_FORMAT_R8_UNORM;
+			desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			CComPtr<ID3D11Texture2D> unmappable;
+			Assert::IsTrue(SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &unmappable)));
+			std::vector<uint8_t> dst(32, 0xAB);
+			HRESULT hr = S_OK;
+			Assert::IsFalse(NvOpticalFlow::ReadStagingRows(context, unmappable, 4, 8, dst.data(), hr));
+			Assert::IsTrue(FAILED(hr), L"the Map failure is reported with its HRESULT");
+			for (uint8_t v : dst)
+				Assert::AreEqual(0xAB, static_cast<int>(v), L"no stale or partial data is written");
+			// Null arguments are failures, not crashes.
+			Assert::IsFalse(NvOpticalFlow::ReadStagingRows(nullptr, unmappable, 4, 8, dst.data(), hr));
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(AMappableStagingTextureIsReadRowByRow)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(AMappableStagingTextureIsReadRowByRow)
+		{
+			CComPtr<ID3D11Device> device;
+			CComPtr<ID3D11DeviceContext> context;
+			Assert::IsTrue(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context)));
+			D3D11_TEXTURE2D_DESC desc{};
+			desc.Width = 6; desc.Height = 3; desc.MipLevels = 1; desc.ArraySize = 1; desc.Format = DXGI_FORMAT_R8_UNORM;
+			desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			CComPtr<ID3D11Texture2D> src, staging;
+			Assert::IsTrue(SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &src)));
+			desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+			Assert::IsTrue(SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &staging)));
+			std::vector<uint8_t> pattern(18);
+			for (size_t i = 0; i < pattern.size(); ++i)
+				pattern[i] = static_cast<uint8_t>(10 + i);
+			context->UpdateSubresource(src, 0, nullptr, pattern.data(), 6, 0);
+			context->CopyResource(staging, src);
+			std::vector<uint8_t> dst(18, 0);
+			HRESULT hr = E_FAIL;
+			Assert::IsTrue(NvOpticalFlow::ReadStagingRows(context, staging, 3, 6, dst.data(), hr));
+			Assert::IsTrue(dst == pattern, L"rows are copied by RowPitch into a tight buffer");
+		}
+
+		TEST_METHOD(TheSessionLatchHoldsThirtySecondsThenRetriesAndCountsExecuteFailures)
+		{
+			SessionLatch latch;
+			const SessionLatch::Time t0 = std::chrono::steady_clock::now();
+			std::string why;
+			Assert::IsFalse(latch.Blocked(t0, why));
+			Assert::IsFalse(latch.NoteExecuteFailure("e1", t0));
+			Assert::IsFalse(latch.NoteExecuteFailure("e2", t0));
+			Assert::IsFalse(latch.Blocked(t0, why), L"two failures do not latch");
+			Assert::IsTrue(latch.NoteExecuteFailure("e3", t0), L"the third in a row latches");
+			Assert::IsTrue(latch.Blocked(t0 + std::chrono::seconds(29), why));
+			Assert::IsTrue(why == "e3");
+			Assert::IsFalse(latch.Blocked(t0 + std::chrono::seconds(31), why), L"retried after 30 s");
+			latch.NoteExecuteFailure("x", t0);
+			latch.NoteSuccess();
+			Assert::IsFalse(latch.NoteExecuteFailure("y", t0), L"a success resets the run of failures");
+			latch.Latch("map failed", t0);
+			Assert::IsTrue(latch.Blocked(t0 + std::chrono::seconds(1), why) && why == "map failed", L"an immediate latch (Map failure) holds at once");
+			latch.Clear();
+			Assert::IsFalse(latch.Latched());
+		}
+
+		// Fix 3: a removed device is released, reported with its HRESULT and latched; the pair still gets the visible fallback.
+		BEGIN_TEST_METHOD_ATTRIBUTE(ARemovedDeviceIsReleasedReportedAndLatched)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ARemovedDeviceIsReleasedReportedAndLatched)
+		{
+			CComPtr<IDXGIAdapter> warp = WarpAdapter();
+			Assert::IsTrue(warp.p != nullptr, L"WARP adapter");
+			const int w = 64, h = 48;
+			std::vector<uint8_t> a, b;
+			Frames(w, h, 2.0, 1.0, a, b);
+			Config c;
+			c.useNvof = true;
+			Service svc(c);
+			svc.SetAdapter(warp);
+			svc.InjectDeviceRemovedForTest(static_cast<long>(DXGI_ERROR_DEVICE_REMOVED));
+			const Result r = svc.RunNow(a.data(), b.data(), w, h, nullptr);
+			Assert::IsTrue(r.ok && r.path == Path::SeededSearch, L"the pair still gets a field");
+			Assert::IsTrue(r.why.reason.find("GPU device removed or reset (0x887A0005)") != std::string::npos, L"the removal is visible with its HRESULT");
+			Assert::IsTrue(svc.CurrentDecision().engaged);
+			Assert::IsTrue(svc.StatusLine().find("device removed") != std::string::npos);
+			// Latched: the next pair does not try the GPU again and keeps the same visible reason.
+			const Result r2 = svc.RunNow(a.data(), b.data(), w, h, nullptr);
+			Assert::IsTrue(r2.path == Path::SeededSearch);
+			Assert::IsTrue(r2.why.reason == r.why.reason);
+			Assert::IsTrue(DeviceRemovedText(static_cast<long>(DXGI_ERROR_DEVICE_RESET), "x").find("0x887A0007") != std::string::npos);
+		}
+
+		// Fix 4: no SetAdapter, no GPU session, and it says so (the old code created a default hardware device).
+		TEST_METHOD(WithoutSetAdapterTheNvofSessionRefusesVisibly)
+		{
+			const int w = 64, h = 48;
+			std::vector<uint8_t> a, b;
+			Frames(w, h, 2.0, 1.0, a, b);
+			Config c;
+			c.useNvof = true;
+			Service svc(c);
+			const HintField hf = ConstHint(w, h, 2.0f, 1.0f);
+			const Result r = svc.RunNow(a.data(), b.data(), w, h, &hf);
+			Assert::IsTrue(r.ok && r.path == Path::SeededSearch);
+			Assert::IsTrue(r.why.reason.find("SetAdapter was not called") != std::string::npos);
+			Assert::IsTrue(svc.CurrentDecision().engaged);
+			Assert::IsTrue(svc.StatusLine().find("SetAdapter was not called") != std::string::npos);
+			svc.SetAdapter(nullptr);   // null is not an adapter
+			const Result r2 = svc.RunNow(a.data(), b.data(), w, h, &hf);
+			Assert::IsTrue(r2.why.reason.find("SetAdapter was not called") != std::string::npos);
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(SetAdapterLiftsTheRefusalImmediately)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SetAdapterLiftsTheRefusalImmediately)
+		{
+			CComPtr<IDXGIAdapter> warp = WarpAdapter();
+			Assert::IsTrue(warp.p != nullptr);
+			const int w = 64, h = 48;
+			std::vector<uint8_t> a, b;
+			Frames(w, h, 2.0, 1.0, a, b);
+			Config c;
+			c.useNvof = true;
+			Service svc(c);
+			Assert::IsTrue(svc.RunNow(a.data(), b.data(), w, h, nullptr).why.reason.find("SetAdapter was not called") != std::string::npos);
+			svc.SetAdapter(warp);
+			const Result r = svc.RunNow(a.data(), b.data(), w, h, nullptr);
+			Assert::IsTrue(r.path == Path::SeededSearch);
+			Assert::IsTrue(r.why.reason.find("SetAdapter was not called") == std::string::npos, L"a different reason now: the session was attempted on the given adapter");
+		}
+
+		// Fix 5: each evicted result is counted once, and only results that are really waiting are evicted.
+		TEST_METHOD(EvictionCountsEachDroppedResultOnce)
+		{
+			const int w = 48, h = 32;
+			std::vector<uint8_t> a, b;
+			Frames(w, h, 1.0, 0.0, a, b);
+			Config c = CpuOnly();
+			c.maxResults = 2;
+			Service svc(c);
+			std::vector<uint64_t> tickets;
+			for (int i = 1; i <= 4; ++i)
+			{
+				const uint64_t t = svc.SubmitLongPair(a.data(), b.data(), w, h, nullptr);
+				Assert::IsTrue(t > 0);
+				tickets.push_back(t);
+				Assert::IsTrue(WaitStored(svc, static_cast<uint64_t>(i)));
+			}
+			Assert::AreEqual(2ull, svc.GetStats().evicted);
+			Result r;
+			Assert::IsFalse(svc.TryTake(tickets[0], r));
+			Assert::IsFalse(svc.TryTake(tickets[1], r));
+			Assert::IsTrue(svc.TryTake(tickets[2], r));
+			Assert::IsTrue(svc.TryTake(tickets[3], r));
+			Assert::AreEqual(2ull, svc.GetStats().evicted, L"taking results is not an eviction");
+		}
+
+		TEST_METHOD(ATakenResultFreesItsSlotSoAnUntakenOneIsNotEvictedEarly)
+		{
+			const int w = 48, h = 32;
+			std::vector<uint8_t> a, b;
+			Frames(w, h, 1.0, 0.0, a, b);
+			Config c = CpuOnly();
+			c.maxResults = 3;
+			Service svc(c);
+			std::vector<uint64_t> t;
+			for (int i = 1; i <= 3; ++i)
+			{
+				t.push_back(svc.SubmitLongPair(a.data(), b.data(), w, h, nullptr));
+				Assert::IsTrue(WaitStored(svc, static_cast<uint64_t>(i)));
+			}
+			Result r;
+			Assert::IsTrue(svc.TryTake(t[1], r));
+			Assert::IsTrue(svc.TryTake(t[2], r));
+			t.push_back(svc.SubmitLongPair(a.data(), b.data(), w, h, nullptr));
+			Assert::IsTrue(WaitStored(svc, 4));
+			Assert::AreEqual(0ull, svc.GetStats().evicted, L"two results are waiting, the bound is three");
+			Assert::IsTrue(svc.TryTake(t[0], r), L"the oldest untaken result is still there");
+			Assert::IsTrue(svc.TryTake(t[3], r));
 		}
 	};
 }

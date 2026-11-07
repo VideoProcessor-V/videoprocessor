@@ -8,7 +8,9 @@
 #include <dxgi.h>
 #include <atlbase.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 
 namespace VpLongPair
@@ -36,8 +38,12 @@ namespace VpLongPair
 		Why lastWhy;
 		bool stop = false;
 		std::thread worker;
+		// The matcher backend is used ONLY under backendMutex, and SetBackend takes the same mutex: once SetBackend returns, no
+		// thread is inside (or about to enter) the old backend, so its owner may destroy it (a raw pointer copied out under
+		// `mutex` and used after the unlock outlived its object).
+		std::mutex backendMutex;
 		ISeededBackend* backend = nullptr;
-		CComPtr<IDXGIAdapter> adapter;
+		CComPtr<IDXGIAdapter> adapter;       // guarded by mutex; null = SetAdapter not called (the NVOF session refuses to run)
 
 		// GPU state, guarded by execMutex (the worker and RunNow share it).
 		std::mutex execMutex;
@@ -46,9 +52,8 @@ namespace VpLongPair
 		std::unique_ptr<NvOpticalFlow::HintedEngine> engine;
 		CComPtr<ID3D11Texture2D> luma[2], hintTex, flow[2], cost[2], flowRead[2], costRead[2];
 		int sizeW = 0, sizeH = 0;
-		std::string nvofLatched;          // non-empty: the hinted session cannot run for this session (visible reason)
-		int consecutiveFailures = 0;
-		std::chrono::steady_clock::time_point latchedAt;
+		SessionLatch latch;               // latched: the hinted session cannot run for now (visible reason; 30 s, then retried)
+		std::atomic<long> injectedRemoved{ 0 };   // test seam: a pending fake GetDeviceRemovedReason() result
 
 		explicit Impl(const Config& c) : config(c) {}
 
@@ -62,9 +67,14 @@ namespace VpLongPair
 				std::lock_guard<std::mutex> lock(mutex);
 				a = adapter;
 			}
+			if (!a)
+			{
+				why = NoAdapterReason();   // never guess a default adapter
+				return false;
+			}
 			CComPtr<ID3D11Device> d;
 			CComPtr<ID3D11DeviceContext> c;
-			if (FAILED(D3D11CreateDevice(a, a ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels, 2,
+			if (FAILED(D3D11CreateDevice(a, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, levels, 2,
 					D3D11_SDK_VERSION, &d, nullptr, &c)))
 			{
 				why = "cannot create its D3D11 device";
@@ -73,6 +83,45 @@ namespace VpLongPair
 			device = d;
 			context = c;
 			return true;
+		}
+
+		static const char* NoAdapterReason()
+		{
+			return "SetAdapter was not called (no render adapter given: the long-pair NVOF session does not guess one)";
+		}
+
+		// Engine and textures first (the engine unregisters them), then the context and the device.
+		void DropDevice()
+		{
+			ReleaseEngine();
+			context.Release();
+			device.Release();
+		}
+
+		// A removed / reset device: release everything on it and latch visibly (the session is retried on a new device after
+		// the latch). Returns true when the device is gone; `why` is then the visible reason.
+		bool CheckDeviceFault(const char* during, std::string& why)
+		{
+			HRESULT hr = static_cast<HRESULT>(injectedRemoved.exchange(0));
+			if (hr == S_OK && device)
+				hr = device->GetDeviceRemovedReason();
+			if (hr == S_OK)
+				return false;
+			DropDevice();
+			why = DeviceRemovedText(static_cast<long>(hr), during);
+			latch.Latch(why, std::chrono::steady_clock::now());
+			return true;
+		}
+
+		// A failed Map (staging readback): latch visibly, never retry silently, never hand out stale or half-filled data.
+		bool ReadbackFailed(const char* what, HRESULT hr, std::string& why)
+		{
+			char hex[16];
+			std::snprintf(hex, sizeof(hex), "0x%08lX", static_cast<unsigned long>(hr));
+			why = std::string("cannot read the ") + what + " back (Map failed " + hex + ")";
+			if (!CheckDeviceFault("the readback", why))
+				latch.Latch(why, std::chrono::steady_clock::now());
+			return false;
 		}
 
 		void ReleaseEngine()
@@ -142,22 +191,32 @@ namespace VpLongPair
 				why = "long-pair NVOF off";
 				return false;
 			}
-			if (!nvofLatched.empty())
+			bool haveAdapter;
 			{
-				// A device / driver / size problem is latched for 30 s, then the session is tried again (a busy engine or
-				// one odd frame size must not disable the service for the whole process).
-				if (std::chrono::steady_clock::now() - latchedAt < std::chrono::seconds(30))
-				{
-					why = nvofLatched;
-					return false;
-				}
-				nvofLatched.clear();
-				consecutiveFailures = 0;
+				std::lock_guard<std::mutex> lock(mutex);
+				haveAdapter = adapter.p != nullptr;
 			}
-			if (!EnsureDevice(why) || !EnsureSize(r.w, r.h, why))
+			if (!haveAdapter)
 			{
-				nvofLatched = why;
-				latchedAt = std::chrono::steady_clock::now();
+				// Not latched: it is a missing call, and SetAdapter makes the next pair run the session.
+				why = NoAdapterReason();
+				return false;
+			}
+			// A device / driver / size / readback problem is latched for 30 s, then the session is tried again (a busy engine or
+			// one odd frame size must not disable the service for the whole process).
+			if (latch.Blocked(std::chrono::steady_clock::now(), why))
+				return false;
+			if (device && CheckDeviceFault("the start of the pair", why))
+				return false;
+			if (!EnsureDevice(why))
+			{
+				latch.Latch(why, std::chrono::steady_clock::now());
+				return false;
+			}
+			if (!EnsureSize(r.w, r.h, why))
+			{
+				if (!CheckDeviceFault("opening the session", why))
+					latch.Latch(why, std::chrono::steady_clock::now());
 				return false;
 			}
 			context->UpdateSubresource(luma[0], 0, nullptr, r.a.data(), static_cast<UINT>(r.w), 0);
@@ -176,48 +235,35 @@ namespace VpLongPair
 			if (!engine->Run(luma[0], luma[1], hintForRun, flow[0], flow[1], cost[0], cost[1]))
 			{
 				why = engine->LastError();
-				if (++consecutiveFailures >= 3)
-				{
-					nvofLatched = why;
-					latchedAt = std::chrono::steady_clock::now();
-				}
+				if (CheckDeviceFault("the NVOF execute", why))
+					return false;
+				latch.NoteExecuteFailure(why, std::chrono::steady_clock::now());
 				return false;
 			}
-			consecutiveFailures = 0;
+			latch.NoteSuccess();
 			const int gw = GridOf(r.w), gh = GridOf(r.h);
 			for (int i = 0; i < 2; ++i)
 			{
 				context->CopyResource(flowRead[i], flow[i]);
 				context->CopyResource(costRead[i], cost[i]);
 			}
-			out.gridW = gw;
-			out.gridH = gh;
+			// Read into a local field; `out` is only set when every Map succeeded.
+			Field tmp;
+			tmp.gridW = gw;
+			tmp.gridH = gh;
 			for (int i = 0; i < 2; ++i)
 			{
-				std::vector<int16_t>& v = i == 0 ? out.forward : out.backward;
-				std::vector<uint8_t>& c = i == 0 ? out.forwardCost : out.backwardCost;
+				std::vector<int16_t>& v = i == 0 ? tmp.forward : tmp.backward;
+				std::vector<uint8_t>& c = i == 0 ? tmp.forwardCost : tmp.backwardCost;
 				v.resize(static_cast<size_t>(gw) * gh * 2);
 				c.resize(static_cast<size_t>(gw) * gh);
-				D3D11_MAPPED_SUBRESOURCE map{};
-				if (FAILED(context->Map(flowRead[i], 0, D3D11_MAP_READ, 0, &map)))
-				{
-					why = "cannot read the flow back";
-					return false;
-				}
-				for (int y = 0; y < gh; ++y)
-					std::memcpy(&v[static_cast<size_t>(y) * gw * 2], static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch,
-						static_cast<size_t>(gw) * 4);
-				context->Unmap(flowRead[i], 0);
-				if (FAILED(context->Map(costRead[i], 0, D3D11_MAP_READ, 0, &map)))
-				{
-					why = "cannot read the cost back";
-					return false;
-				}
-				for (int y = 0; y < gh; ++y)
-					std::memcpy(&c[static_cast<size_t>(y) * gw], static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch,
-						static_cast<size_t>(gw));
-				context->Unmap(costRead[i], 0);
+				HRESULT hr = S_OK;
+				if (!NvOpticalFlow::ReadStagingRows(context, flowRead[i], gh, static_cast<size_t>(gw) * 4, reinterpret_cast<uint8_t*>(v.data()), hr))
+					return ReadbackFailed("flow", hr, why);
+				if (!NvOpticalFlow::ReadStagingRows(context, costRead[i], gh, static_cast<size_t>(gw), c.data(), hr))
+					return ReadbackFailed("cost", hr, why);
 			}
+			out = std::move(tmp);
 			return true;
 		}
 
@@ -229,11 +275,6 @@ namespace VpLongPair
 			res.why.hintSupplied = r.hasHint;
 			std::string why;
 			bool nvof = false, hintBound = false;
-			ISeededBackend* be;
-			{
-				std::lock_guard<std::mutex> lock(mutex);
-				be = backend;
-			}
 			{
 				std::lock_guard<std::mutex> lock(execMutex);
 				nvof = RunNvof(r, res.field, why, hintBound);
@@ -246,12 +287,19 @@ namespace VpLongPair
 			else
 			{
 				res.why.reason = why;
+				res.field = Field();   // nothing from the failed NVOF attempt may leak into the fallback's result
 				const HintField* hint = r.hasHint ? &r.hint : nullptr;
 				std::string err;
-				bool ok = false;
-				if (be)
-					ok = be->Run(r.a.data(), r.b.data(), r.w, r.h, hint, res.field, err);
-				else
+				bool ok = false, usedBackend = false;
+				{
+					std::lock_guard<std::mutex> backendLock(backendMutex);
+					if (backend)
+					{
+						usedBackend = true;
+						ok = backend->Run(r.a.data(), r.b.data(), r.w, r.h, hint, res.field, err);
+					}
+				}
+				if (!usedBackend)
 					ok = SeededSearchPair(r.a.data(), r.b.data(), r.w, r.h, hint, res.field, config.searchRadius);
 				res.ok = ok;
 				res.path = ok ? Path::SeededSearch : Path::None;
@@ -289,12 +337,17 @@ namespace VpLongPair
 					queue.pop_front();
 				}
 				Result res = Process(r);
+				const uint64_t ticket = res.ticket;
 				std::lock_guard<std::mutex> lock(mutex);
-				results[res.ticket] = std::move(res);
-				resultOrder.push_back(r.ticket);
-				while (resultOrder.size() > config.maxResults)
+				results[ticket] = std::move(res);
+				resultOrder.push_back(ticket);
+				++stats.stored;
+				// resultOrder holds exactly the tickets in `results` (TryTake removes its entry), so the bound counts live
+				// results and each evicted result is counted once.
+				while (results.size() > config.maxResults && !resultOrder.empty())
 				{
-					results.erase(resultOrder.front());
+					if (results.erase(resultOrder.front()) > 0)
+						++stats.evicted;
 					resultOrder.pop_front();
 				}
 			}
@@ -320,15 +373,47 @@ namespace VpLongPair
 		impl->ReleaseEngine();
 	}
 
+	// Same adapter = same LUID (a re-enumerated COM object for the same GPU is not a change); an unreadable desc counts as different.
+	static bool SameAdapter(IDXGIAdapter* a, IDXGIAdapter* b)
+	{
+		if (a == b)
+			return true;
+		if (!a || !b)
+			return false;
+		DXGI_ADAPTER_DESC da{}, db{};
+		if (FAILED(a->GetDesc(&da)) || FAILED(b->GetDesc(&db)))
+			return false;
+		return da.AdapterLuid.LowPart == db.AdapterLuid.LowPart && da.AdapterLuid.HighPart == db.AdapterLuid.HighPart;
+	}
+
 	void Service::SetAdapter(IDXGIAdapter* adapter)
 	{
-		std::lock_guard<std::mutex> lock(impl->mutex);
-		impl->adapter = adapter;
+		// Same lock order as the GPU path (execMutex, then mutex). A different adapter drops the device built on the old one and
+		// clears the latch, so the next pair opens the session on the new adapter at once. Null = not set: the NVOF session
+		// refuses to run (visibly) rather than guessing the default adapter.
+		std::lock_guard<std::mutex> exec(impl->execMutex);
+		bool changed;
+		{
+			std::lock_guard<std::mutex> lock(impl->mutex);
+			changed = !SameAdapter(impl->adapter.p, adapter);
+			impl->adapter = adapter;
+		}
+		if (changed)
+		{
+			impl->DropDevice();
+			impl->latch.Clear();
+		}
+	}
+
+	void Service::InjectDeviceRemovedForTest(long hr)
+	{
+		impl->injectedRemoved = hr;
 	}
 
 	void Service::SetBackend(ISeededBackend* backend)
 	{
-		std::lock_guard<std::mutex> lock(impl->mutex);
+		// Waits for a Run in flight on the old backend: when this returns the old one is no longer referenced.
+		std::lock_guard<std::mutex> lock(impl->backendMutex);
 		impl->backend = backend;
 	}
 
@@ -376,6 +461,7 @@ namespace VpLongPair
 			return false;
 		out = std::move(it->second);
 		impl->results.erase(it);
+		impl->resultOrder.erase(std::remove(impl->resultOrder.begin(), impl->resultOrder.end(), ticket), impl->resultOrder.end());
 		return true;
 	}
 

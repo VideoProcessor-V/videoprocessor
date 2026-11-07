@@ -19,6 +19,8 @@
 #include <d3d11.h>
 #include <atlbase.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <map>
 #include <string>
 
@@ -55,4 +57,9 @@ namespace NvOpticalFlow
 		int width = 0, height = 0;
 		std::string error;
 	};
+
+	// Copies `rows` rows of `rowBytes` bytes from a D3D11_USAGE_STAGING / CPU_ACCESS_READ texture into dst (tightly packed).
+	// A failed Map returns false with hr set, leaves dst untouched and never leaves the texture mapped: the caller latches
+	// the session (a failed readback must never fall through to stale or half-filled data).
+	bool ReadStagingRows(ID3D11DeviceContext* context, ID3D11Texture2D* staging, int rows, size_t rowBytes, uint8_t* dst, HRESULT& hr);
 }

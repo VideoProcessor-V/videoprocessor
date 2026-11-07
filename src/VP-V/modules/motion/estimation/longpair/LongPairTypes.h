@@ -12,8 +12,10 @@
 #include <VP-V/core/FallbackCatalog.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -105,6 +107,62 @@ namespace VpLongPair
 				out[o + 1] = ToS105(r[1]);
 			}
 		return true;
+	}
+
+	// ---- the NVOF session latch (device / driver / size / readback problem: off for a while, visibly, then retried) ----------
+	// Pure logic with the clock passed in (tests drive time). `Latch` = latch at once (device, driver, size, init, readback
+	// failures); `NoteExecuteFailure` = latch after `failuresToLatch` execute failures in a row (a busy engine, one odd frame).
+	class SessionLatch
+	{
+	public:
+		typedef std::chrono::steady_clock::time_point Time;
+		explicit SessionLatch(int holdSeconds = 30, int failuresToLatch = 3) : hold(holdSeconds), limit(failuresToLatch) {}
+
+		// True while latched (why = the visible reason). An expired latch is cleared here and the session is tried again.
+		bool Blocked(Time now, std::string& why)
+		{
+			if (reason.empty())
+				return false;
+			if (now - at < std::chrono::seconds(hold))
+			{
+				why = reason;
+				return true;
+			}
+			Clear();
+			return false;
+		}
+		void Latch(const std::string& why, Time now)
+		{
+			reason = why.empty() ? std::string("unknown failure") : why;
+			at = now;
+			failures = 0;
+		}
+		// True when this failure latched the session.
+		bool NoteExecuteFailure(const std::string& why, Time now)
+		{
+			if (++failures < limit)
+				return false;
+			Latch(why, now);
+			return true;
+		}
+		void NoteSuccess() { failures = 0; }
+		void Clear() { reason.clear(); failures = 0; }
+		bool Latched() const { return !reason.empty(); }
+		const std::string& Reason() const { return reason; }
+
+	private:
+		int hold, limit, failures = 0;
+		std::string reason;
+		Time at;
+	};
+
+	// The visible wording of a removed / reset GPU device (hr = GetDeviceRemovedReason(), e.g. 0x887A0005).
+	inline std::string DeviceRemovedText(long hr, const std::string& during)
+	{
+		char hex[16];
+		std::snprintf(hex, sizeof(hex), "0x%08lX", static_cast<unsigned long>(hr));
+		return std::string("GPU device removed or reset (") + hex + ") during " + (during.empty() ? std::string("a pair") : during) +
+			"; the NVOF session is down";
 	}
 
 	// ---- visible fallback (ADR-0001: no silent fallbacks) -------------------------------------------------------------
