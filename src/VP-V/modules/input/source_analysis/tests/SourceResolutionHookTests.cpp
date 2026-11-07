@@ -443,15 +443,19 @@ namespace VideoProcessorTest
 				Assert::AreEqual(1.0, factor, L"native after 5 s without a cut");
 			}
 
-			// Native detail: back to native at once (same shot level, no cut needed).
+			// Native detail: back to native on SUSTAINED real detail (SID-B: 3 native readings over 1.5 s, 0.5 s apart -
+			// one frame no longer reverts), same shot level, no cut needed.
 			{
-				pl_tex tex = upload(content(W, H, 999, 0.55));
-				step(tex);
+				for (int k = 0; k < 4; ++k)
+				{
+					pl_tex tex = upload(content(W, H, 999, 0.55), 0.0008 * k);
+					step(tex);
+					pl_tex_destroy(gpu, &tex);
+				}
 				factor = monitor.AutoFactor(H, 0.8, why);
 				Logger::WriteMessage(("native detail: " + why + "\n").c_str());
-				Assert::AreEqual(1.0, factor, L"native at once on real detail");
+				Assert::AreEqual(1.0, factor, L"native on sustained real detail");
 				Assert::AreEqual(1.0, monitor.Read().declaredRatio, L"declared native");
-				pl_tex_destroy(gpu, &tex);
 			}
 
 			// A discontinuity: native at once and the evidence starts again.

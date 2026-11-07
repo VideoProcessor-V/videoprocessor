@@ -1487,14 +1487,14 @@ namespace VideoProcessorTest
 				r.segmentEngagedFrames[5], r.segmentFrames[5], softOff ? softOff->t - softAt : -1.0, softOff ? softOff->why.c_str() : "-", r.segmentEngagedFrames[6]);
 			Logger::WriteMessage(line);
 			Assert::IsNotNull(FirstEngage(r), L"engaged on the upscale first");
-			Assert::IsTrue(r.segmentEngagedFrames[6] <= static_cast<int>(std::ceil((0.5 + o.latency) * o.fps)) + 2, L"sharp native unlatched within one tile copy");
+			Assert::IsTrue(r.segmentEngagedFrames[6] <= static_cast<int>(std::ceil((SourceResolution::Tracker::Settings{}.nativeEvidenceSeconds + 0.5 + o.latency) * o.fps)) + 2, L"sharp native unlatched on sustained native readings (SID-B: 3 over 1.5 s)");
 			// Latch fixes: the level-aware test only on dark / low-contrast frames - the defocused shot at a
 			// normal level is native evidence, unlatched within one tile copy as before (never re-base real 4K).
-			Assert::IsTrue(r.segmentEngagedFrames[5] <= static_cast<int>(std::ceil((0.5 + o.latency) * o.fps)) + 2, L"soft native unlatched within one tile copy");
+			Assert::IsTrue(r.segmentEngagedFrames[5] <= static_cast<int>(std::ceil((SourceResolution::Tracker::Settings{}.nativeEvidenceSeconds + 0.5 + o.latency) * o.fps)) + 2, L"soft native unlatched on sustained native readings (SID-B)");
 			Budget("SoftNativeShotAfterAnEngagedUpscale", started, 40);
 		}
 
-		// Mixed screens over an engaged 1080 upscale: a native menu (unlatch at once, no re-base
+		// Mixed screens over an engaged 1080 upscale: a native menu (SID-B: a mixed frame is never native evidence for a declaration, so the engaged state stands through a short menu; no re-base
 		// while it shows), subtitles (stay engaged), a transport bar, credits; then picture-in-picture
 		// from cold (native PiP over upscaled video; upscaled PiP over native video): never engaged.
 		TEST_METHOD(MixedScreenGuardOverAnEngagedUpscale)
@@ -1519,7 +1519,7 @@ namespace VideoProcessorTest
 			// Each overlay in its own run: five upscaled shots (engaged by ~12 s), the overlay on the
 			// sixth shot's picture from mid-shot (no cut) for 6 s, then without it.
 			const struct { Overlay overlay; const char* name; bool mustUnlatch, mustStay; } overlays[] = {
-				{ Overlay::Menu, "native menu", true, false }, { Overlay::Subtitles, "subtitles", false, true },
+				{ Overlay::Menu, "native menu", false, false }, { Overlay::Subtitles, "subtitles", false, true },
 				{ Overlay::Osd, "transport bar", false, false }, { Overlay::Credits, "credits over black", false, false } };
 			for (const auto& ov : overlays)
 			{
@@ -1784,7 +1784,7 @@ namespace VideoProcessorTest
 				Logger::WriteMessage(line);
 				if (next > 0.5)
 				{
-					Assert::IsTrue(raisedAfter >= 0.0 && raisedAfter <= 0.5 + o.latency + 2.0 / o.fps, L"1440 raised within one tile copy");
+					Assert::IsTrue(raisedAfter >= 0.0 && raisedAfter <= SourceResolution::Tracker::Settings{}.nativeEvidenceSeconds + 0.5 + o.latency + 2.0 / o.fps, L"1440 raised on sustained readings above the 1080 declaration (SID-B)");
 					Assert::IsTrue(r.segmentEndY.back() >= 1440.0 / 2160 - 0.005, L"never below the 1440 class on 1440 content");
 				}
 				else
@@ -2592,10 +2592,14 @@ namespace VideoProcessorTest
 
 		// The resume time after native evidence (a mixed screen, a native shot) is the evidence
 		// window (120 s), not the 10 s / 3 shots standard; measured on the tracker.
+		// SID-B: with the latch fixes a DECLARATION is cleared only by sustained native readings (3 over 1.5 s) and a
+		// mixed screen is never native evidence for it: a mixed stretch leaves the declaration standing; a native stretch
+		// of one reading does too; a native stretch of 3 s or more clears it and the standard starts again.
 		TEST_METHOD(TrackerResumeAfterNativeEvidence)
 		{
-			char line[200];
+			char line[240];
 			for (const bool fixes : { true, false })
+			for (const bool mixed : { true, false })
 			for (const double nativeSeconds : { 0.5, 3.0, 30.0 })
 			{
 				SourceResolution::Tracker::Settings settings;
@@ -2603,6 +2607,7 @@ namespace VideoProcessorTest
 				SourceResolution::Tracker tracker(settings);
 				const double dt = 0.5, nativeAt = 60.0;
 				double declaredAgain = -1.0;
+				bool lowerAtEndOfNative = false;
 				for (int i = 0; i < 2 * 400; ++i)
 				{
 					const double t = i * dt;
@@ -2613,17 +2618,176 @@ namespace VideoProcessorTest
 					f.signature = f.mean * 10.0 + i * 1e-6;
 					const bool native = t >= nativeAt && t < nativeAt + nativeSeconds;
 					f.ratio = native ? 1.0 : 0.5;
-					f.mixed = native;
+					f.mixed = native && mixed;
 					tracker.Update(f, t);
+					if (t >= nativeAt + nativeSeconds - dt && t < nativeAt + nativeSeconds) lowerAtEndOfNative = tracker.Ratio() < 1.0;
 					if (t >= nativeAt + nativeSeconds && declaredAgain < 0 && tracker.Ratio() < 1.0) declaredAgain = t - (nativeAt + nativeSeconds);
 				}
-				snprintf(line, sizeof(line), "RESULT tracker resume after %.1f s of native (fixes %s): declared again %.1f s after it ended\n",
-					nativeSeconds, fixes ? "on" : "off", declaredAgain);
+				snprintf(line, sizeof(line), "RESULT tracker resume after %.1f s of %s (fixes %s): declared again %.1f s after it ended\n",
+					nativeSeconds, mixed ? "mixed screen" : "native", fixes ? "on" : "off", declaredAgain);
 				Logger::WriteMessage(line);
-				Assert::IsTrue(declaredAgain > 0.0, L"declared again eventually");
-				if (fixes) Assert::IsTrue(declaredAgain <= 10.5, L"fixes on: the standard again (10 s or 3 shots) after the native evidence");
-				else Assert::IsTrue(declaredAgain >= 100.0, L"fixes off: the 120 s window as before");
+				Assert::IsTrue(declaredAgain >= 0.0, L"declared again eventually");
+				if (fixes)
+				{
+					if (mixed || nativeSeconds < 1.0)
+					{
+						Assert::IsTrue(lowerAtEndOfNative, L"fixes on: the declaration stands through a mixed screen or one native reading");
+						Assert::AreEqual(0.0, declaredAgain, 1e-9, L"and was never left");
+					}
+					else
+						Assert::IsTrue(declaredAgain > 0.0 && declaredAgain <= 10.5, L"fixes on: sustained native readings clear it; the standard again (10 s or 3 shots) after");
+				}
+				else
+				{
+					Assert::IsTrue(declaredAgain > 0.0, L"fixes off: native evidence clears at once");
+					Assert::IsTrue(declaredAgain >= 100.0, L"fixes off: the 120 s window as before");
+				}
 			}
+		}
+
+		// ---- SID-B (doc 78 section 5): a declaration is cleared / raised only by SUSTAINED native evidence ----
+		// A tracker with a declared 1080 reading (0.5), fed at the monitor's 0.5 s cadence; every frame informative with its
+		// own signature (never a repeat). `Native()` = a native reading, `Lower()` = a reading at the declared rate,
+		// `Mixed()` = the mixed-screen guard's native frame.
+		struct SidBTracker
+		{
+			SourceResolution::Tracker tracker;
+			double t = 0.0;
+			int i = 0;
+			SourceResolution::FrameReading Make(double ratio, bool mixed)
+			{
+				SourceResolution::FrameReading f;
+				f.tiles = 8; f.informativeTiles = 8;
+				f.mean = (((i / 12) % 2) ? 0.55 : 0.30) + 0.001 * (i % 7);
+				f.signature = f.mean * 10.0 + i * 1e-6;
+				f.ratio = ratio;
+				f.mixed = mixed;
+				return f;
+			}
+			void Feed(double ratio, bool mixed = false) { tracker.Update(Make(ratio, mixed), t); t += 0.5; ++i; }
+			void Native() { Feed(1.0); }
+			void Lower(double ratio = 0.5) { Feed(ratio); }
+			void Mixed() { Feed(1.0, true); }
+			SidBTracker() { for (int k = 0; k < 40 && tracker.Ratio() >= 1.0; ++k) Lower(); }
+		};
+
+		TEST_METHOD(SidBDefaultsAreThreeReadingsOverOneAndAHalfSeconds)
+		{
+			const SourceResolution::Tracker::Settings s;
+			Assert::AreEqual(3, s.nativeEvidenceReadings);
+			Assert::AreEqual(1.5, s.nativeEvidenceSeconds, 1e-12);
+			Assert::AreEqual(s.nativeEvidenceReadings * 0.5, s.nativeEvidenceSeconds, 1e-12, L"k readings at the 0.5 s cadence");
+			SidBTracker x;
+			Assert::AreEqual(0.5, x.tracker.Ratio(), 1e-9, L"fixture: declared");
+		}
+
+		TEST_METHOD(OneNativeFrameDoesNotRevertADeclaration)
+		{
+			SidBTracker x;
+			Assert::AreEqual(0.5, x.tracker.Ratio(), 1e-9);
+			x.Native();
+			Assert::AreEqual(0.5, x.tracker.Ratio(), 1e-9, L"one native frame: the declaration stands");
+			for (int k = 0; k < 6; ++k) x.Lower();
+			Assert::AreEqual(0.5, x.tracker.Ratio(), 1e-9, L"and the lower readings go on");
+			Assert::IsFalse(x.tracker.SustainedNative());
+		}
+
+		TEST_METHOD(ThreeSustainedNativeReadingsRevertTheDeclaration)
+		{
+			SidBTracker x;
+			x.Native();
+			x.Native();
+			Assert::AreEqual(0.5, x.tracker.Ratio(), 1e-9, L"two readings are not enough");
+			Assert::IsFalse(x.tracker.SustainedNative());
+			x.Native();
+			Assert::AreEqual(1.0, x.tracker.Ratio(), 1e-9, L"three readings over 1.5 s revert it");
+			Assert::IsTrue(x.tracker.SustainedNative());
+			Assert::AreEqual(0.0, x.tracker.EvidenceSeconds(), L"and the evidence starts again");
+		}
+
+		TEST_METHOD(ALowerReadingRestartsTheNativeCount)
+		{
+			SidBTracker x;
+			x.Native();
+			x.Native();
+			x.Lower();
+			x.Native();
+			x.Native();
+			Assert::AreEqual(0.5, x.tracker.Ratio(), 1e-9, L"native, native, lower, native, native: not sustained");
+			x.Native();
+			Assert::AreEqual(1.0, x.tracker.Ratio(), 1e-9, L"the third consecutive native reading reverts it");
+		}
+
+		TEST_METHOD(MixedFramesNeverRevertADeclaration)
+		{
+			SidBTracker x;
+			for (int k = 0; k < 40; ++k) x.Mixed();
+			Assert::AreEqual(0.5, x.tracker.Ratio(), 1e-9, L"20 s of mixed screen: the declaration stands");
+			Assert::IsFalse(x.tracker.SustainedNative(), L"a mixed frame is no native evidence");
+			// Mixed frames between native readings are neutral: they neither count nor restart the count.
+			x.Native();
+			x.Mixed();
+			x.Native();
+			Assert::AreEqual(0.5, x.tracker.Ratio(), 1e-9, L"two native readings with a mixed one between: not yet");
+			x.Mixed();
+			x.Native();
+			Assert::AreEqual(1.0, x.tracker.Ratio(), 1e-9, L"the third native reading (mixed frames neutral) reverts it");
+		}
+
+		TEST_METHOD(ADeclaredRiseNeedsTheSameSustainedRule)
+		{
+			SidBTracker x;
+			x.Lower(0.75);
+			Assert::AreEqual(0.5, x.tracker.Ratio(), 1e-9, L"one reading above the declared value does not raise it");
+			x.Lower(0.75);
+			x.Lower(0.80);
+			Assert::AreEqual(0.75, x.tracker.Ratio(), 0.02, L"three sustained readings raise it, to the lowest of them");
+			SidBTracker y;
+			y.Lower(0.75);
+			y.Lower(0.75);
+			y.Lower(0.5);   // a reading at the declared rate restarts the rise
+			y.Lower(0.75);
+			y.Lower(0.75);
+			Assert::AreEqual(0.5, y.tracker.Ratio(), 1e-9, L"a reading at the declared value restarts the count");
+		}
+
+		TEST_METHOD(DiscontinuitiesStayImmediate)
+		{
+			SidBTracker x;
+			x.Native();
+			x.tracker.Discontinuity("seek");
+			Assert::AreEqual(1.0, x.tracker.Ratio(), L"a reported discontinuity clears the declaration at once");
+			Assert::IsFalse(x.tracker.SustainedNative());
+			SidBTracker y;
+			y.t += 10.0;   // a gap with no frames: the tracker's own discontinuity
+			y.Lower();
+			Assert::AreEqual(1.0, y.tracker.Ratio(), L"a gap clears it at once, on the next frame");
+			SidBTracker z;
+			z.t -= 30.0;   // time going backwards
+			z.Lower();
+			Assert::AreEqual(1.0, z.tracker.Ratio(), L"time going backwards clears it at once");
+		}
+
+		TEST_METHOD(SidBRuleIsOffWithTheLatchFixesOff)
+		{
+			SourceResolution::Tracker::Settings settings;
+			settings.latchFixes = false;
+			SourceResolution::Tracker tracker(settings);
+			Assert::IsTrue(tracker.SustainedNative(), L"fixes off: the veto source is as before");
+			double t = 0.0;
+			auto frame = [&](double ratio, int i) {
+				SourceResolution::FrameReading f;
+				f.tiles = 8; f.informativeTiles = 8;
+				f.mean = (((i / 12) % 2) ? 0.55 : 0.30) + 0.001 * (i % 7);
+				f.signature = f.mean * 10.0 + i * 1e-6;
+				f.ratio = ratio;
+				return f;
+			};
+			int i = 0;
+			for (; i < 60 && tracker.Ratio() >= 1.0; ++i, t += 0.5) tracker.Update(frame(0.5, i), t);
+			Assert::AreEqual(0.5, tracker.Ratio(), 1e-9);
+			tracker.Update(frame(1.0, i), t);
+			Assert::AreEqual(1.0, tracker.Ratio(), 1e-9, L"fixes off: one native frame reverts at once (the behaviour before)");
 		}
 
 		// Latch precision (2026-10-17): each rendition's reading on single frames at both tile sizes,

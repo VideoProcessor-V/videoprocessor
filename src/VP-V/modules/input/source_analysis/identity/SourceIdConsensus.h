@@ -20,7 +20,13 @@
 //     Once a candidate is pending it is kept while its dissent stays <= exitDissent (lower bar than
 //     entering: hysteresis).
 //   - a safety veto (ClassicalResolution only: detail above the re-based size) sets the voted axes
-//     native at once, bypassing dwell and hold.
+//     native at once (no dwell). SID-B: the call site raises it only from the tracker's SUSTAINED-native
+//     state (never one reading), and it obeys T_min like any other change (below).
+//   - T_min = max(2 x dwell, minHoldAfterChange): a field that changed cannot change again within it, whatever
+//     moved it (candidate or veto), except through Discontinuity() or a REGIME BOUNDARY towards native: the
+//     contrary hypothesis has persisted for >= regimeEvaluations evaluations after a cut / blank / fade flag
+//     (NoteRegimeFlag, fed from the QualitySample flags) that came after the field's last change and not more
+//     than one dwell before the hypothesis first appeared. A boundary bypasses T_min only, never the dwell.
 // Time is always SOURCE time passed by the caller; there is no clock, no thread, no randomness.
 //
 // The ONLY way consensus moves a re-base stamp is IndicatorPort::AdvanceRebase, once per changed
@@ -39,6 +45,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -69,6 +76,9 @@ namespace SourceIdentity
 		int64_t abrWindowUs = 8000000;       // after an ABR boundary ...
 		int64_t abrDwellUs = 500000;         // ... the dwell is this long (a rendition switch is sudden)
 		double ratioTolerance = 0.03;        // relative; ratios within it are the same value
+		int regimeEvaluations = 3;           // evaluations a contrary hypothesis must persist after a flagged boundary
+		// SID-B: the shortest time between two changes of one field (derived from the settings above, no constant of its own).
+		int64_t MinTimeBetweenChangesUs() const { return (std::max)(2 * dwellUs, minHoldAfterChangeUs); }
 	};
 
 	struct FieldResult
@@ -117,12 +127,48 @@ namespace SourceIdentity
 		}
 	};
 
+	// SHADOW mode (Monitor: source_id_consensus = shadow): one log line per field the consensus changed.
+	inline const char* FieldLogName(Field f)
+	{
+		switch (f)
+		{
+		case Field::AxisH: return "ratioH";
+		case Field::AxisV: return "ratioV";
+		case Field::Kernel: return "kernel";
+		case Field::Codec: return "codec";
+		case Field::Quality: return "tier";
+		default: return "?";
+		}
+	}
+
+	inline std::vector<std::string> WouldBeLines(const Result& r)
+	{
+		std::vector<std::string> lines;
+		for (int i = 0; i < kFieldCount; ++i)
+		{
+			const Field f = static_cast<Field>(i);
+			if (!r.Changed(f))
+				continue;
+			char b[200];
+			if (IsAxis(f))
+				std::snprintf(b, sizeof(b), "source_id would-be: %s %.3f -> %.3f (%s, support %.2f)", FieldLogName(f),
+					FieldValue(r.before, f), FieldValue(r.value, f), r.field[i].reason.c_str(), r.field[i].support);
+			else
+				std::snprintf(b, sizeof(b), "source_id would-be: %s %d -> %d (%s, support %.2f)", FieldLogName(f),
+					static_cast<int>(FieldValue(r.before, f)), static_cast<int>(FieldValue(r.value, f)), r.field[i].reason.c_str(), r.field[i].support);
+			lines.push_back(b);
+		}
+		return lines;
+	}
+
 	struct Stats
 	{
 		uint64_t evaluations = 0;
 		uint64_t changes = 0;                // field changes committed
 		uint64_t holds = 0;                  // field evaluations that held a value for a reason
 		uint64_t vetoes = 0;                 // safety vetoes that moved an axis to native
+		uint64_t regimeBypasses = 0;         // changes that bypassed T_min at a regime boundary towards native
+		uint64_t tMinHolds = 0;              // evaluations that held a change because of T_min
 		uint64_t discontinuities = 0;
 	};
 
@@ -141,6 +187,14 @@ namespace SourceIdentity
 			slot_[vi].vote = vote;
 			if (vote.voter != VoterId::ClassicalResolution)
 				slot_[vi].vote.safetyVeto = false;     // only the classical resolution voter may veto
+		}
+
+		// A cut / blank / fade was flagged in the QualitySample history at this source time (the call site, once
+		// per flagged frame, BEFORE Evaluate of that frame).
+		void NoteRegimeFlag(int64_t timeUs)
+		{
+			haveFlag_ = true;
+			flagUs_ = timeUs;
 		}
 
 		void NoteAbrBoundary(const AbrEvent& e)
@@ -207,6 +261,10 @@ namespace SourceIdentity
 			int64_t candSinceUs = 0;
 			bool hasChanged = false;
 			int64_t lastChangeUs = 0;
+			int flagEvals = 0;               // evaluations the pending candidate persisted after a regime flag
+			bool vetoActive = false;
+			int64_t vetoSinceUs = 0;
+			int vetoFlagEvals = 0;
 		};
 		struct Group
 		{
@@ -225,6 +283,16 @@ namespace SourceIdentity
 				fs_[i] = FieldState();
 			abrSeen_ = false;
 			abrTimeUs_ = 0;
+			haveFlag_ = false;
+			flagUs_ = 0;
+		}
+
+		// One more evaluation of a hypothesis first seen at `sinceUs`: it counts when a regime flag came after the field's
+		// last change and the hypothesis appeared no later than one dwell after that flag.
+		void CountRegime(const FieldState& st, int64_t now, int64_t sinceUs, int& evals) const
+		{
+			if (haveFlag_ && now >= flagUs_ && (!st.hasChanged || flagUs_ > st.lastChangeUs) && sinceUs <= flagUs_ + s_.dwellUs)
+				++evals;
 		}
 
 		bool Same(Field f, double a, double b) const
@@ -261,13 +329,34 @@ namespace SourceIdentity
 					if (sl.present && sl.vote.safetyVeto && (sl.vote.fieldMask & FieldBit(f)) && Fresh(vi, now))
 						vetoed = true;
 				}
+				if (!vetoed)
+					st.vetoActive = false;
 				if (vetoed)
 				{
 					st.hasCandidate = false;
+					if (!st.vetoActive)
+					{
+						st.vetoActive = true;
+						st.vetoSinceUs = now;
+						st.vetoFlagEvals = 0;
+					}
+					CountRegime(st, now, st.vetoSinceUs, st.vetoFlagEvals);
 					fr.reason = "safety veto: detail above the re-based size";
 					fr.support = 1.0;
 					if (cur != 1.0)
 					{
+						// T_min applies to a veto too, except at a regime boundary (towards native by definition).
+						const bool boundary = st.vetoFlagEvals >= s_.regimeEvaluations;
+						if (!boundary && st.hasChanged && now - st.lastChangeUs < s_.MinTimeBetweenChangesUs())
+						{
+							fr.held = true;
+							fr.reason = "held: min hold";
+							++stats_.holds;
+							++stats_.tMinHolds;
+							return;
+						}
+						if (boundary && st.hasChanged && now - st.lastChangeUs < s_.MinTimeBetweenChangesUs())
+							++stats_.regimeBypasses;
 						SetFieldValue(cur_, f, 1.0);
 						fr.value = 1.0;
 						fr.changed = true;
@@ -375,8 +464,12 @@ namespace SourceIdentity
 			{
 				st.hasCandidate = true;
 				st.candSinceUs = now;
+				st.flagEvals = 0;
 			}
 			st.candValue = cand.value;
+			CountRegime(st, now, st.candSinceUs, st.flagEvals);
+			// A regime boundary towards native (an axis rising) bypasses T_min below, never the dwell.
+			const bool boundary = IsAxis(f) && cand.value > cur && st.flagEvals >= s_.regimeEvaluations;
 
 			int64_t dwell = s_.dwellUs;
 			if (abrSeen_ && now >= abrTimeUs_ && now - abrTimeUs_ <= s_.abrWindowUs && s_.abrDwellUs < dwell)
@@ -388,13 +481,17 @@ namespace SourceIdentity
 				++stats_.holds;
 				return;
 			}
-			if (st.hasChanged && now - st.lastChangeUs < s_.minHoldAfterChangeUs)
+			const bool inTMin = st.hasChanged && now - st.lastChangeUs < s_.MinTimeBetweenChangesUs();
+			if (inTMin && !boundary)
 			{
 				fr.held = true;
 				fr.reason = "held: min hold";
 				++stats_.holds;
+				++stats_.tMinHolds;
 				return;
 			}
+			if (inTMin && boundary)
+				++stats_.regimeBypasses;
 
 			SetFieldValue(cur_, f, cand.value);
 			fr.value = FieldValue(cur_, f);
@@ -423,6 +520,8 @@ namespace SourceIdentity
 		FieldState fs_[kFieldCount];
 		bool abrSeen_ = false;
 		int64_t abrTimeUs_ = 0;
+		bool haveFlag_ = false;
+		int64_t flagUs_ = 0;
 		uint64_t lastDiscontinuitySeq_ = 0;
 		Stats stats_;
 	};

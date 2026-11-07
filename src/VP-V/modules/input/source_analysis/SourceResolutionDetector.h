@@ -519,6 +519,17 @@ namespace SourceResolution
 			double frameAlone = 0.8;
 			double frameAloneMargin = 0.5;
 			double frameFlashSeconds = 0.25;
+			// SID-B (source identity, doc 78 section 5; needs latchFixes): a declaration is cleared or raised
+			// only by SUSTAINED native evidence - at least nativeEvidenceReadings informative, not mixed,
+			// non-starved readings above the declared value, covering at least nativeEvidenceSeconds. One
+			// stray frame (added noise raises DetailAbove, a sharp overlay or shot) no longer reverts a
+			// declaration; a mixed frame is never native evidence (neutral while a lower reading is declared); a reading below the declared
+			// value restarts the count. The span of a run is the time from its first reading's own interval
+			// to its newest reading: k readings at the monitor's 0.5 s cadence cover k x 0.5 s, so the default
+			// 1.5 s is exactly 3 readings (k = 3 is also the shots standard, minimumShots). Discontinuities
+			// (Discontinuity / Reset: seek, resync, format change, gap, clock backwards) stay immediate.
+			int nativeEvidenceReadings = 3;
+			double nativeEvidenceSeconds = 1.5;
 		};
 
 		// The rule both judges share: decorrelation against the shot's motion level.
@@ -590,6 +601,11 @@ namespace SourceResolution
 		unsigned long long CoveredSteps() const { return coveredSteps; }
 		// Native readings left out as within the rounding floor (latchFixes).
 		unsigned long long FloorStarved() const { return floorStarved; }
+		// SID-B: the sustained-native state - at least nativeEvidenceReadings qualifying native readings
+		// covering nativeEvidenceSeconds, with no lower reading since (the classical safety veto's source).
+		// Always true with the latch fixes off (the behaviour before).
+		bool SustainedNative() const;
+		int NativeReadings() const { return nativeRun.count; }
 		double Candidate() const;                                // the window's evidence so far
 		// The window's median DetailAbove for frames reading `ratio`; +infinity when none.
 		double ReferenceDetail(double ratio) const;
@@ -651,6 +667,26 @@ namespace SourceResolution
 		bool renditionMode = false, declaredByRendition = false;
 		unsigned long long renditionChanges = 0;
 		std::string lastReason;
+		// SID-B: runs of qualifying readings. `nativeRun`: native readings, kept whatever is declared (reset by
+		// a lower reading). `riseRun`: readings above the declared value while a lower one is declared (reset by
+		// a reading at or below it); its minimum is the value a sustained rise declares.
+		struct Run
+		{
+			int count = 0;
+			double start = 0.0, firstDt = 0.0, minimum = 1.0;
+			void Reset() { *this = Run(); }
+			void Add(double ratio, double seconds, double dt)
+			{
+				if (count == 0) { start = seconds; firstDt = dt; minimum = ratio; }
+				else minimum = (std::min)(minimum, ratio);
+				++count;
+			}
+			bool Met(double seconds, const Settings& s) const
+			{
+				return count >= s.nativeEvidenceReadings && (seconds - start) + firstDt >= s.nativeEvidenceSeconds - 1e-9;
+			}
+		};
+		Run nativeRun, riseRun;
 	};
 
 	// h3-latch: the look-ahead's per-frame cut judge (source_resolution_cut_fixes). Every queued frame's

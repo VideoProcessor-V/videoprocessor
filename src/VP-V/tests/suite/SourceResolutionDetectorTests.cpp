@@ -998,9 +998,14 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.5, tracker.Ratio(), 1e-9);
 			Assert::AreEqual(1080, tracker.Height(2160));
 			Assert::IsTrue(declaredAt >= SourceResolution::Tracker::Settings{}.minimumSeconds, L"not before the standard evidence time");
-			// One frame of real detail: native at once.
+			// SID-B: one frame of detail no longer reverts the declaration; sustained native readings do (the
+			// default: 3 readings over 1.5 s - at this 0.25 s spacing the sixth reading).
 			tracker.Update(Frame(1.0, 0.25), t += 0.25);
-			Assert::AreEqual(1.0, tracker.Ratio());
+			Assert::AreEqual(0.5, tracker.Ratio(), 1e-9, L"one native frame does not revert");
+			int readings = 1;
+			while (tracker.Ratio() < 1.0 && readings < 20) { tracker.Update(Frame(1.0, 0.25), t += 0.25); ++readings; }
+			Assert::AreEqual(1.0, tracker.Ratio(), L"sustained native readings revert");
+			Assert::IsTrue(readings <= 7, L"within about 1.5 s of native readings");
 		}
 
 		TEST_METHOD(TrackerKeepsNativeThroughSoftShotsOfARealFilm)
@@ -1031,7 +1036,9 @@ namespace VideoProcessorTest
 				{
 					const bool sharp = (i % 360) < 8;
 					fixed.Update(Frame(sharp ? 1.0 : 0.5, 0.2 + 0.1 * ((i / 40) % 2) + 0.0001 * i), t);
-					if (sharp) { Assert::AreEqual(1.0, fixed.Ratio(), L"native at once on a sharp frame"); sharpEnded = t; }
+					// SID-B: the declaration is cleared by sustained native readings (3 over 1.5 s), not one frame; the
+					// first minute has nothing declared yet.
+					if (sharp) { if (minute == 0 || i >= 6) Assert::AreEqual(1.0, fixed.Ratio(), L"native on a sustained sharp stretch"); sharpEnded = t; }
 					else if (t - sharpEnded > 10.6) Assert::AreEqual(0.5, fixed.Ratio(), 1e-9, L"declared again within 10 s of the sharp shot");
 				}
 		}
@@ -1269,10 +1276,11 @@ namespace VideoProcessorTest
 			// standard itself restarts after the native readings, so it may declare first.
 			if (!fixes) Assert::IsTrue(tracker.RenditionChanges() >= 1, L"a rendition change was recognised");
 			Assert::IsTrue(declaredAt - switchedAt <= 15.0, L"declared within about 15 s of the switch");
-			// Back to 4K: native on its first frame.
+			// Back to 4K: native on sustained readings (SID-B: not on one frame; 3 readings over 1.5 s with the latch
+			// fixes; the first frame without).
 			const int shotNow = static_cast<int>((t / 0.5)) / 12;
-			tracker.Update(frame(1.0, shotNow, 3), t += 0.5);
-			Assert::AreEqual(1.0, tracker.Ratio(), L"the 4K rendition returns native at once");
+			for (int k = 0; k < 4; ++k) tracker.Update(frame(1.0, shotNow, 3 + k), t += 0.5);
+			Assert::AreEqual(1.0, tracker.Ratio(), L"the 4K rendition returns native on sustained readings");
 			}
 		}
 
@@ -1402,7 +1410,8 @@ namespace VideoProcessorTest
 					const bool archive = shot % 2 == 1;
 					tracker.Update(Frame(archive ? 480.0 / 2160.0 : 1.0, 0.2 + 0.1 * (shot % 2) + 0.001 * i), t);
 					if (std::fabs(tracker.Ratio() - last) > 1e-9) { ++changes; last = tracker.Ratio(); }
-					if (!archive) Assert::AreEqual(1.0, tracker.Ratio(), L"native on the interviews");
+					// SID-B: a declared archive reading clears on sustained native readings (the sixth frame at this spacing).
+					if (!archive && i >= 6) Assert::AreEqual(1.0, tracker.Ratio(), L"native on the interviews");
 				}
 			char line[96];
 			snprintf(line, sizeof(line), "alternating shots: %d changes in %.0f s\n", changes, t);

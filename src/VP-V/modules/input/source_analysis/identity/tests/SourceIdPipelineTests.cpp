@@ -14,8 +14,10 @@
 #include <VP-V/modules/input/source_analysis/identity/SourceIdProduct.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceQualityView.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <string>
 #include <thread>
@@ -511,6 +513,94 @@ namespace Tests
 			m.AutoFactors(1920, 1080, 0.8, why, fx, fy, 11.0, 2);
 			Assert::IsFalse(m.SourceIdGateFallback().engaged, L"off releases the gate's fallback");
 			Assert::IsFalse(m.QualityView(11.0).fallback.engaged);
+		}
+
+		// SID-B: Shadow runs the pipeline and publishes P14, but the classical decision stands: AutoFactors, the quality view and
+		// the re-base port are byte-identical to Off. The Off and Shadow monitors see the same synthetic 2x-upscaled tiles
+		// (separable bilinear of noise, a level jump every 6 s = a shot) and every frame's decision is compared.
+		TEST_METHOD(ShadowDecidesLikeOffForAutoFactorsAndPublishes)
+		{
+			constexpr int T = 128, tiles = 8;
+			auto frameTiles = [&](int frame) {
+				std::vector<float> all(static_cast<size_t>(T) * T * tiles);
+				const int shot = frame / 12;
+				for (int t = 0; t < tiles; ++t)
+				{
+					SidSynth::Lcg rng(7000u + static_cast<uint32_t>(shot * 31 + t));
+					const int h = T / 2;
+					std::vector<double> low(static_cast<size_t>(h) * h);
+					for (double& v : low) v = 0.25 + 0.5 * rng.Next();
+					auto at = [&](int x, int y) { x = (std::min)((std::max)(x, 0), h - 1); y = (std::min)((std::max)(y, 0), h - 1); return low[static_cast<size_t>(y) * h + x]; };
+					const double level = (shot % 2 ? 0.12 : -0.08) + 0.0007 * (frame % 12);   // a jump per shot, a drift within it
+					for (int y = 0; y < T; ++y)
+						for (int x = 0; x < T; ++x)
+						{
+							const int sx = x / 2, sy = y / 2;
+							const int dx = x % 2 ? 1 : -1, dy = y % 2 ? 1 : -1;
+							const double v = 0.5625 * at(sx, sy) + 0.1875 * at(sx + dx, sy) + 0.1875 * at(sx, sy + dy) + 0.0625 * at(sx + dx, sy + dy);
+							all[static_cast<size_t>(t) * T * T + static_cast<size_t>(y) * T + x] = static_cast<float>((std::min)(1.0, (std::max)(0.0, v + level)));
+						}
+				}
+				return all;
+			};
+			SourceResolutionMonitor::Monitor off, shadow;
+			off.SetSourceIdMode(SourceResolutionMonitor::Monitor::SourceIdMode::Off);
+			shadow.SetSourceIdMode(SourceResolutionMonitor::Monitor::SourceIdMode::Shadow);
+			Assert::IsFalse(shadow.SourceIdConsensus(), L"shadow does not decide");
+			Assert::IsTrue(shadow.SourceIdRunning());
+			Assert::AreEqual(std::string("Source identity: shadow (classical decides)"), shadow.SourceIdStatusLine(1.0));
+			const std::vector<float> none;
+			int differences = 0, engagedFrames = 0;
+			for (int f = 0; f < 120; ++f)
+			{
+				const double seconds = 0.5 * f;
+				const std::vector<float> data = frameTiles(f);
+				off.AnalyseTilesForTest(data, tiles, seconds, 1920, 1080, none, none, tiles, T, 64.0 / 1023.0, static_cast<uint64_t>(f + 1));
+				shadow.AnalyseTilesForTest(data, tiles, seconds, 1920, 1080, none, none, tiles, T, 64.0 / 1023.0, static_cast<uint64_t>(f + 1));
+				std::string whyOff, whyShadow;
+				double ox = 1.0, oy = 1.0, sx = 1.0, sy = 1.0;
+				off.AutoFactors(1920, 1080, 0.8, whyOff, ox, oy, seconds + 0.1, static_cast<uint64_t>(f + 1));
+				shadow.AutoFactors(1920, 1080, 0.8, whyShadow, sx, sy, seconds + 0.1, static_cast<uint64_t>(f + 1));
+				if (ox != sx || oy != sy || whyOff != whyShadow) ++differences;
+				if (ox < 1.0 || oy < 1.0) ++engagedFrames;
+				const SourceResolutionMonitor::Snapshot a = off.Read(), b = shadow.Read();
+				if (a.declaredRatio != b.declaredRatio || a.confidence != b.confidence || a.bitrateQuality != b.bitrateQuality) ++differences;
+				const SourceIdentity::QualityView qa = off.QualityView(seconds), qb = shadow.QualityView(seconds);
+				if (qa.quality != qb.quality || qb.fallback.engaged || qb.origin != qa.origin) ++differences;
+			}
+			char line[160];
+			snprintf(line, sizeof(line), "shadow vs off: %d differing decisions; engaged frames %d\n", differences, engagedFrames);
+			Logger::WriteMessage(line);
+			Assert::AreEqual(0, differences, L"AutoFactors, the snapshot and the quality view are byte-identical to Off");
+			SourceIdentity::Record rec;
+			Assert::IsTrue(shadow.SourceIdRecord(rec), L"the record is published in shadow");
+			Assert::IsTrue((rec.flags & SourceIdentity::kFlagShadow) != 0, L"and flagged as shadow");
+			Assert::IsTrue((rec.flags & SourceIdentity::kFlagConsensusOn) == 0);
+			Assert::IsFalse(off.SourceIdRecord(rec), L"off publishes nothing");
+			struct Port : SourceIdentity::IndicatorPort { int n = 0; void AdvanceRebase(int, uint64_t, const char*) override { ++n; } } port;
+			Assert::AreEqual(0, shadow.ApplySourceIdRebase(port), L"shadow never moves a re-base stamp");
+			Assert::AreEqual(0, port.n);
+		}
+
+		TEST_METHOD(WouldBeLinesNameTheFieldTheChangeAndTheReason)
+		{
+			SourceIdentity::Consensus c;
+			SourceIdentity::Vote v;
+			v.voter = SourceIdentity::VoterId::ClassicalResolution;
+			v.h.ratioH = v.h.ratioV = 0.5;
+			SourceIdentity::SetField(v, SourceIdentity::Field::AxisH, 0.9);
+			SourceIdentity::SetField(v, SourceIdentity::Field::AxisV, 0.9);
+			std::vector<std::string> lines;
+			for (int64_t t = 0; t <= 3000000; t += 500000)
+			{
+				v.evidenceTimeUs = t;
+				c.Submit(v);
+				const SourceIdentity::Result r = c.Evaluate(static_cast<uint64_t>(t / 1000 + 1), t);
+				for (const std::string& l : SourceIdentity::WouldBeLines(r)) lines.push_back(l);
+			}
+			Assert::AreEqual(size_t(2), lines.size(), L"one line per changed axis, once");
+			Assert::IsTrue(lines[0].rfind("source_id would-be: ratioH 1.000 -> 0.500 (changed", 0) == 0, L"format: field from -> to (reason)");
+			Assert::IsTrue(lines[1].rfind("source_id would-be: ratioV 1.000 -> 0.500 (changed", 0) == 0);
 		}
 	};
 }

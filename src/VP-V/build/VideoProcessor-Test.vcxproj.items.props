@@ -375,6 +375,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdConsensusTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdReplayTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\AbrStepDetectorTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceWiringTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelMetadataExtensionTests.cpp" />

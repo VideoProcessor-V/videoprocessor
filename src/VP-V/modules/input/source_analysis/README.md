@@ -50,10 +50,28 @@ VP owns two file pairs in this folder (moved by `git mv` in M2 step 10): `Source
 ### Data flow (VP)
 
 1. LibplaceboVideoRenderer.cpp (render thread, once per new source frame) calls `Frame` with the native, unwarped, not re-based frame (`renderImage`). Every `intervalSeconds` (0.5 s) a compute shader copies 8 tiles (16 with the dense grid) of plane 0, inside the crop, into one of two readback buffers. Finished copies are collected without waiting (`pl_buf_poll(..., 0)`) and handed to the worker; a newer copy replaces one the worker has not started. A change of the source signature (size, system, levels, bits, transfer, primaries) is a discontinuity. Dolby Vision is read on its decoded I plane.
-2. The worker runs `SourceResolution::Analyse` per tile and `ReadFrame`. It then updates three trackers (both axes, vertical, horizontal; the per-axis ones need twice the evidence), the live reading (median over about 2 s), the coherence-based confidence, the smoothed bitrate quality and effective bits, and the kernel votes (KernelInverse; see the scaling.rebase README). It writes the `Snapshot` and a history CSV ("source-resolution <date>.csv" beside the log; newest 1200 rows, rewritten every few seconds; newest 5 sessions kept).
-3. The host then pushes the selection and the setters from the active settings. In `auto` it calls `AutoFactors(width, height, source_resolution_auto_min_confidence, ...)`. Engaging waits for a cut, a real black, a fast pan or a low-detail moment (latch fixes), else crossfades after `source_resolution_engage_max_wait_s`. A return to native is immediate on detail above the re-based height or a discontinuity, and at the next cut (at most 5 s) when only the confidence fell. The host turns the result into `rebaseFactor` / `rebaseFactorX` and, with the latch fixes, `rebaseFade` / `rebaseFromFactor(X)` from `AutoTransition`.
+2. The worker runs `SourceResolution::Analyse` per tile and `ReadFrame`. It then updates three trackers (both axes, vertical, horizontal; the per-axis ones need twice the evidence), the live reading (median over about 2 s), the coherence-based confidence, the smoothed bitrate quality and effective bits, and the kernel votes (KernelInverse; see the scaling.rebase README). It writes the `Snapshot` and the SESSION-LONG history CSV ("source-resolution <yyyymmdd-hhmmss>.csv" beside the log, appended every few seconds; at 20 MB it continues in "...-002.csv", "-003" of the same session; the newest 5 sessions are kept, all their files; `SourceHistoryLog.h`). Its columns after `note` (per-axis frame readings, `detail_above`, `mixed`, `blank` / `cut` / `fade` flags, the 2:1 kernel, the classical snapshot behind the votes, the `sid_*` record) let the identity consensus be replayed from the file alone (`identity/SourceIdReplay.h`, `tools/eval/source_id/replay.py --srm`).
+3. The host then pushes the selection and the setters from the active settings. In `auto` it calls `AutoFactors(width, height, source_resolution_auto_min_confidence, ...)`. Engaging waits for a cut, a real black, a fast pan or a low-detail moment (latch fixes), else crossfades after `source_resolution_engage_max_wait_s`. A return to native is immediate on a discontinuity, and when the declared reading ROSE above the re-based height - which, with the latch fixes, now takes SUSTAINED native evidence in the tracker (below), not one frame; it comes at the next cut (at most 5 s) when only the confidence fell or one reading is missing. The host turns the result into `rebaseFactor` / `rebaseFactorX` and, with the latch fixes, `rebaseFade` / `rebaseFromFactor(X)` from `AutoTransition`.
 4. Look-ahead (`auto` only): the render loop passes up to 4 queued frames through `LookAheadFrame`, sampling luma through Bill's `AnalysisLumaSource`. The host passes the whole frame, not the active picture. A cheap 32 x 32-sample check per tile finds a cut or black ahead. While a change is pending, the first frame with picture after it is copied and analysed on the look-ahead worker, and `AutoFactor` engages exactly at that frame or cancels the change.
 5. Other readers of `Read()`: the kernel for the re-base (`rebase_kernel_match`), VP deband and detail restore strength, low-bitrate handling, the residual grain guard, and the stats/status line (`Describe`). The host reports discontinuities on resync/source change, live queue reset (seek or skip) and file seek/step/rate change.
+
+### Sustained native evidence (SID-B, doc 78 section 5)
+
+With the latch fixes on (the default), the classical `SourceResolution::Tracker` clears or raises a DECLARATION only on sustained evidence (`Tracker::Settings::nativeEvidenceReadings` = 3 informative, non-mixed, non-starved native readings, covering `nativeEvidenceSeconds` = 1.5 s). The span of a run is its first reading's own interval plus the time to its newest reading, so k readings at the monitor's 0.5 s cadence cover k x 0.5 s (3 x 0.5 = 1.5 s: the defaults are exactly "3 readings"); the readings count at any cadence. The rules:
+
+- One native frame (added noise raises DetailAbove, a sharp overlay or shot) no longer reverts a declaration; a reading below the declared value restarts the count.
+- A mixed frame (the mixed-screen guard) is never native evidence: while a lower reading is declared it is neutral (neither clears nor raises it). With nothing declared it still restarts the gathering window, as before (no lower reading is gathered across a menu).
+- A declared RISE (a reading above the declared value by more than `tolerance`) needs the same rule and goes to the lowest value of the sustained run.
+- Discontinuities (`Discontinuity`, `Reset`: seek, resync, format change, a gap over 2 s, the clock going backwards) stay immediate.
+- `Tracker::SustainedNative()` is the state the classical safety veto of the consensus is fed from (all three trackers sustained native with nothing gathered below).
+- In the monitor, one missing reading no longer forces native at once (`AutoFactor` takes the pending path: native at the next cut or black, or after 5 s); a discontinuity still does.
+- With the latch fixes off the behaviour is as before (one native frame reverts at once).
+
+This is a VP-V behaviour change of VP's own classical path (not Bill's): a declared re-base now lasts about 1.5 s longer under native evidence, and a menu or panel over a declared film no longer reverts it on its first frame.
+
+### Source identity mode (`source_id_consensus`: off / shadow / on)
+
+`Monitor::SetSourceIdMode`. `off`: nothing runs, every value is byte-identical to before. `shadow`: the identity pipeline and consensus run, P14 and the CSV `sid_*` columns are published, one log line "source_id would-be: <field> <from> -> <to> (<reason>, support <s>)" and one CSV `would_be` row are written per consensus change - but `AutoFactor(s)`, `QualityView` and the re-base port use the classical decision, byte-identical to `off` (the record carries `kFlagShadow`; consumers must not act on it). Status line: "Source identity: shadow (classical decides)". `on`: the consensus decides (identity/README.md).
 
 ### Threading (VP)
 
@@ -106,7 +124,7 @@ vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFi
 
 - CPU only:
   - `SourceResolutionDetectorTests`: detector and tracker. `RealFootageReadings` needs `VP_TEST_REAL_FOOTAGE`, `RealCodecReadings` needs `VP_TEST_CODEC_CORPUS`; else skipped.
-  - `SourceResolutionLatchTests`: the monitor through `AnalyseTilesForTest`. Real-footage cases need `VP_TEST_REAL_FOOTAGE` (or D:\hfr); `RealFilmCutDecisions` needs `VP_TEST_CUT_FILMS`.
+  - `SourceResolutionLatchTests` (SID-B: the sustained native rule on the tracker - `OneNativeFrameDoesNotRevertADeclaration`, `ThreeSustainedNativeReadingsRevertTheDeclaration`, `ALowerReadingRestartsTheNativeCount`, `MixedFramesNeverRevertADeclaration`, `ADeclaredRiseNeedsTheSameSustainedRule`, `DiscontinuitiesStayImmediate`, `SidBRuleIsOffWithTheLatchFixesOff`, `SidBDefaultsAreThreeReadingsOverOneAndAHalfSeconds`, `TrackerResumeAfterNativeEvidence`): the monitor through `AnalyseTilesForTest`. Real-footage cases need `VP_TEST_REAL_FOOTAGE` (or D:\hfr); `RealFilmCutDecisions` needs `VP_TEST_CUT_FILMS`.
   - `MixedScreenSourceResolutionTests`: the mixed-screen guard and the dense grid.
   - `SourceResolutionFrameBoundTests` and `SourceResolutionFrameBoundThreadedTests` (src/VideoProcessor-Test): frame-bound mode (real worker thread runs equal the simulated model, loss counting, order Discontinuity -> Frame -> AutoFactors; run-twice traces with randomised worker timing, source-time engage / fade / disengage, frozen source time with real sleeps, backward-step clamp, held results, held-queue overflow, era drop, `ReadyFor`, switch off = D 0). No footage needed.
 - GPU (D3D11; WARP unless `VP_TEST_GPU=hardware`; only when GPU tests are allowed): `SourceResolutionHookTests` (moved from LibplaceboLutParserTests) methods `SourceResolutionMonitorIdentifiesThePlayerKernel`, `SourceResolutionLookAheadVerifiesOrCancelsTheSwitch`, `SourceResolutionMonitorDeclaresAutoEngagesAtACutAndDisengagesAtOnce`, `SourceResolutionReadsAndRebasesTheDolbyVisionTunnel` (filter `FullyQualifiedName~SourceResolutionHookTests`).
@@ -196,6 +214,38 @@ Cost when off: zero detection work. `type` = `off` and `classic` both leave `Sub
 - As read today: `source_resolution` and `source_coding_fixes` are live, together with the ten `source_resolution_*` keys listed under "How the code works" (added to the slot list in this pass). `rebase_kernel_match` is read for the re-base, not by this slot's code. `subtitle_type` is the key `type` in `[vprenderer.subtitles.<Name>]` (Bill's subtitle code). `subtitle_fit` outside that section is discarded (fit follows `type`). `subtitle_reposition` (main config / command line) is parsed and ignored; repositioning is permanently disabled. Detection keys: see "How the code works".
 - Planned keys: `label_detector`
 - Tiers: not tiered; label-detector net optional
+
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `source_resolution` | input group (`[vprenderer.input.<Name>]`) | enum / int / string | native, auto, a height 144..8640, WIDTHxHEIGHT | auto | Input tab (settings reference section 2) | forced native | "Source resolution: not read (...)" on the stats line; auto stays native | same on all |
+| `source_resolution_auto_min_confidence` | input group | float | 0..1 | 0.8 | Input tab | n/a (VP-only) | below it the classical reading does not engage | same on all |
+| `source_resolution_evidence_shots` | input group | int | 1..10 | 3 | Input tab (Picture slider) | n/a (VP-only) | - | same on all |
+| `source_resolution_evidence_seconds` | input group | float | 2..120 | 10 | Input tab (Picture slider) | n/a (VP-only) | - | same on all |
+| `source_resolution_latch_fixes` | input group | bool | on, off | on | Input tab | forced off | off = the behaviour before, INCLUDING the pre-SID-B instant revert (the sustained native rule needs it on) | same on all |
+| `source_resolution_mixed_guard` | input group | bool | on, off | on | Input tab | n/a (VP-only) | a mixed frame is native for new declarations and neutral for a declared one (SID-B) | same on all |
+| `source_resolution_cut_fixes` | input group | bool | on, off | on | Input tab | forced off | needs latch fixes | same on all |
+| `source_id_consensus` | input group (SID-5 plumbing pending: Monitor setter only) | enum | off, shadow, on | off (shadow after phase A, doc 78 D16) | not in Config yet (SID-5, P3 settings mixin) | forced off | "Source identity: off" / "Source identity: shadow (classical decides)" / "Source identity: classical only (<reason>)" | same on all (cost: the worker pipeline, a fraction of one core) |
+| `source_id_abr_notice` | input group (SID-5 plumbing pending) | bool | on, off | on | not in Config yet (SID-5) | forced off | one-time notice `abr_quality_drop` | same on all |
+| `Tracker::Settings::nativeEvidenceReadings` | code default (not a config key) | int | >= 1 | 3 (= the shots standard) | not in Config (derived: k readings; a Picture-slider candidate later) | n/a (VP-only) | - | same on all |
+| `Tracker::Settings::nativeEvidenceSeconds` | code default (not a config key) | float | > 0 | 1.5 (= 3 readings x the 0.5 s cadence) | not in Config (derived) | n/a (VP-only) | - | same on all |
+| `SourceIdentity::Settings::regimeEvaluations` | code default (not a config key) | int | >= 1 | 3 | not in Config (doc 78 D12) | n/a (VP-only) | - | same on all |
+| `SourceIdentity::Settings::MinTimeBetweenChangesUs` (T_min) | derived (not a config key) | us | max(2 x dwell, minHoldAfterChange) | 10 s | not in Config (derived from the settings) | n/a (VP-only) | a held change reads "held: min hold" | same on all |
+| `SourceHistory::kDefaultRotateBytes` / `Monitor::kHistorySessions` | code constants (not config keys) | bytes / int | - | 20 MB / 5 sessions | not in Config | n/a (VP-only) | - | same on all |
+
+### Environment and diagnostics
+
+| Name | Purpose | Default | Scope (test/debug/runtime) |
+|---|---|---|---|
+| `VP_TEST_SOURCE_MONITOR_DIGEST` | logs a digest of each tile readback | unset | test |
+| `VP_SOURCE_ID_EVAL_DIR` | streaming evaluation reels (SourceIdStreamingEvalTests) | unset (skips) | test |
+| `VP_SOURCE_ID_EVAL_FFMPEG` / `VP_SOURCE_ID_EVAL_ONLY` | ffmpeg path / reel filter of that evaluation | D:\tools\ffmpeg-full\bin\ffmpeg.exe / all | test |
+| history CSV | `source-resolution <stamp>[-NNN].csv` beside vp.log; replay with `python -I tools/eval/source_id/replay.py --srm <file>` | on when the log folder is set | debug |
+
+### Status lines (this module)
+
+- Ctrl+I / Config: `Source identity: off`, `Source identity: shadow (classical decides)`, `Source identity: classical only (<reason>)`, `Source identity: consensus (tier N, level L)`.
+- vp.log (shadow): `source_id would-be: <field> <from> -> <to> (<reason>, support <s>)`, one line per consensus change.
+- Auto decisions with their reasons are in the history CSV (`auto` rows) and the stats line.
 
 ## Fallbacks
 

@@ -10,6 +10,7 @@ against the splice points, quality is compared as a RELATIVE drop against the sa
 numbers come from the no-switch control reels. Pure standard library.
 
   python -I tools/eval/source_id/replay.py --dir D:/codex/videoprocessor/eval-scratch/source-id
+  python -I tools/eval/source_id/replay.py --srm "<folder>/source-resolution 20261107-120000.csv"   (a history session; rotated files followed)
 """
 import argparse
 import csv
@@ -64,10 +65,89 @@ def fnum(x, nd=2):
     return "n/a" if x is None else ("%.*f" % (nd, x))
 
 
+def srm_session_files(path):
+    """The files of one source-resolution history session in write order: the base file
+    "source-resolution <yyyymmdd-hhmmss>.csv" then its numbered continuations "...-002.csv", "-003", ...
+    (SourceHistoryLog.h rotates a session at its size limit). `path` may be the base file or any of them."""
+    folder, name = os.path.split(os.path.abspath(path))
+    if not name.startswith("source-resolution ") or not name.endswith(".csv"):
+        return [path]
+    stamp = name[len("source-resolution "):len("source-resolution ") + 15]
+    found = []
+    for n in os.listdir(folder):
+        if n.startswith("source-resolution " + stamp) and n.endswith(".csv"):
+            tail = n[len("source-resolution ") + 15:-4]
+            index = 1 if tail == "" else (int(tail[1:]) if tail.startswith("-") and tail[1:].isdigit() else None)
+            if index is not None:
+                found.append((index, os.path.join(folder, n)))
+    return [f for _, f in sorted(found)]
+
+
+def read_srm_history(path):
+    """Every row of a source-resolution history session (all its rotated files), as dicts keyed by the header names.
+    The columns after `note` (t_src, seq, frame_ratio_v/_h, detail_above, mixed, blank, cut, fade, kernel, sid_*) are what the
+    consensus is replayed from (SourceIdReplay.h does the same in C++); a file from before SID-B lacks them."""
+    rows = []
+    for f in srm_session_files(path):
+        with open(f, "r", encoding="utf-8", newline="") as fh:
+            rows.extend(csv.DictReader(fh))
+    return rows
+
+
+def fnum_or(row, key, default=0.0):
+    try:
+        return float(row.get(key) or default)
+    except ValueError:
+        return default
+
+
+def srm_summary(rows, settle=10.0):
+    """A short deterministic summary of a history session: duration, readings, discontinuities, would-be consensus changes,
+    changes of the recorded consensus state (sid_ratio_h/_v, sid_tier) after the settle time, and the flags the replay uses."""
+    readings = [r for r in rows if r.get("event") == "reading"]
+    t = [fnum_or(r, "t_src", -1.0) for r in readings if r.get("t_src")]
+    out = {
+        "rows": len(rows), "readings": len(readings),
+        "duration_s": (t[-1] - t[0]) if len(t) >= 2 else 0.0,
+        "discontinuities": sum(1 for r in rows if r.get("event") == "discontinuity"),
+        "auto_decisions": sum(1 for r in rows if r.get("event") == "auto"),
+        "would_be_changes": sum(1 for r in rows if r.get("event") == "would_be"),
+        "detail_above_rows": sum(1 for r in readings if r.get("detail_above") == "1"),
+        "mixed_rows": sum(1 for r in readings if r.get("mixed") == "1"),
+        "blank_rows": sum(1 for r in readings if r.get("blank") == "1"),
+        "cut_rows": sum(1 for r in readings if r.get("cut") == "1"),
+        "fade_rows": sum(1 for r in readings if r.get("fade") == "1"),
+        "modes": sorted({r.get("mode") for r in readings if r.get("mode")}),
+    }
+    changes = 0
+    last = None
+    t0 = t[0] if t else 0.0
+    for r in readings:
+        if not r.get("sid_ratio_h"):
+            continue
+        cur = (r.get("sid_tier"), r.get("sid_ratio_h"), r.get("sid_ratio_v"))
+        if fnum_or(r, "t_src", 0.0) - t0 < settle:
+            last = cur
+            continue
+        if last is not None and cur != last:
+            changes += 1
+        last = cur
+    out["consensus_changes_after_settle"] = changes
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dir", required=True)
+    ap.add_argument("--dir")
+    ap.add_argument("--srm", help="a source-resolution history CSV (any file of a rotated session): print its summary and exit")
     args = ap.parse_args()
+    if args.srm:
+        summary = srm_summary(read_srm_history(args.srm))
+        for key in sorted(summary):
+            print("%s: %s" % (key, summary[key]))
+        return
+    if not args.dir:
+        ap.error("--dir (the C++ evaluation traces) or --srm (a history CSV) is required")
     d = args.dir
     reels = {r["id"]: r for r in rows(os.path.join(d, "reels.tsv"))}
     truth = defaultdict(list)

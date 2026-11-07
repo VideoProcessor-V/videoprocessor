@@ -314,7 +314,7 @@
     "VideoProcessorTest::MixedScreenSourceResolutionTests::MenuWithAVideoPreviewIsNeverReBased":  21.3,
     "VideoProcessorTest::MixedScreenSourceResolutionTests::PictureInPictureIsNeverReBasedOverNativeContent":  14.5,
     "VideoProcessorTest::MixedScreenSourceResolutionTests::SubtitleBandsAreStillIgnoredByTheRowRule":  23.1,
-    "VideoProcessorTest::MixedScreenSourceResolutionTests::UiOverlayAppearingDisengagesAtOnce":  7.7,
+    "VideoProcessorTest::MixedScreenSourceResolutionTests::UiOverlayAppearingLeavesADeclarationStanding":  7.7,
     "VideoProcessorTest::MixedScreenSourceResolutionTests::UiOverlayOverAFilmIsNeverReBased":  15.9,
     "VideoProcessorTest::NearBlackNativeBoundaryRecoveryTests::*":  0,
     "VideoProcessorTest::OpposingBoundaryDiagnosticsTests::*":  0.041,

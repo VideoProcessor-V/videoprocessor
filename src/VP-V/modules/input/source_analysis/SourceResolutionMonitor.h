@@ -1,5 +1,6 @@
 #pragma once
 
+#include <VP-V/modules/input/source_analysis/SourceHistoryLog.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdPipeline.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceQualityView.h>
@@ -187,8 +188,20 @@ namespace SourceResolutionMonitor
 		// worker feeds the consensus with every analysed frame and publishes the held-state record; AutoFactor(s) then ask the
 		// record which source it is (the latched axes) and engage only on a latched field, falling back to the classical
 		// value - visibly - while the record is absent or stale.
-		void SetSourceIdConsensus(bool on);
-		bool SourceIdConsensus() const { return sourceIdOn.load(std::memory_order_acquire); }
+		// SID-B: source_id_consensus is Off / Shadow / On.
+		//   Off    nothing runs; every value is byte-identical to before.
+		//   Shadow the pipeline and consensus run, P14 and the CSV sid columns are published, one "source_id would-be: ..." log
+		//          line is written per consensus change - but AutoFactor(s), QualityView and the re-base port use the CLASSICAL
+		//          decision, byte-identical to Off. Status line "Source identity: shadow (classical decides)".
+		//   On     as above, and the consensus decides (the gate, the quality view, the re-base requests).
+		enum class SourceIdMode { Off = 0, Shadow = 1, On = 2 };
+		void SetSourceIdMode(SourceIdMode mode);
+		SourceIdMode GetSourceIdMode() const { return static_cast<SourceIdMode>(sourceIdMode.load(std::memory_order_acquire)); }
+		void SetSourceIdConsensus(bool on) { SetSourceIdMode(on ? SourceIdMode::On : SourceIdMode::Off); }
+		// True only in On: the consensus decides. (Shadow computes it but does not decide.)
+		bool SourceIdConsensus() const { return GetSourceIdMode() == SourceIdMode::On; }
+		// True in Shadow and On: the pipeline runs and publishes.
+		bool SourceIdRunning() const { return GetSourceIdMode() != SourceIdMode::Off; }
 		void SetSourceIdNotice(bool on) { sourceIdNotice.store(on, std::memory_order_release); sourceIdNoticeDirty.store(true, std::memory_order_release); }
 		// Any thread: the newest record (seq <= `sequence`; 0 = newest). False: none published yet.
 		bool SourceIdRecord(SourceIdentity::Record& out, uint64_t sequence = 0) const { return sourceId.Held().ReadLatest(sequence, out); }
@@ -300,16 +313,18 @@ namespace SourceResolutionMonitor
 		std::string Selection() const;
 
 		void Release(pl_gpu gpu);
-		// Owner 2026-10-16 (debugging auto): one file per session in `folder`,
-		// "source-resolution <yyyymmdd-hhmmss>.csv" - every analysed frame's reading and
-		// every auto decision with its reason, the newest kHistoryRows (about ten minutes,
-		// ~100 KB), rewritten every few seconds (temp + replace). The newest kHistorySessions
-		// files are kept; older ones are deleted when a session starts. Empty folder = off.
+		// Owner 2026-10-16 (debugging auto), SID-B 2026-11-07: one SESSION-LONG file family per session in `folder`,
+		// "source-resolution <yyyymmdd-hhmmss>.csv" - every analysed frame's reading and every auto decision with its
+		// reason, appended every few seconds; when a file reaches the rotation limit (default 20 MB) the log continues in
+		// "source-resolution <stamp>-002.csv", -003, ... of the same session (SourceHistoryLog.h). The newest
+		// kHistorySessions sessions are kept (all their files); older ones are deleted when a session starts. The columns
+		// after `note` let the identity consensus be replayed from the file alone. Empty folder = off.
 		void SetHistoryFolder(const std::string& folder);
-		const std::string& HistoryPath() const { return historyPath; }
-		static constexpr size_t kHistorySessions = 5;
+		// Before SetHistoryFolder (tests): the rotation limit in bytes (0 = the default).
+		void SetHistoryRotateBytes(uint64_t bytes) { historyRotateBytes = bytes; }
+		std::string HistoryPath() const { return historyLog.CurrentPath(); }
+		static constexpr size_t kHistorySessions = SourceHistory::kDefaultSessions;
 		void FlushHistoryNow() { FlushHistory(true); }
-		static constexpr size_t kHistoryRows = 1200;
 		double intervalSeconds = 0.5;   // tile copies per second: 2
 		// The largest analysis tile (the readback buffer's size); with the latch fixes the tile is
 		// SourceResolution::TileSize(picture height) (128 at 1080, 256 at 2160), else always kTile.
@@ -408,7 +423,9 @@ namespace SourceResolutionMonitor
 		void FinishSequence(uint64_t sequence);
 		void Worker();
 		void Fail(const char* what, double seconds);
-		void Record(const std::string& row);   // with `mutex` held
+		// One history row (event .. note, 13 fields) plus the replay / identity columns (SourceHistory::kExtraColumns fields
+		// as ",a,b,..."; empty for events that carry none).
+		void Record(const std::string& row, const std::string& extras = SourceHistory::EmptyExtras());
 		void FlushHistory(bool force);
 		void Analyse(Job& job);
 		void ResetEvidence(const char* cause);   // with `mutex` held: back to native, all evidence cleared
@@ -463,7 +480,7 @@ namespace SourceResolutionMonitor
 		SourceResolution::Tracker tracker;
 		// Source identity (worker side; Held() is the only part other threads read).
 		SourceIdentity::Pipeline sourceId;
-		std::atomic<bool> sourceIdOn{ false };
+		std::atomic<int> sourceIdMode{ 0 };   // SourceIdMode
 		std::atomic<bool> sourceIdNotice{ true };
 		std::atomic<bool> sourceIdNoticeDirty{ false };
 		std::atomic<bool> sourceIdResetPending{ false };
@@ -480,10 +497,9 @@ namespace SourceResolutionMonitor
 		unsigned long long lastCuts = 0;
 		double qualitySmoothed = -1.0, bitsSmoothed = 0.0;
 		Snapshot snapshot;
-		std::deque<std::string> history;
-		std::string historyPath;
+		SourceHistory::Log historyLog;
+		uint64_t historyRotateBytes = 0;
 		std::chrono::steady_clock::time_point lastFlush{};
-		bool historyDirty = false;
 
 		// Look-ahead (render thread, plus its worker under aheadMutex).
 		void AheadWorker();

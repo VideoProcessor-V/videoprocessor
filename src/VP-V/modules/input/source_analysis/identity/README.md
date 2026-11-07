@@ -13,6 +13,7 @@ Today the classical source-resolution monitor (`input.source_analysis`) decides 
 - `AbrStepDetector.h`: ABR boundary timing from per-frame quality samples.
 - `AbrNoticePolicy.h`: the one-time notice and its wording.
 - `SourceIdProduct.h`, `FrameQuality.h`, `SourceIdPipeline.h`, `SourceQualityView.h`: the P14 record and holder, the frame-level quality signal, the worker pipeline and the consumer read API (sections below).
+- `SourceIdReplay.h`: replays a source-resolution history CSV through the pipeline (section "History CSV and replay").
 
 ## Voters and trust
 
@@ -34,7 +35,9 @@ Votes sit in slots indexed by `VoterId`, so the order of `Submit` calls never ma
 3. If it equals the current value: refresh. Otherwise the change needs support at least `enterSupport` (0.67), weight at least `enterMinWeight`, enough distinct voters (1 when classical votes alone; 2 when two or more voters are fresh), the candidate to persist for `dwellUs` (3 s), and `minHoldAfterChangeUs` (10 s) since the field last changed.
 4. Anything else holds the current value with a reason: disagreement, weak evidence, too few voters, dwell, min hold, stale.
 
-A pending candidate is kept while its dissent stays at or below `exitDissent`, a lower bar than entering (hysteresis). A safety veto (detail above the re-based size) sets the voted axes native at once, bypassing dwell and hold; votes from any other voter cannot veto.
+A pending candidate is kept while its dissent stays at or below `exitDissent`, a lower bar than entering (hysteresis). A safety veto (detail above the re-based size) sets the voted axes native with no dwell of its own; votes from any other voter cannot veto. SID-B (doc 78 D12): the call site raises the veto only from the classical trackers' SUSTAINED-native state (`Tracker::SustainedNative()`: 3 native readings over 1.5 s), never from one reading, and the veto obeys T_min like every other change.
+
+**T_min.** A field that changed cannot change again within `T_min = max(2 x dwellUs, minHoldAfterChangeUs)` (derived by `Settings::MinTimeBetweenChangesUs()`, no constant of its own; 10 s with the defaults), whatever moved it (a candidate or a veto), except through `Discontinuity()` or a **regime boundary towards native**: the contrary hypothesis (an axis rising, or the veto) has persisted for at least `regimeEvaluations` (3) evaluations after a cut / blank / fade flag (`NoteRegimeFlag`, fed by the pipeline from the QualitySample flags) that came after the field's last change and no more than one dwell before the hypothesis appeared. The boundary bypasses T_min only, never the dwell; towards a LOWER ratio nothing bypasses T_min. A held change reads `held: min hold` (`Stats::tMinHolds`); a bypass is counted in `Stats::regimeBypasses`. The monitor feeds the `cut` and `blank` (no informative tile) flags today; no fade source is fed yet (the `fade` flag stays 0).
 
 A pending candidate's dwell restarts when it is held for disagreement (intentional: only a steady candidate latches).
 
@@ -104,12 +107,16 @@ The Bill-file call sites (LVR `snap.bitrateQuality` readers) are NOT edited here
 
 ## Auto engage (SourceResolutionMonitor, VP-V file)
 
-With `source_id_consensus` on and a fresh record, `AutoFactor` / `AutoFactors` engage a lower re-base only for a LATCHED axis, at the consensus's ratio; the classical confidence minimum (`source_resolution_auto_min_confidence`) still applies (consensus can delay, veto or refine an engage, never add one), and the latch / crossfade still decide WHEN. A stale or absent record: the classical decision, with `Monitor::SourceIdGateFallback()` engaged. Off: the worker skips the pipeline and the noise measurement; behaviour and the CSV are unchanged (only a cheap reset on a discontinuity and an uncontended gate lock remain). Consensus moves only TOWARDS native: the target is never deeper than the classical reading. The consensus safety veto is fed by the classical trackers: it fires when every tracker is back to native with nothing gathered below it on an informative frame. The SRM history CSV gains `sid` columns only while consensus is on.
+With `source_id_consensus` on and a fresh record, `AutoFactor` / `AutoFactors` engage a lower re-base only for a LATCHED axis, at the consensus's ratio; the classical confidence minimum (`source_resolution_auto_min_confidence`) still applies (consensus can delay, veto or refine an engage, never add one), and the latch / crossfade still decide WHEN. A stale or absent record: the classical decision, with `Monitor::SourceIdGateFallback()` engaged. Off: the worker skips the pipeline and the noise measurement; behaviour and the CSV are unchanged (only a cheap reset on a discontinuity and an uncontended gate lock remain). Consensus moves only TOWARDS native: the target is never deeper than the classical reading. The consensus safety veto is fed by the classical trackers: it fires when every tracker is back to native with nothing gathered below it on an informative frame. The SRM history CSV carries the `sid_*` columns while the pipeline runs (shadow or on) and the replay columns always.
 
 ## Config keys (module side)
 
-- `source_id_consensus` = off | on (default **off**): `Monitor::SetSourceIdConsensus`. The settings key plumbing (P3 settings mixin, validators, master-page row) is the SID-5 step and waits for P3 / the master page; until then the Monitor setters are the only entry.
+- `source_id_consensus` = off | shadow | on (default **off**; shadow after phase A, doc 78 D16): `Monitor::SetSourceIdMode` (`SetSourceIdConsensus(bool)` = on / off). **Shadow** runs the pipeline and the consensus, publishes P14 (record flag `kFlagShadow`) and the CSV `sid_*` columns, logs one "source_id would-be: <field> <from> -> <to> (<reason>, support <s>)" line per consensus change (and a CSV `would_be` row), but `AutoFactor(s)`, `QualityView` and the re-base port use the classical decision, byte-identical to off. Status line "Source identity: shadow (classical decides)". The settings key plumbing (P3 settings mixin, validators, master-page row) is the SID-5 step and waits for P3 / the master page; until then the Monitor setters are the only entry.
 - `source_id_abr_notice` = on | off: `Monitor::SetSourceIdNotice`.
+
+## History CSV and replay (SID-B)
+
+`SourceHistoryLog.h` (in the parent folder) writes the SRM history CSV: one session-long file family, appended; at 20 MB (`kDefaultRotateBytes`) it continues in `source-resolution <stamp>-002.csv`, `-003`, ... of the same session (each with the header and a "session continued" row; a row never straddles files); the newest 5 sessions are kept with all their files. Free-text notes are CSV-quoted. The columns after `note` are what the consensus needs: `mode, t_src, seq, frame_ratio_v, frame_ratio_h, detail_above, mixed, blank, cut, fade, apl, axis_x, axis_y, axis_conf, kernel_id, kernel, kernel_votes, kernel_agree, frame_quality, frame_noise, sid_tier, sid_level, sid_ratio_h, sid_ratio_v, sid_reason` (with the older `declared`, `confidence`, `bitrate_quality`, `frame_ratio`). `SourceIdReplay.h` (`SrmReplay::Run`) feeds a file (or the concatenated files of a session) through `Pipeline` in source time, using the recorded frame quality (`Pipeline::Push(in, &quality)`); the same CSV always gives the same trace (`SrmReplay::Trace`). `python -I tools/eval/source_id/replay.py --srm <file>` reads the same files (rotated sessions followed) and prints a summary. Tests: `SourceIdReplayTests` (a committed fixture, `tests/fixtures/srm-history-replay.csv`, and the writer).
 
 ## Still to do (call sites outside this module)
 
@@ -118,3 +125,29 @@ With `source_id_consensus` on and a fresh record, `AutoFactor` / `AutoFactors` e
 3. Later: the ID-net runtime calls `IdNetVote` on its events.
 
 Fallback entry when consensus is off or unavailable: "Source identity: classical only (<reason>)". The measurement plan is in `MEASUREMENT-PLAN.md`; the streaming-suite evaluation in `tools/eval/source_id/` (`make_abr_reels.py`, `replay.py`, `RESULTS.md`).
+
+## Settings
+
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `source_id_consensus` | input group (plumbing pending, SID-5: Monitor setter only) | enum | off, shadow, on | off (shadow after phase A, doc 78 D16) | not in Config yet (SID-5, P3 settings mixin) | forced off | "Source identity: off" / "Source identity: shadow (classical decides)" / "Source identity: classical only (<reason>)" / "Source identity: consensus (tier N, level L)"; FallbackCatalog `product.source_quality` | same on all |
+| `source_id_abr_notice` | input group (plumbing pending, SID-5) | bool | on, off | on | not in Config yet (SID-5) | forced off | one-time notice `abr_quality_drop` | same on all |
+| `SourceIdentity::Settings::dwellUs` / `minHoldAfterChangeUs` | code defaults (not config keys) | us | > 0 | 3 s / 10 s | not in Config | n/a (VP-only) | `held: dwell` / `held: min hold` | same on all |
+| `SourceIdentity::Settings::regimeEvaluations` | code default (not a config key) | int | >= 1 | 3 | not in Config | n/a (VP-only) | a bypass is counted (`Stats::regimeBypasses`) | same on all |
+| `SourceIdentity::Settings::MinTimeBetweenChangesUs` (T_min) | derived (not a config key) | us | max(2 x dwell, minHoldAfterChange) | 10 s | not in Config (derived) | n/a (VP-only) | `held: min hold` | same on all |
+| `Tracker::Settings::nativeEvidenceReadings` / `nativeEvidenceSeconds` | code defaults in source_analysis (not config keys) | int / float | >= 1 / > 0 | 3 / 1.5 s (3 readings x the 0.5 s cadence) | not in Config (derived) | n/a (VP-only) | the veto source: sustained native only | same on all |
+
+## Environment and diagnostics
+
+| Name | Purpose | Default | Scope (test/debug/runtime) |
+|---|---|---|---|
+| `VP_SOURCE_ID_EVAL_DIR` | reels folder of SourceIdStreamingEvalTests (then `tools/eval/source_id/replay.py --dir`) | unset (the test skips) | test |
+| `VP_SOURCE_ID_EVAL_FFMPEG` / `VP_SOURCE_ID_EVAL_ONLY` | ffmpeg path / reel filter | D:\tools\ffmpeg-full\bin\ffmpeg.exe / all | test |
+| `VP_WRITE_PRODUCT_GRAPH_DOC` | regenerates docs/design/product-graph.md in ProductCatalogTests | unset | test |
+| history CSV `source-resolution <stamp>[-NNN].csv` | the replay input (`replay.py --srm`, `SrmReplay`) | on when the log folder is set | debug |
+
+## Status and fallbacks
+
+- Ctrl+I / Config line `Source identity: ...` (off, shadow, classical only (<reason>), consensus).
+- Shadow: log line "source_id would-be: <field> <from> -> <to> (<reason>, support <s>)" per consensus change.
+- Consumers fall back to the classical value, visibly (`product.source_quality`), whenever the record is absent, stale, unlatched or another version; in shadow they always use the classical value.

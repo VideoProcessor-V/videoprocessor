@@ -1439,6 +1439,8 @@ namespace SourceResolution
 		lastDistribution.clear();
 		lastPatternSequence = 0;
 		pending = Pending{};
+		nativeRun.Reset();
+		riseRun.Reset();
 		++discontinuities;
 		lastReason = reason ? reason : "";
 	}
@@ -1676,6 +1678,10 @@ namespace SourceResolution
 		}
 		if (window.empty()) evidence = 0.0;
 		if (!frame.informative()) return;
+		// SID-B: a mixed screen (native UI over the video) is never native evidence for a declaration: while a lower
+		// reading is declared it is neutral (it neither clears nor raises it, and does not touch the evidence count).
+		// With nothing declared it still restarts the window below, as before (no lower reading gathers across a menu).
+		if (settings.latchFixes && frame.mixed && declared < 1.0) return;
 		const double ratio = frame.ratio >= settings.nativeAbove ? 1.0 : frame.ratio;
 		// Variable bitrate (owner 2026-10-16): native needs detail above the rate in
 		// question - the declared one, else the lower one the window is gathering.
@@ -1720,20 +1726,34 @@ namespace SourceResolution
 			{
 				// Latch fixes: native evidence ends the lower one - the window starts again after it
 				// (the standard, minimumShots and minimumSeconds, from the readings since), instead of
-				// holding re-engagement for windowSeconds. A mixed screen's frames go with it.
-				window.clear();
-				evidence = 0.0;
-				renditionMode = false;
+				// holding re-engagement for windowSeconds.
+				// SID-B: a DECLARATION is cleared (or raised) only by sustained native evidence
+				// (Settings::nativeEvidenceReadings over nativeEvidenceSeconds); with nothing declared the
+				// window simply starts again, as before.
+				if (!frame.mixed) nativeRun.Add(1.0, seconds, dt);   // (a mixed frame only gets here with nothing declared)
 				if (declared < 1.0)
 				{
-					declared = 1.0;
+					riseRun.Add(1.0, seconds, dt);
+					if (!riseRun.Met(seconds, settings))
+						return;   // one reading is not enough: the declaration stands, the window is kept
+					declared = riseRun.minimum;   // 1.0 when every reading was native
+					riseRun.Reset();
 					declaredByRendition = false;
 				}
+				if (declared >= 1.0)
+				{
+					window.clear();
+					evidence = 0.0;
+				}
+				renditionMode = false;
 				return;
 			}
 		}
 		else
 		{
+			// SID-B: a lower reading ends the native run (and a reading at or below the declared value the rise run).
+			nativeRun.Reset();
+			if (declared >= 1.0 || ratio <= declared + settings.tolerance) riseRun.Reset();
 			if (streak == 0 || std::fabs(ratio - streakRatio) > settings.tolerance || shot != lastNativeShot)
 			{
 				streak = 0;
@@ -1766,10 +1786,20 @@ namespace SourceResolution
 		}
 		window.push_back({ seconds, ratio, shot, step, ratio < 1.0 ? DetailAbove(frame, ratio) : std::numeric_limits<double>::infinity() });
 		evidence += step;
-		// Detail above the declared cutoff: up at once (bias to native).
+		// Detail above the declared cutoff: up (bias to native) - at once without the latch fixes; with
+		// them (SID-B) only on sustained evidence above it, at the lowest level the run reached.
 		if (ratio > declared + settings.tolerance)
 		{
-			declared = ratio;
+			if (settings.latchFixes)
+			{
+				riseRun.Add(ratio, seconds, dt);
+				if (!riseRun.Met(seconds, settings))
+					return;
+				declared = riseRun.minimum;
+				riseRun.Reset();
+			}
+			else
+				declared = ratio;
 			renditionMode = false;
 			declaredByRendition = false;
 			return;
@@ -1802,6 +1832,12 @@ namespace SourceResolution
 			declared = candidate;
 			declaredByRendition = false;
 		}
+	}
+
+	bool Tracker::SustainedNative() const
+	{
+		if (!settings.latchFixes) return true;
+		return nativeRun.Met(lastSeconds, settings);
 	}
 
 	double Tracker::Candidate() const

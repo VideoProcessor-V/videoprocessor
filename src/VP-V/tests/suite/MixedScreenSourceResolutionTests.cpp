@@ -549,9 +549,12 @@ namespace VideoProcessorTest
 			}
 		}
 
-		// The overlay appearing over a declared film: back to native on its first frame
-		// (the tracker's "detail above: up at once"), and no re-base while it stays.
-		TEST_METHOD(UiOverlayAppearingDisengagesAtOnce)
+		// The overlay appearing over a declared film. SID-B (doc 78 section 5): a mixed frame is never native evidence for
+		// a DECLARATION - while a lower reading is declared it is neutral, so the panel neither clears the declaration on its
+		// first frame nor raises it; the declaration stands through a short panel (the monitor's gentle revert and the
+		// consensus' regime boundary handle a lasting menu). With nothing declared the panel still blocks any new re-base
+		// (UiOverlayOverAFilmIsNeverReBased).
+		TEST_METHOD(UiOverlayAppearingLeavesADeclarationStanding)
 		{
 			Layout film = Film(0.5);
 			Layout panel = Film(0.5);
@@ -571,8 +574,8 @@ namespace VideoProcessorTest
 				beforeOn, firstPanelOn, firstPanelOff, panelLowestOn, on.declared, off.declared);
 			Logger::WriteMessage(line);
 			Assert::AreEqual(0.5, beforeOn, 0.03, L"the film is declared before the panel");
-			Assert::AreEqual(1.0, firstPanelOn, L"native on the panel's first frame");
-			Assert::AreEqual(1.0, panelLowestOn, L"native while the panel stays");
+			Assert::AreEqual(0.5, firstPanelOn, 0.03, L"the declaration stands on the panel's first frame (a mixed frame is no native evidence)");
+			Assert::AreEqual(0.5, panelLowestOn, 0.03, L"and while the short panel stays");
 		}
 
 		// (c) Picture-in-picture.
