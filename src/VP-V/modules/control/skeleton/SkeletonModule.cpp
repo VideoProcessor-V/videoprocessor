@@ -163,12 +163,14 @@ namespace Vpv
 							// P12(N) needs P12(N-1) (the one-pole state): readable in the ring or live, else Begin says no.
 							const AnalysisLane* l = &lane;
 							SkeletonGpuDispatcher* disp = wiring.dispatcher;
-							job12->SetBeginGate([l, disp](const VpSkeleton::LaneJobContext& job) {
+							std::atomic<uint64_t>* pendingAsNone = &lightPendingAsNone;   // a Bundle member: it outlives the job
+							job12->SetBeginGate([l, disp, pendingAsNone](const VpSkeleton::LaneJobContext& job) {
 								if (!disp->Available(VpSkeleton::kP12LightLevel))
 									return false;   // refused / not allocated yet: declined, shown by the dispatcher's own entry
 								return VpLaneProducts::LightLevelBeginGate(job.seq, [l](uint64_t s) {
 									// LightPrevStateOf: Pending reads as None until G6 (a pending live fill is run by nothing before it).
-									return VpLaneProducts::LightPrevStateOf(l->ReadOf(VpSkeleton::kP12LightLevel, s).state);
+									// Counted and shown (skeleton_gpu_light_pending), never silent.
+									return VpLaneProducts::LightPrevStateOf(l->ReadOf(VpSkeleton::kP12LightLevel, s).state, *pendingAsNone);
 								});
 							});
 						}
@@ -226,6 +228,7 @@ namespace Vpv
 			GpuWiring wiring;
 			VpSkeleton::Registry registry;   // what the lane (and the dispatcher's Configure) are built on
 			// Declared before the lane: they outlive its state (the runner points at them).
+			std::atomic<uint64_t> lightPendingAsNone{ 0 };   // P12 gate: a Pending previous frame read as not made (until G6)
 			VpLaneProducts::HalfLumaProducer p1;
 			VpLaneProducts::SourceStatsProducer p4;
 			std::unique_ptr<VpLaneProducts::GpuComputeLaneJob> job10, job11, job12;   // null unless the GPU gap is on
@@ -925,6 +928,7 @@ namespace Vpv
 					addDecision(FallbackCatalog::SkeletonGpuGapAhead(gap));
 					addDecision(FallbackCatalog::SkeletonGpuGapOff(!gap));
 					addDecision(FallbackCatalog::SkeletonGpuChroma(true));   // P10c is not made before the source ring exists
+					addDecision(FallbackCatalog::SkeletonGpuLightPending(b->lightPendingAsNone.load(std::memory_order_relaxed)));   // A2: visible until G6
 					addDecision(FallbackCatalog::SkeletonGpuFailed(gd->Stats().failures, gd->LastError()));
 					// The governor's tier decision: a GPU product whose lane ring did not fit is made in the render only.
 					std::string shed;

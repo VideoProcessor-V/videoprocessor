@@ -642,6 +642,30 @@ namespace VideoProcessorTest
 				Assert::IsTrue(LightLevelBeginGate(5, [st](uint64_t) { return LightPrevStateOf(st); }, nullptr), L"no read state holds P12(N) back before G6");
 		}
 
+		// (d3) A2: the Pending -> None mapping is VISIBLE: each Pending read is counted and the skeleton shows
+		// skeleton_gpu_light_pending (id asserted) from the first one; no Pending read, no entry. Other states are not counted.
+		TEST_METHOD(PendingReadAsNoneIsCountedAndShown)
+		{
+			using VpLaneProducts::LightPrevState;
+			using VpLaneProducts::LightPrevStateOf;
+			using PR = VpSkeleton::AnalysisLane::ProductRead;
+			std::atomic<uint64_t> n{ 0 };
+			const PR::State others[] = { PR::None, PR::Ring, PR::Live, PR::Failed };
+			for (const PR::State st : others)
+				LightPrevStateOf(st, n);
+			Assert::AreEqual<unsigned long long>(0, n.load(), L"only Pending is counted");
+			Assert::IsFalse(FallbackCatalog::SkeletonGpuLightPending(n.load()).engaged, L"nothing pending: released");
+			Assert::IsTrue(FallbackCatalog::SkeletonGpuLightPending(0).id == "skeleton_gpu_light_pending", L"released entry keeps the id");
+			Assert::IsTrue(LightPrevStateOf(PR::Pending, n) == LightPrevState::None, L"Pending still maps to None before G6");
+			Assert::IsTrue(LightPrevStateOf(PR::Pending, n) == LightPrevState::None);
+			Assert::AreEqual<unsigned long long>(2, n.load(), L"two Pending reads counted");
+			const FallbackCatalog::Decision d = FallbackCatalog::SkeletonGpuLightPending(n.load());
+			Assert::IsTrue(d.engaged, L"engaged after a Pending read");
+			Assert::IsTrue(d.id == "skeleton_gpu_light_pending", L"the id the status lists");
+			Assert::IsTrue(d.reason.find("light level: pending (G6 not wired)") == 0, L"the text names G6");
+			Assert::IsTrue(d.reason.find("2 time(s)") != std::string::npos, L"the count is shown");
+		}
+
 		// (e) The pass GLSL is pinned (FNV-1a 64 over header, newline, body). pinned from the first WARP run; re-pin deliberately
 		// (the value is logged).
 		BEGIN_TEST_METHOD_ATTRIBUTE(PassFingerprintIsPinned)

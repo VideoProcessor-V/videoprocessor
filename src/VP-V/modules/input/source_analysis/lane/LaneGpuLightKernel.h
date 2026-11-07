@@ -28,6 +28,7 @@
 #include <VP-V/modules/input/source_analysis/light_level/LightLevelLut.h>
 #include <VP-V/modules/input/source_analysis/light_level/LightLevelSettings.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -55,6 +56,15 @@ namespace VpLaneProducts
 		case VpSkeleton::AnalysisLane::ProductRead::Pending: return LightPrevState::None;
 		default: return LightPrevState::None;
 		}
+	}
+
+	// The same mapping, counting each Pending read as None in `pendingReadAsNone` (the skeleton shows it as skeleton_gpu_light_pending:
+	// the mapping is a visible downgrade, never silent).
+	inline LightPrevState LightPrevStateOf(VpSkeleton::AnalysisLane::ProductRead::State s, std::atomic<uint64_t>& pendingReadAsNone)
+	{
+		if (s == VpSkeleton::AnalysisLane::ProductRead::Pending)
+			pendingReadAsNone.fetch_add(1, std::memory_order_relaxed);
+		return LightPrevStateOf(s);
 	}
 
 	inline bool LightPrevReadable(LightPrevState s) { return s == LightPrevState::Ring || s == LightPrevState::Live; }

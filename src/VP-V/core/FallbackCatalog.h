@@ -572,6 +572,14 @@ namespace FallbackCatalog
 		return failures == 0 ? Released("skeleton_gpu_failed")
 		                     : Engaged("skeleton_gpu_failed", "dispatch failed " + std::to_string(failures) + " time(s): " + (lastError.empty() ? std::string("no reason recorded") : lastError));
 	}
+	// P12's begin gate read a previous frame that is still Pending (a live fill recorded for the Entrance phase, which nothing runs
+	// before G6) as "not made": P12(N) started without a previous frame and the one-pole smoothing restarted. Engaged from the
+	// first such read; `count` is how many times it happened.
+	inline Decision SkeletonGpuLightPending(uint64_t count)
+	{
+		return count == 0 ? Released("skeleton_gpu_light_pending")
+		                  : Engaged("skeleton_gpu_light_pending", "light level: pending (G6 not wired): the previous P12 frame was read as not made " + std::to_string(count) + " time(s); the smoothing restarted");
+	}
 	// P10c (the chroma planes of the grain split) is not made until the source ring exists.
 	inline Decision SkeletonGpuChroma(bool declined)
 	{
