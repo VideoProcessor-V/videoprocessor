@@ -50,10 +50,14 @@ VP owns two file pairs in this folder (moved by `git mv` in M2 step 10): `Source
 ### Data flow (VP)
 
 1. LibplaceboVideoRenderer.cpp (render thread, once per new source frame) calls `Frame` with the native, unwarped, not re-based frame (`renderImage`). Every `intervalSeconds` (0.5 s) a compute shader copies 8 tiles (16 with the dense grid) of plane 0, inside the crop, into one of two readback buffers. Finished copies are collected without waiting (`pl_buf_poll(..., 0)`) and handed to the worker; a newer copy replaces one the worker has not started. A change of the source signature (size, system, levels, bits, transfer, primaries) is a discontinuity. Dolby Vision is read on its decoded I plane.
-2. The worker runs `SourceResolution::Analyse` per tile and `ReadFrame`. It then updates three trackers (both axes, vertical, horizontal; the per-axis ones need twice the evidence), the live reading (median over about 2 s), the coherence-based confidence, the smoothed bitrate quality and effective bits, and the kernel votes (KernelInverse; see the scaling.rebase README). It writes the `Snapshot` and a history CSV ("source-resolution <date>.csv" beside the log; newest 1200 rows, rewritten every few seconds; newest 5 sessions kept).
+2. The worker runs `SourceResolution::Analyse` per tile and `ReadFrame`. It then updates three trackers (both axes, vertical, horizontal; the per-axis ones need twice the evidence), the live reading (median over about 2 s), the coherence-based confidence, the smoothed bitrate quality and effective bits, and the kernel votes (KernelInverse; see the scaling.rebase README). It writes the `Snapshot` and the SESSION-LONG history CSV ("source-resolution <yyyymmdd-hhmmss>.csv" beside the log, appended every few seconds; at 20 MB it continues in "...-002.csv", "-003" of the same session; the newest 5 sessions are kept, all their files; `SourceHistoryLog.h`). Its columns after `note` (per-axis frame readings, `detail_above`, `mixed`, `blank` / `cut` / `fade` flags, the 2:1 kernel, the classical snapshot behind the votes, the `sid_*` record) let the identity consensus be replayed from the file alone (see "History CSV" below).
 3. The host then pushes the selection and the setters from the active settings. In `auto` it calls `AutoFactors(width, height, source_resolution_auto_min_confidence, ...)`. Engaging waits for a cut, a real black, a fast pan or a low-detail moment (latch fixes), else crossfades after `source_resolution_engage_max_wait_s`. A return to native is immediate on detail above the re-based height or a discontinuity, and at the next cut (at most 5 s) when only the confidence fell. The host turns the result into `rebaseFactor` / `rebaseFactorX` and, with the latch fixes, `rebaseFade` / `rebaseFromFactor(X)` from `AutoTransition`.
 4. Look-ahead (`auto` only): the render loop passes up to 4 queued frames through `LookAheadFrame`, sampling luma through Bill's `AnalysisLumaSource`. The host passes the whole frame, not the active picture. A cheap 32 x 32-sample check per tile finds a cut or black ahead. While a change is pending, the first frame with picture after it is copied and analysed on the look-ahead worker, and `AutoFactor` engages exactly at that frame or cancels the change.
 5. Other readers of `Read()`: the kernel for the re-base (`rebase_kernel_match`), VP deband and detail restore strength, low-bitrate handling, the residual grain guard, and the stats/status line (`Describe`). The host reports discontinuities on resync/source change, live queue reset (seek or skip) and file seek/step/rate change.
+
+### History CSV (SID-B0)
+
+`SourceHistoryLog.h/.cpp` (C++14, Win32 file calls with wide paths): `Append` only queues a row in a bounded in-memory queue under a short lock and never waits on the disk (it is called from the render thread too); the analysis worker flushes (`FlushHistory`), appending. `Open` does no disk work either: the first flush creates the folder, deletes the earlier sessions beyond the newest 4, and creates the base file with the header and the session row. At `kDefaultRotateBytes` (20 MB) it continues in the next numbered file of the same session (each starts with the header; a row never straddles files). A failed write or dropped rows (queue bound `kDefaultQueueRows` 20000: the OLDEST rows are dropped, counted) are reported once as a log line and stay on the stats line (`Snapshot::historyNote`) while they last. Free-text notes are CSV-quoted and every row (also session / auto / discontinuity / would_be rows) has the full 39 columns. Columns after `note`: `mode, t_src, seq, frame_ratio_v, frame_ratio_h, detail_above, mixed, blank, cut, fade, apl, axis_x, axis_y, axis_conf, kernel_id, kernel, kernel_votes, kernel_agree, frame_quality, frame_noise, sid_tier, sid_level, sid_ratio_h, sid_ratio_v, sid_reason`; `mode` is the source-identity mode (off / shadow / on), the `sid_*` columns are filled while the pipeline runs, and `detail_above` is the classical safety veto flag as it was fed to the consensus. Behaviour changes (VP's own file, not Bill's): the file is appended, not rewritten (the whole session is kept, not the newest ~10 minutes); a session may span several files; rows have 25 more columns.
 
 ### Threading (VP)
 
@@ -190,6 +194,26 @@ Checked and found not worth changing:
 - **Scene and LED statistics are not shared with subtitle detection.** Of the overlaps the task listed, only bar finding was checked (item 8).
 
 Cost when off: zero detection work. `type` = `off` and `classic` both leave `SubtitlePreviewMode::None`, so `SubtitlePreviewEnabled` is false. No `QueueSubtitleMeasurement`, no queue observations and no caption probes run, and the worker thread is never started (it starts on the first submit). Detection runs only for `black` and `generated_gray`. The only subtitle-module code still reached is `ExtractSubtitleBarEvidence` (about 0.3-0.8 ms), called by the crop path's `RecoverSubtitleInspectionBars` under its narrow trusted-bars conditions.
+
+## Tuning (not in Config)
+
+Code defaults of the history CSV that are not config keys (each fixed in code):
+
+| Name | Meaning | Default |
+|---|---|---|
+| `SourceHistory::kDefaultRotateBytes` | the history CSV rotates to the next numbered file | 20 MB |
+| `Monitor::kHistorySessions` | history sessions kept (all their files) | 5 |
+| `SourceHistory::kDefaultQueueRows` | in-memory rows between two flushes; beyond it the oldest are dropped, counted and reported | 20000 |
+
+## Environment and diagnostics
+
+| Name | Purpose | Default | Scope (test/debug/runtime) |
+|---|---|---|---|
+| history CSV | `source-resolution <stamp>[-NNN].csv` beside vp.log (the replay input) | on when the log folder is set | debug |
+
+## Status lines (history CSV)
+
+- A failed history write or dropped rows: `source history CSV: write failed (<reason>)` / `source history CSV: rows dropped: N` (one log line each, and the stats line while it lasts).
 
 ## Settings
 

@@ -246,6 +246,10 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\SourceHistoryLog.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\repair\deband\VpDebander.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -384,6 +388,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdConsensusTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\tests\SourceHistoryLogTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\AbrStepDetectorTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceWiringTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelMetadataExtensionTests.cpp" />

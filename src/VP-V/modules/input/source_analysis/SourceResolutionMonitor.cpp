@@ -332,73 +332,41 @@ if (tile < int(tiles) && g.y < ts) {
 	void Monitor::SetHistoryFolder(const std::string& folder)
 	{
 		std::lock_guard<std::mutex> lock(mutex);
-		if (folder.empty()) { historyPath.clear(); return; }
-		CreateDirectoryA(folder.c_str(), nullptr);
-		// The sessions kept: the newest kHistorySessions - 1 earlier files (names sort by time), plus this one.
-		std::vector<std::string> earlier;
-		WIN32_FIND_DATAA found{};
-		HANDLE search = FindFirstFileA((folder + "\\source-resolution *.csv").c_str(), &found);
-		if (search != INVALID_HANDLE_VALUE)
-		{
-			do earlier.push_back(found.cFileName);
-			while (FindNextFileA(search, &found));
-			FindClose(search);
-		}
-		std::sort(earlier.begin(), earlier.end());
-		while (earlier.size() > kHistorySessions - 1)
-		{
-			DeleteFileA((folder + "\\" + earlier.front()).c_str());
-			earlier.erase(earlier.begin());
-		}
+		if (folder.empty()) { historyLog.Open(std::string(), std::string(), std::string()); return; }
 		SYSTEMTIME t{};
 		GetLocalTime(&t);
-		char name[64];
-		snprintf(name, sizeof(name), "source-resolution %04u%02u%02u-%02u%02u%02u.csv", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
-		historyPath = folder + "\\" + name;
+		char stamp[32];
+		snprintf(stamp, sizeof(stamp), "%04u%02u%02u-%02u%02u%02u", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
 		char started[96];
-		snprintf(started, sizeof(started), "session,,,,,,,,,,,,,session started %04u-%02u-%02u %02u:%02u:%02u",
+		snprintf(started, sizeof(started), "session started %04u-%02u-%02u %02u:%02u:%02u",
 			t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
-		history.clear();
-		Record(started);
+		// The sessions kept: the newest kHistorySessions - 1 earlier ones (their names sort by time), plus this one.
+		historyLog.Open(folder, stamp, Clock() + ",session" + std::string(12, ',') + started + SourceHistory::EmptyExtras(),
+			kHistorySessions, historyRotateBytes > 0 ? historyRotateBytes : SourceHistory::kDefaultRotateBytes);
 	}
 
-	void Monitor::Record(const std::string& row)
+	void Monitor::Record(const std::string& row, const std::string& extras)
 	{
-		history.push_back(Clock() + "," + row);
-		while (history.size() > kHistoryRows)
-		{
-			// The session row stays first.
-			if (history.size() > 1 && history.front().find(",session,") != std::string::npos)
-				history.erase(history.begin() + 1);
-			else
-				history.pop_front();
-		}
-		historyDirty = true;
+		historyLog.Append(Clock() + "," + row + extras);
 	}
 
 	void Monitor::FlushHistory(bool force)
 	{
-		std::string path;
-		std::string text;
 		{
 			std::lock_guard<std::mutex> lock(mutex);
 			const auto now = std::chrono::steady_clock::now();
-			if (historyPath.empty() || !historyDirty || (!force && now - lastFlush < std::chrono::seconds(5))) return;
+			if (!historyLog.IsOpen() || !historyLog.Dirty() || (!force && now - lastFlush < std::chrono::seconds(5))) return;
 			lastFlush = now;
-			historyDirty = false;
-			path = historyPath;
-			text = "time,event,frame_ratio,coherence_v,coherence_h,live,declared,confidence,bitrate_quality,effective_bits,cuts,"
-				"tiles,auto_ratio,note\n";
-			for (const std::string& row : history) text += row + "\n";
 		}
-		// Temp + replace: a reader never sees a half-written file.
-		const std::string temp = path + ".tmp";
-		FILE* f = nullptr;
-		if (fopen_s(&f, temp.c_str(), "wb") != 0 || !f) return;
-		const bool written = fwrite(text.data(), 1, text.size(), f) == text.size();
-		fclose(f);
-		if (written) MoveFileExA(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
-		else DeleteFileA(temp.c_str());
+		// Append the queued rows (worker thread only; the log's queue lock is never held across the disk write).
+		historyLog.Flush();
+		// A failed write or dropped rows are visible: one log line each, and the standing note on the status line.
+		std::string note;
+		while (historyLog.TakeNotice(note))
+			DebugLog::Log("%s", note.c_str());
+		const std::string status = historyLog.Status();
+		std::lock_guard<std::mutex> lock(mutex);
+		snapshot.historyNote = status;
 	}
 
 	void Monitor::Release(pl_gpu g)
@@ -924,7 +892,7 @@ if (tile < int(tiles) && g.y < ts) {
 		snapshot.confidence = 0.0;
 		snapshot.discontinuities = tracker.Discontinuities();
 		snapshot.lastDiscontinuity = cause;
-		Record(std::string("discontinuity,,,,,1,0,,,,,") + "1," + cause);
+		Record(std::string("discontinuity,,,,,1,0,,,,,") + "1," + SourceHistory::Field(cause));
 	}
 
 	void Monitor::Analyse(Job& j)
@@ -1207,10 +1175,19 @@ if (tile < int(tiles) && g.y < ts) {
 		snapshot.tiles = j.tiles;
 		if (sourceIdNoticeDirty.exchange(false, std::memory_order_acq_rel))
 			sourceId.SetNoticeEnabled(sourceIdNotice.load(std::memory_order_acquire));
+		// "Detail above the re-based size": every tracker is back to native with nothing gathered below it, on an
+		// informative frame (the classical safety veto; consensus may not hold a re-base the evidence no longer has).
+		const bool detailAbove = frame.informative() && tracker.Ratio() >= 1.0 && tracker.Candidate() >= 1.0 &&
+			trackerV.Ratio() >= 1.0 && trackerV.Candidate() >= 1.0 && trackerH.Ratio() >= 1.0 && trackerH.Candidate() >= 1.0;
+		const uint64_t rowSequence = j.sequence != 0 ? j.sequence : snapshot.frames;
+		const bool cutFlag = snapshot.cuts != sourceIdLastCuts;
+		sourceIdLastCuts = snapshot.cuts;
+		bool haveRecord = false;
+		SourceIdentity::Record rec;
 		if (idOn)
 		{
 			SourceIdentity::FrameInput in;
-			in.seq = j.sequence != 0 ? j.sequence : snapshot.frames;
+			in.seq = rowSequence;
 			in.timeUs = static_cast<int64_t>(std::llround(j.seconds * 1e6));
 			in.streamKey = j.streamKey;
 			in.classical.reading = snapshot.reading;
@@ -1223,16 +1200,12 @@ if (tile < int(tiles) && g.y < ts) {
 			in.classical.kernelVotes = snapshot.kernelVotes;
 			in.classical.kernelAgree = snapshot.kernelAgree;
 			VpUnit::SourceQuality::CopyClassical(in.classical, snapshot);   // U12
-			// "Detail above the re-based size": every tracker is back to native with nothing gathered below it, on an
-			// informative frame (the classical safety veto; consensus may not hold a re-base the evidence no longer has).
-			in.classical.detailAbove = frame.informative() && tracker.Ratio() >= 1.0 && tracker.Candidate() >= 1.0 &&
-				trackerV.Ratio() >= 1.0 && trackerV.Candidate() >= 1.0 && trackerH.Ratio() >= 1.0 && trackerH.Candidate() >= 1.0;
+			in.classical.detailAbove = detailAbove;
 			in.deliveredRatio = frame.informative() ? frame.ratio : 0.0;
 			in.noise = idNoise;
 			in.apl = frame.mean;
 			in.blank = !frame.informative();
-			in.cut = snapshot.cuts != sourceIdLastCuts;
-			sourceIdLastCuts = snapshot.cuts;
+			in.cut = cutFlag;
 			in.nativeHeight = j.nativeHeight;
 			const unsigned long long eventsBefore = sourceId.Events();
 			sourceId.Push(in);
@@ -1241,30 +1214,40 @@ if (tile < int(tiles) && g.y < ts) {
 			snapshot.frameQuality = sourceId.LastFrameQuality();
 			snapshot.frameNoise = sourceId.LastNoise();
 			// SHADOW: what the consensus would have changed, one line per field; the classical decision stands.
+			haveRecord = sourceId.Held().ReadLatest(0, rec);
 			if (idMode == SourceIdMode::Shadow)
 				for (const std::string& line : SourceIdentity::WouldBeLines(sourceId.LastResult()))
+				{
 					DebugLog::Log("%s", line.c_str());
+					Record("would_be" + std::string(12, ',') + SourceHistory::Field(line));
+				}
 		}
 		char row[256];
 		snprintf(row, sizeof(row), "reading,%.4f,%.3f,%.3f,%.4f,%.4f,%.2f,%.2f,%.1f,%llu,%d/%d,%.4f,%.1f ms",
 			frame.ratio, frame.vertical.coherence, frame.horizontal.coherence, snapshot.liveRatio, snapshot.declaredRatio,
 			snapshot.confidence, VpUnit::SourceQuality::Of(snapshot), snapshot.effectiveBits, snapshot.cuts, frame.informativeTiles,
 			frame.tiles, autoAppliedShared.load(std::memory_order_acquire), snapshot.analyseMs);
-		if (idOn)
 		{
-			SourceIdentity::Record rec;
-			if (sourceId.Held().ReadLatest(0, rec))
-			{
-				char cols[200];
-				snprintf(cols, sizeof(cols), ",sid,%.4f,%.2f,%d,%.4f,%.4f,%.4f,%s", snapshot.frameQuality, snapshot.frameNoise, rec.tier,
-					rec.level, rec.ratioH, rec.ratioV, SourceIdentity::ReasonText(static_cast<SourceIdentity::ReasonCode>(rec.reason[static_cast<int>(SourceIdentity::Field::Quality)])));
-				Record(std::string(row) + cols);
-			}
+			// The replay / identity columns (SourceHistory::Header): the frame's own readings and flags, the classical snapshot
+			// behind the votes, then the consensus record (sid_*) when the pipeline runs.
+			const std::vector<KernelInverse::Candidate>& kernels = KernelInverse::Candidates();
+			const std::string kernelName = snapshot.kernel >= 0 && snapshot.kernel < static_cast<int>(kernels.size())
+				? SourceHistory::Field(kernels[static_cast<size_t>(snapshot.kernel)].name) : std::string();
+			char cols[640];
+			const int n = snprintf(cols, sizeof(cols), ",%s,%.6f,%llu,%.4f,%.4f,%d,%d,%d,%d,%d,%.6f,%.4f,%.4f,%.3f,%d,%s,%d,%d",
+				idMode == SourceIdMode::On ? "on" : idMode == SourceIdMode::Shadow ? "shadow" : "off", j.seconds,
+				static_cast<unsigned long long>(rowSequence), frame.ratioV, frame.ratioH, detailAbove ? 1 : 0, frame.mixed ? 1 : 0,
+				frame.informative() ? 0 : 1, cutFlag ? 1 : 0, 0 /* fade: no fade source is fed today */, frame.mean,
+				snapshot.axisRatioX, snapshot.axisRatioY, snapshot.axisConfidence, snapshot.kernel,
+				kernelName.c_str(), snapshot.kernelVotes, snapshot.kernelAgree);
+			if (idOn && haveRecord)
+				snprintf(cols + n, sizeof(cols) - static_cast<size_t>(n), ",%.6f,%.2f,%d,%.4f,%.4f,%.4f,%s", snapshot.frameQuality, snapshot.frameNoise,
+					rec.tier, rec.level, rec.ratioH, rec.ratioV,
+					SourceHistory::Field(SourceIdentity::ReasonText(static_cast<SourceIdentity::ReasonCode>(rec.reason[static_cast<int>(SourceIdentity::Field::Quality)]))).c_str());
 			else
-				Record(row);
+				snprintf(cols + n, sizeof(cols) - static_cast<size_t>(n), ",,,,,,,");
+			Record(row, cols);
 		}
-		else
-			Record(row);
 		if (bound)
 		{
 			PushHeld(j, workerReset);
@@ -1455,7 +1438,7 @@ if (tile < int(tiles) && g.y < ts) {
 			char row[160];
 			snprintf(row, sizeof(row), "auto,,,,,%.4f,%.2f,,,%llu,,%.4f,", s.declaredRatio, s.confidence, s.cuts, autoApplied);
 			std::lock_guard<std::mutex> lock(mutex);
-			Record(row + why);
+			Record(row + SourceHistory::Field(why));
 		}
 		return autoApplied;
 	}
@@ -1553,7 +1536,7 @@ if (tile < int(tiles) && g.y < ts) {
 			snprintf(row, sizeof(row), "auto,,,,,%.4f,%.2f,,,%llu,,%.4f x %.4f,", s.axisRatioY, s.axisConfidence, s.cuts, axisApplied[0], axisApplied[1]);
 			{
 				std::lock_guard<std::mutex> lock(mutex);
-				Record(row + axisWhy);
+				Record(row + SourceHistory::Field(axisWhy));
 			}
 			why = why.empty() ? axisWhy : why + "; " + axisWhy;
 		}
@@ -1924,7 +1907,8 @@ if (tile < int(tiles) && g.y < ts) {
 
 	std::string Describe(const Snapshot& s, double autoRatio, bool autoSelected)
 	{
-		const std::string text = DescribeBase(s, autoRatio, autoSelected);
+		std::string text = DescribeBase(s, autoRatio, autoSelected);
+		if (!s.historyNote.empty()) text += "; " + s.historyNote;
 		if (!s.frameBound) return text;
 		char bound[200];
 		snprintf(bound, sizeof(bound), "; frame-bound D=%u: held %u, dropped %llu, stale %llu, jobs dropped %llu, copies skipped %llu, waits missed %llu, clock steps back %llu",

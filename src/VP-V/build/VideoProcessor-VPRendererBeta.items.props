@@ -29,6 +29,7 @@
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\DynamicDriveFrame.cpp" />
     <ClCompile Include="..\VP-V\modules\scaling\rebase\SourceRebase.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\SourceResolutionMonitor.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\SourceHistoryLog.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\VP-V\modules\repair\deband\VpDebander.cpp" />
     <ClCompile Include="..\VP-V\modules\repair\texture_restore\DetailPulse.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CrossfadeMix.cpp" />
