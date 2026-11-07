@@ -4,7 +4,7 @@
 // camera_eval: offline CPU evaluation driver for VP's global camera model (CameraModel::Fitter and the
 // measurement plan / reference matcher). Not part of the solution; see README.md and build_camera_eval.bat.
 //
-//   camera_eval fit   --vec DIR --frames N --w W --h H --block 16 --fps F --out FILE.camf [--csv FILE] [--phase1] [--two-layer [--tl-ring F] [--tl-swap S] [--tl-veto R] [--tl-floor F] [--tl-comp R]]
+//   camera_eval fit   --vec DIR --frames N --w W --h H --block 16 --fps F --out FILE.camf [--csv FILE] [--phase1] [--two-layer [--dyn-texture [--dt-share F] [--dt-temporal F] [--dt-spatial F] [--dt-agree F]] [--tl-ring F] [--tl-swap S] [--tl-veto R] [--tl-floor F] [--tl-comp R]]
 //   camera_eval match --yuv CODED.yuv --w W --h H --bitdepth 10 --frames N --vec DIR --ref DIR --fps F
 //                     [--start 2] [--count 40] [--phase1] [--dump-flo DIR] --out FILE.csv
 //
@@ -128,11 +128,18 @@ static bool ReadPair(const std::string& dir, int t, int gridW, int gridH, int bl
 // Two-layer constant overrides (tuning): ring fraction, swap seconds, border veto ratio, continuity floor, competitor min ratio.
 // A negative entry keeps the Config default.
 static double g_tl[5] = { -1, -1, -1, -1, -1 };
+// Dynamic-texture detector overrides (tuning): minShare, minTemporal, minSpatial, agreeRatio. Negative = Config default.
+static double g_dt[4] = { -1, -1, -1, -1 };
 
-static Config MakeConfig(bool phase1, bool twoLayer = false)
+static Config MakeConfig(bool phase1, bool twoLayer = false, bool dynTexture = false)
 {
 	Config c;
 	c.twoLayer = twoLayer;
+	c.dynTexture = dynTexture;
+	if (g_dt[0] >= 0) c.dynTextureCfg.minShare = g_dt[0];
+	if (g_dt[1] >= 0) c.dynTextureCfg.minTemporal = g_dt[1];
+	if (g_dt[2] >= 0) c.dynTextureCfg.minSpatial = g_dt[2];
+	if (g_dt[3] >= 0) c.dynTextureCfg.agreeRatio = g_dt[3];
 	if (g_tl[0] >= 0) c.borderRingFraction = g_tl[0];
 	if (g_tl[1] >= 0) c.layerSwapSeconds = g_tl[1];
 	if (g_tl[2] >= 0) c.borderVetoRatio = g_tl[2];
@@ -172,7 +179,7 @@ struct Args
 	std::string mode, vec, ref, yuv, out, csv, dumpFlo;
 	int N = 0, W = 0, H = 0, block = 16, bitdepth = 10, start = 2, count = 40;
 	double fps = 0;
-	bool phase1 = false, twoLayer = false;
+	bool phase1 = false, twoLayer = false, dynTexture = false;
 };
 
 static bool Parse(int argc, char** argv, Args& a)
@@ -199,6 +206,11 @@ static bool Parse(int argc, char** argv, Args& a)
 		else if (s == "--fps") a.fps = atof(next());
 		else if (s == "--phase1") a.phase1 = true;
 		else if (s == "--two-layer") a.twoLayer = true;
+		else if (s == "--dyn-texture") a.dynTexture = true;
+		else if (s == "--dt-share") g_dt[0] = atof(next());
+		else if (s == "--dt-temporal") g_dt[1] = atof(next());
+		else if (s == "--dt-spatial") g_dt[2] = atof(next());
+		else if (s == "--dt-agree") g_dt[3] = atof(next());
 		else if (s == "--tl-ring") g_tl[0] = atof(next());
 		else if (s == "--tl-swap") g_tl[1] = atof(next());
 		else if (s == "--tl-veto") g_tl[2] = atof(next());
@@ -217,13 +229,13 @@ static int RunFit(const Args& a)
 		return 2;
 	}
 	Geometry g; g.W = a.W; g.H = a.H; g.block = a.block; g.fps = a.fps; g.gridW = a.W / a.block; g.gridH = a.H / a.block;
-	Fitter fit(MakeConfig(a.phase1, a.twoLayer));
+	Fitter fit(MakeConfig(a.phase1, a.twoLayer, a.dynTexture));
 	FILE* csv = nullptr;
 	if (!a.csv.empty())
 	{
 		csv = fopen(a.csv.c_str(), "wb");
 		if (!csv) { Fail("cannot write " + a.csv); return 2; }
-		fprintf(csv, "pair,valid,type,reason,confidence,samples,hypotheses,inlierShare,precision,coverage,temporal,conditioning,engineAgreement,inverse,ambiguity,logit,h0,h1,h2,h3,h4,h5,h6,h7,h8,labUnknown,labCamera,labObject,labOverlay,fitUs,layerFlags,layerRisk,border,continuity,haveObject,objId,objBlocks,objH2,objH5\n");
+		fprintf(csv, "pair,valid,type,reason,confidence,samples,hypotheses,inlierShare,precision,coverage,temporal,conditioning,engineAgreement,inverse,ambiguity,logit,h0,h1,h2,h3,h4,h5,h6,h7,h8,labUnknown,labCamera,labObject,labOverlay,fitUs,layerFlags,layerRisk,border,continuity,haveObject,objId,objBlocks,objH2,objH5,dynShare,dynTemporal,dynSpatial,dynField,verdictFlags\n");
 	}
 	struct Rec { int valid, type; double conf, h[9]; std::vector<uint8_t> label; };
 	std::vector<Rec> recs;
@@ -249,8 +261,8 @@ static int RunFit(const Args& a)
 			for (int i = 0; i < 9; ++i) fprintf(csv, ",%.9g", r.h[i]);
 			fprintf(csv, ",%.5f,%.5f,%.5f,%.5f", nl[0] / nb, nl[1] / nb, nl[2] / nb, nl[3] / nb);
 			const ObjectModel& ol = m.objectLayer;
-			fprintf(csv, ",%.1f,%u,%.4f,%.4f,%.4f,%d,%u,%u,%.6g,%.6g\n", fitUs, (unsigned)m.layerFlags, m.layerRisk, s.border, s.continuity,
-				m.haveObjectLayer ? 1 : 0, (unsigned)ol.id, ol.blocks, ol.h[2], ol.h[5]);
+			fprintf(csv, ",%.1f,%u,%.4f,%.4f,%.4f,%d,%u,%u,%.6g,%.6g,%.4f,%.4f,%.4f,%.4f,%u\n", fitUs, (unsigned)m.layerFlags, m.layerRisk, s.border, s.continuity,
+				m.haveObjectLayer ? 1 : 0, (unsigned)ol.id, ol.blocks, ol.h[2], ol.h[5], s.dynShare, s.dynTemporal, s.dynSpatial, s.dynField, (unsigned)m.verdictFlags);
 		}
 	}
 	if (csv) fclose(csv);

@@ -313,7 +313,7 @@ namespace CameraLink
 			char b[512];
 			std::snprintf(b, sizeof(b), "%llu,%llu,%llu,%.9g,%s,%.6g,%d,%.9g/%.9g/%.9g/%.9g/%.9g/%.9g/%.9g/%.9g/%.9g,%lld,%d,%d\n",
 				(unsigned long long)job.seq, (unsigned long long)rec->pairFrom, (unsigned long long)rec->pairTo, rec->pairSeconds,
-				CameraModel::ReasonText(rec->reason), rec->confidence, int(rec->params.type),
+				CameraModel::ReasonTextOf(rec->reason, rec->verdictFlags), rec->confidence, int(rec->params.type),
 				rec->params.h[0], rec->params.h[1], rec->params.h[2], rec->params.h[3], rec->params.h[4], rec->params.h[5],
 				rec->params.h[6], rec->params.h[7], rec->params.h[8],
 				(long long)rec->costMicros, o == PublishOutcome::Published ? 0 : 1, o == PublishOutcome::Published ? 1 : 0);

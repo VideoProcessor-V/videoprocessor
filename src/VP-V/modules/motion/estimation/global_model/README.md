@@ -23,6 +23,7 @@ texture), and to narrow the matcher's search.
 | `GlobalModelGeometry.h/.cpp` | minimal solvers, weighted LS, invert/compose, decomposition, interpolation, degeneracy tests |
 | `GlobalModelFit.h/.cpp` | `PairInput`, `Config`, `Fitter` (plan section 1 steps 1-11) |
 | `GlobalModelTemporal.h/.cpp` | `TemporalFilter` (prediction + consistency only), `FixedLagSmoother` |
+| `DynamicTexture.h/.cpp` | `DetectDynamicTexture`: water-like whole-frame dynamic-texture detector (`Config::dynTexture`; Ambiguous + `verdictFlags`) |
 | `GlobalModelObjects.h/.cpp` | 1-3 object models with persistent ids (only when `Config::objects`) |
 | `PixelResidualReference.h/.cpp` | CPU reference / shader-mirror spec of the tiny-mover measure (not on the runtime path yet) |
 | `CameraAccessor.h` | per-consumer policy, blend state, `FieldVector` (pure, header-only) |
