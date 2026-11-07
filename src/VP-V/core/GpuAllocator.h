@@ -360,7 +360,8 @@ struct ProductTexLayout {
         if (!hasAbs)
             return BytesPerBuffer(d) == BytesOf(decl.size, d);
         const size_t n = decl.size.termCount < decl.size.terms.size() ? size_t(decl.size.termCount) : decl.size.terms.size();
-        if (decl.size.fixedBytes != 0 || n == 0)
+        // fixedBytes (P12 LUT, 16 KB) is a texture the kernel holds itself, not a grid term: not compared here.
+        if (n == 0)
             return false;
         std::map<uint8_t, uint64_t> declRate, layoutRate;
         for (size_t i = 0; i < n; ++i)
