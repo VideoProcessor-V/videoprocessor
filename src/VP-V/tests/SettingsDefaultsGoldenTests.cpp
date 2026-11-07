@@ -84,7 +84,7 @@ namespace SettingsDefaultsGoldenTest
 			std::ostringstream out;
 			out.imbue(std::locale::classic());
 			out << "# CPU defaults golden (SettingsDefaultsGoldenTests). Regenerate with VP_TEST_REGOLDEN=1 after review.\n";
-			const std::string headerText = ReadFile(RepoRoot() + "src\\VideoProcessor-Lib\\RendererProfileConfig.h");
+			const std::string headerText = ProfileSchemaSourceText();
 			const std::vector<std::string> vpvList = VpvKeys(headerText);
 			const std::set<std::string> vpvKeys(vpvList.begin(), vpvList.end());
 

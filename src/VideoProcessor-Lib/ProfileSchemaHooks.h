@@ -17,6 +17,7 @@
 #ifdef PROFILE_SCHEMA_EXTENSION_HEADER
 #include PROFILE_SCHEMA_EXTENSION_HEADER
 #else
+#pragma detect_mismatch("vpv_schema_hooks", "0")
 namespace ProfileSchemaHooks
 {
 	enum class Verdict { NotMine, Valid, Invalid };

@@ -380,8 +380,8 @@ fp live=g7 restart=g6
 + outputRange=full
 + outputGamma=2.2
 + calibrationLutEnabled=1
-+ calibrationLutBt709Path=C:\Users\ADMIN\AppData\Local\Temp\vp-identity-tests-52432\luts\Projector-Rec709.cube
-+ calibrationLutConstrainedBaseDirectory=C:\Users\ADMIN\AppData\Local\Temp\vp-identity-tests-52432\
++ calibrationLutBt709Path=%TMP%\luts\Projector-Rec709.cube
++ calibrationLutConstrainedBaseDirectory=%TMP%\
 + profileValues=profiles.display.rec709_projector{calibration_lut_bt709=luts\Projector-Rec709.cube;calibration_lut_enabled=true;output_gamma=2.2;report_bt2020_to_display=false;sdr_black_nits=0;sdr_target_nits=100;sdr_target_primaries=REC709;when=$key=="F5";}profiles.output.standard{diagnostic_disable_shader_cache=OFF;output_diagnostics=OFF;output_presentation=DIRECT;output_range=FULL;output_transport_gamma=AUTO;}profiles.viewport.normal{when=$key=="F3";}
 ### sample test-fixtures/deployed-VideoProcessor-20260807-current.cfg
 fp live=g8 restart=g7

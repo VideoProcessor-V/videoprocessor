@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#pragma detect_mismatch("vpv_schema_hooks", "1")
+
 // The VP-V keys, sections and constants of the startup schema (MainConfigSchema.h), moved out of the host
 // header (M2 P3-7). MainSchemaHooks.h includes this header when the build defines
 // MAIN_SCHEMA_EXTENSION_HEADER (Directory.Build.targets); a build without it gets inert hooks. It is a

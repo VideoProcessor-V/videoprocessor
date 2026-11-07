@@ -36,6 +36,14 @@ namespace SettingsTestSupport
 		return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 	}
 
+	// The renderer profile schema source: the host header plus the VP-V schema header it includes
+	// (M2 P3-7 moved the VP-V keys and the [vpv] list there). Source-text tests read this.
+	inline std::string ProfileSchemaSourceText()
+	{
+		return ReadFile(RepoRoot() + "src\\VideoProcessor-Lib\\RendererProfileConfig.h") + "\n" +
+			ReadFile(RepoRoot() + "src\\VP-V\\modules\\control\\config\\VpvSchemaKeys.h");
+	}
+
 	inline std::string Here()
 	{
 		char here[MAX_PATH] = {};

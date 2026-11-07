@@ -92,7 +92,10 @@ namespace RendererSettingsIdentityTest
 				std::vector<char> buffer(1 << 20);
 				const int n = dump_(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
 				if (n <= 0) return std::string();
-				return Normalise(buffer.data());
+				std::string result = Normalise(buffer.data());
+				// The per-process temp folder is not part of the identity: written as %TMP%\ (deterministic dump).
+				for (size_t at; (at = result.find(folder_)) != std::string::npos;) result.replace(at, folder_.size(), "%TMP%\\");
+				return result;
 			}
 
 		private:

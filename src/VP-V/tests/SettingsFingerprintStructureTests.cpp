@@ -123,7 +123,7 @@ namespace SettingsFingerprintStructure
 
 	inline std::string HeaderText()
 	{
-		return ReadFile(RepoRoot() + "src\\VideoProcessor-Lib\\RendererProfileConfig.h");
+		return ProfileSchemaSourceText();
 	}
 
 	// The body of one validator function in the header (to the next top-level inline function).
@@ -145,6 +145,12 @@ namespace SettingsFingerprintStructure
 			for (std::sregex_iterator it(body.begin(), body.end(), marker), last; it != last; ++it)
 				keys.insert((*it)[1].str());
 		}
+		// M2 P3-7: the VP-V keys live in VpvSchemaKeys.h (appended to the text by ProfileSchemaSourceText);
+		// all of it is validator code.
+		const size_t vpvPart = text.find("namespace ProfileSchemaHooks");
+		if (vpvPart != std::string::npos)
+			for (std::sregex_iterator it(text.begin() + vpvPart, text.end(), marker), last; it != last; ++it)
+				keys.insert((*it)[1].str());
 		return keys;
 	}
 
@@ -288,7 +294,7 @@ namespace SettingsFingerprintStructureTest
 				"calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged", "frame_analysis_store",
 				"resync_event", "entrance_gpu_drain", "hdr_inference" };
 			Assert::IsTrue(std::set<std::string>(vpv.begin(), vpv.end()) == expected,
-				L"the [vpv] keys in RendererProfileConfig.h changed: update IsVpvSectionKey() in RendererCaptureHarnessTests.cpp and this list");
+				L"the [vpv] keys in VpvSchemaKeys.h changed: update IsVpvSectionKey() in RendererCaptureHarnessTests.cpp and this list");
 		}
 
 		// 2b: a validator-accepted probe changes the fingerprint (a live edit of the key is applied).

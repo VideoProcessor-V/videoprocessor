@@ -21,6 +21,7 @@
 #ifdef MAIN_SCHEMA_EXTENSION_HEADER
 #include MAIN_SCHEMA_EXTENSION_HEADER
 #else
+#pragma detect_mismatch("vpv_schema_hooks", "0")
 namespace MainConfigSchema
 {
 	namespace SchemaHooks

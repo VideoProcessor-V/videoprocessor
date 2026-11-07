@@ -10845,6 +10845,7 @@ static std::set<std::string> RendererValidatedKeys()
     {
         std::ifstream vpvFile(path + "VP-V/modules/control/config/VpvSchemaKeys.h", std::ios::binary);
         const std::string vpvText((std::istreambuf_iterator<char>(vpvFile)), std::istreambuf_iterator<char>());
+        require(!vpvText.empty(), "VpvSchemaKeys.h was not found from __FILE__");
         static const std::regex vpvMarker(R"re(\bkey\s*==\s*"([^"]+)")re");
         for (std::sregex_iterator it(vpvText.begin(), vpvText.end(), vpvMarker), last; it != last; ++it)
             keys.insert((*it)[1].str());
