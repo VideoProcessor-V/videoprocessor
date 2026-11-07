@@ -188,7 +188,7 @@ namespace VideoProcessorTest
 			static const char* const kBody = R"GLSL(
 ivec2 blk = ivec2(gl_GlobalInvocationID.xy);
 if (blk.x < fr_grid.x && blk.y < fr_grid.y)
-    imageStore(test_out, blk, vpu_field_refine_block(blk));
+    imageStore(test_out, blk, vpu_field_refine_search(blk));
 )GLSL";
 			Assert::IsTrue(RunCustom(dispatch, FieldRefineSearchGlsl(), kBody, desc, 5, vars, 7, gw, gh), L"the refine shader failed to compile or run");
 			const std::vector<float> got = Download4(gpu, outTex);

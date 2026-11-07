@@ -115,12 +115,17 @@ namespace VpLongPair
 		std::string reason;   // why the hinted session did not run (driver / caps / execute error)
 	};
 
+	inline std::string Reason(const Why& why) { return why.reason.empty() ? std::string("not opened") : why.reason; }
+
+	// Engaged whenever the pair did not run on the NVOF session (hinted when a hint was supplied) or no path worked at all.
 	inline FallbackCatalog::Decision Decision(Path path, const Why& why)
 	{
-		if (path != Path::SeededSearch || !why.hintSupplied)
+		if (path == Path::None && !why.reason.empty())
+			return FallbackCatalog::Engaged("motion long pair", "motion: long-pair flow failed (" + why.reason + "); no long-range correction");
+		if (path != Path::SeededSearch)
 			return FallbackCatalog::Released("motion long pair");
-		return FallbackCatalog::Engaged("motion long pair", "motion: long-pair seeded search (NVOF with hints unavailable: " +
-			(why.reason.empty() ? std::string("not opened") : why.reason) + ")");
+		return FallbackCatalog::Engaged("motion long pair", std::string("motion: long-pair seeded search (NVOF ") +
+			(why.hintSupplied ? "with hints " : "") + "unavailable: " + Reason(why) + ")");
 	}
 
 	inline std::string StatusLine(Path path, const Why& why)
@@ -130,9 +135,10 @@ namespace VpLongPair
 		case Path::NvofHinted: return "motion: long pair NVOF + hints";
 		case Path::NvofUnhinted: return "motion: long pair NVOF (no hint for this pair)";
 		case Path::SeededSearch:
-			return why.hintSupplied ? "motion: long-pair seeded search (NVOF with hints unavailable: " +
-				(why.reason.empty() ? std::string("not opened") : why.reason) + ")" : "motion: long-pair seeded search";
-		default: return "motion: long pair idle";
+			return std::string("motion: long-pair seeded search (NVOF ") + (why.hintSupplied ? "with hints " : "") + "unavailable: " +
+				Reason(why) + ")";
+		default:
+			return why.reason.empty() ? std::string("motion: long pair idle") : "motion: long-pair flow failed (" + why.reason + ")";
 		}
 	}
 }

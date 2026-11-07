@@ -108,7 +108,7 @@ namespace VideoProcessorTest
 		{
 			Assert::AreEqual(4.0 / 28.0, static_cast<double>(SubPel(13, 4, 9)), 1e-6);
 			Assert::AreEqual(0.0, static_cast<double>(SubPel(5, 5, 5)), 0.0);
-			Assert::AreEqual(0.5, static_cast<double>(SubPel(0, 1, 40)), 0.0, L"clamped");
+			Assert::AreEqual(-0.5, static_cast<double>(SubPel(0, 1, 40)), 0.0, L"clamped");
 		}
 
 		TEST_METHOD(SeededSearchFindsAShiftBeyondTheRangeOnlyWithTheHint)
@@ -180,7 +180,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1ull, svc.GetStats().seeded);
 		}
 
-		TEST_METHOD(ServiceWithoutAHintIsNotAFallbackButStillReportsItsPath)
+		TEST_METHOD(ServiceWithoutAHintStillShowsTheNvofDowngrade)
 		{
 			const int w = 48, h = 32;
 			std::vector<uint8_t> a, b;
@@ -188,8 +188,8 @@ namespace VideoProcessorTest
 			Service svc(CpuOnly());
 			const Result r = svc.RunNow(a.data(), b.data(), w, h, nullptr);
 			Assert::IsTrue(r.ok && r.path == Path::SeededSearch && !r.why.hintSupplied);
-			Assert::IsFalse(svc.CurrentDecision().engaged);
-			Assert::IsTrue(svc.StatusLine() == "motion: long-pair seeded search");
+			Assert::IsTrue(svc.CurrentDecision().engaged, L"NVOF down is visible even without a hint");
+			Assert::IsTrue(svc.StatusLine() == "motion: long-pair seeded search (NVOF unavailable: long-pair NVOF off)");
 		}
 
 		TEST_METHOD(DecisionIsReleasedForTheNvofPaths)

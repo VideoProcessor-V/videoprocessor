@@ -71,7 +71,7 @@ namespace VideoProcessorTest
 			}
 			Assert::AreEqual(0.0, static_cast<double>(ParabolicOffset(5.0f, 5.0f, 5.0f)), 0.0, L"flat: no sub-pel");
 			Assert::AreEqual(0.0, static_cast<double>(ParabolicOffset(1.0f, 5.0f, 1.0f)), 0.0, L"concave: no sub-pel");
-			Assert::AreEqual(0.5, static_cast<double>(ParabolicOffset(0.0f, 0.001f, 4.0f)), 0.0, L"clamped to half a pixel");
+			Assert::AreEqual(-0.5, static_cast<double>(ParabolicOffset(0.0f, 0.001f, 4.0f)), 0.0, L"clamped to half a pixel (low left cost: negative)");
 		}
 
 		TEST_METHOD(HalfFloatRoundTripAndKnownCodes)

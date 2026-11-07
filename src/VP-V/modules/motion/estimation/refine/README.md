@@ -26,6 +26,7 @@ No config key is read. The behaviour follows its consumers (the lane runs the st
 ## Products
 
 * `refined_field` (P3r), producer `RefinedFieldProducer` (`FieldRefineProducer.h`): a PLACEHOLDER that publishes "absent" until P5a. Per 8x8 source block 8 B (`Packed`: vector RG16F, confidence u8, flags u8, padding); the size rule and history belong to the skeleton catalog (W1-RES), not here. Inputs when bound: P3 lag 0, P1 lag 0 and lag 1, P8 lag 0. Spans are invalid across slips (spanMask), like P2/P3.
+* Flag values: `kRefined` 1, `kKept` 2, `kBoundary` 4, `kOccluded` 8; confidence is 0 when the mean cost is below 1e-6.
 * Flags: `kRefined` (output differs from P3 by more than `keepEps`), `kKept` (unchanged; also invalid and occluded blocks), `kBoundary` (a finite 4-neighbour P3 vector differs by more than `boundaryThr`, or the best candidate sits on the edge of the +-2 range: per-pixel checks needed), `kOccluded` (input occlusion flag: no search).
 * Confidence: `255 * clamp(1 - best / mean(25 costs))`, 0 on a flat picture. An invalid (non-finite) P3 vector gives a zero vector, confidence 0, flag kept: no search, no matcher.
 * Consumer fallback when absent or late: TD, MV chroma, adaptive scaler, sigma-delta vectors and the optional consumers read unrefined P3 (visible, never silent).

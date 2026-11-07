@@ -10,7 +10,7 @@
 //   sampler2D fr_cam       (rgba32f per block: vx, vy in source px, camera-block mask 0/1, unused)
 //   uniforms: ivec2 fr_size (half luma), ivec2 fr_grid (blocks), int fr_block_half (4), int fr_margin (2),
 //             float fr_boundary_thr, float fr_keep_eps, int fr_use_cam
-// and calls `vec4 vpu_field_refine_block(ivec2 blk)` -> (vx, vy, confidence 0..255, flags) with the Ref flag bits
+// and calls `vec4 vpu_field_refine_search(ivec2 blk)` -> (vx, vy, confidence 0..255, flags) with the Ref flag bits
 // (1 refined, 2 kept, 4 boundary, 8 occluded). The P3 "valid" channel replaces the CPU's non-finite test.
 //
 // FieldRefineOffsetGlsl() is the per-pixel accessor `vec2 vpu_field_refine_offset(vec2 source_pixel)`: the consumer's
@@ -84,7 +84,7 @@ float fr_parabola(float cm, float c0, float cp)
     return clamp(off, -0.5, 0.5);
 }
 
-vec4 vpu_field_refine_block(ivec2 blk)
+vec4 vpu_field_refine_search(ivec2 blk)
 {
     vec4 s = texelFetch(fr_p3, blk, 0);
     if (s.z < 0.5) return vec4(0.0, 0.0, 0.0, 2.0);

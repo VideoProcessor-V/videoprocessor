@@ -48,6 +48,7 @@ namespace VpLongPair
 		int sizeW = 0, sizeH = 0;
 		std::string nvofLatched;          // non-empty: the hinted session cannot run for this session (visible reason)
 		int consecutiveFailures = 0;
+		std::chrono::steady_clock::time_point latchedAt;
 
 		explicit Impl(const Config& c) : config(c) {}
 
@@ -133,8 +134,9 @@ namespace VpLongPair
 		}
 
 		// The hinted (or unhinted) NVOF pair; false + why = take the fallback.
-		bool RunNvof(const Request& r, Field& out, std::string& why)
+		bool RunNvof(const Request& r, Field& out, std::string& why, bool& hintBound)
 		{
+			hintBound = false;
 			if (!config.useNvof)
 			{
 				why = "long-pair NVOF off";
@@ -142,12 +144,20 @@ namespace VpLongPair
 			}
 			if (!nvofLatched.empty())
 			{
-				why = nvofLatched;
-				return false;
+				// A device / driver / size problem is latched for 30 s, then the session is tried again (a busy engine or
+				// one odd frame size must not disable the service for the whole process).
+				if (std::chrono::steady_clock::now() - latchedAt < std::chrono::seconds(30))
+				{
+					why = nvofLatched;
+					return false;
+				}
+				nvofLatched.clear();
+				consecutiveFailures = 0;
 			}
 			if (!EnsureDevice(why) || !EnsureSize(r.w, r.h, why))
 			{
-				nvofLatched = why;   // device / driver / size problems are latched for the session
+				nvofLatched = why;
+				latchedAt = std::chrono::steady_clock::now();
 				return false;
 			}
 			context->UpdateSubresource(luma[0], 0, nullptr, r.a.data(), static_cast<UINT>(r.w), 0);
@@ -160,13 +170,17 @@ namespace VpLongPair
 				{
 					context->UpdateSubresource(hintTex, 0, nullptr, s.data(), static_cast<UINT>(GridOf(r.w) * 4), 0);
 					hintForRun = hintTex;
+					hintBound = true;
 				}
 			}
 			if (!engine->Run(luma[0], luma[1], hintForRun, flow[0], flow[1], cost[0], cost[1]))
 			{
 				why = engine->LastError();
 				if (++consecutiveFailures >= 3)
+				{
 					nvofLatched = why;
+					latchedAt = std::chrono::steady_clock::now();
+				}
 				return false;
 			}
 			consecutiveFailures = 0;
@@ -214,7 +228,7 @@ namespace VpLongPair
 			res.ticket = r.ticket;
 			res.why.hintSupplied = r.hasHint;
 			std::string why;
-			bool nvof = false;
+			bool nvof = false, hintBound = false;
 			ISeededBackend* be;
 			{
 				std::lock_guard<std::mutex> lock(mutex);
@@ -222,12 +236,12 @@ namespace VpLongPair
 			}
 			{
 				std::lock_guard<std::mutex> lock(execMutex);
-				nvof = RunNvof(r, res.field, why);
+				nvof = RunNvof(r, res.field, why, hintBound);
 			}
 			if (nvof)
 			{
 				res.ok = true;
-				res.path = r.hasHint ? Path::NvofHinted : Path::NvofUnhinted;
+				res.path = hintBound ? Path::NvofHinted : Path::NvofUnhinted;
 			}
 			else
 			{
@@ -242,7 +256,10 @@ namespace VpLongPair
 				res.ok = ok;
 				res.path = ok ? Path::SeededSearch : Path::None;
 				if (!ok)
+				{
 					res.error = err.empty() ? "seeded search failed" : err;
+					res.why.reason = res.error;   // visible: a failed pair is not "idle"
+				}
 			}
 			res.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 			{
@@ -317,7 +334,7 @@ namespace VpLongPair
 
 	static bool Fill(Request& r, const uint8_t* a, const uint8_t* b, int w, int h, const HintField* hint)
 	{
-		if (!a || !b || w < 16 || h < 16)
+		if (!a || !b || w < 32 || h < 32)
 			return false;
 		const size_t n = static_cast<size_t>(w) * h;
 		r.a.assign(a, a + n);
