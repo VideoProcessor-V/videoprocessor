@@ -84,6 +84,7 @@ constexpr uint32_t kExpectedRebaseUnit = 1;
 constexpr uint32_t kExpectedHalfLumaUnit = 1;
 constexpr uint32_t kExpectedMonitorUnit = 1;
 constexpr uint32_t kExpectedSourceIdentityUnit = 1;
+constexpr uint32_t kExpectedSourceGeometryUnit = 1;   // SourceGeometry (P14g source_geometry, doc 78 section 6): input/source_analysis/identity/SourceGeometryProduct.h
 // The temporal-detail engine products (doc 72; repair/temporal_detail/products states the same numbers in TdProducts and a test
 // compares them): U13 CodingEvidence, QualityPattern, U15 FieldRefine and U19 TdMapsView at 1.
 constexpr uint32_t kExpectedCodingEvidenceUnit = 1;
@@ -126,6 +127,9 @@ inline const std::vector<ProductRow>& ProductRows()
         { kTdDelta, "repair/temporal_detail", kExpectedTemporalDetailUnit, "reserved (engine: reset 2)" },
         { kTdMaps, "repair/temporal_detail", kExpectedTdMapsViewUnit, "reserved (engine: reset 2)" },
         { kTdTrailSummary, "repair/temporal_detail", kExpectedTemporalDetailUnit, "reserved (engine: reset 2)" },
+        // Wave S2: P14g source_geometry is HELD STATE like P14: the source-resolution side (single writer) publishes it on each evaluation, no lane
+        // producer, no live fill; its readers take the latest sealed record (lag 1) and fall back visibly when it is absent or stale.
+        { kSourceGeometry, "input/source_analysis/identity", kExpectedSourceGeometryUnit, "" },
     };
     return rows;
 }
@@ -287,10 +291,11 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
                             { kP12LightLevel, kP11RegionBlockStats }, own, "product.light_level"));
         // Scaling
         r.push_back(MakeRow(11, "chroma from luma", "VP-V/modules/scaling/chroma_upscale", PathwayUnit::Scaling, 10,
-                            { kP10GrainSplit, kP10cGrainSplitChroma, kP13SourceRing }, lower, "product.chroma_cfl"));
+                            { kP10GrainSplit, kP10cGrainSplitChroma, kP13SourceRing }, lower, "product.chroma_cfl", false,
+                            { kSourceGeometry }));
         r.push_back(MakeRow(3, "adaptive downscale (grain map)", "VP-V/modules/scaling/adaptive_downscale",
                             PathwayUnit::Scaling, 20, { kP11RegionBlockStats, kP10GrainSplit, kP4SourceStats }, own,
-                            "product.adaptive_downscale", false, { kSourceIdentity }));
+                            "product.adaptive_downscale", false, { kSourceIdentity, kSourceGeometry }));
         // Drive and output
         r.push_back(MakeRow(5, "LED look-ahead", "VP-V/modules/drive/led_measure", PathwayUnit::Drive, 10, { kP4SourceStats },
                             own, "product.led_lookahead"));
@@ -336,6 +341,16 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
         r.push_back(MakeRow(25, "temporal detail engine (reserved: outputs)", "VP-V/modules/repair/temporal_detail/products",
                             PathwayUnit::Repair, 14, { kTdDelta, kTdMaps, kTdTrailSummary }, own, "product.td_engine"));
         r.back().family = "temporal detail";
+        // P14g source_geometry (wave S2, doc 78 section 6): the provisional readers inside the temporal-detail family are quality_pattern and
+        // coding_evidence (their grid placement and sharpening discount) and temporal detail itself (the latched coded raster and the gens as a
+        // discontinuity); the adaptive scaler and the chroma stage read it through their own rows above (held reads, lag 1). One more row for
+        // status. HELD STATE: every read is lag 1 (the latest sealed record), so none of them can fill it live; absent / stale / another unit
+        // version = the delivered raster and each reader's classical form, visibly (SourceGeometry::Read, "product.source_geometry").
+        r.push_back(MakeRow(26, "temporal detail (source geometry read path)", "VP-V/modules/repair/temporal_detail/products",
+                            PathwayUnit::Repair, 15, {}, own, "product.source_geometry", false, { kSourceGeometry }));
+        r.back().family = "temporal detail";
+        r.push_back(MakeRow(27, "source geometry status", "VP-V/core/StatusText", PathwayUnit::Output, 95, {}, own,
+                            "product.source_geometry", false, { kSourceGeometry }));
         // VectorDemand consumers: ids and reads from VectorDemandProducts.h
         for (int i = 0; i < VectorDemand::kConsumerCount; ++i) {
             const VectorDemand::Consumer c = VectorDemand::ConsumerAt(i);

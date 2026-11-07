@@ -1,0 +1,34 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "repair.stack",
+  "unit": "repair",
+  "order": 95,
+  "status": "draft",
+  "successor_of": "repair.deband",
+  "code_location": "migrated",
+  "live_files": [
+    "src/VP-V/modules/repair/stack/RepairStackOrder.h",
+    "src/VP-V/modules/repair/stack/README.md",
+    "src/VP-V/modules/repair/stack/tests/README.md",
+    "src/VP-V/modules/repair/stack/tests/RepairStackOrderTests.cpp"
+  ],
+  "forwarding_headers": [],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [],
+    "upstream_modules": [
+      "repair.deband",
+      "repair.texture_restore"
+    ]
+  },
+  "fallback_when_missing": "Draft: the order table is a pure declaration. With temporal detail absent the stack runs deband then contrast recovery exactly as before; with temporal detail requested but unusable the status names the reason and deband runs everywhere as the fallback layer.",
+  "fallback_entry": "Repair stack: temporal detail unavailable (<reason>), deband runs everywhere as the fallback layer"
+}
