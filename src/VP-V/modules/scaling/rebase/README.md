@@ -212,3 +212,15 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 ## Private GPU textures (skeleton rule)
 
 This module still creates its own GPU textures (see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): per-render temporaries move to the shared scratch arena (src/VP-V/core/ScratchArena.h) and kept state to skeleton product nodes.
+
+
+## Shader warm-up before a re-base (`RebaseWarmup.h`, `RebaseWarmupJob.h`; fix FX-RB)
+
+A re-base to a new plane size uses shader variants libplacebo has never compiled in this cache (GLSL to SPIR-V to HLSL to DXBC: 2.4 s measured on the render thread, 51 dropped frames, 2026-11-01 overnight loop). The renderer now asks `VpRebaseWarmup::Gate` before it applies a wanted re-base:
+
+- `Gate` (pure, CPU-tested, `tests/RebaseWarmupGateTests.cpp`): per candidate key it answers hold / allow / submit. Not compiled yet: the frame stays on the current (native) path, the candidate is handed to the worker once, and the log says "Re-base pending shader warm-up for WxH (current path continues)" (also the fallback entry `re-base warm-up` and the "Preparing shaders" status). Ready: the re-base starts and the log says so. Failed: native frames, retry after 5 s, 10 s, ...; after three failures the re-base is let through compiling on demand, visibly. A warm-up that exceeds 45 s is reported as too slow and keeps holding until it finishes.
+- `Job` (GPU worker body, on the generic `NlsPipelinePreparation` worker): a CPU snapshot of the live source and target frames and render parameters; the worker owns a private D3D11 device, runs `SourceRebase::Module::Apply` (main and crossfade slots) with the live plane sizes, the candidate factors and the identified kernel, then renders the re-based planes to the live target. Only libplacebo's thread-safe `pl_cache` is shared, so the renderer's first real use hits the cache.
+- The candidate plane sizes are derived from the source (`SourceRebase::Scaled` of the live textures and the factors); nothing is hard-coded. The key carries the device / settings revision, the colour and plane contract, the kernel and the target size.
+- With source_resolution off or native, a paused or temporal re-base, or the Original pathway, the gate is not consulted: behaviour is unchanged.
+
+Not warmed (open item): VP-owned hooks (the crossfade mix, deband, detail stages) belong to the renderer's own device and are not compiled by the worker; the first crossfade of a session can still compile its mix hook on the render thread (586 ms HLSL to DXBC seen at 22:33:30). The persistent shader cache (`VideoProcessorShaderCache.bin`, saved on shutdown) removes it for later sessions.

@@ -87,6 +87,7 @@
 #include <VP-V/modules/input/signal/ResyncCallSites.h>   // R1 call-site helpers
 #include <VP-V/modules/input/signal/ResyncExtension.h>   // VPV-HOOK: resync Q1 (Shadow, Drive, HostBinding, pulldown step)
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>   // R4a: the re-base decision product P0
+#include <VP-V/modules/scaling/rebase/RebaseWarmupJob.h>   // FX-RB: re-base shader warm-up (call sites only)
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
@@ -6470,6 +6471,12 @@ struct LibplaceboVideoRenderer::Impl
 	int rebasePauseSeconds = 5;
 	double rebaseFactorX = 1.0;         // the width's (per axis; = rebaseFactor when uniform)
 	std::string rebaseLogged;           // the last state logged
+	// FX-RB (VP-V/modules/scaling/rebase/RebaseWarmup*.h): call sites only. A re-base to a new plane size is
+	// held on the current path until a worker has compiled its shader variants into the shared pl_cache.
+	NlsPipelinePreparation rebaseWarmupWorker;
+	VpRebaseWarmup::Gate rebaseWarmupGate;
+	std::atomic<bool> rebaseWarmupPending{false};
+	bool rebaseWarmupEngaged = false;   // a fallback entry / gate announcement is live (render thread)
 	// Stage 12 step B: effective resolution, bitrate quality and bit depth
 	// of every source, read on the native frame; auto acts on it.
 	SourceResolutionMonitor::Monitor sourceMonitor;
@@ -6588,6 +6595,78 @@ struct LibplaceboVideoRenderer::Impl
 	void EnsureRebaseDispatch()
 	{
 		if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
+	}
+
+	// FX-RB: true = hold this frame on the current (native) path: the re-base's shader variants are not
+	// compiled yet; a worker compiles them on a private device into the shared pl_cache. Never silent:
+	// log line + fallback entry + the "Preparing shaders" status while pending.
+	bool RebaseWarmupHold(const pl_frame& source, const pl_frame& target, double factorX, double factorY)
+	{
+		const std::string key = VpRebaseWarmup::MakeKey(nlsPreparationRevision, source, target, factorX, factorY, sourceRebase.Kernel());
+		if (key.empty())
+			return false;
+		const std::string label = VpRebaseWarmup::Label(source, factorX, factorY);
+		VpRebaseWarmup::Status status = VpRebaseWarmup::Status::Missing;
+		switch (rebaseWarmupWorker.Get(key))
+		{
+		case NlsPipelinePreparation::Status::Pending: status = VpRebaseWarmup::Status::Pending; break;
+		case NlsPipelinePreparation::Status::Ready: status = VpRebaseWarmup::Status::Ready; break;
+		case NlsPipelinePreparation::Status::Failed: status = VpRebaseWarmup::Status::Failed; break;
+		default: break;
+		}
+		const double now = std::chrono::duration<double>(SteadyClock::now().time_since_epoch()).count();
+		const VpRebaseWarmup::Step step = rebaseWarmupGate.Evaluate(true, key, label, status, now);
+		if (step.submit)
+		{
+			try
+			{
+				auto job = std::make_shared<VpRebaseWarmup::Job>(source, target, renderParams);
+				CComPtr<IDXGIDevice> dxgiDevice;
+				CComPtr<IDXGIAdapter> adapter;
+				DXGI_ADAPTER_DESC description{};
+				if (FAILED(d3d11->device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) ||
+					FAILED(dxgiDevice->GetAdapter(&adapter)) || FAILED(adapter->GetDesc(&description)))
+					throw std::runtime_error("preparation adapter unavailable");
+				job->adapter = description.AdapterLuid;
+				job->featureLevel = d3d11->device->GetFeatureLevel();
+				job->noCompute = nlsPreparationNoCompute;
+				job->factorX = factorX;
+				job->factorY = factorY;
+				job->kernel = sourceRebase.Kernel();
+				const pl_cache sharedCache = cache;
+				rebaseWarmupWorker.Submit(key, [job, sharedCache, label]() {
+					const auto start = SteadyClock::now();
+					const bool prepared = job->Compile(sharedCache);
+					DebugLog::Log("VP re-base background warm-up: target=%s thread=%lu ready=%d elapsed_ms=%.2f",
+						label.c_str(), GetCurrentThreadId(), prepared ? 1 : 0,
+						std::chrono::duration<double, std::milli>(SteadyClock::now() - start).count());
+					return prepared;
+				});
+			}
+			catch (const std::exception& error)
+			{
+				// A frame contract the snapshot refuses: recorded as a failed warm-up of this key; the gate
+				// retries with back-off and, after kMaxFailures, lets the re-base through on demand (visibly).
+				DebugLog::Log("Re-base shader warm-up rejected for %s (%s)", label.c_str(), error.what());
+				rebaseWarmupWorker.Submit(key, [] { return false; });
+			}
+		}
+		if (!step.log.empty())
+			DebugLog::Log("%s", step.log.c_str());
+		rebaseWarmupPending.store(step.pending, std::memory_order_release);
+		rebaseWarmupEngaged = true;
+		SyncFallback(step.status.empty() ? FallbackCatalog::Released("re-base warm-up") :
+			FallbackCatalog::Engaged("re-base warm-up", step.status));
+		return !step.allow;
+	}
+	void RebaseWarmupIdle()
+	{
+		if (!rebaseWarmupEngaged)
+			return;
+		rebaseWarmupEngaged = false;
+		rebaseWarmupPending.store(false, std::memory_order_release);
+		rebaseWarmupGate.Evaluate(false, std::string(), std::string(), VpRebaseWarmup::Status::Missing, 0.0);
+		SyncFallback(FallbackCatalog::Released("re-base warm-up"));
 	}
 
 	// ---- B3: the input side once per source frame (pipeline_entrance_once, ADR-0024) ----
@@ -9714,6 +9793,7 @@ struct LibplaceboVideoRenderer::Impl
 		if (!outputResourcesRetired)
 		{
             nlsPreparation.Stop();
+            rebaseWarmupWorker.Stop();
             subtitlePipelinePreparation.Stop();
             pictureProofWorker.Stop();
             lookaheadMeasurementWorker.Stop();
@@ -14120,6 +14200,7 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		status.Empty();
 		if (nlsPreparationPending.load(std::memory_order_acquire) ||
+            rebaseWarmupPending.load(std::memory_order_acquire) ||
             subtitlePipelinePreparationPending.load(std::memory_order_acquire)) {
 			status = TEXT("Preparing shaders...");
 			return true;
@@ -26960,8 +27041,16 @@ releaseDriftBaseRetention =
 			}
 			const bool rebasePaused = SteadyClock::now() < rebasePausedUntil;
 			const double previousRebase = rebaseFactor, previousRebaseX = rebaseFactorX;
-			rebaseFactor = wanted < 1.0 && !temporal && !rebasePaused ? wanted : 1.0;
-			rebaseFactorX = wantedX < 1.0 && !temporal && !rebasePaused ? wantedX : 1.0;
+			// FX-RB: a re-base whose shader variants are not compiled yet stays on the current path (native
+			// planes) until the worker has them; never compiled here, on the render thread.
+			bool rebaseWarmHold = false;
+			if ((wanted < 1.0 || wantedX < 1.0) && !temporal && !rebasePaused && luma &&
+				!pipelineSlots.OriginalPathway() && pipelineSlots.Runs(PipelineSlots::Id::ScalingRebase))
+				rebaseWarmHold = RebaseWarmupHold(renderImage, target, wantedX, wanted);
+			else
+				RebaseWarmupIdle();
+			rebaseFactor = wanted < 1.0 && !temporal && !rebasePaused && !rebaseWarmHold ? wanted : 1.0;
+			rebaseFactorX = wantedX < 1.0 && !temporal && !rebasePaused && !rebaseWarmHold ? wantedX : 1.0;
 			// Silent-fallbacks batch: with scaling.rebase switched off the planes stay native, so every
 			// downstream stage (debander, detail pulse, texture restore, adaptive upscale) uses factor 1.
 			{

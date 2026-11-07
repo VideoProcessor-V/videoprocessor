@@ -14,6 +14,8 @@
     "src/VP-V/segments/EntranceSegment.h",
     "src/VP-V/modules/scaling/rebase/EntranceGpuDrain.h",
     "src/VP-V/modules/scaling/rebase/RebaseDecision.h",
+    "src/VP-V/modules/scaling/rebase/RebaseWarmup.h",
+    "src/VP-V/modules/scaling/rebase/RebaseWarmupJob.h",
     "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
   ],
   "forwarding_headers": [
