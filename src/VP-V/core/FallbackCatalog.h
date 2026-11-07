@@ -536,6 +536,14 @@ namespace FallbackCatalog
 	{
 		return note.empty() ? Released("skeleton_history") : Engaged("skeleton_history", note);
 	}
+	// The record histories (quality pattern, td trail summary) are derived from the configured queue (render-ahead + lane lead +
+	// look-ahead), but some of those values are not delivered to the skeleton yet: it sizes them at their floors. `unwired` names the
+	// values (empty = all delivered, nothing to show).
+	inline Decision SkeletonQueueNotWired(const std::string& unwired)
+	{
+		return unwired.empty() ? Released("skeleton_queue")
+		                       : Engaged("skeleton_queue", "record history: queue not yet wired (" + unwired + "); floors in use");
+	}
 	// A lead read of an ordered-chain product is in THIS graph (WARNING level: nothing is rejected). The reader cannot be sealed ahead,
 	// so it live-fills its reduced form; the note is Graph::leadChainWarning ("quality_pattern -> coding_evidence (lead 2): lead read of an
 	// ordered chain: reader live-fills its reduced form"). Engaged only while such a read is in the graph.

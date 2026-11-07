@@ -116,10 +116,10 @@ namespace SkeletonModuleTestsNs
 
 		const void* Host() const { return &r; }
 
-		void Life(RE::Lifecycle kind, int code = 0)
+		void Life(RE::Lifecycle kind, int code = 0, double value = 0.0)
 		{
 			RE::LifecycleFacts f;
-			f.host = &r; f.kind = kind; f.code = code;
+			f.host = &r; f.kind = kind; f.code = code; f.value = value;
 			sk.OnLifecycle(f);
 		}
 
@@ -651,6 +651,63 @@ namespace SkeletonModuleTestsNs
 			Assert::AreEqual(5, int(gs.lookAheadWalk));
 			rig.Frame(8);
 			Assert::AreEqual(before + 1, configures(), L"and only once");
+		}
+
+		TEST_METHOD(ALongerConfiguredQueueGivesALongerHistory)
+		{
+			// The module's queue snapshot is what SkeletonProducts is built from: floor on a short queue, deeper on a long one.
+			const double p24 = 1001.0 / 24.0;
+			SkeletonModule::QueueShape shortQ;
+			shortQ.renderAhead = 2; shortQ.laneLead = 3; shortQ.lookAheadWalk = 2; shortQ.wired = SkeletonModule::QueueShape::kAll;
+			SkeletonModule::QueueShape longQ;
+			longQ.renderAhead = 8; longQ.laneLead = 4; longQ.lookAheadWalk = 88; longQ.wired = SkeletonModule::QueueShape::kAll;
+			SkeletonModule sk;
+			sk.PublishQueue(shortQ);
+			const SkeletonModule::QueueShape gotShort = sk.CurrentQueue();
+			const unsigned shortFrames = VpSkeleton::QueueFramesFor(gotShort.renderAhead, gotShort.laneLead, gotShort.lookAheadWalk);
+			sk.PublishQueue(longQ);
+			const SkeletonModule::QueueShape got = sk.CurrentQueue();
+			Assert::IsTrue(got == longQ, L"the snapshot round-trips");
+			const unsigned longFrames = VpSkeleton::QueueFramesFor(got.renderAhead, got.laneLead, got.lookAheadWalk);
+			Assert::AreEqual(unsigned(7), shortFrames);
+			Assert::AreEqual(unsigned(100), longFrames);
+			const int floorQp = int(VpSkeleton::SkeletonProducts(false, false, p24, shortFrames).Get(VpSkeleton::kQualityPattern).history);
+			const int longQp = int(VpSkeleton::SkeletonProducts(false, false, p24, longFrames).Get(VpSkeleton::kQualityPattern).history);
+			Assert::AreEqual(48, floorQp, L"a short queue keeps the 2 s floor");
+			Assert::AreEqual(100, longQp, L"a long queue gives a longer history");
+			// An undelivered term keeps its default (0 / 1 / 0) whatever value a feed passes for it.
+			SkeletonModule::QueueShape partial;
+			partial.renderAhead = 9; partial.laneLead = 5; partial.lookAheadWalk = 7; partial.wired = SkeletonModule::QueueShape::kLaneLead;
+			sk.PublishQueue(partial);
+			Assert::AreEqual(0, int(sk.CurrentQueue().renderAhead));
+			Assert::AreEqual(5, int(sk.CurrentQueue().laneLead));
+			Assert::AreEqual(0, int(sk.CurrentQueue().lookAheadWalk));
+		}
+
+		TEST_METHOD(AnUnwiredQueueIsShownAsAFallbackUntilItIsDelivered)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks),
+				"skeleton_queue: record history: queue not yet wired (render-ahead depth, lane lead, look-ahead walk); floors in use"));
+			// The look-ahead walk arrives with the host's SettingsApplied call (value = the motion look-ahead depth): that term leaves the line.
+			rig.Life(RE::Lifecycle::SettingsApplied, 0, 4.0);
+			Assert::AreEqual(4, int(rig.sk.CurrentQueue().lookAheadWalk));
+			Assert::AreEqual(0, int(rig.sk.CurrentQueue().renderAhead));
+			Assert::AreEqual(1, int(rig.sk.CurrentQueue().laneLead));
+			rig.Frame(4);
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks),
+				"skeleton_queue: record history: queue not yet wired (render-ahead depth, lane lead); floors in use"));
+			SkeletonModule::QueueShape q;
+			q.renderAhead = 1; q.laneLead = 2; q.lookAheadWalk = 3;
+			rig.sk.SetQueueForTesting(q);
+			rig.Frame(5);
+			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue"), L"all three delivered: nothing to show");
+			Assert::IsFalse(SkeletonModule::QueueDecision(SkeletonModule::QueueShape::kAll).engaged);
+			Assert::AreEqual(std::string("lane lead, look-ahead walk"), SkeletonModule::QueueNotWiredNote(SkeletonModule::QueueShape::kRenderAhead));
 		}
 
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)

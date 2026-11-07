@@ -16,6 +16,7 @@
 #include <VP-V/core/hub/HostSlots.h>
 #include <VP-V/modules/control/skeleton/SkeletonSettings.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -66,18 +67,56 @@ namespace Vpv
 			VpSkeleton::Dims DimsOf(const void* host) const;
 			bool WorkersRunning(const void* host) const;
 			// The queue the lane graph is sized for: the terms the record histories are derived from (render-ahead R, lane lead L,
-			// look-ahead walk frames; VpSkeleton::QueueFramesFor). This module knows them only here (the render-ahead and look-ahead
-			// feeds are not wired yet: 0 / 1 / 0); a change reconfigures the graph at the next frame, like a moved source period.
+			// look-ahead walk frames; VpSkeleton::QueueFramesFor). `wired` says which of the three a feed has delivered (kRenderAhead |
+			// kLaneLead | kLookAhead); an undelivered term keeps its default (0 / 1 / 0), so the histories stay at their floors, and the
+			// Fallbacks list says so ("record history: queue not yet wired (...); floors in use"). Delivered today: the look-ahead walk,
+			// from the host's SettingsApplied call (the motion look-ahead depth). Not delivered: the render-ahead depth (the renderer's
+			// runtime gate; the cfg key render_ahead is only on/off) and the lane lead (not a setting). A change reconfigures the graph at
+			// the next frame, like a moved source period.
 			struct QueueShape
 			{
+				static constexpr uint8_t kRenderAhead = 1, kLaneLead = 2, kLookAhead = 4, kAll = 7;
 				uint8_t renderAhead = 0;
 				uint8_t laneLead = 1;
 				uint16_t lookAheadWalk = 0;
-				bool operator==(const QueueShape& o) const { return renderAhead == o.renderAhead && laneLead == o.laneLead && lookAheadWalk == o.lookAheadWalk; }
+				uint8_t wired = 0;
+				bool operator==(const QueueShape& o) const
+				{
+					return renderAhead == o.renderAhead && laneLead == o.laneLead && lookAheadWalk == o.lookAheadWalk && wired == o.wired;
+				}
 				bool operator!=(const QueueShape& o) const { return !(*this == o); }
 			};
-			// Tests: change the queue (the next frame reconfigures the graph and rebuilds the record histories).
-			void SetQueueForTesting(const QueueShape& q) { queue_ = q; }
+			// The live feed's entry (any thread, e.g. a settings change on the UI thread or the renderer's gate): ONE atomic snapshot
+			// that the render thread reads once per frame in Begin(); terms not marked in `q.wired` are reset to their defaults.
+			void PublishQueue(const QueueShape& q) { queueBits_.store(Pack(q), std::memory_order_release); }
+			QueueShape CurrentQueue() const { return Unpack(queueBits_.load(std::memory_order_acquire)); }
+			// The look-ahead walk term, delivered by the host's SettingsApplied lifecycle call (LifecycleFacts::value = the motion look-ahead
+			// depth in frames, 0 = off). Host thread; a compare-and-swap on the one snapshot keeps the other terms as they are.
+			void PublishLookAheadWalk(double frames)
+			{
+				const unsigned w = frames > 0.0 ? (frames < 65535.0 ? unsigned(frames) : 65535u) : 0u;   // NaN and negatives: 0
+				uint64_t cur = queueBits_.load(std::memory_order_relaxed);
+				for (;;)
+				{
+					QueueShape q = Unpack(cur);
+					q.lookAheadWalk = uint16_t(w);
+					q.wired = uint8_t(q.wired | QueueShape::kLookAhead);
+					if (queueBits_.compare_exchange_weak(cur, Pack(q), std::memory_order_release, std::memory_order_relaxed))
+						break;
+				}
+			}
+			// Names of the undelivered terms ("" when all three are wired) and the Fallbacks decision for them.
+			static std::string QueueNotWiredNote(uint8_t wired)
+			{
+				std::string out;
+				if (!(wired & QueueShape::kRenderAhead)) out += "render-ahead depth";
+				if (!(wired & QueueShape::kLaneLead)) out += std::string(out.empty() ? "" : ", ") + "lane lead";
+				if (!(wired & QueueShape::kLookAhead)) out += std::string(out.empty() ? "" : ", ") + "look-ahead walk";
+				return out;
+			}
+			static FallbackCatalog::Decision QueueDecision(uint8_t wired) { return FallbackCatalog::SkeletonQueueNotWired(QueueNotWiredNote(wired)); }
+			// Tests only, single-threaded (a test drives the module on one thread): sets all three terms as delivered. Not a feed.
+			void SetQueueForTesting(QueueShape q) { q.wired = QueueShape::kAll; PublishQueue(q); }
 			// Tests: do not start the lane worker threads (the test drives AnalysisLane::StepWorker itself).
 			void SetWorkerThreadsForTesting(bool start) { startWorkers_ = start; }
 			// Tests: use this card profile instead of the device query (no render device exists in a unit test).
@@ -98,7 +137,23 @@ namespace Vpv
 			bool cardOverride_ = false;
 			bool startWorkers_ = true;
 			VpSkeleton::CardProfile card_;
-			QueueShape queue_;
+			static uint64_t Pack(QueueShape q)
+			{
+				if (!(q.wired & QueueShape::kRenderAhead)) q.renderAhead = 0;
+				if (!(q.wired & QueueShape::kLaneLead)) q.laneLead = 1;
+				if (!(q.wired & QueueShape::kLookAhead)) q.lookAheadWalk = 0;
+				return uint64_t(q.renderAhead) | (uint64_t(q.laneLead) << 8) | (uint64_t(q.lookAheadWalk) << 16) | (uint64_t(q.wired) << 32);
+			}
+			static QueueShape Unpack(uint64_t bits)
+			{
+				QueueShape q;
+				q.renderAhead = uint8_t(bits & 0xFF);
+				q.laneLead = uint8_t((bits >> 8) & 0xFF);
+				q.lookAheadWalk = uint16_t((bits >> 16) & 0xFFFF);
+				q.wired = uint8_t((bits >> 32) & 0xFF);
+				return q;
+			}
+			std::atomic<uint64_t> queueBits_{ uint64_t(1) << 8 };   // the published queue snapshot (see PublishQueue); initial value = Pack of the default QueueShape (0 / 1 / 0, nothing wired)
 		};
 
 		// Adds SkeletonModule to the hub. Start-up only; idempotent. After RegisterResyncExtension.
