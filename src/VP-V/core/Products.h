@@ -249,7 +249,11 @@ struct ProductDecl {
     // buffer that readers read at lag 1 (the store is rewritten in place by the producer after the readers of the
     // previous frame are done). Its depth stays max(0, largest lag read) as for any product. It is never governed
     // (no historyFloor: shedding the single store would drop the product, not reduce it). Registry::Validate: history
-    // 0, no historyFloor, no self input.
+    // 0, no historyFloor, no self input, and every reader reads it at lag 0 or 1 (no deeper lag, no look-ahead).
+    // BuildGraph sizes it as a PING-PONG store, whatever render-ahead R and lane lead L are: ring = 2 buffers, live pool = 0
+    // (lane-only: there is no live fill; an absent frame is Unavailable and the reader runs its own visible fallback). The
+    // producer's job for frame N+1 reuses the slot of frame N-1 and waits (counted, SlotCounters::writeWaitPinned) while a
+    // lag-1 reader still pins it. Its VRAM figure is 2x the store, not a ring.
     bool singletonStore = false;
     // Set by detail::AddInput/AddLead when a declaration named more than kMaxInputs reads: the extra read was NOT
     // recorded. Registry::Validate rejects the declaration with a plain reason (fail closed, visible; Release has no
@@ -405,6 +409,8 @@ public:
                     return fail("a single-store product declares history 0");
                 if (d.historyFloor != kHistoryFixed)
                     return fail("a single-store product is not governed (no history floor)");
+                if (d.backend == Backend::RenderOnly)
+                    return fail("a single-store product needs a lane backend (it has no live fill)");
                 for (size_t k = 0; k < d.inputCount; ++k)
                     if (d.inputs[k].product == d.id)
                         return fail("a single-store product does not read itself");
@@ -427,6 +433,14 @@ public:
                     return fail("optical-flow substitute needs the engine");
             }
         }
+        // A single-store product is a two-buffer ping-pong: its readers read it at lag 0 or 1 only (the slot of frame N-2 is
+        // already the one the producer rewrites for frame N).
+        for (const ProductDecl& d : decls_)
+            for (size_t k = 0; k < d.inputCount; ++k) {
+                const InputRef& in = d.inputs[k];
+                if (decls_[in.product].singletonStore && (in.lag > 1 || in.lead > 0))
+                    return fail("a single-store product is read at lag 0 or 1 only (no deeper lag, no look-ahead)");
+            }
         // Look-ahead edges: no chains (the target has no lead inputs itself) and no loops (the target
         // cannot reach the reader through ANY edge, lag, lag 0 or lead): a frame-ahead read must end at
         // a product made from the source alone.
@@ -761,6 +775,7 @@ inline void AppendTemporalDetailProducts(std::vector<ProductDecl>& decls)
     AddInput(an, kTdBlocks, 1);
     an.spanMask = content;          // a trail never crosses a slip / full change
     an.missingInputForm = true;     // after a resync the first frame has no lag-1 state: made from scratch (carry-forward / unknown)
+    an.orderedChain = true;         // it reads itself at lag 1: the lane makes frame 0 in the reduced form and every later frame from a sealed predecessor
     AddTerm(an, 4, 28);
     // The 8 px quadtree pool holds at most 25% of the 8 px cells (about 6 B per 16 px block), but a size rule has no fraction term, so it is
     // declared at 100% of the cells (6 B x 4 cells per block): an over-declaration of ~18 B per 16 px block (0.6 MB at 4K) on purpose,
@@ -933,6 +948,7 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
     AddInput(ce, kP11RegionBlockStats, 0);
     AddInput(ce, kP13SourceRing, 0);
     AddInput(ce, kCodingEvidence, 1);   // the hash history (lag 2 joins when the declarations catch up to the contract table)
+    ce.orderedChain = true;         // self lag 1: ordered-chain lane jobs (frame 0 in the reduced form; needs missingInputForm below)
     AddTerm(ce, 3, 8);
     ce.size.fixedBytes = kCodingEvidenceSummaryBytes;
     ce.rebasedPlane = true;
@@ -954,6 +970,7 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
     qp.variants = Variants::NonIdentical;
     qp.spanMask = content;
     qp.missingInputForm = true;     // no history yet: role "unknown"
+    qp.orderedChain = true;         // self lag 1: ordered-chain lane jobs
     qp.shortQueueSubstitute = kQualityPatternCausal;
     decls.push_back(qp);
 
@@ -966,6 +983,7 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
     qc.residency = Residency::SystemRam;
     qc.spanMask = content;
     qc.missingInputForm = true;
+    qc.orderedChain = true;         // self lag 1: ordered-chain lane jobs
     decls.push_back(qc);
 
     // refined_field (P3r): DMVR-style per 8x8 block 8 B (vector RG16F, confidence u8, flags u8); runs only when P3 exists. The

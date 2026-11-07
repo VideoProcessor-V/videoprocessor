@@ -995,12 +995,14 @@ public:
             skipped += st->runner->Counters(st->table->NodeAt(i).id).skippedDropped.load(std::memory_order_relaxed);
         if (skipped > 0)
             out.push_back("Analysis: " + std::to_string(skipped) + " frames skipped (source gone)");
-        uint64_t carried = 0, refused = 0, chainWait = 0;
+        uint64_t carried = 0, refused = 0, chainWait = 0, chainWaitSeal = 0, pinWait = 0;
         for (size_t i = 0; i < st->table->Count(); ++i) {
             const LaneProductCounters& pc = st->runner->Counters(st->table->NodeAt(i).id);
             carried += pc.chainCarryForward.load(std::memory_order_relaxed);
             refused += pc.chainRefused.load(std::memory_order_relaxed);
             chainWait += st->table->At(i).Counters().chainWaitRejected.load(std::memory_order_relaxed);
+            chainWaitSeal += st->table->At(i).Counters().chainWaitUnsealed.load(std::memory_order_relaxed);
+            pinWait += st->table->At(i).Counters().writeWaitPinned.load(std::memory_order_relaxed);
         }
         uint64_t laterRejected = 0;
         for (size_t i = 0; i < st->table->Count(); ++i)
@@ -1016,6 +1018,12 @@ public:
         if (chainWait > 0)
             out.push_back("Analysis: " + std::to_string(chainWait)
                           + " ordered-chain frames waited on a rejected predecessor (its live fill pending, declined or without a buffer)");
+        if (chainWaitSeal > 0)
+            out.push_back("Analysis: " + std::to_string(chainWaitSeal)
+                          + " ordered-chain frames waited for the predecessor's seal (a chain job pins only a sealed or live predecessor)");
+        if (pinWait > 0)
+            out.push_back("Analysis: " + std::to_string(pinWait)
+                          + " lane jobs waited for a late reader to release their slot (single-store products wait on a lag-1 reader)");
         const GapReport& gt = st->gap.Totals();
         if (gt.capNoFit > 0)
             out.push_back("Analysis: " + std::to_string(gt.capNoFit) + " lane chunks deferred (too big for the chunk cap)");

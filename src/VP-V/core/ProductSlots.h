@@ -235,6 +235,8 @@ struct SlotCounters {
     std::atomic<uint64_t> leadAccepted{ 0 };      // lead ancestors accepted at a SEALED reader (Published, stamp == StampOf(N+k))
     std::atomic<uint64_t> leadLaterRejected{ 0 }; // a frame accepted as a lead ancestor was rejected at its own seal later (residual K1 risk)
     std::atomic<uint64_t> chainWaitRejected{ 0 }; // ordered chain: frames whose job waited on a REJECTED predecessor (counted once per frame)
+    std::atomic<uint64_t> chainWaitUnsealed{ 0 }; // ordered chain: frames whose job waited because the predecessor was only Published (its seal not done yet; counted once per frame)
+    std::atomic<uint64_t> writeWaitPinned{ 0 };   // lane jobs that found their claimed slot still pinned by a late reader of the previous tenant (counted once per job, by the LaneRunner)
 };
 
 class SlotSet {
@@ -242,7 +244,7 @@ public:
     SlotSet(ProductId product, uint16_t ring, uint16_t livePool)
         : product_(product)
         , ring_(ring == 0 ? 1 : ring)
-        , livePool_(livePool == 0 ? 1 : livePool)
+        , livePool_(livePool)   // 0 = lane-only: no live fill (a single-store product, ProductDecl::singletonStore)
         , slots_(ring_)
         , liveOwner_(livePool_, 0)
         , livePins_(livePool_)
@@ -400,8 +402,10 @@ public:
     // Any thread (the lane recording ancestors): the reference to frame `seq`'s current content,
     // pinned until Unpin: its own lane cannot write the reclaimed ring slot (Writable) and the render
     // does not reuse its live buffer (BeginLive). *liveIndex = the live buffer to read, or -1 for the
-    // ring slot. False (nothing pinned) when there is no content.
-    bool PinRef(uint64_t seq, AncestorRef* out, int* liveIndex = nullptr)
+    // ring slot. False (nothing pinned) when there is no content. renderValidOnly: pin only content the render accepted
+    // (Sealed / Live / Live lane-owned); a Published (not yet sealed) frame then counts as no content (an ordered-chain
+    // predecessor: it could still be rejected and live-filled, which would replace the ancestor a successor recorded).
+    bool PinRef(uint64_t seq, AncestorRef* out, int* liveIndex = nullptr, bool renderValidOnly = false)
     {
         if (seq > kSlotSeqMask - ring_)
             return false;
@@ -413,7 +417,7 @@ public:
             s.pins.fetch_add(1, std::memory_order_seq_cst);
             const uint64_t raw = s.word.load(std::memory_order_seq_cst);
             const SlotWord w = Unpack(raw);
-            if (w.seq != Biased(seq) || !HasContent(w.state)) {
+            if (w.seq != Biased(seq) || !HasContent(w.state) || (renderValidOnly && !ValidForRender(w.state))) {
                 s.pins.fetch_sub(1, std::memory_order_release);
                 return false;
             }
@@ -742,6 +746,14 @@ public:
         return w.seq == Biased(seq) && (w.state == SlotState::Rejected || w.state == SlotState::RejectedLaneOwned);
     }
 
+    // Lane: frame `seq` is Published and its seal has not run yet. An ordered-chain successor then waits (Transient),
+    // visibly (chainWaitUnsealed): only a render-valid predecessor is pinned.
+    bool PublishedAwaitingSeal(uint64_t seq) const
+    {
+        const SlotWord w = Unpack(slots_[SlotOf(seq)].word.load(std::memory_order_acquire));
+        return w.seq == Biased(seq) && w.state == SlotState::Published;
+    }
+
     // Lane: why PinRef(seq) failed. Absent = the frame will never have content from this lane (never claimed, abandoned,
     // released, or the slot moved on); Transient = it may still get content (being written, rejected awaiting the live
     // fill, or the word changed under the pin). An ordered chain carries forward only on Absent.
@@ -927,6 +939,8 @@ public:
         results_.resize(nodes_.size());
         leadMark_.resize(nodes_.size());
         chainWaitSeen_.assign(nodes_.size(), 0u);
+        chainWaitUnsealedSeen_.assign(nodes_.size(), 0u);
+        pendingLead_.reserve(kMaxInputs);   // the Check in flight pushes at most one entry per input: no allocation on the render thread
         for (size_t i = 0; i < nodes_.size(); ++i)
             leadMark_[i].assign(size_t(nodes_[i].ring == 0 ? 1 : nodes_[i].ring), 0u);
     }
@@ -981,8 +995,11 @@ public:
             // Ordered chain: the self input at lag >= 1 is optional. Absent (chain start, a predecessor that never
             // published, a skipped range) it is NOT waited for (our own lane finished frame seq-1 before this job
             // began: it will never appear): the job carries forward in its declared reduced form.
+            // The chain pins only a RENDER-VALID predecessor (Sealed / Live): a Published-unsealed one could still be
+            // rejected and live-filled at its seal, which would replace the ancestor this job recorded and make every
+            // later frame fail with AncestorReplaced (a permanent per-frame live fill). It counts as Transient: the job waits.
             const bool chainSelf = n->orderedChain && in.product == id && in.lag > 0;
-            if (!set || !haveSeq || !set->PinRef(aseq, &ref, &live)) {
+            if (!set || !haveSeq || !set->PinRef(aseq, &ref, &live, chainSelf)) {
                 if (chainSelf && set && (!haveSeq || set->AbsenceOf(aseq) == SlotSet::Absence::Absent)) {
                     AncestorRef empty;
                     empty.productId = in.product;
@@ -996,14 +1013,22 @@ public:
                     hdr.chainReduced = true;
                     continue;
                 }
-                if (chainSelf && set && haveSeq && set->RejectedAwaitingLive(aseq)) {
+                if (chainSelf && set && haveSeq) {
                     // Waiting on a Rejected predecessor: it waits for the live fill (which may decline or find no live
-                    // buffer: then it never comes and this chain stalls until the frame is released). Counted once per
-                    // frame, not per poll: the entry is private to this product's lane thread.
+                    // buffer: then it never comes and this chain stalls until the frame is released). Or on a Published
+                    // one whose seal has not run. Counted once per frame, not per poll: the entries are private to this
+                    // product's lane thread.
                     const int ni = IndexOfNode(id);
-                    if (ni >= 0 && chainWaitSeen_[size_t(ni)] != seq + 1u) {
-                        chainWaitSeen_[size_t(ni)] = seq + 1u;
-                        set->MutableCounters().chainWaitRejected.fetch_add(1, std::memory_order_relaxed);
+                    if (ni >= 0 && set->RejectedAwaitingLive(aseq)) {
+                        if (chainWaitSeen_[size_t(ni)] != seq + 1u) {
+                            chainWaitSeen_[size_t(ni)] = seq + 1u;
+                            set->MutableCounters().chainWaitRejected.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    } else if (ni >= 0 && set->PublishedAwaitingSeal(aseq)) {
+                        if (chainWaitUnsealedSeen_[size_t(ni)] != seq + 1u) {
+                            chainWaitUnsealedSeen_[size_t(ni)] = seq + 1u;
+                            set->MutableCounters().chainWaitUnsealed.fetch_add(1, std::memory_order_relaxed);
+                        }
                     }
                 }
                 pins.Unpin();
@@ -1081,13 +1106,8 @@ public:
                     set.MutableCounters().chainCarryForward.fetch_add(1, std::memory_order_relaxed);
                 // Remember which frames were accepted as lead ancestors: their own seal comes later.
                 for (size_t k = 0; k < n.inputCount; ++k)
-                    if (n.inputs[k].lead > 0) {
-                        const int j = IndexOfNode(n.inputs[k].product);
-                        if (j >= 0) {
-                            const uint64_t a = seq + n.inputs[k].lead;
-                            leadMark_[size_t(j)][size_t(sets_[size_t(j)]->SlotOf(a))] = a + 1u;
-                        }
-                    }
+                    if (n.inputs[k].lead > 0)
+                        MarkLeadAccepted(n.inputs[k], seq);
             }
             if (out.seal.outcome == SealOutcome::NeedsLive) {
                 uint64_t& m = leadMark_[i][size_t(set.SlotOf(seq))];
@@ -1098,6 +1118,13 @@ public:
             out.finalReason = out.seal.reason;
             if (out.seal.outcome != SealOutcome::NeedsLive)
                 continue;
+            if (set.LivePool() == 0) {
+                // Lane-only product (a single-store product): no live fill exists. The frame is absent and the reader runs its
+                // own visible fallback (counted by the caller as an unavailable product frame).
+                out.final = SealOutcome::Unavailable;
+                out.finalReason = SealReason::NoLiveBuffer;
+                continue;
+            }
             const int live = set.BeginLive(seq);
             if (live < 0) {
                 out.final = SealOutcome::Unavailable;
@@ -1111,6 +1138,7 @@ public:
             // Ancestors stay positional (index k = input k); a missing input keeps an empty ref
             // (cgen 0, provenance None).
             uint32_t missing = 0;
+            uint32_t leadUsed = 0;   // bit k: lead input k was read from a Published / valid lead ancestor
             for (size_t k = 0; k < n.inputCount; ++k) {
                 const InputRef& in = n.inputs[k];
                 SlotSet* src = Find(in.product);
@@ -1135,6 +1163,8 @@ public:
                     missing |= 1u << k;
                     continue;
                 }
+                if (in.lead > 0)
+                    leadUsed |= 1u << k;
                 r.slotIndex = src->SlotOf(aseq);
                 r.cgen = v.cgen;
                 r.prov = src->WordFor(aseq).prov;
@@ -1164,6 +1194,11 @@ public:
                 ++liveFills_;
                 out.liveFilled = true;
                 out.final = SealOutcome::Sealed;
+                // A live fill that used a Published lead ancestor is the same residual K1 risk as a sealed reader: that ancestor
+                // gets its own seal later and may be rejected then (leadLaterRejected).
+                for (size_t k = 0; k < n.inputCount; ++k)
+                    if ((leadUsed & (1u << k)) != 0u)
+                        MarkLeadAccepted(n.inputs[k], seq);
             } else {
                 set.CancelLive(seq);
                 out.final = SealOutcome::Unavailable;
@@ -1186,6 +1221,16 @@ private:
             if (nodes_[i].id == id)
                 return int(i);
         return -1;
+    }
+
+    // Remember that frame seq + lead of the input's product was used as a lead ancestor: its own seal comes later (render thread).
+    void MarkLeadAccepted(const InputRef& in, uint64_t seq)
+    {
+        const int j = IndexOfNode(in.product);
+        if (j < 0)
+            return;
+        const uint64_t a = seq + in.lead;
+        leadMark_[size_t(j)][size_t(sets_[size_t(j)]->SlotOf(a))] = a + 1u;
     }
 
     // K1: the content of frame `aseq` of a lead ancestor product must have been computed under the stamp of that frame.
@@ -1284,6 +1329,7 @@ private:
     bool pendingChain_ = false;            // the Check in flight accepted a chain carry-forward
     std::vector<std::vector<uint64_t>> leadMark_;   // per node, per slot: frame + 1 accepted as a lead ancestor
     std::vector<uint64_t> chainWaitSeen_;   // per node: frame + 1 last counted in chainWaitRejected (that product's lane thread only)
+    std::vector<uint64_t> chainWaitUnsealedSeen_;   // per node: frame + 1 last counted in chainWaitUnsealed (that product's lane thread only)
     std::vector<Node> nodes_;
     std::vector<SlotSet*> sets_;
     std::vector<SealedRecord> sealed_;

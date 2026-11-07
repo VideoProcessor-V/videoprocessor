@@ -435,6 +435,29 @@ namespace ProductCatalogTestsNs
 			Assert::AreEqual(VramByTier(FullGraph(Settings(dims[1], 3))).Total(), VramByTier(FullGraph(Settings(dims[1], 3))).Total());
 		}
 
+		TEST_METHOD(TdMemoryIsATwoBufferPingPongInTheVramTable)
+		{
+			const Registry reg = SkeletonProducts();
+			const Dims d4k = { 3840, 2160 };
+			const uint64_t store = BytesOf(reg.Get(kTdMemory).size, d4k);
+			for (uint8_t lane : { uint8_t(1), uint8_t(3), uint8_t(6) })
+				for (uint8_t renderAhead : { uint8_t(0), uint8_t(4) }) {
+					GraphSettings gs = Settings(d4k, lane);
+					gs.renderAhead = renderAhead;
+					const Graph g = FullGraph(gs, reg);
+					Assert::IsTrue(g.valid);
+					const Node* n = g.Find(kTdMemory);
+					Assert::IsNotNull(n);
+					Assert::IsTrue(n->singletonStore);
+					Assert::AreEqual(2, int(n->ring), L"ring = 2 whatever R and L are");
+					Assert::AreEqual(0, int(n->livePool), L"no live pool");
+					Assert::AreEqual(store, n->bufferBytes);
+					Assert::AreEqual(2u * store, n->ringBytes, L"the VRAM table figure is 2x the store, not a ring of history + R + L slots");
+					Assert::AreEqual(uint64_t(0), n->liveBytes);
+					Assert::AreEqual(g.totalRingBytes + g.totalLiveBytes, VramByTier(g).Total(), L"the table sums the node figures");
+				}
+		}
+
 		TEST_METHOD(EveryProductRingHoldsItsHistoryAtAnyMeasuredRateAndTheCapIsVisible)
 		{
 			// Unmeasured (the field maximum), 24p, 60p and 240 fps; a deep render-ahead and several lane jobs stress the extra slot terms.
@@ -450,7 +473,10 @@ namespace ProductCatalogTestsNs
 					Assert::IsTrue(g.valid, L"the catalog graph never overflows the slot counts at any rate");
 					for (const Node& n : g.nodes) {
 						Assert::IsTrue(int(n.ring) >= int(n.history) + 1, L"ring >= history + 1");
-						Assert::IsTrue(int(n.livePool) >= int(n.history) + 1, L"live pool >= history + 1");
+						if (n.singletonStore)   // the ping-pong store: two buffers, lane-only (no live fill)
+							Assert::IsTrue(int(n.ring) == 2 && n.livePool == 0, L"a single store is two buffers and has no live pool");
+						else
+							Assert::IsTrue(int(n.livePool) >= int(n.history) + 1, L"live pool >= history + 1");
 					}
 					const Node* qp = g.Find(kQualityPattern);
 					Assert::IsTrue(qp != nullptr);

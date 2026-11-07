@@ -28,6 +28,7 @@
 #include <VP-V/modules/repair/temporal_detail/products/TdProductContracts.h>
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -131,40 +132,88 @@ namespace TdProducts
 	}
 
 	// `snapshot` may be null (no producer at all).
-	inline ReadResult Read(Consumer consumer, const Snapshot* snapshot, bool requested, int64_t nowUs)
+	//
+	// The per-frame path builds no string, engaged or not: the result lives in a per-thread, per-consumer cache and is returned by
+	// reference (valid until the next Read of the same consumer on the same thread; copy it to keep it, as the consumers do). The
+	// reason and the Engaged decision are rebuilt ONLY when what they say changes: which products are missing and for which cause
+	// (a superset of the cause mask: two products missing for the same cause give another text). The caller's copy-assignment into its
+	// own ReadResult reuses its string capacity, so a steady engaged read does not allocate there either.
+	inline const ReadResult& Read(Consumer consumer, const Snapshot* snapshot, bool requested, int64_t nowUs)
 	{
-		ReadResult r;
+		struct Cache
+		{
+			ReadResult result;
+			bool primed = false;    // result.reason / result.fallback describe `noEngine` + `codes`
+			bool noEngine = false;
+			unsigned char codes[kCount] = {};   // per product index: 0 usable, 1 absent, 2 unit version, 3 stale
+		};
+		static thread_local Cache caches[kConsumerCount];
+		Cache& c = caches[size_t(consumer) < kConsumerCount ? size_t(consumer) : 0u];
+		ReadResult& r = c.result;
 		r.requested = requested;
+		r.usable = false;
+		r.missingMask = 0;
+		r.causeMask = 0;
 		if (!requested)
+		{
+			r.reason.clear();            // clear() keeps the capacity: no allocation
+			r.fallback.id.clear();
+			r.fallback.reason.clear();
+			r.fallback.engaged = false;
+			c.primed = false;
 			return r;
-		if (!snapshot)
-		{
-			r.reason = CauseWord(kCauseNoEngine);
-			r.causeMask = kCauseNoEngine;
-			for (ProductId p : NeededBy(consumer))
-				r.missingMask |= 1u << unsigned(IndexOf(p));
 		}
-		else
+		unsigned char codes[kCount] = {};
+		const bool noEngine = snapshot == nullptr;
+		for (ProductId p : NeededBy(consumer))
 		{
-			for (ProductId p : NeededBy(consumer))
+			if (noEngine)
 			{
-				const unsigned cause = CauseOf(snapshot->Of(p), ContractOf(p)->unitVersion, nowUs);
-				if (!cause)
-					continue;
 				r.missingMask |= 1u << unsigned(IndexOf(p));
-				r.causeMask |= cause;
-				r.reason += (r.reason.empty() ? "" : "; ") + std::string(ContractOf(p)->token) + " " + CauseWord(cause);
+				continue;
 			}
+			const unsigned cause = CauseOf(snapshot->Of(p), ContractOf(p)->unitVersion, nowUs);
+			if (!cause)
+				continue;
+			r.missingMask |= 1u << unsigned(IndexOf(p));
+			r.causeMask |= cause;
+			codes[IndexOf(p)] = cause == kCauseAbsent ? 1u : cause == kCauseUnitVersion ? 2u : 3u;
 		}
+		if (noEngine)
+			r.causeMask = kCauseNoEngine;
 		if (r.missingMask == 0)
 		{
 			r.usable = true;
+			r.reason.clear();
+			r.fallback.id.clear();
+			r.fallback.reason.clear();
+			r.fallback.engaged = false;
+			c.primed = false;
 			return r;
 		}
-		// Keyed by consumer + cause (never the consumer's bare id: that is the key of its own classical cause) and worded for the
-		// engine's cause: the existing entry's text names another cause (e.g. a missing chroma split) and would be false here.
-		r.fallback = FallbackCatalog::Engaged(FallbackKey(consumer, r.causeMask).c_str(),
-			std::string("temporal-detail products unavailable, classical form runs: ") + r.reason);
+		const bool same = c.primed && c.noEngine == noEngine && std::memcmp(c.codes, codes, sizeof(codes)) == 0;
+		if (!same)
+		{
+			r.reason.clear();
+			if (noEngine)
+				r.reason = CauseWord(kCauseNoEngine);
+			else
+				for (ProductId p : NeededBy(consumer))
+				{
+					const unsigned code = codes[IndexOf(p)];
+					if (!code)
+						continue;
+					r.reason += (r.reason.empty() ? "" : "; ") + std::string(ContractOf(p)->token) + " "
+					            + CauseWord(code == 1u ? kCauseAbsent : code == 2u ? kCauseUnitVersion : kCauseStale);
+				}
+			// Keyed by consumer + cause (never the consumer's bare id: that is the key of its own classical cause) and worded for the
+			// engine's cause: the existing entry's text names another cause (e.g. a missing chroma split) and would be false here.
+			r.fallback = FallbackCatalog::Engaged(FallbackKey(consumer, r.causeMask).c_str(),
+				std::string("temporal-detail products unavailable, classical form runs: ") + r.reason);
+			std::memcpy(c.codes, codes, sizeof(codes));
+			c.noEngine = noEngine;
+			c.primed = true;
+		}
 		return r;
 	}
 
@@ -195,7 +244,7 @@ namespace TdProducts
 	}
 
 	// The reset-1 read of a consumer: the placeholder producer, the engine not requested. Byte-identical to not reading at all.
-	inline ReadResult ReadToday(Consumer consumer)
+	inline ReadResult ReadToday(Consumer consumer)   // by value: engine not requested, every string empty (no allocation)
 	{
 		return Read(consumer, PlaceholderSnapshot(), kEngineRequestedToday, 0);
 	}

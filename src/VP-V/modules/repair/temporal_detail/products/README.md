@@ -77,6 +77,9 @@ every cause present). The GUI's one-time notice and `Registry.Engage` key on tha
 entries, none overwrites or releases another, and a new cause is announced once. `TdProducts::SyncRead(registry, consumer, read)` engages the key of the
 read and releases the consumer's other cause keys (recovery removes the entry); it never touches the base id. A read that is not engaged carries an empty
 id on purpose: the per-frame read of a consumer that is not requested builds no string (the keys are built once, `NeededBy` returns a stored vector).
+An ENGAGED read builds none either while it is unchanged: `TdProducts::Read` returns a `const ReadResult&` to a per-thread, per-consumer cache (valid until the
+next read of that consumer on that thread; consumers copy it into their own member) and rebuilds the reason and the Engaged decision only when the missing
+products or their causes change (a superset of the cause mask).
 
 ## Tests
 

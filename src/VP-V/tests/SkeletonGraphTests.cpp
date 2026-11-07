@@ -198,6 +198,75 @@ namespace SkeletonGraphTestsNs
 		return Registry(std::move(d));
 	}
 
+	// ---- single store (W1-RES): 0 store (singletonStore), 1 reader (the store at lag 1) ----
+	constexpr ProductId kStore = 0, kStoreReader = 1;
+
+	Registry SingleStoreRegistry()
+	{
+		using namespace VpIndicator;
+		std::vector<ProductDecl> d;
+		ProductDecl store = detail::Make(kStore, "store", "single store", Backend::Cpu, 0, Tier::T0, Bit(kFull), 0);
+		store.singletonStore = true;
+		d.push_back(store);
+		ProductDecl reader = detail::Make(kStoreReader, "store_reader", "store reader", Backend::Cpu, 0, Tier::T0, Bit(kFull), 0);
+		detail::AddInput(reader, kStore, 1);
+		reader.missingInputForm = true;
+		d.push_back(reader);
+		for (ProductDecl& p : d)
+			p.size.fixedBytes = 64;
+		return Registry(std::move(d));
+	}
+
+	// ---- the real catalog chain products: td.blocks, coding_evidence, quality_pattern (+ causal) ----
+	// The declarations are the catalog's own; only the reads that need OTHER lane products (grain split, region stats, source ring) are
+	// stripped from td.blocks and coding_evidence so the closure is the chain product itself (those products are exercised elsewhere).
+	Registry CatalogChainRegistry()
+	{
+		std::vector<ProductDecl> d = SkeletonProducts().All();
+		const ProductId stripped[] = { kTdBlocks, kCodingEvidence };
+		for (ProductId id : stripped) {
+			ProductDecl& p = d[id];
+			p.inputs.fill(InputRef());
+			p.inputCount = 0;
+			detail::AddInput(p, id, 1);
+		}
+		return Registry(std::move(d));
+	}
+
+	// Frames 0..3 through the lane protocol by hand. leads: the product reads its input at lead 1 and 2 (quality_pattern): the render
+	// is simulated sealing the lead target ahead (a real render seals in frame order, see the README note on lead readers of chains).
+	void CatalogChainRuns(const Registry& reg, ProductId product, bool leads)
+	{
+		Assert::IsTrue(reg.Validate());
+		Assert::IsTrue(reg.Get(product).orderedChain && reg.Get(product).missingInputForm, L"declared as an ordered chain with its reduced form");
+		ConsumerDecl c;
+		c.id = 1;
+		c.name = "chain reader";
+		AddConsume(c, product);
+		Rig r(reg, std::vector<ConsumerDecl>(1, c), 4);
+		Assert::IsTrue(r.graph.valid && r.graph.Has(product));
+		Assert::IsTrue(r.graph.Find(product)->orderedChain);
+		uint64_t made = 0;
+		for (uint64_t s = 0; s < 4; ++s) {
+			for (; made < s + (leads ? 3u : 1u); ++made)
+				for (const Node& n : r.graph.nodes) {
+					if (n.id == product)
+						continue;
+					Assert::IsTrue(r.Lane(n.id, made), L"an input of the chain job is made");
+					if (leads && n.id == kCodingEvidence)
+						r.Set(n.id).Seal(made, [](const Header&) { return SealReason::Accepted; });
+				}
+			Assert::IsTrue(r.Lane(product, s), s == 0 ? L"frame 0: the chain start runs reduced" : L"frame N: the sealed predecessor is pinned");
+			const auto& res = r.Resolve(s);
+			const ProductFrameResult& f = r.Result(res, product);
+			Assert::IsTrue(f.seal.reason == SealReason::Accepted && f.final == SealOutcome::Sealed && !f.liveFilled, L"the lane result is accepted");
+			Assert::IsTrue(r.Set(product).Read(s).header->chainReduced == (s == 0), L"only frame 0 is reduced");
+			r.table.ReleaseAfter(s);
+		}
+		Assert::AreEqual(uint64_t(1), r.Set(product).Counters().chainCarryForward.load(), L"one declared carry-forward: the start");
+		Assert::AreEqual(uint64_t(0), r.Set(product).Counters().live.load(), L"never live-filled");
+	}
+
 	class FillProducer : public ILaneProducer {
 	public:
 		explicit FillProducer(ProductId id) : id_(id) {}
@@ -681,10 +750,100 @@ namespace SkeletonGraphTestsNs
 			r.Lane(kChainBase, 0);
 			r.Lane(kChainBase, 1);
 			Assert::IsTrue(r.Lane(kChain, 0));   // chain start: carried
+			r.Resolve(0);                        // the predecessor is sealed: render-valid
 			Assert::IsTrue(r.Lane(kChain, 1));   // predecessor present
 			Assert::IsTrue(r.Set(kChain).Read(0, true).header->chainReduced);
 			Assert::IsFalse(r.Set(kChain).Read(1, true).header->chainReduced);
 			Assert::IsTrue(r.Set(kChain).Read(1, true).header->ancestors[1].cgen != 0u);
+		}
+
+		TEST_METHOD(AChainJobPinsOnlyARenderValidPredecessorAndTheWaitIsCounted)
+		{
+			Rig r(ChainRegistry(), OneConsumer(kChain), 2);
+			r.Lane(kChainBase, 0);
+			r.Lane(kChainBase, 1);
+			Assert::IsTrue(r.Lane(kChain, 0));
+			Assert::IsTrue(r.Set(kChain).StateOf(0) == SlotState::Published, L"published, not sealed");
+			Header scratch;
+			LaneInputs pins;
+			for (int poll = 0; poll < 5; ++poll)
+				Assert::IsFalse(r.table.LaneAncestors(kChain, 1, scratch, pins), L"a Published predecessor is Transient: the job waits");
+			Assert::AreEqual(size_t(0), pins.count, L"nothing stays pinned");
+			Assert::IsFalse(scratch.chainReduced, L"waited, not carried forward");
+			Assert::AreEqual(uint64_t(1), r.Set(kChain).Counters().chainWaitUnsealed.load(), L"one frame waited, not five polls");
+			Assert::AreEqual(uint64_t(0), r.Set(kChain).Counters().chainWaitRejected.load());
+			// The pin rule is the chain's: an ordinary reader (and a lead reader) may still pin the Published content.
+			AncestorRef ref;
+			int live = -1;
+			Assert::IsFalse(r.Set(kChain).PinRef(0, &ref, &live, true), L"render-valid only: refused");
+			Assert::IsTrue(r.Set(kChain).PinRef(0, &ref, &live), L"the default pin still takes Published content");
+			r.Set(kChain).Unpin(0, live);
+			r.Resolve(0);
+			Assert::IsTrue(r.Set(kChain).PinRef(0, &ref, &live, true), L"sealed: pinnable");
+			r.Set(kChain).Unpin(0, live);
+			Assert::IsTrue(r.Lane(kChain, 1), L"the wait ends at the seal");
+			Assert::IsFalse(r.Set(kChain).Read(1, true).header->chainReduced);
+		}
+
+		TEST_METHOD(AChainRecoversFromOneRejectionWithoutACascade)
+		{
+			Rig r(ChainRegistry(), OneConsumer(kChain), 2);
+			std::vector<bool> accepted;
+			std::vector<bool> liveFilled;
+			r.Lane(kChainBase, 0);
+			for (uint64_t s = 0; s < 8; ++s) {
+				Assert::IsTrue(r.Lane(kChain, s), L"the chain job runs once its predecessor is sealed or live");
+				if (s == 3)
+					r.ind.Advance(VpIndicator::kFull, Cause::RendererReset, 3);   // frame 3 was made under the old stamp: rejected at its seal
+				r.Lane(kChainBase, s + 1);
+				// The lane tries to run one frame ahead of the seal: it must wait (the predecessor is only Published).
+				Header scratch;
+				LaneInputs pins;
+				Assert::IsFalse(r.table.LaneAncestors(kChain, s + 1, scratch, pins), L"no chain job ahead of the predecessor's seal");
+				Assert::AreEqual(size_t(0), pins.count);
+				const auto& res = r.Resolve(s);
+				const ProductFrameResult& f = r.Result(res, kChain);
+				accepted.push_back(f.seal.reason == SealReason::Accepted);
+				liveFilled.push_back(f.liveFilled);
+				Assert::IsTrue(f.final == SealOutcome::Sealed, L"every frame has valid content");
+				r.table.ReleaseAfter(s);
+			}
+			for (uint64_t s = 0; s < 8; ++s) {
+				if (s == 3) {
+					Assert::IsFalse(accepted[3]);
+					Assert::IsTrue(liveFilled[3], L"the rejected frame is live-filled once");
+				} else {
+					Assert::IsTrue(accepted[s] && !liveFilled[s], L"no cascade: the next frame (and every later one) is accepted from the lane");
+				}
+			}
+			Assert::AreEqual(uint64_t(1), r.Set(kChain).Counters().live.load(), L"exactly one live fill of the chain product");
+			Assert::AreEqual(uint64_t(8), r.Set(kChain).Counters().chainWaitUnsealed.load(), L"each waiting frame is visible, once");
+		}
+
+		TEST_METHOD(TheCatalogChainProductsAreMadeByTheLaneFromFrameOne)
+		{
+			const Registry reg = CatalogChainRegistry();
+			CatalogChainRuns(reg, kTdBlocks, false);
+			CatalogChainRuns(reg, kCodingEvidence, false);
+			CatalogChainRuns(reg, kQualityPatternCausal, false);
+			CatalogChainRuns(reg, kQualityPattern, true);
+			// The full catalog (nothing stripped) validates with every chain declared.
+			Assert::IsTrue(SkeletonProducts().Validate());
+		}
+
+		TEST_METHOD(ALiveFillThatReadAPublishedLeadAncestorIsCountedWhenThatAncestorIsRejectedLater)
+		{
+			Rig r(LeadRegistry(), OneConsumer(kLeadReader), 4);
+			for (uint64_t s = 0; s < 4; ++s)
+				r.Lane(kBase, s);   // base(2) Published; no reader lane result for frame 0: the reader is live-filled from it
+			const auto& res = r.Resolve(0);
+			const ProductFrameResult& f = r.Result(res, kLeadReader);
+			Assert::IsTrue(f.liveFilled && f.missingInputs == 0u, L"the live fill used the Published lead ancestor");
+			Assert::AreEqual(uint64_t(0), r.Set(kBase).Counters().leadLaterRejected.load());
+			r.ind.Advance(VpIndicator::kFull, Cause::RendererReset, 2);   // base(2) turns stale after the live fill used it
+			r.Resolve(1);
+			r.Resolve(2);
+			Assert::AreEqual(uint64_t(1), r.Set(kBase).Counters().leadLaterRejected.load(), L"the live fill marked the lead ancestor: the residual risk is visible");
 		}
 
 		// ---- declaration overflow fails closed (also in Release, where the assert is compiled out) ----
@@ -798,6 +957,109 @@ namespace SkeletonGraphTestsNs
 			detail::AddInput(bad[0], 0, 1);
 			Assert::IsFalse(Registry(bad).Validate(&why));
 			Assert::IsTrue(Has(why, "single-store"));
+		}
+
+		TEST_METHOD(ASingleStoreIsATwoBufferPingPongWithoutALivePool)
+		{
+			GraphSettings gs = Rig::MakeSettings(4);
+			gs.renderAhead = 3;
+			gs.laneJobsInFlight = 2;
+			const Graph g = BuildGraph(SingleStoreRegistry(), OneConsumer(kStoreReader), gs);
+			Assert::IsTrue(g.valid);
+			const Node* store = g.Find(kStore);
+			Assert::IsNotNull(store);
+			Assert::AreEqual(int(kSingletonStoreBuffers), int(store->ring), L"ring = 2 whatever R and L are");
+			Assert::AreEqual(0, int(store->livePool), L"lane-only: no live pool");
+			Assert::AreEqual(1, int(store->history), L"depth stays the largest lag read");
+			Assert::AreEqual(store->bufferBytes * 2u, store->ringBytes, L"2x the store");
+			Assert::AreEqual(uint64_t(0), store->liveBytes);
+			Assert::IsTrue(g.Find(kStoreReader)->ring > 2u, L"an ordinary product keeps its R / L ring");
+			// The slot table follows the node: no live buffer exists.
+			SlotTable t(g);
+			Assert::AreEqual(2, int(t.Find(kStore)->Ring()));
+			Assert::AreEqual(0, int(t.Find(kStore)->LivePool()));
+			Assert::AreEqual(-1, t.Find(kStore)->BeginLive(0), L"nothing to begin");
+			// Different R and L: the same two buffers.
+			gs.renderAhead = 0;
+			gs.laneLead = 1;
+			Assert::AreEqual(2, int(BuildGraph(SingleStoreRegistry(), OneConsumer(kStoreReader), gs).Find(kStore)->ring));
+		}
+
+		TEST_METHOD(AnAbsentSingleStoreFrameIsUnavailableAndTheReaderRunsItsOwnFallback)
+		{
+			Rig r(SingleStoreRegistry(), OneConsumer(kStoreReader), 2);
+			const auto& res0 = r.Resolve(0);   // the lane made nothing: there is no live fill for a store
+			const ProductFrameResult& s0 = r.Result(res0, kStore);
+			Assert::IsTrue(s0.final == SealOutcome::Unavailable && s0.finalReason == SealReason::NoLiveBuffer && !s0.liveFilled);
+			Assert::AreEqual(uint64_t(0), r.Set(kStore).Counters().noLiveBuffer.load(), L"not a pool shortage: there is no pool");
+			const ProductFrameResult& rd0 = r.Result(res0, kStoreReader);
+			Assert::IsTrue(rd0.liveFilled && (rd0.missingInputs & 1u) != 0u, L"frame 0: no lag-1 store at all");
+			const auto& res1 = r.Resolve(1);
+			const ProductFrameResult& rd1 = r.Result(res1, kStoreReader);
+			Assert::IsTrue(rd1.liveFilled && (rd1.missingInputs & 1u) != 0u, L"frame 1: the store of frame 0 was never made: the declared reduced form");
+			Assert::IsTrue(r.Set(kStoreReader).Read(1).header->prov == Provenance::LiveFallback, L"visible, never a full result");
+		}
+
+		TEST_METHOD(ASingleStoreProducerWaitsWhileALagOneReaderPinsItsSlotAndTheWaitIsCounted)
+		{
+			Rig r(SingleStoreRegistry(), OneConsumer(kStoreReader), 2);
+			Assert::IsTrue(r.Lane(kStore, 0));
+			r.Resolve(0);
+			Assert::IsTrue(r.Lane(kStore, 1));
+			// A lag-1 reader job at frame 1 holds store(0) (slot 0) through its whole job.
+			Header readerHdr;
+			LaneInputs held;
+			Assert::IsTrue(r.table.LaneAncestors(kStoreReader, 1, readerHdr, held));
+			Assert::AreEqual(size_t(1), held.count);
+			r.Resolve(1);
+			r.table.ReleaseAfter(1);   // the render is done with frame 0 (history 1): the slot is released, the lane reader is not
+			// The producer's job for frame 2 uses the slot of frame 0.
+			LaneRunner run(r.table, &r.ind, []() { return uint64_t(0); });
+			FillProducer ps(kStore);
+			run.Register(&ps);
+			for (uint64_t s = 0; s < 3; ++s)
+				run.OnSourceFrame(s);
+			for (int poll = 0; poll < 4; ++poll)
+				Assert::IsTrue(run.Step(kStore, 1000) == StepOutcome::WaitingSlot, L"waits (Transient) while the reader pins the slot");
+			Assert::AreEqual(uint64_t(1), r.Set(kStore).Counters().writeWaitPinned.load(), L"counted once per job, not per poll");
+			held.Unpin();
+			StepOutcome o = StepOutcome::Failed;
+			for (int i = 0; i < 10 && o != StepOutcome::Published; ++i)
+				o = run.Step(kStore, 1000);
+			Assert::IsTrue(o == StepOutcome::Published, L"the wait ends when the reader lets go");
+			Assert::AreEqual(uint64_t(1), r.Set(kStore).Counters().writeWaitPinned.load());
+		}
+
+		TEST_METHOD(ASingleStoreAcceptsOnlyLagZeroOrOneReaders)
+		{
+			std::vector<ProductDecl> d = SingleStoreRegistry().All();
+			Assert::IsTrue(Registry(d).Validate());
+			detail::AddInput(d[kStoreReader], kStore, 0);   // lag 0 is fine too
+			Assert::IsTrue(Registry(d).Validate());
+			d = SingleStoreRegistry().All();
+			d[kStoreReader].inputs[0].lag = 2;
+			const char* why = "";
+			Assert::IsFalse(Registry(d).Validate(&why));
+			Assert::IsTrue(Has(why, "single-store") && Has(why, "lag"));
+			// A consumer reading it deeper than lag 1 fails the graph with the same plain reason.
+			ConsumerDecl c;
+			c.id = 1;
+			c.name = "deep reader";
+			AddConsume(c, kStore, 2);
+			const Graph g = BuildGraph(SingleStoreRegistry(), std::vector<ConsumerDecl>(1, c), Rig::MakeSettings(2));
+			Assert::IsFalse(g.valid);
+			Assert::IsTrue(Has(g.error, "single-store"));
+			Assert::IsTrue(g.errorProduct == kStore);
+			ConsumerDecl ok;
+			ok.id = 1;
+			ok.name = "lag 1 reader";
+			AddConsume(ok, kStore, 1);
+			Assert::IsTrue(BuildGraph(SingleStoreRegistry(), std::vector<ConsumerDecl>(1, ok), Rig::MakeSettings(2)).valid);
+			// No lane, no live fill: a render-only store would have no storage at all.
+			d = SingleStoreRegistry().All();
+			d[kStore].backend = Backend::RenderOnly;
+			Assert::IsFalse(Registry(d).Validate(&why));
+			Assert::IsTrue(Has(why, "single-store") && Has(why, "lane"));
 		}
 
 		// ---- budget-governed history ----

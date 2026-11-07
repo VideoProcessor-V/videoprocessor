@@ -210,6 +210,7 @@ private:
         LaneJobContext job;
         SourceFrameView src;      // the job's own copy of the source view: its keepAlive holds the planes
         bool began = false;       // the producer's fence values are meaningful
+        bool pinWaitCounted = false;   // this job already counted its wait on a pinned slot
         uint64_t costUs = 0;
         ChainOrder chain;         // ordered-chain products: the last published frame
     };
@@ -275,6 +276,7 @@ private:
         st.seq = seq;
         st.ticket = t;
         st.began = false;
+        st.pinWaitCounted = false;
         st.costUs = 0;
         st.pins.count = 0;
         st.phase = Phase::Claimed;
@@ -290,6 +292,12 @@ private:
             return true;
         }
         if (!st.set->Writable(st.ticket)) {
+            // A late reader of the slot's previous tenant still holds a pin (a single-store product's lag-1 reader, a late lane
+            // reader): this job waits (Transient). Counted once per job, not per poll.
+            if (!st.pinWaitCounted) {
+                st.pinWaitCounted = true;
+                st.set->MutableCounters().writeWaitPinned.fetch_add(1, std::memory_order_relaxed);
+            }
             *out = StepOutcome::WaitingSlot;
             return false;
         }

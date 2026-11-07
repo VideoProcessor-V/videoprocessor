@@ -20,6 +20,8 @@
 //          + L (lane lead to render start; 0 for render-only) + q (1 lane-owned rejected buffer for
 //          every lane backend; 0 for render-only) + 1 only when a consumer holds the next frame's
 //          product through the presentation span (a pair consumer, audit 25a N8)
+//   (a single-store product, ProductDecl::singletonStore, is the exception: ring = 2 buffers (ping-pong) whatever R and L are,
+//   live pool = 0, lane-only, no live fill)
 //   live pool = history + 1 + R (+1 for a held span product) + one spare per input reference held
 //               by lane readers x lane jobs in flight (a late lane reader may pin a released live
 //               buffer until its job ends):
@@ -42,6 +44,9 @@
 namespace VpSkeleton {
 
 enum class QueueMode : uint8_t { Normal, Games, Competitive };
+
+// A single-store product (ProductDecl::singletonStore) is a ping-pong of this many buffers, whatever render-ahead and lane lead are.
+constexpr unsigned kSingletonStoreBuffers = 2;
 
 // A history depth the VRAM governor granted a governed-history product (VramGovernor.h PlanTiers) below its full
 // depth. Carried in GraphSettings so the graph is built with it; a change is a rebuild (kRebuildHistory).
@@ -468,8 +473,18 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         node.leadRead = maxLeadRead[p];
         node.reducedFrom = reducedFrom[p];
         node.shortQueue = reducedFrom[p] != kNoProduct;
-        const unsigned ring = unsigned(node.history) + 1u + R + L + q + (node.holdsSpan ? 1u : 0u)
-                              + unsigned(node.leadRead);
+        if (d.singletonStore && (maxLag[p] > 1 || maxLeadRead[p] > 0)) {
+            // The store is a two-buffer ping-pong: a reader deeper than lag 1 (or a look-ahead) would read a buffer the producer already rewrote.
+            g.error = "a single-store product is read at lag 0 or 1 only (a consumer or product reads it deeper); the analysis graph was not built";
+            g.errorProduct = p;
+            g.errorProductName = d.token;
+            g.nodes.clear();
+            g.totalRingBytes = 0;
+            g.totalLiveBytes = 0;
+            return g;
+        }
+        const unsigned ring = d.singletonStore ? kSingletonStoreBuffers
+                              : unsigned(node.history) + 1u + R + L + q + (node.holdsSpan ? 1u : 0u) + unsigned(node.leadRead);
         if (ring > kSlotCountMax) {
             // Never clamped: a ring smaller than history + 1 would starve the lane with no sign of it. Same visible reject as an overflowing read list.
             g.error = "a product needs more than 255 ring slots (history, render-ahead and lane lead together); the analysis graph was not built";
@@ -481,8 +496,9 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
             return g;
         }
         node.ring = uint8_t(ring);
-        const unsigned live = unsigned(node.history) + 1u + R + (node.holdsSpan ? 1u : 0u)
-                              + laneReadRefs[p] * unsigned(gs.laneJobsInFlight == 0 ? 1u : gs.laneJobsInFlight);
+        const unsigned live = d.singletonStore ? 0u
+                              : unsigned(node.history) + 1u + R + (node.holdsSpan ? 1u : 0u)
+                                    + laneReadRefs[p] * unsigned(gs.laneJobsInFlight == 0 ? 1u : gs.laneJobsInFlight);
         if (live > kSlotCountMax) {
             g.error = "a product needs more than 255 live-pool buffers (history, render-ahead and lane readers together); the analysis graph was not built";
             g.errorProduct = p;

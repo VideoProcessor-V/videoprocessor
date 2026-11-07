@@ -384,6 +384,48 @@ namespace Tests
 				Assert::IsTrue(mixed.fallback.id.find("absent+stale") != std::string::npos);
 			}
 
+			TEST_METHOD(AnEngagedReadBuildsNoStringWhileItsCausesAreUnchanged)
+			{
+				const Consumer c = Consumer::ChromaStage;   // td.maps, td.delta, td.memory, refined_field
+				Snapshot s = FreshAll(1000);
+				s.entry[IndexOf(VpSkeleton::kTdMaps)].published = false;
+				const ReadResult& first = Read(c, &s, true, 2000);
+				Assert::IsTrue(first.fallback.engaged && first.reason.find("td.maps absent") != std::string::npos);
+				const char* reasonText = first.reason.c_str();
+				const char* idText = first.fallback.id.c_str();
+				const char* whyText = first.fallback.reason.c_str();
+				for (int frame = 0; frame < 5; ++frame)
+				{
+					const ReadResult& again = Read(c, &s, true, 2000 + frame);
+					Assert::IsTrue(&again == &first, L"one cached result per consumer and thread");
+					Assert::IsTrue(again.reason.c_str() == reasonText && again.fallback.id.c_str() == idText && again.fallback.reason.c_str() == whyText,
+						L"the strings are not rebuilt while the causes are unchanged");
+					Assert::IsTrue(again.fallback.engaged && again.causeMask == kCauseAbsent);
+				}
+				// The SAME cause mask for another product is another text: the cache keys on the products and their causes, not the mask alone.
+				Snapshot t = FreshAll(1000);
+				t.entry[IndexOf(VpSkeleton::kTdDelta)].published = false;
+				const ReadResult& other = Read(c, &t, true, 2000);
+				Assert::AreEqual(unsigned(kCauseAbsent), other.causeMask);
+				Assert::IsTrue(other.reason.find("td.delta absent") != std::string::npos && other.reason.find("td.maps") == std::string::npos);
+				Assert::IsTrue(other.fallback.reason.find("td.delta absent") != std::string::npos);
+				// A cause change rebuilds; recovery clears the strings; the next engagement is correct again.
+				Snapshot st = FreshAll(1000);
+				st.entry[IndexOf(VpSkeleton::kTdDelta)].maxAgeUs = 100;
+				const ReadResult& stale = Read(c, &st, true, 2000);
+				Assert::AreEqual(unsigned(kCauseStale), stale.causeMask);
+				Assert::IsTrue(stale.reason.find("td.delta stale") != std::string::npos);
+				const Snapshot fresh = FreshAll(1000);
+				const ReadResult& ok = Read(c, &fresh, true, 2000);
+				Assert::IsTrue(ok.usable && !ok.fallback.engaged && ok.reason.empty() && ok.fallback.id.empty());
+				const ReadResult& again = Read(c, &s, true, 2000);
+				Assert::IsTrue(again.fallback.engaged && again.reason.find("td.maps absent") != std::string::npos);
+				Assert::AreEqual(FallbackKey(c, kCauseAbsent), again.fallback.id);
+				// No producer at all, then not requested.
+				Assert::AreEqual(std::string("engine not built"), Read(c, nullptr, true, 0).reason);
+				Assert::IsTrue(Read(c, nullptr, false, 0).reason.empty());
+			}
+
 			TEST_METHOD(ReadRecoversByItselfAndRejectsStaleOrForeignVersions)
 			{
 				const Consumer c = Consumer::AdaptiveScaler;   // td.maps + refined_field

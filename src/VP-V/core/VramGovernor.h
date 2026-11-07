@@ -411,7 +411,9 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
         levelHistory[i].push_back(n.historyFull);
         if (canLane[i] && ringB[i] > 0) {
             u.levels.push_back(liveAt);
-            u.levelText.push_back("computed in the render (no look-ahead)");
+            // A single-store product has no live pool (liveAt is 0): dropping its lane drops the store, never an in-render form.
+            u.levelText.push_back(n.singletonStore ? "not kept (no live fill: its readers use their own fallback)"
+                                                   : "computed in the render (no look-ahead)");
             levelHistory[i].push_back(n.historyFull);
             inRenderLevel[i] = 1;
         }
