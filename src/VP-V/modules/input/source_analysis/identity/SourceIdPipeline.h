@@ -16,12 +16,15 @@
 #include <VP-V/modules/input/source_analysis/identity/AbrNoticePolicy.h>
 #include <VP-V/modules/input/source_analysis/identity/AbrStepDetector.h>
 #include <VP-V/modules/input/source_analysis/identity/FrameQuality.h>
+#include <VP-V/modules/input/source_analysis/identity/SourceGeometryProduct.h>
+#include <VP-V/modules/input/source_analysis/identity/SourceGeometryView.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdConsensus.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdProduct.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdVote.h>
 #include <VP-V/modules/input/source_analysis/identity/shared/SourceQuality.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -84,6 +87,37 @@ namespace SourceIdentity
 		std::vector<Request> requests_;
 	};
 
+	// The chain voter's view of a sealed P14g record: the CONFIDENT (applied) axes with the record's confidence, and the applied kernel when
+	// it is verified (the reading sets an applied kernel only above its confidence setting) mapped to the classical kernel index. An UNSURE
+	// axis carries no applied value and is not voted. `seq` is the EVALUATION the record came from: the consensus counts distinct ones.
+	inline ChainReading ChainReadingOf(const Geometry::Record& g)
+	{
+		ChainReading r;
+		r.valid = true;
+		r.seq = g.evalSeq;
+		r.timeUs = g.evalTimeUs;
+		// Which axes carry a claim, and their applied values, is the view's definition (SourceGeometryView.h, ConfidentOf).
+		const Geometry::ConfidentGeometry l = Geometry::ConfidentOf(g, Geometry::Delivered());
+		for (int a = 0; a < 2; ++a)
+			if (l.axis[a].confident)
+			{
+				r.axis[a].confident = true;
+				r.axis[a].ratio = l.axis[a].ratio;
+				r.axis[a].confidence = l.axis[a].conf;
+			}
+		for (int a = 0; a < 2 && r.kernelClassical < 0; ++a)
+			if (l.axis[a].confident && l.axis[a].kernel.Known())
+			{
+				const int k = ChainKernelToClassical(l.axis[a].kernel.index);
+				if (k >= 0)
+				{
+					r.kernelClassical = k;
+					r.kernelConf = l.axis[a].kernel.conf;
+				}
+			}
+		return r;
+	}
+
 	struct FrameInput
 	{
 		uint64_t seq = 0;
@@ -105,6 +139,13 @@ namespace SourceIdentity
 			: s_(s), consensus_(s.consensus), detector_(s.detector), notice_(s.notice), signal_(s.quality) {}
 
 		void SetConsensusOn(bool on) { consensusOn_ = on; }
+		// The P14g holder the chain estimator publishes into (nullptr = no chain voter). Any thread; the worker reads it.
+		void SetGeometrySource(const Geometry::HeldState* source) { geometry_.store(source, std::memory_order_release); }
+		const Geometry::HeldState* GeometrySource() const { return geometry_.load(std::memory_order_acquire); }
+		// The first source sequence of the current era (set by Discontinuity): a P14g record sealed below it is from before the
+		// discontinuity and is never used, whatever its stream key (the ring keeps the old record until the writer publishes its
+		// reset). Any thread (the monitor reads it too).
+		uint64_t GeometryFloor() const { return geometryFloor_.load(std::memory_order_acquire); }
 		// SHADOW: the record is published (P14) and the would-be changes are logged, but the classical decision stands.
 		void SetShadow(bool on) { shadow_ = on; }
 		void SetNoticeEnabled(bool on)
@@ -118,8 +159,10 @@ namespace SourceIdentity
 
 		// FULL / new title or source: everything back to native/unknown, the held records dropped. `streamKey` is the Indicator's
 		// FULL/era counter (it re-arms the one-time notice).
+		// `seq` = the first source sequence of the new era (records of the chain estimator sealed below it are ignored).
 		void Discontinuity(uint64_t seq, uint64_t streamKey)
 		{
+			geometryFloor_.store(seq, std::memory_order_release);
 			consensus_.Discontinuity(seq);
 			detector_.Reset();
 			signal_.Reset();
@@ -177,6 +220,27 @@ namespace SourceIdentity
 			consensus_.Submit(ClassicalKernelVote(c, s_.vote));
 			consensus_.Submit(BitrateQualityVote(c, s_.vote));
 
+			// The chain voter: the latest sealed P14g record with evalSeq <= this frame (lag <= one evaluation), when it is fresh, of this
+			// stream and of this unit version. Anything else submits an empty vote: the classical voters decide. An UNSURE axis is not voted.
+			bool chainVoted = false;
+			const Geometry::HeldState* geometry = geometry_.load(std::memory_order_acquire);
+			if (geometry != nullptr)
+			{
+				ChainReading cr;
+				Geometry::Record g;
+				// Usable = decodable, sealed at or after the era's first sequence, of this stream, and fresh by ITS OWN maximum age (the
+				// writer's governed interval x 2): a fresh record is a live estimator whatever its cadence, so the vote is stamped with the
+				// frame's own time and the consensus's evidence age never judges it. The consensus counts DISTINCT evaluations (g.evalSeq).
+				if (geometry->ReadLatest(in.seq, g) && g.evalSeq >= geometryFloor_.load(std::memory_order_acquire) &&
+					g.Cause(in.seq, in.timeUs) == 0u && (in.streamKey == 0 || g.streamKey == 0 || g.streamKey == in.streamKey))
+				{
+					cr = ChainReadingOf(g);
+					cr.timeUs = in.timeUs;
+					chainVoted = cr.axis[0].confident || cr.axis[1].confident;
+				}
+				consensus_.Submit(ChainVote(cr));
+			}
+
 			DeferredIndicatorPort port;
 			const Result result = consensus_.Evaluate(in.seq, in.timeUs, &port);
 			latchedMask_ = static_cast<uint8_t>(latchedMask_ | result.changedMask);
@@ -209,7 +273,7 @@ namespace SourceIdentity
 			Record r;
 			r.flags = static_cast<uint16_t>((consensusOn_ ? kFlagConsensusOn : 0) | (shadow_ ? kFlagShadow : 0) | (in.classical.reading ? kFlagReading : 0) |
 				(haveEvent_ && lastEvent_.direction == AbrDirection::Drop ? kFlagDropEventSeen : 0) |
-				(noticeFired_ ? kFlagNoticeFired : 0));
+				(noticeFired_ ? kFlagNoticeFired : 0) | (chainVoted ? kFlagChainVote : 0));
 			r.seq = in.seq;
 			r.timeUs = in.timeUs;
 			r.consensusGen = consensusGen_;
@@ -276,6 +340,8 @@ namespace SourceIdentity
 		NoticePolicy notice_;
 		FrameQuality::Signal signal_;
 		HeldState held_;
+		std::atomic<const Geometry::HeldState*> geometry_{ nullptr };
+		std::atomic<uint64_t> geometryFloor_{ 0 };
 		bool consensusOn_ = false;
 		bool shadow_ = false;
 		double level_ = 1.0;

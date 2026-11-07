@@ -1,5 +1,7 @@
 #include <pch.h>
 #include "SourceResolutionMonitor.h"
+#include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h>
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
 #include <VP-V/modules/input/source_analysis/identity/shared/SourceQuality.h>
 
@@ -70,12 +72,31 @@ if (tile < int(tiles) && g.y < ts) {
 
 	Monitor::Monitor()
 	{
+		chainEst.reset(new SourceIdentity::Chain::ChainEstimator());   // inert until SetChainEnabled(true): no thread, no tap
 		worker = std::thread([this] { Worker(); });
 		aheadThread = std::thread([this] { AheadWorker(); });
+		// Test / debug switches (VP-V; the loop rig runs shadow mode before the keys are plumbed): VP_SOURCE_ID_CONSENSUS = off | shadow | on,
+		// VP_SOURCE_ID_EVIDENCE = off | log | log+lines | log+lines+frames. Unset: nothing changes. A value that is not one of these is ignored.
+		char value[64] = {};
+		if (GetEnvironmentVariableA("VP_SOURCE_ID_CONSENSUS", value, sizeof(value)) > 0)
+		{
+			const std::string v = value;
+			if (v == "shadow" || v == "on")
+			{
+				SetSourceIdMode(v == "on" ? SourceIdMode::On : SourceIdMode::Shadow);
+				SetChainEnabled(true);
+			}
+		}
+		if (GetEnvironmentVariableA("VP_SOURCE_ID_EVIDENCE", value, sizeof(value)) > 0)
+		{
+			if (!SetChainEvidence(std::string(), value))
+				DebugLog::Log("VP_SOURCE_ID_EVIDENCE=%s is not an evidence level (off | log | log+lines | log+lines+frames): ignored", value);
+		}
 	}
 
 	Monitor::~Monitor()
 	{
+		if (chainEst) chainEst->Stop();   // its worker never calls back into the monitor; stopped first
 		{
 			std::lock_guard<std::mutex> lock(mutex);
 			stopping = true;
@@ -332,6 +353,8 @@ if (tile < int(tiles) && g.y < ts) {
 	void Monitor::SetHistoryFolder(const std::string& folder)
 	{
 		std::lock_guard<std::mutex> lock(mutex);
+		chainHistoryFolder = folder;   // the evidence folder defaults to "sid-evidence" beside the history CSV
+		ApplyChainEvidenceLocked();
 		if (folder.empty()) { historyLog.Open(std::string(), std::string(), std::string()); return; }
 		SYSTEMTIME t{};
 		GetLocalTime(&t);
@@ -388,6 +411,7 @@ if (tile < int(tiles) && g.y < ts) {
 	void Monitor::Discontinuity(const char* cause)
 	{
 		const char* const text = cause ? cause : "discontinuity";
+		if (chainEnabled.load(std::memory_order_acquire)) chainEst->NoteDiscontinuity(text);   // any thread: a leaf lock
 		discontinuityCause.store(text, std::memory_order_release);
 		// Frame-bound: a new era (results and jobs of the old one are dropped), taking effect at the
 		// render thread's next Frame / AutoFactor.
@@ -399,10 +423,18 @@ if (tile < int(tiles) && g.y < ts) {
 
 	Snapshot Monitor::Read() const
 	{
+		const std::string chainText = chainEnabled.load(std::memory_order_acquire) ? ChainStatusCached() : std::string();
 		std::lock_guard<std::mutex> lock(mutex);
-		if (!frameBound.load(std::memory_order_acquire)) return snapshot;
+		if (!frameBound.load(std::memory_order_acquire))
+		{
+			if (chainText.empty()) return snapshot;
+			Snapshot plain = snapshot;
+			plain.chainNote = chainText;
+			return plain;
+		}
 		// Frame-bound: the released analysis; the GPU-side status and the counters are live.
 		Snapshot out = visible;
+		out.chainNote = chainText;
 		out.notRead = snapshot.notRead;
 		out.error = snapshot.error;
 		out.frameBound = true;
@@ -421,11 +453,32 @@ if (tile < int(tiles) && g.y < ts) {
 	// ---- source identity (doc 61, P14) -------------------------------------------------------------------------------
 	void Monitor::SetSourceIdMode(SourceIdMode mode)
 	{
+		sourceIdRequested.store(static_cast<int>(mode), std::memory_order_release);
+		ApplySourceIdMode();
+	}
+
+	void Monitor::SetOriginalPathway(bool on)
+	{
+		originalPathway.store(on, std::memory_order_release);
+		ApplySourceIdMode();
+	}
+
+	void Monitor::ApplySourceIdMode()
+	{
+		// The Original pathway forces source identity off (doc 78 D16: Bill has no source-resolution feature to extend).
+		const SourceIdMode mode = originalPathway.load(std::memory_order_acquire) ? SourceIdMode::Off
+			: static_cast<SourceIdMode>(sourceIdRequested.load(std::memory_order_acquire));
 		const int was = sourceIdMode.exchange(static_cast<int>(mode), std::memory_order_acq_rel);
 		if (was == static_cast<int>(SourceIdMode::Off) && mode != SourceIdMode::Off)
 		{
 			sourceId.Held().Reset();   // records from before an off period must not read as fresh (HeldState is mutex-guarded)
 			sourceIdResetPending.store(true, std::memory_order_release);
+		}
+		if (chainEnabled.load(std::memory_order_acquire))
+		{
+			chainEst->SetOriginalPathway(originalPathway.load(std::memory_order_acquire));   // the estimator's own status says "Original pathway"
+			chainEst->SetMode(mode == SourceIdMode::On ? SourceIdentity::Chain::EstimatorMode::On :
+				(mode == SourceIdMode::Shadow ? SourceIdentity::Chain::EstimatorMode::Shadow : SourceIdentity::Chain::EstimatorMode::Off));
 		}
 	}
 
@@ -454,18 +507,183 @@ if (tile < int(tiles) && g.y < ts) {
 
 	std::string Monitor::SourceIdStatusLine(double seconds) const
 	{
+		if (OriginalPathway())
+			return "Source identity: off (Original pathway)";
 		if (GetSourceIdMode() == SourceIdMode::Shadow)
 			return "Source identity: shadow (classical decides)";
 		const SourceIdentity::QualityView v = QualityView(seconds);
 		SourceIdentity::Record rec;
 		const bool have = sourceId.Held().ReadLatest(0, rec);
-		return SourceIdentity::StatusLine(v, have ? &rec : nullptr);
+		std::string line = SourceIdentity::StatusLine(v, have ? &rec : nullptr);
+		// With a chain estimator wired: say what it reads, or why the classical voters decide ("classical (chain: ...)").
+		const SourceIdentity::Geometry::HeldState* source = geometrySource.load(std::memory_order_acquire);
+		if (source != nullptr && SourceIdConsensus())
+		{
+			namespace Geo = SourceIdentity::Geometry;
+			Geo::Record grec;
+			unsigned geoCause = 0;
+			const bool haveGeo = ReadGeometry(grec, geoCause);
+			const Snapshot s = Read();
+			Geo::Delivered delivered;
+			delivered.width = s.nativeWidth;
+			delivered.height = s.nativeHeight;
+			const int64_t nowUs = static_cast<int64_t>(std::llround(ClockNow(seconds) * 1e6));
+			const Geo::ConfidentGeometry confident = Geo::Confident(haveGeo ? &grec : nullptr, delivered, nowUs, Geo::Consumer::Status,
+				Geo::detail::kAnySeq, haveGeo ? 0u : geoCause);
+			const Geo::ProvisionalGeometry provisional = Geo::Provisional(haveGeo ? &grec : nullptr, delivered, nowUs,
+				Geo::Consumer::Status, Geo::detail::kAnySeq, haveGeo ? 0u : geoCause);
+			line += " | " + Geo::ChainStatusText(confident, provisional);
+		}
+		return line;
 	}
 
 	FallbackCatalog::Decision Monitor::SourceIdGateFallback() const
 	{
 		std::lock_guard<std::mutex> lock(gateMutex);
 		return gateDecision;
+	}
+
+	void Monitor::SetGeometrySource(const SourceIdentity::Geometry::HeldState* held)
+	{
+		geometrySource.store(held, std::memory_order_release);
+		sourceId.SetGeometrySource(held);
+	}
+
+	FallbackCatalog::Decision Monitor::SourceIdGeometryFallback() const
+	{
+		std::lock_guard<std::mutex> lock(gateMutex);
+		return geometryDecision;
+	}
+
+	// ---- the chain estimator --------------------------------------------------------------------------------------------
+	void Monitor::SetStreamKey(uint64_t key)
+	{
+		streamKey.store(key, std::memory_order_release);
+		if (chainEnabled.load(std::memory_order_acquire)) chainEst->SetStreamKey(key);
+	}
+
+	void Monitor::SetChainEnabled(bool on)
+	{
+		namespace Chain = SourceIdentity::Chain;
+		chainEnabled.store(on, std::memory_order_release);
+		if (on)
+		{
+			SetGeometrySource(&chainEst->Held());
+			chainEst->SetOriginalPathway(originalPathway.load(std::memory_order_acquire));
+			const SourceIdMode mode = GetSourceIdMode();
+			chainEst->SetMode(mode == SourceIdMode::On ? Chain::EstimatorMode::On :
+				(mode == SourceIdMode::Shadow ? Chain::EstimatorMode::Shadow : Chain::EstimatorMode::Off));
+			ApplyChainEvidence();
+		}
+		else
+		{
+			chainEst->SetMode(Chain::EstimatorMode::Off);
+			if (geometrySource.load(std::memory_order_acquire) == &chainEst->Held())
+				SetGeometrySource(nullptr);
+		}
+	}
+
+	void Monitor::SetChainTap(const void* owner)
+	{
+		chainTapExplicit.store(owner != nullptr, std::memory_order_release);
+		if (owner != nullptr) chainEst->AttachTap(owner);
+		else chainEst->DetachTap();
+	}
+
+	std::string Monitor::ChainStatusCached() const
+	{
+		std::lock_guard<std::mutex> g(chainStatusMutex);
+		const auto now = std::chrono::steady_clock::now();
+		if (!chainStatusValid || now - chainStatusAt > std::chrono::milliseconds(500))
+		{
+			std::string t = chainEst->StatusLine();
+			const std::string evidence = chainEst->EvidenceStatusText();
+			if (evidence != "evidence: off")
+				t += " | " + evidence;
+			std::string notice;
+			while (chainEst->TakeNotice(notice))   // one-time notices: the log, and the status line for 30 s
+			{
+				DebugLog::Log("%s", notice.c_str());
+				chainNotice = notice;
+				chainNoticeAt = now;
+			}
+			if (!chainNotice.empty() && now - chainNoticeAt < std::chrono::seconds(30))
+				t += " | " + chainNotice;
+			chainStatusText = t;
+			chainStatusAt = now;
+			chainStatusValid = true;
+		}
+		return chainStatusText;
+	}
+
+	void Monitor::ApplyChainEvidenceLocked()
+	{
+		namespace Chain = SourceIdentity::Chain;
+		const std::string folder = !chainEvidenceFolder.empty() ? chainEvidenceFolder :
+			(chainHistoryFolder.empty() ? std::string() : Chain::JoinPath(chainHistoryFolder, "sid-evidence"));
+		Chain::EvidenceLevel level = Chain::EvidenceLevel::Off;
+		Chain::ParseEvidenceLevel(chainEvidenceLevel, level);
+		chainEst->SetEvidence(folder, level);
+	}
+
+	void Monitor::ApplyChainEvidence()
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		ApplyChainEvidenceLocked();
+	}
+
+	bool Monitor::SetChainEvidence(const std::string& folder, const std::string& level)
+	{
+		SourceIdentity::Chain::EvidenceLevel parsed = SourceIdentity::Chain::EvidenceLevel::Off;
+		if (!SourceIdentity::Chain::ParseEvidenceLevel(level, parsed))
+			return false;
+		std::lock_guard<std::mutex> lock(mutex);
+		chainEvidenceFolder = folder;
+		chainEvidenceLevel = SourceIdentity::Chain::EvidenceLevelText(parsed);
+		ApplyChainEvidenceLocked();
+		return true;
+	}
+
+	void Monitor::RequestChainEvidenceDump(const std::string& why) { chainEst->RequestEvidenceDump(why); }
+	bool Monitor::TakeChainNotice(std::string& text) { return chainEst->TakeNotice(text); }
+	std::string Monitor::ChainStatusLine() const { return chainEst->StatusLine(); }
+	std::string Monitor::ChainDetailText() const { return chainEst->DetailText(); }
+	std::string Monitor::ChainEvidenceStatusText() const { return chainEst->EvidenceStatusText(); }
+
+	Monitor::GeometryViews Monitor::GeometryView(double seconds) const
+	{
+		namespace Geo = SourceIdentity::Geometry;
+		GeometryViews v;
+		Geo::Record rec;
+		unsigned cause = 0;
+		const bool have = ReadGeometry(rec, cause);
+		const Snapshot s = Read();
+		Geo::Delivered delivered;
+		delivered.width = s.nativeWidth;
+		delivered.height = s.nativeHeight;
+		const int64_t nowUs = static_cast<int64_t>(std::llround(ClockNow(seconds) * 1e6));
+		v.confident = Geo::Confident(have ? &rec : nullptr, delivered, nowUs, Geo::Consumer::Status, ~0ull, cause);
+		v.provisional = Geo::Provisional(have ? &rec : nullptr, delivered, nowUs, Geo::Consumer::QualityPattern, ~0ull, cause);
+		return v;
+	}
+
+	bool Monitor::ReadGeometry(SourceGeometry::Record& rec, unsigned& cause) const
+	{
+		cause = 0;
+		const SourceGeometry::HeldState* source = geometrySource.load(std::memory_order_acquire);
+		if (source == nullptr)
+		{
+			cause = SourceGeometry::kCauseAbsent;
+			return false;
+		}
+		if (!source->ReadLatest(0, rec, &cause))
+			return false;   // nothing yet (absent), another unit version or a corrupt record: the cause is named
+		if (rec.evalSeq < sourceId.GeometryFloor())
+		{
+			cause = SourceGeometry::kCauseAbsent;   // sealed before the last discontinuity: as if nothing were published
+			return false;
+		}
+		return true;
 	}
 
 	int Monitor::ApplySourceIdRebase(SourceIdentity::IndicatorPort& port)
@@ -637,6 +855,28 @@ if (tile < int(tiles) && g.y < ts) {
 			notReadLogged = notRead;
 			std::lock_guard<std::mutex> lock(mutex);
 			snapshot.notRead = notRead;
+		}
+		if (luma && chainEnabled.load(std::memory_order_acquire))
+		{
+			// The frame's source time and active rectangle for the chain estimator (a short leaf lock, nothing else).
+			const float ax0 = (std::max)(0.0f, (std::min)(source.crop.x0, source.crop.x1));
+			const float ay0 = (std::max)(0.0f, (std::min)(source.crop.y0, source.crop.y1));
+			const float ax1 = (std::min)(static_cast<float>(luma->params.w), (std::max)(source.crop.x0, source.crop.x1));
+			const float ay1 = (std::min)(static_cast<float>(luma->params.h), (std::max)(source.crop.y0, source.crop.y1));
+			const bool hasCrop = ax1 > ax0 && ay1 > ay0;
+			if (!chainTapExplicit.load(std::memory_order_acquire) && (chainProbe++ % 60u) == 0u)
+			{
+				const std::vector<const void*> owners = VpFrameAnalysis::SourceFrameTap::StoreOwners();
+				if (owners.size() == 1)
+					chainEst->AttachTap(owners[0]);   // idempotent; a lost registration is made again
+			}
+			chainEst->NoteFrame(sourceSequence, raw, hasCrop ? static_cast<int>(std::lround(ax0)) : 0, hasCrop ? static_cast<int>(std::lround(ay0)) : 0,
+				hasCrop ? static_cast<int>(std::lround(ax1 - ax0)) : 0, hasCrop ? static_cast<int>(std::lround(ay1 - ay0)) : 0);
+			if (chainFormatSent != signature)
+			{
+				chainFormatSent = signature;
+				chainEst->SetFormatInfo(signature);
+			}
 		}
 		if (!notRead.empty() || seconds - lastSubmit < intervalSeconds) return;
 
@@ -881,9 +1121,10 @@ if (tile < int(tiles) && g.y < ts) {
 		qualitySmoothed = -1.0;
 		bitsSmoothed = 0.0;
 		lastAnalysedSeconds = -1.0;
+		chainWasBlank = false;   // a new era: the first blank frame is an edge again
 		// Source identity (worker thread): a new title/source starts from native/unknown (no stamp: the Indicator's FULL
-		// already bumps both axes).
-		sourceId.Discontinuity(snapshot.frames, streamKey.load(std::memory_order_acquire));
+		// already bumps both axes). The era's first sequence: P14g records sealed before it are never used (GeometryFloor).
+		sourceId.Discontinuity(sourceIdLastRowSeq + 1, streamKey.load(std::memory_order_acquire));
 		sourceIdLastCuts = tracker.Cuts();
 		snapshot.frameQuality = 1.0;
 		snapshot.frameNoise = -1.0;
@@ -940,7 +1181,7 @@ if (tile < int(tiles) && g.y < ts) {
 		const SourceIdMode idMode = GetSourceIdMode();
 		const bool idOn = idMode != SourceIdMode::Off;   // running (Shadow or On)
 		if (sourceIdResetPending.exchange(false, std::memory_order_acq_rel))
-			sourceId.Discontinuity(snapshot.frames, streamKey.load(std::memory_order_acquire));   // switched on: a clean start
+			sourceId.Discontinuity(j.sequence != 0 ? j.sequence : snapshot.frames + 1, streamKey.load(std::memory_order_acquire));   // switched on: a clean start
 		sourceId.SetConsensusOn(idMode == SourceIdMode::On);
 		sourceId.SetShadow(idMode == SourceIdMode::Shadow);
 		std::vector<SourceIdentity::FrameQuality::TileNoise> idNoise;
@@ -980,6 +1221,7 @@ if (tile < int(tiles) && g.y < ts) {
 				if (gap < 0.0) snprintf(text, sizeof(text), "the source clock went backwards");
 				else snprintf(text, sizeof(text), "a gap of %.1f s with no frames", gap);
 				gapReason = text;
+				if (chainEnabled.load(std::memory_order_acquire)) chainEst->NoteDiscontinuity(gapReason.c_str());
 				ResetEvidence(gapReason.c_str());
 				if (bound) workerReset = true;
 				else autoReset.store(true, std::memory_order_release);
@@ -991,13 +1233,40 @@ if (tile < int(tiles) && g.y < ts) {
 		const SourceResolution::EvidenceSource look = [this](uint64_t from, uint64_t to) { return LookAheadEvidence(from, to); };
 		// Frame-bound: no look-ahead evidence (it is analysis of frames after the one decided).
 		const SourceResolution::EvidenceSource* lookAhead = !bound && fixes && CutFixes() && j.sequence != 0 ? &look : nullptr;
+		// N2 (SID train r2): with the consensus On, the chain's latest usable record reads an axis CONFIDENTLY below native (a fresh record of
+		// this era, applied state confident). While that holds, ONE native-looking frame is no evidence that ends the tracker's window or
+		// declaration (Tracker::SetChainContradictsNative), and it is no classical safety veto either (detailAbove below): the veto would
+		// otherwise pin the consensus native on every informative native-looking frame and the chain could never be adopted. When the chain
+		// stops reading confidently (native, UNSURE, absent, stale) the flag drops and the original rules apply again. The trackers are only
+		// held in On (they are the original decision); the veto suppression also applies in Shadow so the logged would-be is what On decides.
+		bool chainContradicts = false;
+		if (idMode != SourceIdMode::Off)   // Shadow too: the would-be of the consensus must be what On would decide
+		{
+			namespace Geo = SourceIdentity::Geometry;
+			Geo::Record grec;
+			unsigned geoCause = 0;
+			if (ReadGeometry(grec, geoCause) && grec.Cause(Geo::detail::kAnySeq, static_cast<int64_t>(std::llround(j.seconds * 1e6))) == 0u)
+			{
+				const Geo::ConfidentGeometry v = Geo::ConfidentOf(grec, Geo::Delivered());
+				const double tol = sourceId.Settings_().consensus.ratioTolerance;
+				for (int a = 0; a < 2; ++a)
+					if (v.axis[a].confident && v.axis[a].ratio < 1.0 - tol)
+						chainContradicts = true;
+			}
+		}
+		const bool holdTrackers = chainContradicts && idMode == SourceIdMode::On;   // the trackers are the ORIGINAL decision: only On changes them
+		tracker.SetChainContradictsNative(holdTrackers);
+		trackerV.SetChainContradictsNative(holdTrackers);
+		trackerH.SetChainContradictsNative(holdTrackers);
 		tracker.Update(frame, j.seconds, false, j.sequence, lookAhead);
 		trackerV.Update(SourceResolution::AxisFrame(frame, true), j.seconds, false, j.sequence, lookAhead);
 		trackerH.Update(SourceResolution::AxisFrame(frame, false), j.seconds, false, j.sequence, lookAhead);
+		nativeHeldByChain.store(tracker.ChainHeld() + trackerV.ChainHeld() + trackerH.ChainHeld(), std::memory_order_relaxed);
 		// Latch fixes: the tracker reset itself for a cause the check above did not see: the rest too.
 		if (fixes && tracker.Discontinuities() != trackerResets)
 		{
 			gapReason = tracker.LastDiscontinuity();
+			if (chainEnabled.load(std::memory_order_acquire)) chainEst->NoteDiscontinuity(gapReason.c_str());
 			kernelVotes.clear();
 			coherence.clear();
 			coherenceV.clear();
@@ -1178,10 +1447,23 @@ if (tile < int(tiles) && g.y < ts) {
 		// "Detail above the re-based size": every tracker is back to native with nothing gathered below it, on an
 		// informative frame (the classical safety veto; consensus may not hold a re-base the evidence no longer has).
 		const bool detailAbove = frame.informative() && tracker.Ratio() >= 1.0 && tracker.Candidate() >= 1.0 &&
-			trackerV.Ratio() >= 1.0 && trackerV.Candidate() >= 1.0 && trackerH.Ratio() >= 1.0 && trackerH.Candidate() >= 1.0;
+			trackerV.Ratio() >= 1.0 && trackerV.Candidate() >= 1.0 && trackerH.Ratio() >= 1.0 && trackerH.Candidate() >= 1.0 &&
+			!chainContradicts;   // N2: a native-looking frame that confident chain evidence contradicts is no veto
 		const uint64_t rowSequence = j.sequence != 0 ? j.sequence : snapshot.frames;
+		sourceIdLastRowSeq = rowSequence;
 		const bool cutFlag = snapshot.cuts != sourceIdLastCuts;
 		sourceIdLastCuts = snapshot.cuts;
+		if (idOn && chainEnabled.load(std::memory_order_acquire))
+		{
+			// The events for the estimator's shot count and log, and the classical decision to compare with.
+			if (cutFlag) chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::Cut, rowSequence);
+			// Blank is an edge: a dark or flat scene flags it once, not on every evaluation. Fade is not fed today (no fade source).
+			const bool blankNow = !frame.informative();
+			if (blankNow && !chainWasBlank) chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::Blank, rowSequence);
+			chainWasBlank = blankNow;
+			chainEst->SetClassical(snapshot.reading, snapshot.axisRatioX < 1.0 ? snapshot.axisRatioX : snapshot.declaredRatio,
+				snapshot.axisRatioY < 1.0 ? snapshot.axisRatioY : snapshot.declaredRatio);
+		}
 		bool haveRecord = false;
 		SourceIdentity::Record rec;
 		if (idOn)
@@ -1306,20 +1588,18 @@ if (tile < int(tiles) && g.y < ts) {
 			if (before < 1.0) why = "native at once (" + (s.lastDiscontinuity.empty() ? std::string("discontinuity") : s.lastDiscontinuity) + ")";
 		}
 		double wanted = s.reading && s.declaredRatio < 1.0 && s.confidence >= minimumConfidence ? s.declaredRatio : 1.0;
-		// Source identity (doc 61, auto engage): with source_id_consensus on and a fresh record, the classical reading may only
-		// engage on a LATCHED field, and the target is the consensus's ratio. The classical confidence minimum still applies
-		// (consensus can delay, veto or refine an engage, never add one). A stale or absent record: the classical value above,
-		// visibly (SourceIdGateFallback).
+		// Source identity (doc 78 section 5, N1): with source_id_consensus On and a fresh record, WHAT is wanted is the CONSENSUS's
+		// value (chain + classical voters) IN PLACE OF the tracker's declared value: a latched uniform ratio below native is the
+		// wish, anything else is native. WHEN stays the original latch's: the same engage moments, dwell, crossfade and the same
+		// gentle / immediate revert paths below. A stale or absent record: the classical value above, visibly (SourceIdGateFallback).
+		// Off = the original, byte for byte; Shadow = the original decides (SourceIdGate is not 'on').
 		{
 			const IdGate gate = SourceIdGate(now);
-			if (gate.fresh && wanted < 1.0)
+			if (gate.fresh)
 			{
 				const double tol = 0.03;
 				const bool uniform = gate.latchedH && gate.latchedV && std::fabs(gate.ratioH - gate.ratioV) <= tol * (std::max)(gate.ratioH, gate.ratioV);
-				// Consensus moves only TOWARDS native: never a deeper re-base than the classical reading wants (a rise
-				// in detail must not wait for the consensus dwell).
-				const double target = uniform && gate.ratioH < 1.0 ? 0.5 * (gate.ratioH + gate.ratioV) : 1.0;
-				wanted = (std::max)(wanted, target);
+				wanted = uniform && gate.ratioH < 1.0 ? 0.5 * (gate.ratioH + gate.ratioV) : 1.0;
 			}
 		}
 		// Lines: an even height derived from the frame's own height (general).
@@ -1456,6 +1736,26 @@ if (tile < int(tiles) && g.y < ts) {
 			axisDiscontinuities = s.discontinuities;
 			axisApplied[0] = axisApplied[1] = axisPending[0] = axisPending[1] = 1.0;
 		}
+		// The geometry record's visible fallback (product.source_geometry): evaluated on every call while the consensus is On. The chain
+		// records are stamped in the frame's RAW source seconds (as the estimator and P14 do); the never-backwards decision clock would
+		// read every record stale after a backwards seek.
+		{
+			namespace Geo = SourceIdentity::Geometry;
+			FallbackCatalog::Decision d = FallbackCatalog::Released(Geo::kFallbackId);
+			if (SourceIdConsensus())
+			{
+				Geo::Record grec;
+				unsigned readCause = 0;
+				const bool have = ReadGeometry(grec, readCause);
+				Geo::Delivered delivered;
+				delivered.width = nativeWidth;
+				delivered.height = nativeHeight;
+				const int64_t nowUs = static_cast<int64_t>(std::llround((seconds >= 0.0 ? seconds : now) * 1e6));
+				d = Geo::Confident(have ? &grec : nullptr, delivered, nowUs, Geo::Consumer::Status, Geo::detail::kAnySeq, have ? 0u : readCause).fallback;
+			}
+			std::lock_guard<std::mutex> lock(gateMutex);
+			geometryDecision = d;
+		}
 		if (uniform < 1.0)
 		{
 			factorX = factorY = uniform;
@@ -1465,16 +1765,22 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 		// The wanted per-axis factors: even sizes from the frame's own (general).
 		double wanted[2] = { 1.0, 1.0 };
-		if (s.reading && s.axisConfidence >= minimumConfidence)
+		// Source identity (N1): with the consensus On and a fresh record the per-axis wish is the CONSENSUS's latched ratio of that axis
+		// (native for an axis it has not latched), in place of the tracker's per-axis reading; otherwise the tracker's.
+		const IdGate gate = SourceIdGate(now);
+		if (gate.fresh || (s.reading && s.axisConfidence >= minimumConfidence))
 		{
 			const int sizes[2] = { nativeWidth, nativeHeight };
-			double ratios[2] = { s.axisRatioX, s.axisRatioY };
-			// Source identity: only latched axes engage, at the consensus's ratio (see AutoFactor).
-			const IdGate gate = SourceIdGate(now);
+			double ratios[2] = { 1.0, 1.0 };
 			if (gate.fresh)
 			{
-				ratios[0] = ratios[0] < 1.0 && gate.latchedH ? (std::max)(ratios[0], gate.ratioH) : 1.0;
-				ratios[1] = ratios[1] < 1.0 && gate.latchedV ? (std::max)(ratios[1], gate.ratioV) : 1.0;
+				ratios[0] = gate.latchedH ? gate.ratioH : 1.0;
+				ratios[1] = gate.latchedV ? gate.ratioV : 1.0;
+			}
+			else
+			{
+				ratios[0] = s.axisRatioX;
+				ratios[1] = s.axisRatioY;
 			}
 			for (int a = 0; a < 2; ++a)
 				if (ratios[a] < 1.0 && sizes[a] > 0)
@@ -1909,6 +2215,7 @@ if (tile < int(tiles) && g.y < ts) {
 	{
 		std::string text = DescribeBase(s, autoRatio, autoSelected);
 		if (!s.historyNote.empty()) text += "; " + s.historyNote;
+		if (!s.chainNote.empty()) text += "; " + s.chainNote;
 		if (!s.frameBound) return text;
 		char bound[200];
 		snprintf(bound, sizeof(bound), "; frame-bound D=%u: held %u, dropped %llu, stale %llu, jobs dropped %llu, copies skipped %llu, waits missed %llu, clock steps back %llu",
