@@ -197,3 +197,11 @@ VP: activePictureStartupHold, adaptive, adaptiveDownscale, adaptiveUpscale, adap
 - The only unconditional early return is `rule.name.empty()` before the first VP line, so the end-of-function ReadProfile call is skipped exactly when the pre-move VP code was.
 - Behavioural proof stays the identity dump (settings-identity.golden.txt) over the frozen corpus.
 - Method caveat: VP lines are identified by difflib against Bill's a591ad3b text, so a Bill line changed upstream after that point would appear as VP; none of the 9 hunks contains one beyond the `chromaUpscaler` line.
+
+## 9. Golden provenance (identity kit)
+
+The goldens committed in 43c01fdc were generated from the PRE-move code and verified byte-identical here:
+- Source tree: worktree `D:\codex\videoprocessor\r1w1-p3-base`, detached at ff486a41 (= bcde6fc2 plus the kit only; `git diff bcde6fc2 ff486a41 -- src/VideoProcessor-Lib` is the 21-line test-only dump export in LibplaceboVideoRenderer.cpp; no tracked file modified).
+- Built x64 Release there (VideoProcessor-Test.dll 04:56), run with `/Logger:trx`: `D:\codex\videoprocessor\r1w1-p3-trx-base\*.trx`, Counters total=2 passed=2 (SettingsDumpAndFingerprintPartitionMatchTheGolden, ValidationOfEveryKnownKeyMatchesTheCheckedInGolden); the goldens in that tree are untracked files written 05:01 by that run.
+- SHA-256 of `src/VP-V/tests/golden/settings-identity.golden.txt` = fc94651c0398a4be5f263a3bd24a029786ed5e8ea71d0712c34dc8e1b1ccfecf and of `schema-validation.golden.txt` = afa9bcea76808e666c3d77e2d11068fc78568c7025dbf2ba6244c2be2ce6f26d, identical in the pre-move tree and in 43c01fdc.
+- Not re-built in this session (D:\codex\GPU-QUIET present, rule: no builds); the proof is the existing build artefacts and hashes above. The post-move check is the same two tests in the verification build.
