@@ -364,6 +364,8 @@ public:
                     return fail("an ordered chain product needs a self input at lag >= 1");
                 if (d.backend == Backend::RenderOnly)
                     return fail("an ordered chain product needs a lane backend");
+                if (!d.missingInputForm)
+                    return fail("an ordered chain product needs a missing-input form (the chain start and gaps run reduced)");
             }
             if (d.historyFloor != kHistoryFixed && d.historyFloor > d.history)
                 return fail("history floor above the full history");

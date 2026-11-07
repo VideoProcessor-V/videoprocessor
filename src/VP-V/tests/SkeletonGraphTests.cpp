@@ -463,6 +463,10 @@ namespace SkeletonGraphTestsNs
 			Assert::IsFalse(Registry(d).Validate(&why));
 			Assert::IsTrue(Has(why, "ordered chain"));
 			d = ok.All();
+			d[kChain].missingInputForm = false;   // the chain start / a gap live-fills in the reduced form: it must be declared
+			Assert::IsFalse(Registry(d).Validate(&why));
+			Assert::IsTrue(Has(why, "missing-input form"));
+			d = ok.All();
 			d[kChain].backend = Backend::RenderOnly;
 			Assert::IsFalse(Registry(d).Validate(&why));
 			Assert::IsTrue(Has(why, "ordered chain"));
@@ -544,6 +548,17 @@ namespace SkeletonGraphTestsNs
 			Rig r(ChainRegistry(false), OneConsumer(kChain), 2);
 			r.Lane(kChainBase, 2);
 			Assert::IsFalse(r.Lane(kChain, 2), L"no chain: the lag-1 self input is required (today's behaviour)");
+		}
+
+		TEST_METHOD(ALateChainStartLiveFillsInTheReducedFormNotUnavailable)
+		{
+			Rig r(ChainRegistry(), OneConsumer(kChain), 2);
+			r.Lane(kChainBase, 0);   // no lane result for the chain at frame 0
+			const auto& res = r.Resolve(0);
+			const ProductFrameResult& f = r.Result(res, kChain);
+			Assert::IsTrue(f.liveFilled && f.final == SealOutcome::Sealed);
+			Assert::IsTrue((f.missingInputs & 2u) != 0u, L"the self lag input is the missing one");
+			Assert::IsTrue(r.Set(kChain).Read(0).header->prov == Provenance::LiveFallback);
 		}
 
 		TEST_METHOD(ARealPredecessorIsPinnedNotCarriedForward)

@@ -602,10 +602,12 @@ public:
             return 0;
         }
 
+        const VramGovernor governorBefore = governor_;   // BuildState steps the adaptive headroom; a discarded trial must not
         std::shared_ptr<LaneState> st = BuildState(reg, consumers, gs, card, tier, fromSeq);
         if (st->plan.historyCaps != gs.historyCaps && !historyRebuild_) {
             // The governor granted governed-history products another depth than this graph was built for: rebuild once
             // with the grant (visible: the plan notice names the reduced history; the graph key carries the caps).
+            governor_ = governorBefore;   // the rebuild below plans once more from the same headroom (same grant)
             historyCaps_ = st->plan.historyCaps;
             GraphSettings g2 = gs;
             g2.historyCaps = historyCaps_;
