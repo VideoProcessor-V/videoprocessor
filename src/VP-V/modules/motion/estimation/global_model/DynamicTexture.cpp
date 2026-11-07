@@ -9,6 +9,12 @@
 
 namespace CameraModel
 {
+	namespace
+	{
+		// sqrt of the sum of squares: std::hypot is several times slower and the range here is far from overflow.
+		inline double Len(double x, double y) { return std::sqrt(x * x + y * y); }
+	}
+
 	DynTextureResult DetectDynamicTexture(const DynTextureConfig& cfg, const PairInput& in, const Params& model, DynTextureState& state)
 	{
 		DynTextureResult out;
@@ -59,7 +65,7 @@ namespace CameraModel
 				if (!IsFiniteBits(mx) || !IsFiniteBits(my))
 					continue;
 				const double rxv = in.fwdX[b] - mx, ryv = in.fwdY[b] - my;
-				const double t = std::max(absThr, cfg.rel * std::hypot(mx, my));
+				const double t = std::max(absThr, cfg.rel * Len(mx, my));
 				rx[b] = static_cast<float>(rxv);
 				ry[b] = static_cast<float>(ryv);
 				vx[b] = in.fwdX[b];
@@ -67,7 +73,7 @@ namespace CameraModel
 				thr[b] = static_cast<float>(t);
 				valid[b] = 1;
 				++trusted;
-				const double rm = std::hypot(rxv, ryv);
+				const double rm = Len(rxv, ryv);
 				const bool d = rm > t;
 				dis[b] = d ? 1 : 0;
 				disagree += d ? 1 : 0;
@@ -75,17 +81,17 @@ namespace CameraModel
 				{
 					{
 						const double qx = state.prev.vx[b] * k, qy = state.prev.vy[b] * k;
-						const double vm = std::hypot(static_cast<double>(in.fwdX[b]), static_cast<double>(in.fwdY[b]));
+						const double vm = Len(static_cast<double>(in.fwdX[b]), static_cast<double>(in.fwdY[b]));
 						++fCompared;
-						if (std::hypot(in.fwdX[b] - qx, in.fwdY[b] - qy) > std::max(absThr, cfg.agreeRatio * std::max(vm, std::hypot(qx, qy))))
+						if (Len(in.fwdX[b] - qx, in.fwdY[b] - qy) > std::max(absThr, cfg.agreeRatio * std::max(vm, Len(qx, qy))))
 							++fIncoh;
 					}
 					const double px = state.prev.rx[b] * k, py = state.prev.ry[b] * k;
-					const double pm = std::hypot(px, py);
+					const double pm = Len(px, py);
 					if (d || pm > t)
 					{
 						++tCompared;
-						const double diff = std::hypot(rxv - px, ryv - py);
+						const double diff = Len(rxv - px, ryv - py);
 						if (diff > std::max(t, cfg.agreeRatio * std::max(rm, pm)))
 							++tIncoh;
 					}
@@ -94,7 +100,7 @@ namespace CameraModel
 		}
 		// Spatial: right and lower neighbours that both disagree with the model.
 		int sCompared = 0, sIncoh = 0;
-		if (trusted >= std::max(1, cfg.minBlocks))
+		if (trusted >= std::max(1, cfg.minBlocks) && static_cast<double>(disagree) >= cfg.minShare * trusted)
 		{
 			for (int by = 0; by < gh; ++by)
 				for (int bx = 0; bx < gw; ++bx)
@@ -111,9 +117,9 @@ namespace CameraModel
 						if (!dis[c])
 							continue;
 						++sCompared;
-						const double diff = std::hypot(static_cast<double>(rx[a]) - rx[c], static_cast<double>(ry[a]) - ry[c]);
-						const double ma = std::hypot(static_cast<double>(rx[a]), static_cast<double>(ry[a]));
-						const double mc = std::hypot(static_cast<double>(rx[c]), static_cast<double>(ry[c]));
+						const double diff = Len(static_cast<double>(rx[a]) - rx[c], static_cast<double>(ry[a]) - ry[c]);
+						const double ma = Len(static_cast<double>(rx[a]), static_cast<double>(ry[a]));
+						const double mc = Len(static_cast<double>(rx[c]), static_cast<double>(ry[c]));
 						if (diff > std::max(static_cast<double>(std::max(thr[a], thr[c])), cfg.agreeRatio * std::max(ma, mc)))
 							++sIncoh;
 					}
