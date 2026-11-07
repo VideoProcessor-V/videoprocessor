@@ -226,6 +226,7 @@ What the user sees (wizard status in Config, plus the VP log; none is a "Fallbac
 - spotread not found: `ArgyllInstallGuidance` (VP never ships or downloads Argyll).
 - No ConPTY (Windows before 10 1809): the run is refused.
 - No renderer, not rendering, or not the VP Renderer: the reason from `PatternOutputInfo::reason`.
+- A renderer that is attached but still starting (cold shader cache): a visible wait of up to 5 s (status "waiting for VP's renderer", cancellable) before the run fails with the reason above; with no renderer attached it fails at once.
 - Renderer replaced (restart, new signal, exit): the run is cancelled.
 - Config silent for 60 s while measuring: the run is cancelled.
 - A `.ccss` file for a meter that takes only `.ccmx`: refused.

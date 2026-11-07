@@ -21,6 +21,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
+#include <functional>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -208,6 +210,80 @@ namespace
 				session->Step();
 			}
 			return session->Status().step == wanted;
+		}
+	};
+
+	// A sink with a renderer attached that is still starting (cold shader cache): GetOutput reports
+	// unavailable for the first `unavailableCalls` calls, then behaves as the simulated screen.
+	class StartingScreen final : public IPatternSink
+	{
+	public:
+		StartingScreen(const PatternOutputInfo& format, int unavailableCalls) : screen(format), unavailable(unavailableCalls) {}
+		bool GetOutput(PatternOutputInfo& info) override
+		{
+			const int call = ++calls;
+			if (onCall) onCall(call);
+			if (call <= unavailable)
+			{
+				info = PatternOutputInfo();
+				strncpy_s(info.reason, sizeof(info.reason), "renderer starting (test)", _TRUNCATE);
+				return false;
+			}
+			return screen.GetOutput(info);
+		}
+		bool Show(const PatternRequest& request, std::string& error) override { return screen.Show(request, error); }
+		bool RendererAttached() override { return true; }
+		bool Showing(Vec3& device) { return screen.Showing(device); }
+
+		std::function<void(int)> onCall;   // called with the 1-based call number, before it answers
+		int calls = 0;
+
+	private:
+		SimulatedScreen screen;
+		int unavailable;
+	};
+
+	// A session on a StartingScreen, a manual clock whose Sleep advances time at once, and the simulated meter.
+	struct StartingRig
+	{
+		std::string folder;
+		ManualClock clock;
+		std::unique_ptr<StartingScreen> screen;
+		std::unique_ptr<CalibrationSession> session;
+
+		StartingRig(const std::string& name, int unavailableCalls)
+		{
+			folder = TempFolder(name);
+			const std::string config = folder + "\\VideoProcessor.cfg";
+			WriteFile(config, kConfig);
+			screen.reset(new StartingScreen(Format(10, 8, true), unavailableCalls));
+			CalibrationSettings settings;
+			settings.plan = PlanChoice::Quick;
+			settings.warmupMinutes = 0;
+			settings.lutSize = 17;
+			settings.displayKind = DisplayKind::Projector;
+			SimulatedMeterParams mp;
+			mp.seed = 11u;
+			StartingScreen* s = screen.get();
+			auto m = std::unique_ptr<SimulatedScreenMeter>(new SimulatedScreenMeter(
+				[s](Vec3& device) { return s->Showing(device); }, SimulatedDisplayParams(), mp, &clock));
+			SessionEnvironment env;
+			env.vpRoot = folder;
+			env.configPath = config;
+			env.activeColorSection = "Rec709";
+			env.displayName = "Test Projector";
+			session.reset(new CalibrationSession(settings, env, std::move(m), 0.002, *screen, clock));
+		}
+
+		// Steps until the session leaves OpeningMeter or ends (bounded).
+		void StepOutOfOpening()
+		{
+			for (int i = 0; i < 10; ++i)
+			{
+				const SessionStep step = session->Status().step;
+				if (step != SessionStep::OpeningMeter || IsFinal(step)) return;
+				session->Step();
+			}
 		}
 	};
 }
@@ -1171,6 +1247,54 @@ namespace VideoProcessorTest
 			Assert::IsTrue(s.message.find("cannot show calibration patches") != std::string::npos);
 			Assert::AreEqual(original, ReadFile(path));
 			controller.Shutdown();
+		}
+
+		// An attached renderer that is still starting gets a visible wait of up to 5 s (50 polls of 0.1 s).
+		TEST_METHOD(AnAttachedRendererStillStartingIsWaitedForAndThenUsed)
+		{
+			StartingRig rig("starting-ok", 10);
+			std::string midWait;
+			rig.screen->onCall = [&rig, &midWait](int call)
+			{
+				if (call == 5) midWait = rig.session->Status().message;
+			};
+			const double t0 = rig.clock.Now();
+			rig.session->Start();
+			rig.StepOutOfOpening();
+			Assert::IsTrue(rig.session->Status().step == SessionStep::Placement,
+				std::wstring(rig.session->Status().message.begin(), rig.session->Status().message.end()).c_str());
+			Assert::AreEqual(std::string("waiting for VP's renderer"), midWait);   // visible while waiting
+			Assert::IsTrue(rig.screen->calls >= 11);   // 10 unavailable answers, then the available one
+			Assert::IsTrue(rig.clock.Now() - t0 >= 0.89 && rig.clock.Now() - t0 < 5.0);
+			rig.session->Cancel();
+			for (int i = 0; i < 10 && !rig.session->Finished(); ++i) rig.session->Step();
+		}
+
+		TEST_METHOD(AnAttachedRendererThatNeverStartsFailsAfterFiveSeconds)
+		{
+			StartingRig rig("starting-never", 1000000);
+			const double t0 = rig.clock.Now();
+			rig.session->Start();
+			rig.StepOutOfOpening();
+			const SessionStatus s = rig.session->Status();
+			Assert::IsTrue(s.step == SessionStep::Failed);
+			Assert::IsTrue(s.message.find("cannot show calibration patches") != std::string::npos);
+			Assert::IsTrue(rig.screen->calls >= 51);   // the first look plus 50 polls
+			Assert::IsTrue(rig.clock.Now() - t0 >= 4.99);   // 5.0 s on the clock
+		}
+
+		TEST_METHOD(CancelDuringTheRendererWaitEndsWithoutAFailure)
+		{
+			StartingRig rig("starting-cancel", 1000000);
+			rig.screen->onCall = [&rig](int call) { if (call == 5) rig.session->Cancel(); };
+			rig.session->Start();
+			for (int i = 0; i < 10 && !rig.session->Finished(); ++i)
+			{
+				rig.session->Step();
+				Assert::IsFalse(rig.session->Status().step == SessionStep::Failed);
+			}
+			Assert::IsTrue(rig.session->Status().step == SessionStep::Cancelled);
+			Assert::AreEqual(5, rig.screen->calls);   // the wait stopped at the cancel, no further polling
 		}
 
 		// Module findings 2026-10-24 item 7: the .ccss refusal ignores letter case.
