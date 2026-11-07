@@ -30,7 +30,9 @@ struct AncestorRef {
     Provenance prov = Provenance::None;
 };
 
-constexpr size_t kMaxAncestors = 8;   // k is fixed at graph build, <= this
+// k is fixed at graph build, <= this. Must stay >= VpSkeleton::kMaxInputs (static_assert in ProductSlots.h). Header
+// cost of the raise 8 -> 16: 8 x 24 B more per header, two headers per slot (lane + live): about 384 B per slot.
+constexpr size_t kMaxAncestors = 16;
 
 struct Header {
     uint32_t cgen = 0;                       // 0 = never published
@@ -39,6 +41,10 @@ struct Header {
     VpIndicator::CounterMask reads = 0;      // counters this product depends on
     VpIndicator::Stamp honoured;             // the stamp it was computed under
     uint8_t ancestorCount = 0;
+    // Ordered-chain carry-forward (lane job of a product with ProductDecl::orderedChain): the self lag input was
+    // absent (chain start, or a predecessor that never published) and the job ran in its declared reduced form.
+    // Its self-lag ancestor entries are empty (cgen 0); the seal accepts exactly that and counts it.
+    bool chainReduced = false;
     std::array<AncestorRef, kMaxAncestors> ancestors{};
     uint32_t costUs = 0;
 };
@@ -56,6 +62,7 @@ struct SlotView {
     uint64_t seq = 0;
     uint32_t cgen = 0;
     bool valid = false;
+    bool lanePublished = false;   // lane result complete, not sealed yet (a LEAD ancestor is read in this state)
 };
 
 enum class Verdict : uint8_t { Valid, NeverPublished, StampMismatch, AncestorReplaced, AncestorInvalid, AncestorGone,

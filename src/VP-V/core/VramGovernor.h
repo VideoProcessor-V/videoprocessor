@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -44,7 +45,7 @@ enum VramUserId : uint16_t {
     kUserRenderAhead,          // render-ahead swapchain depth
     kUserEarlyUpload,          // early-upload pool slots
     kUserNvofProducer,         // optical-flow engine + producer ring
-    kUserTemporalDetail,       // refstore (+ future slots)
+    kUserTemporalDetail,       // temporal-detail memory (v1 reference store + future slots today; td.memory stages in unit v2)
     kUserCameraModel,          // camera-model textures
     kUserInterpolator,         // interpolator engine + grain bands
     kUserEnhancers,            // texture restore, detail pulse, debander extras
@@ -247,6 +248,11 @@ struct TierEntry {
     uint64_t extraBytes = 0;     // the lane ring: what the lane costs on top of the live pool
     double msSaved = 0.0;        // render critical-path ms the lane removes (upload charged)
     double msPerMB = 0.0;
+    // Budget-governed history (ProductDecl::historyFloor): the depth the governor grants. historyFull == historyGranted
+    // for every product that is not governed or fits at full depth.
+    uint8_t historyFull = 0;
+    uint8_t historyGranted = 0;
+    bool historyReduced = false;
 };
 
 struct TierPlan {
@@ -261,6 +267,9 @@ struct TierPlan {
     bool ofaFits = true;              // the optical-flow engine keeps up with the frame period
     double ofaLoad = 0.0;             // engine ms per pair / frame period
     std::string notice;               // plain-language status ("" = nothing to show)
+    // Governed-history products granted less than their full depth (sorted by id). The host puts them into
+    // GraphSettings::historyCaps and rebuilds (AnalysisLane::Configure does it): the graph is then sized for the grant.
+    std::vector<HistoryCap> historyCaps;
 
     const TierEntry* Find(ProductId id) const
     {
@@ -375,8 +384,13 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
     gi.headroom = in.headroom;
     gi.users = in.otherUsers;
     std::vector<int> userOf(all.size(), -1);
+    std::vector<size_t> inRenderLevel(all.size(), 0);   // the level that is the identical in-render form (full history)
+    std::vector<std::vector<uint8_t>> levelHistory(all.size());   // governed products: granted depth per level
+    std::deque<std::string> texts;                                   // level wording with the depths (stable addresses)
     for (size_t i = 0; i < all.size(); ++i) {
         const Node& n = g.nodes[i];
+        all[i].historyFull = n.historyFull;
+        all[i].historyGranted = n.historyFull;
         if (all[i].residency != Residency::Vram)
             continue;
         VramUser u;
@@ -385,11 +399,33 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
         u.tier = n.tier;
         u.shedOrder = shed[i];
         u.lossless = true;   // in-render recompute is identical
-        u.levels.push_back((canLane[i] ? ringB[i] : 0) + liveB[i]);
+        // Budget-governed history: every depth is a level, sized from the graph's per-depth base (ring and live pool
+        // both hold `history` frames). Order: the lossless lane drop first, then history steps (lossy, memory only).
+        const bool governed = n.historyMin < n.historyFull;
+        const uint64_t ringBase = ringB[i] > 0 ? bufB[i] * uint64_t(n.ring > n.history ? n.ring - n.history : 0u) : 0u;
+        const uint64_t liveBase = bufB[i] * uint64_t(n.livePool > n.history ? n.livePool - n.history : 0u);
+        const uint64_t ringAt = ringB[i] > 0 && governed ? ringBase + bufB[i] * n.historyFull : ringB[i];
+        const uint64_t liveAt = governed ? liveBase + bufB[i] * n.historyFull : liveB[i];
+        u.levels.push_back((canLane[i] ? ringAt : 0) + liveAt);
         u.levelText.push_back(nullptr);
+        levelHistory[i].push_back(n.historyFull);
         if (canLane[i] && ringB[i] > 0) {
-            u.levels.push_back(liveB[i]);
-            u.levelText.push_back("computed in the render (no look-ahead)");
+            u.levels.push_back(liveAt);
+            // A single-store product has no live pool (liveAt is 0): dropping its lane drops the store, never an in-render form.
+            u.levelText.push_back(n.singletonStore ? "not kept (no live fill: its readers use their own fallback)"
+                                                   : "computed in the render (no look-ahead)");
+            levelHistory[i].push_back(n.historyFull);
+            inRenderLevel[i] = 1;
+        }
+        if (governed) {
+            u.lossless = false;   // its last steps lose history (a reduced, non-identical mode)
+            for (unsigned h = unsigned(n.historyFull); h-- > unsigned(n.historyMin);) {
+                u.levels.push_back(liveBase + bufB[i] * h);
+                texts.push_back(std::string("keeps ") + std::to_string(h) + " of " + std::to_string(unsigned(n.historyFull))
+                                + " past frames of history");
+                u.levelText.push_back(texts.back().c_str());
+                levelHistory[i].push_back(uint8_t(h));
+            }
         }
         userOf[i] = int(gi.users.size());
         gi.users.push_back(u);
@@ -436,8 +472,8 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
             if (j >= 0 && all[size_t(j)].grant != Grant::Lane) {
                 e.grant = Grant::InRender;
                 e.why = GrantWhy::InputInRender;
-                if (userOf[i] >= 0 && gi.users[size_t(userOf[i])].levels.size() > 1) {
-                    level[size_t(userOf[i])] = 1;
+                if (userOf[i] >= 0 && inRenderLevel[i] > 0 && gi.users[size_t(userOf[i])].levels.size() > inRenderLevel[i]) {
+                    level[size_t(userOf[i])] = inRenderLevel[i];   // never a history step
                     changed = true;
                 } else if (e.residency == Residency::SystemRam) {
                     systemBytes -= e.extraBytes;
@@ -461,6 +497,24 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
         }
         plan.governor.lines = lines;
     }
+
+    // Granted history depths (governed products only) and the caps the host feeds back into the graph.
+    for (size_t i = 0; i < all.size(); ++i) {
+        if (userOf[i] < 0 || levelHistory[i].empty())
+            continue;
+        const size_t l = level[size_t(userOf[i])];
+        const uint8_t h = levelHistory[i][l < levelHistory[i].size() ? l : levelHistory[i].size() - 1];
+        all[i].historyGranted = h;
+        all[i].historyReduced = h < all[i].historyFull;
+        if (all[i].historyReduced) {
+            HistoryCap c;
+            c.id = all[i].id;
+            c.history = h;
+            plan.historyCaps.push_back(c);
+        }
+    }
+    std::sort(plan.historyCaps.begin(), plan.historyCaps.end(),
+              [](const HistoryCap& a, const HistoryCap& b) { return a.id < b.id; });
 
     plan.budgetBytes = plan.governor.budgetBytes;
     plan.vramBytes = plan.governor.totalBytes;

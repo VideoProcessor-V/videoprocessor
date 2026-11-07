@@ -32,6 +32,7 @@
 
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
+#include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
 
 #include <algorithm>
 #include <cctype>
@@ -87,6 +88,9 @@ namespace ChromaUpscale
 	{
 		Plane cb, cr;              // full luma size, codes
 		std::string status;        // ok, 4:4:4: nothing to upsample, or the failure reason
+		// R1-W1-RES: the read path of the temporal-detail engine's chroma products (base buffers, mirror, refined vectors).
+		// Reset 1: not requested, nothing used, the Original-kernel + CfL form below runs unchanged.
+		TdProducts::ReadResult td;
 	};
 
 	inline double Scale(double lines) { return TemporalDetail::Scale(lines); }
@@ -256,6 +260,7 @@ namespace ChromaUpscale
 		int colorDepth, double lumaLines, const CflParams& p = CflParams())
 	{
 		Result res;
+		res.td = TdProducts::ReadToday(TdProducts::Consumer::ChromaStage);
 		res.cb = Cb; res.cr = Cr;
 		const int W = Y.w, H = Y.h, cw = Cb.w, ch = Cb.h;
 		if (W <= 0 || H <= 0 || cw <= 0 || ch <= 0 || Cr.w != cw || Cr.h != ch) { res.status = "chroma upscale: invalid plane sizes"; return res; }

@@ -580,7 +580,8 @@ namespace Vpv
 					VpSkeleton::AddConsume(report, p);
 				const std::vector<ConsumerDecl> consumers{ report };
 				b->lane.SetStormHold(Resync::ResyncExtension::StormHeld(st.host));
-				b->lane.Configure(st.settings.lane, VpSkeleton::SkeletonProducts(), consumers, gs, card, tier, seq, false);
+				// The record histories (quality_pattern, td.trail_summary) are seconds of source time: frames follow the measured period.
+				b->lane.Configure(st.settings.lane, VpSkeleton::SkeletonProducts(false, false, st.periodMs), consumers, gs, card, tier, seq, false);
 				b->configuredGen = gen;
 				b->configuredPeriodMs = st.periodMs;
 				b->framesSinceConfigure = 0;
@@ -685,6 +686,8 @@ namespace Vpv
 					addDecision(d);
 				addDecision(FallbackCatalog::SkeletonProductsDeclined("P10 grain split, P11 region stats, P12 light level",
 					SkeletonModule::kDeclinedReason));
+				if (const std::shared_ptr<VpSkeleton::LaneState> laneState = lane.State())
+					addDecision(SkeletonModule::HistoryCapDecision(laneState->graph, b->configuredPeriodMs));
 				full = lane.StatusLines();
 				line = std::string("analysis lane ") + mode + " " + Dimensions(b->dims) + ", " + std::to_string(st.frames) +
 					" frames, ahead " + std::to_string(lane.TotalAhead()) + " in-render " + std::to_string(lane.TotalInRender()) +

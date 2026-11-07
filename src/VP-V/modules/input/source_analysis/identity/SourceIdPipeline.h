@@ -19,6 +19,7 @@
 #include <VP-V/modules/input/source_analysis/identity/SourceIdConsensus.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdProduct.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdVote.h>
+#include <VP-V/modules/input/source_analysis/identity/shared/SourceQuality.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -168,7 +169,7 @@ namespace SourceIdentity
 			c.seq = in.seq;
 			c.timeUs = in.timeUs;
 			if (c.reading)
-				c.bitrateQuality = (std::min)(c.bitrateQuality, level_);
+				c.bitrateQuality = VpUnit::SourceQuality::Combine(c.bitrateQuality, level_);   // U12
 			consensus_.Submit(ClassicalResolutionVote(c));
 			consensus_.Submit(ClassicalKernelVote(c, s_.vote));
 			consensus_.Submit(BitrateQualityVote(c, s_.vote));

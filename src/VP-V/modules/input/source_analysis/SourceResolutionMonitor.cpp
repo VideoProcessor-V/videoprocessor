@@ -1,6 +1,7 @@
 #include <pch.h>
 #include "SourceResolutionMonitor.h"
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
+#include <VP-V/modules/input/source_analysis/identity/shared/SourceQuality.h>
 
 #include <DebugLog.h>
 #include <GeneralRateLog.h>
@@ -472,7 +473,7 @@ if (tile < int(tiles) && g.y < ts) {
 		const Snapshot s = Read();
 		SourceIdentity::ClassicalQuality c;
 		c.reading = s.reading;
-		c.bitrateQuality = s.bitrateQuality;
+		VpUnit::SourceQuality::CopyClassical(c, s);   // U12
 		c.effectiveBits = s.effectiveBits;
 		const bool on = SourceIdConsensus();
 		if (!on)
@@ -1183,8 +1184,7 @@ if (tile < int(tiles) && g.y < ts) {
 				snapshot.axisConfidence = c;
 			}
 		}
-		snapshot.bitrateQuality = qualitySmoothed;
-		snapshot.effectiveBits = bitsSmoothed;
+		VpUnit::SourceQuality::Store(snapshot, qualitySmoothed, bitsSmoothed);   // U12
 		snapshot.coherenceV = frame.vertical.coherence;
 		snapshot.coherenceH = frame.horizontal.coherence;
 		snapshot.cuts = tracker.Cuts();
@@ -1217,7 +1217,7 @@ if (tile < int(tiles) && g.y < ts) {
 			in.classical.kernel = snapshot.kernel;
 			in.classical.kernelVotes = snapshot.kernelVotes;
 			in.classical.kernelAgree = snapshot.kernelAgree;
-			in.classical.bitrateQuality = snapshot.bitrateQuality;
+			VpUnit::SourceQuality::CopyClassical(in.classical, snapshot);   // U12
 			// "Detail above the re-based size": every tracker is back to native with nothing gathered below it, on an
 			// informative frame (the classical safety veto; consensus may not hold a re-base the evidence no longer has).
 			in.classical.detailAbove = frame.informative() && tracker.Ratio() >= 1.0 && tracker.Candidate() >= 1.0 &&
@@ -1239,7 +1239,7 @@ if (tile < int(tiles) && g.y < ts) {
 		char row[256];
 		snprintf(row, sizeof(row), "reading,%.4f,%.3f,%.3f,%.4f,%.4f,%.2f,%.2f,%.1f,%llu,%d/%d,%.4f,%.1f ms",
 			frame.ratio, frame.vertical.coherence, frame.horizontal.coherence, snapshot.liveRatio, snapshot.declaredRatio,
-			snapshot.confidence, snapshot.bitrateQuality, snapshot.effectiveBits, snapshot.cuts, frame.informativeTiles,
+			snapshot.confidence, VpUnit::SourceQuality::Of(snapshot), snapshot.effectiveBits, snapshot.cuts, frame.informativeTiles,
 			frame.tiles, autoAppliedShared.load(std::memory_order_acquire), snapshot.analyseMs);
 		if (idOn)
 		{

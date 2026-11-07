@@ -4,9 +4,14 @@
 
 #include "Indicator.h"
 
+#include <algorithm>
 #include <array>
+#include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <string>
 #include <vector>
 
 // Skeleton S0: the product registry (design doc 25 section B1). A product is a piece of analysis
@@ -58,7 +63,7 @@ enum : ProductId {
 //   P11  region block stats   per-block statistics (mean/var/gradient/tensor/Laplacian) + reserved E1/E2/E3 band energies
 //   P12  light level          the 16 KB perceptual LUT + per-block light level (WP2 reserved)
 //   P13  source ring          VIEWS of the unpacked planes of the queued frames (owned by queue/upload): 0 extra bytes
-//   td.refstore / td.analysis / td.admission   TemporalDetail's module-owned history product and its lane products
+//   td.blocks / td.memory / td.anchor_pass     (v1: td.analysis / td.refstore / td.admission) TemporalDetail's products, redefined by doc 72 (unit v2)
 //   P14  source identity      the held-state source record (axes, kernel, codec class, quality tier; CPU, ~256 B). No live fill:
 //                             consumers read the latest sealed record and fall back to the classical value when it is stale
 enum : ProductId {
@@ -67,12 +72,27 @@ enum : ProductId {
     kP11RegionBlockStats,
     kP12LightLevel,
     kP13SourceRing,
-    kTdAnalysis,
-    kTdRefstore,
-    kTdAdmission,
-    kSourceIdentity,      // P14 (doc 61 D-SID1): HELD-STATE source identity record; appended last so every earlier id is unchanged
+    kTdBlocks,            // id 16 (v1: td.analysis): per-block TD state (motion + lighting layer), unit v2
+    kTdMemory,            // id 17 (v1: td.refstore): the whole budget-governed store (slots, bands, chroma), unit v2
+    kTdAnchorPass,        // id 18 (v1: td.admission): the anchor-repair pass, Transient arena, unit v2
+    kSourceIdentity,      // P14 (doc 61 D-SID1): HELD-STATE source identity record
+    // Doc 72 (R1-W1-RES round 2): appended in the planned order after P14. Ids 16-18 above keep their numbers with new tokens.
+    kP7gCameraGuide,      // 20 p7g_camera_guide  camera guidance (doc 56; was claimed as kSkeletonProductEnd by CameraGuideProduct.h, unregistered)
+    kCodingEvidence,      // 21 coding_evidence (P16): per-8x8 coding evidence, fused with P11 (U13 CodingEvidence)
+    kQualityPattern,      // 22 quality_pattern (P15): per-frame LANE product, role at lead 2 (not P14's held state)
+    kQualityPatternCausal,// 23 quality_pattern.causal (P15c): the short-queue substitute of P15
+    kRefinedField,        // 24 refined_field (P3r): refined per-block vectors + confidence (U15 FieldRefine; owner: vector engine)
+    kTdAnchorRefs,        // 25 td.anchor_refs: received luma of the last anchors (budget-governed)
+    kTdDelta,             // 26 td.delta: lane -> render hand-off of the repair delta
+    kTdMaps,              // 27 td.maps: THE consumer-facing per-block map product (U19 TdMapsView)
+    kTdTrailSummary,      // 28 td.trail_summary: per-frame CPU summary for source identity / status
     kSkeletonProductEnd
 };
+
+// v1 names of ids 16-18 (kept so existing readers compile; the tokens and contracts are the v2 ones above).
+constexpr ProductId kTdAnalysis = kTdBlocks;
+constexpr ProductId kTdRefstore = kTdMemory;
+constexpr ProductId kTdAdmission = kTdAnchorPass;
 
 // Frames of look-ahead P9 reads from P7 at film depth (the declared lead; the effective lead is
 // capped by the lane lead of the graph).
@@ -160,13 +180,20 @@ struct InputRef {
     // has a lag OR a lead, never both. A lead edge is not a lag-0 edge (no cycle check, no topological
     // constraint). The product that reads a lead must declare shortQueueSubstitute.
     //
-    // Seal note (S3/K1, NOT implemented in K0): the seal validates a LEAD ancestor as Published with
-    // stamps == StampOf(N+k) (it need not be Sealed: frame N+k has not reached its own seal yet).
-    // ProductSlots.h today computes every ancestor as seq - lag and ignores `lead`.
+    // Seal rule (K1, W1-SKG): the seal validates a LEAD ancestor N+k as Published (or Sealed / Live) with the
+    // ancestor's honoured stamp == StampOf(N+k) under the ancestor's own reads; it need not be Sealed: frame N+k
+    // has not reached its own seal yet (ProductSlots.h SlotTable::Check; needs SlotTable::SetStampSource).
+    // Residual risk (documented, visible through the counters): N+k may still be rejected at its own seal later.
     uint8_t lead = 0;
 };
 
-constexpr size_t kMaxInputs = 4;
+// The seam limits (W1-SKG, doc 72 section 5.2): raised from 4 and 6 so a product can name every product it
+// reads as an ancestor (td.blocks ~14 inputs) and an adaptive consumer can read td.maps + P3r. Every fixed array
+// that depends on them is sized from these (Node::inputs, LaneInputs, LaneJobContext::inputData,
+// VpAncestry::kMaxAncestors, ConsumerDecl::consumes, the missing-input bit mask). Cost: 64 B per Node/decl,
+// 384 B per slot header pair; nothing per frame beyond the header copy of a live fill.
+constexpr size_t kMaxInputs = 16;
+constexpr uint8_t kHistoryFixed = 0xFF;   // ProductDecl::historyFloor: the history is not governed
 
 struct ProductDecl {
     ProductId id = kNoProduct;
@@ -204,7 +231,48 @@ struct ProductDecl {
     // unpacked planes, owned by the queue / early upload): it has no lane of its own, but it never moves a lane reader
     // into the render (VramGovernor's InputInRender rule skips it).
     bool laneVisible = false;
+    // Ordered chain (W1-SKG, doc 72 section 5.3): the product reads ITSELF at lag >= 1 (td.blocks at lag 1), so its
+    // lane jobs run in frame order: job N starts only after job N-1 finished (the runner is sequential per
+    // product). A job whose predecessor never published (chain start, a late/abandoned job, a skipped range)
+    // runs in its declared reduced form (carry-forward): it publishes with Header::chainReduced, the seal accepts
+    // the empty self ancestor and the counters show it. Never skipped silently. Requires a self input at lag >= 1
+    // and a lane backend (Registry::Validate).
+    bool orderedChain = false;
+    // Budget-governed history (W1-SKG, doc 72 section 5.4; owner 2026-11-07: tiers are budget-driven): `history`
+    // is the FULL depth the product wants; it may run with any depth down to historyFloor when the VRAM governor
+    // (PlanTiers) cannot fit the full depth. A reduced depth is visible (status line + Graph::HistoryReducedNodes)
+    // and is a NON-identical reduced mode: the product's own code must handle a shorter history (it reads
+    // Node::history at run time). kHistoryFixed = not governed (today's behaviour). A consumer's or reader's lag
+    // always wins: the depth never drops below the largest lag anything reads the product at.
+    uint8_t historyFloor = kHistoryFixed;
+    // One persistent store (W1-RES, doc 72): the product declares history 0 and is not self-reading, yet keeps ONE
+    // buffer that readers read at lag 1 (the store is rewritten in place by the producer after the readers of the
+    // previous frame are done). Its depth stays max(0, largest lag read) as for any product. It is never governed
+    // (no historyFloor: shedding the single store would drop the product, not reduce it). Registry::Validate: history
+    // 0, no historyFloor, no self input, and every reader reads it at lag 0 or 1 (no deeper lag, no look-ahead).
+    // BuildGraph sizes it as a PING-PONG store, whatever render-ahead R and lane lead L are: ring = 2 buffers, live pool = 0
+    // (lane-only: there is no live fill; an absent frame is Unavailable and the reader runs its own visible fallback). The
+    // producer's job for frame N+1 reuses the slot of frame N-1 and waits (counted, SlotCounters::writeWaitPinned) while a
+    // lag-1 reader still pins it. Its VRAM figure is 2x the store, not a ring.
+    bool singletonStore = false;
+    // Set by detail::AddInput/AddLead when a declaration named more than kMaxInputs reads: the extra read was NOT
+    // recorded. Registry::Validate rejects the declaration with a plain reason (fail closed, visible; Release has no
+    // assert).
+    bool overflow = false;
 };
+
+// The input's frame for a reader at frame `seq`: seq - lag, or seq + lead. False when seq - lag would be negative.
+inline bool InputSeq(const InputRef& in, uint64_t seq, uint64_t* out)
+{
+    if (in.lead > 0) {
+        *out = seq + in.lead;
+        return true;
+    }
+    if (seq < in.lag)
+        return false;
+    *out = seq - in.lag;
+    return true;
+}
 
 // The real tile geometry of the source-resolution monitor (SourceResolutionMonitor.h: kTile, kMaxTiles, ring[2]):
 // kMaxTiles tiles of kTile x kTile f32 samples per readback buffer, two buffers. Fixed, independent of the frame size.
@@ -213,11 +281,6 @@ constexpr uint32_t kMonitorMaxTiles = 16;
 constexpr uint32_t kMonitorRingBuffers = 2;
 constexpr uint32_t kMonitorBufferBytes = kMonitorMaxTiles * kMonitorTileEdge * kMonitorTileEdge * 4u;   // 4 194 304
 constexpr uint32_t kMonitorRingBytes = kMonitorBufferBytes * kMonitorRingBuffers;                        // 8 388 608 (8.4 MB)
-
-// The reference store's slot figure the plan targets (SA6) and what the code allocates today (TemporalDetailGpu:
-// RGBA16F raw + cleaned bands 8 B/px + R16 base 2 B/px = 10 B/px, 83 MB per 4K slot). The declaration uses the target.
-constexpr uint32_t kRefstoreTargetBytesPerPixelX2 = 9;      // 4.5 B/px (4 B/px at full size + 0.5 B/px half-size base)
-constexpr uint32_t kRefstoreTodayBytesPerPixel = 10;
 
 // Products declared outside FirstProducts by their owning module (dense ids appended at plan time) keep a registered
 // token here so every reader names the same node.
@@ -248,22 +311,28 @@ inline ProductDecl Make(ProductId id, const char* token, const char* name, Backe
 
 inline void AddInput(ProductDecl& d, ProductId p, uint8_t lag)
 {
+    assert(d.inputCount < kMaxInputs);   // a declaration never silently drops a read (debug); Release: see below
     if (d.inputCount < kMaxInputs) {
         d.inputs[d.inputCount].product = p;
         d.inputs[d.inputCount].lag = lag;
         d.inputs[d.inputCount].lead = 0;
         ++d.inputCount;
+    } else {
+        d.overflow = true;   // Registry::Validate rejects the declaration: never a silently dropped read
     }
 }
 
 // A look-ahead input: `lead` frames ahead (lag stays 0).
 inline void AddLead(ProductDecl& d, ProductId p, uint8_t lead)
 {
+    assert(d.inputCount < kMaxInputs);
     if (d.inputCount < kMaxInputs) {
         d.inputs[d.inputCount].product = p;
         d.inputs[d.inputCount].lag = 0;
         d.inputs[d.inputCount].lead = lead;
         ++d.inputCount;
+    } else {
+        d.overflow = true;
     }
 }
 
@@ -303,8 +372,8 @@ public:
             const ProductDecl& d = decls_[i];
             if (d.id != i)
                 return fail("product ids are not dense");
-            if (d.inputCount > kMaxInputs)
-                return fail("too many inputs");
+            if (d.inputCount > kMaxInputs || d.overflow)
+                return fail("a product declares more inputs than the seam allows (an extra read was dropped)");
             bool hasLead = false;
             for (size_t k = 0; k < d.inputCount; ++k) {
                 const InputRef& in = d.inputs[k];
@@ -322,6 +391,30 @@ public:
             }
             if (hasLead && d.shortQueueSubstitute == kNoProduct)
                 return fail("a look-ahead product needs a short-queue substitute");
+            if (d.orderedChain) {
+                bool selfLag = false;
+                for (size_t k = 0; k < d.inputCount; ++k)
+                    selfLag = selfLag || (d.inputs[k].product == d.id && d.inputs[k].lag > 0 && d.inputs[k].lead == 0);
+                if (!selfLag)
+                    return fail("an ordered chain product needs a self input at lag >= 1");
+                if (d.backend == Backend::RenderOnly)
+                    return fail("an ordered chain product needs a lane backend");
+                if (!d.missingInputForm)
+                    return fail("an ordered chain product needs a missing-input form (the chain start and gaps run reduced)");
+            }
+            if (d.historyFloor != kHistoryFixed && d.historyFloor > d.history)
+                return fail("history floor above the full history");
+            if (d.singletonStore) {
+                if (d.history != 0)
+                    return fail("a single-store product declares history 0");
+                if (d.historyFloor != kHistoryFixed)
+                    return fail("a single-store product is not governed (no history floor)");
+                if (d.backend == Backend::RenderOnly)
+                    return fail("a single-store product needs a lane backend (it has no live fill)");
+                for (size_t k = 0; k < d.inputCount; ++k)
+                    if (d.inputs[k].product == d.id)
+                        return fail("a single-store product does not read itself");
+            }
             if (d.shortQueueSubstitute != kNoProduct) {
                 if (!Has(d.shortQueueSubstitute) || d.shortQueueSubstitute == d.id)
                     return fail("bad short-queue substitute");
@@ -340,6 +433,14 @@ public:
                     return fail("optical-flow substitute needs the engine");
             }
         }
+        // A single-store product is a two-buffer ping-pong: its readers read it at lag 0 or 1 only (the slot of frame N-2 is
+        // already the one the producer rewrites for frame N).
+        for (const ProductDecl& d : decls_)
+            for (size_t k = 0; k < d.inputCount; ++k) {
+                const InputRef& in = d.inputs[k];
+                if (decls_[in.product].singletonStore && (in.lag > 1 || in.lead > 0))
+                    return fail("a single-store product is read at lag 0 or 1 only (no deeper lag, no look-ahead)");
+            }
         // Look-ahead edges: no chains (the target has no lead inputs itself) and no loops (the target
         // cannot reach the reader through ANY edge, lag, lag 0 or lead): a frame-ahead read must end at
         // a product made from the source alone.
@@ -649,9 +750,12 @@ inline void AppendSourceRingProduct(std::vector<ProductDecl>& decls)
     decls.push_back(p13);
 }
 
-// TemporalDetail's products (the module's former private descriptors, now registered): td.refstore is a module-owned
-// HISTORY product (history = the slots, kRefSlots), td.analysis a lane product, td.admission a T2 gap product.
-constexpr uint8_t kRefSlots = 5;   // TemporalDetail::kSlots
+// TemporalDetail's products, redefined by doc 72 (unit v2). Every size here is the BUDGET-GOVERNED FLOOR ("stage 0": the
+// repair of the still / dark regions plus the full-resolution mid band at the true source resolution, the least the budget grants); the
+// governor adds stages while VRAM and ms headroom allow, each visible and each shed in the reverse order. The stages, their size
+// rules and the full intended input lists (the framework limit is kMaxInputs = 16; the registry still declares only the first
+// four inputs of each, reset-2 open item) are the contract table of
+// modules/repair/temporal_detail/products/TdProductContracts.h. No fixed per-GPU tiers.
 inline void AppendTemporalDetailProducts(std::vector<ProductDecl>& decls)
 {
     using detail::AddInput;
@@ -660,41 +764,55 @@ inline void AppendTemporalDetailProducts(std::vector<ProductDecl>& decls)
     using namespace VpIndicator;
     const CounterMask content = Bit(kFull) | Bit(kContinuity);
 
-    // td.analysis: E1/E2/F/q block maps (12 floats per 16 px block = 48 B), rebound counters, softening run. Reads the
-    // shared split, block stats and the source ring at lag 0. The reference frames "known one frame ahead" are a LEAD
-    // on P13 in the plan; until the K1 seal rule exists a lead edge fails closed, so the lag form is declared.
-    ProductDecl an = Make(kTdAnalysis, "td.analysis", "temporal detail analysis", Backend::GpuCompute, 1, Tier::T1,
+    // td.blocks (id 16): per 16 px block ~28 B (state, origin slot, trail, per-band confidence, lighting layer, motion class...)
+    // + the 8 px quadtree pool (<= 25%): {shift 4: 28 B}, {shift 3: 6 B}. SEQUENTIAL: it reads itself at lag 1 (ordered-chain lane
+    // job, W1-SKG). The framework holds 16 inputs; the registry declares the first 4 today, the intended ~14 are in the contract table.
+    ProductDecl an = Make(kTdBlocks, "td.blocks", "temporal detail blocks", Backend::GpuCompute, 1, Tier::T1,
                           content | Bit(kRebaseH) | Bit(kRebaseV), Bit(kSettingsRebase) | Bit(kSettingsAnalysis));
     AddInput(an, kP10GrainSplit, 0);
     AddInput(an, kP11RegionBlockStats, 0);
     AddInput(an, kP13SourceRing, 0);
-    AddTerm(an, 4, 48);
+    AddInput(an, kTdBlocks, 1);
+    an.spanMask = content;          // a trail never crosses a slip / full change
+    an.missingInputForm = true;     // after a resync the first frame has no lag-1 state: made from scratch (carry-forward / unknown)
+    an.orderedChain = true;         // it reads itself at lag 1: the lane makes frame 0 in the reduced form and every later frame from a sealed predecessor
+    AddTerm(an, 4, 28);
+    // The 8 px quadtree pool holds at most 25% of the 8 px cells (about 6 B per 16 px block), but a size rule has no fraction term, so it is
+    // declared at 100% of the cells (6 B x 4 cells per block): an over-declaration of ~18 B per 16 px block (0.6 MB at 4K) on purpose,
+    // so the declared budget is never below the worst case. Documented in docs/design/product-graph.md.
+    AddTerm(an, 3, 6);
     an.rebasedPlane = true;
     an.refRenderMs = 1.5f;
     decls.push_back(an);
 
-    // td.refstore: history = the slots. Declared at what the code allocates TODAY: kRefstoreTodayBytesPerPixel (10 B/px,
-    // 83 MB per slot at 4K: RGBA16F raw + cleaned bands 8 B/px + R16 base 2 B/px). The SA6 compact form targets
-    // <= 4.5 B/px (kRefstoreTargetBytesPerPixelX2 / 2); the declaration changes with it, never ahead of it.
-    ProductDecl rs = Make(kTdRefstore, "td.refstore", "temporal detail reference store", Backend::GpuCompute, kRefSlots,
+    // td.memory (id 17): the WHOLE store (slots LT-A, LT-P, ST, NA, FP; bands B0 at 1/4 per axis, B1 at FULL resolution; chroma at
+    // B0), module-owned through GpuAllocator / VramGovernor. Floor stage 0: {shift 2: 55 B}, {shift 1: 1 B}, {shift 0: 2 B}
+    // (the full-resolution mid band); the governor adds the larger stages (contract table). Whole-store rule, so history 0.
+    ProductDecl rs = Make(kTdMemory, "td.memory", "temporal detail memory (budget-governed store)", Backend::GpuCompute, 0,
                           Tier::T1, content | Bit(kRebaseH) | Bit(kRebaseV), Bit(kSettingsRebase) | Bit(kSettingsAnalysis));
-    AddInput(rs, kTdAnalysis, 0);
+    AddInput(rs, kTdBlocks, 0);
     AddInput(rs, kP10GrainSplit, 0);
     AddInput(rs, kP3AnalysisField, 0);
     AddInput(rs, kP13SourceRing, 0);
-    AddTerm(rs, 0, kRefstoreTodayBytesPerPixel);
+    AddTerm(rs, 2, 55);
+    AddTerm(rs, 1, 1);
+    AddTerm(rs, 0, 2);
+    rs.singletonStore = true;   // one persistent store, rewritten in place, read at lag 1 by td.delta / td.anchor_pass; never governed as history
     rs.rebasedPlane = true;
+    rs.planningSize = true;
     rs.refRenderMs = 1.0f;
     decls.push_back(rs);
 
-    // td.admission: the cleaner / template work on admission frames, a T2 gap product. Its residency is the
-    // transient arena (SA1); declared Vram until Residency::Transient exists. Per 16 px block templates: an estimate.
-    ProductDecl ad = Make(kTdAdmission, "td.admission", "temporal detail admission", Backend::GpuCompute, 0, Tier::T2,
+    // td.anchor_pass (id 18): the anchor-repair pass, a T2 gap job chunked <= 1 ms; Transient (the shared arena, peak ~6 B1 planes
+    // = 3 B/px; a shared maximum, not a sum). Shed first, visible ("anchor repair: light only").
+    ProductDecl ad = Make(kTdAnchorPass, "td.anchor_pass", "temporal detail anchor pass", Backend::GpuCompute, 0, Tier::T2,
                           content | Bit(kRebaseH) | Bit(kRebaseV), Bit(kSettingsRebase) | Bit(kSettingsAnalysis));
-    AddInput(ad, kTdAnalysis, 0);
-    AddInput(ad, kP10GrainSplit, 0);
     AddInput(ad, kP13SourceRing, 0);
-    AddTerm(ad, 4, 64);
+    AddInput(ad, kP10GrainSplit, 0);
+    AddInput(ad, kP11RegionBlockStats, 0);
+    AddInput(ad, kTdMemory, 1);
+    AddTerm(ad, 0, 3);
+    ad.residency = Residency::Transient;
     ad.rebasedPlane = true;
     ad.refRenderMs = 3.0f;
     decls.push_back(ad);
@@ -721,10 +839,221 @@ inline void AppendSourceIdentityProduct(std::vector<ProductDecl>& decls)
     decls.push_back(p);
 }
 
-// The registry the skeleton runs with: the first products, the camera products, then P10..P13 and the TemporalDetail
-// products, in fixed id order. THE one assembly point.
+// p7g_camera_guide (doc 56, K4-1; claimed as id 20 by CameraGuideProduct.h, registered here): the measurement plan for pair N is a
+// pure function of P7(N-d), the CPU field copy of that pair and P4(N), known ahead and declared as a lane product. d is fixed per
+// graph (CameraLink::GuideLagFor); the registry carries the floor d = kGuideDefaultLag and CameraLink::SkeletonProductsWithGuide(d)
+// sets the measured one on a graph rebuild.
+// kGuideDefaultLag is a STRUCTURAL minimum, not a rate: the guide of pair N needs P7(N-d) read back (one frame behind the fit that made
+// it) and its CPU field copy, so d >= 2 whatever the source rate. The rate-dependent part (readback + p95 fit over the measured source
+// period) is CameraLink::GuideLagFor, which replaces this floor on every graph rebuild (SetGuideLag).
+constexpr uint8_t kGuideDefaultLag = 2;
+constexpr uint32_t kGuideBytesPerBlock = 20;   // RGBA32F guide + R32F code per 16 px block
+inline void AppendCameraGuideProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    const CounterMask content = Bit(kFull) | Bit(kContinuity);
+    ProductDecl p = Make(kP7gCameraGuide, "p7g_camera_guide", "camera guide", Backend::Cpu, 0, Tier::T0, content, Bit(kSettingsMotion));
+    AddInput(p, kP7CameraFit, kGuideDefaultLag);
+    AddInput(p, kP4SourceStats, 0);
+    p.residency = Residency::SystemRam;
+    p.spanMask = content;   // a pair spanning a slip / full change has no guidance
+    AddTerm(p, 4, kGuideBytesPerBlock);
+    p.size.fixedBytes = 256;
+    p.refRenderMs = 0.05f;
+    decls.push_back(p);
+}
+
+// The temporal-detail engine's products and the precursors it needs (doc 72, section 1; the engine itself is built in reset 2).
+// Reset 1 declares the ids, contracts, sizes and fill rules and wires the consumers' read paths against them; the placeholder
+// producers publish "absent" and every reader runs its classical form (visibly, once the engine is requested). Sizes are the
+// BUDGET-GOVERNED FLOOR (stage 0); the larger stages of each budget-governed buffer are in
+// modules/repair/temporal_detail/products/TdProductContracts.h. The framework limit is now kMaxInputs = 16 / kMaxConsumes = 10,
+// but the registry still declares only the first 4 inputs of each intended list (kDeclaredInputsToday in the tests; a reset-2
+// open item: short-queue substitutes for the lead edges). Nothing is silently dropped: the contract table records the full
+// intended list, which a test compares.
+// Record histories are SECONDS of source time; the frame count follows the measured source rate (the same rule as the guide lag).
+// `sourcePeriodMs <= 0` (unmeasured: the status/planning view, tests) declares the field's maximum, kRecordHistoryMax: the records
+// are tens of bytes, so the bound costs kilobytes and never under-declares. `minFrames` keeps the structural floor of the record
+// (the lags its readers use). A rebuild with the measured period replaces the figure (SkeletonProducts(..., sourcePeriodMs)).
+// Node::ring and Node::livePool are uint8_t: a graph that needs more slots is REJECTED by BuildGraph (visible reason), never clamped.
+// The record histories therefore stop short of 255 by kRingHeadroomFrames, the room the product's other slot terms need
+// (render-ahead R + lane lead L + the lane-owned buffer + the held-span slot + the look-ahead lead slots; for the live pool R + the
+// held-span slot + the spare per lane-read input reference x jobs in flight). 32 covers R, L and the spares of every catalog product
+// with a wide margin (tests pin ring >= history + 1 at unmeasured and 240 fps); a setting that needs more is rejected by BuildGraph.
+constexpr unsigned kSlotCountMax = 255;
+constexpr unsigned kRingHeadroomFrames = 32;
+constexpr uint8_t kRecordHistoryMax = static_cast<uint8_t>(kSlotCountMax - kRingHeadroomFrames);
+inline uint8_t HistoryFramesFor(double seconds, double sourcePeriodMs, uint8_t minFrames)
+{
+    if (!(sourcePeriodMs > 0.0) || !(seconds > 0.0))
+        return kRecordHistoryMax;
+    const double frames = std::ceil(seconds * 1000.0 / sourcePeriodMs - 1e-9);
+    const double clamped = (std::min)(double(kRecordHistoryMax), (std::max)(double(minFrames), frames));
+    return static_cast<uint8_t>(clamped);
+}
+// True when the measured period asks for more frames than kRecordHistoryMax (the cap engaged); false when unmeasured.
+inline bool RecordHistoryCapped(double seconds, double sourcePeriodMs)
+{
+    if (!(sourcePeriodMs > 0.0) || !(seconds > 0.0))
+        return false;
+    return std::ceil(seconds * 1000.0 / sourcePeriodMs - 1e-9) > double(kRecordHistoryMax);
+}
+constexpr double kQualityPatternHistorySeconds = 2.0;   // P15 looks back over this much source time (GOP / mini-GOP structure)
+constexpr uint8_t kQualityPatternMinFrames = 8;         // structural: the lags the pattern readers use (lead 2 + lag 1 + the frame)
+constexpr double kTdTrailSummaryHistorySeconds = 0.25;  // source identity folds the last quarter second of trail summaries
+constexpr uint8_t kTdTrailSummaryMinFrames = 3;         // structural: the frame, lag 1 (source identity) and one in flight
+inline uint8_t QualityPatternHistoryFrames(double sourcePeriodMs) { return HistoryFramesFor(kQualityPatternHistorySeconds, sourcePeriodMs, kQualityPatternMinFrames); }
+inline uint8_t TdTrailSummaryHistoryFrames(double sourcePeriodMs) { return HistoryFramesFor(kTdTrailSummaryHistorySeconds, sourcePeriodMs, kTdTrailSummaryMinFrames); }
+// "" when no record history is capped at this measured period, else the plain note for status / Fallbacks (the cap is never silent):
+// "quality pattern history capped at 223 frames (source rate above 111.5 fps)". The rate where the cap starts is frames / seconds.
+// `qualityPattern` / `trailSummary`: only the records that are actually in the graph being described (ProductGraph.h GraphHistoryCapNote).
+inline std::string RecordHistoryCapNote(double sourcePeriodMs, bool qualityPattern = true, bool trailSummary = true)
+{
+    std::string note;
+    const struct { const char* name; double seconds; bool present; } records[] = {
+        { "quality pattern", kQualityPatternHistorySeconds, qualityPattern }, { "td trail summary", kTdTrailSummaryHistorySeconds, trailSummary } };
+    for (const auto& r : records) {
+        if (!r.present || !RecordHistoryCapped(r.seconds, sourcePeriodMs))
+            continue;
+        char text[160] = {};
+        std::snprintf(text, sizeof(text), "%s history capped at %u frames (source rate above %.1f fps)", r.name,
+                      unsigned(kRecordHistoryMax), double(kRecordHistoryMax) / r.seconds);
+        note += (note.empty() ? "" : "; ") + std::string(text);
+    }
+    return note;
+}
+constexpr uint32_t kQualityPatternBytes = 64;
+constexpr uint32_t kCodingEvidenceSummaryBytes = 256;
+constexpr uint32_t kTdTrailSummaryBytes = 256;
+inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, double sourcePeriodMs = 0.0)
+{
+    using detail::AddInput;
+    using detail::AddLead;
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    const CounterMask content = Bit(kFull) | Bit(kContinuity);
+    const CounterMask tdSettings = Bit(kSettingsRebase) | Bit(kSettingsAnalysis);
+    const CounterMask rebased = content | Bit(kRebaseH) | Bit(kRebaseV);
+    const uint8_t qualityPatternHistory = QualityPatternHistoryFrames(sourcePeriodMs);
+    const uint8_t trailSummaryHistory = TdTrailSummaryHistoryFrames(sourcePeriodMs);
+
+    // coding_evidence (P16): per 8x8 block 8 B (hash32, blockiness u16, copy u8, phase u8) + a 256 B per-frame summary; history 2.
+    ProductDecl ce = Make(kCodingEvidence, "coding_evidence", "coding evidence (P16)", Backend::GpuCompute, 2, Tier::T0, rebased,
+                          tdSettings);
+    AddInput(ce, kP10GrainSplit, 0);
+    AddInput(ce, kP11RegionBlockStats, 0);
+    AddInput(ce, kP13SourceRing, 0);
+    AddInput(ce, kCodingEvidence, 1);   // the hash history (lag 2 joins when the declarations catch up to the contract table)
+    ce.orderedChain = true;         // self lag 1: ordered-chain lane jobs (frame 0 in the reduced form; needs missingInputForm below)
+    AddTerm(ce, 3, 8);
+    ce.size.fixedBytes = kCodingEvidenceSummaryBytes;
+    ce.rebasedPlane = true;
+    ce.spanMask = content;          // copy flags vs N-1 / N-2 are invalid across a slip
+    ce.missingInputForm = true;
+    ce.refRenderMs = 0.2f;
+    decls.push_back(ce);
+
+    // quality_pattern (P15): a CPU POD (~64 B) per unique source frame, history = kQualityPatternHistorySeconds of the measured source rate, a per-frame LANE product (not P14's held state):
+    // role at lead 2. Short-queue substitute: P15c (visible "frame pattern: provisional").
+    ProductDecl qp = Make(kQualityPattern, "quality_pattern", "frame quality pattern (P15)", Backend::Cpu, qualityPatternHistory,
+                          Tier::T0, content, Bit(kSettingsAnalysis));
+    AddInput(qp, kCodingEvidence, 0);
+    AddLead(qp, kCodingEvidence, 1);
+    AddLead(qp, kCodingEvidence, 2);
+    AddInput(qp, kQualityPattern, 1);
+    qp.size.fixedBytes = kQualityPatternBytes;
+    qp.residency = Residency::SystemRam;
+    qp.variants = Variants::NonIdentical;
+    qp.spanMask = content;
+    qp.missingInputForm = true;     // no history yet: role "unknown"
+    qp.orderedChain = true;         // self lag 1: ordered-chain lane jobs
+    qp.shortQueueSubstitute = kQualityPatternCausal;
+    decls.push_back(qp);
+
+    // quality_pattern.causal (P15c): no lead, may not read P15.
+    ProductDecl qc = Make(kQualityPatternCausal, "quality_pattern.causal", "frame quality pattern, causal (P15c)", Backend::Cpu,
+                          qualityPatternHistory, Tier::T0, content, Bit(kSettingsAnalysis));
+    AddInput(qc, kCodingEvidence, 0);
+    AddInput(qc, kQualityPatternCausal, 1);
+    qc.size.fixedBytes = kQualityPatternBytes;
+    qc.residency = Residency::SystemRam;
+    qc.spanMask = content;
+    qc.missingInputForm = true;
+    qc.orderedChain = true;         // self lag 1: ordered-chain lane jobs
+    decls.push_back(qc);
+
+    // refined_field (P3r): DMVR-style per 8x8 block 8 B (vector RG16F, confidence u8, flags u8); runs only when P3 exists. The
+    // per-pixel BDOF/PROF offsets are NOT a product (dropped, doc 72): consumers derive them on the fly from U15's accessor.
+    ProductDecl rf = Make(kRefinedField, "refined_field", "refined field (P3r)", Backend::GpuCompute, 1, Tier::T0, content,
+                          Bit(kSettingsMotion));
+    AddInput(rf, kP3AnalysisField, 0);
+    AddInput(rf, kP1HalfLuma, 0);
+    AddInput(rf, kP1HalfLuma, 1);
+    AddInput(rf, kP8CameraLabels, 0);
+    AddTerm(rf, 3, 8);
+    rf.spanMask = content;
+    rf.variants = Variants::NonIdentical;   // reduced = the unrefined P3 (visible "motion: refinement late")
+    rf.refRenderMs = 0.3f;
+    decls.push_back(rf);
+
+    // td.anchor_refs: received full-resolution luma of the last anchors (R16 per slot, up to 3). Budget-governed: the floor is 0
+    // (static / camera mode uses P16 hashes and the P13 lag-1 view); the governor adds slots.
+    ProductDecl ar = Make(kTdAnchorRefs, "td.anchor_refs", "td anchor references", Backend::GpuCompute, 0, Tier::T1, rebased,
+                          tdSettings);
+    AddInput(ar, kP13SourceRing, 0);
+    AddInput(ar, kQualityPattern, 0);
+    ar.rebasedPlane = true;
+    ar.planningSize = true;
+    ar.refRenderMs = 0.05f;
+    decls.push_back(ar);
+
+    // td.delta: the lane -> render hand-off (Delta0 at 1/4 resolution: 3 x R16F; band weights RGBA8 per 16 px block). Floor
+    // {shift 2: 6 B}, {shift 4: 4 B}; the full-resolution Delta1 atlas is a governed stage. Ring = lane lead + 1.
+    ProductDecl dl = Make(kTdDelta, "td.delta", "td repair delta", Backend::GpuCompute, 0, Tier::T1, rebased, tdSettings);
+    AddInput(dl, kTdBlocks, 0);
+    AddInput(dl, kTdMemory, 1);
+    AddInput(dl, kP13SourceRing, 0);
+    AddTerm(dl, 2, 6);
+    AddTerm(dl, 4, 4);
+    dl.rebasedPlane = true;
+    dl.planningSize = true;
+    dl.variants = Variants::NonIdentical;   // reduced = carry-forward (visible "temporal detail: lane late (carried)")
+    dl.refRenderMs = 0.4f;
+    decls.push_back(dl);
+
+    // td.maps: THE consumer-facing product: per 16 px block 3 x RGBA16F = 12 named fields (24 B), read only through U19 TdMapsView.
+    ProductDecl tm = Make(kTdMaps, "td.maps", "td consumer maps (U19 TdMapsView)", Backend::GpuCompute, 0, Tier::T1,
+                          rebased | Bit(kSettingsOutput), tdSettings | Bit(kSettingsOutput));
+    AddInput(tm, kTdBlocks, 0);
+    AddInput(tm, kP10GrainSplit, 0);
+    AddInput(tm, kCodingEvidence, 0);
+    AddInput(tm, kRefinedField, 0);
+    AddTerm(tm, 4, 24);
+    tm.rebasedPlane = true;
+    tm.variants = Variants::NonIdentical;
+    tm.refRenderMs = 0.1f;
+    decls.push_back(tm);
+
+    // td.trail_summary: a CPU record per frame (256 B, history = kTdTrailSummaryHistorySeconds of the measured source rate) for source identity (lag >= 1), status and logs.
+    ProductDecl ts = Make(kTdTrailSummary, "td.trail_summary", "td trail summary", Backend::Cpu, trailSummaryHistory, Tier::T1, content,
+                          Bit(kSettingsAnalysis));
+    AddInput(ts, kTdBlocks, 0);
+    ts.size.fixedBytes = kTdTrailSummaryBytes;
+    ts.residency = Residency::SystemRam;
+    ts.rarelyTouched = true;
+    ts.missingInputForm = true;
+    decls.push_back(ts);
+}
+
+// The registry the skeleton runs with: the first products, the camera products, then P10..P13, the TemporalDetail
+// products, P14, p7g and the temporal-detail engine products, in fixed id order. THE one assembly point.
 // `compactGrain` / `compactChroma`: the GRANTED storage of P10 (luma) and P10c (chroma planes).
-inline Registry SkeletonProducts(bool compactGrain, bool compactChroma)
+// `sourcePeriodMs`: the measured source frame period (0 = unmeasured), which sets the frame counts of the record histories.
+inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double sourcePeriodMs = 0.0)
 {
     std::vector<ProductDecl> d = FirstProducts().All();
     AppendCameraProducts(d);
@@ -733,6 +1062,8 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma)
     AppendSourceRingProduct(d);
     AppendTemporalDetailProducts(d);
     AppendSourceIdentityProduct(d);
+    AppendCameraGuideProduct(d);
+    AppendTemporalDetailEngineProducts(d, sourcePeriodMs);
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }
@@ -743,7 +1074,7 @@ struct ConsumeRef {
     uint8_t lag = 0;
 };
 
-constexpr size_t kMaxConsumes = 6;
+constexpr size_t kMaxConsumes = 10;
 
 struct ConsumerDecl {
     uint16_t id = 0;
@@ -752,14 +1083,20 @@ struct ConsumerDecl {
     std::array<ConsumeRef, kMaxConsumes> consumes{};
     bool holdsSpan = false;       // holds the next frame's product through the presentation span
     bool hasReducedMode = false;  // can run visibly reduced when a product is dropped (regulator)
+    // Set by AddConsume when more than kMaxConsumes reads were named: the extra read was NOT recorded.
+    // BuildGraph rejects the graph with a plain reason (fail closed, visible; Release has no assert).
+    bool overflow = false;
 };
 
 inline void AddConsume(ConsumerDecl& c, ProductId p, uint8_t lag = 0)
 {
+    assert(c.count < kMaxConsumes);   // a consumer never silently drops a read
     if (c.count < kMaxConsumes) {
         c.consumes[c.count].product = p;
         c.consumes[c.count].lag = lag;
         ++c.count;
+    } else {
+        c.overflow = true;
     }
 }
 

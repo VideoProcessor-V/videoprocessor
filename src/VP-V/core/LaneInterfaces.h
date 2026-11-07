@@ -51,6 +51,10 @@ struct LaneJobContext {
     uint8_t* out = nullptr;                             // CPU products: the ring slot's bytes; else null
     size_t outBytes = 0;
     Header* header = nullptr;                           // the lane header: a producer may set costUs only
+    // Ordered chain (ProductDecl::orderedChain): the self lag input is absent (chain start or a predecessor that
+    // never published): run in the declared reduced form (carry-forward). inputData / inputs->sets for that input
+    // are null. False for every other product.
+    bool chainReduced = false;
 };
 
 // A lane producer for one product. All calls for one product come from ONE thread (the lane side of

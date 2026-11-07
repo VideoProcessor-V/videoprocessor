@@ -376,6 +376,40 @@ namespace SkeletonModuleTestsNs
 			Assert::IsFalse(rig.sk.WorkersRunning(rig.Host()));
 		}
 
+		static VpSkeleton::Graph GraphFor(VpSkeleton::ProductId asked, double periodMs)
+		{
+			VpSkeleton::GraphSettings gs;
+			gs.dims.width = 64;
+			gs.dims.height = 48;
+			gs.queueDepth = 6;
+			gs.laneLead = 1;
+			VpSkeleton::ConsumerDecl c;
+			c.id = 1;
+			c.name = "history cap test";
+			VpSkeleton::AddConsume(c, asked);
+			return VpSkeleton::BuildGraph(VpSkeleton::SkeletonProducts(false, false, periodMs), { c }, gs);
+		}
+
+		TEST_METHOD(TheHistoryCapIsShownOnlyWhenACappedProductIsInTheGraph)
+		{
+			const double fast = 1000.0 / 240.0;   // 2 s of quality pattern history = 480 frames: capped at kRecordHistoryMax
+			const VpSkeleton::Graph withQp = GraphFor(VpSkeleton::kQualityPattern, fast);
+			Assert::IsTrue(withQp.valid);
+			const FallbackCatalog::Decision on = SkeletonModule::HistoryCapDecision(withQp, fast);
+			Assert::IsTrue(on.engaged);
+			Assert::AreEqual(std::string("skeleton_history"), on.id);
+			Assert::IsTrue(on.reason.find("quality pattern history capped at 223 frames (source rate above 111.5 fps)") != std::string::npos);
+			// Capped rate but the closure holds no quality pattern: nothing to report (the trail summary needs ~892 fps).
+			const VpSkeleton::Graph noQp = GraphFor(VpSkeleton::kP1HalfLuma, fast);
+			Assert::IsTrue(noQp.valid && !noQp.Has(VpSkeleton::kQualityPattern) && !noQp.Has(VpSkeleton::kQualityPatternCausal));
+			Assert::IsFalse(SkeletonModule::HistoryCapDecision(noQp, fast).engaged);
+			Assert::IsFalse(SkeletonModule::HistoryCapDecision(GraphFor(VpSkeleton::kTdTrailSummary, fast), fast).engaged);
+			// In the graph but not capped (24 p, unmeasured), and an invalid graph.
+			Assert::IsFalse(SkeletonModule::HistoryCapDecision(GraphFor(VpSkeleton::kQualityPattern, 1001.0 / 24.0), 1001.0 / 24.0).engaged);
+			Assert::IsFalse(SkeletonModule::HistoryCapDecision(GraphFor(VpSkeleton::kQualityPattern, 0.0), 0.0).engaged);
+			Assert::IsFalse(SkeletonModule::HistoryCapDecision(VpSkeleton::Graph(), fast).engaged);
+		}
+
 		TEST_METHOD(ProductsAreSealedOrLiveFilledBitIdenticalAndTheRestDeclined)
 		{
 			Rig rig(Lane("on"));
@@ -400,6 +434,7 @@ namespace SkeletonModuleTestsNs
 			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
 			Assert::IsTrue(Has(fb, "skeleton_products: P10 grain split, P11 region stats, P12 light level declined: render-thread GPU dispatch hook pending (M2 Upload/Entrance phase)"));
 			Assert::IsFalse(Has(fb, "skeleton_lane: waiting"), L"nothing is waiting any more");
+			Assert::IsFalse(Has(fb, "skeleton_history"), L"no capped record history is in this graph: no cap note");
 			const std::vector<std::string> lines = rig.Lines(RE::StatusKind::Lines);
 			Assert::AreEqual<size_t>(1, lines.size());
 			Assert::IsTrue(lines[0].find("skeleton=analysis lane on 64x48") == 0);

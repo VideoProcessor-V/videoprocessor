@@ -31,7 +31,7 @@ namespace TemporalDetail
 	constexpr double kWienerKappa = 2.0;        // f = clamp(1 - kappa N / e3x3, 0, 1)
 	constexpr double kEnergyFloor = 1e-3;       // codes^2, added to q and to divisions
 	constexpr int kSlots = 5;                   // K past slots (one more, the future slot, in queued modes)
-	constexpr uint32_t kUnitVersion = 1;        // the td.* products' unit version (core/ProductCatalog.h)
+	constexpr uint32_t kUnitVersion = 1;        // THIS module's code is still v1 (td.analysis / td.refstore / td.admission layouts, 5 slots, ~415 MB at 4K); v2 is the doc 72 contract in repair/temporal_detail/products (TdProducts::kUnitVersion, the catalog's kExpectedTemporalDetailUnit) and is raised here only when the v2 engine replaces this code. The v1 GPU module (TemporalDetailGpu) is not wired into the renderer today (no call site outside its own tests).
 	constexpr int kMaxFutureFrames = 8;         // future frames the model looks at
 
 	// Guard (README step 3)

@@ -13,16 +13,37 @@
   },
   "live_files": [
     "src/VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h",
+    "src/VP-V/modules/input/source_analysis/lane/shared/SourceStats.h",
     "src/VP-V/modules/input/source_analysis/lane/shared/README.md"
   ],
   "forwarding_headers": [],
   "components": {
-    "files": { "required": [], "optional": [] },
-    "hardware": { "required": [], "optional": [] },
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
     "tools": [],
     "config_keys": [],
     "upstream_modules": []
   },
   "fallback_when_missing": "Header-only law; no runtime component to miss.",
-  "fallback_entry": "Half luma: inactive (<reason>)"
+  "fallback_entry": "Half luma: inactive (<reason>)",
+  "shared_units": [
+    {
+      "name": "HalfLuma",
+      "id": "U3",
+      "version": 1,
+      "product": "P1 half + quarter luma"
+    },
+    {
+      "name": "SourceStats",
+      "id": "U6",
+      "version": 1,
+      "product": "P4 source stats (histogram, APL, percentiles, rect, grain)"
+    }
+  ]
 }

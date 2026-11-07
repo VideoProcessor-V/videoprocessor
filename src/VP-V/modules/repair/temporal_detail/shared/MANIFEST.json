@@ -1,0 +1,36 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "repair.temporal_detail.shared",
+  "unit": "repair",
+  "order": 92,
+  "status": "draft",
+  "code_location": "migrated",
+  "shared_unit": {
+    "name": "TdMapsView",
+    "id": "U19",
+    "version": 1,
+    "product": "td.maps (id 27)"
+  },
+  "live_files": [
+    "src/VP-V/modules/repair/temporal_detail/shared/TdMapsView.h",
+    "src/VP-V/modules/repair/temporal_detail/shared/README.md"
+  ],
+  "forwarding_headers": [],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [],
+    "upstream_modules": [
+      "repair.temporal_detail"
+    ]
+  },
+  "fallback_when_missing": "Header-only accessor; absent td.maps = every reader's classical form.",
+  "fallback_entry": "Temporal-detail maps: classical form (<reason>)"
+}

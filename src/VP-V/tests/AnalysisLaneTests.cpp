@@ -287,8 +287,9 @@ namespace AnalysisLaneTestsNs
 	TEST_CLASS(AnalysisLaneTests)
 	{
 	public:
-		// 0. A graph with a look-ahead input (SlotTable invalid until the K1 seal rule) is refused: lane off, visible.
-		TEST_METHOD(LookAheadGraphIsRefusedVisibly)
+		// 0. A graph with a look-ahead input is built (W1-SKG: the K1 seal rule exists); a short queue still resolves to the
+		//    causal form, visibly. The lead graph seals through the stamp source: nothing is refused any more.
+		TEST_METHOD(LookAheadGraphBuildsAndSealsWithTheK1Rule)
 		{
 			Rig r;
 			r.reg = SkeletonProducts();
@@ -300,13 +301,12 @@ namespace AnalysisLaneTestsNs
 			r.consumers.push_back(c);
 			r.gs.laneLead = 3;
 			r.Configure(LaneSettings::Mode::On);
-			Assert::IsFalse(r.lane.Active(), L"lane off");
-			bool engaged = false;
+			Assert::IsTrue(r.lane.Active(), L"the look-ahead graph builds");
 			for (const FallbackCatalog::Decision& d : r.lane.Fallbacks())
-				if (d.id == "analysis_lane" && d.engaged && d.reason.find("look-ahead") != std::string::npos)
-					engaged = true;
-			Assert::IsTrue(engaged, L"visible fallback names the look-ahead input");
-			Assert::IsTrue(r.lane.OnRenderStart(0, 4000).empty(), L"nothing sealed, nothing indexed");
+				Assert::IsFalse(d.id == "analysis_lane" && d.engaged && d.reason.find("look-ahead") != std::string::npos,
+					L"no look-ahead refusal any more");
+			Assert::IsTrue(r.lane.State()->table->Valid());
+			Assert::IsFalse(r.lane.OnRenderStart(0, 4000).empty(), L"the frame is sealed and indexed");
 			// A short queue (lane lead 1) resolves P9 to the causal P7: the lane builds.
 			r.gs.laneLead = 1;
 			r.Configure(LaneSettings::Mode::On);

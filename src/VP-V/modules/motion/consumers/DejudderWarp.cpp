@@ -1,6 +1,7 @@
 ﻿#include <pch.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
 #include <vprenderer/GrainPreserve.h>
+#include <VP-V/modules/input/source_analysis/picture/shared/PictureRect.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
@@ -113,44 +114,8 @@ if (i == 0u) {
 }
 )GLSL";
 
-		// Black bars (owner 2026-10-14): the picture rectangle in input pixels.
-		// The renderer's active picture when given; else, on the 1/8 luma, the
-		// first and last rows and columns brighter than black + bar_codes (a
-		// frame with none, a fade to black, is all picture). One work group.
-		const char* const PICTURE_HEADER = R"GLSL(
-shared int pa_[4];
-)GLSL";
-
-		const char* const PICTURE_BODY = R"GLSL(
-uint i = gl_LocalInvocationIndex;
-if (i == 0u) { pa_[0] = 1 << 30; pa_[1] = -1; pa_[2] = 1 << 30; pa_[3] = -1; }
-barrier();
-ivec2 s = textureSize(l1, 0);
-if (given.z <= given.x || given.w <= given.y) {
-    for (int y = int(i); y < s.y; y += 256) {
-        float m = 0.0;
-        for (int x = 0; x < s.x; x++)
-            m = max(m, texelFetch(l1, ivec2(x, y), 0).r);
-        if (m > black + bar_codes) { atomicMin(pa_[0], y); atomicMax(pa_[1], y); }
-    }
-    for (int x = int(i); x < s.x; x += 256) {
-        float m = 0.0;
-        for (int y = 0; y < s.y; y++)
-            m = max(m, texelFetch(l1, ivec2(x, y), 0).r);
-        if (m > black + bar_codes) { atomicMin(pa_[2], x); atomicMax(pa_[3], x); }
-    }
-}
-barrier();
-if (i == 0u) {
-    vec4 r = vec4(0.0, 0.0, frame_size);
-    if (given.z > given.x && given.w > given.y)
-        r = clamp(given, vec4(0.0), vec4(frame_size, frame_size));
-    else if (pa_[1] >= pa_[0] && pa_[3] >= pa_[2])
-        r = vec4(float(pa_[2]) * 8.0, float(pa_[0]) * 8.0,
-                 min(float(pa_[3] + 1) * 8.0, frame_size.x), min(float(pa_[1] + 1) * 8.0, frame_size.y));
-    imageStore(dst, ivec2(0), r);
-}
-)GLSL";
+		// Black bars (owner 2026-10-14): the picture rectangle in input pixels. The kernel and its law are the shared unit U8
+		// (VpUnit::PictureRect, input/source_analysis/picture/shared/PictureRect.h; moved unchanged).
 
 		// Optical flow source: the half-size luma (8-bit codes) as the
 		// engine's 8-bit input.
@@ -3512,7 +3477,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			inner->SetSettings(innerSettings);
 		inner->rescoreForTest = rescoreForTest;
 		inner->searchOnly = !all;
-		inner->SetPictureArea(pictureGiven[0] / 2, pictureGiven[1] / 2, (pictureGiven[2] + 1) / 2, (pictureGiven[3] + 1) / 2);
+		int innerPicture[4];
+		VpUnit::PictureRect::Halved(pictureGiven, innerPicture);
+		inner->SetPictureArea(innerPicture[0], innerPicture[1], innerPicture[2], innerPicture[3]);
 		inner->innerOfLowRes = true;
 		inner->lumaInCodes = true;
 		inner->timingParent = this;
@@ -3809,15 +3776,16 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		}
 		// Black in this matcher's luma codes (limited 16, full range 0) and
 		// the margin a bar's 1/8 average may have above it.
-		const float black = pictureFullRange ? 0.0f : 16.0f;
-		const float barCodes = 4.0f;
+		const VpUnit::PictureRect::Params rectParams = VpUnit::PictureRect::ForRange(pictureFullRange);
+		const float black = rectParams.blackCode;
+		const float barCodes = rectParams.barCodes;
 		const float given[4] = { static_cast<float>(pictureGiven[0]), static_cast<float>(pictureGiven[1]),
 			static_cast<float>(pictureGiven[2]), static_cast<float>(pictureGiven[3]) };
 		const float frameSize[2] = { static_cast<float>(width), static_cast<float>(height) };
 		const pl_shader_var v[4] = { { pl_var_vec4("given"), given, true }, { pl_var_vec2("frame_size"), frameSize, true },
 			{ pl_var_float("black"), &black, true }, { pl_var_float("bar_codes"), &barCodes, true } };
 		const pl_shader_desc d[2] = { Sampled("l1", l1A, false), Storage("dst", picture) };
-		return Dispatch("VideoProcessor de-judder: picture area (black bars)", PICTURE_HEADER, PICTURE_BODY, d, 2, v, 4, 16, 16, 16);
+		return Dispatch("VideoProcessor de-judder: picture area (black bars)", VpUnit::PictureRect::KernelHeader(), VpUnit::PictureRect::KernelBody(), d, 2, v, 4, 16, 16, 16);
 	}
 
 	bool MotionWarp::FadeMatch(const Planes& b)

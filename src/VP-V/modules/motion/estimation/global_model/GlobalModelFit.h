@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "CameraMotion.h"
+#include "DynamicTexture.h"
 #include "GlobalModelGeometry.h"
 #include "GlobalModelObjects.h"
 #include "GlobalModelTemporal.h"
@@ -110,6 +111,12 @@ namespace CameraModel
 		double continuityFloor = 0.2;
 		// A competing layer exists when its support is at least this share of the camera layer's.
 		double competitorMinRatio = 0.15;
+		// Dynamic-texture (water-like) detector (R1-GATES). false = records are byte-identical to the fitter without it
+		// (the detector state is never touched). true: a valid fit whose block field is a whole-frame dynamic texture
+		// (the camera model leaves most blocks disagreeing, the residual field is incoherent in time and in space) is
+		// reported Ambiguous with verdictFlags & kVerdictDynamicTexture and a confidence below 0.5, never usable.
+		bool dynTexture = false;
+		DynTextureConfig dynTextureCfg;
 		Clock clock = nullptr;
 	};
 
@@ -153,6 +160,7 @@ namespace CameraModel
 		bool m_haveGenerations = false;
 		bool m_seedPending = false;                 // previous call published a post-cut seed
 		TwoLayerState m_tl;
+		DynTextureState m_dyn;                      // previous pair's residual field (Config::dynTexture)
 		// Reused buffers (cost only; never part of the output). Fresh multi-100 KB allocations every pair
 		// cost hundreds of first-touch page faults, so the per-block record and the per-pair scratch are
 		// recycled. A pooled BlockData is rewritten only when no record still holds it (use_count == 1);

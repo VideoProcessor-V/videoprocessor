@@ -75,7 +75,7 @@ struct ProductRow {
 // the band energies); the expectation is declared here so the catalog is complete.
 constexpr uint32_t kExpectedCameraUnit = 1;
 constexpr uint32_t kExpectedRegionUnit = 2;
-constexpr uint32_t kExpectedTemporalDetailUnit = 1;
+constexpr uint32_t kExpectedTemporalDetailUnit = 2;   // doc 72: ids 16-18 redefined (td.blocks / td.memory / td.anchor_pass), TemporalDetail v2
 constexpr uint32_t kExpectedLightLevelUnit = 3;
 constexpr uint32_t kExpectedVectorUnit = 1;
 constexpr uint32_t kExpectedStatsUnit = 1;
@@ -84,6 +84,12 @@ constexpr uint32_t kExpectedRebaseUnit = 1;
 constexpr uint32_t kExpectedHalfLumaUnit = 1;
 constexpr uint32_t kExpectedMonitorUnit = 1;
 constexpr uint32_t kExpectedSourceIdentityUnit = 1;
+// The temporal-detail engine products (doc 72; repair/temporal_detail/products states the same numbers in TdProducts and a test
+// compares them): U13 CodingEvidence, QualityPattern, U15 FieldRefine and U19 TdMapsView at 1.
+constexpr uint32_t kExpectedCodingEvidenceUnit = 1;
+constexpr uint32_t kExpectedQualityPatternUnit = 1;
+constexpr uint32_t kExpectedFieldRefineUnit = 1;
+constexpr uint32_t kExpectedTdMapsViewUnit = 1;
 
 inline const std::vector<ProductRow>& ProductRows()
 {
@@ -104,11 +110,22 @@ inline const std::vector<ProductRow>& ProductRows()
         { kP11RegionBlockStats, "input/source_analysis/regions", kExpectedRegionUnit, "region block statistics pass" },
         { kP12LightLevel, "input/source_analysis/light_level", kExpectedLightLevelUnit, "light level pass" },
         { kP13SourceRing, "input/capture (queue + early upload)", 0, "" },
-        { kTdAnalysis, "repair/temporal_detail", kExpectedTemporalDetailUnit, "td analysis pass" },
-        { kTdRefstore, "repair/temporal_detail", kExpectedTemporalDetailUnit, "" },
-        { kTdAdmission, "repair/temporal_detail", kExpectedTemporalDetailUnit, "td admission cleaner" },
+        { kTdBlocks, "repair/temporal_detail", kExpectedTemporalDetailUnit, "reserved (engine: reset 2)" },
+        { kTdMemory, "repair/temporal_detail", kExpectedTemporalDetailUnit, "" },
+        { kTdAnchorPass, "repair/temporal_detail", kExpectedTemporalDetailUnit, "reserved (engine: reset 2)" },
         // P14 is a HELD-STATE product: the monitor worker publishes it on each consensus evaluation, no lane producer, no live fill.
         { kSourceIdentity, "input/source_analysis/identity", kExpectedSourceIdentityUnit, "" },
+        // Doc 72: p7g (registered, lane producer = the camera worker) and the engine products. No producer for the engine ones in reset 1
+        // (a placeholder publishes "absent"), so every consumer's read path finds them absent and takes its classical form visibly.
+        { kP7gCameraGuide, "motion/estimation/global_model", kExpectedCameraUnit, "camera guide (camera worker)" },
+        { kCodingEvidence, "input/source_analysis/regions", kExpectedCodingEvidenceUnit, "reserved (fused with the region block statistics pass)" },
+        { kQualityPattern, "input/source_analysis/identity/quality_pattern", kExpectedQualityPatternUnit, "reserved (lane CPU job)" },
+        { kQualityPatternCausal, "input/source_analysis/identity/quality_pattern", kExpectedQualityPatternUnit, "reserved (lane CPU job)" },
+        { kRefinedField, "motion/estimation/refine", kExpectedFieldRefineUnit, "reserved (field refine pass after P3)" },
+        { kTdAnchorRefs, "repair/temporal_detail", kExpectedTemporalDetailUnit, "reserved (engine: reset 2)" },
+        { kTdDelta, "repair/temporal_detail", kExpectedTemporalDetailUnit, "reserved (engine: reset 2)" },
+        { kTdMaps, "repair/temporal_detail", kExpectedTdMapsViewUnit, "reserved (engine: reset 2)" },
+        { kTdTrailSummary, "repair/temporal_detail", kExpectedTemporalDetailUnit, "reserved (engine: reset 2)" },
     };
     return rows;
 }
@@ -132,6 +149,9 @@ struct ConsumerRow {
     const char* fallbackId;   // an entry of FallbackCatalog::ProductEntries
     const char* family;       // the component this row belongs to: several rows (module row, vector demand, camera) of
                               // one component are ONE reader for ownership and the document
+    // More reads were named than kMaxConsumes holds: the extra reads were NOT recorded. Release builds have no assert, so this is a
+    // visible flag: ValidateConsumerRows() rejects the catalog with the row's name and the graph build rejects the decl (same flag).
+    bool overflow = false;
 };
 
 // Sorting key: pathway unit first, then render order.
@@ -147,12 +167,14 @@ inline ConsumerRow MakeRow(uint16_t index, const char* name, const char* module,
     r.decl.id = uint16_t(kCatalogConsumerIdBase + index);
     r.decl.name = name;
     r.family = name;
-    assert(reads.size() + heldReads.size() <= kMaxConsumes);   // a row never silently drops a read
+    assert(reads.size() + heldReads.size() <= kMaxConsumes);   // Debug builds stop here; Release flags it (ConsumerRow::overflow)
+    r.overflow = reads.size() + heldReads.size() > kMaxConsumes;
     for (ProductId p : reads)
         AddConsume(r.decl, p);
     // Held-state reads (P14 source identity): the latest sealed record, i.e. a lag >= 1 read, never a live fill.
     for (ProductId p : heldReads)
         AddConsume(r.decl, p, 1);
+    r.overflow = r.overflow || r.decl.overflow;
     r.decl.holdsSpan = holdsSpan;
     r.decl.hasReducedMode = true;
     r.module = module;
@@ -276,6 +298,44 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
                             {}, own, "product.dither_need", false, { kSourceIdentity }));
         r.push_back(MakeRow(4, "sigma-delta (analysis field mapped)", "VP-V/modules/output/dither", PathwayUnit::Output, 10,
                             { kP3AnalysisField }, own, "product.sigma_delta", true));
+        // Camera guidance (doc 56 / doc 72 item 1): reads p7g (registered now); the first reader of the guide in the motion unit.
+        {
+            ConsumerRow row;
+            row.decl.id = uint16_t(CameraLink::kCameraConsumerIdBase + 0x40);   // beside the 14 camera consumers (CameraGuideProduct.h)
+            row.decl.name = "camera guidance";
+            AddConsume(row.decl, kP7gCameraGuide);
+            row.decl.hasReducedMode = true;   // refusal: the matcher runs today's full search (visible)
+            row.module = "VP-V/modules/motion/estimation/global_model/link";
+            row.unit = PathwayUnit::Motion;
+            row.order = 24;
+            row.kind = own;
+            row.fallbackId = "product.camera";
+            row.family = "camera guidance";
+            r.push_back(row);
+        }
+        // The consumers' READ PATHS of the temporal-detail engine's products (doc 72 section 3). Each reads what it will use when the
+        // engine exists (td.maps fields through TdMapsView), finds it absent in reset 1 and runs its classical form (byte-identical;
+        // visible once the engine is requested), under its OWN existing fallback id. The sets equal TdProducts::NeededBy (a test compares).
+        r.push_back(MakeRow(19, "adaptive scaling (temporal-detail read path)", "VP-V/modules/scaling/output/AdaptiveDownscaleStage",
+                            PathwayUnit::Scaling, 21, { kTdMaps, kRefinedField }, own, "product.adaptive_downscale"));
+        r.push_back(MakeRow(20, "dither need (temporal-detail read path)", "VP-V/modules/output/dither/DitherNeed",
+                            PathwayUnit::Output, 16, { kTdMaps, kQualityPattern }, own, "product.dither_need"));
+        r.push_back(MakeRow(21, "chroma upscale (temporal-detail read path)", "VP-V/modules/scaling/chroma_upscale/basic/BasicChroma",
+                            PathwayUnit::Scaling, 11, { kTdMaps, kTdDelta, kTdMemory, kRefinedField }, own, "product.chroma_cfl"));
+        r.push_back(MakeRow(22, "sigma-delta (temporal-detail read path)", "VP-V/modules/output/dither/SigmaDeltaVectors",
+                            PathwayUnit::Output, 13, { kTdMaps, kRefinedField }, own, "product.sigma_delta"));
+        r.push_back(MakeRow(23, "debander (temporal-detail read path)", "VP-V/modules/repair/deband/VpDebander", PathwayUnit::Repair, 43,
+                            { kTdMaps, kCodingEvidence }, own, "product.debander"));
+        // The engine's side: two rows of ONE family ("temporal detail", the component of the module row at repair 10; one reader, at its
+        // earliest position), so the engine is the live-fill owner of every engine product it makes. The module row (repair 10) reads
+        // td.blocks / td.memory / td.anchor_pass.
+        r.push_back(MakeRow(24, "temporal detail engine (reserved: precursors)", "VP-V/modules/repair/temporal_detail/products",
+                            PathwayUnit::Repair, 13, { kCodingEvidence, kQualityPattern, kRefinedField, kTdAnchorRefs }, own,
+                            "product.td_engine"));
+        r.back().family = "temporal detail";
+        r.push_back(MakeRow(25, "temporal detail engine (reserved: outputs)", "VP-V/modules/repair/temporal_detail/products",
+                            PathwayUnit::Repair, 14, { kTdDelta, kTdMaps, kTdTrailSummary }, own, "product.td_engine"));
+        r.back().family = "temporal detail";
         // VectorDemand consumers: ids and reads from VectorDemandProducts.h
         for (int i = 0; i < VectorDemand::kConsumerCount; ++i) {
             const VectorDemand::Consumer c = VectorDemand::ConsumerAt(i);
@@ -407,6 +467,15 @@ inline TierBytes VramByTier(const Graph& g)
     return t;
 }
 
+// "" when no consumer row dropped a read, else the first row's name and why (Release-visible; a test pins it empty).
+inline std::string ValidateConsumerRows()
+{
+    for (const ConsumerRow& c : ConsumerRows())
+        if (c.overflow || c.decl.overflow || c.decl.count > kMaxConsumes)
+            return std::string("consumer row \"") + c.decl.name + "\" names more reads than a consumer holds (" + std::to_string(kMaxConsumes) + ")";
+    return std::string();
+}
+
 // The graph with EVERY consumer active (the worst case the catalog describes).
 inline Graph FullGraph(const GraphSettings& gs, const Registry& reg = SkeletonProducts())
 {
@@ -421,7 +490,7 @@ inline std::string MegaBytes(uint64_t bytes)
     return std::to_string(tenths / 10u) + "." + std::to_string(tenths % 10u);
 }
 
-inline const char* Token(Residency r) { return r == Residency::Vram ? "vram" : "system RAM"; }
+inline const char* Token(Residency r) { return r == Residency::Vram ? "vram" : r == Residency::Transient ? "transient (arena)" : "system RAM"; }
 
 constexpr const char* kDocBegin = "<!-- BEGIN GENERATED product-graph -->";
 constexpr const char* kDocEnd = "<!-- END GENERATED product-graph -->";

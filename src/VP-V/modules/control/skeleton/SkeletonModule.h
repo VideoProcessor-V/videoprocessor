@@ -38,6 +38,12 @@ namespace Vpv
 			// The reason shown for the products no producer or live fill can make yet.
 			static constexpr const char* kDeclinedReason = "render-thread GPU dispatch hook pending (M2 Upload/Entrance phase)";
 
+			// skeleton_history: engaged only when a capped record history (quality pattern, td trail summary) is in THIS graph.
+			static FallbackCatalog::Decision HistoryCapDecision(const VpSkeleton::Graph& graph, double periodMs)
+			{
+				return FallbackCatalog::SkeletonHistoryCapped(VpSkeleton::GraphHistoryCapNote(graph, periodMs));
+			}
+
 			// `loader` reads the configuration (null = the working directory's VideoProcessor.cfg);
 			// `nowUs` is the lane's microsecond clock (null = steady_clock).
 			explicit SkeletonModule(Skeleton::ConfigLoader loader = Skeleton::ConfigLoader(), std::function<uint64_t()> nowUs = nullptr);

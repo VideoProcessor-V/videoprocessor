@@ -42,6 +42,7 @@
 #include <VP-V/core/Products.h>
 #include <VP-V/modules/input/source_analysis/light_level/LightLevelLut.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
+#include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
 
 #include <algorithm>
 #include <cctype>
@@ -279,6 +280,11 @@ namespace DitherNeed
 		bool needed = true;              // NeededAnywhere / NeedCache
 		int colorBits = 8;
 		std::string lutFingerprint;
+		// R1-W1-RES: the read path of the temporal-detail engine's products (grain level, stability, motion model, confidence).
+		// Defaults = reset 1: the engine is not requested, the placeholder producer publishes nothing; the law above is untouched.
+		const TdProducts::Snapshot* td = TdProducts::PlaceholderSnapshot();
+		bool tdRequested = TdProducts::kEngineRequestedToday;
+		int64_t tdNowUs = 0;
 	};
 
 	// ---- the shared reset / off / missing decision ---------------------------------------------------------------------------
@@ -290,6 +296,7 @@ namespace DitherNeed
 		bool off = true;             // write / bind nothing: Off, Unavailable or NotNeeded (the sigma-delta runs at its base amplitude)
 		unsigned missing = 0;
 		std::string status;
+		TdProducts::ReadResult td;   // the temporal-detail read path of the frame (not requested in reset 1: nothing changes)
 	};
 
 	// CPU-only; needs NO grain or evidence planes: the grid, the LUT fingerprint, the colour depth, aBase, the caller's
@@ -320,6 +327,10 @@ namespace DitherNeed
 			gw_ = a.grid.gw; gh_ = a.grid.gh; B_ = a.grid.B;
 			fp_ = a.lutFingerprint; colorBits_ = a.colorBits; aBase_ = a.params.aBase;
 			d.status = StatusOf(a.enabled, d.missing, a.needed);
+			// The classical grain / bitrate-quality terms stand in while a requested engine lacks a product: said, never silent.
+			d.td = TdProducts::Read(TdProducts::Consumer::DitherNeed, a.td, a.enabled && a.tdRequested, a.tdNowUs);
+			if (d.td.fallback.engaged)
+				d.status += " [" + TdProducts::StatusLine(TdProducts::Consumer::DitherNeed, d.td) + "]";
 			return d;
 		}
 		bool Valid() const { return valid_; }

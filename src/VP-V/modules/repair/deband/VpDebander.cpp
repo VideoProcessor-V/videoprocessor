@@ -424,6 +424,7 @@ if (b.x < size.x && b.y < size.y) {
 	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& result, int slot)
 	{
 		error.clear();
+		tdRead = TdProducts::ReadToday(TdProducts::Consumer::Deband);   // absent in reset 1: nothing below changes
 		if (!gpu || !dispatch || source.num_planes <= 0 || !(params.thresholdCodes > 0.0))
 		{
 			error = "nothing to deband";

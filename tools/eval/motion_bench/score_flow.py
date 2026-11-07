@@ -3,11 +3,12 @@
 """Score a predicted optical flow against a ground truth (Middlebury .flo). numpy + stdlib only.
 
   python -I score_flow.py --pred A.flo --gt B.flo [--camera-labels labels.npy|.csv] [--object-mask mask.png|.npy]
-                          [--prev-pred P.flo [--prev-gt G.flo]] --out scores.csv
+                          [--small-mask small.npy|.png] [--prev-pred P.flo [--prev-gt G.flo]] --out scores.csv
   python -I score_flow.py --self-test
 
 Camera labels: integer array (H,W) or block grid (divides H,W; upsampled by repeat): 1 = camera, 2 = object, else ignored.
 Object mask: occlusion-boundary pixels, nonzero = on a boundary (.npy, .csv or 8-bit non-interlaced .png).
+Small mask: pixels of small fast objects (<= 32 px, >= 20 px/frame); metric prefix "smallfast".
 """
 import argparse
 import hashlib
@@ -154,7 +155,7 @@ def _stats(epe, sel, prefix, out):
         out.append((prefix + "_outlier_pct", "nan"))
 
 
-def score(pred, gt, labels=None, objmask=None, prev_pred=None, prev_gt=None):
+def score(pred, gt, labels=None, objmask=None, prev_pred=None, prev_gt=None, smallmask=None):
     if pred.shape != gt.shape:
         raise ValueError("pred/gt size mismatch %s vs %s" % (pred.shape, gt.shape))
     h, w = gt.shape[:2]
@@ -172,6 +173,8 @@ def score(pred, gt, labels=None, objmask=None, prev_pred=None, prev_gt=None):
     if objmask is not None:
         m = fit_to(objmask, h, w, "object-mask") != 0
         _stats(epe, valid & m, "occlusion_boundary", rows)
+    if smallmask is not None:
+        _stats(epe, valid & (fit_to(smallmask, h, w, "small-mask") != 0), "smallfast", rows)
     if prev_pred is not None:
         tcp = temporal_inconsistency(prev_pred, pred)
         rows.append(("tc_pred", tcp))
@@ -194,11 +197,12 @@ def run(args):
         pred, gt = read_flo(args.pred), read_flo(args.gt)
         labels = read_array(args.camera_labels) if args.camera_labels else None
         mask = read_array(args.object_mask) if args.object_mask else None
+        small = read_array(args.small_mask) if getattr(args, "small_mask", None) else None
         pp = read_flo(args.prev_pred) if args.prev_pred else None
         pg = read_flo(args.prev_gt) if args.prev_gt else None
         if pg is not None and pp is None:
             raise ValueError("--prev-gt needs --prev-pred")
-        return render(score(pred, gt, labels, mask, pp, pg))
+        return render(score(pred, gt, labels, mask, pp, pg, small))
     a = once()
     b = once()
     ha, hb = hashlib.sha256(a).hexdigest(), hashlib.sha256(b).hexdigest()
@@ -262,6 +266,12 @@ def self_test():
         check("case2 occlusion", r["occlusion_boundary_epe"], 0.5)
         check("case2 occlusion n", r["occlusion_boundary_n"], h * 4, 0)
 
+        sm = np.zeros((h, w), dtype=np.uint8)
+        sm[:8, :16] = 255  # inside the camera half, EPE 5
+        r = dict(score(read_flo(p("pr2.flo")), read_flo(p("gt2.flo")), smallmask=sm))
+        check("case2b smallfast", r["smallfast_epe"], 5.0)
+        check("case2b smallfast n", r["smallfast_n"], 128, 0)
+
         # case 3: previous flow constant (1,0), current (1.5,0): warped previous = (1,0) -> 0.5; gt consistent -> excess 0.5
         prev = np.zeros((h, w, 2)); prev[..., 0] = 1.0
         cur = np.zeros((h, w, 2)); cur[..., 0] = 1.5
@@ -282,6 +292,7 @@ def main(argv=None):
     ap.add_argument("--gt")
     ap.add_argument("--camera-labels")
     ap.add_argument("--object-mask")
+    ap.add_argument("--small-mask")
     ap.add_argument("--prev-pred")
     ap.add_argument("--prev-gt")
     ap.add_argument("--out")

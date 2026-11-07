@@ -1,0 +1,34 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "input.source_analysis.picture.shared.picture_rect",
+  "unit": "input",
+  "order": 88,
+  "status": "draft",
+  "code_location": "migrated",
+  "shared_unit": {
+    "name": "PictureRect",
+    "id": "U8",
+    "version": 1,
+    "product": "P4 active-picture rect (carries Bill's rect)"
+  },
+  "live_files": [
+    "src/VP-V/modules/input/source_analysis/picture/shared/PictureRect.h",
+    "src/VP-V/modules/input/source_analysis/picture/shared/README.md"
+  ],
+  "forwarding_headers": [],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [],
+    "upstream_modules": []
+  },
+  "fallback_when_missing": "Header-only law; no runtime component to miss.",
+  "fallback_entry": "Active picture: inactive (<reason>)"
+}

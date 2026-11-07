@@ -1610,6 +1610,7 @@ namespace CameraModel
 		m_haveGenerations = false;
 		m_seedPending = false;
 		m_tl = TwoLayerState();
+		m_dyn.Reset();
 	}
 
 	CameraMotion Fitter::Fit(const PairInput& in)
@@ -1661,6 +1662,7 @@ namespace CameraModel
 					m_objects.Reset();
 				m_seedPending = false;
 				m_tl = TwoLayerState();     // before the post-cut seed Run, which reads it
+				m_dyn.Reset();
 				rec.valid = false;
 				rec.reason = Reason::Cut;
 				rec.confidence = 0;
@@ -1694,6 +1696,7 @@ namespace CameraModel
 
 			if (in.flash)
 			{
+				m_dyn.Reset();   // the pair after a flash has a different intensity field
 				rec.valid = false;
 				rec.reason = Reason::Flash;
 				rec.confidence = 0;
@@ -1761,12 +1764,29 @@ namespace CameraModel
 				fit.confidence = 0;
 				fit.reason = Reason::DeadlineMissed;
 			}
+			if (m_config.dynTexture && !fit.valid)
+				m_dyn.Reset();   // an invalid pair breaks the sequence: the next pair has no previous residual field to compare against
+			if (m_config.dynTexture && fit.valid)
+			{
+				const DynTextureResult dt = DetectDynamicTexture(m_config.dynTextureCfg, in, fit.params, m_dyn);
+				fit.signals.dynShare = dt.share;
+				fit.signals.dynTemporal = dt.temporal;
+				fit.signals.dynSpatial = dt.spatial;
+				fit.signals.dynField = dt.field;
+				if (dt.detected && (fit.reason == Reason::Ok || fit.reason == Reason::LowConfidence))
+				{
+					fit.reason = Reason::Ambiguous;
+					fit.verdictFlags |= kVerdictDynamicTexture;
+					fit.confidence *= 0.495;   // below 0.5 for any logistic confidence <= 1
+				}
+			}
 			if (fit.valid)
 			{
 				m_previous = fit;
 				m_havePrevious = true;
 				m_seedPending = false;
-				m_temporal.Update(in.pairSeconds, fit.rates, updateFloor(in));
+				if ((fit.verdictFlags & kVerdictDynamicTexture) == 0)
+					m_temporal.Update(in.pairSeconds, fit.rates, updateFloor(in));   // a water-locked fit never feeds the camera prediction
 			}
 			if (m_config.twoLayer)
 				Impl::ApplyTl(*this, in, fit, tlNext);

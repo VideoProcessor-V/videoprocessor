@@ -42,7 +42,7 @@ namespace CameraLink
 			return r;
 		}
 		r.confidence = in.record->confidence;
-		r.reason = CameraModel::ReasonText(in.record->reason);
+		r.reason = CameraModel::ReasonTextOf(in.record->reason, in.record->verdictFlags);
 		if (in.ctx.spansSlip)
 		{
 			r.refusal = Refusal::Slip;
@@ -59,7 +59,7 @@ namespace CameraLink
 			return r;
 		}
 		r.confidence = in.record->confidence;
-		r.reason = CameraModel::ReasonText(in.record->reason);
+		r.reason = CameraModel::ReasonTextOf(in.record->reason, in.record->verdictFlags);
 		CameraModel::MeasurementInput mi;
 		mi.prev = in.record;
 		const CameraModel::BlockData* b = in.record->blocks.get();

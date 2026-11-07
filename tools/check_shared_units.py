@@ -6,7 +6,7 @@ Usage: python -I tools/check_shared_units.py [--json] [--root PATH] [--strict]
                                              [--write-baseline] [--baseline FILE]
 
 Default run: report only, always exits 0. Every hit of a registered shared
-computation (units U1..U12 of doc 62) gets a role:
+computation (units U1..U20 of doc 62) gets a role:
 
   owner               inside the owning unit's folder (counted, not listed)
   declaration         catalogs, manifests, config, diagnostics, comment-only lines
@@ -75,16 +75,16 @@ REGISTRY = [
     {"id": "U6", "name": "histogram_apl",
      "owning_unit": ["src/VP-V/modules/input/source_analysis"],
      "signatures": _c(r"histogram", r"\bAPL\b", r"average[_ ]?picture[_ ]?level"),
-     "allow": _c(r"SourceStats::")},
+     "allow": _c(r"SourceStats::", r"shared/SourceStats\.h")},
     {"id": "U7", "name": "cut_fade_flash_judge",
      "owning_unit": ["src/VP-V/modules/input/source_analysis"],
      "signatures": _c(r"cut[_ ]?(fade|detect|judge)", r"FrameCutJudge",
                       r"fade[_ ]?(detect|judge|gain)", r"scene[_ ]?cut"),
-     "allow": _c(r"CutFadeJudge::")},
+     "allow": _c(r"CutFadeJudge::", r"shared/CutFadeJudge\.h")},
     {"id": "U8", "name": "active_picture_rect",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/picture"],
      "signatures": _c(r"\bPictureArea\b"),
-     "allow": _c(r"vpu_in_picture")},
+     "allow": _c(r"vpu_in_picture", r"vpu_picture_coverage", r"PictureRect::\w+", r"shared/PictureRect\.h")},
     {"id": "U9", "name": "light_level",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/light_level"],
      "signatures": [],
@@ -99,7 +99,18 @@ REGISTRY = [
     {"id": "U12", "name": "source_quality",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/identity"],
      "signatures": _c(r"snap(shot)?\.bitrateQuality", r"\.bitrateQuality.*(strength|allowance|tier)"),
-     "allow": _c(r"SourceQuality::")},
+     "allow": _c(r"SourceQuality::", r"shared/SourceQuality\.h")},
+    # R1-W1-RES (doc 72): U19 TdMapsView, the one read API of td.maps (accessor only: no signatures). U13 CodingEvidence, U14 TrailCompose,
+    # U15 FieldRefine, U16 LightingFit and U18 CodecModel of doc 72 are registered by their owners with their units.
+    {"id": "U19", "name": "td_maps_view",
+     "owning_unit": ["src/VP-V/modules/repair/temporal_detail/shared"],
+     "signatures": [],
+     "allow": _c(r"vpu_td_maps\w*", r"TdMapsView::\w+")},
+    # R1-W1-RES: the basic polyphase chroma upsample (a stand-in for the hybrid CfL + MV chroma of reset 2). U20: U13-U19 are doc 72's.
+    {"id": "U20", "name": "chroma_upsample_polyphase",
+     "owning_unit": ["src/VP-V/modules/scaling/chroma_upscale/basic"],
+     "signatures": _c(r"polyphase", r"\blanczos\w*\s*\(", r"chroma[_ ]?siting"),
+     "allow": _c(r"BasicChroma::\w+")},
 ]
 
 DECLARATION_PATHS = _c(

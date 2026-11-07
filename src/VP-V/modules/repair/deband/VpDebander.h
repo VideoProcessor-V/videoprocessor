@@ -1,5 +1,7 @@
 #pragma once
 
+#include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
+
 #include <libplacebo/renderer.h>
 
 #include <cstdint>
@@ -110,6 +112,10 @@ namespace VpDebander
 		uint64_t HoldSequence() const { return weightSequence; }
 		void SetHoldSequenceForTest(uint64_t sequence) { weightSequence = sequence; }
 		const std::string& LastError() const { return error; }
+		// R1-W1-RES (doc 72 item 2): the debander is the FALLBACK LAYER under temporal detail (order TD -> deband -> CR). Its read path
+		// of td.maps (validity, stability) and coding_evidence: reset 1 = not requested, the debander decides exactly as today
+		// everywhere; a requested engine with a product absent keeps today's deband everywhere and says so (engaged decision).
+		const TdProducts::ReadResult& TemporalDetailRead() const { return tdRead; }
 		unsigned long long Failures() const { return failures; }
 		unsigned long long HeldFrames() const { return held; }
 		static constexpr int kSlotLookAhead = 2;
@@ -130,6 +136,7 @@ namespace VpDebander
 		uint64_t weightSequence = 0;
 		int weightW[PL_MAX_PLANES] = {}, weightH[PL_MAX_PLANES] = {};
 		std::string error;
+		TdProducts::ReadResult tdRead;
 		unsigned long long failures = 0, held = 0;
 	};
 }

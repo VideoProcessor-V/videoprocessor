@@ -4,9 +4,13 @@
 // camera_eval: offline CPU evaluation driver for VP's global camera model (CameraModel::Fitter and the
 // measurement plan / reference matcher). Not part of the solution; see README.md and build_camera_eval.bat.
 //
-//   camera_eval fit   --vec DIR --frames N --w W --h H --block 16 --fps F --out FILE.camf [--csv FILE] [--phase1] [--two-layer [--tl-ring F] [--tl-swap S] [--tl-veto R] [--tl-floor F] [--tl-comp R]]
+//   camera_eval fit   --vec DIR --frames N --w W --h H --block 16 --fps F --out FILE.camf [--csv FILE] [--phase1] [--two-layer [--dyn-texture [--dt-share F] [--dt-temporal F] [--dt-spatial F] [--dt-agree F]] [--tl-ring F] [--tl-swap S] [--tl-veto R] [--tl-floor F] [--tl-comp R]]
 //   camera_eval match --yuv CODED.yuv --w W --h H --bitdepth 10 --frames N --vec DIR --ref DIR --fps F
-//                     [--start 2] [--count 40] [--phase1] --out FILE.csv
+//                     [--start 2] [--count 40] [--phase1] [--dump-flo DIR] --out FILE.csv
+//
+// --dump-flo DIR (match): per judged pair t writes DIR/pair_%06d/pred_off.flo and pred_on.flo, Middlebury .flo, full
+// picture size, source px, frame t-1 -> t (p in t-1 moves to p + flow in t). Block vectors are expanded to pixels
+// (each block covers `block` source px; the border strip beyond the last whole block repeats the edge block).
 //
 // Input flows: DIR/flow_%06d_%06d.npy (float32 LE, C order, shape (gh4, gw4, 2), 4 px grid, ch0 dx, ch1 dy;
 // frame_b(p + F(p)) ~ frame_a(p) for file flow_a_b). For pair t = 1..N-1 the forward field is flow_(t-1)_(t) and
@@ -20,6 +24,7 @@
 //
 // --phase1 restores the phase-1 fitter configuration: inlier-share ramp 0.4/0.9, no temporal noise floor, no
 // verdict gate on the confidence.
+#include <direct.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -123,11 +128,18 @@ static bool ReadPair(const std::string& dir, int t, int gridW, int gridH, int bl
 // Two-layer constant overrides (tuning): ring fraction, swap seconds, border veto ratio, continuity floor, competitor min ratio.
 // A negative entry keeps the Config default.
 static double g_tl[5] = { -1, -1, -1, -1, -1 };
+// Dynamic-texture detector overrides (tuning): minShare, minTemporal, minSpatial, agreeRatio. Negative = Config default.
+static double g_dt[4] = { -1, -1, -1, -1 };
 
-static Config MakeConfig(bool phase1, bool twoLayer = false)
+static Config MakeConfig(bool phase1, bool twoLayer = false, bool dynTexture = false)
 {
 	Config c;
 	c.twoLayer = twoLayer;
+	c.dynTexture = dynTexture;
+	if (g_dt[0] >= 0) c.dynTextureCfg.minShare = g_dt[0];
+	if (g_dt[1] >= 0) c.dynTextureCfg.minTemporal = g_dt[1];
+	if (g_dt[2] >= 0) c.dynTextureCfg.minSpatial = g_dt[2];
+	if (g_dt[3] >= 0) c.dynTextureCfg.agreeRatio = g_dt[3];
 	if (g_tl[0] >= 0) c.borderRingFraction = g_tl[0];
 	if (g_tl[1] >= 0) c.layerSwapSeconds = g_tl[1];
 	if (g_tl[2] >= 0) c.borderVetoRatio = g_tl[2];
@@ -164,10 +176,10 @@ template <class T> static void Put(FILE* fp, T v) { fwrite(&v, sizeof(T), 1, fp)
 
 struct Args
 {
-	std::string mode, vec, ref, yuv, out, csv;
+	std::string mode, vec, ref, yuv, out, csv, dumpFlo;
 	int N = 0, W = 0, H = 0, block = 16, bitdepth = 10, start = 2, count = 40;
 	double fps = 0;
-	bool phase1 = false, twoLayer = false;
+	bool phase1 = false, twoLayer = false, dynTexture = false;
 };
 
 static bool Parse(int argc, char** argv, Args& a)
@@ -183,6 +195,7 @@ static bool Parse(int argc, char** argv, Args& a)
 		else if (s == "--yuv") a.yuv = next();
 		else if (s == "--out") a.out = next();
 		else if (s == "--csv") a.csv = next();
+		else if (s == "--dump-flo") a.dumpFlo = next();
 		else if (s == "--frames") a.N = atoi(next());
 		else if (s == "--w") a.W = atoi(next());
 		else if (s == "--h") a.H = atoi(next());
@@ -193,6 +206,11 @@ static bool Parse(int argc, char** argv, Args& a)
 		else if (s == "--fps") a.fps = atof(next());
 		else if (s == "--phase1") a.phase1 = true;
 		else if (s == "--two-layer") a.twoLayer = true;
+		else if (s == "--dyn-texture") a.dynTexture = true;
+		else if (s == "--dt-share") g_dt[0] = atof(next());
+		else if (s == "--dt-temporal") g_dt[1] = atof(next());
+		else if (s == "--dt-spatial") g_dt[2] = atof(next());
+		else if (s == "--dt-agree") g_dt[3] = atof(next());
 		else if (s == "--tl-ring") g_tl[0] = atof(next());
 		else if (s == "--tl-swap") g_tl[1] = atof(next());
 		else if (s == "--tl-veto") g_tl[2] = atof(next());
@@ -211,13 +229,13 @@ static int RunFit(const Args& a)
 		return 2;
 	}
 	Geometry g; g.W = a.W; g.H = a.H; g.block = a.block; g.fps = a.fps; g.gridW = a.W / a.block; g.gridH = a.H / a.block;
-	Fitter fit(MakeConfig(a.phase1, a.twoLayer));
+	Fitter fit(MakeConfig(a.phase1, a.twoLayer, a.dynTexture));
 	FILE* csv = nullptr;
 	if (!a.csv.empty())
 	{
 		csv = fopen(a.csv.c_str(), "wb");
 		if (!csv) { Fail("cannot write " + a.csv); return 2; }
-		fprintf(csv, "pair,valid,type,reason,confidence,samples,hypotheses,inlierShare,precision,coverage,temporal,conditioning,engineAgreement,inverse,ambiguity,logit,h0,h1,h2,h3,h4,h5,h6,h7,h8,labUnknown,labCamera,labObject,labOverlay,fitUs,layerFlags,layerRisk,border,continuity,haveObject,objId,objBlocks,objH2,objH5\n");
+		fprintf(csv, "pair,valid,type,reason,confidence,samples,hypotheses,inlierShare,precision,coverage,temporal,conditioning,engineAgreement,inverse,ambiguity,logit,h0,h1,h2,h3,h4,h5,h6,h7,h8,labUnknown,labCamera,labObject,labOverlay,fitUs,layerFlags,layerRisk,border,continuity,haveObject,objId,objBlocks,objH2,objH5,dynShare,dynTemporal,dynSpatial,dynField,verdictFlags\n");
 	}
 	struct Rec { int valid, type; double conf, h[9]; std::vector<uint8_t> label; };
 	std::vector<Rec> recs;
@@ -243,8 +261,8 @@ static int RunFit(const Args& a)
 			for (int i = 0; i < 9; ++i) fprintf(csv, ",%.9g", r.h[i]);
 			fprintf(csv, ",%.5f,%.5f,%.5f,%.5f", nl[0] / nb, nl[1] / nb, nl[2] / nb, nl[3] / nb);
 			const ObjectModel& ol = m.objectLayer;
-			fprintf(csv, ",%.1f,%u,%.4f,%.4f,%.4f,%d,%u,%u,%.6g,%.6g\n", fitUs, (unsigned)m.layerFlags, m.layerRisk, s.border, s.continuity,
-				m.haveObjectLayer ? 1 : 0, (unsigned)ol.id, ol.blocks, ol.h[2], ol.h[5]);
+			fprintf(csv, ",%.1f,%u,%.4f,%.4f,%.4f,%d,%u,%u,%.6g,%.6g,%.4f,%.4f,%.4f,%.4f,%u\n", fitUs, (unsigned)m.layerFlags, m.layerRisk, s.border, s.continuity,
+				m.haveObjectLayer ? 1 : 0, (unsigned)ol.id, ol.blocks, ol.h[2], ol.h[5], s.dynShare, s.dynTemporal, s.dynSpatial, s.dynField, (unsigned)m.verdictFlags);
 		}
 	}
 	if (csv) fclose(csv);
@@ -282,6 +300,29 @@ static bool ReadLuma(FILE* fp, int W, int H, int bitdepth, int f, std::vector<fl
 			out[(size_t)j * mw + i] = 0.25f * scale * (float)(y[o] + y[o + 1] + y[o + W] + y[o + W + 1]);
 		}
 	return true;
+}
+
+// Expand block vectors (matcher px) to a dense source-px .flo of the full picture.
+static bool WriteFlo(const std::string& path, const Reference::MatchResult& r, const Geometry& g, double sourceToMatcher)
+{
+	FILE* fp = fopen(path.c_str(), "wb");
+	if (!fp) return Fail("cannot write " + path);
+	const float magic = 202021.25f;
+	const int32_t w = g.W, h = g.H;
+	fwrite(&magic, 4, 1, fp); fwrite(&w, 4, 1, fp); fwrite(&h, 4, 1, fp);
+	std::vector<float> row((size_t)g.W * 2);
+	for (int y = 0; y < g.H; ++y)
+	{
+		const int by = std::min(y / g.block, r.bh - 1);
+		for (int x = 0; x < g.W; ++x)
+		{
+			const int bx = std::min(x / g.block, r.bw - 1);
+			row[(size_t)x * 2] = (float)(r.vx[(size_t)by * r.bw + bx] / sourceToMatcher);
+			row[(size_t)x * 2 + 1] = (float)(r.vy[(size_t)by * r.bw + bx] / sourceToMatcher);
+		}
+		fwrite(row.data(), 4, row.size(), fp);
+	}
+	return fclose(fp) == 0 || Fail("write failed: " + path);
 }
 
 struct EpeStats { int n = 0; double mean = 0, median = 0, gt1 = 0, gt3 = 0; };
@@ -328,6 +369,7 @@ static int RunMatch(const Args& a)
 
 	const int last = std::min(a.N - 1, a.start + a.count - 1);
 	std::vector<float> lumaPrev, lumaCur; int mw = 0, mh = 0;
+	std::vector<int> skippedPairs;   // --dump-flo: pairs where the plan skipped the matcher
 	for (int t = 1; t <= last; ++t)
 	{
 		// The input's causal fit of pair t (frames t-1 -> t); the plan for pair t+1 is built from it.
@@ -360,6 +402,37 @@ static int RunMatch(const Args& a)
 				fclose(out); fclose(yuv);
 				Fail("matcher grid " + std::to_string(off.bw) + "x" + std::to_string(off.bh) + " != fitter grid " + std::to_string(g.gridW) + "x" + std::to_string(g.gridH));
 				return 2;
+			}
+			if (!a.dumpFlo.empty())
+			{
+				char sub[64];
+				snprintf(sub, sizeof sub, "/pair_%06d", t);
+				const std::string d = a.dumpFlo + sub;
+				_mkdir(a.dumpFlo.c_str()); _mkdir(d.c_str());   // one level each; parents must exist
+				// A plan that legitimately skips the matcher leaves pred_on empty: write the plan's seed field for that pair instead
+				// and list the pair in DIR/skipped.txt (the CSV is unchanged).
+				Reference::MatchResult onFlo = on;
+				if (on.skipped)
+				{
+					const size_t nb = (size_t)on.bw * on.bh;
+					const bool haveSeed = plan.seedX.size() == nb && plan.seedY.size() == nb;
+					for (size_t i = 0; i < nb; ++i)
+					{
+						onFlo.vx[i] = haveSeed ? (float)(plan.seedX[i] * mc.sourceToMatcher) : 0.f;
+						onFlo.vy[i] = haveSeed ? (float)(plan.seedY[i] * mc.sourceToMatcher) : 0.f;
+					}
+					skippedPairs.push_back(t);
+					if (FILE* sk = fopen((a.dumpFlo + "/skipped.txt").c_str(), "wb"))
+					{
+						fprintf(sk, "# pairs whose plan skipped the matcher; pred_on.flo holds the plan seed field (zeros if none)
+");
+						for (int sp : skippedPairs) fprintf(sk, "%d
+", sp);
+						fclose(sk);
+					}
+				}
+				if (!WriteFlo(d + "/pred_off.flo", off, g, mc.sourceToMatcher) || !WriteFlo(d + "/pred_on.flo", onFlo, g, mc.sourceToMatcher))
+				{ fclose(out); fclose(yuv); return 2; }
 			}
 			const std::vector<uint8_t> refLab = LabelsOf(refRec, (size_t)g.gridW * g.gridH);
 			int cam = 0; for (uint8_t l : refLab) if (l == 1) ++cam;

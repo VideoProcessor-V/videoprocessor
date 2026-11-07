@@ -4,7 +4,7 @@ Unit: **output** | side: output | order: 260 | status: **built** | hook point: O
 
 ## Purpose / why
 
-Quantise last for the 8-bit FL35 link: temporal sigma-delta (with vectors) or libplacebo dither; 12-bit / DV output paths later.
+Quantise last for output links/displays of limited bit depth (8- or 10-bit): temporal sigma-delta (with vectors) or libplacebo dither; 12-bit / DV output paths later.
 
 ## Contract
 
@@ -156,8 +156,33 @@ Missing input (no grain split, mismatched grid, no precursors, no LUT, unsupport
 
 Cost: the product is the block-grid state, rgba32f, two textures (ping-pong), 2 x blocks x 16 B. The block grid is about 120 x 68 at every size (16 px at 1080, 32 at 2160, 64 at 4320): ~0.26 MB VRAM at 1080p, 4K and 8K alike. Per output pixel: 4 texel fetches + ~10 ALU in the quantiser; the block pass is one thread per block. Not needed / off: no pass, no fetch.
 
-Link noise versus the grain rule: the added dither is judged by its OWN limit, not the +-5 % grain rule: noise vs plain+4 at most 1.40 in shadow blocks where `sigmaOut < 0.35` (the grain is already below the link step, so the "grain" there is quantiser noise) and 1.05 elsewhere (`tools/eval/link_noise.py`); to be confirmed by eye on the FL35.
+Link noise versus the grain rule: the added dither is judged by its OWN limit, not the +-5 % grain rule: noise vs plain+4 at most 1.40 in shadow blocks where `sigmaOut < 0.35` (the grain is already below the link step, so the "grain" there is quantiser noise) and 1.05 elsewhere (`tools/eval/link_noise.py`); to be confirmed by eye on a limited-bit-depth display.
 
 GPU decision and skipped frames: `DitherNeed::StateTracker::Decide(FrameArgs)` takes the reset / off / missing decision (grid, LUT fingerprint, colour depth, aBase, the caller's discontinuity flag, inputs present, needed) from CPU data only; `MapT` (CPU) and `Gpu::BlockPass::Step` (GPU: Decide + input validation of the grain, precursor and LUT textures against the block grid + the pass) use the same tracker. A skipped, missing or failed frame calls `BlockPass::Invalidate()`: `Current()` is null, `HookGuard::Apply` binds nothing and the sigma-delta runs at its base amplitude. Extra `Missing` bits: `kLutSizeMismatch`, `kNoSetTexture` (libplacebo without `pl_mpv_user_shader_set_texture`), `kPassFailed`.
 
-Acceptance note (A2): on HDR passthrough the 2-frame-mean <5 nit geo-mean is 1.025 against the 1.02 gate (prototype 1.011), a marginal miss accepted by the planner pending the owner's FL35 A/B; the per-frame ratio 0.609 passes (gate 0.8).
+Acceptance note (A2): on HDR passthrough the 2-frame-mean <5 nit geo-mean is 1.025 against the 1.02 gate (prototype 1.011), a marginal miss accepted by the planner pending the owner's display A/B; the per-frame ratio 0.609 passes (gate 0.8).
+
+## Output-domain map (K7-1, pure unit, not wired)
+
+`OutputDomainMap.h` maps source-plane points and vectors (P8 model vectors) to output pixels: active picture / crop and the
+output scale, the NLS stretch (the hook's law, inverted by bisection), and the P0 re-base plane (reported, it cancels in the output
+position). Out-of-picture points are flagged. Consumers: the sigma-delta carry reset on camera motion (K7-2) and the debander
+hold (K7-3). Tests: `tests/OutputDomainMapTests.cpp`.
+
+## All settings (complete list)
+
+Config placement: master VP-V page, Output sub-page (`temporal_dither` is the Output tier's key; the others sit under Advanced). "Original (Bill)" = the Original pathway (`core/OriginalPathway.h`).
+
+| Key | Section | Type | Range | Default | Config placement | What Original (Bill) does | Visible fallbacks / status lines | Tier differences |
+|---|---|---|---|---|---|---|---|---|
+| `temporal_dither` | profile (`[vprenderer.<profile>]`) | choice | auto, off, libplacebo, sigma_delta | auto (the shader list decides) | VP-V > Output (Advanced; tier key) | forced `libplacebo` | `Dither: libplacebo (sigma-delta dropped: <reason>)` under Fallbacks engaged | Classic = libplacebo, Low = auto, Mid = sigma_delta |
+| `dithering` | profile | choice | auto, on, off, blue_noise, ordered_lut, ordered_fixed, white_noise, error_diffusion_* | auto | Rendering > Profile details | Bill's own key (libplacebo dither) | none | none |
+| `dither_vectors` | profile | choice | auto, own | auto (the de-judder's vectors) | Rendering > Profile details (proposed retirement) | not forced | none | none |
+| `dither_grain_tolerance_scale` | profile | number | 1..8 (1 = off) | 3 | VP-V > Advanced | not read (no sigma-delta) | none | none |
+| `output_segments_merged` | global | choice | on, off | off | VP-V > Pipeline (expert) | forced off | none | none |
+| `dither_need` (header-only) | profile | choice | off, auto | off | none yet | not built | none | none |
+| `OutputDomainMap` (internal; no key yet, K3 adds `camera_*` keys) | internal | - | - | - | none (internal) | not built | a map that is not valid is the identity on the raster; the consumer keeps today's behaviour | none |
+
+Tiers: Classic libplacebo dither; Low .. Upper sigma-delta.
+
+**Downstream consumers (TEMPORAL DETAIL, docs 71 section Q5 and 72):** per-pair homography (P7/P9), the object layer (per-object motion), P8 per-block membership + confidence, and K4 guided residuals.

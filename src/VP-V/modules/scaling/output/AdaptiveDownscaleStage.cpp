@@ -93,6 +93,9 @@ namespace AdaptiveDownscaleStage
 		adaptiveNow.float32Picture = frame.fboFloat32 != 0;
 #endif
 		state.bitrateWeightScale = 1.0;
+		// R1-W1-RES: read the temporal-detail products (absent in reset 1: nothing changes below; a requested engine with a missing
+		// product shows in StatusLines and keeps the classical bitrate-quality weights that follow).
+		tdRead = TdProducts::ReadToday(TdProducts::Consumer::AdaptiveScaler);
 		if (frame.slotRuns && !frame.lowBitrateOff && (upscaleBlend || frame.ssimBitrateAware))
 		{
 			double reading = 1.0;
@@ -275,6 +278,9 @@ namespace AdaptiveDownscaleStage
 				m == AdaptiveDownscale::MotionState::NoVectors ? "Motion-adapted blend: no vectors on this frame (plain blend)" :
 				"Motion-adapted blend: idle (the blend did not run on the last frame)");
 		}
+		const std::string td = TdProducts::StatusLine(TdProducts::Consumer::AdaptiveScaler, tdRead);
+		if (!td.empty())
+			lines.push_back(td);
 		return lines;
 	}
 

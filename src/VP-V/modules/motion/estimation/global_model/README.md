@@ -23,6 +23,7 @@ texture), and to narrow the matcher's search.
 | `GlobalModelGeometry.h/.cpp` | minimal solvers, weighted LS, invert/compose, decomposition, interpolation, degeneracy tests |
 | `GlobalModelFit.h/.cpp` | `PairInput`, `Config`, `Fitter` (plan section 1 steps 1-11) |
 | `GlobalModelTemporal.h/.cpp` | `TemporalFilter` (prediction + consistency only), `FixedLagSmoother` |
+| `DynamicTexture.h/.cpp` | `DetectDynamicTexture`: water-like whole-frame dynamic-texture detector (`Config::dynTexture`; Ambiguous + `verdictFlags`) |
 | `GlobalModelObjects.h/.cpp` | 1-3 object models with persistent ids (only when `Config::objects`) |
 | `PixelResidualReference.h/.cpp` | CPU reference / shader-mirror spec of the tiny-mover measure (not on the runtime path yet) |
 | `CameraAccessor.h` | per-consumer policy, blend state, `FieldVector` (pure, header-only) |
@@ -242,9 +243,47 @@ the camera layer is the one with the best `support x continuity x border evidenc
   `Signals::border` / `continuity` diagnostics. State (reference, object id, hold count) resets with the fitter, on a cut
   and on a generation reset; a flash leaves it untouched. Evaluation: `tools/camera_eval` (`--two-layer`).
 
+Default stays **off**: `twoLayer` can create new usable verdicts (a foreground-suspect layer becomes the camera), so the
+acceptance bar (no new confident-wrong) is not met; the opus gate rejected the default flip. It is a tuning/evaluation option
+until the keys exist (K3).
+
+## Dynamic-texture detector (R1-GATES)
+`Config::dynTexture` (default **off**; off = state never touched, record byte-identical, whatever `dynTextureCfg` holds).
+Water, foliage and similar textures give block vectors that are valid-looking but different in every pair, so a clean
+anchor set can still make the fit "usable". `DynamicTexture.h/.cpp` takes the share of trusted blocks that disagree with the
+fitted model, the **temporal** incoherence of that disagreeing field against the previous pair's residuals, and the
+**spatial** incoherence between neighbouring disagreeing blocks. When share >= `minShare` (0.5), temporal >= `minTemporal`
+(0.6, only when a previous field exists) and spatial >= `minSpatial` (0.5) the record becomes `Reason::Ambiguous` with
+`verdictFlags |= kVerdictDynamicTexture`, confidence x 0.495 (below 0.5), the status text names a dynamic texture, and the
+pair does not feed the camera prediction. Never usable by a consumer (visible fallback). History resets with the fitter, on a
+cut, on stale input, on a flash and on any **invalid fit**. Defaults are set so that no real pair of the camera_eval clips the
+fitter calls usable is turned Ambiguous. Signals: `dynShare`, `dynTemporal`, `dynSpatial`, `dynField`. Evaluation:
+`camera_eval fit --dyn-texture`.
+
+## Noise-tier metric (camera_eval)
+The real-clip region metric is reported at two error floors: `WRONG@true-cam` (max(1 px, 10 %)) and `>1.5 px@true-cam`
+(max(1.5 px, 10 %), `xcheck_real.NOISE_TIER_PX`). A pair wrong only between 1 and 1.5 px is a near-threshold miss (vector noise
+against a 1 px metric), not a foreground lock; a confident pair beyond 1.5 px is a real error. Acceptance uses both columns.
+See `tools/camera_eval/README.md`.
+
 ## Link layer (K1 / K2 / K4, module side)
 `link/` holds the fit runner (P7 producer, worker thread, readback ring, pool), the P8 producer / fill / per-consumer binding and
 the guided-matching scheduler, governor and `p7g_camera_guide` product. All of it is inert until the H1 adapter registers it; see
 `link/README.md` (wiring table, fill rule, private-history justification). The verdict gate (D-K4) is `CameraModel::ReasonUsable`:
 one set shared by `BlendState::ForcesZero` and the guidance gate (Ok, PostCutSeeded, FlashBridged); Ambiguous, InverseMismatch,
 Degenerate, TooFewSamples and LowConfidence records are published for diagnostics and never used.
+
+## All settings (complete list)
+
+The fitter has no runtime config key yet: `Config` fields are set by the tests and `tools/camera_eval`. K3 adds the `camera_*` keys. Config placement for the keys that exist (`camera_link`, `analysis_lane`): see `control/skeleton/README.md`. "Original (Bill)" = the Original pathway builds no camera link (`camera_link` off).
+
+| Key | Section | Type | Range | Default | Config placement | What Original (Bill) does | Visible fallbacks / status lines | Tier differences |
+|---|---|---|---|---|---|---|---|---|
+| `camera_link` (see `link/README.md`) | `[vpv.skeleton]` | choice | off, report | off | none yet (master VP-V page, Pipeline) | off | `camera_link` entry (cannot report); status line | none |
+| `Config::twoLayer` (internal; no key yet, K3 adds `camera_*` keys) | internal | bool | false, true | false | none (internal) | not built | foreground-suspect records are `Ambiguous` (`ForegroundSuspect`) in the camera status text; never usable | same on every tier |
+| `Config::dynTexture` (internal; no key yet, K3 adds `camera_*` keys) | internal | bool | false, true | false | none (internal) | not built | `Ambiguous` with the dynamic-texture reason text; never usable (visible fallback) | same on every tier |
+| `Config::dynTextureCfg` (minShare, minTemporal, minSpatial, agreeRatio, absSigmas, rel, minBlocks, minCompared) | internal | numbers | 0.5 / 0.6 / 0.5 / 0.5 / 3 / 0.05 / 64 / 48 | as listed | none (internal) | not built | none | none |
+
+Tiers: the fit is cheap CPU work and is not tiered (cost lines `CAMERA_COST`).
+
+**Downstream consumers (TEMPORAL DETAIL, docs 71 section Q5 and 72):** per-pair homography (P7/P9), the object layer (per-object motion), P8 per-block membership + confidence, and K4 guided residuals.
