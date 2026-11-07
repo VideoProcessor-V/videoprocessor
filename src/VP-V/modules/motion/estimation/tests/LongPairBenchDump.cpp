@@ -20,6 +20,10 @@
 #include <string>
 #include <vector>
 #include <windows.h>
+#include <atlbase.h>
+#include <dxgi.h>
+
+#pragma comment(lib, "dxgi.lib")
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -37,6 +41,30 @@ namespace VideoProcessorTest
 		}
 
 		void MakeDir(const std::string& path) { CreateDirectoryA(path.c_str(), nullptr); }
+
+		// The render adapter for the service (SetAdapter is required): the first NVIDIA hardware adapter, else the first hardware one.
+		CComPtr<IDXGIAdapter> HardwareAdapter()
+		{
+			CComPtr<IDXGIFactory1> factory;
+			CComPtr<IDXGIAdapter> first, nvidia;
+			if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
+				return first;
+			CComPtr<IDXGIAdapter1> a;
+			for (UINT i = 0; factory->EnumAdapters1(i, &a) != DXGI_ERROR_NOT_FOUND; ++i, a.Release())
+			{
+				DXGI_ADAPTER_DESC1 d{};
+				a->GetDesc1(&d);
+				if (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+					continue;
+				CComPtr<IDXGIAdapter> base;
+				a->QueryInterface(IID_PPV_ARGS(&base));
+				if (!first)
+					first = base;
+				if (d.VendorId == 0x10DE && !nvidia)
+					nvidia = base;
+			}
+			return nvidia ? nvidia : first;
+		}
 
 		void WriteBin(const std::string& path, const VpLongPair::Field& f)
 		{
@@ -100,6 +128,7 @@ namespace VideoProcessorTest
 				VpLongPair::Config cfg;
 				cfg.useNvof = true;
 				VpLongPair::Service svc(cfg);
+				svc.SetAdapter(HardwareAdapter());
 				VpLongPair::Path last = VpLongPair::Path::None;
 				for (const auto& p : list)
 				{

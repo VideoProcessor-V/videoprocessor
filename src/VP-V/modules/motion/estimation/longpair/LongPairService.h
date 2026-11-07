@@ -64,6 +64,8 @@ namespace VpLongPair
 	struct Stats
 	{
 		uint64_t submitted = 0, refused = 0, done = 0, nvofHinted = 0, nvofUnhinted = 0, seeded = 0, failed = 0;
+		uint64_t stored = 0;    // results published by the worker (async tickets)
+		uint64_t evicted = 0;   // untaken results dropped because more than Config::maxResults were waiting (each counted once)
 	};
 
 	class Service
@@ -74,8 +76,10 @@ namespace VpLongPair
 		Service(const Service&) = delete;
 		Service& operator=(const Service&) = delete;
 
-		// The adapter the render device runs on (the service creates its own device on it); null = system default.
-		// Call before the first submit.
+		// The adapter the render device runs on (the service creates its own device on it). REQUIRED for the NVOF session: until
+		// it is called with a non-null adapter the session refuses to run and every pair takes the visible seeded-search path
+		// ("SetAdapter was not called ..."); there is no default-adapter guess. A different adapter replaces the device and
+		// clears the latch. Call before the first submit (it waits for a pair running on the GPU).
 		void SetAdapter(IDXGIAdapter* adapter);
 
 		// Async: copies the planes and the hint, returns a ticket (> 0), or 0 when refused (bad size / queue full).
@@ -85,7 +89,12 @@ namespace VpLongPair
 		// Synchronous (tests, the bench dump): same path logic on the calling thread.
 		Result RunNow(const uint8_t* lumaA, const uint8_t* lumaB, int w, int h, const HintField* hint);
 
+		// Blocks while a pair is inside the old backend's Run, so the caller may destroy the old backend once this returns.
+		// Never call it from inside ISeededBackend::Run (self-deadlock).
 		void SetBackend(ISeededBackend* backend);
+		// Test seam only: the next device-fault check behaves as if GetDeviceRemovedReason() returned hr (a removed / reset
+		// device), so the release + visible latch path runs on machines without a failing GPU.
+		void InjectDeviceRemovedForTest(long hr);
 		Stats GetStats() const;
 		// The visible-status state of the most recent finished pair.
 		std::string StatusLine() const;
