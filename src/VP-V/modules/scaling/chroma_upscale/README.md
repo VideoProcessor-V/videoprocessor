@@ -82,7 +82,7 @@ An empty rectangle means the whole plane.
 | Item | Id / owner | Fill rule | Consumer fallback when absent |
 |---|---|---|---|
 | luma and chroma grain split | P10 / P10c `grain.split`, one product per plane (`Params::grain`), read through the accessor | lane precompute or first-consumer live fill (the host's node) | the module's own Full split per plane, visible ("grain split (chroma-from-luma)") |
-| scratch temporaries (SA7) | arena scope `kArenaScope` (0x0501), owner `chroma_cfl`, tier T1: 4 x rgba32f + 2 x rg32f at the chroma crop's size (lo, ab, lohi, avg; gc, rho) | requested by `CflModule::ArenaRequests(gpu, rw, rh, pcw, pch, lumaLines, chromaLines, ownSplit)`; acquired per Apply after the own splits' scope has closed | no arena (`Params::arena` null): private textures, byte-identical output; arena short: the frame fails visibly (see below) |
+| scratch temporaries (SA7) | arena scope `kArenaScope` (0x0501), owner `chroma_cfl`, tier T1: 4 x rgba32f + 2 x rg32f at the chroma crop's size (lo, ab, lohi, avg; gc, rho) | requested by `CflModule::ArenaRequests(gpu, rw, rh, pcw, pch, lumaLines, chromaLines, ownSplit)`; acquired per Apply after the own splits' scope has closed | no arena (`Params::arena` null): private textures, byte-identical pixels; arena short: the frame fails visibly (see below) |
 | own split intermediates | `grain_split` T0 requests of `Splitter::ArenaRequests`, one per distinct shape (the three splits run one after the other) | the Splitter's own scope | as above |
 
 Sizes at 4K luma with 4:2:0 chroma (decimal MB, estimates): the six chroma-grid temporaries are 1920 x 1080 x 80 B = 166 MB; the three

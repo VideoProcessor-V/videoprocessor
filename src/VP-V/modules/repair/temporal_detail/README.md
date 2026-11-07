@@ -200,8 +200,8 @@ Declared products and their sizes: see "Declared products" above. What the GPU m
 
 | Item | Id / owner | Fill rule | Consumer fallback when absent |
 |---|---|---|---|
-| grain split | P10 `grain.split` (unit version `GrainSplit::kUnitVersion`), read through `gs_fetch` / `gs_blocks` | lane precompute or first-consumer live fill (the host's node) | the module's own Full split, visible ("grain split (temporal detail)"); its output textures are freed once the shared product has fitted for `kSplitReleaseSeconds` (1 s of content at the measured rate), and re-created, visibly, if it drops out again |
-| scratch temporaries | arena scope `kArenaScope` (0x0401), owner `temporal_detail`, tier T1: 3 x rg32f at the active picture's size (two cleaner accumulators, the transferred delta; 1 without the cleaner) | requested by `Module::ArenaRequests(gpu, w, h, planeLines, templateClean, ownSplit)`; acquired per Apply after the own split's scope has closed | no arena (`Params::arena` null): private textures, byte-identical output; arena short: the frame fails visibly (see below) |
+| grain split | P10 `grain.split` (unit version `GrainSplit::kUnitVersion`), read through `gs_fetch` / `gs_blocks` | lane precompute or first-consumer live fill (the host's node) | the module's own Full split, visible ("grain split (temporal detail)"); its output textures are freed once the shared product has fitted for `kSplitReleaseSeconds` (1 s of content at the measured rate; with an unknown rate the reference rate 23.976 Hz applies, i.e. 24 frames), in both the arena and the private mode, and re-created, visibly, if it drops out again |
+| scratch temporaries | arena scope `kArenaScope` (0x0401), owner `temporal_detail`, tier T1: 3 x rg32f at the active picture's size (two cleaner accumulators, the transferred delta; 1 without the cleaner) | requested by `Module::ArenaRequests(gpu, w, h, planeLines, templateClean, ownSplit)`; acquired per Apply after the own split's scope has closed | no arena (`Params::arena` null): private textures, byte-identical pixels (the own split's output is freed after the 1 s hold in both modes); arena short: the frame fails visibly (see below) |
 | own split intermediates | `grain_split` T0 requests of `Splitter::ArenaRequests` (merged into the list when `ownSplit`) | the Splitter's own scope | as above |
 | previous-frame grain `prevg` | module texture (rg32f, persistent) | written by the recompose pass of every frame | the guard's lag-1 sums are skipped for a frame without it (`TD_LAG` off) |
 
@@ -209,7 +209,7 @@ Sizes at 4K (estimates, decimal MB): the arena temporaries are 3 x 66 = 199 MB p
 arena's (`TextureBytes(..., tempsInArena = true)` is 332 MB smaller than the private form). The arena keeps one pool per texture
 shape sized by its busiest scope, so a temporary only saves memory where another stage uses the same shape in another scope (the
 own split's bands share the grain split producer's; the rg32f picture-size pool has no other user today). The freed own split
-output (16 B per pixel, 133 MB at 4K) is a saving whenever the shared product fits.
+output (16 B per pixel, 133 MB at 4K) is a saving whenever the shared product fits. The 332 MB figure is only real once the host counts the arena plan once in the governor's ledger and drops this module's private share (SA10 / P13 own that accounting); until then the rg32f picture-size pool has no other user and only moves the bytes.
 
 `prevg` stays a module texture. It is not derivable from the shared product: its input half is `Y(N-1) - (base + s1 + s2)(N-1)`
 and needs the previous frame's source luma, and its output half includes this module's own delta of that frame. Moving it to a

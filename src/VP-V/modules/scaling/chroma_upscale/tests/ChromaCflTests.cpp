@@ -1076,6 +1076,19 @@ namespace VideoProcessorTest
 			pl_tex_destroy(gpu, &chroma);
 		}
 
+		TEST_METHOD(ChromaCflArenaGridRequestsMergeEqualShapes)
+		{
+			// SA7: on a backend where the 2-component float format falls back to the 4-component one, the six temporaries have one
+			// shape: one request of 6, not two requests the plan could count as 4 + 2 of different pools. Distinct formats: 4 and 2.
+			const auto same = ChromaUpscale::Gpu::CflModule::GridRequests(VpSkeleton::TexFormat::RGBA32F, VpSkeleton::TexFormat::RGBA32F, 64, 48);
+			Assert::IsTrue(same.size() == 1 && same[0].count == 6, L"equal formats: one request of six");
+			const auto split = ChromaUpscale::Gpu::CflModule::GridRequests(VpSkeleton::TexFormat::RGBA32F, VpSkeleton::TexFormat::RG32F, 64, 48);
+			Assert::IsTrue(split.size() == 2 && split[0].count == 4 && split[1].count == 2, L"distinct formats: 4 + 2");
+			const VpSkeleton::ArenaPlan plan = VpSkeleton::PlanArena(same, VpSkeleton::Tier::T2);
+			Assert::IsTrue(plan.pools.size() == 1 && plan.pools[0].capacity == 6, L"the plan reserves all six");
+			Assert::IsTrue(plan.OwnerCount(ChromaUpscale::Gpu::kArenaScope, ChromaUpscale::Gpu::kArenaOwner, same[0].shape) == 6, L"the owner may hold six");
+		}
+
 		TEST_METHOD(ChromaCflGpuTextureBytesCountsTheArenaTemporaries)
 		{
 			// SA7: with the temporaries in the arena the module's own bytes drop by 16 per luma pixel (the luma split's bands) and 112

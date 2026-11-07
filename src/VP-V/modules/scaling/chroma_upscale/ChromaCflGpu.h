@@ -110,6 +110,11 @@ namespace ChromaUpscale
 			static std::vector<VpSkeleton::ArenaRequest> ArenaRequests(pl_gpu gpu, int rw, int rh, int pcw, int pch, double lumaLines,
 				double chromaLines, bool ownSplit = true);
 
+			// The chroma-grid temporaries' requests alone for the given formats of the 4- and 2-component textures: equal
+			// (scope, owner, shape) requests are merged by SUMMING their counts (they are held at the same time), so a backend where the
+			// 2-component float format falls back to the 4-component one still reserves all six textures.
+			static std::vector<VpSkeleton::ArenaRequest> GridRequests(VpSkeleton::TexFormat t4, VpSkeleton::TexFormat t2, int pcw, int pch);
+
 			// VRAM of the module's textures for a W x H luma plane and a cw x ch chroma plane (bytes; with the three splits').
 			// tempsInArena: the chroma-grid temporaries and the splits' bands are the arena's (counted in its plan, not here):
 			// 16 bytes per luma pixel and 112 per chroma pixel less. The default is the private-texture form, unchanged.

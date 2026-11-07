@@ -21,7 +21,7 @@
 // diagnostics and tests; the render path never needs it).
 //
 // Memory (SA6): the per-frame temporaries (the cleaner's two accumulators and the transferred delta) can come from the
-// shared scratch arena (Params::arena; null = private textures, byte-identical to before). The module's own grain
+// shared scratch arena (Params::arena; null = private textures, byte-identical pixels to before). The module's own grain
 // split (the visible fallback when no shared product fits) takes its intermediates from the same arena and its private
 // output is freed once the shared product has fitted for kSplitReleaseSeconds of content. An arena shortage is never
 // silent: Apply fails for that frame (ScratchShort(), LastError "scratch memory short (...)") and the arena's own
@@ -105,7 +105,8 @@ namespace TemporalDetail
 			bool autoEngaged = false;      // temporal_detail = auto: the host's AutoGate decision (idle = the input, no pass)
 			// SA6: the render thread's scratch arena (the owner thread; BeginFrame per frame is the host's). Non-null: the
 			// cleaner accumulators, the transferred delta and the own split's intermediates come from it (the module
-			// destroys its private copies). Null: private textures, exactly as before.
+			// destroys its private copies). Null: private textures, identical pixels. The own split's output is freed after
+			// kSplitReleaseSeconds of the shared product in BOTH modes.
 			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena = nullptr;
 		};
 

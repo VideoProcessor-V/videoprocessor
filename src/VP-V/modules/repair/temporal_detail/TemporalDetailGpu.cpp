@@ -233,7 +233,7 @@ namespace TemporalDetail
 				// Off: the input itself, no pass; the store is untouched (the model's Off).
 				m_status = "off";
 				m_grainStatus = GrainSplit::GrainStatus::Ring;   // not reading the grain: no fallback to show
-				if (m_impl) { m_impl->lastSet = set; m_impl->haveSet = true; }   // switching on again is a mode change: reset
+				if (m_impl) { m_impl->lastSet = set; m_impl->haveSet = true; m_impl->sharedStreak = 0; }   // switching on again is a mode change: reset
 				result = source;
 				return true;
 			}
@@ -242,7 +242,7 @@ namespace TemporalDetail
 				// auto, idle: the input itself, no pass; the store restarts when it engages again.
 				m_status = "auto: idle";
 				m_grainStatus = GrainSplit::GrainStatus::Ring;
-				if (m_impl) m_impl->haveFrame = false;
+				if (m_impl) { m_impl->haveFrame = false; m_impl->sharedStreak = 0; }
 				result = source;
 				return true;
 			}
@@ -287,6 +287,7 @@ namespace TemporalDetail
 			// A repeat: the last output again, no state advanced.
 			if (m.haveFrame && params.seq == m.prevSeq && w == m.geo.w && h == m.geo.h && r == m.rect && m.out && m.out->params.w == W && m.out->params.h == H)
 			{
+				m.sharedStreak = 0;   // a repeat reads no grain product: the hold restarts
 				pl_frame frame = source;
 				frame.planes[0].texture = m.out;
 				result = frame;
@@ -319,6 +320,7 @@ namespace TemporalDetail
 				++m_failures;
 				m.haveFrame = false;   // the next frame restarts
 				m.havePrevG = false;
+				m.sharedStreak = 0;
 				return false;
 			};
 
@@ -400,6 +402,8 @@ namespace TemporalDetail
 				// The shared product is read: once it has fitted for a while the own split's output textures are not needed (a product
 				// that drops out again costs one re-creation, visible as the own-split fallback it is).
 				m.sharedStreak = (std::min)(m.sharedStreak + 1, 1 << 30);
+				// hz = the measured content rate; unknown (<= 0) it is kReferenceHz (23.976), so the hold is then 24 frames, not 1 s of real time.
+				// Released in both modes (arena or not): only the pixels are byte-identical between them.
 				if (m.sharedStreak >= Frames(kSplitReleaseSeconds, hz)) m.split.Release(gpu);
 			}
 			else

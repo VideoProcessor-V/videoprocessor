@@ -300,6 +300,31 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			return b;
 		}
 
+		std::vector<VpSkeleton::ArenaRequest> CflModule::GridRequests(VpSkeleton::TexFormat t4, VpSkeleton::TexFormat t2, int pcw, int pch)
+		{
+			std::vector<VpSkeleton::ArenaRequest> r;
+			auto add = [&](VpSkeleton::TexFormat f, int count) {
+				VpSkeleton::ArenaRequest q;
+				q.scope = kArenaScope;
+				q.owner = kArenaOwner;
+				q.tier = VpSkeleton::Tier::T1;
+				q.shape.w = static_cast<uint32_t>(pcw);
+				q.shape.h = static_cast<uint32_t>(pch);
+				q.shape.fmt = f;
+				q.count = static_cast<uint8_t>(count);
+				for (VpSkeleton::ArenaRequest& have : r)
+					if (have.shape == q.shape)   // same scope and owner by construction: held together, so the counts add
+					{
+						have.count = static_cast<uint8_t>(have.count + count);
+						return;
+					}
+				r.push_back(q);
+			};
+			add(t4, 4);   // lo, ab, lohi, avg
+			add(t2, 2);   // gc, rho
+			return r;
+		}
+
 		std::vector<VpSkeleton::ArenaRequest> CflModule::ArenaRequests(pl_gpu gpu, int rw, int rh, int pcw, int pch, double lumaLines,
 			double chromaLines, bool ownSplit)
 		{
@@ -308,19 +333,7 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			if (!gpu || rw < 1 || rh < 1 || pcw < 1 || pch < 1 ||
 				!VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 4), &t4) || !VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 2), &t2))
 				return r;
-			auto add = [&](VpSkeleton::TexFormat f, uint8_t count) {
-				VpSkeleton::ArenaRequest q;
-				q.scope = kArenaScope;
-				q.owner = kArenaOwner;
-				q.tier = VpSkeleton::Tier::T1;
-				q.shape.w = static_cast<uint32_t>(pcw);
-				q.shape.h = static_cast<uint32_t>(pch);
-				q.shape.fmt = f;
-				q.count = count;
-				r.push_back(q);
-			};
-			add(t4, 4);   // lo, ab, lohi, avg
-			add(t2, 2);   // gc, rho
+			r = GridRequests(t4, t2, pcw, pch);
 			if (ownSplit)
 			{
 				// The three splits run one after the other, each in its own scope: one request per distinct shape is enough.
