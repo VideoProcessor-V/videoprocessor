@@ -163,7 +163,10 @@ namespace Vpv
 						{
 							// P12(N) needs P12(N-1) (the one-pole state): readable in the ring or live, else Begin says no.
 							const AnalysisLane* l = &lane;
-							job12->SetBeginGate([l](const VpSkeleton::LaneJobContext& job) {
+							SkeletonGpuDispatcher* disp = wiring.dispatcher;
+							job12->SetBeginGate([l, disp](const VpSkeleton::LaneJobContext& job) {
+								if (!disp->Available(VpSkeleton::kP12LightLevel))
+									return false;   // refused / not allocated yet: declined, shown by the dispatcher's own entry
 								return VpLaneProducts::LightLevelBeginGate(job.seq, [l](uint64_t s) {
 									switch (l->ReadOf(VpSkeleton::kP12LightLevel, s).state)
 									{
@@ -211,6 +214,9 @@ namespace Vpv
 				};
 				slot.reset(new VpLaneProducts::GpuComputeLaneJob(VpLaneProducts::GpuComputeLaneJob::FixedStepsTag(), id, disp,
 					std::move(predicted), steps));
+				// A product the dispatcher could not allocate (refused: shown) or has not allocated yet declines its lane job
+				// instead of failing every chunk (P12 adds its own gate below).
+				slot->SetBeginGate([disp, id](const VpSkeleton::LaneJobContext&) { return disp->Available(id); });
 				lane.RegisterProducer(slot.get());
 			}
 
@@ -353,12 +359,15 @@ namespace Vpv
 			}
 
 			// Destroys the GPU dispatcher (and everything it allocated). The bundle (whose lane and jobs point at it) goes first.
-			void ReleaseDispatcher(HostState& st)
+			void ReleaseDispatcher(HostState& st, bool gpuAlive = true)
 			{
 				if (!st.dispatcher)
 					return;
 				StopBundle(st);
-				st.dispatcher->Release();
+				if (gpuAlive)
+					st.dispatcher->Release();
+				else
+					st.dispatcher->Abandon();   // the renderer's device died without GpuReleased: no libplacebo call may touch it
 				st.dispatcher.reset();
 				st.dispatcherGpu = nullptr;
 			}
@@ -377,7 +386,7 @@ namespace Vpv
 				}
 				if (st.dispatcher && st.dispatcherGpu == st.gpu && st.dispatcherStorage == storage)
 					return;
-				ReleaseDispatcher(st);
+				ReleaseDispatcher(st, st.dispatcherGpu == st.gpu);   // another pl_gpu: the old device is gone
 				std::unique_ptr<SkeletonGpuDispatcher> d(new SkeletonGpuDispatcher(st.gpu));
 				DispatchersCreated().fetch_add(1, std::memory_order_relaxed);
 				if (!d->Valid())
@@ -404,7 +413,7 @@ namespace Vpv
 			std::vector<std::shared_ptr<HostState>> all;
 			hosts_.ForEach([&all](const void*, const std::shared_ptr<HostState>& st) { all.push_back(st); });
 			for (const std::shared_ptr<HostState>& st : all)
-				Teardown(st, false);
+				Teardown(st, false, false);   // process end: the render device may already be gone
 		}
 
 		// ---- diagnostics --------------------------------------------------------------------------
@@ -483,7 +492,7 @@ namespace Vpv
 			{
 				// A new renderer at the address of one that died without GpuReleased (a failed device create):
 				// the old state's seal hooks, tap and lane belong to the dead one.
-				Teardown(st, false);
+				Teardown(st, false, false);   // the dead renderer's device objects are not ours to destroy
 				hosts_.Remove(host, false);
 				st.reset();
 			}
@@ -567,7 +576,7 @@ namespace Vpv
 			Refresh(*st);
 		}
 
-		void SkeletonModule::Teardown(const std::shared_ptr<HostState>& st, bool releaseSlot)
+		void SkeletonModule::Teardown(const std::shared_ptr<HostState>& st, bool releaseSlot, bool gpuAlive)
 		{
 			if (!st)
 				return;
@@ -580,7 +589,7 @@ namespace Vpv
 				st->tapOn = false;
 			}
 			StopBundle(*st);
-			ReleaseDispatcher(*st);   // 70b G5: the GPU textures go with the lane (GpuReleased / switched off)
+			ReleaseDispatcher(*st, gpuAlive);   // 70b G5: the GPU textures go with the lane (GpuReleased / switched off)
 			{
 				std::lock_guard<std::mutex> lock(st->pendingMutex);
 				st->pending.clear();
@@ -710,6 +719,8 @@ namespace Vpv
 				st.gpuMemoryGen = st.settingsGen.load(std::memory_order_relaxed);
 			}
 			wiring.dispatcher = st.gpuMemoryNote.empty() ? st.dispatcher.get() : nullptr;
+			if (st.dispatcher && wiring.dispatcher == nullptr)
+				st.dispatcher->SetLane(nullptr);   // the old lane is about to be replaced: no dangling pointer
 			wiring.gapAhead = wiring.dispatcher != nullptr && st.settings.gpuGap == GpuGapMode::AfterRender;
 			wiring.compactGrain = wiring.dispatcher != nullptr && st.dispatcherCompact;
 			const std::shared_ptr<Bundle> current = std::atomic_load(&st.bundle);
@@ -757,8 +768,11 @@ namespace Vpv
 				// declarations the governor plans: count it as used, and refuse the GPU products when it alone does not fit.
 				if (wiring.dispatcher != nullptr)
 				{
-					const uint64_t priv = wiring.dispatcher->PrivateBytes(dims, wiring.gapAhead);
-					if (known && priv > card.FreeVram())
+					// Counted only while the dispatcher holds nothing yet: afterwards the device query (CurrentUsage) already
+					// includes the textures it allocated, and counting them again would shed more than needed.
+					const bool held = wiring.dispatcher->HoldsVideoMemory();
+					const uint64_t priv = held ? 0 : wiring.dispatcher->PrivateBytes(dims, wiring.gapAhead);
+					if (known && !held && priv > card.FreeVram())
 					{
 						st.gpuMemoryNote = "GPU products not made: private working memory " + std::to_string(priv >> 20) +
 							" MiB exceeds the free video memory " + std::to_string(card.FreeVram() >> 20) + " MiB (" +
@@ -811,7 +825,7 @@ namespace Vpv
 			if (!b)
 				return;
 			const uint64_t seq = static_cast<uint64_t>(seqIn);
-			if (st.dispatcher && b->wiring.dispatcher == st.dispatcher.get())
+			if (st.dispatcher && b->wiring.dispatcher == st.dispatcher.get() && st.gpuMemoryNote.empty())
 			{
 				// GPU-legal (before the flush and the gap): destroy what a size / graph change queued, then (re)allocate the
 				// product textures for the lane's current graph (a no-op while nothing changed). Never at Begin (no render
@@ -820,6 +834,11 @@ namespace Vpv
 				if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
 					if (ls->graph.valid)
 						st.dispatcher->Configure(ls->graph, b->registry, ls->plan, b->dims, b->configuredGen);
+			}
+			else if (st.dispatcher && !st.gpuMemoryNote.empty() && st.dispatcher->HoldsVideoMemory())
+			{
+				// The memory refusal took effect after the frame that already allocated: give it all back now (GPU-legal).
+				st.dispatcher->Release();
 			}
 			if (st.periodMs > 0.0)
 			{

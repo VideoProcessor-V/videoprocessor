@@ -384,14 +384,14 @@ if (p.x < GS_W && p.y < GS_H) {
 			case 0:
 			{
 				const pl_shader_desc d[2] = { Sampled("src", plane), VpvGpu::Storage("rows_out", r.rows) };
-				if (!Pass(dispatch, "VideoProcessor grain split: rows", txt.geo + txt.weights + txt.yread, GH_BODY, d, 2, nullptr, 0, gx, gy, 0))
+				if (!Pass(dispatch, "VideoProcessor grain split: rows", txt.geo + txt.weights + txt.yread, GH_BODY, d, 2, nullptr, 0, gx, gy, 0, 16, 16, options.timer))
 					return fail("grain split: rows pass failed");
 				break;
 			}
 			case 1:
 			{
 				const pl_shader_desc d[2] = { Sampled("rows", r.rows), VpvGpu::Storage("bands_out", r.bands) };
-				if (!Pass(dispatch, "VideoProcessor grain split: columns", txt.geo + txt.weights, GV_BODY, d, 2, nullptr, 0, gx, gy, 0))
+				if (!Pass(dispatch, "VideoProcessor grain split: columns", txt.geo + txt.weights, GV_BODY, d, 2, nullptr, 0, gx, gy, 0, 16, 16, options.timer))
 					return fail("grain split: columns pass failed");
 				break;
 			}
@@ -399,14 +399,14 @@ if (p.x < GS_W && p.y < GS_H) {
 			{
 				const std::string hdr = txt.geo + DefineInt("GS_SUB", params.subBlocks) + DefineInt("GS_QUIET", params.quietSubBlocks) + Define("GS_CAL", params.grainCal);
 				const pl_shader_desc d[2] = { Sampled("bands", r.bands), VpvGpu::Storage("quiet_out", r.quiet) };
-				if (!Pass(dispatch, "VideoProcessor grain split: grain level", hdr, compact ? QUIET_BODY_COMPACT : QUIET_BODY, d, 2, nullptr, 0, bgx, bgy, 0))
+				if (!Pass(dispatch, "VideoProcessor grain split: grain level", hdr, compact ? QUIET_BODY_COMPACT : QUIET_BODY, d, 2, nullptr, 0, bgx, bgy, 0, 16, 16, options.timer))
 					return fail("grain split: grain level pass failed");
 				break;
 			}
 			case 3:
 			{
 				const pl_shader_desc d[2] = { Sampled("quiet", r.quiet), VpvGpu::Storage("blocks_out", r.blocks) };
-				if (!Pass(dispatch, "VideoProcessor grain split: neighbourhood minimum", txt.geo + DefineInt("GS_NG", params.neighbourhood), compact ? NMIN_BODY_COMPACT : NMIN_BODY, d, 2, nullptr, 0, bgx, bgy, 0))
+				if (!Pass(dispatch, "VideoProcessor grain split: neighbourhood minimum", txt.geo + DefineInt("GS_NG", params.neighbourhood), compact ? NMIN_BODY_COMPACT : NMIN_BODY, d, 2, nullptr, 0, bgx, bgy, 0, 16, 16, options.timer))
 					return fail("grain split: minimum pass failed");
 				break;
 			}
@@ -416,7 +416,7 @@ if (p.x < GS_W && p.y < GS_H) {
 				{
 					const std::string hdr = txt.geo + Define("GS_KAPPA", params.kappa) + Define("GS_FLOOR", params.energyFloor) + DefineInt("GS_COMPACT", 1) + Define("GS_CU", codeUnit);
 					const pl_shader_desc d[4] = { Sampled("bands", r.bands), Sampled("blocks", r.blocks), VpvGpu::Storage("split_a", r.outA), VpvGpu::Storage("split_b", r.outB) };
-					if (!Pass(dispatch, "VideoProcessor grain split: Wiener share (compact)", hdr, F_BODY_COMPACT, d, 4, nullptr, 0, gx, gy, 0))
+					if (!Pass(dispatch, "VideoProcessor grain split: Wiener share (compact)", hdr, F_BODY_COMPACT, d, 4, nullptr, 0, gx, gy, 0, 16, 16, options.timer))
 						return fail("grain split: Wiener pass failed");
 					m_out.split = r.outA;
 					m_out.splitB = r.outB;
@@ -425,7 +425,7 @@ if (p.x < GS_W && p.y < GS_H) {
 				{
 					const std::string hdr = txt.geo + Define("GS_KAPPA", params.kappa) + Define("GS_FLOOR", params.energyFloor);
 					const pl_shader_desc d[3] = { Sampled("bands", r.bands), Sampled("blocks", r.blocks), VpvGpu::Storage("split_out", r.rows) };
-					if (!Pass(dispatch, "VideoProcessor grain split: Wiener share", hdr, F_BODY, d, 3, nullptr, 0, gx, gy, 0))
+					if (!Pass(dispatch, "VideoProcessor grain split: Wiener share", hdr, F_BODY, d, 3, nullptr, 0, gx, gy, 0, 16, 16, options.timer))
 						return fail("grain split: Wiener pass failed");
 					m_out.split = r.rows;
 					m_out.splitB = nullptr;

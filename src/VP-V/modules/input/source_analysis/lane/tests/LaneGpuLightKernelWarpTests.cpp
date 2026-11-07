@@ -204,7 +204,7 @@ namespace VideoProcessorTest
 					e.grant = Grant::Lane;
 					plan.entries.push_back(e);
 				}
-				Assert::IsTrue(disp->Configure(graph, reg, plan, dims), L"configure");
+				{ const bool cfgOk = disp->Configure(graph, reg, plan, dims); std::string why = disp->LastError(); for (const FallbackCatalog::Decision& fd : disp->Fallbacks()) if (fd.engaged) why += " | " + fd.id + ": " + fd.reason; Assert::IsTrue(cfgOk, (L"configure: " + std::wstring(why.begin(), why.end())).c_str()); }
 				grid = RE::MakeGrid(kW, kH, RE::BlockSizeFor(kH));
 				pic.left = 0;
 				pic.top = 96;
@@ -583,7 +583,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(why.empty(), L"no reason when allowed");
 
 			const struct { LightPrevState s; bool ok; } table[] = { { LightPrevState::Ring, true }, { LightPrevState::Live, true },
-				{ LightPrevState::None, false }, { LightPrevState::Pending, false }, { LightPrevState::Failed, false } };
+				{ LightPrevState::None, true }, { LightPrevState::Pending, false }, { LightPrevState::Failed, true } };
 			for (const auto& t : table)
 			{
 				answer = t.s;
@@ -599,15 +599,14 @@ namespace VideoProcessorTest
 				L"readable states");
 		}
 
-		// (e) The pass GLSL is pinned (FNV-1a 64 over header, newline, body). 0 = not yet pinned: the integrator fills it after
-		// the first run (the value is logged).
+		// (e) The pass GLSL is pinned (FNV-1a 64 over header, newline, body). pinned from the first WARP run; re-pin deliberately
+		// (the value is logged).
 		BEGIN_TEST_METHOD_ATTRIBUTE(PassFingerprintIsPinned)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(PassFingerprintIsPinned)
 		{
-			// integrator fills after first run
-			constexpr uint64_t kPinned = 0ull;
+			constexpr uint64_t kPinned = 0x4A15A7D450CAEE18ull;
 			const uint64_t fp = LightLevelKernel::PassFingerprint();
 			char msg[120];
 			snprintf(msg, sizeof(msg), "P12_KERNEL_FINGERPRINT 0x%016llXull\n", static_cast<unsigned long long>(fp));

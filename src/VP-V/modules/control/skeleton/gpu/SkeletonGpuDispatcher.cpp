@@ -189,6 +189,39 @@ namespace Vpv
 			return it == m_products.end() ? nullptr : it->second.tex.get();
 		}
 
+		bool SkeletonGpuDispatcher::Available(ProductId id) const
+		{
+			const auto it = m_products.find(id);
+			return it != m_products.end() && it->second.tex != nullptr;
+		}
+
+		bool SkeletonGpuDispatcher::HoldsVideoMemory() const
+		{
+			if (AllocatedBytes() != 0)
+				return true;
+			for (const Tap& t : m_taps)
+				if (t.tap != nullptr || t.extended != nullptr)
+					return true;
+			return false;
+		}
+
+		void SkeletonGpuDispatcher::Abandon()
+		{
+			// The renderer's device is gone: nothing may be handed to libplacebo any more (its objects died with it).
+			m_gpu = nullptr;
+			m_backend.gpu = nullptr;
+			m_dispatch = nullptr;
+			m_lane = nullptr;
+			for (Tap& t : m_taps)
+			{
+				t.tap = nullptr;
+				t.extended = nullptr;
+				t.used = false;
+			}
+			for (auto& kv : m_products)
+				kv.second.timer = nullptr;
+		}
+
 		uint64_t SkeletonGpuDispatcher::AllocatedBytes() const
 		{
 			uint64_t b = 0;
@@ -368,6 +401,13 @@ namespace Vpv
 				Tap* t = TapFor(job.seq, chunk == 0);
 				if (!t)
 					return Fail("the tap plane is missing (evicted or not created)");
+				if (chunk == 0)
+				{
+					// A new job for this seq (a graph swap hands an unfinished job to the next runner, possibly for the same
+					// frame): the tap's upload progress restarts with it.
+					t->bands = 0;
+					t->extendedDone = false;
+				}
 				if (chunk < bands)
 				{
 					if (t->bands != chunk)

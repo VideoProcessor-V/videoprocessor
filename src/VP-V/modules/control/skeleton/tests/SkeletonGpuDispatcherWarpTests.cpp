@@ -284,7 +284,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(disp.Valid(), L"own dispatch on the renderer's gpu");
 			disp.AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel>(new CopyKernel()));
 			Setup s(Dims{ 128, 64 });
-			Assert::IsTrue(disp.Configure(s.graph, s.reg, s.plan, s.dims), L"configure");
+			{ const bool cfgOk = disp.Configure(s.graph, s.reg, s.plan, s.dims); std::string why = disp.LastError(); for (const FallbackCatalog::Decision& fd : disp.Fallbacks()) if (fd.engaged) why += " | " + fd.id + ": " + fd.reason; Assert::IsTrue(cfgOk, (L"configure: " + std::wstring(why.begin(), why.end())).c_str()); }
 			const Node& n = s.P10();
 			const uint64_t declared = uint64_t(n.ring + n.livePool) * BytesOf(s.reg.Get(kP10GrainSplit).size, s.dims);
 			Assert::IsTrue(disp.AllocatedBytes() == declared && declared > 0, L"allocated = declared (ring + live)");
@@ -315,7 +315,7 @@ namespace VideoProcessorTest
 			disp.AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel>(kernel));
 			const Dims d{ 1024, 2100 };   // two tap bands (4 MB each)
 			Setup s(d);
-			Assert::IsTrue(disp.Configure(s.graph, s.reg, s.plan, d), L"configure");
+			{ const bool cfgOk = disp.Configure(s.graph, s.reg, s.plan, d); std::string why = disp.LastError(); for (const FallbackCatalog::Decision& fd : disp.Fallbacks()) if (fd.engaged) why += " | " + fd.id + ": " + fd.reason; Assert::IsTrue(cfgOk, (L"configure: " + std::wstring(why.begin(), why.end())).c_str()); }
 			const std::vector<uint16_t> codes = Codes(int(d.width), int(d.height), 99u);
 			const SourceFrameView view = ViewOf(codes, int(d.width), int(d.height), 7);
 			const Node& n = s.P10();

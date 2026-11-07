@@ -93,7 +93,7 @@ namespace VpvGpu
 	// One compute dispatch. group: the workgroup edge (gx x gy threads), groups: the grid.
 	inline bool Pass(pl_dispatch dispatch, const char* description, const std::string& header, const char* body,
 		const pl_shader_desc* desc, int numDesc, const pl_shader_var* vars, int numVars, int groupsX, int groupsY,
-		size_t shmem, int groupW = 16, int groupH = 16)
+		size_t shmem, int groupW = 16, int groupH = 16, pl_timer timer = nullptr)
 	{
 		pl_custom_shader custom{};
 		custom.description = description;
@@ -120,6 +120,7 @@ namespace VpvGpu
 		compute.dispatch_size[0] = (std::max)(1, groupsX);
 		compute.dispatch_size[1] = (std::max)(1, groupsY);
 		compute.dispatch_size[2] = 1;
+		compute.timer = timer;
 		return pl_dispatch_compute(dispatch, &compute);
 	}
 

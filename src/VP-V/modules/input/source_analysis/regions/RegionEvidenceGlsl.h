@@ -114,6 +114,8 @@ float re_visibility_mean(float code)
 		const size_t at = s.find(from);
 		if (at != std::string::npos)
 			s.replace(at, std::char_traits<char>::length(from), to);
+		else
+			s += "\n#error tap variant replacement text not found (the reference GLSL changed)\n";   // visible: the pass fails to build
 		return s;
 	}
 

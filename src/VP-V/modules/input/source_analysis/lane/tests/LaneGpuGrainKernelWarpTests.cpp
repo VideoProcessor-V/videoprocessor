@@ -215,9 +215,9 @@ namespace VideoProcessorTest
 			SkeletonGpuDispatcher disp(gpu, true);
 			VpLaneProducts::GrainSplitKernel* kernel = new VpLaneProducts::GrainSplitKernel();
 			disp.AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel>(kernel));
-			const Dims d{ 160, 96 };
+			const Dims d{ 320, 768 };
 			Setup s(d);
-			Assert::IsTrue(disp.Configure(s.graph, s.reg, s.plan, d), L"configure");
+			{ const bool cfgOk = disp.Configure(s.graph, s.reg, s.plan, d); std::string why = disp.LastError(); for (const FallbackCatalog::Decision& fd : disp.Fallbacks()) if (fd.engaged) why += " | " + fd.id + ": " + fd.reason; Assert::IsTrue(cfgOk, (L"configure: " + std::wstring(why.begin(), why.end())).c_str()); }
 			const std::vector<uint16_t> codes = Codes(int(d.width), int(d.height), 77u);
 			const SourceFrameView view = ViewOf(codes, int(d.width), int(d.height), 7);
 			const Node& n = s.P10();

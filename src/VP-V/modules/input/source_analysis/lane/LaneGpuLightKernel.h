@@ -35,11 +35,14 @@
 namespace VpLaneProducts
 {
 	// ---- the P12 begin gate (70b section 3) ---------------------------------------------------------------------------
-	// Lane P12(N) runs only after P12(N-1) is readable (it is the one-pole state). The integrator maps
-	// AnalysisLane::ProductRead::State onto this enum: Ring and Live are readable; None, Pending and Failed are not.
+	// Lane P12(N) waits while P12(N-1) is genuinely in progress (it is the one-pole state): Pending. Ring and Live are readable;
+	// None (never made / shed) and Failed will not become readable by waiting, so P12(N) starts without a previous frame and the
+	// kernel resets the one-pole (ll_reset = 1, shown as light_level_smoothing). The integrator maps AnalysisLane::ProductRead::State onto this enum.
 	enum class LightPrevState : uint8_t { None, Pending, Failed, Ring, Live };
 
 	inline bool LightPrevReadable(LightPrevState s) { return s == LightPrevState::Ring || s == LightPrevState::Live; }
+	// Only a previous frame still in progress holds the next one back.
+	inline bool LightPrevWorthWaitingFor(LightPrevState s) { return s == LightPrevState::Pending; }
 
 	// True = P12(seq) may start. The first frame (seq 0: no previous) is always allowed (the kernel resets). `stateOf(seq - 1)`
 	// is the read state of P12(seq - 1) (the integrator's ReadOf call, render thread). `why` (optional) gets the reason text
@@ -48,7 +51,7 @@ namespace VpLaneProducts
 	{
 		if (seq == 0)
 			return true;
-		if (!stateOf || LightPrevReadable(stateOf(seq - 1)))
+		if (!stateOf || !LightPrevWorthWaitingFor(stateOf(seq - 1)))
 			return true;
 		if (why != nullptr)
 			*why = "waits for P12(N-1)";

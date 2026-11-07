@@ -51,6 +51,7 @@ namespace VpLaneProducts
 		opt.storage = choice.storage;
 		opt.arena = nullptr;
 		opt.seq = c.seq;
+		opt.timer = c.timer;
 		opt.targets.split = c.out[0];
 		if (compact)
 		{

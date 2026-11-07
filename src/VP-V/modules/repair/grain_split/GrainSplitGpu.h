@@ -139,6 +139,7 @@ namespace GrainSplit
 			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena = nullptr;   // intermediates; null = private textures
 			Targets targets;
 			uint64_t seq = 0;   // the source frame this split is for: stamped into Frame::seq
+			pl_timer timer = nullptr;   // optional: device time of every pass (the skeleton dispatcher's cost measurement)
 		};
 
 		class Splitter

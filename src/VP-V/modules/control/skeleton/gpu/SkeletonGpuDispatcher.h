@@ -84,6 +84,12 @@ namespace Vpv
 			const VpLaneProducts::GpuProductTextures* TexturesOf(VpSkeleton::ProductId id) const;
 			pl_tex TapOf(uint64_t seq, bool extended) const;
 			uint64_t AllocatedBytes() const;
+			// The product has textures (false while refused or not yet configured: the lane job declines, the readers fall back).
+			bool Available(VpSkeleton::ProductId id) const;
+			// Any product or tap texture is allocated now (the video-memory query then already counts it).
+			bool HoldsVideoMemory() const;
+			// The renderer's device died without GpuReleased: forget every device object WITHOUT calling libplacebo.
+			void Abandon();
 			// Video memory the dispatcher holds OUTSIDE the product textures (the governor does not see it): the tap ring
 			// (tap + extended plane, R16, per in-flight frame) and the kernels' working textures. Analytic (no allocation).
 			uint64_t PrivateBytes(VpSkeleton::Dims dims, bool laneForm) const;

@@ -678,7 +678,7 @@ namespace SkeletonModuleTestsNs
 			Assert::AreEqual(before, SkeletonModule::GpuDispatchersCreated());
 			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
 			Assert::IsTrue(Has(fb, "skeleton_gpu_shadow: shadow: GPU products skipped"));
-			Assert::IsFalse(Has(fb, "no render device"), L"shadow is its own reason");
+			{ std::string all; for (const std::string& l : fb) all += l + " || "; Assert::IsFalse(Has(fb, "no render device"), (L"shadow is its own reason: " + std::wstring(all.begin(), all.end())).c_str()); }
 		}
 
 		TEST_METHOD(AnInvalidGpuKeyIsShownWhileTheLaneRuns)

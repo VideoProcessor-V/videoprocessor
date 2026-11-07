@@ -156,7 +156,7 @@ namespace VpLaneProducts
 			VpvGpu::Storage("re_s0", c.out[0]), VpvGpu::Storage("re_s1", c.out[1]), VpvGpu::Storage("re_s2", c.out[2]),
 			VpvGpu::Storage("re_s3", c.out[3]), VpvGpu::Storage("re_s4", c.out[4]), VpvGpu::Storage("re_s5", c.out[5]) };
 		if (!VpvGpu::Pass(c.dispatch, "VideoProcessor P11 region block statistics", m_header, m_body.c_str(), desc, 8, vars, 8,
-				(g.gw + 7) / 8, (g.gh + 7) / 8, 0, 8, 8))
+				(g.gw + 7) / 8, (g.gh + 7) / 8, 0, 8, 8, c.timer))
 			return Fail(c, "P11: the stats pass failed to build or dispatch");
 		return true;
 	}

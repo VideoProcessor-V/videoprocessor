@@ -81,7 +81,7 @@ namespace Vpv
 
 		private:
 			void Reconcile(const void* host, int originalFlag);
-			void Teardown(const std::shared_ptr<HostState>& st, bool releaseSlot);
+			void Teardown(const std::shared_ptr<HostState>& st, bool releaseSlot, bool gpuAlive = true);
 			void Begin(HostState& st, int64_t seq);
 			void AfterRender(HostState& st, int64_t seq);
 			void Refresh(HostState& st);

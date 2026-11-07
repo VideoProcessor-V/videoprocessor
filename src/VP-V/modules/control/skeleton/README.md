@@ -121,6 +121,11 @@ longer saves memory; its advantage returns only if the lane and live forms could
 (live-only) the lane Splitter is never run, so only the live set stays: Compact about 0.37 GB, Full about 0.30 GB. If the private memory alone exceeds the
 free video memory the GPU products are not wired at all (`skeleton_gpu_memory`; the lane's CPU products continue).
 
+**Small frames (known limit).** The block-grid terms of P10 / P11 / P12 are declared at the 16 px upper bound (shift 4), but `RegionEvidence::BlockSizeFor`
+is 8 px for frame heights of about 763 lines and below, so the kernels' layout (bw x bh at B = 8) is larger than the declaration and `ProductTextures` refuses it
+(`layout does not match the declaration`, shown by the dispatcher's own entry). The lane jobs then decline (`Available(id)` gate) instead of failing every chunk,
+and the readers keep their own computation. Lifting it needs a shift-3 declaration (a declaration and unit-version change owned by the product catalog).
+
 ## Tests
 
 CPU only (no GPU): classes `SkeletonSettingsTests` (incl. `skeleton_gpu_gap` / `grain_split_storage` parsing and invalid-value problems),

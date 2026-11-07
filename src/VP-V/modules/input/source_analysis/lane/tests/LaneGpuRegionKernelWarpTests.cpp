@@ -220,7 +220,7 @@ namespace VideoProcessorTest
 					e.grant = Grant::Lane;
 					plan.entries.push_back(e);
 				}
-				Assert::IsTrue(disp->Configure(graph, reg, plan, dims), L"configure");
+				{ const bool cfgOk = disp->Configure(graph, reg, plan, dims); std::string why = disp->LastError(); for (const FallbackCatalog::Decision& fd : disp->Fallbacks()) if (fd.engaged) why += " | " + fd.id + ": " + fd.reason; Assert::IsTrue(cfgOk, (L"configure: " + std::wstring(why.begin(), why.end())).c_str()); }
 				VpLaneProducts::SourceStatsRecord rec;
 				rec.rectFound = 1;
 				rec.rectX0 = uint32_t(frame.pic.left / 2);
@@ -445,15 +445,14 @@ namespace VideoProcessorTest
 			}
 		}
 
-		// (d) The pass GLSL is pinned (FNV-1a 64 over header, newline, body). 0 = not yet pinned: the integrator fills it
-		// after the first run (the value is logged).
+		// (d) The pass GLSL is pinned (FNV-1a 64 over header, newline, body). pinned from the first WARP run; re-pin deliberately
+		// (the value is logged).
 		BEGIN_TEST_METHOD_ATTRIBUTE(PassFingerprintIsPinned)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(PassFingerprintIsPinned)
 		{
-			// integrator fills after first run
-			constexpr uint64_t kPinned = 0ull;
+			constexpr uint64_t kPinned = 0x75043EEA311B17A7ull;
 			const uint64_t fp = RegionStatsKernel::PassFingerprint();
 			char msg[120];
 			snprintf(msg, sizeof(msg), "P11_KERNEL_FINGERPRINT 0x%016llXull\n", static_cast<unsigned long long>(fp));

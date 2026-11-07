@@ -237,7 +237,7 @@ namespace VpLaneProducts
 			VpvGpu::Sampled("re_s4", full ? s4 : m_dummy), VpvGpu::Sampled("ll_prev", usePrev ? prev : m_dummy),
 			VpvGpu::Sampled("light_level_lut", m_lutTex), VpvGpu::Storage("ll_out", c.out[0]) };
 		if (!VpvGpu::Pass(c.dispatch, "VideoProcessor P12 light level blocks", m_header, m_body.c_str(), desc, 6, vars, 10,
-				(g.gw + 7) / 8, (g.gh + 7) / 8, 0, 8, 8))
+				(g.gw + 7) / 8, (g.gh + 7) / 8, 0, 8, 8, c.timer))
 			return Fail(c, "P12: the block pass failed to build or dispatch");
 		Record(c.seq, full);
 		return true;
