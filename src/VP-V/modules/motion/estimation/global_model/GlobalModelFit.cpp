@@ -1610,6 +1610,7 @@ namespace CameraModel
 		m_haveGenerations = false;
 		m_seedPending = false;
 		m_tl = TwoLayerState();
+		m_dyn.Reset();
 	}
 
 	CameraMotion Fitter::Fit(const PairInput& in)
@@ -1661,6 +1662,7 @@ namespace CameraModel
 					m_objects.Reset();
 				m_seedPending = false;
 				m_tl = TwoLayerState();     // before the post-cut seed Run, which reads it
+				m_dyn.Reset();
 				rec.valid = false;
 				rec.reason = Reason::Cut;
 				rec.confidence = 0;
@@ -1760,6 +1762,20 @@ namespace CameraModel
 				fit.valid = false;
 				fit.confidence = 0;
 				fit.reason = Reason::DeadlineMissed;
+			}
+			if (m_config.dynTexture && fit.valid)
+			{
+				const DynTextureResult dt = DetectDynamicTexture(m_config.dynTextureCfg, in, fit.params, m_dyn);
+				fit.signals.dynShare = dt.share;
+				fit.signals.dynTemporal = dt.temporal;
+				fit.signals.dynSpatial = dt.spatial;
+				fit.signals.dynField = dt.field;
+				if (dt.detected && (fit.reason == Reason::Ok || fit.reason == Reason::LowConfidence))
+				{
+					fit.reason = Reason::Ambiguous;
+					fit.verdictFlags |= kVerdictDynamicTexture;
+					fit.confidence *= 0.495;   // below 0.5 for any logistic confidence <= 1
+				}
 			}
 			if (fit.valid)
 			{

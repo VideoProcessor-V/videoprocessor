@@ -29,6 +29,9 @@ namespace CameraModel
 	inline bool IsFiniteBits(float v) { uint32_t u; std::memcpy(&u, &v, sizeof(u)); return (u & 0x7F800000u) != 0x7F800000u; }
 	inline bool IsFiniteBits(double v) { uint64_t u; std::memcpy(&u, &v, sizeof(u)); return (u & 0x7FF0000000000000ull) != 0x7FF0000000000000ull; }
 
+	// CameraMotion::verdictFlags bits (why an Ambiguous verdict was given beyond the competing-motion signal).
+	constexpr uint8_t kVerdictDynamicTexture = 1;
+
 	enum class ModelType : uint8_t { None, Translation, Similarity, Affine, Homography };
 
 	enum class Label : uint8_t { Unknown = 0, Camera = 1, Object = 2, Overlay = 3 };
@@ -59,6 +62,14 @@ namespace CameraModel
 		case Reason::Disabled: return "disabled";
 		}
 		return "unknown";
+	}
+
+	// The reason text for a record: ReasonText plus the detector's cause where there is one (status text, trace).
+	inline const char* ReasonTextOf(Reason reason, uint8_t verdictFlags)
+	{
+		if (reason == Reason::Ambiguous && (verdictFlags & kVerdictDynamicTexture) != 0)
+			return "ambiguous (dynamic texture, water-like)";
+		return ReasonText(reason);
 	}
 
 	// D-K4 (verdict gate): the ONE set of reasons whose record may be used by a consumer (the accessor weight and the 
@@ -100,6 +111,9 @@ namespace CameraModel
 	{
 		double inlierShare = 0, precision = 0, coverage = 0, temporal = 0.5, conditioning = 0,
 			engineAgreement = 0.5, inverse = 0.5, ambiguity = 1, logit = 0;
+		// Dynamic-texture detector statistics (Config::dynTexture; 0 otherwise): share of trusted blocks that disagree with the
+		// camera model, and the temporal / spatial incoherence of that disagreement.
+		double dynShare = 0, dynTemporal = 0, dynSpatial = 0, dynField = 0;
 		bool haveBackward = false, haveEngine = false;
 		// Two-layer diagnostics (Config::twoLayer; neutral 0.5 otherwise): the camera layer's border ratio (clamped
 		// to 0..1) and its continuity with the last usable camera layer.
@@ -155,6 +169,7 @@ namespace CameraModel
 		// Two-layer (Config::twoLayer), K10a. layerFlags: 1 TwoLayerRan, 2 CompetitorFound, 4 CameraIsRansacRunnerUp,
 		// 8 ForegroundSuspect, 16 SwapPending (hysteresis held), 32 Swapped, 64 ContinuityUsed.
 		uint8_t layerFlags = 0;
+		uint8_t verdictFlags = 0;    // kVerdictDynamicTexture: Ambiguous because the block field is a whole-frame dynamic texture
 		bool haveObjectLayer = false;
 		ObjectModel objectLayer;     // params, blocks = support count, cx/cy = support centre, id = persistent layer id 1..255
 		double layerRisk = 0;        // 1 at an accepted layer swap, decaying linearly to 0 over the swap window

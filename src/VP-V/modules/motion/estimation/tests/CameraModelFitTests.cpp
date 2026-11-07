@@ -1233,4 +1233,148 @@ namespace VideoProcessorTest
 			}
 		}
 	};
+
+	// R1-GATES: the dynamic-texture (water-like) detector (Config::dynTexture).
+	TEST_CLASS(CameraDynTextureTests)
+	{
+	public:
+		static Config DT() { Config c; c.dynTexture = true; return c; }
+
+		// A pan whose reliable block per cell (trust 1) follows the camera while every other block is water: random vectors
+		// (amplitude 3 px) of lower trust, different in every pair. The fitter samples one block per cell, so the fit itself is
+		// clean; the detector sees the whole block field.
+		static Field AnchoredWater(uint64_t seed, double amplitude, double waterShareOfBlocks = 1.0)
+		{
+			Field f(Grid4K());
+			f.FromModel(Pan4K());
+			SplitMix64 rng(seed);
+			for (int y = 0; y < f.gridH; ++y)
+				for (int x = 0; x < f.gridW; ++x)
+				{
+					const size_t i = f.Index(x, y);
+					const bool anchor = (x % 5 == 2) && (y % 5 == 2);
+					if (anchor) continue;
+					f.trust[i] = 0.9f;
+					if (rng.Unit() <= waterShareOfBlocks)
+					{
+						f.fx[i] += static_cast<float>((rng.Unit() - 0.5) * 2 * amplitude);
+						f.fy[i] += static_cast<float>((rng.Unit() - 0.5) * 2 * amplitude);
+					}
+				}
+			return f;
+		}
+
+		static std::vector<CameraMotion> WaterSequence(const Config& c, int pairs)
+		{
+			Fitter fitter(c);
+			std::vector<CameraMotion> out;
+			for (int i = 0; i < pairs; ++i)
+			{
+				Field f = AnchoredWater(700 + i, 3.0);
+				out.push_back(fitter.Fit(f.Input(kPairSeconds, 5 + i)));
+			}
+			return out;
+		}
+
+		TEST_METHOD(WaterLikeFieldIsAmbiguousWithReasonCode)
+		{
+			// Premise: without the detector the clean anchors make the fit usable.
+			const std::vector<CameraMotion> off = WaterSequence(Config(), 3);
+			for (const CameraMotion& r : off)
+				Require(r.valid && r.reason == Reason::Ok && r.confidence >= 0.5 && r.verdictFlags == 0, "premise (detector off): " + Describe(r));
+			const std::vector<CameraMotion> on = WaterSequence(DT(), 3);
+			for (size_t i = 0; i < on.size(); ++i)
+			{
+				const CameraMotion& r = on[i];
+				Require(r.valid && r.reason == Reason::Ambiguous && r.confidence < 0.5 && (r.verdictFlags & kVerdictDynamicTexture) != 0,
+					"water-like field must be Ambiguous with the dynamic-texture flag, pair " + std::to_string(i) + ": " + Describe(r));
+				Require(!ReasonUsable(r.reason), "never usable by a consumer");
+				Require(std::string(ReasonTextOf(r.reason, r.verdictFlags)).find("dynamic texture") != std::string::npos, "status text names the cause");
+				Require(r.signals.dynShare >= 0.5 && r.signals.dynSpatial >= 0.5, "statistics recorded: share=" + std::to_string(r.signals.dynShare)
+					+ " spatial=" + std::to_string(r.signals.dynSpatial));
+				if (i > 0)
+					Require(r.signals.dynTemporal >= 0.6, "temporal incoherence recorded: " + std::to_string(r.signals.dynTemporal));
+			}
+		}
+
+		// Real-looking content stays usable: a pan, a pan with a coherent 40 % foreground, a pan with a small-object crowd
+		// (45 % of the blocks in 2 x 2 movers with random vectors).
+		TEST_METHOD(PansCrowdsAndForegroundsAreNotFlagged)
+		{
+			Fitter fitter(DT());
+			for (int i = 0; i < 4; ++i)
+			{
+				Field f(Grid4K());
+				f.FromModel(Pan4K());
+				f.AddNoise(0.05, 800 + i);
+				const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5 + i));
+				Require(r.valid && r.reason == Reason::Ok && r.confidence >= 0.5 && r.verdictFlags == 0, "pan: " + Describe(r));
+			}
+			{
+				Fitter fc(DT());
+				for (int i = 0; i < 3; ++i)
+				{
+					Field f(Grid4K());
+					f.FromModel(Pan4K());
+					SplitMix64 rng(41 + i);
+					for (int y = 0; y + 1 < f.gridH; y += 2)
+						for (int x = 0; x + 1 < f.gridW; x += 2)
+							if (rng.Unit() < 0.45) f.AddObject(x, y, 2, 2, (rng.Unit() - 0.5) * 80, (rng.Unit() - 0.5) * 80);
+					f.AddNoise(0.05, 42 + i);
+					const CameraMotion r = fc.Fit(f.Input(kPairSeconds, 5 + i));
+					Require(r.valid && r.reason == Reason::Ok && r.confidence >= 0.5 && r.verdictFlags == 0, "crowd under pan: " + Describe(r));
+				}
+			}
+			{
+				Fitter ff(DT());
+				for (int i = 0; i < 3; ++i)
+				{
+					Field f(Grid4K());
+					f.FromModel(Pan4K());
+					f.AddObject(10, 10, 60, 60, -12, 9);
+					f.AddNoise(0.05, 60 + i);
+					const CameraMotion r = ff.Fit(f.Input(kPairSeconds, 5 + i));
+					Require(r.valid && r.reason == Reason::Ok && r.confidence >= 0.5 && r.verdictFlags == 0, "coherent foreground: " + Describe(r));
+				}
+			}
+		}
+
+		// Off: the detector state is never touched, the record carries no detector fields, whatever the thresholds are.
+		TEST_METHOD(DetectorOffIsBitIdentical)
+		{
+			Config odd;
+			odd.dynTexture = false;
+			odd.dynTextureCfg.minShare = 0.0; odd.dynTextureCfg.minTemporal = 0.0; odd.dynTextureCfg.minSpatial = 0.0; odd.dynTextureCfg.agreeRatio = 0.01;
+			const std::vector<CameraMotion> a = WaterSequence(Config(), 4), b = WaterSequence(odd, 4);
+			for (size_t i = 0; i < a.size(); ++i)
+			{
+				Require(a[i].valid == b[i].valid && a[i].reason == b[i].reason && SameBits(a[i].confidence, b[i].confidence)
+					&& SameParams(a[i].params, b[i].params) && SameSignals(a[i].signals, b[i].signals) && SameBlocks(a[i], b[i]), "record " + std::to_string(i) + " differs");
+				Require(a[i].verdictFlags == 0 && a[i].signals.dynShare == 0 && a[i].signals.dynTemporal == 0 && a[i].signals.dynSpatial == 0, "no detector fields when off");
+			}
+		}
+
+		TEST_METHOD(DetectorIsDeterministic)
+		{
+			const std::vector<CameraMotion> a = WaterSequence(DT(), 4), b = WaterSequence(DT(), 4);
+			for (size_t i = 0; i < a.size(); ++i)
+				Require(a[i].valid == b[i].valid && a[i].reason == b[i].reason && SameBits(a[i].confidence, b[i].confidence) && SameParams(a[i].params, b[i].params)
+					&& SameBits(a[i].signals.dynShare, b[i].signals.dynShare) && SameBits(a[i].signals.dynTemporal, b[i].signals.dynTemporal)
+					&& SameBits(a[i].signals.dynSpatial, b[i].signals.dynSpatial) && a[i].verdictFlags == b[i].verdictFlags, "record " + std::to_string(i) + " differs between runs");
+		}
+
+		// A cut clears the previous residual field: the first water pair after a cut has no temporal term (detected on share and spatial alone).
+		TEST_METHOD(CutClearsDetectorHistory)
+		{
+			Fitter fitter(DT());
+			Field w = AnchoredWater(900, 3.0);
+			fitter.Fit(w.Input(kPairSeconds, 5));
+			PairInput cut = w.Input(kPairSeconds, 6);
+			cut.cut = true;
+			fitter.Fit(cut);
+			Field w2 = AnchoredWater(901, 3.0);
+			const CameraMotion r = fitter.Fit(w2.Input(kPairSeconds, 7));
+			Require(r.reason == Reason::Ambiguous && r.signals.dynTemporal == 0.0, "after a cut: " + Describe(r) + " temporal=" + std::to_string(r.signals.dynTemporal));
+		}
+	};
 }
