@@ -289,7 +289,7 @@ namespace SkeletonModuleTestsNs
 			Assert::AreEqual<size_t>(1, s.cameraProblems.size());
 		}
 
-		TEST_METHOD(GpuKeysDefaultAndParse)
+		TEST_METHOD(DispatchKeysDefaultAndParse)
 		{
 			const Vpv::Skeleton::Settings d = ParseText("[vpv.skeleton]\nanalysis_lane=on\n");
 			Assert::IsTrue(d.gpuGap == Vpv::Skeleton::GpuGapMode::Off, L"skeleton_gpu_gap defaults to off");
@@ -303,7 +303,7 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(o.laneProblems.empty());
 		}
 
-		TEST_METHOD(InvalidGpuKeysKeepTheDefaultAndAreReported)
+		TEST_METHOD(InvalidDispatchKeysKeepTheDefaultAndAreReported)
 		{
 			const Vpv::Skeleton::Settings s = ParseText("[vpv.skeleton]\nskeleton_gpu_gap=sometimes\ngrain_split_storage=tiny\n");
 			Assert::IsTrue(s.gpuGap == Vpv::Skeleton::GpuGapMode::Off);
@@ -762,7 +762,7 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(rig.Command().find("2 drops applied") != std::string::npos);
 		}
 
-		TEST_METHOD(OffAndOriginalNeverConstructAGpuDispatcher)
+		TEST_METHOD(OffAndOriginalNeverConstructADispatcher)
 		{
 			const unsigned long long before = SkeletonModule::GpuDispatchersCreated();
 			{
@@ -785,7 +785,7 @@ namespace SkeletonModuleTestsNs
 			Assert::AreEqual(before, SkeletonModule::GpuDispatchersCreated(), L"no dispatcher was ever constructed");
 		}
 
-		TEST_METHOD(WithoutAPlGpuTheOnModeHasNoDispatcherAndSaysSo)
+		TEST_METHOD(WithoutARenderDeviceTheOnModeHasNoDispatcherAndSaysSo)
 		{
 			const unsigned long long before = SkeletonModule::GpuDispatchersCreated();
 			Rig rig(Lane("on", "skeleton_gpu_gap=after_render\ngrain_split_storage=compact\n"));
@@ -804,7 +804,7 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(rig.sk.LaneOf(rig.Host())->TotalDeclined() > 0, L"the declining live fill is still installed without a dispatcher");
 		}
 
-		TEST_METHOD(ShadowModeSkipsTheGpuProductsVisibly)
+		TEST_METHOD(ShadowModeSkipsTheDeviceProductsVisibly)
 		{
 			const unsigned long long before = SkeletonModule::GpuDispatchersCreated();
 			Rig rig(Lane("shadow", "skeleton_gpu_gap=after_render\n"));
@@ -821,7 +821,7 @@ namespace SkeletonModuleTestsNs
 			Assert::IsFalse(HasId(fb, "skeleton_gpu_live"), L"shadow has no live GPU wait");
 		}
 
-		TEST_METHOD(AnInvalidGpuKeyIsShownWhileTheLaneRuns)
+		TEST_METHOD(AnInvalidDispatchKeyIsShownWhileTheLaneRuns)
 		{
 			Rig rig(Lane("on", "skeleton_gpu_gap=sometimes\n"));
 			rig.ResyncApply("on");
@@ -857,7 +857,7 @@ namespace SkeletonModuleTestsNs
 	TEST_CLASS(SkeletonGpuStatusTexts)
 	{
 	public:
-		TEST_METHOD(TheGpuStatusTextsAreTheAgreedOnes)
+		TEST_METHOD(TheDispatcherStatusTextsAreTheAgreedOnes)
 		{
 			namespace FC = FallbackCatalog;
 			Assert::IsTrue(FC::SkeletonGpuLive(true).engaged);
