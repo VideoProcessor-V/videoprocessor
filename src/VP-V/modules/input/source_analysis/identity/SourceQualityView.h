@@ -16,6 +16,7 @@
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdProduct.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdVote.h>
+#include <VP-V/modules/input/source_analysis/identity/shared/SourceQuality.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -50,11 +51,7 @@ namespace SourceIdentity
 
 	inline int TierOf(double quality, const VoteSettings& vs = VoteSettings())
 	{
-		int tier = 0;
-		for (size_t i = 0; i < vs.qualityTierEdges.size(); ++i)
-			if (quality >= vs.qualityTierEdges[i])
-				++tier;
-		return tier;
+		return VpUnit::SourceQuality::TierOf(quality, vs.qualityTierEdges);   // U12
 	}
 
 	inline const char* ConsumerStatusText(QualityConsumer c)
@@ -99,7 +96,7 @@ namespace SourceIdentity
 			return v;
 		}
 		v.origin = QualityOrigin::Consensus;
-		v.quality = (std::min)(snap.bitrateQuality, static_cast<double>(record->level));
+		v.quality = VpUnit::SourceQuality::Combine(snap.bitrateQuality, static_cast<double>(record->level));   // U12
 		v.tier = record->tier;
 		v.abrDropSeen = (record->flags & kFlagDropEventSeen) != 0;
 		v.fallback = FallbackCatalog::Released("product.source_quality");
@@ -115,13 +112,15 @@ namespace SourceIdentity
 	// ---- the consumer helpers (pure; the classical view feeds the same functions, so a fallback changes the INPUT only) ----
 
 	// Dither need in 0..1: the lower the quality, the more a step is visible. Smooth, monotone.
-	inline double DitherNeed(const QualityView& v) { return (std::min)(1.0, (std::max)(0.0, 1.0 - v.quality)); }
+	inline double DitherNeed(const QualityView& v) { return VpUnit::SourceQuality::DitherNeed(v.quality); }
 
 	// Contrast recovery gates OFF on a clean high-bitrate source (get out of the way): the best tier and a high quality.
 	inline bool ContrastRecoveryActive(const QualityView& v, const VoteSettings& vs = VoteSettings(), double cleanQuality = 0.9)
 	{
-		const int top = static_cast<int>(vs.qualityTierEdges.size());
-		return !(v.tier >= top && v.quality >= cleanQuality);
+		VpUnit::SourceQuality::Params p;
+		p.tierEdges = vs.qualityTierEdges;
+		p.cleanQuality = cleanQuality;
+		return VpUnit::SourceQuality::ContrastRecoveryActive(v.tier, v.quality, p);   // U12
 	}
 
 	// The Ctrl+I / Config status line (doc 61 2.2).

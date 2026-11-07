@@ -3,7 +3,9 @@
 #pragma once
 
 #include <VP-V/core/LaneInterfaces.h>
+#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 
 #include <algorithm>
 #include <cmath>
@@ -211,204 +213,25 @@ private:
 // P4 source stats.
 // ---------------------------------------------------------------------------------------------
 
-constexpr uint32_t kStatsHistBins = 1024;      // top 10 bits of the 16-bit half-plane sample
-constexpr uint32_t kStatsVersion = 1;
+// P4 record, accumulator and percentile/rect/grain law: the shared unit U6 (VpUnit::SourceStats, lane/shared/SourceStats.h).
+// The lane names below are aliases of it (identity: the code was moved unchanged).
+constexpr uint32_t kStatsHistBins = VpUnit::SourceStats::kHistBins;      // top 10 bits of the 16-bit half-plane sample
+constexpr uint32_t kStatsVersion = VpUnit::SourceStats::kRecordVersion;
 constexpr uint32_t kHalfLumaVersion = VpUnit::HalfLuma::kUnitVersion;       // P1 half + quarter luma layout and law (core/ProductCatalog.h)
-constexpr uint32_t kStatsBytes = 8192;         // the declared fixed size of P4
-constexpr uint32_t kGrainBlock = 8;            // grain: 8x8 blocks of the half plane
-constexpr uint32_t kRectFractionShift = 4;     // rect threshold = p1 + (p99 - p1) / 16
+constexpr uint32_t kStatsBytes = VpUnit::SourceStats::kRecordBytes;     // the declared fixed size of P4
+constexpr uint32_t kGrainBlock = VpUnit::SourceStats::kGrainBlock;      // grain: 8x8 blocks of the half plane
+constexpr uint32_t kRectFractionShift = VpUnit::SourceStats::kRectFractionShift;  // rect threshold = p1 + (p99 - p1) / 16
 
-// The stored record (POD). Codes are on the 16-bit scale. The picture rect is on the half plane
-// (end exclusive) and is an EVIDENCE rect (rows/cols brighter than the frame's own floor), NOT
-// Bill's active-picture result.
-struct SourceStatsRecord {
-    uint32_t version = kStatsVersion;
-    uint32_t halfWidth = 0;
-    uint32_t halfHeight = 0;
-    uint32_t pixelCount = 0;
-    uint32_t mean = 0;
-    uint32_t minCode = 0;
-    uint32_t maxCode = 0;
-    uint32_t p01 = 0;
-    uint32_t p50 = 0;
-    uint32_t p99 = 0;
-    uint32_t rectFound = 0;   // 0: no row/col exceeded the threshold; the rect is the whole plane
-    uint32_t rectX0 = 0;
-    uint32_t rectY0 = 0;
-    uint32_t rectX1 = 0;
-    uint32_t rectY1 = 0;
-    uint32_t grain = 0;       // median over 8x8 blocks of the RMS second difference (16-bit codes)
-    uint32_t reserved[2] = { 0, 0 };
-    uint32_t hist[kStatsHistBins] = {};
-};
+using SourceStatsRecord = VpUnit::SourceStats::Record;
+using StatsAccumulator = VpUnit::SourceStats::Accumulator;
 static_assert(sizeof(SourceStatsRecord) <= kStatsBytes, "the stats record must fit the P4 buffer");
 
 inline bool ReadSourceStats(const uint8_t* buf, size_t bytes, SourceStatsRecord* out)
 {
-    if (buf == nullptr || out == nullptr || bytes < sizeof(SourceStatsRecord))
-        return false;
-    std::memcpy(out, buf, sizeof(SourceStatsRecord));
-    return out->version == kStatsVersion;
+    return VpUnit::SourceStats::ReadRecord(buf, bytes, out);
 }
 
-inline uint32_t Isqrt64(uint64_t v)
-{
-    uint64_t r = 0;
-    uint64_t bit = uint64_t(1) << 62;
-    while (bit > v)
-        bit >>= 2;
-    while (bit != 0) {
-        if (v >= r + bit) {
-            v -= r + bit;
-            r = (r >> 1) + bit;
-        } else {
-            r >>= 1;
-        }
-        bit >>= 2;
-    }
-    return uint32_t(r);
-}
-
-// Partial sums over half-plane rows. Everything is integer sums, so the reduction does not depend
-// on the chunking; rows are still fed in ascending order.
-class StatsAccumulator {
-public:
-    void Reset(uint32_t hw, uint32_t hh)
-    {
-        hw_ = hw;
-        hh_ = hh;
-        std::memset(hist_, 0, sizeof(hist_));
-        sum_ = 0;
-        min_ = 0xFFFFu;
-        max_ = 0;
-        rowSum_.assign(hh, 0);
-        colSum_.assign(hw, 0);
-        bw_ = (hw + kGrainBlock - 1u) / kGrainBlock;
-        bh_ = (hh + kGrainBlock - 1u) / kGrainBlock;
-        blockSq_.assign(size_t(bw_) * bh_, 0);
-        blockN_.assign(size_t(bw_) * bh_, 0);
-    }
-
-    void AddRows(const uint16_t* half, uint32_t rowBegin, uint32_t rowEnd)
-    {
-        if (rowEnd > hh_)
-            rowEnd = hh_;
-        for (uint32_t y = rowBegin; y < rowEnd; ++y) {
-            const uint16_t* r = half + size_t(y) * hw_;
-            const bool vInterior = y >= 1u && y + 1u < hh_;
-            uint64_t rs = 0;
-            for (uint32_t x = 0; x < hw_; ++x) {
-                const uint32_t s = r[x];
-                ++hist_[s >> 6];
-                rs += s;
-                colSum_[x] += s;
-                if (s < min_)
-                    min_ = s;
-                if (s > max_)
-                    max_ = s;
-                int64_t sq = 0;
-                uint32_t n = 0;
-                if (x >= 1u && x + 1u < hw_) {
-                    const int64_t d = int64_t(r[x - 1]) - 2 * int64_t(s) + int64_t(r[x + 1]);
-                    sq += d * d;
-                    ++n;
-                }
-                if (vInterior) {
-                    const int64_t d = int64_t(half[size_t(y - 1) * hw_ + x]) - 2 * int64_t(s)
-                                      + int64_t(half[size_t(y + 1) * hw_ + x]);
-                    sq += d * d;
-                    ++n;
-                }
-                if (n != 0) {
-                    const size_t b = size_t(y / kGrainBlock) * bw_ + (x / kGrainBlock);
-                    blockSq_[b] += uint64_t(sq);
-                    blockN_[b] += n;
-                }
-            }
-            rowSum_[y] = rs;
-            sum_ += rs;
-        }
-    }
-
-    void Finish(SourceStatsRecord* rec) const
-    {
-        *rec = SourceStatsRecord();
-        rec->halfWidth = hw_;
-        rec->halfHeight = hh_;
-        const uint64_t n = uint64_t(hw_) * hh_;
-        rec->pixelCount = uint32_t(n);
-        std::memcpy(rec->hist, hist_, sizeof(hist_));
-        if (n == 0)
-            return;
-        rec->mean = uint32_t(sum_ / n);
-        rec->minCode = min_;
-        rec->maxCode = max_;
-        rec->p01 = Percentile((n + 99u) / 100u);
-        rec->p50 = Percentile((n + 1u) / 2u);
-        rec->p99 = Percentile((n * 99u + 99u) / 100u);
-        // Evidence rect: rows/cols whose mean exceeds p1 + (p99 - p1) / 16.
-        const uint32_t span = rec->p99 > rec->p01 ? rec->p99 - rec->p01 : 0u;
-        const uint64_t thr = uint64_t(rec->p01) + (span >> kRectFractionShift);
-        bool found = false;
-        uint32_t y0 = 0, y1 = 0, x0 = 0, x1 = 0;
-        for (uint32_t y = 0; y < hh_; ++y)
-            if (rowSum_[y] / hw_ > thr) {
-                if (!found)
-                    y0 = y;
-                y1 = y + 1u;
-                found = true;
-            }
-        bool foundX = false;
-        for (uint32_t x = 0; x < hw_; ++x)
-            if (colSum_[x] / hh_ > thr) {
-                if (!foundX)
-                    x0 = x;
-                x1 = x + 1u;
-                foundX = true;
-            }
-        if (found && foundX) {
-            rec->rectFound = 1;
-            rec->rectX0 = x0;
-            rec->rectX1 = x1;
-            rec->rectY0 = y0;
-            rec->rectY1 = y1;
-        } else {
-            rec->rectX1 = hw_;
-            rec->rectY1 = hh_;
-        }
-        // Grain: median over blocks of sqrt(mean of the squared second differences).
-        std::vector<uint32_t> rms;
-        rms.reserve(blockSq_.size());
-        for (size_t b = 0; b < blockSq_.size(); ++b)
-            if (blockN_[b] != 0)
-                rms.push_back(Isqrt64(blockSq_[b] / blockN_[b]));
-        if (!rms.empty()) {
-            std::sort(rms.begin(), rms.end());
-            rec->grain = rms[rms.size() / 2];
-        }
-    }
-
-private:
-    // Centre code of the smallest bin whose cumulative count reaches `target`.
-    uint32_t Percentile(uint64_t target) const
-    {
-        uint64_t c = 0;
-        for (uint32_t i = 0; i < kStatsHistBins; ++i) {
-            c += hist_[i];
-            if (c >= target)
-                return (i << 6) | 32u;
-        }
-        return ((kStatsHistBins - 1u) << 6) | 32u;
-    }
-
-    uint32_t hw_ = 0, hh_ = 0, bw_ = 0, bh_ = 0;
-    uint32_t hist_[kStatsHistBins] = {};
-    uint64_t sum_ = 0;
-    uint32_t min_ = 0xFFFFu;
-    uint32_t max_ = 0;
-    std::vector<uint64_t> rowSum_, colSum_, blockSq_;
-    std::vector<uint32_t> blockN_;
-};
+inline uint32_t Isqrt64(uint64_t v) { return VpUnit::SourceStats::Isqrt64(v); }
 
 inline void WriteStatsRecord(const SourceStatsRecord& rec, uint8_t* out, size_t outBytes)
 {
@@ -419,18 +242,10 @@ inline void WriteStatsRecord(const SourceStatsRecord& rec, uint8_t* out, size_t 
 // The one-shot (live-fill) form: P1's product bytes -> the stored record (rest of the buffer zero).
 inline bool ComputeSourceStats(const uint8_t* halfLumaProduct, Dims dims, uint8_t* out, size_t outBytes)
 {
-    if (halfLumaProduct == nullptr || out == nullptr || outBytes < sizeof(SourceStatsRecord) || dims.width == 0
-        || dims.height == 0)
+    if (halfLumaProduct == nullptr || dims.width == 0 || dims.height == 0)
         return false;
-    const uint32_t hw = HalfDim(dims.width);
-    const uint32_t hh = HalfDim(dims.height);
-    StatsAccumulator acc;
-    acc.Reset(hw, hh);
-    acc.AddRows(reinterpret_cast<const uint16_t*>(halfLumaProduct), 0, hh);
-    SourceStatsRecord rec;
-    acc.Finish(&rec);
-    WriteStatsRecord(rec, out, outBytes);
-    return true;
+    return VpUnit::SourceStats::ComputeRecord(reinterpret_cast<const uint16_t*>(halfLumaProduct), HalfDim(dims.width),
+                                              HalfDim(dims.height), out, outBytes);
 }
 
 class SourceStatsProducer : public ILaneProducer {
@@ -482,78 +297,28 @@ private:
 };
 
 // ---------------------------------------------------------------------------------------------
-// Event classification, derived per consumer from two stored records (cut/fade/flash are never
-// stored). All thresholds are relative to the frames' own spread (p99 - p1) or normalised
-// histogram mass: no absolute rate or resolution constants.
+// ---------------------------------------------------------------------------------------------
+// Event classification: the shared unit U7 (VpUnit::CutFadeJudge, events/shared/CutFadeJudge.h). Derived per
+// consumer from two stored records (cut/fade/flash are never stored); the lane names are aliases of it.
 // ---------------------------------------------------------------------------------------------
 
-constexpr double kCutHistFrac = 0.50;          // normalised L1 distance / 2 above this: a different picture
-constexpr double kCutPossibleHistFrac = 0.25;  // above this (or a continuity slip): a cut is possible
-constexpr int64_t kFadeMinDiv = 64;            // fade: |mean step| >= spread / 64 ...
-constexpr int64_t kFadeMaxDiv = 4;             // ... and < spread / 4 (more is a jump, not a ramp)
-constexpr int64_t kFlashMeanDiv = 4;           // flash: |mean step| >= spread / 4 with the spread kept within spread / 4
+constexpr double kCutHistFrac = VpUnit::CutFadeJudge::kCutHistFrac;
+constexpr double kCutPossibleHistFrac = VpUnit::CutFadeJudge::kCutPossibleHistFrac;
+constexpr int64_t kFadeMinDiv = VpUnit::CutFadeJudge::kFadeMinDiv;
+constexpr int64_t kFadeMaxDiv = VpUnit::CutFadeJudge::kFadeMaxDiv;
+constexpr int64_t kFlashMeanDiv = VpUnit::CutFadeJudge::kFlashMeanDiv;
 
-struct EventSignals {
-    bool cut = false;
-    bool cutPossible = false;
-    bool fade = false;
-    bool flash = false;
-    uint32_t histDistance = 0;   // normalised L1 distance, 0..65535 (65535 = disjoint histograms)
-};
+using EventSignals = VpUnit::CutFadeJudge::EventSignals;
 
 inline uint32_t HistDistance(const SourceStatsRecord& a, const SourceStatsRecord& b)
 {
-    const double na = a.pixelCount > 0 ? double(a.pixelCount) : 1.0;
-    const double nb = b.pixelCount > 0 ? double(b.pixelCount) : 1.0;
-    double l1 = 0.0;
-    for (uint32_t i = 0; i < kStatsHistBins; ++i)
-        l1 += std::fabs(double(a.hist[i]) / na - double(b.hist[i]) / nb);
-    const double frac = l1 * 0.5;   // 0..1
-    const double v = frac * 65535.0 + 0.5;
-    return v >= 65535.0 ? 65535u : uint32_t(v);
+    return VpUnit::CutFadeJudge::HistDistance(a, b);
 }
 
 inline EventSignals ClassifyEvents(const SourceStatsRecord& prev, const SourceStatsRecord& cur, bool fullBetween,
                                    bool continuityBetween)
 {
-    EventSignals e;
-    e.histDistance = HistDistance(prev, cur);
-    const double frac = double(e.histDistance) / 65535.0;
-    if (fullBetween) {
-        e.cut = true;
-        e.cutPossible = true;
-        return e;
-    }
-    if (continuityBetween)
-        e.cutPossible = true;
-    if (frac > kCutPossibleHistFrac)
-        e.cutPossible = true;
-
-    const uint32_t spreadPrev = prev.p99 > prev.p01 ? prev.p99 - prev.p01 : 0u;
-    const uint32_t spreadCur = cur.p99 > cur.p01 ? cur.p99 - cur.p01 : 0u;
-    const int64_t spread = int64_t(std::max<uint32_t>(1u, std::max(spreadPrev, spreadCur)));
-    const int64_t dMean = int64_t(cur.mean) - int64_t(prev.mean);
-    const int64_t aMean = dMean < 0 ? -dMean : dMean;
-    const int64_t dSpread = int64_t(spreadCur) - int64_t(spreadPrev);
-    const int64_t aSpread = dSpread < 0 ? -dSpread : dSpread;
-
-    if (frac > kCutHistFrac) {
-        // A shifted histogram of unchanged spread is a flash (or a cut between look-alike
-        // scenes: reported as a flash with cutPossible); any other jump is a cut.
-        if (aMean * kFlashMeanDiv >= spread && aSpread * 4 <= spread) {
-            e.flash = true;
-            e.cutPossible = true;
-        } else {
-            e.cut = true;
-            e.cutPossible = true;
-        }
-        return e;
-    }
-    // Gradual ramp: mean and contrast move together by a small step.
-    const bool sameSign = (dMean > 0 && dSpread > 0) || (dMean < 0 && dSpread < 0);
-    if (aMean * kFadeMinDiv >= spread && aMean * kFadeMaxDiv < spread && sameSign)
-        e.fade = true;
-    return e;
+    return VpUnit::CutFadeJudge::ClassifyEvents(prev, cur, fullBetween, continuityBetween);
 }
 
 // ---------------------------------------------------------------------------------------------

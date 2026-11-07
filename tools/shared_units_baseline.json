@@ -192,24 +192,189 @@
   "U6": {
    "name": "histogram_apl",
    "blocking": false,
-   "baseline_duplicates": 32,
-   "known_false_positive": []
+   "baseline_duplicates": 2,
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/core/FrameAnalysisStore.h",
+     "pattern": "kHistogramBins|histogram\\{\\}|histogram, mean/APL|average picture level",
+     "kind": "false_positive",
+     "reason": "declaration of the stored record shape (field names, bin count); no computation, the Reducer percentiles call the unit"
+    },
+    {
+     "file": "src/VP-V/modules/input/signal/HdrInference.cpp",
+     "pattern": "HISTOGRAM_BINS> bins|stats\\.histogram|Histogram10 active|m_lastHistogram|limits\\.histogram|m_previous\\.histogram",
+     "kind": "false_positive",
+     "reason": "veto signature storage and arguments of the unit calls (SourceStats::HistBin10 / Histogram10 / HalfL1Distance, CutFadeJudge::GridHistCut); the laws live in the unit"
+    },
+    {
+     "file": "src/VP-V/modules/input/signal/HdrInference.h",
+     "pattern": "HISTOGRAM_BINS|HISTOGRAM_DISTANCE|LastHistogramDistance|m_lastHistogram|histogram\\{\\}",
+     "kind": "false_positive",
+     "reason": "veto signature declarations and the detector tuning thresholds handed to CutFadeJudge::GridHistCut; no computation"
+    },
+    {
+     "file": "src/VP-V/modules/input/signal/HdrVetoCaptureGate.h",
+     "pattern": "LastHistogramDistance",
+     "kind": "false_positive",
+     "reason": "diagnostic accessor forwarding the detector value"
+    },
+    {
+     "file": "src/VP-V/modules/input/signal/SettingsStamp.h",
+     "pattern": "dejudder_cut_histogram",
+     "kind": "false_positive",
+     "reason": "configuration key name in the settings stamp list"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/OpticalFlowTrust.h",
+     "pattern": "histogram\\[|size_t histogram",
+     "kind": "false_positive",
+     "reason": "histogram of optical-flow MATCH COSTS (median and MAD of the cost), not a luma histogram"
+    },
+    {
+     "file": "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
+     "pattern": "settings\\.cutHistogram",
+     "kind": "residual",
+     "reason": "matcher M3 GPU 16-bin cut histogram (uniform feed of the GLSL trust pass); the GLSL cannot move into the unit without a GPU run proving the emitted shader unchanged; migrate with the matcher package"
+    },
+    {
+     "file": "src/VP-V/modules/motion/vector_delivery/DejudderWarp.h",
+     "pattern": "cutHistogram",
+     "kind": "residual",
+     "reason": "matcher M3 GPU 16-bin cut histogram threshold (setting of the GLSL trust pass); migrate with the matcher package"
+    }
+   ]
   },
   "U7": {
    "name": "cut_fade_flash_judge",
    "blocking": false,
-   "baseline_duplicates": 21,
-   "known_false_positive": []
+   "baseline_duplicates": 1,
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/input/signal/HdrInference.cpp",
+     "pattern": "HdrVetoCutDetector::Observe",
+     "kind": "false_positive",
+     "reason": "the veto detector's state machine (previous frame, entering/leaving black); its cut rule is CutFadeJudge::GridHistCut"
+    },
+    {
+     "file": "src/VP-V/modules/input/signal/HdrInference.h",
+     "pattern": "HdrVetoCutDetector",
+     "kind": "false_positive",
+     "reason": "the veto detector's state machine (previous frame, entering/leaving black); its cut rule is CutFadeJudge::GridHistCut"
+    },
+    {
+     "file": "src/VP-V/modules/input/signal/HdrVetoCaptureGate.h",
+     "pattern": "m_cutDetector|HdrVetoCutDetector",
+     "kind": "false_positive",
+     "reason": "the veto detector's state machine (previous frame, entering/leaving black); its cut rule is CutFadeJudge::GridHistCut (owner member / forwarding)"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/global_model/CameraMotion.h",
+     "pattern": "fadeGain",
+     "kind": "false_positive",
+     "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/global_model/GlobalModelFit.cpp",
+     "pattern": "fadeGain",
+     "kind": "false_positive",
+     "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/global_model/GlobalModelFit.h",
+     "pattern": "fadeGain",
+     "kind": "false_positive",
+     "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/global_model/GlobalModelMeasurement.cpp",
+     "pattern": "fadeGain",
+     "kind": "false_positive",
+     "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/global_model/GlobalModelMeasurement.h",
+     "pattern": "fadeGain",
+     "kind": "false_positive",
+     "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/global_model/GlobalModelSearchHints.cpp",
+     "pattern": "fadeGain",
+     "kind": "false_positive",
+     "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/global_model/GlobalModelSearchHints.h",
+     "pattern": "fadeGain",
+     "kind": "false_positive",
+     "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/global_model/link/CameraRecordPool.h",
+     "pattern": "fadeGain",
+     "kind": "false_positive",
+     "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/global_model/link/GuidanceScheduler.cpp",
+     "pattern": "fadeGain",
+     "kind": "false_positive",
+     "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/global_model/link/GuidanceScheduler.h",
+     "pattern": "fadeGain",
+     "kind": "false_positive",
+     "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/global_model/link/PairAssembly.h",
+     "pattern": "fadeGain",
+     "kind": "false_positive",
+     "reason": "carries the unit fade gain / offset as data (record field or plumbing); no judgement is made here"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/global_model/CameraMotion.h",
+     "pattern": "scene cut",
+     "kind": "false_positive",
+     "reason": "diagnostic reason text, not a judgement"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/global_model/GlobalModelMeasurement.cpp",
+     "pattern": "scene cut",
+     "kind": "false_positive",
+     "reason": "diagnostic reason text; the cut flag is the unit event passed in"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
+     "pattern": "meanLuma",
+     "kind": "residual",
+     "reason": "AdaptiveDownscale's GPU scalar pass keeps its own 20-code mean-step cut (state_io shader, AdaptiveDownscale.cpp); migrate with the downscale package and a GPU run"
+    }
+   ]
   },
   "U8": {
    "name": "active_picture_rect",
-   "blocking": false,
-   "baseline_duplicates": 8,
-   "known_false_positive": []
+   "blocking": true,
+   "baseline_duplicates": 0,
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
+     "pattern": "PictureArea\\(\\)|settings\\.pictureArea",
+     "kind": "false_positive",
+     "reason": "dispatcher / gate of the unit's rect pass (kernel text is PictureRect::KernelHeader/KernelBody)"
+    },
+    {
+     "file": "src/VP-V/modules/motion/vector_delivery/DejudderWarp.h",
+     "pattern": "pictureArea|PictureArea\\(\\)",
+     "kind": "false_positive",
+     "reason": "setting flag or texture binding of the unit's rect pass; the PICTURE kernel and its law moved to VpUnit::PictureRect"
+    }
+   ]
   },
   "U9": {
    "name": "light_level",
-   "blocking": false,
+   "blocking": true,
    "baseline_duplicates": 0,
    "known_false_positive": []
   },
@@ -221,13 +386,13 @@
   },
   "U11": {
    "name": "camera_fit",
-   "blocking": false,
+   "blocking": true,
    "baseline_duplicates": 0,
    "known_false_positive": []
   },
   "U12": {
    "name": "source_quality",
-   "blocking": false,
+   "blocking": true,
    "baseline_duplicates": 0,
    "known_false_positive": []
   }

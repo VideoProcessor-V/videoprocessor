@@ -196,6 +196,15 @@ One dependency unit per shared computation. A unit is a CPU reference (the law, 
 | Histogram / APL (`SourceHistogram`) | 1024-bin histogram, APL, p1/p50/p99, picture-only peak | `src/VP-V/modules/input/source_analysis/lane/` (`SourceHistogramRef.h`, `SourceHistogramGlsl.h`, `kSourceHistogramUnitVersion`) | LED look-ahead, HdrInference grid, matcher M3 16-bin, detector histogram. The libplacebo peak and the LED output-domain hook stay where they are |
 | Global motion (`GlobalMotion`) | One global-motion estimate per pair (P2 global; P2m on non-NVOF cards) | `src/VP-V/modules/motion/estimation/` (`GlobalMotionRef.h`, `GlobalMotionGlsl.h`, `kGlobalMotionUnitVersion`) | FlowGlobal (worker), D1 (GPU), engineGlobal, SRM pan, intent |
 
+Registered shared units (code, `tools/check_shared_units.py` ids, `kUnitVersion` 1; each a header-only law with its tests in `src/VP-V/tests/suite/SharedUnitsW1Tests.cpp`):
+
+| Id | Unit | Header | Product | Blocking in the checker |
+|---|---|---|---|---|
+| U6 | `VpUnit::SourceStats` (histogram, APL, percentiles, rect, grain) | `input/source_analysis/lane/shared/SourceStats.h` | P4 | no (2 GPU residuals: matcher M3 histogram) |
+| U7 | `VpUnit::CutFadeJudge` (cut / fade / flash, veto rule, fade fit) | `input/source_analysis/events/shared/CutFadeJudge.h` | P4 event | no (1 GPU residual: AdaptiveDownscale cut) |
+| U8 | `VpUnit::PictureRect` (active-picture rect, `vpu_in_picture`) | `input/source_analysis/picture/shared/PictureRect.h` | P4 rect | yes (0) |
+| U12 | `VpUnit::SourceQuality` (tier, quality, ABR drop seen) | `input/source_analysis/identity/shared/SourceQuality.h` | P4 field `quality` | yes (0) |
+
 ## Known duplicates
 
 Doc 51 section 2. This is the initial report of `tools/check_shared_units.py` (non-blocking). Counts and the kept authority are declared, not measured.

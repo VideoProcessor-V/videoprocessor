@@ -20,6 +20,8 @@
 #include <cstdint>
 #include <vector>
 
+#include <VP-V/modules/input/source_analysis/identity/shared/SourceQuality.h>
+
 namespace SourceIdentity
 {
 	enum class Field { AxisH = 0, AxisV, Kernel, Codec, Quality, Count };
@@ -166,11 +168,7 @@ namespace SourceIdentity
 		v.evidenceTimeUs = r.timeUs;
 		if (!r.reading || !(r.bitrateQuality >= 0.0))
 			return v;
-		int tier = 0;
-		for (size_t i = 0; i < s.qualityTierEdges.size(); ++i)
-			if (r.bitrateQuality >= s.qualityTierEdges[i])
-				++tier;
-		v.h.qualityTier = tier;
+		v.h.qualityTier = VpUnit::SourceQuality::TierOf(r.bitrateQuality, s.qualityTierEdges);   // U12
 		SetField(v, Field::Quality, s.bitrateQualityConfidence);
 		return v;
 	}

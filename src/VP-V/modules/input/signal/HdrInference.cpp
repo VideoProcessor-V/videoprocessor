@@ -1,5 +1,7 @@
 #include "pch.h"
 #include <VP-V/modules/input/signal/HdrInference.h>
+#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 
 #include <algorithm>
 #include <cmath>
@@ -356,7 +358,7 @@ HdrVetoFrameStats MeasureHdrVetoGrid(const uint16_t* grid, int columns, int rows
 			const size_t cell = static_cast<size_t>(cy) * HdrVetoFrameStats::GRID_COLUMNS + cx;
 			sums[cell] += code;
 			++counts[cell];
-			++bins[std::min<int>(code / 64, HdrVetoFrameStats::HISTOGRAM_BINS - 1)];
+			++bins[VpUnit::SourceStats::HistBin10(code, static_cast<uint32_t>(bins.size()))];   // U6 bin law
 			if (code > thresholds.blackCode)
 				++aboveBlack;
 		}
@@ -376,30 +378,22 @@ HdrVetoFrameStats MeasureHdrVetoGrid(const uint16_t* grid, int columns, int rows
 		lastActive - firstActive + 1 < thresholds.minimumActiveRows * rows)
 		return stats;
 
-	std::array<uint32_t, 1024> histogram{};
+	VpUnit::SourceStats::Histogram10 active;   // U6: the active rows' 10-bit histogram
 	for (int y = firstActive; y <= lastActive; ++y)
 	{
 		const uint16_t* row = grid + static_cast<size_t>(y) * columns;
 		for (int x = 0; x < columns; ++x)
-			++histogram[std::min<uint16_t>(row[x], 1023)];
+			active.Add(row[x]);
 	}
 	stats.activePicture = true;
 	stats.activeSamples = static_cast<uint32_t>(lastActive - firstActive + 1) *
 		static_cast<uint32_t>(columns);
-	for (int code = thresholds.highCode; code < 1024; ++code)
-		stats.atOrAboveHigh += histogram[code];
+	stats.atOrAboveHigh = static_cast<uint32_t>(active.CountAtOrAbove(thresholds.highCode));
 	stats.fractionAtHigh = static_cast<double>(stats.atOrAboveHigh) / stats.activeSamples;
 	const double target = 0.999 * stats.activeSamples;
-	double cumulative = 0.0;
-	for (int code = 0; code < 1024; ++code)
-	{
-		cumulative += histogram[code];
-		if (cumulative >= target)
-		{
-			stats.p999 = static_cast<uint16_t>(code);
-			break;
-		}
-	}
+	const int p999 = active.CodeReaching(target);
+	if (p999 >= 0)
+		stats.p999 = static_cast<uint16_t>(p999);
 	stats.sdrEvidence = stats.fractionAtHigh >= thresholds.highFraction ||
 		stats.p999 >= thresholds.p999Code;
 	return stats;
@@ -444,18 +438,18 @@ bool HdrVetoCutDetector::Observe(const HdrVetoFrameStats& stats)
 			cut = true;   // entering or leaving black
 		else if (stats.activePicture)
 		{
-			float grid = 0.0f;
-			for (size_t i = 0; i < stats.grid.size(); ++i)
-				grid += std::fabs(stats.grid[i] - m_previous.grid[i]);
-			grid /= static_cast<float>(stats.grid.size());
-			float histogram = 0.0f;
-			for (size_t i = 0; i < stats.histogram.size(); ++i)
-				histogram += std::fabs(stats.histogram[i] - m_previous.histogram[i]);
-			histogram *= 0.5f;
+			// U7 / U6: the mean cell difference and the half-L1 histogram distance (the signature histograms are
+			// already fractions: total 1), judged by the unit's grid + histogram rule with this detector's thresholds.
+			const float grid = VpUnit::CutFadeJudge::MeanAbsDifference(stats.grid.data(), m_previous.grid.data(), stats.grid.size());
+			const float distance = VpUnit::SourceStats::HalfL1Distance<float>(stats.histogram.data(), m_previous.histogram.data(),
+				stats.histogram.size(), 1.0f, 1.0f);
 			m_lastGrid = grid;
-			m_lastHistogram = histogram;
-			cut = (grid >= GRID_DIFFERENCE && histogram >= HISTOGRAM_DISTANCE) ||
-				histogram >= HISTOGRAM_DISTANCE_ALONE;
+			m_lastHistogram = distance;
+			VpUnit::CutFadeJudge::GridHistThresholds limits;
+			limits.gridDifference = GRID_DIFFERENCE;
+			limits.histogramDistance = HISTOGRAM_DISTANCE;
+			limits.histogramDistanceAlone = HISTOGRAM_DISTANCE_ALONE;
+			cut = VpUnit::CutFadeJudge::GridHistCut(grid, distance, limits);
 		}
 	}
 	m_previous = stats;
