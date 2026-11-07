@@ -197,8 +197,8 @@
   },
   "U6": {
    "name": "histogram_apl",
-   "blocking": false,
-   "baseline_duplicates": 2,
+   "blocking": true,
+   "baseline_duplicates": 0,
    "known_false_positive": [
     {
      "file": "src/VP-V/core/FrameAnalysisStore.h",
@@ -239,21 +239,21 @@
     {
      "file": "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
      "pattern": "settings\\.cutHistogram",
-     "kind": "residual",
-     "reason": "matcher M3 GPU 16-bin cut histogram (uniform feed of the GLSL trust pass); the GLSL cannot move into the unit without a GPU run proving the emitted shader unchanged; migrate with the matcher package"
+     "kind": "false_positive",
+     "reason": "uniform feed of the dejudder_cut_histogram setting into the trust pass; the M3 histogram GLSL and its CPU twin are SourceStats::CoarseHistBody / CoarseL1 and the cut rule is CutFadeJudge::TrustCut"
     },
     {
      "file": "src/VP-V/modules/motion/vector_delivery/DejudderWarp.h",
      "pattern": "cutHistogram",
-     "kind": "residual",
-     "reason": "matcher M3 GPU 16-bin cut histogram threshold (setting of the GLSL trust pass); migrate with the matcher package"
+     "kind": "false_positive",
+     "reason": "the dejudder_cut_histogram setting (threshold handed to CutFadeJudge::TrustCut / the unit's trust cut lines); no histogram computation here"
     }
    ]
   },
   "U7": {
    "name": "cut_fade_flash_judge",
-   "blocking": false,
-   "baseline_duplicates": 1,
+   "blocking": true,
+   "baseline_duplicates": 0,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/input/signal/HdrInference.cpp",
@@ -353,9 +353,9 @@
     },
     {
      "file": "src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
-     "pattern": "meanLuma",
-     "kind": "residual",
-     "reason": "AdaptiveDownscale's GPU scalar pass keeps its own 20-code mean-step cut (state_io shader, AdaptiveDownscale.cpp); migrate with the downscale package and a GPU run"
+     "pattern": "float meanLuma = 0\\.0f;",
+     "kind": "false_positive",
+     "reason": "carries the frame's mean luma (8-bit codes) read back from the scalar pass as data; the cut rule is CutFadeJudge::MeanStepCut / MeanStepCutLine"
     }
    ]
   },
