@@ -257,6 +257,14 @@ def nframes_of(ctx, m):
     return ctx.gops * gop_of(m)
 
 
+def pad_filter(m):
+    """The black-bar pad of a letterboxed master (empty text otherwise), with a trailing comma; every path that decodes the master file must use it."""
+    return ("pad=%d:%d:0:%d:color=black," % (m["w"], m["h"], m["pad"]["y"])) if m.get("pad") else ""
+
+
+DARK2_FILTER = "lutyuv=y='clip((val-minval)*0.56+minval,minval,maxval)'"      # two stops down in a ~gamma 2.4 domain
+
+
 # ---------------------------------------------------------------- master timeline graph
 def master_graph(ctx, m, nframes, pix, label="m", ss0=False):
     """Inputs ([(path, ss_seconds|None)]) and graph text producing [label]: the master window of `nframes` native frames,
@@ -291,7 +299,7 @@ def master_graph(ctx, m, nframes, pix, label="m", ss0=False):
             ss = max(0.0, part["ss"] - 0.25 / part["fps"])
         inputs.append((part["path"], ss))
         lab = label if len(uses) == 1 else "p%d" % k
-        padf = ("pad=%d:%d:0:%d:color=black," % (m["w"], m["h"], m["pad"]["y"])) if m.get("pad") else ""
+        padf = pad_filter(m)
         lines.append("[%d:v]fps=fps=%s:round=near,trim=start_frame=0:end_frame=%d,setpts=PTS-STARTPTS,%sformat=%s[%s]" % (k, fstr(fps), take, padf, pix, lab))
         labels.append(lab)
     if len(uses) > 1:
@@ -391,7 +399,7 @@ def pre_filter(ctx, m, pre, nframes, fps):
         return None
     if pre == "dark2":
         # two stops down in a ~gamma 2.4 domain (0.25^(1/2.4) = 0.56): luma gain about black
-        return "lutyuv=y='clip((val-minval)*0.56+minval,minval,maxval)'"
+        return DARK2_FILTER
     if pre == "fades":
         return "FADES"
     raise ValueError(pre)
@@ -987,6 +995,9 @@ def build_r7(ctx):
             add_reel(ctx, Reel("R7.menu_%s.%s" % (label, mid), "R7", "stream -> synthetic 4K menu -> stream, %s transition" % label, mid, segs))
 
 
+R8_DARK_FULL = ["anim30_bbb", "film24_tos", "docu25_eclipse_flight"]      # ~34 min together
+
+
 def build_r8(ctx):
     def S(m, r, kernel="lanczos3"):
         return full_chain(ctx, m, r, kernel)
@@ -999,6 +1010,15 @@ def build_r8(ctx):
         r2 = need_rung(ctx, mid, "down", (1, 2), pre="dark2")
         add_reel(ctx, Reel("R8.dark2.%s.native" % mid, "R8", "two stops darker, native 4K encode", mid, [seg_stream(("rung", rn.id), 0, nf, {"bits": 10, "native": True})]))
         add_reel(ctx, Reel("R8.dark2.%s.r1of2" % mid, "R8", "two stops darker, 1/2 upscale", mid, [seg_stream(("rung", r2.id), 0, nf, S(m, r2))]))
+    # full-length two-stops-darker reels from the as-is native masters: the darkening runs in the on-the-fly chain, so they cost no encodes
+    for mid in R8_DARK_FULL:
+        m = avail(ctx, mid, need_8bit=True)
+        if not m or not m.get("full_frames"):
+            continue
+        reel = Reel("R8.dark2.full.%s.asis" % mid, "R8", "two stops darker (on the fly), native master as-is, full length", mid,
+                    [seg_stream(("master", mid), 0, m["full_frames"], {"bits": 8, "native": True, "dark": True}, note="dark2 on the fly, full length", full=True)])
+        reel.prio = 0
+        add_reel(ctx, reel)
     for mid, tagp, label, pre in (("flat_sol", "flat", "flat CG / anime", None), ("synth_credits", "credits", "credits scroll", None), ("grain60_nocturne", "grain60", "HDR-origin film grain 60p", None),
                                   ("nat30_nikon", "fades", "fades through black", "fades")):
         m = avail(ctx, mid)
@@ -1150,6 +1170,10 @@ def compile_reel(ctx, reel):
                 ss = max(0.0, base_ss + seg["a"] / master_fps(m) - 0.25 / master_fps(m))
                 idx = add_input(part["path"], ss if ss > 0 else None)
                 head = "[%d:v]fps=fps=%s:round=near,trim=start_frame=0:end_frame=%d,setpts=PTS-STARTPTS" % (idx, fstr(in_fps), n_in)
+                if m.get("pad"):                 # the as-is master file is the unpadded delivery: pad exactly like master_graph
+                    head += "," + pad_filter(m).rstrip(",")
+                if chain.get("dark"):            # two stops darker, applied on the fly (no encode)
+                    head += "," + DARK2_FILTER
             flt = [head]
             for st in chain.get("stages", []):
                 flt.append(scale_filter(ctx, st["kernel"], st["w"], st["h"]))
@@ -1174,8 +1198,8 @@ def compile_reel(ctx, reel):
                     part = m["parts"][0]
                     ss = max(0.0, part["ss"] + pip["a"] / master_fps(m) - 0.25 / master_fps(m))
                     pidx = add_input(part["path"], ss)
-                    lines.append("[%d:v]fps=fps=%s:round=near,trim=start_frame=0:end_frame=%d,setpts=PTS-STARTPTS,scale=%d:%d:flags=lanczos+accurate_rnd+bitexact,format=yuv420p10le[pip%d_%d]" %
-                                 (pidx, fstr(in_fps), n_in, pip["w"], pip["h"], si, pi))
+                    lines.append("[%d:v]fps=fps=%s:round=near,trim=start_frame=0:end_frame=%d,setpts=PTS-STARTPTS,%sscale=%d:%d:flags=lanczos+accurate_rnd+bitexact,format=yuv420p10le[pip%d_%d]" %
+                                 (pidx, fstr(in_fps), n_in, pad_filter(m), pip["w"], pip["h"], si, pi))
                     nxt = "o%d_%d" % (si, pi)
                     lines.append("[%s][pip%d_%d]overlay=x=%d:y=%d:enable='between(t,%s,%s)':format=yuv420p10[%s]" % (base, si, pi, pip["x"], pip["y"], pip["start"], pip["end"], nxt))
                     base = nxt
@@ -1922,6 +1946,15 @@ def selftest():
     t = seg_truth(ctx, reel, compile_reel(ctx, reel)["segs"][0])
     aa = t["active_area_out"]      # even-rounded in the 1080 rung (111 -> 112, 857 -> 856): within 2 rows of the master's bars
     assert abs(aa["y"] - 222) <= 2 and abs(aa["h"] - 1714) <= 2 and aa["w"] == 3840 and abs(t["n_active_coded"]["y"] - 857) <= 1 and t["truth_n"] == dict(x=1920, y=1080), t
+    # every as-is reel of a padded master pads each of its master inputs (decoded size == manifest size == truth raster 3840x2160)
+    for rl in ctx.reels:
+        comp = compile_reel(ctx, rl)
+        mm = ctx.masters[rl.master]
+        nmaster_inputs = sum(1 for i in comp["inputs"] if i["path"] == P(mm["parts"][0]["path"])) if mm["parts"] else 0
+        if mm.get("pad") and nmaster_inputs:
+            assert comp["filter_complex"].count("pad=3840:2160:0:222:color=black") >= nmaster_inputs, rl.id
+    dk = [rl for rl in ctx.reels if rl.id.startswith("R8.dark2.full.")]
+    assert len(dk) == 3 and all("lutyuv" in compile_reel(ctx, rl)["filter_complex"] for rl in dk)
     assert not any(rl.master == "dark25_eclipse_totality" and rl.family == "R2" for rl in ctx.reels) and any(rl.master == "docu30_roman" and rl.family == "R2" for rl in ctx.reels)
     # rung budget estimate stays far below the 15 GB cap
     # Latin square: every kernel at every ratio among the clean reels; clean reels are 60 s; R1 is full length

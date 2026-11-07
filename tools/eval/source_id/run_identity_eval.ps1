@@ -158,6 +158,9 @@ try {
         foreach ($d in (Get-Descendants $proc.Id)) { try { Stop-Process -Id ([int]$d.ProcessId) -Force -ErrorAction Stop; Log ("stopped own child PID {0} ({1})" -f $d.ProcessId, $d.Name) } catch { } }
         if (-not $proc.HasExited) { try { Stop-Process -Id $proc.Id -Force } catch { } }
     }
+    # a STOP left by this run (timeout, or the run was cut before a reel ended) is consumed so a rerun of the same -Out runs
+    $stopFile = Join-Path $Out 'STOP'
+    if (Test-Path $stopFile) { try { Move-Item -Path $stopFile -Destination ($stopFile + '.done.' + (Get-Date -Format 'yyyyMMdd-HHmmss')) -Force; Log 'STOP consumed' } catch { } }
     if ($slot -and (Test-Path $slot)) { Remove-Item -Path $slot -Recurse -Force -ErrorAction SilentlyContinue; Log "released $slot" }
 }
 
