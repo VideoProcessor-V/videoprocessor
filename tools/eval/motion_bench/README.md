@@ -12,6 +12,9 @@ except `run_motion_bench.ps1 -Run`.
 | `run_motion_bench.ps1` | runner skeleton; dry run unless `-Run` |
 | `summarize_bench.py` | merges per-run `VP_MOTION_BENCH` csv files into `summary.csv` + `summary.md` |
 | `offline_adapter.py` | no-camera vs camera-guided comparison through `tools/camera_eval match`; optional RAFT reference |
+| `synth_gt.py` | synthetic sequences with exact flow, occlusion band, labels, small-fast-object masks (cv2 + numpy) |
+| `offline_matrix.py` | offline matrix stages `prep` / `gpu` / `cpu` / `report` (NVOF seed, engine, engine + camera, RAFT) |
+| `run_offline_matrix.ps1` | driver: GPU lock, mains / PRIORITY checks, one sequence per GPU chunk, writes `<DataRoot>\results\summary.md/csv` |
 
 ## VP_MOTION_BENCH csv (one row per pair)
 Header: `pair,seq,switch_mask,d,confidence,reason,narrow,full,escalated,skipped,governor_state,gpu_ms`
@@ -65,8 +68,38 @@ released and retaken), refuses while `D:\codex\build-slots\PRIORITY` exists, rel
 plan in a single invocation, and writes only a per-pair CSV of block EPE statistics (all / camera / other blocks). It does **not**
 write `.flo` files and does not take two arbitrary frames: it needs the YUV sequence plus vectors. So the adapter cannot produce
 `pred_off.flo` / `pred_on.flo` today; it runs `match` and writes `match_summary.csv` (mean over pairs of every `*_mean` column).
-A `.flo` dump option in `camera_eval.cpp` would be needed for score_flow-based comparison; until then `--score-flo` scores `.flo`
-files produced elsewhere (`--pred-off`, `--pred-on`, `--gt`).
+`camera_eval match --dump-flo DIR` now writes `DIR/pair_%06d/pred_off.flo` and `pred_on.flo` (dense, source px, block vectors
+expanded; CSV unchanged); `--score-flo` scores such files (`--pred-off`, `--pred-on`, `--gt`).
 
 `--raft --frame0 a.png --frame1 b.png --out raft.flo` writes a torchvision `raft_large` flow (run with `D:\hfr\venv` python). Imports are
 guarded, so the file imports without torch. It does not download: the pretrained weights must already be in the torch cache.
+
+## Offline matrix (R1-MB)
+```
+.
+.\run_offline_matrix.ps1 [-DataRoot D:\codex\videoprocessor\r1cam-bench-data] [-Stages synth,prep,gpu,cpu,report] [-Only name,...] [-DryRun]
+1cam-bench-data] [-Stages synth,prep,gpu,cpu,report] [-Only name,...] [-DryRun]
+```
+Contenders on every sequence: `nvof_seed` (tools/td-cli `nvof_dump`, forward vectors, 4 px cells), `engine` (camera_eval `match`, CPU
+ReferenceMatcher, plan off), `engine_camera` (plan on; the plan is built causally from the camera fit of the NVOF vectors of the previous
+pair), `raft` (torchvision raft_large, BSD, cached weights only, luma replicated to 3 channels, 12 iterations). All contenders see only the
+luma of the same 10-bit YUV. Sets: synthetic (`synth_gt.py`: pans integer / sub-pixel / slow, zoom, rotation, small fast objects <= 32 px at
+20-28 px/frame, large objects with occlusions, grain, zoom + rotation + objects; 1280x720, 12 frames, pairs 2..11) and two real clips
+(Tears of Steel pan from `td-real-vectors-out`, Cosmos Laundromat long take; 32 frames). On real clips RAFT is the reference, not ground
+truth: scores there are "agreement with RAFT", camera labels come from camera_eval `fit` on the RAFT fields, the occlusion band from RAFT
+forward/backward inconsistency. Synthetic ground truth is checked by warping frame t onto t-1 (`gt_warp_mae` in `meta.json`, ~0.002-0.003
+in 0..1 gray, i.e. interpolation error only). Pooling: pixel counts weight EPE and outlier percentages; TC is the mean over pairs. Cost proxy
+= matcher candidate evaluations and wall ms, guided (plan on) against full (plan off), plus escalated / narrow blocks.
+Run-twice: `score_flow.py` scores every pair twice and requires identical bytes; the matcher dump of `pan_small_fast` is run twice and
+hashed (`determinism.txt`). Dense predictions are deleted after scoring unless `--keep-flo`.
+
+### Ground-truth data licences
+- **MPI Sintel** (http://sintel.is.tue.mpg.de/license, read 2026-11-07): single-user, non-exclusive, non-transferable, free right for
+  non-commercial scientific research, non-commercial education and non-commercial artistic projects; commercial use, use in a commercial
+  product or service, and training for commercial / military / surveillance uses are prohibited; no copying, sharing or redistribution
+  without written permission (one archive copy allowed); the two Butler / Wulff ECCV 2012 papers must be cited in publications; AS IS.
+  "Testing" or "benchmarking a software product" is not named. **Decision: not downloaded** (unclear whether benchmarking a software
+  project falls under non-commercial research; download requires accepting the terms, which needs the owner). Needs: owner decision.
+  Where: MPI-Sintel-training_images.zip (1.7 GB) + MPI-Sintel-training_extras.zip (3.1 GB, flow + occlusions).
+- **KITTI**: not downloaded (owner OK required, non-commercial licence).
+- Real clips: Tears of Steel (CC BY 3.0, Blender Foundation) and Cosmos Laundromat (CC BY 4.0), see D:	estclips\README.md.
