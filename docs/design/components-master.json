@@ -702,6 +702,7 @@
         "src/VP-V/modules/motion/consumers/FrameInterpolator.h",
         "src/VP-V/modules/motion/consumers/OcclusionMaskHook.h",
         "src/VP-V/modules/motion/consumers/FillerEdgeEntry.h",
+        "src/VP-V/modules/motion/consumers/tests/FillerEdgeEntryTests.cpp",
         "src/VP-V/modules/motion/consumers/DejudderCacheStage.h",
         "src/VP-V/modules/motion/consumers/DejudderCacheStage.cpp"
       ],
@@ -1194,6 +1195,7 @@
         "shaders/Temporal sigma-delta.glsl",
         "src/VP-V/modules/output/dither/SigmaDeltaVectors.h",
         "src/VP-V/modules/output/dither/OutputDomainMap.h",
+        "src/VP-V/modules/output/dither/tests/OutputDomainMapTests.cpp",
         "src/VP-V/modules/output/dither/DitherSlot.h",
         "src/VP-V/modules/output/dither/DitherNeed.h",
         "src/VP-V/modules/output/dither/DitherNeedGlsl.h",
