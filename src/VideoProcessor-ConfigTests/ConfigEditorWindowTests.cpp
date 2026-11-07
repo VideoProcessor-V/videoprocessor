@@ -10870,8 +10870,6 @@ static std::vector<CoverageSource> CoverageSources()
     std::vector<std::string> retiredKeys;
     for (const char* key : { "fix_scene_cooldown", "dejudder_picture_area", "dither_vectors_new_frame" })
         if (RetiredSettings::FindKey(key) && !rendererKeySet.count(key)) retiredKeys.push_back(key);
-    // P3 (Bill-identical lists, 2026-11-07): the list functions hold the host's keys only; the VP-V keys of
-    // a list are added by MainConfigSchema::WithVpKeys (the list as the startup check validates it).
     return {
         { "led_drive", { "led_drive" }, keysOf(LedDrive::LedDriveRules()) },
         { "projector", { "projector" }, keysOf(LedDrive::ProjectorRules()) },

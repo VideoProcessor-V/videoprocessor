@@ -269,8 +269,9 @@ namespace MainConfigSchema
 		return rules;
 	}
 
-	// VPV-HOOK: a rule list as the host validates it: the host's own rules (the list functions above are
-	// exactly the host's, in its order) followed by the VP-V keys of that list. In a host-only pass
+	// VPV-HOOK
+	// A rule list as the host validates it: the host's own rules (the list functions above are exactly the
+	// host's, in its order) followed by the VP-V keys of that list. In a host-only pass
 	// (SchemaHooks::HostOnlyScope) the VP-V keys are accepted without a value check, so that only the
 	// host's faults can be reported.
 	inline std::vector<ConfigSchema::KeyRule> WithVpKeys(const char* list, std::vector<ConfigSchema::KeyRule> rules)
@@ -278,10 +279,11 @@ namespace MainConfigSchema
 		SchemaHooks::AppendRules(list, rules);
 		return rules;
 	}
+	// VPV-HOOK-END
 
-	// The host's startup checks, in the host's order and with the host's texts. (VPV-HOOK: this is the host's
-	// Validate, renamed; Validate below runs it and then the VP-V group.)
-	inline bool ValidateHostChecks(const ConfigFile& config, std::string& error)
+	// The host's startup checks, in the host's order and with the host's texts: the host's Validate,
+	// renamed; Validate below runs it and then the VP-V group.
+	inline bool ValidateHostChecks(const ConfigFile& config, std::string& error)   // VPV-HOOK
 	{
 		error.clear();
 		const auto recoveryRule = BoundedInvalidCaptureRecoveryRule();
@@ -438,7 +440,8 @@ namespace MainConfigSchema
 			config, "logging", loggingRules, error);
 	}
 
-	// VPV-HOOK: the host's checks come first and alone decide which fault is reported when the host finds one,
+	// VPV-HOOK
+	// The host's checks come first and alone decide which fault is reported when the host finds one,
 	// whatever VP-V faults the file also has (the VP-V keys are checked in place, in their own section order,
 	// so a VP-V fault can precede a host fault in the file; a host-only pass reports the host's first).
 	inline bool Validate(const ConfigFile& config, std::string& error)
@@ -451,4 +454,5 @@ namespace MainConfigSchema
 			error = hostError;
 		return false;
 	}
+	// VPV-HOOK-END
 }

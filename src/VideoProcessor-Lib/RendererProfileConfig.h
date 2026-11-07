@@ -1415,7 +1415,7 @@ namespace RendererProfileConfig
 				return false;
 			}
 
-		const std::set<std::string> expressionVariables = ProfileSchemaHooks::WithExpressionVariables({   // VPV-HOOK: the host's list, then the VP-V variables
+		const std::set<std::string> expressionVariables = ProfileSchemaHooks::WithExpressionVariables({   // VPV-HOOK
 			"eotf", "transfer", "colorspace", "primaries", "format",
 			"hdr_metadata", "interlaced", "scan", "source_rate",
 			"cadence", "width", "height", "resolution", "renderer", "actual_refresh",
@@ -1996,14 +1996,16 @@ namespace RendererProfileConfig
 	{
 		if (!ReadUnchecked(config, model, error))
 		{
-			// VPV-HOOK: the VP-V keys are checked in place, so a VP-V fault can precede a host fault in the
-			// file. The host's own order decides: a host-only pass (the VP-V keys accepted unchecked) reports
+			// VPV-HOOK
+			// The VP-V keys are checked in place, so a VP-V fault can precede a host fault in the file.
+			// The host's own order decides: a host-only pass (the VP-V keys accepted unchecked) reports
 			// the host's first fault when there is one; a file with only VP-V faults keeps the VP-V message.
 			const ProfileSchemaHooks::HostOnlyScope hostOnly;
 			Model hostModel;
 			std::string hostError;
 			if (!ReadUnchecked(config, hostModel, hostError))
 				error = hostError;
+			// VPV-HOOK-END
 			return false;
 		}
 		AppendContentGateWarnings(model);
@@ -2142,7 +2144,7 @@ namespace RendererProfileConfig
 						{ return ValidateBaseSetting(key, value); },
 					"a valid renderer value"
 				});
-			ProfileSchemaHooks::AppendLegacyDisplayRules(displayRules);   // VPV-HOOK: the VP-V keys of the legacy section, after the host's
+			ProfileSchemaHooks::AppendLegacyDisplayRules(displayRules);   // VPV-HOOK
 			if (!ConfigSchema::ValidateSection(
 				config, displaySection, displayRules, error))
 				return false;
@@ -2276,7 +2278,7 @@ namespace RendererProfileConfig
 				if (!profile.when.empty() &&
 					(!profile.whenExpression.Compile(profile.when, error, true) ||
 					 !ValidateExpressionVariables(profile.whenExpression,
-						ProfileSchemaHooks::WithExpressionVariables({   // VPV-HOOK: the host's list, then the VP-V variables
+						ProfileSchemaHooks::WithExpressionVariables({   // VPV-HOOK
 						  "eotf", "transfer", "colorspace", "primaries", "format",
 						  "hdr_metadata", "interlaced", "scan", "source_rate",
 						  "cadence", "width", "height", "resolution", "renderer",

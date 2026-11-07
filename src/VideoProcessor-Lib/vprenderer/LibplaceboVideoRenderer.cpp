@@ -12320,7 +12320,7 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		changedFields = DescribeProfileSettingsDelta(
 			publishedActiveSettings, settings);
-		RendererSettingsHooks::AppendDeltaText(publishedActiveSettings, settings, changedFields);   // VPV-HOOK: the VP-V names, after the host's complete text
+		RendererSettingsHooks::AppendDeltaText(publishedActiveSettings, settings, changedFields);   // VPV-HOOK
 		return LiveProfileSettingsCompatible(publishedActiveSettings, settings);
 	}
 
