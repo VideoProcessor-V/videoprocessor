@@ -982,6 +982,12 @@ inline void AppendCameraGuideProduct(std::vector<ProductDecl>& decls)
 // open item: short-queue substitutes for the lead edges). Nothing is silently dropped: the contract table records the full
 // intended list, which a test compares.
 // Record histories are SECONDS of source time; the frame count follows the measured source rate (the same rule as the guide lag).
+// The depth is DERIVED FROM THE CONFIGURED QUEUE (owner ruling 2026-11-07), not a fixed number of seconds:
+//   history_seconds = max(floor_seconds, queue_multiple x queue_frames x measured source period)
+// where queue_frames = render-ahead R + lane lead L + look-ahead walk frames (QueueFramesFor), the floor is the record's own minimum
+// (2.0 s quality_pattern, 0.25 s td.trail_summary) and queue_multiple is the record's declared share of the queue (1 for both today;
+// a later best-frame detector can declare more, for example 4 s on a long queue). frames = HistoryFramesFor(history_seconds, period).
+// The range is therefore floor .. kRecordHistoryMax frames, with the cap note below when the queue (not the rate) asks for more.
 // `sourcePeriodMs <= 0` (unmeasured: the status/planning view, tests) declares the field's maximum, kRecordHistoryMax: the records
 // are tens of bytes, so the bound costs kilobytes and never under-declares. `minFrames` keeps the structural floor of the record
 // (the lags its readers use). A rebuild with the measured period replaces the figure (SkeletonProducts(..., sourcePeriodMs)).
@@ -993,6 +999,19 @@ inline void AppendCameraGuideProduct(std::vector<ProductDecl>& decls)
 constexpr unsigned kSlotCountMax = 255;
 constexpr unsigned kRingHeadroomFrames = 32;
 constexpr uint8_t kRecordHistoryMax = static_cast<uint8_t>(kSlotCountMax - kRingHeadroomFrames);
+// Frames the configured queue holds: render-ahead R + lane lead L + the look-ahead walk (the GraphSettings terms the skeleton knows).
+inline unsigned QueueFramesFor(unsigned renderAhead, unsigned laneLead, unsigned lookAheadFrames)
+{
+    return renderAhead + laneLead + lookAheadFrames;
+}
+// max(floor, queue_multiple x queue_frames x period). Unmeasured (period <= 0): the floor (HistoryFramesFor then declares the cap).
+inline double RecordHistorySeconds(double floorSeconds, double queueMultiple, unsigned queueFrames, double sourcePeriodMs)
+{
+    if (!(sourcePeriodMs > 0.0))
+        return floorSeconds;
+    const double queueSeconds = queueMultiple * double(queueFrames) * sourcePeriodMs / 1000.0;
+    return queueSeconds > floorSeconds ? queueSeconds : floorSeconds;
+}
 inline uint8_t HistoryFramesFor(double seconds, double sourcePeriodMs, uint8_t minFrames)
 {
     if (!(sourcePeriodMs > 0.0) || !(seconds > 0.0))
@@ -1012,22 +1031,41 @@ constexpr double kQualityPatternHistorySeconds = 2.0;   // P15 looks back over t
 constexpr uint8_t kQualityPatternMinFrames = 8;         // structural: the lags the pattern readers use (lead 2 + lag 1 + the frame)
 constexpr double kTdTrailSummaryHistorySeconds = 0.25;  // source identity folds the last quarter second of trail summaries
 constexpr uint8_t kTdTrailSummaryMinFrames = 3;         // structural: the frame, lag 1 (source identity) and one in flight
-inline uint8_t QualityPatternHistoryFrames(double sourcePeriodMs) { return HistoryFramesFor(kQualityPatternHistorySeconds, sourcePeriodMs, kQualityPatternMinFrames); }
-inline uint8_t TdTrailSummaryHistoryFrames(double sourcePeriodMs) { return HistoryFramesFor(kTdTrailSummaryHistorySeconds, sourcePeriodMs, kTdTrailSummaryMinFrames); }
+// The declared queue multiple of each record: how many queues' worth of source time it keeps (1 = exactly the queue).
+constexpr double kQualityPatternQueueMultiple = 1.0;
+constexpr double kTdTrailSummaryQueueMultiple = 1.0;
+inline uint8_t QualityPatternHistoryFrames(double sourcePeriodMs, unsigned queueFrames = 0)
+{
+    return HistoryFramesFor(RecordHistorySeconds(kQualityPatternHistorySeconds, kQualityPatternQueueMultiple, queueFrames, sourcePeriodMs),
+                            sourcePeriodMs, kQualityPatternMinFrames);
+}
+inline uint8_t TdTrailSummaryHistoryFrames(double sourcePeriodMs, unsigned queueFrames = 0)
+{
+    return HistoryFramesFor(RecordHistorySeconds(kTdTrailSummaryHistorySeconds, kTdTrailSummaryQueueMultiple, queueFrames, sourcePeriodMs),
+                            sourcePeriodMs, kTdTrailSummaryMinFrames);
+}
 // "" when no record history is capped at this measured period, else the plain note for status / Fallbacks (the cap is never silent):
-// "quality pattern history capped at 223 frames (source rate above 111.5 fps)". The rate where the cap starts is frames / seconds.
+// "quality pattern history capped at 223 frames (source rate above 111.5 fps)". The rate where the cap starts is frames / floor seconds.
+// When the QUEUE sets the depth (queue seconds above the floor) the cap does not depend on the rate: "... capped at 223 frames (the
+// configured queue asks for N frames)". `queueFrames` = QueueFramesFor(...) of the graph being described (0: no queue term).
 // `qualityPattern` / `trailSummary`: only the records that are actually in the graph being described (ProductGraph.h GraphHistoryCapNote).
-inline std::string RecordHistoryCapNote(double sourcePeriodMs, bool qualityPattern = true, bool trailSummary = true)
+inline std::string RecordHistoryCapNote(double sourcePeriodMs, bool qualityPattern = true, bool trailSummary = true, unsigned queueFrames = 0)
 {
     std::string note;
-    const struct { const char* name; double seconds; bool present; } records[] = {
-        { "quality pattern", kQualityPatternHistorySeconds, qualityPattern }, { "td trail summary", kTdTrailSummaryHistorySeconds, trailSummary } };
+    const struct { const char* name; double floorSeconds; double queueMultiple; bool present; } records[] = {
+        { "quality pattern", kQualityPatternHistorySeconds, kQualityPatternQueueMultiple, qualityPattern },
+        { "td trail summary", kTdTrailSummaryHistorySeconds, kTdTrailSummaryQueueMultiple, trailSummary } };
     for (const auto& r : records) {
-        if (!r.present || !RecordHistoryCapped(r.seconds, sourcePeriodMs))
+        const double seconds = RecordHistorySeconds(r.floorSeconds, r.queueMultiple, queueFrames, sourcePeriodMs);
+        if (!r.present || !RecordHistoryCapped(seconds, sourcePeriodMs))
             continue;
-        char text[160] = {};
-        std::snprintf(text, sizeof(text), "%s history capped at %u frames (source rate above %.1f fps)", r.name,
-                      unsigned(kRecordHistoryMax), double(kRecordHistoryMax) / r.seconds);
+        char text[200] = {};
+        if (seconds > r.floorSeconds)   // the queue sets the depth: the cap is a frame count, whatever the rate
+            std::snprintf(text, sizeof(text), "%s history capped at %u frames (the configured queue asks for %u frames)", r.name,
+                          unsigned(kRecordHistoryMax), unsigned(std::ceil(r.queueMultiple * double(queueFrames) - 1e-9)));
+        else
+            std::snprintf(text, sizeof(text), "%s history capped at %u frames (source rate above %.1f fps)", r.name,
+                          unsigned(kRecordHistoryMax), double(kRecordHistoryMax) / r.floorSeconds);
         note += (note.empty() ? "" : "; ") + std::string(text);
     }
     return note;
@@ -1035,7 +1073,7 @@ inline std::string RecordHistoryCapNote(double sourcePeriodMs, bool qualityPatte
 constexpr uint32_t kQualityPatternBytes = 64;
 constexpr uint32_t kCodingEvidenceSummaryBytes = 256;
 constexpr uint32_t kTdTrailSummaryBytes = 256;
-inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, double sourcePeriodMs = 0.0)
+inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, double sourcePeriodMs = 0.0, unsigned queueFrames = 0)
 {
     using detail::AddInput;
     using detail::AddLead;
@@ -1045,8 +1083,8 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
     const CounterMask content = Bit(kFull) | Bit(kContinuity);
     const CounterMask tdSettings = Bit(kSettingsRebase) | Bit(kSettingsAnalysis);
     const CounterMask rebased = content | Bit(kRebaseH) | Bit(kRebaseV);
-    const uint8_t qualityPatternHistory = QualityPatternHistoryFrames(sourcePeriodMs);
-    const uint8_t trailSummaryHistory = TdTrailSummaryHistoryFrames(sourcePeriodMs);
+    const uint8_t qualityPatternHistory = QualityPatternHistoryFrames(sourcePeriodMs, queueFrames);
+    const uint8_t trailSummaryHistory = TdTrailSummaryHistoryFrames(sourcePeriodMs, queueFrames);
 
     // coding_evidence (P16): per 8x8 block 8 B (hash32, blockiness u16, copy u8, phase u8) + a 256 B per-frame summary; history 2.
     ProductDecl ce = Make(kCodingEvidence, "coding_evidence", "coding evidence (P16)", Backend::GpuCompute, 2, Tier::T0, rebased,
@@ -1064,7 +1102,7 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
     ce.refRenderMs = 0.2f;
     decls.push_back(ce);
 
-    // quality_pattern (P15): a CPU POD (~64 B) per unique source frame, history = kQualityPatternHistorySeconds of the measured source rate, a per-frame LANE product (not P14's held state):
+    // quality_pattern (P15): a CPU POD (~64 B) per unique source frame, history = max(kQualityPatternHistorySeconds, queue x period) at the measured source rate, a per-frame LANE product (not P14's held state):
     // role at lead 2. Short-queue substitute: P15c (visible "frame pattern: provisional").
     ProductDecl qp = Make(kQualityPattern, "quality_pattern", "frame quality pattern (P15)", Backend::Cpu, qualityPatternHistory,
                           Tier::T0, content, Bit(kSettingsAnalysis));
@@ -1145,7 +1183,7 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
     tm.refRenderMs = 0.1f;
     decls.push_back(tm);
 
-    // td.trail_summary: a CPU record per frame (256 B, history = kTdTrailSummaryHistorySeconds of the measured source rate) for source identity (lag >= 1), status and logs.
+    // td.trail_summary: a CPU record per frame (256 B, history = max(kTdTrailSummaryHistorySeconds, queue x period) at the measured source rate) for source identity (lag >= 1), status and logs.
     ProductDecl ts = Make(kTdTrailSummary, "td.trail_summary", "td trail summary", Backend::Cpu, trailSummaryHistory, Tier::T1, content,
                           Bit(kSettingsAnalysis));
     AddInput(ts, kTdBlocks, 0);
@@ -1160,7 +1198,9 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
 // products, P14, p7g, the temporal-detail engine products and P14g source_geometry, in fixed id order. THE one assembly point.
 // `compactGrain` / `compactChroma`: the GRANTED storage of P10 (luma) and P10c (chroma planes).
 // `sourcePeriodMs`: the measured source frame period (0 = unmeasured), which sets the frame counts of the record histories.
-inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double sourcePeriodMs = 0.0)
+// `queueFrames`: QueueFramesFor(render-ahead, lane lead, look-ahead) of the configured queue; with the period it lifts a record history
+// above its floor (RecordHistorySeconds). 0 = no queue term (the floor).
+inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double sourcePeriodMs = 0.0, unsigned queueFrames = 0)
 {
     std::vector<ProductDecl> d = FirstProducts().All();
     AppendCameraProducts(d);
@@ -1170,7 +1210,7 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double s
     AppendTemporalDetailProducts(d);
     AppendSourceIdentityProduct(d);
     AppendCameraGuideProduct(d);
-    AppendTemporalDetailEngineProducts(d, sourcePeriodMs);
+    AppendTemporalDetailEngineProducts(d, sourcePeriodMs, queueFrames);
     AppendSourceGeometryProduct(d);   // wave S2: P14g, appended after the doc 72 list
     return Registry(std::move(d));
 }

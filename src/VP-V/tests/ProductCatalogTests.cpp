@@ -566,6 +566,55 @@ namespace ProductCatalogTestsNs
 			Assert::IsFalse(FallbackCatalog::SkeletonHistoryCapped("").engaged);
 		}
 
+		TEST_METHOD(RecordHistoriesAreDerivedFromTheConfiguredQueue)
+		{
+			// history_seconds = max(floor, queue multiple x (R + L + look-ahead) x period); frames = ceil(seconds / period), capped at kRecordHistoryMax.
+			const double p24 = 1001.0 / 24.0;
+			const double p60 = 1001.0 / 60.0;
+			Assert::AreEqual(unsigned(100), QueueFramesFor(8, 4, 88));
+			// The floor holds on a short queue (7 frames = 0.29 s at 24 p): 2 s of quality pattern = 48 frames, 0.25 s of trail summary = 6.
+			const unsigned shortQ = QueueFramesFor(2, 3, 2);
+			Assert::AreEqual(48, int(QualityPatternHistoryFrames(p24, shortQ)));
+			Assert::AreEqual(int(QualityPatternHistoryFrames(p24)), int(QualityPatternHistoryFrames(p24, shortQ)));
+			Assert::AreEqual(6, int(TdTrailSummaryHistoryFrames(p24, shortQ)));
+			Assert::AreEqual(int(TdTrailSummaryHistoryFrames(p24)), int(TdTrailSummaryHistoryFrames(p24, shortQ)));
+			// A long queue gives a longer history: 100 frames = 4.17 s at 24 p, above both floors. The same 100 frames are only 1.67 s at 60 p,
+			// below the 2 s floor, so the quality pattern keeps its floor there (120 frames) while the trail summary follows the queue.
+			Assert::AreEqual(100, int(QualityPatternHistoryFrames(p24, 100)));
+			Assert::AreEqual(100, int(TdTrailSummaryHistoryFrames(p24, 100)));
+			Assert::AreEqual(int(QualityPatternHistoryFrames(p60)), int(QualityPatternHistoryFrames(p60, 100)));
+			Assert::AreEqual(100, int(TdTrailSummaryHistoryFrames(p60, 100)));
+			// The registry carries the derived depths (the quality pattern, its causal substitute and the trail summary).
+			const Registry reg100 = SkeletonProducts(false, false, p24, 100);
+			Assert::IsTrue(reg100.Validate());
+			Assert::AreEqual(100, int(reg100.Get(kQualityPattern).history));
+			Assert::AreEqual(100, int(reg100.Get(kQualityPatternCausal).history));
+			Assert::AreEqual(100, int(reg100.Get(kTdTrailSummary).history));
+			Assert::AreEqual(48, int(SkeletonProducts(false, false, p24, 0).Get(kQualityPattern).history));
+			// Unmeasured period: today's behaviour (the field maximum), whatever the queue.
+			Assert::AreEqual(int(kRecordHistoryMax), int(QualityPatternHistoryFrames(0.0, 300)));
+			Assert::IsTrue(RecordHistoryCapNote(0.0, true, true, 300).empty());
+			// The cap and its visible note: exactly kRecordHistoryMax frames of queue is not capped, one more is, and the note names the queue.
+			Assert::IsTrue(RecordHistoryCapNote(p24, true, true, kRecordHistoryMax).empty());
+			const std::string over = RecordHistoryCapNote(p24, true, true, unsigned(kRecordHistoryMax) + 1u);
+			Assert::IsTrue(over.find("quality pattern history capped at 223 frames (the configured queue asks for 224 frames)") != std::string::npos, L"the queue cap is named");
+			Assert::IsTrue(over.find("td trail summary history capped at 223 frames (the configured queue asks for 224 frames)") != std::string::npos);
+			Assert::AreEqual(int(kRecordHistoryMax), int(QualityPatternHistoryFrames(p24, 300)));
+			// A rate-driven cap keeps its own wording, whatever a short queue adds.
+			Assert::IsTrue(RecordHistoryCapNote(1000.0 / 240.0, true, true, 7).find("quality pattern history capped at 223 frames (source rate above 111.5 fps)") != std::string::npos);
+			// Through a built graph: the note reads the graph's own queue (R + L + look-ahead walk), and the capped node holds the cap.
+			GraphSettings gs = Settings(Dims{ 3840, 2160 }, 1);
+			gs.renderAhead = 0;
+			gs.lookAheadWalk = 300;
+			const Registry regCap = SkeletonProducts(false, false, p24, QueueFrames(gs));
+			const Graph g = FullGraph(gs, regCap);
+			Assert::IsTrue(g.valid, L"a queue-driven cap still fits the slot counts at a lane lead of 1");
+			const Node* causal = g.Find(kQualityPatternCausal);
+			Assert::IsNotNull(causal);
+			Assert::AreEqual(int(kRecordHistoryMax), int(causal->history));
+			Assert::IsTrue(GraphHistoryCapNote(g, p24).find("(the configured queue asks for 301 frames)") != std::string::npos);
+		}
+
 		TEST_METHOD(GeneratedDocRegionMatchesTheCatalog)
 		{
 			const std::string path = SettingsTestSupport::RepoRoot() + "docs\\design\\product-graph.md";

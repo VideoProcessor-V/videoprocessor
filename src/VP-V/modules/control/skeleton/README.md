@@ -43,9 +43,15 @@ pathway = off), on the render thread.
 * **Declined (visible):** P10 grain split, P11 region block stats, P12 light level. They have no producer and no live fill
   here yet: `skeleton_products: ... declined: render-thread GPU dispatch hook pending (M2 Upload/Entrance phase)`. Their
   consumers keep their own computation. Nothing reads the products yet (the `skeleton.report` consumer only declares them).
-* **Capped record history (visible):** the quality-pattern and td trail-summary histories are seconds of the measured source rate, bounded so
-  every ring fits 255 slots. When the rate asks for more, `skeleton_history: quality pattern history capped at 223 frames (source rate above
-  111.5 fps)` appears in Fallbacks; a graph whose slot counts still overflow is rejected (analysis lane unavailable, with the reason), never clamped.
+* **Record histories follow the queue (owner ruling 2026-11-07):** the quality-pattern and td trail-summary depths are
+  `max(floor seconds, queue multiple x (render-ahead + lane lead + look-ahead frames) x measured source period)`, floors 2.0 s and 0.25 s,
+  queue multiple 1 for both today. This module knows the three queue terms in one place (`SkeletonModule::QueueShape`, today 0 / 1 / 0: the
+  render-ahead and look-ahead feeds are not wired yet) and reconfigures the graph at the next frame when they change, as it does for a moved
+  source period.
+* **Capped record history (visible):** the depths are bounded so every ring fits 255 slots (223 frames). When the rate asks for more,
+  `skeleton_history: quality pattern history capped at 223 frames (source rate above 111.5 fps)` appears in Fallbacks; when the queue asks for
+  more, `... (the configured queue asks for N frames)`. A graph whose slot counts still overflow is rejected (analysis lane unavailable, with
+  the reason), never clamped.
 
 ## Why "skeleton first"
 

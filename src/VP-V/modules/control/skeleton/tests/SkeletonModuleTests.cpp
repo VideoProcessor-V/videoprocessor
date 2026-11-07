@@ -618,6 +618,41 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(rig.sk.WorkersRunning(rig.Host()));
 		}
 
+		TEST_METHOD(AQueueChangeReconfiguresTheGraphAtTheNextFrame)
+		{
+			// The record histories follow R + L + look-ahead: a queue change rebuilds the graph like a moved source period.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			auto configures = [&rig]() {
+				const std::string text = rig.Command();
+				const size_t k = text.find(" graph configure");
+				Assert::IsTrue(k != std::string::npos);
+				const size_t b = text.rfind(' ', k - 1);
+				return std::stoi(text.substr(b + 1, k - b - 1));
+			};
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			const int before = configures();
+			for (int64_t s = 4; s <= 6; ++s)
+				rig.Frame(s);
+			Assert::AreEqual(before, configures(), L"an unchanged queue does not reconfigure");
+			Assert::AreEqual(1, int(rig.sk.LaneOf(rig.Host())->State()->graph.settings.laneLead));
+			SkeletonModule::QueueShape q;
+			q.renderAhead = 4;
+			q.laneLead = 3;
+			q.lookAheadWalk = 5;
+			rig.sk.SetQueueForTesting(q);
+			rig.Frame(7);
+			Assert::AreEqual(before + 1, configures(), L"the queue change reconfigured the graph once");
+			const VpSkeleton::GraphSettings gs = rig.sk.LaneOf(rig.Host())->State()->graph.settings;
+			Assert::AreEqual(4, int(gs.renderAhead));
+			Assert::AreEqual(3, int(gs.laneLead));
+			Assert::AreEqual(5, int(gs.lookAheadWalk));
+			rig.Frame(8);
+			Assert::AreEqual(before + 1, configures(), L"and only once");
+		}
+
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)
 		{
 			Rig rig(Lane("on"));

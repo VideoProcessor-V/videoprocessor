@@ -134,6 +134,7 @@ namespace Vpv
 			// Render thread.
 			uint32_t configuredGen = 0;
 			double configuredPeriodMs = 0.0;
+			SkeletonModule::QueueShape configuredQueue;
 			uint64_t framesSinceConfigure = 0;
 		};
 
@@ -552,7 +553,8 @@ namespace Vpv
 			const bool periodMoved = b->configuredPeriodMs > 0.0 && st.periodMs > 0.0 &&
 				std::abs(st.periodMs - b->configuredPeriodMs) > 0.3 * b->configuredPeriodMs;
 			const bool periodKnown = b->configuredPeriodMs <= 0.0 && st.periodMs > 0.0;
-			if (rebuild || b->configuredGen != gen || ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
+			const bool queueMoved = b->configuredQueue != queue_;   // the record histories follow the queue (R + L + look-ahead)
+			if (rebuild || b->configuredGen != gen || queueMoved || ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
 			{
 				CardProfile card;
 				std::string why;
@@ -564,11 +566,11 @@ namespace Vpv
 				tier.framePeriodMs = st.periodMs;
 				GraphSettings gs;
 				gs.dims = dims;
-				gs.renderAhead = 0;
-				gs.laneLead = 1;
+				gs.renderAhead = queue_.renderAhead;
+				gs.laneLead = queue_.laneLead;
 				const size_t capacity = resync->queueCapacity.load(std::memory_order_acquire);
 				gs.queueDepth = static_cast<uint16_t>((std::max<size_t>)(4u, (std::min<size_t>)(capacity, 64u)));
-				gs.lookAheadWalk = 0;
+				gs.lookAheadWalk = queue_.lookAheadWalk;
 				gs.ofaPresent = false;
 				gs.cardProfileKey = card.Identity();
 				ConsumerDecl report;
@@ -580,10 +582,11 @@ namespace Vpv
 					VpSkeleton::AddConsume(report, p);
 				const std::vector<ConsumerDecl> consumers{ report };
 				b->lane.SetStormHold(Resync::ResyncExtension::StormHeld(st.host));
-				// The record histories (quality_pattern, td.trail_summary) are seconds of source time: frames follow the measured period.
-				b->lane.Configure(st.settings.lane, VpSkeleton::SkeletonProducts(false, false, st.periodMs), consumers, gs, card, tier, seq, false);
+				// The record histories (quality_pattern, td.trail_summary): max(floor seconds, queue x period); frames follow the measured period.
+				b->lane.Configure(st.settings.lane, VpSkeleton::SkeletonProducts(false, false, st.periodMs, VpSkeleton::QueueFrames(gs)), consumers, gs, card, tier, seq, false);
 				b->configuredGen = gen;
 				b->configuredPeriodMs = st.periodMs;
+				b->configuredQueue = queue_;
 				b->framesSinceConfigure = 0;
 				++st.configures;
 			}

@@ -65,6 +65,19 @@ namespace Vpv
 			// Dimensions of the current lane graph (0 x 0 without one).
 			VpSkeleton::Dims DimsOf(const void* host) const;
 			bool WorkersRunning(const void* host) const;
+			// The queue the lane graph is sized for: the terms the record histories are derived from (render-ahead R, lane lead L,
+			// look-ahead walk frames; VpSkeleton::QueueFramesFor). This module knows them only here (the render-ahead and look-ahead
+			// feeds are not wired yet: 0 / 1 / 0); a change reconfigures the graph at the next frame, like a moved source period.
+			struct QueueShape
+			{
+				uint8_t renderAhead = 0;
+				uint8_t laneLead = 1;
+				uint16_t lookAheadWalk = 0;
+				bool operator==(const QueueShape& o) const { return renderAhead == o.renderAhead && laneLead == o.laneLead && lookAheadWalk == o.lookAheadWalk; }
+				bool operator!=(const QueueShape& o) const { return !(*this == o); }
+			};
+			// Tests: change the queue (the next frame reconfigures the graph and rebuilds the record histories).
+			void SetQueueForTesting(const QueueShape& q) { queue_ = q; }
 			// Tests: do not start the lane worker threads (the test drives AnalysisLane::StepWorker itself).
 			void SetWorkerThreadsForTesting(bool start) { startWorkers_ = start; }
 			// Tests: use this card profile instead of the device query (no render device exists in a unit test).
@@ -85,6 +98,7 @@ namespace Vpv
 			bool cardOverride_ = false;
 			bool startWorkers_ = true;
 			VpSkeleton::CardProfile card_;
+			QueueShape queue_;
 		};
 
 		// Adds SkeletonModule to the hub. Start-up only; idempotent. After RegisterResyncExtension.
