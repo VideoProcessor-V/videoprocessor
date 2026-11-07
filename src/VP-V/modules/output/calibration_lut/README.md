@@ -138,7 +138,7 @@ Config placement: the master VP-V page (`calibration_lut_stage`, Expert) and Out
 | `pipeline_slots_off` (entry `output.calibration_lut`) | `[vpv]` / `[vprenderer]` | list | slot ids | empty | master VP-V page | n/a | stops the VP stage only; LUT runs as libplacebo's target LUT |
 | `calibration_lut_reload` (planned) | colour profile | choice | auto, apply | auto | Output > Calibration | apply | not read yet |
 
-Tiers: not tiered. Patch display and the wizard have no settings of their own here (the wizard's `[calibration]` section is in `calibration/CalibrationConfig.h`); the patch fallback is `calibration patch (full field ...)`.
+Tiers: not tiered. Patch display and the wizard have no settings of their own here (the wizard's `[calibration]` section is in `src/VP-V/modules/output/calibration_lut/calibration/CalibrationConfig.h`); the patch fallback is `calibration patch (full field ...)`.
 
 ## Fallbacks
 
