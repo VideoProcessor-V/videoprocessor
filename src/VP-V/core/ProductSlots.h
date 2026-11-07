@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 // Skeleton S1: product slots and the ownership protocol (design doc 25 B3/B4, audit 25a §3 and
@@ -44,6 +45,9 @@
 // side). Lane jobs reading another product pin that slot (PinRef): its own lane cannot write the
 // reclaimed slot (Writable) and the render does not reuse its live buffer under the reader.
 namespace VpSkeleton {
+
+static_assert(kMaxInputs <= VpAncestry::kMaxAncestors, "a header must record every declared input");
+static_assert(kMaxInputs <= 32, "ProductFrameResult::missingInputs is a 32-bit mask");
 
 using VpAncestry::AncestorRef;
 using VpAncestry::Header;
@@ -227,6 +231,8 @@ struct SlotCounters {
     std::atomic<uint64_t> liveMissingInputs{ 0 }; // live fills made in the declared missing-input form
     std::atomic<uint64_t> inputMissing{ 0 };      // live fills refused: an input missing, no form
     std::atomic<uint64_t> spanUnknown{ 0 };       // the span check had no sealed stamp (not N2)
+    std::atomic<uint64_t> chainCarryForward{ 0 }; // ordered chain: sealed in the declared reduced form (self ancestor absent)
+    std::atomic<uint64_t> leadAccepted{ 0 };      // lead ancestors accepted at a seal (Published, stamp == StampOf(N+k))
 };
 
 class SlotSet {
@@ -741,11 +747,25 @@ public:
         v.seq = w.seq - ring_;
         v.cgen = UsesLaneHeader(w.state) ? s.laneHdr.cgen : UsesLiveHeader(w.state) ? s.liveHdr.cgen : 0u;
         v.valid = ValidForRender(w.state);
+        v.lanePublished = w.state == SlotState::Published;
         return v;
     }
 
+    // Render: the stamp the content of frame `seq` was computed under (lane or live header); false without content.
+    bool HonouredOf(uint64_t seq, VpIndicator::Stamp* out) const
+    {
+        const Slot& s = slots_[SlotOf(seq)];
+        const SlotWord w = Unpack(s.word.load(std::memory_order_acquire));
+        if (w.seq != Biased(seq) || !HasContent(w.state))
+            return false;
+        if (out)
+            *out = UsesLaneHeader(w.state) ? s.laneHdr.honoured : s.liveHdr.honoured;
+        return true;
+    }
+
     // Render: where to read frame `seq` (None when there is no valid content).
-    ReadInfo Read(uint64_t seq) const
+    // allowPublished: a LEAD input is read before its own seal, from the lane's published (not yet sealed) result.
+    ReadInfo Read(uint64_t seq, bool allowPublished = false) const
     {
         ReadInfo r;
         const uint16_t idx = SlotOf(seq);
@@ -753,7 +773,7 @@ public:
         const SlotWord w = Unpack(s.word.load(std::memory_order_acquire));
         if (w.seq != Biased(seq))
             return r;
-        if (w.state == SlotState::Sealed) {
+        if (w.state == SlotState::Sealed || (allowPublished && w.state == SlotState::Published)) {
             r.kind = ReadInfo::Ring;
             r.index = idx;
             r.waitValue = s.producerValue.load(std::memory_order_relaxed);
@@ -857,21 +877,14 @@ struct ProductFrameResult {
 // of recent frames (span checks), and the per-frame resolve that seals and live-fills in order.
 class SlotTable {
 public:
-    // Fails closed: a node with a look-ahead input (lead > 0) makes the table INVALID (Valid() false, Error()
-    // says why, Count() 0) until the K1 seal rule for lead ancestors exists (Published with stamps ==
-    // StampOf(N+k)). Today every ancestor is computed as seq - lag and a lead would be silently ignored.
+    // Look-ahead (K1, W1-SKG): an input with a lead reads frame N+k. The lane pins the ancestor result (a job
+    // waits until the ancestor lane has made N+k); the seal accepts it when it is Published (or already Sealed /
+    // Live) with the same cgen the reader recorded and its honoured stamp equals StampOf(N+k) under the
+    // ancestor own reads. The stamp of a frame that has not been resolved yet comes from the injected source
+    // (SetStampSource: the Indicator StampOf); without one a lead ancestor is refused visibly (AncestryIncomplete,
+    // counted), never accepted unchecked. The table is always valid.
     explicit SlotTable(const Graph& g) : nodes_(g.nodes)
     {
-        for (const Node& n : nodes_)
-            for (size_t k = 0; k < n.inputCount; ++k)
-                if (n.inputs[k].lead > 0) {
-                    valid_ = false;
-                    error_ = "look-ahead input needs the K1 seal rule";
-                }
-        if (!valid_) {
-            nodes_.clear();
-            return;
-        }
         sets_.reserve(nodes_.size());
         size_t maxRing = 1;
         for (const Node& n : nodes_) {
@@ -890,6 +903,9 @@ public:
     SlotTable(const SlotTable&) = delete;
     SlotTable& operator=(const SlotTable&) = delete;
 
+    using StampSource = std::function<VpIndicator::Stamp(uint64_t)>;
+    // The Indicator StampOf, for the seal of lead ancestors (render thread; set before the first Resolve).
+    void SetStampSource(StampSource f) { stampOf_ = std::move(f); }
     bool Valid() const { return valid_; }
     const char* Error() const { return error_; }
     size_t Count() const { return sets_.size(); }
@@ -919,18 +935,39 @@ public:
         if (!n)
             return false;
         hdr.ancestorCount = 0;
+        hdr.chainReduced = false;
         for (size_t k = 0; k < n->inputCount; ++k) {
             const InputRef& in = n->inputs[k];
             SlotSet* set = Find(in.product);
             AncestorRef ref;
             int live = -1;
-            if (!set || seq < in.lag || !set->PinRef(seq - in.lag, &ref, &live)) {
+            uint64_t aseq = 0;
+            const bool haveSeq = InputSeq(in, seq, &aseq);
+            // Ordered chain: the self input at lag >= 1 is optional. Absent (chain start, a predecessor that never
+            // published, a skipped range) it is NOT waited for (our own lane finished frame seq-1 before this job
+            // began: it will never appear): the job carries forward in its declared reduced form.
+            const bool chainSelf = n->orderedChain && in.product == id && in.lag > 0;
+            if (!set || !haveSeq || !set->PinRef(aseq, &ref, &live)) {
+                if (chainSelf && set) {
+                    AncestorRef empty;
+                    empty.productId = in.product;
+                    empty.seq = haveSeq ? aseq : 0;
+                    pins.sets[pins.count] = nullptr;   // positional: no pin, nothing to unpin
+                    pins.seqs[pins.count] = empty.seq;
+                    pins.liveIndex[pins.count] = -1;
+                    ++pins.count;
+                    hdr.ancestors[k] = empty;
+                    hdr.ancestorCount = uint8_t(k + 1);
+                    hdr.chainReduced = true;
+                    continue;
+                }
                 pins.Unpin();
                 hdr.ancestorCount = 0;
+                hdr.chainReduced = false;
                 return false;
             }
             pins.sets[pins.count] = set;
-            pins.seqs[pins.count] = seq - in.lag;
+            pins.seqs[pins.count] = aseq;
             pins.liveIndex[pins.count] = live;
             ++pins.count;
             hdr.ancestors[k] = ref;
@@ -1011,20 +1048,23 @@ public:
                 AncestorRef& r = h.ancestors[k];
                 r = AncestorRef();
                 r.productId = in.product;
-                r.seq = seq >= in.lag ? seq - in.lag : 0;
-                bool ok = src != nullptr && seq >= in.lag;
+                uint64_t aseq = 0;
+                const bool haveSeq = InputSeq(in, seq, &aseq);
+                r.seq = haveSeq ? aseq : 0;
+                bool ok = src != nullptr && haveSeq;
                 VpAncestry::SlotView v;
                 if (ok) {
-                    v = src->ViewAt(src->SlotOf(seq - in.lag));
-                    ok = v.present && v.seq == seq - in.lag && v.valid;
+                    v = src->ViewAt(src->SlotOf(aseq));
+                    // A lead input is read from the lane published result (its own seal comes later).
+                    ok = v.present && v.seq == aseq && (v.valid || (in.lead > 0 && v.lanePublished));
                 }
                 if (!ok) {
                     missing |= 1u << k;
                     continue;
                 }
-                r.slotIndex = src->SlotOf(seq - in.lag);
+                r.slotIndex = src->SlotOf(aseq);
                 r.cgen = v.cgen;
-                r.prov = src->WordFor(seq - in.lag).prov;
+                r.prov = src->WordFor(aseq).prov;
             }
             h.ancestorCount = uint8_t(n.inputCount);
             out.missingInputs = missing;
@@ -1081,7 +1121,15 @@ private:
         for (size_t k = 0; k < n.inputCount; ++k) {
             const InputRef& in = n.inputs[k];
             const AncestorRef& ref = h.ancestors[k];
-            if (ref.productId != in.product || seq < in.lag || ref.seq != seq - in.lag)
+            // Ordered chain carry-forward: the job declared its self lag input absent (Header::chainReduced) and
+            // recorded an empty ancestor: accepted (visible in the counters), nothing to validate.
+            if (h.chainReduced && n.orderedChain && in.product == n.id && in.lag > 0 && ref.productId == in.product
+                && ref.cgen == 0) {
+                Find(n.id)->MutableCounters().chainCarryForward.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            uint64_t aseq = 0;
+            if (!InputSeq(in, seq, &aseq) || ref.productId != in.product || ref.seq != aseq)
                 return SealReason::AncestryIncomplete;
             SlotSet* src = Find(ref.productId);
             if (!src || ref.slotIndex != src->SlotOf(ref.seq))
@@ -1091,6 +1139,22 @@ private:
                 return SealReason::AncestorGone;
             if (v.cgen != ref.cgen)
                 return v.cgen == 0 ? SealReason::AncestorInvalid : SealReason::AncestorReplaced;
+            if (in.lead > 0) {
+                // K1: the lead ancestor needs a result (Published is enough) computed under the stamp of ITS frame.
+                if (!v.valid && !v.lanePublished)
+                    return SealReason::AncestorInvalid;
+                const Node* an = NodeOf(ref.productId);
+                VpIndicator::Stamp honoured;
+                if (!stampOf_ || !an || !src->HonouredOf(ref.seq, &honoured))
+                    return SealReason::AncestryIncomplete;
+                const VpIndicator::Stamp want = stampOf_(ref.seq);
+                if (want.ancient || honoured.ancient)
+                    return SealReason::AncientStamp;
+                if (!VpIndicator::SameFor(honoured, want, an->reads))
+                    return SealReason::StampMismatch;
+                src->MutableCounters().leadAccepted.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
             if (!v.valid)
                 return SealReason::AncestorInvalid;
             if (in.lag > 0 && n.spanMask != 0) {
@@ -1108,6 +1172,7 @@ private:
 
     bool valid_ = true;
     const char* error_ = "";
+    StampSource stampOf_;
     std::vector<Node> nodes_;
     std::vector<SlotSet*> sets_;
     std::vector<SealedRecord> sealed_;

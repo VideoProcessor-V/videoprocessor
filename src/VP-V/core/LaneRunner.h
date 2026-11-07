@@ -3,6 +3,7 @@
 #pragma once
 
 #include "LaneInterfaces.h"
+#include "OrderedChain.h"
 
 #include <array>
 #include <atomic>
@@ -47,6 +48,8 @@ struct LaneProductCounters {
     std::atomic<uint64_t> beginFailures{ 0 };
     std::atomic<uint64_t> chunkFailures{ 0 };
     std::atomic<uint64_t> laneUs{ 0 };           // measured producer time
+    std::atomic<uint64_t> chainCarryForward{ 0 };// ordered chain: jobs run in the declared reduced form (no predecessor)
+    std::atomic<uint64_t> chainRefused{ 0 };     // ordered chain: out-of-order work refused (never run, never published)
 };
 
 class LaneRunner {
@@ -208,6 +211,7 @@ private:
         SourceFrameView src;      // the job's own copy of the source view: its keepAlive holds the planes
         bool began = false;       // the producer's fence values are meaningful
         uint64_t costUs = 0;
+        ChainOrder chain;         // ordered-chain products: the last published frame
     };
 
     State* StateOf(ProductId id) { return id < states_.size() ? &states_[id] : nullptr; }
@@ -238,6 +242,13 @@ private:
         if (st.readsSource && (!find_ || !find_(seq, nullptr))) {   // presence only: no keepAlive copy
             st.nextSeq = seq + 1u;
             st.counters.skippedDropped.fetch_add(1, std::memory_order_relaxed);
+            *out = StepOutcome::Late;
+            return false;
+        }
+        if (st.node->orderedChain && st.chain.Admit(seq) == ChainOrder::Verdict::Refused) {
+            // Out of order for the chain (not after the last published frame): refused visibly, the lane moves on.
+            st.nextSeq = seq + 1u;
+            st.counters.chainRefused.fetch_add(1, std::memory_order_relaxed);
             *out = StepOutcome::Late;
             return false;
         }
@@ -313,9 +324,13 @@ private:
         job.out = ring_ ? ring_(st.node->id, job.ringSlot) : nullptr;
         job.outBytes = bytes_ ? bytes_(st.node->id) : size_t(0);
         job.header = &hdr;
+        job.chainReduced = hdr.chainReduced;
+        if (hdr.chainReduced)
+            st.counters.chainCarryForward.fetch_add(1, std::memory_order_relaxed);
         if (input_)
             for (size_t k = 0; k < st.pins.count && k < job.inputData.size(); ++k)
-                job.inputData[k] = input_(st.pins.sets[k]->Product(), st.pins.seqs[k], st.pins.liveIndex[k]);
+                if (st.pins.sets[k] != nullptr)   // null: an absent chain-self input (carry-forward)
+                    job.inputData[k] = input_(st.pins.sets[k]->Product(), st.pins.seqs[k], st.pins.liveIndex[k]);
 
         if (!st.producer->Begin(job)) {
             st.counters.beginFailures.fetch_add(1, std::memory_order_relaxed);
@@ -366,6 +381,8 @@ private:
         st.nextSeq = st.seq + 1u;
         st.phase = Phase::Idle;
         if (r == PublishResult::Published) {
+            if (st.node->orderedChain)
+                st.chain.Published(st.seq);
             st.counters.published.fetch_add(1, std::memory_order_relaxed);
             return StepOutcome::Published;
         }

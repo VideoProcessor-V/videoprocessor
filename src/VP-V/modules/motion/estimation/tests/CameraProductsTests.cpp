@@ -270,15 +270,16 @@ namespace CameraProductsTestsNs
 			Assert::IsTrue(ValidateFails(sub), L"substitute reads the original");
 		}
 
-		TEST_METHOD(SlotTableFailsClosedOnLookAheadInputs)
+		// W1-SKG: the K1 seal rule exists, so a look-ahead graph gets a valid table (it used to fail closed). The lead
+		// seal itself is tested in SkeletonGraphTests; here only that the camera look-ahead graph is accepted.
+		TEST_METHOD(SlotTableAcceptsLookAheadInputsWithTheK1Rule)
 		{
 			const Registry reg = SkeletonProducts();
 			const Graph lead = BuildGraph(reg, Camera({ CameraLink::CameraConsumer::TemporalDetail }), Settings(3));
 			Assert::IsTrue(lead.valid);
-			VpSkeleton::SlotTable bad(lead);
-			Assert::IsFalse(bad.Valid());
-			Assert::IsTrue(bad.Error()[0] != '\0', L"a plain visible reason");
-			Assert::AreEqual(size_t(0), bad.Count());
+			VpSkeleton::SlotTable good(lead);
+			Assert::IsTrue(good.Valid());
+			Assert::AreEqual(lead.nodes.size(), good.Count());
 			// The causal form (no lead input) is fine.
 			const Graph causal = BuildGraph(reg, Camera({ CameraLink::CameraConsumer::TemporalDetail }), Settings(1));
 			VpSkeleton::SlotTable ok(causal);

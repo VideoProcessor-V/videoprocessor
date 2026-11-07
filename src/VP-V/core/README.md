@@ -25,12 +25,13 @@ Header-only and pure: no libplacebo, no Windows, C++14. The renderer and the CPU
 | `FrameSeal.h` | `VpSeal::FrameSeal`: the ONE owner of the Indicator seal. On a new era it registers every provider (resync Drive, R2 motion readers, the lane handle, ...) before the first Observe, then seals once per frame and fans (seq, changed) out to subscribers (Drive latch, lane regulator). `AnalysisLane` holds the Indicator by shared handle (`BindIndicator`) and, with `SetExternalSeal(true)`, takes `OnSealed(seq, changed)` instead of sealing; the storm hold reaches its regulator through `SetStormHold` (T0) |
 | `FrameAnalysisValidity.h` | `VpFrameAnalysis::RecordValid(indicator, recordSeq, useSeq, mask)`: per-record temporal validity from the Indicator's stamps (FrameAnalysisStore itself unchanged; no private frame history added) |
 | `Products.h` | Skeleton S0 registry: product declarations (inputs with lag, backend, history, size, honoured counters, tier, residency, variants) the first products P0-P6 (+ P2m matcher pair) and the camera products P7-P9 (`SkeletonProducts()` is the one assembly point); look-ahead inputs (`InputRef::lead`, `AddLead`) with a `shortQueueSubstitute`; component consumer declarations |
-| `ProductGraph.h` | Skeleton S0 graph: the closure of what active consumers need (each product once, topological, deterministic), fixed ring and live-pool counts, rebuild triggers, `GraphOwner` (advances the Indicator's `graph` counter), Indicator ring sizing (N6). A look-ahead input gets an effective lead = min(declared, lane lead - 1) (the lane makes N+L as N starts rendering, so N+L itself has no slack; a lead below the declared one is a PARTIAL lead, listed by `Graph::PartialLeadNodes()` with both numbers); a product read at lead k has k more ring slots; with no lead available the node resolves to its short-queue substitute and is recorded in `Graph::reductions` (asked -> made) and listed by `Graph::ReducedNodes()` (visible reduced mode; a substitute that was also asked directly is still listed, the record says what was reduced). `Registry::Validate` rejects lead chains, lead loops and a substitute that reads the product it replaces. `SlotTable` fails closed (`Valid()` false) on any node with a lead input until the K1 seal rule exists. Seal note: the seal must validate a LEAD ancestor as Published with stamps == StampOf(N+k) (not Sealed); this belongs to S3/K1, K0 only declares it (`ProductSlots.h` still computes ancestors as seq - lag) |
-| `ProductSlots.h` | Skeleton S1 slots: the 64-bit state word, ABA-proof generation-tagged claim, lane/live headers, lane-owned rejected buffers, live pool for every backend, lane input pins, the seal (stamps, span, ancestry cgens) and the cascade (`SlotTable::Resolve`) |
+| `ProductGraph.h` | Skeleton S0 graph: the closure of what active consumers need (each product once, topological, deterministic), fixed ring and live-pool counts, rebuild triggers, `GraphOwner` (advances the Indicator's `graph` counter), Indicator ring sizing (N6). A look-ahead input gets an effective lead = min(declared, lane lead - 1) (the lane makes N+L as N starts rendering, so N+L itself has no slack; a lead below the declared one is a PARTIAL lead, listed by `Graph::PartialLeadNodes()` with both numbers); a product read at lead k has k more ring slots; with no lead available the node resolves to its short-queue substitute and is recorded in `Graph::reductions` (asked -> made) and listed by `Graph::ReducedNodes()` (visible reduced mode; a substitute that was also asked directly is still listed, the record says what was reduced). `Registry::Validate` rejects lead chains, lead loops and a substitute that reads the product it replaces. Governed history (W1-SKG): `ProductDecl::historyFloor`, `GraphSettings::historyCaps` (the governor's grant), `Node::historyFull/historyMin`, `Graph::HistoryReducedNodes()`, rebuild reason `kRebuildHistory`. Lead edges are sealed by the K1 rule (see below) |
+| `ProductSlots.h` | Skeleton S1 slots: the 64-bit state word, ABA-proof generation-tagged claim, lane/live headers, lane-owned rejected buffers, live pool for every backend, lane input pins, the seal (stamps, span, ancestry cgens) and the cascade (`SlotTable::Resolve`); lead ancestors (K1, `SetStampSource`); ordered-chain carry-forward |
 | `CardProfile.h` | Skeleton S2: card profile (cached per adapter LUID + driver), adaptive VRAM headroom, system-RAM rules |
 | `VramGovernor.h` | Skeleton S2: the ONE VRAM governor and the tier plan on it. Every VRAM user (early-upload pool, render-ahead, vector engine, TemporalDetail, camera model, interpolator, enhancers, fixed libplacebo/capture memory, and the skeleton products) registers levels + tier; one budget (own usage re-planned), one shed order (tier, lossless first, order); one status line per cutback. `PlanTiers` = T0 first then T1/T2 by ms saved per MB as that order; `ApplyLaneGrants` sets the slots |
 | `LaneInterfaces.h` | Skeleton S3-S7 contracts: `SourceFrameView`, `ILaneProducer`, `IGapWork`, `IGpuDispatcher`, `IReadbackDevice` (the host owns every device call) |
 | `LaneRunner.h` | Skeleton S3: the lane runner, one state machine per product over the S1 slot protocol (claim, pins, stamp, chunks, publish or abandon after the fence); no thread of its own |
+| `OrderedChain.h` | W1-SKG: `ChainOrder`, the frame-order rule of an ordered-chain lane product (in order / carry-forward / refused) |
 | `SealPoint.h` | Skeleton S3: `RenderStartSeq`, `CheckLead` (queue deep enough for the lane) and the N1 bounded deterministic wait (`DecideWait`, never past the present slack) |
 | `GapScheduler.h` | Skeleton S4: render-thread idle-gap scheduler, fixed class priority (render-ahead extras, early-upload wraps, lane compute), deterministic order, never starts a chunk that does not fit |
 | `Regulator.h` | Skeleton S5: the slack regulator, the ladder of lane/in-render/dropped states, margin on render-only time, dwell, multiplicative back-off, death-spiral guard, traces and notice |
@@ -99,3 +100,41 @@ released live buffer; ring and live pool are separate memory (a lane costs its w
 ## GPU allocator (SA1)
 
 `GpuAllocator.h` / `ScratchArena.h`: the shared scratch arena (per-render temporaries, capacity = busiest scope per texture shape), `ProductTextures` (ring + live pool from a declared layout that must equal the product's `SizeRule`), the arena as governor user `kUserScratchArena`, `Residency::Transient` (not a ring product) and `VramLedgerLines` for Ctrl+Alt+D. Details and call sites: `modules/control/gpu_memory/README.md`. `kP10GrainSplit` (SA2) is the only product added after the camera products; SA0 adopts its declaration.
+
+## Seal and graph capabilities (W1-SKG, doc 72 section 5 items 1-4)
+
+Unit: control/skeleton (core). No new settings keys; every capability is declared by the products and bounded by the
+VRAM governor (budget-driven, no per-GPU flags).
+
+## Settings
+
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| (none) | | | | | | | | |
+
+## Environment and diagnostics
+
+| Name | Purpose | Default | Scope (test/debug/runtime) |
+|---|---|---|---|
+| (none) | | | |
+
+## Products
+
+| Capability | Contract | Seal / fill rule | Visible when it engages |
+|---|---|---|---|
+| Lead edges (`InputRef::lead`, `AddLead`) | the lane job of N pins the ancestor result of N+k (it waits until that frame is published); effective lead = min(declared, lane lead - 1) | the seal accepts a lead ancestor that is Published (or Sealed / Live) with the recorded cgen and an honoured stamp equal to `StampOf(N+k)` under the ancestor's own reads (`SlotTable::SetStampSource`; `AnalysisLane` sets it); a moved stamp is `StampMismatch` -> live fill; without a stamp source the seal refuses (`AncestryIncomplete`). Never two producers per slot per frame; a lane publishes before the seal else the first consumer live-fills (doc 25, unchanged). Residual risk: N+k can still be rejected at its own later seal (its readers were sealed earlier); counted in `SlotCounters::leadAccepted` | `Graph::PartialLeadNodes()`, `ReducedNodes()` (short queue -> causal substitute) |
+| Limits | `kMaxInputs` 16 (was 4), `kMaxConsumes` 10 (was 6), `VpAncestry::kMaxAncestors` 16 (was 8, static_assert >= kMaxInputs); `ProductFrameResult::missingInputs` is a 32-bit mask | all fixed arrays are sized from the constants. Cost: `Node` +96 B, `ProductDecl` +48 B, `ConsumerDecl` +16 B, slot header pair +384 B; one `Header` copy per live fill (about 0.4 KB), nothing else per frame | `CameraLink::kMaxGuideLag` pins the guide lag clamp at 16 (it was `kMaxInputs * 4`) |
+| Ordered chain (`ProductDecl::orderedChain`) | the product reads itself at lag >= 1; its lane jobs run in frame order (the runner is sequential per product; `ChainOrder` refuses a frame not after the last published one) | an absent self lag input (chain start, a late/abandoned predecessor, a skipped range) is not waited for: the job runs in its declared reduced form (`LaneJobContext::chainReduced`), publishes `Header::chainReduced` with an empty self ancestor, the seal accepts exactly that (`SlotCounters::chainCarryForward`). An undeclared hole is rejected (live fill) | status lines "ordered-chain frames ran in the reduced form", "out-of-order chain frames refused"; `LaneProductCounters::chainCarryForward/chainRefused` |
+| Governed history (`ProductDecl::historyFloor`) | `history` is the full depth; the product runs at any depth in [historyFloor, history] (never below the largest lag read). `PlanTiers` adds one governor level per depth AFTER the lossless lane drop (lane -> in render, then history steps; the user ranks as lossy) | `TierPlan::historyCaps` -> `GraphSettings::historyCaps` -> rebuild (`AnalysisLane::Configure` does it once, the grant persists so a repeated Configure does not flap); ring and live pool shrink by the shed frames | `Video memory: <product> keeps N of M past frames of history (not enough free video memory)` on the status lines; `Graph::HistoryReducedNodes()`; `TierEntry::historyGranted` |
+
+## Status and fallbacks
+
+Governed history reductions and chain carry-forwards are on the analysis status lines (Ctrl+I) as above; a product with a
+reduced history is a non-identical reduced mode and must declare `Variants::NonIdentical` and handle `Node::history`.
+
+## Tests
+
+`SkeletonGraphTests` (new), `ProductSlotsTests`, `ProductGraphTests`, `VramGovernorTests`, `AnalysisLaneTests`,
+`LaneProductsTests`, `PipelineSkeletonTests`, `SkeletonModuleTests`, `ProductCatalogTests`, `CameraProductsTests`.
+CPU only: `vstest.console.exe x64\Release\VideoProcessor-Test.dll /Tests:SkeletonGraphTests,... /Logger:trx`.
+

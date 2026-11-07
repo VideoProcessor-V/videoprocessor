@@ -160,13 +160,20 @@ struct InputRef {
     // has a lag OR a lead, never both. A lead edge is not a lag-0 edge (no cycle check, no topological
     // constraint). The product that reads a lead must declare shortQueueSubstitute.
     //
-    // Seal note (S3/K1, NOT implemented in K0): the seal validates a LEAD ancestor as Published with
-    // stamps == StampOf(N+k) (it need not be Sealed: frame N+k has not reached its own seal yet).
-    // ProductSlots.h today computes every ancestor as seq - lag and ignores `lead`.
+    // Seal rule (K1, W1-SKG): the seal validates a LEAD ancestor N+k as Published (or Sealed / Live) with the
+    // ancestor's honoured stamp == StampOf(N+k) under the ancestor's own reads; it need not be Sealed: frame N+k
+    // has not reached its own seal yet (ProductSlots.h SlotTable::Check; needs SlotTable::SetStampSource).
+    // Residual risk (documented, visible through the counters): N+k may still be rejected at its own seal later.
     uint8_t lead = 0;
 };
 
-constexpr size_t kMaxInputs = 4;
+// The seam limits (W1-SKG, doc 72 section 5.2): raised from 4 and 6 so a product can name every product it
+// reads as an ancestor (td.blocks ~14 inputs) and an adaptive consumer can read td.maps + P3r. Every fixed array
+// that depends on them is sized from these (Node::inputs, LaneInputs, LaneJobContext::inputData,
+// VpAncestry::kMaxAncestors, ConsumerDecl::consumes, the missing-input bit mask). Cost: 64 B per Node/decl,
+// 384 B per slot header pair; nothing per frame beyond the header copy of a live fill.
+constexpr size_t kMaxInputs = 16;
+constexpr uint8_t kHistoryFixed = 0xFF;   // ProductDecl::historyFloor: the history is not governed
 
 struct ProductDecl {
     ProductId id = kNoProduct;
@@ -204,7 +211,34 @@ struct ProductDecl {
     // unpacked planes, owned by the queue / early upload): it has no lane of its own, but it never moves a lane reader
     // into the render (VramGovernor's InputInRender rule skips it).
     bool laneVisible = false;
+    // Ordered chain (W1-SKG, doc 72 section 5.3): the product reads ITSELF at lag >= 1 (td.blocks at lag 1), so its
+    // lane jobs run in frame order: job N starts only after job N-1 finished (the runner is sequential per
+    // product). A job whose predecessor never published (chain start, a late/abandoned job, a skipped range)
+    // runs in its declared reduced form (carry-forward): it publishes with Header::chainReduced, the seal accepts
+    // the empty self ancestor and the counters show it. Never skipped silently. Requires a self input at lag >= 1
+    // and a lane backend (Registry::Validate).
+    bool orderedChain = false;
+    // Budget-governed history (W1-SKG, doc 72 section 5.4; owner 2026-11-07: tiers are budget-driven): `history`
+    // is the FULL depth the product wants; it may run with any depth down to historyFloor when the VRAM governor
+    // (PlanTiers) cannot fit the full depth. A reduced depth is visible (status line + Graph::HistoryReducedNodes)
+    // and is a NON-identical reduced mode: the product's own code must handle a shorter history (it reads
+    // Node::history at run time). kHistoryFixed = not governed (today's behaviour). A consumer's or reader's lag
+    // always wins: the depth never drops below the largest lag anything reads the product at.
+    uint8_t historyFloor = kHistoryFixed;
 };
+
+// The input's frame for a reader at frame `seq`: seq - lag, or seq + lead. False when seq - lag would be negative.
+inline bool InputSeq(const InputRef& in, uint64_t seq, uint64_t* out)
+{
+    if (in.lead > 0) {
+        *out = seq + in.lead;
+        return true;
+    }
+    if (seq < in.lag)
+        return false;
+    *out = seq - in.lag;
+    return true;
+}
 
 // The real tile geometry of the source-resolution monitor (SourceResolutionMonitor.h: kTile, kMaxTiles, ring[2]):
 // kMaxTiles tiles of kTile x kTile f32 samples per readback buffer, two buffers. Fixed, independent of the frame size.
@@ -322,6 +356,17 @@ public:
             }
             if (hasLead && d.shortQueueSubstitute == kNoProduct)
                 return fail("a look-ahead product needs a short-queue substitute");
+            if (d.orderedChain) {
+                bool selfLag = false;
+                for (size_t k = 0; k < d.inputCount; ++k)
+                    selfLag = selfLag || (d.inputs[k].product == d.id && d.inputs[k].lag > 0 && d.inputs[k].lead == 0);
+                if (!selfLag)
+                    return fail("an ordered chain product needs a self input at lag >= 1");
+                if (d.backend == Backend::RenderOnly)
+                    return fail("an ordered chain product needs a lane backend");
+            }
+            if (d.historyFloor != kHistoryFixed && d.historyFloor > d.history)
+                return fail("history floor above the full history");
             if (d.shortQueueSubstitute != kNoProduct) {
                 if (!Has(d.shortQueueSubstitute) || d.shortQueueSubstitute == d.id)
                     return fail("bad short-queue substitute");
@@ -743,7 +788,7 @@ struct ConsumeRef {
     uint8_t lag = 0;
 };
 
-constexpr size_t kMaxConsumes = 6;
+constexpr size_t kMaxConsumes = 10;
 
 struct ConsumerDecl {
     uint16_t id = 0;

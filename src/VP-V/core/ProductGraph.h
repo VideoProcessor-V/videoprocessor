@@ -43,6 +43,15 @@ namespace VpSkeleton {
 
 enum class QueueMode : uint8_t { Normal, Games, Competitive };
 
+// A history depth the VRAM governor granted a governed-history product (VramGovernor.h PlanTiers) below its full
+// depth. Carried in GraphSettings so the graph is built with it; a change is a rebuild (kRebuildHistory).
+struct HistoryCap {
+    ProductId id = kNoProduct;
+    uint8_t history = 0;
+    bool operator==(const HistoryCap& o) const { return id == o.id && history == o.history; }
+    bool operator!=(const HistoryCap& o) const { return !(*this == o); }
+};
+
 struct GraphSettings {
     Dims dims;                    // source active picture
     uint8_t renderAhead = 0;      // R
@@ -53,6 +62,7 @@ struct GraphSettings {
     bool ofaPresent = true;       // the card has an optical-flow engine
     uint64_t cardProfileKey = 0;  // CardProfile identity (adapter LUID + driver), a rebuild trigger
     uint8_t laneJobsInFlight = 1; // jobs one lane producer may hold pins for at once (OFA: up to its fence)
+    std::vector<HistoryCap> historyCaps;   // governed-history products running below their full depth (sorted by id)
 };
 
 struct Node {
@@ -60,7 +70,10 @@ struct Node {
     ProductId declared = kNoProduct;   // the id a consumer asked for (differs when substituted)
     Backend backend = Backend::Cpu;
     Tier tier = Tier::T0;
-    uint8_t history = 0;
+    uint8_t history = 0;               // the granted depth (what the ring and live pool are sized for)
+    uint8_t historyFull = 0;           // the depth without a governor cap: max(declared, largest lag read)
+    uint8_t historyMin = 0;            // the lowest depth the governor may grant (== historyFull: not governed)
+    bool orderedChain = false;         // ProductDecl::orderedChain
     bool holdsSpan = false;
     uint8_t ring = 0;
     uint8_t livePool = 0;
@@ -91,6 +104,7 @@ enum RebuildReason : uint32_t {
     kRebuildCard = 1u << 6,
     kRebuildDims = 1u << 7,
     kRebuildConsumers = 1u << 8,
+    kRebuildHistory = 1u << 9,    // the governor granted a governed-history product another depth
 };
 
 // What a rebuild depends on. The `graph` counter itself is deliberately not part of it.
@@ -172,6 +186,8 @@ inline uint32_t RebuildReasons(const GraphKey& before, const GraphKey& after, bo
         r |= kRebuildDims;
     if (before.consumers != after.consumers)
         r |= kRebuildConsumers;
+    if (a.historyCaps != b.historyCaps)
+        r |= kRebuildHistory;
     return r;
 }
 
@@ -216,6 +232,15 @@ struct Graph {
         std::vector<const Node*> out;
         for (const Node& n : nodes)
             if (n.lead > 0 && n.lead < n.declaredLead)
+                out.push_back(&n);
+        return out;
+    }
+    // Nodes running below their full history because the budget could not fit it (visible reduced mode).
+    std::vector<const Node*> HistoryReducedNodes() const
+    {
+        std::vector<const Node*> out;
+        for (const Node& n : nodes)
+            if (n.history < n.historyFull)
                 out.push_back(&n);
         return out;
     }
@@ -407,7 +432,19 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         node.backend = d.backend;
         node.tier = d.tier;
         node.laneVisible = d.laneVisible;
-        node.history = d.history > maxLag[p] ? d.history : maxLag[p];
+        node.historyFull = d.history > maxLag[p] ? d.history : maxLag[p];
+        node.historyMin = node.historyFull;
+        node.history = node.historyFull;
+        if (d.historyFloor != kHistoryFixed) {
+            const uint8_t floorEff = d.historyFloor > maxLag[p] ? d.historyFloor : maxLag[p];
+            node.historyMin = floorEff < node.historyFull ? floorEff : node.historyFull;
+            for (const HistoryCap& c : gs.historyCaps)
+                if (c.id == p) {
+                    uint8_t h = c.history < node.historyMin ? node.historyMin : c.history;
+                    node.history = h < node.historyFull ? h : node.historyFull;
+                }
+        }
+        node.orderedChain = d.orderedChain;
         node.holdsSpan = span[p] != 0;
         const bool lane = d.backend != Backend::RenderOnly;
         const unsigned L = lane ? gs.laneLead : 0u;
