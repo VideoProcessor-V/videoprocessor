@@ -11,6 +11,8 @@
 
 #include <ConfigurationRpcClient.h>
 
+#include <QCheckBox>
+#include <QComboBox>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
@@ -502,7 +504,8 @@ QWidget* CalibrationPage::Build(State& st)
         {
             if (stp->kit->noTarget()) return;
             QWidget* current = stp->kit->currentPage();
-            const bool visible = current && stp->page && current == stp->page.data();
+            const bool visible = current &&
+                current->findChild<QWidget*>(QStringLiteral("calibration.wizard.step")) != nullptr;
             if (visible || stp->active || stp->probeRunning)
                 Run(*stp, QStringLiteral("status"), QString());
         });

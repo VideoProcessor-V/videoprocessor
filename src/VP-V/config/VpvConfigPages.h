@@ -98,7 +98,7 @@ namespace Vpv
 		// Adds the pages of registered config page providers (ConfigPageHost.h); nothing registered adds
 		// nothing. The editor calls this after its own VP-V pages (Dynamic Drive) and before the master
 		// VP-V page, so that page can link the sub-pages the providers registered. A page's leafAfter is
-		// advisory and not yet honoured: the leaves follow the VP-V ones. A sub-page (parentPage set) is
+		// advisory and not yet honoured: provider leaves follow Dynamic Drive, before the VP-V leaf. A sub-page (parentPage set) is
 		// named and stacked like any page but gets no navigation leaf.
 		int appendProviderPages(QStackedWidget* pages, ConfigPageHost::ConfigFormApi& api)
 		{
