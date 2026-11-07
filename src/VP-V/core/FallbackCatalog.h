@@ -4,6 +4,7 @@
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -524,11 +525,57 @@ namespace FallbackCatalog
 	{
 		return waiting.empty() ? Released("skeleton_lane") : Engaged("skeleton_lane", waiting);
 	}
-	// Products the lane's graph holds that nothing can make yet (no producer, no live fill): they are declined,
-	// their consumers keep their own computation.
-	inline Decision SkeletonProductsDeclined(const std::string& products, const std::string& why)
+	// 70b G5: the GPU products of the lane (P10 grain split, P11 region stats, P12 light level). Each entry is Released
+	// when it does not apply; the skeleton lists the engaged ones (Ctrl+I line, Ctrl+Alt+D, Config status).
+	// No render device (pl_gpu) was handed to the module: the three products are not made, their readers compute their own.
+	inline Decision SkeletonGpuDevice(bool missing)
 	{
-		return products.empty() ? Released("skeleton_products") : Engaged("skeleton_products", products + " declined: " + why);
+		return missing ? Engaged("skeleton_gpu_device", "GPU products: no render device (P10 grain split, P11 region stats and P12 light level are not made; their readers use their own computation)")
+		               : Released("skeleton_gpu_device");
+	}
+	// Shadow mode runs the CPU lane only.
+	inline Decision SkeletonGpuShadow(bool shadow)
+	{
+		return shadow ? Engaged("skeleton_gpu_shadow", "shadow: GPU products skipped (no GPU dispatcher, no GPU work)") : Released("skeleton_gpu_shadow");
+	}
+	// The GPU products' in-render (live) form needs the Entrance phase, which the hub does not offer yet.
+	inline Decision SkeletonGpuLive(bool waiting)
+	{
+		return waiting ? Engaged("skeleton_gpu_live", "live: waits for the Entrance phase (M2 P4)") : Released("skeleton_gpu_live");
+	}
+	// skeleton_gpu_gap = after_render: the lane's GPU work runs before the frame is presented.
+	inline Decision SkeletonGpuGapAhead(bool ahead)
+	{
+		return ahead ? Engaged("skeleton_gpu_gap", "GPU lane work runs ahead of the present") : Released("skeleton_gpu_gap");
+	}
+	// skeleton_gpu_gap = off (default) while the dispatcher exists: the GPU products have no lane work yet.
+	inline Decision SkeletonGpuGapOff(bool off)
+	{
+		return off ? Engaged("skeleton_gpu_gap_off", "GPU lane work off (skeleton_gpu_gap = off): the GPU products are not made ahead")
+		           : Released("skeleton_gpu_gap_off");
+	}
+	// The VRAM governor took the lane ring of GPU products away (tier): they are made in the render only.
+	inline Decision SkeletonGpuShed(const std::string& products)
+	{
+		return products.empty() ? Released("skeleton_gpu_shed")
+		                        : Engaged("skeleton_gpu_shed", "VRAM shed: " + products + " lost the lane ring (not enough free video memory); made in the render only");
+	}
+	// The GPU products' private working memory (tap ring, grain-split working textures: not shed by the governor) does not
+	// fit in the free video memory: the GPU products are not made at all (the consumers keep their own computation).
+	inline Decision SkeletonGpuMemory(const std::string& why)
+	{
+		return why.empty() ? Released("skeleton_gpu_memory") : Engaged("skeleton_gpu_memory", why);
+	}
+	// A GPU dispatch failed (counted); `lastError` is the dispatcher's last reason.
+	inline Decision SkeletonGpuFailed(uint64_t failures, const std::string& lastError)
+	{
+		return failures == 0 ? Released("skeleton_gpu_failed")
+		                     : Engaged("skeleton_gpu_failed", "dispatch failed " + std::to_string(failures) + " time(s): " + (lastError.empty() ? std::string("no reason recorded") : lastError));
+	}
+	// P10c (the chroma planes of the grain split) is not made until the source ring exists.
+	inline Decision SkeletonGpuChroma(bool declined)
+	{
+		return declined ? Engaged("skeleton_gpu_chroma", "P10c declined: chroma needs the source ring (M2 P10)") : Released("skeleton_gpu_chroma");
 	}
 	// A [vpv.skeleton] key that could not be read (kept at its default).
 	inline Decision SkeletonKeys(const std::string& problems)

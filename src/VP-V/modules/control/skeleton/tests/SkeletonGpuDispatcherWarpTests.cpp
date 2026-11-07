@@ -342,7 +342,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(disp.DispatchLive(n, 8, 0, Header(), 0u), L"live fill");
 			Assert::IsTrue(kernel->steps == 10 && disp.Stats().tapBands == 4 && disp.Stats().extends == 2, L"same passes, live");
 
-			const GpuProductTextures* tex = disp.TexturesOf(kP10GrainSplit);
+			const VpLaneProducts::GpuProductTextures* tex = disp.TexturesOf(kP10GrainSplit);
 			const std::vector<float> lane = Download<float>(gpu, tex->Ring(0, 0), 4);
 			const std::vector<float> live = Download<float>(gpu, tex->Live(0, 0), 4);
 			Assert::IsTrue(lane.size() == live.size() && std::memcmp(lane.data(), live.data(), lane.size() * sizeof(float)) == 0,

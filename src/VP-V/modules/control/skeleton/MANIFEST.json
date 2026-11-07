@@ -11,9 +11,13 @@
     "src/VP-V/modules/control/skeleton/SkeletonModule.h",
     "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
     "src/VP-V/modules/control/skeleton/SkeletonSettings.h",
+    "src/VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h",
+    "src/VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
+    "src/VP-V/modules/control/skeleton/README.md",
     "src/VP-V/core/hub/HostSlots.h",
     "src/VP-V/modules/input/source_analysis/SourceFrameTap.h",
     "src/VP-V/modules/control/skeleton/tests/SkeletonModuleTests.cpp",
+    "src/VP-V/modules/control/skeleton/tests/SkeletonGpuDispatcherWarpTests.cpp",
     "src/VP-V/modules/input/source_analysis/tests/SourceFrameTapTests.cpp"
   ],
   "components": {
@@ -31,7 +35,9 @@
       "vpv.skeleton.analysis_lane_chunk_us",
       "vpv.skeleton.analysis_lane_deterministic",
       "vpv.skeleton.analysis_lane_test_wait_ms",
-      "vpv.skeleton.camera_link"
+      "vpv.skeleton.camera_link",
+      "vpv.skeleton.skeleton_gpu_gap",
+      "vpv.skeleton.grain_split_storage"
     ],
     "upstream_modules": ["input.signal (resync_event = on: the one shared seal)", "input.source_analysis (frame_analysis_store = on: the source frames)"]
   },

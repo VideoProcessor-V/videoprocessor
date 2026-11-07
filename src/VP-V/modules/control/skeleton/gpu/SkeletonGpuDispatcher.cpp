@@ -448,7 +448,21 @@ namespace Vpv
 			return true;
 		}
 
-		std::vector<FallbackCatalog::Decision> SkeletonGpuDispatcher::Fallbacks() const
+		double SkeletonGpuDispatcher::MeasuredMs(VpSkeleton::ProductId id) const
+		{
+			const auto it = m_products.find(id);
+			return it == m_products.end() ? 0.0 : double(it->second.lastNs) / 1.0e6;
+		}
+
+		uint64_t SkeletonGpuDispatcher::PrivateBytes(VpSkeleton::Dims dims, bool laneForm) const
+	{
+		uint64_t total = uint64_t(kTapRing) * 2u * uint64_t(dims.width) * dims.height * 2u;
+		for (const std::unique_ptr<VpLaneProducts::IProductKernel>& k : m_kernels)
+			total += k->PrivateBytes(dims, laneForm);
+		return total;
+	}
+
+	std::vector<FallbackCatalog::Decision> SkeletonGpuDispatcher::Fallbacks() const
 		{
 			std::vector<FallbackCatalog::Decision> out;
 			for (const auto& kv : m_products)

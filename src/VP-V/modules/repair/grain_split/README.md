@@ -49,6 +49,9 @@ RTX 3090. Computed once per frame; readers never recompute it.
   level, neighbourhood minimum, Wiener share) -> `split` (s1, s2, f, base; rgba32f) and `blocks` (N, e3). Matches the model
   within 5e-5 codes on WARP (`GrainSplitGpuMatchesModel`). Two rgba32f planes: 253 MiB at 4K (full-resolution bands, kept
   for exactness against the model; the half-resolution base of the plan would halve it).
+- `Splitter::Step(..., step)` / `Splitter::StepCount()` (70b G2, `GrainSplitGpu.h`): the same five passes as separate, resumable steps (0..4);
+  `Compute()` is the loop over `Step` (same dispatches, same order, byte-identical). The skeleton's lane form runs one step per gap chunk
+  (`LaneGpuGrainKernel.h`, `kP10SplitterSteps` = 5) and its live form all five at once.
 - `GpuPassUtil.h`: the compute-pass helpers its readers share.
 - Tests: see `tests/README.md`.
 
@@ -187,7 +190,7 @@ Config placement: none; this slot has no key of its own (the split law is fixed)
 
 | Key | Section | Type | Range | Default | Config placement | What Original (Bill) does | Visible fallbacks / status lines | Tier differences |
 |---|---|---|---|---|---|---|---|---|
-| `grain_split_storage` (declared by the integrator's node/settings, not read here yet) | `[vprenderer.<profile>]` | choice | full, compact | full | none yet (planned: master VP-V page, Repair sub-page, Advanced) | not built | none (Compact is a visible memory reduction when added) | Compact for the laptop store tier (planned) |
+| `grain_split_storage` (declared by the integrator's node/settings, not read here yet; the skeleton's GPU P10 reads its own `[vpv.skeleton] grain_split_storage`, see `modules/control/skeleton/README.md`) | `[vprenderer.<profile>]` | choice | full, compact | full | none yet (planned: master VP-V page, Repair sub-page, Advanced) | not built | none (Compact is a visible memory reduction when added) | Compact for the laptop store tier (planned) |
 | `GrainCameraRefine` variant (internal; no key yet, K3 adds `camera_*` keys) | internal | enum | Uncompensated, Camera | Uncompensated | none (internal) | not built | `grain: camera late` when P8 is absent or late (the host shows it at K5-2); the frame takes today's rule | same on every tier |
 
 Tiers: not tiered.

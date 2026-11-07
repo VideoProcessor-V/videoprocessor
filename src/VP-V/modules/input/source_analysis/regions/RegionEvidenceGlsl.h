@@ -104,6 +104,25 @@ float re_visibility_mean(float code)
 )GLSL";
 	}
 
+	// ---- the TAP form (70b G3) ----------------------------------------------------------------------------------------
+	// P11 as the lane GPU kernel runs it: re_src is the EXTENDED tap plane (R16 unorm, code << 6), so re_y recovers the exact
+	// 10-bit code, floor(texel * 65535 + 0.5) / 64. re_bands is P10's Compact block texel (N, e3, e1, e2), swizzled to the
+	// pass's (e1, e2, e3, N). A sixth storage image re_s5 receives the aux texel (zeros: no overlay / camera evidence yet).
+	// The reference form above (StatsPassHeaderGlsl / StatsPassGlsl) and the CPU mirror StatsBlock<float> are UNCHANGED.
+	inline std::string GlslReplaceOnce(std::string s, const char* from, const char* to)
+	{
+		const size_t at = s.find(from);
+		if (at != std::string::npos)
+			s.replace(at, std::char_traits<char>::length(from), to);
+		return s;
+	}
+
+	inline std::string StatsPassTapHeaderGlsl()
+	{
+		return GlslReplaceOnce(StatsPassHeaderGlsl(), "return texelFetch(re_src, q, 0).x;",
+			"return floor(texelFetch(re_src, q, 0).x * 65535.0 + 0.5) / 64.0;");
+	}
+
 	// The stats pass header with the light-level LUT (WP2): same body (StatsPassGlsl), but J / L / V come from the LUT.
 	// Extra descriptor: light_level_lut (LightLevelGlsl.h: sampled rgba32f 1024 x 1). re_transfer / re_vis / re_dark are not
 	// read. Mirror: StatsBlock<float> with StatsConstants::lutTexels.
@@ -200,6 +219,13 @@ if (blk.x < grid.x && blk.y < grid.y) {
     imageStore(re_s4, blk, o4);
 }
 )GLSL";
+	}
+
+	// The tap-form body (see StatsPassTapHeaderGlsl): StatsPassGlsl with the bands swizzled and the aux image written.
+	inline std::string StatsPassTapGlsl()
+	{
+		std::string s = GlslReplaceOnce(StatsPassGlsl(), "texelFetch(re_bands, blk, 0)", "texelFetch(re_bands, blk, 0).zwyx");
+		return GlslReplaceOnce(s, "imageStore(re_s4, blk, o4);", "imageStore(re_s4, blk, o4);\n    imageStore(re_s5, blk, vec4(0.0));");
 	}
 
 	// The consumer accessor (fused into the consumer's own shader). Branch order = DeriveBlock.

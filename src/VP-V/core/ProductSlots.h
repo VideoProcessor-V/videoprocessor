@@ -1128,6 +1128,8 @@ public:
     size_t Bytes() const { return bytes_; }
     uint8_t* Ring(size_t slot) { return ring_.data() + slot * bytes_; }
     uint8_t* Live(size_t index) { return live_.data() + index * bytes_; }
+    const uint8_t* Ring(size_t slot) const { return ring_.data() + slot * bytes_; }
+    const uint8_t* Live(size_t index) const { return live_.data() + index * bytes_; }
 
 private:
     size_t bytes_;

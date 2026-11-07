@@ -12,6 +12,8 @@
     "src/VP-V/modules/repair/grain_split/tests/GrainCameraRefineTests.cpp",
     "src/VP-V/modules/repair/grain_split/GrainSplitGpu.h",
     "src/VP-V/modules/repair/grain_split/GrainSplitGpu.cpp",
+    "src/VP-V/modules/input/source_analysis/lane/LaneGpuGrainKernel.h",
+    "src/VP-V/modules/input/source_analysis/lane/LaneGpuGrainKernel.cpp",
     "src/VP-V/modules/repair/grain_split/GpuPassUtil.h",
     "src/VP-V/modules/repair/grain_split/shared/BandFromBase.h",
     "src/VP-V/modules/repair/grain_split/shared/README.md",

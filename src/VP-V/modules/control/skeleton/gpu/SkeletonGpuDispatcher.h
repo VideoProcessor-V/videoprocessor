@@ -84,6 +84,12 @@ namespace Vpv
 			const VpLaneProducts::GpuProductTextures* TexturesOf(VpSkeleton::ProductId id) const;
 			pl_tex TapOf(uint64_t seq, bool extended) const;
 			uint64_t AllocatedBytes() const;
+			// Video memory the dispatcher holds OUTSIDE the product textures (the governor does not see it): the tap ring
+			// (tap + extended plane, R16, per in-flight frame) and the kernels' working textures. Analytic (no allocation).
+			uint64_t PrivateBytes(VpSkeleton::Dims dims, bool laneForm) const;
+			// G5: the last measured device time of a product's pass(es) in ms (pl_timer), 0 = not measured yet. The lane job's
+			// predictedMs reads it (a conservative derived default is used until then).
+			double MeasuredMs(VpSkeleton::ProductId id) const;
 			const Counters& Stats() const { return m_counters; }
 			size_t PendingReleases() const { return m_graveyard.size(); }
 			const std::string& LastError() const { return m_error; }

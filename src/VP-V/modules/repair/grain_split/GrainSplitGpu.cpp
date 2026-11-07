@@ -316,6 +316,138 @@ if (p.x < GS_W && p.y < GS_H) {
 		bool Splitter::Compute(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B, const Params& params,
 			const Options& options)
 		{
+			// One arena scope across the five steps (they share the arena's temporaries), closed on every exit.
+			ScopeGuard scope(options.arena);
+			for (uint32_t i = 0; i < StepCount(); ++i)
+				if (!Step(gpu, dispatch, plane, component, codeUnit, scale, B, params, options, i))
+					return false;
+			return true;
+		}
+
+		namespace
+		{
+			struct PassText
+			{
+				std::string geo, weights, yread;
+			};
+			PassText MakePassText(int w, int h, int B, int bw, int bh, int component, double codeUnit, double scale, const Params& params)
+			{
+				using namespace VpvGpu;
+				static const char* const kComp[4] = { "x", "y", "z", "w" };
+				PassText t;
+				t.geo = DefineInt("GS_W", w) + DefineInt("GS_H", h) + DefineInt("GS_B", B) + DefineInt("GS_BW", bw) + DefineInt("GS_BH", bh) +
+					DefineInt("GS_UNIT_VERSION", GrainSplit::kUnitVersion);
+				t.weights = WeightsGlsl("w1", "R1", params.sigmaFine * scale) + WeightsGlsl("wb", "RB", params.sigmaBase * scale) +
+					WeightsGlsl("w6", "R6", params.sigmaLow * scale);
+				t.yread = "float gs_y(int x, int y) { return texelFetch(src, ivec2(x, y), 0)." + std::string(kComp[component]) + " * " +
+					Num(1.0 / codeUnit) + "; }\n";
+				return t;
+			}
+		}
+
+		bool Splitter::Step(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B, const Params& params,
+			const Options& options, uint32_t step)
+		{
+			using namespace VpvGpu;
+			if (step >= StepCount())
+			{
+				m_error = "grain split: step out of range";
+				m_run = Run();
+				return false;
+			}
+			if (step == 0)
+			{
+				m_run = Run();
+				if (!Begin(gpu, dispatch, plane, component, codeUnit, B, params, options))
+					return false;
+			}
+			else if (!m_run.active || m_run.next != step)
+			{
+				m_error = "grain split: step out of order";
+				m_run = Run();
+				m_out = Frame();
+				return false;
+			}
+			const Run r = m_run;
+			const int w = r.w, h = r.h, bw = r.bw, bh = r.bh;
+			const bool compact = r.compact;
+			const PassText txt = MakePassText(w, h, B, bw, bh, component, codeUnit, scale, params);
+			const int gx = (w + 15) / 16, gy = (h + 15) / 16, bgx = (bw + 15) / 16, bgy = (bh + 15) / 16;
+			auto fail = [&](const char* why) {
+				m_error = why;
+				m_run = Run();
+				m_out = Frame();
+				return false;
+			};
+			switch (step)
+			{
+			case 0:
+			{
+				const pl_shader_desc d[2] = { Sampled("src", plane), VpvGpu::Storage("rows_out", r.rows) };
+				if (!Pass(dispatch, "VideoProcessor grain split: rows", txt.geo + txt.weights + txt.yread, GH_BODY, d, 2, nullptr, 0, gx, gy, 0))
+					return fail("grain split: rows pass failed");
+				break;
+			}
+			case 1:
+			{
+				const pl_shader_desc d[2] = { Sampled("rows", r.rows), VpvGpu::Storage("bands_out", r.bands) };
+				if (!Pass(dispatch, "VideoProcessor grain split: columns", txt.geo + txt.weights, GV_BODY, d, 2, nullptr, 0, gx, gy, 0))
+					return fail("grain split: columns pass failed");
+				break;
+			}
+			case 2:
+			{
+				const std::string hdr = txt.geo + DefineInt("GS_SUB", params.subBlocks) + DefineInt("GS_QUIET", params.quietSubBlocks) + Define("GS_CAL", params.grainCal);
+				const pl_shader_desc d[2] = { Sampled("bands", r.bands), VpvGpu::Storage("quiet_out", r.quiet) };
+				if (!Pass(dispatch, "VideoProcessor grain split: grain level", hdr, compact ? QUIET_BODY_COMPACT : QUIET_BODY, d, 2, nullptr, 0, bgx, bgy, 0))
+					return fail("grain split: grain level pass failed");
+				break;
+			}
+			case 3:
+			{
+				const pl_shader_desc d[2] = { Sampled("quiet", r.quiet), VpvGpu::Storage("blocks_out", r.blocks) };
+				if (!Pass(dispatch, "VideoProcessor grain split: neighbourhood minimum", txt.geo + DefineInt("GS_NG", params.neighbourhood), compact ? NMIN_BODY_COMPACT : NMIN_BODY, d, 2, nullptr, 0, bgx, bgy, 0))
+					return fail("grain split: minimum pass failed");
+				break;
+			}
+			default:
+			{
+				if (compact)
+				{
+					const std::string hdr = txt.geo + Define("GS_KAPPA", params.kappa) + Define("GS_FLOOR", params.energyFloor) + DefineInt("GS_COMPACT", 1) + Define("GS_CU", codeUnit);
+					const pl_shader_desc d[4] = { Sampled("bands", r.bands), Sampled("blocks", r.blocks), VpvGpu::Storage("split_a", r.outA), VpvGpu::Storage("split_b", r.outB) };
+					if (!Pass(dispatch, "VideoProcessor grain split: Wiener share (compact)", hdr, F_BODY_COMPACT, d, 4, nullptr, 0, gx, gy, 0))
+						return fail("grain split: Wiener pass failed");
+					m_out.split = r.outA;
+					m_out.splitB = r.outB;
+				}
+				else
+				{
+					const std::string hdr = txt.geo + Define("GS_KAPPA", params.kappa) + Define("GS_FLOOR", params.energyFloor);
+					const pl_shader_desc d[3] = { Sampled("bands", r.bands), Sampled("blocks", r.blocks), VpvGpu::Storage("split_out", r.rows) };
+					if (!Pass(dispatch, "VideoProcessor grain split: Wiener share", hdr, F_BODY, d, 3, nullptr, 0, gx, gy, 0))
+						return fail("grain split: Wiener pass failed");
+					m_out.split = r.rows;
+					m_out.splitB = nullptr;
+				}
+				m_out.blocks = r.blocks;
+				m_out.w = w; m_out.h = h; m_out.bw = bw; m_out.bh = bh; m_out.B = B; m_out.scale = scale;
+				m_out.codeUnit = codeUnit; m_out.component = component;
+				m_out.storage = r.storage;
+				m_out.seq = options.seq;
+				m_out.version = GrainSplit::kUnitVersion;
+				break;
+			}
+			}
+			m_run.next = step + 1;
+			if (step + 1 == StepCount())
+				m_run = Run();
+			return true;
+		}
+
+		bool Splitter::Begin(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, int B, const Params& params,
+			const Options& options)
+		{
 			using namespace VpvGpu;
 			m_error.clear();
 			m_scratchShort = false;
@@ -368,8 +500,7 @@ if (p.x < GS_W && p.y < GS_H) {
 
 			// Intermediates: from the arena (fixed order rows, bands, quiet; scope closed on every exit), else private.
 			pl_tex rows = nullptr, bands = nullptr, quiet = nullptr;
-			ScopeGuard scope(options.arena);
-			if (options.arena)
+						if (options.arena)
 			{
 				// The private temporaries of the non-arena path are not used any more: free them.
 				for (pl_tex* t : { &m_bands, &m_quiet })
@@ -440,77 +571,13 @@ if (p.x < GS_W && p.y < GS_H) {
 				}
 				blocksTex = m_blocks;
 			}
-			static const char* const kComp[4] = { "x", "y", "z", "w" };
-			const std::string geo = DefineInt("GS_W", w) + DefineInt("GS_H", h) + DefineInt("GS_B", B) + DefineInt("GS_BW", bw) + DefineInt("GS_BH", bh) +
-				DefineInt("GS_UNIT_VERSION", GrainSplit::kUnitVersion);
-			const std::string weights = WeightsGlsl("w1", "R1", params.sigmaFine * scale) + WeightsGlsl("wb", "RB", params.sigmaBase * scale) +
-				WeightsGlsl("w6", "R6", params.sigmaLow * scale);
-			const std::string yread = "float gs_y(int x, int y) { return texelFetch(src, ivec2(x, y), 0)." + std::string(kComp[component]) + " * " +
-				Num(1.0 / codeUnit) + "; }\n";
-			const int gx = (w + 15) / 16, gy = (h + 15) / 16, bgx = (bw + 15) / 16, bgy = (bh + 15) / 16;
-			{
-				const pl_shader_desc d[2] = { Sampled("src", plane), VpvGpu::Storage("rows_out", rows) };
-				if (!Pass(dispatch, "VideoProcessor grain split: rows", geo + weights + yread, GH_BODY, d, 2, nullptr, 0, gx, gy, 0))
-				{
-					m_error = "grain split: rows pass failed";
-					return false;
-				}
-			}
-			{
-				const pl_shader_desc d[2] = { Sampled("rows", rows), VpvGpu::Storage("bands_out", bands) };
-				if (!Pass(dispatch, "VideoProcessor grain split: columns", geo + weights, GV_BODY, d, 2, nullptr, 0, gx, gy, 0))
-				{
-					m_error = "grain split: columns pass failed";
-					return false;
-				}
-			}
-			{
-				const std::string hdr = geo + DefineInt("GS_SUB", params.subBlocks) + DefineInt("GS_QUIET", params.quietSubBlocks) + Define("GS_CAL", params.grainCal);
-				const pl_shader_desc d[2] = { Sampled("bands", bands), VpvGpu::Storage("quiet_out", quiet) };
-				if (!Pass(dispatch, "VideoProcessor grain split: grain level", hdr, compact ? QUIET_BODY_COMPACT : QUIET_BODY, d, 2, nullptr, 0, bgx, bgy, 0))
-				{
-					m_error = "grain split: grain level pass failed";
-					return false;
-				}
-			}
-			{
-				const pl_shader_desc d[2] = { Sampled("quiet", quiet), VpvGpu::Storage("blocks_out", blocksTex) };
-				if (!Pass(dispatch, "VideoProcessor grain split: neighbourhood minimum", geo + DefineInt("GS_NG", params.neighbourhood), compact ? NMIN_BODY_COMPACT : NMIN_BODY, d, 2, nullptr, 0, bgx, bgy, 0))
-				{
-					m_error = "grain split: minimum pass failed";
-					return false;
-				}
-			}
-			if (compact)
-			{
-				const std::string hdr = geo + Define("GS_KAPPA", params.kappa) + Define("GS_FLOOR", params.energyFloor) + DefineInt("GS_COMPACT", 1) + Define("GS_CU", codeUnit);
-				const pl_shader_desc d[4] = { Sampled("bands", bands), Sampled("blocks", blocksTex), VpvGpu::Storage("split_a", outA), VpvGpu::Storage("split_b", outB) };
-				if (!Pass(dispatch, "VideoProcessor grain split: Wiener share (compact)", hdr, F_BODY_COMPACT, d, 4, nullptr, 0, gx, gy, 0))
-				{
-					m_error = "grain split: Wiener pass failed";
-					return false;
-				}
-				m_out.split = outA;
-				m_out.splitB = outB;
-			}
-			else
-			{
-				const std::string hdr = geo + Define("GS_KAPPA", params.kappa) + Define("GS_FLOOR", params.energyFloor);
-				const pl_shader_desc d[3] = { Sampled("bands", bands), Sampled("blocks", blocksTex), VpvGpu::Storage("split_out", rows) };
-				if (!Pass(dispatch, "VideoProcessor grain split: Wiener share", hdr, F_BODY, d, 3, nullptr, 0, gx, gy, 0))
-				{
-					m_error = "grain split: Wiener pass failed";
-					return false;
-				}
-				m_out.split = rows;
-				m_out.splitB = nullptr;
-			}
-			m_out.blocks = blocksTex;
-			m_out.w = w; m_out.h = h; m_out.bw = bw; m_out.bh = bh; m_out.B = B; m_out.scale = scale;
-			m_out.codeUnit = codeUnit; m_out.component = component;
-			m_out.storage = choice.storage;
-			m_out.seq = options.seq;
-			m_out.version = GrainSplit::kUnitVersion;
+			m_run.active = true;
+			m_run.next = 0;
+			m_run.compact = compact;
+			m_run.storage = choice.storage;
+			m_run.w = w; m_run.h = h; m_run.bw = bw; m_run.bh = bh;
+			m_run.rows = rows; m_run.bands = bands; m_run.quiet = quiet; m_run.blocks = blocksTex;
+			m_run.outA = outA; m_run.outB = outB;
 			return true;
 		}
 	}

@@ -155,6 +155,9 @@ namespace VpLaneProducts
 		virtual bool Step(KernelContext& c, uint32_t step) = 0;
 		virtual void Release(pl_gpu gpu) = 0;
 		virtual std::string LastError() const { return std::string(); }
+		// Private video memory the kernel holds outside the product textures (working textures the VRAM governor does not
+		// see) at `dims`; `laneForm`: the lane form (a second working set) is wanted too. The live form's set is always counted.
+		virtual uint64_t PrivateBytes(VpSkeleton::Dims dims, bool laneForm) const { (void)dims; (void)laneForm; return 0; }
 		// The kernel's visible downgrades (storage refused, reduced forms, ...).
 		virtual std::vector<FallbackCatalog::Decision> Fallbacks() const { return std::vector<FallbackCatalog::Decision>(); }
 	};

@@ -7,7 +7,9 @@
 // worker does. Settings parse; off is inert; the Original pathway forces off; waiting reasons are
 // visible; with the shared seal driving and source frames tapped, P1 / P4 are sealed or live-filled with
 // the bytes of the one-shot reference and P10-12 are declined with the visible reason; hosts are
-// independent. CPU only (the lane's own CPU worker threads run).
+// independent. 70b G5: skeleton_gpu_gap / grain_split_storage parse; Off, Shadow, the Original pathway and "no render
+// device" construct no GPU dispatcher and make no GPU call (the status says why); the GPU status texts. CPU only (the
+// lane's own CPU worker threads run); the dispatcher itself is covered by SkeletonGpuDispatcherWarpTests (WARP).
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -15,6 +17,7 @@
 #include <windows.h>
 #include "CppUnitTest.h"
 
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/FramesInFlight.h>
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
@@ -275,6 +278,30 @@ namespace SkeletonModuleTestsNs
 			Assert::AreEqual<size_t>(1, s.cameraProblems.size());
 		}
 
+		TEST_METHOD(GpuKeysDefaultAndParse)
+		{
+			const Vpv::Skeleton::Settings d = ParseText("[vpv.skeleton]\nanalysis_lane=on\n");
+			Assert::IsTrue(d.gpuGap == Vpv::Skeleton::GpuGapMode::Off, L"skeleton_gpu_gap defaults to off");
+			Assert::IsTrue(d.grainStorage == Vpv::Skeleton::GrainStorage::Full, L"grain_split_storage defaults to full");
+			const Vpv::Skeleton::Settings s = ParseText("[vpv.skeleton]\nanalysis_lane=on\nskeleton_gpu_gap=After_Render\ngrain_split_storage=Compact\n");
+			Assert::IsTrue(s.gpuGap == Vpv::Skeleton::GpuGapMode::AfterRender);
+			Assert::IsTrue(s.grainStorage == Vpv::Skeleton::GrainStorage::Compact);
+			Assert::IsTrue(s.laneProblems.empty());
+			const Vpv::Skeleton::Settings o = ParseText("[vpv.skeleton]\nskeleton_gpu_gap=off\ngrain_split_storage=full\n");
+			Assert::IsTrue(o.gpuGap == Vpv::Skeleton::GpuGapMode::Off && o.grainStorage == Vpv::Skeleton::GrainStorage::Full);
+			Assert::IsTrue(o.laneProblems.empty());
+		}
+
+		TEST_METHOD(InvalidGpuKeysKeepTheDefaultAndAreReported)
+		{
+			const Vpv::Skeleton::Settings s = ParseText("[vpv.skeleton]\nskeleton_gpu_gap=sometimes\ngrain_split_storage=tiny\n");
+			Assert::IsTrue(s.gpuGap == Vpv::Skeleton::GpuGapMode::Off);
+			Assert::IsTrue(s.grainStorage == Vpv::Skeleton::GrainStorage::Full);
+			Assert::AreEqual<size_t>(2, s.laneProblems.size());
+			Assert::IsTrue(s.laneProblems[0] == "skeleton_gpu_gap 'sometimes' is not valid (off|after_render); kept off");
+			Assert::IsTrue(s.laneProblems[1] == "grain_split_storage 'tiny' is not valid (full|compact); kept full");
+		}
+
 		TEST_METHOD(OriginalPathwayForcesBothOff)
 		{
 			const Vpv::Skeleton::Settings s = ParseText("[vpv]\npipeline_original_pathway=on\n[vpv.skeleton]\nanalysis_lane=on\ncamera_link=report\n");
@@ -398,7 +425,8 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(rig.sk.WorkersRunning(rig.Host()), L"started after the producers were registered");
 			Assert::IsTrue(rig.sk.LaneOf(rig.Host())->TotalDeclined() > 0, L"P10-12 have no producer and no live fill yet");
 			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
-			Assert::IsTrue(Has(fb, "skeleton_products: P10 grain split, P11 region stats, P12 light level declined: render-thread GPU dispatch hook pending (M2 Upload/Entrance phase)"));
+			Assert::IsTrue(Has(fb, "skeleton_gpu_device: GPU products: no render device"), L"no pl_gpu in a unit test: P10-12 are not made, visibly");
+			Assert::IsFalse(Has(fb, "skeleton_products"), L"the old declined entry is gone");
 			Assert::IsFalse(Has(fb, "skeleton_lane: waiting"), L"nothing is waiting any more");
 			const std::vector<std::string> lines = rig.Lines(RE::StatusKind::Lines);
 			Assert::AreEqual<size_t>(1, lines.size());
@@ -596,6 +624,73 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(rig.Command().find("2 drops applied") != std::string::npos);
 		}
 
+		TEST_METHOD(OffAndOriginalNeverConstructAGpuDispatcher)
+		{
+			const unsigned long long before = SkeletonModule::GpuDispatchersCreated();
+			{
+				Rig off("[general]\nx=1\n");
+				off.ResyncApply("on");
+				off.Life(RE::Lifecycle::GpuCreated);
+				off.Life(RE::Lifecycle::SettingsApplied);
+				for (int64_t s = 1; s <= 3; ++s)
+					off.Frame(s);
+				Assert::IsNull(off.sk.GpuDispatcherFor(off.Host()), L"off: no dispatcher");
+			}
+			{
+				Rig orig(Lane("on", "skeleton_gpu_gap=after_render\n"));
+				orig.Life(RE::Lifecycle::GpuCreated, 0);
+				orig.Life(RE::Lifecycle::SettingsApplied, 1);   // the Original pathway
+				Assert::IsFalse(orig.sk.Active(orig.Host()));
+				Assert::IsNull(orig.sk.GpuDispatcherFor(orig.Host()), L"Original: no dispatcher");
+				Assert::IsNull(orig.sk.LaneOf(orig.Host()));
+			}
+			Assert::AreEqual(before, SkeletonModule::GpuDispatchersCreated(), L"no dispatcher was ever constructed");
+		}
+
+		TEST_METHOD(WithoutAPlGpuTheOnModeHasNoDispatcherAndSaysSo)
+		{
+			const unsigned long long before = SkeletonModule::GpuDispatchersCreated();
+			Rig rig(Lane("on", "skeleton_gpu_gap=after_render\ngrain_split_storage=compact\n"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);   // f.gpu is null in a unit test
+			for (int64_t s = 1; s <= 6; ++s)
+				rig.Frame(s);
+			Assert::IsNotNull(rig.sk.LaneOf(rig.Host()));
+			Assert::IsNull(rig.sk.GpuDispatcherFor(rig.Host()));
+			Assert::AreEqual(before, SkeletonModule::GpuDispatchersCreated());
+			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
+			Assert::IsTrue(Has(fb, "skeleton_gpu_device: GPU products: no render device"));
+			Assert::IsFalse(Has(fb, "GPU lane work runs ahead of the present"), L"nothing runs ahead without a device");
+			Assert::IsFalse(Has(fb, "live: waits for the Entrance phase"), L"no dispatcher, no live wait");
+			Assert::IsFalse(Has(fb, "shadow: GPU products skipped"));
+			Assert::IsTrue(rig.sk.LaneOf(rig.Host())->TotalDeclined() > 0, L"the declining live fill is still installed without a dispatcher");
+		}
+
+		TEST_METHOD(ShadowModeSkipsTheGpuProductsVisibly)
+		{
+			const unsigned long long before = SkeletonModule::GpuDispatchersCreated();
+			Rig rig(Lane("shadow", "skeleton_gpu_gap=after_render\n"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 6; ++s)
+				rig.Frame(s);
+			Assert::IsNull(rig.sk.GpuDispatcherFor(rig.Host()));
+			Assert::AreEqual(before, SkeletonModule::GpuDispatchersCreated());
+			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
+			Assert::IsTrue(Has(fb, "skeleton_gpu_shadow: shadow: GPU products skipped"));
+			Assert::IsFalse(Has(fb, "no render device"), L"shadow is its own reason");
+		}
+
+		TEST_METHOD(AnInvalidGpuKeyIsShownWhileTheLaneRuns)
+		{
+			Rig rig(Lane("on", "skeleton_gpu_gap=sometimes\n"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_settings: skeleton_gpu_gap 'sometimes' is not valid (off|after_render); kept off"));
+		}
+
 		TEST_METHOD(ACommandForAnotherModuleIsNotAnswered)
 		{
 			Rig rig(Lane("on"));
@@ -616,6 +711,30 @@ namespace SkeletonModuleTestsNs
 			rig.sk.OnStatus(c, RE::StatusKind::WorkerFault, none, "skeleton", "exception");
 			rig.sk.OnStatus(c, RE::StatusKind::WorkerFault, none, "resync", "exception");
 			Assert::AreEqual<unsigned long long>(before + 1, SkeletonModule::ContainedFaults());
+		}
+	};
+
+	TEST_CLASS(SkeletonGpuStatusTexts)
+	{
+	public:
+		TEST_METHOD(TheGpuStatusTextsAreTheAgreedOnes)
+		{
+			namespace FC = FallbackCatalog;
+			Assert::IsTrue(FC::SkeletonGpuLive(true).engaged);
+			Assert::IsTrue(FC::SkeletonGpuLive(true).reason == "live: waits for the Entrance phase (M2 P4)");
+			Assert::IsFalse(FC::SkeletonGpuLive(false).engaged);
+			Assert::IsTrue(FC::SkeletonGpuGapAhead(true).reason == "GPU lane work runs ahead of the present");
+			Assert::IsFalse(FC::SkeletonGpuGapAhead(false).engaged);
+			Assert::IsTrue(FC::SkeletonGpuDevice(true).reason.find("GPU products: no render device") == 0);
+			Assert::IsFalse(FC::SkeletonGpuDevice(false).engaged);
+			Assert::IsTrue(FC::SkeletonGpuShadow(true).reason.find("shadow: GPU products skipped") == 0);
+			Assert::IsTrue(FC::SkeletonGpuChroma(true).reason == "P10c declined: chroma needs the source ring (M2 P10)");
+			Assert::IsFalse(FC::SkeletonGpuFailed(0, "x").engaged);
+			const FC::Decision failed = FC::SkeletonGpuFailed(3, "the extend pass failed");
+			Assert::IsTrue(failed.engaged && failed.reason.find("3 time(s)") != std::string::npos && failed.reason.find("the extend pass failed") != std::string::npos);
+			Assert::IsFalse(FC::SkeletonGpuShed("").engaged);
+			const FC::Decision shed = FC::SkeletonGpuShed("light level (T1)");
+			Assert::IsTrue(shed.engaged && shed.reason.find("VRAM shed: light level (T1)") == 0);
 		}
 	};
 }

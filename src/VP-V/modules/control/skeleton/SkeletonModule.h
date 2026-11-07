@@ -10,6 +10,14 @@
 // from ResyncExtension's FrameSeal (a provider + a subscriber), the render-thread phases from OnFrame
 // (Begin: OnRenderStart; AfterRender: post-submit gap + retire) and OnQueue (Drop). Off (the default):
 // no state, no thread, no tap, no status line. The Original pathway forces off.
+//
+// 70b G5 (GPU products P10/P11/P12): the pl_gpu is stored at GpuCreated; a SkeletonGpuDispatcher (+ the three
+// kernels) exists per renderer only while the lane is wanted AND analysis_lane = on AND a pl_gpu was given. Shadow, Off,
+// Original and "no render device" never construct one (no GPU call; the status says why). The dispatcher's texture
+// allocation (Configure) and its deferred releases run in AfterRender (GPU-legal, before the gap); with
+// skeleton_gpu_gap = after_render the GPU lane jobs are registered as lane producers and run in that gap (visible: ahead
+// of the present); with off (default) they are not registered (the products stay in-render-only). The live (in-render)
+// form is deferred until the Entrance phase (M2 P4): declined and shown.
 
 #include <VP-V/core/AnalysisLane.h>
 #include <VP-V/core/hub/ExtensionHub.h>
@@ -29,14 +37,14 @@ namespace Vpv
 		namespace RE = RendererExtension;
 
 		struct HostState;   // per renderer (SkeletonModule.cpp)
+		class SkeletonGpuDispatcher;   // gpu/SkeletonGpuDispatcher.h (libplacebo; not included here)
+		struct GpuSlotTag { const void* host = nullptr; };   // the per-renderer pl_gpu, kept as a HostSlots aux
 
 		class SkeletonModule : public Hub::ISkeletonModule
 		{
 		public:
 			static constexpr const char* kName = "skeleton";
 			static constexpr const char* kLineKey = "skeleton";
-			// The reason shown for the products no producer or live fill can make yet.
-			static constexpr const char* kDeclinedReason = "render-thread GPU dispatch hook pending (M2 Upload/Entrance phase)";
 
 			// `loader` reads the configuration (null = the working directory's VideoProcessor.cfg);
 			// `nowUs` is the lane's microsecond clock (null = steady_clock).
@@ -63,6 +71,11 @@ namespace Vpv
 			void SetWorkerThreadsForTesting(bool start) { startWorkers_ = start; }
 			// Tests: use this card profile instead of the device query (no render device exists in a unit test).
 			void SetCardForTesting(const VpSkeleton::CardProfile& card) { cardOverride_ = true; card_ = card; }
+			// 70b G5: the renderer's GPU dispatcher (null in Off / Shadow / the Original pathway / without a pl_gpu).
+			// Render thread / single-threaded tests only.
+			const SkeletonGpuDispatcher* GpuDispatcherFor(const void* host) const;
+			// Dispatchers ever constructed by any SkeletonModule (tests: Off and Original must leave it unchanged).
+			static unsigned long long GpuDispatchersCreated();
 			// Hub-contained exceptions in this module (all renderers).
 			static unsigned long long ContainedFaults();
 
@@ -76,6 +89,7 @@ namespace Vpv
 			Skeleton::ConfigLoader loader_;
 			std::function<uint64_t()> nowUs_;
 			Hub::HostSlots<HostState> hosts_;
+			Hub::HostSlots<GpuSlotTag> gpuSlots_;   // aux = the renderer's pl_gpu (GpuCreated), cleared at GpuReleased
 			bool cardOverride_ = false;
 			bool startWorkers_ = true;
 			VpSkeleton::CardProfile card_;
