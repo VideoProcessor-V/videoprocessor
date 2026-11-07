@@ -112,24 +112,27 @@ namespace Tests
 			Assert::IsTrue(Matches("${eotf} == pq || ${key} == \"F5\"", { { "key", "F5" } }));
 		}
 
-		// Item 4: a Boolean variable followed by a bare word without an
-		// operator is no longer read as `== word`.
-		TEST_METHOD(BareBooleanAcceptsOnlyTheImplicitTrue)
+		// Item 4 (audit 2026-10-16) rejected a Boolean variable followed by a value word without an
+		// operator. That stricter parse is NOT applied (M2 P3: the host parser is Bill's again, register
+		// row DR-P3-BOOLWORD, a candidate bug fix to offer upstream). This test pins the Bill-identical
+		// behaviour: `${b} word` reads as `${b} == word` and only true/false are Boolean values.
+		TEST_METHOD(BareBooleanFollowedByWordReadsAsEqualsLikeBill)
 		{
 			std::string error;
-			Assert::IsFalse(DisplayRuleExpression::Validate("${hdr_metadata} false", error));
-			Assert::IsTrue(error.find("expected comparison operator") != std::string::npos);
+			Assert::IsTrue(DisplayRuleExpression::Validate("${hdr_metadata} false", error),
+				std::wstring(error.begin(), error.end()).c_str());
+			Assert::IsTrue(DisplayRuleExpression::Validate("${hdr_metadata} true|false", error),
+				L"non-strict alternatives are accepted after a bare Boolean");
 			Assert::IsFalse(DisplayRuleExpression::Validate("${interlaced} no", error));
-			Assert::IsFalse(DisplayRuleExpression::Validate("${hdr_metadata} true|false", error));
+			Assert::IsTrue(error.find("accepts only true or false") != std::string::npos);
 			Assert::IsFalse(DisplayRuleExpression::Validate("${hdr_metadata} pq", error));
 
 			DisplayRuleExpression::Expression expression;
-			Assert::IsFalse(expression.Compile("${hdr_metadata} false", error, true),
-				L"strict mode must reject the bare word too");
-			Assert::IsFalse(expression.Compile("${hdr_metadata} true", error, true));
+			Assert::IsTrue(expression.Compile("${hdr_metadata} false", error, true),
+				L"strict mode reads the bare word as == false, as Bill's parser does");
+			Assert::IsTrue(expression.Compile("${hdr_metadata} true", error, true));
 
-			// Still accepted: the bare variable, the redundant non-strict
-			// `true`, and full comparisons.
+			// The bare variable, the redundant `true`, and full comparisons are accepted.
 			Assert::IsTrue(DisplayRuleExpression::Validate("${hdr_metadata}", error));
 			Assert::IsTrue(DisplayRuleExpression::Validate("${hdr_metadata} true", error));
 			Assert::IsTrue(DisplayRuleExpression::Validate("${hdr_metadata} == false", error));
@@ -140,6 +143,8 @@ namespace Tests
 			const Values hdr = { { "hdr_metadata", "true" }, { "interlaced", "false" } };
 			Assert::IsTrue(Matches("${hdr_metadata}", hdr));
 			Assert::IsTrue(Matches("${hdr_metadata} true", hdr));
+			Assert::IsFalse(Matches("${hdr_metadata} false", hdr), L"read as == false (Bill)");
+			Assert::IsTrue(Matches("${interlaced} false", hdr), L"read as == false (Bill)");
 			Assert::IsFalse(Matches("${interlaced}", hdr));
 			Assert::IsTrue(Matches("${hdr_metadata} && ${interlaced} == false", hdr, true));
 		}

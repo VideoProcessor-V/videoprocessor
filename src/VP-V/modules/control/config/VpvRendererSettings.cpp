@@ -1071,7 +1071,7 @@ namespace VpvRendererSettings
 	// deband_vp_exclusive: see LibplaceboDebandYieldsToVp in the host (settings = the host's settings struct).
 
 	// Fingerprint terms of the VP-V settings, appended after the host's own (VpvRendererSettings::AppendFingerprint).
-	// Every value is separated by '|', so the string stays unambiguous; its ORDER differs from the old
+	// Starts with the '|' that joins it to the host's text, values separated by '|', no trailing '|', so the string stays unambiguous; its ORDER differs from the old
 	// interleaved one, the equality partition over configurations is the same (RendererSettingsIdentityTests).
 	std::string Fingerprint(const VpvRenderer::Fields& settings, bool includeLive)
 	{
@@ -1257,7 +1257,11 @@ namespace VpvRendererSettings
 			// so they never force a restart by themselves.
 			stream << settings.profileValues << '|';
 		}
-		return stream.str();
+		// The host's text ends without a separator and this text starts with one; drop the trailing one so
+		// the join adds no empty field (the host's own part stays byte-identical to Bill's).
+		std::string text = stream.str();
+		if (!text.empty() && text.back() == '|') text.pop_back();
+		return text;
 	}
 
 	// The live-applied settings: dst takes src's (the host's transport copy of the active settings).

@@ -152,8 +152,8 @@ namespace SchemaValidationGoldenTest
 			std::string mode;
 			for (const std::string& line : Split(golden, '\n'))
 			{
+				if (line.rfind("### ", 0) == 0) { mode = line.substr(4); out << line << "\n"; continue; }   // a section header sets the mode, so it is tested before the '#' comment skip
 				if (line.empty() || line[0] == '#') { if (!line.empty()) out << line << "\n"; continue; }
-				if (line.rfind("### ", 0) == 0) { mode = line.substr(4); out << line << "\n"; continue; }
 				if (mode == "profile")
 				{
 					const size_t bar = line.find(" | ");
