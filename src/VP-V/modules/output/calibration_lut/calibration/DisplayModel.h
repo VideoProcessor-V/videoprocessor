@@ -25,8 +25,8 @@
 // measured BTB / WTW response where the display responds there, and are left
 // as the inverse made them where it does not (BTB / WTW codes still pass).
 
-#include "ColorMath.h"
-#include "PatternPlan.h"
+#include "../pattern_lib/ColorMath.h"
+#include "../pattern_lib/PatternPlan.h"
 
 #include <string>
 #include <vector>

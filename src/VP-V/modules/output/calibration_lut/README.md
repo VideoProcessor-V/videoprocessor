@@ -2,6 +2,93 @@
 
 Unit: **output** | side: output | order: 250 | status: **partial** | hook point: PRE_OUTPUT
 
+## Working on this module alone (start here)
+
+Everything a developer needs to set up, change and bug-test the calibration module without the rest of VP's
+design documents. The module is self-contained in this folder except for the Bill files listed in
+[HOOKS.md](HOOKS.md) ("Renderer side", "Process and Config side"), which are the only places the rest of VP calls in.
+
+### Layout
+
+| Path | What it is | Depends on |
+|---|---|---|
+| `pattern_lib/` | The dependency-free pattern library: exact patch codes for 8-bit / 8-in-10 / 10-bit, patch plans, colour maths, reading policy, the POD structs shared with the renderer DLL. Own README, own stand-alone tests. | C++17 standard library only |
+| `calibration/` | The automatic calibration: controller, session, meter (ArgyllCMS `spotread` over ConPTY), display model and LUT fit, outputs, LED characterisation, ambient check, HDR verify, simulated display and meter. | `pattern_lib/`, Windows (ConPTY, job objects), `pch.h`, `DebugLog`, VideoProcessor-Lib config classes, ConfigCore key-only edits, drive modules (LED run only) |
+| `CalibrationLutStage.*` | The GPU hook that applies the `.cube` LUT as VP's last colour hook (`calibration_lut_stage = vp`). | libplacebo |
+| `CalibrationLutHost.*`, `CalibrationLutHostPolicy.h` | The adapter between the renderer and everything above: patch presentation, LUT take/reload/attached/fallback decisions, output facts. The policy header is pure and CPU-testable. | libplacebo, D3D11 (adapter); none (policy) |
+| `tests/` | MSTest classes compiled by VideoProcessor-Test, scripted spotread transcripts (`tests/data/spotread`). | see "Tests" below |
+| `HOOKS.md` | The hook contract: every renderer and Config call site today and the hook it becomes. | - |
+
+### Set up
+
+1. A clone of `billslack2/videoprocessor`'s current beta integration branch (see `AGENTS.md`), Visual Studio 2022
+   or newer with the C++ desktop workload, the MWCapture SDK headers (the build needs them even though this module
+   never uses a capture card; point `MagewellSdkRoot` at `SDKv3`), and Qt as the rest of the solution requires.
+2. Optional, for a real display: ArgyllCMS 3.0 or newer (`spotread.exe`) and a meter. Without them everything
+   below still runs (simulated display and meter).
+
+### Build (x64 Release, whole solution)
+
+From a Visual Studio Developer PowerShell in the repository root (the `AGENTS.md` command, with your SDK path):
+
+```
+MSBuild.exe VideoProcessor.sln /t:Build /m /p:Configuration=Release /p:Platform=x64 /p:MagewellSdkRoot=<path to MWCaptureSDK>\SDKv3 /v:minimal
+```
+
+The build also produces `x64\Release\VideoProcessor-Test.dll` and `x64\Release\test-tools\fake_spotread.exe`
+(project `src/VideoProcessor-FakeSpotread`, used by the ConPTY tests). If the linker reports LNK1103 or LNK1318 on
+the renderer or GUI, delete the stale `.iobj` / `.ipdb` files under `x64\Release` and build again.
+
+### Test it (fastest first)
+
+1. Pattern library, no solution and no build needed (seconds):
+   `powershell -NoProfile -ExecutionPolicy Bypass -File src\VP-V\modules\output\calibration_lut\pattern_lib\run_pattern_lib_tests.ps1 -OutDir <scratch folder>`
+2. Everything CPU-only in this module, after the build above (a minute or two; no GPU, no meter). `vstest.console.exe`
+   prints no summary for this host DLL, so always read the TRX `Counters` line:
+   ```
+   vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /Logger:"trx;LogFileName=calibration.trx" /ResultsDirectory:<scratch folder> /TestCaseFilter:"FullyQualifiedName~CalibrationCoreTests|FullyQualifiedName~CalibrationSpotreadTextTests|FullyQualifiedName~CalibrationMeterStateTests|FullyQualifiedName~CalibrationPatternTests|FullyQualifiedName~CalibrationSessionTests|FullyQualifiedName~CalibrationConfigTests|FullyQualifiedName~CalibrationPhase2Tests|FullyQualifiedName~CalibrationLutHostPolicyTests|FullyQualifiedName~CalibrationMeterTests|FullyQualifiedName~CalibrationTranscriptConPtyTests"
+   ```
+   The last two classes need ConPTY and `fake_spotread.exe` (built with the solution). Hardware classes
+   (`CalibrationHardwareTests`, `CalibrationTranscriptHardwareTests`, `CalibrationLedHardwareTests`) skip unless
+   their `VP_TEST_*` variables are set (see "Test it standalone" below).
+3. The renderer, on a GPU: see "Running CalibrationDryRun".
+
+### Running CalibrationDryRun
+
+`RendererCaptureHarnessTests::CalibrationDryRunThroughTheRenderer` (`src/VP-V/tests/harness/RendererCaptureHarnessTests.cpp`)
+is the end-to-end test: it starts the real VP renderer on the GPU with a synthetic 10-bit 4:2:2 signal, starts a
+calibration session (Quick plan, `settle_ms` 40, no verify, 17-point LUT) at t = 1 s with a simulated meter that
+reads the codes the renderer was asked to show, and expects the session to reach Review (more than 50 patches
+measured) and the renderer to log `Calibration patterns: ended` within 28 s. It proves the patch timing (present
+twice, then settle) and the end state (patterns off, video back) on a real swapchain.
+
+Requirements: a desktop session with a real GPU (not a remote session), mains power, nothing else rendering, and
+the display it opens on at its normal mode. Then, after the build:
+
+```
+set VP_TEST_GPU=hardware
+set VP_TEST_ADAPTER=NVIDIA
+vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /Logger:"trx;LogFileName=dryrun.trx" /ResultsDirectory:<scratch folder> /TestCaseFilter:"Name=CalibrationDryRunThroughTheRenderer"
+```
+
+(`VP_TEST_ADAPTER` is a name fragment of the adapter to use; leave it unset to use the default adapter.
+`VP_TEST_REQUIRE_GPU=1` turns a skipped GPU test into a failure.) Read `dryrun.trx`: the test's standard output
+has the line `dry run: <step> measured <n> skipped <n> format <...>` followed by the session message, and the
+renderer's log lines (`Calibration patterns: started` / `ended`, `present failed`) are in the failure text.
+Related GPU cases: `CalibrationPatternsAreExactCodesInTheBackbuffer` (reads the backbuffer back and compares codes)
+and `CalibrationToneCurveReportedWithTheOutput`. In this team, GPU runs also follow the shared quiet-marker and
+mains-only rules of the team's `TEAM-RULES.md`; an outside developer only needs a free GPU.
+
+### References that stay outside the module (inventory and recommendation, W1-CAL 2026-11-07)
+
+Two shared files mention the module's config keys. Neither is edited in this wave (`RendererProfileConfig.h` is
+under the SCHEMA lock held by W1-P3; both are Bill's files). Recommendation: **keep both where they are**.
+
+| File | References | What they are | Recommendation |
+|---|---|---|---|
+| `src/VideoProcessor-Lib/CalibrationProfileMigration.h` (179 lines; Bill's, extended by VP) | Included by `RendererProfileConfig.h` (line 9), `ConfigFile.cpp` (17; `Apply` at 404, the runtime load) and used by `ConfigEditorCore.cpp` (198, 210; `Build`, the comment-preserving editor). Tested in `ConfigFileTests.cpp` and `ConfigEditorCoreTests.cpp`. Holds the key list `IsKey` (`calibration_lut_enabled/bt709/p3_d65/bt2020`, `sdr_lut_input_gamma`, `hdr_tone_map_target_gamma`, `calibration_lut_input_transfer/gamma`), the archive section names, and the plan that moves those keys from Rendering profiles into Color profiles. | A profile-schema migration (which section owns which key), shared by the loader and the editor. It does not touch calibration logic. | Keep in `VideoProcessor-Lib`. It belongs with `ColorOutputProfileMigration.h` and the other migrations; moving it buys the module nothing and adds a Bill-file include change. Revisit only if the schema is ever generated from module manifests. |
+| `src/VideoProcessor-Lib/RendererProfileConfig.h` | Value validators: `calibration_lut_enabled` (boolean), the three LUT paths (`none` or `*.cube`), `calibration_lut_input_gamma/transfer` and `hdr_tone_map_target_gamma` / `sdr_lut_input_gamma` (choices) (lines 977-996); `calibration_lut_stage` (choice `libplacebo`/`vp`, 1164; also in the global VP-V key list, 2186); rendering profiles may not carry calibration keys (1316); the Color profile's key set (1337-1339); alias and normalisation (`NormalizeCalibrationChoice`, 1450-1462); archive sections (62, 2207, 2677). | The schema's validation of the module's keys. | Keep until the SCHEMA work (W1-P3) lands. Then, in M2, give the module a small `CalibrationKeys.h` (key names, validators, defaults) and make the schema call it, so the key list lives in one place; that is a SCHEMA-lock change and belongs to that package, not this one. |
+
 ## Purpose / why
 
 The LAST colour op: SDR target -> projector codes. The agreed place is VP's last PRE_OUTPUT colour hook, after LED compensation and black level (ADR-0013, barrier R1). Two paths exist, chosen by `calibration_lut_stage`:
@@ -95,7 +182,7 @@ Purpose: a wizard in Config drives VP to show exact patches, reads a meter, fits
 Public API:
 - `CalibrationController` (CalibrationController.h): `Handle(command, arguments)` (text in, text out), `RendererGoing()`, `Shutdown()`, `Active()`. Commands: `status`, `detect`, `start` (`kind: calibration | led | ambient | hdr_verify`), `continue`, `skip`, `cancel`, `apply`, `discard`. Owned by `CVideoProcessorDlg` (src/VideoProcessor-GUI/VideoProcessorDlg.cpp, `HandleCalibrationRpc`) and reached over the configuration RPC (`Operation::Calibration`).
 - `ICalibrationRun` (CalibrationSession.h): `CalibrationSession` (the LUT run); `MeterRun` (CalibrationRunBase.h) with `LedCharacterizationRun` (LedRun.h), `AmbientCheckRun` (AmbientCheck.h) and `HdrVerifyRun` (HdrVerify.h).
-- `IPatternSink` (CalibrationSession.h): `RendererPatternSink` wraps `IVideoRenderer::GetCalibrationOutput` / `SetCalibrationPattern` (src/VideoProcessor-Lib/IRenderer.h). The patch layout is CalibrationPattern.h (POD; it crosses the renderer DLL boundary).
+- `IPatternSink` (CalibrationSession.h): `RendererPatternSink` wraps `IVideoRenderer::GetCalibrationOutput` / `SetCalibrationPattern` (src/VideoProcessor-Lib/IRenderer.h). The patch layout is `pattern_lib/CalibrationPattern.h` (POD; it crosses the renderer DLL boundary).
 - `IMeter` (Meter.h): `SpotreadMeter` (real), `SimulatedScreenMeter` (CalibrationSimulation.h, dry run).
 - `ITerminal` (Terminal.h): `CreateConPtyTerminal` (ConPtyTerminal.cpp), `RecordingTerminal` (TranscriptRecorder.h).
 
@@ -139,7 +226,7 @@ Dependencies needed to lift it:
 - VideoProcessor-Lib: `ConfigFile.h`, `ConfigSchema.h`, `DisplayRuleExpression.h`, `DisplayProfile.h`, `AmbientConfig.h` (forwarder; now in colour/appearance), `IRenderer.h`, `VP-V/modules/drive/led_compensation/LedDriveConfig.h`.
 - VideoProcessor-ConfigCore: `ConfigEditorCore.h` (key-only edits, validation, `SaveSafely`).
 - VP-V: `modules/drive/projector_control/ProjectorDriver.h` and `SerialPort.h` (LED run); `VP-V/modules/drive/led_compensation/LedRawTransfer.h` (the HDR-verify tone curve in `CalibrationLutHost`; WP-15 moves it to `modules/drive/led_compensation/`, switch the include at the rebase).
-- The pure core (ColorMath.h, PatternPlan, PatternCodes, DisplayModel, LedCharacterize, the Spotread text parser, Simulated*) needs only the C++ standard library.
+- The pure core needs only the C++ standard library: `pattern_lib/` (ColorMath, PatternPlan, PatternCodes, CalibrationPattern; its own stand-alone tests) and, in `calibration/`, DisplayModel, LedCharacterize, the Spotread text parser and Simulated*.
 
 ### Test it standalone
 
@@ -177,11 +264,12 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 - `src/VP-V/modules/output/calibration_lut/CalibrationLutHost.cpp`
 - `src/VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h`
 - `src/VP-V/modules/output/calibration_lut/calibration`
+- `src/VP-V/modules/output/calibration_lut/pattern_lib`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.cpp`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.h`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboCalibrationLutPolicy.h`
 
-Forwarding headers at the legacy path (early migration, removed in M2; they only keep files on active branches building, new code includes the `<VP-V/...>` path):
+Forwarding headers at the legacy path (early migration; they only keep files on active branches building, new code includes the `<VP-V/...>` path). They are NOT removed in this wave because Bill's files include them (W1-CAL, 2026-11-07), so they move with M2 P0/P3. Includers: `src/VideoProcessor-Lib/IRenderer.h` line 25 (the Pattern header), `src/VideoProcessor-Lib/MainConfigSchema.h` line 7 (the Config header; SCHEMA lock) and `src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp` line 138 (the Pattern header). No VP file includes them any more:
 
 - `src/VideoProcessor-Lib/calibration/CalibrationConfig.h`
 - `src/VideoProcessor-Lib/calibration/CalibrationPattern.h`

@@ -20,7 +20,7 @@
 // has up/down hysteresis; the LED moves after a dead time, optionally ramps
 // internally, then follows a first-order lag.
 
-#include "ColorMath.h"
+#include "../pattern_lib/ColorMath.h"
 #include "LedCharacterize.h"
 
 #include <random>

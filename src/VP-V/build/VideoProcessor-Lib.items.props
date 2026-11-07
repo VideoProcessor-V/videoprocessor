@@ -17,8 +17,8 @@
     <ClInclude Include="..\VP-V\modules\drive\projector_control\LedShutdownRestore.h" />
     <ClInclude Include="..\VP-V\modules\drive\projector_control\BarcoAsciiDriver.h" />
     <ClInclude Include="..\VP-V\modules\drive\projector_control\LedClock.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\ColorMath.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\PatternPlan.h" />
+    <ClInclude Include="..\VP-V\modules\output\calibration_lut\pattern_lib\ColorMath.h" />
+    <ClInclude Include="..\VP-V\modules\output\calibration_lut\pattern_lib\PatternPlan.h" />
     <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\DisplayModel.h" />
     <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\LedCharacterize.h" />
     <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationOutputs.h" />
@@ -29,8 +29,8 @@
     <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\Spotread.h" />
     <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\Terminal.h" />
     <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\ArgyllInstall.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationPattern.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\PatternCodes.h" />
+    <ClInclude Include="..\VP-V\modules\output\calibration_lut\pattern_lib\CalibrationPattern.h" />
+    <ClInclude Include="..\VP-V\modules\output\calibration_lut\pattern_lib\PatternCodes.h" />
     <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\Meter.h" />
     <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationRun.h" />
     <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationSession.h" />
@@ -139,7 +139,12 @@
     <ClCompile Include="AmbientSensor.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\projector_control\ProjectorDriver.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\projector_control\BarcoAsciiDriver.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\PatternPlan.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\pattern_lib\ColorMath.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\pattern_lib\PatternPlan.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\DisplayModel.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\LedCharacterize.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationOutputs.cpp" />
@@ -149,7 +154,9 @@
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\Spotread.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\ConPtyTerminal.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\ArgyllInstall.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\PatternCodes.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\pattern_lib\PatternCodes.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\Meter.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationRun.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationSession.cpp" />

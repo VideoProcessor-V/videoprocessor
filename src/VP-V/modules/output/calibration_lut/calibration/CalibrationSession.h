@@ -25,8 +25,8 @@
 #include "DisplayModel.h"
 #include "Meter.h"
 #include "MeterCatalog.h"
-#include "PatternCodes.h"
-#include "PatternPlan.h"
+#include "../pattern_lib/PatternCodes.h"
+#include "../pattern_lib/PatternPlan.h"
 
 #include <memory>
 #include <mutex>

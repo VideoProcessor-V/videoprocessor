@@ -2,7 +2,7 @@
 
 #include "CalibrationLutHostPolicy.h"
 #include "CalibrationLutStage.h"
-#include "calibration/CalibrationPattern.h"
+#include "pattern_lib/CalibrationPattern.h"
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/drive/led_compensation/LedRawTransfer.h>

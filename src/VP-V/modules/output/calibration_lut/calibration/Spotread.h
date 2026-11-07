@@ -16,7 +16,7 @@
 // "to take a reading" / "space to read", "Error -") and the unit tests run
 // recorded transcripts of each case (src/VP-V/modules/output/calibration_lut/tests/data/spotread).
 
-#include "ColorMath.h"
+#include "../pattern_lib/ColorMath.h"
 
 #include <string>
 #include <vector>

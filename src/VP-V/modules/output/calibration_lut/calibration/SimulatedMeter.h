@@ -6,8 +6,8 @@
 // it) with proportional noise per component and an absolute low-light noise
 // floor; the integration time follows the luminance (MeterTimingModel).
 
-#include "ColorMath.h"
-#include "PatternPlan.h"
+#include "../pattern_lib/ColorMath.h"
+#include "../pattern_lib/PatternPlan.h"
 
 #include <random>
 
