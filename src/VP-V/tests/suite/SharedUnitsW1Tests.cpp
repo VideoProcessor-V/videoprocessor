@@ -250,7 +250,10 @@ namespace SharedUnitsW1TestsNs2
 			{
 				// a pair: an unrelated frame, or the same frame with a little noise
 				const std::vector<uint16_t> g1 = RandomGrid(rng, 64, 36, 4);
-				std::vector<uint16_t> g2 = (rep % 3 == 0) ? RandomGrid(rng, 64, 36, 4) : g1;
+				std::vector<uint16_t> g2 = g1;
+				if (rep % 3 == 0)   // an unrelated, much darker picture: a cut
+					for (auto& c : g2)
+						c = static_cast<uint16_t>(c / 4);
 				if (rep % 3 != 0)
 					for (size_t i = 0; i < g2.size(); i += 7)
 						g2[i] = static_cast<uint16_t>((std::min)(1023, g2[i] + (rep % 5)));
@@ -274,7 +277,7 @@ namespace SharedUnitsW1TestsNs2
 				Assert::AreEqual(hist, det.LastHistogramDistance());
 				(frozenCut ? cuts : steady)++;
 			}
-			Assert::IsTrue(cuts > 10 && steady > 10, L"the sequence must exercise both outcomes");
+			Assert::IsTrue(cuts > 10 && steady > 10, (L"both outcomes must occur: cuts " + std::to_wstring(cuts) + L" steady " + std::to_wstring(steady)).c_str());
 		}
 
 		// ---- U6: percentile scan and the lane histogram distance --------------------------------------------------------------
