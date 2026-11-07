@@ -522,9 +522,10 @@ namespace GpuAllocatorTestsNs
 				Assert::IsTrue(ResidencyFor(tr, b) == Residency::Transient, L"transient for any size");
 			for (const ProductDecl& d : sk.All())
 				for (uint64_t b : sizes) {
-					const Residency want = d.residency == Residency::SystemRam && SystemRamAllowed(d, b)
-						? Residency::SystemRam : Residency::Vram;
-					Assert::IsTrue(ResidencyFor(d, b) == want, L"existing products keep Vram/SystemRam");
+					// td.anchor_pass (doc 72) is declared Transient (the arena); every other product keeps Vram / SystemRam.
+					const Residency want = d.residency == Residency::Transient ? Residency::Transient
+						: d.residency == Residency::SystemRam && SystemRamAllowed(d, b) ? Residency::SystemRam : Residency::Vram;
+					Assert::IsTrue(ResidencyFor(d, b) == want, L"existing products keep Vram/SystemRam (td.anchor_pass: Transient)");
 				}
 			const Registry reg = P10Registry(true);
 			const Dims dims = MkDims(1920, 1080);

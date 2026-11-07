@@ -19,6 +19,7 @@
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
+#include <VP-V/modules/repair/temporal_detail/products/TdProductContracts.h>
 
 #include "SettingsTestSupport.h"
 
@@ -174,10 +175,22 @@ namespace ProductCatalogTestsNs
 				{ kTdAnalysis, "temporal detail" },
 				{ kTdRefstore, "temporal detail" },
 				{ kTdAdmission, "temporal detail" },
+				// Doc 72: p7g is read by the camera guidance row (motion 24); the engine products are read at lag 0 by the engine rows (family
+				// "temporal detail", repair 13-14) which come before every Scaling / Output / deband reader, so the engine is the live-fill owner.
+				{ kP7gCameraGuide, "camera guidance" },
+				{ kCodingEvidence, "temporal detail" },
+				{ kQualityPattern, "temporal detail" },
+				{ kRefinedField, "temporal detail" },
+				{ kTdAnchorRefs, "temporal detail" },
+				{ kTdDelta, "temporal detail" },
+				{ kTdMaps, "temporal detail" },
+				{ kTdTrailSummary, "temporal detail" },
 			};
 			const Registry reg = SkeletonProducts();
-			Assert::AreEqual(size_t(kSkeletonProductEnd) - 2u, sizeof(expected) / sizeof(expected[0]),
-				L"every product but the matcher pair and the held-state source identity has an expectation");
+			Assert::AreEqual(size_t(kSkeletonProductEnd) - 3u, sizeof(expected) / sizeof(expected[0]),
+				L"every product but the matcher pair, the held-state source identity and the causal quality pattern has an expectation");
+			// The causal quality pattern is a substitute (read as P15 by its declared id): nobody reads it by its own id.
+			Assert::IsNull(LiveFillOwner(kQualityPatternCausal));
 			for (const Expect& e : expected) {
 				const ConsumerRow* owner = LiveFillOwner(e.id);
 				Assert::IsNotNull(owner, L"an owner exists");
@@ -197,7 +210,7 @@ namespace ProductCatalogTestsNs
 			for (const ProductDecl& d : reg.All())
 				if (ConsumersOf(d.id).empty() && d.backend != Backend::RenderOnly)
 					++unread;
-			Assert::AreEqual(size_t(1), unread);
+			Assert::AreEqual(size_t(2), unread, L"the matcher pair and the causal quality pattern (substitutes read by the declared id)");
 
 			// Over the ACTIVE consumers: with the temporal-detail camera row off, P7's owner is the next lag-0 reader.
 			std::vector<uint16_t> active;
@@ -216,6 +229,71 @@ namespace ProductCatalogTestsNs
 			Assert::IsTrue(families <= 1);
 		}
 
+		TEST_METHOD(EngineProductsAreWiredToTheFiveConsumerReadPathsAndTheEngineRows)
+		{
+			// The consumer rows state exactly the sets TdProducts::NeededBy states (the read paths in the modules use that function),
+			// and every engine product has a reader (consumer rows or engine rows).
+			auto readSet = [](uint16_t index, std::set<int>& into) {
+				const uint16_t id = uint16_t(kCatalogConsumerIdBase + index);
+				bool found = false;
+				for (const ConsumerRow& c : ConsumerRows())
+					if (c.decl.id == id) {
+						found = true;
+						for (size_t k = 0; k < c.decl.count; ++k)
+							into.insert(int(c.decl.consumes[k].product));
+					}
+				Assert::IsTrue(found, L"consumer row present");
+			};
+			auto expectSet = [](TdProducts::Consumer who) {
+				std::set<int> s2;
+				for (ProductId p : TdProducts::NeededBy(who))
+					s2.insert(int(p));
+				return s2;
+			};
+			std::set<int> scaler, dither, chroma, sigma, deband, engine;
+			readSet(19, scaler);
+			readSet(20, dither);
+			readSet(21, chroma);
+			readSet(22, sigma);
+			readSet(23, deband);
+			readSet(24, engine);
+			readSet(25, engine);
+			Assert::IsTrue(scaler == expectSet(TdProducts::Consumer::AdaptiveScaler), L"adaptive scaling read path");
+			Assert::IsTrue(dither == expectSet(TdProducts::Consumer::DitherNeed), L"dither need read path");
+			Assert::IsTrue(chroma == expectSet(TdProducts::Consumer::ChromaStage), L"chroma read path");
+			Assert::IsTrue(sigma == expectSet(TdProducts::Consumer::SigmaDelta), L"sigma-delta read path");
+			Assert::IsTrue(deband == expectSet(TdProducts::Consumer::Deband), L"deband read path");
+			Assert::IsTrue(engine == expectSet(TdProducts::Consumer::Engine), L"engine rows");
+			// Every engine-product id (the three redefined + the appended) is a registry product with a catalog row of the right unit.
+			const Registry reg = SkeletonProducts();
+			size_t seen = 0;
+			for (const TdProducts::Contract& c : TdProducts::Contracts()) {
+				++seen;
+				Assert::IsTrue(reg.Has(c.id));
+				Assert::AreEqual(std::string(c.token), std::string(reg.Get(c.id).token));
+				if (c.id == kQualityPatternCausal) continue;   // the substitute is read through the declared id of quality_pattern
+				Assert::IsFalse(ConsumersOf(c.id).empty(), L"every engine product has a reader");
+			}
+			Assert::AreEqual(size_t(TdProducts::kCount), seen);
+			// Each row names its consumer's fallback id (its own existing entry); the engine rows use the engine's.
+			for (const ConsumerRow& c : ConsumerRows()) {
+				const uint16_t index = uint16_t(c.decl.id - kCatalogConsumerIdBase);
+				if (c.decl.id < kCatalogConsumerIdBase || index > 25) continue;
+				if (index == 19) Assert::AreEqual(std::string(TdProducts::FallbackIdOf(TdProducts::Consumer::AdaptiveScaler)), std::string(c.fallbackId));
+				if (index == 20) Assert::AreEqual(std::string(TdProducts::FallbackIdOf(TdProducts::Consumer::DitherNeed)), std::string(c.fallbackId));
+				if (index == 21) Assert::AreEqual(std::string(TdProducts::FallbackIdOf(TdProducts::Consumer::ChromaStage)), std::string(c.fallbackId));
+				if (index == 22) Assert::AreEqual(std::string(TdProducts::FallbackIdOf(TdProducts::Consumer::SigmaDelta)), std::string(c.fallbackId));
+				if (index == 23) Assert::AreEqual(std::string(TdProducts::FallbackIdOf(TdProducts::Consumer::Deband)), std::string(c.fallbackId));
+				if (index >= 24 && index <= 25) {
+					Assert::AreEqual(std::string(TdProducts::FallbackIdOf(TdProducts::Consumer::Engine)), std::string(c.fallbackId));
+					Assert::AreEqual(std::string("temporal detail"), std::string(c.family));
+				}
+			}
+			// The registered p7g and its consumer row (id 20 of the registry: registered, not claimed).
+			Assert::AreEqual(int(kSourceIdentity) + 1, int(kP7gCameraGuide));
+			Assert::AreEqual(size_t(1), ConsumersOf(kP7gCameraGuide).size());
+		}
+
 		TEST_METHOD(EveryRegistryProductHasACatalogRow)
 		{
 			const Registry reg = SkeletonProducts();
@@ -227,7 +305,22 @@ namespace ProductCatalogTestsNs
 			}
 			// No consumer row drops a read: every declared read count fits (MakeRow asserts it) and is non-empty.
 			for (const ConsumerRow& c : ConsumerRows())
-				Assert::IsTrue(c.decl.count > 0 && c.decl.count <= kMaxConsumes);
+				Assert::IsTrue(c.decl.count > 0 && c.decl.count <= kMaxConsumes && !c.overflow && !c.decl.overflow);
+			Assert::AreEqual(std::string(), ValidateConsumerRows(), L"Release-visible: no catalog row dropped a read");
+#ifdef NDEBUG
+			{   // Release has no assert: a row naming one read too many is flagged, not silently truncated.
+				std::vector<ProductId> many(kMaxConsumes + 1, kP4SourceStats);
+				ConsumerRow row = MakeRow(0x7f, "overflow probe", "test", PathwayUnit::Input, 1, {}, FallbackKind::OwnReduced, "product.source_id", false, {});
+				for (ProductId p : many) AddConsume(row.decl, p);
+				Assert::IsTrue(row.decl.overflow, L"AddConsume flags the extra read");
+				Assert::AreEqual(size_t(kMaxConsumes), size_t(row.decl.count));
+				const size_t n = kMaxConsumes + 1;
+				ConsumerRow big = MakeRow(0x7e, "overflow probe 2", "test", PathwayUnit::Input, 2,
+					{ kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats },
+					FallbackKind::OwnReduced, "product.source_id");
+				Assert::IsTrue(n == 11 && big.overflow && big.decl.overflow, L"MakeRow flags the row (and the decl) in Release");
+			}
+#endif
 		}
 
 		TEST_METHOD(UnitVersionsMatchTheUnitsAndVerifyUnitEngagesAFallback)
@@ -242,8 +335,8 @@ namespace ProductCatalogTestsNs
 				{ kP9CameraSmoothed, CameraLink::kCameraUnitVersion },
 				{ kP11RegionBlockStats, RegionEvidence::kUnitVersion },
 				{ kP12LightLevel, LightLevel::kUnitVersion },
-				{ kTdAnalysis, TemporalDetail::kUnitVersion }, { kTdRefstore, TemporalDetail::kUnitVersion },
-				{ kTdAdmission, TemporalDetail::kUnitVersion },
+				{ kTdAnalysis, TdProducts::kUnitVersion }, { kTdRefstore, TdProducts::kUnitVersion },
+				{ kTdAdmission, TdProducts::kUnitVersion },
 				{ kSourceIdentity, SourceIdentity::kUnitVersion },
 				{ kP10GrainSplit, GrainSplit::kUnitVersion }, { kP10cGrainSplitChroma, GrainSplit::kUnitVersion },
 			};
@@ -254,6 +347,22 @@ namespace ProductCatalogTestsNs
 				FallbackCatalog::Decision d;
 				Assert::IsTrue(VerifyUnit(p.id, p.unit, &d));
 				Assert::IsFalse(d.engaged);
+			}
+			// The temporal-detail engine products: each contract's unit version is the catalog's expectation.
+			Assert::AreEqual(2u, kExpectedTemporalDetailUnit);
+			Assert::AreEqual(2u, TdProducts::kUnitVersion);
+			Assert::AreEqual(1u, TemporalDetail::kUnitVersion, L"the v1 module code (415 MB class store) stays v1 until the v2 engine replaces it");
+			Assert::AreEqual(TdProducts::kCodingEvidenceUnit, kExpectedCodingEvidenceUnit);
+			Assert::AreEqual(TdProducts::kQualityPatternUnit, kExpectedQualityPatternUnit);
+			Assert::AreEqual(TdProducts::kFieldRefineUnit, kExpectedFieldRefineUnit);
+			Assert::AreEqual(TdProducts::kMapsViewUnit, kExpectedTdMapsViewUnit);
+			for (const TdProducts::Contract& c : TdProducts::Contracts()) {
+				Assert::AreEqual(c.unitVersion, RowOf(c.id)->unitVersion, L"catalog expectation equals the unit constant");
+				FallbackCatalog::Decision d;
+				Assert::IsTrue(VerifyUnit(c.id, c.unitVersion, &d));
+				Assert::IsFalse(d.engaged);
+				Assert::IsFalse(VerifyUnit(c.id, c.unitVersion + 1, &d), L"a reader of another version engages the fallback");
+				Assert::IsTrue(d.engaged);
 			}
 			// P10/P10c: the grain split unit's own constant (SA2, GrainSplit::kUnitVersion = 2), checked above.
 			Assert::AreEqual(2u, RowOf(kP10GrainSplit)->unitVersion);
@@ -288,9 +397,11 @@ namespace ProductCatalogTestsNs
 			// P4: 8 KB today (the producer layout) of system RAM.
 			Assert::AreEqual(uint64_t(8192), BytesOf(reg.Get(kP4SourceStats).size, d4k));
 			Assert::IsTrue(reg.Get(kP4SourceStats).residency == Residency::SystemRam);
-			// td.refstore: today's 10 B/px per slot (83 MB at 4K), history = the slots.
-			Assert::AreEqual(uint64_t(3840ull * 2160 * 10), BytesOf(reg.Get(kTdRefstore).size, d4k));
-			Assert::AreEqual(int(kRefSlots), int(reg.Get(kTdRefstore).history));
+			// td.memory (id 17, doc 72): the budget-governed floor, the WHOLE store: {1/4 axis: 55 B, 1/2 axis: 1 B, full: 2 B}; no history.
+			Assert::AreEqual(uint64_t(960ull * 540 * 55 + 1920ull * 1080 * 1 + 3840ull * 2160 * 2), BytesOf(reg.Get(kTdMemory).size, d4k));
+			Assert::AreEqual(0, int(reg.Get(kTdMemory).history));
+			Assert::IsTrue(reg.Get(kTdMemory).singletonStore, L"td.memory is the one persistent store (read at lag 1, never governed as history)");
+			Assert::AreEqual(std::string("td.memory"), std::string(reg.Get(kTdMemory).token));
 			// P13: views only.
 			Assert::AreEqual(uint64_t(0), BytesOf(reg.Get(kP13SourceRing).size, d4k));
 			Assert::IsTrue(reg.Get(kP13SourceRing).backend == Backend::RenderOnly);
@@ -322,6 +433,66 @@ namespace ProductCatalogTestsNs
 			}
 			// Deterministic.
 			Assert::AreEqual(VramByTier(FullGraph(Settings(dims[1], 3))).Total(), VramByTier(FullGraph(Settings(dims[1], 3))).Total());
+		}
+
+		TEST_METHOD(TdMemoryIsATwoBufferPingPongInTheVramTable)
+		{
+			const Registry reg = SkeletonProducts();
+			const Dims d4k = { 3840, 2160 };
+			const uint64_t store = BytesOf(reg.Get(kTdMemory).size, d4k);
+			for (uint8_t lane : { uint8_t(1), uint8_t(3), uint8_t(6) })
+				for (uint8_t renderAhead : { uint8_t(0), uint8_t(4) }) {
+					GraphSettings gs = Settings(d4k, lane);
+					gs.renderAhead = renderAhead;
+					const Graph g = FullGraph(gs, reg);
+					Assert::IsTrue(g.valid);
+					const Node* n = g.Find(kTdMemory);
+					Assert::IsNotNull(n);
+					Assert::IsTrue(n->singletonStore);
+					Assert::AreEqual(2, int(n->ring), L"ring = 2 whatever R and L are");
+					Assert::AreEqual(0, int(n->livePool), L"no live pool");
+					Assert::AreEqual(store, n->bufferBytes);
+					Assert::AreEqual(2u * store, n->ringBytes, L"the VRAM table figure is 2x the store, not a ring of history + R + L slots");
+					Assert::AreEqual(uint64_t(0), n->liveBytes);
+					Assert::AreEqual(g.totalRingBytes + g.totalLiveBytes, VramByTier(g).Total(), L"the table sums the node figures");
+				}
+		}
+
+		TEST_METHOD(EveryProductRingHoldsItsHistoryAtAnyMeasuredRateAndTheCapIsVisible)
+		{
+			// Unmeasured (the field maximum), 24p, 60p and 240 fps; a deep render-ahead and several lane jobs stress the extra slot terms.
+			const double periods[] = { 0.0, 1001.0 / 24.0, 1001.0 / 60.0, 1000.0 / 120.0, 1000.0 / 240.0 };
+			for (double period : periods) {
+				const Registry reg = SkeletonProducts(false, false, period);
+				Assert::IsTrue(reg.Validate());
+				for (uint8_t lane : { uint8_t(0), uint8_t(1), uint8_t(3) }) {
+					GraphSettings gs = Settings(Dims{ 3840, 2160 }, lane);
+					gs.renderAhead = 8;
+					gs.laneJobsInFlight = 4;
+					const Graph g = FullGraph(gs, reg);
+					Assert::IsTrue(g.valid, L"the catalog graph never overflows the slot counts at any rate");
+					for (const Node& n : g.nodes) {
+						Assert::IsTrue(int(n.ring) >= int(n.history) + 1, L"ring >= history + 1");
+						if (n.singletonStore)   // the ping-pong store: two buffers, lane-only (no live fill)
+							Assert::IsTrue(int(n.ring) == 2 && n.livePool == 0, L"a single store is two buffers and has no live pool");
+						else
+							Assert::IsTrue(int(n.livePool) >= int(n.history) + 1, L"live pool >= history + 1");
+					}
+					const Node* qp = g.Find(kQualityPattern);
+					Assert::IsTrue(qp != nullptr);
+					Assert::AreEqual(int(QualityPatternHistoryFrames(period)), int(qp->history), L"the node carries the derived depth, no silent change");
+				}
+			}
+			// The cap: 223 frames of the 2 s window = 111.5 fps. Visible above it, silent when nothing is capped.
+			Assert::AreEqual(223, int(kRecordHistoryMax));
+			Assert::IsTrue(RecordHistoryCapNote(0.0).empty());
+			Assert::IsTrue(RecordHistoryCapNote(1001.0 / 24.0).empty());
+			Assert::IsTrue(RecordHistoryCapNote(1000.0 / 100.0).empty());
+			const std::string note = RecordHistoryCapNote(1000.0 / 240.0);
+			Assert::IsTrue(note.find("quality pattern history capped at 223 frames (source rate above 111.5 fps)") != std::string::npos, L"the cap is named, never silent");
+			Assert::AreEqual(223, int(QualityPatternHistoryFrames(1000.0 / 240.0)));
+			Assert::IsFalse(FallbackCatalog::SkeletonHistoryCapped(note).reason.empty());
+			Assert::IsFalse(FallbackCatalog::SkeletonHistoryCapped("").engaged);
 		}
 
 		TEST_METHOD(GeneratedDocRegionMatchesTheCatalog)

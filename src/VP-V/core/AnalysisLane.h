@@ -417,6 +417,7 @@ struct LaneState {
     std::vector<uint64_t> lateSeen;                   // per node index (render thread)
     std::vector<uint64_t> missSeen;                   // per node index (render thread)
     uint64_t firstSeq = 0;                            // the first frame this graph serves
+    std::string capsMismatch;                         // non-empty: the real plan's history caps differ from the trial's
 
     int IndexOf(ProductId id) const { return id < indexOfId.size() ? indexOfId[id] : -1; }
 };
@@ -551,9 +552,14 @@ public:
     // through the VRAM governor, lane grants, runner, regulator, gap chunk cap) and swap it in. Returns
     // the rebuild reasons (0 = graph kept). Mode Off clears everything and returns 0.
     uint32_t Configure(const LaneSettings& s, const Registry& reg, const std::vector<ConsumerDecl>& consumers,
-                       const GraphSettings& gs, const CardProfile& card, const TierInput& tier, uint64_t fromSeq,
+                       const GraphSettings& gsIn, const CardProfile& card, const TierInput& tier, uint64_t fromSeq,
                        bool hostDeterministic)
     {
+        // Budget-governed history: the depths the governor granted (a previous plan) ride with the graph settings so a
+        // repeated Configure by a host that knows nothing of them keeps the same graph (no rebuild flapping).
+        GraphSettings gs = gsIn;
+        if (gs.historyCaps.empty())
+            gs.historyCaps = historyCaps_;
         settings_ = s;
         mode_.store(uint8_t(s.mode), std::memory_order_release);
         if (s.mode != LaneSettings::Mode::Off) {
@@ -572,27 +578,33 @@ public:
         const bool detChanged = det != det_;
         det_ = det;
 
+        // Budget-governed history: plan the grant BEFORE the graph is (re)built, on a trial graph and a copy of the governor
+        // (the headroom state is stepped only by the real Update in BuildState), so one Configure builds one graph and
+        // advances the graph counter once. Re-planned on every Configure: the grant recovers when memory frees.
+        {
+            bool governed = false;
+            for (const ProductDecl& d : reg.All())
+                governed = governed || d.historyFloor != kHistoryFixed;
+            if (governed) {
+                const Graph trial = BuildGraph(reg, consumers, gs);
+                if (trial.valid) {
+                    VramGovernor probe = governor_;
+                    gs.historyCaps = probe.Update(reg, trial, card, tier).historyCaps;
+                }
+            }
+            historyCaps_ = gs.historyCaps;
+        }
         const VpIndicator::Stamp stamp = ind_->StampOf(fromSeq);
         const uint32_t reasons = owner_.Update(reg, consumers, gs, stamp, ind_, fromSeq);
         const std::shared_ptr<LaneState> cur = std::atomic_load(&state_);
         const Graph& g = owner_.Current();
         if (!g.valid) {
-            error_ = g.error;
+            error_ = g.ErrorText();
             std::atomic_store(&state_, std::shared_ptr<LaneState>());
             renderState_.reset();
             return reasons;
         }
-        // A look-ahead input (lead > 0) has no seal rule yet (K1): SlotTable would be invalid. Refuse the graph: the lane
-        // is off and every product is made live in the render; the reason reaches Fallbacks() via error_.
-        for (const Node& n : g.nodes)
-            for (size_t k = 0; k < n.inputCount; ++k)
-                if (n.inputs[k].lead > 0) {
-                    error_ = std::string("look-ahead input on ") + (reg.Has(n.id) ? reg.Get(n.id).token : "?")
-                             + " needs the K1 seal rule";
-                    std::atomic_store(&state_, std::shared_ptr<LaneState>());
-                    renderState_.reset();
-                    return reasons;
-                }
+        // A look-ahead input (lead > 0) is sealed by the K1 rule (SlotTable::Check, stamp source set in BuildState).
         error_.clear();
         periodMs_ = tier.framePeriodMs;
         chunkCapUs_.store(GapScheduler::DerivedChunkCapUs(tier.framePeriodMs, s.chunkUs), std::memory_order_relaxed);
@@ -608,6 +620,14 @@ public:
         }
 
         std::shared_ptr<LaneState> st = BuildState(reg, consumers, gs, card, tier, fromSeq);
+        if (!st->capsMismatch.empty()) {
+            // The graph was sized for the trial's history grant but the real plan grants otherwise: the memory plan
+            // does not describe the rings. Fail closed and visibly (Analysis lane unavailable + the Fallbacks entry).
+            error_ = st->capsMismatch;
+            std::atomic_store(&state_, std::shared_ptr<LaneState>());
+            renderState_.reset();
+            return reasons;
+        }
         // Regulator products from the new graph.
         ConfigureRegulatorFor(*st, reg, consumers, gs, card, tier);
         lateRingSize_ = periodMs_ > 0.0 ? size_t(std::max(1.0, 10000.0 / periodMs_ + 0.5)) : size_t(0);
@@ -975,6 +995,35 @@ public:
             skipped += st->runner->Counters(st->table->NodeAt(i).id).skippedDropped.load(std::memory_order_relaxed);
         if (skipped > 0)
             out.push_back("Analysis: " + std::to_string(skipped) + " frames skipped (source gone)");
+        uint64_t carried = 0, refused = 0, chainWait = 0, chainWaitSeal = 0, pinWait = 0;
+        for (size_t i = 0; i < st->table->Count(); ++i) {
+            const LaneProductCounters& pc = st->runner->Counters(st->table->NodeAt(i).id);
+            carried += pc.chainCarryForward.load(std::memory_order_relaxed);
+            refused += pc.chainRefused.load(std::memory_order_relaxed);
+            chainWait += st->table->At(i).Counters().chainWaitRejected.load(std::memory_order_relaxed);
+            chainWaitSeal += st->table->At(i).Counters().chainWaitUnsealed.load(std::memory_order_relaxed);
+            pinWait += st->table->At(i).Counters().writeWaitPinned.load(std::memory_order_relaxed);
+        }
+        uint64_t laterRejected = 0;
+        for (size_t i = 0; i < st->table->Count(); ++i)
+            laterRejected += st->table->At(i).Counters().leadLaterRejected.load(std::memory_order_relaxed);
+        if (laterRejected > 0)
+            out.push_back("Analysis: " + std::to_string(laterRejected)
+                          + " look-ahead frames were rejected at their own seal after a reader used them");
+        if (carried > 0)
+            out.push_back("Analysis: " + std::to_string(carried)
+                          + " ordered-chain frames ran in the reduced form (no predecessor result)");
+        if (refused > 0)
+            out.push_back("Analysis: " + std::to_string(refused) + " out-of-order chain frames refused");
+        if (chainWait > 0)
+            out.push_back("Analysis: " + std::to_string(chainWait)
+                          + " ordered-chain frames waited on a rejected predecessor (its live fill pending, declined or without a buffer)");
+        if (chainWaitSeal > 0)
+            out.push_back("Analysis: " + std::to_string(chainWaitSeal)
+                          + " ordered-chain frames waited for the predecessor's seal (a chain job pins only a sealed or live predecessor)");
+        if (pinWait > 0)
+            out.push_back("Analysis: " + std::to_string(pinWait)
+                          + " lane jobs waited for a late reader to release their slot (single-store products wait on a lag-1 reader)");
         const GapReport& gt = st->gap.Totals();
         if (gt.capNoFit > 0)
             out.push_back("Analysis: " + std::to_string(gt.capNoFit) + " lane chunks deferred (too big for the chunk cap)");
@@ -1046,6 +1095,7 @@ private:
         regProducts_.clear();
         regulator_.Configure(regProducts_, 1.0, false);
         governor_ = VramGovernor();
+        historyCaps_.clear();
         det_ = false;
         observedOnce_ = false;
         waitValid_ = false;
@@ -1071,13 +1121,16 @@ private:
                                           uint64_t fromSeq)
     {
         (void)consumers;
-        (void)gs;
         std::shared_ptr<LaneState> st = std::make_shared<LaneState>();
         st->graph = owner_.Current();
         st->firstSeq = fromSeq;
         st->ring.reset(new LaneSourceRing(std::max<size_t>(st->graph.framesInFlight, 4u)));
         st->table.reset(new SlotTable(st->graph));
-        assert(st->table->Valid());   // Configure refuses graphs with look-ahead inputs before this point
+        assert(st->table->Valid());
+        {
+            const VpIndicator::Indicator* ind = ind_;   // the K1 seal of lead ancestors needs the stamp of frame N+k
+            st->table->SetStampSource([ind](uint64_t q) { return ind->StampOf(q); });
+        }
         ProductId maxId = 0;
         for (const Node& n : st->graph.nodes)
             maxId = std::max(maxId, n.id);
@@ -1097,6 +1150,10 @@ private:
         st->missSeen.assign(st->graph.nodes.size(), 0u);
 
         st->plan = governor_.Update(reg, st->graph, card, tier);
+        // The graph was built with the trial probe's history caps (Configure); the real plan must grant the same: a cheap
+        // equality check (the caps are short, sorted by id) so the rings and the memory plan cannot silently disagree.
+        if (st->plan.historyCaps != gs.historyCaps)
+            st->capsMismatch = "the history grant changed between the trial plan and the real plan (graph sized for another grant)";
         ApplyLaneGrants(st->plan, *st->table);
 
         st->indHold = indHandle_;
@@ -1243,9 +1300,10 @@ private:
                 if (((missing >> k) & 1u) != 0)
                     continue;
                 const int j = st.IndexOf(n.inputs[k].product);
-                if (j < 0 || !st.bufs[size_t(j)] || seq < n.inputs[k].lag)
+                uint64_t aseq = 0;
+                if (j < 0 || !st.bufs[size_t(j)] || !InputSeq(n.inputs[k], seq, &aseq))
                     continue;
-                const ReadInfo ri = st.table->At(size_t(j)).Read(seq - n.inputs[k].lag);
+                const ReadInfo ri = st.table->At(size_t(j)).Read(aseq, n.inputs[k].lead > 0);   // a lead reads the published result
                 if (ri.kind == ReadInfo::Ring)
                     in[k] = st.bufs[size_t(j)]->Ring(size_t(ri.index));
                 else if (ri.kind == ReadInfo::Live)
@@ -1321,6 +1379,7 @@ private:
     std::function<void()> readyMissed_;
     uint64_t readyProbeMisses_ = 0;
     std::unique_ptr<SavedConfig> cfg_;
+    std::vector<HistoryCap> historyCaps_;   // the governor's last grant below full history (see Configure)
     bool rebuildPending_ = false;
     uint64_t rebindRebuilds_ = 0;
     uint64_t stormHoldEngagements_ = 0;

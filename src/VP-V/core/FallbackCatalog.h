@@ -530,6 +530,12 @@ namespace FallbackCatalog
 	{
 		return products.empty() ? Released("skeleton_products") : Engaged("skeleton_products", products + " declined: " + why);
 	}
+	// A record history (quality pattern, td trail summary) the measured source rate asked deeper than the slot counts allow; the note
+	// is VpSkeleton::RecordHistoryCapNote (plain text with the cap and the rate where it starts). Never capped silently.
+	inline Decision SkeletonHistoryCapped(const std::string& note)
+	{
+		return note.empty() ? Released("skeleton_history") : Engaged("skeleton_history", note);
+	}
 	// A [vpv.skeleton] key that could not be read (kept at its default).
 	inline Decision SkeletonKeys(const std::string& problems)
 	{
@@ -576,6 +582,10 @@ namespace FallbackCatalog
 			{ "product.light_level", "light-level users use the global level only (per-block light level unavailable)" },
 			{ "product.vector_demand", "vector consumer runs without vectors (the vector engine product is unavailable)" },
 			{ "product.camera", "camera consumer runs causal / without the camera model (camera products unavailable or short queue)" },
+			// Temporal-detail engine (doc 72; repair/temporal_detail/products; the engine itself is built in reset 2). The consumers of its
+			// products (adaptive scaling, dither need, sigma-delta, chroma upscale, debander) keep their OWN entries above for the classical
+			// form; this one is the engine's own: its products are not produced, so repairs run their classical forms.
+			{ "product.td_engine", "temporal-detail engine products are not produced: repairs run their classical forms (engine reserved, not built)" },
 		};
 		if (count)
 			*count = sizeof(kEntries) / sizeof(kEntries[0]);

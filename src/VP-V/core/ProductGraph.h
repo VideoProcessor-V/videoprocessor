@@ -20,6 +20,8 @@
 //          + L (lane lead to render start; 0 for render-only) + q (1 lane-owned rejected buffer for
 //          every lane backend; 0 for render-only) + 1 only when a consumer holds the next frame's
 //          product through the presentation span (a pair consumer, audit 25a N8)
+//   (a single-store product, ProductDecl::singletonStore, is the exception: ring = 2 buffers (ping-pong) whatever R and L are,
+//   live pool = 0, lane-only, no live fill)
 //   live pool = history + 1 + R (+1 for a held span product) + one spare per input reference held
 //               by lane readers x lane jobs in flight (a late lane reader may pin a released live
 //               buffer until its job ends):
@@ -43,6 +45,18 @@ namespace VpSkeleton {
 
 enum class QueueMode : uint8_t { Normal, Games, Competitive };
 
+// A single-store product (ProductDecl::singletonStore) is a ping-pong of this many buffers, whatever render-ahead and lane lead are.
+constexpr unsigned kSingletonStoreBuffers = 2;
+
+// A history depth the VRAM governor granted a governed-history product (VramGovernor.h PlanTiers) below its full
+// depth. Carried in GraphSettings so the graph is built with it; a change is a rebuild (kRebuildHistory).
+struct HistoryCap {
+    ProductId id = kNoProduct;
+    uint8_t history = 0;
+    bool operator==(const HistoryCap& o) const { return id == o.id && history == o.history; }
+    bool operator!=(const HistoryCap& o) const { return !(*this == o); }
+};
+
 struct GraphSettings {
     Dims dims;                    // source active picture
     uint8_t renderAhead = 0;      // R
@@ -53,6 +67,7 @@ struct GraphSettings {
     bool ofaPresent = true;       // the card has an optical-flow engine
     uint64_t cardProfileKey = 0;  // CardProfile identity (adapter LUID + driver), a rebuild trigger
     uint8_t laneJobsInFlight = 1; // jobs one lane producer may hold pins for at once (OFA: up to its fence)
+    std::vector<HistoryCap> historyCaps;   // governed-history products running below their full depth (sorted by id)
 };
 
 struct Node {
@@ -60,7 +75,11 @@ struct Node {
     ProductId declared = kNoProduct;   // the id a consumer asked for (differs when substituted)
     Backend backend = Backend::Cpu;
     Tier tier = Tier::T0;
-    uint8_t history = 0;
+    uint8_t history = 0;               // the granted depth (what the ring and live pool are sized for)
+    uint8_t historyFull = 0;           // the depth without a governor cap: max(declared, largest lag read)
+    uint8_t historyMin = 0;            // the lowest depth the governor may grant (== historyFull: not governed)
+    bool orderedChain = false;         // ProductDecl::orderedChain
+    bool singletonStore = false;       // ProductDecl::singletonStore (one persistent store, read at lag 1; never governed)
     bool holdsSpan = false;
     uint8_t ring = 0;
     uint8_t livePool = 0;
@@ -91,6 +110,7 @@ enum RebuildReason : uint32_t {
     kRebuildCard = 1u << 6,
     kRebuildDims = 1u << 7,
     kRebuildConsumers = 1u << 8,
+    kRebuildHistory = 1u << 9,    // the governor granted a governed-history product another depth
 };
 
 // What a rebuild depends on. The `graph` counter itself is deliberately not part of it.
@@ -121,7 +141,7 @@ inline uint64_t ConsumerFingerprint(const std::vector<ConsumerDecl>& consumers)
         mix(c.count);
         for (size_t k = 0; k < c.count && k < kMaxConsumes; ++k)
             mix((uint64_t(c.consumes[k].product) << 8) | c.consumes[k].lag);
-        mix((c.holdsSpan ? 1u : 0u) | (c.hasReducedMode ? 2u : 0u));
+        mix((c.holdsSpan ? 1u : 0u) | (c.hasReducedMode ? 2u : 0u) | (c.overflow ? 4u : 0u));
     }
     return h;
 }
@@ -172,6 +192,8 @@ inline uint32_t RebuildReasons(const GraphKey& before, const GraphKey& after, bo
         r |= kRebuildDims;
     if (before.consumers != after.consumers)
         r |= kRebuildConsumers;
+    if (a.historyCaps != b.historyCaps)
+        r |= kRebuildHistory;
     return r;
 }
 
@@ -180,6 +202,8 @@ struct Graph {
     const char* error = "";        // plain reason when invalid (shown in status by the caller)
     std::vector<Node> nodes;       // topological over lag-0 edges, ties by product id
     GraphSettings settings;
+    ProductId errorProduct = kNoProduct;   // the product a slot-count overflow names (kNoProduct for other errors)
+    std::string errorProductName;          // its token
     size_t framesInFlight = 0;     // audit 25a N6: sizes the Indicator's event ring
     uint64_t totalRingBytes = 0;
     uint64_t totalLiveBytes = 0;
@@ -219,10 +243,24 @@ struct Graph {
                 out.push_back(&n);
         return out;
     }
+    // Nodes running below their full history because the budget could not fit it (visible reduced mode).
+    std::vector<const Node*> HistoryReducedNodes() const
+    {
+        std::vector<const Node*> out;
+        for (const Node& n : nodes)
+            if (n.history < n.historyFull)
+                out.push_back(&n);
+        return out;
+    }
     const Node* Find(ProductId id) const
     {
         const int i = IndexOf(id);
         return i < 0 ? nullptr : &nodes[size_t(i)];
+    }
+    // The reason for status / Fallbacks: `error` plus the product a slot-count overflow names.
+    std::string ErrorText() const
+    {
+        return std::string(error) + (errorProductName.empty() ? std::string() : " (" + errorProductName + ")");
     }
     size_t IndicatorCapacity() const { return VpIndicator::Indicator::RequiredCapacity(framesInFlight); }
 };
@@ -328,6 +366,11 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
     };
 
     for (const ConsumerDecl& c : consumers)
+        if (c.overflow || c.count > kMaxConsumes) {
+            g.error = "a consumer declares more reads than the seam allows (an extra read was dropped)";
+            return g;
+        }
+    for (const ConsumerDecl& c : consumers)
         for (size_t k = 0; k < c.count && k < kMaxConsumes; ++k)
             if (!want(c.consumes[k].product, c.consumes[k].lag, c.holdsSpan, 0)) {
                 g.error = "a consumer asks for an unknown product";
@@ -407,7 +450,20 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         node.backend = d.backend;
         node.tier = d.tier;
         node.laneVisible = d.laneVisible;
-        node.history = d.history > maxLag[p] ? d.history : maxLag[p];
+        node.historyFull = d.history > maxLag[p] ? d.history : maxLag[p];
+        node.historyMin = node.historyFull;
+        node.history = node.historyFull;
+        if (d.historyFloor != kHistoryFixed) {
+            const uint8_t floorEff = d.historyFloor > maxLag[p] ? d.historyFloor : maxLag[p];
+            node.historyMin = floorEff < node.historyFull ? floorEff : node.historyFull;
+            for (const HistoryCap& c : gs.historyCaps)
+                if (c.id == p) {
+                    uint8_t h = c.history < node.historyMin ? node.historyMin : c.history;
+                    node.history = h < node.historyFull ? h : node.historyFull;
+                }
+        }
+        node.orderedChain = d.orderedChain;
+        node.singletonStore = d.singletonStore;
         node.holdsSpan = span[p] != 0;
         const bool lane = d.backend != Backend::RenderOnly;
         const unsigned L = lane ? gs.laneLead : 0u;
@@ -417,12 +473,42 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         node.leadRead = maxLeadRead[p];
         node.reducedFrom = reducedFrom[p];
         node.shortQueue = reducedFrom[p] != kNoProduct;
-        const unsigned ring = unsigned(node.history) + 1u + R + L + q + (node.holdsSpan ? 1u : 0u)
-                              + unsigned(node.leadRead);
-        node.ring = uint8_t(ring > 255u ? 255u : ring);
-        const unsigned live = unsigned(node.history) + 1u + R + (node.holdsSpan ? 1u : 0u)
-                              + laneReadRefs[p] * unsigned(gs.laneJobsInFlight == 0 ? 1u : gs.laneJobsInFlight);
-        node.livePool = uint8_t(live > 255u ? 255u : live);
+        if (d.singletonStore && (maxLag[p] > 1 || maxLeadRead[p] > 0)) {
+            // The store is a two-buffer ping-pong: a reader deeper than lag 1 (or a look-ahead) would read a buffer the producer already rewrote.
+            g.error = "a single-store product is read at lag 0 or 1 only (a consumer or product reads it deeper); the analysis graph was not built";
+            g.errorProduct = p;
+            g.errorProductName = d.token;
+            g.nodes.clear();
+            g.totalRingBytes = 0;
+            g.totalLiveBytes = 0;
+            return g;
+        }
+        const unsigned ring = d.singletonStore ? kSingletonStoreBuffers
+                              : unsigned(node.history) + 1u + R + L + q + (node.holdsSpan ? 1u : 0u) + unsigned(node.leadRead);
+        if (ring > kSlotCountMax) {
+            // Never clamped: a ring smaller than history + 1 would starve the lane with no sign of it. Same visible reject as an overflowing read list.
+            g.error = "a product needs more than 255 ring slots (history, render-ahead and lane lead together); the analysis graph was not built";
+            g.errorProduct = p;
+            g.errorProductName = d.token;
+            g.nodes.clear();
+            g.totalRingBytes = 0;
+            g.totalLiveBytes = 0;
+            return g;
+        }
+        node.ring = uint8_t(ring);
+        const unsigned live = d.singletonStore ? 0u
+                              : unsigned(node.history) + 1u + R + (node.holdsSpan ? 1u : 0u)
+                                    + laneReadRefs[p] * unsigned(gs.laneJobsInFlight == 0 ? 1u : gs.laneJobsInFlight);
+        if (live > kSlotCountMax) {
+            g.error = "a product needs more than 255 live-pool buffers (history, render-ahead and lane readers together); the analysis graph was not built";
+            g.errorProduct = p;
+            g.errorProductName = d.token;
+            g.nodes.clear();
+            g.totalRingBytes = 0;
+            g.totalLiveBytes = 0;
+            return g;
+        }
+        node.livePool = uint8_t(live);
         node.inputCount = d.inputCount;
         for (size_t k = 0; k < d.inputCount; ++k) {
             node.inputs[k].product = Resolve(reg, d.inputs[k].product, gs);
@@ -451,6 +537,14 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
                        + maxLead;
     g.valid = true;
     return g;
+}
+
+// The visible cap note for the record histories of the products THIS graph holds ("" when none is capped or none is in the closure).
+inline std::string GraphHistoryCapNote(const Graph& g, double sourcePeriodMs)
+{
+    if (!g.valid)
+        return std::string();
+    return RecordHistoryCapNote(sourcePeriodMs, g.Has(kQualityPattern) || g.Has(kQualityPatternCausal), g.Has(kTdTrailSummary));
 }
 
 // Owns the current graph; rebuilds on a trigger and advances the Indicator's `graph` counter.

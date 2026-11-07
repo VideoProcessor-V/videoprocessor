@@ -3,6 +3,7 @@
 #pragma once
 
 #include "LaneInterfaces.h"
+#include "OrderedChain.h"
 
 #include <array>
 #include <atomic>
@@ -47,6 +48,8 @@ struct LaneProductCounters {
     std::atomic<uint64_t> beginFailures{ 0 };
     std::atomic<uint64_t> chunkFailures{ 0 };
     std::atomic<uint64_t> laneUs{ 0 };           // measured producer time
+    std::atomic<uint64_t> chainCarryForward{ 0 };// ordered chain: jobs run in the declared reduced form (no predecessor)
+    std::atomic<uint64_t> chainRefused{ 0 };     // ordered chain: out-of-order work refused (never run, never published)
 };
 
 class LaneRunner {
@@ -207,7 +210,9 @@ private:
         LaneJobContext job;
         SourceFrameView src;      // the job's own copy of the source view: its keepAlive holds the planes
         bool began = false;       // the producer's fence values are meaningful
+        bool pinWaitCounted = false;   // this job already counted its wait on a pinned slot
         uint64_t costUs = 0;
+        ChainOrder chain;         // ordered-chain products: the last published frame
     };
 
     State* StateOf(ProductId id) { return id < states_.size() ? &states_[id] : nullptr; }
@@ -241,6 +246,14 @@ private:
             *out = StepOutcome::Late;
             return false;
         }
+        // Only Refused gates here; the CarryForward verdict is informational (the slot table decides the reduced form).
+        if (st.node->orderedChain && st.chain.Admit(seq) == ChainOrder::Verdict::Refused) {
+            // Out of order for the chain (not after the last published frame): refused visibly, the lane moves on.
+            st.nextSeq = seq + 1u;
+            st.counters.chainRefused.fetch_add(1, std::memory_order_relaxed);
+            *out = StepOutcome::Late;
+            return false;
+        }
         const Provenance prov = st.node->backend == Backend::Ofa ? Provenance::AheadOfa : Provenance::AheadLane;
         const uint64_t completed = releaseCompleted_ ? releaseCompleted_(st.node->id) : ~uint64_t(0);
         LaneTicket t;
@@ -263,6 +276,7 @@ private:
         st.seq = seq;
         st.ticket = t;
         st.began = false;
+        st.pinWaitCounted = false;
         st.costUs = 0;
         st.pins.count = 0;
         st.phase = Phase::Claimed;
@@ -278,6 +292,12 @@ private:
             return true;
         }
         if (!st.set->Writable(st.ticket)) {
+            // A late reader of the slot's previous tenant still holds a pin (a single-store product's lag-1 reader, a late lane
+            // reader): this job waits (Transient). Counted once per job, not per poll.
+            if (!st.pinWaitCounted) {
+                st.pinWaitCounted = true;
+                st.set->MutableCounters().writeWaitPinned.fetch_add(1, std::memory_order_relaxed);
+            }
             *out = StepOutcome::WaitingSlot;
             return false;
         }
@@ -313,9 +333,11 @@ private:
         job.out = ring_ ? ring_(st.node->id, job.ringSlot) : nullptr;
         job.outBytes = bytes_ ? bytes_(st.node->id) : size_t(0);
         job.header = &hdr;
+        job.chainReduced = hdr.chainReduced;
         if (input_)
             for (size_t k = 0; k < st.pins.count && k < job.inputData.size(); ++k)
-                job.inputData[k] = input_(st.pins.sets[k]->Product(), st.pins.seqs[k], st.pins.liveIndex[k]);
+                if (st.pins.sets[k] != nullptr)   // null: an absent chain-self input (carry-forward)
+                    job.inputData[k] = input_(st.pins.sets[k]->Product(), st.pins.seqs[k], st.pins.liveIndex[k]);
 
         if (!st.producer->Begin(job)) {
             st.counters.beginFailures.fetch_add(1, std::memory_order_relaxed);
@@ -323,6 +345,8 @@ private:
             return true;
         }
         st.began = true;
+        if (hdr.chainReduced)   // counted once the job really started (not on a failed Begin)
+            st.counters.chainCarryForward.fetch_add(1, std::memory_order_relaxed);
         st.phase = Phase::Running;
         return true;
     }
@@ -366,6 +390,8 @@ private:
         st.nextSeq = st.seq + 1u;
         st.phase = Phase::Idle;
         if (r == PublishResult::Published) {
+            if (st.node->orderedChain)
+                st.chain.Published(st.seq);
             st.counters.published.fetch_add(1, std::memory_order_relaxed);
             return StepOutcome::Published;
         }

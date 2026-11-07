@@ -1,0 +1,40 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "repair.temporal_detail.products",
+  "unit": "repair",
+  "order": 91,
+  "status": "draft",
+  "code_location": "migrated",
+  "shared_unit": {
+    "name": "TemporalDetailProducts",
+    "id": "(contract table; U19 TdMapsView is the accessor)",
+    "version": 2,
+    "product": "td.blocks, td.memory, td.anchor_pass, td.anchor_refs, td.delta, td.maps, td.trail_summary + precursors coding_evidence, quality_pattern(.causal), refined_field and p7g registered (doc 72); no producer in reset 1"
+  },
+  "live_files": [
+    "src/VP-V/modules/repair/temporal_detail/products/TdProductContracts.h",
+    "src/VP-V/modules/repair/temporal_detail/products/TdProductReads.h",
+    "src/VP-V/modules/repair/temporal_detail/products/README.md",
+    "src/VP-V/modules/repair/temporal_detail/products/tests/TdProductsTests.cpp"
+  ],
+  "forwarding_headers": [],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [],
+    "upstream_modules": [
+      "repair.temporal_detail",
+      "repair.grain_split",
+      "motion.estimation"
+    ]
+  },
+  "fallback_when_missing": "Engine products are not produced in reset 1: every consumer runs its classical form; once the engine is requested the form is announced under the consumer's own fallback id.",
+  "fallback_entry": "Temporal-detail products: classical form (<reason>)"
+}

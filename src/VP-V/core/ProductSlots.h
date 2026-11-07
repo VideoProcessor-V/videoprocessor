@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 // Skeleton S1: product slots and the ownership protocol (design doc 25 B3/B4, audit 25a §3 and
@@ -44,6 +45,9 @@
 // side). Lane jobs reading another product pin that slot (PinRef): its own lane cannot write the
 // reclaimed slot (Writable) and the render does not reuse its live buffer under the reader.
 namespace VpSkeleton {
+
+static_assert(kMaxInputs <= VpAncestry::kMaxAncestors, "a header must record every declared input");
+static_assert(kMaxInputs <= 32, "ProductFrameResult::missingInputs is a 32-bit mask");
 
 using VpAncestry::AncestorRef;
 using VpAncestry::Header;
@@ -227,6 +231,12 @@ struct SlotCounters {
     std::atomic<uint64_t> liveMissingInputs{ 0 }; // live fills made in the declared missing-input form
     std::atomic<uint64_t> inputMissing{ 0 };      // live fills refused: an input missing, no form
     std::atomic<uint64_t> spanUnknown{ 0 };       // the span check had no sealed stamp (not N2)
+    std::atomic<uint64_t> chainCarryForward{ 0 }; // ordered chain: sealed in the declared reduced form (self ancestor absent)
+    std::atomic<uint64_t> leadAccepted{ 0 };      // lead ancestors accepted at a SEALED reader (Published, stamp == StampOf(N+k))
+    std::atomic<uint64_t> leadLaterRejected{ 0 }; // a frame accepted as a lead ancestor was rejected at its own seal later (residual K1 risk)
+    std::atomic<uint64_t> chainWaitRejected{ 0 }; // ordered chain: frames whose job waited on a REJECTED predecessor (counted once per frame)
+    std::atomic<uint64_t> chainWaitUnsealed{ 0 }; // ordered chain: frames whose job waited because the predecessor was only Published (its seal not done yet; counted once per frame)
+    std::atomic<uint64_t> writeWaitPinned{ 0 };   // lane jobs that found their claimed slot still pinned by a late reader of the previous tenant (counted once per job, by the LaneRunner)
 };
 
 class SlotSet {
@@ -234,7 +244,7 @@ public:
     SlotSet(ProductId product, uint16_t ring, uint16_t livePool)
         : product_(product)
         , ring_(ring == 0 ? 1 : ring)
-        , livePool_(livePool == 0 ? 1 : livePool)
+        , livePool_(livePool)   // 0 = lane-only: no live fill (a single-store product, ProductDecl::singletonStore)
         , slots_(ring_)
         , liveOwner_(livePool_, 0)
         , livePins_(livePool_)
@@ -392,8 +402,10 @@ public:
     // Any thread (the lane recording ancestors): the reference to frame `seq`'s current content,
     // pinned until Unpin: its own lane cannot write the reclaimed ring slot (Writable) and the render
     // does not reuse its live buffer (BeginLive). *liveIndex = the live buffer to read, or -1 for the
-    // ring slot. False (nothing pinned) when there is no content.
-    bool PinRef(uint64_t seq, AncestorRef* out, int* liveIndex = nullptr)
+    // ring slot. False (nothing pinned) when there is no content. renderValidOnly: pin only content the render accepted
+    // (Sealed / Live / Live lane-owned); a Published (not yet sealed) frame then counts as no content (an ordered-chain
+    // predecessor: it could still be rejected and live-filled, which would replace the ancestor a successor recorded).
+    bool PinRef(uint64_t seq, AncestorRef* out, int* liveIndex = nullptr, bool renderValidOnly = false)
     {
         if (seq > kSlotSeqMask - ring_)
             return false;
@@ -405,7 +417,7 @@ public:
             s.pins.fetch_add(1, std::memory_order_seq_cst);
             const uint64_t raw = s.word.load(std::memory_order_seq_cst);
             const SlotWord w = Unpack(raw);
-            if (w.seq != Biased(seq) || !HasContent(w.state)) {
+            if (w.seq != Biased(seq) || !HasContent(w.state) || (renderValidOnly && !ValidForRender(w.state))) {
                 s.pins.fetch_sub(1, std::memory_order_release);
                 return false;
             }
@@ -726,6 +738,43 @@ public:
         }
     }
 
+    // Lane: frame `seq` is Rejected (the render owns it, no content yet): the live fill has not made it, or declined,
+    // or found no live buffer. An ordered-chain successor then waits (Transient), visibly (chainWaitRejected).
+    bool RejectedAwaitingLive(uint64_t seq) const
+    {
+        const SlotWord w = Unpack(slots_[SlotOf(seq)].word.load(std::memory_order_acquire));
+        return w.seq == Biased(seq) && (w.state == SlotState::Rejected || w.state == SlotState::RejectedLaneOwned);
+    }
+
+    // Lane: frame `seq` is Published and its seal has not run yet. An ordered-chain successor then waits (Transient),
+    // visibly (chainWaitUnsealed): only a render-valid predecessor is pinned.
+    bool PublishedAwaitingSeal(uint64_t seq) const
+    {
+        const SlotWord w = Unpack(slots_[SlotOf(seq)].word.load(std::memory_order_acquire));
+        return w.seq == Biased(seq) && w.state == SlotState::Published;
+    }
+
+    // Lane: why PinRef(seq) failed. Absent = the frame will never have content from this lane (never claimed, abandoned,
+    // released, or the slot moved on); Transient = it may still get content (being written, rejected awaiting the live
+    // fill, or the word changed under the pin). An ordered chain carries forward only on Absent.
+    enum class Absence : uint8_t { Absent, Transient };
+    Absence AbsenceOf(uint64_t seq) const
+    {
+        const Slot& s = slots_[SlotOf(seq)];
+        const SlotWord w = Unpack(s.word.load(std::memory_order_acquire));
+        if (w.seq != Biased(seq))
+            return Absence::Absent;
+        switch (w.state) {
+        case SlotState::Empty:
+        case SlotState::Abandoned:
+        case SlotState::Released:
+        case SlotState::ReleasedLaneOwned:
+            return Absence::Absent;
+        default:
+            return Absence::Transient;
+        }
+    }
+
     // Render: what the ancestry check sees of slot `slotIndex`.
     VpAncestry::SlotView ViewAt(uint16_t slotIndex) const
     {
@@ -741,11 +790,25 @@ public:
         v.seq = w.seq - ring_;
         v.cgen = UsesLaneHeader(w.state) ? s.laneHdr.cgen : UsesLiveHeader(w.state) ? s.liveHdr.cgen : 0u;
         v.valid = ValidForRender(w.state);
+        v.lanePublished = w.state == SlotState::Published;
         return v;
     }
 
+    // Render: the stamp the content of frame `seq` was computed under (lane or live header); false without content.
+    bool HonouredOf(uint64_t seq, VpIndicator::Stamp* out) const
+    {
+        const Slot& s = slots_[SlotOf(seq)];
+        const SlotWord w = Unpack(s.word.load(std::memory_order_acquire));
+        if (w.seq != Biased(seq) || !HasContent(w.state))
+            return false;
+        if (out)
+            *out = UsesLaneHeader(w.state) ? s.laneHdr.honoured : s.liveHdr.honoured;
+        return true;
+    }
+
     // Render: where to read frame `seq` (None when there is no valid content).
-    ReadInfo Read(uint64_t seq) const
+    // allowPublished: a LEAD input is read before its own seal, from the lane's published (not yet sealed) result.
+    ReadInfo Read(uint64_t seq, bool allowPublished = false) const
     {
         ReadInfo r;
         const uint16_t idx = SlotOf(seq);
@@ -753,7 +816,7 @@ public:
         const SlotWord w = Unpack(s.word.load(std::memory_order_acquire));
         if (w.seq != Biased(seq))
             return r;
-        if (w.state == SlotState::Sealed) {
+        if (w.state == SlotState::Sealed || (allowPublished && w.state == SlotState::Published)) {
             r.kind = ReadInfo::Ring;
             r.index = idx;
             r.waitValue = s.producerValue.load(std::memory_order_relaxed);
@@ -857,21 +920,14 @@ struct ProductFrameResult {
 // of recent frames (span checks), and the per-frame resolve that seals and live-fills in order.
 class SlotTable {
 public:
-    // Fails closed: a node with a look-ahead input (lead > 0) makes the table INVALID (Valid() false, Error()
-    // says why, Count() 0) until the K1 seal rule for lead ancestors exists (Published with stamps ==
-    // StampOf(N+k)). Today every ancestor is computed as seq - lag and a lead would be silently ignored.
+    // Look-ahead (K1, W1-SKG): an input with a lead reads frame N+k. The lane pins the ancestor result (a job
+    // waits until the ancestor lane has made N+k); the seal accepts it when it is Published (or already Sealed /
+    // Live) with the same cgen the reader recorded and its honoured stamp equals StampOf(N+k) under the
+    // ancestor own reads. The stamp of a frame that has not been resolved yet comes from the injected source
+    // (SetStampSource: the Indicator StampOf); without one a lead ancestor is refused visibly (AncestryIncomplete,
+    // counted), never accepted unchecked. The table is always valid.
     explicit SlotTable(const Graph& g) : nodes_(g.nodes)
     {
-        for (const Node& n : nodes_)
-            for (size_t k = 0; k < n.inputCount; ++k)
-                if (n.inputs[k].lead > 0) {
-                    valid_ = false;
-                    error_ = "look-ahead input needs the K1 seal rule";
-                }
-        if (!valid_) {
-            nodes_.clear();
-            return;
-        }
         sets_.reserve(nodes_.size());
         size_t maxRing = 1;
         for (const Node& n : nodes_) {
@@ -881,6 +937,12 @@ public:
         }
         sealed_.resize(maxRing + 1);
         results_.resize(nodes_.size());
+        leadMark_.resize(nodes_.size());
+        chainWaitSeen_.assign(nodes_.size(), 0u);
+        chainWaitUnsealedSeen_.assign(nodes_.size(), 0u);
+        pendingLead_.reserve(kMaxInputs);   // the Check in flight pushes at most one entry per input: no allocation on the render thread
+        for (size_t i = 0; i < nodes_.size(); ++i)
+            leadMark_[i].assign(size_t(nodes_[i].ring == 0 ? 1 : nodes_[i].ring), 0u);
     }
     ~SlotTable()
     {
@@ -890,6 +952,9 @@ public:
     SlotTable(const SlotTable&) = delete;
     SlotTable& operator=(const SlotTable&) = delete;
 
+    using StampSource = std::function<VpIndicator::Stamp(uint64_t)>;
+    // The Indicator StampOf, for the seal of lead ancestors (render thread; set before the first Resolve).
+    void SetStampSource(StampSource f) { stampOf_ = std::move(f); }
     bool Valid() const { return valid_; }
     const char* Error() const { return error_; }
     size_t Count() const { return sets_.size(); }
@@ -919,18 +984,60 @@ public:
         if (!n)
             return false;
         hdr.ancestorCount = 0;
+        hdr.chainReduced = false;
         for (size_t k = 0; k < n->inputCount; ++k) {
             const InputRef& in = n->inputs[k];
             SlotSet* set = Find(in.product);
             AncestorRef ref;
             int live = -1;
-            if (!set || seq < in.lag || !set->PinRef(seq - in.lag, &ref, &live)) {
+            uint64_t aseq = 0;
+            const bool haveSeq = InputSeq(in, seq, &aseq);
+            // Ordered chain: the self input at lag >= 1 is optional. Absent (chain start, a predecessor that never
+            // published, a skipped range) it is NOT waited for (our own lane finished frame seq-1 before this job
+            // began: it will never appear): the job carries forward in its declared reduced form.
+            // The chain pins only a RENDER-VALID predecessor (Sealed / Live): a Published-unsealed one could still be
+            // rejected and live-filled at its seal, which would replace the ancestor this job recorded and make every
+            // later frame fail with AncestorReplaced (a permanent per-frame live fill). It counts as Transient: the job waits.
+            const bool chainSelf = n->orderedChain && in.product == id && in.lag > 0;
+            if (!set || !haveSeq || !set->PinRef(aseq, &ref, &live, chainSelf)) {
+                if (chainSelf && set && (!haveSeq || set->AbsenceOf(aseq) == SlotSet::Absence::Absent)) {
+                    AncestorRef empty;
+                    empty.productId = in.product;
+                    empty.seq = haveSeq ? aseq : 0;
+                    pins.sets[pins.count] = nullptr;   // positional: no pin, nothing to unpin
+                    pins.seqs[pins.count] = empty.seq;
+                    pins.liveIndex[pins.count] = -1;
+                    ++pins.count;
+                    hdr.ancestors[k] = empty;
+                    hdr.ancestorCount = uint8_t(k + 1);
+                    hdr.chainReduced = true;
+                    continue;
+                }
+                if (chainSelf && set && haveSeq) {
+                    // Waiting on a Rejected predecessor: it waits for the live fill (which may decline or find no live
+                    // buffer: then it never comes and this chain stalls until the frame is released). Or on a Published
+                    // one whose seal has not run. Counted once per frame, not per poll: the entries are private to this
+                    // product's lane thread.
+                    const int ni = IndexOfNode(id);
+                    if (ni >= 0 && set->RejectedAwaitingLive(aseq)) {
+                        if (chainWaitSeen_[size_t(ni)] != seq + 1u) {
+                            chainWaitSeen_[size_t(ni)] = seq + 1u;
+                            set->MutableCounters().chainWaitRejected.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    } else if (ni >= 0 && set->PublishedAwaitingSeal(aseq)) {
+                        if (chainWaitUnsealedSeen_[size_t(ni)] != seq + 1u) {
+                            chainWaitUnsealedSeen_[size_t(ni)] = seq + 1u;
+                            set->MutableCounters().chainWaitUnsealed.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
+                }
                 pins.Unpin();
                 hdr.ancestorCount = 0;
+                hdr.chainReduced = false;
                 return false;
             }
             pins.sets[pins.count] = set;
-            pins.seqs[pins.count] = seq - in.lag;
+            pins.seqs[pins.count] = aseq;
             pins.liveIndex[pins.count] = live;
             ++pins.count;
             hdr.ancestors[k] = ref;
@@ -987,11 +1094,37 @@ public:
             ProductFrameResult& out = results_[i];
             out = ProductFrameResult();
             out.id = n.id;
+            pendingLead_.clear();
+            pendingChain_ = false;
             out.seal = set.Seal(seq, [&](const Header& h) { return Check(n, seq, stampN, h); });
+            if (out.seal.outcome == SealOutcome::Sealed && out.seal.reason == SealReason::Accepted) {
+                // Counted once, after the seal took effect (not per input, not on a CAS retry).
+                for (ProductId p : pendingLead_)
+                    if (SlotSet* src = Find(p))
+                        src->MutableCounters().leadAccepted.fetch_add(1, std::memory_order_relaxed);
+                if (pendingChain_)
+                    set.MutableCounters().chainCarryForward.fetch_add(1, std::memory_order_relaxed);
+                // Remember which frames were accepted as lead ancestors: their own seal comes later.
+                for (size_t k = 0; k < n.inputCount; ++k)
+                    if (n.inputs[k].lead > 0)
+                        MarkLeadAccepted(n.inputs[k], seq);
+            }
+            if (out.seal.outcome == SealOutcome::NeedsLive) {
+                uint64_t& m = leadMark_[i][size_t(set.SlotOf(seq))];
+                if (m == seq + 1u)
+                    set.MutableCounters().leadLaterRejected.fetch_add(1, std::memory_order_relaxed);
+            }
             out.final = out.seal.outcome;
             out.finalReason = out.seal.reason;
             if (out.seal.outcome != SealOutcome::NeedsLive)
                 continue;
+            if (set.LivePool() == 0) {
+                // Lane-only product (a single-store product): no live fill exists. The frame is absent and the reader runs its
+                // own visible fallback (counted by the caller as an unavailable product frame).
+                out.final = SealOutcome::Unavailable;
+                out.finalReason = SealReason::NoLiveBuffer;
+                continue;
+            }
             const int live = set.BeginLive(seq);
             if (live < 0) {
                 out.final = SealOutcome::Unavailable;
@@ -1005,26 +1138,36 @@ public:
             // Ancestors stay positional (index k = input k); a missing input keeps an empty ref
             // (cgen 0, provenance None).
             uint32_t missing = 0;
+            uint32_t leadUsed = 0;   // bit k: lead input k was read from a Published / valid lead ancestor
             for (size_t k = 0; k < n.inputCount; ++k) {
                 const InputRef& in = n.inputs[k];
                 SlotSet* src = Find(in.product);
                 AncestorRef& r = h.ancestors[k];
                 r = AncestorRef();
                 r.productId = in.product;
-                r.seq = seq >= in.lag ? seq - in.lag : 0;
-                bool ok = src != nullptr && seq >= in.lag;
+                uint64_t aseq = 0;
+                const bool haveSeq = InputSeq(in, seq, &aseq);
+                r.seq = haveSeq ? aseq : 0;
+                bool ok = src != nullptr && haveSeq;
                 VpAncestry::SlotView v;
                 if (ok) {
-                    v = src->ViewAt(src->SlotOf(seq - in.lag));
-                    ok = v.present && v.seq == seq - in.lag && v.valid;
+                    v = src->ViewAt(src->SlotOf(aseq));
+                    // A lead input is read from the lane published result (its own seal comes later).
+                    ok = v.present && v.seq == aseq && (v.valid || (in.lead > 0 && v.lanePublished));
+                    // K1 also binds the live fill: a lead ancestor whose stamp moved (or is unknown) is a MISSING input
+                    // (declared missing-input form, LiveFallback, visible), never a full result from stale data.
+                    if (ok && in.lead > 0 && LeadStampReason(in.product, aseq) != SealReason::Accepted)
+                        ok = false;
                 }
                 if (!ok) {
                     missing |= 1u << k;
                     continue;
                 }
-                r.slotIndex = src->SlotOf(seq - in.lag);
+                if (in.lead > 0)
+                    leadUsed |= 1u << k;
+                r.slotIndex = src->SlotOf(aseq);
                 r.cgen = v.cgen;
-                r.prov = src->WordFor(seq - in.lag).prov;
+                r.prov = src->WordFor(aseq).prov;
             }
             h.ancestorCount = uint8_t(n.inputCount);
             out.missingInputs = missing;
@@ -1051,6 +1194,11 @@ public:
                 ++liveFills_;
                 out.liveFilled = true;
                 out.final = SealOutcome::Sealed;
+                // A live fill that used a Published lead ancestor is the same residual K1 risk as a sealed reader: that ancestor
+                // gets its own seal later and may be rejected then (leadLaterRejected).
+                for (size_t k = 0; k < n.inputCount; ++k)
+                    if ((leadUsed & (1u << k)) != 0u)
+                        MarkLeadAccepted(n.inputs[k], seq);
             } else {
                 set.CancelLive(seq);
                 out.final = SealOutcome::Unavailable;
@@ -1067,9 +1215,49 @@ private:
         VpIndicator::Stamp stamp;
     };
 
+    int IndexOfNode(ProductId id) const
+    {
+        for (size_t i = 0; i < nodes_.size(); ++i)
+            if (nodes_[i].id == id)
+                return int(i);
+        return -1;
+    }
+
+    // Remember that frame seq + lead of the input's product was used as a lead ancestor: its own seal comes later (render thread).
+    void MarkLeadAccepted(const InputRef& in, uint64_t seq)
+    {
+        const int j = IndexOfNode(in.product);
+        if (j < 0)
+            return;
+        const uint64_t a = seq + in.lead;
+        leadMark_[size_t(j)][size_t(sets_[size_t(j)]->SlotOf(a))] = a + 1u;
+    }
+
+    // K1: the content of frame `aseq` of a lead ancestor product must have been computed under the stamp of that frame.
+    // Accepted, or why not (AncestryIncomplete without a stamp source or content, AncientStamp, StampMismatch).
+    SealReason LeadStampReason(ProductId product, uint64_t aseq)
+    {
+        SlotSet* src = Find(product);
+        const Node* an = NodeOf(product);
+        VpIndicator::Stamp honoured;
+        if (!stampOf_ || !src || !an || !src->HonouredOf(aseq, &honoured))
+            return SealReason::AncestryIncomplete;
+        const VpIndicator::Stamp want = stampOf_(aseq);
+        if (want.ancient || honoured.ancient)
+            return SealReason::AncientStamp;
+        if (!VpIndicator::SameFor(honoured, want, an->reads))
+            return SealReason::StampMismatch;
+        return SealReason::Accepted;
+    }
+
     // The seal's validation of a published lane header for frame `seq` (design B4 (a)/(b)).
+    // RENDER THREAD ONLY (the single caller of Resolve -> Seal -> Check): leadMark_, pendingLead_ and pendingChain_ are
+    // plain members with no synchronisation. Check may run more than once per product and frame (SlotSet::Seal retries
+    // the CAS), so it starts from empty pending state: counts are taken once, by Resolve, after the seal took effect.
     SealReason Check(const Node& n, uint64_t seq, const VpIndicator::Stamp& stampN, const Header& h)
     {
+        pendingLead_.clear();
+        pendingChain_ = false;
         if (stampN.ancient || h.honoured.ancient)
             return SealReason::AncientStamp;
         if (h.seq != seq || h.cgen == 0)
@@ -1081,7 +1269,24 @@ private:
         for (size_t k = 0; k < n.inputCount; ++k) {
             const InputRef& in = n.inputs[k];
             const AncestorRef& ref = h.ancestors[k];
-            if (ref.productId != in.product || seq < in.lag || ref.seq != seq - in.lag)
+            // Ordered chain carry-forward: the job declared its self lag input absent (Header::chainReduced) and
+            // recorded an empty ancestor: accepted (visible in the counters), nothing to validate.
+            if (h.chainReduced && n.orderedChain && in.product == n.id && in.lag > 0 && ref.productId == in.product
+                && ref.cgen == 0) {
+                // Carry-forward is only for a truly absent predecessor: if frame N-1 has valid content by now (sealed or
+                // live-filled), the reduced result is rejected and the frame is made in full by the live fill.
+                uint64_t pseq = 0;
+                if (InputSeq(in, seq, &pseq)) {
+                    SlotSet* self = Find(n.id);
+                    const VpAncestry::SlotView pv = self->ViewAt(self->SlotOf(pseq));
+                    if (pv.present && pv.seq == pseq && (pv.valid || pv.lanePublished))
+                        return SealReason::AncestryIncomplete;
+                }
+                pendingChain_ = true;
+                continue;
+            }
+            uint64_t aseq = 0;
+            if (!InputSeq(in, seq, &aseq) || ref.productId != in.product || ref.seq != aseq)
                 return SealReason::AncestryIncomplete;
             SlotSet* src = Find(ref.productId);
             if (!src || ref.slotIndex != src->SlotOf(ref.seq))
@@ -1091,6 +1296,16 @@ private:
                 return SealReason::AncestorGone;
             if (v.cgen != ref.cgen)
                 return v.cgen == 0 ? SealReason::AncestorInvalid : SealReason::AncestorReplaced;
+            if (in.lead > 0) {
+                // K1: the lead ancestor needs a result (Published is enough) computed under the stamp of ITS frame.
+                if (!v.valid && !v.lanePublished)
+                    return SealReason::AncestorInvalid;
+                const SealReason lr = LeadStampReason(ref.productId, ref.seq);
+                if (lr != SealReason::Accepted)
+                    return lr;
+                pendingLead_.push_back(ref.productId);
+                continue;
+            }
             if (!v.valid)
                 return SealReason::AncestorInvalid;
             if (in.lag > 0 && n.spanMask != 0) {
@@ -1108,6 +1323,13 @@ private:
 
     bool valid_ = true;
     const char* error_ = "";
+    StampSource stampOf_;
+    // Render thread only (see Check): the single caller contract for the three members below.
+    std::vector<ProductId> pendingLead_;   // lead ancestors seen by the Check in flight (counted on Accepted)
+    bool pendingChain_ = false;            // the Check in flight accepted a chain carry-forward
+    std::vector<std::vector<uint64_t>> leadMark_;   // per node, per slot: frame + 1 accepted as a lead ancestor
+    std::vector<uint64_t> chainWaitSeen_;   // per node: frame + 1 last counted in chainWaitRejected (that product's lane thread only)
+    std::vector<uint64_t> chainWaitUnsealedSeen_;   // per node: frame + 1 last counted in chainWaitUnsealed (that product's lane thread only)
     std::vector<Node> nodes_;
     std::vector<SlotSet*> sets_;
     std::vector<SealedRecord> sealed_;
