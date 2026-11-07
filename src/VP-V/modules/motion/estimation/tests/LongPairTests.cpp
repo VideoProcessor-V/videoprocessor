@@ -72,6 +72,56 @@ namespace VideoProcessorTest
 		}
 	}
 
+	namespace
+	{
+		CComPtr<IDXGIAdapter> WarpAdapter()
+		{
+			CComPtr<IDXGIFactory4> factory;
+			CComPtr<IDXGIAdapter> adapter;
+			if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
+				factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter));
+			return adapter;
+		}
+
+		bool WaitStored(Service& svc, uint64_t n)
+		{
+			for (int i = 0; i < 400; ++i)
+			{
+				if (svc.GetStats().stored >= n)
+					return true;
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			}
+			return false;
+		}
+
+		// A backend that stays inside Run until released (or 5 s), to prove SetBackend waits for it.
+		struct BlockingBackend : ISeededBackend
+		{
+			std::mutex m;
+			std::condition_variable cv;
+			bool entered = false, release = false;
+			std::atomic<bool> finished{ false };
+			const char* Name() const override { return "blocking"; }
+			bool Run(const uint8_t*, const uint8_t*, int w, int h, const HintField*, Field& out, std::string&) override
+			{
+				{
+					std::unique_lock<std::mutex> lock(m);
+					entered = true;
+					cv.notify_all();
+					cv.wait_for(lock, std::chrono::seconds(5), [&] { return release; });
+				}
+				out.gridW = GridOf(w);
+				out.gridH = GridOf(h);
+				out.forward.assign(static_cast<size_t>(out.gridW) * out.gridH * 2, 0);
+				out.backward = out.forward;
+				out.forwardCost.assign(static_cast<size_t>(out.gridW) * out.gridH, 0);
+				out.backwardCost = out.forwardCost;
+				finished = true;
+				return true;
+			}
+		};
+	}
+
 	TEST_CLASS(LongPairTests)
 	{
 	public:
@@ -282,56 +332,6 @@ namespace VideoProcessorTest
 
 	// The five pre-P5a fixes (opus gate): backend lifetime, Map-failure latch, device-removed recovery, SetAdapter required,
 	// eviction count. CPU / WARP only: no NVIDIA hardware needed.
-	namespace
-	{
-		CComPtr<IDXGIAdapter> WarpAdapter()
-		{
-			CComPtr<IDXGIFactory4> factory;
-			CComPtr<IDXGIAdapter> adapter;
-			if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
-				factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter));
-			return adapter;
-		}
-
-		bool WaitStored(Service& svc, uint64_t n)
-		{
-			for (int i = 0; i < 400; ++i)
-			{
-				if (svc.GetStats().stored >= n)
-					return true;
-				std::this_thread::sleep_for(std::chrono::milliseconds(10));
-			}
-			return false;
-		}
-
-		// A backend that stays inside Run until released (or 5 s), to prove SetBackend waits for it.
-		struct BlockingBackend : ISeededBackend
-		{
-			std::mutex m;
-			std::condition_variable cv;
-			bool entered = false, release = false;
-			std::atomic<bool> finished{ false };
-			const char* Name() const override { return "blocking"; }
-			bool Run(const uint8_t*, const uint8_t*, int w, int h, const HintField*, Field& out, std::string&) override
-			{
-				{
-					std::unique_lock<std::mutex> lock(m);
-					entered = true;
-					cv.notify_all();
-					cv.wait_for(lock, std::chrono::seconds(5), [&] { return release; });
-				}
-				out.gridW = GridOf(w);
-				out.gridH = GridOf(h);
-				out.forward.assign(static_cast<size_t>(out.gridW) * out.gridH * 2, 0);
-				out.backward = out.forward;
-				out.forwardCost.assign(static_cast<size_t>(out.gridW) * out.gridH, 0);
-				out.backwardCost = out.forwardCost;
-				finished = true;
-				return true;
-			}
-		};
-	}
-
 	TEST_CLASS(LongPairFixTests)
 	{
 	public:
@@ -412,6 +412,9 @@ namespace VideoProcessorTest
 
 		// Fix 2: a failed Map must latch a visible state and never read stale data. A DEFAULT texture without CPU access cannot
 		// be mapped, which is a real Map failure on WARP.
+		BEGIN_TEST_METHOD_ATTRIBUTE(AFailedMapReturnsFalseWithAnHresultAndLeavesTheDestinationUntouched)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(AFailedMapReturnsFalseWithAnHresultAndLeavesTheDestinationUntouched)
 		{
 			CComPtr<ID3D11Device> device;
@@ -432,6 +435,9 @@ namespace VideoProcessorTest
 			Assert::IsFalse(NvOpticalFlow::ReadStagingRows(nullptr, unmappable, 4, 8, dst.data(), hr));
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(AMappableStagingTextureIsReadRowByRow)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(AMappableStagingTextureIsReadRowByRow)
 		{
 			CComPtr<ID3D11Device> device;
@@ -478,6 +484,9 @@ namespace VideoProcessorTest
 		}
 
 		// Fix 3: a removed device is released, reported with its HRESULT and latched; the pair still gets the visible fallback.
+		BEGIN_TEST_METHOD_ATTRIBUTE(ARemovedDeviceIsReleasedReportedAndLatched)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(ARemovedDeviceIsReleasedReportedAndLatched)
 		{
 			CComPtr<IDXGIAdapter> warp = WarpAdapter();
@@ -503,7 +512,7 @@ namespace VideoProcessorTest
 		}
 
 		// Fix 4: no SetAdapter, no GPU session, and it says so (the old code created a default hardware device).
-		TEST_METHOD(WithoutSetAdapterTheNvofSessionRefusesVisiblyAndNeverTouchesTheGpu)
+		TEST_METHOD(WithoutSetAdapterTheNvofSessionRefusesVisibly)
 		{
 			const int w = 64, h = 48;
 			std::vector<uint8_t> a, b;
@@ -522,6 +531,9 @@ namespace VideoProcessorTest
 			Assert::IsTrue(r2.why.reason.find("SetAdapter was not called") != std::string::npos);
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(SetAdapterLiftsTheRefusalImmediately)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(SetAdapterLiftsTheRefusalImmediately)
 		{
 			CComPtr<IDXGIAdapter> warp = WarpAdapter();

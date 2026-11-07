@@ -373,6 +373,19 @@ namespace VpLongPair
 		impl->ReleaseEngine();
 	}
 
+	// Same adapter = same LUID (a re-enumerated COM object for the same GPU is not a change); an unreadable desc counts as different.
+	static bool SameAdapter(IDXGIAdapter* a, IDXGIAdapter* b)
+	{
+		if (a == b)
+			return true;
+		if (!a || !b)
+			return false;
+		DXGI_ADAPTER_DESC da{}, db{};
+		if (FAILED(a->GetDesc(&da)) || FAILED(b->GetDesc(&db)))
+			return false;
+		return da.AdapterLuid.LowPart == db.AdapterLuid.LowPart && da.AdapterLuid.HighPart == db.AdapterLuid.HighPart;
+	}
+
 	void Service::SetAdapter(IDXGIAdapter* adapter)
 	{
 		// Same lock order as the GPU path (execMutex, then mutex). A different adapter drops the device built on the old one and
@@ -382,7 +395,7 @@ namespace VpLongPair
 		bool changed;
 		{
 			std::lock_guard<std::mutex> lock(impl->mutex);
-			changed = static_cast<IDXGIAdapter*>(impl->adapter) != adapter;
+			changed = !SameAdapter(impl->adapter.p, adapter);
 			impl->adapter = adapter;
 		}
 		if (changed)
