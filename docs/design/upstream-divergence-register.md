@@ -136,6 +136,12 @@ Listed with their design note: `vprenderer/LibplaceboVideoRenderer.{h,cpp}` (doc
 | DIV-D-06 | `ConfigurationLiveApply.h` `global_hotkeys` | on = every configured key global (Bill's rule) | `global_hotkeys on` | default is off: sweep item 6 |
 | DIV-D-07 | `vprenderer/LibplaceboVideoRenderer.cpp` `EffectiveSettingsFingerprint` (return line) | `RendererSettingsHooks::Fingerprint` | Bill's string is the same text (his terms, his order) followed by the VP-V terms; the old VP string interleaved them and reordered some of Bill's | order only; every consumer is memory-only and compares strings of one process, so no one-time invalidation (docs/audit/p3-cpu-defaults-regolden.md, Consumers) |
 
+## Owner-approved shared-units waivers
+
+| ID | Where | Waiver | Reason | Status |
+|---|---|---|---|---|
+| WAIVER-SU-01 | `tools/shared_units_baseline.json` U8 `known_false_positive`, `src/VP-V/modules/motion/estimation/MatcherSettings.h` | `settings\.pictureArea` not counted as a duplicate of active_picture_rect | `settings.pictureArea` flag assignment moved verbatim from LVR (P3-6), not a PictureRect implementation; same class as the DejudderWarp entries | owner-approved 2026-11-07 (relayed by the M2 lead) |
+
 ## Open (not yet a row)
 
 (e2) and (e3) items are in the sweep note, section 5: `D:\codex\videoprocessor\skeleton-notes\divergence-sweep-firstpass.md`. They become rows only after the owner decides revert, gate, or register.

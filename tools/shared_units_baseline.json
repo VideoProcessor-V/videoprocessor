@@ -375,6 +375,12 @@
      "pattern": "pictureArea|PictureArea\\(\\)",
      "kind": "false_positive",
      "reason": "setting flag or texture binding of the unit's rect pass; the PICTURE kernel and its law moved to VpUnit::PictureRect"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/MatcherSettings.h",
+     "pattern": "settings\\.pictureArea",
+     "kind": "false_positive",
+     "reason": "settings.pictureArea flag assignment moved verbatim from LVR (P3-6), not a PictureRect implementation; same class as the DejudderWarp entries"
     }
    ]
   },
