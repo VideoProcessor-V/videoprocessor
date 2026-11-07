@@ -171,3 +171,12 @@ Accessors (every shader reads only these): `gs_fetch(p)` = (s1, s2, f, base) in 
 | interpolator grain bands (SA4) | grain bands | base | later package |
 | camera model grain-map refinement (K5) | grain map refinement | N, tilt | later package |
 | contrast recovery (WP8) | halo guard | base + energies | later package |
+
+## Camera refinement of the grain-map smoothing (K5-1, pure unit, not wired)
+
+`GrainCameraRefine.h` (CPU reference + GLSL text, one unit) changes where the per-block grain statistic's previous value is fetched:
+at the P8 camera model position for camera blocks the accessor lets through, today's rule for everything else (object blocks,
+blocks under the trust floor, P8 absent or late = the uncompensated variant, flagged for "grain: camera late"). It changes
+smoothing parameters only, never the grain layer or the exact re-add. Today's smoothing site (K5-0): `scaling/output/AdaptiveDownscale.cpp`
+MAP_BODY (16x16 blocks, once per source frame). `GrainSplit::kUnitVersion` is not bumped (the split law is unchanged); the variant has
+its own stamp (`GrainCameraRefine::VariantStamp`). Tests: `tests/GrainCameraRefineTests.cpp`. Wiring is K5-2.

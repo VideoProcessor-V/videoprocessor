@@ -8,6 +8,7 @@
   "code_location": "migrated",
   "live_files": [
     "src/VP-V/modules/repair/grain_split/GrainSplit.h",
+    "src/VP-V/modules/repair/grain_split/GrainCameraRefine.h",
     "src/VP-V/modules/repair/grain_split/GrainSplitGpu.h",
     "src/VP-V/modules/repair/grain_split/GrainSplitGpu.cpp",
     "src/VP-V/modules/repair/grain_split/GpuPassUtil.h",

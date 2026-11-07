@@ -98,3 +98,10 @@ CPU: `PairTimingTests`, `PairAssemblyTests`, `VerdictGateTests`, `CameraFitRunne
 `CameraLabelUploadTests`, `CameraConsumerBindingTests`, `P8FillRuleTests`, `GuidanceSchedulingTests`, `GuideProductTests`,
 `GuidanceGovernorTests`, `MotionBenchWriterTests`. WARP (category `GpuWarp`): `FieldReadbackRingWarpTests`, `CameraLabelWarpTests`,
 `GuidanceNullIdentityWarpTests`.
+
+## Phase interpolation (K9-2, pure unit, not wired)
+
+`CameraPhaseInterp.h` interpolates camera models at a phase through log-scale and shortest-arc angle (never homography entries)
+with a per-pixel evaluation and a block-grid helper; degenerate models fall back to the usable end or the identity (`ok = false`).
+It also holds the strict de-judder policy constants 0.85 / 0.7 / 0.05 / 0.2 (pinned equal to `PolicyFor(DejudderWarp)`).
+Tests: `../../tests/CameraPhaseInterpTests.cpp`. The P9 producer (`CameraSmoother`, K9-1) is a separate step.
