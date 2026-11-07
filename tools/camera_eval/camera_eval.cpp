@@ -6,7 +6,11 @@
 //
 //   camera_eval fit   --vec DIR --frames N --w W --h H --block 16 --fps F --out FILE.camf [--csv FILE] [--phase1] [--two-layer [--tl-ring F] [--tl-swap S] [--tl-veto R] [--tl-floor F] [--tl-comp R]]
 //   camera_eval match --yuv CODED.yuv --w W --h H --bitdepth 10 --frames N --vec DIR --ref DIR --fps F
-//                     [--start 2] [--count 40] [--phase1] --out FILE.csv
+//                     [--start 2] [--count 40] [--phase1] [--dump-flo DIR] --out FILE.csv
+//
+// --dump-flo DIR (match): per judged pair t writes DIR/pair_%06d/pred_off.flo and pred_on.flo, Middlebury .flo, full
+// picture size, source px, frame t-1 -> t (p in t-1 moves to p + flow in t). Block vectors are expanded to pixels
+// (each block covers `block` source px; the border strip beyond the last whole block repeats the edge block).
 //
 // Input flows: DIR/flow_%06d_%06d.npy (float32 LE, C order, shape (gh4, gw4, 2), 4 px grid, ch0 dx, ch1 dy;
 // frame_b(p + F(p)) ~ frame_a(p) for file flow_a_b). For pair t = 1..N-1 the forward field is flow_(t-1)_(t) and
@@ -20,6 +24,7 @@
 //
 // --phase1 restores the phase-1 fitter configuration: inlier-share ramp 0.4/0.9, no temporal noise floor, no
 // verdict gate on the confidence.
+#include <direct.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -164,7 +169,7 @@ template <class T> static void Put(FILE* fp, T v) { fwrite(&v, sizeof(T), 1, fp)
 
 struct Args
 {
-	std::string mode, vec, ref, yuv, out, csv;
+	std::string mode, vec, ref, yuv, out, csv, dumpFlo;
 	int N = 0, W = 0, H = 0, block = 16, bitdepth = 10, start = 2, count = 40;
 	double fps = 0;
 	bool phase1 = false, twoLayer = false;
@@ -183,6 +188,7 @@ static bool Parse(int argc, char** argv, Args& a)
 		else if (s == "--yuv") a.yuv = next();
 		else if (s == "--out") a.out = next();
 		else if (s == "--csv") a.csv = next();
+		else if (s == "--dump-flo") a.dumpFlo = next();
 		else if (s == "--frames") a.N = atoi(next());
 		else if (s == "--w") a.W = atoi(next());
 		else if (s == "--h") a.H = atoi(next());
@@ -284,6 +290,29 @@ static bool ReadLuma(FILE* fp, int W, int H, int bitdepth, int f, std::vector<fl
 	return true;
 }
 
+// Expand block vectors (matcher px) to a dense source-px .flo of the full picture.
+static bool WriteFlo(const std::string& path, const Reference::MatchResult& r, const Geometry& g, double sourceToMatcher)
+{
+	FILE* fp = fopen(path.c_str(), "wb");
+	if (!fp) return Fail("cannot write " + path);
+	const float magic = 202021.25f;
+	const int32_t w = g.W, h = g.H;
+	fwrite(&magic, 4, 1, fp); fwrite(&w, 4, 1, fp); fwrite(&h, 4, 1, fp);
+	std::vector<float> row((size_t)g.W * 2);
+	for (int y = 0; y < g.H; ++y)
+	{
+		const int by = std::min(y / g.block, r.bh - 1);
+		for (int x = 0; x < g.W; ++x)
+		{
+			const int bx = std::min(x / g.block, r.bw - 1);
+			row[(size_t)x * 2] = (float)(r.vx[(size_t)by * r.bw + bx] / sourceToMatcher);
+			row[(size_t)x * 2 + 1] = (float)(r.vy[(size_t)by * r.bw + bx] / sourceToMatcher);
+		}
+		fwrite(row.data(), 4, row.size(), fp);
+	}
+	return fclose(fp) == 0 || Fail("write failed: " + path);
+}
+
 struct EpeStats { int n = 0; double mean = 0, median = 0, gt1 = 0, gt3 = 0; };
 
 static EpeStats Stats(std::vector<double>& e)
@@ -360,6 +389,16 @@ static int RunMatch(const Args& a)
 				fclose(out); fclose(yuv);
 				Fail("matcher grid " + std::to_string(off.bw) + "x" + std::to_string(off.bh) + " != fitter grid " + std::to_string(g.gridW) + "x" + std::to_string(g.gridH));
 				return 2;
+			}
+			if (!a.dumpFlo.empty() && on.skipped) { fclose(out); fclose(yuv); Fail("--dump-flo: the plan skipped the matcher at pair " + std::to_string(t)); return 2; }
+			if (!a.dumpFlo.empty())
+			{
+				char sub[64];
+				snprintf(sub, sizeof sub, "/pair_%06d", t);
+				const std::string d = a.dumpFlo + sub;
+				_mkdir(a.dumpFlo.c_str()); _mkdir(d.c_str());   // one level each; parents must exist
+				if (!WriteFlo(d + "/pred_off.flo", off, g, mc.sourceToMatcher) || !WriteFlo(d + "/pred_on.flo", on, g, mc.sourceToMatcher))
+				{ fclose(out); fclose(yuv); return 2; }
 			}
 			const std::vector<uint8_t> refLab = LabelsOf(refRec, (size_t)g.gridW * g.gridH);
 			int cam = 0; for (uint8_t l : refLab) if (l == 1) ++cam;
