@@ -1555,10 +1555,10 @@ ConfigEditorWindow::ConfigEditorWindow(QString configPath, quintptr ownerHandle,
     kit.setKnownFn = [this](const QString& s, const QString& k, const QString& text)
     {
         if (!document_) return;
-        if (!document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toStdString()))
+        if (!document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toLocal8Bit().constData()))
         {
             document_->AddSection(s.toStdString());
-            document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toStdString());
+            document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toLocal8Bit().constData());
         }
     };
     kit.removeKnownFn = [this](const QString& s, const QString& k) { if (document_) document_->RemoveKnown(s.toStdString(), k.toStdString().c_str()); };

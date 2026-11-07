@@ -194,7 +194,7 @@ namespace Vpv
 				{ L::Feature, "Room-light adaptation", "ambient_adapt", nullptr, "off", "off" } },
 
 			// ---- Dynamic Drive ----
-			{ "drive", "pages", "Dynamic Drive (its own page)", "The projector LED dimming has its own page in the sidebar.", false, false, {
+			{ "drive", "pages", "Dynamic Drive (its own page)", "The projector LED dimming has its own page, opened from the Drive tab.", false, false, {
 				{ K::Note, "Everything Dynamic Drive does is on the Dynamic Drive page. Its master is the command source "
 					"(your script, VP's compensate, or none): each card appears only when that source uses it. The "
 					"Advanced LED card has two more masters: \"Advanced LED values\" (your script's values, or Custom) "

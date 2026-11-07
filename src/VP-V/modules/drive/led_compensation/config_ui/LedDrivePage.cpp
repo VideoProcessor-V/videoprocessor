@@ -1177,6 +1177,7 @@ QWidget* LedDriveBuilder::createLedDrivePage()
 
 struct LedDrivePage::State
 {
+    EditorKit* kit = nullptr;
     std::unique_ptr<LedDriveBuilder> builder;
 };
 
@@ -1188,9 +1189,16 @@ void LedDrivePage::AppendPages(ConfigPageHost::ConfigFormApi& api, std::vector<C
     EditorKit* kit = api.editorKit();
     if (!kit) return;
     std::unique_ptr<State>& slot = states_[&api];
+    if (slot && slot->kit != kit)
+    {
+        // A stale state (the registry was reset while an editor lived, or an address was reused).
+        slot->builder->projectorCards().JoinTest();
+        slot.reset();
+    }
     if (!slot)
     {
         slot = std::make_unique<State>();
+        slot->kit = kit;
         slot->builder = std::make_unique<LedDriveBuilder>(*kit);
     }
     ConfigPageHost::ConfigPage page;

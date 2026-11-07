@@ -49,7 +49,7 @@ namespace DriveConfig
 	public:
 		explicit DocumentWriter(ConfigPageHost::EditorKit& kit) : kit_(kit) {}
 		bool SetKnown(const std::string& section, const char* key, const std::string& text)
-		{ kit_.setKnown(QString::fromStdString(section), QString::fromLatin1(key), QString::fromStdString(text)); return true; }
+		{ kit_.setKnown(QString::fromStdString(section), QString::fromLatin1(key), QString::fromLocal8Bit(text.c_str())); return true; }
 		void AddSection(const std::string&) {}
 		void RemoveKnown(const std::string& section, const char* key)
 		{ kit_.removeKnown(QString::fromStdString(section), QString::fromLatin1(key)); }
