@@ -27051,6 +27051,13 @@ releaseDriftBaseRetention =
 				RebaseWarmupIdle();
 			rebaseFactor = wanted < 1.0 && !temporal && !rebasePaused && !rebaseWarmHold ? wanted : 1.0;
 			rebaseFactorX = wantedX < 1.0 && !temporal && !rebasePaused && !rebaseWarmHold ? wantedX : 1.0;
+			if (rebaseWarmHold)
+			{
+				// Held: stay on the CURRENT path (the factors already in force, native when none), not a
+				// drop to native and back.
+				rebaseFactor = previousRebase;
+				rebaseFactorX = previousRebaseX;
+			}
 			// Silent-fallbacks batch: with scaling.rebase switched off the planes stay native, so every
 			// downstream stage (debander, detail pulse, texture restore, adaptive upscale) uses factor 1.
 			{

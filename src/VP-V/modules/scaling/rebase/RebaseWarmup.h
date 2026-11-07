@@ -3,6 +3,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -107,7 +108,9 @@ namespace VpRebaseWarmup
 					std::snprintf(text, sizeof(text), "Re-base shader warm-up for %s failed; staying on the current path, retry in %.0f s",
 						label.c_str(), retrySeconds);
 					step.log = text;
-					retrySeconds = (std::min)(kRetryMaxSeconds, retrySeconds * 2.0);
+					const double cap = kRetryMaxSeconds;
+					retrySeconds = (std::min)(cap, retrySeconds * 2.0);
+					since = nowSeconds;   // the retry's own wait starts now
 				}
 				return step;
 			}
