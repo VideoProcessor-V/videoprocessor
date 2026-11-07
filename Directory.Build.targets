@@ -24,6 +24,15 @@
     </ClCompile>
   </ItemDefinitionGroup>
 
+  <!-- M2 P3-7 (H2 schema hooks): the host schema headers (MainConfigSchema.h, RendererProfileConfig.h) include
+       these VP-V headers when the macros are defined; without them the hooks are inert (the host's own rules).
+       Every project that compiles the schema headers gets the same rules, with no start-up registration. -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PreprocessorDefinitions>MAIN_SCHEMA_EXTENSION_HEADER=\&quot;VP-V/modules/control/config/VpvStartupSchema.h\&quot;;PROFILE_SCHEMA_EXTENSION_HEADER=\&quot;VP-V/modules/control/config/VpvSchemaKeys.h\&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
   <!-- Preserve the actual toolset and binary identity for release prerequisite checks.
        The record also carries the binary's embedded build ID (schema 2). -->
   <Target Name="RecordVpRuntimeRequirement" AfterTargets="Build"

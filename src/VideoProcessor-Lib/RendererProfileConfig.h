@@ -76,8 +76,7 @@ namespace RendererProfileConfig
 			section.rfind("event_actions.", 0) == 0 ||
 			section.rfind("actions.", 0) == 0 ||
 			section.rfind("display_rules.", 0) == 0 ||
-			// The VP-V section (ADR-0023): [vpv] / [vpv.*] hold VP-V's own namespaced keys.
-			section == "vpv" || section.rfind("vpv.", 0) == 0;
+			MainConfigSchema::SchemaHooks::OwnsRendererSection(section);   // VPV-HOOK: [vpv] / [vpv.*]
 	}
 
     // Shared by application startup and Config Save/Apply. Keep this check in
@@ -649,6 +648,8 @@ namespace RendererProfileConfig
         return key.rfind("subtitle_", 0) == 0 || key.rfind("scope_subtitle_", 0) == 0;
     }
 
+#include "ProfileSchemaHooks.h" // VPV-HOOK: the VP-V profile keys (after the Is*/Parse* helpers they use)
+
 	inline bool ValidateProfileSettingBuiltin(const std::string& group, const std::string& key, // VPV-HOOK (renamed; wrapper below)
 		const std::string& value, std::string& expected)
 	{
@@ -687,8 +688,6 @@ namespace RendererProfileConfig
 
 		if (group == "input")
         {
-            // Pruning 2026-10-17: a retired key loads with any value and is ignored (logged by the renderer).
-            if (RetiredSettings::FindKey(key)) return true;
             const int tuning = ToneMappingTuning::Find(key);
             if (tuning >= 0) {
                 ToneMappingTuning::Override parsed;
@@ -700,208 +699,11 @@ namespace RendererProfileConfig
 			if (key == "peak_detection") return IsChoice(value, { "auto", "off", "default", "high_quality", "on" });
 			if (key == "dynamic_target" || key == "custom_tone_mapping") return IsBoolean(value);
 			if (key == "contrast_recovery") return IsChoice(value, { "auto" }) || IsNumberInRange(value, 0.0, 2.0);
-			if (key == "saturation")
-			{
-				int parsed = 0; return ParseInteger(value, -100, 100, parsed);
-			}
-			// Stage 6: motion-compensated de-judder (0 = off, today's path) and
-			// its own match tolerance (mean luma difference, 8-bit codes).
-			if (key == "dejudder_strength") return IsNumberInRange(value, 0.0, 1.0);
-			// Delta 10: even (2:2) cadences, and which rates take it.
-			if (key == "dejudder_strength_even") return IsNumberInRange(value, 0.0, 1.0);
-			// "30" / "30_and_29.97": retired spellings, still loaded (RetiredSettings migrates them).
-			if (key == "dejudder_even_rates") return IsChoice(value, { "whole", "whole_and_1001", "30", "30_and_29.97" });
-			if (key == "dejudder_match_tolerance") return IsNumberInRange(value, 0.5, 16.0);
-			// 6b-2: below this share of trusted blocks a frame is held whole
-			// (a cut between A and B).
-			if (key == "dejudder_frame_trust") return IsNumberInRange(value, 0.0, 1.0);
-			// 6c: the de-judder's occlusion mask for the sigma-delta (works
-			// with dejudder_strength 0: mask-only mode).
-			if (key == "occlusion_mask") return IsChoice(value, { "on", "off" });
-			// WP-24: captured repeats drawn from the rendered-picture cache (OUTPUT stage only).
-			if (key == "repeat_render_reuse") return IsChoice(value, { "on", "off" });
-			// 6d: the extras warp A's rendered picture, or a warped source.
-			if (key == "dejudder_warp_stage") return IsChoice(value, { "rendered", "source" });
-			// Refinements (docs/VP-build-plan-refinements.md): D1 global prior,
-			// D3 vector smoothing, D5 occlusion fill; D2 motion-scaled strength
-			// (source px per source frame, hi 0 = off); D4 trust-adaptive
-			// strength (share at full strength, 0 = off); S1 the sigma-delta's
-			// tolerance on grain (1 = off).
-			if (key == "dejudder_global_prior" || key == "dejudder_vector_smooth" || key == "dejudder_occlusion_fill" ||
-				key == "dejudder_est_candidates" || key == "dejudder_est_qpel" || key == "dejudder_est_still_zero" || key == "dejudder_est_gate" ||
-				key == "dejudder_est_split" || key == "dejudder_block_taper" || key == "dejudder_estimate_ahead" ||
-				key == "dejudder_motion_rolloff" || key == "dejudder_global_two" || key == "dejudder_regional_hold" ||
-				key == "dejudder_fade_match" || key == "dejudder_verify" || key == "dejudder_pixel_trust" ||
-				key == "dejudder_landing_check" || key == "dejudder_pulldown" || key == "native_rgb_ingest" ||
-				key == "dv_tunnel_gpu_unpack" || key == "dv_trims" ||
-				key == "dv_tunnel_fixes")   // restore switch 2026-10-17
-				return IsChoice(value, { "on", "off" });
-			// Motion fixes (owner 2026-10-13 night): M1 texture tolerance, M3's
-			// cut test, the coarse search range, the forward/backward agreement.
-			if (key == "dejudder_texture_tolerance") return IsNumberInRange(value, 0.0, 4.0);
-			if (key == "dejudder_cut_histogram") return IsNumberInRange(value, 0.0, 2.0);
-			if (key == "dejudder_search_range") { int n = 0; return ParseInteger(value, 1, 16, n); }
-			if (key == "dejudder_consistency_px") return IsNumberInRange(value, 0.5, 8.0);
-			if (key == "dejudder_fade_floor") return IsNumberInRange(value, 0.0, 1.0);
-			if (key == "dejudder_verify_share") return IsNumberInRange(value, 0.02, 1.0);
-			if (key == "dejudder_pixel_trust_lo") return IsNumberInRange(value, 0.25, 16.0);
-			if (key == "dejudder_pixel_trust_hi") return IsNumberInRange(value, 0.5, 32.0);
-			// Stage 11a E1: the smoothness penalty (codes per source pixel).
-			if (key == "dejudder_est_lambda") return IsNumberInRange(value, 0.0, 8.0);
-			// Owner 2026-10-13: the de-judder matcher one level coarser (4K).
-			if (key == "dejudder_low_res") return IsChoice(value, { "off", "search", "all" });
-			// Owner 2026-10-13: the capture path (gpu = the low-latency GPU unpack).
-			if (key == "capture_path") return IsChoice(value, { "standard", "gpu" });
-			if (key == "capture_upload") return IsChoice(value, { "auto", "render", "early" });
-			if (key == "dv_tone_mapping") return IsChoice(value, { "libplacebo", "dolby_style" });   // feat/dv-l8
-			if (key == "dv_compare_capture_folder") return value.find('"') == std::string::npos;   // feat/dv-l8 WIP: a folder, "" = off
-			if (key == "source_range") return IsChoice(value, { "auto", "full", "limited" });
-			// native | auto | any height in lines (general: not a fixed list).
-			if (key == "source_resolution")
-			{
-				if (IsChoice(value, { "native", "auto" })) return true;
-				auto lines = [](const std::string& v, double hi) {
-					return !v.empty() && v.find_first_not_of("0123456789") == std::string::npos && IsNumberInRange(v, 144, hi); };
-				// A height, or WIDTHxHEIGHT (per axis: a source upscaled in one direction).
-				const size_t x = value.find('x');
-				return x == std::string::npos ? lines(value, 8640) : lines(value.substr(0, x), 17280) && lines(value.substr(x + 1), 8640);
-			}
-			if (key == "source_resolution_auto_min_confidence") return IsNumberInRange(value, 0.0, 1.0);
-			// The Picture slider's evidence: whole shots 1..10, seconds 2..120.
-			if (key == "source_resolution_evidence_shots")
-				return !value.empty() && value.find_first_not_of("0123456789") == std::string::npos && IsNumberInRange(value, 1, 10);
-			if (key == "source_resolution_evidence_seconds") return IsNumberInRange(value, 2.0, 120.0);
-			if (key == "deband_vp") return IsChoice(value, { "off", "auto", "on" });
-			if (key == "low_bitrate_handling") return IsChoice(value, { "auto", "off", "on" });
-			if (key == "cnn_residual_stabilise" || key == "ssim_residual_stabilise" || key == "ssim_bitrate_aware") return IsChoice(value, { "on", "off" });
-			if (key == "ssim_bitrate_floor") return IsNumberInRange(value, 0.0, 1.0);
-			// docs/VP-nvof-ahead.md (owner 2026-10-16): optical-flow frames ahead, 0..4 (whole frames).
-			if (key == "motion_ahead_frames") return IsChoice(value, { "0", "1", "2", "3", "4" });
-			// The optical-flow engine: the default; off = the matcher only.
-			if (key == "optical_flow") return IsChoice(value, { "on", "off" });
-			if (key == "optical_flow_global") return IsChoice(value, { "on", "off" });
-			// The engine's extras (2026-10-17): D1's fallback to the search, cost and forward/backward trust.
-			if (key == "optical_flow_global_fallback" || key == "optical_flow_cost_trust" || key == "optical_flow_fb_check")
-				return IsChoice(value, { "on", "off" });
-			// VP's 50/60p frame interpolation (docs/VP-interpolator-50-60-plan.md): off by default.
-			if (key == "interpolation") return IsChoice(value, { "off", "auto", "always" });
-			if (key == "interpolation_fallback") return IsChoice(value, { "hold", "blend" });
-			if (key == "interpolation_fill_gaps") return IsChoice(value, { "off", "on" });
-			// Film grain (owner 2026-10-17; docs/audit/grain-audit-2026-10-17.md).
-			if (key == "interpolation_grain") return IsChoice(value, { "preserve", "blend" });
-			if (key == "dejudder_source_warp_filter") return IsChoice(value, { "catmull", "bilinear" });
-			if (key == "nls_sampling") return IsChoice(value, { "catmull", "bilinear" });   // hunt 2 M1
-			if (key == "residual_stabilise_grain_guard") return IsChoice(value, { "on", "off" });
-			// on = the grain split (hunt 2 07-scaling H1), veto = the 2026-10-17 spatial-share veto.
-			if (key == "deband_vp_grain_guard") return IsChoice(value, { "on", "veto", "off" });
-			// 15-intent C14: libplacebo's automatic deband off while VP's grain-guarded debander runs.
-			if (key == "deband_vp_exclusive") return IsChoice(value, { "on", "off" });
-			// Detail pulse stabilisation and texture restore (docs/VP-detail-restore.md, 2026-10-17):
-			// the caps are the module headers' ranges.
-			if (key == "detail_pulse_stabilise") return IsChoice(value, { "on", "off" });
-			if (key == "detail_pulse_cap") return IsNumberInRange(value, 1.0, 1.5);
-			if (key == "detail_pulse_fast") return IsChoice(value, { "on", "off" });
-			if (key == "texture_restore") return IsChoice(value, { "off", "statistical" });
-			if (key == "texture_restore_cap") return IsNumberInRange(value, 1.0, 2.0);
-			if (key == "source_class") return IsChoice(value, { "legacy", "measured" });
-			// Content recognition (intent interpreter item 1, 2026-10-17): default off;
-			// a new class is taken after this many seconds, at a cut.
-			if (key == "intent_content") return IsChoice(value, { "off", "on" });
-			if (key == "intent_content_hold_seconds") return IsNumberInRange(value, 1.0, 60.0);
-			// Intent remainder (2026-10-17): motion intent, ambient adaptation, black protection and
-			// display mapping readout; all experimental, default off.
-			if (key == "intent_motion") return IsChoice(value, { "off", "on" });
-			if (key == "intent_motion_policy") return IsChoice(value, { "display", "ease_fast", "ease_slow", "visibility", "metadata" });
-			if (key == "intent_motion_min") return IsNumberInRange(value, 0.0, 1.0);
-			if (key == "intent_motion_min_shot_s") return IsNumberInRange(value, 0.5, 30.0);
-			if (key == "intent_ease_s") return IsNumberInRange(value, 0.0, 5.0);
-			if (key == "ambient_adapt") return IsChoice(value, { "off", "on" });
-			if (key == "ambient_adapt_strength") return IsNumberInRange(value, 0.0, 1.0);
-			if (key == "ambient_screen_reflect") return IsNumberInRange(value, 0.0, 1.0);
-			if (key == "ambient_max_black_nits") return IsNumberInRange(value, 0.0, 10.0);
-			if (key == "ambient_tau_up_s") return IsNumberInRange(value, 1.0, 600.0);
-			if (key == "ambient_tau_down_s") return IsNumberInRange(value, 1.0, 1800.0);
-			if (key == "intent_black") return IsChoice(value, { "off", "report", "led_protect" });
-			if (key == "intent_display") return IsChoice(value, { "off", "report" });
-			if (key == "temporal_dither") return IsChoice(value, { "auto", "off", "libplacebo", "sigma_delta" });
-			if (key == "rebase_kernel_match") return IsChoice(value, { "on", "off" });
-			if (key == "source_resolution_text_guard") return IsChoice(value, { "on", "off" });
-			if (key == "source_resolution_mixed_guard") return IsChoice(value, { "on", "off" });
-			if (key == "source_coding_fixes") return IsChoice(value, { "on", "off" });   // hunt 2 M2/M3
-			// Latch review 2026-10-17: the latch fixes and the switch timing (seconds).
-			if (key == "source_resolution_latch_fixes") return IsChoice(value, { "on", "off" });
-			if (key == "source_resolution_cut_fixes") return IsChoice(value, { "on", "off" });
-			if (key == "active_picture_startup_hold") return IsChoice(value, { "on", "off" });
-			if (key == "source_resolution_engage_max_wait_s") return IsNumberInRange(value, 0.0, 600.0);
-			if (key == "source_resolution_crossfade_s") return IsNumberInRange(value, 0.0, 10.0);
-			if (key == "source_resolution_release_fade_s") return IsNumberInRange(value, 0.0, 0.25);
-			if (key == "pulldown_fixes") return IsChoice(value, { "on", "off" });
-			if (key == "timing_continuity_fixes") return IsChoice(value, { "on", "off" });   // Bug hunt 2026-10-17
-			if (key == "cadence_class_fixes") return IsChoice(value, { "on", "off" });   // Hunt 2 2026-10-17
-			if (key == "motion_history_fixes") return IsChoice(value, { "on", "off" });   // Hunt 2 fix group 5
-			if (key == "vector_demand") return IsChoice(value, { "on", "off" });   // vector engine on demand
-			if (key == "queue_timing_fixes") return IsChoice(value, { "on", "off" });   // Hunt 2 group 5 (queue/cadence timing)
-			if (key == "general_rate_fixes") return IsChoice(value, { "on", "off" });   // fixed-constant batch 2026-10-18
-			if (key == "efficiency_fixes") return IsChoice(value, { "on", "off" });   // efficiency round 2026-10-18
-			// Render-ahead (docs/VP-render-ahead-design.md, 2026-10-17): queued extras, the
-			// de-judder's gate per source period, its GPU budget and the queue credit.
-			if (key == "render_ahead" || key == "render_ahead_queue_credit") return IsChoice(value, { "on", "off" });
-			if (key == "dejudder_gate") return IsChoice(value, { "auto", "period", "refresh" });
-			if (key == "render_ahead_utilisation") return IsNumberInRange(value, 0.5, 1.0);
-			// Stage 11a E2: the split threshold (0 = the match tolerance).
-			if (key == "dejudder_est_split_sad") return IsNumberInRange(value, 0.0, 16.0);
-			// Delta 14: R-A's roll-off (source px per source frame; floor as a
-			// share of the strength) and R-B's object strength (1 = off).
-			if (key == "dejudder_roll_lo") return IsNumberInRange(value, 0.0, 200.0);
-			if (key == "dejudder_roll_hi") return IsNumberInRange(value, 0.0, 400.0);
-			if (key == "dejudder_roll_floor" || key == "dejudder_object_strength") return IsNumberInRange(value, 0.0, 1.0);
-			// Delta 9: H1 feather (output px, 0 = off), H2 hysteresis (source
-			// frames, 1 = off), H3 taper end (codes, 0 = 2 x match tolerance).
-			if (key == "dejudder_hold_feather_px") return IsNumberInRange(value, 0.0, 16.0);
-			if (key == "dejudder_hold_hysteresis") { int n = 0; return ParseInteger(value, 1, 8, n); }
-			if (key == "dejudder_taper_sad") return IsNumberInRange(value, 0.0, 32.0);
-			if (key == "dejudder_motion_scale_lo") return IsNumberInRange(value, 0.0, 16.0);
-			if (key == "dejudder_motion_scale_hi") return IsNumberInRange(value, 0.0, 32.0);
-			if (key == "dejudder_trust_scale") return IsNumberInRange(value, 0.0, 1.0);
-			if (key == "dither_grain_tolerance_scale") return IsNumberInRange(value, 1.0, 8.0);
-			if (key == "dither_vectors") return IsChoice(value, { "auto", "own" });   // delta 8 R1
-			// S2: every FBO in 32-bit float (auto: on, off with Low_Latency).
-			if (key == "fbo_float32") return IsChoice(value, { "auto", "on", "off" });
-			// Stage 8-2: the adaptive downscale blend.
-			if (key == "adaptive_downscale" || key == "adaptive_chroma_ssim" || key == "adaptive_grain_map" ||
-				key == "adaptive_upscale" || key == "adaptive_upscale_superres_scale")
-				return IsChoice(value, { "on", "off" });
-			if (key == "adaptive_upscale_w_base") return IsNumberInRange(value, 0.0, 1.0);
-			// "polar": retired 2026-10-17 (runs as auto), still loaded.
-			if (key == "adaptive_faithful") return IsChoice(value, { "polar", "ortho", "auto" });
-			if (key == "adaptive_w_base" || key == "adaptive_grain_floor" || key == "adaptive_grain_shadow_bias")
-				return IsNumberInRange(value, 0.0, 1.0);
-			if (key == "adaptive_edge_lo" || key == "adaptive_edge_hi") return IsNumberInRange(value, 0.0, 255.0);
-			if (key == "adaptive_grain_lo" || key == "adaptive_grain_hi") return IsNumberInRange(value, 0.0, 64.0);
-			if (key == "adaptive_grain_smooth_ms" || key == "adaptive_grain_map_smooth_ms")
-				return IsNumberInRange(value, 0.0, 10000.0);
-			// The motion-adapted blend (VP-V scaling.output, owner 2026-10-31; candidate, off).
-			if (key == "adaptive_motion") return IsChoice(value, { "on", "off" });
-			if (key == "adaptive_motion_speed_lo" || key == "adaptive_motion_speed_hi") return IsNumberInRange(value, 0.0, 10.0);
-			if (key == "adaptive_motion_floor") return IsNumberInRange(value, 0.0, 1.0);
-			if (key == "adaptive_motion_smooth_ms") return IsNumberInRange(value, 0.0, 10000.0);
-			// Stage 10: BTB/WTW kept through libplacebo's scaling (SDR).
-			if (key == "preserve_extended_range") return IsChoice(value, { "on", "off" });
-			if (key == "extended_range_more_cases") return IsChoice(value, { "on", "off" });
-			// Delta 13: the SDR tone shape and headroom.
-			if (key == "sdr_tone_shape") return IsChoice(value, { "off", "knee" });
-			if (key == "sdr_white_headroom") return IsNumberInRange(value, 0.0, 0.5);
-			if (key == "sdr_knee_start") return IsNumberInRange(value, 0.5, 0.99);
-			if (key == "sdr_knee_strength") return IsNumberInRange(value, 0.0, 1.0);
-			if (key == "sdr_contrast_recovery") return IsChoice(value, { "auto", "off" }) || IsNumberInRange(value, 0.0, 2.0);
 			if (key == "sdr_input_transfer") return IsChoice(value, { "auto", "bt1886", "srgb", "1.8", "2.0", "2.2", "2.4", "2.6", "2.8" });
 			if (key == "sdr_adjust_gamma") return IsChoice(value, { "auto", "on", "off", "passthrough" });
 			expected = "an input-owned setting"; return false;
 		}
         if (group == "motion") {
-            // VP's motion handling or libplacebo's smooth motion, one or the
-            // other (owner 2026-10-15); auto = whichever is configured, VP's when both.
-            if(key=="motion_engine")return IsChoice(value,{"auto","vp","smooth_motion"});
             if(key=="smooth_motion")return IsChoice(value,{"off","auto","always"});
             if(key=="frame_mixer")return IsChoice(value,{"oversample","hermite","linear","cubic","mitchell_clamp"});
             if(key=="deinterlace")return IsChoice(value,{"auto","off","force"});
@@ -920,8 +722,6 @@ namespace RendererProfileConfig
 			// to the polar filter on his clip, about 1/7 of its cost); upscaler = the
 			// main upscaler (Bill's VP).
 			if (key == "chroma_upscaler") return IsChoice(value, { "auto", "upscaler", "ewa_lanczossharp", "ewa_lanczos", "lanczos", "catmull_rom", "bicubic", "bilinear" });
-			// VP-V scaling.chroma_upscale (2026-10-31; candidate, off until GPU-validated)
-			if (key == "chroma_upscale_vp") return IsChoice(value, { "off", "cfl" });
 			if (key == "downscaler")
 			{
 				// Accept the two removed spellings only as legacy input so an old
@@ -933,9 +733,6 @@ namespace RendererProfileConfig
 					"none", "ewa_lanczos" });
 			}
 			if (key == "sigmoid") return IsChoice(value, { "auto", "on", "off" });
-			// Stage 8-1: the light domain of downscaling frames.
-			if (key == "downscale_light") return IsChoice(value, { "linear", "gamma" });
-			if (key == "upscale_light") return IsChoice(value, { "linear", "gamma" });
 			if (key == "dithering") return IsChoice(value, { "auto", "on", "off",
 				"blue_noise", "ordered_lut", "ordered_fixed", "white_noise",
 				"error_diffusion_simple", "error_diffusion_false_fs",
@@ -944,8 +741,6 @@ namespace RendererProfileConfig
 				"error_diffusion_stucki", "error_diffusion_burkes",
 				"error_diffusion_sierra2", "error_diffusion_sierra3" });
 			if (key == "deband_strength") return IsChoice(value, { "auto", "off", "light", "default" });
-			// Owner 2026-10-17 (grain audit): libplacebo's deband adds grain (off: none; VP's dither).
-			if (key == "deband_grain") return IsChoice(value, { "on", "off" });
 			// Dither precision moved here with dithering; Rendering profiles still
 			// accept it so older configurations load.
 			if (key == "display_bit_depth") return IsChoice(value, { "auto", "output", "8", "10" });
@@ -1045,11 +840,6 @@ namespace RendererProfileConfig
 			{
 				int parsed = 0; return ParseInteger(value, 0, 100000, parsed);
 			}
-			if (screenGroup && (key == "blank_left" || key == "blank_top" ||
-				key == "blank_right" || key == "blank_bottom"))
-			{
-				int parsed = 0; return ParseInteger(value, 0, 4000, parsed);
-			}
 			if (screenGroup && key == "anamorphic_scale")
 				return IsAspectInRange(value, 0.5, 2.0);
 			if (key == "automatic_crop" || key == "subtitle_fit" ||
@@ -1104,13 +894,10 @@ namespace RendererProfileConfig
 				return ParseInteger(value, 0, 16, parsed);
 			if (key == "active_picture_lookahead_frames")
 				return ParseInteger(value, 0, 8, parsed);
-			if (key == "target_latency_ms")
-				return ParseInteger(value, 0, 1000, parsed);
 			if (key == "reset_after_render_restart_seconds")
 				return ParseInteger(value, 1, INT_MAX, parsed);
 			if (key == "reset_queue_too_large_percent")
 				return ParseInteger(value, 1, 200, parsed);
-			if (key == "low_latency_path") return IsChoice(value, { "on", "off" });
 			expected = "a queue-owned setting"; return false;
 		}
 		if (group == "lldv")
@@ -1133,7 +920,15 @@ namespace RendererProfileConfig
 	inline bool ValidateProfileSetting(const std::string& group, const std::string& key,
 		const std::string& value, std::string& expected)
 	{
+		const std::string expectedBefore = expected;
 		if (ValidateProfileSettingBuiltin(group, key, value, expected)) return true;
+		// The VP-V keys: the host's `expected` text is left as it was, as when the host judged them itself.
+		switch (ProfileSchemaHooks::Validate(group, key, value))
+		{
+		case ProfileSchemaHooks::Verdict::Valid: expected = expectedBefore; return true;
+		case ProfileSchemaHooks::Verdict::Invalid: expected = expectedBefore; return false;
+		default: break;
+		}
 		std::string extensionError;
 		const SettingsExtension::Verdict verdict = SettingsExtension::Validate(group, key, value, extensionError);
 		if (verdict == SettingsExtension::Verdict::Valid) return true;
@@ -1147,23 +942,14 @@ namespace RendererProfileConfig
 		std::string ignored;
 		for (const char* group : { "input", "scaling", "motion", "display", "output", "viewport" })
 			if (ValidateProfileSetting(group, key, value, ignored)) return true;
-		// Pipeline skeleton (design freeze 2026-10-24): the Original pathway baseline (ADR-0019),
-		// the module order (ADR-0021; slot names, validated by the renderer's registry, an invalid
-		// order never runs), slot-level switches and where the calibration LUT runs (R1).
-		if (key == "pipeline_original_pathway") return IsChoice(value, { "on", "off" });
-		if (key == "pipeline_entrance_once") return IsChoice(value, { "on", "off" });   // B3 (ADR-0024)
-		if (key == "frame_analysis_store") return IsChoice(value, { "on", "off" });     // WP-23
-		if (key == "resync_event") return IsChoice(value, { "off", "shadow", "on" });   // R1 shadow; R3/L1/R4a on
-		if (key == "entrance_gpu_drain") return IsChoice(value, { "off", "flush", "finish" });   // expert workaround
-		// Config usability (2026-10-25): the owner's Approve / Keep decision per retirement group (A-D; keys retirement_a .. retirement_d, names are case-insensitive), recorded by the VP-V page's
-		// Proposed retirement tab. A UI-only record: nothing in the renderer reads it and nothing is hidden or removed by it.
-		if (key == "retirement_a" || key == "retirement_b" || key == "retirement_c" || key == "retirement_d")
-			return IsChoice(value, { "approve", "keep" });
-		if (key == "pipeline_order" || key == "pipeline_slots_off")
-			return value.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_.,;> ") == std::string::npos;
-		if (key == "calibration_lut_stage") return IsChoice(value, { "libplacebo", "vp" });
-		if (key == "output_segments_merged") return IsChoice(value, { "on", "off" });   // output segments S2/S3 (draft)
-		if (key == "hdr_inference") return IsChoice(value, { "vp", "original" });   // F-8 (HdrInferenceChoice.h)
+		// VPV-HOOK: the pipeline-skeleton keys and the retirement decisions (VP-V, VpvSchemaKeys.h).
+		switch (ProfileSchemaHooks::Validate("base", key, value))
+		{
+		case ProfileSchemaHooks::Verdict::Valid: return true;
+		case ProfileSchemaHooks::Verdict::Invalid: return false;
+		default: break;
+		}
+		// VPV-HOOK-END
 		if (key == "video_conversion")
 			return IsChoice(value, { "none", "off", "v210_to_p010", "uyvy_to_p010" });
 		if (key == "container_colorspace")
@@ -2176,28 +1962,9 @@ namespace RendererProfileConfig
 			model.actions.push_back(std::move(action));
 		}
 
-		// The VP-V section (ADR-0023): [vpv] holds the global VP-V keys that are not per renderer
-		// profile, so Config's profile migrations never move them. Each key is validated like the
-		// same key in [vprenderer]; anything else there is an error, as in every owned section.
-		if (const auto* vpvValues = config.GetSectionValues("vpv"))
-			for (const auto& value : *vpvValues)
-			{
-				static const char* const vpvKeys[] = { "pipeline_original_pathway", "pipeline_order",
-					"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged", "frame_analysis_store", "resync_event", "entrance_gpu_drain", "hdr_inference" };
-				bool known = false;
-				for (const char* key : vpvKeys) known = known || value.first == key;
-				for (const char* key : { "retirement_a", "retirement_b", "retirement_c", "retirement_d" }) known = known || value.first == key;   // UI-only decisions
-				if (!known)
-				{
-					error = "[vpv] unknown key '" + value.first + "'";
-					return false;
-				}
-				if (!ValidateBaseSetting(value.first, value.second))
-				{
-					error = "[vpv] invalid " + value.first + " '" + value.second + "'";
-					return false;
-				}
-			}
+		// VPV-HOOK: the [vpv] section (ADR-0023), VpvSchemaKeys.h.
+		if (!ProfileSchemaHooks::ValidateSections(config, error))
+			return false;
 
 		for (const std::string& section : config.GetSectionNames())
 			if (!MainConfigSchema::OwnsSection(section) &&
@@ -2207,9 +1974,7 @@ namespace RendererProfileConfig
                 !CalibrationProfileMigration::IsArchive(section) &&
 				section.rfind("actions.", 0) != 0 &&
 				section.rfind("shader.", 0) != 0 &&
-				// The VP-V section (settings agent 2026-10-24, ADR-0023): [vpv] / [vpv.*] are VP-V's own
-				// namespaced keys (validated above).
-				section != "vpv" && section.rfind("vpv.", 0) != 0)
+				!MainConfigSchema::SchemaHooks::OwnsRendererSection(section))   // VPV-HOOK: [vpv] / [vpv.*], validated above
 			{
 				error = "VP-0079 configuration has unknown section [" + section + "]";
 				return false;

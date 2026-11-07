@@ -26,6 +26,10 @@
     "src/VP-V/modules/control/config/VpvSettingsDump.h",
     "src/VP-V/modules/control/config/VpvSettingsExports.cpp",
     "src/VideoProcessor-Lib/vprenderer/RendererSettingsExtension.h",
+    "src/VideoProcessor-Lib/MainSchemaHooks.h",
+    "src/VideoProcessor-Lib/ProfileSchemaHooks.h",
+    "src/VP-V/modules/control/config/VpvStartupSchema.h",
+    "src/VP-V/modules/control/config/VpvSchemaKeys.h",
     "src/VideoProcessor-Lib/RendererProfileConfig.h"
   ],
   "components": {

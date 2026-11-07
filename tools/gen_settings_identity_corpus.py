@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES = [
     ROOT / "src" / "VideoProcessor-Lib" / "RendererProfileConfig.h",
-    ROOT / "src" / "VP-V" / "modules" / "control" / "config" / "VpvSchemaKeys.cpp",
+    ROOT / "src" / "VP-V" / "modules" / "control" / "config" / "VpvSchemaKeys.h",
 ]
 OUT = ROOT / "tests" / "vpv" / "settings-identity-corpus.txt"
 SAMPLES = [
