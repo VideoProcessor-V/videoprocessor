@@ -284,7 +284,10 @@ namespace BillIdenticalSchemaTest
 			const size_t hostCount = MainConfigSchema::LoggingRules().size();
 			Assert::IsTrue(plain.size() > hostCount, L"[logging] has VP-V keys");
 			for (size_t i = hostCount; i < plain.size(); ++i)
-				Assert::IsFalse(plain[i].validator && plain[i].validator("zzz"), L"a VP-V key is checked outside the scope");
+			{
+				Assert::IsTrue(static_cast<bool>(plain[i].validator), L"a VP-V key has its validator outside the scope");
+				Assert::IsFalse(plain[i].validator("zzz"), L"a VP-V key is checked outside the scope");
+			}
 			{
 				const MainConfigSchema::SchemaHooks::HostOnlyScope scope;
 				const std::vector<ConfigSchema::KeyRule> hostOnly = MainConfigSchema::WithVpKeys("logging", MainConfigSchema::LoggingRules());
@@ -295,7 +298,8 @@ namespace BillIdenticalSchemaTest
 					Assert::AreEqual(static_cast<bool>(plain[i].validator), static_cast<bool>(hostOnly[i].validator));
 			}
 			const std::vector<ConfigSchema::KeyRule> after = MainConfigSchema::WithVpKeys("logging", MainConfigSchema::LoggingRules());
-			Assert::IsFalse(after[hostCount].validator && after[hostCount].validator("zzz"), L"checked again after the scope");
+			Assert::IsTrue(static_cast<bool>(after[hostCount].validator), L"validator back after the scope");
+			Assert::IsFalse(after[hostCount].validator("zzz"), L"checked again after the scope");
 			Assert::IsFalse(RendererProfileConfig::ProfileSchemaHooks::HostOnlyFlag());
 			Assert::IsFalse(MainConfigSchema::SchemaHooks::HostOnlyFlag());
 		}

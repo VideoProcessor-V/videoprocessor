@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-#pragma detect_mismatch("vpv_schema_hooks", "1")
+#pragma detect_mismatch("vpv_schema_hooks", "2")   // 2: host-only pass (HostOnlyScope), WithVpKeys, WithExpressionVariables, AppendLegacyDisplayRules
 
 // The VP-V keys, sections and constants of the startup schema (MainConfigSchema.h), moved out of the host
 // header (M2 P3-7). MainSchemaHooks.h includes this header when the build defines

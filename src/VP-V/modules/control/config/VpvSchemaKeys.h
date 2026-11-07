@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-#pragma detect_mismatch("vpv_schema_hooks", "1")
+#pragma detect_mismatch("vpv_schema_hooks", "2")   // 2: host-only pass (HostOnlyScope), WithVpKeys, WithExpressionVariables, AppendLegacyDisplayRules
 
 // The VP-V renderer profile keys and the [vpv] section check, moved out of RendererProfileConfig.h (M2 P3-7).
 // ProfileSchemaHooks.h includes this header INSIDE namespace RendererProfileConfig when the build defines
