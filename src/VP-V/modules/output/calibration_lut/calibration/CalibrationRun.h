@@ -14,7 +14,7 @@
 
 #include "CalibrationOutputs.h"
 #include "DisplayModel.h"
-#include "PatternCodes.h"
+#include "../pattern_lib/PatternCodes.h"
 
 #include <string>
 #include <vector>

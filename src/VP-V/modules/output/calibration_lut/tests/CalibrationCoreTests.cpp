@@ -4,7 +4,7 @@
 #include <VP-V/modules/output/calibration_lut/calibration/CalibrationOutputs.h>
 #include <VP-V/modules/output/calibration_lut/calibration/DisplayModel.h>
 #include <VP-V/modules/output/calibration_lut/calibration/LedCharacterize.h>
-#include <VP-V/modules/output/calibration_lut/calibration/PatternPlan.h>
+#include <VP-V/modules/output/calibration_lut/pattern_lib/PatternPlan.h>
 #include <VP-V/modules/output/calibration_lut/calibration/SimulatedDisplay.h>
 #include <VP-V/modules/output/calibration_lut/calibration/SimulatedMeter.h>
 #include <ConfigEditorCore.h>

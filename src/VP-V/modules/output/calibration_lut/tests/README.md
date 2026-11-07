@@ -7,3 +7,5 @@ The automatic-calibration tests live here (M2 step 3, WP-12). VideoProcessor-Tes
 - `CalibrationTestSupport.h`: the scripted terminal and paths; `data/spotread/`: the spotread transcripts it plays.
 
 The render-time LUT tests (`LibplaceboLutParserTests`, `LibplaceboOutputPolicyTests`, `ExtendedRangeCarryTests`) stay in VideoProcessor-Test: they test Bill's `LibplaceboDisplayLut` and the shared output policy.
+
+The pattern library (`../pattern_lib/`) also has stand-alone tests that need no solution: `../pattern_lib/run_pattern_lib_tests.ps1` (see `../pattern_lib/README.md`). The hook contract these tests cover is in `../HOOKS.md`.

@@ -4,7 +4,7 @@
 // (data/spotread), an in-process ITerminal that plays them (the session's
 // CPU tests), and paths to the fake spotread executable (the ConPTY tests).
 
-#include <VP-V/modules/output/calibration_lut/calibration/ColorMath.h>
+#include <VP-V/modules/output/calibration_lut/pattern_lib/ColorMath.h>
 #include <VP-V/modules/output/calibration_lut/calibration/Terminal.h>
 
 #include <cstdio>

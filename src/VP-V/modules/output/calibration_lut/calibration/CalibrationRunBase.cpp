@@ -548,6 +548,19 @@ namespace Calibration
 		{
 			PatternOutputInfo info;
 			std::string reason;
+			// The renderer may still be starting (cold shader cache): wait a little, visibly, before giving up.
+			bool haveOutput = patterns.GetOutput(info) && info.available;
+			for (int waited = 0; !haveOutput && waited < 50 && !CancelPending(); ++waited)
+			{
+				if (waited == 0)
+				{
+					std::lock_guard<std::mutex> g(mutex);
+					status.message = "waiting for VP's renderer";
+				}
+				clock.Sleep(0.1);
+				haveOutput = patterns.GetOutput(info) && info.available;
+			}
+			if (CancelPending()) return;
 			if (!patterns.GetOutput(info) || !PatternFormatSupported(info, reason))
 			{
 				Fail("VP cannot show calibration patches: " + (reason.empty() ? std::string("the renderer is not running") : reason) +

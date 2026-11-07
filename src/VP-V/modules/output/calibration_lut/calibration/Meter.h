@@ -12,7 +12,7 @@
 // A vendor SDK meter would be another IMeter (a slot left for later; vendor
 // SDKs are licensed to OEMs only).
 
-#include "ColorMath.h"
+#include "../pattern_lib/ColorMath.h"
 #include "Spotread.h"
 #include "Terminal.h"
 

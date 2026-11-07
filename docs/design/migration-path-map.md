@@ -11,8 +11,8 @@ the old path until M2 so files on active branches keep building.
 
 | Old path | New path | Commit | Note |
 |---|---|---|---|
-| `src/VideoProcessor-Lib/AmbientAdaptation.h` | `src/VP-V/modules/colour/appearance/AmbientAdaptation.h` | ? | fwd |
-| `src/VideoProcessor-Lib/AmbientConfig.h` | `src/VP-V/modules/colour/appearance/AmbientConfig.h` | ? | fwd |
+| `src/VideoProcessor-Lib/AmbientAdaptation.h` | `src/VP-V/modules/colour/appearance/AmbientAdaptation.h` | cddb6dbb | fwd |
+| `src/VideoProcessor-Lib/AmbientConfig.h` | `src/VP-V/modules/colour/appearance/AmbientConfig.h` | cddb6dbb | fwd |
 | `src/VideoProcessor-Lib/vprenderer/ExtendedRange.cpp` | `src/VP-V/modules/colour/extended_range/ExtendedRange.cpp` | 4a7a73c0 |  |
 | `src/VideoProcessor-Lib/vprenderer/ExtendedRange.h` | `src/VP-V/modules/colour/extended_range/ExtendedRange.h` | 4a7a73c0 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h` | `src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h` | d58d0b4c | fwd |
@@ -49,8 +49,8 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/led/ProjectorDriver.h` | `src/VP-V/modules/drive/projector_control/ProjectorDriver.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/SerialPort.cpp` | `src/VP-V/modules/drive/projector_control/SerialPort.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/SerialPort.h` | `src/VP-V/modules/drive/projector_control/SerialPort.h` | 570b1ee8 | fwd |
-| `src/VideoProcessor-Lib/video_frame_formatter/CTwoPlane420VideoFrameFormatter.cpp` | `src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.cpp` | staged |  |
-| `src/VideoProcessor-Lib/video_frame_formatter/CTwoPlane420VideoFrameFormatter.h` | `src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.h` | ? | fwd |
+| `src/VideoProcessor-Lib/video_frame_formatter/CTwoPlane420VideoFrameFormatter.cpp` | `src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.cpp` | cddb6dbb |  |
+| `src/VideoProcessor-Lib/video_frame_formatter/CTwoPlane420VideoFrameFormatter.h` | `src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.h` | cddb6dbb | fwd |
 | `src/VideoProcessor-Lib/vprenderer/EarlyUpload.cpp` | `src/VP-V/modules/input/capture/EarlyUpload.cpp` | 27622366 |  |
 | `src/VideoProcessor-Lib/vprenderer/EarlyUpload.h` | `src/VP-V/modules/input/capture/EarlyUpload.h` | 27622366 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.cpp` | `src/VP-V/modules/input/capture/GpuCaptureUnpack.cpp` | 27622366 |  |
@@ -103,7 +103,6 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/calibration/CalibrationController.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationController.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/CalibrationOutputs.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationOutputs.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/CalibrationOutputs.h` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationOutputs.h` | d2517eb1 |  |
-| `src/VideoProcessor-Lib/calibration/CalibrationPattern.h` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationPattern.h` | d2517eb1 | fwd |
 | `src/VideoProcessor-Lib/calibration/CalibrationRun.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationRun.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/CalibrationRun.h` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationRun.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/CalibrationRunBase.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationRunBase.cpp` | d2517eb1 |  |
@@ -111,7 +110,6 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/calibration/CalibrationSession.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationSession.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/CalibrationSession.h` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationSession.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/CalibrationSimulation.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationSimulation.cpp` | d2517eb1 |  |
-| `src/VideoProcessor-Lib/calibration/ColorMath.h` | `src/VP-V/modules/output/calibration_lut/calibration/ColorMath.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/ConPtyTerminal.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/ConPtyTerminal.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/DisplayModel.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/DisplayModel.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/DisplayModel.h` | `src/VP-V/modules/output/calibration_lut/calibration/DisplayModel.h` | d2517eb1 |  |
@@ -125,9 +123,6 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/calibration/Meter.h` | `src/VP-V/modules/output/calibration_lut/calibration/Meter.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/MeterCatalog.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/MeterCatalog.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/MeterCatalog.h` | `src/VP-V/modules/output/calibration_lut/calibration/MeterCatalog.h` | d2517eb1 |  |
-| `src/VideoProcessor-Lib/calibration/PatternCodes.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/PatternCodes.cpp` | d2517eb1 |  |
-| `src/VideoProcessor-Lib/calibration/PatternPlan.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/PatternPlan.cpp` | d2517eb1 |  |
-| `src/VideoProcessor-Lib/calibration/PatternPlan.h` | `src/VP-V/modules/output/calibration_lut/calibration/PatternPlan.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/SimulatedDisplay.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/SimulatedDisplay.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/SimulatedDisplay.h` | `src/VP-V/modules/output/calibration_lut/calibration/SimulatedDisplay.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/SimulatedMeter.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/SimulatedMeter.cpp` | d2517eb1 |  |
@@ -137,6 +132,11 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/calibration/Terminal.h` | `src/VP-V/modules/output/calibration_lut/calibration/Terminal.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.h` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.h` | d2517eb1 |  |
+| `src/VideoProcessor-Lib/calibration/CalibrationPattern.h` | `src/VP-V/modules/output/calibration_lut/pattern_lib/CalibrationPattern.h` | 08ed4567 | fwd |
+| `src/VideoProcessor-Lib/calibration/ColorMath.h` | `src/VP-V/modules/output/calibration_lut/pattern_lib/ColorMath.h` | 08ed4567 |  |
+| `src/VideoProcessor-Lib/calibration/PatternCodes.cpp` | `src/VP-V/modules/output/calibration_lut/pattern_lib/PatternCodes.cpp` | 08ed4567 |  |
+| `src/VideoProcessor-Lib/calibration/PatternPlan.cpp` | `src/VP-V/modules/output/calibration_lut/pattern_lib/PatternPlan.cpp` | 08ed4567 |  |
+| `src/VideoProcessor-Lib/calibration/PatternPlan.h` | `src/VP-V/modules/output/calibration_lut/pattern_lib/PatternPlan.h` | 08ed4567 |  |
 | `src/VideoProcessor-Test/CalibrationCoreTests.cpp` | `src/VP-V/modules/output/calibration_lut/tests/CalibrationCoreTests.cpp` | fc7c06b7 |  |
 | `src/VideoProcessor-Test/CalibrationMeterTests.cpp` | `src/VP-V/modules/output/calibration_lut/tests/CalibrationMeterTests.cpp` | fc7c06b7 |  |
 | `src/VideoProcessor-Test/CalibrationPhase2Tests.cpp` | `src/VP-V/modules/output/calibration_lut/tests/CalibrationPhase2Tests.cpp` | fc7c06b7 |  |

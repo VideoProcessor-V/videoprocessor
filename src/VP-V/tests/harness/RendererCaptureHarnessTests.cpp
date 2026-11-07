@@ -49,7 +49,7 @@
 #include <HDRData.h>
 #include <VP-V/modules/output/calibration_lut/calibration/CalibrationController.h>
 #include <VP-V/modules/output/calibration_lut/calibration/CalibrationSimulation.h>
-#include <VP-V/modules/output/calibration_lut/calibration/PatternCodes.h>
+#include <VP-V/modules/output/calibration_lut/pattern_lib/PatternCodes.h>
 #include <VP-V/tests/support/RealClipLibrary.h>   // B3 real-clip acceptance (decoded clip frames into the harness)
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -6608,13 +6608,34 @@ namespace Tests
 			std::unique_ptr<Calibration::ISessionClock> clock = Calibration::CreateSystemClock();
 			std::thread worker;
 			bool started = false;
+			double startT = 0.0;
+			bool timedOut = false;
+			std::string lastReason;
 			Calibration::SessionStatus final;
+			// Diagnostics: the patch index against time (one sample per tick), so a slow run shows
+			// where the seconds went, and the renderer's own pattern timing from its log.
+			struct PatchSample { double seconds; int patchIndex; };
+			std::vector<PatchSample> timeline;
 			FramePlan plan;
 			plan.tick = [&](IVideoRenderer& renderer, double t)
 			{
+				if (started && session && !final.measured)
+				{
+					const int index = session->Status().patchIndex;
+					if (timeline.empty() || timeline.back().patchIndex != index) timeline.push_back({ t, index });
+				}
+				// Start only once the renderer reports a usable output: at a fixed 1 s the render thread can still be
+				// initialising (cold shader cache), and the session would fail with "the renderer is not running".
+				Calibration::PatternOutputInfo ready;
 				if (!started && t >= 1.0)
 				{
+					const bool got = renderer.GetCalibrationOutput(ready);
+					lastReason = got ? std::string(ready.reason) : std::string("GetCalibrationOutput returned false");
+				}
+				if (!started && t >= 1.0 && ready.available)
+				{
 					started = true;
+					startT = t;
 					IVideoRenderer* raw = &renderer;
 					sink = std::make_shared<Calibration::RendererPatternSink>(
 						[raw]() { return std::shared_ptr<IVideoRenderer>(raw, [](IVideoRenderer*) {}); });
@@ -6643,8 +6664,10 @@ namespace Tests
 					});
 				}
 				if (started && worker.joinable() && (session->Finished() ||
-					session->Status().step == Calibration::SessionStep::Review || t >= 28.0))
+					session->Status().step == Calibration::SessionStep::Review ||
+					t >= (std::min)(startT + 27.0, 29.5)))
 				{
+					timedOut = !session->Finished() && session->Status().step != Calibration::SessionStep::Review;
 					if (session->Status().step != Calibration::SessionStep::Review) session->Cancel();
 					else session->Discard();
 					worker.join();
@@ -6657,10 +6680,25 @@ namespace Tests
 				session->Cancel();
 				worker.join();
 			}
+			if (!started)
+				Assert::Fail((L"renderer never reported a usable calibration output within the run: " +
+					std::wstring(lastReason.begin(), lastReason.end())).c_str());
 			Logger::WriteMessage(("dry run: " + std::string(Calibration::ToString(final.step)) + " measured " +
 				std::to_string(final.measured) + " skipped " + std::to_string(final.skipped) + " format " + final.format +
 				"\n" + final.message + "\n" + final.review + "\n").c_str());
+			{
+				std::string trace;
+				for (const PatchSample& sample : timeline)
+					trace += "  t=" + std::to_string(sample.seconds) + " s: patch " + std::to_string(sample.patchIndex) + "\n";
+				Logger::WriteMessage(("patch timeline (a new line per patch):\n" + trace).c_str());
+				std::string lines;
+				for (const std::string& line : r.log)
+					if (line.find("Calibration") != std::string::npos || line.find("calibration patch") != std::string::npos)
+						lines += "  " + line + "\n";
+				Logger::WriteMessage(("renderer calibration log lines:\n" + lines).c_str());
+			}
 			Assert::IsTrue(r.presented, r.Tail().c_str());
+			Assert::IsFalse(timedOut, L"the session did not finish within its own budget after it started");
 			Assert::IsTrue(final.step == Calibration::SessionStep::Discarded,
 				(L"the dry run reached the review\n" + std::wstring(final.message.begin(), final.message.end())).c_str());
 			Assert::IsTrue(final.measured > 50);
