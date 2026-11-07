@@ -289,7 +289,7 @@ mostly (not coherently) still, which is what the boat clip does:
 | 0.4 / 0.2 (shipped values) | 0.57 | 9 of 317 (0) | 0.90 | 0.81 | 0.98 | 0 |
 | 0.4 / 0.3 | 0.51 | 7 of 288 (0) | 0.90 | 0.81 | 0.98 | 0 |
 
-The boat gate (confident-wrong <= 1 %, that is <= 3 of 323) is **not met** (9 of 317, 2.8 %): the remaining wrong pairs are near-threshold misses
+A demoted fit still seeds the next pair's prediction state (`m_previous`), exactly like a dynamic-texture demotion (accepted; it never feeds the temporal filter). The boat gate (confident-wrong <= 1 %, that is <= 3 of 323) is **not met** (9 of 317, 2.8 %): the remaining wrong pairs are near-threshold misses
 (1.0 to 1.3 px error against a 1 px floor, true camera motion not zero) whose ring statistics are the same as the correct pairs
 (static share 0.44 vs 0.45, fit share 0.72 vs 0.82), so no ring statistic separates them. The two pairs beyond the 1.5 px tier are removed. Hence the
 default stays **off**: the hypothesis is an option with visible status, not a shipped default.

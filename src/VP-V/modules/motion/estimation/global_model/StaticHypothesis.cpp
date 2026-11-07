@@ -52,7 +52,7 @@ namespace CameraModel
 				if (in.textGuard != nullptr && in.textGuard[b] == 1)
 					continue;
 				const float tr = in.fwdTrust[b];
-				if (!(tr > 0.0f) || !IsFiniteBits(in.fwdX[b]) || !IsFiniteBits(in.fwdY[b]))
+				if (!(tr > 0.0f) || !IsFiniteBits(tr) || !IsFiniteBits(in.fwdX[b]) || !IsFiniteBits(in.fwdY[b]))
 					continue;
 				double x, y, mx, my;
 				BlockCentre(bx, by, in.blockSize, in.picture, &x, &y);

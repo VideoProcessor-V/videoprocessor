@@ -248,11 +248,13 @@ def main():
     for tag, _ in CONFIGS:
         rows_ = real[tag][0]
         far = ['%s/%s/t%d:%.2f' % (k[0], k[1], t, p90) for k in sorted(rows_) for (t, p90, thr) in rows_[k]['wrong_pairs'] if p90 > xcheck_real.NOISE_TIER_PX]
-        nd = 0
+        nd = ns = 0
         for fn in sorted(os.listdir(os.path.join(out, tag, 'real'))):
             if fn.endswith('.csv'):
-                nd += sum(1 for r in csv.DictReader(open(os.path.join(out, tag, 'real', fn))) if int(r.get('verdictFlags') or 0) & 1)
-        L.append('- %s: %d pairs > 1.5 px %s; dynamic-texture Ambiguous pairs: %d' % (tag, len(far), ('(' + ', '.join(far) + ')') if far else '', nd))
+                for r in csv.DictReader(open(os.path.join(out, tag, 'real', fn))):
+                    nd += int(r.get('verdictFlags') or 0) & 1
+                    ns += (int(r.get('verdictFlags') or 0) >> 1) & 1
+        L.append('- %s: %d pairs > 1.5 px %s; dynamic-texture Ambiguous pairs: %d; static-camera demoted pairs: %d' % (tag, len(far), ('(' + ', '.join(far) + ')') if far else '', nd, ns))
     if a.match:
         res = run_match(exe, out, a.real_root, a.match_clips.split(','), a.match_count, CONFIGS)
         L += ['', '## Matcher: plan from the previous pair (narrow window + guided candidate) vs full search', '',
