@@ -2,7 +2,7 @@
  "counts": {
   "default_mismatch": 0,
   "stale": 0,
-  "undocumented": 362
+  "undocumented": 356
  },
  "gaps": {
   "default_mismatch": [],
@@ -86,7 +86,6 @@
    "capture_display_fixes",
    "capture_path",
    "capture_upload",
-   "chroma_upscale_vp",
    "cnn_residual_stabilise",
    "deband_grain",
    "deband_vp",
@@ -352,11 +351,6 @@
    "ssim_residual_stabilise",
    "stats_overlay",
    "target_latency_ms",
-   "temporal_detail",
-   "temporal_detail_boost",
-   "temporal_detail_boost_max",
-   "temporal_detail_max_age",
-   "temporal_detail_strength",
    "temporal_dither",
    "texture_restore",
    "texture_restore_cap",
