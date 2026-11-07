@@ -18,6 +18,7 @@
     "src/VP-V/modules/motion/consumers/RenderedWarp.h",
     "src/VP-V/modules/motion/consumers/FrameInterpolator.h",
     "src/VP-V/modules/motion/consumers/OcclusionMaskHook.h",
+    "src/VP-V/modules/motion/consumers/FillerEdgeEntry.h",
     "src/VP-V/modules/motion/consumers/DejudderCacheStage.h",
     "src/VP-V/modules/motion/consumers/DejudderCacheStage.cpp"
   ],

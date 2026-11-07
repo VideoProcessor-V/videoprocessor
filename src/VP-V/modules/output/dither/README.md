@@ -161,3 +161,10 @@ Link noise versus the grain rule: the added dither is judged by its OWN limit, n
 GPU decision and skipped frames: `DitherNeed::StateTracker::Decide(FrameArgs)` takes the reset / off / missing decision (grid, LUT fingerprint, colour depth, aBase, the caller's discontinuity flag, inputs present, needed) from CPU data only; `MapT` (CPU) and `Gpu::BlockPass::Step` (GPU: Decide + input validation of the grain, precursor and LUT textures against the block grid + the pass) use the same tracker. A skipped, missing or failed frame calls `BlockPass::Invalidate()`: `Current()` is null, `HookGuard::Apply` binds nothing and the sigma-delta runs at its base amplitude. Extra `Missing` bits: `kLutSizeMismatch`, `kNoSetTexture` (libplacebo without `pl_mpv_user_shader_set_texture`), `kPassFailed`.
 
 Acceptance note (A2): on HDR passthrough the 2-frame-mean <5 nit geo-mean is 1.025 against the 1.02 gate (prototype 1.011), a marginal miss accepted by the planner pending the owner's FL35 A/B; the per-frame ratio 0.609 passes (gate 0.8).
+
+## Output-domain map (K7-1, pure unit, not wired)
+
+`OutputDomainMap.h` maps source-plane points and vectors (P8 model vectors) to output pixels: active picture / crop and the
+output scale, the NLS stretch (the hook's law, inverted by bisection), and the P0 re-base plane (reported, it cancels in the output
+position). Out-of-picture points are flagged. Consumers: the sigma-delta carry reset on camera motion (K7-2) and the debander
+hold (K7-3). Tests: `tests/OutputDomainMapTests.cpp`.

@@ -186,3 +186,10 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
 <!-- vpv-settings-tests:end -->
+
+## Filler edge entry (K8-1, pure unit, not wired)
+
+`FillerEdgeEntry.h` is the CPU mirror of the trust / occlusion filler's per-block decision: an untrusted camera block takes the
+P8 model vector (accessor Step 2); a filled block whose back-projection (`p - t v`, `p + (1 - t) v`) leaves the active picture is
+new content and is never filled with warped pixels. Not called by `DejudderWarp` yet (needs the P5b motion extension and K8-2).
+Tests: `tests/FillerEdgeEntryTests.cpp`.
