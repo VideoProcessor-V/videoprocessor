@@ -25,6 +25,13 @@ that skipped). With an on-screen run requested (-OnScreen, or VP_TEST_HARNESS_ON
 environment) a SKIP-NO-DISPLAY-TIMING marker also fails it: an on-screen test whose display gave
 no frame statistics tested nothing (render-ahead follow-up 2026-10-17). Prints totals, failures
 and every SKIP-* marker.
+
+Chain gate clip and rig labels:
+  - VP_TEST_FILTER_CLIP (a path; default D:\testclips\gate\gate_h264.mp4) is the clip for the file-source test.
+    Absent or invalid: that test reports SKIP-NO-CLIP, which fails under VP_TEST_REQUIRE_GPU=1.
+  - tools/make_gate_clips.ps1 writes the synthetic testsrc2 gate clips (no film frames).
+  - A WARNING is printed (console only; the adapter choice is not changed) when the primary display is not on the render adapter.
+  - "rig: no display timing" failures are still counted; the label reads "(suspected, ...)" when only the test name matched.
 #>
 param(
     [string]$Dll = (Join-Path $PSScriptRoot "..\x64\Release\VideoProcessor-Test.dll"),
@@ -98,13 +105,6 @@ try {
     }
 }
 catch { "WARNING: could not determine which adapter drives the primary display ($($_.Exception.Message)); timing tests may be invalid." }
-# The file-source graph test needs a clip: the synthetic gate clip (D:\testclips\gate, no film frames; see
-# tools/make_gate_clips.ps1) unless VP_TEST_FILTER_CLIP is already set.
-$gateClip = "D:\testclips\gate\gate_h264.mp4"
-if (-not $env:VP_TEST_FILTER_CLIP) {
-    if (Test-Path $gateClip) { $env:VP_TEST_FILTER_CLIP = $gateClip }
-    else { "NOTE: $gateClip is absent and VP_TEST_FILTER_CLIP is unset: FileSourceLavVpRendererPlaysSeeksStepsAndStops cannot run (fails under VP_TEST_REQUIRE_GPU=1); run tools/make_gate_clips.ps1." }
-}
 $onScreenRequested = $OnScreen -or $env:VP_TEST_HARNESS_ONSCREEN -eq "1"
 $env:VP_TEST_GPU = "hardware"; $env:VP_TEST_ADAPTER = $Adapter; $env:VP_TEST_REQUIRE_GPU = "1"
 # The delay gate is strict (owner 2026-10-24: the same total at every rate, render_ahead off);
@@ -117,6 +117,14 @@ $env:VP_TEST_REQUIRE_HARDWARE = "1"
 if ($OnScreen) { $env:VP_TEST_HARNESS_ONSCREEN = "1" }
 if ($Fullscreen) { $env:VP_TEST_HARNESS_FULLSCREEN = $Fullscreen }
 try {
+    # The file-source graph test needs a clip: the synthetic gate clip (D:\testclips\gate, no film frames; see
+    # tools/make_gate_clips.ps1) unless VP_TEST_FILTER_CLIP is already set.
+    $gateClip = "D:\testclips\gate\gate_h264.mp4"
+    if (-not $env:VP_TEST_FILTER_CLIP) {
+        if (Test-Path $gateClip) { $env:VP_TEST_FILTER_CLIP = $gateClip }
+        else { "NOTE: $gateClip is absent and VP_TEST_FILTER_CLIP is unset: FileSourceLavVpRendererPlaysSeeksStepsAndStops cannot run (fails under VP_TEST_REQUIRE_GPU=1); run tools/make_gate_clips.ps1." }
+    }
+    if ($env:VP_TEST_FILTER_CLIP -and -not (Test-Path $env:VP_TEST_FILTER_CLIP)) { "WARNING: VP_TEST_FILTER_CLIP=$($env:VP_TEST_FILTER_CLIP) does not exist; the clip test will fail" }
     # vstest writes "Test Run Failed." to stderr; under Stop that would end the script before the TRX
     # is read, so the run itself is not allowed to throw (the TRX decides).
     $ErrorActionPreference = "Continue"
@@ -146,9 +154,12 @@ $bad = @($failed | Where-Object { -not $knownFailures.Contains([string]$_.testNa
 # but labelled so they are not mistaken for a product regression.
 # The 2026-11-01 timing set is also labelled by name when the primary display is on another adapter.
 $timingTests = "InterpolationOffIsPixelIdenticalAtAWholeRatio", "InterpolationRunsAtAMeasuredRateMismatch", "StreamFaultsKeepTheDejudderSafeAndRecovering", "EntranceOnceMotionPicturesFromTheProcessedFrames", "DelayBudgetFrameLadderHoldsTheTotalAtEveryRate", "OnScreenRenderAheadExtras"
-$rigNoTiming = @($bad | Where-Object { ([string]$_.Output.ErrorInfo.Message -match 'state=unavailable|stats_hr=0x887A0004') -or ($rigMismatch -and $timingTests -contains [string]$_.testName) })
+$rigNoTiming = @($bad | Where-Object { ([string]$_.Output.ErrorInfo.Message -match 'display timing state: state=unavailable|stats_hr=0x887A0004') -or ($rigMismatch -and $timingTests -contains [string]$_.testName) })
+$rigMsg = @($bad | Where-Object { [string]$_.Output.ErrorInfo.Message -match 'display timing state: state=unavailable|stats_hr=0x887A0004' })
 $bad | ForEach-Object {
-    $label = if ($rigNoTiming -contains $_) { "rig: no display timing" } else { $_.outcome }
+    $label = if ($rigMsg -contains $_) { "rig: no display timing" }
+        elseif ($rigNoTiming -contains $_) { "rig: no display timing (suspected, primary display on another adapter)" }
+        else { $_.outcome }
     "  ${label}: $($_.testName)"
 }
 $known | ForEach-Object { "  KNOWN FAILURE ($($_.outcome)): $($_.testName) - $($knownFailures[[string]$_.testName])" }
