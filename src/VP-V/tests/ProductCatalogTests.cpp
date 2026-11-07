@@ -522,7 +522,7 @@ namespace ProductCatalogTestsNs
 			for (double period : periods) {
 				const Registry reg = SkeletonProducts(false, false, period);
 				Assert::IsTrue(reg.Validate());
-				for (uint8_t lane : { uint8_t(0), uint8_t(1), uint8_t(3) }) {
+				for (uint8_t lane : { uint8_t(0), uint8_t(1), uint8_t(2), uint8_t(3) }) {
 					GraphSettings gs = Settings(Dims{ 3840, 2160 }, lane);
 					gs.renderAhead = 8;
 					gs.laneJobsInFlight = 4;
@@ -537,12 +537,18 @@ namespace ProductCatalogTestsNs
 						else
 							Assert::IsTrue(int(n.livePool) >= int(n.history) + 1, L"live pool >= history + 1");
 					}
-					// The look-ahead form (quality_pattern) needs lane lead >= 3 (effective lead = min(declared 2, lane lead - 1)); a shorter queue
-					// resolves it to the causal substitute (a visible reduced mode). Both carry the same derived history depth.
+					// The look-ahead form (quality_pattern) stays in the graph while the queue supplies any lead: effective lead = min(declared 2,
+					// lane lead - 1), so lane 2 gives effective lead 1 (still quality_pattern, a shorter look-ahead) and lane >= 3 gives 2. Only a
+					// lane lead of 0 or 1 gives no lead and resolves it to the causal substitute (a visible reduced mode). Both carry the same derived history depth.
 					const Node* qp = g.Find(kQualityPattern);
 					const Node* qc = g.Find(kQualityPatternCausal);
-					Assert::IsTrue((qp != nullptr) == (lane >= 3), L"quality_pattern is in the graph exactly when the queue supplies its lead");
-					Assert::IsTrue(lane >= 3 || qc != nullptr, L"otherwise the causal substitute stands in");
+					Assert::IsTrue((qp != nullptr) == (lane >= 2), L"quality_pattern is in the graph exactly when the queue supplies some lead (lane lead >= 2)");
+					Assert::IsTrue(lane >= 2 || qc != nullptr, L"otherwise the causal substitute stands in");
+					if (qp) {
+						Assert::AreEqual(int(lane == 2 ? 1 : 2), int(qp->lead), L"effective lead = min(declared 2, lane lead - 1): lane 2 gives 1, lane 3 gives 2");
+						Assert::AreEqual(2, int(qp->declaredLead));
+						Assert::IsFalse(qp->shortQueue, L"a shortened look-ahead is not the causal substitute");
+					}
 					const Node* record = qp ? qp : qc;
 					Assert::IsNotNull(record);
 					Assert::AreEqual(int(QualityPatternHistoryFrames(period)), int(record->history), L"the node carries the derived depth, no silent change");
