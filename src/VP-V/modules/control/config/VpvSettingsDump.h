@@ -15,12 +15,16 @@
 
 namespace VpvSettingsDump
 {
+	// C++14: tag dispatch instead of if constexpr (the renderer projects set no LanguageStandard).
+	inline void PutPlain(std::ostream& o, bool v) { o << (v ? 1 : 0); }
+	template <class T> inline void PutPlain(std::ostream& o, const T& v) { o << v; }
+	template <class T> inline void PutValue(std::ostream& o, const T& v, std::true_type) { o << static_cast<long long>(v); }
+	template <class T> inline void PutValue(std::ostream& o, const T& v, std::false_type) { PutPlain(o, v); }
+
 	template <class T> inline void Put(std::ostream& o, const char* name, const T& v)
 	{
 		o << name << '=';
-		if constexpr (std::is_enum_v<T>) o << static_cast<long long>(v);
-		else if constexpr (std::is_same_v<T, bool>) o << (v ? 1 : 0);
-		else o << v;
+		PutValue(o, v, std::is_enum<T>());
 		o << '\n';
 	}
 }
