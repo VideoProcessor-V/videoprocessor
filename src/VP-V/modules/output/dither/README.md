@@ -168,3 +168,21 @@ Acceptance note (A2): on HDR passthrough the 2-frame-mean <5 nit geo-mean is 1.0
 output scale, the NLS stretch (the hook's law, inverted by bisection), and the P0 re-base plane (reported, it cancels in the output
 position). Out-of-picture points are flagged. Consumers: the sigma-delta carry reset on camera motion (K7-2) and the debander
 hold (K7-3). Tests: `tests/OutputDomainMapTests.cpp`.
+
+## All settings (complete list)
+
+Config placement: master VP-V page, Output sub-page (`temporal_dither` is the Output tier's key; the others sit under Advanced). "Original (Bill)" = the Original pathway (`core/OriginalPathway.h`).
+
+| Key | Section | Type | Range | Default | Config placement | What Original (Bill) does | Visible fallbacks / status lines | Tier differences |
+|---|---|---|---|---|---|---|---|---|
+| `temporal_dither` | profile (`[vprenderer.<profile>]`) | choice | auto, off, libplacebo, sigma_delta | auto (the shader list decides) | VP-V > Output (Advanced; tier key) | forced `libplacebo` | `Dither: libplacebo (sigma-delta dropped: <reason>)` under Fallbacks engaged | Classic = libplacebo, Low = auto, Mid = sigma_delta |
+| `dithering` | profile | choice | auto, on, off, blue_noise, ordered_lut, ordered_fixed, white_noise, error_diffusion_* | auto | Rendering > Profile details | Bill's own key (libplacebo dither) | none | none |
+| `dither_vectors` | profile | choice | auto, own | auto (the de-judder's vectors) | Rendering > Profile details (proposed retirement) | not forced | none | none |
+| `dither_grain_tolerance_scale` | profile | number | 1..8 (1 = off) | 3 | VP-V > Advanced | not read (no sigma-delta) | none | none |
+| `output_segments_merged` | global | choice | on, off | off | VP-V > Pipeline (expert) | forced off | none | none |
+| `dither_need` (header-only) | profile | choice | off, auto | off | none yet | not built | none | none |
+| `OutputDomainMap` (internal; no key yet, K3 adds `camera_*` keys) | internal | - | - | - | none (internal) | not built | a map that is not valid is the identity on the raster; the consumer keeps today's behaviour | none |
+
+Tiers: Classic libplacebo dither; Low .. Upper sigma-delta.
+
+**Downstream consumers (TEMPORAL DETAIL, docs 71 section Q5 and 72):** per-pair homography (P7/P9), the object layer (per-object motion), P8 per-block membership + confidence, and K4 guided residuals.

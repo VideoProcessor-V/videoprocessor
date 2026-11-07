@@ -66,3 +66,20 @@ list the render thread drains). Status: a cache rebuilt on the render thread. Pe
 * Backlog-flush drops (`OnQueue(Drop)`): the call site passes the surviving sequence and the number of frames dropped before
   it, so the dropped sequences are taken as `[seq - n, seq)` (consecutive). That assumption is counted and shown
   (`dropped frame(s) were taken as consecutive sequences`); at most 16 per event are applied, the rest are counted as lost.
+
+## All settings (complete list)
+
+Keys of `[vpv.skeleton]` (`VideoProcessor.cfg`). Config placement: no Config control yet; planned on the master VP-V page, Pipeline (expert) sub-page. "Original (Bill)" = the Original pathway: the lane is off (Lifecycle `code != 0`), no state, thread, tap or status line.
+
+| Key | Section | Type | Range | Default | Config placement | What Original (Bill) does | Visible fallbacks / status lines | Tier differences |
+|---|---|---|---|---|---|---|---|---|
+| `analysis_lane` | `[vpv.skeleton]` | choice | off, shadow, on | off | none yet (planned: master VP-V page, Pipeline) | off (nothing built) | `analysis_lane` (reduced / forced live / at minimum), `skeleton_lane` (waiting for `resync_event=on` or `frame_analysis_store=on`), `skeleton_products` (P10/P11/P12 declined), Ctrl+Alt+D | the lane plans its own tiers by video memory (VramGovernor); reduced forms are listed in the `analysis_lane` entry |
+| `analysis_lane_chunk_us` | `[vpv.skeleton]` | integer | 0..4000000 (0 = from the frame period) | 0 | none yet (Pipeline, expert) | n/a | invalid value: `skeleton_settings` entry, default kept | none |
+| `analysis_lane_deterministic` | `[vpv.skeleton]` | choice | auto, on, off | auto | none yet (Pipeline, expert) | n/a | `analysis_lane_determinism` entry when frames miss the bounded wait | none |
+| `analysis_lane_test_wait_ms` | `[vpv.skeleton]` | integer | 0..4000000 | 0 | none yet (Pipeline, expert; test only) | n/a | invalid value: `skeleton_settings` | none |
+| `camera_link` | `[vpv.skeleton]` | choice | off, report | off | none yet (Pipeline, expert) | off (no state, no line) | `camera_link` entry when it was asked to report but cannot (no store, no seal); status line when on | none |
+| `source_stats_walk` (lane key, `LaneSettings::Parse`) | `[vpv.skeleton]` | choice | original, lane | original | none yet (Pipeline, expert) | Bill's active-picture walk | `source_stats_walk` entry when the lane's source stats are unavailable | none |
+
+`camera_link = report` only creates the camera link core and its status line; there is no vector engine yet, so it never feeds a consumer. K3 adds the `camera_*` keys that select the fit options (`twoLayer`, `dynTexture`).
+
+**Downstream consumers (TEMPORAL DETAIL, docs 71 section Q5 and 72):** per-pair homography (P7/P9), the object layer (per-object motion), P8 per-block membership + confidence, and K4 guided residuals.

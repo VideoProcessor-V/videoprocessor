@@ -105,3 +105,9 @@ CPU: `PairTimingTests`, `PairAssemblyTests`, `VerdictGateTests`, `CameraFitRunne
 with a per-pixel evaluation and a block-grid helper; degenerate models fall back to the usable end or the identity (`ok = false`).
 It also holds the strict de-judder policy constants 0.85 / 0.7 / 0.05 / 0.2 (pinned equal to `PolicyFor(DejudderWarp)`).
 Tests: `../../tests/CameraPhaseInterpTests.cpp`. The P9 producer (`CameraSmoother`, K9-1) is a separate step.
+
+## All settings (complete list)
+
+The link has exactly one key, `camera_link` (`[vpv.skeleton]`, off / report, default off; Original (Bill): off; Config placement: none yet, planned master VP-V page > Pipeline (expert); visible state: the `camera_link` Fallbacks entry and the camera status line; not tiered). Fit options (`twoLayer`, `dynTexture`) are internal `Config` fields until K3 adds `camera_*` keys. The full table is in `../README.md` ("All settings") and `../../../../control/skeleton/README.md`.
+
+**Downstream consumers (TEMPORAL DETAIL, docs 71 section Q5 and 72):** per-pair homography (P7/P9), the object layer (per-object motion), P8 per-block membership + confidence, and K4 guided residuals.

@@ -272,3 +272,18 @@ the guided-matching scheduler, governor and `p7g_camera_guide` product. All of i
 `link/README.md` (wiring table, fill rule, private-history justification). The verdict gate (D-K4) is `CameraModel::ReasonUsable`:
 one set shared by `BlendState::ForcesZero` and the guidance gate (Ok, PostCutSeeded, FlashBridged); Ambiguous, InverseMismatch,
 Degenerate, TooFewSamples and LowConfidence records are published for diagnostics and never used.
+
+## All settings (complete list)
+
+The fitter has no runtime config key yet: `Config` fields are set by the tests and `tools/camera_eval`. K3 adds the `camera_*` keys. Config placement for the keys that exist (`camera_link`, `analysis_lane`): see `control/skeleton/README.md`. "Original (Bill)" = the Original pathway builds no camera link (`camera_link` off).
+
+| Key | Section | Type | Range | Default | Config placement | What Original (Bill) does | Visible fallbacks / status lines | Tier differences |
+|---|---|---|---|---|---|---|---|---|
+| `camera_link` (see `link/README.md`) | `[vpv.skeleton]` | choice | off, report | off | none yet (master VP-V page, Pipeline) | off | `camera_link` entry (cannot report); status line | none |
+| `Config::twoLayer` (internal; no key yet, K3 adds `camera_*` keys) | internal | bool | false, true | false | none (internal) | not built | foreground-suspect records are `Ambiguous` (`ForegroundSuspect`) in the camera status text; never usable | same on every tier |
+| `Config::dynTexture` (internal; no key yet, K3 adds `camera_*` keys) | internal | bool | false, true | false | none (internal) | not built | `Ambiguous` with the dynamic-texture reason text; never usable (visible fallback) | same on every tier |
+| `Config::dynTextureCfg` (minShare, minTemporal, minSpatial, agreeRatio, absSigmas, rel, minBlocks, minCompared) | internal | numbers | 0.5 / 0.6 / 0.5 / 0.5 / 3 / 0.05 / 64 / 48 | as listed | none (internal) | not built | none | none |
+
+Tiers: the fit is cheap CPU work and is not tiered (cost lines `CAMERA_COST`).
+
+**Downstream consumers (TEMPORAL DETAIL, docs 71 section Q5 and 72):** per-pair homography (P7/P9), the object layer (per-object motion), P8 per-block membership + confidence, and K4 guided residuals.

@@ -180,3 +180,16 @@ blocks under the trust floor, P8 absent or late = the uncompensated variant, fla
 smoothing parameters only, never the grain layer or the exact re-add. Today's smoothing site (K5-0): `scaling/output/AdaptiveDownscale.cpp`
 MAP_BODY (16x16 blocks, once per source frame). `GrainSplit::kUnitVersion` is not bumped (the split law is unchanged); the variant has
 its own stamp (`GrainCameraRefine::VariantStamp`). Tests: `tests/GrainCameraRefineTests.cpp`. Wiring is K5-2.
+
+## All settings (complete list)
+
+Config placement: none; this slot has no key of its own (the split law is fixed). "Original (Bill)" = the Original pathway never builds the split.
+
+| Key | Section | Type | Range | Default | Config placement | What Original (Bill) does | Visible fallbacks / status lines | Tier differences |
+|---|---|---|---|---|---|---|---|---|
+| `grain_split_storage` (declared by the integrator's node/settings, not read here yet) | `[vprenderer.<profile>]` | choice | full, compact | full | none yet (planned: master VP-V page, Repair sub-page, Advanced) | not built | none (Compact is a visible memory reduction when added) | Compact for the laptop store tier (planned) |
+| `GrainCameraRefine` variant (internal; no key yet, K3 adds `camera_*` keys) | internal | enum | Uncompensated, Camera | Uncompensated | none (internal) | not built | `grain: camera late` when P8 is absent or late (the host shows it at K5-2); the frame takes today's rule | same on every tier |
+
+Tiers: not tiered.
+
+**Downstream consumers (TEMPORAL DETAIL, docs 71 section Q5 and 72):** per-pair homography (P7/P9), the object layer (per-object motion), P8 per-block membership + confidence, and K4 guided residuals.
