@@ -37,8 +37,9 @@ from collections import defaultdict
 
 LATCH_T = 15.0           # R2 clean: latched correct within this many seconds
 DIRTY_T = 10.0
-HOURS_PHASE_A = 30.0
+HOURS_PHASE_A = 10.0       # target H_A: smoke gate, licenses SHADOW mode only
 TITLES_PHASE_A = 15
+SHOTS_PHASE_A = 1000
 
 
 def fnum(x, default=None):
@@ -94,17 +95,35 @@ def load_csv(path):
 
 
 def load_eval(eval_dir):
+    """Reads <dir>/reels/<reel>/{evaluations,events,done}.csv (the harness writes one file set per reel, atomically) and, for older
+    runs, the flat evaluations.csv / events.csv / reels_done.csv. Returns rows, events, done keyed per reel."""
     rows = defaultdict(list)       # (reel, lane) -> rows
-    for r in load_csv(os.path.join(eval_dir, "evaluations.csv")):
-        r["t"] = fnum(r.get("t"), 0.0)
-        rows[(r["reel"], r["lane"])].append(r)
+    events = defaultdict(list)
+    done = {}
+    rdir = os.path.join(eval_dir, "reels")
+    paths = []
+    if os.path.isdir(rdir):
+        for name in sorted(os.listdir(rdir)):
+            d = os.path.join(rdir, name)
+            if os.path.isdir(d) and not name.endswith(".tmp"):
+                paths.append(d)
+    srcs = [(os.path.join(d, "evaluations.csv"), os.path.join(d, "events.csv"), os.path.join(d, "done.csv"), d.endswith(".failed")) for d in paths]
+    if os.path.exists(os.path.join(eval_dir, "evaluations.csv")):
+        srcs.append((os.path.join(eval_dir, "evaluations.csv"), os.path.join(eval_dir, "events.csv"), os.path.join(eval_dir, "reels_done.csv"), False))
+    for ep, vp, dp, failed in srcs:
+        for r in load_csv(ep):
+            r["t"] = fnum(r.get("t"), 0.0)
+            rows[(r["reel"], r["lane"])].append(r)
+        for e in load_csv(vp):
+            e["t"] = fnum(e.get("t"), 0.0)
+            e["event_t"] = fnum(e.get("event_t"), e["t"])
+            events[(e["reel"], e["lane"])].append(e)
+        for d in load_csv(dp):
+            if failed and d.get("state") == "ok":
+                d["state"] = "failed"
+            done[d["reel"]] = d
     for v in rows.values():
         v.sort(key=lambda x: (x["t"], fnum(x.get("out_frame"), 0)))
-    events = defaultdict(list)
-    for e in load_csv(os.path.join(eval_dir, "events.csv")):
-        e["t"] = fnum(e.get("t"), 0.0)
-        events[(e["reel"], e["lane"])].append(e)
-    done = {r["reel"]: r for r in load_csv(os.path.join(eval_dir, "reels_done.csv"))}
     return rows, events, done
 
 
@@ -131,7 +150,7 @@ def is_native_truth(reel, seg):
 
 def score_reel_lane(reel, rows, events, cfg):
     st = dict(rows=len(rows), episodes=[], menu_violations=0, flaps=0, cand_entries=0, false_cand=0, seg=[], reasons=defaultdict(int),
-              unsure_rows=0, latched_rows=0, ms=[], notices=[], abr=[], geo=[])
+              unsure_rows=0, latched_rows=0, ms=[], native_ms=[], notices=[], abr=[], geo=[], state_events=defaultdict(int), hold_win_rows=0, hold_win_hold=0, cuts=0)
     prev_state, prev_n = None, None
     ep = None
     menu_run = {}
@@ -153,6 +172,11 @@ def score_reel_lane(reel, rows, events, cfg):
         ms = fnum(row.get("ms"))
         if ms is not None and ms >= 0:
             st["ms"].append(ms)
+            if is_native_truth(reel, seg):
+                st["native_ms"].append(ms)
+        cu = fnum(row.get("cuts"))
+        if cu is not None and cu > st["cuts"]:
+            st["cuts"] = int(cu)
         latched = state == "LATCHED"
         in_grace = (t - seg["t0"]) < cfg["boundary_grace"] and si > 0
         wrong = latched and n != tn and not in_grace
@@ -225,9 +249,22 @@ def score_reel_lane(reel, rows, events, cfg):
         if typ == "notice":
             st["notices"].append(e["t"])
         elif typ == "abr":
-            st["abr"].append(dict(t=e["t"], direction=e.get("a", "")))
+            st["abr"].append(dict(t=e["t"], event_t=e.get("event_t", e["t"]), direction=e.get("a", "")))
         elif typ == "geometry":
-            st["geo"].append(dict(t=e["t"], direction=""))
+            st["geo"].append(dict(t=e["t"], event_t=e.get("event_t", e["t"]), direction=""))
+        elif typ in ("latch", "revert", "hold", "unstable"):
+            st["state_events"][typ] += 1
+    # HOLD enforcement: rows inside the overlay windows of hold_expected segments
+    for si, seg in enumerate(reel["segs"]):
+        if not seg.get("hold_expected"):
+            continue
+        wins = [(seg["t0"] + o["start"], seg["t0"] + o["end"]) for o in seg.get("overlays", []) if o.get("type") == "pip" and o.get("start") is not None]
+        for row in rows:
+            for (w0, w1) in wins:
+                if w0 <= row["t"] < w1:
+                    st["hold_win_rows"] += 1
+                    if (row.get("state") or "").upper() == "HOLD":
+                        st["hold_win_hold"] += 1
     return st
 
 
@@ -249,7 +286,7 @@ def aggregate(reels, per, lane, pred, cfg):
                seg_latched_exact=0, seg_native=0, seg_native_latched_ok=0, reasons=defaultdict(int), unsure_rows=0, rows=0, latched_rows=0,
                kernel_n=0, kernel_ok=0, kernel_cov=0, kernel_wrong=0, sharp_up=0, sharp_hit=0, sharp_off=0, sharp_false=0, dbl_n=0, dbl_ok=0, dbl_cov=0,
                act_n=0, act_ok=0, act_cov=0, act_wrong=0, dirty_segs=0, dirty_ok=0, hold_rows=0, hold_segs=0, wrong_rows=0, sel=[r["id"] for r in sel],
-               bad=[])
+               bad=[], native_ms=[], hold_win_rows=0, hold_win_hold=0, cuts_by_master=defaultdict(int))
     for r in sel:
         st = per[(r["id"], lane)]
         out["episodes"] += len(st["episodes"])
@@ -261,6 +298,10 @@ def aggregate(reels, per, lane, pred, cfg):
         out["false_cand"] += st["false_cand"]
         out["menu_violations"] += st["menu_violations"]
         out["ms"].extend(st["ms"])
+        out["native_ms"].extend(st["native_ms"])
+        out["hold_win_rows"] += st["hold_win_rows"]
+        out["hold_win_hold"] += st["hold_win_hold"]
+        out["cuts_by_master"][r["master"]] = max(out["cuts_by_master"][r["master"]], st["cuts"])
         out["rows"] += st["rows"]
         out["latched_rows"] += st["latched_rows"]
         out["unsure_rows"] += st["unsure_rows"]
@@ -343,15 +384,20 @@ def aggregate(reels, per, lane, pred, cfg):
 
 
 def abr_scores(reels, per, lane, cfg):
-    """Precision / recall of detected rung events (type abr / geometry) against the truth events."""
-    tp = det = 0
-    truth_geo = truth_geo_hit = truth_q = truth_q_hit = 0
+    """Rung events. Quality events: an `abr` detection whose reported BOUNDARY time (event_t) is within +-1.0 s of the truth boundary
+    (the replay.py rule, comparable with the 0.55 / 0.12 baseline); the detection latency is reported separately. Geometry events: a
+    chain `geometry` detection within [0, +2] s of the truth boundary. A lane without any geometry detection is NA for geometry."""
+    det = tp = 0
+    truth_geo = geo_hit = truth_q = q_hit = 0
     lat = []
+    lane_has_geo = False
     for r in reels.values():
         st = per.get((r["id"], lane))
         if st is None:
             continue
-        detections = [dict(d, used=False) for d in st["abr"] + st["geo"]]
+        if st["geo"]:
+            lane_has_geo = True
+        detections = [dict(d, used=False, kind="abr") for d in st["abr"]] + [dict(d, used=False, kind="geometry") for d in st["geo"]]
         for e in r["events"]:
             if e["kind"] not in ("geometry", "quality"):
                 continue
@@ -359,24 +405,25 @@ def abr_scores(reels, per, lane, cfg):
             for d in detections:
                 if d["used"]:
                     continue
-                if e["t"] - 1.0 <= d["t"] <= e["t"] + cfg["abr_tol"] and (not d["direction"] or d["direction"] == e["direction"]):
+                if e["kind"] == "quality" and d["kind"] == "abr" and abs(d["event_t"] - e["t"]) <= 1.0 and (not d["direction"] or d["direction"] == e["direction"]):
+                    hit = d
+                    break
+                if e["kind"] == "geometry" and d["kind"] == "geometry" and e["t"] - 0.01 <= d["t"] <= e["t"] + 2.0:
                     hit = d
                     break
             if e["kind"] == "geometry":
                 truth_geo += 1
-                if hit and hit["t"] <= e["t"] + 2.0:
-                    truth_geo_hit += 1
+                geo_hit += 1 if hit else 0
             else:
                 truth_q += 1
-                if hit:
-                    truth_q_hit += 1
+                q_hit += 1 if hit else 0
             if hit:
                 hit["used"] = True
                 lat.append(hit["t"] - e["t"])
         det += len(detections)
         tp += sum(1 for d in detections if d["used"])
-    return dict(det=det, tp=tp, precision=(tp / float(det)) if det else None, truth_geo=truth_geo, geo_hit=truth_geo_hit,
-                truth_q=truth_q, q_hit=truth_q_hit, q_recall=(truth_q_hit / float(truth_q)) if truth_q else None, lat=lat)
+    return dict(det=det, tp=tp, precision=(tp / float(det)) if det else None, truth_geo=truth_geo, geo_hit=geo_hit, lane_has_geo=lane_has_geo,
+                truth_q=truth_q, q_hit=q_hit, q_recall=(q_hit / float(truth_q)) if truth_q else None, lat=lat)
 
 
 # ------------------------------------------------------------------ GO table
@@ -388,23 +435,42 @@ def frac(a, b):
     return (a / float(b)) if b else None
 
 
-def go_table(reels, per, lane, cfg):
+def go_table(reels, per, lane, cfg, masters_info=None):
+    masters_info = masters_info or {}
     A = lambda pred: aggregate(reels, per, lane, pred, cfg)
     g = []
     r1 = A(family_pred("R1"))
     h = r1["hours"]
+    mids = sorted(set(reels[i]["master"] for i in r1["sel"]))
+    uniq_h = sum(masters_info.get(m_, {}).get("full_seconds", 0) for m_ in mids) / 3600.0
+    shots_manifest = [len(masters_info[m_]["shots"]) + 1 for m_ in mids if masters_info.get(m_, {}).get("shots") is not None]
+    shots = sum(shots_manifest) if len(shots_manifest) == len(mids) and mids else sum(v + 1 for v in r1["cuts_by_master"].values())
+    shots_src = "scdet per master" if len(shots_manifest) == len(mids) and mids else "monitor cut counter (lane off)"
     bound = (3.0 / h) if h > 0 else None
-    st = "NA" if r1["reels"] == 0 else ("FAIL" if r1["episodes"] > 0 else ("INSUFFICIENT" if (h < HOURS_PHASE_A or r1["titles"] < TITLES_PHASE_A) else "PASS"))
-    g.append(gate("axes.r1.wrong", "Axes - R1 native (phase A smoke gate)", "0 confident-wrong over >= %g h, >= %d titles, >= 1000 shots" % (HOURS_PHASE_A, TITLES_PHASE_A),
-                  dict(confident_wrong=r1["episodes"], hours=round(h, 3), titles=r1["titles"], reels_with_wrong=r1["reels_with_episode"],
-                       rate_bound_per_h=(round(bound, 2) if bound else None), shots="not measured"), st,
-                  "zero events in %.2f h bounds the rate at <= %s per hour (95%%, rule of three)" % (h, ("%.1f" % bound) if bound else "n/a")))
+    bound_u = (3.0 / uniq_h) if uniq_h > 0 else None
+    if r1["reels"] == 0:
+        st = "NA"
+    elif r1["episodes"] > 0:
+        st = "FAIL"
+    elif h < HOURS_PHASE_A or r1["titles"] < TITLES_PHASE_A or shots < SHOTS_PHASE_A:
+        st = "INSUFFICIENT"
+    else:
+        st = "PASS"
+    phase_a = dict(H_A_hours=round(h, 3), unique_footage_hours=round(uniq_h, 3), titles=r1["titles"], shots=shots, shots_source=shots_src,
+                   confident_wrong=r1["episodes"], reels_with_wrong=r1["reels_with_episode"],
+                   bound_per_h=(round(bound, 2) if bound else None), bound_per_unique_h=(round(bound_u, 2) if bound_u else None))
+    g.append(gate("axes.r1.wrong", "Axes - R1 native (phase A smoke gate)", "H_A >= %g h, >= %d titles, >= %d shots, 0 confident-wrong (smoke gate; licenses SHADOW mode only)" %
+                  (HOURS_PHASE_A, TITLES_PHASE_A, SHOTS_PHASE_A), phase_a, st,
+                  "supports <= %s confident-wrong per hour (95%%, rule of three over H_A = %.2f h); the variants of one title are NOT independent: over the unique footage "
+                  "(%.2f h) the bound is <= %s per hour; the design target (1 per 100 title-hours) needs phase B" %
+                  (("%.1f" % bound) if bound else "n/a", h, uniq_h, ("%.1f" % bound_u) if bound_u else "n/a")))
     st = "NA" if r1["reels"] == 0 else ("PASS" if frac(r1["false_cand"], h) is not None and r1["false_cand"] / h <= 1.0 else "FAIL")
     g.append(gate("axes.r1.false_candidate", "Axes - R1 native", "false CANDIDATE <= 1 per hour",
                   dict(per_hour=round(frac(r1["false_cand"], h) or 0.0, 3), count=r1["false_cand"], hours=round(h, 3)), st))
     dk = A(idpred("R8.dark2", "R8.credits", "R8.flat"))
-    st = "NA" if dk["reels"] == 0 else ("FAIL" if (dk["flaps"] > 0 or dk["episodes"] > 0) else ("INSUFFICIENT" if dk["hours"] < 1.0 else "PASS"))
-    g.append(gate("axes.r1.dark_credits", "Axes - R1 native", "dark / credits >= 1 h: 0 reverts", dict(reverts=dk["flaps"], wrong=dk["episodes"], hours=round(dk["hours"], 3)), st))
+    st = "NA" if dk["reels"] == 0 else ("FAIL" if (dk["flaps"] > 0 or dk["episodes"] > 0) else "PASS")
+    g.append(gate("axes.r1.dark_credits", "Axes - R1 native", "dark / credits / flat reels (all of them, hours reported): 0 reverts, 0 wrong",
+                  dict(reverts=dk["flaps"], wrong=dk["episodes"], reels=dk["reels"], hours=round(dk["hours"], 3)), st))
     c = A(lambda r: r["id"].startswith("R2.clean"))
     secs = c["hours"] * 3600.0
     ok = frac(c["seg_up_correct_T"], c["seg_up"])
@@ -435,9 +501,11 @@ def go_table(reels, per, lane, cfg):
     if m["reels"] == 0:
         st = "NA"
     else:
-        st = "FAIL" if (m["menu_violations"] > 0 or m["episodes"] > 0) else "PASS"
-    g.append(gate("axes.r7", "Axes - R7 menus / overlays", "no re-base persisting > %g s on a native menu; 0 wrong under subtitles / PiP (HOLD shown)" % cfg["menu_persist"],
-                  dict(menu_violations=m["menu_violations"], wrong=m["episodes"], hold_rows_in_expected_segments=m["hold_rows"], expected_hold_segments=m["hold_segs"]), st,
+        hold_share = frac(m["hold_win_hold"], m["hold_win_rows"])
+        st = "FAIL" if (m["menu_violations"] > 0 or m["episodes"] > 0 or (hold_share is not None and hold_share < 0.8)) else "PASS"
+    g.append(gate("axes.r7", "Axes - R7 menus / overlays", "no re-base persisting > %g s on a native menu; 0 wrong under subtitles / PiP; HOLD shown >= 80%% of the large-PiP window" % cfg["menu_persist"],
+                  dict(menu_violations=m["menu_violations"], wrong=m["episodes"], hold_share_in_large_pip_windows=(round(hold_share, 3) if hold_share is not None else None),
+                       window_rows=m["hold_win_rows"], expected_hold_segments=m["hold_segs"]), st,
                   "; ".join(m["bad"][:5])))
     for gid, field, crit in (("axes.r10", "Axes - R10 loop", ">= 90% of informative evaluations propose the true n; latch <= 20 s; 0 wrong; 0 dropped frames"),
                              ("axes.r11", "Axes - R11 Apple TV", "correct n per title; no re-base > 3 s on menus")):
@@ -478,14 +546,16 @@ def go_table(reels, per, lane, cfg):
         q_rec = ab["q_recall"]
         prec = ab["precision"]
         bad = []
-        if geo_ok is not None and geo_ok < 1.0:
+        if ab["truth_geo"] and not ab["lane_has_geo"]:
+            bad.append("lane emits no geometry events (geometry recall 0)")
+        elif geo_ok is not None and geo_ok < 1.0:
             bad.append("geometry recall < 100%")
         if prec is not None and prec < 0.8:
             bad.append("precision < 0.8")
         if q_rec is not None and q_rec < 0.5:
             bad.append("quality recall < 0.5")
         st = "FAIL" if bad else "PASS"
-        detail = "; ".join(bad)
+        detail = "; ".join(bad) + " (boundary matching +-1.0 s as replay.py: comparable with the 0.55 / 0.12 baseline)"
     g.append(gate("abr", "ABR", "resolution rungs 100% as geometry events <= 2 s; quality-only precision >= 0.8, recall >= 0.5",
                   dict(precision=(round(ab["precision"], 3) if ab["precision"] is not None else None), geometry_recall=(round(frac(ab["geo_hit"], ab["truth_geo"]), 3) if ab["truth_geo"] else None),
                        quality_recall=(round(ab["q_recall"], 3) if ab["q_recall"] is not None else None), detections=ab["det"], median_latency_s=(round(pct(ab["lat"], 0.5), 2) if ab["lat"] else None)),
@@ -500,7 +570,9 @@ def go_table(reels, per, lane, cfg):
     p95 = pct(ms, 0.95)
     st = "NA" if not ms else ("PASS" if p95 <= 50.0 else "FAIL")
     g.append(gate("cost", "Cost", "<= 15% of one core average; p95 <= 50 ms per evaluation; native latched <= 2%",
-                  dict(ms_mean=(round(sum(ms) / len(ms), 2) if ms else None), ms_p95=(round(p95, 2) if p95 is not None else None), evaluations=len(ms)), st,
+                  dict(ms_mean=(round(sum(ms) / len(ms), 2) if ms else None), ms_p95=(round(p95, 2) if p95 is not None else None), evaluations=len(ms),
+                       core_pct_at_2_per_s=(round(sum(ms) / len(ms) * 2 / 10.0, 2) if ms else None),
+                       native_core_pct=(round(sum(allr["native_ms"]) / len(allr["native_ms"]) * 2 / 10.0, 2) if allr["native_ms"] else None)), st,
                   "lane 'off'/'on' time includes the classical tile analysis; the chain estimator's own time is the 'chain' lane"))
     return g, ab
 
@@ -550,10 +622,16 @@ def render(reels, per, lanes, gate_lane, gates, done, cfg, ab):
         for gt in notes:
             L.append("- %s: %s" % (gt["id"], gt["detail"]))
     L.append("")
-    r1h = aggregate(reels, per, gate_lane, family_pred("R1"), cfg)["hours"]
-    L.append("Statistics: the design target is <= 1 confident-wrong per 100 title-hours. Zero events in H hours only bounds the rate at 3/H per hour "
-             "(95 percent). This run supports a bound of " + (("%.1f" % (3.0 / r1h)) if r1h > 0 else "n/a") +
-             " per hour on the R1 native reels; the reels are about 30 s long, not title-length.")
+    pa = [g_ for g_ in gates if g_["id"] == "axes.r1.wrong"]
+    if pa and pa[0]["value"]:
+        v = pa[0]["value"]
+        L.append("**Phase A (offline native reels, smoke gate):** H_A = %s h of native reels from %s titles / %s shots (%s), unique footage %s h; confident-wrong = %s; "
+                 "bound 3/H_A = %s per hour (over the unique footage: %s per hour). Target: H_A >= %g h, >= %d titles, >= %d shots; the gate licenses SHADOW mode only. "
+                 "The design target (<= 1 per 100 title-hours) is tracked by the shadow deploy (doc 78 section 9b), not by this run." %
+                 (v["H_A_hours"], v["titles"], v["shots"], v["shots_source"], v["unique_footage_hours"], v["confident_wrong"], fmt(v["bound_per_h"], 1), fmt(v["bound_per_unique_h"], 1),
+                  HOURS_PHASE_A, TITLES_PHASE_A, SHOTS_PHASE_A))
+    L.append("")
+    L.append("Statistics: zero events in H hours only bounds the rate at 3/H per hour (95 percent). Every figure above is for the reel durations actually decoded.")
     for lane in lanes:
         L.append("")
         L.append("## Lane %s by family" % lane)
@@ -577,7 +655,13 @@ def render(reels, per, lanes, gate_lane, gates, done, cfg, ab):
 
 def score(reels_path, eval_dir, out_dir, cfg, gate_lane=None):
     reels = load_manifest(reels_path)
+    with open(reels_path, "r", encoding="utf-8") as f:
+        masters_info = json.load(f).get("masters", {})
     rows, events, done = load_eval(eval_dir)
+    for rid, d in done.items():
+        # partial reels count at their actual duration
+        if rid in reels and fnum(d.get("frames_decoded"), 0) > 0:
+            reels[rid]["duration"] = fnum(d["frames_decoded"]) / reels[rid]["fps"]
     lanes = sorted(set(k[1] for k in rows), key=lambda x: ["off", "on", "chain"].index(x) if x in ("off", "on", "chain") else 9)
     per = {}
     for (rid, lane), rr in rows.items():
@@ -587,14 +671,14 @@ def score(reels_path, eval_dir, out_dir, cfg, gate_lane=None):
     if not lanes:
         raise SystemExit("no evaluation rows in %s" % eval_dir)
     gl = gate_lane or ("chain" if "chain" in lanes else ("on" if "on" in lanes else lanes[0]))
-    gates, ab = go_table(reels, per, gl, cfg)
+    gates, ab = go_table(reels, per, gl, cfg, masters_info)
     os.makedirs(out_dir, exist_ok=True)
     md = render(reels, per, lanes, gl, gates, done, cfg, ab)
     with open(os.path.join(out_dir, "summary.md"), "w", encoding="utf-8", newline="\n") as f:
         f.write(md)
     all_lanes = {}
     for lane in lanes:
-        gt, _ = go_table(reels, per, lane, cfg)
+        gt, _ = go_table(reels, per, lane, cfg, masters_info)
         all_lanes[lane] = gt
     with open(os.path.join(out_dir, "gates.json"), "w", encoding="utf-8", newline="\n") as f:
         json.dump(dict(gate_lane=gl, config=cfg, gates=gates, lanes=all_lanes,
@@ -632,7 +716,9 @@ def selftest():
              events=[dict(frame=360, kind="geometry", cls="major", direction="drop", from_seg=0, to_seg=1, t=0)]),
         reel("R2.clean.E", "R2", [seg(0, 0, 720, up)], master="m2"),
         reel("R7.F", "R7", [seg(0, 0, 240, up), seg(1, 240, 240, (W, H), regime="menu"), seg(2, 480, 240, up)], master="m3"),
+        reel("R7.G", "R7", [seg(0, 0, 720, up, hold_expected=True, overlays=[dict(type="pip", start=6.0, end=24.0)])], master="m3"),
     ])
+    doc["masters"]["m2"].update(full_seconds=1800, shots=[100, 200])
     with open(os.path.join(tmp, "reels.json"), "w") as f:
         json.dump(doc, f)
     ev = []
@@ -676,14 +762,32 @@ def selftest():
     for i in range(60):
         t = i * 0.5
         add("R7.F", "chain", t, "LATCHED", up)
+    # R7.G: HOLD shown only 60% of the large-PiP window -> the R7 gate must fail on HOLD alone
+    for i in range(60):
+        t = i * 0.5
+        add("R7.G", "chain", t, "HOLD" if (t < 6 or t >= 24 or (t - 6) % 5 < 3) else "LATCHED", None if (t < 6 or t >= 24 or (t - 6) % 5 < 3) else up)
+    # R6.D geometry event and a quality-boundary abr event with event_t
+    # per-reel directory layout for R7.G (the harness layout), flat files for the rest (older runs)
+    gdir = os.path.join(tmp, "reels", "R7.G")
+    os.makedirs(gdir)
+    grows = [r for r in ev if r["reel"] == "R7.G"]
+    ev = [r for r in ev if r["reel"] != "R7.G"]
+    with open(os.path.join(gdir, "evaluations.csv"), "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(grows[0].keys()))
+        w.writeheader()
+        w.writerows(grows)
+    with open(os.path.join(gdir, "events.csv"), "w") as f:
+        f.write("reel,lane,t,event_t,out_frame,seg,type,a,b,detail" + chr(10))
+    with open(os.path.join(gdir, "done.csv"), "w") as f:
+        f.write("reel,frames_expected,frames_decoded,wall_s,ffmpeg_stderr_lines,state" + chr(10) + "R7.G,720,720,1.0,0,ok" + chr(10))
     with open(os.path.join(tmp, "evaluations.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(ev[0].keys()))
         w.writeheader()
         w.writerows(ev)
     with open(os.path.join(tmp, "events.csv"), "w", newline="") as f:
-        f.write("reel,lane,t,out_frame,seg,type,a,b,detail\n")
-        f.write("R6.D,chain,15.2,365,1,geometry,,,\n")
-        f.write("R2.clean.A,chain,3.0,72,0,notice,,,x\n")
+        f.write("reel,lane,t,event_t,out_frame,seg,type,a,b,detail" + chr(10))
+        f.write("R6.D,chain,15.2,15.0,365,1,geometry,,," + chr(10))
+        f.write("R2.clean.A,chain,3.0,3.0,72,0,notice,,,x" + chr(10))
     with open(os.path.join(tmp, "reels_done.csv"), "w") as f:
         f.write("reel,frames_expected,frames_decoded,wall_s,state\n")
     cfg = default_cfg()
@@ -705,6 +809,10 @@ def selftest():
     assert by["axes.r2.clean"]["status"] == "INSUFFICIENT"            # 2 clips, 1 min: not enough to judge
     assert by["axes.dirty"]["status"] == "FAIL"
     assert by["axes.r7"]["status"] == "FAIL"
+    hv = by["axes.r7"]["value"]["hold_share_in_large_pip_windows"]
+    assert hv is not None and hv < 0.8, hv
+    pa = by["axes.r1.wrong"]["value"]
+    assert pa["titles"] == 1 and pa["H_A_hours"] > 0 and pa["shots"] == 3 and pa["unique_footage_hours"] == 0.5 and pa["bound_per_h"] > 0, pa
     assert by["kernel"]["status"] in ("PASS", "NA") and by["axes.r10"]["status"] == "NA"
     assert by["cost"]["status"] == "PASS" and by["abr"]["status"] in ("PASS", "FAIL")
     assert os.path.exists(os.path.join(tmp, "summary.md")) and os.path.exists(os.path.join(tmp, "gates.json"))

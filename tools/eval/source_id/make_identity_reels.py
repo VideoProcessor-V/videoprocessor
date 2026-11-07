@@ -35,6 +35,7 @@ import sys
 from fractions import Fraction
 
 SEED = 20261107
+NL = chr(10)
 SCHEMA = 1
 FONT = "C:/Windows/Fonts/arial.ttf"
 MAJOR_RATE = 1.6            # rate step regarded as a MAJOR quality event (same as make_abr_reels.py)
@@ -51,6 +52,11 @@ MASTERS = [
     ("nat30_sequim", "nature30", [(EVAL_ROOT + "/nature_30p_4k/Drone_4k_Video_Sequim_WA/Drone_4k_Video_Sequim_WA.webm", 60.0)], None),
     ("nat24_steeple", "nature24", [(EVAL_ROOT + "/nature_other/Steeple_Jason_Island_Falkland_Islands_Malvin_17c7/Steeple_Jason_Island_Falkland_Islands_Malvin_17c7.webm", 10.0)], None),
     ("nat25_funchal", "static_long_take25", [(EVAL_ROOT + "/nature_other/Funchal_Madeira_amazing_view_from_the_window_1abb/Funchal_Madeira_amazing_view_from_the_window_1abb.webm", 10.0)], None),
+    ("nat30_halona", "nature30", [(EVAL_ROOT + "/nature_30p_4k/Halona_Blowhole_Oahu_Hawaii_4K_footage/Halona_Blowhole_Oahu_Hawaii_4K_footage.webm", 10.0)], None),
+    ("film_bury", "film24_grain", [(EVAL_ROOT + "/film_grain_24p/We_ll_Bury_You_Trailer_1962_35mm_Flat_Mono_UHD/We_ll_Bury_You_Trailer_1962_35mm_Flat_Mono_UHD.webm", 10.0)], None),
+    ("nat50_natgeo", "nature50", [(EVAL_ROOT + "/nature_other/National_Geographic_Endurance_and_Northern_R_1aa0/National_Geographic_Endurance_and_Northern_R_1aa0.webm", 20.0)], None),
+    ("nat30_rheinfall", "nature30_vp8", [(EVAL_ROOT + "/nature_30p_4k/Rheinfall_Rhine_Falls/Rheinfall_Rhine_Falls.webm", 0.0)], None),
+    ("sport30_sidemen", "sports_av1", [(EVAL_ROOT + "/sports_ball/Sidemen_Charity_Match_2025_Pitch_Celebrations/Sidemen_Charity_Match_2025_Pitch_Celebrations.webm", 0.0)], None),
     ("sport60_k808", "hfr60_pans", [(EVAL_ROOT + "/hfr_4k60/20230513_K808_4K_60FPS_HDR/20230513_K808_4K_60FPS_HDR.webm", 8.0)], None),
     ("sport30_torschuss", "sports30", [(EVAL_ROOT + "/sports_ball/Amateurfu_ball_Torschuss_von_oben/Amateurfu_ball_Torschuss_von_oben.webm", 0.5)], None),
     ("dark60_meridian", "dark_lowkey60", [(CLIPS_ROOT + "/meridian_src/Meridian_UHD4k5994_HDR_P3PQ.mp4", 100.0)],
@@ -87,11 +93,14 @@ def even(v):
     return int(round(v / 2.0)) * 2
 
 
-def fps_rational(f):
+def fps_rational(f, exact=None):
     for num, den in ((24000, 1001), (30000, 1001), (60000, 1001)):
         if abs(f - num / float(den)) < 0.005:
             return (num, den)
-    return (int(round(f)), 1)
+    if abs(f - round(f)) < 0.005 or exact is None:
+        return (int(round(f)), 1)
+    fr = Fraction(exact).limit_denominator(1001)      # a genuinely odd rate (e.g. 30.26): keep it exactly, never resample
+    return (fr.numerator, fr.denominator)
 
 
 def fstr(r):
@@ -124,6 +133,7 @@ class Ctx:
         self.work_dir = self.out + "/work"
         self.truth_dir = self.out + "/truth"
         self.gops = args.gops
+        self.gops_clean = getattr(args, "gops_clean", 30)
 
 
 def run(cmd, **kw):
@@ -191,17 +201,19 @@ def load_masters(ctx):
                         src = json.load(f)
                 except (OSError, ValueError):
                     src = {}
-            m["parts"].append(dict(path=path, ss=ss, w=w, h=h, fps=float(fr), pix_fmt=st.get("pix_fmt", ""), duration=dur,
+            m["parts"].append(dict(path=path, ss=ss, w=w, h=h, fps=float(fr), fr=fr, pix_fmt=st.get("pix_fmt", ""), duration=dur,
                                    url=src.get("url", ""), lic=src.get("lic", ""), author=src.get("author", ""),
                                    size_mb=round(os.path.getsize(path) / 1048576.0, 1)))
         if not ok:
             ctx.masters[mid] = m
             continue
         p0 = m["parts"][0]
-        m.update(w=p0["w"], h=p0["h"], fps=fps_rational(p0["fps"]), pix_fmt=p0["pix_fmt"], eight_bit=all(p["pix_fmt"] == "yuv420p" for p in m["parts"]))
+        m.update(w=p0["w"], h=p0["h"], fps=fps_rational(p0["fps"], p0.get("fr")), pix_fmt=p0["pix_fmt"], eight_bit=all(p["pix_fmt"] == "yuv420p" for p in m["parts"]))
         m["lic"] = (lic_override or {}).get("lic") or "; ".join(sorted(set(p["lic"] for p in m["parts"] if p["lic"]))) or "see D:\\testclips\\eval-2026-10-31\\CATALOG.md"
         m["url"] = (lic_override or {}).get("url") or "; ".join(p["url"] for p in m["parts"] if p["url"])
         m["size_mb"] = round(sum(p["size_mb"] for p in m["parts"]), 1)
+        # R1 plays the FULL master (from 0, no loop): every frame the decoder can deliver, minus one for the last-frame ambiguity
+        m["full_frames"] = int(math.floor(p0["duration"] * master_fps(m))) - 1 if len(m["parts"]) == 1 else 0
         ctx.masters[mid] = m
     return ctx
 
@@ -219,7 +231,7 @@ def nframes_of(ctx, m):
 
 
 # ---------------------------------------------------------------- master timeline graph
-def master_graph(ctx, m, nframes, pix, label="m"):
+def master_graph(ctx, m, nframes, pix, label="m", ss0=False):
     """Inputs ([(path, ss_seconds|None)]) and graph text producing [label]: the master window of `nframes` native frames,
     CFR at the master rate, format `pix`. Multi-part masters are concatenated and cycled (looped) when too short."""
     fps = m["fps"]
@@ -236,7 +248,8 @@ def master_graph(ctx, m, nframes, pix, label="m"):
     i = 0
     while remaining > 0:
         part = m["parts"][i % len(m["parts"])]
-        avail = int(math.floor((part["duration"] - part["ss"]) * part["fps"])) - 1
+        pss = 0.0 if ss0 else part["ss"]
+        avail = int(math.floor((part["duration"] - pss) * part["fps"])) - 1
         take = min(remaining, max(1, avail))
         uses.append((part, take))
         remaining -= take
@@ -247,7 +260,7 @@ def master_graph(ctx, m, nframes, pix, label="m"):
     inputs, lines, labels = [], [], []
     for k, (part, take) in enumerate(uses):
         ss = None
-        if part["ss"] > 0:
+        if part["ss"] > 0 and not ss0:
             ss = max(0.0, part["ss"] - 0.25 / part["fps"])
         inputs.append((part["path"], ss))
         lab = label if len(uses) == 1 else "p%d" % k
@@ -260,15 +273,16 @@ def master_graph(ctx, m, nframes, pix, label="m"):
 
 # ---------------------------------------------------------------- rungs
 class Rung:
-    def __init__(self, ctx, master, kind, cw, ch, bits, codec, rate, tag, pre=None, active=None, latent=None, studio=None, preset=None):
+    def __init__(self, ctx, master, kind, cw, ch, bits, codec, rate, tag, pre=None, active=None, latent=None, studio=None, preset=None, full=False, nframes=None):
         self.master, self.kind, self.cw, self.ch, self.bits, self.codec = master, kind, cw, ch, bits, codec
         self.rate, self.pre, self.active, self.latent, self.studio = rate, pre, active, latent, studio
         m = ctx.masters[master]
         self.fps = m["fps"]
         self.gop = gop_of(m)
-        self.nframes = nframes_of(ctx, m)
+        self.full = full
+        self.nframes = (m["full_frames"] if full else (nframes or nframes_of(ctx, m)))
         self.id = "%s.%s" % (master, tag)
-        self.preset = preset or {"libx265": "fast", "libx264": "medium", "libaom-av1": "cpu8"}.get(codec, "fast")
+        self.preset = preset or {"libx265": "superfast", "libx264": "veryfast", "libaom-av1": "cpu8"}.get(codec, "fast")
         self.path = "%s/%s.mkv" % (ctx.rung_dir, self.id)
         self.frames_csv = "%s/%s.frames.csv" % (ctx.rung_dir, self.id)
         self.meta_path = "%s/%s.json" % (ctx.rung_dir, self.id)
@@ -276,7 +290,7 @@ class Rung:
 
     def params_hash(self, ctx):
         s = json.dumps([self.master, self.kind, self.cw, self.ch, self.bits, self.codec, self.rate, self.pre, self.active, self.latent,
-                        self.studio, self.nframes, self.gop, self.preset, ctx.args.preset_override, ctx.args.threads, ctx.masters[self.master]["parts"] and [p["ss"] for p in ctx.masters[self.master]["parts"]]], sort_keys=True)
+                        self.studio, self.nframes, self.gop, self.preset, ctx.args.preset_override, ctx.args.threads, self.full, ctx.masters[self.master]["parts"] and [p["ss"] for p in ctx.masters[self.master]["parts"]]], sort_keys=True)
         return hashlib.sha256(s.encode()).hexdigest()[:16]
 
     def est_bytes(self, ctx):
@@ -302,13 +316,13 @@ def tag_rate(rate):
     return "crf%d" % rate[1] if rate[0] == "crf" else "%dk" % rate[1]
 
 
-def need_rung(ctx, master, kind, ratio=None, codec="libx265", bits=10, rate=("crf", 20), pre=None, extra=None):
+def need_rung(ctx, master, kind, ratio=None, codec="libx265", bits=10, rate=("crf", 20), pre=None, extra=None, full=False, nframes=None, preset=None):
     """Returns the Rung (created once per unique id). kind: down | lb239 | pb43 | native | studio."""
     m = ctx.masters[master]
     W, H = m["w"], m["h"]
     codec_tag = {"libx265": "x265", "libx264": "x264", "libaom-av1": "aom"}[codec]
     base = "%s_%db_%s" % (codec_tag, bits, tag_rate(rate))
-    pre_tag = ("%s." % pre) if pre else ""
+    pre_tag = (("%s." % pre) if pre else "") + ("full." if full else "")
     active = latent = studio = None
     if kind == "native":
         cw, ch, tag = W, H, "%sn4k_%s" % (pre_tag, base)
@@ -331,9 +345,11 @@ def need_rung(ctx, master, kind, ratio=None, codec="libx265", bits=10, rate=("cr
     else:
         raise ValueError(kind)
     r = Rung(ctx, master, kind, cw, ch, bits, codec, rate, tag, pre=pre, active=active, latent=latent, studio=studio,
-             preset=(ctx.args.preset_override or None))
+             preset=(ctx.args.preset_override or preset or None), full=full, nframes=nframes)
     if r.id in ctx.rungs:
-        return ctx.rungs[r.id]
+        old = ctx.rungs[r.id]
+        old.nframes = max(old.nframes, r.nframes)       # consumers trim a prefix
+        return old
     ctx.rungs[r.id] = r
     return r
 
@@ -354,7 +370,7 @@ def rung_graph(ctx, r):
     m = ctx.masters[r.master]
     pix = "yuv420p10le" if r.bits == 10 else "yuv420p"
     # 10-bit working format even for 8-bit rungs so a gain / scale has headroom; the final format= quantises
-    inputs, g, looped = master_graph(ctx, m, r.nframes, "yuv420p10le", "m")
+    inputs, g, looped = master_graph(ctx, m, r.nframes, "yuv420p10le", "m", ss0=r.full)
     f = master_fps(m)
     parts = [g]
     cur = "m"
@@ -425,7 +441,7 @@ def codec_args(ctx, r, log_path):
     gop = r.gop
     pixf = "yuv420p10le" if r.bits == 10 else "yuv420p"
     if r.codec == "libx265":
-        xp = ("keyint=%d:min-keyint=%d:scenecut=0:open-gop=0:bframes=4:frame-threads=3:pools=%d:csv=%s:csv-log-level=2:log-level=error" %
+        xp = ("keyint=%d:min-keyint=%d:scenecut=0:open-gop=0:bframes=4:frame-threads=2:pools=%d:csv=%s:csv-log-level=2:log-level=error" %
               (gop, gop, T, os.path.basename(log_path)))   # relative: ffmpeg runs with cwd = the rung dir
         a = ["-c:v", "libx265", "-preset", r.preset, "-pix_fmt", pixf, "-x265-params", xp, "-tag:v", "hvc1"]
     elif r.codec == "libx264":
@@ -541,9 +557,10 @@ def encode_rung(ctx, r):
     csv_log = r.path + ".x265.csv"      # basename goes to x265 (cwd = rung dir)
     if os.path.exists(csv_log):
         os.remove(csv_log)
-    cmd = [ctx.ffmpeg, "-y", "-hide_banner", "-v", "error", "-filter_threads", str(ctx.args.threads)]
+    dthr = str(min(2, ctx.args.threads))
+    cmd = [ctx.ffmpeg, "-y", "-hide_banner", "-v", "error", "-filter_threads", dthr, "-filter_complex_threads", dthr]
     for path, ss in inputs:
-        cmd += ["-threads", str(ctx.args.threads)]
+        cmd += ["-threads", dthr]
         if ss:
             cmd += ["-ss", "%.6f" % ss]
         cmd += ["-i", path]
@@ -590,17 +607,20 @@ def read_frames_csv(path):
     return out
 
 
-def master_frames(ctx, m, a, n):
-    """pict_type per frame of an as-is master window (ffprobe on the interval); QP unknown (-1)."""
+def master_frames(ctx, m, full=False):
+    """pict_type per frame of an as-is master window (ffprobe on the interval; full = the whole master from 0); QP unknown (-1)."""
     part = m["parts"][0]
-    cache = "%s/_master_%s.frames.csv" % (ctx.rung_dir, m["id"])
+    cache = "%s/_master_%s%s.frames.csv" % (ctx.rung_dir, m["id"], ".full" if full else "")
     if os.path.exists(cache):
         return read_frames_csv(cache)
     f = master_fps(m)
-    ss = max(0.0, part["ss"] - 0.25 / part["fps"])
-    nf = nframes_of(ctx, m)
-    r = run([ctx.ffprobe, "-v", "error", "-select_streams", "v:0", "-read_intervals", "%.6f%%+%.3f" % (ss, nf / f + 1.0),
-             "-show_entries", "frame=pict_type,best_effort_timestamp_time", "-of", "csv=p=0", part["path"]])
+    ss = 0.0 if full else max(0.0, part["ss"] - 0.25 / part["fps"])
+    nf = m["full_frames"] if full else nframes_of(ctx, m)
+    cmd = [ctx.ffprobe, "-v", "error", "-select_streams", "v:0"]
+    if not full:
+        cmd += ["-read_intervals", "%.6f%%+%.3f" % (ss, nf / f + 1.0)]
+    cmd += ["-show_entries", "frame=pict_type,best_effort_timestamp_time", "-of", "csv=p=0", part["path"]]
+    r = run(cmd)
     rows = []
     for ln in r.stdout.decode("utf-8", "replace").splitlines():
         c = ln.strip().split(",")
@@ -611,16 +631,18 @@ def master_frames(ctx, m, a, n):
     rows.sort()
     rows = [x for x in rows if x[0] >= ss - 1e-6][:nf]
     os.makedirs(ctx.rung_dir, exist_ok=True)
-    with open(cache, "w", encoding="utf-8", newline="\n") as fh:
+    tmp = cache + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("frame,pict_type,qp\n")
         for i, (_, t) in enumerate(rows):
             fh.write("%d,%s,-1\n" % (i, t))
+    os.replace(tmp, cache)
     return [(t, -1.0) for _, t in rows]
 
 
 # ---------------------------------------------------------------- reel model
-def seg_stream(src, a, b, chain=None, frc=None, overlays=None, fades=None, note=""):
-    return dict(kind="stream", src=src, a=a, b=b, chain=chain or {}, frc=frc, overlays=overlays or [], fades=fades or {}, note=note)
+def seg_stream(src, a, b, chain=None, frc=None, overlays=None, fades=None, note="", full=False):
+    return dict(kind="stream", src=src, a=a, b=b, chain=chain or {}, frc=frc, overlays=overlays or [], fades=fades or {}, note=note, full=full)
 
 
 def seg_gen(kind, frames, bits=8, note=""):
@@ -649,6 +671,7 @@ class Reel:
     def __init__(self, rid, family, title, master, segs, fps_out=None, note="", flags=None):
         self.id, self.family, self.title, self.master, self.segs = rid, family, title, master, segs
         self.fps_out, self.note, self.flags = fps_out, note, flags or []
+        self.prio = 0
 
 
 def add_reel(ctx, reel):
@@ -672,59 +695,87 @@ def gp(ctx, m, frac):
     return max(1, int(round(ctx.gops * frac))) * gop_of(m)
 
 
+R1_TITLES = ["film_dragon", "film_married", "nat30_nikon", "nat30_sequim", "nat24_steeple", "nat25_funchal", "sport60_k808", "sport30_torschuss",
+             "dark60_meridian", "nat30_halona", "film_bury", "nat50_natgeo", "nat30_rheinfall"]
+R1_ASIS_ONLY = ["sport30_sidemen"]          # a real AV1 4K stream: played as-is, never re-encoded
+# (priority, codec, bits, rate, preset): the budget cutter drops the highest priority number first, never below 3
+R1_VARIANTS = [(1, "libx264", 8, ("kbps", 2500), "veryfast"),      # blocky low rate
+               (2, "libx265", 10, ("kbps", 6000), "superfast"),
+               (3, "libx264", 8, ("kbps", 8000), "veryfast"),
+               (4, "libx265", 10, ("kbps", 14000), "superfast"),
+               (5, "libx264", 8, ("kbps", 16000), "veryfast")]
+
+
 def build_r1(ctx):
-    n = lambda m: nframes_of(ctx, m)
-    for mid in ("film_dragon", "film_married", "nat30_nikon", "nat30_sequim", "sport60_k808", "sport30_torschuss", "nat24_steeple", "dark60_meridian", "nat25_funchal"):
+    """R1 native 4K at the FULL length of every master (from 0, no loop): as-is + stream encodes (fast presets: blocky streams are the point)."""
+    for mid in R1_TITLES + R1_ASIS_ONLY:
         m = avail(ctx, mid, need_8bit=True)
-        if not m:
+        if not m or not m.get("full_frames"):
             continue
-        add_reel(ctx, Reel("R1.%s.asis" % mid, "R1", "native 4K master as-is (%s)" % m["cls"], mid,
-                           [seg_stream(("master", mid), 0, n(m), {"bits": 8, "native": True}, note="master window as-is")]))
-    variants = [("libx265", 8, ("kbps", 3000)), ("libx265", 10, ("kbps", 8000)), ("libx265", 10, ("kbps", 20000)), ("libx264", 8, ("kbps", 8000))]
-    for mid in ("film_dragon", "nat30_nikon", "sport60_k808", "nat24_steeple", "dark60_meridian"):
+        reel = Reel("R1.%s.asis" % mid, "R1", "native 4K master as-is, full length (%s)" % m["cls"], mid,
+                    [seg_stream(("master", mid), 0, m["full_frames"], {"bits": 8, "native": True}, note="master as-is, full length", full=True)])
+        reel.prio = 0
+        add_reel(ctx, reel)
+    for mid in R1_TITLES:
         m = avail(ctx, mid)
-        if not m:
+        if not m or not m.get("full_frames"):
             continue
-        for codec, bits, rate in variants:
+        for prio, codec, bits, rate, preset in R1_VARIANTS:
             if codec not in ctx.encoders:
                 continue
-            r = need_rung(ctx, mid, "native", codec=codec, bits=bits, rate=rate)
-            add_reel(ctx, Reel("R1.%s.%s" % (mid, r.id.split(".", 1)[1]), "R1", "native 4K stream encode %s %d-bit %s" % (codec, bits, tag_rate(rate)), mid,
-                               [seg_stream(("rung", r.id), 0, n(m), {"bits": bits, "native": True})]))
+            r = need_rung(ctx, mid, "native", codec=codec, bits=bits, rate=rate, full=True, preset=preset)
+            reel = Reel("R1.%s.%s" % (mid, r.id.split(".", 1)[1]), "R1", "native 4K stream encode %s %s %d-bit %s, full length" % (codec, preset, bits, tag_rate(rate)), mid,
+                        [seg_stream(("rung", r.id), 0, r.nframes, {"bits": bits, "native": True})])
+            reel.prio = prio
+            add_reel(ctx, reel)
     m = avail(ctx, "nat30_nikon")
-    av1 = "libsvtav1" if "libsvtav1" in ctx.encoders else ("libaom-av1" if "libaom-av1" in ctx.encoders else None)
-    if m and av1 == "libaom-av1" and ctx.args.av1:      # opt-in: libaom at 4K is far too slow for the default run (no SVT-AV1 here)
-        r = need_rung(ctx, "nat30_nikon", "native", codec="libaom-av1", bits=10, rate=("kbps", 6000))
-        add_reel(ctx, Reel("R1.nat30_nikon.%s" % r.id.split(".", 1)[1], "R1", "native 4K stream encode AV1 (libaom) 10-bit 6000k", "nat30_nikon",
-                           [seg_stream(("rung", r.id), 0, n(m), {"bits": 10, "native": True})]))
+    if m and ctx.args.av1 and "libaom-av1" in ctx.encoders:      # opt-in 60 s window: libaom at 4K is far too slow for more
+        r = need_rung(ctx, "nat30_nikon", "native", codec="libaom-av1", bits=10, rate=("kbps", 6000), nframes=30 * gop_of(m))
+        reel = Reel("R1.nat30_nikon.%s" % r.id.split(".", 1)[1], "R1", "native 4K stream encode AV1 (libaom) 10-bit 6000k, 60 s", "nat30_nikon",
+                    [seg_stream(("rung", r.id), 0, r.nframes, {"bits": 10, "native": True})])
+        reel.prio = 9
+        add_reel(ctx, reel)
 
 
 def clean_chain(ctx, m, rung, kernel, **kw):
     return full_chain(ctx, m, rung, kernel, **kw)
 
 
+CLEAN_MASTERS = ["nat30_nikon", "film_dragon", "nat30_sequim", "film_married", "nat24_steeple", "nat25_funchal", "dark60_meridian", "nat30_halona",
+                 "film_bury", "nat50_natgeo"]       # all >= 60 s after their start: no loops
+
+
+def kernel_for(ctx, mi, ri):
+    """Latin square: every kernel appears at every ratio (10 masters x 10 kernels), so kernel accuracy is not confounded with n."""
+    k = KERNEL_ROTATION[(mi + 2 * ri) % len(KERNEL_ROTATION)]
+    if KERNELS[k]["backend"] == "zimg" and not ctx.zscale:
+        k = "lanczos3"
+    return k
+
+
 def build_r2(ctx):
-    masters = ["film_dragon", "nat30_nikon", "sport60_k808", "nat24_steeple", "dark60_meridian", "nat25_funchal", "sport30_torschuss"]
-    for mi, mid in enumerate(masters):
+    for mi, mid in enumerate(CLEAN_MASTERS):
         m = avail(ctx, mid)
         if not m:
             continue
-        nf = nframes_of(ctx, m)
+        nfc = ctx.gops_clean * gop_of(m)
         for ri, ratio in enumerate(RATIOS):
-            kernel = KERNEL_ROTATION[(mi * 5 + ri) % len(KERNEL_ROTATION)]
-            if KERNELS[kernel]["backend"] == "zimg" and not ctx.zscale:
-                kernel = "lanczos3"
-            r = need_rung(ctx, mid, "down", ratio)
-            add_reel(ctx, Reel("R2.clean.%s.r%dof%d.%s" % (mid, ratio[0], ratio[1], kernel), "R2", "clean 10-bit player upscale %d/%d, %s" % (ratio[0], ratio[1], kernel), mid,
-                               [seg_stream(("rung", r.id), 0, nf, clean_chain(ctx, m, r, kernel))]))
+            kernel = kernel_for(ctx, mi, ri)
+            b8 = (mi + ri) % 4 == 0                      # a quarter of the clean reels are 8-bit (ordered dither), the rest 10-bit
+            r = need_rung(ctx, mid, "down", ratio, nframes=nfc)
+            chain = clean_chain(ctx, m, r, kernel, bits=(8 if b8 else 10), dither=("bayer" if b8 else "none"))
+            add_reel(ctx, Reel("R2.clean.%s.r%dof%d.%s%s" % (mid, ratio[0], ratio[1], kernel, "_8b" if b8 else ""), "R2",
+                               "clean %d-bit player upscale %d/%d, %s" % (8 if b8 else 10, ratio[0], ratio[1], kernel), mid,
+                               [seg_stream(("rung", r.id), 0, nfc, chain)]))
     m = avail(ctx, "nat30_nikon")
-    if m:                      # kernel sweep at 1/2
-        r = need_rung(ctx, "nat30_nikon", "down", (1, 2))
+    if m:                      # kernel sweep at 1/2 (60 s)
+        nfc = ctx.gops_clean * gop_of(m)
+        r = need_rung(ctx, "nat30_nikon", "down", (1, 2), nframes=nfc)
         for kernel in KERNEL_ROTATION:
             if KERNELS[kernel]["backend"] == "zimg" and not ctx.zscale:
                 continue
             add_reel(ctx, Reel("R2.clean.nat30_nikon.r1of2.%s" % kernel, "R2", "kernel sweep 1/2 %s" % kernel, "nat30_nikon",
-                               [seg_stream(("rung", r.id), 0, nframes_of(ctx, m), clean_chain(ctx, m, r, kernel))]))
+                               [seg_stream(("rung", r.id), 0, nfc, clean_chain(ctx, m, r, kernel))]))
     # dirty chains: grain / USM / 8-bit + dither / low-rate rung
     for mid in ("film_dragon", "film_married", "nat30_nikon", "dark60_meridian"):
         m = avail(ctx, mid)
@@ -967,6 +1018,8 @@ def frc_map(in_fps, out_fps, mode, n_in):
             src = min(int(math.floor(x)), n_in - 1)
             frac = float(x - src)
             blended = 1 if 0.06 < frac < 0.94 else 0
+            if frac >= 0.94:
+                src = min(src + 1, n_in - 1)           # framerate emits the next frame here (not a blend)
         rows.append((src, 1 if prev == src else 0, blended))
         prev = src
     return rows
@@ -1059,8 +1112,9 @@ def compile_reel(ctx, reel):
                 head = "[%d:v]fps=fps=%s:round=near,trim=start_frame=%d:end_frame=%d,setpts=PTS-STARTPTS" % (idx, fstr(in_fps), seg["a"], seg["b"])
             else:
                 part = m["parts"][0]
-                ss = max(0.0, part["ss"] + seg["a"] / master_fps(m) - 0.25 / master_fps(m))
-                idx = add_input(part["path"], ss)
+                base_ss = 0.0 if seg.get("full") else part["ss"]
+                ss = max(0.0, base_ss + seg["a"] / master_fps(m) - 0.25 / master_fps(m))
+                idx = add_input(part["path"], ss if ss > 0 else None)
                 head = "[%d:v]fps=fps=%s:round=near,trim=start_frame=0:end_frame=%d,setpts=PTS-STARTPTS" % (idx, fstr(in_fps), n_in)
             flt = [head]
             for st in chain.get("stages", []):
@@ -1158,6 +1212,19 @@ def check_graph(fc, n_inputs):
 
 
 # ---------------------------------------------------------------- truth
+def fade_spans(ctx, r):
+    """Fade-through-black spans of a pre="fades" rung, in rung frame indices: [start, end, "out"|"in"] (see rung_graph)."""
+    m = ctx.masters[r.master]
+    f = master_fps(m)
+    fd = int(round(1.5 * f))
+    spans = []
+    for x in (0.27, 0.53, 0.80):
+        c = int(r.nframes * x)
+        spans.append([c - fd, c, "out"])
+        spans.append([c, c + fd, "in"])
+    return spans
+
+
 def seg_truth(ctx, reel, cs):
     m = ctx.masters[reel.master]
     W, H = m["w"], m["h"]
@@ -1226,6 +1293,8 @@ def seg_truth(ctx, reel, cs):
             t["overlay_row_fraction"] = frac
     t["overlays"] = [dict(type=o["type"], start=o.get("start"), end=o.get("end")) for o in seg["overlays"]]
     t["fades"] = seg["fades"]
+    if r is not None and r.pre == "fades":
+        t["fade_spans"] = fade_spans(ctx, r)
     return t
 
 
@@ -1273,7 +1342,7 @@ def write_truth_csv(ctx, reel, comp, seg_truths):
                 if ks == "rung":
                     types = read_frames_csv(ctx.rungs[sid].frames_csv)
                 else:
-                    types = master_frames(ctx, m, seg["a"], n_in)
+                    types = master_frames(ctx, m, seg.get("full", False))
             rows = frc_map(in_fps, tuple(seg["frc"]["out"]), seg["frc"]["mode"], n_in) if seg.get("frc") else [(j, 0, 0) for j in range(n_in)]
             gop = gop_of(m)
             for j, (src, rep, bl) in enumerate(rows):
@@ -1289,6 +1358,10 @@ def write_truth_csv(ctx, reel, comp, seg_truths):
                     flags.append("fade_out")
                 if fd.get("in_") and src < fd["in_"]:
                     flags.append("fade_in")
+                if seg["src"][0] == "rung" and ctx.rungs[seg["src"][1]].pre == "fades":
+                    for (fa, fb, fk) in fade_spans(ctx, ctx.rungs[seg["src"][1]]):
+                        if fa <= sf < fb:
+                            flags.append("fade_" + fk)
                 f.write("%s,%d,%.6f,%d,stream,%s,%d,%s,%s,%d,%d,%d,%d,%s\n" % (reel.id, of, of / out_f, cs["idx"], ctx_src_id(seg), sf, pt, ("%.2f" % qp),
                                                                                   rep, bl, sf // gop, 1 if pt == "I" else 0, "|".join(flags)))
     return path
@@ -1320,31 +1393,240 @@ def build_all(ctx, families):
         ctx.rungs = {k: v for k, v in ctx.rungs.items() if k in used}
 
 
+def will_loop(m, nframes, ss0):
+    if m["synthetic"] or len(m["parts"]) != 1:
+        return False
+    part = m["parts"][0]
+    pss = 0.0 if ss0 else part["ss"]
+    return nframes > int(math.floor((part["duration"] - pss) * part["fps"])) - 1
+
+
+LOOP_OK = ("flat_sol", "grain60_nocturne")
+
+
 def validate_reels(ctx):
     bad = 0
     for reel in ctx.reels:
         comp = compile_reel(ctx, reel)
-        probs = check_graph(comp["fc"] if "fc" in comp else comp["filter_complex"], len(comp["inputs"]))
+        probs = check_graph(comp["filter_complex"], len(comp["inputs"]))
         fpsv = comp["fps"][0] / float(comp["fps"][1])
-        if comp["frames"] / fpsv < 30.0 - 1e-6 and ctx.gops >= 15:
-            probs.append("reel shorter than 30 s (%.2f s)" % (comp["frames"] / fpsv))
+        need = 60.0 if reel.id.startswith("R2.clean") else (0.0 if reel.family == "R1" else 30.0)
+        if comp["frames"] / fpsv < need - 1e-6 and (ctx.gops >= 15 and (not reel.id.startswith("R2.clean") or ctx.gops_clean >= 30)):
+            probs.append("reel shorter than %.0f s (%.2f s)" % (need, comp["frames"] / fpsv))
+        for sg in reel.segs:
+            if sg["src"] and sg["src"][0] == "rung":
+                r = ctx.rungs[sg["src"][1]]
+                m = ctx.masters[r.master]
+                if will_loop(m, r.nframes, r.full) and r.master not in LOOP_OK:
+                    probs.append("rung %s would loop its master (%d frames)" % (r.id, r.nframes))
+            elif sg["src"] and sg["src"][0] == "master":
+                m = ctx.masters[sg["src"][1]]
+                if will_loop(m, sg["b"] - sg["a"] + sg["a"], sg.get("full", False)):
+                    probs.append("as-is master %s would run past its end" % m["id"])
         for p in probs:
-            print("GRAPH PROBLEM %s: %s" % (reel.id, p))
+            print("PROBLEM %s: %s" % (reel.id, p))
             bad += 1
     return bad
 
 
-def print_plan(ctx):
-    est = 0
-    for r in plan_rungs_for(ctx):
-        est += r.est_bytes(ctx)
+FALLBACK_FPS_4K = {("libx264", "veryfast"): 12.0, ("libx264", "medium"): 4.0, ("libx265", "superfast"): 8.0, ("libx265", "veryfast"): 5.0,
+                   ("libx265", "fast"): 2.5, ("libx265", "ultrafast"): 14.0, ("libx264", "ultrafast"): 20.0, ("libaom-av1", "cpu8"): 1.0}
+
+
+def rung_kept(ctx, r):
+    if not (os.path.exists(r.path) and os.path.exists(r.meta_path)):
+        return False
+    try:
+        with open(r.meta_path, "r", encoding="utf-8") as f:
+            return json.load(f).get("params_hash") == r.params_hash(ctx)
+    except (OSError, ValueError):
+        return False
+
+
+def calibrate(ctx):
+    """Measure ONE short encode per (codec, preset) at 3840x2160 with the real settings (pinned threads): frames per second."""
+    pairs = sorted(set((r.codec, r.preset) for r in ctx.rungs.values()))
+    res = dict(FALLBACK_FPS_4K)
+    if ctx.args.no_calibrate or not pairs:
+        return res
+    m = next((x for x in ctx.masters.values() if x.get("parts") and not x.get("skip") and x["eight_bit"]), None)
+    if not m:
+        return res
+    import time
+    os.makedirs(ctx.work_dir, exist_ok=True)
+    nfr = 60
+    part = m["parts"][0]
+    for codec, preset in pairs:
+        if codec == "libaom-av1":
+            continue
+        stub = type("S", (), dict(gop=60, bits=(10 if codec == "libx265" else 8), codec=codec, preset=preset, rate=("kbps", 8000), cw=3840, ch=2160))()
+        cmd = [ctx.ffmpeg, "-y", "-hide_banner", "-v", "error", "-threads", "2", "-ss", "%.3f" % max(0.0, part["ss"]), "-i", part["path"], "-frames:v", str(nfr),
+               "-an", "-vf", "format=%s" % ("yuv420p10le" if stub.bits == 10 else "yuv420p")] + codec_args(ctx, stub, "calib.csv") + ["-f", "null", "-"]
+        best = None
+        for _ in range(2):             # the machine is shared: keep the faster of two runs
+            t0 = time.time()
+            r = run(cmd, cwd=ctx.work_dir)
+            dt = time.time() - t0
+            if r.returncode == 0 and dt > 0.5 and (best is None or dt < best):
+                best = dt
+        if best:
+            res[(codec, preset)] = nfr / best
+            print("  calibration %s %s at 4K, %d threads: %.1f fps (%d frames in %.1f s, best of 2)" % (codec, preset, ctx.args.threads, nfr / best, nfr, best))
+    return res
+
+
+def rung_seconds(r, fps4k):
+    ref = fps4k.get((r.codec, r.preset), 3.0)
+    fps = min(ref * (3840 * 2160.0) / (r.cw * r.ch), 150.0)
+    return r.nframes / fps
+
+
+def estimate_hours(ctx, fps4k):
+    return sum(rung_seconds(r, fps4k) for r in ctx.rungs.values() if not rung_kept(ctx, r)) / 3600.0
+
+
+def prune_rungs(ctx):
+    used = set()
+    for rl in ctx.reels:
+        for sg in rl.segs:
+            if sg["src"] and sg["src"][0] == "rung":
+                used.add(sg["src"][1])
+    ctx.rungs = {k: v for k, v in ctx.rungs.items() if k in used}
+
+
+def cut_to_budget(ctx, fps4k):
+    """Drop R1 encode variants (highest priority number first, never below as-is + the blocky x264 encode; the lead is told which were cut) until the estimate fits --budget-hours."""
+    cuts = []
+    while estimate_hours(ctx, fps4k) > ctx.args.budget_hours:
+        prios = sorted(set(rl.prio for rl in ctx.reels if rl.family == "R1" and rl.prio > 1), reverse=True)
+        if not prios:
+            break
+        pr = prios[0]
+        ctx.reels = [rl for rl in ctx.reels if not (rl.family == "R1" and rl.prio == pr)]
+        prune_rungs(ctx)
+        cuts.append(pr)
+    return cuts
+
+
+def print_plan(ctx, fps4k=None):
+    est = sum(r.est_bytes(ctx) for r in plan_rungs_for(ctx))
     fam = {}
+    secs = {}
     for r in ctx.reels:
         fam[r.family] = fam.get(r.family, 0) + 1
+        fr = ctx.masters[r.master]["fps"]
+        fpsv = (r.fps_out[0] / float(r.fps_out[1])) if r.fps_out else fr[0] / float(fr[1])
+        secs[r.family] = secs.get(r.family, 0.0) + sum(seg_out_frames(sg, fr) for sg in r.segs) / fpsv
     print("masters: %s" % ", ".join("%s%s" % (k, "(SKIP: %s)" % v["skip"] if v.get("skip") else "") for k, v in ctx.masters.items()))
     print("reels: %d  %s" % (len(ctx.reels), "  ".join("%s=%d" % (k, fam[k]) for k in sorted(fam))))
-    print("rungs: %d  estimated %.2f GB (budget %.1f GB)   D: free %.1f GB (floor %.1f GB)" % (len(ctx.rungs), est / 1073741824.0, ctx.args.rung_budget_gb,
-                                                                                               disk_free_gb(ctx.out), ctx.args.min_free_gb))
+    r1 = [r for r in ctx.reels if r.family == "R1"]
+    r1h = secs.get("R1", 0.0) / 3600.0
+    mids = set(r.master for r in r1)
+    uniq = sum(ctx.masters[mid]["full_frames"] / master_fps(ctx.masters[mid]) for mid in mids if ctx.masters[mid].get("full_frames")) / 3600.0
+    print("R1 (phase A, offline): H_A = %.2f h of native reels (%d reels) from %d titles, unique footage %.2f h; all reels %.2f h" %
+          (r1h, len(r1), len(mids), uniq, sum(secs.values()) / 3600.0))
+    print("rungs: %d  estimated %.1f GB (budget %.1f GB)   output drive free %.1f GB (floor %.1f GB)" % (len(ctx.rungs), est / 1073741824.0, ctx.args.rung_budget_gb,
+                                                                                                   disk_free_gb(ctx.out), ctx.args.min_free_gb))
+    if fps4k is not None:
+        todo = [r for r in ctx.rungs.values() if not rung_kept(ctx, r)]
+        print("generation wall time at %d threads (measured 4K fps per codec/preset, scaled by pixels): %.1f h for %d rungs to encode (%d kept); budget %.1f h" %
+              (ctx.args.threads, estimate_hours(ctx, fps4k), len(todo), len(ctx.rungs) - len(todo), ctx.args.budget_hours))
+
+
+def detect_shots(ctx, m):
+    """Shot boundaries of a master (ffmpeg scdet on a 480-wide proxy), frame indices from frame 0; cached in work/shots_<id>.json."""
+    cache = "%s/shots_%s.json" % (ctx.work_dir, m["id"])
+    if os.path.exists(cache):
+        with open(cache, "r", encoding="utf-8") as f:
+            return json.load(f)
+    part = m["parts"][0]
+    f = master_fps(m)
+    txt = "shots_%s.txt" % m["id"]
+    cmd = [ctx.ffmpeg, "-y", "-hide_banner", "-v", "error", "-threads", "2", "-i", part["path"], "-an", "-vf",
+           "fps=fps=%s:round=near,scale=480:-2,scdet=threshold=10:sc_pass=1,metadata=mode=print:file=%s" % (fstr(m["fps"]), txt), "-f", "null", "-"]
+    r = run(cmd, cwd=ctx.work_dir)
+    frames = []
+    tp = os.path.join(ctx.work_dir, txt)
+    if r.returncode == 0 and os.path.exists(tp):
+        with open(tp, "r", encoding="utf-8", errors="replace") as fh:
+            for ln in fh:
+                mm = re.search(r"pts_time:([0-9.]+)", ln)
+                if mm:
+                    frames.append(int(round(float(mm.group(1)) * f)))
+        os.remove(tp)
+    doc = dict(method="ffmpeg scdet threshold=10 on a 480-wide proxy", cuts=sorted(set(x for x in frames if x > 0)), ok=(r.returncode == 0))
+    with open(cache, "w", encoding="utf-8", newline=NL) as fh:
+        json.dump(doc, fh)
+    return doc
+
+
+def detect_shots_cached(ctx, m):
+    cache = "%s/shots_%s.json" % (ctx.work_dir, m["id"])
+    if os.path.exists(cache):
+        with open(cache, "r", encoding="utf-8") as f:
+            return json.load(f).get("cuts", [])
+    return None
+
+
+def sha256_cached(ctx, path):
+    cache_path = ctx.work_dir + "/sha256.json"
+    cache = {}
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+        except (OSError, ValueError):
+            cache = {}
+    st = os.stat(path)
+    key = P(path)
+    e = cache.get(key)
+    if e and e["size"] == st.st_size and e["mtime"] == int(st.st_mtime):
+        return e["sha256"]
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
+            h.update(chunk)
+    cache[key] = dict(size=st.st_size, mtime=int(st.st_mtime), sha256=h.hexdigest())
+    os.makedirs(ctx.work_dir, exist_ok=True)
+    with open(cache_path, "w", encoding="utf-8", newline=NL) as f:
+        json.dump(cache, f, indent=1)
+    return h.hexdigest()
+
+
+README_BEGIN = "<!-- MASTERS:BEGIN (written by make_identity_reels.py) -->"
+README_END = "<!-- MASTERS:END -->"
+
+
+def masters_table(ctx):
+    rows = ["| Master id | Class | File (path) | Size (bytes) | SHA256 | Origin URL | Licence | Author |", "|---|---|---|---|---|---|---|---|"]
+    for mid, m in ctx.masters.items():
+        if m.get("skip"):
+            rows.append("| %s | %s | not available: %s | | | | | |" % (mid, m["cls"], m["skip"]))
+            continue
+        if m["synthetic"]:
+            rows.append("| %s | %s | generated by the script (work/credits.txt, drawtext on black) | - | - | - | %s | - |" % (mid, m["cls"], m["lic"]))
+            continue
+        for p in m["parts"]:
+            sha = sha256_cached(ctx, p["path"]) if ctx.args.hash_masters else "not computed (run --readme-only --hash-masters)"
+            rows.append("| %s | %s | %s | %d | %s | %s | %s | %s |" % (mid, m["cls"], P(p["path"]), os.path.getsize(p["path"]), sha, p["url"] or "origin not recorded",
+                                                                       p["lic"] or m["lic"], p["author"] or "-"))
+    return NL.join(rows)
+
+
+def update_readme(ctx):
+    path = ctx.out + "/README.md"
+    text = ""
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8", newline="") as f:
+            text = f.read().replace(chr(13) + NL, NL)
+    block = README_BEGIN + NL + masters_table(ctx) + NL + README_END
+    if README_BEGIN in text and README_END in text:
+        i, j = text.index(README_BEGIN), text.index(README_END) + len(README_END)
+        text = text[:i] + block + text[j:]
+    else:
+        text = text.rstrip() + NL + NL + "## Masters: files, sizes, hashes" + NL + NL + block + NL
+    with open(path, "w", encoding="utf-8", newline=NL) as f:
+        f.write(text)
 
 
 def write_manifest(ctx):
@@ -1374,14 +1656,19 @@ def write_manifest(ctx):
     for k, m in ctx.masters.items():
         masters_out[k] = dict(id=k, cls=m["cls"], skip=m.get("skip", ""), width=m.get("w"), height=m.get("h"), fps=list(m["fps"]) if m.get("fps") else None,
                               eight_bit=m.get("eight_bit"), licence=m["lic"], url=m["url"], size_mb=m.get("size_mb"),
-                              parts=[dict(path=P(p["path"]), ss_s=p["ss"], pix_fmt=p["pix_fmt"], licence=p["lic"], author=p["author"], url=p["url"]) for p in m["parts"]])
+                              full_frames=m.get("full_frames", 0),
+                              full_seconds=(round(m["full_frames"] / master_fps(m), 3) if m.get("full_frames") else 0),
+                              shots=detect_shots_cached(ctx, m),
+                              parts=[dict(path=P(p["path"]), ss_s=p["ss"], pix_fmt=p["pix_fmt"], licence=p["lic"], author=p["author"], url=p["url"] or "origin not recorded",
+                                          size_bytes=os.path.getsize(p["path"]), sha256=(sha256_cached(ctx, p["path"]) if ctx.args.hash_masters else None)) for p in m["parts"]])
     doc = dict(schema=SCHEMA, generator="tools/eval/source_id/make_identity_reels.py", seed=SEED, ffmpeg=ctx.version, zscale=ctx.zscale,
                encoders=sorted(ctx.encoders), gops=ctx.gops, threads=ctx.args.threads, output_pix_fmt="gray16le",
                note="luma codes: the harness takes y16 >> (16 - bits) per segment, bits from segments[].bits; no film frames are stored with this file",
                masters=masters_out, rungs=rungs_out, reels=reels_out)
     os.makedirs(ctx.out, exist_ok=True)
-    with open(ctx.out + "/reels.json", "w", encoding="utf-8", newline="\n") as f:
+    with open(ctx.out + "/reels.json.tmp", "w", encoding="utf-8", newline=NL) as f:
         json.dump(doc, f, indent=1, sort_keys=False)
+    os.replace(ctx.out + "/reels.json.tmp", ctx.out + "/reels.json")
     return len(reels_out), len(rungs_out)
 
 
@@ -1400,6 +1687,21 @@ def write_credits(ctx):
         f.write("\n".join(lines) + "\n")
 
 
+def limit_process(mask):
+    """Below-normal priority and a logical-processor mask for this process; ffmpeg / x265 children inherit both (owner cap: 4 threads)."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.GetCurrentProcess()
+        k.SetPriorityClass(h, 0x4000)
+        if mask:
+            k.SetProcessAffinityMask(h, mask)
+    except Exception as e:      # never fatal
+        print("could not limit the process: %s" % e)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--out", default="D:/testclips/sourceid")
@@ -1410,9 +1712,15 @@ def main(argv=None):
     ap.add_argument("--only-reel", default="", help="comma list of reel id substrings")
     ap.add_argument("--plan", action="store_true")
     ap.add_argument("--manifest-only", action="store_true")
-    ap.add_argument("--threads", type=int, default=6)
+    ap.add_argument("--threads", type=int, default=4, help="encoder pool threads; the process is also pinned to --affinity-mask")
+    ap.add_argument("--affinity-mask", type=lambda x: int(x, 0), default=0xF, help="logical processors for this process and its ffmpeg children (4 by default)")
+    ap.add_argument("--budget-hours", type=float, default=8.0, help="wall-time budget of the whole generation; R1 variants are cut to fit")
+    ap.add_argument("--gops-clean", type=int, default=30, help="GOPs of the R2.clean reels (30 = >= 60 s)")
+    ap.add_argument("--readme-only", action="store_true", help="hash the masters and rewrite the masters table of <out>/README.md")
+    ap.add_argument("--no-calibrate", action="store_true")
+    ap.add_argument("--hash-masters", action="store_true", help="SHA256 of every master (cached) into reels.json and the README table")
     ap.add_argument("--min-free-gb", type=float, default=40.0)
-    ap.add_argument("--rung-budget-gb", type=float, default=15.0)
+    ap.add_argument("--rung-budget-gb", type=float, default=20.0)
     ap.add_argument("--preset-override", default="")
     ap.add_argument("--ffmpeg-dir", default="D:/tools/ffmpeg/bin")
     ap.add_argument("--no-zscale", action="store_true")
@@ -1421,17 +1729,28 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.selftest:
         return selftest()
+    limit_process(args.affinity_mask)
     ctx = Ctx(args)
     probe_tools(ctx)
     load_masters(ctx)
     os.makedirs(ctx.work_dir, exist_ok=True)
     write_credits(ctx)
+    if args.readme_only:
+        os.makedirs(ctx.out, exist_ok=True)
+        update_readme(ctx)
+        print("masters table written to %s/README.md" % ctx.out)
+        return 0
     build_all(ctx, [f for f in args.families.split(",") if f in FAMILIES])
     bad = validate_reels(ctx)
-    print_plan(ctx)
     if bad:
-        print("graph validation failed; nothing generated")
+        print("validation failed; nothing generated")
         return 2
+    fps4k = calibrate(ctx)
+    cuts = cut_to_budget(ctx, fps4k)
+    for pr in cuts:
+        v = [x for x in R1_VARIANTS if x[0] == pr][0]
+        print("CUT R1 variant %s %s %s: the generation estimate exceeded the %.1f h budget" % (v[1], v[4], tag_rate(v[3]), args.budget_hours))
+    print_plan(ctx, fps4k)
     if args.plan:
         return 0
     try:
@@ -1444,6 +1763,12 @@ def main(argv=None):
     except StopForDisk as e:
         print(str(e))
         return 3
+    for mid in sorted(set(r.master for r in ctx.reels if r.family == "R1")):
+        if ctx.masters[mid].get("parts"):
+            d = detect_shots(ctx, ctx.masters[mid])
+            print("  shots %s: %d cuts" % (mid, len(d["cuts"])))
+    if args.hash_masters:
+        update_readme(ctx)
     nr, nrung = write_manifest(ctx)
     print("manifest: %d reels, %d rungs -> %s/reels.json   ffmpeg: %s" % (nr, nrung, ctx.out, ctx.version))
     return 0
@@ -1462,13 +1787,18 @@ def selftest():
         limit = 0
         only_reel = ""
         av1 = True
+        budget_hours = 8.0
+        no_calibrate = True
+        hash_masters = False
+        gops_clean = 30
     ctx = Ctx(A)
     ctx.zscale = True
     ctx.encoders = {"libx264", "libx265", "libaom-av1"}
     for mid, cls, parts, lic in MASTERS:
         m = dict(id=mid, cls=cls, parts=[], synthetic=mid in SYNTHETIC, lic="x", url="", skip="", w=3840, h=2160, fps=(24000, 1001), pix_fmt="yuv420p", eight_bit=True, size_mb=0)
         for path, ss in parts:
-            m["parts"].append(dict(path=path, ss=ss, w=3840, h=2160, fps=23.976, pix_fmt="yuv420p", duration=40.0, url="", lic="", author="", size_mb=1))
+            m["parts"].append(dict(path=path, ss=ss, w=3840, h=2160, fps=23.976, pix_fmt="yuv420p", duration=300.0, url="", lic="", author="", size_mb=1))
+        m["full_frames"] = 0 if (m["synthetic"] or len(parts) != 1) else 3000
         ctx.masters[mid] = m
     ctx.masters["sport60_k808"]["fps"] = (60000, 1001)
     ctx.masters["nat30_nikon"]["fps"] = (30000, 1001)
@@ -1539,6 +1869,29 @@ def selftest():
     kinds = [s["kind"] for s in compile_reel(ctx, reel)["segs"]]
     assert kinds == ["stream", "black", "menu", "black", "stream"], kinds
     # rung budget estimate stays far below the 15 GB cap
+    # Latin square: every kernel at every ratio among the clean reels; clean reels are 60 s; R1 is full length
+    seen = {}
+    for rl in ctx.reels:
+        if rl.id.startswith("R2.clean.") and ".r" in rl.id:
+            tag = rl.id.split(".")[3]
+            seen.setdefault(tag, set()).add(rl.id.split(".")[4].replace("_8b", ""))
+    for tag, ks in seen.items():
+        assert len(ks) == len(KERNEL_ROTATION), (tag, ks)
+    for rl in ctx.reels:
+        comp = compile_reel(ctx, rl)
+        if rl.id.startswith("R2.clean"):
+            assert comp["frames"] / (comp["fps"][0] / float(comp["fps"][1])) >= 59.9, rl.id
+    assert any(rl.id.endswith(".asis") for rl in ctx.reels) and all(rl.prio == 0 for rl in ctx.reels if rl.id.endswith(".asis"))
+    r1 = [rl for rl in ctx.reels if rl.family == "R1"]
+    assert all(sg["b"] == 3000 for rl in r1 if rl.prio != 9 for sg in rl.segs), "R1 reels must play the full master"
+    assert len(set(rl.master for rl in r1)) >= 13
+    # budget cutter keeps as-is + the blocky x264 encode at least
+    ctx.args.budget_hours = 0.001
+    ctx.args.no_calibrate = True
+    cuts = cut_to_budget(ctx, dict(FALLBACK_FPS_4K))
+    assert cuts == [9, 5, 4, 3, 2], cuts
+    assert sorted(set(rl.prio for rl in ctx.reels if rl.family == "R1")) == [0, 1]
+    assert frc_map((30000, 1001), (60000, 1001), "blend", 4)[0][0] == 0
     est = sum(r.est_bytes(ctx) for r in ctx.rungs.values())
     print("selftest ok: %d reels, %d rungs, estimated rung bytes %.2f GB" % (len(ctx.reels), len(ctx.rungs), est / 1073741824.0))
     return 0
