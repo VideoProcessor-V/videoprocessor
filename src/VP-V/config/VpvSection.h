@@ -25,13 +25,27 @@
 #include <QStringList>
 
 #include <functional>
+#include <vector>
 
 class QWidget;
 
 namespace Vpv
 {
+	// A settings page of its own that belongs to a unit of the VP-V page (registered through the Config
+	// page host as a sub-page): the unit's tab shows a button that opens it.
+	struct SubPage
+	{
+		QString pageName;      // the page's name in the editor
+		QString title;         // the button text
+		QString description;   // the button's tooltip
+	};
+
 	struct Host
 	{
+		// The sub-pages grouped under a unit (unit id, e.g. "output"); may be empty (none).
+		std::function<std::vector<SubPage>(const QString& unitId)> subPages;
+		// Opens a page of the editor by its name.
+		std::function<void(const QString& pageName)> openPage;
 		// The stored value of key in section ("" when absent). Sections are the editor's names:
 		// "vprenderer", "vprenderer.<profile>", "queue", "vpv".
 		std::function<QString(const QString& section, const QString& key)> value;

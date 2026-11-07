@@ -9,6 +9,7 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClCompile Include="..\VP-V\config\VpvSection.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\config_ui\CalibrationPage.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\projector_control\SerialPort.cpp">
       <ObjectFileName>$(IntDir)LedSerialPortStandalone.obj</ObjectFileName>
     </ClCompile>

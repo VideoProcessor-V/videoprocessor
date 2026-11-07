@@ -1555,6 +1555,42 @@ ConfigEditorWindow::ConfigEditorWindow(QString configPath, quintptr ownerHandle,
     };
     formApi_.markDirtyFn = [this] { markDirty(); };
     formApi_.profileSectionsFn = [this](const QString& root) { return profileSections(root); };
+    // The editor's own field helpers and services for provider pages (ConfigPageHost::EditorKit).
+    Vpv::FunctionEditorKit& kit = formApi_.kit;
+    kit.valueFn = [this](const QString& s, const QString& k, const QString& fallback) { return value(s, k, fallback); };
+    kit.bindTextFn = [this](const QString& s, const QString& k, const QString& fallback) { return bindTextField(s, k, fallback); };
+    kit.bindChoiceFn = [this](const QString& s, const QString& k, const QStringList& values, const QStringList& labels) { return bindChoiceField(s, k, values, labels); };
+    kit.bindCheckFn = [this](const QString& label, const QString& s, const QString& k, bool on) { return bindCheckField(label, s, k, on); };
+    kit.controlNameFn = [](const QString& s, const QString& k) { return controlName(s, k); };
+    kit.helpLabelFn = [](const QString& text) { return helpLabel(text); };
+    kit.createCardFn = [this](const QString& title, const QString& help, QWidget* content) { return createCard(title, help, content); };
+    kit.createPageFn = [this](const QString& title, const QString& help, QWidget* body) { return createPage(title, help, body); };
+    kit.createCardGridFn = [] { return static_cast<QWidget*>(new ResponsiveCardGrid); };
+    kit.addCardFn = [](QWidget* grid, QWidget* card) { static_cast<ResponsiveCardGrid*>(grid)->addCard(card); };
+    kit.setKnownFn = [this](const QString& s, const QString& k, const QString& text)
+    {
+        if (!document_) return;
+        if (!document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toStdString()))
+        {
+            document_->AddSection(s.toStdString());
+            document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toStdString());
+        }
+    };
+    kit.markDirtyFn = [this](QObject* edited)
+    {
+        if (edited && edited->objectName().startsWith(QStringLiteral("config.")))
+            editOrder_[edited->objectName()] = ++editSerial_;
+        markDirty();
+    };
+    kit.windowFn = [this] { return static_cast<QWidget*>(this); };
+    kit.currentPageFn = [this] { return pages_ ? pages_->currentWidget() : nullptr; };
+    kit.settingsPreviewFn = [] { return sandboxPreview(); };
+    kit.noTargetFn = [this] { return noTarget_; };
+    kit.remoteTargetFn = [this] { return ConfigPageHost::EditorKit::RemoteTarget{ remoteClient_ != nullptr, remoteHost_, remotePort_ }; };
+    kit.documentDirtyFn = [this] { return dirty_; };
+    kit.discardEditsFn = [this] { discardEdits(); };
+    kit.setStatusFn = [this](const QString& text) { setStatus(text); };
+    kit.setWarningStatusFn = [this](const QString& text) { setWarningStatus(text); };
     // VPV-HOOK-END
     loadConfiguration();
     runLoadMigrations();
@@ -1693,12 +1729,7 @@ ConfigEditorWindow::~ConfigEditorWindow()
 		projectorTestThread_->wait();
 		projectorTestThread_ = nullptr;
 	}
-	// Automatic calibration: a status request (bounded by the RPC timeout).
-	if (calibrationRpcThread_)
-	{
-		calibrationRpcThread_->wait();
-		calibrationRpcThread_ = nullptr;
-	}
+	ConfigPageHost::OnEditorClosing(formApi_);   // VPV-HOOK (a Calibration status request is joined here)
 	if (remoteApplyThread_)
 	{
 		// Second pass (audit 2026-10-16): do not hold exit for up to a
@@ -2249,7 +2280,7 @@ void ConfigEditorWindow::selectPage(int index)
     if (!navigation_) return;
     const int navigationIndex = index == 4 || index == 11 || index == 13 ? 2 :
         index == 12 ? 3 :
-        index == 8 || index == 9 ? 8 : index;
+        index == 8 || index == 9 ? 8 : vpvPages_.navigationIndex(index);   // VPV-HOOK (a sub-page lights its parent's leaf)
     for (QAbstractButton* button : navigation_->findChildren<QAbstractButton*>())
     {
         const bool selected = button->property("pageIndex").isValid() &&
@@ -5438,7 +5469,7 @@ QWidget* ConfigEditorWindow::createShell()
     // VPV-HOOK
     vpvPages_.reset();
     vpvPages_.append(pages_, QStringLiteral("Dynamic Drive"), createLedDrivePage());
-    vpvPages_.append(pages_, QStringLiteral("Calibration"), createCalibrationPage());
+    vpvPages_.appendProviderPages(pages_, formApi_);   // sub-pages first, so the VP-V page can link them
     // VP-V section hook (owner 2026-10-24; src/VP-V/config/README.md). The whole VP-V section lives in src/VP-V/config/;
     // this block and the "VP-V" navigation leaf below are its only footprint in this file.
     {
@@ -5457,11 +5488,18 @@ QWidget* ConfigEditorWindow::createShell()
         vpvHost.profileSections = [this](const QString& root) { return profileSections(root); };
         vpvHost.upstreamControlName = [](const QString& key) { return controlName(QStringLiteral("vprenderer"), key); };
         vpvHost.upstreamRoot = pages_;
+        vpvHost.subPages = [this](const QString& unitId)
+        {
+            std::vector<Vpv::SubPage> subs;
+            for (const auto& sub : vpvPages_.subPagesOf(QStringLiteral("VP-V"), unitId))
+                subs.push_back({ sub.name, sub.name, sub.description });
+            return subs;
+        };
+        vpvHost.openPage = [this](const QString& pageName) { selectPage(pageName); };
         vpvPages_.append(pages_, QStringLiteral("VP-V"), createPage(QStringLiteral("VP-V"),
             QStringLiteral("Everything VP-V adds, by unit: one tier per unit plus a global tier, each unit's settings, and the fallbacks engaged."),
             Vpv::CreateSection(vpvHost)));
     }
-    vpvPages_.appendProviderPages(pages_, formApi_);   // VPV-HOOK
     // VPV-HOOK-END
     auto* navGroup = new QButtonGroup(root);
     navGroup->setExclusive(true);
@@ -16642,607 +16680,6 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
     }
     return createPage(QStringLiteral("Dynamic Drive"),
         QStringLiteral("Projector LED dimming and the gamma boost."), cards);
-}
-
-// Automatic calibration (docs/calibration/AUTO-CALIBRATION.md): the [calibration]
-// settings - every key has a control here - and the wizard. The wizard talks to
-// VP over the configuration RPC (Operation::Calibration): VP owns the renderer,
-// the meter (ArgyllCMS spotread) and the configuration edits; this page sends
-// commands and shows the status. A run uses the saved settings.
-namespace
-{
-    QMap<QString, QString> parseCalibrationStatus(const QString& text)
-    {
-        QMap<QString, QString> values;
-        for (const QString& line : text.split(QLatin1Char('\n')))
-        {
-            const int colon = line.indexOf(QStringLiteral(": "));
-            if (colon <= 0) continue;
-            QString value = line.mid(colon + 2);
-            QString unescaped;
-            for (int i = 0; i < value.size(); ++i)
-            {
-                if (value[i] == QLatin1Char('\\') && i + 1 < value.size())
-                {
-                    ++i;
-                    unescaped += value[i] == QLatin1Char('n') ? QChar(QLatin1Char('\n')) : value[i];
-                }
-                else
-                    unescaped += value[i];
-            }
-            values.insert(line.left(colon), unescaped);
-        }
-        return values;
-    }
-
-    QString calibrationStepTitle(const QString& step)
-    {
-        static const QMap<QString, QString> titles = {
-            { QStringLiteral("idle"), QStringLiteral("Ready") },
-            { QStringLiteral("opening_meter"), QStringLiteral("1. Connecting to the meter") },
-            { QStringLiteral("meter_calibration"), QStringLiteral("1. Meter calibration") },
-            { QStringLiteral("placement"), QStringLiteral("2. Place the meter") },
-            { QStringLiteral("warm_up"), QStringLiteral("3. Warm-up") },
-            { QStringLiteral("measuring"), QStringLiteral("4. Measuring") },
-            { QStringLiteral("fitting"), QStringLiteral("5. Building the LUTs") },
-            { QStringLiteral("verifying"), QStringLiteral("6. Verifying") },
-            { QStringLiteral("review"), QStringLiteral("7. Review") },
-            { QStringLiteral("applied"), QStringLiteral("Applied") },
-            { QStringLiteral("discarded"), QStringLiteral("Discarded") },
-            { QStringLiteral("cancelled"), QStringLiteral("Cancelled") },
-            { QStringLiteral("failed"), QStringLiteral("Stopped") },
-            // Phase 2.
-            { QStringLiteral("user_action"), QStringLiteral("Your turn") },
-            { QStringLiteral("done"), QStringLiteral("Done") },
-        };
-        return titles.value(step, step);
-    }
-
-    bool calibrationStepFinal(const QString& step)
-    {
-        return step.isEmpty() || step == QStringLiteral("idle") || step == QStringLiteral("applied") ||
-            step == QStringLiteral("discarded") || step == QStringLiteral("cancelled") || step == QStringLiteral("failed") ||
-            step == QStringLiteral("done");
-    }
-}
-
-QWidget* ConfigEditorWindow::createCalibrationPage()
-{
-    const QString section = QStringLiteral("calibration");
-    auto* cards = new ResponsiveCardGrid;
-
-    auto setValue = [this, section](const QString& key, const QString& text)
-    {
-        if (!document_) return;
-        const std::string sectionText = section.toStdString();
-        const std::string keyText = key.toStdString();
-        if (!document_->SetKnown(sectionText, keyText.c_str(), text.toStdString()))
-        {
-            document_->AddSection(sectionText);
-            document_->SetKnown(sectionText, keyText.c_str(), text.toStdString());
-        }
-        markDirty();
-    };
-    auto integer = [this, section, setValue](const QString& key, int minimum, int maximum, int fallback,
-        const QString& suffix)
-    {
-        auto* spin = new QSpinBox;
-        spin->setObjectName(controlName(section, key));
-        spin->setAccessibleName(key);
-        spin->setRange(minimum, maximum);
-        bool ok = false;
-        const int configured = value(section, key).toInt(&ok);
-        spin->setValue(ok ? std::min(std::max(configured, minimum), maximum) : fallback);
-        if (!suffix.isEmpty()) spin->setSuffix(QStringLiteral(" ") + suffix);
-        spin->setMaximumWidth(140);
-        connect(spin, qOverload<int>(&QSpinBox::valueChanged), this,
-            [setValue, key](int v) { setValue(key, QString::number(v)); });
-        return spin;
-    };
-    auto number = [this, section, setValue](const QString& key, double minimum, double maximum, double fallback,
-        int decimals, const QString& suffix)
-    {
-        auto* spin = new QDoubleSpinBox;
-        spin->setObjectName(controlName(section, key));
-        spin->setAccessibleName(key);
-        spin->setRange(minimum, maximum);
-        spin->setDecimals(decimals);
-        bool ok = false;
-        const double configured = value(section, key).toDouble(&ok);
-        spin->setValue(ok ? std::min(std::max(configured, minimum), maximum) : fallback);
-        if (!suffix.isEmpty()) spin->setSuffix(QStringLiteral(" ") + suffix);
-        spin->setMaximumWidth(140);
-        connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-            [setValue, key](double v) { setValue(key, QString::number(v, 'g', 6)); });
-        return spin;
-    };
-    auto browseRow = [this](QLineEdit* edit, bool folder, const QString& filter)
-    {
-        auto* row = new QWidget;
-        auto* layout = new QHBoxLayout(row);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->addWidget(edit, 1);
-        auto* browse = new QPushButton(QStringLiteral("Browse…"));
-        browse->setObjectName(edit->objectName() + QStringLiteral(".browse"));
-        layout->addWidget(browse);
-        connect(browse, &QPushButton::clicked, this, [this, edit, folder, filter]()
-        {
-            const QString chosen = folder ?
-                QFileDialog::getExistingDirectory(this, QStringLiteral("ArgyllCMS folder"), edit->text()) :
-                QFileDialog::getOpenFileName(this, QStringLiteral("Spectral correction"), edit->text(), filter);
-            if (!chosen.isEmpty()) edit->setText(QDir::toNativeSeparators(chosen));
-        });
-        return row;
-    };
-
-    // ------------------------------------------------------------- meter
-    auto* meter = new QWidget;
-    auto* meterForm = new QFormLayout(meter);
-    meterForm->setContentsMargins(0, 0, 0, 0);
-    meterForm->setVerticalSpacing(8);
-    auto* argyll = bindTextField(section, QStringLiteral("argyll_path"));
-    argyll->setPlaceholderText(QStringLiteral("Search PATH and the usual install folders"));
-    argyll->setToolTip(QStringLiteral(
-        "The ArgyllCMS folder (the one holding bin\\spotread.exe), bin itself, or spotread.exe. Empty: VP searches "
-        "ARGYLL_PATH, PATH, Program Files, your profile and C:\\ for an Argyll* folder. VP never bundles or "
-        "downloads ArgyllCMS."));
-    meterForm->addRow(QStringLiteral("ArgyllCMS folder"), browseRow(argyll, true, QString()));
-    auto* detect = new QPushButton(QStringLiteral("Detect ArgyllCMS and meters"));
-    detect->setObjectName(QStringLiteral("calibration.detect"));
-    detect->setMaximumWidth(260);
-    auto* probe = helpLabel(QStringLiteral("Press Detect to find ArgyllCMS and the connected meters (uses the saved "
-        "folder; Apply first after changing it)."));
-    probe->setObjectName(QStringLiteral("calibration.probe"));
-    probe->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    meterForm->addRow(detect, probe);
-    connect(detect, &QPushButton::clicked, this, [this]() { runCalibrationCommand(QStringLiteral("detect")); });
-
-    const QStringList models = { QStringLiteral("auto"), QStringLiteral("i1d3"), QStringLiteral("colormunki_display"),
-        QStringLiteral("i1d2"), QStringLiteral("spyderx2"), QStringLiteral("spyderx"), QStringLiteral("spyder5"),
-        QStringLiteral("spyder4"), QStringLiteral("dtp94"), QStringLiteral("i1pro3"), QStringLiteral("i1pro2"),
-        QStringLiteral("i1pro"), QStringLiteral("colormunki_photo"), QStringLiteral("jeti"), QStringLiteral("klein_k10"),
-        QStringLiteral("other"), QStringLiteral("simulated") };
-    const QStringList modelLabels = { QStringLiteral("Automatic (from the connected meter)"),
-        QStringLiteral("Calibrite Display Pro / Plus (HL), i1Display Pro / Plus"),
-        QStringLiteral("ColorMunki Display, i1Display Studio"), QStringLiteral("i1Display 2 / LT, Huey Pro"),
-        QStringLiteral("Datacolor Spyder X2"), QStringLiteral("Datacolor Spyder X"), QStringLiteral("Datacolor Spyder 5"),
-        QStringLiteral("Datacolor Spyder 4"), QStringLiteral("X-Rite DTP94"), QStringLiteral("X-Rite i1Pro 3"),
-        QStringLiteral("X-Rite i1Pro 2"), QStringLiteral("X-Rite i1Pro"), QStringLiteral("X-Rite ColorMunki Photo / Design"),
-        QStringLiteral("JETI specbos / spectraval"), QStringLiteral("Klein K10-A"),
-        QStringLiteral("Another ArgyllCMS instrument"), QStringLiteral("Dry run (simulated meter, real patches)") };
-    auto* model = bindChoiceField(section, QStringLiteral("meter_model"), models, modelLabels);
-    model->setToolTip(QStringLiteral("Any meter ArgyllCMS supports works. The model tunes VP's handling: sensor "
-        "calibration prompts (spectros), the low-light floor for near-black averaging, CCSS or CCMX corrections."));
-    meterForm->addRow(QStringLiteral("Meter"), model);
-    auto* port = integer(QStringLiteral("meter_port"), 0, 64, 0, QString());
-    port->setSpecialValueText(QStringLiteral("First found"));
-    port->setToolTip(QStringLiteral("spotread's -c number from Detect's list; First found uses the first meter."));
-    meterForm->addRow(QStringLiteral("Meter number"), port);
-    auto* displayType = bindTextField(section, QStringLiteral("display_type"));
-    displayType->setPlaceholderText(QStringLiteral("The meter's default"));
-    displayType->setMaximumWidth(140);
-    displayType->setToolTip(QStringLiteral("spotread's -y display type selector (Detect lists the meter's choices). "
-        "For a colorimeter pick the type closest to your display's light source."));
-    meterForm->addRow(QStringLiteral("Display type"), displayType);
-    auto* correction = bindTextField(section, QStringLiteral("spectral_correction"));
-    correction->setPlaceholderText(QStringLiteral("None"));
-    correction->setToolTip(QStringLiteral("A .ccss spectral sample set (i1Display / Spyder family) or a .ccmx matrix "
-        "for your display's light source; strongly advised for laser and LED projectors and wide-gamut screens."));
-    meterForm->addRow(QStringLiteral("Spectral correction"),
-        browseRow(correction, false, QStringLiteral("Corrections (*.ccss *.ccmx);;All files (*)")));
-    auto* refresh = bindChoiceField(section, QStringLiteral("refresh_mode"),
-        { QStringLiteral("auto"), QStringLiteral("refresh"), QStringLiteral("non_refresh") },
-        { QStringLiteral("Meter decides"), QStringLiteral("Refresh display"), QStringLiteral("Non-refresh display") });
-    refresh->setToolTip(QStringLiteral("Whether the meter synchronises to the display's refresh (spotread -Y r / -Y n). "
-        "Meter decides measures it."));
-    meterForm->addRow(QStringLiteral("Refresh mode"), refresh);
-    meterForm->addRow(QStringLiteral("Reading time limit"),
-        integer(QStringLiteral("read_timeout_s"), 5, 600, 60, QStringLiteral("s")));
-    cards->addCard(createCard(QStringLiteral("Meter"), QStringLiteral(
-        "ArgyllCMS's spotread drives the meter; install ArgyllCMS yourself from argyllcms.com."), meter));
-
-    // ----------------------------------------------------- display / patches
-    auto* display = new QWidget;
-    auto* displayForm = new QFormLayout(display);
-    displayForm->setContentsMargins(0, 0, 0, 0);
-    displayForm->setVerticalSpacing(8);
-    auto* kind = bindChoiceField(section, QStringLiteral("display_kind"),
-        { QStringLiteral("projector"), QStringLiteral("lcd"), QStringLiteral("oled"), QStringLiteral("other") },
-        { QStringLiteral("Projector"), QStringLiteral("LCD TV / monitor"), QStringLiteral("OLED TV / monitor"),
-            QStringLiteral("Other") });
-    kind->setToolTip(QStringLiteral("Sets the patch window and settle time when those are left at automatic: "
-        "projectors full field, LCD 18% window, OLED 10% window (keeps ABL out of the measurement)."));
-    displayForm->addRow(QStringLiteral("Display"), kind);
-    auto* name = bindTextField(section, QStringLiteral("display_name"));
-    name->setPlaceholderText(QStringLiteral("The output monitor's name"));
-    displayForm->addRow(QStringLiteral("Display name"), name);
-    auto* window = number(QStringLiteral("patch_window_percent"), 0.0, 100.0, 0.0, 1, QStringLiteral("% of the screen"));
-    window->setSpecialValueText(QStringLiteral("Automatic"));
-    displayForm->addRow(QStringLiteral("Patch window"), window);
-    displayForm->addRow(QStringLiteral("Window surround"),
-        number(QStringLiteral("background_percent"), 0.0, 100.0, 0.0, 1, QStringLiteral("% grey")));
-    auto* settle = integer(QStringLiteral("settle_ms"), 0, 30000, 0, QStringLiteral("ms"));
-    settle->setSpecialValueText(QStringLiteral("Automatic"));
-    settle->setToolTip(QStringLiteral("The wait after each patch change before reading. Automatic: 0.5 s for "
-        "projectors, 0.8 s OLED, 1 s LCD, plus more after a large drop to dark."));
-    displayForm->addRow(QStringLiteral("Settle time"), settle);
-    auto* reads = integer(QStringLiteral("near_black_max_reads"), 1, 16, 4, QStringLiteral("readings"));
-    reads->setToolTip(QStringLiteral("Near black a colorimeter's count is noisy: VP averages up to this many readings "
-        "(stopping early when two agree) and marks patches below the meter's floor."));
-    displayForm->addRow(QStringLiteral("Near-black readings"), reads);
-    displayForm->addRow(QStringLiteral("Agreement"),
-        number(QStringLiteral("repeat_tolerance_percent"), 0.1, 20.0, 1.0, 1, QStringLiteral("%")));
-    auto* warm = integer(QStringLiteral("warmup_minutes"), 0, 180, 30, QStringLiteral("min"));
-    warm->setToolTip(QStringLiteral("Displays drift as they warm up; the wizard can skip it when the display has "
-        "been on long enough."));
-    displayForm->addRow(QStringLiteral("Warm-up"), warm);
-    auto* drift = integer(QStringLiteral("drift_interval"), 0, 1000, 50, QStringLiteral("patches"));
-    drift->setToolTip(QStringLiteral("White is measured again every this many patches; VP corrects slow drift."));
-    displayForm->addRow(QStringLiteral("Drift check every"), drift);
-    cards->addCard(createCard(QStringLiteral("Display and patches"), QStringLiteral(
-        "Patches are exact codes in VP's active output (BTB / WTW included); the sigma-delta and dither are "
-        "bypassed for the patch only."), display));
-
-    // ------------------------------------------------------------ target
-    auto* target = new QWidget;
-    auto* targetForm = new QFormLayout(target);
-    targetForm->setContentsMargins(0, 0, 0, 0);
-    targetForm->setVerticalSpacing(8);
-    auto* plan = bindChoiceField(section, QStringLiteral("plan"),
-        { QStringLiteral("quick"), QStringLiteral("cube5"), QStringLiteral("standard"), QStringLiteral("cube13"),
-            QStringLiteral("thorough") },
-        { QStringLiteral("Quick (greyscale + colours)"), QStringLiteral("5³ cube"), QStringLiteral("Standard (9³ cube)"),
-            QStringLiteral("13³ cube"), QStringLiteral("Thorough (17³ cube)") });
-    targetForm->addRow(QStringLiteral("Measurements"), plan);
-    auto* estimate = helpLabel(QString());
-    estimate->setObjectName(QStringLiteral("calibration.plan_estimate"));
-    targetForm->addRow(QString(), estimate);
-    auto showEstimate = [plan, estimate]()
-    {
-        static const QMap<QString, QString> times = {
-            { QStringLiteral("quick"), QStringLiteral("About 10 minutes on a projector (longer on a dim display).") },
-            { QStringLiteral("cube5"), QStringLiteral("About 15 minutes.") },
-            { QStringLiteral("standard"), QStringLiteral("About 35-45 minutes.") },
-            { QStringLiteral("cube13"), QStringLiteral("About 1.5 hours.") },
-            { QStringLiteral("thorough"), QStringLiteral("About 2.5 hours.") } };
-        estimate->setText(times.value(plan->currentData().toString()));
-    };
-    connect(plan, qOverload<int>(&QComboBox::currentIndexChanged), this, [showEstimate](int) { showEstimate(); });
-    showEstimate();
-    targetForm->addRow(QStringLiteral("Target response"), bindChoiceField(section, QStringLiteral("target_transfer"),
-        { QStringLiteral("bt1886"), QStringLiteral("gamma") },
-        { QStringLiteral("BT.1886 (with the measured black)"), QStringLiteral("Pure gamma") }));
-    targetForm->addRow(QStringLiteral("Gamma"), number(QStringLiteral("target_gamma"), 1.6, 3.0, 2.4, 2, QString()));
-    targetForm->addRow(QStringLiteral("White level"),
-        number(QStringLiteral("target_white_percent"), 25.0, 100.0, 100.0, 0, QStringLiteral("% of the brightest D65 white")));
-    targetForm->addRow(QStringLiteral("LUT size"), bindChoiceField(section, QStringLiteral("lut_size"),
-        { QStringLiteral("17"), QStringLiteral("33"), QStringLiteral("65") },
-        { QStringLiteral("17³"), QStringLiteral("33³ (recommended)"), QStringLiteral("65³") }));
-    auto* verify = bindCheckField(QStringLiteral("Verify through the new LUT (about 60 patches)"), section,
-        QStringLiteral("verify_after"), true);
-    targetForm->addRow(QString(), verify);
-    cards->addCard(createCard(QStringLiteral("Target and LUT"), QStringLiteral(
-        "One run writes the BT.709, P3-D65 and BT.2020 LUTs; Apply attaches them to the live Color / Output profile."),
-        target));
-
-    // ------------------------------------------- phase 2: the other runs
-    auto* runs = new QWidget;
-    auto* runsForm = new QFormLayout(runs);
-    runsForm->setContentsMargins(0, 0, 0, 0);
-    runsForm->setVerticalSpacing(8);
-    auto* fluxStep = integer(QStringLiteral("led_flux_step"), 1, 50, 5, QStringLiteral("LPW1 steps"));
-    fluxStep->setToolTip(QStringLiteral("Dynamic Drive run: the flux sweep's LPW1 step, from full light down to the "
-        "lowest level VP drives and back up (both directions show the hysteresis)."));
-    runsForm->addRow(QStringLiteral("Flux sweep step"), fluxStep);
-    auto* dwell = integer(QStringLiteral("led_dwell_ms"), 500, 20000, 3000, QStringLiteral("ms"));
-    dwell->setToolTip(QStringLiteral("Wait after each LPW1 change before the meter reads (the LED settling plus margin)."));
-    runsForm->addRow(QStringLiteral("LED dwell"), dwell);
-    runsForm->addRow(QStringLiteral("Readings per level"),
-        integer(QStringLiteral("led_reads_per_level"), 1, 8, 2, QStringLiteral("readings")));
-    auto* cntrMax = integer(QStringLiteral("led_cntr_sweep_max"), 50, 100, 74, QString());
-    cntrMax->setToolTip(QStringLiteral("The highest CNTR the run sets (from 50 up). Find where code 235 stops gaining "
-        "(dmd_clip_cntr) and where light stops rising (cntr_max_usable). CNTR goes back to 50 at the end or on Cancel."));
-    runsForm->addRow(QStringLiteral("CNTR sweep up to"), cntrMax);
-    runsForm->addRow(QStringLiteral("CNTR dwell"),
-        integer(QStringLiteral("led_cntr_dwell_ms"), 200, 20000, 1500, QStringLiteral("ms")));
-    auto* sensorPort = bindTextField(section, QStringLiteral("led_sensor_port"));
-    sensorPort->setPlaceholderText(QStringLiteral("None (latency not measured)"));
-    sensorPort->setMaximumWidth(160);
-    sensorPort->setToolTip(QStringLiteral("A fast light sensor (photodiode or VEML7700 in a fast mode on a "
-        "microcontroller, one reading per line: value, or device microseconds and value) on its own COM port. A "
-        "colorimeter is too slow for the LED's response time; without this sensor latency and settle are not measured."));
-    runsForm->addRow(QStringLiteral("Fast light sensor port"), sensorPort);
-    runsForm->addRow(QStringLiteral("Fast sensor speed"),
-        integer(QStringLiteral("led_sensor_baud"), 1200, 2000000, 115200, QStringLiteral("baud")));
-    runsForm->addRow(QStringLiteral("Steps per direction"),
-        integer(QStringLiteral("led_step_repeats"), 1, 10, 3, QString()));
-    auto* hdrCurve = bindChoiceField(section, QStringLiteral("hdr_verify_tone_curve"),
-        { QStringLiteral("vp"), QStringLiteral("bt2390"), QStringLiteral("none") },
-        { QStringLiteral("VP's own tone mapping"), QStringLiteral("BT.2390 model"), QStringLiteral("None (PQ as sent)") });
-    hdrCurve->setToolTip(QStringLiteral("HDR verify: the target for each PQ patch. VP's own = the tone curve VP uses for "
-        "the playing HDR source (falls back to BT.2390 before the first HDR frame)."));
-    runsForm->addRow(QStringLiteral("HDR verify target"), hdrCurve);
-    runsForm->addRow(QStringLiteral("HDR source peak (model)"),
-        number(QStringLiteral("hdr_verify_source_peak"), 100.0, 10000.0, 1000.0, 0, QStringLiteral("cd/m²")));
-    auto* record = bindCheckField(QStringLiteral("Record real meter transcripts (test-data format)"), section,
-        QStringLiteral("record_transcripts"), false);
-    record->setToolTip(QStringLiteral("Saves every spotread session as a script for VP's tests "
-        "(recorded_<meter>_<time>.txt): commit one to src\\VideoProcessor-Test\\data\\spotread."));
-    runsForm->addRow(QString(), record);
-    auto* transcripts = bindTextField(section, QStringLiteral("transcript_folder"));
-    transcripts->setPlaceholderText(QStringLiteral("luts\\calibration\\transcripts"));
-    runsForm->addRow(QStringLiteral("Transcript folder"), browseRow(transcripts, true, QString()));
-    cards->addCard(createCard(QStringLiteral("Dynamic Drive, room light and HDR runs"), QStringLiteral(
-        "Choose the run in Calibrate. The Dynamic Drive run steps the projector's LED and CNTR within its ranges and "
-        "always restores full light and CNTR 50."), runs));
-
-    // ------------------------------------------------------------ wizard
-    auto* wizard = new QWidget;
-    auto* wizardLayout = new QVBoxLayout(wizard);
-    wizardLayout->setContentsMargins(0, 0, 0, 0);
-    wizardLayout->setSpacing(8);
-    auto* step = new QLabel(QStringLiteral("Ready"));
-    step->setObjectName(QStringLiteral("calibration.wizard.step"));
-    step->setStyleSheet(QStringLiteral("font-size: 15px; font-weight: 600;"));
-    wizardLayout->addWidget(step);
-    auto* instruction = helpLabel(QStringLiteral(
-        "Start runs the calibration with the saved settings: connect the meter, place it, measure, review, then "
-        "Apply or Discard. VP shows the patches; keep a source playing so the VP Renderer is running."));
-    instruction->setObjectName(QStringLiteral("calibration.wizard.instruction"));
-    instruction->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    wizardLayout->addWidget(instruction);
-    auto* progress = new QProgressBar;
-    progress->setObjectName(QStringLiteral("calibration.wizard.progress"));
-    progress->setRange(0, 1);
-    progress->setValue(0);
-    progress->setTextVisible(true);
-    wizardLayout->addWidget(progress);
-    auto* reading = new QLabel;
-    reading->setObjectName(QStringLiteral("calibration.wizard.reading"));
-    wizardLayout->addWidget(reading);
-    auto* message = helpLabel(QString());
-    message->setObjectName(QStringLiteral("calibration.wizard.message"));
-    message->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    wizardLayout->addWidget(message);
-    auto* review = new QPlainTextEdit;
-    review->setObjectName(QStringLiteral("calibration.wizard.review"));
-    review->setReadOnly(true);
-    review->setMinimumHeight(140);
-    review->setVisible(false);
-    wizardLayout->addWidget(review);
-    // Phase 2: which run Start begins, and the room's lux for the ambient check.
-    auto* runRow = new QWidget;
-    auto* runLayout = new QHBoxLayout(runRow);
-    runLayout->setContentsMargins(0, 0, 0, 0);
-    runLayout->addWidget(new QLabel(QStringLiteral("Run")));
-    auto* runKind = new QComboBox;
-    runKind->setObjectName(QStringLiteral("calibration.wizard.kind"));
-    runKind->addItem(QStringLiteral("Display calibration (3D LUTs)"), QStringLiteral("calibration"));
-    runKind->addItem(QStringLiteral("Dynamic Drive characterisation (projector LED / CNTR)"), QStringLiteral("led"));
-    runKind->addItem(QStringLiteral("Ambient-light check (screen reflectance)"), QStringLiteral("ambient"));
-    runKind->addItem(QStringLiteral("HDR (PQ) verify"), QStringLiteral("hdr_verify"));
-    runKind->setToolTip(QStringLiteral("Display calibration builds the LUTs. Dynamic Drive measures the flux table, the "
-        "CNTR curve and (with a fast sensor) the LED timing. Ambient-light measures black and white with the room "
-        "lights off and on (ambient_screen_reflect). HDR verify measures PQ tracking and dE ITP."));
-    runLayout->addWidget(runKind, 1);
-    runLayout->addWidget(new QLabel(QStringLiteral("Room light")));
-    auto* lux = new QDoubleSpinBox;
-    lux->setObjectName(QStringLiteral("calibration.wizard.lux"));
-    lux->setRange(0.0, 200000.0);
-    lux->setDecimals(1);
-    lux->setSuffix(QStringLiteral(" lux"));
-    lux->setSpecialValueText(QStringLiteral("Sensor"));
-    lux->setMaximumWidth(130);
-    lux->setToolTip(QStringLiteral("Ambient-light check without VP's light sensor: the room's lux, sent with Continue "
-        "(a phone light-meter app is close enough). Sensor: VP's [ambient] sensor reading; a dark room counts as 0."));
-    runLayout->addWidget(lux);
-    wizardLayout->addWidget(runRow);
-    auto* buttons = new QWidget;
-    auto* buttonLayout = new QHBoxLayout(buttons);
-    buttonLayout->setContentsMargins(0, 0, 0, 0);
-    const QList<QPair<QString, QString>> actions = {
-        { QStringLiteral("start"), QStringLiteral("Start") }, { QStringLiteral("continue"), QStringLiteral("Continue") },
-        { QStringLiteral("skip"), QStringLiteral("Skip warm-up") }, { QStringLiteral("apply"), QStringLiteral("Apply") },
-        { QStringLiteral("discard"), QStringLiteral("Discard") }, { QStringLiteral("cancel"), QStringLiteral("Cancel") } };
-    for (const auto& action : actions)
-    {
-        auto* button = new QPushButton(action.second);
-        button->setObjectName(QStringLiteral("calibration.wizard.") + action.first);
-        button->setEnabled(action.first == QStringLiteral("start"));
-        buttonLayout->addWidget(button);
-        const QString command = action.first;
-        connect(button, &QPushButton::clicked, this, [this, command, runKind, lux]()
-        {
-            if (command == QStringLiteral("start") && dirty_)
-                setWarningStatus(QStringLiteral("Calibration uses the saved settings: Apply your changes first."));
-            QString arguments;
-            if (command == QStringLiteral("start"))
-                arguments = QStringLiteral("kind: ") + runKind->currentData().toString();
-            else if (command == QStringLiteral("continue") && lux->value() > 0.0)
-                arguments = QStringLiteral("lux: ") + QString::number(lux->value(), 'f', 1);
-            runCalibrationCommand(command, arguments);
-        });
-    }
-    buttonLayout->addStretch(1);
-    wizardLayout->addWidget(buttons);
-    if (noTarget_)
-    {
-        instruction->setText(QStringLiteral("Connect to a running VideoProcessor to calibrate."));
-        for (QPushButton* button : buttons->findChildren<QPushButton*>()) button->setEnabled(false);
-        detect->setEnabled(false);
-    }
-    cards->addCard(createCard(QStringLiteral("Calibrate"), QStringLiteral(
-        "Cancel at any step returns the display to video; nothing changes until you Apply, and Apply backs up the "
-        "configuration first."), wizard));
-
-    if (!calibrationTimer_)
-    {
-        calibrationTimer_ = new QTimer(this);
-        calibrationTimer_->setInterval(1000);
-        connect(calibrationTimer_, &QTimer::timeout, this, [this]()
-        {
-            if (noTarget_ || !pages_) return;
-            const bool visible = pages_->currentWidget() &&
-                pages_->currentWidget()->findChild<QWidget*>(QStringLiteral("calibration.wizard.step")) != nullptr;
-            if (visible || calibrationActive_ || calibrationProbeRunning_)
-                runCalibrationCommand(QStringLiteral("status"));
-        });
-        calibrationTimer_->start();
-    }
-    return createPage(QStringLiteral("Calibration"),
-        QStringLiteral("Automatic display calibration with a meter: VP measures its own patches and writes 3D LUTs."),
-        cards);
-}
-
-void ConfigEditorWindow::runCalibrationCommand(const QString& command, const QString& arguments)
-{
-    if (sandboxPreview())
-    {
-        applyCalibrationStatus(QString(), QStringLiteral("Settings preview: VP is not connected."), command);
-        return;
-    }
-    if (noTarget_ || calibrationRpcThread_) return;
-    const bool remote = remoteClient_ != nullptr;
-    const QString host = remote ? remoteHost_ : QStringLiteral("127.0.0.1");
-    const quint16 rpcPort = remote ? remotePort_ : 41686;
-    struct Outcome { bool ok = false; QString text, error; };
-    const auto outcome = std::make_shared<Outcome>();
-    const std::string commandText = command.toStdString();
-    const std::string argumentText = arguments.toStdString();
-    QThread* worker = QThread::create([outcome, host, rpcPort, commandText, argumentText]()
-    {
-        ConfigurationRpcClient client(host.toStdString(), rpcPort);
-        std::string status, error;
-        outcome->ok = client.Calibration(commandText, argumentText, status, error);
-        outcome->text = QString::fromStdString(status);
-        outcome->error = QString::fromStdString(error);
-    });
-    worker->setParent(this);
-    calibrationRpcThread_ = worker;
-    connect(worker, &QThread::finished, this, [this, worker, outcome, command]()
-    {
-        if (calibrationRpcThread_ == worker) calibrationRpcThread_ = nullptr;
-        worker->deleteLater();
-        applyCalibrationStatus(outcome->ok ? outcome->text : QString(),
-            outcome->ok ? QString() : outcome->error, command);
-    });
-    worker->start();
-}
-
-void ConfigEditorWindow::applyCalibrationStatus(const QString& text, const QString& error, const QString& command)
-{
-    auto* step = findChild<QLabel*>(QStringLiteral("calibration.wizard.step"));
-    auto* instruction = findChild<QLabel*>(QStringLiteral("calibration.wizard.instruction"));
-    auto* message = findChild<QLabel*>(QStringLiteral("calibration.wizard.message"));
-    auto* reading = findChild<QLabel*>(QStringLiteral("calibration.wizard.reading"));
-    auto* progress = findChild<QProgressBar*>(QStringLiteral("calibration.wizard.progress"));
-    auto* review = findChild<QPlainTextEdit*>(QStringLiteral("calibration.wizard.review"));
-    auto* probe = findChild<QLabel*>(QStringLiteral("calibration.probe"));
-    if (!step || !instruction || !message || !reading || !progress || !review) return;
-    if (!error.isEmpty())
-    {
-        message->setText(QStringLiteral("VideoProcessor did not answer: ") + error +
-            QStringLiteral(" (calibration runs inside VideoProcessor; start it first)."));
-        return;
-    }
-    const QMap<QString, QString> s = parseCalibrationStatus(text);
-    const QString state = s.value(QStringLiteral("step"));
-    const QString previous = calibrationLastStep_;
-    calibrationLastStep_ = state;
-    calibrationActive_ = !calibrationStepFinal(state) || state == QStringLiteral("review");
-    calibrationProbeRunning_ = s.value(QStringLiteral("probe")) == QStringLiteral("running");
-    step->setText(calibrationStepTitle(state));
-    if (!s.value(QStringLiteral("instruction")).isEmpty())
-        instruction->setText(s.value(QStringLiteral("instruction")));
-    QString note = s.value(QStringLiteral("message"));
-    if (text.startsWith(QStringLiteral("error: ")))
-        note = text.section(QLatin1Char('\n'), 0, 0).mid(7).replace(QStringLiteral("\\n"), QStringLiteral("\n"));
-    if (!s.value(QStringLiteral("format")).isEmpty())
-        note += (note.isEmpty() ? QString() : QStringLiteral("\n")) + QStringLiteral("Output: ") + s.value(QStringLiteral("format"));
-    message->setText(note);
-    const QStringList xyz = s.value(QStringLiteral("reading")).split(QLatin1Char(' '));
-    if (xyz.size() == 3)
-    {
-        const double x = xyz[0].toDouble(), y = xyz[1].toDouble(), z = xyz[2].toDouble();
-        const double sum = x + y + z;
-        reading->setText(sum > 0.0 ? QStringLiteral("Last reading: Y %1 cd/m², x %2, y %3")
-            .arg(y, 0, 'f', 3).arg(x / sum, 0, 'f', 4).arg(y / sum, 0, 'f', 4) : QString());
-    }
-    else
-        reading->clear();
-    auto fraction = [](const QString& value, int& done, int& total)
-    {
-        done = value.section(QLatin1Char('/'), 0, 0).toInt();
-        total = value.section(QLatin1Char('/'), 1, 1).toInt();
-    };
-    int done = 0, total = 0;
-    if (state == QStringLiteral("verifying")) fraction(s.value(QStringLiteral("verify")), done, total);
-    else fraction(s.value(QStringLiteral("patch")), done, total);
-    const int remaining = s.value(QStringLiteral("seconds_remaining")).toInt();
-    if (state == QStringLiteral("warm_up"))
-    {
-        const int left = s.value(QStringLiteral("warmup_remaining")).toInt();
-        progress->setRange(0, 1);
-        progress->setValue(0);
-        progress->setFormat(QStringLiteral("Warm-up: %1:%2 left").arg(left / 60).arg(left % 60, 2, 10, QLatin1Char('0')));
-    }
-    else if (total > 0 && (state == QStringLiteral("measuring") || state == QStringLiteral("verifying")))
-    {
-        progress->setRange(0, total);
-        progress->setValue(done);
-        progress->setFormat(QStringLiteral("%v / %m") + (remaining > 0 ?
-            QStringLiteral(" - about %1 min left").arg((remaining + 59) / 60) : QString()));
-    }
-    else
-    {
-        progress->setRange(0, 1);
-        progress->setValue(state == QStringLiteral("review") || state == QStringLiteral("applied") ||
-            state == QStringLiteral("done") ? 1 : 0);
-        progress->setFormat(QString());
-    }
-    const bool showReview = state == QStringLiteral("review") || state == QStringLiteral("applied") ||
-        state == QStringLiteral("done");
-    review->setVisible(showReview);
-    if (showReview)
-    {
-        QString body = s.value(QStringLiteral("review"));
-        if (!s.value(QStringLiteral("diff")).isEmpty())
-            body += QStringLiteral("\n\nConfiguration changes:\n") + s.value(QStringLiteral("diff"));
-        if (!s.value(QStringLiteral("backup")).isEmpty())
-            body += QStringLiteral("\n") + s.value(QStringLiteral("backup"));
-        if (!s.value(QStringLiteral("run")).isEmpty())
-            body += QStringLiteral("\nRun folder: ") + s.value(QStringLiteral("run"));
-        if (review->toPlainText() != body) review->setPlainText(body);
-    }
-    const bool canApply = state == QStringLiteral("review") &&
-        !s.value(QStringLiteral("diff")).startsWith(QStringLiteral("Apply is not possible"));
-    const QMap<QString, bool> enabled = {
-        { QStringLiteral("start"), calibrationStepFinal(state) },
-        { QStringLiteral("continue"), state == QStringLiteral("meter_calibration") || state == QStringLiteral("placement") ||
-            state == QStringLiteral("user_action") },
-        { QStringLiteral("skip"), state == QStringLiteral("warm_up") },
-        { QStringLiteral("apply"), canApply },
-        { QStringLiteral("discard"), state == QStringLiteral("review") },
-        { QStringLiteral("cancel"), !calibrationStepFinal(state) && state != QStringLiteral("review") } };
-    for (auto it = enabled.begin(); it != enabled.end(); ++it)
-        if (auto* button = findChild<QPushButton*>(QStringLiteral("calibration.wizard.") + it.key()))
-            button->setEnabled(it.value() && !noTarget_);
-    if (probe && s.value(QStringLiteral("probe")) == QStringLiteral("running"))
-        probe->setText(QStringLiteral("Detecting… (running spotread -?)"));
-    else if (probe && s.contains(QStringLiteral("probe_text")))
-        probe->setText(s.value(QStringLiteral("probe_text")) +
-            (s.value(QStringLiteral("display_types")).isEmpty() ? QString() :
-                QStringLiteral("\nDisplay types (-y): ") +
-                s.value(QStringLiteral("display_types")).replace(QLatin1Char('\n'), QStringLiteral("; "))
-                    .replace(QLatin1Char('|'), QStringLiteral(" = "))));
-    // The run changed the configuration VP uses: reload it here too.
-    if (state == QStringLiteral("applied") && previous != QStringLiteral("applied") && command == QStringLiteral("status"))
-    {
-        setStatus(s.value(QStringLiteral("kind")) == QStringLiteral("calibration") || s.value(QStringLiteral("kind")).isEmpty() ?
-            QStringLiteral("Calibration applied: VP attached the new LUTs. Reloading the configuration.") :
-            QStringLiteral("Calibration result applied. Reloading the configuration."));
-        if (!dirty_) discardEdits();
-    }
 }
 
 QWidget* ConfigEditorWindow::createLogsPage()

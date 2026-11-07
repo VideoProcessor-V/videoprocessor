@@ -141,6 +141,10 @@ Dependencies needed to lift it:
 - VP-V: `modules/drive/projector_control/ProjectorDriver.h` and `SerialPort.h` (LED run); `VP-V/modules/drive/led_compensation/LedRawTransfer.h` (the HDR-verify tone curve in `CalibrationLutHost`; WP-15 moves it to `modules/drive/led_compensation/`, switch the include at the rebase).
 - The pure core (ColorMath.h, PatternPlan, PatternCodes, DisplayModel, LedCharacterize, the Spotread text parser, Simulated*) needs only the C++ standard library.
 
+### c) The Calibration settings page (`config_ui/`)
+
+`CalibrationPage.h/.cpp` is the Config editor's Calibration page, moved out of `ConfigEditorWindow` (R1 W1 CAL-C, P7-4): the `[calibration]` cards, the wizard, the calibration RPC and its status poll. It is a Config page provider (`ConfigPageHost.h`, registered by `Vpv::RegisterConfigProviders()` in `VP-V/config/VpvConfigProviders.h`): its page is a sub-page of the master VP-V page grouped under the Output unit (no navigation leaf of its own; the Output tab has an "Open Calibration" button), and it joins its RPC thread in `OnEditorClosing`. It reaches the editor only through `ConfigPageHost::EditorKit` (the editor's own field helpers, so object names, tooltips and the dirty path are the editor's). The Colour page's calibration rows (`refreshCalibrationControls`) are Bill's code and stay in the editor. Test seam: `ConfigPageHost::Find<Vpv::CalibrationPage>()`; tests in `config_ui/tests/CalibrationPageTests.cpp` (`--match CalibrationPageTests`).
+
 ### Test it standalone
 
 Build x64 Release (the AGENTS.md command), including `VideoProcessor-FakeSpotread`, which writes `x64\Release\test-tools\fake_spotread.exe`. Run tests single-threaded and read the TRX for the summary:
@@ -177,6 +181,7 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 - `src/VP-V/modules/output/calibration_lut/CalibrationLutHost.cpp`
 - `src/VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h`
 - `src/VP-V/modules/output/calibration_lut/calibration`
+- `src/VP-V/modules/output/calibration_lut/config_ui`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.cpp`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.h`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboCalibrationLutPolicy.h`

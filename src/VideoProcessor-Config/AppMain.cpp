@@ -9,6 +9,7 @@
 #include "ConfigWheelGuard.h"
 #include "Resource.h"
 #include "VpTheme.h"
+#include <VP-V/config/VpvConfigProviders.h>   // VPV-HOOK
 #include <ConfigurationRpcProtocol.h>
 #include <ConfigurationLiveApply.h>
 
@@ -338,6 +339,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     int argc = __argc;
     QApplication app(argc, __argv);
     ConfigWheelGuard::install();
+    Vpv::RegisterConfigProviders();   // VPV-HOOK (before the first editor is created)
     if (UpdateLauncher::InstallationPending())
     {
         MessageBoxW(nullptr, L"An update is being installed. Please wait for setup to finish.", L"VideoProcessor updates", MB_OK | MB_ICONINFORMATION);

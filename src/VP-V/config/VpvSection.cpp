@@ -1172,6 +1172,28 @@ namespace Vpv
 				});
 				layout->addWidget(more);
 			}
+			// Pages of their own that the Config page host registered under this unit (e.g. Calibration
+			// under Output): one button each opens the page.
+			if (state->host.subPages && state->host.openPage)
+			{
+				const std::vector<SubPage> subs = state->host.subPages(unitId);
+				if (!subs.empty())
+				{
+					CardBox card = MakeCard(ObjectName(unitId + QStringLiteral(".card.subpages")), QStringLiteral("Settings pages"),
+						QStringLiteral("Pages of their own that belong to this unit."), false);
+					for (const SubPage& sub : subs)
+					{
+						auto* open = new QPushButton(QStringLiteral("Open %1").arg(sub.title));
+						open->setObjectName(ObjectName(unitId + QStringLiteral(".subpage.") + sub.pageName));
+						open->setToolTip(sub.description);
+						open->setMaximumWidth(260);
+						const QString pageName = sub.pageName;
+						QObject::connect(open, &QPushButton::clicked, open, [state, pageName]() { state->host.openPage(pageName); });
+						card.Add(open);
+					}
+					layout->addWidget(card.frame);
+				}
+			}
 			layout->addStretch();
 
 			// 3. Advanced, last: the planned settings and the unit's stages.

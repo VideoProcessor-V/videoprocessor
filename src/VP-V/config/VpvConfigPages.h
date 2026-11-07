@@ -55,7 +55,37 @@ namespace Vpv
 		}
 
 		// Forgets the VP-V pages (the shell is being rebuilt).
-		void reset() { vpvNames_.clear(); }
+		void reset() { vpvNames_.clear(); subPages_.clear(); }
+
+		// A page that belongs to another page (ConfigPage::parentPage): no navigation leaf, opened from
+		// its parent, grouped there under `group`.
+		struct SubPageInfo
+		{
+			QString name, parent, group, description;
+		};
+
+		// The sub-pages of `parent` grouped under `group` (case-insensitive; an empty group matches all).
+		std::vector<SubPageInfo> subPagesOf(const QString& parent, const QString& group = QString()) const
+		{
+			std::vector<SubPageInfo> found;
+			for (const SubPageInfo& sub : subPages_)
+				if (sub.parent == parent && (group.isEmpty() || sub.group.compare(group, Qt::CaseInsensitive) == 0))
+					found.push_back(sub);
+			return found;
+		}
+
+		// The page whose navigation leaf stands for page `index`: the parent of a sub-page, else itself.
+		int navigationIndex(int index) const
+		{
+			const QString own = name(index);
+			for (const SubPageInfo& sub : subPages_)
+				if (sub.name == own)
+				{
+					const int parent = this->index(sub.parent);
+					return parent >= 0 ? parent : index;
+				}
+			return index;
+		}
 
 		// Adds a VP-V page to the stack (which must already hold Bill's pages) and names it.
 		int append(QStackedWidget* pages, const QString& name, QWidget* page)
@@ -65,9 +95,11 @@ namespace Vpv
 			return index;
 		}
 
-		// Adds the pages of registered config page providers (ConfigPageHost.h) after the VP-V pages;
-		// nothing registered adds nothing. A page's leafAfter is advisory and not yet honoured: the
-		// leaves follow the VP-V ones.
+		// Adds the pages of registered config page providers (ConfigPageHost.h); nothing registered adds
+		// nothing. The editor calls this after its own VP-V pages (Dynamic Drive) and before the master
+		// VP-V page, so that page can link the sub-pages the providers registered. A page's leafAfter is
+		// advisory and not yet honoured: the leaves follow the VP-V ones. A sub-page (parentPage set) is
+		// named and stacked like any page but gets no navigation leaf.
 		int appendProviderPages(QStackedWidget* pages, ConfigPageHost::ConfigFormApi& api)
 		{
 			std::vector<ConfigPageHost::ConfigPage> extra;
@@ -77,6 +109,8 @@ namespace Vpv
 			{
 				if (!page.widget || page.name.isEmpty()) continue;
 				append(pages, page.name, page.widget);
+				if (!page.parentPage.isEmpty())
+					subPages_.push_back({ page.name, page.parentPage, page.group, page.description });
 				++added;
 			}
 			return added;
@@ -88,6 +122,9 @@ namespace Vpv
 		{
 			for (const QString& title : vpvNames_)
 			{
+				bool sub = false;
+				for (const SubPageInfo& info : subPages_) sub = sub || info.name == title;
+				if (sub) continue;
 				QPushButton* button = addLeaf(title, index(title));
 				if (title == QStringLiteral("VP-V")) button->setObjectName(QStringLiteral("config.openVpv"));
 			}
@@ -95,5 +132,6 @@ namespace Vpv
 
 	private:
 		QStringList vpvNames_;
+		std::vector<SubPageInfo> subPages_;
 	};
 }

@@ -12,6 +12,7 @@
     "src/VP-V/modules/output/calibration_lut/CalibrationLutHost.cpp",
     "src/VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h",
     "src/VP-V/modules/output/calibration_lut/calibration",
+    "src/VP-V/modules/output/calibration_lut/config_ui",
     "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.cpp",
     "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.h",
     "src/VideoProcessor-Lib/vprenderer/LibplaceboCalibrationLutPolicy.h"
