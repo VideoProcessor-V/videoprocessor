@@ -12,7 +12,7 @@ on its own.
 | File | What it holds |
 |---|---|
 | `CalibrationPattern.h` | POD structs that cross the renderer DLL boundary: `PatternRequest` (what to show), `PatternOutputInfo` (what the output is), `SignalTransfer`, `PatchWindowRect` (centred window of a given area share, any resolution, even offsets, at least 2 x 2). Header-only. Do not change the layout without bumping the plugin API (`VP_LIBPLACEBO_PLUGIN_API_VERSION`). |
-| `ColorMath.h/.cpp` | `Vec3`, `Mat3` (multiply, inverse), RGB/XYZ/xyY/Lab, gamut primaries, CCT; `DeltaE2000` (CIEDE2000) is the one out-of-line function (`ColorMath.cpp`, moved here from `calibration/DisplayModel.cpp`). Double precision. |
+| `ColorMath.h/.cpp` | `Vec3`, `Mat3` (multiply, inverse), RGB/XYZ/xyY/Lab, gamut primaries, CCT; `DeltaE2000` (CIEDE2000) is the one out-of-line function (`ColorMath.cpp`, moved here from `DisplayModel.cpp`). Double precision. |
 | `PatternPlan.h/.cpp` | The patch sets: greyscale (ramp, near-black steps, BTB, WTW), primaries and secondaries, n^3 cubes, the verification set (ColorChecker 24, skin tones, deterministic randoms), drift references, `BuildPlan(PlanKind)`, and the time estimate. Normalised signals only (0 = black code, 1 = white code). |
 | `PatternCodes.h/.cpp` | Signal to code for 8-bit, 8-in-10 (the sigma-delta's domain) and 10-bit, limited and full range; BTB/WTW legality and clipping; PQ encode/decode; settle time; the near-black reading policy (`ReadingAccumulator`); measurement order. |
 | `tests/PatternLibSelfTest.cpp` | The library's own tests (a plain `main`, no framework). |

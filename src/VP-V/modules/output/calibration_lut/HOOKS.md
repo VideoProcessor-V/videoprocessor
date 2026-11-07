@@ -80,7 +80,7 @@ Outputs of a finished run (what the wizard changes): only `calibration_lut_enabl
 `calibration_lut_p3_d65`, `calibration_lut_bt2020`, `calibration_lut_input_transfer`, `hdr_tone_map_target_gamma`,
 `sdr_lut_input_gamma`. Global: `calibration_lut_stage` (`libplacebo` | `vp`, read from `[vpv]` first), slot switch
 `pipeline_slots_off` containing `output.calibration_lut`. Planned: `calibration_lut_reload`. The wizard's own
-`[calibration]` section is in `calibration/CalibrationConfig.h`.
+`[calibration]` section is defined by `CalibrationConfig.h` (beside the session code).
 
 ## 4. Failure and fallback entries
 
