@@ -286,6 +286,7 @@ namespace Tests
 				ReadResult r = Read(c, &s, true, 2000);
 				Assert::IsFalse(r.usable);
 				Assert::IsTrue(r.reason.find("td.maps absent") != std::string::npos);
+				Assert::IsTrue(r.fallback.reason.find("temporal-detail products unavailable") != std::string::npos, L"the wording is the engine's, not another cause's");
 				Assert::IsFalse(Read(Consumer::DitherNeed, &s, true, 2000).usable);
 				Assert::IsFalse(Read(Consumer::Deband, &s, true, 2000).usable, L"deband reads td.maps too");
 				s.entry[IndexOf(VpSkeleton::kTdMaps)].published = true;

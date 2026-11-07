@@ -98,7 +98,7 @@ namespace TdProducts
 			  { { kP10GrainSplit, 0, 0 }, { kP11RegionBlockStats, 0, 0 }, { kP13SourceRing, 0, 0 }, { kTdBlocks, 1, 0 },
 			    { kP12LightLevel, 0, 0 }, { kP13SourceRing, 0, 2 }, { kP13SourceRing, 1, 0 }, { kQualityPattern, 0, 0 },
 			    { kCodingEvidence, 0, 0 }, { kCodingEvidence, 1, 0 }, { kRefinedField, 0, 0 }, { kP9CameraSmoothed, 0, 0 },
-			    { kP8CameraLabels, 0, 0 }, { kTdMemory, 1, 0 }, { kTdAnchorRefs, 1, 0 }, { kSourceIdentity, 1, 0 } },
+			    { kP8CameraLabels, 0, 0 }, { kTdMemory, 1, 0 }, { kTdAnchorRefs, 1, 0 }, { kSourceIdentity, 1, 0 }, { kP7CameraFit, 0, 0 } },
 			  {} },
 			{ kTdMemory, "td.memory", "repair/temporal_detail", kUnitVersion, "TD job feedback at anchors + the anchor pass (no other writer)",
 			  "none (no live fill)", "absent or shed: temporal detail runs level 3 / 4 or off, visibly",

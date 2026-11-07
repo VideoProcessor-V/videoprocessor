@@ -106,7 +106,9 @@ namespace TdProducts
 			r.fallback = FallbackCatalog::Released(id);
 			return r;
 		}
-		r.fallback = FallbackCatalog::ProductFallback(id, r.reason);
+		// The consumer's own id (its status key) with the engine's wording: the existing entry's text names another cause (e.g. a
+		// missing chroma split) and would be false here.
+		r.fallback = FallbackCatalog::Engaged(id, std::string("temporal-detail products unavailable, classical form runs: ") + r.reason);
 		return r;
 	}
 

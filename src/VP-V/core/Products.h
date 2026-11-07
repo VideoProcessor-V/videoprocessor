@@ -760,6 +760,8 @@ inline void AppendTemporalDetailProducts(std::vector<ProductDecl>& decls)
     AddInput(an, kP11RegionBlockStats, 0);
     AddInput(an, kP13SourceRing, 0);
     AddInput(an, kTdBlocks, 1);
+    an.spanMask = content;          // a trail never crosses a slip / full change
+    an.missingInputForm = true;     // after a resync the first frame has no lag-1 state: made from scratch (carry-forward / unknown)
     AddTerm(an, 4, 28);
     AddTerm(an, 3, 6);
     an.rebasedPlane = true;
@@ -875,6 +877,7 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls)
     AddTerm(ce, 3, 8);
     ce.size.fixedBytes = kCodingEvidenceSummaryBytes;
     ce.rebasedPlane = true;
+    ce.spanMask = content;          // copy flags vs N-1 / N-2 are invalid across a slip
     ce.missingInputForm = true;
     ce.refRenderMs = 0.2f;
     decls.push_back(ce);
@@ -891,6 +894,7 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls)
     qp.residency = Residency::SystemRam;
     qp.variants = Variants::NonIdentical;
     qp.spanMask = content;
+    qp.missingInputForm = true;     // no history yet: role "unknown"
     qp.shortQueueSubstitute = kQualityPatternCausal;
     decls.push_back(qp);
 
@@ -902,6 +906,7 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls)
     qc.size.fixedBytes = kQualityPatternBytes;
     qc.residency = Residency::SystemRam;
     qc.spanMask = content;
+    qc.missingInputForm = true;
     decls.push_back(qc);
 
     // refined_field (P3r): DMVR-style per 8x8 block 8 B (vector RG16F, confidence u8, flags u8); runs only when P3 exists. The

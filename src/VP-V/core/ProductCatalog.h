@@ -476,7 +476,7 @@ inline std::string MegaBytes(uint64_t bytes)
     return std::to_string(tenths / 10u) + "." + std::to_string(tenths % 10u);
 }
 
-inline const char* Token(Residency r) { return r == Residency::Vram ? "vram" : "system RAM"; }
+inline const char* Token(Residency r) { return r == Residency::Vram ? "vram" : r == Residency::Transient ? "transient (arena)" : "system RAM"; }
 
 constexpr const char* kDocBegin = "<!-- BEGIN GENERATED product-graph -->";
 constexpr const char* kDocEnd = "<!-- END GENERATED product-graph -->";
