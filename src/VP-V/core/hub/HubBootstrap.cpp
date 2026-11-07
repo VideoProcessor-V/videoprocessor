@@ -8,6 +8,7 @@
 
 #include "ExtensionHub.h"
 
+#include <VP-V/modules/control/config/VpvSettingsModule.h>
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraExtension.h>
@@ -16,6 +17,8 @@ namespace
 {
 	int RegisterAtLoad()
 	{
+		// The settings module serves the host's settings-load hooks (M2 P3); the hub order does not matter to it.
+		Vpv::Settings::RegisterSettingsModule();
 		// Fixed fan-out order (doc 63 section 1): resync / FrameSeal first, so every later module
 		// sees the frame already sealed.
 		Vpv::Resync::RegisterResyncExtension();

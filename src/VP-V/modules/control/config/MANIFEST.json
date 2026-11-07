@@ -17,6 +17,15 @@
     "src/VideoProcessor-Lib/ConfigFile.cpp",
     "src/VideoProcessor-Lib/ConfigSchema.h",
     "src/VideoProcessor-Lib/MainConfigSchema.h",
+    "src/VP-V/modules/control/config/VpvRendererFields.h",
+    "src/VP-V/modules/control/config/VpvRendererExtension.h",
+    "src/VP-V/modules/control/config/VpvRendererSettings.h",
+    "src/VP-V/modules/control/config/VpvRendererSettings.cpp",
+    "src/VP-V/modules/control/config/VpvSettingsModule.h",
+    "src/VP-V/modules/control/config/VpvSettingsModule.cpp",
+    "src/VP-V/modules/control/config/VpvSettingsDump.h",
+    "src/VP-V/modules/control/config/VpvSettingsExports.cpp",
+    "src/VideoProcessor-Lib/vprenderer/RendererSettingsExtension.h",
     "src/VideoProcessor-Lib/RendererProfileConfig.h"
   ],
   "components": {

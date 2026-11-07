@@ -6,6 +6,19 @@ Unit: **control** | side: control | order: 930 | status: **partial** | hook poin
 
 Per-unit Classic/Low/Mid/Upper tier sliders + global, toggles listed beneath, unbuilt slots shown as 'not yet implemented'; settings preview exe.
 
+## Renderer settings (M2 P3)
+
+The VP-V members of the renderer settings live here, not in `LibplaceboVideoRenderer.cpp`:
+
+- `VpvRendererFields.h`: `VpvRenderer::Fields`, the VP-V members (verbatim); the host struct inherits them through
+  `RendererSettingsExtension` (host header `vprenderer/RendererSettingsExtension.h`, H7 props define
+  `RENDERER_SETTINGS_EXTENSION_HEADER`).
+- `VpvRendererSettings.{h,cpp}`: `ReadBase`, `ReadProfile`, `ReadGlobal`, `PostLoad` (Original overlay, slot switches,
+  presentation owner; returns the host-field `Overrides`), `Fingerprint`, `AppendDelta`, `CopyLive`, `Describe`.
+- `VpvSettingsModule.cpp`: the hub module serving `RendererExtension::SettingsLoad`; registered first in `HubBootstrap.cpp`.
+- `VpvSettingsDump.h`, `VpvSettingsExports.cpp`: the identity-kit dump (tests only).
+- Not moved yet: the VP validators and `[vpv]` keys in `RendererProfileConfig.h` / `MainConfigSchema.h` (P3-7).
+
 ## Contract
 
 - Input: slots.json + config schema
