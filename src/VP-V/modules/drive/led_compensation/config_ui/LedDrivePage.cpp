@@ -1191,7 +1191,7 @@ void LedDrivePage::AppendPages(ConfigPageHost::ConfigFormApi& api, std::vector<C
     std::unique_ptr<State>& slot = states_[&api];
     if (slot && slot->kit != kit)
     {
-        // A stale state (the registry was reset while an editor lived, or an address was reused).
+        // A state whose kit is not this api's current kit (defensive: a test double, or a reused address).
         slot->builder->projectorCards().JoinTest();
         slot.reset();
     }

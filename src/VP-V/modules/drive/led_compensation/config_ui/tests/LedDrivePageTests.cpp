@@ -153,35 +153,37 @@ namespace
 			"the command source pick did not write the matching mode");
 	}
 
-	void testRs232TestSurvivesARebuildAndIsJoinedOnClose()
-	{
-		Vpv::RegisterConfigProviders();
-		auto* provider = ConfigPageHost::Find<Vpv::LedDrivePage>();
-		require(provider != nullptr, "no Dynamic Drive provider");
-		const int before = provider->StateCountForTesting();
-		QTemporaryDir dir;
-		std::atomic<bool> release(false);
-		{
-			ConfigEditorWindow window(writeFixture(dir), 0, true);
-			QThread* fake = QThread::create([&release] { while (!release.load()) QThread::msleep(5); });
-			fake->start();
-			require(provider->AdoptProjectorTestThreadForTesting(&window, fake), "the provider does not serve this editor");
-			require(provider->ProjectorTestRunningForTesting(&window), "the test thread is not recorded as running");
-			// A rebuild (Cancel) deletes the page; the new one shows the test as still running.
-			window.findChild<QPushButton*>(QStringLiteral("cancelConfiguration"))->click();
-			QCoreApplication::processEvents();
-			auto* button = window.findChild<QPushButton*>(QStringLiteral("config.projector.default.connection_test"));
-			require(button != nullptr && !button->isEnabled(), "the rebuilt page enables the test button while a test runs");
-			auto* result = window.findChild<QLabel*>(QStringLiteral("config.projector.default.connection_test.result"));
-			require(result != nullptr && result->text().startsWith(QStringLiteral("Testing")), "the rebuilt page does not say the test runs");
-			require(provider->ProjectorTestRunningForTesting(&window), "a rebuild lost the running test");
-			// The editor closing joins the thread: release it first so the join returns.
-			release = true;
-			fake->setParent(&window);
-		}
-		require(provider->StateCountForTesting() == before, "the provider kept state after its editor closed");
-	}
-
+	void testRs232TestSurvivesARebuildAndIsJoinedOnClose()
+	{
+		Vpv::RegisterConfigProviders();
+		auto* provider = ConfigPageHost::Find<Vpv::LedDrivePage>();
+		require(provider != nullptr, "no Dynamic Drive provider");
+		const int before = provider->StateCountForTesting();
+		QTemporaryDir dir;
+		std::atomic<bool> release(false);
+		{
+			ConfigEditorWindow window(writeFixture(dir), 0, true);
+			// Declared after the window, so it runs first: a failed check must not leave the thread
+			// spinning while the window's destructor joins it.
+			struct Release { std::atomic<bool>& flag; ~Release() { flag = true; } } releaseOnExit{ release };
+			QThread* fake = QThread::create([&release] { while (!release.load()) QThread::msleep(5); });
+			fake->setParent(&window);
+			fake->start();
+			require(provider->AdoptProjectorTestThreadForTesting(&window, fake), "the provider does not serve this editor");
+			require(provider->ProjectorTestRunningForTesting(&window), "the test thread is not recorded as running");
+			// A rebuild (Cancel) deletes the page; the new one shows the test as still running.
+			window.findChild<QPushButton*>(QStringLiteral("cancelConfiguration"))->click();
+			QCoreApplication::processEvents();
+			auto* button = window.findChild<QPushButton*>(QStringLiteral("config.projector.default.connection_test"));
+			require(button != nullptr && !button->isEnabled(), "the rebuilt page enables the test button while a test runs");
+			auto* result = window.findChild<QLabel*>(QStringLiteral("config.projector.default.connection_test.result"));
+			require(result != nullptr && result->text().startsWith(QStringLiteral("Testing")), "the rebuilt page does not say the test runs");
+			require(provider->ProjectorTestRunningForTesting(&window), "a rebuild lost the running test");
+			// The editor closing joins the thread (released first by the guard above).
+		}
+		require(provider->StateCountForTesting() == before, "the provider kept state after its editor closed");
+	}
+
 	void testStateGoesWithTheEditor()
 	{
 		Vpv::RegisterConfigProviders();
