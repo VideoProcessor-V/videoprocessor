@@ -845,6 +845,7 @@ namespace VideoProcessorTest
 	{
 	public:
 		static Config TL() { Config c; c.twoLayer = true; return c; }
+		static Config SingleLayer() { Config c; c.twoLayer = false; return c; }
 
 		static void RandomField(Field& f, uint64_t seed, double amplitude)
 		{
@@ -880,7 +881,7 @@ namespace VideoProcessorTest
 			const int x0 = f.gridW / 2;
 			f.AddObject(x0, 0, f.gridW - x0, f.gridH, -20, 6);
 			f.AddNoise(0.05, 72);
-			Fitter off;
+			Fitter off(SingleLayer());
 			const CameraMotion ro = off.Fit(f.Input(kPairSeconds, 5));
 			Require(ro.layerFlags == 0 && !ro.haveObjectLayer && ro.layerRisk == 0, "twoLayer off: no layer fields " + Flags(ro));
 			Fitter on(TL());
@@ -906,7 +907,7 @@ namespace VideoProcessorTest
 			Require((r.layerFlags & 8) != 0, "ForegroundSuspect flag: " + Flags(r));
 			Require(r.haveObjectLayer && r.objectLayer.id >= 1, "the suspect layer is reported as the object layer: " + Flags(r));
 			Require(r.signals.border < 0.35, "border signal " + std::to_string(r.signals.border));
-			Fitter off;
+			Fitter off(SingleLayer());
 			const CameraMotion ro = off.Fit(f.Input(kPairSeconds, 5));
 			Logger::WriteMessage(("same field, twoLayer off: " + Flags(ro)).c_str());
 		}
@@ -933,7 +934,7 @@ namespace VideoProcessorTest
 			Require(r.valid && ModelError(r, pan, f.picture) < kTol, "camera is the pan: " + Flags(r) + " err=" + std::to_string(ModelError(r, pan, f.picture)));
 			Require((r.layerFlags & 4) != 0, "camera is the RANSAC runner-up: " + Flags(r));
 			Require(r.haveObjectLayer && ObjectError(r, PanModel(-20, 6), f.picture) < 2e-3, "object layer is the object motion: " + Flags(r));
-			Fitter off;
+			Fitter off(SingleLayer());
 			const CameraMotion ro = off.Fit(f.Input(kPairSeconds, 5));
 			Logger::WriteMessage(("same field, twoLayer off: " + Flags(ro) + " err=" + std::to_string(ModelError(ro, pan, f.picture))).c_str());
 		}
@@ -969,7 +970,7 @@ namespace VideoProcessorTest
 			Require(r.haveObjectLayer && ObjectError(r, PanModel(0, 0), f.picture) < 2e-3, "object layer is the static subject: " + Flags(r));
 			// 60/40 stays Ambiguous exactly as with twoLayer off: continuity and border evidence choose the layer, they never
 			// make a record confident.
-			Fitter off;
+			Fitter off(SingleLayer());
 			const CameraMotion ro = off.Fit(f.Input(kPairSeconds, 5));
 			Require(r.confidence <= ro.confidence + 1e-12, "no more lenient than off: " + Flags(r) + " vs " + Flags(ro));
 		}
