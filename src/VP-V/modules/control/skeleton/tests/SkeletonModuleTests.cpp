@@ -54,6 +54,17 @@ namespace SkeletonModuleTestsNs
 		return false;
 	}
 
+	// True when the status carries an engaged entry for this reason id ("<id>: <reason>"). The audit rule: assert on the id,
+	// never on the status prose (the lane's own card note may also say "no render device").
+	bool HasId(const std::vector<std::string>& lines, const char* id)
+	{
+		const std::string prefix = std::string(id) + ": ";
+		for (const std::string& l : lines)
+			if (l.compare(0, prefix.size(), prefix) == 0)
+				return true;
+		return false;
+	}
+
 	// A configuration file in the temp directory, read fresh by the injected loader.
 	struct TempCfg
 	{
@@ -659,10 +670,10 @@ namespace SkeletonModuleTestsNs
 			Assert::IsNull(rig.sk.GpuDispatcherFor(rig.Host()));
 			Assert::AreEqual(before, SkeletonModule::GpuDispatchersCreated());
 			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
-			Assert::IsTrue(Has(fb, "skeleton_gpu_device: GPU products: no render device"));
-			Assert::IsFalse(Has(fb, "GPU lane work runs ahead of the present"), L"nothing runs ahead without a device");
-			Assert::IsFalse(Has(fb, "live: waits for the Entrance phase"), L"no dispatcher, no live wait");
-			Assert::IsFalse(Has(fb, "shadow: GPU products skipped"));
+			Assert::IsTrue(HasId(fb, "skeleton_gpu_device"), L"no render device is its own reason id");
+			Assert::IsFalse(HasId(fb, "skeleton_gpu_gap"), L"nothing runs ahead without a device");
+			Assert::IsFalse(HasId(fb, "skeleton_gpu_live"), L"no dispatcher, no live wait");
+			Assert::IsFalse(HasId(fb, "skeleton_gpu_shadow"), L"not shadow: no shadow entry");
 			Assert::IsTrue(rig.sk.LaneOf(rig.Host())->TotalDeclined() > 0, L"the declining live fill is still installed without a dispatcher");
 		}
 
@@ -677,8 +688,10 @@ namespace SkeletonModuleTestsNs
 			Assert::IsNull(rig.sk.GpuDispatcherFor(rig.Host()));
 			Assert::AreEqual(before, SkeletonModule::GpuDispatchersCreated());
 			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
-			Assert::IsTrue(Has(fb, "skeleton_gpu_shadow: shadow: GPU products skipped"));
-			{ std::string all; for (const std::string& l : fb) all += l + " || "; Assert::IsFalse(Has(fb, "no render device"), (L"shadow is its own reason: " + std::wstring(all.begin(), all.end())).c_str()); }
+			Assert::IsTrue(HasId(fb, "skeleton_gpu_shadow"), L"shadow is reported under its own reason id");
+			Assert::IsFalse(HasId(fb, "skeleton_gpu_device"), L"shadow is not reported as a missing render device");
+			Assert::IsFalse(HasId(fb, "skeleton_gpu_gap"), L"shadow runs no GPU work ahead");
+			Assert::IsFalse(HasId(fb, "skeleton_gpu_live"), L"shadow has no live GPU wait");
 		}
 
 		TEST_METHOD(AnInvalidGpuKeyIsShownWhileTheLaneRuns)

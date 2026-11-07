@@ -172,7 +172,11 @@ namespace Vpv
 									{
 									case AnalysisLane::ProductRead::Ring: return VpLaneProducts::LightPrevState::Ring;
 									case AnalysisLane::ProductRead::Live: return VpLaneProducts::LightPrevState::Live;
-									case AnalysisLane::ProductRead::Pending: return VpLaneProducts::LightPrevState::Pending;
+									// Pending = a live fill RECORDED for the Entrance phase. Nothing runs it before G6 (Entrance forwarding),
+									// so waiting on it would hold P12(N) forever (livelock). Until G6 it is treated as never made (None): P12(N)
+									// starts without a previous frame and the kernel resets the one-pole (shown as light_level_smoothing).
+									// G6: map Pending to LightPrevState::Pending here once RunDeferredLive is driven by the hub.
+									case AnalysisLane::ProductRead::Pending: return VpLaneProducts::LightPrevState::None;
 									case AnalysisLane::ProductRead::Failed: return VpLaneProducts::LightPrevState::Failed;
 									default: return VpLaneProducts::LightPrevState::None;
 									}

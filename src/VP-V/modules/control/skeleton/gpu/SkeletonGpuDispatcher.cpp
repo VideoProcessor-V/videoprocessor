@@ -34,7 +34,7 @@ namespace Vpv
 				tp.sampleable = true;
 				tp.storable = true;
 				tp.host_writable = true;
-				tp.host_readable = readable;
+				tp.host_readable = readable && (fmt->caps & PL_FMT_CAP_HOST_READABLE) != 0;   // only what the format supports
 				return pl_tex_recreate(gpu, &tex, &tp);
 			}
 		}
@@ -116,8 +116,9 @@ namespace Vpv
 					ps.tex.reset(new GpuProductTextures(m_backend));
 					if (!ps.tex->Allocate(n, reg.Get(n.id), k->Layout(dims), dims, plan))
 					{
-						ps.refusal = ps.tex->LastRefusal().empty() ? std::string("video memory could not be allocated")
-						                                           : ps.tex->LastRefusal();
+						ps.refusal = ps.tex->LastRefusal().empty()
+							? std::string("video memory could not be allocated: ") + (m_backend.lastError.empty() ? "unknown reason" : m_backend.lastError)
+							: ps.tex->LastRefusal();
 						ps.tex.reset();
 						ok = false;
 						continue;
@@ -146,7 +147,13 @@ namespace Vpv
 					ok = false;
 				}
 			if (!ok)
-				m_error = "an analysis product is unavailable (see the status)";
+			{
+				// The first refusal is the reason (the status lists every product's own).
+				std::string first;
+				for (const auto& kv : m_products)
+					if (!kv.second.refusal.empty()) { first = kv.second.refusal; break; }
+				m_error = "an analysis product is unavailable (see the status)" + (first.empty() ? std::string() : ": " + first);
+			}
 			return ok;
 		}
 

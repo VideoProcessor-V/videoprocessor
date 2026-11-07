@@ -37,22 +37,35 @@ namespace VpLaneProducts
 	struct GpuTexBackend : VpSkeleton::PlTexBackend
 	{
 		explicit GpuTexBackend(pl_gpu g = nullptr, bool readable = false) : VpSkeleton::PlTexBackend(g), hostReadable(readable) {}
+		// Host readback (tests only) is requested only when the format supports it (PL_FMT_CAP_HOST_READABLE): asking for a
+		// capability the format lacks makes pl_tex_create refuse. No blit capability is requested (nothing here blits). A
+		// failed create records WHY (lastError, shown by the dispatcher's status entry), never a bare "could not allocate".
 		Handle Create(const VpSkeleton::TexShape& s)
 		{
 			const pl_fmt fmt = FindFormat(gpu, s.fmt);
 			if (!fmt)
+			{
+				lastError = "no sampleable and storable texture format for the product texture (format " +
+					std::to_string(int(s.fmt)) + ", " + std::to_string(s.w) + "x" + std::to_string(s.h) + ")";
 				return nullptr;
+			}
 			pl_tex_params tp{};
 			tp.w = int(s.w);
 			tp.h = int(s.h);
 			tp.format = fmt;
 			tp.sampleable = true;
 			tp.storable = true;
-			tp.host_readable = hostReadable;
-			tp.blit_dst = hostReadable;
-			return pl_tex_create(gpu, &tp);
+			tp.host_readable = hostReadable && (fmt->caps & PL_FMT_CAP_HOST_READABLE) != 0;
+			const Handle h = pl_tex_create(gpu, &tp);
+			if (!h)
+				lastError = std::string("the GPU refused a product texture ") + std::to_string(s.w) + "x" + std::to_string(s.h) + " " +
+					(fmt->name ? fmt->name : "?") + (tp.host_readable ? " (host readable)" : "");
+			else if (hostReadable && !tp.host_readable)
+				lastError = std::string("note: ") + (fmt->name ? fmt->name : "?") + " has no host readback; products in it cannot be read back";
+			return h;
 		}
 		bool hostReadable;
+		std::string lastError;
 	};
 	using GpuProductTextures = VpSkeleton::ProductTextures<GpuTexBackend>;
 
