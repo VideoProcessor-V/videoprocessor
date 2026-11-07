@@ -80,6 +80,7 @@ struct Node {
     uint8_t historyMin = 0;            // the lowest depth the governor may grant (== historyFull: not governed)
     bool orderedChain = false;         // ProductDecl::orderedChain
     bool singletonStore = false;       // ProductDecl::singletonStore (one persistent store, read at lag 1; never governed)
+    bool heldState = false;            // ProductDecl::heldState (a record read at lag >= 1 only; no live pool, no live fill)
     bool holdsSpan = false;
     uint8_t ring = 0;
     uint8_t livePool = 0;
@@ -375,6 +376,15 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
             g.error = "a consumer declares more reads than the seam allows (an extra read was dropped)";
             return g;
         }
+    // A held-state product is read at lag >= 1 only: a consumer asking for it at lag 0 is refused, visibly (never silently served).
+    for (const ConsumerDecl& c : consumers)
+        for (size_t k = 0; k < c.count && k < kMaxConsumes; ++k)
+            if (c.consumes[k].lag == 0 && reg.Has(c.consumes[k].product) && reg.Get(c.consumes[k].product).heldState) {
+                g.error = "a held-state product is read at lag >= 1 only (a consumer reads it at lag 0); the analysis graph was not built";
+                g.errorProduct = c.consumes[k].product;
+                g.errorProductName = reg.Get(c.consumes[k].product).token;
+                return g;
+            }
     for (const ConsumerDecl& c : consumers)
         for (size_t k = 0; k < c.count && k < kMaxConsumes; ++k)
             if (!want(c.consumes[k].product, c.consumes[k].lag, c.holdsSpan, 0)) {
@@ -469,6 +479,7 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         }
         node.orderedChain = d.orderedChain;
         node.singletonStore = d.singletonStore;
+        node.heldState = d.heldState;
         node.holdsSpan = span[p] != 0;
         const bool lane = d.backend != Backend::RenderOnly;
         const unsigned L = lane ? gs.laneLead : 0u;
@@ -501,7 +512,7 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
             return g;
         }
         node.ring = uint8_t(ring);
-        const unsigned live = d.singletonStore ? 0u
+        const unsigned live = (d.singletonStore || d.heldState) ? 0u
                               : unsigned(node.history) + 1u + R + (node.holdsSpan ? 1u : 0u)
                                     + laneReadRefs[p] * unsigned(gs.laneJobsInFlight == 0 ? 1u : gs.laneJobsInFlight);
         if (live > kSlotCountMax) {

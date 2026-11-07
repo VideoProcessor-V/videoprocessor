@@ -30,6 +30,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 
 namespace SourceGeometry
@@ -45,12 +46,33 @@ namespace SourceGeometry
 	static_assert(kRecordBytesMax == 512, "doc 78 section 6: the record is at most 512 B");
 
 	// Stale after maxAgeUs = kMaxAgeIntervals x the longest evaluation interval (doc 78 section 6). The interval is MEASURED by the writer
-	// (never a fixed rate): the writer states the result in its record, a reader only compares.
+	// (never a fixed rate): the writer states the result in its record, a reader only compares. 0 = the interval is not measured yet (the
+	// reader says so, see kCauseNotMeasured); the product saturates instead of overflowing.
 	constexpr int64_t kMaxAgeIntervals = 2;
 	inline int64_t MaxAgeUs(int64_t evaluationIntervalMaxUs)
 	{
-		return evaluationIntervalMaxUs > 0 ? kMaxAgeIntervals * evaluationIntervalMaxUs : 0;
+		if (evaluationIntervalMaxUs <= 0)
+			return 0;
+		const int64_t top = (std::numeric_limits<int64_t>::max)();
+		return evaluationIntervalMaxUs > top / kMaxAgeIntervals ? top : kMaxAgeIntervals * evaluationIntervalMaxUs;
 	}
+
+	// |a - b| in microseconds for ANY two int64 values, without signed overflow (unsigned arithmetic is exact: the difference fits uint64).
+	inline uint64_t AbsDiffUs(int64_t a, int64_t b)
+	{
+		return a >= b ? static_cast<uint64_t>(a) - static_cast<uint64_t>(b) : static_cast<uint64_t>(b) - static_cast<uint64_t>(a);
+	}
+
+	// ---- the record header: a fixed 8 B in front of the payload -----------------------------------------------------------------
+	//   offset 0  u16  (kMagic << 8) | unit version   (the version fits the low byte)
+	//   offset 2  u16  the record length in bytes, header included (kHeaderBytes .. kRecordBytesMax)
+	//   offset 4  u32  reserved: written 0, ignored on read (room for flags without a version bump of the header)
+	// A reader checks the header BEFORE it trusts a byte of the payload: another magic / unit version / a length beyond the buffer or the
+	// 512 B bound is a visible cause, never a guess. The payload is at most kPayloadBytesMax.
+	constexpr size_t kHeaderBytes = 8;
+	constexpr size_t kPayloadBytesMax = kRecordBytesMax - kHeaderBytes;
+	constexpr uint8_t kMagic = 0x47;   // 'G'
+	static_assert(kUnitVersion <= 0xFFu, "the unit version lives in the low byte of the header's first u16");
 
 	// ---- the byte order of the record: fixed little-endian, independent of the host --------------------------------------------
 
@@ -83,6 +105,109 @@ namespace SourceGeometry
 		for (unsigned i = 0; i < 8; ++i)
 			v |= static_cast<uint64_t>(at[i]) << (8u * i);
 		return v;
+	}
+
+	// Writes the 8 B header at `at` (kHeaderBytes writable). False (nothing written) for a length outside kHeaderBytes .. kRecordBytesMax.
+	inline bool WriteHeader(unsigned char* at, size_t lengthBytes)
+	{
+		if (lengthBytes < kHeaderBytes || lengthBytes > kRecordBytesMax)
+			return false;
+		PutU16(at, static_cast<uint16_t>((unsigned(kMagic) << 8) | kUnitVersion));
+		PutU16(at + 2, static_cast<uint16_t>(lengthBytes));
+		PutU32(at + 4, 0u);
+		return true;
+	}
+
+	enum class HeaderStatus : uint8_t { Ok, TooShort, BadMagic, UnitVersion, BadLength };
+	struct Header
+	{
+		uint16_t unitVersion = 0;
+		uint16_t lengthBytes = 0;
+	};
+	inline const char* HeaderText(HeaderStatus s)
+	{
+		switch (s)
+		{
+		case HeaderStatus::Ok: return "ok";
+		case HeaderStatus::TooShort: return "buffer shorter than the 8 B header";
+		case HeaderStatus::BadMagic: return "not a source geometry record";
+		case HeaderStatus::UnitVersion: return "unit version";
+		case HeaderStatus::BadLength: return "record length outside the header .. 512 B bound or beyond the buffer";
+		}
+		return "?";
+	}
+	// `available` = the bytes readable at `at`. On Ok `out` holds the version and the length.
+	inline HeaderStatus ReadHeader(const unsigned char* at, size_t available, Header* out)
+	{
+		if (!at || available < kHeaderBytes)
+			return HeaderStatus::TooShort;
+		const uint16_t first = GetU16(at);
+		if ((first >> 8) != kMagic)
+			return HeaderStatus::BadMagic;
+		const uint16_t version = static_cast<uint16_t>(first & 0xFFu);
+		if (version != kUnitVersion)
+			return HeaderStatus::UnitVersion;
+		const uint16_t length = GetU16(at + 2);
+		if (length < kHeaderBytes || length > kRecordBytesMax || length > available)
+			return HeaderStatus::BadLength;
+		if (out)
+		{
+			out->unitVersion = version;
+			out->lengthBytes = length;
+		}
+		return HeaderStatus::Ok;
+	}
+
+	// ---- the field budget (doc 78 section 6) --------------------------------------------------------------------------------------
+	// The CEILING the source-identity layout must stay within, one line per field of the doc 78 list with its byte width and how many
+	// times it occurs: per axis (horizontal, vertical) and per side (measured, applied) the state, n, N, ratio, phase, kernel family and two
+	// parameters, kernel confidence, sharpening, double scaling, confidence, LLR and reason bits; per axis the effective bandwidth; the active
+	// area; the coded-raster class; the reserved chroma chain (two planes); the generations and timing. NOT the layout (SID-C lays the bytes
+	// out and bumps kUnitVersion with any change); a test pins that header + budget fits kRecordBytesMax with room to grow.
+	struct FieldBudget
+	{
+		const char* name;
+		uint16_t bytes;   // one occurrence
+		uint8_t count;    // occurrences (axis x side = 4, per axis = 2, ...)
+	};
+	inline const FieldBudget* FieldBudgets(size_t* count)
+	{
+		static const FieldBudget kFields[] = {
+			{ "state (per axis and side)", 1, 4 },
+			{ "n", 2, 4 },
+			{ "N", 2, 4 },
+			{ "ratio", 4, 4 },
+			{ "phase", 4, 4 },
+			{ "kernel family", 1, 4 },
+			{ "kernel parameters (2 x f32)", 8, 4 },
+			{ "kernel confidence", 4, 4 },
+			{ "sharpening {present, amount, radius, confidence}", 13, 4 },
+			{ "double scaling {present, n1, confidence}", 7, 4 },
+			{ "confidence", 4, 4 },
+			{ "LLR", 4, 4 },
+			{ "reason bits", 4, 4 },
+			{ "effective bandwidth per axis", 4, 2 },
+			{ "active area {x, y, w, h, confidence}", 12, 1 },
+			{ "coded-raster class", 1, 1 },
+			{ "chroma chain per plane {origin sampling, player-upsampled, kernel, siting x, siting y, confidence} (reserved)", 9, 2 },
+			{ "geometryGen", 8, 1 },
+			{ "appliedGen", 8, 1 },
+			{ "evalSeq", 8, 1 },
+			{ "evalTimeUs", 8, 1 },
+			{ "maxAgeUs", 8, 1 },
+		};
+		if (count)
+			*count = sizeof(kFields) / sizeof(kFields[0]);
+		return kFields;
+	}
+	inline size_t FieldBudgetBytes()
+	{
+		size_t n = 0;
+		const FieldBudget* f = FieldBudgets(&n);
+		size_t total = 0;
+		for (size_t i = 0; i < n; ++i)
+			total += size_t(f[i].bytes) * f[i].count;
+		return total;
 	}
 
 	// ---- the readers --------------------------------------------------------------------------------------------------------------
@@ -127,7 +252,7 @@ namespace SourceGeometry
 		uint32_t unitVersion = 0;   // the unit version that made it
 		uint64_t seq = 0;           // the frame the evaluation was sealed with: visible to a reader of frame N only when seq <= N
 		int64_t timeUs = 0;         // source time of the evaluation
-		int64_t maxAgeUs = 0;       // stale after this age; <= 0 = the writer stated none: the record is treated as stale (fail closed)
+		int64_t maxAgeUs = 0;       // stale after this age; <= 0 = the writer has not measured its interval yet: never used (kCauseNotMeasured)
 	};
 
 	// The reservation's PLACEHOLDER producer: nothing is ever published (absent).
@@ -141,7 +266,7 @@ namespace SourceGeometry
 	constexpr bool kRequestedToday = false;
 
 	// Why the record is not usable: one bit per cause.
-	enum : unsigned { kCauseAbsent = 1u, kCauseUnitVersion = 2u, kCauseStale = 4u, kCauseNotYet = 8u, kCauseNoProducer = 16u };
+	enum : unsigned { kCauseAbsent = 1u, kCauseUnitVersion = 2u, kCauseStale = 4u, kCauseNotYet = 8u, kCauseNoProducer = 16u, kCauseNotMeasured = 32u };
 
 	inline unsigned CauseOf(const Entry* e, uint64_t frameSeq, int64_t nowUs)
 	{
@@ -153,7 +278,10 @@ namespace SourceGeometry
 			return kCauseUnitVersion;
 		if (e->seq > frameSeq)
 			return kCauseNotYet;   // sealed after the frame being rendered: a reader never reads the future
-		if (e->maxAgeUs <= 0 || nowUs - e->timeUs > e->maxAgeUs || nowUs < e->timeUs - e->maxAgeUs)
+		// The writer states no maximum age until it has MEASURED its evaluation interval: say so plainly (not "stale"), and never use the record.
+		if (e->maxAgeUs <= 0)
+			return kCauseNotMeasured;
+		if (AbsDiffUs(nowUs, e->timeUs) > static_cast<uint64_t>(e->maxAgeUs))
 			return kCauseStale;
 		return 0;
 	}
@@ -167,6 +295,7 @@ namespace SourceGeometry
 		case kCauseStale: return "stale";
 		case kCauseNotYet: return "not sealed yet";
 		case kCauseNoProducer: return "no producer";
+		case kCauseNotMeasured: return "evaluation interval not measured yet";
 		}
 		return "";
 	}

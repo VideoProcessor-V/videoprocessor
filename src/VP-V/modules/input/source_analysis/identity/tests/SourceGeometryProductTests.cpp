@@ -5,13 +5,18 @@
 // P14g source_geometry (wave S2, doc 78 section 6): the reservation. Id 29 appended after the doc 72 list, the held-state declaration (Cpu, T0,
 // no live fill, lag-1 readers, single writer), the catalog row and readers, the ABSENT placeholder and the absent-tested read of every
 // provisional consumer (not requested = byte-identical, requested = classical form visibly), the staleness rule, the byte order. CPU only.
-#include "pch.h"
+// Built without the test project's precompiled header (as ProductCatalogTests): keep windows.h from defining min/max.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "CppUnitTest.h"
 
 #include <VP-V/core/ProductCatalog.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceGeometryProduct.h>
 
 #include <cstdint>
+#include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -70,6 +75,7 @@ namespace Tests
 				Assert::IsTrue(BytesOf(p.size, Dims{ 3840, 2160 }) <= kRecordBytesMax);
 				Assert::AreEqual(size_t(512), kRecordBytesMax);
 				Assert::IsFalse(p.orderedChain || p.singletonStore, L"a plain record product");
+				Assert::IsTrue(p.heldState, L"enforced held state: lag >= 1 readers only, no live pool");
 				Assert::IsTrue(p.shortQueueSubstitute == kNoProduct && p.noOfaSubstitute == kNoProduct);
 				// The same single writer family as P14: it follows the monitor evaluation (P5), stamps = content + the analysis settings.
 				Assert::AreEqual(1, int(p.inputCount));
@@ -79,6 +85,7 @@ namespace Tests
 				// P14 itself is untouched (id, size).
 				Assert::AreEqual(19, int(kSourceIdentity));
 				Assert::AreEqual(uint32_t(256), reg.Get(kSourceIdentity).size.fixedBytes);
+				Assert::IsTrue(reg.Get(kSourceIdentity).heldState, L"P14 is the same held state: every reader is a lag-1 read");
 			}
 
 			TEST_METHOD(TheCatalogRowIsHeldStateWithNoLaneProducerAndNoLiveFill)
@@ -178,10 +185,28 @@ namespace Tests
 				Assert::AreEqual(0u, CauseOf(&fresh, 10, 1000000 + 500000));
 				Assert::AreEqual(unsigned(kCauseStale), CauseOf(&fresh, 10, 1000000 + 500001));
 				Assert::AreEqual(unsigned(kCauseStale), CauseOf(&fresh, 10, 1000000 - 500001));
-				// A record that states no maximum age is treated as stale (fail closed).
+				// The writer states no maximum age until it has measured its interval: said plainly, never used.
 				Entry noAge = Fresh();
 				noAge.maxAgeUs = 0;
-				Assert::AreEqual(unsigned(kCauseStale), CauseOf(&noAge, 10, 1000000));
+				Assert::AreEqual(unsigned(kCauseNotMeasured), CauseOf(&noAge, 10, 1000000));
+				Assert::AreEqual(std::string("evaluation interval not measured yet"), std::string(CauseWord(kCauseNotMeasured)));
+				const ReadResult nm = Read(Consumer::AdaptiveScaler, &noAge, true, 10, 1000000);
+				Assert::IsFalse(nm.usable);
+				Assert::IsTrue(nm.fallback.engaged && nm.fallback.reason.find("evaluation interval not measured yet") != std::string::npos);
+				Assert::IsTrue(StatusLine(Consumer::AdaptiveScaler, nm).find("evaluation interval not measured yet") != std::string::npos);
+				// No signed overflow at the extremes of the clock: the age is exact for any pair of int64.
+				const int64_t lo = (std::numeric_limits<int64_t>::min)(), hi = (std::numeric_limits<int64_t>::max)();
+				Entry wide = Fresh(10, lo, hi);
+				Assert::AreEqual(unsigned(kCauseStale), CauseOf(&wide, 10, hi - 1), L"hi - lo does not fit int64 but is far beyond the limit");
+				Assert::AreEqual(unsigned(kCauseStale), CauseOf(&wide, 10, hi), L"age 2^64 - 1 exceeds the largest maximum age");
+				wide.timeUs = hi;
+				Assert::AreEqual(unsigned(kCauseStale), CauseOf(&wide, 10, lo), L"the clock far behind the record: stale, no UB");
+				wide.maxAgeUs = 5;
+				Assert::AreEqual(0u, CauseOf(&wide, 10, hi - 5));
+				Assert::AreEqual(unsigned(kCauseStale), CauseOf(&wide, 10, hi - 6));
+				Assert::AreEqual(uint64_t(~uint64_t(0)), AbsDiffUs(lo, hi));
+				Assert::AreEqual(uint64_t(0), AbsDiffUs(hi, hi));
+				Assert::AreEqual(uint64_t(7), AbsDiffUs(3, -4));
 				// Another unit version.
 				Entry other = Fresh();
 				other.unitVersion = kUnitVersion + 1;
@@ -224,6 +249,10 @@ namespace Tests
 				Assert::AreEqual(int64_t(0), MaxAgeUs(-5));
 				Assert::AreEqual(int64_t(2 * 41708), MaxAgeUs(41708));
 				Assert::AreEqual(int64_t(2 * 1000000), MaxAgeUs(1000000));
+				const int64_t top = (std::numeric_limits<int64_t>::max)();
+				Assert::AreEqual(top, MaxAgeUs(top), L"saturates, never overflows 2 x interval");
+				Assert::AreEqual(top, MaxAgeUs(top / 2 + 1));
+				Assert::AreEqual(top - 1, MaxAgeUs(top / 2), L"the largest interval that doubles exactly");
 				Assert::IsTrue(MaxAgeUs(2000000) > MaxAgeUs(1000000), L"follows the interval");
 			}
 
@@ -247,6 +276,77 @@ namespace Tests
 				Assert::AreEqual(~uint64_t(0), GetU64(edge));
 				PutU64(edge, 0);
 				Assert::AreEqual(uint64_t(0), GetU64(edge));
+			}
+
+			TEST_METHOD(TheRecordHeaderIsAFixedEightBytesCheckedBeforeThePayload)
+			{
+				Assert::AreEqual(size_t(8), kHeaderBytes);
+				Assert::AreEqual(size_t(504), kPayloadBytesMax);
+				unsigned char b[kRecordBytesMax] = {};
+				Assert::IsTrue(WriteHeader(b, 320));
+				Assert::AreEqual(int(kMagic), int(b[1]), L"magic in the high byte of the first u16 (little-endian: offset 1)");
+				Assert::AreEqual(int(kUnitVersion), int(b[0]), L"unit version in the low byte");
+				Assert::AreEqual(uint16_t(320), GetU16(b + 2));
+				Assert::AreEqual(uint32_t(0), GetU32(b + 4), L"reserved written 0");
+				Header h;
+				Assert::IsTrue(ReadHeader(b, 320, &h) == HeaderStatus::Ok);
+				Assert::AreEqual(uint16_t(kUnitVersion), h.unitVersion);
+				Assert::AreEqual(uint16_t(320), h.lengthBytes);
+				// The reserved bytes are ignored on read.
+				PutU32(b + 4, 0xDEADBEEFu);
+				Assert::IsTrue(ReadHeader(b, 320, nullptr) == HeaderStatus::Ok);
+				PutU32(b + 4, 0u);
+				// Bounds: the whole record at 512, the bare header at 8; nothing outside is written.
+				Assert::IsTrue(WriteHeader(b, kRecordBytesMax) && WriteHeader(b, kHeaderBytes));
+				Assert::IsFalse(WriteHeader(b, kHeaderBytes - 1));
+				Assert::IsFalse(WriteHeader(b, kRecordBytesMax + 1));
+				// Every wrong header is a visible status, never a guess.
+				Assert::IsTrue(WriteHeader(b, 100));
+				Assert::IsTrue(ReadHeader(b, 7, nullptr) == HeaderStatus::TooShort);
+				Assert::IsTrue(ReadHeader(nullptr, 100, nullptr) == HeaderStatus::TooShort);
+				Assert::IsTrue(ReadHeader(b, 99, nullptr) == HeaderStatus::BadLength, L"length beyond the buffer");
+				unsigned char bad[8];
+				std::memcpy(bad, b, 8);
+				bad[1] = 0x00;
+				Assert::IsTrue(ReadHeader(bad, 100, nullptr) == HeaderStatus::BadMagic);
+				std::memcpy(bad, b, 8);
+				bad[0] = static_cast<unsigned char>(kUnitVersion + 1);
+				Assert::IsTrue(ReadHeader(bad, 100, nullptr) == HeaderStatus::UnitVersion);
+				std::memcpy(bad, b, 8);
+				PutU16(bad + 2, 7);
+				Assert::IsTrue(ReadHeader(bad, 100, nullptr) == HeaderStatus::BadLength, L"shorter than the header");
+				PutU16(bad + 2, 513);
+				Assert::IsTrue(ReadHeader(bad, 600, nullptr) == HeaderStatus::BadLength, L"beyond the 512 B bound");
+				for (HeaderStatus s : { HeaderStatus::Ok, HeaderStatus::TooShort, HeaderStatus::BadMagic, HeaderStatus::UnitVersion, HeaderStatus::BadLength })
+					Assert::IsTrue(std::string(HeaderText(s)) != "?" && !std::string(HeaderText(s)).empty());
+			}
+
+			TEST_METHOD(TheFieldBudgetOfDoc78FitsTheRecordWithRoomToGrow)
+			{
+				size_t n = 0;
+				const FieldBudget* f = FieldBudgets(&n);
+				Assert::IsTrue(n >= 20);
+				size_t total = 0;
+				bool bandwidth = false, area = false, chroma = false, gens = false, sharpen = false, dbl = false;
+				for (size_t i = 0; i < n; ++i)
+				{
+					Assert::IsTrue(f[i].bytes > 0 && f[i].count > 0 && f[i].name[0] != '\0');
+					total += size_t(f[i].bytes) * f[i].count;
+					const std::string name = f[i].name;
+					bandwidth = bandwidth || name.find("effective bandwidth per axis") != std::string::npos;
+					area = area || name.find("active area") != std::string::npos;
+					chroma = chroma || name.find("chroma chain") != std::string::npos;
+					gens = gens || name == "appliedGen";
+					sharpen = sharpen || name.find("sharpening") != std::string::npos;
+					dbl = dbl || name.find("double scaling") != std::string::npos;
+				}
+				Assert::IsTrue(bandwidth, L"doc 78 section 6: effective bandwidth per axis");
+				Assert::IsTrue(area && chroma && gens && sharpen && dbl);
+				Assert::AreEqual(total, FieldBudgetBytes());
+				Assert::IsTrue(kHeaderBytes + total <= kRecordBytesMax, L"header + every field fits 512 B");
+				Assert::IsTrue(total <= kPayloadBytesMax);
+				Assert::IsTrue(kHeaderBytes + total + 128 <= kRecordBytesMax, L"at least 128 B of headroom for the build to grow");
+				Assert::AreEqual(size_t(311), total, L"pinned: a change of the budget is a deliberate edit");
 			}
 
 			TEST_METHOD(TheStatusWordingNamesNoDisplayAndEveryConsumerHasAClassicalForm)

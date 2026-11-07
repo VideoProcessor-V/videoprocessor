@@ -243,6 +243,74 @@ namespace SkeletonGraphTestsNs
 		return Registry(std::move(d));
 	}
 
+	// ---- held state (wave S2 audit): 0 held record, 1 reader (the record at `readerLag`), 2 causal reader (the lead reader's substitute) ----
+	constexpr ProductId kHeld = 0, kHeldReader = 1, kHeldCausal = 2;
+
+	Registry HeldRegistry(uint8_t readerLag, bool readerAtLead = false)
+	{
+		using namespace VpIndicator;
+		const CounterMask content = Bit(kFull) | Bit(kContinuity);
+		std::vector<ProductDecl> d;
+		ProductDecl held = detail::Make(kHeld, "held", "held record", Backend::Cpu, 1, Tier::T0, content, 0);
+		held.heldState = true;
+		d.push_back(held);
+		ProductDecl reader = detail::Make(kHeldReader, "held_reader", "held reader", Backend::Cpu, 0, Tier::T0, content, 0);
+		if (readerAtLead)
+		{
+			detail::AddLead(reader, kHeld, 1);
+			reader.shortQueueSubstitute = kHeldCausal;
+		}
+		else
+			detail::AddInput(reader, kHeld, readerLag);
+		reader.missingInputForm = true;
+		d.push_back(reader);
+		ProductDecl causal = detail::Make(kHeldCausal, "held_causal", "held causal reader", Backend::Cpu, 0, Tier::T0, content, 0);
+		detail::AddInput(causal, kHeld, 1);
+		causal.missingInputForm = true;
+		d.push_back(causal);
+		for (ProductDecl& p : d)
+			p.size.fixedBytes = 64;
+		return Registry(std::move(d));
+	}
+
+	// ---- two single stores and two readers: A, B (stores), R (reads A@1 and B@1), R2 (reads A@1) ----
+	constexpr ProductId kPairA = 0, kPairB = 1, kPairR = 2, kPairR2 = 3;
+
+	Registry PairRegistry()
+	{
+		using namespace VpIndicator;
+		const CounterMask content = Bit(kFull) | Bit(kContinuity);
+		std::vector<ProductDecl> d;
+		for (ProductId id : { kPairA, kPairB })
+		{
+			ProductDecl s = detail::Make(id, id == kPairA ? "store_a" : "store_b", "single store", Backend::Cpu, 0, Tier::T0, content, 0);
+			s.singletonStore = true;
+			d.push_back(s);
+		}
+		ProductDecl r = detail::Make(kPairR, "reader_r", "reader of both", Backend::Cpu, 0, Tier::T0, content, 0);
+		detail::AddInput(r, kPairA, 1);
+		detail::AddInput(r, kPairB, 1);
+		r.missingInputForm = true;
+		d.push_back(r);
+		ProductDecl r2 = detail::Make(kPairR2, "reader_r2", "reader of A", Backend::Cpu, 0, Tier::T0, content, 0);
+		detail::AddInput(r2, kPairA, 1);
+		r2.missingInputForm = true;
+		d.push_back(r2);
+		for (ProductDecl& p : d)
+			p.size.fixedBytes = 64;
+		return Registry(std::move(d));
+	}
+
+	std::vector<ConsumerDecl> PairConsumers()
+	{
+		ConsumerDecl c;
+		c.id = 1;
+		c.name = "readers";
+		AddConsume(c, kPairR);
+		AddConsume(c, kPairR2);
+		return std::vector<ConsumerDecl>(1, c);
+	}
+
 	// Frames 0..3 through the lane protocol by hand. leads: the product reads its input at lead 1 and 2 (quality_pattern): the render
 	// is simulated sealing the lead target ahead (a real render seals in frame order, see the README note on lead readers of chains).
 	void CatalogChainRuns(const Registry& reg, ProductId product, bool leads)
@@ -1354,6 +1422,100 @@ namespace SkeletonGraphTestsNs
 			for (const std::string& l : lane.StatusLines())
 				shown = shown || (Has(l, "3 single-store reader frames waited on a rejected store frame") && Has(l, "no live fill"));
 			Assert::IsTrue(shown, L"shown in plain language");
+		}
+
+		// ---- S2 audit: held state is ENFORCED (lag >= 1 readers only, no live pool) ----
+
+		TEST_METHOD(AHeldStateProductIsReadAtLagOneOrMoreAndNeverAtLagZeroOrALead)
+		{
+			const char* why = "";
+			Assert::IsTrue(HeldRegistry(1).Validate(&why), L"lag 1 is the held read");
+			Assert::IsTrue(HeldRegistry(2).Validate(&why), L"deeper lags are fine (the history keeps them)");
+			Assert::IsFalse(HeldRegistry(0).Validate(&why), L"a lag-0 read is refused");
+			Assert::IsTrue(Has(why, "held-state"));
+			Assert::IsFalse(HeldRegistry(1, true).Validate(&why), L"a look-ahead read is refused");
+			Assert::IsTrue(Has(why, "held-state"));
+			// A held-state product needs a lane backend.
+			std::vector<ProductDecl> d = HeldRegistry(1).All();
+			d[kHeld].backend = Backend::RenderOnly;
+			Assert::IsFalse(Registry(d).Validate(&why));
+			Assert::IsTrue(Has(why, "held-state"));
+			// The graph refuses a CONSUMER at lag 0 with a visible reason and the product named; at lag 1 it builds.
+			ConsumerDecl c;
+			c.id = 1;
+			c.name = "lag zero";
+			AddConsume(c, kHeld, 0);
+			const Graph bad = BuildGraph(HeldRegistry(1), std::vector<ConsumerDecl>(1, c), Rig::MakeSettings(2));
+			Assert::IsFalse(bad.valid);
+			Assert::IsTrue(Has(bad.error, "held-state") && Has(bad.error, "lag 0"));
+			Assert::AreEqual(int(kHeld), int(bad.errorProduct));
+			Assert::AreEqual(std::string("held"), bad.errorProductName);
+			Assert::IsTrue(bad.nodes.empty());
+			ConsumerDecl ok;
+			ok.id = 2;
+			ok.name = "lag one";
+			AddConsume(ok, kHeld, 1);
+			const Graph good = BuildGraph(HeldRegistry(1), std::vector<ConsumerDecl>(1, ok), Rig::MakeSettings(2));
+			Assert::IsTrue(good.valid);
+			Assert::IsTrue(good.Find(kHeld)->heldState);
+			Assert::IsFalse(good.Find(kHeldReader) != nullptr && good.Find(kHeldReader)->heldState);
+		}
+
+		TEST_METHOD(AHeldStateProductHasNoLivePoolAndAnAbsentRecordIsUnavailableForItsReader)
+		{
+			Rig r(HeldRegistry(1), OneConsumer(kHeldReader), 2);
+			const Node* held = r.graph.Find(kHeld);
+			Assert::IsNotNull(held);
+			Assert::IsTrue(held->heldState && !held->singletonStore);
+			Assert::AreEqual(0, int(held->livePool), L"no live fill, so no live pool");
+			Assert::AreEqual(uint64_t(0), held->liveBytes);
+			Assert::IsTrue(int(held->ring) >= int(held->history) + 1, L"the ring keeps its history");
+			Assert::AreEqual(0, int(r.table.Find(kHeld)->LivePool()));
+			Assert::AreEqual(-1, r.table.Find(kHeld)->BeginLive(0), L"nothing to begin");
+			Assert::IsTrue(r.graph.Find(kHeldReader)->livePool > 0u, L"an ordinary product keeps its live pool");
+			// Nothing published: the record is Unavailable for the frame (not a pool shortage) and the reader runs its declared reduced form.
+			const auto& res0 = r.Resolve(0);
+			const ProductFrameResult& h0 = r.Result(res0, kHeld);
+			Assert::IsTrue(h0.final == SealOutcome::Unavailable && h0.finalReason == SealReason::NoLiveBuffer && !h0.liveFilled);
+			Assert::AreEqual(uint64_t(0), r.Set(kHeld).Counters().noLiveBuffer.load());
+			const ProductFrameResult& rd0 = r.Result(res0, kHeldReader);
+			Assert::IsTrue(rd0.liveFilled && (rd0.missingInputs & 1u) != 0u, L"visible reduced form, never a full result");
+			// A published record is read normally at lag 1.
+			Rig q(HeldRegistry(1), OneConsumer(kHeldReader), 2);
+			Assert::IsTrue(q.Lane(kHeld, 0));
+			q.Resolve(0);
+			Assert::IsTrue(q.Lane(kHeldReader, 1), L"the lag-1 reader pins the sealed record");
+		}
+
+		// ---- S2 audit: the store wait is counted per (reader, store) pair ----
+
+		TEST_METHOD(TheStoreWaitIsCountedPerReaderAndStorePair)
+		{
+			Header scratch;
+			LaneInputs pins;
+			// A healthy, B rejected: reader R pins A and then waits on B. The wait is counted on B only; R2 (A only) runs.
+			Rig r(PairRegistry(), PairConsumers(), 2);
+			Assert::IsTrue(r.Lane(kPairA, 0));
+			r.Resolve(0);
+			Assert::IsTrue(r.Set(kPairB).RejectedAwaitingLive(0), L"B(0) was never made: Rejected, no live fill");
+			for (int poll = 0; poll < 3; ++poll)
+				Assert::IsFalse(r.table.LaneAncestors(kPairR, 1, scratch, pins));
+			Assert::AreEqual(size_t(0), pins.count, L"A's pin is released again");
+			Assert::AreEqual(uint64_t(1), r.Set(kPairB).Counters().storeWaitRejected.load(), L"once per frame, not per poll");
+			Assert::AreEqual(uint64_t(0), r.Set(kPairA).Counters().storeWaitRejected.load(), L"A is healthy: nothing counted");
+			Assert::IsTrue(r.table.LaneAncestors(kPairR2, 1, scratch, pins));
+			pins.Unpin();
+			Assert::AreEqual(uint64_t(0), r.Set(kPairA).Counters().storeWaitRejected.load());
+			// Both stores rejected: R waits on A (the first input) and is counted for the (R, A) pair; R2 is a SECOND pair on the same store.
+			Rig q(PairRegistry(), PairConsumers(), 2);
+			q.Resolve(0);
+			Assert::IsTrue(q.Set(kPairA).RejectedAwaitingLive(0) && q.Set(kPairB).RejectedAwaitingLive(0));
+			Assert::IsFalse(q.table.LaneAncestors(kPairR, 1, scratch, pins));
+			Assert::IsFalse(q.table.LaneAncestors(kPairR, 1, scratch, pins));
+			Assert::AreEqual(uint64_t(1), q.Set(kPairA).Counters().storeWaitRejected.load());
+			Assert::IsFalse(q.table.LaneAncestors(kPairR2, 1, scratch, pins));
+			Assert::AreEqual(uint64_t(2), q.Set(kPairA).Counters().storeWaitRejected.load(), L"two readers of one store are two pairs");
+			Assert::AreEqual(uint64_t(0), q.Set(kPairB).Counters().storeWaitRejected.load(), L"B is behind A's wait: not reached, not counted");
 		}
 	};
 }

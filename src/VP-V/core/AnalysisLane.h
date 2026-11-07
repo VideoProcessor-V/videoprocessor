@@ -1024,7 +1024,7 @@ public:
                           + " ordered-chain frames waited for the predecessor's seal (a chain job pins only a sealed or live predecessor)");
         if (storeWait > 0)
             out.push_back("Analysis: " + std::to_string(storeWait)
-                          + " single-store reader frames waited on a rejected store frame (a store has no live fill: the reader job waits until the frame is released)");
+                          + " single-store reader frames waited on a rejected store frame (a store has no live fill: the reader's lane job does not run for that frame and the render makes it in its declared reduced form, or it is unavailable)");
         if (!st->graph.leadChainWarning.empty())
             out.push_back("Analysis warning: " + st->graph.leadChainWarning);
         if (pinWait > 0)

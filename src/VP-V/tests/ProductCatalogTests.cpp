@@ -302,6 +302,54 @@ namespace ProductCatalogTestsNs
 			Assert::AreEqual(size_t(1), ConsumersOf(kP7gCameraGuide).size());
 		}
 
+		TEST_METHOD(HeldStateProductsAreReadAtLagOneOrMoreOnlyAndHaveNoLivePool)
+		{
+			// P14 source identity and P14g source geometry are the held-state products: the writer outside the frame loop publishes, every reader
+			// takes the latest sealed record. Enforced: no lag-0 / look-ahead read (Registry::Validate, BuildGraph), no live pool.
+			const Registry reg = SkeletonProducts();
+			size_t held = 0;
+			for (const ProductDecl& d : reg.All())
+				if (d.heldState) {
+					++held;
+					Assert::IsTrue(d.id == kSourceIdentity || d.id == kSourceGeometry, L"only the two records");
+					// Every catalog reader reads it at lag >= 1 (a lag-0 reader would have been refused by the graph).
+					for (const ConsumerRow& c : ConsumerRows())
+						for (size_t k = 0; k < c.decl.count; ++k)
+							if (c.decl.consumes[k].product == d.id)
+								Assert::IsTrue(c.decl.consumes[k].lag >= 1, L"a held-state read is lag >= 1");
+					// No product declares a lag-0 / lead input on it either.
+					for (const ProductDecl& o : reg.All())
+						for (size_t k = 0; k < o.inputCount; ++k)
+							if (o.inputs[k].product == d.id)
+								Assert::IsTrue(o.inputs[k].lag >= 1 && o.inputs[k].lead == 0);
+				}
+			Assert::AreEqual(size_t(2), held);
+			Assert::IsTrue(reg.Get(kSourceIdentity).heldState && reg.Get(kSourceGeometry).heldState);
+			for (uint8_t lane : { uint8_t(0), uint8_t(1), uint8_t(3) }) {
+				const Graph g = FullGraph(Settings(Dims{ 3840, 2160 }, lane), reg);
+				Assert::IsTrue(g.valid, L"the full catalog graph still builds with the rule enforced");
+				for (ProductId id : { kSourceIdentity, kSourceGeometry }) {
+					const Node* n = g.Find(id);
+					Assert::IsNotNull(n);
+					Assert::IsTrue(n->heldState);
+					Assert::AreEqual(0, int(n->livePool), L"no live pool");
+					Assert::AreEqual(uint64_t(0), n->liveBytes);
+					Assert::IsTrue(n->ring >= n->history + 1, L"the ring keeps its history");
+				}
+			}
+			// A consumer at lag 0 on either record is refused, visibly.
+			for (ProductId id : { kSourceIdentity, kSourceGeometry }) {
+				ConsumerDecl c;
+				c.id = 1;
+				c.name = "lag-zero reader";
+				AddConsume(c, id, 0);
+				const Graph bad = BuildGraph(reg, std::vector<ConsumerDecl>(1, c), Settings(Dims{ 1920, 1080 }, 1));
+				Assert::IsFalse(bad.valid);
+				Assert::IsTrue(std::string(bad.error).find("held-state") != std::string::npos);
+				Assert::AreEqual(int(id), int(bad.errorProduct));
+			}
+		}
+
 		TEST_METHOD(EveryRegistryProductHasACatalogRow)
 		{
 			const Registry reg = SkeletonProducts();
@@ -484,6 +532,8 @@ namespace ProductCatalogTestsNs
 						Assert::IsTrue(int(n.ring) >= int(n.history) + 1, L"ring >= history + 1");
 						if (n.singletonStore)   // the ping-pong store: two buffers, lane-only (no live fill)
 							Assert::IsTrue(int(n.ring) == 2 && n.livePool == 0, L"a single store is two buffers and has no live pool");
+						else if (n.heldState)   // held state (P14, P14g): lane-only, read at lag >= 1; no live fill, so no live pool
+							Assert::IsTrue(n.livePool == 0, L"a held-state product has no live pool");
 						else
 							Assert::IsTrue(int(n.livePool) >= int(n.history) + 1, L"live pool >= history + 1");
 					}

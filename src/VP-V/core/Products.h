@@ -257,6 +257,13 @@ struct ProductDecl {
     // producer's job for frame N+1 reuses the slot of frame N-1 and waits (counted, SlotCounters::writeWaitPinned) while a
     // lag-1 reader still pins it. Its VRAM figure is 2x the store, not a ring.
     bool singletonStore = false;
+    // HELD STATE (wave S2 audit): a record the writer (outside the lane's frame loop, e.g. the source-resolution worker) publishes on its
+    // own evaluations and every reader takes as the latest SEALED one: a lag >= 1 read, never lag 0 and never a look-ahead. There is no
+    // live fill, so BuildGraph gives it NO live pool (livePool 0, like singletonStore) and an absent record is Unavailable for that frame:
+    // the reader runs its own visible fallback. Registry::Validate rejects a lag-0 or lead read of a held-state product in a product's inputs,
+    // BuildGraph the same in a consumer's reads (visible reason). Set on P14 source identity and P14g source geometry (every reader of both
+    // is a lag-1 held read in the catalog; a test pins it).
+    bool heldState = false;
     // Set by detail::AddInput/AddLead when a declaration named more than kMaxInputs reads: the extra read was NOT
     // recorded. Registry::Validate rejects the declaration with a plain reason (fail closed, visible; Release has no
     // assert).
@@ -423,6 +430,8 @@ public:
             }
             if (d.historyFloor != kHistoryFixed && d.historyFloor > d.history)
                 return fail("history floor above the full history");
+            if (d.heldState && d.backend == Backend::RenderOnly)
+                return fail("a held-state product needs a lane backend (it has no live fill)");
             if (d.singletonStore) {
                 if (d.history != 0)
                     return fail("a single-store product declares history 0");
@@ -459,6 +468,13 @@ public:
                 const InputRef& in = d.inputs[k];
                 if (decls_[in.product].singletonStore && (in.lag > 1 || in.lead > 0))
                     return fail("a single-store product is read at lag 0 or 1 only (no deeper lag, no look-ahead)");
+            }
+        // A held-state product is read at lag >= 1 only: the latest sealed record, never the frame's own and never a look-ahead.
+        for (const ProductDecl& d : decls_)
+            for (size_t k = 0; k < d.inputCount; ++k) {
+                const InputRef& in = d.inputs[k];
+                if (decls_[in.product].heldState && (in.lag == 0 || in.lead > 0))
+                    return fail("a held-state product is read at lag >= 1 only (no lag-0 read, no look-ahead)");
             }
         // Look-ahead edges: no chains (the target has no lead inputs itself) and no loops (the target
         // cannot reach the reader through ANY edge, lag, lag 0 or lead): a frame-ahead read must end at
@@ -897,6 +913,7 @@ inline void AppendSourceIdentityProduct(std::vector<ProductDecl>& decls)
     ProductDecl p = Make(kSourceIdentity, "p14_source_identity", "source identity (held state)", Backend::Cpu, 1,
                          Tier::T0, Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
     AddInput(p, kP5MonitorTiles, 0);   // through the monitor snapshot (the tiles' analysis)
+    p.heldState = true;   // every catalog reader is a lag-1 held read (ProductCatalogTests pins it): no live pool
     p.size.fixedBytes = kSourceIdentityRecordBytes;
     p.residency = Residency::SystemRam;
     p.rarelyTouched = true;
@@ -921,6 +938,7 @@ inline void AppendSourceGeometryProduct(std::vector<ProductDecl>& decls)
     ProductDecl p = Make(kSourceGeometry, "source_geometry", "source geometry (held state)", Backend::Cpu, 1, Tier::T0,
                          Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
     AddInput(p, kP5MonitorTiles, 0);   // like P14: the same monitor evaluation (single writer, the source-resolution side)
+    p.heldState = true;
     p.size.fixedBytes = kSourceGeometryRecordBytes;
     p.residency = Residency::SystemRam;
     p.rarelyTouched = true;

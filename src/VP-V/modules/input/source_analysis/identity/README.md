@@ -80,8 +80,11 @@ Fixed voter slots and group order, no unordered containers, no clock, no random 
 `Products.h` declares `kSourceGeometry` (`source_geometry`, id 29, appended after the doc 72 list; CPU, T0, history 1, system RAM, declared 512 B,
 unit version `SourceGeometry::kUnitVersion` = 1, catalog expectation `kExpectedSourceGeometryUnit`). Like P14 it is **HELD STATE with no live fill**: the
 source-resolution side is the single writer and publishes on each evaluation; a consumer reads the latest SEALED record with seq <= N (a lag >= 1 read);
-a record older than `maxAgeUs` (`SourceGeometry::MaxAgeUs`: twice the longest MEASURED evaluation interval, never a fixed rate; a record that states no
-maximum age is treated as stale) is stale. The layout is fixed little-endian of at most 512 B (`PutU16/32/64`, `GetU16/32/64`); its fields (per axis the
+a record older than `maxAgeUs` (`SourceGeometry::MaxAgeUs`: twice the longest MEASURED evaluation interval, never a fixed rate, saturating; the age is exact
+for any clock pair) is stale; a record that states no maximum age yet is "evaluation interval not measured yet" and is never used. Held state is ENFORCED
+for P14 and P14g (`ProductDecl::heldState`: lag >= 1 readers only, no live pool). The layout is fixed little-endian of at most 512 B behind a fixed 8 B header
+(u16 magic 'G' + unit version, u16 length, u32 reserved; `WriteHeader` / `ReadHeader` check it before any payload byte; `FieldBudgets()` is the doc 78 field
+ceiling incl. the effective bandwidth per axis, 311 B + header, pinned by a test; `PutU16/32/64`, `GetU16/32/64`); its fields (per axis the
 measured and the applied state, n, N, ratio, phase, kernel and parameters, sharpening, double scaling, confidence; the active area; the coded-raster
 class; the reserved chroma chain; geometryGen / appliedGen) are laid out by the source-identity build inside that bound, which bumps the unit version and
 the catalog expectation with any layout change. This wave holds only the reservation: the id, the catalog row, the catalog readers and an ABSENT
