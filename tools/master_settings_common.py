@@ -94,7 +94,7 @@ def collect_constants(text):
 
 
 # Section attribution (F1). A read whose section is a variable (`section`) is attributed to the section of the
-# function that holds it. This table is explicit and documented: file basename -> {function name: section};
+# function that holds it. This table is explicit and documented: repo-relative path -> {function name: section};
 # "*" is the file's default. Functions are the `inline <type> Name(` definitions of the file. Files not listed
 # here use their own first *SECTION constant (or stay bare when they have none).
 #   LedDriveConfig.h: ProjectorRules / ReadProjectorConfig read [projector.default] (the projector link);
@@ -102,9 +102,9 @@ def collect_constants(text):
 #                     ValidateLedProfile*) reads [led_drive.default], whose alias is [dynamic_drive.default].
 #   AmbientConfig.h:  the whole file is the [ambient] section.
 SECTION_MAP = {
-    "LedDriveConfig.h": {"ProjectorRules": "projector.default", "ReadProjectorConfig": "projector.default",
-                         "*": "led_drive.default"},
-    "AmbientConfig.h": {"*": "ambient"},
+    "src/VP-V/modules/drive/led_compensation/LedDriveConfig.h": {
+        "ProjectorRules": "projector.default", "ReadProjectorConfig": "projector.default", "*": "led_drive.default"},
+    "src/VP-V/modules/colour/appearance/AmbientConfig.h": {"*": "ambient"},
 }
 # Spec-builder / lambda reads, only trusted in the files of SECTION_MAP (their names are common words elsewhere).
 _BUILDER = re.compile(r'(?<![\w:.])(?:ConfigSchema::)?(?:Boolean|Integer|Number|Choice|Custom)\(\s*"(' + KEY_RE + r')"')
@@ -141,8 +141,7 @@ def extract_file_keys(text, consts, schema_file, rel="", retired=None):
     tables. A `section` variable takes the section of its function (SECTION_MAP), else the file's own first
     *SECTION constant. `retired`, when given, collects accepted-but-ignored keys; they are left out of the result."""
     t = strip_comments(text)
-    base = os.path.basename(rel)
-    fmap = SECTION_MAP.get(base)
+    fmap = SECTION_MAP.get(rel.replace("\\", "/"))
     consts = dict(consts, **collect_constants(text))      # this file's own constants win over same-named ones elsewhere
     own = re.search(r'\w*SECTION\w*\s*=\s*"([^"]+)"', t)
     file_owner = own.group(1) if own else None
@@ -224,7 +223,7 @@ def _iter_vpv_sources(root):
                 yield os.path.join(dp, fn)
 
 
-def _scan_code(root):
+def _scan_code(root, problems=None):
     """-> (live key id -> set of files, retired key id -> set of files)."""
     found, dead = {}, {}
 
@@ -251,6 +250,8 @@ def _scan_code(root):
         add(extract_field_table_keys(read_text(p)), rel)
     for rel, text in vpv:
         r = set()
+        if problems is not None:
+            problems.extend(section_map_problems(rel, text, consts))
         add(extract_file_keys(text, consts, False, rel, r), rel)
         add(r, rel, dead)
         if "kSection" in text and '"vpv.' in text:
@@ -262,9 +263,33 @@ def _scan_code(root):
     return found, dead
 
 
-def extract_code_keys(root):
-    """key id -> sorted list of repo-relative source files that name it (live keys only)."""
-    found, _ = _scan_code(root)
+def section_map_problems(rel, text, consts):
+    """Hard errors for a VP-V source file outside SECTION_MAP whose reads would be mis-sectioned or dropped:
+    (a) spec builders in a file with KeyRule, with a builder key nothing else extracts; (b) two or more distinct
+    *SECTION constants and a TryGet* whose section argument is a lower-case variable."""
+    rel = rel.replace("\\", "/")
+    if rel in SECTION_MAP:
+        return []
+    t = strip_comments(text)
+    out = []
+    if "KeyRule" in t:
+        built = {m.group(1) for m in _BUILDER.finditer(t)}
+        have = {k.split(".")[-1] for k in extract_file_keys(text, consts, False, rel)}
+        miss = sorted(built - have)
+        if miss:
+            out.append("%s: spec-builder keys not otherwise extracted (%s); add %s to SECTION_MAP"
+                       % (rel, ", ".join(miss), rel))
+    if len(set(re.findall(r'\b(\w*SECTION\w*)\s*=\s*"', t))) >= 2 and \
+            re.search(r'TryGet\w+\(\s*[a-z_]\w*\s*,', t):
+        out.append("%s: several *SECTION constants and a TryGet* on a section variable; add %s to SECTION_MAP"
+                   % (rel, rel))
+    return out
+
+
+def extract_code_keys(root, problems=None):
+    """key id -> sorted list of repo-relative source files that name it (live keys only). `problems`, when
+    given, collects section_map_problems() messages."""
+    found, _ = _scan_code(root, problems)
     # A schema file names a key bare when it cannot say which section it validates; a VP-V reader that names the
     # section is then the real id. Drop the bare twin (Bill's own bare keys are kept: they are upstream).
     upstream = load_upstream(root)
@@ -502,11 +527,12 @@ FL35 = re.compile(r"fl\s*-?\s*35", re.I)
 def analyse(root):
     mods = discover_modules(root)
     rows, struct_errors = collect_documented(root, mods)
-    code = extract_code_keys(root)
+    problems = []
+    code = extract_code_keys(root, problems)
     upstream = load_upstream(root)
     golden = load_golden(root)
 
-    errors = list(struct_errors)
+    errors = list(struct_errors) + problems
     by_id = {}
     for r in rows:
         by_id.setdefault(r["id"], []).append(r)

@@ -334,6 +334,30 @@ class SectionAttributionTests(Fixture):
         _w(self.root, "src/VP-V/modules/drive/x/Other.h", 'auto r = { Boolean("not_a_key"), Integer("nor_this", 1, 2) };\n')
         self.assertFalse({"not_a_key", "nor_this"} & self.ids())
 
+    def test_guard_unmapped_builder_file_with_keyrule_is_an_error(self):          # F-A (a)
+        _w(self.root, "src/VP-V/modules/x/y/NewConfig.h",
+           'inline auto R(){ KeyRule r; return { Boolean("sneaky_key"), Integer("other_sneaky", 1, 2) }; }\n')
+        probs = []
+        C.extract_code_keys(self.root, probs)
+        self.assertTrue(any("add src/VP-V/modules/x/y/NewConfig.h to SECTION_MAP" in p for p in probs), probs)
+        self.assertTrue(any("NewConfig.h" in e and "SECTION_MAP" in e for e in C.analyse(self.root)["errors"]))
+
+    def test_guard_unmapped_multi_section_variable_read_is_an_error(self):        # F-A (b)
+        _w(self.root, "src/VP-V/modules/x/y/TwoConfig.h",
+           'constexpr const char* A_SECTION = "a";\n' 'constexpr const char* B_SECTION = "b";\n'
+           'void f(const std::string& section){ c.TryGetString(section, "which_one", v); }\n')
+        probs = []
+        C.extract_code_keys(self.root, probs)
+        self.assertTrue(any("add src/VP-V/modules/x/y/TwoConfig.h to SECTION_MAP" in p for p in probs), probs)
+
+    def test_guard_quiet_when_builder_keys_are_otherwise_extracted(self):         # F-A (a) negative
+        _w(self.root, "src/VP-V/modules/x/y/OkConfig.h",
+           'KeyRule r; auto s = Boolean("fine_key"); void f(){ c.TryGetBool("sec", "fine_key", v); }\n'
+           'constexpr const char* A_SECTION = "a";\n' 'void g(){ c.TryGetBool(A_SECTION, "z_key", v); }\n')
+        probs = []
+        C.extract_code_keys(self.root, probs)
+        self.assertEqual(probs, [])
+
     def test_section_qualified_keys_are_kept_next_to_bare_schema_keys(self):       # F3
         _w(self.root, "src/VP-V/modules/control/diag/StateReportSettings.h",
            'void f(){ c.TryGetBool("logging", "auto_report", a); c.TryGetBool("logging", "enabled", b); }\n')
