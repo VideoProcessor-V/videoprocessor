@@ -13,8 +13,9 @@ A worked example: `src/VP-V/modules/colour/extended_range/README.md`.
 ## Add a key
 
 1. Code: add the key and its validator/default where the code keeps them
-   (`RendererProfileConfig.h`, `MainConfigSchema.h`, a `[vpv]` key list, or the VP-V field table in
-   `src/VP-V/config/` / `src/VP-V/modules/control/config/VpvRenderer*`). Add it to the module `MANIFEST.json`
+   (`RendererProfileConfig.h`, `MainConfigSchema.h`, a `[vpv]` key list, a `[vpv.<name>]` settings header with
+   `kSection`, or a VP-V field table `VpvRenderer*.{h,cpp}` / `VpvRendererFields.h` once settings move to
+   `src/VP-V/modules/control/config/`). Add it to the module `MANIFEST.json`
    `components.config_keys`.
 2. README: add one row to the module's `## Settings` table. Exact header row, one key per row, key in backticks:
 
@@ -45,4 +46,8 @@ compares them with the README rows.
 - Gaps, ratcheted by `tools/master_settings_baseline.json`: `undocumented` (key in code, no row),
   `stale` (row, no key in code), `default_mismatch` (documented default differs from the golden).
   `--strict` fails on any gap that is not in the baseline; the baseline only shrinks.
+- CI should also run `--strict --base-ref <merge-base>`: the baseline and `UPSTREAM-KEYS.txt` may not grow
+  relative to it (otherwise a gap could be hidden by editing either file).
+- Known limits: keys are matched by bare name; keys defined only in other validator headers
+  (e.g. RendererConfigView.h, FileHostSettings.h) are not scanned; fenced example tables are ignored.
 - Tests: `python -I tools/test_check_master_settings.py` (fixture trees, plus the repository's own gate).

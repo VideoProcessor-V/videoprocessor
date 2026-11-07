@@ -4,7 +4,7 @@
 
 Usage: python -I tools/check_master_settings.py [--json] [--root PATH] [--strict]
                                                 [--write-baseline] [--baseline FILE]
-                                                [--write-upstream GIT-REF]
+                                                [--write-upstream GIT-REF] [--base-ref GIT-REF]
 
 Compares the keys that exist in code (Bill-style schema files, [vpv] keys, VP-V
 field tables in either layout, [vpv.*] namespaced sections) with the rows of
@@ -29,7 +29,7 @@ import os
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import master_settings_common as C  # noqa: E402
 
 BASELINE_REL = "tools/master_settings_baseline.json"
@@ -75,6 +75,31 @@ def write_upstream(root, ref):
     return 0
 
 
+def git_show(root, ref, rel):
+    p = subprocess.run(["git", "-C", root, "show", "%s:%s" % (ref, rel)],
+                       capture_output=True, text=True, encoding="utf-8-sig", errors="replace")
+    return p.stdout if p.returncode == 0 else None
+
+
+def base_ref_errors(root, ref, baseline):
+    """Ratchet against a git ref (merge base): the baseline and upstream list may only shrink."""
+    errs = []
+    old = git_show(root, ref, BASELINE_REL)
+    if old is not None and baseline is not None:
+        og = json.loads(old).get("gaps", {})
+        for k in GAP_KINDS:
+            added = sorted(set(baseline.get(k, [])) - set(og.get(k, [])))
+            if added:
+                errs.append("baseline gained %s gap(s) vs %s: %s" % (k, ref, ", ".join(added)))
+    up = git_show(root, ref, C.UPSTREAM_REL)
+    if up is not None:
+        oldkeys = {ln.strip() for ln in up.splitlines() if ln.strip() and not ln.startswith("#")}
+        added = sorted(C.load_upstream(root) - oldkeys)
+        if added:
+            errs.append("upstream key list gained keys vs %s (a VP-V key hidden from scope?): %s" % (ref, ", ".join(added)))
+    return errs
+
+
 def master_stale(root):
     path = os.path.join(root, *C.MASTER_REL.split("/"))
     if not os.path.isfile(path):
@@ -94,6 +119,8 @@ def main(argv=None):
     ap.add_argument("--write-baseline", action="store_true")
     ap.add_argument("--baseline", default=None)
     ap.add_argument("--write-upstream", metavar="GIT_REF")
+    ap.add_argument("--base-ref", metavar="GIT_REF",
+                    help="merge-base ref: fail if the baseline or upstream list grew relative to it")
     args = ap.parse_args(argv)
     root = os.path.abspath(args.root)
     bpath = args.baseline or os.path.join(root, *BASELINE_REL.split("/"))
@@ -108,6 +135,12 @@ def main(argv=None):
         if stale_master:
             errors.append(stale_master)
     baseline = load_baseline(bpath)
+    if baseline is not None and os.path.isfile(bpath):
+        counts = json.loads(C.read_text(bpath)).get("counts", {})
+        if any(counts.get(k) != len(baseline[k]) for k in GAP_KINDS):
+            errors.append("baseline counts do not match its gap lists")
+    if args.base_ref:
+        errors += base_ref_errors(root, args.base_ref, baseline)
     fresh = new_gaps(gaps, baseline)
     shrinkable = {k: sorted(set((baseline or {}).get(k, [])) - set(gaps[k])) for k in GAP_KINDS}
     n_new = sum(len(v) for v in fresh.values())

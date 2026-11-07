@@ -234,6 +234,38 @@ class RatchetTests(Fixture):
         self.assertIn("swapped_key", out)
 
 
+class HardeningTests(Fixture):
+    def test_fenced_table_is_ignored_and_bad_header_is_an_error(self):
+        self.readme('```' + chr(10) + HDR + row("vp_key") + '```')
+        self.assertEqual(C.analyse(self.root)["rows"], [])
+        self.readme(HDR.replace("Range / values", "Range") + row("vp_key"))
+        self.assertTrue(any("header" in e for e in C.analyse(self.root)["errors"]))
+
+    def test_planned_row_for_live_key_still_default_checked(self):
+        self.readme(HDR + row("vp_key", default="`off`", status="planned") + row("other_key", default="`off`"))
+        self.assertEqual(C.analyse(self.root)["gaps"]["default_mismatch"], ["vp_key"])
+
+    def test_defaults_are_case_sensitive_except_switch_words(self):
+        self.assertNotEqual(C.norm_default("Auto"), C.norm_default("auto"))
+        self.assertEqual(C.norm_default("ON"), C.norm_default("1"))
+
+    def test_baseline_count_mismatch_is_an_error(self):
+        self.gen_and_baseline()
+        bp = os.path.join(self.root, chk.BASELINE_REL)
+        data = json.loads(C.read_text(bp))
+        data["counts"]["undocumented"] = 0
+        _w(self.root, chk.BASELINE_REL, json.dumps(data))
+        rc, out = _run(chk, ["--root", self.root])
+        self.assertEqual(rc, 1)
+        self.assertIn("counts do not match", out)
+
+    def test_bom_json_is_read(self):
+        d = self.mod("colour", "bom", 20, ["vp_key"])
+        with open(os.path.join(self.root, d, "MANIFEST.json"), "wb") as f:
+            f.write(bytes([0xEF, 0xBB, 0xBF]) + json.dumps({"slot": "colour.bom", "unit": "colour"}).encode())
+        self.assertIn("colour.bom", [m["slot"] for m in C.discover_modules(self.root)])
+
+
 class GeneratorTests(Fixture):
     def test_output_is_deterministic_and_complete(self):
         self.readme(HDR + row("vp_key") + row("other_key", default="`off`"))

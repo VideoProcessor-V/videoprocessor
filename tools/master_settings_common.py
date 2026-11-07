@@ -49,7 +49,7 @@ _NAME = re.compile(r'"(' + KEY_RE + r')"')
 
 
 def read_text(path):
-    with open(path, encoding="utf-8", errors="replace") as fh:
+    with open(path, encoding="utf-8-sig", errors="replace") as fh:
         return fh.read()
 
 
@@ -241,8 +241,16 @@ def parse_readme_settings(text, readme_rel):
     in_settings = False
     lines = text.splitlines()
     i = 0
+    fence = False
     while i < len(lines):
         ln = lines[i]
+        if ln.lstrip().startswith("```"):
+            fence = not fence
+            i += 1
+            continue
+        if fence:
+            i += 1
+            continue
         if ln.startswith("## "):
             in_settings = ln[3:].strip().lower().startswith("settings")
             i += 1
@@ -278,6 +286,8 @@ def parse_readme_settings(text, readme_rel):
                             rows.append(row)
                     i += 1
                 continue
+            if len(hdr) == len(HEADER_COLS) and hdr[0].strip().lower() == "key":   # 9-column near miss = typo; older bullet/3-column tables are legacy
+                errors.append("%s:%d: Settings table header differs from the template" % (readme_rel, i + 1))
         i += 1
     return rows, errors
 
@@ -307,10 +317,10 @@ _FALSE = {"off", "false", "0", "no"}
 
 
 def norm_default(text):
-    t = text.strip().strip("`").strip().lower()
-    if t in _TRUE:
+    t = text.strip().strip("`").strip()
+    if t.lower() in _TRUE:
         return "1"
-    if t in _FALSE:
+    if t.lower() in _FALSE:
         return "0"
     try:
         return repr(float(t))
@@ -361,7 +371,7 @@ def analyse(root):
         "default_mismatch": [],
     }
     for k, rs in sorted(by_id.items()):
-        if k in golden and not is_planned(rs[0]):
+        if k in golden and (k in code or not is_planned(rs[0])):
             lit = doc_default_literal(rs[0]["default"])
             if lit is not None and norm_default(lit) != norm_default(golden[k]):
                 gaps["default_mismatch"].append(k)
