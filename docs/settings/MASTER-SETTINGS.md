@@ -13,9 +13,9 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 |---|---|
 | Modules | 37 |
 | Documented rows | 2 |
-| VP-V keys in code (outside Bill's schema lists) | 332 |
+| VP-V keys in code (outside Bill's schema lists) | 364 |
 | of which documented | 2 |
-| of which undocumented (appendix A) | 330 |
+| of which undocumented (appendix A) | 362 |
 | Documented keys with no code entry (appendix B) | 0 |
 
 ## Modules index
@@ -190,6 +190,10 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `adaptive_upscale_w_base` | scaling.output |  |  | RendererProfileConfig.h |
 | `adaptive_w_base` | scaling.output | 1.0 |  | RendererProfileConfig.h |
 | `ambient.baud` | unassigned |  |  | AmbientConfig.h |
+| `ambient.hold_s` | unassigned |  |  | AmbientConfig.h |
+| `ambient.lux_dark` | unassigned |  |  | AmbientConfig.h |
+| `ambient.lux_lit` | unassigned |  |  | AmbientConfig.h |
+| `ambient.mode` | unassigned |  |  | AmbientConfig.h |
 | `ambient.port` | unassigned |  |  | AmbientConfig.h |
 | `ambient.room` | unassigned |  |  | AmbientConfig.h |
 | `ambient_adapt` | unassigned | off | VP-V > Colour > Room-light adaptation (experimental) | RendererProfileConfig.h |
@@ -198,14 +202,10 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `ambient_screen_reflect` | unassigned | 0.01 |  | RendererProfileConfig.h |
 | `ambient_tau_down_s` | unassigned | 90 |  | RendererProfileConfig.h |
 | `ambient_tau_up_s` | unassigned | 15 |  | RendererProfileConfig.h |
-| `auto_report` | control.diagnostics |  |  | MainConfigSchema.h |
-| `b_structure` | unassigned |  |  | NetPackage.cpp |
-| `baud` | unassigned |  |  | AmbientConfig.h |
 | `blank_bottom` | unassigned |  |  | RendererProfileConfig.h |
 | `blank_left` | unassigned |  |  | RendererProfileConfig.h |
 | `blank_right` | unassigned |  |  | RendererProfileConfig.h |
 | `blank_top` | unassigned |  |  | RendererProfileConfig.h |
-| `c_structure` | unassigned |  |  | NetPackage.cpp |
 | `cadence_class_fixes` | input.queue_timing, motion.consumers | on |  | RendererProfileConfig.h |
 | `calibration.argyll_path` | unassigned |  |  | CalibrationConfig.h |
 | `calibration.background_percent` | unassigned |  |  | CalibrationConfig.h |
@@ -242,13 +242,11 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `calibration.verify_after` | unassigned |  |  | CalibrationConfig.h |
 | `calibration.warmup_minutes` | unassigned |  |  | CalibrationConfig.h |
 | `calibration_lut_stage` | output.calibration_lut |  |  | RendererProfileConfig.h |
-| `camera_link` | unassigned |  |  | SkeletonSettings.h |
 | `capture_display_fixes` | unassigned |  |  | MainConfigSchema.h |
 | `capture_path` | input.capture | gpu | VP-V > Input > Capture unpack on the GPU | RendererProfileConfig.h |
 | `capture_upload` | input.capture | auto | VP-V > Input > Upload frames as they arrive | RendererProfileConfig.h |
-| `chroma_upscale_vp` | scaling.chroma_upscale |  |  | RendererProfileConfig.h |
+| `chroma_upscale_vp` | scaling.chroma_upscale |  |  | ChromaCfl.h, RendererProfileConfig.h |
 | `cnn_residual_stabilise` | scaling.output | on | VP-V > Scaling > Steady the upscaler's added detail along motion | RendererProfileConfig.h |
-| `cntr_latency_ms` | unassigned |  |  | VpvSection.cpp |
 | `deband_grain` | repair.deband | off |  | RendererProfileConfig.h |
 | `deband_vp` | repair.deband | off |  | RendererProfileConfig.h |
 | `deband_vp_exclusive` | repair.deband | on | VP-V > Repair > VP deband replaces libplacebo's | RendererProfileConfig.h |
@@ -304,6 +302,7 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `detail_pulse_fast` | repair.texture_restore | on | VP-V > Repair > Detail pulse: fast path | RendererProfileConfig.h |
 | `detail_pulse_stabilise` | repair.texture_restore | on |  | RendererProfileConfig.h |
 | `dither_grain_tolerance_scale` | output.dither | 3 |  | RendererProfileConfig.h |
+| `dither_need` | output.dither |  |  | DitherNeed.h |
 | `dither_vectors` | motion.consumers, output.dither | auto | VP-V > Motion > Dither reuses the de-judder's motion | RendererProfileConfig.h |
 | `downscale_light` | scaling.output |  |  | RendererProfileConfig.h |
 | `dv_compare_capture_folder` | input.signal |  |  | RendererProfileConfig.h |
@@ -321,7 +320,6 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `general_rate_fixes` | input.queue_timing, motion.estimation, motion.vector_delivery, motion.consumers | on |  | RendererProfileConfig.h |
 | `global_hotkeys` | unassigned |  |  | MainConfigSchema.h |
 | `hdr_inference` | input.signal | vp |  | HdrInferenceChoice.h, RendererProfileConfig.h |
-| `hold_s` | unassigned |  |  | AmbientConfig.h |
 | `intent_black` | drive.led_compensation | off |  | RendererProfileConfig.h |
 | `intent_content` | unassigned | off | VP-V > Input > Content labels for profile rules (film / video / sports) | RendererProfileConfig.h |
 | `intent_content_hold_seconds` | unassigned | 5 |  | RendererProfileConfig.h |
@@ -335,15 +333,103 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `interpolation_fallback` | motion.consumers | hold | VP-V > Motion > Where motion is not trusted: hold or blend | RendererProfileConfig.h |
 | `interpolation_fill_gaps` | motion.consumers | on | VP-V > Motion > Fill dropped frames (hiccup repair) | RendererProfileConfig.h |
 | `interpolation_grain` | motion.consumers | preserve |  | RendererProfileConfig.h |
-| `led_latency_ms` | unassigned |  |  | VpvSection.cpp |
+| `led_drive.adaptive_gamma` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.anti_pump_band` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.apl_persist_ms` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.apl_weights` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.black_prelift_max` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.bright_cut_dump` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.cntr_assist` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.cntr_assist_max` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.cntr_pair_predict` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.command_source` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.compensation_eotf` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.correction_weight_by_time` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.curve` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.cut_cntr_dump` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.cut_cntr_level` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.cut_jump` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.cut_lead` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.cut_threshold` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.deadband` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.early_ramp` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.enabled` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.fade_frames` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.fade_min_slope` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.fade_min_step` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.fade_ms` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.ftb_black_ms` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.ftb_custom_dim` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.ftb_custom_floor` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.ftb_custom_start` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.ftb_step_ms` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.ftb_turn_step` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.gamma_boost` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.gamma_boost_knee` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.gamma_boost_knee_width` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.highlight_area_large` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.highlight_area_small` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.highlight_percentile` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.highlight_persist_ms` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.highlight_release_ms` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.highlight_tolerance_stops` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.knee` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.led_btb_passthrough` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.led_ceiling` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.led_floor` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.led_floor_black` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.led_floor_reactive` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.led_highlight_grain_suppress` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.led_idle_restore_s` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.led_landing_ms` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.led_lookahead_ms` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.led_peak_full_coverage` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.led_picture_only` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.led_wtw_passthrough` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.lookahead` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.max_cut_dip` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.mode` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.preposition_black_only` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.profile_file` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.rate_down` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.rate_gain_down` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.rate_gain_up` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.rate_max_down` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.rate_max_up` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.rate_min_down` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.rate_min_up` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.rate_preset` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.rate_up` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.recovery_bias_pct` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.recovery_rate_gain` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.recovery_rate_max` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.recovery_rate_min` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.script_echo_ms` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.script_highlight_code` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.script_lookahead` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.script_measure_ms` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.script_pacing` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.script_resend_failed_writes` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.script_smoothing` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.shadow_lift_ansi` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.shadow_lift_ansi_ramp_hi` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.shadow_lift_ansi_ramp_lo` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.shadow_lift_ansi_rate` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.shaped_recovery` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.software_first` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.steps_down` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.steps_up_bright` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.steps_up_dark` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.steps_up_split_apl` | unassigned |  |  | LedDriveConfig.h |
+| `led_drive.tick_ms` | unassigned |  |  | LedDriveConfig.h |
 | `light_level_ambient_nits` | input.light_level |  |  | LightLevelSettings.h |
 | `light_level_display_black_nits` | input.light_level |  |  | LightLevelSettings.h |
 | `light_level_display_white_nits` | input.light_level |  |  | LightLevelSettings.h |
 | `light_level_weber` | input.light_level |  |  | LightLevelSettings.h |
+| `logging.auto_report` | unassigned |  |  | StateReportSettings.h |
+| `logging.report_thumbnail` | unassigned |  |  | StateReportSettings.h |
 | `low_bitrate_handling` | repair.deband | auto | VP-V > Repair > Deband reacts to compression | RendererProfileConfig.h |
 | `low_latency_path` | input.queue_timing |  |  | MainConfigSchema.h, RendererProfileConfig.h |
-| `lux_dark` | unassigned |  |  | AmbientConfig.h |
-| `lux_lit` | unassigned |  |  | AmbientConfig.h |
 | `magewell_recover_faults` | unassigned |  |  | MainConfigSchema.h |
 | `motion_ahead_frames` | motion.estimation | 4 |  | RendererProfileConfig.h |
 | `motion_engine` | motion.estimation, motion.vector_delivery |  |  | RendererProfileConfig.h |
@@ -363,106 +449,47 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `pipeline_original_pathway` | unassigned |  |  | SkeletonSettings.h, HdrInferenceChoice.h, RendererProfileConfig.h |
 | `pipeline_slots_off` | unassigned |  |  | RendererProfileConfig.h |
 | `projector.ack_timeout_ms` | unassigned |  |  | LedDriveConfig.h |
-| `projector.adaptive_gamma` | unassigned |  |  | LedDriveConfig.h |
-| `projector.apl_weights` | unassigned |  |  | LedDriveConfig.h |
 | `projector.baud` | unassigned |  |  | LedDriveConfig.h |
-| `projector.bright_cut_dump` | unassigned |  |  | LedDriveConfig.h |
 | `projector.burst_commands` | unassigned |  |  | LedDriveConfig.h |
 | `projector.burst_pause_ms` | unassigned |  |  | LedDriveConfig.h |
-| `projector.cntr_assist` | unassigned |  |  | LedDriveConfig.h |
 | `projector.cntr_latency_ms` | unassigned |  |  | LedDriveConfig.h |
 | `projector.cntr_max_usable` | unassigned |  |  | LedDriveConfig.h |
-| `projector.cntr_pair_predict` | unassigned |  |  | LedDriveConfig.h |
 | `projector.cntr_settle_ms` | unassigned |  |  | LedDriveConfig.h |
-| `projector.command_source` | unassigned |  |  | LedDriveConfig.h |
-| `projector.correction_weight_by_time` | unassigned |  |  | LedDriveConfig.h |
-| `projector.curve` | unassigned |  |  | LedDriveConfig.h |
-| `projector.cut_cntr_dump` | unassigned |  |  | LedDriveConfig.h |
-| `projector.cut_jump` | unassigned |  |  | LedDriveConfig.h |
-| `projector.cut_lead` | unassigned |  |  | LedDriveConfig.h |
 | `projector.dmd_clip_cntr` | unassigned |  |  | LedDriveConfig.h |
-| `projector.early_ramp` | unassigned |  |  | LedDriveConfig.h |
 | `projector.echo` | unassigned |  |  | LedDriveConfig.h |
-| `projector.fade_min_slope` | unassigned |  |  | LedDriveConfig.h |
-| `projector.fade_ms` | unassigned |  |  | LedDriveConfig.h |
 | `projector.flux_table` | unassigned |  |  | LedDriveConfig.h |
-| `projector.ftb_custom_dim` | unassigned |  |  | LedDriveConfig.h |
-| `projector.ftb_custom_floor` | unassigned |  |  | LedDriveConfig.h |
-| `projector.ftb_custom_start` | unassigned |  |  | LedDriveConfig.h |
-| `projector.gamma_boost` | unassigned |  |  | LedDriveConfig.h |
-| `projector.highlight_area_large` | unassigned |  |  | LedDriveConfig.h |
-| `projector.highlight_area_small` | unassigned |  |  | LedDriveConfig.h |
-| `projector.lead_ms` | unassigned |  |  | LedDriveConfig.h |
-| `projector.led_btb_passthrough` | unassigned |  |  | LedDriveConfig.h |
-| `projector.led_ceiling` | unassigned |  |  | LedDriveConfig.h |
-| `projector.led_floor` | unassigned |  |  | LedDriveConfig.h |
-| `projector.led_floor_black` | unassigned |  |  | LedDriveConfig.h |
-| `projector.led_highlight_grain_suppress` | unassigned |  |  | LedDriveConfig.h |
-| `projector.led_landing_ms` | unassigned |  |  | LedDriveConfig.h |
 | `projector.led_latency_ms` | unassigned |  |  | LedDriveConfig.h |
-| `projector.led_peak_full_coverage` | unassigned |  |  | LedDriveConfig.h |
-| `projector.led_picture_only` | unassigned |  |  | LedDriveConfig.h |
-| `projector.led_response_ms` | unassigned |  |  | LedDriveConfig.h |
 | `projector.led_settle_ms` | unassigned |  |  | LedDriveConfig.h |
-| `projector.led_wtw_passthrough` | unassigned |  |  | LedDriveConfig.h |
 | `projector.light_max` | unassigned |  |  | LedDriveConfig.h |
 | `projector.light_min` | unassigned |  |  | LedDriveConfig.h |
-| `projector.lookahead` | unassigned |  |  | LedDriveConfig.h |
 | `projector.max_levels_per_command` | unassigned |  |  | LedDriveConfig.h |
 | `projector.min_command_gap_ms` | unassigned |  |  | LedDriveConfig.h |
 | `projector.port` | unassigned |  |  | AmbientConfig.h, LedDriveConfig.h |
-| `projector.preposition_black_only` | unassigned |  |  | LedDriveConfig.h |
-| `projector.profile_file` | unassigned |  |  | LedDriveConfig.h |
 | `projector.protocol` | unassigned |  |  | LedDriveConfig.h |
-| `projector.rate_max_down` | unassigned |  |  | LedDriveConfig.h |
-| `projector.rate_max_up` | unassigned |  |  | LedDriveConfig.h |
-| `projector.rate_min_down` | unassigned |  |  | LedDriveConfig.h |
-| `projector.rate_min_up` | unassigned |  |  | LedDriveConfig.h |
-| `projector.rate_preset` | unassigned |  |  | LedDriveConfig.h |
 | `projector.read_back` | unassigned |  |  | LedDriveConfig.h |
-| `projector.script_lookahead` | unassigned |  |  | LedDriveConfig.h |
-| `projector.script_pacing` | unassigned |  |  | LedDriveConfig.h |
-| `projector.script_resend_failed_writes` | unassigned |  |  | LedDriveConfig.h |
-| `projector.script_smoothing` | unassigned |  |  | LedDriveConfig.h |
-| `projector.shaped_recovery` | unassigned |  |  | LedDriveConfig.h |
-| `projector.software_first` | unassigned |  |  | LedDriveConfig.h |
-| `projector.steps_down` | unassigned |  |  | LedDriveConfig.h |
-| `projector.steps_up_bright` | unassigned |  |  | LedDriveConfig.h |
-| `projector.steps_up_dark` | unassigned |  |  | LedDriveConfig.h |
 | `projector.terminator` | unassigned |  |  | LedDriveConfig.h |
 | `pulldown_fixes` | input.queue_timing | on |  | RendererProfileConfig.h |
 | `queue_auto_reset` | input.queue_timing |  |  | MainConfigSchema.h |
 | `queue_timing_fixes` | input.queue_timing | on |  | RendererProfileConfig.h |
-| `rate_gain_down` | unassigned |  |  | VpvSection.cpp |
-| `rate_gain_up` | unassigned |  |  | VpvSection.cpp |
-| `rate_max_down` | unassigned |  |  | VpvSection.cpp |
-| `rate_max_up` | unassigned |  |  | VpvSection.cpp |
-| `rate_min_down` | unassigned |  |  | VpvSection.cpp |
-| `rate_min_up` | unassigned |  |  | VpvSection.cpp |
-| `read_back` | unassigned |  |  | VpvSection.cpp |
 | `rebase_kernel_match` | scaling.rebase | on | VP-V > Scaling > Re-base: undo the player's upscaler | RendererProfileConfig.h |
-| `recovery_rate_gain` | unassigned |  |  | VpvSection.cpp |
-| `recovery_rate_max` | unassigned |  |  | VpvSection.cpp |
-| `recovery_rate_min` | unassigned |  |  | VpvSection.cpp |
 | `render_ahead` | output.presentation | off | VP-V > Motion > De-judder: render ahead (under test) | RendererProfileConfig.h |
 | `render_ahead_queue_credit` | output.presentation | off |  | RendererProfileConfig.h |
 | `render_ahead_utilisation` | output.presentation | 0.85 |  | RendererProfileConfig.h |
 | `renderer_failure_keep_fullscreen` | unassigned |  |  | MainConfigSchema.h |
 | `repeat_render_reuse` | output.presentation |  |  | RendererProfileConfig.h |
-| `report_thumbnail` | control.diagnostics |  |  | MainConfigSchema.h |
 | `residual_stabilise_grain_guard` | scaling.output | on |  | RendererProfileConfig.h |
 | `resync_event` | input.signal |  |  | RendererProfileConfig.h |
 | `retirement_a` | unassigned |  |  | RendererProfileConfig.h |
 | `retirement_b` | unassigned |  |  | RendererProfileConfig.h |
 | `retirement_c` | unassigned |  |  | RendererProfileConfig.h |
 | `retirement_d` | unassigned |  |  | RendererProfileConfig.h |
-| `room` | unassigned |  |  | AmbientConfig.h |
 | `saturation` | unassigned |  |  | RendererProfileConfig.h |
 | `sdr_contrast_recovery` | colour.sdr_tone_shape |  |  | RendererProfileConfig.h |
 | `sdr_knee_start` | input.light_level, colour.sdr_tone_shape | 0.8 |  | RendererProfileConfig.h |
 | `sdr_knee_strength` | input.light_level, colour.sdr_tone_shape | 0.5 |  | RendererProfileConfig.h |
 | `sdr_tone_shape` | input.light_level, colour.sdr_tone_shape | off | VP-V > Colour > SDR tone shape | RendererProfileConfig.h |
 | `sdr_white_headroom` | input.light_level, colour.sdr_tone_shape |  |  | RendererProfileConfig.h |
+| `shaders.cinema_only` | unassigned |  |  | MadVRShaderLoader.cpp |
 | `shortcuts.global_actions` | unassigned |  |  | MainConfigSchema.h |
 | `shortcuts.state_report` | unassigned |  |  | StateReportSettings.h |
 | `source_class` | motion.consumers | legacy |  | RendererProfileConfig.h |
@@ -484,6 +511,11 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `ssim_residual_stabilise` | scaling.output | on | VP-V > Scaling > Steady the downscaler's added detail along motion | RendererProfileConfig.h |
 | `stats_overlay` | unassigned |  |  | MainConfigSchema.h |
 | `target_latency_ms` | input.queue_timing |  |  | MainConfigSchema.h, RendererProfileConfig.h |
+| `temporal_detail` | repair.temporal_detail |  |  | TemporalDetail.h |
+| `temporal_detail_boost` | repair.temporal_detail |  |  | TemporalDetail.h |
+| `temporal_detail_boost_max` | repair.temporal_detail |  |  | TemporalDetail.h |
+| `temporal_detail_max_age` | repair.temporal_detail |  |  | TemporalDetail.h |
+| `temporal_detail_strength` | repair.temporal_detail |  |  | TemporalDetail.h |
 | `temporal_dither` | output.dither | auto |  | RendererProfileConfig.h |
 | `texture_restore` | repair.texture_restore | off |  | RendererProfileConfig.h |
 | `texture_restore_cap` | repair.texture_restore | 1.5 |  | RendererProfileConfig.h |
@@ -507,3 +539,18 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 ## Appendix C: Original (Bill) keys
 
 192 key(s) belong to Bill's schema files (`docs/settings/UPSTREAM-KEYS.txt`) and are not part of this list.
+
+## Appendix D: retired keys (accepted, ignored)
+
+Keys the code still accepts or rejects with a message but no longer acts on; they are not live settings.
+
+| Key | Found in |
+|---|---|
+| `led_drive.lead_ms` | LedDriveConfig.h |
+| `led_drive.led_response_ms` | LedDriveConfig.h |
+| `led_drive.listen_log` | LedDriveConfig.h |
+| `led_drive.listen_port` | LedDriveConfig.h |
+| `led_drive.listen_script` | LedDriveConfig.h |
+| `led_drive.python` | LedDriveConfig.h |
+| `led_drive.python_drives_port` | LedDriveConfig.h |
+| `led_drive.python_feed` | LedDriveConfig.h |

@@ -256,6 +256,130 @@ class TryGetExtractionTests(Fixture):
         self.assertEqual(C.row_key_id("k", "[calibration]"), "calibration.k")
 
 
+LED_FIXTURE = """
+namespace LedDrive {
+	constexpr const char* PROJECTOR_SECTION = "projector.default";
+	constexpr const char* LED_DRIVE_SECTION = "led_drive.default";
+	constexpr const char* DYNAMIC_DRIVE_SECTION = "dynamic_drive.default";
+	inline std::vector<KeyRule> ProjectorRules()
+	{
+		return { Choice("protocol", { "a", "b" }), Integer("baud", 1, 2), Custom("port", [](const std::string&) { return true; }, "x") };
+	}
+	inline std::vector<KeyRule> LedDriveRules()
+	{
+		return {
+			Boolean("enabled"),
+			Custom("listen_port", [](const std::string&) { return true; }, "retired (ignored)"),
+			Custom("curve", [](const std::string& v) { return true; }, "pairs"),
+			Number("rate_up", 1.0, 2.0),
+		};
+	}
+	inline ProjectorConfig ReadProjectorConfig(const ConfigFile& config)
+	{
+		const std::string section = PROJECTOR_SECTION;
+		config.TryGetString(section, "echo", value);
+		return result;
+	}
+	inline bool Validate(const ConfigFile& config, std::string& error)
+	{
+		if (led && config.TryGetString(section, "led_response_ms", moved)) { return false; }
+		for (const char* key : { "rate_min_up", "rate_preset" }) names = config.TryGetString(section, key, value);
+		return true;
+	}
+	inline void ApplyLedDriveSection(const ConfigFile& config, const std::string& section, LedDriveConfig& result)
+	{
+		auto readInt = [&](const char* key, int minimum, int maximum, int& target) { config.TryGetString(section, key, value); };
+		readInt("tick_ms", 50, 5000, result.tickMs);
+		readNumber("knee", result.knee);
+		config.TryGetBool(section, "cut_jump", result.cutJump);
+	}
+}
+"""
+
+
+class SectionAttributionTests(Fixture):
+    LED = "src/VP-V/modules/drive/led_compensation/LedDriveConfig.h"
+
+    def ids(self):
+        return set(C.extract_code_keys(self.root))
+
+    def test_led_file_is_attributed_by_function_not_first_constant(self):          # F1
+        _w(self.root, self.LED, LED_FIXTURE)
+        ids = self.ids()
+        self.assertTrue({"projector.protocol", "projector.baud", "projector.port", "projector.echo"} <= ids, ids)
+        self.assertTrue({"led_drive.cut_jump", "led_drive.tick_ms", "led_drive.rate_min_up",
+                         "led_drive.rate_preset", "led_drive.enabled"} <= ids, ids)
+        self.assertFalse({k for k in ids if k.startswith("projector.") and k.split(".", 1)[1] in
+                          {"cut_jump", "tick_ms", "enabled", "curve", "rate_up", "knee"}})
+
+    def test_dynamic_drive_is_an_alias_of_led_drive(self):                         # F1
+        self.assertEqual(C.qualify("dynamic_drive.default", "k"), "led_drive.k")
+        self.assertEqual(C.qualify("led_drive.default", "k"), "led_drive.k")
+        self.assertEqual(C.row_key_id("k", "[dynamic_drive.default]"), "led_drive.k")
+
+    def test_spec_builders_and_read_lambdas_are_keys(self):                        # F2
+        _w(self.root, self.LED, LED_FIXTURE)
+        ids = self.ids()
+        self.assertTrue({"led_drive.curve", "led_drive.rate_up", "led_drive.knee", "projector.port"} <= ids, ids)
+
+    def test_retired_keys_are_not_live(self):                                      # F2
+        _w(self.root, self.LED, LED_FIXTURE)
+        self.assertNotIn("led_drive.listen_port", self.ids())
+        self.assertNotIn("led_drive.led_response_ms", self.ids())
+        retired = C.extract_retired_keys(self.root)
+        self.assertEqual(set(retired), {"led_drive.listen_port", "led_drive.led_response_ms"})
+        self.assertIn("## Appendix D", C.render_master(self.root))
+
+    def test_builders_are_ignored_outside_mapped_files(self):                      # F2
+        _w(self.root, "src/VP-V/modules/drive/x/Other.h", 'auto r = { Boolean("not_a_key"), Integer("nor_this", 1, 2) };\n')
+        self.assertFalse({"not_a_key", "nor_this"} & self.ids())
+
+    def test_section_qualified_keys_are_kept_next_to_bare_schema_keys(self):       # F3
+        _w(self.root, "src/VP-V/modules/control/diag/StateReportSettings.h",
+           'void f(){ c.TryGetBool("logging", "auto_report", a); c.TryGetBool("logging", "enabled", b); }\n')
+        _w(self.root, C.SCHEMA_FILES[1],
+           'inline bool V(const std::string& key){ if (key == "enabled") return true; return false; }\n'
+           'inline auto R(){ return { ConfigSchema::Boolean("auto_report") }; }\n')
+        ids = self.ids()
+        self.assertIn("logging.enabled", ids)        # bare twin is Bill's (upstream or not): both kept
+        self.assertIn("logging.auto_report", ids)
+        self.assertNotIn("auto_report", ids)          # the schema file could not name a section: not a second key
+
+    def test_ui_key_lists_without_a_section_make_no_keys(self):                    # F3
+        _w(self.root, "src/VP-V/config/Ui.cpp", 'void f(){ for (const char* key : { "ui_a", "ui_b" }) g(key); }\n')
+        _w(self.root, "src/VP-V/nets/NetPackage.cpp", 'void f(){ for (const char* key : { "b_structure", "c_structure" }) g(key); }\n')
+        self.assertFalse({"ui_a", "ui_b", "b_structure", "c_structure"} & self.ids())
+
+    def test_ambient_gets_its_own_section_and_no_bare_twins(self):                 # F3
+        _w(self.root, "src/VP-V/modules/colour/appearance/AmbientConfig.h",
+           'inline auto R(){ return { ConfigSchema::Choice("mode", {"off"}), ConfigSchema::Integer("baud", 1, 2) }; }\n'
+           'void g(){ config.TryGetString("ambient", "room", raw); }\n')
+        ids = self.ids()
+        self.assertTrue({"ambient.mode", "ambient.baud", "ambient.room"} <= ids, ids)
+        self.assertFalse({"mode", "baud", "room"} & ids)
+
+    def test_file_local_constant_wins_over_same_name_elsewhere(self):              # F3
+        _w(self.root, "src/VP-V/modules/a/A.h", 'constexpr const char* kSection = "vpv";\n')
+        _w(self.root, "src/VP-V/modules/b/B.h",
+           'constexpr const char* kSection = "vpv.b";\nvoid f(){ c.TryGetString(kSection, "camera_link", v); }\n')
+        ids = self.ids()
+        self.assertIn("vpv.b.camera_link", ids)
+        self.assertNotIn("camera_link", ids)
+
+    def test_kv_map_getkey_and_extra_file_reads(self):                             # F4
+        _w(self.root, "src/VP-V/modules/repair/td/TemporalDetail.h",
+           'void f(){ auto it = kv.find("temporal_detail"); auto g = kv.find("temporal_detail_boost");\n'
+           ' number("temporal_detail_strength", 0.0, 1.0, x); }\n')
+        _w(self.root, "src/VP-V/modules/output/dither/DitherNeed.h", 'bool p(){ return getKey("dither_need", raw); }\n')
+        _w(self.root, "src/VideoProcessor-Lib/microsoft_directshow/MadVRShaderLoader.cpp",
+           'constexpr const char* CONFIG_SECTION = "shaders";\nvoid f(){ config.TryGetString(section, "cinema_only", v);'
+           ' config.TryGetString(section, "bill_key_here", v); }\n')
+        ids = self.ids()
+        self.assertTrue({"temporal_detail", "temporal_detail_boost", "temporal_detail_strength", "dither_need",
+                         "shaders.cinema_only"} <= ids, ids)
+        self.assertNotIn("shaders.bill_key_here", ids)
+
+
 class HardeningTests(Fixture):
     def test_fenced_table_is_ignored_and_bad_header_is_an_error(self):
         self.readme('```' + chr(10) + HDR + row("vp_key") + '```')

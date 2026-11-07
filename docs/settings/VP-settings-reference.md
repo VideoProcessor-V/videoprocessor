@@ -13,7 +13,7 @@ Config tooltips, and used to audit those tooltips (section 11).
   (under 1 ms), *medium* (1-3 ms), *high* (over 3 ms at 4K on the laptop's RTX 3050 Ti).
 - "Under test" means a fix or feature that ships behind a switch until it is proven.
   Most "fixes under test" are default ON and their switch exists only so an A/B is possible.
-- This guide covers VP's own (FL35 fork) settings in full. Bill's upstream settings are only listed
+- This guide covers VP-V's own settings in full. Bill's upstream settings are only listed
   in section 9, with a one-line summary each.
 
 **Contents**
@@ -391,7 +391,7 @@ CNTR change. Not yet implemented.
 
 | Key | What it does | Why it exists | Default | Cost |
 |---|---|---|---|---|
-| `temporal_dither` | *sigma_delta*: VP's temporal sigma-delta, which spreads the finer-than-8-bit steps over time along the motion. *libplacebo*: its own dither. *auto*: VP decides. | The FL35 link is 8-bit, and the sigma-delta is what keeps 10-bit smoothness through it. | auto (Low tier: sigma_delta) | low |
+| `temporal_dither` | *sigma_delta*: VP's temporal sigma-delta, which spreads the finer-than-8-bit steps over time along the motion. *libplacebo*: its own dither. *auto*: VP decides. | Output links or displays of limited bit depth (8- or 10-bit) lose smoothness; the sigma-delta is what keeps 10-bit smoothness through an 8-bit link. | auto (Low tier: sigma_delta) | low |
 | `dithering` | libplacebo's dither pattern (blue noise etc.), used when libplacebo dithers. | Upstream option. | auto | tiny |
 | `display_bit_depth` | Dither target depth (8/10). | Clamped to the surface depth. | auto | none |
 | `occlusion_mask` | Tells the sigma-delta where new picture appears, so it does not carry a residual into it. | No smears at edges of moving objects. | off | low |

@@ -93,7 +93,37 @@ def collect_constants(text):
     return out
 
 
+# Section attribution (F1). A read whose section is a variable (`section`) is attributed to the section of the
+# function that holds it. This table is explicit and documented: file basename -> {function name: section};
+# "*" is the file's default. Functions are the `inline <type> Name(` definitions of the file. Files not listed
+# here use their own first *SECTION constant (or stay bare when they have none).
+#   LedDriveConfig.h: ProjectorRules / ReadProjectorConfig read [projector.default] (the projector link);
+#                     every other function (LedDriveRules, ApplyLedDriveSection, Validate, LedProfilePath,
+#                     ValidateLedProfile*) reads [led_drive.default], whose alias is [dynamic_drive.default].
+#   AmbientConfig.h:  the whole file is the [ambient] section.
+SECTION_MAP = {
+    "LedDriveConfig.h": {"ProjectorRules": "projector.default", "ReadProjectorConfig": "projector.default",
+                         "*": "led_drive.default"},
+    "AmbientConfig.h": {"*": "ambient"},
+}
+# Spec-builder / lambda reads, only trusted in the files of SECTION_MAP (their names are common words elsewhere).
+_BUILDER = re.compile(r'(?<![\w:.])(?:ConfigSchema::)?(?:Boolean|Integer|Number|Choice|Custom)\(\s*"(' + KEY_RE + r')"')
+_READ_LAMBDA = re.compile(r'\b(?:readInt|readNumber)\(\s*"(' + KEY_RE + r')"')
+_RETIRED = re.compile(r'\bCustom\(\s*"(' + KEY_RE + r')"\s*,\s*\[\]\([^)]*\)\s*\{\s*return\s+true;\s*\}\s*,\s*"retired')
+_RETIRED_READ = re.compile(r'TryGet\w+\(\s*section\s*,\s*"(' + KEY_RE + r')"\s*,\s*moved\s*\)')
+# Keys read from a key/value map or accessor lambda (TemporalDetail.h, DitherNeed.h): profile-level, bare ids.
+_KV_READ = re.compile(r'\b(?:kv\.find|getKey|number)\(\s*"([a-z][a-z0-9_]*)"')
+_FUNC_DEF = re.compile(r'^[ \t]*inline\s+[\w:<>,\s\*&]*?\b(\w+)\s*\(', re.M)
+
+# Files outside src/VP-V that carry VP-V-added keys: path -> the only keys taken from it.
+EXTRA_KEY_FILES = {
+    "src/VideoProcessor-Lib/microsoft_directshow/MadVRShaderLoader.cpp": {"cinema_only"},
+}
+
+
 def _norm_section(name):
+    if name == "dynamic_drive" or name.startswith("dynamic_drive."):
+        name = "led_drive" + name[len("dynamic_drive"):]      # alias of [led_drive*]: one id
     return name[:-len(".default")] if name.endswith(".default") else name
 
 
@@ -104,19 +134,49 @@ def qualify(section, key):
     return "%s.%s" % (_norm_section(section), key)
 
 
-def extract_file_keys(text, consts, schema_file):
+def extract_file_keys(text, consts, schema_file, rel="", retired=None):
     """Keys read or declared by one file: schema validators (schema files only), ConfigSchema:: entries,
-    `for (const char* key : {...})` lists, TryGet*(section, key) reads (literal or constant names; the file's
-    own first *SECTION constant stands in for a `section` variable) and `{"key", "label", number...}` tables."""
+    `for (const char* key : {...})` lists, TryGet*(section, key) reads (literal or constant names), spec builders
+    and readInt/readNumber reads (files of SECTION_MAP), kv/getKey map reads and `{"key", "label", number...}`
+    tables. A `section` variable takes the section of its function (SECTION_MAP), else the file's own first
+    *SECTION constant. `retired`, when given, collects accepted-but-ignored keys; they are left out of the result."""
     t = strip_comments(text)
+    base = os.path.basename(rel)
+    fmap = SECTION_MAP.get(base)
+    consts = dict(consts, **collect_constants(text))      # this file's own constants win over same-named ones elsewhere
     own = re.search(r'\w*SECTION\w*\s*=\s*"([^"]+)"', t)
-    owner = own.group(1) if own else None
+    file_owner = own.group(1) if own else None
+    funcs = [(m.start(), m.group(1)) for m in _FUNC_DEF.finditer(t)] if fmap else []
+
+    def owner_at(pos):
+        if fmap:
+            name = None
+            for start, fn in funcs:
+                if start > pos:
+                    break
+                name = fn
+            return fmap.get(name, fmap.get("*", file_owner))
+        return file_owner
+
     bare = extract_schema_keys(text) if schema_file else set()
     cand = set()   # (section or None, key)
+    dead = set()
     if not schema_file:
-        cand |= {(owner, k) for k in re.findall(r'ConfigSchema::\w+\(\s*"(' + KEY_RE + r')"', t)}
+        for m in re.finditer(r'ConfigSchema::\w+\(\s*"(' + KEY_RE + r')"', t):
+            cand.add((owner_at(m.start()), m.group(1)))
         for m in re.finditer(r'for\s*\(\s*const\s+char\s*\*\s*key\s*:\s*\{([^}]*)\}', t):
-            cand |= {(owner, k) for k in _NAME.findall(m.group(1))}
+            sec = owner_at(m.start())
+            if sec is not None:       # a UI key list with no section is no setting of its own
+                cand |= {(sec, k) for k in _NAME.findall(m.group(1))}
+        if fmap:
+            for rx in (_BUILDER, _READ_LAMBDA):
+                for m in rx.finditer(t):
+                    cand.add((owner_at(m.start()), m.group(1)))
+            for rx in (_RETIRED, _RETIRED_READ):
+                for m in rx.finditer(t):
+                    dead.add((owner_at(m.start()), m.group(1)))
+        for m in _KV_READ.finditer(t):
+            cand.add((None, m.group(1)))
     arg = r'(?:"[^"]*"|[\w:]+)'
     for m in re.finditer(r'TryGet\w+\(\s*(' + arg + r')\s*,\s*(' + arg + r')', t):
         def res(tok):
@@ -126,13 +186,17 @@ def extract_file_keys(text, consts, schema_file):
         sec, key = res(m.group(1)), res(m.group(2))
         if key is None or not re.fullmatch(KEY_RE, key):
             continue
-        cand.add((sec if sec is not None else owner, key))
+        cand.add((sec if sec is not None else owner_at(m.start()), key))
     out = set(bare)
     for sec, key in cand:
         if sec is None:
             out.add(key)
         elif key not in bare:
             out.add(qualify(sec, key))
+    gone = {qualify(sec, k) if sec else k for sec, k in dead}
+    if retired is not None:
+        retired |= gone
+    out -= gone
     out |= set(re.findall(r'\{\s*"([a-z][a-z0-9_]*)"\s*,\s*"[^"]*"\s*,\s*-?[0-9.]', t))
     return out
 
@@ -160,13 +224,13 @@ def _iter_vpv_sources(root):
                 yield os.path.join(dp, fn)
 
 
-def extract_code_keys(root):
-    """key id -> sorted list of repo-relative source files that name it."""
-    found = {}
+def _scan_code(root):
+    """-> (live key id -> set of files, retired key id -> set of files)."""
+    found, dead = {}, {}
 
-    def add(keys, rel):
+    def add(keys, rel, into=found):
         for k in keys:
-            found.setdefault(k, set()).add(rel)
+            into.setdefault(k, set()).add(rel)
 
     schema = []
     for rel in SCHEMA_FILES:
@@ -177,11 +241,8 @@ def extract_code_keys(root):
     consts = {}
     for _, text in schema + vpv:
         consts.update(collect_constants(text))
-    schema_bare = set()
     for rel, text in schema:
-        ks = extract_file_keys(text, consts, True)
-        schema_bare |= {k for k in ks if "." not in k}
-        add(ks, rel)
+        add(extract_file_keys(text, consts, True, rel), rel)
     tables = set()
     for pat in FIELD_TABLE_GLOBS:
         tables |= set(glob.glob(os.path.join(root, *pat.split("/")), recursive=True))
@@ -189,14 +250,35 @@ def extract_code_keys(root):
         rel = os.path.relpath(p, root).replace(os.sep, "/")
         add(extract_field_table_keys(read_text(p)), rel)
     for rel, text in vpv:
-        add(extract_file_keys(text, consts, False), rel)
+        r = set()
+        add(extract_file_keys(text, consts, False, rel, r), rel)
+        add(r, rel, dead)
         if "kSection" in text and '"vpv.' in text:
             add(extract_namespaced_keys(text), rel)
-    # A key already declared bare by the schema validators is that key; drop its section-qualified read.
-    for k in [k for k in found if "." in k and not k.startswith("vpv.")]:
-        if k.split(".", 1)[1] in found and k.split(".", 1)[1] in schema_bare:
+    for rel, only in EXTRA_KEY_FILES.items():
+        p = os.path.join(root, *rel.split("/"))
+        if os.path.isfile(p):
+            add({k for k in extract_file_keys(read_text(p), consts, False, rel) if k.split(".")[-1] in only}, rel)
+    return found, dead
+
+
+def extract_code_keys(root):
+    """key id -> sorted list of repo-relative source files that name it (live keys only)."""
+    found, _ = _scan_code(root)
+    # A schema file names a key bare when it cannot say which section it validates; a VP-V reader that names the
+    # section is then the real id. Drop the bare twin (Bill's own bare keys are kept: they are upstream).
+    upstream = load_upstream(root)
+    for k in [k for k in found if "." not in k and k not in upstream
+              and any(o.endswith("." + k) and not o.startswith("vpv.") for o in found)]:
+        if all(f in SCHEMA_FILES for f in found[k]):
             del found[k]
     return {k: sorted(v) for k, v in found.items()}
+
+
+def extract_retired_keys(root):
+    """key id -> sorted files, for keys the code still accepts but ignores (retired); not part of the live list."""
+    found, dead = _scan_code(root)
+    return {k: sorted(v) for k, v in dead.items() if k not in found}
 
 
 def load_upstream(root):
@@ -595,5 +677,17 @@ def render_master(root, an=None):
     w("")
     w("%d key(s) belong to Bill's schema files (`%s`) and are not part of this list." % (
         len({k for k in an["code"] if k in an["upstream"]}), UPSTREAM_REL))
+    w("")
+    w("## Appendix D: retired keys (accepted, ignored)")
+    w("")
+    w("Keys the code still accepts or rejects with a message but no longer acts on; they are not live settings.")
+    w("")
+    w("| Key | Found in |")
+    w("|---|---|")
+    retired = extract_retired_keys(root)
+    for k in sorted(retired):
+        w("| `%s` | %s |" % (k, _cell(", ".join(os.path.basename(f) for f in retired[k]))))
+    if not retired:
+        w("| (none) | |")
     w("")
     return "\n".join(out)

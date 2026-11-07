@@ -4,7 +4,7 @@ Unit: **output** | side: output | order: 260 | status: **built** | hook point: O
 
 ## Purpose / why
 
-Quantise last for the 8-bit FL35 link: temporal sigma-delta (with vectors) or libplacebo dither; 12-bit / DV output paths later.
+Quantise last for output links/displays of limited bit depth (8- or 10-bit): temporal sigma-delta (with vectors) or libplacebo dither; 12-bit / DV output paths later.
 
 ## Contract
 
@@ -156,8 +156,8 @@ Missing input (no grain split, mismatched grid, no precursors, no LUT, unsupport
 
 Cost: the product is the block-grid state, rgba32f, two textures (ping-pong), 2 x blocks x 16 B. The block grid is about 120 x 68 at every size (16 px at 1080, 32 at 2160, 64 at 4320): ~0.26 MB VRAM at 1080p, 4K and 8K alike. Per output pixel: 4 texel fetches + ~10 ALU in the quantiser; the block pass is one thread per block. Not needed / off: no pass, no fetch.
 
-Link noise versus the grain rule: the added dither is judged by its OWN limit, not the +-5 % grain rule: noise vs plain+4 at most 1.40 in shadow blocks where `sigmaOut < 0.35` (the grain is already below the link step, so the "grain" there is quantiser noise) and 1.05 elsewhere (`tools/eval/link_noise.py`); to be confirmed by eye on the FL35.
+Link noise versus the grain rule: the added dither is judged by its OWN limit, not the +-5 % grain rule: noise vs plain+4 at most 1.40 in shadow blocks where `sigmaOut < 0.35` (the grain is already below the link step, so the "grain" there is quantiser noise) and 1.05 elsewhere (`tools/eval/link_noise.py`); to be confirmed by eye on a limited-bit-depth display.
 
 GPU decision and skipped frames: `DitherNeed::StateTracker::Decide(FrameArgs)` takes the reset / off / missing decision (grid, LUT fingerprint, colour depth, aBase, the caller's discontinuity flag, inputs present, needed) from CPU data only; `MapT` (CPU) and `Gpu::BlockPass::Step` (GPU: Decide + input validation of the grain, precursor and LUT textures against the block grid + the pass) use the same tracker. A skipped, missing or failed frame calls `BlockPass::Invalidate()`: `Current()` is null, `HookGuard::Apply` binds nothing and the sigma-delta runs at its base amplitude. Extra `Missing` bits: `kLutSizeMismatch`, `kNoSetTexture` (libplacebo without `pl_mpv_user_shader_set_texture`), `kPassFailed`.
 
-Acceptance note (A2): on HDR passthrough the 2-frame-mean <5 nit geo-mean is 1.025 against the 1.02 gate (prototype 1.011), a marginal miss accepted by the planner pending the owner's FL35 A/B; the per-frame ratio 0.609 passes (gate 0.8).
+Acceptance note (A2): on HDR passthrough the 2-frame-mean <5 nit geo-mean is 1.025 against the 1.02 gate (prototype 1.011), a marginal miss accepted by the planner pending the owner's display A/B; the per-frame ratio 0.609 passes (gate 0.8).
