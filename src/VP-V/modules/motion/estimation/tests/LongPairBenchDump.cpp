@@ -56,13 +56,16 @@ namespace VideoProcessorTest
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(LongPairBenchDump)
 		{
-			const char* env = std::getenv("VP_LONGPAIR_BENCH_DIR");
+			char* env = nullptr;
+			size_t envLen = 0;
+			_dupenv_s(&env, &envLen, "VP_LONGPAIR_BENCH_DIR");
 			if (!env || !*env)
 			{
 				Logger::WriteMessage("LONGPAIR_BENCH skipped: VP_LONGPAIR_BENCH_DIR is not set\n");
 				return;
 			}
 			const std::string dir = env;
+			free(env);
 			std::ifstream pairs(dir + "\\pairs.csv");
 			Assert::IsTrue(static_cast<bool>(pairs), L"pairs.csv not found");
 			std::string line;
