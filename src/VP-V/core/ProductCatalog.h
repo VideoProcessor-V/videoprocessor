@@ -149,6 +149,9 @@ struct ConsumerRow {
     const char* fallbackId;   // an entry of FallbackCatalog::ProductEntries
     const char* family;       // the component this row belongs to: several rows (module row, vector demand, camera) of
                               // one component are ONE reader for ownership and the document
+    // More reads were named than kMaxConsumes holds: the extra reads were NOT recorded. Release builds have no assert, so this is a
+    // visible flag: ValidateConsumerRows() rejects the catalog with the row's name and the graph build rejects the decl (same flag).
+    bool overflow = false;
 };
 
 // Sorting key: pathway unit first, then render order.
@@ -164,12 +167,14 @@ inline ConsumerRow MakeRow(uint16_t index, const char* name, const char* module,
     r.decl.id = uint16_t(kCatalogConsumerIdBase + index);
     r.decl.name = name;
     r.family = name;
-    assert(reads.size() + heldReads.size() <= kMaxConsumes);   // a row never silently drops a read
+    assert(reads.size() + heldReads.size() <= kMaxConsumes);   // Debug builds stop here; Release flags it (ConsumerRow::overflow)
+    r.overflow = reads.size() + heldReads.size() > kMaxConsumes;
     for (ProductId p : reads)
         AddConsume(r.decl, p);
     // Held-state reads (P14 source identity): the latest sealed record, i.e. a lag >= 1 read, never a live fill.
     for (ProductId p : heldReads)
         AddConsume(r.decl, p, 1);
+    r.overflow = r.overflow || r.decl.overflow;
     r.decl.holdsSpan = holdsSpan;
     r.decl.hasReducedMode = true;
     r.module = module;
@@ -460,6 +465,15 @@ inline TierBytes VramByTier(const Graph& g)
         t.live[i] += n.liveBytes;
     }
     return t;
+}
+
+// "" when no consumer row dropped a read, else the first row's name and why (Release-visible; a test pins it empty).
+inline std::string ValidateConsumerRows()
+{
+    for (const ConsumerRow& c : ConsumerRows())
+        if (c.overflow || c.decl.overflow || c.decl.count > kMaxConsumes)
+            return std::string("consumer row \"") + c.decl.name + "\" names more reads than a consumer holds (" + std::to_string(kMaxConsumes) + ")";
+    return std::string();
 }
 
 // The graph with EVERY consumer active (the worst case the catalog describes).

@@ -305,7 +305,22 @@ namespace ProductCatalogTestsNs
 			}
 			// No consumer row drops a read: every declared read count fits (MakeRow asserts it) and is non-empty.
 			for (const ConsumerRow& c : ConsumerRows())
-				Assert::IsTrue(c.decl.count > 0 && c.decl.count <= kMaxConsumes);
+				Assert::IsTrue(c.decl.count > 0 && c.decl.count <= kMaxConsumes && !c.overflow && !c.decl.overflow);
+			Assert::AreEqual(std::string(), ValidateConsumerRows(), L"Release-visible: no catalog row dropped a read");
+#ifdef NDEBUG
+			{   // Release has no assert: a row naming one read too many is flagged, not silently truncated.
+				std::vector<ProductId> many(kMaxConsumes + 1, kP4SourceStats);
+				ConsumerRow row = MakeRow(0x7f, "overflow probe", "test", PathwayUnit::Input, 1, {}, FallbackKind::OwnReduced, "product.source_id", false, {});
+				for (ProductId p : many) AddConsume(row.decl, p);
+				Assert::IsTrue(row.decl.overflow, L"AddConsume flags the extra read");
+				Assert::AreEqual(size_t(kMaxConsumes), size_t(row.decl.count));
+				const size_t n = kMaxConsumes + 1;
+				ConsumerRow big = MakeRow(0x7e, "overflow probe 2", "test", PathwayUnit::Input, 2,
+					{ kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats, kP4SourceStats },
+					FallbackKind::OwnReduced, "product.source_id");
+				Assert::IsTrue(n == 11 && big.overflow && big.decl.overflow, L"MakeRow flags the row (and the decl) in Release");
+			}
+#endif
 		}
 
 		TEST_METHOD(UnitVersionsMatchTheUnitsAndVerifyUnitEngagesAFallback)

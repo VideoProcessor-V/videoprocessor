@@ -779,6 +779,7 @@ inline void AppendTemporalDetailProducts(std::vector<ProductDecl>& decls)
     AddTerm(rs, 2, 55);
     AddTerm(rs, 1, 1);
     AddTerm(rs, 0, 2);
+    rs.singletonStore = true;   // one persistent store, rewritten in place, read at lag 1 by td.delta / td.anchor_pass; never governed as history
     rs.rebasedPlane = true;
     rs.planningSize = true;
     rs.refRenderMs = 1.0f;
