@@ -302,6 +302,7 @@ namespace VideoProcessorTest
 				std::ofstream(historyFolder + "\\source-resolution 2020010" + std::to_string(old) + "-000000.csv") << "old";
 			monitor.SetHistoryFolder(historyFolder);
 			const std::string historyPath = monitor.HistoryPath();
+			monitor.FlushHistoryNow();   // the session start (retention, the new file) happens on the first flush, not in SetHistoryFolder
 			{
 				int kept = 0;
 				WIN32_FIND_DATAA found{};

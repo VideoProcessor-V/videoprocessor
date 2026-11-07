@@ -292,8 +292,8 @@ namespace SourceIdentity
 		void CountRegime(const FieldState& st, int64_t now, int64_t sinceUs, int& evals) const
 		{
 			// Two-sided: the hypothesis must START at or after the flag (one that began before the boundary never
-			// bypasses T_min) and no later than one dwell after it, and it counts only inside that dwell window.
-			if (haveFlag_ && now >= flagUs_ && now - flagUs_ <= s_.dwellUs && (!st.hasChanged || flagUs_ > st.lastChangeUs) &&
+			// bypasses T_min) and no later than one dwell after it; it then counts at any evaluation cadence.
+			if (haveFlag_ && now >= flagUs_ && (!st.hasChanged || flagUs_ > st.lastChangeUs) &&
 				sinceUs >= flagUs_ && sinceUs - flagUs_ <= s_.dwellUs)
 				++evals;
 		}

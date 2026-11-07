@@ -1232,7 +1232,7 @@ if (tile < int(tiles) && g.y < ts) {
 			frame.ratio, frame.vertical.coherence, frame.horizontal.coherence, snapshot.liveRatio, snapshot.declaredRatio,
 			snapshot.confidence, snapshot.bitrateQuality, snapshot.effectiveBits, snapshot.cuts, frame.informativeTiles,
 			frame.tiles, autoAppliedShared.load(std::memory_order_acquire), snapshot.analyseMs,
-			snapshot.holdingMixed ? "; holding: mixed picture (overlay)" : "");
+			snapshot.holdingMixed ? (std::string("; ") + kHoldingMixedText).c_str() : "");
 		{
 			// The replay / identity columns (SourceHistory::Header): the frame's own readings and flags, the classical snapshot
 			// behind the votes, then the consensus record (sid_*) when the pipeline runs.
@@ -1444,8 +1444,7 @@ if (tile < int(tiles) && g.y < ts) {
 		// SID-B: a mixed/overlay screen over a declared re-base: the declaration stands - say so once per hold.
 		if (autoApplied < 1.0 && s.holdingMixed)
 		{
-			if (!mixedHoldLogged && why.empty()) why = kHoldingMixedText;
-			mixedHoldLogged = true;
+			if (!mixedHoldLogged && why.empty()) { why = kHoldingMixedText; mixedHoldLogged = true; }
 		}
 		else if (!s.holdingMixed)
 			mixedHoldLogged = false;
@@ -1576,9 +1575,10 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 		if ((axisApplied[0] < 1.0 || axisApplied[1] < 1.0) && s.holdingMixed)
 		{
-			if (!mixedHoldLogged && axisWhy.empty()) axisWhy = kHoldingMixedText;
-			mixedHoldLogged = true;
+			if (!mixedHoldLogged && axisWhy.empty()) { axisWhy = kHoldingMixedText; mixedHoldLogged = true; }
 		}
+		else if (!s.holdingMixed)
+			mixedHoldLogged = false;
 		if (!axisWhy.empty())
 		{
 			char row[200];

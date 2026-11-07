@@ -67,8 +67,8 @@ namespace SourceHistory
 		bool CreateDirectories(const std::string& folder);
 		std::vector<std::string> ListNames(const std::string& folder);                          // file names only
 		bool Remove(const std::string& path);
-		// Creates (append = false) or appends; false + `error` on failure.
-		bool Write(const std::string& path, const std::string& data, bool append, std::string& error);
+		// Creates (append = false) or appends; false + `error` on failure. `written` (optional) = the bytes that did reach the file.
+		bool Write(const std::string& path, const std::string& data, bool append, std::string& error, size_t* written = nullptr);
 		std::string Join(const std::string& folder, const std::string& name);
 	}
 
@@ -87,8 +87,10 @@ namespace SourceHistory
 		// Deletes the oldest sessions so that at most `keep` remain. Returns the number of sessions deleted.
 		static int Prune(const std::string& folder, size_t keep);
 
-		// Starts a session: the earlier sessions beyond `sessions - 1` are deleted, the base file is created with the
-		// header and `firstRow` (a complete row, no newline). An empty folder turns the log off.
+		// Starts a session. Does NO disk work (it may run on the render thread): it only records the session under a short
+		// lock. The first Flush (the worker) creates the folder, deletes the earlier sessions beyond `sessions - 1` and
+		// creates the base file with the header and `firstRow` (a complete row, no newline); a failure there is counted,
+		// reported once and retried at the next Flush. An empty folder turns the log off.
 		bool Open(const std::string& folder, const std::string& stamp, const std::string& firstRow, size_t sessions = kDefaultSessions,
 			uint64_t rotateBytes = kDefaultRotateBytes, size_t queueRows = kDefaultQueueRows);
 
@@ -117,7 +119,7 @@ namespace SourceHistory
 		static int IndexOf(const std::string& fileName);
 		bool Rotate();   // caller holds io_
 
-		mutable std::mutex q_;    // the queue and its counters: short holds only
+		mutable std::mutex q_;    // the queue, its counters and the pending session start: short holds only
 		mutable std::mutex io_;   // the files: folder_, stamp_, path_, bytes_, index_ ... (never taken by Append)
 		std::string folder_, stamp_, path_;
 		uint64_t rotateBytes_ = kDefaultRotateBytes;
@@ -132,5 +134,11 @@ namespace SourceHistory
 		uint64_t dropped_ = 0, droppedReported_ = 0, failed_ = 0;   // guarded by q_
 		bool failing_ = false, failureReported_ = false;            // guarded by q_
 		std::string failureText_;                                    // guarded by q_
+		// The session start Open recorded and the first Flush performs (all guarded by q_).
+		bool initPending_ = false;
+		uint64_t gen_ = 0;           // bumped by every Open: a Flush of an older session never touches the new one
+		std::string initFolder_, initStamp_, initFirstRow_;
+		size_t initSessions_ = kDefaultSessions;
+		uint64_t initRotate_ = kDefaultRotateBytes;
 	};
 }

@@ -267,6 +267,39 @@ namespace Tests
 			Assert::IsTrue(atChange == 13000000, L"a flag at the change time is the change's own boundary, not the next one's");
 		}
 
+		// The boundary does not depend on the evaluation cadence: 3 evaluations at 2 s steps (6 s > one dwell) still fire it.
+		TEST_METHOD(RegimeBoundaryFiresAtASlowEvaluationCadence)
+		{
+			using namespace SourceIdCons;
+			auto run = [](bool flagged, int64_t& changedAt, SourceIdentity::Stats& stats) {
+				Consensus c;
+				uint64_t seq = 0;
+				changedAt = -1;
+				bool first = true;
+				for (int64_t t = 0; t <= 20000000; t += 2000000)
+				{
+					const double ratio = t < 6000000 ? 0.5 : 1.0;   // re-based (changes at 4 s), native from 6 s
+					c.Submit(AxisVote(VoterId::ClassicalResolution, ratio, ratio, 0.9, t));
+					if (flagged && t == 6000000)
+						c.NoteRegimeFlag(t);
+					const Result r = c.Evaluate(++seq, t);
+					if (r.Changed(Field::AxisH))
+					{
+						if (first) first = false;
+						else if (changedAt < 0) changedAt = t;
+					}
+				}
+				stats = c.GetStats();
+			};
+			int64_t plain = -1, bounded = -1;
+			SourceIdentity::Stats sp, sb;
+			run(false, plain, sp);
+			run(true, bounded, sb);
+			Assert::IsTrue(plain == 14000000, L"without a flag: T_min (4 s + 10 s)");
+			Assert::IsTrue(bounded == 10000000, L"flag at 6 s, evaluations at 6, 8, 10 s: native at 10 s, inside T_min");
+			Assert::IsTrue(sb.regimeBypasses == 2);
+		}
+
 		// The boundary is towards native only: a deeper re-base after a flag still waits for T_min.
 		TEST_METHOD(RegimeBoundaryNeverBypassesTMinTowardsALowerRatio)
 		{

@@ -53,10 +53,10 @@ namespace SourceHistory
 				{
 					const std::wstring part = w.substr(0, i);
 					if (part.size() == 2 && part[1] == L':') continue;
-					if (!CreateDirectoryW(part.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
-						return false;
+					CreateDirectoryW(part.c_str(), nullptr);   // an existing one (or a UNC / share root) is fine: judged below
 				}
-			return true;
+			const DWORD attributes = GetFileAttributesW(w.c_str());
+			return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 		}
 
 		std::vector<std::string> ListNames(const std::string& folder)
@@ -79,8 +79,9 @@ namespace SourceHistory
 			return DeleteFileW(Wide(path).c_str()) != 0;
 		}
 
-		bool Write(const std::string& path, const std::string& data, bool append, std::string& error)
+		bool Write(const std::string& path, const std::string& data, bool append, std::string& error, size_t* writtenOut)
 		{
+			if (writtenOut) *writtenOut = 0;
 			const HANDLE h = CreateFileW(Wide(path).c_str(), append ? FILE_APPEND_DATA : GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
 				append ? OPEN_ALWAYS : CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 			if (h == INVALID_HANDLE_VALUE)
@@ -107,6 +108,7 @@ namespace SourceHistory
 				done += wrote;
 			}
 			CloseHandle(h);
+			if (writtenOut) *writtenOut = done;
 			return ok;
 		}
 	}
@@ -174,43 +176,26 @@ namespace SourceHistory
 	bool Log::Open(const std::string& folder, const std::string& stamp, const std::string& firstRow, size_t sessions, uint64_t rotateBytes,
 		size_t queueRows)
 	{
-		std::lock_guard<std::mutex> io(io_);
+		// No disk work here (the render thread may call this): only the session is recorded, under the short queue lock.
 		std::lock_guard<std::mutex> q(q_);
+		++gen_;
 		pending_.clear();
-		folder_.clear();
-		path_.clear();
 		pathCopy_.clear();
+		indexCopy_ = 1;
 		open_ = false;
+		initPending_ = false;
 		dropped_ = droppedReported_ = failed_ = 0;
 		failing_ = failureReported_ = false;
 		failureText_.clear();
 		if (folder.empty()) return false;
-		Os::CreateDirectories(folder);
-		// A restart inside the same second reuses the stamp: its earlier files go first.
-		const std::vector<std::string> same = SessionFiles(folder, stamp);
-		for (size_t i = 0; i < same.size(); ++i)
-			Os::Remove(Os::Join(folder, same[i]));
-		Prune(folder, sessions > 0 ? sessions - 1 : 0);
-		folder_ = folder;
-		stamp_ = stamp;
-		rotateBytes_ = rotateBytes > 0 ? rotateBytes : kDefaultRotateBytes;
+		initFolder_ = folder;
+		initStamp_ = stamp;
+		initFirstRow_ = firstRow;
+		initSessions_ = sessions;
+		initRotate_ = rotateBytes > 0 ? rotateBytes : kDefaultRotateBytes;
 		queueRows_ = queueRows > 0 ? queueRows : kDefaultQueueRows;
-		index_ = 1;
-		path_ = Os::Join(folder_, FileName(stamp_, 1));
-		const std::string head = std::string(Header()) + "\n" + firstRow + "\n";
-		std::string error;
-		if (!Os::Write(path_, head, false, error))
-		{
-			failed_ = 1;
-			failing_ = true;
-			failureText_ = error;
-			path_.clear();
-			return false;
-		}
-		bytes_ = head.size();
-		freshBytes_ = bytes_;
-		pathCopy_ = path_;
-		indexCopy_ = 1;
+		pathCopy_ = Os::Join(folder, FileName(stamp, 1));
+		initPending_ = true;
 		open_ = true;
 		return true;
 	}
@@ -218,7 +203,7 @@ namespace SourceHistory
 	bool Log::IsOpen() const { std::lock_guard<std::mutex> lock(q_); return open_; }
 	std::string Log::CurrentPath() const { std::lock_guard<std::mutex> lock(q_); return pathCopy_; }
 	int Log::FileIndex() const { std::lock_guard<std::mutex> lock(q_); return indexCopy_; }
-	bool Log::Dirty() const { std::lock_guard<std::mutex> lock(q_); return !pending_.empty(); }
+	bool Log::Dirty() const { std::lock_guard<std::mutex> lock(q_); return initPending_ || !pending_.empty(); }
 	uint64_t Log::DroppedRows() const { std::lock_guard<std::mutex> lock(q_); return dropped_; }
 	uint64_t Log::FailedWrites() const { std::lock_guard<std::mutex> lock(q_); return failed_; }
 
@@ -267,16 +252,58 @@ namespace SourceHistory
 	{
 		std::lock_guard<std::mutex> io(io_);
 		std::vector<std::string> rows;
+		bool doInit = false;
+		uint64_t gen = 0;
+		std::string folder, stamp, firstRow;
+		size_t sessions = kDefaultSessions;
+		uint64_t rotate = kDefaultRotateBytes;
 		{
 			std::lock_guard<std::mutex> q(q_);
-			if (!open_ || pending_.empty()) return 0;
+			if (!open_ || (!initPending_ && pending_.empty())) return 0;
+			gen = gen_;
+			if (initPending_)
+			{
+				doInit = true;
+				folder = initFolder_; stamp = initStamp_; firstRow = initFirstRow_; sessions = initSessions_; rotate = initRotate_;
+			}
 			rows.swap(pending_);
 		}
 		size_t written = 0;
 		size_t i = 0;
 		bool failed = false;
+		bool initFailed = false;
 		std::string error;
-		while (i < rows.size())
+		if (doInit)
+		{
+			// The session start Open recorded: folder, retention, then the base file with the header and the first row.
+			if (!Os::CreateDirectories(folder))
+			{
+				failed = initFailed = true;
+				error = "cannot create the folder " + folder;
+			}
+			else
+			{
+				const std::vector<std::string> same = SessionFiles(folder, stamp);
+				for (size_t k = 0; k < same.size(); ++k)
+					Os::Remove(Os::Join(folder, same[k]));   // a restart inside the same second reuses the stamp
+				Prune(folder, sessions > 0 ? sessions - 1 : 0);
+				const std::string head = std::string(Header()) + "\n" + firstRow + "\n";
+				const std::string path = Os::Join(folder, FileName(stamp, 1));
+				if (!Os::Write(path, head, false, error))
+					failed = initFailed = true;
+				else
+				{
+					folder_ = folder;
+					stamp_ = stamp;
+					rotateBytes_ = rotate;
+					index_ = 1;
+					path_ = path;
+					bytes_ = head.size();
+					freshBytes_ = bytes_;
+				}
+			}
+		}
+		while (!failed && i < rows.size())
 		{
 			// As many rows as fit below the limit, in one write.
 			std::string chunk;
@@ -299,14 +326,33 @@ namespace SourceHistory
 				chunk = rows[i] + '\n';
 				count = 1;
 			}
-			if (!Os::Write(path_, chunk, true, error)) { failed = true; break; }
+			size_t wrote = 0;
+			if (!Os::Write(path_, chunk, true, error, &wrote))
+			{
+				// A partial write: the rows that reached the file whole are done (no duplicate); the cut row is retried whole.
+				size_t whole = 0, at = 0;
+				for (size_t k = 0; k < count; ++k)
+				{
+					const size_t end = at + rows[i + k].size() + 1;
+					if (end > wrote) break;
+					at = end;
+					++whole;
+				}
+				bytes_ += wrote;
+				i += whole;
+				written += whole;
+				failed = true;
+				break;
+			}
 			bytes_ += chunk.size();
 			i += count;
 			written += count;
 		}
 		std::lock_guard<std::mutex> q(q_);
+		if (gen != gen_) return written;   // Open started another session meanwhile: its state is not touched
 		indexCopy_ = index_;
-		pathCopy_ = path_;
+		if (!path_.empty() && !initPending_) pathCopy_ = path_;
+		if (doInit && !initFailed) initPending_ = false;   // (Open has not run again: gen matches)
 		if (failed)
 		{
 			++failed_;

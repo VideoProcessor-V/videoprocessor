@@ -321,6 +321,8 @@ namespace Tests
 			const std::string stamp = "20261107-140000";
 			Assert::IsTrue(log.Open(dir.Str(), stamp, "12:00:00.000,session" + std::string(12, ',') + "x" + SourceHistory::EmptyExtras()));
 			const std::string path = dir.Join(SourceHistory::Log::FileName(stamp, 1));
+			log.Append("before-lock");
+			Assert::AreEqual(size_t(1), log.Flush(), L"the first flush starts the session and writes");
 			HANDLE lockHandle = CreateFileA(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);   // exclusive: no share
 			Assert::IsTrue(lockHandle != INVALID_HANDLE_VALUE);
 			for (int i = 0; i < 5; ++i) log.Append("held-" + std::to_string(i));
@@ -338,6 +340,47 @@ namespace Tests
 			Assert::AreEqual(size_t(5), log.Flush(), L"recovered: the kept rows are written");
 			Assert::IsTrue(log.Status().empty());
 			Assert::IsTrue(ReadAll(path).find("held-4") != std::string::npos);
+		}
+
+		// Open does no disk work (the render thread calls it): nothing exists until the first Flush, which does the start.
+		TEST_METHOD(OpenDoesNoDiskWorkTheFirstFlushStartsTheSession)
+		{
+			using namespace SidReplay;
+			TempFolder dir;
+			const std::string sub = dir.Join("later");
+			SourceHistory::Log log;
+			Assert::IsTrue(log.Open(sub, "20261107-150000", "12:00:00.000,session" + std::string(12, ',') + "x" + SourceHistory::EmptyExtras()));
+			Assert::IsTrue(SourceHistory::Os::ListNames(sub).empty(), L"no folder, no file yet");
+			Assert::IsTrue(log.CurrentPath().find("20261107-150000") != std::string::npos, L"the path is known at once");
+			Assert::IsTrue(log.Dirty(), L"a pending session start counts as work for the worker");
+			log.Append("row-a");
+			Assert::AreEqual(size_t(1), log.Flush());
+			Assert::AreEqual(size_t(1), SourceHistory::Os::ListNames(sub).size());
+			Assert::IsTrue(ReadAll(log.CurrentPath()).find("row-a") != std::string::npos);
+			Assert::IsFalse(log.Dirty());
+			SourceHistory::Os::Remove(log.CurrentPath());
+			RemoveDirectoryA(sub.c_str());
+		}
+
+		// A session that cannot be started (the folder cannot be created) is reported once like a failed write, and retried.
+		TEST_METHOD(AFailedSessionStartIsReportedOnceAndRetried)
+		{
+			using namespace SidReplay;
+			TempFolder dir;
+			// A file where the folder should go: the folder cannot be created under it.
+			const std::string blocker = dir.Join("blocker");
+			std::string writeError;
+			Assert::IsTrue(SourceHistory::Os::Write(blocker, "x", false, writeError));
+			SourceHistory::Log log;
+			Assert::IsTrue(log.Open(SourceHistory::Os::Join(blocker, "sub"), "20261107-160000", "first"));
+			log.Append("row");
+			Assert::AreEqual(size_t(0), log.Flush());
+			std::string notice;
+			Assert::IsTrue(log.TakeNotice(notice));
+			Assert::IsTrue(notice.find("write failed") != std::string::npos && notice.find("cannot create") != std::string::npos, L"visible");
+			Assert::IsFalse(log.TakeNotice(notice), L"once");
+			Assert::IsTrue(log.Dirty(), L"the start and the row are kept for the retry");
+			SourceHistory::Os::Remove(blocker);
 		}
 
 		TEST_METHOD(AFreeTextNoteIsQuotedSoTheColumnsStayAligned)
