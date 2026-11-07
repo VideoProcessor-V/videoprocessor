@@ -106,6 +106,24 @@ namespace FillerEdgeEntryTestsNs
 			Require(n.newContent == 2u * kGh && n.model == static_cast<uint32_t>(kGw - 2) * kGh && n.entryA == kGh && n.entryB == kGh, L"counts");
 		}
 
+		TEST_METHOD(TrustedMeasuredEdgeBlocksAreNeverNewContent)
+		{
+			auto rec = Record(Fill(24.0f), Fill(0.0f));
+			const CameraModel::Policy p = Strict(true);
+			CameraModel::BlendState st;
+			Settle(p, rec.get(), st);
+			const Geometry g = GeometryFor(*rec, kBlock, 0.5);
+			const std::vector<uint8_t> trusted(static_cast<size_t>(kGw) * kGh, 1);
+			std::vector<BlockResult> out;
+			const Counts n = ClassifyGrid(p, st, rec.get(), g, kGw, kGh, trusted, Fill(24.0f), Fill(0.0f), out);
+			for (int by = 0; by < kGh; ++by)
+			{
+				Require(out[At(0, by)].kind != Kind::NewContent && !out[At(0, by)].fill, L"trusted left edge: not NewContent, not filled");
+				Require(out[At(kGw - 1, by)].kind != Kind::NewContent && !out[At(kGw - 1, by)].fill, L"trusted right edge: not NewContent, not filled");
+			}
+			Require(n.newContent == 0u, L"no trusted block is counted as new content");
+		}
+
 		TEST_METHOD(MirrorPanGivesMirroredBlocks)
 		{
 			auto right = Record(Fill(24.0f), Fill(0.0f)), left = Record(Fill(-24.0f), Fill(0.0f));

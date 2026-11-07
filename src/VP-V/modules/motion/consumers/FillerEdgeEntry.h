@@ -96,7 +96,10 @@ namespace FillerEdgeEntry
 		if (filled)
 		{
 			if (r.entry != Entry::None)
-				r.kind = Kind::NewContent;
+			{
+				if (!measuredTrusted)   // a trusted measured block is never relabelled (or filled) by the entry rule
+					r.kind = Kind::NewContent;
+			}
 			else
 				r.fill = true;
 		}
