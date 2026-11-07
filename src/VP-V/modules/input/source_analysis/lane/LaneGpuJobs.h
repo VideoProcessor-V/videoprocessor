@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <utility>
+#include <vector>
 
 // Skeleton S6: the generic lane job of the GPU-compute products (P3, P5, P6). The job runs on the
 // render device in the idle gap: the host's IGpuDispatcher records each chunk; the seal and the
@@ -65,6 +66,66 @@ inline uint32_t RowsFor(ProductId id, Dims d)
     }
 }
 
+// 70b G0/G1: the lane form of the VP-owned GPU products (P10, P11, P12) is a FIXED sequence of passes, one chunk
+// per pass (never split by the budget): the same dispatches in the same order as the live form, so lane == live by
+// construction. The common input is the tap plane (the lane SourceFrameView luma as R16 unorm, code << 6), uploaded
+// in row bands of at most kTapBandBytes each.
+constexpr uint32_t kTapBandBytes = 4u << 20;
+constexpr uint32_t kP10SplitterSteps = 5;   // GH, GV, QUIET, NMIN, F (GrainSplitGpu.h)
+
+inline uint32_t TapRowsPerBand(Dims d)
+{
+    const uint64_t rowBytes = uint64_t(d.width) * 2u;
+    if (rowBytes == 0)
+        return 0;
+    const uint64_t rows = uint64_t(kTapBandBytes) / rowBytes;
+    return rows == 0 ? 1u : uint32_t(rows > d.height ? d.height : rows);
+}
+
+inline uint32_t TapBands(Dims d)
+{
+    const uint32_t rpb = TapRowsPerBand(d);
+    return rpb == 0 || d.height == 0 ? 0u : (d.height + rpb - 1u) / rpb;
+}
+
+// Steps (chunks) of a fixed-step product: P10 = tap bands + extend + the splitter passes; P11 and P12 one pass each
+// (the tap and extend are the P10 job's, or made inline by their one chunk when absent). 0 = not fixed-step.
+inline uint32_t StepsFor(ProductId id, Dims d)
+{
+    if (d.width == 0 || d.height == 0)
+        return 0;
+    switch (id) {
+    case VpSkeleton::kP10GrainSplit: return TapBands(d) + 1u + kP10SplitterSteps;
+    case VpSkeleton::kP11RegionBlockStats: return 1;
+    case VpSkeleton::kP12LightLevel: return 1;
+    default: return 0;
+    }
+}
+
+// 70b §3 / doc 70 §6.2: until the source ring (P13, M2 P10) exists, P10 and P11 are computed from the TAP plane (the
+// lane's analysis luma), not from the queued source planes: the registry the lane is built on drops their P13 input.
+// The tap form has its own unit version and provenance tag (kTapFormUnitVersion, kTapProvenance); at the migration to
+// P13 both change and consumers CheckFit and fall back visibly (WrongSize / Stale). Every other declaration is kept.
+constexpr uint32_t kTapFormUnitVersion = 1;
+constexpr const char* kTapProvenance = "tap: analysis luma (10-bit studio codes << 6, R16 unorm)";
+
+inline VpSkeleton::Registry TapFormProducts(const VpSkeleton::Registry& reg)
+{
+    std::vector<VpSkeleton::ProductDecl> d = reg.All();
+    for (VpSkeleton::ProductDecl& p : d) {
+        if (p.id != VpSkeleton::kP10GrainSplit && p.id != VpSkeleton::kP11RegionBlockStats)
+            continue;
+        uint8_t w = 0;
+        for (uint8_t k = 0; k < p.inputCount; ++k)
+            if (p.inputs[k].product != VpSkeleton::kP13SourceRing)
+                p.inputs[w++] = p.inputs[k];
+        for (uint8_t k = w; k < p.inputCount; ++k)
+            p.inputs[k] = VpSkeleton::InputRef();
+        p.inputCount = w;
+    }
+    return VpSkeleton::Registry(std::move(d));
+}
+
 class GpuComputeLaneJob : public ILaneProducer {
 public:
     GpuComputeLaneJob(ProductId id, IGpuDispatcher* dispatcher, std::function<double()> predictedMs,
@@ -77,13 +138,32 @@ public:
     {
     }
 
+    // 70b: a fixed-step job (StepsFor): exactly `steps` chunks, one per pass, whatever the budget.
+    struct FixedStepsTag {};
+    GpuComputeLaneJob(FixedStepsTag, ProductId id, IGpuDispatcher* dispatcher, std::function<double()> predictedMs,
+                      uint32_t steps)
+        : id_(id)
+        , dispatcher_(dispatcher)
+        , predictedMs_(std::move(predictedMs))
+        , rows_(0)
+        , fixedSteps_(steps == 0 ? 1u : steps)
+    {
+    }
+    uint32_t FixedStepCount() const { return fixedSteps_; }
+
+    // 70b: an optional gate consulted by Begin (render thread): false = cannot run this frame (e.g. P12 waits for
+    // P12(N-1) to be published). The runner abandons and counts the job.
+    void SetBeginGate(std::function<bool(const LaneJobContext&)> gate) { gate_ = std::move(gate); }
+
     ProductId Product() const override { return id_; }
 
-    bool Begin(const LaneJobContext&) override
+    bool Begin(const LaneJobContext& job) override
     {
-        if (dispatcher_ == nullptr)
+        active_ = false;
+        next_ = 0;
+        if (dispatcher_ == nullptr || (gate_ && !gate_(job)))
             return false;
-        plan_ = PlanChunks(rows_, predictedMs_ ? predictedMs_() : 0.0, chunkCapUs_ ? chunkCapUs_() : 0u);
+        plan_ = PlanFor();
         predictedUs_ = PredictedUs();
         next_ = 0;
         active_ = true;
@@ -97,7 +177,7 @@ public:
     {
         if (active_)
             return ChunkUs(predictedUs_, plan_.chunkCount);
-        const ChunkPlan p = PlanChunks(rows_, predictedMs_ ? predictedMs_() : 0.0, chunkCapUs_ ? chunkCapUs_() : 0u);
+        const ChunkPlan p = PlanFor();
         return ChunkUs(PredictedUs(), p.chunkCount);
     }
 
@@ -126,6 +206,15 @@ public:
     uint32_t NextChunk() const { return next_; }
 
 private:
+    ChunkPlan PlanFor() const
+    {
+        if (fixedSteps_ != 0) {
+            ChunkPlan p;
+            p.chunkCount = fixedSteps_;
+            return p;
+        }
+        return PlanChunks(rows_, predictedMs_ ? predictedMs_() : 0.0, chunkCapUs_ ? chunkCapUs_() : 0u);
+    }
     double PredictedUs() const
     {
         const double ms = predictedMs_ ? predictedMs_() : 0.0;
@@ -144,6 +233,8 @@ private:
     std::function<double()> predictedMs_;
     std::function<uint32_t()> chunkCapUs_;
     uint32_t rows_;
+    uint32_t fixedSteps_ = 0;   // 70b: one chunk per pass (StepsFor); 0 = rows split by the budget
+    std::function<bool(const LaneJobContext&)> gate_;
     ChunkPlan plan_;
     uint32_t next_ = 0;
     bool active_ = false;       // a job is in progress: plan_ and predictedUs_ are its own

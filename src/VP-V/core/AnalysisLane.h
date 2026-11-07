@@ -544,6 +544,13 @@ public:
     void RegisterCpuLiveCompute(ProductId id, CpuLiveCompute fn) { cpuLive_[id] = std::move(fn); }
     // The render-device release fence's completed value for a product (lane polls it before reuse).
     void SetReleaseCompleted(std::function<uint64_t(ProductId)> f) { releaseCompleted_ = std::move(f); }
+    // 70b G0: GPU live deferral. On, a GPU-compute product's live fill at the seal (OnRenderStart, BEFORE the
+    // render lock: no GPU recording there) only reserves the live buffer and records a LivePending entry; the
+    // render thread later calls RunDeferredLive(seq) at a GPU-legal phase (Entrance), which dispatches the
+    // entries in topological order through IGpuDispatcher::DispatchLive. Off (default): today's behaviour (the
+    // dispatcher records at the seal). Needs a dispatcher; liveFill_ still wins when set (unchanged precedence).
+    void SetGpuLiveDeferred(bool on) { gpuLiveDeferred_ = on; }
+    bool GpuLiveDeferred() const { return gpuLiveDeferred_; }
 
     // ---- render thread ----
 
@@ -645,6 +652,14 @@ public:
         const std::shared_ptr<LaneState> st = std::atomic_load(&state_);
         if (!st)
             return empty_;
+        // 70b G0: entries the previous frame never ran (no Entrance reached) are stale: failed, counted.
+        for (const LivePending& e : livePending_)
+            MarkFailed(e.id, e.seq);
+        deferredTotals_.stale += livePending_.size();
+        livePending_.clear();
+        if (pendingState_ != st.get())
+            failed_.clear();   // another graph: its failures named the old graph's slots
+        pendingState_ = st.get();
         renderState_ = st;
         lastSlackUs_ = presentSlackUs;
 
@@ -783,6 +798,114 @@ public:
         for (const std::unique_ptr<LaneComputeGapWork>& w : st->gapWorks)
             w->Wake();
         return st->gap.RunGap(gapEndUs, nowUs_);
+    }
+
+    // ---- 70b G0: deferred GPU live fills, product reads (render thread) ----
+
+    struct LivePending {
+        ProductId id = kNoProduct;
+        uint64_t seq = 0;
+        int live = -1;
+        Header hdr;
+        uint32_t missing = 0;
+    };
+    struct DeferredReport {
+        uint64_t run = 0;       // dispatched and succeeded
+        uint64_t failed = 0;    // DispatchLive returned false, or an input failed and no missing-input form
+        uint64_t stale = 0;     // entries of an earlier frame or graph (never dispatched; their reads say Failed)
+    };
+
+    // The GPU live fills still waiting for RunDeferredLive (render thread; topological order).
+    const std::vector<LivePending>& LivePendingList() const { return livePending_; }
+
+    // Entrance of frame `seq`: dispatch its pending GPU live fills in topological order. An entry whose input
+    // failed this frame runs in the product's missing-input form when declared, else fails too (cascade).
+    // Entries of another frame or graph are stale: never dispatched, counted, their reads say Failed.
+    DeferredReport RunDeferredLive(uint64_t seq)
+    {
+        DeferredReport r;
+        if (livePending_.empty())
+            return r;
+        std::vector<LivePending> todo;
+        todo.swap(livePending_);
+        LaneState* st = renderState_.get();
+        for (const LivePending& e : todo) {
+            if (st == nullptr || e.seq != seq || pendingState_ != st) {
+                MarkFailed(e.id, e.seq);
+                ++r.stale;
+                continue;
+            }
+            const int idx = st->IndexOf(e.id);
+            if (idx < 0 || dispatcher_ == nullptr) {
+                MarkFailed(e.id, e.seq);
+                ++r.failed;
+                continue;
+            }
+            const Node& n = st->table->NodeAt(size_t(idx));
+            uint32_t missing = e.missing;
+            for (size_t k = 0; k < n.inputCount; ++k)
+                if (seq >= n.inputs[k].lag && IsFailed(n.inputs[k].product, seq - n.inputs[k].lag))
+                    missing |= 1u << k;
+            const bool ok = (missing == e.missing || n.missingInputForm)
+                            && dispatcher_->DispatchLive(n, seq, e.live, e.hdr, missing);
+            if (ok) {
+                ++r.run;
+            } else {
+                MarkFailed(e.id, e.seq);
+                ++r.failed;
+            }
+        }
+        deferredTotals_.run += r.run;
+        deferredTotals_.failed += r.failed;
+        deferredTotals_.stale += r.stale;
+        return r;
+    }
+    const DeferredReport& DeferredTotals() const { return deferredTotals_; }
+
+    // Where the render reads product `id` of frame `seq` (render thread). A GPU live fill still pending is
+    // Pending, one whose deferred dispatch failed is Failed: both carry no ReadInfo (kind None), so a reader
+    // falls back exactly as for a missing product. CPU products also give their bytes.
+    struct ProductRead {
+        enum State : uint8_t { None, Ring, Live, Pending, Failed } state = None;
+        ReadInfo info;
+        const uint8_t* cpu = nullptr;
+        size_t cpuBytes = 0;
+    };
+    ProductRead ReadOf(ProductId id, uint64_t seq) const
+    {
+        ProductRead out;
+        const LaneState* st = renderState_.get();
+        if (st == nullptr)
+            return out;
+        const int idx = st->IndexOf(id);
+        if (idx < 0)
+            return out;
+        if (IsFailed(id, seq)) {
+            out.state = ProductRead::Failed;
+            return out;
+        }
+        for (const LivePending& e : livePending_)
+            if (e.id == id && e.seq == seq) {
+                out.state = ProductRead::Pending;
+                return out;
+            }
+        out.info = st->table->At(size_t(idx)).Read(seq);
+        if (out.info.kind == ReadInfo::None)
+            return out;
+        out.state = out.info.kind == ReadInfo::Ring ? ProductRead::Ring : ProductRead::Live;
+        const CpuBuffers* b = st->bufs[size_t(idx)].get();
+        if (b != nullptr) {
+            out.cpu = out.info.kind == ReadInfo::Ring ? b->Ring(size_t(out.info.index)) : b->Live(size_t(out.info.index));
+            out.cpuBytes = b->Bytes();
+        }
+        return out;
+    }
+
+    // The source view of frame `seq` (render thread, lock-free mirror; no keepAlive: the render holds the frame).
+    bool SourceOf(uint64_t seq, SourceFrameView* out) const
+    {
+        const LaneState* st = renderState_.get();
+        return st != nullptr && st->ring->TryGet(seq, out);
     }
 
     // The frame's last use is over (presented / render-ahead slot retired).
@@ -1258,7 +1381,19 @@ private:
         } else if (liveFill_) {
             ok = liveFill_(n, seq, live, hdr, missing);
         } else if (dispatcher_ != nullptr && n.backend == Backend::GpuCompute) {
-            ok = dispatcher_->DispatchLive(n, seq, live, hdr, missing);
+            if (gpuLiveDeferred_) {
+                // 70b G0: reserve only; RunDeferredLive records it at Entrance (no GPU work before the render lock).
+                LivePending e;
+                e.id = n.id;
+                e.seq = seq;
+                e.live = live;
+                e.hdr = hdr;
+                e.missing = missing;
+                livePending_.push_back(e);
+                ok = true;
+            } else {
+                ok = dispatcher_->DispatchLive(n, seq, live, hdr, missing);
+            }
         }
         if (ok && nowUs_) {
             const uint64_t t1 = nowUs_();
@@ -1267,6 +1402,23 @@ private:
                 hdr.costUs = dt > 0xFFFFFFFFull ? 0xFFFFFFFFu : uint32_t(dt);
         }
         return ok;
+    }
+
+    // 70b G0: failed deferred live fills (product, frame), kept for the frames still readable (bounded).
+    void MarkFailed(ProductId id, uint64_t seq)
+    {
+        if (IsFailed(id, seq))
+            return;
+        if (failed_.size() >= kFailedKept)
+            failed_.erase(failed_.begin());
+        failed_.push_back(std::make_pair(id, seq));
+    }
+    bool IsFailed(ProductId id, uint64_t seq) const
+    {
+        for (const std::pair<ProductId, uint64_t>& f : failed_)
+            if (f.first == id && f.second == seq)
+                return true;
+        return false;
     }
 
     // While the storm hold is in force keep the regulator at the conservative floor (T0), once per frame.
@@ -1337,6 +1489,13 @@ private:
     std::vector<ILaneProducer*> producers_;
     IGpuDispatcher* dispatcher_ = nullptr;
     LiveFill liveFill_;
+    // 70b G0 (render thread)
+    static constexpr size_t kFailedKept = 64;
+    bool gpuLiveDeferred_ = false;
+    std::vector<LivePending> livePending_;
+    const LaneState* pendingState_ = nullptr;   // the graph the pending entries and failures belong to
+    std::vector<std::pair<ProductId, uint64_t>> failed_;
+    DeferredReport deferredTotals_;
     std::map<ProductId, CpuLiveCompute> cpuLive_;
     std::function<uint64_t(ProductId)> releaseCompleted_;
     std::vector<ProductFrameResult> empty_;
