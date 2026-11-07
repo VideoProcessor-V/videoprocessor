@@ -421,8 +421,7 @@ namespace VideoProcessorTest
 					if (bad < 4)
 					{
 						char first[160];
-						snprintf(first, sizeof(first), "P12_KERNEL %s first bad value %zu (component %zu): got %.6g want %.6g
-", label, i, i % 4,
+						snprintf(first, sizeof(first), "P12_KERNEL %s first bad value %zu (component %zu): got %.6g want %.6g\n", label, i, i % 4,
 							double(got[i]), double(want[i]));
 						Logger::WriteMessage(first);
 					}
@@ -556,8 +555,7 @@ namespace VideoProcessorTest
 			const std::vector<float> want = r.Mirror(r.stats[0], texels, nullptr, false, true);
 			{
 				const std::string reason = Find(r.kernel->Fallbacks(), "light_level_frame").reason;
-				Logger::WriteMessage(("P12_KERNEL frame-level reason: " + reason + "
-").c_str());
+				Logger::WriteMessage(("P12_KERNEL frame-level reason: " + reason + "\n").c_str());
 			}
 			Assert::IsTrue(Compare(got, want, "frame_level") == 0, L"the frame level differs from the mirror");
 			FallbackCatalog::Decision d = Find(r.kernel->Fallbacks(), "light_level_frame");
