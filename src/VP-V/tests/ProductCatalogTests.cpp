@@ -478,9 +478,15 @@ namespace ProductCatalogTestsNs
 						else
 							Assert::IsTrue(int(n.livePool) >= int(n.history) + 1, L"live pool >= history + 1");
 					}
+					// The look-ahead form (quality_pattern) needs lane lead >= 3 (effective lead = min(declared 2, lane lead - 1)); a shorter queue
+					// resolves it to the causal substitute (a visible reduced mode). Both carry the same derived history depth.
 					const Node* qp = g.Find(kQualityPattern);
-					Assert::IsTrue(qp != nullptr);
-					Assert::AreEqual(int(QualityPatternHistoryFrames(period)), int(qp->history), L"the node carries the derived depth, no silent change");
+					const Node* qc = g.Find(kQualityPatternCausal);
+					Assert::IsTrue((qp != nullptr) == (lane >= 3), L"quality_pattern is in the graph exactly when the queue supplies its lead");
+					Assert::IsTrue(lane >= 3 || qc != nullptr, L"otherwise the causal substitute stands in");
+					const Node* record = qp ? qp : qc;
+					Assert::IsNotNull(record);
+					Assert::AreEqual(int(QualityPatternHistoryFrames(period)), int(record->history), L"the node carries the derived depth, no silent change");
 				}
 			}
 			// The cap: 223 frames of the 2 s window = 111.5 fps. Visible above it, silent when nothing is capped.

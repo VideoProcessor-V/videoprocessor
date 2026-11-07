@@ -994,6 +994,7 @@ namespace SkeletonGraphTestsNs
 			Assert::AreEqual(uint64_t(0), r.Set(kStore).Counters().noLiveBuffer.load(), L"not a pool shortage: there is no pool");
 			const ProductFrameResult& rd0 = r.Result(res0, kStoreReader);
 			Assert::IsTrue(rd0.liveFilled && (rd0.missingInputs & 1u) != 0u, L"frame 0: no lag-1 store at all");
+			r.table.ReleaseAfter(0);   // the render is done with frame 0: the reader's single live buffer is free for frame 1
 			const auto& res1 = r.Resolve(1);
 			const ProductFrameResult& rd1 = r.Result(res1, kStoreReader);
 			Assert::IsTrue(rd1.liveFilled && (rd1.missingInputs & 1u) != 0u, L"frame 1: the store of frame 0 was never made: the declared reduced form");
