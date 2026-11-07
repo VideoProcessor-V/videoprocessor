@@ -59,7 +59,7 @@ the renderer or GUI, delete the stale `.iobj` / `.ipdb` files under `x64\Release
 is the end-to-end test: it starts the real VP renderer on the GPU with a synthetic 10-bit 4:2:2 signal, starts a
 calibration session (Quick plan, `settle_ms` 40, no verify, 17-point LUT) at t >= 1 s, once GetCalibrationOutput reports available, with a simulated meter that
 reads the codes the renderer was asked to show, and expects the session to reach Review (more than 50 patches
-measured) and the renderer to log `Calibration patterns: ended` within 28 s. It proves the patch timing (present
+measured) and the renderer to log `Calibration patterns: ended` (the run stops at min(session start + 27 s, 29.5 s)). It proves the patch timing (present
 twice, then settle) and the end state (patterns off, video back) on a real swapchain.
 
 Requirements: a desktop session with a real GPU (not a remote session), mains power, nothing else rendering, and
@@ -124,21 +124,21 @@ The module also holds the automatic calibration (the `calibration/` sub-folder).
 
 ## All settings (complete list)
 
-Config placement: the master VP-V page (`calibration_lut_stage`, Expert) and Output > Calibration sub-page (the LUT rows and the wizard; the LUT rows are on the Colour / Output profile page today, the sub-page arrives with P7). "Original (Bill)" = what the Original pathway does with the key.
+Config placement: the master VP-V page (`calibration_lut_stage`, Expert); the LUT rows stay on the Colour / Output profile page; the wizard and `[calibration]` cards are on Output > Open Calibration (`config_ui`). "Original (Bill)" = what the Original pathway does with the key.
 
 | Key | Section | Type | Range | Default | Config placement | Original (Bill) | Fallback / status |
 |---|---|---|---|---|---|---|---|
-| `calibration_lut_enabled` | `[vprenderer.color.<name>]` (and base) | bool | true/false | false | Output > Calibration | same (libplacebo target LUT) | invalid value: log + false; Ctrl+I `LUT:` line |
-| `calibration_lut_bt709` / `_p3_d65` / `_bt2020` | same | path | file relative to the cfg, or `none` | empty (no LUT) | Output > Calibration | same | `Rejected: <reason>` / `Inactive: <reason>` status (not a downgrade) |
-| `calibration_lut_input_transfer` | same (Rendering alias) | choice | as `hdr_tone_map_target_gamma` | empty | Colour / Output page | accepted alias | migration notice in the log |
-| `hdr_tone_map_target_gamma` | same | choice | bt1886, srgb, 1.8..2.8 | 2.2 in the shipped cfg (empty resolves to 2.2) | Colour / Output page | same | none |
-| `sdr_lut_input_gamma` | same | choice | passthrough, bt1886, srgb, 1.8..2.8 | passthrough | Colour / Output page | same | none |
+| `calibration_lut_enabled` | `[vprenderer.color.<name>]` (and base) | bool | true/false | false | Colour / Output profile page | same (libplacebo target LUT) | invalid value: log + false; Ctrl+I `LUT:` line |
+| `calibration_lut_bt709` / `_p3_d65` / `_bt2020` | same | path | file relative to the cfg, or `none` | empty (no LUT) | Colour / Output profile page | same | `Rejected: <reason>` / `Inactive: <reason>` status (not a downgrade) |
+| `calibration_lut_input_transfer` | same (Rendering alias) | choice | as `hdr_tone_map_target_gamma` | empty | Colour / Output profile page | accepted alias | migration notice in the log |
+| `hdr_tone_map_target_gamma` | same | choice | bt1886, srgb, 1.8..2.8 | 2.2 in the shipped cfg (empty resolves to 2.2) | Colour / Output profile page | same | none |
+| `sdr_lut_input_gamma` | same | choice | passthrough, bt1886, srgb, 1.8..2.8 | passthrough | Colour / Output profile page | same | none |
 | `calibration_lut_input_gamma` | same | retired | any | display | none | accepted, no effect | log line |
 | `calibration_lut_stage` | `[vpv]`, then `[vprenderer]` (global) | choice | libplacebo, vp | libplacebo | master VP-V page, Expert | always libplacebo (Original pathway) | invalid: `pipeline settings` entry; VP stage failure: `calibration LUT (the VP stage failed; ...)` |
 | `pipeline_slots_off` (entry `output.calibration_lut`) | `[vpv]` / `[vprenderer]` | list | slot ids | empty | master VP-V page | n/a | stops the VP stage only; LUT runs as libplacebo's target LUT |
-| `calibration_lut_reload` (planned) | colour profile | choice | auto, apply | auto | Output > Calibration | apply | not read yet |
+| `calibration_lut_reload` (planned) | colour profile | choice | auto, apply | auto | Colour / Output profile page | apply | not read yet |
 
-Tiers: not tiered. Patch display and the wizard have no settings of their own here (the wizard's `[calibration]` section is in `src/VP-V/modules/output/calibration_lut/calibration/CalibrationConfig.h`); the patch fallback is `calibration patch (full field ...)`.
+Tiers: not tiered. Patch display and the wizard have no settings of their own here (the wizard's `[calibration]` section is in `src/VP-V/modules/output/calibration_lut/calibration/CalibrationConfig.h`); the patch fallback is `calibration patch (full field ...)`; the page's keys are listed in §c (Settings of the Calibration page).
 
 ## Fallbacks
 
@@ -288,7 +288,7 @@ Placement for every row: master VP-V page > Output > "Open Calibration" > card. 
 | same | `hdr_verify_tone_curve` | choice vp / bt2390 / none | schema |
 | same | `hdr_verify_source_peak` | number 100-10000 cd/m2 | 1000 |
 | same | `record_transcripts` | checkbox | false |
-| same | `transcript_folder` | text (Browse) | empty (luts\calibration	ranscripts) |
+| same | `transcript_folder` | text (Browse) | empty (`luts\calibration\transcripts`) |
 | Calibrate (wizard) | `calibration.wizard.kind`, `.lux`, buttons Start / Continue / Skip warm-up / Apply / Discard / Cancel | run kind choice; room light 0-200000 lux (0 = Sensor) | Display calibration; Sensor |
 
 Status and fallback lines the page shows (none is a "Fallbacks engaged" entry; they are status text in the wizard or Config's status bar): "Connect to a running VideoProcessor to calibrate." (no target; all buttons disabled); "Settings preview: VP is not connected." (settings preview); "VideoProcessor did not answer: <reason> (calibration runs inside VideoProcessor; start it first)." (RPC failed); "Calibration uses the saved settings: Apply your changes first." (Start with unsaved edits); "Calibration applied: VP attached the new LUTs. Reloading the configuration." (after Apply in the run; reload only when the editor has no unsaved edits); "The Calibration page could not be built: <reason>" (the page failed to build; the editor shows no Calibration page).
