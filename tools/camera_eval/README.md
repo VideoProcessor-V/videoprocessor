@@ -62,7 +62,7 @@ summary reports a per-clip table and the fit time (p50 / p95 / max). Synthetic f
 
 `match --dump-flo DIR` also writes, per judged pair t, `DIR/pair_%06d/pred_off.flo` and `pred_on.flo` (Middlebury .flo, full picture, source px,
 frame t-1 -> t as in the convention above; each matcher block vector is expanded over its `block` x `block` source pixels, the strip beyond the last
-whole block repeats the edge block). The CSV is unchanged. `DIR` must exist.
+whole block repeats the edge block). The CSV is unchanged. `DIR` must exist. When the plan legitimately skips the matcher (`kPathSkipped`), `pred_on.flo` holds the plan's seed field for that pair (zeros if the plan has none) and the pair number is appended to `DIR/skipped.txt`; the run does not abort.
 
 ## Noise tier and dynamic-texture detector (R1-GATES)
 - **Noise tier**: the region metric is reported at two error floors. `WRONG@true-cam` uses max(1 px, 10 %); `>1.5 px@true-cam` uses

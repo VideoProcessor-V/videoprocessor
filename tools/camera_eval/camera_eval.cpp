@@ -369,6 +369,7 @@ static int RunMatch(const Args& a)
 
 	const int last = std::min(a.N - 1, a.start + a.count - 1);
 	std::vector<float> lumaPrev, lumaCur; int mw = 0, mh = 0;
+	std::vector<int> skippedPairs;   // --dump-flo: pairs where the plan skipped the matcher
 	for (int t = 1; t <= last; ++t)
 	{
 		// The input's causal fit of pair t (frames t-1 -> t); the plan for pair t+1 is built from it.
@@ -402,14 +403,35 @@ static int RunMatch(const Args& a)
 				Fail("matcher grid " + std::to_string(off.bw) + "x" + std::to_string(off.bh) + " != fitter grid " + std::to_string(g.gridW) + "x" + std::to_string(g.gridH));
 				return 2;
 			}
-			if (!a.dumpFlo.empty() && on.skipped) { fclose(out); fclose(yuv); Fail("--dump-flo: the plan skipped the matcher at pair " + std::to_string(t)); return 2; }
 			if (!a.dumpFlo.empty())
 			{
 				char sub[64];
 				snprintf(sub, sizeof sub, "/pair_%06d", t);
 				const std::string d = a.dumpFlo + sub;
 				_mkdir(a.dumpFlo.c_str()); _mkdir(d.c_str());   // one level each; parents must exist
-				if (!WriteFlo(d + "/pred_off.flo", off, g, mc.sourceToMatcher) || !WriteFlo(d + "/pred_on.flo", on, g, mc.sourceToMatcher))
+				// A plan that legitimately skips the matcher leaves pred_on empty: write the plan's seed field for that pair instead
+				// and list the pair in DIR/skipped.txt (the CSV is unchanged).
+				Reference::MatchResult onFlo = on;
+				if (on.skipped)
+				{
+					const size_t nb = (size_t)on.bw * on.bh;
+					const bool haveSeed = plan.seedX.size() == nb && plan.seedY.size() == nb;
+					for (size_t i = 0; i < nb; ++i)
+					{
+						onFlo.vx[i] = haveSeed ? (float)(plan.seedX[i] * mc.sourceToMatcher) : 0.f;
+						onFlo.vy[i] = haveSeed ? (float)(plan.seedY[i] * mc.sourceToMatcher) : 0.f;
+					}
+					skippedPairs.push_back(t);
+					if (FILE* sk = fopen((a.dumpFlo + "/skipped.txt").c_str(), "wb"))
+					{
+						fprintf(sk, "# pairs whose plan skipped the matcher; pred_on.flo holds the plan seed field (zeros if none)
+");
+						for (int sp : skippedPairs) fprintf(sk, "%d
+", sp);
+						fclose(sk);
+					}
+				}
+				if (!WriteFlo(d + "/pred_off.flo", off, g, mc.sourceToMatcher) || !WriteFlo(d + "/pred_on.flo", onFlo, g, mc.sourceToMatcher))
 				{ fclose(out); fclose(yuv); return 2; }
 			}
 			const std::vector<uint8_t> refLab = LabelsOf(refRec, (size_t)g.gridW * g.gridH);
