@@ -85,7 +85,7 @@ namespace Tests
 		// ---- the session-long writer ----
 		TEST_METHOD(TheLogRotatesToNumberedFilesOfTheSameSession)
 		{
-			using namespace SidReplay;
+			using namespace SidHistory;
 			TempFolder dir;
 			SourceHistory::Log log;
 			const uint64_t limit = 3000;   // bytes (a header is ~450)
@@ -127,7 +127,7 @@ namespace Tests
 
 		TEST_METHOD(TheNewestFiveSessionsAreKeptWholeAndOlderOnesGo)
 		{
-			using namespace SidReplay;
+			using namespace SidHistory;
 			TempFolder dir;
 			const uint64_t limit = 1500;
 			for (int s = 1; s <= 7; ++s)
@@ -166,7 +166,7 @@ namespace Tests
 		// Append never waits on the disk and never grows without bound: past the bound the OLDEST rows are dropped, counted and reported.
 		TEST_METHOD(AppendIsBoundedDropsTheOldestAndReportsIt)
 		{
-			using namespace SidReplay;
+			using namespace SidHistory;
 			TempFolder dir;
 			SourceHistory::Log log;
 			Assert::IsTrue(log.Open(dir.Str(), "20261107-130000", "12:00:00.000,session" + std::string(12, ',') + "x" + SourceHistory::EmptyExtras(),
@@ -188,7 +188,7 @@ namespace Tests
 		// A failed write is counted, reported once, keeps the rows, and the log recovers when the file can be written again.
 		TEST_METHOD(AFailedWriteIsReportedOnceKeepsTheRowsAndRecovers)
 		{
-			using namespace SidReplay;
+			using namespace SidHistory;
 			TempFolder dir;
 			SourceHistory::Log log;
 			const std::string stamp = "20261107-140000";
@@ -218,7 +218,7 @@ namespace Tests
 		// Open does no disk work (the render thread calls it): nothing exists until the first Flush, which does the start.
 		TEST_METHOD(OpenDoesNoDiskWorkTheFirstFlushStartsTheSession)
 		{
-			using namespace SidReplay;
+			using namespace SidHistory;
 			TempFolder dir;
 			const std::string sub = dir.Join("later");
 			SourceHistory::Log log;
@@ -238,7 +238,7 @@ namespace Tests
 		// A session that cannot be started (the folder cannot be created) is reported once like a failed write, and retried.
 		TEST_METHOD(AFailedSessionStartIsReportedOnceAndRetried)
 		{
-			using namespace SidReplay;
+			using namespace SidHistory;
 			TempFolder dir;
 			// A file where the folder should go: the folder cannot be created under it.
 			const std::string blocker = dir.Join("blocker");
@@ -292,17 +292,17 @@ namespace Tests
 			Assert::IsTrue(lines.size() >= 6);
 			Assert::AreEqual(std::string(SourceHistory::Header()), lines[0], L"the header");
 			int readings = 0;
-			bool session = false, seek = false;
+			bool session = false, gap = false;
 			for (size_t i = 1; i < lines.size(); ++i)
 			{
 				Assert::AreEqual(SourceHistory::kColumns, Columns(lines[i]), L"every row is full width");
 				if (lines[i].find(",reading,") != std::string::npos) ++readings;
 				if (lines[i].find(",session,") != std::string::npos) session = true;
-				if (lines[i].find(",discontinuity,") != std::string::npos && lines[i].find("with no frames") != std::string::npos) seek = true;
+				if (lines[i].find(",discontinuity,") != std::string::npos && lines[i].find("with no frames") != std::string::npos) gap = true;
 			}
 			Assert::IsTrue(readings >= 4, L"a reading row per analysed frame");
 			Assert::IsTrue(session, L"the session row");
-			Assert::IsTrue(seek, L"the discontinuity row with its cause");
+			Assert::IsTrue(gap, L"the discontinuity row with its cause");
 			// A second flush appends: the first file's text is a prefix of the new one.
 			m.AnalyseTilesForTest(tiles, 8, 10.5, 3840, 2160);
 			m.FlushHistoryNow();

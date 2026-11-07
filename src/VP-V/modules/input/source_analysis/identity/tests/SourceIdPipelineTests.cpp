@@ -292,6 +292,25 @@ namespace Tests
 			Assert::AreEqual(0.8, v.quality);
 		}
 
+		// SID-B0: a record flagged SHADOW is for logs only; even a caller that passes consensusOn = true gets the classical value, visibly.
+		TEST_METHOD(AShadowRecordIsNeverUsedAsAnInput)
+		{
+			using namespace SourceIdentity;
+			ClassicalQuality c;
+			c.reading = true;
+			c.bitrateQuality = 0.8;
+			Record r;
+			r.timeUs = 5000000; r.maxAgeUs = 12000000; r.tier = 1; r.level = 0.4f; r.latched = 1u << static_cast<unsigned>(Field::Quality);
+			QualityView v = View(&r, c, true, 6000000);
+			Assert::IsTrue(v.origin == QualityOrigin::Consensus, L"the same record without the flag is used");
+			r.flags = static_cast<uint16_t>(r.flags | kFlagShadow);
+			v = View(&r, c, true, 6000000);
+			Assert::IsTrue(v.origin == QualityOrigin::Classical);
+			Assert::IsTrue(v.fallback.engaged);
+			Assert::AreEqual(std::string("shadow record"), v.reason);
+			Assert::AreEqual(0.8, v.quality);
+		}
+
 		TEST_METHOD(EveryConsumerHasAnAbsentProductPath)
 		{
 			using namespace SourceIdentity;
@@ -550,7 +569,7 @@ namespace Tests
 			Assert::IsTrue(shadow.SourceIdRunning());
 			Assert::AreEqual(std::string("Source identity: shadow (classical decides)"), shadow.SourceIdStatusLine(1.0));
 			const std::vector<float> none;
-			int differences = 0, engagedFrames = 0;
+			int differences = 0, engagedFrames = 0, shadowEngagedFrames = 0;
 			for (int f = 0; f < 120; ++f)
 			{
 				const double seconds = 0.5 * f;
@@ -563,15 +582,19 @@ namespace Tests
 				shadow.AutoFactors(1920, 1080, 0.8, whyShadow, sx, sy, seconds + 0.1, static_cast<uint64_t>(f + 1));
 				if (ox != sx || oy != sy || whyOff != whyShadow) ++differences;
 				if (ox < 1.0 || oy < 1.0) ++engagedFrames;
+				if (sx < 1.0 || sy < 1.0) ++shadowEngagedFrames;
 				const SourceResolutionMonitor::Snapshot a = off.Read(), b = shadow.Read();
 				if (a.declaredRatio != b.declaredRatio || a.confidence != b.confidence || a.bitrateQuality != b.bitrateQuality) ++differences;
 				const SourceIdentity::QualityView qa = off.QualityView(seconds), qb = shadow.QualityView(seconds);
 				if (qa.quality != qb.quality || qb.fallback.engaged || qb.origin != qa.origin) ++differences;
 			}
 			char line[160];
-			snprintf(line, sizeof(line), "shadow vs off: %d differing decisions; engaged frames %d\n", differences, engagedFrames);
+			snprintf(line, sizeof(line), "shadow vs off: %d differing decisions; engaged frames %d (off) %d (shadow)\n", differences, engagedFrames, shadowEngagedFrames);
 			Logger::WriteMessage(line);
 			Assert::AreEqual(0, differences, L"AutoFactors, the snapshot and the quality view are byte-identical to Off");
+			// Not vacuous: the classical path engages on this script (an earlier run: 96 of 120 frames), and both modes engage on the same frames.
+			Assert::IsTrue(engagedFrames > 0, L"the script makes the classical path engage, so the comparison covers a real decision");
+			Assert::AreEqual(engagedFrames, shadowEngagedFrames, L"shadow engages on exactly the frames Off does");
 			SourceIdentity::Record rec;
 			Assert::IsTrue(shadow.SourceIdRecord(rec), L"the record is published in shadow");
 			Assert::IsTrue((rec.flags & SourceIdentity::kFlagShadow) != 0, L"and flagged as shadow");

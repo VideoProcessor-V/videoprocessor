@@ -15,9 +15,11 @@ using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 // SID-B0 (doc 78 section 5): PINS the behaviour on integ, it changes none. Once a lower reading is declared (the thing the monitor
 // re-bases to), frames that carry no evidence - dark, flat, credits-like (no informative tile), no tiles at all, starved of detail
-// by a dark / low-contrast level or by a blur - HOLD the declaration; only a genuine native reading (informative, not mixed, not
-// starved, reading native) clears it, and a discontinuity still clears it at once. The tracker is fed hand-made FrameReadings
-// (the same technique as TrackerResumeAfterNativeEvidence), so the cases are exact and need no footage.
+// by a dark / low-contrast level or by a blur - HOLD the declaration; a genuine native reading (informative, not starved, reading
+// native) clears it, and a discontinuity still clears it at once. NOT pinned here: an informative MIXED screen that reads native
+// skips both starved gates (they sit inside `ratio >= 1.0 && !frame.mixed`) and clears the declaration at once today - that is the
+// incident path of doc 78 section 5, to be judged by its own fix, so no case here claims mixed frames hold. The tracker is fed
+// hand-made FrameReadings (the same technique as TrackerResumeAfterNativeEvidence): Tracker level only, not Monitor / AutoFactor.
 namespace VideoProcessorTest
 {
 	namespace

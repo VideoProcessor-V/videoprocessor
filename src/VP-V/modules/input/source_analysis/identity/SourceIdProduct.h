@@ -64,7 +64,7 @@ namespace SourceIdentity
 		kFlagNoticeFired = 1u << 1,     // the one-time notice fired for this title
 		kFlagConsensusOn = 1u << 2,     // the worker ran with source_id_consensus on when it published
 		kFlagReading = 1u << 3,         // the classical monitor had a reading
-		kFlagShadow = 1u << 4,          // SHADOW mode: published and logged, but the classical decision stands (consumers must not act on it)
+		kFlagShadow = 1u << 4,          // SHADOW mode: published and logged, but the classical decision stands (consumers must not act on it: View() and the monitor gate treat it as no usable record)
 		kFlagChainVote = 1u << 5        // SID train r2: a fresh CONFIDENT chain (P14g) vote was submitted to the consensus on this evaluation
 	};
 

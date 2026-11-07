@@ -711,6 +711,8 @@ if (tile < int(tiles) && g.y < ts) {
 			why = "no record";
 		else if (rec.unitVersion != SourceIdentity::kUnitVersion)
 			why = "unit version";
+		else if ((rec.flags & SourceIdentity::kFlagShadow) != 0)
+			why = "shadow record";   // a shadow record is for logs only: never an input (defence in depth)
 		else
 		{
 			const int64_t nowUs = static_cast<int64_t>(std::llround(now * 1e6));
