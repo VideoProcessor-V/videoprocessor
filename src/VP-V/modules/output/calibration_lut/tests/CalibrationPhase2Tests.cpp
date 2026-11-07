@@ -12,7 +12,7 @@
 #include <VP-V/modules/output/calibration_lut/calibration/HdrVerify.h>
 #include <VP-V/modules/output/calibration_lut/calibration/LedRun.h>
 #include <VP-V/modules/output/calibration_lut/calibration/Meter.h>
-#include <VP-V/modules/output/calibration_lut/calibration/PatternCodes.h>
+#include <VP-V/modules/output/calibration_lut/pattern_lib/PatternCodes.h>
 #include <VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.h>
 #include <ConfigEditorCore.h>
 #include <ConfigFile.h>

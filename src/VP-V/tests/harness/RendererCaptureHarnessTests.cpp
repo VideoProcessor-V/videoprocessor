@@ -6609,9 +6609,18 @@ namespace Tests
 			std::thread worker;
 			bool started = false;
 			Calibration::SessionStatus final;
+			// Diagnostics: the patch index against time (one sample per tick), so a slow run shows
+			// where the seconds went, and the renderer's own pattern timing from its log.
+			struct PatchSample { double seconds; int patchIndex; };
+			std::vector<PatchSample> timeline;
 			FramePlan plan;
 			plan.tick = [&](IVideoRenderer& renderer, double t)
 			{
+				if (started && session && !final.measured)
+				{
+					const int index = session->Status().patchIndex;
+					if (timeline.empty() || timeline.back().patchIndex != index) timeline.push_back({ t, index });
+				}
 				if (!started && t >= 1.0)
 				{
 					started = true;
@@ -6660,6 +6669,17 @@ namespace Tests
 			Logger::WriteMessage(("dry run: " + std::string(Calibration::ToString(final.step)) + " measured " +
 				std::to_string(final.measured) + " skipped " + std::to_string(final.skipped) + " format " + final.format +
 				"\n" + final.message + "\n" + final.review + "\n").c_str());
+			{
+				std::string trace;
+				for (const PatchSample& sample : timeline)
+					trace += "  t=" + std::to_string(sample.seconds) + " s: patch " + std::to_string(sample.patchIndex) + "\n";
+				Logger::WriteMessage(("patch timeline (a new line per patch):\n" + trace).c_str());
+				std::string lines;
+				for (const std::string& line : r.log)
+					if (line.find("Calibration") != std::string::npos || line.find("calibration patch") != std::string::npos)
+						lines += "  " + line + "\n";
+				Logger::WriteMessage(("renderer calibration log lines:\n" + lines).c_str());
+			}
 			Assert::IsTrue(r.presented, r.Tail().c_str());
 			Assert::IsTrue(final.step == Calibration::SessionStep::Discarded,
 				(L"the dry run reached the review\n" + std::wstring(final.message.begin(), final.message.end())).c_str());

@@ -1,4 +1,3 @@
-
 #include "PatternCodes.h"
 
 #include <algorithm>

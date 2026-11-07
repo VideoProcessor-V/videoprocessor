@@ -6,13 +6,13 @@
 #include <VP-V/modules/output/calibration_lut/calibration/ArgyllInstall.h>
 #include <VP-V/modules/output/calibration_lut/calibration/CalibrationConfig.h>
 #include <VP-V/modules/output/calibration_lut/calibration/CalibrationController.h>
-#include <VP-V/modules/output/calibration_lut/calibration/CalibrationPattern.h>
+#include <VP-V/modules/output/calibration_lut/pattern_lib/CalibrationPattern.h>
 #include <VP-V/modules/output/calibration_lut/calibration/CalibrationRun.h>
 #include <VP-V/modules/output/calibration_lut/calibration/CalibrationSession.h>
 #include <VP-V/modules/output/calibration_lut/calibration/CalibrationSimulation.h>
 #include <VP-V/modules/output/calibration_lut/calibration/Meter.h>
 #include <VP-V/modules/output/calibration_lut/calibration/MeterCatalog.h>
-#include <VP-V/modules/output/calibration_lut/calibration/PatternCodes.h>
+#include <VP-V/modules/output/calibration_lut/pattern_lib/PatternCodes.h>
 #include <VP-V/modules/output/calibration_lut/calibration/Spotread.h>
 #include <ConfigEditorCore.h>
 #include <ConfigFile.h>
