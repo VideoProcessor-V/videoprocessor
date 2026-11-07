@@ -384,6 +384,7 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
     gi.headroom = in.headroom;
     gi.users = in.otherUsers;
     std::vector<int> userOf(all.size(), -1);
+    std::vector<size_t> inRenderLevel(all.size(), 0);   // the level that is the identical in-render form (full history)
     std::vector<std::vector<uint8_t>> levelHistory(all.size());   // governed products: granted depth per level
     std::deque<std::string> texts;                                   // level wording with the depths (stable addresses)
     for (size_t i = 0; i < all.size(); ++i) {
@@ -412,6 +413,7 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
             u.levels.push_back(liveAt);
             u.levelText.push_back("computed in the render (no look-ahead)");
             levelHistory[i].push_back(n.historyFull);
+            inRenderLevel[i] = 1;
         }
         if (governed) {
             u.lossless = false;   // its last steps lose history (a reduced, non-identical mode)
@@ -468,8 +470,8 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
             if (j >= 0 && all[size_t(j)].grant != Grant::Lane) {
                 e.grant = Grant::InRender;
                 e.why = GrantWhy::InputInRender;
-                if (userOf[i] >= 0 && gi.users[size_t(userOf[i])].levels.size() > 1) {
-                    level[size_t(userOf[i])] = 1;
+                if (userOf[i] >= 0 && inRenderLevel[i] > 0 && gi.users[size_t(userOf[i])].levels.size() > inRenderLevel[i]) {
+                    level[size_t(userOf[i])] = inRenderLevel[i];   // never a history step
                     changed = true;
                 } else if (e.residency == Residency::SystemRam) {
                     systemBytes -= e.extraBytes;

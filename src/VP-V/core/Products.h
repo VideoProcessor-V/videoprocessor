@@ -5,6 +5,7 @@
 #include "Indicator.h"
 
 #include <array>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -282,6 +283,7 @@ inline ProductDecl Make(ProductId id, const char* token, const char* name, Backe
 
 inline void AddInput(ProductDecl& d, ProductId p, uint8_t lag)
 {
+    assert(d.inputCount < kMaxInputs);   // a declaration never silently drops a read
     if (d.inputCount < kMaxInputs) {
         d.inputs[d.inputCount].product = p;
         d.inputs[d.inputCount].lag = lag;
@@ -293,6 +295,7 @@ inline void AddInput(ProductDecl& d, ProductId p, uint8_t lag)
 // A look-ahead input: `lead` frames ahead (lag stays 0).
 inline void AddLead(ProductDecl& d, ProductId p, uint8_t lead)
 {
+    assert(d.inputCount < kMaxInputs);
     if (d.inputCount < kMaxInputs) {
         d.inputs[d.inputCount].product = p;
         d.inputs[d.inputCount].lag = 0;
@@ -803,6 +806,7 @@ struct ConsumerDecl {
 
 inline void AddConsume(ConsumerDecl& c, ProductId p, uint8_t lag = 0)
 {
+    assert(c.count < kMaxConsumes);   // a consumer never silently drops a read
     if (c.count < kMaxConsumes) {
         c.consumes[c.count].product = p;
         c.consumes[c.count].lag = lag;

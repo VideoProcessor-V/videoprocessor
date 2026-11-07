@@ -90,7 +90,7 @@ namespace SkeletonGraphTestsNs
 		size_t IndexOf(ProductId p) const { return size_t(graph.IndexOf(p)); }
 
 		// False when an input has no content (the job would wait).
-		bool Lane(ProductId p, uint64_t seq, bool breakChainFlag = false)
+		bool Lane(ProductId p, uint64_t seq, bool breakChainFlag = false, bool forceCarry = false)
 		{
 			SlotSet& s = Set(p);
 			LaneTicket t;
@@ -101,6 +101,14 @@ namespace SkeletonGraphTestsNs
 			if (!table.LaneAncestors(p, seq, h, pins)) {
 				s.Abandon(t);
 				return false;
+			}
+			if (forceCarry) {   // a reduced job although its predecessor exists (what a transient pin failure would produce)
+				AncestorRef empty;
+				empty.productId = p;
+				empty.seq = seq - 1u;
+				empty.slotIndex = s.SlotOf(seq - 1u);
+				h.ancestors[1] = empty;
+				h.chainReduced = true;
 			}
 			if (breakChainFlag)
 				h.chainReduced = false;   // tamper: the seal must not accept an undeclared hole
@@ -163,8 +171,8 @@ namespace SkeletonGraphTestsNs
 		for (size_t i = 0; i < kSources; ++i)
 			d.push_back(detail::Make(ProductId(i), "src", "source", Backend::Cpu, 0, Tier::T0, Bit(kFull), 0));
 		ProductDecl sink = detail::Make(ProductId(kSources), "sink", "sink", Backend::Cpu, 0, Tier::T0, Bit(kFull), 0);
-		for (size_t i = 0; i < kSources + 1u; ++i)   // one more than fits: the extra is dropped, never written past the array
-			detail::AddInput(sink, ProductId(i < kSources ? i : 0), 0);
+		for (size_t i = 0; i < kSources; ++i)
+			detail::AddInput(sink, ProductId(i), 0);   // exactly the limit (one more asserts)
 		d.push_back(sink);
 		for (ProductDecl& p : d)
 			p.size.fixedBytes = 64;
@@ -288,7 +296,7 @@ namespace SkeletonGraphTestsNs
 		{
 			const Registry reg = ManyInputsRegistry();
 			Assert::IsTrue(reg.Validate());
-			Assert::AreEqual(int(kMaxInputs), int(reg.Get(ProductId(kSources)).inputCount), L"the 17th input is dropped, not written past the array");
+			Assert::AreEqual(int(kMaxInputs), int(reg.Get(ProductId(kSources)).inputCount), L"all 16 inputs declared");
 			Rig r(reg, OneConsumer(ProductId(kSources)), 1);
 			Assert::AreEqual(kSources + 1u, r.graph.nodes.size());
 			for (size_t i = 0; i < kSources; ++i)
@@ -383,6 +391,52 @@ namespace SkeletonGraphTestsNs
 			const ProductFrameResult& f = r.Result(res, kLeadReader);
 			Assert::IsTrue(f.seal.outcome == SealOutcome::NeedsLive && f.seal.reason == SealReason::StampMismatch);
 			Assert::IsTrue(f.liveFilled && f.final == SealOutcome::Sealed, L"visible live fill, not a silent accept");
+			// K1 binds the live fill too: the stale N+2 is a MISSING input, so the declared form runs and is marked.
+			Assert::IsTrue((f.missingInputs & 1u) != 0u, L"stale lead ancestor = missing input");
+			Assert::IsTrue(r.Set(kLeadReader).Read(0).header->prov == Provenance::LiveFallback, L"never a full LiveRender result");
+		}
+
+		TEST_METHOD(ALiveFillRefusesAStaleLeadAncestorEvenWithoutALaneResult)
+		{
+			Rig r(LeadRegistry(), OneConsumer(kLeadReader), 4);
+			for (uint64_t s = 0; s < 4; ++s)
+				r.Lane(kBase, s);   // base(2) Published; no reader lane result
+			r.ind.Advance(VpIndicator::kFull, Cause::RendererReset, 2);   // base(2) is now stale
+			const auto& res = r.Resolve(0);
+			const ProductFrameResult& f = r.Result(res, kLeadReader);
+			Assert::IsTrue(f.liveFilled && (f.missingInputs & 1u) != 0u);
+			Assert::IsTrue(r.Set(kLeadReader).Read(0).header->prov == Provenance::LiveFallback);
+			// Without a stamp source the live fill cannot vouch for the lead ancestor either.
+			Rig n(LeadRegistry(), OneConsumer(kLeadReader), 4, false);
+			for (uint64_t s = 0; s < 4; ++s)
+				n.Lane(kBase, s);
+			const auto& nres = n.Resolve(0);
+			Assert::IsTrue((n.Result(nres, kLeadReader).missingInputs & 1u) != 0u);
+		}
+
+		TEST_METHOD(AnAcceptedLeadAncestorRejectedAtItsOwnSealIsCounted)
+		{
+			Rig r(LeadRegistry(), OneConsumer(kLeadReader), 4);
+			for (uint64_t s = 0; s < 4; ++s)
+				r.Lane(kBase, s);
+			Assert::IsTrue(r.Lane(kLeadReader, 0));
+			r.Resolve(0);
+			Assert::AreEqual(uint64_t(1), r.Set(kBase).Counters().leadAccepted.load());
+			r.ind.Advance(VpIndicator::kFull, Cause::RendererReset, 2);   // base(2) turns stale after the reader used it
+			r.Resolve(1);
+			r.Resolve(2);
+			Assert::AreEqual(uint64_t(1), r.Set(kBase).Counters().leadLaterRejected.load(), L"the documented residual risk is visible");
+		}
+
+		TEST_METHOD(ARejectedLeadSealCountsNothing)
+		{
+			Rig r(LeadRegistry(), OneConsumer(kLeadReader), 4);
+			for (uint64_t s = 0; s < 4; ++s)
+				r.Lane(kBase, s);
+			Assert::IsTrue(r.Lane(kLeadReader, 0));
+			r.ind.Advance(VpIndicator::kFull, Cause::RendererReset, 2);
+			r.Resolve(0);
+			Assert::AreEqual(uint64_t(0), r.Set(kBase).Counters().leadAccepted.load());
 		}
 
 		TEST_METHOD(TheSealRefusesALeadAncestorWithoutAStampSourceVisibly)
@@ -559,6 +613,37 @@ namespace SkeletonGraphTestsNs
 			Assert::IsTrue(f.liveFilled && f.final == SealOutcome::Sealed);
 			Assert::IsTrue((f.missingInputs & 2u) != 0u, L"the self lag input is the missing one");
 			Assert::IsTrue(r.Set(kChain).Read(0).header->prov == Provenance::LiveFallback);
+		}
+
+		TEST_METHOD(TheSealRejectsAChainCarryForwardWhenThePredecessorIsValid)
+		{
+			Rig r(ChainRegistry(), OneConsumer(kChain), 2);
+			r.Lane(kChainBase, 0);
+			r.Lane(kChainBase, 1);
+			Assert::IsTrue(r.Lane(kChain, 0));
+			r.Resolve(0);   // chain(0) is Sealed: a valid predecessor
+			Assert::IsTrue(r.Lane(kChain, 1, false, true));
+			const auto& res = r.Resolve(1);
+			const ProductFrameResult& f = r.Result(res, kChain);
+			Assert::IsTrue(f.seal.outcome == SealOutcome::NeedsLive && f.seal.reason == SealReason::AncestryIncomplete);
+			Assert::IsTrue(f.liveFilled && f.missingInputs == 0u, L"made in full by the live fill, not reduced");
+			Assert::IsTrue(r.Set(kChain).Read(1).header->prov == Provenance::LiveRender);
+		}
+
+		TEST_METHOD(ATransientPredecessorIsWaitedForNotCarriedForward)
+		{
+			Rig r(ChainRegistry(), OneConsumer(kChain), 2);
+			r.Lane(kChainBase, 0);
+			r.Lane(kChainBase, 1);
+			// chain(0): rejected by the seal and not live-filled yet (the render will fill it): content may still come.
+			Assert::IsTrue(r.Set(kChain).Seal(0, [](const Header&) { return SealReason::StampMismatch; }).outcome == SealOutcome::NeedsLive);
+			Assert::IsTrue(r.Set(kChain).AbsenceOf(0) == SlotSet::Absence::Transient);
+			Header scratch;
+			LaneInputs pins;
+			Assert::IsFalse(r.table.LaneAncestors(kChain, 1, scratch, pins), L"the job waits");
+			Assert::IsFalse(scratch.chainReduced);
+			// A frame that was never claimed is absent for good: carried forward.
+			Assert::IsTrue(r.Set(kChain).AbsenceOf(5) == SlotSet::Absence::Absent);
 		}
 
 		TEST_METHOD(ARealPredecessorIsPinnedNotCarriedForward)

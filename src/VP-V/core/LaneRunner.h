@@ -325,8 +325,6 @@ private:
         job.outBytes = bytes_ ? bytes_(st.node->id) : size_t(0);
         job.header = &hdr;
         job.chainReduced = hdr.chainReduced;
-        if (hdr.chainReduced)
-            st.counters.chainCarryForward.fetch_add(1, std::memory_order_relaxed);
         if (input_)
             for (size_t k = 0; k < st.pins.count && k < job.inputData.size(); ++k)
                 if (st.pins.sets[k] != nullptr)   // null: an absent chain-self input (carry-forward)
@@ -338,6 +336,8 @@ private:
             return true;
         }
         st.began = true;
+        if (hdr.chainReduced)   // counted once the job really started (not on a failed Begin)
+            st.counters.chainCarryForward.fetch_add(1, std::memory_order_relaxed);
         st.phase = Phase::Running;
         return true;
     }

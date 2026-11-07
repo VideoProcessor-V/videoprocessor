@@ -577,6 +577,22 @@ public:
         const bool detChanged = det != det_;
         det_ = det;
 
+        // Budget-governed history: plan the grant BEFORE the graph is (re)built, on a trial graph and a copy of the governor
+        // (the headroom state is stepped only by the real Update in BuildState), so one Configure builds one graph and
+        // advances the graph counter once. Re-planned on every Configure: the grant recovers when memory frees.
+        {
+            bool governed = false;
+            for (const ProductDecl& d : reg.All())
+                governed = governed || d.historyFloor != kHistoryFixed;
+            if (governed) {
+                const Graph trial = BuildGraph(reg, consumers, gs);
+                if (trial.valid) {
+                    VramGovernor probe = governor_;
+                    gs.historyCaps = probe.Update(reg, trial, card, tier).historyCaps;
+                }
+            }
+            historyCaps_ = gs.historyCaps;
+        }
         const VpIndicator::Stamp stamp = ind_->StampOf(fromSeq);
         const uint32_t reasons = owner_.Update(reg, consumers, gs, stamp, ind_, fromSeq);
         const std::shared_ptr<LaneState> cur = std::atomic_load(&state_);
@@ -602,20 +618,7 @@ public:
             return 0;
         }
 
-        const VramGovernor governorBefore = governor_;   // BuildState steps the adaptive headroom; a discarded trial must not
         std::shared_ptr<LaneState> st = BuildState(reg, consumers, gs, card, tier, fromSeq);
-        if (st->plan.historyCaps != gs.historyCaps && !historyRebuild_) {
-            // The governor granted governed-history products another depth than this graph was built for: rebuild once
-            // with the grant (visible: the plan notice names the reduced history; the graph key carries the caps).
-            governor_ = governorBefore;   // the rebuild below plans once more from the same headroom (same grant)
-            historyCaps_ = st->plan.historyCaps;
-            GraphSettings g2 = gs;
-            g2.historyCaps = historyCaps_;
-            historyRebuild_ = true;
-            const uint32_t again = Configure(s, reg, consumers, g2, card, tier, fromSeq, hostDeterministic);
-            historyRebuild_ = false;
-            return reasons | again;
-        }
         // Regulator products from the new graph.
         ConfigureRegulatorFor(*st, reg, consumers, gs, card, tier);
         lateRingSize_ = periodMs_ > 0.0 ? size_t(std::max(1.0, 10000.0 / periodMs_ + 0.5)) : size_t(0);
@@ -989,6 +992,12 @@ public:
             carried += pc.chainCarryForward.load(std::memory_order_relaxed);
             refused += pc.chainRefused.load(std::memory_order_relaxed);
         }
+        uint64_t laterRejected = 0;
+        for (size_t i = 0; i < st->table->Count(); ++i)
+            laterRejected += st->table->At(i).Counters().leadLaterRejected.load(std::memory_order_relaxed);
+        if (laterRejected > 0)
+            out.push_back("Analysis: " + std::to_string(laterRejected)
+                          + " look-ahead frames were rejected at their own seal after a reader used them");
         if (carried > 0)
             out.push_back("Analysis: " + std::to_string(carried)
                           + " ordered-chain frames ran in the reduced form (no predecessor result)");
@@ -1347,7 +1356,6 @@ private:
     uint64_t readyProbeMisses_ = 0;
     std::unique_ptr<SavedConfig> cfg_;
     std::vector<HistoryCap> historyCaps_;   // the governor's last grant below full history (see Configure)
-    bool historyRebuild_ = false;
     bool rebuildPending_ = false;
     uint64_t rebindRebuilds_ = 0;
     uint64_t stormHoldEngagements_ = 0;
