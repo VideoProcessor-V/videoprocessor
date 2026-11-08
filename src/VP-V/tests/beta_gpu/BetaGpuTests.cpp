@@ -4584,6 +4584,11 @@ namespace CameraAccuracy
 		std::vector<CameraAccuracyAhead::PairTiming> aheadTiming;
 		std::vector<double> aheadConvertMs;
 		std::vector<int> aheadHave;   // 1 = the ahead pair existed and converted
+		// RAW field vs the exact camera translation (trusted samples, trust >= 0.5; source px): the native P2 field and the F2 seed field
+		// of the same pairs (does NVOF itself under-estimate slow motion?). Index = pair.
+		struct RawStats { double biasX = 0, biasY = 0, epe = 0; long long n = 0; };
+		std::vector<RawStats> aheadRaw, seedRaw;
+		size_t aheadCells = 0;        // native cells per pair (the memory figure)
 		int aheadQuarter = 0;         // the engine searched at a quarter (lowRes)
 		std::string aheadProblem;
 	};
@@ -4636,6 +4641,30 @@ namespace CameraAccuracy
 	}
 
 	// ---- AHEAD FIT (VP_TEST_CAMERA_ACCURACY_AHEAD=1) -----------------------------------------------------------------------------------
+	// The raw field against the exact camera translation of the pair (trusted samples only; a mover's cells are part of the field and
+	// show as a spread, the bias of a pan is what NVOF itself makes).
+	inline SceneResult::RawStats RawVsTruth(const CameraLink::FieldCopy& f, double truthX, double truthY)
+	{
+		SceneResult::RawStats r;
+		for (size_t i = 0; i < f.fwdX.size() && i < f.fwdTrust.size(); ++i)
+		{
+			if (!(f.fwdTrust[i] >= 0.5f))
+				continue;
+			const double ex = f.fwdX[i] - truthX, ey = f.fwdY[i] - truthY;
+			r.biasX += ex;
+			r.biasY += ey;
+			r.epe += std::hypot(ex, ey);
+			++r.n;
+		}
+		if (r.n)
+		{
+			r.biasX /= r.n;
+			r.biasY /= r.n;
+			r.epe /= r.n;
+		}
+		return r;
+	}
+
 	// The producer's NVOF pair of every pair of the scene, reproduced offline (AheadPairReplica.h), converted by the production units
 	// (CopyAhead over the FlowView FlowOf serves -> AheadToSourceGrid with the matcher's consistency limit). The engine size follows the
 	// matcher's search (half, or a quarter at a lowRes search: the producer makes only those two), read from a seed of this scene (a probe
@@ -4648,6 +4677,7 @@ namespace CameraAccuracy
 		sr.aheadTiming.assign(pairs, CameraAccuracyAhead::PairTiming());
 		sr.aheadConvertMs.assign(pairs, 0.0);
 		sr.aheadHave.assign(pairs, 0);
+		sr.aheadRaw.assign(pairs, SceneResult::RawStats());
 		if (!hardware)
 		{
 			sr.aheadProblem = "not a hardware GPU: no optical flow engine, no ahead pair";
@@ -4704,6 +4734,10 @@ namespace CameraAccuracy
 				fc.pairFrom = p;
 				fc.pairTo = p + 1;
 				sr.aheadHave[p] = 1;
+				sr.aheadCells = fc.Blocks();
+				double tx = 0, ty = 0;
+				CameraTruth(cs.scene, static_cast<float>(p), tx, ty);
+				sr.aheadRaw[p] = RawVsTruth(fc, tx / SizeDiv(), ty / SizeDiv());
 			}
 			sr.aheadConvertMs[p] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
 		}
@@ -4829,7 +4863,100 @@ namespace CameraAccuracy
 				faults.push_back(s.scene.name + ": the median pair time is above 10 source periods (implausible for the engine: a measurement fault?)");
 		}
 
-		md << "\n### Accuracy A/B: ahead fit minus F2 seed fit (negative = the ahead fit is better)\n\n";
+		md << "\n### Raw field vs truth (trusted samples; source px): native P2 vs the F2 seed, pairs >= 1\n\n";
+		md << "| scene | raw P2 bias x / y | raw P2 EPE | raw seed bias x / y | raw seed EPE | native cells per pair |\n|---|---|---|---|---|---|\n";
+		for (const SceneResult& s : all)
+		{
+			if (s.variants[3].name.empty() || s.aheadRaw.empty())
+				continue;
+			auto mean = [](const std::vector<SceneResult::RawStats>& v, double SceneResult::RawStats::*m) {
+				double sum = 0; int n = 0;
+				for (size_t p = 1; p < v.size(); ++p) if (v[p].n) { sum += v[p].*m; ++n; }
+				return n ? sum / n : 0.0;
+			};
+			std::snprintf(line, sizeof(line), "| %s | %+.4f / %+.4f | %.4f | %+.4f / %+.4f | %.4f | %zu |\n", s.scene.name.c_str(),
+				mean(s.aheadRaw, &SceneResult::RawStats::biasX), mean(s.aheadRaw, &SceneResult::RawStats::biasY), mean(s.aheadRaw, &SceneResult::RawStats::epe),
+				mean(s.seedRaw, &SceneResult::RawStats::biasX), mean(s.seedRaw, &SceneResult::RawStats::biasY), mean(s.seedRaw, &SceneResult::RawStats::epe), s.aheadCells);
+			md << line;
+		}
+
+		md << "\n### Acceptance (owner criteria): fit bias, ambiguity, cost\n\n";
+		md << "Criteria: 1080 |mean fit bias| <= 0.02 px on both pans (120 and 480 px/s); 4K records non-ambiguous on the 480 px/s pans; model_global "
+			"EPE at least as good as the f32 baseline at 1080 and 4K (compare `model_global_ahead` here with the f32 run's model_global); 60p mover not "
+			"worse than off. Fit bias = mean (fit - truth) camera translation over the scored pairs (x / y). Fit cost on the camera worker, median / p95.\n\n";
+		md << "| scene | variant | fit bias x / y px | |bias| ok (1080 pans) | ambiguous pairs | non-ambiguous ok (4K 480) | fit ms median / p95 | worker share of one core (median) | memory per pair (KiB) |\n";
+		md << "|---|---|---|---|---|---|---|---|---|\n";
+		const bool is1080 = Corpus::H / SizeDiv() == 1080;
+		for (const SceneResult& s : all)
+			for (int vi = 1; vi < 5; vi += 2)
+			{
+				const VariantResult& v = s.variants[vi];
+				if (v.name.empty() || s.variants[3].name.empty())
+					continue;
+				double bx = 0, by = 0; int n = 0, amb = 0;
+				std::vector<double> fit;
+				for (const PairLog& p : v.pairs)
+				{
+					if (p.pair >= 1 && p.fitReason.find("mbiguous") != std::string::npos) ++amb;
+					if (!FitScored(p)) continue;
+					bx += p.fitTx - p.truthTx; by += p.fitTy - p.truthTy; ++n;
+					fit.push_back(p.fitMs);
+				}
+				bx = n ? bx / n : 0.0; by = n ? by / n : 0.0;
+				const bool pan = !s.scene.mover && !s.scene.fade && (s.scene.name.find("120pxs") != std::string::npos || s.scene.name.find("480pxs") != std::string::npos);
+				const bool biasOk = std::fabs(bx) <= 0.02 && std::fabs(by) <= 0.02;
+				const bool is480 = s.scene.name.find("480pxs") != std::string::npos && !s.scene.mover && !s.scene.fade;
+				std::vector<double> share;
+				const double periodMs = 1000.0 / s.scene.fps;
+				for (size_t p = 1; p < v.pairs.size(); ++p)
+					share.push_back((v.pairs[p].fitMs + (vi == 3 && p < s.aheadConvertMs.size() ? s.aheadConvertMs[p] : 0.0)) / periodMs);
+				// Memory per pair held: the ahead copy (2 int16 x 2 directions + 1 cost byte per cell) + the native field (3 floats per cell).
+				const double kib = vi == 3 ? (s.aheadCells * (2.0 * 2 * 2 + 1) + s.aheadCells * 3.0 * 4) / 1024.0 : 0.0;
+				std::snprintf(line, sizeof(line), "| %s | %s | %+.4f / %+.4f | %s | %d | %s | %.3f / %.3f | %.1f%% | %.0f |\n", s.scene.name.c_str(), v.name.c_str(), bx, by,
+					(is1080 && pan) ? (biasOk ? "PASS" : "FAIL") : "-", amb, (!is1080 && is480) ? (amb == 0 ? "PASS" : "FAIL") : "-",
+					Quant(fit, 0.5), Quant(fit, 0.95), 100.0 * Quant(share, 0.5), kib);
+				md << line;
+			}
+		md << "\nMemory held: the camera keeps at most the fit queue (16) + the record pool (32) native fields, so the worst case is 48 x the per-pair "
+			"figure above; the FlowOf lease itself is the engine's (one pair).\n";
+
+		md << "\n### On-time misses by cause (lead L = 1..4; cause: the producer's pair was not ready within L x T, or the fit made it late)\n\n";
+		md << "| scene | L | on time | missed: pair late | missed: fit too slow |\n|---|---|---|---|---|\n";
+		for (const SceneResult& s : all)
+		{
+			if (s.variants[3].name.empty() || s.aheadTiming.empty() || !s.aheadProblem.empty())
+				continue;
+			const double periodMs = 1000.0 / s.scene.fps;
+			double producerFree = 0.0, workerFree = 0.0;
+			std::vector<double> readyLat, doneLat;
+			for (size_t p = 0; p < s.aheadTiming.size(); ++p)
+			{
+				const double arrival = static_cast<double>(p + 1) * periodMs;
+				const double ready = (std::max)(arrival, producerFree) + s.aheadTiming[p].PairMs();
+				producerFree = ready;
+				const double fitMs = p < s.variants[3].pairs.size() ? s.variants[3].pairs[p].fitMs : 0.0;
+				const double done = (std::max)(ready, workerFree) + s.aheadConvertMs[p] + fitMs;
+				workerFree = done;
+				readyLat.push_back(ready - arrival);
+				doneLat.push_back(done - arrival);
+			}
+			for (int L = 1; L <= 4; ++L)
+			{
+				int ok = 0, pairLate = 0, fitSlow = 0;
+				for (size_t p = 1; p < doneLat.size(); ++p)
+				{
+					if (doneLat[p] <= L * periodMs) ++ok;
+					else if (readyLat[p] > L * periodMs) ++pairLate;
+					else ++fitSlow;
+				}
+				std::snprintf(line, sizeof(line), "| %s | %d | %d | %d | %d |\n", s.scene.name.c_str(), L, ok, pairLate, fitSlow);
+				md << line;
+			}
+		}
+
+		md << "\n### Accuracy A/B: ahead fit minus F2 seed fit (negative = the ahead fit is better; informational, the acceptance table decides)\n\n";
+		md << "Guided accuracy is NOT part of this reset (guidance is locked; the ahead variants' records are on the native grid, so the matcher "
+			"refuses their guide: their EPE rows are the unguided matcher). Next reset adds the d = 0 guided rows.\n\n";
 		md << "Equal or better is read as dEPE mean <= +0.002 px, dwarp <= +0.005 codes and dfit error <= +0.005 px (the run-to-run noise of this harness is "
 			"about that size; the verdict column applies these tolerances, the coordinator judges).\n\n";
 		md << "| scene | pair of variants | EPE mean seed / ahead | dEPE mean | dEPE p95 | d<0.25 px (eval) | dwarp | fit err mean seed / ahead px | dfit err | mover dEPE | guided seed / ahead | verdict |\n";
@@ -5373,6 +5500,13 @@ void RunBetaCameraAccuracy()
 					layout.consistencyPx = seed.consistencyPx;
 					Check(CameraLink::SeedToSourceGrid(seedRgba[0].data(), seedRgba[1].data(), layout, fc), "camera accuracy: seed layout");
 					log.seedBlockPx = 16 * per;
+					if (aheadRun && vi == 1)
+					{
+						// The F2 seed field's raw accuracy of the same pair (the A/B's raw row).
+						if (sr.seedRaw.size() < static_cast<size_t>(Frames() - 1))
+							sr.seedRaw.assign(static_cast<size_t>(Frames() - 1), SceneResult::RawStats());
+						sr.seedRaw[static_cast<size_t>(p)] = RawVsTruth(fc, log.truthTx, log.truthTy);
+					}
 				}
 				if (spec.on && !haveSeed)
 				{
