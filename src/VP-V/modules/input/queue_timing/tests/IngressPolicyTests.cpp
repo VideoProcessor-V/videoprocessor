@@ -111,6 +111,29 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0, a.calls);
 		}
 
+		// R19: the renderer's VP-V target replaces Bill's for its host only; no renderer: Bill's value.
+		TEST_METHOD(QueueTargetReachesOnlyItsRenderer)
+		{
+			HubScope hub;
+			struct Target
+			{
+				static void Five(const void*, RE::QueueTargetContext& qc) { qc.target = 5; }
+			};
+			FakeRenderer a;
+			int other = 0;
+			Vpv::Ingress::HostBinding bind(&a, &FakeRenderer::Decide, &a, &Target::Five);
+			RE::QueueTargetContext qc;
+			qc.capacity = 8;
+			Assert::AreEqual<size_t>(5, RE::ResolveQueueTarget(&a, qc, 4), L"the renderer's target");
+			RE::QueueTargetContext qo;
+			qo.capacity = 8;
+			Assert::AreEqual<size_t>(4, RE::ResolveQueueTarget(&other, qo, 4), L"another host keeps Bill's value");
+			Vpv::Ingress::HostBinding noTarget(&other, &FakeRenderer::Decide, &other);
+			RE::QueueTargetContext qn;
+			qn.capacity = 8;
+			Assert::AreEqual<size_t>(4, RE::ResolveQueueTarget(&other, qn, 4), L"a binding without a target function keeps it too");
+		}
+
 		TEST_METHOD(AFullTableIsVisibleUnderFallbacks)
 		{
 			std::vector<std::unique_ptr<FakeRenderer>> renderers;

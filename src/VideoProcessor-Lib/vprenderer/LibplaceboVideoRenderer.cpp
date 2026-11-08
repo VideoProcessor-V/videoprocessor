@@ -34075,55 +34075,14 @@ void LibplaceboVideoRenderer::ClearQueueLocked(const char* reason)
 
 size_t LibplaceboVideoRenderer::PrefillTargetLocked() const
 {
-	if (!m_useFrameQueue)
-		return 1;
-	// VP-V delay budget (ADR-0020): with a budget the queue target is the hold's whole frames at
-	// this rate (time-based already, so no film-lock scaling); otherwise the frame-count target.
-	QueueTimingPolicy::TargetContext context;
-	context.useFrameQueue = m_useFrameQueue;
-	context.configuredDepth = m_frameQueueDesiredDepth;
-	context.capacity = m_frameQueueMaxSize;
-	context.hold = CurrentQueueHold();
-	// Host-side cadence scaling (hunt 2 06-interp M3); evaluated only when the hold does not decide.
-	context.cadenceScaledDepth = context.hold.active ? 0 :
-		LockedFilmQueueTarget(AlphaQueuePolicy::ClampDesiredDepthToCapacity(m_frameQueueDesiredDepth, m_frameQueueMaxSize));
-	// render_ahead_queue_credit (design step 7) and the look-ahead floor (hunt 2 13-timing M3), in
-	// the one rule the stress harness tests too (AlphaQueuePolicy::CombineQueueTarget): the floor
-	// never exceeds `desired`, so a delay budget's hold target wins (audit B2).
-	context.renderAheadCreditFrames = m_impl ? m_impl->renderAheadCreditFrames.load(std::memory_order_acquire) : 0;
-	context.lookaheadFloor = m_queueTargetFloor.load(std::memory_order_relaxed);
-	return QueuePolicy().QueueTarget(context);
+	RendererExtension::QueueTargetContext queueTarget; queueTarget.desired = m_frameQueueDesiredDepth; queueTarget.capacity = m_frameQueueMaxSize;   // VPV-HOOK
+	return RendererExtension::ResolveQueueTarget(this, queueTarget, m_useFrameQueue ?   // P10-6 R19: VP-V's target (queue_timing QueueTarget.inl)   // VPV-HOOK
+		AlphaQueuePolicy::ClampDesiredDepthToCapacity(
+			m_frameQueueDesiredDepth, m_frameQueueMaxSize) : 1);
 }
 
 
-// Hunt 2 (cadence_class_fixes, 06-interp M3: pulldown D2 wired). While a pulldown lock
-// holds, the queue holds film frames: target_frames (set for the signal) is scaled by
-// new / cycle so the queue's latency does not step by cycle / new at each lock change;
-// never below the frames the queue's look-ahead users need (A shown, B queued and converted
-// a frame before A leaves, for the interpolator / de-judder: kLockedQueuePairFrames; the optical-flow look-ahead's depth + 1, MotionAhead::QueueFramesFor;
-// the active-picture look-ahead + 1) or the target itself. Re-resolved on every call from
-// the current cadence.
-size_t LibplaceboVideoRenderer::LockedFilmQueueTarget(size_t desired) const
-{
-	if (!m_cadenceClassFixes.load(std::memory_order_relaxed))
-		return desired;
-	const int cadence = m_pulldownCadence.load(std::memory_order_relaxed);
-	if (cadence == 0)
-		return desired;
-	size_t minimum = Pulldown::kLockedQueuePairFrames;   // gate r3: A, B ready and the arrival (was 2)
-	if (m_impl)
-	{
-		const int motionDepth = m_impl->motionAheadDepth.load(std::memory_order_acquire);
-		if (motionDepth > 0)
-			minimum = (std::max)(minimum, MotionAhead::QueueFramesFor(motionDepth));
-	}
-	// Bug hunt 3 F2: an explicit look-ahead's frames; the automatic one (target - 1 for the
-	// signal) follows the scaled queue and holds no floor, else it cancelled the scaling.
-	minimum = (std::max)(minimum, QueueLookahead::LockedFilmLookaheadFloor(
-		m_activePictureLookaheadFrames.load(std::memory_order_acquire),
-		m_activePictureLookaheadAutomatic.load(std::memory_order_acquire)));
-	return Pulldown::LockedQueueTarget(desired, Pulldown::FilmToSignalRatio(cadence >> 16, cadence & 0xffff), minimum);
-}
+#include <VP-V/modules/input/queue_timing/QueueTarget.inl>   // P10-6: QueueTargetVp, LockedFilmQueueTarget (R19)   // VPV-HOOK
 
 
 void LibplaceboVideoRenderer::SetActivePictureLookaheadAutomatic(bool automatic)

@@ -20,6 +20,7 @@ namespace Vpv
 			{
 				const void* host = nullptr;
 				DecideFn decide = nullptr;
+				QueueTargetFn queueTarget = nullptr;
 				void* self = nullptr;
 			};
 			Hub::HostSlots<Entry>& Slots()
@@ -34,7 +35,7 @@ namespace Vpv
 			}
 		}
 
-		HostBinding::HostBinding(const void* host, DecideFn decide, void* self)
+		HostBinding::HostBinding(const void* host, DecideFn decide, void* self, QueueTargetFn queueTarget)
 			: host_(host)
 		{
 			if (!host || !decide)
@@ -43,6 +44,7 @@ namespace Vpv
 			entry->host = host;
 			entry->decide = decide;
 			entry->self = self;
+			entry->queueTarget = queueTarget;
 			registered_ = Slots().Put(host, entry);
 			if (registered_)
 				return;
@@ -64,6 +66,13 @@ namespace Vpv
 		{
 			const std::shared_ptr<Entry> entry = Slots().Find(ic.host);
 			return entry && entry->decide && entry->decide(entry->self, ic);
+		}
+
+		void QueueTarget(const void* host, RE::QueueTargetContext& qc)
+		{
+			const std::shared_ptr<Entry> entry = Slots().Find(host);
+			if (entry && entry->queueTarget)
+				entry->queueTarget(entry->self, qc);
 		}
 
 		size_t BoundHosts() { return Slots().States(); }

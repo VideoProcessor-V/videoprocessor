@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// M2 P10-5 (doc 59 sections 1.1 R15 and 5.2): the input.queue_timing hub module for R15 DecideIngress.
+// M2 P10-5 / P10-6 (doc 59 sections 1.1 R15, R19 and 5.2): the input.queue_timing hub module for R15 DecideIngress and
+// R19 ResolveQueueTarget (the renderer's VP-V queue target, QueueTarget.inl).
 //
 // The renderer's ingress decision (pulldown detection, the film clock, the stale-delivery gap: IngressPolicy.inl) needs
 // the renderer's own state, so the renderer registers ONE binding (its last member, keyed by the renderer itself, the
@@ -23,11 +24,12 @@ namespace Vpv
 		namespace RE = RendererExtension;
 
 		using DecideFn = bool (*)(void* self, RE::IngressContext& ic);
+		using QueueTargetFn = void (*)(const void* self, RE::QueueTargetContext& qc);   // R19: sets qc.target
 
 		class HostBinding
 		{
 		public:
-			HostBinding(const void* host, DecideFn decide, void* self);
+			HostBinding(const void* host, DecideFn decide, void* self, QueueTargetFn queueTarget = nullptr);
 			~HostBinding();
 			HostBinding(const HostBinding&) = delete;
 			HostBinding& operator=(const HostBinding&) = delete;
@@ -41,6 +43,8 @@ namespace Vpv
 
 		// The registered renderer's decision for `ic` (false: none registered under ic.host).
 		bool Decide(RE::IngressContext& ic);
+		// R19 (any thread holding the host's queue mutex): the registered renderer's queue target into qc.target.
+		void QueueTarget(const void* host, RE::QueueTargetContext& qc);
 		size_t BoundHosts();
 		size_t UnboundRenderers();   // live renderers that could not register
 
@@ -49,6 +53,7 @@ namespace Vpv
 		public:
 			const char* Name() const override { return "input.queue_timing"; }
 			bool OnDecideIngress(RE::FrameContext&, RE::IngressContext& ic) override { return Decide(ic); }
+			void OnQueueTarget(RE::FrameContext& c, RE::QueueTargetContext& qc) override { QueueTarget(c.host, qc); }
 			void OnStatus(const RE::Context&, RE::StatusKind kind, std::vector<std::string>& lines, const char*, const char*) override;
 		};
 
