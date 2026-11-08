@@ -126,7 +126,7 @@ namespace CameraLink
 	// "camera: fits 120, published 118, late 2, unusable 3, slip 0, queue full 0"
 	inline std::string StatusLine(const FitCounters& c)
 	{
-		char b[256];
+		char b[512];
 		std::snprintf(b, sizeof(b), "camera fit: %llu fitted, %llu published, %llu late, %llu not used, %llu slip, %llu timing unknown, %llu queue full, %llu readback dropped, %llu stale lane (refused after a graph rebuild), %llu lane rebinds",
 			(unsigned long long)c.fitted.load(), (unsigned long long)c.published.load(), (unsigned long long)c.late.load(),
 			(unsigned long long)c.unusable.load(), (unsigned long long)c.notFittedSlip.load(),

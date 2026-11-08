@@ -207,9 +207,10 @@ class CheckSharedUnitsTest(unittest.TestCase):
             i += 1
         body = text[open_at:i]
         code = "\n".join(l for l in body.splitlines() if not l.strip().startswith("//"))
-        for forbidden in ("TemporalValid", "VpIndicator::", "StampOf", "seal.Current", "MotionValidity", "kFull", "kContinuity"):
+        for forbidden in ("TemporalValid", "Indicator", "Resync::", "StampOf", "seal.Current", "MotionValidity", "kFull", "kContinuity"):
             self.assertNotIn(forbidden, code, "SceneFactsOf reads a validity source: " + forbidden)
-        self.assertIn("ClassifyEvents", code)
+        # The events are classified with NO full / continuity input: the literal call, so a validity argument cannot be slipped in.
+        self.assertIn("ClassifyEvents(a, c, false, false)", code)
 
     # ---- strict + baseline --------------------------------------------------------------------
     def _baseline(self, blocking, n):

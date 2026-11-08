@@ -78,6 +78,7 @@ namespace VectorDemandProductsTestsNs
 							++checked;
 						}
 			// 32 flag sets x 3 queue depths x 2 under-load x 2^11 original wants x 2 camera-group states (none / all) x 2 camera-fit states.
+			// Count change coordinator-approved 2026-11-08 (an extension of the sweep, no assertion weakened).
 			Assert::AreEqual((size_t(32 * 3 * 2) << kOriginalConsumerCount) * 2 * 2, checked);
 		}
 

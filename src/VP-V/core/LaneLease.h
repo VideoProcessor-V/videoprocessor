@@ -44,6 +44,14 @@ struct LaneLease {
     }
 };
 
+// The ordering rule for installing a re-acquired lease. A lease is read OUTSIDE any lock (two threads can read and install in either
+// order), so an older read must never replace a newer one: install only a higher generation. An invalid lease (the lane has no state)
+// carries the generation counter at the time of the read, so it orders against the states too; a valid lease of the SAME generation
+// replaces an invalid one (the state was published just after the counter was read).
+inline bool LaneLeaseNewer(const LaneLease& cur, const LaneLease& held) {
+    return cur.generation > held.generation || (cur.generation == held.generation && cur.Valid() && !held.Valid());
+}
+
 // Re-acquires the lane's CURRENT lease (empty / invalid when the lane is inactive or the graph is invalid).
 // Called off the render thread too: it must be cheap and thread-safe (AnalysisLane::Lease is an atomic_load).
 using LaneLeaseSource = std::function<LaneLease()>;

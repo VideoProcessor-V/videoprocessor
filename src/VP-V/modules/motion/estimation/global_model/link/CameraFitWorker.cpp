@@ -39,11 +39,14 @@ namespace CameraLink
 	{
 		if (!m_env.leaseSource)
 			return false;
+		// Read OUTSIDE the mutex: the render thread (Submit) and the fit thread (publish) both rebind, and each may be descheduled between
+		// the read and the install. Only a NEWER lease is installed (LaneLeaseNewer), so the older read of the two can never put the
+		// worker back on a graph the other thread already left.
 		VpSkeleton::LaneLease cur = m_env.leaseSource();
 		VpSkeleton::LaneLease old;   // released after the unlock: the last hold of an old state dies outside the mutex
 		{
 			std::lock_guard<std::mutex> lock(m_leaseMutex);
-			if (cur.generation == m_lease.generation && cur.table == m_lease.table)
+			if (!VpSkeleton::LaneLeaseNewer(cur, m_lease))
 				return false;
 			old = std::move(m_lease);
 			m_lease = std::move(cur);

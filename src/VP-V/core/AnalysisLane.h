@@ -615,6 +615,7 @@ public:
         const Graph& g = owner_.Current();
         if (!g.valid) {
             error_ = g.ErrorText();
+            stateGeneration_.fetch_add(1, std::memory_order_acq_rel);
             std::atomic_store(&state_, std::shared_ptr<LaneState>());
             renderState_.reset();
             return reasons;
@@ -639,6 +640,7 @@ public:
             // The graph was sized for the trial's history grant but the real plan grants otherwise: the memory plan
             // does not describe the rings. Fail closed and visibly (Analysis lane unavailable + the Fallbacks entry).
             error_ = st->capsMismatch;
+            stateGeneration_.fetch_add(1, std::memory_order_acq_rel);
             std::atomic_store(&state_, std::shared_ptr<LaneState>());
             renderState_.reset();
             return reasons;
@@ -1077,6 +1079,8 @@ public:
     LaneLease Lease(ProductId bytesProduct = ProductId(0xFFFFu)) const
     {
         LaneLease l;
+        // The counter is read BEFORE the state: an empty lease carries it, so a holder orders it against the states (LaneLeaseNewer).
+        l.generation = stateGeneration_.load(std::memory_order_acquire);
         const std::shared_ptr<LaneState> st = std::atomic_load(&state_);
         if (!st || !st->table)
             return l;
@@ -1258,7 +1262,8 @@ private:
 
     void Clear()
     {
-        std::atomic_store(&state_, std::shared_ptr<LaneState>());
+        stateGeneration_.fetch_add(1, std::memory_order_acq_rel);
+            std::atomic_store(&state_, std::shared_ptr<LaneState>());
         renderState_.reset();
         owner_ = GraphOwner();
         regProducts_.clear();
@@ -1293,7 +1298,7 @@ private:
         std::shared_ptr<LaneState> st = std::make_shared<LaneState>();
         st->graph = owner_.Current();
         st->firstSeq = fromSeq;
-        st->generation = ++stateGeneration_;
+        st->generation = stateGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1u;
         st->ring.reset(new LaneSourceRing(std::max<size_t>(st->graph.framesInFlight, 4u)));
         st->table.reset(new SlotTable(st->graph));
         assert(st->table->Valid());
@@ -1592,7 +1597,7 @@ private:
     std::function<uint64_t()> nowUs_;
     LaneSettings settings_;
     std::shared_ptr<LaneState> state_;         // swapped with std::atomic_store / atomic_load
-    uint64_t stateGeneration_ = 0;             // last LaneState::generation handed out (render thread, BuildState)
+    std::atomic<uint64_t> stateGeneration_{ 0 };   // last LaneState::generation handed out; also bumped when the state is dropped (Lease() reads it)
     std::shared_ptr<LaneState> renderState_;   // the render thread's hold (keeps returned references valid)
     GraphOwner owner_;
     VramGovernor governor_;

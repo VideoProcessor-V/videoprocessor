@@ -218,6 +218,8 @@ A raw `SlotTable*` kept by the fit thread across that swap was a use-after-free.
 | `CameraFitWorker::Lease()` / `LaneGeneration()` | a copy of the held lease (safe to use after any rebuild) / its generation |
 | `CameraFitJob::laneGen` | the generation stamped at `Submit`; a job whose generation is not the worker's at publish time returns `PublishOutcome::StaleLane`: refused, `FitCounters::staleLane`++, shown in `StatusLine` ("stale lane (refused after a graph rebuild)", "lane rebinds"); the frame then seals without P7 (`camera.no_model.late`) |
 
+`CameraLabelFill` (P8) holds the lane the same way: `CameraLabelFill(LaneLeaseSource, link, device)` (bind `AnalysisLane::Lease(kP8CameraLabels)`), `Rebind()` at every entrance, the lease held for a whole production, a production claimed in an older generation abandoned and counted (`LabelFillCounters::staleLane` / `rebound`, `LabelFillStatusLine`). The old `(SlotTable&, link, device, indicator)` constructor is the borrowed (tests) form. Lease reads happen outside any lock, so installs follow `VpSkeleton::LaneLeaseNewer` (never backwards; test `AnOlderLeaseReadNeverReplacesANewerOneWhateverTheInterleaving`).
+
 The publish takes the lease once and keeps it for the whole Claim -> write -> Publish, so a rebuild during it cannot free what it writes; the old state dies with its last holder
 (outside the worker's mutex). Tests: `CameraFitThreadingTests` (a rebuild with a held lease: old state alive, stale post refused and counted, then a rebound post; a threaded stress).
 

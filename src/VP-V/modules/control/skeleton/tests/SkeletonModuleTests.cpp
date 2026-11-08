@@ -1121,6 +1121,16 @@ namespace SkeletonModuleTestsNs
 		{
 			FakeEngine eng;
 			Rig rig(Lane("on"));
+			// Observed root cause of this test's failure (cdb on the built test, 2026-11-08): with no card the lane grants NO product a lane (LaneRunner::Step
+			// answered NotLaned for P1 and P4 on every call), so P1(5) is only made by the live fill at the seal of frame 5, after the feed's 8 attempts.
+			// There is no render device in a unit test: give the lane a card with room (as AnAheadResultIsTheSameBytesAsTheLiveForm does), and step the
+			// CPU worker by hand (no threads) so the P1 inputs of the field are there deterministically.
+			VpSkeleton::CardProfile card;
+			card.vramBudgetBytes = 1ull << 30;
+			card.systemRamFreeBytes = 1ull << 30;
+			card.uploadGBps = 10.0;
+			rig.sk.SetCardForTesting(card);
+			rig.sk.SetWorkerThreadsForTesting(false);
 			rig.sk.SetEngineProviderForTesting([&eng](const void*) { return &eng; });
 			rig.ResyncApply("on");
 			rig.Life(RE::Lifecycle::GpuCreated);
@@ -1136,10 +1146,15 @@ namespace SkeletonModuleTestsNs
 			eng.pairFrom = 4;
 			eng.stamp = ind->StampOf(5);
 			rig.Frame(4);
-			for (int i = 0; i < 400 && rig.sk.FeedCountersOf(rig.Host()).published == 0; ++i)
+			VpSkeleton::AnalysisLane* feedLane = rig.sk.LaneOf(rig.Host());
+			Assert::IsNotNull(feedLane);
+			for (int i = 0; i < 6 && rig.sk.FeedCountersOf(rig.Host()).published == 0; ++i)
 			{
-				rig.sk.RetryEngineFeedForTesting(rig.Host());   // the P1 inputs come from the lane's own threads
-				Sleep(5);
+				int steps = 0;
+				while (feedLane->StepWorker(VpSkeleton::Backend::Cpu, 0) && ++steps < 1000)
+				{
+				}
+				rig.sk.RetryEngineFeedForTesting(rig.Host());   // the P1 inputs were made by the CPU worker stepped above
 			}
 			const Vpv::Skeleton::FeedCounters fc = rig.sk.FeedCountersOf(rig.Host());
 			Assert::AreEqual(uint64_t(1), fc.published);

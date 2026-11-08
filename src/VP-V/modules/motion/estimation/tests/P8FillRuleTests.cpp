@@ -10,6 +10,10 @@
 #include <VP-V/modules/motion/estimation/global_model/link/CameraLinkCore.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraLabelFill.h>
 
+#include <atomic>
+#include <functional>
+#include <memory>
+
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace VideoProcessorTest
@@ -20,9 +24,12 @@ namespace VideoProcessorTest
 		{
 			int produced = 0;
 			bool fail = false;
+			std::function<void()> onProduce;   // test hook: runs at the start of every production (a rebuild "during" it)
 			std::vector<CameraLink::LabelTarget> targets;
 			bool Produce(const CameraModel::CameraMotion&, const CameraLink::FieldCopy*, CameraLink::LabelTarget t) override
 			{
+				if (onProduce)
+					onProduce();
 				if (fail)
 					return false;
 				++produced;
@@ -87,6 +94,44 @@ namespace VideoProcessorTest
 	TEST_CLASS(P8FillRuleTests)
 	{
 	public:
+		// SK-W fix: the fill used to keep a raw SlotTable&; the lane swaps its whole state at every rebuild.
+		TEST_METHOD(ARebuildDuringALaneProductionRefusesThePublishCountsItAndKeepsTheOldStateAliveUntilReleased)
+		{
+			Setup t;
+			t.PublishP7(1);
+			std::shared_ptr<int> oldState = std::make_shared<int>(1);
+			const std::shared_ptr<int> newState = std::make_shared<int>(2);
+			std::weak_ptr<int> weakOld = oldState;
+			std::atomic<uint64_t> gen{ 1 };
+			VpSkeleton::SlotTable* table = t.rig.table.get();
+			VpSkeleton::CpuBuffers* bytes = t.rig.bytes.get();
+			VpIndicator::Indicator* ind = t.rig.indicator.get();
+			const std::shared_ptr<int> firstState = oldState;
+			CameraLink::CameraLabelFill fill(
+				[&gen, table, bytes, ind, firstState, newState]() {
+					VpSkeleton::LaneLease l = VpSkeleton::LaneLease::Borrow(table, bytes, ind);
+					l.generation = gen.load();
+					l.hold = gen.load() == 1 ? std::shared_ptr<const void>(firstState) : std::shared_ptr<const void>(newState);
+					return l;
+				},
+				*t.core.Link(), t.device);
+			oldState.reset();
+			Assert::AreEqual(uint64_t(1), fill.LaneGeneration());
+			Assert::IsFalse(weakOld.expired(), L"generation 1 is owned by the fill's lease (and the source's capture)");
+			t.device.onProduce = [&gen]() { gen = 2; };   // the lane rebuilds while the device is producing
+			VpSkeleton::IGapWork* gap = fill.GapWork();
+			Assert::IsTrue(gap->HasWork());
+			gap->RunChunk(1000);
+			Assert::AreEqual(1, t.device.produced, L"the device ran against the held (old) table: no access to freed memory");
+			Assert::AreEqual(uint64_t(1), fill.Counters().staleLane.load(), L"the publish into the old generation was refused and counted");
+			Assert::AreEqual(uint64_t(0), fill.Counters().lane.load());
+			Assert::AreEqual(uint64_t(0), fill.Counters().laneLate.load());
+			Assert::AreEqual(uint64_t(2), fill.LaneGeneration(), L"the fill rebound to the new generation");
+			Assert::AreEqual(uint64_t(1), fill.Counters().rebound.load());
+			Assert::IsTrue(CameraLink::LabelFillStatusLine(fill.Counters()).find("1 stale lane") != std::string::npos, L"visible in the status line");
+			Assert::IsFalse(weakOld.expired(), L"the source's own capture still holds it here; the fill's lease and the production's copy are gone");
+		}
+
 		TEST_METHOD(LaneProducesInAnIdleGapBeforeTheSealAndTheSealAcceptsIt)
 		{
 			Setup t;

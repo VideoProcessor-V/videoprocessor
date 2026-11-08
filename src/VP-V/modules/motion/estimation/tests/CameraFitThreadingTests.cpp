@@ -257,6 +257,60 @@ namespace VideoProcessorTest
 			Assert::AreEqual(uint64_t(1), counters.staleLane.load(), L"no further refusals");
 		}
 
+		// Two threads rebind (Submit on the render thread, the publish on the fit thread) and each reads the lease OUTSIDE the mutex. The order
+		// "A reads the old lease, B reads and installs the new one, A installs" is injected here deterministically: A's source call runs B's
+		// whole Rebind before returning the older lease. The older read must NOT put the worker back on the old graph.
+		TEST_METHOD(AnOlderLeaseReadNeverReplacesANewerOneWhateverTheInterleaving)
+		{
+			CameraLinkTest::Rig rig(2);
+			CameraLink::CameraRecordPool pool(rig.Ring());
+			CameraLink::FitCounters counters;
+			CameraLink::CameraFitProducer producer(CameraModel::Config(), &counters);
+			VpSkeleton::LaneLease older = VpSkeleton::LaneLease::Borrow(rig.table.get(), rig.bytes.get(), rig.indicator.get());
+			VpSkeleton::LaneLease newer = older;
+			older.generation = 1;
+			newer.generation = 2;
+			CameraLink::CameraFitWorker* wp = nullptr;
+			int calls = 0;
+			CameraLink::CameraFitEnv env = rig.Env(&pool, &counters, 4);
+			env.lease = older;
+			env.leaseSource = [&]() {
+				++calls;
+				if (calls == 1)
+				{
+					wp->Rebind();   // "thread B": reads (call 2 -> the newer lease) and installs it
+					return older;   // "thread A" resumes with what it read BEFORE B ran
+				}
+				return newer;
+			};
+			CameraLink::CameraFitWorker worker(producer, env);
+			wp = &worker;
+			Assert::AreEqual(uint64_t(1), worker.LaneGeneration());
+			Assert::IsFalse(worker.Rebind(), L"A's call installed nothing: B's install (inside it) was newer");
+			Assert::AreEqual(2, calls);
+			Assert::AreEqual(uint64_t(2), worker.LaneGeneration(), L"A's older read was rejected: the lease did not go backwards");
+			Assert::AreEqual(uint64_t(1), counters.rebound.load(), L"one install, not two");
+			// An empty lease (the lane dropped its state) carries the counter: newer than the state it replaces, and a valid lease of the same
+			// generation then replaces the empty one.
+			VpSkeleton::LaneLease empty;
+			empty.generation = 3;
+			VpSkeleton::LaneLease valid3 = newer;
+			valid3.generation = 3;
+			VpSkeleton::LaneLease stale = older;
+			int phase = 0;
+			env.leaseSource = [&]() { return phase == 0 ? empty : phase == 1 ? valid3 : stale; };
+			CameraLink::CameraFitWorker w2(producer, env);   // starts on env.lease (generation 1)
+			Assert::IsTrue(w2.Rebind(), L"the empty lease of generation 3 is newer than generation 1");
+			Assert::AreEqual(uint64_t(3), w2.LaneGeneration());
+			Assert::IsFalse(w2.Lease().Valid(), L"the empty lease of generation 3 was installed (the lane is gone)");
+			phase = 1;
+			Assert::IsTrue(w2.Rebind(), L"a valid lease of the same generation replaces the empty one");
+			Assert::IsTrue(w2.Lease().Valid());
+			phase = 2;
+			Assert::IsFalse(w2.Rebind(), L"an older generation is never installed");
+			Assert::AreEqual(uint64_t(3), w2.LaneGeneration());
+		}
+
 		TEST_METHOD(RebuildingTheLaneRepeatedlyUnderARunningWorkerThreadIsSafe)
 		{
 			LaneRig rig;
