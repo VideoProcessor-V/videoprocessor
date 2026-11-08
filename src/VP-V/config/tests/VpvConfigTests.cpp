@@ -1515,29 +1515,24 @@ namespace
 	void testQueueRowsOnTheVpvCard()
 	{
 		QTemporaryDir dir;
-		const char* text = "[general]
-renderer: VP Renderer
-[queue.Normal]
-queue_size: 32
-target_frames: 4
-"
-			"[queue.Minus]
-queue_size: 16
-active_picture_lookahead_frames: -1
-"
-			"[queue.Word]
-queue_size: 16
-active_picture_lookahead_frames: auto
-"
-			"[queue.Three]
-queue_size: 16
-active_picture_lookahead_frames: 3
-";
+		const char* text = "[general]\nrenderer: VP Renderer\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 4\n"
+			"[queue.Minus]\nqueue_size: 16\nactive_picture_lookahead_frames: -1\n"
+			"[queue.Word]\nqueue_size: 16\nactive_picture_lookahead_frames: auto\n"
+			"[queue.Three]\nqueue_size: 16\nactive_picture_lookahead_frames: 3\n";
 		const QString path = WriteFixture(dir, text);
 		const QByteArray original(text);
-		const auto readFile = [&path]() { QFile file(path); return file.open(QIODevice::ReadOnly) ? file.readAll().replace("
-", "
-") : QByteArray(); };
+		const auto readFile = [&path]() { QFile file(path); return file.open(QIODevice::ReadOnly) ? file.readAll().replace("\r\n", "\n") : QByteArray(); };
+		const auto selectQueue = [](QListWidget* queues, const QString& name)
+		{
+			for (int row = 0; row < queues->count(); ++row)
+				if (queues->item(row)->data(Qt::UserRole).toString().compare(name, Qt::CaseInsensitive) == 0)
+				{
+					queues->setCurrentRow(row);
+					QCoreApplication::processEvents();
+					return true;
+				}
+			return false;
+		};
 		{
 			ConfigEditorWindow window(path, 0, true);
 			auto* section = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section")));
@@ -1559,44 +1554,22 @@ active_picture_lookahead_frames: 3
 			require(vpv->minimum() == -1 && vpv->maximum() == 8 && vpv->specialValueText() == QStringLiteral("Auto"), "VP-V's look-ahead has no Auto");
 			auto* queues = control<QListWidget>(window, QStringLiteral("config.queue.profiles"));
 			auto* picker = control<QComboBox>(window, QStringLiteral("vpv.both.queue_target.profile"));
-			const auto select = [queues](const QString& name)
-			{
-				for (int row = 0; row < queues->count(); ++row)
-					if (queues->item(row)->data(Qt::UserRole).toString().compare(name, Qt::CaseInsensitive) == 0)
-					{
-						queues->setCurrentRow(row);
-						QCoreApplication::processEvents();
-						return true;
-					}
-				return false;
-			};
+			auto* notice = control<QLabel>(window, QStringLiteral("config.queue.active_picture_lookahead_notice"));
 			for (const char* name : { "queue.normal", "queue.minus", "queue.word" })
 			{
-				require(select(QString::fromLatin1(name)), (std::string("profile missing: ") + name).c_str());
+				require(selectQueue(queues, QString::fromLatin1(name)), (std::string("profile missing: ") + name).c_str());
 				require(picker->currentIndex() == queues->currentRow(), "the card's picker does not follow Bill's list");
 				require(vpv->value() == -1 && vpv->text() == QStringLiteral("Auto"), (std::string("VP-V's look-ahead does not show Auto: ") + name).c_str());
 				require(bills->value() == 0, (std::string("Bill's control does not show Auto as his 0: ") + name).c_str());
-				require(!control<QLabel>(window, QStringLiteral("config.queue.active_picture_lookahead_notice"))->isVisibleTo(card),
-					"the explicit-0 notice shows for Auto");
+				require(!notice->isVisibleTo(card), "the explicit-0 notice shows for Auto");
 			}
-			require(select(QStringLiteral("queue.three")) && vpv->value() == 3 && bills->value() == 3, "an explicit value is not shown on both controls");
+			require(selectQueue(queues, QStringLiteral("queue.three")) && vpv->value() == 3 && bills->value() == 3,
+				"an explicit value is not shown on both controls");
 			require(readFile() == original, "opening Config wrote the file");
 			save(window);
 			const QByteArray saved = readFile();
-			for (const char* part : { "[queue.Normal]
-queue_size: 32
-target_frames: 4
-", "[queue.Minus]
-queue_size: 16
-active_picture_lookahead_frames: -1
-",
-					"[queue.Word]
-queue_size: 16
-active_picture_lookahead_frames: auto
-", "[queue.Three]
-queue_size: 16
-active_picture_lookahead_frames: 3
-" })
+			for (const char* part : { "[queue.Normal]\nqueue_size: 32\ntarget_frames: 4\n", "[queue.Minus]\nqueue_size: 16\nactive_picture_lookahead_frames: -1\n",
+					"[queue.Word]\nqueue_size: 16\nactive_picture_lookahead_frames: auto\n", "[queue.Three]\nqueue_size: 16\nactive_picture_lookahead_frames: 3\n" })
 				require(saved.contains(part), (std::string("saving untouched changed a queue profile: ") + part).c_str());
 			require(saved.count("active_picture_lookahead_frames") == 3 && !saved.contains("active_picture_lookahead_frames: 0"),
 				"saving untouched wrote Bill's displayed 0 back");
@@ -1605,10 +1578,7 @@ active_picture_lookahead_frames: 3
 			ConfigEditorWindow window(path, 0, true);
 			auto* bills = control<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames"));
 			auto* vpv = control<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames.vpv"));
-			auto* queues = control<QListWidget>(window, QStringLiteral("config.queue.profiles"));
-			for (int row = 0; row < queues->count(); ++row)
-				if (queues->item(row)->data(Qt::UserRole).toString().compare(QStringLiteral("queue.three"), Qt::CaseInsensitive) == 0) queues->setCurrentRow(row);
-			QCoreApplication::processEvents();
+			require(selectQueue(control<QListWidget>(window, QStringLiteral("config.queue.profiles")), QStringLiteral("queue.three")), "Three missing");
 			bills->setValue(5);
 			QCoreApplication::processEvents();
 			require(vpv->value() == 5, "VP-V's look-ahead does not follow Bill's control");
@@ -1620,9 +1590,7 @@ active_picture_lookahead_frames: 3
 			require(bills->value() == 0 && vpv->value() == -1, "VP-V's Auto does not show as 0 on Bill's control");
 			save(window);
 			const QByteArray saved = readFile();
-			require(saved.contains("[queue.Three]
-queue_size: 16
-") && saved.count("active_picture_lookahead_frames") == 2 &&
+			require(saved.contains("[queue.Three]\nqueue_size: 16\n") && saved.count("active_picture_lookahead_frames") == 2 &&
 				!saved.contains("active_picture_lookahead_frames: 0") && saved.contains("active_picture_lookahead_frames: -1") &&
 				saved.contains("active_picture_lookahead_frames: auto"),
 				(std::string("VP-V's Auto did not remove the key, or another profile's value changed: ") + saved.toStdString()).c_str());
