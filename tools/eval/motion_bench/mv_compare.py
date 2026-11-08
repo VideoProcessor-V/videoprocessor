@@ -46,6 +46,32 @@ ROWS = [('shift', 'epe_px', 'vector error, trusted blocks (source px)'), ('shift
         ('interp', 'engine_used', 'optical-flow input used (1 = yes)')]
 
 
+STEADY_MODES = ('a_steady_lane', 'b_lowlatency', 'c_warm_only')
+STEADY_ROWS = [('width', 'width'), ('height', 'height'), ('fps', 'rate (fps)'), ('render_ms_mean', 'render path GPU ms (mean, drained)'),
+               ('render_ms_p95', 'render path GPU ms (p95)'), ('lane_pair_ms_mean', 'lane: NVOF pair ms (mean)'),
+               ('nvof_occupancy', 'NVOF occupancy (pair ms / wall)'), ('pair_latency_ms_mean', 'pair latency after hand-over (ms)'),
+               ('vram_lane_mb', 'VRAM: producer engine + ring (MB over start)'), ('vram_render_mb', 'VRAM: matcher on the render path (MB)'),
+               ('ring_bytes_mb', 'engine ring textures by formula (MB)'), ('render_estimates', 'render estimates measured'), ('lane_pairs', 'lane pairs measured')]
+
+
+def steady_section(before, after, clip):
+    out = []
+    for metric, text in STEADY_ROWS:
+        for mode in STEADY_MODES:
+            b = before.get((clip, 'steady', mode, metric), {})
+            a = after.get((clip, 'steady', mode, metric), {})
+            if not a and not b:
+                continue
+            vb = b.get(0, float('nan'))
+            va = a.get(0, float('nan'))
+            d = va - vb if (vb == vb and va == va) else float('nan')
+            out.append('| %s | %s | %.4f | %.4f | %+.4f |' % (text, mode, vb, va, d))
+    if not out:
+        return []
+    return ['', 'Steady state per mode (one run each; 1080p60 and 4K30 are separate clips = separate sections):', '',
+            '| measure | mode | before | after | change |', '|---|---|---|---|---|'] + out
+
+
 def counts(acc, clip):
     out = []
     for kind in ('shift', 'interp'):
@@ -79,6 +105,7 @@ def report(before, after):
                 ma = mean([a[p] for p in common])
                 d = ma - mb if (mb == mb and ma == ma) else float('nan')
                 out.append('| %s (%s) | %s | %d (before %d, after %d) | %.4f | %.4f | %+.4f |' % (text, kind, mode, len(common), len(b), len(a), mb, ma, d))
+        out += steady_section(before, after, clip)
         out.append('')
     out += ['Plausibility checks: vector error must stay well below the shift magnitude (8-32 px); hold-A PSNR is the floor the warp must beat;',
             'the pair mode must be unchanged between trees (same code path); engine_used must be 1 for mode pair; nopair/before pair_ms is absent by design.']

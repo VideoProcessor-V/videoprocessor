@@ -29,6 +29,7 @@
 #include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <dxgi1_2.h>
+#include <dxgi1_4.h>
 #include <libplacebo/d3d11.h>
 
 #include <algorithm>
@@ -67,6 +68,7 @@ namespace
 	{
 		std::ifstream file;
 		int width = 0, height = 0;
+		double fps = 0.0;   // from the F tag (num:den); 0 when absent
 		std::streamoff firstFrame = 0;
 		size_t frameBytes = 0;
 		bool Open(const std::string& path, std::string& why)
@@ -83,6 +85,12 @@ namespace
 			{
 				if (w[0] == 'W') width = std::atoi(w.c_str() + 1);
 				else if (w[0] == 'H') height = std::atoi(w.c_str() + 1);
+				else if (w[0] == 'F')
+				{
+					const size_t colon = w.find(':');
+					const double num = std::atof(w.c_str() + 1), den = colon == std::string::npos ? 1.0 : std::atof(w.c_str() + colon + 1);
+					fps = den > 0.0 ? num / den : 0.0;
+				}
 				else if (w[0] == 'C') chromaOk = w.compare(0, 4, "C420") == 0;
 			}
 			if (width <= 0 || height <= 0 || !chromaOk) { why = "needs 8-bit 4:2:0 (C420) with W and H"; return false; }
@@ -411,6 +419,178 @@ namespace VideoProcessorTest
 			csv.close();
 			Assert::IsTrue(ran > 0, L"the clip gave no frames");
 			Logger::WriteMessage(("MotionUnificationBench: " + std::to_string(ran) + " positions written to " + outPath + "\n").c_str());
+		}
+
+		// Steady-state cost PER MODE (doc 83 / coordinator 2026-11-08), real time at the clip's own rate, for 1080p60 and 4K30 clips
+		// (pick the clip: this test measures the size and rate it is given). Modes:
+		//   a_steady_lane   queue >= lead: the producer (the lane) makes the pairs ahead; the render path runs the matcher WITH the
+		//                   pair. render_ms = the matcher with a pair (GPU drained), lane_pair_ms = the NVOF pair on the producer.
+		//   b_lowlatency    no look-ahead, backward vectors on the render path: the matcher WITHOUT a pair on (n-1, n) at once;
+		//                   pair_latency_ms = how late the producer's pair (n-1, n) arrives after the frame was handed over.
+		//   c_warm_only     the always-warm de-judder demand with nothing rendered: frame-pair products only (the producer alone).
+		// Every mode runs the producer in real time (VP_MV_BENCH_STEADY_FRAMES frames, spaced 1 / fps); render_ms is 0 in mode c.
+		// nvof_occupancy = the producer's summed pair time / the wall time; vram_*_mb = this process's video memory on the NVIDIA
+		// adapter (DXGI QueryVideoMemoryInfo) after the producer's engine opened and after the matcher estimated, over the start.
+		BEGIN_TEST_METHOD_ATTRIBUTE(SteadyStateCostPerMode)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SteadyStateCostPerMode)
+		{
+			const std::string clipPath = MvEnv("VP_MV_BENCH_CLIP"), outPath = MvEnv("VP_MV_BENCH_OUT");
+			const int frames = MvEnvInt("VP_MV_BENCH_STEADY_FRAMES", 0), start = MvEnvInt("VP_MV_BENCH_START", 0);
+			if (clipPath.empty() || outPath.empty() || frames <= 0)
+			{
+				Logger::WriteMessage("MotionUnificationBench steady: VP_MV_BENCH_CLIP / VP_MV_BENCH_OUT / VP_MV_BENCH_STEADY_FRAMES not set: not run\n");
+				return;
+			}
+			CComPtr<IDXGIFactory1> factory;
+			CComPtr<IDXGIAdapter1> nvidia;
+			if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
+				for (UINT i = 0;; ++i)
+				{
+					CComPtr<IDXGIAdapter1> adapter;
+					if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+					DXGI_ADAPTER_DESC1 desc{};
+					adapter->GetDesc1(&desc);
+					if (desc.VendorId == 0x10DE) nvidia = adapter;
+				}
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "SteadyStateCostPerMode", nvidia != nullptr, "no NVIDIA adapter"))
+				return;
+			Y4mClip clip;
+			std::string why;
+			Assert::IsTrue(clip.Open(clipPath, why), std::wstring(why.begin(), why.end()).c_str());
+			Assert::IsTrue(clip.fps > 1.0, L"the y4m has no F tag (frame rate): the steady run is paced at the clip's rate");
+			const int width = clip.width, height = clip.height;
+			const double periodMs = 1000.0 / clip.fps;
+			const std::string label = MvEnv("VP_MV_BENCH_LABEL").empty() ? "run" : MvEnv("VP_MV_BENCH_LABEL");
+			const std::string clipName = clipPath.substr(clipPath.find_last_of("\\/") == std::string::npos ? 0 : clipPath.find_last_of("\\/") + 1);
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			CComPtr<ID3D11Device> device;
+			Assert::IsTrue(SUCCEEDED(D3D11CreateDevice(nvidia, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr)));
+			Assert::IsTrue(NvOpticalFlow::Sessions::AdapterKey(device) != NvOpticalFlow::Sessions::kUnknownAdapterKey &&
+				MvGpuKey(gpu) == NvOpticalFlow::Sessions::AdapterKey(device),
+				L"the libplacebo fixture device is not on the NVIDIA adapter the producer uses (VP_TEST_GPU=hardware, VP_TEST_ADAPTER=NVIDIA)");
+			CComPtr<IDXGIAdapter3> adapter3;
+			nvidia->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&adapter3));
+			auto vramMb = [&]() {
+				DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+				if (adapter3 && SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
+					return static_cast<double>(info.CurrentUsage) / (1024.0 * 1024.0);
+				return -1.0;
+			};
+
+			std::ofstream csv(outPath + ".steady.csv", std::ios::trunc);
+			Assert::IsTrue(static_cast<bool>(csv), L"cannot write the csv");
+			csv << "label,clip,kind,mode,position,metric,value\n";
+			auto row = [&](const char* mode, const char* metric, double value) {
+				csv << label << ',' << clipName << ",steady," << mode << ",0," << metric << ',' << value << '\n';
+			};
+
+			struct Mode { const char* name; bool renderWithPair, renderNoPair; };
+			const Mode modes[3] = { { "a_steady_lane", true, false }, { "b_lowlatency", false, true }, { "c_warm_only", false, false } };
+			for (const Mode& mode : modes)
+			{
+				const double vramStart = vramMb();
+				MotionAhead::Producer producer;
+				Assert::IsTrue(producer.Start(device, NvOpticalFlow::Preset::Slow), L"producer started");
+				std::vector<double> renderMs, pairMs, latencyMs;
+				std::vector<uint8_t> older, prev, cur;
+				double vramProducer = -1.0, vramRender = -1.0;
+				unsigned long long pairsSeen = 0;
+				const auto wallStart = std::chrono::steady_clock::now();
+				auto nowMs = [&]() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wallStart).count(); };
+				int used = 0;
+				for (int k = 0; k < frames; ++k)
+				{
+					if (!clip.Luma(start + k, cur)) break;
+					++used;
+					const double slotStart = static_cast<double>(k) * periodMs;
+					while (nowMs() < slotStart) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					const double handedOver = nowMs();
+					producer.Submit(static_cast<uint64_t>(k + 1), 1, MvSource(cur, width, height));
+					const uint64_t seq = static_cast<uint64_t>(k + 1);
+					// The render path. Steady lane (a): the render is a frame behind the lane, so it uses the pair of the frames before this
+					// one, (seq - 2, seq - 1), already made ahead. Low latency (b): the pair (seq - 1, seq) of the frame just handed over,
+					// with no look-ahead, at once, matcher only.
+					const bool haveFrames = mode.renderWithPair ? k > 1 : k > 0;
+					if (haveFrames && (mode.renderWithPair || mode.renderNoPair))
+					{
+						DejudderFrame fa, fb;
+						MvFrame(mode.renderWithPair ? older : prev, width, height, fa);
+						MvFrame(mode.renderWithPair ? prev : cur, width, height, fb);
+						DejudderGpuPlanes pa, pb;
+						UploadDejudderFrame(gpu, fa, pa);
+						UploadDejudderFrame(gpu, fb, pb);
+						Dejudder::Settings settings = DejudderTestSettings();
+						settings.opticalFlow = true;
+						settings.opticalFlowCandidate = true;
+						settings.opticalFlowSeed = true;
+						settings.globalPrior = true;
+						settings.estCandidates = true;
+						settings.globalTwo = true;
+						settings.opticalFlowGlobal = true;
+						settings.hostReadable = false;
+						Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+						MotionAhead::FlowPtr flow;
+						if (mode.renderWithPair)
+						{
+							for (int w = 0; w < 400 && !flow; ++w)
+							{
+								flow = producer.Take(seq - 2, seq - 1);
+								if (!flow) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+							}
+							if (flow) warp.SetExternalFlow(flow);
+						}
+						const auto t0 = std::chrono::steady_clock::now();
+						const bool ok = warp.Estimate(pa.planes, pb.planes);
+						pl_gpu_finish(gpu);
+						const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+						if (ok && (!mode.renderWithPair || warp.ExternalFlowUsed()))
+							renderMs.push_back(ms);
+						vramRender = vramMb();
+					}
+					// The lane: poll the producer for the pair (seq - 1, seq) and its time; its lateness after the hand-over.
+					for (int w = 0; w < static_cast<int>(3 * periodMs) + 5; ++w)
+					{
+						const auto st = producer.GetStats();
+						if (st.pairs > pairsSeen) { pairsSeen = st.pairs; pairMs.push_back(st.lastPairMs); }
+						if (k > 0 && producer.Take(seq - 1, seq)) { latencyMs.push_back(nowMs() - handedOver); break; }
+						std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					}
+					if (vramProducer < 0.0 && producer.EngineReady()) vramProducer = vramMb();
+					older.swap(prev);
+					prev.swap(cur);
+				}
+				const double wallMs = nowMs();
+				producer.Stop();
+				auto avg = [](const std::vector<double>& v) { double s = 0; for (double x : v) s += x; return v.empty() ? 0.0 : s / v.size(); };
+				auto p95 = [](std::vector<double> v) { if (v.empty()) return 0.0; std::sort(v.begin(), v.end()); return v[static_cast<size_t>(0.95 * (v.size() - 1))]; };
+				double pairSum = 0.0;
+				for (double x : pairMs) pairSum += x;
+				row(mode.name, "width", width);
+				row(mode.name, "height", height);
+				row(mode.name, "fps", clip.fps);
+				row(mode.name, "frames", used);
+				row(mode.name, "render_ms_mean", avg(renderMs));
+				row(mode.name, "render_ms_p95", p95(renderMs));
+				row(mode.name, "render_estimates", static_cast<double>(renderMs.size()));
+				row(mode.name, "lane_pair_ms_mean", avg(pairMs));
+				row(mode.name, "lane_pairs", static_cast<double>(pairMs.size()));
+				row(mode.name, "nvof_occupancy", wallMs > 0.0 ? pairSum / wallMs : 0.0);
+				row(mode.name, "pair_latency_ms_mean", avg(latencyMs));
+				row(mode.name, "vram_lane_mb", vramProducer >= 0.0 && vramStart >= 0.0 ? vramProducer - vramStart : -1.0);
+				row(mode.name, "vram_render_mb", vramRender >= 0.0 && vramProducer >= 0.0 ? vramRender - vramProducer : -1.0);
+				{
+					// The engine ring's textures by the formats' sizes: two sets of the half-size input (R8) + flow (4 B) + cost (1 B) per 4 x 4 cell.
+					const double hw = (width + 1) / 2, hh = (height + 1) / 2, cells = std::ceil(hw / 4.0) * std::ceil(hh / 4.0);
+					row(mode.name, "ring_bytes_mb", 2.0 * (hw * hh + cells * 5.0) / (1024.0 * 1024.0));
+				}
+			}
+			csv.close();
+			Logger::WriteMessage(("MotionUnificationBench steady: written to " + outPath + ".steady.csv\n").c_str());
 		}
 	};
 }
