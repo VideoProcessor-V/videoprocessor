@@ -1463,8 +1463,9 @@ namespace
 		// trust; with every block as sure as usual, or the switches off, or no pair ahead, the
 		// field is exactly the one without the extras. The engine's whole-frame motion falls
 		// back to the global search when it is not clear.
+		// dyHalf (SK-MV): the pan's vertical part in half-size pixels (0 = a horizontal pan, as before).
 		static std::shared_ptr<MotionAhead::Flow> SyntheticAheadFlow(int width, int height, int dxHalf, uint8_t unsureCost,
-			int cellX0, int cellY0, int cellX1, int cellY1)
+			int cellX0, int cellY0, int cellX1, int cellY1, int dyHalf = 0)
 		{
 			auto flow = std::make_shared<MotionAhead::Flow>();
 			flow->halfW = (width + 1) / 2;
@@ -1479,6 +1480,8 @@ namespace
 			{
 				flow->forward[i * 2] = static_cast<int16_t>(dxHalf * 32);
 				flow->backward[i * 2] = static_cast<int16_t>(-dxHalf * 32);
+				flow->forward[i * 2 + 1] = static_cast<int16_t>(dyHalf * 32);
+				flow->backward[i * 2 + 1] = static_cast<int16_t>(-dyHalf * 32);
 				const int x = static_cast<int>(i % flow->gridW), y = static_cast<int>(i / flow->gridW);
 				if (x >= cellX0 && x < cellX1 && y >= cellY0 && y < cellY1) flow->forwardCost[i] = unsureCost;
 			}

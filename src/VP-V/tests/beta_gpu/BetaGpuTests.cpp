@@ -2077,8 +2077,9 @@ void RunBetaPassTiming()
 			ofSettings.opticalFlowSeed = mode == 1;
 			Dejudder::MotionWarp of(gpu.Log(), g, ofSettings);
 			const double ofMs = DrainedMs(g, 10, [&] { { const bool ok_ = of.Estimate(a, b, slot, true); Check(ok_, "pass timing: estimate failed: " + of.LastError()); } slot ^= 1; });
-			std::cout << "  de-judder live matcher + optical flow " << (mode == 1 ? "seed" : "candidate") << " " << ofMs << " ms (engine "
-				<< (of.OpticalFlowUsed() ? "used" : ("not used: " + of.OpticalFlowError()).c_str()) << "; live matcher " << liveMs << " ms)\n";
+			// SK-MV: the matcher opens no engine; this timing has no producer pair, so it is the matcher with the miss reported (NoPairAhead).
+			std::cout << "  de-judder live matcher + optical flow " << (mode == 1 ? "seed" : "candidate") << " " << ofMs << " ms (SK-MV: no producer pair here, "
+				<< (of.NoPairAhead() ? "the matcher ran, miss reported" : of.ExternalFlowUsed() ? "pair used" : "optical flow not in use") << "; live matcher " << liveMs << " ms)\n";
 		}
 		live.SetPassTiming(true);
 		for (int i = 0; i < reps; ++i)
@@ -3366,7 +3367,9 @@ namespace Corpus
 			// scored where shown. The trust pipeline after the source is the same.
 			auto add = [&](const char* name, bool of, int preset, bool taste, bool candidate)
 			{
-				Variant v{ name, 4.5f, 0.5f, true };
+				// SK-MV (doc 83): the render-time engine and its presets are gone and this runner has no producer, so the optical-flow
+				// variants run as the matcher; the name says so (a real engine comparison needs a producer pair in this host project).
+				Variant v{ std::string(name) + (of ? " [SK-MV: no producer pair here, runs as the matcher]" : ""), 4.5f, 0.5f, true };
 				v.globalTwo = true; v.regional = true; v.coarseRange = 8; v.consistency = 2.0f;
 				v.textureTol = 0.25f; v.fade = true; v.split = false; v.pixel = true; v.pixLo = 3.0f; v.pixHi = 8.0f;
 				v.opticalFlow = of; v.ofPreset = preset; v.ofCandidate = candidate;
@@ -3786,7 +3789,6 @@ namespace Corpus
 		s.opticalFlowCandidate = v.ofCandidate;
 		s.opticalFlowSeed = v.ofSeed;
 		s.opticalFlowGlobal = v.ofGlobal;
-		s.opticalFlowGlobalReadback = v.ofGlobal;   // no producer in the corpus runs
 		s.pixelTrustLo = v.pixLo;
 		s.pixelTrustHi = v.pixHi;
 		s.pixelTrustLoUntrusted = v.pixLoU;

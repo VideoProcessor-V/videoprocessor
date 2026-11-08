@@ -38,24 +38,28 @@ namespace VideoProcessorTest
 			DejudderGpuPlanes a1, b1, a2, b2;
 			frames(512, 256, a1, b1);
 			frames(768, 384, a2, b2);
-			bool engine = false;
+			// SK-MV (doc 83): the matcher opens no engine; the pair comes from the look-ahead producer (P2). A synthetic pair of the same
+			// pan stands in for it here (the real engine is covered by NvOpticalFlowTests and MotionUnificationBenchTests); the resize /
+			// teardown regression now covers the pair's flow textures (the only D3D11 textures left in the optical-flow path).
+			auto pair = [&](int width, int height) { return SyntheticAheadFlow(width, height, dx / 2, 10, 0, 0, 0, 0, dy / 2); };
 			{
 				Dejudder::Settings settings = DejudderTestSettings();
 				settings.opticalFlow = true;
 				settings.opticalFlowCandidate = true;
 				settings.opticalFlowSeed = true;
 				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				warp.SetExternalFlow(pair(512, 256));
 				Assert::IsTrue(warp.Estimate(a1.planes, b1.planes), std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
-				engine = warp.OpticalFlowUsed();
-				if (!engine)
-				{
-					Logger::WriteMessage(("optical flow engine unavailable here (" + warp.OpticalFlowError() + "); regressions not run\n").c_str());
+				if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "OpticalFlowEngineSurvivesResizeAndTeardownAndReplacesTheSearches",
+						warp.ExternalFlowUsed(), "the pair's D3D11 textures cannot be made on this device: " + warp.OpticalFlowError()))
 					return;
-				}
-				Assert::IsTrue(warp.Estimate(a2.planes, b2.planes), L"the engine across a size change");
+				warp.SetExternalFlow(pair(768, 384));
+				Assert::IsTrue(warp.Estimate(a2.planes, b2.planes), L"the pair across a size change");
+				Assert::IsTrue(warp.ExternalFlowUsed(), L"the pair taken after the size change");
+				warp.SetExternalFlow(pair(512, 256));
 				Assert::IsTrue(warp.Estimate(a1.planes, b1.planes), L"and back");
-				Assert::IsTrue(warp.OpticalFlowUsed(), L"the engine still in use after the size changes");
-			}   // destroyed here: the engine first (a fail-fast would end the test process)
+				Assert::IsTrue(warp.ExternalFlowUsed(), L"the pair taken after the size changes");
+			}   // destroyed here: the flow textures after libplacebo's wrappers (a fail-fast would end the test process)
 			Logger::WriteMessage("teardown after two size changes: survived\n");
 			for (const bool seed : { false, true })
 			{
@@ -65,8 +69,9 @@ namespace VideoProcessorTest
 				settings.opticalFlowSeed = seed;
 				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
 				warp.SetPassTiming(true, true);
+				warp.SetExternalFlow(pair(512, 256));
 				Assert::IsTrue(warp.Estimate(a1.planes, b1.planes), std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
-				Assert::IsTrue(warp.OpticalFlowUsed());
+				Assert::IsTrue(warp.ExternalFlowUsed(), L"the pair ahead is the optical-flow input");
 				std::string passes;
 				bool searched = false;
 				for (const auto& entry : warp.PassMs())
@@ -87,6 +92,28 @@ namespace VideoProcessorTest
 					}
 				Assert::IsTrue(right * 100 >= interior * 90, (std::wstring(seed ? L"seed" : L"replace") + L": the backward field holds the pan (" +
 					std::to_wstring(right) + L" of " + std::to_wstring(interior) + L")").c_str());
+			}
+			// SK-MV: NO pair ahead means no second engine. The block searches run (the P2m path), the miss is reported (NoPairAhead,
+			// which the host turns into the visible "motion" entry), and the field is exactly the one with optical_flow off.
+			{
+				Dejudder::Settings on = DejudderTestSettings();
+				on.opticalFlow = true;
+				Dejudder::Settings off = DejudderTestSettings();
+				off.opticalFlow = false;
+				Dejudder::MotionWarp withFlow(fixture.Log(), gpu, on), without(fixture.Log(), gpu, off);
+				withFlow.SetPassTiming(true, true);
+				Assert::IsTrue(withFlow.Estimate(a1.planes, b1.planes), std::wstring(withFlow.LastError().begin(), withFlow.LastError().end()).c_str());
+				Assert::IsTrue(without.Estimate(a1.planes, b1.planes));
+				Assert::IsFalse(withFlow.OpticalFlowUsed(), L"no render-time engine");
+				Assert::IsFalse(withFlow.ExternalFlowUsed());
+				Assert::IsTrue(withFlow.NoPairAhead(), L"the miss is reported, not silent");
+				Assert::IsFalse(without.NoPairAhead(), L"optical_flow off is not a miss");
+				bool searched = false;
+				for (const auto& entry : withFlow.PassMs())
+					searched = searched || entry.first.find("block search") != std::string::npos;
+				Assert::IsTrue(searched, L"the block searches ran");
+				const DejudderField fieldOn = DownloadField(gpu, withFlow), fieldOff = DownloadField(gpu, without);
+				Assert::IsTrue(fieldOn.texels == fieldOff.texels, L"no pair ahead: exactly the matcher's field");
 			}
 		}
 
@@ -135,10 +162,15 @@ namespace VideoProcessorTest
 					settings.estCandidates = true;   // the two sweeps the seed needs
 					settings.globalTwo = true;
 					settings.opticalFlowGlobal = mode == 1;
-					settings.opticalFlowGlobalReadback = mode == 1;
 					Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+					// SK-MV: mode 1's whole-frame motion comes from the pair computed ahead (P2); a synthetic pair of the true pan
+					// stands in for the producer's (the real engine's accuracy is NvOpticalFlowTests'). Mode 0: the searches' D1.
+					if (mode == 1)
+						warp.SetExternalFlow(SyntheticAheadFlow(width, height, dx / 2, 10, 0, 0, 0, 0));
 					Assert::IsTrue(warp.Estimate(pa.planes, pb.planes), std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
-					if (!warp.OpticalFlowUsed()) { engine = false; break; }
+					if (mode == 1 && !HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "EngineGlobalMatchesTheSearchOnKnownPans",
+							warp.ExternalFlowUsed(), "the pair's D3D11 textures cannot be made on this device: " + warp.OpticalFlowError()))
+					{ engine = false; break; }
 					if (mode == 1) Assert::IsTrue(warp.GlobalFromEngine(), L"the engine's global was used");
 					readGlobal(warp, g[mode]);
 				}
@@ -189,7 +221,9 @@ namespace VideoProcessorTest
 			};
 			bool used[4] = {}, weighted[4] = {};
 			const DejudderField off = run(Off, used[0], weighted[0]);
-			if (!used[0]) { Logger::WriteMessage("the pair computed ahead was not taken here (no D3D11 engine textures): not run\n"); return; }
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "EngineCostLowersTrustAndSwitchOffIsIdentical", used[0],
+					"the pair computed ahead was not taken here (no D3D11 textures for it)"))
+				return;
 			const DejudderField sure = run(OnSure, used[1], weighted[1]);
 			const DejudderField unsure = run(OnUnsure, used[2], weighted[2]);
 			const DejudderField noPair = run(OnNoPair, used[3], weighted[3]);
@@ -238,14 +272,11 @@ namespace VideoProcessorTest
 			Dejudder::MotionWarp reference(fixture.Log(), gpu, matcher);
 			Assert::IsTrue(reference.Estimate(pa.planes, pb.planes));
 			const DejudderField referenceField = DownloadField(gpu, reference);
-			if (!reference.OpticalFlowUsed())
-			{
-				differ = 0;
-				for (size_t i = 0; i < referenceField.texels.size(); ++i) differ += referenceField.texels[i] != noPair.texels[i] ? 1 : 0;
-				Assert::AreEqual(static_cast<size_t>(0), differ, L"no pair ahead: exactly as without the switches");
-			}
-			else
-				Logger::WriteMessage("the engine ran at render time here (no weights either way)\n");
+			// SK-MV: there is no render-time engine any more, so no pair ahead is always the matcher.
+			Assert::IsFalse(reference.OpticalFlowUsed(), L"no render-time engine");
+			differ = 0;
+			for (size_t i = 0; i < referenceField.texels.size(); ++i) differ += referenceField.texels[i] != noPair.texels[i] ? 1 : 0;
+			Assert::AreEqual(static_cast<size_t>(0), differ, L"no pair ahead: exactly as without the switches");
 		}
 
 		TEST_METHOD(EngineGlobalFallsBackToTheSearchWhenUnclear)
@@ -280,7 +311,9 @@ namespace VideoProcessorTest
 						for (int d = 0; d < 2; ++d) flow->global[d][2] = 1.0f;   // not clear (too few cells agree)
 					warp.SetExternalFlow(flow);
 					Assert::IsTrue(warp.Estimate(pa.planes, pb.planes), std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
-					if (!warp.ExternalFlowUsed()) { Logger::WriteMessage("the pair computed ahead was not taken here: not run\n"); return; }
+					if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "EngineGlobalFallsBackToTheSearchWhenUnclear", warp.ExternalFlowUsed(),
+							"the pair computed ahead was not taken here (no D3D11 textures for it)"))
+						return;
 					const bool expectEngine = clear || !fallback;
 					Assert::AreEqual(expectEngine, warp.GlobalFromEngine(), clear ? L"clear: the engine's camera" :
 						fallback ? L"unclear: the global search" : L"fallback off: the engine's value as before");

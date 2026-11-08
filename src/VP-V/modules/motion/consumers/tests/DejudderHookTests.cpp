@@ -285,12 +285,20 @@ namespace VideoProcessorTest
 					settings.opticalFlowCandidate = true;
 					settings.opticalFlowSeed = true;
 					settings.opticalFlowGlobal = mode == 1;
-					settings.opticalFlowGlobalReadback = mode == 1;
 					Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
 					for (int f = 0; f + 1 < frames; ++f)
+					{
+						// SK-MV: mode 1's whole-frame motion is the pair computed ahead (P2), here a synthetic pair of the true pan at the
+						// search's size (the low-resolution matcher searches on the half-size picture, whose engine grid is a half again:
+						// the pan is dx / 4 of those pixels). The real engine's accuracy is NvOpticalFlowTests'. Mode 0: the searches' D1.
+						if (mode == 1)
+							warp.SetExternalFlow(SyntheticAheadFlow(width / 2, height / 2, dx / 4, 10, 0, 0, 0, 0));
 						Assert::IsTrue(warp.Estimate(planes[static_cast<size_t>(f)].planes, planes[static_cast<size_t>(f + 1)].planes),
 							std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
-					if (mode == 1 && !warp.GlobalFromEngine()) { engineSeen = false; continue; }
+					}
+					if (mode == 1 && !HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "RolloffFollowsTheTruePanSpeedAt4K",
+							warp.GlobalFromEngine(), "the pair's D3D11 textures cannot be made on this device"))
+					{ engineSeen = false; continue; }
 					pl_tex trust = warp.FrameTrust();
 					std::vector<uint8_t> raw(trust->params.format->texel_size);
 					pl_tex_transfer_params d{}; d.tex = trust; d.ptr = raw.data();
