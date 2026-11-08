@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// Camera K3: the camera model's switches, section [vpv.camera] of VideoProcessor.cfg. Every key defaults to OFF and the
-// Original pathway forces every key off (Effective(), the accessors below). Pure, header-only, C++14: parser, validators and
+// Camera K3: the camera model's switches, section [vpv.camera] of VideoProcessor.cfg. camera_model defaults to ON (camera defaults (b); it still needs camera_link = report, also the default), every
+// other key defaults to OFF, and the Original pathway forces every key off (Effective(), the accessors below). Pure, header-only, C++14: parser, validators and
 // a serialiser; no state, no threads. The H1 adapter (CameraExtension) reads them at GpuCreated and every SettingsApplied.
 //
 //   camera_model                 on | off                              the camera model (P7 fit) and its diagnostics
@@ -76,7 +76,7 @@ namespace Vpv
 
 		struct CameraSettings
 		{
-			bool model = false;                              // camera_model
+			bool model = true;                               // camera_model (default ON, camera defaults (b))
 			OverlayMode overlay = OverlayMode::Off;          // camera_model_overlay
 			bool labelsGpu = false;                          // camera_labels_gpu
 			CameraModel::MeasurementSwitches meas;           // camera_meas_*  (`objects` has no key: it stays off)
@@ -106,6 +106,7 @@ namespace Vpv
 				if (!originalPathway)
 					return *this;
 				CameraSettings off;
+				off.model = false;   // the default is on: the Original pathway forces it off
 				off.originalPathway = true;
 				return off;
 			}
@@ -173,7 +174,7 @@ namespace Vpv
 					break;
 				case Verdict::Invalid:
 					s.problems.push_back(key + " '" + kv.second + "' is not valid (" +
-						(key == "camera_model_overlay" ? "off|labels|residual|vectors" : "on|off") + "); kept off");
+						(key == "camera_model_overlay" ? "off|labels|residual|vectors" : "on|off") + "); kept " + std::string(key == "camera_model" ? "on" : "off"));
 					break;
 				case Verdict::Valid:
 					if (key == "camera_model_overlay")

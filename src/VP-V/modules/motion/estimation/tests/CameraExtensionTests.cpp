@@ -128,7 +128,7 @@ namespace CameraExtensionTestsNs
 	public:
 		TEST_METHOD(OffIsInert)
 		{
-			Rig rig("[general]\nx=1\n");
+			Rig rig("[vpv.skeleton]\ncamera_link=off\n[vpv.camera]\ncamera_model=off\n");   // camera defaults (b): both are on by default
 			rig.ResyncApply("on");
 			rig.Life(RE::Lifecycle::GpuCreated);
 			rig.Life(RE::Lifecycle::SettingsApplied);
@@ -144,7 +144,7 @@ namespace CameraExtensionTestsNs
 
 		TEST_METHOD(ReportShowsOneLineAndAllocatesNothing)
 		{
-			Rig rig("[vpv.skeleton]\ncamera_link=report\n");
+			Rig rig("[vpv.skeleton]\ncamera_link=report\n[vpv.camera]\ncamera_model=off\n");   // the fit is not wanted: model off
 			rig.ResyncApply("on");
 			rig.Life(RE::Lifecycle::GpuCreated);
 			Assert::IsTrue(rig.ext.Active(rig.Host()));
@@ -206,14 +206,14 @@ namespace CameraExtensionTestsNs
 			Assert::IsTrue(rig.Lines(RE::StatusKind::Lines).empty());
 		}
 
-		TEST_METHOD(AnInvalidValueIsShownWhileOff)
+		TEST_METHOD(AnInvalidValueKeepsTheDefaultAndIsShown)
 		{
-			Rig rig("[vpv.skeleton]\ncamera_link=sideways\n");
+			// camera defaults (b): camera_link defaults to report, so an invalid value keeps report (it used to keep off) and is shown.
+			Rig rig("[vpv.skeleton]\ncamera_link=sideways\n[vpv.camera]\ncamera_model=off\n");
 			rig.Life(RE::Lifecycle::GpuCreated);
-			Assert::IsFalse(rig.ext.Active(rig.Host()));
-			Assert::IsNull(rig.ext.CoreOf(rig.Host()));
+			Assert::IsTrue(rig.ext.Active(rig.Host()));
+			Assert::IsNotNull(rig.ext.CoreOf(rig.Host()));
 			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), "camera_link: camera_link 'sideways'"));
-			Assert::IsTrue(rig.Lines(RE::StatusKind::Lines).empty());
 		}
 
 		TEST_METHOD(AReusedRendererAddressRebuildsTheCore)

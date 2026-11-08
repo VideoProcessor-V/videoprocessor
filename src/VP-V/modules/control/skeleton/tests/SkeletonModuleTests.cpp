@@ -256,12 +256,13 @@ namespace SkeletonModuleTestsNs
 	TEST_CLASS(SkeletonSettingsTests)
 	{
 	public:
-		TEST_METHOD(DefaultsAreOff)
+		TEST_METHOD(DefaultsAreOffExceptTheCameraLink)
 		{
 			const Vpv::Skeleton::Settings s = ParseText("[general]\nx=1\n");
 			Assert::IsTrue(s.lane.mode == VpSkeleton::LaneSettings::Mode::Off);
-			Assert::IsTrue(s.camera == Vpv::Skeleton::CameraLinkMode::Off);
-			Assert::IsFalse(s.LaneWanted() || s.CameraWanted());
+			Assert::IsTrue(s.camera == Vpv::Skeleton::CameraLinkMode::Report, L"camera defaults (b): camera_link defaults to report");
+			Assert::IsFalse(s.LaneWanted());
+			Assert::IsTrue(s.CameraWanted());
 			Assert::IsTrue(s.laneProblems.empty() && s.cameraProblems.empty());
 		}
 
@@ -284,7 +285,7 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(s.lane.mode == VpSkeleton::LaneSettings::Mode::Off);
 			Assert::AreEqual<uint32_t>(0, s.lane.chunkUs);
 			Assert::IsTrue(s.lane.deterministic == VpSkeleton::LaneSettings::Det::Auto);
-			Assert::IsTrue(s.camera == Vpv::Skeleton::CameraLinkMode::Off);
+			Assert::IsTrue(s.camera == Vpv::Skeleton::CameraLinkMode::Report, L"kept at the default (report)");
 			Assert::AreEqual<size_t>(3, s.laneProblems.size());
 			Assert::AreEqual<size_t>(1, s.cameraProblems.size());
 		}
@@ -323,7 +324,8 @@ namespace SkeletonModuleTestsNs
 		TEST_METHOD(AnUnreadableFileMeansDefaults)
 		{
 			const Vpv::Skeleton::Settings s = Vpv::Skeleton::Load([](ConfigFile&) { return false; });
-			Assert::IsFalse(s.LaneWanted() || s.CameraWanted());
+			Assert::IsFalse(s.LaneWanted());
+			Assert::IsTrue(s.CameraWanted(), L"the defaults: camera_link = report");
 		}
 	};
 

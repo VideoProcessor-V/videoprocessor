@@ -200,7 +200,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(EverythingOffInstantiatesNothingAndNeverTouchesTheEngine)
 		{
 			const int threadsBefore = CameraLink::CameraFitWorker::ThreadsEverStarted();
-			Rig rig("[general]\nx=1\n");
+			Rig rig("[vpv.skeleton]\ncamera_link=off\n[vpv.camera]\ncamera_model=off\n");   // both are on by default (camera defaults (b))
 			rig.Start(6);
 			Assert::AreEqual<size_t>(0, rig.ext.HostStates());
 			Assert::IsNull(rig.ext.CoreOf(rig.Host()));
@@ -215,7 +215,7 @@ namespace VideoProcessorTest
 		{
 			// camera_model and a switch are on, camera_link is not: the keys are shown as inert, nothing exists.
 			const int threadsBefore = CameraLink::CameraFitWorker::ThreadsEverStarted();
-			Rig rig("[vpv.camera]\ncamera_model=on\ncamera_meas_model_global=on\n");
+			Rig rig("[vpv.skeleton]\ncamera_link=off\n[vpv.camera]\ncamera_model=on\ncamera_meas_model_global=on\n");
 			rig.Start(6);
 			Assert::IsFalse(rig.ext.FitWanted(rig.Host()));
 			Assert::IsFalse(rig.ext.LiveBuilt(rig.Host()));
@@ -228,7 +228,7 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(ReportOnlyWithoutTheModelKeepsTheFitAndTheEngineOut)
 		{
-			Rig rig(kLinkOn);
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=off\n");
 			rig.Start(6);
 			Assert::IsTrue(rig.ext.Active(rig.Host()));
 			Assert::IsFalse(rig.ext.FitWanted(rig.Host()), L"camera_model is off: no fit");

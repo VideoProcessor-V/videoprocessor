@@ -63,7 +63,7 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 with any `camera_meas_*` switch also on it creates the `CameraGuidanceAdapter` and attaches it to the renderer's engine
 (`Query("vpv.vector_engine.v1")` -> `IVectorEngineDirectory::EngineFor(host)`), which registers the ONE pre-estimate hook. The four .cpp files
 (`GuidanceScheduler`, `GuideLaneJob`, `GuidanceAdapter`, `GuidanceCountsRing`) and what they need (`CameraLane`, `CameraLabelFill`, `CameraLabelProducer`,
-`CameraModelGpu`, `GlobalModelMeasurement`, `GlobalModelSearchHints`) are in both renderer items props. All keys default off: nothing below exists then.
+`CameraModelGpu`, `GlobalModelMeasurement`, `GlobalModelSearchHints`) are in both renderer items props. Camera defaults (b): `camera_link = report` and `camera_model = on` are the defaults, every `camera_meas_*` and `camera_use_*` switch stays off (the fit runs, no hook is registered); the Original pathway forces all of it off.
 No Bill file changed; nothing is fed into the PassTimers accumulator (that needs a renderer call site: gap G3 below).
 
 **LOCK RULE.** `CameraGuidanceAdapter::Detach` (also `SetSettings` / `Attach` when they unregister) runs on the render thread with `renderMutex`
@@ -110,7 +110,7 @@ P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` 
 | `cutSkip` / `flashBridge` | the whole pair is skipped, the seeds with it (by design: nothing is searched across a cut) | same |
 | `fadeNormalised` | cost normalisation of the E1 check only | narrow pass and E1 check |
 
-## Camera live wiring (default off; what is live and what is not)
+## Camera live wiring (camera_link and camera_model default ON, all guidance and use switches OFF; what is live and what is not)
 
 > **STOPGAP - TO BE RETIRED.** `CameraLane` is the camera's PRIVATE SlotTable (owner rule: products live in the skeleton). It is retired for skeleton slots once SK-W
 > provides live P2 / P3 / P4 content, the camera consumer declarations in the skeleton graph and the BeforeRender seal; then the markers and the lagged seal are deleted and the
@@ -133,6 +133,23 @@ table. G2 (closed) `m2/p5a-outcome` is merged and mapped (see AfterEstimate abov
 G4 flash events and fade gain / offset have no producer (flash false, gain 1, offset 0). G5 `measuredSourceHz` is the ingress rate (`HostResync::measuredRateHz`); a cadence-locked source
 uses the store's film rate when its cadence group was written, else the ingress rate.
 
+### What the defaults (b) add per frame (camera_link = report, camera_model = on, every camera_meas_* and camera_use_* off)
+
+Read from the code, not measured. NO hook is registered (`guideWanted` is false: no adapter, no `SetPreEstimateHook`), so `VectorEngine::Estimate` runs the matcher's passes exactly as before.
+
+| Cost | Where | Size |
+|---|---|---|
+| CPU fit | the ONE camera worker thread, once per verified field (cadence repeats have none); `Fitter::Fit` on the readback copy | async: the render thread never waits; p95 not yet measured on the laptop (indicative 9-12 ms CPU) |
+| GPU -> CPU readback of `IVectorEngine::FieldOf(seq)` | D3D11 (the production backend): ONE small copy pass (a shader writes the engine's rgba32f forward field into a VP-owned slot texture by imageStore), ONE native CopyResource into a staging texture and an event query; read later with Map(DO_NOT_WAIT). Not D3D11: `pl_tex_download` into a host-mapped `pl_buf`, `pl_buf_poll(..., 0)`. The backward plane is requested only when the engine gives one (`FieldOf` gives none today) | 16 B per 16x16 block: 1080p 120 x 68 = 8,160 blocks = 130,560 B (0.12 MiB) per pair; 4K 240 x 135 = 32,400 blocks = 518,400 B (0.49 MiB) per pair. Ring of at least 3 slots allocated at attach (about 0.4 MiB at 1080p, 1.5 MiB at 4K); a full ring drops the request visibly |
+| `CameraLane` | CPU only: input-marker headers for about 4 nodes per frame (atomic claims / publishes), the lagged seal (`Resolve`, `ReleaseAfter`), no GPU, no allocation per frame | microseconds |
+| Frame-analysis store reads | `UpdateTiming` (one cadence read per frame) and `DescribePair` (one record read per fit); each copies a `Record` (about 4 KB) under the store mutex | negligible |
+| P8 labels upload | only when labels are wanted (overlay != off, any `camera_use_*`, `camera_labels_gpu`): none with the defaults | 0 |
+| GPU operations added | the one copy pass and the one CopyResource + query per verified field, and nothing else (no guidance counts readback, no label upload, no change to any matcher pass) | |
+
+### Known issue (owner decision): the fit reads the GUIDED live field
+
+`FieldOf(seq)` returns the matcher's LIVE block field of the last successful estimate (HOOKS.md section 7; `MotionWarp::Field()`), and production feeds the fit from exactly that. With every guidance switch off that field is the unguided matcher output, so nothing feeds back. With `camera_meas_model_global` (or any switch that changes the estimate) ON, the matcher's field is the one the camera's own model guided, so the fit re-measures its own guide: diagnosis ac283dae2a47417e5 found a feedback drift of about 0.004 px per pair. The fix is to fit from the engine's seed field (the NVOF / pre-guidance field) instead of the guided live field; it needs a second field accessor on `IVectorEngine` and is not done. Until then, turning on a measurement switch by default (option (a)) carries this drift.
+
 ## Rules this code follows
 
 * **Fill rule.** P7: the lane (camera worker) publishes before the seal; a result after the seal is discarded (SlotSet `Late`,
@@ -147,7 +164,7 @@ uses the store's film rate when its cadence group was written, else the ingress 
 
 ## Activation (report mode, 2026-11-01)
 
-`CameraExtension.h/.cpp` is the H1 adapter in REPORT mode (`[vpv.skeleton] camera_link = report`, off by default): per renderer a
+`CameraExtension.h/.cpp` is the H1 adapter in REPORT mode (`[vpv.skeleton] camera_link = report`, on by default since camera defaults (b)): per renderer a
 `CameraLinkCore` over that renderer's `FrameAnalysis::Store` (found through `SourceFrameTap::StoreFor`), `OnGpuCreated`, the
 Indicator reader through a FrameSeal provider, `OnFrameStart` at Begin (resync driving), `OnPostSubmitGap` after render, status and
 decisions into the hub's status. No vector engine exists yet (P5a), so the core is configured with `p7Wanted = false`: no thread,
@@ -156,7 +173,7 @@ a second (K3: `VP_CAMERA_DUMP=<dir>` writes flow files instead, see below). The 
 
 ## K3: C0 diagnostics (keys, status, dump; 2026-11-07)
 
-Design: `D:\codex\vp-handover\61-design-p2-sourceid-camera-k3-k10.md` section 3.1. All inert and default off; the Original pathway forces every key off.
+Design: `D:\codex\vp-handover\61-design-p2-sourceid-camera-k3-k10.md` section 3.1. camera_model defaults on (camera defaults (b)), every other key off; the Original pathway forces every key off.
 
 | Part | Files | Role |
 |---|---|---|
@@ -206,6 +223,6 @@ Tests: `../../tests/CameraPhaseInterpTests.cpp`. The P9 producer (`CameraSmoothe
 
 ## All settings (complete list)
 
-The link has exactly one key, `camera_link` (`[vpv.skeleton]`, off / report, default off; Original (Bill): off; Config placement: none yet, planned master VP-V page > Pipeline (expert); visible state: the `camera_link` Fallbacks entry and the camera status line; not tiered). Fit options (`twoLayer`, `dynTexture`) are internal `Config` fields. K3 added the `[vpv.camera]` keys (section "K3" above; full table in `../../README.md`). The full table is in `../README.md` ("All settings") and `../../../../control/skeleton/README.md`.
+The link has exactly one key, `camera_link` (`[vpv.skeleton]`, off / report, default report; Original (Bill): off; Config placement: none yet, planned master VP-V page > Pipeline (expert); visible state: the `camera_link` Fallbacks entry and the camera status line; not tiered). Fit options (`twoLayer`, `dynTexture`) are internal `Config` fields. K3 added the `[vpv.camera]` keys (section "K3" above; full table in `../../README.md`). The full table is in `../README.md` ("All settings") and `../../../../control/skeleton/README.md`.
 
 **Downstream consumers (TEMPORAL DETAIL, docs 71 section Q5 and 72):** per-pair homography (P7/P9), the object layer (per-object motion), P8 per-block membership + confidence, and K4 guided residuals.

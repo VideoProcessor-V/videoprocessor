@@ -9,7 +9,7 @@
 //   analysis_lane_chunk_us       0..4000000             (default 0 = derived from the frame period)
 //   analysis_lane_deterministic  auto | on | off        (default auto)
 //   analysis_lane_test_wait_ms   0..4000000             (default 0 = none)
-//   camera_link                  off | report           (default off)
+//   camera_link                  off | report           (default report: camera defaults (b); the camera model needs [vpv.camera] camera_model)
 //   skeleton_gpu_gap             off | after_render     (default off)   70b G5: lane GPU work (P10/P11/P12) in the
 //                                                       AfterRender gap, ahead of the present (visible); off = the GPU
 //                                                       products get no lane (the CPU products' gap is unchanged)
@@ -43,12 +43,12 @@ namespace Vpv
 		struct Settings
 		{
 			VpSkeleton::LaneSettings lane;                 // mode Off by default
-			CameraLinkMode camera = CameraLinkMode::Off;
+			CameraLinkMode camera = CameraLinkMode::Report;   // camera defaults (b): on; the Original pathway forces it off (CameraWanted)
 			GpuGapMode gpuGap = GpuGapMode::Off;           // skeleton_gpu_gap
 			GrainStorage grainStorage = GrainStorage::Full;   // grain_split_storage
 			bool originalPathway = false;                  // [vpv] pipeline_original_pathway = on
 			std::vector<std::string> laneProblems;         // invalid analysis_lane* values (kept at the default)
-			std::vector<std::string> cameraProblems;       // invalid camera_link value (kept off)
+			std::vector<std::string> cameraProblems;       // invalid camera_link value (kept at the default, report)
 
 			bool LaneWanted() const { return !originalPathway && lane.mode != VpSkeleton::LaneSettings::Mode::Off; }
 			bool CameraWanted() const { return !originalPathway && camera == CameraLinkMode::Report; }
@@ -112,7 +112,7 @@ namespace Vpv
 				else if (value == "report")
 					s.camera = CameraLinkMode::Report;
 				else
-					s.cameraProblems.push_back("camera_link '" + camera + "' is not valid (off|report); kept off");
+					s.cameraProblems.push_back("camera_link '" + camera + "' is not valid (off|report); kept report");
 			}
 			std::string pathway;
 			if (config.TryGetString("vpv", "pipeline_original_pathway", pathway) ||

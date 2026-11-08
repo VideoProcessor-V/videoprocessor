@@ -68,6 +68,7 @@ namespace CameraOverlayOffTestsNs
 			for (OverlayMode m : { OverlayMode::Labels, OverlayMode::Residual, OverlayMode::Vectors })
 			{
 				CameraSettings s;
+				s.model = false;   // the model is on by default
 				s.overlay = m;
 				Assert::IsTrue(s.Overlay() == OverlayMode::Off, L"the model is off");
 				s.model = true;
@@ -102,6 +103,7 @@ namespace CameraOverlayOffTestsNs
 		TEST_METHOD(AnOverlayWhileTheModelIsOffIsShownAsInert)
 		{
 			StatusInput in;
+			in.cam.model = false;
 			in.cam.overlay = OverlayMode::Labels;
 			const StatusText t = BuildStatus(in);
 			Assert::IsTrue(AnyMentions(t, "camera_model_overlay=labels"));
