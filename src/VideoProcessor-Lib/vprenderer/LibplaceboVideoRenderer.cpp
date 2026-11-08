@@ -91,7 +91,7 @@
 #include <VP-V/modules/input/signal/ResyncCallSites.h>   // R1 call-site helpers
 #include <VP-V/modules/input/signal/ResyncExtension.h>   // VPV-HOOK: resync Q1 (Shadow, Drive, HostBinding, pulldown step)
 #include <VP-V/modules/motion/estimation/VectorEngineHost.h>   // P5a: the vector engine: state, logic and the host adapter   // VPV-HOOK
-#include <VP-V/modules/input/capture/CaptureHost.h>   // VPV-HOOK P10: the capture extension's binding and host adapter
+#include <VP-V/modules/input/capture/CaptureHost.h>   // P10: the capture extension's binding and host adapter   // VPV-HOOK
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>   // R4a: the re-base decision product P0
 #include <VP-V/modules/scaling/rebase/RebaseWarmupJob.h>   // FX-RB: re-base shader warm-up (call sites only)
 #include <vprenderer/DejudderPolicy.h>
@@ -5120,10 +5120,10 @@ struct LibplaceboVideoRenderer::Impl
 	bool dejudderRgbBt2020 = false;
 	pl_tex dejudderRgbScratch = nullptr;
 	bool rgbGpuLogged = false;
-	void CaptureApplySettings();   // VPV-HOOK P10: defined in VP-V/modules/input/capture/CaptureImpl.inl
-	void CaptureReleaseGpu();   // VPV-HOOK P10: defined in VP-V/modules/input/capture/CaptureImpl.inl
-	bool CaptureConvert(RendererExtension::ConvertContext& cc);   // VPV-HOOK P10: defined in VP-V/modules/input/capture/CaptureImpl.inl
-	void CaptureAfterPublish(RendererExtension::PublishView& pv);   // VPV-HOOK P10: defined in VP-V/modules/input/capture/CaptureImpl.inl
+	void CaptureApplySettings();   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
+	void CaptureReleaseGpu();   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
+	bool CaptureConvert(RendererExtension::ConvertContext& cc);   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
+	void CaptureAfterPublish(RendererExtension::PublishView& pv);   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
 	// entrance_gpu_drain (VP-V/modules/scaling/rebase/EntranceGpuDrain.h, group E): call sites only.
 	// S1 notes every entrance run through EntranceHost::OnStagesRun.
 	EntranceGpuDrain::Drain entranceDrain;
@@ -27551,10 +27551,10 @@ releaseDriftBaseRetention =
 		std::lock_guard<std::mutex> guard(renderMutex);
 		return d3d11 && pl_gpu_is_failed(d3d11->gpu);
 	}
-	Vpv::Capture::HostBinding captureBinding{ this, Vpv::Capture::MakeCaptureHost(*this) };   // VPV-HOOK P10: last member (registered last, removed first)
+	Vpv::Capture::HostBinding captureBinding{ this, Vpv::Capture::MakeCaptureHost(*this) };   // P10: last member (registered last, removed first)   // VPV-HOOK
 };
 #include <VP-V/modules/motion/estimation/VectorEngineEstimate.inl>   // VPV-HOOK P5a-5: the estimate and the engine keeper (Impl members)
-#include <VP-V/modules/input/capture/CaptureImpl.inl>   // VPV-HOOK P10: the capture code (Impl members)
+#include <VP-V/modules/input/capture/CaptureImpl.inl>   // P10: the capture code (Impl members)   // VPV-HOOK
 
 
 namespace
