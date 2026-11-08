@@ -146,7 +146,7 @@ class CheckSharedUnitsTest(unittest.TestCase):
         self.assertEqual(u["duplicates"], 2)
         self.assertEqual(u["inside_owner"], 1)
 
-    def test_u21_motion_engine_instance_signatures(self):
+    def test_u22_motion_engine_instance_signatures(self):
         # SK-W must-land check 2: an NVOF engine instantiated, held by value or aliased, or a VectorStore<...> created, outside motion/estimation is a
         # second engine / a second vector store. Each of these forms is a duplicate outside the owner; the same lines inside the owner, the engine's
         # own static helpers (Engine::InputFormat), a pointer or reference to an engine and a comment-only line are not.
@@ -157,7 +157,7 @@ class CheckSharedUnitsTest(unittest.TestCase):
         _w(self.root, "src/VP-V/modules/motion/other/Store.h", "VectorStore<int> s{ 4 };\nusing Fields = VpMotion::VectorStore<int>;\n")
         _w(self.root, "src/VP-V/modules/motion/other/Ok.h", "auto f = NvOpticalFlow::Engine::InputFormat();\nNvOpticalFlow::Engine* p = nullptr;\nconst NvOpticalFlow::Engine& r = *p;\n// new NvOpticalFlow::Engine in a comment\n")
         _w(self.root, "src/VP-V/modules/motion/estimation/Own.h", "NvOpticalFlow::Engine engine;\nVectorStore<int> s;\n")
-        u = _unit(csu.scan(self.root, baseline={"units": {}}), "U21")
+        u = _unit(csu.scan(self.root, baseline={"units": {}}), "U22")
         by_file = {}
         for h in u["hits"]:
             by_file.setdefault(h["file"].rsplit("/", 1)[-1], []).append((h["line"], h["role"]))
@@ -171,7 +171,7 @@ class CheckSharedUnitsTest(unittest.TestCase):
         self.assertEqual(u["duplicates"], 9)
         self.assertEqual(u["inside_owner"], 2)
 
-    def test_u21_by_value_parameters_and_using_namespace_forms(self):
+    def test_u22_by_value_parameters_and_using_namespace_forms(self):
         # A by-value parameter (an engine copied or moved into a function), `using namespace NvOpticalFlow;` (a bare Engine is then the same type)
         # and a using-declaration are duplicates outside the owner; a reference or pointer parameter is not.
         _w(self.root, "src/VP-V/modules/motion/other/Param.h",
@@ -179,7 +179,7 @@ class CheckSharedUnitsTest(unittest.TestCase):
         _w(self.root, "src/VP-V/modules/motion/other/Using.h",
            "using namespace NvOpticalFlow;\nusing namespace VpMotion::NvOpticalFlow;\nusing NvOpticalFlow::Engine;\nusing NvOpticalFlow::HintedEngine;\n")
         _w(self.root, "src/VP-V/modules/motion/estimation/OwnUsing.h", "using namespace NvOpticalFlow;\nvoid A(NvOpticalFlow::Engine e);\n")
-        u = _unit(csu.scan(self.root, baseline={"units": {}}), "U21")
+        u = _unit(csu.scan(self.root, baseline={"units": {}}), "U22")
         by_file = {}
         for h in u["hits"]:
             by_file.setdefault(h["file"].rsplit("/", 1)[-1], []).append((h["line"], h["role"]))

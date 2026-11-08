@@ -146,7 +146,7 @@ member and the alias table: [HOOKS.md](HOOKS.md).
 * **VRAM.** The producer (`MotionAheadProducer::EnsureSize`) and the long-pair service (`EnsureSize`) declare their ring textures to the governor with
   `NvOpticalFlow::RingBytes(w, h, readback, hint)` through `VpSkeleton::VramUsers` (core/VramUsers.h) as `kUserNvofProducer` (fixed: counted, never shed) and withdraw
   them when the engine is released. The driver's own session memory is not visible to the application and is not counted. DejudderWarp's own optical-flow
-  textures and engine (MV2) are NOT declared: that second NVOF session goes away with SK-MV, and `tools/check_shared_units.py` U21 holds it at its one site.
+  textures and engine (MV2) are NOT declared: that second NVOF session goes away with SK-MV, and `tools/check_shared_units.py` U22 holds it at its one site.
 * **Time.** The producer times 1 pair in 8 (`PassTimers::Sampler`: the GPU idle first, then the engine's completion, on the worker's own device) and posts it to
   `PassTimers::Inbox::Motion()` ("motion: NVOF producer engine (idle to completion)"). The skeleton status shows it; the pass-timer readout needs the host drain
   (a Z3 call site, handed over). The long-pair service posts nothing yet (its `HintedEngine::Run` has no timed form).
