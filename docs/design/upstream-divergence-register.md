@@ -177,6 +177,13 @@ UI (relayed 2026-11-07). Each row: the test, what his UI does now, and the failu
 | WAIVER-CAL-01 | `src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp` testPagesAreAddressedByName | TEMPORARY narrowing: "Calibration" dropped from the navigation-leaf names checked | Calibration is a VP-V sub-page with no leaf of its own in the cal train; coverage moves to CalibrationPageTests::testCalibrationIsASubPageOfVpv. CLOSED BY M2 P8 step 1 (m2/config-c), which restores the Calibration child leaf and puts the name back in this test (TESTHUNK-P8-01) | coordinator (delegated), 2026-11-08; open until P8 step 1 lands |
 | WAIVER-CAL-02 | `docs/audit/footprint-budget.json` | ConfigEditorWindowTests.cpp 3773 -> 3782 (+9), AppMain.cpp 49 -> 50 (+1), measured | cal's audited VPV-HOOK call sites (RegisterConfigProviders, the RunCalibrationPageTests declaration, the --identity kit); later trains take the measured value, never hand-added | coordinator (delegated), 2026-11-08 |
 
+## Owner-approved shared-units waivers
+
+| ID | Where | Waiver | Reason | Status |
+|---|---|---|---|---|
+| WAIVER-P8-01 | `src/VP-V/modules/drive/led_compensation/config_ui/tests/LedDrivePageTests.cpp` `testDynamicDriveIsASubPageBeforeCalibration` | "the Dynamic Drive sub-page has no navigation leaf of its own" inverted to "Dynamic Drive has a navigation child leaf with `vpvChild` = true and `vpvParent` = VP-V; the child and the Drive unit's button open the same page and the button lights the child" | owner 2026-11-07 (doc 60 section 3, P8): every VP-V setting is reachable from the VP-V group of the list, so the sub-page gets a child leaf under the VP-V leaf; `vpvChild`/`vpvParent`, not Bill's `navChild` | coordinator-approved 2026-11-08 (relayed by the M2 finisher); owner informed in the morning summary |
+| WAIVER-P8-02 | `src/VP-V/modules/output/calibration_lut/config_ui/tests/CalibrationPageTests.cpp` `testCalibrationIsASubPageOfVpv` | "the Calibration sub-page has no navigation leaf of its own" inverted to "Calibration has a navigation child leaf with `vpvChild` = true and `vpvParent` = VP-V"; "opening a sub-page lights the VP-V master leaf" replaced by "opening it lights its child leaf" (and the child opens the same page as the button) | same owner rule as WAIVER-P8-01; with its own child leaf the exclusive navigation group lights the child, not the master leaf | coordinator-approved 2026-11-08 (relayed by the M2 finisher); owner informed in the morning summary |
+
 ## Open (not yet a row)
 
 (e2) and (e3) items are in the sweep note, section 5: `D:\codex\videoprocessor\skeleton-notes\divergence-sweep-firstpass.md`. They become rows only after the owner decides revert, gate, or register.

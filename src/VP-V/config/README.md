@@ -52,6 +52,8 @@ The hook has four parts.
    ```
 3. With the other navigation leaves, add one:
    `addLeaf(QStringLiteral("VP-V"), vpvPage)->setObjectName(QStringLiteral("config.openVpv"));`
+   The VP-V leaf closes Bill's list (after Updates), and its sub-pages (Dynamic Drive, Calibration)
+   get child leaves right below it (`VpvConfigPages::addNavigationLeaves`).
 4. Add the source files to the projects:
    - `..\VP-V\config\VpvSection.cpp` in `VideoProcessor-Config.vcxproj`;
    - `..\VP-V\config\VpvSection.cpp` and `..\VP-V\config\tests\VpvConfigTests.cpp` in
@@ -155,3 +157,5 @@ Bill's editor file only gets call sites; the logic is here (header-only):
   item and whose explicit `auto` is a live value (Bill's concrete-only rules are for his keys).
 - Page lookups are by name (`ConfigEditorWindow::pageIndex`, `selectPage(QString)`): Bill's pages
   keep his order and numbers (0-22); Dynamic Drive, Calibration and VP-V follow them (23-25).
+  In the navigation list the VP-V leaf closes Bill's list and has child leaves (Dynamic Drive,
+  Calibration; properties `vpvChild`/`vpvParent`).

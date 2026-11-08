@@ -93,7 +93,7 @@ namespace
 		ConfigEditorWindow window(writeFixture(dir), 0, true);
 		QStringList order;
 		for (QPushButton* button : window.findChildren<QPushButton*>())
-			if (button->property("nav").toBool() && button->objectName().startsWith(QStringLiteral("settingsNavigation.")))
+			if (button->property("nav").toBool())   // by the nav property: Updates and VP-V carry their own object names
 				order << button->text();
 		// Bill's list, in his order and with his text; the VP-V group (master leaf, then its children in
 		// registration order) follows his last entry.
