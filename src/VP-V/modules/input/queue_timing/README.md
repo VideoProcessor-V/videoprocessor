@@ -135,7 +135,8 @@ Chain tests:
 - `QueueDelayHold.inl` (item m): SetQueueDelayBudget, CurrentQueueHold, QueuePolicy (the either/or with Bill's queue
   policy), UpdateQueueDelayHold, HoldTicksUntilDueLocked, WaitForDequeueLocked. `TimedFileFrames.inl` (item l):
   OnTimedVideoFrame, the file slot gate, FileHeadTicksUntilDueLocked. Both are VP-only member definitions of the
-  renderer, included ONCE by LibplaceboVideoRenderer.cpp at the exact place the text stood (the translation unit is
+  renderer, included ONCE by LibplaceboVideoRenderer.cpp where the text stood (both right after EnqueueFrame and before Bill's
+  UpdateFrameRateAndPPM; the translation unit is
   textually unchanged); threads and locks as before (each file's header lists them).
 - `tests/QueueTargetNeverExceedsDesiredTests.cpp`: the owner rule "queue depth is never added for vectors" over every
   vector demand x cadence x look-ahead x credit x queue_timing_fixes.

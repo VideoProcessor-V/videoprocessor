@@ -25,7 +25,8 @@ namespace VideoProcessorTest
 {
 	namespace
 	{
-		// LockedFilmQueueTarget's floor, as the renderer composes it (QueueDelayHold.inl / LibplaceboVideoRenderer.cpp).
+		// LockedFilmQueueTarget's floor, as the renderer composes it (LibplaceboVideoRenderer::LockedFilmQueueTarget,
+		// LibplaceboVideoRenderer.cpp).
 		size_t FilmFloor(int motionDepth, size_t lookahead, bool automatic)
 		{
 			size_t minimum = Pulldown::kLockedQueuePairFrames;

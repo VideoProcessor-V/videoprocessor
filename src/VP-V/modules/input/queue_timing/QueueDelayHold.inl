@@ -4,8 +4,8 @@
 // M2 P10-6a (doc 59 section 5.1 item m): the VP-V delay budget's queue hold (ADR-0020), moved VERBATIM out of
 // LibplaceboVideoRenderer.cpp: SetQueueDelayBudget, CurrentQueueHold, QueuePolicy (the either/or with Bill's queue
 // policy), UpdateQueueDelayHold, HoldTicksUntilDueLocked, kDueWaitRecheckMicros and WaitForDequeueLocked. These are
-// member definitions of LibplaceboVideoRenderer; the renderer includes this file ONCE, at the exact place the text
-// stood, so the translation unit is textually unchanged. No other translation unit may include it. Threads as before:
+// member definitions of LibplaceboVideoRenderer; LibplaceboVideoRenderer.cpp includes this file ONCE where the text stood
+// (right after the TimedFileFrames.inl include, before Bill's UpdateFrameRateAndPPM), so the translation unit is textually unchanged. No other translation unit may include it. Threads as before:
 // SetQueueDelayBudget from the GUI (vpv.presentation_ctl.v1), UpdateQueueDelayHold from the render loop,
 // CurrentQueueHold under m_queueHoldMutex from any thread, HoldTicksUntilDueLocked / WaitForDequeueLocked from the
 // render loop holding m_queueMutex. The state (m_queueHold, m_queueDelayBudgetMs, the policies) stays in the

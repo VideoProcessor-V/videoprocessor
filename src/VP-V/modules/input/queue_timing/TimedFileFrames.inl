@@ -4,7 +4,8 @@
 // M2 P10-7a (doc 59 section 5.1 item l): the renderer's timed file frames (ABI 37, the VP Renderer DirectShow
 // filter), moved VERBATIM out of LibplaceboVideoRenderer.cpp: OnTimedVideoFrame, FileFrameSlotFreeLocked,
 // WaitForFileFrameSlot, CancelFileFrameWait, FileHeadTicksUntilDueLocked. These are member definitions of
-// LibplaceboVideoRenderer; the renderer includes this file ONCE, at the exact place the text stood, so the translation
+// LibplaceboVideoRenderer; LibplaceboVideoRenderer.cpp includes this file ONCE where the text stood (right after EnqueueFrame, before the
+// QueueDelayHold.inl include and Bill's UpdateFrameRateAndPPM), so the translation
 // unit is textually unchanged. No other translation unit may include it. The plugin boundary is P2's
 // vpv.timed_file_frames.v1 (src/VP-V/abi: RendererAbiBridge forwards to these members; VPRendererFilter calls through
 // VpvHostCalls). Threads as before: the file thread (OnTimedVideoFrame, WaitForFileFrameSlot), any thread
