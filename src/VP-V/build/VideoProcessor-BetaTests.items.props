@@ -16,5 +16,14 @@
     <ClCompile Include="..\VP-V\modules\colour\extended_range\ExtendedRange.cpp"/>
     <ClCompile Include="..\VP-V\modules\motion\consumers\RenderedWarp.cpp"/>
     <ClCompile Include="..\VP-V\modules\scaling\output\AdaptiveDownscale.cpp"/>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelGeometry.cpp"/>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelTemporal.cpp"/>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\DynamicTexture.cpp"/>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\StaticHypothesis.cpp"/>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelObjects.cpp"/>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelFit.cpp"/>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelSearchHints.cpp"/>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelMeasurement.cpp"/>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\GuidanceScheduler.cpp"/>
   </ItemGroup>
 </Project>
