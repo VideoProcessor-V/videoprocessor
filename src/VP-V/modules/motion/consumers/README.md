@@ -43,7 +43,23 @@ Aliases left in the renderer (`LibplaceboVideoRenderer.cpp`, one VPV-HOOK block 
 | `dejudderMaskRateLogged`, `dejudderSourceHz` | `RenderAheadChainRatio`, `RenderLocked` (deband weight, pin) | P6 / P4 |
 | `vpTimeline`, `vpTimelineActive`, `vpSkipOutput`, `vpSkipIsUpdate`, `vpFilmUpdates`, `vpOutputPhase`, `vpTimelineLogged`, `vpCaptureRateHz`, `vpGapPhaseScale`, `vpQueueSteering`, `vpQueueGeneration`, `vpQueueErrorReset`, `timelineDisplayRateHold` | `RenderLocked` (scene correction gate, upload reuse, deband content rate), `HoldTicksUntilDueLocked`, the render loop's draw loop (`vpOutputPhase`) and display-repeat either/or, `BuildSigmaDeltaVectorsWithoutExtras` | P6 (IPhaseTimeline) / P10 / P4 |
 
-Open items (owner change, this reset): the de-judder cache stage (`DejudderCacheStage::Register`) and the draw piece (`DrawVpPhasePicture`) stay IN PLACE in `RenderLocked`, one call each at today's position; they are retired when P4 moves the hook block (`CollectHooks` / `OnDraw`).
+Hooks and call sites (M2 P5b): R10 `PlanOutputs` (render loop, renderMutex held: `Impl::PlanVpOutputs`, the smooth-motion mixing log and `TimelinePlanner.h`'s `PlanVpTimeline`), `OnQueue(BacklogFlush)` (the backlog flush that restarts the timeline's steering; appended to H1's `QueueEvent`, distinct from `Flush` = the queue generation's arm), and in-place calls: `ResolveMotionEngine` (the motion_engine either/or), `UpdateDejudderEstimate` -> `RunDejudderPolicy`, `VpStageBFrame`, `DrawVpPhasePicture`, `RegisterDejudderCacheFrame`, `ApplyMotionInvalidate` -> `TakeDejudderHistoryAction` (doc 50 Q4: the `motion-history` reader action; R2 off / shadow / unregistered = the epoch path as before). Unchanged and visible: the "display repeat" fallback line (present_every_vsync paused while VP schedules the refreshes), the D3 `SyncFallback` of the phase interpolation, render-ahead's display-rate fallback (output.presentation, `SelectDejudderDisplayRate`).
+
+H1 amendment R10a (M2 P5b-5, appended only): `QueueEvent::BacklogFlush` (raised by the render loop's backlog flush when it restarts the timing; route: `NotifyQueue` -> hub -> `DejudderExtension::OnQueue` -> the binding -> `vpQueueErrorReset`, exchanged by the next plan; every other `OnQueue` handler ignores it, ResyncExtension does not arm on it), `OutputPlan::arrivalQpc`, `OutputPlan::queueTimingFixes`. `TimelinePlanner.h` holds `PlanVpTimeline`, `TimelineNotPlanned` (no plan this frame - no binding / hub, or a contained throw: no stale timeline flags, the visible "timeline" fallback) and `VpTimelineLine`; `PhaseTimeline.inl` holds `Impl::ResolveMotionEngine`, `Impl::PlanVpOutputs`, `Impl::NoteTimelinePlanned`.
+
+Declared substitutions in the moved code (each the old statement, at the old point): the decision's renderer reads as host calls (`ImplDecisionHost`: the telemetry snapshot, the payload / plane checks, the intent scale, `TimelineDisplayHz`, the clock, the log, the report-a-problem record, the status publish / clear, the engine keeper); the timeline's renderer reads as host calls (`ImplTimelineHost`: the resync reader, the QPC frequency - now read whenever the timeline plans, still pure -, the reader generation, `TimelineDisplayHz`, `VpTimelineWanted`, `LogVpTimeline`); `holdFraction` / `queueTimingFixes` read at the call site (`CurrentQueueHoldFraction`); `LogVpTimeline` formats through `VpTimelineLine` (a 512-byte buffer, then `DebugLog::Log("%s", ...)`: the same text); the draw piece's pure `phasePicture` test after `bAlreadyA`'s first evaluation; `submittedNls != nullptr` evaluated by the cache stage's caller.
+
+Skeleton products (doc 70): the module consumes the vector engine's pairs (P2 forward pairs for the estimate, the P3 field for the warp / interpolator / sigma-delta) through `IVectorEngine` and the renderer's estimate state; it declares one private frame history, the rendered-picture cache (`DejudderRendered::Cache`, A's PRE_OUTPUT picture), justified because the extras and the rendered warp redraw A's processed picture at the refreshes A owns without re-running the chain; it is released with the GPU (`ReleaseDejudder`) and invalidated at every motion invalidation and NLS retry. The policy and timeline state (`DejudderPolicyState`) hold no frames.
+
+Identity tests (CPU, recorded from test-only verbatim copies of the code before the move; the moved code must reproduce them): `DejudderDecisionTableTests` (96 rows, 4 sequences: copy and moved runner), `TimelinePlanTraceTests` (13 scenarios, 236 frames: copy and moved planner), `DejudderHistoryActionTests`, `DejudderExtensionHookTests` (the no-plan guard, the BacklogFlush / PlanOutputs routes through the hub), `ResyncExtensionTests::BacklogFlushDoesNotArm`.
+
+Footprint (`tools/vp_footprint.py`, LibplaceboVideoRenderer.cpp stray lines): 7468 at fork/integ/batch1 746af45b0, 6707 after P5b-5 (P5b-6/7 add one call / one line each).
+
+Open items:
+- Owner change, this reset: the de-judder cache stage (`RegisterDejudderCacheFrame`) and the draw piece (`DrawVpPhasePicture`) stay IN PLACE in `RenderLocked`, one call each at today's position; they are retired when P4 moves the hook block (`CollectHooks` / `OnDraw`).
+- R2 activation: the `motion-history` reader is not yet registered on the FrameSeal (a provider in the resync module, with the motion facade binding); until then `TakeDejudderHistoryAction` always takes the epoch path.
+- The status line's tail segments and the release (`ReleaseDejudder`) are moved verbatim but have no CPU identity test (GPU state); the chain-gate motion subset covers them.
+- With no hub module registered (a renderer built without HubBootstrap, or a test that clears the registry), `PlanOutputs` is not answered: the timeline does not plan, the host's own outputs are drawn and the "timeline" fallback is shown (`NoteTimelinePlanned`).
 
 ### Data flow
 
@@ -78,6 +94,8 @@ Not keys: `dejudder_hold` (only a change-log group name for the four hold/taper 
 ### Fallbacks the user actually sees
 
 Visible ("Fallbacks engaged", one-time notice):
+- `timeline`: the per-refresh timeline did not plan this frame (the de-judder module is not registered for the renderer, or its plan failed); frames are shown at their own times.
+- `display repeat` (output.presentation's entry, raised here): present_every_vsync paused while VP's per-refresh timeline / de-judder extras schedule the refreshes.
 - `entrance once fill`: the source warp's occlusion fill is off on B3's processed planes.
 - `entrance once`: B3 pictures that took the per-picture stages.
 - `look-ahead`: fewer queued frames than the design depth (estimate-ahead and the pairs degrade).
