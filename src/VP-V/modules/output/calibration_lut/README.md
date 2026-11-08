@@ -212,6 +212,8 @@ Chain tests:
 
 ## Known issues / open items
 
+- Licence headers (2026-11-08): all 47 module sources that lacked one now carry `// Copyright(C) 2026 VP-V contributors` + `// SPDX-License-Identifier: GPL-3.0-only`. Each was checked to be created in VP-V history (`git log --follow --diff-filter=A` first-add commit not an ancestor of Bill's a591ad3b; no file name exists in Bill's tree), so no Bill-origin file was touched.
+
 - The move into VP's LAST output hook (pl_shader_custom_lut + BTB/WTW carried; barrier R1; owner agreed) is built behind `calibration_lut_stage = vp`; the default is still `libplacebo`. Open: a GPU test of the hook, the OutputEncodingRepair check, and switching the default after measurement (LED measurement then sees target light, not projector codes).
 - Renderer call sites: the pattern, take-over and output-info call sites already go through the adapter (HOOKS.md, "Status after W1-CAL-B"); P6 (tone-curve and video-target notes) is still open. The adapter fixes of that work (kept reload rejection, attached with the VP stage, the two newer fallback entries, the output-query wait) are live only where the renderer makes the call.
 - `calibration_lut_reload` (planned, see Settings): wire with the Bill merge.
