@@ -417,14 +417,16 @@ int wmain(int argc, wchar_t** argv)
 		printf("COM initialisation failed\n");
 		return 1;
 	}
-	int result = 0;
+	// All COM objects live inside the lambda so they are released before CoUninitialize
+	// (returning with live DeckLink pointers after CoUninitialize crashed in the unloaded DLL).
+	const int result = [&]() -> int
 	{
+	int result = 0;
 		using Microsoft::WRL::ComPtr;
 		ComPtr<IDeckLinkIterator> iterator;
 		if (FAILED(CoCreateInstance(CLSID_CDeckLinkIterator, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&iterator))))
 		{
 			printf("The DeckLink driver is not installed (no DeckLink iterator).\n");
-			CoUninitialize();
 			return 1;
 		}
 		ComPtr<IDeckLink> chosen;
@@ -442,13 +444,11 @@ int wmain(int argc, wchar_t** argv)
 		}
 		if (options.list)
 		{
-			CoUninitialize();
 			return 0;
 		}
 		if (!chosen)
 		{
 			printf("No DeckLink device %d (use --list).\n", options.device);
-			CoUninitialize();
 			return 1;
 		}
 
@@ -459,7 +459,6 @@ int wmain(int argc, wchar_t** argv)
 		if (!input)
 		{
 			printf("Device %d cannot capture.\n", options.device);
-			CoUninitialize();
 			return 1;
 		}
 		if (configuration)
@@ -486,7 +485,6 @@ int wmain(int argc, wchar_t** argv)
 		if (!frames || !thumbs || !events || (options.stamps && !stamps))
 		{
 			printf("Cannot write to %ls\n", options.outDir.c_str());
-			CoUninitialize();
 			return 1;
 		}
 		LARGE_INTEGER frequency{};
@@ -549,7 +547,8 @@ int wmain(int argc, wchar_t** argv)
 		fclose(events);
 		if (stamps)
 			fclose(stamps);
-	}
+		return result;
+	}();
 	CoUninitialize();
 	return result;
 }
