@@ -343,7 +343,10 @@ namespace Vpv
 		{
 			if (st.adapter)
 			{
-				st.adapter->Detach();
+				// The engine is called only while it is KNOWN valid: the directory still returns this very pointer for this host. A renderer
+				// that died without GpuReleased (a stale tap), or an engine that is gone, is dropped without a call.
+				const bool engineValid = st.engine != nullptr && FindEngine(st.host) == st.engine;
+				st.adapter->Detach(engineValid);
 				st.adapter.reset();
 			}
 			if (st.core)
@@ -783,6 +786,9 @@ namespace Vpv
 				}
 				if (!st.graphProblem.empty())
 					fb.push_back("camera_graph: " + st.graphProblem);
+				if (st.liveBuilt && st.lane.MarkerFailures() != 0)
+					fb.push_back("camera_graph: " + std::to_string(st.lane.MarkerFailures()) + " input marker(s) could not be published (an input slot "
+						"was missing); those frames get no fit");
 				if (!st.gpu)
 					fb.push_back("camera_gpu: no render device for this renderer; the fit cannot read the engine's fields back");
 				if (st.adapter)

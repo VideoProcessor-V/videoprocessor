@@ -91,7 +91,7 @@ namespace VideoProcessorTest
 			{
 				CameraLink::CameraLane::Sealed sealed;
 				Assert::IsTrue(rig.Frame(seq, sealed));
-				if (seq < 1 + kLag)
+				if (seq < kLag)
 					Assert::IsFalse(sealed.any, L"nothing has left the window yet");
 				else
 				{
@@ -103,10 +103,11 @@ namespace VideoProcessorTest
 				}
 				rig.Fit(seq);   // the fit of this frame's field is published long before its seal (the window)
 			}
-			Assert::AreEqual<uint64_t>(14 - kLag, sealedFrames);
+			Assert::AreEqual<uint64_t>(14 - kLag + 1, sealedFrames, L"frames 0 (the warm-up frame) .. 8");
 			Assert::AreEqual<uint64_t>(14, rig.core.Counters().published.load(), L"every fit reached its P7 slot");
 			Assert::AreEqual<uint64_t>(0, rig.core.Counters().late.load(), L"none was late");
-			Assert::IsTrue(acceptedFits >= sealedFrames - 1, L"the seal accepted the published fits (the first frame has no lag-1 inputs)");
+			Assert::IsTrue(acceptedFits >= sealedFrames - 2, L"the seal accepted the published fits (the warm-up frame has none)");
+			Assert::AreEqual<uint64_t>(0, rig.lane.MarkerFailures(), L"no input marker failed after the warm-up frame");
 		}
 
 		TEST_METHOD(AFitThatArrivesAfterItsSealIsLateAndNeverPublished)
@@ -159,6 +160,38 @@ namespace VideoProcessorTest
 			const uint64_t sealedBefore = rig.lane.FramesSealed();
 			Assert::IsTrue(rig.Frame(12, sealed), L"a refused call changed nothing: the next frame is accepted");
 			Assert::IsTrue(rig.lane.FramesSealed() >= sealedBefore);
+		}
+
+		TEST_METHOD(TwoHundredFramesWrapTheRingsCleanlyAndReleaseEveryPin)
+		{
+			LaneRig rig;
+			const VpSkeleton::SlotSet* p7 = rig.lane.Table()->Find(VpSkeleton::kP7CameraFit);
+			const size_t ring = p7->Ring();
+			Assert::IsTrue(ring < 100, L"the test wraps the ring many times");
+			uint64_t sealedCount = 0;
+			for (uint64_t seq = 1; seq <= 240; ++seq)
+			{
+				CameraLink::CameraLane::Sealed sealed;
+				Assert::IsTrue(rig.Frame(seq, sealed));
+				if (sealed.any)
+					++sealedCount;
+				rig.Fit(seq);
+			}
+			// A pin that was never released would keep a slot unwritable: the next tenant's Claim / Writable would fail and the fit would be
+			// late, an input marker would fail, or PinRef would give up. None of that happened over 240 frames (> 30 ring wraps).
+			Assert::AreEqual<uint64_t>(240, rig.core.Counters().published.load(), L"every fit reached its slot: no slot stayed pinned");
+			Assert::AreEqual<uint64_t>(0, rig.core.Counters().late.load());
+			Assert::AreEqual<uint64_t>(0, rig.lane.MarkerFailures());
+			Assert::AreEqual<uint64_t>(240 - kLag + 1, sealedCount, L"one frame sealed per call after the window filled");
+			for (size_t i = 0; i < rig.lane.Table()->Count(); ++i)
+			{
+				const VpSkeleton::SlotCounters& c = rig.lane.Table()->At(i).Counters();
+				Assert::AreEqual<uint64_t>(0, c.pinGiveUps.load(), L"PinRef never gave up");
+				Assert::AreEqual<uint64_t>(0, c.overruns.load(), L"no overrun: no slot was reclaimed before its release");
+				Assert::AreEqual<uint64_t>(0, c.doubleSeals.load());
+			}
+			// The newest frames are still readable (their slots are the live tenants after the wraps).
+			Assert::IsTrue(rig.core.CausalRecord(240) != nullptr);
 		}
 
 		TEST_METHOD(MarkersAreOnlyPublishedForTheInputNodes)

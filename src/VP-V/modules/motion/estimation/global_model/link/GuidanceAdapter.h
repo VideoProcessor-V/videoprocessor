@@ -55,7 +55,9 @@ namespace CameraLink
 		// observer mutex; the camera worker holds that mutex while it pumps the lane job. So the host's p4 reader, nextPair hint and anything
 		// they call must NEVER take renderMutex or wait for the render thread, or Detach deadlocks. (CameraLinkCore::SetFitDoneObserver asserts
 		// in debug builds that it is not called from the observer's own thread.)
-		void Detach();
+		// engineValid = false: the engine pointer is not known to be valid any more (the renderer was torn down without a GpuReleased, or the
+		// directory no longer returns it): the hook is dropped WITHOUT calling the engine (the engine, if it exists, logs a left-over hook).
+		void Detach(bool engineValid = true);
 		bool Attached() const { return m_engine != nullptr; }
 		bool Hooked() const { return m_hooked; }
 

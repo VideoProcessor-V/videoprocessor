@@ -1,5 +1,7 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
+// STOPGAP - TO BE RETIRED for skeleton slots once SK-W provides live P2 / P3 / P4 content, consumer declarations and the BeforeRender seal
+// (owner rule: products live in the skeleton). See CameraLane.h.
 #include "CameraLane.h"
 
 #include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
@@ -63,6 +65,7 @@ namespace CameraLink
 		m_lastSeq = 0;
 		m_nextToSeal = 0;
 		m_markers = 0;
+		m_markerFailures = 0;
 		m_sealedFrames = 0;
 		m_fieldMark.clear();
 	}
@@ -95,10 +98,15 @@ namespace CameraLink
 		if (!m_started)
 		{
 			m_started = true;
-			m_nextToSeal = seq;   // nothing before the first frame was ever published: there is nothing to seal there
+			// Warm-up: the frame before the first one gets its markers too (tolerating the failures its lag-1 inputs cause), so the first
+			// real frame finds its lag-1 ancestors (P2m reads P1 at lag 1). It is sealed and released like any frame, or its ring slot
+			// would never come back.
+			const uint64_t warm = seq - 1;
+			PublishMarkers(warm, indicator, true);
+			m_nextToSeal = warm;
 		}
 		m_lastSeq = seq;
-		PublishMarkers(seq, indicator);
+		PublishMarkers(seq, indicator, false);
 		const uint64_t lag = kSealLag;
 		while (m_nextToSeal + lag <= seq)
 		{
@@ -110,7 +118,7 @@ namespace CameraLink
 
 	// Every node but P7..P9, in topological order, as a lane producer would publish it: the ancestors recorded, the honoured stamp
 	// read AFTER the pins. The slot content is empty (see the header): what it carries is the ancestry the seal checks.
-	void CameraLane::PublishMarkers(uint64_t seq, VpIndicator::Indicator& indicator)
+	void CameraLane::PublishMarkers(uint64_t seq, VpIndicator::Indicator& indicator, bool warmUp)
 	{
 		for (size_t i = 0; i < m_table->Count(); ++i)
 		{
@@ -123,7 +131,15 @@ namespace CameraLink
 				continue;
 			VpAncestry::Header& hdr = set.LaneHeader(ticket);
 			VpSkeleton::LaneInputs pins;
-			m_table->LaneAncestors(n.id, seq, hdr, pins);
+			if (!m_table->LaneAncestors(n.id, seq, hdr, pins))
+			{
+				// An input slot is missing: never publish a header with an empty ancestor list (the seal would read it as complete).
+				pins.Unpin();
+				set.Abandon(ticket);
+				if (!warmUp)
+					++m_markerFailures;
+				continue;
+			}
 			hdr.honoured = indicator.StampOf(seq);
 			set.Publish(ticket);
 			pins.Unpin();

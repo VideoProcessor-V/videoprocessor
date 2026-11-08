@@ -112,6 +112,10 @@ P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` 
 
 ## Camera live wiring (default off; what is live and what is not)
 
+> **STOPGAP - TO BE RETIRED.** `CameraLane` is the camera's PRIVATE SlotTable (owner rule: products live in the skeleton). It is retired for skeleton slots once SK-W
+> provides live P2 / P3 / P4 content, the camera consumer declarations in the skeleton graph and the BeforeRender seal; then the markers and the lagged seal are deleted and the
+> camera worker becomes a LaneRunner producer (K1-9).
+
 | Part | Live now | How |
 |---|---|---|
 | P7 fit | yes, with camera_link = report + camera_model = on | `p7Wanted` is set by the keys, NOT by P5a's vector demand (that decision only covers P2/P3 and nothing in a renderer declares P7 as a consumer). The fit reads the engine's verified fields (`IVectorEngine::FieldOf`) through the readback ring |

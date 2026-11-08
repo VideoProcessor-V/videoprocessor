@@ -1,6 +1,12 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
+// *** STOPGAP - TO BE RETIRED. *** This is the camera's PRIVATE SlotTable. Owner rule: products live in the skeleton. It exists only because
+// the skeleton lane cannot carry the camera products yet: no renderer graph declares P7 / P2 / P3 as consumers, nothing publishes P2 / P3 / P4
+// as live-content slots, and the seal of a frame (BeforeRender) is not available to a module. When SK-W provides live P2 / P3 / P4 content,
+// the camera consumer declarations in the skeleton graph and the BeforeRender seal, this class, its markers and its lagged seal are DELETED
+// and P7 / P8 are filled in the skeleton's own table (K1-9: the camera worker becomes a LaneRunner producer).
+//
 // Camera link (camera-live wiring): the camera's own product table, until P7 moves into the skeleton lane (K1-9 / SK-W).
 //
 // WHY IT EXISTS. P7 (camera fit) is a skeleton product: the fit worker claims P7(N) in a SlotSet, pins its ancestors P3 / P4 / P2
@@ -85,10 +91,13 @@ namespace CameraLink
 
 		uint64_t NextFloor() const { return m_nextToSeal; }   // the first frame not sealed yet (P8 gap work below it is pointless)
 		uint64_t MarkersPublished() const { return m_markers; }
+		// Input markers that could not be published after the warm-up frame (LaneAncestors failed: an input slot was missing). Each is
+		// abandoned (never published with an empty ancestor list), counted here and shown by the extension (Fallbacks "camera_graph").
+		uint64_t MarkerFailures() const { return m_markerFailures; }
 		uint64_t FramesSealed() const { return m_sealedFrames; }
 
 	private:
-		void PublishMarkers(uint64_t seq, VpIndicator::Indicator& indicator);
+		void PublishMarkers(uint64_t seq, VpIndicator::Indicator& indicator, bool warmUp);
 		void SealOne(uint64_t seq, VpIndicator::Indicator& indicator, Sealed& out);
 
 		VpSkeleton::Graph m_graph;
@@ -101,7 +110,7 @@ namespace CameraLink
 		bool m_started = false;
 		uint64_t m_lastSeq = 0;
 		uint64_t m_nextToSeal = 0;
-		uint64_t m_markers = 0, m_sealedFrames = 0;
+		uint64_t m_markers = 0, m_markerFailures = 0, m_sealedFrames = 0;
 		std::vector<uint64_t> m_fieldMark;   // seq + 1 at index seq % size: the engine had a field for seq
 	};
 }

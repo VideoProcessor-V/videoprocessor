@@ -287,6 +287,17 @@ namespace VideoProcessorTest
 			Assert::IsNull(rig.ext.AdapterOf(rig.Host()));
 		}
 
+		TEST_METHOD(AnEngineThatIsGoneIsNotCalledAtTeardown)
+		{
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\ncamera_meas_model_global=on\n");
+			rig.Start(6);
+			Assert::AreEqual<size_t>(1, rig.engine.history.size());
+			rig.dir.engine = nullptr;   // the renderer was torn down: the directory no longer returns the engine
+			rig.Life(RE::Lifecycle::GpuReleased);
+			Assert::AreEqual<size_t>(1, rig.engine.history.size(), L"no call into an engine that is not known to be valid");
+			Assert::AreEqual<size_t>(0, rig.ext.HostStates());
+		}
+
 		TEST_METHOD(ASettingsChangeThatTurnsGuidanceOffClearsTheHook)
 		{
 			// The loader re-reads the file: rewrite it without the switch, apply settings.
@@ -310,10 +321,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(TheEnginesOutcomeIsMappedOntoTheCameraOutcome)
 		{
 			// M2's plain-data outcome through the registered hook: narrow idle and the rejection text reach the scheduler's counters.
-			Rig rig(std::string(kLinkOn) + "[vpv.camera]
-camera_model=on
-camera_meas_model_global=on
-");
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\ncamera_meas_model_global=on\n");
 			rig.Start(6);
 			CameraLink::CameraGuidanceAdapter* adapter = rig.ext.AdapterOf(rig.Host());
 			Assert::IsNotNull(adapter);

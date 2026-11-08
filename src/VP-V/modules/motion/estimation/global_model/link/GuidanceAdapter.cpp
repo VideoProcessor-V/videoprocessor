@@ -33,10 +33,10 @@ namespace CameraLink
 		Reconcile();
 	}
 
-	void CameraGuidanceAdapter::Detach()
+	void CameraGuidanceAdapter::Detach(bool engineValid)
 	{
 		// Render thread, renderMutex held (GuidanceAdapter.h LOCK RULE): SetFitDoneObserver below waits for the worker's pump.
-		if (m_hooked && m_engine)
+		if (m_hooked && m_engine && engineValid)
 			m_engine->SetPreEstimateHook(nullptr);   // FIRST: the engine must not call a hook that is going away
 		m_hooked = false;
 		m_core.SetFitDoneObserver(nullptr);          // waits for an observer call in flight on the camera worker
