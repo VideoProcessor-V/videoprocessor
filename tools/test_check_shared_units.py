@@ -171,6 +171,21 @@ class CheckSharedUnitsTest(unittest.TestCase):
         self.assertEqual(u["duplicates"], 9)
         self.assertEqual(u["inside_owner"], 2)
 
+    def test_u22_second_p2_slot_and_hand_made_session_counts(self):
+        # SK-MV: a second P2 slot (the one store of the NVOF pairs) and Sessions::Opened / Closed calls outside the owning folder are duplicates;
+        # a shared_ptr or reference to the slot (a view holder) and the same lines inside the owner are not.
+        _w(self.root, "src/VP-V/modules/motion/other/Slot.h",
+           "auto s = std::make_shared<VpMotion::P2Slot>(16);\nVpMotion::P2Slot own;\nstd::shared_ptr<VpMotion::P2Slot> ok;\nVpMotion::P2Slot& r = *ok;\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Count.h", "NvOpticalFlow::Sessions::Opened(NvOpticalFlow::SessionKind::Engine, 1);\nSessions::Closed(k, a);\n")
+        _w(self.root, "src/VP-V/modules/motion/estimation/OwnSlot.h", "VpMotion::P2Slot own;\nSessions::Opened(k, a);\n")
+        u = _unit(csu.scan(self.root, baseline={"units": {}}), "U22")
+        by_file = {}
+        for h in u["hits"]:
+            by_file.setdefault(h["file"].rsplit("/", 1)[-1], []).append((h["line"], h["role"]))
+        self.assertEqual(by_file["Slot.h"], [(1, "duplicate"), (2, "duplicate")], by_file)
+        self.assertEqual(by_file["Count.h"], [(1, "duplicate"), (2, "duplicate")], by_file)
+        self.assertNotIn("OwnSlot.h", by_file)
+
     def test_u22_by_value_parameters_and_using_namespace_forms(self):
         # A by-value parameter (an engine copied or moved into a function), `using namespace NvOpticalFlow;` (a bare Engine is then the same type)
         # and a using-declaration are duplicates outside the owner; a reference or pointer parameter is not.

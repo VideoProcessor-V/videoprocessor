@@ -140,7 +140,12 @@ REGISTRY = [
                       r"using\s+(\w+::)*NvOpticalFlow::\w*Engine\s*;",
                       r"(using\s+\w+\s*=|typedef)\s*(\w+::)*NvOpticalFlow::\w*Engine",
                       r"VectorStore\s*<",
-                      r"using\s+\w+\s*=\s*(\w+::)*VectorStore"),
+                      r"using\s+\w+\s*=\s*(\w+::)*VectorStore",
+                      # SK-MV: a second P2 slot (the one store of the NVOF pairs) and a hand-made session count (the one-engine guard's table is
+                      # written only by the engines in the owning folder).
+                      r"make_(unique|shared)<\s*(\w+::)*P2Slot\b",
+                      r"\b(\w+::)*P2Slot\s+\w+\s*[;({=\[,)]",
+                      r"\bSessions::(Opened|Closed)\s*\("),
      "allow": []},
 ]
 
