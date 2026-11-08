@@ -23,6 +23,7 @@ void LibplaceboVideoRenderer::OnTimedVideoFrame(VideoFrame& videoFrame,
 	// until here).
 	m_fileSlotGate.Arm();
 	const int64_t callbackQpc = PerformanceCounterNow();
+	const Vpv::Ingress::CallbackGate::Use ingressUse(m_ingressGate); if (!ingressUse) return;   // P10-8 (fix C F2): the Impl outlives this callback
 	if (m_state.load(std::memory_order_acquire) != RendererState::RENDERSTATE_RENDERING)
 		return;
 	if (!FileFrameClock::TimingUsable(timing))

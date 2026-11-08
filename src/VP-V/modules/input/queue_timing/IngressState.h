@@ -12,6 +12,7 @@
 // read by the render loop (cadence, skipped count) and written by its settings refresh. C++14.
 
 #include <vprenderer/CaptureTimestampGap.h>   // CaptureArrival::Tracker
+#include <VP-V/modules/input/queue_timing/CallbackGate.h>
 #include <VP-V/modules/input/queue_timing/PulldownDetector.h>
 
 #include <atomic>
@@ -61,6 +62,9 @@ namespace Vpv
 	const char* m_ingressGapCause = nullptr;
 	uint32_t m_ingressGapFrames = 0;
 	bool m_ingressTimingFixes = true;
+	// M2 P10-8 (fix C F2): the capture / file callbacks run inside a Use of this gate; the renderer closes and drains
+	// it before it resets its Impl (Retire, FinalizeRetirementForShutdown, Build, the destructor).
+	CallbackGate m_ingressGate;
 		};
 	}
 }

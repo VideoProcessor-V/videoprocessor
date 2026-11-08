@@ -27406,6 +27406,7 @@ LibplaceboVideoRenderer::~LibplaceboVideoRenderer()
 	// VP Renderer filter (2026-10-17): in the filter process the running LED drive is parked
 	// for the next graph (DynamicDriveHost::ParkForHoldover).
 	m_dynamicDrive.ParkForHoldover(DynamicDriveContext());
+	m_ingressGate.CloseAndDrain();   // P10-8   // VPV-HOOK
 	m_impl.reset();
 }
 
@@ -27563,6 +27564,7 @@ using VpDiagnostics::RecordRendererFrame;
 void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 {
 	const int64_t callbackQpc = PerformanceCounterNow();
+	const Vpv::Ingress::CallbackGate::Use ingressUse(m_ingressGate); if (!ingressUse) return;   // P10-8: the Impl outlives this callback   // VPV-HOOK
 	if (m_state.load(std::memory_order_acquire) != RendererState::RENDERSTATE_RENDERING)
 		return;
 	// Automatic calibration: patches replace video; frames are not queued.
@@ -27993,7 +27995,9 @@ void LibplaceboVideoRenderer::Build()
 	// D3D11 device/swapchain creation and persistent cache loading can enter the
 	// driver for seconds. Build only captures an immutable construction request;
 	// RenderLoop performs the actual initialization on its own thread.
+	m_ingressGate.CloseAndDrain();   // P10-8: the old Impl (if any) has no callback inside   // VPV-HOOK
 	m_impl.reset(new Impl());
+	m_ingressGate.Open();   // VPV-HOOK
 	m_impl->diagRendererGeneration = m_callbackGeneration;   // report-a-problem rows
 	DiagnosticHistory::Global().RecordDecision("renderer-build", "renderer constructed",
 		static_cast<int64_t>(m_callbackGeneration));
@@ -28656,6 +28660,8 @@ void LibplaceboVideoRenderer::Retire() noexcept
 		m_retirementSucceeded.store(
 			externalStateRestored, std::memory_order_release);
 		if (externalStateRestored)
+			m_ingressGate.CloseAndDrain();   // P10-8: no capture / file callback still inside   // VPV-HOOK
+		if (externalStateRestored)
 			m_impl.reset();
 		m_hasPresentedLiveFrame.store(false, std::memory_order_release);
 		DebugLog::Log(
@@ -28693,6 +28699,7 @@ bool LibplaceboVideoRenderer::FinalizeRetirementForShutdown() noexcept
 		// renderer-local resources are gone and external retry ownership has been
 		// explicitly abandoned for process shutdown. Any transient shared_ptr
 		// released later has a nonblocking renderer destructor.
+		m_ingressGate.CloseAndDrain();   // P10-8   // VPV-HOOK
 		m_impl.reset();
 		return true;
 	}

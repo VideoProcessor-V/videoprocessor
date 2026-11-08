@@ -747,6 +747,7 @@
     <ClCompile Include="..\VP-V\modules\input\queue_timing\tests\PulldownResyncTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\queue_timing\tests\QueueTargetNeverExceedsDesiredTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\queue_timing\tests\IngressPolicyTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\queue_timing\tests\CallbackGateTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncQ0Tests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncAuditTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncInjectScheduleTests.cpp" />
