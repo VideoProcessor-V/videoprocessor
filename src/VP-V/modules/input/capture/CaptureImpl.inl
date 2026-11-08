@@ -247,3 +247,268 @@ void LibplaceboVideoRenderer::Impl::CaptureAfterPublish(RendererExtension::Publi
 		earlyHandoff->RunUpload([&] { return EarlyActive() && earlyUpload->IsOpen() ?
 			std::shared_ptr<void>(earlyUpload->Upload(earlyFrame->GetData(), earlyRowBytes, earlyHeight)) : std::shared_ptr<void>(); });
 }
+
+// Items a and b (P10-4a): the early upload (EarlyRequested, EarlyActive, SyncEarlyUpload, EarlyTexture,
+// BookUploadTimers) and the unpack of raw payloads (UnpackRgbPayload, UnpackDolbyVisionOnCpu, UnpackDolbyVisionPayload,
+// UnpackRawPayload), moved VERBATIM out of the Impl struct (one indentation level less; default arguments stay on the
+// declarations in the Impl). The data members they use and the EarlyTake type stay in the Impl until the R18 / LVRH
+// step. Callers are unchanged: the render upload branches (item g, still in the renderer) and P5a's de-judder
+// next / ahead upload (UnpackRawPayload with sessionFallback false; VectorEngineEstimate.inl). Threads as before:
+// render thread (renderMutex) for all; EarlyRequested / EarlyActive also on the conversion thread (atomics only).
+
+bool LibplaceboVideoRenderer::Impl::EarlyRequested() const
+{
+	return EarlyUploadPolicy::Requested(earlyWanted.load(std::memory_order_acquire) ? EarlyUploadPolicy::Mode::Early :
+		earlyAuto.load(std::memory_order_acquire) ? EarlyUploadPolicy::Mode::Auto : EarlyUploadPolicy::Mode::Render,
+		earlyEfficiency.load(std::memory_order_acquire), lowLatencyQueueActive.load(std::memory_order_acquire));
+}
+
+bool LibplaceboVideoRenderer::Impl::EarlyActive() const
+{
+	return EarlyRequested() && !earlyGuardBlocked.load(std::memory_order_acquire);
+}
+
+void LibplaceboVideoRenderer::Impl::SyncEarlyUpload(size_t frameBytes)
+{
+	const bool requested = EarlyRequested() && d3d11;
+	if (!requested)
+	{
+		if (earlyUpload->IsOpen())
+		{
+			earlyUpload->Close();
+			DebugLog::Log("Early upload: off (%llu frames read early, %llu took the render upload (%llu before the early upload started), %llu waited for a running upload)",
+				static_cast<unsigned long long>(earlyUsed), static_cast<unsigned long long>(earlyFallback),
+				static_cast<unsigned long long>(earlyLate), static_cast<unsigned long long>(earlyWaited));
+		}
+		earlyOpenFailed = false;
+		earlyGuardChecked = false;
+		earlyGuardBlocked.store(false, std::memory_order_release);
+		SyncFallback(FallbackCatalog::EarlyUpload(false, false, std::string()));
+		earlyRenderUploads = FallbackCatalog::EarlyUploadRenderUploads();
+		SyncFallback(earlyRenderUploads.last);
+		return;
+	}
+	SyncFallback(earlyRenderUploads.Current(GetTickCount64()));   // ages out with no eligible payloads
+	if (earlyUpload->IsOpen())
+		return;
+	const SteadyClock::time_point now = SteadyClock::now();
+	if (earlyGuardChecked && now - earlyGuardCheckedAt < std::chrono::seconds(5))
+		return;
+	earlyGuardChecked = true;
+	earlyGuardCheckedAt = now;
+	// Frames in flight (queue, de-judder next / ahead, the one being
+	// filled, a cadence repeat) plus a margin of 3 (owner 2026-10-15);
+	// capped at 1 GB and a quarter of the card's memory. The queue part
+	// follows the queue target (hunt 2 13-timing L4).
+	const int slots = AlphaQueuePolicy::EarlyUploadSlots(earlyUploadQueueTarget.load(std::memory_order_acquire));
+	EarlyUploadPolicy::Input guard;
+	guard.mode = earlyWanted.load(std::memory_order_acquire) ? EarlyUploadPolicy::Mode::Early : EarlyUploadPolicy::Mode::Auto;
+	guard.device = d3d11 && d3d11->device;
+	guard.slots = slots;
+	guard.frameBytes = frameBytes;
+	uint64_t usage = 0, budget = 0;
+	if (QueryMotionEngineBudget(usage, budget))
+	{
+		guard.usageBytes = usage;
+		guard.budgetBytes = budget;
+	}
+	guard.openFailed = earlyOpenFailed;
+	guard.guard = earlyEfficiency.load(std::memory_order_acquire);
+	const EarlyUploadPolicy::Decision decision = EarlyUploadPolicy::Decide(guard);
+	if (decision.reason == EarlyUploadPolicy::Reason::FrameSizeUnknown)
+	{
+		earlyGuardChecked = false;   // not known yet: decide on the next raw frame (no pool, no entry)
+		return;
+	}
+	earlyGuardBlocked.store(!decision.early, std::memory_order_release);
+	if (!decision.early)
+	{
+		const std::string why = decision.FallbackReason();
+		if (!why.empty())
+			SyncFallback(FallbackCatalog::EarlyUpload(true, false, why));
+		return;
+	}
+	if (earlyUpload->Open(d3d11->device, d3d11->gpu, slots))
+	{
+		DebugLog::Log("Early upload: on (%d slots, up to %zu MB; frames uploaded as they arrive on a second device)", slots,
+			earlyUpload->CapBytes() >> 20);
+		SyncFallback(FallbackCatalog::EarlyUpload(true, true, std::string()));
+	}
+	else
+	{
+		earlyOpenFailed = true;
+		earlyGuardBlocked.store(true, std::memory_order_release);
+		DebugLog::Log("Early upload: not available (%s); the render upload", earlyUpload->LastError().c_str());
+		SyncFallback(FallbackCatalog::EarlyUpload(true, false, earlyUpload->LastError()));
+	}
+}
+
+pl_tex LibplaceboVideoRenderer::Impl::EarlyTexture(const QueuedFrame::ConvertedPayload& payload, EarlyUpload::Slot*& slot, EarlyTake* take)
+{
+	std::shared_ptr<void> handle = payload.early;
+	EarlyUploadHandoff::Outcome outcome = EarlyUploadHandoff::Outcome::NoSlot;
+	bool first = false;
+	const double takeStart = PassTimerHook::Hook::NowMs();
+	if (!handle && payload.earlyHandoff)
+		handle = payload.earlyHandoff->Take(&outcome, &first);   // the slot stays alive through the handoff the payload holds
+	const bool waited = outcome == EarlyUploadHandoff::Outcome::WaitedThenEarly || outcome == EarlyUploadHandoff::Outcome::WaitedThenNone;
+	slot = handle ? static_cast<EarlyUpload::Slot*>(handle.get()) : nullptr;
+	pl_tex tex = slot && earlyUpload->IsOpen() ? earlyUpload->Acquire(*slot) : nullptr;
+	if (!tex)
+		slot = nullptr;
+	++(tex ? earlyUsed : earlyFallback);
+	const bool late = outcome == EarlyUploadHandoff::Outcome::Late;   // once per payload (Pending -> Abandoned)
+	earlyLate += late ? 1 : 0;
+	earlyWaited += waited ? 1 : 0;
+	if (first)   // once per early-eligible payload: the visible share of render uploads
+		SyncFallback(earlyRenderUploads.Note(GetTickCount64(), late, !tex && !late, waited));
+	if (take)
+	{
+		take->late = late || outcome == EarlyUploadHandoff::Outcome::AbandonedAgain;
+		take->waitedMs = waited ? PassTimerHook::Hook::NowMs() - takeStart : 0.0;
+	}
+	return tex;
+}
+
+void LibplaceboVideoRenderer::Impl::BookUploadTimers(pl_tex early, const EarlyTake& take, double startMs)
+{
+	if (take.waitedMs > 0.0)
+		passTimerHook.AddCpu("upload: waited for the conversion-thread upload", PassTimers::Kind::CpuWait, take.waitedMs);
+	passTimerHook.AddCpu(early ? "upload: unpack submit (early slot)" : take.late ?
+		"upload: CPU copy + unpack submit (render thread, early upload not started)" : "upload: CPU copy + unpack submit (render thread)",
+		PassTimers::Kind::CpuWork, PassTimerHook::Hook::NowMs() - startMs - take.waitedMs);
+}
+
+bool LibplaceboVideoRenderer::Impl::UnpackRgbPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, bool bt2020, pl_tex& rgb, pl_tex& luma)
+{
+	if (!payload.Raw() || !d3d11)
+		return false;
+	if (!rgbUnpack)
+		rgbUnpack = std::make_unique<GpuRgbUnpack>(log, d3d11->gpu);
+	SyncEarlyUpload(payload.rawBytes);
+	EarlyUpload::Slot* slot = nullptr;
+	const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
+	EarlyTake take;
+	const pl_tex early = EarlyTexture(payload, slot, &take);
+	bool unpacked = rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
+		rgb, luma, false, early);
+	if (slot)
+		earlyUpload->Used(*slot);
+	BookUploadTimers(early, take, uploadCpuStart);
+	if (!unpacked && early)
+		unpacked = rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, rgb, luma);
+	if (unpacked)
+	{
+		if (!rgbGpuLogged)
+		{
+			const VideoFrameEncoding e = payload.rawEncoding;
+			DebugLog::Log("Native RGB ingest: %s unpacked on the GPU to RGB 4:4:4 (%dx%d, no CPU conversion)",
+				e == VideoFrameEncoding::R210 ? "r210" : e == VideoFrameEncoding::R12B ? "R12B" :
+				e == VideoFrameEncoding::R12L ? "R12L" : e == VideoFrameEncoding::R10b ? "R10b" :
+				e == VideoFrameEncoding::R10l ? "R10l" : e == VideoFrameEncoding::ARGB_8BIT ? "ARGB" : "BGRA", width, height);
+			rgbGpuLogged = true;
+		}
+		return true;
+	}
+	if (!rgbGpuFailed.exchange(true))
+	{
+		DebugLog::Log("Native RGB ingest: the GPU unpack failed (%s); the CPU conversion for the rest of the session",
+			rgbUnpack->Error().c_str());
+		EngageFallback("native RGB GPU unpack", "CPU conversion to 10-bit 4:2:0 for the session: " + rgbUnpack->Error());
+	}
+	return false;
+}
+
+bool LibplaceboVideoRenderer::Impl::UnpackDolbyVisionOnCpu(const QueuedFrame::ConvertedPayload& payload, int width, int height, std::vector<BYTE>& pixels)
+{
+	if (!payload.Raw() || !payload.dvTunnelRaw || width <= 0 || height <= 0 ||
+		payload.rawRowBytes < static_cast<size_t>(width) * 4 ||
+		payload.rawBytes < payload.rawRowBytes * static_cast<size_t>(height))
+		return false;
+	std::lock_guard<std::mutex> formatterGuard(formatterMutex);
+	auto* dv = dynamic_cast<CRGBDolbyVisionTunnelFormatter*>(formatter.get());
+	const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
+	if (!dv || !formatterState || !formatterState->displayMode ||
+		formatterState->videoFrameEncoding != payload.rawEncoding ||
+		static_cast<size_t>(dv->GetOutFrameSize()) != bytes ||
+		static_cast<size_t>(formatterState->BytesPerRow()) != payload.rawRowBytes)
+		return false;
+	pixels.resize(bytes);
+	return dv->UnpackPicture(payload.rawFrame->GetData(), pixels.data(), payload.dvTunnelHighAligned);
+}
+
+bool LibplaceboVideoRenderer::Impl::UnpackDolbyVisionPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],
+	bool sessionFallback)
+{
+	// After a failure this session the payloads still in flight go straight
+	// to the CPU fallback (no GPU retry per frame, no burst of late frames).
+	if (dvGpuFailed.load(std::memory_order_acquire))
+		return false;
+	GpuDolbyVisionTunnelUnpack& unpack = dvUnpack.Unpacker(log, d3d11->gpu);
+	SyncEarlyUpload(payload.rawBytes);
+	EarlyUpload::Slot* slot = nullptr;
+	const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
+	EarlyTake take;
+	const pl_tex early = EarlyTexture(payload, slot, &take);
+	bool unpacked = unpack.Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
+		payload.dvTunnelHighAligned, planes, early);
+	if (slot)
+		earlyUpload->Used(*slot);
+	BookUploadTimers(early, take, uploadCpuStart);
+	if (!unpacked && early)   // the early texture refused: the frame itself
+		unpacked = unpack.Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
+			payload.dvTunnelHighAligned, planes);
+	return dvUnpack.Finish(unpacked, width, height, payload.dvTunnelHighAligned, sessionFallback, dvGpuFailed,
+		[this](const char* id, const std::string& reason) { EngageFallback(id, reason); });
+}
+
+bool LibplaceboVideoRenderer::Impl::UnpackRawPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],
+	bool sessionFallback)
+{
+	if (!payload.Raw() || !d3d11)
+		return false;
+	if (payload.dvTunnelRaw)
+		return UnpackDolbyVisionPayload(payload, width, height, planes, sessionFallback);
+	if (!captureUnpack)
+		captureUnpack = std::make_unique<GpuCaptureUnpack>(log, d3d11->gpu);
+	SyncEarlyUpload(payload.rawBytes);
+	EarlyUpload::Slot* slot = nullptr;
+	const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
+	EarlyTake take;
+	const pl_tex early = EarlyTexture(payload, slot, &take);
+	bool unpacked = captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
+		planes, early);
+	if (slot)
+		earlyUpload->Used(*slot);
+	BookUploadTimers(early, take, uploadCpuStart);
+	if (!unpacked && early)   // the early texture refused: the frame itself
+		unpacked = captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, planes);
+	if (unpacked)
+	{
+		if (!captureGpuLogged)
+		{
+			DebugLog::Log("Capture path gpu: %s unpacked on the GPU (%dx%d, no CPU conversion)",
+				payload.rawEncoding == VideoFrameEncoding::V210 ? "V210" : "UYVY/HDYC", width, height);
+			captureGpuLogged = true;
+		}
+		return true;
+	}
+	// The de-judder's next / ahead frame: that frame only (the de-judder
+	// holds once); the picture's own frames decide the session.
+	if (!sessionFallback)
+	{
+		DebugLog::Log("Capture path gpu: a de-judder frame's GPU unpack failed (%s); that frame skipped",
+			captureUnpack->Error().c_str());
+		return false;
+	}
+	if (!captureGpuFailed.exchange(true))
+	{
+		DebugLog::Log("Capture path gpu: the GPU unpack failed (%s); the CPU formatters for the rest of the session",
+			captureUnpack->Error().c_str());
+		// F-3 (m2-dv findings): the CPU formatters keep P210 4:2:2 for V210 / UYVY / HDYC unless the
+		// P010 conversion is forced, so the entry no longer claims 4:2:0.
+		EngageFallback("capture GPU unpack", "CPU formatters for the session: " + captureUnpack->Error());
+	}
+	return false;
+}
+
