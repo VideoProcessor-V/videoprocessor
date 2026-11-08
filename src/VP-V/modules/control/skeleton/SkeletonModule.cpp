@@ -604,6 +604,7 @@ namespace Vpv
 				else
 					hosts_.Remove(f.host, true);
 				gpuSlots_.Remove(f.host, true);   // the pl_gpu is going away: the dispatcher was released by Teardown above
+				EraseExternal(f.host);   // a renderer recreated at this address never inherits the old one's external demand
 				break;
 			}
 			default:
@@ -624,6 +625,7 @@ namespace Vpv
 				// the old state's seal hooks, tap and lane belong to the dead one.
 				Teardown(st, false, false);   // the dead renderer's device objects are not ours to destroy
 				hosts_.Remove(host, false);
+				EraseExternal(host);          // nor is its external demand (declared for the dead renderer)
 				st.reset();
 			}
 			if (!s.LaneWanted())
@@ -768,6 +770,34 @@ namespace Vpv
 			e.products = publishedOutside;
 			external_.push_back(std::move(e));
 			externalVersion_.fetch_add(1, std::memory_order_release);
+		}
+
+		size_t SkeletonModule::EraseExternal(const void* host)
+		{
+			std::lock_guard<std::mutex> lock(externalMutex_);
+			size_t erased = 0;
+			for (size_t i = 0; i < external_.size();)
+			{
+				if (external_[i].host == host)
+				{
+					external_.erase(external_.begin() + static_cast<std::ptrdiff_t>(i));
+					++erased;
+				}
+				else
+					++i;
+			}
+			if (erased != 0)
+				externalVersion_.fetch_add(1, std::memory_order_release);
+			return erased;
+		}
+
+		size_t SkeletonModule::ExternalEntriesOf(const void* host) const
+		{
+			std::lock_guard<std::mutex> lock(externalMutex_);
+			size_t n = 0;
+			for (const ExternalEntry& e : external_)
+				n += e.host == host ? 1u : 0u;
+			return n;
 		}
 
 		void SkeletonModule::ClearExternalDemand(const void* host, const void* owner)

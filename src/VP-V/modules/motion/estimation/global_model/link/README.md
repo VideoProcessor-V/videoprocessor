@@ -133,6 +133,8 @@ P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` 
 | `ReleaseAfter(seq)` after each lagged seal (the N2 retire: a frame's slots are released only after it was sealed) | the bridge seals late, so it must also retire late | the skeleton retires P7 / P8 (and the ancestors they pin) after their lagged seal |
 | (not in the bridge) the skeleton demand: `SetExternalDemand(host, owner, DeclareCameraConsumers(LiveCameraDemand(labels)), {P7, P8})` | see "No skeleton demand yet" below | declared in `CameraExtension::Reconcile` while the fit is wanted, cleared when off / at GpuReleased |
 
+**Shown while it runs.** While the bridge carries the fit, Ctrl+I shows `camera: private lag bridge (P7 / P8 sealed at N+6 in the camera's own table, not in the skeleton slots) until SK-W2` and Fallbacks the entry `camera_lag_bridge: <same text>` (`CameraExtension::kLagBridgeId` / `LagBridgeText()`); nothing with the camera off (test `TheLagBridgeIsShownWhileItCarriesTheFitAndNothingWhenTheCameraIsOff`). SK-W2 removes it with the bridge.
+
 **No skeleton demand yet (decision, camera-live step 2).** `publishedOutside` only stops the skeleton from attempting a live fill: the frame is still sealed
 absent and counted (`ExternalDeclined`, "Analysis: products published outside the lane ...") on EVERY frame, and the demand also sets `feedNeeded` /
 `SetCameraFitWanted` (SkeletonModule.cpp ~l.1296 / ~l.1381), so the engine feed would publish P2m / P3 slots that nothing consumes. No SK-W mechanism lets a

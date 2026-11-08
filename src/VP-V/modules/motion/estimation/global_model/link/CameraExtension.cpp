@@ -246,6 +246,12 @@ namespace Vpv
 				Teardown(st, false);
 		}
 
+		std::string CameraExtension::LagBridgeText()
+		{
+			return "private lag bridge (P7 / P8 sealed at N+" + std::to_string(static_cast<int>(CameraLink::CameraLane::kSealLag)) +
+				" in the camera's own table, not in the skeleton slots) until SK-W2";
+		}
+
 		bool CameraExtension::Active(const void* host) const
 		{
 			const std::shared_ptr<CameraHostState> st = hosts_.Find(host);
@@ -814,6 +820,14 @@ namespace Vpv
 				if (st.liveBuilt && st.lane.MarkerFailures() != 0)
 					fb.push_back("camera_graph: " + std::to_string(st.lane.MarkerFailures()) + " input marker(s) could not be published (an input slot "
 						"was missing); those frames get no fit");
+				if (st.liveBuilt)
+				{
+					// Standing state, never log-only (Ctrl+I and Fallbacks): P7 / P8 live in the camera's private lag bridge, not in the skeleton
+					// slots, until SK-W2 seals them at N + lag in the skeleton lane (link/README.md "Lag bridge until SK-W2").
+					const std::string bridge = std::string(kLagBridgeId) + ": " + LagBridgeText();
+					lines.push_back("camera: " + LagBridgeText());
+					fb.push_back(bridge);
+				}
 				if (!st.gpu)
 					fb.push_back("camera_gpu: no render device for this renderer; the fit cannot read the engine's fields back");
 				if (st.adapter)

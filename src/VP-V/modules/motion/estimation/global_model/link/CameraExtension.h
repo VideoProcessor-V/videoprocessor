@@ -54,6 +54,10 @@ namespace Vpv
 			static constexpr const char* kLineKey = "camera";
 			static constexpr const char* kReportLine =
 				"camera: report mode; fit idle (no vector engine yet, P5a pending); guided matching (K4) off";
+			// The standing status while the lag bridge carries the fit (camera-live step 2, until SK-W2): the Ctrl+I line "camera: <text>" and
+			// the Fallbacks entry "camera_lag_bridge: <text>". Never log-only.
+			static constexpr const char* kLagBridgeId = "camera_lag_bridge";
+			static std::string LagBridgeText();
 
 			// Where the renderer's vector engines are looked up; empty = the hub's Query("vpv.vector_engine.v1") (tests pass a fake).
 			using EngineDirectoryProvider = std::function<VpMotion::IVectorEngineDirectory*()>;

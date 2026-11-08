@@ -117,6 +117,9 @@ namespace Vpv
 			void SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
 				const std::vector<VpSkeleton::ProductId>& publishedOutside) override;
 			void ClearExternalDemand(const void* host, const void* owner) override;
+			// External-demand entries held for `host` (tests / diagnostics). Every entry of a host is erased at its GpuReleased / Shutdown and when
+			// a new renderer is found at the address of a dead one, so a renderer recreated at the same pointer never inherits a stale demand.
+			size_t ExternalEntriesOf(const void* host) const;
 			// The engine of a renderer (null = none). Default: Query("vpv.vector_engine.v1") -> IVectorEngineDirectory::EngineFor(host). Tests inject a fake.
 			using EngineProvider = std::function<VpMotion::IVectorEngine*(const void* host)>;
 			void SetEngineProviderForTesting(EngineProvider provider) { engineProvider_ = std::move(provider); }
@@ -233,6 +236,7 @@ namespace Vpv
 		private:
 			void Reconcile(const void* host, int originalFlag);
 			void Teardown(const std::shared_ptr<HostState>& st, bool releaseSlot, bool gpuAlive = true);
+			size_t EraseExternal(const void* host);   // every external-demand entry of `host` (returns how many)
 			void Begin(HostState& st, int64_t seq);
 			void AfterRender(HostState& st, int64_t seq);
 			void Refresh(HostState& st);

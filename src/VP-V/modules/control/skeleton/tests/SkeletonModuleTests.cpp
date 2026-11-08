@@ -1102,6 +1102,37 @@ namespace SkeletonModuleTestsNs
 			Assert::IsFalse(eng.fitWanted, L"and the engine is told");
 		}
 
+		// A renderer released (or shut down) and recreated at the same address never inherits the old one's external demand.
+		TEST_METHOD(AReleasedHostLosesItsExternalDemandSoARecreatedOneStartsClean)
+		{
+			FakeEngine eng;
+			Rig rig(Lane("on"));
+			rig.sk.SetEngineProviderForTesting([&eng](const void*) { return &eng; });
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			int ownerA = 0, ownerB = 0, otherHost = 0;
+			rig.sk.SetExternalDemand(rig.Host(), &ownerA, CameraConsumers(), { VpSkeleton::kP7CameraFit });
+			rig.sk.SetExternalDemand(rig.Host(), &ownerB, {}, {});
+			rig.sk.SetExternalDemand(&otherHost, &ownerA, CameraConsumers(), {});
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			Assert::AreEqual<size_t>(2, rig.sk.ExternalEntriesOf(rig.Host()));
+			Assert::IsTrue(rig.sk.LaneOf(rig.Host())->State()->graph.Has(VpSkeleton::kP7CameraFit));
+			// The declaring components never cleared (they died with the renderer): the module erases every entry of the host itself.
+			rig.Life(RE::Lifecycle::GpuReleased);
+			Assert::AreEqual<size_t>(0, rig.sk.ExternalEntriesOf(rig.Host()), L"all entries of the released host are gone");
+			Assert::AreEqual<size_t>(1, rig.sk.ExternalEntriesOf(&otherHost), L"another renderer's entry is untouched");
+			rig.Life(RE::Lifecycle::GpuCreated);   // a renderer at the same pointer
+			Assert::AreEqual<size_t>(0, rig.sk.ExternalEntriesOf(rig.Host()), L"nothing inherited");
+			// Shutdown erases too.
+			rig.sk.SetExternalDemand(rig.Host(), &ownerA, CameraConsumers(), {});
+			Assert::AreEqual<size_t>(1, rig.sk.ExternalEntriesOf(rig.Host()));
+			rig.Life(RE::Lifecycle::Shutdown);
+			Assert::AreEqual<size_t>(0, rig.sk.ExternalEntriesOf(rig.Host()));
+			rig.sk.ClearExternalDemand(&otherHost, &ownerA);
+			Assert::AreEqual<size_t>(0, rig.sk.ExternalEntriesOf(&otherHost));
+		}
+
 		// camera-live step 2: the demand entry a component reaches through the hub query (without including this module), on a REAL module.
 		TEST_METHOD(TheExternalDemandQueryGivesTheModulesOwnSetAndClear)
 		{

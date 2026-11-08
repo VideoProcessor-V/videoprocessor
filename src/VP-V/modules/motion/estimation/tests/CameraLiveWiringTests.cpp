@@ -457,6 +457,42 @@ namespace VideoProcessorTest
 
 		// ---- camera-live step 2: the lag bridge on the lease path -------------------------------------------------------------
 
+		// The lag bridge is a standing state, never log-only: Ctrl+I and Fallbacks say so while it carries the fit, nothing with the camera off.
+		TEST_METHOD(TheLagBridgeIsShownWhileItCarriesTheFitAndNothingWhenTheCameraIsOff)
+		{
+			const std::string text = CameraExtension::LagBridgeText();
+			Assert::IsTrue(text.find("private lag bridge") != std::string::npos);
+			Assert::IsTrue(text.find("N+6") != std::string::npos, L"the seal lag in the text (kSealLag)");
+			Assert::IsTrue(text.find("until SK-W2") != std::string::npos);
+			const std::string entry = std::string(CameraExtension::kLagBridgeId) + ": " + text;
+			{
+				Rig off("[general]\nx=1\n");
+				off.Start(6);
+				Assert::IsFalse(Has(off.Lines(RE::StatusKind::Lines), "lag bridge"));
+				Assert::IsFalse(Has(off.Lines(RE::StatusKind::Fallbacks), CameraExtension::kLagBridgeId), L"camera off: nothing");
+			}
+			{
+				Rig report(kLinkOn);
+				report.Start(6);
+				Assert::IsFalse(Has(report.Lines(RE::StatusKind::Fallbacks), CameraExtension::kLagBridgeId), L"no fit: no bridge, nothing shown");
+			}
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\n");
+			rig.Start(6);
+			Assert::IsTrue(rig.ext.LiveBuilt(rig.Host()));
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Lines), ("camera: " + text).c_str()), L"the Ctrl+I line");
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), entry.c_str()), L"the Fallbacks entry: id and text");
+			// The fit turned off: the bridge is released and the entry goes.
+			{
+				std::ofstream out(rig.cfg.path, std::ios::binary | std::ios::trunc);
+				out << std::string(kLinkOn);
+			}
+			rig.Life(RE::Lifecycle::SettingsApplied);
+			for (int64_t s = 7; s <= 8; ++s)
+				rig.Frame(s);
+			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Fallbacks), CameraExtension::kLagBridgeId));
+			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Lines), "lag bridge"));
+		}
+
 		TEST_METHOD(TheCameraRunsOnTheLagBridgeWithoutTheSkeletonLane)
 		{
 			// No skeleton module and no analysis lane: until SK-W2 the camera declares nothing to the skeleton and does not depend on its lane;
