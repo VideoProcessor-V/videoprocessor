@@ -27629,7 +27629,7 @@ LibplaceboVideoRenderer::LibplaceboVideoRenderer(
 
 LibplaceboVideoRenderer::~LibplaceboVideoRenderer()
 {
-	m_abiBridge.reset(); // VPV-HOOK: before the render and conversion threads and Impl go
+	m_abiBridge.reset(); // VPV-HOOK
 	if (m_stopWorker.joinable())
 		m_stopWorker.join();
 	{

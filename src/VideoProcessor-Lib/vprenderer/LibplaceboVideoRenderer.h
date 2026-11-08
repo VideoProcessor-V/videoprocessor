@@ -3,7 +3,7 @@
 #include "PreparedOutwardWindow.h"
 
 #include <IRenderer.h>
-#include <VP-V/abi/VpvInterfaces.h> // VPV-HOOK: the types of the methods that are no longer IVideoRenderer virtuals
+#include <VP-V/abi/VpvInterfaces.h> // VPV-HOOK
 #include <StartupPresentationReadiness.h>
 #include <AnalysisFrame.h>
 #include <vprenderer/OptionalAnalysisWorker.h>
@@ -441,7 +441,7 @@ private:
 	std::atomic_bool m_stopWorkerStarted{false};
 
 	std::unique_ptr<Impl> m_impl;
-	std::unique_ptr<Vpv::RendererAbiBridge> m_abiBridge; // VPV-HOOK: declared after m_impl so it is destroyed first
+	std::unique_ptr<Vpv::RendererAbiBridge> m_abiBridge; // VPV-HOOK
 	std::shared_ptr<const ConfigFile> m_rendererConfiguration;
 	std::shared_ptr<const ConfigFile> m_applicationConfiguration;
 	std::shared_ptr<const ConfigFile> m_buildConfiguration;

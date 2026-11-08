@@ -159,7 +159,7 @@ namespace
             DebugLog::Log("VP Renderer plugin flavor mismatch: path=%ls", pluginPath.c_str());
             return refuse(result.module, "VP Renderer DLL refused: flavor mismatch (Beta/non-Beta folder swapped).");
         }
-		if (!Vpv::PluginGuard::Check(result.module, pairing)) return refuse(result.module, pairing); // VPV-HOOK: the VP-V extension ABI export (src/VP-V/abi)
+		if (!Vpv::PluginGuard::Check(result.module, pairing)) return refuse(result.module, pairing); // VPV-HOOK
 		result.startupReadiness = reinterpret_cast<VideoProcessorLibplaceboGetStartupReadinessFn>(
 			GetProcAddress(result.module, VP_LIBPLACEBO_STARTUP_READINESS_EXPORT));
 		result.getHdrStatus = reinterpret_cast<VideoProcessorLibplaceboGetHdrStatusFn>(

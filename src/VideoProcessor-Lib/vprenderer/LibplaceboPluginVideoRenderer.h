@@ -104,7 +104,7 @@ public:
 		double& captureToTargetMs) const override;
 	bool GetPresentationTimingStatus(CString& status) const override;
 	void SetPostStallResetTelemetrySuppressedUntil(uint64_t untilMs) override;
-	void* QueryExtension(const char* iid) override; // VPV-HOOK: the VP-V extension interfaces live in the plugin (src/VP-V/abi)
+	void* QueryExtension(const char* iid) override; // VPV-HOOK
 	bool SupportsNativeStatsOverlay() const override;
 	bool SetNativeStatsOverlay(const uint8_t* pixels, size_t byteCount,
 		int width, int height, int stride) override;
