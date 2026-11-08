@@ -124,12 +124,12 @@ namespace Vpv
 			ResetEnabledMirror(QAbstractButton* bills, QAbstractButton* vpv) : QObject(vpv), bills_(bills), vpv_(vpv)
 			{
 				bills->installEventFilter(this);
-				vpv->setEnabled(bills->isEnabled());
+				vpv->setEnabled(!bills->testAttribute(Qt::WA_Disabled));   // his own flag: a greyed parent does not count
 			}
 			bool eventFilter(QObject* watched, QEvent* event) override
 			{
 				if (watched == bills_ && event->type() == QEvent::EnabledChange && vpv_)
-					vpv_->setEnabled(bills_->isEnabled());
+					vpv_->setEnabled(!bills_->testAttribute(Qt::WA_Disabled));
 				return false;
 			}
 		private:
