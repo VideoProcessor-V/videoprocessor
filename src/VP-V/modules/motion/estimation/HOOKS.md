@@ -30,11 +30,11 @@ thread. `Ui` = UI / config thread.
 | Member (State field) | Writers | Readers | Protection |
 |---|---|---|---|
 | `vectorDemand` | Rt (`UpdateVectorEngine`) | Rt; Loop (`motionAheadEngaged` log text: `lowLatencyAllowed`, 33942) | none: plain struct read by Loop (unchanged from before the move; benign torn read at worst of a log text) |
-| `queueAheadCapacity` | Loop (queue pass) | Rt, Loop | atomic |
+| `queueAheadCapacity` | Loop (queue pass) | Rt (`VectorDemandInput`), Loop | atomic |
 | `motionAheadBackward`, `motionAheadDepth`, `motionAheadConfigured` | Rt (`PlanProducer`) | Loop, Rt | atomics (acquire/release) |
 | `motionAheadEngaged` | Loop (engage/disengage), **Rt** (`PlanProducer`, two writes) | Loop, Rt | **atomic since this package** (was a plain bool written under two different locks: doc 52 D-3, no value change) |
 | `motionAheadEngagedGeneration`, `motionAheadPrev*` | Loop | Loop | single thread |
-| `motionProducer` (the unique_ptr) | Rt (`PlanProducer`: create, stop, reset) | Rt; **Loop** (33716, 33720, 33959, 33988: `motionProducer && ...->LastSubmitted()`, `->Submit`) | **none. Existing hazard, unchanged by P5a** (byte-identical rule): the loop dereferences the pointer while the render thread may `reset()` it when the producer is no longer wanted. The window is small (reset only on settings change / low latency / release past the keep-briefly rule) but it is a use-after-free if the loop is inside `LastSubmitted()`. Fix options for the 2A audit: `std::shared_ptr` with atomic load, or have the loop take the pointer under a small mutex the reset also takes. Not done here. |
+| `motionProducer` (the unique_ptr) | Rt (`PlanProducer`: create via `motionProducer = std::move(producer)`, stop, reset) | Rt; **Loop** (33716, 33720, 33959, 33988: `motionProducer && ...->LastSubmitted()`, `->Submit`) | **none. Existing hazard, unchanged by P5a** (byte-identical rule; first audit: not better, not worse). The loop null-checks at 33959 and dereferences at 33988 with `PrepareFrameAnalysis` (a conversion) in between, so the window is the whole per-frame hand-off, not only `LastSubmitted()`; a `reset()` destroys the `Producer` including the mutex `Submit` locks (use-after-free on a mutex), and the creating `std::move` assignment is a racing write to the same pointer. Fix options for the 2A audit: `std::shared_ptr` with atomic load, or a small mutex the loop and the render thread both take. Not done here. |
 | `motionEngineReady` | Rt | Any | atomic (no reader left in the renderer file) |
 | `motionValidity` | Any (`Invalidate`), Rt (`Consume`) | Any | atomics inside `MotionValidity::State` |
 | `motionValiditySeen`, counters (`motionInvalidations`, log tick/cause, `motionRecoveryLogPending`) | Rt | Rt | single thread |
@@ -60,7 +60,7 @@ Declared right after the `vectorEngine` member, reference to the field of the sa
 | Alias | Readers outside P5a | Deleted by |
 |---|---|---|
 | `vectorDemand` | the whole pass: P4 (adaptive stage, entrance), P5b/c (extras, interpolator, dither), render loop log | P5b/P4 (last reader), P6 |
-| `queueAheadCapacity` | render loop (queue pass, engage depth) | P10 / T1 |
+| `queueAheadCapacity` | render loop (queue pass, engage depth), `VectorDemandInput` | P10 / T1 |
 | `motionAheadBackward`, `motionAheadDepth`, `motionAheadConfigured` | render loop (queue pass, submit) | P5a-6 (with item i, after T1) |
 | `motionAheadEngaged`, `motionAheadEngagedGeneration`, `motionAheadPrev*` | render loop (engage rule, break rule) | P5a-6 |
 | `motionProducer` | render loop; `RunDejudderEstimate`, `EstimateAhead` (item f) | P5a-5 / P5a-6 |

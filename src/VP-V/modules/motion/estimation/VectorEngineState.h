@@ -6,7 +6,7 @@
 // vectors-valid state and its invalidation counters). The renderer keeps ONE member of this type, `vectorEngine`,
 // declared at the position of the earliest moved member, and a block of reference aliases with the old names so
 // every reader in a zone another package still owns compiles unchanged (doc 52 1.2). Each alias is deleted by
-// the package that moves its last reader (docs/m2/P5A-INVENTORY.md lists them).
+// the package that moves its last reader (HOOKS.md in this folder lists them).
 //
 // Threading is unchanged and documented per member: any thread = atomics only; render thread = under renderMutex;
 // render loop = the loop thread (no renderMutex). motionAheadEngaged is the one member whose two writers (the
@@ -19,7 +19,7 @@
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <VP-V/modules/motion/vector_delivery/MotionSegment.h>
-#include <vprenderer/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 
 #include <atomic>
 #include <chrono>

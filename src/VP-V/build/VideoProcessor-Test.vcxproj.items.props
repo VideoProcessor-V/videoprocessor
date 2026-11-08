@@ -72,6 +72,7 @@
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\VectorEngineTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\EstimatorHookTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>

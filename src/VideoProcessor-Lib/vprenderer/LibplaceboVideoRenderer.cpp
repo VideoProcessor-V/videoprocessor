@@ -88,7 +88,7 @@
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>   // WP-23 frame analysis store
 #include <VP-V/modules/input/signal/ResyncCallSites.h>   // R1 call-site helpers
 #include <VP-V/modules/input/signal/ResyncExtension.h>   // VPV-HOOK: resync Q1 (Shadow, Drive, HostBinding, pulldown step)
-#include <VP-V/modules/motion/estimation/VectorEngineHost.h>   // VPV-HOOK: P5a (the vector engine: state, logic and the host adapter)
+#include <VP-V/modules/motion/estimation/VectorEngineHost.h>   // P5a: the vector engine: state, logic and the host adapter   // VPV-HOOK
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>   // R4a: the re-base decision product P0
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationPolicy.h>
@@ -13160,7 +13160,7 @@ struct LibplaceboVideoRenderer::Impl
 	// epoch is forgotten (each consumer also checks the epoch it was made in).
 	void ApplyMotionInvalidate()
 	{
-		MotionValidity::Pending pending;
+		MotionValidity::Pending pending;   // VPV-HOOK
 		if (!vectorEngine.TakeInvalidation(pending))   // VPV-HOOK
 			return;
 		if (pending.release)
@@ -16703,7 +16703,7 @@ struct LibplaceboVideoRenderer::Impl
 			// source_resolution auto's fast-pan switch. Bug hunt 3 F1: one cell is 8 source px
 			// per halving of the search input (4K 16, 8K 32), not 8 at every size.
 			const int searchHalvings = dejudder->SearchHalvings();
-			vectorEngine.NoteGlobalPair(flow != nullptr);   // vector engine: a missed pair is counted and, sustained, visible
+			vectorEngine.NoteGlobalPair(flow != nullptr);   // VPV-HOOK
 			if (flow)
 			{
 				const VectorDemand::GlobalSample sample = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
@@ -16788,7 +16788,7 @@ struct LibplaceboVideoRenderer::Impl
 		if (vectorDemand.estimate)
 		{
 			++vectorPairs;
-			vectorEngine.NoteVectorsDelivered(false, dejudder->ExternalFlowUsed() ? "engine ahead" : dejudder->OpticalFlowUsed() ? "engine" : "matcher");
+			vectorEngine.NoteVectorsDelivered(false, dejudder->ExternalFlowUsed() ? "engine ahead" : dejudder->OpticalFlowUsed() ? "engine" : "matcher");   // VPV-HOOK
 		}
 		static GeneralRate::LogInterval motionAheadStatsLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
 		if (motionProducer && dejudderEstimates + 1 >= 24 && motionAheadStatsLog.DueOr((dejudderEstimates + 1) == 24))   // as the other periodic logs (audit 2026-10-16)

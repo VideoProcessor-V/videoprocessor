@@ -137,6 +137,9 @@ namespace VectorEngineTest
 			for (int i = 0; i < halvings; ++i) { ew = (ew + 1) / 2; eh = (eh + 1) / 2; }
 			Assert::AreEqual(ew, w);
 			Assert::AreEqual(eh, h);
+			Assert::AreEqual(1, halvings, L"2160 lines with low-res on: one halving");
+			Assert::AreEqual(960, w);
+			Assert::AreEqual(540, h);
 			int w2 = 0, h2 = 0, halvings2 = 0;
 			VectorEngine::SizeFor(false, 3840, 2160, w2, h2, halvings2);
 			Assert::IsTrue(halvings2 <= halvings, L"low-res off never halves more");

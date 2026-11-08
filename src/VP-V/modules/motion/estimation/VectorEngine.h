@@ -5,7 +5,7 @@
 // (VectorEngineState) and the logic that used to be member functions of the renderer's Impl:
 //   P5a-3  the optical-flow producer's lifecycle and the look-ahead depth (PlanProducer);
 //   P5a-4  the vector-demand decision, its statistics service and the invalidation requests
-//          (UpdateVectorEngine, ServeStatistics, RequestInvalidate, ApplyInvalidate).
+//          (UpdateVectorEngine, ServeStatistics, TakeInvalidation / LogInvalidation, the global-pair and shadow checks).
 // The renderer holds one member of this type (`vectorEngine`) and calls it at the sites the code used
 // to sit at. What the engine needs from the renderer comes in as plain values (ProducerInputs, the
 // VectorDemand::Input) or through the small IVectorEngineHost interface the renderer implements with

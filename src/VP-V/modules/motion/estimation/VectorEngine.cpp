@@ -1,13 +1,14 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 
+#include <pch.h>
 #include "VectorEngine.h"
 
 #include <DebugLog.h>
 #include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <libplacebo/d3d11.h>
-#include <vprenderer/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 
 #include <algorithm>
 #include <chrono>
