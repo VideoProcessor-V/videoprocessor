@@ -10,8 +10,6 @@
 
 #include <SubtitlePreviewMode.h>
 #include <DolbyVisionLuminanceStatus.h>
-#include <IntentDescriptor.h>
-#include <FileFrameTiming.h>
 
 
 #include <VideoFrame.h>
@@ -21,8 +19,6 @@
 #include <RendererResetRequest.h>
 #include <RendererOutputContractStatus.h>
 #include <SubtitleRepositionMode.h>
-#include <DiagnosticHistory.h>
-#include "calibration/CalibrationPattern.h"
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -464,51 +460,6 @@ public:
 		return false;
 	}
 
-	// Stage 6b-2b: one line for the stats overlay about the VP Renderer's
-	// de-judder and occlusion mask. Empty (false) when both are off.
-	virtual bool GetDejudderStatus(CString& status) const
-	{
-		status.Empty();
-		return false;
-	}
-
-	// Crash state (owner 2026-10-15): one line about the LED drive - its
-	// source, whether it drives the projector, the last levels sent. False
-	// when the renderer has no LED drive.
-	virtual bool GetLedDriveStatus(CString& status) const
-	{
-		status.Empty();
-		return false;
-	}
-
-	// Crash state (Stage 12, owner 2026-10-15): the source's effective
-	// resolution, bitrate quality and bit depth, and what source_resolution
-	// auto chose. False when the renderer does not read them.
-	virtual bool GetSourceResolutionStatus(CString& status) const
-	{
-		status.Empty();
-		return false;
-	}
-
-	// RS-232 connection test (Config, LED drive page): the renderer frees the
-	// projector's COM port for the test. False (with reason) when it will not,
-	// e.g. while video is playing. Renderers without an LED drive hold no port.
-	virtual bool SuspendLedDriveForTest(CString& reason)
-	{
-		reason.Empty();
-		return true;
-	}
-
-	// After the test: the LED drive starts again with the saved settings.
-	virtual void ResumeLedDriveAfterTest() {}
-
-	// Integration 2026-10-17: the forced shutdown (a blocked retirement leaks the
-	// renderer) stops the LED drive first, so it restores full light (LDMM 0,
-	// LPW1 to the ceiling, CNTR 50) and CNTR is never left high. Must not wait
-	// on the renderer's state lock; the caller bounds the call on its own thread
-	// (LedShutdownRestore.h). True when stopped or there is none.
-	virtual bool StopLedDriveForShutdown() { return true; }
-
 	// Rolling render cost, for judging whether a quality setting fits inside a
 	// frame period on this machine. Renderers without per-frame instrumentation
 	// return false so the OSD does not imply a measurement it does not have.
@@ -674,154 +625,7 @@ public:
 		status = {};
 		return false;
 	}
-
-	// Content recognition (intent interpreter item 1, 2026-10-17): the content
-	// class the rules' `content` variable carries, and its source. False (and
-	// status.enabled false) when the renderer has none or intent_content is off.
-	virtual bool GetContentIntentStatus(ContentIntentStatus& status) const
-	{
-		status = {};
-		return false;
-	}
-
-	// Report-a-problem (2026-10-17): the renderer DLL writes its own
-	// DiagnosticHistory rings (DiagnosticHistory.h; one Global() per module)
-	// into `sink` as JSONL rows tagged src "renderer", times relative to
-	// referenceQpc. Never throws; false when the renderer has no history.
-	virtual bool WriteDiagnosticHistory(VpDiagnosticHistorySink sink, void* context,
-		int64_t referenceQpc) const
-	{
-		(void)sink;
-		(void)context;
-		(void)referenceQpc;
-		return false;
-	}
-
-	// ABI 37 (VP Renderer DirectShow filter; claimed 35 on its branch, after
-	// 36's WriteDiagnosticHistory in the vtable): frames from a file source.
-	// The frame carries its own presentation time and exact source rate, so the
-	// renderer skips capture timing (rate/PPM measurement, pulldown detection)
-	// and fills its film clock directly. Capture frames keep OnVideoFrame and
-	// are unchanged. The default forwards to OnVideoFrame (capture semantics).
-	virtual bool SupportsTimedFileFrames() const { return false; }
-	virtual void OnTimedVideoFrame(VideoFrame& videoFrame,
-		const FileFrameTiming&)
-	{
-		OnVideoFrame(videoFrame);
-	}
-	// A file source never drops: the filter's Receive waits here until the
-	// queue has room. True when a frame can be queued without a drop; false on
-	// timeout or after CancelFileFrameWait (flush, stop), in which case the
-	// caller retries or abandons the sample. Must not hold locks the render
-	// thread needs.
-	virtual bool WaitForFileFrameSlot(uint32_t /*timeoutMs*/) { return true; }
-	// Wakes every WaitForFileFrameSlot with false until the next timed frame.
-	virtual void CancelFileFrameWait() {}
-	// Intent interpreter items 2-5 (2026-10-17): motion intent, ambient
-	// adaptation, black protection, display mapping readout. False (status
-	// default: every function off) when the renderer has none.
-	virtual bool GetIntentStatus(IntentStatus& status) const
-	{
-		status = {};
-		return false;
-	}
-
-	// Ambient adaptation input from the GUI's [ambient] detector (about 1 Hz):
-	// the newest room reading in lux, `valid` false when the detector is lost
-	// or ambient switching is off. `nowSeconds` is GetTickCount64() / 1000.
-	virtual void SetAmbientLux(double lux, bool valid, double nowSeconds)
-	{
-		(void)lux; (void)valid; (void)nowSeconds;
-	}
-
-	// Automatic calibration (docs/calibration/AUTO-CALIBRATION.md, plugin API
-	// 39; claimed 36 on its branch, after the intent methods in the vtable):
-	// the output a patch is shown in (swapchain depth, colour depth,
-	// range, transfer, size, measured refresh) and which patch generation was
-	// presented. False (info.available false, info.reason set) when this
-	// renderer cannot show patches.
-	virtual bool GetCalibrationOutput(Calibration::PatternOutputInfo& info) const
-	{
-		info = Calibration::PatternOutputInfo();
-		const char text[] = "this renderer cannot show calibration patches (use VP Renderer)";
-		for (size_t i = 0; i < sizeof(text) && i < sizeof(info.reason); ++i) info.reason[i] = text[i];
-		return false;
-	}
-
-	// Shows a patch (exact codes written to the backbuffer; the sigma-delta,
-	// dither, LUT and all shading bypassed for the patch only) or, with
-	// request.active false, returns to video. While a patch is active the
-	// renderer drops incoming frames and holds the LED drive at full light.
-	virtual bool SetCalibrationPattern(const Calibration::PatternRequest&, CString& reason)
-	{
-		reason = TEXT("this renderer cannot show calibration patches (use VP Renderer)");
-		return false;
-	}
-
-	// Bug hunt 3 F2 (after SetAmbientLux in the vtable): the active-picture look-ahead
-	// given by SetActivePictureLookaheadFrames is automatic (it follows the queue,
-	// active_picture_lookahead_frames absent) rather than an explicit value. An automatic
-	// look-ahead sets no floor on the locked-film queue target.
-	virtual void SetActivePictureLookaheadAutomatic(bool automatic)
-	{
-		(void)automatic;
-	}
-
-	// r6 fix 7 (owner rule vp-no-silent-fallbacks, plugin API 41): the renderer's automatic
-	// fallbacks as one heading, "Fallbacks engaged: <id> (<reason>); ..." or "Fallbacks engaged:
-	// none" (src/VP-V/core/FallbackStatus.h). Shown in the Ctrl+I overlay, the Config status and the Ctrl+Alt+D
-	// bundle; the GUI announces each id once (a brief transient notice). False: not supported.
-	virtual bool GetFallbacksStatus(CString& status) const
-	{
-		status.Empty();
-		return false;
-	}
-
-	// VP-V delay budget (ADR-0020, barrier B2; plugin API 42): the ONE total delay the user set
-	// (target_latency_ms), the same at every frame rate. The renderer turns it into its queue
-	// hold with DelayBudget.h (src/VP-V/core): the whole frames through the queue target the
-	// executable sends, the sub-frame rest through the timeline's steering or the plain path's
-	// age gate. 0 = no budget (frame-count queue, as before).
-	virtual void SetQueueDelayBudget(int totalMs)
-	{
-		(void)totalMs;
-	}
-
-	// feat/dv-l8 WIP (plugin API 43; unverified): the dv_compare_capture shortcut - start a DV
-	// comparison clip, or stop one early (VP-V/modules/input/signal/DvCompareCapture.h). status =
-	// the line to show on screen. False: not supported.
-	virtual bool ToggleDvCompareCapture(CString& status)
-	{
-		status.Empty();
-		return false;
-	}
-
-	// Generic module status (plugin API 44, WP-11). ONE
-	// versioned entry for every status line a renderer module publishes, so a new line needs no
-	// new virtual and no ABI change. `status` is key/value text, one "key=value" per line
-	// (ModuleStatusText.h documents the format); `module` "" asks for the index of module ids.
-	// False: the renderer has no such module (status empty).
-	virtual bool GetModuleStatus(const char* module, CString& status) const
-	{
-		(void)module;
-		status.Empty();
-		return false;
-	}
-
-	// Generic module command, the counterpart of GetModuleStatus: a shortcut or host action a
-	// renderer module handles (e.g. a capture toggle) without a new virtual. `reply` uses the
-	// same key/value format; its "status" key is the line to show. False: not handled.
-	virtual bool InvokeModuleCommand(const char* module, const char* command, CString& reply)
-	{
-		(void)module;
-		(void)command;
-		reply.Empty();
-		return false;
-	}
-
 	// VPV-HOOK
-	// Host-side extension lookup: an opaque interface pointer for `iid`, or nullptr (the default).
-	// Not part of the plugin ABI; a renderer that offers extensions overrides it.
 	virtual void* QueryExtension(const char* iid) { (void)iid; return nullptr; }
 	// VPV-HOOK-END
 

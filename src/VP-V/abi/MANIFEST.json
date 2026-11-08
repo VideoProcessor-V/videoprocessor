@@ -1,0 +1,42 @@
+{
+  "schema": "vp-abi-manifest/1",
+  "note": "Not a module folder: the module checker (tools/check_module_manifests.py) scans src/VP-V/modules only. This manifest lists the extension ABI surface so a change to it is reviewed as one.",
+  "name": "vpv.abi",
+  "extension_abi": 2,
+  "bill_plugin_api_version": 34,
+  "bill_base": "a591ad3b",
+  "export": "VideoProcessorLibplaceboVpvAbi",
+  "attach_export": "VideoProcessorLibplaceboVpvAttach",
+  "interfaces": [
+    { "iid": "vpv.modules.v1", "header": "VpvInterfaces.h", "class": "Vpv::IVpvModules", "methods": ["Status", "Command"] },
+    { "iid": "vpv.status.v1", "header": "VpvInterfaces.h", "class": "Vpv::IVpvStatus", "methods": ["GetDejudderStatus", "GetSourceResolutionStatus", "GetFallbacksStatus", "WriteDiagnosticHistory"] },
+    { "iid": "vpv.led.v1", "header": "VpvInterfaces.h", "class": "Vpv::IVpvLed", "methods": ["Status", "SuspendForTest", "ResumeAfterTest", "StopForShutdown"] },
+    { "iid": "vpv.intent.v1", "header": "VpvInterfaces.h", "class": "Vpv::IVpvIntent", "methods": ["GetIntentStatus", "GetContentIntentStatus", "SetAmbientLux"] },
+    { "iid": "vpv.calibration.v1", "header": "VpvInterfaces.h", "class": "Vpv::IVpvCalibration", "methods": ["GetOutput", "SetPattern"] },
+    { "iid": "vpv.timed_file_frames.v1", "header": "VpvInterfaces.h", "class": "Vpv::IVpvTimedFileFrames", "methods": ["Supports", "OnTimedVideoFrame", "WaitSlot", "Cancel"] },
+    { "iid": "vpv.presentation_ctl.v1", "header": "VpvInterfaces.h", "class": "Vpv::IVpvPresentationCtl", "methods": ["SetQueueDelayBudget", "SetActivePictureLookaheadAutomatic", "ToggleDvCompareCapture"] }
+  ],
+  "live_files": [
+    "src/VP-V/abi/VpvAbi.h",
+    "src/VP-V/abi/VpvTextSink.h",
+    "src/VP-V/abi/VpvInterfaces.h",
+    "src/VP-V/abi/VpvText.h",
+    "src/VP-V/abi/VpvRendererAccess.h",
+    "src/VP-V/abi/VpvHostCalls.h",
+    "src/VP-V/abi/VpvPluginGuard.h",
+    "src/VP-V/abi/VpvAttachGate.h",
+    "src/VP-V/abi/RendererAbiBridge.h",
+    "src/VP-V/abi/RendererAbiBridge.cpp"
+  ],
+  "tests": [
+    "src/VP-V/tests/VpvAbiBridgeTests.cpp",
+    "src/VP-V/tests/PluginGuardTests.cpp",
+    "src/VP-V/tests/QueryNoCacheTests.cpp"
+  ],
+  "bill_file_hooks": [
+    "src/VideoProcessor-Lib/IRenderer.h (QueryExtension, VPV-HOOK block)",
+    "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h (forward declaration, member)",
+    "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp (include, create, reset, QueryExtension)",
+    "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp (guard line, QueryExtension forwarder)"
+  ]
+}

@@ -551,6 +551,11 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\tests\VpStatusAdapterTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\VpvAbiBridgeTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\PluginGuardTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\QueryNoCacheTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\tests\suite\ModuleStatusTextTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\QueueStressLaneTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\FileFrameTests.cpp" />
@@ -711,6 +716,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\hooks\HookLayerSettingsTests.cpp" Condition="Exists('$(MSBuildThisFileDirectory)..\tests\hooks\HookLayerSettingsTests.cpp')">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\hooks\HookAmendmentTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
   </ItemGroup>

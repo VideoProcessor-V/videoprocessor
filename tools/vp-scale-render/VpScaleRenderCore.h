@@ -15,6 +15,8 @@
 #include <VideoFrame.h>
 #include <VideoState.h>
 #include <vprenderer/LibplaceboRendererPluginApi.h>
+#include <VP-V/abi/VpvHostCalls.h>
+#include <VP-V/abi/VpvPluginGuard.h>
 #include <ConfigFile.h>
 #include <RendererProfileConfig.h>
 
@@ -378,6 +380,7 @@ namespace VpScaleRenderCore
 		const auto create = reinterpret_cast<Create>(GetProcAddress(dll, "VideoProcessorLibplaceboCreateRenderer"));
 		const auto destroy = reinterpret_cast<Destroy>(GetProcAddress(dll, "VideoProcessorLibplaceboDestroyRenderer"));
 		if (!create || !destroy) { say("renderer factory missing"); outcome.rc = 3; return outcome; }
+		{ std::string attachReason; if (!Vpv::PluginGuard::Check(dll, attachReason) || !Vpv::PluginGuard::Attach(dll, attachReason)) { say(attachReason); outcome.rc = 3; return outcome; } }
 
 		WNDCLASSA wc{};
 		wc.lpfnWndProc = DefWindowProcA;
@@ -881,7 +884,7 @@ namespace VpScaleRenderCore
 		}
 		failures += static_cast<int>(backPressureTimeouts + captureTimeouts);   // legacy pictures' waits that gave up
 		CString status;
-		if (renderer->GetSourceResolutionStatus(status)) CaptureLog(("VpScaleRender: source resolution: " + std::string(CStringA(status).GetString())).c_str());
+		if (VpvCalls::GetSourceResolutionStatus(renderer, status)) CaptureLog(("VpScaleRender: source resolution: " + std::string(CStringA(status).GetString())).c_str());
 		renderer->Stop();
 		destroy(renderer);
 		DestroyWindow(hwnd);

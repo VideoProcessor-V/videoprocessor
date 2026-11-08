@@ -21,9 +21,20 @@
 // started, so extension state must be keyed by host. IngressContext runs on capture/file
 // threads and must not block or lock. A throw from an extension never reaches the caller:
 // it is reported to OnStatus(WorkerFault, "extension").
+//
+// M2 P0b (hook amendment R10-R20, doc 59 section 1.1): the per-frame phases PlanOutputs, PlanPresent,
+// AfterPresent, PresentSample, ResolveTime, DecideIngress, Convert, AfterPublish, Upload and QueueTarget
+// carry a typed payload in FrameContext::phaseData and have a one-line helper below. Every helper returns
+// the caller's own value (or "not handled") when nothing is registered, and the host keeps its code as the
+// fallback when no handler takes the phase over. Take-over phases are first-wins (the first handler that
+// returns true stops the chain); fan-out phases call every extension in registration order (PhaseFansOut).
+// A handler writes its payload only once it has succeeded: a throw is contained, but what it already wrote stays
+// (except AfterPresent / R12, where the hub discards a throwing module's writes).
 
 #include <libplacebo/renderer.h>
+#include <libplacebo/swapchain.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -33,7 +44,10 @@
 #include <vector>
 
 struct ID3D11Device;
+struct IDXGISwapChain;
 class ConfigFile;
+class VideoFrame;                    // host types the M2 phase payloads carry by pointer or reference
+struct AlphaDxgiPresentationSample;
 
 namespace RendererExtension
 {
@@ -109,19 +123,153 @@ namespace RendererExtension
 	};
 
 	// ---- Per-frame phases --------------------------------------------------------------------
+	// New phases are appended (existing values never change). ResolveTime (R14) and DecideIngress (R15) are M2 P0b.
 	enum class FramePhase { Convert, AfterPublish, CollectAhead, QueueTarget, Begin, PlanOutputs, Entrance, Upload,
-		CollectHooks, Draw, AfterRender, PlanPresent, AfterPresent, PresentSample };
+		CollectHooks, Draw, AfterRender, PlanPresent, AfterPresent, PresentSample, ResolveTime, DecideIngress };
+	// Fan-out phases: every extension is called in registration order and the result is the OR of the returns
+	// (informational). Of the five, ResolveTime and DecideIngress are new in M2 P0b; AfterPublish, QueueTarget,
+	// AfterPresent and PresentSample already existed (first-wins, unused) and now fan out. All other phases keep
+	// the first-wins rule: the first handler that returns true stops the chain.
+	inline bool PhaseFansOut(FramePhase phase) noexcept
+	{
+		return phase == FramePhase::AfterPublish || phase == FramePhase::QueueTarget || phase == FramePhase::AfterPresent ||
+			phase == FramePhase::PresentSample || phase == FramePhase::ResolveTime;
+	}
 	enum : uint32_t { kRequestMixerFlush = 1, kRequestComponentReset = 2 };
 
-	// Phase payloads (generic, host-type based; later packages may extend them).
-	struct OutputPlan { std::vector<int64_t> sequences; std::vector<double> phases; };
-	struct PresentPlan { uint32_t interval = 1; uint32_t flags = 0; };
+	// Phase payloads (generic, host-type based; later packages may extend them). The one-line helpers
+	// at the end of the namespace fill FrameContext::phaseData with the matching payload.
 	struct PresentFacts { int64_t presentQpc = 0, endQpc = 0; uint32_t syncInterval = 1; bool dropped = false; };
-	struct UploadJob { const void* source = nullptr; void* texture = nullptr; };
-	struct ConvertJob { const void* frame = nullptr; const void* state = nullptr; void* payload = nullptr; };
 	struct DrawJob { int errors = 0; int retried = 0; bool rendered = false; };
 	struct QueueView { const void* queue = nullptr; size_t size = 0; };
-	struct QueueTargetView { int64_t targetQpc = 0; size_t index = 0; };
+
+	// R10 PlanOutputs (take-over; render loop, after the host's own timeline Begin, no renderMutex). In: the facts.
+	// In/out: the host's output list. Default (no handler): the lists are left as the host built them.
+	struct OutputPlan
+	{
+		int64_t seq = -1, nextSeq = -1, generation = 0;
+		double ptsA = 0, ptsB = 0;                         // source times of A (shown) and B (next), seconds
+		double filmHz = 0, captureHz = 0, displayHz = 0;
+		bool discontinuity = false, fileFrame = false;
+		size_t queueDepthAfterDequeue = 0, desiredDepth = 0;
+		double holdFraction = 0;
+		std::vector<double>* outputs = nullptr;            // the host's list; a handler may replace its content
+		std::vector<double>* phases = nullptr;             // matching phases between A and B; null = not wanted
+		bool skip = false;                                 // out: draw no output for this frame
+		bool schedulesRefreshes = false;                   // out: the extension owns the refresh schedule
+	};
+
+	// R11 PlanPresent (take-over; render thread, renderMutex). Default interval 1 = the host's Present(1, 0).
+	enum class PresentKind { Main, Repeat };
+	struct PresentPlan
+	{
+		PresentKind kind = PresentKind::Main;
+		IDXGISwapChain* native = nullptr;
+		bool vpOwned = false;
+		uint32_t interval = 1;
+		uint32_t flags = 0;
+	};
+
+	// R12 AfterPresent (fan-out; render thread, renderMutex, after the main present). Each module writes only its own
+	// contribution; the hub merges the contributions (extrasRan / committed OR, targetLeadMs / estimatedLeadMs max,
+	// spentSeconds sum) and discards a throwing module's partial writes. Default = nothing ran.
+	struct PresentOutcome
+	{
+		bool extrasRan = false, committed = false;
+		double targetLeadMs = 0;      // raise-only: the host takes the larger of its own and this
+		double estimatedLeadMs = 0;
+		double spentSeconds = 0;
+	};
+	struct PresentContext
+	{
+		int64_t callbackQpc = 0, arrivalQpc = 0, mainCallQpc = 0, swapEndQpc = 0;
+		double renderMs = 0, workMs = 0;
+		pl_swapchain swapchain = nullptr;
+		IDXGISwapChain* native = nullptr;
+		const std::atomic<bool>* nextFrameArrived = nullptr;   // the host's flag: a newer source frame has arrived
+		PresentOutcome outcome;                                // out
+	};
+
+	// R13 PresentSample (fan-out, chained: each handler sees the previous adjustment; render thread, in the
+	// host's ObservePresent). Default: the sample is unchanged.
+	struct PresentSampleView { AlphaDxgiPresentationSample* sample = nullptr; IDXGISwapChain* native = nullptr; };
+
+	// R14 ResolveTime (fan-out, chained; render loop). Default: the host's value.
+	enum class TimeKind { FramePresentEnd };
+	struct TimeQuery { TimeKind kind = TimeKind::FramePresentEnd; int64_t billQpc = 0; int64_t qpc = 0; /* in/out, starts at billQpc */ };
+
+	// R15 DecideIngress (take-over; capture thread, before the frame is queued; must not block or lock). Uses
+	// IngressContext: the facts are the in fields; the caller pre-fills drop = false and gapBefore / gapFrames /
+	// gapCause / discontinuity / filmHz / filmUpdate / arrivalQpc with the host's values, and a handler may
+	// overwrite them (drop = a cadence repeat). Default (no handler): the host's values stand.
+
+	// R16 OnConvertedFrame (take-over; conversion thread, no queue lock) and R16 AfterPublish (fan-out; after the
+	// payload is published and the queue notified). `payload` is the host's converted payload (opaque here);
+	// `extension` is its R18 slot. The formatter mutex is reached through the callbacks (as in the host today).
+	struct ConvertContext
+	{
+		const VideoFrame* frame = nullptr;
+		const void* state = nullptr;
+		void* payload = nullptr;
+		std::shared_ptr<void>* extension = nullptr;
+		void* formatterUser = nullptr;
+		void (*lockFormatter)(void* user) = nullptr;
+		void (*unlockFormatter)(void* user) = nullptr;
+	};
+	struct PublishView
+	{
+		const VideoFrame* frame = nullptr;
+		const void* state = nullptr;
+		const void* payload = nullptr;
+		std::shared_ptr<void> extension;                      // copy of the published payload's slot
+	};
+
+	// R17 TryUpload (take-over; render thread, renderMutex). Default false = the host's own upload.
+	struct UploadContext
+	{
+		const void* payload = nullptr;
+		const void* nextPayload = nullptr;
+		const void* state = nullptr;
+		int width = 0, height = 0;
+		pl_tex (*textures)[2] = nullptr;
+		pl_frame* image = nullptr;
+		void* gpuTimer = nullptr;
+		void* statusUser = nullptr;
+		void (*setIngressStatus)(void* user, const char* text) = nullptr;
+	};
+
+	// R19 ResolveQueueTarget (fan-out, chained; any thread holding the host's queue mutex). Default = billTarget;
+	// the helper clamps the chained result to capacity (when set).
+	struct QueueTargetContext
+	{
+		size_t desired = 0, capacity = 0;
+		bool holdActive = false;
+		double holdFraction = 0;
+		size_t cadenceScaledDepth = 0, creditFrames = 0, lookaheadFloor = 0;
+		size_t billTarget = 0;                                // in: the host's own result
+		size_t target = 0;                                    // in/out, starts at billTarget
+	};
+
+	// R20 timed file frames: the iid a file-frame provider answers to QueryExtension, the per-frame external timing
+	// (the host's FileQueueFields, generic) and the host-side admission view the provider enqueues through. The
+	// iid's interface text (vpv.timed_file_frames.v1) is owned by src/VP-V/abi/ (P2); P10 implements the view.
+	constexpr const char kTimedFileFramesIid[] = "vpv.timed_file_frames.v1";
+	struct ExternalTiming
+	{
+		int64_t presentationQpc = 0;
+		bool paused = false, motionOff = false, discontinuity = false;
+		double filmHz = 0;
+	};
+	class IQueueAdmission
+	{
+	public:
+		virtual ~IQueueAdmission() = default;
+		virtual void Enqueue(VideoFrame& frame, const void* state, uint64_t generation, int64_t callbackQpc, int64_t arrivalQpc,
+			bool gapBefore, const char* gapCause, uint32_t gapFrames, double filmHz, bool filmUpdate, const ExternalTiming* external) = 0;
+		virtual uint64_t QueueGeneration() const = 0;
+		virtual bool SlotFree() const = 0;
+		virtual uint64_t Dropped() const = 0;
+	};
 
 	struct FrameContext : Context
 	{
@@ -199,12 +347,18 @@ namespace RendererExtension
 	inline void Ingress(IngressContext& c) noexcept { if (!Any()) return; detail::ForEach(c, [&](IRendererExtension& e) { e.OnIngress(c); }); }
 	inline void Queue(const QueueFacts& f) noexcept { if (!Any()) return; detail::ForEach(f, [&](IRendererExtension& e) { e.OnQueue(f); }); }
 
-	// True when an extension handled the phase (a take-over); the first handler stops the chain.
+	// True when an extension handled the phase (a take-over); the first handler stops the chain. Fan-out
+	// phases (PhaseFansOut) call every extension and return the OR of the results.
 	inline bool Frame(FrameContext& c) noexcept
 	{
 		if (!Any()) return false;
+		const bool fanOut = PhaseFansOut(c.phase);
 		bool handled = false;
-		detail::ForEach(c, [&](IRendererExtension& e) { if (!handled) handled = e.OnFrame(c); });
+		detail::ForEach(c, [&](IRendererExtension& e)
+		{
+			if (fanOut) { if (e.OnFrame(c)) handled = true; }
+			else if (!handled) handled = e.OnFrame(c);
+		});
 		return handled;
 	}
 
@@ -310,5 +464,76 @@ namespace RendererExtension
 		DrawJob job; job.errors = errors; job.retried = retried; job.rendered = rendered;
 		FrameContext c; c.host = host; c.phase = FramePhase::AfterRender; c.seq = seq; c.generation = generation; c.phaseData = &job;
 		Frame(c);
+	}
+
+	// ---- M2 P0b one-line helpers (R10-R19). Each returns the caller's own value / false with nothing registered. ----
+	namespace detail
+	{
+		template<class T> bool Phase(FramePhase phase, const void* host, int64_t seq, int64_t generation, T& payload) noexcept
+		{
+			FrameContext c; c.host = host; c.phase = phase; c.seq = seq; c.generation = generation; c.phaseData = &payload;
+			return Frame(c);
+		}
+	}
+	// The typed payload of a phase (null when the host passed none).
+	template<class T> T* PayloadOf(FrameContext& c) noexcept { return static_cast<T*>(c.phaseData); }
+
+	inline bool PlanOutputs(const void* host, OutputPlan& plan) noexcept // R10: true = a handler replaced the plan
+	{
+		if (!Any()) return false;
+		return detail::Phase(FramePhase::PlanOutputs, host, plan.seq, plan.generation, plan);
+	}
+	inline bool PlanPresent(const void* host, PresentPlan& plan) noexcept // R11: plan.interval stays 1 unless a handler decides
+	{
+		if (!Any()) return false;
+		return detail::Phase(FramePhase::PlanPresent, host, -1, 0, plan);
+	}
+	inline PresentOutcome AfterPresent(const void* host, int64_t seq, int64_t generation, PresentContext& pc) noexcept // R12
+	{
+		if (Any()) detail::Phase(FramePhase::AfterPresent, host, seq, generation, pc);
+		return pc.outcome;
+	}
+	inline void AdjustPresentationSample(const void* host, AlphaDxgiPresentationSample& sample, IDXGISwapChain* native) noexcept // R13
+	{
+		if (!Any()) return;
+		PresentSampleView view; view.sample = &sample; view.native = native;
+		detail::Phase(FramePhase::PresentSample, host, -1, 0, view);
+	}
+	inline int64_t ResolveTime(const void* host, TimeKind kind, int64_t billQpc) noexcept // R14
+	{
+		if (!Any()) return billQpc;
+		TimeQuery q; q.kind = kind; q.billQpc = billQpc; q.qpc = billQpc;
+		detail::Phase(FramePhase::ResolveTime, host, -1, 0, q);
+		return q.qpc;
+	}
+	inline bool DecideIngress(IngressContext& c) noexcept // R15: true = a handler decided (read drop and the out fields)
+	{
+		if (!Any()) return false;
+		return detail::Phase(FramePhase::DecideIngress, c.host, c.seq, c.queueGeneration, c);
+	}
+	inline bool OnConvertedFrame(const void* host, ConvertContext& cc) noexcept // R16: false = the host's own formatter
+	{
+		if (!Any()) return false;
+		return detail::Phase(FramePhase::Convert, host, -1, 0, cc);
+	}
+	inline void AfterPublish(const void* host, PublishView& pv) noexcept // R16
+	{
+		if (!Any()) return;
+		detail::Phase(FramePhase::AfterPublish, host, -1, 0, pv);
+	}
+	inline bool TryUpload(const void* host, UploadContext& uc) noexcept // R17: false = the host's own upload
+	{
+		if (!Any()) return false;
+		return detail::Phase(FramePhase::Upload, host, -1, 0, uc);
+	}
+	inline size_t ResolveQueueTarget(const void* host, QueueTargetContext& qc, size_t billTarget) noexcept // R19
+	{
+		qc.billTarget = billTarget; qc.target = billTarget;
+		if (!Any()) return billTarget;
+		detail::Phase(FramePhase::QueueTarget, host, -1, 0, qc);
+		// A handler never takes the target past the queue's capacity (or the host's own value, if that is larger).
+		const size_t ceiling = qc.capacity > billTarget ? qc.capacity : billTarget;
+		if (qc.capacity > 0 && qc.target > ceiling) qc.target = ceiling;
+		return qc.target;
 	}
 }
