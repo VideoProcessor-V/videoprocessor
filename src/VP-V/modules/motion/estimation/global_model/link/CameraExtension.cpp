@@ -235,6 +235,7 @@ namespace Vpv
 				const CameraLink::AheadRefusal r = CameraLink::CopyAhead(v, seq, out);
 				if (r != CameraLink::AheadRefusal::None)
 					return r;
+				out.epoch = engine.FieldEra();   // G-A3: the P2 provenance (the epoch FlowOf just served the pair under; same render-thread call)
 				float g[4] = {}, second[4] = {};
 				MotionAhead::FlowGlobal(out.forward, out.forwardCost, out.gridW, out.gridH, g, second);
 				out.globalValid = g[3] > 0.5f && g[2] < 0.9f;
@@ -406,6 +407,7 @@ namespace Vpv
 			if (st.core)
 			{
 				st.core->AttachOnTime(VpSkeleton::LaneLeaseSource(), std::string());
+				st.core->SetP2EpochSource(std::function<uint64_t()>());
 				st.core->labelsProvider = nullptr;
 				st.core->SetFactsProvider(nullptr);
 				st.core->SetEngine(nullptr);
@@ -478,6 +480,7 @@ namespace Vpv
 				st.core->SetAheadSource([engine](uint64_t seq, CameraLink::AheadCopy& out) { return TakeAhead(*engine, seq, out); },
 					[sp, store](const CameraLink::FieldCopy& f, CameraLink::PairDescription& d) { return DescribeAhead(*sp, store, f, d); });
 				st.core->SetAheadGrid(sf.sourceGridW, sf.sourceGridH);
+				st.core->SetP2EpochSource([engine]() { return engine->FieldEra(); });   // any thread (IVectorEngine::FieldEra)
 				st.core->SetAheadConsistency(sf.consistencyPx);
 				// G-A1: the on-time target is the skeleton lane's P7, reached through the skeleton's demand entry (Query, no module include):
 				// the demand makes the lane hold P7 (published outside: the camera fit worker), LeaseFor gives its current lease per use. No

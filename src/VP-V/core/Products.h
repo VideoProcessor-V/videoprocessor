@@ -701,9 +701,11 @@ inline void AppendCameraProducts(std::vector<ProductDecl>& decls)
     // P7: the per-frame global camera fit; its own previous frame seeds the temporal fit (history 1).
     ProductDecl p7 = Make(kP7CameraFit, "p7_camera_fit", "camera fit", Backend::Cpu, 1, Tier::T0, content,
                           Bit(kSettingsMotion));
-    AddInput(p7, kP3AnalysisField, 0);
+    // G-A3 (coordinator decision 2026-11-08, camera ahead fit): the fit reads only the UNGUIDED P2 pair, through IVectorEngine::FlowOf,
+    // never the lane's P2 / P3 slots (those are fed from the render-time field, so an on-time P7 could never claim before them). P3 is not
+    // an ancestor; P2 is not a lane input: P7 records its P2 provenance itself (the FlowOf pair id + the engine's vectors-valid epoch,
+    // CameraLink::FieldCopy::p2Epoch), checked at claim, seal and every consumer read (CameraLinkCore / CameraFitWorker).
     AddInput(p7, kP4SourceStats, 0);
-    AddInput(p7, kP2VectorPair, 0);   // resolves to P2m on a card without an engine
     p7.residency = Residency::SystemRam;
     p7.spanMask = content;
     p7.size.fixedBytes = 1024;        // per-block object arrays only with `objects` (stays off)

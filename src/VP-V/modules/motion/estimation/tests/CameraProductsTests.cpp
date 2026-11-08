@@ -139,12 +139,11 @@ namespace CameraProductsTestsNs
 			Assert::AreEqual(1, int(p7.history));
 			Assert::IsTrue(p7.tier == Tier::T0);
 			Assert::IsTrue(p7.variants == Variants::Identical);
-			Assert::AreEqual(3, int(p7.inputCount));
-			Assert::AreEqual(int(kP3AnalysisField), int(p7.inputs[0].product));
-			Assert::AreEqual(int(kP4SourceStats), int(p7.inputs[1].product));
-			Assert::AreEqual(int(kP2VectorPair), int(p7.inputs[2].product));
-			for (int k = 0; k < 3; ++k)
-				Assert::IsTrue(p7.inputs[k].lag == 0 && p7.inputs[k].lead == 0);
+			// G-A3 (coordinator decision 2026-11-08): P4 is P7's only lane input; its P2 provenance is the FlowOf pair id + epoch, carried
+			// by the record (FieldCopy::p2Epoch), not a lane ancestor; P3 is not an ancestor.
+			Assert::AreEqual(1, int(p7.inputCount));
+			Assert::AreEqual(int(kP4SourceStats), int(p7.inputs[0].product));
+			Assert::IsTrue(p7.inputs[0].lag == 0 && p7.inputs[0].lead == 0);
 			Assert::AreEqual(content | Bit(kSettingsMotion), p7.reads);
 			Assert::AreEqual(content, p7.spanMask);
 			Assert::AreEqual(1024u, p7.size.fixedBytes);
@@ -335,7 +334,8 @@ namespace CameraProductsTestsNs
 			Assert::IsFalse(g.Has(kP9CameraSmoothed));
 			// P7 before P8 (lag-0 edge), and both after their inputs.
 			Assert::IsTrue(g.IndexOf(kP7CameraFit) < g.IndexOf(kP8CameraLabels));
-			Assert::IsTrue(g.IndexOf(kP3AnalysisField) < g.IndexOf(kP7CameraFit));
+			Assert::IsTrue(g.IndexOf(kP4SourceStats) < g.IndexOf(kP7CameraFit));   // G-A3: P4 is P7's only lane input
+			Assert::IsTrue(g.IndexOf(kP3AnalysisField) < g.IndexOf(kP8CameraLabels));
 
 			const Graph noEngine = BuildGraph(reg, cs, Settings(1, false));
 			Assert::IsTrue(noEngine.valid);

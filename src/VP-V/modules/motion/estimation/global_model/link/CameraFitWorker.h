@@ -27,7 +27,7 @@
 namespace CameraLink
 {
 	// PublishedOnTime: AHEAD FIT only, the record went into the on-time target (before its frame's seal) instead of the lag bridge.
-	enum class PublishOutcome : uint8_t { Published, LateClaim, LateNotWritable, LateInputs, LateSeal, NoProduct, StaleLane, PublishedOnTime };
+	enum class PublishOutcome : uint8_t { Published, LateClaim, LateNotWritable, LateInputs, LateSeal, NoProduct, StaleLane, PublishedOnTime, StaleP2 };
 	inline bool IsPublished(PublishOutcome o) { return o == PublishOutcome::Published || o == PublishOutcome::PublishedOnTime; }
 
 	inline const char* Text(PublishOutcome o)
@@ -41,6 +41,7 @@ namespace CameraLink
 		case PublishOutcome::LateSeal: return "late (sealed before the publish)";
 		case PublishOutcome::StaleLane: return "refused (the lane graph was rebuilt after the job was submitted)";
 		case PublishOutcome::PublishedOnTime: return "published on time";
+		case PublishOutcome::StaleP2: return "refused (the P2 pair's vectors-valid epoch moved: a resync / gap after FlowOf)";
 		default: return "no P7 product in the graph";
 		}
 	}
@@ -69,6 +70,9 @@ namespace CameraLink
 		// Every park ends in exactly one onResult. A full park ends its oldest entry as late. Seed jobs (not ahead) publish as before.
 		bool aheadMode = false;
 		VpSkeleton::LaneLeaseSource onTimeSource;   // empty = no on-time target: every ahead result is bridged (shown)
+		// G-A3: the engine's CURRENT vectors-valid epoch (IVectorEngine::FieldEra, any thread); an Ahead field whose p2Epoch differs is
+		// refused at the claim (PublishOutcome::StaleP2, FitCounters::p2RefusedClaim). Empty = no check.
+		std::function<uint64_t()> p2Epoch;
 		size_t parkCapacity = 64;
 	};
 

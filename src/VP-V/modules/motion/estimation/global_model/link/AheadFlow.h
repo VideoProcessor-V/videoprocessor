@@ -74,6 +74,7 @@ namespace CameraLink
 		std::vector<int16_t> forward, backward;   // interleaved (x, y), gridW * gridH * 2
 		std::vector<uint8_t> forwardCost;         // gridW * gridH
 		VpIndicator::Stamp stamp;            // the Indicator's stamp of seq when the pair was taken (render thread)
+		uint64_t epoch = 0;                  // G-A3: the engine's vectors-valid epoch FlowOf served the pair under (IVectorEngine::FieldEra)
 		// The engine's whole-frame motion of the pair (source px), filled by the source the way the engine fills its own record
 		// (MotionAhead::FlowGlobal); a fit prior like the render-time EngineGlobal. Not filled: no prior.
 		bool globalValid = false;
@@ -180,6 +181,8 @@ namespace CameraLink
 		out.blockSize = bs;
 		out.stamp = a.stamp;
 		out.origin = FieldOrigin::Ahead;
+		out.haveP2 = true;
+		out.p2Epoch = a.epoch;
 		const size_t blocks = static_cast<size_t>(sourceGridW) * static_cast<size_t>(sourceGridH);
 		out.fwdX.assign(blocks, 0.0f);
 		out.fwdY.assign(blocks, 0.0f);

@@ -500,6 +500,109 @@ namespace VideoProcessorTest
 			Assert::IsTrue(Has(lines, "on-time target: test lane"));
 		}
 
+		// G-A3: P7's P2 provenance is the FlowOf pair + the vectors-valid epoch it was served under; another epoch at the claim, at the
+		// on-time seal or at a consumer read refuses the record, counted and shown. P3 / P2 are no lane ancestors of P7.
+		TEST_METHOD(TheP2ProvenanceIsCheckedAtClaimSealAndUse)
+		{
+			const VpSkeleton::Registry reg = VpSkeleton::SkeletonProducts();
+			const VpSkeleton::ProductDecl& p7 = reg.Get(VpSkeleton::kP7CameraFit);
+			Assert::AreEqual(1, int(p7.inputCount), L"P4 only");
+			CameraLinkTest::Rig bridge, onTime;
+			FrameAnalysis::Store store;
+			for (uint64_t seq = 1; seq <= 4; ++seq)
+			{
+				FrameAnalysis::Identity id;
+				id.seq = seq;
+				id.width = 64;
+				id.height = 36;
+				store.Begin(id, FrameAnalysis::kCamera);
+			}
+			CameraLink::CameraLinkCore core(store);
+			CameraLink::CameraLinkSettings s;
+			s.p7Wanted = true;
+			s.aheadFit = true;
+			core.OnSettings(s);
+			std::atomic<uint64_t> epoch{ 5 };
+			core.SetAheadSource([](uint64_t, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
+			core.SetP2EpochSource([&epoch]() { return epoch.load(); });
+			core.AttachOnTime(SourceOf(onTime), "test lane");
+			core.AttachGraph(bridge.table.get(), bridge.bytes.get(), bridge.indicator.get());
+			CameraLink::FramePhaseFacts f;
+			f.seq = f.renderSeq = 1;
+			core.OnFrameStart(f);
+			onTime.PublishInputs(1);
+			onTime.Retire(1);
+			onTime.PublishInputs(2);
+			onTime.PublishInputs(3);
+			auto field = [](uint64_t seq, uint64_t ep) {
+				auto c = AheadField(seq, 4.0);
+				c->haveP2 = true;
+				c->p2Epoch = ep;
+				return c;
+			};
+			// At the claim: served under epoch 4, the engine is at 5: refused, never published anywhere.
+			Assert::IsTrue(core.SubmitAheadField(field(2, 4)));
+			core.Worker()->WaitIdle();
+			Assert::AreEqual(uint64_t(1), core.Counters().p2RefusedClaim.load());
+			Assert::AreEqual(uint64_t(0), core.Counters().aheadOnTime.load());
+			// Frame 3 under the current epoch: on time; then the epoch moves before its seal: rejected at the seal.
+			Assert::IsTrue(core.SubmitAheadField(field(3, 5)));
+			core.Worker()->WaitIdle();
+			Assert::AreEqual(uint64_t(1), core.Counters().aheadOnTime.load());
+			SealAt(onTime, 2);
+			SealAt(onTime, 3);
+			epoch.store(6);
+			f.seq = f.renderSeq = 3;
+			core.OnFrameStart(f);
+			Assert::AreEqual(uint64_t(1), core.Counters().p2RefusedSeal.load());
+			Assert::IsTrue(core.SealedRecord(3) == nullptr);
+			std::vector<std::string> lines;
+			core.CollectStatus(lines);
+			Assert::IsTrue(Has(lines, "P2 provenance refused at claim / seal / use 1 / 1 / 0"), L"shown");
+		}
+
+		TEST_METHOD(TheP2ProvenanceIsCheckedAtAConsumerRead)
+		{
+			CameraLinkTest::Rig bridge, onTime;
+			FrameAnalysis::Store store;
+			for (uint64_t seq = 1; seq <= 3; ++seq)
+			{
+				FrameAnalysis::Identity id;
+				id.seq = seq;
+				id.width = 64;
+				id.height = 36;
+				store.Begin(id, FrameAnalysis::kCamera);
+			}
+			CameraLink::CameraLinkCore core(store);
+			CameraLink::CameraLinkSettings s;
+			s.p7Wanted = true;
+			s.aheadFit = true;
+			core.OnSettings(s);
+			std::atomic<uint64_t> epoch{ 5 };
+			core.SetAheadSource([](uint64_t, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
+			core.SetP2EpochSource([&epoch]() { return epoch.load(); });
+			core.AttachOnTime(SourceOf(onTime), "test lane");
+			core.AttachGraph(bridge.table.get(), bridge.bytes.get(), bridge.indicator.get());
+			CameraLink::FramePhaseFacts f;
+			f.seq = f.renderSeq = 1;
+			core.OnFrameStart(f);
+			onTime.PublishInputs(1);
+			onTime.Retire(1);
+			onTime.PublishInputs(2);
+			auto c = AheadField(2, 4.0);
+			c->haveP2 = true;
+			c->p2Epoch = 5;
+			Assert::IsTrue(core.SubmitAheadField(c));
+			core.Worker()->WaitIdle();
+			SealAt(onTime, 2);
+			f.seq = f.renderSeq = 2;
+			core.OnFrameStart(f);
+			Assert::IsTrue(core.SealedRecord(2) != nullptr, L"sealed on time under the current epoch");
+			epoch.store(6);
+			Assert::IsTrue(core.SealedRecord(2) == nullptr, L"refused at use once the epoch moved");
+			Assert::AreEqual(uint64_t(1), core.Counters().p2RefusedUse.load());
+		}
+
 		TEST_METHOD(TheAheadPollTakesPairsInOrderAndStopsAtTheFirstMissing)
 		{
 			CameraLinkTest::Rig bridge;

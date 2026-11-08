@@ -129,6 +129,9 @@ namespace CameraLink
 		void AttachOnTime(VpSkeleton::LaneLeaseSource source, const std::string& name) { m_onTimeSource = std::move(source); m_onTimeName = name; }
 		// The 16-px source grid the ahead pair is converted onto (the live field's grid that sized the camera graph).
 		void SetAheadGrid(int sourceGridW, int sourceGridH) { m_aheadGridW = sourceGridW; m_aheadGridH = sourceGridH; }
+		// G-A3: the engine's current vectors-valid epoch (IVectorEngine::FieldEra, any thread): an Ahead record whose P2 epoch differs is
+		// refused at the claim, the on-time seal and every consumer read. Empty = no check. Set before AttachLane.
+		void SetP2EpochSource(std::function<uint64_t()> source) { m_p2Epoch = std::move(source); }
 		// The matcher's forward/backward consistency limit in engine px (SeedField::consistencyPx when one is seen; default 2, the
 		// dejudder_consistency_px default, as the TD motion source).
 		void SetAheadConsistency(float enginePx) { if (enginePx > 0.0f) m_aheadConsistency = enginePx; }
@@ -262,6 +265,11 @@ namespace CameraLink
 		PairFactsProvider m_aheadFacts;
 		VpSkeleton::LaneLeaseSource m_onTimeSource;
 		std::string m_onTimeName;
+		std::function<uint64_t()> m_p2Epoch;
+		bool P2Stale(const PoolEntry& e) const
+		{
+			return e.field && e.field->haveP2 && m_p2Epoch && m_p2Epoch() != e.field->p2Epoch;
+		}
 		int m_aheadGridW = 0, m_aheadGridH = 0;
 		float m_aheadConsistency = 2.0f;
 		uint64_t m_aheadNext = 0;            // the next frame the ahead pair is asked for (0 = not started)

@@ -141,6 +141,7 @@ namespace CameraLink
 		env.queueCapacity = ahead ? (std::max)(m_settings.queueCapacity, kAheadQueue) : m_settings.queueCapacity;
 		env.aheadMode = ahead;
 		env.onTimeSource = ahead ? m_onTimeSource : VpSkeleton::LaneLeaseSource();
+		env.p2Epoch = ahead ? m_p2Epoch : std::function<uint64_t()>();
 		env.onResult = [this](const CameraFitJob& j, const CameraFitResult& r, PublishOutcome o) { OnResult(j, r, o); };
 		m_worker.reset(new CameraFitWorker(*m_producer, env));
 		if (!m_settings.deterministic)
@@ -334,6 +335,11 @@ namespace CameraLink
 		VpIndicator::Indicator* ind = l.indicator ? l.indicator : (m_worker ? m_worker->Lease().indicator : nullptr);
 		if (sealed && have && e.haveHonoured && ind && !VpIndicator::SameFor(e.honoured, ind->StampOf(seq), kP7StampMask))
 			sealed = false;
+		if (sealed && have && P2Stale(e))
+		{
+			sealed = false;   // G-A3 at the seal: the P2 epoch moved since FlowOf served the pair
+			m_counters.p2RefusedSeal.fetch_add(1, std::memory_order_relaxed);
+		}
 		if (sealed && have)
 		{
 			const bool accepted = m_sealToStore.OnSealed(seq, e.record);
@@ -744,6 +750,11 @@ namespace CameraLink
 		PoolEntry e;
 		if (!m_pool->Get(seq, e))
 			return nullptr;
+		if (P2Stale(e))
+		{
+			m_counters.p2RefusedUse.fetch_add(1, std::memory_order_relaxed);   // G-A3 at the consumer read
+			return nullptr;
+		}
 		if (e.haveHonoured && m_worker)
 		{
 			// AHEAD FIT re-check at consumption: the stamp honoured at the publish must still be the frame's stamp in the Indicator of the

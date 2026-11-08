@@ -231,6 +231,11 @@ namespace CameraLink
 					outcome = PublishOutcome::PublishedOnTime;
 					return true;
 				}
+				if (o == PublishOutcome::StaleP2)
+				{
+					outcome = o;           // refused for good: not bridged either
+					return true;
+				}
 				if (o != PublishOutcome::LateInputs)
 					p.onTimeDone = true;   // claimed / sealed / not writable / no P7 there: the bridge takes it
 				else
@@ -330,6 +335,13 @@ namespace CameraLink
 		VpSkeleton::SlotSet* set = lease.table ? lease.table->Find(VpSkeleton::kP7CameraFit) : nullptr;
 		if (!set || !m_env.pool || !fit.record)
 			return PublishOutcome::NoProduct;
+		if (job.field && job.field->haveP2 && m_env.p2Epoch && m_env.p2Epoch() != job.field->p2Epoch)
+		{
+			// G-A3 at the claim: the pair was served under another vectors-valid epoch (a resync / gap after FlowOf): never published.
+			if (c)
+				c->p2RefusedClaim.fetch_add(1, std::memory_order_relaxed);
+			return PublishOutcome::StaleP2;
+		}
 
 		if (!countLate)
 		{

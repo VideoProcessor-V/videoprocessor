@@ -246,7 +246,12 @@ lagged seal does not. Test: `DeterministicModeTakesTheBridgePathOnly` (the ahead
   every live fill of a product published outside, `externalDeclined_`). With the demand declared, every frame whose ahead fit misses the seal
   is sealed ABSENT in the skeleton and counted there ("products published outside the lane ..."); the camera then bridges it in its own table.
   A frame cannot be "expected later" in the skeleton (SK-W2).
-* **G-A3 P7's lag-0 inputs are render-time products.** P7 declares P3(N), P4(N), P2(N) at lag 0 (`core/Products.h`); the skeleton's P2 / P3
+* **G-A3 (DECIDED and done, coordinator 2026-11-08): P7 declares P4 only.** P3 is not an ancestor and P2 is not a lane input
+  (`core/Products.h`): the fit reads only the unguided P2 through FlowOf, and P7 carries its P2 provenance itself (the FlowOf pair =
+  `pairFrom -> pairTo`, the engine's vectors-valid epoch `FieldCopy::p2Epoch` from `IVectorEngine::FieldEra` in the same render-thread
+  call). Another epoch at the claim (`PublishOutcome::StaleP2`, never published anywhere), at the on-time seal or at a consumer read is
+  refused, counted (`p2RefusedClaim / Seal / Use`) and shown in the ahead line. Tests: `TheP2ProvenanceIsCheckedAtClaimSealAndUse`,
+  `TheP2ProvenanceIsCheckedAtAConsumerRead`, `CameraProductsTests::CameraProductFields` (P4 only). History: P7 declares P3(N), P4(N), P2(N) at lag 0 (`core/Products.h`); the skeleton's P2 / P3
   slots of N are published by the ENGINE FEED from the matcher's verified field (`SkeletonModule::FeedEngine` at AfterRender of the frame that
   estimated N's pair, sealed at N's Begin). So an ahead P7(N) can only be claimed in the window [AfterRender(N-1), Begin(N)], however early it
   was fitted (the park retries at AfterRender for exactly that window). An ahead-fed P7 would need its inputs to be P2 (the NVOF pair) and P4.

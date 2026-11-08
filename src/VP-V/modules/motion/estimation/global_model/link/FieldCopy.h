@@ -36,6 +36,10 @@ namespace CameraLink
 		std::vector<float> bwdX, bwdY, bwdTrust;    // empty when no backward field
 		VpIndicator::Stamp stamp;                   // the stamp the field was computed under
 		FieldOrigin origin = FieldOrigin::Synthetic;
+		// G-A3: the P2 provenance of an Ahead field (the FlowOf pair = pairFrom -> pairTo, served under the engine's vectors-valid epoch
+		// p2Epoch, IVectorEngine::FieldEra). Checked at claim, seal and every consumer read: another epoch = refused, counted, shown.
+		bool haveP2 = false;
+		uint64_t p2Epoch = 0;
 		bool HaveBackward() const { return !bwdX.empty(); }
 		size_t Blocks() const { return static_cast<size_t>(gridW > 0 ? gridW : 0) * static_cast<size_t>(gridH > 0 ? gridH : 0); }
 		bool Valid() const { return gridW > 0 && gridH > 0 && blockSize > 0 && fwdX.size() == Blocks(); }
