@@ -59,9 +59,12 @@ namespace TemporalDetail
 		// entry's threshold follows it. 0 (the default) = the tracker's floor.
 		void SetDepth(int depthFrames) { m_depth = depthFrames; }
 		// The matcher's forward/backward consistency limit in producer (half-size) pixels (Dejudder::MotionWarp::ConsistencyPixels): the host
-		// hands over the value its matcher uses, so TD judges the engine's consistency exactly as the de-judder does. The default is the matcher's
-		// own default setting.
+		// hands over the value its matcher uses, so TD judges the engine's consistency exactly as the de-judder does. The default is the live
+		// dejudder_consistency_px default (2.0, VpvRendererFields.h) - NOT Dejudder::Settings::consistencyPixels' object default of 1.0 - and
+		// the wiring MUST set it from warp.ConsistencyPixels() (which also scales by height above the reference).
+		static float DefaultConsistencyPixels() { return 2.0f; }
 		void SetConsistencyPixels(float pixels) { if (pixels > 0.0f) m_consistencyPx = pixels; }
+		float ConsistencyPixels() const { return m_consistencyPx; }
 
 		bool Forward(uint64_t seq, MotionPair& out) const override { return Take(seq, true, out); }
 		bool Backward(uint64_t seq, MotionPair& out) const override { return Take(seq, false, out); }
@@ -143,7 +146,7 @@ namespace TemporalDetail
 		VpMotion::P2View m_view;
 		const MotionValidity::State* m_validity = nullptr;
 		int m_srcW = 0, m_srcH = 0;
-		float m_consistencyPx = 1.0f;   // = Dejudder::Settings::consistencyPixels' default; the host sets its matcher's value
+		float m_consistencyPx = DefaultConsistencyPixels();   // the live dejudder_consistency_px default; the wiring sets its matcher's value
 		mutable Stats m_stats;
 		mutable VpMotion::NoPairTracker m_tracker;
 		int m_depth = 0;

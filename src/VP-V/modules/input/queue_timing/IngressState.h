@@ -48,6 +48,7 @@ namespace Vpv
 	std::atomic<uint64_t> m_captureTimestampBreaks{0};
 	std::atomic<bool> m_pulldownResetRequested{false};
 	std::atomic<int> m_pulldownCadence{0};   // (cycle << 16) | new frames per cycle; 0 = not locked
+	std::atomic<bool> m_pulldownAcquiring{false};   // SK-MV: a film cadence is being acquired (Detector::Acquiring), not yet locked
 	std::atomic<uint64_t> m_pulldownSkipped{0};
 	Pulldown::Detector m_pulldown;
 	Pulldown::FilmClock m_pulldownClock;

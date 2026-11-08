@@ -12,6 +12,7 @@
 #endif
 #include "CppUnitTest.h"
 
+#include <VP-V/modules/input/queue_timing/PulldownDetector.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/ProducerPlan.h>
@@ -19,6 +20,7 @@
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 
 #include <algorithm>
+#include <cmath>
 #include <initializer_list>
 #include <string>
 
@@ -402,11 +404,13 @@ namespace ProducerPlanTest
 			Assert::IsFalse(pairAtFirstActive(false), L"without the hook line the UnknownRates frames are not standing");
 		}
 
-		// A DIRECT switch IneligibleCadence -> Active (no UnknownRates in between) is COLD by design, and that is measured here, not assumed: an
-		// ineligible cadence (60p video, no strength for the cadence) is not standing, because keeping NVOF running on every frame of a source the
-		// de-judder can never act on is exactly what the MUST KEEP forbids. The first Active frame finds no pair (one counted P2m miss, far below the
-		// sustained threshold, so not shown), the plan of that frame submits the queue, and the next frame is served by the producer.
-		TEST_METHOD(ADirectIneligibleCadenceToActiveSwitchIsColdForOneFrameAndNotShown)
+		// A DIRECT switch IneligibleCadence -> Active (no UnknownRates in between) with NO film cadence being acquired (a settings change, a
+		// display-rate switch) is cold for a few frames, and that is measured here, not assumed: an ineligible cadence is not standing, because
+		// keeping NVOF running on every frame of a source the de-judder can never act on is what the MUST KEEP forbids. The first Active frame finds
+		// no pair (a counted P2m miss; the producer's first pair takes about one NVOF latency, one to a few frames, always below the sustained
+		// threshold, so never shown), the plan of that frame submits the queue, and the following frames are served by the producer. The pulldown
+		// lock - the common source of this switch - is NOT cold: see the Acquiring tests below.
+		TEST_METHOD(ADirectIneligibleCadenceToActiveSwitchWithoutAnAcquiringCadenceIsColdForAFewFramesBelowTheSustainedThreshold)
 		{
 			using R = DejudderPolicy::Reason;
 			std::vector<R> sequence(10, R::IneligibleCadence);
@@ -442,11 +446,108 @@ namespace ProducerPlanTest
 						slot.Publish(nextSubmit - 1, nextSubmit, 1, std::make_shared<const MotionAhead::Flow>());
 			}
 			Assert::AreEqual<size_t>(3, activeFrameFoundPair.size());
-			Assert::IsFalse(activeFrameFoundPair[0], L"the first Active frame after a direct switch is cold (documented)");
+			Assert::IsFalse(activeFrameFoundPair[0], L"the first Active frame after a direct switch with no cadence being acquired is cold (documented)");
 			Assert::IsTrue(activeFrameFoundPair[1] && activeFrameFoundPair[2], L"the producer serves from the next frame on");
 			VpMotion::NoPairTracker tracker;
 			tracker.Note(true, depthSeen);
-			Assert::IsFalse(tracker.Sustained(depthSeen), L"one cold frame is a counter only, never an engaged fallback");
+			Assert::IsFalse(tracker.Sustained(depthSeen), L"the few cold frames are counters only, never an engaged fallback");
+		}
+
+		// The pattern of `filmHz` carried in `signalHz` the way a source does it (each signal frame shows the latest film frame due).
+		static std::string CarriedPatternFor(double filmHz, double signalHz, size_t frames)
+		{
+			std::string pattern;
+			long long previous = -1;
+			for (size_t i = 0; i < frames; ++i)
+			{
+				const long long film = static_cast<long long>(std::floor(static_cast<double>(i) * filmHz / signalHz + 1e-9));
+				pattern += film == previous ? 'R' : 'N';
+				previous = film;
+			}
+			return pattern;
+		}
+
+		// 60p video with sporadic repeats (hiccups, a dropped-and-repeated frame) and a frozen picture never look like a pulldown cycle: the
+		// standing engine stays idle where the de-judder can never act.
+		TEST_METHOD(SporadicRepeatsOnVideoAndAFrozenPictureNeverStartTheStandingEngine)
+		{
+			using R = DejudderPolicy::Reason;
+			std::string video(600, 'N');
+			for (const size_t at : { size_t(13), size_t(50), size_t(131), size_t(157), size_t(301), size_t(419), size_t(420), size_t(555) })
+				video[at] = 'R';
+			Pulldown::Detector detector;
+			for (size_t i = 0; i < video.size(); ++i)
+			{
+				const Pulldown::Decision d = detector.Next(video[i] == 'R', false, 60.0);
+				Assert::IsFalse(d.locked, L"no lock on sporadic repeats");
+				Assert::IsFalse(detector.Acquiring(), L"sporadic repeats are not a cycle");
+				Assert::IsFalse(DejudderPolicy::CanEngageOrAcquiring(R::IneligibleCadence, detector.Acquiring()), L"idle");
+			}
+			Pulldown::Detector frozen;
+			for (int i = 0; i < 300; ++i)
+			{
+				frozen.Next(i != 0, false, 60.0);   // the first frame is new, then the picture freezes
+				Assert::IsFalse(frozen.Acquiring(), L"a frozen picture (all repeats) is not a pulldown");
+			}
+			// A source the de-judder can never act on is not made standing by a cadence either.
+			Assert::IsFalse(DejudderPolicy::CanEngageOrAcquiring(R::Off, true));
+			Assert::IsFalse(DejudderPolicy::CanEngageOrAcquiring(R::VideoRateMaskOnly, true));
+			Assert::IsFalse(DejudderPolicy::CanEngageOrAcquiring(R::LowLatency, true));
+			Assert::IsTrue(DejudderPolicy::CanEngageOrAcquiring(R::IneligibleCadence, true), L"the ineligible cadence that is being acquired");
+			Assert::IsTrue(DejudderPolicy::CanEngageOrAcquiring(R::UnknownRates, false), L"the existing standing reasons are unchanged");
+		}
+
+		// 24p carried in 60 Hz: the pulldown lock needs FramesToLock frames (three cycles and two seconds), and the lock frame is where the source
+		// rate turns into the film's and the de-judder first engages. The cadence is ACQUIRED well before (three cycles), so with the acquiring
+		// signal the engine is warm: valid pairs exist at the lock frame. Without it the same switch is cold (the control).
+		TEST_METHOD(ACadenceBeingAcquiredHasValidPairsBeforeThePulldownLockFrame)
+		{
+			using R = DejudderPolicy::Reason;
+			const double signalHz = 60.0;
+			const std::string frames = CarriedPatternFor(24.0, signalHz, 200);
+			auto pairAtLock = [&](bool useAcquiring, int& firstAcquiring, int& lockFrame) {
+				VpMotion::P2Slot slot(16);
+				slot.SetGeneration(1);
+				Pulldown::Detector detector;
+				uint64_t nextSubmit = 1;
+				firstAcquiring = lockFrame = -1;
+				for (size_t i = 0; i < frames.size(); ++i)
+				{
+					const uint64_t n = i + 1;
+					const Pulldown::Decision d = detector.Next(frames[i] == 'R', false, signalHz);
+					const bool acquiring = !d.locked && detector.Acquiring();
+					if (acquiring && firstAcquiring < 0)
+						firstAcquiring = static_cast<int>(i);
+					if (d.locked)
+					{
+						lockFrame = static_cast<int>(i);
+						return static_cast<bool>(slot.Find(n, n + 1));   // what the first Active frame's estimate takes, before its own plan
+					}
+					DepthInput in;
+					in.opticalFlow = true;
+					in.motionAheadFrames = 4;
+					in.sourceHz = signalHz;   // before the lock the source rate is the signal's
+					in.producerRunning = true;
+					in.queuedFutureFrames = 8;
+					in.dejudderEstimating = false;
+					in.dejudderStanding = DejudderPolicy::CanEngageOrAcquiring(R::IneligibleCadence, useAcquiring && acquiring);
+					const DepthOutput o = Depth(in);
+					if (o.storedDepth <= 0)
+						continue;
+					for (; nextSubmit <= n + static_cast<uint64_t>(o.storedDepth); ++nextSubmit)
+						if (nextSubmit > 1)
+							slot.Publish(nextSubmit - 1, nextSubmit, 1, std::make_shared<const MotionAhead::Flow>());
+				}
+				return false;
+			};
+			int acquiredAt = -1, lockedAt = -1;
+			Assert::IsTrue(pairAtLock(true, acquiredAt, lockedAt), L"acquiring: valid pairs exist at the lock frame");
+			Assert::IsTrue(lockedAt >= 0 && acquiredAt >= 0, L"the pattern locked and was acquired first");
+			Assert::IsTrue(lockedAt + 1 >= Pulldown::Detector::FramesToLock(5, signalHz), L"the lock waits for the cycles AND the two seconds");
+			Assert::IsTrue(acquiredAt + 60 < lockedAt, L"the cadence is acquired at least a second of signal frames before the lock");
+			int a2 = -1, l2 = -1;
+			Assert::IsFalse(pairAtLock(false, a2, l2), L"control: without the acquiring signal the same switch finds no pair at the lock frame");
+			Assert::AreEqual(lockedAt, l2);
 		}
 
 		TEST_METHOD(DepthIsZeroWhileTheProducerDoesNotRun)

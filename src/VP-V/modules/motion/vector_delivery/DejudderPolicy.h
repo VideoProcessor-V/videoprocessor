@@ -47,6 +47,15 @@ namespace DejudderPolicy
 			reason == Reason::UnknownRates || reason == Reason::PlaneFormat;
 	}
 
+	// ... plus the transient where the cadence turns eligible with NO state in between: the pulldown lock changes the source rate from the
+	// signal's (a video-rate source, IneligibleCadence) to the film's and the very next decision is Active. A film cadence being ACQUIRED
+	// (PulldownDetector::Acquiring) while the de-judder is enabled but the cadence still ineligible keeps the engine warm too, so pairs exist
+	// at the lock frame. Every other ineligible source (no pulldown pattern forming) stays idle.
+	inline bool CanEngageOrAcquiring(Reason reason, bool pulldownAcquiring)
+	{
+		return CanEngage(reason) || (pulldownAcquiring && reason == Reason::IneligibleCadence);
+	}
+
 	struct Input
 	{
 		double strength = 0.0;

@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 namespace VideoProcessorTest
@@ -110,17 +111,19 @@ namespace VideoProcessorTest
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
 			for (int all = 0; all < 2; ++all)   // dejudder_low_res on (the inner searches, the outer refines) and all (the inner makes the field)
 			{
-				const CaseResult r = RunCase(fixture, 2048, 1536, true, all == 1, +1);
+				const CaseResult r = RunCase(fixture, 2048, 1536, true, all == 1, kPreGapTruth);
 				Assert::IsTrue(r.lowResEngaged, L"the 1536-line input halves for the search");
 				Assert::IsTrue(r.seededUsed, L"D1 started from the gap seed in the inner (the outer reports it)");
-				Assert::IsTrue(r.seededError <= r.unseededError + 1e-6, L"lowRes: seeded error <= unseeded error");
+				Assert::IsTrue(r.seeded.trustedError <= r.unseeded.trustedError + 1e-6, L"lowRes: seeded trusted-block error <= unseeded");
+				Assert::IsTrue(r.seeded.untrustedShare <= r.unseeded.untrustedShare + 1e-9, L"lowRes: seeded untrusted share <= unseeded");
 				Assert::IsFalse(r.spentSeedUsedAgain, L"the seed is spent by the one estimate (the inner too)");
 			}
 		}
 
-		// A wrong seed (the motion CHANGED during the hiccup: the pan reversed) must not make the fill pair worse than the unseeded estimate by
-		// more than an epsilon (the mean field error in source pixels over the interior blocks, an untrusted block counting as fully wrong).
-		// If this ever fails the seed has to be rejected, not shipped.
+		// A wrong seed (the motion CHANGED during the hiccup) must not make the fill pair worse than the unseeded estimate. Two bounds, kept
+		// SEPARATE so a loss in one cannot hide behind the other: the mean error of the blocks the matcher TRUSTS (source pixels) may exceed the
+		// unseeded one by at most kErrorEpsilonPx, and the share of interior blocks left untrusted by at most kShareEpsilon. Cases: the pan
+		// reversed, stopped, and ran at half and at double the pre-gap speed. If any of this fails the seed has to be rejected, not shipped.
 		BEGIN_TEST_METHOD_ATTRIBUTE(AWrongSeedIsNoWorseThanUnseededPlusEpsilon)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
 		END_TEST_METHOD_ATTRIBUTE()
@@ -128,28 +131,63 @@ namespace VideoProcessorTest
 		{
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
-			const double epsilon = 0.5;
-			const CaseResult full = RunCase(fixture, 768, 384, false, false, -1);
-			Assert::IsTrue(full.seededError <= full.unseededError + epsilon, L"full resolution: a wrong seed is no worse than unseeded + epsilon");
-			const CaseResult low = RunCase(fixture, 2048, 1536, true, false, -1);
-			Assert::IsTrue(low.lowResEngaged);
-			Assert::IsTrue(low.seededError <= low.unseededError + epsilon, L"lowRes: a wrong seed is no worse than unseeded + epsilon");
+			for (const int truth : { -kPreGapTruth, 0, kPreGapTruth / 2, kPreGapTruth * 2 })
+			{
+				const CaseResult full = RunCase(fixture, 768, 384, false, false, truth);
+				const std::wstring name = L"full resolution, true motion " + std::to_wstring(truth) + L" px: ";
+				Assert::IsTrue(full.seeded.trustedError <= full.unseeded.trustedError + kErrorEpsilonPx, (name + L"trusted-block error").c_str());
+				Assert::IsTrue(full.seeded.untrustedShare <= full.unseeded.untrustedShare + kShareEpsilon, (name + L"untrusted share").c_str());
+			}
+			for (const int truth : { -kPreGapTruth, 0 })
+			{
+				const CaseResult low = RunCase(fixture, 2048, 1536, true, false, truth);
+				Assert::IsTrue(low.lowResEngaged);
+				const std::wstring name = L"lowRes, true motion " + std::to_wstring(truth) + L" px: ";
+				Assert::IsTrue(low.seeded.trustedError <= low.unseeded.trustedError + kErrorEpsilonPx, (name + L"trusted-block error").c_str());
+				Assert::IsTrue(low.seeded.untrustedShare <= low.unseeded.untrustedShare + kShareEpsilon, (name + L"untrusted share").c_str());
+			}
 		}
 
 	private:
+		static constexpr int kPerFrame = 40, kDropped = 2, kPreGapTruth = kPerFrame * kDropped;   // the pre-gap pan, and what it would span over the gap
+		static constexpr double kErrorEpsilonPx = 0.5, kShareEpsilon = 0.05;
+
+		struct FieldScore
+		{
+			double trustedError = 1e9;     // mean |v - truth| over the trusted interior blocks (source px); 0 when none is trusted
+			double untrustedShare = 1.0;   // share of the interior blocks that are not trusted
+		};
 		struct CaseResult
 		{
-			double unseededError = 1e9, seededError = 1e9;
+			FieldScore unseeded, seeded;
 			bool seededUsed = false, spentSeedUsedAgain = true, lowResEngaged = false;
 		};
 
-		// One fill pair over a dropped frame (frames 0 and 2 of a pan), unseeded and seeded. truthSign +1: the pan continued as before the
-		// gap (the seed is right); -1: it reversed during the hiccup (the seed, from the pre-gap motion, is wrong).
-		static CaseResult RunCase(TargetLutGpuFixture& fixture, int width, int height, bool lowRes, bool lowResAll, int truthSign)
+		static FieldScore Score(const DejudderField& f, int truth)
+		{
+			FieldScore score;
+			double sum = 0.0;
+			long trusted = 0, total = 0;
+			for (int by = 2; by < f.blocksY - 2; ++by)
+				for (int bx = 2; bx < f.blocksX - 2; ++bx)
+				{
+					++total;
+					if (!f.trusted(bx, by))
+						continue;
+					sum += std::hypot(f.vx(bx, by) - truth, f.vy(bx, by));
+					++trusted;
+				}
+			score.trustedError = trusted ? sum / trusted : 0.0;
+			score.untrustedShare = total ? 1.0 - static_cast<double>(trusted) / total : 1.0;
+			return score;
+		}
+
+		// One fill pair over a dropped frame (frames 0 and 2): the content moves `truth` source px between them (kPreGapTruth = the pan
+		// continued as before the gap, the seed is right; anything else = the motion changed during the hiccup, the seed from the pre-gap pair
+		// is wrong). Estimated unseeded, then seeded from the pre-gap motion.
+		static CaseResult RunCase(TargetLutGpuFixture& fixture, int width, int height, bool lowRes, bool lowResAll, int truth)
 		{
 			pl_gpu gpu = fixture.Gpu();
-			const int perFrame = 40, dropped = 2;
-			const int truth = truthSign * perFrame * dropped;
 			auto frame = [&](int shift) {
 				return MakeDejudderFrame(width, height, [shift](int x, int y) { return DejudderTexture(x - shift, y); },
 					[shift](int x, int y, int c) { return DejudderTexture((x - shift / 2) * 2, y, 7 + c); });
@@ -165,33 +203,22 @@ namespace VideoProcessorTest
 				s.lowResAll = lowResAll;
 				return s;
 			};
-			auto error = [&](const DejudderField& f) {
-				double sum = 0.0;
-				long n = 0;
-				for (int by = 2; by < f.blocksY - 2; ++by)
-					for (int bx = 2; bx < f.blocksX - 2; ++bx)
-					{
-						sum += f.trusted(bx, by) ? std::hypot(f.vx(bx, by) - truth, f.vy(bx, by)) : static_cast<double>(std::abs(truth));
-						++n;
-					}
-				return n ? sum / n : 1e9;
-			};
 			CaseResult r;
 			Dejudder::MotionWarp unseeded(fixture.Log(), gpu, settings());
 			Assert::IsTrue(unseeded.Estimate(pa.planes, pb.planes), std::wstring(unseeded.LastError().begin(), unseeded.LastError().end()).c_str());
 			r.lowResEngaged = unseeded.SearchHalvings() > 0;
-			r.unseededError = error(DownloadField(gpu, unseeded));
-			// The shared pair before the gap: perFrame source px per frame (always +), in the searching instance's input pixels: half of the
-			// source's at lowRes; D1 cells are 1/8 of those. The gap spans two periods.
-			const float cell = (lowRes ? 0.5f : 1.0f) * perFrame / 8.0f;
+			r.unseeded = Score(DownloadField(gpu, unseeded), truth);
+			// The shared pair before the gap: kPerFrame source px per frame (always +), in the searching instance's input pixels: half of the
+			// source's at lowRes; D1 cells are 1/8 of those. The gap spans kDropped periods.
+			const float cell = (lowRes ? 0.5f : 1.0f) * kPerFrame / 8.0f;
 			float g[2][4] = { { cell, 0.0f, 0.2f, 1.0f }, { -cell, 0.0f, 0.2f, 1.0f } };
-			const VpMotion::GapSeed seed = VpMotion::GapSeed::Make(g, 10, 10, 10 + dropped, 7, 8, true);
+			const VpMotion::GapSeed seed = VpMotion::GapSeed::Make(g, 10, 10, 10 + kDropped, 7, 8, true);
 			Assert::IsTrue(seed.valid);
 			Dejudder::MotionWarp seeded(fixture.Log(), gpu, settings());
 			seeded.SetSearchSeed(seed.global);
 			Assert::IsTrue(seeded.Estimate(pa.planes, pb.planes), std::wstring(seeded.LastError().begin(), seeded.LastError().end()).c_str());
 			r.seededUsed = seeded.SearchSeedUsed();
-			r.seededError = error(DownloadField(gpu, seeded));
+			r.seeded = Score(DownloadField(gpu, seeded), truth);
 			Assert::IsTrue(seeded.Estimate(pa.planes, pb.planes));
 			r.spentSeedUsedAgain = seeded.SearchSeedUsed();
 			return r;

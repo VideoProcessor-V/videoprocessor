@@ -238,6 +238,7 @@ bool LibplaceboVideoRenderer::IngressPulldown(RendererExtension::IngressContext&
 			DebugLog::Log("Pulldown: %s (was %s)", lockText.c_str(), before.c_str());
 		}
 		const int cadence = decision.locked ? (decision.cycle << 16) | decision.unique : 0;
+		m_pulldownAcquiring.store(!decision.locked && m_pulldown.Acquiring(), std::memory_order_relaxed);   // SK-MV warm engine
 		// Hunt 2 (06-interp M3): the queue target follows the lock (PrefillTargetLocked): wake
 		// the waiters when it changes.
 		if (m_pulldownCadence.exchange(cadence, std::memory_order_relaxed) != cadence && classFixes)
@@ -317,6 +318,7 @@ bool LibplaceboVideoRenderer::IngressPulldown(RendererExtension::IngressContext&
 		m_pulldownSignature = 0;
 		m_pulldownFilmQpc = 0;
 		m_pulldownCadence.store(0, std::memory_order_relaxed);
+		m_pulldownAcquiring.store(false, std::memory_order_relaxed);
 		if (!gapBefore)
 			gapCause = "pulldown off";
 		gapBefore = true;

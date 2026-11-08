@@ -452,6 +452,36 @@ namespace Pulldown
 	public:
 		bool Locked() const { return m_locked; }
 
+		// SK-MV warm engine: a film cadence is being ACQUIRED. The lock needs three cycles AND two seconds; the motion engine needs a pair
+		// ahead of the lock frame (the lock is the frame the source rate changes from the signal's to the film's and the de-judder first
+		// engages), so the host starts the standing engine once the frames already follow a pulldown cycle: not locked, and the last three
+		// cycles of the history are periodic for the shortest period, with at least one new and at least one repeated frame per cycle. This is
+		// the lock's own periodicity test without its two-second wait. Isolated repeats or drops (hiccups on a video-rate source) never repeat
+		// at one spacing three times, and a frozen picture (all repeats) or all-new frames is not a pulldown, so none of them starts it.
+		bool Acquiring() const
+		{
+			if (m_locked)
+				return false;
+			const int size = static_cast<int>(m_history.size());
+			const int maxCycle = MaxCycle(m_signalHz);
+			for (int cycle = 2; cycle <= maxCycle; ++cycle)
+			{
+				const int need = cycle * kCyclesToLock;
+				if (size < need)
+					break;   // longer cycles need at least as much history
+				bool periodic = true;
+				for (int i = size - need + cycle; i < size && periodic; ++i)
+					periodic = m_history[i] == m_history[i - cycle];
+				if (!periodic)
+					continue;
+				int unique = 0;
+				for (int i = size - cycle; i < size; ++i)
+					unique += m_history[i] == 'N' ? 1 : 0;
+				return unique >= 1 && unique < cycle;   // the shortest period decides (a longer one is only it repeated)
+			}
+			return false;
+		}
+
 		// R3 (resync_event on): the Indicator's `timing` counter re-latches the signal rate; the fixed
 		// 0.5% rule stays on as a backstop (bug hunt 35 #3 / 25a R5). Off = the rule alone, as before.
 		void SetTimingRelatch(bool on) { m_timingRelatch = on; }
