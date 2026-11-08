@@ -13,9 +13,8 @@
 //   * OnFrame() once per frame on the render thread: finish the counts a frame late, pump the lane job.
 //   * the d lag is derived at a graph rebuild from the MEASURED costs (RebuildGraph), then the core's meter restarts with the graph.
 //   * status through FallbackCatalog decisions and status lines; costs as PassTimers rows (FeedPassTimers).
-// AfterEstimate shim: P5a's plain AfterEstimate(pairSeq, guidanceUsed, countsTex) is what exists today; the camera hook forwards it
-// into EstimateOutcome (CameraGuidanceHook::AfterEstimate). When M2 adds the plain-data outcome to AfterEstimate, the ONLY edit on
-// this side is one override that maps it onto CameraLink::EstimateOutcome (narrow idle, rejection, gpuMs) and calls AfterEstimateEx.
+// AfterEstimate: P5a's AfterEstimate(pairSeq, VpMotion::EstimateOutcome) (M2 P5a-out) is mapped by CameraGuidanceHook::AfterEstimate onto
+// CameraLink::EstimateOutcome (the ONE mapping: narrow idle, rejection text, gpuMs, counts) and forwarded to AfterEstimateEx.
 // C++14, header + .cpp, render thread unless noted.
 #pragma once
 

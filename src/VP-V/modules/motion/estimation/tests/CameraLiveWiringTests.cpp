@@ -307,6 +307,26 @@ namespace VideoProcessorTest
 			Assert::IsNull(rig.engine.hook);
 		}
 
+		TEST_METHOD(TheEnginesOutcomeIsMappedOntoTheCameraOutcome)
+		{
+			// M2's plain-data outcome through the registered hook: narrow idle and the rejection text reach the scheduler's counters.
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]
+camera_model=on
+camera_meas_model_global=on
+");
+			rig.Start(6);
+			CameraLink::CameraGuidanceAdapter* adapter = rig.ext.AdapterOf(rig.Host());
+			Assert::IsNotNull(adapter);
+			VpMotion::EstimateOutcome outcome;
+			outcome.guidanceUsed = true;
+			outcome.narrowIdle = true;
+			outcome.rejection = "camera guidance: texture upload failed";
+			rig.engine.hook->AfterEstimate(9, outcome);
+			Assert::AreEqual<uint64_t>(1, adapter->Scheduler().Counters().narrowIdleEngine);
+			Assert::AreEqual<uint64_t>(1, adapter->Scheduler().Counters().rejectedByMatcher);
+			Assert::AreEqual<uint64_t>(1, adapter->Hook().UsedPairs());
+		}
+
 		TEST_METHOD(AnAbsentVectorEngineIsRefusedVisibly)
 		{
 			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\ncamera_meas_model_global=on\n", false);

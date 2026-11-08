@@ -217,9 +217,8 @@ namespace CameraLink
 		CameraGuidanceHook(GuidanceScheduler& scheduler, IGuidanceCountsSource* counts, ICameraLink& link)
 			: m_sched(scheduler), m_counts(counts), m_link(link) {}
 		void BeforeEstimate(const VpMotion::EstimateContext& ctx, VpMotion::IGuidanceSink& sink) override;
-		void AfterEstimate(uint64_t pairSeq, bool guidanceUsed, pl_tex countsTex) override;
-		// SHIM: P5a's AfterEstimate carries only guidanceUsed and the counts texture; it forwards into EstimateOutcome here. The one
-		// edit when M2 adds the plain-data outcome: an override that maps it onto EstimateOutcome and calls AfterEstimateEx.
+		// The engine's plain-data outcome (M2 P5a-out) mapped onto CameraLink::EstimateOutcome (the ONE mapping), then AfterEstimateEx.
+		void AfterEstimate(uint64_t pairSeq, const VpMotion::EstimateOutcome& outcome) override;
 		// The full form: everything the host read from the matcher (see EstimateOutcome). AfterEstimate forwards here.
 		void AfterEstimateEx(uint64_t pairSeq, const EstimateOutcome& outcome);
 		// Render thread, once per frame: finish the pairs whose counts arrived.

@@ -123,7 +123,7 @@ member and the alias table: [HOOKS.md](HOOKS.md).
   `EstimateState.h` (`vectorEstimate`). The renderer keeps one declaration line per function and the alias block.
 - K4 insertion point: `VectorEngine::Estimate` wraps the matcher's Estimate. A registered `IPreEstimateHook` (the camera
   link) gets `BeforeEstimate(ctx, sink)` right before (the sink is the matcher's `SetCameraGuidance`) and
-  `AfterEstimate(pairSeq, guidanceUsed, countsTex)` right after, for the in-render estimate and the estimate ahead (never
+  `AfterEstimate(pairSeq, EstimateOutcome)` right after, for the in-render estimate and the estimate ahead (never
   the warm-up). No hook (today; always with camera guidance off) = the matcher's Estimate only: nothing bound, no extra
   GPU work.
 - `IVectorEngine` (`vpv.vector_engine.v1`) is implemented by `VectorEngine` from today's state: the matcher's live block

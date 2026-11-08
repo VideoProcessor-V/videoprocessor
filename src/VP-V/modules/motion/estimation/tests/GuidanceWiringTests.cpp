@@ -857,7 +857,7 @@ namespace VideoProcessorTest
 			ec.nextPairSeconds = 1.0 / 24;
 			engine.hook->BeforeEstimate(ec, sink);
 			Assert::IsTrue(sink.last == nullptr, L"no record for pair 9 (the chain is empty): refused, an explicit null is bound");
-			engine.hook->AfterEstimate(9, false, nullptr);
+			engine.hook->AfterEstimate(9, VpMotion::EstimateOutcome());
 			Assert::AreEqual(uint64_t(1), adapter.Scheduler().Counters().refusals[size_t(CameraLink::Refusal::NoRecord)]);
 			std::vector<FallbackCatalog::Decision> d = adapter.CollectDecisions();
 			Assert::IsTrue(IsEngaged(d, CameraLink::kIdGuidanceRefused), L"the refusal is visible through the skeleton's catalog");

@@ -94,9 +94,9 @@ P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` 
   `FeedPassTimers()` -> `camera.fit` (CPU work, the worker's fit) and `camera.readback` (a WAIT: request -> ready latency) into `PassTimerHook::acc`.
   `camera.labels` (P8) has no producer clock in this scope. The governor trips on escalation counts; a skeleton feed of a consumer's measured GPU ms
   into a governor does not exist yet (MV7 item).
-* **AfterEstimate shim.** P5a's `AfterEstimate(pairSeq, guidanceUsed, countsTex)` forwards into `CameraLink::EstimateOutcome`
-  (`CameraGuidanceHook::AfterEstimateEx`: narrow idle, rejection text, gpuMs). When M2's plain-data outcome lands the only edit here is one override
-  mapping it onto `EstimateOutcome`. Until then "engine field used, narrow idle" and the bench `gpu_ms` stay empty.
+* **AfterEstimate.** M2's `AfterEstimate(pairSeq, VpMotion::EstimateOutcome)` (`m2/p5a-outcome`, merged) is mapped by `CameraGuidanceHook::AfterEstimate` onto
+  `CameraLink::EstimateOutcome` (the ONE mapping: guidance used, narrow idle -> `narrowDroppedEngine`, rejection text, gpuMs, counts texture) and forwarded to `AfterEstimateEx`.
+  "Engine field used, narrow idle" is now filled. `gpuMs` is -1 today (the engine has no per-estimate GPU time: its pass timers are asynchronous), so the bench `gpu_ms` stays empty.
 * **No new keys.** The measurement switches are plain `MeasurementSwitches` inputs (`GuidanceSettings`); K3 supplies the `vector_*` keys.
 * **NVOF seed mode stays primary; guidance never drops a seed.** What each switch does there (DejudderWarp.cpp, `Estimate`):
 
@@ -124,8 +124,7 @@ P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` 
 | status | Ctrl+I, Config status, Fallbacks, Ctrl+Alt+D | `CameraStatus.h` + the adapter's lines and decisions + `camera_engine` / `camera_graph` / `camera_fit` / `camera_gpu` / `camera_scene` |
 
 **Gaps (not closed here).** G1 P2 / P3 / P4 content is not in a skeleton slot: the markers carry ancestry only; moving P7 into the skeleton lane (K1-9 / SK-W) removes the private
-table. G2 `AfterEstimate` carries no `EstimateOutcome` until `m2/p5a-outcome` is merged (it was not on the remote when this was built): "engine field used, narrow idle" and the bench
-`gpu_ms` stay empty; the edit is one override on `CameraGuidanceHook` mapping the plain-data outcome onto `CameraLink::EstimateOutcome` and calling `AfterEstimateEx`. G3 `camera.fit` /
+table. G2 (closed) `m2/p5a-outcome` is merged and mapped (see AfterEstimate above); the bench `gpu_ms` stays empty until the engine can measure a per-estimate GPU time. G3 `camera.fit` /
 `camera.readback` PassTimers rows need `FeedPassTimers(passTimerHook.acc)` at a renderer call site (a Bill hunk under a zone lock); the samples are bounded and unread until then.
 G4 flash events and fade gain / offset have no producer (flash false, gain 1, offset 0). G5 `measuredSourceHz` is the ingress rate (`HostResync::measuredRateHz`); a cadence-locked source
 uses the store's film rate when its cadence group was written, else the ingress rate.

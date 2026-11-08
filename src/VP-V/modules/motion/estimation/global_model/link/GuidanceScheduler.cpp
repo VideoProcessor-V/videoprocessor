@@ -485,13 +485,18 @@ namespace CameraLink
 			m_waiting.erase(m_waiting.begin());
 	}
 
-	void CameraGuidanceHook::AfterEstimate(uint64_t pairSeq, bool guidanceUsed, pl_tex countsTex)
+	void CameraGuidanceHook::AfterEstimate(uint64_t pairSeq, const VpMotion::EstimateOutcome& outcome)
 	{
-		// The plain interface cannot say which passes ran: a counts texture handed over means a counting pass ran.
+		// The engine's plain-data outcome onto the camera's: the engine does not say which pass ran, but it hands the counts texture over
+		// only when a narrow or E1 pass wrote it, so a texture means a counting pass ran. narrowIdle is "narrow planned, the engine's
+		// field seeded the searches" (shown as "engine field used, narrow idle"); gpuMs is -1 (not measured) today.
 		EstimateOutcome o;
-		o.guidanceUsed = guidanceUsed;
-		o.narrowPass = countsTex != nullptr;
-		o.counts = countsTex;
+		o.guidanceUsed = outcome.guidanceUsed;
+		o.narrowPass = outcome.countsTex != nullptr;
+		o.narrowDroppedEngine = outcome.narrowIdle;
+		o.rejected = outcome.rejection != nullptr ? outcome.rejection : "";
+		o.gpuMs = outcome.gpuMs;
+		o.counts = outcome.countsTex;
 		AfterEstimateEx(pairSeq, o);
 	}
 
