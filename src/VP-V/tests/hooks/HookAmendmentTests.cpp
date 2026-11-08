@@ -280,6 +280,11 @@ namespace HookAmendmentTest
 			Assert::IsTrue(RE::PhaseFansOut(RE::FramePhase::AfterPresent));
 			Assert::IsTrue(RE::PhaseFansOut(RE::FramePhase::PresentSample));
 			Assert::IsTrue(RE::PhaseFansOut(RE::FramePhase::ResolveTime));
+			// M2 P4 (70b section 9.7): the observer phases Entrance, CollectHooks and AfterRender fan out as well
+			// (added assertions; none of the above changed). See EntranceHookTests.
+			Assert::IsTrue(RE::PhaseFansOut(RE::FramePhase::Entrance));
+			Assert::IsTrue(RE::PhaseFansOut(RE::FramePhase::CollectHooks));
+			Assert::IsTrue(RE::PhaseFansOut(RE::FramePhase::AfterRender));
 		}
 
 		TEST_METHOD(TakeOverPhasesAreFirstWinsAndTheHostValueSurvivesAMiss)

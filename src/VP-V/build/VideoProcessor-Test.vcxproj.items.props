@@ -733,6 +733,9 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\hooks\HookAmendmentTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\hooks\EntranceHookTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelBlocksTests.cpp">
