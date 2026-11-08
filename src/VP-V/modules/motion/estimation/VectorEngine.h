@@ -27,7 +27,9 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <memory>
+#include <string>
 #include <utility>
 
 namespace VpMotion
@@ -158,18 +160,26 @@ namespace VpMotion
 		// Runs the matcher's estimate of the pair (aSequence, bSequence). With a pre-estimate hook registered and
 		// `hookable` (not the warm-up's dummy estimate): BeforeEstimate(ctx, sink) right before, AfterEstimate(pairSeq,
 		// guidanceUsed, countsTex) right after. With no hook it is `estimate()` and nothing else (no sink, no matcher
-		// call, no GPU work). Either way a successful estimate is recorded for FieldOf. ahead: called from the estimate
-		// ahead (EstimateContext::ahead; today that is the render thread too). sourceHz: the content rate for
-		// nextPairSeconds (<= 0 unknown).
-		template<class Matcher, class EstimateFn>
-		bool Estimate(uint64_t aSequence, uint64_t bSequence, bool ahead, double sourceHz, bool hookable, Matcher& matcher,
-			EstimateFn&& estimate)
+		// call, no GPU work). Either way a successful estimate is recorded for FieldOf, but only when the validity
+		// epoch is still `epochAtChoice` (the epoch the caller chose the pair under) after the estimate. ahead: called
+		// from the estimate ahead (EstimateContext::ahead; today that is the render thread too). sourceHz: the content
+		// rate for nextPairSeconds (<= 0 unknown). syncFallback(FallbackCatalog::Decision): the renderer's fallback
+		// registry, called only while a hook is registered or a hook failure is still shown.
+		// A hook that throws never stops the estimate: BeforeEstimate throwing = the guidance is cleared and the plain
+		// estimate runs (AfterEstimate is then skipped); AfterEstimate throwing is contained. Each failure is counted,
+		// logged and raised as the "vector_engine_hook" fallback entry (released after 8 hooked estimates without one).
+		// An exception from the estimate itself is rethrown as before, after AfterEstimate(pairSeq, false, null).
+		template<class Matcher, class EstimateFn, class SyncFallbackFn>
+		bool Estimate(uint64_t aSequence, uint64_t bSequence, bool ahead, double sourceHz, uint64_t epochAtChoice, bool hookable,
+			Matcher& matcher, EstimateFn&& estimate, SyncFallbackFn&& syncFallback)
 		{
 			IPreEstimateHook* hook = hookable ? preEstimateHook_.load(std::memory_order_acquire) : nullptr;
 			if (!hook)
 			{
+				if (hookFailures_.engaged)
+					syncFallback(ReleaseHookFailures());   // the hook went (camera guidance off): nothing left to show
 				const bool done = estimate();
-				NoteEstimated(done, aSequence, bSequence);
+				NoteEstimated(done, aSequence, bSequence, epochAtChoice);
 				return done;
 			}
 			EstimateContext ctx;
@@ -177,15 +187,39 @@ namespace VpMotion
 			ctx.ahead = ahead;
 			ctx.nextPairSeconds = sourceHz > 0 && bSequence > aSequence ? static_cast<double>(bSequence - aSequence) / sourceHz : 0.0;
 			MatcherGuidanceSink<Matcher> sink(matcher);
-			hook->BeforeEstimate(ctx, sink);
-			const bool done = estimate();
-			const auto use = matcher.CameraGuidanceUsed();
-			const bool used = !(use.rejected && use.rejected[0]) &&
-				(use.modelGlobal || use.staticFromModel || use.matcherSkipped || use.narrowPass || use.e1Pass);
-			hook->AfterEstimate(ctx.pairSeq, used, used && (use.narrowPass || use.e1Pass) ? matcher.CameraGuidanceCounts() : nullptr);
-			NoteEstimated(done, aSequence, bSequence);
+			std::string failure;
+			bool before = true;
+			try { hook->BeforeEstimate(ctx, sink); }
+			catch (const std::exception& e) { failure = std::string("BeforeEstimate: ") + e.what(); before = false; }
+			catch (...) { failure = "BeforeEstimate: unknown exception"; before = false; }
+			if (!before)
+				matcher.SetCameraGuidance(nullptr);   // whatever it bound: the plain estimate runs
+			bool done = false;
+			try { done = estimate(); }
+			catch (...)
+			{
+				if (before)
+				{
+					try { hook->AfterEstimate(ctx.pairSeq, false, nullptr); }
+					catch (...) { if (failure.empty()) failure = "AfterEstimate: exception after a failed estimate"; }
+				}
+				syncFallback(NoteHookOutcome(!failure.empty(), failure));
+				throw;
+			}
+			if (before)
+			{
+				const auto use = matcher.CameraGuidanceUsed();
+				const bool used = !(use.rejected && use.rejected[0]) &&
+					(use.modelGlobal || use.staticFromModel || use.matcherSkipped || use.narrowPass || use.e1Pass);
+				try { hook->AfterEstimate(ctx.pairSeq, used, used && (use.narrowPass || use.e1Pass) ? matcher.CameraGuidanceCounts() : nullptr); }
+				catch (const std::exception& e) { failure = std::string("AfterEstimate: ") + e.what(); }
+				catch (...) { failure = "AfterEstimate: unknown exception"; }
+			}
+			syncFallback(NoteHookOutcome(!failure.empty(), failure));
+			NoteEstimated(done, aSequence, bSequence, epochAtChoice);
 			return done;
 		}
+		unsigned long long PreEstimateHookFailures() const { return hookFailures_.failures; }
 		bool PreEstimateHooked() const { return preEstimateHook_.load(std::memory_order_acquire) != nullptr; }
 		// The optical-flow engine's whole-frame motion of the pair the matcher took ahead (flow->global[0], D1 format:
 		// 1/8-size texels, z ambiguity, w written); null = no producer pair. CPU record for EngineGlobal only.
@@ -206,11 +240,15 @@ namespace VpMotion
 		bool PairSpansSlip(uint64_t from, uint64_t to) const override;
 		bool FlowIsCpuResident() const override { return false; }   // absent: no CPU field view is kept today
 		bool FlowOf(uint64_t, FlowView&) const override { return false; }
+		// Contract: set AND clear on the render thread or under renderMutex (an estimate reads the pointer once and
+		// calls it without a lock); the hook object may be destroyed only after the clear has returned.
 		void SetPreEstimateHook(IPreEstimateHook* hook) override { preEstimateHook_.store(hook, std::memory_order_release); }
 		// Reservations (RefinedFieldOf, SubmitLongPair ...): IVectorEngine's "absent" defaults.
 
 	private:
-		void NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence);
+		void NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence, uint64_t epochAtChoice);
+		FallbackCatalog::Decision NoteHookOutcome(bool failed, const std::string& what);   // counts and logs a failure
+		FallbackCatalog::Decision ReleaseHookFailures();
 
 		const void* host_ = nullptr;
 		const IMatcherView* matcher_ = nullptr;
@@ -219,6 +257,8 @@ namespace VpMotion
 		FieldRecord field_;                 // the last successful estimate (render thread)
 		uint64_t eraFirstFrom_ = 0;         // the A of the first successful estimate in field_.epoch
 		struct GlobalRecord { uint64_t from = 0, to = 0, epoch = 0; bool valid = false; double x = 0, y = 0; };
-		GlobalRecord global_;
+		static constexpr size_t kGlobalRing = 16;   // the link may ask about a pair a frame or so after it was taken
+		GlobalRecord global_[kGlobalRing];          // slot = to % kGlobalRing
+		FallbackCatalog::LookAheadFailures hookFailures_ = FallbackCatalog::PreEstimateHookFailures();
 	};
 }

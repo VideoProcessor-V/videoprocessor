@@ -8,8 +8,8 @@
 // of this type (`vectorEstimate`, right after `vectorEngine`) and a reference alias per member with the old name, so
 // every reader in a zone another package still owns compiles unchanged (doc 52 1.2; HOOKS.md section 4).
 //
-// The template argument is the renderer's converted-payload type (a private type of the renderer: the state only
-// holds a shared_ptr to it). The state is also the engine's view of the matcher (IMatcherView): the IVectorEngine
+// The template argument is the renderer's converted-payload type (LibplaceboVideoRenderer::QueuedFrame::ConvertedPayload,
+// a type of the renderer's header that VP-V code does not include here; the state only holds a shared_ptr to it). The state is also the engine's view of the matcher (IMatcherView): the IVectorEngine
 // answers about the live field read it, so the engine never sees the matcher's type.
 //
 // Threading: render thread (renderMutex held), as before the move. Teardown is unchanged: the renderer's

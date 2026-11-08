@@ -380,6 +380,9 @@ namespace VpMotion
 
 	VectorEngine::~VectorEngine()
 	{
+		// Contract (SetPreEstimateHook): the consumer clears its hook before the engine goes; say so if it did not.
+		if (preEstimateHook_.load(std::memory_order_acquire) != nullptr)
+			DebugLog::Log("Vector engine: destroyed with the pre-estimate hook still registered (the consumer must clear it first)");
 		if (host_)
 			Engines().Remove(host_, this);
 	}
@@ -390,32 +393,53 @@ namespace VpMotion
 	}
 
 	// ---- P5a-5: records for IVectorEngine (render thread; CPU only, nothing logged) ----------------------------------
-	void VectorEngine::NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence)
+	void VectorEngine::NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence, uint64_t epochAtChoice)
 	{
 		if (!done || aSequence == 0 || bSequence <= aSequence)
 			return;
-		const uint64_t epoch = motionValidity.Epoch();
-		if (epoch != field_.epoch || field_.from == 0)
+		// An invalidation that landed between the pair's choice and here: the field is of an older epoch, never
+		// recorded (the old record stays and is no longer current either).
+		if (epochAtChoice == 0 || epochAtChoice != motionValidity.Epoch())
+			return;
+		if (epochAtChoice != field_.epoch || field_.from == 0)
 			eraFirstFrom_ = aSequence;
 		field_.from = aSequence;
 		field_.to = bSequence;
-		field_.epoch = epoch;
+		field_.epoch = epochAtChoice;
+	}
+
+	FallbackCatalog::Decision VectorEngine::NoteHookOutcome(bool failed, const std::string& what)
+	{
+		if (failed && (hookFailures_.failures < 20 || (hookFailures_.failures + 1) % 100 == 0))
+			DebugLog::Log("Vector engine: the pre-estimate hook failed (%s; %llu failures); the plain estimate ran",
+				what.c_str(), hookFailures_.failures + 1);
+		return hookFailures_.Note(failed, what);
+	}
+
+	FallbackCatalog::Decision VectorEngine::ReleaseHookFailures()
+	{
+		hookFailures_.engaged = false;
+		hookFailures_.goodSince = 0;
+		return FallbackCatalog::Released(hookFailures_.id);
 	}
 
 	void VectorEngine::NoteEngineGlobal(uint64_t from, uint64_t to, const float* global, int searchHalvings)
 	{
-		global_ = GlobalRecord();
-		if (!global || from == 0 || to <= from)
+		if (from == 0 || to <= from)
+			return;
+		GlobalRecord& r = global_[to % kGlobalRing];
+		r = GlobalRecord();
+		r.from = from;
+		r.to = to;   // no producer pair: the slot says so (valid false), an older pair's record is not served for it
+		if (!global)
 			return;
 		const double cell = DejudderPolicy::EngineCellSourcePixels(searchHalvings);
-		global_.from = from;
-		global_.to = to;
-		global_.epoch = motionValidity.Epoch();
+		r.epoch = motionValidity.Epoch();
 		// Usable as the statistics consumers use it (VectorDemand::SampleGlobal: ambiguity z < 0.9).
-		global_.valid = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(static_cast<double>(global[0]),
+		r.valid = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(static_cast<double>(global[0]),
 			static_cast<double>(global[1]), searchHalvings), global[2], global[3], 0).usable;
-		global_.x = cell * static_cast<double>(global[0]);
-		global_.y = cell * static_cast<double>(global[1]);
+		r.x = cell * static_cast<double>(global[0]);
+		r.y = cell * static_cast<double>(global[1]);
 	}
 
 	// ---- P5a-5: IVectorEngine from today's state ---------------------------------------------------------------------
@@ -447,6 +471,8 @@ namespace VpMotion
 		out.gridH = fwd->params.h;
 		out.blockSize = 16;          // one texel per 16x16 source block (MotionWarp::Field)
 		out.scaleToSourcePx = 1.0f;  // the field's vectors are in source px
+		// The stamp of the pair's later frame from the bound Indicator (resync on); unbound: the default Stamp.
+		motionValidity.StampAt(field_.to, out.stamp);
 		return true;
 	}
 
@@ -458,11 +484,12 @@ namespace VpMotion
 	bool VectorEngine::EngineGlobal(uint64_t seq, GlobalVec& out) const
 	{
 		out = GlobalVec();
-		if (seq == 0 || seq != global_.to || !global_.valid || !motionValidity.Current(global_.epoch))
+		const GlobalRecord& r = global_[seq % kGlobalRing];
+		if (seq == 0 || seq != r.to || !r.valid || !motionValidity.Current(r.epoch))
 			return false;
 		out.valid = true;
-		out.x = global_.x;
-		out.y = global_.y;
+		out.x = r.x;
+		out.y = r.y;
 		return true;
 	}
 

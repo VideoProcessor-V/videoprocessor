@@ -23,10 +23,11 @@ namespace VpMotion
 	constexpr const char* kVectorEngineQueryId = "vpv.vector_engine.v1";
 
 	// Required texture capabilities: fwd, bwd and the counts texture must be SAMPLEABLE rgba32f (the camera readback copy pass
-	// reads them with texelFetch); they need not be host readable. Threading: BeforeEstimate / AfterEstimate run on the thread that
-	// calls Estimate: the render thread for ahead == false; for ahead == true the thread of the engine lane, NOT the render thread,
-	// so the hook may only touch thread-safe state there. GuidanceScheduler::Guide is render-thread only: the engine must call
-	// the hook for ahead == false only (PublishLane covers the ahead path from the camera worker).
+	// reads them with texelFetch); they need not be host readable. Threading (M2 P5a-5): BeforeEstimate / AfterEstimate are
+	// called for BOTH ahead == false (the in-render estimate) and ahead == true (the de-judder's estimate ahead), and today
+	// both run on the render thread with renderMutex held, so GuidanceScheduler::Guide may be called from either. A future
+	// estimate on an off-render lane thread must NOT call Guide from the hook (PublishLane covers that path from the camera
+	// worker); SetPreEstimateHook (set and clear) runs on the render thread or under renderMutex.
 	// A verified analysis field (P3) of one source pair. Textures are owned by the engine: valid only while the
 	// field's seq is within the engine's ring (the consumer copies, never keeps the pl_tex).
 	struct VerifiedField
