@@ -179,7 +179,10 @@ namespace SourceIdentity
 				vs.nowMs = &State::VerifierClock;
 				vs.clockCtx = this;
 				verifier.reset(new DescaleVerifier(vs));
-				probeVerifier.reset(new DescaleVerifier(vs));
+				// The probe's operators are 1.64x longer but only a handful (one kernel, five sizes per axis): an eighth of the byte budget holds them.
+				VerifierSettings pvs = vs;
+				pvs.cacheBytes = vs.cacheBytes / 8;
+				probeVerifier.reset(new DescaleVerifier(pvs));
 			}
 
 			// ---- lifecycle ------------------------------------------------------------------------------------------------
