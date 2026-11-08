@@ -110,6 +110,11 @@ namespace CameraLink
 		out.pairFrom = field.pairFrom;
 		out.pairTo = field.pairTo;
 		out.pairSeconds = facts.pairSeconds;
+		// Audit F4: the Fitter's default precision is 0.25 x blockSize / 16 (GlobalModelFit.cpp PairPrecision), which HALVES at the ahead
+		// field's native 8-px cells and so tightens the inlier threshold in source px. The ahead field keeps the 16-px path's threshold:
+		// 0.25 px explicitly (the seed / live path is unchanged: precisionPx stays 0 = the default).
+		if (field.origin == FieldOrigin::Ahead)
+			out.precisionPx = 0.25;
 		out.resyncGeneration = GenerationsOf(stamp);
 		out.rebaseGeneration = 0;   // re-base is Ignore (F3)
 		out.deadlineMicros = facts.deadlineMicros;

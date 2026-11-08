@@ -310,6 +310,29 @@ namespace VideoProcessorTest
 			Assert::IsTrue(CameraLink::RegridToConsumerGrid(out, 120, 68, 16.0) == out, L"already on the grid: as is");
 		}
 
+		// Audit F4: the ahead field's native 8-px cells would halve the Fitter's default precision (0.25 x blockSize / 16); the ahead field
+		// keeps the 16-px path's 0.25 px explicitly, and the seed path keeps the default (precisionPx 0).
+		TEST_METHOD(TheAheadFieldKeepsTheSixteenPixelPrecision)
+		{
+			Pair p(960, 540, 2.0);
+			p.Uniform(2.0, 0.0);
+			CameraLink::AheadCopy a;
+			Assert::IsTrue(CameraLink::CopyAhead(p.View(5), 5, a) == CameraLink::AheadRefusal::None);
+			CameraLink::FieldCopy f;
+			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 2.0f, 120, 68, f));
+			CameraLink::PairFacts facts;
+			facts.pairSeconds = 1.0 / 24;
+			CameraModel::PairInput in;
+			Assert::IsTrue(CameraLink::AssemblePair(f, facts, VpIndicator::Stamp(), in) == CameraLink::AssembleStatus::Ready);
+			Assert::AreEqual(8.0, in.blockSize);
+			Assert::AreEqual(0.25, in.precisionPx, L"the 16-px path's threshold, not 0.125");
+			CameraLink::FieldCopy seed = f;
+			seed.origin = CameraLink::FieldOrigin::Seed;
+			CameraModel::PairInput sin;
+			Assert::IsTrue(CameraLink::AssemblePair(seed, facts, VpIndicator::Stamp(), sin) == CameraLink::AssembleStatus::Ready);
+			Assert::AreEqual(0.0, sin.precisionPx, L"the seed path unchanged (the default)");
+		}
+
 		TEST_METHOD(AheadIsAcceptedTheGuidedFieldIsStillRefused)
 		{
 			CameraLinkTest::Rig rig;
