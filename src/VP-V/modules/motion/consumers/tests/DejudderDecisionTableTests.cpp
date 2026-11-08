@@ -54,6 +54,9 @@ namespace DejudderDecisionTableTest
 		const char* firstStatusHead;
 		const char* statusHead;
 		const char* logs;
+		unsigned long long diagModeTick;
+		unsigned long long diagModeSkipped;
+		const char* decisions;
 	};
 
 	struct Row
@@ -127,6 +130,12 @@ namespace DejudderDecisionTableTest
 		Assert::AreEqual(std::string(e.firstStatusHead), s.firstStatusHead, (n + L": first publish text").c_str());
 		Assert::AreEqual(std::string(e.statusHead), s.statusHead, (n + L": hold / status text").c_str());
 		Assert::AreEqual(std::string(e.logs), logs, (n + L": log lines").c_str());
+		std::string decisions;
+		for (const std::string& d : s.decisions)
+			decisions += d + "\n";
+		Assert::IsTrue(s.diagModeTick == e.diagModeTick, (n + L": decision record tick").c_str());
+		Assert::IsTrue(s.diagModeSkipped == e.diagModeSkipped, (n + L": decision rows skipped").c_str());
+		Assert::AreEqual(std::string(e.decisions), decisions, (n + L": decision rows").c_str());
 	}
 
 	static void CheckSequence(const RecordedSequence& rec, const std::vector<std::string>& actual, const wchar_t* who)

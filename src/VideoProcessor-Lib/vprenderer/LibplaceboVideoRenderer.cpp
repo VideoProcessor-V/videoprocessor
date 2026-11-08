@@ -12183,7 +12183,6 @@ struct LibplaceboVideoRenderer::Impl
 	int pulldownCadence = 0;   // (cycle << 16) | new frames per cycle
 	// Black bars: the latest trusted active picture, for the matcher.
 	HdrPeakAnalysisCrop::TrustedPicture dejudderPicture;
-	// The content rate the matcher's per-frame settings are converted to.
 	// Bug hunt 2026-10-17: this frame's state is on the Dolby Vision tunnel
 	// (set by the render before UpdateDejudderEstimate).
 	bool dejudderDolbyVisionTunnel = false;

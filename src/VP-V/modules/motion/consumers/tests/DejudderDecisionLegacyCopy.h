@@ -12,7 +12,7 @@
 // planeFormatsUsable), the presentation telemetry, the intent interpreter's scale, GetTickCount64, and
 // the side effects (logs, diagnostics, release, warm, budget poll), which are recorded instead of run.
 // Left out (not decision): MotionValidity NoteKept / ApplyMotionInvalidate, `dejudderSourceHz = sourceHz`,
-// the vector engine's UpdateVectorEngine / ServeStatistics, the report-a-problem decision record, and
+// the vector engine's UpdateVectorEngine / ServeStatistics, and
 // everything after the pair check (layout, upload, estimate; the pair validity itself is covered by the
 // MotionValidity* tests). The status text is the head of the line only (the ahead / render-ahead / dither /
 // pulldown / mask / motion-source tail segments are out of scope: they do not depend on the decision).
@@ -123,6 +123,15 @@ namespace DejudderDecisionLegacy
 		uint64_t sourceSequence = 10;
 	};
 
+	// A report-a-problem decision row, as text (kind, name, a, b, x, y).
+	inline std::string DecisionLine(const char* kind, const char* name, int64_t a, int64_t b, double x, double y)
+	{
+		char line[256];
+		std::snprintf(line, sizeof(line), "%s %s a=%lld b=%lld x=%.17g y=%.17g", kind, name, static_cast<long long>(a),
+			static_cast<long long>(b), x, y);
+		return line;
+	}
+
 	struct State : Facts
 	{
 		// Adapters: Begin = the whole Facts (prior state included); ApplyInputs = the per-frame inputs only
@@ -171,6 +180,10 @@ namespace DejudderDecisionLegacy
 		ULONGLONG interpolationLogTick = 0;
 		unsigned interpolationLogCount = 0;
 		unsigned long long interpolatedPresents = 0;
+		// the report-a-problem decision state (Impl members of the same names) and the rows it recorded
+		ULONGLONG diagDejudderModeTick = 0;
+		unsigned long long diagDejudderModeSkipped = 0;
+		std::vector<std::string> decisions;
 
 		MotionEngineIdle::Keeper motionEngineIdle;
 
@@ -377,7 +390,18 @@ namespace DejudderDecisionLegacy
 			{
 				++dejudderReasonChangesNotLogged;
 				dejudderReason = reason;
-				// COPY: the report-a-problem decision record (250 ms limit) is left out.
+				// Report-a-problem: a = reason code, b = changes skipped by the 250 ms limit,
+				// x = source Hz, y = display Hz.
+				const ULONGLONG diagNow = nowTick;   // COPY: GetTickCount64()
+				if (diagDejudderModeTick == 0 || diagNow - diagDejudderModeTick >= 250)
+				{
+					decisions.push_back(DecisionLine("dejudder-mode", DejudderPolicy::Name(reason),   // COPY: DiagnosticHistory
+						static_cast<int64_t>(reason), static_cast<int64_t>(diagDejudderModeSkipped), in.sourceHz, in.displayHz));
+					diagDejudderModeTick = diagNow;
+					diagDejudderModeSkipped = 0;
+				}
+				else
+					++diagDejudderModeSkipped;
 			}
 			if (dejudderReasonChangesNotLogged > 0)
 			{
@@ -488,6 +512,9 @@ namespace DejudderDecisionLegacy
 		bool statusCleared = false;
 		std::string statusHead, firstStatusHead;
 		std::vector<std::string> logs;
+		ULONGLONG diagModeTick = 0;
+		unsigned long long diagModeSkipped = 0;
+		std::vector<std::string> decisions;
 	};
 	inline Observed Observe(const State& s)
 	{
@@ -498,6 +525,7 @@ namespace DejudderDecisionLegacy
 		o.outcome = s.outcome; o.warmPendingAfter = s.motionEngineWarmPending; o.budgetPolled = s.budgetPolled;
 		o.warmed = s.warmed; o.released = s.released; o.statusPublishes = s.statusPublishes; o.statusCleared = s.statusCleared;
 		o.statusHead = s.statusHead; o.firstStatusHead = s.firstStatusHead; o.logs = s.logs;
+		o.diagModeTick = s.diagDejudderModeTick; o.diagModeSkipped = s.diagDejudderModeSkipped; o.decisions = s.decisions;
 		return o;
 	}
 
@@ -526,7 +554,9 @@ namespace DejudderDecisionLegacy
 			DejudderPolicy::Name(o.reason), o.extrasAllowed ? 1 : 0, static_cast<double>(o.effectiveStrength), o.evenCycle,
 			o.interpolating ? 1 : 0, InterpolationPolicy::Name(o.interpolation.reason), o.statusPublishes, Name(o.outcome),
 			o.released ? 1 : 0, o.warmed ? 1 : 0);
-		std::string line = std::string(head) + o.statusHead;
+		char diag[64];
+		std::snprintf(diag, sizeof(diag), " dec=%u skip=%llu", static_cast<unsigned>(o.decisions.size()), o.diagModeSkipped);
+		std::string line = std::string(head) + o.statusHead + diag;
 		for (size_t i = logsFrom; i < o.logs.size(); ++i)
 			line += " | " + o.logs[i];
 		return line;

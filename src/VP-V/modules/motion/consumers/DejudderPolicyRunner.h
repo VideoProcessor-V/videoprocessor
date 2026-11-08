@@ -89,6 +89,7 @@ namespace VpMotion
 				host.ClearStatusIfPublished();   // if (dejudderStatusTick != 0) { tick = 0; clear the line under its lock }
 			return DecisionOutcome::SettledOff;
 		}
+		host.SnapshotTelemetry();   // const AlphaPresentationSnapshot telemetry = presentationTelemetry.Snapshot();
 		DejudderPolicy::Input in;
 		in.strength = activeSettings.dejudderStrength;
 		in.strengthEven = activeSettings.dejudderStrengthEven;
@@ -260,7 +261,7 @@ namespace VpMotion
 			const bool held = f.dejudderHeld || f.nextTextureHeld;
 			if (held && activeSettings.interpolationFillGaps && repairPossible)
 				host.PollMotionEngineBudget(width, height, true);
-			MotionEngineIdle::Keeper& motionEngineIdle = host.MotionEngineIdle();
+			MotionEngineIdle::Keeper& motionEngineIdle = host.IdleKeeper();
 			const bool keepForGaps = motionEngineIdle.Keep(activeSettings.interpolationFillGaps, repairPossible);
 			// H3 F4 follow-up: loaded and idle from the source's start, not at its first hiccup.
 			if (!held && keepForGaps && host.WarmPending())

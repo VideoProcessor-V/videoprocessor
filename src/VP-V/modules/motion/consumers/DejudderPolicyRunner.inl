@@ -30,9 +30,10 @@ namespace
 		bool WarmPending() const { return impl.motionEngineWarmPending; }
 		void SetWarmPending(bool v) { impl.motionEngineWarmPending = v; }
 		bool LowLatency() const { return impl.lowLatencyQueueActive.load(std::memory_order_acquire); }
+		AlphaPresentationSnapshot telemetry{};
+		void SnapshotTelemetry() { telemetry = impl.presentationTelemetry.Snapshot(); }
 		double DecisionDisplayHz() const
 		{
-			const AlphaPresentationSnapshot telemetry = impl.presentationTelemetry.Snapshot();
 			return telemetry.measuredDisplayHz > 0.0 ? telemetry.measuredDisplayHz :
 				impl.RenderAheadActive() && impl.dejudderDisplayRate.openLoop ? impl.dejudderDisplayRate.hz : impl.customHookRefreshHz;
 		}
@@ -86,7 +87,7 @@ namespace
 			}
 		}
 		void PollMotionEngineBudget(int width, int height, bool held) { impl.PollMotionEngineBudget(width, height, held); }
-		MotionEngineIdle::Keeper& MotionEngineIdle() { return impl.motionEngineIdle; }
+		MotionEngineIdle::Keeper& IdleKeeper() { return impl.motionEngineIdle; }
 		unsigned long long& IdleReleasesLogged() { return impl.motionEngineIdleReleasesLogged; }
 		void WarmIdleMotionEngine() { impl.WarmIdleMotionEngine(call.contract, call.lossless422, call.nativeRgb); }
 		void ReleaseDejudder() { impl.ReleaseDejudder(); }

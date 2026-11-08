@@ -51,6 +51,7 @@ namespace VpMotion
 		bool motionEngineLogged = false;
 		bool smoothMotionMixingLogged = false;
 		bool dejudderMaskRateLogged = false;
+		// The content rate the matcher's per-frame settings are converted to.
 		double dejudderSourceHz = 0.0;
 
 		// ---- a: phase state (the extras' latency floor and prediction; their readers are P5c's) ----

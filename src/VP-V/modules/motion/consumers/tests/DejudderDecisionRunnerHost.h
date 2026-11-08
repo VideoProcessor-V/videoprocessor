@@ -48,6 +48,7 @@ namespace DejudderDecisionRunner
 		bool WarmPending() const { return motionEngineWarmPending; }
 		void SetWarmPending(bool v) { motionEngineWarmPending = v; }
 		bool LowLatency() const { return facts.lowLatency; }
+		void SnapshotTelemetry() {}   // the facts are the snapshot
 		double DecisionDisplayHz() const
 		{
 			return facts.measuredDisplayHz > 0.0 ? facts.measuredDisplayHz :
@@ -64,7 +65,11 @@ namespace DejudderDecisionRunner
 		}
 		void SetCadenceRatio(double r) { cadenceRatio = r; }
 		ULONGLONG Tick() const { return nowTick; }
-		void RecordDecision(const char*, const char*, int64_t, int64_t, double, double) {}
+		void RecordDecision(const char* kind, const char* name, int64_t a, int64_t b, double x, double y)
+		{
+			decisions.push_back(DejudderDecisionLegacy::DecisionLine(kind, name, a, b, x, y));
+		}
+		std::vector<std::string> decisions;
 		void Log(const char* format, ...)
 		{
 			char line[512];
@@ -93,7 +98,7 @@ namespace DejudderDecisionRunner
 			}
 		}
 		void PollMotionEngineBudget(int, int, bool) { budgetPolled = true; }
-		MotionEngineIdle::Keeper& MotionEngineIdle() { return motionEngineIdle; }
+		MotionEngineIdle::Keeper& IdleKeeper() { return motionEngineIdle; }
 		unsigned long long& IdleReleasesLogged() { return motionEngineIdleReleasesLogged; }
 		void WarmIdleMotionEngine() { motionEngineWarmPending = false; warmed = true; }
 		void ReleaseDejudder() { released = true; }
@@ -170,6 +175,7 @@ namespace DejudderDecisionRunner
 			o.warmed = warmed; o.released = released; o.statusPublishes = statusPublishes; o.statusCleared = statusCleared;
 			o.statusHead = statusHead; o.firstStatusHead = firstStatusHead; o.logs = logs;
 			o.analysisEstimate = analysisEstimate;
+			o.diagModeTick = st.diagDejudderModeTick; o.diagModeSkipped = st.diagDejudderModeSkipped; o.decisions = decisions;
 			return o;
 		}
 		bool analysisEstimate = false;   // the decision's local, through RunDejudderDecision's out parameter

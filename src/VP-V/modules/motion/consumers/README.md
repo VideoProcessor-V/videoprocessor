@@ -20,6 +20,31 @@ Checked against the code on 2026-10-25 (feat/m2-motion). The module is the de-ju
 - `InterpolationTimeline.h` (pure): `Timeline::Plan(generation, sequence, pts, nextPts, sourceHz, displayHz, discontinuity)` (the refreshes inside [A, B) with their phases; restart on a discontinuity / generation / rate change / jump, re-anchor beyond a quarter period, cadence repeat re-presents the last output, film update gets no refresh, at most 16 outputs), `SetRateTrim` (+-1%), `MaxSpanFrames` / `MaxPairSpanFrames` (the gap span as 4 periods of 23.976p in time with `general_rate_fixes`), `GapFillPair`, `GapFillStandalone`, `StandaloneGap`, `FieldPeriods` / `OnePeriodField`.
 - `DejudderAhead.h`: `Dejudder::AheadSchedule` (`TryAhead` after A's first extra, `Consume` at the next frame, `Reset`, reason counters).
 
+### De-judder module (M2 P5b)
+
+The de-judder policy and the per-vsync timeline moved out of the renderer file (doc 59 section 2):
+
+- `DejudderState.h`: `VpMotion::DejudderPolicyState`, the policy's and the timeline's plain state (moved verbatim). The renderer keeps one reference alias per member (table below).
+- `DejudderPolicyRunner.h`: `RunDejudderDecision` (the decision part of `UpdateDejudderEstimate`: the de-judder reason, extras, strength, even cycle, the interpolation decision, the standalone gap repair, the status publish and reason logs, the idle engine keeper) and `LogInterpolationDecisionFor`, templates over the settings and a host (every renderer access is a host call at the old point). `DejudderPolicyRunner.inl` (renderer `Impl` members): `RunDejudderPolicy` (the old body around the decision), `ImplDecisionHost`, `LogDejudderAhead`, `DejudderHold`, `FlushDejudderHolds`. `UpdateDejudderEstimate` stays a one-line forwarder with its 15 arguments packed into `DejudderEstimateCall.h` (same order, same values).
+- `PhaseTimeline.inl` (renderer `Impl` members): the phase picture (`RunVpPhaseInterpolation`, `PrepareVpPhasePicture`, `VpPhaseDrawn`), `TimelineDisplayHz`, `VpTimelineWanted`, `LogVpTimeline`, `PublishDejudderStatus`, `ReleaseDejudder`, Stage B's no-refresh frames (`VpStageBFrame`), the draw piece (`DrawVpPhasePicture`).
+- `DejudderExtension.h/.cpp`: the hub module `motion.dejudder` (hub order Resync -> VectorEngine -> Camera -> Dejudder -> Entrance -> CoreSegments). The renderer registers one `DejudderHostBinding`. `Query("vpv.dejudder.v1")` / `Query("vpv.phase_timeline.v1")` answer an `IDejudderDirectory` (`DejudderInterface.h`); a consumer asks it for its renderer's `IDejudder` (reason, effective strength, even cycle, extras allowed, interpolating, estimated sequence, `Hold(why)`, `FieldChoice` = the K8 insertion point, 0 = today's) or `IPhaseTimeline` (active, skip, phase, content rate); `DejudderViews.h` implements both over the state.
+- Threading: render thread. The policy runs in `RenderLocked`; the timeline plan runs in `RenderLoop` before it, on the same thread and with `renderMutex` HELD (the loop's `unique_lock`, released only inside `WaitForDisplaySlot`, between draws).
+
+Aliases left in the renderer (`LibplaceboVideoRenderer.cpp`, one VPV-HOOK block after the `dejudderPolicy` member); each is deleted by the package that moves its last reader outside this module:
+
+| Alias | Readers left outside the module | Deleted by |
+|---|---|---|
+| `dejudderLatencyFloor`, `dejudderCallLatency`, `dejudderLoggedFloor`, `dejudderPhaseGeneration`, `dejudderPhaseLogPending`, `dejudderPredictedVsync`, `dejudderPredictedGeneration`, `dejudderPredictedSequence` | `PresentDejudderExtras`; `LogRenderAhead` (floor); `RetireOutput` / `RenderLocked` (prediction reset) | P5c (extras), P6 (render-ahead log) |
+| `dejudderReason`, `dejudderExtrasAllowed` | `RepeatReuseContext`, `RetireOutput` (teardown log), `PresentDejudderExtras`, `RenderLocked` (extras gate, `pin.dejudderEstimating`), the render loop's display-repeat either/or | P5c / P6 (IDejudder) |
+| `dejudderEffectiveStrength`, `dejudderEvenCycle`, `diagLastHoldCode`, `dejudderAheadLogTick` | `PresentDejudderExtras`, `UnpackRawPayload` area declarations | P5c |
+| `dejudderReasonChangesNotLogged`, `dejudderReasonLogTick`, `diagDejudderModeTick`, `diagDejudderModeSkipped` | `RetireOutput` (the last reason line at teardown) | P5c / P11 |
+| `interpolationDecision`, `interpolating`, `interpolationReasonLogged`, `interpolationLogTick`, `interpolationLogCount` | `RepeatReuseContext`, `BuildSigmaDeltaVectorsWithoutExtras`, `PresentDejudderExtras`, the render loop's dequeue (gap pair) | P5c / P10 |
+| `smoothMotionEngine`, `motionEngineLogged`, `smoothMotionMixingLogged` | `RepeatReuseContext`, `VectorDemandInput` | P4 / P5a-rest |
+| `dejudderMaskRateLogged`, `dejudderSourceHz` | `RenderAheadChainRatio`, `RenderLocked` (deband weight, pin) | P6 / P4 |
+| `vpTimeline`, `vpTimelineActive`, `vpSkipOutput`, `vpSkipIsUpdate`, `vpFilmUpdates`, `vpOutputPhase`, `vpTimelineLogged`, `vpCaptureRateHz`, `vpGapPhaseScale`, `vpQueueSteering`, `vpQueueGeneration`, `vpQueueErrorReset`, `timelineDisplayRateHold` | `RenderLocked` (scene correction gate, upload reuse, deband content rate), `HoldTicksUntilDueLocked`, the render loop's draw loop (`vpOutputPhase`) and display-repeat either/or, `BuildSigmaDeltaVectorsWithoutExtras` | P6 (IPhaseTimeline) / P10 / P4 |
+
+Open items (owner change, this reset): the de-judder cache stage (`DejudderCacheStage::Register`) and the draw piece (`DrawVpPhasePicture`) stay IN PLACE in `RenderLocked`, one call each at today's position; they are retired when P4 moves the hook block (`CollectHooks` / `OnDraw`).
+
 ### Data flow
 
 1. Decision, per source frame on the render thread: `DejudderPolicy::Decide` (vector_delivery) and `InterpolationPolicy::Decide`, then the standalone gap repair (`interpolation_fill_gaps`). The de-judder takes film-like sources it has a strength for; the interpolator takes the rest; libplacebo smooth motion (TemporalRenderer, `motion_engine` resolved by `DejudderPolicy::ResolveEngine`) excludes both.
