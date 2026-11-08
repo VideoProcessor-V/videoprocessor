@@ -133,6 +133,8 @@
       "status": "built",
       "code_location": "partly migrated",
       "live_files": [
+        "src/VP-V/modules/input/queue_timing/QueueDelayHold.inl",
+        "src/VP-V/modules/input/queue_timing/TimedFileFrames.inl",
         "src/VP-V/modules/input/queue_timing/WindowedRate.h",
         "src/VP-V/core/DelayBudget.h",
         "src/VP-V/modules/input/queue_timing/QueueLatency.h",
