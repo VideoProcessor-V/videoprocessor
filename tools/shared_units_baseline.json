@@ -190,9 +190,21 @@
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
-     "pattern": "kP11RegionBlockStats",
+     "pattern": "AddGpuJob\\(VpSkeleton::kP11RegionBlockStats",
      "kind": "false_positive",
-     "reason": "owner-approved 2026-11-07: product-id references only (VpSkeleton::kP11RegionBlockStats: registers the lane's own P11 GPU job, lists it as a consumed product, names it in the VRAM shed status); the skeleton module computes no block statistics"
+     "reason": "owner/coordinator-approved 2026-11-08, product-id reference, not a U4 law copy (registers the lane's own P11 GPU job)"
+    },
+    {
+     "file": "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
+     "pattern": "kP11RegionBlockStats, VpSkeleton::kP12LightLevel",
+     "kind": "false_positive",
+     "reason": "owner/coordinator-approved 2026-11-08, product-id reference, not a U4 law copy (lists P11 among the products the report consumer reads)"
+    },
+    {
+     "file": "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
+     "pattern": "kP10GrainSplit, VpSkeleton::kP11RegionBlockStats",
+     "kind": "false_positive",
+     "reason": "owner/coordinator-approved 2026-11-08, product-id reference, not a U4 law copy (names P11 in the VRAM shed status)"
     }
    ]
   },

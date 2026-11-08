@@ -146,6 +146,31 @@ class CheckSharedUnitsTest(unittest.TestCase):
         self.assertEqual(u["duplicates"], 2)
         self.assertEqual(u["inside_owner"], 1)
 
+    def test_u21_motion_engine_instance_signatures(self):
+        # SK-W must-land check 2: an NVOF engine instantiated, held by value or aliased, or a VectorStore<...> created, outside motion/estimation is a
+        # second engine / a second vector store. Each of these forms is a duplicate outside the owner; the same lines inside the owner, the engine's
+        # own static helpers (Engine::InputFormat), a pointer or reference to an engine and a comment-only line are not.
+        _w(self.root, "src/VP-V/modules/motion/other/New.h", "auto* e = new NvOpticalFlow::Engine();\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Make.h", "auto a = std::make_unique<NvOpticalFlow::Engine>();\nauto b = std::make_shared<NvOpticalFlow::HintedEngine>();\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Value.h", "NvOpticalFlow::Engine engine;\nvoid F() { NvOpticalFlow::HintedEngine local; }\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Alias.h", "using Eng = NvOpticalFlow::Engine;\ntypedef NvOpticalFlow::Engine Eng2;\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Store.h", "VectorStore<int> s{ 4 };\nusing Fields = VpMotion::VectorStore<int>;\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Ok.h", "auto f = NvOpticalFlow::Engine::InputFormat();\nNvOpticalFlow::Engine* p = nullptr;\nconst NvOpticalFlow::Engine& r = *p;\n// new NvOpticalFlow::Engine in a comment\n")
+        _w(self.root, "src/VP-V/modules/motion/estimation/Own.h", "NvOpticalFlow::Engine engine;\nVectorStore<int> s;\n")
+        u = _unit(csu.scan(self.root, baseline={"units": {}}), "U21")
+        by_file = {}
+        for h in u["hits"]:
+            by_file.setdefault(h["file"].rsplit("/", 1)[-1], []).append((h["line"], h["role"]))
+        self.assertEqual(by_file["New.h"], [(1, "duplicate")])
+        self.assertEqual(by_file["Make.h"], [(1, "duplicate"), (2, "duplicate")])
+        self.assertEqual(by_file["Value.h"], [(1, "duplicate"), (2, "duplicate")])
+        self.assertEqual(by_file["Alias.h"], [(1, "duplicate"), (2, "duplicate")])
+        self.assertEqual(by_file["Store.h"], [(1, "duplicate"), (2, "duplicate")])
+        self.assertEqual(by_file["Ok.h"], [(4, "declaration")], by_file)
+        self.assertNotIn("Own.h", by_file)
+        self.assertEqual(u["duplicates"], 9)
+        self.assertEqual(u["inside_owner"], 2)
+
     # ---- strict + baseline --------------------------------------------------------------------
     def _baseline(self, blocking, n):
         _w(self.root, "tools/shared_units_baseline.json", json.dumps(

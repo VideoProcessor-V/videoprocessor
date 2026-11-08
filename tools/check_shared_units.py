@@ -133,7 +133,12 @@ REGISTRY = [
     # (DejudderWarp's own engine, MV2) and ratchets to 0 with SK-MV. The runtime one-engine guard lands with SK-MV.
     {"id": "U22", "name": "motion_engine_instance",
      "owning_unit": ["src/VP-V/modules/motion/estimation"],
-     "signatures": _c(r"\bnew\s+NvOpticalFlow::", r"make_unique<\s*NvOpticalFlow::\w*Engine", r"VectorStore\s*<"),
+     "signatures": _c(r"\bnew\s+NvOpticalFlow::",
+                      r"make_(unique|shared)<\s*(\w+::)*NvOpticalFlow::\w*Engine",
+                      r"\bNvOpticalFlow::(Hinted)?Engine\s+\w+\s*[;({=\[]",
+                      r"(using\s+\w+\s*=|typedef)\s*(\w+::)*NvOpticalFlow::\w*Engine",
+                      r"VectorStore\s*<",
+                      r"using\s+\w+\s*=\s*(\w+::)*VectorStore"),
      "allow": []},
 ]
 
