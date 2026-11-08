@@ -12,6 +12,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/modules/motion/consumers/DejudderHistory.h>
 #include <VP-V/modules/motion/consumers/tests/DejudderDecisionRunnerHost.h>
 #include <VP-V/modules/motion/consumers/tests/DejudderDecisionSequences.h>
 
@@ -199,6 +200,54 @@ namespace DejudderDecisionTableTest
 			const std::vector<DejudderDecisionLegacy::Sequence> sequences = DejudderDecisionLegacy::Sequences();
 			for (size_t i = 0; i < sequences.size() && i < sizeof(kSequences) / sizeof(kSequences[0]); ++i)
 				CheckSequence(kSequences[i], DejudderDecisionRunner::RunSequence(sequences[i].base, sequences[i].steps), L"runner");
+		}
+	};
+
+	// M2 P5b-7 (doc 50 Q4): the motion-history reader action at the de-judder's apply point.
+	TEST_CLASS(DejudderHistoryActionTests)
+	{
+	public:
+		// R2 off / shadow, and on with no reader registered: exactly today's epoch decision, pending untouched.
+		TEST_METHOD(OffShadowOrUnregisteredIsTheEpochPath)
+		{
+			for (const bool resyncOn : { false, true })
+				for (const bool moved : { false, true })
+					for (const bool release : { false, true })
+					{
+						VpMotionResync::Readers readers;   // never registered (Rearms() == 0)
+						MotionValidity::Pending p;
+						p.changed = moved;
+						p.release = release;
+						Assert::AreEqual(moved, VpMotion::TakeDejudderHistoryAction(resyncOn, moved, p, readers));
+						Assert::AreEqual(release, p.release, L"pending untouched");
+						Assert::IsFalse(VpMotion::HistoryReaderDrives(resyncOn, readers));
+					}
+		}
+
+		// Registered but resync off: still today's path (the switch decides, not the registration).
+		TEST_METHOD(RegisteredButOffIsTheEpochPath)
+		{
+			VpMotionResync::Readers readers;
+			readers.Rearm();
+			MotionValidity::Pending p;
+			Assert::IsFalse(VpMotion::TakeDejudderHistoryAction(false, false, p, readers));
+			Assert::IsFalse(p.release);
+			Assert::IsTrue(VpMotion::HistoryReaderDrives(true, readers));
+			Assert::IsFalse(VpMotion::HistoryReaderDrives(false, readers));
+		}
+
+		// On and registered with nothing pending: as the epoch path; the reader's pending is taken once.
+		TEST_METHOD(OnRegisteredNothingPendingIsTheEpochPath)
+		{
+			VpMotionResync::Readers readers;
+			readers.Rearm();
+			for (const bool moved : { false, true })
+			{
+				MotionValidity::Pending p;
+				p.changed = moved;
+				Assert::AreEqual(moved, VpMotion::TakeDejudderHistoryAction(true, moved, p, readers));
+				Assert::IsFalse(p.release);
+			}
 		}
 	};
 }

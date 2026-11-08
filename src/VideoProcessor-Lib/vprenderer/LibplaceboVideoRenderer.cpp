@@ -117,6 +117,7 @@
 #include <VP-V/modules/motion/consumers/DejudderExtension.h>   // VPV-HOOK M2 P5b-2
 #include <VP-V/modules/motion/consumers/DejudderViews.h>   // VPV-HOOK M2 P5b-2 (includes DejudderState.h)
 #include <VP-V/modules/motion/consumers/DejudderEstimateCall.h>   // VPV-HOOK M2 P5b-3
+#include <VP-V/modules/motion/consumers/DejudderHistory.h>   // VPV-HOOK M2 P5b-7
 #include <VP-V/modules/output/dither/SigmaDeltaVectors.h>
 #include <VP-V/modules/output/dither/DitherSlot.h>
 // VP-V pipeline skeleton (src/VP-V; see src/VP-V/README.md): the slot registry, the entrance
@@ -12278,7 +12279,8 @@ struct LibplaceboVideoRenderer::Impl
 	void ApplyMotionInvalidate()
 	{
 		MotionValidity::Pending pending;   // VPV-HOOK
-		if (!vectorEngine.TakeInvalidation(pending))   // VPV-HOOK
+		const bool epochMoved = vectorEngine.TakeInvalidation(pending);   // VPV-HOOK
+		if (!VpMotion::TakeDejudderHistoryAction(resync.Driving(), epochMoved, pending, dejudderPolicy.motionHistory))   // VPV-HOOK M2 P5b-7 (Q4 reader action; off/shadow = today)
 			return;
 		if (pending.release)
 		{
@@ -12303,7 +12305,8 @@ struct LibplaceboVideoRenderer::Impl
 		debander.ForgetHold();
 		detailPulse.Forget();      // detail restore: both histories restart (docs/VP-detail-restore.md)
 		textureRestore.Forget();
-		vectorEngine.LogInvalidation(pending);   // VPV-HOOK
+		if (epochMoved)   // VPV-HOOK M2 P5b-7: a reader-only act (rebase axis) has no epoch move to log
+			vectorEngine.LogInvalidation(pending);   // VPV-HOOK
 	}
 
 	// Consumed after RenderLocked returns, so this frame's geometry references
