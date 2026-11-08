@@ -353,6 +353,10 @@
         "src/VP-V/modules/motion/estimation/global_model/link/CameraLink.h",
         "src/VP-V/modules/motion/estimation/global_model/link/CameraLinkCore.cpp",
         "src/VP-V/modules/motion/estimation/global_model/link/CameraLinkCore.h",
+        "src/VP-V/modules/motion/estimation/global_model/link/CameraSettings.h",
+        "src/VP-V/modules/motion/estimation/global_model/link/CameraStatus.h",
+        "src/VP-V/modules/motion/estimation/global_model/link/CameraDump.h",
+        "src/VP-V/modules/motion/estimation/global_model/link/CameraDump.cpp",
         "src/VP-V/modules/motion/estimation/global_model/link/CameraRecordPool.h",
         "src/VP-V/modules/motion/estimation/global_model/link/CameraUsable.h",
         "src/VP-V/modules/motion/estimation/global_model/link/FieldCopy.h",
@@ -398,7 +402,11 @@
         "src/VP-V/modules/motion/estimation/tests/FieldRefineTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/FieldRefineWarpTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/LongPairTests.cpp",
-        "src/VP-V/modules/motion/estimation/tests/LongPairBenchDump.cpp"
+        "src/VP-V/modules/motion/estimation/tests/LongPairBenchDump.cpp",
+        "src/VP-V/modules/motion/estimation/tests/CameraSettingsTests.cpp",
+        "src/VP-V/modules/motion/estimation/tests/CameraStatusTests.cpp",
+        "src/VP-V/modules/motion/estimation/tests/CameraDumpTests.cpp",
+        "src/VP-V/modules/motion/estimation/tests/CameraOverlayOffTests.cpp"
       ],
       "components": {
         "files": {

@@ -72,7 +72,21 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 Indicator reader through a FrameSeal provider, `OnFrameStart` at Begin (resync driving), `OnPostSubmitGap` after render, status and
 decisions into the hub's status. No vector engine exists yet (P5a), so the core is configured with `p7Wanted = false`: no thread,
 pool, ring or product. It never feeds a consumer and answers no `vpv.camera.v1` query. `VP_CAMERA_DUMP=1` logs the status once
-a second. The rows below remain the plan for the full wiring.
+a second (K3: `VP_CAMERA_DUMP=<dir>` writes flow files instead, see below). The rows below remain the plan for the full wiring.
+
+## K3: C0 diagnostics (keys, status, dump; 2026-11-07)
+
+Design: `D:\codex\vp-handover\61-design-p2-sourceid-camera-k3-k10.md` section 3.1. All inert and default off; the Original pathway forces every key off.
+
+| Part | Files | Role |
+|---|---|---|
+| Keys | `CameraSettings.h` | section `[vpv.camera]`: `camera_model`, `camera_model_overlay` (off, labels, residual, vectors), `camera_labels_gpu`, the 10 `camera_meas_<name>` (one per `MeasurementSwitches` member except `objects`), `camera_use_{grain,detail,dither,deband,filler,dejudder}`. Parser, `Validate` (Verdict like `VpvSchemaKeys.h`), `ToConfigText` (round trip). Invalid value: default kept, listed (`camera_settings`); unknown key: listed, never rewritten. The switches and the consumers are inert unless `camera_model` is on (`Measurement()`, `Use()`, `Overlay()`, `LabelsGpu()` give off) |
+| Status | `CameraStatus.h` | one pure builder (`BuildStatus`) for the Ctrl+I line, Config status, Fallbacks and the Ctrl+Alt+D section (per-consumer weight, deadline misses, `MeasurementDiagnostics` line). A switch that cannot act is shown: model off, `camera_link` off, no vector engine yet (P5a), an overlay that cannot draw. `CameraExtension` feeds it from the settings, `CameraLinkCore::LastFit()` and the counters |
+| Dump | `CameraDump.h/.cpp` | `VP_CAMERA_DUMP=<dir>` (and `VP_CAMERA_DUMP_CLIP`, default `clip`): `<dir>/<clip>/flow_<a>_<b>.npy` forward and `flow_<b>_<a>.npy` backward (float32 (gridH, gridW, 2), source px, names as `tools/eval/vector_source.py`), `camera_<b>.json` with a `mode` tag (`engine`; `engine_camera` when a measurement switch is on). Fed from the camera worker after `Fit` (`CameraLinkCore::SetDump`): two shared_ptr copies and a bounded push; a full queue drops the new item and counts it (status + Fallbacks `camera_dump`). The writer thread exists only when the variable names a directory and a core exists (`camera_link = report`). `VP_CAMERA_DUMP=1` keeps its older meaning (status log once a second) and starts no writer |
+
+Not in K3: the **Config rows** (blocked on the P0c master page: no row-registration mechanism exists on this base, the VP-V page is the self-contained `VpvSection`) and the
+**overlay** itself (K2's P8 is not instantiated and the fit has no vector engine, so nothing could be drawn; the key parses, and a request is shown as "cannot draw yet").
+`camera_model` allocates nothing by itself: `p7Wanted` stays false until P5a. Tests: `CameraSettingsTests`, `CameraStatusTests`, `CameraDumpTests`, `CameraOverlayOffTests`.
 
 ## Wiring TODO (the H1 adapter, ~40 lines, a later step; needs `feat/m2-hooks` c716298f)
 
@@ -95,7 +109,7 @@ Also pending: `FieldReadbackRing` becomes an `IReadbackDevice` again at K1-9 (th
 ## Tests
 
 CPU: `PairTimingTests`, `PairAssemblyTests`, `VerdictGateTests`, `CameraFitRunnerTests`, `CameraFitThreadingTests`, `CameraOffTests`,
-`CameraLabelUploadTests`, `CameraConsumerBindingTests`, `P8FillRuleTests`, `GuidanceSchedulingTests`, `GuideProductTests`,
+`CameraSettingsTests`, `CameraStatusTests`, `CameraDumpTests`, `CameraOverlayOffTests`, `CameraLabelUploadTests`, `CameraConsumerBindingTests`, `P8FillRuleTests`, `GuidanceSchedulingTests`, `GuideProductTests`,
 `GuidanceGovernorTests`, `MotionBenchWriterTests`. WARP (category `GpuWarp`): `FieldReadbackRingWarpTests`, `CameraLabelWarpTests`,
 `GuidanceNullIdentityWarpTests`.
 
@@ -108,6 +122,6 @@ Tests: `../../tests/CameraPhaseInterpTests.cpp`. The P9 producer (`CameraSmoothe
 
 ## All settings (complete list)
 
-The link has exactly one key, `camera_link` (`[vpv.skeleton]`, off / report, default off; Original (Bill): off; Config placement: none yet, planned master VP-V page > Pipeline (expert); visible state: the `camera_link` Fallbacks entry and the camera status line; not tiered). Fit options (`twoLayer`, `dynTexture`) are internal `Config` fields until K3 adds `camera_*` keys. The full table is in `../README.md` ("All settings") and `../../../../control/skeleton/README.md`.
+The link has exactly one key, `camera_link` (`[vpv.skeleton]`, off / report, default off; Original (Bill): off; Config placement: none yet, planned master VP-V page > Pipeline (expert); visible state: the `camera_link` Fallbacks entry and the camera status line; not tiered). Fit options (`twoLayer`, `dynTexture`) are internal `Config` fields. K3 added the `[vpv.camera]` keys (section "K3" above; full table in `../../README.md`). The full table is in `../README.md` ("All settings") and `../../../../control/skeleton/README.md`.
 
 **Downstream consumers (TEMPORAL DETAIL, docs 71 section Q5 and 72):** per-pair homography (P7/P9), the object layer (per-object motion), P8 per-block membership + confidence, and K4 guided residuals.

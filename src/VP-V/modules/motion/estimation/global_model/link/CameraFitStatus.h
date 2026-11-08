@@ -78,6 +78,18 @@ namespace CameraLink
 		bool m_engaged = false;
 	};
 
+	// The newest fitted record, for the status line (K3). Written by the camera worker under the link's status mutex.
+	struct LastFitSummary
+	{
+		bool have = false;
+		CameraModel::ModelType type = CameraModel::ModelType::None;
+		double confidence = 0;
+		double fitMs = 0;               // the fit's own cost (CameraMotion::costMicros)
+		CameraModel::Reason reason = CameraModel::Reason::NoInput;
+		uint8_t verdictFlags = 0;
+		bool published = false;         // the record reached its P7 slot before the seal
+	};
+
 	// The facts the decisions are built from (a snapshot).
 	struct StatusFacts
 	{

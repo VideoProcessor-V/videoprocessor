@@ -69,6 +69,7 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\repair\grain_split\GrainSplitGpu.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraExtension.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraLinkCore.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraDump.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraFitProducer.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraFitWorker.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\FieldReadbackRing.cpp" />

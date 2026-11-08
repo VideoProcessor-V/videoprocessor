@@ -37,6 +37,8 @@
 
 namespace CameraLink
 {
+	class CameraDump;
+
 	// The per-frame facts the H1 FrameStart phase carries (defined locally; the adapter fills them).
 	struct FramePhaseFacts
 	{
@@ -92,6 +94,12 @@ namespace CameraLink
 		void CollectStatus(std::vector<std::string>& lines);
 		std::vector<FallbackCatalog::Decision> CollectDecisions();
 		ICameraLink* Link() { return this; }
+
+		// K3: the VP_CAMERA_DUMP writer. Fed from the camera worker after each Fit (a shared_ptr copy and a bounded-queue push, so the
+		// fit deadline is untouched). null = no dump. Any thread; the core keeps the writer alive until it is replaced.
+		void SetDump(std::shared_ptr<CameraDump> dump);
+		// K3: the newest fit for the status line (have = false until a record was fitted). Any thread.
+		LastFitSummary LastFit() const;
 
 		// Deterministic mode / tests: fit + publish every queued job on the calling thread (no thread involved).
 		size_t ProcessPending();
@@ -158,9 +166,12 @@ namespace CameraLink
 		mutable std::mutex m_statusMutex;
 		AmbiguousTracker m_ambiguous;
 		StatusFacts m_facts;
+		LastFitSummary m_lastFit;
 		uint64_t m_records = 0, m_ambiguousRecords = 0;
 		std::mutex m_traceMutex;
 		std::ofstream m_trace;
+		mutable std::mutex m_dumpMutex;
+		std::shared_ptr<CameraDump> m_dump;
 		uint64_t m_seenReadbackDropped = 0;
 	};
 }

@@ -4,7 +4,9 @@
 #include <pch.h>
 #include "CameraExtension.h"
 
+#include "CameraDump.h"
 #include "CameraLinkCore.h"
+#include "CameraStatus.h"
 
 #include <DebugLog.h>
 
@@ -57,6 +59,8 @@ namespace Vpv
 			FrameAnalysis::Store* builtStore = nullptr;   // the store the core references
 
 			Skeleton::Settings settings;
+			CameraSettings cam;                         // [vpv.camera] (K3), Original applied
+			std::shared_ptr<CameraLink::CameraDump> dumpWriter;   // VP_CAMERA_DUMP=<dir>; null = no writer, no thread
 			std::atomic<bool> active{ false };
 			std::atomic<bool> reporting{ false };   // off, but an invalid key is being shown
 			bool sealHooked = false;
@@ -73,6 +77,37 @@ namespace Vpv
 			std::vector<std::string> lines;
 			std::string fullText;
 		};
+
+		namespace
+		{
+			// K3: starts, keeps or stops the dump writer. It exists only while VP_CAMERA_DUMP names a directory and a core can feed
+			// it (camera_link = report); with the variable unset no object and no thread exist.
+			void ReconcileDump(CameraHostState& st, const CameraSettings& cam)
+			{
+				const std::string dir = CameraLink::CameraDump::DirectoryFromEnvironment();
+				if (dir.empty() || !st.core)
+				{
+					if (st.core)
+						st.core->SetDump(nullptr);
+					st.dumpWriter.reset();   // joins the writer thread, which writes what is queued first
+					return;
+				}
+				CameraLink::DumpConfig cfg;
+				cfg.directory = dir;
+				cfg.clip = CameraLink::CameraDump::ClipFromEnvironment();
+				cfg.mode = (cam.ModelWanted() && cam.meas.Any()) ? "engine_camera" : "engine";
+				if (st.dumpWriter && st.dumpWriter->Config().directory == cfg.directory && st.dumpWriter->Config().clip == cfg.clip &&
+					st.dumpWriter->Config().mode == cfg.mode)
+				{
+					st.core->SetDump(st.dumpWriter);   // the same writer on a rebuilt core
+					return;
+				}
+				st.core->SetDump(nullptr);
+				st.dumpWriter.reset();
+				st.dumpWriter = std::make_shared<CameraLink::CameraDump>(cfg, true);
+				st.core->SetDump(st.dumpWriter);
+			}
+		}
 
 		CameraExtension::CameraExtension(Skeleton::ConfigLoader loader) : loader_(std::move(loader)) {}
 
@@ -99,6 +134,17 @@ namespace Vpv
 		{
 			const std::shared_ptr<CameraHostState> st = hosts_.Find(host);
 			return st && st->core ? st->builtStore : nullptr;
+		}
+
+		CameraSettings CameraExtension::CameraSettingsOf(const void* host) const
+		{
+			const std::shared_ptr<CameraHostState> st = hosts_.Find(host);
+			return st ? st->cam : CameraSettings();
+		}
+		const CameraLink::CameraDump* CameraExtension::DumpOf(const void* host) const
+		{
+			const std::shared_ptr<CameraHostState> st = hosts_.Find(host);
+			return st ? st->dumpWriter.get() : nullptr;
 		}
 
 		void CameraExtension::OnLifecycle(RE::LifecycleFacts& f)
@@ -134,6 +180,8 @@ namespace Vpv
 			Skeleton::Settings s = Skeleton::Load(loader_);
 			if (originalFlag >= 0)
 				s.originalPathway = originalFlag != 0;
+			CameraSettings cam = Load(loader_);   // [vpv.camera] (K3)
+			cam.originalPathway = s.originalPathway;
 			if (!gpu)
 				gpu = static_cast<pl_gpu>(hosts_.Aux(host));
 			std::shared_ptr<CameraHostState> st = hosts_.Find(host);
@@ -144,12 +192,16 @@ namespace Vpv
 				hosts_.Remove(host, false);
 				st.reset();
 			}
-			if (!s.CameraWanted())
+			const bool linkWanted = s.CameraWanted();
+			if (!linkWanted && !cam.Wanted())
 			{
 				if (st)
 					Teardown(st, false);
-				// An unreadable camera_link is shown, never ignored.
-				if (!s.originalPathway && !s.cameraProblems.empty())
+				// An unreadable camera_link or [vpv.camera] key is shown, never ignored.
+				StatusInput keyIn;
+				keyIn.cam = cam;
+				const std::vector<std::string> keyProblems = BuildStatus(keyIn).fallbacks;
+				if (!s.originalPathway && (!s.cameraProblems.empty() || !keyProblems.empty()))
 				{
 					if (!st)
 					{
@@ -163,7 +215,10 @@ namespace Vpv
 					{
 						std::lock_guard<std::mutex> lock(st->statusMutex);
 						st->fallbackLines.clear();
-						st->fallbackLines.push_back("camera_link: " + problems);
+						if (!problems.empty())
+							st->fallbackLines.push_back("camera_link: " + problems);
+						for (const std::string& p : keyProblems)
+							st->fallbackLines.push_back(p);
 					}
 					st->reporting.store(true, std::memory_order_release);
 				}
@@ -179,16 +234,19 @@ namespace Vpv
 				}
 			}
 			st->settings = s;
+			st->cam = cam;
 			st->dump = DumpRequested();
 			st->problem.clear();
-			FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(host);
-			if (st->core && st->builtStore != store)
+			FrameAnalysis::Store* store = linkWanted ? VpFrameAnalysis::SourceFrameTap::StoreFor(host) : nullptr;
+			if (st->core && (!linkWanted || st->builtStore != store))
 			{
+				if (st->dumpWriter)
+					st->core->SetDump(nullptr);
 				st->core->OnGpuReleased();
-				st->core.reset();   // built over a store that is gone or replaced
+				st->core.reset();   // camera_link went off, or built over a store that is gone or replaced
 				st->builtStore = nullptr;
 			}
-			if (!st->core)
+			if (linkWanted && !st->core)
 			{
 				if (!store)
 					st->problem = "no frame analysis store for this renderer (the renderer does not register one); the camera link cannot report";
@@ -203,8 +261,10 @@ namespace Vpv
 			}
 			if (st->core && gpu)
 				st->core->OnGpuCreated(gpu);
+			// K3: the dump writer exists only when VP_CAMERA_DUMP names a directory and a core can feed it.
+			ReconcileDump(*st, cam);
 			// The reader of the camera fit on the Indicator: registered through the one shared seal, once per renderer.
-			if (!st->sealHooked)
+			if (linkWanted && !st->sealHooked)
 			{
 				if (VpSeal::FrameSeal* seal = Resync::ResyncExtension::SealFor(host))
 				{
@@ -229,6 +289,9 @@ namespace Vpv
 				return;
 			st->active.store(false, std::memory_order_release);
 			st->reporting.store(false, std::memory_order_release);
+			if (st->core)
+				st->core->SetDump(nullptr);
+			st->dumpWriter.reset();   // joins the writer (K3); a thread never outlives the host state
 			if (st->core)
 			{
 				st->core->OnGpuReleased();
@@ -256,7 +319,7 @@ namespace Vpv
 			{
 				st->seenEpoch = epoch;
 				if (st->ownerGen != VpFrameAnalysis::SourceFrameTap::Generation(c.host) ||
-					st->builtStore != VpFrameAnalysis::SourceFrameTap::StoreFor(c.host))
+					(st->settings.CameraWanted() && st->builtStore != VpFrameAnalysis::SourceFrameTap::StoreFor(c.host)))
 				{
 					Reconcile(c.host, -1, nullptr);   // stale core: rebuild over the current store (or say there is none)
 					return false;
@@ -300,6 +363,7 @@ namespace Vpv
 			const unsigned long long faults = Faults().load(std::memory_order_relaxed);
 			if (faults != 0)
 				fb.push_back("camera_fault: " + std::to_string(faults) + " camera callback exception(s) contained");
+			const bool linkWanted = st.settings.CameraWanted();
 			if (st.core)
 			{
 				lines.push_back(kReportLine);
@@ -307,8 +371,35 @@ namespace Vpv
 				for (const FallbackCatalog::Decision& d : st.core->CollectDecisions())
 					addDecision(d);
 			}
-			else
+			else if (linkWanted)
 				lines.push_back("camera: report mode unavailable (" + (st.problem.empty() ? std::string("starting") : st.problem) + ")");
+
+			// K3: the camera model's own state ([vpv.camera] keys, the fit, the dump), one builder for every surface.
+			StatusInput in;
+			in.cam = st.cam;
+			in.linkReport = linkWanted;
+			in.coreAlive = st.core != nullptr;
+			in.engineAvailable = st.core && st.core->Allocated();
+			in.linkProblem = st.problem;
+			if (st.core)
+			{
+				in.fit = st.core->LastFit();
+				const CameraLink::FitCounters& n = st.core->Counters();
+				in.fitted = n.fitted.load(std::memory_order_relaxed);
+				in.published = n.published.load(std::memory_order_relaxed);
+				in.late = n.late.load(std::memory_order_relaxed);
+			}
+			if (st.dumpWriter)
+			{
+				in.dumpOn = true;
+				in.dumpDirectory = st.dumpWriter->ClipDirectory();
+				in.dump = st.dumpWriter->Stats();
+			}
+			const StatusText k3 = BuildStatus(in);
+			for (const std::string& l : k3.lines)
+				lines.push_back(l);
+			for (const std::string& l : k3.fallbacks)
+				fb.push_back(l);
 
 			if (st.dump)
 			{
@@ -326,6 +417,8 @@ namespace Vpv
 
 			std::string text;
 			for (const std::string& l : lines)
+				text += (text.empty() ? "" : "\n") + l;
+			for (const std::string& l : k3.detail)   // Ctrl+Alt+D only
 				text += (text.empty() ? "" : "\n") + l;
 			for (const std::string& l : fb)
 				text += "\n" + l;
@@ -375,7 +468,7 @@ namespace Vpv
 			const std::shared_ptr<CameraHostState> st = hosts_.Find(ctx.host);
 			if (!st || !st->active.load(std::memory_order_acquire))
 			{
-				reply = "camera: off (camera_link = off, or the Original pathway)";
+				reply = "camera: off (camera_link = off and no [vpv.camera] key set, or the Original pathway)";
 				return true;
 			}
 			std::lock_guard<std::mutex> lock(st->statusMutex);

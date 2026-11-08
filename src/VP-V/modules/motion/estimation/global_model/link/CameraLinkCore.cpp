@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "CameraLinkCore.h"
 
+#include "CameraDump.h"
 #include "CameraUsable.h"
 
 #include <algorithm>
@@ -301,12 +302,26 @@ namespace CameraLink
 				m_ambiguousRecords += rec->reason == CameraModel::Reason::Ambiguous ? 1u : 0u;
 				m_facts.ambiguousNow = m_ambiguous.Observe(rec->reason, rec->pairSeconds);
 				m_facts.ambiguousShare = m_records ? double(m_ambiguousRecords) / double(m_records) : 0.0;
+				m_lastFit.have = true;
+				m_lastFit.type = rec->params.type;
+				m_lastFit.confidence = rec->confidence;
+				m_lastFit.fitMs = double(rec->costMicros) / 1000.0;
+				m_lastFit.reason = rec->reason;
+				m_lastFit.verdictFlags = rec->verdictFlags;
+				m_lastFit.published = o == PublishOutcome::Published;
 			}
 			if (r.timingUnknown)
 				m_events.fetch_or(1u << kEvTiming, std::memory_order_relaxed);
 			if (r.status == AssembleStatus::NotFittedSlip || r.status == AssembleStatus::NotFittedAncient)
 				m_events.fetch_or(1u << kEvSlip, std::memory_order_relaxed);
 		}
+		std::shared_ptr<CameraDump> dump;
+		{
+			std::lock_guard<std::mutex> lock(m_dumpMutex);
+			dump = m_dump;
+		}
+		if (dump)
+			dump->Offer(job.field, r.record);   // after Fit: a bounded push that drops visibly, never a wait
 		std::lock_guard<std::mutex> lock(m_traceMutex);
 		if (m_trace.is_open() && rec)
 		{
@@ -319,6 +334,18 @@ namespace CameraLink
 				(long long)rec->costMicros, o == PublishOutcome::Published ? 0 : 1, o == PublishOutcome::Published ? 1 : 0);
 			m_trace << b;
 		}
+	}
+
+	void CameraLinkCore::SetDump(std::shared_ptr<CameraDump> dump)
+	{
+		std::lock_guard<std::mutex> lock(m_dumpMutex);
+		m_dump = std::move(dump);
+	}
+
+	LastFitSummary CameraLinkCore::LastFit() const
+	{
+		std::lock_guard<std::mutex> lock(m_statusMutex);
+		return m_lastFit;
 	}
 
 	std::vector<FallbackCatalog::Decision> CameraLinkCore::CollectDecisions()
