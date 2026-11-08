@@ -5793,13 +5793,17 @@ void testScreenConfigSectionsAndInlineUnits()
         "Subtitle section expansion state changed when selecting another profile");
 }
 
-void testSeparatedProfilesDoNotLeaveShortcutShellsBehind()
+// legacyPresetCompatibility false: Bill's quality retirement runs (a High preset is flattened into every legacy
+// Rendering profile). true: a non-High preset (here quality: balanced) keeps NeedsPresetCompatibility set
+// (QualityProfileMigration.h), so the preset flattening is skipped and the shell-pruning path of
+// migrateSeparatedRendererProfiles still applies: a profile left holding nothing but a selector is removed.
+void separatedProfilesScenario(bool legacyPresetCompatibility)
 {
     QTemporaryDir directory;
     const QString path = directory.filePath(QStringLiteral("VideoProcessor.cfg"));
-    const QByteArray configuration =
-        "[vprenderer.rendering]\n"
-        "quality: high\n\n"
+    const QByteArray configuration = QByteArray(legacyPresetCompatibility ?
+        "[vprenderer.rendering]\nquality: balanced\n\n" :
+        "[vprenderer.rendering]\nquality: high\n\n") +
         "[vprenderer.scaling_only]\n"
         "shortcut: Shift+1\n"
         "upscaler: ewa_lanczos\n"
@@ -5850,10 +5854,17 @@ void testSeparatedProfilesDoNotLeaveShortcutShellsBehind()
     // (Bill's quality retirement writes the preset-derived Tone Mapping values peak_detection: high_quality and
     // contrast_recovery: 0.3 into every legacy Rendering profile, so a profile that only carried a selector and
     // moved settings stays a real Tone Mapping profile; its moved settings live in their new owners).
-    require(hasProfile(rendering, QStringLiteral("vprenderer.scaling_only")) &&
-        hasProfile(rendering, QStringLiteral("vprenderer.color_only")) &&
-        hasProfile(rendering, QStringLiteral("vprenderer.output_only")),
-        "A legacy selector-only Rendering profile was dropped instead of kept as a Tone Mapping profile");
+    // With a non-High preset (legacyPresetCompatibility) the preset flattening is skipped, so the shell is pruned.
+    if (legacyPresetCompatibility)
+        require(!hasProfile(rendering, QStringLiteral("vprenderer.scaling_only")) &&
+            !hasProfile(rendering, QStringLiteral("vprenderer.color_only")) &&
+            !hasProfile(rendering, QStringLiteral("vprenderer.output_only")),
+            "A moved-only profile remained selectable in Rendering");
+    else
+        require(hasProfile(rendering, QStringLiteral("vprenderer.scaling_only")) &&
+            hasProfile(rendering, QStringLiteral("vprenderer.color_only")) &&
+            hasProfile(rendering, QStringLiteral("vprenderer.output_only")),
+            "A legacy selector-only Rendering profile was dropped instead of kept as a Tone Mapping profile");
     require(hasProfile(scaling, QStringLiteral("vprenderer.scaling.scaling_only")) &&
         hasProfile(color, QStringLiteral("vprenderer.color.color_only")) &&
         !hasProfile(output, QStringLiteral("vprenderer.output.output_only")),
@@ -5869,18 +5880,24 @@ void testSeparatedProfilesDoNotLeaveShortcutShellsBehind()
     ConfigFile reloaded;
     require(reloaded.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh),
         "Cannot reload the separated-profile migration result");
-    for (const char* shell : { "vprenderer.scaling_only", "vprenderer.color_only", "vprenderer.output_only" })
-    {
-        std::string setting;
-        require(reloaded.HasSection(shell) &&
-            reloaded.TryGetString(shell, "peak_detection", setting) && setting == "high_quality" &&
-            reloaded.TryGetString(shell, "contrast_recovery", setting) && setting == "0.3" &&
-            !reloaded.TryGetString(shell, "upscaler", setting) &&
-            !reloaded.TryGetString(shell, "downscaler", setting) &&
-            !reloaded.TryGetString(shell, "sdr_target_primaries", setting) &&
-            !reloaded.TryGetString(shell, "output_presentation", setting),
-            "A Rendering profile kept a setting that moved to another owner");
-    }
+    if (legacyPresetCompatibility)
+        require(!saved.contains("[vprenderer.scaling_only]") &&
+            !saved.contains("[vprenderer.color_only]") &&
+            !saved.contains("[vprenderer.output_only]"),
+            "A moved-only Rendering shell survived separated-profile migration");
+    else
+        for (const char* shell : { "vprenderer.scaling_only", "vprenderer.color_only", "vprenderer.output_only" })
+        {
+            std::string setting;
+            require(reloaded.HasSection(shell) &&
+                reloaded.TryGetString(shell, "peak_detection", setting) && setting == "high_quality" &&
+                reloaded.TryGetString(shell, "contrast_recovery", setting) && setting == "0.3" &&
+                !reloaded.TryGetString(shell, "upscaler", setting) &&
+                !reloaded.TryGetString(shell, "downscaler", setting) &&
+                !reloaded.TryGetString(shell, "sdr_target_primaries", setting) &&
+                !reloaded.TryGetString(shell, "output_presentation", setting),
+                "A Rendering profile kept a setting that moved to another owner");
+        }
     require(!saved.contains("[vprenderer.viewport.scope_and_crop]"),
         "A selector-only source section survived separated-profile migration");
     require(saved.contains("[vprenderer.scaling.scaling_only]") &&
@@ -5891,6 +5908,20 @@ void testSeparatedProfilesDoNotLeaveShortcutShellsBehind()
     require(!saved.contains("downscaler: ewa_lanczos") &&
         !saved.contains("downscaler: none"),
         "A removed downscaler survived migration instead of becoming Auto");
+}
+
+// Bill's quality retirement is active (quality: high): a selector-only Rendering profile is kept as a Tone Mapping
+// profile. (Named "...leave shortcut shells behind" before the update to his v1.4.02 UI; see DIV-CFG-T06.)
+void testSeparatedProfilesKeepToneMappingProfileUnderQualityRetirement()
+{
+    separatedProfilesScenario(false);
+}
+
+// The same fixture with a non-High preset keeps the preset compatibility path, so his shell pruning in
+// migrateSeparatedRendererProfiles is still exercised: moved-only Rendering profiles are removed.
+void testSeparatedProfilesDoNotLeaveShortcutShellsBehind()
+{
+    separatedProfilesScenario(true);
 }
 
 void testQueueUnitsAndLutControlsUseConsistentRows()
@@ -12272,6 +12303,18 @@ void testRenderingMenuDuplicateExportImportPreservesLegacyOwner()
 
 #include "ToneChartIntegrationTests.inc"
 
+// The tests that measure real text (single source: run() skips the flagged ones without fonts and
+// tools/run_config_tests.ps1 reads this list with --list-font-tests for its font pass and gate).
+// The VP-V 'fits the window' test is not skipped (it checks the rest without fonts) but needs the font pass
+// for its page-fit part.
+struct FontGatedTest { const char* name; bool skipWithoutFonts; };
+const FontGatedTest fontGatedTests[] = {
+    { "VP-V: masters, derived settings, one control per key, fits the window", false },
+    { "responsive workspaces preserve edits and fit", true },
+    { "left docks restore manual choices and drawer editing", true },
+    { "two-column cards share row height", true },
+    { "Tone slider wheel scrolls panel without editing", true } };
+
 int run(const char* name, const std::function<void()>& test)
 {
     const QString testName = QString::fromUtf8(name);
@@ -12302,16 +12345,13 @@ int run(const char* name, const std::function<void()>& test)
     }
     // Layout tests measure real text: off screen without fonts Qt measures placeholder boxes, so the editor's
     // layout is not the one the owner sees (page 0 'overflows 278px', no scroll range for the wheel fixture).
-    // They are skipped here and run by tools/run_config_tests.ps1's font pass (QT_QPA_FONTDIR), like the
-    // VP-V 'fits the window' test.
+    // Tests flagged skipWithoutFonts are skipped here and run by tools/run_config_tests.ps1's font pass
+    // (QT_QPA_FONTDIR); the runner reads the same list with --list-font-tests (fontGatedTests, the single source).
     if (qEnvironmentVariable("QT_QPA_PLATFORM").compare(QStringLiteral("offscreen"), Qt::CaseInsensitive) == 0 &&
         QFontDatabase::families().isEmpty())
     {
-        static const char* const fontTests[] = { "responsive workspaces preserve edits and fit",
-            "left docks restore manual choices and drawer editing", "two-column cards share row height",
-            "Tone slider wheel scrolls panel without editing" };
-        for (const char* needsFonts : fontTests)
-            if (testName.compare(QString::fromLatin1(needsFonts), Qt::CaseInsensitive) == 0)
+        for (const FontGatedTest& gated : fontGatedTests)
+            if (gated.skipWithoutFonts && testName.compare(QString::fromUtf8(gated.name), Qt::CaseInsensitive) == 0)
             {
                 if (testShardCount <= 1 || testShard == 0)   // reported once, not by every shard
                     std::cerr << "SKIP " << name << ": needs real fonts (the runner reruns it with QT_QPA_FONTDIR)" << std::endl;
@@ -12353,6 +12393,12 @@ int run(const char* name, const std::function<void()>& test)
 
 int main(int argc, char** argv)
 {
+    for (int i = 1; i < argc; ++i)
+        if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--list-font-tests"))
+        {
+            for (const FontGatedTest& gated : fontGatedTests) std::cout << gated.name << std::endl;
+            return 0;
+        }
     if (argc == 3 && QString::fromLocal8Bit(argv[1]) ==
         QStringLiteral("--zorder-helper"))
     {
@@ -12379,6 +12425,7 @@ int main(int argc, char** argv)
         }
     }
     QApplication application(argc, argv);
+    std::cerr << "FONTS " << QFontDatabase::families().size() << std::endl;   // the runner fails a font pass that loaded none
     // Not tests: the settings coverage inventory (--inventory <file>) and the preview's re-save (--resave <file>).
     for (int i = 1; i + 1 < argc; ++i)
         if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--inventory"))
@@ -12490,6 +12537,8 @@ int main(int argc, char** argv)
     failures += run("calibration profile owns LUT and HDR gamma", testCalibrationProfileOwnsLutAndHdrGamma);
     failures += run("legacy Rendering color settings migrate to Color Config",
         testLegacyRendererColorSettingsMigrateToColorConfigs);
+    failures += run("separated profiles keep a Tone Mapping profile under quality retirement",
+        testSeparatedProfilesKeepToneMappingProfileUnderQualityRetirement);
     failures += run("separated profiles do not leave shortcut shells behind",
         testSeparatedProfilesDoNotLeaveShortcutShellsBehind);
     failures += run("legacy VP input override migrates independently",
