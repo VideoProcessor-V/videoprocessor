@@ -6,6 +6,7 @@
 #include "CameraUsable.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 
@@ -54,6 +55,11 @@ namespace CameraLink
 		m_pool.reset();
 		m_ring.reset();
 		m_sealedMark.clear();
+		m_requestedAt.clear();
+		{
+			std::lock_guard<std::mutex> lock(m_chainMutex);
+			m_chain.clear();
+		}
 		m_table = nullptr;
 		m_bytes = nullptr;
 		m_indicator = nullptr;
@@ -82,6 +88,9 @@ namespace CameraLink
 	void CameraLinkCore::AttachGraph(VpSkeleton::SlotTable* table, VpSkeleton::CpuBuffers* p7Bytes, VpIndicator::Indicator* indicator)
 	{
 		Teardown();
+		// The measured costs belong to the graph that made them: a rebuild starts a fresh window (the caller derives d from
+		// the old window BEFORE it attaches the new graph).
+		m_lagMeter.Clear();
 		if (!m_active || !table || !table->Find(VpSkeleton::kP7CameraFit))
 			return;
 		m_table = table;
@@ -151,8 +160,69 @@ namespace CameraLink
 	void CameraLinkCore::SubmitReady(const std::vector<std::shared_ptr<FieldCopy>>& ready, const FramePhaseFacts& f)
 	{
 		(void)f;
+		const auto now = std::chrono::steady_clock::now();
 		for (const std::shared_ptr<FieldCopy>& fc : ready)
+		{
+			// The readback latency (request -> ready) is one of the two measured terms of the guide lag d.
+			const auto at = m_requestedAt.find(fc->seq);
+			if (at != m_requestedAt.end())
+			{
+				const double latency = std::chrono::duration<double>(now - at->second).count();
+				m_lagMeter.AddReadbackSeconds(latency);
+				AddTimerSample(kTimerReadback, latency * 1000.0, true);
+				m_requestedAt.erase(at);
+			}
 			SubmitField(fc, f);
+		}
+	}
+
+	void CameraLinkCore::AddTimerSample(const char* row, double ms, bool wait)
+	{
+		if (!(ms > 0))
+			return;
+		std::lock_guard<std::mutex> lock(m_timerMutex);
+		if (m_timerSamples.size() >= 256)
+			m_timerSamples.erase(m_timerSamples.begin());   // bounded: an undrained queue keeps the newest
+		TimerSample s;
+		s.row = row;
+		s.ms = ms;
+		s.wait = wait;
+		m_timerSamples.push_back(s);
+	}
+
+	size_t CameraLinkCore::DrainTimerSamples(std::vector<TimerSample>& out)
+	{
+		std::lock_guard<std::mutex> lock(m_timerMutex);
+		const size_t n = m_timerSamples.size();
+		out.insert(out.end(), m_timerSamples.begin(), m_timerSamples.end());
+		m_timerSamples.clear();
+		return n;
+	}
+
+	bool CameraLinkCore::PreviousRecordSeq(uint64_t seq, unsigned back, uint64_t& out) const
+	{
+		if (back == 0)
+			return false;
+		std::lock_guard<std::mutex> lock(m_chainMutex);
+		const size_t k = static_cast<size_t>(std::lower_bound(m_chain.begin(), m_chain.end(), seq) - m_chain.begin());
+		if (k < back)
+			return false;
+		out = m_chain[k - back];
+		return true;
+	}
+
+	uint64_t CameraLinkCore::LatestRecordSeq() const
+	{
+		std::lock_guard<std::mutex> lock(m_chainMutex);
+		return m_chain.empty() ? 0 : m_chain.back();
+	}
+
+	void CameraLinkCore::SetFitDoneObserver(std::function<void(uint64_t fitSeq)> f)
+	{
+		// Called from inside the observer it would wait for itself: the lock rule (CameraLinkCore.h) forbids it.
+		assert(m_observerThread.load() != std::this_thread::get_id());
+		std::lock_guard<std::mutex> lock(m_observerMutex);
+		m_fitDone = std::move(f);
 	}
 
 	bool CameraLinkCore::SubmitField(std::shared_ptr<const FieldCopy> field, const FramePhaseFacts& f)
@@ -224,6 +294,9 @@ namespace CameraLink
 			{
 				m_lastEra = era;
 				m_lastRequestedField = 0;
+				m_requestedAt.clear();
+				std::lock_guard<std::mutex> lock(m_chainMutex);
+				m_chain.clear();   // the numbering restarted: the old records are not "previous" any more
 			}
 		}
 		if (m_ring && m_engine)
@@ -243,6 +316,22 @@ namespace CameraLink
 						m_events.fetch_or(1u << kEvReadback, std::memory_order_relaxed);
 					if (m_producer)
 						m_producer->NoteReset();   // a hole in the pair chain
+				}
+				else
+				{
+					{
+						// The record chain: this field WILL be a record (its copy is on the way), whatever its fit does later.
+						std::lock_guard<std::mutex> lock(m_chainMutex);
+						if (m_chain.empty() || vf.seq > m_chain.back())
+						{
+							if (m_chain.size() >= 64)
+								m_chain.erase(m_chain.begin());
+							m_chain.push_back(vf.seq);
+						}
+					}
+					if (m_requestedAt.size() >= 64)
+						m_requestedAt.erase(m_requestedAt.begin());   // bounded: a copy that never came back is not timed
+					m_requestedAt[vf.seq] = now;
 				}
 			}
 			if (latest > m_lastRequestedField)
@@ -315,24 +404,42 @@ namespace CameraLink
 			if (r.status == AssembleStatus::NotFittedSlip || r.status == AssembleStatus::NotFittedAncient)
 				m_events.fetch_or(1u << kEvSlip, std::memory_order_relaxed);
 		}
-		std::shared_ptr<CameraDump> dump;
 		{
-			std::lock_guard<std::mutex> lock(m_dumpMutex);
-			dump = m_dump;
+			std::shared_ptr<CameraDump> dump;
+			{
+				std::lock_guard<std::mutex> lock(m_dumpMutex);
+				dump = m_dump;
+			}
+			if (dump)
+				dump->Offer(job.field, r.record);   // after Fit: a bounded push that drops visibly, never a wait
 		}
-		if (dump)
-			dump->Offer(job.field, r.record);   // after Fit: a bounded push that drops visibly, never a wait
-		std::lock_guard<std::mutex> lock(m_traceMutex);
-		if (m_trace.is_open() && rec)
+		if (rec && rec->costMicros > 0)
 		{
-			char b[512];
-			std::snprintf(b, sizeof(b), "%llu,%llu,%llu,%.9g,%s,%.6g,%d,%.9g/%.9g/%.9g/%.9g/%.9g/%.9g/%.9g/%.9g/%.9g,%lld,%d,%d\n",
-				(unsigned long long)job.seq, (unsigned long long)rec->pairFrom, (unsigned long long)rec->pairTo, rec->pairSeconds,
-				CameraModel::ReasonTextOf(rec->reason, rec->verdictFlags), rec->confidence, int(rec->params.type),
-				rec->params.h[0], rec->params.h[1], rec->params.h[2], rec->params.h[3], rec->params.h[4], rec->params.h[5],
-				rec->params.h[6], rec->params.h[7], rec->params.h[8],
-				(long long)rec->costMicros, o == PublishOutcome::Published ? 0 : 1, o == PublishOutcome::Published ? 1 : 0);
-			m_trace << b;
+			m_lagMeter.AddFitSeconds(static_cast<double>(rec->costMicros) * 1e-6);
+			AddTimerSample(kTimerFit, static_cast<double>(rec->costMicros) * 1e-3, false);
+		}
+		{
+			std::lock_guard<std::mutex> lock(m_traceMutex);
+			if (m_trace.is_open() && rec)
+			{
+				char b[512];
+				std::snprintf(b, sizeof(b), "%llu,%llu,%llu,%.9g,%s,%.6g,%d,%.9g/%.9g/%.9g/%.9g/%.9g/%.9g/%.9g/%.9g/%.9g,%lld,%d,%d\n",
+					(unsigned long long)job.seq, (unsigned long long)rec->pairFrom, (unsigned long long)rec->pairTo, rec->pairSeconds,
+					CameraModel::ReasonTextOf(rec->reason, rec->verdictFlags), rec->confidence, int(rec->params.type),
+					rec->params.h[0], rec->params.h[1], rec->params.h[2], rec->params.h[3], rec->params.h[4], rec->params.h[5],
+					rec->params.h[6], rec->params.h[7], rec->params.h[8],
+					(long long)rec->costMicros, o == PublishOutcome::Published ? 0 : 1, o == PublishOutcome::Published ? 1 : 0);
+				m_trace << b;
+			}
+		}
+		// K4: the guide lane job. After the publish, outside the status / trace locks. The observer mutex is held for the call, so
+		// SetFitDoneObserver(nullptr) (the adapter's Detach) returns only when no call is in flight: the observer's captures stay valid.
+		std::lock_guard<std::mutex> lock(m_observerMutex);
+		if (m_fitDone)
+		{
+			m_observerThread.store(std::this_thread::get_id());
+			m_fitDone(job.seq);
+			m_observerThread.store(std::thread::id());
 		}
 	}
 
