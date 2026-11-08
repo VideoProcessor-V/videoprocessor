@@ -466,6 +466,36 @@ namespace VideoProcessorTest
 			Assert::AreEqual(uint64_t(1), counters.aheadBridged.load());
 		}
 
+		// Audit F5: a Tick that arrives with a job (the loop takes the job and clears the tick) still reaches the parked results, also
+		// when that job publishes at once.
+		TEST_METHOD(AnImmediatePublishAlsoRetriesTheParkedResults)
+		{
+			CameraLinkTest::Rig bridge;
+			CameraLink::FitCounters counters;
+			CameraLink::CameraRecordPool pool(32);
+			CameraLink::CameraFitProducer producer(CameraModel::Config(), &counters);
+			CameraLink::CameraFitEnv env = bridge.Env(&pool, &counters);
+			env.aheadMode = true;
+			CameraLink::CameraFitWorker worker(producer, env);
+			worker.Tick(1);
+			CameraLink::CameraFitJob j2 = CameraLinkTest::PanJob(2, 4.0);
+			j2.ahead = true;
+			worker.Submit(j2);
+			worker.ProcessQueued();
+			Assert::AreEqual(size_t(1), worker.Parked(), L"frame 2 waits for its markers");
+			bridge.PublishInputs(1);
+			bridge.Retire(1);
+			bridge.PublishInputs(2);
+			bridge.PublishInputs(3);
+			worker.Tick(3);   // no RetryParked here: the next job carries the tick
+			CameraLink::CameraFitJob j3 = CameraLinkTest::PanJob(3, 4.0);
+			j3.ahead = true;
+			worker.Submit(j3);
+			worker.ProcessQueued();
+			Assert::AreEqual(size_t(0), worker.Parked(), L"frame 2 published with frame 3");
+			Assert::AreEqual(uint64_t(2), counters.aheadBridged.load());
+		}
+
 		TEST_METHOD(SeedJobsPublishAsBeforeInAheadMode)
 		{
 			CameraLinkTest::Rig bridge;

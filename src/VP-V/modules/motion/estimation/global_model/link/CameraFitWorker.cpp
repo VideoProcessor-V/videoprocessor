@@ -311,6 +311,7 @@ namespace CameraLink
 			if (TryParked(p, m_renderSeq.load(std::memory_order_acquire), o))
 			{
 				Finish(job, fit, o);
+				RetryParked();   // audit F5: a Tick consumed with this job must still reach the earlier parked results
 				return o;
 			}
 			if (m_parked.size() >= (m_env.parkCapacity ? m_env.parkCapacity : 1))
