@@ -36,7 +36,7 @@
   "src/VideoProcessor-BetaTests/BetaParametersTests.cpp": 153,
   "src/VideoProcessor-BetaTests/VideoProcessor-BetaTests.vcxproj": 2,
   "src/VideoProcessor-Config/AppMain.cpp": 50,
-  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 4647,
+  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 4470,
   "src/VideoProcessor-Config/ConfigEditorWindow.h": 55,
   "src/VideoProcessor-Config/ProfileListController.h": 7,
   "src/VideoProcessor-Config/README.md": 3,
