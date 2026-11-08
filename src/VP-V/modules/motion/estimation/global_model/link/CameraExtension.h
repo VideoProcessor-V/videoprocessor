@@ -10,6 +10,12 @@
 // shader text exists, and the extension never feeds a consumer (no "vpv.camera.v1" answer). What it adds
 // is the visible state: a status line and the fallbacks. Off (the default) and the Original pathway:
 // no state, no line.
+//
+// K3 (diagnostics): the [vpv.camera] keys (CameraSettings.h) are read here too. Any key set shows its state through
+// CameraStatus.h (Ctrl+I line, Config status, Fallbacks, Ctrl+Alt+D) even when camera_link is off: a switch that cannot act is
+// shown, never silent. VP_CAMERA_DUMP=<dir> starts the dump writer (CameraDump.h) on the core, only then a thread exists.
+
+#include "CameraSettings.h"
 
 #include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/core/hub/HostSlots.h>
@@ -20,7 +26,7 @@
 #include <string>
 #include <vector>
 
-namespace CameraLink { class CameraLinkCore; }
+namespace CameraLink { class CameraLinkCore; class CameraDump; }
 
 namespace Vpv
 {
@@ -52,6 +58,8 @@ namespace Vpv
 			CameraLink::CameraLinkCore* CoreOf(const void* host) const;   // null without one (render thread / tests)
 			size_t HostStates() const;
 			const void* StoreOf(const void* host) const;   // the FrameAnalysis::Store the host's core was built over (null: none)
+			CameraSettings CameraSettingsOf(const void* host) const;   // the [vpv.camera] settings applied to the host (defaults when none)
+			const CameraLink::CameraDump* DumpOf(const void* host) const;   // the VP_CAMERA_DUMP writer (null: none)
 
 		private:
 			void Reconcile(const void* host, int originalFlag, pl_gpu gpu);
