@@ -12,6 +12,8 @@
 #include <ConfigFile.h>
 #include <UnifiedProfileRuntime.h>
 #include "../VideoProcessor-Lib/vprenderer/LibplaceboRendererPluginApi.h"
+#include <VP-V/abi/VpvAbi.h>
+#include <VP-V/abi/VpvInterfaces.h>
 #include "../VideoProcessor-Lib/VpBuildIdentity.h"
 #include "../VideoProcessor-Lib/vprenderer/RendererDiagnosticCodes.h"
 #include <DiagnosticHistory.h>
@@ -123,15 +125,17 @@ namespace VideoProcessorTest
 			}
 		}
 
-		// Report-a-problem (API 36): the proxy forwards the renderer DLL's history
-		// (without an override IVideoRenderer's default returns false: no rows).
-		TEST_METHOD(WriteDiagnosticHistoryHasExplicitProxyOverride)
+		// M2 P2: the proxy no longer forwards the 22 VP-V methods one by one (they are no longer IVideoRenderer virtuals);
+		// it forwards QueryExtension, so the VP-V interfaces of the plugin renderer reach the host (the old report-a-problem
+		// override check, now: the history writer is an interface method and the proxy has the one forwarder).
+		TEST_METHOD(ProxyForwardsQueryExtensionAndNothingElseOfVpv)
 		{
-			using ExpectedMethod = bool (LibplaceboPluginVideoRenderer::*)(
-				VpDiagnosticHistorySink, void*, int64_t) const;
 			Assert::IsTrue((std::is_same_v<
-				decltype(&LibplaceboPluginVideoRenderer::WriteDiagnosticHistory),
-				ExpectedMethod>));
+				decltype(&LibplaceboPluginVideoRenderer::QueryExtension),
+				void* (LibplaceboPluginVideoRenderer::*)(const char*)>));
+			Assert::IsTrue((std::is_same_v<
+				decltype(&Vpv::IVpvStatus::WriteDiagnosticHistory),
+				bool (Vpv::IVpvStatus::*)(VpDiagnosticHistorySink, void*, int64_t) const>));
 		}
 
 		// What LibplaceboVideoRenderer::WriteDiagnosticHistory sends across the plugin
@@ -234,67 +238,40 @@ namespace VideoProcessorTest
 				ExpectedMethod>));
 		}
 
-		TEST_METHOD(TimedFileFramesHaveExplicitProxyOverrides)
+		// M2 P2: every former virtual is an interface method of the plugin's bridge with the same signature apart from
+		// text (IVpvTextSink instead of CString&) and the iid map (src/VP-V/abi/README.md). The host reaches them only
+		// through Vpv::Query (VpvHostCalls.h); a missing forwarder can no longer fall back to a default silently,
+		// because there is nothing to forward but QueryExtension.
+		TEST_METHOD(ExtensionInterfacesCarryTheFormerVirtualsSignatures)
 		{
-			// ABI 37 (claimed 35 on the filter branch): every file-frame virtual is forwarded to the plugin (a
-			// missing override would silently fall back to capture semantics).
-			Assert::IsTrue((std::is_same_v<
-				decltype(&LibplaceboPluginVideoRenderer::SupportsTimedFileFrames),
-				bool (LibplaceboPluginVideoRenderer::*)() const>));
-			Assert::IsTrue((std::is_same_v<
-				decltype(&LibplaceboPluginVideoRenderer::OnTimedVideoFrame),
-				void (LibplaceboPluginVideoRenderer::*)(VideoFrame&, const FileFrameTiming&)>));
-			Assert::IsTrue((std::is_same_v<
-				decltype(&LibplaceboPluginVideoRenderer::WaitForFileFrameSlot),
-				bool (LibplaceboPluginVideoRenderer::*)(uint32_t)>));
-			Assert::IsTrue((std::is_same_v<
-				decltype(&LibplaceboPluginVideoRenderer::CancelFileFrameWait),
-				void (LibplaceboPluginVideoRenderer::*)()>));
-			Assert::AreEqual(static_cast<uint32_t>(45), VP_LIBPLACEBO_PLUGIN_API_VERSION);
-		}
-
-		TEST_METHOD(IntentAndCalibrationHaveExplicitProxyOverrides)
-		{
-			// ABI 38 (intent: GetIntentStatus / SetAmbientLux) and ABI 39 (automatic
-			// calibration, claimed 36 on its branch, appended after the intent methods):
-			// every call is forwarded to the plugin.
-			Assert::IsTrue((std::is_same_v<
-				decltype(&LibplaceboPluginVideoRenderer::GetIntentStatus),
-				bool (LibplaceboPluginVideoRenderer::*)(IntentStatus&) const>));
-			Assert::IsTrue((std::is_same_v<
-				decltype(&LibplaceboPluginVideoRenderer::SetAmbientLux),
-				void (LibplaceboPluginVideoRenderer::*)(double, bool, double)>));
-			Assert::IsTrue((std::is_same_v<
-				decltype(&LibplaceboPluginVideoRenderer::GetCalibrationOutput),
-				bool (LibplaceboPluginVideoRenderer::*)(Calibration::PatternOutputInfo&) const>));
-			Assert::IsTrue((std::is_same_v<
-				decltype(&LibplaceboPluginVideoRenderer::SetCalibrationPattern),
-				bool (LibplaceboPluginVideoRenderer::*)(const Calibration::PatternRequest&, CString&)>));
-			// ABI 40 (bug hunt 3 F2, integration round 5): appended after calibration.
-			Assert::IsTrue((std::is_same_v<
-				decltype(&LibplaceboPluginVideoRenderer::SetActivePictureLookaheadAutomatic),
-				void (LibplaceboPluginVideoRenderer::*)(bool)>));
-			// ABI 41 (r6 fix 7, "Fallbacks engaged"): appended after the look-ahead switch.
-			Assert::IsTrue((std::is_same_v<
-				decltype(&LibplaceboPluginVideoRenderer::GetFallbacksStatus),
-				bool (LibplaceboPluginVideoRenderer::*)(CString&) const>));
-			// ABI 42 (VP-V delay budget, ADR-0020): appended after GetFallbacksStatus.
-			Assert::IsTrue((std::is_same_v<
-				decltype(&LibplaceboPluginVideoRenderer::SetQueueDelayBudget),
-				void (LibplaceboPluginVideoRenderer::*)(int)>));
-			// ABI 43 (feat/dv-l8, assigned at the integ/batch1 merge): appended after SetQueueDelayBudget.
-			Assert::IsTrue((std::is_same_v<
-				decltype(&LibplaceboPluginVideoRenderer::ToggleDvCompareCapture),
-				bool (LibplaceboPluginVideoRenderer::*)(CString&)>));
-			// ABI 44 (WP-11, integration group C): the generic module status and command entries,
-			// appended after ToggleDvCompareCapture.
-			Assert::IsTrue((std::is_same_v<
-				decltype(&LibplaceboPluginVideoRenderer::GetModuleStatus),
-				bool (LibplaceboPluginVideoRenderer::*)(const char*, CString&) const>));
-			Assert::IsTrue((std::is_same_v<
-				decltype(&LibplaceboPluginVideoRenderer::InvokeModuleCommand),
-				bool (LibplaceboPluginVideoRenderer::*)(const char*, const char*, CString&)>));
-			Assert::AreEqual(static_cast<uint32_t>(45), VP_LIBPLACEBO_PLUGIN_API_VERSION);
+			// vpv.timed_file_frames.v1 (was ABI 37).
+			Assert::IsTrue((std::is_same_v<decltype(&Vpv::IVpvTimedFileFrames::Supports), bool (Vpv::IVpvTimedFileFrames::*)() const>));
+			Assert::IsTrue((std::is_same_v<decltype(&Vpv::IVpvTimedFileFrames::OnTimedVideoFrame),
+				void (Vpv::IVpvTimedFileFrames::*)(VideoFrame&, const FileFrameTiming&)>));
+			Assert::IsTrue((std::is_same_v<decltype(&Vpv::IVpvTimedFileFrames::WaitSlot), bool (Vpv::IVpvTimedFileFrames::*)(uint32_t)>));
+			Assert::IsTrue((std::is_same_v<decltype(&Vpv::IVpvTimedFileFrames::Cancel), void (Vpv::IVpvTimedFileFrames::*)()>));
+			// vpv.intent.v1 (was ABI 38) and vpv.calibration.v1 (was ABI 39).
+			Assert::IsTrue((std::is_same_v<decltype(&Vpv::IVpvIntent::GetIntentStatus), bool (Vpv::IVpvIntent::*)(IntentStatus&) const>));
+			Assert::IsTrue((std::is_same_v<decltype(&Vpv::IVpvIntent::GetContentIntentStatus), bool (Vpv::IVpvIntent::*)(ContentIntentStatus&) const>));
+			Assert::IsTrue((std::is_same_v<decltype(&Vpv::IVpvIntent::SetAmbientLux), void (Vpv::IVpvIntent::*)(double, bool, double)>));
+			Assert::IsTrue((std::is_same_v<decltype(&Vpv::IVpvCalibration::GetOutput),
+				bool (Vpv::IVpvCalibration::*)(Calibration::PatternOutputInfo&) const>));
+			Assert::IsTrue((std::is_same_v<decltype(&Vpv::IVpvCalibration::SetPattern),
+				bool (Vpv::IVpvCalibration::*)(const Calibration::PatternRequest&, Vpv::IVpvTextSink&)>));
+			// vpv.presentation_ctl.v1 (was ABI 40, 42, 43).
+			Assert::IsTrue((std::is_same_v<decltype(&Vpv::IVpvPresentationCtl::SetActivePictureLookaheadAutomatic),
+				void (Vpv::IVpvPresentationCtl::*)(bool)>));
+			Assert::IsTrue((std::is_same_v<decltype(&Vpv::IVpvPresentationCtl::SetQueueDelayBudget), void (Vpv::IVpvPresentationCtl::*)(int)>));
+			Assert::IsTrue((std::is_same_v<decltype(&Vpv::IVpvPresentationCtl::ToggleDvCompareCapture),
+				bool (Vpv::IVpvPresentationCtl::*)(Vpv::IVpvTextSink&)>));
+			// vpv.status.v1 (was ABI 25, 31, 41, 36) and vpv.modules.v1 (was ABI 44).
+			Assert::IsTrue((std::is_same_v<decltype(&Vpv::IVpvStatus::GetFallbacksStatus), bool (Vpv::IVpvStatus::*)(Vpv::IVpvTextSink&) const>));
+			Assert::IsTrue((std::is_same_v<decltype(&Vpv::IVpvModules::Status), bool (Vpv::IVpvModules::*)(const char*, Vpv::IVpvTextSink&) const>));
+			Assert::IsTrue((std::is_same_v<decltype(&Vpv::IVpvModules::Command),
+				bool (Vpv::IVpvModules::*)(const char*, const char*, Vpv::IVpvTextSink&)>));
+			// The ABI numbers: Bill's, and VP-V's own.
+			Assert::AreEqual(static_cast<uint32_t>(34), VP_LIBPLACEBO_PLUGIN_API_VERSION);
+			Assert::AreEqual(static_cast<uint32_t>(2), Vpv::kVpvExtensionAbi);
 		}
 	};
 }

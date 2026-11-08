@@ -578,6 +578,15 @@ namespace SourceResolution
 		void SetEvidence(int shots, double seconds) { settings.minimumShots = shots; settings.minimumSeconds = seconds; }
 		void SetLatchFixes(bool on) { settings.latchFixes = on; }
 		void SetCutFixes(bool on) { settings.cutFixes = on; }
+		// SID train r2 (N2, doc 78 section 5): the consensus (chain + classical, source_id_consensus On) says this source is upscaled and the
+		// chain's CONFIDENT reading contradicts native. While it is set, a native-looking informative frame is NOT evidence that ends the
+		// window or the declaration (one frame of a menu, a flash or a stray detail burst must not clear a lock that confident evidence
+		// holds): the frame is left out like a starved one and counted in ChainHeld(). The caller sets it per frame; Off / Shadow never
+		// set it, so the original behaviour is byte-identical. WHEN (engage moments, dwell, crossfade) is untouched.
+		void SetChainContradictsNative(bool on) { chainContradictsNative = on; }
+		bool ChainContradictsNative() const { return chainContradictsNative; }
+		// Native-looking frames left out because the consensus held the lock (N2).
+		unsigned long long ChainHeld() const { return chainHeld; }
 		bool CutFixesActive() const { return settings.latchFixes && settings.cutFixes; }
 		// Cut fixes: the moments a switch may use (a cut judged at once; a deferred confirmation is
 		// not one), with the span of the last; without the cut fixes the same as Cuts / LastCutSpan.
@@ -618,6 +627,8 @@ namespace SourceResolution
 		double lastMean = -1.0, lastSignature = 0.0, lastSeconds = -1.0, evidence = 0.0;
 		bool haveLast = false;
 		unsigned long long shot = 0, cuts = 0, discontinuities = 0, starved = 0, floorStarved = 0;
+		bool chainContradictsNative = false;     // N2: see SetChainContradictsNative
+		unsigned long long chainHeld = 0;
 		// latchFixes: the last frame whose shape could be judged (the cut test compares across black).
 		std::vector<double> lastPattern;
 		std::vector<char> lastPatternFlat;

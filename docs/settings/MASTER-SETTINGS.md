@@ -11,8 +11,8 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 
 | Count | Value |
 |---|---|
-| Modules | 44 |
-| Documented rows | 68 |
+| Modules | 45 |
+| Documented rows | 69 |
 | VP-V keys in code (outside Bill's schema lists) | 385 |
 | of which documented | 64 |
 | of which undocumented (appendix A) | 321 |
@@ -27,6 +27,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Input | `input.queue_timing` | built | [README](../../src/VP-V/modules/input/queue_timing/README.md) | 0 | 15 | 0/15 |
 | Input | `input.source_analysis` | partial | [README](../../src/VP-V/modules/input/source_analysis/README.md) | 0 | 19 | 0/19 |
 | Input | `input.light_level` | draft | [README](../../src/VP-V/modules/input/source_analysis/light_level/README.md) | 0 | 33 | 0/33 |
+| Input | `input.source_analysis.identity.chain` | draft | [README](../../src/VP-V/modules/input/source_analysis/identity/chain/README.md) | 1 | 0 | 0/0 |
 | Input | `input.source_analysis.lane.shared.half_luma` | draft | [README](../../src/VP-V/modules/input/source_analysis/lane/shared/README.md) | 1 | 0 | 0/0 |
 | Input | `input.source_analysis.picture.shared.picture_rect` | draft | [README](../../src/VP-V/modules/input/source_analysis/picture/shared/README.md) | 0 | 0 | 0/0 |
 | Input | `input.source_analysis.events.shared.cut_fade_judge` | draft | [README](../../src/VP-V/modules/input/source_analysis/events/shared/README.md) | 0 | 0 | 0/0 |
@@ -69,10 +70,11 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 
 ## Input
 
-Modules: `input.capture`, `input.signal`, `input.queue_timing`, `input.source_analysis`, `input.light_level`, `input.source_analysis.lane.shared.half_luma`, `input.source_analysis.picture.shared.picture_rect`, `input.source_analysis.events.shared.cut_fade_judge`, `input.source_analysis.identity.shared.source_quality`.
+Modules: `input.capture`, `input.signal`, `input.queue_timing`, `input.source_analysis`, `input.light_level`, `input.source_analysis.identity.chain`, `input.source_analysis.lane.shared.half_luma`, `input.source_analysis.picture.shared.picture_rect`, `input.source_analysis.events.shared.cut_fade_judge`, `input.source_analysis.identity.shared.source_quality`.
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
+| `source_id_evidence` | `input.source_analysis.identity.chain` | profile (VP-owned key lists, plumbing with P3) | enum | off, log, log+lines, log+lines+frames | log+lines (only active in shadow / on; until P3 the setter default is off) |  | VP-V > Input > Source identity | forced off | planned (setter only until P3: `ChainEstimator::SetEvidence` / `Monitor::SetChainEvidence`); Config status row "evidence: <level>, <size> in sid-evidence (cap 2048 MB), <n> dumps"; one-time notice "Source identity: evidence logging on (shadow)"; a failing disk is a visible notice once per episode; a level with no history folder reads "evidence: <level> requested, no folder (set the history folder)" plus one notice (never silently off); a refused hotkey press is a notice | storage-budgeted (2 GB FIFO cap), never GPU-dependent |
 | `source_stats_authority` | `input.source_analysis.lane.shared.half_luma` | profile (deferred) | enum | original, p4 | original |  | not in Config (deferred to SA3; needs the SCHEMA lock, RendererProfileConfig.h / MainConfigSchema.h) | Original = Bill's SceneDetector and analysis | Declared: deferred to SA3, not implemented in this package (the key is documented once, here; events/shared shares it) | same on all |
 
 ## Motion

@@ -92,6 +92,7 @@
 #include <VP-V/modules/input/signal/ResyncExtension.h>   // VPV-HOOK: resync Q1 (Shadow, Drive, HostBinding, pulldown step)
 #include <VP-V/modules/motion/estimation/VectorEngineHost.h>   // P5a: the vector engine: state, logic and the host adapter   // VPV-HOOK
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>   // R4a: the re-base decision product P0
+#include <VP-V/modules/scaling/rebase/RebaseWarmupJob.h>   // FX-RB: re-base shader warm-up (call sites only)
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
@@ -144,6 +145,7 @@
 #include <QueuedFrameStatistics.h>
 #include <ContentIntentObserver.h>
 #include <IntentInterpreterObserver.h>
+#include <VP-V/abi/RendererAbiBridge.h> // VPV-HOOK
 #include <IntentInterpreterSupport.h>
 #include <AmbientAdaptation.h>
 #include <BlackIntent.h>
@@ -5077,6 +5079,9 @@ struct LibplaceboVideoRenderer::Impl
 	int rebasePauseSeconds = 5;
 	double rebaseFactorX = 1.0;         // the width's (per axis; = rebaseFactor when uniform)
 	std::string rebaseLogged;           // the last state logged
+	// FX-RB (VP-V/modules/scaling/rebase/RebaseWarmupJob.h): a re-base to a new plane size is held on the
+	// current path until a worker has compiled its shader variants into the shared pl_cache.
+	VpRebaseWarmup::Controller rebaseWarmup;
 	// Stage 12 step B: effective resolution, bitrate quality and bit depth
 	// of every source, read on the native frame; auto acts on it.
 	SourceResolutionMonitor::Monitor sourceMonitor;
@@ -8090,6 +8095,7 @@ struct LibplaceboVideoRenderer::Impl
 		if (!outputResourcesRetired)
 		{
             nlsPreparation.Stop();
+            rebaseWarmup.Stop();
             subtitlePipelinePreparation.Stop();
             pictureProofWorker.Stop();
             lookaheadMeasurementWorker.Stop();
@@ -12298,6 +12304,7 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		status.Empty();
 		if (nlsPreparationPending.load(std::memory_order_acquire) ||
+            rebaseWarmup.Pending() ||
             subtitlePipelinePreparationPending.load(std::memory_order_acquire)) {
 			status = TEXT("Preparing shaders...");
 			return true;
@@ -24525,6 +24532,17 @@ releaseDriftBaseRetention =
 			const double previousRebase = rebaseFactor, previousRebaseX = rebaseFactorX;
 			rebaseFactor = wanted < 1.0 && !temporal && !rebasePaused ? wanted : 1.0;
 			rebaseFactorX = wantedX < 1.0 && !temporal && !rebasePaused ? wantedX : 1.0;
+			{
+				// FX-RB: a re-base whose shader variants are not compiled yet stays on the current path (the
+				// factors in force, else native) until a worker has them; never compiled on this thread.
+				const VpRebaseWarmup::Context warmContext{ renderImage, target, renderParams, d3d11->device, cache,
+					shaderCacheEnabled, nlsPreparationRevision, nlsPreparationNoCompute, sourceRebase.Kernel() };
+				const VpRebaseWarmup::Controller::Outcome warm = rebaseWarmup.Frame(luma &&
+					!pipelineSlots.OriginalPathway() && pipelineSlots.Runs(PipelineSlots::Id::ScalingRebase),
+					warmContext, rebaseFactorX, rebaseFactor, previousRebaseX, previousRebase);
+				if (warm.hold) { rebaseFactorX = warm.x; rebaseFactor = warm.y; }
+				if (warm.fallbackChanged) SyncFallback(warm.fallback);
+			}
 			// Silent-fallbacks batch: with scaling.rebase switched off the planes stay native, so every
 			// downstream stage (debander, detail pulse, texture restore, adaptive upscale) uses factor 1.
 			{
@@ -27607,6 +27625,7 @@ LibplaceboVideoRenderer::LibplaceboVideoRenderer(
 	m_frameQueueDesiredDepth(AlphaQueuePolicy::NormalizeDesiredDepth(frameQueueMaxSize)),
 	m_frameQueueMaxSize(AlphaQueuePolicy::HardCapacity(frameQueueMaxSize))
 {
+	m_abiBridge = Vpv::MakeRendererAbiBridge(*this); // VPV-HOOK
 	{
 		std::lock_guard<std::mutex> guard(g_runtimeDisplayRuleMutex);
 		m_manualDisplayRule = g_runtimeManualDisplayRule;
@@ -27627,6 +27646,7 @@ LibplaceboVideoRenderer::LibplaceboVideoRenderer(
 
 LibplaceboVideoRenderer::~LibplaceboVideoRenderer()
 {
+	m_abiBridge.reset(); // VPV-HOOK
 	if (m_stopWorker.joinable())
 		m_stopWorker.join();
 	{
@@ -30567,7 +30587,8 @@ bool LibplaceboVideoRenderer::GetModuleStatus(const char* module, CString& statu
 	return answered;
 }
 
-void* LibplaceboVideoRenderer::QueryExtension(const char* iid) { return RendererExtension::Query(iid); } // VPV-HOOK
+void* LibplaceboVideoRenderer::QueryExtension(const char* iid) // VPV-HOOK
+{ return m_abiBridge ? m_abiBridge->Query(iid) : nullptr; } // VPV-HOOK
 bool LibplaceboVideoRenderer::InvokeModuleCommand(const char* module, const char* command, CString& reply) // VPV-HOOK
 { std::string text; const bool handled = RendererExtension::CommandFor(m_impl.get(), module, command, text); reply = CString(text.c_str()); return handled; } // VPV-HOOK
 

@@ -3636,28 +3636,9 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(LibplaceboPluginApiVersionCoversSnapshotsDiagnosticsAndExplicitLutReload)
 		{
-			// 25: IVideoRenderer::GetDejudderStatus (stage 6b-2b) or rc4's Beta
-			// flavor export; 26: both (rc4 merge); 27: the LED drive's
-			// projector connection test (Suspend/ResumeLedDriveForTest); 28:
-			// v1.4.02's diagnostics and profiles; 29: both (v1.4.02 merge); 30:
-			// GetLedDriveStatus (crash state); 31: GetSourceResolutionStatus
-			// (Stage 12, crash state); 32: the DV L1 scene minimum in the luminance status;
-			// 33: StopLedDriveForShutdown (2026-10-17 integration); 34: GetContentIntentStatus
-			// and the DV L5/L6/L11 metadata fields (content intent, 2026-10-17); 35: the
-			// required build-ID export (hunt 2; the build ID is the mechanical pair check);
-			// 36: IVideoRenderer::WriteDiagnosticHistory (report-a-problem, 2026-10-17);
-			// 37: the VP Renderer DirectShow filter (NV12/P010/P016, FileFrameTiming,
-			// file-frame methods; claimed 35 on its branch); 38: GetIntentStatus /
-			// SetAmbientLux (intent interpreter items 2-5; claimed 36 on its branch);
-			// 39: GetCalibrationOutput / SetCalibrationPattern (automatic calibration;
-			// claimed 36 on its branch); 40: SetActivePictureLookaheadAutomatic (bug hunt 3
-			// F2, integration round 5); 41: GetFallbacksStatus (r6 fix 7); 42: SetQueueDelayBudget
-			// (VP-V delay budget, ADR-0020).
-			// 43: ToggleDvCompareCapture (feat/dv-l8, the DV comparison capture shortcut).
-			// 44: GetModuleStatus / InvokeModuleCommand (WP-11, integration group C).
-			// 45: v1.4.02-beta merge (rehearsal): Bill's API 34 (separate submitted and detected
-			// picture aspect snapshots) and VP-V 44 together; provisional max+1.
-			Assert::AreEqual(static_cast<uint32_t>(45),
+			// API 34 separates submitted and detected picture aspect snapshots.
+			// Host and renderer must reject older payload and vtable layouts.
+			Assert::AreEqual(static_cast<uint32_t>(34),
 				VP_LIBPLACEBO_PLUGIN_API_VERSION);
             using LutApplyMethod=void (IVideoRenderer::*)();
             const LutApplyMethod apply=&IVideoRenderer::RequestCalibrationLutReload;

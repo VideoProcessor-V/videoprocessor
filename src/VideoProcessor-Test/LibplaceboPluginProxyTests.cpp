@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "CppUnitTest.h"
+#include <VP-V/abi/VpvPluginGuard.h> // VPV-HOOK
 
 #include "../VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.h"
 #include "../VideoProcessor-Lib/AspectRatioOsd.h"
@@ -251,6 +252,7 @@ namespace VideoProcessorTest
 			const auto destroy = reinterpret_cast<VideoProcessorLibplaceboDestroyRendererFn>(
 				GetProcAddress(plugin, VP_LIBPLACEBO_DESTROY_EXPORT));
 			Assert::IsTrue(version && create && destroy);
+			{ std::string vpvAttach; Assert::IsTrue(Vpv::PluginGuard::Attach(plugin, vpvAttach), L"the renderer DLL accepts the VP-V attach"); } // VPV-HOOK
 			Assert::AreEqual(VP_LIBPLACEBO_PLUGIN_API_VERSION, version());
 			char temp[MAX_PATH] = {};
 			GetTempPathA(MAX_PATH, temp);
@@ -367,6 +369,7 @@ namespace VideoProcessorTest
             const auto destroy = reinterpret_cast<VideoProcessorLibplaceboDestroyRendererFn>(
                 GetProcAddress(plugin, VP_LIBPLACEBO_DESTROY_EXPORT));
             Assert::IsTrue(create && destroy);
+            { std::string vpvAttach; Assert::IsTrue(Vpv::PluginGuard::Attach(plugin, vpvAttach), L"the renderer DLL accepts the VP-V attach"); } // VPV-HOOK
             VideoStateComPtr state = new VideoState();
             for (const auto nativeEncoding : {VideoFrameEncoding::P210, VideoFrameEncoding::P010})
             {

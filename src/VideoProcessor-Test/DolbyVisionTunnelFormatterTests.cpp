@@ -4,6 +4,7 @@
  */
 #include "pch.h"
 #include "CppUnitTest.h"
+#include <VP-V/abi/VpvPluginGuard.h> // VPV-HOOK
 #include <VideoFrame.h>
 #include <VideoState.h>
 #include <CpuFeatures.h>
@@ -145,6 +146,7 @@ namespace Tests
             const auto destroy = reinterpret_cast<VideoProcessorLibplaceboDestroyRendererFn>(
                 GetProcAddress(plugin, VP_LIBPLACEBO_DESTROY_EXPORT));
             Assert::IsTrue(version && create && destroy);
+            { std::string vpvAttach; Assert::IsTrue(Vpv::PluginGuard::Attach(plugin, vpvAttach), L"the renderer DLL accepts the VP-V attach"); } // VPV-HOOK
             Assert::AreEqual(VP_LIBPLACEBO_PLUGIN_API_VERSION, version());
             for (const auto encoding : { VideoFrameEncoding::ARGB_8BIT, VideoFrameEncoding::BGRA_8BIT })
             {

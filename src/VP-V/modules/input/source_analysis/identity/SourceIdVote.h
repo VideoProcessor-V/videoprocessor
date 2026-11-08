@@ -26,7 +26,10 @@ namespace SourceIdentity
 {
 	enum class Field { AxisH = 0, AxisV, Kernel, Codec, Quality, Count };
 	enum class CodecClass { Unknown = 0, Avc, Hevc, Vp9, Av1, Vvc, Lcevc, Other };
-	enum class VoterId { ClassicalResolution = 0, ClassicalKernel, BitrateQuality, IdNet, Count };
+	// Chain (SID train r2): the scaling-chain estimator's CONFIDENT reading (the P14g applied values; UNSURE axes are not voted), read from
+	// the latest sealed record by the worker pipeline. It is an ordinary weighted voter (SourceIdConsensus.h): no authority, its trust is
+	// a conservative placeholder until the calibration run (it can only make the consensus abstain more).
+	enum class VoterId { ClassicalResolution = 0, ClassicalKernel, BitrateQuality, IdNet, Chain, Count };
 
 	constexpr int kFieldCount = static_cast<int>(Field::Count);
 	constexpr int kVoterCount = static_cast<int>(VoterId::Count);
@@ -83,6 +86,7 @@ namespace SourceIdentity
 		// Only VoterId::ClassicalResolution may set it ("detail above the re-based size" => the source
 		// is native on the voted axes at once). The consensus ignores it from any other voter.
 		bool safetyVeto = false;
+		uint32_t vetoExemptFields = 0;        // N2: fields (axes) the safety veto does not apply to (a confident chain contradicts native there)
 	};
 
 	inline void SetField(Vote& v, Field f, double confidence)
@@ -112,6 +116,7 @@ namespace SourceIdentity
 		int kernel = -1, kernelVotes = 0, kernelAgree = 0;
 		double bitrateQuality = 1.0;          // 0..1, 1 = best
 		bool detailAbove = false;             // detail above the re-based size
+		uint8_t chainHoldMask = 0;            // N2: bit 0 = axis H, bit 1 = axis V: a confident chain contradicts native there, so the veto skips that axis
 		uint64_t seq = 0;
 		int64_t timeUs = 0;
 	};
@@ -125,6 +130,8 @@ namespace SourceIdentity
 		if (!r.reading)
 			return v;
 		v.safetyVeto = r.detailAbove;
+		if ((r.chainHoldMask & 1u) != 0) v.vetoExemptFields |= FieldBit(Field::AxisH);
+		if ((r.chainHoldMask & 2u) != 0) v.vetoExemptFields |= FieldBit(Field::AxisV);
 		const double delta = r.declaredRatio - 1.0;
 		double confidence = 0.0;
 		if (r.declaredRatio > 0.0 && (delta > 1e-9 || delta < -1e-9))
@@ -170,6 +177,61 @@ namespace SourceIdentity
 			return v;
 		v.h.qualityTier = VpUnit::SourceQuality::TierOf(r.bitrateQuality, s.qualityTierEdges);   // U12
 		SetField(v, Field::Quality, s.bitrateQualityConfidence);
+		return v;
+	}
+
+	// The chain estimator's CONFIDENT reading as the voter sees it (the call site fills it from the sealed P14g record; plain, so this
+	// header does not include the product). An axis the chain reads UNSURE is not voted: the classical voters decide it.
+	struct ChainAxisReading
+	{
+		bool confident = false;               // the axis reads CONFIDENT (native included)
+		double ratio = 1.0;                   // n / N (1 = native)
+		double confidence = 0.0;              // 0..1: LLR relative to c1, capped at 1 (the record's applied conf)
+	};
+
+	struct ChainReading
+	{
+		bool valid = false;                   // a fresh, usable record
+		ChainAxisReading axis[2];
+		int kernelClassical = -1;             // the verified kernel as the classical (KernelInverse) index, -1 = none / unverified
+		double kernelConf = 0.0;
+		uint64_t seq = 0;                     // the EVALUATION the record came from (its evalSeq): distinct evaluations are what the consensus counts
+		int64_t timeUs = 0;
+	};
+
+	// Chain KernelBank index (chain/KernelBank.h: bilinear, bicubic 0/0.5, 0/0.6, 1/3 1/3, lanczos2/3/4, spline16/36/64) to the classical
+	// KernelInverse index (bicubic C0.5, C0.6, C0.75, lanczos2/3/4, bilinear). No classical equivalent: -1 (the chain abstains on Kernel).
+	inline int ChainKernelToClassical(int chainIndex)
+	{
+		static const int kMap[10] = { 6, 0, 1, -1, 3, 4, 5, -1, -1, -1 };
+		return chainIndex >= 0 && chainIndex < 10 ? kMap[chainIndex] : -1;
+	}
+
+	// Votes only the confident axes and a verified kernel; the confidence is the reading's (LLR / c1, capped at 1). evidenceSeq = the
+	// evaluation behind the record: a record that is read again (held) carries the same seq and never counts as a new evaluation.
+	inline Vote ChainVote(const ChainReading& r)
+	{
+		Vote v;
+		v.voter = VoterId::Chain;
+		v.evidenceSeq = r.seq;
+		v.evidenceTimeUs = r.timeUs;
+		if (!r.valid)
+			return v;
+		if (r.axis[0].confident && r.axis[0].ratio > 0.0 && r.axis[0].confidence > 0.0)
+		{
+			v.h.ratioH = r.axis[0].ratio;
+			SetField(v, Field::AxisH, r.axis[0].confidence > 1.0 ? 1.0 : r.axis[0].confidence);
+		}
+		if (r.axis[1].confident && r.axis[1].ratio > 0.0 && r.axis[1].confidence > 0.0)
+		{
+			v.h.ratioV = r.axis[1].ratio;
+			SetField(v, Field::AxisV, r.axis[1].confidence > 1.0 ? 1.0 : r.axis[1].confidence);
+		}
+		if (r.kernelClassical >= 0)
+		{
+			v.h.kernel = r.kernelClassical;
+			SetField(v, Field::Kernel, r.kernelConf > 0.0 ? (r.kernelConf > 1.0 ? 1.0 : r.kernelConf) : 1.0);
+		}
 		return v;
 	}
 
