@@ -20,6 +20,13 @@
     "src/VP-V/modules/motion/consumers/OcclusionMaskHook.h",
     "src/VP-V/modules/motion/consumers/FillerEdgeEntry.h",
     "src/VP-V/modules/motion/consumers/tests/FillerEdgeEntryTests.cpp",
+    "src/VP-V/modules/motion/consumers/tests/DejudderDecisionTableTests.cpp",
+    "src/VP-V/modules/motion/consumers/tests/DejudderDecisionLegacyCopy.h",
+    "src/VP-V/modules/motion/consumers/tests/DejudderDecisionRows.inl",
+    "src/VP-V/modules/motion/consumers/tests/TimelinePlanTraceTests.cpp",
+    "src/VP-V/modules/motion/consumers/tests/TimelinePlanLegacyCopy.h",
+    "src/VP-V/modules/motion/consumers/tests/TimelinePlanScenarios.h",
+    "src/VP-V/modules/motion/consumers/tests/TimelinePlanTraceRows.inl",
     "src/VP-V/modules/motion/consumers/DejudderCacheStage.h",
     "src/VP-V/modules/motion/consumers/DejudderCacheStage.cpp"
   ],

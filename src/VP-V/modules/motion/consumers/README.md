@@ -73,7 +73,7 @@ libplacebo (gpu, dispatch, renderer, shaders), D3D11 (the optical-flow engine pa
 
 ### Test it standalone
 
-- CPU (VideoProcessor-Test): `InterpolationPolicyTests`, `InterpolationTimelineTests`, `InterpolationDebandHoldTests`, `InterpolationDecisionMatrix`, `GapSpanMatrix`, `TimelineSpanMatrix` (GeneralRateMatrixTests.cpp), `Hunt2CadenceClassPolicyTests`, `RenderAheadGapFillTests`, the AheadSchedule cases in `LibplaceboLutParserTests`.
+- CPU (VideoProcessor-Test): `InterpolationPolicyTests`, `InterpolationTimelineTests`, `InterpolationDebandHoldTests`, `InterpolationDecisionMatrix`, `GapSpanMatrix`, `TimelineSpanMatrix` (GeneralRateMatrixTests.cpp), `Hunt2CadenceClassPolicyTests`, `RenderAheadGapFillTests`, the AheadSchedule cases in `LibplaceboLutParserTests`; M2 P5b recorded identity tables `DejudderDecisionTableTests` (the de-judder / interpolation decision, tests/DejudderDecisionRows.inl) and `TimelinePlanTraceTests` (the per-vsync timeline block, tests/TimelinePlanTraceRows.inl), from test-only verbatim copies of today's code.
 - GPU (D3D11; WARP unless `VP_TEST_GPU=hardware`; run only when GPU tests are allowed): `LibplaceboLutParserTests` `Dejudder*` (27 methods: warp, rendered warp, hold at a cut, occlusion fill, ...), `OcclusionMask*`, `InterpolatorKeepsGrainRmsAtEveryPhase`, `InterpolatorGrainNotSmearedAcrossFrames`; VideoProcessor-BetaTests (`BetaGpuTests.cpp`, MotionWarp corpora; read the TRX) and `src/VP-V/tests/gpu/MotionTimingGpuTests.inc`.
 
 Run single-threaded and read the TRX:
