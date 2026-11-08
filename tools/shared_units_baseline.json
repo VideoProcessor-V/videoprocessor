@@ -247,6 +247,12 @@
      "pattern": "cutHistogram",
      "kind": "false_positive",
      "reason": "the dejudder_cut_histogram setting (threshold handed to CutFadeJudge::TrustCut / the unit's trust cut lines); no histogram computation here"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/MatcherSettings.h",
+     "pattern": "settings\\.cutHistogram",
+     "kind": "false_positive",
+     "reason": "settings.cutHistogram feed of the dejudder_cut_histogram setting moved verbatim from LVR (P3-6); same class as the DejudderWarp.cpp settings\\.cutHistogram entry (cut rule is CutFadeJudge::TrustCut); WAIVER-SU-02 under WAIVER-SU-01"
     }
    ]
   },
