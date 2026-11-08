@@ -112,6 +112,7 @@ namespace VpMotion
 		depth.vectorBackward = vectorDemand.mode == VectorDemand::Mode::Backward;
 		depth.vectorProducer = vectorDemand.producer;
 		depth.dejudderEstimating = in.dejudderEstimating;
+		depth.dejudderStanding = in.dejudderPresent && in.opticalFlow;   // SK-MV: the standing demand while the de-judder is enabled
 		depth.producerRunning = motionProducer && motionProducer->Running();
 		depth.queuedFutureFrames = in.queuedFutureFrames->load(std::memory_order_acquire);
 		const ProducerPlan::DepthOutput plan = ProducerPlan::Depth(depth);

@@ -72,7 +72,7 @@ inline uint64_t TexBytesOf(const Tex* tex)
 // visible gap, not a guess of their size); a module leaves this list when it calls Declare. Static text.
 inline const char* KnownUndeclaredVramUsers()
 {
-    return "temporal detail, texture restore / detail pulse / debander, DejudderWarp's optical-flow textures, camera guidance textures";
+    return "temporal detail, texture restore / detail pulse / debander, the de-judder's pair flow textures (a few hundred KB), camera guidance textures";
 }
 
 class VramUsers {

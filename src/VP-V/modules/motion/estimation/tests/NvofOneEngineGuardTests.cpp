@@ -83,6 +83,55 @@ namespace VideoProcessorTest
 			users.ResetForTesting();
 		}
 
+		// SK-MV warm engine (owner MUST KEEP 3): the engine behind the de-judder's standing demand is a PROTECTED tier. The producer declares
+		// its rings as a fixed T0 user (VramUsers::DeclareFixed: one level, counted, never stepped down), so when the governor sheds it takes
+		// the lower tiers first (T2, then T1) and never this user; when even that is not enough the plan says so in its own words.
+		TEST_METHOD(TheStandingEngineDemandIsNeverShedBeforeLowerTiersAndShortfallIsVisible)
+		{
+			using namespace VpSkeleton;
+			VramUsers& registry = VramUsers::Instance();
+			registry.ResetForTesting();
+			int owner = 0;
+			// Size everything from the real budget so the numbers do not depend on the headroom constants.
+			GovernorInput probe;
+			probe.card.vramBudgetBytes = 1000ull << 20;
+			const uint64_t budget = PlanVram(probe).budgetBytes;
+			Assert::IsTrue(budget > 0);
+			registry.DeclareFixed(&owner, kUserNvofProducer, budget / 4);   // what the producer's EnsureSize declares
+			auto user = [](uint16_t id, const char* name, Tier tier, std::vector<uint64_t> levels) {
+				VramUser u;
+				u.id = id;
+				u.name = name;
+				u.tier = tier;
+				u.levels = std::move(levels);
+				u.levelText.assign(u.levels.size(), nullptr);
+				return u;
+			};
+			GovernorInput in = probe;
+			in.users = registry.Take().users;   // the engine's declared ring
+			Assert::AreEqual(size_t(1), in.users.size());
+			Assert::IsTrue(in.users[0].tier == Tier::T0 && in.users[0].levels.size() == 1, L"fixed T0: one level, never stepped down");
+			in.users.push_back(user(kUserLibplacebo, "libplacebo", Tier::T0, { budget / 4 }));
+			in.users.push_back(user(kUserEnhancers, "enhancers", Tier::T1, { budget / 2, budget / 4, 0 }));
+			in.users.push_back(user(kUserInterpolator, "interpolator", Tier::T2, { budget / 2, 0 }));
+			GovernorPlan plan = PlanVram(in);
+			Assert::IsTrue(plan.fits);
+			const UserGrant* engine = plan.Find(kUserNvofProducer);
+			Assert::IsNotNull(engine);
+			Assert::IsTrue(!engine->reduced && !engine->shed && engine->level == 0, L"the engine's ring is untouched");
+			Assert::IsTrue(plan.Find(kUserInterpolator)->shed, L"the lower tier went first");
+			// Not enough even with every lower tier at its minimum: the engine still keeps its ring and the shortfall is said, never silent.
+			in.card.vramBudgetBytes = (budget / 4) * 2 / 2;   // less than the two fixed T0 users together
+			plan = PlanVram(in);
+			Assert::IsFalse(plan.fits);
+			Assert::IsTrue(!plan.lines.empty() && plan.lines.back().find("over budget") != std::string::npos, L"the shortfall is a status line");
+			engine = plan.Find(kUserNvofProducer);
+			Assert::IsTrue(engine->level == 0 && !engine->shed, L"still not shed: the standing demand is the last to go (never)");
+			for (uint16_t id : { kUserEnhancers, kUserInterpolator })
+				Assert::IsTrue(plan.Find(id)->level + 1 == (id == kUserEnhancers ? 3u : 2u), L"every lower tier is at its minimum first");
+			registry.ResetForTesting();
+		}
+
 		// SK-MV: when "no pair ahead" becomes visible: not a bare frame count, and a partial miss ratio shows too.
 		TEST_METHOD(NoPairTrackerThresholdFollowsTheDepthAndShowsPartialMisses)
 		{

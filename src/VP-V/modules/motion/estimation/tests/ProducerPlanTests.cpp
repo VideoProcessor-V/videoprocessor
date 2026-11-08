@@ -13,7 +13,9 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
+#include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/ProducerPlan.h>
+#include <VP-V/modules/motion/estimation/VectorProducts.h>
 
 #include <algorithm>
 #include <initializer_list>
@@ -251,6 +253,56 @@ namespace ProducerPlanTest
 			l.opticalFlow = false;   // the settings no longer want it: stopped, not kept
 			o = Lifecycle(l);
 			Assert::IsTrue(!o.keepBriefly && o.action == Action::Stop);
+		}
+
+		// SK-MV warm engine (owner MUST KEEP 1 + 2): a de-judder that is enabled but idle is a STANDING consumer, so frames keep flowing to the
+		// producer; at a transient it finds the pair of its first estimate already made, with no warm-up gap. Without the standing demand
+		// (the old decision) the same sequence misses, which is why the de-judder used to be always on.
+		TEST_METHOD(AnEnabledIdleDejudderIsAStandingConsumerAndHasAPairOnTheFirstTransientFrame)
+		{
+			DepthInput d;
+			d.opticalFlow = true;
+			d.motionAheadFrames = 4;
+			d.sourceHz = 24.0;
+			d.producerRunning = true;
+			d.queuedFutureFrames = 8;
+			Assert::IsFalse(Depth(d).motionConsumer, L"idle and not standing: no consumer (the old decision)");
+			Assert::AreEqual(0, Depth(d).ahead.depth);
+			d.dejudderStanding = true;
+			Assert::IsTrue(Depth(d).motionConsumer, L"enabled: a standing consumer");
+			Assert::IsTrue(Depth(d).storedDepth > 0, L"frames go to the producer while the de-judder is idle");
+			d.opticalFlow = false;
+			Assert::IsFalse(Depth(d).ahead.reason == MotionAhead::Reason::Active, L"optical flow off: no engine to keep warm");
+
+			auto firstTransientHasAPair = [](bool standing) {
+				VpMotion::P2Slot slot(16);
+				slot.SetGeneration(1);
+				DepthInput in;
+				in.opticalFlow = true;
+				in.motionAheadFrames = 4;
+				in.sourceHz = 24.0;
+				in.producerRunning = true;
+				in.queuedFutureFrames = 8;
+				in.dejudderStanding = standing;
+				const uint64_t transient = 20;
+				uint64_t nextSubmit = 1;
+				bool pairBeforeThePlan = false;
+				for (uint64_t n = 1; n <= transient; ++n)
+				{
+					if (n == transient)
+						pairBeforeThePlan = static_cast<bool>(slot.Find(transient, transient + 1));   // what the first transient estimate would take
+					in.dejudderEstimating = n >= transient;
+					const DepthOutput o = Depth(in);
+					if (o.storedDepth <= 0)
+						continue;
+					for (; nextSubmit <= n + static_cast<uint64_t>(o.storedDepth); ++nextSubmit)
+						if (nextSubmit > 1)
+							slot.Publish(nextSubmit - 1, nextSubmit, 1, std::make_shared<const MotionAhead::Flow>());   // the producer pairs each submitted frame
+				}
+				return pairBeforeThePlan;
+			};
+			Assert::IsFalse(firstTransientHasAPair(false), L"without the standing demand the first transient frame has no pair (the warm-up gap)");
+			Assert::IsTrue(firstTransientHasAPair(true), L"with it, the pair is already there");
 		}
 
 		TEST_METHOD(DepthIsZeroWhileTheProducerDoesNotRun)

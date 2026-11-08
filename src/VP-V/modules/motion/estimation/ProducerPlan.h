@@ -76,6 +76,11 @@ namespace VpMotion
 			bool vectorBackward = false;           // vectorDemand.mode == Backward
 			bool vectorProducer = false;           // vectorDemand.producer
 			bool dejudderEstimating = false;       // the de-judder's reason is Active / NoNextFrame / NextFrameDiffers
+			// SK-MV warm engine (owner MUST KEEP): a STANDING demand, true whenever the de-judder is enabled (its matcher exists), whether
+			// or not it is estimating this frame. The shared engine is the de-judder's only optical-flow source now, so the producer keeps
+			// making pairs continuously and a transient finds valid vectors on its FIRST frame (no warm-up gap, the reason the de-judder is
+			// always on). Default false = the old decision exactly.
+			bool dejudderStanding = false;
 			bool producerRunning = false;          // producer exists AND runs, after the lifecycle step
 			size_t queuedFutureFrames = 0;
 		};
@@ -93,7 +98,7 @@ namespace VpMotion
 		inline DepthOutput Depth(const DepthInput& in)
 		{
 			DepthOutput out;
-			out.motionConsumer = in.dejudderEstimating || in.vectorProducer;
+			out.motionConsumer = in.dejudderEstimating || in.vectorProducer || in.dejudderStanding;
 			out.ahead = MotionAhead::Decide(
 				MotionAhead::DepthAt(in.motionAheadFrames, in.sourceHz, in.generalRateFixes),
 				in.lowLatency && (!in.vectorLowLatencyAllowed || in.vectorBackward),
