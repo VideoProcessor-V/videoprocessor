@@ -142,7 +142,7 @@ Every tunable is a member of a settings struct with its default in the header (h
 | chain_phase_count | VerifierSettings::phaseCount | int (odd) | 1..7 | 1 | sub-sample phases tried at the best integer (1 = centre aligned only); tiers: budget-governed |
 | chain_phase_step | VerifierSettings::phaseStep | float | 0.05..0.5 | 0.25 | latent samples between phases; tiers: same on all |
 | chain_cache_limit | VerifierSettings::cacheLimit | int | 1..8192 | 4096 | operators kept at most, least recently used evicted first (time only, never changes a result); the byte budget below binds first at 3840x2160; tiers: budget: memory about 30-400 KB per operator |
-| chain_cache_bytes | VerifierSettings::cacheBytes | int bytes | 0 (no limit), 1 MiB.. | 167772160 (160 MiB) | heap bytes of the cached operators at most (least recently used evicted first; time only, never changes a result); the power probe's verifier gets an eighth of it; the shared tap memo adds up to about 5 MB outside this budget; tiers: budget: lower it on a small machine, builds then repeat per evaluation |
+| chain_cache_bytes | VerifierSettings::cacheBytes | int bytes | 0 (no limit), 1 MiB.. | 167772160 (160 MiB) | heap bytes of ALL cached state at most: operators (30 KB coarse to 400 KB full line each at 3840x2160) + tap memo (at most 1/16 of this, about 120 bytes per entry, 65536 entries at most) + the solves kept for the running call (about 8 KB per exact-stage entry, about 2 MB per call); least recently used operators are evicted first; time only, never changes a result; the power probe's verifier gets an eighth of it (20 MiB), so both together stay under 180 MiB; tiers: budget: lower it on a small machine, builds then repeat per evaluation |
 | chain_batched_solve | VerifierSettings::batchedSolve | bool | on/off | on | the lines of a stage are solved together against one factor (same arithmetic in the same order per line, so the same bits); off = one line at a time, the reference routine kept for the equality test and for bisecting; tiers: same on all |
 | chain_q_max | ProposerSettings::qMax | int | 2..32 | 16 | longest phase period tested; ratios needing a longer period come from the caller candidates; tiers: budget-governed (cost grows with q_max) |
 | chain_proposer_lines | ProposerSettings::maxLines | int | 1..64 | 16 | lines of a LineSet used per proposer evaluation; tiers: budget-governed |
@@ -283,6 +283,9 @@ challengers of a confident axis), `coarseWindows` = 1 (one coarse window per lin
 acquires; the sampler already drops to 16 + 16 lines when both axes are confident, and with both confident nothing changes. The evaluation harness test seam
 `VP_SOURCE_ID_LEVER` = none | step3 | coarse1 | coarse2 (read only by ChainEvalRegistrationTests) sets a lever without a rebuild. The multi-candidate timing test (`LogsMedianAndP95OfTwentyMultiCandidateEvaluationsAtUltraHd`) logs median and p95 of 20
 evaluations, cold and warm.
+
+Measured with SID-OPT step 1 (4 reels): warm evaluations run at about 166 ms median; the first evaluations after a start or a discontinuity are cold, about 907 ms median
+(1760 operator builds), because every operator of the acquiring candidates is built once; the cache then serves the recurring candidates.
 
 ### Cost (the older estimate, NOT measured; one thread, 3840x2160, +-2x; the timing test logs the real numbers)
 

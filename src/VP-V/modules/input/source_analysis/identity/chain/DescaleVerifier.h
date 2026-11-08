@@ -95,8 +95,9 @@ namespace SourceIdentity
 			double (*nowMs)(void*) = nullptr;
 			void* clockCtx = nullptr;
 			size_t cacheLimit = 4096;           // operators kept at most (time only; the byte budget below binds first at 4K)
-			size_t cacheBytes = static_cast<size_t>(160) * 1024 * 1024;   // heap bytes of the cached operators at most (0 = no byte limit); 30 KB (coarse) to
-			                                                              // 400 KB (full line) per operator at 3840x2160. The probe verifier gets 1/8 of it.
+			size_t cacheBytes = static_cast<size_t>(160) * 1024 * 1024;   // heap bytes of ALL cached state at most (operators + tap memo + the call's kept solves;
+			                                                              // 0 = no byte limit); 30 KB (coarse) to 400 KB (full line) per operator at 3840x2160,
+			                                                              // tap memo <= 1/16 of it, kept solves about 2 MB. The probe verifier gets 1/8 of it.
 			bool batchedSolve = true;           // false: solve the lines one at a time with the reference routine (same bits; for tests and bisecting)
 		};
 
@@ -158,12 +159,14 @@ namespace SourceIdentity
 		class DescaleVerifier
 		{
 		public:
-			explicit DescaleVerifier(const VerifierSettings& s = VerifierSettings()) : s_(s) {}
+			explicit DescaleVerifier(const VerifierSettings& s = VerifierSettings()) : s_(s), taps_(TapEntriesFor(s.cacheBytes)) {}
 
 			const VerifierSettings& Settings() const { return s_; }
-			void ClearCache() { cache_.clear(); lru_.clear(); cacheBytes_ = 0; memo_.clear(); }
+			void ClearCache() { cache_.clear(); lru_.clear(); cacheBytes_ = 0; memo_.clear(); memoBytes_ = 0; }
 			size_t CachedOperators() const { return cache_.size(); }
-			size_t CachedBytes() const { return cacheBytes_ + taps_.Bytes(); }   // operators plus the tap memo (the tap memo survives ClearCache)
+			// Heap bytes of everything this verifier keeps for speed: operators + tap memo + (during a call) the kept solves. After every
+			// Evaluate this is <= cacheBytes (unless ONE operator alone is larger than the budget); the tap memo survives ClearCache.
+			size_t CachedBytes() const { return cacheBytes_ + taps_.Bytes() + memoBytes_; }
 
 			bool Evaluate(const LineSet& ls, const int* cand, int count, const VerifyOptions& opt, VerifyResult& out)
 			{
@@ -179,6 +182,7 @@ namespace SourceIdentity
 				const int solves0 = solves_;
 				const int reused0 = reused_;
 				memo_.clear();   // the solves are those of THIS call's lines
+				memoBytes_ = 0;
 				if (ls.count < 1 || ls.axisLen < 64 || ls.length < 96 || cand == nullptr || count <= 0)
 				{
 					out.reason = (count <= 0) ? kReasonNoCandidates : kReasonBadInput;
@@ -277,7 +281,9 @@ namespace SourceIdentity
 				out.operatorBuilds = builds_ - builds0;
 				out.solves = solves_ - solves0;
 				out.solvesReused = reused_ - reused0;
+				Evict();   // with the kept solves still counted: the call's peak, not only its end state, is inside the budget
 				memo_.clear();
+				memoBytes_ = 0;
 				out.cold = out.operatorBuilds > 0;
 				out.costMs = s_.nowMs != nullptr ? s_.nowMs(s_.clockCtx) - clock0 : 0.0;
 				return true;
@@ -354,10 +360,21 @@ namespace SourceIdentity
 				return ok ? raw : nullptr;
 			}
 
+			// Tap-memo entries a budget allows: the memo (at most about 120 bytes per entry including table and growth slack) stays under
+			// 1/16 of cacheBytes, never more than 65536 entries, never fewer than 256. 0 = no byte limit = the full 65536.
+			static size_t TapEntriesFor(size_t cacheBytes)
+			{
+				if (cacheBytes == 0)
+					return 65536;
+				const size_t e = cacheBytes / 16 / 120;
+				return e < 256 ? 256 : (e > 65536 ? 65536 : e);
+			}
+
 			void Evict()
 			{
 				const size_t limit = s_.cacheLimit < 1 ? 1 : s_.cacheLimit;
-				while (cache_.size() > 1 && (cache_.size() > limit || (s_.cacheBytes > 0 && cacheBytes_ > s_.cacheBytes)))
+				// The byte budget covers ALL of it: operators + tap memo + the solves kept for the current call.
+				while (cache_.size() > 1 && (cache_.size() > limit || (s_.cacheBytes > 0 && cacheBytes_ + taps_.Bytes() + memoBytes_ > s_.cacheBytes)))
 				{
 					auto victim = cache_.find(lru_.front());
 					cacheBytes_ -= victim->second.bytes;
@@ -441,6 +458,8 @@ namespace SourceIdentity
 						b.segRows[static_cast<size_t>(k)] = segRowsTmp[k];
 				}
 				b.ok = true;
+				memoBytes_ += (b.s.capacity() + b.ms.capacity() + b.segSum.capacity()) * sizeof(double) + b.segRows.capacity() * sizeof(int)
+					+ sizeof(SolveKey) + sizeof(SolveBatch) + 48;   // 48 = the map node's own bookkeeping, an estimate
 				return &b;
 			}
 
@@ -847,7 +866,8 @@ namespace SourceIdentity
 			std::map<OpKey, CacheEntry> cache_;
 			std::list<OpKey> lru_;               // least recently used first
 			size_t cacheBytes_ = 0;              // sum of the cached operators' Bytes()
-			TapMemo taps_;                       // tap weights shared by every operator this verifier builds (a pure memo; at most about 5 MB)
+			TapMemo taps_;                       // tap weights shared by every operator this verifier builds (a pure memo; <= cacheBytes / 16, see TapEntriesFor)
+			size_t memoBytes_ = 0;               // estimated heap bytes of memo_
 			std::map<SolveKey, SolveBatch> memo_;   // the solves of the current Evaluate call
 			std::vector<double> scratch_;
 			int builds_ = 0;

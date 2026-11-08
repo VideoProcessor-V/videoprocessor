@@ -982,7 +982,8 @@ namespace Tests
 				Assert::IsTrue(compared >= 4, L"most candidates were compared");
 				Assert::IsTrue(rc.solvesReused > 0, L"overlapping scans share solves");
 				Assert::IsTrue(evicting.CachedOperators() <= tiny.cacheLimit);
-				Assert::IsTrue(evicting.CachedBytes() <= tiny.cacheBytes + 2u * 1024u * 1024u, L"the byte budget holds (plus the evicting tap memo)");
+				Assert::IsTrue(evicting.CachedBytes() <= tiny.cacheBytes, L"the byte budget holds for the TOTAL: operators + tap memo (+ kept solves, gone after the call)");
+				Assert::IsTrue(combined.CachedBytes() <= all.cacheBytes, L"and the default budget too");
 				Assert::IsTrue(evicting.CachedOperators() < combined.CachedOperators(), L"the evicting cache evicted");
 			}
 		}
