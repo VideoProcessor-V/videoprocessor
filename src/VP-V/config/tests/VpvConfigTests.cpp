@@ -1474,14 +1474,12 @@ namespace
 		QCoreApplication::processEvents();
 		require(bills->currentData().toString() == QStringLiteral("catmull_rom"), "Bill's control does not follow a set on VP-V's list");
 		auto* vpvReset = control<QPushButton>(window, QStringLiteral("config.vprenderer.scaling.chroma_upscaler.vpv.reset_override"));
-		if (vpvReset->isEnabled())
-		{
-			vpvReset->click();
-			QCoreApplication::processEvents();
-			if (!vpv->currentData().toString().isEmpty())
-				require(bills->currentData().toString().compare(vpv->currentData().toString(), Qt::CaseInsensitive) == 0,
-					"Bill's control does not follow VP-V's Reset");
-		}
+		require(vpvReset->isEnabled(), "VP-V's chroma Reset is not enabled after an edit");
+		vpvReset->click();
+		QCoreApplication::processEvents();
+		require(!vpv->currentData().toString().isEmpty(), "VP-V's chroma Reset left no value");
+		require(bills->currentData().toString().compare(vpv->currentData().toString(), Qt::CaseInsensitive) == 0,
+			"Bill's control does not follow VP-V's Reset");
 		int added = 0;
 		for (int i = 0; i < bills->count(); ++i)
 			if (bills->itemData(i, Qt::UserRole + 41).toBool()) ++added;
@@ -1497,14 +1495,12 @@ namespace
 		require(billsDither->currentData().toString() == QStringLiteral("blue_noise") && billsDither->placeholderText().isEmpty(),
 			"Bill's control does not show VP-V's Auto with his mapping (Blue noise)");
 		auto* billsReset = control<QPushButton>(window, QStringLiteral("config.vprenderer.scaling.dithering.reset_override"));
-		if (billsReset->isEnabled())
-		{
-			billsReset->click();
-			QCoreApplication::processEvents();
-			if (billsDither->currentIndex() >= 0)
-				require(vpvDither->findData(billsDither->currentData().toString(), Qt::UserRole, Qt::MatchFixedString) == vpvDither->currentIndex(),
-					"VP-V's dither control does not follow Bill's Reset");
-		}
+		require(billsReset->isEnabled(), "Bill's Dithering Reset is not enabled for a set value");
+		billsReset->click();
+		QCoreApplication::processEvents();
+		require(billsDither->currentIndex() >= 0, "Bill's Dithering Reset left no value");
+		require(vpvDither->findData(billsDither->currentData().toString(), Qt::UserRole, Qt::MatchFixedString) == vpvDither->currentIndex(),
+			"VP-V's dither control does not follow Bill's Reset");
 	}
 }
 

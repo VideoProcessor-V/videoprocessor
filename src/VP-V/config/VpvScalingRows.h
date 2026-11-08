@@ -20,6 +20,7 @@
 
 #include <QAbstractButton>
 #include <QComboBox>
+#include <QEvent>
 #include <QFormLayout>
 #include <QLabel>
 #include <QObject>
@@ -115,6 +116,27 @@ namespace Vpv
 			return combo->findChild<QAbstractButton*>(name);
 		}
 
+		// Bill's loader enables his Reset when the profile sets the key (it does not find VP-V's Reset, which is
+		// not under his page): VP-V's Reset of the same key and section follows his enabled state.
+		class ResetEnabledMirror : public QObject
+		{
+		public:
+			ResetEnabledMirror(QAbstractButton* bills, QAbstractButton* vpv) : QObject(vpv), bills_(bills), vpv_(vpv)
+			{
+				bills->installEventFilter(this);
+				vpv->setEnabled(bills->isEnabled());
+			}
+			bool eventFilter(QObject* watched, QEvent* event) override
+			{
+				if (watched == bills_ && event->type() == QEvent::EnabledChange && vpv_)
+					vpv_->setEnabled(bills_->isEnabled());
+				return false;
+			}
+		private:
+			QAbstractButton* bills_;
+			QAbstractButton* vpv_;
+		};
+
 		// Each control's changes are shown on the other (the document is already written by the edited
 		// control's own handler): a pick (activated), its Reset, and any other index change (a set from code,
 		// a preset). During a profile load Bill's control is set first and VP-V's after it, both from the
@@ -138,6 +160,8 @@ namespace Vpv
 			QObject::connect(bills, qOverload<int>(&QComboBox::activated), vpv, [toVpv](int) { toVpv(); });
 			if (QAbstractButton* reset = ResetOf(vpv)) QObject::connect(reset, &QAbstractButton::clicked, vpv, [toBills](bool) { toBills(); });
 			if (QAbstractButton* reset = ResetOf(bills)) QObject::connect(reset, &QAbstractButton::clicked, vpv, [toVpv](bool) { toVpv(); });
+			if (QAbstractButton* billsReset = ResetOf(bills))
+				if (QAbstractButton* vpvReset = ResetOf(vpv)) new ResetEnabledMirror(billsReset, vpvReset);
 			// A load sets both fields from the document, so only a change that moves one control away from the
 			// other needs mirroring; a value equal on both sides is left alone (that keeps Bill's loader display).
 			QObject::connect(vpv, qOverload<int>(&QComboBox::currentIndexChanged), vpv, [vpv, bills, toBills](int index)
