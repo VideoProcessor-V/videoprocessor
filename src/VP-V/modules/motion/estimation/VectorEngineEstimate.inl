@@ -373,7 +373,8 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		const char* source = dejudder->ExternalFlowUsed() ? (dejudder->GlobalFromEngine() ?
 				"optical-flow engine (computed ahead, camera from the engine)" : "optical-flow engine (computed ahead)") :
 			dejudder->OpticalFlowUsed() ? "optical-flow engine" :
-			!dejudder->GetSettings().opticalFlow ? "block searches (optical_flow off)" : "block searches (no engine)";
+			!dejudder->GetSettings().opticalFlow ? "block searches (optical_flow off)" :
+			dejudder->NoPairAhead() ? "block searches (no optical-flow pair computed ahead)" : "block searches (no engine)";
 		if (motionSourceLogged != source)
 		{
 			motionSourceLogged = source;
@@ -386,8 +387,20 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		const bool flowFailed = !dejudder->OpticalFlowUsed() && !dejudder->ExternalFlowUsed() &&
 			!dejudder->OpticalFlowError().empty();
 		const bool producerStopped = motionProducer && !motionProducer->Running();
+		// SK-MV (MV2): the P2m path is shown. A run of kNoPairRun estimates without a pair computed ahead (optical flow wanted) is a visible
+		// "motion" entry with the reason; a single missed pair (the start-up fill, a refill) is a counter only; a pair resets the run.
+		if (dejudder->NoPairAhead())
+		{
+			if (vectorEngine.motionNoPairRun < 1000000u) ++vectorEngine.motionNoPairRun;
+		}
+		else
+			vectorEngine.motionNoPairRun = 0;
+		const bool noPairShown = vectorEngine.motionNoPairRun >= VpMotion::VectorEngineState::kNoPairRun;
+		const char* noPairWhy = !motionProducer ? "no look-ahead producer: motion_ahead_frames off, low latency, or no optical-flow engine" :
+			!motionProducer->Running() ? "the look-ahead producer is not running" : "no pair computed ahead for these frames (short queue, a gap or a resync)";
 		SyncFallback(FallbackCatalog::Motion(dejudder->GetSettings().opticalFlow, flowFailed, producerStopped,
-			flowFailed ? dejudder->OpticalFlowError() : producerStopped ? motionProducer->Error() : std::string()));
+			flowFailed ? dejudder->OpticalFlowError() : producerStopped ? motionProducer->Error() : noPairShown ? std::string(noPairWhy) : std::string(),
+			noPairShown));
 	}
 	if (vectorDemand.estimate)
 	{

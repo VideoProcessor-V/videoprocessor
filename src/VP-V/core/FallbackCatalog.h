@@ -186,12 +186,15 @@ namespace FallbackCatalog
 	}
 
 	// ---- motion.estimation ----------------------------------------------------------------------
+	// noAheadPair (SK-MV, doc 83): optical flow is wanted but the one NVOF source (the look-ahead producer) gave no pair for a run of
+	// estimates, so the block searches (the P2m path) ran. `error` then names why.
 	inline Decision Motion(bool opticalFlowRequested, bool engineFailed, bool aheadProducerStopped,
-		const std::string& error = std::string())
+		const std::string& error = std::string(), bool noAheadPair = false)
 	{
-		if (!opticalFlowRequested || (!engineFailed && !aheadProducerStopped))
+		if (!opticalFlowRequested || (!engineFailed && !aheadProducerStopped && !noAheadPair))
 			return Released("motion");
-		std::string reason = engineFailed ? "matcher only (optical flow failed" : "no optical-flow look-ahead (producer stopped";
+		std::string reason = engineFailed ? "matcher only (optical flow failed" :
+			aheadProducerStopped ? "no optical-flow look-ahead (producer stopped" : "matcher only (no optical-flow pair computed ahead";
 		return Engaged("motion", reason + (error.empty() ? std::string() : ": " + error) + ")");
 	}
 

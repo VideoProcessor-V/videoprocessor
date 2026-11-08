@@ -2378,19 +2378,15 @@ if (q.x < size.x && q.y < size.y) {
 
 	MotionWarp::~MotionWarp()
 	{
-		// The optical-flow engine first: it unregisters its D3D11 textures, which must
-		// still exist (as members they would be released before it - a crash at
-		// teardown on NVIDIA GPUs once the engine became the default, 2026-10-16).
-		opticalFlowEngine.reset();
 		for (pl_tex* tex : { &halfA, &halfB, &l1A, &l1B, &l2A, &l2B, &halfK, &l1K, &l2K, &forward, &backward,
 			&field, &frameTrust, &occlusion[0], &occlusion[1], &grainError, &warpedLuma, &warpedChroma, &processedLuma, &processedChroma,
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
 			&sweep[0], &sweep[1], &ofSearch[0], &ofSearch[1], &ofNone, &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
 			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &globalBothSad2, &globalBothSad1, &globalBothPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &stillField, &stillSub, &pixelMask, &snapMask, &vectorOk, &snapVectorOk, &picture,
-			&ofInTex[0], &ofInTex[1], &ofFlowTex[0], &ofFlowTex[1], &ofWeight, &cgGuide, &cgCode, &cgKeep[0], &cgKeep[1], &cgCounts })
+			&ofFlowTex[0], &ofFlowTex[1], &ofWeight, &cgGuide, &cgCode, &cgKeep[0], &cgKeep[1], &cgCounts })
 			pl_tex_destroy(gpu, tex);
-		for (int i = 0; i < 2; ++i) { ofIn[i].Release(); ofFlow[i].Release(); ofCost[i].Release(); }
+		for (int i = 0; i < 2; ++i) { ofFlow[i].Release(); }
 		inner.reset();   // its textures before the dispatch and the device
 		for (auto& entry : passTimers)
 			pl_timer_destroy(gpu, &entry.second);
@@ -3554,15 +3550,23 @@ if (b.x < blocks.x && b.y < blocks.y) {
 
 	bool MotionWarp::OpticalFlowSearch(pl_tex outForward, pl_tex outBackward)
 	{
-		// The pair computed ahead (docs/VP-nvof-ahead.md), taken once.
+		// SK-MV (doc 83, MV2; owner decision 2026-11-08: ONE motion source). This matcher opens no NVOF engine: the look-ahead
+		// producer (MotionAhead::Producer) is the one NvOpticalFlow session per device, and the pair it published (P2, read through the
+		// engine's P2View and handed here by SetExternalFlow) is the only optical-flow input. With no pair that fits this estimate
+		// (no producer running: motion_ahead_frames off, low latency, a short queue, a miss) NOTHING runs here and the block searches
+		// take over (the P2m path); noPairAhead says so and the host shows it (FallbackCatalog::Motion), never silently.
 		const std::shared_ptr<const MotionAhead::Flow> ahead = std::move(externalFlow);
 		externalFlow.reset();
 		externalFlowUsed = false;
 		ofWeighted = false;
+		noPairAhead = false;
 		const bool useAhead = ahead && ahead->halfW == halfW && ahead->halfH == halfH &&
 			ahead->gridW == (halfW + 3) / 4 && ahead->gridH == (halfH + 3) / 4;
-		if (opticalFlowFailed && !useAhead)
+		if (!useAhead)
+		{
+			noPairAhead = true;
 			return false;
+		}
 		auto fail = [this](const std::string& why) {
 			opticalFlowFailed = true;
 			opticalFlowError = why;   // the renderer logs it (OpticalFlowError)
@@ -3574,15 +3578,13 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		CComPtr<ID3D11DeviceContext> context;
 		d3d->device->GetImmediateContext(&context);
 		const int w = halfW, h = halfH;
-		// Textures of the half size (the engine's grid: 4 x 4).
+		// The flow textures of the half size's grid (the engine's grid: 4 x 4), written from the pair's CPU fields.
 		if (w != ofW || h != ofH)
 		{
-			opticalFlowEngine.reset();   // unregisters the textures while they still exist
 			for (int i = 0; i < 2; ++i)
 			{
-				pl_tex_destroy(gpu, &ofInTex[i]);
 				pl_tex_destroy(gpu, &ofFlowTex[i]);
-				ofIn[i].Release(); ofFlow[i].Release(); ofCost[i].Release();
+				ofFlow[i].Release();
 			}
 			auto make = [&](int tw, int th, DXGI_FORMAT format, CComPtr<ID3D11Texture2D>& out) {
 				D3D11_TEXTURE2D_DESC desc{};
@@ -3595,95 +3597,24 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			const int gw = (w + 3) / 4, gh = (h + 3) / 4;
 			for (int i = 0; i < 2; ++i)
 			{
-				if (!make(w, h, NvOpticalFlow::Engine::InputFormat(), ofIn[i]) ||
-					!make(gw, gh, NvOpticalFlow::Engine::FlowFormat(), ofFlow[i]) ||
-					!make(gw, gh, NvOpticalFlow::Engine::CostFormat(), ofCost[i]))
+				if (!make(gw, gh, NvOpticalFlow::Engine::FlowFormat(), ofFlow[i]))
 					return fail("cannot create its textures");
-				pl_d3d11_wrap_params wrapIn{}; wrapIn.tex = ofIn[i];
 				pl_d3d11_wrap_params wrapFlow{}; wrapFlow.tex = ofFlow[i];
-				ofInTex[i] = pl_d3d11_wrap(gpu, &wrapIn);
 				ofFlowTex[i] = pl_d3d11_wrap(gpu, &wrapFlow);
-				if (!ofInTex[i] || !ofFlowTex[i])
+				if (!ofFlowTex[i])
 					return fail("cannot share its textures with libplacebo");
 			}
 			ofW = w; ofH = h;
 		}
-		if (useAhead)
-		{
-			// The flow fields straight into the engine's output textures: no input
-			// passes, no engine run at render time.
-			context->UpdateSubresource(ofFlow[0], 0, nullptr, ahead->forward.data(), static_cast<UINT>(ahead->gridW * 4), 0);
-			context->UpdateSubresource(ofFlow[1], 0, nullptr, ahead->backward.data(), static_cast<UINT>(ahead->gridW * 4), 0);
-			externalFlowUsed = true;
-			ofHintValid = false;   // the engine did not see this pair
-			for (int d = 0; d < 2; ++d)
-				for (int k = 0; k < 4; ++k) engineGlobal[d][k] = ahead->global[d][k];
-			engineGlobalValid = true;
-			// The engine's extras as trust weights per block (cost; its own consistency).
-			UploadEngineWeights(*ahead);   // none applied when it cannot (as without them)
-		}
-		else if (!opticalFlowEngine || opticalFlowPresetOpen != settings.opticalFlowPreset)
-		{
-			opticalFlowEngine = std::make_unique<NvOpticalFlow::Engine>();
-			const NvOpticalFlow::Preset preset = settings.opticalFlowPreset <= 0 ? NvOpticalFlow::Preset::Slow :
-				settings.opticalFlowPreset >= 2 ? NvOpticalFlow::Preset::Fast : NvOpticalFlow::Preset::Medium;
-			if (!opticalFlowEngine->Open(d3d->device, context, w, h, preset, true))
-				return fail(opticalFlowEngine->LastError());
-			opticalFlowPresetOpen = settings.opticalFlowPreset;
-			ofHintValid = false;
-		}
-		if (!useAhead)
-		{
-			// A's and B's half-size luma as the engine's input, the flow both
-			// ways, then the blocks' vectors and SADs in the searches' format.
-			const pl_shader_desc inA[2] = { Sampled("src", halfA, false), Storage("dst", ofInTex[0]) };
-			const pl_shader_desc inB[2] = { Sampled("src", halfB, false), Storage("dst", ofInTex[1]) };
-			if (!Dispatch("VideoProcessor de-judder: optical flow input A", nullptr, OF_INPUT_BODY, inA, 2, nullptr, 0, w, h, 16) ||
-				!Dispatch("VideoProcessor de-judder: optical flow input B", nullptr, OF_INPUT_BODY, inB, 2, nullptr, 0, w, h, 16))
-				return fail("its input pass failed");
-			// libplacebo's queued work reaches the context before the engine runs.
-			pl_gpu_flush(gpu);
-			const bool continuous = ofHintValid;
-			ofHintValid = false;
-			if (!opticalFlowEngine->Run(ofIn[0], ofIn[1], ofFlow[0], ofFlow[1], ofCost[0], ofCost[1], nullptr, continuous))
-				return fail(opticalFlowEngine->LastError());
-			ofHintValid = true;
-			if (settings.opticalFlowGlobalReadback)
-			{
-				// Tests only: the field read back (waits for the engine) for the whole-frame motion.
-				const int gw = (w + 3) / 4, gh = (h + 3) / 4;
-				bool read = true;
-				for (int d = 0; d < 2 && read; ++d)
-				{
-					std::vector<int16_t> vectors(static_cast<size_t>(gw) * gh * 2);
-					std::vector<uint8_t> costs(static_cast<size_t>(gw) * gh);
-					for (int part = 0; part < 2 && read; ++part)
-					{
-						ID3D11Texture2D* source = part == 0 ? ofFlow[d].p : ofCost[d].p;
-						D3D11_TEXTURE2D_DESC desc{};
-						source->GetDesc(&desc);
-						desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; desc.MiscFlags = 0;
-						CComPtr<ID3D11Texture2D> staging;
-						D3D11_MAPPED_SUBRESOURCE map{};
-						read = SUCCEEDED(d3d->device->CreateTexture2D(&desc, nullptr, &staging));
-						if (!read) break;
-						context->CopyResource(staging, source);
-						read = SUCCEEDED(context->Map(staging, 0, D3D11_MAP_READ, 0, &map));
-						if (!read) break;
-						for (int y = 0; y < gh; ++y)
-							std::memcpy(part == 0 ? static_cast<void*>(&vectors[static_cast<size_t>(y) * gw * 2]) : static_cast<void*>(&costs[static_cast<size_t>(y) * gw]),
-								static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch, static_cast<size_t>(gw) * (part == 0 ? 4 : 1));
-						context->Unmap(staging, 0);
-					}
-					if (read)
-					{
-						float unusedSecond[4];
-						MotionAhead::FlowGlobal(vectors, costs, gw, gh, engineGlobal[d], unusedSecond, settings.generalRates);
-					}
-				}
-				engineGlobalValid = read;
-			}
-		}
+		// The flow fields straight into the flow textures: no input passes, no engine run here.
+		context->UpdateSubresource(ofFlow[0], 0, nullptr, ahead->forward.data(), static_cast<UINT>(ahead->gridW * 4), 0);
+		context->UpdateSubresource(ofFlow[1], 0, nullptr, ahead->backward.data(), static_cast<UINT>(ahead->gridW * 4), 0);
+		externalFlowUsed = true;
+		for (int d = 0; d < 2; ++d)
+			for (int k = 0; k < 4; ++k) engineGlobal[d][k] = ahead->global[d][k];
+		engineGlobalValid = true;
+		// The engine's extras as trust weights per block (cost; its own consistency).
+		UploadEngineWeights(*ahead);   // none applied when it cannot (as without them)
 		const std::string header = std::string(RESCORE_HEADER);
 		const std::string weightedHeader = std::string("#define OF_WEIGHT 1\n") + RESCORE_HEADER;
 		const pl_shader_desc fw[5] = { Sampled("flow", ofFlowTex[0], false), Sampled("from_half", halfA, false),
@@ -3805,10 +3736,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		// sequences and decides for itself.
 		if (base.historyFixes && !DejudderPolicy::MatcherHistoryChained(a.sequence, keptSequence))
 		{
-			if (previousValid || ofHintValid || keptSequence != 0)
+			if (previousValid || keptSequence != 0)
 				++historyRestarts;
 			previousValid = false;
-			ofHintValid = false;
 			holdResetPending = true;
 		}
 		if (!EnsureTextures(a)) return false;
@@ -3897,8 +3827,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				if (!CameraSkipSearches())
 					return false;
 				previousValid = false;
-				ofHintValid = false;   // the engine's temporal hint is from the old scene too
 				opticalFlowUsed = false;
+				noPairAhead = false;
 				globalFromEngine = false;
 				refineCarriesWeight = false;
 				externalFlow.reset();   // a pair computed ahead is for this Estimate only
@@ -3909,6 +3839,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			{
 			engineGlobalValid = false;
 			ofWeighted = false;
+			noPairAhead = false;   // set by OpticalFlowSearch when optical flow is wanted and no pair computed ahead fits
 			opticalFlowUsed = settings.opticalFlow && !serialSearchForTest &&
 				(candidateMode ? OpticalFlowSearch(ofSearch[0], ofSearch[1]) : OpticalFlowSearch(forward, backward));
 			const bool replaced = opticalFlowUsed && !candidateMode;

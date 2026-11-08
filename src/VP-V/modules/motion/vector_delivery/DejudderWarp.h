@@ -277,8 +277,11 @@ namespace Dejudder
 		// half-size picture; the median of a block's four) instead of the
 		// block searches, re-scored per block and judged by the same trust
 		// checks. Falls back to the searches where the engine is missing.
+		// SK-MV (doc 83, MV2): the matcher opens NO engine of its own any more - the look-ahead producer is the ONE NvOpticalFlow session
+		// per device and the pair it published (P2) is the engine's input here (SetExternalFlow). With no pair for an estimate the block
+		// searches run (the P2m path), and the host shows it.
 		bool opticalFlow = false;
-		int opticalFlowPreset = 1;   // 0 slow, 1 medium, 2 fast
+		int opticalFlowPreset = 1;   // 0 slow, 1 medium, 2 fast; unused since SK-MV (the producer's preset is fixed: slow); kept for the tests
 		// docs/VP-nvof-ahead.md (2026-10-16 corpus): the engine's vector as one more
 		// candidate in the matcher's refinement (each block keeps whichever predicts B
 		// best, then the half-pixel step) - true; false = the engine instead of the
@@ -309,8 +312,7 @@ namespace Dejudder
 		// corpus 2026-10-17: no measured benefit on real clips (cost trust identical; fb check trades removal for damage) - off by default, owner gate
 		bool opticalFlowCostTrust = false;
 		bool opticalFlowFbCheck = false;
-		// Tests only: the render-time engine's field read back (a stall) so the engine's
-		// whole-frame motion can be compared on corpora without a producer.
+		// Unused since SK-MV (no render-time engine to read back; a pair computed ahead carries its own whole-frame motion).
 		bool opticalFlowGlobalReadback = false;
 		// Hunt 2 fix group 5 (motion_history_fixes; the renderer's key defaults on, the
 		// object's default is the matcher as before): a pair not chained to the last
@@ -506,7 +508,6 @@ namespace Dejudder
 		void ForgetHistory()
 		{
 			previousValid = false;
-			ofHintValid = false;
 			holdResetPending = true;
 			keptSequence = 0;
 			if (fadeState)
@@ -690,15 +691,14 @@ namespace Dejudder
 		// The pair's trust weights (cost, the engine's own consistency) into ofWeight per
 		// block (ofWeighted); none when switched off, missing or not uploadable.
 		bool UploadEngineWeights(const MotionAhead::Flow& flow);
-		std::unique_ptr<NvOpticalFlow::Engine> opticalFlowEngine;
 		bool opticalFlowFailed = false;   // logged once; the searches from then on
-		int opticalFlowPresetOpen = -1;
-		CComPtr<ID3D11Texture2D> ofIn[2], ofFlow[2], ofCost[2];
-		pl_tex ofInTex[2] = { nullptr, nullptr }, ofFlowTex[2] = { nullptr, nullptr };
+		// The pair computed ahead (P2) lands in these D3D11 textures (the flow, written by the CPU), shared with libplacebo.
+		// SK-MV: no engine here and so no input / cost textures and no engine session (doc 83 MV2).
+		CComPtr<ID3D11Texture2D> ofFlow[2];
+		pl_tex ofFlowTex[2] = { nullptr, nullptr };
 		int ofW = 0, ofH = 0;
-		// The engine's temporal hints only from the pair just before (audit 2026-10-16: they carried
-		// across resyncs, gaps and runs of pairs computed ahead).
-		bool ofHintValid = false;
+		// This estimate found no pair computed ahead (P2) and ran the block searches (the P2m path): not a failure, a state the host shows.
+		bool noPairAhead = false;
 	public:
 		// The searching instance may be the half-size inner one (lowRes): report it.
 		const std::string& OpticalFlowError() const
@@ -706,6 +706,8 @@ namespace Dejudder
 			return opticalFlowError.empty() && inner ? inner->OpticalFlowError() : opticalFlowError;
 		}
 		bool OpticalFlowUsed() const { return opticalFlowUsed || (inner && HalvesForSearch() && inner->OpticalFlowUsed()); }
+		// SK-MV: optical flow was wanted for the last Estimate but no pair computed ahead (P2) fitted, so the block searches ran (P2m).
+		bool NoPairAhead() const { return noPairAhead || (inner && HalvesForSearch() && inner->NoPairAhead()); }
 		// The engine's input size where the searches run (this instance's half size,
 		// or the inner's): the size a flow computed ahead must have. False before the
 		// first estimate.
