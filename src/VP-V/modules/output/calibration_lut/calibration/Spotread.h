@@ -1,3 +1,5 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
 // Automatic calibration: ArgyllCMS spotread, the text side (no process here).
@@ -16,7 +18,7 @@
 // "to take a reading" / "space to read", "Error -") and the unit tests run
 // recorded transcripts of each case (src/VP-V/modules/output/calibration_lut/tests/data/spotread).
 
-#include "ColorMath.h"
+#include "../pattern_lib/ColorMath.h"
 
 #include <string>
 #include <vector>

@@ -1,3 +1,5 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
 // Automatic calibration: VP's side of the wizard. The Config app sends text
@@ -42,6 +44,7 @@ namespace Calibration
 		using RendererFn = std::function<std::shared_ptr<IVideoRenderer>()>;
 		explicit RendererPatternSink(RendererFn renderer);
 		bool GetOutput(PatternOutputInfo& info) override;
+		bool RendererAttached() override;
 		bool Show(const PatternRequest& request, std::string& error) override;
 		void Block();
 		// The device signal of the patch last shown (the simulated meter's input).

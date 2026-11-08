@@ -1,3 +1,5 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
 // Automatic calibration (docs/VP-auto-calibration-design.md, "Tests"): a
@@ -20,7 +22,7 @@
 // has up/down hysteresis; the LED moves after a dead time, optionally ramps
 // internally, then follows a first-order lag.
 
-#include "ColorMath.h"
+#include "../pattern_lib/ColorMath.h"
 #include "LedCharacterize.h"
 
 #include <random>

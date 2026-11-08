@@ -1,3 +1,5 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
 // Automatic calibration: the wizard's step machine (design "Wizard",
@@ -25,8 +27,8 @@
 #include "DisplayModel.h"
 #include "Meter.h"
 #include "MeterCatalog.h"
-#include "PatternCodes.h"
-#include "PatternPlan.h"
+#include "../pattern_lib/PatternCodes.h"
+#include "../pattern_lib/PatternPlan.h"
 
 #include <memory>
 #include <mutex>
@@ -40,6 +42,9 @@ namespace Calibration
 	public:
 		virtual ~IPatternSink() = default;
 		virtual bool GetOutput(PatternOutputInfo& info) = 0;
+		// True only while a real renderer is attached (it may still be starting, so GetOutput can
+		// report unavailable for a moment). A sink with no renderer behind it never waits.
+		virtual bool RendererAttached() { return false; }
 		// request.active false = back to video. False with error when refused.
 		virtual bool Show(const PatternRequest& request, std::string& error) = 0;
 	};

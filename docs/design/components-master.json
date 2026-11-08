@@ -1267,6 +1267,8 @@
         "src/VP-V/modules/output/calibration_lut/CalibrationLutHost.cpp",
         "src/VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h",
         "src/VP-V/modules/output/calibration_lut/calibration",
+        "src/VP-V/modules/output/calibration_lut/pattern_lib",
+        "src/VP-V/modules/output/calibration_lut/config_ui",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.cpp",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.h",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboCalibrationLutPolicy.h"
@@ -1536,6 +1538,7 @@
         "src/VP-V/core/OutputHookOrder.h",
         "src/VP-V/tests/PipelineSkeletonTests.cpp",
         "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
+        "src/VP-V/modules/control/config/tests/ConfigIdentityDump.cpp",
         "src/VideoProcessor-Lib/ConfigFile.cpp",
         "src/VideoProcessor-Lib/ConfigSchema.h",
         "src/VideoProcessor-Lib/MainConfigSchema.h",

@@ -1,3 +1,5 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
 // Automatic calibration (docs/VP-auto-calibration-design.md, "Tests"): a
@@ -6,8 +8,8 @@
 // it) with proportional noise per component and an absolute low-light noise
 // floor; the integration time follows the luminance (MeterTimingModel).
 
-#include "ColorMath.h"
-#include "PatternPlan.h"
+#include "../pattern_lib/ColorMath.h"
+#include "../pattern_lib/PatternPlan.h"
 
 #include <random>
 

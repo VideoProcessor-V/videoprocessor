@@ -1,3 +1,5 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
 // Automatic calibration (docs/VP-auto-calibration-design.md, "LUT maths"):
@@ -25,8 +27,8 @@
 // measured BTB / WTW response where the display responds there, and are left
 // as the inverse made them where it does not (BTB / WTW codes still pass).
 
-#include "ColorMath.h"
-#include "PatternPlan.h"
+#include "../pattern_lib/ColorMath.h"
+#include "../pattern_lib/PatternPlan.h"
 
 #include <string>
 #include <vector>

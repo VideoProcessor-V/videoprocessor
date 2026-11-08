@@ -152,7 +152,7 @@ void LibplaceboVideoRenderer::WaitForDequeueLocked(std::unique_lock<std::mutex>&
 	// caller checks m_calibrationPatternActive and presents the patch instead.
 	const auto calibrationActive = [this, wakeOnCalibrationPattern]() {
 		return wakeOnCalibrationPattern &&
-			m_calibrationPatternActive.load(std::memory_order_acquire);
+			CalibrationLutHost::IsTakingOver(m_calibrationPatternActive);
 	};
 	for (;;)
 	{

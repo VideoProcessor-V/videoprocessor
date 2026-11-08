@@ -1,3 +1,5 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
 #include <pch.h>
 
 #include "CalibrationController.h"
@@ -89,6 +91,12 @@ namespace Calibration
 		const bool ok = VpvCalls::GetCalibrationOutput(current.get(), info);
 		format = info;
 		return ok;
+	}
+
+	bool RendererPatternSink::RendererAttached()
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return !blocked && renderer && renderer();
 	}
 
 	bool RendererPatternSink::Show(const PatternRequest& request, std::string& error)

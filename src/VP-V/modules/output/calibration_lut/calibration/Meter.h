@@ -1,3 +1,5 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
 // Automatic calibration: the meter (design "Meter and licence").
@@ -12,7 +14,7 @@
 // A vendor SDK meter would be another IMeter (a slot left for later; vendor
 // SDKs are licensed to OEMs only).
 
-#include "ColorMath.h"
+#include "../pattern_lib/ColorMath.h"
 #include "Spotread.h"
 #include "Terminal.h"
 

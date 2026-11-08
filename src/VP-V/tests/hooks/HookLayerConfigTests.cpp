@@ -10,6 +10,7 @@
 
 #include "ConfigEditorWindow.h"
 #include "ConfigPageHost.h"
+#include <VP-V/config/VpvConfigProviders.h>
 
 #include <QFile>
 #include <QLabel>
@@ -34,7 +35,8 @@ namespace
 	struct Scope
 	{
 		Scope() { CPH::ResetForTesting(); }
-		~Scope() { CPH::ResetForTesting(); }
+		// Later tests in the process need the VP-V providers back (Calibration page).
+		~Scope() { CPH::ResetForTesting(); Vpv::RegisterConfigProviders(); }
 	};
 
 	class NullApi : public CPH::ConfigFormApi

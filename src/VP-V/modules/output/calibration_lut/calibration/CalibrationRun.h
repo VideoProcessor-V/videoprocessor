@@ -1,3 +1,5 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
 // Automatic calibration: writing a run (design "Outputs", "Safety and
@@ -14,7 +16,7 @@
 
 #include "CalibrationOutputs.h"
 #include "DisplayModel.h"
-#include "PatternCodes.h"
+#include "../pattern_lib/PatternCodes.h"
 
 #include <string>
 #include <vector>

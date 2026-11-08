@@ -20,7 +20,7 @@
 #include <FileFrameTiming.h>
 #include <VideoFrame.h>
 #include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
-#include <VP-V/modules/output/calibration_lut/calibration/CalibrationPattern.h>
+#include <VP-V/modules/output/calibration_lut/pattern_lib/CalibrationPattern.h>
 
 #include <cstddef>
 #include <cstdint>
