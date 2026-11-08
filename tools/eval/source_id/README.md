@@ -41,6 +41,14 @@ manifest live in `D:\testclips\sourceid\` (see its README for sources and licenc
    (`VP_SOURCE_ID_REELS_ONLY=<id substrings>` selects reels). Output: one file set per reel under `<out>\reels\<reel>\` (written to `<reel>.tmp` and renamed when complete, so a restart skips finished reels; `VP_SOURCE_ID_EVAL_FORCE=1` redoes them) and `reels_done.csv`. Between reels the harness honours `<out>\STOP`, pauses while `D:\codex\build-slots\PRIORITY` exists and stops below 40 GB free. A STOP file is consumed at the end of the run (renamed `STOP.done.<timestamp>`), so a rerun of the same output folder runs. A reel whose directory cannot be placed is a failure (`rename_failed`), and a later success removes its stale `<reel>.failed` directory.
 4. `python -I tools/eval/source_id/score_identity.py --reels <reels.json> --eval-dir <dir>` writes `summary.md` and `gates.json` (the GO table of doc 78
    section 9). `--selftest` runs the scorer on a tiny synthetic CSV.
+   * Confident-wrong is counted two ways (SID-CAL2 C2): the JOINT `state` (both axes confident and agreeing, `n_x`, `n_y` against the truth) and PER AXIS from
+     the chain lane's `state_x` / `state_y` (an axis CONFIDENT with `measured_n_<axis>` different from that axis's truth; same boundary grace; the x and y episodes
+     are counted separately). A single confident wrong axis never appears in the joint state, so the joint count alone missed it. The GO table shows
+     `confident_wrong` (joint) and `confident_wrong_axis` (x/y split, reels with one), every wrong-count gate (R1, dark / credits, R2 clean, dirty, R7) fails on
+     either kind, and the per-family tables carry the per-axis count and rate. Classical lanes have no per-axis columns: their per-axis count is 0.
+   * Cost counts DISTINCT evaluations: the harness repeats the last evaluation's `ms` on each 0.5 s row in between (the chain evaluates about every 1 s), so one
+     `ms` value = one evaluation. `core_pct` = mean ms x the measured evaluations per second of reel time / 10 (native: per second of native-segment time).
+   * An evaluation without any R7 reel no longer crashes the scorer (the R7 gate is NA).
 
 ### Reel families (reel counts and hours are printed by `--plan`; every non-R1 reel is >= 30 s, R2.clean >= 60 s, R1 is the FULL length of its master; no loops except the flagged sol levante / nocturne masters)
 

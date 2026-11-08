@@ -17,6 +17,10 @@ Metric definitions (all per lane; n = original size per axis, compared with the 
   confident-wrong episode   a maximal run of evaluation rows in state CONFIDENT (chain lane) or LATCHED (classical lanes) whose (n_x, n_y)
                             differs from the truth of the segment, rows within --boundary-grace seconds after a truth change are not
                             judged (the reading / the original latch may still hold the old value)
+  per-axis confident-wrong  (chain lane, columns state_x / state_y) a maximal run of rows in which ONE axis is CONFIDENT and its measured_n
+                            differs from the truth of that axis, whatever the joint `state` is (the joint state needs both axes and
+                            their agreement, so a single confident wrong axis never shows in it). Same grace; episodes of the two
+                            axes are counted separately. Every wrong-count gate (R1, dark / credits, R2, dirty, R7) fails on either kind.
   per title-hour / per reel episodes / reel-hours ; share of reels with >= 1 episode
   time to confident         seconds from the segment start to the first CONFIDENT / LATCHED row whose n is exact (segments with a player
                             upscale; a native segment counts when the lane reports it at the canvas size)
@@ -30,6 +34,9 @@ Metric definitions (all per lane; n = original size per axis, compared with the 
                             the truth; the chain lane declares nothing
   notice false positives    one-time notices with no truth quality/geometry event within [-1 s, +--abr-tol s], per reel-hour
   menu re-base violation    a CONFIDENT / LATCHED n below the raster persisting > --menu-persist seconds in a native (menu/black) segment
+  cost                      one chain evaluation = one DISTINCT `ms` value: the harness repeats the row of the last evaluation on every 0.5 s
+                            row in between (the chain evaluates about every 1 s), so rows are NOT evaluations. Core % = mean ms x the real
+                            evaluation rate (distinct evaluations per second of reel time, native: of native-segment time) / 10.
 """
 import argparse
 import csv
@@ -160,9 +167,12 @@ def is_native_truth(reel, seg):
 
 def score_reel_lane(reel, rows, events, cfg):
     st = dict(rows=len(rows), episodes=[], menu_violations=0, flaps=0, cand_entries=0, false_cand=0, seg=[], reasons=defaultdict(int),
-              unsure_rows=0, latched_rows=0, ms=[], native_ms=[], notices=[], abr=[], geo=[], state_events=defaultdict(int), hold_win_rows=0, hold_win_hold=0, cuts=0)
+              unsure_rows=0, latched_rows=0, ms=[], native_ms=[], notices=[], abr=[], geo=[], state_events=defaultdict(int), hold_win_rows=0, hold_win_hold=0, cuts=0,
+              axis_episodes=[], native_seconds=0.0)
     prev_state, prev_n = None, None
     ep = None
+    ax_ep = {"x": None, "y": None}       # the open per-axis confident-wrong episode
+    prev_ms, prev_t = None, None
     menu_run = {}
     truth_changes = [s["t0"] for i, s in enumerate(reel["segs"]) if i > 0 and (truth_n(s) != truth_n(reel["segs"][i - 1]) or
                                                                               s["active_area_out"] != reel["segs"][i - 1]["active_area_out"] or
@@ -180,10 +190,16 @@ def score_reel_lane(reel, rows, events, cfg):
         ss["rows"] += 1
         ss["last"] = dict(state=state, n=n, row=row)
         ms = fnum(row.get("ms"))
+        native_seg = is_native_truth(reel, seg)
+        if native_seg and prev_t is not None:
+            st["native_seconds"] += min(max(t - prev_t, 0.0), 5.0)
+        prev_t = t
         if ms is not None and ms >= 0:
-            st["ms"].append(ms)
-            if is_native_truth(reel, seg):
-                st["native_ms"].append(ms)
+            if ms != prev_ms:     # a new evaluation: the rows in between repeat the last one's cost
+                st["ms"].append(ms)
+                if native_seg:
+                    st["native_ms"].append(ms)
+            prev_ms = ms
         cu = fnum(row.get("cuts"))
         if cu is not None and cu > st["cuts"]:
             st["cuts"] = int(cu)
@@ -212,6 +228,19 @@ def score_reel_lane(reel, rows, events, cfg):
             if ep is not None:
                 st["episodes"].append(ep)
                 ep = None
+        # per-axis CONFIDENT-wrong (chain lane: state_x / state_y); the joint state needs both axes and their agreement
+        for ai, ax in enumerate(("x", "y")):
+            wrong_ax = False
+            if (row.get("state_" + ax) or "").upper() == "CONFIDENT" and not in_grace:
+                mn = fnum(row.get("measured_n_" + ax))
+                wrong_ax = mn is not None and int(round(mn)) != tn[ai]
+            if wrong_ax:
+                if ax_ep[ax] is None:
+                    ax_ep[ax] = dict(t0=t, t1=t, seg=si, axis=ax, n=int(round(mn)), truth=tn[ai])
+                ax_ep[ax]["t1"] = t
+            elif ax_ep[ax] is not None:
+                st["axis_episodes"].append(ax_ep[ax])
+                ax_ep[ax] = None
         # menu / black: a re-base that persists
         if seg["regime"] in ("menu", "black") or (reel["family"] == "R7" and is_native_truth(reel, seg) and seg["regime"] != "stream"):
             key = si
@@ -250,6 +279,9 @@ def score_reel_lane(reel, rows, events, cfg):
             ss["active_last"] = (ax, ay, aw, ah) if None not in (ax, ay, aw, ah) else None
     if ep is not None:
         st["episodes"].append(ep)
+    for ax in ("x", "y"):
+        if ax_ep[ax] is not None:
+            st["axis_episodes"].append(ax_ep[ax])
     st["seg"] = segs
     for e in events:
         typ = e.get("type")
@@ -288,24 +320,33 @@ def aggregate(reels, per, lane, pred, cfg):
     """per: {(reel, lane): stats}. Returns dict of metrics over the reels for which pred(reel) and the lane has rows."""
     sel = [r for r in reels.values() if pred(r) and (r["id"], lane) in per]
     out = dict(reels=len(sel), hours=sum(r["duration"] for r in sel) / 3600.0, titles=len(set(r["master"] for r in sel)),
-               classes=len(set(r["cls"] for r in sel)), episodes=0, reels_with_episode=0, flaps=0, cand_entries=0, false_cand=0,
+               classes=len(set(r["cls"] for r in sel)), episodes=0, reels_with_episode=0, axis_episodes=0, axis_x=0, axis_y=0, reels_with_axis_episode=0,
+               eval_n=0, flaps=0, cand_entries=0, false_cand=0,
                menu_violations=0, notices_fp=0, notices=0, ms=[], seg_total=0, seg_up=0, seg_up_correct_T=0, lat=[], seg_latched_end=0,
                seg_latched_exact=0, seg_native=0, seg_native_latched_ok=0, reasons=defaultdict(int), unsure_rows=0, rows=0, latched_rows=0,
                kernel_n=0, kernel_ok=0, kernel_cov=0, kernel_wrong=0, sharp_up=0, sharp_hit=0, sharp_off=0, sharp_false=0, dbl_n=0, dbl_ok=0, dbl_cov=0,
                act_n=0, act_ok=0, act_cov=0, act_wrong=0, dirty_segs=0, dirty_ok=0, hold_rows=0, hold_segs=0, wrong_rows=0, sel=[r["id"] for r in sel],
-               bad=[], native_ms=[], hold_win_rows=0, hold_win_hold=0, cuts_by_master=defaultdict(int))
+               bad=[], native_ms=[], native_seconds=0.0, hold_win_rows=0, hold_win_hold=0, cuts_by_master=defaultdict(int))
     for r in sel:
         st = per[(r["id"], lane)]
         out["episodes"] += len(st["episodes"])
         out["reels_with_episode"] += 1 if st["episodes"] else 0
         for ep in st["episodes"]:
             out["bad"].append("%s seg %d: latched n=%s truth=%s t=%.1f-%.1f" % (r["id"], ep["seg"], ep["n"], ep["truth"], ep["t0"], ep["t1"]))
+        out["axis_episodes"] += len(st["axis_episodes"])
+        out["axis_x"] += sum(1 for ep in st["axis_episodes"] if ep["axis"] == "x")
+        out["axis_y"] += sum(1 for ep in st["axis_episodes"] if ep["axis"] == "y")
+        out["reels_with_axis_episode"] += 1 if st["axis_episodes"] else 0
+        for ep in st["axis_episodes"]:
+            out["bad"].append("%s seg %d: axis %s confident n=%s truth=%s t=%.1f-%.1f" % (r["id"], ep["seg"], ep["axis"], ep["n"], ep["truth"], ep["t0"], ep["t1"]))
+        out["native_seconds"] += st["native_seconds"]
         out["flaps"] += st["flaps"]
         out["cand_entries"] += st["cand_entries"]
         out["false_cand"] += st["false_cand"]
         out["menu_violations"] += st["menu_violations"]
         out["ms"].extend(st["ms"])
         out["native_ms"].extend(st["native_ms"])
+        out["eval_n"] += len(st["ms"])
         out["hold_win_rows"] += st["hold_win_rows"]
         out["hold_win_hold"] += st["hold_win_hold"]
         out["cuts_by_master"][r["master"]] = max(out["cuts_by_master"][r["master"]], st["cuts"])
@@ -442,6 +483,11 @@ def frac(a, b):
     return (a / float(b)) if b else None
 
 
+def wrong_any(a):
+    """A confident-wrong reading of either kind: the joint state or ONE axis (state_x / state_y)."""
+    return a["episodes"] + a["axis_episodes"]
+
+
 def go_table(reels, per, lane, cfg, masters_info=None):
     masters_info = masters_info or {}
     A = lambda pred: aggregate(reels, per, lane, pred, cfg)
@@ -457,7 +503,7 @@ def go_table(reels, per, lane, cfg, masters_info=None):
     bound_u = (3.0 / uniq_h) if uniq_h > 0 else None
     if r1["reels"] == 0:
         st = "NA"
-    elif r1["episodes"] > 0:
+    elif wrong_any(r1) > 0:
         st = "FAIL"
     elif h < HOURS_PHASE_A or r1["titles"] < TITLES_PHASE_A or shots < SHOTS_PHASE_A:
         st = "INSUFFICIENT"
@@ -465,8 +511,9 @@ def go_table(reels, per, lane, cfg, masters_info=None):
         st = "PASS"
     phase_a = dict(H_A_hours=round(h, 3), unique_footage_hours=round(uniq_h, 3), titles=r1["titles"], shots=shots, shots_source=shots_src,
                    confident_wrong=r1["episodes"], reels_with_wrong=r1["reels_with_episode"],
+                   confident_wrong_axis=r1["axis_episodes"], axis_x=r1["axis_x"], axis_y=r1["axis_y"], reels_with_wrong_axis=r1["reels_with_axis_episode"],
                    bound_per_h=(round(bound, 2) if bound else None), bound_per_unique_h=(round(bound_u, 2) if bound_u else None))
-    g.append(gate("axes.r1.wrong", "Axes - R1 native (phase A smoke gate)", "H_A >= %g h, >= %d titles, >= %d shots, 0 confident-wrong (smoke gate; licenses SHADOW mode only)" %
+    g.append(gate("axes.r1.wrong", "Axes - R1 native (phase A smoke gate)", "H_A >= %g h, >= %d titles, >= %d shots, 0 confident-wrong, joint or per axis (smoke gate; licenses SHADOW mode only)" %
                   (HOURS_PHASE_A, TITLES_PHASE_A, SHOTS_PHASE_A), phase_a, st,
                   "supports <= %s confident-wrong per hour (95%%, rule of three over H_A = %.2f h); the variants of one title are NOT independent: over the unique footage "
                   "(%.2f h) the bound is <= %s per hour; the design target (1 per 100 title-hours) needs phase B" %
@@ -481,43 +528,44 @@ def go_table(reels, per, lane, cfg, masters_info=None):
                        rows=r1["rows"]), st))
     dk = A(idpred("R8.dark2", "R8.credits", "R8.flat"))
     # a failure is a FAIL at any amount of evidence; a PASS needs >= 30 min of such reels, else INSUFFICIENT
-    st = "NA" if dk["reels"] == 0 else ("FAIL" if (dk["flaps"] > 0 or dk["episodes"] > 0) else ("PASS" if dk["hours"] * 60.0 >= DARK_MIN_MINUTES else "INSUFFICIENT"))
-    g.append(gate("axes.r1.dark_credits", "Axes - R1 native", "dark / credits / flat reels (all of them, hours reported): 0 reverts, 0 wrong",
-                  dict(reverts=dk["flaps"], wrong=dk["episodes"], reels=dk["reels"], hours=round(dk["hours"], 3)), st))
+    st = "NA" if dk["reels"] == 0 else ("FAIL" if (dk["flaps"] > 0 or wrong_any(dk) > 0) else ("PASS" if dk["hours"] * 60.0 >= DARK_MIN_MINUTES else "INSUFFICIENT"))
+    g.append(gate("axes.r1.dark_credits", "Axes - R1 native", "dark / credits / flat reels (all of them, hours reported): 0 reverts, 0 wrong (joint or per axis)",
+                  dict(reverts=dk["flaps"], wrong=dk["episodes"], wrong_axis=dk["axis_episodes"], reels=dk["reels"], hours=round(dk["hours"], 3)), st))
     c = A(lambda r: r["id"].startswith("R2.clean"))
     secs = c["hours"] * 3600.0
     ok = frac(c["seg_up_correct_T"], c["seg_up"])
     if c["reels"] == 0:
         st = "NA"
-    elif c["episodes"] > 0 or (ok is not None and ok < 0.95):
+    elif wrong_any(c) > 0 or (ok is not None and ok < 0.95):
         st = "FAIL"
     elif c["reels"] < 20 or c["classes"] < 3 or secs < 1200:
         st = "INSUFFICIENT"
     else:
         st = "PASS"
     g.append(gate("axes.r2.clean", "Axes - R2 clean chains", ">= 95%% confident and correct <= %g s; 0 wrong (>= 20 clips, >= 3 content types, 20 min)" % LATCH_T,
-                  dict(confident_correct_within=(round(ok, 3) if ok is not None else None), wrong=c["episodes"], clips=c["reels"], content_types=c["classes"],
+                  dict(confident_correct_within=(round(ok, 3) if ok is not None else None), wrong=c["episodes"], wrong_axis=c["axis_episodes"], clips=c["reels"], content_types=c["classes"],
                        seconds=round(secs)), st, "; ".join(c["bad"][:5])))
     d = A(lambda r: r["id"].startswith("R2.dirty") or r["id"].startswith("R2.usm"))
     ok = frac(d["dirty_ok"], d["dirty_segs"])
     lat_ok = frac(sum(1 for x in d["lat"] if x <= DIRTY_T), d["dirty_segs"])
     if d["reels"] == 0:
         st = "NA"
-    elif d["episodes"] > 0 or d["flaps"] > 0 or (ok is not None and ok < 0.80):
+    elif wrong_any(d) > 0 or d["flaps"] > 0 or (ok is not None and ok < 0.80):
         st = "FAIL"
     else:
         st = "PASS"
     g.append(gate("axes.dirty", "Axes - dirty chains", ">= 80%% confident or UNSURE with reason; 0 wrong; 0 flaps; 1080 confident <= %g s or UNSURE" % DIRTY_T,
                   dict(confident_or_unsure_with_reason=(round(ok, 3) if ok is not None else None), confident_within_10s=(round(lat_ok, 3) if lat_ok is not None else None),
-                       wrong=d["episodes"], flaps=d["flaps"], segments=d["dirty_segs"]), st, "; ".join(d["bad"][:5])))
+                       wrong=d["episodes"], wrong_axis=d["axis_episodes"], flaps=d["flaps"], segments=d["dirty_segs"]), st, "; ".join(d["bad"][:5])))
     m = A(family_pred("R7"))
+    hold_share = None     # defined for the value below also when the evaluation has no R7 reel (it was unbound: a crash)
     if m["reels"] == 0:
         st = "NA"
     else:
         hold_share = frac(m["hold_win_hold"], m["hold_win_rows"])
-        st = "FAIL" if (m["menu_violations"] > 0 or m["episodes"] > 0 or (hold_share is not None and hold_share < 0.8)) else "PASS"
+        st = "FAIL" if (m["menu_violations"] > 0 or wrong_any(m) > 0 or (hold_share is not None and hold_share < 0.8)) else "PASS"
     g.append(gate("axes.r7", "Axes - R7 menus / overlays", "no re-base persisting > %g s on a native menu; 0 wrong under subtitles / PiP; HOLD shown >= 80%% of the large-PiP window" % cfg["menu_persist"],
-                  dict(menu_violations=m["menu_violations"], wrong=m["episodes"], hold_share_in_large_pip_windows=(round(hold_share, 3) if hold_share is not None else None),
+                  dict(menu_violations=m["menu_violations"], wrong=m["episodes"], wrong_axis=m["axis_episodes"], hold_share_in_large_pip_windows=(round(hold_share, 3) if hold_share is not None else None),
                        window_rows=m["hold_win_rows"], expected_hold_segments=m["hold_segs"]), st,
                   "; ".join(m["bad"][:5])))
     for gid, field, crit in (("axes.r10", "Axes - R10 loop", ">= 90% of informative evaluations propose the true n; latch <= 20 s; 0 wrong; 0 dropped frames"),
@@ -579,13 +627,21 @@ def go_table(reels, per, lane, cfg, masters_info=None):
     g.append(gate("abr.notice", "ABR notice", "false positives <= 1 per 10 title-hours",
                   dict(per_10_hours=(round((nfp or 0.0) * 10, 3)), notices=allr["notices"], false_positives=allr["notices_fp"], hours=round(notice_h, 3)),
                   "NA" if allr["notices"] == 0 and lane != "on" else st))
-    ms = allr["ms"]
+    ms = allr["ms"]        # one value per DISTINCT evaluation (the harness repeats the last cost on the rows in between)
     p95 = pct(ms, 0.95)
+    secs = allr["hours"] * 3600.0
+    rate = frac(len(ms), secs)                                   # evaluations per second of reel time, measured
+    native_rate = frac(len(allr["native_ms"]), allr["native_seconds"])
+    mean_ms = sum(ms) / len(ms) if ms else None
+    core = mean_ms * rate / 10.0 if (ms and rate is not None) else None
+    ncore = (sum(allr["native_ms"]) / len(allr["native_ms"]) * native_rate / 10.0) if (allr["native_ms"] and native_rate is not None) else None
     st = "NA" if not ms else ("PASS" if p95 <= 50.0 else "FAIL")
     g.append(gate("cost", "Cost", "<= 15% of one core average; p95 <= 50 ms per evaluation; native latched <= 2%",
-                  dict(ms_mean=(round(sum(ms) / len(ms), 2) if ms else None), ms_p95=(round(p95, 2) if p95 is not None else None), evaluations=len(ms),
-                       core_pct_at_2_per_s=(round(sum(ms) / len(ms) * 2 / 10.0, 2) if ms else None),
-                       native_core_pct=(round(sum(allr["native_ms"]) / len(allr["native_ms"]) * 2 / 10.0, 2) if allr["native_ms"] else None)), st,
+                  dict(ms_mean=(round(mean_ms, 2) if ms else None), ms_p95=(round(p95, 2) if p95 is not None else None), evaluations=len(ms),
+                       evals_per_s=(round(rate, 3) if rate is not None else None), core_pct=(round(core, 2) if core is not None else None),
+                       native_evals_per_s=(round(native_rate, 3) if native_rate is not None else None),
+                       native_core_pct=(round(ncore, 2) if ncore is not None else None)), st,
+                  "distinct evaluations only (rows repeat the last evaluation's ms); core % = mean ms x measured evaluations per second / 10; "
                   "lane 'off'/'on' time includes the classical tile analysis; the chain estimator's own time is the 'chain' lane"))
     return g, ab
 
@@ -597,7 +653,8 @@ def family_table(reels, per, lane, cfg):
         a = aggregate(reels, per, lane, family_pred(fam), cfg)
         if a["reels"] == 0:
             continue
-        rows.append((fam, a["reels"], a["hours"], a["episodes"], a["reels_with_episode"], frac(a["episodes"], a["hours"]), pct(a["lat"], 0.5), pct(a["lat"], 0.95),
+        rows.append((fam, a["reels"], a["hours"], a["episodes"], a["reels_with_episode"], frac(a["episodes"], a["hours"]), a["axis_episodes"],
+                     "%d/%d" % (a["axis_x"], a["axis_y"]), frac(a["axis_episodes"], a["hours"]), pct(a["lat"], 0.5), pct(a["lat"], 0.95),
                      frac(a["seg_latched_exact"], a["seg_latched_end"]), frac(a["flaps"], a["hours"]), frac(a["unsure_rows"], a["rows"])))
     return rows
 
@@ -649,8 +706,8 @@ def render(reels, per, lanes, gate_lane, gates, done, cfg, ab):
         L.append("")
         L.append("## Lane %s by family" % lane)
         L.append("")
-        L.append("| Family | Reels | Hours | Confident-wrong | Reels with wrong | Wrong/h | Time to confident median s | p95 s | Exact-n when confident | Flaps/h | UNSURE rate |")
-        L.append("|---|---|---|---|---|---|---|---|---|---|---|")
+        L.append("| Family | Reels | Hours | Confident-wrong (joint) | Reels with wrong | Wrong/h | Per-axis confident-wrong | x/y | Per-axis wrong/h | Time to confident median s | p95 s | Exact-n when confident | Flaps/h | UNSURE rate |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for row in family_table(reels, per, lane, cfg):
             L.append("| " + " | ".join(fmt(x, 3) if isinstance(x, float) else str(x) if x is not None else "-" for x in row) + " |")
         a = aggregate(reels, per, lane, lambda r: True, cfg)
@@ -660,7 +717,7 @@ def render(reels, per, lanes, gate_lane, gates, done, cfg, ab):
             L.append("UNSURE rate by reason (rows in UNKNOWN / ABSTAIN / PROVISIONAL): " + ", ".join("%s %.1f%%" % (k, 100 * v / tot) for k, v in sorted(a["reasons"].items(), key=lambda kv: -kv[1])[:10]))
         if a["bad"]:
             L.append("")
-            L.append("Confident-wrong episodes (first 20):")
+            L.append("Confident-wrong episodes, joint and per axis (first 20):")
             for b in a["bad"][:20]:
                 L.append("- " + b)
     return "\n".join(L) + "\n"
@@ -731,6 +788,7 @@ def selftest():
         reel("R2.dirty.E2", "R2", [seg(0, 0, 720, up)], master="m2"),
         reel("R7.F", "R7", [seg(0, 0, 240, up), seg(1, 240, 240, (W, H), regime="menu"), seg(2, 480, 240, up)], master="m3"),
         reel("R7.G", "R7", [seg(0, 0, 720, up, hold_expected=True, overlays=[dict(type="pip", start=6.0, end=24.0)])], master="m3"),
+        reel("R8.dark2.Z", "R8", [seg(0, 0, 720, (W, H))], master="m3"),
     ])
     doc["masters"]["m2"].update(full_seconds=1800, shots=[100, 200])
     with open(os.path.join(tmp, "reels.json"), "w") as f:
@@ -738,9 +796,11 @@ def selftest():
     ev = []
 
     def add(reel_id, lane, t, state, n, reason="none", **kw):
+        # ms: one DISTINCT value per second of source time, repeated on the two 0.5 s rows of that second (as the harness writes it)
         r = dict(reel=reel_id, lane=lane, out_frame=int(t * 24), t=t, seg=0, bits=10, fx="", fy="", n_x=n[0] if n else "", n_y=n[1] if n else "", state=state,
-                 declared="1.0", conf="", frame_quality="", noise="", classical_quality="", tier="", level="", rec_ratio_h="", rec_ratio_v="", gen="", reason=reason, ms="5",
-                 kernel="", sharpen_amount="", double_n1_x="", double_n1_y="", active_x="", active_y="", active_w="", active_h="", llr_x="", llr_y="")
+                 declared="1.0", conf="", frame_quality="", noise="", classical_quality="", tier="", level="", rec_ratio_h="", rec_ratio_v="", gen="", reason=reason, ms=str(5 + int(t)),
+                 kernel="", sharpen_amount="", double_n1_x="", double_n1_y="", active_x="", active_y="", active_w="", active_h="", llr_x="", llr_y="",
+                 state_x="", state_y="", measured_n_x="", measured_n_y="")
         r.update(kw)
         ev.append(r)
     # A: unknown for 6 s then confident and correct with the right kernel
@@ -784,6 +844,13 @@ def selftest():
     for i in range(60):
         t = i * 0.5
         add("R7.G", "chain", t, "HOLD" if (t < 6 or t >= 24 or (t - 6) % 5 < 3) else "CONFIDENT", None if (t < 6 or t >= 24 or (t - 6) % 5 < 3) else up)
+    # R8.dark2.Z: a NATIVE reel whose joint state never says CONFIDENT, but the y axis alone is CONFIDENT at 1350 for 6 s (truth 2160): the per-axis
+    # episode the joint count misses (state_x / state_y, measured_n_y)
+    for i in range(60):
+        t = i * 0.5
+        wrongy = 10.0 <= t < 16.0
+        add("R8.dark2.Z", "chain", t, "UNKNOWN", None, "dark", state_x="UNKNOWN", state_y="CONFIDENT" if wrongy else "UNKNOWN",
+            measured_n_x="", measured_n_y="1350.000000" if wrongy else "")
     # R6.D geometry event and a quality-boundary abr event with event_t
     # per-reel directory layout for R7.G (the harness layout), flat files for the rest (older runs)
     gdir = os.path.join(tmp, "reels", "R7.G")
@@ -839,9 +906,39 @@ def selftest():
     assert Fm["menu_violations"] >= 1, Fm["menu_violations"]
     by = {g["id"]: g for g in gates}
     assert by["axes.r1.wrong"]["status"] == "INSUFFICIENT" and by["axes.r1.wrong"]["value"]["confident_wrong"] == 0
+    assert by["axes.r1.wrong"]["value"]["confident_wrong_axis"] == 0
+    # per-axis confident-wrong: one y episode on the dark reel, none joint; the dark gate fails on it; it shows in the family table
+    Z = per[("R8.dark2.Z", "chain")]
+    assert not Z["episodes"] and len(Z["axis_episodes"]) == 1 and Z["axis_episodes"][0]["axis"] == "y" and Z["axis_episodes"][0]["n"] == 1350, Z["axis_episodes"]
+    dkv = by["axes.r1.dark_credits"]
+    assert dkv["status"] == "FAIL" and dkv["value"]["wrong"] == 0 and dkv["value"]["wrong_axis"] == 1, dkv
+    fam = dict((row[0], row) for row in family_table(reels, per, "chain", cfg))
+    assert fam["R8"][6] == 1 and fam["R8"][7] == "0/1", fam["R8"]
+    assert fam["R1"][6] == 0 and fam["R2"][6] == 0, (fam["R1"], fam["R2"])
+    # cost: distinct evaluations (one ms value per second), not rows; 9 reels x 30 s at one evaluation per second
+    cv_ = by["cost"]["value"]
+    assert cv_["evaluations"] == 270 and abs(cv_["evals_per_s"] - 1.0) < 1e-6 and abs(cv_["ms_mean"] - 19.5) < 1e-6, cv_
+    assert abs(cv_["core_pct"] - 1.95) < 1e-6, cv_
     assert by["axes.r2.clean"]["status"] == "INSUFFICIENT"            # 2 clips, 1 min: not enough to judge
     assert by["axes.dirty"]["status"] == "FAIL"
     assert by["axes.r7"]["status"] == "FAIL"
+    # an evaluation without any R7 reel must not crash (hold_share was unbound): NA, no hold share
+    d2 = os.path.join(tmp, "no_r7")
+    os.makedirs(d2)
+    doc2 = dict(doc, reels=[r_ for r_ in doc["reels"] if r_["id"] in ("R2.clean.A", "R1.B")])
+    with open(os.path.join(d2, "reels.json"), "w") as f:
+        json.dump(doc2, f)
+    with open(os.path.join(d2, "evaluations.csv"), "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(ev[0].keys()))
+        w.writeheader()
+        w.writerows([r_ for r_ in ev if r_["reel"] in ("R2.clean.A", "R1.B")])
+    with open(os.path.join(d2, "events.csv"), "w") as f:
+        f.write("reel,lane,t,event_t,out_frame,seg,type,a,b,detail" + chr(10))
+    with open(os.path.join(d2, "reels_done.csv"), "w") as f:
+        f.write("reel,frames_expected,frames_decoded,wall_s,state" + chr(10))
+    _r2, _p2, gates2, _l2 = score(os.path.join(d2, "reels.json"), d2, d2, cfg)
+    by2 = {g["id"]: g for g in gates2}
+    assert by2["axes.r7"]["status"] == "NA" and by2["axes.r7"]["value"]["hold_share_in_large_pip_windows"] is None, by2["axes.r7"]
     hv = by["axes.r7"]["value"]["hold_share_in_large_pip_windows"]
     assert hv is not None and hv < 0.8, hv
     pa = by["axes.r1.wrong"]["value"]
