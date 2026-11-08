@@ -25,7 +25,7 @@ namespace VpvAbiBridgeTestsNs
 {
 	namespace
 	{
-		const wchar_t* const kWide = L"on → 60 Hz, café — \U0001F3AC";   // arrows, accents and a non-BMP character
+		const wchar_t* const kWide = L"on \u2192 60 Hz, caf\u00E9 \u2014 \U0001F3AC";   // arrows, accents and a non-BMP character (escaped: compiled without /utf-8)
 		const char* const kUtf8 = "on \xE2\x86\x92 60 Hz, caf\xC3\xA9 \xE2\x80\x94 \xF0\x9F\x8E\xAC";
 
 		// The old method set the bridge calls (RendererAbiBridge.h lists it). Each records one call.
