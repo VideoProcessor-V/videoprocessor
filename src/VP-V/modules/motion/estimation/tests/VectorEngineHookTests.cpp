@@ -11,15 +11,20 @@
 #endif
 #include "CppUnitTest.h"
 
+#include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/motion/estimation/VectorEngineExtension.h>
+#include <VP-V/modules/motion/estimation/VectorEngineHost.h>
+#include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
+#include <vprenderer/RendererExtension.h>
 
 #include <VP-V/core/Indicator.h>
 
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -29,6 +34,14 @@ namespace VectorEngineHookTest
 {
 	namespace
 	{
+		// P5a-rest: the recorded invalidation sink calls (host key, cause).
+		std::vector<std::pair<const void*, MotionValidity::Cause>>& SinkCalls()
+		{
+			static std::vector<std::pair<const void*, MotionValidity::Cause>> calls;
+			return calls;
+		}
+		void RecordSink(const void* host, MotionValidity::Cause cause) { SinkCalls().emplace_back(host, cause); }
+
 		// The matcher surface the engine's Estimate touches (MotionWarp's names and shapes). `calls` records the calls
 		// that change what the matcher does (bind, estimate); `reads` the read-only queries.
 		struct FakeMatcher
@@ -59,6 +72,8 @@ namespace VectorEngineHookTest
 			uint64_t afterSeq = 0;
 			bool afterUsed = true;
 			pl_tex afterCounts = reinterpret_cast<pl_tex>(0x2);
+			EstimateOutcome afterOutcome;   // the whole outcome of the last AfterEstimate
+			int afterCalls = 0;
 			void BeforeEstimate(const EstimateContext& c, IGuidanceSink& sink) override
 			{
 				calls->push_back("before");
@@ -68,14 +83,16 @@ namespace VectorEngineHookTest
 				if (throwBefore)
 					throw std::runtime_error("before failed");
 			}
-			void AfterEstimate(uint64_t pairSeq, bool used, pl_tex countsTex) override
+			void AfterEstimate(uint64_t pairSeq, const EstimateOutcome& outcome) override
 			{
 				calls->push_back("after");
 				if (throwAfter)
 					throw std::runtime_error("after failed");
 				afterSeq = pairSeq;
-				afterUsed = used;
-				afterCounts = countsTex;
+				afterUsed = outcome.guidanceUsed;
+				afterCounts = outcome.countsTex;
+				afterOutcome = outcome;
+				++afterCalls;
 			}
 		};
 
@@ -189,6 +206,72 @@ namespace VectorEngineHookTest
 			RunOne(engine, matcher, true);
 			Assert::IsFalse(hook.afterUsed, L"rejected guidance is not used");
 			Assert::IsTrue(hook.afterCounts == nullptr);
+		}
+
+		// M2 P5a-out: the outcome struct carries the matcher's report to the hook (guidanceUsed, narrowIdle, rejection,
+		// countsTex; gpuMs is unknown = -1 today); absent values on a quiet matcher; an estimate that throws gives an
+		// all-absent outcome; and with no hook the matcher is not queried and no outcome is built.
+		TEST_METHOD(TheOutcomeFieldsReachTheHookAndNoHookIsUnchanged)
+		{
+			{
+				VectorEngine engine;
+				FakeMatcher matcher;
+				RunOne(engine, matcher, true);
+				Assert::AreEqual(0, matcher.reads, L"no hook: no matcher query for an outcome");
+			}
+			VectorEngine engine;
+			FakeMatcher matcher;
+			RecordingHook hook;
+			std::vector<std::string> hookCalls;
+			hook.calls = &hookCalls;
+			engine.SetPreEstimateHook(&hook);
+
+			RunOne(engine, matcher, true);   // quiet matcher: every field is its absent value
+			Assert::AreEqual(1, hook.afterCalls);
+			Assert::IsFalse(hook.afterOutcome.guidanceUsed);
+			Assert::IsFalse(hook.afterOutcome.narrowIdle);
+			Assert::IsTrue(hook.afterOutcome.rejection == nullptr, L"the matcher's empty string is reported as absent");
+			Assert::AreEqual(-1.0, hook.afterOutcome.gpuMs, L"no per-estimate GPU time exists: unknown");
+			Assert::IsTrue(hook.afterOutcome.countsTex == nullptr);
+
+			matcher.use.narrowPass = true;       // a narrow pass ran...
+			matcher.use.narrowDroppedEngine = true;   // ...planned, but the engine replaced the searches
+			RunOne(engine, matcher, true);
+			Assert::AreEqual(2, hook.afterCalls);
+			Assert::IsTrue(hook.afterOutcome.guidanceUsed);
+			Assert::IsTrue(hook.afterOutcome.narrowIdle, L"narrowDroppedEngine reaches the hook as narrowIdle");
+			Assert::IsTrue(hook.afterOutcome.rejection == nullptr);
+			Assert::IsTrue(hook.afterOutcome.countsTex == matcher.counts);
+			Assert::AreEqual(-1.0, hook.afterOutcome.gpuMs);
+
+			static const char kReason[] = "camera guidance: texture upload failed";
+			matcher.use.rejected = kReason;
+			RunOne(engine, matcher, true);
+			Assert::AreEqual(3, hook.afterCalls);
+			Assert::IsFalse(hook.afterOutcome.guidanceUsed, L"a rejection means not used");
+			Assert::IsTrue(hook.afterOutcome.rejection == kReason, L"the matcher's static string, not a copy");
+			Assert::IsTrue(hook.afterOutcome.countsTex == nullptr);
+
+			// An estimate that throws: AfterEstimate still runs, with every field absent, and the throw is rethrown.
+			matcher.use.rejected = "";
+			std::vector<std::string> calls;
+			matcher.calls = &calls;
+			bool rethrown = false;
+			try
+			{
+				engine.Estimate(5, 6, false, 24.0, engine.motionValidity.Epoch(), true, matcher,
+					[&]() -> bool { throw std::runtime_error("estimate failed"); },
+					[](const FallbackCatalog::Decision&) {});
+			}
+			catch (const std::runtime_error&) { rethrown = true; }
+			Assert::IsTrue(rethrown);
+			Assert::AreEqual(4, hook.afterCalls);
+			Assert::IsFalse(hook.afterOutcome.guidanceUsed);
+			Assert::IsFalse(hook.afterOutcome.narrowIdle);
+			Assert::IsTrue(hook.afterOutcome.rejection == nullptr);
+			Assert::AreEqual(-1.0, hook.afterOutcome.gpuMs);
+			Assert::IsTrue(hook.afterOutcome.countsTex == nullptr);
+			engine.SetPreEstimateHook(nullptr);
 		}
 
 		// IVectorEngine with nothing estimated, or no matcher bound: every answer is the documented "absent" value.
@@ -438,6 +521,124 @@ namespace VectorEngineHookTest
 			Assert::IsTrue(VpIndicator::SameFor(expected, field.stamp, ~VpIndicator::CounterMask(0)));
 			engine.motionValidity.Unbind();
 			engine.BindMatcher(nullptr);
+		}
+
+		// P5a-rest (items j, k; R9): the renderer's queue events reach its own invalidation request with the causes the
+		// direct calls used, in the order raised; a gap stores its detail first (null too, as the old dequeue code did),
+		// other causes leave it; Flush / Drop request nothing; an unknown host requests nothing.
+		TEST_METHOD(QueueEventsRequestTheOldInvalidationCausesInOrder)
+		{
+			int host = 0, other = 0;
+			SinkCalls().clear();
+			VectorEngine engine(&host, &RecordSink);
+			VectorEngineExtension extension;
+			auto raise = [&](RendererExtension::QueueEvent kind, const void* key, const char* text) {
+				RendererExtension::QueueFacts f;
+				f.host = key;
+				f.kind = kind;
+				f.text = text;
+				extension.OnQueue(f);
+			};
+			using QE = RendererExtension::QueueEvent;
+			raise(QE::Reset, &host, nullptr);
+			raise(QE::LiveQueueReset, &host, nullptr);
+			raise(QE::Gap, &host, "missed frames");
+			Assert::AreEqual(std::string("missed frames"), std::string(engine.motionGapDetail.load()));
+			raise(QE::Discontinuity, &host, nullptr);
+			raise(QE::FormatChange, &host, nullptr);
+			Assert::AreEqual(std::string("missed frames"), std::string(engine.motionGapDetail.load()), L"only a gap stores the detail");
+			raise(QE::Flush, &host, "renderer reset");
+			raise(QE::Drop, &host, nullptr);
+			raise(QE::Gap, &other, "not ours");
+			raise(QE::Gap, &host, nullptr);
+			Assert::IsTrue(engine.motionGapDetail.load() == nullptr, L"a gap without a cause stores null");
+			const std::vector<MotionValidity::Cause> expected = { MotionValidity::Cause::Resync, MotionValidity::Cause::QueueReset,
+				MotionValidity::Cause::Gap, MotionValidity::Cause::Seek, MotionValidity::Cause::SourceFormatChange,
+				MotionValidity::Cause::Gap };
+			Assert::AreEqual(expected.size(), SinkCalls().size());
+			for (size_t i = 0; i < expected.size(); ++i)
+			{
+				Assert::IsTrue(SinkCalls()[i].first == &host, L"the sink gets the engine's host key");
+				Assert::IsTrue(SinkCalls()[i].second == expected[i]);
+			}
+			Assert::IsFalse(VectorEngine::RequestInvalidationFor(nullptr, MotionValidity::Cause::Gap, nullptr));
+			Assert::IsFalse(VectorEngine::RequestInvalidationFor(&other, MotionValidity::Cause::Gap, nullptr));
+		}
+
+		// Without a sink (tests, a host that gives none) the engine's own validity state takes the request.
+		TEST_METHOD(AQueueEventWithoutASinkMovesTheEnginesOwnEpoch)
+		{
+			int host = 0;
+			VectorEngine engine(&host);
+			const uint64_t before = engine.motionValidity.Epoch();
+			Assert::IsTrue(VectorEngine::RequestInvalidationFor(&host, MotionValidity::Cause::Seek, nullptr));
+			Assert::IsTrue(engine.motionValidity.Epoch() != before);
+			MotionValidity::Pending pending;
+			Assert::IsTrue(engine.TakeInvalidation(pending));
+			Assert::IsTrue(pending.cause == MotionValidity::Cause::Seek);
+		}
+
+		// P5a-rest (item l, fix C): GpuReleased of a host stops and drops that host's producer and clears the engine-ready
+		// flag; another host's producer (a replacement renderer) is untouched; other lifecycle events do nothing.
+		TEST_METHOD(GpuReleasedStopsOnlyThatHostsProducer)
+		{
+			int host = 0, replacement = 0;
+			VectorEngine engine(&host);
+			VectorEngine next(&replacement);
+			engine.PublishProducer(std::make_shared<MotionAhead::Producer>());
+			next.PublishProducer(std::make_shared<MotionAhead::Producer>());
+			engine.motionEngineReady.store(true);
+			next.motionEngineReady.store(true);
+			const std::shared_ptr<MotionAhead::Producer> loopCopy = engine.LoopProducer();   // a render-loop copy in flight
+			VectorEngineExtension extension;
+			RendererExtension::LifecycleFacts f;
+			f.host = &host;
+			f.kind = RendererExtension::Lifecycle::GpuCreated;
+			extension.OnLifecycle(f);
+			Assert::IsTrue(engine.motionProducer != nullptr, L"only the release stops it");
+			f.kind = RendererExtension::Lifecycle::GpuReleased;
+			extension.OnLifecycle(f);
+			Assert::IsTrue(engine.motionProducer == nullptr);
+			Assert::IsFalse(engine.motionEngineReady.load());
+			Assert::IsTrue(loopCopy != nullptr && !loopCopy->Running(), L"a copy in flight keeps a stopped producer");
+			Assert::IsTrue(next.motionProducer != nullptr && next.motionEngineReady.load(), L"the replacement is untouched");
+			extension.OnLifecycle(f);   // a second release: nothing left
+			Assert::IsFalse(VectorEngine::ReleaseProducerFor(&host));
+			Assert::IsTrue(VectorEngine::ReleaseProducerFor(&replacement));
+			Assert::IsTrue(next.motionProducer == nullptr);
+		}
+
+		// P5a-rest (audit F4): the whole route as the renderer has it - the hook layer's NotifyQueue, the hub, this
+		// module registered in it, the directory, and the real sink InvalidateHost<Impl> calling the host's own
+		// RequestMotionInvalidate. Reset and Gap arrive with their old causes, in order; the gap's detail is stored.
+		TEST_METHOD(QueueEventsThroughTheHubReachTheHostsRequestMotionInvalidate)
+		{
+			struct FakeImpl
+			{
+				std::vector<MotionValidity::Cause> causes;
+				void RequestMotionInvalidate(MotionValidity::Cause cause) { causes.push_back(cause); }
+			} impl;
+			struct Fwd : RendererExtension::IRendererExtension
+			{
+				void OnQueue(const RendererExtension::QueueFacts& f) override { Vpv::Hub::ExtensionHub::Instance().OnQueue(f); }
+			};
+			struct Scope
+			{
+				Scope() { RendererExtension::ResetForTesting(); Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting(); }
+				~Scope() { RendererExtension::ResetForTesting(); Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting(); }
+			} scope;
+			Vpv::Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new VectorEngineExtension()));
+			RendererExtension::Register(std::unique_ptr<RendererExtension::IRendererExtension>(new Fwd()));
+			VectorEngine engine(&impl, &InvalidateHost<FakeImpl>);
+			RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Reset, &impl);
+			RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Gap, &impl, -1, 0, 0, 0, "missed frames");
+			Assert::AreEqual<size_t>(2, impl.causes.size());
+			Assert::IsTrue(impl.causes[0] == MotionValidity::Cause::Resync);
+			Assert::IsTrue(impl.causes[1] == MotionValidity::Cause::Gap);
+			Assert::AreEqual(std::string("missed frames"), std::string(engine.motionGapDetail.load()));
+			RendererExtension::ResetForTesting();   // no hub registered (the dependency VectorEngineExtension.h states)
+			RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Reset, &impl);
+			Assert::AreEqual<size_t>(2, impl.causes.size(), L"without the hub the event reaches nothing");
 		}
 	};
 }

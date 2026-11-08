@@ -106,7 +106,7 @@ namespace VideoProcessorTest
 				c.nextPairSeconds = 1.0 / 24;
 				hook.BeforeEstimate(c, sink);
 				Assert::IsTrue(sink.last == nullptr, L"nothing bound");
-				hook.AfterEstimate(pair, false, nullptr);
+				hook.AfterEstimate(pair, VpMotion::EstimateOutcome());
 			}
 			Assert::AreEqual(uint64_t(0), sched.Counters().guided);
 			Assert::AreEqual(uint64_t(9), sched.Counters().refusals[size_t(CameraLink::Refusal::AllOff)]);
@@ -214,7 +214,10 @@ namespace VideoProcessorTest
 			c.nextPairSeconds = 1.0 / 24;
 			hook.BeforeEstimate(c, sink);
 			Assert::IsTrue(sink.last != nullptr && sink.calls == 1);
-			hook.AfterEstimate(3, true, reinterpret_cast<pl_tex>(static_cast<uintptr_t>(0x10)));
+			VpMotion::EstimateOutcome outcome;
+			outcome.guidanceUsed = true;
+			outcome.countsTex = reinterpret_cast<pl_tex>(static_cast<uintptr_t>(0x10));
+			hook.AfterEstimate(3, outcome);
 			Assert::AreEqual(size_t(1), counts.requested.size(), L"the 16 B counts are read a frame later");
 			Assert::AreEqual(uint64_t(1), hook.UsedPairs());
 			CameraLink::IGuidanceCountsSource::Done d;

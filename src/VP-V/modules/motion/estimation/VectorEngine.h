@@ -82,11 +82,29 @@ namespace VpMotion
 		// Query(kVectorEngineQueryId) answers with (until destruction). Default: unregistered (tests).
 		VectorEngine() {}
 		explicit VectorEngine(const void* host);
+		// P5a-rest (items j, k): the host's own invalidation request (the renderer's RequestMotionInvalidate: the
+		// validity epoch AND the frame-analysis store's shared epoch), called by RequestInvalidationFor. Fixed at
+		// construction (never changes). Null: the engine invalidates its own validity state only (tests).
+		using InvalidateSink = void (*)(const void* host, MotionValidity::Cause cause);
+		VectorEngine(const void* host, InvalidateSink sink);
 		~VectorEngine() override;
 		VectorEngine(const VectorEngine&) = delete;
 		VectorEngine& operator=(const VectorEngine&) = delete;
 		// The process-wide host -> engine directory (never destroyed: a renderer may outlive static teardown).
 		static IVectorEngineDirectory& Directory();
+		// P5a-rest (items j, k; R9 OnQueue): an invalidation request for the newest engine registered under `host`,
+		// from any thread (UI: Reset / ResetLiveQueue; render loop: the dequeue's gap, file discontinuity, format
+		// change). For a Gap, gapDetail (a static string, may be null) is stored first, as the old dequeue code did,
+		// for the invalidation log; other causes leave the stored detail alone. Runs under the directory's lock (a leaf lock: the sink only moves the two epochs), so
+		// the engine cannot go meanwhile. False = no engine for `host` (nothing requested).
+		static bool RequestInvalidationFor(const void* host, MotionValidity::Cause cause, const char* gapDetail);
+		// P5a-rest (item l; doc 30 F4 "fix C"): the GPU release of `host` (RendererExtension GpuReleased, from
+		// RetireOutput before the device goes) stops and drops that engine's optical-flow producer (its worker, its own
+		// D3D11 device and VRAM) instead of keeping it until the Impl is destroyed, and clears motionEngineReady. Keyed by
+		// host: the release can run on the retirement worker after a replacement renderer has started (70b section 7),
+		// whose engine is untouched. The producer is unpublished under the directory lock and stopped outside it. False =
+		// no engine for `host` or no producer.
+		static bool ReleaseProducerFor(const void* host);
 
 		// What the producer plan reads from the renderer, as plain values. The two atomics are read
 		// at the points the old inline block read them (low latency first, the queue depth after the
@@ -159,7 +177,7 @@ namespace VpMotion
 		void BindMatcher(const IMatcherView* matcher) { matcher_ = matcher; }
 		// Runs the matcher's estimate of the pair (aSequence, bSequence). With a pre-estimate hook registered and
 		// `hookable` (not the warm-up's dummy estimate): BeforeEstimate(ctx, sink) right before, AfterEstimate(pairSeq,
-		// guidanceUsed, countsTex) right after. With no hook it is `estimate()` and nothing else (no sink, no matcher
+		// EstimateOutcome) right after. With no hook it is `estimate()` and nothing else (no sink, no matcher
 		// call, no GPU work). Either way a successful estimate is recorded for FieldOf, but only when the validity
 		// epoch is still `epochAtChoice` (the epoch the caller chose the pair under) after the estimate. ahead: called
 		// from the estimate ahead (EstimateContext::ahead; today that is the render thread too). sourceHz: the content
@@ -168,7 +186,7 @@ namespace VpMotion
 		// A hook that throws never stops the estimate: BeforeEstimate throwing = the guidance is cleared and the plain
 		// estimate runs (AfterEstimate is then skipped); AfterEstimate throwing is contained. Each failure is counted,
 		// logged and raised as the "vector_engine_hook" fallback entry (released after 8 hooked estimates without one).
-		// An exception from the estimate itself is rethrown as before, after AfterEstimate(pairSeq, false, null).
+		// An exception from the estimate itself is rethrown as before, after AfterEstimate(pairSeq, an all-absent EstimateOutcome).
 		template<class Matcher, class EstimateFn, class SyncFallbackFn>
 		bool Estimate(uint64_t aSequence, uint64_t bSequence, bool ahead, double sourceHz, uint64_t epochAtChoice, bool hookable,
 			Matcher& matcher, EstimateFn&& estimate, SyncFallbackFn&& syncFallback)
@@ -200,7 +218,7 @@ namespace VpMotion
 			{
 				if (before)
 				{
-					try { hook->AfterEstimate(ctx.pairSeq, false, nullptr); }
+					try { hook->AfterEstimate(ctx.pairSeq, EstimateOutcome()); }
 					catch (...) { if (failure.empty()) failure = "AfterEstimate: exception after a failed estimate"; }
 				}
 				syncFallback(NoteHookOutcome(!failure.empty(), failure));
@@ -211,7 +229,12 @@ namespace VpMotion
 				const auto use = matcher.CameraGuidanceUsed();
 				const bool used = !(use.rejected && use.rejected[0]) &&
 					(use.modelGlobal || use.staticFromModel || use.matcherSkipped || use.narrowPass || use.e1Pass);
-				try { hook->AfterEstimate(ctx.pairSeq, used, used && (use.narrowPass || use.e1Pass) ? matcher.CameraGuidanceCounts() : nullptr); }
+				EstimateOutcome outcome;
+				outcome.guidanceUsed = used;
+				outcome.narrowIdle = use.narrowDroppedEngine;
+				outcome.rejection = use.rejected && use.rejected[0] ? use.rejected : nullptr;
+				outcome.countsTex = used && (use.narrowPass || use.e1Pass) ? matcher.CameraGuidanceCounts() : nullptr;
+				try { hook->AfterEstimate(ctx.pairSeq, outcome); }
 				catch (const std::exception& e) { failure = std::string("AfterEstimate: ") + e.what(); }
 				catch (...) { failure = "AfterEstimate: unknown exception"; }
 			}
@@ -251,6 +274,7 @@ namespace VpMotion
 		FallbackCatalog::Decision ReleaseHookFailures();
 
 		const void* host_ = nullptr;
+		InvalidateSink invalidateSink_ = nullptr;
 		const IMatcherView* matcher_ = nullptr;
 		std::atomic<IPreEstimateHook*> preEstimateHook_{ nullptr };
 		struct FieldRecord { uint64_t from = 0, to = 0, epoch = 0; };

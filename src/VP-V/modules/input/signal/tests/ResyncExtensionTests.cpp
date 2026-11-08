@@ -154,6 +154,34 @@ namespace Tests
 				Assert::IsTrue(r.resync.GetIndicator()->Capacity() >= VpIndicator::Indicator::RequiredCapacity(FramesInFlight(64, 0, 0, 2, 0)));
 			}
 
+			// P5a-rest: Reset / LiveQueueReset are now raised (the motion invalidation requests, before the generation
+			// exists) and must not arm the generation: only the Flush that BeginQueueGeneration raises right after does.
+			TEST_METHOD(ResetAndLiveQueueResetDoNotArmOnlyTheFlushDoes)
+			{
+				ResyncExtension ext;
+				FakeRenderer baseline, resets;
+				Apply(ext, &baseline, "on");
+				Apply(ext, &resets, "on");
+				RE::QueueFacts q; q.host = &resets; q.generation = 2; q.frames = 64; q.text = "renderer reset";
+				q.kind = RE::QueueEvent::Reset;
+				ext.OnQueue(q);
+				q.kind = RE::QueueEvent::LiveQueueReset; q.text = "live queue reset";
+				ext.OnQueue(q);
+				for (FakeRenderer* r : { &baseline, &resets })
+				{
+					RE::IngressContext c = Frame(r, 1); c.queueGeneration = 2; ext.OnIngress(c);
+					Begin(ext, r, 1);
+				}
+				Assert::AreEqual(baseline.resync.GetIndicator()->Capacity(), resets.resync.GetIndicator()->Capacity(),
+					L"Reset / LiveQueueReset keep no capacity and arm nothing");
+				q.kind = RE::QueueEvent::Flush; q.text = "renderer reset";
+				ext.OnQueue(q);
+				RE::IngressContext c = Frame(&resets, 2); c.queueGeneration = 2; ext.OnIngress(c);
+				Begin(ext, &resets, 2);
+				Assert::IsTrue(resets.resync.GetIndicator()->Capacity() >= VpIndicator::Indicator::RequiredCapacity(FramesInFlight(64, 0, 0, 2, 0)),
+					L"the Flush keeps the queue's capacity, as before");
+			}
+
 			TEST_METHOD(LateSlipsReachTheShadow)
 			{
 				ResyncExtension ext;
