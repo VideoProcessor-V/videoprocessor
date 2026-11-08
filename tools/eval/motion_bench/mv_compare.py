@@ -3,7 +3,7 @@
 """SK-MV before/after summary (doc 83, owner decision 2026-11-08 #1).
 
 Reads the csv files written by MotionUnificationBenchTests (one per tree: label before / after) and writes a markdown table of the
-per-mode means: vector error (source px; epe_half_px in the matcher's half-size px), trusted share, output PSNR / SSIM against the real
+per-mode means: vector error (source px: Field() is in source pixels), trusted share, output PSNR / SSIM against the real
 middle frame and the hold floor, NVOF pair ms and the Estimate wall ms. Means compare the SAME positions only (a position missing a
 metric in either tree is left out of both means). Skipped / failed / no-pair rows are counted and printed per tree, so a half-empty
 run cannot look like a clean one. Numbers only; no film frame is read or written.
@@ -37,7 +37,7 @@ def mean(v):
     return sum(v) / len(v) if v else float('nan')
 
 
-ROWS = [('shift', 'epe_px', 'vector error, trusted blocks (source px)'), ('shift', 'epe_half_px', 'vector error (half-size px, the field unit)'),
+ROWS = [('shift', 'epe_px', 'vector error, trusted blocks (source px)'),
         ('shift', 'trusted_share', 'trusted share'), ('shift', 'estimate_ms', 'estimate wall (ms)'), ('shift', 'pair_ms', 'NVOF pair (ms, producer)'),
         ('shift', 'engine_used', 'optical-flow input used (1 = yes)'),
         ('interp', 'psnr_db', 'output PSNR vs the real middle frame (dB)'), ('interp', 'ssim', 'output SSIM'),

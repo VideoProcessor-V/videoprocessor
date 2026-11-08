@@ -190,10 +190,11 @@ namespace
 		ssim = windows ? sum / windows : 0.0;
 	}
 
-	// The mean vector error of the trusted blocks (the 2-block border excluded) against a known motion given in the FIELD's own unit.
-	// UNIT (audit SK-MV 2026-11-08): the matcher's block field is in HALF-SIZE pixels (the search runs on the half-size luma; the
-	// existing EstimatorHookTests read a 12 x 6 source pan as (6, 3)), so a source-pixel shift must be halved before it is compared.
-	// Returns the error in field units, -1 when no block is trusted; trusted / total count the blocks.
+	// The mean vector error of the trusted blocks (the 2-block border excluded) against a known motion in the FIELD's own unit.
+	// UNIT (checked against the existing tests, which settle the audit's doubt): Field() - what DownloadField reads and the harness scores -
+	// is the VERIFIED field in SOURCE pixels (DejudderWarp.h: "rgba = (vx, vy) in source pixels"; DejudderHookTests compare field.vx with
+	// the 12 px source shift). Forward() / Backward() (the raw searches) are in half-size pixels (the same tests expect 6 and 3 there).
+	// The harness scores Field(), so the shift is compared as it is. Returns -1 when no block is trusted; trusted / total count blocks.
 	double MvFieldError(const DejudderField& field, double dxField, double dyField, long& trusted, long& total)
 	{
 		double sum = 0.0;
@@ -230,8 +231,8 @@ namespace VideoProcessorTest
 	TEST_CLASS(MotionUnificationBenchTests)
 	{
 	public:
-		// The scorer itself (CPU): exact vectors in the field's unit score ~0, the same vectors read as source pixels score about
-		// half the shift (the audit's unit error), an untrusted block is not counted.
+		// The scorer itself (CPU): exact vectors in the field's unit (source px) score ~0, a wrong unit scores far off, an untrusted block
+		// is not counted.
 		TEST_METHOD(FieldErrorScorerUnitsAndPerfectVectors)
 		{
 			DejudderField f;
@@ -239,17 +240,17 @@ namespace VideoProcessorTest
 			f.texels.assign(static_cast<size_t>(f.blocksX) * f.blocksY * 4, 0.0f);
 			for (int i = 0; i < f.blocksX * f.blocksY; ++i)
 			{
-				f.texels[static_cast<size_t>(i) * 4] = 4.0f;       // a 8 source px shift in half-size px
-				f.texels[static_cast<size_t>(i) * 4 + 1] = 1.0f;   // a 2 source px shift
+				f.texels[static_cast<size_t>(i) * 4] = 8.0f;       // an 8 source px shift, as Field() holds it
+				f.texels[static_cast<size_t>(i) * 4 + 1] = 2.0f;   // a 2 source px shift
 				f.texels[static_cast<size_t>(i) * 4 + 2] = 1.0f;   // trusted
 			}
 			long trusted = 0, total = 0;
-			Assert::AreEqual(0.0, MvFieldError(f, 4.0, 1.0, trusted, total), 1e-9, L"perfect vectors in the field's unit");
+			Assert::AreEqual(0.0, MvFieldError(f, 8.0, 2.0, trusted, total), 1e-9, L"perfect vectors in the field's unit");
 			Assert::AreEqual<long>(16, total, L"the interior 4 x 4 blocks");
 			Assert::AreEqual<long>(16, trusted);
-			Assert::IsTrue(MvFieldError(f, 8.0, 2.0, trusted, total) > 4.0, L"comparing half-size vectors with the source-pixel shift is the unit error");
+			Assert::IsTrue(MvFieldError(f, 4.0, 1.0, trusted, total) > 4.0, L"the wrong unit (a half-size shift against source-pixel vectors) is caught");
 			f.texels[(2 * 8 + 2) * 4 + 2] = 0.0f;   // one interior block untrusted
-			MvFieldError(f, 4.0, 1.0, trusted, total);
+			MvFieldError(f, 8.0, 2.0, trusted, total);
 			Assert::AreEqual<long>(15, trusted, L"an untrusted block is not scored");
 		}
 
@@ -369,9 +370,8 @@ namespace VideoProcessorTest
 						Assert::IsTrue(warp.ExternalFlowUsed(), L"the pair estimate must have taken the pair ahead (size or device mismatch otherwise)");
 					const DejudderField field = DownloadField(gpu, warp);
 					long trusted = 0, total = 0;
-					const double epeHalf = MvFieldError(field, sh[0] / 2.0, sh[1] / 2.0, trusted, total);   // field unit: half-size px
-					row("shift", name, n, "epe_half_px", epeHalf);
-					row("shift", name, n, "epe_px", epeHalf < 0 ? epeHalf : epeHalf * 2.0);   // in source px
+					const double epe = MvFieldError(field, sh[0], sh[1], trusted, total);   // Field() is in source px
+					row("shift", name, n, "epe_px", epe);
 					row("shift", name, n, "trusted_share", total ? static_cast<double>(trusted) / total : 0.0);
 					row("shift", name, n, "estimate_ms", ms);
 					row("shift", name, n, "used_optical_flow_pair", warp.ExternalFlowUsed() ? 1.0 : 0.0);
