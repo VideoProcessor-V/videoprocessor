@@ -143,7 +143,8 @@ Writes `NullTables.generated.h` (an inline `GeneratedNullTables()` returning the
 * The simulation is a line-by-line port of `ChainEvidence.h` (SID-CAL2 C1): the RECENT WINDOW in seconds (closed shots expire after
   1.5 x (c1 / 1.4) x the measured running-mean gap between the axis's evaluations, 10-600 s; about 16 s at a 1 s gap), a HOLD
   evaluation forgets its axis, the first cut after a HOLD clears both axes (rate measurement included), and the E2 minimum shot dwell
-  (`--dwell-sec`, default = the estimator's `kMinShotDwellSec`; 0 = the estimator without E2). The HEADLINE row is the live setting:
+  (`--dwell-sec`, default = the estimator's `kMinShotDwellSec` = 3 s, owner-approved; 0 = the estimator without E2: a shot's evidence counts once the shot lasted
+  the dwell, shorter shots add nothing). The HEADLINE row is the live setting:
   calibrated tables, per-shot cap c1/2, window on; the c1*1.0 cap and the placeholder tables are extra rows. Switches for ablations:
   `--no-window` (the cal1 behaviour), `--no-hold`, `--dwell-sec`.
 * HOLD from the dump: the dump has no HOLD column. A HOLD evaluation (the top candidate is mixed) leaves a gated candidate whose
