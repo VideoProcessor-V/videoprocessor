@@ -65,13 +65,7 @@ if (p.x < size.x && p.y < size.y) {
 		// Black bars (owner 2026-10-14): the picture rectangle in input pixels. The kernel and its law are the shared unit U8
 		// (VpUnit::PictureRect, input/source_analysis/picture/shared/PictureRect.h; moved unchanged).
 
-		// Optical flow source: the half-size luma (8-bit codes) as the
-		// engine's 8-bit input.
-		const char* const OF_INPUT_BODY = R"GLSL(
-ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-if (p.x < imageSize(dst).x && p.y < imageSize(dst).y)
-    imageStore(dst, p, vec4(clamp(texelFetch(src, p, 0).r / 255.0, 0.0, 1.0), 0.0, 0.0, 1.0));
-)GLSL";
+		// (SK-MV: the engine's 8-bit input pass is gone with the render-time engine; the producer makes its own input.)
 
 		// Optical flow source: a block's vector (8x8 half-size pixels = 2x2
 		// engine vectors, S10.5) as the median of its four per component,
