@@ -1,0 +1,55 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
+#pragma once
+
+// M2 P10-5 preparation (doc 59 section 5.2, the confirmed split): the capture thread's ingress state, the members the
+// pulldown / film clock / stale-arrival code reads, copied VERBATIM (names, types, initialisers, comments) from
+// LibplaceboVideoRenderer.h so that, at the LVRH step, the renderer takes them as ONE base (the members leave Bill's
+// header and every reader keeps its text, as P5a's settings base did). R15 DecideIngress then runs the pulldown /
+// stale-gap block before EnqueueFrame from IngressPolicy; the hardware-age block and the missed / break counters
+// around Bill's UpdateFrameRateAndPPM become one-line helpers into it; Bill's lines keep their order.
+// NOT included anywhere yet (the header still declares these members). Threads: as each comment says; the atomics are
+// read by the render loop (cadence, skipped count) and written by its settings refresh. C++14.
+
+#include <vprenderer/CaptureTimestampGap.h>   // CaptureArrival::Tracker
+#include <VP-V/modules/input/queue_timing/PulldownDetector.h>
+
+#include <atomic>
+#include <cstdint>
+
+namespace Vpv
+{
+	namespace Ingress
+	{
+		struct IngressState
+		{
+	// Pulldown detection (owner 2026-10-14; off by default). The detector runs on the capture thread only; the switch is
+	// refreshed from the active settings by the render loop; Reset asks for a fresh start.
+	std::atomic<bool> m_pulldownDetection{false};
+	std::atomic<bool> m_pulldownFixes{true};   // pulldown_fixes (audit 2026-10-16)
+	bool m_pulldownFixesApplied = true;        // capture thread
+	// timing_continuity_fixes (Bug hunt 2026-10-17): refreshed by the render loop.
+	std::atomic<bool> m_timingContinuityFixes{true};
+	// cadence_class_fixes (Hunt 2, 2026-10-17): refreshed by the render loop.
+	std::atomic<bool> m_cadenceClassFixes{true};
+	bool m_cadenceClassFixesApplied = true;   // capture thread
+	bool m_pulldownForceGap = false;          // capture thread: a toggle restarted the film clock (06-interp L1)
+	// Q1 (queue stress 2026-10-18, queue_timing_fixes): stale-frame arrivals and their
+	// delivery gap (capture thread).
+	CaptureArrival::Tracker m_captureArrival;
+	bool m_captureStaleGapPending = false;
+	const char* m_captureStaleGapCause = nullptr;
+	uint64_t m_captureStaleRuns = 0;
+	bool m_enqueueArrivalIsFrameStart = false;   // OnVideoFrame -> EnqueueFrame (capture callbacks are serial; re-audit MED 1)
+	// Capture timestamp breaks (UpdateFrameRateAndPPM's discontinuity branch).
+	std::atomic<uint64_t> m_captureTimestampBreaks{0};
+	std::atomic<bool> m_pulldownResetRequested{false};
+	std::atomic<int> m_pulldownCadence{0};   // (cycle << 16) | new frames per cycle; 0 = not locked
+	std::atomic<uint64_t> m_pulldownSkipped{0};
+	Pulldown::Detector m_pulldown;
+	Pulldown::FilmClock m_pulldownClock;
+	uint64_t m_pulldownSignature = 0;
+	int64_t m_pulldownFilmQpc = 0;   // the last film frame's even time (QPC)
+		};
+	}
+}
