@@ -66,7 +66,7 @@ An empty rectangle means the whole plane.
 
 | Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|
-| `chroma_upscale_vp` | profile | enum | off, cfl | off | Config editor > Scaling > VP chroma upscale (candidate) | libplacebo's own chroma upscaler (`chroma_upscaler`) | "Chroma upscale: libplacebo (<reason>)"; `Status()`; "grain split (chroma-from-luma)" while an own split runs | budget-governed: the VRAM governor drops the scratch-arena temporaries (T1) before the T0 ones; the module then fails visibly for the frame and libplacebo's chroma upscaler runs; nothing is fixed to a GPU model |
+| `chroma_upscale_vp` | profile | enum | off, cfl | off | VP-V > Scaling > Chroma and downscale light > VP chroma upscale (candidate) (edits the Scaling profile selected on VP Renderer > Scaling) | libplacebo's own chroma upscaler (`chroma_upscaler`) | "Chroma upscale: libplacebo (<reason>)"; `Status()`; "grain split (chroma-from-luma)" while an own split runs | budget-governed: the VRAM governor drops the scratch-arena temporaries (T1) before the T0 ones; the module then fails visibly for the frame and libplacebo's chroma upscaler runs; nothing is fixed to a GPU model |
 - Existing key `chroma_upscaler` (libplacebo's own chroma upscaler) applies whenever this module is off or has failed.
 - Fixed law (not user settings): radius 2, `epsFrac` 0.002, neighbour range 3 x 3. The model-only knob `CflParams::grainGuard`
   (false = regression on the raw planes, no add-back) exists for tests.
