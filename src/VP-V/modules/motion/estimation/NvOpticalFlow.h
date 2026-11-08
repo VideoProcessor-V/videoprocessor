@@ -19,6 +19,24 @@ namespace NvOpticalFlow
 {
 	enum class Preset { Slow, Medium, Fast };
 
+	// SK-MV (doc 83, section 5): the runtime ONE-ENGINE GUARD. The vector engine owns exactly one NVOF session (Engine) per GPU: the
+	// look-ahead producer's. Every Engine and HintedEngine counts itself here while its driver session is open, keyed by the GPU
+	// (the adapter's LUID, so a second device on the same GPU is the same GPU). Opening a second Engine on a GPU that already has
+	// one is counted as a violation (the vector engine logs a rise, VectorEngine::PlanProducer); nothing is refused, so the guard changes no behaviour, and a test
+	// asserts it stays at zero across the producer, the de-judder and the long-pair service. The long-pair HintedEngine is a
+	// second session by design (hints on) and is counted apart; it is a governor decision, not a violation, until the service is wired.
+	enum class SessionKind { Engine, Hinted };
+	struct Sessions
+	{
+		static uint64_t AdapterKey(ID3D11Device* device);   // the adapter LUID as one word; 0 = unknown
+		static void Opened(SessionKind kind, uint64_t adapter);
+		static void Closed(SessionKind kind, uint64_t adapter);
+		static int Open(SessionKind kind, uint64_t adapter);    // sessions of `kind` open on that GPU now (adapter 0: all GPUs)
+		static int Peak(SessionKind kind, uint64_t adapter);    // the most open at once since the process started (adapter 0: the highest of any GPU)
+		static unsigned long long Violations();                  // second Engine sessions opened on a GPU that had one
+		static void ResetForTest();                              // zeroes the table (tests only, nothing may be open)
+	};
+
 	struct Result
 	{
 		double gpuMs = 0.0;   // wall time from an idle GPU to the engine's completion (both directions)
@@ -65,6 +83,7 @@ namespace NvOpticalFlow
 		CComPtr<ID3D11DeviceContext> context;
 		CComPtr<ID3D11Query> queryStart;   // an event query (timing)
 		std::map<ID3D11Texture2D*, void*> registered;
+		uint64_t sessionAdapter = 0;   // the GPU this session is counted under while its handle is open (Sessions)
 		int width = 0, height = 0;
 		bool costs = false;
 		std::string error;

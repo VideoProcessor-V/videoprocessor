@@ -84,6 +84,14 @@ namespace VpMotion
 			DebugLog::Log("Motion ahead: the producer stopped (%s); the de-judder estimates at render time",
 				motionProducer->Error().c_str());
 		}
+		// SK-MV: the runtime one-engine guard (NvOpticalFlow.h Sessions): a second Engine session on a GPU is logged (a bug, never silent).
+		const unsigned long long nvofViolations = NvOpticalFlow::Sessions::Violations();
+		if (nvofViolations != nvofViolationsSeen)
+		{
+			nvofViolationsSeen = nvofViolations;
+			DebugLog::Log("NVOF guard: a second NvOpticalFlow::Engine session was opened on one GPU (%llu in total) - the vector engine's producer is the only one allowed",
+				nvofViolations);
+		}
 		motionEngineReady.store(motionProducer && motionProducer->Running() && motionProducer->EngineReady(), std::memory_order_release);
 		// Frames are submitted only while a motion estimate runs for this source (the de-judder or the
 		// interpolator); otherwise the producer stays alive, idle. Fixed-constant batch B3 2026-10-18

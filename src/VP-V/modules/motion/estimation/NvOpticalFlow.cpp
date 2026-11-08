@@ -3,15 +3,104 @@
 
 #include "../../../../../3rdparty/nvidia-optical-flow/nvOpticalFlowD3D11.h"
 
+#include <dxgi.h>
+
+#include <map>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace NvOpticalFlow
 {
 	namespace
 	{
+		struct SessionTable
+		{
+			std::mutex mutex;
+			std::map<uint64_t, int> open[2], peak[2];
+			unsigned long long violations = 0;
+		};
+		SessionTable& Table()
+		{
+			static SessionTable* table = new SessionTable();   // never destroyed: an engine may close during static teardown
+			return *table;
+		}
+		int Index(SessionKind kind) { return kind == SessionKind::Engine ? 0 : 1; }
+
 		using CreateInstance = NV_OF_STATUS(NVOFAPI*)(uint32_t, NV_OF_D3D11_API_FUNCTION_LIST*);
 		NV_OF_D3D11_API_FUNCTION_LIST* List(void* p) { return static_cast<NV_OF_D3D11_API_FUNCTION_LIST*>(p); }
+	}
+
+	uint64_t Sessions::AdapterKey(ID3D11Device* device)
+	{
+		if (!device)
+			return 0;
+		CComPtr<IDXGIDevice> dxgiDevice;
+		CComPtr<IDXGIAdapter> adapter;
+		DXGI_ADAPTER_DESC desc{};
+		if (FAILED(device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDevice))) || FAILED(dxgiDevice->GetAdapter(&adapter)) ||
+			FAILED(adapter->GetDesc(&desc)))
+			return 0;
+		return (static_cast<uint64_t>(static_cast<uint32_t>(desc.AdapterLuid.HighPart)) << 32) | desc.AdapterLuid.LowPart;
+	}
+
+	void Sessions::Opened(SessionKind kind, uint64_t adapter)
+	{
+		SessionTable& t = Table();
+		std::lock_guard<std::mutex> lock(t.mutex);
+		int& now = t.open[Index(kind)][adapter];
+		if (kind == SessionKind::Engine && now >= 1)
+			++t.violations;
+		++now;
+		int& high = t.peak[Index(kind)][adapter];
+		if (now > high)
+			high = now;
+	}
+
+	void Sessions::Closed(SessionKind kind, uint64_t adapter)
+	{
+		SessionTable& t = Table();
+		std::lock_guard<std::mutex> lock(t.mutex);
+		int& now = t.open[Index(kind)][adapter];
+		if (now > 0)
+			--now;
+	}
+
+	int Sessions::Open(SessionKind kind, uint64_t adapter)
+	{
+		SessionTable& t = Table();
+		std::lock_guard<std::mutex> lock(t.mutex);
+		int sum = 0;
+		for (const auto& entry : t.open[Index(kind)])
+			if (adapter == 0 || entry.first == adapter)
+				sum += entry.second;
+		return sum;
+	}
+
+	int Sessions::Peak(SessionKind kind, uint64_t adapter)
+	{
+		SessionTable& t = Table();
+		std::lock_guard<std::mutex> lock(t.mutex);
+		int high = 0;
+		for (const auto& entry : t.peak[Index(kind)])
+			if ((adapter == 0 || entry.first == adapter) && entry.second > high)
+				high = entry.second;
+		return high;
+	}
+
+	unsigned long long Sessions::Violations()
+	{
+		SessionTable& t = Table();
+		std::lock_guard<std::mutex> lock(t.mutex);
+		return t.violations;
+	}
+
+	void Sessions::ResetForTest()
+	{
+		SessionTable& t = Table();
+		std::lock_guard<std::mutex> lock(t.mutex);
+		t.open[0].clear(); t.open[1].clear(); t.peak[0].clear(); t.peak[1].clear();
+		t.violations = 0;
 	}
 
 	Engine::~Engine()
@@ -31,6 +120,8 @@ namespace NvOpticalFlow
 		registered.clear();
 		if (f && handle)
 			f->nvOFDestroy(static_cast<NvOFHandle>(handle));
+		if (handle)
+			Sessions::Closed(SessionKind::Engine, sessionAdapter);
 		handle = nullptr;
 	}
 
@@ -73,6 +164,8 @@ namespace NvOpticalFlow
 			return false;
 		}
 		handle = h0;
+		sessionAdapter = Sessions::AdapterKey(deviceIn);
+		Sessions::Opened(SessionKind::Engine, sessionAdapter);   // SK-MV: the one-engine guard counts the open session
 		device = deviceIn;
 		context = contextIn;
 		width = w;

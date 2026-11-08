@@ -94,6 +94,8 @@ namespace VpMotion
 		// A run of kNoPairRun makes the visible "motion" fallback entry (FallbackCatalog::Motion); a pair resets it. Render thread.
 		static constexpr unsigned kNoPairRun = 8;
 		unsigned motionNoPairRun = 0;
+		// SK-MV: NvOpticalFlow::Sessions::Violations() as last logged (render thread).
+		unsigned long long nvofViolationsSeen = 0;
 		// One vectors-valid state (docs/VP-interpolator-50-60-plan.md step 1; owner [[vp-vector-validity]]):
 		// every discontinuity moves its epoch from any thread; the render thread applies it
 		// (ApplyMotionInvalidate) and every vector consumer checks the epoch its vectors were made in.

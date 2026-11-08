@@ -54,6 +54,7 @@ namespace NvOpticalFlow
 		void* functions = nullptr;   // NV_OF_D3D11_API_FUNCTION_LIST (own copy)
 		void* handle = nullptr;
 		std::map<ID3D11Texture2D*, void*> registered;
+		uint64_t sessionAdapter = 0;   // the GPU this session is counted under while its handle is open (NvOpticalFlow::Sessions)
 		int width = 0, height = 0;
 		std::string error;
 	};

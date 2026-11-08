@@ -31,6 +31,8 @@ namespace NvOpticalFlow
 		registered.clear();
 		if (f && handle)
 			f->nvOFDestroy(static_cast<NvOFHandle>(handle));
+		if (handle)
+			Sessions::Closed(SessionKind::Hinted, sessionAdapter);
 		handle = nullptr;
 	}
 
@@ -70,6 +72,8 @@ namespace NvOpticalFlow
 			return false;
 		}
 		handle = h0;
+		sessionAdapter = Sessions::AdapterKey(device);
+		Sessions::Opened(SessionKind::Hinted, sessionAdapter);   // SK-MV: counted apart from the Engine (the one-engine guard)
 		// External hints must be supported for the optical flow mode, else the visible fallback takes the pair.
 		uint32_t hintCap = 0, capSize = 1;
 		if (!f->nvOFGetCaps || f->nvOFGetCaps(h0, NV_OF_CAPS_SUPPORT_HINT_WITH_OF_MODE, &hintCap, &capSize) != NV_OF_SUCCESS || hintCap == 0)

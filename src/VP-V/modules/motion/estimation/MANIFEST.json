@@ -50,6 +50,7 @@
     "src/VP-V/modules/motion/estimation/global_model/ReferenceMatcher.cpp",
     "src/VP-V/modules/motion/estimation/tests/CameraMeasurementTests.cpp",
     "src/VP-V/modules/motion/estimation/tests/MotionUnificationBenchTests.cpp",
+    "src/VP-V/modules/motion/estimation/tests/NvofOneEngineGuardTests.cpp",
     "src/VP-V/modules/motion/estimation/VectorDemand.h",
     "src/VP-V/modules/motion/estimation/tests/VectorDemandTests.cpp",
     "src/VP-V/modules/motion/estimation/VectorDemandProducts.h",
