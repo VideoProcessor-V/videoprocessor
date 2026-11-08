@@ -37,6 +37,7 @@ namespace FallbackPlainText
 			{ "vector_engine", "The motion vector engine is not serving the steps that need it" },
 			{ "vector_engine_producer", "The motion vector engine is skipping work to keep up" },
 			{ "vector_engine_global", "Global motion detection is not keeping up and is off" },
+			{ "vector_engine_hook", "Camera-guided motion matching was skipped after an error" },
 		};
 		for (const Entry& e : table)
 			if (id == e.id)

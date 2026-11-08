@@ -101,7 +101,37 @@ Synthesis consumers (dejudder extras, interpolator, hiccup repair, occlusion mas
 
 DELIBERATE exception: while libplacebo smooth motion runs, source-domain analysis consumers (source field and source statistics) keep the VP vectors, and output-domain consumers (output dither) fall back visibly ("libplacebo smooth motion owns output"). This is analysis only: no VP interpolation or de-judder synthesis runs alongside smooth motion. Revert with `VectorDemand::kAnalysisUnderSmoothMotion = false`, which makes smooth motion exclusive (every consumer falls back visibly).
 
-Fallback entries (`FallbackCatalog`): `vector_engine` (unserved consumers and why), `vector_engine_producer` (look-ahead stores nothing for this size), `vector_engine_global` (fast-pan / intent without whole-frame motion).
+Fallback entries (`FallbackCatalog`): `vector_engine` (unserved consumers and why), `vector_engine_producer` (look-ahead stores nothing for this size), `vector_engine_global` (fast-pan / intent without whole-frame motion), `vector_engine_hook` (the K4 pre-estimate hook threw: those pairs estimated without camera guidance; M2 P5a-5).
+
+## Vector engine ownership (M2 P5a)
+
+The estimation-side state and decisions behind the renderer live in `VectorEngine` (`VectorEngine.h/.cpp`,
+`VectorEngineState.h`): the vector-demand decision and its statistics service, the optical-flow producer's lifecycle
+and look-ahead depth (`ProducerPlan.h`, pure and identity-tested against the old inline logic), the one vectors-valid
+state with its counters, and the S0 shadow check. The renderer holds one `vectorEngine` member and reaches it at the
+sites the code used to sit at; what the engine needs from the renderer arrives as plain values or through
+`IVectorEngineHost` (adapter: `VectorEngineHost.h`). What moved, what is left in the renderer, the thread of every
+member and the alias table: [HOOKS.md](HOOKS.md).
+
+- Reserved in `IVectorEngine` (interface and contracts only, default "absent"): the P3r refinement stage (`refined_field`,
+  U15 FieldRefine) and the async long-pair NVOF service `SubmitLongPair` with external hints. Fallback when absent: the
+  consumer reads the P3 field / the matcher's seeded search, and the fallback is raised visibly (ids in the header).
+  No BDOF/PROF offsets are stored.
+- P5a-5: the estimate itself moved out of the renderer: the idle engine keeper (`EngineKeeper.inl`: warm-up estimate,
+  video-memory budget) and the estimate (`VectorEngineEstimate.inl`: plane uploads, the matcher run, the estimate ahead),
+  verbatim, as out-of-line members of the renderer's Impl that the renderer includes once; their state is
+  `EstimateState.h` (`vectorEstimate`). The renderer keeps one declaration line per function and the alias block.
+- K4 insertion point: `VectorEngine::Estimate` wraps the matcher's Estimate. A registered `IPreEstimateHook` (the camera
+  link) gets `BeforeEstimate(ctx, sink)` right before (the sink is the matcher's `SetCameraGuidance`) and
+  `AfterEstimate(pairSeq, guidanceUsed, countsTex)` right after, for the in-render estimate and the estimate ahead (never
+  the warm-up). No hook (today; always with camera guidance off) = the matcher's Estimate only: nothing bound, no extra
+  GPU work.
+- `IVectorEngine` (`vpv.vector_engine.v1`) is implemented by `VectorEngine` from today's state: the matcher's live block
+  field as the verified field, the validity epoch as the field era, the producer's whole-frame motion; everything the
+  renderer does not keep today answers "absent" (HOOKS.md section 7). The hub module `VectorEngineExtension` answers the
+  query with a directory: `EngineFor(host)` gives that renderer's engine.
+- No settings were added or changed by P5a (P5a-5 included); defaults are untouched. With VP motion off and in Original
+  the engine does nothing (its decision returns before any work, the producer plan wants nothing, no hook is bound).
 
 ## Contract
 
@@ -135,7 +165,7 @@ Placeholder tests:
 - (none yet)
 
 Isolation tests:
-- `NvOpticalFlowTests` (GPU), `VectorStoreTests`, `MotionAhead*Tests`, `OpticalFlowTrustTests`, `MotionValidityTests`, `H3TimingTests` (idle keeper); no class is named "DejudderWarp estimator tests" (the estimator is covered by the GPU regressions in `LibplaceboLutParserTests` / `BetaGpuTests`)
+- `NvOpticalFlowTests` (GPU), `VectorStoreTests`, `MotionAhead*Tests`, `OpticalFlowTrustTests`, `MotionValidityTests`, `H3TimingTests` (idle keeper), `ProducerPlanTests`, `VectorEngineTests`, `VectorEngineHookTests` (K4 hook: null / all-off hook leave the matcher's call sequence unchanged; IVectorEngine answers); no class is named "DejudderWarp estimator tests" (the estimator is covered by the GPU regressions in `LibplaceboLutParserTests` / `BetaGpuTests`)
 
 Contract tests:
 - vectors estimated on the original (not repaired/re-based) frame at the matcher's half size (not yet a dedicated test)
@@ -164,6 +194,9 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 - `src/VideoProcessor-Lib/MotionConfig.h`
 - `src/VP-V/modules/motion/estimation/MotionEngineIdle.h`
 - `src/VP-V/modules/motion/estimation/MotionAheadProducer.h`
+- `src/VP-V/modules/motion/estimation/VectorEngine.h` / `VectorEngine.cpp`, `VectorEngineState.h`, `ProducerPlan.h`, `VectorEngineHost.h`, `VectorEngineInterface.h`
+- `src/VP-V/modules/motion/estimation/EstimateState.h`, `EngineKeeper.inl`, `VectorEngineEstimate.inl` (P5a-5; the two `.inl` are compiled only inside the renderer's translation unit)
+- `src/VP-V/modules/motion/estimation/VectorEngineExtension.h` / `VectorEngineExtension.cpp` (hub module: `vpv.vector_engine.v1`)
 
 Forwarding headers (old paths kept for Bill's files, the renderer host and RendererCaptureHarnessTests.cpp; removed at M2 step 0):
 
