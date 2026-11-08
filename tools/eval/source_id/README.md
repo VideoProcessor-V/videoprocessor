@@ -124,7 +124,17 @@ Writes `NullTables.generated.h` (an inline `GeneratedNullTables()` returning the
   (3/H when no event: zero events in H hours supports only that bound); wrong-n entries on alt segments; evaluations to c1 on alt segment-axes
   (every one is a denominator; inf = never), 8- and 10-bit separately. Segments are maximal runs of one truth; evaluations without
   truth are boundaries. c1 = -ln(rate x 10 s / 3600) + ln(8 x 10) = 14.87 nats.
-* Not simulated: the native hypothesis (it cannot raise a false size) and HOLD masking. The writer (ChainEvalRegistrationTests) marks NO candidate `informative` in an evaluation the estimator judged HOLD (it accumulates nothing there, SID-CAL r2 M1), so those evaluations never reach the fit.
+* The simulation is a line-by-line port of `ChainEvidence.h` (SID-CAL2 C1): the RECENT WINDOW in seconds (closed shots expire after
+  1.5 x (c1 / 1.4) x the measured running-mean gap between the axis's evaluations, 10-600 s; about 16 s at a 1 s gap), a HOLD
+  evaluation forgets its axis, the first cut after a HOLD clears both axes (rate measurement included), and the E2 minimum shot dwell
+  (`--dwell-sec`, default = the estimator's `kMinShotDwellSec`; 0 = the estimator without E2). The HEADLINE row is the live setting:
+  calibrated tables, per-shot cap c1/2, window on; the c1*1.0 cap and the placeholder tables are extra rows. Switches for ablations:
+  `--no-window` (the cal1 behaviour), `--no-hold`, `--dwell-sec`.
+* HOLD from the dump: the dump has no HOLD column. A HOLD evaluation (the top candidate is mixed) leaves a gated candidate whose
+  statistic was never reached (`T_ev` empty, line gate passed) and no informative candidate (the writer clears them): that is the proxy
+  (`_is_hold`). On the cal1 dump it flags 197 of 23396 axis evaluations and tracks the live run's HOLD rows reel by reel (22 vs 25, 23 vs 23, 8 vs 8 ...);
+  on the dark reels it over-detects (it counts dark frames the live state machine did not hold).
+* Not simulated: the native hypothesis (it cannot raise a false size). The writer (ChainEvalRegistrationTests) marks NO candidate `informative` in an evaluation the estimator judged HOLD (it accumulates nothing there, SID-CAL r2 M1), so those evaluations never reach the fit.
 
 ## compare_eval_runs.py (SID-OPT: did a cost change alter a result, and what did it do to the time)
 
