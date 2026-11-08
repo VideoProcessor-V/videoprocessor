@@ -124,6 +124,8 @@ Every tunable is a member of a settings struct with its default in the header (h
 | chain_min_run | SamplerSettings::minRun | int px | 16.. | 64 | inner extent below this: plan invalid (kReasonShortLines); tiers: same on all |
 | chain_coarse_half_width | VerifierSettings::coarseHalfWidth | int | 0..16 | 4 | coarse stage scans n +- this; tiers: same on all |
 | chain_coarse_step | VerifierSettings::coarseStep | int | 1..8 | 1 | a short-window notch is only a few integers wide: step 1 (doc 78 said 4; measured, see Method); tiers: same on all |
+| chain_coarse_windows | VerifierSettings::coarseWindows | int | 1..2 | 2 | lever (result-changing, off): short coarse windows per line, 2 = both line ends, 1 = the left end only (about half the coarse stage); tiers: budget-governed |
+| chain_coarse_refine | VerifierSettings::coarseRefine | bool | on/off | off | lever (result-changing, off): with chain_coarse_step > 1, also scan the integers the step skipped within step - 1 of the best (step 2 + refine = 7 instead of 9 integers); tiers: budget-governed |
 | chain_coarse_lines | VerifierSettings::coarseLines | int | 4..64 | 8 | lines of the coarse stage (it only refines and ranks candidates; F0: the size is right down to 8 lines); tiers: budget-governed |
 | chain_coarse_window_fraction | VerifierSettings::coarseWindowFraction | float | 0.05..0.5 | 0.125 | coarse window = N x this; tiers: same on all |
 | chain_coarse_min_window | VerifierSettings::coarseMinWindow | int px | 64.. | 160 | lower bound of the coarse window; tiers: same on all |
@@ -195,7 +197,7 @@ Every tunable is a member of a settings struct with its default in the header (h
 | chain_queue_depth | EstimatorSettings::queueDepth | int | 1..2 | 1 | jobs waiting for the worker; a newer job replaces the oldest, counted; tiers: same on all |
 | chain_output_step_override | EstimatorSettings::outputStepOverride | int | 0, 1, 4 | 0 (detect) | forces the output quantisation step in 10-bit codes (4 = 8-bit picture); tiers: same on all |
 | chain_latched_exact_lines | EstimatorSettings::latchedExactLines | int | 4..64 | 16 | exact-stage lines while confident; tiers: budget-governed |
-| chain_confident_axis_exact_lines | EstimatorSettings::confidentAxisExactLines | int | 0 (off), 4..64 | 16 | exact-stage lines of one confident axis while the other axis is still acquiring (both confident: chain_latched_exact_lines applies, or all lines when the monitor holds natives out); the sampled lines per frame stay 32 + 32 until both are confident; tiers: budget-governed |
+| chain_confident_axis_exact_lines | EstimatorSettings::confidentAxisExactLines | int | 0 (off), 4..64 | 0 (off) | lever (result-changing, measured later in order): exact-stage lines of one confident axis while the other axis is still acquiring; 16 = on (both confident: chain_latched_exact_lines applies, or all lines when the monitor holds natives out); the sampled lines per frame stay 32 + 32 until both are confident; selected by `ExactLinesFor`; tiers: budget-governed |
 | chain_clock_ring | EstimatorSettings::clockRing | int | 4..4096 | 64 | frames of (seq, source time, active area) remembered for the sink; tiers: same on all |
 | chain_event_cap | EstimatorSettings::eventCap | int | 1.. | 64 | pending cut / blank / fade events kept (oldest dropped); tiers: same on all |
 | chain_repeat_cap | EstimatorSettings::repeatCap | int | 1.. | 16 | pending repeat marks kept; tiers: same on all |
@@ -274,9 +276,12 @@ memoised across operators (`TapMemo`), the solves of a call are kept so candidat
 bytes (160 MiB, probe 20 MiB) instead of a FIFO of 512, smaller than the working set of one acquiring evaluation (estimated about 1800 distinct operators for 8 candidates on
 two axes), which evicts an operator before the next evaluation can reuse it. Reciprocal diagonals were already in place (`Factor` stores 1/d and the solves multiply). Step 2 (search narrowing): the two narrowings asked for
 (exact stage only for n within +-1 of the coarse best; exact stage only for the top 2 coarse candidates plus the confident n) were already the shipped values; they are now
-one documented constant set (`Narrowing` in `DescaleVerifier.h`) and a new, default-off lever caps the promoted candidates of a confident axis. Step 3: an axis that reads
-confident while the other still acquires runs its exact stage on 16 lines (`confidentAxisExactLines`); the sampler already drops to 16 + 16 lines when both axes are
-confident, so with both confident nothing changes. The multi-candidate timing test (`LogsMedianAndP95OfTwentyMultiCandidateEvaluationsAtUltraHd`) logs median and p95 of 20
+one documented constant set (`Narrowing` in `DescaleVerifier.h`); the new levers are all OFF (shipped behaviour unchanged) and are measured later, one at a time, with the
+acceptance rule: no confident-wrong reading, UNSURE share and latch latency not worse than before on the same reels. The levers: `confidentMaxExactCandidates` (cap the promoted
+challengers of a confident axis), `coarseWindows` = 1 (one coarse window per line) and `coarseStep` = 2 with `coarseRefine` (7 instead of 9 coarse integers). Step 3
+(`confidentAxisExactLines` = 16, selected by `ExactLinesFor`) is a lever too, OFF: it would run the exact stage of a confident axis on 16 lines while the other axis still
+acquires; the sampler already drops to 16 + 16 lines when both axes are confident, and with both confident nothing changes. The evaluation harness test seam
+`VP_SOURCE_ID_LEVER` = none | step3 | coarse1 | coarse2 (read only by ChainEvalRegistrationTests) sets a lever without a rebuild. The multi-candidate timing test (`LogsMedianAndP95OfTwentyMultiCandidateEvaluationsAtUltraHd`) logs median and p95 of 20
 evaluations, cold and warm.
 
 ### Cost (the older estimate, NOT measured; one thread, 3840x2160, +-2x; the timing test logs the real numbers)

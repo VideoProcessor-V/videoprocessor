@@ -19,9 +19,12 @@ Per reel it reports
                     verifier), so it only compares runs made on a comparable load (same affinity, nothing else heavy running).
 A reel missing from either side is listed as UNCOMPARED (it is not a pass).
 
-Exit code: 0 = every compared row identical (and nothing uncompared unless --expect any); 1 = a difference with --expect identical (the default);
-3 = nothing differed but some reel could not be compared; 2 = bad arguments / unreadable input. With --expect any the exit code is 0 unless an input is
-unreadable (use it for a result-changing step: the report still lists every difference).
+cost (optional) the per-evaluation work counters of the AFTER (and BEFORE, when present) run: caldump/cost/<reel>.csv (builds, solves, reused, exact lines
+                    per axis and the cached MiB after the evaluation), summarised as medians and the maximum.
+
+Exit code: 0 = every compared row identical and every reel compared; 1 = a difference with --expect identical (the default); 3 = some reel (or its
+caldump) could not be compared or had ZERO rows to compare (never a pass, also with --expect any); 2 = bad arguments / unreadable input. With --expect any
+differences do not fail (a result-changing step: the report still lists every one), uncompared reels still do.
 """
 import argparse
 import csv
@@ -158,6 +161,34 @@ def compare_caldump(before_path, after_path):
     return c, only_before, only_after
 
 
+def cost_summary(path):
+    """Medians of the per-evaluation work counters of one reel (caldump/cost/<reel>.csv), or None."""
+    if not os.path.isfile(path):
+        return None
+    rows = read_csv(path)
+    if not rows:
+        return None
+
+    def col(name):
+        out = []
+        for r in rows:
+            try:
+                out.append(float(r[name]))
+            except (KeyError, ValueError):
+                pass
+        return out
+
+    builds = [a + b for a, b in zip(col("builds_x"), col("builds_y"))]
+    solves = [a + b for a, b in zip(col("solves_x"), col("solves_y"))]
+    reused = [a + b for a, b in zip(col("reused_x"), col("reused_y"))]
+    mb = col("cached_mb")
+    if not builds:
+        return None
+    return "evaluations %d: builds median %.0f, solves median %.0f, reused median %.0f, cached MiB median %.1f max %.1f" % (
+        len(rows), statistics.median(builds), statistics.median(solves), statistics.median(reused),
+        statistics.median(mb) if mb else 0.0, max(mb) if mb else 0.0)
+
+
 def fmt_stats(vals):
     if not vals:
         return "n/a"
@@ -200,6 +231,10 @@ def run(before, after, only, expect):
             continue
         all_b.extend(msb)
         all_a.extend(msa)
+        if c.compared == 0:
+            lines.append("  UNCOMPARED: no chain-lane rows on both sides (nothing to compare is not a pass)")
+            uncompared += 1
+            continue
         bad = c.compared - c.full_same
         lines.append("  chain rows compared %d: core fields (n llr kernel state) identical %d, all columns identical %d%s"
                      % (c.compared, c.core_same, c.full_same, "" if bad == 0 else "   <-- %d rows differ" % bad))
@@ -223,6 +258,10 @@ def run(before, after, only, expect):
         if os.path.isfile(cb) and os.path.isfile(ca):
             try:
                 cc, cob, coa = compare_caldump(cb, ca)
+                if cc.compared == 0:
+                    lines.append("  UNCOMPARED: caldump has no rows on both sides")
+                    uncompared += 1
+                    raise StopIteration
                 badc = cc.compared - cc.full_same
                 lines.append("  caldump rows compared %d: identical %d%s" % (cc.compared, cc.full_same, "" if badc == 0 else "   <-- %d rows differ" % badc))
                 if cob or coa:
@@ -233,12 +272,18 @@ def run(before, after, only, expect):
                     for ex in cc.examples:
                         lines.append("    " + ex)
                 diffs += badc
+            except StopIteration:
+                pass
             except Exception as e:
                 lines.append("  ERROR reading caldump: %s" % e)
                 broken += 1
         else:
             lines.append("  caldump: not compared (%s)" % ("missing BEFORE %s" % cb if not os.path.isfile(cb) else "missing AFTER %s" % ca))
             uncompared += 1
+        for tag, croot in (("BEFORE", before), ("AFTER ", after)):
+            cs = cost_summary(os.path.join(croot, "caldump", "cost", name + ".csv"))
+            if cs:
+                lines.append("  work %s: %s" % (tag, cs))
     lines.append("")
     lines.append("== all compared reels together")
     lines.append("  time BEFORE: %s" % fmt_stats(all_b))
@@ -250,11 +295,9 @@ def run(before, after, only, expect):
     lines.append("verdict: %s (differing rows/blocks %d, uncompared items %d, unreadable %d)" % (verdict, diffs, uncompared, broken))
     if broken:
         return 2, lines
-    if expect == "any":
-        return 0, lines
-    if diffs:
+    if diffs and expect != "any":
         return 1, lines
-    if uncompared:
+    if uncompared or not names:
         return 3, lines
     return 0, lines
 
@@ -295,6 +338,14 @@ def selftest():
         os.remove(os.path.join(root, "before", "reels", "R.b", "evaluations.csv"))
         code4, lines4 = run(os.path.join(root, "before"), os.path.join(root, "after"), [], "identical")
         assert code4 == 3, "\n".join(lines4)
+        code5, _ = run(os.path.join(root, "before"), os.path.join(root, "after"), [], "any")
+        assert code5 == 3, "an uncompared reel is not a pass even with --expect any"
+        # zero comparable rows on both sides must not pass vacuously
+        for side in ("before", "after"):
+            _write(os.path.join(root, side, "reels", "R.z", "evaluations.csv"), hdr)
+            _write(os.path.join(root, side, "caldump", "R.z.csv"), cal)
+        code6, lines6 = run(os.path.join(root, "before"), os.path.join(root, "after"), ["R.z"], "identical")
+        assert code6 == 3, "\n".join(lines6)
     assert abs(percentile([1, 2, 3, 4, 5], 0.5) - 3) < 1e-9 and abs(percentile([1.0, 2.0], 0.95) - 1.95) < 1e-9
     print("selftest ok")
     return 0

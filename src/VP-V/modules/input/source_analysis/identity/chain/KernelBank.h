@@ -31,6 +31,10 @@
 
 #include "ChainCommon.h"
 
+// No contraction (fused multiply-add) in the descale arithmetic: Residual and ResidualBatch must round identically under any /arch
+// (the translation units that include this header are built without FMA today; this keeps it true if /arch:AVX2 is ever set).
+#pragma fp_contract(off)
+
 namespace SourceIdentity
 {
 	namespace Chain
@@ -558,3 +562,4 @@ namespace SourceIdentity
 		};
 	}
 }
+#pragma fp_contract(on)

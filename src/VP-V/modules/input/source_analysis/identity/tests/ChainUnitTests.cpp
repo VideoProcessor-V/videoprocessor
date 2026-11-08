@@ -987,6 +987,35 @@ namespace Tests
 			}
 		}
 
+		// SID-OPT levers on the coarse stage (Narrowing::kCoarseWindows, kCoarseRefine; OFF by default, measured later in order): one coarse window
+		// per line, and a step-2 coarse grid with a refinement of the skipped integers. Both still refine an off-by-two candidate to the true size.
+		TEST_METHOD(TheCoarseLeversAreOffByDefaultAndStillFindTheTrueSize)
+		{
+			using namespace ChainSynth;
+			const Axes& a = FullChain(720, 1280, kBicubic, 232u, 10);
+			Assert::IsTrue(VerifierSettings().coarseWindows == 2 && !VerifierSettings().coarseRefine && VerifierSettings().coarseStep == 1, L"shipped coarse stage");
+			VerifierSettings one;
+			one.coarseWindows = 1;
+			VerifierSettings grid;
+			grid.coarseStep = 2;
+			grid.coarseRefine = true;
+			const int cands[3] = { 722, 718, 720 };
+			for (int c = 0; c < 3; ++c)
+			{
+				DescaleVerifier shipped;
+				DescaleVerifier v1(one);
+				DescaleVerifier v2(grid);
+				VerifyResult r0, r1, r2;
+				Assert::IsTrue(shipped.Evaluate(a.v, &cands[c], 1, VerifyOptions(), r0));
+				Assert::IsTrue(v1.Evaluate(a.v, &cands[c], 1, VerifyOptions(), r1));
+				Assert::IsTrue(v2.Evaluate(a.v, &cands[c], 1, VerifyOptions(), r2));
+				Assert::IsTrue(r0.candidates[0].exactDone && r0.candidates[0].n == 720, L"shipped finds the true size");
+				Assert::IsTrue(r1.candidates[0].exactDone && r1.candidates[0].n == 720, L"one coarse window finds it too");
+				Assert::IsTrue(r2.candidates[0].exactDone && r2.candidates[0].n == 720, L"the step-2 grid with refinement finds it too");
+				Assert::IsTrue(r1.solves < r0.solves && r2.solves < r0.solves, L"and does less work");
+			}
+		}
+
 		// SID-OPT step 2 lever (Narrowing::kConfidentMaxExactCandidates, default 0 = off): when the caller forces its confident n, only that many
 		// coarse-ranked challengers get the exact stage besides it. Default off: the shipped counts; on: the best challenger and the forced size.
 		TEST_METHOD(TheConfidentAxisLeverPromotesFewerChallengersAndIsOffByDefault)
@@ -2047,6 +2076,7 @@ namespace Tests
 			double cutAt = -1.0;            // the monitor reports a cut on the first frame at or after this time
 			double blackAt = -1.0;          // one second of black (picture lines and monitor frames) from here
 			double formatChangeAt = -1.0;   // Monitor::Discontinuity("source format change") before the frame at or after this time
+			int confidentAxisLines = 0;     // EstimatorSettings::confidentAxisExactLines (0 = the shipped, off)
 		};
 
 		static RevertRun Drive(Mon::SourceIdMode mode)
@@ -2071,7 +2101,9 @@ namespace Tests
 			blk.v.assign(static_cast<size_t>(kFrameH) * static_cast<size_t>(kFrameW), 64.0);
 
 			Tests::ChainFx::ManualClock clk;
-			std::unique_ptr<C::ChainEstimator> owner(new C::ChainEstimator(C::EstimatorSettings(), clk.Fn()));
+			C::EstimatorSettings es;
+			es.confidentAxisExactLines = sc.confidentAxisLines;
+			std::unique_ptr<C::ChainEstimator> owner(new C::ChainEstimator(es, clk.Fn()));
 			C::ChainEstimator& est = *owner;
 			Mon m;
 			m.SetChainEstimatorForTest(std::move(owner));
@@ -2242,6 +2274,67 @@ namespace Tests
 			Assert::IsTrue(r.tChainFlip >= sc.switchAt && r.tChainFlip - sc.switchAt <= bound, L"the chain stopped reading the upscale within the clear bound");
 			Assert::IsTrue(r.tRevert >= sc.switchAt, L"the old reading was held until the source changed");
 			Assert::IsTrue(r.tRevert - sc.switchAt <= bound, L"the consensus let go within the clear bound, not after the window");
+		}
+
+		// SID-OPT step 3 lever (EstimatorSettings::confidentAxisExactLines, Narrowing::kConfidentAxisExactLines): OFF by default. The line
+		// selection is one pure function (ExactLinesFor): latched = latchedExactLines on both axes; the lever only for a confident axis whose
+		// other axis is not; both confident WITHOUT latched mode (N2: natives held out) and every other case = all lines (0).
+		TEST_METHOD(TheConfidentAxisLinesLeverIsOffByDefaultAndSelectsLinesPerAxis)
+		{
+			namespace C = SourceIdentity::Chain;
+			C::EstimatorSettings off;
+			Assert::AreEqual(0, off.confidentAxisExactLines, L"shipped: off");
+			Assert::AreEqual(16, off.latchedExactLines);
+			C::EstimatorSettings on;
+			on.confidentAxisExactLines = 16;
+			for (int thisC = 0; thisC < 2; ++thisC)
+				for (int otherC = 0; otherC < 2; ++otherC)
+				{
+					Assert::AreEqual(off.latchedExactLines, C::ExactLinesFor(off, true, thisC != 0, otherC != 0), L"latched mode wins, lever off");
+					Assert::AreEqual(on.latchedExactLines, C::ExactLinesFor(on, true, thisC != 0, otherC != 0), L"latched mode wins, lever on");
+					Assert::AreEqual(0, C::ExactLinesFor(off, false, thisC != 0, otherC != 0), L"lever off: all lines in every other state");
+					const int expectOn = (thisC != 0 && otherC == 0) ? 16 : 0;
+					Assert::AreEqual(expectOn, C::ExactLinesFor(on, false, thisC != 0, otherC != 0), L"lever on: only a confident axis beside an unsettled one");
+				}
+			Assert::AreEqual(0, C::ExactLinesFor(on, false, true, true), L"both confident but not latched (N2 hold): all lines re-test");
+		}
+
+		// With the lever ON the N2 hold and the N3 window must behave as without it: the same end-to-end scenarios and the same asserts as the
+		// two tests above (this fixture is a 2x upscale on both axes, so the lever can only act while one axis is confident before the other).
+		TEST_METHOD(WithTheConfidentAxisLinesLeverOnN2StillHoldsAndTheRevertStaysInsideTheWindowBound)
+		{
+			Scenario sc;
+			sc.confidentAxisLines = 16;
+			const RevertRun r = Drive(sc);
+			double window = 0.0, acq = 0.0;
+			const double bound = BoundSeconds(window, acq);
+			char line[300];
+			snprintf(line, sizeof(line), "N2 revert, lever on: adopted at %.1f s, chain flip +%.1f s, consensus reverted +%.1f s (bound %.1f s), frames held %llu",
+				r.tAdopt, r.tChainFlip - SwitchSeconds(), r.tRevert - SwitchSeconds(), bound, r.held);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(r.tAdopt > 0.0 && r.tAdopt < SwitchSeconds() - 3.0, L"fixture: adopted well before the switch");
+			Assert::IsTrue(r.held > 0, L"N2 still holds the native-looking frames while the chain reads the upscale");
+			Assert::AreEqual(acq, r.lastIntervalBeforeSwitch, 1e-9, L"and the estimator runs at the acquiring cadence while holding");
+			Assert::IsTrue(r.tRevert > SwitchSeconds() && r.tRevert - SwitchSeconds() <= bound, L"N3: the revert comes inside the window bound");
+			Assert::IsTrue(r.tChainFlip >= 0.0 && r.tChainFlip <= r.tRevert, L"the revert follows the chain's own reading");
+		}
+
+		TEST_METHOD(WithTheConfidentAxisLinesLeverOnAMenuEndOntoNativeStillLetsGoWithinTheClearBound)
+		{
+			Scenario sc;
+			sc.confidentAxisLines = 16;
+			sc.menuStart = 45.0;
+			sc.menuEnd = 55.0;
+			sc.switchAt = 55.0;
+			sc.endAt = 80.0;
+			const RevertRun r = Drive(sc);
+			double acq = 0.0, frame = 0.0;
+			const double bound = ClearBoundSeconds(acq, frame);
+			PrintClear("menu end, lever on", sc, r, bound);
+			Assert::IsTrue(r.tAdopt > 0.0 && r.tAdopt < sc.menuStart, L"fixture: adopted before the menu");
+			Assert::IsTrue(r.clears >= 1, L"the end of the mixed episode still cleared the evidence window");
+			Assert::IsTrue(r.tChainFlip >= sc.switchAt && r.tChainFlip - sc.switchAt <= bound, L"the chain stopped reading the upscale within the clear bound");
+			Assert::IsTrue(r.tRevert >= sc.switchAt && r.tRevert - sc.switchAt <= bound, L"the consensus let go within the clear bound");
 		}
 
 		// Debounce (audit M2): a mixed episode counts only once it has lasted one acquiring interval of source time. The 10 s menu of the test

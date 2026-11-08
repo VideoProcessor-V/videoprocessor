@@ -44,6 +44,9 @@
 
 #include "KernelBank.h"
 
+// No contraction (fused multiply-add) in the descale arithmetic: the batched and the single-line solve must round identically under any /arch.
+#pragma fp_contract(off)
+
 namespace SourceIdentity
 {
 	namespace Chain
@@ -59,15 +62,19 @@ namespace SourceIdentity
 			constexpr int kMaxExactCandidates = 2;           // coarse-ranked candidates promoted to full lines (plus the caller's confident n)
 			constexpr int kConfidentMaxExactCandidates = 0;  // lever: when the caller forces its confident n, promote at most this many coarse
 			                                                 // ranked candidates besides it (0 = kMaxExactCandidates, the shipped behaviour)
-			constexpr int kConfidentAxisExactLines = 16;     // step 3: exact-stage lines of an axis whose reading is confident, whatever the
-			                                                 // other axis reads (0 = off, all lines); applied by the estimator
-			                                                 // (EstimatorSettings::confidentAxisExactLines), not by the verifier
+			constexpr int kConfidentAxisExactLines = 0;      // lever (step 3, OFF until measured): exact-stage lines of one confident axis while the
+			                                                 // other axis still acquires (0 = off, all sampled lines; 16 = on); applied by the
+			                                                 // estimator (EstimatorSettings::confidentAxisExactLines, ExactLinesFor), not by the verifier
+			constexpr int kCoarseWindows = 2;                // lever: coarse windows per line (2 = both ends, shipped; 1 = the left end only)
+			constexpr bool kCoarseRefine = false;            // lever: with coarseStep > 1, scan the integers the step skipped around the best (false = shipped)
 		}
 
 		struct VerifierSettings
 		{
 			int coarseHalfWidth = 4;            // integers scanned each side of a candidate by the coarse stage
 			int coarseStep = 1;                 // step of that scan (the notch of a short window is a few integers wide)
+			bool coarseRefine = Narrowing::kCoarseRefine;   // coarseStep > 1: also scan the skipped integers within step - 1 of the best (lever; see Narrowing)
+			int coarseWindows = Narrowing::kCoarseWindows;  // 2 = a short window at each end of the lines; 1 = the left one only (lever; see Narrowing)
 			int coarseLines = 8;                // lines used by the coarse stage (F0: the size is still right down to 8 lines)
 			double coarseWindowFraction = 0.125;   // coarse window = this fraction of N ...
 			int coarseMinWindow = 160;          // ... but at least this many rows
@@ -519,7 +526,7 @@ namespace SourceIdentity
 				int Lc = (std::max)(s_.coarseMinWindow, static_cast<int>(std::floor(s_.coarseWindowFraction * static_cast<double>(N))));
 				if (Lc > L)
 					Lc = L;
-				const int nWin = (Lc >= L) ? 1 : 2;
+				const int nWin = (Lc >= L || s_.coarseWindows <= 1) ? 1 : 2;
 				const int winOff[2] = { 0, L - Lc };
 				const int nl = (std::min)(ls.count, (std::max)(1, s_.coarseLines));
 				std::vector<int> idx(static_cast<size_t>(nl));
@@ -539,11 +546,10 @@ namespace SourceIdentity
 				std::vector<double> vals(static_cast<size_t>(nWin) * static_cast<size_t>(nl), 0.0);
 				bool have = false;
 				const SolveBatch* bw[2][kFamilyCount];
-				for (int d = -s_.coarseHalfWidth; d <= s_.coarseHalfWidth; d += step)
-				{
+				auto visit = [&](int d) {
 					const int n = nC + d;
 					if (n < s_.minLatent || n > maxN)
-						continue;
+						return;
 					bool ok = true;
 					for (int w = 0; w < nWin && ok; ++w)
 						for (int q = 0; q < nrep; ++q)
@@ -556,7 +562,7 @@ namespace SourceIdentity
 							}
 						}
 					if (!ok)
-						continue;
+						return;
 					for (int w = 0; w < nWin; ++w)
 						for (int i = 0; i < nl; ++i)
 						{
@@ -582,6 +588,16 @@ namespace SourceIdentity
 						tBest = T;
 						nBest = n;
 					}
+				};
+				for (int d = -s_.coarseHalfWidth; d <= s_.coarseHalfWidth; d += step)
+					visit(d);
+				if (s_.coarseRefine && step > 1 && have)
+				{
+					// The grid skipped step - 1 integers between its points: look at those within step - 1 of the grid's best.
+					const int bestD = nBest - nC;
+					for (int d = bestD - (step - 1); d <= bestD + (step - 1); ++d)
+						if (d >= -s_.coarseHalfWidth && d <= s_.coarseHalfWidth && ((d + s_.coarseHalfWidth) % step) != 0)
+							visit(d);
 				}
 				return have ? 0u : kReasonShortLines;
 			}
@@ -840,3 +856,4 @@ namespace SourceIdentity
 		};
 	}
 }
+#pragma fp_contract(on)

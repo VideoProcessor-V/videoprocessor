@@ -78,12 +78,24 @@ namespace SourceIdentity
 			int queueDepth = 1;                  // jobs waiting for the worker (1..2); a newer job replaces the oldest, counted
 			int outputStepOverride = 0;          // 0 = detect from the samples; 4 = an 8-bit picture; 1 = 10-bit
 			int latchedExactLines = 16;          // exact-stage lines while both axes are confident (a confident n always gets the exact stage)
-			int confidentAxisExactLines = Narrowing::kConfidentAxisExactLines;   // exact-stage lines of ONE confident axis while the other is still
-			                                                                   // acquiring (0 = off: all sampled lines); step 3 of SID-OPT
+			int confidentAxisExactLines = Narrowing::kConfidentAxisExactLines;   // lever, OFF (0 = all sampled lines): exact-stage lines of ONE
+			                                                                   // confident axis while the other is still acquiring; SID-OPT step 3
 			int clockRing = 64;                  // frames of (seq, source time, active area) remembered
 			int eventCap = 64;                   // pending events kept (oldest dropped)
 			int repeatCap = 16;                  // pending repeat marks kept
 		};
+
+		// Exact-stage lines of one axis for this evaluation (0 = all sampled lines): latchedExactLines while both axes are confident and the
+		// monitor holds nothing out (latchedMode); confidentAxisExactLines for a confident axis whose OTHER axis is not (the lever, off by
+		// default); otherwise all lines. Both confident without latchedMode (N2: natives held out) re-tests on all lines.
+		inline int ExactLinesFor(const EstimatorSettings& s, bool latchedMode, bool thisAxisConfident, bool otherAxisConfident)
+		{
+			if (latchedMode)
+				return s.latchedExactLines;
+			if (s.confidentAxisExactLines > 0 && thisAxisConfident && !otherAxisConfident)
+				return s.confidentAxisExactLines;
+			return 0;
+		}
 
 		struct EstimatorCounters
 		{
@@ -121,6 +133,10 @@ namespace SourceIdentity
 			int lines = 0;               // lines offered
 			bool probeRan = false, probeSeen = false;
 			double floorCodes = 0.0;     // the (dof-normalised) rounding floor handed to the evidence stage
+			int exactLines = 0;          // lines of the exact stage (0 = no candidate reached it)
+			int operatorBuilds = 0;      // verifier work of this evaluation on this axis (cold = builds > 0)
+			int solves = 0;              // line solves executed
+			int solvesReused = 0;        // line solves read back from an identical solve of the same call
 			std::vector<CandidateDetail> cands;
 		};
 		struct EvaluationDetail
@@ -130,6 +146,7 @@ namespace SourceIdentity
 			uint64_t streamKey = 0;
 			uint32_t shotId = 0;         // the estimator's own detected shot id (the cuts it consumed since the start / reset)
 			int stepCodes = 1;           // 4 = an 8-bit picture, 1 = 10-bit
+			double cachedMB = 0.0;       // operator caches (main + power probe) plus tap memos after this evaluation, MiB
 			AxisDetail axis[2];
 		};
 		// Called on the thread that processes the evaluation (the worker; the caller in synchronous mode), after the evidence stage.
