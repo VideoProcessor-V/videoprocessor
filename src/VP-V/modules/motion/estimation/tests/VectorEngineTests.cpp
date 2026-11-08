@@ -12,6 +12,7 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
+#include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 
 #include <string>
 #include <vector>
@@ -164,6 +165,36 @@ namespace VectorEngineTest
 			Assert::AreEqual<unsigned long long>(0, engine.motionShadowMismatches);
 			engine.MotionShadowCheck(true, 5, 6, true);    // the host says live, the segment has nothing: a mismatch
 			Assert::AreEqual<unsigned long long>(1, engine.motionShadowMismatches);
+		}
+
+		// The reservations (doc 72 item 7): both are absent placeholders until the camera + motion lead implements them.
+		TEST_METHOD(TheReservedRefinementAndLongPairEntryPointsAnswerAbsent)
+		{
+			struct Absent : IVectorEngine
+			{
+				uint64_t LatestVerifiedFieldSeq() const override { return 0; }
+				uint64_t FieldEra() const override { return 0; }
+				bool FieldOf(uint64_t, VerifiedField&) const override { return false; }
+				float FieldScale() const override { return 1.0f; }
+				bool GlobalFromEngine() const override { return false; }
+				bool EngineGlobal(uint64_t, GlobalVec&) const override { return false; }
+				bool PairSpansSlip(uint64_t, uint64_t) const override { return false; }
+				bool FlowIsCpuResident() const override { return false; }
+				bool FlowOf(uint64_t, FlowView&) const override { return false; }
+				void SetPreEstimateHook(IPreEstimateHook*) override {}
+			} engine;
+			VerifiedField field;
+			Assert::IsFalse(engine.RefinedFieldAvailable());
+			Assert::IsFalse(engine.RefinedFieldOf(7, field));
+			uint64_t ticket = 99;
+			HintField hint;
+			Assert::IsTrue(engine.SubmitLongPair(nullptr, nullptr, &hint, 3, 9, ticket) == LongPairResult::Unavailable);
+			Assert::AreEqual<uint64_t>(0, ticket, L"no ticket is issued for an absent service");
+			Assert::IsFalse(engine.PollLongPair(0, field));
+			engine.CancelLongPair(0);   // a no-op, never a fault
+			Assert::IsTrue(std::string(kLongPairFallbackText).find("matcher") != std::string::npos,
+				L"the fallback wording names the matcher");
+			Assert::AreEqual(std::string("refined_field"), std::string(kRefinedFieldProduct));
 		}
 
 		TEST_METHOD(TheAtomicEngagedFlagKeepsTheOldValues)

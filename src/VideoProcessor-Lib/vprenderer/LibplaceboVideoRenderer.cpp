@@ -6438,7 +6438,6 @@ struct LibplaceboVideoRenderer::Impl
 	DejudderPolicy::MotionAheadFrame& motionAheadPrev = vectorEngine.motionAheadPrev;
 	std::unique_ptr<MotionAhead::Producer>& motionProducer = vectorEngine.motionProducer;
 	MotionValidity::State& motionValidity = vectorEngine.motionValidity;
-	uint64_t& motionValiditySeen = vectorEngine.motionValiditySeen;
 	using MotionShadowField = VpMotion::VectorEngineState::MotionShadowField;
 	VpMotion::MotionSegment<MotionShadowField>& motionSegment = vectorEngine.motionSegment;
 	std::atomic<int>& motionAheadDepth = vectorEngine.motionAheadDepth;
@@ -6449,9 +6448,7 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<double>& motionHandoffTotalMs = vectorEngine.motionHandoffTotalMs;
 	std::atomic<unsigned long long>& motionHandoffCount = vectorEngine.motionHandoffCount;
 	uint64_t& motionInvalidations = vectorEngine.motionInvalidations;
-	ULONGLONG& motionInvalidateLogTick = vectorEngine.motionInvalidateLogTick;
 	bool& motionRecoveryLogPending = vectorEngine.motionRecoveryLogPending;
-	int& motionInvalidateLoggedCause = vectorEngine.motionInvalidateLoggedCause;
 	std::atomic<const char*>& motionGapDetail = vectorEngine.motionGapDetail;
 	// VPV-HOOK-END
 	bool sigmaDeltaRanLast = false;                   // the sigma-delta quantiser ran in the last frame's output pass
@@ -13163,10 +13160,9 @@ struct LibplaceboVideoRenderer::Impl
 	// epoch is forgotten (each consumer also checks the epoch it was made in).
 	void ApplyMotionInvalidate()
 	{
-		const MotionValidity::Pending pending = motionValidity.Consume(motionValiditySeen);
-		if (!pending.changed)
+		MotionValidity::Pending pending;
+		if (!vectorEngine.TakeInvalidation(pending))   // VPV-HOOK
 			return;
-		motionInvalidations += pending.invalidations;
 		if (pending.release)
 		{
 			ReleaseDejudder();
@@ -13190,26 +13186,7 @@ struct LibplaceboVideoRenderer::Impl
 		debander.ForgetHold();
 		detailPulse.Forget();      // detail restore: both histories restart (docs/VP-detail-restore.md)
 		textureRestore.Forget();
-		const int cause = static_cast<int>(pending.cause);
-		const ULONGLONG now = GetTickCount64();
-		// The first 50 are all logged; then at most one line per 5 s, but a
-		// new cause is always logged.
-		if (motionInvalidations <= 50 || now - motionInvalidateLogTick >= 5000 || cause != motionInvalidateLoggedCause)
-		{
-			// The text as before the MotionValidity wiring (the harness reads it): a frame gap
-			// names its own cause ("missed frames", "backlog flush", "queue overflow drop",
-			// "pulldown lock change"), and a release pending with other causes reads as the
-			// resync it is (the strongest request names the line, as the old flag did).
-			const char* detail = pending.cause == MotionValidity::Cause::Gap ?
-				motionGapDetail.load(std::memory_order_relaxed) : nullptr;
-			const char* text = pending.release && !MotionValidity::ReleasesResources(pending.cause) ?
-				MotionValidity::Describe(MotionValidity::Cause::Resync) : detail ? detail : MotionValidity::Describe(pending.cause);
-			DebugLog::Log("De-judder: motion invalidated (%s; %llu in total); the vectors' users fall back until a fresh pair",
-				text, static_cast<unsigned long long>(motionInvalidations));
-			motionInvalidateLogTick = now;
-			motionInvalidateLoggedCause = cause;
-			motionRecoveryLogPending = true;
-		}
+		vectorEngine.LogInvalidation(pending);   // VPV-HOOK
 	}
 
 	// Consumed after RenderLocked returns, so this frame's geometry references

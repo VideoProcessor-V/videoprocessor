@@ -293,4 +293,35 @@ namespace VpMotion
 				static_cast<unsigned long long>(sequence), static_cast<unsigned long long>(nextSequence), hostLive ? 1 : 0,
 				d ? 1 : 0, VpMotion::Describe(d.miss), motionShadowMismatches, motionShadowChecks);
 	}
+
+	bool VectorEngine::TakeInvalidation(MotionValidity::Pending& pending)
+	{
+		pending = motionValidity.Consume(motionValiditySeen);
+		if (!pending.changed)
+			return false;
+		motionInvalidations += pending.invalidations;
+		return true;
+	}
+
+	void VectorEngine::LogInvalidation(const MotionValidity::Pending& pending)
+	{
+		const int cause = static_cast<int>(pending.cause);
+		const ULONGLONG now = GetTickCount64();
+		if (motionInvalidations <= 50 || now - motionInvalidateLogTick >= 5000 || cause != motionInvalidateLoggedCause)
+		{
+			// The text as before the MotionValidity wiring (the harness reads it): a frame gap names its own cause
+			// ("missed frames", "backlog flush", "queue overflow drop", "pulldown lock change"), and a release
+			// pending with other causes reads as the resync it is (the strongest request names the line, as the
+			// old flag did).
+			const char* detail = pending.cause == MotionValidity::Cause::Gap ?
+				motionGapDetail.load(std::memory_order_relaxed) : nullptr;
+			const char* text = pending.release && !MotionValidity::ReleasesResources(pending.cause) ?
+				MotionValidity::Describe(MotionValidity::Cause::Resync) : detail ? detail : MotionValidity::Describe(pending.cause);
+			DebugLog::Log("De-judder: motion invalidated (%s; %llu in total); the vectors' users fall back until a fresh pair",
+				text, static_cast<unsigned long long>(motionInvalidations));
+			motionInvalidateLogTick = now;
+			motionInvalidateLoggedCause = cause;
+			motionRecoveryLogPending = true;
+		}
+	}
 }

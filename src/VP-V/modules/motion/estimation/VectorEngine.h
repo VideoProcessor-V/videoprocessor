@@ -101,5 +101,14 @@ namespace VpMotion
 		static void SizeFor(bool lowResSearch, int width, int height, int& engineW, int& engineH, int& halvings);
 		// S0 shadow step: the segment's answer against the host's own predicate; nothing is delivered from it.
 		void MotionShadowCheck(bool deliveryRuns, uint64_t sequence, uint64_t nextSequence, bool hostLive);
+
+		// ---- P5a-4 (item d): the apply point of the one vectors-valid state, split at the renderer's own consumers ----
+		// Render thread, before an estimate: consumes the epoch requests made from any thread since the last look and
+		// counts them. False = nothing changed (the caller returns). The caller then makes every consumer of older
+		// vectors forget (they are the renderer's: matcher, ahead state, adaptive / deband / detail histories) and
+		// calls LogInvalidation.
+		bool TakeInvalidation(MotionValidity::Pending& pending);
+		// The first 50 invalidations are all logged; then at most one line per 5 s, but a new cause is always logged.
+		void LogInvalidation(const MotionValidity::Pending& pending);
 	};
 }
