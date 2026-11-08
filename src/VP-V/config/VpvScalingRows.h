@@ -18,6 +18,7 @@
 // the user (both are also loaded from the document on every profile change). A VP-V value that is
 // not in Bill's list shows on his control the way his loader shows it. UI thread only; C++14.
 
+#include <QAbstractButton>
 #include <QComboBox>
 #include <QFormLayout>
 #include <QLabel>
@@ -55,45 +56,98 @@ namespace Vpv
 			return !model || !model->item(index) || model->item(index)->isEnabled();
 		}
 
-		// Shows `value` on Bill's control as his loader shows a stored value: his item when he offers
-		// it, otherwise (retiredLabel set) his "Saved legacy method" placeholder, else an added item.
-		inline void ShowOnBills(QComboBox* bills, const QString& value, const QString& label, bool retiredStyle)
+		// Items VP-V adds to Bill's control (a VP-V-only chroma value, as his loader adds one for an unknown
+		// stored value) carry this role so they can be taken out again once stale.
+		const int kVpvAddedRole = Qt::UserRole + 41;
+
+		inline void DropStaleAdded(QComboBox* bills)
+		{
+			for (int i = bills->count() - 1; i >= 0; --i)
+				if (i != bills->currentIndex() && bills->itemData(i, kVpvAddedRole).toBool()) bills->removeItem(i);
+		}
+
+		// Shows `value` on Bill's control as his loader shows a stored value. Dithering (retiredStyle): his
+		// mapping auto/on/true -> blue_noise, then his item, else his "Saved legacy method" placeholder.
+		// Chroma: his item, else an added item (tagged, removed once stale).
+		inline void ShowOnBills(QComboBox* bills, QString value, const QString& label, bool retiredStyle)
 		{
 			const QSignalBlocker blocker(bills);
+			if (retiredStyle)
+			{
+				const QString lower = value.trimmed().toLower();
+				if (lower == QStringLiteral("auto") || lower == QStringLiteral("on") || lower == QStringLiteral("true"))
+					value = QStringLiteral("blue_noise");
+			}
 			const int index = bills->findData(value, Qt::UserRole, Qt::MatchFixedString);
 			if (index >= 0 && ItemEnabled(bills, index))
 			{
 				bills->setPlaceholderText(QString());
 				bills->setCurrentIndex(index);
+				DropStaleAdded(bills);
 				return;
 			}
 			if (retiredStyle)
 			{
 				bills->setPlaceholderText(QStringLiteral("Saved legacy method: %1").arg(label));
 				bills->setCurrentIndex(-1);
+				DropStaleAdded(bills);
 				return;
 			}
 			bills->addItem(label, value);
+			bills->setItemData(bills->count() - 1, true, kVpvAddedRole);
 			bills->setCurrentIndex(bills->count() - 1);
+			DropStaleAdded(bills);
 		}
 
-		// The user's choice on one control is shown on the other (the document is already written by the
-		// edited control's own handler).
+		inline void ShowOnVpv(QComboBox* vpv, const QString& value)
+		{
+			const QSignalBlocker blocker(vpv);
+			const int mine = vpv->findData(value, Qt::UserRole, Qt::MatchFixedString);
+			if (mine >= 0) vpv->setCurrentIndex(mine);
+		}
+
+		// The Reset button Bill's addChoice gives a control (renamed with it for VP-V's control).
+		inline QAbstractButton* ResetOf(QComboBox* combo)
+		{
+			const QString name = combo->objectName() + QStringLiteral(".reset_override");
+			if (QWidget* row = combo->parentWidget())
+				if (auto* reset = row->findChild<QAbstractButton*>(name)) return reset;
+			return combo->findChild<QAbstractButton*>(name);
+		}
+
+		// Each control's changes are shown on the other (the document is already written by the edited
+		// control's own handler): a pick (activated), its Reset, and any other index change (a set from code,
+		// a preset). During a profile load Bill's control is set first and VP-V's after it, both from the
+		// document: VP-V's then mirrors only when it differs, through the same mapping as Bill's loader, and a
+		// greyed VP-V control (Original pathway) never touches Bill's.
 		inline void Follow(QComboBox* vpv, QComboBox* bills, bool retiredStyle)
 		{
 			if (!vpv || !bills) return;
-			QObject::connect(vpv, qOverload<int>(&QComboBox::activated), vpv, [vpv, bills, retiredStyle](int index)
+			const auto toBills = [vpv, bills, retiredStyle]()
 			{
-				if (index < 0) return;
-				ShowOnBills(bills, vpv->itemData(index).toString(), vpv->itemText(index), retiredStyle);
-			});
-			QObject::connect(bills, qOverload<int>(&QComboBox::activated), vpv, [vpv, bills](int index)
+				const int index = vpv->currentIndex();
+				if (index >= 0) ShowOnBills(bills, vpv->itemData(index).toString(), vpv->itemText(index), retiredStyle);
+			};
+			const auto toVpv = [vpv, bills]()
 			{
-				if (index < 0) return;
-				const QSignalBlocker blocker(vpv);
-				const int mine = vpv->findData(bills->itemData(index).toString(), Qt::UserRole, Qt::MatchFixedString);
-				if (mine >= 0) vpv->setCurrentIndex(mine);
+				const int index = bills->currentIndex();
+				if (index >= 0) ShowOnVpv(vpv, bills->itemData(index).toString());
+				if (!bills->itemData(index, kVpvAddedRole).toBool()) DropStaleAdded(bills);
+			};
+			QObject::connect(vpv, qOverload<int>(&QComboBox::activated), vpv, [toBills](int) { toBills(); });
+			QObject::connect(bills, qOverload<int>(&QComboBox::activated), vpv, [toVpv](int) { toVpv(); });
+			if (QAbstractButton* reset = ResetOf(vpv)) QObject::connect(reset, &QAbstractButton::clicked, vpv, [toBills](bool) { toBills(); });
+			if (QAbstractButton* reset = ResetOf(bills)) QObject::connect(reset, &QAbstractButton::clicked, vpv, [toVpv](bool) { toVpv(); });
+			// A load sets both fields from the document, so only a change that moves one control away from the
+			// other needs mirroring; a value equal on both sides is left alone (that keeps Bill's loader display).
+			QObject::connect(vpv, qOverload<int>(&QComboBox::currentIndexChanged), vpv, [vpv, bills, toBills](int index)
+			{
+				if (index < 0 || !vpv->isEnabled()) return;
+				const QString mine = vpv->itemData(index).toString();
+				if (bills->currentIndex() >= 0 && bills->currentData().toString().compare(mine, Qt::CaseInsensitive) == 0) return;
+				toBills();
 			});
+			QObject::connect(bills, qOverload<int>(&QComboBox::currentIndexChanged), vpv, [toVpv](int) { toVpv(); });
 		}
 
 		inline QFormLayout* NewForm(QWidget* body)

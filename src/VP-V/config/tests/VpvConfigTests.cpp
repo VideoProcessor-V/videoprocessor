@@ -660,10 +660,10 @@ namespace
 		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
 		QCoreApplication::processEvents();
 		require(!RowShown(debandRow), "the duplicate row stays hidden in the Original pathway (one control per key)");
-		// Bill's own Rendering keys are never on the VP-V page (checked against billslack2 v1.4.02-beta's
-		// RendererProfileConfig.h, 2026-10-24: none of the keys VP-V hosts is Bill's).
-		// v1.4.02: Bill retired `quality` (no control) and moved debanding, dithering and dither depth to his
-		// Scaling page; they are still never on the VP-V page.
+		// Bill's own controls of these keys are never on the VP-V page. v1.4.02: Bill retired `quality` (no
+		// control) and moved debanding, dithering and dither depth to his Scaling page. Two of his keys also
+		// have a VP-V control of their own on the VP-V page under another object name (P8 step 2: `.vpv`, e.g.
+		// config.vprenderer.scaling.dithering.vpv, chroma_upscaler.vpv); this checks Bill's, by his name.
 		for (const char* key : { "scaling.deband_strength", "scaling.dithering", "scaling.display_bit_depth", "tone_mapping", "gamut_mapping",
 			"peak_detection", "contrast_recovery", "saturation", "sdr_target_nits", "sdr_black_nits" })
 		{
@@ -1437,6 +1437,75 @@ namespace
 			require(file.open(QIODevice::ReadOnly) && file.readAll() == QByteArray(text.c_str()), "opening Config wrote the file");
 		}
 	}
+	// Audit P8-2: the Profile use card is on the VP-V page (On both pathways) and its picker follows Bill's
+	// Queue list both ways; Bill -> VP-V chroma sync, Reset on both controls, and VP-V's dither Auto shown on
+	// Bill's control with his own mapping (Blue noise).
+	void testProfileUseAndSyncDirections()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir, "[general]\nrenderer: VP Renderer\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 3\n"
+			"[queue.Game]\nqueue_size: 2\ntarget_frames: 1\n[vprenderer.scaling.Default]\nchroma_upscaler: lanczos\ndithering: off\n"
+			"[vprenderer.scaling.Named]\nchroma_upscaler: bicubic\n");
+		ConfigEditorWindow window(path, 0, true);
+		auto* section = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section")));
+		auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("both.card.profile_use_queue")));
+		require(section->isAncestorOf(card), "the queue Profile use card is not on the VP-V page");
+		require(section->isAncestorOf(control<QWidget>(window, QStringLiteral("config.queue.rate_rule"))), "the queue rate rule is not on the VP-V page");
+		auto* picker = control<QComboBox>(window, Vpv::ObjectName(QStringLiteral("both.queue.profile")));
+		auto* queues = control<QListWidget>(window, QStringLiteral("config.queue.profiles"));
+		require(picker->count() == queues->count() && picker->count() == 2, "the picker does not list Bill's queue profiles");
+		queues->setCurrentRow(1);
+		QCoreApplication::processEvents();
+		require(picker->currentIndex() == 1, "the picker does not follow Bill's queue list");
+		emit picker->activated(0);
+		QCoreApplication::processEvents();
+		require(queues->currentRow() == 0, "the picker does not select the profile on Bill's list");
+
+		window.selectPage(QStringLiteral("Scaling"));
+		QCoreApplication::processEvents();
+		auto* bills = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.chroma_upscaler"));
+		auto* vpv = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.chroma_upscaler.vpv"));
+		const int bicubic = bills->findData(QStringLiteral("bicubic"));
+		bills->setCurrentIndex(bicubic);
+		emit bills->activated(bicubic);
+		QCoreApplication::processEvents();
+		require(vpv->currentData().toString() == QStringLiteral("bicubic"), "VP-V's chroma list does not follow Bill's choice");
+		vpv->setCurrentIndex(vpv->findData(QStringLiteral("catmull_rom")));
+		QCoreApplication::processEvents();
+		require(bills->currentData().toString() == QStringLiteral("catmull_rom"), "Bill's control does not follow a set on VP-V's list");
+		auto* vpvReset = control<QPushButton>(window, QStringLiteral("config.vprenderer.scaling.chroma_upscaler.vpv.reset_override"));
+		if (vpvReset->isEnabled())
+		{
+			vpvReset->click();
+			QCoreApplication::processEvents();
+			if (!vpv->currentData().toString().isEmpty())
+				require(bills->currentData().toString().compare(vpv->currentData().toString(), Qt::CaseInsensitive) == 0,
+					"Bill's control does not follow VP-V's Reset");
+		}
+		int added = 0;
+		for (int i = 0; i < bills->count(); ++i)
+			if (bills->itemData(i, Qt::UserRole + 41).toBool()) ++added;
+		require(added == 0 || bills->itemData(bills->currentIndex(), Qt::UserRole + 41).toBool(), "a stale VP-V item stays in Bill's list");
+
+		auto* billsDither = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.dithering"));
+		auto* vpvDither = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.dithering.vpv"));
+		const int automatic = vpvDither->findData(QStringLiteral("AUTO"));
+		require(automatic >= 0, "VP-V's dither list lacks Auto");
+		vpvDither->setCurrentIndex(automatic);
+		emit vpvDither->activated(automatic);
+		QCoreApplication::processEvents();
+		require(billsDither->currentData().toString() == QStringLiteral("blue_noise") && billsDither->placeholderText().isEmpty(),
+			"Bill's control does not show VP-V's Auto with his mapping (Blue noise)");
+		auto* billsReset = control<QPushButton>(window, QStringLiteral("config.vprenderer.scaling.dithering.reset_override"));
+		if (billsReset->isEnabled())
+		{
+			billsReset->click();
+			QCoreApplication::processEvents();
+			if (billsDither->currentIndex() >= 0)
+				require(vpvDither->findData(billsDither->currentData().toString(), Qt::UserRole, Qt::MatchFixedString) == vpvDither->currentIndex(),
+					"VP-V's dither control does not follow Bill's Reset");
+		}
+	}
 }
 
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -1466,5 +1535,6 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: both-pathway cards leave Bill's pages", testBothPathwayCardsLeaveBillsPages);
 	failures += run("VP-V: Bill's Chroma upscaler and VP-V's list", testChromaBillsControlAndVpvList);
 	failures += run("VP-V: Bill's Dithering stays his, VP-V's list shows the value", testBillsDitheringStaysHis);
+	failures += run("VP-V: Profile use card and the sync directions", testProfileUseAndSyncDirections);
 	return failures;
 }

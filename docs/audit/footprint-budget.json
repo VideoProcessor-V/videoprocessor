@@ -47,7 +47,7 @@
   "src/VideoProcessor-ConfigCore/ConfigurationRpcClient.cpp": 62,
   "src/VideoProcessor-ConfigCore/ConfigurationRpcClient.h": 19,
   "src/VideoProcessor-ConfigCore/ConfigurationRpcProtocol.h": 18,
-  "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp": 4028,
+  "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp": 4032,
   "src/VideoProcessor-ConfigTests/VideoProcessor-ConfigTests.vcxproj": 11,
   "src/VideoProcessor-GUI/ConfigurationRpcServer.cpp": 3,
   "src/VideoProcessor-GUI/FullscreenVideoWindow.cpp": 8,

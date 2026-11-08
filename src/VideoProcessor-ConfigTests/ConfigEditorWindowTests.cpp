@@ -5453,8 +5453,11 @@ void testRendererProfileSectionsCollapseAndPersist()
         peakDetection->itemData(3).toString() == QStringLiteral("off"),
         "Peak-detection choices are not ordered High quality, On, Off after Auto");
     // Updated to Bill v1.4.02 UI (a591ad3b): dithering and its depth moved to Scaling / Quality.
-    QComboBox* dithering = requireControl<QComboBox>(window,
-        QStringLiteral("config.vprenderer.scaling.dithering"));
+    QComboBox* dithering = requireControl<QComboBox>(window,   // WAIVER-P8-06: VP-V's labels on VP-V's own control
+        QStringLiteral("config.vprenderer.scaling.dithering.vpv"));
+    QComboBox* billsDithering = requireControl<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.dithering"));
+    QStringList billsChoices; for (int i = 0; i < billsDithering->count(); ++i) if (!billsDithering->itemData(i).toString().isEmpty()) billsChoices << billsDithering->itemData(i).toString();
+    require(billsChoices == QStringList({ "blue_noise", "ordered_fixed", "white_noise", "off" }), "Bill's Dithering does not offer exactly his four choices");
     require(window.findChild<QComboBox*>(QStringLiteral("config.vprenderer.dithering")) == nullptr &&
         dithering->itemText(dithering->findData(QStringLiteral("AUTO"))) ==
         QStringLiteral("Auto") &&
