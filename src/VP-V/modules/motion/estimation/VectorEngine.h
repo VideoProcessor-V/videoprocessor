@@ -30,8 +30,10 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace VpMotion
 {
@@ -266,8 +268,29 @@ namespace VpMotion
 		// True unless every adjacent pair in [from, to] is valid in the current epoch and lies at or after the first
 		// estimate made in it; unknown = true (conservative).
 		bool PairSpansSlip(uint64_t from, uint64_t to) const override;
-		bool FlowIsCpuResident() const override { return false; }   // absent: no CPU field view is kept today
-		bool FlowOf(uint64_t, FlowView&) const override { return false; }
+		// FlowIsCpuResident stays false on purpose: the camera link's GuidanceContext only calls FlowOf when it is true, so flipping it is the
+		// consumer-visible step (the camera finisher's), not part of providing FlowOf.
+		bool FlowIsCpuResident() const override { return false; }
+		// SK-MV: the P2 pair (seq - 1, seq) of the NVOF producer as a CPU view, per block in SOURCE px (forward vectors, S10.5 half-size
+		// px / 32 x source px per engine px), block = 4 engine px. Read-only over the P2 slot; never starts the producer or the matcher.
+		// False (view cleared, counted by reason in FlowReads) when: no pair (none computed, pruned, an older generation), the
+		// vectors-valid state (P5a MotionValidity) does not hold the pair, no producer / low latency, or the source size is not known yet
+		// (set by the statistics service). Never a stale pair. The view's pointers stay valid until the NEXT FlowOf call on this engine
+		// (the engine holds the shared pair and its converted planes as a lease; the pair is copied out of the slot before any Prune)
+		// or the engine's destruction; call and read on the render thread.
+		bool FlowOf(uint64_t seq, FlowView& out) const override;
+		// The source width the engine size derives from (the statistics service notes it each time it sizes the producer); until then
+		// FlowOf answers "size unknown" rather than guess a scale.
+		void NoteFlowSourceWidth(int width) { flowSourceWidth_.store(width, std::memory_order_relaxed); }
+		struct FlowReadCounters
+		{
+			unsigned long long requests = 0, served = 0;
+			unsigned long long noProducer = 0;     // no producer (low latency, optical flow off, not started / dropped)
+			unsigned long long noPair = 0;         // the producer has no such pair (not computed yet, pruned, older generation)
+			unsigned long long invalidated = 0;    // the vectors-valid state does not hold the pair (resync, gap, format change)
+			unsigned long long unscaled = 0;       // the source size the engine size derives from is not known yet
+		};
+		FlowReadCounters FlowReads() const;
 		// Contract: set AND clear on the render thread or under renderMutex (an estimate reads the pointer once and
 		// calls it without a lock); the hook object may be destroyed only after the clear has returned.
 		void SetPreEstimateHook(IPreEstimateHook* hook) override { preEstimateHook_.store(hook, std::memory_order_release); }
@@ -281,6 +304,19 @@ namespace VpMotion
 		FallbackCatalog::Decision ReleaseHookFailures();
 
 		const void* host_ = nullptr;
+		// FlowOf's lease: the shared pair and the converted planes the last returned view points into (render thread; the mutex only
+		// makes a stray second reader safe, it does not extend a view's validity).
+		struct FlowLease
+		{
+			MotionAhead::FlowPtr flow;
+			uint64_t from = 0, to = 0;
+			double scale = 0;
+			std::vector<float> x, y;
+		};
+		mutable std::mutex flowMutex_;
+		mutable std::shared_ptr<FlowLease> flowLease_;
+		mutable FlowReadCounters flowReads_;
+		std::atomic<int> flowSourceWidth_{ 0 };   // the source width the engine size was last made for (ServeStatistics)
 		InvalidateSink invalidateSink_ = nullptr;
 		const IMatcherView* matcher_ = nullptr;
 		std::atomic<IPreEstimateHook*> preEstimateHook_{ nullptr };

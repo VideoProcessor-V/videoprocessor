@@ -254,6 +254,10 @@ namespace VpMotion
 			vectorStatsTick = now;
 			DebugLog::Log("Vector engine: %llu pairs (ahead hits %llu, misses %llu, backward %llu)", vectorPairs,
 				static_cast<unsigned long long>(motionAheadHits), static_cast<unsigned long long>(motionAheadMisses), vectorBackwardPairs);
+			const FlowReadCounters fr = FlowReads();   // a CPU flow reader exists (FlowOf): its absences are visible, by reason
+			if (fr.requests)
+				DebugLog::Log("Vector engine: flow reads %llu, served %llu, absent %llu (no producer %llu, no pair %llu, invalidated %llu, size unknown %llu)",
+					fr.requests, fr.served, fr.requests - fr.served, fr.noProducer, fr.noPair, fr.invalidated, fr.unscaled);
 		}
 	}
 
@@ -299,6 +303,7 @@ namespace VpMotion
 		vectorBackwardSequence = sequence;
 		int engineW = 0, engineH = 0, halvings = 0;
 		SizeFor(facts.lowResSearch, width, height, engineW, engineH, halvings);
+		NoteFlowSourceWidth(width);
 		motionProducer->SetTargetSize(engineW, engineH);
 		MotionAhead::FlowPtr flow;
 		uint64_t from = 0, to = 0;
@@ -616,6 +621,67 @@ namespace VpMotion
 		out.x = r.x;
 		out.y = r.y;
 		return true;
+	}
+
+	bool VectorEngine::FlowOf(uint64_t seq, FlowView& out) const
+	{
+		out = FlowView();
+		std::lock_guard<std::mutex> lock(flowMutex_);
+		++flowReads_.requests;
+		auto absent = [this](unsigned long long& counter) {
+			++counter;
+			flowLease_.reset();   // nothing valid: hold nothing (the next view is built from the slot again)
+			return false;
+		};
+		if (!LoopProducer() || motionLowLatencyNoVectors)
+			return absent(flowReads_.noProducer);
+		if (seq < 2)
+			return absent(flowReads_.noPair);
+		const uint64_t from = seq - 1, to = seq;
+		// The one vectors-valid state decides first: a pair across a resync / gap / format change is never served.
+		if (!motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()) || !motionValidity.PairValidAt(from, to))
+			return absent(flowReads_.invalidated);
+		// The shared pointer is copied out of the slot before anything can Prune it: from here the pair cannot be freed under us.
+		const MotionAhead::FlowPtr flow = P2().Find(from, to);
+		if (!flow || flow->gridW <= 0 || flow->gridH <= 0 || flow->halfW <= 0 ||
+			flow->forward.size() < static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH) * 2)
+			return absent(flowReads_.noPair);
+		const int sourceWidth = flowSourceWidth_.load(std::memory_order_relaxed);
+		if (sourceWidth <= 0)
+			return absent(flowReads_.unscaled);
+		const double scale = static_cast<double>(sourceWidth) / flow->halfW;   // source px per engine px (a ratio, never a constant)
+		if (!flowLease_ || flowLease_->flow != flow || flowLease_->from != from || flowLease_->to != to || flowLease_->scale != scale)
+		{
+			auto lease = std::make_shared<FlowLease>();
+			lease->flow = flow;
+			lease->from = from;
+			lease->to = to;
+			lease->scale = scale;
+			const size_t cells = static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH);
+			lease->x.resize(cells);
+			lease->y.resize(cells);
+			for (size_t i = 0; i < cells; ++i)
+			{
+				lease->x[i] = static_cast<float>(flow->forward[i * 2] / 32.0 * scale);
+				lease->y[i] = static_cast<float>(flow->forward[i * 2 + 1] / 32.0 * scale);
+			}
+			flowLease_ = std::move(lease);
+		}
+		out.x = flowLease_->x.data();
+		out.y = flowLease_->y.data();
+		out.gridW = flow->gridW;
+		out.gridH = flow->gridH;
+		out.blockSize = 4.0 * scale;   // a cell is 4 x 4 engine px
+		out.from = from;
+		out.to = to;
+		++flowReads_.served;
+		return true;
+	}
+
+	VectorEngine::FlowReadCounters VectorEngine::FlowReads() const
+	{
+		std::lock_guard<std::mutex> lock(flowMutex_);
+		return flowReads_;
 	}
 
 	bool VectorEngine::PairSpansSlip(uint64_t from, uint64_t to) const
