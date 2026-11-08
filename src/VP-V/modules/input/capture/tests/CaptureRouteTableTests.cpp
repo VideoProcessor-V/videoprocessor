@@ -9,6 +9,13 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 #include <VP-V/modules/input/capture/CaptureRoutes.h>
+#include <VP-V/modules/input/capture/CaptureRouteFacts.h>
+#include <VP-V/modules/input/capture/CapturePayload.h>
+#include <VP-V/modules/input/capture/EarlyUploadHandoff.h>
+#include <VideoFrame.h>
+
+#include <memory>
+#include <vector>
 
 #include <cstdint>
 #include <string>
@@ -131,6 +138,77 @@ namespace VideoProcessorTest
 			Assert::IsFalse(Vpv::Capture::ChooseRoute(f) == ConvertRoute::RawRgb);
 			f.widthMultipleOf8 = true;
 			Assert::IsTrue(Vpv::Capture::ChooseRoute(f) == ConvertRoute::RawRgb);
+		}
+
+		// Audit F3: FactsOf on real states, against the old expressions as they read the host (state->..., the
+		// Supports functions, the width rule), for every encoding x tunnel x override x display mode x switches.
+		TEST_METHOD(FactsOfMatchesTheOldExpressionsOnRealStates)
+		{
+			const VideoFrameEncoding encodings[] = { VideoFrameEncoding::UNKNOWN, VideoFrameEncoding::UYVY, VideoFrameEncoding::HDYC,
+				VideoFrameEncoding::V210, VideoFrameEncoding::ARGB_8BIT, VideoFrameEncoding::BGRA_8BIT, VideoFrameEncoding::R210,
+				VideoFrameEncoding::R10b, VideoFrameEncoding::R10l, VideoFrameEncoding::R12B, VideoFrameEncoding::R12L,
+				VideoFrameEncoding::H265, VideoFrameEncoding::DNxHR, VideoFrameEncoding::P210, VideoFrameEncoding::P010,
+				VideoFrameEncoding::NV12, VideoFrameEncoding::P016 };
+			const VideoConversionOverride overrides[] = { VideoConversionOverride::VIDEOCONVERSION_NONE,
+				VideoConversionOverride::VIDEOCONVERSION_V210_TO_P010 };
+			const int widths[] = { 0 /* no display mode */, 1920, 1922 };
+			uint32_t rows = 0, raw = 0;
+			for (VideoFrameEncoding e : encodings)
+				for (int dv = 0; dv < 2; ++dv)
+					for (VideoConversionOverride o : overrides)
+						for (int w : widths)
+							for (uint32_t bits = 0; bits < 64; ++bits)
+								for (int native = 0; native < 2; ++native)
+								{
+									VideoStateComPtr state = new VideoState();
+									state->videoFrameEncoding = e;
+									state->dolbyVisionTunnel = dv != 0;
+									if (w > 0)
+										state->displayMode = std::make_shared<DisplayMode>(w, 1080, false, 24000, 1001);
+									Vpv::Capture::RouteFlags flags;
+									flags.rgbWanted = (bits & 1) != 0; flags.rgbFailed = (bits & 2) != 0;
+									flags.captureWanted = (bits & 4) != 0; flags.captureFailed = (bits & 8) != 0;
+									flags.dvWanted = (bits & 16) != 0; flags.dvFailed = (bits & 32) != 0;
+									// The pre-P10 terms, verbatim in their host form.
+									const bool rgbRaw = !state->dolbyVisionTunnel && flags.rgbWanted && !flags.rgbFailed &&
+										o == VideoConversionOverride::VIDEOCONVERSION_NONE &&
+										GpuRgbUnpack::Supports(state->videoFrameEncoding) && state->displayMode &&
+										((state->videoFrameEncoding != VideoFrameEncoding::R12B && state->videoFrameEncoding != VideoFrameEncoding::R12L) ||
+											state->displayMode->FrameWidth() % 8 == 0);
+									const bool dvRaw = state->dolbyVisionTunnel && flags.dvWanted && !flags.dvFailed &&
+										o == VideoConversionOverride::VIDEOCONVERSION_NONE &&
+										GpuDolbyVisionTunnelUnpack::Supports(state->videoFrameEncoding) && state->displayMode;
+									ConvertRoute legacy = ConvertRoute::CpuFormatter;
+									if (!rgbRaw && native != 0)
+										legacy = ConvertRoute::NativeRgbEmpty;
+									else if (rgbRaw || (flags.captureWanted && !flags.captureFailed &&
+										o == VideoConversionOverride::VIDEOCONVERSION_NONE && GpuCaptureUnpack::Supports(state->videoFrameEncoding)))
+										legacy = rgbRaw ? ConvertRoute::RawRgb : ConvertRoute::RawCapture;
+									else if (dvRaw)
+										legacy = ConvertRoute::DvAnalyse;
+									const ConvertRoute now = Vpv::Capture::ChooseRoute(Vpv::Capture::FactsOf(*state, o, native != 0, flags));
+									if (now != legacy)
+										Assert::Fail((L"route differs: encoding " + std::to_wstring(static_cast<int>(e)) + L" bits " +
+											std::to_wstring(bits)).c_str());
+									++rows;
+									raw += now == ConvertRoute::RawRgb || now == ConvertRoute::RawCapture || now == ConvertRoute::DvAnalyse ? 1 : 0;
+								}
+			Assert::AreEqual(17u * 2u * 2u * 3u * 64u * 2u, rows);
+			Assert::IsTrue(raw > 0, L"plausibility: real states reach the raw routes");
+		}
+
+		// Audit F3: the AfterPublish gate (CaptureAfterPublish runs the early upload only for a slot with a hand-off and
+		// its frame; a null slot, or one without them, is skipped).
+		TEST_METHOD(EarlyUploadDueOnlyWithAHandoffAndItsFrame)
+		{
+			Assert::IsNull(Vpv::Capture::EarlyUploadDue(std::shared_ptr<void>()), L"null slot: skipped");
+			auto e = std::make_shared<Vpv::Capture::PayloadExtension>();
+			std::shared_ptr<void> slot = e;
+			Assert::IsNull(Vpv::Capture::EarlyUploadDue(slot), L"no hand-off: skipped");
+			e->earlyHandoff = std::make_shared<EarlyUploadHandoff>();
+			Assert::IsNull(Vpv::Capture::EarlyUploadDue(slot), L"no frame: skipped");
+			e->earlyFrame = std::make_shared<VideoFrame>();
+			Assert::IsTrue(Vpv::Capture::EarlyUploadDue(slot) == e.get(), L"both: due");
 		}
 	};
 }

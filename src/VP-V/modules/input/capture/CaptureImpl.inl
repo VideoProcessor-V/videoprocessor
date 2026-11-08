@@ -9,6 +9,7 @@
 #pragma once
 
 #include <VP-V/modules/input/capture/CapturePayload.h>
+#include <VP-V/modules/input/capture/CaptureRouteFacts.h>
 #include <VP-V/modules/input/capture/CaptureRoutes.h>
 
 // Item f (P10-2): the live capture switches, from the applied settings. Was two copies of these stores in the
@@ -92,23 +93,15 @@ bool LibplaceboVideoRenderer::Impl::CaptureConvert(RendererExtension::ConvertCon
 	// no conversion. The frame is marked prepared with an empty payload
 	// (the queue waits for one now that these encodings have a
 	// formatter; the native upload reads the frame itself).
-	Vpv::Capture::RouteFacts facts;
-	facts.dolbyVisionTunnel = state->dolbyVisionTunnel;
-	facts.overrideNone = m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE;
-	facts.displayMode = state->displayMode != nullptr;
-	facts.rgbWanted = rgbGpuWanted.load(std::memory_order_acquire);
-	facts.rgbFailed = rgbGpuFailed.load(std::memory_order_acquire);
-	facts.rgbSupports = GpuRgbUnpack::Supports(state->videoFrameEncoding);
-	facts.twelveBitRgb = state->videoFrameEncoding == VideoFrameEncoding::R12B || state->videoFrameEncoding == VideoFrameEncoding::R12L;
-	facts.widthMultipleOf8 = state->displayMode && state->displayMode->FrameWidth() % 8 == 0;
-	facts.nativeRgbUpload = IsNativeRgbUpload(state->videoFrameEncoding, m_videoConversionOverride, state->dolbyVisionTunnel);
-	facts.captureWanted = captureGpuWanted.load(std::memory_order_acquire);
-	facts.captureFailed = captureGpuFailed.load(std::memory_order_acquire);
-	facts.captureSupports = GpuCaptureUnpack::Supports(state->videoFrameEncoding);
-	facts.dvWanted = dvGpuWanted.load(std::memory_order_acquire);
-	facts.dvFailed = dvGpuFailed.load(std::memory_order_acquire);
-	facts.dvSupports = GpuDolbyVisionTunnelUnpack::Supports(state->videoFrameEncoding);
-	const Vpv::Capture::ConvertRoute route = Vpv::Capture::ChooseRoute(facts);
+	Vpv::Capture::RouteFlags flags;
+	flags.rgbWanted = rgbGpuWanted.load(std::memory_order_acquire);
+	flags.rgbFailed = rgbGpuFailed.load(std::memory_order_acquire);
+	flags.captureWanted = captureGpuWanted.load(std::memory_order_acquire);
+	flags.captureFailed = captureGpuFailed.load(std::memory_order_acquire);
+	flags.dvWanted = dvGpuWanted.load(std::memory_order_acquire);
+	flags.dvFailed = dvGpuFailed.load(std::memory_order_acquire);
+	const Vpv::Capture::ConvertRoute route = Vpv::Capture::ChooseRoute(Vpv::Capture::FactsOf(*state, m_videoConversionOverride,
+		IsNativeRgbUpload(state->videoFrameEncoding, m_videoConversionOverride, state->dolbyVisionTunnel), flags));
 	if (route == Vpv::Capture::ConvertRoute::CpuFormatter)
 		return false;
 	try
@@ -237,8 +230,8 @@ bool LibplaceboVideoRenderer::Impl::CaptureConvert(RendererExtension::ConvertCon
 // four locals are the payload's R18 slot now. Conversion thread, no lock (the hand-off's own mutex), as before.
 void LibplaceboVideoRenderer::Impl::CaptureAfterPublish(RendererExtension::PublishView& pv)
 {
-	const Vpv::Capture::PayloadExtension* published = Vpv::Capture::ExtensionOf(pv.extension);
-	if (!published || !published->earlyHandoff || !published->earlyFrame)
+	const Vpv::Capture::PayloadExtension* published = Vpv::Capture::EarlyUploadDue(pv.extension);
+	if (!published)
 		return;
 	const std::shared_ptr<EarlyUploadHandoff>& earlyHandoff = published->earlyHandoff;
 	const std::shared_ptr<VideoFrame>& earlyFrame = published->earlyFrame;

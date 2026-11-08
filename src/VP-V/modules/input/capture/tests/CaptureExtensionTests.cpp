@@ -9,6 +9,8 @@
 #include <VP-V/modules/input/capture/CaptureHost.h>
 
 #include <atomic>
+#include <stdexcept>
+#include <string>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -48,6 +50,54 @@ namespace VideoProcessorTest
 			c.host = host;
 			return c;
 		}
+
+		// The hub as production registers it (one forwarding extension), emptied around each hub test.
+		struct HubScope
+		{
+			struct Fwd : RE::IRendererExtension
+			{
+				bool OnFrame(RE::FrameContext& c) override { return Vpv::Hub::ExtensionHub::Instance().OnFrame(c); }
+			};
+			HubScope()
+			{
+				RE::ResetForTesting();
+				Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+				RE::Register(std::unique_ptr<RE::IRendererExtension>(new Fwd()));
+			}
+			~HubScope()
+			{
+				RE::ResetForTesting();
+				Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+			}
+		};
+
+		// An observer of converted frames: records the calls, never takes the frame.
+		struct Observer : Vpv::Hub::ISkeletonModule
+		{
+			int* converts; int* publishes;
+			Observer(int* c, int* p) : converts(c), publishes(p) {}
+			const char* Name() const override { return "observer"; }
+			bool OnConvertedFrame(RE::FrameContext&, RE::ConvertContext&) override { ++*converts; return false; }
+			void OnAfterPublish(RE::FrameContext&, RE::PublishView&) override { ++*publishes; }
+		};
+
+		// A module whose convert throws (contained by the hub).
+		struct Thrower : Vpv::Hub::ISkeletonModule
+		{
+			const char* Name() const override { return "thrower"; }
+			bool OnConvertedFrame(RE::FrameContext&, RE::ConvertContext&) override { throw std::runtime_error("boom"); }
+		};
+
+		// A capture host whose route fails with a text (as CaptureConvert does when a route throws).
+		class FailingHost : public Vpv::Capture::ICaptureHost
+		{
+		public:
+			void ApplySettings() override {}
+			void ReleaseGpu() override {}
+			bool Convert(RE::ConvertContext& cc) override { if (cc.error) *cc.error = "frame conversion failed"; return true; }
+			void AfterPublish(RE::PublishView&) override {}
+			void SyncFallback(const FallbackCatalog::Decision&) override {}
+		};
 	}
 
 	TEST_CLASS(CaptureExtensionTests)
@@ -188,6 +238,66 @@ namespace VideoProcessorTest
 			conversion.join();
 			Assert::AreEqual(0, misses.load(), L"the live renderer is found on every frame");
 			Assert::IsTrue(c.convert > 0);
+		}
+
+		// Audit F2: Convert is first-wins. An observer registered AFTER capture never sees a frame capture takes; one
+		// registered BEFORE it (returning false) does, and capture still takes the frame; AfterPublish reaches both.
+		TEST_METHOD(ConvertIsFirstWinsSoObserversUseAfterPublishOrComeFirst)
+		{
+			int key = 0;
+			Counts c;
+			Vpv::Capture::HostBinding bind(&key, std::unique_ptr<Vpv::Capture::ICaptureHost>(new FakeHost(c, true)));
+			int afterConverts = 0, afterPublishes = 0, beforeConverts = 0, beforePublishes = 0;
+			{
+				HubScope hub;
+				Vpv::Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new Vpv::Capture::CaptureExtension()));
+				Vpv::Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new Observer(&afterConverts, &afterPublishes)));
+				RE::ConvertContext cc;
+				Assert::IsTrue(RE::OnConvertedFrame(&key, cc), L"capture takes the frame");
+				RE::PublishView pv;
+				RE::AfterPublish(&key, pv);
+			}
+			Assert::AreEqual(0, afterConverts, L"an observer after capture is skipped for taken frames");
+			Assert::AreEqual(1, afterPublishes, L"AfterPublish fans out to it");
+			{
+				HubScope hub;
+				Vpv::Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new Observer(&beforeConverts, &beforePublishes)));
+				Vpv::Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new Vpv::Capture::CaptureExtension()));
+				RE::ConvertContext cc;
+				Assert::IsTrue(RE::OnConvertedFrame(&key, cc), L"capture still takes the frame");
+			}
+			Assert::AreEqual(1, beforeConverts, L"an observer before capture sees the frame");
+			Assert::AreEqual(2, c.convert);
+		}
+
+		// Audit F3: a handled frame's error text survives the hub, and the host's rethrow fails it with that text; a
+		// THROW instead would be contained by the hub and read as "not handled" (the host formatter would run), which
+		// is why CaptureConvert catches its own errors.
+		TEST_METHOD(ConvertErrorReachesTheHostAndIsRethrownWithTheSameText)
+		{
+			int key = 0;
+			Vpv::Capture::HostBinding bind(&key, std::unique_ptr<Vpv::Capture::ICaptureHost>(new FailingHost()));
+			HubScope hub;
+			Vpv::Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new Vpv::Capture::CaptureExtension()));
+			std::string error, caught;
+			try
+			{
+				RE::ConvertContext cc;
+				cc.error = &error;
+				// The renderer's two lines (ConversionLoop), as written there.
+				if (RE::OnConvertedFrame(&key, cc)) { if (!error.empty()) throw std::runtime_error(error); }
+				else Assert::Fail(L"the route was handled");
+			}
+			catch (const std::exception& e)
+			{
+				caught = e.what();
+			}
+			Assert::AreEqual(std::string("frame conversion failed"), caught);
+
+			Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+			Vpv::Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new Thrower()));
+			RE::ConvertContext cc;
+			Assert::IsFalse(RE::OnConvertedFrame(&key, cc), L"a throw is contained: not handled");
 		}
 	};
 }

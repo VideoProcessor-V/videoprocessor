@@ -123,6 +123,7 @@ Doc 59 section 5. The capture code leaves the renderer's file; the renderer keep
 | `CaptureExtension.h/.cpp` | the hub module: Lifecycle `SettingsApplied` / `GpuReleased`, R16 `OnConvertedFrame` / `AfterPublish`, each routed to the renderer registered under the hook's host; registered in `core/hub/HubBootstrap.cpp` after resync |
 | `CaptureHost.h` | `ICaptureHost`, the header-only Impl adapter (`CaptureImplHost<Impl>`) and `HostBinding` (the Impl's LAST member: registered last, removed first; fixed lock-free host-keyed slot table, `core/hub/HostSlots.h`). A failed registration engages the renderer's "capture extension" fallback (`FallbackCatalog::CaptureUnbound`) and logs a line |
 | `CaptureImpl.inl` | the moved code, as out-of-line members of the renderer's Impl (the P5a pattern): `CaptureApplySettings` (item f), `CaptureReleaseGpu` (d), `CaptureConvert` (h), `CaptureAfterPublish` (i), the early upload and the unpackers (a functions, b). Included ONCE by the renderer after its Impl |
+| `CaptureRouteFacts.h` | `FactsOf`: the route's facts from the state, the override and the switches (pinned on real states) |
 | `CaptureRoutes.h` | `ChooseRoute`: the conversion route as a pure decision (pinned by `CaptureRouteTableTests`, 32768 rows against a copy of the old expressions) |
 | `CapturePayload.h` | the R18 slot's content (`PayloadExtension`; P10-3: the early hand-off) |
 

@@ -18,6 +18,7 @@
     "src/VP-V/modules/input/capture/EarlyUploadHandoff.h",
     "src/VideoProcessor-Lib/CaptureInput.cpp",
     "src/VP-V/modules/input/capture/CaptureRoutes.h",
+    "src/VP-V/modules/input/capture/CaptureRouteFacts.h",
     "src/VP-V/modules/input/capture/CaptureHost.h",
     "src/VP-V/modules/input/capture/CaptureExtension.h",
     "src/VP-V/modules/input/capture/CaptureExtension.cpp",

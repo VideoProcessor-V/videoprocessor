@@ -206,6 +206,9 @@ namespace RendererExtension
 	// R16 OnConvertedFrame (take-over; conversion thread, no queue lock) and R16 AfterPublish (fan-out; after the
 	// payload is published and the queue notified). `payload` is the host's converted payload (opaque here);
 	// `extension` is its R18 slot. The formatter mutex is reached through the callbacks (as in the host today).
+	// Convert is first-wins: a handler that takes the frame (input.capture does for every raw route) ends the chain, so
+	// a module that only OBSERVES converted frames uses AfterPublish (fan-out), or registers before the taker and
+	// returns false.
 	struct ConvertContext
 	{
 		const VideoFrame* frame = nullptr;

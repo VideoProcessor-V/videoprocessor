@@ -4,7 +4,8 @@
 
 // M2 P10 (doc 59 section 5): the conversion thread's capture route, as a pure decision over plain facts.
 // The renderer's ConversionLoop chose it inline (capture_path gpu, native_rgb_ingest, dv_tunnel_gpu_unpack,
-// libplacebo's native RGB upload); CaptureConvert (CaptureConvert.inl) now asks this function. The facts are
+// libplacebo's native RGB upload); CaptureConvert (CaptureImpl.inl) now asks this function
+// (its facts from CaptureRouteFacts.h FactsOf). The facts are
 // exactly the terms of the old expressions, evaluated by the caller in the same way; the order of the old
 // if / else-if chain is kept (native RGB upload, then the raw routes, then the Dolby Vision analyse, then the
 // CPU formatter). CaptureRouteTableTests pins the function against a verbatim copy of the old expressions

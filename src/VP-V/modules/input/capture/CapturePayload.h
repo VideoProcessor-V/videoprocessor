@@ -34,5 +34,13 @@ namespace Vpv
 		{
 			return static_cast<const PayloadExtension*>(slot.get());
 		}
+
+		// The AfterPublish gate: the slot's content when it carries an early upload to run (a hand-off and its frame),
+		// else null (no slot, or a payload published without the early upload): nothing is uploaded.
+		inline const PayloadExtension* EarlyUploadDue(const std::shared_ptr<void>& slot)
+		{
+			const PayloadExtension* e = ExtensionOf(slot);
+			return e && e->earlyHandoff && e->earlyFrame ? e : nullptr;
+		}
 	}
 }

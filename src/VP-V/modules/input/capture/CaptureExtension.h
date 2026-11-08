@@ -16,6 +16,10 @@
 // return "not handled" except libplacebo's native RGB upload, which the renderer took before P10 as well.
 // A throw is contained by the hub (WorkerFault); the conversion route catches its own errors and reports them
 // through ConvertContext::error, as the renderer's conversion did.
+//
+// Convert is a first-wins phase and this module returns true for every raw route: a module registered AFTER it never
+// sees those frames in OnConvertedFrame. An observer (e.g. the analysis lane) uses OnAfterPublish (fan-out), or
+// registers before this module and returns false (CaptureExtensionTests pins both).
 
 #include <VP-V/core/hub/ExtensionHub.h>
 
