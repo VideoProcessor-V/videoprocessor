@@ -7,9 +7,14 @@
 //   * P4Reader   reads P4(N) from a PUBLISHED / pinned slot (never render-thread-only state) and fills the scene part of the
 //                context; false = P4(N) is not published yet (the lane job asks again later; the live fill treats it as "record late").
 //                It also carries the stamp's ancient flag.
-//   * engine     IVectorEngine::PairSpansSlip(N-d, N) and, when the flow is CPU-resident, FlowOf(N) for temporalSeed. P5a must make
-//                these two calls safe to make from the camera worker (read-only over the sealed ring); null engine = no slip info
-//                and no flow (the context is still built).
+//   * engine     IVectorEngine::PairSpansSlip(recordSeq, N) (recordSeq = the d-th previous record, set by the scheduler in the context
+//                before the provider runs) and, when the flow is CPU-resident, FlowOf(N) for temporalSeed (absent today). P5a's contract:
+//                every IVectorEngine method but FieldEra is RENDER THREAD ONLY (renderMutex). So the provider asks the engine only on the
+//                render thread (renderThread() true). On the camera worker (the lane job) it leaves the engine facts out: the slip is
+//                judged by the scheduler's re-check when the stored result is consumed (SetSlipCheck, render thread), and the pair is
+//                "not ready" (nothing stored, the render computes it live) whenever a CPU flow may exist (flowMayBeResident, a render
+//                thread snapshot), so a lane result never differs from the live one by who made it. The camera worker never calls
+//                FieldOf (its texture is valid only until the next estimate).
 //   * temporalSeed input: the engine flow is resampled onto the RECORD's block grid by ResampleFlowToGrid (source px per cell
 //                -> the record's blocks, nearest cell at the block centre). A flow that cannot be resampled is dropped (the plan
 //                then reports "no temporal seed input"), never guessed.
@@ -62,27 +67,36 @@ namespace CameraLink
 	}
 
 	// The provider for GuidanceScheduler::SetContextProvider. `lag` returns d (the scheduler's worker-side SnapshotLag()).
+	// renderThread: true on the render thread (null = never: every call is treated as the camera worker's). flowMayBeResident: a render
+	// thread snapshot of IVectorEngine::FlowIsCpuResident (null = "may be": the worker's pair is then not ready).
 	inline std::function<bool(uint64_t, PairContext&)> MakeContextProvider(VpMotion::IVectorEngine* engine, ICameraLink& link,
-		P4Reader p4, std::function<uint8_t()> lag)
+		P4Reader p4, std::function<bool()> renderThread = nullptr, std::function<bool()> flowMayBeResident = nullptr)
 	{
 		ICameraLink* l = &link;
-		return [engine, l, p4, lag](uint64_t pair, PairContext& ctx) -> bool
+		return [engine, l, p4, renderThread, flowMayBeResident](uint64_t pair, PairContext& ctx) -> bool
 		{
+			const uint64_t recordSeq = ctx.recordSeq;   // set by the scheduler before it asks
 			ctx = PairContext();
+			ctx.recordSeq = recordSeq;
 			if (!p4 || !p4(pair, ctx))
 				return false;   // P4(N) not published yet
+			ctx.recordSeq = recordSeq;   // whatever the reader did
 			ctx.spansSlip = false;   // the engine part below is the provider's, whatever the reader left there
 			ctx.flowCpuResident = false;
 			ctx.nvofX.clear();
 			ctx.nvofY.clear();
-			const uint64_t d = lag ? lag() : 2;
-			if (!engine || pair < d)
+			// The engine is render-thread only. On the worker: no engine facts (the slip is re-checked at consumption), and "not ready"
+			// while a CPU flow may exist (the live fill would add it; the pair is then computed live only).
+			const bool onRender = renderThread && renderThread();
+			if (engine && !onRender)
+				return flowMayBeResident && !flowMayBeResident();
+			if (!engine || recordSeq == 0 || recordSeq > pair)
 				return true;
-			ctx.spansSlip = engine->PairSpansSlip(pair - d, pair);
+			ctx.spansSlip = engine->PairSpansSlip(recordSeq, pair);
 			if (engine->FlowIsCpuResident())
 			{
 				VpMotion::FlowView view;
-				const std::shared_ptr<const CameraModel::CameraMotion> rec = l->CausalRecord(pair - d);
+				const std::shared_ptr<const CameraModel::CameraMotion> rec = l->CausalRecord(recordSeq);
 				if (rec && rec->blocks && engine->FlowOf(pair, view) &&
 					ResampleFlowToGrid(view, rec->blocks->gridW, rec->blocks->gridH, rec->blocks->blockSize, ctx.nvofX, ctx.nvofY))
 					ctx.flowCpuResident = true;

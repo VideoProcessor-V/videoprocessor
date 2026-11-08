@@ -18,6 +18,7 @@
 #include "CameraLink.h"
 #include "FieldReadbackRing.h"
 #include "GuidanceLag.h"
+#include "GuidanceTimers.h"
 #include "PairAssembly.h"
 
 #include <VP-V/core/FallbackCatalog.h>
@@ -115,6 +116,8 @@ namespace CameraLink
 		// ---- ICameraLink ----
 		std::shared_ptr<const CameraModel::CameraMotion> SealedRecord(uint64_t seq) const override;
 		std::shared_ptr<const CameraModel::CameraMotion> CausalRecord(uint64_t seq) const override;
+		bool PreviousRecordSeq(uint64_t seq, unsigned back, uint64_t& out) const override;
+		uint64_t LatestRecordSeq() const override;
 		std::shared_ptr<const FieldCopy> FieldOf(uint64_t seq) const override;
 		bool LabelsFor(uint64_t seq, CameraConsumer c, CameraLabelsView& out) override;
 		std::shared_ptr<const CameraModel::GuidanceFrame> GuideFor(uint64_t seq) override;
@@ -124,6 +127,9 @@ namespace CameraLink
 		void SetFitDoneObserver(std::function<void(uint64_t fitSeq)> f);
 		// K4: the measured fit cost (p95) and the readback latency the guide lag d is derived from (GuidanceLag.h).
 		GuideLagMeter& LagMeter() { return m_lagMeter; }
+		// K4: the fit time (CPU work, the camera worker) and the readback latency (a wait, request -> ready) as PassTimers samples,
+		// buffered thread-safely and drained on the render thread into the skeleton's accumulator (AddCameraRows). Bounded.
+		size_t DrainTimerSamples(std::vector<TimerSample>& out);
 
 		// K2 / K4 plug in here (set by their owners; null = unavailable).
 		std::function<bool(uint64_t, CameraConsumer, CameraLabelsView&)> labelsProvider;
@@ -162,6 +168,11 @@ namespace CameraLink
 		uint64_t m_seenQueueFull = 0;
 		std::vector<uint64_t> m_sealedMark;   // seq accepted at the seal, indexed seq mod size
 		GuideLagMeter m_lagMeter;
+		mutable std::mutex m_chainMutex;
+		std::vector<uint64_t> m_chain;   // requested record seqs, ascending (bounded); cleared on a new field era / teardown
+		std::mutex m_timerMutex;
+		std::vector<TimerSample> m_timerSamples;
+		void AddTimerSample(const char* row, double ms, bool wait);
 		std::map<uint64_t, std::chrono::steady_clock::time_point> m_requestedAt;   // render thread: field copy requests in flight
 		std::mutex m_observerMutex;
 		std::function<void(uint64_t)> m_fitDone;

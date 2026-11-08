@@ -54,6 +54,10 @@ namespace CameraLink
 		m_ring.reset();
 		m_sealedMark.clear();
 		m_requestedAt.clear();
+		{
+			std::lock_guard<std::mutex> lock(m_chainMutex);
+			m_chain.clear();
+		}
 		m_table = nullptr;
 		m_bytes = nullptr;
 		m_indicator = nullptr;
@@ -82,6 +86,9 @@ namespace CameraLink
 	void CameraLinkCore::AttachGraph(VpSkeleton::SlotTable* table, VpSkeleton::CpuBuffers* p7Bytes, VpIndicator::Indicator* indicator)
 	{
 		Teardown();
+		// The measured costs belong to the graph that made them: a rebuild starts a fresh window (the caller derives d from
+		// the old window BEFORE it attaches the new graph).
+		m_lagMeter.Clear();
 		if (!m_active || !table || !table->Find(VpSkeleton::kP7CameraFit))
 			return;
 		m_table = table;
@@ -158,11 +165,54 @@ namespace CameraLink
 			const auto at = m_requestedAt.find(fc->seq);
 			if (at != m_requestedAt.end())
 			{
-				m_lagMeter.AddReadbackSeconds(std::chrono::duration<double>(now - at->second).count());
+				const double latency = std::chrono::duration<double>(now - at->second).count();
+				m_lagMeter.AddReadbackSeconds(latency);
+				AddTimerSample(kTimerReadback, latency * 1000.0, true);
 				m_requestedAt.erase(at);
 			}
 			SubmitField(fc, f);
 		}
+	}
+
+	void CameraLinkCore::AddTimerSample(const char* row, double ms, bool wait)
+	{
+		if (!(ms > 0))
+			return;
+		std::lock_guard<std::mutex> lock(m_timerMutex);
+		if (m_timerSamples.size() >= 256)
+			m_timerSamples.erase(m_timerSamples.begin());   // bounded: an undrained queue keeps the newest
+		TimerSample s;
+		s.row = row;
+		s.ms = ms;
+		s.wait = wait;
+		m_timerSamples.push_back(s);
+	}
+
+	size_t CameraLinkCore::DrainTimerSamples(std::vector<TimerSample>& out)
+	{
+		std::lock_guard<std::mutex> lock(m_timerMutex);
+		const size_t n = m_timerSamples.size();
+		out.insert(out.end(), m_timerSamples.begin(), m_timerSamples.end());
+		m_timerSamples.clear();
+		return n;
+	}
+
+	bool CameraLinkCore::PreviousRecordSeq(uint64_t seq, unsigned back, uint64_t& out) const
+	{
+		if (back == 0)
+			return false;
+		std::lock_guard<std::mutex> lock(m_chainMutex);
+		const size_t k = static_cast<size_t>(std::lower_bound(m_chain.begin(), m_chain.end(), seq) - m_chain.begin());
+		if (k < back)
+			return false;
+		out = m_chain[k - back];
+		return true;
+	}
+
+	uint64_t CameraLinkCore::LatestRecordSeq() const
+	{
+		std::lock_guard<std::mutex> lock(m_chainMutex);
+		return m_chain.empty() ? 0 : m_chain.back();
 	}
 
 	void CameraLinkCore::SetFitDoneObserver(std::function<void(uint64_t fitSeq)> f)
@@ -241,6 +291,8 @@ namespace CameraLink
 				m_lastEra = era;
 				m_lastRequestedField = 0;
 				m_requestedAt.clear();
+				std::lock_guard<std::mutex> lock(m_chainMutex);
+				m_chain.clear();   // the numbering restarted: the old records are not "previous" any more
 			}
 		}
 		if (m_ring && m_engine)
@@ -263,6 +315,16 @@ namespace CameraLink
 				}
 				else
 				{
+					{
+						// The record chain: this field WILL be a record (its copy is on the way), whatever its fit does later.
+						std::lock_guard<std::mutex> lock(m_chainMutex);
+						if (m_chain.empty() || vf.seq > m_chain.back())
+						{
+							if (m_chain.size() >= 64)
+								m_chain.erase(m_chain.begin());
+							m_chain.push_back(vf.seq);
+						}
+					}
 					if (m_requestedAt.size() >= 64)
 						m_requestedAt.erase(m_requestedAt.begin());   // bounded: a copy that never came back is not timed
 					m_requestedAt[vf.seq] = now;
@@ -332,7 +394,10 @@ namespace CameraLink
 				m_events.fetch_or(1u << kEvSlip, std::memory_order_relaxed);
 		}
 		if (rec && rec->costMicros > 0)
+		{
 			m_lagMeter.AddFitSeconds(static_cast<double>(rec->costMicros) * 1e-6);
+			AddTimerSample(kTimerFit, static_cast<double>(rec->costMicros) * 1e-3, false);
+		}
 		{
 			std::lock_guard<std::mutex> lock(m_traceMutex);
 			if (m_trace.is_open() && rec)
@@ -347,14 +412,11 @@ namespace CameraLink
 				m_trace << b;
 			}
 		}
-		// K4: the guide lane job. After the publish, outside every lock of this class.
-		std::function<void(uint64_t)> fitDone;
-		{
-			std::lock_guard<std::mutex> lock(m_observerMutex);
-			fitDone = m_fitDone;
-		}
-		if (fitDone)
-			fitDone(job.seq);
+		// K4: the guide lane job. After the publish, outside the status / trace locks. The observer mutex is held for the call, so
+		// SetFitDoneObserver(nullptr) (the adapter's Detach) returns only when no call is in flight: the observer's captures stay valid.
+		std::lock_guard<std::mutex> lock(m_observerMutex);
+		if (m_fitDone)
+			m_fitDone(job.seq);
 	}
 
 	std::vector<FallbackCatalog::Decision> CameraLinkCore::CollectDecisions()

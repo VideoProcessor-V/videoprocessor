@@ -38,7 +38,8 @@ namespace CameraLink
 	// What the host knows about the pair about to be searched.
 	struct PairContext
 	{
-		bool spansSlip = false;                 // IVectorEngine::PairSpansSlip(N-d, N)
+		uint64_t recordSeq = 0;                 // the record the guide reads (the d-th previous): set by the scheduler BEFORE the provider runs
+		bool spansSlip = false;                 // IVectorEngine::PairSpansSlip(recordSeq, N)
 		bool ancientStamp = false;              // the stamp of the pair is ancient (Indicator::StampOf(...).ancient): counted as a slip
 		bool cut = false, fade = false, flash = false;   // P4(N) scene flags
 		double fadeGain = 1, fadeOffset = 0;
@@ -129,6 +130,9 @@ namespace CameraLink
 		// The provider is also called from the camera worker (PublishLane): it must be thread-safe and read P4 of the pair from a
 		// pinned / published slot, never from render-thread-only state.
 		void SetContextProvider(std::function<bool(uint64_t pairSeq, PairContext&)> p) { m_context = std::move(p); RefreshSnapshot(); }
+		// Re-checked when a STORED lane result is consumed (the slip can appear after the lane built it): (recordSeq, pairSeq) ->
+		// true = the pair spans a slip now. Render thread. Null = no re-check.
+		void SetSlipCheck(std::function<bool(uint64_t recordSeq, uint64_t pairSeq)> f) { m_slipCheck = std::move(f); }
 
 		// Camera worker: right after Fit(N-d) once P4(N) is published. Stores the result unless the render already asked.
 		// Published: stored for the render. NotReady: the record or P4(N) is not there yet (ask again later; nothing stored).
@@ -147,7 +151,14 @@ namespace CameraLink
 		// The counts of a finished guided pair (from the readback): diagnostics + governor.
 		void OnCounts(uint64_t pairSeq, const float counts[4], double pairSeconds);
 
-		const GuidanceCounters& Counters() const { return m_counters; }
+		// A snapshot: the render thread's counters plus the lane counters the camera worker writes (atomics). Render thread.
+		GuidanceCounters Counters() const
+		{
+			GuidanceCounters c = m_counters;
+			c.lanePublished = m_lanePublished.load(std::memory_order_relaxed);
+			c.laneDiscarded = m_laneDiscarded.load(std::memory_order_relaxed);
+			return c;
+		}
 		const GuidanceGovernor& Governor() const { return m_governor; }
 		// VP_MOTION_BENCH rows (null = none). Written for guided AND refused pairs.
 		void SetBench(MotionBenchWriter* w) { m_bench = w; }
@@ -163,17 +174,21 @@ namespace CameraLink
 		void OnEstimateOutcome(uint64_t pairSeq, const EstimateOutcome& o);
 
 	private:
-		struct Stored { uint64_t seq = ~uint64_t(0); uint32_t key = 0; GuideResult result; double gpuMs = -1; };
+		struct Stored { uint64_t seq = ~uint64_t(0); uint32_t key = 0; uint32_t cfgKey = 0; uint64_t recSeq = 0; GuideResult result; double gpuMs = -1; };
 		static constexpr uint8_t kMinGuideLagLocal = 2;
 		GuideResult Compute(uint64_t pairSeq);
 		void RefreshSnapshot();   // render thread: publishes the governed switches / lag / config / provider for PublishLane
 		uint32_t KeyOf(const CameraModel::MeasurementSwitches& sw, uint8_t lag) const { return SwitchMask(sw) | (uint32_t(lag) << 16); }
+		static uint32_t CfgKeyOf(const CameraModel::MeasurementConfig& c);   // every threshold that changes a plan
 
 		ICameraLink& m_link;
 		GuidanceSettings m_settings;
 		GuidanceGovernor m_governor;
 		CameraModel::MeasurementDiagnostics m_diag;
-		GuidanceCounters m_counters;
+		GuidanceCounters m_counters;                // render thread only
+		std::atomic<uint64_t> m_lanePublished{ 0 }, m_laneDiscarded{ 0 };   // the camera worker's counters
+		uint64_t m_epoch = 0;                       // under m_mutex: bumped by a discontinuity / new settings; a lane result of an old epoch is never stored
+		std::function<bool(uint64_t, uint64_t)> m_slipCheck;
 		RefusalHold m_hold;
 		double m_narrowIdleRemaining = 0;   // measured seconds the narrow-idle entry is still held
 		std::string m_rejectedText, m_gpuNotAppliedText;
@@ -199,6 +214,8 @@ namespace CameraLink
 			: m_sched(scheduler), m_counts(counts), m_link(link) {}
 		void BeforeEstimate(const VpMotion::EstimateContext& ctx, VpMotion::IGuidanceSink& sink) override;
 		void AfterEstimate(uint64_t pairSeq, bool guidanceUsed, pl_tex countsTex) override;
+		// SHIM: P5a's AfterEstimate carries only guidanceUsed and the counts texture; it forwards into EstimateOutcome here. The one
+		// edit when M2 adds the plain-data outcome: an override that maps it onto EstimateOutcome and calls AfterEstimateEx.
 		// The full form: everything the host read from the matcher (see EstimateOutcome). AfterEstimate forwards here.
 		void AfterEstimateEx(uint64_t pairSeq, const EstimateOutcome& outcome);
 		// Render thread, once per frame: finish the pairs whose counts arrived.
@@ -206,6 +223,8 @@ namespace CameraLink
 		// The motion pass GPU ms of the Estimate of pair N (< 0 = not measured), for its bench row. Optional.
 		void NoteEstimateGpuMs(uint64_t pairSeq, double ms) { m_sched.NoteGpuMs(pairSeq, ms); }
 		uint64_t UsedPairs() const { return m_used; }
+		// The 16 B counts readback (render thread; null = the counts are never read). Set by the adapter at Attach / Detach.
+		void SetCountsSource(IGuidanceCountsSource* counts) { m_counts = counts; }
 
 	private:
 		GuidanceScheduler& m_sched;

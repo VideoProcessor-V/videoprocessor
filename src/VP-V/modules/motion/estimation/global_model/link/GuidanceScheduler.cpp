@@ -107,6 +107,25 @@ namespace CameraLink
 		return o;
 	}
 
+	uint32_t GuidanceScheduler::CfgKeyOf(const CameraModel::MeasurementConfig& c)
+	{
+		// FNV-1a over the bytes of each threshold (no padding is hashed: field by field).
+		uint32_t h = 2166136261u;
+		const double v[] = { c.minConfidence, c.staticConfidence, c.staticSigmas, c.agreeSigmas, c.narrowRadiusSigmas,
+			c.narrowMinRadiusPx, c.e1AgreePx, c.roiBudgetShare };
+		for (size_t i = 0; i < sizeof(v) / sizeof(v[0]); ++i)
+		{
+			unsigned char b[sizeof(double)];
+			std::memcpy(b, &v[i], sizeof(double));
+			for (size_t k = 0; k < sizeof(double); ++k)
+			{
+				h ^= b[k];
+				h *= 16777619u;
+			}
+		}
+		return h;
+	}
+
 	GuidanceScheduler::GuidanceScheduler(ICameraLink& link, const GuidanceSettings& settings)
 		: m_link(link), m_settings(settings), m_governor(settings.governor), m_lane(kLaneRing), m_pending(kPendingRing), m_asked(kLaneRing, ~uint64_t(0))
 	{
@@ -114,6 +133,13 @@ namespace CameraLink
 
 	void GuidanceScheduler::SetSettings(const GuidanceSettings& s)
 	{
+		{
+			// New thresholds / switches: a lane result built under the old ones must not be used (it is also keyed, this drops it now).
+			std::lock_guard<std::mutex> lock(m_mutex);
+			for (Stored& st : m_lane)
+				st = Stored();
+			++m_epoch;
+		}
 		m_settings = s;
 		m_governor = GuidanceGovernor(s.governor);
 		RefreshSnapshot();
@@ -135,6 +161,8 @@ namespace CameraLink
 			std::lock_guard<std::mutex> lock(m_mutex);
 			for (Stored& s : m_lane)
 				s = Stored();
+			std::fill(m_asked.begin(), m_asked.end(), ~uint64_t(0));   // the numbering may restart: nothing counts as asked
+			++m_epoch;   // a lane pass that is mid-compute right now must not store its result
 		}
 		for (Stored& s : m_pending)
 			s = Stored();
@@ -149,10 +177,12 @@ namespace CameraLink
 		GuideInputs in;
 		std::shared_ptr<const CameraModel::CameraMotion> rec;
 		std::shared_ptr<const FieldCopy> field;
-		if (pairSeq >= m_lag)
+		uint64_t recSeq = 0;
+		if (m_link.PreviousRecordSeq(pairSeq, m_lag, recSeq))   // the d-th PREVIOUS record, not N - d (gaps in the numbering)
 		{
-			rec = m_link.CausalRecord(pairSeq - m_lag);
-			field = m_link.FieldOf(pairSeq - m_lag);
+			rec = m_link.CausalRecord(recSeq);
+			field = m_link.FieldOf(recSeq);
+			in.ctx.recordSeq = recSeq;
 		}
 		in.record = rec.get();
 		in.prevField = field.get();
@@ -191,27 +221,31 @@ namespace CameraLink
 		CameraModel::MeasurementConfig cfg;
 		uint8_t lag;
 		std::function<bool(uint64_t, PairContext&)> context;
+		uint64_t epoch;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			sw = m_snapSwitches;
 			cfg = m_snapConfig;
 			lag = m_snapLag;
 			context = m_snapContext;
+			epoch = m_epoch;
 			if (!sw.Any())
 				return LaneOutcome::Off;
 			if (m_asked[pairSeq % m_asked.size()] == pairSeq)
 			{
-				++m_counters.laneDiscarded;   // the render computed it live first: a late lane result is discarded, never merged
+				m_laneDiscarded.fetch_add(1, std::memory_order_relaxed);   // the render computed it live first: a late lane result is discarded, never merged
 				return LaneOutcome::Discarded;
 			}
 		}
-		if (pairSeq < lag)
-			return LaneOutcome::Discarded;   // no P7(N-d) can exist for this pair: never a lane pair
+		uint64_t recSeq = 0;
+		if (!m_link.PreviousRecordSeq(pairSeq, lag, recSeq))
+			return LaneOutcome::NotReady;   // fewer than d records before this pair (yet)
 		GuideInputs in;
-		const std::shared_ptr<const CameraModel::CameraMotion> rec = m_link.CausalRecord(pairSeq - lag);
-		const std::shared_ptr<const FieldCopy> field = m_link.FieldOf(pairSeq - lag);
+		const std::shared_ptr<const CameraModel::CameraMotion> rec = m_link.CausalRecord(recSeq);
+		const std::shared_ptr<const FieldCopy> field = m_link.FieldOf(recSeq);
 		in.record = rec.get();
 		in.prevField = field.get();
+		in.ctx.recordSeq = recSeq;
 		if (context && !context(pairSeq, in.ctx))
 			return LaneOutcome::NotReady;   // P4(N) is not published yet
 		GuideResult r = BuildGuide(sw, cfg, in);
@@ -219,16 +253,20 @@ namespace CameraLink
 			return LaneOutcome::NotReady;   // "late" is not a stored verdict: the render asks again with the record it then has
 		r.fromLane = true;
 		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_epoch != epoch)
+			return LaneOutcome::Discarded;   // a discontinuity / new settings arrived mid-compute: this result is from the old numbering
 		if (m_asked[pairSeq % m_asked.size()] == pairSeq)
 		{
-			++m_counters.laneDiscarded;
+			m_laneDiscarded.fetch_add(1, std::memory_order_relaxed);
 			return LaneOutcome::Discarded;
 		}
 		Stored& s = m_lane[pairSeq % m_lane.size()];
 		s.seq = pairSeq;
 		s.key = KeyOf(sw, lag);
+		s.cfgKey = CfgKeyOf(cfg);
+		s.recSeq = recSeq;
 		s.result = std::move(r);
-		++m_counters.lanePublished;
+		m_lanePublished.fetch_add(1, std::memory_order_relaxed);
 		return LaneOutcome::Published;
 	}
 
@@ -242,18 +280,28 @@ namespace CameraLink
 			RefreshSnapshot();
 		}
 		const uint32_t key = KeyOf(m_governor.Apply(m_settings.switches), m_lag);
+		const uint32_t cfgKey = CfgKeyOf(m_settings.config);
+		uint64_t recNow = 0;
+		const bool haveRecNow = m_link.PreviousRecordSeq(pairSeq, m_lag, recNow);
 		GuideResult out;
 		bool haveLane = false;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			m_asked[pairSeq % m_asked.size()] = pairSeq;
 			Stored& s = m_lane[pairSeq % m_lane.size()];
-			if (s.seq == pairSeq && s.key == key)   // a lane result built under other switches / lag is never used
+			// A lane result built under other switches / thresholds / lag, or from another record, is never used.
+			if (s.seq == pairSeq && s.key == key && s.cfgKey == cfgKey && haveRecNow && s.recSeq == recNow)
 			{
 				out = s.result;
 				haveLane = true;
 			}
 			s = Stored();
+		}
+		if (haveLane && out.frame && m_slipCheck && m_slipCheck(recNow, pairSeq))
+		{
+			// The slip appeared after the lane built the guide: the same refusal the live fill would give.
+			out.frame.reset();
+			out.refusal = Refusal::Slip;
 		}
 		if (haveLane)
 			++m_counters.fromLane;
@@ -272,7 +320,7 @@ namespace CameraLink
 		{
 			BenchRow row;
 			row.pair = pairSeq;
-			row.seq = pairSeq >= m_lag ? pairSeq - m_lag : 0;
+			row.seq = haveRecNow ? recNow : 0;
 			row.switchMask = SwitchMask(m_settings.switches);
 			row.d = m_lag;
 			row.confidence = out.confidence;
@@ -285,6 +333,7 @@ namespace CameraLink
 			++m_counters.guided;
 			Stored& p = m_pending[pairSeq % m_pending.size()];
 			p.seq = pairSeq;
+			p.recSeq = haveRecNow ? recNow : 0;
 			p.result = out;
 			p.gpuMs = -1;
 		}
@@ -341,7 +390,7 @@ namespace CameraLink
 		{
 			BenchRow row;
 			row.pair = pairSeq;
-			row.seq = pairSeq >= m_lag ? pairSeq - m_lag : 0;
+			row.seq = p.recSeq;
 			row.switchMask = SwitchMask(m_settings.switches);
 			row.d = m_lag;
 			row.confidence = p.result.confidence;

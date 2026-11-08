@@ -17,8 +17,11 @@
 
 #include "MotionBenchWriter.h"
 
+#include <VP-V/core/PassTimers.h>
+
 #include <map>
 #include <string>
+#include <vector>
 
 namespace CameraLink
 {
@@ -63,6 +66,23 @@ namespace CameraLink
 		if (d1 > 0)
 			rows[kTimerD1] = d1;
 		return rows;
+	}
+
+	// One camera-link timing for the skeleton's PassTimers accumulator: camera.fit (CPU work, the fit on the camera worker) and
+	// camera.readback (a WAIT: the request -> ready latency of the field copy; kept in its own line so it is never counted as work).
+	// camera.labels (P8, GPU) has no producer-side clock in K4's scope and is not fed.
+	struct TimerSample
+	{
+		const char* row = "";
+		double ms = 0;
+		bool wait = false;
+	};
+
+	// The skeleton path: PassTimerHook::acc.Add(...) for each sample (host call: `AddCameraRows(passTimerHook.acc, samples)`).
+	inline void AddCameraRows(PassTimers::Accumulator& acc, const std::vector<TimerSample>& samples)
+	{
+		for (size_t i = 0; i < samples.size(); ++i)
+			acc.Add(samples[i].wait ? PassTimers::Kind::CpuWait : PassTimers::Kind::CpuWork, samples[i].row, samples[i].ms);
 	}
 
 	// The estimate row for the bench's gpu_ms column (-1 = not measured).
