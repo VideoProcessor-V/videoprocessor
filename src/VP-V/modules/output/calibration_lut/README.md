@@ -7,6 +7,9 @@ Unit: **output** | side: output | order: 250 | status: **partial** | hook point:
 Everything a developer needs to set up, change and bug-test the calibration module without the rest of VP's
 design documents. The module is self-contained in this folder except for the Bill files listed in
 [HOOKS.md](HOOKS.md) ("Renderer side", "Process and Config side"), which are the only places the rest of VP calls in.
+Nothing in this README or in HOOKS.md depends on a document outside this folder: the design summary, the hook
+contracts, the setup and the contributor rules are all here. The links under "Further reading (optional)" at the end
+only add background.
 
 ### Layout
 
@@ -21,7 +24,8 @@ design documents. The module is self-contained in this folder except for the Bil
 
 ### Set up
 
-1. A clone of `billslack2/videoprocessor`'s current beta integration branch (see `AGENTS.md`), Visual Studio 2022
+1. A clone of `billslack2/videoprocessor` at the tip of its current beta integration branch (list the branches with
+   `gh repo view billslack2/videoprocessor` or on GitHub), Visual Studio 2022
    or newer with the C++ desktop workload, the MWCapture SDK headers (the build needs them even though this module
    never uses a capture card; point `MagewellSdkRoot` at `SDKv3`), and Qt as the rest of the solution requires.
 2. Optional, for a real display: ArgyllCMS 3.0 or newer (`spotread.exe`) and a meter. Without them everything
@@ -38,12 +42,12 @@ Newcomer notes (gaps found by a docs-only newcomer check, 2026-11-08):
 - `vstest.console.exe` is not on PATH outside a Developer PowerShell. It lives under the Visual Studio install, e.g.
   `C:\Program Files\Microsoft Visual Studio\<version>\<edition>\Common7\IDE\CommonExtensions\Microsoft\TestWindow\`.
   From Git Bash, set `MSYS_NO_PATHCONV=1` so `/ResultsDirectory:` paths are not rewritten.
-- "Shared build-slot runner" (in "How to build / test" below) is this team's slot protocol; an outside developer
-  just runs the MSBuild command below.
+- Build with the MSBuild command below, straight from a Developer PowerShell; no other build tooling is needed.
+- The ConPTY tests need Windows 10 1809 or newer (the meter talks to spotread through a pseudo-console).
 
 ### Build (x64 Release, whole solution)
 
-From a Visual Studio Developer PowerShell in the repository root (the `AGENTS.md` command, with your SDK path):
+From a Visual Studio Developer PowerShell in the repository root (with your SDK path):
 
 ```
 MSBuild.exe VideoProcessor.sln /t:Build /m /p:Configuration=Release /p:Platform=x64 /p:MagewellSdkRoot=<path to MWCaptureSDK>\SDKv3 /v:minimal
@@ -106,22 +110,22 @@ vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /Logger:"tr
 has the line `dry run: <step> measured <n> skipped <n> format <...>` followed by the session message, and the
 renderer's log lines (`Calibration patterns: started` / `ended`, `present failed`) are in the failure text.
 Related GPU cases: `CalibrationPatternsAreExactCodesInTheBackbuffer` (reads the backbuffer back and compares codes)
-and `CalibrationToneCurveReportedWithTheOutput`. In this team, GPU runs also follow the shared quiet-marker and
-mains-only rules of the team's `TEAM-RULES.md`; an outside developer only needs a free GPU.
+and `CalibrationToneCurveReportedWithTheOutput`. GPU runs need a free GPU (nothing else rendering on it) and mains power, because a throttling
+laptop can miss the patch timing.
 
 ### References that stay outside the module (inventory and recommendation, W1-CAL 2026-11-07)
 
 Two shared files mention the module's config keys. Neither is edited in this wave (`RendererProfileConfig.h` is
-under the SCHEMA lock held by W1-P3; both are Bill's files). Recommendation: **keep both where they are**.
+in a separate schema change; both are Bill's files). Recommendation: **keep both where they are**.
 
 | File | References | What they are | Recommendation |
 |---|---|---|---|
 | `src/VideoProcessor-Lib/CalibrationProfileMigration.h` (about 180 lines; Bill's, extended by VP) | Included by `RendererProfileConfig.h` (line 9), `ConfigFile.cpp` (17; `Apply` at 404, the runtime load) and used by `ConfigEditorCore.cpp` (198, 210; `Build`, the comment-preserving editor). Tested in `ConfigFileTests.cpp` and `ConfigEditorCoreTests.cpp`. Holds the key list `IsKey` (`calibration_lut_enabled/bt709/p3_d65/bt2020`, `sdr_lut_input_gamma`, `hdr_tone_map_target_gamma`, `calibration_lut_input_transfer/gamma`), the archive section names, and the plan that moves those keys from Rendering profiles into Color profiles. | A profile-schema migration (which section owns which key), shared by the loader and the editor. It does not touch calibration logic. | Keep in `VideoProcessor-Lib`. It belongs with `ColorOutputProfileMigration.h` and the other migrations; moving it buys the module nothing and adds a Bill-file include change. Revisit only if the schema is ever generated from module manifests. |
-| `src/VideoProcessor-Lib/RendererProfileConfig.h` | Value validators: `calibration_lut_enabled` (boolean), the three LUT paths (`none` or `*.cube`), `calibration_lut_input_gamma/transfer` and `hdr_tone_map_target_gamma` / `sdr_lut_input_gamma` (choices) (lines 977-996); `calibration_lut_stage` (choice `libplacebo`/`vp`, 1164; also in the global VP-V key list, 2186); rendering profiles may not carry calibration keys (1316); the Color profile's key set (1337-1339); alias and normalisation (`NormalizeCalibrationChoice`, 1450-1462); archive sections (62, 2207, 2677). | The schema's validation of the module's keys. | Keep until the SCHEMA work (W1-P3) lands. Then, in M2, give the module a small `CalibrationKeys.h` (key names, validators, defaults) and make the schema call it, so the key list lives in one place; that is a SCHEMA-lock change and belongs to that package, not this one. |
+| `src/VideoProcessor-Lib/RendererProfileConfig.h` | Value validators: `calibration_lut_enabled` (boolean), the three LUT paths (`none` or `*.cube`), `calibration_lut_input_gamma/transfer` and `hdr_tone_map_target_gamma` / `sdr_lut_input_gamma` (choices) (lines 977-996); `calibration_lut_stage` (choice `libplacebo`/`vp`, 1164; also in the global VP-V key list, 2186); rendering profiles may not carry calibration keys (1316); the Color profile's key set (1337-1339); alias and normalisation (`NormalizeCalibrationChoice`, 1450-1462); archive sections (62, 2207, 2677). | The schema's validation of the module's keys. | Keep until the schema work (made module-driven) lands. Then, in M2, give the module a small `CalibrationKeys.h` (key names, validators, defaults) and make the schema call it, so the key list lives in one place; that is a schema change and belongs to that work, not to this module. |
 
 ## Purpose / why
 
-The LAST colour op: SDR target -> projector codes. The agreed place is VP's last PRE_OUTPUT colour hook, after LED compensation and black level (ADR-0013, barrier R1). Two paths exist, chosen by `calibration_lut_stage`:
+The LAST colour op: SDR target -> projector codes. The agreed place is VP's last PRE_OUTPUT colour hook, after LED compensation and black level (ADR-0013 "Output-end order and the two LUTs"; barrier R1 is the rule that the calibration LUT is the last colour operation, see "Design summary (auto-calibration)" below). Two paths exist, chosen by `calibration_lut_stage`:
 
 - `libplacebo` (the default, byte-identical to before): the LUT is libplacebo's target LUT. It runs inside libplacebo's colour management, BEFORE VP's PRE_OUTPUT hooks, so LED measurement and compensation see projector codes (wrong order).
 - `vp`: `CalibrationLutStage::Hook` applies the same LUT as VP's last colour hook (the agreed order). It stays off by default until the owner switches it after measurement.
@@ -138,7 +142,7 @@ The module also holds the automatic calibration (the `calibration/` sub-folder).
 - Hook point, `vp` stage: `PL_HOOK_PRE_OUTPUT`. Order (src/VP-V/core/OutputHookOrder.h): LED measurement (220) -> LED compensation (230) -> black level (240; placeholder, no hook yet) -> user PRE_OUTPUT shaders -> calibration LUT (250) -> de-judder rendered-picture cache -> OUTPUT-stage hooks -> output quantiser (sigma-delta).
 - Hook point, `libplacebo` stage: libplacebo's target LUT (`pl_frame.lut`, `PL_LUT_NORMALIZED`), after tone/gamut mapping and before range encoding, so before every VP PRE_OUTPUT hook.
 - LUT choice: one LUT per target gamut (`calibration_lut_bt709`, `calibration_lut_p3_d65`, `calibration_lut_bt2020`), picked by the profile's `sdr_target_primaries` (`LibplaceboCalibrationLut::Select`). No LUT for that gamut = no LUT.
-- BTB/WTW (ADR-0002): the `vp` stage maps the clamped 0..1 point and adds the excess through the LUT's edge slope per axis (bug hunt 2026-10-31 F2; the same GLSL as ExtendedRange's late restore, `ExtendedRange::LutSlopeGlsl`). The `libplacebo` stage clamps; ExtendedRange's late restore extrapolates along the same edge slope (`extended_range_more_cases`). A LUT ExtendedRange cannot carry (shaper matrices, a side over 256) keeps slope 1 in the `vp` stage, counted in `SlopeFallbacks()`.
+- BTB/WTW (ADR-0002, "BTB/WTW preserved": codes below black and above white are kept through the whole chain, never clipped): the `vp` stage maps the clamped 0..1 point and adds the excess through the LUT's edge slope per axis (bug hunt 2026-10-31 F2; the same GLSL as ExtendedRange's late restore, `ExtendedRange::LutSlopeGlsl`). The `libplacebo` stage clamps; ExtendedRange's late restore extrapolates along the same edge slope (`extended_range_more_cases`). A LUT ExtendedRange cannot carry (shaper matrices, a side over 256) keeps slope 1 in the `vp` stage, counted in `SlopeFallbacks()`.
 - The Original pathway (`pipeline_original_pathway on`) always uses the `libplacebo` stage.
 - Calibration patches bypass this slot: the renderer writes exact codes into the backbuffer (no LUT, no dither).
 
@@ -169,7 +173,7 @@ Config placement: the master VP-V page (`calibration_lut_stage`, Expert); the LU
 | `pipeline_slots_off` (entry `output.calibration_lut`) | `[vpv]` / `[vprenderer]` | list | slot ids | empty | master VP-V page | n/a | stops the VP stage only; LUT runs as libplacebo's target LUT |
 | `calibration_lut_reload` (planned) | colour profile | choice | auto, apply | auto | Colour / Output profile page | apply | not read yet |
 
-Tiers: not tiered. Patch display and the wizard have no settings of their own here (the wizard's `[calibration]` section is in `src/VP-V/modules/output/calibration_lut/calibration/CalibrationConfig.h`); the patch fallback is `calibration patch (full field ...)`; the page's keys are listed in §c (Settings of the Calibration page).
+Tiers: not tiered. Patch display and the wizard have no settings of their own here (the wizard's `[calibration]` section is in `src/VP-V/modules/output/calibration_lut/calibration/CalibrationConfig.h`); the patch fallback is `calibration patch (full field ...)`; the page's keys are listed in section c (Settings of the Calibration page).
 
 ## Fallbacks
 
@@ -186,7 +190,7 @@ Tiers: not tiered. Patch display and the wizard have no settings of their own he
 
 ## How to build / test
 
-Build the solution via the shared build-slot runner (see AGENTS.md); tests single-threaded; GPU tests only on mains with `VP_TEST_GPU=hardware`. Commands and test classes: "Test it standalone" below.
+Build the solution with the MSBuild command under "Build (x64 Release, whole solution)" above; run tests single-threaded; GPU tests only on mains power, on a real GPU, with `VP_TEST_GPU=hardware`. Commands and test classes: "Test it standalone" below.
 
 Placeholder tests:
 - byte-identical while the VP stage is off (libplacebo LUT path unchanged): no dedicated test yet
@@ -204,7 +208,7 @@ Chain tests:
 ## Known issues / open items
 
 - The move into VP's LAST output hook (pl_shader_custom_lut + BTB/WTW carried; barrier R1; owner agreed) is built behind `calibration_lut_stage = vp`; the default is still `libplacebo`. Open: a GPU test of the hook, the OutputEncodingRepair check, and switching the default after measurement (LED measurement then sees target light, not projector codes).
-- WP-12: the renderer side of the adapter is a patch for the integrator (docs/design/wp12-calib-callsites.patch); until it is applied the renderer still carries the old inline glue, and the WP-12 fixes in the adapter (kept reload rejection, attached with the VP stage, the two new fallback entries, the output-query wait) are not live.
+- Renderer call sites: the pattern, take-over and output-info call sites already go through the adapter (HOOKS.md, "Status after W1-CAL-B"); P6 (tone-curve and video-target notes) is still open. The adapter fixes of that work (kept reload rejection, attached with the VP stage, the two newer fallback entries, the output-query wait) are live only where the renderer makes the call.
 - `calibration_lut_reload` (planned, see Settings): wire with the Bill merge.
 - A windowed-patch fallback is visible as a "Fallbacks engaged" entry, but the session does not yet record it per patch: that needs a field in `PatternOutputInfo` (a plugin ABI change, "API: next"), left for the integrator.
 
@@ -212,7 +216,7 @@ Chain tests:
 
 ### a) The LUT at render time
 
-Files: `CalibrationLutStage.h/.cpp` (the hook), `CalibrationLutHost.h/.cpp` and `CalibrationLutHostPolicy.h` (the host adapter, WP-12) in this folder; Bill's `LibplaceboDisplayLut.h/.cpp` and `LibplaceboCalibrationLutPolicy.h` (src/VideoProcessor-Lib/vprenderer; not ours, never moved); caller `LibplaceboVideoRenderer.cpp`, one call per hook point into `CalibrationLutHost::Adapter` (docs/design/wp12-calib-callsites.md).
+Files: `CalibrationLutStage.h/.cpp` (the hook), `CalibrationLutHost.h/.cpp` and `CalibrationLutHostPolicy.h` (the host adapter, WP-12) in this folder; Bill's `LibplaceboDisplayLut.h/.cpp` and `LibplaceboCalibrationLutPolicy.h` (src/VideoProcessor-Lib/vprenderer; not ours, never moved); caller `LibplaceboVideoRenderer.cpp` (src/VideoProcessor-Lib/vprenderer), one call per hook point into `CalibrationLutHost::Adapter` (every call site is listed in HOOKS.md).
 
 - Load: the renderer's `LoadDisplayLut` picks the slot with `LibplaceboCalibrationLut::Select` and parses the `.cube` with `LibplaceboDisplayLut::Load` (3D only, at most 65^3 and 64 MB, the path must stay under the configuration's base folder). The result is one `pl_custom_lut`.
 - Reload: `MaybeReloadDisplayLut` asks the adapter (`LutReloadDue`, `ReloadPolicy` in auto mode) once per frame; the file version is probed once a second and a changed file is reloaded transactionally. A failed reload with the same input contract keeps the last good LUT. `LoadDisplayLut` reports the version it read (`NoteLutFileVersion`).
@@ -225,7 +229,7 @@ Files: `CalibrationLutStage.h/.cpp` (the hook), `CalibrationLutHost.h/.cpp` and 
 
 ### b) Automatic calibration (`calibration/`)
 
-Purpose: a wizard in Config drives VP to show exact patches, reads a meter, fits a display model, and writes three `.cube` LUTs plus key-only configuration edits. Phase 2 adds the Dynamic Drive (LED) characterisation, the ambient-light check and the HDR (PQ) verify. Design: docs/VP-auto-calibration-design.md, docs/calibration/AUTO-CALIBRATION.md.
+Purpose: a wizard in Config drives VP to show exact patches, reads a meter, fits a display model, and writes three `.cube` LUTs plus key-only configuration edits. Phase 2 adds the Dynamic Drive (LED) characterisation, the ambient-light check and the HDR (PQ) verify. Design summary: "Design summary (auto-calibration)" below.
 
 Public API:
 - `CalibrationController` (CalibrationController.h): `Handle(command, arguments)` (text in, text out), `RendererGoing()`, `Shutdown()`, `Active()`. Commands: `status`, `detect`, `start` (`kind: calibration | led | ambient | hdr_verify`), `continue`, `skip`, `cancel`, `apply`, `discard`. Owned by `CVideoProcessorDlg` (src/VideoProcessor-GUI/VideoProcessorDlg.cpp, `HandleCalibrationRpc`) and reached over the configuration RPC (`Operation::Calibration`).
@@ -327,7 +331,7 @@ Status and fallback lines the page shows (none is a "Fallbacks engaged" entry; t
 
 ### Test it standalone
 
-Build x64 Release (the AGENTS.md command), including `VideoProcessor-FakeSpotread`, which writes `x64\Release\test-tools\fake_spotread.exe`. Run tests single-threaded and read the TRX for the summary:
+Build x64 Release (the command under "Build" above), including `VideoProcessor-FakeSpotread`, which writes `x64\Release\test-tools\fake_spotread.exe`. Run tests single-threaded and read the TRX for the summary:
 
 `vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~<Class>" /Logger:"trx;LogFileName=x.trx"`
 
@@ -367,7 +371,7 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.h`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboCalibrationLutPolicy.h`
 
-Forwarding headers at the legacy path (early migration; they only keep files on active branches building, new code includes the `<VP-V/...>` path). They are NOT removed in this wave because Bill's files include them (W1-CAL, 2026-11-07), so they move with M2 P0/P3. Includers: `src/VideoProcessor-Lib/IRenderer.h` line 25 (the Pattern header), `src/VideoProcessor-Lib/MainConfigSchema.h` line 7 (the Config header; SCHEMA lock) and `src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp` line 138 (the Pattern header). No VP file includes them any more:
+Forwarding headers at the legacy path (early migration; they only keep files on active branches building, new code includes the `<VP-V/...>` path). They are NOT removed in this wave because Bill's files include them (W1-CAL, 2026-11-07), so they move with M2 P0/P3. Includers: `src/VideoProcessor-Lib/IRenderer.h` line 25 (the Pattern header), `src/VideoProcessor-Lib/MainConfigSchema.h` line 7 (the Config header; part of the schema) and `src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp` line 138 (the Pattern header). No VP file includes them any more:
 
 - `src/VideoProcessor-Lib/calibration/CalibrationConfig.h`
 - `src/VideoProcessor-Lib/calibration/CalibrationPattern.h`
@@ -378,11 +382,79 @@ The automatic-calibration code (meter, ArgyllCMS, session, patterns; `calibratio
 
 Code moves into this folder only when this slot is touched (opportunistic until M1, a dedicated phase after M1, finished by M2). A move = `git mv` + project/include updates + this module's `live_files` + `docs/design/components-master.json` (regenerate with `python tools/check_module_manifests.py --write`) in the SAME commit, with the build, this module's tests and the chain-gate subset passing. Never leave a copy behind; one module per change; never during a release/deploy window. Update this README in the same commit as any slot change.
 
-## Links
+## Design summary (auto-calibration)
 
-- Design: [VP-pipeline-final.md](../../../../../docs/design/VP-pipeline-final.md)
-- Slot data: [slots.json](../../../../../docs/design/slots.json)
-- Decisions: ADR-0013 in [docs/decisions](../../../../../docs/decisions/README.md)
+What it is for: the projector (or LCD/OLED) has its own colour errors. The wizard measures them with a meter and
+produces three 3D `.cube` LUTs (BT.709, P3-D65 and BT.2020 slots) that VP applies as the last colour operation
+(barrier R1 in ADR-0013: nothing changes colour after the calibration LUT except the final dither). Phase 2 adds
+three more run kinds that reuse the same machinery: Dynamic Drive (LED) characterisation, an ambient-light check
+and an HDR (PQ) verify.
+
+Where it runs: inside VideoProcessor, which owns the renderer and the projector's serial port. The Config app is
+only the UI and talks to it over the configuration RPC (`Operation::Calibration`; the commands are in HOOKS.md, C2).
+Config never touches the GPU or the meter.
+
+Run kinds (`start` argument `kind`): `calibration` (the LUT run), `led`, `ambient`, `hdr_verify`.
+
+Session states (`SessionStep`, CalibrationSession.h; the text names cross the RPC): `Idle`, `OpeningMeter`,
+`MeterCalibration`, `Placement` (position the meter on the screen), `WarmUp` (the display reaches steady state;
+can be skipped), `Measuring`, `Fitting`, `Verifying`, `Review` (the diff is shown, nothing is applied yet), then a
+final state `Applied`, `Discarded`, `Cancelled` or `Failed`. Phase 2 adds `UserAction` (wait for the person, then
+Continue) and `Done` (a verify-only run finished, nothing to apply). Commands: Continue, Skip, Cancel, Apply,
+Discard. `IsFinal(step)` says which states end a run. Cancel works at any time and restores normal video.
+
+Plans (`[calibration] plan`, `PlanChoice` in CalibrationConfig.h, built by `BuildPlan(PlanKind)` in
+`pattern_lib/PatternPlan.h`): `Quick` (greyscale with BTB/WTW plus primaries and secondaries, enough to fit the
+matrix; about 10 minutes), `Cube5`, `Standard` (9^3 cube, 729 patches; 35-45 minutes), `Cube13`, `Thorough` (17^3;
+about 2.5 hours). Drift reference whites are inserted every `drift_interval` patches. The times are estimates for
+one projector and meter; the meter's integration time grows as patches get darker (`MeterTimingModel`).
+
+Meter path: patch codes (`pattern_lib/PatternCodes.h`, exact integers for the output format) ->
+`IPatternSink::Show` -> the renderer writes the codes into the swapchain backbuffer -> settle -> `IMeter::Read`.
+The real meter is ArgyllCMS `spotread` run as a child process under a ConPTY pseudo-console inside a job object
+(`SpotreadMeter`, `Spotread.cpp` parses its text). VP never ships or downloads ArgyllCMS (`ArgyllInstallGuidance`).
+`SimulatedScreenMeter` stands in for the meter in tests and dry runs; supported instruments are listed in
+`MeterCatalog.h`.
+
+Fit and output: `DisplayModel` fits black level, a 3x3 matrix, per-channel splines and a residual field, then
+solves an inverse per target colour; the LUT end cells follow the same edge-slope extrapolation as ExtendedRange so
+that BTB/WTW survive. Apply writes only `calibration_lut_enabled` and the `calibration_lut_<slot>` keys, after byte
+backups.
+
+Decisions behind this module (restated so that no outside document is needed):
+- ADR-0013, output-end order: libplacebo scaling and tone/gamut mapping first, then VP's hooks in this order: SDR
+  tone shape, appearance model, LED measurement, LED compensation, black level, **projector calibration LUT**,
+  dither / sigma-delta. The LUT moved from libplacebo's target LUT (applied before the PRE_OUTPUT hooks) to a VP hook
+  so that it is the last colour operation. Open catch: a combined HDR-to-SDR LUT outputs projector codes while LED
+  compensation needs linear light.
+- ADR-0002, BTB/WTW preserved: below-black and above-white codes survive; the VP stage keeps the part outside 0..1
+  aside, applies the LUT to the clamped value and adds the excess back along the LUT's edge slope.
+- Bill's files (the upstream author's) receive only generic, inert call sites; with this module absent or off,
+  behaviour is byte-identical. Failures are never silent (a "Fallbacks engaged" entry or status text).
+
+## Contributing: repository rules that apply to this module
+
+New files carry the header `Copyright(C) 2026 VP-V contributors` with the SPDX line `GPL-3.0-only` (as at the top
+of HOOKS.md); files that came from the upstream author are left untouched. The Lib, renderer and test projects
+build as C++14 (the MSVC default; `pattern_lib/` is additionally compiled at `/std:c++17` by its own script), so
+write C++14-compatible code outside it. Test sources are ASCII-only. Only generic, inert hooks may be added to the
+upstream author's files (`LibplaceboVideoRenderer.cpp`, `IRenderer.h`, the schema and so on): everything
+calibration-specific lives in this folder, and a change that moves code here must also update `MANIFEST.json`
+`live_files`. Run tests with `vstest.console.exe` and `/Logger:trx`, and read the `Counters` line of the TRX
+(vstest prints no summary for this host DLL). GPU tests need a real GPU and `VP_TEST_GPU=hardware`; hardware-meter
+tests need `VP_TEST_METER=1`. Before committing run `python -I tools/check_module_manifests.py` and
+`python -I tools/check_shared_units.py --strict`; both must exit 0.
+
+## Further reading (optional)
+
+Nothing below is needed to work on this module; these are background documents in the wider repository.
+
+- Pipeline design: [VP-pipeline-final.md](../../../../../docs/design/VP-pipeline-final.md); slot data: [slots.json](../../../../../docs/design/slots.json)
+- Decisions: [ADR-0013](../../../../../docs/decisions/ADR-0013-output-end-order.md), [ADR-0002](../../../../../docs/decisions/ADR-0002-btb-wtw-preserved.md); index: [docs/decisions](../../../../../docs/decisions/README.md)
+- Auto-calibration design: `docs/VP-auto-calibration-design.md`, `docs/calibration/AUTO-CALIBRATION.md`
+- Renderer call sites, historical: `docs/design/wp12-calib-callsites.md`, `docs/design/wp12-calib-callsites.patch`
+- Repository build rules: `AGENTS.md` at the repository root
+- Slot test matrix: `docs/design/slot-test-matrix.md`
 
 <!-- vpv-settings-tests:begin (generated by tools/vpv_tests/seed_module_readmes.py) -->
 
