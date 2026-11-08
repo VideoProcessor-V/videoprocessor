@@ -20,6 +20,7 @@
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/FramesInFlight.h>
+#include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
@@ -970,6 +971,37 @@ namespace SkeletonModuleTestsNs
 			const uint64_t fed = t.frames;
 			rig.After(99);
 			Assert::AreEqual(fed, rig.sk.TimingFeedOf(rig.Host()).frames);
+		}
+
+		TEST_METHOD(DeclaredVramUsersAreInThePlanTheLedgerAndTheGuard)
+		{
+			// MV7: the users outside the product catalog reach the skeleton's tier plan as the governor's own usage, are listed in the
+			// Ctrl+Alt+D ledger, and an active module that declared nothing is a visible Fallbacks entry (skeleton_vram_users).
+			VpSkeleton::VramUsers& registry = VpSkeleton::VramUsers::Instance();
+			registry.ResetForTesting();
+			int engineOwner = 0, cameraOwner = 0;
+			registry.DeclareFixed(&engineOwner, VpSkeleton::kUserNvofProducer, 200ull * 1024ull * 1024ull);
+			registry.MarkActive(&cameraOwner, VpSkeleton::kUserCameraModel, true);   // active, but nothing declared
+			{
+				Rig rig(Lane("on"));
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				for (int64_t s = 1; s <= 3; ++s)
+					rig.Frame(s);
+				const std::shared_ptr<VpSkeleton::LaneState> ls = rig.sk.LaneOf(rig.Host())->State();
+				Assert::IsTrue(ls != nullptr);
+				const VpSkeleton::UserGrant* g = ls->plan.governor.Find(VpSkeleton::kUserNvofProducer);
+				Assert::IsNotNull(g, L"the declared user is in the plan");
+				Assert::AreEqual(uint64_t(200) * 1024ull * 1024ull, g->bytes);
+				Assert::IsTrue(rig.Command().find("VRAM T0 optical-flow engines: 200.0 MB level 0") != std::string::npos);
+				const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
+				Assert::IsTrue(HasId(fb, "skeleton_vram_users"), L"an active module without a declaration is shown");
+				Assert::IsTrue(Has(fb, "camera model"));
+				registry.DeclareFixed(&cameraOwner, VpSkeleton::kUserCameraModel, 1024ull * 1024ull);
+				rig.Frame(4);
+				Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_vram_users"), L"declared: the entry releases");
+			}
+			registry.ResetForTesting();
 		}
 
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)

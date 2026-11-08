@@ -51,6 +51,7 @@ enum VramUserId : uint16_t {
     kUserEnhancers,            // texture restore, detail pulse, debander extras
     kUserScratchArena,         // SA1: the shared scratch arena, T0 temporaries (GpuAllocator.h)
     kUserScratchArenaExtra,    // SA1: the arena's T1/T2 temporaries (the increment over the T0 plan)
+    kUserBasicChroma,          // MV7: BasicChroma's output texture (luma-size rg16, kept across frames; VramUsers.h)
     kUserProductBase = 0x100,  // + ProductId: skeleton lane products
 };
 

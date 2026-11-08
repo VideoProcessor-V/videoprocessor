@@ -2,6 +2,8 @@
 #include "MotionAheadProducer.h"
 
 #include <DebugLog.h>
+#include <VP-V/core/PassTimerInbox.h>
+#include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 
 #include <dxgi.h>
@@ -250,6 +252,7 @@ namespace MotionAhead
 	void Producer::ReleaseEngine()
 	{
 		engine.reset();
+		VpSkeleton::VramUsers::Instance().Withdraw(this, VpSkeleton::kUserNvofProducer);   // MV7: the ring textures go with the engine
 		for (int i = 0; i < 2; ++i)
 		{
 			lumaTex[i].Release(); flowTex[i].Release(); costTex[i].Release(); flowRead[i].Release(); costRead[i].Release();
@@ -402,6 +405,7 @@ namespace MotionAhead
 	{
 		if (halfW == sizeW && halfH == sizeH && engine && engine->IsOpen()) return true;
 		engine.reset();
+		VpSkeleton::VramUsers::Instance().Withdraw(this, VpSkeleton::kUserNvofProducer);   // MV7: re-declared below for the new size
 		for (int i = 0; i < 2; ++i)
 		{
 			lumaTex[i].Release(); flowTex[i].Release(); costTex[i].Release(); flowRead[i].Release(); costRead[i].Release();
@@ -438,6 +442,8 @@ namespace MotionAhead
 		}
 		sizeW = halfW;
 		sizeH = halfH;
+		// MV7: the ring textures (2 sets, with the CPU-readback copies) are this producer's VRAM; the governor counts them (VramUsers.h).
+		VpSkeleton::VramUsers::Instance().DeclareFixed(this, VpSkeleton::kUserNvofProducer, NvOpticalFlow::RingBytes(halfW, halfH, true, false));
 		return true;
 	}
 
@@ -489,7 +495,11 @@ namespace MotionAhead
 			// (audit 2026-10-16: they carried across seeks, dropped jobs and size skips).
 			const bool continuous = hintSequence == previousSequence && hintGeneration == job.generation;
 			hintSequence = UINT64_MAX;
-			if (!engine->Run(lumaTex[prev], lumaTex[slot], flowTex[0], flowTex[1], costTex[0], costTex[1], nullptr, continuous))
+			// MV7: 1 pair in N is timed (the GPU idle first, then the engine's completion, on this worker's own device) and posted to the
+			// pass-timer inbox the render thread drains; the other pairs run untimed exactly as before.
+			NvOpticalFlow::Result timing;
+			const bool timed = PassTimers::Sampler().Take(job.sequence);
+			if (!engine->Run(lumaTex[prev], lumaTex[slot], flowTex[0], flowTex[1], costTex[0], costTex[1], timed ? &timing : nullptr, continuous))
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				error = engine->LastError();
@@ -497,6 +507,8 @@ namespace MotionAhead
 			}
 			else
 			{
+				if (timed && timing.gpuMs > 0.0)
+					PassTimers::Inbox::Motion().Post(PassTimers::Kind::GpuGroup, "motion: NVOF producer engine (idle to completion)", timing.gpuMs);
 				hintSequence = job.sequence;
 				hintGeneration = job.generation;
 				for (int i = 0; i < 2; ++i)

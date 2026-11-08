@@ -106,6 +106,20 @@ No `VP_*` variable changes the module's behaviour.
   more, `... (the configured queue asks for N frames)`. A graph whose slot counts still overflow is rejected (analysis lane unavailable, with
   the reason), never clamped.
 
+## VRAM users and motion costs (MV7)
+
+* **Declared VRAM users.** At every graph configure `SkeletonModule` reads `VpSkeleton::VramUsers::Instance().Take()` (core/VramUsers.h): the users outside the
+  product catalog become `TierInput::otherUsers` and their held bytes `ownUsageBytes` (inside `CurrentUsage`, so VP's own: re-planned, never counted twice). The
+  graph is re-planned when the declarations changed (`VramUsers::Version()`), at most once per `kReconfigureMinFrames` frames. Ctrl+Alt+D lists each declared user
+  ("VRAM T0 optical-flow engines: N MB level L"); a user below level 0 has its governor notice in the "Analysis:" status line. The `VramLedgerLines` rows (core/
+  GpuAllocator.h) list every governor grant, so a declared user has a row there too. BasicChroma's kept output texture (`BasicChroma::Gpu::DeclaredUser`, luma-size
+  rg16, 4 B/px = 33.2 MB at 3840x2160: the real allocation, not the 66 MB RGBA16F estimate of the tracking note) is a stepped user (T1, lossy, shed first) declared
+  before any call site exists; the owner-waived `PrivateTextureScan` entry is untouched.
+* **Motion GPU job timings.** The NVOF producer times 1 pair in N (the GPU idle first, then the engine's completion, on the worker's own device) and posts it to
+  `PassTimers::Inbox::Motion()` ("motion: NVOF producer engine (idle to completion)"). The skeleton prints the cumulative figures itself ("Skeleton motion GPU
+  job ..."); the render thread's pass-timer readout needs one generic host call at the existing timer site (`Inbox::Motion().DrainInto(passTimerHook.acc)`), which is a
+  Z3 hunk and is handed to the owner of that zone (not applied here). DejudderWarp's own `SetPassSampling` / `TakePassGpuMs` have no caller yet: the same host site.
+
 ## Products
 
 | Id | Unit version | Fill rule | Consumer fallback when absent |
@@ -133,6 +147,7 @@ Every downgrade is visible (Ctrl+I line, Ctrl+Alt+D, Config status); none is log
 | `skeleton_queue_starve` | `queue starve: lane lead N (was M), K fall(s); look-ahead products reduced: ...` | the live lane lead is below the best it had since the lane was built (releases when the queue recovers) |
 | `skeleton_lane_lead` | `lane lead capped at N frame(s) (queue holds M; ring slot budget)` (and the render-ahead form) | the fed lane lead / render-ahead depth exceeds the ring-slot budget shared by R + L |
 | `skeleton_regulator` | `regulator input: slack derived from render time; presentation facts not wired` | the S5 regulator is fed derived slack (no host presentation facts yet) |
+| `skeleton_vram_users` | `VRAM not declared to the governor: <modules> (its memory is not in the budget)` | a module that holds video memory called `VramUsers::MarkActive` but declared none of it (MV7 guard) |
 | `skeleton_history` | `quality pattern history capped at N frames (...)` | the rate or the queue asks for deeper record histories than the 255-slot rings allow |
 | `skeleton_gpu_shadow` | `shadow: GPU products skipped (no GPU dispatcher, no GPU work)` | `analysis_lane = shadow` |
 | `skeleton_gpu_device` | `GPU products: no render device (...)` | `analysis_lane = on` without a usable `pl_gpu` |
@@ -174,7 +189,8 @@ CPU only (no GPU): classes `SkeletonSettingsTests` (incl. `skeleton_gpu_gap` / `
 `SkeletonModuleTests` (Off and Original construct no dispatcher and make no GPU call; shadow and "no render device" statuses), `SkeletonGpuStatusTexts`,
 `SkeletonLaneTests`, `AnalysisLaneGpuHookTests` (lane deferral, `ReadOf`, `StepsFor`). Live queue feed and regulator input (`SkeletonModuleTests`):
 `TheQueueFeedsEachMergeOnlyTheirOwnTerm` (three threads CAS-merging their terms), `TheLaneLeadIsTheQueueTheHostCollectedAheadAndIsShown` (0 and 255 cases),
-`AQueueStarveIsShownAndRecovers`, `TheQueuePhaseIsInertWhenTheLaneIsOffOrOriginal`, `TheRegulatorGetsTheDerivedSlackEveryFrameAndSaysSo`.
+`AQueueStarveIsShownAndRecovers`, `TheQueuePhaseIsInertWhenTheLaneIsOffOrOriginal`, `TheRegulatorGetsTheDerivedSlackEveryFrameAndSaysSo`,
+`TheThreeFeedsTogetherWireTheWholeQueue`, `DeclaredVramUsersAreInThePlanTheLedgerAndTheGuard`.
 GPU (libplacebo WARP unless `VP_TEST_GPU=hardware`): `SkeletonGpuDispatcherWarpTests` (1024 codes exact, extend == CPU, alloc == declaration, lane == live),
 `LaneGpuGrainKernelWarpTests`, `LaneGpuRegionKernelWarpTests`, `LaneGpuLightKernelWarpTests`.
 

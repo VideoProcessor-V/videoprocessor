@@ -65,7 +65,7 @@ class CheckSharedUnitsTest(unittest.TestCase):
 
     def test_every_unit_registered(self):
         ids = [e["id"] for e in csu.REGISTRY]
-        self.assertEqual(ids, ["U%d" % i for i in range(1, 13)] + ["U15", "U19", "U20", "U21"])
+        self.assertEqual(ids, ["U%d" % i for i in range(1, 13)] + ["U15", "U19", "U20", "U21", "U22"])   # U21: SID source geometry; U22: SK-W must-land check 2 (one motion engine instance)
 
     def test_default_run_exits_zero_even_with_duplicates(self):
         rc, out = _run(["--root", self.root])

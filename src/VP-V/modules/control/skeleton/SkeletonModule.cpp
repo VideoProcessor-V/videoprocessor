@@ -7,6 +7,9 @@
 #include <DebugLog.h>
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/GpuAllocator.h>
+#include <VP-V/core/PassTimerInbox.h>
+#include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
@@ -241,6 +244,7 @@ namespace Vpv
 			uint32_t configuredGen = 0;
 			double configuredPeriodMs = 0.0;
 			SkeletonModule::QueueShape configuredQueue;
+			uint64_t configuredVramVersion = 0;   // VramUsers::Version() at the last Configure
 			uint64_t framesSinceConfigure = 0;
 		};
 
@@ -843,7 +847,11 @@ namespace Vpv
 				st.lastUsedLead = queue.laneLead;
 			}
 			const bool queueMoved = b->configuredQueue != queue;   // the record histories follow the queue (R + L + look-ahead)
-			if (rebuild || b->configuredGen != gen || queueMoved || ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
+			// MV7: the declared VRAM users (optical-flow engines, interpolator, camera model, BasicChroma's output, ...) moved: re-plan, but not
+			// more often than a moved period (a producer re-sizing its textures must not rebuild the graph every frame).
+			const uint64_t vramVersion = VpSkeleton::VramUsers::Instance().Version();
+			const bool vramMoved = b->configuredVramVersion != vramVersion && b->framesSinceConfigure >= kReconfigureMinFrames;
+			if (rebuild || b->configuredGen != gen || queueMoved || vramMoved || ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
 			{
 				CardProfile card;
 				std::string why;
@@ -853,6 +861,13 @@ namespace Vpv
 				st.cardNote = known ? std::string() : why;
 				TierInput tier;
 				tier.framePeriodMs = st.periodMs;
+				{
+					// MV7: the VRAM users outside the product catalog. What they hold is already inside the adapter's CurrentUsage, so it is VP's own
+					// usage (re-planned, never counted twice) and each user is in the plan: the lane products are granted what is left.
+					const VpSkeleton::VramUsers::Snapshot declared = VpSkeleton::VramUsers::Instance().Take();
+					tier.otherUsers = declared.users;
+					tier.ownUsageBytes = declared.heldBytes;
+				}
 				GraphSettings gs;
 				gs.dims = dims;
 				gs.renderAhead = queue.renderAhead;
@@ -895,6 +910,7 @@ namespace Vpv
 				b->configuredGen = gen;
 				b->configuredPeriodMs = st.periodMs;
 				b->configuredQueue = queue;
+				b->configuredVramVersion = vramVersion;
 				b->framesSinceConfigure = 0;
 				++st.configures;
 			}
@@ -1039,6 +1055,8 @@ namespace Vpv
 					addDecision(FallbackCatalog::SkeletonQueueStarve(st.queueUsed.laneLead, st.leadPeak, st.starveReduced, st.starveEvents));
 				// S5: until the host delivers presentation facts the regulator's slack is derived from the render time.
 				addDecision(FallbackCatalog::SkeletonRegulatorInput(hasBundle && st.timing.derived));
+				// MV7 guard: a module that holds video memory is active but declared none of it: visible, never silent.
+				addDecision(FallbackCatalog::SkeletonVramUsers(VpSkeleton::UnpopulatedUserNames(VpSkeleton::VramUsers::Instance().Take().unpopulated)));
 			}
 			// The GPU products (70b G5): shadow and "no render device" have no dispatcher and say so.
 			const SkeletonGpuDispatcher* gd = st.dispatcher.get();
@@ -1102,6 +1120,13 @@ namespace Vpv
 				if (const std::shared_ptr<VpSkeleton::LaneState> laneState = lane.State())
 					addDecision(SkeletonModule::HistoryCapDecision(laneState->graph, b->configuredPeriodMs));
 				full = lane.StatusLines();
+				// MV7 ledger (Ctrl+Alt+D): the VRAM users outside the product catalog, as the governor granted them (one line each; products are
+				// listed by the lane's own status). A user below level 0 also has its governor notice in "Analysis: ..." (plan.notice).
+				if (const std::shared_ptr<VpSkeleton::LaneState> laneState = lane.State())
+					for (const VpSkeleton::UserGrant& g : laneState->plan.governor.grants)
+						if (g.id < VpSkeleton::kUserProductBase)
+							full.push_back(std::string("VRAM ") + VpSkeleton::Token(g.tier) + " " + g.name + ": " + VpSkeleton::FormatMB(g.bytes) + " level " +
+								std::to_string(g.level) + (g.shed ? " (off)" : g.reduced ? " (reduced)" : ""));
 				line = std::string("analysis lane ") + mode + " " + Dimensions(b->dims) + ", " + std::to_string(st.frames) +
 					" frames, ahead " + std::to_string(lane.TotalAhead()) + " in-render " + std::to_string(lane.TotalInRender()) +
 					" declined " + std::to_string(lane.TotalDeclined());
@@ -1138,6 +1163,8 @@ namespace Vpv
 					static_cast<unsigned long long>(st.timing.skipped), st.timing.lastSlackMs, st.timing.lastRenderOnlyMs,
 					static_cast<unsigned long long>(st.timing.missed));
 				full.push_back(regLine);
+				for (const std::string& l : PassTimers::Inbox::Motion().Lines())
+					full.push_back("Skeleton motion GPU job " + l);   // MV7: the producers' posted timings (also drained into the pass-timer readout by the host)
 			}
 			full.push_back("Skeleton: " + std::to_string(st.frames) + " frames, " + std::to_string(st.srcFrames.load(std::memory_order_relaxed)) +
 				" source frames tapped, " + std::to_string(st.dropsApplied) + " drops applied, " + std::to_string(st.gapsRun) +

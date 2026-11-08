@@ -1,5 +1,6 @@
 #include <pch.h>
 #include "FrameInterpolator.h"
+#include <VP-V/core/VramUsers.h>
 
 #include <vprenderer/GrainPreserve.h>
 
@@ -449,6 +450,7 @@ if (q.x < size.x && q.y < size.y) {
 	{
 		if (gpu)
 		{
+			VpSkeleton::VramUsers::Instance().Withdraw(this, VpSkeleton::kUserInterpolator);   // MV7
 			pl_tex_destroy(gpu, &outLuma);
 			pl_tex_destroy(gpu, &outChroma);
 			pl_tex_destroy(gpu, &noField);
@@ -717,6 +719,15 @@ if (q.x < size.x && q.y < size.y) {
 				a.chroma, b.chroma, outChroma, use, t, chromaScale, header, preserve ? &grainBands[1] : nullptr))
 				return false;
 			out.chroma = outChroma;
+		}
+		{
+			// MV7: the interpolator's textures (outputs, the no-vector 1x1 pair, the grain bands) are its VRAM; the governor counts them.
+			uint64_t held = VpSkeleton::TexBytesOf(outLuma) + VpSkeleton::TexBytesOf(outChroma) + VpSkeleton::TexBytesOf(noField) +
+				VpSkeleton::TexBytesOf(noTrust);
+			for (const GrainBands& bands : grainBands)
+				held += VpSkeleton::TexBytesOf(bands.half) + VpSkeleton::TexBytesOf(bands.tmp) + VpSkeleton::TexBytesOf(bands.lowA) +
+					VpSkeleton::TexBytesOf(bands.lowB);
+			VpSkeleton::VramUsers::Instance().DeclareFixed(this, VpSkeleton::kUserInterpolator, held);
 		}
 		++runs;
 		if (preserve) ++grainPreservedRuns;

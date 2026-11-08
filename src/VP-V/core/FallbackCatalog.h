@@ -628,6 +628,13 @@ namespace FallbackCatalog
 		return derived ? Engaged("skeleton_regulator", "regulator input: slack derived from render time; presentation facts not wired")
 		               : Released("skeleton_regulator");
 	}
+	// MV7: a module that holds video memory is active but declared none of it to the VRAM governor (VramUsers.h), so its memory is
+	// invisible to the budget and the lane products may be granted memory it already holds. `names` lists the modules (empty = none).
+	inline Decision SkeletonVramUsers(const std::string& names)
+	{
+		return names.empty() ? Released("skeleton_vram_users")
+		                     : Engaged("skeleton_vram_users", "VRAM not declared to the governor: " + names + " (its memory is not in the budget)");
+	}
 	// A lead read of an ordered-chain product is in THIS graph (WARNING level: nothing is rejected). The reader cannot be sealed ahead,
 	// so it live-fills its reduced form; the note is Graph::leadChainWarning ("quality_pattern -> coding_evidence (lead 2): lead read of an
 	// ordered chain: reader live-fills its reduced form"). Engaged only while such a read is in the graph.

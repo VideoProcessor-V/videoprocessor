@@ -10,6 +10,7 @@
 // chroma_upscale_basic is deferred with the SCHEMA lock); the caller owns the frame plumbing.
 #pragma once
 
+#include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/scaling/chroma_upscale/basic/BasicChroma.h>
 
 #include <libplacebo/dispatch.h>
@@ -26,6 +27,35 @@ namespace BasicChroma
 		std::string BuildHeader(const Geometry& g);
 		// The pass body (compute, one thread per output pixel, 16 x 16 groups).
 		const char* Body();
+
+		// MV7: the output texture m_out is a kept, luma-size, two-component 16-bit unorm storage texture (VpvGpu::Unorm16(gpu, 2): 4 B/px;
+		// 33.2 MB at 3840x2160). It is NOT a per-call temporary, so it has a governor entry of its own BEFORE any call site exists
+		// (VramUsers.h): level 0 = kept, level 1 = off (the caller keeps the plain libplacebo chroma upscale and says so). A lossy, T1 step
+		// (the picture changes), shed first among T1. `Granted` is what the call site reads from the governor's plan.
+		inline uint64_t TextureBytes(int lumaW, int lumaH)
+		{
+			return lumaW > 0 && lumaH > 0 ? static_cast<uint64_t>(lumaW) * static_cast<uint64_t>(lumaH) * 4u : 0u;
+		}
+		inline VpSkeleton::VramUser DeclaredUser(int lumaW, int lumaH)
+		{
+			VpSkeleton::VramUser u;
+			u.id = VpSkeleton::kUserBasicChroma;
+			u.name = VpSkeleton::VramUserName(VpSkeleton::kUserBasicChroma);
+			u.tier = VpSkeleton::Tier::T1;
+			u.shedOrder = 0;
+			u.lossless = false;
+			u.levels.push_back(TextureBytes(lumaW, lumaH));
+			u.levelText.push_back(nullptr);
+			u.levels.push_back(0);
+			u.levelText.push_back("off: the libplacebo chroma upscale runs");
+			return u;
+		}
+		inline bool Granted(const VpSkeleton::GovernorPlan& plan)
+		{
+			const VpSkeleton::UserGrant* g = plan.Find(VpSkeleton::kUserBasicChroma);
+			return g == nullptr || !g->shed;
+		}
+
 
 		class Module
 		{

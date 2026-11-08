@@ -4,6 +4,8 @@
 #include "LongPairService.h"
 #include "NvOpticalFlowHinted.h"
 
+#include <VP-V/core/VramUsers.h>
+
 #include <d3d11.h>
 #include <dxgi.h>
 #include <atlbase.h>
@@ -131,6 +133,8 @@ namespace VpLongPair
 			{
 				luma[i].Release(); flow[i].Release(); cost[i].Release(); flowRead[i].Release(); costRead[i].Release();
 			}
+			// MV7: the long pair's ring textures leave the governor's budget with the engine.
+			VpSkeleton::VramUsers::Instance().Withdraw(this, VpSkeleton::kUserNvofProducer);
 			hintTex.Release();
 			sizeW = sizeH = 0;
 		}
@@ -177,6 +181,8 @@ namespace VpLongPair
 				ReleaseEngine();
 				return false;
 			}
+			// MV7 (the long pair is the 3rd NVOF user): its textures, readback copies and hint, counted by the governor (VramUsers.h).
+			VpSkeleton::VramUsers::Instance().DeclareFixed(this, VpSkeleton::kUserNvofProducer, NvOpticalFlow::RingBytes(w, h, true, true));
 			sizeW = w;
 			sizeH = h;
 			return true;

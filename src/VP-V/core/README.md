@@ -29,6 +29,8 @@ Header-only and pure: no libplacebo, no Windows, C++14. The renderer and the CPU
 | `ProductSlots.h` | Skeleton S1 slots: the 64-bit state word, ABA-proof generation-tagged claim, lane/live headers, lane-owned rejected buffers, live pool for every backend, lane input pins, the seal (stamps, span, ancestry cgens) and the cascade (`SlotTable::Resolve`); lead ancestors (K1, `SetStampSource`); ordered-chain carry-forward |
 | `CardProfile.h` | Skeleton S2: card profile (cached per adapter LUID + driver), adaptive VRAM headroom, system-RAM rules |
 | `VramGovernor.h` | Skeleton S2: the ONE VRAM governor and the tier plan on it. Every VRAM user (early-upload pool, render-ahead, vector engine, TemporalDetail, camera model, interpolator, enhancers, fixed libplacebo/capture memory, and the skeleton products) registers levels + tier; one budget (own usage re-planned), one shed order (tier, lossless first, order); one status line per cutback. `PlanTiers` = T0 first then T1/T2 by ms saved per MB as that order; `ApplyLaneGrants` sets the slots |
+| `VramUsers.h` | MV7: the registry of VRAM users outside the product catalog (optical-flow engines, temporal detail, camera model, interpolator, enhancers, BasicChroma's output): a module declares what it holds when it allocates and withdraws it when it releases; `SkeletonModule` hands the snapshot to the governor (`TierInput::otherUsers`, `ownUsageBytes`). An active module without a declaration is named (`skeleton_vram_users`) |
+| `PassTimerInbox.h` | MV7: the thread-safe inbox the motion engine's own threads post completed GPU timings to (`PassTimers::Inbox::Motion()`); the render thread drains it into the pass-timer hook's accumulator, the skeleton shows the cumulative lines itself |
 | `LaneInterfaces.h` | Skeleton S3-S7 contracts: `SourceFrameView`, `ILaneProducer`, `IGapWork`, `IGpuDispatcher`, `IReadbackDevice` (the host owns every device call) |
 | `LaneRunner.h` | Skeleton S3: the lane runner, one state machine per product over the S1 slot protocol (claim, pins, stamp, chunks, publish or abandon after the fence); no thread of its own |
 | `OrderedChain.h` | W1-SKG: `ChainOrder`, the frame-order rule of an ordered-chain lane product (in order / carry-forward / refused) |
@@ -154,7 +156,23 @@ declaration as a WARNING (never a reject), `Graph::leadChainReads` the effective
    a later role estimate (less look-ahead for the anchor decision); no seal change. Measure first: the counters `chainCarryForward`, `leadAccepted` and
    `leadLaterRejected` say how often the lead read actually runs reduced.
 
-Until one is chosen the warning stays; no behaviour changes.
+Until one is chosen the warning stays; no behaviour changes. **Decision state (SK-W, 2026-11-08):** option 1 is still the recommendation; it is a catalog change on
+`coding_evidence` / `quality_pattern` (`TdProductContracts.h`, shared with the TD-2 owner) and waits for the lead's written confirmation. Nothing was changed in the
+catalog or in `SlotTable::Check` (option 2 is not taken here).
+
+## VRAM users outside the product catalog (MV7)
+
+The governor is one budget for every VRAM user, but until MV7 nothing populated `TierInput::otherUsers`: the optical-flow engines and their rings, the camera model,
+the interpolator and BasicChroma's kept output texture were invisible, so the lane products were granted memory those users already held. Now `VramUsers` (header
+above) is the one place they declare themselves. **A fixed user** (one level, `DeclareFixed`) counts and is never shed: today no call site can give that memory back,
+so the governor does not pretend to. **A stepped user** (BasicChroma's output: kept / off) is shed visibly (`Video memory: basic chroma upscale output off: ... (not
+enough free video memory)`) and its future call site reads `BasicChroma::Gpu::Granted(plan)`. What a user holds is inside the adapter's `CurrentUsage`, so the
+skeleton passes it as `ownUsageBytes` (re-planned, not counted twice). Declared today: the NVOF producer's ring (`MotionAheadProducer`), the long-pair service's ring
+(`LongPairService`, MV4), the camera model's label textures (`LabelPass`), the interpolator's textures (`FrameInterpolator`) and BasicChroma's output (no call site yet).
+**Not yet declared (open items, no module-level size function or single allocation site to hook): temporal detail, the texture-restore / detail-pulse / debander
+enhancers, DejudderWarp's own optical-flow textures (MV2: removed with SK-MV), the camera model's guidance textures.** The guard `MarkActive` names an active module that
+declared nothing (`skeleton_vram_users`); the modules above do not call `MarkActive` yet, so the guard cannot see them. Ctrl+Alt+D lists each declared user
+("VRAM T0 optical-flow engines: 6.4 MB level 0").
 
 ## Status and fallbacks
 
@@ -164,6 +182,7 @@ reduced history is a non-identical reduced mode and must declare `Variants::NonI
 ## Tests
 
 `SkeletonGraphTests` (new), `ProductSlotsTests`, `ProductGraphTests`, `VramGovernorTests`, `AnalysisLaneTests`,
-`LaneProductsTests`, `PipelineSkeletonTests`, `SkeletonModuleTests`, `ProductCatalogTests`, `CameraProductsTests`.
+`LaneProductsTests`, `PipelineSkeletonTests`, `SkeletonModuleTests`, `ProductCatalogTests`, `CameraProductsTests`, `VramUsersTests` (MV7, in `VramGovernorTests.cpp`),
+`PassTimersTests` (the inbox).
 CPU only: `vstest.console.exe x64\Release\VideoProcessor-Test.dll /Tests:SkeletonGraphTests,... /Logger:trx`.
 

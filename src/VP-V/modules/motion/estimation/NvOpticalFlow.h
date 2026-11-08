@@ -69,4 +69,21 @@ namespace NvOpticalFlow
 		bool costs = false;
 		std::string error;
 	};
+
+	// MV7: bytes of the ring textures one engine's user holds (the sizes follow the formats above, one flow and one cost texel per
+	// Grid x Grid pixels): two sets of input (R8, w x h), flow (R16G16_SINT, 4 B) and cost (R8_UINT, 1 B); `readback` adds the two
+	// staging copies of flow and cost (the producer's CPU read), `hint` one more flow-sized texture (the long pair's temporal hint).
+	// The driver's own session memory is not visible to the application and is NOT counted (the governor line says "textures").
+	inline uint64_t RingBytes(int w, int h, bool readback, bool hint)
+	{
+		if (w < 1 || h < 1)
+			return 0;
+		const uint64_t gw = static_cast<uint64_t>((w + Engine::Grid - 1) / Engine::Grid);
+		const uint64_t gh = static_cast<uint64_t>((h + Engine::Grid - 1) / Engine::Grid);
+		const uint64_t grid = gw * gh;
+		uint64_t perSet = static_cast<uint64_t>(w) * static_cast<uint64_t>(h) + grid * 4 + grid * 1;
+		if (readback)
+			perSet += grid * 4 + grid * 1;
+		return 2 * perSet + (hint ? grid * 4 : 0);
+	}
 }

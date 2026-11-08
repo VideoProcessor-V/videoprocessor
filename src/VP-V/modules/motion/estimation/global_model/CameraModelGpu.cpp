@@ -5,6 +5,8 @@
 // GlobalModelFit.cpp Labels() exactly, in float arithmetic; LabelBlockMirror is its CPU twin.
 #include "CameraModelGpu.h"
 
+#include <VP-V/core/VramUsers.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -323,6 +325,7 @@ if (blk.x < cm_grid.x && blk.y < cm_grid.y) {
 
 	LabelPass::~LabelPass()
 	{
+		VpSkeleton::VramUsers::Instance().Withdraw(this, VpSkeleton::kUserCameraModel);   // MV7
 		for (pl_tex& t : m_tex)
 			if (t)
 				pl_tex_destroy(m_gpu, &t);
@@ -355,6 +358,8 @@ if (blk.x < cm_grid.x && blk.y < cm_grid.y) {
 				return false;
 			}
 		}
+		// MV7: the label textures are the camera model's VRAM; the governor counts them (VramUsers.h).
+		VpSkeleton::VramUsers::Instance().DeclareFixed(this, VpSkeleton::kUserCameraModel, VpSkeleton::TexBytesOf(m_tex[0]) + VpSkeleton::TexBytesOf(m_tex[1]));
 		return true;
 	}
 

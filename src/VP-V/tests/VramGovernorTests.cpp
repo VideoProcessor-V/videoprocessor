@@ -12,6 +12,9 @@
 // 3090, own usage re-planned, pressure/headroom over time and determinism. CPU only.
 
 #include <VP-V/core/VramGovernor.h>
+#include <VP-V/core/VramUsers.h>
+#include <VP-V/modules/motion/estimation/NvOpticalFlow.h>
+#include <VP-V/modules/scaling/chroma_upscale/basic/BasicChromaGpu.h>
 
 #include <string>
 #include <vector>
@@ -323,6 +326,140 @@ namespace VramGovernorTestsNs
 			for (size_t i = 0; i < a.governor.grants.size(); ++i)
 				Assert::AreEqual(a.governor.grants[i].level, b.governor.grants[i].level);
 			Assert::AreEqual(a.notice, b.notice);
+		}
+	};
+
+	// MV7: the VRAM users outside the product catalog are declared to the governor (core/VramUsers.h). CPU only.
+	TEST_CLASS(VramUsersTests)
+	{
+	public:
+		TEST_METHOD(ADeclaredUserReachesThePlanAndItsMemoryIsNotCountedTwice)
+		{
+			VramUsers::Instance().ResetForTesting();
+			int owner = 0;
+			VramUsers::Instance().DeclareFixed(&owner, kUserNvofProducer, 200 * kMB);
+			const VramUsers::Snapshot s = VramUsers::Instance().Take();
+			Assert::AreEqual(size_t(1), s.users.size());
+			Assert::AreEqual(200 * kMB, s.heldBytes);
+			Assert::AreEqual(std::string("optical-flow engines"), std::string(s.users[0].name));
+			const Registry reg = R4b();
+			const Graph g = Products4k(reg);
+			TierInput in;
+			in.otherUsers = s.users;
+			in.ownUsageBytes = s.heldBytes;
+			CardProfile card = Card4GB();
+			card.vramUsageBytes += s.heldBytes;   // what the user holds is inside the adapter's CurrentUsage
+			const TierPlan plan = PlanTiers(reg, g, card, in);
+			const UserGrant* u = plan.governor.Find(kUserNvofProducer);
+			Assert::IsNotNull(u);
+			Assert::AreEqual(200 * kMB, u->bytes);
+			Assert::AreEqual(size_t(0), u->level, L"a fixed user is never shed");
+			// Counted once: declared as own usage the budget is larger than if it were counted as somebody else's.
+			TierInput other = in;
+			other.ownUsageBytes = 0;
+			Assert::IsTrue(plan.governor.budgetBytes > PlanTiers(reg, g, card, other).governor.budgetBytes);
+			VramUsers::Instance().ResetForTesting();
+		}
+
+		TEST_METHOD(DeclarationsOfOneIdAreSummedAndTheVersionMovesOnlyOnAChange)
+		{
+			VramUsers::Instance().ResetForTesting();
+			int a = 0, b = 0;
+			VramUsers& r = VramUsers::Instance();
+			r.DeclareFixed(&a, kUserNvofProducer, 100 * kMB);
+			const uint64_t v1 = r.Version();
+			r.DeclareFixed(&a, kUserNvofProducer, 100 * kMB);
+			Assert::AreEqual(v1, r.Version(), L"the same declaration again is not a change");
+			r.DeclareFixed(&b, kUserNvofProducer, 50 * kMB);
+			Assert::IsTrue(r.Version() != v1);
+			VramUsers::Snapshot s = r.Take();
+			Assert::AreEqual(size_t(1), s.users.size(), L"one governor user per id");
+			Assert::AreEqual(150 * kMB, s.users[0].levels[0]);
+			Assert::AreEqual(150 * kMB, s.heldBytes);
+			r.Withdraw(&a, kUserNvofProducer);
+			s = r.Take();
+			Assert::AreEqual(50 * kMB, s.users[0].levels[0]);
+			r.WithdrawAll(&b);
+			Assert::IsTrue(r.Take().users.empty());
+			r.ResetForTesting();
+		}
+
+		TEST_METHOD(AnActiveModuleWithoutADeclarationIsNamedForEveryDeclarableId)
+		{
+			// MV7 must-land check 3: a declared kUser* id whose module is active but populated no entry is reported (and shown by the
+			// skeleton as skeleton_vram_users); once the module declares, the report clears.
+			size_t n = 0;
+			const uint16_t* ids = DeclarableVramUsers(&n);
+			Assert::AreEqual(size_t(6), n, L"the five motion / repair users and BasicChroma");
+			const uint16_t expected[] = { kUserNvofProducer, kUserTemporalDetail, kUserCameraModel, kUserInterpolator, kUserEnhancers, kUserBasicChroma };
+			for (size_t i = 0; i < n; ++i)
+				Assert::AreEqual(int(expected[i]), int(ids[i]));
+			VramUsers& r = VramUsers::Instance();
+			for (size_t i = 0; i < n; ++i)
+			{
+				r.ResetForTesting();
+				int module = 0;
+				Assert::AreNotEqual(std::string(), std::string(VramUserName(ids[i])), L"every declarable id has a plain name");
+				r.MarkActive(&module, ids[i], true);
+				VramUsers::Snapshot s = r.Take();
+				Assert::AreEqual(size_t(1), s.unpopulated.size());
+				Assert::AreEqual(int(ids[i]), int(s.unpopulated[0]));
+				Assert::AreEqual(std::string(VramUserName(ids[i])), UnpopulatedUserNames(s.unpopulated));
+				r.DeclareFixed(&module, ids[i], 1 * kMB);
+				Assert::IsTrue(r.Take().unpopulated.empty(), L"declared: nothing is unpopulated");
+				r.MarkActive(&module, ids[i], false);
+				r.Withdraw(&module, ids[i]);
+			}
+			r.ResetForTesting();
+		}
+
+		TEST_METHOD(NvofRingBytesFollowTheEngineFormats)
+		{
+			// 1920 x 1080 (the half size of a 4K source): grid 480 x 270 = 129600 blocks; R8 input 2073600 B; flow R16G16 4 B and cost R8 1 B
+			// per block.
+			const uint64_t perSet = 1920ull * 1080ull + 129600ull * 4ull + 129600ull;
+			Assert::AreEqual(uint64_t(2) * perSet, NvOpticalFlow::RingBytes(1920, 1080, false, false));
+			Assert::AreEqual(uint64_t(2) * (perSet + 129600ull * 5ull), NvOpticalFlow::RingBytes(1920, 1080, true, false));
+			Assert::AreEqual(uint64_t(2) * (perSet + 129600ull * 5ull) + 129600ull * 4ull, NvOpticalFlow::RingBytes(1920, 1080, true, true));
+			// Plausibility: a few MB per engine at 4K (the driver's own session memory is not counted and not visible).
+			Assert::IsTrue(NvOpticalFlow::RingBytes(1920, 1080, true, true) < 10 * kMB);
+			Assert::AreEqual(uint64_t(0), NvOpticalFlow::RingBytes(0, 1080, true, true));
+			// A size that is not a multiple of the grid rounds the grid up.
+			Assert::AreEqual(uint64_t(2) * (7ull * 3ull + 2ull * 1ull * 4ull + 2ull * 1ull), NvOpticalFlow::RingBytes(7, 3, false, false));
+		}
+
+		TEST_METHOD(BasicChromaOutputIsAGovernorUserWithAVisibleShed)
+		{
+			// m_out: luma-size rg16 (4 B/px): 33.2 MB at 3840 x 2160. Declared BEFORE any call site exists.
+			Assert::AreEqual(uint64_t(3840) * 2160ull * 4ull, BasicChroma::Gpu::TextureBytes(3840, 2160));
+			Assert::AreEqual(uint64_t(0), BasicChroma::Gpu::TextureBytes(0, 2160));
+			const VramUser u = BasicChroma::Gpu::DeclaredUser(3840, 2160);
+			Assert::AreEqual(int(kUserBasicChroma), int(u.id));
+			Assert::AreEqual(size_t(2), u.levels.size());
+			Assert::AreEqual(uint64_t(0), u.levels[1]);
+			// Enough memory: granted, no notice.
+			GovernorInput roomy;
+			roomy.card = Card4GB();
+			roomy.users.push_back(u);
+			GovernorPlan plan = PlanVram(roomy);
+			Assert::IsTrue(BasicChroma::Gpu::Granted(plan));
+			Assert::IsTrue(plan.lines.empty());
+			// Over budget (a big fixed user takes the rest): the output texture is shed first and the notice says what runs instead.
+			GovernorInput tight;
+			tight.card = Card4GB();
+			tight.users.push_back(User(kUserLibplacebo, "libplacebo intermediates", Tier::T0, 0, { 3000 }));
+			tight.users.push_back(u);
+			plan = PlanVram(tight);
+			const UserGrant* g = plan.Find(kUserBasicChroma);
+			Assert::IsNotNull(g);
+			Assert::IsTrue(g->shed);
+			Assert::IsFalse(BasicChroma::Gpu::Granted(plan));
+			bool said = false;
+			for (const std::string& l : plan.lines)
+				said = said || (l.find("basic chroma upscale output") != std::string::npos && l.find("off: the libplacebo chroma upscale runs") != std::string::npos);
+			Assert::IsTrue(said, L"the shed is visible and names the reduced mode");
+			// The ledger row exists for it (VramLedgerLines lists every grant).
+			Assert::IsNotNull(plan.Find(kUserBasicChroma));
 		}
 	};
 }

@@ -4,6 +4,7 @@
 #endif
 #include "CppUnitTest.h"
 #include <VP-V/core/PassTimers.h>
+#include <VP-V/core/PassTimerInbox.h>
 #include <string>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -102,6 +103,36 @@ namespace VideoProcessorTest
 			const std::string tail = "recent max\n";
 			Assert::IsTrue(r.size() > tail.size());
 			Assert::AreEqual(tail, r.substr(r.size() - tail.size()));
+		}
+		TEST_METHOD(AMotionJobPostedOffTheRenderThreadReachesTheHooksAccumulatorAndTheSkeletonLines)
+		{
+			// MV7: the producers post completed measurements; the render thread drains them into the pass-timer accumulator.
+			PassTimers::Inbox inbox;
+			inbox.Post(PassTimers::Kind::GpuGroup, "motion: NVOF producer engine (idle to completion)", 0.0);   // not a sample
+			Assert::AreEqual(0ull, static_cast<unsigned long long>(inbox.Posted()));
+			inbox.Post(PassTimers::Kind::GpuGroup, "motion: NVOF producer engine (idle to completion)", 2.0);
+			inbox.Post(PassTimers::Kind::GpuGroup, "motion: NVOF producer engine (idle to completion)", 4.0);
+			PassTimers::Accumulator acc;
+			Assert::AreEqual(size_t(2), inbox.DrainInto(acc));
+			const PassTimers::Stat* s = acc.Find("motion: NVOF producer engine (idle to completion)");
+			Assert::IsNotNull(s);
+			Assert::AreEqual(3.0, s->MeanMs(), 1e-9);
+			Assert::AreEqual(size_t(0), inbox.DrainInto(acc), L"drained samples are not delivered twice");
+			// The skeleton's own lines are cumulative and survive the drain.
+			const std::vector<std::string> lines = inbox.Lines();
+			Assert::AreEqual(size_t(1), lines.size());
+			Assert::IsTrue(lines[0].find("3.000 ms avg") != std::string::npos);
+			Assert::IsTrue(lines[0].find("(2 sample(s))") != std::string::npos);
+		}
+
+		TEST_METHOD(TheMotionInboxIsBoundedWhenNobodyDrainsIt)
+		{
+			PassTimers::Inbox inbox;
+			for (size_t i = 0; i < PassTimers::Inbox::kCapacity + 10; ++i)
+				inbox.Post(PassTimers::Kind::GpuGroup, "motion: job", 1.0);
+			Assert::AreEqual(10ull, static_cast<unsigned long long>(inbox.Dropped()));
+			PassTimers::Accumulator acc;
+			Assert::AreEqual(size_t(PassTimers::Inbox::kCapacity), inbox.DrainInto(acc));
 		}
 	};
 }

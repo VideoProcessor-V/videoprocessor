@@ -449,6 +449,12 @@
    "blocking": false,
    "baseline_duplicates": 0,
    "known_false_positive": []
+  },
+  "U22": {
+   "name": "motion_engine_instance",
+   "blocking": true,
+   "baseline_duplicates": 1,
+   "known_false_positive": []
   }
  }
 }

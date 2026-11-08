@@ -255,3 +255,16 @@ Doc 51 section 2. This is the initial report of `tools/check_shared_units.py` (n
 | Future/past source frames | Queue planes; EarlyUpload slots; AnalysisLumaSource pool; TD future slot copy; entrance ring | 3-5 copies | P13 source ring | Views |
 | Motion engine instance | Active MotionWarp + idle hiccup MotionWarp + interpolator | 2 | One | Shared |
 | Product descriptors | `VpSkeleton::ProductDecl`; `GrainSplit::kProductDecl`; TD `ProductDecl` copy; CfL `ProductInfo` | 4 types | Core `ProductDecl` | Deleted |
+
+## VRAM users outside the product catalog (MV7, hand-written)
+
+The generated tables above are the catalog's products. The governor also plans the users below (declared through `core/VramUsers.h`, listed in Ctrl+Alt+D); none is a
+catalog product. Sizes follow the module's own allocation at the time it declares.
+
+| Governor id | Declared by | Held (declared) | Steps |
+|---|---|---|---|
+| kUserNvofProducer | MotionAheadProducer (P2 producer), LongPairService (MV4; unwired), DejudderWarp's own engine NOT yet (MV2, removed by SK-MV) | `NvOpticalFlow::RingBytes`: 2 sets of input R8 + flow 4 B + cost 1 B per 4x4 block, plus readback copies (producer) and a hint (long pair); the driver's session memory is not visible | fixed |
+| kUserCameraModel | `LabelPass` label textures | 2 x rgba32f at the block grid | fixed |
+| kUserInterpolator | `FrameInterpolator` outputs, no-vector pair, grain bands | the textures held | fixed |
+| kUserBasicChroma | `BasicChroma::Gpu::Module::m_out` (no call site yet) | luma-size rg16, 33.2 MB at 4K | kept / off (T1, lossy, shed first) |
+| kUserTemporalDetail, kUserEnhancers | not declared yet (open items) | n/a | n/a |

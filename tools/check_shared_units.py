@@ -127,6 +127,14 @@ REGISTRY = [
      "owning_unit": ["src/VP-V/modules/input/source_analysis/identity"],
      "signatures": _c(r"\.(applied|measured)\s*\[[^\]]*\]\s*\.(n|N|ratio|kernelIndex)\b"),
      "allow": _c(r"Geometry::(Confident|ConfidentOf|Provisional)\b", r"SourceGeometryView")},
+    # SK-W must-land check 2 (coordinator 2026-11-07, doc 83 section 5): the motion engine is ONE session per device. An NVOF engine
+    # instantiated, or a VectorStore<...> created, outside the owning folder (the vector engine, its producer and the long-pair
+    # service live in motion/estimation) is a second engine / a second vector store. Blocking; the baseline is today's one site
+    # (DejudderWarp's own engine, MV2) and ratchets to 0 with SK-MV. The runtime one-engine guard lands with SK-MV.
+    {"id": "U22", "name": "motion_engine_instance",
+     "owning_unit": ["src/VP-V/modules/motion/estimation"],
+     "signatures": _c(r"\bnew\s+NvOpticalFlow::", r"make_unique<\s*NvOpticalFlow::\w*Engine", r"VectorStore\s*<"),
+     "allow": []},
 ]
 
 DECLARATION_PATHS = _c(
