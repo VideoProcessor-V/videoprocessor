@@ -5152,6 +5152,16 @@ void RunBetaCameraAccuracy()
 	std::cout << "Beta camera accuracy: results in " << outDir << " (camera-accuracy.csv, camera-accuracy-pairs.csv, summary.md)\n" << std::flush;
 }
 
+// R1-CAMACC dispatch (the Beta host's main calls only this; report only): VP_TEST_CAMERA_ACCURACY=1 runs the camera guidance's
+// accuracy report on synthetic pans against the exact block truth and returns true (the caller then stops as a report mode).
+bool RunBetaCameraAccuracyIfRequested()
+{
+	if (CameraAccuracy::EnvText("VP_TEST_CAMERA_ACCURACY") != "1")
+		return false;
+	RunBetaCameraAccuracy();
+	return true;
+}
+
 // The failure map's real part (owner 2026-10-13): high-frame-rate clips give
 // the true in-between pictures. UVG 120 fps (3840x2160 yuv420p10le .yuv):
 // frames n and n+5 are a 24p pair, n+1 .. n+4 the truth at 0.2 .. 0.8. Xiph

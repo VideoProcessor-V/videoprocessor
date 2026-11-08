@@ -14,7 +14,7 @@ void RunBetaDejudderQuality(); // BetaGpuTests.cpp
 void RunBetaDitherCompare(); // BetaGpuTests.cpp
 void RunBetaTimingGate(); // BetaGpuTests.cpp
 void RunBetaMotionCorpus(); // BetaGpuTests.cpp
-void RunBetaCameraAccuracy(); // BetaGpuTests.cpp
+bool RunBetaCameraAccuracyIfRequested(); // BetaGpuTests.cpp (R1-CAMACC, VP_TEST_CAMERA_ACCURACY=1) // VPV-HOOK
 void RunBetaRealFootage(); // BetaGpuTests.cpp
 void RunBetaChainBiasRegression(); // BetaGpuTests.cpp
 void RunBetaSigmaBias(); // BetaGpuTests.cpp
@@ -24,7 +24,7 @@ void RunBetaExtendedRangeGpuTests(); // BetaGpuTests.cpp
 void RunBetaChainGpuTest(); // BetaGpuTests.cpp
 static void check(bool result, const char* message) { if (!result) throw std::runtime_error(message); }
 // Report modes (VP_TEST_MATCHER_TIMING, _DEJUDDER_QUALITY, _DITHER_COMPARE, _TIMING_GATE, _MOTION_CORPUS,
-// _CAMERA_ACCURACY, _REAL_FOOTAGE, _QUALITY, _SCENARIO) run one report and stop before the gate's whole-chain tests: they
+// _REAL_FOOTAGE, _QUALITY, _SCENARIO) run one report and stop before the gate's whole-chain tests: they
 // return this distinct code and print "MODE <name>: gate not run", so a gate run with a stray report
 // switch can never pass (the test host fails it unless VP_TEST_REPORT_MODE=1).
 const int kBetaReportModeExitCode = 3;
@@ -165,16 +165,7 @@ int main() {
                 RunBetaMotionCorpus();
                 return BetaReportMode("VP_TEST_MOTION_CORPUS");
             }
-            // R1-CAMACC: the camera guidance's accuracy on synthetic pans against the exact block truth (report only).
-            char* ca = nullptr;
-            size_t caLength = 0;
-            const bool runCameraAccuracy = _dupenv_s(&ca, &caLength, "VP_TEST_CAMERA_ACCURACY") == 0 && ca && std::string(ca) == "1";
-            std::free(ca);
-            if (runCameraAccuracy)
-            {
-                RunBetaCameraAccuracy();
-                return BetaReportMode("VP_TEST_CAMERA_ACCURACY");
-            }
+            if (RunBetaCameraAccuracyIfRequested()) return BetaReportMode("VP_TEST_CAMERA_ACCURACY"); // VPV-HOOK
             char* rf = nullptr;
             size_t rfLength = 0;
             const bool runReal = _dupenv_s(&rf, &rfLength, "VP_TEST_REAL_FOOTAGE") == 0 && rf && *rf;
