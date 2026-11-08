@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 
 #ifndef _WINDOWS_
 #ifndef NOMINMAX
@@ -72,7 +73,15 @@ namespace VpMotion
 		std::atomic<bool> motionEngineReady{ false };
 		// The producer computing the pairs ahead (render thread starts / stops it; the render loop submits frames;
 		// the de-judder takes its pairs). It stores them under motionValidity.StreamGeneration().
-		std::unique_ptr<MotionAhead::Producer> motionProducer;
+		// Hardening (P5a-rest; audit correction): RenderLocked runs only inside RenderLoop, so the "render thread"
+		// (PlanProducer) and the "render loop" are the SAME OS thread and no race existed between them. The one
+		// cross-thread writer is the retirement path (GPU release, VectorEngine::ReleaseProducerFor), which is safe
+		// because Retire joins m_renderThread before RetireOutput; ~Impl is single-threaded. The shared_ptr is kept as
+		// cheap hardening: published with std::atomic_store (PublishProducer) and read by the loop's hand-off through
+		// one std::atomic_load copy per use (LoopProducer), so it stays safe if a writer ever moves to another thread.
+		std::shared_ptr<MotionAhead::Producer> motionProducer;
+		void PublishProducer(std::shared_ptr<MotionAhead::Producer> producer) { std::atomic_store(&motionProducer, std::move(producer)); }
+		std::shared_ptr<MotionAhead::Producer> LoopProducer() const { return std::atomic_load(&motionProducer); }
 		// One vectors-valid state (docs/VP-interpolator-50-60-plan.md step 1; owner [[vp-vector-validity]]):
 		// every discontinuity moves its epoch from any thread; the render thread applies it
 		// (ApplyMotionInvalidate) and every vector consumer checks the epoch its vectors were made in.

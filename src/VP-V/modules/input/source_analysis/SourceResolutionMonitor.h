@@ -1,6 +1,8 @@
 #pragma once
 
+#include <VP-V/modules/input/source_analysis/SourceHistoryLog.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
+#include <VP-V/modules/input/source_analysis/identity/SourceGeometryView.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdPipeline.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceQualityView.h>
 
@@ -19,6 +21,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+namespace SourceIdentity { namespace Chain { class ChainEstimator; } }
 
 // Stage 12 step B in the renderer (owner 2026-10-15): the effective
 // resolution, bitrate quality and effective bit depth of every source, and
@@ -80,6 +84,11 @@ namespace SourceResolutionMonitor
 		double analyseMs = 0.0;        // worker time for the last frame
 		int tiles = 0;                 // tiles in the last analysed frame (8 = base grid, 16 = dense)
 		std::string error;             // the last GPU-side failure (empty when none)
+		// The history CSV's standing status ("" = fine): a failed write or dropped rows (SourceHistoryLog.h).
+		std::string historyNote;
+		// The chain estimator's status line (+ evidence status, + a recent one-time notice) when `SetChainEnabled(true)`; "" otherwise.
+		// Describe() appends it to the stats line the renderer already shows.
+		std::string chainNote;
 		// Frame-bound mode (SetFrameBound; all zero / false when off): shown by Describe().
 		bool frameBound = false;
 		unsigned frameLead = 0;               // D
@@ -176,7 +185,7 @@ namespace SourceResolutionMonitor
 		// (its era and FULL count; 0 = not driven, the default). Tile copies and worker jobs carry the
 		// key they were taken under; one taken under another key (a frame of the source before a FULL
 		// resync, still in flight) is dropped instead of being analysed into the new source's evidence.
-		void SetStreamKey(uint64_t key) { streamKey.store(key, std::memory_order_release); }
+		void SetStreamKey(uint64_t key);
 		uint64_t StreamKey() const { return streamKey.load(std::memory_order_acquire); }
 		// Copies and jobs dropped that way (diagnostics, tests).
 		unsigned long long StaleJobsDropped() const { return staleJobsDropped.load(std::memory_order_relaxed); }
@@ -187,8 +196,27 @@ namespace SourceResolutionMonitor
 		// worker feeds the consensus with every analysed frame and publishes the held-state record; AutoFactor(s) then ask the
 		// record which source it is (the latched axes) and engage only on a latched field, falling back to the classical
 		// value - visibly - while the record is absent or stale.
-		void SetSourceIdConsensus(bool on);
-		bool SourceIdConsensus() const { return sourceIdOn.load(std::memory_order_acquire); }
+		// SID-B: source_id_consensus is Off / Shadow / On.
+		//   Off    nothing runs; every value is byte-identical to before.
+		//   Shadow the pipeline and consensus run, P14 and the CSV sid columns are published, one "source_id would-be: ..." log
+		//          line is written per consensus change - but AutoFactor(s), QualityView and the re-base port use the CLASSICAL
+		//          decision, byte-identical to Off. Status line "Source identity: shadow (classical decides)".
+		//   On     as above, and the consensus decides (the gate, the quality view, the re-base requests).
+		enum class SourceIdMode { Off = 0, Shadow = 1, On = 2 };
+		void SetSourceIdMode(SourceIdMode mode);
+		// The EFFECTIVE mode: the requested one, except that the Original pathway forces Off (below).
+		SourceIdMode GetSourceIdMode() const { return static_cast<SourceIdMode>(sourceIdMode.load(std::memory_order_acquire)); }
+		SourceIdMode RequestedSourceIdMode() const { return static_cast<SourceIdMode>(sourceIdRequested.load(std::memory_order_acquire)); }
+		// The host calls this with the Original (Bill) pathway selection: while it is on, source identity is OFF whatever was requested
+		// (no pipeline, no record, no chain estimator, no fallback), exactly as before this feature; the requested mode is kept and
+		// takes effect again when the Original pathway is left. Status line: "Source identity: off (Original pathway)".
+		void SetOriginalPathway(bool on);
+		bool OriginalPathway() const { return originalPathway.load(std::memory_order_acquire); }
+		void SetSourceIdConsensus(bool on) { SetSourceIdMode(on ? SourceIdMode::On : SourceIdMode::Off); }
+		// True only in On: the consensus decides. (Shadow computes it but does not decide.)
+		bool SourceIdConsensus() const { return GetSourceIdMode() == SourceIdMode::On; }
+		// True in Shadow and On: the pipeline runs and publishes.
+		bool SourceIdRunning() const { return GetSourceIdMode() != SourceIdMode::Off; }
 		void SetSourceIdNotice(bool on) { sourceIdNotice.store(on, std::memory_order_release); sourceIdNoticeDirty.store(true, std::memory_order_release); }
 		// Any thread: the newest record (seq <= `sequence`; 0 = newest). False: none published yet.
 		bool SourceIdRecord(SourceIdentity::Record& out, uint64_t sequence = 0) const { return sourceId.Held().ReadLatest(sequence, out); }
@@ -200,10 +228,55 @@ namespace SourceResolutionMonitor
 		std::string SourceIdStatusLine(double seconds = -1.0) const;
 		// The auto-engage gate's own fallback: engaged while consensus is on but the record could not be used.
 		FallbackCatalog::Decision SourceIdGateFallback() const;
+		// SID train r2: the chain estimator's P14g holder (nullptr = none; the holder must outlive the monitor's worker). It feeds the
+		// chain voter of the pipeline: the CONSENSUS (chain + classical voters) is then what AutoFactor(s) ask in place of the tracker's
+		// declared value (N1, with source_id_consensus On; Off = the original, Shadow = the original decides and the would-be is logged).
+		// WHEN stays the original latch's (engage moments, dwell, crossfade). The chain has no gate of its own any more.
+		void SetGeometrySource(const SourceIdentity::Geometry::HeldState* held);
+		// Engaged (product.source_geometry) while consensus is on but the geometry record is absent, stale or of another version.
+		FallbackCatalog::Decision SourceIdGeometryFallback() const;
+		// ---- the chain estimator (identity/chain/ChainEstimator.h) -----------------------------------------------------------
+		// DEFAULT OFF: until SetChainEnabled(true) nothing below runs and every value is byte-identical to before. Enabled, the monitor
+		// owns the estimator: it drives its mode from SetSourceIdMode (Off / Shadow / On), feeds it the frame clock (Frame), the cuts /
+		// blanks / discontinuities / stream key / classical decision (the worker's analysis), and exposes P14g through GeometryView().
+		// The estimator publishes into its own held-state holder, which the monitor wires as its geometry source (SetGeometrySource).
+		void SetChainEnabled(bool on);
+		bool ChainEnabled() const { return chainEnabled.load(std::memory_order_acquire); }
+		// The renderer identity (the owner key of VpFrameAnalysis::Host::Owner) whose source frames the estimator reads; nullptr
+		// detaches. Idempotent: a lost registration is made again. OPTIONAL: while no owner was given, Frame() finds it itself (once a
+		// second): the owner is the only renderer with a registered store (VpFrameAnalysis::Host::Owner). With none or several, nothing
+		// is attached and the status says "no frame tap".
+		void SetChainTap(const void* owner);
+		// source_id_evidence: setter only (key plumbing waits for P3). `level` is "off", "log", "log+lines" or "log+lines+frames"
+		// (false: not a level, nothing changed); an empty `folder` means "sid-evidence" beside the history CSV folder.
+		bool SetChainEvidence(const std::string& folder, const std::string& level);
+		// The report-a-problem hotkey: dumps the estimator's evidence ring (rate limited except for this).
+		void RequestChainEvidenceDump(const std::string& why);
+		// Render thread (or any): one-time notices of the estimator ("Source identity: evidence logging on (shadow)", write failures).
+		bool TakeChainNotice(std::string& text);
+		// Ctrl+I / Config status line of the chain estimator, and the Ctrl+Alt+D detail text.
+		std::string ChainStatusLine() const;
+		std::string ChainDetailText() const;
+		std::string ChainEvidenceStatusText() const;
+		// The geometry of the delivered picture as the consumers read it (SourceGeometryView.h), on the monitor's frame clock.
+		struct GeometryViews
+		{
+			SourceIdentity::Geometry::ConfidentGeometry confident;
+			SourceIdentity::Geometry::ProvisionalGeometry provisional;
+		};
+		GeometryViews GeometryView(double seconds = -1.0) const;
+		// The estimator itself (diagnostics, tests). Never null.
+		SourceIdentity::Chain::ChainEstimator& ChainEstimatorRef() { return *chainEst; }
+		// Tests: replaces the (inert) estimator with one built with an injected clock / settings. Before SetChainEnabled(true) only.
+		void SetChainEstimatorForTest(std::unique_ptr<SourceIdentity::Chain::ChainEstimator> estimator);
+		// N2 (diagnostic): native-looking frames the trackers left out because the consensus held an upscaled source on confident chain
+		// evidence (Tracker::ChainHeld, summed over the three trackers; 0 in Off / Shadow).
+		unsigned long long NativeFramesHeldByChain() const { return nativeHeldByChain.load(std::memory_order_relaxed); }
 		// Render thread: apply the consensus's re-base requests to the Indicator port, each generation exactly once.
 		int ApplySourceIdRebase(SourceIdentity::IndicatorPort& port);
 		// Render thread: true once per firing of the one-time "stream quality dropped" notice (`seen`: the caller's serial).
-		bool TakeSourceIdNotice(uint64_t& seen, std::string& text) const { return sourceId.TakeNotice(seen, text); }
+		// Only in On: a shadow ABR notice never reaches the user.
+		bool TakeSourceIdNotice(uint64_t& seen, std::string& text) const { return SourceIdConsensus() && sourceId.TakeNotice(seen, text); }
 		unsigned long long SourceIdEvents() const { return sourceIdEvents.load(std::memory_order_relaxed); }
 		// Bug hunt 34 item 1: true while the tiles are read back without waiting (D3D11 staging);
 		// false before the first frame, on another API, or when the staging could not be made on
@@ -300,16 +373,18 @@ namespace SourceResolutionMonitor
 		std::string Selection() const;
 
 		void Release(pl_gpu gpu);
-		// Owner 2026-10-16 (debugging auto): one file per session in `folder`,
-		// "source-resolution <yyyymmdd-hhmmss>.csv" - every analysed frame's reading and
-		// every auto decision with its reason, the newest kHistoryRows (about ten minutes,
-		// ~100 KB), rewritten every few seconds (temp + replace). The newest kHistorySessions
-		// files are kept; older ones are deleted when a session starts. Empty folder = off.
+		// Owner 2026-10-16 (debugging auto), SID-B0 2026-11-07: one SESSION-LONG file family per session in `folder`,
+		// "source-resolution <yyyymmdd-hhmmss>.csv" - every analysed frame's reading and every auto decision with its
+		// reason, appended every few seconds; when a file reaches the rotation limit (default 20 MB) the log continues in
+		// "source-resolution <stamp>-002.csv", -003, ... of the same session (SourceHistoryLog.h). The newest
+		// kHistorySessions sessions are kept (all their files); older ones are deleted when a session starts (by the first
+		// flush). The columns after `note` let the identity consensus be replayed from the file alone. Empty folder = off.
 		void SetHistoryFolder(const std::string& folder);
-		const std::string& HistoryPath() const { return historyPath; }
-		static constexpr size_t kHistorySessions = 5;
+		// Before SetHistoryFolder (tests): the rotation limit in bytes (0 = the default).
+		void SetHistoryRotateBytes(uint64_t bytes) { historyRotateBytes = bytes; }
+		std::string HistoryPath() const { return historyLog.CurrentPath(); }
+		static constexpr size_t kHistorySessions = SourceHistory::kDefaultSessions;
 		void FlushHistoryNow() { FlushHistory(true); }
-		static constexpr size_t kHistoryRows = 1200;
 		double intervalSeconds = 0.5;   // tile copies per second: 2
 		// The largest analysis tile (the readback buffer's size); with the latch fixes the tile is
 		// SourceResolution::TileSize(picture height) (128 at 1080, 256 at 2160), else always kTile.
@@ -408,7 +483,9 @@ namespace SourceResolutionMonitor
 		void FinishSequence(uint64_t sequence);
 		void Worker();
 		void Fail(const char* what, double seconds);
-		void Record(const std::string& row);   // with `mutex` held
+		// One history row (event .. note, 13 fields) plus the replay / identity columns (SourceHistory::kExtraColumns fields
+		// as ",a,b,..."; empty for events that carry none).
+		void Record(const std::string& row, const std::string& extras = SourceHistory::EmptyExtras());
 		void FlushHistory(bool force);
 		void Analyse(Job& job);
 		void ResetEvidence(const char* cause);   // with `mutex` held: back to native, all evidence cleared
@@ -463,7 +540,10 @@ namespace SourceResolutionMonitor
 		SourceResolution::Tracker tracker;
 		// Source identity (worker side; Held() is the only part other threads read).
 		SourceIdentity::Pipeline sourceId;
-		std::atomic<bool> sourceIdOn{ false };
+		std::atomic<int> sourceIdMode{ 0 };        // SourceIdMode, the effective one
+		std::atomic<int> sourceIdRequested{ 0 };   // SourceIdMode as requested (SetSourceIdMode)
+		std::atomic<bool> originalPathway{ false };
+		void ApplySourceIdMode();
 		std::atomic<bool> sourceIdNotice{ true };
 		std::atomic<bool> sourceIdNoticeDirty{ false };
 		std::atomic<bool> sourceIdResetPending{ false };
@@ -475,15 +555,39 @@ namespace SourceResolutionMonitor
 		// The gate's view of the record at `now` (render thread): fresh = usable; ratios are the latched axes (1 = native).
 		struct IdGate { bool on = false, fresh = false; double ratioH = 1.0, ratioV = 1.0; bool latchedH = false, latchedV = false; };
 		IdGate SourceIdGate(double now);
+		// The newest P14g record the monitor may use: decodable, not from before the last discontinuity. `cause` = kCause* when none.
+		// `seq` != 0: the latest sealed record with evalSeq <= seq (the P14g contract: a frame-bound consumer never reads the future);
+		// 0 = the newest of all (status, fallback and other live displays).
+		bool ReadGeometry(SourceGeometry::Record& rec, unsigned& cause, uint64_t seq = 0) const;
+		uint64_t sourceIdLastRowSeq = 0;           // worker: the source sequence of the newest analysed frame (era floor for P14g records)
+		FallbackCatalog::Decision geometryDecision;     // product.source_geometry, written by AutoFactor(s) (gateMutex)
+		std::atomic<const SourceIdentity::Geometry::HeldState*> geometrySource{ nullptr };
+		// the chain estimator (created by the constructor, never null; inert until SetChainEnabled(true)).
+		std::unique_ptr<SourceIdentity::Chain::ChainEstimator> chainEst;
+		std::atomic<bool> chainEnabled{ false };
+		std::atomic<unsigned long long> nativeHeldByChain{ 0 };
+		std::string chainHistoryFolder;      // SetHistoryFolder's folder (guarded by `mutex`)
+		std::string chainEvidenceFolder;     // SetChainEvidence's folder ("" = beside the history CSV)
+		std::string chainEvidenceLevel = "off";
+		void ApplyChainEvidence();           // pushes the effective folder + level into the estimator (any thread)
+		void ApplyChainEvidenceLocked();     // the same with `mutex` held
+		std::string ChainStatusCached() const;   // the Snapshot::chainNote text, rebuilt at most every 500 ms
+		mutable std::mutex chainStatusMutex;
+		mutable std::string chainStatusText, chainNotice;
+		mutable std::chrono::steady_clock::time_point chainStatusAt{}, chainNoticeAt{};
+		mutable bool chainStatusValid = false;
+		std::atomic<bool> chainTapExplicit{ false };   // SetChainTap(owner) was called (any thread): no auto-discovery (render thread reads it)
+		bool chainWasBlank = false;         // worker: the previous analysed frame was non-informative (the Blank event fires on the rising edge only)
+		unsigned chainProbe = 0;             // render thread: frames since the last owner probe
+		std::string chainFormatSent;         // render thread: the input format text last handed to the estimator
 		std::deque<std::pair<double, double>> live;          // (seconds, ratio) of informative frames
 		std::deque<std::pair<double, double>> coherence;     // (seconds, min axis coherence)
 		unsigned long long lastCuts = 0;
 		double qualitySmoothed = -1.0, bitsSmoothed = 0.0;
 		Snapshot snapshot;
-		std::deque<std::string> history;
-		std::string historyPath;
+		SourceHistory::Log historyLog;
+		uint64_t historyRotateBytes = 0;
 		std::chrono::steady_clock::time_point lastFlush{};
-		bool historyDirty = false;
 
 		// Look-ahead (render thread, plus its worker under aheadMutex).
 		void AheadWorker();

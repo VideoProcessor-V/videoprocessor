@@ -16,6 +16,7 @@
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>
 #include <VP-V/tests/SyntheticAnalysisFrames.h>
 
+#include <string>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -180,6 +181,151 @@ namespace SourceFrameTapTestsNs
 			Assert::IsTrue(ran);
 			Assert::IsFalse(Tap::Wants(&key));
 			Assert::IsFalse(Tap::Deliver(&key, v));
+		}
+
+		// ---- SID-C2b: several sinks per owner ----
+		TEST_METHOD(SeveralNamedSinksAreDeliveredInNameOrder)
+		{
+			int key = 0;
+			std::vector<std::string> order;
+			Tap::Register(&key, "b", [&order](const SourceFrameView&) { order.push_back("b"); });
+			Tap::Register(&key, [&order](const SourceFrameView&) { order.push_back(""); });   // the old API is the name ""
+			Tap::Register(&key, "a", [&order](const SourceFrameView&) { order.push_back("a"); });
+			SourceFrameView v;
+			Assert::IsTrue(Tap::Deliver(&key, v));
+			Assert::AreEqual<size_t>(3, order.size());
+			Assert::AreEqual(std::string(""), order[0]);
+			Assert::AreEqual(std::string("a"), order[1]);
+			Assert::AreEqual(std::string("b"), order[2]);
+			Tap::Register(&key, "a", [&order](const SourceFrameView&) { order.push_back("a2"); });   // the same name replaces
+			order.clear();
+			Assert::IsTrue(Tap::Deliver(&key, v));
+			Assert::AreEqual<size_t>(3, order.size());
+			Assert::AreEqual(std::string("a2"), order[1]);
+			Tap::UnregisterAll(&key);
+			Assert::IsFalse(Tap::AnyWants());
+			Assert::IsFalse(Tap::Deliver(&key, v));
+		}
+
+		TEST_METHOD(TheOldApiIsTheNameEmptyAndUnregisterKeepsTheOtherSinks)
+		{
+			int key = 0;
+			Tap::Register(&key, [](const SourceFrameView&) {});
+			Tap::Register(&key, "chain", [](const SourceFrameView&) {});
+			Assert::IsTrue(Tap::Registered(&key, ""));
+			Assert::IsTrue(Tap::Registered(&key, "chain"));
+			Tap::Unregister(&key);   // the old call: the name "" only
+			Assert::IsFalse(Tap::Registered(&key, ""));
+			Assert::IsTrue(Tap::Registered(&key, "chain"), L"a module's teardown of its own sink leaves the others");
+			Assert::IsTrue(Tap::Wants(&key));
+			Tap::Unregister(&key, "chain");
+			Assert::IsFalse(Tap::AnyWants());
+			Assert::IsFalse(Tap::Wants(&key));
+		}
+
+		TEST_METHOD(AWantsPredicateGatesWantsAndDelivery)
+		{
+			int key = 0;
+			bool want = false;
+			int got = 0, always = 0;
+			Tap::Register(&key, "chain", [&got](const SourceFrameView&) { ++got; }, [&want]() { return want; });
+			Assert::IsTrue(Tap::AnyWants(), L"registered: the one-atomic fast path says yes");
+			Assert::IsFalse(Tap::Wants(&key), L"but this owner's only sink does not want a frame now");
+			SourceFrameView v;
+			Assert::IsFalse(Tap::Deliver(&key, v));
+			Assert::AreEqual(0, got);
+			want = true;
+			Assert::IsTrue(Tap::Wants(&key));
+			Assert::IsTrue(Tap::Deliver(&key, v));
+			Assert::AreEqual(1, got);
+			Assert::AreEqual<uint64_t>(1, Tap::Delivered(&key, "chain"));
+			Tap::Register(&key, [&always](const SourceFrameView&) { ++always; });   // an always-wanting sink next to it
+			want = false;
+			Assert::IsTrue(Tap::Wants(&key));
+			Assert::IsTrue(Tap::Deliver(&key, v));
+			Assert::AreEqual(1, got, L"the gated sink was not handed the frame");
+			Assert::AreEqual(1, always);
+			Tap::UnregisterAll(&key);
+		}
+
+		TEST_METHOD(ASkeletonSinkAndANamedSinkBothGetEveryPlaneAndTheOldOneIsUnchanged)
+		{
+			VpFrameAnalysis::Host host;
+			std::vector<SourceFrameView> old, chain;
+			Tap::Register(&host, [&old](const SourceFrameView& v) { old.push_back(v); });
+			Tap::Register(&host, "chain", [&chain](const SourceFrameView& v) { chain.push_back(v); }, []() { return true; });
+			host.Owner(&host).Configure(true, false, false);
+			host.Worker().Stop();
+			Frame frame = Make(Kind::Uyvy, 1);
+			VpFrameAnalysis::Host::AttachIfEnabled(frame.source);
+			host.OnArrival(7, frame.source, FrameAnalysis::Rect{}, 0, false);
+			host.Worker().Drain();
+			Assert::AreEqual<size_t>(1, old.size(), L"the skeleton's sink still receives every plane");
+			Assert::AreEqual<size_t>(1, chain.size());
+			Assert::AreEqual<uint64_t>(7, old[0].seq);
+			AssertViewMatches(old[0], frame.source);
+			AssertViewMatches(chain[0], frame.source);
+			Assert::AreEqual<uint64_t>(1, Tap::Delivered(&host, ""));
+			Assert::AreEqual<uint64_t>(1, Tap::Delivered(&host, "chain"));
+			Assert::AreEqual<uint64_t>(2, Tap::Delivered(&host), L"the sum over the sinks");
+			old.clear();
+			chain.clear();
+			Tap::UnregisterAll(&host);
+			host.Configure(false);
+		}
+
+		TEST_METHOD(ASinkThatDoesNotWantAPlaneNowMeansNoDecodeAndNoJob)
+		{
+			VpFrameAnalysis::Host host;
+			bool want = false;
+			std::vector<SourceFrameView> got;
+			Tap::Register(&host, "chain", [&got](const SourceFrameView& v) { got.push_back(v); }, [&want]() { return want; });
+			host.Owner(&host).Configure(true, false, false);
+			host.Worker().Stop();
+			Frame frame = Make(Kind::Uyvy, 1);
+			host.OnArrival(1, frame.source, FrameAnalysis::Rect{}, 0, false);
+			host.Worker().Drain();
+			Assert::AreEqual(uint64_t(0), host.Worker().Processed(), L"nothing wants the frame now: no decode, no job");
+			Assert::AreEqual<size_t>(0, got.size());
+			want = true;
+			Frame next = Make(Kind::Uyvy, 2);
+			VpFrameAnalysis::Host::AttachIfEnabled(next.source);
+			host.OnArrival(2, next.source, FrameAnalysis::Rect{}, 0, false);
+			host.Worker().Drain();
+			Assert::AreEqual<size_t>(1, got.size());
+			AssertViewMatches(got[0], next.source);
+			got.clear();
+			Tap::UnregisterAll(&host);
+			host.Configure(false);
+		}
+
+		TEST_METHOD(StoreOwnersListsTheRenderersThatRegisteredAStore)
+		{
+			Assert::AreEqual<size_t>(0, Tap::StoreOwners().size());
+			{
+				VpFrameAnalysis::Host host;
+				host.Owner(&host);
+				const std::vector<const void*> owners = Tap::StoreOwners();
+				Assert::AreEqual<size_t>(1, owners.size());
+				Assert::IsTrue(owners[0] == &host);
+			}
+			Assert::AreEqual<size_t>(0, Tap::StoreOwners().size());
+		}
+
+		TEST_METHOD(AHostTakesEverySinkOfItsOwnerWithIt)
+		{
+			const void* key = nullptr;
+			{
+				VpFrameAnalysis::Host host;
+				key = &host;
+				host.Owner(&host);
+				Tap::Register(&host, [](const SourceFrameView&) {});
+				Tap::Register(&host, "chain", [](const SourceFrameView&) {});
+				Assert::IsTrue(Tap::Registered(key, "") && Tap::Registered(key, "chain"));
+			}
+			Assert::IsFalse(Tap::Registered(key, ""), L"no sink of any name outlives its Host's store");
+			Assert::IsFalse(Tap::Registered(key, "chain"));
+			Assert::IsFalse(Tap::AnyWants());
 		}
 	};
 }

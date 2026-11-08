@@ -78,6 +78,13 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\tests\LookAheadWalkTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\control\diagnostics\tests\DiagnosticOverridesModuleTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\EstimatorHookTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
@@ -264,6 +271,18 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\chain\ChainEstimator.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\chain\ChainEvidenceLog.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\SourceHistoryLog.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\repair\deband\VpDebander.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -306,6 +325,8 @@
     <ClCompile Include="..\VP-V\tests\suite\SourceResolutionDetectorTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\MixedScreenSourceResolutionTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SourceResolutionLatchTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\SourceResolutionChainClearTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\SourceResolutionAbsenceHoldTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\ExtendedRangeCarryTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\ChangeKeyTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\EfficiencyPolicyTests.cpp" />
@@ -401,7 +422,19 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdConsensusTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\tests\SourceHistoryLogTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdReplayTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\AbrStepDetectorTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainUnitTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainReadingTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceGeometryRecordTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceGeometryViewTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdChainVoterTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdChainGateTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainEstimatorTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainEvidenceLogTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainGovernorStatusTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainEvalRegistrationTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceWiringTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelMetadataExtensionTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\DetailRestoreConfigTests.cpp" />
@@ -729,6 +762,7 @@
     <ClCompile Include="..\VP-V\modules\repair\stack\tests\RepairStackOrderTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdChainEvalTests.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\CameraFitProducer.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>

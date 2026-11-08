@@ -39,6 +39,9 @@ namespace FallbackPlainText
 			{ "vector_engine_producer", "The motion vector engine is skipping work to keep up" },
 			{ "vector_engine_global", "Global motion detection is not keeping up and is off" },
 			{ "vector_engine_hook", "Camera-guided motion matching was skipped after an error" },
+			{ "vector producer", "The motion look-ahead stopped and is restarting" },
+			{ "motion look-ahead", "Some frames went without optical-flow look-ahead" },
+			{ "source resolution look-ahead", "Some frames had their source resolution judged on arrival only" },
 		};
 		for (const Entry& e : table)
 			if (id == e.id)

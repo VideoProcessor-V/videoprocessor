@@ -21,6 +21,11 @@
 //     entering: hysteresis).
 //   - a safety veto (ClassicalResolution only: detail above the re-based size) sets the voted axes
 //     native at once, bypassing dwell and hold.
+//   - The Chain voter (the scaling-chain estimator's CONFIDENT reading, SID train r2) is an ORDINARY weighted voter with a conservative
+//     placeholder trust (N5: it can only make the consensus abstain more; calibration sets it later). Its dwell counts DISTINCT informative
+//     evaluations (N4): a chain vote joins the groups only after it has been seen for the same value from `chainMinDistinctEvaluations`
+//     different evaluations (Vote::evidenceSeq = the record's evaluation sequence), so a record that is read again - held, re-submitted
+//     for every analysed frame - never satisfies the dwell by repetition. Time still counts through the consensus dwell as for any voter.
 // Time is always SOURCE time passed by the caller; there is no clock, no thread, no randomness.
 //
 // The ONLY way consensus moves a re-base stamp is IndicatorPort::AdvanceRebase, once per changed
@@ -39,6 +44,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -54,11 +60,15 @@ namespace SourceIdentity
 
 	struct Settings
 	{
-		// Trust per voter, indexed by VoterId: ClassicalResolution, ClassicalKernel, BitrateQuality, IdNet.
-		double trust[kVoterCount] = { 1.0, 1.0, 0.5, 1.0 };
+		// Trust per voter, indexed by VoterId: ClassicalResolution, ClassicalKernel, BitrateQuality, IdNet, Chain (a conservative
+		// placeholder, N5: half the classical weight, so the chain alone can still pass enterMinWeight but never outvotes a confident classical voter).
+		double trust[kVoterCount] = { 1.0, 1.0, 0.5, 1.0, 0.5 };
 		// Maximum evidence age (microseconds of source time) per voter. The classical voters are
 		// refreshed every few analysis intervals; the net is event-driven, so its vote may be old.
-		int64_t maxEvidenceAgeUs[kVoterCount] = { 4000000, 6000000, 4000000, 30000000 };
+		// The chain's record is republished at every evaluation; its own maximum age (the writer's planned interval x 2) already judged it
+		// when the pipeline read it, so this is only the backstop.
+		int64_t maxEvidenceAgeUs[kVoterCount] = { 4000000, 6000000, 4000000, 30000000, 10000000 };
+		int chainMinDistinctEvaluations = 2;  // N4: distinct informative chain evaluations a chain value needs before it votes (a held record counts once)
 		double enterSupport = 0.67;          // weighted share a candidate needs to start
 		double enterMinWeight = 0.25;        // absolute weighted confidence a candidate needs
 		double exitDissent = 0.5;            // a pending candidate is dropped when dissent exceeds this
@@ -116,6 +126,40 @@ namespace SourceIdentity
 			return o.str();
 		}
 	};
+
+	// SHADOW mode (Monitor: source_id_consensus = shadow): one log line per field the consensus changed.
+	inline const char* FieldLogName(Field f)
+	{
+		switch (f)
+		{
+		case Field::AxisH: return "ratioH";
+		case Field::AxisV: return "ratioV";
+		case Field::Kernel: return "kernel";
+		case Field::Codec: return "codec";
+		case Field::Quality: return "tier";
+		default: return "?";
+		}
+	}
+
+	inline std::vector<std::string> WouldBeLines(const Result& r)
+	{
+		std::vector<std::string> lines;
+		for (int i = 0; i < kFieldCount; ++i)
+		{
+			const Field f = static_cast<Field>(i);
+			if (!r.Changed(f))
+				continue;
+			char b[200];
+			if (IsAxis(f))
+				std::snprintf(b, sizeof(b), "source_id would-be: %s %.3f -> %.3f (%s, support %.2f)", FieldLogName(f),
+					FieldValue(r.before, f), FieldValue(r.value, f), r.field[i].reason.c_str(), r.field[i].support);
+			else
+				std::snprintf(b, sizeof(b), "source_id would-be: %s %d -> %d (%s, support %.2f)", FieldLogName(f),
+					static_cast<int>(FieldValue(r.before, f)), static_cast<int>(FieldValue(r.value, f)), r.field[i].reason.c_str(), r.field[i].support);
+			lines.push_back(b);
+		}
+		return lines;
+	}
 
 	struct Stats
 	{
@@ -207,6 +251,10 @@ namespace SourceIdentity
 			int64_t candSinceUs = 0;
 			bool hasChanged = false;
 			int64_t lastChangeUs = 0;
+			bool chainRun = false;           // the chain voted this field with chainRunValue ...
+			double chainRunValue = 0.0;
+			int chainRunEvals = 0;           // ... in this many DISTINCT evaluations (evidenceSeq values) so far
+			uint64_t chainRunSeq = 0;
 		};
 		struct Group
 		{
@@ -258,7 +306,8 @@ namespace SourceIdentity
 				for (int vi = 0; vi < kVoterCount; ++vi)
 				{
 					const Slot& sl = slot_[vi];
-					if (sl.present && sl.vote.safetyVeto && (sl.vote.fieldMask & FieldBit(f)) && Fresh(vi, now))
+					if (sl.present && sl.vote.safetyVeto && (sl.vote.fieldMask & FieldBit(f)) && (sl.vote.vetoExemptFields & FieldBit(f)) == 0 &&
+						Fresh(vi, now))
 						vetoed = true;
 				}
 				if (vetoed)
@@ -282,6 +331,35 @@ namespace SourceIdentity
 				}
 			}
 
+			// The chain's run of DISTINCT evaluations for this field (N4): the same value seen in a NEW evaluation counts once, the same
+			// record read again does not count; a different value or no chain vote starts the count over.
+			const int chainIdx = static_cast<int>(VoterId::Chain);
+			bool chainEligible = true;
+			bool chainPending = false;
+			{
+				const Slot& cs = slot_[chainIdx];
+				if (cs.present && (cs.vote.fieldMask & FieldBit(f)) && cs.vote.confidence[fi] > 0.0 && Fresh(chainIdx, now))
+				{
+					const double cv = FieldValue(cs.vote.h, f);
+					if (!st.chainRun || !Same(f, st.chainRunValue, cv))
+					{
+						st.chainRun = true;
+						st.chainRunValue = cv;
+						st.chainRunEvals = 1;
+						st.chainRunSeq = cs.vote.evidenceSeq;
+					}
+					else if (cs.vote.evidenceSeq > st.chainRunSeq)
+					{
+						++st.chainRunEvals;
+						st.chainRunSeq = cs.vote.evidenceSeq;
+					}
+					chainEligible = st.chainRunEvals >= s_.chainMinDistinctEvaluations;
+					chainPending = !chainEligible;
+				}
+				else
+					st.chainRun = false;
+			}
+
 			// Collect the fresh votes, grouped by equal value, in VoterId order.
 			Group groups[kVoterCount];
 			int groupCount = 0;
@@ -297,6 +375,8 @@ namespace SourceIdentity
 					++fr.stale;
 					continue;
 				}
+				if (vi == chainIdx && !chainEligible)
+					continue;   // not yet seen in enough distinct evaluations: it does not vote
 				const double w = sl.vote.confidence[fi] * s_.trust[vi];
 				if (!(w > 0.0))
 					continue;
@@ -330,6 +410,8 @@ namespace SourceIdentity
 					fr.reason = "held: stale";
 					++stats_.holds;
 				}
+				else if (chainPending)
+					fr.reason = "no votes (chain: waiting for a second evaluation)";
 				else
 					fr.reason = "no votes";
 				return;

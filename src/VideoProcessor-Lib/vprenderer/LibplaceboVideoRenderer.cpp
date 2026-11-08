@@ -15,6 +15,8 @@
 #include <VP-V/modules/output/presentation/RepeatReuseRegistryKey.h>
 #include <KernelInverse.h>
 #include <vprenderer/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/MotionAheadWalk.h>
+#include <VP-V/modules/input/source_analysis/SourceAheadWalk.h>
 #include "../SubtitleProfileUpdatePolicy.h"
 #include "SubtitleBarRecovery.h"
 
@@ -6386,7 +6388,7 @@ struct LibplaceboVideoRenderer::Impl
 	// VpMotion::VectorEngineState; the aliases keep every reader outside P5a's ranges unchanged. Each alias
 	// is deleted by the package that moves its last reader (VP-V/modules/motion/estimation/HOOKS.md).
 	// VPV-HOOK
-	VpMotion::VectorEngine vectorEngine{ this };   // registered for IVectorEngine (vpv.vector_engine.v1) under this host
+	VpMotion::VectorEngine vectorEngine{ this, &VpMotion::InvalidateHost<Impl> };   // registered for IVectorEngine (vpv.vector_engine.v1) under this host; queue-event invalidations reach RequestMotionInvalidate
 	VectorDemand::Decision& vectorDemand = vectorEngine.vectorDemand;
 	std::atomic<int>& queueAheadCapacity = vectorEngine.queueAheadCapacity;
 	std::atomic<bool>& motionAheadBackward = vectorEngine.motionAheadBackward;
@@ -6396,7 +6398,7 @@ struct LibplaceboVideoRenderer::Impl
 	bool& motionAheadPrevKnown = vectorEngine.motionAheadPrevKnown;
 	uint64_t& motionAheadPrevGeneration = vectorEngine.motionAheadPrevGeneration;
 	DejudderPolicy::MotionAheadFrame& motionAheadPrev = vectorEngine.motionAheadPrev;
-	std::unique_ptr<MotionAhead::Producer>& motionProducer = vectorEngine.motionProducer;
+	std::shared_ptr<MotionAhead::Producer>& motionProducer = vectorEngine.motionProducer;
 	MotionValidity::State& motionValidity = vectorEngine.motionValidity;
 	using MotionShadowField = VpMotion::VectorEngineState::MotionShadowField;
 	VpMotion::MotionSegment<MotionShadowField>& motionSegment = vectorEngine.motionSegment;
@@ -6409,7 +6411,6 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<unsigned long long>& motionHandoffCount = vectorEngine.motionHandoffCount;
 	uint64_t& motionInvalidations = vectorEngine.motionInvalidations;
 	bool& motionRecoveryLogPending = vectorEngine.motionRecoveryLogPending;
-	std::atomic<const char*>& motionGapDetail = vectorEngine.motionGapDetail;
 	// P5a-5: the estimate state (item a; VP-V/modules/motion/estimation/EstimateState.h).
 	VpMotion::EstimateState<QueuedFrame::ConvertedPayload> vectorEstimate{ vectorEngine };
 	pl_tex (&dejudderNextTextures)[2] = vectorEstimate.dejudderNextTextures;
@@ -7193,6 +7194,7 @@ struct LibplaceboVideoRenderer::Impl
 	}
 	// motion.consumers (group D audit D3): failed warp / interpolation passes, visible while recent.
 	FallbackCatalog::MotionConsumerFailures motionConsumerFailures;
+	FallbackCatalog::LookAheadFailures motionAheadFailures = FallbackCatalog::MotionAheadWorker(), sourceAheadFailures = FallbackCatalog::SourceResolutionWorker();   // render-loop thread only
 	// The de-judder held this frame because the display rate is not known (presentation entry).
 	bool dejudderHeldNoDisplayRate = false;
 	// Pipeline skeleton (design freeze 2026-10-24): the ONE slot registry (VP-V/core/SlotRegistry.h). It
@@ -29564,7 +29566,7 @@ void LibplaceboVideoRenderer::Reset()
 		// opening the new generation, so its first admitted frame cannot present
 		// with geometry from the discarded generation.
 		m_impl->RequestPresentationStateReset();
-		m_impl->RequestMotionInvalidate(MotionValidity::Cause::Resync);
+		RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Reset, m_impl.get()); // VPV-HOOK: motion invalidation (resync)
 		m_impl->motionLastStateReset.store(true, std::memory_order_release);
 		// Stage 12: a resync or source change - the resolution evidence belongs to what came before.
 		m_impl->sourceMonitor.Discontinuity("resync or source change");
@@ -29607,7 +29609,7 @@ void LibplaceboVideoRenderer::ResetLiveQueue()
 	{
 		m_impl->RequestPresentationStateReset(QueueNativeResetKind::QUEUE_ONLY);
 		// The discarded frames break the sequence: no pair or history across it.
-		m_impl->RequestMotionInvalidate(MotionValidity::Cause::QueueReset);
+		RendererExtension::NotifyQueue(RendererExtension::QueueEvent::LiveQueueReset, m_impl.get()); // VPV-HOOK: motion invalidation
 		// The last frame's video state is kept: QueueReset does not release, so a format
 		// change across this reset still releases (SourceFormatChange).
 		m_impl->sourceMonitor.Discontinuity("live queue reset (seek or skip)");
@@ -33178,25 +33180,7 @@ void LibplaceboVideoRenderer::RenderLoop()
             // the queued frames after the current one (not cadence repeats), up to 4,
             // whatever Bill's active-picture look-ahead is set to. Only frames already
             // queued: no waiting; an empty or short queue simply gives fewer.
-            // Optical flow ahead (docs/VP-nvof-ahead.md): the current frame and up to the
-            // depth after it, each once (only frames already queued: an empty or short
-            // queue gives fewer).
-            if (m_impl && m_impl->motionProducer && (m_impl->motionAheadDepth.load(std::memory_order_acquire) > 0 ||
-                m_impl->motionAheadBackward.load(std::memory_order_acquire)))
-            {
-                const size_t depth = static_cast<size_t>(m_impl->motionAheadDepth.load(std::memory_order_acquire));
-                const uint64_t last = m_impl->motionProducer->LastSubmitted();
-                size_t taken = 0;
-                for (size_t index = 0; index < m_frameQueue.size() && taken <= depth; ++index)
-                {
-                    const QueuedFrame& q = m_frameQueue[index];
-                    if (q.cadenceRepeat || !q.state) continue;
-                    ++taken;
-                    if (q.sourceSequence <= last) continue;
-                    motionAheadFrames.push_back(q);
-                    motionAheadFrames.back().frame.SourceBufferAddRef();
-                }
-            }
+            MotionAhead::CollectQueueAhead(m_impl.get(), m_frameQueue, motionAheadFrames);   // VPV-HOOK: optical flow ahead (MotionAheadWalk.h)
             if (m_impl && m_impl->sourceAutoActive.load(std::memory_order_acquire))
                 for (size_t index = 1; index < m_frameQueue.size() && sourceAheadFrames.size() < 4; ++index)
                 {
@@ -33378,92 +33362,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 		if (!motionAheadFrames.empty())
 		{
 			const auto handoffStarted = SteadyClock::now();
-			try
-			{
-				// The stream generation (resync / queue reset / seek / format change), as before
-				// step 1: a gap moves only the epoch, so the ahead pairs after it are kept.
-				const uint64_t generation = m_impl->motionValidity.StreamGeneration();
-				// Owner 2026-10-16: the look-ahead engages once 4 frames are queued ahead (the startup
-				// fill, a refilled queue), disengages with none queued or a broken sequence (a new
-				// generation: skip, seek, reset) and waits for 4 again; disengaged, the producer gets
-				// no work (no pair could be used before its frames are shown).
-				const size_t queuedAhead = m_impl->queuedFutureFrames.load(std::memory_order_acquire);
-				const size_t engageAhead = m_impl->activeSettings.vectorDemand ?
-					static_cast<size_t>(VectorDemand::EngageAhead(m_impl->motionAheadConfigured.load(std::memory_order_acquire),
-						m_impl->queueAheadCapacity.load(std::memory_order_acquire))) :
-					static_cast<size_t>((std::max)(1, m_impl->motionAheadConfigured.load(std::memory_order_acquire)));
-				const bool backwardPairs = m_impl->motionAheadBackward.load(std::memory_order_acquire);   // vector engine: engaged while it runs
-				// A break always disengages and the next pass must see 4 queued ahead again (a re-engage
-				// in the same pass would skip the refill wait: the reset test, 2026-10-16).
-				if (m_impl->motionAheadEngaged &&
-					(queuedAhead == 0 || generation != m_impl->motionAheadEngagedGeneration))
-				{
-					m_impl->motionAheadEngaged = false;
-					DebugLog::Log("Motion ahead: waiting for %zu frames queued ahead (%s)", engageAhead,
-						queuedAhead == 0 ? "the queue holds none" : "the sequence broke: skip, seek or reset");
-				}
-				else if (!m_impl->motionAheadEngaged && queuedAhead >= engageAhead && !backwardPairs)
-				{
-					m_impl->motionAheadEngaged = true;
-					m_impl->motionAheadEngagedGeneration = generation;
-					DebugLog::Log("Motion ahead: engaged (%zu frames queued ahead%s)", queuedAhead,
-						m_impl->vectorDemand.lowLatencyAllowed ? "; vector engine: shallow queue" : "");
-				}
-				const bool framesAhead = m_impl->motionAheadEngaged || backwardPairs;
-				// A frame's time as the dequeue reads it (the film clock when pulldown is locked,
-				// else the capture timestamp; 0 = not known).
-				LARGE_INTEGER aheadQpcFrequency{};
-				const bool aheadQpcKnown = QueryPerformanceFrequency(&aheadQpcFrequency) && aheadQpcFrequency.QuadPart > 0;
-				auto aheadTime = [&](const QueuedFrame& q) -> double {
-					if (q.filmHz > 0.0 && q.arrivalQpc > 0 && aheadQpcKnown)
-						return static_cast<double>(q.arrivalQpc) / static_cast<double>(aheadQpcFrequency.QuadPart);
-					if (m_timingClock && m_timingClock->TimingClockTicksPerSecond() > 0)
-						return static_cast<double>(q.frame.GetTimingTimestamp()) / static_cast<double>(m_timingClock->TimingClockTicksPerSecond());
-					return 0.0;
-				};
-				for (QueuedFrame& ahead : motionAheadFrames)
-				{
-					const VideoState& aheadState = *ahead.state;
-					if (!framesAhead || !aheadState.displayMode || !m_impl->motionProducer) continue;
-					// The luma source keeps the frame's own buffer alive for the producer's worker.
-					const auto prepared = Impl::PrepareFrameAnalysis(ahead.frame, aheadState, ahead.converted, ahead.analysis,
-						AnalysisSourceProfile::QueuedCapture, ahead.activePictureIdentity.sourceFormatGeneration, false,
-						aheadState.dolbyVisionTunnel);
-					// The first frame not ready yet (a conversion pending) stops this pass: the producer's
-					// high-water mark would otherwise pass it and its pairs would never exist (audit 2026-10-16).
-					if (!prepared.source.IsValid())
-						break;
-					// Integration 2026-10-17: also a break when the pair's times are not adjacent
-					// (the dequeue's AdjacentPairTimes rule, with timing_continuity_fixes) or, on the
-					// DV tunnel, when the pair is not trusted (DolbyVisionPairTrusted).
-					DejudderPolicy::MotionAheadFrame aheadFrame;
-					aheadFrame.time = aheadTime(ahead);
-					aheadFrame.filmClock = ahead.filmHz > 0.0;
-					// Hunt 2 02-dv L1: the kind by the payload's capture encoding, as the dequeue
-					// classifies it (ClassifyDolbyVisionPayload), not the walk's state encoding.
-					if (ahead.converted)
-					{
-						aheadFrame.kind = DejudderPolicy::ClassifyDolbyVisionPayload(*ahead.converted);
-						aheadFrame.matrices = DejudderPolicy::DolbyVisionMatricesOf(ahead.converted->dolby);
-					}
-					const double aheadRateHz = ahead.filmHz > 0.0 ? ahead.filmHz :
-						m_measuredFrameRate.load(std::memory_order_relaxed) > 0.0 ? m_measuredFrameRate.load(std::memory_order_relaxed) :
-						aheadState.displayMode->RefreshRateHz();
-					const bool havePrev = m_impl->motionAheadPrevKnown && m_impl->motionAheadPrevGeneration == generation;
-					const bool breakBefore = DejudderPolicy::MotionAheadBreakBefore(ahead.gapBefore, ahead.filmUpdate,
-						m_impl->activeSettings.timingContinuityFixes, aheadRateHz, aheadState.dolbyVisionTunnel,
-						havePrev, m_impl->motionAheadPrev, aheadFrame, m_impl->activeSettings.motionHistoryFixes);
-					m_impl->motionProducer->Submit(ahead.sourceSequence, generation, prepared.source, breakBefore);
-					m_impl->motionAheadPrevKnown = true;
-					m_impl->motionAheadPrevGeneration = generation;
-					m_impl->motionAheadPrev = aheadFrame;
-				}
-			}
-			catch (const std::exception& e)
-			{
-				DebugLog::Log("Motion ahead: frames skipped: %s", e.what());
-				RendererExtension::ReportWorker(m_impl.get(), "motion-ahead", e.what()); // VPV-HOOK
-			}
+			MotionAhead::AheadView<Impl, QueuedFrame, ITimingClock> aheadView{ *m_impl, motionAheadFrames, m_timingClock, m_measuredFrameRate };
+			MotionAhead::RunQueueWalk(aheadView);
 			for (QueuedFrame& ahead : motionAheadFrames)
 				ahead.frame.SourceBufferRelease();
 			motionAheadFrames.clear();
@@ -33475,29 +33375,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 		}
 		if (!sourceAheadFrames.empty())
 		{
-			try
-			{
-				for (QueuedFrame& ahead : sourceAheadFrames)
-				{
-					const VideoState& aheadState = *ahead.state;
-					if (!aheadState.displayMode) continue;
-					const auto prepared = Impl::PrepareFrameAnalysis(ahead.frame, aheadState, ahead.converted, ahead.analysis,
-						AnalysisSourceProfile::QueuedCapture, ahead.activePictureIdentity.sourceFormatGeneration, false,
-						aheadState.dolbyVisionTunnel);
-					const AnalysisLumaSource& luma = prepared.source;
-					if (!luma.IsValid()) continue;
-					m_impl->sourceMonitor.LookAheadFrame(ahead.sourceSequence, luma.width, luma.height,
-						[&luma](int x, int y) {
-							uint16_t code = 0;   // WP-23: the shared decode when ready
-							return luma.SampleLuma(x, y, code) ? static_cast<int>(code) : 0;
-						}, 0, 0, luma.width, luma.height);
-				}
-			}
-			catch (const std::exception& e)
-			{
-				DebugLog::Log("Source resolution look-ahead skipped: %s", e.what());
-				RendererExtension::ReportWorker(m_impl.get(), "source-look-ahead", e.what()); // VPV-HOOK
-			}
+			SourceResolution::SourceAheadView<Impl, QueuedFrame> sourceView{ *m_impl, sourceAheadFrames };
+			SourceResolution::RunAheadWalk(sourceView);
 			if (!m_impl->sourceAheadLogged)
 			{
 				m_impl->sourceAheadLogged = true;
@@ -33638,16 +33517,13 @@ void LibplaceboVideoRenderer::RenderLoop()
 				m_activePictureTimeline.MarkConsumed(
 					dequeued.activePictureIdentity);
 			if (dequeued.gapBefore && m_impl)
-			{
-				m_impl->motionGapDetail.store(dequeued.gapCause, std::memory_order_relaxed);   // why, for the log
-				m_impl->RequestMotionInvalidate(MotionValidity::Cause::Gap);
-			}
+				RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Gap, m_impl.get(), -1, 0, 0, 0, dequeued.gapCause); // VPV-HOOK: motion invalidation, the gap's cause for the log
 			// ABI 37: a file discontinuity (seek, frame step, rate change) is a source
 			// discontinuity at this frame: the one vectors-valid state and the resolution
 			// evidence start over, as on a capture resync.
 			if (dequeued.fileDiscontinuity && m_impl)
 			{
-				m_impl->RequestMotionInvalidate(MotionValidity::Cause::Seek);
+				RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Discontinuity, m_impl.get()); // VPV-HOOK: motion invalidation (seek)
 				m_impl->sourceMonitor.Discontinuity("file discontinuity (seek, step or rate change)");
 			}
 			// A format change without a reset (normally a Reset comes first: then this is
@@ -33656,7 +33532,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 				motionLastState = nullptr;
 			if (m_impl && motionLastState && state && motionLastState->valid && state->valid &&
 				!SameDejudderVideoState(motionLastState, state))
-				m_impl->RequestMotionInvalidate(MotionValidity::Cause::SourceFormatChange);
+				RendererExtension::NotifyQueue(RendererExtension::QueueEvent::FormatChange, m_impl.get()); // VPV-HOOK: motion invalidation
 			if (state)
 				motionLastState = state;
 			m_frameQueue.pop_front();

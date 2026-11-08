@@ -180,7 +180,7 @@ namespace CameraLink
 		CameraGuidanceHook(GuidanceScheduler& scheduler, IGuidanceCountsSource* counts, ICameraLink& link)
 			: m_sched(scheduler), m_counts(counts), m_link(link) {}
 		void BeforeEstimate(const VpMotion::EstimateContext& ctx, VpMotion::IGuidanceSink& sink) override;
-		void AfterEstimate(uint64_t pairSeq, bool guidanceUsed, pl_tex countsTex) override;
+		void AfterEstimate(uint64_t pairSeq, const VpMotion::EstimateOutcome& outcome) override;
 		// Render thread, once per frame: finish the pairs whose counts arrived.
 		void Poll();
 		uint64_t UsedPairs() const { return m_used; }
