@@ -833,6 +833,7 @@
         "src/VP-V/modules/motion/consumers/tests/TimelinePlanTraceRows.inl",
         "src/VP-V/modules/motion/consumers/DejudderCacheStage.h",
         "src/VP-V/modules/motion/consumers/DejudderCacheStage.cpp",
+        "src/VP-V/modules/motion/consumers/PhaseTimeline.inl",
         "src/VP-V/modules/motion/consumers/DejudderPolicyRunner.h",
         "src/VP-V/modules/motion/consumers/DejudderPolicyRunner.inl",
         "src/VP-V/modules/motion/consumers/DejudderEstimateCall.h",
