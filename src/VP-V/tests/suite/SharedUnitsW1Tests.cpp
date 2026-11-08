@@ -172,6 +172,26 @@ namespace SharedUnitsW1TestsNs
 		return h;
 	}
 
+	// The fade fit as it stood before its numbers got names (base 3086bfae): the identity reference of the refactored FadeFit.
+	inline VpUnit::CutFadeJudge::FadeOut FrozenFadeFit(const VpUnit::CutFadeJudge::FadeIn& in, const VpUnit::CutFadeJudge::FadeParams& p)
+	{
+		VpUnit::CutFadeJudge::FadeOut o;
+		if (!p.enabled)
+			return o;
+		const float d = in.meanB - in.meanA;
+		const float g = in.spreadB / (std::max)(in.spreadA, 1e-3f);
+		const float black = std::fabs(1.0f - g) > 0.01f ? (in.meanB - g * in.meanA) / (1.0f - g) : 1e9f;
+		const bool scaled = std::fabs(1.0f - g) > 0.01f && black > p.minBlack && black < p.maxBlack;
+		const float ad = std::fabs(d), ap = std::fabs(in.previousStep);
+		const bool sameSign = (d > 0.0f) == (in.previousStep > 0.0f) && (d < 0.0f) == (in.previousStep < 0.0f);
+		o.fading = scaled && ad > p.minStepCodes && ad < p.maxStepCodes && ap > p.minStepCodes && sameSign &&
+			in.spreadA > 1.0f && in.spreadB > 1.0f;
+		o.gain = (std::min)((std::max)(in.spreadA / (std::max)(in.spreadB, 1e-3f), 0.5f), 2.0f);
+		o.offset = in.meanA - o.gain * in.meanB;
+		o.step = d;
+		return o;
+	}
+
 	inline std::vector<uint16_t> RandomGrid(std::mt19937& rng, int columns, int rows, int barRows)
 	{
 		std::vector<uint16_t> g(static_cast<size_t>(columns) * rows);
@@ -460,6 +480,120 @@ namespace SharedUnitsW1TestsNs2
 			// FNV-1a (carriage returns ignored) of PICTURE_HEADER / PICTURE_BODY as they stood in DejudderWarp.cpp at bcde6fc2.
 			Assert::AreEqual(0xefcbe9a17545f64cull, Fnv1a(VpUnit::PictureRect::KernelHeader()));
 			Assert::AreEqual(0x6b50f3e422483fbeull, Fnv1a(VpUnit::PictureRect::KernelBody()));
+		}
+
+		// ---- W1-SU residuals (S2-UG): the matcher's M3 / M4 and AdaptiveDownscale's cut GLSL live in the units ----------------
+		TEST_METHOD(ResidualKernelTextIsTheTextTheConsumersCarried)
+		{
+			// FNV-1a (carriage returns ignored) of the pieces as they stood in DejudderWarp.cpp / AdaptiveDownscale.cpp at 3086bfae.
+			// The consumers splice them between their own literals; the assembled kernels were proven byte-identical to the
+			// base kernels (FRAME_TRUST_HEADER 0xedb5867b62f3e7ef, FRAME_TRUST_BODY 0x9176fb9f871b0785, FINAL_BODY 0x277cc1c561dab52c).
+			Assert::AreEqual(0x7367db684e7dc866ull, Fnv1a(VpUnit::CutFadeJudge::FadeKernelHeader()));
+			Assert::AreEqual(0x6a601db07243f0a4ull, Fnv1a(VpUnit::CutFadeJudge::FadeKernelBody()));
+			Assert::AreEqual(0xdf5b6d4b82520110ull, Fnv1a(VpUnit::SourceStats::CoarseHistHeader()));
+			Assert::AreEqual(0x1ae6594f0419f53bull, Fnv1a(VpUnit::SourceStats::CoarseHistBody()));
+			Assert::AreEqual(0x28b8a668c74cf3dbull, Fnv1a(VpUnit::CutFadeJudge::TrustCutRegionalLine()));
+			Assert::AreEqual(0x10da1f9152c0e32cull, Fnv1a(VpUnit::CutFadeJudge::TrustCutPlainLine()));
+			Assert::AreEqual(0x6b5eb81113219c2cull, Fnv1a(VpUnit::CutFadeJudge::MeanStepCutLine()));
+			Assert::AreEqual(1u, VpUnit::CutFadeJudge::kUnitVersion, L"additive, byte-identical: no unit version bump");
+		}
+
+		TEST_METHOD(FadeFitIsIdenticalToTheFrozenCopy)
+		{
+			using namespace VpUnit::CutFadeJudge;
+			std::mt19937 rng(0x5eed);
+			std::uniform_real_distribution<float> mean(0.0f, 255.0f), spread(0.0f, 80.0f), step(-40.0f, 40.0f), black(-30.0f, 70.0f), g(0.3f, 2.5f);
+			int fading = 0;
+			for (int i = 0; i < 40000; ++i)
+			{
+				FadeIn in;
+				in.meanA = mean(rng); in.spreadA = spread(rng);
+				if (i % 2)   // a fade about a plausible black: B = black + g (A - black)
+				{
+					const float b = black(rng), gg = g(rng);
+					in.meanB = b + gg * (in.meanA - b);
+					in.spreadB = gg * in.spreadA;
+					in.previousStep = (in.meanB - in.meanA) * (i % 7 ? 1.0f : -1.0f) * (0.5f + float(i % 5));
+				}
+				else
+				{
+					in.meanB = mean(rng); in.spreadB = spread(rng); in.previousStep = step(rng);
+				}
+				FadeParams p;
+				p.enabled = (i % 997) != 0;
+				if (i % 3 == 0) { p.minStepCodes = 0.4f; p.maxStepCodes = 60.0f; p.minBlack = -20.0f; p.maxBlack = 80.0f; }
+				const FadeOut a = FadeFit(in, p), f = FrozenFadeFit(in, p);
+				Assert::IsTrue(a.fading == f.fading && a.gain == f.gain && a.offset == f.offset && a.step == f.step);
+				fading += a.fading ? 1 : 0;
+			}
+			Assert::IsTrue(fading > 500, L"the generator reaches the fading branch");
+		}
+
+		TEST_METHOD(FadeKernelCarriesTheLawsNumbers)
+		{
+			using namespace VpUnit::CutFadeJudge;
+			const std::string body = FadeKernelBody();
+			Assert::AreEqual(0.75f, kFadeMinStepCodes); Assert::AreEqual(24.0f, kFadeMaxStepCodes);
+			Assert::AreEqual(-12.0f, kFadeMinBlack); Assert::AreEqual(48.0f, kFadeMaxBlack);
+			Assert::AreEqual(0.01f, kFadeScaleEps);
+			Assert::AreEqual(0.5f, kFadeGainMin); Assert::AreEqual(2.0f, kFadeGainMax);
+			Assert::AreEqual(1.0f, kFadeMinSpread);
+			Assert::AreEqual(1e-3f, kFadeDivGuard); Assert::AreEqual(1e9f, kFadeNoBlack);
+			Assert::IsTrue(body.find("black > -12.0 && black < 48.0") != std::string::npos);
+			Assert::IsTrue(body.find("abs(1.0 - g) > 0.01 ?") != std::string::npos && body.find("abs(1.0 - g) > 0.01 &&") != std::string::npos);
+			Assert::IsTrue(body.find("clamp(sa / max(sb, 1e-3), 0.5, 2.0)") != std::string::npos);
+			Assert::IsTrue(body.find("sa > 1.0 && sb > 1.0") != std::string::npos);
+			Assert::IsTrue(body.find(": 1e9;") != std::string::npos && body.find("max(sa, 1e-3)") != std::string::npos);
+			Assert::IsTrue(body.find("abs(d) > fade_lo && abs(d) < fade_hi") != std::string::npos, L"the window arrives as the fade_lo / fade_hi uniforms");
+			const FadeParams defaults;
+			Assert::AreEqual(kFadeMinStepCodes, defaults.minStepCodes); Assert::AreEqual(kFadeMaxStepCodes, defaults.maxStepCodes);
+			Assert::AreEqual(kFadeMinBlack, defaults.minBlack); Assert::AreEqual(kFadeMaxBlack, defaults.maxBlack);
+		}
+
+		TEST_METHOD(CoarseHistogramLawAndItsKernel)
+		{
+			using namespace VpUnit::SourceStats;
+			Assert::AreEqual(0, CoarseBin(0.0f)); Assert::AreEqual(0, CoarseBin(15.99f)); Assert::AreEqual(1, CoarseBin(16.0f));
+			Assert::AreEqual(15, CoarseBin(255.0f)); Assert::AreEqual(15, CoarseBin(300.0f), L"clamped to the last bin");
+			Assert::AreEqual(0, CoarseBin(-5.0f), L"clamped to the first bin");
+			uint32_t a[kCoarseBins] = {}, b[kCoarseBins] = {};
+			a[2] = 30; b[9] = 30;   // disjoint, 30 texels each
+			Assert::AreEqual(2.0f, CoarseL1(a, b, 30.0f));
+			Assert::AreEqual(0.0f, CoarseL1(a, a, 30.0f));
+			b[2] = 30; b[9] = 0;
+			Assert::AreEqual(0.0f, CoarseL1(a, b, 0.0f), L"identical counts over a zero texel count (floor 1)");
+			a[2] = 10; a[3] = 20; b[2] = 20; b[3] = 10;
+			Assert::AreEqual(20.0f / 30.0f, CoarseL1(a, b, 30.0f));
+			const std::string body = CoarseHistBody();
+			Assert::AreEqual(16, kCoarseBins); Assert::AreEqual(16.0f, kCoarseBinCodes);
+			Assert::IsTrue(body.find("clamp(int(texelFetch(hist_a, p, 0).r / 16.0), 0, 15)") != std::string::npos);
+			Assert::IsTrue(body.find("hist_bins_[16 + clamp(int(texelFetch(hist_b, p, 0).r / 16.0), 0, 15)]") != std::string::npos);
+			Assert::IsTrue(body.find("for (int j = 0; j < 16; j++)") != std::string::npos && body.find("hist_d /= max(hist_n, 1.0);") != std::string::npos);
+			Assert::IsTrue(std::string(CoarseHistHeader()).find("hist_bins_[32]") != std::string::npos);
+		}
+
+		TEST_METHOD(TrustCutAndMeanStepCutLaws)
+		{
+			using namespace VpUnit::CutFadeJudge;
+			// regional: share below min needs the histogram's word (distance above the threshold) or a share below 0.05
+			Assert::IsTrue(TrustCut(0.2f, 0.3f, 0.5f, 0.3f, true));
+			Assert::IsFalse(TrustCut(0.2f, 0.3f, 0.3f, 0.3f, true), L"distance must exceed the threshold");
+			Assert::IsFalse(TrustCut(0.2f, 0.3f, 0.1f, 0.3f, true), L"a hard pan: low share, same histogram");
+			Assert::IsTrue(TrustCut(0.04f, 0.3f, 0.0f, 0.3f, true), L"share below 0.05 alone");
+			Assert::IsFalse(TrustCut(0.35f, 0.3f, 2.0f, 0.3f, true), L"share above the minimum is never a cut");
+			// plain: the share alone
+			Assert::IsTrue(TrustCut(0.2f, 0.3f, 0.0f, 0.3f, false));
+			Assert::IsFalse(TrustCut(0.3f, 0.3f, 2.0f, 0.3f, false));
+			Assert::AreEqual(0.05f, kTrustCutShareAlone);
+			Assert::IsTrue(std::string(TrustCutRegionalLine()).find("share < 0.05") != std::string::npos);
+			Assert::IsTrue(std::string(TrustCutRegionalLine()).find("hist_d > cut_hist") != std::string::npos);
+			// the mean-step cut
+			Assert::AreEqual(20.0f, kMeanStepCutCodes);
+			Assert::IsTrue(MeanStepCut(0.0f, 100.0f, 100.0f), L"no state yet");
+			Assert::IsTrue(MeanStepCut(1.0f, 100.0f, 120.5f)); Assert::IsTrue(MeanStepCut(2.0f, 100.0f, 79.0f));
+			Assert::IsFalse(MeanStepCut(1.0f, 100.0f, 120.0f), L"exactly 20 codes is not more than 20");
+			Assert::IsFalse(MeanStepCut(1.0f, 100.0f, 90.0f));
+			Assert::IsTrue(std::string(MeanStepCutLine()).find("prev.a < 0.5 || abs(luma_mean - prev.b) > 20.0") != std::string::npos);
 		}
 
 		// ---- U12 --------------------------------------------------------------------------------------------------------------

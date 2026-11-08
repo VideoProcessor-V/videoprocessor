@@ -11,11 +11,11 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 
 | Count | Value |
 |---|---|
-| Modules | 43 |
-| Documented rows | 5 |
-| VP-V keys in code (outside Bill's schema lists) | 364 |
-| of which documented | 2 |
-| of which undocumented (appendix A) | 362 |
+| Modules | 44 |
+| Documented rows | 19 |
+| VP-V keys in code (outside Bill's schema lists) | 366 |
+| of which documented | 15 |
+| of which undocumented (appendix A) | 351 |
 | Documented keys with no code entry (appendix B) | 0 |
 
 ## Modules index
@@ -38,14 +38,15 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Repair | `repair.deband` | built | [README](../../src/VP-V/modules/repair/deband/README.md) | 0 | 7 | 0/7 |
 | Repair | `repair.grain_split` | draft | [README](../../src/VP-V/modules/repair/grain_split/README.md) | 0 | 0 | 0/0 |
 | Repair | `repair.grain_split.shared.band_from_base` | draft | [README](../../src/VP-V/modules/repair/grain_split/shared/README.md) | 0 | 0 | 0/0 |
-| Repair | `repair.temporal_detail` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/README.md) | 0 | 5 | 0/5 |
+| Repair | `repair.temporal_detail` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/README.md) | 5 | 5 | 5/5 |
 | Repair | `repair.texture_restore` | built | [README](../../src/VP-V/modules/repair/texture_restore/README.md) | 0 | 5 | 0/5 |
 | Repair | `repair.temporal_detail.products` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/products/README.md) | 1 | 0 | 0/0 |
 | Repair | `repair.temporal_detail.shared` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/shared/README.md) | 0 | 0 | 0/0 |
+| Repair | `repair.stack` | draft | [README](../../src/VP-V/modules/repair/stack/README.md) | 0 | 0 | 0/0 |
 | Scaling | `scaling.rebase` | built | [README](../../src/VP-V/modules/scaling/rebase/README.md) | 0 | 4 | 0/4 |
 | Scaling | `scaling.route_4k` | placeholder | [README](../../src/VP-V/modules/scaling/route_4k/README.md) | 0 | 1 | 0/1 |
 | Scaling | `scaling.refine` | placeholder | [README](../../src/VP-V/modules/scaling/refine/README.md) | 0 | 1 | 0/1 |
-| Scaling | `scaling.chroma_upscale` | placeholder | [README](../../src/VP-V/modules/scaling/chroma_upscale/README.md) | 0 | 2 | 0/2 |
+| Scaling | `scaling.chroma_upscale` | placeholder | [README](../../src/VP-V/modules/scaling/chroma_upscale/README.md) | 1 | 2 | 1/2 |
 | Scaling | `scaling.chroma_upscale.basic` | draft | [README](../../src/VP-V/modules/scaling/chroma_upscale/basic/README.md) | 1 | 0 | 0/0 |
 | Scaling | `scaling.geometry` | built | [README](../../src/VP-V/modules/scaling/geometry/README.md) | 0 | 8 | 0/8 |
 | Scaling | `scaling.output` | partial | [README](../../src/VP-V/modules/scaling/output/README.md) | 0 | 30 | 0/30 |
@@ -64,7 +65,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Control | `control.diagnostics` | partial | [README](../../src/VP-V/modules/control/diagnostics/README.md) | 0 | 4 | 0/4 |
 | Control | `control.config` | partial | [README](../../src/VP-V/modules/control/config/README.md) | 0 | 0 | 0/0 |
 | Control | `control.gpu_memory` | draft | [README](../../src/VP-V/modules/control/gpu_memory/README.md) | 0 | 0 | 0/0 |
-| Control | `control.skeleton` | draft | [README](../../src/VP-V/modules/control/skeleton/README.md) | 0 | 5 | 0/5 |
+| Control | `control.skeleton` | draft | [README](../../src/VP-V/modules/control/skeleton/README.md) | 8 | 7 | 7/7 |
 
 ## Input
 
@@ -84,11 +85,16 @@ Modules: `motion.estimation`, `motion.vector_delivery`, `motion.consumers`.
 
 ## Repair
 
-Modules: `repair.encoding`, `repair.deband`, `repair.grain_split`, `repair.grain_split.shared.band_from_base`, `repair.temporal_detail`, `repair.texture_restore`, `repair.temporal_detail.products`, `repair.temporal_detail.shared`.
+Modules: `repair.encoding`, `repair.deband`, `repair.grain_split`, `repair.grain_split.shared.band_from_base`, `repair.temporal_detail`, `repair.texture_restore`, `repair.temporal_detail.products`, `repair.temporal_detail.shared`, `repair.stack`.
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
+| `temporal_detail` | `repair.temporal_detail` | profile | enum | off, steady, auto | off |  | not in Config (module not wired) | n/a (VP-only) | declared: "Temporal detail: inactive (<reason>)"; `Status()` line | budget-governed: the VRAM governor keeps fewer reference slots first (5 down to 1, `Params::slots`), then drops the scratch-arena temporaries (T1), then the module; nothing is fixed to a GPU model |
+| `temporal_detail_boost` | `repair.temporal_detail` | profile | bool | on, off (the fallback boost) | off |  | not in Config (module not wired) | n/a (VP-only) | declared: off unless re-validated on real encodes (owner 2026-10-31) | same as `temporal_detail` |
+| `temporal_detail_boost_max` | `repair.temporal_detail` | profile | float | 0.0 .. 0.3 | 0.15 |  | not in Config (module not wired) | n/a (VP-only) | declared; used when the boost is on | same as `temporal_detail` |
 | `temporal_detail_engine` | `repair.temporal_detail.products` | deferred (profile; SCHEMA lock held by W1-P3, reset 2 adds it) | enum | off, auto | off (`TdProducts::kEngineRequestedToday = false`) |  | deferred: VP-V > Repair > Temporal detail | n/a (VP-only) | Declared (deferred key; reset 2 adds it): `product.adaptive_downscale`, `product.dither_need`, `product.sigma_delta`, `product.chroma_cfl`, `product.debander`, `product.td_engine`; status lines "<consumer>: classical form (temporal-detail products: <reason>)" | budget-governed: the VRAM / ms governor decides which stage of each governed buffer fits (see Products) |
+| `temporal_detail_max_age` | `repair.temporal_detail` | profile | float | 0.25 .. 4.0 (seconds) | 2.0 |  | not in Config (module not wired) | n/a (VP-only) | declared | same as `temporal_detail` |
+| `temporal_detail_strength` | `repair.temporal_detail` | profile | float | 0.0 .. 1.0 | 1.0 |  | not in Config (module not wired) | n/a (VP-only) | declared | same as `temporal_detail` |
 
 ## Scaling
 
@@ -97,6 +103,7 @@ Modules: `scaling.rebase`, `scaling.route_4k`, `scaling.refine`, `scaling.chroma
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `chroma_upscale_basic` | `scaling.chroma_upscale.basic` | deferred (profile; added when the SCHEMA lock is free) | enum | off, lanczos | off |  | deferred: VP-V > Scaling > Chroma upscale | libplacebo's chroma upscaler (either/or: Original = libplacebo chroma) | Declared (deferred key): "Chroma upscale: libplacebo (<reason>)" | same on all (one pass, ~36 texel fetches per output pixel and plane pair) |
+| `chroma_upscale_vp` | `scaling.chroma_upscale` | profile | enum | off, cfl | off |  | Config editor > Scaling > VP chroma upscale (candidate) | libplacebo's own chroma upscaler (`chroma_upscaler`) | "Chroma upscale: libplacebo (<reason>)"; `Status()`; "grain split (chroma-from-luma)" while an own split runs | budget-governed: the VRAM governor drops the scratch-arena temporaries (T1) before the T0 ones; the module then fails visibly for the frame and libplacebo's chroma upscaler runs; nothing is fixed to a GPU model |
 
 ## Colour
 
@@ -129,7 +136,14 @@ Modules: `control.net_runtime`, `control.diagnostics`, `control.config`, `contro
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
-| (none documented yet) | | | | | | | | | | |
+| `vpv.skeleton.analysis_lane` | `control.skeleton` | [vpv.skeleton] | enum | off, shadow, on | off |  | not in Config (cfg-only until the M2 Config page) | off (nothing built) | `analysis_lane` (reduced / forced live / at minimum), `skeleton_lane` (waiting for `resync_event=on` or `frame_analysis_store=on`), `skeleton_gpu_shadow` ("shadow: GPU products skipped"), `skeleton_gpu_device` ("GPU products: no render device"), Ctrl+I line, Ctrl+Alt+D | the lane plans its tiers by video memory (VramGovernor); shadow = CPU lane only, no GPU dispatcher; on + a render device = CPU and GPU products (see the shed order under Status and fallbacks) |
+| `vpv.skeleton.analysis_lane_chunk_us` | `control.skeleton` | [vpv.skeleton] | int | 0..4000000 (0 = derived from the frame period) | 0 |  | not in Config (cfg-only until the M2 Config page) | n/a (VP-only) | invalid value: `skeleton_settings`, default kept | same on all |
+| `vpv.skeleton.analysis_lane_deterministic` | `control.skeleton` | [vpv.skeleton] | enum | auto, on, off | auto |  | not in Config (cfg-only until the M2 Config page) | n/a (VP-only) | `analysis_lane_determinism` when frames miss the bounded wait | same on all |
+| `vpv.skeleton.analysis_lane_test_wait_ms` | `control.skeleton` | [vpv.skeleton] | int | 0..4000000 | 0 |  | not in Config (cfg-only until the M2 Config page; test only) | n/a (VP-only) | invalid value: `skeleton_settings` | same on all |
+| `vpv.skeleton.camera_link` | `control.skeleton` | [vpv.skeleton] | enum | off, report | off |  | not in Config (cfg-only until the M2 Config page) | off (no state, no line) | `camera_link` when asked to report but unable (no store, no seal); status line when on | same on all |
+| `vpv.skeleton.grain_split_storage` | `control.skeleton` | [vpv.skeleton] | enum | full, compact | full |  | not in Config (cfg-only until the M2 Config page) | n/a (VP-only) | `grain_split_storage` entry of the kernel (Compact refused for the plane -> Full, with the reason; Compact granted -> Released); invalid value: `skeleton_settings` | P10 storage either/or; Compact is also the governor's visible budget step (Compact -> Full / Full -> Compact is shown by the kernel's decision, never silent) |
+| `vpv.skeleton.skeleton_gpu_gap` | `control.skeleton` | [vpv.skeleton] | enum | off, after_render | off |  | not in Config (cfg-only until the M2 Config page) | n/a (VP-only; off in the Original pathway) | after_render: `skeleton_gpu_gap` ("GPU lane work runs ahead of the present"); off with a dispatcher: `skeleton_gpu_gap_off`; invalid value: `skeleton_settings` | off: the GPU products get no lane producer (in-render-only, live form deferred); after_render: P10/P11/P12 lane jobs run in the AfterRender gap, chunked by the gap budget (one chunk per pass); the CPU products' gap is unchanged either way |
+| `vpv.skeleton.source_stats_walk` | `control.skeleton` | [vpv.skeleton] | enum | original, lane | original |  | not in Config (cfg-only until the M2 Config page) | Bill's active-picture walk | planned: the cfg key is not read from the file yet (a lane key set by tests and tooling); `source_stats_walk` entry when the lane's source stats are unavailable | same on all |
 
 ## Tier presets
 
@@ -251,7 +265,6 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `capture_display_fixes` | unassigned |  |  | VpvStartupSchema.h |
 | `capture_path` | input.capture | gpu | VP-V > Input > Capture unpack on the GPU | VpvSchemaKeys.h |
 | `capture_upload` | input.capture | auto | VP-V > Input > Upload frames as they arrive | VpvSchemaKeys.h |
-| `chroma_upscale_vp` | scaling.chroma_upscale |  |  | VpvSchemaKeys.h, ChromaCfl.h |
 | `cnn_residual_stabilise` | scaling.output | on | VP-V > Scaling > Steady the upscaler's added detail along motion | VpvSchemaKeys.h |
 | `deband_grain` | repair.deband | off |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `deband_vp` | repair.deband | off |  | VpvSchemaKeys.h |
@@ -517,11 +530,6 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `ssim_residual_stabilise` | scaling.output | on | VP-V > Scaling > Steady the downscaler's added detail along motion | VpvSchemaKeys.h |
 | `stats_overlay` | unassigned |  |  | VpvStartupSchema.h |
 | `target_latency_ms` | input.queue_timing |  |  | VpvSchemaKeys.h, VpvStartupSchema.h |
-| `temporal_detail` | repair.temporal_detail |  |  | TemporalDetail.h |
-| `temporal_detail_boost` | repair.temporal_detail |  |  | TemporalDetail.h |
-| `temporal_detail_boost_max` | repair.temporal_detail |  |  | TemporalDetail.h |
-| `temporal_detail_max_age` | repair.temporal_detail |  |  | TemporalDetail.h |
-| `temporal_detail_strength` | repair.temporal_detail |  |  | TemporalDetail.h |
 | `temporal_dither` | output.dither | auto |  | VpvSchemaKeys.h |
 | `texture_restore` | repair.texture_restore | off |  | VpvSchemaKeys.h |
 | `texture_restore_cap` | repair.texture_restore | 1.5 |  | VpvSchemaKeys.h |
@@ -529,11 +537,6 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `upscale_light` | scaling.output | linear |  | VpvSchemaKeys.h |
 | `use_frame_queue` | input.queue_timing |  |  | VpvStartupSchema.h |
 | `vector_demand` | motion.estimation, motion.vector_delivery | on | VP-V > Motion > Vector engine on demand | VpvSchemaKeys.h |
-| `vpv.skeleton.analysis_lane` | control.skeleton |  |  | SkeletonSettings.h |
-| `vpv.skeleton.analysis_lane_chunk_us` | control.skeleton |  |  | SkeletonSettings.h |
-| `vpv.skeleton.analysis_lane_deterministic` | control.skeleton |  |  | SkeletonSettings.h |
-| `vpv.skeleton.analysis_lane_test_wait_ms` | control.skeleton |  |  | SkeletonSettings.h |
-| `vpv.skeleton.camera_link` | control.skeleton |  |  | SkeletonSettings.h |
 | `ycbcr_12bit_capture` | unassigned |  |  | VpvStartupSchema.h |
 
 ## Appendix B: documented keys with no entry in code

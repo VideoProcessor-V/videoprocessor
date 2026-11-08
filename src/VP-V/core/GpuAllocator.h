@@ -350,7 +350,8 @@ struct ProductTexLayout {
     //     bytes per cell of that shift (all declared terms sharing it);
     //   * an absolute term is at most the declared grid of its shift in EACH axis (absW <= ceil(w / 2^s) and
     //     absH <= ceil(h / 2^s), not only in total bytes): the declaration is the upper bound the governor plans with.
-    // A declaration with fixed bytes never matches a layout with absolute terms.
+    // fixedBytes of a declaration with an absolute-grid layout are not compared (P12's 16 KB LUT is a texture the kernel holds itself);
+    // the governor still counts them: its ledger is BytesOf(decl.size) per buffer (GpuAllocatorTests::P12FixedBytesAreStillInTheGovernorLedger).
     bool MatchesDecl(const ProductDecl& decl, Dims d) const
     {
         bool hasAbs = false;
@@ -360,7 +361,8 @@ struct ProductTexLayout {
         if (!hasAbs)
             return BytesPerBuffer(d) == BytesOf(decl.size, d);
         const size_t n = decl.size.termCount < decl.size.terms.size() ? size_t(decl.size.termCount) : decl.size.terms.size();
-        if (decl.size.fixedBytes != 0 || n == 0)
+        // fixedBytes (P12 LUT, 16 KB) is a texture the kernel holds itself, not a grid term: not compared here.
+        if (n == 0)
             return false;
         std::map<uint8_t, uint64_t> declRate, layoutRate;
         for (size_t i = 0; i < n; ++i)

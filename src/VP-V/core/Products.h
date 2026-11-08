@@ -86,6 +86,8 @@ enum : ProductId {
     kTdDelta,             // 26 td.delta: lane -> render hand-off of the repair delta
     kTdMaps,              // 27 td.maps: THE consumer-facing per-block map product (U19 TdMapsView)
     kTdTrailSummary,      // 28 td.trail_summary: per-frame CPU summary for source identity / status
+    // Wave S2 (SID lead request, doc 78 section 6): appended after the doc 72 list, never before it.
+    kSourceGeometry,      // 29 source_geometry (P14g): HELD-STATE measured + applied source geometry (SourceGeometry unit v1)
     kSkeletonProductEnd
 };
 
@@ -255,6 +257,13 @@ struct ProductDecl {
     // producer's job for frame N+1 reuses the slot of frame N-1 and waits (counted, SlotCounters::writeWaitPinned) while a
     // lag-1 reader still pins it. Its VRAM figure is 2x the store, not a ring.
     bool singletonStore = false;
+    // HELD STATE (wave S2 audit): a record the writer (outside the lane's frame loop, e.g. the source-resolution worker) publishes on its
+    // own evaluations and every reader takes as the latest SEALED one: a lag >= 1 read, never lag 0 and never a look-ahead. There is no
+    // live fill, so BuildGraph gives it NO live pool (livePool 0, like singletonStore) and an absent record is Unavailable for that frame:
+    // the reader runs its own visible fallback. Registry::Validate rejects a lag-0 or lead read of a held-state product in a product's inputs,
+    // BuildGraph the same in a consumer's reads (visible reason). Set on P14 source identity and P14g source geometry (every reader of both
+    // is a lag-1 held read in the catalog; a test pins it).
+    bool heldState = false;
     // Set by detail::AddInput/AddLead when a declaration named more than kMaxInputs reads: the extra read was NOT
     // recorded. Registry::Validate rejects the declaration with a plain reason (fail closed, visible; Release has no
     // assert).
@@ -347,6 +356,19 @@ inline void AddTerm(ProductDecl& d, uint8_t shift, uint16_t bytesPerCell)
 
 } // namespace detail
 
+// A LEAD read of an ORDERED-CHAIN product (a reader of N+k whose target reads itself at lag >= 1). WARNING level, never a reject: the chain
+// target runs at most one frame ahead of its seal (a chain job pins only a render-valid predecessor), so the target of N+k is not Published
+// when the reader of N is sealed; the seal falls to the reader's live fill, i.e. the reader live-fills its reduced form (visible, counted).
+// Registry::Validate reports it through its optional `warning` out, BuildGraph keeps the EFFECTIVE reads in Graph::leadChainReads (a reader
+// that resolved to its short-queue substitute has no lead), and the analysis lane shows both (status line + Fallbacks entry).
+// Design options for the removal (S2 / reset 2) are in core/README.md ("Lead reads of an ordered chain").
+constexpr const char* kLeadChainWarning = "lead read of an ordered chain: reader live-fills its reduced form";
+struct LeadChainRead {
+    ProductId reader = kNoProduct;
+    ProductId chain = kNoProduct;
+    uint8_t lead = 0;   // the largest lead the reader reads the chain at
+};
+
 // The registry: products indexed by their id (dense 0..n-1).
 class Registry {
 public:
@@ -361,8 +383,12 @@ public:
     // Ids dense and in place, inputs and substitutes known, at most one lag-0 path per pair (no
     // lag-0 cycle: the seal runs in topological order over lag-0 edges). Returns false with a
     // plain reason on the first problem.
-    bool Validate(const char** reason = nullptr) const
+    // `warning` (optional): cleared at the start and, when the registry is valid, set to LeadChainWarningText of the declared lead reads of
+    // ordered chains ("" = none). A warning never makes the registry invalid.
+    bool Validate(const char** reason = nullptr, std::string* warning = nullptr) const
     {
+        if (warning)
+            warning->clear();
         auto fail = [reason](const char* why) {
             if (reason)
                 *reason = why;
@@ -404,6 +430,8 @@ public:
             }
             if (d.historyFloor != kHistoryFixed && d.historyFloor > d.history)
                 return fail("history floor above the full history");
+            if (d.heldState && d.backend == Backend::RenderOnly)
+                return fail("a held-state product needs a lane backend (it has no live fill)");
             if (d.singletonStore) {
                 if (d.history != 0)
                     return fail("a single-store product declares history 0");
@@ -440,6 +468,13 @@ public:
                 const InputRef& in = d.inputs[k];
                 if (decls_[in.product].singletonStore && (in.lag > 1 || in.lead > 0))
                     return fail("a single-store product is read at lag 0 or 1 only (no deeper lag, no look-ahead)");
+            }
+        // A held-state product is read at lag >= 1 only: the latest sealed record, never the frame's own and never a look-ahead.
+        for (const ProductDecl& d : decls_)
+            for (size_t k = 0; k < d.inputCount; ++k) {
+                const InputRef& in = d.inputs[k];
+                if (decls_[in.product].heldState && (in.lag == 0 || in.lead > 0))
+                    return fail("a held-state product is read at lag >= 1 only (no lag-0 read, no look-ahead)");
             }
         // Look-ahead edges: no chains (the target has no lead inputs itself) and no loops (the target
         // cannot reach the reader through ANY edge, lag, lag 0 or lead): a frame-ahead read must end at
@@ -494,7 +529,53 @@ public:
             return fail("lag-0 cycle between products");
         if (reason)
             *reason = "";
+        if (warning)
+            *warning = LeadChainWarningText(LeadChainReads());
         return true;
+    }
+
+    // The DECLARED lead reads of ordered chains: one entry per (reader, chain) with the largest lead, in id order. Declaration level (the
+    // lane lead may cap it to 0 at run time: BuildGraph's Graph::leadChainReads is the effective set).
+    std::vector<LeadChainRead> LeadChainReads() const
+    {
+        std::vector<LeadChainRead> out;
+        for (const ProductDecl& d : decls_) {
+            const size_t n = d.inputCount < kMaxInputs ? size_t(d.inputCount) : kMaxInputs;
+            for (size_t k = 0; k < n; ++k) {
+                const InputRef& in = d.inputs[k];
+                if (in.lead == 0 || !Has(in.product) || !decls_[in.product].orderedChain)
+                    continue;
+                bool known = false;
+                for (LeadChainRead& r : out)
+                    if (r.reader == d.id && r.chain == in.product) {
+                        known = true;
+                        if (in.lead > r.lead)
+                            r.lead = in.lead;
+                    }
+                if (!known) {
+                    LeadChainRead r;
+                    r.reader = d.id;
+                    r.chain = in.product;
+                    r.lead = in.lead;
+                    out.push_back(r);
+                }
+            }
+        }
+        return out;
+    }
+
+    // "quality_pattern -> coding_evidence (lead 2): lead read of an ordered chain: reader live-fills its reduced form" (entries joined by
+    // "; "); "" when there are none.
+    std::string LeadChainWarningText(const std::vector<LeadChainRead>& reads) const
+    {
+        std::string text;
+        for (const LeadChainRead& r : reads) {
+            if (!Has(r.reader) || !Has(r.chain))
+                continue;
+            text += (text.empty() ? "" : "; ") + std::string(decls_[r.reader].token) + " -> " + decls_[r.chain].token + " (lead "
+                    + std::to_string(unsigned(r.lead)) + "): " + kLeadChainWarning;
+        }
+        return text;
     }
 
 private:
@@ -832,7 +913,33 @@ inline void AppendSourceIdentityProduct(std::vector<ProductDecl>& decls)
     ProductDecl p = Make(kSourceIdentity, "p14_source_identity", "source identity (held state)", Backend::Cpu, 1,
                          Tier::T0, Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
     AddInput(p, kP5MonitorTiles, 0);   // through the monitor snapshot (the tiles' analysis)
+    p.heldState = true;   // every catalog reader is a lag-1 held read (ProductCatalogTests pins it): no live pool
     p.size.fixedBytes = kSourceIdentityRecordBytes;
+    p.residency = Residency::SystemRam;
+    p.rarelyTouched = true;
+    p.refRenderMs = 0.0f;
+    decls.push_back(p);
+}
+
+// P14g: the source geometry record (doc 78 section 6, SID lead request; id 29, appended after the doc 72 list). Per axis the MEASURED and
+// the APPLIED geometry (state, n, N, ratio, phase, kernel, sharpening, double scale, confidence), the active area, the coded-raster class,
+// the reserved chroma chain, geometryGen / appliedGen. Like P14 it is HELD STATE: the source-resolution side (single writer) publishes it on
+// each evaluation, consumers read the latest sealed record (seq <= N: a lag >= 1 read), there is no live fill, and a record older than
+// its maximum age (SourceGeometry::MaxAgeUs: twice the longest evaluation interval) is stale and every consumer falls back to its
+// delivered-raster / classical form, visibly. Cpu, T0, history 1, fixed little-endian layout of at most kSourceGeometryRecordBytes (the
+// layout itself is the SourceGeometry unit, input/source_analysis/identity/SourceGeometryProduct.h; the SID build fills it). Provisional
+// consumers: quality_pattern, coding_evidence, temporal detail, the adaptive scaler, the chroma stage and status (catalog rows).
+constexpr uint32_t kSourceGeometryRecordBytes = 512;
+inline void AppendSourceGeometryProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::Make;
+    using namespace VpIndicator;
+    ProductDecl p = Make(kSourceGeometry, "source_geometry", "source geometry (held state)", Backend::Cpu, 1, Tier::T0,
+                         Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
+    AddInput(p, kP5MonitorTiles, 0);   // like P14: the same monitor evaluation (single writer, the source-resolution side)
+    p.heldState = true;
+    p.size.fixedBytes = kSourceGeometryRecordBytes;
     p.residency = Residency::SystemRam;
     p.rarelyTouched = true;
     p.refRenderMs = 0.0f;
@@ -875,6 +982,12 @@ inline void AppendCameraGuideProduct(std::vector<ProductDecl>& decls)
 // open item: short-queue substitutes for the lead edges). Nothing is silently dropped: the contract table records the full
 // intended list, which a test compares.
 // Record histories are SECONDS of source time; the frame count follows the measured source rate (the same rule as the guide lag).
+// The depth is DERIVED FROM THE CONFIGURED QUEUE (owner ruling 2026-11-07), not a fixed number of seconds:
+//   history_seconds = max(floor_seconds, queue_multiple x queue_frames x measured source period)
+// where queue_frames = render-ahead R + lane lead L + look-ahead walk frames (QueueFramesFor), the floor is the record's own minimum
+// (2.0 s quality_pattern, 0.25 s td.trail_summary) and queue_multiple is the record's declared share of the queue (1 for both today;
+// a later best-frame detector can declare more, for example 4 s on a long queue). frames = HistoryFramesFor(history_seconds, period).
+// The range is therefore floor .. kRecordHistoryMax frames, with the cap note below when the queue (not the rate) asks for more.
 // `sourcePeriodMs <= 0` (unmeasured: the status/planning view, tests) declares the field's maximum, kRecordHistoryMax: the records
 // are tens of bytes, so the bound costs kilobytes and never under-declares. `minFrames` keeps the structural floor of the record
 // (the lags its readers use). A rebuild with the measured period replaces the figure (SkeletonProducts(..., sourcePeriodMs)).
@@ -886,6 +999,19 @@ inline void AppendCameraGuideProduct(std::vector<ProductDecl>& decls)
 constexpr unsigned kSlotCountMax = 255;
 constexpr unsigned kRingHeadroomFrames = 32;
 constexpr uint8_t kRecordHistoryMax = static_cast<uint8_t>(kSlotCountMax - kRingHeadroomFrames);
+// Frames the configured queue holds: render-ahead R + lane lead L + the look-ahead walk (the GraphSettings terms the skeleton knows).
+inline unsigned QueueFramesFor(unsigned renderAhead, unsigned laneLead, unsigned lookAheadFrames)
+{
+    return renderAhead + laneLead + lookAheadFrames;
+}
+// max(floor, queue_multiple x queue_frames x period). Unmeasured (period <= 0): the floor (HistoryFramesFor then declares the cap).
+inline double RecordHistorySeconds(double floorSeconds, double queueMultiple, unsigned queueFrames, double sourcePeriodMs)
+{
+    if (!(sourcePeriodMs > 0.0))
+        return floorSeconds;
+    const double queueSeconds = queueMultiple * double(queueFrames) * sourcePeriodMs / 1000.0;
+    return queueSeconds > floorSeconds ? queueSeconds : floorSeconds;
+}
 inline uint8_t HistoryFramesFor(double seconds, double sourcePeriodMs, uint8_t minFrames)
 {
     if (!(sourcePeriodMs > 0.0) || !(seconds > 0.0))
@@ -905,22 +1031,41 @@ constexpr double kQualityPatternHistorySeconds = 2.0;   // P15 looks back over t
 constexpr uint8_t kQualityPatternMinFrames = 8;         // structural: the lags the pattern readers use (lead 2 + lag 1 + the frame)
 constexpr double kTdTrailSummaryHistorySeconds = 0.25;  // source identity folds the last quarter second of trail summaries
 constexpr uint8_t kTdTrailSummaryMinFrames = 3;         // structural: the frame, lag 1 (source identity) and one in flight
-inline uint8_t QualityPatternHistoryFrames(double sourcePeriodMs) { return HistoryFramesFor(kQualityPatternHistorySeconds, sourcePeriodMs, kQualityPatternMinFrames); }
-inline uint8_t TdTrailSummaryHistoryFrames(double sourcePeriodMs) { return HistoryFramesFor(kTdTrailSummaryHistorySeconds, sourcePeriodMs, kTdTrailSummaryMinFrames); }
+// The declared queue multiple of each record: how many queues' worth of source time it keeps (1 = exactly the queue).
+constexpr double kQualityPatternQueueMultiple = 1.0;
+constexpr double kTdTrailSummaryQueueMultiple = 1.0;
+inline uint8_t QualityPatternHistoryFrames(double sourcePeriodMs, unsigned queueFrames = 0)
+{
+    return HistoryFramesFor(RecordHistorySeconds(kQualityPatternHistorySeconds, kQualityPatternQueueMultiple, queueFrames, sourcePeriodMs),
+                            sourcePeriodMs, kQualityPatternMinFrames);
+}
+inline uint8_t TdTrailSummaryHistoryFrames(double sourcePeriodMs, unsigned queueFrames = 0)
+{
+    return HistoryFramesFor(RecordHistorySeconds(kTdTrailSummaryHistorySeconds, kTdTrailSummaryQueueMultiple, queueFrames, sourcePeriodMs),
+                            sourcePeriodMs, kTdTrailSummaryMinFrames);
+}
 // "" when no record history is capped at this measured period, else the plain note for status / Fallbacks (the cap is never silent):
-// "quality pattern history capped at 223 frames (source rate above 111.5 fps)". The rate where the cap starts is frames / seconds.
+// "quality pattern history capped at 223 frames (source rate above 111.5 fps)". The rate where the cap starts is frames / floor seconds.
+// When the QUEUE sets the depth (queue seconds above the floor) the cap does not depend on the rate: "... capped at 223 frames (the
+// configured queue asks for N frames)". `queueFrames` = QueueFramesFor(...) of the graph being described (0: no queue term).
 // `qualityPattern` / `trailSummary`: only the records that are actually in the graph being described (ProductGraph.h GraphHistoryCapNote).
-inline std::string RecordHistoryCapNote(double sourcePeriodMs, bool qualityPattern = true, bool trailSummary = true)
+inline std::string RecordHistoryCapNote(double sourcePeriodMs, bool qualityPattern = true, bool trailSummary = true, unsigned queueFrames = 0)
 {
     std::string note;
-    const struct { const char* name; double seconds; bool present; } records[] = {
-        { "quality pattern", kQualityPatternHistorySeconds, qualityPattern }, { "td trail summary", kTdTrailSummaryHistorySeconds, trailSummary } };
+    const struct { const char* name; double floorSeconds; double queueMultiple; bool present; } records[] = {
+        { "quality pattern", kQualityPatternHistorySeconds, kQualityPatternQueueMultiple, qualityPattern },
+        { "td trail summary", kTdTrailSummaryHistorySeconds, kTdTrailSummaryQueueMultiple, trailSummary } };
     for (const auto& r : records) {
-        if (!r.present || !RecordHistoryCapped(r.seconds, sourcePeriodMs))
+        const double seconds = RecordHistorySeconds(r.floorSeconds, r.queueMultiple, queueFrames, sourcePeriodMs);
+        if (!r.present || !RecordHistoryCapped(seconds, sourcePeriodMs))
             continue;
-        char text[160] = {};
-        std::snprintf(text, sizeof(text), "%s history capped at %u frames (source rate above %.1f fps)", r.name,
-                      unsigned(kRecordHistoryMax), double(kRecordHistoryMax) / r.seconds);
+        char text[200] = {};
+        if (seconds > r.floorSeconds)   // the queue sets the depth: the cap is a frame count, whatever the rate
+            std::snprintf(text, sizeof(text), "%s history capped at %u frames (the configured queue asks for %u frames)", r.name,
+                          unsigned(kRecordHistoryMax), unsigned(std::ceil(r.queueMultiple * double(queueFrames) - 1e-9)));
+        else
+            std::snprintf(text, sizeof(text), "%s history capped at %u frames (source rate above %.1f fps)", r.name,
+                          unsigned(kRecordHistoryMax), double(kRecordHistoryMax) / r.floorSeconds);
         note += (note.empty() ? "" : "; ") + std::string(text);
     }
     return note;
@@ -928,7 +1073,7 @@ inline std::string RecordHistoryCapNote(double sourcePeriodMs, bool qualityPatte
 constexpr uint32_t kQualityPatternBytes = 64;
 constexpr uint32_t kCodingEvidenceSummaryBytes = 256;
 constexpr uint32_t kTdTrailSummaryBytes = 256;
-inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, double sourcePeriodMs = 0.0)
+inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, double sourcePeriodMs = 0.0, unsigned queueFrames = 0)
 {
     using detail::AddInput;
     using detail::AddLead;
@@ -938,8 +1083,8 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
     const CounterMask content = Bit(kFull) | Bit(kContinuity);
     const CounterMask tdSettings = Bit(kSettingsRebase) | Bit(kSettingsAnalysis);
     const CounterMask rebased = content | Bit(kRebaseH) | Bit(kRebaseV);
-    const uint8_t qualityPatternHistory = QualityPatternHistoryFrames(sourcePeriodMs);
-    const uint8_t trailSummaryHistory = TdTrailSummaryHistoryFrames(sourcePeriodMs);
+    const uint8_t qualityPatternHistory = QualityPatternHistoryFrames(sourcePeriodMs, queueFrames);
+    const uint8_t trailSummaryHistory = TdTrailSummaryHistoryFrames(sourcePeriodMs, queueFrames);
 
     // coding_evidence (P16): per 8x8 block 8 B (hash32, blockiness u16, copy u8, phase u8) + a 256 B per-frame summary; history 2.
     ProductDecl ce = Make(kCodingEvidence, "coding_evidence", "coding evidence (P16)", Backend::GpuCompute, 2, Tier::T0, rebased,
@@ -957,7 +1102,7 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
     ce.refRenderMs = 0.2f;
     decls.push_back(ce);
 
-    // quality_pattern (P15): a CPU POD (~64 B) per unique source frame, history = kQualityPatternHistorySeconds of the measured source rate, a per-frame LANE product (not P14's held state):
+    // quality_pattern (P15): a CPU POD (~64 B) per unique source frame, history = max(kQualityPatternHistorySeconds, queue x period) at the measured source rate, a per-frame LANE product (not P14's held state):
     // role at lead 2. Short-queue substitute: P15c (visible "frame pattern: provisional").
     ProductDecl qp = Make(kQualityPattern, "quality_pattern", "frame quality pattern (P15)", Backend::Cpu, qualityPatternHistory,
                           Tier::T0, content, Bit(kSettingsAnalysis));
@@ -1038,7 +1183,7 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
     tm.refRenderMs = 0.1f;
     decls.push_back(tm);
 
-    // td.trail_summary: a CPU record per frame (256 B, history = kTdTrailSummaryHistorySeconds of the measured source rate) for source identity (lag >= 1), status and logs.
+    // td.trail_summary: a CPU record per frame (256 B, history = max(kTdTrailSummaryHistorySeconds, queue x period) at the measured source rate) for source identity (lag >= 1), status and logs.
     ProductDecl ts = Make(kTdTrailSummary, "td.trail_summary", "td trail summary", Backend::Cpu, trailSummaryHistory, Tier::T1, content,
                           Bit(kSettingsAnalysis));
     AddInput(ts, kTdBlocks, 0);
@@ -1050,10 +1195,12 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
 }
 
 // The registry the skeleton runs with: the first products, the camera products, then P10..P13, the TemporalDetail
-// products, P14, p7g and the temporal-detail engine products, in fixed id order. THE one assembly point.
+// products, P14, p7g, the temporal-detail engine products and P14g source_geometry, in fixed id order. THE one assembly point.
 // `compactGrain` / `compactChroma`: the GRANTED storage of P10 (luma) and P10c (chroma planes).
 // `sourcePeriodMs`: the measured source frame period (0 = unmeasured), which sets the frame counts of the record histories.
-inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double sourcePeriodMs = 0.0)
+// `queueFrames`: QueueFramesFor(render-ahead, lane lead, look-ahead) of the configured queue; with the period it lifts a record history
+// above its floor (RecordHistorySeconds). 0 = no queue term (the floor).
+inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double sourcePeriodMs = 0.0, unsigned queueFrames = 0)
 {
     std::vector<ProductDecl> d = FirstProducts().All();
     AppendCameraProducts(d);
@@ -1063,7 +1210,8 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double s
     AppendTemporalDetailProducts(d);
     AppendSourceIdentityProduct(d);
     AppendCameraGuideProduct(d);
-    AppendTemporalDetailEngineProducts(d, sourcePeriodMs);
+    AppendTemporalDetailEngineProducts(d, sourcePeriodMs, queueFrames);
+    AppendSourceGeometryProduct(d);   // wave S2: P14g, appended after the doc 72 list
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }

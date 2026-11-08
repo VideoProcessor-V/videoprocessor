@@ -31,6 +31,7 @@ namespace CameraModel
 
 	// CameraMotion::verdictFlags bits (why an Ambiguous verdict was given beyond the competing-motion signal).
 	constexpr uint8_t kVerdictDynamicTexture = 1;
+	constexpr uint8_t kVerdictStaticCamera = 2;   // Ambiguous because the static (identity) model explains the background as well as the fit (Config::staticCamera)
 
 	enum class ModelType : uint8_t { None, Translation, Similarity, Affine, Homography };
 
@@ -69,6 +70,8 @@ namespace CameraModel
 	{
 		if (reason == Reason::Ambiguous && (verdictFlags & kVerdictDynamicTexture) != 0)
 			return "ambiguous (dynamic texture, water-like)";
+		if (reason == Reason::Ambiguous && (verdictFlags & kVerdictStaticCamera) != 0)
+			return "ambiguous (static background explains the motion better: foreground object)";
 		return ReasonText(reason);
 	}
 
@@ -114,6 +117,9 @@ namespace CameraModel
 		// Dynamic-texture detector statistics (Config::dynTexture; 0 otherwise): share of trusted blocks that disagree with the
 		// camera model, and the temporal / spatial incoherence of that disagreement.
 		double dynShare = 0, dynTemporal = 0, dynSpatial = 0, dynField = 0;
+		// Static-camera hypothesis statistics (Config::staticCamera; 0 otherwise): share of the trusted border-ring blocks the
+		// identity model explains, and the share the fitted model explains.
+		double staticRing = 0, staticFit = 0;
 		bool haveBackward = false, haveEngine = false;
 		// Two-layer diagnostics (Config::twoLayer; neutral 0.5 otherwise): the camera layer's border ratio (clamped
 		// to 0..1) and its continuity with the last usable camera layer.

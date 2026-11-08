@@ -80,6 +80,7 @@ struct Node {
     uint8_t historyMin = 0;            // the lowest depth the governor may grant (== historyFull: not governed)
     bool orderedChain = false;         // ProductDecl::orderedChain
     bool singletonStore = false;       // ProductDecl::singletonStore (one persistent store, read at lag 1; never governed)
+    bool heldState = false;            // ProductDecl::heldState (a record read at lag >= 1 only; no live pool, no live fill)
     bool holdsSpan = false;
     uint8_t ring = 0;
     uint8_t livePool = 0;
@@ -215,6 +216,11 @@ struct Graph {
         ProductId made = kNoProduct;
     };
     std::vector<Reduction> reductions;
+    // WARNING level (never a reject): the EFFECTIVE lead reads of ordered-chain products in this graph (a reader whose lead the queue can
+    // supply, reading a product that reads itself at lag >= 1). Such a reader cannot be sealed ahead and live-fills its reduced form
+    // (Products.h kLeadChainWarning). Empty text = none. Shown on the analysis status lines and the Fallbacks list.
+    std::vector<LeadChainRead> leadChainReads;
+    std::string leadChainWarning;
 
     int IndexOf(ProductId id) const
     {
@@ -370,6 +376,15 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
             g.error = "a consumer declares more reads than the seam allows (an extra read was dropped)";
             return g;
         }
+    // A held-state product is read at lag >= 1 only: a consumer asking for it at lag 0 is refused, visibly (never silently served).
+    for (const ConsumerDecl& c : consumers)
+        for (size_t k = 0; k < c.count && k < kMaxConsumes; ++k)
+            if (c.consumes[k].lag == 0 && reg.Has(c.consumes[k].product) && reg.Get(c.consumes[k].product).heldState) {
+                g.error = "a held-state product is read at lag >= 1 only (a consumer reads it at lag 0); the analysis graph was not built";
+                g.errorProduct = c.consumes[k].product;
+                g.errorProductName = reg.Get(c.consumes[k].product).token;
+                return g;
+            }
     for (const ConsumerDecl& c : consumers)
         for (size_t k = 0; k < c.count && k < kMaxConsumes; ++k)
             if (!want(c.consumes[k].product, c.consumes[k].lag, c.holdsSpan, 0)) {
@@ -464,6 +479,7 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         }
         node.orderedChain = d.orderedChain;
         node.singletonStore = d.singletonStore;
+        node.heldState = d.heldState;
         node.holdsSpan = span[p] != 0;
         const bool lane = d.backend != Backend::RenderOnly;
         const unsigned L = lane ? gs.laneLead : 0u;
@@ -496,7 +512,7 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
             return g;
         }
         node.ring = uint8_t(ring);
-        const unsigned live = d.singletonStore ? 0u
+        const unsigned live = (d.singletonStore || d.heldState) ? 0u
                               : unsigned(node.history) + 1u + R + (node.holdsSpan ? 1u : 0u)
                                     + laneReadRefs[p] * unsigned(gs.laneJobsInFlight == 0 ? 1u : gs.laneJobsInFlight);
         if (live > kSlotCountMax) {
@@ -533,18 +549,42 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
             maxLead = node.lead;
         g.nodes.push_back(node);
     }
+    for (const Node& nd : g.nodes)
+        for (size_t k = 0; k < nd.inputCount; ++k) {
+            if (nd.inputs[k].lead == 0 || !reg.Get(nd.inputs[k].product).orderedChain)
+                continue;
+            bool known = false;
+            for (LeadChainRead& r : g.leadChainReads)
+                if (r.reader == nd.id && r.chain == nd.inputs[k].product) {
+                    known = true;
+                    if (nd.inputs[k].lead > r.lead)
+                        r.lead = nd.inputs[k].lead;
+                }
+            if (!known) {
+                LeadChainRead r;
+                r.reader = nd.id;
+                r.chain = nd.inputs[k].product;
+                r.lead = nd.inputs[k].lead;
+                g.leadChainReads.push_back(r);
+            }
+        }
+    g.leadChainWarning = reg.LeadChainWarningText(g.leadChainReads);
     g.framesInFlight = size_t(gs.queueDepth) + gs.lookAheadWalk + maxHistory + R + gs.laneLead + 1u
                        + maxLead;
     g.valid = true;
     return g;
 }
 
+// The configured queue's frames: R + L + the look-ahead walk (the term the record histories are derived from, Products.h).
+inline unsigned QueueFrames(const GraphSettings& gs) { return QueueFramesFor(gs.renderAhead, gs.laneLead, gs.lookAheadWalk); }
+
 // The visible cap note for the record histories of the products THIS graph holds ("" when none is capped or none is in the closure).
 inline std::string GraphHistoryCapNote(const Graph& g, double sourcePeriodMs)
 {
     if (!g.valid)
         return std::string();
-    return RecordHistoryCapNote(sourcePeriodMs, g.Has(kQualityPattern) || g.Has(kQualityPatternCausal), g.Has(kTdTrailSummary));
+    return RecordHistoryCapNote(sourcePeriodMs, g.Has(kQualityPattern) || g.Has(kQualityPatternCausal), g.Has(kTdTrailSummary),
+                                QueueFrames(g.settings));
 }
 
 // Owns the current graph; rebuilds on a trigger and advances the Indicator's `graph` counter.

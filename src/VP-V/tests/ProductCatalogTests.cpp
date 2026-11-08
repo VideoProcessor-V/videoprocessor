@@ -14,6 +14,7 @@
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/light_level/LightLevelLut.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
+#include <VP-V/modules/input/source_analysis/identity/SourceGeometryProduct.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdProduct.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>
@@ -187,8 +188,8 @@ namespace ProductCatalogTestsNs
 				{ kTdTrailSummary, "temporal detail" },
 			};
 			const Registry reg = SkeletonProducts();
-			Assert::AreEqual(size_t(kSkeletonProductEnd) - 3u, sizeof(expected) / sizeof(expected[0]),
-				L"every product but the matcher pair, the held-state source identity and the causal quality pattern has an expectation");
+			Assert::AreEqual(size_t(kSkeletonProductEnd) - 4u, sizeof(expected) / sizeof(expected[0]),
+				L"every product but the matcher pair, the two held-state records (source identity, source geometry) and the causal quality pattern has an expectation");
 			// The causal quality pattern is a substitute (read as P15 by its declared id): nobody reads it by its own id.
 			Assert::IsNull(LiveFillOwner(kQualityPatternCausal));
 			for (const Expect& e : expected) {
@@ -206,6 +207,13 @@ namespace ProductCatalogTestsNs
 				for (size_t k = 0; k < c->decl.count; ++k)
 					if (c->decl.consumes[k].product == kSourceIdentity)
 						Assert::IsTrue(c->decl.consumes[k].lag >= 1, L"a held-state read is lag >= 1");
+			// P14g source_geometry is HELD STATE too (wave S2, doc 78 section 6): readers at lag >= 1 only, so no live fill; it has readers.
+			Assert::IsNull(LiveFillOwner(kSourceGeometry), L"no live fill for the held-state source geometry");
+			Assert::IsFalse(ConsumersOf(kSourceGeometry).empty());
+			for (const ConsumerRow& c : ConsumerRows())
+				for (size_t k = 0; k < c.decl.count; ++k)
+					if (c.decl.consumes[k].product == kSourceGeometry)
+						Assert::IsTrue(c.decl.consumes[k].lag >= 1, L"a held-state read is lag >= 1");
 			size_t unread = 0;
 			for (const ProductDecl& d : reg.All())
 				if (ConsumersOf(d.id).empty() && d.backend != Backend::RenderOnly)
@@ -294,6 +302,54 @@ namespace ProductCatalogTestsNs
 			Assert::AreEqual(size_t(1), ConsumersOf(kP7gCameraGuide).size());
 		}
 
+		TEST_METHOD(HeldStateProductsAreReadAtLagOneOrMoreOnlyAndHaveNoLivePool)
+		{
+			// P14 source identity and P14g source geometry are the held-state products: the writer outside the frame loop publishes, every reader
+			// takes the latest sealed record. Enforced: no lag-0 / look-ahead read (Registry::Validate, BuildGraph), no live pool.
+			const Registry reg = SkeletonProducts();
+			size_t held = 0;
+			for (const ProductDecl& d : reg.All())
+				if (d.heldState) {
+					++held;
+					Assert::IsTrue(d.id == kSourceIdentity || d.id == kSourceGeometry, L"only the two records");
+					// Every catalog reader reads it at lag >= 1 (a lag-0 reader would have been refused by the graph).
+					for (const ConsumerRow& c : ConsumerRows())
+						for (size_t k = 0; k < c.decl.count; ++k)
+							if (c.decl.consumes[k].product == d.id)
+								Assert::IsTrue(c.decl.consumes[k].lag >= 1, L"a held-state read is lag >= 1");
+					// No product declares a lag-0 / lead input on it either.
+					for (const ProductDecl& o : reg.All())
+						for (size_t k = 0; k < o.inputCount; ++k)
+							if (o.inputs[k].product == d.id)
+								Assert::IsTrue(o.inputs[k].lag >= 1 && o.inputs[k].lead == 0);
+				}
+			Assert::AreEqual(size_t(2), held);
+			Assert::IsTrue(reg.Get(kSourceIdentity).heldState && reg.Get(kSourceGeometry).heldState);
+			for (uint8_t lane : { uint8_t(0), uint8_t(1), uint8_t(3) }) {
+				const Graph g = FullGraph(Settings(Dims{ 3840, 2160 }, lane), reg);
+				Assert::IsTrue(g.valid, L"the full catalog graph still builds with the rule enforced");
+				for (ProductId id : { kSourceIdentity, kSourceGeometry }) {
+					const Node* n = g.Find(id);
+					Assert::IsNotNull(n);
+					Assert::IsTrue(n->heldState);
+					Assert::AreEqual(0, int(n->livePool), L"no live pool");
+					Assert::AreEqual(uint64_t(0), n->liveBytes);
+					Assert::IsTrue(n->ring >= n->history + 1, L"the ring keeps its history");
+				}
+			}
+			// A consumer at lag 0 on either record is refused, visibly.
+			for (ProductId id : { kSourceIdentity, kSourceGeometry }) {
+				ConsumerDecl c;
+				c.id = 1;
+				c.name = "lag-zero reader";
+				AddConsume(c, id, 0);
+				const Graph bad = BuildGraph(reg, std::vector<ConsumerDecl>(1, c), Settings(Dims{ 1920, 1080 }, 1));
+				Assert::IsFalse(bad.valid);
+				Assert::IsTrue(std::string(bad.error).find("held-state") != std::string::npos);
+				Assert::AreEqual(int(id), int(bad.errorProduct));
+			}
+		}
+
 		TEST_METHOD(EveryRegistryProductHasACatalogRow)
 		{
 			const Registry reg = SkeletonProducts();
@@ -338,6 +394,7 @@ namespace ProductCatalogTestsNs
 				{ kTdAnalysis, TdProducts::kUnitVersion }, { kTdRefstore, TdProducts::kUnitVersion },
 				{ kTdAdmission, TdProducts::kUnitVersion },
 				{ kSourceIdentity, SourceIdentity::kUnitVersion },
+				{ kSourceGeometry, SourceGeometry::kUnitVersion },
 				{ kP10GrainSplit, GrainSplit::kUnitVersion }, { kP10cGrainSplitChroma, GrainSplit::kUnitVersion },
 			};
 			for (const Pair& p : pairs) {
@@ -465,7 +522,7 @@ namespace ProductCatalogTestsNs
 			for (double period : periods) {
 				const Registry reg = SkeletonProducts(false, false, period);
 				Assert::IsTrue(reg.Validate());
-				for (uint8_t lane : { uint8_t(0), uint8_t(1), uint8_t(3) }) {
+				for (uint8_t lane : { uint8_t(0), uint8_t(1), uint8_t(2), uint8_t(3) }) {
 					GraphSettings gs = Settings(Dims{ 3840, 2160 }, lane);
 					gs.renderAhead = 8;
 					gs.laneJobsInFlight = 4;
@@ -475,15 +532,23 @@ namespace ProductCatalogTestsNs
 						Assert::IsTrue(int(n.ring) >= int(n.history) + 1, L"ring >= history + 1");
 						if (n.singletonStore)   // the ping-pong store: two buffers, lane-only (no live fill)
 							Assert::IsTrue(int(n.ring) == 2 && n.livePool == 0, L"a single store is two buffers and has no live pool");
+						else if (n.heldState)   // held state (P14, P14g): lane-only, read at lag >= 1; no live fill, so no live pool
+							Assert::IsTrue(n.livePool == 0, L"a held-state product has no live pool");
 						else
 							Assert::IsTrue(int(n.livePool) >= int(n.history) + 1, L"live pool >= history + 1");
 					}
-					// The look-ahead form (quality_pattern) needs lane lead >= 3 (effective lead = min(declared 2, lane lead - 1)); a shorter queue
-					// resolves it to the causal substitute (a visible reduced mode). Both carry the same derived history depth.
+					// The look-ahead form (quality_pattern) stays in the graph while the queue supplies any lead: effective lead = min(declared 2,
+					// lane lead - 1), so lane 2 gives effective lead 1 (still quality_pattern, a shorter look-ahead) and lane >= 3 gives 2. Only a
+					// lane lead of 0 or 1 gives no lead and resolves it to the causal substitute (a visible reduced mode). Both carry the same derived history depth.
 					const Node* qp = g.Find(kQualityPattern);
 					const Node* qc = g.Find(kQualityPatternCausal);
-					Assert::IsTrue((qp != nullptr) == (lane >= 3), L"quality_pattern is in the graph exactly when the queue supplies its lead");
-					Assert::IsTrue(lane >= 3 || qc != nullptr, L"otherwise the causal substitute stands in");
+					Assert::IsTrue((qp != nullptr) == (lane >= 2), L"quality_pattern is in the graph exactly when the queue supplies some lead (lane lead >= 2)");
+					Assert::IsTrue(lane >= 2 || qc != nullptr, L"otherwise the causal substitute stands in");
+					if (qp) {
+						Assert::AreEqual(int(lane == 2 ? 1 : 2), int(qp->lead), L"effective lead = min(declared 2, lane lead - 1): lane 2 gives 1, lane 3 gives 2");
+						Assert::AreEqual(2, int(qp->declaredLead));
+						Assert::IsFalse(qp->shortQueue, L"a shortened look-ahead is not the causal substitute");
+					}
 					const Node* record = qp ? qp : qc;
 					Assert::IsNotNull(record);
 					Assert::AreEqual(int(QualityPatternHistoryFrames(period)), int(record->history), L"the node carries the derived depth, no silent change");
@@ -499,6 +564,60 @@ namespace ProductCatalogTestsNs
 			Assert::AreEqual(223, int(QualityPatternHistoryFrames(1000.0 / 240.0)));
 			Assert::IsFalse(FallbackCatalog::SkeletonHistoryCapped(note).reason.empty());
 			Assert::IsFalse(FallbackCatalog::SkeletonHistoryCapped("").engaged);
+		}
+
+		TEST_METHOD(RecordHistoriesAreDerivedFromTheConfiguredQueue)
+		{
+			// history_seconds = max(floor, queue multiple x (R + L + look-ahead) x period); frames = ceil(seconds / period), capped at kRecordHistoryMax.
+			const double p24 = 1001.0 / 24.0;
+			const double p60 = 1001.0 / 60.0;
+			Assert::AreEqual(unsigned(100), QueueFramesFor(8, 4, 88));
+			// The floors hold on a short queue. At 24 p (41.708 ms) the floors are 2 s = ceil(47.95) = 48 frames of quality pattern and
+			// 0.25 s = ceil(5.994) = 6 frames of trail summary. A queue of 3 frames (0.125 s) is under both floors; a queue of 7 frames
+			// (7 x 41.708 = 291.96 ms) is far under the 2 s floor but ABOVE the 0.25 s floor, so the trail summary follows it: 7 frames.
+			const unsigned shortQ = QueueFramesFor(2, 3, 2);
+			const unsigned tinyQ = QueueFramesFor(0, 1, 2);
+			Assert::AreEqual(unsigned(7), shortQ);
+			Assert::AreEqual(48, int(QualityPatternHistoryFrames(p24, shortQ)));
+			Assert::AreEqual(int(QualityPatternHistoryFrames(p24)), int(QualityPatternHistoryFrames(p24, shortQ)));
+			Assert::AreEqual(6, int(TdTrailSummaryHistoryFrames(p24, tinyQ)));
+			Assert::AreEqual(int(TdTrailSummaryHistoryFrames(p24)), int(TdTrailSummaryHistoryFrames(p24, tinyQ)));
+			Assert::AreEqual(7, int(TdTrailSummaryHistoryFrames(p24, shortQ)), L"7 queue frames exceed the 0.25 s floor (6 frames): the queue sets the depth");
+			// A long queue gives a longer history: 100 frames = 4.17 s at 24 p, above both floors. The same 100 frames are only 1.67 s at 60 p,
+			// below the 2 s floor, so the quality pattern keeps its floor there (120 frames) while the trail summary follows the queue.
+			Assert::AreEqual(100, int(QualityPatternHistoryFrames(p24, 100)));
+			Assert::AreEqual(100, int(TdTrailSummaryHistoryFrames(p24, 100)));
+			Assert::AreEqual(int(QualityPatternHistoryFrames(p60)), int(QualityPatternHistoryFrames(p60, 100)));
+			Assert::AreEqual(100, int(TdTrailSummaryHistoryFrames(p60, 100)));
+			// The registry carries the derived depths (the quality pattern, its causal substitute and the trail summary).
+			const Registry reg100 = SkeletonProducts(false, false, p24, 100);
+			Assert::IsTrue(reg100.Validate());
+			Assert::AreEqual(100, int(reg100.Get(kQualityPattern).history));
+			Assert::AreEqual(100, int(reg100.Get(kQualityPatternCausal).history));
+			Assert::AreEqual(100, int(reg100.Get(kTdTrailSummary).history));
+			Assert::AreEqual(48, int(SkeletonProducts(false, false, p24, 0).Get(kQualityPattern).history));
+			// Unmeasured period: today's behaviour (the field maximum), whatever the queue.
+			Assert::AreEqual(int(kRecordHistoryMax), int(QualityPatternHistoryFrames(0.0, 300)));
+			Assert::IsTrue(RecordHistoryCapNote(0.0, true, true, 300).empty());
+			// The cap and its visible note: exactly kRecordHistoryMax frames of queue is not capped, one more is, and the note names the queue.
+			Assert::IsTrue(RecordHistoryCapNote(p24, true, true, kRecordHistoryMax).empty());
+			const std::string over = RecordHistoryCapNote(p24, true, true, unsigned(kRecordHistoryMax) + 1u);
+			Assert::IsTrue(over.find("quality pattern history capped at 223 frames (the configured queue asks for 224 frames)") != std::string::npos, L"the queue cap is named");
+			Assert::IsTrue(over.find("td trail summary history capped at 223 frames (the configured queue asks for 224 frames)") != std::string::npos);
+			Assert::AreEqual(int(kRecordHistoryMax), int(QualityPatternHistoryFrames(p24, 300)));
+			// A rate-driven cap keeps its own wording, whatever a short queue adds.
+			Assert::IsTrue(RecordHistoryCapNote(1000.0 / 240.0, true, true, 7).find("quality pattern history capped at 223 frames (source rate above 111.5 fps)") != std::string::npos);
+			// Through a built graph: the note reads the graph's own queue (R + L + look-ahead walk), and the capped node holds the cap.
+			GraphSettings gs = Settings(Dims{ 3840, 2160 }, 1);
+			gs.renderAhead = 0;
+			gs.lookAheadWalk = 300;
+			const Registry regCap = SkeletonProducts(false, false, p24, QueueFrames(gs));
+			const Graph g = FullGraph(gs, regCap);
+			Assert::IsTrue(g.valid, L"a queue-driven cap still fits the slot counts at a lane lead of 1");
+			const Node* causal = g.Find(kQualityPatternCausal);
+			Assert::IsNotNull(causal);
+			Assert::AreEqual(int(kRecordHistoryMax), int(causal->history));
+			Assert::IsTrue(GraphHistoryCapNote(g, p24).find("(the configured queue asks for 301 frames)") != std::string::npos);
 		}
 
 		TEST_METHOD(GeneratedDocRegionMatchesTheCatalog)
