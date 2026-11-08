@@ -28,6 +28,9 @@
 #include <string>
 
 #ifndef _WINDOWS_
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 
