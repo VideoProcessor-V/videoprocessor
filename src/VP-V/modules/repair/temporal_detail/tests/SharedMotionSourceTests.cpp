@@ -151,6 +151,54 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1.0, static_cast<double>(lenient.trust[0]), 1e-6, L"within the handed-over limit");
 		}
 
+		// Monotonicity: a higher engine cost, or a higher forward/backward inconsistency, never gives a higher trust.
+		TEST_METHOD(HigherCostOrHigherInconsistencyNeverGivesHigherTrust)
+		{
+			auto trustAt = [](uint8_t patchCost, float inconsistentPx, size_t cell) {
+				auto slot = std::make_shared<VpMotion::P2Slot>(16);
+				slot->SetGeneration(1);
+				auto flow = std::make_shared<MotionAhead::Flow>();
+				flow->halfW = 64;
+				flow->halfH = 64;
+				flow->gridW = flow->gridH = 16;
+				const size_t cells = 256;
+				flow->forward.assign(cells * 2, 0);
+				flow->backward.assign(cells * 2, 0);
+				flow->forwardCost.assign(cells, 10);
+				flow->backwardCost.assign(cells, 10);
+				for (int cy = 0; cy < 2; ++cy)
+					for (int cx = 0; cx < 2; ++cx)
+						flow->forwardCost[static_cast<size_t>(cy) * 16 + cx] = patchCost;   // one de-judder block (2 x 2 cells)
+				flow->forward[(8 * 16 + 8) * 2] = static_cast<int16_t>(inconsistentPx * 32.0f);   // backward is zero: |f + b| = inconsistentPx
+				MotionAhead::FlowExtras(*flow);
+				Assert::IsTrue(slot->Publish(1, 2, 1, flow));
+				MotionValidity::State validity;
+				validity.NoteKept(1);
+				validity.NoteKept(2);
+				TemporalDetail::SharedMotionSource source(VpMotion::P2View(slot), &validity);
+				source.SetSourceSize(128, 128);
+				TemporalDetail::MotionPair out;
+				Assert::IsTrue(source.Forward(2, out));
+				return static_cast<double>(out.trust[cell]);
+			};
+			double previous = 2.0;
+			for (const int cost : { 10, 20, 30, 40, 60, 120, 250 })
+			{
+				const double t = trustAt(static_cast<uint8_t>(cost), 0.0f, 0);
+				Assert::IsTrue(t >= 0.0 && t <= 1.0 && t <= previous + 1e-9, L"a higher cost never gives a higher trust");
+				previous = t;
+			}
+			Assert::IsTrue(previous < 0.01 && trustAt(10, 0.0f, 0) > 0.99, L"(and the range is used: sure = 1, far less sure = 0)");
+			previous = 2.0;
+			for (const float error : { 0.0f, 0.5f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 4.0f })
+			{
+				const double t = trustAt(10, error, 8 * 16 + 8);
+				Assert::IsTrue(t >= 0.0 && t <= 1.0 && t <= previous + 1e-9, L"a higher inconsistency never gives a higher trust");
+				previous = t;
+			}
+			Assert::IsTrue(previous < 0.01, L"inconsistent by more than twice the limit: not trusted");
+		}
+
 		// The sustained-absent threshold is derived from the look-ahead depth the way the "motion" entry's NoPairTracker does, not a constant.
 		TEST_METHOD(TheSustainedAbsentThresholdFollowsTheLookAheadDepth)
 		{
