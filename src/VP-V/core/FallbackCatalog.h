@@ -239,6 +239,9 @@ namespace FallbackCatalog
 	};
 	inline LookAheadFailures MotionAheadWorker() { return LookAheadFailures("motion look-ahead", "no optical-flow look-ahead for some frames"); }
 	inline LookAheadFailures SourceResolutionWorker() { return LookAheadFailures("source resolution look-ahead", "resolution judged on arrival only"); }
+	// motion.estimation (M2 P5a-5): the K4 pre-estimate hook (camera-guided matching) threw; those pairs were estimated
+	// without camera guidance.
+	inline LookAheadFailures PreEstimateHookFailures() { return LookAheadFailures("vector_engine_hook", "camera guidance skipped for some pairs"); }
 
 	// ---- control.diagnostics: diagnostic overrides (bug hunt 39 #6) -----------------------------
 	// Test / debug switches set in the environment outside a test harness

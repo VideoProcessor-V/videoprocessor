@@ -336,6 +336,18 @@ namespace MotionValidity
 				VpIndicator::Bit(VpIndicator::kSettingsMotion));
 		}
 
+		// Bound: the Indicator's stamp of seq (true). Unbound: false and `out` untouched (M2 P5a-5, IVectorEngine::FieldOf).
+		bool StampAt(uint64_t seq, VpIndicator::Stamp& out) const
+		{
+			if (!bound.load(std::memory_order_acquire))
+				return false;
+			const std::shared_ptr<VpIndicator::Indicator> indicator = VpIndicator::Indicator::Latest(std::atomic_load(&ind));
+			if (!indicator)
+				return false;
+			out = indicator->StampOf(seq);
+			return true;
+		}
+
 		// Bound: the producer's engage generation at seq = Drive::FullKey (era + FULL count).
 		// Unbound: StreamGeneration().
 		uint64_t StreamGenerationAt(uint64_t seq) const
