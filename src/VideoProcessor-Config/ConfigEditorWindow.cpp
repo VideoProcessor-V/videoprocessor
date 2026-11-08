@@ -5472,6 +5472,7 @@ QWidget* ConfigEditorWindow::createShell()
             return subs;
         };
         vpvHost.openPage = [this](const QString& pageName) { selectPage(pageName); };
+        vpvHost.bothPathwayCards = [this] { return Vpv::BothPathwayCards(formApi_.kit); };
         vpvPages_.append(pages_, QStringLiteral("VP-V"), createPage(QStringLiteral("VP-V"),
             QStringLiteral("Everything VP-V adds, by unit: one tier per unit plus a global tier, each unit's settings, and the fallbacks engaged."),
             Vpv::CreateSection(vpvHost)));
@@ -5959,19 +5960,6 @@ QWidget* ConfigEditorWindow::createStartupPage()
     });
     hardwareForm->addRow(QStringLiteral("Input connection"), captureConnection);
     auto* vpvForm = Vpv::AddNestedVpvForm(hardwareForm);   // VPV-HOOK
-    // [decklink] ycbcr_12bit_capture (FL35; planner 2026-10-16: every setting has a Config control).
-    auto* ycbcr12 = bindChoiceField(QStringLiteral("decklink"), QStringLiteral("ycbcr_12bit_capture"),
-        { QStringLiteral("v210"), QStringLiteral("rgb12"), QStringLiteral("off") },
-        { QStringLiteral("10-bit 4:2:2, keeps BTB/WTW (default)"),
-          QStringLiteral("12-bit RGB from the card, clips BTB/WTW (earlier default)"),
-          QStringLiteral("Refuse the signal (older behaviour)") });
-    ycbcr12->setToolTip(QStringLiteral(
-        "DeckLink only: a source sending 12-bit YCbCr 4:2:2 (some players and consoles); the SDK has no 12-bit "
-        "YCbCr capture format. 10-bit 4:2:2 (default): the signal as sent minus the lowest two bits; "
-        "below-black/above-white kept and VP owns the colour matrix. 12-bit RGB: the card converts to full-range "
-        "12-bit RGB when it offers that for the mode (all 12 bits, but the card's conversion clips "
-        "below-black/above-white and out-of-gamut values), otherwise 10-bit 4:2:2. Refuse: no picture."));
-    vpvForm->addRow(QStringLiteral("12-bit YCbCr signals (DeckLink)"), ycbcr12);
     // Hunt 2 (2026-10-17, every setting has a control): [decklink] RGB packing,
     // [directshow.conversion] and [directshow.ppm]. The first entry of each choice
     // leaves the key unset (the runtime default).
@@ -6038,13 +6026,6 @@ QWidget* ConfigEditorWindow::createStartupPage()
         configuredBooleanValue(value(QStringLiteral("general"),
             QStringLiteral("no_ui")), false)));
     behaviorLayout->addWidget(bindCheckField(QStringLiteral("Start minimized"), QStringLiteral("general"), QStringLiteral("startminimized")));
-    // Hunt 2 (2026-10-17): VP-0179 recovery policy, read once at startup (default on).
-    auto* boundedRecovery = bindCheckField(QStringLiteral("Bounded invalid-capture recovery"),
-        QStringLiteral("general"), QStringLiteral("bounded_invalid_capture_recovery"), true);
-    boundedRecovery->setToolTip(QStringLiteral(
-        "On (default): a bounded 1500 ms grace after an invalid capture state; only a valid capture state cancels "
-        "recovery. Off: the earlier recovery, which keeps the frame counter. Takes effect when VP restarts."));
-    behaviorLayout->addWidget(boundedRecovery);
     // Delta 6 (settings first): the saved state of what a key or a main-window
     // control can change.
     auto* statsOverlay = bindCheckField(QStringLiteral("Show statistics overlay"),
@@ -12019,19 +12000,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* summary = helpLabel(QStringLiteral(
             "DV Tunneling uses VP Renderer and needs no additional input settings."));
         modeLayout->addWidget(summary);
-        // DV input fixes 2026-10-18: signals that are not a tunnel leave the
-        // tunnel path (10-bit RGB, BT.2020 RGB without tunnel metadata).
-        auto* handoffCheck = bindCheckField(
-            QStringLiteral("Hand LLDV / HDR10 sent as RGB to the normal path"),
-            QStringLiteral("general"), QStringLiteral("dv_tunnel_handoff"), true);
-        handoffCheck->setToolTip(QStringLiteral(
-            "With DV Tunneling, a signal that carries no tunnel metadata for about a second and is either 10-bit RGB "
-            "or BT.2020 RGB without an HDR flag (LLDV or HDR10 converted to RGB, for example by an HDFury) leaves the "
-            "tunnel path: it is shown normally and treated as PQ HDR (8-bit LLDV included) instead of staying black or "
-            "being shown as SDR. A tunnel arriving later takes the signal back. LLDV and HDR10 sent as YCbCr are also "
-            "declined by the tunnel (it is only ever 8-bit RGB), even under a profile set to DV Tunneling, and get the "
-            "normal LLDV / newlldv handling. Default on. Restart VideoProcessor after changing it. Key: dv_tunnel_handoff."));
-        modeLayout->addWidget(handoffCheck);
         detailLayout->insertWidget(2, dvModeControls);
         fields->push_back({ QStringLiteral("dolby_vision_tunnel"), tunneling, Field::DvMode });
 
@@ -12042,31 +12010,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         lldvLayout->setSpacing(12);
         lldvLayout->addWidget(helpLabel(QStringLiteral(
             "Uses this profile's metadata for recognized HDFury LLDV input with DirectShow and VP Renderer.")));
-        auto* newLldvCheck = bindCheckField(
-            QStringLiteral("Treat BT.2020 without HDR flag as HDR (LLDV/HDR10)"),
-            QStringLiteral("general"), QStringLiteral("newlldv"));
-        newLldvCheck->setToolTip(QStringLiteral(
-            "A BT.2020, 10/12-bit signal without an HDR InfoFrame is shown as PQ HDR after 1.5 s: "
-            "LLDV, and HDR10 whose HDR flag was dropped (for example an HDFury with its HDR toggle off). "
-            "Metadata comes from this LLDV profile; peak detection works as usual. "
-            "Never for the DV tunnel, BT.709 or a source that sends an HDR InfoFrame. Key: newlldv."));
-        lldvLayout->addWidget(newLldvCheck);
-        auto* sdrVetoCheck = bindCheckField(
-            QStringLiteral("Return real SDR to SDR from the picture (SDR veto)"),
-            QStringLiteral("general"), QStringLiteral("newlldv_sdr_veto"), true);
-        sdrVetoCheck->setToolTip(QStringLiteral(
-            "With the option above, SDR sent as BT.2020 returns to SDR when the picture shows SDR highlights "
-            "(at a cut, after evidence in two shots; once per signal). Default on. Key: newlldv_sdr_veto."));
-        lldvLayout->addWidget(sdrVetoCheck);
+        lldvLayout->addWidget(bindCheckField(QStringLiteral("Alternate LLDV detection"),
+            QStringLiteral("general"), QStringLiteral("newlldv")));
         lldvLayout->addWidget(helpLabel(QStringLiteral(
-            "These apply to all LLDV profiles and to HDR10 without an HDR flag. Restart VideoProcessor after changing them.")));
+            "Alternate detection applies to all LLDV profiles. Restart VideoProcessor after changing it.")));
         lldvLayout->addWidget(profileFields);
         detailLayout->addWidget(lldvSettings);
-        updateDvModeControls = [tunneling, lldvSettings, summary, handoffCheck]()
+        updateDvModeControls = [tunneling, lldvSettings, summary]()
         {
             lldvSettings->setVisible(!tunneling->isChecked());
             summary->setVisible(tunneling->isChecked());
-            handoffCheck->setVisible(tunneling->isChecked());
         };
         connect(tunneling, &QRadioButton::toggled, this,
             [this, state, updateDvModeControls](bool enabled)
@@ -15254,32 +15207,6 @@ QWidget* ConfigEditorWindow::createLogsPage()
     layout->addWidget(helpLabel(QStringLiteral(
         "Enhanced logging keeps all logs and writes additional live telemetry files. Use it only while diagnosing an issue.")));
 
-    // Report-a-problem (StateReportSettings.h): the switches beside the
-    // Shortcuts page's "Save problem report" (default Ctrl+Alt+D).
-    auto* reportsTitle = new QLabel(QStringLiteral("Problem reports"));
-    reportsTitle->setObjectName(QStringLiteral("config.logging.reports_title"));
-    QFont reportsFont = reportsTitle->font();
-    reportsFont.setBold(true);
-    reportsTitle->setFont(reportsFont);
-    layout->addWidget(reportsTitle);
-    auto* autoReport = bindCheckField(QStringLiteral("Save a problem report automatically"),
-        QStringLiteral("logging"), QStringLiteral("auto_report"), false);
-    autoReport->setAccessibleDescription(QStringLiteral(
-        "When VP recovers from a stall or a source gap, or a renderer reset fails, it saves a problem report "
-        "by itself: at most one every 10 minutes and five per run. Default: off."));
-    layout->addWidget(autoReport);
-    auto* reportThumbnail = bindCheckField(QStringLiteral("Include a small picture in problem reports"),
-        QStringLiteral("logging"), QStringLiteral("report_thumbnail"), false);
-    reportThumbnail->setAccessibleDescription(QStringLiteral(
-        "Adds a 480-pixel-wide copy of the next rendered frame to each report (VP Renderer only). "
-        "Default: off - reports then hold no pictures."));
-    layout->addWidget(reportThumbnail);
-    layout->addWidget(helpLabel(QStringLiteral(
-        "Press the problem-report shortcut (Shortcuts page, default Ctrl+Alt+D) or choose \"Save problem report\" "
-        "in VP's window menu right after you see a problem. VP saves the last few seconds of its state - timings, "
-        "decisions, Dynamic Drive commands, settings, the log and system details, without your name or private "
-        "folder paths - to logs\reports (the newest 20 are kept). Send the .zip file with a short description.")));
-
     QString logDirectory = QFileInfo(configPath_).absoluteDir().filePath(QStringLiteral("logs"));
     const QString logPath = QDir(logDirectory).filePath(QStringLiteral("vp.log"));
     auto* actions = new QHBoxLayout;
@@ -15294,30 +15221,10 @@ QWidget* ConfigEditorWindow::createLogsPage()
 	}
     openFolder->setAccessibleDescription(QStringLiteral("Open the folder containing VideoProcessor logs."));
     openLog->setAccessibleDescription(QStringLiteral("Open the current VideoProcessor log."));
-    auto* openReports = new QPushButton(QStringLiteral("Open reports folder"));
-    openReports->setObjectName(QStringLiteral("config.logging.open_reports"));
-    openReports->setEnabled(!remoteClient_);
-    if (remoteClient_)
-        openReports->setToolTip(QStringLiteral("Reports are on the VP computer."));
-    openReports->setAccessibleDescription(QStringLiteral("Open the folder containing VideoProcessor problem reports."));
     actions->addWidget(openFolder);
     actions->addWidget(openLog);
-    actions->addWidget(openReports);
     actions->addStretch();
     layout->addLayout(actions);
-    const QString reportsDirectory = QDir(logDirectory).filePath(QStringLiteral("reports"));
-    connect(openReports, &QPushButton::clicked, this, [this, reportsDirectory]
-    {
-        if (!QDir(reportsDirectory).exists())
-        {
-            QMessageBox::information(this, QStringLiteral("Problem reports"),
-                QStringLiteral("No problem report has been saved yet. Press the problem-report shortcut in VP first."));
-            return;
-        }
-        if (!openPathExternally(reportsDirectory))
-            QMessageBox::warning(this, QStringLiteral("Problem reports"),
-                QStringLiteral("Windows could not open the reports folder."));
-    });
     connect(openFolder, &QPushButton::clicked, this, [this, logDirectory]
     {
         if (!QDir(logDirectory).exists())
@@ -15567,53 +15474,6 @@ QWidget* ConfigEditorWindow::createShortcutsSetupPage()
     help->setWordWrap(true);
     help->setObjectName(QStringLiteral("fieldHelp"));
     handlingLayout->addWidget(help);
-    auto* globalHotkeys = bindCheckField(
-        QStringLiteral("Every shortcut works while another application has focus"),
-        QStringLiteral("shortcuts"), QStringLiteral("global_hotkeys"), false);
-    globalHotkeys->setToolTip(QStringLiteral(
-        "Off (recommended): shortcuts act only while VideoProcessor (its window or its fullscreen "
-        "picture) has focus, except the actions listed below; keys pressed in another application "
-        "(MPC-HC, a browser) are left to that application. On: every shortcut also acts, and the "
-        "Config and video-only keys are taken, while another application has focus."));
-    handlingLayout->addWidget(globalHotkeys);
-    // Bug hunt 3 (SH6): the actions that stay global with global_hotkeys off.
-    {
-        auto* globalActionsRow = new QWidget;
-        auto* globalActionsLayout = new QHBoxLayout(globalActionsRow);
-        globalActionsLayout->setContentsMargins(0, 0, 0, 0);
-        auto* globalActionsLabel = new QLabel(QStringLiteral("Global actions"));
-        auto* globalActions = new QLineEdit(value(QStringLiteral("shortcuts"),
-            QStringLiteral("global_actions"), QString()));
-        globalActions->setObjectName(controlName(QStringLiteral("shortcuts"), QStringLiteral("global_actions")));
-        globalActions->setAccessibleName(QStringLiteral("Global actions"));
-        globalActions->setPlaceholderText(QStringLiteral("none (for example: config_editor, toggle_noui)"));
-        globalActions->setToolTip(QStringLiteral(
-            "Comma-separated [shortcuts] actions that act while another application has focus, such as "
-            "config_editor or toggle_noui. Empty (the default): none. For MPC-HC file playback leave "
-            "out actions whose keys MPC uses itself (Alt+Enter, Ctrl+1..4, Ctrl+I)."));
-        connect(globalActions, &QLineEdit::textChanged, this, [this](const QString& text)
-        {
-            if (!document_) return;
-            const std::string valueText = text.trimmed().toLocal8Bit().constData();
-            if (!document_->SetKnown("shortcuts", "global_actions", valueText))
-            {
-                document_->AddSection("shortcuts");
-                document_->SetKnown("shortcuts", "global_actions", valueText);
-            }
-            markDirty();
-        });
-        globalActionsLayout->addWidget(globalActionsLabel);
-        globalActionsLayout->addWidget(globalActions, 1);
-        handlingLayout->addWidget(globalActionsRow);
-    }
-    auto* abHelp = new QLabel(QStringLiteral(
-        "Settings are the primary control; shortcuts are a backup for A/B comparison. A key's change "
-        "lasts until restart, a profile change, or applying that setting here, and the statistics "
-        "overlay shows it on its \"Key override\" line. Keys marked DirectShow only do nothing with "
-        "VP Renderer."));
-    abHelp->setWordWrap(true);
-    abHelp->setObjectName(QStringLiteral("fieldHelp"));
-    handlingLayout->addWidget(abHelp);
     layout->addWidget(createCard(QStringLiteral("Keyboard handling"),
         QStringLiteral("Choose whether shortcuts remain global or require VideoProcessor focus."),
         handling));

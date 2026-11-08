@@ -2632,6 +2632,23 @@ namespace Vpv
 		originalNote->setVisible(false);
 		layout->addWidget(originalNote);
 		layout->addWidget(content);
+		// VP-V settings that act on both pathways (they used to sit on Bill's pages, P8 step 2): below
+		// the unit tabs and outside `content`, so the Original pathway does not grey them.
+		if (host.bothPathwayCards)
+		{
+			auto* both = new QWidget;
+			both->setObjectName(ObjectName(QStringLiteral("both")));
+			auto* bothLayout = new QVBoxLayout(both);
+			bothLayout->setContentsMargins(0, 12, 0, 0);
+			bothLayout->setSpacing(8);
+			auto* bothTitle = Help(QStringLiteral("<b>On both pathways</b> - these VP-V settings are not switched off by the Original pathway."));
+			bothTitle->setTextFormat(Qt::RichText);
+			bothTitle->setObjectName(ObjectName(QStringLiteral("both.title")));
+			bothLayout->addWidget(bothTitle);
+			for (QWidget* card : host.bothPathwayCards())
+				if (card) bothLayout->addWidget(card);
+			layout->addWidget(both);
+		}
 
 		// The renderer profile. It follows the Rendering page's profile list, whose selected profile
 		// the moved upstream rows edit (one current renderer profile on both pages).

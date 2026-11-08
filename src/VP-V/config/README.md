@@ -148,6 +148,11 @@ Owner decisions of 2026-10-25, built on the pages above:
 
 Bill's editor file only gets call sites; the logic is here (header-only):
 
+- `VpvBothPathwayCards.h` (P8 step 2): the VP-V rows that used to sit on Bill's pages and act on both
+  pathways (12-bit YCbCr capture, the DV hand-off and SDR veto, problem reports, global shortcuts, and
+  Bill's `bounded_invalid_capture_recovery`, which his editor has no control for). Built through the
+  EditorKit (same object names, keys, defaults); `Host::bothPathwayCards` places them below the unit tabs,
+  outside the part the Original pathway greys. Bill's General, DV, Logs and Shortcuts pages are his again.
 - `VpvDitherChoices.h`: the Dithering choice sets. On the Original pathway the Scaling page's
   control is Bill's (blue_noise, ordered_fixed, white_noise, off); in VP-V mode it is VP-V's
   full list (Auto, ordered_lut, the error_diffusion_* modes). The editor switches the set when

@@ -13,6 +13,7 @@
 #include <QStringList>
 #include <QWidget>
 #include <VideoProcessor-Config/ConfigPageHost.h>
+#include <VP-V/config/VpvBothPathwayCards.h>
 #include <vector>
 
 namespace Vpv

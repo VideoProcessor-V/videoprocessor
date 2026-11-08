@@ -59,6 +59,9 @@ namespace Vpv
 		std::function<QString(const QString& key)> upstreamControlName;
 		// The upstream widget tree the managed controls live in (greying); may be null.
 		QWidget* upstreamRoot = nullptr;
+		// Cards of VP-V settings that act on both pathways (VpvBothPathwayCards.h), shown below the unit
+		// tabs, outside the part the Original pathway greys; may be empty (none).
+		std::function<std::vector<QWidget*>()> bothPathwayCards;
 	};
 
 	// The VP-V page body (the host wraps it in its own page frame).
