@@ -117,6 +117,8 @@ namespace Vpv
 			void SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
 				const std::vector<VpSkeleton::ProductId>& publishedOutside) override;
 			void ClearExternalDemand(const void* host, const void* owner) override;
+			// The host lane's current lease of `product` (IExternalDemand::LeaseFor); empty without a lane or the product. Any thread.
+			VpSkeleton::LaneLease LeaseFor(const void* host, VpSkeleton::ProductId product) override;
 			// External-demand entries held for `host` (tests / diagnostics). Every entry of a host is erased at its GpuReleased / Shutdown and when
 			// a new renderer is found at the address of a dead one, so a renderer recreated at the same pointer never inherits a stale demand.
 			size_t ExternalEntriesOf(const void* host) const;

@@ -1165,6 +1165,40 @@ namespace SkeletonModuleTestsNs
 			Assert::IsFalse(eng.fitWanted, L"and the engine is told");
 		}
 
+		// Camera ahead fit (G-A1): the lease a publisher of an external product takes through the interface, on a REAL module. Empty
+		// without a lane or without the product in the graph; the lane's own lease (same table, generation) once the demand holds P7.
+		TEST_METHOD(LeaseForGivesTheLanesLeaseOfADeclaredProductAndEmptyOtherwise)
+		{
+			FakeEngine eng;
+			Rig rig(Lane("on"));
+			rig.sk.SetEngineProviderForTesting([&eng](const void*) { return &eng; });
+			Vpv::Skeleton::IExternalDemand* demand =
+				static_cast<Vpv::Skeleton::IExternalDemand*>(rig.sk.Query(Vpv::Skeleton::kExternalDemandQueryId));
+			Assert::IsNotNull(demand);
+			Assert::IsNull(demand->LeaseFor(rig.Host(), VpSkeleton::kP7CameraFit).table, L"no lane yet: empty");
+			int other = 0;
+			Assert::IsNull(demand->LeaseFor(&other, VpSkeleton::kP7CameraFit).table, L"an unknown host: empty");
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 2; ++s)
+				rig.Frame(s);
+			Assert::IsNull(demand->LeaseFor(rig.Host(), VpSkeleton::kP7CameraFit).table, L"no demand: the graph has no P7, empty");
+			int owner = 0;
+			demand->SetExternalDemand(rig.Host(), &owner, CameraConsumers(), { VpSkeleton::kP7CameraFit });
+			for (int64_t s = 3; s <= 6; ++s)
+				rig.Frame(s);
+			const VpSkeleton::LaneLease l = demand->LeaseFor(rig.Host(), VpSkeleton::kP7CameraFit);
+			const VpSkeleton::LaneLease own = rig.sk.LaneOf(rig.Host())->Lease(VpSkeleton::kP7CameraFit);
+			Assert::IsNotNull(l.table);
+			Assert::IsTrue(l.table == own.table && l.generation == own.generation && l.generation >= 1, L"the lane's own current lease");
+			Assert::IsNotNull(l.table->Find(VpSkeleton::kP7CameraFit));
+			Assert::IsNotNull(l.bytes, L"with P7's bytes ring");
+			demand->ClearExternalDemand(rig.Host(), &owner);
+			rig.Frame(7);
+			Assert::IsNull(demand->LeaseFor(rig.Host(), VpSkeleton::kP7CameraFit).table, L"cleared: empty again");
+			Assert::IsNotNull(l.table->Find(VpSkeleton::kP7CameraFit), L"a held lease keeps its (old) state alive");
+		}
+
 		TEST_METHOD(WithoutAnEngineTheFeedSaysSo)
 		{
 			Rig rig(Lane("on"));

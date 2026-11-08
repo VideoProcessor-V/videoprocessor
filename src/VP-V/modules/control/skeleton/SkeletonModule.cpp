@@ -509,6 +509,18 @@ namespace Vpv
 			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
 			return b ? &b->lane : nullptr;
 		}
+		VpSkeleton::LaneLease SkeletonModule::LeaseFor(const void* host, VpSkeleton::ProductId product)
+		{
+			// The bundle is held for the call only; the lease holds the lane state itself (SK-W lease rules).
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
+			if (!b)
+				return VpSkeleton::LaneLease();
+			VpSkeleton::LaneLease l = b->lane.Lease(product);
+			if (!l.table || !l.table->Find(product))
+				return VpSkeleton::LaneLease();   // the graph does not hold the product (no external demand for it)
+			return l;
+		}
 		Dims SkeletonModule::DimsOf(const void* host) const
 		{
 			const std::shared_ptr<HostState> st = hosts_.Find(host);

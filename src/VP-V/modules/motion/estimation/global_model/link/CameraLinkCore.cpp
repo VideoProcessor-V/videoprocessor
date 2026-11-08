@@ -424,7 +424,14 @@ namespace CameraLink
 		m_renderSeq = f.renderSeq != 0 ? f.renderSeq : f.seq;
 		// (0) AHEAD FIT: the on-time seal of the frame starting now (its P7 was published into the on-time target before the seal).
 		if (ahead)
+		{
+			const bool usable = m_onTimeSource && m_onTimeSource().table != nullptr;
+			{
+				std::lock_guard<std::mutex> lock(m_statusMutex);
+				m_onTimeUsable = usable;
+			}
 			OnTimeSeal(m_renderSeq);
+		}
 		// (1) seal observer (the lag bridge's seal of f.seq; a frame the on-time seal already decided is skipped)
 		if (!(ahead && Retired(f.seq)))
 		{
@@ -690,19 +697,19 @@ namespace CameraLink
 	std::vector<FallbackCatalog::Decision> CameraLinkCore::CollectDecisions()
 	{
 		StatusFacts f;
-		bool bridged = false;
+		bool usable = false;
 		{
 			std::lock_guard<std::mutex> lock(m_statusMutex);
 			f = m_facts;
-			bridged = m_hold[kEvAhead].engaged;
+			usable = m_onTimeUsable;
 		}
 		std::vector<FallbackCatalog::Decision> d = BuildDecisions(f);
 		if (m_settings.aheadFit && !m_settings.deterministic && f.graphHasP7)
 		{
-			// AHEAD FIT (only when it is on): frames sealed by the lag bridge instead of on time are a visible downgrade.
-			const std::string why = std::string("camera: ahead fit bridged: P7 sealed by the lag bridge, not with its frame (") +
-				(m_onTimeSource ? "the fit missed its frame's seal or no ahead pair existed" : "no on-time seal target: SK-W2") + ")";
-			d.push_back(bridged || !m_onTimeSource ? FallbackCatalog::Engaged(kIdAheadBridged, why) : FallbackCatalog::Released(kIdAheadBridged));
+			// AHEAD FIT (only when it is on): no usable on-time target = every frame bridged, a visible downgrade. A late frame with a target
+			// is informational only (AheadLateLine in the status lines), never engaged here.
+			const std::string why = "camera: ahead fit has no on-time seal target (" + std::string(kAheadNoTargetText) + ")";
+			d.push_back(!usable ? FallbackCatalog::Engaged(kIdAheadNoTarget, why) : FallbackCatalog::Released(kIdAheadNoTarget));
 		}
 		return d;
 	}
@@ -713,8 +720,12 @@ namespace CameraLink
 			return;
 		lines.push_back(StatusLine(m_counters));
 		if (m_settings.aheadFit)
+		{
 			lines.push_back(m_settings.deterministic ? std::string(kAheadDeterministicText)
-				: AheadStatusLine(m_counters, m_onTimeSource ? m_onTimeName : std::string(kAheadNoTargetText)));
+				: AheadStatusLine(m_counters, OnTimeUsable() ? m_onTimeName : std::string(kAheadNoTargetText)));
+			if (!m_settings.deterministic)
+				lines.push_back(AheadLateLine(m_counters));   // G-A2: informational
+		}
 		for (const FallbackCatalog::Decision& d : CollectDecisions())
 			if (d.engaged)
 				lines.push_back(d.reason);

@@ -54,11 +54,21 @@ namespace CameraLink
 		uint64_t renderSeq = 0;
 	};
 
-	// AHEAD FIT: the decision id (Fallbacks / Config status / Ctrl+Alt+D) engaged while frames are bridged instead of sealed on time.
-	constexpr const char* kIdAheadBridged = "camera.ahead.bridged";
-	// What the on-time target is called in the status line when there is none (production until SK-W2 / the lease accessor).
+	// AHEAD FIT: the decision id (Fallbacks / Config status / Ctrl+Alt+D) engaged while there is NO usable on-time target (no skeleton lane
+	// holds P7): then every frame is bridged. A single frame that is late with a target present is NOT a defect (G-A2, "on time or not at
+	// all"): it is counted and shown as an informational line (AheadLateLine), never as an engaged entry.
+	constexpr const char* kIdAheadNoTarget = "camera.ahead.no_target";
+	// What the on-time target is called in the status line when there is none or it holds no P7.
 	constexpr const char* kAheadNoTargetText =
-		"none (SK-W gives the camera no lease of the skeleton lane's P7: every frame goes to the lag bridge until SK-W2)";
+		"none (no skeleton lane holds P7: analysis_lane off, no source yet, or the demand not applied yet): every frame goes to the lag bridge";
+	// G-A2: the informational line of the frames that missed the on-time seal and were sealed by the lag bridge instead.
+	inline std::string AheadLateLine(const FitCounters& c)
+	{
+		const unsigned long long late = c.aheadBridged.load() + c.aheadSeedFallback.load();
+		const unsigned long long all = late + c.onTimeSealed.load();
+		return "camera fit: " + std::to_string(late) + " of " + std::to_string(all) + " frames late (bridged): the lag bridge sealed them "
+			"(informational: on time or not at all)";
+	}
 	// Deterministic runs take ONE path: the lag bridge from the seed (the ahead fit's on-time / bridged split depends on wall-clock).
 	constexpr const char* kAheadDeterministicText =
 		"camera ahead fit: off in deterministic mode (the deterministic path is the seed fit through the lag bridge)";
@@ -123,6 +133,8 @@ namespace CameraLink
 		// dejudder_consistency_px default, as the TD motion source).
 		void SetAheadConsistency(float enginePx) { if (enginePx > 0.0f) m_aheadConsistency = enginePx; }
 		bool AheadActive() const { return m_active && m_settings.aheadFit && !m_settings.deterministic && static_cast<bool>(m_aheadSource); }
+		// The on-time target's lease held P7 at the last frame start (render thread; false without a target).
+		bool OnTimeUsable() const { std::lock_guard<std::mutex> lock(m_statusMutex); return m_onTimeUsable; }
 		uint64_t AheadNext() const { return m_aheadNext; }
 		void SetTimingFacts(const TimingFacts& f);
 		// Registers the reader (reset -> NoteReset, timing -> NoteTiming). Setup, before the first Observe.
@@ -255,6 +267,7 @@ namespace CameraLink
 		uint64_t m_aheadNext = 0;            // the next frame the ahead pair is asked for (0 = not started)
 		uint64_t m_aheadRefusedSeq = 0;      // the last frame whose pair was refused (counted once)
 		uint64_t m_renderSeq = 0;            // the frame rendering now (the last OnFrameStart)
+		bool m_onTimeUsable = false;         // under m_statusMutex: the on-time target's lease held P7 at the last frame start
 		std::vector<uint64_t> m_seedPending; // frames the seed fallback is fetching while the ahead fit is on (ahead submissions wait)
 		enum { kAheadMarks = 256 };
 		std::unique_ptr<std::atomic<uint64_t>[]> m_onTimeMark{ new std::atomic<uint64_t>[kAheadMarks] };   // seq + 1 at seq % size: published on time (the worker writes)

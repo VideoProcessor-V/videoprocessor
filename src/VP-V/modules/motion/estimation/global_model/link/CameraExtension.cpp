@@ -16,7 +16,9 @@
 #include <DebugLog.h>
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/modules/control/skeleton/SkeletonFacts.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
+#include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 
@@ -81,6 +83,7 @@ namespace Vpv
 			bool guideWanted = false;                   // ... and any camera_meas_* switch on
 			bool labelsWanted = false;                  // ... and labels are wanted (overlay, a use switch, camera_labels_gpu)
 			bool aheadWanted = false;                   // ... and camera_ahead_fit on (the fit reads the ahead NVOF pair, FlowOf)
+			Skeleton::IExternalDemand* demand = nullptr;   // AHEAD FIT: the skeleton's demand entry the P7 demand was declared through (null = none)
 			bool liveBuilt = false;                     // lane built and the core attached to it
 			bool graphRefused = false;                  // the registry refused the camera graph (until the next settings change)
 			bool liveLabelsGpu = false;                 // camera_labels_gpu the live parts were built with
@@ -394,8 +397,14 @@ namespace Vpv
 				st.adapter->Detach(engineValid);
 				st.adapter.reset();
 			}
+			if (st.demand)
+			{
+				st.demand->ClearExternalDemand(st.host, &st);   // AHEAD FIT: the on-time P7 demand goes with the live parts
+				st.demand = nullptr;
+			}
 			if (st.core)
 			{
+				st.core->AttachOnTime(VpSkeleton::LaneLeaseSource(), std::string());
 				st.core->labelsProvider = nullptr;
 				st.core->SetFactsProvider(nullptr);
 				st.core->SetEngine(nullptr);
@@ -469,6 +478,20 @@ namespace Vpv
 					[sp, store](const CameraLink::FieldCopy& f, CameraLink::PairDescription& d) { return DescribeAhead(*sp, store, f, d); });
 				st.core->SetAheadGrid(sf.sourceGridW, sf.sourceGridH);
 				st.core->SetAheadConsistency(sf.consistencyPx);
+				// G-A1: the on-time target is the skeleton lane's P7, reached through the skeleton's demand entry (Query, no module include):
+				// the demand makes the lane hold P7 (published outside: the camera fit worker), LeaseFor gives its current lease per use. No
+				// skeleton module / no lane: the lease is empty and every frame is bridged, visibly (camera.ahead.no_target). P8 stays on the
+				// bridge (G-A4: not declared).
+				Skeleton::IExternalDemand* demand = static_cast<Skeleton::IExternalDemand*>(
+					Hub::ExtensionHub::Instance().Query(Skeleton::kExternalDemandQueryId));
+				if (demand)
+				{
+					std::vector<VpSkeleton::ConsumerDecl> consumers;
+					CameraLink::DeclareCameraConsumers(CameraLink::LiveCameraDemand(false), consumers);
+					demand->SetExternalDemand(host, &st, consumers, { VpSkeleton::kP7CameraFit });
+					st.demand = demand;
+					st.core->AttachOnTime([demand, host]() { return demand->LeaseFor(host, VpSkeleton::kP7CameraFit); }, "skeleton lane");
+				}
 			}
 			else
 				st.core->SetAheadSource(CameraLink::AheadSource(), CameraLink::PairFactsProvider());

@@ -211,7 +211,7 @@ no park, no extra line or decision, the pool and queue keep their sizes (`Camera
 | Order | `PollAhead`, the seed loop | the fit history is in frame order: the poll asks N = the next frame and stops at the first frame without a pair. When the render reaches a frame without an ahead pair (low latency, a producer drop, a pair not computed in time) that frame takes the SEED (F2's readback, the bridge path) and later ahead pairs wait until its fit is submitted (a seed copy that never comes back is given up after 16 frames). Back-pressure (a full queue) only defers the poll |
 | On time | `CameraFitWorker` (park), `CameraLinkCore::OnTimeSeal` | an ahead job is fitted at once (submit order) and PARKED until it can publish: into the on-time target while its frame's seal has not run (the target's inputs of N are probed BEFORE the claim, because a claimed-then-abandoned slot can never be claimed again; "inputs not published" is retried at every Tick: Begin and AfterRender), else into the lag bridge once N began (its markers exist). At N's Begin the core reads the target's P7(N): Sealed -> the record goes to the store, `SealedRecord` serves it from N on, and the lag bridge's later seal of N is skipped (retired: no second verdict, no false "late") |
 | Resync | `PoolEntry::honoured`, `OnTimeSeal`, `SealedRecord` | the publish reads the Indicator stamp of N after the pins (AheadLane provenance) and keeps it with the record; the seal re-checks it (a resync after the publish: rejected, never served, `onTimeRejected`), and so does every consumer read (`SealedRecord` against the Indicator of the lane it was published into: `staleAtUse`) |
-| Visible | `AheadStatusLine`, `kIdAheadBridged` | Ctrl+I / Config status / Ctrl+Alt+D: `camera ahead fit: N on time, M bridged (A ahead fits late for the on-time seal, S from the seed: no ahead pair), L late, R rejected after the publish (resync), U refused at use; no pair / incomplete / layout; on-time target: <name or none>`. Fallbacks: `camera.ahead.bridged` while frames are bridged (held 0.5 s of measured time), and always while there is no on-time target |
+| Visible | `AheadStatusLine`, `AheadLateLine`, `kIdAheadNoTarget` | Ctrl+I / Config status / Ctrl+Alt+D: `camera ahead fit: N on time, M bridged (A ahead fits late for the on-time seal, S from the seed: no ahead pair), L late, R rejected after the publish (resync), U refused at use; no pair / incomplete / layout; on-time target: <skeleton lane or none>` and the INFORMATIONAL `camera fit: N of M frames late (bridged)` (G-A2: a late frame is "on time or not at all", never an engaged defect). Fallbacks: `camera.ahead.no_target` only while no usable on-time target exists (no skeleton lane holds P7) |
 
 ### Deterministic mode: ONE path, the bridge
 
@@ -222,13 +222,17 @@ lagged seal does not. Test: `DeterministicModeTakesTheBridgePathOnly` (the ahead
 
 ### Ahead fit: gaps (reported, not worked around)
 
-* **G-A1 no lease of the skeleton lane.** SK-W gives an outside component no way to the skeleton lane's `AnalysisLane::Lease(kP7CameraFit)`:
+* **G-A1 (CLOSED in this branch): the lease of the skeleton lane.** `IExternalDemand::LeaseFor(host, product)` (SkeletonModule: the host
+  lane's `AnalysisLane::Lease`, empty without a lane or the product; test `LeaseForGivesTheLanesLeaseOfADeclaredProductAndEmptyOtherwise`).
+  With the ahead fit on, `CameraExtension::EnsureLive` declares `SetExternalDemand(host, &state, LiveCameraDemand(false), {P7})` and attaches
+  `AttachOnTime([]{ return demand->LeaseFor(host, P7); }, "skeleton lane")`; `ReleaseLive` clears both. An empty lease (analysis_lane off,
+  no source yet) = every frame bridged, `camera.ahead.no_target` engaged. History of the gap: SK-W gives an outside component no way to the skeleton lane's `AnalysisLane::Lease(kP7CameraFit)`:
   `IExternalDemand` (the only entry the camera can query, `kExternalDemandQueryId`) has `SetExternalDemand` / `ClearExternalDemand` only, and
   `SkeletonModule::LaneOf` is on the concrete module, render thread only. So production has NO on-time target (`AttachOnTime` is not called):
-  every ahead result is bridged, visibly (`on-time target: none ...`, `camera.ahead.bridged`). The mechanism is complete and tested against a
+  every ahead result is bridged, visibly (`on-time target: none ...`, then `camera.ahead.bridged`). The mechanism is complete and tested against a
   lane that seals at N (`CameraAheadFitTests`); the fix is one accessor on `IExternalDemand` (a lease source per host and product) plus one
   `AttachOnTime([...]{ return lease; }, "skeleton lane")` line in `CameraExtension::EnsureLive`, with the demand declared as below.
-* **G-A2 late = sealed absent.** The skeleton seals P7(N) at N's Begin with no deferral (`SlotSet::Seal`; `AnalysisLane::LiveFillOf` declines
+* **G-A2 (decided: informational) late = sealed absent.** The skeleton seals P7(N) at N's Begin with no deferral (`SlotSet::Seal`; `AnalysisLane::LiveFillOf` declines
   every live fill of a product published outside, `externalDeclined_`). With the demand declared, every frame whose ahead fit misses the seal
   is sealed ABSENT in the skeleton and counted there ("products published outside the lane ..."); the camera then bridges it in its own table.
   A frame cannot be "expected later" in the skeleton (SK-W2).
@@ -236,7 +240,7 @@ lagged seal does not. Test: `DeterministicModeTakesTheBridgePathOnly` (the ahead
   slots of N are published by the ENGINE FEED from the matcher's verified field (`SkeletonModule::FeedEngine` at AfterRender of the frame that
   estimated N's pair, sealed at N's Begin). So an ahead P7(N) can only be claimed in the window [AfterRender(N-1), Begin(N)], however early it
   was fitted (the park retries at AfterRender for exactly that window). An ahead-fed P7 would need its inputs to be P2 (the NVOF pair) and P4.
-* **G-A4 P8 on time.** P8(N) needs P7(N) and P3(N) published plus a GPU fill before N's seal, and the seal declines a live fill of an external
+* **G-A4 (deferred to SK-W2) P8 on time.** P8(N) needs P7(N) and P3(N) published plus a GPU fill before N's seal, and the seal declines a live fill of an external
   product (G-A2), so P8 stays on the bridge (the label fill and its live fill at the bridge's seal). With an on-time target, a frame sealed on
   time has no P7 in the bridge, so its P8 would be absent: P8 on time needs the label fill against the target's lease (a second
   `CameraLabelFill(LaneLeaseSource)` over `kP8CameraLabels`) before the on-time target is switched on with labels wanted.

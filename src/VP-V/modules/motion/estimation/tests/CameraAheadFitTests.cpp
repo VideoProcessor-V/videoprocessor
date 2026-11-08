@@ -490,6 +490,14 @@ namespace VideoProcessorTest
 			onTime.indicator->Advance(VpIndicator::kContinuity, VpResync::Cause::MissedFrames, 2);
 			Assert::IsTrue(core.SealedRecord(2) == nullptr, L"re-checked at consumption");
 			Assert::AreEqual(uint64_t(1), core.Counters().staleAtUse.load());
+			// G-A2: with a usable target, a late frame is informational (a line), never an engaged entry.
+			Assert::IsTrue(core.OnTimeUsable());
+			for (const FallbackCatalog::Decision& d : core.CollectDecisions())
+				Assert::IsFalse(d.id == CameraLink::kIdAheadNoTarget && d.engaged, L"no defect while the target exists");
+			std::vector<std::string> lines;
+			core.CollectStatus(lines);
+			Assert::IsTrue(Has(lines, "frames late (bridged)"), L"the informational late line");
+			Assert::IsTrue(Has(lines, "on-time target: test lane"));
 		}
 
 		TEST_METHOD(TheAheadPollTakesPairsInOrderAndStopsAtTheFirstMissing)
@@ -524,7 +532,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(Has(lines, "on-time target: none"), L"no on-time target is said so");
 			bool engaged = false;
 			for (const FallbackCatalog::Decision& d : core.CollectDecisions())
-				engaged = engaged || (d.id == CameraLink::kIdAheadBridged && d.engaged);
+				engaged = engaged || (d.id == CameraLink::kIdAheadNoTarget && d.engaged);
 			Assert::IsTrue(engaged, L"bridging is a visible fallback");
 		}
 
@@ -556,7 +564,7 @@ namespace VideoProcessorTest
 			core.CollectStatus(lines);
 			Assert::IsTrue(Has(lines, CameraLink::kAheadDeterministicText));
 			for (const FallbackCatalog::Decision& d : core.CollectDecisions())
-				Assert::IsFalse(d.id == CameraLink::kIdAheadBridged);
+				Assert::IsFalse(d.id == CameraLink::kIdAheadNoTarget);
 		}
 
 		TEST_METHOD(OffIsInert)

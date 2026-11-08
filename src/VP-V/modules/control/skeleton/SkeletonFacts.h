@@ -7,6 +7,7 @@
 // on the render thread. SK-W stage D.
 
 #include <VP-V/core/Indicator.h>
+#include <VP-V/core/LaneLease.h>
 #include <VP-V/core/Products.h>
 
 #include <cstdint>
@@ -74,6 +75,12 @@ namespace Vpv
 			virtual void SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
 				const std::vector<VpSkeleton::ProductId>& publishedOutside) = 0;
 			virtual void ClearExternalDemand(const void* host, const void* owner) = 0;
+			// The CURRENT lease of the host's lane for `product` (AnalysisLane::Lease: the product's bytes ring added), for a component that
+			// publishes a product it declared publishedOutside (the camera's on-time P7). Any thread. EMPTY (no table) when the host has no
+			// lane (analysis_lane off, no source yet) or the graph does not hold the product: the caller uses its own path, visibly.
+			// Generations are per lane (a new source size builds a new lane and restarts them): take a fresh lease per use, never install
+			// one across a rebuild with LaneLeaseNewer. Default: empty (an implementer without lanes).
+			virtual VpSkeleton::LaneLease LeaseFor(const void* /*host*/, VpSkeleton::ProductId /*product*/) { return VpSkeleton::LaneLease(); }
 		protected:
 			~IExternalDemand() {}
 		};
