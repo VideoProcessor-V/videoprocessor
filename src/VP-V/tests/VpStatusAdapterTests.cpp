@@ -14,6 +14,7 @@
 #include <IRenderer.h>
 #include <IntentInterpreterSupport.h>
 #include <ShortcutDefaults.h>
+#include <VP-V/abi/VpvHostCalls.h>
 #include <VP-V/gui/VpStatusAdapter.h>
 
 #include <map>
@@ -70,18 +71,21 @@ namespace VpStatusAdapterTest
 			double ExitLatencyMs() const override { return 0; }
 			uint64_t DroppedFrameCount() const override { return 0; }
 
-			bool GetDejudderStatus(CString& s) const override { return moduleEntry ? Get(dejudder, s) : IVideoRenderer::GetDejudderStatus(s); }
-			bool GetFallbacksStatus(CString& s) const override { return moduleEntry ? Get(fallbacks, s) : IVideoRenderer::GetFallbacksStatus(s); }
-			bool GetLedDriveStatus(CString& s) const override { return moduleEntry ? Get(led, s) : IVideoRenderer::GetLedDriveStatus(s); }
-			bool GetSourceResolutionStatus(CString& s) const override { return moduleEntry ? Get(source, s) : IVideoRenderer::GetSourceResolutionStatus(s); }
+			// The old per-line getters, now plain methods: the renderer's extension interfaces (below) read them, as
+			// the plugin renderer's bridge reads LibplaceboVideoRenderer's. Without the module entry (DirectShow) the
+			// renderer offers no interface at all (QueryExtension gives null) and these are never reached through it.
+			bool GetDejudderStatus(CString& s) const { return moduleEntry ? Get(dejudder, s) : Absent(s); }
+			bool GetFallbacksStatus(CString& s) const { return moduleEntry ? Get(fallbacks, s) : Absent(s); }
+			bool GetLedDriveStatus(CString& s) const { return moduleEntry ? Get(led, s) : Absent(s); }
+			bool GetSourceResolutionStatus(CString& s) const { return moduleEntry ? Get(source, s) : Absent(s); }
 			bool GetPresentationTimingStatus(CString& s) const override { return Get(presentation, s); }
 			bool GetRenderStallStatus(CString& s) const override { return Get(stall, s); }
 			bool GetOutputModeInfo(CString& s) const override { return Get(output, s); }
 
-			bool GetModuleStatus(const char* module, CString& status) const override
+			bool GetModuleStatus(const char* module, CString& status) const
 			{
 				if (!moduleEntry)
-					return IVideoRenderer::GetModuleStatus(module, status);
+					return Absent(status);
 				// The patched LibplaceboVideoRenderer::GetModuleStatus body.
 				std::wstring text;
 				const bool answered = VpStatusText::RendererModuleStatus<wchar_t>(module,
@@ -99,6 +103,50 @@ namespace VpStatusAdapterTest
 				status = text.c_str();
 				return answered;
 			}
+
+			static bool Absent(CString& s) { s.Empty(); return false; }
+
+			// What the plugin renderer's QueryExtension gives (P2): vpv.modules.v1, vpv.status.v1 and vpv.led.v1 over the
+			// getters above; null for a renderer without the VP module (DirectShow).
+			void* QueryExtension(const char* iid) override
+			{
+				if (!moduleEntry || !iid)
+					return nullptr;
+				if (std::string(iid) == Vpv::IVpvModules::Iid()) return static_cast<Vpv::IVpvModules*>(&modulesIf);
+				if (std::string(iid) == Vpv::IVpvStatus::Iid()) return static_cast<Vpv::IVpvStatus*>(&statusIf);
+				if (std::string(iid) == Vpv::IVpvLed::Iid()) return static_cast<Vpv::IVpvLed*>(&ledIf);
+				return nullptr;
+			}
+
+			struct ModulesIf final : Vpv::IVpvModules
+			{
+				explicit ModulesIf(FakeRenderer& r) : self(r) {}
+				bool Status(const char* module, Vpv::IVpvTextSink& sink) const override
+				{ CString t; const bool a = self.GetModuleStatus(module, t); Vpv::WriteText(sink, t); return a; }
+				bool Command(const char*, const char*, Vpv::IVpvTextSink&) override { return false; }   // the default: handles nothing
+				FakeRenderer& self;
+			};
+			struct StatusIf final : Vpv::IVpvStatus
+			{
+				explicit StatusIf(FakeRenderer& r) : self(r) {}
+				bool GetDejudderStatus(Vpv::IVpvTextSink& s) const override { CString t; const bool k = self.GetDejudderStatus(t); Vpv::WriteText(s, t); return k; }
+				bool GetSourceResolutionStatus(Vpv::IVpvTextSink& s) const override { CString t; const bool k = self.GetSourceResolutionStatus(t); Vpv::WriteText(s, t); return k; }
+				bool GetFallbacksStatus(Vpv::IVpvTextSink& s) const override { CString t; const bool k = self.GetFallbacksStatus(t); Vpv::WriteText(s, t); return k; }
+				bool WriteDiagnosticHistory(VpDiagnosticHistorySink, void*, int64_t) const override { return false; }
+				FakeRenderer& self;
+			};
+			struct LedIf final : Vpv::IVpvLed
+			{
+				explicit LedIf(FakeRenderer& r) : self(r) {}
+				bool Status(Vpv::IVpvTextSink& s) const override { CString t; const bool k = self.GetLedDriveStatus(t); Vpv::WriteText(s, t); return k; }
+				bool SuspendForTest(Vpv::IVpvTextSink&) override { return true; }
+				void ResumeAfterTest() override {}
+				bool StopForShutdown() override { return true; }
+				FakeRenderer& self;
+			};
+			ModulesIf modulesIf{ *this };
+			StatusIf statusIf{ *this };
+			LedIf ledIf{ *this };
 		};
 
 		// The dialog's own state behind its VP lines.
@@ -185,8 +233,8 @@ namespace VpStatusAdapterTest
 			{
 				Stats stats;
 				if (isAlphaRenderer)
-					m_videoRenderer->GetDejudderStatus(stats.dejudderStatus);
-				m_videoRenderer->GetFallbacksStatus(stats.fallbacksStatus);   // r6 fix 7
+					VpvCalls::GetDejudderStatus(m_videoRenderer, stats.dejudderStatus);
+				VpvCalls::GetFallbacksStatus(m_videoRenderer, stats.fallbacksStatus);   // r6 fix 7
 				stats.keyOverrides = KeyOverrideSummary(d.keyOverrideItems);
 				stats.room = AmbientOverlayLine(d);
 				stats.content = ContentIntentLine(d.content);
@@ -246,12 +294,12 @@ namespace VpStatusAdapterTest
 				CString text;
 				if (m_videoRenderer)
 				{
-					rendererLine("de-judder", m_videoRenderer->GetDejudderStatus(text), text);
-					rendererLine("fallbacks", m_videoRenderer->GetFallbacksStatus(text), text);
+					rendererLine("de-judder", VpvCalls::GetDejudderStatus(m_videoRenderer, text), text);
+					rendererLine("fallbacks", VpvCalls::GetFallbacksStatus(m_videoRenderer, text), text);
 					rendererLine("presentation", m_videoRenderer->GetPresentationTimingStatus(text), text);
 					rendererLine("render stall", m_videoRenderer->GetRenderStallStatus(text), text);
-					rendererLine("Dynamic Drive", m_videoRenderer->GetLedDriveStatus(text), text);
-					rendererLine("source resolution", m_videoRenderer->GetSourceResolutionStatus(text), text);
+					rendererLine("Dynamic Drive", VpvCalls::GetLedDriveStatus(m_videoRenderer, text), text);
+					rendererLine("source resolution", VpvCalls::GetSourceResolutionStatus(m_videoRenderer, text), text);
 					rendererLine("content", true, ContentIntentLine(d.content));
 					rendererLine("motion intent", true, CString(IntentInterpreter::MotionIntentLine(d.intent.motion).c_str()));
 					rendererLine("ambient", true, CString(IntentInterpreter::AmbientIntentLine(d.intent.ambient).c_str()));
@@ -272,7 +320,7 @@ namespace VpStatusAdapterTest
 			std::string FallbacksHeading(IVideoRenderer* m_videoRenderer)
 			{
 				CString text;
-				return m_videoRenderer && m_videoRenderer->GetFallbacksStatus(text) ?
+				return m_videoRenderer && VpvCalls::GetFallbacksStatus(m_videoRenderer, text) ?
 					std::string(CStringA(text).GetString()) : std::string();
 			}
 
@@ -284,9 +332,9 @@ namespace VpStatusAdapterTest
 					CString text;
 					if (m_videoRenderer->GetPresentationTimingStatus(text))
 						settings.emplace_back("presentation", std::string(CStringA(text).GetString()));
-					if (m_videoRenderer->GetDejudderStatus(text))
+					if (VpvCalls::GetDejudderStatus(m_videoRenderer, text))
 						settings.emplace_back("dejudder", std::string(CStringA(text).GetString()));
-					if (m_videoRenderer->GetFallbacksStatus(text))
+					if (VpvCalls::GetFallbacksStatus(m_videoRenderer, text))
 						settings.emplace_back("fallbacks", std::string(CStringA(text).GetString()));
 					if (m_videoRenderer->GetRenderStallStatus(text))
 						settings.emplace_back("render_stall", std::string(CStringA(text).GetString()));
@@ -605,7 +653,9 @@ namespace VpStatusAdapterTest
 			Assert::IsTrue(text.IsEmpty());
 			r.moduleEntry = false;
 			Assert::IsFalse(r.GetModuleStatus("vp", text));
-			Assert::IsFalse(r.InvokeModuleCommand("vp", "anything", text), L"the default command entry handles nothing");
+			Assert::IsFalse(VpvCalls::InvokeModuleCommand(&r, "vp", "anything", text), L"without the module entry there is no command entry");
+			r.moduleEntry = true;
+			Assert::IsFalse(VpvCalls::InvokeModuleCommand(&r, "vp", "anything", text), L"the default command entry handles nothing");
 		}
 
 		TEST_METHOD(VpCommandsDispatchToTheirHandlers)

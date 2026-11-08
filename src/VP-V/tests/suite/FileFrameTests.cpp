@@ -14,6 +14,7 @@
 #include "../VideoProcessor-Lib/vprenderer/FileFrameClock.h"
 #include "../VideoProcessor-Lib/vprenderer/FileFrameSlotGate.h"
 #include "../VideoProcessor-Lib/vprenderer/LibplaceboRendererPluginApi.h"
+#include <VP-V/abi/VpvAbi.h>
 
 #include <atomic>
 #include <chrono>
@@ -117,20 +118,13 @@ namespace VideoProcessorTest
 			Assert::AreEqual(static_cast<int>(VideoFrameEncoding::P010) + 2, static_cast<int>(VideoFrameEncoding::P016));
 		}
 
-		// Claimed 35 on the filter branch; 37 after integ's build ID (35) and the
-		// report-a-problem WriteDiagnosticHistory (36), integ/mpc-state 2026-10-17;
-		// 38 since the intent interpreter's GetIntentStatus / SetAmbientLux
-		// (integ/2026-10-17 round 3); 39 since automatic calibration's
-		// GetCalibrationOutput / SetCalibrationPattern (integration round 4; claimed
-		// 36 on its branch); 40 since SetActivePictureLookaheadAutomatic (bug hunt 3 F2,
-		// integration round 5); 41 since GetFallbacksStatus (r6 fix 7); 42 since SetQueueDelayBudget
-		// (VP-V delay budget, ADR-0020); 43 since ToggleDvCompareCapture (feat/dv-l8,
-		// assigned at the integ/batch1 merge); 44 since GetModuleStatus / InvokeModuleCommand
-		// (WP-11, integration group C); 45 since the v1.4.02-beta merge (Bill's API 34 and
-		// VP-V 44 together). The version check is equality.
-		TEST_METHOD(PluginApiVersionIs45)
+		// M2 P2 (D-P2b): VP_LIBPLACEBO_PLUGIN_API_VERSION is Bill's own number again (34 at the a591ad3b base; the
+		// 25..45 counter VP-V kept is retired, its history is in VP-V/abi/VpvAbi.h). Everything VP-V adds across the
+		// plugin boundary is the extension ABI, which starts at 1.
+		TEST_METHOD(PluginApiVersionIsBillsAndTheExtensionAbiStartsAtOne)
 		{
-			Assert::AreEqual(static_cast<uint32_t>(45), VP_LIBPLACEBO_PLUGIN_API_VERSION);
+			Assert::AreEqual(static_cast<uint32_t>(34), VP_LIBPLACEBO_PLUGIN_API_VERSION);
+			Assert::AreEqual(static_cast<uint32_t>(1), Vpv::kVpvExtensionAbi);
 		}
 	};
 
