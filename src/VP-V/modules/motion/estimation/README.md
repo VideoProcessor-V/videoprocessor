@@ -101,7 +101,7 @@ Synthesis consumers (dejudder extras, interpolator, hiccup repair, occlusion mas
 
 DELIBERATE exception: while libplacebo smooth motion runs, source-domain analysis consumers (source field and source statistics) keep the VP vectors, and output-domain consumers (output dither) fall back visibly ("libplacebo smooth motion owns output"). This is analysis only: no VP interpolation or de-judder synthesis runs alongside smooth motion. Revert with `VectorDemand::kAnalysisUnderSmoothMotion = false`, which makes smooth motion exclusive (every consumer falls back visibly).
 
-Fallback entries (`FallbackCatalog`): `vector_engine` (unserved consumers and why), `vector_engine_producer` (look-ahead stores nothing for this size), `vector_engine_global` (fast-pan / intent without whole-frame motion).
+Fallback entries (`FallbackCatalog`): `vector_engine` (unserved consumers and why), `vector_engine_producer` (look-ahead stores nothing for this size), `vector_engine_global` (fast-pan / intent without whole-frame motion), `vector_engine_hook` (the K4 pre-estimate hook threw: those pairs estimated without camera guidance; M2 P5a-5).
 
 ## Vector engine ownership (M2 P5a)
 

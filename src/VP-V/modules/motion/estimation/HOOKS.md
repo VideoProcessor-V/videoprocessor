@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
 # Vector engine: what moved out of the renderer, what is left, who reads what (M2 P5a)
 
-Plan: doc 52 section 3 (inventory a-l, hooks, identity, commit sequence). Base cda5794e. This file is the P5a-1
+Plan: doc 52 section 3 (inventory a-l, hooks, identity, commit sequence). Base cda5794e for P5a-0..4; P5a-5 (items a, e, f, K4, IVectorEngine) is on bff1c35e (line numbers below: at d8605823). This file is the P5a-1
 inventory (member list, readers outside P5a's ranges = the alias list, the thread of every access) and the
 alias table the package leaves behind.
 
@@ -19,7 +19,7 @@ alias table the package leaves behind.
 | K4 | camera-guided matching insertion point | DONE (P5a-5): `IPreEstimateHook::BeforeEstimate` right before / `AfterEstimate` right after the matcher's `Estimate`, inside `RunDejudderEstimate` (so both the in-render estimate and the estimate ahead); never for the warm-up's dummy estimate. No hook = `estimate()` only | `VectorEngine::Estimate` (VectorEngine.h), call site `VectorEngineEstimate.inl` |
 | IVectorEngine | `vpv.vector_engine.v1` | DONE (P5a-5): `VectorEngine` implements it from today's state (section 7); the renderer's engine registers under its host (`vectorEngine{ this }`); `VectorEngineExtension` (hub module, after ResyncExtension) answers the query with the `IVectorEngineDirectory` | `VectorEngine.h/.cpp`, `VectorEngineExtension.h/.cpp`, `core/hub/HubBootstrap.cpp` |
 | g | producer lifecycle and depth decision | MOVED: pure `ProducerPlan::Lifecycle/Depth` + `VectorEngine::PlanProducer` (a plain-value call site in `RenderLocked`, not a hook phase: it needs the pass's own facts) | `ProducerPlan.h`, `VectorEngine.cpp` |
-| h, i | look-ahead copy under the queue lock; engage rule, `Submit` loop and its catch | NOT moved: Z3a (LVR RenderLoop 33700-34050) is held by T1 (`r1w1/t1` a9627e41, not merged), which rewrites the catch (B4 `LookAheadFailures`) | Impl |
+| h, i | look-ahead copy under the queue lock; engage rule, `Submit` loop and its catch | NOT moved: Z3a (LVR `RenderLoop`, from 32815: the look-ahead copy and the submit loop) is held by T1 (`r1w1/t1` a9627e41, not merged), which rewrites the catch (B4 `LookAheadFailures`) | Impl |
 | j, k | invalidate requests at Reset / ResetLiveQueue / gap / seek / format change as `OnQueue` events | NOT done: the six `RequestMotionInvalidate` sites in Z6 call a VP one-liner; converting needs the engine to reach `frameAnalysis` from a hub event (host binding), then net-0 lines | Impl |
 | l | producer stop on GPU release (fix C, `fix-module-lifetime` 5f9c96b0) | NOT in this base: `RetireOutput` does not stop the producer here; `~Impl` does | - |
 | reservations | `refined_field` (P3r / U15), `SubmitLongPair` with external hints | interface + contracts, default "absent" | `VectorEngineInterface.h` |
@@ -31,12 +31,12 @@ thread. `Ui` = UI / config thread.
 
 | Member (State field) | Writers | Readers | Protection |
 |---|---|---|---|
-| `vectorDemand` | Rt (`UpdateVectorEngine`) | Rt; Loop (`motionAheadEngaged` log text: `lowLatencyAllowed`, 33942) | none: plain struct read by Loop (unchanged from before the move; benign torn read at worst of a log text) |
+| `vectorDemand` | Rt (`UpdateVectorEngine`) | Rt; Loop (`motionAheadEngaged` log text: `lowLatencyAllowed` in `RenderLoop`'s engage log, 33393) | none: plain struct read by Loop (unchanged from before the move; benign torn read at worst of a log text) |
 | `queueAheadCapacity` | Loop (queue pass) | Rt (`VectorDemandInput`), Loop | atomic |
 | `motionAheadBackward`, `motionAheadDepth`, `motionAheadConfigured` | Rt (`PlanProducer`) | Loop, Rt | atomics (acquire/release) |
 | `motionAheadEngaged` | Loop (engage/disengage), **Rt** (`PlanProducer`, two writes) | Loop, Rt | **atomic since this package** (was a plain bool written under two different locks: doc 52 D-3, no value change) |
 | `motionAheadEngagedGeneration`, `motionAheadPrev*` | Loop | Loop | single thread |
-| `motionProducer` (the unique_ptr) | Rt (`PlanProducer`: create via `motionProducer = std::move(producer)`, stop, reset) | Rt; **Loop** (33716, 33720, 33959, 33988: `motionProducer && ...->LastSubmitted()`, `->Submit`) | **none. Existing hazard, unchanged by P5a** (byte-identical rule; first audit: not better, not worse). The loop null-checks at 33959 and dereferences at 33988 with `PrepareFrameAnalysis` (a conversion) in between, so the window is the whole per-frame hand-off, not only `LastSubmitted()`; a `reset()` destroys the `Producer` including the mutex `Submit` locks (use-after-free on a mutex), and the creating `std::move` assignment is a racing write to the same pointer. Fix options for the 2A audit: `std::shared_ptr` with atomic load, or a small mutex the loop and the render thread both take. Not done here. |
+| `motionProducer` (the unique_ptr) | Rt (`PlanProducer`: create via `motionProducer = std::move(producer)`, stop, reset) | Rt; **Loop** (`RenderLoop`: 33167, 33171 `m_impl->motionProducer && ...->LastSubmitted()`; 33410 null check, 33439 `->Submit`) | **none. Existing hazard, unchanged by P5a** (byte-identical rule; first audit: not better, not worse). The loop null-checks at 33410 and dereferences at 33439 with `PrepareFrameAnalysis` (a conversion) in between, so the window is the whole per-frame hand-off, not only `LastSubmitted()`; a `reset()` destroys the `Producer` including the mutex `Submit` locks (use-after-free on a mutex), and the creating `std::move` assignment is a racing write to the same pointer. Fix options for the 2A audit: `std::shared_ptr` with atomic load, or a small mutex the loop and the render thread both take. Not done here. |
 | `motionEngineReady` | Rt | Any | atomic (no reader left in the renderer file) |
 | `motionValidity` | Any (`Invalidate`), Rt (`Consume`) | Any | atomics inside `MotionValidity::State` |
 | `motionValiditySeen`, counters (`motionInvalidations`, log tick/cause, `motionRecoveryLogPending`) | Rt | Rt | single thread |
@@ -94,7 +94,12 @@ P5a-5: `vectorEstimate` is declared right after `vectorEngine`, i.e. later than 
 member destruction it goes earlier than the members declared in between; none of them holds the matcher (grep:
 `MotionWarp*` / `MotionWarp&` only inside the matcher itself). The GPU release is unchanged: `ReleaseDejudder` (and
 `RetireOutput`'s budget-adapter release) run before the device goes, through the aliases. `~EstimateState` unbinds its
-matcher view from the engine; `~VectorEngine` removes the engine from the directory.
+matcher view from the engine; `~VectorEngine` removes the engine from the directory (and logs once if a
+pre-estimate hook is still registered: the consumer must clear it first).
+Members that now OUTLIVE the matcher at member destruction (declared between the old `dejudder` position and
+`vectorEstimate`): `frameInterpolator`, `dejudderCache`, `repeatReuse`, `dejudderRenderedWarp`, `dejudderVectorField`
+(declared before it, so destroyed after it). None keeps a pointer to the matcher, and `ReleaseDejudder` frees all of them (and the
+matcher) first, before the device goes, so member destruction normally finds them empty.
 
 `~Impl` still destroys the producer (its own optical-flow device). GPU objects of the matcher are released by
 `ReleaseDejudder` (item a, unchanged). The state struct is declared at the position of the earliest moved member (the
@@ -122,17 +127,30 @@ that renderer's `VectorEngine` (host = the RendererExtension `Context::host`, th
 |---|---|---|
 | `LatestVerifiedFieldSeq` | the last successful estimate's pair `to`, while `FieldOf(to)` holds | 0 |
 | `FieldEra` | `motionValidity.Epoch()` (any thread) | - |
-| `FieldOf(seq)` | the matcher's live block field (`MotionWarp::Field()`, rgba32f, vx/vy source px, trust, error; 16x16 source px blocks) of the last successful estimate (from, to = seq) while `dejudderLiveFieldFrom == from` and the epoch it was made in is current; `bwd`, `trust` null; `scaleToSourcePx` 1 | false |
+| `FieldOf(seq)` | the matcher's live block field (`MotionWarp::Field()`, rgba32f, vx/vy source px, trust, error; 16x16 source px blocks) of the last successful estimate (from, to = seq) while `dejudderLiveFieldFrom == from` and the epoch it was made in is current; recorded only when the epoch the caller chose the pair under (`motionShadowEpoch` at the top of `RunDejudderEstimate`) still holds after the estimate; `bwd`, `trust` null; `scaleToSourcePx` 1; `stamp` = the bound Indicator's `StampOf(pairTo)` (`MotionValidity::StampAt`; unbound / resync off: the default `Stamp`) | false |
 | `FieldScale` | 1 (the field is in source px) | - |
 | `GlobalFromEngine` | `dejudder->GlobalFromEngine()` | false (no matcher) |
-| `EngineGlobal(seq)` | the producer pair's `flow->global[0]` taken in `RunDejudderEstimate` (pair to = seq, current epoch, z < 0.9), x/y = cell px (`EngineCellSourcePixels`) x the D1 texels | false |
+| `EngineGlobal(seq)` | the producer pair's `flow->global[0]` taken in `RunDejudderEstimate` (pair to = seq, current epoch, z < 0.9), x/y = cell px (`EngineCellSourcePixels`) x the D1 texels; a ring of the last 16 pairs keyed by `to` (a pair without a producer flow is recorded as absent) | false |
 | `PairSpansSlip(from, to)` | false only when every adjacent pair in [from, to] is `PairValidAt` in the current epoch, from >= the first estimate of that epoch, span <= 64 | true (unknown = slip) |
 | `FlowIsCpuResident`, `FlowOf` | none kept today | false |
-| `SetPreEstimateHook` | atomic pointer read once per estimate (any thread writes; the camera link sets it, and clears it before its hook goes) | null = none |
+| `SetPreEstimateHook` | atomic pointer read once per estimate. Contract: set AND clear on the render thread or under renderMutex; the hook object may be destroyed only after the clear has returned (`~VectorEngine` logs a hook left registered) | null = none |
 | reservations (`RefinedFieldOf`, `SubmitLongPair`, ...) | interface defaults | absent |
 
 Hook contract notes for K4: `pairSeq` = the pair's later frame (`bSequence`); `ahead` is true for the estimate ahead,
 which today also runs on the render thread (inside `RenderLocked`, from the extras / entrance), never on a lane;
 `nextPairSeconds` = (b - a) / the content rate (`dejudderSourceHz`), 0 when unknown; `guidanceUsed` = the matcher's
 `CameraGuidanceUsed()` reports a guided part and no rejection; `countsTex` = `CameraGuidanceCounts()` only when a narrow
-or E1 pass ran.
+or E1 pass ran. The hook is called for both ahead == false and ahead == true, on the render thread with renderMutex
+held; a future off-render lane estimate must not call `GuidanceScheduler::Guide` from it. A throwing hook is contained:
+`BeforeEstimate` throwing clears the guidance and runs the plain estimate (no `AfterEstimate`); `AfterEstimate` throwing
+is caught; an exception of the estimate itself is rethrown after `AfterEstimate(pairSeq, false, null)`. Each hook
+failure is counted, logged (first 20, then every 100th) and raised as the fallback entry `vector_engine_hook`
+("camera guidance skipped for some pairs", released after 8 clean hooked estimates, or at once when the hook is gone).
+
+## 8. Open items (audit of bff1c35e..d8605823, not fixed by decision)
+
+- F7: only the LATEST field is served (`FieldOf` answers the last estimated pair only; the matcher keeps no ring). A
+  consumer that misses a frame cannot ask for the field it skipped, and the engine does not count missed fields. A field
+  ring (with a missed-field counter on the status) belongs to the P3 verified-field store, not to the live matcher.
+- F8: the engine global's validity uses the statistics consumers' rule (`SampleGlobal(...).usable`: z < 0.9) and ignores
+  the `w > 0.5` written flag that the intent interpreter checks; left as is (same rule as the fast-pan input).
