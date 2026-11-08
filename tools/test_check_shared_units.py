@@ -65,7 +65,7 @@ class CheckSharedUnitsTest(unittest.TestCase):
 
     def test_every_unit_registered(self):
         ids = [e["id"] for e in csu.REGISTRY]
-        self.assertEqual(ids, ["U%d" % i for i in range(1, 13)] + ["U15", "U19", "U20", "U21"])
+        self.assertEqual(ids, ["U%d" % i for i in range(1, 13)] + ["U15", "U19", "U20", "U21", "U22"])   # U21: SID source geometry; U22: SK-W must-land check 2 (one motion engine instance)
 
     def test_default_run_exits_zero_even_with_duplicates(self):
         rc, out = _run(["--root", self.root])
@@ -145,6 +145,72 @@ class CheckSharedUnitsTest(unittest.TestCase):
         self.assertFalse(any(f in ("Word.h", "Cons.h", "Own.h") for f, _ in got), got)
         self.assertEqual(u["duplicates"], 2)
         self.assertEqual(u["inside_owner"], 1)
+
+    def test_u22_motion_engine_instance_signatures(self):
+        # SK-W must-land check 2: an NVOF engine instantiated, held by value or aliased, or a VectorStore<...> created, outside motion/estimation is a
+        # second engine / a second vector store. Each of these forms is a duplicate outside the owner; the same lines inside the owner, the engine's
+        # own static helpers (Engine::InputFormat), a pointer or reference to an engine and a comment-only line are not.
+        _w(self.root, "src/VP-V/modules/motion/other/New.h", "auto* e = new NvOpticalFlow::Engine();\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Make.h", "auto a = std::make_unique<NvOpticalFlow::Engine>();\nauto b = std::make_shared<NvOpticalFlow::HintedEngine>();\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Value.h", "NvOpticalFlow::Engine engine;\nvoid F() { NvOpticalFlow::HintedEngine local; }\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Alias.h", "using Eng = NvOpticalFlow::Engine;\ntypedef NvOpticalFlow::Engine Eng2;\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Store.h", "VectorStore<int> s{ 4 };\nusing Fields = VpMotion::VectorStore<int>;\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Ok.h", "auto f = NvOpticalFlow::Engine::InputFormat();\nNvOpticalFlow::Engine* p = nullptr;\nconst NvOpticalFlow::Engine& r = *p;\n// new NvOpticalFlow::Engine in a comment\n")
+        _w(self.root, "src/VP-V/modules/motion/estimation/Own.h", "NvOpticalFlow::Engine engine;\nVectorStore<int> s;\n")
+        u = _unit(csu.scan(self.root, baseline={"units": {}}), "U22")
+        by_file = {}
+        for h in u["hits"]:
+            by_file.setdefault(h["file"].rsplit("/", 1)[-1], []).append((h["line"], h["role"]))
+        self.assertEqual(by_file["New.h"], [(1, "duplicate")])
+        self.assertEqual(by_file["Make.h"], [(1, "duplicate"), (2, "duplicate")])
+        self.assertEqual(by_file["Value.h"], [(1, "duplicate"), (2, "duplicate")])
+        self.assertEqual(by_file["Alias.h"], [(1, "duplicate"), (2, "duplicate")])
+        self.assertEqual(by_file["Store.h"], [(1, "duplicate"), (2, "duplicate")])
+        self.assertEqual(by_file["Ok.h"], [(4, "declaration")], by_file)
+        self.assertNotIn("Own.h", by_file)
+        self.assertEqual(u["duplicates"], 9)
+        self.assertEqual(u["inside_owner"], 2)
+
+    def test_u22_by_value_parameters_and_using_namespace_forms(self):
+        # A by-value parameter (an engine copied or moved into a function), `using namespace NvOpticalFlow;` (a bare Engine is then the same type)
+        # and a using-declaration are duplicates outside the owner; a reference or pointer parameter is not.
+        _w(self.root, "src/VP-V/modules/motion/other/Param.h",
+           "void A(NvOpticalFlow::Engine e);\nvoid B(int x, NvOpticalFlow::HintedEngine e, int y);\nvoid C(NvOpticalFlow::Engine& r);\nvoid D(NvOpticalFlow::Engine* p);\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Using.h",
+           "using namespace NvOpticalFlow;\nusing namespace VpMotion::NvOpticalFlow;\nusing NvOpticalFlow::Engine;\nusing NvOpticalFlow::HintedEngine;\n")
+        _w(self.root, "src/VP-V/modules/motion/estimation/OwnUsing.h", "using namespace NvOpticalFlow;\nvoid A(NvOpticalFlow::Engine e);\n")
+        u = _unit(csu.scan(self.root, baseline={"units": {}}), "U22")
+        by_file = {}
+        for h in u["hits"]:
+            by_file.setdefault(h["file"].rsplit("/", 1)[-1], []).append((h["line"], h["role"]))
+        self.assertEqual(by_file["Param.h"], [(1, "duplicate"), (2, "duplicate")], by_file)
+        self.assertEqual(by_file["Using.h"], [(1, "duplicate"), (2, "duplicate"), (3, "duplicate"), (4, "duplicate")], by_file)
+        self.assertNotIn("OwnUsing.h", by_file)
+
+    def test_scene_facts_reads_no_validity_source(self):
+        # Coordinator ruling 2026-11-08: scene EVENTS (cut / fade / flash) are scene facts, classified from P4 through ClassifyEvents; SceneFactsOf
+        # must NOT read VpIndicator::TemporalValid or any other validity source. Vector validity comes ONLY from the P5a MotionValidity facade.
+        path = os.path.join(ROOT, "src", "VP-V", "modules", "control", "skeleton", "SkeletonModule.cpp")
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        start = text.find("bool SkeletonModule::SceneFactsOf(")
+        self.assertGreaterEqual(start, 0, "SceneFactsOf not found")
+        open_at = text.find("{", start)
+        depth, i = 0, open_at
+        while i < len(text):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        body = text[open_at:i]
+        code = "\n".join(l for l in body.splitlines() if not l.strip().startswith("//"))
+        for forbidden in ("TemporalValid", "Indicator", "Resync::", "StampOf", "seal.Current", "MotionValidity", "kFull", "kContinuity"):
+            self.assertNotIn(forbidden, code, "SceneFactsOf reads a validity source: " + forbidden)
+        # The events are classified with NO full / continuity input: the literal call, so a validity argument cannot be slipped in.
+        self.assertIn("ClassifyEvents(a, c, false, false)", code)
 
     # ---- strict + baseline --------------------------------------------------------------------
     def _baseline(self, blocking, n):

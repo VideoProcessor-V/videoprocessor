@@ -216,6 +216,7 @@ inline Placement PlacementOf(VectorDemand::Consumer c)
     case C::TextureRestore: return { PathwayUnit::Repair, 31, "texture restore" };
     case C::ResidualStabilise: return { PathwayUnit::Repair, 61, "residual stabilise" };
     case C::TemporalDetail: return { PathwayUnit::Repair, 11, "temporal detail" };
+    case C::CameraFit: return { PathwayUnit::Motion, 26, "camera measurement" };
     }
     return { PathwayUnit::Motion, 99, "?" };
 }

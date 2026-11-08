@@ -602,6 +602,54 @@ namespace FallbackCatalog
 		return unwired.empty() ? Released("skeleton_queue")
 		                       : Engaged("skeleton_queue", "record history: queue not yet wired (" + unwired + "); floors in use");
 	}
+	// The lane lead the host's queue fed is lower than the lead the graph held at its best (owner decision 2026-11-07: lane lead = frames
+	// actually queued ahead of output, measured live). `lead` is the lead in use, `peak` the highest since the lane was built, `reduced`
+	// names the look-ahead products that lost their lead (empty: none in this graph), `events` counts the falls so far. Engaged while the
+	// lead is below its peak; released (automatically) when the queue recovers. Never log-only.
+	inline Decision SkeletonQueueStarve(unsigned lead, unsigned peak, const std::string& reduced, uint64_t events)
+	{
+		if (!(lead < peak))
+			return Released("skeleton_queue_starve");
+		return Engaged("skeleton_queue_starve", "queue starve: lane lead " + std::to_string(lead) + " (was " + std::to_string(peak) + "), " +
+			std::to_string(events) + " fall(s); look-ahead products reduced: " + (reduced.empty() ? std::string("none in this graph") : reduced));
+	}
+	// The render-ahead depth and/or lane lead the queue fed do not fit the ring slots (render-ahead + lane lead + the record history must
+	// fit the 255-slot rings; Products.h kRingHeadroomFrames): the lane uses the capped values. `note` says which ("lane lead capped at 21
+	// (queue holds 255; ring slot budget)"); empty = no cap bites.
+	inline Decision SkeletonLaneLeadCapped(const std::string& note)
+	{
+		return note.empty() ? Released("skeleton_lane_lead") : Engaged("skeleton_lane_lead", note);
+	}
+	// S5 regulator input. The hub delivers no presentation facts and no measured render-only span yet: the module can only observe
+	// Begin..AfterRender (which includes lock waits and pacing sleeps), so it records the derived slack and shows it but does NOT feed
+	// the regulator with it (nothing is shed on that number). The regulator acts only on a span the host measured
+	// (SkeletonModule::NoteRenderOnlyMs). Engaged while observing.
+	inline Decision SkeletonRegulatorInput(bool derived)
+	{
+		return derived ? Engaged("skeleton_regulator", "regulator input: observe only, slack derived from the Begin..AfterRender span (includes waits); render-only time not measured, shedding off")
+		               : Released("skeleton_regulator");
+	}
+	// MV7: a module that holds video memory is active but declared none of it to the VRAM governor (VramUsers.h), so its memory is
+	// invisible to the budget and the lane products may be granted memory it already holds. `names` lists the modules (empty = none).
+	inline Decision SkeletonVramUsers(const std::string& names)
+	{
+		return names.empty() ? Released("skeleton_vram_users")
+		                     : Engaged("skeleton_vram_users", "VRAM not declared to the governor: " + names + " (its memory is not in the budget)");
+	}
+	// SK-W stage D: the graph holds P2m / P3 for an external consumer (the camera link) but this renderer has no vector engine to publish
+	// them from: their slots stay empty and every reader falls back to its own form. Engaged only while that is so.
+	inline Decision SkeletonEngineFeed(bool noEngine)
+	{
+		return noEngine ? Engaged("skeleton_engine_feed", "no vector engine for this renderer: the pair and field slots (P2m, P3) are not published; their readers fall back")
+		                : Released("skeleton_engine_feed");
+	}
+	// MV7 standing gap: these users hold video memory and do not declare it to the governor (core/VramUsers.h KnownUndeclaredVramUsers), so the
+	// budget does not see their memory. Engaged while the lane runs, until each module declares.
+	inline Decision SkeletonVramKnown(const std::string& names)
+	{
+		return names.empty() ? Released("skeleton_vram_known")
+		                     : Engaged("skeleton_vram_known", "VRAM not yet declared to the governor (known gaps): " + names + "; the budget does not count their memory");
+	}
 	// A lead read of an ordered-chain product is in THIS graph (WARNING level: nothing is rejected). The reader cannot be sealed ahead,
 	// so it live-fills its reduced form; the note is Graph::leadChainWarning ("quality_pattern -> coding_evidence (lead 2): lead read of an
 	// ordered chain: reader live-fills its reduced form"). Engaged only while such a read is in the graph.

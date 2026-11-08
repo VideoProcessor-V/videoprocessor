@@ -266,6 +266,8 @@ namespace VpMotion
 		// Contract: set AND clear on the render thread or under renderMutex (an estimate reads the pointer once and
 		// calls it without a lock); the hook object may be destroyed only after the clear has returned.
 		void SetPreEstimateHook(IPreEstimateHook* hook) override { preEstimateHook_.store(hook, std::memory_order_release); }
+		void SetCameraFitWanted(bool wanted) override { cameraFitWanted_.store(wanted, std::memory_order_release); }
+		bool CameraFitWanted() const { return cameraFitWanted_.load(std::memory_order_acquire); }
 		// Reservations (RefinedFieldOf, SubmitLongPair ...): IVectorEngine's "absent" defaults.
 
 	private:
@@ -277,6 +279,7 @@ namespace VpMotion
 		InvalidateSink invalidateSink_ = nullptr;
 		const IMatcherView* matcher_ = nullptr;
 		std::atomic<IPreEstimateHook*> preEstimateHook_{ nullptr };
+		std::atomic<bool> cameraFitWanted_{ false };   // SK-W stage D: the external CameraFit want, merged into the next decision
 		struct FieldRecord { uint64_t from = 0, to = 0, epoch = 0; };
 		FieldRecord field_;                 // the last successful estimate (render thread)
 		uint64_t eraFirstFrom_ = 0;         // the A of the first successful estimate in field_.epoch

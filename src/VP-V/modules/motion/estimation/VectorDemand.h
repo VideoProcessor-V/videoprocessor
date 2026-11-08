@@ -28,9 +28,12 @@ namespace VectorDemand
 		SigmaDelta, GrainMap, DebandHold, DetailPulse, EntranceSegment,
 		SourceMonitorPan, MotionIntent,
 		// Camera-linking consumers (K0): appended so the indices above never move. All read the source field.
-		TextureRestore, ResidualStabilise, TemporalDetail
+		TextureRestore, ResidualStabilise, TemporalDetail,
+		// SK-W stage D: the camera fit (P7) wants the verified field of every pair (P3 and the pair it reads), so declaring it starts the
+		// engine like any source-field consumer. Appended: the indices above never move.
+		CameraFit
 	};
-	constexpr int kConsumerCount = 14;
+	constexpr int kConsumerCount = 15;
 
 	enum class Domain { Synthesis, Output, SourceField, SourceStatistics };
 
@@ -49,7 +52,8 @@ namespace VectorDemand
 		case Consumer::EntranceSegment:
 		case Consumer::TextureRestore:
 		case Consumer::ResidualStabilise:
-		case Consumer::TemporalDetail: return Domain::SourceField;
+		case Consumer::TemporalDetail:
+		case Consumer::CameraFit: return Domain::SourceField;
 		case Consumer::SourceMonitorPan:
 		case Consumer::MotionIntent: return Domain::SourceStatistics;
 		}
@@ -74,6 +78,7 @@ namespace VectorDemand
 		case Consumer::TextureRestore: return "texture restore";
 		case Consumer::ResidualStabilise: return "residual stabilise";
 		case Consumer::TemporalDetail: return "temporal detail";
+		case Consumer::CameraFit: return "camera fit";
 		}
 		return "?";
 	}

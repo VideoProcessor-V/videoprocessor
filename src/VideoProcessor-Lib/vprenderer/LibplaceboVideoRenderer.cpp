@@ -16121,6 +16121,7 @@ struct LibplaceboVideoRenderer::Impl
 			if (restart)
 				++renderAheadRestarts;
 			renderAheadLead = RenderAhead::PlannedLead(sourcePeriod, displayPeriod);
+			RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::QueueDepth, this, nullptr, nullptr, nullptr, nullptr, 0, nullptr, sourcePeriod > 0.0 ? renderAheadLead / sourcePeriod : -1.0); // VPV-HOOK
 			// L, the constant that fixes which refresh is phase 0, without the lead: fixed
 			// at the anchor (a restart's first vsync - film time) and kept by chained
 			// frames (Schedule::AnchorLatency, Bug hunt 05 H1: a floor over chained samples
@@ -25564,6 +25565,7 @@ releaseDriftBaseRetention =
 		passTimerHook.CpuMark("render: submit + present (may wait for the swap chain)", PassTimers::Kind::CpuWait);
 		passTimerHook.CpuEnd();
 		entranceSpans.Poll(passTimerHook.acc);   // T2: finished entrance spans (never waits)
+		PassTimers::Inbox::Motion().DrainInto(passTimerHook.acc);   // VPV-HOOK
 		{
 			const std::string readout = passTimerHook.DueReadout(
 				std::chrono::duration<double>(SteadyClock::now().time_since_epoch()).count());

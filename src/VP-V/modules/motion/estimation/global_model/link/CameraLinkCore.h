@@ -81,7 +81,12 @@ namespace CameraLink
 
 		// ---- configuration (render thread) ----
 		void OnSettings(const CameraLinkSettings& s);
-		// A (re)built graph: the P7 SlotSet table and its byte ring. nullptr table = the graph has no P7 -> DetachGraph.
+		// LIVE: the lane is held through leases, never raw pointers (the lane swaps its state on every rebuild). `source` re-acquires the
+		// current lease (bind AnalysisLane::Lease(kP7CameraFit) in a lambda); the link takes the first one now and REBINDS when the
+		// generation changes (CameraFitWorker::Rebind, noticed at Submit / publish / OnFrameStart). A job submitted against an older
+		// generation is refused and counted (FitCounters::staleLane, the status line). An empty first lease or one without P7 -> no attach.
+		void AttachLane(VpSkeleton::LaneLeaseSource source);
+		// STANDALONE / TESTS: borrowed raw objects that outlive the link by construction; never stale. nullptr table = no P7.
 		void AttachGraph(VpSkeleton::SlotTable* table, VpSkeleton::CpuBuffers* p7Bytes, VpIndicator::Indicator* indicator);
 		void DetachGraph();
 		void SetEngine(VpMotion::IVectorEngine* engine) { m_engine = engine; }
@@ -150,6 +155,8 @@ namespace CameraLink
 
 	private:
 		void Teardown();
+		void AttachLease(const VpSkeleton::LaneLease& first, VpSkeleton::LaneLeaseSource source);
+		void OnLaneRebound();
 		void SubmitReady(const std::vector<std::shared_ptr<FieldCopy>>& ready, const FramePhaseFacts& f);
 		void OnResult(const CameraFitJob& job, const CameraFitResult& r, PublishOutcome o);
 
@@ -157,9 +164,6 @@ namespace CameraLink
 		CameraSealToStore m_sealToStore;
 		CameraLinkSettings m_settings;
 		bool m_active = false;
-		VpSkeleton::SlotTable* m_table = nullptr;
-		VpSkeleton::CpuBuffers* m_bytes = nullptr;
-		VpIndicator::Indicator* m_indicator = nullptr;
 		VpMotion::IVectorEngine* m_engine = nullptr;
 		PairFactsProvider m_provider;
 		FitCounters m_counters;

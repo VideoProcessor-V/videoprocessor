@@ -110,6 +110,14 @@ if (p.x < BC_W && p.y < BC_H) {
 			const pl_fmt fmt = VpvGpu::Unorm16(gpu, 2);
 			if (!fmt) return fail("no storable two-component 16-bit unorm format");
 			if (!VpvGpu::Ensure(gpu, m_out, g.lumaW, g.lumaH, fmt, true)) return fail("no storage texture for the output");
+			// MV7: the kept output texture is declared to the governor with its real size (inert: no call site makes it yet).
+			const uint64_t held = VpSkeleton::TexBytesOf(m_out);
+			if (held != m_declared)   // Apply is per frame: the registry is touched only when the texture size moved
+			{
+				VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserBasicChroma, true);
+				VpSkeleton::VramUsers::Instance().Declare(this, DeclaredUser(g.lumaW, g.lumaH), held);
+				m_declared = held;
+			}
 			const pl_shader_desc d[2] = { VpvGpu::Sampled("bc_src", src), VpvGpu::Storage("bc_dst", m_out) };
 			if (!VpvGpu::Pass(dispatch, "VideoProcessor basic chroma upscale", BuildHeader(g), BODY, d, 2, nullptr, 0,
 				(g.lumaW + 15) / 16, (g.lumaH + 15) / 16, 0))
@@ -120,6 +128,9 @@ if (p.x < BC_W && p.y < BC_H) {
 
 		void Module::Release(pl_gpu gpu)
 		{
+			VpSkeleton::VramUsers::Instance().Withdraw(this, VpSkeleton::kUserBasicChroma);   // MV7
+			VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserBasicChroma, false);
+			m_declared = ~uint64_t(0);
 			if (m_out) pl_tex_destroy(gpu, &m_out);
 		}
 	}

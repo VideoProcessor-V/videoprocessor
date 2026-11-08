@@ -20,16 +20,21 @@
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/FramesInFlight.h>
+#include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
+#include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -244,6 +249,71 @@ namespace SkeletonModuleTestsNs
 			return out;
 		}
 	};
+
+	// The CollectAhead phase as P5a's call site raises it: the input queue's size in a QueueView.
+	void Collect(Rig& rig, size_t size)
+	{
+		rig.base += 40000;   // one call per 25 fps frame: the lane-lead window is REAL time (0.5 s), so the test clock must move
+		RE::QueueView view;
+		view.size = size;
+		RE::FrameContext c;
+		c.host = rig.Host(); c.phase = RE::FramePhase::CollectAhead; c.phaseData = &view;
+		Assert::IsFalse(rig.sk.OnFrame(c), L"the skeleton never takes a phase over");
+	}
+
+	// A scripted vector engine (P5a's IVectorEngine): what the feed reads.
+	struct FakeEngine : VpMotion::IVectorEngine
+	{
+		uint64_t latest = 0, era = 1;
+		uint64_t pairFrom = 0;
+		bool slip = false;
+		bool global = true;
+		bool fitWanted = false;
+		int fitCalls = 0;
+		VpIndicator::Stamp stamp;
+		uint64_t LatestVerifiedFieldSeq() const override { return latest; }
+		uint64_t FieldEra() const override { return era; }
+		bool FieldOf(uint64_t seq, VpMotion::VerifiedField& out) const override
+		{
+			if (seq != latest || seq == 0)
+				return false;
+			out = VpMotion::VerifiedField();
+			out.seq = seq;
+			out.pairFrom = pairFrom;
+			out.pairTo = seq;
+			out.gridW = 4;
+			out.gridH = 3;
+			out.blockSize = 16;
+			out.stamp = stamp;
+			return true;
+		}
+		float FieldScale() const override { return 1.0f; }
+		bool GlobalFromEngine() const override { return global; }
+		bool EngineGlobal(uint64_t, VpMotion::GlobalVec& out) const override
+		{
+			out.valid = global;
+			out.x = 1.5;
+			out.y = -0.5;
+			return global;
+		}
+		bool PairSpansSlip(uint64_t, uint64_t) const override { return slip; }
+		bool FlowIsCpuResident() const override { return false; }
+		bool FlowOf(uint64_t, VpMotion::FlowView&) const override { return false; }
+		void SetPreEstimateHook(VpMotion::IPreEstimateHook*) override {}
+		void SetCameraFitWanted(bool wanted) override { fitWanted = wanted; ++fitCalls; }
+	};
+
+	// Camera consumers as the camera extension declares them: the fit (P7 at lag 1) and the diagnostics (P7 + P8).
+	std::vector<VpSkeleton::ConsumerDecl> CameraConsumers()
+	{
+		CameraLink::CameraDemandInput in;
+		in.active[static_cast<int>(CameraLink::CameraConsumer::Measurement)] = true;
+		in.active[static_cast<int>(CameraLink::CameraConsumer::Diagnostics)] = true;
+		std::vector<VpSkeleton::ConsumerDecl> out;
+		CameraLink::DeclareCameraConsumers(in, out);
+		return out;
+	}
+
 
 	Vpv::Skeleton::Settings ParseText(const std::string& text)
 	{
@@ -748,6 +818,607 @@ namespace SkeletonModuleTestsNs
 			Assert::IsFalse(SkeletonModule::QueueDecision(SkeletonModule::QueueShape::kAll).engaged);
 			Assert::AreEqual(std::string("lane lead, look-ahead walk"), SkeletonModule::QueueNotWiredNote(SkeletonModule::QueueShape::kRenderAhead));
 		}
+
+		TEST_METHOD(TheQueueFeedsEachMergeOnlyTheirOwnTerm)
+		{
+			// FEED RULE (owner decision 2026-11-07): three feeds on three threads, each compare-and-swapping ITS term into the one snapshot.
+			// None may erase another's: a wired term never un-wires, every value stays in its feed's domain, and the last write of each
+			// feed is what the snapshot holds at the end.
+			SkeletonModule sk;
+			const int kIter = 20000;
+			std::atomic<bool> go{ false };
+			std::atomic<int> bad{ 0 };
+			auto spin = [&go]() { while (!go.load()) { std::this_thread::yield(); } };
+			std::thread a([&]() { spin(); for (int i = 0; i < kIter; ++i) sk.PublishRenderAhead(double(i % 9)); });
+			std::thread b([&]() { spin(); for (int i = 0; i < kIter; ++i) sk.PublishLaneLead(double(i % 200)); });
+			std::thread c([&]() { spin(); for (int i = 0; i < kIter; ++i) sk.PublishLookAheadWalk(double(i % 90)); });
+			std::thread r([&]() {
+				spin();
+				uint8_t seen = 0;
+				for (int i = 0; i < kIter * 2; ++i)
+				{
+					const SkeletonModule::QueueShape q = sk.CurrentQueue();
+					if ((seen & ~q.wired) != 0)
+						++bad;   // a term that was delivered went missing
+					seen = uint8_t(seen | q.wired);
+					if (q.renderAhead > 8 || q.laneLead > 199 || q.lookAheadWalk > 89)
+						++bad;   // a value outside its own feed's domain: another feed's value landed in it
+				}
+			});
+			go = true;
+			a.join(); b.join(); c.join(); r.join();
+			Assert::AreEqual(0, bad.load());
+			const SkeletonModule::QueueShape q = sk.CurrentQueue();
+			Assert::AreEqual(int(SkeletonModule::QueueShape::kAll), int(q.wired));
+			Assert::AreEqual((kIter - 1) % 9, int(q.renderAhead));
+			Assert::AreEqual((kIter - 1) % 200, int(q.laneLead));
+			Assert::AreEqual((kIter - 1) % 90, int(q.lookAheadWalk));
+			// Single-threaded: each feed leaves the other terms as they are; values are clamped, never wrapped.
+			SkeletonModule one;
+			one.PublishLookAheadWalk(5.0);
+			one.PublishRenderAhead(3.2);
+			Assert::AreEqual(5, int(one.CurrentQueue().lookAheadWalk));
+			Assert::AreEqual(4, int(one.CurrentQueue().renderAhead), L"a partial frame holds a slot: rounded up");
+			Assert::AreEqual(1, int(one.CurrentQueue().laneLead), L"undelivered term keeps its default");
+			one.PublishLaneLead(300.0);
+			Assert::AreEqual(255, int(one.CurrentQueue().laneLead));
+			one.PublishLaneLead(-1.0);
+			Assert::AreEqual(0, int(one.CurrentQueue().laneLead));
+			one.PublishRenderAhead(1000.0);
+			Assert::AreEqual(255, int(one.CurrentQueue().renderAhead));
+			one.PublishRenderAhead(std::nan(""));
+			Assert::AreEqual(0, int(one.CurrentQueue().renderAhead));
+			Assert::AreEqual(int(SkeletonModule::QueueShape::kAll), int(one.CurrentQueue().wired));
+		}
+
+		TEST_METHOD(TheLaneLeadIsTheQueueTheHostCollectedAheadAndIsShown)
+		{
+			// The input-queue term: QueueView::size at the CollectAhead phase. Ctrl+I prints the lead the lane runs with; the 0 and 255 cases.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			Assert::AreEqual(0, int(rig.sk.CurrentQueue().wired & SkeletonModule::QueueShape::kLaneLead), L"nothing fed yet");
+			Collect(rig, 0);
+			rig.Frame(4);
+			SkeletonModule::QueueInUse u = rig.sk.QueueInUseOf(rig.Host());
+			Assert::AreEqual(0, int(u.fed.laneLead));
+			Assert::AreEqual(0, int(u.used.laneLead));
+			Assert::IsTrue((u.fed.wired & SkeletonModule::QueueShape::kLaneLead) != 0);
+			Assert::AreEqual(0, int(rig.sk.LaneOf(rig.Host())->State()->graph.settings.laneLead));
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Lines), "lane lead 0"));
+			const std::vector<std::string> fb0 = rig.Lines(RE::StatusKind::Fallbacks);
+			Assert::IsTrue(Has(fb0, "queue not yet wired (render-ahead depth, look-ahead walk)"), L"the lane lead left the unwired list");
+			Assert::IsFalse(HasId(fb0, "skeleton_lane_lead"));
+			// 255 frames queued: the window keeps the LOWEST size over half a second of source time, so the 0 must age out first.
+			for (int i = 0; i < 30; ++i)
+				Collect(rig, 255);
+			rig.Frame(5);
+			u = rig.sk.QueueInUseOf(rig.Host());
+			Assert::AreEqual(255, int(u.fed.laneLead));
+			Assert::AreEqual(int(SkeletonModule::LaneLeadCap(0)), int(u.used.laneLead), L"capped to the ring-slot budget");
+			Assert::IsTrue(u.used.laneLead < 255);
+			Assert::AreEqual(int(u.used.laneLead), int(rig.sk.LaneOf(rig.Host())->State()->graph.settings.laneLead));
+			Assert::IsTrue(rig.sk.LaneOf(rig.Host())->Active(), L"the capped graph is valid: the lane is not lost");
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Lines), (std::string("lane lead ") + std::to_string(int(u.used.laneLead)) + " (fed 255, capped)").c_str()));
+			Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_lane_lead"), L"the cap is shown, never silent");
+			// A queue inside the budget is printed exactly as fed.
+			for (int i = 0; i < 30; ++i)
+				Collect(rig, 6);
+			rig.Frame(6);
+			u = rig.sk.QueueInUseOf(rig.Host());
+			Assert::AreEqual(6, int(u.used.laneLead));
+			Assert::AreEqual(6, int(u.fed.laneLead));
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Lines), "lane lead 6"));
+			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Lines), "capped"));
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_lane_lead"), L"the cap released by itself");
+		}
+
+		TEST_METHOD(TheThreeFeedsTogetherWireTheWholeQueue)
+		{
+			// Walk (SettingsApplied), render-ahead depth (the host's generic QueueDepth fact), lane lead (CollectAhead): each merges its own term.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			rig.Life(RE::Lifecycle::SettingsApplied, 0, 4.0);
+			Collect(rig, 6);
+			rig.Life(RE::Lifecycle::QueueDepth, 0, 2.2);   // a partial frame holds a slot: 3
+			const SkeletonModule::QueueShape q = rig.sk.CurrentQueue();
+			Assert::AreEqual(3, int(q.renderAhead));
+			Assert::AreEqual(6, int(q.laneLead));
+			Assert::AreEqual(4, int(q.lookAheadWalk));
+			Assert::AreEqual(int(SkeletonModule::QueueShape::kAll), int(q.wired));
+			rig.Frame(4);
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue"), L"all three delivered: nothing unwired to show");
+			Assert::IsTrue(rig.Command().find("render-ahead 3, lane lead 6, look-ahead walk 4; queued ahead of output 9 frame(s)") != std::string::npos);
+			const VpSkeleton::GraphSettings gs = rig.sk.LaneOf(rig.Host())->State()->graph.settings;
+			Assert::AreEqual(3, int(gs.renderAhead));
+			Assert::AreEqual(6, int(gs.laneLead));
+			Assert::AreEqual(4, int(gs.lookAheadWalk));
+		}
+
+		TEST_METHOD(AQueueStarveIsShownAndRecovers)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			for (int i = 0; i < 30; ++i)
+				Collect(rig, 5);
+			rig.Frame(4);
+			Assert::AreEqual(5, int(rig.sk.QueueInUseOf(rig.Host()).used.laneLead));
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue_starve"));
+			Collect(rig, 3);   // the queue ran short: the lowest size in the window is taken at once
+			rig.Frame(5);
+			const SkeletonModule::QueueInUse u = rig.sk.QueueInUseOf(rig.Host());
+			Assert::AreEqual(3, int(u.used.laneLead));
+			Assert::AreEqual(5, int(u.leadPeak));
+			Assert::AreEqual(uint64_t(1), u.starveEvents);
+			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
+			Assert::IsTrue(HasId(fb, "skeleton_queue_starve"), L"a queue-starve drop is visible, not log-only");
+			Assert::IsTrue(Has(fb, "queue starve: lane lead 3 (was 5)"));
+			Assert::IsTrue(rig.Command().find("1 lead fall(s)") != std::string::npos);
+			// Recovery: the whole window must be above the dip before the lead rises again, then the entry releases by itself.
+			for (int i = 0; i < 30; ++i)
+				Collect(rig, 5);
+			rig.Frame(6);
+			Assert::AreEqual(5, int(rig.sk.QueueInUseOf(rig.Host()).used.laneLead));
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue_starve"));
+		}
+
+		TEST_METHOD(TheQueuePhaseIsInertWhenTheLaneIsOffOrOriginal)
+		{
+			Rig off("[general]\nx=1\n");
+			off.ResyncApply("on");
+			off.Life(RE::Lifecycle::GpuCreated);
+			Collect(off, 9);
+			off.Life(RE::Lifecycle::QueueDepth, 0, 3.0);
+			Assert::AreEqual(0, int(off.sk.CurrentQueue().wired), L"off: nothing is published");
+			Rig orig(Lane("on"));
+			orig.Life(RE::Lifecycle::GpuCreated, 0);
+			orig.Life(RE::Lifecycle::SettingsApplied, 1);   // the Original pathway
+			Collect(orig, 9);
+			orig.Life(RE::Lifecycle::QueueDepth, 0, 3.0);
+			Assert::AreEqual(0, int(orig.sk.CurrentQueue().wired & (SkeletonModule::QueueShape::kLaneLead | SkeletonModule::QueueShape::kRenderAhead)), L"Original: nothing is published");
+			Assert::AreEqual(0, int(orig.sk.TimingFeedOf(orig.Host()).frames));
+		}
+
+		TEST_METHOD(TheRegulatorGetsTheDerivedSlackEveryFrameAndSaysSo)
+		{
+			// S5: slack = measured period - render-only time (the module's own clock between Begin and AfterRender), missed = render above the period.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			auto frame = [&rig](int64_t seq, uint64_t renderUs) {
+				rig.Ingress(seq);
+				if (seq == 1)
+					rig.Deliver(1);
+				rig.Deliver(uint64_t(seq) + 1);
+				rig.Begin(seq);   // the clock moves 40 ms per Begin
+				rig.base += renderUs;
+				rig.After(seq);
+				rig.base -= renderUs;   // the cadence stays at 40 ms
+			};
+			for (int64_t s = 1; s <= 6; ++s)
+				frame(s, 10000);
+			SkeletonModule::TimingFeed t = rig.sk.TimingFeedOf(rig.Host());
+			Assert::IsTrue(t.frames >= 4, L"every frame with a measured period is fed");
+			Assert::IsTrue(t.skipped >= 1, L"the first frame has no period yet: nothing fed, counted");
+			Assert::AreEqual(10.0, t.lastRenderOnlyMs, 0.1);
+			Assert::AreEqual(40.0, t.lastPeriodMs, 0.5);
+			Assert::AreEqual(t.lastPeriodMs - t.lastRenderOnlyMs, t.lastSlackMs, 1e-9, L"slack = period - render time");
+			Assert::AreEqual(30.0, t.lastSlackMs, 0.6, L"plausible: 10 ms of render in a 40 ms cadence leaves about 30 ms");
+			Assert::IsFalse(t.lastMissed);
+			Assert::AreEqual(uint64_t(0), t.missed);
+			// A spike the smoothed period has not caught up with: a missed deadline, negative slack.
+			frame(7, 90000);
+			t = rig.sk.TimingFeedOf(rig.Host());
+			Assert::IsTrue(t.lastMissed);
+			Assert::AreEqual(uint64_t(1), t.missed);
+			Assert::IsTrue(t.lastSlackMs < 0.0);
+			Assert::AreEqual(90.0, t.lastRenderOnlyMs, 0.1);
+			// Visible, not log-only: the derived form is a Fallbacks entry and a Ctrl+Alt+D line.
+			Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_regulator"));
+			Assert::IsTrue(rig.Command().find("Skeleton regulator input: derived from render time") != std::string::npos);
+			// A frame that never had its own Begin feeds nothing.
+			const uint64_t fed = t.frames;
+			rig.After(99);
+			Assert::AreEqual(fed, rig.sk.TimingFeedOf(rig.Host()).frames);
+		}
+
+		TEST_METHOD(DeclaredVramUsersAreInThePlanTheLedgerAndTheGuard)
+		{
+			// MV7: the users outside the product catalog reach the skeleton's tier plan as the governor's own usage, are listed in the
+			// Ctrl+Alt+D ledger, and an active module that declared nothing is a visible Fallbacks entry (skeleton_vram_users).
+			VpSkeleton::VramUsers& registry = VpSkeleton::VramUsers::Instance();
+			registry.ResetForTesting();
+			int engineOwner = 0, cameraOwner = 0;
+			registry.DeclareFixed(&engineOwner, VpSkeleton::kUserNvofProducer, 200ull * 1024ull * 1024ull);
+			registry.MarkActive(&cameraOwner, VpSkeleton::kUserCameraModel, true);   // active, but nothing declared
+			{
+				Rig rig(Lane("on"));
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				for (int64_t s = 1; s <= 3; ++s)
+					rig.Frame(s);
+				const std::shared_ptr<VpSkeleton::LaneState> ls = rig.sk.LaneOf(rig.Host())->State();
+				Assert::IsTrue(ls != nullptr);
+				const VpSkeleton::UserGrant* g = ls->plan.governor.Find(VpSkeleton::kUserNvofProducer);
+				Assert::IsNotNull(g, L"the declared user is in the plan");
+				Assert::AreEqual(uint64_t(200) * 1024ull * 1024ull, g->bytes);
+				Assert::IsTrue(rig.Command().find("VRAM T0 optical-flow engines: 200.0 MiB level 0") != std::string::npos);
+				const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
+				Assert::IsTrue(HasId(fb, "skeleton_vram_users"), L"an active module without a declaration is shown");
+				Assert::IsTrue(Has(fb, "camera model"));
+				registry.DeclareFixed(&cameraOwner, VpSkeleton::kUserCameraModel, 1024ull * 1024ull);
+				rig.Frame(4);
+				Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_vram_users"), L"declared: the entry releases");
+			}
+			registry.ResetForTesting();
+		}
+
+		TEST_METHOD(ExternalCameraConsumersJoinTheLaneGraphAndStartTheEngine)
+		{
+			// SK-W stage D: the camera link's consumers (P7 / P8 with P2 / P3 / P4 as inputs) are in the SKELETON lane graph, and declaring
+			// them starts the vector engine (IVectorEngine::SetCameraFitWanted); clearing them takes both away again.
+			FakeEngine eng;
+			Rig rig(Lane("on"));
+			rig.sk.SetEngineProviderForTesting([&eng](const void*) { return &eng; });
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 2; ++s)
+				rig.Frame(s);
+			Assert::IsFalse(rig.sk.LaneOf(rig.Host())->State()->graph.Has(VpSkeleton::kP7CameraFit), L"no camera demand: no camera product");
+			int owner = 0;
+			rig.sk.SetExternalDemand(rig.Host(), &owner, CameraConsumers(), { VpSkeleton::kP7CameraFit, VpSkeleton::kP8CameraLabels });
+			for (int64_t s = 3; s <= 4; ++s)
+				rig.Frame(s);
+			const std::shared_ptr<VpSkeleton::LaneState> laneState = rig.sk.LaneOf(rig.Host())->State();
+			Assert::IsTrue(laneState != nullptr);
+			const VpSkeleton::Graph& g = laneState->graph;
+			Assert::IsTrue(g.valid);
+			Assert::IsTrue(g.Has(VpSkeleton::kP7CameraFit) && g.Has(VpSkeleton::kP8CameraLabels));
+			Assert::IsTrue(g.Has(VpSkeleton::kP3AnalysisField) && g.Has(VpSkeleton::kP2mMatcherPair) && g.Has(VpSkeleton::kP4SourceStats),
+				L"the inputs of P7 / P8 are in the graph (P2 resolves to the matcher pair without an engine session)");
+			Assert::IsTrue(eng.fitWanted, L"the camera fit asked the engine to run");
+			const std::string text = rig.Command();
+			Assert::IsTrue(text.find("Skeleton engine feed:") != std::string::npos);
+			Assert::IsTrue(text.find("camera fit wanted") != std::string::npos);
+			Assert::IsTrue(text.find("products published outside the lane:") != std::string::npos);
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_engine_feed"), L"an engine exists: nothing to show");
+			// A second owner repeating an id is counted, the first wins.
+			int other = 0;
+			rig.sk.SetExternalDemand(rig.Host(), &other, CameraConsumers(), {});
+			rig.Frame(5);
+			Assert::IsTrue(rig.Command().find("2 duplicate id(s)") != std::string::npos);
+			rig.sk.ClearExternalDemand(rig.Host(), &other);
+			rig.sk.ClearExternalDemand(rig.Host(), &owner);
+			rig.Frame(6);
+			Assert::IsFalse(rig.sk.LaneOf(rig.Host())->State()->graph.Has(VpSkeleton::kP7CameraFit), L"withdrawn: the graph is rebuilt without it");
+			Assert::IsFalse(eng.fitWanted, L"and the engine is told");
+		}
+
+		TEST_METHOD(WithoutAnEngineTheFeedSaysSo)
+		{
+			Rig rig(Lane("on"));
+			rig.sk.SetEngineProviderForTesting([](const void*) -> VpMotion::IVectorEngine* { return nullptr; });
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			int owner = 0;
+			rig.sk.SetExternalDemand(rig.Host(), &owner, CameraConsumers(), {});
+			for (int64_t s = 1; s <= 4; ++s)
+				rig.Frame(s);
+			Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_engine_feed"), L"visible, not log-only");
+			Assert::IsTrue(rig.sk.FeedCountersOf(rig.Host()).noEngine > 0);
+			Assert::AreEqual(uint64_t(0), rig.sk.FeedCountersOf(rig.Host()).published);
+		}
+
+		TEST_METHOD(TheEngineFeedPublishesTheFieldSlotsWithTheFieldsOwnStamp)
+		{
+			FakeEngine eng;
+			Rig rig(Lane("on"));
+			// Observed root cause of this test's failure (cdb on the built test, 2026-11-08): with no card the lane grants NO product a lane (LaneRunner::Step
+			// answered NotLaned for P1 and P4 on every call), so P1(5) is only made by the live fill at the seal of frame 5, after the feed's 8 attempts.
+			// There is no render device in a unit test: give the lane a card with room (as AnAheadResultIsTheSameBytesAsTheLiveForm does), and step the
+			// CPU worker by hand (no threads) so the P1 inputs of the field are there deterministically.
+			VpSkeleton::CardProfile card;
+			card.vramBudgetBytes = 1ull << 30;
+			card.systemRamFreeBytes = 1ull << 30;
+			card.uploadGBps = 10.0;
+			rig.sk.SetCardForTesting(card);
+			rig.sk.SetWorkerThreadsForTesting(false);
+			rig.sk.SetEngineProviderForTesting([&eng](const void*) { return &eng; });
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			int owner = 0;
+			rig.sk.SetExternalDemand(rig.Host(), &owner, CameraConsumers(), { VpSkeleton::kP7CameraFit, VpSkeleton::kP8CameraLabels });
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			// The engine made the field of the pair (4, 5) while frame 4 renders: the stamp it was computed under is the Indicator's stamp of 5
+			// (MotionValidity::StampAt). The module publishes P2m / P3 of frame 5 at the AfterRender of frame 4.
+			std::shared_ptr<VpIndicator::Indicator> ind = Vpv::Resync::ResyncExtension::For(rig.Host())->seal.Current();
+			Assert::IsTrue(ind != nullptr);
+			eng.latest = 5;
+			eng.pairFrom = 4;
+			eng.stamp = ind->StampOf(5);
+			rig.Frame(4);
+			VpSkeleton::AnalysisLane* feedLane = rig.sk.LaneOf(rig.Host());
+			Assert::IsNotNull(feedLane);
+			for (int i = 0; i < 6 && rig.sk.FeedCountersOf(rig.Host()).published == 0; ++i)
+			{
+				int steps = 0;
+				while (feedLane->StepWorker(VpSkeleton::Backend::Cpu, 0) && ++steps < 1000)
+				{
+				}
+				rig.sk.RetryEngineFeedForTesting(rig.Host());   // the P1 inputs were made by the CPU worker stepped above
+			}
+			const Vpv::Skeleton::FeedCounters fc = rig.sk.FeedCountersOf(rig.Host());
+			Assert::AreEqual(uint64_t(1), fc.published);
+			Assert::AreEqual(uint64_t(5), fc.lastSeq);
+			Vpv::Skeleton::EngineFieldFacts f;
+			Assert::IsTrue(rig.sk.EngineFieldFactsOf(rig.Host(), 5, f));
+			Assert::AreEqual(uint64_t(4), f.pairFrom);
+			Assert::AreEqual(uint64_t(5), f.pairTo);
+			Assert::AreEqual(4, f.gridW);
+			Assert::AreEqual(16, f.blockSize);
+			Assert::IsTrue(f.globalValid);
+			Assert::AreEqual(1.5, f.globalX, 1e-12);
+			Assert::IsTrue(f.p2mPublished && f.p3Published);
+			Assert::IsFalse(f.p2Published, L"no optical-flow session in this graph: the pair is P2m");
+			Assert::IsFalse(rig.sk.EngineFieldFactsOf(rig.Host(), 4, f), L"no field was made for frame 4");
+			// The seal of frame 5 accepts what was published under the stamp the field was made under: a sealed slot is readable.
+			rig.Frame(5);
+			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+			Assert::IsTrue(lane->ReadOf(VpSkeleton::kP3AnalysisField, 5).state != VpSkeleton::AnalysisLane::ProductRead::None, L"P3(5) sealed");
+			Assert::IsTrue(lane->ReadOf(VpSkeleton::kP2mMatcherPair, 5).state != VpSkeleton::AnalysisLane::ProductRead::None, L"P2m(5) sealed");
+			// A field whose pair spans a slip is not published (the engine's facade says so) and is counted.
+			eng.latest = 7;
+			eng.pairFrom = 6;
+			eng.slip = true;
+			rig.Frame(6);
+			Assert::AreEqual(uint64_t(1), rig.sk.FeedCountersOf(rig.Host()).slip);
+			Assert::IsFalse(rig.sk.EngineFieldFactsOf(rig.Host(), 7, f));
+			// The engine's numbering restarted (seek / resync): counted, nothing carried over.
+			eng.slip = false;
+			eng.era = 2;
+			eng.latest = 0;
+			rig.Frame(7);
+			Assert::AreEqual(uint64_t(1), rig.sk.FeedCountersOf(rig.Host()).eraResets);
+			Assert::IsTrue(rig.Command().find("1 slipped") != std::string::npos);
+		}
+
+		TEST_METHOD(ASceneIsDerivedFromTwoP4RecordsNeverStored)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			rig.Ingress(4);
+			rig.Deliver(5);
+			rig.Begin(4);   // P4(4) is sealed; P4(3) is still in its ring
+			Vpv::Skeleton::SceneFacts f;
+			Assert::IsTrue(rig.sk.SceneFactsOf(rig.Host(), 4, f));
+			Assert::IsTrue(f.valid);
+			Assert::IsFalse(f.fullBetween, L"no resync event between the frames");
+			// The same classification the shared unit gives for those two records (U7): nothing is stored, the module derives it.
+			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+			const VpSkeleton::AnalysisLane::ProductRead cur = lane->ReadOf(VpSkeleton::kP4SourceStats, 4);
+			const VpSkeleton::AnalysisLane::ProductRead prev = lane->ReadOf(VpSkeleton::kP4SourceStats, 3);
+			VpLaneProducts::SourceStatsRecord a, c;
+			Assert::IsTrue(VpLaneProducts::ReadSourceStats(prev.cpu, prev.cpuBytes, &a) && VpLaneProducts::ReadSourceStats(cur.cpu, cur.cpuBytes, &c));
+			const VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(a, c, false, false);
+			Assert::AreEqual(e.cut, f.cut);
+			Assert::AreEqual(e.flash, f.flash);
+			Assert::AreEqual(e.fade, f.fade);
+			Assert::AreEqual(e.cutPossible, f.cutPossible);
+			Assert::AreEqual(e.histDistance, f.histDistance);
+			Assert::IsTrue(f.histDistance > 0u, L"two different noise frames never have identical histograms");
+			Assert::AreEqual(c.mean, f.curMean);
+			Assert::AreEqual(a.mean, f.prevMean);
+			Assert::IsTrue(f.curSpread > 0u);
+			rig.After(4);
+			Assert::IsFalse(rig.sk.SceneFactsOf(rig.Host(), 1, f), L"there is no frame before 1");
+		}
+
+		TEST_METHOD(AClaimFailureIsExplainedAndTheBackwardModeSaysItIsExpected)
+		{
+			Assert::IsTrue(Vpv::Skeleton::ClaimFailedNote(0, true).empty(), L"nothing to explain");
+			Assert::IsTrue(Vpv::Skeleton::ClaimFailedNote(0, false).empty());
+			const std::string backward = Vpv::Skeleton::ClaimFailedNote(3, true);
+			Assert::IsTrue(backward.find("3 pair(s) arrived after the seal") != std::string::npos, L"the count and the cause");
+			Assert::IsTrue(backward.find("backward / low-latency") != std::string::npos);
+			Assert::IsTrue(backward.find("expected in this mode") != std::string::npos);
+			const std::string ahead = Vpv::Skeleton::ClaimFailedNote(2, false);
+			Assert::IsTrue(ahead.find("2 field(s) not published") != std::string::npos);
+			Assert::IsTrue(ahead.find("left the ring") != std::string::npos);
+			Assert::IsTrue(ahead.find("expected in this mode") == std::string::npos, L"with a lead it is not the mode's normal behaviour");
+		}
+
+		TEST_METHOD(AnObservedSpanWithAWaitInsideNeverShedsAnything)
+		{
+			// Fix 3 of the stage A-C audit: the Begin..AfterRender span includes the render lock wait and pacing sleeps, so it is NOT a render-only time.
+			// Every frame here spends 5 periods inside the span (a sleep / lock wait): the regulator must not be fed and must shed nothing.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			auto frame = [&rig](int64_t seq, uint64_t spanUs) {
+				rig.Ingress(seq);
+				if (seq == 1)
+					rig.Deliver(1);
+				rig.Deliver(uint64_t(seq) + 1);
+				rig.Begin(seq);
+				rig.base += spanUs;   // the wait inside the span
+				rig.After(seq);
+				rig.base -= spanUs;
+			};
+			for (int64_t s = 1; s <= 150; ++s)
+				frame(s, 200000);
+			SkeletonModule::TimingFeed t = rig.sk.TimingFeedOf(rig.Host());
+			Assert::IsTrue(t.frames > 100, L"the span is observed every frame");
+			Assert::IsTrue(t.missed > 100, L"and is far above the period");
+			Assert::AreEqual(uint64_t(0), t.fed, L"but the regulator is not fed with it");
+			Assert::IsFalse(t.measured);
+			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+			Assert::AreEqual(int(lane->GetRegulator().MaxLevel()), int(lane->GetRegulator().Level()), L"nothing stepped down");
+			Assert::IsTrue(lane->GetRegulator().Dropped().empty());
+			VpSkeleton::RegTrace traces[64];
+			const size_t n = lane->RegulatorTraces(traces, 64);
+			for (size_t i = 0; i < n; ++i)
+			{
+				Assert::IsTrue(traces[i].action != VpSkeleton::RegAction::BackOff && traces[i].action != VpSkeleton::RegAction::Drop &&
+					traces[i].action != VpSkeleton::RegAction::MoveToRender && traces[i].action != VpSkeleton::RegAction::ForcedLive,
+					L"no shedding action on an observed span");
+			}
+			Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_regulator"), L"visible: observe only, shedding off");
+			Assert::IsTrue(rig.Command().find("(none: shedding off)") != std::string::npos);
+			// A span the HOST measured is what the regulator takes: counted, and the observe-only entry releases at the next status refresh.
+			Assert::IsFalse(rig.sk.NoteRenderOnlyMs(rig.Host(), 150, -1.0), L"a negative time is no measurement");
+			int other = 0;
+			Assert::IsFalse(rig.sk.NoteRenderOnlyMs(&other, 150, 5.0), L"no lane for that host");
+			for (int i = 0; i < 3; ++i)
+				Assert::IsTrue(rig.sk.NoteRenderOnlyMs(rig.Host(), uint64_t(150 + i), 5.0));
+			t = rig.sk.TimingFeedOf(rig.Host());
+			Assert::AreEqual(uint64_t(3), t.fed);
+			Assert::IsTrue(t.measured);
+			for (int64_t s = 151; s <= 170; ++s)
+				frame(s, 1000);
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_regulator"), L"a measured span is in use");
+		}
+
+		TEST_METHOD(TheRenderAheadTermIsNeverLeftWiredWithAnOldValue)
+		{
+			// Fix 2: the host calls QueueDepth only while a render-ahead plan runs. No value (a negative one: no source period) unwires at once; a plan that
+			// stops (render-ahead switched off) is noticed after 8 source periods and unwires the term too.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			rig.Life(RE::Lifecycle::QueueDepth, 0, 2.2);
+			Assert::AreEqual(3, int(rig.sk.CurrentQueue().renderAhead));
+			Assert::IsTrue((rig.sk.CurrentQueue().wired & SkeletonModule::QueueShape::kRenderAhead) != 0);
+			rig.Life(RE::Lifecycle::QueueDepth, 0, -1.0);   // sourcePeriod <= 0 on the host
+			Assert::IsTrue((rig.sk.CurrentQueue().wired & SkeletonModule::QueueShape::kRenderAhead) == 0, L"no value: unwired, not zero-wired");
+			Assert::AreEqual(0, int(rig.sk.CurrentQueue().renderAhead));
+			rig.Life(RE::Lifecycle::QueueDepth, 0, 2.2);
+			for (int64_t s = 4; s <= 6; ++s)
+				rig.Frame(s);
+			Assert::IsTrue((rig.sk.CurrentQueue().wired & SkeletonModule::QueueShape::kRenderAhead) != 0, L"a plan 3 frames ago is current");
+			for (int64_t s = 7; s <= 20; ++s)
+				rig.Frame(s);   // the plan stopped: 14 periods without a QueueDepth fact
+			Assert::IsTrue((rig.sk.CurrentQueue().wired & SkeletonModule::QueueShape::kRenderAhead) == 0, L"stale: unwired");
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), "render-ahead depth"), L"and the unwired term is shown again");
+		}
+
+		TEST_METHOD(ALaneLeadThatStaysLowIsTheNewNormalAfterTheHoldTime)
+		{
+			// Fix 5: the starve peak decays. A dip is shown while it is recent; a lead that stays low for 10 s of real time stops being a starve.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			for (int i = 0; i < 30; ++i)
+				Collect(rig, 5);
+			rig.Frame(4);
+			Collect(rig, 3);
+			for (int i = 0; i < 30; ++i)
+				Collect(rig, 3);   // the window is 3 from here on
+			rig.Frame(5);
+			Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue_starve"), L"a recent dip is shown");
+			for (int64_t s = 6; s <= 300; ++s)
+			{
+				Collect(rig, 3);
+				rig.Frame(s);   // 12 s at 25 fps
+			}
+			const SkeletonModule::QueueInUse u = rig.sk.QueueInUseOf(rig.Host());
+			Assert::AreEqual(3, int(u.used.laneLead));
+			Assert::AreEqual(3u, u.leadPeak, L"the peak decayed to the lead in use");
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue_starve"), L"released by itself");
+		}
+
+		TEST_METHOD(TheLaneLeadWindowIsRealTimeWhateverTheCallRate)
+		{
+			// Fix 4: samples are timestamped. Ten calls inside one frame and one call per frame give the same window: the 0 ages out 0.5 s after it was seen.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			RE::QueueView view;
+			RE::FrameContext c;
+			c.host = rig.Host(); c.phase = RE::FramePhase::CollectAhead; c.phaseData = &view;
+			view.size = 0;
+			rig.sk.OnFrame(c);   // a 0 at t
+			view.size = 9;
+			for (int i = 0; i < 40; ++i)
+				rig.sk.OnFrame(c);   // forty calls with no time between (a burst): the 0 is still inside the window
+			Assert::AreEqual(0, int(rig.sk.CurrentQueue().laneLead));
+			rig.base += 600000;   // 0.6 s later
+			rig.sk.OnFrame(c);
+			Assert::AreEqual(9, int(rig.sk.CurrentQueue().laneLead), L"the 0 is older than 0.5 s of real time: gone");
+		}
+
+		TEST_METHOD(TheKnownUndeclaredVramUsersAreAStandingLine)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
+			Assert::IsTrue(HasId(fb, "skeleton_vram_known"), L"MV7 is never invisible: the gaps are named");
+			Assert::IsTrue(Has(fb, "temporal detail") && Has(fb, "texture restore"));
+		}
+
+		TEST_METHOD(AShedUserThatStillHoldsItsTextureIsPlannedAsTransient)
+		{
+			// Fix 9: the plan sheds a stepped user but its module has not freed the texture. The bytes it still holds above its grant are planned as transient
+			// until the module Withdraws, so the products are not granted occupied memory; the pending figure follows the real free, never the plan.
+			VpSkeleton::VramUsers& registry = VpSkeleton::VramUsers::Instance();
+			registry.ResetForTesting();
+			const uint64_t mb = 1024ull * 1024ull;
+			VpSkeleton::VramUser u;
+			u.id = VpSkeleton::kUserBasicChroma;
+			u.name = VpSkeleton::VramUserName(VpSkeleton::kUserBasicChroma);
+			u.tier = VpSkeleton::Tier::T1;
+			u.levels.push_back(200 * mb);
+			u.levelText.push_back(nullptr);
+			u.levels.push_back(0);
+			u.levelText.push_back("off");
+			int owner = 0;
+			registry.Declare(&owner, u, 200 * mb);
+			{
+				Rig rig(Lane("on"));
+				VpSkeleton::CardProfile card;
+				card.key.luid = 77;
+				card.vramBudgetBytes = 100 * mb;   // less than the user alone
+				card.vramUsageBytes = 200 * mb;    // and the user's 200 MiB are inside the usage (VP's own)
+				rig.sk.SetCardForTesting(card);
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				for (int64_t s = 1; s <= 4; ++s)
+					rig.Frame(s);
+				const std::shared_ptr<VpSkeleton::LaneState> ls = rig.sk.LaneOf(rig.Host())->State();
+				Assert::IsTrue(ls != nullptr);
+				const VpSkeleton::UserGrant* g = ls->plan.governor.Find(VpSkeleton::kUserBasicChroma);
+				Assert::IsNotNull(g);
+				Assert::IsTrue(g->shed, L"over budget: the stepped user is planned off");
+				Assert::AreEqual(200 * mb, rig.sk.VramPendingFreeOf(rig.Host()), L"but it still holds 200 MiB: pending");
+				Assert::AreEqual(200 * mb, registry.Take().heldBytes, L"the held bytes follow the module, not the plan");
+				registry.Withdraw(&owner, VpSkeleton::kUserBasicChroma);   // the module frees its texture
+				for (int64_t s = 5; s <= 70; ++s)
+					rig.Frame(s);
+				Assert::AreEqual(uint64_t(0), rig.sk.VramPendingFreeOf(rig.Host()), L"freed: nothing pending");
+			}
+			registry.ResetForTesting();
+		}
+
 
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)
 		{

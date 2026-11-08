@@ -141,6 +141,24 @@ member and the alias table: [HOOKS.md](HOOKS.md).
 - No settings were added or changed by P5a (P5a-5 and P5a-rest included); defaults are untouched. With VP motion off and in Original
   the engine does nothing (its decision returns before any work, the producer plan wants nothing, no hook is bound).
 
+## Cost visibility (MV7, SK-W)
+
+* **VRAM.** The producer (`MotionAheadProducer::EnsureSize`) and the long-pair service (`EnsureSize`) declare their ring textures to the governor with
+  `NvOpticalFlow::RingBytes(w, h, readback, hint)` through `VpSkeleton::VramUsers` (core/VramUsers.h) as `kUserNvofProducer` (fixed: counted, never shed) and withdraw
+  them when the engine is released. The driver's own session memory is not visible to the application and is not counted. DejudderWarp's own optical-flow
+  textures and engine (MV2) are NOT declared: that second NVOF session goes away with SK-MV, and `tools/check_shared_units.py` U22 holds it at its one site.
+* **Time.** The producer times 1 pair in 8 (`PassTimers::Sampler`: the GPU idle first, then the engine's completion, on the worker's own device) and posts it to
+  `PassTimers::Inbox::Motion()` ("motion: NVOF producer engine (idle to completion)"). The skeleton status shows it; the pass-timer readout needs the host drain
+  (a Z3 call site, handed over). The long-pair service posts nothing yet (its `HintedEngine::Run` has no timed form).
+
+## Camera fit as a vector consumer (SK-W stage D)
+
+`VectorDemand::Consumer::CameraFit` (index 14, source-field domain, reads P2 and P3) is the camera fit's demand. It is never set from the renderer's
+settings: `IVectorEngine::SetCameraFitWanted(true)` (called by the skeleton module when an external consumer reads a camera product) makes `VectorEngine::UpdateVectorEngine`
+add it to the decision, so declaring P7 starts the producer and the render-time estimate like any source-field consumer. The catalog row sits with
+"camera measurement" (Motion unit, order 26). docs/design/product-graph.md's generated region must be regenerated after the first build
+(`VP_WRITE_PRODUCT_GRAPH_DOC=1`, `ProductCatalogTests.GeneratedDocRegionMatchesTheCatalog`).
+
 ## Contract
 
 - Input: original frame luma at the delivered source size (before re-base/repair); queued next frames for the look-ahead

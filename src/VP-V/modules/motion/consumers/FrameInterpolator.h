@@ -118,6 +118,7 @@ namespace Interpolator
 		bool hostReadable = false;
 		pl_tex outLuma = nullptr, outChroma = nullptr;
 		pl_tex noField = nullptr, noTrust = nullptr;   // the no-vector fallback's 1x1 field and trust
+		uint64_t vramDeclared = ~uint64_t(0);   // the bytes last declared to the VRAM governor (declare on a change only)
 		bool EnsureNoVectors();
 		std::string error;
 		unsigned long long runs = 0, passthroughs = 0;

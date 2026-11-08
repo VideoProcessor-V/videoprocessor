@@ -187,7 +187,26 @@
    "name": "block_statistics",
    "blocking": false,
    "baseline_duplicates": 19,
-   "known_false_positive": []
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
+     "pattern": "AddGpuJob\\(VpSkeleton::kP11RegionBlockStats",
+     "kind": "false_positive",
+     "reason": "owner/coordinator-approved 2026-11-08, product-id reference, not a U4 law copy (registers the lane's own P11 GPU job)"
+    },
+    {
+     "file": "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
+     "pattern": "kP11RegionBlockStats, VpSkeleton::kP12LightLevel",
+     "kind": "false_positive",
+     "reason": "owner/coordinator-approved 2026-11-08, product-id reference, not a U4 law copy (lists P11 among the products the report consumer reads)"
+    },
+    {
+     "file": "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
+     "pattern": "kP10GrainSplit, VpSkeleton::kP11RegionBlockStats",
+     "kind": "false_positive",
+     "reason": "owner/coordinator-approved 2026-11-08, product-id reference, not a U4 law copy (names P11 in the VRAM shed status)"
+    }
+   ]
   },
   "U5": {
    "name": "laplacian_ringing",
@@ -448,6 +467,12 @@
    "name": "source_geometry",
    "blocking": false,
    "baseline_duplicates": 0,
+   "known_false_positive": []
+  },
+  "U22": {
+   "name": "motion_engine_instance",
+   "blocking": true,
+   "baseline_duplicates": 1,
    "known_false_positive": []
   }
  }

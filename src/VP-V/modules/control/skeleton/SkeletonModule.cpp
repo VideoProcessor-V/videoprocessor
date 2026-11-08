@@ -7,6 +7,10 @@
 #include <DebugLog.h>
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/GpuAllocator.h>
+#include <VP-V/core/PassTimerInbox.h>
+#include <VP-V/core/VramUsers.h>
+#include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
@@ -51,6 +55,10 @@ namespace Vpv
 			constexpr uint64_t kEarlyRefreshFrames = 8;
 			constexpr uint64_t kRefreshEvery = 16;
 			constexpr uint64_t kReconfigureMinFrames = 60;
+			constexpr double kLeadWindowSeconds = 0.5;   // source time the lane-lead feed keeps its lowest value over
+			constexpr double kLeadPeakHoldSeconds = 10.0;   // the lane lead's best value is held this long, then decays to the lead in use
+			constexpr size_t kFactsRing = 64;           // engine-field facts kept (frames)
+			constexpr unsigned kFeedRetries = 8;        // publish attempts per field before it is given up (Begin + AfterRender per frame)
 
 			uint64_t SteadyUs()
 			{
@@ -65,6 +73,25 @@ namespace Vpv
 			}
 
 			bool SameDims(Dims a, Dims b) { return a.width == b.width && a.height == b.height; }
+
+			// The engine of a renderer through the hub's query (null when none is registered or the renderer has no engine yet).
+			VpMotion::IVectorEngine* DefaultEngine(const void* host)
+			{
+				VpMotion::IVectorEngineDirectory* dir = static_cast<VpMotion::IVectorEngineDirectory*>(RendererExtension::Query(VpMotion::kVectorEngineQueryId));
+				return dir ? dir->EngineFor(host) : nullptr;
+			}
+
+			// A consumer that reads a camera product: the camera fit is wanted (the vector engine must run).
+			bool ReadsCameraProduct(const VpSkeleton::ConsumerDecl& c)
+			{
+				for (size_t i = 0; i < c.count; ++i)
+				{
+					const VpSkeleton::ProductId p = c.consumes[i].product;
+					if (p == VpSkeleton::kP7CameraFit || p == VpSkeleton::kP8CameraLabels || p == VpSkeleton::kP9CameraSmoothed || p == VpSkeleton::kP7gCameraGuide)
+						return true;
+				}
+				return false;
+			}
 
 			std::atomic<unsigned long long>& DispatchersCreated()
 			{
@@ -239,6 +266,8 @@ namespace Vpv
 			uint32_t configuredGen = 0;
 			double configuredPeriodMs = 0.0;
 			SkeletonModule::QueueShape configuredQueue;
+			uint64_t configuredVramVersion = 0;   // VramUsers::Version() at the last Configure
+			uint64_t configuredExtVersion = 0;     // externalVersion_ at the last Configure
 			uint64_t framesSinceConfigure = 0;
 		};
 
@@ -298,6 +327,50 @@ namespace Vpv
 			std::string shownWaiting;
 			bool shownBundle = false;
 			uint8_t shownQueueWired = 0xFF;   // the queue-delivery state the cached status text was built for
+			uint64_t shownQueueKey = ~uint64_t(0);   // the queue-in-use / starve state the cached status text was built for
+
+			// S5 regulator feed (render thread): the module's own clock between its Begin and AfterRender of one frame.
+			uint64_t renderBeginUs = 0;
+			int64_t renderBeginSeq = 0;
+			SkeletonModule::TimingFeed timing;
+
+			// The queue in use (render thread; Begin): the snapshot after the ring-slot caps, the best lane lead and the falls.
+			SkeletonModule::QueueShape queueFed, queueUsed;
+			unsigned leadPeak = 0;               // the best lane lead of the last kLeadPeakHoldSeconds (decays: not a permanent high-water mark)
+			uint64_t leadPeakAtUs = 0;
+			unsigned lastUsedLead = 0;
+			uint64_t starveEvents = 0;
+			std::string starveReduced;   // look-ahead products that lost their lead in the current graph (names)
+
+			// SK-W stage D (render thread): external demand and the engine feed.
+			size_t externalConsumers = 0;        // consumers declared from outside, in the current graph
+			size_t externalDuplicates = 0;       // declared ids that were already taken (ignored, shown)
+			bool wantsCameraFit = false;         // an external consumer reads a camera product
+			bool feedNeeded = false;             // the graph holds P2m / P3 for an external consumer: the engine feed runs
+			bool fitWantedPushed = false;        // IVectorEngine::SetCameraFitWanted(true) was sent
+			VpMotion::IVectorEngine* engine = nullptr;   // this renderer's engine; dropped at Teardown (valid until the renderer goes)
+			FeedCounters feed;
+			uint64_t feedEra = 0;
+			bool feedHadEra = false;
+			uint64_t feedLastEngineSeq = 0;      // the last field seq handled (published, slipped or given up)
+			uint64_t feedPendingSeq = 0;         // a field whose slots are still being published (0 = none)
+			unsigned feedPendingMask = 0;        // bit 1 P2, 2 P2m, 4 P3: slots done
+			unsigned feedAttempts = 0;
+			EngineFieldFacts feedPending;
+			EngineFieldFacts facts[kFactsRing];
+
+			// The live lane-lead feed (CollectAhead phase; any thread that delivers it). The queue size jitters by a frame or two: the lead
+			// the graph is built for is the LOWEST size seen over the last kLeadWindowSeconds of source time (a fall is taken at once, a rise
+			// only when the whole window is above it), so the graph is not rebuilt for every wobble.
+			// Samples are timestamped (the module's microsecond clock): the window is kLeadWindowSeconds of REAL time whatever the call rate, so a
+			// host that calls CollectAhead once per frame, several times per frame or in bursts gives the same answer.
+			struct LeadSample { uint64_t us; uint8_t size; };
+			std::mutex leadMutex;
+			std::deque<LeadSample> leadWindow;
+			std::atomic<uint64_t> lastQueueDepthUs{ 0 };   // the last QueueDepth fact (render-ahead plan): older than 8 source periods = the plan stopped
+			uint64_t vramShortfall = 0;          // declared users' bytes still held although planned lower (transient in the next plan)
+			uint64_t vramShortfallUsed = 0;      // the transient the last Configure planned with
+			bool vramReplan = false;             // the shortfall changed: re-plan once
 
 			// The render-thread status cache, read by any thread.
 			std::mutex statusMutex;
@@ -448,6 +521,39 @@ namespace Vpv
 			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
 			return b && b->threads.Running();
 		}
+		SkeletonModule::TimingFeed SkeletonModule::TimingFeedOf(const void* host) const
+		{
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			return st ? st->timing : TimingFeed();
+		}
+		bool SkeletonModule::NoteRenderOnlyMs(const void* host, uint64_t seq, double renderOnlyMs)
+		{
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
+			if (!b || !(st->periodMs > 0.0) || !(renderOnlyMs >= 0.0))
+				return false;
+			b->lane.OnFrameTiming(seq, st->periodMs - renderOnlyMs, renderOnlyMs, renderOnlyMs > st->periodMs);
+			++st->timing.fed;
+			st->timing.measured = true;
+			return true;
+		}
+		uint64_t SkeletonModule::VramPendingFreeOf(const void* host) const
+		{
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			return st ? st->vramShortfall : 0u;
+		}
+		SkeletonModule::QueueInUse SkeletonModule::QueueInUseOf(const void* host) const
+		{
+			QueueInUse out;
+			if (const std::shared_ptr<HostState> st = hosts_.Find(host))
+			{
+				out.fed = st->queueFed;
+				out.used = st->queueUsed;
+				out.leadPeak = st->leadPeak;
+				out.starveEvents = st->starveEvents;
+			}
+			return out;
+		}
 		unsigned long long SkeletonModule::ContainedFaults() { return Faults().load(std::memory_order_relaxed); }
 		const SkeletonGpuDispatcher* SkeletonModule::GpuDispatcherFor(const void* host) const
 		{
@@ -472,6 +578,23 @@ namespace Vpv
 				PublishLookAheadWalk(f.value);   // the host passes the motion look-ahead depth (frames) here: the one queue term it delivers
 				Reconcile(f.host, f.code != 0 ? 1 : 0);   // code != 0: the Original pathway
 				break;
+			case RE::Lifecycle::QueueDepth:
+			{
+				// The render-ahead term (the host's one generic call at the render-ahead plan block, every planned frame): frames the plan keeps ahead
+				// of the present. Only while this renderer's lane is on; PublishRenderAhead is change-only (a compare-and-swap that leaves the other terms).
+				const std::shared_ptr<HostState> st = hosts_.Find(f.host);
+				if (st && st->active.load(std::memory_order_acquire))
+				{
+					if (f.value >= 0.0)   // NaN and negative: the host has no value (no source period): unwired, never an old number
+					{
+						PublishRenderAhead(f.value);
+						st->lastQueueDepthUs.store(nowUs_(), std::memory_order_relaxed);
+					}
+					else
+						UnpublishRenderAhead();
+				}
+				break;
+			}
 			case RE::Lifecycle::GpuReleased:
 			case RE::Lifecycle::Shutdown:
 			{
@@ -595,6 +718,13 @@ namespace Vpv
 				VpFrameAnalysis::SourceFrameTap::Unregister(host);
 				st->tapOn = false;
 			}
+			if (st->engine != nullptr && gpuAlive && st->fitWantedPushed)
+				st->engine->SetCameraFitWanted(false);   // the engine is still valid at GpuReleased / Shutdown; not for a dead renderer's address
+			st->engine = nullptr;
+			st->fitWantedPushed = false;
+			st->feedNeeded = false;
+			st->wantsCameraFit = false;
+			st->feedPendingSeq = 0;
 			StopBundle(*st);
 			ReleaseDispatcher(*st, gpuAlive);   // 70b G5: the GPU textures go with the lane (GpuReleased / switched off)
 			{
@@ -617,6 +747,308 @@ namespace Vpv
 			if (releaseSlot)
 				hosts_.Remove(host, true);   // the seal hooks hold weak references: they become no-ops
 		}
+
+		// ---- external demand and the engine feed (SK-W stage D) ---------------------------------------
+		void SkeletonModule::SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
+			const std::vector<VpSkeleton::ProductId>& publishedOutside)
+		{
+			std::lock_guard<std::mutex> lock(externalMutex_);
+			for (ExternalEntry& e : external_)
+				if (e.host == host && e.owner == owner)
+				{
+					e.consumers = consumers;
+					e.products = publishedOutside;
+					externalVersion_.fetch_add(1, std::memory_order_release);
+					return;
+				}
+			ExternalEntry e;
+			e.host = host;
+			e.owner = owner;
+			e.consumers = consumers;
+			e.products = publishedOutside;
+			external_.push_back(std::move(e));
+			externalVersion_.fetch_add(1, std::memory_order_release);
+		}
+
+		void SkeletonModule::ClearExternalDemand(const void* host, const void* owner)
+		{
+			std::lock_guard<std::mutex> lock(externalMutex_);
+			for (size_t i = 0; i < external_.size(); ++i)
+				if (external_[i].host == host && external_[i].owner == owner)
+				{
+					external_.erase(external_.begin() + static_cast<std::ptrdiff_t>(i));
+					externalVersion_.fetch_add(1, std::memory_order_release);
+					return;
+				}
+		}
+
+		// Adds this host's external consumers (ids not already in `consumers`: the first wins, the rest are counted) and products.
+		bool SkeletonModule::CollectExternal(const void* host, std::vector<VpSkeleton::ConsumerDecl>& consumers,
+			std::vector<VpSkeleton::ProductId>& products, bool& wantsCameraFit, size_t& duplicates) const
+		{
+			std::lock_guard<std::mutex> lock(externalMutex_);
+			bool any = false;
+			for (const ExternalEntry& e : external_)
+			{
+				if (e.host != host)
+					continue;
+				any = true;
+				for (const VpSkeleton::ConsumerDecl& c : e.consumers)
+				{
+					bool taken = false;
+					for (const VpSkeleton::ConsumerDecl& have : consumers)
+						taken = taken || have.id == c.id;
+					if (taken)
+					{
+						++duplicates;
+						continue;
+					}
+					consumers.push_back(c);
+					wantsCameraFit = wantsCameraFit || ReadsCameraProduct(c);
+				}
+				for (VpSkeleton::ProductId p : e.products)
+				{
+					bool have = false;
+					for (VpSkeleton::ProductId q : products)
+						have = have || q == p;
+					if (!have)
+						products.push_back(p);
+				}
+			}
+			return any;
+		}
+
+		FeedCounters SkeletonModule::FeedCountersOf(const void* host) const
+		{
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			return st ? st->feed : FeedCounters();
+		}
+
+		bool SkeletonModule::EngineFieldFactsOf(const void* host, uint64_t seq, EngineFieldFacts& out) const
+		{
+			out = EngineFieldFacts();
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			if (!st || seq == 0)
+				return false;
+			const EngineFieldFacts& f = st->facts[static_cast<size_t>(seq % kFactsRing)];
+			if (f.seq != seq)
+				return false;
+			out = f;
+			return true;
+		}
+
+		void SkeletonModule::RetryEngineFeedForTesting(const void* host)
+		{
+			if (const std::shared_ptr<HostState> st = hosts_.Find(host))
+				FeedEngine(*st, true);
+		}
+
+		// The scene of `seq` against `seq - 1`: the two P4 records, classified by the shared unit (never stored).
+		bool SkeletonModule::SceneFactsOf(const void* host, uint64_t seq, SceneFacts& out) const
+		{
+			out = SceneFacts();
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
+			if (!b || seq < 2)
+				return false;
+			const AnalysisLane::ProductRead cur = b->lane.ReadOf(VpSkeleton::kP4SourceStats, seq);
+			const AnalysisLane::ProductRead prev = b->lane.ReadOf(VpSkeleton::kP4SourceStats, seq - 1);
+			VpLaneProducts::SourceStatsRecord a, c;
+			if (cur.cpu == nullptr || prev.cpu == nullptr || !VpLaneProducts::ReadSourceStats(prev.cpu, prev.cpuBytes, &a) ||
+				!VpLaneProducts::ReadSourceStats(cur.cpu, cur.cpuBytes, &c))
+				return false;
+			// Scene EVENTS (cut / fade / flash) are scene facts: classified from the two P4 records alone. This function reads NO validity source
+			// (no VpIndicator::TemporalValid, no Indicator at all): whether a vector pair is usable across a resync is answered only by the P5a
+			// MotionValidity facade (coordinator ruling 2026-11-08; tools/test_check_shared_units.py test_scene_facts_reads_no_validity_source).
+			const VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(a, c, false, false);
+			out.valid = true;
+			out.cut = e.cut;
+			out.cutPossible = e.cutPossible;
+			out.fade = e.fade;
+			out.flash = e.flash;
+			out.histDistance = e.histDistance;
+			out.prevMean = a.mean;
+			out.curMean = c.mean;
+			out.prevSpread = a.p99 > a.p01 ? a.p99 - a.p01 : 0u;
+			out.curSpread = c.p99 > c.p01 ? c.p99 - c.p01 : 0u;
+			out.rectFound = c.rectFound != 0;
+			out.rectX0 = c.rectX0;
+			out.rectY0 = c.rectY0;
+			out.rectX1 = c.rectX1;
+			out.rectY1 = c.rectY1;
+			return true;
+		}
+
+		// Render thread. AfterRender (retryOnly = false): takes the engine's newest verified field and publishes its slots; Begin and AfterRender
+		// both retry a field whose input slots were not there yet. Validity is the engine's own facade: the field's stamp (MotionValidity::StampAt),
+		// FieldEra (a restart of the numbering forgets what was pending) and PairSpansSlip (a pair that spans a slip is not published).
+		void SkeletonModule::FeedEngine(HostState& st, bool retryOnly)
+		{
+			if (!st.feedNeeded)
+				return;
+			const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
+			if (!b)
+				return;
+			if (!st.engine)
+				st.engine = engineProvider_ ? engineProvider_(st.host) : DefaultEngine(st.host);
+			VpMotion::IVectorEngine* e = st.engine;
+			if (!e)
+			{
+				if (!retryOnly)
+					++st.feed.noEngine;
+				return;
+			}
+			const uint64_t era = e->FieldEra();
+			if (!st.feedHadEra || era != st.feedEra)
+			{
+				if (st.feedHadEra)
+					++st.feed.eraResets;
+				st.feedHadEra = true;
+				st.feedEra = era;
+				st.feedLastEngineSeq = 0;   // the numbering restarted: what was pending belongs to the old era
+				st.feedPendingSeq = 0;
+			}
+			if (!retryOnly)
+			{
+				const uint64_t s = e->LatestVerifiedFieldSeq();
+				if (s != 0 && s != st.feedLastEngineSeq && s != st.feedPendingSeq)
+				{
+					VpMotion::VerifiedField f;
+					if (!e->FieldOf(s, f))
+					{
+						++st.feed.noField;
+						st.feedLastEngineSeq = s;
+					}
+					else if (e->PairSpansSlip(f.pairFrom, f.pairTo))
+					{
+						++st.feed.slip;   // a pair across a gap / resync: no field of it is published, its readers fall back
+						st.feedLastEngineSeq = s;
+					}
+					else
+					{
+						EngineFieldFacts ff;
+						ff.seq = s;
+						ff.pairFrom = f.pairFrom;
+						ff.pairTo = f.pairTo;
+						ff.era = era;
+						ff.gridW = f.gridW;
+						ff.gridH = f.gridH;
+						ff.blockSize = f.blockSize;
+						ff.scaleToSourcePx = f.scaleToSourcePx;
+						ff.stamp = f.stamp;
+						VpMotion::GlobalVec g;
+						if (e->GlobalFromEngine() && e->EngineGlobal(s, g) && g.valid)
+						{
+							ff.globalValid = true;
+							ff.globalX = g.x;
+							ff.globalY = g.y;
+						}
+						st.feedPending = ff;
+						st.feedPendingSeq = s;
+						st.feedPendingMask = 0;
+						st.feedAttempts = 0;
+					}
+				}
+			}
+			if (st.feedPendingSeq == 0)
+				return;
+			++st.feedAttempts;
+			unsigned mask = st.feedPendingMask;
+			const bool all = PublishEngineSlots(st, *b, st.feedPending, mask);
+			st.feedPendingMask = mask;
+			if (all)
+			{
+				st.facts[static_cast<size_t>(st.feedPendingSeq % kFactsRing)] = st.feedPending;
+				++st.feed.published;
+				st.feed.lastSeq = st.feedPendingSeq;
+				st.feedLastEngineSeq = st.feedPendingSeq;
+				st.feedPendingSeq = 0;
+			}
+			else if (st.feedAttempts >= kFeedRetries)
+			{
+				++st.feed.abandoned;
+				st.feedLastEngineSeq = st.feedPendingSeq;
+				st.feedPendingSeq = 0;
+			}
+		}
+
+		// Publishes the P2 / P2m / P3 slots of facts.seq that the graph holds and that are not done yet (bits of doneMask), in topological order.
+		// True when every one is done (published, or nothing more can be done for it).
+		bool SkeletonModule::PublishEngineSlots(HostState& st, Bundle& b, EngineFieldFacts& facts, unsigned& doneMask)
+		{
+			const std::shared_ptr<VpSkeleton::LaneState> ls = b.lane.State();
+			if (!ls || !ls->graph.valid || !ls->table)
+				return false;
+			VpSkeleton::SlotTable& table = *ls->table;
+			const uint64_t seq = facts.seq;
+			bool all = true;
+			for (size_t i = 0; i < table.Count(); ++i)
+			{
+				const VpSkeleton::Node& n = table.NodeAt(i);
+				unsigned bit = 0;
+				if (n.id == VpSkeleton::kP2VectorPair)
+					bit = 1;
+				else if (n.id == VpSkeleton::kP2mMatcherPair)
+					bit = 2;
+				else if (n.id == VpSkeleton::kP3AnalysisField)
+					bit = 4;
+				else
+					continue;
+				if ((doneMask & bit) != 0)
+					continue;
+				if (n.id == VpSkeleton::kP2VectorPair && !facts.globalValid)
+				{
+					doneMask |= bit;   // the NVOF producer made no pair for this frame: the slot stays empty (its readers fall back)
+					continue;
+				}
+				VpSkeleton::SlotSet& set = table.At(i);
+				// The inputs are pinned BEFORE the claim (into a scratch header): a claim that is then abandoned leaves the slot Abandoned for
+				// this frame, and the retry would find it Stale (a lost frame, counted as a claim failure: the engine feed's retry for
+				// missing inputs could never succeed once a first attempt had claimed). Nothing is claimed while an input is missing.
+				VpAncestry::Header scratch;
+				VpSkeleton::LaneInputs pins;
+				if (!table.LaneAncestors(n.id, seq, scratch, pins))
+				{
+					++st.feed.ancestorsMissing;   // an input (P1, P2m) is not published yet: retried at the next Begin / AfterRender
+					all = false;
+					continue;
+				}
+				VpSkeleton::LaneTicket ticket;
+				const VpSkeleton::ClaimResult cr = set.Claim(seq, VpAncestry::Provenance::AheadLane, ~uint64_t(0), &ticket);
+				if (cr == VpSkeleton::ClaimResult::TooEarly || cr == VpSkeleton::ClaimResult::ReleasePending)
+				{
+					pins.Unpin();
+					all = false;   // the ring has not reached this frame yet: try again
+					continue;
+				}
+				if (cr != VpSkeleton::ClaimResult::Claimed)
+				{
+					pins.Unpin();
+					++st.feed.claimFailed;   // Stale / out of range: the frame already left the ring (or is published)
+					doneMask |= bit;
+					continue;
+				}
+				VpAncestry::Header& hdr = set.LaneHeader(ticket);
+				hdr.ancestors = scratch.ancestors;
+				hdr.ancestorCount = scratch.ancestorCount;
+				hdr.chainReduced = scratch.chainReduced;
+				hdr.reads = scratch.reads;
+				hdr.honoured = facts.stamp;   // the stamp the engine made the field under; the seal of the frame compares it with StampOf(seq)
+				const VpSkeleton::PublishResult pr = set.Publish(ticket);
+				pins.Unpin();
+				doneMask |= bit;
+				if (pr == VpSkeleton::PublishResult::Published)
+				{
+					facts.p2Published = facts.p2Published || bit == 1;
+					facts.p2mPublished = facts.p2mPublished || bit == 2;
+					facts.p3Published = facts.p3Published || bit == 4;
+				}
+				else
+					++st.feed.claimFailed;
+			}
+			return all;
+		}
+
 
 		// ---- queue (capture / queue threads) ----------------------------------------------------------
 		void SkeletonModule::OnQueue(const RE::QueueFacts& f)
@@ -648,6 +1080,17 @@ namespace Vpv
 		// ---- frame phases (render thread) -------------------------------------------------------------
 		bool SkeletonModule::OnFrame(RE::FrameContext& c)
 		{
+			if (c.phase == RE::FramePhase::CollectAhead)
+			{
+				// P5a's CollectAhead call site: the input queue's size is the lane lead (frames queued ahead of the render). Inert off.
+				if (c.phaseData != nullptr)
+				{
+					const std::shared_ptr<HostState> q = hosts_.Find(c.host);
+					if (q && q->active.load(std::memory_order_acquire))
+						OnCollectAhead(*q, *static_cast<const RE::QueueView*>(c.phaseData));
+				}
+				return false;
+			}
 			if (c.phase != RE::FramePhase::Begin && c.phase != RE::FramePhase::AfterRender)
 				return false;
 			const std::shared_ptr<HostState> st = hosts_.Find(c.host);
@@ -670,6 +1113,28 @@ namespace Vpv
 			else
 				AfterRender(*st, c.seq);
 			return false;   // observation only: never a take-over
+		}
+
+		// The input-queue term of the lane lead. CALL CONTRACT: any thread, any rate (the host calls it once per frame; calls in bursts or several
+		// per frame are fine): every call is one timestamped sample of the queue size, and the published value is the LOWEST size among the samples of
+		// the last kLeadWindowSeconds of real time (a fall is taken at once, a rise only when the whole window is above it). A host that stops calling
+		// leaves the last value published; the lane lead then ages out through the starve peak, not by itself. PublishLaneLead is a
+		// compare-and-swap that leaves the other terms alone and does nothing when the value did not change.
+		void SkeletonModule::OnCollectAhead(HostState& st, const RE::QueueView& view)
+		{
+			const uint8_t size = view.size > 255u ? uint8_t(255) : uint8_t(view.size);
+			const uint64_t now = nowUs_();
+			const uint64_t windowUs = static_cast<uint64_t>(kLeadWindowSeconds * 1e6);
+			uint8_t lowest = size;
+			{
+				std::lock_guard<std::mutex> lock(st.leadMutex);
+				st.leadWindow.push_back(Vpv::Skeleton::HostState::LeadSample{ now, size });
+				while (st.leadWindow.size() > 1 && st.leadWindow.front().us + windowUs < now)
+					st.leadWindow.pop_front();
+				for (const Vpv::Skeleton::HostState::LeadSample& s : st.leadWindow)
+					lowest = (std::min)(lowest, s.size);
+			}
+			PublishLaneLead(double(lowest));
 		}
 
 		void SkeletonModule::Begin(HostState& st, int64_t seqIn)
@@ -736,6 +1201,9 @@ namespace Vpv
 			if (rebuild)
 			{
 				b = std::make_shared<Bundle>(dims, seq, nowUs_, wiring);
+				st.leadPeak = 0;   // a new lane: the best lead is measured again
+				st.leadPeakAtUs = now;
+				st.lastUsedLead = 0;
 				b->lane.BindIndicator(seal->Current());
 				b->lane.OnSealed(seq, 0);   // the shared seal already passed this frame before this lane existed
 			}
@@ -743,9 +1211,42 @@ namespace Vpv
 			const bool periodMoved = b->configuredPeriodMs > 0.0 && st.periodMs > 0.0 &&
 				std::abs(st.periodMs - b->configuredPeriodMs) > 0.3 * b->configuredPeriodMs;
 			const bool periodKnown = b->configuredPeriodMs <= 0.0 && st.periodMs > 0.0;
-			const QueueShape queue = CurrentQueue();   // one snapshot per frame: a feed on another thread never races the graph build
+			// A render-ahead term nobody refreshed for 8 source periods is stale (render-ahead was switched off, or its plan stopped): unwire it
+			// (the depths fall back to their floors, shown by skeleton_queue) instead of keeping an old value wired.
+			if ((CurrentQueue().wired & QueueShape::kRenderAhead) != 0 && st.periodMs > 0.0)
+			{
+				const uint64_t last = st.lastQueueDepthUs.load(std::memory_order_relaxed);
+				if (last != 0 && now > last + static_cast<uint64_t>(8.0 * st.periodMs * 1000.0))
+					UnpublishRenderAhead();
+			}
+			const QueueShape fedQueue = CurrentQueue();   // one snapshot per frame: a feed on another thread never races the graph build
+			QueueShape queue = fedQueue;
+			// The ring slots bound R + L together (RingSlotBudget); a feed above them is capped here, and the cap is shown (skeleton_lane_lead).
+			queue.renderAhead = uint8_t(CappedRenderAhead(fedQueue.renderAhead));
+			queue.laneLead = uint8_t((std::min<unsigned>)(fedQueue.laneLead, LaneLeadCap(fedQueue.renderAhead)));
+			st.queueFed = fedQueue;
+			st.queueUsed = queue;
+			if (fedQueue.wired & QueueShape::kLaneLead)
+			{
+				// A decaying peak: the best lead of the last kLeadPeakHoldSeconds. A lead that stays lower for that long is the new normal (the
+				// starve entry releases by itself); a dip shorter than that is shown.
+				if (queue.laneLead >= st.leadPeak || now > st.leadPeakAtUs + static_cast<uint64_t>(kLeadPeakHoldSeconds * 1e6))
+				{
+					st.leadPeak = queue.laneLead;
+					st.leadPeakAtUs = now;
+				}
+				if (queue.laneLead < st.lastUsedLead)
+					++st.starveEvents;   // the queue the lane can look into got shorter: shown as skeleton_queue_starve while below the peak
+				st.lastUsedLead = queue.laneLead;
+			}
 			const bool queueMoved = b->configuredQueue != queue;   // the record histories follow the queue (R + L + look-ahead)
-			if (rebuild || b->configuredGen != gen || queueMoved || ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
+			// MV7: the declared VRAM users (optical-flow engines, interpolator, camera model, BasicChroma's output, ...) moved: re-plan, but not
+			// more often than a moved period (a producer re-sizing its textures must not rebuild the graph every frame).
+			const uint64_t vramVersion = VpSkeleton::VramUsers::Instance().Version();
+			const bool vramMoved = b->configuredVramVersion != vramVersion && b->framesSinceConfigure >= kReconfigureMinFrames;
+			const uint64_t extVersion = externalVersion_.load(std::memory_order_acquire);
+			const bool extMoved = b->configuredExtVersion != extVersion || st.vramReplan;   // external demand changed, or the shortfall did: re-plan at once (rare)
+			if (rebuild || b->configuredGen != gen || queueMoved || vramMoved || extMoved || ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
 			{
 				CardProfile card;
 				std::string why;
@@ -755,6 +1256,18 @@ namespace Vpv
 				st.cardNote = known ? std::string() : why;
 				TierInput tier;
 				tier.framePeriodMs = st.periodMs;
+				// MV7: the VRAM users outside the product catalog. What they hold is already inside the adapter's CurrentUsage, so it is VP's own
+				// usage (re-planned, never counted twice) and each user is in the plan: the lane products are granted what is left.
+				// OVER-GRANT NOTE: a STEPPED user (BasicChroma's output) that the plan sheds still holds its texture until its own module frees it
+				// (nothing frees it for the governor yet), so the plan alone would grant that memory to products while it is occupied. The bytes a
+				// user holds above what the plan gave it are planned as TRANSIENT in the next Configure (vramShortfall, below), and the plan's own
+				// ownUsage drops only when the module Withdraws (VramUsers::Take: heldBytes follows Declare / Withdraw, never the plan).
+				const VpSkeleton::VramUsers::Snapshot declared = VpSkeleton::VramUsers::Instance().Take();
+				tier.otherUsers = declared.users;
+				tier.ownUsageBytes = declared.heldBytes;
+				tier.transientBytes = st.vramShortfall;
+				st.vramShortfallUsed = st.vramShortfall;
+				st.vramReplan = false;
 				GraphSettings gs;
 				gs.dims = dims;
 				gs.renderAhead = queue.renderAhead;
@@ -771,7 +1284,25 @@ namespace Vpv
 					VpSkeleton::kP11RegionBlockStats, VpSkeleton::kP12LightLevel };
 				for (VpSkeleton::ProductId p : consumed)
 					VpSkeleton::AddConsume(report, p);
-				const std::vector<ConsumerDecl> consumers{ report };
+				std::vector<ConsumerDecl> consumers{ report };
+				// SK-W stage D: the consumers other components declared (the camera link): their products and ancestors join the graph.
+				std::vector<VpSkeleton::ProductId> outside;
+				size_t duplicates = 0;
+				bool wantsFit = false;
+				CollectExternal(st.host, consumers, outside, wantsFit, duplicates);
+				st.externalConsumers = consumers.size() - 1;
+				st.externalDuplicates = duplicates;
+				st.wantsCameraFit = wantsFit;
+				st.feedNeeded = st.externalConsumers != 0;
+				if (st.feedNeeded)
+					for (VpSkeleton::ProductId p : { VpSkeleton::kP2VectorPair, VpSkeleton::kP2mMatcherPair, VpSkeleton::kP3AnalysisField })
+					{
+						bool have = false;
+						for (VpSkeleton::ProductId q : outside)
+							have = have || q == p;
+						if (!have)
+							outside.push_back(p);   // the engine feed publishes the pair and the field; the lane never makes them
+					}
 				b->lane.SetStormHold(Resync::ResyncExtension::StormHeld(st.host));
 				// The dispatcher's private working memory (tap ring, grain-split working textures) is outside the product
 				// declarations the governor plans: count it as used, and refuse the GPU products when it alone does not fit.
@@ -794,9 +1325,32 @@ namespace Vpv
 				// (quality_pattern, td.trail_summary) are max(floor seconds, queue x period).
 				b->registry = Bundle::MakeRegistry(b->wiring, st.periodMs, VpSkeleton::QueueFrames(gs));
 				b->lane.Configure(st.settings.lane, b->registry, consumers, gs, card, tier, seq, false);
+				b->lane.SetExternalProducts(outside);
+				{
+					// What the declared users still hold above their grant: planned as transient at the next Configure (once).
+					uint64_t shortfall = 0;
+					if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
+						for (const std::pair<uint16_t, uint64_t>& h : declared.heldById)
+							if (const VpSkeleton::UserGrant* g = ls->plan.governor.Find(h.first))
+								if (g->bytes < h.second)
+									shortfall += h.second - g->bytes;
+					if (shortfall != st.vramShortfallUsed)
+						st.vramReplan = true;
+					st.vramShortfall = shortfall;
+					// Which look-ahead products the queue could not feed (names of the short-queue substitutions), for the starve line: built here,
+					// at a graph change, not every frame.
+					std::string reduced;
+					if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
+						for (const VpSkeleton::Node* n : ls->graph.ReducedNodes())
+							if (n->reducedFrom != VpSkeleton::kNoProduct && b->registry.Has(n->reducedFrom))
+								reduced += std::string(reduced.empty() ? "" : ", ") + b->registry.Get(n->reducedFrom).name;
+					st.starveReduced = reduced;
+				}
 				b->configuredGen = gen;
 				b->configuredPeriodMs = st.periodMs;
 				b->configuredQueue = queue;
+				b->configuredVramVersion = vramVersion;
+				b->configuredExtVersion = extVersion;
 				b->framesSinceConfigure = 0;
 				++st.configures;
 			}
@@ -824,20 +1378,56 @@ namespace Vpv
 				++st.dropsApplied;
 			}
 
+			if ((st.feedNeeded || st.wantsCameraFit) && !st.engine)
+				st.engine = engineProvider_ ? engineProvider_(st.host) : DefaultEngine(st.host);
+			// Both directions: declaring the camera fit starts the engine (VectorDemand::Consumer::CameraFit), and WITHDRAWING the whole external
+			// demand (feedNeeded and wantsCameraFit both false) must tell it so too. The push used to sit inside the "something is wanted" branch,
+			// so the last demand going away left the engine running the fit for nobody.
+			if (st.engine && st.wantsCameraFit != st.fitWantedPushed)
+			{
+				st.engine->SetCameraFitWanted(st.wantsCameraFit);
+				st.fitWantedPushed = st.wantsCameraFit;
+			}
+			else if (!st.engine && st.fitWantedPushed)
+				st.fitWantedPushed = false;
+			FeedEngine(st, true);   // a field whose input slots (P1) were not published yet last time: publish before the seal of its frame
 			b->lane.SetStormHold(Resync::ResyncExtension::StormHeld(st.host));
 			uint32_t wait = 0;
 			for (int guard = 0; guard < 64 && (wait = b->lane.DeterministicWaitUs(seq, 0)) > 0; ++guard)
 				std::this_thread::sleep_for(std::chrono::microseconds(wait));   // N1: only a deterministic run or an explicit test wait
 			b->lane.OnRenderStart(seq, 0);
+			st.renderBeginSeq = seqIn;   // the render-only clock starts here (after the deterministic wait and the seal, which are not render work)
+			st.renderBeginUs = nowUs_();
 			Refresh(st);
 		}
 
 		void SkeletonModule::AfterRender(HostState& st, int64_t seqIn)
 		{
+			const uint64_t afterUs = nowUs_();   // first: the render-only time ends before this module's own AfterRender work
 			const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
 			if (!b)
 				return;
 			const uint64_t seq = static_cast<uint64_t>(seqIn);
+			// S5: the span from the end of Begin to the entry of AfterRender is OBSERVED and shown (skeleton_regulator: observe only); the regulator is
+			// fed only through NoteRenderOnlyMs. A frame without a Begin of its own, or with the period unmeasured, observes nothing (counted).
+			if (st.renderBeginSeq == seqIn && st.periodMs > 0.0 && afterUs >= st.renderBeginUs)
+			{
+				const double renderMs = static_cast<double>(afterUs - st.renderBeginUs) / 1000.0;
+				const double slackMs = st.periodMs - renderMs;
+				const bool missed = renderMs > st.periodMs;
+				// OBSERVED ONLY: Begin..AfterRender includes the render lock wait and the pacing sleeps, so it is not a render-only time and the
+				// regulator is NOT fed with it (it would shed on waits). The regulator acts on NoteRenderOnlyMs (a span the host measured).
+				++st.timing.frames;
+				st.timing.missed += missed ? 1u : 0u;
+				st.timing.lastSlackMs = slackMs;
+				st.timing.lastRenderOnlyMs = renderMs;
+				st.timing.lastPeriodMs = st.periodMs;
+				st.timing.lastMissed = missed;
+			}
+			else
+				++st.timing.skipped;
+			st.renderBeginSeq = 0;
+			FeedEngine(st, false);   // the pair the engine just estimated: its slots are sealed at the Begin of its frame
 			if (st.dispatcher && b->wiring.dispatcher == st.dispatcher.get() && st.gpuMemoryNote.empty())
 			{
 				// GPU-legal (before the flush and the gap): destroy what a size / graph change queued, then (re)allocate the
@@ -871,10 +1461,13 @@ namespace Vpv
 			const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
 			const bool hasBundle = b != nullptr;
 			const uint8_t queueWired = CurrentQueue().wired;
+			const uint64_t queueKey = (uint64_t(st.queueFed.laneLead) << 40) | (uint64_t(st.queueUsed.laneLead) << 32) | (uint64_t(st.queueFed.renderAhead) << 24) |
+				(uint64_t(st.queueUsed.renderAhead) << 16) | (st.starveEvents & 0xFFFFu);
 			const bool due = st.frames <= kEarlyRefreshFrames || st.frames % kRefreshEvery == 1 || st.waiting != st.shownWaiting ||
-				hasBundle != st.shownBundle || queueWired != st.shownQueueWired;
+				hasBundle != st.shownBundle || queueWired != st.shownQueueWired || queueKey != st.shownQueueKey;
 			if (!due)
 				return;
+			st.shownQueueKey = queueKey;
 			st.shownQueueWired = queueWired;
 			st.shownWaiting = st.waiting;
 			st.shownBundle = hasBundle;
@@ -891,6 +1484,26 @@ namespace Vpv
 				problems += (problems.empty() ? "" : "; ") + p;
 			addDecision(FallbackCatalog::SkeletonKeys(problems));
 			addDecision(QueueDecision(queueWired));   // visible: the record histories sit at their floors until the queue is delivered
+			{
+				// The live queue feed (owner decision 2026-11-07): a feed above the ring-slot budget is capped, and a lane lead that fell below its
+				// best is a visible queue starve (look-ahead products reduced, if the graph has any).
+				std::string cap;
+				if (st.queueFed.renderAhead > st.queueUsed.renderAhead)
+					cap = "render-ahead depth capped at " + std::to_string(unsigned(st.queueUsed.renderAhead)) + " frame(s) (queue holds " +
+						std::to_string(unsigned(st.queueFed.renderAhead)) + "; ring slot budget)";
+				if (st.queueFed.laneLead > st.queueUsed.laneLead)
+					cap += std::string(cap.empty() ? "" : "; ") + "lane lead capped at " + std::to_string(unsigned(st.queueUsed.laneLead)) +
+						" frame(s) (queue holds " + std::to_string(unsigned(st.queueFed.laneLead)) + "; ring slot budget)";
+				addDecision(FallbackCatalog::SkeletonLaneLeadCapped(cap));
+				if (st.queueFed.wired & QueueShape::kLaneLead)
+					addDecision(FallbackCatalog::SkeletonQueueStarve(st.queueUsed.laneLead, st.leadPeak, st.starveReduced, st.starveEvents));
+				// S5: until the host delivers presentation facts the regulator's slack is derived from the render time.
+				addDecision(FallbackCatalog::SkeletonRegulatorInput(hasBundle && !st.timing.measured));
+addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleton::KnownUndeclaredVramUsers()) : std::string()));   // MV7 standing gap
+				addDecision(FallbackCatalog::SkeletonEngineFeed(st.feedNeeded && st.engine == nullptr));   // SK-W stage D: P2m / P3 cannot be published
+				// MV7 guard: a module that holds video memory is active but declared none of it: visible, never silent.
+				addDecision(FallbackCatalog::SkeletonVramUsers(VpSkeleton::UnpopulatedUserNames(VpSkeleton::VramUsers::Instance().Take().unpopulated)));
+			}
 			// The GPU products (70b G5): shadow and "no render device" have no dispatcher and say so.
 			const SkeletonGpuDispatcher* gd = st.dispatcher.get();
 			const bool shadow = st.settings.lane.mode == LaneSettings::Mode::Shadow;
@@ -953,6 +1566,13 @@ namespace Vpv
 				if (const std::shared_ptr<VpSkeleton::LaneState> laneState = lane.State())
 					addDecision(SkeletonModule::HistoryCapDecision(laneState->graph, b->configuredPeriodMs));
 				full = lane.StatusLines();
+				// MV7 ledger (Ctrl+Alt+D): the VRAM users outside the product catalog, as the governor granted them (one line each; products are
+				// listed by the lane's own status). A user below level 0 also has its governor notice in "Analysis: ..." (plan.notice).
+				if (const std::shared_ptr<VpSkeleton::LaneState> laneState = lane.State())
+					for (const VpSkeleton::UserGrant& g : laneState->plan.governor.grants)
+						if (g.id < VpSkeleton::kUserProductBase)
+							full.push_back(std::string("VRAM ") + VpSkeleton::Token(g.tier) + " " + g.name + ": " + VpSkeleton::FormatMB(g.bytes) + " level " +
+								std::to_string(g.level) + (g.shed ? " (off)" : g.reduced ? " (reduced)" : ""));
 				line = std::string("analysis lane ") + mode + " " + Dimensions(b->dims) + ", " + std::to_string(st.frames) +
 					" frames, ahead " + std::to_string(lane.TotalAhead()) + " in-render " + std::to_string(lane.TotalInRender()) +
 					" declined " + std::to_string(lane.TotalDeclined());
@@ -964,9 +1584,53 @@ namespace Vpv
 					std::snprintf(period, sizeof(period), ", period %.2f ms", st.periodMs);
 					line += period;
 				}
+				if (st.queueFed.wired & QueueShape::kLaneLead)
+					line += ", lane lead " + std::to_string(unsigned(st.queueUsed.laneLead)) +
+						(st.queueFed.laneLead != st.queueUsed.laneLead ? " (fed " + std::to_string(unsigned(st.queueFed.laneLead)) + ", capped)" : std::string());
 			}
 			else
 				line = std::string("analysis lane ") + mode + ": " + (st.waiting.empty() ? std::string("starting") : st.waiting);
+			{
+				// Ctrl+I / Ctrl+Alt+D: the queue the lane is built for and the regulator's input, in plain words.
+				const QueueShape& fq = st.queueFed;
+				const QueueShape& uq = st.queueUsed;
+				auto term = [](bool wired, unsigned fed, unsigned used) {
+					if (!wired)
+						return std::string("not fed");
+					return fed == used ? std::to_string(used) : std::to_string(used) + " (fed " + std::to_string(fed) + ")";
+				};
+				full.push_back("Skeleton queue: render-ahead " + term((fq.wired & QueueShape::kRenderAhead) != 0, fq.renderAhead, uq.renderAhead) +
+					", lane lead " + term((fq.wired & QueueShape::kLaneLead) != 0, fq.laneLead, uq.laneLead) + ", look-ahead walk " +
+					term((fq.wired & QueueShape::kLookAhead) != 0, fq.lookAheadWalk, uq.lookAheadWalk) + "; queued ahead of output " +
+					std::to_string(unsigned(uq.renderAhead) + unsigned(uq.laneLead)) + " frame(s); " + std::to_string(st.starveEvents) + " lead fall(s)");
+				char regLine[512] = {};   // the fixed text alone is 237 characters: 240 cut off the " (none: shedding off)" suffix
+				std::snprintf(regLine, sizeof(regLine), "Skeleton regulator input: derived from render time (observe only: the Begin..AfterRender span includes waits), %llu frame(s) observed (%llu skipped), last slack %.2f ms, span %.2f ms, %llu over the period; %llu measured frame(s) fed to the regulator%s",
+					static_cast<unsigned long long>(st.timing.frames), static_cast<unsigned long long>(st.timing.skipped), st.timing.lastSlackMs,
+					st.timing.lastRenderOnlyMs, static_cast<unsigned long long>(st.timing.missed), static_cast<unsigned long long>(st.timing.fed),
+					st.timing.measured ? "" : " (none: shedding off)");
+				full.push_back(regLine);
+				if (st.feedNeeded || st.externalConsumers != 0)
+				{
+					char feedLine[640] = {};
+					std::snprintf(feedLine, sizeof(feedLine),
+						"Skeleton engine feed: %llu field(s) published (last frame %llu), %llu without a field, %llu slipped, %llu retried for missing inputs, %llu given up, %llu claim failure(s), %llu era reset(s); external demand: %llu consumer(s), %llu duplicate id(s), camera fit %s",
+						static_cast<unsigned long long>(st.feed.published), static_cast<unsigned long long>(st.feed.lastSeq),
+						static_cast<unsigned long long>(st.feed.noField), static_cast<unsigned long long>(st.feed.slip),
+						static_cast<unsigned long long>(st.feed.ancestorsMissing), static_cast<unsigned long long>(st.feed.abandoned),
+						static_cast<unsigned long long>(st.feed.claimFailed), static_cast<unsigned long long>(st.feed.eraResets),
+						static_cast<unsigned long long>(st.externalConsumers), static_cast<unsigned long long>(st.externalDuplicates),
+						st.wantsCameraFit ? "wanted" : "not wanted");
+					full.push_back(feedLine);
+					const std::string claimNote = ClaimFailedNote(st.feed.claimFailed, st.queueUsed.laneLead == 0);
+					if (!claimNote.empty())
+						full.push_back(claimNote);
+				}
+				for (const std::string& l : PassTimers::Inbox::Motion().Lines())
+					full.push_back("Skeleton cost row " + l);
+				if (PassTimers::Inbox::Motion().Posted() != 0 || PassTimers::Inbox::Motion().Dropped() != 0)
+					full.push_back("Skeleton cost rows: " + std::to_string(PassTimers::Inbox::Motion().Posted()) + " posted, " +
+						std::to_string(PassTimers::Inbox::Motion().Dropped()) + " dropped (the queue is bounded; with nobody draining it the oldest is dropped)");   // MV7: the producers' posted timings (also drained into the pass-timer readout by the host)
+			}
 			full.push_back("Skeleton: " + std::to_string(st.frames) + " frames, " + std::to_string(st.srcFrames.load(std::memory_order_relaxed)) +
 				" source frames tapped, " + std::to_string(st.dropsApplied) + " drops applied, " + std::to_string(st.gapsRun) +
 				" idle gaps run, " + std::to_string(st.gapsSkipped) + " skipped (frame period unknown), " + std::to_string(st.configures) +

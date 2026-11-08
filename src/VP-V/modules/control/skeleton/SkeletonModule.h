@@ -23,13 +23,18 @@
 #include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/core/hub/HostSlots.h>
 #include <VP-V/modules/control/skeleton/SkeletonSettings.h>
+#include <VP-V/modules/control/skeleton/SkeletonFacts.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
+
+namespace VpMotion { class IVectorEngine; }   // modules/motion/estimation/VectorEngineInterface.h (the P5a engine)
 
 namespace Vpv
 {
@@ -38,6 +43,7 @@ namespace Vpv
 		namespace RE = RendererExtension;
 
 		struct HostState;   // per renderer (SkeletonModule.cpp)
+		struct Bundle;      // the lane and its producers for one source size (SkeletonModule.cpp)
 		class SkeletonGpuDispatcher;   // gpu/SkeletonGpuDispatcher.h (libplacebo; not included here)
 		struct GpuSlotTag { const void* host = nullptr; };   // the per-renderer pl_gpu, kept as a HostSlots aux
 
@@ -74,6 +80,61 @@ namespace Vpv
 			// Dimensions of the current lane graph (0 x 0 without one).
 			VpSkeleton::Dims DimsOf(const void* host) const;
 			bool WorkersRunning(const void* host) const;
+			// S5 regulator feed (render thread / single-threaded tests): what OnFrameTiming was given at the last AfterRender. `derived` = the
+			// slack came from the measured period and render time because the host delivers no presentation facts.
+			struct TimingFeed
+			{
+				uint64_t frames = 0;        // frames OBSERVED (the Begin..AfterRender span: it includes lock waits and pacing sleeps)
+				uint64_t skipped = 0;       // AfterRender without a Begin of the same frame, or with the period unknown (nothing observed)
+				uint64_t missed = 0;        // observed frames whose span was above the period
+				uint64_t fed = 0;           // frames given to the regulator: ONLY measured render-only spans (NoteRenderOnlyMs); never the observed span
+				bool measured = false;      // a measured render-only span has been given (the regulator acts on it)
+				double lastSlackMs = 0.0, lastRenderOnlyMs = 0.0, lastPeriodMs = 0.0;
+				bool lastMissed = false;
+				bool derived = true;        // the figures above are the observed span, not a measured render-only time
+			};
+			TimingFeed TimingFeedOf(const void* host) const;
+			// The regulator's input (render thread, once per frame, any time before the next Begin): the render-only time of frame `seq` that the HOST
+			// measured (the PassTimers render span, not the module's Begin..AfterRender clock). Slack = the measured source period - renderOnlyMs,
+			// missed = renderOnlyMs > period; it goes to AnalysisLane::OnFrameTiming, so the regulator acts (sheds) on it. Until a measured span arrives the
+			// regulator is NOT fed: the module's own span includes lock waits and pacing sleeps, and shedding on that would act on waits. False when
+			// there is no lane or no measured period.
+			bool NoteRenderOnlyMs(const void* host, uint64_t seq, double renderOnlyMs);
+			// The bytes a declared VRAM user still holds although the plan gave it less (a shed user keeps its texture until its module frees it): counted
+			// as transient in the next plan, so the products are not granted memory that is still occupied. 0 when nothing is pending.
+			uint64_t VramPendingFreeOf(const void* host) const;
+
+			// ---- SK-W stage D: demand and products from outside the lane (the camera link, the vector engine) ----------------------------
+			// EXTERNAL DEMAND. A component beside the lane (the camera extension) declares its consumers here (for example
+			// CameraLink::DeclareCameraConsumers: P7 / P8 / P9 / p7g with P2 / P3 / P4 as their inputs) and the products it publishes itself
+			// (`publishedOutside`, e.g. P7 / P8 / p7g by the camera fit worker straight into the lane's slot table: LaneOf(host)->State()->table).
+			// The next frame reconfigures the lane graph, which then holds those products and their ancestors; the declared consumers also start the
+			// vector engine (IVectorEngine::SetCameraFitWanted) when any of them reads a camera product. `owner` identifies the declaring object;
+			// one entry per (host, owner), replaced by the next call. Any thread. Consumer ids must be unique across owners (the first wins; the
+			// rest are counted and shown). Cleared with ClearExternalDemand (the declaring component's GpuReleased / Shutdown).
+			void SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
+				const std::vector<VpSkeleton::ProductId>& publishedOutside);
+			void ClearExternalDemand(const void* host, const void* owner);
+			// The engine of a renderer (null = none). Default: Query("vpv.vector_engine.v1") -> IVectorEngineDirectory::EngineFor(host). Tests inject a fake.
+			using EngineProvider = std::function<VpMotion::IVectorEngine*(const void* host)>;
+			void SetEngineProviderForTesting(EngineProvider provider) { engineProvider_ = std::move(provider); }
+			// The ENGINE FEED (render thread): once per frame (AfterRender, retried at Begin) the module publishes the P2m / P3 (and P2) slots of the
+			// frame the engine just made a verified field for (IVectorEngine::LatestVerifiedFieldSeq), with the stamp the field was computed under;
+			// the frame's own seal at Begin accepts or rejects them like any lane result. The slot CONTENT of P3 is the engine's texture (a GPU
+			// product: no kernel copies it into the slot yet, see README); what the module records and serves here are the facts of the field.
+			// THREADING: FeedCountersOf and EngineFieldFactsOf are RENDER THREAD ONLY (and tests that drive the frames on their own thread). They
+			// read the host state's plain (non-atomic) feed counters and facts ring, which the render thread writes in Begin / AfterRender; a call
+			// from another thread would race those writes (torn counters, a facts entry read while it is stored). Not guarded on purpose: a lock
+			// on the per-frame feed path would cost every frame for a reader that must sit on the render thread anyway (it consumes the facts
+			// for the frame being rendered). Another thread that needs the numbers reads the status lines (Ctrl+I, the command), which are
+			// published under the status mutex. SceneFactsOf is render-thread-only for the same reason (it reads the lane's slots at the seal).
+			FeedCounters FeedCountersOf(const void* host) const;
+			bool EngineFieldFactsOf(const void* host, uint64_t seq, EngineFieldFacts& out) const;
+			// Tests: the retry step the module runs at every Begin and AfterRender (the P1 inputs are published by the lane's own threads).
+			void RetryEngineFeedForTesting(const void* host);
+			// The scene of frame `seq` against `seq - 1` from the two P4 records (render thread, after the seal of `seq`). False when a record is not readable.
+			bool SceneFactsOf(const void* host, uint64_t seq, SceneFacts& out) const;
+
 			// The queue the lane graph is sized for: the terms the record histories are derived from (render-ahead R, lane lead L,
 			// look-ahead walk frames; VpSkeleton::QueueFramesFor). `wired` says which of the three a feed has delivered (kRenderAhead |
 			// kLaneLead | kLookAhead); an undelivered term keeps its default (0 / 1 / 0), so the histories stay at their floors, and the
@@ -94,24 +155,54 @@ namespace Vpv
 				}
 				bool operator!=(const QueueShape& o) const { return !(*this == o); }
 			};
+			// The queue the graph was last built from (render thread / tests): `fed` = the snapshot, `used` = after the ring-slot caps.
+			struct QueueInUse
+			{
+				QueueShape fed, used;
+				unsigned leadPeak = 0;       // the highest lane lead in use since the lane was built
+				uint64_t starveEvents = 0;   // times the lane lead in use fell
+			};
+			QueueInUse QueueInUseOf(const void* host) const;
 			// The live feed's entry (any thread, e.g. a settings change on the UI thread or the renderer's gate): ONE atomic snapshot
 			// that the render thread reads once per frame in Begin(); terms not marked in `q.wired` are reset to their defaults.
 			void PublishQueue(const QueueShape& q) { queueBits_.store(Pack(q), std::memory_order_release); }
 			QueueShape CurrentQueue() const { return Unpack(queueBits_.load(std::memory_order_acquire)); }
+			// The three feeds below are shaped alike (FEED RULE, owner decision 2026-11-07): each one compare-and-swaps ITS term into the one
+			// snapshot and leaves the others as they are. A feed must never PublishQueue a fresh QueueShape: that would erase the terms the
+			// other feeds delivered. Any thread; a value equal to the published one does not touch the snapshot (change-only).
+			//
 			// The look-ahead walk term, delivered by the host's SettingsApplied lifecycle call (LifecycleFacts::value = the motion look-ahead
-			// depth in frames, 0 = off). Host thread; a compare-and-swap on the one snapshot keeps the other terms as they are.
+			// depth in frames, 0 = off). Host thread.
 			void PublishLookAheadWalk(double frames)
 			{
 				const unsigned w = frames > 0.0 ? (frames < 65535.0 ? unsigned(frames) : 65535u) : 0u;   // NaN and negatives: 0
-				uint64_t cur = queueBits_.load(std::memory_order_relaxed);
-				for (;;)
-				{
-					QueueShape q = Unpack(cur);
-					q.lookAheadWalk = uint16_t(w);
-					q.wired = uint8_t(q.wired | QueueShape::kLookAhead);
-					if (queueBits_.compare_exchange_weak(cur, Pack(q), std::memory_order_release, std::memory_order_relaxed))
-						break;
-				}
+				MergeTerm([w](QueueShape& q) { q.lookAheadWalk = uint16_t(w); q.wired = uint8_t(q.wired | QueueShape::kLookAhead); });
+			}
+			// The render-ahead depth term: frames the renderer's render-ahead plan keeps ahead of the present (planned lead / source period; a
+			// partial frame holds a slot, so it rounds up). The host's one generic call at the render-ahead plan block delivers it.
+			void PublishRenderAhead(double frames)
+			{
+				const unsigned r = frames > 0.0 ? (frames < 255.0 ? unsigned(std::ceil(frames - 1e-9)) : 255u) : 0u;   // NaN and negatives: 0
+				MergeTerm([r](QueueShape& q) { q.renderAhead = uint8_t(r); q.wired = uint8_t(q.wired | QueueShape::kRenderAhead); });
+			}
+			// The lane lead term: frames actually queued ahead of the render (the input queue's size at the CollectAhead phase). Stored as fed
+			// (0..255); the render thread caps it to the ring-slot budget when it builds the graph (LaneLeadCap, shown).
+			void PublishLaneLead(double frames)
+			{
+				const unsigned l = frames > 0.0 ? (frames < 255.0 ? unsigned(frames) : 255u) : 0u;
+				MergeTerm([l](QueueShape& q) { q.laneLead = uint8_t(l); q.wired = uint8_t(q.wired | QueueShape::kLaneLead); });
+			}
+			// The ring-slot budget the queue terms share (Products.h kRingHeadroomFrames: a ring holds record history + 1 + R + L + the queue
+			// and span slots + the largest lead read, and a graph that needs more than 255 slots is rejected, so the lane would be lost): the
+			// room left for render-ahead + lane lead when the record histories sit at their cap.
+			static unsigned RingSlotBudget() { return VpSkeleton::kRingHeadroomFrames - 3u - unsigned(VpSkeleton::kMaxCameraLead); }
+			static unsigned CappedRenderAhead(unsigned renderAhead) { return renderAhead < RingSlotBudget() ? renderAhead : RingSlotBudget(); }
+			static unsigned LaneLeadCap(unsigned renderAhead) { return RingSlotBudget() - CappedRenderAhead(renderAhead); }
+			// Withdraws the render-ahead term (not wired again: the depths fall back to their floors and the skeleton_queue entry names it): the plan
+			// stopped (render-ahead off), or the host had no source period to express the lead in frames.
+			void UnpublishRenderAhead()
+			{
+				MergeTerm([](QueueShape& q) { q.renderAhead = 0; q.wired = uint8_t(q.wired & ~QueueShape::kRenderAhead); });
 			}
 			// Names of the undelivered terms ("" when all three are wired) and the Fallbacks decision for them.
 			static std::string QueueNotWiredNote(uint8_t wired)
@@ -143,6 +234,23 @@ namespace Vpv
 			void Begin(HostState& st, int64_t seq);
 			void AfterRender(HostState& st, int64_t seq);
 			void Refresh(HostState& st);
+			void OnCollectAhead(HostState& st, const RE::QueueView& view);
+			void FeedEngine(HostState& st, bool retryOnly);
+			bool PublishEngineSlots(HostState& st, Bundle& b, EngineFieldFacts& facts, unsigned& doneMask);
+			bool CollectExternal(const void* host, std::vector<VpSkeleton::ConsumerDecl>& consumers, std::vector<VpSkeleton::ProductId>& products,
+				bool& wantsCameraFit, size_t& duplicates) const;
+			template<class F> void MergeTerm(F&& set)
+			{
+				uint64_t cur = queueBits_.load(std::memory_order_relaxed);
+				for (;;)
+				{
+					QueueShape q = Unpack(cur);
+					set(q);
+					const uint64_t next = Pack(q);
+					if (next == cur || queueBits_.compare_exchange_weak(cur, next, std::memory_order_release, std::memory_order_relaxed))
+						break;
+				}
+			}
 
 			Skeleton::ConfigLoader loader_;
 			std::function<uint64_t()> nowUs_;
@@ -150,6 +258,17 @@ namespace Vpv
 			Hub::HostSlots<GpuSlotTag> gpuSlots_;   // aux = the renderer's pl_gpu (GpuCreated), cleared at GpuReleased
 			bool cardOverride_ = false;
 			bool startWorkers_ = true;
+			struct ExternalEntry
+			{
+				const void* host = nullptr;
+				const void* owner = nullptr;
+				std::vector<VpSkeleton::ConsumerDecl> consumers;
+				std::vector<VpSkeleton::ProductId> products;
+			};
+			mutable std::mutex externalMutex_;
+			std::vector<ExternalEntry> external_;
+			std::atomic<uint64_t> externalVersion_{ 0 };
+			EngineProvider engineProvider_;
 			VpSkeleton::CardProfile card_;
 			static uint64_t Pack(QueueShape q)
 			{
