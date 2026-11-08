@@ -48,6 +48,22 @@ namespace SourceIdentity
 {
 	namespace Chain
 	{
+		// The search-narrowing constants (SID-OPT step 2; VP-owned, ONE set, documented in README.md "Cost"). They bound how much of the
+		// exact (full line) stage runs per axis and evaluation. kExactHalfWidth and kMaxExactCandidates are the values the estimator has
+		// always run with (measured before SID-OPT: one candidate = 1888 solves per axis = 832 coarse + 1056 exact, which is exactly
+		// 3 integers x 4 kernels in the scan and 2 promoted candidates); they are named here so the narrowing is one reviewed set rather
+		// than scattered defaults. The two entries marked "lever" are new: a non-default value changes results.
+		namespace Narrowing
+		{
+			constexpr int kExactHalfWidth = 1;               // exact stage scans the coarse best n +- this (the coarse stage already centres it)
+			constexpr int kMaxExactCandidates = 2;           // coarse-ranked candidates promoted to full lines (plus the caller's confident n)
+			constexpr int kConfidentMaxExactCandidates = 0;  // lever: when the caller forces its confident n, promote at most this many coarse
+			                                                 // ranked candidates besides it (0 = kMaxExactCandidates, the shipped behaviour)
+			constexpr int kConfidentAxisExactLines = 16;     // step 3: exact-stage lines of an axis whose reading is confident, whatever the
+			                                                 // other axis reads (0 = off, all lines); applied by the estimator
+			                                                 // (EstimatorSettings::confidentAxisExactLines), not by the verifier
+		}
+
 		struct VerifierSettings
 		{
 			int coarseHalfWidth = 4;            // integers scanned each side of a candidate by the coarse stage
@@ -55,8 +71,9 @@ namespace SourceIdentity
 			int coarseLines = 8;                // lines used by the coarse stage (F0: the size is still right down to 8 lines)
 			double coarseWindowFraction = 0.125;   // coarse window = this fraction of N ...
 			int coarseMinWindow = 160;          // ... but at least this many rows
-			int exactHalfWidth = 1;             // integers scanned each side by the exact stage
-			int maxExactCandidates = 2;         // candidates promoted to the exact stage
+			int exactHalfWidth = Narrowing::kExactHalfWidth;             // integers scanned each side by the exact stage
+			int maxExactCandidates = Narrowing::kMaxExactCandidates;     // candidates promoted to the exact stage
+			int confidentMaxExactCandidates = Narrowing::kConfidentMaxExactCandidates;   // see Narrowing; 0 = maxExactCandidates
 			int exactFamilies = 2;              // kernel families evaluated in full at the best integer
 			double refFraction1 = 0.04;         // baseline sizes n (1 +- f1), n (1 +- f2)
 			double refFraction2 = 0.08;
@@ -227,8 +244,11 @@ namespace SourceIdentity
 						return na < nb;
 					return a < b;
 				});
+				int maxExact = s_.maxExactCandidates;
+				if (opt.forceExactN > 0 && s_.confidentMaxExactCandidates > 0 && s_.confidentMaxExactCandidates < maxExact)
+					maxExact = s_.confidentMaxExactCandidates;   // lever (Narrowing): a confident axis needs its own n plus fewer challengers
 				const int promote = opt.exactOnly ? static_cast<int>(order.size())
-					: (std::min<int>)(static_cast<int>(order.size()), s_.maxExactCandidates);
+					: (std::min<int>)(static_cast<int>(order.size()), maxExact);
 				for (int i = 0; i < static_cast<int>(order.size()); ++i)
 				{
 					CandidateResult& cr = out.candidates[static_cast<size_t>(order[static_cast<size_t>(i)])];

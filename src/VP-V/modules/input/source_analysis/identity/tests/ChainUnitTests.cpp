@@ -986,6 +986,41 @@ namespace Tests
 				Assert::IsTrue(evicting.CachedOperators() < combined.CachedOperators(), L"the evicting cache evicted");
 			}
 		}
+
+		// SID-OPT step 2 lever (Narrowing::kConfidentMaxExactCandidates, default 0 = off): when the caller forces its confident n, only that many
+		// coarse-ranked challengers get the exact stage besides it. Default off: the shipped counts; on: the best challenger and the forced size.
+		TEST_METHOD(TheConfidentAxisLeverPromotesFewerChallengersAndIsOffByDefault)
+		{
+			using namespace ChainSynth;
+			const Axes& a = FullChain(720, 1280, kBicubic, 232u, 10);
+			const int cand[4] = { 720, 360, 540, 810 };
+			VerifyOptions forced;
+			forced.forceExactN = 810;
+			Assert::IsTrue(VerifierSettings().confidentMaxExactCandidates == 0 && VerifierSettings().exactHalfWidth == 1 && VerifierSettings().maxExactCandidates == 2,
+				L"the shipped narrowing constants");
+			DescaleVerifier shipped;
+			VerifierSettings lv;
+			lv.confidentMaxExactCandidates = 1;
+			DescaleVerifier lever(lv);
+			VerifyResult rs, rl, rn;
+			Assert::IsTrue(shipped.Evaluate(a.v, cand, 4, forced, rs));
+			Assert::IsTrue(lever.Evaluate(a.v, cand, 4, forced, rl));
+			DescaleVerifier lever2(lv);
+			Assert::IsTrue(lever2.Evaluate(a.v, cand, 4, VerifyOptions(), rn));   // nothing forced: the lever does not apply
+			auto exactCount = [](const VerifyResult& r) {
+				int e = 0;
+				for (size_t i = 0; i < r.candidates.size(); ++i)
+					if (r.candidates[i].exactDone)
+						++e;
+				return e;
+			};
+			Assert::IsTrue(exactCount(rl) == 2, L"the best challenger and the forced size");
+			Assert::IsTrue(exactCount(rs) >= exactCount(rl) && exactCount(rs) <= 3, L"shipped: top 2 plus the forced size");
+			Assert::IsTrue(exactCount(rn) == 2, L"unforced: the lever is idle");
+			for (size_t i = 0; i < 4; ++i)
+				if (rl.candidates[i].exactDone && rs.candidates[i].exactDone)
+					Assert::IsTrue(ChainSynth::SameCandidate(rl.candidates[i], rs.candidates[i]), L"a candidate that gets the exact stage in both is the same number");
+		}
 	};
 
 	TEST_CLASS(ChainProposerTests)
