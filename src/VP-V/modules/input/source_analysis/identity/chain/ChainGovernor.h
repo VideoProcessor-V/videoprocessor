@@ -5,8 +5,10 @@
 // ChainGovernor (SID-C2b, doc 78 section 8): the CPU-share governor of the chain estimator worker. Pure arithmetic, no clock of
 // its own (the caller passes a monotonic `nowMs`), no threads, deterministic.
 //
-//   interval = max(nominal, costMs / share)       nominal: 1 s while acquiring, 5 s while LATCHED with power
-//   share    = 15 % of one core while acquiring (UNKNOWN / PROVISIONAL / CANDIDATE), 2 % while LATCHED with power
+//   interval = max(nominal, costMs / share)       nominal: 1 s while acquiring, 5 s while both axes read CONFIDENT (with power)
+//   share    = 15 % of one core while acquiring (UNKNOWN / PROVISIONAL / UNSURE), 2 % while both axes are confident
+//   (N2: while the monitor keeps holding native-looking frames on the strength of a confident reading, the estimator is NOT in the
+//   confident regime: ChainEstimator::NoteNativeHeld, the acquiring cadence applies; the regime is the caller's `latchedWithPower` flag.)
 //
 // `costMs` is the wall time of one evaluation as the worker measured it; `cold` (operators were built in that evaluation)
 // keeps a one-off cold cost from stretching the cadence for good: a warm cost, once seen, replaces the cold one. The interval is

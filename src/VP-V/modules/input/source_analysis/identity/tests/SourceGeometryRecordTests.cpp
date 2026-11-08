@@ -136,6 +136,14 @@ namespace Tests
 			Assert::IsTrue(cause == G::kCauseCorrupt && u.evalSeq == 77);
 		}
 
+		// W3 (round 1): the framework's SourceGeometryProductTests stay as the skeleton team wrote them (kRequestedToday); SID's request is tested here.
+		TEST_METHOD(OnlyConsensusOnRequestsTheGeometry)
+		{
+			Assert::IsFalse(SourceGeometry::kRequestedToday, L"the framework's constant: no estimator wired, nothing requested");
+			Assert::IsFalse(SourceGeometry::Requested(false), L"source_id_consensus off (or shadow, or the Original pathway) asks for nothing");
+			Assert::IsTrue(SourceGeometry::Requested(true), L"source_id_consensus on is the request");
+		}
+
 		TEST_METHOD(RecordCauseIsTheSkeletonsRuleOverTheRecordsOwnEntry)
 		{
 			GeoFx::G::Record r;

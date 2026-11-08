@@ -265,8 +265,11 @@ namespace SourceGeometry
 		return &empty;
 	}
 
-	// Whether any consumer asks for the geometry: source_id_consensus = On (the Monitor's effective mode: the Original pathway forces Off,
-	// Shadow only computes and logs). `consensusOn` is the caller's state of that key; nothing else asks.
+	// Whether any consumer asks for the geometry in a build without the estimator wired (the framework's constant, unchanged): false.
+	constexpr bool kRequestedToday = false;
+
+	// SID: whether any consumer asks for the geometry with the estimator wired: source_id_consensus = On (the Monitor's effective mode: the
+	// Original pathway forces Off, Shadow only computes and logs). `consensusOn` is the caller's state of that key; nothing else asks.
 	inline bool Requested(bool consensusOn) { return consensusOn; }
 
 	// Why the record is not usable: one bit per cause.
@@ -337,7 +340,7 @@ namespace SourceGeometry
 
 	// The read of a consumer in a build without the estimator wired: the placeholder producer, nothing requested. Byte-identical to not
 	// reading at all.
-	inline ReadResult ReadToday(Consumer consumer) { return Read(consumer, PlaceholderEntry(), Requested(false), 0, 0); }
+	inline ReadResult ReadToday(Consumer consumer) { return Read(consumer, PlaceholderEntry(), kRequestedToday, 0, 0); }
 
 	// The ONE decision of `product.source_geometry` over the reads of every consumer (one id, so one consumer's recovery cannot release
 	// another's entry): engaged while any requested read is not usable, the reason naming each consumer. Released otherwise.

@@ -258,6 +258,69 @@ namespace Tests
 			Assert::IsTrue(u.NativeFramesHeldByChain() == 0, L"UNSURE: the original rules");
 		}
 
+		// S2 (round 1): the hold reads the latest SEALED record with evalSeq <= the frame being analysed (the P14g contract), never a newer one.
+		TEST_METHOD(ARecordSealedAfterTheFrameNeverHoldsTheTrackers)
+		{
+			SidGate::Mon m;
+			GeoFx::G::HeldState geo;
+			m.SetGeometrySource(&geo);
+			m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+			geo.Publish(SidGate::Upscaled(1000, 15.9));   // sealed for frame 1000: frames 2..13 are of its past
+			uint64_t seq = 2;
+			for (int i = 0; i < 12; ++i)
+				SidGate::Analyse(m, 10.0 + 0.5 * i, seq++);
+			Assert::IsTrue(m.NativeFramesHeldByChain() == 0, L"a record from after these frames is no contradiction of them");
+			for (int i = 0; i < 4; ++i)
+				SidGate::Analyse(m, 16.0 + 0.5 * i, 1000 + static_cast<uint64_t>(i));
+			Assert::IsTrue(m.NativeFramesHeldByChain() > 0, L"frames at or after its sequence do see it (fixture)");
+		}
+
+		// S3 (round 1): a confident axis holds only its own tracker (and the combined one).
+		TEST_METHOD(AConfidentAxisHoldsOnlyItsOwnTracker)
+		{
+			auto held = [](bool h, bool v) {
+				SidGate::Mon m;
+				GeoFx::G::HeldState geo;
+				m.SetGeometrySource(&geo);
+				m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+				uint64_t seq = 2;
+				for (int i = 0; i < 12; ++i)
+				{
+					const double t = 10.0 + 0.5 * i;
+					if (i % 2 == 0)
+						geo.Publish(GeoFx::MakeRecord(seq, SidGate::Us(t - 0.1), h ? GeoFx::AppliedAxis(1920, 3840, 5) : GeoFx::G::AxisGeom(),
+							v ? GeoFx::AppliedAxis(1080, 2160, 5) : GeoFx::G::AxisGeom()));
+					SidGate::Analyse(m, t, seq++);
+				}
+				return m.NativeFramesHeldByChain();
+			};
+			const unsigned long long both = held(true, true), hOnly = held(true, false), vOnly = held(false, true), neither = held(false, false);
+			Assert::IsTrue(neither == 0, L"no confident axis: nothing is held");
+			Assert::IsTrue(hOnly > 0 && vOnly > 0, L"one confident axis holds its own tracker");
+			Assert::IsTrue(hOnly < both && vOnly < both, L"and not the other axis's tracker (two of three trackers, not three)");
+		}
+
+		// S1 (a) (round 1): the hold lasts only while the record is fresh by ITS OWN maximum age.
+		TEST_METHOD(AStaleChainRecordNoLongerHoldsNativeLookingFrames)
+		{
+			SidGate::Mon m;
+			GeoFx::G::HeldState geo;
+			m.SetGeometrySource(&geo);
+			m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+			GeoFx::G::Record r = SidGate::Upscaled(2, 9.9);
+			r.maxAgeUs = 1000000;   // stale 1 s after its evaluation
+			geo.Publish(r);
+			uint64_t seq = 2;
+			unsigned long long heldWhileFresh = 0;
+			for (int i = 0; i < 12; ++i)
+			{
+				SidGate::Analyse(m, 10.0 + 0.5 * i, seq++);
+				if (i == 1) heldWhileFresh = m.NativeFramesHeldByChain();   // t = 10.5 s: 0.6 s after the evaluation
+			}
+			Assert::IsTrue(heldWhileFresh > 0, L"fixture: fresh, the confident record holds the frames");
+			Assert::IsTrue(m.NativeFramesHeldByChain() == heldWhileFresh, L"stale (past its own max age): the original rules, no frame is held any more");
+		}
+
 		TEST_METHOD(TheGeometryFallbackIsVisibleWhileConsensusIsOnAndTheRecordIsUnusable)
 		{
 			SidGate::Mon m;

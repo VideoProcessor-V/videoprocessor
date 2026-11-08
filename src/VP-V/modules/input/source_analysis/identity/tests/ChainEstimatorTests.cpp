@@ -520,6 +520,33 @@ namespace Tests
 			Assert::IsFalse(est.Wants(), L"a second pull inside one second is refused");
 		}
 
+		// S1 (b) (round 1): while the monitor holds native-looking frames on the strength of this estimator's reading, the long cadence ends.
+		TEST_METHOD(ANativeHeldNoteRestoresTheAcquiringCadenceWhileConfident)
+		{
+			ManualClock clk;
+			C::ChainEstimator est(C::EstimatorSettings(), clk.Fn());
+			StartShadow(est);
+			const Plane plane = MakePlane(kW, kH, 44, 4);
+			Feed(est, plane, 10, 1.0);   // evaluated at 0 ms
+			est.ForceLatchedPowerForTest(true);
+			est.ForceNextDueForTest(5000.0);   // as a confident evaluation leaves it: the long interval
+			clk.Set(1500.0);
+			Assert::IsFalse(est.Wants(), L"fixture: the confident cadence is not due at 1.5 s");
+			est.NoteNativeHeld(0u);
+			Assert::IsTrue(est.LatchedPowerForTest() && !est.Wants(), L"an empty note changes nothing");
+			est.NoteNativeHeld(1u);
+			Assert::IsFalse(est.LatchedPowerForTest(), L"a held native-looking frame ends the confident regime");
+			Assert::AreEqual(1.0, est.IntervalSec(), 1e-9, L"the acquiring interval (the governor's plan)");
+			Assert::IsTrue(est.Wants(), L"the evaluation due at the long interval is pulled forward to one acquiring interval after the last start");
+			est.ForceNextDueForTest(5000.0);
+			est.NoteNativeHeld(2u);
+			Assert::IsFalse(est.Wants(), L"already acquiring: a note pulls nothing forward");
+			C::ChainEstimator idle(C::EstimatorSettings(), clk.Fn());   // never started: inert
+			idle.ForceLatchedPowerForTest(true);
+			idle.NoteNativeHeld(3u);
+			Assert::IsTrue(idle.LatchedPowerForTest(), L"an estimator that does not run ignores the note");
+		}
+
 		TEST_METHOD(ABackToBackDiscontinuityPublishesAResetRecordAtOrAboveTheMonitorFloor)
 		{
 			const Plane plane = MakePlane(kW, kH, 44, 4);

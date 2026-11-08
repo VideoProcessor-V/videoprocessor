@@ -105,6 +105,9 @@ namespace SourceIdentity
 			EvaluationObserver observer;   // set before the estimator runs
 			std::atomic<double> nextDueMs{ 0.0 };
 			std::atomic<double> intervalMs{ 1000.0 };
+			std::atomic<double> acquiringIntervalMs{ 1000.0 };   // the PLANNED acquiring interval as of the last evaluation (cost aware)
+			std::atomic<double> lastStartMs{ 0.0 };              // wall time the newest evaluation started
+			std::atomic<unsigned> nativeHeldMask{ 0u };          // axes (bit 0 = H, 1 = V) on which the monitor left a native-looking frame out since the last evaluation (N2)
 			std::atomic<double> lastEventDueMs{ -1e18 };   // the last time an event pulled the next evaluation forward (at most once per second)
 			std::atomic<double> lastEvalWallMs{ -1.0 };    // wall time the newest evaluation finished (-1: none since the start)
 			std::atomic<double> runStartMs{ 0.0 };         // wall time of the clean start
@@ -162,6 +165,7 @@ namespace SourceIdentity
 				}
 				BuildVerifiers();
 				intervalMs.store(cfg.governor.acquiringIntervalSec * 1000.0);
+				acquiringIntervalMs.store(cfg.governor.acquiringIntervalSec * 1000.0);
 				statusPlan = gov.Plan(false);
 			}
 
@@ -386,6 +390,26 @@ namespace SourceIdentity
 						if (nextDueMs.load(std::memory_order_acquire) > now)
 							nextDueMs.store(now, std::memory_order_release);
 					}
+				}
+			}
+
+			// N2 (S1 bound): the monitor left a native-looking informative frame out on the axes of `mask` because this estimator reads them
+			// confidently below native. While that goes on, the estimator's own reading must be re-tested quickly: the confident cadence
+			// (5 s, 2 % share) does not apply; the evaluation after this note, and every one while notes keep coming, runs at the
+			// ACQUIRING cadence, and an evaluation already scheduled at the long interval is pulled forward to one acquiring interval
+			// after the last start. No new fixed number: both intervals are the governor's plan. Leaf atomics only (render / analysis thread).
+			void NoteNativeHeld(unsigned mask)
+			{
+				if (mask == 0u || !running.load(std::memory_order_acquire))
+					return;
+				nativeHeldMask.fetch_or(mask, std::memory_order_acq_rel);
+				if (latchedPower.exchange(false, std::memory_order_acq_rel))
+				{
+					const double acq = acquiringIntervalMs.load(std::memory_order_acquire);
+					const double due = lastStartMs.load(std::memory_order_acquire) + acq;
+					if (nextDueMs.load(std::memory_order_acquire) > due)
+						nextDueMs.store(due, std::memory_order_release);
+					intervalMs.store(acq, std::memory_order_release);
 				}
 			}
 
@@ -782,9 +806,11 @@ namespace SourceIdentity
 				lastTimeUs = 0;
 				lastSeq = 0;
 				latchedPower.store(false, std::memory_order_release);
+				nativeHeldMask.store(0u, std::memory_order_release);
 				held.Reset();
 				nextDueMs.store(0.0, std::memory_order_release);
 				intervalMs.store(cfg.governor.acquiringIntervalSec * 1000.0, std::memory_order_release);
+				acquiringIntervalMs.store(cfg.governor.acquiringIntervalSec * 1000.0, std::memory_order_release);
 				lastEventDueMs.store(-1e18, std::memory_order_release);
 				lastEvalWallMs.store(-1.0, std::memory_order_release);
 				runStartMs.store(nowMs(), std::memory_order_release);
@@ -865,6 +891,7 @@ namespace SourceIdentity
 					++geometryGen;
 				if (out[0].appliedChanged || out[1].appliedChanged)
 					++appliedGen;
+				nativeHeldMask.store(0u, std::memory_order_release);
 				nextDueMs.store(0.0, std::memory_order_release);   // acquisition restarts at once
 				intervalMs.store(cfg.governor.acquiringIntervalSec * 1000.0, std::memory_order_release);
 				if (haveEvaluated)
@@ -959,6 +986,7 @@ namespace SourceIdentity
 				const LineSnapshot& s = *job.snap;
 				const double t0 = nowMs();
 				gov.NoteStart(t0);
+				lastStartMs.store(t0, std::memory_order_release);
 				std::string fmt;
 				bool classicalOk = false;
 				double classical[2] = { 1.0, 1.0 };
@@ -1133,9 +1161,15 @@ namespace SourceIdentity
 				gov.NoteCost(cost, cold);
 				// Both axes CONFIDENT: the long cadence (5 s, 2% share); anything else evaluates at the acquiring cadence. maxAgeUs follows
 				// the PLANNED interval, not the nominal one.
+				// N2 (S1 bound): while the monitor keeps leaving native-looking frames out on the strength of this very reading (a note since
+				// the last evaluation), the long cadence does not apply: the reading is re-tested at the acquiring cadence, so a source that
+				// genuinely became native flips it quickly (and the window of ChainEvidence follows the measured, shorter interval).
 				const bool bothConfident = AxisConfident(reader[0]) && AxisConfident(reader[1]);
-				latchedPower.store(bothConfident, std::memory_order_release);
-				const GovernorPlan plan = gov.Plan(bothConfident);
+				const bool nativeHeld = nativeHeldMask.exchange(0u, std::memory_order_acq_rel) != 0u;
+				const bool latchedWithPower = bothConfident && !nativeHeld;
+				latchedPower.store(latchedWithPower, std::memory_order_release);
+				acquiringIntervalMs.store(gov.Plan(false).intervalSec * 1000.0, std::memory_order_release);
+				const GovernorPlan plan = gov.Plan(latchedWithPower);
 				nextDueMs.store(t0 + plan.intervalSec * 1000.0, std::memory_order_release);
 				intervalMs.store(plan.intervalSec * 1000.0, std::memory_order_release);
 
@@ -1297,6 +1331,7 @@ namespace SourceIdentity
 		void ChainEstimator::NoteEvent(EstimatorEvent kind, uint64_t seq) { st_->NoteEvent(kind, seq); }
 		void ChainEstimator::NoteRepeat(uint64_t seq) { st_->NoteRepeat(seq); }
 		void ChainEstimator::NoteDiscontinuity(const char* cause) { st_->NoteDiscontinuity(cause); }
+		void ChainEstimator::NoteNativeHeld(unsigned axisMask) { st_->NoteNativeHeld(axisMask); }
 		void ChainEstimator::SetStreamKey(uint64_t key) { st_->SetStreamKey(key); }
 		void ChainEstimator::SetClassical(bool valid, double ratioH, double ratioV) { st_->SetClassical(valid, ratioH, ratioV); }
 		void ChainEstimator::SetFormatInfo(const std::string& text) { st_->SetFormatInfo(text); }
@@ -1326,6 +1361,9 @@ namespace SourceIdentity
 		bool ChainEstimator::WaitIdle(int timeoutMs) const { return st_->WaitIdle(timeoutMs); }
 		void ChainEstimator::PauseForTest(bool pause) { st_->Pause(pause); }
 		void ChainEstimator::ForceLatchedPowerForTest(bool on) { st_->latchedPower.store(on, std::memory_order_release); }
+		bool ChainEstimator::LatchedPowerForTest() const { return st_->latchedPower.load(std::memory_order_acquire); }
+		void ChainEstimator::ForceNextDueForTest(double ms) { st_->nextDueMs.store(ms, std::memory_order_release); st_->intervalMs.store(ms - st_->lastStartMs.load(std::memory_order_acquire), std::memory_order_release); }
+		double ChainEstimator::IntervalSec() const { return st_->intervalMs.load(std::memory_order_acquire) / 1000.0; }
 		bool ChainEstimator::SubmitLines(const LineSnapshot& snapshot) { return st_->SubmitSnapshot(snapshot); }
 	}
 }

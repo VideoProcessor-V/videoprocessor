@@ -267,6 +267,8 @@ namespace SourceResolutionMonitor
 		GeometryViews GeometryView(double seconds = -1.0) const;
 		// The estimator itself (diagnostics, tests). Never null.
 		SourceIdentity::Chain::ChainEstimator& ChainEstimatorRef() { return *chainEst; }
+		// Tests: replaces the (inert) estimator with one built with an injected clock / settings. Before SetChainEnabled(true) only.
+		void SetChainEstimatorForTest(std::unique_ptr<SourceIdentity::Chain::ChainEstimator> estimator);
 		// N2 (diagnostic): native-looking frames the trackers left out because the consensus held an upscaled source on confident chain
 		// evidence (Tracker::ChainHeld, summed over the three trackers; 0 in Off / Shadow).
 		unsigned long long NativeFramesHeldByChain() const { return nativeHeldByChain.load(std::memory_order_relaxed); }
@@ -554,7 +556,9 @@ namespace SourceResolutionMonitor
 		struct IdGate { bool on = false, fresh = false; double ratioH = 1.0, ratioV = 1.0; bool latchedH = false, latchedV = false; };
 		IdGate SourceIdGate(double now);
 		// The newest P14g record the monitor may use: decodable, not from before the last discontinuity. `cause` = kCause* when none.
-		bool ReadGeometry(SourceGeometry::Record& rec, unsigned& cause) const;
+		// `seq` != 0: the latest sealed record with evalSeq <= seq (the P14g contract: a frame-bound consumer never reads the future);
+		// 0 = the newest of all (status, fallback and other live displays).
+		bool ReadGeometry(SourceGeometry::Record& rec, unsigned& cause, uint64_t seq = 0) const;
 		uint64_t sourceIdLastRowSeq = 0;           // worker: the source sequence of the newest analysed frame (era floor for P14g records)
 		FallbackCatalog::Decision geometryDecision;     // product.source_geometry, written by AutoFactor(s) (gateMutex)
 		std::atomic<const SourceIdentity::Geometry::HeldState*> geometrySource{ nullptr };

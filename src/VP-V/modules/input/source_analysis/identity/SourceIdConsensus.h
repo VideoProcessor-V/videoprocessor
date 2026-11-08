@@ -306,7 +306,8 @@ namespace SourceIdentity
 				for (int vi = 0; vi < kVoterCount; ++vi)
 				{
 					const Slot& sl = slot_[vi];
-					if (sl.present && sl.vote.safetyVeto && (sl.vote.fieldMask & FieldBit(f)) && Fresh(vi, now))
+					if (sl.present && sl.vote.safetyVeto && (sl.vote.fieldMask & FieldBit(f)) && (sl.vote.vetoExemptFields & FieldBit(f)) == 0 &&
+						Fresh(vi, now))
 						vetoed = true;
 				}
 				if (vetoed)

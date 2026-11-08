@@ -99,7 +99,7 @@ Writes `NullTables.generated.h` (an inline `GeneratedNullTables()` returning the
   row per evaluation x axis x tested candidate, 27 columns, ALL required (a v1/v2 dump is refused: "dump v2 - regenerate with v3
   writer"): the 21 v2 columns `reel_id,title,eval_seq,time_s,axis,N,n,class,T,stage,best_kernel,kernel_margin,lines_passed,lines,power_seen,floor_codes,truth_n,bit_depth,truth_kernel,truth_sharpen,shot_id`
   then `T_ev,informative,master,has_truth,truth_n1,cut_id`. `T_ev` is the statistic the LLR sees (used for every fit and
-  simulation; `T` is diagnostic only). `title` is a per-reel description and is ignored: folds and counts use `master`.
+  simulation; `T` is diagnostic only; a HOLD evaluation's rows carry `T_ev` with `informative` = 0, and the fit drops them). `title` is a per-reel description and is ignored: folds and counts use `master`.
 * Run: `python -I tools/eval/source_id/calibrate_nulls.py --dump <dir> --out <dir>` (options: `--require-power`,
   `--null-side below`, `--seed`, `--date`). Test: `python -I tools/eval/source_id/calibrate_nulls.py --selftest` (about 20 s).
 * Samples (stage exact only): `has_truth == 1`, `informative == 1` and the line gate (`lines_passed >= max(3, ceil(lines/4))`),

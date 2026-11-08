@@ -644,6 +644,13 @@ if (tile < int(tiles) && g.y < ts) {
 		return true;
 	}
 
+	void Monitor::SetChainEstimatorForTest(std::unique_ptr<SourceIdentity::Chain::ChainEstimator> estimator)
+	{
+		if (!estimator || chainEnabled.load(std::memory_order_acquire)) return;   // never swapped under a running chain
+		chainEst->Stop();
+		chainEst = std::move(estimator);
+	}
+
 	void Monitor::RequestChainEvidenceDump(const std::string& why) { chainEst->RequestEvidenceDump(why); }
 	bool Monitor::TakeChainNotice(std::string& text) { return chainEst->TakeNotice(text); }
 	std::string Monitor::ChainStatusLine() const { return chainEst->StatusLine(); }
@@ -667,7 +674,7 @@ if (tile < int(tiles) && g.y < ts) {
 		return v;
 	}
 
-	bool Monitor::ReadGeometry(SourceGeometry::Record& rec, unsigned& cause) const
+	bool Monitor::ReadGeometry(SourceGeometry::Record& rec, unsigned& cause, uint64_t seq) const
 	{
 		cause = 0;
 		const SourceGeometry::HeldState* source = geometrySource.load(std::memory_order_acquire);
@@ -676,7 +683,7 @@ if (tile < int(tiles) && g.y < ts) {
 			cause = SourceGeometry::kCauseAbsent;
 			return false;
 		}
-		if (!source->ReadLatest(0, rec, &cause))
+		if (!source->ReadLatest(seq, rec, &cause))
 			return false;   // nothing yet (absent), another unit version or a corrupt record: the cause is named
 		if (rec.evalSeq < sourceId.GeometryFloor())
 		{
@@ -1235,35 +1242,54 @@ if (tile < int(tiles) && g.y < ts) {
 		const SourceResolution::EvidenceSource look = [this](uint64_t from, uint64_t to) { return LookAheadEvidence(from, to); };
 		// Frame-bound: no look-ahead evidence (it is analysis of frames after the one decided).
 		const SourceResolution::EvidenceSource* lookAhead = !bound && fixes && CutFixes() && j.sequence != 0 ? &look : nullptr;
-		// N2 (SID train r2): with the consensus On, the chain's latest usable record reads an axis CONFIDENTLY below native (a fresh record of
-		// this era, applied state confident). While that holds, ONE native-looking frame is no evidence that ends the tracker's window or
-		// declaration (Tracker::SetChainContradictsNative), and it is no classical safety veto either (detailAbove below): the veto would
-		// otherwise pin the consensus native on every informative native-looking frame and the chain could never be adopted. When the chain
-		// stops reading confidently (native, UNSURE, absent, stale) the flag drops and the original rules apply again. The trackers are only
-		// held in On (they are the original decision); the veto suppression also applies in Shadow so the logged would-be is what On decides.
-		bool chainContradicts = false;
+		// N2 (SID train r2): with the consensus On, the chain's latest usable record reads an axis CONFIDENTLY below native. The record is
+		// the latest SEALED one with evalSeq <= this frame's sequence (the P14g contract, as the pipeline's chain vote reads it; the newest
+		// of all only without sequences), fresh by its own maximum age and of this era. PER AXIS: a confident axis holds ONLY its own
+		// tracker (axis 0 = H -> trackerH, axis 1 = V -> trackerV; the combined tracker when either is confident) and is exempt from the
+		// classical safety veto only on that axis (chainHoldMask -> Vote.vetoExemptFields). While it holds, ONE native-looking frame is
+		// no evidence that ends the tracker's window or declaration (Tracker::SetChainContradictsNative), and it is no classical veto on
+		// that axis: the veto would otherwise pin the consensus native on every informative native-looking frame and the chain could
+		// never be adopted. When the chain stops reading an axis confidently (native, UNSURE, absent, stale) that axis's flag drops and
+		// the original rules apply to it again. BOUNDED (S1): the hold lasts only while the record is fresh and confident, and while it
+		// holds the chain estimator evaluates at its acquiring cadence (NoteNativeHeld), so its own reading re-tests quickly. The
+		// trackers are only held in On (they are the original decision); the veto exemption also applies in Shadow so the logged
+		// would-be is what On decides.
+		bool chainHoldsAxis[2] = { false, false };   // [0] = H, [1] = V
 		if (idMode != SourceIdMode::Off)   // Shadow too: the would-be of the consensus must be what On would decide
 		{
 			namespace Geo = SourceIdentity::Geometry;
 			Geo::Record grec;
 			unsigned geoCause = 0;
-			if (ReadGeometry(grec, geoCause) && grec.Cause(Geo::detail::kAnySeq, static_cast<int64_t>(std::llround(j.seconds * 1e6))) == 0u)
+			const uint64_t frameSeq = j.sequence;   // 0 (no sequences: tests, live without frame binding) = the newest record
+			if (ReadGeometry(grec, geoCause, frameSeq) &&
+				grec.Cause(frameSeq != 0 ? frameSeq : Geo::detail::kAnySeq, static_cast<int64_t>(std::llround(j.seconds * 1e6))) == 0u)
 			{
 				const Geo::ConfidentGeometry v = Geo::ConfidentOf(grec, Geo::Delivered());
 				const double tol = sourceId.Settings_().consensus.ratioTolerance;
 				for (int a = 0; a < 2; ++a)
-					if (v.axis[a].confident && v.axis[a].ratio < 1.0 - tol)
-						chainContradicts = true;
+					chainHoldsAxis[a] = v.axis[a].confident && v.axis[a].ratio < 1.0 - tol;
 			}
 		}
-		const bool holdTrackers = chainContradicts && idMode == SourceIdMode::On;   // the trackers are the ORIGINAL decision: only On changes them
-		tracker.SetChainContradictsNative(holdTrackers);
-		trackerV.SetChainContradictsNative(holdTrackers);
-		trackerH.SetChainContradictsNative(holdTrackers);
+		const bool chainContradicts = chainHoldsAxis[0] || chainHoldsAxis[1];
+		const unsigned chainHoldMask = (chainHoldsAxis[0] ? 1u : 0u) | (chainHoldsAxis[1] ? 2u : 0u);
+		const bool holdOn = idMode == SourceIdMode::On;   // the trackers are the ORIGINAL decision: only On changes them
+		tracker.SetChainContradictsNative(holdOn && chainContradicts);
+		trackerH.SetChainContradictsNative(holdOn && chainHoldsAxis[0]);
+		trackerV.SetChainContradictsNative(holdOn && chainHoldsAxis[1]);
+		const unsigned long long heldBefore[3] = { tracker.ChainHeld(), trackerH.ChainHeld(), trackerV.ChainHeld() };
 		tracker.Update(frame, j.seconds, false, j.sequence, lookAhead);
 		trackerV.Update(SourceResolution::AxisFrame(frame, true), j.seconds, false, j.sequence, lookAhead);
 		trackerH.Update(SourceResolution::AxisFrame(frame, false), j.seconds, false, j.sequence, lookAhead);
 		nativeHeldByChain.store(tracker.ChainHeld() + trackerV.ChainHeld() + trackerH.ChainHeld(), std::memory_order_relaxed);
+		if (holdOn && chainContradicts && chainEnabled.load(std::memory_order_acquire))
+		{
+			// A native-looking informative frame was just left out on an axis: the estimator re-tests at its acquiring cadence.
+			unsigned held = 0;
+			if (trackerH.ChainHeld() != heldBefore[1]) held |= 1u;
+			if (trackerV.ChainHeld() != heldBefore[2]) held |= 2u;
+			if (tracker.ChainHeld() != heldBefore[0]) held |= chainHoldMask;
+			if (held != 0) chainEst->NoteNativeHeld(held);
+		}
 		// Latch fixes: the tracker reset itself for a cause the check above did not see: the rest too.
 		if (fixes && tracker.Discontinuities() != trackerResets)
 		{
@@ -1448,9 +1474,12 @@ if (tile < int(tiles) && g.y < ts) {
 			sourceId.SetNoticeEnabled(sourceIdNotice.load(std::memory_order_acquire));
 		// "Detail above the re-based size": every tracker is back to native with nothing gathered below it, on an
 		// informative frame (the classical safety veto; consensus may not hold a re-base the evidence no longer has).
-		const bool detailAbove = frame.informative() && tracker.Ratio() >= 1.0 && tracker.Candidate() >= 1.0 &&
-			trackerV.Ratio() >= 1.0 && trackerV.Candidate() >= 1.0 && trackerH.Ratio() >= 1.0 && trackerH.Candidate() >= 1.0 &&
-			!chainContradicts;   // N2: a native-looking frame that confident chain evidence contradicts is no veto
+		// N2: the axes a confident chain contradicts are exempt from this veto (chainHoldMask travels in the vote); the others keep it.
+		const bool detailAboveRaw = frame.informative() && tracker.Ratio() >= 1.0 && tracker.Candidate() >= 1.0 &&
+			trackerV.Ratio() >= 1.0 && trackerV.Candidate() >= 1.0 && trackerH.Ratio() >= 1.0 && trackerH.Candidate() >= 1.0;
+		// The CSV's detail_above is the veto as the consensus sees it: not raised when both axes are exempt (a one-axis exemption leaves
+		// the other axis's veto standing, so it is still 1).
+		const bool detailAbove = detailAboveRaw && chainHoldMask != 3u;
 		const uint64_t rowSequence = j.sequence != 0 ? j.sequence : snapshot.frames;
 		sourceIdLastRowSeq = rowSequence;
 		const bool cutFlag = snapshot.cuts != sourceIdLastCuts;
@@ -1484,7 +1513,8 @@ if (tile < int(tiles) && g.y < ts) {
 			in.classical.kernelVotes = snapshot.kernelVotes;
 			in.classical.kernelAgree = snapshot.kernelAgree;
 			VpUnit::SourceQuality::CopyClassical(in.classical, snapshot);   // U12
-			in.classical.detailAbove = detailAbove;
+			in.classical.detailAbove = detailAboveRaw;
+			in.classical.chainHoldMask = static_cast<uint8_t>(chainHoldMask);   // 0 in Off (the record is not read there)
 			in.deliveredRatio = frame.informative() ? frame.ratio : 0.0;
 			in.noise = idNoise;
 			in.apl = frame.mean;

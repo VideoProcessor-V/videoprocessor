@@ -86,6 +86,7 @@ namespace SourceIdentity
 		// Only VoterId::ClassicalResolution may set it ("detail above the re-based size" => the source
 		// is native on the voted axes at once). The consensus ignores it from any other voter.
 		bool safetyVeto = false;
+		uint32_t vetoExemptFields = 0;        // N2: fields (axes) the safety veto does not apply to (a confident chain contradicts native there)
 	};
 
 	inline void SetField(Vote& v, Field f, double confidence)
@@ -115,6 +116,7 @@ namespace SourceIdentity
 		int kernel = -1, kernelVotes = 0, kernelAgree = 0;
 		double bitrateQuality = 1.0;          // 0..1, 1 = best
 		bool detailAbove = false;             // detail above the re-based size
+		uint8_t chainHoldMask = 0;            // N2: bit 0 = axis H, bit 1 = axis V: a confident chain contradicts native there, so the veto skips that axis
 		uint64_t seq = 0;
 		int64_t timeUs = 0;
 	};
@@ -128,6 +130,8 @@ namespace SourceIdentity
 		if (!r.reading)
 			return v;
 		v.safetyVeto = r.detailAbove;
+		if ((r.chainHoldMask & 1u) != 0) v.vetoExemptFields |= FieldBit(Field::AxisH);
+		if ((r.chainHoldMask & 2u) != 0) v.vetoExemptFields |= FieldBit(Field::AxisV);
 		const double delta = r.declaredRatio - 1.0;
 		double confidence = 0.0;
 		if (r.declaredRatio > 0.0 && (delta > 1e-9 || delta < -1e-9))

@@ -10,6 +10,10 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include "ChainEstimatorFixtures.h"
+
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
+#include <VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/ChainEvidence.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/DescaleVerifier.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/LineSampler.h>
@@ -20,7 +24,11 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -1605,6 +1613,127 @@ namespace Tests
 				m << " cached operators " << verifier.CachedOperators();
 				Logger::WriteMessage(m.str().c_str());
 			}
+		}
+	};
+
+	// ---- S1 (SID train r2, round 1): how long N2 can keep a source that became native on the old reading, measured end to end ------------
+	// The real monitor (consensus On, N2) and the real chain estimator (injected manual clock, synchronous) driven like the live loop:
+	// every 0.5 s a monitor frame of textured native-looking tiles; the estimator evaluates when ITS OWN due predicate (Wants) says so, on
+	// the lines of a confident 2x upscale, then (the switch) on the lines of a genuinely native picture. The monitor holds the native-looking
+	// frames while the record reads the upscale confidently and tells the estimator (NoteNativeHeld), so the estimator runs at its acquiring
+	// cadence; the chain evidence window follows the measured interval (N3). The bound derived from those two:
+	//   W = windowMargin x (c1 / windowYieldNats) x acquiring interval          (31.9 s with the shipped settings)
+	//   revert <= (one evaluation interval before the first native evaluation) + W + (one evaluation to read the expiry) + (one frame)
+	// i.e. W + 2 x acquiring interval + one frame interval. Nothing here is a frame count.
+	TEST_CLASS(ChainRevertBoundTests)
+	{
+	public:
+		typedef SourceResolutionMonitor::Monitor Mon;
+
+		static void MonitorFrame(Mon& m, double seconds, uint64_t seq)
+		{
+			const int T = 128, tiles = 8;
+			std::vector<float> data(static_cast<size_t>(T) * T * tiles);
+			uint32_t x = 12345u + static_cast<uint32_t>(seq);
+			for (size_t i = 0; i < data.size(); ++i)
+			{
+				x = x * 1664525u + 1013904223u;
+				data[i] = static_cast<float>(0.3 + 0.4 * (static_cast<double>(x >> 8) / 16777216.0));
+			}
+			const std::vector<float> none;
+			m.AnalyseTilesForTest(data, tiles, seconds, 3840, 2160, none, none, tiles, T, 64.0 / 1023.0, seq);
+		}
+
+		static bool SubmitEvaluation(SourceIdentity::Chain::ChainEstimator& est, const ChainSynth::Image& img, uint64_t seq, double seconds, bool cut)
+		{
+			using namespace SourceIdentity::Chain;
+			const LinePlan plan = LineSampler::Plan(ChainSynth::MakeRect(0, 0, img.w, img.h), seq);
+			LineSnapshot snap;
+			if (!CaptureLines<double>(plan, img.v.data(), img.w, 1.0, snap))
+				return false;
+			snap.seq = seq;
+			snap.timeUs = static_cast<int64_t>(std::llround(seconds * 1e6));
+			if (cut)
+			{
+				snap.flags = kEvCut;
+				snap.cuts = 1;
+				snap.eventTimeUs = snap.timeUs;
+			}
+			return est.SubmitLines(snap);
+		}
+
+		TEST_METHOD(AConfidentUpscaleThatBecomesGenuineNativeRevertsWithinTheWindowAtTheAcquiringCadence)
+		{
+			using namespace ChainSynth;
+			namespace C = SourceIdentity::Chain;
+			// The two sources: the loop-night 540 -> 1080 bilinear upscale at 8 bits (reaches c1 in the unit tests), and a native 8-bit picture.
+			const Image up = ChainScene(540, 960, kFrameH, kFrameW, kBilinear, 1201u, 8, 0.0, 10.0);
+			Image nat = Scene(kFrameH, kFrameW, 10.0, 906u, 0.5 + 0.15 * 10.0);
+			Quantize(nat, 8);
+
+			Tests::ChainFx::ManualClock clk;
+			std::unique_ptr<C::ChainEstimator> owner(new C::ChainEstimator(C::EstimatorSettings(), clk.Fn()));
+			C::ChainEstimator& est = *owner;
+			Mon m;
+			m.SetChainEstimatorForTest(std::move(owner));
+			m.SetSourceIdMode(Mon::SourceIdMode::On);
+			m.SetChainEnabled(true);
+			est.SetSynchronous(true);
+			Assert::IsTrue(est.Running(), L"fixture: the estimator runs");
+
+			const double t0 = 10.0, tSwitch = 60.0, tEnd = 140.0, dt = 0.5;
+			double tAdopt = -1.0, tChainFlip = -1.0, tRevert = -1.0;
+			int evaluations = 0, nativeEvaluations = 0;
+			double lastIntervalBeforeSwitch = 0.0;
+			uint64_t seq = 2;
+			for (int i = 0; t0 + dt * i <= tEnd; ++i, ++seq)
+			{
+				const double t = t0 + dt * i;
+				const bool native = t >= tSwitch;
+				clk.Set(t * 1000.0);                     // the wall clock of the estimator follows the source clock (1x playback)
+				if (est.Wants())
+				{
+					Assert::IsTrue(SubmitEvaluation(est, native ? nat : up, seq, t, evaluations % 2 == 0), L"fixture: the lines were captured");
+					++evaluations;
+					if (native) ++nativeEvaluations;
+				}
+				MonitorFrame(m, t, seq);
+				SourceIdentity::Geometry::Record rec;
+				bool chainConfident = false;
+				if (est.Held().ReadLatest(0, rec))
+				{
+					const SourceIdentity::Geometry::ConfidentGeometry g = SourceIdentity::Geometry::ConfidentOf(rec, SourceIdentity::Geometry::Delivered());
+					chainConfident = (g.axis[0].confident && g.axis[0].ratio < 0.99) || (g.axis[1].confident && g.axis[1].ratio < 0.99);
+				}
+				SourceIdentity::Record p14;
+				const bool have = m.SourceIdRecord(p14);
+				const bool consensusUp = have && p14.ratioH < 0.99f && p14.ratioV < 0.99f;
+				const bool consensusNative = have && p14.ratioH >= 0.99f && p14.ratioV >= 0.99f;
+				if (!native && consensusUp && tAdopt < 0.0) tAdopt = t;
+				if (!native) lastIntervalBeforeSwitch = est.IntervalSec();
+				if (native && !chainConfident && tChainFlip < 0.0) tChainFlip = t;
+				if (native && consensusNative && tRevert < 0.0) tRevert = t;
+			}
+			const double acq = C::EstimatorSettings().governor.acquiringIntervalSec;
+			const C::EvidenceSettings es;
+			const double c1 = C::ComputeThresholds(es).c1;
+			const double window = (std::min)((std::max)(es.windowMargin * (c1 / es.windowYieldNats) * acq, es.windowMinSec), es.windowMaxSec);
+			const double bound = window + 2.0 * acq + dt;
+			char line[400];
+			snprintf(line, sizeof(line), "N2 revert: adopted at %.1f s, source switched to native at %.1f s, the chain reading flipped at %.1f s (+%.1f s), "
+				"the consensus reverted at %.1f s (+%.1f s after the switch); bound = window %.1f s + 2 x %.1f s + %.1f s = %.1f s; "
+				"evaluations %d (%d on native), cadence before the switch %.2f s, frames held %llu",
+				tAdopt, tSwitch, tChainFlip, tChainFlip - tSwitch, tRevert, tRevert - tSwitch, window, acq, dt, bound, evaluations, nativeEvaluations,
+				lastIntervalBeforeSwitch, m.NativeFramesHeldByChain());
+			Logger::WriteMessage(line);
+
+			Assert::IsTrue(tAdopt > 0.0 && tAdopt < tSwitch - 3.0, L"fixture: the consensus adopted the confident upscale well before the switch");
+			Assert::IsTrue(m.NativeFramesHeldByChain() > 0, L"N2 held the native-looking frames while the chain read the upscale");
+			Assert::AreEqual(acq, lastIntervalBeforeSwitch, 1e-9, L"while holding, the estimator runs at its acquiring cadence (not the confident one)");
+			Assert::IsTrue(tRevert >= 0.0, L"the consensus reverted after the source became native");
+			Assert::IsTrue(tRevert > tSwitch, L"and not before (the old reading was held until then)");
+			Assert::IsTrue(tRevert - tSwitch <= bound, L"within the window at the acquiring cadence (plus the evaluation and frame granularity)");
+			Assert::IsTrue(tChainFlip >= 0.0 && tChainFlip <= tRevert, L"the revert follows the chain's own reading");
 		}
 	};
 }

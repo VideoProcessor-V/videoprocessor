@@ -156,6 +156,13 @@ namespace SourceIdentity
 			void NoteFrame(uint64_t seq, double seconds, int x, int y, int w, int h);
 			void NoteEvent(EstimatorEvent kind, uint64_t seq);
 			void NoteRepeat(uint64_t seq);
+			// N2 (S1 bound): the monitor left a native-looking informative frame out on the axes of `axisMask` (bit 0 = H, bit 1 = V) because
+			// this estimator's record reads them confidently below native. While such notes keep coming the estimator evaluates at its
+			// ACQUIRING cadence (an evaluation due at the long confident interval is pulled forward to one acquiring interval after the last
+			// start), so its own reading re-tests quickly. Leaf atomics; inert when the estimator does not run.
+			void NoteNativeHeld(unsigned axisMask);
+			// The planned interval (seconds) until the next evaluation as of now (the governor's plan, shortened by NoteNativeHeld).
+			double IntervalSec() const;
 			// Any thread: a resync, seek, format change, FULL era: everything restarts.
 			void NoteDiscontinuity(const char* cause);
 			// The Indicator's FULL / era key; a change is a discontinuity.
@@ -200,6 +207,9 @@ namespace SourceIdentity
 			void PauseForTest(bool pause);
 			// Sets the "both axes confident" power flag (the long cadence, the event pull-forward) without a real reading; the next evaluation recomputes it.
 			void ForceLatchedPowerForTest(bool on);
+			bool LatchedPowerForTest() const;
+			// Sets the due time (wall ms of the estimator's clock) and the interval it implies, as a confident evaluation would have left them.
+			void ForceNextDueForTest(double ms);
 			// The replay entry: feeds a (dumped) snapshot to the worker as if it had been delivered - its flags, source time and active
 			// rectangle included, no due check, no clock lookup. False when the estimator does not run.
 			bool SubmitLines(const LineSnapshot& snapshot);

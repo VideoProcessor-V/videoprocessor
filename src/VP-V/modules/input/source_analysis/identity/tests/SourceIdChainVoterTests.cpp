@@ -280,6 +280,48 @@ namespace Tests
 			Assert::IsTrue(c.GetStats().vetoes >= 1);
 		}
 
+		// S3 (round 1): the classical veto is exempt only on the axes a confident chain contradicts.
+		TEST_METHOD(TheClassicalVoteCarriesTheAxesItsVetoSkips)
+		{
+			using namespace SourceIdentity;
+			ClassicalReading cr;
+			cr.reading = true;
+			cr.declaredRatio = 0.5;
+			cr.confidence = 0.9;
+			cr.detailAbove = true;
+			Assert::IsTrue(ClassicalResolutionVote(cr).vetoExemptFields == 0u, L"no chain hold: the veto applies to every axis it carries");
+			cr.chainHoldMask = 1;
+			Vote v = ClassicalResolutionVote(cr);
+			Assert::IsTrue(v.safetyVeto && v.vetoExemptFields == FieldBit(Field::AxisH), L"axis H held by the chain: exempt on H only");
+			cr.chainHoldMask = 2;
+			Assert::IsTrue(ClassicalResolutionVote(cr).vetoExemptFields == FieldBit(Field::AxisV));
+			cr.chainHoldMask = 3;
+			Assert::IsTrue(ClassicalResolutionVote(cr).vetoExemptFields == (FieldBit(Field::AxisH) | FieldBit(Field::AxisV)));
+		}
+
+		TEST_METHOD(AVetoExemptAxisKeepsItsValueWhileTheOtherAxisGoesNativeAtOnce)
+		{
+			using namespace SourceIdentity;
+			Consensus c;
+			double hAt[41] = {}, vAt[41] = {};
+			for (int i = 0; i <= 40; ++i)
+			{
+				const int64_t t = SidChain::S(static_cast<double>(i));
+				c.Submit(ChainVote(SidChain::Reading(true, true, 0.5, t, 100 + static_cast<uint64_t>(i))));
+				const bool veto = i >= 12 && i <= 14;
+				Vote cv = SidChain::Classical(0.5, 0.9, t, veto);
+				if (veto)
+					cv.vetoExemptFields = FieldBit(Field::AxisH);   // the chain contradicts native on H only
+				c.Submit(cv);
+				const Result r = c.Evaluate(static_cast<uint64_t>(i + 1), t);
+				hAt[i] = r.value.ratioH;
+				vAt[i] = r.value.ratioV;
+			}
+			Assert::IsTrue(hAt[5] == 0.5 && vAt[5] == 0.5, L"fixture: both axes were adopted");
+			Assert::IsTrue(vAt[12] == 1.0, L"the unexempt axis is vetoed at once");
+			Assert::IsTrue(hAt[12] == 0.5 && hAt[14] == 0.5, L"the exempt axis keeps the chain value");
+		}
+
 		TEST_METHOD(TheEvaluationIsIdenticalWhateverTheSubmitOrder)
 		{
 			using namespace SourceIdentity;
