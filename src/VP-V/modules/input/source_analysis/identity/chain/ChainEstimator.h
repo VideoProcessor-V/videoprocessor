@@ -29,7 +29,7 @@
 // Revert window (owner-approved): NoteEvent(ClearWindow, seq) asks for the evidence window (both axes, ChainEvidence::Reset + the proposers, the
 // path of a resync reset without the reader reset and without a reset record: the reading is a pure function of the evidence, so the next
 // evaluation reads UNSURE until new evidence builds) to be cleared before the first evaluation of a frame with seq >= the event's. The monitor
-// sends it at the END of a mixed (menu / overlay) episode and at the first cut after one (WindowClearPolicy.h); the estimator also clears at
+// sends it at the END of a mixed (menu / overlay) episode that lasted at least one acquiring interval and at the first cut after one (WindowClearPolicy.h, debounced: a one-frame blip clears nothing); the estimator also clears at
 // its own first cut after a HOLD evaluation. Black frames (Blank) and ordinary cuts never clear. A clear event pulls the next evaluation
 // forward while the readings are confident, like any event, so the reading is re-made at once.
 //
@@ -171,6 +171,8 @@ namespace SourceIdentity
 			void NoteNativeHeld(unsigned axisMask);
 			// The planned interval (seconds) until the next evaluation as of now (the governor's plan, shortened by NoteNativeHeld).
 			double IntervalSec() const;
+			// The planned ACQUIRING interval (seconds) as of the last evaluation (the governor's cost-aware plan, never the long confident one): the unit of the monitor's mixed-episode debounce.
+			double AcquiringIntervalSec() const;
 			// Any thread: a resync, seek, format change, FULL era: everything restarts.
 			void NoteDiscontinuity(const char* cause);
 			// The Indicator's FULL / era key; a change is a discontinuity.

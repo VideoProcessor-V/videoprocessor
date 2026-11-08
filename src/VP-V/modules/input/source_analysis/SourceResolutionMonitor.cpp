@@ -1131,6 +1131,7 @@ if (tile < int(tiles) && g.y < ts) {
 		bitsSmoothed = 0.0;
 		lastAnalysedSeconds = -1.0;
 		chainWasBlank = false;   // a new era: the first blank frame is an edge again
+		chainWindowPolicy.Reset();   // and a mixed episode of the old era neither ends nor arms a cut in the new one
 		// Source identity (worker thread): a new title/source starts from native/unknown (no stamp: the Indicator's FULL
 		// already bumps both axes). The era's first sequence: P14g records sealed before it are never used (GeometryFloor).
 		sourceId.Discontinuity(sourceIdLastRowSeq + 1, streamKey.load(std::memory_order_acquire));
@@ -1508,7 +1509,8 @@ if (tile < int(tiles) && g.y < ts) {
 		if (idOn && chainEnabled.load(std::memory_order_acquire))
 		{
 			// The events for the estimator's shot count and log, and the classical decision to compare with.
-			const bool chainCut = cutFlag || cutForTest.exchange(false, std::memory_order_acq_rel);   // the test seam adds a cut for the chain events only
+			const bool cutSeam = cutForTest.exchange(false, std::memory_order_acq_rel);   // the test seam (one-shot) adds a cut for the chain events only
+			const bool chainCut = cutFlag || cutSeam;
 			if (chainCut) chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::Cut, rowSequence);
 			// Blank is an edge: a dark or flat scene flags it once, not on every evaluation. Fade is not fed today (no fade source).
 			const bool blankNow = !frame.informative();
@@ -1517,7 +1519,9 @@ if (tile < int(tiles) && g.y < ts) {
 			// Revert window: the evidence window is cleared at the END of a mixed (menu / overlay) episode and at the first cut after one; a
 			// black frame (Blank above) and an ordinary cut never clear it. Frame-rate / cadence changes are not visible to the monitor.
 			const bool mixedNow = frame.mixed || mixedForTest.load(std::memory_order_acquire);
-			if (chainWindowPolicy.Frame(mixedNow, chainCut).clear)
+			// Debounced (audit M2): a mixed episode counts only once it has lasted one ACQUIRING interval of source time (the estimator's plan,
+			// measured, never a frame count); a one-frame blip clears nothing and arms nothing, a flickering menu is one episode.
+			if (chainWindowPolicy.Frame(mixedNow, chainCut, j.seconds, chainEst->AcquiringIntervalSec()).clear)
 				chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::ClearWindow, rowSequence);
 			chainEst->SetClassical(snapshot.reading, snapshot.axisRatioX < 1.0 ? snapshot.axisRatioX : snapshot.declaredRatio,
 				snapshot.axisRatioY < 1.0 ? snapshot.axisRatioY : snapshot.declaredRatio);

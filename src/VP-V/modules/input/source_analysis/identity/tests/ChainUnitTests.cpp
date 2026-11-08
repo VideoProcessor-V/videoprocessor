@@ -1823,6 +1823,7 @@ namespace Tests
 			double switchAt = 60.0;         // the source is genuinely native from here (< 0: never)
 			double endAt = 140.0;
 			double menuStart = -1.0, menuEnd = -1.0;   // a mixed (menu / overlay) episode as the monitor reads it: [menuStart, menuEnd)
+			double flickerStart = -1.0, flickerEnd = -1.0;   // a flickering menu: mixed on every second monitor frame in [flickerStart, flickerEnd)
 			double cutAt = -1.0;            // the monitor reports a cut on the first frame at or after this time
 			double blackAt = -1.0;          // one second of black (picture lines and monitor frames) from here
 			double formatChangeAt = -1.0;   // Monitor::Discontinuity("source format change") before the frame at or after this time
@@ -1884,7 +1885,10 @@ namespace Tests
 					if (black) ++r.blackEvaluations;
 					else if (r.blackEvaluations > 0 && r.chainAfterBlack < 0) postBlackEvaluation = true;
 				}
-				m.SetMixedForTest(sc.menuStart >= 0.0 && t >= sc.menuStart && t < sc.menuEnd);
+				bool mixedNow = sc.menuStart >= 0.0 && t >= sc.menuStart && t < sc.menuEnd;
+				if (sc.flickerStart >= 0.0 && t >= sc.flickerStart && t < sc.flickerEnd)
+					mixedNow = (i % 2 == 0);
+				m.SetMixedForTest(mixedNow);
 				if (sc.cutAt >= 0.0 && !cutDone && t >= sc.cutAt)
 				{
 					m.ForceCutForTest();
@@ -2020,6 +2024,41 @@ namespace Tests
 			Assert::IsTrue(r.tRevert - sc.switchAt <= bound, L"the consensus let go within the clear bound, not after the window");
 		}
 
+		// Debounce (audit M2): a mixed episode counts only once it has lasted one acquiring interval of source time. The 10 s menu of the test
+		// above is a genuine one (it lets go within the 3.0 s bound); these two are not.
+		TEST_METHOD(AOneFrameMixedBlipMidSceneClearsNothingAndNativeLookingFramesStillAreHeld)
+		{
+			Scenario sc;
+			sc.menuStart = 60.0;
+			sc.menuEnd = 60.5;            // exactly one monitor frame reads mixed
+			sc.switchAt = -1.0;           // the source stays the upscale
+			sc.endAt = 90.0;
+			const RevertRun r = Drive(sc);
+			char line[300];
+			snprintf(line, sizeof(line), "one-frame mixed blip mid-scene: adopted at %.1f s, consensus let go at %.1f s (-1 = never), native-looking frames held %llu, clears %llu",
+				r.tAdopt, r.tLetGo, r.held, r.clears);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(r.tAdopt > 0.0 && r.tAdopt < sc.menuStart, L"fixture: the consensus adopted the upscale before the blip");
+			Assert::AreEqual<unsigned long long>(0ull, r.clears, L"a one-frame mixed blip clears nothing (and arms no cut)");
+			Assert::IsTrue(r.held > 0, L"N2 held the native-looking frames");
+			Assert::IsTrue(r.tLetGo < 0.0, L"N2 still holds: the lock is not let go");
+		}
+
+		TEST_METHOD(AFlickeringMenuClearsAtMostOnce)
+		{
+			Scenario sc;
+			sc.flickerStart = 60.0;
+			sc.flickerEnd = 66.0;         // mixed on / off on every frame for 6 s, then ordinary frames
+			sc.switchAt = -1.0;
+			sc.endAt = 90.0;
+			const RevertRun r = Drive(sc);
+			char line[300];
+			snprintf(line, sizeof(line), "flickering menu (6 s): clears %llu (at most 1 expected), consensus let go at %.1f s (-1 = never)", r.clears, r.tLetGo);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(r.tAdopt > 0.0 && r.tAdopt < sc.flickerStart, L"fixture: the consensus adopted the upscale before the flicker");
+			Assert::IsTrue(r.clears <= 1ull, L"one flickering episode is one clear, not one per frame");
+		}
+
 		TEST_METHOD(AGenuineSwitchToNativeAtTheFirstCutAfterAMenuEpisodeLetsGoWithinAFewSeconds)
 		{
 			Scenario sc;
@@ -2114,47 +2153,88 @@ namespace Tests
 	public:
 		typedef SourceIdentity::Chain::WindowClearPolicy Policy;
 
-		TEST_METHOD(OnlyTheEndOfAMixedEpisodeAndTheFirstCutAfterItClear)
+		// One analysed frame every 0.5 s of source time; minSec = one acquiring interval = 1.0 s.
+		static double Interval() { return SourceIdentity::Chain::EstimatorSettings().governor.acquiringIntervalSec; }
+		static Policy::Result Step(Policy& p, double t, bool mixed, bool cut) { return p.Frame(mixed, cut, t, Interval()); }
+
+		TEST_METHOD(OnlyTheEndOfACountedMixedEpisodeAndTheFirstCutAfterItClear)
 		{
 			Policy p;
 			// Ordinary frames and an ordinary cut (no episode yet): nothing. A black frame is an ordinary frame here (it is not mixed).
-			Assert::IsFalse(p.Frame(false, false).clear);
-			Assert::IsFalse(p.Frame(false, false).clear);
-			Assert::IsFalse(p.Frame(false, true).clear, L"an ordinary cut does not clear");
-			// A mixed episode: nothing while it lasts, not even a cut inside it.
-			Assert::IsFalse(p.Frame(true, false).clear);
-			Assert::IsFalse(p.Frame(true, false).clear);
-			Assert::IsFalse(p.Frame(true, true).clear, L"a cut inside the episode is not after it");
+			Assert::IsFalse(Step(p, 10.0, false, false).clear);
+			Assert::IsFalse(Step(p, 10.5, false, false).clear);
+			Assert::IsFalse(Step(p, 11.0, false, true).clear, L"an ordinary cut does not clear");
+			// A mixed episode of 3 s: nothing while it lasts, not even a cut inside it.
+			Assert::IsFalse(Step(p, 20.0, true, false).clear);
+			Assert::IsFalse(Step(p, 21.0, true, false).clear);
+			Assert::IsFalse(Step(p, 22.0, true, true).clear, L"a cut inside the episode is not after it");
+			Assert::IsFalse(Step(p, 23.0, true, false).clear);
 			Assert::IsTrue(p.InEpisode());
 			// The end of the episode clears (once).
-			const Policy::Result end = p.Frame(false, false);
-			Assert::IsTrue(end.clear && end.episodeEnded && !end.cutAfterEpisode, L"the end of the episode clears");
+			const Policy::Result end = Step(p, 23.5, false, false);
+			Assert::IsTrue(end.clear && end.episodeEnded && !end.cutAfterEpisode, L"the end of a counted episode clears");
 			Assert::IsFalse(p.InEpisode());
-			Assert::IsFalse(p.Frame(false, false).clear, L"and only once");
+			Assert::IsFalse(Step(p, 24.0, false, false).clear, L"and only once");
 			// The first cut after the episode clears; the second does not.
-			const Policy::Result cut = p.Frame(false, true);
+			const Policy::Result cut = Step(p, 24.5, false, true);
 			Assert::IsTrue(cut.clear && cut.cutAfterEpisode && !cut.episodeEnded, L"the first cut after the episode clears");
-			Assert::IsFalse(p.Frame(false, true).clear, L"the next cut is an ordinary one again");
-			Assert::IsFalse(p.EpisodePending());
+			Assert::IsFalse(Step(p, 25.0, false, true).clear, L"the next cut is an ordinary one again");
+			Assert::IsFalse(p.CutArmed());
+		}
+
+		TEST_METHOD(AMixedBlipShorterThanAnAcquiringIntervalClearsNothingAndArmsNothing)
+		{
+			Policy p;
+			// One mixed frame mid-scene.
+			Assert::IsFalse(Step(p, 30.0, false, false).clear);
+			Assert::IsFalse(Step(p, 30.5, true, false).clear);
+			Assert::IsFalse(Step(p, 31.0, false, false).clear, L"the end of a one-frame blip clears nothing");
+			Assert::IsFalse(Step(p, 31.5, false, true).clear, L"and a cut after it is an ordinary cut");
+			Assert::IsFalse(p.CutArmed());
+			// Two mixed frames spanning less than the interval (0.5 s < 1.0 s).
+			Step(p, 40.0, true, false);
+			Step(p, 40.5, true, false);
+			Assert::IsFalse(Step(p, 41.0, false, false).clear, L"a sub-interval episode is a blip too");
+			Assert::IsFalse(Step(p, 41.5, false, true).clear);
+		}
+
+		TEST_METHOD(AFlickeringMenuIsOneEpisodeThatClearsAtMostOnce)
+		{
+			Policy p;
+			int clears = 0;
+			// Mixed on / off on every frame for 6 s (the mixed frames are 1.0 s apart, at most one interval: one episode).
+			for (int i = 0; i < 12; ++i)
+			{
+				const double t = 50.0 + 0.5 * i;
+				if (Step(p, t, i % 2 == 0, false).clear)
+					++clears;
+			}
+			// Then ordinary frames.
+			for (int i = 0; i < 8; ++i)
+				if (Step(p, 56.0 + 0.5 * i, false, false).clear)
+					++clears;
+			Assert::IsTrue(clears <= 1, L"a flickering menu clears at most once");
+			Assert::IsTrue(clears == 1, L"and it does clear: the episode lasted longer than the interval");
 		}
 
 		TEST_METHOD(AnEpisodeThatEndsOnACutClearsOnceWithBothCauses)
 		{
 			Policy p;
-			p.Frame(true, false);
-			p.Frame(true, false);
-			const Policy::Result r = p.Frame(false, true);
+			Step(p, 60.0, true, false);
+			Step(p, 61.0, true, false);
+			const Policy::Result r = Step(p, 61.5, false, true);
 			Assert::IsTrue(r.clear && r.episodeEnded && r.cutAfterEpisode, L"one clear, both causes named");
-			Assert::IsFalse(p.Frame(false, true).clear, L"the cut was consumed by that clear");
+			Assert::IsFalse(Step(p, 62.0, false, true).clear, L"the cut was consumed by that clear");
 		}
 
 		TEST_METHOD(ResetForgetsAnEpisode)
 		{
 			Policy p;
-			p.Frame(true, false);
+			Step(p, 70.0, true, false);
+			Step(p, 71.0, true, false);
 			p.Reset();
-			Assert::IsFalse(p.Frame(false, false).clear, L"no episode end after a reset");
-			Assert::IsFalse(p.Frame(false, true).clear, L"and no cut after an episode");
+			Assert::IsFalse(Step(p, 71.5, false, false).clear, L"no episode end after a reset");
+			Assert::IsFalse(Step(p, 72.0, false, true).clear, L"and no cut after an episode");
 		}
 	};
 }

@@ -1290,6 +1290,7 @@ namespace SourceIdentity
 				in.noClock = c.noClock;
 				in.unusable = c.unusable;
 				in.stale = c.stale;
+				in.windowClears = c.windowClears;
 				in.evidence = log.GetStatus();
 				in.evidenceText = log.StatusText();
 				return in;
@@ -1399,6 +1400,7 @@ namespace SourceIdentity
 		bool ChainEstimator::LatchedPowerForTest() const { return st_->latchedPower.load(std::memory_order_acquire); }
 		void ChainEstimator::ForceNextDueForTest(double ms) { st_->nextDueMs.store(ms, std::memory_order_release); st_->intervalMs.store(ms - st_->lastStartMs.load(std::memory_order_acquire), std::memory_order_release); }
 		double ChainEstimator::IntervalSec() const { return st_->intervalMs.load(std::memory_order_acquire) / 1000.0; }
+		double ChainEstimator::AcquiringIntervalSec() const { return st_->acquiringIntervalMs.load(std::memory_order_acquire) / 1000.0; }
 		bool ChainEstimator::SubmitLines(const LineSnapshot& snapshot) { return st_->SubmitSnapshot(snapshot); }
 	}
 }
