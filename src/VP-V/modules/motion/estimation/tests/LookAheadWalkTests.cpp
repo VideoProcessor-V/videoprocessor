@@ -173,6 +173,13 @@ namespace LookAheadWalkTest
 			Assert::IsFalse(host.fallbacks.Engaged("vector producer"));
 			host.motionProducer->health.recovering = true;
 			VectorEngineFallbackSync::Sync(host, host);
+			Assert::IsTrue(host.fallbacks.Engaged("vector producer"));
+			host.vectorDemand.producer = false;   // recovering, but the look-ahead is not wanted: nothing to show
+			VectorEngineFallbackSync::Sync(host, host);
+			Assert::IsFalse(host.fallbacks.Engaged("vector producer"), L"wanted == false releases a recovering producer");
+			host.vectorDemand.producer = true;
+			VectorEngineFallbackSync::Sync(host, host);
+			Assert::IsTrue(host.fallbacks.Engaged("vector producer"));
 			VectorEngineFallbackSync::Release(host);
 			Assert::IsFalse(host.fallbacks.Engaged("vector producer"));
 			Assert::IsFalse(host.fallbacks.Engaged("vector_engine_producer"));

@@ -346,6 +346,7 @@
         "src/VP-V/modules/motion/estimation/VectorEngineHost.h",
         "src/VP-V/modules/motion/estimation/tests/ProducerPlanTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/VectorEngineTests.cpp",
+        "src/VP-V/modules/motion/estimation/tests/LookAheadWalkTests.cpp",
         "src/VP-V/modules/motion/estimation/EstimateState.h",
         "src/VP-V/modules/motion/estimation/EngineKeeper.inl",
         "src/VP-V/modules/motion/estimation/VectorEngineEstimate.inl",

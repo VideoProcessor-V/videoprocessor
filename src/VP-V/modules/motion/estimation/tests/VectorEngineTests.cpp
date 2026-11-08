@@ -108,6 +108,27 @@ namespace VectorEngineTest
 			Assert::AreEqual<size_t>(0, host.fallbackIds.size(), L"released once");
 		}
 
+		// WAIVER-T1-01: the fourth Release is the reason the counts above went 3 -> 4. An engaged
+		// "vector producer" entry must not outlive vector_demand: the real UpdateVectorEngine path releases it.
+		TEST_METHOD(DemandOffReleasesAnEngagedVectorProducerEntry)
+		{
+			VectorEngine engine;
+			FakeHost host;
+			VectorEngine::UpdateFacts facts;
+			facts.vectorDemandSetting = true;
+			engine.UpdateVectorEngine(OneConsumer(VectorDemand::Consumer::GrainMap), facts, host);   // a line is logged
+			host.SyncFallback(FallbackCatalog::VectorProducer(true, true, 2, "no device"));   // the entry engages
+			Assert::IsTrue(host.fallbackEngaged.back(), L"engaged");
+			facts.vectorDemandSetting = false;
+			engine.UpdateVectorEngine(OneConsumer(VectorDemand::Consumer::GrainMap), facts, host);
+			int last = -1;
+			for (size_t i = 0; i < host.fallbackIds.size(); ++i)
+				if (host.fallbackIds[i] == "vector producer")
+					last = static_cast<int>(i);
+			Assert::IsTrue(last >= 0);
+			Assert::IsFalse(host.fallbackEngaged[static_cast<size_t>(last)], L"released with vector_demand off");
+		}
+
 		TEST_METHOD(GlobalPairMissIsSustainedOnlyAfter24InARowAndNeedsAServedConsumer)
 		{
 			VectorEngine engine;

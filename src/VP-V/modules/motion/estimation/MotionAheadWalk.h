@@ -10,13 +10,18 @@
 //
 // Threading: the render-loop thread, outside renderMutex (as before). The LookAheadFailures counter
 // (Impl::motionAheadFailures) is touched by that thread only; no atomics.
+// Existing hazard, unchanged by this move: impl.motionProducer (a unique_ptr) is null-checked and
+// dereferenced here without a lock while the render thread may create / reset it (PlanProducer);
+// see HOOKS.md section 2, row `motionProducer`.
 //
 // Templated on the host Impl / queued-frame / timing-clock types so the walk is testable with a fake
 // host. Impl provides the fields the body names, SyncFallback() and motionAheadFailures; Queued
 // provides the QueuedFrame fields the body names.
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <exception>
 #include <vector>
 

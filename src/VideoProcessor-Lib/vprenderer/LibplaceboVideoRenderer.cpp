@@ -15,7 +15,6 @@
 #include <VP-V/modules/output/presentation/RepeatReuseRegistryKey.h>
 #include <KernelInverse.h>
 #include <vprenderer/MotionAheadProducer.h>
-#include <VP-V/modules/motion/estimation/VectorEngineFallbackSync.h>
 #include <VP-V/modules/motion/estimation/MotionAheadWalk.h>
 #include <VP-V/modules/input/source_analysis/SourceAheadWalk.h>
 #include "../SubtitleProfileUpdatePolicy.h"
