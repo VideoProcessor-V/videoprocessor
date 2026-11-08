@@ -14,6 +14,9 @@
 #include <vprenderer/RendererExtension.h>
 #include "../../core/hub/ExtensionHub.h"
 
+#include <algorithm>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
@@ -72,6 +75,20 @@ namespace EntranceHookTest
 				return handles;
 			}
 		};
+
+		std::string ReadText(const std::string& path)
+		{
+			std::ifstream in(path, std::ios::binary);
+			return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		}
+
+		std::string RepositoryRoot()
+		{
+			std::string root = __FILE__;
+			std::replace(root.begin(), root.end(), '/', '\\');
+			root.resize(root.rfind("\\src\\VP-V\\tests\\"));
+			return root;
+		}
 
 		struct Rec : RE::IRendererExtension
 		{
@@ -188,6 +205,28 @@ namespace EntranceHookTest
 			}
 			RE::NotifyAfterRender(&host, 9, 3, 0, 0, false);   // the default: no report
 			Assert::IsTrue(b->seenJob.renderErrors == nullptr);
+		}
+
+		// Source-order pin (70b section 9.5-3): ONE Entrance call, right before the entrance-decision block, before the
+		// source-monitor feed, the hook list and the render call, and outside the draw callback (it is not re-run on an
+		// NLS retry because it precedes RenderOwned, whose callback is the only place the draw runs twice).
+		TEST_METHOD(TheEntranceSiteSitsBeforeTheEntranceDecisionsAndOutsideTheDrawCallback)
+		{
+			const std::string text = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
+			Assert::IsFalse(text.empty(), L"the renderer source");
+			const size_t site = text.find("RendererExtension::NotifyEntrance(");
+			Assert::IsTrue(site != std::string::npos, L"the Entrance site");
+			Assert::IsTrue(text.find("RendererExtension::NotifyEntrance(", site + 1) == std::string::npos, L"exactly one site");
+			const size_t stepA = text.find("// Stage 12 step A: the re-base factor for this frame", site);
+			Assert::IsTrue(stepA != std::string::npos && stepA - site < 700, L"right before the entrance-decision block");
+			const size_t monitor = text.find("sourceMonitor.Frame(", site);
+			const size_t hooks = text.find("customHooks.Ensure(hookTemplates)", site);
+			const size_t render = text.find("NlsHookRecovery::RenderOwned(", site);
+			const size_t after = text.find("RendererExtension::NotifyAfterRender(", site);
+			Assert::IsTrue(monitor != std::string::npos && hooks != std::string::npos && render != std::string::npos &&
+				after != std::string::npos, L"the later calls exist");
+			Assert::IsTrue(site < stepA && stepA < monitor && monitor < hooks && hooks < render && render < after,
+				L"Entrance, then the entrance decisions, the hook list, the render call, AfterRender");
 		}
 
 		TEST_METHOD(DrawJobDefaultsAreInert)
