@@ -167,7 +167,7 @@ namespace Vpv
 							job12->SetBeginGate([l, disp, pendingAsNone](const VpSkeleton::LaneJobContext& job) {
 								if (!disp->Available(VpSkeleton::kP12LightLevel))
 									return false;   // refused / not allocated yet: declined, shown by the dispatcher's own entry
-								return VpLaneProducts::LightLevelBeginGate(job.seq, [l](uint64_t s) {
+								return VpLaneProducts::LightLevelBeginGate(job.seq, [l, pendingAsNone](uint64_t s) {
 									// LightPrevStateOf: Pending reads as None until G6 (a pending live fill is run by nothing before it).
 									// Counted and shown (skeleton_gpu_light_pending), never silent.
 									return VpLaneProducts::LightPrevStateOf(l->ReadOf(VpSkeleton::kP12LightLevel, s).state, *pendingAsNone);
