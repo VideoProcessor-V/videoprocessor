@@ -140,6 +140,7 @@
 #include <VP-V/config/VpvDitherChoiceSet.h>   // VPV-HOOK
 #include "ConfigPageHost.h"   // VPV-HOOK
 #include <VP-V/config/VpvConfigPages.h>   // VPV-HOOK
+#include <VP-V/config/VpvFormLayout.h>   // VPV-HOOK
 
 // Settings preview (queue item 23): VideoProcessorConfig.exe --sandbox edits only its --config
 // file. It never signals, queries or commands a running VP (no live apply, no live status, no
@@ -5944,15 +5945,7 @@ QWidget* ConfigEditorWindow::createStartupPage()
         markDirty();
     });
     hardwareForm->addRow(QStringLiteral("Input connection"), captureConnection);
-    // Layout (FX-CFG14): VP-V's DeckLink / DirectShow rows have long labels. They sit in a form of their own (never
-    // wrapping) so they do not widen Bill's label column and wrap his Capture device row (the card then grew taller
-    // than the grid's size hint and the two cards of a row did not align).
-    auto* vpvForm = new QFormLayout;
-    vpvForm->setContentsMargins(0, 0, 0, 0);
-    vpvForm->setHorizontalSpacing(18);
-    vpvForm->setVerticalSpacing(8);
-    vpvForm->setRowWrapPolicy(QFormLayout::DontWrapRows);
-    hardwareForm->addRow(vpvForm);
+    auto* vpvForm = Vpv::AddNestedVpvForm(hardwareForm);   // VPV-HOOK
     // [decklink] ycbcr_12bit_capture (FL35; planner 2026-10-16: every setting has a Config control).
     auto* ycbcr12 = bindChoiceField(QStringLiteral("decklink"), QStringLiteral("ycbcr_12bit_capture"),
         { QStringLiteral("v210"), QStringLiteral("rgb12"), QStringLiteral("off") },
@@ -6298,17 +6291,7 @@ QWidget* ConfigEditorWindow::createStartupPage()
     ambientNote->setWordWrap(true);
     ambientForm->addRow(ambientNote);
 
-    // Layout (FX-CFG14): VP-V's DeckLink and DirectShow-conversion combos have long item names that pushed the
-    // two-column grid past a narrow page. They shrink to the width they are given instead (Bill's own Capture
-    // device combo is left as he built it).
-    for (QComboBox* combo : hardware->findChildren<QComboBox*>())
-        if (combo->objectName().startsWith(QStringLiteral("config.decklink.")) ||
-            combo->objectName().startsWith(QStringLiteral("config.directshow.conversion.")))
-        {
-            combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-            combo->setMinimumContentsLength(0);
-            combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        }
+    Vpv::MakeCombosShrinkable(hardware, { QStringLiteral("config.decklink."), QStringLiteral("config.directshow.conversion.") });   // VPV-HOOK
     cards->addCard(createCard(QStringLiteral("Hardware"),
         QStringLiteral("Capture selection used when VP starts."), hardware));
     cards->addCard(createCard(QStringLiteral("General behavior"),
@@ -16833,11 +16816,7 @@ QWidget* ConfigEditorWindow::createCalibrationPage()
     auto* model = bindChoiceField(section, QStringLiteral("meter_model"), models, modelLabels);
     model->setToolTip(QStringLiteral("Any meter ArgyllCMS supports works. The model tunes VP's handling: sensor "
         "calibration prompts (spectros), the low-light floor for near-black averaging, CCSS or CCMX corrections."));
-    // Layout (FX-CFG14): the long meter names must not set the card's minimum width, or the two-column grid
-    // (which switches at 720 px) overflows sideways on a 1040 px window.
-    model->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    model->setMinimumContentsLength(0);
-    model->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    Vpv::MakeComboShrinkable(model);   // VPV-HOOK
     meterForm->addRow(QStringLiteral("Meter"), model);
     auto* port = integer(QStringLiteral("meter_port"), 0, 64, 0, QString());
     port->setSpecialValueText(QStringLiteral("First found"));
@@ -17046,9 +17025,7 @@ QWidget* ConfigEditorWindow::createCalibrationPage()
     runKind->addItem(QStringLiteral("Dynamic Drive characterisation (projector LED / CNTR)"), QStringLiteral("led"));
     runKind->addItem(QStringLiteral("Ambient-light check (screen reflectance)"), QStringLiteral("ambient"));
     runKind->addItem(QStringLiteral("HDR (PQ) verify"), QStringLiteral("hdr_verify"));
-    runKind->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);   // FX-CFG14: shrinkable, see the Meter combo
-    runKind->setMinimumContentsLength(0);
-    runKind->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    Vpv::MakeComboShrinkable(runKind);   // VPV-HOOK
     runKind->setToolTip(QStringLiteral("Display calibration builds the LUTs. Dynamic Drive measures the flux table, the "
         "CNTR curve and (with a fast sensor) the LED timing. Ambient-light measures black and white with the room "
         "lights off and on (ambient_screen_reflect). HDR verify measures PQ tracking and dE ITP."));
@@ -17066,8 +17043,7 @@ QWidget* ConfigEditorWindow::createCalibrationPage()
     runLayout->addWidget(lux);
     wizardLayout->addWidget(runRow);
     auto* buttons = new QWidget;
-    // Layout (FX-CFG14): the six wizard buttons wrap instead of setting the card's minimum width (499 px).
-    auto* buttonLayout = new FlowLayout(buttons);
+    auto* buttonLayout = new FlowLayout(buttons);   // FX-CFG14: the wizard buttons wrap (no 499 px card minimum)   // VPV-HOOK
     const QList<QPair<QString, QString>> actions = {
         { QStringLiteral("start"), QStringLiteral("Start") }, { QStringLiteral("continue"), QStringLiteral("Continue") },
         { QStringLiteral("skip"), QStringLiteral("Skip warm-up") }, { QStringLiteral("apply"), QStringLiteral("Apply") },
