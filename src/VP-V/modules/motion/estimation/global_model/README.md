@@ -313,7 +313,7 @@ The fitter's own options are `Config` fields set by the tests and `tools/camera_
 
 | Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|
-| `camera_link` (see `link/README.md`) | `[vpv.skeleton]` | choice | off, report | report | none yet (master VP-V page, Pipeline) | off | `camera_link` entry (cannot report); status line | none |
+| `camera_link` (see `link/README.md`) | `[vpv.skeleton]` | choice | off, report | off | none yet (master VP-V page, Pipeline) | off | `camera_link` entry (cannot report); status line | none |
 | `Config::twoLayer` (internal; no key) | internal | bool | false, true | false | none (internal) | not built | foreground-suspect records are `Ambiguous` (`ForegroundSuspect`) in the camera status text; never usable | same on every tier |
 | `Config::dynTexture` (internal; no key) | internal | bool | false, true | false | none (internal) | not built | `Ambiguous` with the dynamic-texture reason text; never usable (visible fallback) | same on every tier |
 | `Config::staticCamera` (internal; no key) | internal | bool | false, true | false | none (internal) | not built | `Ambiguous` with the static-background reason text (foreground object); never usable (visible fallback) | same on every tier |

@@ -412,7 +412,7 @@ namespace
 	}
 
 	// Camera K3 (docs 61 section 3.1): the "Camera model" group of the Motion unit writes the [vpv.camera] keys VP reads (every key
-	// of CameraSettings.h, same names and values), an off box removes the key (off is the default; the model box, on by default, writes off), the switches are greyed while
+	// of CameraSettings.h, same names and values), an off box removes the key (off is the default), the switches are greyed while
 	// the model is off, and everything is greyed in the Original pathway.
 	void testCameraModelControlsReachVp()
 	{
@@ -426,7 +426,7 @@ namespace
 			ConfigEditorWindow window(path, 0, true);
 			auto* model = control<QCheckBox>(window, Vpv::ObjectName("camera.camera_model"));
 			auto* overlay = control<QComboBox>(window, Vpv::ObjectName("camera.camera_model_overlay"));
-			require(model->isChecked() && overlay->currentIndex() == 0, "the camera model is on by default (camera defaults (b)) and its overlay is off");
+			require(!model->isChecked() && overlay->currentIndex() == 0, "the camera model and its overlay are off by default");
 			require(control<QWidget>(window, Vpv::ObjectName("motion.card.camera.body"))->isAncestorOf(model),
 				"the controls sit in the Camera model group of the Motion unit");
 			require(control<QLabel>(window, Vpv::ObjectName("camera.status")) != nullptr, "the group has a status row");
@@ -434,14 +434,8 @@ namespace
 			{
 				auto* box = control<QCheckBox>(window, Vpv::ObjectName(QStringLiteral("camera.") + QString::fromLatin1(key)));
 				require(!box->isChecked(), (std::string("off by default: ") + key).c_str());
-				require(box->isEnabled(), (std::string("usable while the camera model is on (the default): ") + key).c_str());
+				require(!box->isEnabled(), (std::string("greyed while the camera model is off: ") + key).c_str());
 			}
-			require(overlay->isEnabled(), "the overlay is usable while the camera model is on (the default)");
-			model->setChecked(false);
-			QCoreApplication::processEvents();
-			for (const char* key : kBoolKeys)
-				require(!control<QCheckBox>(window, Vpv::ObjectName(QStringLiteral("camera.") + QString::fromLatin1(key)))->isEnabled(),
-					(std::string("greyed while the camera model is off: ") + key).c_str());
 			require(!overlay->isEnabled(), "the overlay is greyed while the camera model is off");
 			model->setChecked(true);
 			QCoreApplication::processEvents();

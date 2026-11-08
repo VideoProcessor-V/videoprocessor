@@ -173,9 +173,7 @@ namespace CameraStatusTestsNs
 	public:
 		TEST_METHOD(OffAndOriginalShowNothing)
 		{
-			StatusInput nothing;
-			nothing.cam.model = false;   // camera defaults (b): the model is on by default
-			const StatusText off = BuildStatus(nothing);
+			const StatusText off = BuildStatus(StatusInput());
 			Assert::IsTrue(off.state == CameraState::Off);
 			Assert::IsTrue(off.lines.empty() && off.fallbacks.empty() && off.detail.empty());
 			StatusInput original = Running();
@@ -192,7 +190,6 @@ namespace CameraStatusTestsNs
 		TEST_METHOD(ASwitchWhileTheModelIsOffIsShownAsInert)
 		{
 			StatusInput in;
-			in.cam.model = false;
 			in.cam.use.grain = true;
 			in.cam.meas.staticGate = true;
 			const StatusText t = BuildStatus(in);
@@ -270,7 +267,6 @@ namespace CameraStatusTestsNs
 		TEST_METHOD(InvalidAndUnknownKeysAreShownEvenWhenNothingElseIsSet)
 		{
 			StatusInput in;
-			in.cam.model = false;
 			in.cam.problems.push_back("camera_model 'maybe' is not valid (on|off); kept off");
 			in.cam.unknownKeys.push_back("camera_future");
 			const StatusText t = BuildStatus(in);
@@ -319,8 +315,7 @@ namespace CameraStatusTestsNs
 
 		TEST_METHOD(ADumpWithNoCameraKeyStillShowsItsDrops)
 		{
-			StatusInput in;   // nothing set in [vpv.camera] (the model switched off: it is on by default)
-			in.cam.model = false;
+			StatusInput in;   // nothing set in [vpv.camera]
 			in.linkReport = true;
 			in.coreAlive = true;
 			in.dumpOn = true;
@@ -341,10 +336,10 @@ namespace CameraStatusTestsNs
 
 		TEST_METHOD(TheOffReplyOfTheStatusCommandIsPinned)
 		{
-			Rig rig("[vpv.skeleton]\ncamera_link=off\n[vpv.camera]\ncamera_model=off\n");
+			Rig rig("[general]\nx=1\n");
 			rig.Life(RE::Lifecycle::GpuCreated);
 			Assert::IsFalse(rig.ext.Active(rig.Host()));
-			Assert::AreEqual(std::string("camera: off (camera_link = off and camera_model = off, or the Original pathway)"), rig.Command());
+			Assert::AreEqual(std::string("camera: off (camera_link = off and no [vpv.camera] key set, or the Original pathway)"), rig.Command());
 		}
 
 		TEST_METHOD(ALinkWithADumpAndNoKeyShowsTheDumpSection)
@@ -363,7 +358,7 @@ namespace CameraStatusTestsNs
 		// ---- the extension ----
 		TEST_METHOD(AllOffInTheSectionIsInert)
 		{
-			Rig rig("[vpv.skeleton]\ncamera_link=off\n[vpv.camera]\ncamera_model: off\ncamera_use_grain: off\ncamera_model_overlay: off\n");
+			Rig rig("[vpv.camera]\ncamera_model: off\ncamera_use_grain: off\ncamera_model_overlay: off\n");
 			rig.Life(RE::Lifecycle::GpuCreated);
 			rig.Life(RE::Lifecycle::SettingsApplied);
 			Assert::IsFalse(rig.ext.Active(rig.Host()));
@@ -375,7 +370,7 @@ namespace CameraStatusTestsNs
 
 		TEST_METHOD(ModelOnWithTheLinkOffShowsWhyNothingRuns)
 		{
-			Rig rig("[vpv.skeleton]\ncamera_link=off\n[vpv.camera]\ncamera_model: on\ncamera_use_grain: on\n");
+			Rig rig("[vpv.camera]\ncamera_model: on\ncamera_use_grain: on\n");
 			rig.Life(RE::Lifecycle::GpuCreated);
 			Assert::IsTrue(rig.ext.Active(rig.Host()));
 			Assert::IsNull(rig.ext.CoreOf(rig.Host()), L"camera_link is off: no core");
@@ -407,7 +402,7 @@ namespace CameraStatusTestsNs
 
 		TEST_METHOD(ASwitchSetWhileTheModelIsOffIsAFallback)
 		{
-			Rig rig("[vpv.camera]\ncamera_model: off\ncamera_meas_static_gate: on\n");
+			Rig rig("[vpv.camera]\ncamera_meas_static_gate: on\n");
 			rig.Life(RE::Lifecycle::GpuCreated);
 			Assert::IsTrue(rig.ext.Active(rig.Host()));
 			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), "camera_model: camera_model is off, so camera_meas_static_gate have no effect"));
@@ -416,19 +411,11 @@ namespace CameraStatusTestsNs
 
 		TEST_METHOD(AnInvalidKeyIsShownWhileEverythingIsOff)
 		{
-			Rig rig("[vpv.skeleton]\ncamera_link=off\n[vpv.camera]\ncamera_model: off\ncamera_use_grain: maybe\n");
+			Rig rig("[vpv.camera]\ncamera_model: maybe\n");
 			rig.Life(RE::Lifecycle::GpuCreated);
 			Assert::IsFalse(rig.ext.Active(rig.Host()));
-			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), "camera_settings: camera_use_grain 'maybe' is not valid"));
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), "camera_settings: camera_model 'maybe' is not valid"));
 			Assert::IsTrue(rig.Lines(RE::StatusKind::Lines).empty());
-		}
-
-		TEST_METHOD(AnInvalidModelValueKeepsTheDefaultOnAndIsShown)
-		{
-			Rig rig("[vpv.skeleton]\ncamera_link=off\n[vpv.camera]\ncamera_model: maybe\n");
-			rig.Life(RE::Lifecycle::GpuCreated);
-			Assert::IsTrue(rig.ext.CameraSettingsOf(rig.Host()).model, L"kept at the default: on");
-			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), "camera_settings: camera_model 'maybe' is not valid (on|off); kept on"));
 		}
 
 		TEST_METHOD(TheOriginalPathwayForcesTheModelOff)

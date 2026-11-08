@@ -897,7 +897,7 @@ namespace Vpv
 			const std::shared_ptr<CameraHostState> st = hosts_.Find(ctx.host);
 			if (!st || !st->active.load(std::memory_order_acquire))
 			{
-				reply = "camera: off (camera_link = off and camera_model = off, or the Original pathway)";
+				reply = "camera: off (camera_link = off and no [vpv.camera] key set, or the Original pathway)";
 				return true;
 			}
 			std::lock_guard<std::mutex> lock(st->statusMutex);

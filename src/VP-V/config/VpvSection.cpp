@@ -966,7 +966,7 @@ namespace Vpv
 
 		void SetGreyReason(QWidget* w, const QString& reason);   // defined below
 
-		// Camera K3 (docs 61 section 3.1): the "Camera model" group of the Motion unit. Keys of [vpv.camera]: camera_model defaults ON (camera defaults (b)), the rest off
+		// Camera K3 (docs 61 section 3.1): the "Camera model" group of the Motion unit. Keys of [vpv.camera], all default off
 		// (an off box removes the key); greyed in the Original pathway, and everything but the model switch is greyed while the
 		// model is off ("used only when Camera model is on"; the stored values are kept). The runtime state of the camera model is
 		// not shown here: it is the Ctrl+I "camera:" line, Fallbacks engaged (camera_model, camera_model_overlay, camera_settings,
@@ -995,14 +995,13 @@ namespace Vpv
 			};
 			const QString camSection = QStringLiteral("vpv.camera");
 			CardBox card = MakeCard(ObjectName(unitId + QStringLiteral(".card.camera")), QStringLiteral("Camera model"),
-				QStringLiteral("Diagnostics and switches for the global camera model. The camera model is on by default (it needs camera_link = report, "
-					"also the default); every switch and use is off by default and the Original pathway keeps all of it off. The switches act only "
-					"while the camera model is on."), true);
+				QStringLiteral("Diagnostics and switches for the global camera model. Everything is off by default and the Original "
+					"pathway keeps it off. The switches act only while the camera model is on."), true);
 
 			auto* model = new QCheckBox(QStringLiteral("Camera model"));
 			model->setObjectName(ObjectName(QStringLiteral("camera.camera_model")));
 			model->setToolTip(QStringLiteral("Key camera_model (section [vpv.camera]). Fits one camera motion per source frame pair "
-				"for the steps below. On by default. Needs camera_link = report in [vpv.skeleton] (the default; cfg only) to attach."));
+				"for the steps below. Needs camera_link = report in [vpv.skeleton] to attach (cfg only)."));
 			card.Form()->addRow(QStringLiteral("Camera model"), model);
 
 			auto* overlay = new QComboBox;
@@ -1030,8 +1029,7 @@ namespace Vpv
 			status->setObjectName(ObjectName(QStringLiteral("camera.status")));
 			card.Add(status);
 
-			// camera_model defaults ON: its off box writes "off" (an empty value would mean the default, on). Every other box defaults off: an off
-			// box removes the key (empty value).
+			// An off box removes the key (empty value): off is the default.
 			const auto write = [state, camSection](const QString& key, const QString& value)
 			{
 				if (state->refreshing || !state->host.setValue) return;
@@ -1039,7 +1037,7 @@ namespace Vpv
 			};
 			QObject::connect(model, &QCheckBox::toggled, model, [write, state](bool on)
 			{
-				write(QStringLiteral("camera_model"), on ? QStringLiteral("on") : QStringLiteral("off"));
+				write(QStringLiteral("camera_model"), on ? QStringLiteral("on") : QString());
 				state->RefreshAll();   // the dependants grey or un-grey at once (a no-op while refreshing)
 			});
 			QObject::connect(overlay, qOverload<int>(&QComboBox::currentIndexChanged), overlay, [write, overlay](int i)
@@ -1063,8 +1061,7 @@ namespace Vpv
 				};
 				const auto isOn = [](const QString& v) { return v.compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0; };
 				const bool original = isOn(get(Q(TierTable().section), QStringLiteral("pipeline_original_pathway")));
-				// Absent (or not "off") is the default: on.
-				const bool modelOn = get(camSection, QStringLiteral("camera_model")).compare(QStringLiteral("off"), Qt::CaseInsensitive) != 0;
+				const bool modelOn = isOn(get(camSection, QStringLiteral("camera_model")));
 				const QString originalReason = QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).");
 				const QString modelReason = QStringLiteral("Greyed: used only when Camera model is on (the stored value is kept).");
 				{

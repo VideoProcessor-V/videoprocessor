@@ -1,7 +1,7 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 
-// CameraSettings (link/CameraSettings.h): the [vpv.camera] keys of camera K3. Every default is off except camera_model (camera defaults (b): on), the Original pathway forces
+// CameraSettings (link/CameraSettings.h): the [vpv.camera] keys of camera K3. Every default is off, the Original pathway forces
 // every key off, an invalid value keeps the default and is listed, unknown keys are listed and never rewritten, the file text
 // round-trips, and the switches are inert unless camera_model is on. CPU only, no GPU.
 
@@ -63,18 +63,18 @@ namespace CameraSettingsTestsNs
 	TEST_CLASS(CameraSettingsTests)
 	{
 	public:
-		TEST_METHOD(EveryDefaultIsOffExceptTheModel)
+		TEST_METHOD(EveryDefaultIsOff)
 		{
 			const CameraSettings s;
-			Assert::IsTrue(s.model, L"camera defaults (b): the model is on by default");
+			Assert::IsFalse(s.model);
 			Assert::IsTrue(s.overlay == OverlayMode::Off);
 			Assert::IsFalse(s.labelsGpu);
 			Assert::IsFalse(s.meas.Any());
 			Assert::IsFalse(s.use.Any());
-			Assert::IsTrue(s.AnySet());
-			Assert::IsTrue(s.Wanted());
+			Assert::IsFalse(s.AnySet());
+			Assert::IsFalse(s.Wanted());
 			for (const auto& kv : KeyValues(s))
-				Assert::AreEqual(std::string(kv.first == "camera_model" ? "on" : "off"), kv.second, std::wstring(kv.first.begin(), kv.first.end()).c_str());
+				Assert::AreEqual(std::string("off"), kv.second, std::wstring(kv.first.begin(), kv.first.end()).c_str());
 			// A file without the section, and an unreadable file, both give the defaults.
 			Assert::IsTrue(TempCfg("[general]\nx=1\n").Load() == s);
 			Assert::IsTrue(Vpv::Camera::Load([](ConfigFile&) { return false; }) == s);
@@ -109,7 +109,7 @@ namespace CameraSettingsTestsNs
 			Assert::IsTrue(m.modelGlobal && m.guidedCandidate && m.narrowWindow && m.e1Skip && m.staticGate);
 			Assert::IsTrue(m.cutSkip && m.fadeNormalised && m.flashBridge && m.temporalSeed && m.tinyMoverRoi);
 			Assert::IsFalse(m.objects, L"objects has no key and stays off");
-			Assert::IsTrue(s.model, L"the default (on) is untouched");
+			Assert::IsFalse(s.model);
 			Assert::IsFalse(s.use.Any());
 			Assert::IsTrue(s.problems.empty());
 			// Each key alone sets exactly its own member.
@@ -165,7 +165,7 @@ namespace CameraSettingsTestsNs
 			Assert::IsFalse(back.use.detail);
 			Assert::AreEqual(ToConfigText(mixed), ToConfigText(back));
 			Assert::IsTrue(back.problems.empty() && back.unknownKeys.empty());
-			// The defaults serialise (model on, the rest off) and read back as defaults.
+			// The defaults serialise to all off and read back as defaults.
 			Assert::IsTrue(TempCfg(ToConfigText(CameraSettings())).Load() == CameraSettings());
 		}
 
@@ -180,7 +180,7 @@ namespace CameraSettingsTestsNs
 		TEST_METHOD(AnInvalidValueKeepsTheDefaultAndIsListed)
 		{
 			const CameraSettings s = TempCfg("[vpv.camera]\ncamera_model: maybe\ncamera_model_overlay: sideways\ncamera_use_grain: on\n").Load();
-			Assert::IsTrue(s.model, L"kept at the default (on)");
+			Assert::IsFalse(s.model, L"kept off");
 			Assert::IsTrue(s.overlay == OverlayMode::Off, L"kept off");
 			Assert::IsTrue(s.use.grain, L"a valid key beside an invalid one still applies");
 			Assert::AreEqual<size_t>(2, s.problems.size());
@@ -206,7 +206,7 @@ namespace CameraSettingsTestsNs
 		TEST_METHOD(TheOriginalPathwayForcesEverythingOff)
 		{
 			CameraSettings s = AllOn();
-			s.problems.push_back("camera_model 'x' is not valid (on|off); kept on");
+			s.problems.push_back("camera_model 'x' is not valid (on|off); kept off");
 			s.originalPathway = true;
 			Assert::IsFalse(s.ModelWanted());
 			Assert::IsFalse(s.Wanted());
