@@ -422,6 +422,10 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\VectorEngine.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\tests\suite\LedDriveDelta1Tests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\LedDriveHunt2Tests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\LedDriveHunt3Tests.cpp" />

@@ -88,6 +88,7 @@
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>   // WP-23 frame analysis store
 #include <VP-V/modules/input/signal/ResyncCallSites.h>   // R1 call-site helpers
 #include <VP-V/modules/input/signal/ResyncExtension.h>   // VPV-HOOK: resync Q1 (Shadow, Drive, HostBinding, pulldown step)
+#include <VP-V/modules/motion/estimation/VectorEngine.h>   // VPV-HOOK: P5a (the vector engine: state and logic)
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>   // R4a: the re-base decision product P0
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationPolicy.h>
@@ -6418,23 +6419,56 @@ struct LibplaceboVideoRenderer::Impl
 	}
 
 	// ---- Vector engine on demand (VP-V/modules/motion/estimation/VectorDemand.h) --------------------
-	// The engine (producer + render-time estimate) runs for the consumers that want vectors, at any rate.
-	// The decision uses the previous frame's state (one frame of latency); with vector_demand off it is
-	// the default-constructed Decision and every use below reduces to the old expression.
-	VectorDemand::Decision vectorDemand;
-	std::atomic<int> queueAheadCapacity{ 0 };         // frames the queue holds after the current one (queue pass)
-	std::atomic<bool> motionAheadBackward{ false };   // backward pairs: the producer is fed the current frame
+	// M2 P5a: the vector engine's state (vector demand, producer, look-ahead, validity, invalidation) lives in
+	// VpMotion::VectorEngineState; the aliases keep every reader outside P5a's ranges unchanged. Each alias
+	// is deleted by the package that moves its last reader (docs/m2/P5A-INVENTORY.md).
+	// VPV-HOOK
+	VpMotion::VectorEngine vectorEngine;
+	VectorDemand::Decision& vectorDemand = vectorEngine.vectorDemand;
+	std::atomic<int>& queueAheadCapacity = vectorEngine.queueAheadCapacity;
+	std::atomic<bool>& motionAheadBackward = vectorEngine.motionAheadBackward;
+	std::string& vectorEngineLogged = vectorEngine.vectorEngineLogged;
+	int& vectorDeliveredLogged = vectorEngine.vectorDeliveredLogged;
+	int& vectorDitherKeyLogged = vectorEngine.vectorDitherKeyLogged;
+	unsigned long long& vectorPairs = vectorEngine.vectorPairs;
+	unsigned long long& vectorBackwardPairs = vectorEngine.vectorBackwardPairs;
+	ULONGLONG& vectorStatsTick = vectorEngine.vectorStatsTick;
+	uint64_t& vectorBackwardSequence = vectorEngine.vectorBackwardSequence;
+	bool& vectorGlobalMissSustained = vectorEngine.vectorGlobalMissSustained;
+	unsigned& vectorGlobalMisses = vectorEngine.vectorGlobalMisses;
+	unsigned& vectorGlobalHits = vectorEngine.vectorGlobalHits;
+	uint64_t& vectorProducerFirstSubmit = vectorEngine.vectorProducerFirstSubmit;
+	bool& vectorProducerSkipSustained = vectorEngine.vectorProducerSkipSustained;
+	std::atomic<bool>& motionAheadEngaged = vectorEngine.motionAheadEngaged;
+	uint64_t& motionAheadEngagedGeneration = vectorEngine.motionAheadEngagedGeneration;
+	bool& motionAheadPrevKnown = vectorEngine.motionAheadPrevKnown;
+	uint64_t& motionAheadPrevGeneration = vectorEngine.motionAheadPrevGeneration;
+	DejudderPolicy::MotionAheadFrame& motionAheadPrev = vectorEngine.motionAheadPrev;
+	std::atomic<bool>& motionEngineReady = vectorEngine.motionEngineReady;
+	std::unique_ptr<MotionAhead::Producer>& motionProducer = vectorEngine.motionProducer;
+	MotionValidity::State& motionValidity = vectorEngine.motionValidity;
+	uint64_t& motionValiditySeen = vectorEngine.motionValiditySeen;
+	using MotionShadowField = VpMotion::VectorEngineState::MotionShadowField;
+	VpMotion::MotionSegment<MotionShadowField>& motionSegment = vectorEngine.motionSegment;
+	unsigned long long& motionShadowChecks = vectorEngine.motionShadowChecks;
+	unsigned long long& motionShadowMismatches = vectorEngine.motionShadowMismatches;
+	std::atomic<int>& motionAheadDepth = vectorEngine.motionAheadDepth;
+	std::atomic<int>& motionAheadConfigured = vectorEngine.motionAheadConfigured;
+	bool& motionProducerFailedLogged = vectorEngine.motionProducerFailedLogged;
+	unsigned long long& motionAheadHits = vectorEngine.motionAheadHits;
+	unsigned long long& motionAheadMisses = vectorEngine.motionAheadMisses;
+	std::atomic<double>& motionHandoffMaxMs = vectorEngine.motionHandoffMaxMs;
+	std::atomic<double>& motionHandoffTotalMs = vectorEngine.motionHandoffTotalMs;
+	std::atomic<unsigned long long>& motionHandoffCount = vectorEngine.motionHandoffCount;
+	std::string& motionAheadLogged = vectorEngine.motionAheadLogged;
+	SteadyClock::time_point& motionAheadLoggedAt = vectorEngine.motionAheadLoggedAt;
+	uint64_t& motionInvalidations = vectorEngine.motionInvalidations;
+	ULONGLONG& motionInvalidateLogTick = vectorEngine.motionInvalidateLogTick;
+	bool& motionRecoveryLogPending = vectorEngine.motionRecoveryLogPending;
+	int& motionInvalidateLoggedCause = vectorEngine.motionInvalidateLoggedCause;
+	std::atomic<const char*>& motionGapDetail = vectorEngine.motionGapDetail;
+	// VPV-HOOK-END
 	bool sigmaDeltaRanLast = false;                   // the sigma-delta quantiser ran in the last frame's output pass
-	std::string vectorEngineLogged;
-	int vectorDeliveredLogged = -1;
-	int vectorDitherKeyLogged = -1;
-	unsigned long long vectorPairs = 0, vectorBackwardPairs = 0;
-	ULONGLONG vectorStatsTick = 0;
-	uint64_t vectorBackwardSequence = 0;
-	bool vectorGlobalMissSustained = false;
-	unsigned vectorGlobalMisses = 0;
-	uint64_t vectorProducerFirstSubmit = 0;
-	bool vectorProducerSkipSustained = false;
 	// C10: the debug switches are read once, not per frame.
 	const bool debugPhaseNoVectors = [] { char f[4] = {}; return GetEnvironmentVariableA("VP_DEBUG_PHASE_NOVECTORS", f, sizeof(f)) > 0 && f[0] == '1'; }();
 	const bool debugPhaseAb = [] { char f[4] = {}; return GetEnvironmentVariableA("VP_DEBUG_PHASE_AB", f, sizeof(f)) > 0 && f[0] == '1'; }();
@@ -6528,7 +6562,6 @@ struct LibplaceboVideoRenderer::Impl
 	}
 	// Whole-frame motion for the statistics consumers: a producer pair (hit) or none (miss). A miss run
 	// is visible (never log-only): hysteresis, so a single missed pair does not flap the entry.
-	unsigned vectorGlobalHits = 0;
 	void NoteGlobalPair(bool hit)
 	{
 		if (!vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan) && !vectorDemand.Serves(VectorDemand::Consumer::MotionIntent))
@@ -7311,8 +7344,6 @@ struct LibplaceboVideoRenderer::Impl
 	// source_resolution auto is selected (the render loop then shows the monitor the frames ahead).
 	std::atomic<bool> sourceAutoActive{ false };
 	bool sourceAheadLogged = false;   // render loop thread
-	std::string motionAheadLogged;
-	SteadyClock::time_point motionAheadLoggedAt{};
 	std::string motionSourceLogged;   // the de-judder's motion source, logged on change
 	// r6 fix 1: WarmIdleMotionEngine's dummy A -> A estimate. It loads the engine only: no
 	// estimate count, no "motion estimated"/motion-source logs, no vectors to the consumers.
@@ -7510,37 +7541,6 @@ struct LibplaceboVideoRenderer::Impl
 		else
 			ReleaseFallback("render-ahead");
 	}
-	// Owner 2026-10-16: the look-ahead engages with 4 frames queued ahead and disengages when the
-	// queue holds none or the sequence breaks (a skip, seek or reset: a new motion generation);
-	// it re-engages only once 4 are queued again. Render-loop thread only.
-	bool motionAheadEngaged = false;
-	uint64_t motionAheadEngagedGeneration = 0;
-	// Integration 2026-10-17: the frame last submitted to the producer (its time and DV kind),
-	// for the break rule (DejudderPolicy::MotionAheadBreakBefore). Render-loop thread only.
-	bool motionAheadPrevKnown = false;
-	uint64_t motionAheadPrevGeneration = 0;
-	DejudderPolicy::MotionAheadFrame motionAheadPrev;
-	// Set when the optical-flow producer's engine has produced a pair (docs/VP-nvof-ahead.md).
-	std::atomic<bool> motionEngineReady{ false };
-	// The producer computing the pairs ahead (render thread starts / stops it; the
-	// render loop submits frames; the de-judder takes its pairs). It stores them
-	// under motionValidity.StreamGeneration() (a resync, queue reset, seek or
-	// format change moves it).
-	std::unique_ptr<MotionAhead::Producer> motionProducer;
-	// One vectors-valid state (docs/VP-interpolator-50-60-plan.md step 1; owner
-	// [[vp-vector-validity]]): every discontinuity moves its epoch from any thread;
-	// the render thread applies it (ApplyMotionInvalidate) and every vector consumer
-	// checks the epoch its vectors were made in.
-	MotionValidity::State motionValidity;
-	uint64_t motionValiditySeen = MotionValidity::State::kInitialEpoch;   // render thread
-	// S0 motion segment, SHADOW step (P-b1, 2026-10-24 draft): it shares motionValidity, records every
-	// live estimate (RunDejudderEstimate) and withdraws it where the host clears
-	// dejudderLiveFieldFrom; the VP phase picture asks it in parallel with the host's own predicate
-	// (DejudderLiveFieldFor). Mismatches are counted and logged; nothing is delivered from it yet, so
-	// pixels are unchanged. Step 2 switches the consumers once the byte-identity gate shows 0.
-	struct MotionShadowField { uint64_t from = 0, to = 0; };
-	VpMotion::MotionSegment<MotionShadowField> motionSegment{ &motionValidity };
-	unsigned long long motionShadowChecks = 0, motionShadowMismatches = 0;
 	void MotionShadowCheck(uint64_t sequence, uint64_t nextSequence, bool hostLive)
 	{
 		// Modularity sweep 2026-10-25: no shadow state while the delivery slot is off (Original pathway).
@@ -7556,18 +7556,6 @@ struct LibplaceboVideoRenderer::Impl
 				static_cast<unsigned long long>(sequence), static_cast<unsigned long long>(nextSequence), hostLive ? 1 : 0,
 				d ? 1 : 0, VpMotion::Describe(d.miss), motionShadowMismatches, motionShadowChecks);
 	}
-	std::atomic<int> motionAheadDepth{ 0 };   // the frames ahead to submit (0 = none)
-	// r6 fix 3: the time-based depth at this source rate (MotionAhead::DepthAt; 2 at 24p, 4 at 60p):
-	// the look-ahead engages once that many are queued ahead (was always 4).
-	std::atomic<int> motionAheadConfigured{ MotionAhead::kDefaultDepth };
-	bool motionProducerFailedLogged = false;
-	// Audit 2026-10-16: since when the producer has been unwanted only because the de-judder was
-	// released (a resync or reset releases it): kept alive instead of a join on the render thread and
-	// a new device on every resync.
-	unsigned long long motionAheadHits = 0, motionAheadMisses = 0;
-	// The render loop's hand-off of frames to the producer (render loop thread writes).
-	std::atomic<double> motionHandoffMaxMs{ 0.0 }, motionHandoffTotalMs{ 0.0 };
-	std::atomic<unsigned long long> motionHandoffCount{ 0 };
 	bool customHooksPublishedLowLatency = false;
 	double customHookRefreshHz = 0.0;
 	ULONGLONG customHookRefreshTick = 0;
@@ -13337,11 +13325,6 @@ struct LibplaceboVideoRenderer::Impl
 		return state.displayMode ? state.displayMode->RefreshRateHz() : 0.0;
 	}
 
-	uint64_t motionInvalidations = 0;
-	ULONGLONG motionInvalidateLogTick = 0;
-	bool motionRecoveryLogPending = false;   // log the first estimate after a logged invalidation
-	int motionInvalidateLoggedCause = -1;    // a MotionValidity::Cause, -1 = none yet
-	std::atomic<const char*> motionGapDetail{ nullptr };   // a frame gap's own cause (a static string), for the log
 	// The cause names the discontinuity (MotionValidity::Describe for the log);
 	// Resync and SourceFormatChange also release the de-judder's resources.
 	// Any thread; applied on the render thread before the next estimate.
@@ -25173,102 +25156,18 @@ releaseDriftBaseRetention =
             hdrPeakAnalysisMotionProtectionPixels=SubtitleHdrProtectionPixels(relocatedSubtitle,true,
                 hdrTrustedPicture.top,hdrTrustedPicture.bottom);
 
-		// docs/VP-nvof-ahead.md (owner 2026-10-16): the optical-flow depth for this frame -
-		// the configured depth, off in low latency or without the engine, never more than
-		// the frames queued. Logged when it changes (the matcher covers the rest).
+		// M2 P5a: the optical-flow producer's lifecycle and the look-ahead depth for this frame (VpMotion::VectorEngine::PlanProducer).
 		{
-			// The producer runs while the de-judder does, with optical flow on, outside low
-			// latency and with a depth set; it stops otherwise (the matcher covers all).
-			const bool lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
-			// Owner 2026-10-16: the producer stays alive once wanted (starting it again would cost a
-			// device on every queue refill); with no frames queued ahead it gets no frames (below),
-			// so it computes nothing it could not use - the startup fill and an emptied queue alike.
-			// Vector engine on demand: also while a consumer of vectors is served (forward, or backward pairs).
-			const bool vectorProducer = vectorDemand.producer && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 &&
-				(!lowLatency || vectorDemand.lowLatencyAllowed);
-			const bool wantProducer = (dejudder && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 && !lowLatency) || vectorProducer;
-			if (wantProducer && !motionProducer && !motionProducerFailedLogged && d3d11 && d3d11->gpu)
-			{
-				pl_d3d11 d3d = pl_d3d11_get(d3d11->gpu);
-				auto producer = std::make_unique<MotionAhead::Producer>();
-				// The slow (best) preset: off the render path, and on the 7 real clips the seed
-				// with it removed 41.9% of the judder vs the matcher's 41.3% (damage 0.35 vs 0.40;
-				// medium 41.2%, 0.37). The render-time fallback keeps the matcher's preset (medium).
-				const NvOpticalFlow::Preset preset = NvOpticalFlow::Preset::Slow;
-				if (d3d && d3d->device && producer->Start(d3d->device, preset))
-					motionProducer = std::move(producer);
-				else
-				{
-					motionProducerFailedLogged = true;
-					DebugLog::Log("Motion ahead: the producer did not start (%s); the de-judder estimates at render time",
-						producer->Error().c_str());
-				}
-			}
-			else if (!wantProducer)
-			{
-				const bool onlyReleased = !dejudder && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 && !lowLatency;
-				// Owner: the producer stays alive once wanted - kept while the settings still want it
-				// (a resync or format change can take longer than any timer); stopped when they change.
-				const bool keepBriefly = motionProducer && motionProducer->Running() && onlyReleased;   // never a dead one
-				if (motionProducer && !keepBriefly)
-				{
-					motionProducer->Stop();
-					motionProducer.reset();
-					motionEngineReady.store(false, std::memory_order_release);
-				}
-				// Audit 2026-10-16: a failure is retried once the producer is wanted again (optical flow
-				// off and on, low latency and back), and the look-ahead re-engages only after the
-				// refill (4 queued ahead) - never on a stale engagement.
-				if (!keepBriefly)
-					motionProducerFailedLogged = false;
-				motionAheadEngaged = false;
-			}
-			if (motionProducer && !motionProducer->Running() && !motionProducerFailedLogged)
-			{
-				motionProducerFailedLogged = true;
-				DebugLog::Log("Motion ahead: the producer stopped (%s); the de-judder estimates at render time",
-					motionProducer->Error().c_str());
-			}
-			motionEngineReady.store(motionProducer && motionProducer->Running() && motionProducer->EngineReady(), std::memory_order_release);
-			// Frames are submitted only while a motion estimate runs for this source (the de-judder or
-			// the interpolator); otherwise the producer stays alive, idle.
-			const bool motionConsumer = (dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
-				dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers)) ||
-				vectorDemand.producer;
-			// Fixed-constant batch B3 2026-10-18 (general_rate_fixes): the depth as a time with a frame floor.
-			const MotionAhead::Decision ahead = MotionAhead::Decide(
-				MotionAhead::DepthAt(activeSettings.motionAheadFrames, dejudderSourceHz, activeSettings.generalRateFixes),
-				lowLatency && (!vectorDemand.lowLatencyAllowed || vectorDemand.mode == VectorDemand::Mode::Backward),
-				motionProducer && motionProducer->Running(),
-				queuedFutureFrames.load(std::memory_order_acquire), activeSettings.opticalFlow, motionConsumer,
-				vectorDemand.mode == VectorDemand::Mode::Backward);
-			motionAheadDepth.store(motionProducer && motionProducer->Running() ? ahead.depth : 0, std::memory_order_release);
-			motionAheadBackward.store(motionProducer && motionProducer->Running() && ahead.reason == MotionAhead::Reason::BackwardPairs,
-				std::memory_order_release);
-			motionAheadConfigured.store((std::max)(1, ahead.configured), std::memory_order_release);
-			if (motionProducer)   // fixed-constant batch B3/B4 2026-10-18
-			{
-				motionProducer->SetDepth(ahead.configured);
-				motionProducer->SetGeneralRates(activeSettings.generalRateFixes);
-			}
-			if (!(motionProducer && motionProducer->Running()) || ahead.depth == 0)
-				motionAheadEngaged = false;   // no frames collected below: no stale engagement (audit 2026-10-16)
-			char text[200];
-			snprintf(text, sizeof(text), "Motion ahead: configured %d, queued ahead %d, depth %d (%s)",
-				ahead.configured, (std::min)(ahead.available, 99), ahead.depth, MotionAhead::Describe(ahead.reason));
-			// Log the reason and depth, not every change of the queued count.
-			char key[96];
-			snprintf(key, sizeof(key), "%d|%d|%d", ahead.configured, ahead.depth, static_cast<int>(ahead.reason));
-			// The queue level swings around the depth as frames arrive and are shown: an Active /
-			// ShallowQueue flip is logged at most every 5 s (audit 2026-10-16: up to once per frame).
-			const bool levelOnly = ahead.reason == MotionAhead::Reason::Active || ahead.reason == MotionAhead::Reason::ShallowQueue;
-			const auto now = SteadyClock::now();
-			if (motionAheadLogged != key && (!levelOnly || now - motionAheadLoggedAt >= std::chrono::seconds(5)))
-			{
-				motionAheadLogged = key;
-				motionAheadLoggedAt = now;
-				DebugLog::Log("%s", text);
-			}
+			// VPV-HOOK
+			VpMotion::VectorEngine::ProducerInputs pin;
+			pin.lowLatency = &lowLatencyQueueActive; pin.queuedFutureFrames = &queuedFutureFrames;
+			pin.opticalFlow = activeSettings.opticalFlow; pin.motionAheadFrames = activeSettings.motionAheadFrames;
+			pin.generalRateFixes = activeSettings.generalRateFixes; pin.sourceHz = dejudderSourceHz; pin.gpu = d3d11 ? d3d11->gpu : nullptr;
+			pin.dejudderPresent = dejudder != nullptr;
+			pin.dejudderEstimating = dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
+				dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers);
+			vectorEngine.PlanProducer(pin);
+			// VPV-HOOK-END
 		}
 
 		// Stage 12 step A: the re-base factor for this frame. Geometry above
