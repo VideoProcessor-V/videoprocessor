@@ -253,6 +253,12 @@
      "pattern": "settings\\.cutHistogram",
      "kind": "false_positive",
      "reason": "settings.cutHistogram feed of the dejudder_cut_histogram setting moved verbatim from LVR (P3-6); same class as the DejudderWarp.cpp settings\\.cutHistogram entry (cut rule is CutFadeJudge::TrustCut); WAIVER-SU-02 under WAIVER-SU-01"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/VectorEngineEstimate.inl",
+     "pattern": "current\\.cutHistogram != next\\.cutHistogram",
+     "kind": "false_positive",
+     "reason": "matcher-settings comparison (meaningChanged) moved verbatim from LVR RunDejudderEstimate (M2 P5a-5), not a histogram implementation; same class as the DejudderWarp.cpp settings.cutHistogram entry; source: LVR RunDejudderEstimate meaningChanged (bff1c35e); WAIVER-SU-03 (coordinator, under SU-01)"
     }
    ]
   },
@@ -387,6 +393,12 @@
      "pattern": "settings\\.pictureArea",
      "kind": "false_positive",
      "reason": "settings.pictureArea flag assignment moved verbatim from LVR (P3-6), not a PictureRect implementation; same class as the DejudderWarp entries"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/VectorEngineEstimate.inl",
+     "pattern": "current\\.pictureArea != next\\.pictureArea",
+     "kind": "false_positive",
+     "reason": "matcher-settings comparison (meaningChanged) moved verbatim from LVR RunDejudderEstimate (M2 P5a-5), not a PictureRect implementation; same class as the MatcherSettings.h settings.pictureArea entry; source: LVR RunDejudderEstimate meaningChanged (bff1c35e); WAIVER-SU-03 (coordinator, under SU-01)"
     }
    ]
   },
