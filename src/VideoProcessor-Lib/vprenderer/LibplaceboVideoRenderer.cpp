@@ -92,7 +92,7 @@
 #include <VP-V/modules/input/signal/ResyncExtension.h>   // VPV-HOOK: resync Q1 (Shadow, Drive, HostBinding, pulldown step)
 #include <VP-V/modules/motion/estimation/VectorEngineHost.h>   // P5a: the vector engine: state, logic and the host adapter   // VPV-HOOK
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>   // R4a: the re-base decision product P0
-#include <VP-V/modules/scaling/rebase/RebaseWarmupJob.h>   // FX-RB: re-base shader warm-up (call sites only)
+#include <VP-V/modules/scaling/rebase/RebaseWarmupJob.h>   // FX-RB re-base shader warm-up // VPV-HOOK
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
@@ -5078,9 +5078,7 @@ struct LibplaceboVideoRenderer::Impl
 	int rebasePauseSeconds = 5;
 	double rebaseFactorX = 1.0;         // the width's (per axis; = rebaseFactor when uniform)
 	std::string rebaseLogged;           // the last state logged
-	// FX-RB (VP-V/modules/scaling/rebase/RebaseWarmupJob.h): a re-base to a new plane size is held on the
-	// current path until a worker has compiled its shader variants into the shared pl_cache.
-	VpRebaseWarmup::Controller rebaseWarmup;
+	VpRebaseWarmup::Controller rebaseWarmup;   // FX-RB: holds a re-base until its shaders are warm // VPV-HOOK
 	// Stage 12 step B: effective resolution, bitrate quality and bit depth
 	// of every source, read on the native frame; auto acts on it.
 	SourceResolutionMonitor::Monitor sourceMonitor;
@@ -8094,7 +8092,7 @@ struct LibplaceboVideoRenderer::Impl
 		if (!outputResourcesRetired)
 		{
             nlsPreparation.Stop();
-            rebaseWarmup.Stop();
+            rebaseWarmup.Stop(); // VPV-HOOK
             subtitlePipelinePreparation.Stop();
             pictureProofWorker.Stop();
             lookaheadMeasurementWorker.Stop();
@@ -12303,7 +12301,7 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		status.Empty();
 		if (nlsPreparationPending.load(std::memory_order_acquire) ||
-            rebaseWarmup.Pending() ||
+            rebaseWarmup.Pending() || // VPV-HOOK
             subtitlePipelinePreparationPending.load(std::memory_order_acquire)) {
 			status = TEXT("Preparing shaders...");
 			return true;
@@ -24531,17 +24529,16 @@ releaseDriftBaseRetention =
 			const double previousRebase = rebaseFactor, previousRebaseX = rebaseFactorX;
 			rebaseFactor = wanted < 1.0 && !temporal && !rebasePaused ? wanted : 1.0;
 			rebaseFactorX = wantedX < 1.0 && !temporal && !rebasePaused ? wantedX : 1.0;
-			{
-				// FX-RB: a re-base whose shader variants are not compiled yet stays on the current path (the
-				// factors in force, else native) until a worker has them; never compiled on this thread.
-				const VpRebaseWarmup::Context warmContext{ renderImage, target, renderParams, d3d11->device, cache,
-					shaderCacheEnabled, nlsPreparationRevision, nlsPreparationNoCompute, sourceRebase.Kernel() };
-				const VpRebaseWarmup::Controller::Outcome warm = rebaseWarmup.Frame(luma &&
-					!pipelineSlots.OriginalPathway() && pipelineSlots.Runs(PipelineSlots::Id::ScalingRebase),
-					warmContext, rebaseFactorX, rebaseFactor, previousRebaseX, previousRebase);
-				if (warm.hold) { rebaseFactorX = warm.x; rebaseFactor = warm.y; }
-				if (warm.fallbackChanged) SyncFallback(warm.fallback);
-			}
+			{ // VPV-HOOK
+				// FX-RB: hold a re-base on the current path until a worker has its shaders // VPV-HOOK
+				const VpRebaseWarmup::Context warmContext{ renderImage, target, renderParams, d3d11->device, cache, // VPV-HOOK
+					shaderCacheEnabled, nlsPreparationRevision, nlsPreparationNoCompute, sourceRebase.Kernel() }; // VPV-HOOK
+				const VpRebaseWarmup::Controller::Outcome warm = rebaseWarmup.Frame(luma && // VPV-HOOK
+					!pipelineSlots.OriginalPathway() && pipelineSlots.Runs(PipelineSlots::Id::ScalingRebase), // VPV-HOOK
+					warmContext, rebaseFactorX, rebaseFactor, previousRebaseX, previousRebase); // VPV-HOOK
+				if (warm.hold) { rebaseFactorX = warm.x; rebaseFactor = warm.y; } // VPV-HOOK
+				if (warm.fallbackChanged) SyncFallback(warm.fallback); // VPV-HOOK
+			} // VPV-HOOK
 			// Silent-fallbacks batch: with scaling.rebase switched off the planes stay native, so every
 			// downstream stage (debander, detail pulse, texture restore, adaptive upscale) uses factor 1.
 			{
