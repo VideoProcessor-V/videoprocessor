@@ -489,7 +489,7 @@ namespace Vpv
 			{
 				if (st.fitWanted)
 				{
-					st.liveWait = "the shared resync seal is not driving (resync_event is not on): the camera fit cannot run";
+					st.liveWait = "camera fit waits for resync_event: turn resync_event on";
 					st.liveWaitIsFault = true;
 				}
 				return;
@@ -780,9 +780,12 @@ namespace Vpv
 					fb.push_back("camera_engine: " + st.engineProblem);
 				else if (!st.liveWait.empty())
 				{
-					lines.push_back("camera: " + st.liveWait + "; no fit yet");
+					// With every camera default off, a camera that is on was turned on explicitly: a missing resync_event is a visible
+					// fallback entry (Fallbacks, Ctrl+I, Config status, Ctrl+Alt+D), not a plain status line. "Waiting for the first field" is a state.
 					if (st.liveWaitIsFault)
 						fb.push_back("camera_fit: " + st.liveWait);
+					else
+						lines.push_back("camera: " + st.liveWait + "; no fit yet");
 				}
 				if (!st.graphProblem.empty())
 					fb.push_back("camera_graph: " + st.graphProblem);

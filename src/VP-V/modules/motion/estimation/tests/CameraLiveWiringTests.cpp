@@ -335,6 +335,27 @@ namespace VideoProcessorTest
 			Assert::AreEqual<uint64_t>(1, adapter->Hook().UsedPairs());
 		}
 
+		TEST_METHOD(TheCameraOnWithoutResyncEventIsAVisibleFallback)
+		{
+			// camera_link + camera_model on (explicit), resync_event off: the seal never drives, so the fit can never run.
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\n");
+			rig.ResyncApply("off");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 6; ++s)
+				rig.Frame(s);
+			Assert::IsTrue(rig.ext.FitWanted(rig.Host()));
+			Assert::IsFalse(rig.ext.LiveBuilt(rig.Host()), L"nothing attaches without the seal");
+			const std::string want = "camera_fit: camera fit waits for resync_event: turn resync_event on";
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), want.c_str()), L"a fallback entry with id camera_fit and the actionable text");
+			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Lines), "waits for resync_event"), L"not a separate status-line form");
+			std::string reply;
+			RE::Context c;
+			c.host = rig.Host();
+			Assert::IsTrue(rig.ext.OnCommand(c, "camera", "status", reply));
+			Assert::IsTrue(reply.find(want) != std::string::npos, L"also in the Ctrl+Alt+D text");
+			Assert::IsTrue(rig.engine.history.empty());
+		}
+
 		TEST_METHOD(AnAbsentVectorEngineIsRefusedVisibly)
 		{
 			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\ncamera_meas_model_global=on\n", false);

@@ -125,13 +125,30 @@ P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` 
 | P8 labels | yes, when labels are wanted (overlay != off, any camera_use_* switch, camera_labels_gpu) and a render device exists | `CameraLabelProducer` in UPLOAD mode (CPU labels uploaded to a texture; compute mode with camera_labels_gpu on), `CameraLabelFill` as the post-submit gap work and the seal's live fill. Because the seal lags, a consumer reads the labels of a frame that has been sealed (`LabelsFor(seq)`); no consumer is wired to them yet |
 | P9 smoothed | NO | no producer exists (K9-1 `CameraSmoother` is not built); declared by no consumer, so the graph never holds it |
 | K4 guidance | yes, with a `camera_meas_*` switch on | adapter + hook; P4 facts for the lane job come from the frame-analysis store (`Identity.picture`, `Scene.cut / fade` when the scene group was written); a pair without a scene record is counted and shown (`camera_scene`) |
-| status | Ctrl+I, Config status, Fallbacks, Ctrl+Alt+D | `CameraStatus.h` + the adapter's lines and decisions + `camera_engine` / `camera_graph` / `camera_fit` / `camera_gpu` / `camera_scene` |
+| status | Ctrl+I, Config status, Fallbacks, Ctrl+Alt+D | `CameraStatus.h` + the adapter's lines and decisions + `camera_engine` / `camera_graph` / `camera_fit` / `camera_gpu` / `camera_scene`; `camera_fit` = "camera fit waits for resync_event: turn resync_event on" (the seal is not driving: a visible fallback, since every camera default is off and an enabled camera is explicit) |
 
 **Gaps (not closed here).** G1 P2 / P3 / P4 content is not in a skeleton slot: the markers carry ancestry only; moving P7 into the skeleton lane (K1-9 / SK-W) removes the private
 table. G2 (closed) `m2/p5a-outcome` is merged and mapped (see AfterEstimate above); the bench `gpu_ms` stays empty until the engine can measure a per-estimate GPU time. G3 `camera.fit` /
 `camera.readback` PassTimers rows need `FeedPassTimers(passTimerHook.acc)` at a renderer call site (a Bill hunk under a zone lock); the samples are bounded and unread until then.
 G4 flash events and fade gain / offset have no producer (flash false, gain 1, offset 0). G5 `measuredSourceHz` is the ingress rate (`HostResync::measuredRateHz`); a cadence-locked source
 uses the store's film rate when its cadence group was written, else the ingress rate.
+
+### What an explicit camera-on adds per frame (camera_link = report, camera_model = on, resync_event = on; every camera_meas_* and camera_use_* off)
+
+Read from the code, not measured. NO hook is registered (`guideWanted` is false: no adapter, no `SetPreEstimateHook`), so `VectorEngine::Estimate` runs the matcher's passes exactly as before.
+
+| Cost | Where | Size |
+|---|---|---|
+| CPU fit | the ONE camera worker thread, once per verified field (cadence repeats have none); `Fitter::Fit` on the readback copy | async: the render thread never waits; p95 not yet measured on the laptop (indicative 9-12 ms CPU) |
+| GPU -> CPU readback of `IVectorEngine::FieldOf(seq)` | D3D11 (the production backend): ONE small copy pass (a shader writes the engine's rgba32f forward field into a VP-owned slot texture by imageStore), ONE native CopyResource into a staging texture and an event query; read later with Map(DO_NOT_WAIT). Not D3D11: `pl_tex_download` into a host-mapped `pl_buf`, `pl_buf_poll(..., 0)`. The backward plane is requested only when the engine gives one (`FieldOf` gives none today) | 16 B per 16x16 block: 1080p 120 x 68 = 8,160 blocks = 130,560 B (0.12 MiB) per pair; 4K 240 x 135 = 32,400 blocks = 518,400 B (0.49 MiB) per pair. Ring of at least 3 slots allocated at attach (about 0.4 MiB at 1080p, 1.5 MiB at 4K); a full ring drops the request visibly |
+| `CameraLane` | CPU only: input-marker headers for about 4 nodes per frame (atomic claims / publishes), the lagged seal (`Resolve`, `ReleaseAfter`), no GPU, no allocation per frame | microseconds |
+| Frame-analysis store reads | `UpdateTiming` (one cadence read per frame) and `DescribePair` (one record read per fit); each copies a `Record` (about 4 KB) under the store mutex | negligible |
+| P8 labels upload | only when labels are wanted (overlay != off, any `camera_use_*`, `camera_labels_gpu`): none with the defaults | 0 |
+| GPU operations added | the one copy pass and the one CopyResource + query per verified field, and nothing else (no guidance counts readback, no label upload, no change to any matcher pass) | |
+
+### Known issue (owner decision): the fit reads the GUIDED live field
+
+`FieldOf(seq)` returns the matcher's LIVE block field of the last successful estimate (HOOKS.md section 7; `MotionWarp::Field()`), and production feeds the fit from exactly that. With every guidance switch off that field is the unguided matcher output, so nothing feeds back. With `camera_meas_model_global` (or any switch that changes the estimate) ON, the matcher's field is the one the camera's own model guided, so the fit re-measures its own guide: diagnosis ac283dae2a47417e5 found a feedback drift of about 0.004 px per pair. The fix is to fit from the engine's seed field (the NVOF / pre-guidance field) instead of the guided live field; it needs a second field accessor on `IVectorEngine` and is not done. Until then, a measurement switch that changes the estimate (camera_meas_model_global, and a default-on option (a) if the owner chooses it) carries this drift.
 
 ## Rules this code follows
 
