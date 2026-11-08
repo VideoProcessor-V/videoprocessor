@@ -97,11 +97,33 @@ namespace Vpv
 		void ExtensionHub::OnIngress(RE::IngressContext& c) { for (auto& m : modules_) { try { m->OnIngress(c); } catch (...) { Contain(c, m->Name()); } } }
 		void ExtensionHub::OnQueue(const RE::QueueFacts& f) { for (auto& m : modules_) { try { m->OnQueue(f); } catch (...) { Contain(f, m->Name()); } } }
 
+		// One module's share of a phase: the M2 P0b phases go to their typed method (null payload = skipped), the
+		// earlier phases to OnFrame as before. Fan-out phases return false (the hub ORs nothing for them).
+		static bool DispatchPhase(ISkeletonModule& m, RE::FrameContext& c)
+		{
+			switch (c.phase)
+			{
+			case RE::FramePhase::PlanOutputs:   if (auto* p = RE::PayloadOf<RE::OutputPlan>(c)) return m.OnPlanOutputs(c, *p); return false;
+			case RE::FramePhase::PlanPresent:   if (auto* p = RE::PayloadOf<RE::PresentPlan>(c)) return m.OnPlanPresent(c, *p); return false;
+			case RE::FramePhase::AfterPresent:  if (auto* p = RE::PayloadOf<RE::PresentContext>(c)) m.OnAfterPresent(c, *p); return false;
+			case RE::FramePhase::PresentSample: if (auto* p = RE::PayloadOf<RE::PresentSampleView>(c)) m.OnPresentSample(c, *p); return false;
+			case RE::FramePhase::ResolveTime:   if (auto* p = RE::PayloadOf<RE::TimeQuery>(c)) m.OnResolveTime(c, *p); return false;
+			case RE::FramePhase::DecideIngress: if (auto* p = RE::PayloadOf<RE::IngressContext>(c)) return m.OnDecideIngress(c, *p); return false;
+			case RE::FramePhase::Convert:       if (auto* p = RE::PayloadOf<RE::ConvertContext>(c)) return m.OnConvertedFrame(c, *p); return false;
+			case RE::FramePhase::AfterPublish:  if (auto* p = RE::PayloadOf<RE::PublishView>(c)) m.OnAfterPublish(c, *p); return false;
+			case RE::FramePhase::Upload:        if (auto* p = RE::PayloadOf<RE::UploadContext>(c)) return m.OnTryUpload(c, *p); return false;
+			case RE::FramePhase::QueueTarget:   if (auto* p = RE::PayloadOf<RE::QueueTargetContext>(c)) m.OnQueueTarget(c, *p); return false;
+			default:                            return m.OnFrame(c);
+			}
+		}
+
+		// Take-over phases stop at the first module that returns true; fan-out phases (RE::PhaseFansOut) call every module.
 		bool ExtensionHub::OnFrame(RE::FrameContext& c)
 		{
+			const bool fanOut = RE::PhaseFansOut(c.phase);
 			bool handled = false;
 			for (auto& m : modules_)
-				if (!handled) { try { handled = m->OnFrame(c); } catch (...) { Contain(c, m->Name()); } }
+				if (fanOut || !handled) { try { if (DispatchPhase(*m, c)) handled = true; } catch (...) { Contain(c, m->Name()); } }
 			return handled;
 		}
 

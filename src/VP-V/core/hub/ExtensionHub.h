@@ -41,6 +41,23 @@ namespace Vpv
 			virtual void OnIngress(RE::IngressContext&) {}
 			virtual void OnQueue(const RE::QueueFacts&) {}
 			virtual bool OnFrame(RE::FrameContext&) { return false; }
+			// M2 P0b typed phases (R10-R19). For these phases the hub decodes FrameContext::phaseData and calls the
+			// method below instead of OnFrame (a phase whose payload is null is skipped). Defaults = "not handled" /
+			// "no change". Take-over phases (first-wins, bool): PlanOutputs, PlanPresent, DecideIngress, Convert,
+			// Upload. Fan-out phases (every module, in order, void): AfterPresent, PresentSample, ResolveTime,
+			// AfterPublish, QueueTarget; ResolveTime and QueueTarget are chained (each sees the previous result).
+			// Threads and locks per hook are in RendererExtension.h and doc 59 section 1.1; DecideIngress runs on the
+			// capture thread and ResolveQueueTarget under the host's queue mutex: no blocking, no locks.
+			virtual bool OnPlanOutputs(RE::FrameContext&, RE::OutputPlan&) { return false; }
+			virtual bool OnPlanPresent(RE::FrameContext&, RE::PresentPlan&) { return false; }
+			virtual void OnAfterPresent(RE::FrameContext&, RE::PresentContext&) {}
+			virtual void OnPresentSample(RE::FrameContext&, RE::PresentSampleView&) {}
+			virtual void OnResolveTime(RE::FrameContext&, RE::TimeQuery&) {}
+			virtual bool OnDecideIngress(RE::FrameContext&, RE::IngressContext&) { return false; }
+			virtual bool OnConvertedFrame(RE::FrameContext&, RE::ConvertContext&) { return false; }
+			virtual void OnAfterPublish(RE::FrameContext&, RE::PublishView&) {}
+			virtual bool OnTryUpload(RE::FrameContext&, RE::UploadContext&) { return false; }
+			virtual void OnQueueTarget(RE::FrameContext&, RE::QueueTargetContext&) {}
 			virtual double OnResolve(RE::Resolve, const RE::Context&, double billValue) { return billValue; }
 			virtual void OnStatus(const RE::Context&, RE::StatusKind, std::vector<std::string>&, const char*, const char*) {}
 			virtual bool OnCommand(const RE::Context&, const char*, const char*, std::string&) { return false; }

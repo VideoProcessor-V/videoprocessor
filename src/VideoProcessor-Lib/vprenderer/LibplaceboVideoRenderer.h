@@ -231,6 +231,7 @@ private:
 			// bits of the r210 channels.
 			bool dvTunnelRaw = false;
 			bool dvTunnelHighAligned = false;
+			std::shared_ptr<void> extension; // VPV-HOOK
 			bool Raw() const { return rawFrame != nullptr; }
 			size_t Bytes() const { return Raw() ? rawBytes : pixels.size(); }
 		};

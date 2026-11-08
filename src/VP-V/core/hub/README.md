@@ -10,3 +10,29 @@ hook layer (`src/VideoProcessor-Lib/vprenderer/RendererExtension.h`). It fans ev
 - Modules are added at start-up only (`AddModule`); the list is read-only afterwards and dispatch is lock-free.
 - Not a module folder: no `MANIFEST.json` (core/ has none); the module checker does not scan it.
 - Later packages add modules (resync/seal first, vector engine, entrance, motion, presentation, capture, camera/LED).
+
+## M2 P0b: hook amendment R10-R20 (doc 59 section 1.1)
+
+Declarations, hub dispatch and inert defaults only; the call sites belong to the packages that move the code.
+Phase payloads and the one-line helpers are in `RendererExtension.h`; `ISkeletonModule` has one typed method per
+phase and the hub decodes `FrameContext::phaseData` for them. With nothing registered, or no module overriding the
+method, every helper returns the host's own value (or `false` = "the host's code runs").
+
+| # | Helper (RendererExtension::) | Phase | Rule | Default | Call site by |
+|---|---|---|---|---|---|
+| R10 | `PlanOutputs(host, OutputPlan&)` | PlanOutputs | take-over | host's output list untouched | P5b |
+| R11 | `PlanPresent(host, PresentPlan&)` | PlanPresent | take-over | `interval == 1` | P6 |
+| R12 | `AfterPresent(host, seq, gen, PresentContext&)` | AfterPresent | fan-out, outcome only added to | nothing ran | P5c |
+| R13 | `AdjustPresentationSample(host, sample, native)` | PresentSample | fan-out, chained | sample unchanged | P6 |
+| R14 | `ResolveTime(host, TimeKind, billQpc)` | ResolveTime | fan-out, chained | `billQpc` | P5c |
+| R15 | `DecideIngress(IngressContext&)` | DecideIngress | take-over | host's values stand | P10 |
+| R16 | `OnConvertedFrame(host, ConvertContext&)`, `AfterPublish(host, PublishView&)` | Convert, AfterPublish | take-over, fan-out | `false` (host's formatter) | P10 (P13 uses it) |
+| R17 | `TryUpload(host, UploadContext&)` | Upload | take-over | `false` (host's upload) | P10 |
+| R18 | `std::shared_ptr<void> extension` in the host's `ConvertedPayload` | - | member | null | P10 moves the VP members into it |
+| R19 | `ResolveQueueTarget(host, QueueTargetContext&, billTarget)` | QueueTarget | fan-out, chained | `billTarget` | P10 |
+| R20 | `kTimedFileFramesIid`, `ExternalTiming`, `IQueueAdmission` | - | declarations | - | P10 (interface text: P2) |
+
+Phase rule (`RendererExtension::PhaseFansOut`): the phases P0b adds as fan-out are AfterPublish, QueueTarget,
+AfterPresent, PresentSample and ResolveTime; every other phase keeps the first-wins rule it had. A module writes
+its payload only once it has succeeded (a contained throw leaves what it wrote). R12 is experimental in the Bill
+PR text (doc 59 D-10).
