@@ -127,20 +127,35 @@ namespace RendererExtension
 	enum class FramePhase { Convert, AfterPublish, CollectAhead, QueueTarget, Begin, PlanOutputs, Entrance, Upload,
 		CollectHooks, Draw, AfterRender, PlanPresent, AfterPresent, PresentSample, ResolveTime, DecideIngress };
 	// Fan-out phases: every extension is called in registration order and the result is the OR of the returns
-	// (informational). Of the five, ResolveTime and DecideIngress are new in M2 P0b; AfterPublish, QueueTarget,
-	// AfterPresent and PresentSample already existed (first-wins, unused) and now fan out. All other phases keep
-	// the first-wins rule: the first handler that returns true stops the chain.
+	// (informational). Of the first five, ResolveTime and DecideIngress are new in M2 P0b; AfterPublish, QueueTarget,
+	// AfterPresent and PresentSample already existed (first-wins, unused) and now fan out. M2 P4 adds Entrance
+	// (the render thread's GPU-work and entrance-planning point), CollectHooks and AfterRender: observers, none of
+	// the existing handlers returns true for them. All other phases keep the first-wins rule: the first handler
+	// that returns true stops the chain.
 	inline bool PhaseFansOut(FramePhase phase) noexcept
 	{
 		return phase == FramePhase::AfterPublish || phase == FramePhase::QueueTarget || phase == FramePhase::AfterPresent ||
-			phase == FramePhase::PresentSample || phase == FramePhase::ResolveTime;
+			phase == FramePhase::PresentSample || phase == FramePhase::ResolveTime || phase == FramePhase::Entrance ||
+			phase == FramePhase::CollectHooks || phase == FramePhase::AfterRender;
 	}
 	enum : uint32_t { kRequestMixerFlush = 1, kRequestComponentReset = 2 };
 
 	// Phase payloads (generic, host-type based; later packages may extend them). The one-line helpers
 	// at the end of the namespace fill FrameContext::phaseData with the matching payload.
 	struct PresentFacts { int64_t presentQpc = 0, endQpc = 0; uint32_t syncInterval = 1; bool dropped = false; };
-	struct DrawJob { int errors = 0; int retried = 0; bool rendered = false; };
+	// M2 P4. Draw (take-over, inside the host's draw callback; Continue = the host draws as before) and AfterRender
+	// (fan-out, after the host's render call). Every pointer is valid for the call only; defaults are inert.
+	enum class DrawResult { Continue, Drawn };
+	struct DrawJob
+	{
+		int errors = 0; int retried = 0; bool rendered = false;
+		const pl_render_errors* renderErrors = nullptr;   // AfterRender: libplacebo's error report of this render (read-only)
+		const pl_frame* source = nullptr;                 // Draw: the picture the host is about to render
+		pl_frame* frame = nullptr;                        // Draw: in/out, a handler may replace the picture
+		const pl_frame* destination = nullptr;            // Draw: the target
+		const pl_render_params* params = nullptr;         // Draw: this frame's parameters
+		DrawResult result = DrawResult::Continue;         // Draw: out
+	};
 	struct QueueView { const void* queue = nullptr; size_t size = 0; };
 
 	// R10 PlanOutputs (take-over; render loop, after the host's own timeline Begin, no renderMutex). In: the facts.
@@ -458,10 +473,25 @@ namespace RendererExtension
 		FrameContext c; c.host = host; c.phase = phase; c.seq = seq; c.generation = generation;
 		return Frame(c);
 	}
-	inline void NotifyAfterRender(const void* host, int64_t seq, int64_t generation, int errors, int retried, bool rendered) noexcept
+	// Entrance (fan-out; render thread, renderMutex held, before the frame's hook list is built): the point where the
+	// host's entrance-decision block starts. Handlers may record GPU work on their own objects and read the facts; they
+	// never write the frame's textures, params or hooks (70b section 9.2).
+	// OPEN ITEM: 'never write' is a contract, not enforced by the types: image and target are non-const pl_frame pointers;
+	// const-ness comes in a later package (audit 2 of M2 P4).
+	inline void NotifyEntrance(const void* host, int64_t seq, int64_t nextSeq, int64_t generation, pl_frame* image, pl_frame* target,
+		int width, int height, bool cadenceRepeat, double captureRateHz) noexcept
 	{
 		if (!Any()) return;
-		DrawJob job; job.errors = errors; job.retried = retried; job.rendered = rendered;
+		FrameContext c; c.host = host; c.phase = FramePhase::Entrance; c.seq = seq; c.nextSeq = nextSeq; c.generation = generation;
+		c.image = image; c.target = target; c.width = width; c.height = height; c.cadenceRepeat = cadenceRepeat;
+		c.captureRateHz = captureRateHz;
+		Frame(c);
+	}
+	inline void NotifyAfterRender(const void* host, int64_t seq, int64_t generation, int errors, int retried, bool rendered,
+		const pl_render_errors* renderErrors = nullptr) noexcept
+	{
+		if (!Any()) return;
+		DrawJob job; job.errors = errors; job.retried = retried; job.rendered = rendered; job.renderErrors = renderErrors;
 		FrameContext c; c.host = host; c.phase = FramePhase::AfterRender; c.seq = seq; c.generation = generation; c.phaseData = &job;
 		Frame(c);
 	}
