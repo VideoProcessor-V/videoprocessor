@@ -28,7 +28,8 @@
 // the caller's own value (or "not handled") when nothing is registered, and the host keeps its code as the
 // fallback when no handler takes the phase over. Take-over phases are first-wins (the first handler that
 // returns true stops the chain); fan-out phases call every extension in registration order (PhaseFansOut).
-// A handler writes its payload only once it has succeeded: a throw is contained, but what it already wrote stays.
+// A handler writes its payload only once it has succeeded: a throw is contained, but what it already wrote stays
+// (except AfterPresent / R12, where the hub discards a throwing module's writes).
 
 #include <libplacebo/renderer.h>
 #include <libplacebo/swapchain.h>
@@ -125,9 +126,10 @@ namespace RendererExtension
 	// New phases are appended (existing values never change). ResolveTime (R14) and DecideIngress (R15) are M2 P0b.
 	enum class FramePhase { Convert, AfterPublish, CollectAhead, QueueTarget, Begin, PlanOutputs, Entrance, Upload,
 		CollectHooks, Draw, AfterRender, PlanPresent, AfterPresent, PresentSample, ResolveTime, DecideIngress };
-	// Fan-out phases (the ones M2 P0b adds): every extension is called in registration order and the
-	// result is the OR of the returns (informational). All other phases keep the first-wins rule: the
-	// first handler that returns true stops the chain. The phases of earlier packages are unchanged here.
+	// Fan-out phases: every extension is called in registration order and the result is the OR of the returns
+	// (informational). Of the five, ResolveTime and DecideIngress are new in M2 P0b; AfterPublish, QueueTarget,
+	// AfterPresent and PresentSample already existed (first-wins, unused) and now fan out. All other phases keep
+	// the first-wins rule: the first handler that returns true stops the chain.
 	inline bool PhaseFansOut(FramePhase phase) noexcept
 	{
 		return phase == FramePhase::AfterPublish || phase == FramePhase::QueueTarget || phase == FramePhase::AfterPresent ||

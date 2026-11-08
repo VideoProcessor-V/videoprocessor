@@ -32,10 +32,11 @@ method, every helper returns the host's own value (or `false` = "the host's code
 | R19 | `ResolveQueueTarget(host, QueueTargetContext&, billTarget)` | QueueTarget | fan-out, chained | `billTarget` | P10 |
 | R20 | `kTimedFileFramesIid`, `ExternalTiming`, `IQueueAdmission` | - | declarations | - | P10 (interface text: P2) |
 
-Phase rule (`RendererExtension::PhaseFansOut`): the phases P0b adds as fan-out are AfterPublish, QueueTarget,
-AfterPresent, PresentSample and ResolveTime; every other phase keeps the first-wins rule it had. A module writes
-its payload only once it has succeeded (a contained throw leaves what it wrote). R12 is experimental in the Bill
-PR text (doc 59 D-10).
+Phase rule (`RendererExtension::PhaseFansOut`): the fan-out phases are AfterPublish, QueueTarget,
+AfterPresent, PresentSample and ResolveTime (ResolveTime is new; the other four existed and now fan out, see the
+note below); every other phase keeps the first-wins rule it had. A module writes its payload only once it has
+succeeded: a contained throw leaves what it wrote, except for AfterPresent (R12), where the hub discards a throwing
+module's writes. R12 is experimental in the Bill PR text (doc 59 D-10).
 
 Semantics note (deliberate, inert): the phases AfterPublish, QueueTarget, AfterPresent and PresentSample already
 existed in the enum and were first-wins by default. P0b makes them fan-out. Nothing called or handled them before
