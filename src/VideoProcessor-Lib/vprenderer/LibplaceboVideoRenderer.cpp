@@ -91,6 +91,7 @@
 #include <VP-V/modules/input/signal/ResyncCallSites.h>   // R1 call-site helpers
 #include <VP-V/modules/input/signal/ResyncExtension.h>   // VPV-HOOK: resync Q1 (Shadow, Drive, HostBinding, pulldown step)
 #include <VP-V/modules/motion/estimation/VectorEngineHost.h>   // P5a: the vector engine: state, logic and the host adapter   // VPV-HOOK
+#include <VP-V/modules/input/capture/CaptureHost.h>   // VPV-HOOK P10: the capture extension's binding and host adapter
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>   // R4a: the re-base decision product P0
 #include <VP-V/modules/scaling/rebase/RebaseWarmupJob.h>   // FX-RB: re-base shader warm-up (call sites only)
 #include <vprenderer/DejudderPolicy.h>
@@ -5119,6 +5120,10 @@ struct LibplaceboVideoRenderer::Impl
 	bool dejudderRgbBt2020 = false;
 	pl_tex dejudderRgbScratch = nullptr;
 	bool rgbGpuLogged = false;
+	void CaptureApplySettings();   // VPV-HOOK P10: defined in VP-V/modules/input/capture/CaptureImpl.inl
+	void CaptureReleaseGpu();   // VPV-HOOK P10: defined in VP-V/modules/input/capture/CaptureImpl.inl
+	bool CaptureConvert(RendererExtension::ConvertContext& cc);   // VPV-HOOK P10: defined in VP-V/modules/input/capture/CaptureImpl.inl
+	void CaptureAfterPublish(RendererExtension::PublishView& pv);   // VPV-HOOK P10: defined in VP-V/modules/input/capture/CaptureImpl.inl
 	// entrance_gpu_drain (VP-V/modules/scaling/rebase/EntranceGpuDrain.h, group E): call sites only.
 	// S1 notes every entrance run through EntranceHost::OnStagesRun.
 	EntranceGpuDrain::Drain entranceDrain;
@@ -8132,23 +8137,6 @@ struct LibplaceboVideoRenderer::Impl
 				pl_tex_destroy(d3d11->gpu, &profileOverlayTexture);
 				for (pl_tex& texture : textures)
 					pl_tex_destroy(d3d11->gpu, &texture);
-				captureUnpack.reset();   // its textures and dispatch, before the device
-				rgbUnpack.reset();       // the same for the RGB unpack, and its planes
-				dvUnpack.Reset();        // and the Dolby Vision tunnel unpack
-				dvGpuFailed.store(false, std::memory_order_release);   // a new device may unpack again
-				ReleaseFallback("Dolby Vision GPU unpack");
-				pl_tex_destroy(d3d11->gpu, &rgbIngestLuma);
-				if (earlyUpload->IsOpen())
-				{
-					const EarlyUpload::Stats es = earlyUpload->GetStats();
-					DebugLog::Log("Early upload: closed (%llu frames read early, %llu took the render upload (%llu before the early upload started), %llu waited for a running upload; %llu uploads, %llu with no free slot (held %llu, GPU release pending %llu), %llu failed)",
-						static_cast<unsigned long long>(earlyUsed), static_cast<unsigned long long>(earlyFallback),
-						static_cast<unsigned long long>(earlyLate), static_cast<unsigned long long>(earlyWaited),
-						static_cast<unsigned long long>(es.uploads), static_cast<unsigned long long>(es.noFreeSlot),
-						static_cast<unsigned long long>(es.noFreeHeld), static_cast<unsigned long long>(es.noFreeGpu),
-						static_cast<unsigned long long>(es.failures));
-				}
-				earlyUpload->Close();    // the second device and the shared textures
 				ReleaseDejudder();   // before the device goes
 				motionEngineBudgetAdapter.Release();   // Bug hunt 3 F4: the budget reader's adapter
 				adaptiveDownscale.Release();   // Stage 8-2: its textures, too
@@ -11138,12 +11126,6 @@ struct LibplaceboVideoRenderer::Impl
 		activeSettings = settings;
 		++activeSettingsGeneration;   // WP-24: the repeat key's settings generation
 		UpdatePipelineSlots(settings);
-		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
-		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
-		dvGpuWanted.store(settings.dvTunnelGpuUnpack, std::memory_order_release);
-		earlyWanted.store(settings.captureUpload == "early", std::memory_order_release);
-		earlyAuto.store(settings.captureUpload == "auto", std::memory_order_release);
-		earlyEfficiency.store(settings.efficiencyFixes, std::memory_order_release);   // modularity 2026-10-25
         displayRepeatValid = false;
         displayVsyncClock.Reset();
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
@@ -12188,9 +12170,6 @@ struct LibplaceboVideoRenderer::Impl
         displayRepeatValid = false;
         displayVsyncClock.Reset();
         displayCadenceTransition.OutputChanged();
-		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
-		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
-		dvGpuWanted.store(settings.dvTunnelGpuUnpack, std::memory_order_release);
 		{
 			// dv_tunnel_fixes, live (restore switch 2026-10-17).
 			std::lock_guard<std::mutex> formatterGuard(formatterMutex);
@@ -12202,9 +12181,6 @@ struct LibplaceboVideoRenderer::Impl
 					DebugLog::Log("Dolby Vision RGB tunnel: bug-hunt fixes %s (dv_tunnel_fixes)", settings.dvTunnelFixes ? "on" : "off");
 				}
 		}
-		earlyWanted.store(settings.captureUpload == "early", std::memory_order_release);
-		earlyAuto.store(settings.captureUpload == "auto", std::memory_order_release);   // live too (audit 2026-10-16)
-		earlyEfficiency.store(settings.efficiencyFixes, std::memory_order_release);   // modularity 2026-10-25
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
         calibrationStatusAvailable = false;
 		sdrTargetNits = settings.sdrTargetNits;
@@ -27575,8 +27551,10 @@ releaseDriftBaseRetention =
 		std::lock_guard<std::mutex> guard(renderMutex);
 		return d3d11 && pl_gpu_is_failed(d3d11->gpu);
 	}
+	Vpv::Capture::HostBinding captureBinding{ this, Vpv::Capture::MakeCaptureHost(*this) };   // VPV-HOOK P10: last member (registered last, removed first)
 };
 #include <VP-V/modules/motion/estimation/VectorEngineEstimate.inl>   // VPV-HOOK P5a-5: the estimate and the engine keeper (Impl members)
+#include <VP-V/modules/input/capture/CaptureImpl.inl>   // VPV-HOOK P10: the capture code (Impl members)
 
 
 namespace
