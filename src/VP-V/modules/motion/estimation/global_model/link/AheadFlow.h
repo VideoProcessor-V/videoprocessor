@@ -50,6 +50,7 @@ namespace CameraLink
 		NoPair,        // FlowOf false (no producer, low latency, pair not computed / pruned / invalidated, size unknown)
 		Incomplete,    // the view has no backward vectors or no forward costs: the engine trust cannot be computed (never guessed)
 		Layout,        // the view's layout is inconsistent (units, cell size, grid) or does not cover the camera's 16-px source grid
+		EpochMoved,    // G-A3: the engine's vectors-valid epoch changed around FlowOf (read before and after): the provenance is unknown
 	};
 
 	inline const char* Text(AheadRefusal r)
@@ -60,6 +61,7 @@ namespace CameraLink
 		case AheadRefusal::NoPair: return "no ahead pair";
 		case AheadRefusal::Incomplete: return "ahead pair without backward vectors or costs";
 		case AheadRefusal::Layout: return "ahead pair layout does not cover the source grid";
+		case AheadRefusal::EpochMoved: return "the vectors-valid epoch moved during FlowOf";
 		}
 		return "?";
 	}

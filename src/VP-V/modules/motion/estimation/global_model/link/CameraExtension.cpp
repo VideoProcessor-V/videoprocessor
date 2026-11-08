@@ -229,13 +229,19 @@ namespace Vpv
 			// the forward vectors and costs, one engine cell = cellEnginePx x enginePxToSource source px, usable at ambiguity < 0.9).
 			CameraLink::AheadRefusal TakeAhead(VpMotion::IVectorEngine& engine, uint64_t seq, CameraLink::AheadCopy& out)
 			{
+				// G-A3 (audit F1): the epoch is read BEFORE and AFTER FlowOf; FieldEra may move from another thread in between, and then the pair's
+				// provenance is unknown: refused and counted (aheadEpochRace), never stamped with a guess.
+				const uint64_t e0 = engine.FieldEra();
 				VpMotion::FlowView v;
 				if (!engine.FlowOf(seq, v))
 					return CameraLink::AheadRefusal::NoPair;
+				const uint64_t e1 = engine.FieldEra();
+				if (e0 != e1)
+					return CameraLink::AheadRefusal::EpochMoved;
 				const CameraLink::AheadRefusal r = CameraLink::CopyAhead(v, seq, out);
 				if (r != CameraLink::AheadRefusal::None)
 					return r;
-				out.epoch = engine.FieldEra();   // G-A3: the P2 provenance (the epoch FlowOf just served the pair under; same render-thread call)
+				out.epoch = e0;
 				float g[4] = {}, second[4] = {};
 				MotionAhead::FlowGlobal(out.forward, out.forwardCost, out.gridW, out.gridH, g, second);
 				out.globalValid = g[3] > 0.5f && g[2] < 0.9f;

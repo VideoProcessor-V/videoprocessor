@@ -74,6 +74,7 @@ namespace CameraLink
 		std::atomic<uint64_t> p2RefusedClaim{ 0 };   // G-A3: ahead fits refused at the claim (the P2 epoch moved after FlowOf)
 		std::atomic<uint64_t> p2RefusedSeal{ 0 };    // ... rejected at the on-time seal
 		std::atomic<uint64_t> p2RefusedUse{ 0 };     // ... refused at a consumer read
+		std::atomic<uint64_t> aheadEpochRace{ 0 };   // G-A3: FlowOf answered while the vectors-valid epoch moved (refused at the copy)
 	};
 
 	// AHEAD FIT: the visible state (Ctrl+I line, Config status, Ctrl+Alt+D). `target` says where an on-time result can go ("" = none).
@@ -82,11 +83,12 @@ namespace CameraLink
 		char b[800];
 		std::snprintf(b, sizeof(b), "camera ahead fit: %llu on time, %llu bridged (%llu ahead fits late for the on-time seal, %llu from the seed: no ahead pair), "
 			"%llu late, %llu rejected after the publish (resync), %llu refused at use; no pair %llu, incomplete %llu, layout %llu; "
-			"P2 provenance refused at claim / seal / use %llu / %llu / %llu; on-time target: %s",
+			"P2 provenance refused at copy / claim / seal / use %llu / %llu / %llu / %llu; on-time target: %s",
 			(unsigned long long)c.onTimeSealed.load(), (unsigned long long)(c.aheadBridged.load() + c.aheadSeedFallback.load()),
 			(unsigned long long)c.aheadBridged.load(), (unsigned long long)c.aheadSeedFallback.load(), (unsigned long long)c.aheadLate.load(),
 			(unsigned long long)c.onTimeRejected.load(), (unsigned long long)c.staleAtUse.load(), (unsigned long long)c.aheadNoPair.load(),
-			(unsigned long long)c.aheadIncomplete.load(), (unsigned long long)c.aheadLayout.load(), (unsigned long long)c.p2RefusedClaim.load(),
+			(unsigned long long)c.aheadIncomplete.load(), (unsigned long long)c.aheadLayout.load(), (unsigned long long)c.aheadEpochRace.load(),
+			(unsigned long long)c.p2RefusedClaim.load(),
 			(unsigned long long)c.p2RefusedSeal.load(), (unsigned long long)c.p2RefusedUse.load(), target.empty() ? "none" : target.c_str());
 		return b;
 	}

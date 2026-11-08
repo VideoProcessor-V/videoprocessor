@@ -594,7 +594,28 @@ namespace VideoProcessorTest
 			Assert::IsTrue(core.SealedRecord(3) == nullptr);
 			std::vector<std::string> lines;
 			core.CollectStatus(lines);
-			Assert::IsTrue(Has(lines, "P2 provenance refused at claim / seal / use 1 / 1 / 0"), L"shown");
+			Assert::IsTrue(Has(lines, "P2 provenance refused at copy / claim / seal / use 0 / 1 / 1 / 0"), L"shown");
+		}
+
+		// Audit F1: a source that saw the epoch move around FlowOf refuses the pair (EpochMoved), counted once per frame, never submitted.
+		TEST_METHOD(AnEpochThatMovesAroundFlowOfRefusesThePair)
+		{
+			CameraLinkTest::Rig bridge;
+			FrameAnalysis::Store store;
+			CameraLink::CameraLinkCore core(store);
+			CameraLink::CameraLinkSettings s;
+			s.p7Wanted = true;
+			s.aheadFit = true;
+			core.OnSettings(s);
+			core.SetAheadSource([](uint64_t, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::EpochMoved; }, CameraLink::PairFactsProvider());
+			core.SetAheadGrid(120, 68);
+			core.AttachGraph(bridge.table.get(), bridge.bytes.get(), bridge.indicator.get());
+			CameraLink::FramePhaseFacts f;
+			f.seq = f.renderSeq = 9;
+			core.OnFrameStart(f);
+			core.OnPostSubmitGap();
+			Assert::AreEqual(uint64_t(1), core.Counters().aheadEpochRace.load(), L"counted once for the frame");
+			Assert::AreEqual(uint64_t(0), core.Counters().aheadSubmitted.load());
 		}
 
 		TEST_METHOD(TheP2ProvenanceIsCheckedAtAConsumerRead)

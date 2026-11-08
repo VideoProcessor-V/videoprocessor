@@ -300,7 +300,8 @@ namespace CameraLink
 				if (m_aheadRefusedSeq != seq)
 				{
 					m_aheadRefusedSeq = seq;   // counted once per frame; the frame takes the seed when the render reaches it
-					(r == AheadRefusal::Incomplete ? m_counters.aheadIncomplete : m_counters.aheadLayout).fetch_add(1, std::memory_order_relaxed);
+					(r == AheadRefusal::Incomplete ? m_counters.aheadIncomplete : r == AheadRefusal::EpochMoved ? m_counters.aheadEpochRace :
+						m_counters.aheadLayout).fetch_add(1, std::memory_order_relaxed);
 				}
 				break;
 			}
