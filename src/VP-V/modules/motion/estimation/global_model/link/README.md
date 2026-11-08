@@ -16,14 +16,17 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 | K1-5 | `CameraFitProducer.*`, `CameraFitWorker.*` | `ILaneProducer` for P7; the one worker thread; never `BindFitter` (F2): the reader only bumps atomics |
 | K1-6 | `CameraLinkCore.*`, `CameraFitStatus.h` | phases as plain methods, status, `camera.no_model.*` ids, `VP_CAMERA_FIT_TRACE` |
 | K2 | `CameraLabelPack.h`, `CameraLabelProducer.*`, `CameraLabelFill.*`, `CameraConsumerBinding.*` | P8 upload / compute (one unit), lane / live fill, per-consumer binding |
-| K4 | `CameraGuideProduct.h`, `GuidanceScheduler.*`, `GuidanceGovernor.h`, `GuidanceCountsRing.*`, `MotionBenchWriter.h` | `p7g_camera_guide`, refusal gate, hook, governor, counts readback, `VP_MOTION_BENCH` |
+| K4 | `CameraGuideProduct.h`, `GuidanceScheduler.*`, `GuidanceGate.h`, `GuidanceGovernor.h`, `GuidanceCountsRing.*`, `MotionBenchWriter.h` | `p7g_camera_guide`, refusal gate, hook, governor, counts readback, `VP_MOTION_BENCH` |
+| K4 wiring (prepared before P5a) | `GuidanceLag.h`, `GuideLaneJob.*`, `GuidanceContext.h`, `GuidanceStatus.h`, `GuidanceTimers.h`, `GuidanceBracket.h` | measured `d`, the guide lane job, the `PairContext` provider + flow resampler, skeleton-visible status, `motion.*` PassTimers rows, the two-line bracket around `Estimate` |
 
 ## Skeleton products declared
 
 * P7 camera fit, P8 camera labels, P9 camera smoothed: K0 (`core/Products.h`). P8 is RGBA32F, 16 B per 16x16 block.
-* `p7g_camera_guide` (D-K3): `CameraGuideProduct.h`. Cpu, T0, inputs P7 at lag d and P4 at lag 0, 20 B per block. It is **not** in
-  `SkeletonProducts()` / `ProductRows()` yet (those tables are pinned by the catalog tests): `SkeletonProductsWithGuide(d)` and
-  `GuideRow()` are the integration surface; the wiring step adds it to the assembly and the catalog in one commit.
+* `p7g_camera_guide` (D-K3): `CameraGuideProduct.h`. Cpu, T0, inputs P7 at lag d and P4 at lag 0, 20 B per block. It is REGISTERED
+  (id 20, `core/Products.h`, with the floor lag 2) and has its catalog row and the "camera guidance" consumer; the tests pin the
+  declaration (`GuideProductTests`, `ProductCatalogTests`). `SkeletonProductsWithGuide(d)` sets the measured d on a graph rebuild;
+  d comes from `GuideLagMeter` (`GuidanceLag.h`): p95 of the fit cost (`CameraMotion::costMicros`) + the readback latency, over the
+  measured source period; the floor when nothing is measured or the run is deterministic.
 * Unit version: `kCameraUnitVersion` covers the fit, the labels (both modes) and the guide.
 
 ## Private history: justification (TEAM-RULES "skeleton first")
@@ -52,6 +55,37 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 * **Status holds**: each `camera.no_model.*` event engages its id for 0.5 s of measured time (frame period), then releases;
   `camera.no_model.queue` reports queue-full drops.
 * **Binding**: the per-consumer define and the sampler follow the policy, never P8 presence; a 1x1 dummy is bound with `camera_enabled = 0`.
+
+## K4 wiring prepared before P5a (2026-11-07)
+
+Everything the guided matcher needs on the VP side exists and is CPU-tested (`GuidanceWiringTests`); what is left is the host call
+site and the adapter lines, written as a ready patch and a cookbook (`D:\codex\videoprocessor\r1cam-k4prep-callsite.patch`,
+`...-callsite-cookbook.md`).
+* **One gate, one unit.** `GuidanceRefusal()` (`GuidanceGate.h`) judges every pair: all switches off, record late, slip / ancient
+  stamp, `!Usable`, confidence < 0.7 (0.85 when the static gate is the only switch). `BuildGuide()` calls it for the lane and for the
+  live fill. Every refusal is counted per reason (`GuidanceScheduler::Counters`) and shown.
+* **Lane job.** `CameraLinkCore::SetFitDoneObserver` fires on the fitting thread after the publish; `GuideLaneJob::OnFitDone(seq)` wants
+  pair `seq + d`, `Pump()` stores it through `TryPublishLane` once the record and P4(N) (the `P4Reader`) are there (`NotReady` stays
+  wanted). A lane result built after the render asked is discarded and counted. Lane == live byte for byte (`GuideProductTests`,
+  `GuidanceWiringTests`).
+* **Status through the skeleton.** `GuidanceScheduler::CollectDecisions()` returns FallbackCatalog Decisions
+  (`camera.guidance.escalations_high`, `.refused`, `.narrow_idle`), the same path as `camera.no_model.*`. Nothing camera-private.
+* **Costs through the skeleton's pass-timer path.** `MotionTimerRows()` turns the completed `TakePassGpuMs()` map into the rows
+  `motion.estimate`, `motion.guided_pass`, `motion.block_search`, `motion.d1` for `PassTimerHook::AddGpuGroups`. The governor itself
+  trips on escalation counts; a per-consumer measured-cost feed into a governor does not exist in the skeleton yet (MV7 item).
+* **No new keys.** The measurement switches are plain `MeasurementSwitches` inputs (`GuidanceSettings`); K3 supplies the
+  `vector_*` keys. Off: nothing is created, bound or dispatched.
+* **NVOF seed mode stays primary; guidance never drops a seed.** What each switch does there (DejudderWarp.cpp, `Estimate`):
+
+| Switch | Seed mode (engine seeds the refinement) | Without the engine seeding |
+|---|---|---|
+| `modelGlobal` | replaces the engine's whole-frame D1 value when confident; saves work only when the engine's global was unclear (the global search is skipped) | skips the D1 search |
+| `guidedCandidate` | no effect: CPU plan only, no GPU path yet (shown as "not applied") | same |
+| `narrowWindow` | idle: `narrowDroppedEngine`, shown as "engine field used, narrow idle" (`camera.guidance.narrow_idle`) | the guided narrow pass before the block search |
+| `e1Skip` | runs on the engine's seeds: blocks agreeing with the model skip the second sweep; seeds stay | runs on the first sweep |
+| `staticGate` | the E4 flag reaches the refinement | also the block search |
+| `cutSkip` / `flashBridge` | the whole pair is skipped, the seeds with it (by design: nothing is searched across a cut) | same |
+| `fadeNormalised` | cost normalisation of the E1 check only | narrow pass and E1 check |
 
 ## Rules this code follows
 
@@ -86,6 +120,9 @@ a second. The rows below remain the plan for the full wiring.
 | settings change | `OnSettings(...)`, `AttachGraph(...)` on a graph rebuild, `CameraLabelProducer` mode from `ChooseLabelMode` |
 | `CollectStatus` | `CollectStatus(lines)` + `CollectDecisions()` into the fallback registry |
 | `QueryInterface("vpv.camera.v1")` | `Link()` |
+| graph rebuild | `GuideLagMeter::Lag(sourcePeriod, deterministic)` -> `GuidanceScheduler::SetLag(d)` + `SkeletonProductsWithGuide(d)` |
+| camera adapter, once the engine exists | `GuidanceScheduler` + `CameraGuidanceHook` + `GuidanceCountsRing(gpu)` + `GuideLaneJob`; `core.SetFitDoneObserver([&](uint64_t s) { job.OnFitDone(s); job.Pump(); })`; `sched.SetContextProvider(MakeContextProvider(engine, link, p4Reader, lag))`; `engine->SetPreEstimateHook(&hook)`; per frame `hook.Poll()` and `job.Pump()`; decisions from `sched.CollectDecisions()` into the fallback registry |
+| `Estimate` / `EstimateAhead` (P5a) | `BeforeGuidedEstimate` / `AfterGuidedEstimate` (`GuidanceBracket.h`), see the cookbook |
 | Indicator setup | `RegisterReader(indicator)` |
 | P5a engine | `SetEngine(IVectorEngine*)`, `engine->SetPreEstimateHook(&CameraGuidanceHook)` |
 
