@@ -82,11 +82,22 @@ namespace VpMotion
 		// Query(kVectorEngineQueryId) answers with (until destruction). Default: unregistered (tests).
 		VectorEngine() {}
 		explicit VectorEngine(const void* host);
+		// P5a-rest (items j, k): the host's own invalidation request (the renderer's RequestMotionInvalidate: the
+		// validity epoch AND the frame-analysis store's shared epoch), called by RequestInvalidationFor. Fixed at
+		// construction (never changes). Null: the engine invalidates its own validity state only (tests).
+		using InvalidateSink = void (*)(const void* host, MotionValidity::Cause cause);
+		VectorEngine(const void* host, InvalidateSink sink);
 		~VectorEngine() override;
 		VectorEngine(const VectorEngine&) = delete;
 		VectorEngine& operator=(const VectorEngine&) = delete;
 		// The process-wide host -> engine directory (never destroyed: a renderer may outlive static teardown).
 		static IVectorEngineDirectory& Directory();
+		// P5a-rest (items j, k; R9 OnQueue): an invalidation request for the newest engine registered under `host`,
+		// from any thread (UI: Reset / ResetLiveQueue; render loop: the dequeue's gap, file discontinuity, format
+		// change). For a Gap, gapDetail (a static string, may be null) is stored first, as the old dequeue code did,
+		// for the invalidation log; other causes leave the stored detail alone. Runs under the directory's lock (a leaf lock: the sink only moves the two epochs), so
+		// the engine cannot go meanwhile. False = no engine for `host` (nothing requested).
+		static bool RequestInvalidationFor(const void* host, MotionValidity::Cause cause, const char* gapDetail);
 
 		// What the producer plan reads from the renderer, as plain values. The two atomics are read
 		// at the points the old inline block read them (low latency first, the queue depth after the
@@ -256,6 +267,7 @@ namespace VpMotion
 		FallbackCatalog::Decision ReleaseHookFailures();
 
 		const void* host_ = nullptr;
+		InvalidateSink invalidateSink_ = nullptr;
 		const IMatcherView* matcher_ = nullptr;
 		std::atomic<IPreEstimateHook*> preEstimateHook_{ nullptr };
 		struct FieldRecord { uint64_t from = 0, to = 0, epoch = 0; };

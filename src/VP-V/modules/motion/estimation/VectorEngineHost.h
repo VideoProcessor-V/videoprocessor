@@ -33,4 +33,14 @@ namespace VpMotion
 
 	template<class Impl>
 	VectorEngineImplHost<Impl> MakeVectorEngineHost(Impl& impl) { return VectorEngineImplHost<Impl>(impl); }
+
+	// P5a-rest (items j, k): the engine's invalidation sink for the renderer (VectorEngine::InvalidateSink). The
+	// host key IS the renderer's Impl (`vectorEngine{ this, &InvalidateHost<Impl> }`), so the request reaches the
+	// Impl's own RequestMotionInvalidate (the validity epoch and the frame-analysis store), exactly as the
+	// direct calls did. Any thread (as RequestMotionInvalidate).
+	template<class Impl>
+	void InvalidateHost(const void* host, MotionValidity::Cause cause)
+	{
+		static_cast<Impl*>(const_cast<void*>(host))->RequestMotionInvalidate(cause);
+	}
 }

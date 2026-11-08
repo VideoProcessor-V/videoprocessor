@@ -296,9 +296,11 @@ namespace Vpv
 				return;
 			switch (f.kind)
 			{
-			case RE::QueueEvent::Reset:
-			case RE::QueueEvent::LiveQueueReset:
 			case RE::QueueEvent::Flush:
+				// Only the Flush: Reset / LiveQueueReset (P5a-rest, the motion invalidation requests at the top of
+				// Reset / ResetLiveQueue, before the generation exists) are followed by this Flush from
+				// BeginQueueGeneration, which carries the generation, capacity and reason; before P5a-rest they were
+				// never raised, so arming on the Flush alone is today's behaviour.
 				// BeginQueueGeneration (queue mutex held): arm the generation's FULL by its reason and keep the
 				// real capacity for the ring (G5); the ring is resized on the render thread at the next seal.
 				if (f.frames != 0)

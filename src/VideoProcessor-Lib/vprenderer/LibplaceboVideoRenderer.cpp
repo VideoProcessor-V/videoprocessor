@@ -6384,7 +6384,7 @@ struct LibplaceboVideoRenderer::Impl
 	// VpMotion::VectorEngineState; the aliases keep every reader outside P5a's ranges unchanged. Each alias
 	// is deleted by the package that moves its last reader (VP-V/modules/motion/estimation/HOOKS.md).
 	// VPV-HOOK
-	VpMotion::VectorEngine vectorEngine{ this };   // registered for IVectorEngine (vpv.vector_engine.v1) under this host
+	VpMotion::VectorEngine vectorEngine{ this, &VpMotion::InvalidateHost<Impl> };   // registered for IVectorEngine (vpv.vector_engine.v1) under this host; queue-event invalidations reach RequestMotionInvalidate
 	VectorDemand::Decision& vectorDemand = vectorEngine.vectorDemand;
 	std::atomic<int>& queueAheadCapacity = vectorEngine.queueAheadCapacity;
 	std::atomic<bool>& motionAheadBackward = vectorEngine.motionAheadBackward;
@@ -6407,7 +6407,6 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<unsigned long long>& motionHandoffCount = vectorEngine.motionHandoffCount;
 	uint64_t& motionInvalidations = vectorEngine.motionInvalidations;
 	bool& motionRecoveryLogPending = vectorEngine.motionRecoveryLogPending;
-	std::atomic<const char*>& motionGapDetail = vectorEngine.motionGapDetail;
 	// P5a-5: the estimate state (item a; VP-V/modules/motion/estimation/EstimateState.h).
 	VpMotion::EstimateState<QueuedFrame::ConvertedPayload> vectorEstimate{ vectorEngine };
 	pl_tex (&dejudderNextTextures)[2] = vectorEstimate.dejudderNextTextures;
@@ -29550,7 +29549,7 @@ void LibplaceboVideoRenderer::Reset()
 		// opening the new generation, so its first admitted frame cannot present
 		// with geometry from the discarded generation.
 		m_impl->RequestPresentationStateReset();
-		m_impl->RequestMotionInvalidate(MotionValidity::Cause::Resync);
+		RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Reset, m_impl.get()); // VPV-HOOK: motion invalidation (resync)
 		m_impl->motionLastStateReset.store(true, std::memory_order_release);
 		// Stage 12: a resync or source change - the resolution evidence belongs to what came before.
 		m_impl->sourceMonitor.Discontinuity("resync or source change");
@@ -29593,7 +29592,7 @@ void LibplaceboVideoRenderer::ResetLiveQueue()
 	{
 		m_impl->RequestPresentationStateReset(QueueNativeResetKind::QUEUE_ONLY);
 		// The discarded frames break the sequence: no pair or history across it.
-		m_impl->RequestMotionInvalidate(MotionValidity::Cause::QueueReset);
+		RendererExtension::NotifyQueue(RendererExtension::QueueEvent::LiveQueueReset, m_impl.get()); // VPV-HOOK: motion invalidation
 		// The last frame's video state is kept: QueueReset does not release, so a format
 		// change across this reset still releases (SourceFormatChange).
 		m_impl->sourceMonitor.Discontinuity("live queue reset (seek or skip)");
@@ -33520,16 +33519,13 @@ void LibplaceboVideoRenderer::RenderLoop()
 				m_activePictureTimeline.MarkConsumed(
 					dequeued.activePictureIdentity);
 			if (dequeued.gapBefore && m_impl)
-			{
-				m_impl->motionGapDetail.store(dequeued.gapCause, std::memory_order_relaxed);   // why, for the log
-				m_impl->RequestMotionInvalidate(MotionValidity::Cause::Gap);
-			}
+				RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Gap, m_impl.get(), -1, 0, 0, 0, dequeued.gapCause); // VPV-HOOK: motion invalidation, the gap's cause for the log
 			// ABI 37: a file discontinuity (seek, frame step, rate change) is a source
 			// discontinuity at this frame: the one vectors-valid state and the resolution
 			// evidence start over, as on a capture resync.
 			if (dequeued.fileDiscontinuity && m_impl)
 			{
-				m_impl->RequestMotionInvalidate(MotionValidity::Cause::Seek);
+				RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Discontinuity, m_impl.get()); // VPV-HOOK: motion invalidation (seek)
 				m_impl->sourceMonitor.Discontinuity("file discontinuity (seek, step or rate change)");
 			}
 			// A format change without a reset (normally a Reset comes first: then this is
@@ -33538,7 +33534,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 				motionLastState = nullptr;
 			if (m_impl && motionLastState && state && motionLastState->valid && state->valid &&
 				!SameDejudderVideoState(motionLastState, state))
-				m_impl->RequestMotionInvalidate(MotionValidity::Cause::SourceFormatChange);
+				RendererExtension::NotifyQueue(RendererExtension::QueueEvent::FormatChange, m_impl.get()); // VPV-HOOK: motion invalidation
 			if (state)
 				motionLastState = state;
 			m_frameQueue.pop_front();

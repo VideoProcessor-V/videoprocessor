@@ -14,12 +14,14 @@
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/motion/estimation/VectorEngineExtension.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
+#include <vprenderer/RendererExtension.h>
 
 #include <VP-V/core/Indicator.h>
 
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -29,6 +31,14 @@ namespace VectorEngineHookTest
 {
 	namespace
 	{
+		// P5a-rest: the recorded invalidation sink calls (host key, cause).
+		std::vector<std::pair<const void*, MotionValidity::Cause>>& SinkCalls()
+		{
+			static std::vector<std::pair<const void*, MotionValidity::Cause>> calls;
+			return calls;
+		}
+		void RecordSink(const void* host, MotionValidity::Cause cause) { SinkCalls().emplace_back(host, cause); }
+
 		// The matcher surface the engine's Estimate touches (MotionWarp's names and shapes). `calls` records the calls
 		// that change what the matcher does (bind, estimate); `reads` the read-only queries.
 		struct FakeMatcher
@@ -508,6 +518,61 @@ namespace VectorEngineHookTest
 			Assert::IsTrue(VpIndicator::SameFor(expected, field.stamp, ~VpIndicator::CounterMask(0)));
 			engine.motionValidity.Unbind();
 			engine.BindMatcher(nullptr);
+		}
+
+		// P5a-rest (items j, k; R9): the renderer's queue events reach its own invalidation request with the causes the
+		// direct calls used, in the order raised; a gap stores its detail first (null too, as the old dequeue code did),
+		// other causes leave it; Flush / Drop request nothing; an unknown host requests nothing.
+		TEST_METHOD(QueueEventsRequestTheOldInvalidationCausesInOrder)
+		{
+			int host = 0, other = 0;
+			SinkCalls().clear();
+			VectorEngine engine(&host, &RecordSink);
+			VectorEngineExtension extension;
+			auto raise = [&](RendererExtension::QueueEvent kind, const void* key, const char* text) {
+				RendererExtension::QueueFacts f;
+				f.host = key;
+				f.kind = kind;
+				f.text = text;
+				extension.OnQueue(f);
+			};
+			using QE = RendererExtension::QueueEvent;
+			raise(QE::Reset, &host, nullptr);
+			raise(QE::LiveQueueReset, &host, nullptr);
+			raise(QE::Gap, &host, "missed frames");
+			Assert::AreEqual(std::string("missed frames"), std::string(engine.motionGapDetail.load()));
+			raise(QE::Discontinuity, &host, nullptr);
+			raise(QE::FormatChange, &host, nullptr);
+			Assert::AreEqual(std::string("missed frames"), std::string(engine.motionGapDetail.load()), L"only a gap stores the detail");
+			raise(QE::Flush, &host, "renderer reset");
+			raise(QE::Drop, &host, nullptr);
+			raise(QE::Gap, &other, "not ours");
+			raise(QE::Gap, &host, nullptr);
+			Assert::IsTrue(engine.motionGapDetail.load() == nullptr, L"a gap without a cause stores null");
+			const std::vector<MotionValidity::Cause> expected = { MotionValidity::Cause::Resync, MotionValidity::Cause::QueueReset,
+				MotionValidity::Cause::Gap, MotionValidity::Cause::Seek, MotionValidity::Cause::SourceFormatChange,
+				MotionValidity::Cause::Gap };
+			Assert::AreEqual(expected.size(), SinkCalls().size());
+			for (size_t i = 0; i < expected.size(); ++i)
+			{
+				Assert::IsTrue(SinkCalls()[i].first == &host, L"the sink gets the engine's host key");
+				Assert::IsTrue(SinkCalls()[i].second == expected[i]);
+			}
+			Assert::IsFalse(VectorEngine::RequestInvalidationFor(nullptr, MotionValidity::Cause::Gap, nullptr));
+			Assert::IsFalse(VectorEngine::RequestInvalidationFor(&other, MotionValidity::Cause::Gap, nullptr));
+		}
+
+		// Without a sink (tests, a host that gives none) the engine's own validity state takes the request.
+		TEST_METHOD(AQueueEventWithoutASinkMovesTheEnginesOwnEpoch)
+		{
+			int host = 0;
+			VectorEngine engine(&host);
+			const uint64_t before = engine.motionValidity.Epoch();
+			Assert::IsTrue(VectorEngine::RequestInvalidationFor(&host, MotionValidity::Cause::Seek, nullptr));
+			Assert::IsTrue(engine.motionValidity.Epoch() != before);
+			MotionValidity::Pending pending;
+			Assert::IsTrue(engine.TakeInvalidation(pending));
+			Assert::IsTrue(pending.cause == MotionValidity::Cause::Seek);
 		}
 	};
 }
