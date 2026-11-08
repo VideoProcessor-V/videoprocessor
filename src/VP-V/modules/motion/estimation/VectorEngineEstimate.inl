@@ -353,6 +353,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		else
 			++vectorEngine.motionGapUnseeded;
 	}
+	SyncFallback(vectorEstimate.SnapshotLeaseDecision(GetTickCount64()));   // SK-MV: a lost snapshot lease is shown while recent
 	dejudder->SetFieldSource(&vectorEstimate);   // SK-MV pass-through (TEMPORARY until P5c): Field/FrameTrust/SubField read the shared view
 	dejudderLiveFieldFrom = 0;   // the live outputs are being replaced
 	motionSegment.Retract(VpMotion::Direction::Forward);
@@ -378,7 +379,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	dejudderLiveFieldFrom = aSequence;
 	if (pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery))
 		motionSegment.Publish(VpMotion::Direction::Forward, aSequence, bSequence,
-		MotionShadowField{ aSequence, bSequence, dejudder->Field(), dejudder->FrameTrust(), dejudder->SubField(), dejudder->Camera() },   // SK-MV: P3 (+P2/P2m by the source) published with its textures
+		MotionShadowField{ aSequence, bSequence, dejudder->Field(), dejudder->FrameTrust(), dejudder->SubField(), dejudder->Camera(), dejudder->GrainError() },   // SK-MV: P3 (+P2/P2m by the source) published with its textures
 		dejudder->ExternalFlowUsed() ? VpMotion::Source::EngineAhead : VpMotion::Source::Matcher,   // SK-MV: no render-time engine (EngineAtRender is unreachable)
 		motionShadowEpoch, 0, bSequence != aSequence + 1);
 	if (motionEngineWarming)

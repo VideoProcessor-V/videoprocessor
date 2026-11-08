@@ -139,6 +139,14 @@ namespace FallbackCatalogTest
 			Assert::IsTrue(Has(TdMotionSource(true, "no pair computed ahead"), "no pair computed ahead"), L"TD's absent motion is visible with its reason");
 			Assert::IsFalse(MotionEnginePressure(false).engaged);
 			Assert::IsTrue(Has(MotionEnginePressure(true), "standing optical-flow demand is dropped"), L"dropping the standing demand is visible");
+			{
+				SnapshotLeaseNotes notes;
+				Assert::IsFalse(notes.Note(1000, 0).engaged, L"no lost read: released");
+				Assert::IsTrue(Has(notes.Note(2000, 3), "replaced or invalidated"), L"a lost snapshot lease is visible with its count");
+				Assert::IsTrue(notes.Note(2000 + 4999, 3).engaged, L"still shown while recent");
+				Assert::IsFalse(notes.Note(2000 + 5000, 3).engaged, L"released after the hold without a new lost read");
+				Assert::IsTrue(notes.Note(9000, 4).engaged, L"a new lost read engages it again");
+			}
 			// The one-engine guard's entry.
 			Assert::IsFalse(NvofSessions(0, 0).engaged);
 			Assert::IsFalse(NvofSessions(1, 0).engaged, L"one session per GPU is the rule");

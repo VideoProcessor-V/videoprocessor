@@ -351,16 +351,37 @@ namespace Dejudder
 	// camera: the warp binds `camera` (MotionWarp::Camera()) for R-B.
 	std::string WarpHeader(const Settings& settings, bool split, bool camera = false);
 
-	// SK-MV pass-through (TEMPORARY until P5c): where the renderer reads the matcher's LIVE field set through the SHARED view (the motion
+	// SK-MV pass-through (TEMPORARY until P5c): where the renderer reads the matcher's field set through the SHARED view (the motion
 	// segment's published pair) instead of through the matcher's members. Optional: unbound (the default, every test, the Original pathway)
-	// the accessors return their own members, byte-identical. Render thread only; the pointers are valid until the next estimate.
+	// the accessors return their own members, byte-identical. Render thread only; the pointers are valid until the next estimate (live set)
+	// or until the next snapshot (snapshot set, held by a generation lease: see SnapshotLease below).
 	class IFieldSource
 	{
 	public:
+		// ONE pair's set: every accessor answers from the same Set, so the field, the trust, the sub-field and the grain map always come
+		// from the same pair (from, to are that pair's source sequences).
+		struct Set
+		{
+			pl_tex field = nullptr, frameTrust = nullptr, subField = nullptr, grainError = nullptr;
+			uint64_t from = 0, to = 0;
+		};
 		virtual ~IFieldSource() {}
 		// The live set of the last estimated pair when it is published and still valid (epoch current, not retracted); false otherwise
-		// (the accessor then returns its own member). Never null-only: a valid set carries the same textures the members hold.
-		virtual bool LiveFieldSet(pl_tex& field, pl_tex& frameTrust, pl_tex& subField) const = 0;
+		// (the accessor then returns its own member). A valid set carries the same textures the members hold.
+		virtual bool LiveFieldSet(Set& set) const = 0;
+		// The matcher copied the live set into its snapshot textures (SnapshotForWarp, which succeeded): `copies` holds the snapshot
+		// textures (grainError unused) and `generation` is the matcher's snapshot lease generation for that copy (never 0). The source
+		// records the live pair's id with it.
+		virtual void CaptureSnapshot(const Set& copies, uint64_t generation) = 0;
+		// The snapshot captured last, as the matcher asks for it with its CURRENT snapshot generation (0 when the snapshot is being
+		// replaced or failed). None = nothing was ever captured (the accessor returns its member, as unbound). Valid = `set` is the
+		// captured snapshot and the lease still holds. Lost = something was captured but the matcher's snapshot has since changed or been
+		// invalidated: the accessor returns its member AND the source must make that visible (NoteSnapshotLeaseLost).
+		enum class SnapshotState { None, Valid, Lost };
+		virtual SnapshotState SnapshotFieldSet(uint64_t currentGeneration, Set& set) const = 0;
+		virtual void NoteSnapshotLeaseLost() = 0;
+		// A matcher was just bound for the first time: whatever the source captured from a predecessor is not this matcher's (no lease).
+		virtual void ResetSnapshot() = 0;
 	};
 
 	class MotionWarp
@@ -416,8 +437,13 @@ namespace Dejudder
 		// pixels, trust (1/0), match error. One texel per 16x16 source block.
 		// TEMPORARY until P5c (SK-MV pass-through): with a field source bound this is the shared view's pointer for the same pair / epoch
 		// (the same texture as the member), else the member.
-		pl_tex Field() const { pl_tex f = nullptr, t = nullptr, s = nullptr; return fieldSource && fieldSource->LiveFieldSet(f, t, s) ? f : field; }
-		void SetFieldSource(const IFieldSource* source) { fieldSource = source; }
+		pl_tex Field() const { IFieldSource::Set set; return fieldSource && fieldSource->LiveFieldSet(set) ? set.field : field; }
+		void SetFieldSource(IFieldSource* source)
+		{
+			if (source && !fieldSource)
+				source->ResetSnapshot();   // a fresh binding: a snapshot captured from a previous matcher is not this one's
+			fieldSource = source;
+		}
 		// SK-MV hiccup gap seed (VpMotion::GapSeed): the last valid shared pair's whole-frame motion, scaled by the gap, as D1's start for the next
 		// Estimate (a prior only: the blocks' own matches decide). Consumed by that Estimate; never set = the search exactly as before.
 		void SetSearchSeed(const float global[2][4])
@@ -429,11 +455,16 @@ namespace Dejudder
 		void ClearSearchSeed() { searchSeedValid = false; }   // the host clears it after the estimate (an early return must not leak it into the next one)
 		bool SearchSeedUsed() const { return searchSeedUsed; }
 		const IFieldSource* FieldSource() const { return fieldSource; }
+		// SK-MV pass-through: the snapshot LEASE. SnapshotForWarp bumps this to a process-unique non-zero generation when the copies are
+		// complete, and sets it to 0 while they are being replaced (or when the copy failed); a bound source holds the generation it was
+		// told, so a read after the snapshot changed (or was invalidated) is a LOST lease: visible, answered by the member as before.
+		uint64_t SnapshotGeneration() const { return snapGeneration; }
+		void InvalidateSnapshot() { snapGeneration = 0; }
 		// From the last Estimate (1x1): r = the share of trusted blocks,
 		// g = the strength scale (D2/D4; 1 when both are off), b = the mean
 		// trusted |v| in source pixels.
 		// TEMPORARY until P5c: as Field().
-		pl_tex FrameTrust() const { pl_tex f = nullptr, t = nullptr, s = nullptr; return fieldSource && fieldSource->LiveFieldSet(f, t, s) ? t : frameTrust; }
+		pl_tex FrameTrust() const { IFieldSource::Set set; return fieldSource && fieldSource->LiveFieldSet(set) ? set.frameTrust : frameTrust; }
 		// D1: the global vector of the last forward search (1x1): xy in 1/8
 		// resolution texels (source pixels / 8), z = best / second-best match
 		// (the prior is used below 0.9), w = 1 once written.
@@ -475,11 +506,12 @@ namespace Dejudder
 		// field, the frame trust, the sub-field) for the extras still to come,
 		// taken before the next pair is estimated over them.
 		bool SnapshotForWarp();
-		// TEMPORARY until P5c: the Snap* copies are NOT published (the motion segment holds the live set only), so these forward to the
-		// matcher's own members; the renderer's reads of them stay as they are.
-		pl_tex SnapField() const { return snapField; }
-		pl_tex SnapFrameTrust() const { return snapTrust; }
-		pl_tex SnapSubField() const { return snapSubValid ? snapSub : nullptr; }
+		// TEMPORARY until P5c: with a field source bound these return the shared view captured when the snapshot was taken (the pair it
+		// copied), under the snapshot lease; if the lease is lost they return the member AND the source shows it (never silent). Unbound:
+		// the members, byte-identical.
+		pl_tex SnapField() const { return SnapSetRead().field; }
+		pl_tex SnapFrameTrust() const { return SnapSetRead().frameTrust; }
+		pl_tex SnapSubField() const { return SnapSetRead().subField; }
 		pl_tex SnapCamera() const { return snapCamera; }
 		// M6: A's pixel weights (half resolution), nullptr unless pixelTrust.
 		pl_tex PixelMask() const { return settings.pixelTrust && pixelMaskReady ? pixelMask : nullptr; }
@@ -505,8 +537,8 @@ namespace Dejudder
 		// TEMPORARY until P5c: as Field() (the published sub-field was read through this same gate when it was published).
 		pl_tex SubField() const
 		{
-			pl_tex f = nullptr, t = nullptr, s = nullptr;
-			return fieldSource && fieldSource->LiveFieldSet(f, t, s) ? s : (settings.estSplit && estimated ? subField : nullptr);
+			IFieldSource::Set set;
+			return fieldSource && fieldSource->LiveFieldSet(set) ? set.subField : (settings.estSplit && estimated ? subField : nullptr);
 		}
 		// B's occlusion mask (6c), one texel per 16x16 source block of B:
 		// r = 1 where B's content was visible in A (consistent both ways and
@@ -518,7 +550,13 @@ namespace Dejudder
 		// difference (a fade or lighting change is not grain), g = the block's
 		// mean luma, both in 8-bit codes of half-resolution luma. Only
 		// meaningful where Field() trusts the block; null before.
-		pl_tex GrainError() const { return grainErrorValid ? grainError : nullptr; }
+		// SK-MV pass-through (TEMPORARY until P5c): with a field source bound this is the grain map of the SAME shared pair Field() returns
+		// (published with it), else the member.
+		pl_tex GrainError() const
+		{
+			IFieldSource::Set set;
+			return fieldSource && fieldSource->LiveFieldSet(set) ? set.grainError : (grainErrorValid ? grainError : nullptr);
+		}
 		// The raw half-resolution searches (rgba = vector in half-resolution
 		// pixels, match error); for diagnostics.
 		pl_tex Forward() const { return forward; }
@@ -738,7 +776,24 @@ namespace Dejudder
 		// SK-MV hiccup gap seed: D1's start for the NEXT Estimate only (forward, backward; D1 format), then cleared. Unset = today's search.
 		float searchSeed[2][4] = {};
 		bool searchSeedValid = false;
-		const IFieldSource* fieldSource = nullptr;   // SK-MV pass-through (TEMPORARY until P5c); null = the members
+		IFieldSource* fieldSource = nullptr;   // SK-MV pass-through (TEMPORARY until P5c); null = the members
+		uint64_t snapGeneration = 0;   // the snapshot lease (see SnapshotGeneration)
+		IFieldSource::Set SnapSetRead() const
+		{
+			IFieldSource::Set members;
+			members.field = snapField;
+			members.frameTrust = snapTrust;
+			members.subField = snapSubValid ? snapSub : nullptr;
+			if (!fieldSource)
+				return members;
+			IFieldSource::Set captured;
+			switch (fieldSource->SnapshotFieldSet(snapGeneration, captured))
+			{
+			case IFieldSource::SnapshotState::Valid: return captured;
+			case IFieldSource::SnapshotState::Lost: fieldSource->NoteSnapshotLeaseLost(); return members;
+			default: return members;
+			}
+		}
 	public:
 		// The searching instance may be the half-size inner one (lowRes): report it.
 		const std::string& OpticalFlowError() const

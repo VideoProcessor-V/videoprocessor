@@ -238,6 +238,28 @@ namespace FallbackCatalog
 			"optical-flow demand is dropped (the block searches run) until the pressure eases");
 	}
 
+	// SK-MV pass-through (TEMPORARY until P5c): the renderer read the matcher's snapshot (SnapField / SnapFrameTrust / SnapSubField) after
+	// the shared view's snapshot lease was lost (the matcher replaced or invalidated its copies since the view captured them). The read is
+	// answered by the matcher's own copy exactly as before, but it may not be the pair the view captured: never silent. `reads` is the
+	// running count of such reads; the entry is engaged while one is recent (holdMs) and released after, like MotionConsumerFailures.
+	struct SnapshotLeaseNotes
+	{
+		unsigned long long seenReads = 0;
+		unsigned long long lastLostMs = 0;
+		Decision Note(unsigned long long nowMs, unsigned long long reads, unsigned long long holdMs = 5000)
+		{
+			if (reads > seenReads)
+			{
+				seenReads = reads;
+				lastLostMs = nowMs;
+			}
+			if (seenReads == 0 || nowMs - lastLostMs >= holdMs)
+				return Released("motion snapshot");
+			return Engaged("motion snapshot", "the shared motion snapshot was replaced or invalidated before the extras used it (" +
+				std::to_string(seenReads) + " read(s) so far): the matcher's own copy answers, which may belong to a later pair");
+		}
+	};
+
 	// SK-MV runtime one-engine guard (NvOpticalFlow::Sessions): shown while more than one NvOpticalFlow::Engine session is open on one
 	// GPU (the producer owns the only one). `mostOnOneGpu` = the highest open count on any GPU, `violations` = second opens so far.
 	inline Decision NvofSessions(int mostOnOneGpu, unsigned long long violations)

@@ -17,6 +17,7 @@
 // Header for the renderer's translation unit only (it includes the matcher and DXGI); C++14.
 #pragma once
 
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/motion/estimation/MotionEngineIdle.h>
 #include <VP-V/modules/motion/consumers/DejudderAhead.h>
@@ -49,21 +50,76 @@ namespace VpMotion
 		bool MatcherGlobalFromEngine() const override { return dejudder && dejudder->GlobalFromEngine(); }
 
 		// ---- SK-MV pass-through (TEMPORARY until P5c): Dejudder::IFieldSource ----------------------------------
-		// The matcher's Field / FrameTrust / SubField accessors ask this when it is bound (RunDejudderEstimate binds it): the answer is the
-		// motion segment's published live set of the last estimated pair (the same textures the members hold), valid while the epoch is
-		// current and the segment has not been retracted by the next estimate. Otherwise false and the accessor returns its member.
-		bool LiveFieldSet(pl_tex& field, pl_tex& frameTrust, pl_tex& subField) const override
+		// ONE source for the renderer's motion reads when the matcher is bound (RunDejudderEstimate binds it). Live: the motion segment's
+		// published set of the last estimated pair - field, trust, sub-field AND the grain map, one pair id - valid while the epoch is
+		// current and the segment has not been retracted by the next estimate. Snapshot: the shared view captured when the matcher took its
+		// snapshot (the live pair's id with the snapshot textures), held by the matcher's snapshot lease generation: it stays that pair
+		// while the live view advances, and a read after the matcher replaced or invalidated the copies is a LOST lease, which is counted
+		// and shown (FallbackCatalog::MotionSnapshotLease), answered by the matcher's member exactly as before. Otherwise false / None
+		// and the accessor returns its member.
+		bool LiveFieldSet(Dejudder::IFieldSource::Set& set) const override
 		{
 			if (dejudderLiveFieldFrom == 0)
 				return false;
 			const auto d = engine_.motionSegment.PeekFrom(VpMotion::Direction::Forward, dejudderLiveFieldFrom, 0);
 			if (!d || d.field == nullptr || d.field->field == nullptr)
 				return false;
-			field = d.field->field;
-			frameTrust = d.field->frameTrust;
-			subField = d.field->subField;
+			set.field = d.field->field;
+			set.frameTrust = d.field->frameTrust;
+			set.subField = d.field->subField;
+			set.grainError = d.field->grainError;
+			set.from = d.field->from;
+			set.to = d.field->to;
 			return true;
 		}
+		void CaptureSnapshot(const Dejudder::IFieldSource::Set& copies, uint64_t generation) override
+		{
+			snapshotSet_ = copies;
+			snapshotSet_.grainError = nullptr;   // the snapshot has no grain map
+			Dejudder::IFieldSource::Set live;
+			if (LiveFieldSet(live))
+			{
+				snapshotSet_.from = live.from;   // the snapshot copied the live pair: its id
+				snapshotSet_.to = live.to;
+			}
+			else
+			{
+				snapshotSet_.from = dejudderLiveFieldFrom;
+				snapshotSet_.to = 0;
+			}
+			snapshotGeneration_ = generation;
+			snapshotLeaseLost_ = false;   // a complete snapshot again: the loss (if any) is over
+		}
+		Dejudder::IFieldSource::SnapshotState SnapshotFieldSet(uint64_t currentGeneration, Dejudder::IFieldSource::Set& set) const override
+		{
+			if (snapshotGeneration_ == 0)
+				return Dejudder::IFieldSource::SnapshotState::None;
+			if (currentGeneration != snapshotGeneration_)
+				return Dejudder::IFieldSource::SnapshotState::Lost;
+			set = snapshotSet_;
+			return Dejudder::IFieldSource::SnapshotState::Valid;
+		}
+		void NoteSnapshotLeaseLost() override
+		{
+			++snapshotLeaseLostReads_;
+			snapshotLeaseLost_ = true;
+		}
+		void ResetSnapshot() override
+		{
+			snapshotSet_ = Dejudder::IFieldSource::Set();
+			snapshotGeneration_ = 0;
+			snapshotLeaseLost_ = false;
+		}
+		// The loss is visible (FallbackCatalog::MotionSnapshotLease): latched until the next complete snapshot; the count is reads.
+		bool SnapshotLeaseLost() const { return snapshotLeaseLost_; }
+		unsigned long long SnapshotLeaseLostReads() const { return snapshotLeaseLostReads_; }
+		// The "motion snapshot" entry for the host to sync (shown while a lost read is recent, then released).
+		FallbackCatalog::Decision SnapshotLeaseDecision(unsigned long long nowMs)
+		{
+			return snapshotLeaseNotes_.Note(nowMs, snapshotLeaseLostReads_);
+		}
+		// The captured snapshot's pair id (0, 0 = none captured), for the status line and the tests.
+		void SnapshotPair(uint64_t& from, uint64_t& to) const { from = snapshotSet_.from; to = snapshotSet_.to; }
 
 		// ---- SK-MV (MV1): the VP-side view of the matcher's field set ------------------------------------------
 		// One place that reads today's dejudder-> accessors (Field / FrameTrust / SubField / Camera, and the Snap* copies the extras and
@@ -152,5 +208,10 @@ namespace VpMotion
 
 	private:
 		VectorEngine& engine_;
+		Dejudder::IFieldSource::Set snapshotSet_;   // render thread
+		uint64_t snapshotGeneration_ = 0;           // the matcher's snapshot lease generation it was captured under (0 = none)
+		bool snapshotLeaseLost_ = false;
+		unsigned long long snapshotLeaseLostReads_ = 0;
+		FallbackCatalog::SnapshotLeaseNotes snapshotLeaseNotes_;
 	};
 }

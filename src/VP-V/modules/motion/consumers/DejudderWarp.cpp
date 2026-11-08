@@ -15,6 +15,7 @@
 #include <libplacebo/d3d11.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -3087,8 +3088,20 @@ if (li == 0) {
 		return true;
 	}
 
+	namespace
+	{
+		// SK-MV pass-through: snapshot lease generations are unique across matcher instances (a recreated matcher can never match a
+		// generation a source captured from its predecessor). Render thread; atomic for safety only.
+		uint64_t NextSnapshotGeneration()
+		{
+			static std::atomic<uint64_t> counter{ 0 };
+			return ++counter;
+		}
+	}
+
 	bool MotionWarp::SnapshotForWarp()
 	{
+		snapGeneration = 0;   // the copies are being replaced: any lease on the previous snapshot is lost from here
 		snapSubValid = false;
 		if (!estimated || !field || !frameTrust)
 		{
@@ -3126,6 +3139,16 @@ if (li == 0) {
 			if (PixelOwnVectors() && !copy(vectorOk, &snapVectorOk))
 				return false;
 			snapMaskValid = true;
+		}
+		// SK-MV pass-through: the copies are complete. A new lease generation; a bound source captures the shared view of the snapshot.
+		snapGeneration = NextSnapshotGeneration();
+		if (fieldSource)
+		{
+			IFieldSource::Set copies;
+			copies.field = snapField;
+			copies.frameTrust = snapTrust;
+			copies.subField = snapSubValid ? snapSub : nullptr;
+			fieldSource->CaptureSnapshot(copies, snapGeneration);
 		}
 		return true;
 	}
@@ -3277,19 +3300,20 @@ if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) {
 
 	pl_tex MotionWarp::LookAheadTrust()
 	{
-		if (!settings.motionRolloff || !snapTrust || !frameTrust || !estimated)
-			return snapTrust;
-		pl_tex_params params = snapTrust->params;
+		const pl_tex snap = SnapFrameTrust();   // SK-MV pass-through: the snapshot trust through the same lease as the renderer's own read
+		if (!settings.motionRolloff || !snap || !frameTrust || !estimated)
+			return snap;
+		pl_tex_params params = snap->params;
 		params.sampleable = true;
 		params.storable = true;
 		params.host_readable = settings.hostReadable && (params.format->caps & PL_FMT_CAP_HOST_READABLE);
 		if (!pl_tex_recreate(gpu, &aheadTrust, &params))
-			return snapTrust;
+			return snap;
 		const float minShare = settings.minTrustedShare;
 		const pl_shader_var v[1] = { { pl_var_float("min_share"), &minShare, true } };
-		const pl_shader_desc d[3] = { Sampled("snap", snapTrust, false), Sampled("next_trust", frameTrust, false), Storage("dst", aheadTrust) };
+		const pl_shader_desc d[3] = { Sampled("snap", snap, false), Sampled("next_trust", frameTrust, false), Storage("dst", aheadTrust) };
 		return Dispatch("VideoProcessor de-judder: the roll-off ahead (Q7)", nullptr, LOOKAHEAD_TRUST_BODY, d, 3, v, 1, 1, 1, 1) ?
-			aheadTrust : snapTrust;
+			aheadTrust : snap;
 	}
 
 	bool MotionWarp::CopyPair(pl_tex src0, pl_tex dst0, pl_tex src1, pl_tex dst1)

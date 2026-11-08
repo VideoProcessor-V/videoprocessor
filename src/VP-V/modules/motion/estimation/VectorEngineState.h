@@ -132,6 +132,7 @@ namespace VpMotion
 		{
 			uint64_t from = 0, to = 0;
 			pl_tex field = nullptr, frameTrust = nullptr, subField = nullptr, camera = nullptr;
+			pl_tex grainError = nullptr;   // SK-MV pass-through: the grain map of the same pair (null when the estimate did not ask for it)
 		};
 		VpMotion::MotionSegment<MotionShadowField> motionSegment{ &motionValidity };
 		unsigned long long motionShadowChecks = 0, motionShadowMismatches = 0;
