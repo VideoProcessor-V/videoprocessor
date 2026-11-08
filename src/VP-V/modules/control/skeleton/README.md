@@ -47,9 +47,12 @@ No `VP_*` variable changes the module's behaviour.
 * **The one seal:** `ResyncExtension::SealFor(host)` (a `FrameSeal` provider rebinding the lane to each new-era Indicator and a subscriber calling
   `OnSealed`). Needs `resync_event = on`; otherwise `skeleton_lane: waiting: resync_event=on required`. The hooks are added once per renderer;
   switching the lane on after the first frame counts as a late provider (the lane binds at the next era; shown).
+* **Queue phase:** hub `OnFrame(CollectAhead)` (P5a's call site; `phaseData` = `QueueView`) -> the lane-lead term: `QueueView::size` = frames queued
+  ahead of the render. Inert while the lane is off or in the Original pathway.
 * **Render phases:** hub `OnFrame(Begin)` -> `OnRenderStart` (lazy `Configure` once the source size is known / changes; never GPU work here:
   Begin runs before the render lock); `OnFrame(AfterRender)` -> deferred releases + dispatcher `Configure` (GPU-legal) -> post-submit gap (half the
-  measured frame period; skipped and counted while it is unknown) -> `OnFrameRetired`; `OnQueue(Drop)` -> `OnFrameDropped` (applied at the next Begin).
+  measured frame period; skipped and counted while it is unknown) -> `OnFrameRetired`; `AfterRender` also feeds the S5 regulator (`AnalysisLane::OnFrameTiming`,
+  see "Regulator input" below); `OnQueue(Drop)` -> `OnFrameDropped` (applied at the next Begin).
 * **Render device:** `LifecycleFacts::gpu` (the renderer's `pl_gpu`) is stored at `GpuCreated` (per-host aux slot) and read when the dispatcher is
   decided; `LifecycleFacts::device` serves `IDXGIAdapter3::QueryVideoMemoryInfo` at each lane `Configure` (a failure leaves zeros and is shown).
 
@@ -72,14 +75,32 @@ No `VP_*` variable changes the module's behaviour.
 * **Record histories follow the queue (owner ruling 2026-11-07):** the quality-pattern and td trail-summary depths are
   `max(floor seconds, queue multiple x (render-ahead + lane lead + look-ahead frames) x measured source period)`, floors 2.0 s and 0.25 s,
   queue multiple 1 for both today. The three queue terms are one atomic snapshot (`SkeletonModule::PublishQueue`, any thread; the render thread
-  reads it once per frame in `Begin()`), and a change reconfigures the graph at the next frame, as for a moved source period. Only
-  the look-ahead walk is delivered today: the host's `SettingsApplied` lifecycle call carries the motion look-ahead depth in
-  `LifecycleFacts::value` (`motion_ahead_frames`: 0 or the default depth), which `OnLifecycle` publishes (`PublishLookAheadWalk`, one
-  compare-and-swap on the snapshot). The render-ahead depth is the renderer's runtime gate (the cfg key `render_ahead` is only on/off) and the
-  lane lead is not a setting, so this module's inputs (the `[vpv.skeleton]` cfg keys, `QueueFacts`, `FrameContext`) carry neither; a host call
-  site has to publish them (tracked in the handover notes). Until then those two sit at their defaults, the depths at their floors, and
-  Fallbacks says so: `skeleton_queue: record history: queue not yet wired (render-ahead depth, lane lead); floors in use` (it names only the
-  terms still undelivered). `SetQueueForTesting` is test-only and single-threaded; it is not a feed.
+  reads it once per frame in `Begin()`), and a change reconfigures the graph at the next frame, as for a moved source period. The
+  look-ahead walk is delivered by the host's `SettingsApplied` lifecycle call (`LifecycleFacts::value` = `motion_ahead_frames`: 0 or the default
+  depth; `PublishLookAheadWalk`). The other two terms are live feeds (owner decision 2026-11-07: **no new setting**; the lane lead is the number of frames
+  actually queued ahead of the output, measured live, shown in Ctrl+I, and a drop in it is visible):
+  * **Lane lead** = the input queue's size at the `CollectAhead` phase (`PublishLaneLead`, called by `OnCollectAhead`). The value published is the
+    lowest size over the last half second of source time (a fall is taken at once, a rise only when the whole window is above it) so the graph is not
+    rebuilt for every wobble of the queue. It is stored as fed (0..255) and capped when the graph is built: `RingSlotBudget()` frames (27 today:
+    `kRingHeadroomFrames` minus the queue, span and largest lead-read slots) are shared by render-ahead + lane lead, because a ring that needs more than
+    255 slots rejects the graph and the lane would be lost. A cap that bites is shown (`skeleton_lane_lead`, Ctrl+I "lane lead N (fed M, capped)").
+    Memory beyond the slot count is the VRAM governor's: it sheds record history depth first, visibly.
+  * **Render-ahead depth** = planned lead / source period (`PublishRenderAhead`, rounded up), delivered by ONE generic host call at the renderer's
+    render-ahead plan block (`RendererExtension::Lifecycle::QueueDepth`). Until a render-ahead plan has run (render-ahead off, or not planned yet) the
+    term is "not fed" and shown so.
+  * **Feed rule:** every feed compare-and-swaps ITS term into the one snapshot (`MergeTerm`) and never calls `PublishQueue` with a fresh `QueueShape`
+    (that would erase the other terms). `PublishQueue` and `SetQueueForTesting` are test entry points.
+  * **Queue starve:** a lane lead in use below the best it had since the lane was built is `skeleton_queue_starve` (lead, peak, falls, and the
+    look-ahead products that fell back to their causal substitute, if the graph has any); it releases when the queue recovers. Ctrl+I carries
+    `lane lead N` and Ctrl+Alt+D the "Skeleton queue:" line (render-ahead, lane lead, look-ahead walk, queued ahead of output, falls).
+  Undelivered terms sit at their defaults, the depths at their floors, and Fallbacks says so:
+  `skeleton_queue: record history: queue not yet wired (render-ahead depth, lane lead); floors in use` (it names only the terms still undelivered).
+  `SetQueueForTesting` is test-only and single-threaded; it is not a feed.
+* **Regulator input (S5):** `AfterRender` calls `AnalysisLane::OnFrameTiming(seq, slackMs, renderOnlyMs, missed)` for every frame whose Begin it saw and
+  whose period is measured. Render-only time = the module's own clock from the end of `Begin` (after the deterministic wait and the seal) to the entry of
+  `AfterRender`. The hub has no AfterPresent / PresentSample call site yet, so slack and "missed" are derived (slack = period - render time, missed =
+  render time above the period) and Fallbacks says so (`skeleton_regulator`, Ctrl+Alt+D "Skeleton regulator input: derived from render time ..."); when
+  the host delivers presentation facts the entry releases.
 * **Capped record history (visible):** the depths are bounded so every ring fits 255 slots (223 frames). When the rate asks for more,
   `skeleton_history: quality pattern history capped at 223 frames (source rate above 111.5 fps)` appears in Fallbacks; when the queue asks for
   more, `... (the configured queue asks for N frames)`. A graph whose slot counts still overflow is rejected (analysis lane unavailable, with
@@ -109,6 +130,9 @@ Every downgrade is visible (Ctrl+I line, Ctrl+Alt+D, Config status); none is log
 | `skeleton_lane` | `waiting: ...` / `no source frames: needs frame_analysis_store=on` | the lane cannot run yet |
 | `skeleton_settings` | invalid key list | a `[vpv.skeleton]` value was not valid (default kept) |
 | `skeleton_queue` | `record history: queue not yet wired (...); floors in use` | the render-ahead depth and/or lane lead have no feed yet (record histories at their floors) |
+| `skeleton_queue_starve` | `queue starve: lane lead N (was M), K fall(s); look-ahead products reduced: ...` | the live lane lead is below the best it had since the lane was built (releases when the queue recovers) |
+| `skeleton_lane_lead` | `lane lead capped at N frame(s) (queue holds M; ring slot budget)` (and the render-ahead form) | the fed lane lead / render-ahead depth exceeds the ring-slot budget shared by R + L |
+| `skeleton_regulator` | `regulator input: slack derived from render time; presentation facts not wired` | the S5 regulator is fed derived slack (no host presentation facts yet) |
 | `skeleton_history` | `quality pattern history capped at N frames (...)` | the rate or the queue asks for deeper record histories than the 255-slot rings allow |
 | `skeleton_gpu_shadow` | `shadow: GPU products skipped (no GPU dispatcher, no GPU work)` | `analysis_lane = shadow` |
 | `skeleton_gpu_device` | `GPU products: no render device (...)` | `analysis_lane = on` without a usable `pl_gpu` |
@@ -148,7 +172,9 @@ and the readers keep their own computation. Lifting it needs a shift-3 declarati
 
 CPU only (no GPU): classes `SkeletonSettingsTests` (incl. `skeleton_gpu_gap` / `grain_split_storage` parsing and invalid-value problems),
 `SkeletonModuleTests` (Off and Original construct no dispatcher and make no GPU call; shadow and "no render device" statuses), `SkeletonGpuStatusTexts`,
-`SkeletonLaneTests`, `AnalysisLaneGpuHookTests` (lane deferral, `ReadOf`, `StepsFor`).
+`SkeletonLaneTests`, `AnalysisLaneGpuHookTests` (lane deferral, `ReadOf`, `StepsFor`). Live queue feed and regulator input (`SkeletonModuleTests`):
+`TheQueueFeedsEachMergeOnlyTheirOwnTerm` (three threads CAS-merging their terms), `TheLaneLeadIsTheQueueTheHostCollectedAheadAndIsShown` (0 and 255 cases),
+`AQueueStarveIsShownAndRecovers`, `TheQueuePhaseIsInertWhenTheLaneIsOffOrOriginal`, `TheRegulatorGetsTheDerivedSlackEveryFrameAndSaysSo`.
 GPU (libplacebo WARP unless `VP_TEST_GPU=hardware`): `SkeletonGpuDispatcherWarpTests` (1024 codes exact, extend == CPU, alloc == declaration, lane == live),
 `LaneGpuGrainKernelWarpTests`, `LaneGpuRegionKernelWarpTests`, `LaneGpuLightKernelWarpTests`.
 

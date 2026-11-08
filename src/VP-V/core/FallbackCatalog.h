@@ -602,6 +602,32 @@ namespace FallbackCatalog
 		return unwired.empty() ? Released("skeleton_queue")
 		                       : Engaged("skeleton_queue", "record history: queue not yet wired (" + unwired + "); floors in use");
 	}
+	// The lane lead the host's queue fed is lower than the lead the graph held at its best (owner decision 2026-11-07: lane lead = frames
+	// actually queued ahead of output, measured live). `lead` is the lead in use, `peak` the highest since the lane was built, `reduced`
+	// names the look-ahead products that lost their lead (empty: none in this graph), `events` counts the falls so far. Engaged while the
+	// lead is below its peak; released (automatically) when the queue recovers. Never log-only.
+	inline Decision SkeletonQueueStarve(unsigned lead, unsigned peak, const std::string& reduced, uint64_t events)
+	{
+		if (!(lead < peak))
+			return Released("skeleton_queue_starve");
+		return Engaged("skeleton_queue_starve", "queue starve: lane lead " + std::to_string(lead) + " (was " + std::to_string(peak) + "), " +
+			std::to_string(events) + " fall(s); look-ahead products reduced: " + (reduced.empty() ? std::string("none in this graph") : reduced));
+	}
+	// The render-ahead depth and/or lane lead the queue fed do not fit the ring slots (render-ahead + lane lead + the record history must
+	// fit the 255-slot rings; Products.h kRingHeadroomFrames): the lane uses the capped values. `note` says which ("lane lead capped at 21
+	// (queue holds 255; ring slot budget)"); empty = no cap bites.
+	inline Decision SkeletonLaneLeadCapped(const std::string& note)
+	{
+		return note.empty() ? Released("skeleton_lane_lead") : Engaged("skeleton_lane_lead", note);
+	}
+	// S5 regulator input. Slack and the missed-deadline flag come from the host's present facts; until the renderer delivers them (the hub
+	// has no AfterPresent / PresentSample call site yet) the module derives them from the measured frame period and the render-only time
+	// (slack = period - render time; missed = render time above the period). Engaged while derived.
+	inline Decision SkeletonRegulatorInput(bool derived)
+	{
+		return derived ? Engaged("skeleton_regulator", "regulator input: slack derived from render time; presentation facts not wired")
+		               : Released("skeleton_regulator");
+	}
 	// A lead read of an ordered-chain product is in THIS graph (WARNING level: nothing is rejected). The reader cannot be sealed ahead,
 	// so it live-fills its reduced form; the note is Graph::leadChainWarning ("quality_pattern -> coding_evidence (lead 2): lead read of an
 	// ordered chain: reader live-fills its reduced form"). Engaged only while such a read is in the graph.

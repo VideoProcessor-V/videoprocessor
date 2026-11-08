@@ -51,6 +51,8 @@ namespace Vpv
 			constexpr uint64_t kEarlyRefreshFrames = 8;
 			constexpr uint64_t kRefreshEvery = 16;
 			constexpr uint64_t kReconfigureMinFrames = 60;
+			constexpr double kLeadWindowSeconds = 0.5;   // source time the lane-lead feed keeps its lowest value over
+			constexpr size_t kLeadWindowMinFrames = 2;
 
 			uint64_t SteadyUs()
 			{
@@ -298,6 +300,26 @@ namespace Vpv
 			std::string shownWaiting;
 			bool shownBundle = false;
 			uint8_t shownQueueWired = 0xFF;   // the queue-delivery state the cached status text was built for
+			uint64_t shownQueueKey = ~uint64_t(0);   // the queue-in-use / starve state the cached status text was built for
+
+			// S5 regulator feed (render thread): the module's own clock between its Begin and AfterRender of one frame.
+			uint64_t renderBeginUs = 0;
+			int64_t renderBeginSeq = 0;
+			SkeletonModule::TimingFeed timing;
+
+			// The queue in use (render thread; Begin): the snapshot after the ring-slot caps, the best lane lead and the falls.
+			SkeletonModule::QueueShape queueFed, queueUsed;
+			unsigned leadPeak = 0;
+			unsigned lastUsedLead = 0;
+			uint64_t starveEvents = 0;
+			std::string starveReduced;   // look-ahead products that lost their lead in the current graph (names)
+
+			// The live lane-lead feed (CollectAhead phase; any thread that delivers it). The queue size jitters by a frame or two: the lead
+			// the graph is built for is the LOWEST size seen over the last kLeadWindowSeconds of source time (a fall is taken at once, a rise
+			// only when the whole window is above it), so the graph is not rebuilt for every wobble.
+			std::atomic<uint32_t> periodUs{ 0 };   // the measured source period (Begin), for the window length
+			std::mutex leadMutex;
+			std::deque<uint8_t> leadWindow;
 
 			// The render-thread status cache, read by any thread.
 			std::mutex statusMutex;
@@ -448,6 +470,23 @@ namespace Vpv
 			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
 			return b && b->threads.Running();
 		}
+		SkeletonModule::TimingFeed SkeletonModule::TimingFeedOf(const void* host) const
+		{
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			return st ? st->timing : TimingFeed();
+		}
+		SkeletonModule::QueueInUse SkeletonModule::QueueInUseOf(const void* host) const
+		{
+			QueueInUse out;
+			if (const std::shared_ptr<HostState> st = hosts_.Find(host))
+			{
+				out.fed = st->queueFed;
+				out.used = st->queueUsed;
+				out.leadPeak = st->leadPeak;
+				out.starveEvents = st->starveEvents;
+			}
+			return out;
+		}
 		unsigned long long SkeletonModule::ContainedFaults() { return Faults().load(std::memory_order_relaxed); }
 		const SkeletonGpuDispatcher* SkeletonModule::GpuDispatcherFor(const void* host) const
 		{
@@ -472,6 +511,15 @@ namespace Vpv
 				PublishLookAheadWalk(f.value);   // the host passes the motion look-ahead depth (frames) here: the one queue term it delivers
 				Reconcile(f.host, f.code != 0 ? 1 : 0);   // code != 0: the Original pathway
 				break;
+			case RE::Lifecycle::QueueDepth:
+			{
+				// The render-ahead term (the host's one generic call at the render-ahead plan block, every planned frame): frames the plan keeps ahead
+				// of the present. Only while this renderer's lane is on; PublishRenderAhead is change-only (a compare-and-swap that leaves the other terms).
+				const std::shared_ptr<HostState> st = hosts_.Find(f.host);
+				if (st && st->active.load(std::memory_order_acquire))
+					PublishRenderAhead(f.value);
+				break;
+			}
 			case RE::Lifecycle::GpuReleased:
 			case RE::Lifecycle::Shutdown:
 			{
@@ -648,6 +696,17 @@ namespace Vpv
 		// ---- frame phases (render thread) -------------------------------------------------------------
 		bool SkeletonModule::OnFrame(RE::FrameContext& c)
 		{
+			if (c.phase == RE::FramePhase::CollectAhead)
+			{
+				// P5a's CollectAhead call site: the input queue's size is the lane lead (frames queued ahead of the render). Inert off.
+				if (c.phaseData != nullptr)
+				{
+					const std::shared_ptr<HostState> q = hosts_.Find(c.host);
+					if (q && q->active.load(std::memory_order_acquire))
+						OnCollectAhead(*q, *static_cast<const RE::QueueView*>(c.phaseData));
+				}
+				return false;
+			}
 			if (c.phase != RE::FramePhase::Begin && c.phase != RE::FramePhase::AfterRender)
 				return false;
 			const std::shared_ptr<HostState> st = hosts_.Find(c.host);
@@ -672,6 +731,28 @@ namespace Vpv
 			return false;   // observation only: never a take-over
 		}
 
+		// The input-queue term of the lane lead (any thread that runs the CollectAhead phase). The published value is the lowest size over
+		// the window (see HostState::leadWindow); PublishLaneLead is a compare-and-swap that leaves the other terms alone and does nothing
+		// when the value did not change.
+		void SkeletonModule::OnCollectAhead(HostState& st, const RE::QueueView& view)
+		{
+			const uint8_t size = view.size > 255u ? uint8_t(255) : uint8_t(view.size);
+			const double periodMs = double(st.periodUs.load(std::memory_order_relaxed)) / 1000.0;
+			const size_t frames = periodMs > 0.0 ?
+				(std::min<size_t>)(255u, (std::max<size_t>)(kLeadWindowMinFrames, size_t(std::ceil(kLeadWindowSeconds * 1000.0 / periodMs)))) :
+				kLeadWindowMinFrames;   // the period is not measured yet: a short window
+			uint8_t lowest = size;
+			{
+				std::lock_guard<std::mutex> lock(st.leadMutex);
+				st.leadWindow.push_back(size);
+				while (st.leadWindow.size() > frames)
+					st.leadWindow.pop_front();
+				for (uint8_t v : st.leadWindow)
+					lowest = (std::min)(lowest, v);
+			}
+			PublishLaneLead(double(lowest));
+		}
+
 		void SkeletonModule::Begin(HostState& st, int64_t seqIn)
 		{
 			const uint64_t seq = static_cast<uint64_t>(seqIn);
@@ -681,6 +762,7 @@ namespace Vpv
 				const double dtMs = static_cast<double>(now - st.lastBeginUs) / 1000.0;
 				if (dtMs >= 0.5 && dtMs <= 1000.0)   // a pause or a burst is not a period
 					st.periodMs = st.periodMs > 0.0 ? 0.9 * st.periodMs + 0.1 * dtMs : dtMs;
+				st.periodUs.store(uint32_t(st.periodMs * 1000.0 + 0.5), std::memory_order_relaxed);
 			}
 			st.lastBeginUs = now;
 			++st.frames;
@@ -736,6 +818,8 @@ namespace Vpv
 			if (rebuild)
 			{
 				b = std::make_shared<Bundle>(dims, seq, nowUs_, wiring);
+				st.leadPeak = 0;   // a new lane: the best lead is measured again
+				st.lastUsedLead = 0;
 				b->lane.BindIndicator(seal->Current());
 				b->lane.OnSealed(seq, 0);   // the shared seal already passed this frame before this lane existed
 			}
@@ -743,7 +827,21 @@ namespace Vpv
 			const bool periodMoved = b->configuredPeriodMs > 0.0 && st.periodMs > 0.0 &&
 				std::abs(st.periodMs - b->configuredPeriodMs) > 0.3 * b->configuredPeriodMs;
 			const bool periodKnown = b->configuredPeriodMs <= 0.0 && st.periodMs > 0.0;
-			const QueueShape queue = CurrentQueue();   // one snapshot per frame: a feed on another thread never races the graph build
+			const QueueShape fedQueue = CurrentQueue();   // one snapshot per frame: a feed on another thread never races the graph build
+			QueueShape queue = fedQueue;
+			// The ring slots bound R + L together (RingSlotBudget); a feed above them is capped here, and the cap is shown (skeleton_lane_lead).
+			queue.renderAhead = uint8_t(CappedRenderAhead(fedQueue.renderAhead));
+			queue.laneLead = uint8_t((std::min<unsigned>)(fedQueue.laneLead, LaneLeadCap(fedQueue.renderAhead)));
+			st.queueFed = fedQueue;
+			st.queueUsed = queue;
+			if (fedQueue.wired & QueueShape::kLaneLead)
+			{
+				if (queue.laneLead > st.leadPeak)
+					st.leadPeak = queue.laneLead;
+				if (queue.laneLead < st.lastUsedLead)
+					++st.starveEvents;   // the queue the lane can look into got shorter: shown as skeleton_queue_starve while below the peak
+				st.lastUsedLead = queue.laneLead;
+			}
 			const bool queueMoved = b->configuredQueue != queue;   // the record histories follow the queue (R + L + look-ahead)
 			if (rebuild || b->configuredGen != gen || queueMoved || ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
 			{
@@ -829,15 +927,47 @@ namespace Vpv
 			for (int guard = 0; guard < 64 && (wait = b->lane.DeterministicWaitUs(seq, 0)) > 0; ++guard)
 				std::this_thread::sleep_for(std::chrono::microseconds(wait));   // N1: only a deterministic run or an explicit test wait
 			b->lane.OnRenderStart(seq, 0);
+			st.renderBeginSeq = seqIn;   // the render-only clock starts here (after the deterministic wait and the seal, which are not render work)
+			st.renderBeginUs = nowUs_();
+			{
+				// Which look-ahead products the queue could not feed (names of the short-queue substitutions), for the starve line.
+				std::string reduced;
+				if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
+					for (const VpSkeleton::Node* n : ls->graph.ReducedNodes())
+						if (n->reducedFrom != VpSkeleton::kNoProduct && b->registry.Has(n->reducedFrom))
+							reduced += std::string(reduced.empty() ? "" : ", ") + b->registry.Get(n->reducedFrom).name;
+				st.starveReduced = reduced;
+			}
 			Refresh(st);
 		}
 
 		void SkeletonModule::AfterRender(HostState& st, int64_t seqIn)
 		{
+			const uint64_t afterUs = nowUs_();   // first: the render-only time ends before this module's own AfterRender work
 			const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
 			if (!b)
 				return;
 			const uint64_t seq = static_cast<uint64_t>(seqIn);
+			// S5: the regulator's per-frame input. The hub has no AfterPresent / PresentSample call site yet, so slack and "missed" are derived
+			// from the measured period and the render-only time (slack = period - render time, missed = render time above the period) and the
+			// status says so (skeleton_regulator). A frame without a Begin of its own, or with the period unmeasured, feeds nothing (counted).
+			if (st.renderBeginSeq == seqIn && st.periodMs > 0.0 && afterUs >= st.renderBeginUs)
+			{
+				const double renderMs = static_cast<double>(afterUs - st.renderBeginUs) / 1000.0;
+				const double slackMs = st.periodMs - renderMs;
+				const bool missed = renderMs > st.periodMs;
+				b->lane.OnFrameTiming(seq, slackMs, renderMs, missed);
+				++st.timing.frames;
+				st.timing.missed += missed ? 1u : 0u;
+				st.timing.lastSlackMs = slackMs;
+				st.timing.lastRenderOnlyMs = renderMs;
+				st.timing.lastPeriodMs = st.periodMs;
+				st.timing.lastMissed = missed;
+				st.timing.derived = true;
+			}
+			else
+				++st.timing.skipped;
+			st.renderBeginSeq = 0;
 			if (st.dispatcher && b->wiring.dispatcher == st.dispatcher.get() && st.gpuMemoryNote.empty())
 			{
 				// GPU-legal (before the flush and the gap): destroy what a size / graph change queued, then (re)allocate the
@@ -871,10 +1001,13 @@ namespace Vpv
 			const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
 			const bool hasBundle = b != nullptr;
 			const uint8_t queueWired = CurrentQueue().wired;
+			const uint64_t queueKey = (uint64_t(st.queueFed.laneLead) << 40) | (uint64_t(st.queueUsed.laneLead) << 32) | (uint64_t(st.queueFed.renderAhead) << 24) |
+				(uint64_t(st.queueUsed.renderAhead) << 16) | (st.starveEvents & 0xFFFFu);
 			const bool due = st.frames <= kEarlyRefreshFrames || st.frames % kRefreshEvery == 1 || st.waiting != st.shownWaiting ||
-				hasBundle != st.shownBundle || queueWired != st.shownQueueWired;
+				hasBundle != st.shownBundle || queueWired != st.shownQueueWired || queueKey != st.shownQueueKey;
 			if (!due)
 				return;
+			st.shownQueueKey = queueKey;
 			st.shownQueueWired = queueWired;
 			st.shownWaiting = st.waiting;
 			st.shownBundle = hasBundle;
@@ -891,6 +1024,22 @@ namespace Vpv
 				problems += (problems.empty() ? "" : "; ") + p;
 			addDecision(FallbackCatalog::SkeletonKeys(problems));
 			addDecision(QueueDecision(queueWired));   // visible: the record histories sit at their floors until the queue is delivered
+			{
+				// The live queue feed (owner decision 2026-11-07): a feed above the ring-slot budget is capped, and a lane lead that fell below its
+				// best is a visible queue starve (look-ahead products reduced, if the graph has any).
+				std::string cap;
+				if (st.queueFed.renderAhead > st.queueUsed.renderAhead)
+					cap = "render-ahead depth capped at " + std::to_string(unsigned(st.queueUsed.renderAhead)) + " frame(s) (queue holds " +
+						std::to_string(unsigned(st.queueFed.renderAhead)) + "; ring slot budget)";
+				if (st.queueFed.laneLead > st.queueUsed.laneLead)
+					cap += std::string(cap.empty() ? "" : "; ") + "lane lead capped at " + std::to_string(unsigned(st.queueUsed.laneLead)) +
+						" frame(s) (queue holds " + std::to_string(unsigned(st.queueFed.laneLead)) + "; ring slot budget)";
+				addDecision(FallbackCatalog::SkeletonLaneLeadCapped(cap));
+				if (st.queueFed.wired & QueueShape::kLaneLead)
+					addDecision(FallbackCatalog::SkeletonQueueStarve(st.queueUsed.laneLead, st.leadPeak, st.starveReduced, st.starveEvents));
+				// S5: until the host delivers presentation facts the regulator's slack is derived from the render time.
+				addDecision(FallbackCatalog::SkeletonRegulatorInput(hasBundle && st.timing.derived));
+			}
 			// The GPU products (70b G5): shadow and "no render device" have no dispatcher and say so.
 			const SkeletonGpuDispatcher* gd = st.dispatcher.get();
 			const bool shadow = st.settings.lane.mode == LaneSettings::Mode::Shadow;
@@ -964,9 +1113,32 @@ namespace Vpv
 					std::snprintf(period, sizeof(period), ", period %.2f ms", st.periodMs);
 					line += period;
 				}
+				if (st.queueFed.wired & QueueShape::kLaneLead)
+					line += ", lane lead " + std::to_string(unsigned(st.queueUsed.laneLead)) +
+						(st.queueFed.laneLead != st.queueUsed.laneLead ? " (fed " + std::to_string(unsigned(st.queueFed.laneLead)) + ", capped)" : std::string());
 			}
 			else
 				line = std::string("analysis lane ") + mode + ": " + (st.waiting.empty() ? std::string("starting") : st.waiting);
+			{
+				// Ctrl+I / Ctrl+Alt+D: the queue the lane is built for and the regulator's input, in plain words.
+				const QueueShape& fq = st.queueFed;
+				const QueueShape& uq = st.queueUsed;
+				auto term = [](bool wired, unsigned fed, unsigned used) {
+					if (!wired)
+						return std::string("not fed");
+					return fed == used ? std::to_string(used) : std::to_string(used) + " (fed " + std::to_string(fed) + ")";
+				};
+				full.push_back("Skeleton queue: render-ahead " + term((fq.wired & QueueShape::kRenderAhead) != 0, fq.renderAhead, uq.renderAhead) +
+					", lane lead " + term((fq.wired & QueueShape::kLaneLead) != 0, fq.laneLead, uq.laneLead) + ", look-ahead walk " +
+					term((fq.wired & QueueShape::kLookAhead) != 0, fq.lookAheadWalk, uq.lookAheadWalk) + "; queued ahead of output " +
+					std::to_string(unsigned(uq.renderAhead) + unsigned(uq.laneLead)) + " frame(s); " + std::to_string(st.starveEvents) + " lead fall(s)");
+				char regLine[240] = {};
+				std::snprintf(regLine, sizeof(regLine), "Skeleton regulator input: %s, %llu frame(s) fed (%llu skipped), last slack %.2f ms, render %.2f ms, %llu missed",
+					st.timing.derived ? "derived from render time" : "presentation facts", static_cast<unsigned long long>(st.timing.frames),
+					static_cast<unsigned long long>(st.timing.skipped), st.timing.lastSlackMs, st.timing.lastRenderOnlyMs,
+					static_cast<unsigned long long>(st.timing.missed));
+				full.push_back(regLine);
+			}
 			full.push_back("Skeleton: " + std::to_string(st.frames) + " frames, " + std::to_string(st.srcFrames.load(std::memory_order_relaxed)) +
 				" source frames tapped, " + std::to_string(st.dropsApplied) + " drops applied, " + std::to_string(st.gapsRun) +
 				" idle gaps run, " + std::to_string(st.gapsSkipped) + " skipped (frame period unknown), " + std::to_string(st.configures) +

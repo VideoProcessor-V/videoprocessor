@@ -26,10 +26,12 @@
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -244,6 +246,16 @@ namespace SkeletonModuleTestsNs
 			return out;
 		}
 	};
+
+	// The CollectAhead phase as P5a's call site raises it: the input queue's size in a QueueView.
+	void Collect(Rig& rig, size_t size)
+	{
+		RE::QueueView view;
+		view.size = size;
+		RE::FrameContext c;
+		c.host = rig.Host(); c.phase = RE::FramePhase::CollectAhead; c.phaseData = &view;
+		Assert::IsFalse(rig.sk.OnFrame(c), L"the skeleton never takes a phase over");
+	}
 
 	Vpv::Skeleton::Settings ParseText(const std::string& text)
 	{
@@ -747,6 +759,217 @@ namespace SkeletonModuleTestsNs
 			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue"), L"all three delivered: nothing to show");
 			Assert::IsFalse(SkeletonModule::QueueDecision(SkeletonModule::QueueShape::kAll).engaged);
 			Assert::AreEqual(std::string("lane lead, look-ahead walk"), SkeletonModule::QueueNotWiredNote(SkeletonModule::QueueShape::kRenderAhead));
+		}
+
+		TEST_METHOD(TheQueueFeedsEachMergeOnlyTheirOwnTerm)
+		{
+			// FEED RULE (owner decision 2026-11-07): three feeds on three threads, each compare-and-swapping ITS term into the one snapshot.
+			// None may erase another's: a wired term never un-wires, every value stays in its feed's domain, and the last write of each
+			// feed is what the snapshot holds at the end.
+			SkeletonModule sk;
+			const int kIter = 20000;
+			std::atomic<bool> go{ false };
+			std::atomic<int> bad{ 0 };
+			auto spin = [&go]() { while (!go.load()) { std::this_thread::yield(); } };
+			std::thread a([&]() { spin(); for (int i = 0; i < kIter; ++i) sk.PublishRenderAhead(double(i % 9)); });
+			std::thread b([&]() { spin(); for (int i = 0; i < kIter; ++i) sk.PublishLaneLead(double(i % 200)); });
+			std::thread c([&]() { spin(); for (int i = 0; i < kIter; ++i) sk.PublishLookAheadWalk(double(i % 90)); });
+			std::thread r([&]() {
+				spin();
+				uint8_t seen = 0;
+				for (int i = 0; i < kIter * 2; ++i)
+				{
+					const SkeletonModule::QueueShape q = sk.CurrentQueue();
+					if ((seen & ~q.wired) != 0)
+						++bad;   // a term that was delivered went missing
+					seen = uint8_t(seen | q.wired);
+					if (q.renderAhead > 8 || q.laneLead > 199 || q.lookAheadWalk > 89)
+						++bad;   // a value outside its own feed's domain: another feed's value landed in it
+				}
+			});
+			go = true;
+			a.join(); b.join(); c.join(); r.join();
+			Assert::AreEqual(0, bad.load());
+			const SkeletonModule::QueueShape q = sk.CurrentQueue();
+			Assert::AreEqual(int(SkeletonModule::QueueShape::kAll), int(q.wired));
+			Assert::AreEqual((kIter - 1) % 9, int(q.renderAhead));
+			Assert::AreEqual((kIter - 1) % 200, int(q.laneLead));
+			Assert::AreEqual((kIter - 1) % 90, int(q.lookAheadWalk));
+			// Single-threaded: each feed leaves the other terms as they are; values are clamped, never wrapped.
+			SkeletonModule one;
+			one.PublishLookAheadWalk(5.0);
+			one.PublishRenderAhead(3.2);
+			Assert::AreEqual(5, int(one.CurrentQueue().lookAheadWalk));
+			Assert::AreEqual(4, int(one.CurrentQueue().renderAhead), L"a partial frame holds a slot: rounded up");
+			Assert::AreEqual(1, int(one.CurrentQueue().laneLead), L"undelivered term keeps its default");
+			one.PublishLaneLead(300.0);
+			Assert::AreEqual(255, int(one.CurrentQueue().laneLead));
+			one.PublishLaneLead(-1.0);
+			Assert::AreEqual(0, int(one.CurrentQueue().laneLead));
+			one.PublishRenderAhead(1000.0);
+			Assert::AreEqual(255, int(one.CurrentQueue().renderAhead));
+			one.PublishRenderAhead(std::nan(""));
+			Assert::AreEqual(0, int(one.CurrentQueue().renderAhead));
+			Assert::AreEqual(int(SkeletonModule::QueueShape::kAll), int(one.CurrentQueue().wired));
+		}
+
+		TEST_METHOD(TheLaneLeadIsTheQueueTheHostCollectedAheadAndIsShown)
+		{
+			// The input-queue term: QueueView::size at the CollectAhead phase. Ctrl+I prints the lead the lane runs with; the 0 and 255 cases.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			Assert::AreEqual(0, int(rig.sk.CurrentQueue().wired & SkeletonModule::QueueShape::kLaneLead), L"nothing fed yet");
+			Collect(rig, 0);
+			rig.Frame(4);
+			SkeletonModule::QueueInUse u = rig.sk.QueueInUseOf(rig.Host());
+			Assert::AreEqual(0, int(u.fed.laneLead));
+			Assert::AreEqual(0, int(u.used.laneLead));
+			Assert::IsTrue((u.fed.wired & SkeletonModule::QueueShape::kLaneLead) != 0);
+			Assert::AreEqual(0, int(rig.sk.LaneOf(rig.Host())->State()->graph.settings.laneLead));
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Lines), "lane lead 0"));
+			const std::vector<std::string> fb0 = rig.Lines(RE::StatusKind::Fallbacks);
+			Assert::IsTrue(Has(fb0, "queue not yet wired (render-ahead depth, look-ahead walk)"), L"the lane lead left the unwired list");
+			Assert::IsFalse(HasId(fb0, "skeleton_lane_lead"));
+			// 255 frames queued: the window keeps the LOWEST size over half a second of source time, so the 0 must age out first.
+			for (int i = 0; i < 30; ++i)
+				Collect(rig, 255);
+			rig.Frame(5);
+			u = rig.sk.QueueInUseOf(rig.Host());
+			Assert::AreEqual(255, int(u.fed.laneLead));
+			Assert::AreEqual(int(SkeletonModule::LaneLeadCap(0)), int(u.used.laneLead), L"capped to the ring-slot budget");
+			Assert::IsTrue(u.used.laneLead < 255);
+			Assert::AreEqual(int(u.used.laneLead), int(rig.sk.LaneOf(rig.Host())->State()->graph.settings.laneLead));
+			Assert::IsTrue(rig.sk.LaneOf(rig.Host())->Active(), L"the capped graph is valid: the lane is not lost");
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Lines), (std::string("lane lead ") + std::to_string(int(u.used.laneLead)) + " (fed 255, capped)").c_str()));
+			Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_lane_lead"), L"the cap is shown, never silent");
+			// A queue inside the budget is printed exactly as fed.
+			for (int i = 0; i < 30; ++i)
+				Collect(rig, 6);
+			rig.Frame(6);
+			u = rig.sk.QueueInUseOf(rig.Host());
+			Assert::AreEqual(6, int(u.used.laneLead));
+			Assert::AreEqual(6, int(u.fed.laneLead));
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Lines), "lane lead 6"));
+			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Lines), "capped"));
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_lane_lead"), L"the cap released by itself");
+		}
+
+		TEST_METHOD(TheThreeFeedsTogetherWireTheWholeQueue)
+		{
+			// Walk (SettingsApplied), render-ahead depth (the host's generic QueueDepth fact), lane lead (CollectAhead): each merges its own term.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			rig.Life(RE::Lifecycle::SettingsApplied, 0, 4.0);
+			Collect(rig, 6);
+			rig.Life(RE::Lifecycle::QueueDepth, 0, 2.2);   // a partial frame holds a slot: 3
+			const SkeletonModule::QueueShape q = rig.sk.CurrentQueue();
+			Assert::AreEqual(3, int(q.renderAhead));
+			Assert::AreEqual(6, int(q.laneLead));
+			Assert::AreEqual(4, int(q.lookAheadWalk));
+			Assert::AreEqual(int(SkeletonModule::QueueShape::kAll), int(q.wired));
+			rig.Frame(4);
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue"), L"all three delivered: nothing unwired to show");
+			Assert::IsTrue(rig.Command().find("render-ahead 3, lane lead 6, look-ahead walk 4; queued ahead of output 9 frame(s)") != std::string::npos);
+			const VpSkeleton::GraphSettings gs = rig.sk.LaneOf(rig.Host())->State()->graph.settings;
+			Assert::AreEqual(3, int(gs.renderAhead));
+			Assert::AreEqual(6, int(gs.laneLead));
+			Assert::AreEqual(4, int(gs.lookAheadWalk));
+		}
+
+		TEST_METHOD(AQueueStarveIsShownAndRecovers)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			for (int i = 0; i < 30; ++i)
+				Collect(rig, 5);
+			rig.Frame(4);
+			Assert::AreEqual(5, int(rig.sk.QueueInUseOf(rig.Host()).used.laneLead));
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue_starve"));
+			Collect(rig, 3);   // the queue ran short: the lowest size in the window is taken at once
+			rig.Frame(5);
+			const SkeletonModule::QueueInUse u = rig.sk.QueueInUseOf(rig.Host());
+			Assert::AreEqual(3, int(u.used.laneLead));
+			Assert::AreEqual(5, int(u.leadPeak));
+			Assert::AreEqual(uint64_t(1), u.starveEvents);
+			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
+			Assert::IsTrue(HasId(fb, "skeleton_queue_starve"), L"a queue-starve drop is visible, not log-only");
+			Assert::IsTrue(Has(fb, "queue starve: lane lead 3 (was 5)"));
+			Assert::IsTrue(rig.Command().find("1 lead fall(s)") != std::string::npos);
+			// Recovery: the whole window must be above the dip before the lead rises again, then the entry releases by itself.
+			for (int i = 0; i < 30; ++i)
+				Collect(rig, 5);
+			rig.Frame(6);
+			Assert::AreEqual(5, int(rig.sk.QueueInUseOf(rig.Host()).used.laneLead));
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue_starve"));
+		}
+
+		TEST_METHOD(TheQueuePhaseIsInertWhenTheLaneIsOffOrOriginal)
+		{
+			Rig off("[general]\nx=1\n");
+			off.ResyncApply("on");
+			off.Life(RE::Lifecycle::GpuCreated);
+			Collect(off, 9);
+			off.Life(RE::Lifecycle::QueueDepth, 0, 3.0);
+			Assert::AreEqual(0, int(off.sk.CurrentQueue().wired), L"off: nothing is published");
+			Rig orig(Lane("on"));
+			orig.Life(RE::Lifecycle::GpuCreated, 0);
+			orig.Life(RE::Lifecycle::SettingsApplied, 1);   // the Original pathway
+			Collect(orig, 9);
+			orig.Life(RE::Lifecycle::QueueDepth, 0, 3.0);
+			Assert::AreEqual(0, int(orig.sk.CurrentQueue().wired & (SkeletonModule::QueueShape::kLaneLead | SkeletonModule::QueueShape::kRenderAhead)), L"Original: nothing is published");
+			Assert::AreEqual(0, int(orig.sk.TimingFeedOf(orig.Host()).frames));
+		}
+
+		TEST_METHOD(TheRegulatorGetsTheDerivedSlackEveryFrameAndSaysSo)
+		{
+			// S5: slack = measured period - render-only time (the module's own clock between Begin and AfterRender), missed = render above the period.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			auto frame = [&rig](int64_t seq, uint64_t renderUs) {
+				rig.Ingress(seq);
+				if (seq == 1)
+					rig.Deliver(1);
+				rig.Deliver(uint64_t(seq) + 1);
+				rig.Begin(seq);   // the clock moves 40 ms per Begin
+				rig.base += renderUs;
+				rig.After(seq);
+				rig.base -= renderUs;   // the cadence stays at 40 ms
+			};
+			for (int64_t s = 1; s <= 6; ++s)
+				frame(s, 10000);
+			SkeletonModule::TimingFeed t = rig.sk.TimingFeedOf(rig.Host());
+			Assert::IsTrue(t.frames >= 4, L"every frame with a measured period is fed");
+			Assert::IsTrue(t.skipped >= 1, L"the first frame has no period yet: nothing fed, counted");
+			Assert::AreEqual(10.0, t.lastRenderOnlyMs, 0.1);
+			Assert::AreEqual(40.0, t.lastPeriodMs, 0.5);
+			Assert::AreEqual(t.lastPeriodMs - t.lastRenderOnlyMs, t.lastSlackMs, 1e-9, L"slack = period - render time");
+			Assert::AreEqual(30.0, t.lastSlackMs, 0.6, L"plausible: 10 ms of render in a 40 ms cadence leaves about 30 ms");
+			Assert::IsFalse(t.lastMissed);
+			Assert::AreEqual(uint64_t(0), t.missed);
+			// A spike the smoothed period has not caught up with: a missed deadline, negative slack.
+			frame(7, 90000);
+			t = rig.sk.TimingFeedOf(rig.Host());
+			Assert::IsTrue(t.lastMissed);
+			Assert::AreEqual(uint64_t(1), t.missed);
+			Assert::IsTrue(t.lastSlackMs < 0.0);
+			Assert::AreEqual(90.0, t.lastRenderOnlyMs, 0.1);
+			// Visible, not log-only: the derived form is a Fallbacks entry and a Ctrl+Alt+D line.
+			Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_regulator"));
+			Assert::IsTrue(rig.Command().find("Skeleton regulator input: derived from render time") != std::string::npos);
+			// A frame that never had its own Begin feeds nothing.
+			const uint64_t fed = t.frames;
+			rig.After(99);
+			Assert::AreEqual(fed, rig.sk.TimingFeedOf(rig.Host()).frames);
 		}
 
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)
