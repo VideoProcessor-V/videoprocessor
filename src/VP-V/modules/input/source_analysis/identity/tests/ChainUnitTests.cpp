@@ -1662,7 +1662,19 @@ namespace Tests
 			return est.SubmitLines(snap);
 		}
 
-		TEST_METHOD(AConfidentUpscaleThatBecomesGenuineNativeRevertsWithinTheWindowAtTheAcquiringCadence)
+		struct RevertRun
+		{
+			double tAdopt = -1.0, tChainFlip = -1.0, tRevert = -1.0;
+			int evaluations = 0, nativeEvaluations = 0;
+			double lastIntervalBeforeSwitch = 0.0;
+			unsigned long long held = 0;
+			std::vector<double> intervals;   // est.IntervalSec() after every monitor frame (the estimator's planned cadence, frame by frame)
+		};
+
+		static double SwitchSeconds() { return 60.0; }
+
+		// The loop above, in `mode` (On: the monitor holds; Shadow: it holds nothing and decides like Off, but computes the would-be).
+		static RevertRun Drive(Mon::SourceIdMode mode)
 		{
 			using namespace ChainSynth;
 			namespace C = SourceIdentity::Chain;
@@ -1676,15 +1688,13 @@ namespace Tests
 			C::ChainEstimator& est = *owner;
 			Mon m;
 			m.SetChainEstimatorForTest(std::move(owner));
-			m.SetSourceIdMode(Mon::SourceIdMode::On);
+			m.SetSourceIdMode(mode);
 			m.SetChainEnabled(true);
 			est.SetSynchronous(true);
 			Assert::IsTrue(est.Running(), L"fixture: the estimator runs");
 
-			const double t0 = 10.0, tSwitch = 60.0, tEnd = 140.0, dt = 0.5;
-			double tAdopt = -1.0, tChainFlip = -1.0, tRevert = -1.0;
-			int evaluations = 0, nativeEvaluations = 0;
-			double lastIntervalBeforeSwitch = 0.0;
+			RevertRun r;
+			const double t0 = 10.0, tSwitch = SwitchSeconds(), tEnd = 140.0, dt = 0.5;
 			uint64_t seq = 2;
 			for (int i = 0; t0 + dt * i <= tEnd; ++i, ++seq)
 			{
@@ -1693,9 +1703,9 @@ namespace Tests
 				clk.Set(t * 1000.0);                     // the wall clock of the estimator follows the source clock (1x playback)
 				if (est.Wants())
 				{
-					Assert::IsTrue(SubmitEvaluation(est, native ? nat : up, seq, t, evaluations % 2 == 0), L"fixture: the lines were captured");
-					++evaluations;
-					if (native) ++nativeEvaluations;
+					Assert::IsTrue(SubmitEvaluation(est, native ? nat : up, seq, t, r.evaluations % 2 == 0), L"fixture: the lines were captured");
+					++r.evaluations;
+					if (native) ++r.nativeEvaluations;
 				}
 				MonitorFrame(m, t, seq);
 				SourceIdentity::Geometry::Record rec;
@@ -1706,34 +1716,73 @@ namespace Tests
 					chainConfident = (g.axis[0].confident && g.axis[0].ratio < 0.99) || (g.axis[1].confident && g.axis[1].ratio < 0.99);
 				}
 				SourceIdentity::Record p14;
-				const bool have = m.SourceIdRecord(p14);
+				const bool have = m.SourceIdRecord(p14);   // On: the consensus; Shadow: the would-be
 				const bool consensusUp = have && p14.ratioH < 0.99f && p14.ratioV < 0.99f;
 				const bool consensusNative = have && p14.ratioH >= 0.99f && p14.ratioV >= 0.99f;
-				if (!native && consensusUp && tAdopt < 0.0) tAdopt = t;
-				if (!native) lastIntervalBeforeSwitch = est.IntervalSec();
-				if (native && !chainConfident && tChainFlip < 0.0) tChainFlip = t;
-				if (native && consensusNative && tRevert < 0.0) tRevert = t;
+				r.intervals.push_back(est.IntervalSec());
+				if (!native && consensusUp && r.tAdopt < 0.0) r.tAdopt = t;
+				if (!native) r.lastIntervalBeforeSwitch = est.IntervalSec();
+				if (native && !chainConfident && r.tChainFlip < 0.0) r.tChainFlip = t;
+				if (native && consensusNative && r.tRevert < 0.0) r.tRevert = t;
 			}
-			const double acq = C::EstimatorSettings().governor.acquiringIntervalSec;
+			r.held = m.NativeFramesHeldByChain();
+			return r;
+		}
+
+		static double BoundSeconds(double& window, double& acq)
+		{
+			namespace C = SourceIdentity::Chain;
+			acq = C::EstimatorSettings().governor.acquiringIntervalSec;
 			const C::EvidenceSettings es;
 			const double c1 = C::ComputeThresholds(es).c1;
-			const double window = (std::min)((std::max)(es.windowMargin * (c1 / es.windowYieldNats) * acq, es.windowMinSec), es.windowMaxSec);
-			const double bound = window + 2.0 * acq + dt;
+			window = (std::min)((std::max)(es.windowMargin * (c1 / es.windowYieldNats) * acq, es.windowMinSec), es.windowMaxSec);
+			return window + 2.0 * acq + 0.5;
+		}
+
+		TEST_METHOD(AConfidentUpscaleThatBecomesGenuineNativeRevertsWithinTheWindowAtTheAcquiringCadence)
+		{
+			const RevertRun r = Drive(Mon::SourceIdMode::On);
+			double window = 0.0, acq = 0.0;
+			const double bound = BoundSeconds(window, acq);
 			char line[400];
-			snprintf(line, sizeof(line), "N2 revert: adopted at %.1f s, source switched to native at %.1f s, the chain reading flipped at %.1f s (+%.1f s), "
-				"the consensus reverted at %.1f s (+%.1f s after the switch); bound = window %.1f s + 2 x %.1f s + %.1f s = %.1f s; "
+			snprintf(line, sizeof(line), "N2 revert (On): adopted at %.1f s, source switched to native at %.1f s, the chain reading flipped at %.1f s (+%.1f s), "
+				"the consensus reverted at %.1f s (+%.1f s after the switch); bound = window %.1f s + 2 x %.1f s + 0.5 s = %.1f s; "
 				"evaluations %d (%d on native), cadence before the switch %.2f s, frames held %llu",
-				tAdopt, tSwitch, tChainFlip, tChainFlip - tSwitch, tRevert, tRevert - tSwitch, window, acq, dt, bound, evaluations, nativeEvaluations,
-				lastIntervalBeforeSwitch, m.NativeFramesHeldByChain());
+				r.tAdopt, SwitchSeconds(), r.tChainFlip, r.tChainFlip - SwitchSeconds(), r.tRevert, r.tRevert - SwitchSeconds(), window, acq, bound, r.evaluations,
+				r.nativeEvaluations, r.lastIntervalBeforeSwitch, r.held);
 			Logger::WriteMessage(line);
 
-			Assert::IsTrue(tAdopt > 0.0 && tAdopt < tSwitch - 3.0, L"fixture: the consensus adopted the confident upscale well before the switch");
-			Assert::IsTrue(m.NativeFramesHeldByChain() > 0, L"N2 held the native-looking frames while the chain read the upscale");
-			Assert::AreEqual(acq, lastIntervalBeforeSwitch, 1e-9, L"while holding, the estimator runs at its acquiring cadence (not the confident one)");
-			Assert::IsTrue(tRevert >= 0.0, L"the consensus reverted after the source became native");
-			Assert::IsTrue(tRevert > tSwitch, L"and not before (the old reading was held until then)");
-			Assert::IsTrue(tRevert - tSwitch <= bound, L"within the window at the acquiring cadence (plus the evaluation and frame granularity)");
-			Assert::IsTrue(tChainFlip >= 0.0 && tChainFlip <= tRevert, L"the revert follows the chain's own reading");
+			Assert::IsTrue(r.tAdopt > 0.0 && r.tAdopt < SwitchSeconds() - 3.0, L"fixture: the consensus adopted the confident upscale well before the switch");
+			Assert::IsTrue(r.held > 0, L"N2 held the native-looking frames while the chain read the upscale");
+			Assert::AreEqual(acq, r.lastIntervalBeforeSwitch, 1e-9, L"while holding, the estimator runs at its acquiring cadence (not the confident one)");
+			Assert::IsTrue(r.tRevert >= 0.0, L"the consensus reverted after the source became native");
+			Assert::IsTrue(r.tRevert > SwitchSeconds(), L"and not before (the old reading was held until then)");
+			Assert::IsTrue(r.tRevert - SwitchSeconds() <= bound, L"within the window at the acquiring cadence (plus the evaluation and frame granularity)");
+			Assert::IsTrue(r.tChainFlip >= 0.0 && r.tChainFlip <= r.tRevert, L"the revert follows the chain's own reading");
+		}
+
+		// MF1 (round 2): Shadow holds nothing and decides like Off, but its would-be must be what On decides: the estimator reaches the same
+		// acquiring cadence on the same frames (the notes are sent for the frames On WOULD hold), so the chain flips and the would-be reverts
+		// at the same moments, not at the confident cadence's ~5x longer window.
+		TEST_METHOD(ShadowReachesTheSameCadenceOnTheSameFramesAndTheSameRevertAsOn)
+		{
+			const RevertRun on = Drive(Mon::SourceIdMode::On);
+			const RevertRun shadow = Drive(Mon::SourceIdMode::Shadow);
+			char line[400];
+			snprintf(line, sizeof(line), "N2 shadow vs on: chain flip %.1f s / %.1f s, would-be revert %.1f s / %.1f s, evaluations %d / %d, cadence before the switch %.2f s / %.2f s, frames held %llu / %llu",
+				shadow.tChainFlip, on.tChainFlip, shadow.tRevert, on.tRevert, shadow.evaluations, on.evaluations, shadow.lastIntervalBeforeSwitch,
+				on.lastIntervalBeforeSwitch, shadow.held, on.held);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(shadow.held == 0, L"Shadow holds nothing: the trackers decide as in Off");
+			Assert::IsTrue(on.held > 0, L"fixture: On held frames");
+			Assert::IsTrue(shadow.intervals.size() == on.intervals.size(), L"fixture: the same frames");
+			bool same = true;
+			for (size_t i = 0; i < on.intervals.size(); ++i)
+				if (shadow.intervals[i] != on.intervals[i]) { same = false; break; }
+			Assert::IsTrue(same, L"the estimator's planned cadence is the same frame by frame in both modes");
+			Assert::AreEqual(on.evaluations, shadow.evaluations);
+			Assert::AreEqual(on.tChainFlip, shadow.tChainFlip, 1e-9, L"the chain flips at the same moment");
+			Assert::AreEqual(on.tRevert, shadow.tRevert, 1e-9, L"and the would-be reverts when On's consensus does");
 		}
 	};
 }

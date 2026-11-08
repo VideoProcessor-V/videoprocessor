@@ -1277,17 +1277,35 @@ if (tile < int(tiles) && g.y < ts) {
 		trackerH.SetChainContradictsNative(holdOn && chainHoldsAxis[0]);
 		trackerV.SetChainContradictsNative(holdOn && chainHoldsAxis[1]);
 		const unsigned long long heldBefore[3] = { tracker.ChainHeld(), trackerH.ChainHeld(), trackerV.ChainHeld() };
+		const SourceResolution::FrameReading frameV = SourceResolution::AxisFrame(frame, true);
+		const SourceResolution::FrameReading frameH = SourceResolution::AxisFrame(frame, false);
 		tracker.Update(frame, j.seconds, false, j.sequence, lookAhead);
-		trackerV.Update(SourceResolution::AxisFrame(frame, true), j.seconds, false, j.sequence, lookAhead);
-		trackerH.Update(SourceResolution::AxisFrame(frame, false), j.seconds, false, j.sequence, lookAhead);
+		trackerV.Update(frameV, j.seconds, false, j.sequence, lookAhead);
+		trackerH.Update(frameH, j.seconds, false, j.sequence, lookAhead);
 		nativeHeldByChain.store(tracker.ChainHeld() + trackerV.ChainHeld() + trackerH.ChainHeld(), std::memory_order_relaxed);
-		if (holdOn && chainContradicts && chainEnabled.load(std::memory_order_acquire))
+		if (chainContradicts && chainEnabled.load(std::memory_order_acquire))
 		{
-			// A native-looking informative frame was just left out on an axis: the estimator re-tests at its acquiring cadence.
+			// A native-looking informative frame was just left out on an axis (On) or would have been (Shadow): the estimator re-tests at
+			// its acquiring cadence. Shadow holds nothing - the trackers decide as in Off - but it sends the same notes, by the same
+			// predicate as Tracker::Update's early return (informative and reading native on that tracker's axis), so the estimator's
+			// cadence and the would-be revert time are what On's would be. The note only moves the estimator's schedule; no displayed
+			// decision reads it.
 			unsigned held = 0;
-			if (trackerH.ChainHeld() != heldBefore[1]) held |= 1u;
-			if (trackerV.ChainHeld() != heldBefore[2]) held |= 2u;
-			if (tracker.ChainHeld() != heldBefore[0]) held |= chainHoldMask;
+			if (holdOn)
+			{
+				if (trackerH.ChainHeld() != heldBefore[1]) held |= 1u;
+				if (trackerV.ChainHeld() != heldBefore[2]) held |= 2u;
+				if (tracker.ChainHeld() != heldBefore[0]) held |= chainHoldMask;
+			}
+			else
+			{
+				auto wouldHold = [](const SourceResolution::Tracker& t, const SourceResolution::FrameReading& f) {
+					return f.informative() && f.ratio >= t.GetSettings().nativeAbove;
+				};
+				if (chainHoldsAxis[0] && wouldHold(trackerH, frameH)) held |= 1u;
+				if (chainHoldsAxis[1] && wouldHold(trackerV, frameV)) held |= 2u;
+				if (wouldHold(tracker, frame)) held |= chainHoldMask;
+			}
 			if (held != 0) chainEst->NoteNativeHeld(held);
 		}
 		// Latch fixes: the tracker reset itself for a cause the check above did not see: the rest too.
