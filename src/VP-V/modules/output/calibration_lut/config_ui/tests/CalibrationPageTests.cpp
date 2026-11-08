@@ -49,19 +49,23 @@ namespace
 		const int vpv = window.pageIndex(QStringLiteral("VP-V"));
 		require(calibration >= 0 && vpv == calibration + 1,
 			"the Calibration page does not keep its place before the VP-V page");
+		// Owner 2026-11-07: a left-hand entry under the VP-V group as well as the Output unit's button.
+		QPushButton* leaf = nullptr;
 		for (QPushButton* button : window.findChildren<QPushButton*>())
-			require(button->property("pageName").toString() != QStringLiteral("Calibration"),
-				"the Calibration sub-page has a navigation leaf of its own");
+			if (button->property("nav").toBool() && button->property("pageName").toString() == QStringLiteral("Calibration")) leaf = button;
+		require(leaf != nullptr && leaf->property("vpvChild").toBool() && leaf->property("vpvParent").toString() == QStringLiteral("VP-V"),
+			"Calibration has no navigation child under the VP-V group");
 		auto* open = window.findChild<QPushButton*>(QStringLiteral("vpv.output.subpage.Calibration"));
 		require(open != nullptr, "the Output unit of the VP-V page has no button for the Calibration page");
 		window.selectPage(QStringLiteral("General"));
 		open->click();
 		QCoreApplication::processEvents();
 		require(pages->currentIndex() == calibration, "the Output unit's Calibration button opened another page");
-		bool vpvLeafLit = false;
-		for (QPushButton* button : window.findChildren<QPushButton*>())
-			if (button->property("pageName").toString() == QStringLiteral("VP-V") && button->isChecked()) vpvLeafLit = true;
-		require(vpvLeafLit, "opening a sub-page did not light the VP-V navigation leaf");
+		require(leaf->isChecked(), "opening the page from the button did not light its navigation child");
+		window.selectPage(QStringLiteral("General"));
+		leaf->click();
+		QCoreApplication::processEvents();
+		require(pages->currentIndex() == calibration, "the navigation child opened another page than the button");
 	}
 
 	void testCalibrationControlsKeepNamesAndWritePath()

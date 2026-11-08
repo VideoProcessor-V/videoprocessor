@@ -2257,7 +2257,7 @@ void ConfigEditorWindow::selectPage(int index)
     if (!navigation_) return;
     const int navigationIndex = index == 4 || index == 11 || index == 13 ? 2 :
         index == 12 ? 3 :
-        index == 8 || index == 9 ? 8 : vpvPages_.navigationIndex(index);   // VPV-HOOK (a sub-page lights its parent's leaf)
+        index == 8 || index == 9 ? 8 : vpvPages_.navigationIndex(index);   // VPV-HOOK (a sub-page lights its own VP-V child leaf)
     for (QAbstractButton* button : navigation_->findChildren<QAbstractButton*>())
     {
         const bool selected = button->property("pageIndex").isValid() &&
@@ -5494,12 +5494,12 @@ QWidget* ConfigEditorWindow::createShell()
     QPushButton* shadersNavigation = addLeaf(QStringLiteral("Shaders"), 14);
     addLeaf(QStringLiteral("Actions"), 7);
     QPushButton* shortcutsNavigation = addLeaf(QStringLiteral("Shortcuts"), 15);
-    vpvPages_.addNavigationLeaves(addLeaf);   // VPV-HOOK
     addLeaf(QStringLiteral("Logs"), 10);
     navLayout->addSpacing(8);
     QPushButton* vpNavigation = addLeaf(QStringLiteral("VP Renderer"), 2);
     QPushButton* directShowNavigation = addLeaf(QStringLiteral("DirectShow"), 3);
     addLeaf(QStringLiteral("Updates"), 20)->setObjectName(QStringLiteral("config.openUpdates"));
+    vpvPages_.addNavigationLeaves(addLeaf);   // VPV-HOOK (the VP-V group and its children close Bill's list)
     navLayout->addStretch();
 
     auto* pageHost = new QWidget;

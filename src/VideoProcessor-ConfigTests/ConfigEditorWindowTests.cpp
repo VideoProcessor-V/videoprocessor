@@ -10685,9 +10685,10 @@ void testPagesAreAddressedByName()
     }
     require(window.pageIndex(QStringLiteral("No such page")) == -1, "An unknown page name resolved");
     // Navigation buttons carry the name: they open the same page whatever the order.
-    // (Dynamic Drive and Calibration are sub-pages of the VP-V page: no leaf of their own; LedDrivePageTests and
-    // CalibrationPageTests cover them.)
-    for (const QString& name : { QStringLiteral("Display"), QStringLiteral("Updates"), QStringLiteral("VP-V") })
+    // (Dynamic Drive and Calibration are children of the VP-V group in the list; LedDrivePageTests and
+    // CalibrationPageTests also check that the child and the unit button reach the same page.)
+    for (const QString& name : { QStringLiteral("Display"), QStringLiteral("Updates"), QStringLiteral("Dynamic Drive"),
+            QStringLiteral("Calibration"), QStringLiteral("VP-V") })
     {
         QPushButton* found = nullptr;
         for (auto* button : window.findChildren<QPushButton*>())

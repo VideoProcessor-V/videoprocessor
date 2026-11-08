@@ -74,12 +74,14 @@ namespace Vpv
 			return found;
 		}
 
-		// The page whose navigation leaf stands for page `index`: the parent of a sub-page, else itself.
+		// The page whose navigation leaf stands for page `index`: itself. A sub-page of the VP-V master
+		// page has a child leaf under the VP-V leaf (addNavigationLeaves); a sub-page of any other page
+		// has no leaf of its own and its parent's leaf stands for it.
 		int navigationIndex(int index) const
 		{
 			const QString own = name(index);
 			for (const SubPageInfo& sub : subPages_)
-				if (sub.name == own)
+				if (sub.name == own && sub.parent != QStringLiteral("VP-V"))
 				{
 					const int parent = this->index(sub.parent);
 					return parent >= 0 ? parent : index;
@@ -116,7 +118,11 @@ namespace Vpv
 			return added;
 		}
 
-		// Adds the VP-V navigation leaves through the host's own leaf builder (title, page index).
+		// Adds the VP-V navigation leaves through the host's own leaf builder (title, page index). The
+		// VP-V master page gets its leaf, and each sub-page registered under it (Dynamic Drive,
+		// Calibration, ...) a child leaf right below it, in registration order, indented. Every VP-V
+		// setting is thus reachable from the VP-V group of the list (owner 2026-11-07); the unit tabs'
+		// "Open ..." buttons reach the same pages. A sub-page of another parent has no leaf.
 		template <class AddLeaf>
 		void addNavigationLeaves(AddLeaf&& addLeaf) const
 		{
@@ -126,7 +132,16 @@ namespace Vpv
 				for (const SubPageInfo& info : subPages_) sub = sub || info.name == title;
 				if (sub) continue;
 				QPushButton* button = addLeaf(title, index(title));
-				if (title == QStringLiteral("VP-V")) button->setObjectName(QStringLiteral("config.openVpv"));
+				if (title != QStringLiteral("VP-V")) continue;
+				button->setObjectName(QStringLiteral("config.openVpv"));
+				for (const SubPageInfo& info : subPages_)
+				{
+					if (info.parent != title) continue;
+					QPushButton* child = addLeaf(info.name, index(info.name));
+					child->setProperty("vpvChild", true);
+					child->setProperty("vpvParent", title);
+					child->setStyleSheet(QStringLiteral("QPushButton { padding-left: 26px; }"));
+				}
 			}
 		}
 

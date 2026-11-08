@@ -67,15 +67,41 @@ namespace
 		const int vpv = window.pageIndex(QStringLiteral("VP-V"));
 		require(drive >= 0 && calibration == drive + 1 && vpv == calibration + 1,
 			"the stack order is not Dynamic Drive, Calibration, VP-V");
+		// Owner 2026-11-07: a left-hand entry under the VP-V group as well as the Drive unit's button.
+		QPushButton* leaf = nullptr;
 		for (QPushButton* button : window.findChildren<QPushButton*>())
-			require(button->property("pageName").toString() != QStringLiteral("Dynamic Drive"),
-				"the Dynamic Drive sub-page has a navigation leaf of its own");
+			if (button->property("nav").toBool() && button->property("pageName").toString() == QStringLiteral("Dynamic Drive")) leaf = button;
+		require(leaf != nullptr && leaf->property("vpvChild").toBool() && leaf->property("vpvParent").toString() == QStringLiteral("VP-V"),
+			"Dynamic Drive has no navigation child under the VP-V group");
 		auto* open = window.findChild<QPushButton*>(QStringLiteral("vpv.drive.subpage.Dynamic Drive"));
 		require(open != nullptr, "the Drive unit of the VP-V page has no button for the Dynamic Drive page");
 		window.selectPage(QStringLiteral("General"));
 		open->click();
 		QCoreApplication::processEvents();
 		require(pages->currentIndex() == drive, "the Drive unit's button opened another page");
+		require(leaf->isChecked(), "opening the page from the button did not light its navigation child");
+		window.selectPage(QStringLiteral("General"));
+		leaf->click();
+		QCoreApplication::processEvents();
+		require(pages->currentIndex() == drive, "the navigation child opened another page than the button");
+	}
+
+	void testVpvGroupClosesBillsNavigationList()
+	{
+		Vpv::RegisterConfigProviders();
+		QTemporaryDir dir;
+		ConfigEditorWindow window(writeFixture(dir), 0, true);
+		QStringList order;
+		for (QPushButton* button : window.findChildren<QPushButton*>())
+			if (button->property("nav").toBool() && button->objectName().startsWith(QStringLiteral("settingsNavigation.")))
+				order << button->text();
+		// Bill's list, in his order and with his text; the VP-V group (master leaf, then its children in
+		// registration order) follows his last entry.
+		const QStringList expected = { QStringLiteral("General"), QStringLiteral("Display"), QStringLiteral("Queue"),
+			QStringLiteral("DV"), QStringLiteral("Shaders"), QStringLiteral("Actions"), QStringLiteral("Shortcuts"),
+			QStringLiteral("Logs"), QStringLiteral("VP Renderer"), QStringLiteral("DirectShow"), QStringLiteral("Updates"),
+			QStringLiteral("VP-V"), QStringLiteral("Dynamic Drive"), QStringLiteral("Calibration") };
+		require(order == expected, ("the navigation list is not Bill's list followed by the VP-V group: " + order.join(QStringLiteral(", ")).toStdString()).c_str());
 	}
 
 	void testControlsKeepNamesAndShowStoredValues()
@@ -227,6 +253,7 @@ int RunLedDrivePageTests(const std::function<int(const char*, const std::functio
 	g_save = saveHelper;
 	int failures = 0;
 	failures += run("LedDrivePageTests: Dynamic Drive is a sub-page before Calibration", testDynamicDriveIsASubPageBeforeCalibration);
+	failures += run("LedDrivePageTests: the VP-V group closes Bill's navigation list", testVpvGroupClosesBillsNavigationList);
 	failures += run("LedDrivePageTests: controls keep names and show stored values", testControlsKeepNamesAndShowStoredValues);
 	failures += run("LedDrivePageTests: edits reach the file", testEditsReachTheFile);
 	failures += run("LedDrivePageTests: the fixed-loop Reset follows the script grouping", testFixedLoopResetFollowsTheScriptGrouping);
