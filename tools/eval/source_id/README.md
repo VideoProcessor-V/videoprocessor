@@ -123,8 +123,14 @@ Writes `NullTables.generated.h` (an inline `GeneratedNullTables()` returning the
 * Fit per class: null mean = median; sd = the largest of 1.4826 MAD and the dip-side spread matched at 1, 2 and 2.5 sigma
   (median - P15.9, (median - P2.3)/2, (median - P0.6)/2.5), widened x1.25 and by (1 + 2/sqrt(n_eff)); alt = median /
   max(MAD sd, upper-side spread), shrunk toward the null by min(1, n_eff_alt/75).
-* Conservative rules: fewer than 30 null or 20 alt effective samples, fewer than 5 masters, or an alt not 0.25 null-sd below the null
-  KEEPS THE PLACEHOLDER. Below the full counts (150 null / 75 alt) a class is "thin": blended toward the placeholder in steps of
+* SID-CAL2 C3 (`--no-null-floor` switches both rules off, ablation only): (a) a class's null sd is NEVER below the fitted dip-side sd of its own null data
+  (`dip_sd` = max(median - P15.9, (median - P2.3)/2, (median - P0.6)/2.5), widened x1.25 and by (1 + 2/sqrt(n_eff)) like the fit), also for a class that keeps the
+  placeholder or a blend of it (the placeholder nulls k/16 0.08 and generic 0.06 were narrower than the tails of the native data) - the floor is applied last,
+  so a blended class is no longer guaranteed to be dominated by the placeholder (the blend itself still is: `diag["dominated"]`); needs >= 30 null shots; (b) a class
+  with >= 30 null but < 20 alt effective samples gets alt = null (a zero increment everywhere: no evidence for sizes of that class until alt data exist), status
+  `no-alt`, instead of the placeholder alt. The report line "C3 ..." names the classes each rule hit.
+* Conservative rules: fewer than 30 null effective samples, fewer than 5 masters, or an alt not 0.25 null-sd below the null
+  KEEPS THE PLACEHOLDER (fewer than 20 alt effective samples: C3b above). Below the full counts (150 null / 75 alt) a class is "thin": blended toward the placeholder in steps of
   0.1 until its clamped increment is nowhere larger than the placeholder's on T in [-2, max(1, largest observed T)]. Every number is a
   field of `Policy`.
 * Validation: 2-fold CV BY MASTER (sha1-ordered, alternating; all reels of a footage, native or upscaled, share a fold). Held out: per
