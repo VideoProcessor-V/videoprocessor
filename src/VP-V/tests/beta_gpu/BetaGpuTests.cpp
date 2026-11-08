@@ -4609,7 +4609,9 @@ namespace CameraAccuracy
 		md << "- Different (a live run can differ by these): the lag d is fixed at " << kGuideLag << " here, live uses the measured lag (>= 2); the fit reads the "
 			"estimator's final Field() with no backward field (the live readback may add one); the fade flag and gain come from the scene's truth, live "
 			"from P4's detector; the guidance governor, the lane-versus-live race, a late record and a slip refusal are not modelled (a refused pair is today's "
-			"matcher, which this harness's off variant is); the temporal seed has no CPU flow here, so that switch (in all_switches) does nothing.\n";
+			"matcher, which this harness's off variant is); the temporal seed has no CPU flow here, so that switch (in all_switches) does nothing; "
+			"PairFacts.haveEngineGlobal is not set (the fit's engine-agreement signal stays neutral; live sets it when the engine's global is used); "
+			"all_switches understates guidedCandidate and tinyMoverRoi (the CPU plan only: the GPU matcher does not apply them yet).\n";
 	}
 }
 
