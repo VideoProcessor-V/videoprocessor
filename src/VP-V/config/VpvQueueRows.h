@@ -121,11 +121,12 @@ namespace Vpv
 		auto* column = new QVBoxLayout(body);
 		column->setContentsMargins(0, 0, 0, 0);
 		column->setSpacing(8);
+		QComboBox* picker = nullptr;
 		if (list)
 		{
 			auto* pickerRow = new QHBoxLayout;
 			pickerRow->addWidget(new QLabel(QStringLiteral("Profile")));
-			auto* picker = new QComboBox;
+			picker = new QComboBox;
 			picker->setObjectName(QStringLiteral("vpv.both.queue_target.profile"));
 			picker->setAccessibleName(QStringLiteral("Queue profile"));
 			picker->setToolTip(QStringLiteral("The queue profile these settings edit; the same profile is selected on the Queue page."));
@@ -229,9 +230,15 @@ namespace Vpv
 			// blocked or unchanged): the buttons, the row and the note follow its value.
 			auto* refresh = new QAction(modeButtons);
 			refresh->setObjectName(QStringLiteral("config.queue.target_mode_refresh"));
-			QObject::connect(refresh, &QAction::triggered, modeButtons, [show, latencySpin, updateLatencyNote]() {
+			// The picker also shows the loaded profile (a list change made under blocked signals reaches it here).
+			QObject::connect(refresh, &QAction::triggered, modeButtons, [show, latencySpin, updateLatencyNote, picker, list]() {
 				updateLatencyNote(latencySpin->value());
 				show();
+				if (picker && list && picker->count() == list->count() && picker->currentIndex() != list->currentRow())
+				{
+					const QSignalBlocker blocker(picker);
+					picker->setCurrentIndex(list->currentRow());
+				}
 			});
 			latencySpin->setProperty(kRefreshProperty, QVariant::fromValue<QObject*>(refresh));
 			show();

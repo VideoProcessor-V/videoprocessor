@@ -1509,19 +1509,14 @@ namespace
 	}
 	// Row c (RESTORED-CFG-04, WAIVER-C-1): VP-V's queue rows sit on the VP-V card "Queue target and low latency",
 	// bound to the queue profile selected on Bill's list; Bill's Queue form is his a591ad3b form again. VP-V's
-	// look-ahead (.vpv) shows a stored -1, "auto" or an absent key as Auto while Bill's 0..8 control shows 0 the
-	// way his loader does; opening and saving untouched leaves the stored values byte-unchanged (Bill's displayed
-	// 0 is never written back); the two controls follow each other both ways.
+	// look-ahead (.vpv) shows an absent key, a stored -1 or "auto" as Auto while Bill's 0..8 control shows 0 the
+	// way his loader does, and opening writes nothing. (A stored -1 / "auto" is outside Bill's queue schema, 0..8,
+	// so Apply refuses such a file before and after row c; Auto is saved as an absent key.) Opening and saving
+	// untouched keeps every stored value (Bill's displayed 0 is never written back); the two controls follow each
+	// other both ways; an explicit 0 shows the notice.
 	void testQueueRowsOnTheVpvCard()
 	{
-		QTemporaryDir dir;
-		const char* text = "[general]\nrenderer: VP Renderer\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 4\n"
-			"[queue.Minus]\nqueue_size: 16\nactive_picture_lookahead_frames: -1\n"
-			"[queue.Word]\nqueue_size: 16\nactive_picture_lookahead_frames: auto\n"
-			"[queue.Three]\nqueue_size: 16\nactive_picture_lookahead_frames: 3\n";
-		const QString path = WriteFixture(dir, text);
-		const QByteArray original(text);
-		const auto readFile = [&path]() { QFile file(path); return file.open(QIODevice::ReadOnly) ? file.readAll().replace("\r\n", "\n") : QByteArray(); };
+		const auto readFile = [](const QString& path) { QFile file(path); return file.open(QIODevice::ReadOnly) ? file.readAll().replace("\r\n", "\n") : QByteArray(); };
 		const auto selectQueue = [](QListWidget* queues, const QString& name)
 		{
 			for (int row = 0; row < queues->count(); ++row)
@@ -1534,6 +1529,12 @@ namespace
 			return false;
 		};
 		{
+			QTemporaryDir dir;
+			const char* text = "[general]\nrenderer: VP Renderer\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 4\n"
+				"[queue.Minus]\nqueue_size: 16\nactive_picture_lookahead_frames: -1\n"
+				"[queue.Word]\nqueue_size: 16\nactive_picture_lookahead_frames: auto\n"
+				"[queue.Three]\nqueue_size: 16\nactive_picture_lookahead_frames: 3\n";
+			const QString path = WriteFixture(dir, text);
 			ConfigEditorWindow window(path, 0, true);
 			auto* section = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section")));
 			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("both.card.queue_target")));
@@ -1558,21 +1559,36 @@ namespace
 			for (const char* name : { "queue.normal", "queue.minus", "queue.word" })
 			{
 				require(selectQueue(queues, QString::fromLatin1(name)), (std::string("profile missing: ") + name).c_str());
-				require(picker->currentIndex() == queues->currentRow(), "the card's picker does not follow Bill's list");
+				require(picker->currentIndex() == queues->currentRow(), (std::string("the card's picker does not follow Bill's list: ") + name).c_str());
 				require(vpv->value() == -1 && vpv->text() == QStringLiteral("Auto"), (std::string("VP-V's look-ahead does not show Auto: ") + name).c_str());
 				require(bills->value() == 0, (std::string("Bill's control does not show Auto as his 0: ") + name).c_str());
 				require(!notice->isVisibleTo(card), "the explicit-0 notice shows for Auto");
 			}
 			require(selectQueue(queues, QStringLiteral("queue.three")) && vpv->value() == 3 && bills->value() == 3,
 				"an explicit value is not shown on both controls");
-			require(readFile() == original, "opening Config wrote the file");
+			require(readFile(path) == QByteArray(text), "opening Config wrote the file");
+		}
+		QTemporaryDir dir;
+		const char* text = "[general]\nrenderer: VP Renderer\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 4\n"
+			"[queue.Zero]\nqueue_size: 16\nactive_picture_lookahead_frames: 0\n"
+			"[queue.Three]\nqueue_size: 16\nactive_picture_lookahead_frames: 3\n";
+		const QString path = WriteFixture(dir, text);
+		{
+			ConfigEditorWindow window(path, 0, true);
+			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("both.card.queue_target")));
+			auto* queues = control<QListWidget>(window, QStringLiteral("config.queue.profiles"));
+			auto* vpv = control<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames.vpv"));
+			auto* notice = control<QLabel>(window, QStringLiteral("config.queue.active_picture_lookahead_notice"));
+			require(selectQueue(queues, QStringLiteral("queue.zero")) && vpv->value() == 0 && notice->isVisibleTo(card),
+				"an explicit 0 does not show 0 and the notice on VP-V's control");
+			require(selectQueue(queues, QStringLiteral("queue.normal")) && vpv->value() == -1 && !notice->isVisibleTo(card),
+				"Auto after an explicit 0 keeps the notice");
 			save(window);
-			const QByteArray saved = readFile();
-			for (const char* part : { "[queue.Normal]\nqueue_size: 32\ntarget_frames: 4\n", "[queue.Minus]\nqueue_size: 16\nactive_picture_lookahead_frames: -1\n",
-					"[queue.Word]\nqueue_size: 16\nactive_picture_lookahead_frames: auto\n", "[queue.Three]\nqueue_size: 16\nactive_picture_lookahead_frames: 3\n" })
-				require(saved.contains(part), (std::string("saving untouched changed a queue profile: ") + part).c_str());
-			require(saved.count("active_picture_lookahead_frames") == 3 && !saved.contains("active_picture_lookahead_frames: 0"),
-				"saving untouched wrote Bill's displayed 0 back");
+			const QByteArray saved = readFile(path);
+			for (const char* part : { "[queue.Normal]\nqueue_size: 32\ntarget_frames: 4\n", "[queue.Zero]\nqueue_size: 16\nactive_picture_lookahead_frames: 0\n",
+					"[queue.Three]\nqueue_size: 16\nactive_picture_lookahead_frames: 3\n" })
+				require(saved.contains(part), (std::string("saving untouched changed a queue profile: ") + part + " in " + saved.toStdString()).c_str());
+			require(saved.count("active_picture_lookahead_frames") == 2, "saving untouched wrote Bill's displayed 0 for the Auto profile");
 		}
 		{
 			ConfigEditorWindow window(path, 0, true);
@@ -1589,10 +1605,9 @@ namespace
 			QCoreApplication::processEvents();
 			require(bills->value() == 0 && vpv->value() == -1, "VP-V's Auto does not show as 0 on Bill's control");
 			save(window);
-			const QByteArray saved = readFile();
-			require(saved.contains("[queue.Three]\nqueue_size: 16\n") && saved.count("active_picture_lookahead_frames") == 2 &&
-				!saved.contains("active_picture_lookahead_frames: 0") && saved.contains("active_picture_lookahead_frames: -1") &&
-				saved.contains("active_picture_lookahead_frames: auto"),
+			const QByteArray saved = readFile(path);
+			require(saved.contains("[queue.Three]\nqueue_size: 16\n") && saved.count("active_picture_lookahead_frames") == 1 &&
+				saved.contains("[queue.Zero]\nqueue_size: 16\nactive_picture_lookahead_frames: 0\n"),
 				(std::string("VP-V's Auto did not remove the key, or another profile's value changed: ") + saved.toStdString()).c_str());
 		}
 	}
