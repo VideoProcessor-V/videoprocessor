@@ -1407,6 +1407,36 @@ namespace
 		QFile file(path);
 		require(file.open(QIODevice::ReadOnly) && file.readAll().contains("chroma_upscaler: catmull_rom"), "VP-V's chroma choice not saved");
 	}
+	// D4 (WAIVER-P8-05): Bill's Dithering control is his again in VP-V mode too - his four choices; a VP-V-only
+	// value shows as his "Saved legacy method" and nothing is written - while VP-V's own control shows the value.
+	void testBillsDitheringStaysHis()
+	{
+		for (const char* mode : { "ordered_lut", "error_diffusion_stucki", "blue_noise" })
+		{
+			QTemporaryDir dir;
+			const std::string text = std::string("[general]\nrenderer: VP Renderer\n[vprenderer.scaling.Default]\ndithering: ") + mode + "\n";
+			const QString path = WriteFixture(dir, text.c_str());
+			ConfigEditorWindow window(path, 0, true);
+			window.selectPage(QStringLiteral("Scaling"));
+			QCoreApplication::processEvents();
+			auto* bills = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.dithering"));
+			QStringList offered;
+			for (int i = 0; i < bills->count(); ++i)
+				if (!bills->itemData(i).toString().isEmpty()) offered << bills->itemData(i).toString();
+			require(offered == QStringList({ "blue_noise", "ordered_fixed", "white_noise", "off" }), "Bill's Dithering does not keep his four choices");
+			auto* vpv = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.dithering.vpv"));
+			require(vpv->currentData().toString() == QString::fromLatin1(mode), (std::string("VP-V's Dithering does not show the stored ") + mode).c_str());
+			if (QString::fromLatin1(mode) == QStringLiteral("blue_noise"))
+				require(bills->currentData().toString() == QStringLiteral("blue_noise"), "Bill's control does not show his own value");
+			else
+				require(bills->currentIndex() < 0 && bills->placeholderText().startsWith(QStringLiteral("Saved legacy method")),
+					(std::string("Bill's control does not show a VP-V value as his legacy method: ") + mode).c_str());
+			require(control<QLabel>(window, QStringLiteral("vpv.output.dither.note"))->text().contains(QStringLiteral("legacy method")),
+				"the VP-V dither card does not explain Bill's legacy-method display");
+			QFile file(path);
+			require(file.open(QIODevice::ReadOnly) && file.readAll() == QByteArray(text.c_str()), "opening Config wrote the file");
+		}
+	}
 }
 
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -1435,5 +1465,6 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: Camera model group writes the keys VP reads", testCameraModelControlsReachVp);
 	failures += run("VP-V: both-pathway cards leave Bill's pages", testBothPathwayCardsLeaveBillsPages);
 	failures += run("VP-V: Bill's Chroma upscaler and VP-V's list", testChromaBillsControlAndVpvList);
+	failures += run("VP-V: Bill's Dithering stays his, VP-V's list shows the value", testBillsDitheringStaysHis);
 	return failures;
 }
