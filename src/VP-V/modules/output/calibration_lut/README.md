@@ -27,6 +27,20 @@ design documents. The module is self-contained in this folder except for the Bil
 2. Optional, for a real display: ArgyllCMS 3.0 or newer (`spotread.exe`) and a meter. Without them everything
    below still runs (simulated display and meter).
 
+Newcomer notes (gaps found by a docs-only newcomer check, 2026-11-08):
+- MWCapture SDK: Magewell's "MWCapture SDK" for Windows (developer download on magewell.com; this repository
+  builds with 3.3.1.1596). Install it anywhere and pass its `SDKv3` folder, e.g.
+  `/p:MagewellSdkRoot="C:\Program Files\MWCaptureSDK 3.3.1.1596\SDKv3"`. Check that
+  `SDKv3\Include\LibMWCapture\MWCapture.h` exists before treating a build failure as a missing SDK.
+- Qt: Qt 6.8.3 `msvc2022_64` (set in `src/VideoProcessor-Config/VideoProcessor-Config.vcxproj`). The build finds
+  it through `VP_QT_ROOT`, else `%LOCALAPPDATA%\VideoProcessor\dependencies\Qt\6.8.3\msvc2022_64`, else
+  `.dependencies\Qt\6.8.3\msvc2022_64` in the repository. Toolset v143 (Visual Studio 2022 17.x or newer).
+- `vstest.console.exe` is not on PATH outside a Developer PowerShell. It lives under the Visual Studio install, e.g.
+  `C:\Program Files\Microsoft Visual Studio\<version>\<edition>\Common7\IDE\CommonExtensions\Microsoft\TestWindow\`.
+  From Git Bash, set `MSYS_NO_PATHCONV=1` so `/ResultsDirectory:` paths are not rewritten.
+- "Shared build-slot runner" (in "How to build / test" below) is this team's slot protocol; an outside developer
+  just runs the MSBuild command below.
+
 ### Build (x64 Release, whole solution)
 
 From a Visual Studio Developer PowerShell in the repository root (the `AGENTS.md` command, with your SDK path):
@@ -52,6 +66,23 @@ the renderer or GUI, delete the stale `.iobj` / `.ipdb` files under `x64\Release
    (`CalibrationHardwareTests`, `CalibrationTranscriptHardwareTests`, `CalibrationLedHardwareTests`) skip unless
    their `VP_TEST_*` variables are set (see "Test it standalone" below).
 3. The renderer, on a GPU: see "Running CalibrationDryRun".
+4. The Calibration settings page (Qt, not vstest): `VideoProcessorConfigTests.exe` is a separate test program built
+   with the solution, run through `tools\run_config_tests.ps1` (off screen by default):
+   `powershell -NoProfile -ExecutionPolicy Bypass -File tools\run_config_tests.ps1 -Match CalibrationPage -OutDir <scratch folder>`
+   (PASS/FAIL counts are printed; exit 1 on any failure).
+
+A CPU-only simulated calibration session (no GPU, no meter): `CalibrationSessionTests` in
+`tests/CalibrationRemainderTests.cpp` drives `CalibrationSession` with the simulated display and meter, e.g.
+`FullRunAppliesOnlyTheCalibrationKeysAfterBackups` (a whole run to Apply) and `CancelDuringMeasurementRestoresVideo`;
+it is in the filter of step 2. `tests/CalibrationRemainderTests.cpp` also holds `CalibrationSpotreadTextTests`,
+`CalibrationMeterStateTests` and `CalibrationPatternTests`.
+
+Opening the page by hand: start `x64\Release\VideoProcessorConfig.exe` (or VideoProcessor's own settings
+command), choose the VP-V entry in the left-hand page list, open the Output tab and press
+"Open Calibration". The page shows its cards without a running VideoProcessor; Start / Apply need one ("Connect
+to a running VideoProcessor to calibrate"). A dry run through the real renderer: set Meter to `simulated` on the
+page (`[calibration] meter_model = simulated`) with VideoProcessor running and press Start; the session uses a
+simulated meter that reads the codes the renderer shows.
 
 ### Running CalibrationDryRun
 
