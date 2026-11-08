@@ -103,6 +103,23 @@ DELIBERATE exception: while libplacebo smooth motion runs, source-domain analysi
 
 Fallback entries (`FallbackCatalog`): `vector_engine` (unserved consumers and why), `vector_engine_producer` (look-ahead stores nothing for this size), `vector_engine_global` (fast-pan / intent without whole-frame motion).
 
+## Vector engine ownership (M2 P5a)
+
+The estimation-side state and decisions behind the renderer live in `VectorEngine` (`VectorEngine.h/.cpp`,
+`VectorEngineState.h`): the vector-demand decision and its statistics service, the optical-flow producer's lifecycle
+and look-ahead depth (`ProducerPlan.h`, pure and identity-tested against the old inline logic), the one vectors-valid
+state with its counters, and the S0 shadow check. The renderer holds one `vectorEngine` member and reaches it at the
+sites the code used to sit at; what the engine needs from the renderer arrives as plain values or through
+`IVectorEngineHost` (adapter: `VectorEngineHost.h`). What moved, what is left in the renderer, the thread of every
+member and the alias table: [HOOKS.md](HOOKS.md).
+
+- Reserved in `IVectorEngine` (interface and contracts only, default "absent"): the P3r refinement stage (`refined_field`,
+  U15 FieldRefine) and the async long-pair NVOF service `SubmitLongPair` with external hints. Fallback when absent: the
+  consumer reads the P3 field / the matcher's seeded search, and the fallback is raised visibly (ids in the header).
+  No BDOF/PROF offsets are stored.
+- No settings were added or changed by P5a; defaults are untouched. With VP motion off and in Original the engine does
+  nothing (its decision returns before any work, the producer plan wants nothing).
+
 ## Contract
 
 - Input: original frame luma at the delivered source size (before re-base/repair); queued next frames for the look-ahead

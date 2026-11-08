@@ -6424,7 +6424,7 @@ struct LibplaceboVideoRenderer::Impl
 	// ---- Vector engine on demand (VP-V/modules/motion/estimation/VectorDemand.h) --------------------
 	// M2 P5a: the vector engine's state (vector demand, producer, look-ahead, validity, invalidation) lives in
 	// VpMotion::VectorEngineState; the aliases keep every reader outside P5a's ranges unchanged. Each alias
-	// is deleted by the package that moves its last reader (docs/m2/P5A-INVENTORY.md).
+	// is deleted by the package that moves its last reader (VP-V/modules/motion/estimation/HOOKS.md).
 	// VPV-HOOK
 	VpMotion::VectorEngine vectorEngine;
 	VectorDemand::Decision& vectorDemand = vectorEngine.vectorDemand;
