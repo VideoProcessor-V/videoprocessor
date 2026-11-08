@@ -71,9 +71,10 @@ namespace NvOpticalFlow
 	};
 
 	// MV7: bytes of the ring textures one engine's user holds (the sizes follow the formats above, one flow and one cost texel per
-	// Grid x Grid pixels): two sets of input (R8, w x h), flow (R16G16_SINT, 4 B) and cost (R8_UINT, 1 B); `readback` adds the two
-	// staging copies of flow and cost (the producer's CPU read), `hint` one more flow-sized texture (the long pair's temporal hint).
-	// The driver's own session memory is not visible to the application and is NOT counted (the governor line says "textures").
+	// Grid x Grid pixels): two sets of input (R8, w x h), flow (R16G16_SINT, 4 B) and cost (R8_UINT, 1 B); `hint` one more flow-sized
+	// texture (the long pair's temporal hint). `readback` adds the two CPU-readback staging copies of flow and cost (D3D11 STAGING
+	// textures): those live in SYSTEM RAM, not video memory, so the VRAM ledger passes false (the producer and the long pair do). The
+	// driver's own session memory is not visible to the application and is NOT counted (the governor line says "textures").
 	inline uint64_t RingBytes(int w, int h, bool readback, bool hint)
 	{
 		if (w < 1 || h < 1)

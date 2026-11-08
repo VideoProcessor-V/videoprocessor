@@ -253,6 +253,7 @@ namespace SkeletonModuleTestsNs
 	// The CollectAhead phase as P5a's call site raises it: the input queue's size in a QueueView.
 	void Collect(Rig& rig, size_t size)
 	{
+		rig.base += 40000;   // one call per 25 fps frame: the lane-lead window is REAL time (0.5 s), so the test clock must move
 		RE::QueueView view;
 		view.size = size;
 		RE::FrameContext c;
@@ -1049,7 +1050,7 @@ namespace SkeletonModuleTestsNs
 				const VpSkeleton::UserGrant* g = ls->plan.governor.Find(VpSkeleton::kUserNvofProducer);
 				Assert::IsNotNull(g, L"the declared user is in the plan");
 				Assert::AreEqual(uint64_t(200) * 1024ull * 1024ull, g->bytes);
-				Assert::IsTrue(rig.Command().find("VRAM T0 optical-flow engines: 200.0 MB level 0") != std::string::npos);
+				Assert::IsTrue(rig.Command().find("VRAM T0 optical-flow engines: 200.0 MiB level 0") != std::string::npos);
 				const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
 				Assert::IsTrue(HasId(fb, "skeleton_vram_users"), L"an active module without a declaration is shown");
 				Assert::IsTrue(Has(fb, "camera model"));
@@ -1207,6 +1208,187 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(f.curSpread > 0u);
 			rig.After(4);
 			Assert::IsFalse(rig.sk.SceneFactsOf(rig.Host(), 1, f), L"there is no frame before 1");
+		}
+
+
+		TEST_METHOD(AnObservedSpanWithAWaitInsideNeverShedsAnything)
+		{
+			// Fix 3 of the stage A-C audit: the Begin..AfterRender span includes the render lock wait and pacing sleeps, so it is NOT a render-only time.
+			// Every frame here spends 5 periods inside the span (a sleep / lock wait): the regulator must not be fed and must shed nothing.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			auto frame = [&rig](int64_t seq, uint64_t spanUs) {
+				rig.Ingress(seq);
+				if (seq == 1)
+					rig.Deliver(1);
+				rig.Deliver(uint64_t(seq) + 1);
+				rig.Begin(seq);
+				rig.base += spanUs;   // the wait inside the span
+				rig.After(seq);
+				rig.base -= spanUs;
+			};
+			for (int64_t s = 1; s <= 150; ++s)
+				frame(s, 200000);
+			SkeletonModule::TimingFeed t = rig.sk.TimingFeedOf(rig.Host());
+			Assert::IsTrue(t.frames > 100, L"the span is observed every frame");
+			Assert::IsTrue(t.missed > 100, L"and is far above the period");
+			Assert::AreEqual(uint64_t(0), t.fed, L"but the regulator is not fed with it");
+			Assert::IsFalse(t.measured);
+			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+			Assert::AreEqual(int(lane->GetRegulator().MaxLevel()), int(lane->GetRegulator().Level()), L"nothing stepped down");
+			Assert::IsTrue(lane->GetRegulator().Dropped().empty());
+			VpSkeleton::RegTrace traces[64];
+			const size_t n = lane->RegulatorTraces(traces, 64);
+			for (size_t i = 0; i < n; ++i)
+			{
+				Assert::IsTrue(traces[i].action != VpSkeleton::RegAction::BackOff && traces[i].action != VpSkeleton::RegAction::Drop &&
+					traces[i].action != VpSkeleton::RegAction::MoveToRender && traces[i].action != VpSkeleton::RegAction::ForcedLive,
+					L"no shedding action on an observed span");
+			}
+			Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_regulator"), L"visible: observe only, shedding off");
+			Assert::IsTrue(rig.Command().find("(none: shedding off)") != std::string::npos);
+			// A span the HOST measured is what the regulator takes: counted, and the observe-only entry releases at the next status refresh.
+			Assert::IsFalse(rig.sk.NoteRenderOnlyMs(rig.Host(), 150, -1.0), L"a negative time is no measurement");
+			int other = 0;
+			Assert::IsFalse(rig.sk.NoteRenderOnlyMs(&other, 150, 5.0), L"no lane for that host");
+			for (int i = 0; i < 3; ++i)
+				Assert::IsTrue(rig.sk.NoteRenderOnlyMs(rig.Host(), uint64_t(150 + i), 5.0));
+			t = rig.sk.TimingFeedOf(rig.Host());
+			Assert::AreEqual(uint64_t(3), t.fed);
+			Assert::IsTrue(t.measured);
+			for (int64_t s = 151; s <= 170; ++s)
+				frame(s, 1000);
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_regulator"), L"a measured span is in use");
+		}
+
+		TEST_METHOD(TheRenderAheadTermIsNeverLeftWiredWithAnOldValue)
+		{
+			// Fix 2: the host calls QueueDepth only while a render-ahead plan runs. No value (a negative one: no source period) unwires at once; a plan that
+			// stops (render-ahead switched off) is noticed after 8 source periods and unwires the term too.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			rig.Life(RE::Lifecycle::QueueDepth, 0, 2.2);
+			Assert::AreEqual(3, int(rig.sk.CurrentQueue().renderAhead));
+			Assert::IsTrue((rig.sk.CurrentQueue().wired & SkeletonModule::QueueShape::kRenderAhead) != 0);
+			rig.Life(RE::Lifecycle::QueueDepth, 0, -1.0);   // sourcePeriod <= 0 on the host
+			Assert::IsTrue((rig.sk.CurrentQueue().wired & SkeletonModule::QueueShape::kRenderAhead) == 0, L"no value: unwired, not zero-wired");
+			Assert::AreEqual(0, int(rig.sk.CurrentQueue().renderAhead));
+			rig.Life(RE::Lifecycle::QueueDepth, 0, 2.2);
+			for (int64_t s = 4; s <= 6; ++s)
+				rig.Frame(s);
+			Assert::IsTrue((rig.sk.CurrentQueue().wired & SkeletonModule::QueueShape::kRenderAhead) != 0, L"a plan 3 frames ago is current");
+			for (int64_t s = 7; s <= 20; ++s)
+				rig.Frame(s);   // the plan stopped: 14 periods without a QueueDepth fact
+			Assert::IsTrue((rig.sk.CurrentQueue().wired & SkeletonModule::QueueShape::kRenderAhead) == 0, L"stale: unwired");
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), "render-ahead depth"), L"and the unwired term is shown again");
+		}
+
+		TEST_METHOD(ALaneLeadThatStaysLowIsTheNewNormalAfterTheHoldTime)
+		{
+			// Fix 5: the starve peak decays. A dip is shown while it is recent; a lead that stays low for 10 s of real time stops being a starve.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			for (int i = 0; i < 30; ++i)
+				Collect(rig, 5);
+			rig.Frame(4);
+			Collect(rig, 3);
+			for (int i = 0; i < 30; ++i)
+				Collect(rig, 3);   // the window is 3 from here on
+			rig.Frame(5);
+			Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue_starve"), L"a recent dip is shown");
+			for (int64_t s = 6; s <= 300; ++s)
+			{
+				Collect(rig, 3);
+				rig.Frame(s);   // 12 s at 25 fps
+			}
+			const SkeletonModule::QueueInUse u = rig.sk.QueueInUseOf(rig.Host());
+			Assert::AreEqual(3, int(u.used.laneLead));
+			Assert::AreEqual(3u, u.leadPeak, L"the peak decayed to the lead in use");
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue_starve"), L"released by itself");
+		}
+
+		TEST_METHOD(TheLaneLeadWindowIsRealTimeWhateverTheCallRate)
+		{
+			// Fix 4: samples are timestamped. Ten calls inside one frame and one call per frame give the same window: the 0 ages out 0.5 s after it was seen.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			RE::QueueView view;
+			RE::FrameContext c;
+			c.host = rig.Host(); c.phase = RE::FramePhase::CollectAhead; c.phaseData = &view;
+			view.size = 0;
+			rig.sk.OnFrame(c);   // a 0 at t
+			view.size = 9;
+			for (int i = 0; i < 40; ++i)
+				rig.sk.OnFrame(c);   // forty calls with no time between (a burst): the 0 is still inside the window
+			Assert::AreEqual(0, int(rig.sk.CurrentQueue().laneLead));
+			rig.base += 600000;   // 0.6 s later
+			rig.sk.OnFrame(c);
+			Assert::AreEqual(9, int(rig.sk.CurrentQueue().laneLead), L"the 0 is older than 0.5 s of real time: gone");
+		}
+
+		TEST_METHOD(TheKnownUndeclaredVramUsersAreAStandingLine)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
+			Assert::IsTrue(HasId(fb, "skeleton_vram_known"), L"MV7 is never invisible: the gaps are named");
+			Assert::IsTrue(Has(fb, "temporal detail") && Has(fb, "texture restore"));
+		}
+
+		TEST_METHOD(AShedUserThatStillHoldsItsTextureIsPlannedAsTransient)
+		{
+			// Fix 9: the plan sheds a stepped user but its module has not freed the texture. The bytes it still holds above its grant are planned as transient
+			// until the module Withdraws, so the products are not granted occupied memory; the pending figure follows the real free, never the plan.
+			VpSkeleton::VramUsers& registry = VpSkeleton::VramUsers::Instance();
+			registry.ResetForTesting();
+			const uint64_t mb = 1024ull * 1024ull;
+			VpSkeleton::VramUser u;
+			u.id = VpSkeleton::kUserBasicChroma;
+			u.name = VpSkeleton::VramUserName(VpSkeleton::kUserBasicChroma);
+			u.tier = VpSkeleton::Tier::T1;
+			u.levels.push_back(200 * mb);
+			u.levelText.push_back(nullptr);
+			u.levels.push_back(0);
+			u.levelText.push_back("off");
+			int owner = 0;
+			registry.Declare(&owner, u, 200 * mb);
+			{
+				Rig rig(Lane("on"));
+				VpSkeleton::CardProfile card;
+				card.key.luid = 77;
+				card.vramBudgetBytes = 100 * mb;   // less than the user alone
+				card.vramUsageBytes = 200 * mb;    // and the user's 200 MiB are inside the usage (VP's own)
+				rig.sk.SetCardForTesting(card);
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				for (int64_t s = 1; s <= 4; ++s)
+					rig.Frame(s);
+				const std::shared_ptr<VpSkeleton::LaneState> ls = rig.sk.LaneOf(rig.Host())->State();
+				Assert::IsTrue(ls != nullptr);
+				const VpSkeleton::UserGrant* g = ls->plan.governor.Find(VpSkeleton::kUserBasicChroma);
+				Assert::IsNotNull(g);
+				Assert::IsTrue(g->shed, L"over budget: the stepped user is planned off");
+				Assert::AreEqual(200 * mb, rig.sk.VramPendingFreeOf(rig.Host()), L"but it still holds 200 MiB: pending");
+				Assert::AreEqual(200 * mb, registry.Take().heldBytes, L"the held bytes follow the module, not the plan");
+				registry.Withdraw(&owner, VpSkeleton::kUserBasicChroma);   // the module frees its texture
+				for (int64_t s = 5; s <= 70; ++s)
+					rig.Frame(s);
+				Assert::AreEqual(uint64_t(0), rig.sk.VramPendingFreeOf(rig.Host()), L"freed: nothing pending");
+			}
+			registry.ResetForTesting();
 		}
 
 

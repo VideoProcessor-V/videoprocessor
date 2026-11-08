@@ -84,14 +84,25 @@ namespace Vpv
 			// slack came from the measured period and render time because the host delivers no presentation facts.
 			struct TimingFeed
 			{
-				uint64_t frames = 0;        // frames fed
-				uint64_t skipped = 0;       // AfterRender without a Begin of the same frame, or with the period unknown (nothing fed)
-				uint64_t missed = 0;        // frames fed with missed = true
+				uint64_t frames = 0;        // frames OBSERVED (the Begin..AfterRender span: it includes lock waits and pacing sleeps)
+				uint64_t skipped = 0;       // AfterRender without a Begin of the same frame, or with the period unknown (nothing observed)
+				uint64_t missed = 0;        // observed frames whose span was above the period
+				uint64_t fed = 0;           // frames given to the regulator: ONLY measured render-only spans (NoteRenderOnlyMs); never the observed span
+				bool measured = false;      // a measured render-only span has been given (the regulator acts on it)
 				double lastSlackMs = 0.0, lastRenderOnlyMs = 0.0, lastPeriodMs = 0.0;
 				bool lastMissed = false;
-				bool derived = true;
+				bool derived = true;        // the figures above are the observed span, not a measured render-only time
 			};
 			TimingFeed TimingFeedOf(const void* host) const;
+			// The regulator's input (render thread, once per frame, any time before the next Begin): the render-only time of frame `seq` that the HOST
+			// measured (the PassTimers render span, not the module's Begin..AfterRender clock). Slack = the measured source period - renderOnlyMs,
+			// missed = renderOnlyMs > period; it goes to AnalysisLane::OnFrameTiming, so the regulator acts (sheds) on it. Until a measured span arrives the
+			// regulator is NOT fed: the module's own span includes lock waits and pacing sleeps, and shedding on that would act on waits. False when
+			// there is no lane or no measured period.
+			bool NoteRenderOnlyMs(const void* host, uint64_t seq, double renderOnlyMs);
+			// The bytes a declared VRAM user still holds although the plan gave it less (a shed user keeps its texture until its module frees it): counted
+			// as transient in the next plan, so the products are not granted memory that is still occupied. 0 when nothing is pending.
+			uint64_t VramPendingFreeOf(const void* host) const;
 
 			// ---- SK-W stage D: demand and products from outside the lane (the camera link, the vector engine) ----------------------------
 			// EXTERNAL DEMAND. A component beside the lane (the camera extension) declares its consumers here (for example
@@ -181,6 +192,12 @@ namespace Vpv
 			static unsigned RingSlotBudget() { return VpSkeleton::kRingHeadroomFrames - 3u - unsigned(VpSkeleton::kMaxCameraLead); }
 			static unsigned CappedRenderAhead(unsigned renderAhead) { return renderAhead < RingSlotBudget() ? renderAhead : RingSlotBudget(); }
 			static unsigned LaneLeadCap(unsigned renderAhead) { return RingSlotBudget() - CappedRenderAhead(renderAhead); }
+			// Withdraws the render-ahead term (not wired again: the depths fall back to their floors and the skeleton_queue entry names it): the plan
+			// stopped (render-ahead off), or the host had no source period to express the lead in frames.
+			void UnpublishRenderAhead()
+			{
+				MergeTerm([](QueueShape& q) { q.renderAhead = 0; q.wired = uint8_t(q.wired & ~QueueShape::kRenderAhead); });
+			}
 			// Names of the undelivered terms ("" when all three are wired) and the Fallbacks decision for them.
 			static std::string QueueNotWiredNote(uint8_t wired)
 			{

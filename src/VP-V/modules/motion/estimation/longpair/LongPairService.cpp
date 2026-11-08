@@ -135,6 +135,7 @@ namespace VpLongPair
 			}
 			// MV7: the long pair's ring textures leave the governor's budget with the engine.
 			VpSkeleton::VramUsers::Instance().Withdraw(this, VpSkeleton::kUserNvofProducer);
+			VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserNvofProducer, false);
 			hintTex.Release();
 			sizeW = sizeH = 0;
 		}
@@ -173,6 +174,7 @@ namespace VpLongPair
 				ReleaseEngine();
 				return false;
 			}
+			VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserNvofProducer, true);   // declared below once the engine is open
 			engine = std::make_unique<NvOpticalFlow::HintedEngine>();
 			if (!engine->Open(device, context, w, h, static_cast<NvOpticalFlow::Preset>(config.nvofPreset)))
 			{
@@ -181,8 +183,8 @@ namespace VpLongPair
 				ReleaseEngine();
 				return false;
 			}
-			// MV7 (the long pair is the 3rd NVOF user): its textures, readback copies and hint, counted by the governor (VramUsers.h).
-			VpSkeleton::VramUsers::Instance().DeclareFixed(this, VpSkeleton::kUserNvofProducer, NvOpticalFlow::RingBytes(w, h, true, true));
+			// MV7 (the long pair is the 3rd NVOF user): its textures and hint (the readback staging copies are system RAM), counted by the governor (VramUsers.h).
+			VpSkeleton::VramUsers::Instance().DeclareFixed(this, VpSkeleton::kUserNvofProducer, NvOpticalFlow::RingBytes(w, h, false, true));
 			sizeW = w;
 			sizeH = h;
 			return true;

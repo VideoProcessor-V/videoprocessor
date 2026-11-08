@@ -253,6 +253,7 @@ namespace MotionAhead
 	{
 		engine.reset();
 		VpSkeleton::VramUsers::Instance().Withdraw(this, VpSkeleton::kUserNvofProducer);   // MV7: the ring textures go with the engine
+		VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserNvofProducer, false);
 		for (int i = 0; i < 2; ++i)
 		{
 			lumaTex[i].Release(); flowTex[i].Release(); costTex[i].Release(); flowRead[i].Release(); costRead[i].Release();
@@ -406,6 +407,7 @@ namespace MotionAhead
 		if (halfW == sizeW && halfH == sizeH && engine && engine->IsOpen()) return true;
 		engine.reset();
 		VpSkeleton::VramUsers::Instance().Withdraw(this, VpSkeleton::kUserNvofProducer);   // MV7: re-declared below for the new size
+		VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserNvofProducer, true);   // an open that fails below leaves it active without a declaration: shown by the skeleton
 		for (int i = 0; i < 2; ++i)
 		{
 			lumaTex[i].Release(); flowTex[i].Release(); costTex[i].Release(); flowRead[i].Release(); costRead[i].Release();
@@ -442,8 +444,8 @@ namespace MotionAhead
 		}
 		sizeW = halfW;
 		sizeH = halfH;
-		// MV7: the ring textures (2 sets, with the CPU-readback copies) are this producer's VRAM; the governor counts them (VramUsers.h).
-		VpSkeleton::VramUsers::Instance().DeclareFixed(this, VpSkeleton::kUserNvofProducer, NvOpticalFlow::RingBytes(halfW, halfH, true, false));
+		// MV7: the ring textures (2 sets) are this producer's VRAM; the governor counts them (VramUsers.h). The readback staging copies are system RAM: not counted.
+		VpSkeleton::VramUsers::Instance().DeclareFixed(this, VpSkeleton::kUserNvofProducer, NvOpticalFlow::RingBytes(halfW, halfH, false, false));
 		return true;
 	}
 

@@ -496,7 +496,7 @@ private:
 inline std::string FormatMB(uint64_t bytes)
 {
     char s[48];
-    std::snprintf(s, sizeof(s), "%.1f MB", double(bytes) / (1024.0 * 1024.0));
+    std::snprintf(s, sizeof(s), "%.1f MiB", double(bytes) / (1024.0 * 1024.0));
     return s;
 }
 

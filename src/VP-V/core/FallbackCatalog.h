@@ -620,12 +620,13 @@ namespace FallbackCatalog
 	{
 		return note.empty() ? Released("skeleton_lane_lead") : Engaged("skeleton_lane_lead", note);
 	}
-	// S5 regulator input. Slack and the missed-deadline flag come from the host's present facts; until the renderer delivers them (the hub
-	// has no AfterPresent / PresentSample call site yet) the module derives them from the measured frame period and the render-only time
-	// (slack = period - render time; missed = render time above the period). Engaged while derived.
+	// S5 regulator input. The hub delivers no presentation facts and no measured render-only span yet: the module can only observe
+	// Begin..AfterRender (which includes lock waits and pacing sleeps), so it records the derived slack and shows it but does NOT feed
+	// the regulator with it (nothing is shed on that number). The regulator acts only on a span the host measured
+	// (SkeletonModule::NoteRenderOnlyMs). Engaged while observing.
 	inline Decision SkeletonRegulatorInput(bool derived)
 	{
-		return derived ? Engaged("skeleton_regulator", "regulator input: slack derived from render time; presentation facts not wired")
+		return derived ? Engaged("skeleton_regulator", "regulator input: observe only, slack derived from the Begin..AfterRender span (includes waits); render-only time not measured, shedding off")
 		               : Released("skeleton_regulator");
 	}
 	// MV7: a module that holds video memory is active but declared none of it to the VRAM governor (VramUsers.h), so its memory is
@@ -642,7 +643,14 @@ namespace FallbackCatalog
 		return noEngine ? Engaged("skeleton_engine_feed", "no vector engine for this renderer: the pair and field slots (P2m, P3) are not published; their readers fall back")
 		                : Released("skeleton_engine_feed");
 	}
-	// A lead read of an ordered-chain product is in THIS graph (WARNING level: nothing is rejected). The reader cannot be sealed ahead,
+	// MV7 standing gap: these users hold video memory and do not declare it to the governor (core/VramUsers.h KnownUndeclaredVramUsers), so the
+// budget does not see their memory. Engaged while the lane runs, until each module declares.
+inline Decision SkeletonVramKnown(const std::string& names)
+{
+	return names.empty() ? Released("skeleton_vram_known")
+	                     : Engaged("skeleton_vram_known", "VRAM not yet declared to the governor (known gaps): " + names + "; the budget does not count their memory");
+}
+// A lead read of an ordered-chain product is in THIS graph (WARNING level: nothing is rejected). The reader cannot be sealed ahead,
 	// so it live-fills its reduced form; the note is Graph::leadChainWarning ("quality_pattern -> coding_evidence (lead 2): lead read of an
 	// ordered chain: reader live-fills its reduced form"). Engaged only while such a read is in the graph.
 	inline Decision SkeletonLeadChain(const std::string& note)

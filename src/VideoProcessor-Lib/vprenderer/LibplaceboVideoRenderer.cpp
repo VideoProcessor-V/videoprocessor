@@ -16121,7 +16121,7 @@ struct LibplaceboVideoRenderer::Impl
 			if (restart)
 				++renderAheadRestarts;
 			renderAheadLead = RenderAhead::PlannedLead(sourcePeriod, displayPeriod);
-			RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::QueueDepth, this, nullptr, nullptr, nullptr, nullptr, 0, nullptr, sourcePeriod > 0.0 ? renderAheadLead / sourcePeriod : 0.0); // VPV-HOOK
+			RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::QueueDepth, this, nullptr, nullptr, nullptr, nullptr, 0, nullptr, sourcePeriod > 0.0 ? renderAheadLead / sourcePeriod : -1.0); // VPV-HOOK
 			// L, the constant that fixes which refresh is phase 0, without the lead: fixed
 			// at the anchor (a restart's first vsync - film time) and kept by chained
 			// frames (Schedule::AnchorLatency, Bug hunt 05 H1: a floor over chained samples

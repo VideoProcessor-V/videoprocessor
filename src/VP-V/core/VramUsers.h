@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 // MV7: the VRAM users outside the product catalog, declared to the ONE governor.
@@ -65,6 +66,13 @@ inline uint64_t TexBytesOf(const Tex* tex)
         return 0;
     const uint64_t d = tex->params.d > 0 ? uint64_t(tex->params.d) : uint64_t(1);
     return uint64_t(tex->params.w) * uint64_t(tex->params.h) * d * uint64_t(tex->params.format->texel_size);
+}
+
+// The users that hold video memory today and do NOT declare it (MV7 open items). Shown as one standing line while the lane runs (a
+// visible gap, not a guess of their size); a module leaves this list when it calls Declare. Static text.
+inline const char* KnownUndeclaredVramUsers()
+{
+    return "temporal detail, texture restore / detail pulse / debander, DejudderWarp's optical-flow textures, camera guidance textures";
 }
 
 class VramUsers {
@@ -168,6 +176,7 @@ public:
     struct Snapshot {
         std::vector<VramUser> users;        // one per id (declarations of one id are summed level by level)
         uint64_t heldBytes = 0;             // what they hold now: VP's own usage inside CurrentUsage
+        std::vector<std::pair<uint16_t, uint64_t>> heldById;   // the same, per id (a shed user that still holds its texture is a shortfall)
         std::vector<uint16_t> unpopulated;  // ids of active modules that declared nothing (unique, first-seen order)
     };
 
@@ -178,6 +187,14 @@ public:
         std::vector<uint16_t> ids;
         for (const Entry& e : entries_) {
             s.heldBytes += e.held;
+            bool counted = false;
+            for (std::pair<uint16_t, uint64_t>& h : s.heldById)
+                if (h.first == e.user.id) {
+                    h.second += e.held;
+                    counted = true;
+                }
+            if (!counted)
+                s.heldById.push_back(std::make_pair(e.user.id, e.held));
             bool seen = false;
             for (uint16_t id : ids)
                 seen = seen || id == e.user.id;

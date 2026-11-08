@@ -96,11 +96,22 @@ No `VP_*` variable changes the module's behaviour.
   Undelivered terms sit at their defaults, the depths at their floors, and Fallbacks says so:
   `skeleton_queue: record history: queue not yet wired (render-ahead depth, lane lead); floors in use` (it names only the terms still undelivered).
   `SetQueueForTesting` is test-only and single-threaded; it is not a feed.
-* **Regulator input (S5):** `AfterRender` calls `AnalysisLane::OnFrameTiming(seq, slackMs, renderOnlyMs, missed)` for every frame whose Begin it saw and
-  whose period is measured. Render-only time = the module's own clock from the end of `Begin` (after the deterministic wait and the seal) to the entry of
-  `AfterRender`. The hub has no AfterPresent / PresentSample call site yet, so slack and "missed" are derived (slack = period - render time, missed =
-  render time above the period) and Fallbacks says so (`skeleton_regulator`, Ctrl+Alt+D "Skeleton regulator input: derived from render time ..."); when
-  the host delivers presentation facts the entry releases.
+* **Regulator input (S5): observe only until a render-only span is measured.** `AfterRender` records the span from the end of `Begin` to the entry of
+  `AfterRender` (slack = period - span, "over the period" = span above the period) and shows it ("Skeleton regulator input: derived from render time
+  (observe only ...)", `skeleton_regulator`), but does NOT feed it to `AnalysisLane::OnFrameTiming`: that span contains the render lock wait and the
+  pacing sleeps, so a regulator acting on it would shed because of waits (test: a span with a wait of 5 periods inside sheds nothing). The regulator
+  acts only on `SkeletonModule::NoteRenderOnlyMs(host, seq, ms)`, a render-only time the HOST measured (the PassTimers render span; the host call site is
+  not in this package). Plausibility: the observed span is the idle-inclusive frame time (a frame that renders in 10 ms in a 40 ms cadence shows about
+  30 ms of slack by the observed form too, but so does one that waits 30 ms); with measured spans the figure is the real headroom. Until one arrives
+  the line says "(none: shedding off)" and the Fallbacks entry stays.
+* **Audit fixes (stage A-C).** The lane-lead window is timestamped: every `CollectAhead` call is one sample, the window is the last 0.5 s of REAL time
+  whatever the call rate (call contract: any thread, any rate; a host that stops calling leaves the last value, which then ages out through the starve peak).
+  The starve peak is the best lead of the last 10 s (it decays to the lead in use; not a permanent high-water mark). The render-ahead term is unwired
+  (never left wired with an old value) when the host passes no value (`QueueDepth` with a negative value: no source period) and when no `QueueDepth` fact came
+  for 8 source periods (the plan stopped). `Declare` runs only when a module's held size changed. The producers' readback staging copies are system
+  RAM and are not in the VRAM ledger; the ledger prints MiB. A stepped user that the plan sheds but that still holds its texture is planned as transient
+  until its module frees it (`VramPendingFreeOf`). `skeleton_vram_known` names the users that hold video memory and declare none yet. Ctrl+Alt+D shows
+  how many cost rows were posted and dropped ("Skeleton cost rows").
 * **Capped record history (visible):** the depths are bounded so every ring fits 255 slots (223 frames). When the rate asks for more,
   `skeleton_history: quality pattern history capped at 223 frames (source rate above 111.5 fps)` appears in Fallbacks; when the queue asks for
   more, `... (the configured queue asks for N frames)`. A graph whose slot counts still overflow is rejected (analysis lane unavailable, with
@@ -111,9 +122,9 @@ No `VP_*` variable changes the module's behaviour.
 * **Declared VRAM users.** At every graph configure `SkeletonModule` reads `VpSkeleton::VramUsers::Instance().Take()` (core/VramUsers.h): the users outside the
   product catalog become `TierInput::otherUsers` and their held bytes `ownUsageBytes` (inside `CurrentUsage`, so VP's own: re-planned, never counted twice). The
   graph is re-planned when the declarations changed (`VramUsers::Version()`), at most once per `kReconfigureMinFrames` frames. Ctrl+Alt+D lists each declared user
-  ("VRAM T0 optical-flow engines: N MB level L"); a user below level 0 has its governor notice in the "Analysis:" status line. The `VramLedgerLines` rows (core/
+  ("VRAM T0 optical-flow engines: N MiB level L"); a user below level 0 has its governor notice in the "Analysis:" status line. The `VramLedgerLines` rows (core/
   GpuAllocator.h) list every governor grant, so a declared user has a row there too. BasicChroma's kept output texture (`BasicChroma::Gpu::DeclaredUser`, luma-size
-  rg16, 4 B/px = 33.2 MB at 3840x2160: the real allocation, not the 66 MB RGBA16F estimate of the tracking note) is a stepped user (T1, lossy, shed first) declared
+  rg16, 4 B/px = 31.6 MiB (33.2 MB) at 3840x2160: the real allocation, not the 66 MB RGBA16F estimate of the tracking note) is a stepped user (T1, lossy, shed first) declared
   before any call site exists; the owner-waived `PrivateTextureScan` entry is untouched.
 * **Motion GPU job timings.** The NVOF producer times 1 pair in N (the GPU idle first, then the engine's completion, on the worker's own device) and posts it to
   `PassTimers::Inbox::Motion()` ("motion: NVOF producer engine (idle to completion)"). The skeleton prints the cumulative figures itself ("Skeleton motion GPU
@@ -160,7 +171,8 @@ Every downgrade is visible (Ctrl+I line, Ctrl+Alt+D, Config status); none is log
 | `skeleton_queue` | `record history: queue not yet wired (...); floors in use` | the render-ahead depth and/or lane lead have no feed yet (record histories at their floors) |
 | `skeleton_queue_starve` | `queue starve: lane lead N (was M), K fall(s); look-ahead products reduced: ...` | the live lane lead is below the best it had since the lane was built (releases when the queue recovers) |
 | `skeleton_lane_lead` | `lane lead capped at N frame(s) (queue holds M; ring slot budget)` (and the render-ahead form) | the fed lane lead / render-ahead depth exceeds the ring-slot budget shared by R + L |
-| `skeleton_regulator` | `regulator input: slack derived from render time; presentation facts not wired` | the S5 regulator is fed derived slack (no host presentation facts yet) |
+| `skeleton_regulator` | `regulator input: observe only, slack derived from the Begin..AfterRender span (includes waits); render-only time not measured, shedding off` | no host-measured render-only span has been given (`NoteRenderOnlyMs`); the regulator is not fed |
+| `skeleton_vram_known` | `VRAM not yet declared to the governor (known gaps): temporal detail, ...` | standing while the lane runs: users that hold video memory and declare none |
 | `skeleton_vram_users` | `VRAM not declared to the governor: <modules> (its memory is not in the budget)` | a module that holds video memory called `VramUsers::MarkActive` but declared none of it (MV7 guard) |
 | `skeleton_engine_feed` | `no vector engine for this renderer: the pair and field slots (P2m, P3) are not published; their readers fall back` | external consumers are declared (P2m / P3 are in the graph) but the renderer has no vector engine |
 | `skeleton_history` | `quality pattern history capped at N frames (...)` | the rate or the queue asks for deeper record histories than the 255-slot rings allow |

@@ -413,16 +413,44 @@ namespace VramGovernorTestsNs
 			r.ResetForTesting();
 		}
 
+		TEST_METHOD(TheHeldBytesDropOnlyWhenTheModuleFreesTheTexture)
+		{
+			// A shed BasicChroma output is planned at 0 but the texture stays allocated until its module frees it: the registry's held bytes (VP's own usage)
+			// follow Declare / Withdraw, never the plan.
+			VramUsers& r = VramUsers::Instance();
+			r.ResetForTesting();
+			int owner = 0;
+			const uint64_t bytes = BasicChroma::Gpu::TextureBytes(3840, 2160);
+			r.Declare(&owner, BasicChroma::Gpu::DeclaredUser(3840, 2160), bytes);
+			VramUsers::Snapshot s = r.Take();
+			Assert::AreEqual(bytes, s.heldBytes);
+			Assert::AreEqual(size_t(1), s.heldById.size());
+			Assert::AreEqual(int(kUserBasicChroma), int(s.heldById[0].first));
+			GovernorInput tight;
+			tight.card = Card4GB();
+			tight.ownUsageBytes = s.heldBytes;
+			tight.users.push_back(User(kUserLibplacebo, "libplacebo intermediates", Tier::T0, 0, { 3000 }));
+			tight.users.push_back(s.users[0]);
+			const GovernorPlan plan = PlanVram(tight);
+			Assert::IsTrue(plan.Find(kUserBasicChroma)->shed, L"planned off");
+			Assert::AreEqual(bytes, r.Take().heldBytes, L"still held: the plan did not free it");
+			r.Withdraw(&owner, kUserBasicChroma);
+			Assert::AreEqual(uint64_t(0), r.Take().heldBytes, L"freed by the module");
+			r.ResetForTesting();
+		}
+
+
 		TEST_METHOD(NvofRingBytesFollowTheEngineFormats)
 		{
 			// 1920 x 1080 (the half size of a 4K source): grid 480 x 270 = 129600 blocks; R8 input 2073600 B; flow R16G16 4 B and cost R8 1 B
 			// per block.
 			const uint64_t perSet = 1920ull * 1080ull + 129600ull * 4ull + 129600ull;
 			Assert::AreEqual(uint64_t(2) * perSet, NvOpticalFlow::RingBytes(1920, 1080, false, false));
+			Assert::AreEqual(uint64_t(2) * perSet + 129600ull * 4ull, NvOpticalFlow::RingBytes(1920, 1080, false, true), L"the long pair adds one flow-sized hint texture");
+			// The readback staging copies are system RAM: only the explicit argument counts them, and the VRAM declarations never pass it.
 			Assert::AreEqual(uint64_t(2) * (perSet + 129600ull * 5ull), NvOpticalFlow::RingBytes(1920, 1080, true, false));
-			Assert::AreEqual(uint64_t(2) * (perSet + 129600ull * 5ull) + 129600ull * 4ull, NvOpticalFlow::RingBytes(1920, 1080, true, true));
 			// Plausibility: a few MB per engine at 4K (the driver's own session memory is not counted and not visible).
-			Assert::IsTrue(NvOpticalFlow::RingBytes(1920, 1080, true, true) < 10 * kMB);
+			Assert::IsTrue(NvOpticalFlow::RingBytes(1920, 1080, false, true) < 10 * kMB);
 			Assert::AreEqual(uint64_t(0), NvOpticalFlow::RingBytes(0, 1080, true, true));
 			// A size that is not a multiple of the grid rounds the grid up.
 			Assert::AreEqual(uint64_t(2) * (7ull * 3ull + 2ull * 1ull * 4ull + 2ull * 1ull), NvOpticalFlow::RingBytes(7, 3, false, false));
