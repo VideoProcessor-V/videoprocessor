@@ -454,6 +454,7 @@ namespace Dejudder
 		}
 		void ClearSearchSeed() { searchSeedValid = false; if (inner) inner->searchSeedValid = false; }   // the host clears it after the estimate (an early return must not leak it into the next one)
 		bool SearchSeedUsed() const { return searchSeedUsed; }
+		bool SearchSeedRejected() const { return searchSeedRejected; }   // the last Estimate dropped the gap seed (SAD vs zero: it did not beat "nothing moved")
 		const IFieldSource* FieldSource() const { return fieldSource; }
 		// SK-MV pass-through: the snapshot LEASE. SnapshotForWarp bumps this to a process-unique non-zero generation when the copies are
 		// complete, and sets it to 0 while they are being replaced (or when the copy failed); a bound source holds the generation it was
@@ -777,6 +778,7 @@ namespace Dejudder
 		// This estimate found no pair computed ahead (P2) and ran the block searches (the P2m path): not a failure, a state the host shows.
 		bool noPairAhead = false;
 		bool searchSeedUsed = false;     // the last Estimate started D1 from the gap seed
+		bool searchSeedRejected = false;   // ... or dropped it (GapSeedHolds false)
 		bool pairSizeMismatch = false;   // ... because a pair WAS handed over but not at this instance's search size
 		// SK-MV hiccup gap seed: D1's start for the NEXT Estimate only (forward, backward; D1 format), then cleared. Unset = today's search.
 		float searchSeed[2][4] = {};

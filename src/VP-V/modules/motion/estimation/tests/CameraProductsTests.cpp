@@ -249,7 +249,11 @@ namespace CameraProductsTestsNs
 			std::vector<ProductDecl> loop = SkeletonProducts().All();
 			VpSkeleton::detail::AddLead(loop[kP4SourceStats], kP7CameraFit, 1);
 			loop[kP4SourceStats].shortQueueSubstitute = kP1HalfLuma;
-			Assert::IsTrue(ValidateFails(loop), L"a lead that closes a loop");
+			{
+				const char* loopWhy = "";
+				Assert::IsFalse(Registry(loop).Validate(&loopWhy), L"a lead that closes a loop");
+				Assert::IsTrue(std::string(loopWhy).find("closes a loop") != std::string::npos, L"rejected FOR the loop, not for another reason");
+			}
 
 			// A lead chain: P5 reads P9, which itself looks ahead.
 			std::vector<ProductDecl> chain = SkeletonProducts().All();

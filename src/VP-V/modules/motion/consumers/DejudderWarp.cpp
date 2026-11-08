@@ -3572,6 +3572,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			return false;
 		}
 		searchSeedUsed = inner->SearchSeedUsed();
+		searchSeedRejected = inner->SearchSeedRejected();
 		auto up = [&](pl_tex src, pl_tex dst) -> bool
 		{
 			const pl_shader_desc d[2] = { Sampled("src", src, false), Storage("dst", dst) };
@@ -3856,6 +3857,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		grainErrorValid = false;
 		fillReady = false;
 		searchSeedUsed = false;   // SK-MV gap seed: set again below only by the instance that searched with it (an early return reads false)
+		searchSeedRejected = false;
 		// Hunt 2 04 M1 (motion_history_fixes): the temporal state is the last estimated
 		// pair's; a pair whose A is not that pair's B (a pair in between was never
 		// estimated) starts it over - as ForgetHistory, the fade state kept. Before
@@ -3986,11 +3988,15 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			bool gapSeed = searchSeedValid && settings.globalPrior;   // SK-MV hiccup gap seed: used (or dropped) by THIS estimate only
 			searchSeedValid = false;
 			searchSeedUsed = false;
+			searchSeedRejected = false;
 			// A gap seed that would reach D1 must first explain this pair better than the zero vector does (pre-approved SAD-vs-zero rejection):
 			// otherwise it is dropped and the global search below runs exactly as without a seed.
 			if (gapSeed && !modelGlobal &&
 				!(settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid && engineGlobalClear) && !GapSeedHolds())
+			{
 				gapSeed = false;
+				searchSeedRejected = true;   // counted and logged by the host (motionGapRejected), distinct from "unseeded"
+			}
 			if (!modelGlobal && settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid && !engineGlobalClear)
 				++globalFallbacks;
 			if (modelGlobal)

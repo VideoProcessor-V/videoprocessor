@@ -371,6 +371,13 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		// Counted from what happened, not from what was handed over: an engine global (or the camera model) wins over the seed, and a failed estimate used none.
 		if (motionEstimated && dejudder->SearchSeedUsed())
 			++vectorEngine.motionGapSeeded;
+		else if (motionEstimated && dejudder->SearchSeedRejected())
+		{
+			// Visible, never silent: a separate counter and a log line (the first, then each 10th) naming what happened.
+			if (++vectorEngine.motionGapRejected == 1 || vectorEngine.motionGapRejected % 10 == 0)
+				DebugLog::Log("De-judder: gap seed rejected (it did not beat the zero vector on this pair; the unseeded global search ran); %llu rejected, %llu seeded, %llu unseeded",
+					vectorEngine.motionGapRejected, vectorEngine.motionGapSeeded, vectorEngine.motionGapUnseeded);
+		}
 		else
 			++vectorEngine.motionGapUnseeded;
 	}
