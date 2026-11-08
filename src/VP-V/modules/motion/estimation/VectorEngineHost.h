@@ -8,6 +8,7 @@
 #pragma once
 
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
+#include <VP-V/modules/motion/estimation/EstimateState.h>   // P5a-5: the estimate state the renderer holds (item a)
 
 namespace VpMotion
 {

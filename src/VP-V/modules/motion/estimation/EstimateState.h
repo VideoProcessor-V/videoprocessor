@@ -1,0 +1,103 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// M2 P5a-5: the estimate state (doc 52 section 3.1 item a), moved verbatim out of the renderer's Impl with the code
+// that uses it (EngineKeeper.inl, VectorEngineEstimate.inl): B's planes, the estimate-ahead payload / planes /
+// schedule, the upload layout, the matcher (`dejudder`), the estimated pair's sequence / epoch / periods, the idle
+// engine keeper and its budget adapter, the live-field bookkeeping and the warm-up flags. The renderer holds ONE member
+// of this type (`vectorEstimate`, right after `vectorEngine`) and a reference alias per member with the old name, so
+// every reader in a zone another package still owns compiles unchanged (doc 52 1.2; HOOKS.md section 4).
+//
+// The template argument is the renderer's converted-payload type (a private type of the renderer: the state only
+// holds a shared_ptr to it). The state is also the engine's view of the matcher (IMatcherView): the IVectorEngine
+// answers about the live field read it, so the engine never sees the matcher's type.
+//
+// Threading: render thread (renderMutex held), as before the move. Teardown is unchanged: the renderer's
+// ReleaseDejudder releases the matcher and the textures before the device goes (never this destructor).
+// Header for the renderer's translation unit only (it includes the matcher and DXGI); C++14.
+#pragma once
+
+#include <VP-V/modules/motion/estimation/VectorEngine.h>
+#include <VP-V/modules/motion/estimation/MotionEngineIdle.h>
+#include <VP-V/modules/motion/consumers/DejudderAhead.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
+#include <VideoFrameEncoding.h>
+#include <video_frame_formatter/IVideoFrameFormatter.h>
+
+#include <libplacebo/gpu.h>
+
+#include <atlbase.h>
+#include <dxgi1_4.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+
+namespace VpMotion
+{
+	template<class Payload>
+	struct EstimateState : IMatcherView
+	{
+		explicit EstimateState(VectorEngine& engine) : engine_(engine) { engine_.BindMatcher(this); }
+		~EstimateState() override { engine_.BindMatcher(nullptr); }
+		EstimateState(const EstimateState&) = delete;
+		EstimateState& operator=(const EstimateState&) = delete;
+
+		// ---- IMatcherView (render thread) ---------------------------------------------------------------------
+		pl_tex LiveField() const override { return dejudder ? dejudder->Field() : nullptr; }
+		uint64_t LiveFieldFrom() const override { return dejudderLiveFieldFrom; }
+		bool MatcherGlobalFromEngine() const override { return dejudder && dejudder->GlobalFromEngine(); }
+
+		// ---- moved members (verbatim, with their comments) ----------------------------------------------------
+		// Stage 6 de-judder: B's planes (the next source frame) and the matcher.
+		// Created only while the de-judder is on; freed when it goes off.
+		// (A later optimisation could reuse B's upload when B becomes current.)
+		pl_tex dejudderNextTextures[2] = { nullptr, nullptr };
+		// Owner 2026-10-13 (estimate ahead): C, the frame after B, when queued
+		// and converted; its planes; the pair estimated ahead (B, C) during A's
+		// extras; B's upload layout (C must match it).
+		std::shared_ptr<const Payload> dejudderAheadPayload;
+		uint64_t dejudderAheadPayloadSequence = 0;
+		pl_tex dejudderAheadTextures[2] = { nullptr, nullptr };
+		Dejudder::AheadSchedule dejudderAhead;
+		struct DejudderUploadLayout
+		{
+			bool valid = false;
+			int width = 0, height = 0, chromaHeight = 0;
+			size_t rowBytes = 0, pixelBytes = 0;
+			bool lossless422 = false, fullRange = false;
+			bool raw = false;   // the raw (GPU unpack) route, with its encoding
+			bool rgb = false, bt2020 = false;   // an RGB raw route: luma only, its matrix
+			VideoFrameEncoding rawEncoding = VideoFrameEncoding::UNKNOWN;
+			bool dvTunnelRaw = false;   // the Dolby Vision tunnel's GPU unpack route
+			VideoFrameFormatterOutputContract contract{};
+		} dejudderLayout;
+		std::unique_ptr<Dejudder::MotionWarp> dejudder;
+		uint64_t dejudderEstimatedSequence = 0;
+		uint64_t dejudderEstimatedEpoch = 0;   // the motion epoch the estimate was made in (MotionValidity)
+		// Bug hunt 3 F10: the source periods the estimated pair's field spans (a gap pair: k + 1).
+		int dejudderEstimatedPeriods = 1;
+		// Bug hunt 3 F4: the idle motion engine kept for hiccup repair, and its low-memory fallback.
+		MotionEngineIdle::Keeper motionEngineIdle;
+		CComPtr<IDXGIAdapter3> motionEngineBudgetAdapter;
+		unsigned long long dejudderCreates = 0;
+		// H3 F4 follow-up: load the idle engine (and the interpolator) once at a source's start, so
+		// the first hiccup does not pay its creation on the render thread (about 100 ms here, 9.7 s
+		// under CPU load: a backlog flush that swallowed the next gap). Set at renderer start and at
+		// a resync / format change; cleared once loaded or when low memory released it.
+		bool motionEngineWarmPending = true;
+		// Hunt 2 04 M2: the A of the pair whose field the matcher's live outputs hold (0 = none).
+		// After an ahead estimate it is B while A is still showing, so A's repeat draws must not
+		// read the live field as A's (the extras read their snapshot).
+		uint64_t dejudderLiveFieldFrom = 0;
+		// Hunt 2 04 L3: the motion source last estimated with (0 matcher only, 1 render-time
+		// engine, 2 engine with the producer ahead); -1 = none yet.
+		int dejudderMotionSourceKey = -1;
+		// r6 fix 1: WarmIdleMotionEngine's dummy A -> A estimate. It loads the engine only: no
+		// estimate count, no "motion estimated"/motion-source logs, no vectors to the consumers.
+		bool motionEngineWarming = false;
+
+	private:
+		VectorEngine& engine_;
+	};
+}

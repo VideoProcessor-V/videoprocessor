@@ -4884,10 +4884,6 @@ struct LibplaceboVideoRenderer::Impl
     };
 
 	pl_tex textures[2] = { nullptr, nullptr };
-	// Stage 6 de-judder: B's planes (the next source frame) and the matcher.
-	// Created only while the de-judder is on; freed when it goes off.
-	// (A later optimisation could reuse B's upload when B becomes current.)
-	pl_tex dejudderNextTextures[2] = { nullptr, nullptr };
 	// capture_path: gpu. The conversion thread reads the two flags; a failed
 	// unpack turns the session back to the CPU formatters (the fallback is shown: Ctrl+I line, one-time notice, Config status).
 	std::atomic<bool> captureGpuWanted{ true };
@@ -5571,49 +5567,9 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		return false;
 	}
-	// Owner 2026-10-13 (estimate ahead): C, the frame after B, when queued
-	// and converted; its planes; the pair estimated ahead (B, C) during A's
-	// extras; B's upload layout (C must match it).
-	std::shared_ptr<const QueuedFrame::ConvertedPayload> dejudderAheadPayload;
-	uint64_t dejudderAheadPayloadSequence = 0;
-	pl_tex dejudderAheadTextures[2] = { nullptr, nullptr };
-	Dejudder::AheadSchedule dejudderAhead;
 	ULONGLONG dejudderAheadLogTick = 0;
-	struct DejudderUploadLayout
-	{
-		bool valid = false;
-		int width = 0, height = 0, chromaHeight = 0;
-		size_t rowBytes = 0, pixelBytes = 0;
-		bool lossless422 = false, fullRange = false;
-		bool raw = false;   // the raw (GPU unpack) route, with its encoding
-		bool rgb = false, bt2020 = false;   // an RGB raw route: luma only, its matrix
-		VideoFrameEncoding rawEncoding = VideoFrameEncoding::UNKNOWN;
-		bool dvTunnelRaw = false;   // the Dolby Vision tunnel's GPU unpack route
-		VideoFrameFormatterOutputContract contract{};
-	} dejudderLayout;
-	std::unique_ptr<Dejudder::MotionWarp> dejudder;
 	DejudderPolicy::Reason dejudderReason = DejudderPolicy::Reason::Off;
-	uint64_t dejudderEstimatedSequence = 0;
-	uint64_t dejudderEstimatedEpoch = 0;   // the motion epoch the estimate was made in (MotionValidity)
-	// Bug hunt 3 F10: the source periods the estimated pair's field spans (a gap pair: k + 1).
-	int dejudderEstimatedPeriods = 1;
-	// Bug hunt 3 F4: the idle motion engine kept for hiccup repair, and its low-memory fallback.
-	MotionEngineIdle::Keeper motionEngineIdle;
-	CComPtr<IDXGIAdapter3> motionEngineBudgetAdapter;
-	unsigned long long dejudderCreates = 0;
 	unsigned long long motionEngineIdleReleasesLogged = 0;
-	// H3 F4 follow-up: load the idle engine (and the interpolator) once at a source's start, so
-	// the first hiccup does not pay its creation on the render thread (about 100 ms here, 9.7 s
-	// under CPU load: a backlog flush that swallowed the next gap). Set at renderer start and at
-	// a resync / format change; cleared once loaded or when low memory released it.
-	bool motionEngineWarmPending = true;
-	// Hunt 2 04 M2: the A of the pair whose field the matcher's live outputs hold (0 = none).
-	// After an ahead estimate it is B while A is still showing, so A's repeat draws must not
-	// read the live field as A's (the extras read their snapshot).
-	uint64_t dejudderLiveFieldFrom = 0;
-	// Hunt 2 04 L3: the motion source last estimated with (0 matcher only, 1 render-time
-	// engine, 2 engine with the producer ahead); -1 = none yet.
-	int dejudderMotionSourceKey = -1;
 	// Whether the matcher's live outputs (field, trust, grain error) are this source
 	// frame's (sequence, sequence + 1) pair of the current motion epoch.
 	bool DejudderLiveFieldFor(uint64_t sequence) const
@@ -6426,7 +6382,7 @@ struct LibplaceboVideoRenderer::Impl
 	// VpMotion::VectorEngineState; the aliases keep every reader outside P5a's ranges unchanged. Each alias
 	// is deleted by the package that moves its last reader (VP-V/modules/motion/estimation/HOOKS.md).
 	// VPV-HOOK
-	VpMotion::VectorEngine vectorEngine;
+	VpMotion::VectorEngine vectorEngine{ this };   // registered for IVectorEngine (vpv.vector_engine.v1) under this host
 	VectorDemand::Decision& vectorDemand = vectorEngine.vectorDemand;
 	std::atomic<int>& queueAheadCapacity = vectorEngine.queueAheadCapacity;
 	std::atomic<bool>& motionAheadBackward = vectorEngine.motionAheadBackward;
@@ -6450,6 +6406,26 @@ struct LibplaceboVideoRenderer::Impl
 	uint64_t& motionInvalidations = vectorEngine.motionInvalidations;
 	bool& motionRecoveryLogPending = vectorEngine.motionRecoveryLogPending;
 	std::atomic<const char*>& motionGapDetail = vectorEngine.motionGapDetail;
+	// P5a-5: the estimate state (item a; VP-V/modules/motion/estimation/EstimateState.h).
+	VpMotion::EstimateState<QueuedFrame::ConvertedPayload> vectorEstimate{ vectorEngine };
+	pl_tex (&dejudderNextTextures)[2] = vectorEstimate.dejudderNextTextures;
+	std::shared_ptr<const QueuedFrame::ConvertedPayload>& dejudderAheadPayload = vectorEstimate.dejudderAheadPayload;
+	uint64_t& dejudderAheadPayloadSequence = vectorEstimate.dejudderAheadPayloadSequence;
+	pl_tex (&dejudderAheadTextures)[2] = vectorEstimate.dejudderAheadTextures;
+	Dejudder::AheadSchedule& dejudderAhead = vectorEstimate.dejudderAhead;
+	using DejudderUploadLayout = VpMotion::EstimateState<QueuedFrame::ConvertedPayload>::DejudderUploadLayout;
+	DejudderUploadLayout& dejudderLayout = vectorEstimate.dejudderLayout;
+	std::unique_ptr<Dejudder::MotionWarp>& dejudder = vectorEstimate.dejudder;
+	uint64_t& dejudderEstimatedSequence = vectorEstimate.dejudderEstimatedSequence;
+	uint64_t& dejudderEstimatedEpoch = vectorEstimate.dejudderEstimatedEpoch;
+	int& dejudderEstimatedPeriods = vectorEstimate.dejudderEstimatedPeriods;
+	MotionEngineIdle::Keeper& motionEngineIdle = vectorEstimate.motionEngineIdle;
+	CComPtr<IDXGIAdapter3>& motionEngineBudgetAdapter = vectorEstimate.motionEngineBudgetAdapter;
+	unsigned long long& dejudderCreates = vectorEstimate.dejudderCreates;
+	bool& motionEngineWarmPending = vectorEstimate.motionEngineWarmPending;
+	uint64_t& dejudderLiveFieldFrom = vectorEstimate.dejudderLiveFieldFrom;
+	int& dejudderMotionSourceKey = vectorEstimate.dejudderMotionSourceKey;
+	bool& motionEngineWarming = vectorEstimate.motionEngineWarming;
 	// VPV-HOOK-END
 	bool sigmaDeltaRanLast = false;                   // the sigma-delta quantiser ran in the last frame's output pass
 	// C10: the debug switches are read once, not per frame.
@@ -7165,9 +7141,6 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<bool> sourceAutoActive{ false };
 	bool sourceAheadLogged = false;   // render loop thread
 	std::string motionSourceLogged;   // the de-judder's motion source, logged on change
-	// r6 fix 1: WarmIdleMotionEngine's dummy A -> A estimate. It loads the engine only: no
-	// estimate count, no "motion estimated"/motion-source logs, no vectors to the consumers.
-	bool motionEngineWarming = false;
 	// r6 fix 7 (owner rule vp-no-silent-fallbacks): the renderer's automatic fallbacks, published
 	// as "Fallbacks engaged: <list> / none" (GetFallbacksStatus: Ctrl+I, Config status, Ctrl+Alt+D).
 	FallbackStatus::Registry fallbacks;
@@ -16295,83 +16268,10 @@ struct LibplaceboVideoRenderer::Impl
 		}
 	}
 
-	// H3 F4 follow-up: create the matcher, its optical-flow engine and textures, and the
-	// interpolator's planes and passes once, on A's own planes (A -> A); nothing they produce
-	// is used (no live field, no picture), and the history is forgotten.
-	void WarmIdleMotionEngine(const VideoFrameFormatterOutputContract& contract, bool lossless422, bool nativeRgb)
-	{
-		motionEngineWarmPending = false;
-		if (nativeRgb || dejudderRgbLuma || !textures[0] || !textures[1] || !d3d11 || !d3d11->gpu)
-			return;
-		Dejudder::Planes a;
-		a.luma = textures[0];
-		a.chroma = textures[1];
-		a.chromaShiftX = 1;
-		a.chromaShiftY = lossless422 ? 0 : 1;
-		a.fullRange = contract.sampleRange == VideoFrameSampleRange::FULL;
-		const auto started = std::chrono::steady_clock::now();
-		motionEngineWarming = true;
-		const bool estimated = RunDejudderEstimate(a, a, 0, 0);
-		motionEngineWarming = false;
-		dejudderLiveFieldFrom = 0;
-		motionSegment.Retract(VpMotion::Direction::Forward);
-		bool pictured = false;
-		if (estimated && dejudder)
-		{
-			Interpolator::Motion motion;
-			motion.field = dejudder->Field();
-			motion.frameTrust = dejudder->FrameTrust();
-			motion.subField = dejudder->SubField();
-			motion.minTrustedShare = dejudder->GetSettings().minTrustedShare;
-			if (!frameInterpolator)
-				frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
-			frameInterpolator->SetGrain(activeSettings.interpolationGrain);
-			Dejudder::Planes scratch;
-			pictured = frameInterpolator->Run(a, a, motion, 0.5f, activeSettings.interpolationFallback, scratch);
-			vpPhasePlanesValid = false;
-		}
-		if (dejudder)
-			dejudder->ForgetHistory();
-		DebugLog::Log("Motion engine: loaded idle for hiccup repair at the source's start (%.1f ms; estimate %s, interpolator %s)",
-			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count(),
-			estimated ? "ok" : "failed", pictured ? "ok" : "not run");
-	}
+	void WarmIdleMotionEngine(const VideoFrameFormatterOutputContract& contract, bool lossless422, bool nativeRgb);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/EngineKeeper.inl
 
-	// Bug hunt 3 F4: one DXGI video memory reading a second for the idle motion engine's
-	// low-memory fallback (engineHeld: its bytes are already in the usage).
-	void PollMotionEngineBudget(int width, int height, bool engineHeld)
-	{
-		const double now = static_cast<double>(GetTickCount64()) / 1000.0;
-		motionEngineIdle.NoteTime(now);
-		if (!motionEngineIdle.BudgetDue(now))
-			return;
-		uint64_t usage = 0, budget = 0;
-		const bool reported = QueryMotionEngineBudget(usage, budget);
-		motionEngineIdle.NoteBudgetReported(reported);
-		motionEngineIdle.NoteBudget(reported ? usage : 0, reported ? budget : 0,
-			engineHeld ? 0 : MotionEngineIdle::IdleBytes(width, height), now);
-	}
-	bool QueryMotionEngineBudget(uint64_t& usage, uint64_t& budget)
-	{
-		if (!d3d11 || !d3d11->gpu)
-			return false;
-		if (!motionEngineBudgetAdapter)
-		{
-			pl_d3d11 d3d = pl_d3d11_get(d3d11->gpu);
-			CComPtr<IDXGIDevice> dxgiDevice;
-			CComPtr<IDXGIAdapter> adapter;
-			if (!d3d || !d3d->device || FAILED(d3d->device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) ||
-				FAILED(dxgiDevice->GetAdapter(&adapter)) || FAILED(adapter->QueryInterface(IID_PPV_ARGS(&motionEngineBudgetAdapter))))
-				return false;
-		}
-		// Local: a discrete card's own memory; on an integrated GPU Windows reports its shared budget here.
-		DXGI_QUERY_VIDEO_MEMORY_INFO info{};
-		if (FAILED(motionEngineBudgetAdapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)) || info.Budget == 0)
-			return false;
-		usage = info.CurrentUsage;
-		budget = info.Budget;
-		return true;
-	}
+	void PollMotionEngineBudget(int width, int height, bool engineHeld);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/EngineKeeper.inl
+	bool QueryMotionEngineBudget(uint64_t& usage, uint64_t& budget);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/EngineKeeper.inl
 
 	// Interpolation: the decision when it changes (at most one line per 5 s), with the
 	// measured rates it came from.
@@ -16420,463 +16320,13 @@ struct LibplaceboVideoRenderer::Impl
 			Dejudder::AheadSchedule::Name(dejudderAhead.LastReason()));
 	}
 
-	// The next frames' planes (B, or C ahead) in B's layout.
-	// upload (efficiency_fixes): filled with how the planes were made, for the reuse when this
-	// frame is shown; cleared first (a failed or luma-only upload is never reused).
-	bool UploadDejudderPlanes(const std::shared_ptr<const QueuedFrame::ConvertedPayload>& payloadPtr, pl_tex (&dst)[2],
-		DejudderPlaneUpload* upload = nullptr, uint64_t sequence = 0)
-	{
-		if (upload)
-			upload->Clear();
-		if (!payloadPtr)
-			return false;
-		const QueuedFrame::ConvertedPayload& payload = *payloadPtr;
-		const DejudderUploadLayout& l = dejudderLayout;
-		if (!l.valid || payload.Bytes() != l.pixelBytes)
-			return false;
-		auto record = [&](bool raw, const pl_plane* planes)
-		{
-			if (!upload)
-				return;
-			upload->record.valid = true;
-			upload->record.payload = payloadPtr.get();
-			// Gate r3 (2026-10-18, measured on the GeForce): the payload's source frame. It was never
-			// recorded, so CanReuse (r.sequence == q.sequence) refused every reuse as "layout differs".
-			upload->record.sequence = sequence;
-			upload->record.width = l.width;
-			upload->record.height = l.height;
-			upload->record.chromaHeight = l.chromaHeight;
-			upload->record.rowBytes = l.rowBytes;
-			upload->record.raw = raw;
-			upload->payload = payloadPtr;
-			if (planes)
-			{
-				upload->planes[0] = planes[0];
-				upload->planes[1] = planes[1];
-			}
-		};
-		// native_rgb_ingest: an RGB raw frame gives the matcher its luma only
-		// (dst[0]; dst[1] untouched), unpacked as the frame A was.
-		if (payload.Raw() && !payload.dvTunnelRaw && GpuRgbUnpack::Supports(payload.rawEncoding))
-		{
-			if (!l.raw || !l.rgb || payload.rawEncoding != l.rawEncoding || !d3d11)
-				return false;
-			if (!rgbUnpack)
-				rgbUnpack = std::make_unique<GpuRgbUnpack>(log, d3d11->gpu);
-			EarlyUpload::Slot* slot = nullptr;
-			const pl_tex early = EarlyTexture(payload, slot);
-			bool unpacked = rgbUnpack->Unpack(payload.rawEncoding, l.bt2020, payload.rawFrame->GetData(), payload.rawRowBytes,
-				l.width, l.height, dejudderRgbScratch, dst[0], true, early);
-			if (slot)
-				earlyUpload->Used(*slot);
-			if (!unpacked && early)
-				unpacked = rgbUnpack->Unpack(payload.rawEncoding, l.bt2020, payload.rawFrame->GetData(), payload.rawRowBytes,
-					l.width, l.height, dejudderRgbScratch, dst[0], true);
-			if (unpacked)
-				return true;
-			DebugLog::Log("Native RGB ingest: a de-judder frame's GPU unpack failed (%s); that frame skipped",
-				rgbUnpack->Error().c_str());
-			return false;
-		}
-		if (payload.Raw())
-		{
-			// capture_path: gpu; the route and format must be B's (A's layout).
-			if (!l.raw || payload.rawEncoding != l.rawEncoding || payload.dvTunnelRaw != l.dvTunnelRaw)
-				return false;
-			if (!UnpackRawPayload(payload, l.width, l.height, dst, false))
-				return false;
-			record(true, nullptr);
-			return true;
-		}
-		struct pl_plane_data planes[2]{};
-		const BYTE* yPixels = payload.pixels.data();
-		const BYTE* uvPixels = yPixels + l.rowBytes * static_cast<size_t>(l.height);
-		planes[0].type = PL_FMT_UNORM;
-		planes[0].width = l.width;
-		planes[0].height = l.height;
-		planes[0].component_size[0] = 16;
-		planes[0].component_map[0] = PL_CHANNEL_Y;
-		planes[0].pixel_stride = sizeof(uint16_t);
-		planes[0].row_stride = l.rowBytes;
-		planes[0].pixels = yPixels;
-		planes[1] = planes[0];
-		planes[1].width = (l.width + 1) / 2;
-		planes[1].height = l.chromaHeight;
-		planes[1].component_size[1] = 16;
-		planes[1].component_map[0] = PL_CHANNEL_CB;
-		planes[1].component_map[1] = PL_CHANNEL_CR;
-		planes[1].pixel_stride = sizeof(uint16_t) * 2;
-		planes[1].pixels = uvPixels;
-		pl_plane uploaded[2]{};
-		for (int plane = 0; plane < 2; ++plane)
-			if (!pl_upload_plane(d3d11->gpu, &uploaded[plane], &dst[plane], &planes[plane]))
-				return false;
-		record(false, uploaded);
-		return true;
-	}
+	bool UploadDejudderPlanes(const std::shared_ptr<const QueuedFrame::ConvertedPayload>& payloadPtr, pl_tex (&dst)[2], DejudderPlaneUpload* upload = nullptr, uint64_t sequence = 0);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/VectorEngineEstimate.inl
 
-	// efficiency_fixes (UploadReuse.h): the frame about to be shown was the last frame's B,
-	// uploaded (or GPU-unpacked) for the motion estimate from this same payload in this same
-	// layout. Its planes are swapped in as the frame's own (bit-identical: the same bytes,
-	// route and formats) and `out` receives the planes the upload would have made. False:
-	// upload as before. YCbCr routes only (the RGB route uploads the matcher's luma alone).
-	bool TakeNextPlanes(const std::shared_ptr<const QueuedFrame::ConvertedPayload>& payload, uint64_t sourceSequence,
-		int width, int height, int chromaHeight, size_t rowBytes, bool flipped, pl_plane* out)
-	{
-		if (!payload)
-			return false;
-		UploadReuse::Record record = dejudderNextUpload.record;
-		// The recorded payload's identity holds only while that payload is alive.
-		const auto alive = dejudderNextUpload.payload.lock();
-		record.payload = alive.get();
-		UploadReuse::Request request;
-		request.enabled = activeSettings.efficiencyFixes;
-		request.payload = payload.get();
-		request.sequence = sourceSequence;
-		request.width = width;
-		request.height = height;
-		request.chromaHeight = chromaHeight;
-		request.rowBytes = rowBytes;
-		request.raw = payload->Raw();
-		request.texturesPresent = dejudderNextTextures[0] && dejudderNextTextures[1];
-		request.uploadedSequenceMatches = sourceSequence != 0 && dejudderNextUploadedSequence == sourceSequence;
-		if (!UploadReuse::CanReuse(record, request))
-		{
-			// The next frame's planes were there but could not be taken: counted (and the first
-			// few logged), so an on-screen run shows whether the saving engages.
-			if (request.enabled && request.uploadedSequenceMatches && ++uploadsReuseMissed <= 5)
-				DebugLog::Log("Efficiency: the next frame's planes not reused for frame %llu (%s)",
-					static_cast<unsigned long long>(sourceSequence),
-					!record.valid ? "not recorded" : record.payload != request.payload ? "another payload" :
-					!request.texturesPresent ? "no planes" : "layout differs");
-			return false;
-		}
-		std::swap(textures[0], dejudderNextTextures[0]);
-		std::swap(textures[1], dejudderNextTextures[1]);
-		if (request.raw)
-		{
-			// As the GPU unpack's planes are described below (UnpackRawPayload).
-			out[0] = pl_plane{};
-			out[0].texture = textures[0];
-			out[0].components = 1;
-			out[0].component_mapping[0] = PL_CHANNEL_Y;
-			out[1] = pl_plane{};
-			out[1].texture = textures[1];
-			out[1].components = 2;
-			out[1].component_mapping[0] = PL_CHANNEL_CB;
-			out[1].component_mapping[1] = PL_CHANNEL_CR;
-		}
-		else
-			for (int plane = 0; plane < 2; ++plane)
-			{
-				// pl_upload_plane's description of the same upload, on the swapped-in texture.
-				out[plane] = dejudderNextUpload.planes[plane];
-				out[plane].texture = textures[plane];
-				out[plane].shift_x = 0.0f;
-				out[plane].shift_y = 0.0f;
-			}
-		for (int plane = 0; plane < 2; ++plane)
-			out[plane].flipped = flipped;
-		// dejudderNextTextures now hold the previous frame's planes: nothing valid there.
-		dejudderNextUploadedSequence = 0;
-		dejudderNextUpload.Clear();
-		if (++uploadsReused == 1 || uploadsReused % 2400 == 0)
-			DebugLog::Log("Efficiency: the frame shown took the planes uploaded for the motion estimate (%llu frames, "
-				"no second upload; %llu not reused)", uploadsReused, uploadsReuseMissed);
-		return true;
-	}
+	bool TakeNextPlanes(const std::shared_ptr<const QueuedFrame::ConvertedPayload>& payload, uint64_t sourceSequence, int width, int height, int chromaHeight, size_t rowBytes, bool flipped, pl_plane* out);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/VectorEngineEstimate.inl
 
-	// The matcher on (a, b): its settings from the profile, b's occlusion mask
-	// into the slot not holding a's.
-	bool RunDejudderEstimate(const Dejudder::Planes& a, const Dejudder::Planes& b, uint64_t aSequence, uint64_t bSequence)
-	{
-		const uint64_t motionShadowEpoch = motionValidity.Epoch();   // shadow segment: as the callers' estimateEpoch
-		// The matcher's settings from the profile, refinements included.
-		auto wanted = [&](Dejudder::Settings settings)
-		{
-			Dejudder::Settings result = MatcherSettingsFromProfile::MatcherSettings(activeSettings, settings);
-			result.sourceHz = dejudderSourceHz;   // the content rate (the film rate with pulldown)
-			result.generalRates = activeSettings.generalRateFixes;   // fixed-constant batch B4 2026-10-18
-			return result;
-		};
-		if (activeSettings.dejudderOcclusionFill && activeSettings.dejudderWarpRendered && !dejudderFillIgnoredLogged)
-		{
-			DebugLog::Log("De-judder occlusion fill: source warp path only; ignored with dejudder_warp_stage: rendered");
-			dejudderFillIgnoredLogged = true;
-		}
-		if (!dejudder)
-		{
-			dejudder = std::make_unique<Dejudder::MotionWarp>(log, d3d11->gpu, wanted(Dejudder::Settings()));
-			// Bug hunt 3 F4: logged, so a test sees that a second hiccup does not recreate it.
-			if (++dejudderCreates <= 20 || dejudderCreates % 100 == 0)
-				DebugLog::Log("Motion engine: created (%llu times this renderer; hiccup repair %s)",
-					dejudderCreates, activeSettings.interpolationFillGaps ? "on: kept loaded and idle between gaps" : "off");
-		}
-		else
-		{
-			const Dejudder::Settings current = dejudder->GetSettings();
-			const Dejudder::Settings next = wanted(current);
-			const bool meaningChanged = current.matchTolerance != next.matchTolerance || current.minTrustedShare != next.minTrustedShare ||
-				current.globalPrior != next.globalPrior || current.vectorSmooth != next.vectorSmooth ||
-				current.motionScaleLo != next.motionScaleLo || current.motionScaleHi != next.motionScaleHi ||
-				current.trustScaleFull != next.trustScaleFull || current.occlusionFill != next.occlusionFill ||
-				current.estCandidates != next.estCandidates || current.estLambda != next.estLambda ||
-				current.estQpel != next.estQpel || current.estStillZero != next.estStillZero || current.estGate != next.estGate ||
-				current.estSplit != next.estSplit || current.estSplitSad != next.estSplitSad ||
-				current.lowRes != next.lowRes || current.lowResAll != next.lowResAll ||
-				current.holdFeatherPx != next.holdFeatherPx || current.holdHysteresis != next.holdHysteresis ||
-				current.blockTaper != next.blockTaper || current.taperSad != next.taperSad ||
-				current.motionRolloff != next.motionRolloff || current.rollLo != next.rollLo ||
-				current.rollHi != next.rollHi || current.rollFloor != next.rollFloor ||
-				current.objectStrength != next.objectStrength ||
-				// The motion fixes (audit 2026-10-14: these never reached a live matcher).
-				current.textureTolerance != next.textureTolerance || current.globalTwo != next.globalTwo ||
-				current.regionalHold != next.regionalHold || current.cutHistogram != next.cutHistogram ||
-				current.coarseRange != next.coarseRange || current.consistencyPixels != next.consistencyPixels ||
-				current.fadeMatch != next.fadeMatch || current.fadeFloor != next.fadeFloor ||
-				current.verifyPixels != next.verifyPixels || current.verifyShare != next.verifyShare ||
-				current.pixelTrust != next.pixelTrust || current.pixelTrustLo != next.pixelTrustLo ||
-				current.pixelTrustHi != next.pixelTrustHi || current.pixelTrustedVectors != next.pixelTrustedVectors ||
-				current.landingCheck != next.landingCheck || current.pictureArea != next.pictureArea ||
-				current.sourceWarpCatmull != next.sourceWarpCatmull ||
-				current.referenceHeight != next.referenceHeight ||
-				current.generalRates != next.generalRates ||   // fixed-constant batch B4 2026-10-18
-				// The optical-flow engine and its camera estimate (audit 2026-10-16: never reached a live matcher).
-				current.opticalFlow != next.opticalFlow || current.opticalFlowGlobal != next.opticalFlowGlobal ||
-				current.opticalFlowGlobalFallback != next.opticalFlowGlobalFallback ||
-				current.opticalFlowCostTrust != next.opticalFlowCostTrust || current.opticalFlowFbCheck != next.opticalFlowFbCheck;
-			// The measured content rate (it follows the source; converts the per-frame values) and
-			// the switch itself change no vector's meaning.
-			if (meaningChanged || current.sourceHz != next.sourceHz || current.referenceRateHz != next.referenceRateHz ||
-				current.historyFixes != next.historyFixes)
-				dejudder->SetSettings(next);
-			// Hunt 2 04 L3 (motion_history_fixes): a matcher setting that changes what the vectors
-			// mean invalidates them (the consumers fall back until a fresh pair) and this pair is
-			// estimated without the old history.
-			if (meaningChanged && activeSettings.motionHistoryFixes)
-			{
-				RequestMotionInvalidate(MotionValidity::Cause::SettingsChange);
-				dejudder->ForgetHistory();
-			}
-		}
-		// Hunt 2 04 L3 (motion_history_fixes): the motion source (the optical-flow engine on or
-		// off, the producer ahead wanted or not) changed while the matcher kept its history.
-		{
-			const int sourceKey = !activeSettings.opticalFlow ? 0 : activeSettings.motionAheadFrames > 0 ? 2 : 1;
-			if (activeSettings.motionHistoryFixes && dejudderMotionSourceKey >= 0 && sourceKey != dejudderMotionSourceKey)
-			{
-				RequestMotionInvalidate(MotionValidity::Cause::MotionSourceChange);
-				dejudder->ForgetHistory();
-			}
-			dejudderMotionSourceKey = sourceKey;
-		}
-		// 6c: B's occlusion mask into the slot not holding the mask for the
-		// frame A (now showing, or B itself ahead), so A's survives until it
-		// is rendered.
-		int maskSlot = -1;
-		if (activeSettings.occlusionMask)
-			maskSlot = dejudderMaskSequence[0] == aSequence ? 1 : 0;
-		// Black bars: the latest trusted active picture when it is this
-		// raster's (else the matcher finds the bars itself).
-		const int width = a.luma ? a.luma->params.w : 0, height = a.luma ? a.luma->params.h : 0;
-		if (dejudderPicture.available && dejudderPicture.rasterWidth == width && dejudderPicture.rasterHeight == height &&
-			dejudderPicture.right > dejudderPicture.left && dejudderPicture.bottom > dejudderPicture.top)
-			dejudder->SetPictureArea(dejudderPicture.left, dejudderPicture.top, dejudderPicture.right, dejudderPicture.bottom);
-		else
-			dejudder->SetPictureArea(0, 0, 0, 0);
-		// The frame numbers let a pair whose A is the last pair's B reuse its
-		// planes (2026-10-15; a gap or resync forgets them).
-		Dejudder::Planes sa = a, sb = b;
-		sa.sequence = aSequence;
-		sb.sequence = bSequence;
-		if (motionProducer && motionProducer->Running() && !motionEngineWarming)
-		{
-			int engineW = 0, engineH = 0;
-			if (dejudder->EngineInputSize(engineW, engineH))
-				motionProducer->SetTargetSize(engineW, engineH);
-			// MotionValidity step 1 D: a stored pair only for adjacent frames of the current
-			// epoch (otherwise the matcher runs).
-			MotionAhead::FlowPtr flow = motionValidity.PairValid(aSequence, bSequence, motionValidity.EpochOfLastKept(),
-				motionValidity.Epoch()) ? motionProducer->Take(aSequence, bSequence) : nullptr;
-			if (flow) ++motionAheadHits; else ++motionAheadMisses;
-			// Latch review 2026-10-17: the engine's whole-frame motion (z < 0.9 usable) for
-			// source_resolution auto's fast-pan switch. Bug hunt 3 F1: one cell is 8 source px
-			// per halving of the search input (4K 16, 8K 32), not 8 at every size.
-			const int searchHalvings = dejudder->SearchHalvings();
-			vectorEngine.NoteGlobalPair(flow != nullptr);   // VPV-HOOK
-			if (flow)
-			{
-				const VectorDemand::GlobalSample sample = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
-					static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1]), searchHalvings),
-					flow->global[0][2], flow->global[0][3], 0);
-				if (sample.usable)
-					sourceMonitor.SetMotion(sample.sourcePixels, bSequence);
-			}
-			// Motion intent (2026-10-17): the same whole-frame motion for this valid pair (the
-			// vectors-valid state accepted it above), in picture heights per frame; read-only.
-			if (flow && intentInterpreter->Active())
-			{
-				const int pictureHeight = dejudderPicture.available && dejudderPicture.rasterHeight == height &&
-					dejudderPicture.bottom > dejudderPicture.top ? dejudderPicture.bottom - dejudderPicture.top : height;
-				IntentInterpreter::VectorSample vectors;
-				vectors.from = aSequence;
-				vectors.to = bSequence;
-				const VectorDemand::GlobalSample sample = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
-					static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1]), searchHalvings),
-					flow->global[0][2], flow->global[0][3], pictureHeight);
-				vectors.valid = sample.intentValid;
-				vectors.heightsPerFrame = sample.heightsPerFrame;
-				intentInterpreter->NoteVectors(vectors);
-			}
-			dejudder->SetExternalFlow(std::move(flow));
-			motionProducer->Prune(aSequence);
-		}
-		dejudderLiveFieldFrom = 0;   // the live outputs are being replaced
-		motionSegment.Retract(VpMotion::Direction::Forward);
-		dejudder->SetPassSampling(passTimerHook.Sampling());   // efficiency timers T3: polled, never drained
-		const bool motionEstimated = dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted);
-		passTimerHook.AddGpuGroups("motion: ", dejudder->TakePassGpuMs());
-		if (!motionEstimated)
-		{
-			// Bug hunt 3 F4: a texture the engine could not create (low video memory).
-			if (dejudder->LastError().find("cannot create") != std::string::npos)
-				motionEngineIdle.NoteAllocationFailure(static_cast<double>(GetTickCount64()) / 1000.0);
-			if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
-				DebugLog::Log("De-judder: motion estimate failed (%s; %llu failures)",
-					dejudder->LastError().c_str(), dejudderFailures);
-			return false;
-		}
-		dejudderLiveFieldFrom = aSequence;
-		if (pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery))
-			motionSegment.Publish(VpMotion::Direction::Forward, aSequence, bSequence, MotionShadowField{ aSequence, bSequence },
-			dejudder->ExternalFlowUsed() ? VpMotion::Source::EngineAhead :
-			dejudder->OpticalFlowUsed() ? VpMotion::Source::EngineAtRender : VpMotion::Source::Matcher,
-			motionShadowEpoch, 0, bSequence != aSequence + 1);
-		if (motionEngineWarming)
-			return true;   // r6 fix 1: warm-up only; nothing counted, logged or handed on
-		if (maskSlot >= 0)
-		{
-			dejudderMaskSequence[maskSlot] = bSequence;
-			dejudderMaskEpoch[maskSlot] = motionValidity.Epoch();
-		}
-		if (motionRecoveryLogPending)
-		{
-			DebugLog::Log("De-judder: estimating again on a fresh contiguous pair");
-			motionRecoveryLogPending = false;
-		}
-		// The motion source: the optical-flow engine, or the block searches (logged on change).
-		{
-			const char* source = dejudder->ExternalFlowUsed() ? (dejudder->GlobalFromEngine() ?
-					"optical-flow engine (computed ahead, camera from the engine)" : "optical-flow engine (computed ahead)") :
-				dejudder->OpticalFlowUsed() ? "optical-flow engine" :
-				!dejudder->GetSettings().opticalFlow ? "block searches (optical_flow off)" : "block searches (no engine)";
-			if (motionSourceLogged != source)
-			{
-				motionSourceLogged = source;
-				if (!dejudder->OpticalFlowUsed() && dejudder->GetSettings().opticalFlow && !dejudder->OpticalFlowError().empty())
-					DebugLog::Log("De-judder motion: %s - %s", source, dejudder->OpticalFlowError().c_str());
-				else
-					DebugLog::Log("De-judder motion: %s", source);
-			}
-			// Silent-fallbacks batch: the matcher standing in for the optical-flow engine is visible.
-			const bool flowFailed = !dejudder->OpticalFlowUsed() && !dejudder->ExternalFlowUsed() &&
-				!dejudder->OpticalFlowError().empty();
-			const bool producerStopped = motionProducer && !motionProducer->Running();
-			SyncFallback(FallbackCatalog::Motion(dejudder->GetSettings().opticalFlow, flowFailed, producerStopped,
-				flowFailed ? dejudder->OpticalFlowError() : producerStopped ? motionProducer->Error() : std::string()));
-		}
-		if (vectorDemand.estimate)
-		{
-			++vectorPairs;
-			vectorEngine.NoteVectorsDelivered(false, dejudder->ExternalFlowUsed() ? "engine ahead" : dejudder->OpticalFlowUsed() ? "engine" : "matcher");   // VPV-HOOK
-		}
-		static GeneralRate::LogInterval motionAheadStatsLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
-		if (motionProducer && dejudderEstimates + 1 >= 24 && motionAheadStatsLog.DueOr((dejudderEstimates + 1) == 24))   // as the other periodic logs (audit 2026-10-16)
-		{
-			std::string counts;
-			for (size_t n = 0; n < queuedAheadCounts.size(); ++n)
-			{
-				const unsigned long long c = queuedAheadCounts[n].load(std::memory_order_relaxed);
-				if (c) counts += (counts.empty() ? "" : " ") + std::to_string(n) + (n == 9 ? "+" : "") + ":" + std::to_string(c);
-			}
-			DebugLog::Log("Motion ahead: frames queued ahead when taken (count:frames) %s", counts.c_str());
-			const auto ps = motionProducer->GetStats();
-			const unsigned long long handoffs = motionHandoffCount.load(std::memory_order_relaxed);
-			DebugLog::Log("Motion ahead: %llu frames, %llu pairs (last %.1f ms, luma %.1f ms, on the worker), %llu dropped; pairs taken %llu, missed %llu; render-loop hand-off mean %.3f ms, max %.3f ms",
-				ps.frames, ps.pairs, ps.lastPairMs, ps.lumaMs, ps.dropped, motionAheadHits, motionAheadMisses,
-				handoffs ? motionHandoffTotalMs.load(std::memory_order_relaxed) / handoffs : 0.0, motionHandoffMaxMs.load(std::memory_order_relaxed));
-			DebugLog::Log("Motion ahead extras: %.2f ms per pair on the worker; engine trust weights %s; camera from the search when unclear %llu times",
-				ps.extrasMs, dejudder->EngineWeightsUsed() ? "applied" : "not applied", dejudder->GlobalFallbacks());
-		}
-		static GeneralRate::LogInterval estimatesLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
-		if (estimatesLog.DueOr(++dejudderEstimates == 1))
-			DebugLog::Log("De-judder: motion estimated for %llu source frames (%dx%d, %s)",
-				dejudderEstimates, dejudderLayout.width, dejudderLayout.height,
-				dejudderLayout.rgb ? "RGB, luma from the unpack" : dejudderLayout.lossless422 ? "4:2:2" : "4:2:0");
-		return true;
-	}
+	bool RunDejudderEstimate(const Dejudder::Planes& a, const Dejudder::Planes& b, uint64_t aSequence, uint64_t bSequence, bool ahead = false);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/VectorEngineEstimate.inl
 
-	// Owner 2026-10-13 (estimate ahead): after an extra of A, with C (the
-	// frame after B) already queued, the next pair (B, C) is estimated in
-	// that extra's spare refresh, so B's own refresh holds only its render.
-	// The extras still to come read a copy of (A, B)'s field. Without C, or
-	// with anything not matching, B is estimated before its render as before.
-	// renderedPath: the extras of this frame really use the rendered warp (the
-	// cache exists). With the source warp they read the matcher's live field,
-	// which an ahead estimate would replace (audit 2026-10-14).
-	// timing (render-ahead gate, E): the estimate's GPU stages - the snapshot and the
-	// estimate. The next frame's upload is left out: its CPU copy runs between the
-	// timestamps with the GPU idle and was measured as GPU time (p95 20-37 ms on a
-	// 3050 Ti for an estimate of a few ms; render-ahead follow-up 2026-10-17).
-	// forEntranceOnce: B3's B ahead (any path: its consumers read the snapshot; ProcessedB).
-	bool EstimateAhead(uint64_t sourceSequence, uint64_t nextSourceSequence, bool renderedPath,
-		AlphaFrameGpuTimingScope* timing = nullptr, bool forEntranceOnce = false)
-	{
-		Dejudder::AheadSchedule::Conditions c;
-		c.enabled = activeSettings.dejudderEstimateAhead;
-		c.renderedWarp = forEntranceOnce || (activeSettings.dejudderWarpRendered && renderedPath);
-		c.active = dejudder && dejudderReason == DejudderPolicy::Reason::Active &&
-			dejudderNextTextures[0] && (dejudderNextTextures[1] || dejudderLayout.rgb);
-		c.source = sourceSequence;
-		c.next = nextSourceSequence;
-		c.after = dejudderAheadPayload ? dejudderAheadPayloadSequence : 0;
-		c.estimated = dejudderEstimatedSequence;
-		c.layoutMatches = dejudderAheadPayload && dejudderLayout.valid &&
-			dejudderAheadPayload->Bytes() == dejudderLayout.pixelBytes &&
-			dejudderAheadPayload->Raw() == dejudderLayout.raw &&
-			(!dejudderLayout.raw || dejudderAheadPayload->rawEncoding == dejudderLayout.rawEncoding) &&
-			dejudderAheadPayload->dvTunnelRaw == dejudderLayout.dvTunnelRaw &&
-			dejudderAheadPayload->contract.sampleRange == dejudderLayout.contract.sampleRange &&
-			dejudderAheadPayload->contract.colorDepth == dejudderLayout.contract.colorDepth &&
-			dejudderAheadPayload->contract.bitShift == dejudderLayout.contract.bitShift;
-		Dejudder::AheadSchedule::Steps steps;
-		steps.snapshot = [this, timing]()
-		{
-			if (timing) timing->BeginStage(AlphaD3D11FrameGpuTimer::Stage::CoreRender);
-			const bool done = dejudder->SnapshotForWarp();
-			if (timing) timing->EndStage();
-			return done;
-		};
-		steps.uploadAfter = [this]() { return UploadDejudderPlanes(dejudderAheadPayload, dejudderAheadTextures, &dejudderAheadUpload,
-			dejudderAheadPayloadSequence); };
-		steps.estimate = [this, timing](uint64_t bSequence, uint64_t cSequence)
-		{
-			Dejudder::Planes b, c;
-			b.luma = dejudderNextTextures[0];
-			b.chroma = dejudderLayout.rgb ? nullptr : dejudderNextTextures[1];
-			b.chromaShiftX = 1;
-			b.chromaShiftY = dejudderLayout.lossless422 ? 0 : 1;
-			b.fullRange = dejudderLayout.fullRange;
-			c = b;
-			c.luma = dejudderAheadTextures[0];
-			c.chroma = dejudderLayout.rgb ? nullptr : dejudderAheadTextures[1];
-			if (timing) timing->BeginStage(AlphaD3D11FrameGpuTimer::Stage::CoreRender);
-			const bool done = RunDejudderEstimate(b, c, bSequence, cSequence);
-			if (timing) timing->EndStage();
-			return done;
-		};
-		return dejudderAhead.TryAhead(c, steps);
-	}
+	bool EstimateAhead(uint64_t sourceSequence, uint64_t nextSourceSequence, bool renderedPath, AlphaFrameGpuTimingScope* timing = nullptr, bool forEntranceOnce = false);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/VectorEngineEstimate.inl
 
 	// Stage 6b-2: extra presents. After A's own present, each further
 	// refresh A owns gets one picture of A warped by s*delta, presented one
@@ -28106,6 +27556,7 @@ releaseDriftBaseRetention =
 		return d3d11 && pl_gpu_is_failed(d3d11->gpu);
 	}
 };
+#include <VP-V/modules/motion/estimation/VectorEngineEstimate.inl>   // VPV-HOOK P5a-5: the estimate and the engine keeper (Impl members)
 
 
 namespace
