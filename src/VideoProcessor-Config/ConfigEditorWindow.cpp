@@ -5944,6 +5944,15 @@ QWidget* ConfigEditorWindow::createStartupPage()
         markDirty();
     });
     hardwareForm->addRow(QStringLiteral("Input connection"), captureConnection);
+    // Layout (FX-CFG14): VP-V's DeckLink / DirectShow rows have long labels. They sit in a form of their own (never
+    // wrapping) so they do not widen Bill's label column and wrap his Capture device row (the card then grew taller
+    // than the grid's size hint and the two cards of a row did not align).
+    auto* vpvForm = new QFormLayout;
+    vpvForm->setContentsMargins(0, 0, 0, 0);
+    vpvForm->setHorizontalSpacing(18);
+    vpvForm->setVerticalSpacing(8);
+    vpvForm->setRowWrapPolicy(QFormLayout::DontWrapRows);
+    hardwareForm->addRow(vpvForm);
     // [decklink] ycbcr_12bit_capture (FL35; planner 2026-10-16: every setting has a Config control).
     auto* ycbcr12 = bindChoiceField(QStringLiteral("decklink"), QStringLiteral("ycbcr_12bit_capture"),
         { QStringLiteral("v210"), QStringLiteral("rgb12"), QStringLiteral("off") },
@@ -5956,11 +5965,11 @@ QWidget* ConfigEditorWindow::createStartupPage()
         "below-black/above-white kept and VP owns the colour matrix. 12-bit RGB: the card converts to full-range "
         "12-bit RGB when it offers that for the mode (all 12 bits, but the card's conversion clips "
         "below-black/above-white and out-of-gamut values), otherwise 10-bit 4:2:2. Refuse: no picture."));
-    hardwareForm->addRow(QStringLiteral("12-bit YCbCr signals (DeckLink)"), ycbcr12);
+    vpvForm->addRow(QStringLiteral("12-bit YCbCr signals (DeckLink)"), ycbcr12);
     // Hunt 2 (2026-10-17, every setting has a control): [decklink] RGB packing,
     // [directshow.conversion] and [directshow.ppm]. The first entry of each choice
     // leaves the key unset (the runtime default).
-    const auto deckLinkPacking = [this, hardwareForm](const QString& key, const QString& label,
+    const auto deckLinkPacking = [this, vpvForm](const QString& key, const QString& label,
         const QStringList& packings, const QString& defaults)
     {
         QStringList values{ QString(), QStringLiteral("AUTO") };
@@ -5971,7 +5980,7 @@ QWidget* ConfigEditorWindow::createStartupPage()
             "DeckLink only: host-memory packing requested for detected RGB input at this depth. AUTO keeps the "
             "established ARGB / r210 / R12B. The device and mode are checked; an unsupported packing falls "
             "back safely and is logged."));
-        hardwareForm->addRow(label, combo);
+        vpvForm->addRow(label, combo);
     };
     deckLinkPacking(QStringLiteral("rgb_8bit_packing"), QStringLiteral("8-bit RGB packing (DeckLink)"),
         { QStringLiteral("ARGB"), QStringLiteral("BGRA") }, QStringLiteral("ARGB"));
@@ -5985,7 +5994,7 @@ QWidget* ConfigEditorWindow::createStartupPage()
           QStringLiteral("Standard") });
     conversionMethod->setToolTip(QStringLiteral(
         "DirectShow path: the CPU method that converts v210 capture to P010. Auto picks the fastest available."));
-    hardwareForm->addRow(QStringLiteral("P010 conversion method (DirectShow)"), conversionMethod);
+    vpvForm->addRow(QStringLiteral("P010 conversion method (DirectShow)"), conversionMethod);
     auto* chromaDownsampling = bindChoiceField(QStringLiteral("directshow.conversion"), QStringLiteral("chroma_downsampling"),
         { QString(), QStringLiteral("AVERAGE"), QStringLiteral("LEGACY"), QStringLiteral("ADVANCED") },
         { QStringLiteral("Not set (Average)"), QStringLiteral("Average adjacent rows"),
@@ -5993,7 +6002,7 @@ QWidget* ConfigEditorWindow::createStartupPage()
     chromaDownsampling->setToolTip(QStringLiteral(
         "DirectShow path: 4:2:2 to 4:2:0 chroma for P010. Average (default) averages adjacent chroma rows; "
         "Legacy takes the even rows; Advanced uses 12-tap Lanczos-3 vertical filtering (more CPU, possible ringing)."));
-    hardwareForm->addRow(QStringLiteral("P010 chroma downsampling (DirectShow)"), chromaDownsampling);
+    vpvForm->addRow(QStringLiteral("P010 chroma downsampling (DirectShow)"), chromaDownsampling);
     for (const auto& cores : { std::make_pair(QStringLiteral("min_core_count"), QStringLiteral("P010 conversion helpers, minimum")),
         std::make_pair(QStringLiteral("max_core_count"), QStringLiteral("P010 conversion helpers, maximum")) })
     {
@@ -6002,7 +6011,7 @@ QWidget* ConfigEditorWindow::createStartupPage()
         count->setPlaceholderText(QStringLiteral("1 (default)"));
         count->setToolTip(QStringLiteral(
             "DirectShow path: helper threads for the P010 conversion, not counting the calling thread. Empty = 1."));
-        hardwareForm->addRow(cores.second, count);
+        vpvForm->addRow(cores.second, count);
     }
     auto* ppm = bindTextField(QStringLiteral("directshow.ppm"), QStringLiteral("ppm"));
     ppm->setValidator(new QRegularExpressionValidator(QRegularExpression(
@@ -6011,7 +6020,7 @@ QWidget* ConfigEditorWindow::createStartupPage()
     ppm->setToolTip(QStringLiteral(
         "DirectShow path: clock correction in parts per million for every source rate. AUTO measures it; a number "
         "from -1000000 to 1000000 applies it; empty applies none."));
-    hardwareForm->addRow(QStringLiteral("Clock PPM correction (DirectShow)"), ppm);
+    vpvForm->addRow(QStringLiteral("Clock PPM correction (DirectShow)"), ppm);
     auto* behavior = new QWidget;
     auto* behaviorLayout = new QVBoxLayout(behavior);
     behaviorLayout->setContentsMargins(0, 0, 0, 0);
@@ -6289,6 +6298,17 @@ QWidget* ConfigEditorWindow::createStartupPage()
     ambientNote->setWordWrap(true);
     ambientForm->addRow(ambientNote);
 
+    // Layout (FX-CFG14): VP-V's DeckLink and DirectShow-conversion combos have long item names that pushed the
+    // two-column grid past a narrow page. They shrink to the width they are given instead (Bill's own Capture
+    // device combo is left as he built it).
+    for (QComboBox* combo : hardware->findChildren<QComboBox*>())
+        if (combo->objectName().startsWith(QStringLiteral("config.decklink.")) ||
+            combo->objectName().startsWith(QStringLiteral("config.directshow.conversion.")))
+        {
+            combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+            combo->setMinimumContentsLength(0);
+            combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        }
     cards->addCard(createCard(QStringLiteral("Hardware"),
         QStringLiteral("Capture selection used when VP starts."), hardware));
     cards->addCard(createCard(QStringLiteral("General behavior"),
@@ -16813,6 +16833,11 @@ QWidget* ConfigEditorWindow::createCalibrationPage()
     auto* model = bindChoiceField(section, QStringLiteral("meter_model"), models, modelLabels);
     model->setToolTip(QStringLiteral("Any meter ArgyllCMS supports works. The model tunes VP's handling: sensor "
         "calibration prompts (spectros), the low-light floor for near-black averaging, CCSS or CCMX corrections."));
+    // Layout (FX-CFG14): the long meter names must not set the card's minimum width, or the two-column grid
+    // (which switches at 720 px) overflows sideways on a 1040 px window.
+    model->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    model->setMinimumContentsLength(0);
+    model->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     meterForm->addRow(QStringLiteral("Meter"), model);
     auto* port = integer(QStringLiteral("meter_port"), 0, 64, 0, QString());
     port->setSpecialValueText(QStringLiteral("First found"));
@@ -17021,6 +17046,9 @@ QWidget* ConfigEditorWindow::createCalibrationPage()
     runKind->addItem(QStringLiteral("Dynamic Drive characterisation (projector LED / CNTR)"), QStringLiteral("led"));
     runKind->addItem(QStringLiteral("Ambient-light check (screen reflectance)"), QStringLiteral("ambient"));
     runKind->addItem(QStringLiteral("HDR (PQ) verify"), QStringLiteral("hdr_verify"));
+    runKind->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);   // FX-CFG14: shrinkable, see the Meter combo
+    runKind->setMinimumContentsLength(0);
+    runKind->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     runKind->setToolTip(QStringLiteral("Display calibration builds the LUTs. Dynamic Drive measures the flux table, the "
         "CNTR curve and (with a fast sensor) the LED timing. Ambient-light measures black and white with the room "
         "lights off and on (ambient_screen_reflect). HDR verify measures PQ tracking and dE ITP."));
@@ -17038,8 +17066,8 @@ QWidget* ConfigEditorWindow::createCalibrationPage()
     runLayout->addWidget(lux);
     wizardLayout->addWidget(runRow);
     auto* buttons = new QWidget;
-    auto* buttonLayout = new QHBoxLayout(buttons);
-    buttonLayout->setContentsMargins(0, 0, 0, 0);
+    // Layout (FX-CFG14): the six wizard buttons wrap instead of setting the card's minimum width (499 px).
+    auto* buttonLayout = new FlowLayout(buttons);
     const QList<QPair<QString, QString>> actions = {
         { QStringLiteral("start"), QStringLiteral("Start") }, { QStringLiteral("continue"), QStringLiteral("Continue") },
         { QStringLiteral("skip"), QStringLiteral("Skip warm-up") }, { QStringLiteral("apply"), QStringLiteral("Apply") },
@@ -17063,7 +17091,6 @@ QWidget* ConfigEditorWindow::createCalibrationPage()
             runCalibrationCommand(command, arguments);
         });
     }
-    buttonLayout->addStretch(1);
     wizardLayout->addWidget(buttons);
     if (noTarget_)
     {
