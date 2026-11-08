@@ -24118,6 +24118,7 @@ releaseDriftBaseRetention =
 			// VPV-HOOK-END
 		}
 
+		RendererExtension::NotifyEntrance(this, static_cast<int64_t>(sourceSequence), static_cast<int64_t>(nextSourceSequence), static_cast<int64_t>(frameGeneration), &renderImage, &target, width, height, cadenceRepeat, captureRateHz);   // VPV-HOOK: the Entrance phase (GPU work, entrance planning; fan-out, observers only)
 		// Stage 12 step A: the re-base factor for this frame. Geometry above
 		// stays in native pixels; the factor applies where libplacebo samples
 		// the source (the render call, the de-judder's source-warp extras) and
