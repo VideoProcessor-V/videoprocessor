@@ -3,7 +3,7 @@
 
 // Camera K3 overlay switch (camera_model_overlay). The overlay itself is not built yet (no fitted labels reach an overlay stage: the
 // fit has no vector engine, K2's P8 is not instantiated), so what is pinned here is the OFF contract: default off, forced off under
-// the Original pathway and while the model is off, no overlay text anywhere when off, the extension registers no hook, and a request
+// the Original pathway and while the model is off, no overlay text anywhere when off, and a request
 // that cannot be met is SHOWN (never silently dropped). CPU only.
 
 #ifndef NOMINMAX

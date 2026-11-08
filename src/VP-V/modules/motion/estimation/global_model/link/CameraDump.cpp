@@ -186,7 +186,11 @@ namespace CameraLink
 	std::string CameraDump::DirectoryFromEnvironment()
 	{
 		const std::string v = EnvValue("VP_CAMERA_DUMP");
-		return v == "1" ? std::string() : v;
+		static const char* const kSwitchWords[] = { "0", "1", "on", "off", "true", "false", "yes", "no" };
+		for (const char* w : kSwitchWords)
+			if (v == w)
+				return std::string();
+		return v;
 	}
 
 	std::string CameraDump::ClipFromEnvironment()

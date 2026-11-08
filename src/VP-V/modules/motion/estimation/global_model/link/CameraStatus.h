@@ -129,6 +129,24 @@ namespace Vpv
 			if (c.originalPathway)
 				return t;
 
+			// The dump's progress and drops are shown whatever else is set (a dump with no [vpv.camera] key must not hide its drops).
+			auto addDump = [&]() {
+				if (in.dumpOn)
+				{
+					char b[192];
+					std::snprintf(b, sizeof(b), "camera dump: written %llu, dropped %llu, failed %llu, queued %llu",
+						static_cast<unsigned long long>(in.dump.written), static_cast<unsigned long long>(in.dump.dropped),
+						static_cast<unsigned long long>(in.dump.failed), static_cast<unsigned long long>(in.dump.queued));
+					t.detail.push_back(std::string(b) + " (" + in.dumpDirectory + ")");
+					if (in.dump.dropped > 0 || in.dump.failed > 0)
+					{
+						std::snprintf(b, sizeof(b), "camera_dump: %llu item(s) dropped (the writer is behind), %llu failed to write",
+							static_cast<unsigned long long>(in.dump.dropped), static_cast<unsigned long long>(in.dump.failed));
+						t.fallbacks.push_back(b);
+					}
+				}
+			};
+
 			// Invalid values and unknown keys: shown even when nothing else is set.
 			std::vector<std::string> keyProblems = c.problems;
 			for (const std::string& k : c.unknownKeys)
@@ -137,7 +155,10 @@ namespace Vpv
 				t.fallbacks.push_back("camera_settings: " + Detail::Join(keyProblems, "; "));
 
 			if (!c.AnySet())
+			{
+				addDump();
 				return t;
+			}
 
 			const std::vector<std::string> setKeys = Detail::SetKeys(c);
 			std::string users;
@@ -155,6 +176,7 @@ namespace Vpv
 				const std::string why = "camera_model is off, so " + Detail::Join(setKeys, ", ") + " have no effect";
 				t.lines.push_back("camera: model off; " + why);
 				t.fallbacks.push_back("camera_model: " + why);
+				addDump();
 				return t;
 			}
 
@@ -223,20 +245,7 @@ namespace Vpv
 				t.detail.push_back(b);
 			}
 
-			if (in.dumpOn)
-			{
-				char b[192];
-				std::snprintf(b, sizeof(b), "camera dump: written %llu, dropped %llu, failed %llu, queued %llu",
-					static_cast<unsigned long long>(in.dump.written), static_cast<unsigned long long>(in.dump.dropped),
-					static_cast<unsigned long long>(in.dump.failed), static_cast<unsigned long long>(in.dump.queued));
-				t.detail.push_back(std::string(b) + " (" + in.dumpDirectory + ")");
-				if (in.dump.dropped > 0 || in.dump.failed > 0)
-				{
-					std::snprintf(b, sizeof(b), "camera_dump: %llu item(s) dropped (the writer is behind), %llu failed to write",
-						static_cast<unsigned long long>(in.dump.dropped), static_cast<unsigned long long>(in.dump.failed));
-					t.fallbacks.push_back(b);
-				}
-			}
+			addDump();
 			return t;
 		}
 	}

@@ -313,6 +313,48 @@ namespace CameraStatusTestsNs
 			Assert::IsTrue(Has(t.fallbacks, "camera_dump: 3 item(s) dropped (the writer is behind), 1 failed to write"));
 		}
 
+		TEST_METHOD(ADumpWithNoCameraKeyStillShowsItsDrops)
+		{
+			StatusInput in;   // nothing set in [vpv.camera]
+			in.linkReport = true;
+			in.coreAlive = true;
+			in.dumpOn = true;
+			in.dumpDirectory = "D:\\dump\\clip";
+			in.dump.written = 2;
+			in.dump.dropped = 4;
+			const StatusText t = BuildStatus(in);
+			Assert::IsTrue(t.state == CameraState::Off);
+			Assert::IsTrue(t.lines.empty());
+			Assert::IsTrue(Has(t.detail, "camera dump: written 2, dropped 4, failed 0, queued 0"));
+			Assert::IsTrue(Has(t.fallbacks, "camera_dump: 4 item(s) dropped (the writer is behind), 0 failed to write"));
+			// A switch set while the model is off does not hide it either.
+			in.cam.use.grain = true;
+			const StatusText inert = BuildStatus(in);
+			Assert::IsTrue(inert.state == CameraState::InertSwitches);
+			Assert::IsTrue(Has(inert.fallbacks, "camera_dump: 4 item(s) dropped"));
+		}
+
+		TEST_METHOD(TheOffReplyOfTheStatusCommandIsPinned)
+		{
+			Rig rig("[general]\nx=1\n");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			Assert::IsFalse(rig.ext.Active(rig.Host()));
+			Assert::AreEqual(std::string("camera: off (camera_link = off and no [vpv.camera] key set, or the Original pathway)"), rig.Command());
+		}
+
+		TEST_METHOD(ALinkWithADumpAndNoKeyShowsTheDumpSection)
+		{
+			char dir[MAX_PATH] = {};
+			GetTempPathA(MAX_PATH, dir);
+			const std::string target = std::string(dir) + "vp-camera-status-dump2-" + std::to_string(GetCurrentProcessId());
+			EnvGuard set("VP_CAMERA_DUMP", target.c_str());
+			Rig rig("[vpv.skeleton]\ncamera_link=report\n");
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			Assert::IsNotNull(rig.ext.DumpOf(rig.Host()));
+			Assert::IsTrue(rig.Command().find("camera dump: written 0, dropped 0, failed 0, queued 0") != std::string::npos);
+		}
+
 		// ---- the extension ----
 		TEST_METHOD(AllOffInTheSectionIsInert)
 		{

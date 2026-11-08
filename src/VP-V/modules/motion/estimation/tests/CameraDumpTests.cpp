@@ -348,6 +348,11 @@ namespace CameraDumpTestsNs
 				EnvGuard g("VP_CAMERA_DUMP", "1");
 				Assert::AreEqual(std::string(), CameraDump::DirectoryFromEnvironment(), L"=1 is the status log, not a directory");
 			}
+			for (const char* word : { "0", "on", "off", "true" })
+			{
+				EnvGuard g("VP_CAMERA_DUMP", word);
+				Assert::AreEqual(std::string(), CameraDump::DirectoryFromEnvironment(), L"a switch word is not a directory");
+			}
 			{
 				EnvGuard g("VP_CAMERA_DUMP", "D:\\dumps\\run1");
 				Assert::AreEqual(std::string("D:\\dumps\\run1"), CameraDump::DirectoryFromEnvironment());

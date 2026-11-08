@@ -66,13 +66,14 @@ namespace CameraLink
 		CameraDump(const CameraDump&) = delete;
 		CameraDump& operator=(const CameraDump&) = delete;
 
-		// The directory named by VP_CAMERA_DUMP, or "" when unset, empty or "1" (the status-log meaning).
+		// The directory named by VP_CAMERA_DUMP, or "" when unset, empty, "0" / "1" or a bare on/off word (those are switches, not
+		// directories: "1" is the status-log meaning, the others start nothing).
 		static std::string DirectoryFromEnvironment();
 		static std::string ClipFromEnvironment();
 
 		// Camera worker, after Fit. false = dropped (counted). A null field is dropped as well (nothing to write).
 		bool Offer(std::shared_ptr<const FieldCopy> field, std::shared_ptr<const CameraModel::CameraMotion> record);
-		// Writes every queued item on the calling thread (tests, and the destructor when no thread ran). Returns the count written.
+		// Writes every queued item on the calling thread (tests; the destructor does not drain a thread-less object). Returns the count written.
 		size_t DrainOnce();
 
 		DumpStats Stats() const;
