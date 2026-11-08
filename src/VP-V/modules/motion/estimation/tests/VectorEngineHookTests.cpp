@@ -580,7 +580,7 @@ namespace VectorEngineHookTest
 
 		// P5a-rest (item l, fix C): GpuReleased of a host stops and drops that host's producer and clears the engine-ready
 		// flag; another host's producer (a replacement renderer) is untouched; other lifecycle events do nothing.
-		TEST_METHOD(GpuReleasedStopsOnlyThatHostsProducer)
+		TEST_METHOD(ReleasedHostStopsOnlyItsOwnProducer)
 		{
 			int host = 0, replacement = 0;
 			VectorEngine engine(&host);

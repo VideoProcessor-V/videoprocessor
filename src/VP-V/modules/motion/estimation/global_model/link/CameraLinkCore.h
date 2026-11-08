@@ -17,6 +17,8 @@
 #include "CameraFitWorker.h"
 #include "CameraLink.h"
 #include "FieldReadbackRing.h"
+#include "GuidanceLag.h"
+#include "GuidanceTimers.h"
 #include "PairAssembly.h"
 
 #include <VP-V/core/FallbackCatalog.h>
@@ -30,13 +32,17 @@
 #include <chrono>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace CameraLink
 {
+	class CameraDump;
+
 	// The per-frame facts the H1 FrameStart phase carries (defined locally; the adapter fills them).
 	struct FramePhaseFacts
 	{
@@ -93,6 +99,12 @@ namespace CameraLink
 		std::vector<FallbackCatalog::Decision> CollectDecisions();
 		ICameraLink* Link() { return this; }
 
+		// K3: the VP_CAMERA_DUMP writer. Fed from the camera worker after each Fit (a shared_ptr copy and a bounded-queue push, so the
+		// fit deadline is untouched). null = no dump. Any thread; the core keeps the writer alive until it is replaced.
+		void SetDump(std::shared_ptr<CameraDump> dump);
+		// K3: the newest fit for the status line (have = false until a record was fitted). Any thread.
+		LastFitSummary LastFit() const;
+
 		// Deterministic mode / tests: fit + publish every queued job on the calling thread (no thread involved).
 		size_t ProcessPending();
 		// Test hook for deterministic drivers that have no GPU: submit a ready field copy exactly as the ring path does.
@@ -113,9 +125,24 @@ namespace CameraLink
 		// ---- ICameraLink ----
 		std::shared_ptr<const CameraModel::CameraMotion> SealedRecord(uint64_t seq) const override;
 		std::shared_ptr<const CameraModel::CameraMotion> CausalRecord(uint64_t seq) const override;
+		bool PreviousRecordSeq(uint64_t seq, unsigned back, uint64_t& out) const override;
+		uint64_t LatestRecordSeq() const override;
 		std::shared_ptr<const FieldCopy> FieldOf(uint64_t seq) const override;
 		bool LabelsFor(uint64_t seq, CameraConsumer c, CameraLabelsView& out) override;
 		std::shared_ptr<const CameraModel::GuidanceFrame> GuideFor(uint64_t seq) override;
+
+		// K4: the guide lane job's trigger. Called on the fitting thread after EVERY fit (published or late), with the record's seq,
+		// once its pool entry is committed (publish happened before). Set at setup; a copy is taken per call under a mutex.
+		// LOCK RULE: the observer runs under m_observerMutex on the camera worker, and SetFitDoneObserver (the adapter's Detach / Reconcile, render
+		// thread, renderMutex held) takes the same mutex, so it waits for a call in flight. Therefore nothing the observer reaches (the guide
+		// lane job: the host's p4 reader, the nextPair hint, the context provider) may ever take renderMutex or wait for the render thread.
+		// Debug builds assert that SetFitDoneObserver is not called from the observer's own thread (a self-deadlock).
+		void SetFitDoneObserver(std::function<void(uint64_t fitSeq)> f);
+		// K4: the measured fit cost (p95) and the readback latency the guide lag d is derived from (GuidanceLag.h).
+		GuideLagMeter& LagMeter() { return m_lagMeter; }
+		// K4: the fit time (CPU work, the camera worker) and the readback latency (a wait, request -> ready) as PassTimers samples,
+		// buffered thread-safely and drained on the render thread into the skeleton's accumulator (AddCameraRows). Bounded.
+		size_t DrainTimerSamples(std::vector<TimerSample>& out);
 
 		// K2 / K4 plug in here (set by their owners; null = unavailable).
 		std::function<bool(uint64_t, CameraConsumer, CameraLabelsView&)> labelsProvider;
@@ -153,14 +180,27 @@ namespace CameraLink
 		std::atomic<uint32_t> m_events{ 0 };   // bits set by any thread, consumed by OnFrameStart
 		uint64_t m_seenQueueFull = 0;
 		std::vector<uint64_t> m_sealedMark;   // seq accepted at the seal, indexed seq mod size
+		GuideLagMeter m_lagMeter;
+		mutable std::mutex m_chainMutex;
+		std::vector<uint64_t> m_chain;   // requested record seqs, ascending (bounded); cleared on a new field era / teardown
+		std::mutex m_timerMutex;
+		std::vector<TimerSample> m_timerSamples;
+		void AddTimerSample(const char* row, double ms, bool wait);
+		std::map<uint64_t, std::chrono::steady_clock::time_point> m_requestedAt;   // render thread: field copy requests in flight
+		std::mutex m_observerMutex;
+		std::atomic<std::thread::id> m_observerThread{ std::thread::id() };   // the thread inside the observer right now (debug check)
+		std::function<void(uint64_t)> m_fitDone;
 
 		// status state touched by the worker's onResult
 		mutable std::mutex m_statusMutex;
 		AmbiguousTracker m_ambiguous;
 		StatusFacts m_facts;
+		LastFitSummary m_lastFit;
 		uint64_t m_records = 0, m_ambiguousRecords = 0;
 		std::mutex m_traceMutex;
 		std::ofstream m_trace;
+		mutable std::mutex m_dumpMutex;
+		std::shared_ptr<CameraDump> m_dump;
 		uint64_t m_seenReadbackDropped = 0;
 	};
 }

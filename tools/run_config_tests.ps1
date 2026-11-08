@@ -76,26 +76,62 @@ for ($i = 0; $i -lt $Shards; ++$i) {
     $emptyMatchShard = $Match -and $code -eq 2 -and @($shardLines | Where-Object { $_ -like "START *" }).Count -eq 0
     if (($null -eq $code -or $code -ne 0) -and -not $emptyMatchShard) { $shardProblems += "shard $i exited with code $code" }
 }
-# Off screen Qt has no fonts, so text measures as placeholder boxes; the layout-fit test (the VP-V page
-# must not scroll sideways at the default window size) skips its check then. It runs once more here
-# with the Windows fonts, so it measures what the owner sees (organisation pass 2, 2026-10-24).
-if (-not $OnScreen -and (-not $Match -or "VP-V: masters, derived settings, one control per key, fits the window" -match $Match)) {
+# Off screen Qt has no fonts, so text measures as placeholder boxes; the layout tests (the VP-V page must not
+# scroll sideways at the default window size, Bill's responsive workspaces, ...) skip their check then. They run
+# once more here with the Windows fonts, so they measure what the owner sees (organisation pass 2, 2026-10-24).
+# FX-CFG14: the list of font-gated tests has ONE source, the test exe (fontGatedTests in ConfigEditorWindowTests.cpp,
+# printed by --list-font-tests). -Match keeps the exe's rule: a test runs when its name contains a word.
+$fontTests = @()
+if (-not $OnScreen) {
+    $listLog = Join-Path $OutDir "font-tests-list.txt"
+    $lp = Start-Process -FilePath $Exe -WorkingDirectory (Split-Path $Exe) -ArgumentList @("--list-font-tests") `
+        -RedirectStandardOutput $listLog -RedirectStandardError "$listLog.err" -PassThru -NoNewWindow
+    $null = $lp.Handle
+    $lp.WaitForExit()
+    $fontTests = @(Get-Content $listLog -ErrorAction SilentlyContinue | Where-Object { $_.Trim() })
+    if ($lp.ExitCode -ne 0 -or $fontTests.Count -eq 0) { $shardProblems += "the test exe printed no font-gated test list (--list-font-tests exit $($lp.ExitCode))" }
+}
+$fontSelected = @()
+foreach ($testName in $fontTests) {
+    $words = if ($Match) { @($Match -split '\|' | Where-Object { $_ }) } else { @() }
+    $hit = -not $Match
+    foreach ($word in $words) { if ($testName.IndexOf($word, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hit = $true } }
+    if ($hit) { $fontSelected += $testName }
+}
+$fontPassLines = @()
+if (-not $OnScreen -and $fontSelected.Count -gt 0) {
     $fontLog = Join-Path $OutDir "fonts.txt"
     $previousFontDir = $env:QT_QPA_FONTDIR
     $env:QT_QPA_PLATFORM = "offscreen"
     $env:QT_QPA_FONTDIR = Join-Path $env:WINDIR "Fonts"
     try {
-        $fp = Start-Process -FilePath $Exe -WorkingDirectory (Split-Path $Exe) -ArgumentList @("--match", "`"fits the window`"") `
+        $fp = Start-Process -FilePath $Exe -WorkingDirectory (Split-Path $Exe) -ArgumentList @("--match", "`"$($fontSelected -join '|')`"") `
             -RedirectStandardOutput $fontLog -RedirectStandardError "$fontLog.err" -PassThru -NoNewWindow
         $null = $fp.Handle
         $fp.WaitForExit()
         if ($fp.ExitCode -ne 0) { $shardProblems += "fonts pass exited with code $($fp.ExitCode)" }
-        $lines += @(Get-Content $fontLog, "$fontLog.err" -ErrorAction SilentlyContinue)
+        $fontPassLines = @(Get-Content $fontLog, "$fontLog.err" -ErrorAction SilentlyContinue)
+        $lines += $fontPassLines
     }
     finally {
         if ($null -eq $previousFontDir) { Remove-Item Env:QT_QPA_FONTDIR -ErrorAction SilentlyContinue } else { $env:QT_QPA_FONTDIR = $previousFontDir }
         if ($null -eq $previousPlatform) { Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue } else { $env:QT_QPA_PLATFORM = $previousPlatform }
     }
+    # The font pass must have loaded fonts (it prints "FONTS <n>"), and every selected font test must PASS in it.
+    $fontCountLine = @($fontPassLines | Where-Object { $_ -match '^FONTS \d+$' } | Select-Object -First 1)
+    if ($fontCountLine.Count -eq 0 -or [int]($fontCountLine[0] -replace '^FONTS ', '') -le 0) {
+        $shardProblems += "fonts pass loaded no fonts ($($fontCountLine -join '')); QT_QPA_FONTDIR=$($env:WINDIR)\Fonts"
+    }
+    foreach ($testName in $fontSelected) {
+        $fontPassed = @($fontPassLines | Where-Object { $_.StartsWith("PASS $testName [") })
+        if ($fontPassed.Count -eq 0) { $shardProblems += "font-gated test has no PASS in the font pass: $testName" }
+    }
+}
+# Any 'needs real fonts' SKIP must have a matching PASS (from the font pass) or the gate fails.
+foreach ($skipLine in @($lines | Where-Object { $_ -like "SKIP *: needs real fonts*" })) {
+    $skippedName = ($skipLine.Substring(5) -split ': needs real fonts')[0]
+    $rerun = @($fontPassLines | Where-Object { $_.StartsWith("PASS $skippedName [") })
+    if ($rerun.Count -eq 0) { $shardProblems += "skipped for fonts and never passed: $skippedName" }
 }
 $passed = @($lines | Where-Object { $_ -like "PASS *" })
 $failed = @($lines | Where-Object { $_ -like "FAIL *" })

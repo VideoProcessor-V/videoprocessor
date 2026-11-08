@@ -58,6 +58,8 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\config\VpvRendererSettings.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\config\VpvSettingsModule.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\signal\ResyncExtension.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\capture\CaptureExtension.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\queue_timing\IngressPolicy.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\skeleton\SkeletonModule.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\skeleton\gpu\SkeletonGpuDispatcher.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -75,10 +77,41 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\repair\grain_split\GrainSplitGpu.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraExtension.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraLinkCore.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraDump.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraFitProducer.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraFitWorker.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\FieldReadbackRing.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\NativeCopyReadback.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraLane.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraLabelFill.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraLabelProducer.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\GuidanceScheduler.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\GuidanceAdapter.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\GuideLaneJob.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\GuidanceCountsRing.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelMeasurement.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelSearchHints.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\CameraModelGpu.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelGeometry.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelTemporal.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\DynamicTexture.cpp" />

@@ -226,6 +226,30 @@ namespace
 		return binary.substr(0, binary.find_last_of("\\/") + 1);
 	}
 
+	// Deletes a folder and everything under it (the cold-cache measurement's private shader cache).
+	void RemoveFolderTree(const std::string& folder)
+	{
+		WIN32_FIND_DATAA found;
+		const HANDLE search = FindFirstFileA((folder + "\\*").c_str(), &found);
+		if (search != INVALID_HANDLE_VALUE)
+		{
+			do
+			{
+				const std::string name = found.cFileName;
+				if (name == "." || name == "..") continue;
+				const std::string path = folder + "\\" + name;
+				if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveFolderTree(path);
+				else
+				{
+					SetFileAttributesA(path.c_str(), FILE_ATTRIBUTE_NORMAL);
+					DeleteFileA(path.c_str());
+				}
+			} while (FindNextFileA(search, &found));
+			FindClose(search);
+		}
+		RemoveDirectoryA(folder.c_str());
+	}
+
 	// Letterbox bars (black rows at the top and bottom) in the V210 frames; 0 = none.
 	int g_harnessBarRows = 0;
 	// A picture for the V210 frames (10-bit luma codes, width x height; chroma neutral), the same
@@ -312,6 +336,9 @@ namespace
 	struct RunResult
 	{
 		bool created = false, presented = false;
+		// Run(..., stopWhenLogged): the seconds since the frame loop started when that text was first
+		// logged (-1: it never was, the run lasted its full `seconds`).
+		double stopSeenSeconds = -1.0;
 		std::vector<std::string> log;
 		std::string dejudderStatus, presentationStatus;   // the stats lines at the end
 		std::string ledStatus;   // the crash state's LED drive line (GetLedDriveStatus)
@@ -397,6 +424,9 @@ namespace
 	// On-screen window mode for Run(): -1 = VP_TEST_HARNESS_FULLSCREEN (1 = fullscreen), 0 =
 	// windowed, 1 = fullscreen. A test that runs both modes (OnScreenModes) sets it per pass.
 	int g_harnessFullscreen = -1;
+	// The folder (beside the test DLL) of the persistent shader cache Run() uses; empty = the shared
+	// "vp-harness-shader-cache". A test that measures a COLD cache points it at a fresh folder.
+	std::string g_harnessShaderCacheName;
 
 	// Stream faults (owner 2026-10-14): what each captured frame does. The
 	// default plan is the plain stream at the run's rate.
@@ -457,6 +487,7 @@ namespace
 		std::vector<std::string> shaderProfiles;
 		bool shadersSelected = false;
 		int fullscreen = -1;
+		std::string shaderCacheName;
 	};
 
 	HarnessGlobals CaptureHarnessGlobals()
@@ -485,6 +516,7 @@ namespace
 		g.shaderProfiles = g_harnessShaderProfiles;
 		g.shadersSelected = g_harnessShadersSelected;
 		g.fullscreen = g_harnessFullscreen;
+		g.shaderCacheName = g_harnessShaderCacheName;
 		return g;
 	}
 
@@ -513,6 +545,7 @@ namespace
 		g_harnessShaderProfiles = g.shaderProfiles;
 		g_harnessShadersSelected = g.shadersSelected;
 		g_harnessFullscreen = g.fullscreen;
+		g_harnessShaderCacheName = g.shaderCacheName;
 	}
 
 	// The window modes an on-screen test runs (render-ahead follow-up 2026-10-17):
@@ -760,7 +793,7 @@ namespace
 	// `seconds`, then stopped and destroyed (also when an Assert fails part-way: RunResources).
 	RunResult Run(VideoFrameEncoding encoding, const std::string& capturePath, double seconds,
 		bool film = false, const std::string& extra = std::string(), bool onScreen = false,
-		const FramePlan* plan = nullptr)
+		const FramePlan* plan = nullptr, const std::string& stopWhenLogged = std::string(), double stopGraceSeconds = 0.0)
 	{
 		RunResult result;
 		{
@@ -768,12 +801,15 @@ namespace
 			g_log.clear();
 		}
 		const std::string folder = Here();
+		// stopWhenLogged (optional, default off): `seconds` becomes the longest the run may last; it ends
+		// stopGraceSeconds after the first log line containing that text (result.stopSeenSeconds says when).
+		// The shader pre-warm passes and the cold-cache measurement use it; no other caller sets it.
 		// A persistent shader cache beside the test DLL (gate fix 2026-10-17), as a deployed VP
 		// keeps one beside its exe: only the first renderer of a build compiles its shaders, so a
 		// cold compile (up to ~3 s of render stall under load) no longer lands inside a test's
 		// timed window. The renderer reads VP_TEST_SHADER_CACHE_DIR in place of the exe folder.
 		{
-			const std::string cache = folder + "vp-harness-shader-cache";
+			const std::string cache = folder + (g_harnessShaderCacheName.empty() ? std::string("vp-harness-shader-cache") : g_harnessShaderCacheName);
 			CreateDirectoryA(cache.c_str(), nullptr);
 			CreateDirectoryA((cache + "\\vprenderer").c_str(), nullptr);
 			CreateDirectoryA((cache + "\\vprenderer-beta").c_str(), nullptr);
@@ -951,9 +987,29 @@ namespace
 				for (const std::string& line : g_log)
 					done += line.find("Rendered-output capture complete") != std::string::npos ? 1 : 0;
 				return done < wanted; };
+			// stopWhenLogged: the log is scanned (new lines only) every 100 ms.
+			bool stopSeen = false;
+			std::chrono::steady_clock::time_point stopSeenAt, nextStopScan = start;
+			size_t stopScanned = 0;
+			auto stopRequested = [&]() {
+				if (stopWhenLogged.empty()) return false;
+				const auto now = std::chrono::steady_clock::now();
+				if (!stopSeen && now >= nextStopScan)
+				{
+					nextStopScan = now + std::chrono::milliseconds(100);
+					std::lock_guard<std::mutex> guard(g_logMutex);
+					for (; stopScanned < g_log.size() && !stopSeen; ++stopScanned)
+						if (g_log[stopScanned].find(stopWhenLogged) != std::string::npos)
+						{
+							stopSeen = true;
+							stopSeenAt = now;
+							result.stopSeenSeconds = std::chrono::duration<double>(now - start).count();
+						}
+				}
+				return stopSeen && now - stopSeenAt >= std::chrono::duration<double>(stopGraceSeconds); };
 			auto keepRunning = [&]() {
 				const auto elapsed = std::chrono::steady_clock::now() - start;
-				if (elapsed < std::chrono::duration<double>(seconds)) return true;
+				if (elapsed < std::chrono::duration<double>(seconds)) return !stopRequested();
 				return elapsed < std::chrono::duration<double>(seconds + 6.0) && capturesPending(); };
 			for (int n = 0; keepRunning(); ++n)
 			{
@@ -2187,10 +2243,30 @@ namespace Tests
 			g_harnessWidth = 3840;
 			g_harnessHeight = 2160;
 			struct Case { const char* extra; const char* expected; const wchar_t* name; };
-			for (const Case& c : { Case{ "source_resolution: 1080\n", "Re-base: 3840x2160 -> 1920x1080", L"1080" },
+			const Case cases[] = { Case{ "source_resolution: 1080\n", "Re-base: 3840x2160 -> 1920x1080", L"1080" },
 				Case{ "source_resolution: 900\n", "Re-base: 3840x2160 -> 1600x900", L"900" },
 				Case{ "source_resolution: 1080\ndejudder_strength: 0.25\n", "Re-base: 3840x2160 -> 1920x1080", L"1080 with the de-judder" },
-				Case{ "source_resolution: 1080\ncapture_upload: early\n", "Re-base: 3840x2160 -> 1920x1080", L"1080 with the early upload" } })
+				Case{ "source_resolution: 1080\ncapture_upload: early\n", "Re-base: 3840x2160 -> 1920x1080", L"1080 with the early upload" } };
+			// Shader pre-warm (FX-RBT, coordinator 2026-11-08). The timed windows below are 2-4 s, shorter than a
+			// COLD first frame (~4.8 s of shader compile) plus the re-base's own warm-up hold (~2.6 s cold), so the
+			// test used to pass only on a warm harness shader cache. Before any timed window, each configuration
+			// the test checks runs once, untimed and unasserted, through the same renderer set-up (same 4K source,
+			// same extra text, film flag and target size, so the same re-base variant): each ends 3 s after its
+			// re-base starts (so the first frames at the new size compiled too) or after 30 s, and the renderer's
+			// release saves the harness shader cache the timed runs then load. Nothing in the timed part compiles.
+			// The cold cost is not hidden: SourceResolutionRebaseColdCacheCost measures it.
+			for (const Case& c : cases)
+			{
+				const bool film = std::string(c.extra).find("dejudder") != std::string::npos;
+				const RunResult warm = Run(VideoFrameEncoding::V210, "gpu", 30.0, film, c.extra, false, nullptr,
+					"Re-base: 3840x2160 ->", 3.0);
+				Logger::WriteMessage((std::wstring(L"pre-warm ") + c.name + L": re-base seen after " +
+					(warm.stopSeenSeconds >= 0.0 ? std::to_wstring(warm.stopSeenSeconds) + L" s" : std::wstring(L"never (30 s)")) + L"\n").c_str());
+			}
+			// The native (default, auto) and auto runs: the 4K path and the source monitor's shaders.
+			Run(VideoFrameEncoding::V210, "gpu", 30.0, false, "source_resolution: auto\n", false, nullptr,
+				"Source resolution look-ahead: watching", 3.0);
+			for (const Case& c : cases)
 			{
 				const bool film = std::string(c.extra).find("dejudder") != std::string::npos;
 				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, film, c.extra);
@@ -2226,6 +2302,65 @@ namespace Tests
 			}
 			g_harnessWidth = savedW;
 			g_harnessHeight = savedH;
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(SourceResolutionRebaseColdCacheCost)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SourceResolutionRebaseColdCacheCost)
+		{
+			const HarnessScope harnessScope;
+			// FX-RBT measurement row (coordinator 2026-11-08): the COLD-cache cost of a source_resolution re-base,
+			// kept visible now that SourceResolutionRebasesThroughTheRenderer pre-warms. A private, empty harness
+			// shader cache (deleted afterwards; the shared cache is untouched) runs one 4K -> 1080 re-base and
+			// reports the first frame's render time (the cold shader compile), the re-base's own warm-up hold, the
+			// time until "Re-base: 3840x2160 -> 1920x1080" was logged and the wall time of the whole run. Expected
+			// on the laptop (RTX 3050 Ti): ~4.8 s + ~2.6 s, about 7.4 s until re-based. It reports; it does not
+			// gate on those numbers. Asserted: sanity only. The re-base happens, does not fail and frames present,
+			// within kColdRebaseBoundSeconds (30 s, about four times the expected total; beyond it the background
+			// shader warm-up is stuck, not slow).
+			if (!RequireHardwareOrSkip("SourceResolutionRebaseColdCacheCost")) return;
+			const double kColdRebaseBoundSeconds = 30.0;
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			const std::string coldName = "vp-harness-shader-cache-cold-" + std::to_string(GetCurrentProcessId());
+			const std::string coldFolder = Here() + coldName;
+			struct ColdFolder
+			{
+				std::string path;
+				explicit ColdFolder(const std::string& p) : path(p) { RemoveFolderTree(path); }
+				~ColdFolder() { RemoveFolderTree(path); }
+			} cold(coldFolder);
+			g_harnessShaderCacheName = coldName;
+			const auto wallStart = std::chrono::steady_clock::now();
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", kColdRebaseBoundSeconds, false, "source_resolution: 1080\n", false, nullptr,
+				"Re-base: 3840x2160 -> 1920x1080", 1.0);
+			const double wallSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - wallStart).count();
+			// The number after `key` in the first log line containing `anchor` and `key`; -1 when absent.
+			auto numberAfter = [&](const char* anchor, const char* key) {
+				for (const std::string& line : r.log)
+				{
+					const size_t at = line.find(key);
+					if (line.find(anchor) != std::string::npos && at != std::string::npos)
+						return std::atof(line.c_str() + at + std::strlen(key));
+				}
+				return -1.0;
+			};
+			const double firstFrameMs = numberAfter("Alpha presentation telemetry:", " render_ms=");
+			const double holdMs = numberAfter("VP re-base background warm-up:", "elapsed_ms=");
+			Logger::WriteMessage(("COLD-CACHE RE-BASE COST (4K -> 1080, empty shader cache): first frame render " +
+				std::to_string(firstFrameMs) + " ms (cold shader compile), re-base warm-up hold " + std::to_string(holdMs) +
+				" ms, re-based " + std::to_string(r.stopSeenSeconds) + " s after the first frame was sent, run wall time " +
+				std::to_string(wallSeconds) + " s (expected ~4.8 s + ~2.6 s; sanity bound " + std::to_string(kColdRebaseBoundSeconds) +
+				" s; -1 = not logged)\n").c_str());
+			for (const std::string& line : r.log)
+				if (line.find("Re-base shader warm-up ready") != std::string::npos || line.find("persistent shader cache") != std::string::npos)
+					Logger::WriteMessage((line + "\n").c_str());
+			Assert::IsTrue(r.created, L"cold: renderer created");
+			Assert::IsFalse(r.Logged("Re-base failed"), (L"cold: no re-base failure\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.stopSeenSeconds >= 0.0 && r.stopSeenSeconds < kColdRebaseBoundSeconds,
+				(L"cold: re-based within the sanity bound\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.presented, (L"cold: frames presented\n" + r.Tail()).c_str());
 		}
 
 		TEST_METHOD(EveryProfileKeyChangesTheLiveSettingsFingerprint)

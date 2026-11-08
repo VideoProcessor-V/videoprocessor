@@ -35,6 +35,7 @@ namespace FallbackPlainText
 			{ "output scaling", "The output scaler was replaced by a simpler one" },
 			{ "early upload", "Early upload of frames to the graphics card is off" },
 			{ "early upload frames", "Early upload is holding fewer frames than requested" },
+			{ "capture extension", "The capture card's frames are converted on the processor instead of the graphics card" },
 			{ "vector_engine", "The motion vector engine is not serving the steps that need it" },
 			{ "vector_engine_producer", "The motion vector engine is skipping work to keep up" },
 			{ "vector_engine_global", "Global motion detection is not keeping up and is off" },

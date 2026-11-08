@@ -91,6 +91,7 @@
 #include <VP-V/modules/input/signal/ResyncCallSites.h>   // R1 call-site helpers
 #include <VP-V/modules/input/signal/ResyncExtension.h>   // VPV-HOOK: resync Q1 (Shadow, Drive, HostBinding, pulldown step)
 #include <VP-V/modules/motion/estimation/VectorEngineHost.h>   // P5a: the vector engine: state, logic and the host adapter   // VPV-HOOK
+#include <VP-V/modules/input/capture/CaptureHost.h>   // P10: the capture extension's binding and host adapter   // VPV-HOOK
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>   // R4a: the re-base decision product P0
 #include <VP-V/modules/scaling/rebase/RebaseWarmupJob.h>   // FX-RB re-base shader warm-up // VPV-HOOK
 #include <vprenderer/DejudderPolicy.h>
@@ -4910,16 +4911,8 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<bool> earlyEfficiency{ false };     // efficiency_fixes: every mode + guard (off: the old rule)
 	bool earlyGuardChecked = false;
 	SteadyClock::time_point earlyGuardCheckedAt{};
-	bool EarlyRequested() const
-	{
-		return EarlyUploadPolicy::Requested(earlyWanted.load(std::memory_order_acquire) ? EarlyUploadPolicy::Mode::Early :
-			earlyAuto.load(std::memory_order_acquire) ? EarlyUploadPolicy::Mode::Auto : EarlyUploadPolicy::Mode::Render,
-			earlyEfficiency.load(std::memory_order_acquire), lowLatencyQueueActive.load(std::memory_order_acquire));
-	}
-	bool EarlyActive() const
-	{
-		return EarlyRequested() && !earlyGuardBlocked.load(std::memory_order_acquire);
-	}
+	bool EarlyRequested() const;   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
+	bool EarlyActive() const;   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
 	const std::unique_ptr<EarlyUpload> earlyUpload = std::make_unique<EarlyUpload>();
 	bool earlyOpenFailed = false;
 	std::atomic<size_t> earlyUploadQueueTarget{ AlphaQueuePolicy::DEFAULT_DESIRED_DEPTH + 1 };   // the queue target (L4)
@@ -4929,121 +4922,16 @@ struct LibplaceboVideoRenderer::Impl
 	// Render thread, each raw frame: the pool open when wanted (closed when not).
 	// Efficiency audit 2026-10-24 #3: the decision is EarlyUploadPolicy's (VRAM guard by need,
 	// re-checked every 5 s while closed); a guard refusal is listed under "Fallbacks engaged".
-	void SyncEarlyUpload(size_t frameBytes)
-	{
-		const bool requested = EarlyRequested() && d3d11;
-		if (!requested)
-		{
-			if (earlyUpload->IsOpen())
-			{
-				earlyUpload->Close();
-				DebugLog::Log("Early upload: off (%llu frames read early, %llu took the render upload (%llu before the early upload started), %llu waited for a running upload)",
-					static_cast<unsigned long long>(earlyUsed), static_cast<unsigned long long>(earlyFallback),
-					static_cast<unsigned long long>(earlyLate), static_cast<unsigned long long>(earlyWaited));
-			}
-			earlyOpenFailed = false;
-			earlyGuardChecked = false;
-			earlyGuardBlocked.store(false, std::memory_order_release);
-			SyncFallback(FallbackCatalog::EarlyUpload(false, false, std::string()));
-			earlyRenderUploads = FallbackCatalog::EarlyUploadRenderUploads();
-			SyncFallback(earlyRenderUploads.last);
-			return;
-		}
-		SyncFallback(earlyRenderUploads.Current(GetTickCount64()));   // ages out with no eligible payloads
-		if (earlyUpload->IsOpen())
-			return;
-		const SteadyClock::time_point now = SteadyClock::now();
-		if (earlyGuardChecked && now - earlyGuardCheckedAt < std::chrono::seconds(5))
-			return;
-		earlyGuardChecked = true;
-		earlyGuardCheckedAt = now;
-		// Frames in flight (queue, de-judder next / ahead, the one being
-		// filled, a cadence repeat) plus a margin of 3 (owner 2026-10-15);
-		// capped at 1 GB and a quarter of the card's memory. The queue part
-		// follows the queue target (hunt 2 13-timing L4).
-		const int slots = AlphaQueuePolicy::EarlyUploadSlots(earlyUploadQueueTarget.load(std::memory_order_acquire));
-		EarlyUploadPolicy::Input guard;
-		guard.mode = earlyWanted.load(std::memory_order_acquire) ? EarlyUploadPolicy::Mode::Early : EarlyUploadPolicy::Mode::Auto;
-		guard.device = d3d11 && d3d11->device;
-		guard.slots = slots;
-		guard.frameBytes = frameBytes;
-		uint64_t usage = 0, budget = 0;
-		if (QueryMotionEngineBudget(usage, budget))
-		{
-			guard.usageBytes = usage;
-			guard.budgetBytes = budget;
-		}
-		guard.openFailed = earlyOpenFailed;
-		guard.guard = earlyEfficiency.load(std::memory_order_acquire);
-		const EarlyUploadPolicy::Decision decision = EarlyUploadPolicy::Decide(guard);
-		if (decision.reason == EarlyUploadPolicy::Reason::FrameSizeUnknown)
-		{
-			earlyGuardChecked = false;   // not known yet: decide on the next raw frame (no pool, no entry)
-			return;
-		}
-		earlyGuardBlocked.store(!decision.early, std::memory_order_release);
-		if (!decision.early)
-		{
-			const std::string why = decision.FallbackReason();
-			if (!why.empty())
-				SyncFallback(FallbackCatalog::EarlyUpload(true, false, why));
-			return;
-		}
-		if (earlyUpload->Open(d3d11->device, d3d11->gpu, slots))
-		{
-			DebugLog::Log("Early upload: on (%d slots, up to %zu MB; frames uploaded as they arrive on a second device)", slots,
-				earlyUpload->CapBytes() >> 20);
-			SyncFallback(FallbackCatalog::EarlyUpload(true, true, std::string()));
-		}
-		else
-		{
-			earlyOpenFailed = true;
-			earlyGuardBlocked.store(true, std::memory_order_release);
-			DebugLog::Log("Early upload: not available (%s); the render upload", earlyUpload->LastError().c_str());
-			SyncFallback(FallbackCatalog::EarlyUpload(true, false, earlyUpload->LastError()));
-		}
-	}
+	void SyncEarlyUpload(size_t frameBytes);   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
 	// Render thread: the early-uploaded texture of a payload (with its GPU wait
 	// queued), or nullptr (the unpack uploads from the frame).
 	// late: the render uploads because the early upload had not started; waitedMs: time blocked on
 	// a running conversion-thread upload (timed apart from the unpack submit).
 	struct EarlyTake { bool late = false; double waitedMs = 0.0; };
 	FallbackCatalog::EarlyUploadRenderUploads earlyRenderUploads;   // "Fallbacks engaged: early upload frames"
-	pl_tex EarlyTexture(const QueuedFrame::ConvertedPayload& payload, EarlyUpload::Slot*& slot, EarlyTake* take = nullptr)
-	{
-		std::shared_ptr<void> handle = payload.early;
-		EarlyUploadHandoff::Outcome outcome = EarlyUploadHandoff::Outcome::NoSlot;
-		bool first = false;
-		const double takeStart = PassTimerHook::Hook::NowMs();
-		if (!handle && payload.earlyHandoff)
-			handle = payload.earlyHandoff->Take(&outcome, &first);   // the slot stays alive through the handoff the payload holds
-		const bool waited = outcome == EarlyUploadHandoff::Outcome::WaitedThenEarly || outcome == EarlyUploadHandoff::Outcome::WaitedThenNone;
-		slot = handle ? static_cast<EarlyUpload::Slot*>(handle.get()) : nullptr;
-		pl_tex tex = slot && earlyUpload->IsOpen() ? earlyUpload->Acquire(*slot) : nullptr;
-		if (!tex)
-			slot = nullptr;
-		++(tex ? earlyUsed : earlyFallback);
-		const bool late = outcome == EarlyUploadHandoff::Outcome::Late;   // once per payload (Pending -> Abandoned)
-		earlyLate += late ? 1 : 0;
-		earlyWaited += waited ? 1 : 0;
-		if (first)   // once per early-eligible payload: the visible share of render uploads
-			SyncFallback(earlyRenderUploads.Note(GetTickCount64(), late, !tex && !late, waited));
-		if (take)
-		{
-			take->late = late || outcome == EarlyUploadHandoff::Outcome::AbandonedAgain;
-			take->waitedMs = waited ? PassTimerHook::Hook::NowMs() - takeStart : 0.0;
-		}
-		return tex;
-	}
+	pl_tex EarlyTexture(const QueuedFrame::ConvertedPayload& payload, EarlyUpload::Slot*& slot, EarlyTake* take = nullptr);   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
 	// The upload timers of one raw payload (efficiency timers T4), the wait booked apart.
-	void BookUploadTimers(pl_tex early, const EarlyTake& take, double startMs)
-	{
-		if (take.waitedMs > 0.0)
-			passTimerHook.AddCpu("upload: waited for the conversion-thread upload", PassTimers::Kind::CpuWait, take.waitedMs);
-		passTimerHook.AddCpu(early ? "upload: unpack submit (early slot)" : take.late ?
-			"upload: CPU copy + unpack submit (render thread, early upload not started)" : "upload: CPU copy + unpack submit (render thread)",
-			PassTimers::Kind::CpuWork, PassTimerHook::Hook::NowMs() - startMs - take.waitedMs);
-	}
+	void BookUploadTimers(pl_tex early, const EarlyTake& take, double startMs);   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
 	std::atomic<int> rawBuffersPeak{ 0 };
 	std::atomic<bool> rgbGpuFailed{ false };
 	std::unique_ptr<GpuRgbUnpack> rgbUnpack;
@@ -5117,6 +5005,10 @@ struct LibplaceboVideoRenderer::Impl
 	bool dejudderRgbBt2020 = false;
 	pl_tex dejudderRgbScratch = nullptr;
 	bool rgbGpuLogged = false;
+	void CaptureApplySettings();   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
+	void CaptureReleaseGpu();   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
+	bool CaptureConvert(RendererExtension::ConvertContext& cc);   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
+	void CaptureAfterPublish(RendererExtension::PublishView& pv);   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
 	// entrance_gpu_drain (VP-V/modules/scaling/rebase/EntranceGpuDrain.h, group E): call sites only.
 	// S1 notes every entrance run through EntranceHost::OnStagesRun.
 	EntranceGpuDrain::Drain entranceDrain;
@@ -5230,145 +5122,22 @@ struct LibplaceboVideoRenderer::Impl
 	// mix. False (nothing shown yet): the caller falls back to libplacebo's frame mixer.
 	bool RenderCrossfadeMix(const pl_frame& from, const pl_frame& to, const pl_frame& destination, const pl_render_params& parameters, const pl_color_space* historyColor, double weight);   // VPV-HOOK P4-5: defined in VP-V/segments/EntranceHostMembers.inl
 
-	bool UnpackRgbPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, bool bt2020, pl_tex& rgb, pl_tex& luma)
-	{
-		if (!payload.Raw() || !d3d11)
-			return false;
-		if (!rgbUnpack)
-			rgbUnpack = std::make_unique<GpuRgbUnpack>(log, d3d11->gpu);
-		SyncEarlyUpload(payload.rawBytes);
-		EarlyUpload::Slot* slot = nullptr;
-		const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
-		EarlyTake take;
-		const pl_tex early = EarlyTexture(payload, slot, &take);
-		bool unpacked = rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
-			rgb, luma, false, early);
-		if (slot)
-			earlyUpload->Used(*slot);
-		BookUploadTimers(early, take, uploadCpuStart);
-		if (!unpacked && early)
-			unpacked = rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, rgb, luma);
-		if (unpacked)
-		{
-			if (!rgbGpuLogged)
-			{
-				const VideoFrameEncoding e = payload.rawEncoding;
-				DebugLog::Log("Native RGB ingest: %s unpacked on the GPU to RGB 4:4:4 (%dx%d, no CPU conversion)",
-					e == VideoFrameEncoding::R210 ? "r210" : e == VideoFrameEncoding::R12B ? "R12B" :
-					e == VideoFrameEncoding::R12L ? "R12L" : e == VideoFrameEncoding::R10b ? "R10b" :
-					e == VideoFrameEncoding::R10l ? "R10l" : e == VideoFrameEncoding::ARGB_8BIT ? "ARGB" : "BGRA", width, height);
-				rgbGpuLogged = true;
-			}
-			return true;
-		}
-		if (!rgbGpuFailed.exchange(true))
-		{
-			DebugLog::Log("Native RGB ingest: the GPU unpack failed (%s); the CPU conversion for the rest of the session",
-				rgbUnpack->Error().c_str());
-			EngageFallback("native RGB GPU unpack", "CPU conversion to 10-bit 4:2:0 for the session: " + rgbUnpack->Error());
-		}
-		return false;
-	}
+	bool UnpackRgbPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, bool bt2020, pl_tex& rgb, pl_tex& luma);   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
 	// dv_tunnel_gpu_unpack: the CPU unpack of a tunnel picture handed on raw
 	// whose GPU unpack failed (the formatter's rows, single-threaded), into
 	// pixels in its P216 layout; false when the formatter no longer has the
 	// frame's geometry.
 	std::vector<BYTE> dvFallbackPixels;
-	bool UnpackDolbyVisionOnCpu(const QueuedFrame::ConvertedPayload& payload, int width, int height, std::vector<BYTE>& pixels)
-	{
-		if (!payload.Raw() || !payload.dvTunnelRaw || width <= 0 || height <= 0 ||
-			payload.rawRowBytes < static_cast<size_t>(width) * 4 ||
-			payload.rawBytes < payload.rawRowBytes * static_cast<size_t>(height))
-			return false;
-		std::lock_guard<std::mutex> formatterGuard(formatterMutex);
-		auto* dv = dynamic_cast<CRGBDolbyVisionTunnelFormatter*>(formatter.get());
-		const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
-		if (!dv || !formatterState || !formatterState->displayMode ||
-			formatterState->videoFrameEncoding != payload.rawEncoding ||
-			static_cast<size_t>(dv->GetOutFrameSize()) != bytes ||
-			static_cast<size_t>(formatterState->BytesPerRow()) != payload.rawRowBytes)
-			return false;
-		pixels.resize(bytes);
-		return dv->UnpackPicture(payload.rawFrame->GetData(), pixels.data(), payload.dvTunnelHighAligned);
-	}
+	bool UnpackDolbyVisionOnCpu(const QueuedFrame::ConvertedPayload& payload, int width, int height, std::vector<BYTE>& pixels);   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
 	// dv_tunnel_gpu_unpack: a Dolby Vision tunnel picture's planes (the CPU
 	// formatter's, exactly) unpacked on the GPU, or false (and the session back
 	// to the CPU unpack, with the fallback shown: Ctrl+I line, one-time notice, Config status) when it fails.
-	bool UnpackDolbyVisionPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],
-		bool sessionFallback)
-	{
-		// After a failure this session the payloads still in flight go straight
-		// to the CPU fallback (no GPU retry per frame, no burst of late frames).
-		if (dvGpuFailed.load(std::memory_order_acquire))
-			return false;
-		GpuDolbyVisionTunnelUnpack& unpack = dvUnpack.Unpacker(log, d3d11->gpu);
-		SyncEarlyUpload(payload.rawBytes);
-		EarlyUpload::Slot* slot = nullptr;
-		const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
-		EarlyTake take;
-		const pl_tex early = EarlyTexture(payload, slot, &take);
-		bool unpacked = unpack.Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
-			payload.dvTunnelHighAligned, planes, early);
-		if (slot)
-			earlyUpload->Used(*slot);
-		BookUploadTimers(early, take, uploadCpuStart);
-		if (!unpacked && early)   // the early texture refused: the frame itself
-			unpacked = unpack.Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
-				payload.dvTunnelHighAligned, planes);
-		return dvUnpack.Finish(unpacked, width, height, payload.dvTunnelHighAligned, sessionFallback, dvGpuFailed,
-			[this](const char* id, const std::string& reason) { EngageFallback(id, reason); });
-	}
+	bool UnpackDolbyVisionPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],   // VPV-HOOK
+		bool sessionFallback);   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
 	// The planes of a raw payload: the GPU unpack, or false (and the session
 	// back to the CPU path) when it fails.
-	bool UnpackRawPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],
-		bool sessionFallback = true)
-	{
-		if (!payload.Raw() || !d3d11)
-			return false;
-		if (payload.dvTunnelRaw)
-			return UnpackDolbyVisionPayload(payload, width, height, planes, sessionFallback);
-		if (!captureUnpack)
-			captureUnpack = std::make_unique<GpuCaptureUnpack>(log, d3d11->gpu);
-		SyncEarlyUpload(payload.rawBytes);
-		EarlyUpload::Slot* slot = nullptr;
-		const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
-		EarlyTake take;
-		const pl_tex early = EarlyTexture(payload, slot, &take);
-		bool unpacked = captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
-			planes, early);
-		if (slot)
-			earlyUpload->Used(*slot);
-		BookUploadTimers(early, take, uploadCpuStart);
-		if (!unpacked && early)   // the early texture refused: the frame itself
-			unpacked = captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, planes);
-		if (unpacked)
-		{
-			if (!captureGpuLogged)
-			{
-				DebugLog::Log("Capture path gpu: %s unpacked on the GPU (%dx%d, no CPU conversion)",
-					payload.rawEncoding == VideoFrameEncoding::V210 ? "V210" : "UYVY/HDYC", width, height);
-				captureGpuLogged = true;
-			}
-			return true;
-		}
-		// The de-judder's next / ahead frame: that frame only (the de-judder
-		// holds once); the picture's own frames decide the session.
-		if (!sessionFallback)
-		{
-			DebugLog::Log("Capture path gpu: a de-judder frame's GPU unpack failed (%s); that frame skipped",
-				captureUnpack->Error().c_str());
-			return false;
-		}
-		if (!captureGpuFailed.exchange(true))
-		{
-			DebugLog::Log("Capture path gpu: the GPU unpack failed (%s); the CPU formatters for the rest of the session",
-				captureUnpack->Error().c_str());
-			// F-3 (m2-dv findings): the CPU formatters keep P210 4:2:2 for V210 / UYVY / HDYC unless the
-			// P010 conversion is forced, so the entry no longer claims 4:2:0.
-			EngageFallback("capture GPU unpack", "CPU formatters for the session: " + captureUnpack->Error());
-		}
-		return false;
-	}
+	bool UnpackRawPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],   // VPV-HOOK
+		bool sessionFallback = true);   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
 	ULONGLONG dejudderAheadLogTick = 0;
 	DejudderPolicy::Reason dejudderReason = DejudderPolicy::Reason::Off;
 	unsigned long long motionEngineIdleReleasesLogged = 0;
@@ -7819,23 +7588,6 @@ struct LibplaceboVideoRenderer::Impl
 				pl_tex_destroy(d3d11->gpu, &profileOverlayTexture);
 				for (pl_tex& texture : textures)
 					pl_tex_destroy(d3d11->gpu, &texture);
-				captureUnpack.reset();   // its textures and dispatch, before the device
-				rgbUnpack.reset();       // the same for the RGB unpack, and its planes
-				dvUnpack.Reset();        // and the Dolby Vision tunnel unpack
-				dvGpuFailed.store(false, std::memory_order_release);   // a new device may unpack again
-				ReleaseFallback("Dolby Vision GPU unpack");
-				pl_tex_destroy(d3d11->gpu, &rgbIngestLuma);
-				if (earlyUpload->IsOpen())
-				{
-					const EarlyUpload::Stats es = earlyUpload->GetStats();
-					DebugLog::Log("Early upload: closed (%llu frames read early, %llu took the render upload (%llu before the early upload started), %llu waited for a running upload; %llu uploads, %llu with no free slot (held %llu, GPU release pending %llu), %llu failed)",
-						static_cast<unsigned long long>(earlyUsed), static_cast<unsigned long long>(earlyFallback),
-						static_cast<unsigned long long>(earlyLate), static_cast<unsigned long long>(earlyWaited),
-						static_cast<unsigned long long>(es.uploads), static_cast<unsigned long long>(es.noFreeSlot),
-						static_cast<unsigned long long>(es.noFreeHeld), static_cast<unsigned long long>(es.noFreeGpu),
-						static_cast<unsigned long long>(es.failures));
-				}
-				earlyUpload->Close();    // the second device and the shared textures
 				ReleaseDejudder();   // before the device goes
 				motionEngineBudgetAdapter.Release();   // Bug hunt 3 F4: the budget reader's adapter
 				adaptiveDownscale.Release();   // Stage 8-2: its textures, too
@@ -10825,12 +10577,6 @@ struct LibplaceboVideoRenderer::Impl
 		activeSettings = settings;
 		++activeSettingsGeneration;   // WP-24: the repeat key's settings generation
 		UpdatePipelineSlots(settings);
-		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
-		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
-		dvGpuWanted.store(settings.dvTunnelGpuUnpack, std::memory_order_release);
-		earlyWanted.store(settings.captureUpload == "early", std::memory_order_release);
-		earlyAuto.store(settings.captureUpload == "auto", std::memory_order_release);
-		earlyEfficiency.store(settings.efficiencyFixes, std::memory_order_release);   // modularity 2026-10-25
         displayRepeatValid = false;
         displayVsyncClock.Reset();
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
@@ -11875,9 +11621,6 @@ struct LibplaceboVideoRenderer::Impl
         displayRepeatValid = false;
         displayVsyncClock.Reset();
         displayCadenceTransition.OutputChanged();
-		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
-		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
-		dvGpuWanted.store(settings.dvTunnelGpuUnpack, std::memory_order_release);
 		{
 			// dv_tunnel_fixes, live (restore switch 2026-10-17).
 			std::lock_guard<std::mutex> formatterGuard(formatterMutex);
@@ -11889,9 +11632,6 @@ struct LibplaceboVideoRenderer::Impl
 					DebugLog::Log("Dolby Vision RGB tunnel: bug-hunt fixes %s (dv_tunnel_fixes)", settings.dvTunnelFixes ? "on" : "off");
 				}
 		}
-		earlyWanted.store(settings.captureUpload == "early", std::memory_order_release);
-		earlyAuto.store(settings.captureUpload == "auto", std::memory_order_release);   // live too (audit 2026-10-16)
-		earlyEfficiency.store(settings.efficiencyFixes, std::memory_order_release);   // modularity 2026-10-25
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
         calibrationStatusAvailable = false;
 		sdrTargetNits = settings.sdrTargetNits;
@@ -27262,8 +27002,10 @@ releaseDriftBaseRetention =
 		std::lock_guard<std::mutex> guard(renderMutex);
 		return d3d11 && pl_gpu_is_failed(d3d11->gpu);
 	}
+	Vpv::Capture::HostBinding captureBinding{ this, Vpv::Capture::MakeCaptureHost(*this) };   // P10: last member (registered last, removed first)   // VPV-HOOK
 };
 #include <VP-V/modules/motion/estimation/VectorEngineEstimate.inl>   // VPV-HOOK P5a-5: the estimate and the engine keeper (Impl members)
+#include <VP-V/modules/input/capture/CaptureImpl.inl>   // P10: the capture code (Impl members)   // VPV-HOOK
 #include <VP-V/segments/CoreSegments.inl>   // VPV-HOOK P4-2: UpdatePipelineSlots, OrderFrameSlotHooks (Impl members)
 #include <VP-V/segments/EntranceHostMembers.inl>   // VPV-HOOK P4-5: the entrance host B3 helpers, RenderCrossfadeMix, DrainEntranceBeforeRender (Impl members)
 
@@ -27353,11 +27095,13 @@ LibplaceboVideoRenderer::~LibplaceboVideoRenderer()
 	// VP Renderer filter (2026-10-17): in the filter process the running LED drive is parked
 	// for the next graph (DynamicDriveHost::ParkForHoldover).
 	m_dynamicDrive.ParkForHoldover(DynamicDriveContext());
+	m_ingressGate.CloseAndDrain();   // P10-8   // VPV-HOOK
 	m_impl.reset();
 }
 
 bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
 {
+	const Vpv::Ingress::CallbackGate::Use ingressUse(m_ingressGate); if (!ingressUse) return false;   // P10-8: capture thread too (slice 4 F1)   // VPV-HOOK
 	if (!videoState)
 		throw std::runtime_error("null video state is invalid");
 
@@ -27510,6 +27254,7 @@ using VpDiagnostics::RecordRendererFrame;
 void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 {
 	const int64_t callbackQpc = PerformanceCounterNow();
+	const Vpv::Ingress::CallbackGate::Use ingressUse(m_ingressGate); if (!ingressUse) return;   // P10-8: the Impl outlives this callback   // VPV-HOOK
 	if (m_state.load(std::memory_order_acquire) != RendererState::RENDERSTATE_RENDERING)
 		return;
 	// Automatic calibration: patches replace video; frames are not queued.
@@ -27520,34 +27265,7 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 	// Q1 (queue stress 2026-10-18): the hardware time is kept at any age; the
 	// CaptureArrival tracker below decides whether a stale frame (>= 0.5 s old)
 	// keeps it (queue_timing_fixes, when plausible) or the callback time.
-	int64_t arrivalQpc = 0;
-	int64_t hardwareQpc = 0;
-	bool hardwareAgeKnown = false;
-	{
-		const timingclocktime_t frameTicks = videoFrame.GetTimingTimestamp();
-		if (m_timingClock && frameTicks > 0)
-		{
-			try
-			{
-				const timingclocktime_t nowTicks = m_timingClock->TimingClockNow();
-				const int64_t nowQpc = PerformanceCounterNow();
-				const timingclocktime_t ticksPerSecond = m_timingClock->TimingClockTicksPerSecond();
-				LARGE_INTEGER frequency{};
-				QueryPerformanceFrequency(&frequency);
-				const timingclocktime_t age = nowTicks - frameTicks;
-				if (ticksPerSecond > 0 && frequency.QuadPart > 0 && age >= 0)
-				{
-					hardwareQpc = nowQpc - static_cast<int64_t>(static_cast<double>(age) *
-						static_cast<double>(frequency.QuadPart) / static_cast<double>(ticksPerSecond));
-					hardwareAgeKnown = true;
-				}
-			}
-			catch (const std::exception&)
-			{
-				hardwareAgeKnown = false;   // the callback time is used
-			}
-		}
-	}
+	IngressHardwareArrival(videoFrame);   // P10-5: the hardware arrival (queue_timing IngressPolicy.inl)   // VPV-HOOK
 
 	uint64_t enqueueGeneration = 0;
 	{
@@ -27558,61 +27276,9 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 	}
 
 	const uint64_t counter = m_frameCounter.fetch_add(1, std::memory_order_relaxed);
-	const uint64_t missedBefore = m_captureMissedFrames.load(std::memory_order_relaxed);
-	const uint64_t breaksBefore = m_captureTimestampBreaks.load(std::memory_order_relaxed);
+	IngressCountersBefore();   // VPV-HOOK
 	UpdateFrameRateAndPPM(videoFrame.GetTimingTimestamp());
-	const uint64_t missedNow = m_captureMissedFrames.load(std::memory_order_relaxed);
-	bool gapBefore = missedNow != missedBefore;
-	const char* gapCause = gapBefore ? "missed frames" : nullptr;
-	uint32_t gapFrames = gapBefore ? static_cast<uint32_t>((std::min)(missedNow - missedBefore, uint64_t{ 1000 })) : 0;
-	// Bug hunt 2026-10-17 (timing_continuity_fixes): a timestamp break (a jump of
-	// 9+ periods, an odd jump, a backward step) is a gap too - not whole missed
-	// frames, so never filled - else motion pairs and history carry across it.
-	const bool timingFixes = m_timingContinuityFixes.load(std::memory_order_relaxed);
-	const bool timestampBreak = m_captureTimestampBreaks.load(std::memory_order_relaxed) != breaksBefore;
-	if (timingFixes && timestampBreak)
-	{
-		gapBefore = true;
-		gapFrames = 0;
-		gapCause = "capture timestamp discontinuity";
-	}
-	// Q1 (queue stress 2026-10-18, queue_timing_fixes): the arrival. A stale frame (a stalled
-	// capture delivering its held frames at once) keeps its hardware time when plausible,
-	// else the callback time (as before). The delivery discontinuity is a no-fill gap, marked
-	// on the kept frame after the pulldown detector (the cadence lock is kept, no gap-fill
-	// pair spans the stall).
-	{
-		LARGE_INTEGER arrivalFrequency{};
-		QueryPerformanceFrequency(&arrivalFrequency);
-		const double qpcPerSecond = static_cast<double>(arrivalFrequency.QuadPart);
-		const bool queueFixes = m_queueTimingFixes.load(std::memory_order_relaxed);
-		if (qpcPerSecond > 0.0)
-		{
-			const CaptureArrival::Result arrival = m_captureArrival.Next(
-				static_cast<double>(callbackQpc) / qpcPerSecond, hardwareAgeKnown,
-				static_cast<double>(hardwareQpc) / qpcPerSecond, !timestampBreak, queueFixes);
-			arrivalQpc = arrival.Hardware() ? hardwareQpc : 0;
-			m_enqueueArrivalIsFrameStart = arrivalQpc != 0;   // re-audit MED 1
-			if (arrival.staleStart || arrival.staleEnd)
-			{
-				m_captureStaleGapPending = true;
-				m_captureStaleGapCause = arrival.staleStart ? "stale capture delivery" : "stale capture delivery ended";
-				const uint64_t stale = ++m_captureStaleRuns;
-				if ((stale & (stale - 1)) == 0)
-					DebugLog::Log("Capture: %s (age %.0f ms, %s time; runs %llu, stale frames on hardware time %llu, on callback time %llu)",
-						m_captureStaleGapCause, static_cast<double>(callbackQpc - hardwareQpc) * 1000.0 / qpcPerSecond,
-						arrival.Hardware() ? "hardware" : "callback", static_cast<unsigned long long>(stale),
-						m_captureArrival.StaleHardware(), m_captureArrival.StaleCallback());
-			}
-		}
-		else
-		{
-			arrivalQpc = 0;
-			m_enqueueArrivalIsFrameStart = false;
-		}
-		if (!queueFixes)
-			m_captureStaleGapPending = false;
-	}
+	IngressAfterRate(callbackQpc);   // P10-5: gaps from missed frames / timestamp breaks, the arrival   // VPV-HOOK
 	if (m_timingClock && counter % 20 == 0)
 	{
 		m_entryLatencyMs.store(
@@ -27650,200 +27316,11 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		return;
 	}
 
-	// Pulldown detection (owner 2026-10-14; off by default): a frame that
-	// repeats the previous one where the locked cadence has a repeat is not
-	// queued; the unique frames get the film rate and an even film clock.
-	double filmHz = 0.0;
-	bool filmUpdate = false;
-	if (m_pulldownDetection.load(std::memory_order_relaxed) && frameState->displayMode)
-	{
-		const Vpv::Resync::PulldownStep pulldownResync = Vpv::Resync::PulldownResyncStep(m_impl.get(), m_pulldownResetRequested.exchange(false, std::memory_order_acq_rel)); // VPV-HOOK: resync cursor (on: FULL resets, timing re-latches)
-		m_pulldown.SetTimingRelatch(pulldownResync.driving); // VPV-HOOK
-		if (pulldownResync.reset) // VPV-HOOK
-		{
-			m_pulldown.Reset();
-			m_pulldownClock.Reset();
-			m_pulldownSignature = 0;
-			m_pulldownFilmQpc = 0;
-		}
-		const uint64_t signature = Pulldown::Signature(videoFrame.GetData(),
-			static_cast<size_t>(frameState->BytesPerRow()),
-			static_cast<size_t>(frameState->displayMode->FrameHeight()));
-		const bool repeat = signature != 0 && signature == m_pulldownSignature;
-		m_pulldownSignature = signature;
-		const double measuredRateHz = m_measuredFrameRate.load(std::memory_order_relaxed);
-		const double signalHz = RendererExtension::ResolveFor(RendererExtension::Resolve::SourceSignalRate, m_impl.get(), measuredRateHz > 0.0 ? measuredRateHz : frameState->displayMode->RefreshRateHz()); // VPV-HOOK
-		const bool fixes = m_pulldownFixes.load(std::memory_order_relaxed);
-		const bool classFixes = m_cadenceClassFixes.load(std::memory_order_relaxed);
-		if (fixes != m_pulldownFixesApplied || classFixes != m_cadenceClassFixesApplied)
-		{
-			const bool clockForm = fixes != m_pulldownFixesApplied;
-			m_pulldownFixesApplied = fixes;
-			m_cadenceClassFixesApplied = classFixes;
-			Pulldown::Settings settings;
-			settings.keepLockAcrossMisses = settings.rephaseInPlace = settings.cadenceAwareClock = fixes;
-			// Hunt 2 (cadence_class_fixes): the exclusive film floor (H1), lateness while the
-			// phase is uncertain (M1) and a retry that needs the locked phase to fail (L3).
-			settings.exclusiveFilmFloor = settings.trackingLatenessMax = settings.retryNeedsFailure = classFixes;
-			// Real-footage suite 2026-10-18: a lock needs a maximally even pattern (no mixed-cadence lock).
-			settings.maximallyEvenPattern = classFixes;
-			m_pulldown.SetSettings(settings);
-			// Bug hunt 2026-10-17: the clock's form changes with the switch (cadence-aware
-			// or not): start it over, and no pair across the change.
-			if (clockForm)
-			{
-				// Hunt 2 (L1): a clock in use restarting is a break whatever pulldown_fixes now says.
-				m_pulldownForceGap = m_pulldownForceGap || m_pulldownClock.InUse();
-				m_pulldownClock.Reset();
-				m_pulldown.MarkDiscontinuity();
-			}
-		}
-		// Hunt 2 (cadence_class_fixes, 06-interp L6): the second-largest anchor; toggled mid-lock the
-		// offsets start over and no pair crosses the change.
-		if (m_pulldownClock.SetRobustAnchor(classFixes))
-		{
-			m_pulldown.MarkDiscontinuity();
-			m_pulldownForceGap = true;
-		}
-		// Bug hunt 2026-10-17 (timing_continuity_fixes): the film clock re-bases when
-		// the film rate (from signalHz: measured or nominal) changes mid-lock.
-		// Post-merge audit 2026-10-17: toggled mid-lock, the clock starts over and no
-		// pair crosses the change.
-		if (m_pulldownClock.SetRebaseOnRateChange(timingFixes))
-		{
-			m_pulldown.MarkDiscontinuity();
-			m_pulldownForceGap = true;   // Hunt 2 (L1)
-			DebugLog::Log("Pulldown: film clock re-basing %s (timing_continuity_fixes); clock restarted",
-				timingFixes ? "on" : "off");
-		}
-		// Q1 (pulldown_fixes): the film clock's late-arrival guard (never backwards inside a lock).
-		m_pulldownClock.SetLateGuard(fixes);
-		const bool wasLocked = m_pulldown.Locked();
-		const int previousCycle = m_pulldown.Cycle(), previousUnique = m_pulldown.Unique();
-		// R3 (resync_event on): an unannounced rate move (timing) re-latches the signal rate; the lock
-		// is dropped only when the cadence class changes (Pulldown::Detector::RelatchSignalHz).
-		if (pulldownResync.relatchTiming && m_pulldown.RelatchSignalHz(signalHz)) // VPV-HOOK
-			DebugLog::Log("Pulldown: signal rate moved to %.3f Hz beyond the lock's resolution (resync timing); lock dropped",
-				signalHz);
-		// D4: the counted misses keep the lock (verified over the next cycle).
-		const uint64_t missed = m_captureMissedFrames.load(std::memory_order_relaxed) - missedBefore;
-		static GeneralRate::FallbackNotice pulldownRateFallback;   // fixed-constant batch B7 2026-10-18: logged (PulldownDetector assumes 60)
-		GeneralRate::NoteFallback(pulldownRateFallback, signalHz > 0.0, "pulldown contradiction window", 60.0);
-		const Pulldown::Decision decision = m_pulldown.Next(repeat, gapBefore, signalHz,
-			gapBefore && fixes ? static_cast<int>((std::min)(missed, uint64_t{ 1000 })) : -1);
-		if (decision.locked != wasLocked || decision.relocked)
-		{
-			// The frame timing changes here: no pair across it.
-			if (!gapBefore)
-				gapCause = "pulldown lock change";
-			gapBefore = true;
-			gapFrames = 0;   // not a loss of whole frames: never filled
-			m_pulldownClock.Reset();
-			// Not rate-limited: a lock needs two seconds, so changes are rare.
-			const std::string lockText = decision.locked ?
-				Pulldown::Describe(decision.filmHz, signalHz, decision.unique, decision.cycle) : std::string("lost");
-			const std::string before = wasLocked && previousUnique > 0 ?
-				Pulldown::Describe(signalHz * previousUnique / previousCycle, signalHz, previousUnique, previousCycle) :
-				std::string("none");
-			DebugLog::Log("Pulldown: %s (was %s)", lockText.c_str(), before.c_str());
-		}
-		const int cadence = decision.locked ? (decision.cycle << 16) | decision.unique : 0;
-		// Hunt 2 (06-interp M3): the queue target follows the lock (PrefillTargetLocked): wake
-		// the waiters when it changes.
-		if (m_pulldownCadence.exchange(cadence, std::memory_order_relaxed) != cadence && classFixes)
-			m_queueChanged.notify_all();
-		if (decision.drop)
-		{
-			// D1: a lock change (or a gap) on a dropped repeat marks the next kept frame.
-			if (gapBefore && fixes)
-				m_pulldown.MarkDiscontinuity();
-			m_pulldownSkipped.fetch_add(1, std::memory_order_relaxed);
-			return;
-		}
-		// Hunt 2 (cadence_class_fixes, 06-interp L1): a clock restarted by a switch toggle is a
-		// break even when pulldown_fixes is now off (the consume below ignores the mark then);
-		// kept across dropped repeats until this kept frame.
-		const bool forcedGap = m_pulldownForceGap;
-		m_pulldownForceGap = false;
-		if (forcedGap && classFixes)
-		{
-			if (!gapBefore)
-			{
-				gapCause = "pulldown film clock restarted (switch toggled)";
-				gapBefore = true;
-			}
-			gapFrames = 0;
-		}
-		// Consumed always (a mark left while the fixes were off must not fire later); labelled by cause.
-		if (m_pulldown.ConsumeDiscontinuity() && fixes)
-		{
-			if (!gapBefore)
-			{
-				gapCause = decision.rephased ? "pulldown re-phase" : "pulldown lock change (on a skipped repeat)";
-				gapBefore = true;
-			}
-			gapFrames = 0;   // the film timing changed: never a gap-fill pair, missed frames or not
-		}
-		if (decision.rephased)
-		{
-			gapFrames = 0;
-			// Hunt 2 (cadence_class_fixes, 06-interp M1): the offsets from before the shift would
-			// hold the anchor for the clock's window and then step it mid-shot; this frame
-			// carries the re-phase discontinuity, so the clock re-anchors here.
-			if (classFixes)
-				m_pulldownClock.Reanchor();
-			DebugLog::Log("Pulldown: re-phased in place (lock kept)");
-		}
-		if (decision.locked)
-		{
-			filmHz = decision.filmHz;
-			if (decision.update && m_pulldownFilmQpc > 0)
-			{
-				// Option b: the same film frame, updated - at its time.
-				filmUpdate = true;
-				arrivalQpc = m_pulldownFilmQpc;
-			}
-			else
-			{
-				LARGE_INTEGER frequency{};
-				QueryPerformanceFrequency(&frequency);
-				const double qpcPerSecond = static_cast<double>(frequency.QuadPart);
-				const int64_t arrived = arrivalQpc > 0 ? arrivalQpc : callbackQpc;
-				m_enqueueArrivalIsFrameStart = arrivalQpc > 0;   // the film clock keeps its anchor's meaning
-				arrivalQpc = static_cast<int64_t>((fixes ? m_pulldownClock.Time(decision.filmIndex,
-					static_cast<double>(arrived) / qpcPerSecond, filmHz, decision.cadenceLateness, decision.cadenceLatenessMax) :
-					m_pulldownClock.Time(decision.filmIndex, static_cast<double>(arrived) / qpcPerSecond, filmHz)) * qpcPerSecond);
-				m_pulldownFilmQpc = arrivalQpc;
-			}
-		}
-		else
-			m_pulldownFilmQpc = 0;
-	}
-	else if (m_pulldownCadence.load(std::memory_order_relaxed) != 0 || m_pulldown.Locked())
-	{
-		m_pulldown.Reset();
-		m_pulldownClock.Reset();
-		m_pulldownSignature = 0;
-		m_pulldownFilmQpc = 0;
-		m_pulldownCadence.store(0, std::memory_order_relaxed);
-		if (!gapBefore)
-			gapCause = "pulldown off";
-		gapBefore = true;
-		gapFrames = 0;
-	}
-	// Q1 (queue_timing_fixes): a stale delivery's gap, kept across dropped pulldown repeats
-	// until this kept frame; never filled.
-	if (m_captureStaleGapPending)
-	{
-		m_captureStaleGapPending = false;
-		if (!gapBefore)
-			gapCause = m_captureStaleGapCause;
-		gapBefore = true;
-		gapFrames = 0;
-	}
+	RendererExtension::IngressContext ingress; ingress.host = this; ingress.frame = &videoFrame; ingress.state = &frameState; ingress.gapBefore = m_ingressGapBefore; ingress.gapCause = m_ingressGapCause; ingress.gapFrames = m_ingressGapFrames; ingress.arrivalQpc = m_ingressArrivalQpc;   // VPV-HOOK
+	if (RendererExtension::DecideIngress(ingress) && ingress.drop) return;   // P10-5 R15: pulldown, film clock, stale gap (IngressPolicy)   // VPV-HOOK
 
-	EnqueueFrame(videoFrame, frameState, enqueueGeneration, callbackQpc, arrivalQpc,
-		gapBefore, gapCause, gapFrames, filmHz, filmUpdate, nullptr);
+	EnqueueFrame(videoFrame, frameState, enqueueGeneration, callbackQpc, ingress.arrivalQpc,
+		ingress.gapBefore, ingress.gapCause, ingress.gapFrames, ingress.filmHz, ingress.filmUpdate, nullptr);
 }
 
 
@@ -28035,308 +27512,11 @@ void LibplaceboVideoRenderer::EnqueueFrame(VideoFrame& videoFrame,
 }
 
 
-// ABI 37 (VP Renderer DirectShow filter): a file frame. Capture timing is not
-// used (no UpdateFrameRateAndPPM, no pulldown detection or cadence): the film
-// clock is filled from the frame's own timing - the source rate (exact
-// rational, else measured) times the playback rate, on the frame's due time.
-void LibplaceboVideoRenderer::OnTimedVideoFrame(VideoFrame& videoFrame,
-	const FileFrameTiming& timing)
-{
-	// Any timed frame re-arms the slot wait (CancelFileFrameWait is sticky
-	// until here).
-	m_fileSlotGate.Arm();
-	const int64_t callbackQpc = PerformanceCounterNow();
-	if (m_state.load(std::memory_order_acquire) != RendererState::RENDERSTATE_RENDERING)
-		return;
-	if (!FileFrameClock::TimingUsable(timing))
-	{
-		const uint64_t total = m_fileTimingRejected.fetch_add(1, std::memory_order_relaxed) + 1;
-		m_droppedFrames.fetch_add(1, std::memory_order_relaxed);
-		if ((total & (total - 1)) == 0)
-			DebugLog::Log("File frame refused: timing block of %u bytes, this renderer needs %u (total %llu)",
-				static_cast<unsigned>(timing.structSize), static_cast<unsigned>(sizeof(FileFrameTiming)),
-				static_cast<unsigned long long>(total));
-		return;
-	}
-
-	uint64_t enqueueGeneration = 0;
-	{
-		std::lock_guard<std::mutex> guard(m_queueMutex);
-		if (m_stopRequested)
-			return;
-		enqueueGeneration = m_queueGeneration;
-	}
-	m_frameCounter.fetch_add(1, std::memory_order_relaxed);
-
-	VideoStateComPtr frameState;
-	{
-		std::lock_guard<std::mutex> guard(m_stateMutex);
-		frameState = m_videoState;
-	}
-	if (!frameState)
-	{
-		const uint64_t droppedTotal =
-			m_droppedFrames.fetch_add(1, std::memory_order_relaxed) + 1;
-		const uint64_t reasonTotal =
-			m_missingFrameStateDrops.fetch_add(1, std::memory_order_relaxed) + 1;
-		if ((reasonTotal & (reasonTotal - 1)) == 0)
-		{
-			DebugLog::Log(
-				"Alpha dropped file frame: reason=video_state_unavailable reason_total=%llu dropped_total=%llu",
-				static_cast<unsigned long long>(reasonTotal),
-				static_cast<unsigned long long>(droppedTotal));
-		}
-		return;
-	}
-
-	const double filmHz = FileFrameClock::FilmHz(timing);
-	const bool motionOff = !FileFrameClock::MotionAllowed(timing);
-	if (filmHz != m_fileLoggedFilmHz || motionOff != m_fileLoggedMotionOff)
-	{
-		// On a change only (a seek, a rate change, pause / run).
-		m_fileLoggedFilmHz = filmHz;
-		m_fileLoggedMotionOff = motionOff;
-		DebugLog::Log("File frames: film clock %.6f Hz (source %u/%u = %.6f Hz, measured %.6f Hz, playback rate %.3f)%s, motion %s%s",
-			filmHz, timing.sourceRateNumerator, timing.sourceRateDenominator,
-			FileFrameClock::SourceRateHz(timing), timing.sourceRateHz, timing.playbackRate,
-			filmHz > 0.0 ? "" : " (rate unknown: the signal's nominal rate)",
-			motionOff ? "off" : "allowed",
-			timing.paused ? " (paused: shown and held)" : "");
-	}
-
-	FileQueueFields file;
-	file.presentationQpc = timing.presentationQpc;
-	file.paused = timing.paused;
-	file.motionOff = motionOff;
-	file.discontinuity = timing.discontinuity;
-	// A discontinuity is a source discontinuity at this frame (continuity of the
-	// active-picture timeline, smooth motion and the timeline break here; the
-	// render thread invalidates the vectors-valid state when it dequeues it).
-	if (timing.discontinuity)
-		videoFrame.SetSourceDiscontinuity(true);
-	EnqueueFrame(videoFrame, frameState, enqueueGeneration, callbackQpc,
-		FileFrameClock::ArrivalQpc(timing, callbackQpc),
-		timing.discontinuity, timing.discontinuity ? "file discontinuity (seek, step or rate change)" : nullptr,
-		0, filmHz, false, &file);
-}
+#include <VP-V/modules/input/queue_timing/IngressPolicy.inl>   // P10-5: OnVideoFrame's VP ingress blocks (renderer members)   // VPV-HOOK
+#include <VP-V/modules/input/queue_timing/TimedFileFrames.inl>   // P10-7a: OnTimedVideoFrame, the file slot gate, the file head due time   // VPV-HOOK
 
 
-bool LibplaceboVideoRenderer::FileFrameSlotFreeLocked() const
-{
-	if (m_stopRequested ||
-		m_state.load(std::memory_order_acquire) != RendererState::RENDERSTATE_RENDERING)
-		return false;
-	const size_t queueLimit = m_useFrameQueue ? m_frameQueueMaxSize : 1;
-	return m_frameQueue.size() < queueLimit;
-}
-
-
-bool LibplaceboVideoRenderer::WaitForFileFrameSlot(uint32_t timeoutMs)
-{
-	// The gate sleeps on its own mutex; the queue mutex is taken only to read
-	// the queue's depth, so the render thread is never blocked by a waiter.
-	return m_fileSlotGate.Wait(timeoutMs, [this]()
-		{
-			std::lock_guard<std::mutex> guard(m_queueMutex);
-			return FileFrameSlotFreeLocked();
-		});
-}
-
-
-void LibplaceboVideoRenderer::CancelFileFrameWait()
-{
-	m_fileSlotGate.Cancel();
-}
-
-
-int64_t LibplaceboVideoRenderer::FileHeadTicksUntilDueLocked() const
-{
-	if (m_frameQueue.empty() || !m_frameQueue.front().fileFrame)
-		return 0;
-	const QueuedFrame& head = m_frameQueue.front();
-	LARGE_INTEGER frequency{};
-	if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)
-		return 0;
-	// The measured lead from submission to the display's target refresh: the
-	// frame is submitted that much before it is due on screen.
-	int64_t leadQpc = 0;
-	if (m_presentationTargetTimingKnown.load(std::memory_order_acquire))
-	{
-		const double leadMs = m_presentationTargetLeadMs.load(std::memory_order_relaxed);
-		if (std::isfinite(leadMs) && leadMs > 0.0 && leadMs < 1000.0)
-			leadQpc = static_cast<int64_t>(leadMs * static_cast<double>(frequency.QuadPart) / 1000.0);
-	}
-	return FileFrameClock::TicksUntilDue(PerformanceCounterNow(), head.filePresentationQpc,
-		leadQpc, head.filePaused);
-}
-
-
-// VP-V delay budget (ADR-0020, barrier B2). The user sets ONE total delay, the same at every
-// frame rate. DelayBudget turns it into the time each frame waits in this queue (the hold):
-// fixed costs (swapchain, processing, capture transfer, render-ahead's residual lead) + hold =
-// the budget. The whole frames of the hold are the queue target (PrefillTargetLocked); the
-// sub-frame rest by the age gate below on the plain path, by the steering (target + holdFraction)
-// on the VP timeline. Not in low latency (no budget there).
-void LibplaceboVideoRenderer::SetQueueDelayBudget(int totalMs)
-{
-	const int previous = m_queueDelayBudgetMs.exchange(totalMs > 0 ? totalMs : 0, std::memory_order_acq_rel);
-	if (previous != totalMs)
-		DebugLog::Log("Delay budget: %d ms total (0 = frame-count queue)", totalMs > 0 ? totalMs : 0);
-	m_queueChanged.notify_all();
-}
-
-LibplaceboVideoRenderer::QueueHold LibplaceboVideoRenderer::CurrentQueueHold() const
-{
-	std::lock_guard<std::mutex> guard(m_queueHoldMutex);
-	return m_queueHold;
-}
-
-const QueueTimingPolicy::IQueueTimingPolicy& LibplaceboVideoRenderer::QueuePolicy() const
-{
-	// Either/or (owner 2026-10-25): the Original pathway and input.queue_timing switched off run Bill's
-	// queue policy (SlotSwitchSettings::UsesUpstreamQueuePolicy); otherwise VP's fixed total delay.
-	const bool original = m_impl && m_impl->pipelineSlots.OriginalPathway();
-	const bool slotOff = m_impl && !m_impl->pipelineSlots.Runs(PipelineSlots::Id::InputQueueTiming);
-	if (VpQueueTiming::Select(slotOff, original, true) == VpQueueTiming::Selection::Upstream)
-		return m_upstreamQueuePolicy;
-	const_cast<VpQueueTiming::VpFixedBudgetPolicy&>(m_vpQueuePolicy).SetOptions({
-		original, m_queueTimingFixes.load(std::memory_order_relaxed) });
-	return m_vpQueuePolicy;
-}
-
-void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double signalRateHz)
-{
-	const int budgetMs = m_queueDelayBudgetMs.load(std::memory_order_acquire);
-	const bool lowLatency = m_impl && m_impl->lowLatencyQueueActive.load(std::memory_order_acquire);
-	// The decision is the policy's (VP fixed total delay, or upstream's frame-count queue); the host
-	// keeps the status, the log and the wake-up.
-	QueueTimingPolicy::HoldContext context;
-	context.budgetMs = m_impl ? budgetMs : 0;
-	context.sourceRateHz = sourceRateHz;
-	context.signalRateHz = signalRateHz;
-	context.lowLatency = lowLatency;
-	if (m_impl)
-	{
-		context.displayHz = m_impl->TimelineDisplayHz();
-		context.renderAheadActive = m_impl->RenderAheadActive();
-		if (context.renderAheadActive && context.displayHz > 0.0 && sourceRateHz > 0.0)
-			context.renderAheadLeadSeconds = RenderAhead::PlannedLead(1.0 / sourceRateHz, 1.0 / context.displayHz);
-		context.renderAheadCreditFrames = m_impl->renderAheadCreditFrames.load(std::memory_order_acquire);
-		// Owner decision 2: the swapchain frames of whichever owner presents (Bill's configured
-		// depth unless render-ahead owns presentation), never a fixed 2.
-		context.presentationFrames = m_impl->delaySwapchainFrames.load(std::memory_order_acquire);
-	}
-	{
-		std::lock_guard<std::mutex> guard(m_queueMutex);
-		context.queueCapacity = m_useFrameQueue ? m_frameQueueMaxSize : 1;
-	}
-	const QueueTimingPolicy::HoldPlan plan = QueuePolicy().PlanHold(context);
-	const std::string& budgetNote = plan.note;
-	QueueHold next = plan;
-	bool wasActive = false;
-	{
-		std::lock_guard<std::mutex> guard(m_queueHoldMutex);
-		wasActive = m_queueHold.active;
-		m_queueHold = next;
-	}
-	if (m_impl)
-	{
-		if (budgetNote.empty())
-			m_impl->ReleaseFallback("delay budget");
-		else
-			m_impl->EngageFallback("delay budget", budgetNote);
-		// WP-23: the store's ring follows the budget (queue + look-ahead + 2), never a fixed count.
-		const int analysisFrames = next.active ? plan.queueFrames : static_cast<int>(AlphaQueuePolicy::DEFAULT_DESIRED_DEPTH);
-		m_impl->frameAnalysis.SetRingDepth(analysisFrames, analysisFrames);
-		// The frame fallback ladder (owner 2026-10-20/24): below the design depth every look-ahead
-		// consumer uses what is queued (shorter look-ahead, never waiting, never adding delay);
-		// visible, not silent.
-		if (next.active && plan.degraded)
-			m_impl->EngageFallback("look-ahead", std::to_string(plan.queueFrames) + " of " + std::to_string(DelayBudget::kDesignDepth) +
-				" queued frames (delay budget " + std::to_string(budgetMs) + " ms)");
-		else
-			m_impl->ReleaseFallback("look-ahead");
-	}
-	std::string state;
-	if (next.active)
-	{
-		char text[192] = {};
-		sprintf_s(text, "%d ms at %.3f Hz (signal %.3f Hz): %d look-ahead frames, hold %.1f ms = target %zu + %.2f frames, padding %.1f ms",
-			budgetMs, sourceRateHz, signalRateHz > 0.0 ? signalRateHz : sourceRateHz, plan.queueFrames, plan.holdMs,
-			plan.targetFrames, plan.fraction, plan.paddingMs);
-		state = text;
-	}
-	if (state != m_queueHoldLogged)
-	{
-		m_queueHoldLogged = state;
-		if (next.active)
-			DebugLog::Log("Delay budget: %s", state.c_str());
-		else if (wasActive)
-			DebugLog::Log("Delay budget: hold off (%s)", budgetMs <= 0 || (m_impl && m_impl->pipelineSlots.OriginalPathway()) ? "no budget" : lowLatency ? "low latency" : "not feasible");
-	}
-	if (next.active != wasActive)
-		m_queueChanged.notify_all();
-}
-
-int64_t LibplaceboVideoRenderer::HoldTicksUntilDueLocked() const
-{
-	// The plain per-refresh path only. The VP timeline realises the rest by its steering (target +
-	// holdFraction); an age gate there adds a frame its slow steering does not drain (delay-gate
-	// finding 2026-10-24).
-	if (m_frameQueue.empty() || !m_impl)
-		return 0;
-	const QueuedFrame& head = m_frameQueue.front();
-	QueueTimingPolicy::DueContext context;
-	context.hold = CurrentQueueHold();
-	if (!context.hold.active)
-		return 0;   // as before: no clock reads without a hold
-	context.timelineActive = m_impl->vpTimelineActive;
-	context.fileFrame = head.fileFrame;
-	context.arrivalQpc = head.arrivalQpc;   // the frame's START (DeckLink normalised, audit MED 7)
-	context.enqueueQpc = head.enqueueQpc;
-	LARGE_INTEGER frequency{};
-	context.arrivalIsFrameStart = head.arrivalIsFrameStart;   // re-audit MED 1: the transfer only for a hardware frame-start time
-	context.qpcFrequency = QueryPerformanceFrequency(&frequency) ? frequency.QuadPart : 0;
-	context.nowQpc = PerformanceCounterNow();
-	return QueuePolicy().TicksUntilDue(context);
-}
-
-// A timed dequeue wait (a file head's due time, the delay budget's hold) re-checks at least this
-// often, so a changed presentation lead or budget is followed promptly.
-static constexpr int64_t kDueWaitRecheckMicros = 100000;
-
-void LibplaceboVideoRenderer::WaitForDequeueLocked(std::unique_lock<std::mutex>& lock,
-	bool wakeOnCalibrationPattern)
-{
-	// wakeOnCalibrationPattern (integration round 4): the render loop's preview
-	// wait also returns when a calibration patch starts, as on its branch; the
-	// caller checks m_calibrationPatternActive and presents the patch instead.
-	const auto calibrationActive = [this, wakeOnCalibrationPattern]() {
-		return wakeOnCalibrationPattern &&
-			CalibrationLutHost::IsTakingOver(m_calibrationPatternActive);
-	};
-	for (;;)
-	{
-		m_queueChanged.wait(lock, [this, &calibrationActive]() {
-			return m_stopRequested || CanDequeueLocked() || calibrationActive(); });
-		if (m_stopRequested || calibrationActive())
-			return;
-		// Capture heads: 0 at once (the wait above), unless the delay budget's hold applies
-		// (HoldTicksUntilDueLocked: the plain path's age gate).
-		const int64_t fileTicks = FileHeadTicksUntilDueLocked();
-		const int64_t ticks = fileTicks > 0 ? fileTicks : HoldTicksUntilDueLocked();
-		if (ticks <= 0)
-			return;
-		LARGE_INTEGER frequency{};
-		QueryPerformanceFrequency(&frequency);
-		const int64_t micros = frequency.QuadPart > 0 ?
-			static_cast<int64_t>(static_cast<double>(ticks) * 1000000.0 / static_cast<double>(frequency.QuadPart)) : 1000;
-		// Woken early by any queue change (a reset, a stop, a new head); re-checked
-		// at least every 100 ms so a changed presentation lead is followed.
-		m_queueChanged.wait_for(lock, std::chrono::microseconds(
-			(std::max)(int64_t{ 1 }, (std::min)(micros, kDueWaitRecheckMicros))));
-	}
-}
+#include <VP-V/modules/input/queue_timing/QueueDelayHold.inl>   // P10-6a: the delay budget hold, the queue policy either/or, the dequeue wait   // VPV-HOOK
 
 
 void LibplaceboVideoRenderer::UpdateFrameRateAndPPM(
@@ -28505,7 +27685,10 @@ void LibplaceboVideoRenderer::Build()
 	// D3D11 device/swapchain creation and persistent cache loading can enter the
 	// driver for seconds. Build only captures an immutable construction request;
 	// RenderLoop performs the actual initialization on its own thread.
-	m_impl.reset(new Impl());
+	std::unique_ptr<Impl> builtImpl(new Impl());   // P10-8: built first, so a throw leaves the gate open   // VPV-HOOK
+	m_ingressGate.CloseAndDrain();   // P10-8: the old Impl (if any) has no callback inside   // VPV-HOOK
+	m_impl.swap(builtImpl); builtImpl.reset();   // VPV-HOOK
+	m_ingressGate.Open();   // VPV-HOOK
 	m_impl->diagRendererGeneration = m_callbackGeneration;   // report-a-problem rows
 	DiagnosticHistory::Global().RecordDecision("renderer-build", "renderer constructed",
 		static_cast<int64_t>(m_callbackGeneration));
@@ -29168,6 +28351,8 @@ void LibplaceboVideoRenderer::Retire() noexcept
 		m_retirementSucceeded.store(
 			externalStateRestored, std::memory_order_release);
 		if (externalStateRestored)
+			m_ingressGate.CloseAndDrain();   // P10-8: no capture / file callback still inside   // VPV-HOOK
+		if (externalStateRestored)
 			m_impl.reset();
 		m_hasPresentedLiveFrame.store(false, std::memory_order_release);
 		DebugLog::Log(
@@ -29205,6 +28390,7 @@ bool LibplaceboVideoRenderer::FinalizeRetirementForShutdown() noexcept
 		// renderer-local resources are gone and external retry ownership has been
 		// explicitly abandoned for process shutdown. Any transient shared_ptr
 		// released later has a nonblocking renderer destructor.
+		m_ingressGate.CloseAndDrain();   // P10-8   // VPV-HOOK
 		m_impl.reset();
 		return true;
 	}
@@ -32182,153 +31368,14 @@ void LibplaceboVideoRenderer::ConversionLoop()
 			sequence = queued->sourceSequence;
 		}
 		std::shared_ptr<QueuedFrame::ConvertedPayload> converted;
-		std::shared_ptr<EarlyUploadHandoff> earlyHandoff;   // capture_upload: early, uploaded after the publish
-		std::shared_ptr<VideoFrame> earlyFrame;
-		size_t earlyRowBytes = 0;
-		int earlyHeight = 0;
 		std::string error;
 		try
 		{
 			if (!state || !m_impl->formatter)
 				throw std::runtime_error("formatter or frame state unavailable");
 			const auto started = SteadyClock::now();
-			// capture_path: gpu (owner 2026-10-13): V210 / UYVY / HDYC go on raw
-			// (the render unpacks them on the GPU); anything else, an override,
-			// or a failed unpack earlier this session: the CPU formatter.
-			// native_rgb_ingest: R12B / R12L / r210 go on raw (native RGB in the
-			// render); the contract is the CPU formatter's (the unpack's luma
-			// equals its Y plane).
-			// Never on the Dolby Vision tunnel: its r210 words carry packed
-			// 12-bit IPT and the DM packet, not RGB (the render excludes it too,
-			// so a raw RGB payload there had no metadata and showed black).
-			const bool rgbRaw = !state->dolbyVisionTunnel &&
-				m_impl->rgbGpuWanted.load(std::memory_order_acquire) &&
-				!m_impl->rgbGpuFailed.load(std::memory_order_acquire) &&
-				m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
-				GpuRgbUnpack::Supports(state->videoFrameEncoding) && state->displayMode &&
-				((state->videoFrameEncoding != VideoFrameEncoding::R12B && state->videoFrameEncoding != VideoFrameEncoding::R12L) ||
-					state->displayMode->FrameWidth() % 8 == 0);
-			// The raw frame held for the render's GPU unpack (capture_path gpu,
-			// native_rgb_ingest, dv_tunnel_gpu_unpack).
-			auto makeRaw = [&]()
-			{
-				auto raw = std::make_shared<QueuedFrame::ConvertedPayload>();
-				frame.SourceBufferAddRef();   // released with the payload
-				// Capture buffers held by raw payloads (owner 2026-10-15): the most
-				// at once is logged when it rises, to check against the card's pool.
-				const int held = ++*m_impl->rawBuffersHeld;
-				int peak = m_impl->rawBuffersPeak.load(std::memory_order_relaxed);
-				while (held > peak && !m_impl->rawBuffersPeak.compare_exchange_weak(peak, held))
-				{
-				}
-				if (held > peak)
-					DebugLog::Log("Capture raw route: up to %d capture buffers held at once (queue, next / ahead frames)", held);
-				std::shared_ptr<std::atomic<int>> heldCounter = m_impl->rawBuffersHeld;
-				raw->rawFrame = std::shared_ptr<VideoFrame>(new VideoFrame(frame), [heldCounter](VideoFrame* f)
-				{
-					f->SourceBufferRelease();
-					delete f;
-					--*heldCounter;
-				});
-				raw->rawRowBytes = static_cast<size_t>(state->BytesPerRow());
-				raw->rawBytes = static_cast<size_t>(state->BytesPerFrame());
-				raw->rawEncoding = state->videoFrameEncoding;
-				// capture_upload: early - the upload runs after the payload is
-				// published (EarlyUploadHandoff::RunUpload below); the frame is
-				// held here so the upload can read it.
-				if (m_impl->EarlyActive() && m_impl->earlyUpload->IsOpen() && state->displayMode)
-				{
-					raw->earlyHandoff = std::make_shared<EarlyUploadHandoff>();
-					earlyHandoff = raw->earlyHandoff;
-					earlyFrame = raw->rawFrame;
-					earlyRowBytes = raw->rawRowBytes;
-					earlyHeight = static_cast<int>(state->displayMode->FrameHeight());
-				}
-				return raw;
-			};
-			// dv_tunnel_gpu_unpack: the DV formatter finds and checks the DM
-			// packet (its pixels only); the picture goes on raw and the render
-			// unpacks it on the GPU. Off, an override or a failed unpack this
-			// session: the CPU unpack.
-			const bool dvRaw = state->dolbyVisionTunnel &&
-				m_impl->dvGpuWanted.load(std::memory_order_acquire) &&
-				!m_impl->dvGpuFailed.load(std::memory_order_acquire) &&
-				m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
-				GpuDolbyVisionTunnelUnpack::Supports(state->videoFrameEncoding) && state->displayMode;
-			// libplacebo's native upload (ARGB / BGRA with native_rgb_ingest off):
-			// no conversion. The frame is marked prepared with an empty payload
-			// (the queue waits for one now that these encodings have a
-			// formatter; the native upload reads the frame itself).
-			if (!rgbRaw && IsNativeRgbUpload(state->videoFrameEncoding, m_videoConversionOverride, state->dolbyVisionTunnel))
-			{
-				converted = std::make_shared<QueuedFrame::ConvertedPayload>();
-				converted->contract.sampleRange = VideoFrameSampleRange::FULL;
-				converted->contract.colorDepth = 8;
-				converted->contract.bitShift = 0;
-			}
-			else if (rgbRaw ||
-				(m_impl->captureGpuWanted.load(std::memory_order_acquire) &&
-				!m_impl->captureGpuFailed.load(std::memory_order_acquire) &&
-				m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
-				GpuCaptureUnpack::Supports(state->videoFrameEncoding)))
-			{
-				auto raw = makeRaw();
-				if (rgbRaw)
-				{
-					raw->contract.sampleRange = GpuRgbUnpack::FullRange(state->videoFrameEncoding) ?
-						VideoFrameSampleRange::FULL : VideoFrameSampleRange::LIMITED;
-					raw->contract.colorDepth = 10;
-					raw->contract.bitShift = 6;
-				}
-				else
-					raw->contract = GpuCaptureUnpack::Contract(state->videoFrameEncoding);
-				converted = raw;
-			}
-			else if (dvRaw)
-			{
-				CRGBDolbyVisionTunnelFormatter::FrameResult result = CRGBDolbyVisionTunnelFormatter::FrameResult::REJECTED;
-				bool highAligned = false;
-				LONG byteCount = 0;
-				VideoFrameFormatterOutputContract contract;
-				DolbyVisionTunnelFrameMetadata dolby;
-				{
-					std::lock_guard<std::mutex> formatterGuard(m_impl->formatterMutex);
-					if (!m_impl->formatterState ||
-						m_impl->formatterState->colorspace != state->colorspace)
-					{
-						m_impl->formatter->OnVideoState(state);
-						m_impl->formatterState = state;
-					}
-					auto* dv = dynamic_cast<CRGBDolbyVisionTunnelFormatter*>(m_impl->formatter.get());
-					if (!dv)
-						throw std::runtime_error("Dolby Vision tunnel formatter unavailable");
-					byteCount = dv->GetOutFrameSize();
-					if (byteCount <= 0)
-						throw std::runtime_error("formatter returned an empty frame size");
-					result = dv->AnalyzeFrame(frame);
-					if (result == CRGBDolbyVisionTunnelFormatter::FrameResult::REJECTED)
-						throw std::runtime_error("frame conversion failed");
-					highAligned = dv->PlanesHighAligned();
-					contract = dv->GetOutputContract();
-					dolby = dv->GetDolbyVisionTunnelMetadata();
-				}
-				if (result == CRGBDolbyVisionTunnelFormatter::FrameResult::PICTURE)
-				{
-					auto raw = makeRaw();
-					raw->dvTunnelRaw = true;
-					raw->dvTunnelHighAligned = highAligned;
-					converted = raw;
-				}
-				else
-				{
-					// No lock / no valid DM: the CPU path's zero planes (the render
-					// presents black or the SDR RGB passthrough; never these bytes).
-					converted = AcquireConversionPayload();
-					converted->pixels.assign(static_cast<size_t>(byteCount), 0);
-				}
-				converted->contract = contract;
-				converted->dolby = dolby;
-			}
+			RendererExtension::ConvertContext capture; capture.frame = &frame; capture.state = &state; capture.payload = &converted; capture.hostObject = this; capture.error = &error;   // VPV-HOOK
+			if (RendererExtension::OnConvertedFrame(m_impl.get(), capture)) { if (!error.empty()) throw std::runtime_error(error); }   // P10: the capture routes (input/capture CaptureImpl.inl)   // VPV-HOOK
 			else
 			{
 			converted = AcquireConversionPayload();
@@ -32370,6 +31417,7 @@ void LibplaceboVideoRenderer::ConversionLoop()
 		frame.SourceBufferRelease();
 		const double conversionUs = converted ?
 			converted->conversionCpuMs * 1000.0 : 0.0;
+		std::shared_ptr<void> publishedExtension = converted ? converted->extension : nullptr;   // P10: capture_upload early (R18 slot)   // VPV-HOOK
 		bool published = false;
 		QueuedFrame analysed;   // WP-23: the frame for the analysis producer (on arrival)
 		bool analyse = false;
@@ -32417,13 +31465,8 @@ void LibplaceboVideoRenderer::ConversionLoop()
 			}
 			m_queueChanged.notify_all();
 		}
-		// capture_upload: early - after the notify, so readiness waiters wake first;
-		// the render takes the slot (or abandons it and uploads itself).
-		if (published && error.empty() && earlyHandoff)
-			earlyHandoff->RunUpload([&] { return m_impl->EarlyActive() && m_impl->earlyUpload->IsOpen() ?
-				std::shared_ptr<void>(m_impl->earlyUpload->Upload(earlyFrame->GetData(), earlyRowBytes, earlyHeight)) : std::shared_ptr<void>(); });
-		earlyHandoff.reset();
-		earlyFrame.reset();
+		if (published && error.empty() && publishedExtension) { RendererExtension::PublishView publish; publish.frame = &frame; publish.state = &state; publish.extension = std::move(publishedExtension); RendererExtension::AfterPublish(m_impl.get(), publish); }   // VPV-HOOK
+		publishedExtension.reset();   // VPV-HOOK
 		if (analyse)
 		{
 			// WP-23: prepared once here (the cache every later walk reuses), measured off this thread.
@@ -34685,55 +33728,14 @@ void LibplaceboVideoRenderer::ClearQueueLocked(const char* reason)
 
 size_t LibplaceboVideoRenderer::PrefillTargetLocked() const
 {
-	if (!m_useFrameQueue)
-		return 1;
-	// VP-V delay budget (ADR-0020): with a budget the queue target is the hold's whole frames at
-	// this rate (time-based already, so no film-lock scaling); otherwise the frame-count target.
-	QueueTimingPolicy::TargetContext context;
-	context.useFrameQueue = m_useFrameQueue;
-	context.configuredDepth = m_frameQueueDesiredDepth;
-	context.capacity = m_frameQueueMaxSize;
-	context.hold = CurrentQueueHold();
-	// Host-side cadence scaling (hunt 2 06-interp M3); evaluated only when the hold does not decide.
-	context.cadenceScaledDepth = context.hold.active ? 0 :
-		LockedFilmQueueTarget(AlphaQueuePolicy::ClampDesiredDepthToCapacity(m_frameQueueDesiredDepth, m_frameQueueMaxSize));
-	// render_ahead_queue_credit (design step 7) and the look-ahead floor (hunt 2 13-timing M3), in
-	// the one rule the stress harness tests too (AlphaQueuePolicy::CombineQueueTarget): the floor
-	// never exceeds `desired`, so a delay budget's hold target wins (audit B2).
-	context.renderAheadCreditFrames = m_impl ? m_impl->renderAheadCreditFrames.load(std::memory_order_acquire) : 0;
-	context.lookaheadFloor = m_queueTargetFloor.load(std::memory_order_relaxed);
-	return QueuePolicy().QueueTarget(context);
+	RendererExtension::QueueTargetContext queueTarget; queueTarget.desired = m_frameQueueDesiredDepth; queueTarget.capacity = m_frameQueueMaxSize;   // VPV-HOOK
+	return RendererExtension::ResolveQueueTarget(this, queueTarget, m_useFrameQueue ?   // P10-6 R19: VP-V's target (queue_timing QueueTarget.inl)   // VPV-HOOK
+		AlphaQueuePolicy::ClampDesiredDepthToCapacity(
+			m_frameQueueDesiredDepth, m_frameQueueMaxSize) : 1);
 }
 
 
-// Hunt 2 (cadence_class_fixes, 06-interp M3: pulldown D2 wired). While a pulldown lock
-// holds, the queue holds film frames: target_frames (set for the signal) is scaled by
-// new / cycle so the queue's latency does not step by cycle / new at each lock change;
-// never below the frames the queue's look-ahead users need (A shown, B queued and converted
-// a frame before A leaves, for the interpolator / de-judder: kLockedQueuePairFrames; the optical-flow look-ahead's depth + 1, MotionAhead::QueueFramesFor;
-// the active-picture look-ahead + 1) or the target itself. Re-resolved on every call from
-// the current cadence.
-size_t LibplaceboVideoRenderer::LockedFilmQueueTarget(size_t desired) const
-{
-	if (!m_cadenceClassFixes.load(std::memory_order_relaxed))
-		return desired;
-	const int cadence = m_pulldownCadence.load(std::memory_order_relaxed);
-	if (cadence == 0)
-		return desired;
-	size_t minimum = Pulldown::kLockedQueuePairFrames;   // gate r3: A, B ready and the arrival (was 2)
-	if (m_impl)
-	{
-		const int motionDepth = m_impl->motionAheadDepth.load(std::memory_order_acquire);
-		if (motionDepth > 0)
-			minimum = (std::max)(minimum, MotionAhead::QueueFramesFor(motionDepth));
-	}
-	// Bug hunt 3 F2: an explicit look-ahead's frames; the automatic one (target - 1 for the
-	// signal) follows the scaled queue and holds no floor, else it cancelled the scaling.
-	minimum = (std::max)(minimum, QueueLookahead::LockedFilmLookaheadFloor(
-		m_activePictureLookaheadFrames.load(std::memory_order_acquire),
-		m_activePictureLookaheadAutomatic.load(std::memory_order_acquire)));
-	return Pulldown::LockedQueueTarget(desired, Pulldown::FilmToSignalRatio(cadence >> 16, cadence & 0xffff), minimum);
-}
+#include <VP-V/modules/input/queue_timing/QueueTarget.inl>   // P10-6: QueueTargetVp, LockedFilmQueueTarget (R19)   // VPV-HOOK
 
 
 void LibplaceboVideoRenderer::SetActivePictureLookaheadAutomatic(bool automatic)

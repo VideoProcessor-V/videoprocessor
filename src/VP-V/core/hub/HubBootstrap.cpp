@@ -10,6 +10,8 @@
 
 #include <VP-V/modules/control/config/VpvSettingsModule.h>
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
+#include <VP-V/modules/input/capture/CaptureExtension.h>
+#include <VP-V/modules/input/queue_timing/IngressPolicy.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraExtension.h>
 #include <VP-V/modules/motion/estimation/VectorEngineExtension.h>
@@ -25,6 +27,12 @@ namespace
 		// Fixed fan-out order (doc 63 section 1): resync / FrameSeal first, so every later module
 		// sees the frame already sealed.
 		Vpv::Resync::RegisterResyncExtension();
+		// The capture routes (M2 P10): the conversion route, the early upload after the publish, the live capture
+		// switches and the unpackers' GPU release, for the renderer registered under the hook's host.
+		Vpv::Capture::RegisterCaptureExtension();
+		// R15 DecideIngress (M2 P10-5): pulldown detection, the film clock and the stale-delivery gap of the renderer
+		// registered under the hook's host.
+		Vpv::Ingress::RegisterIngressPolicy();
 		// The vector engine (M2 P5a): answers vpv.vector_engine.v1, turns the queue events into motion invalidation
 		// requests (OnQueue) and stops the optical-flow producer at GpuReleased; before its consumers.
 		VpMotion::RegisterVectorEngineExtension();

@@ -130,6 +130,35 @@ Contract tests:
 Chain tests:
 - delay gate (`DelayGate`): the recommended total and lower totals (4/3/2 frames) at 23.976/24/25/30/50/60p; identical measured total across rates; no stalls; recovery when frames return
 
+## M2 P10 (doc 59 section 5)
+
+Moved code (renderer member definitions, each included ONCE by LibplaceboVideoRenderer.cpp; the anchors are below):
+
+| File | Item | Content | Included |
+|---|---|---|---|
+| `IngressPolicy.inl` | j | OnVideoFrame's three VP ingress blocks: the hardware arrival, the missed / break counters around Bill's UpdateFrameRateAndPPM, and R15 (pulldown detection, film clock, stale-delivery gap); the fault thunk | after EnqueueFrame |
+| `TimedFileFrames.inl` | l | OnTimedVideoFrame, the file slot gate, FileHeadTicksUntilDueLocked | after the IngressPolicy.inl include |
+| `QueueDelayHold.inl` | m | SetQueueDelayBudget, CurrentQueueHold, QueuePolicy, UpdateQueueDelayHold, HoldTicksUntilDueLocked, WaitForDequeueLocked | after TimedFileFrames.inl, before Bill's UpdateFrameRateAndPPM |
+| `QueueTarget.inl` | q, m | QueueTargetVp (R19) and LockedFilmQueueTarget | after PrefillTargetLocked |
+
+Other files: `IngressState.h` (the renderer's private base: the ingress members, the per-frame m_ingress* values, the
+P10-8 `CallbackGate`), `CallbackGate.h` (fix C F2), `IngressPolicy.h/.cpp` (the hub module: R15 DecideIngress and R19
+ResolveQueueTarget for the renderer registered under the host, which is the renderer object itself; its fallback lines
+"ingress policy (...)" and "ingress_fault (...)").
+
+Tests: `IngressPolicyTests` (routing, R19, a throwing decision, the unregistered renderer), `CallbackGateTests`,
+`QueueTargetNeverExceedsDesiredTests` (owner rule: queue depth is never added for vectors). Gate classes for the moved
+behaviour (they run the real renderer): `RendererCaptureHarnessTests` (pulldown on 24p in 29.97 / 59.94, lines
+2080-2137, GPU), `Hunt2CadenceClass*Tests`, `Pulldown*Tests`, `QueueStress*`, `QueueTimingPolicyTests`, `FileFrame*`.
+
+Open items:
+- R18 (the 8 raw fields of the converted payload into input.capture's slot) is DEFERRED until SK-W releases Z3, then done
+  in one pass (lead decision): D-8 stays open; readers in other zones at LVR 15747-15749 / 15964-15967 (Z3),
+  11674-11675, 25098 / 25106.
+- R20 `IQueueAdmission`: the file boundary is P2's vpv.timed_file_frames.v1; the admission view has no user yet.
+- Fix C F1 (StopLedDriveForShutdown) and F3 (the GUI status getters) read m_impl on other threads, in other zones.
+- ResyncExtension.cpp's "resync_fault: ..." fallback line contains a top-level "; " (FallbackStatus::Ids splits it).
+
 ## Known issues / open items
 
 - DONE: the forced 5-frame minimum is gone (r6 fix 2; `ApplyFrameMinimum` removed).

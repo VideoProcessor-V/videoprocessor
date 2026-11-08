@@ -1,6 +1,14 @@
 {
  "_note": "Per-file ceiling on stray VP lines in Bill's files (vp_footprint.py --budget). Ratchet: lower a value when a package moves lines out; never raise one without the lead. Files not listed (and any new file) have a ceiling of 0. Measured at the P3 verification candidate against bill a591ad3b.",
  "default": 0,
+ "upstream_candidates": {
+  "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp": {
+   "lines": 239,
+   "ids": "DIV-CFG-T01..T13",
+   "waiver": "WAIVER-FP-01",
+   "_comment": "Bill-UI test updates (PR candidates DIV-CFG-T01..T13); ratchet down when upstreamed"
+  }
+ },
  "files": {
   ".agents/skills/vp-release/scripts/build-vp.ps1": 9,
   ".gitattributes": 2,
@@ -27,8 +35,8 @@
   "shaders/NLSPlus.glsl": 91,
   "src/VideoProcessor-BetaTests/BetaParametersTests.cpp": 153,
   "src/VideoProcessor-BetaTests/VideoProcessor-BetaTests.vcxproj": 2,
-  "src/VideoProcessor-Config/AppMain.cpp": 50,
-  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 7064,
+  "src/VideoProcessor-Config/AppMain.cpp": 49,
+  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 7061,
   "src/VideoProcessor-Config/ConfigEditorWindow.h": 67,
   "src/VideoProcessor-Config/ProfileListController.h": 7,
   "src/VideoProcessor-Config/README.md": 3,
@@ -39,7 +47,7 @@
   "src/VideoProcessor-ConfigCore/ConfigurationRpcClient.cpp": 62,
   "src/VideoProcessor-ConfigCore/ConfigurationRpcClient.h": 19,
   "src/VideoProcessor-ConfigCore/ConfigurationRpcProtocol.h": 18,
-  "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp": 3782,
+  "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp": 4012,
   "src/VideoProcessor-ConfigTests/VideoProcessor-ConfigTests.vcxproj": 11,
   "src/VideoProcessor-GUI/ConfigurationRpcServer.cpp": 3,
   "src/VideoProcessor-GUI/FullscreenVideoWindow.cpp": 8,
@@ -137,8 +145,8 @@
   "src/VideoProcessor-Lib/vprenderer/LibplaceboRenderParameters.cpp": 61,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboRenderParameters.h": 16,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboRendererPluginApi.h": 14,
-  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 8505,
-  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": 229,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 7468,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": 200,
   "src/VideoProcessor-Lib/vprenderer/NlsHookRecovery.h": 45,
   "src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h": 17,
   "src/VideoProcessor-Test/AnalysisDiagnosticReplayTests.cpp": 1,

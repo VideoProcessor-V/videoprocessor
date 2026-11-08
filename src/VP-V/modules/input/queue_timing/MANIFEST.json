@@ -6,6 +6,14 @@
   "status": "built",
   "code_location": "partly migrated",
   "live_files": [
+    "src/VP-V/modules/input/queue_timing/QueueTarget.inl",
+    "src/VP-V/modules/input/queue_timing/CallbackGate.h",
+    "src/VP-V/modules/input/queue_timing/IngressPolicy.cpp",
+    "src/VP-V/modules/input/queue_timing/IngressPolicy.h",
+    "src/VP-V/modules/input/queue_timing/IngressPolicy.inl",
+    "src/VP-V/modules/input/queue_timing/IngressState.h",
+    "src/VP-V/modules/input/queue_timing/QueueDelayHold.inl",
+    "src/VP-V/modules/input/queue_timing/TimedFileFrames.inl",
     "src/VP-V/modules/input/queue_timing/WindowedRate.h",
     "src/VP-V/core/DelayBudget.h",
     "src/VP-V/modules/input/queue_timing/QueueLatency.h",
@@ -62,5 +70,5 @@
     ]
   },
   "fallback_when_missing": "The 4/3/2 ladder shortens the look-ahead when the budget cannot hold 4 frames (\"look-ahead\"); an infeasible budget, unknown display refresh or a queue_size cut falls back to the frame-count queue (\"delay budget\"). The total delay never changes silently.",
-  "fallback_entry": "look-ahead: <n> of 4 queued frames (delay budget <ms>); delay budget: <why the total is not exact>"
+  "fallback_entry": "look-ahead: <n> of 4 queued frames (delay budget <ms>); delay budget: <why the total is not exact> | ingress policy: a renderer could not register; pulldown detection, the film clock and the stale-delivery gap are off for it"
 }

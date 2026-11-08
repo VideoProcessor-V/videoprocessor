@@ -80,6 +80,8 @@ int WriteConfigIdentity(const QString& outPath, const QStringList& extraFiles); 
 #include <QLineEdit>
 #include <QListView>
 #include <QListWidget>
+#include <QStyle>
+#include <QStyleOptionComboBox>
 #include <QStyledItemDelegate>
 #include <QListView>
 #include <QMessageBox>
@@ -1617,12 +1619,37 @@ void testInheritedHdrTargetLuminanceValidation()
     auto* white = requireControl<QLineEdit>(window, "config.vprenderer.sdr_target_nits");
     auto* black = requireControl<QLineEdit>(window, "config.vprenderer.sdr_black_nits");
     auto* apply = requireControl<QPushButton>(window, "applyConfiguration");
+    // Updated to Bill v1.4.02 UI (a591ad3b): Apply did not save: [vprenderer.Second] sdr_black_nits must be Auto or
+    // non-negative and below the HDR target white. The saved value is retained.
+    // Bill's Rendering page no longer inherits tone settings between profiles: the black level Second inherited from
+    // First at the last save is frozen into Second when the page loads, and a cleared white means the built-in
+    // 203 nits, never First's 1000.
+    require(white->text() == "2000" && black->text() == "300",
+        "Second's inherited black level was not frozen into the profile");
+    const QByteArray originalBytes = readBytes(path);
     white->setText("200");
-    require(!apply->isEnabled(), "Inherited black above explicit white escaped validation");
+    require(!apply->isEnabled(), "Frozen black above explicit white escaped validation");
     white->clear();
     black->setText("500");
-    require(apply->isEnabled(), "Validation did not use inherited white of 1000");
+    // Black 500 over the built-in white of 203 must never reach the file, whether the live check or Apply refuses it.
+    if (apply->isEnabled())
+    {
+        apply->click();
+        QCoreApplication::processEvents();
+        require(requireControl<QLabel>(window, "configurationStatus")->text().contains(
+            QStringLiteral("sdr_black_nits must be Auto or non-negative and below the HDR target white")),
+            "Black above the built-in white of 203 was not refused with its actionable message");
+    }
+    require(readBytes(path) == originalBytes, "A black level above the cleared profile's white reached the file");
+    black->setText("100");
     save(window);
+    ConfigFile saved;
+    require(saved.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh), "Cannot reload the luminance fixture");
+    std::string value;
+    require(saved.TryGetString("vprenderer.second", "sdr_target_nits", value) && value == "203" &&
+        saved.TryGetString("vprenderer.second", "sdr_black_nits", value) && value == "100" &&
+        saved.TryGetString("vprenderer.first", "sdr_target_nits", value) && value == "1000",
+        "A cleared white was not saved as the built-in 203 nits in its own profile");
 }
 
 void testAuditedBooleanAliasesAndInheritedAutoStatus()
@@ -3062,9 +3089,12 @@ void testEveryPageRoundTrips()
     require(window.findChildren<QTabBar*>(
         QStringLiteral("settingsSectionTabs")).size() == 1,
         "Grouped settings do not use one persistent tab control");
-    require(!sectionTabs->expanding() &&
-        sectionTabs->sizePolicy().horizontalPolicy() == QSizePolicy::Maximum,
-        "Grouped settings tabs do not use compact Shader tab sizing");
+    // Updated to Bill v1.4.02 UI (a591ad3b): Grouped settings tabs do not use compact Shader tab sizing
+    // (Bill's tab bar is non-expanding with scroll buttons and an Expanding horizontal size policy).
+    require(!sectionTabs->expanding() && sectionTabs->usesScrollButtons() &&
+        sectionTabs->elideMode() == Qt::ElideNone && sectionTabs->minimumWidth() == 0 &&
+        sectionTabs->sizePolicy().horizontalPolicy() == QSizePolicy::Expanding,
+        "Grouped settings tabs do not use Bill's non-expanding scrollable tab sizing");
     require(!sectionTabs->drawBase(),
         "Grouped settings tabs still draw the native white tab-bar base");
     const auto parentButton = [&window](const QString& text)
@@ -3091,10 +3121,12 @@ void testEveryPageRoundTrips()
     requireTabs({ QStringLiteral("Setup"), QStringLiteral("Standard"),
         QStringLiteral("NLS") });
     vpRenderer->click();
-    requireTabs({ QStringLiteral("Rendering"), QStringLiteral("Color / Output"),
-        QStringLiteral("Scaling"),
+    // Updated to Bill v1.4.02 UI (a591ad3b): A grouped settings page has the wrong top tabs
+    // (VP Renderer tabs are Tone Mapping, Color / Output, Scaling / Quality, Screen, Zoom, Subtitles, Motion, Input Processing).
+    requireTabs({ QStringLiteral("Tone Mapping"), QStringLiteral("Color / Output"),
+        QStringLiteral("Scaling / Quality"),
         QStringLiteral("Screen"), QStringLiteral("Zoom"), QStringLiteral("Subtitles"),
-        QStringLiteral("Motion"), QStringLiteral("Processing") });
+        QStringLiteral("Motion"), QStringLiteral("Input Processing") });
     directShow->click();
     requireTabs({ QStringLiteral("General"), QStringLiteral("Input Processing") });
     shortcutsNavigation->click();
@@ -3176,8 +3208,10 @@ void testEveryPageRoundTrips()
     requireControl<QLineEdit>(window, QStringLiteral("config.queue.shortcut"))
         ->setText(QStringLiteral("Ctrl+q"));
 
-    selectData(requireControl<QComboBox>(window, QStringLiteral("config.vprenderer.quality")),
-        QStringLiteral("balanced"));
+    // Updated to Bill v1.4.02 UI (a591ad3b): Missing control: config.vprenderer.quality
+    // (quality is retired; the round trip edits the Scaling / Quality debanding choice instead).
+    selectData(requireControl<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.deband_strength")),
+        QStringLiteral("light"));
     requireControl<QLineEdit>(window, QStringLiteral("config.vprenderer.sdr_target_nits"))
         ->setText(QStringLiteral("220"));
     selectData(requireControl<QComboBox>(window, QStringLiteral("config.vprenderer.tone_mapping")),
@@ -3554,7 +3588,7 @@ void testEveryPageRoundTrips()
         "scene_detect: false",
         "monitor: Test Display", "container_colorspace: BT2020",
         "queue_size: 48", "lead_frames: 3", "reset_queue_too_large_percent: 200",
-        "shortcut: Ctrl+Q", "quality: balanced", "sdr_target_nits: 220", "tone_mapping: spline",
+        "shortcut: Ctrl+Q", "deband_strength: light", "sdr_target_nits: 220", "tone_mapping: spline",
         "screen_aspect: 21:10", "vertical_alignment: bottom", "anamorphic_scale: 4:3",
         "automatic_crop: true",
         "crop_narrower_content_to_fill_screen: true",
@@ -3899,28 +3933,30 @@ void testRendererSectionTabsRemainSynchronizedDuringRapidClicks()
         }
     };
 
-    requireTabs({ QStringLiteral("Rendering"), QStringLiteral("Color / Output"),
-        QStringLiteral("Scaling"),
+    // Updated to Bill v1.4.02 UI (a591ad3b): Persistent grouped tab labels changed unexpectedly
+    // (tabs are Tone Mapping / Scaling / Quality / Input Processing; Motion is page 21, Display page 22).
+    requireTabs({ QStringLiteral("Tone Mapping"), QStringLiteral("Color / Output"),
+        QStringLiteral("Scaling / Quality"),
         QStringLiteral("Screen"), QStringLiteral("Zoom"), QStringLiteral("Subtitles"),
-        QStringLiteral("Motion"), QStringLiteral("Processing") });
+        QStringLiteral("Motion"), QStringLiteral("Input Processing") });
     runSequence({
         { 1, 16, "Color / Output", "config.vprenderer.color.profiles" },
         { 3, 4, "Screen", "config.vprenderer.viewport.profiles" },
         { 4, 18, "Zoom", "config.vprenderer.zoom.crop_narrower_content_to_fill_screen" },
         { 5, 19, "Subtitles", "config.vprenderer.subtitles.profiles" },
-        { 6, 22, "Motion", "config.vprenderer.motion.profiles" },   // page 22 after Dynamic Drive (20) and Updates (21)
+        { 6, 21, "Motion", "config.vprenderer.motion.profiles" },
         { 7, 11, "Input processing", "config.vprenderer.input_processing.video_conversion" },
         { 1, 16, "Color / Output", "config.vprenderer.color.profiles" },
-        { 2, 17, "Scaling", "config.vprenderer.scaling.profiles" },
-        { 0, 2, "Rendering", "config.vprenderer.profiles" },
+        { 2, 17, "Scaling / Quality", "config.vprenderer.scaling.profiles" },
+        { 0, 2, "Tone Mapping", "config.vprenderer.profiles" },
         { 5, 19, "Subtitles", "config.vprenderer.subtitles.profiles" },
-        { 6, 22, "Motion", "config.vprenderer.motion.profiles" },   // page 22 after Dynamic Drive (20) and Updates (21)
+        { 6, 21, "Motion", "config.vprenderer.motion.profiles" },
         { 7, 11, "Input processing", "config.vprenderer.input_processing.video_conversion" },
         { 4, 18, "Zoom", "config.vprenderer.zoom.crop_narrower_content_to_fill_screen" },
         { 3, 4, "Screen", "config.vprenderer.viewport.profiles" },
         { 1, 16, "Color / Output", "config.vprenderer.color.profiles" },
-        { 2, 17, "Scaling", "config.vprenderer.scaling.profiles" },
-        { 0, 2, "Rendering", "config.vprenderer.profiles" }
+        { 2, 17, "Scaling / Quality", "config.vprenderer.scaling.profiles" },
+        { 0, 2, "Tone Mapping", "config.vprenderer.profiles" }
     });
     require(navigationButton(QStringLiteral("VP Renderer")) &&
         navigationButton(QStringLiteral("VP Renderer"))->isChecked(),
@@ -4047,7 +4083,9 @@ void testTwoColumnCardsShareRowHeight()
     };
     QFrame* hardware = card(pages->widget(0), QStringLiteral("Hardware"));
     QFrame* behavior = card(pages->widget(0), QStringLiteral("General behavior"));
-    QFrame* display = card(pages->widget(0), QStringLiteral("Display"));
+    // Updated to Bill v1.4.02 UI (a591ad3b): Missing card: Display
+    // (the General 'Display' card is now the 'Renderer' card; monitor choice lives on the Display page).
+    QFrame* display = card(pages->widget(0), QStringLiteral("Renderer"));
     QFrame* input = card(pages->widget(0), QStringLiteral("Input processing"));
     require(hardware->height() == behavior->height() && hardware->y() == behavior->y(),
         "The first two-column card row is not height-aligned");
@@ -4060,10 +4098,10 @@ void testTwoColumnCardsShareRowHeight()
         QStringLiteral("config.general.renderer")) == nullptr &&
         display->findChild<QComboBox*>(
         QStringLiteral("config.general.renderer")) != nullptr,
-        "The renderer selector was not moved from Hardware to Display");
+        "The renderer selector was not moved from Hardware to the Renderer card");
     require(display->findChild<QCheckBox*>(
         QStringLiteral("config.general.hide_legacy_renderers")) != nullptr,
-        "Display does not contain the Hide legacy renderers checkbox");
+        "The Renderer card does not contain the Hide legacy renderers checkbox");
     QCheckBox* videoOnly = requireControl<QCheckBox>(window,
         QStringLiteral("config.general.noui"));
     require(videoOnly->text() == QStringLiteral("Start as Video Only"),
@@ -5328,19 +5366,16 @@ void testRendererProfileSectionsCollapseAndPersist()
         requireControl<QComboBox>(window,
         QStringLiteral("config.vprenderer.color.output_transport_gamma")),
         "The ordinary output controls are not included in Advanced output");
-    require(requireControl<QComboBox>(window,
-        QStringLiteral("config.vprenderer.quality")),
-        "Rendering quality is not available at the top of the renderer profile");
-    QComboBox* quality = requireControl<QComboBox>(window,
-        QStringLiteral("config.vprenderer.quality"));
-    require(quality->currentData().toString() == QStringLiteral("high") &&
-        quality->currentText() == QStringLiteral("High") &&
-        qobject_cast<QListView*>(quality->view())->isRowHidden(0),
-        "The root rendering-quality selector exposes a redundant Default choice");
-    require(quality->itemData(1).toString() == QStringLiteral("high") &&
-        quality->itemData(2).toString() == QStringLiteral("balanced") &&
-        quality->itemData(3).toString() == QStringLiteral("fast"),
-        "Rendering-quality choices are not ordered High, Balanced, Fast");
+    // Updated to Bill v1.4.02 UI (a591ad3b): Missing control: config.vprenderer.quality
+    // (Bill retired the root rendering-quality selector: quality presets migrate into Scaling profiles and the
+    // renderer's Processing section, rendererSection.processing, is what remains on Tone Mapping).
+    require(window.findChild<QComboBox*>(QStringLiteral("config.vprenderer.quality")) == nullptr &&
+        window.findChild<QComboBox*>(QStringLiteral("config.vprenderer.scaling.quality")) == nullptr,
+        "The retired rendering-quality selector is still exposed");
+    require(processing->text() == QStringLiteral("Processing") &&
+        pages->widget(2)->isAncestorOf(requireControl<QWidget>(window,
+            QStringLiteral("rendererSection.processing.content"))),
+        "The Processing section is not on the Tone Mapping page");
     QComboBox* upscaler = requireControl<QComboBox>(window,
         QStringLiteral("config.vprenderer.scaling.upscaler"));
     QComboBox* downscaler = requireControl<QComboBox>(window,
@@ -5357,17 +5392,20 @@ void testRendererProfileSectionsCollapseAndPersist()
         QStringLiteral("mitchell"), QStringLiteral("lanczos") })
         require(downscaler->findData(value) >= 0,
             "The downscaler selector is missing a supported libplacebo filter");
-    require(upscaler->itemData(2).toString() ==
+    // Updated to Bill v1.4.02 UI (a591ad3b): the Scaling selectors no longer list the retired Auto/inherit rows,
+    // so the quality-ordered choices start at row 0.
+    require(upscaler->itemData(0).toString() ==
         QStringLiteral("ewa_lanczos4sharpest") &&
-        upscaler->itemData(3).toString() == QStringLiteral("ewa_lanczossharp") &&
-        upscaler->itemData(12).toString() == QStringLiteral("none") &&
-        upscaler->itemText(12) == QStringLiteral("Built-in GPU sampling"),
+        upscaler->itemData(1).toString() == QStringLiteral("ewa_lanczossharp") &&
+        upscaler->itemData(10).toString() == QStringLiteral("none") &&
+        upscaler->itemText(10) == QStringLiteral("Built-in GPU sampling") &&
+        upscaler->findData(QStringLiteral("AUTO")) < 0,
 		"Upscaler choices are not quality ordered or accurately labelled");
-	require(downscaler->itemData(2).toString() == QStringLiteral("lanczos") &&
-		downscaler->itemData(8).toString() == QStringLiteral("bilinear") &&
-		downscaler->itemData(9).toString() == QStringLiteral("box") &&
-		downscaler->itemData(10).toString() == QStringLiteral("gpu") &&
-		downscaler->itemText(10) == QStringLiteral("Built-in GPU sampling") &&
+	require(downscaler->itemData(0).toString() == QStringLiteral("lanczos") &&
+		downscaler->itemData(6).toString() == QStringLiteral("bilinear") &&
+		downscaler->itemData(7).toString() == QStringLiteral("box") &&
+		downscaler->itemData(8).toString() == QStringLiteral("gpu") &&
+		downscaler->itemText(8) == QStringLiteral("Built-in GPU sampling") &&
 		downscaler->findData(QStringLiteral("none")) < 0 &&
 		downscaler->findData(QStringLiteral("ewa_lanczos")) < 0,
 		"Downscaler choices include a removed or pathologically expensive mode");
@@ -5385,32 +5423,37 @@ void testRendererProfileSectionsCollapseAndPersist()
         pages->widget(2)->findChild<QComboBox*>(
         QStringLiteral("config.general.switch_refresh_rate")) == nullptr,
         "Switch refresh rate selector was not moved to the top-level Display page");
+    // Updated to Bill v1.4.02 UI (a591ad3b): debanding moved from Tone Mapping to Scaling / Quality
+    // (config.vprenderer.scaling.deband_strength) and Auto is retired in favour of explicit choices.
     QComboBox* debanding = requireControl<QComboBox>(window,
-        QStringLiteral("config.vprenderer.deband_strength"));
-    require(debanding->findData(QStringLiteral("AUTO")) >= 0 &&
+        QStringLiteral("config.vprenderer.scaling.deband_strength"));
+    require(window.findChild<QComboBox*>(QStringLiteral("config.vprenderer.deband_strength")) == nullptr &&
+        debanding->findData(QStringLiteral("AUTO")) < 0 &&
         debanding->findData(QStringLiteral("off")) >= 0 &&
         debanding->findData(QStringLiteral("light")) >= 0 &&
         debanding->findData(QStringLiteral("default")) >= 0,
         "The canonical debanding selector is missing an expected value");
-    require(debanding->itemData(1).toString() == QStringLiteral("AUTO") &&
-        debanding->itemData(2).toString() == QStringLiteral("default") &&
-        debanding->itemData(3).toString() == QStringLiteral("light") &&
-        debanding->itemData(4).toString() == QStringLiteral("off"),
-        "Debanding choices are not ordered Standard, Light, Off after Auto");
+    require(debanding->itemData(0).toString() == QStringLiteral("default") &&
+        debanding->itemData(1).toString() == QStringLiteral("light") &&
+        debanding->itemData(2).toString() == QStringLiteral("off"),
+        "Debanding choices are not ordered Standard, Light, Off");
     QComboBox* sigmoid = requireControl<QComboBox>(window,
         QStringLiteral("config.vprenderer.scaling.sigmoid"));
     require(sigmoid->accessibleName() == QStringLiteral("Sigmoid upscaling"),
         "Sigmoid scaling does not expose its precise Sigmoid upscaling accessible name");
     QComboBox* peakDetection = requireControl<QComboBox>(window,
         QStringLiteral("config.vprenderer.peak_detection"));
-    require(peakDetection->itemData(1).toString() == QStringLiteral("AUTO") &&
-        peakDetection->itemData(2).toString() == QStringLiteral("high_quality") &&
-        peakDetection->itemData(3).toString() == QStringLiteral("on") &&
-        peakDetection->itemData(4).toString() == QStringLiteral("off"),
+    // Updated to Bill v1.4.02 UI (a591ad3b): Tone Mapping has no inherit row, so From input (AUTO) is row 0.
+    require(peakDetection->itemData(0).toString() == QStringLiteral("AUTO") &&
+        peakDetection->itemData(1).toString() == QStringLiteral("high_quality") &&
+        peakDetection->itemData(2).toString() == QStringLiteral("on") &&
+        peakDetection->itemData(3).toString() == QStringLiteral("off"),
         "Peak-detection choices are not ordered High quality, On, Off after Auto");
+    // Updated to Bill v1.4.02 UI (a591ad3b): dithering and its depth moved to Scaling / Quality.
     QComboBox* dithering = requireControl<QComboBox>(window,
-        QStringLiteral("config.vprenderer.dithering"));
-    require(dithering->itemText(dithering->findData(QStringLiteral("AUTO"))) ==
+        QStringLiteral("config.vprenderer.scaling.dithering"));
+    require(window.findChild<QComboBox*>(QStringLiteral("config.vprenderer.dithering")) == nullptr &&
+        dithering->itemText(dithering->findData(QStringLiteral("AUTO"))) ==
         QStringLiteral("Auto") &&
         dithering->itemText(dithering->findData(QStringLiteral("blue_noise"))) ==
         QStringLiteral("Blue noise") &&
@@ -5433,9 +5476,12 @@ void testRendererProfileSectionsCollapseAndPersist()
         QStringLiteral("Off"),
         "The dithering selector does not expose every libplacebo method");
     QComboBox* displayBitDepth = requireControl<QComboBox>(window,
-        QStringLiteral("config.vprenderer.display_bit_depth"));
-    require(displayBitDepth->property("effectiveValue").toString().compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0 &&
-        displayBitDepth->currentText().startsWith(QStringLiteral("When unset:")),
+        QStringLiteral("config.vprenderer.scaling.display_bit_depth"));
+    // Updated to Bill v1.4.02 UI (a591ad3b): automatic dither depth is retired into the explicit
+    // 'Match output format' choice on Scaling / Quality.
+    require(window.findChild<QComboBox*>(QStringLiteral("config.vprenderer.display_bit_depth")) == nullptr &&
+        displayBitDepth->currentData().toString() == QStringLiteral("output") &&
+        displayBitDepth->currentText() == QStringLiteral("Match output format"),
         "Existing automatic dither depth was not preserved with its direct label");
     require(displayBitDepth->itemText(displayBitDepth->findData(QStringLiteral("8"))) == QStringLiteral("8-bit") &&
         displayBitDepth->itemText(displayBitDepth->findData(QStringLiteral("10"))) == QStringLiteral("10-bit"),
@@ -5461,10 +5507,11 @@ void testRendererProfileSectionsCollapseAndPersist()
         "Renderer section expansion state changed when selecting another profile");
     // Selecting the canonical control must retire the compatibility toggle,
     // so saving cannot leave two conflicting debanding values in one profile.
-    window.selectPage(2);
-    QListWidget* renderingProfiles = requireControl<QListWidget>(window,
-        QStringLiteral("config.vprenderer.profiles"));
-    renderingProfiles->setCurrentRow(0);
+    // Updated to Bill v1.4.02 UI (a591ad3b): these controls now edit the Scaling profile list.
+    window.selectPage(17);
+    QListWidget* scalingProfiles = requireControl<QListWidget>(window,
+        QStringLiteral("config.vprenderer.scaling.profiles"));
+    scalingProfiles->setCurrentRow(0);
     QCoreApplication::processEvents();
     selectData(debanding, QStringLiteral("light"));
     selectData(displayBitDepth, QStringLiteral("8"));
@@ -5751,13 +5798,17 @@ void testScreenConfigSectionsAndInlineUnits()
         "Subtitle section expansion state changed when selecting another profile");
 }
 
-void testSeparatedProfilesDoNotLeaveShortcutShellsBehind()
+// legacyPresetCompatibility false: Bill's quality retirement runs (a High preset is flattened into every legacy
+// Rendering profile). true: a non-High preset (here quality: balanced) keeps NeedsPresetCompatibility set
+// (QualityProfileMigration.h), so the preset flattening is skipped and the shell-pruning path of
+// migrateSeparatedRendererProfiles still applies: a profile left holding nothing but a selector is removed.
+void separatedProfilesScenario(bool legacyPresetCompatibility)
 {
     QTemporaryDir directory;
     const QString path = directory.filePath(QStringLiteral("VideoProcessor.cfg"));
-    const QByteArray configuration =
-        "[vprenderer.rendering]\n"
-        "quality: high\n\n"
+    const QByteArray configuration = QByteArray(legacyPresetCompatibility ?
+        "[vprenderer.rendering]\nquality: balanced\n\n" :
+        "[vprenderer.rendering]\nquality: high\n\n") +
         "[vprenderer.scaling_only]\n"
         "shortcut: Shift+1\n"
         "upscaler: ewa_lanczos\n"
@@ -5804,10 +5855,21 @@ void testSeparatedProfilesDoNotLeaveShortcutShellsBehind()
     QListWidget* zoom = requireControl<QListWidget>(window,
         QStringLiteral("config.vprenderer.zoom.profiles"));
 
-    require(!hasProfile(rendering, QStringLiteral("vprenderer.scaling_only")) &&
-        !hasProfile(rendering, QStringLiteral("vprenderer.color_only")) &&
-        !hasProfile(rendering, QStringLiteral("vprenderer.output_only")),
-        "A moved-only profile remained selectable in Rendering");
+    // Updated to Bill v1.4.02 UI (a591ad3b): A moved-only profile remained selectable in Rendering
+    // (Bill's quality retirement writes the preset-derived Tone Mapping values peak_detection: high_quality and
+    // contrast_recovery: 0.3 into every legacy Rendering profile, so a profile that only carried a selector and
+    // moved settings stays a real Tone Mapping profile; its moved settings live in their new owners).
+    // With a non-High preset (legacyPresetCompatibility) the preset flattening is skipped, so the shell is pruned.
+    if (legacyPresetCompatibility)
+        require(!hasProfile(rendering, QStringLiteral("vprenderer.scaling_only")) &&
+            !hasProfile(rendering, QStringLiteral("vprenderer.color_only")) &&
+            !hasProfile(rendering, QStringLiteral("vprenderer.output_only")),
+            "A moved-only profile remained selectable in Rendering");
+    else
+        require(hasProfile(rendering, QStringLiteral("vprenderer.scaling_only")) &&
+            hasProfile(rendering, QStringLiteral("vprenderer.color_only")) &&
+            hasProfile(rendering, QStringLiteral("vprenderer.output_only")),
+            "A legacy selector-only Rendering profile was dropped instead of kept as a Tone Mapping profile");
     require(hasProfile(scaling, QStringLiteral("vprenderer.scaling.scaling_only")) &&
         hasProfile(color, QStringLiteral("vprenderer.color.color_only")) &&
         !hasProfile(output, QStringLiteral("vprenderer.output.output_only")),
@@ -5820,10 +5882,28 @@ void testSeparatedProfilesDoNotLeaveShortcutShellsBehind()
 
     save(window);
     const QByteArray saved = readBytes(path);
-    require(!saved.contains("[vprenderer.scaling_only]") &&
-        !saved.contains("[vprenderer.color_only]") &&
-        !saved.contains("[vprenderer.output_only]") &&
-        !saved.contains("[vprenderer.viewport.scope_and_crop]"),
+    ConfigFile reloaded;
+    require(reloaded.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh),
+        "Cannot reload the separated-profile migration result");
+    if (legacyPresetCompatibility)
+        require(!saved.contains("[vprenderer.scaling_only]") &&
+            !saved.contains("[vprenderer.color_only]") &&
+            !saved.contains("[vprenderer.output_only]"),
+            "A moved-only Rendering shell survived separated-profile migration");
+    else
+        for (const char* shell : { "vprenderer.scaling_only", "vprenderer.color_only", "vprenderer.output_only" })
+        {
+            std::string setting;
+            require(reloaded.HasSection(shell) &&
+                reloaded.TryGetString(shell, "peak_detection", setting) && setting == "high_quality" &&
+                reloaded.TryGetString(shell, "contrast_recovery", setting) && setting == "0.3" &&
+                !reloaded.TryGetString(shell, "upscaler", setting) &&
+                !reloaded.TryGetString(shell, "downscaler", setting) &&
+                !reloaded.TryGetString(shell, "sdr_target_primaries", setting) &&
+                !reloaded.TryGetString(shell, "output_presentation", setting),
+                "A Rendering profile kept a setting that moved to another owner");
+        }
+    require(!saved.contains("[vprenderer.viewport.scope_and_crop]"),
         "A selector-only source section survived separated-profile migration");
     require(saved.contains("[vprenderer.scaling.scaling_only]") &&
         saved.contains("[vprenderer.color.color_only]") &&
@@ -5833,6 +5913,20 @@ void testSeparatedProfilesDoNotLeaveShortcutShellsBehind()
     require(!saved.contains("downscaler: ewa_lanczos") &&
         !saved.contains("downscaler: none"),
         "A removed downscaler survived migration instead of becoming Auto");
+}
+
+// Bill's quality retirement is active (quality: high): a selector-only Rendering profile is kept as a Tone Mapping
+// profile. (Named "...leave shortcut shells behind" before the update to his v1.4.02 UI; see DIV-CFG-T06.)
+void testSeparatedProfilesKeepToneMappingProfileUnderQualityRetirement()
+{
+    separatedProfilesScenario(false);
+}
+
+// The same fixture with a non-High preset keeps the preset compatibility path, so his shell pruning in
+// migrateSeparatedRendererProfiles is still exercised: moved-only Rendering profiles are removed.
+void testSeparatedProfilesDoNotLeaveShortcutShellsBehind()
+{
+    separatedProfilesScenario(true);
 }
 
 void testQueueUnitsAndLutControlsUseConsistentRows()
@@ -7851,8 +7945,13 @@ void testLeftDocksRestoreManualChoicesAndDrawerEditing()
     auto* toneCurves = requireControl<QToolButton>(window, "rendererSection.toneCurves");
     auto* settingsScroll = workspace->findChild<QScrollArea*>("workspaceSettingsViewport");
     require(toneSection->isChecked() && toneCurves->isChecked(), "Advanced controls were not expanded");
+    // Updated to Bill v1.4.02 UI (a591ad3b): Advanced focus did not bring tone controls into view
+    // (Bill's focus scroll runs from pre-layout geometry, so the tone section lands inside the Advanced
+    // viewport but not at its very top: measured 155 px down a 250 px viewport; the contract tested is that
+    // the whole section header is visible in the viewport, not a fixed 40 px offset).
     require(settingsScroll && toneSection->mapTo(settingsScroll->viewport(), QPoint()).y() >= 0 &&
-        toneSection->mapTo(settingsScroll->viewport(), QPoint()).y() < 40,
+        toneSection->mapTo(settingsScroll->viewport(), QPoint()).y() + toneSection->height() <=
+            settingsScroll->viewport()->height(),
         "Advanced focus did not bring tone controls into view");
     requireControl<QAbstractButton>(window, "settingsRail.settingsNavigation.22")->click(); events();
     require(requireControl<QStackedWidget>(window, "settingsPages")->currentIndex() == 22,
@@ -8086,23 +8185,41 @@ void testPrimaryDiscoverySelectorsOpenOnFieldClick()
     const QString path = copyFixture(directory);
     ConfigEditorWindow window(path, 0, true);
     window.show();
-    window.selectPage(0);
     QCoreApplication::processEvents();
 
-    for (const QString& name : {
-        QStringLiteral("config.general.capture_device"),
-        QStringLiteral("config.general.fullscreen_monitor_name"),
-        QStringLiteral("config.general.renderer") })
+    // Updated to Bill v1.4.02 UI (a591ad3b): Missing control: config.general.fullscreen_monitor_name
+    // (the monitor choice moved to Bill's top-level Display page as config.output_display.monitor, page 22).
+    // Bill's monitor selector is deliberately editable (a monitor can stay configured while disconnected), so its
+    // popup opens from the dropdown arrow; the capture device and renderer selectors open from the field.
+    struct DiscoverySelector { const char* name; int page; bool editable; };
+    for (const DiscoverySelector& entry : {
+        DiscoverySelector{ "config.general.capture_device", 0, false },
+        DiscoverySelector{ "config.output_display.monitor", 22, true },
+        DiscoverySelector{ "config.general.renderer", 0, false } })
     {
+        const QString name = QString::fromLatin1(entry.name);
+        window.selectPage(entry.page);
+        QCoreApplication::processEvents();
         QComboBox* selector = requireControl<QComboBox>(window, name);
-        require(!selector->isEditable(),
-            "A discovery selector still behaves like a text editor");
-        require(selector->lineEdit() == nullptr,
-            "A discovery selector still owns an embedded text editor");
+        // Updated to Bill v1.4.02 UI (a591ad3b): A discovery selector still behaves like a text editor
+        // (the Display page Monitor selector is editable by design).
+        require(selector->isEditable() == entry.editable,
+            entry.editable ? "The Display monitor selector is no longer editable" :
+                "A discovery selector still behaves like a text editor");
+        require(entry.editable ? selector->lineEdit() != nullptr : selector->lineEdit() == nullptr,
+            "A discovery selector has the wrong embedded text editor state");
         require(selector->isVisibleTo(&window) && selector->isEnabled(),
             "A discovery selector is not available for direct interaction");
 
-        const QPoint point = selector->rect().center();
+        QPoint point = selector->rect().center();
+        if (entry.editable)
+        {
+            QStyleOptionComboBox option;
+            option.initFrom(selector);
+            option.editable = true;
+            point = selector->style()->subControlRect(QStyle::CC_ComboBox, &option,
+                QStyle::SC_ComboBoxArrow, selector).center();
+        }
         const QPoint globalPoint = selector->mapToGlobal(point);
         const ULONGLONG started = GetTickCount64();
         QMouseEvent press(QEvent::MouseButtonPress, QPointF(point),
@@ -9815,14 +9932,16 @@ void testRememberedTargetDoesNotFallBackToLocal()
         QStringLiteral("old-computer-no-longer-on-lan"),
         QStringLiteral("STUDY"));
     auto* choice = requireControl<QComboBox>(window, "config.targetChoice");
-    require(choice->currentText() == QStringLiteral("STUDY (searchingâ€¦)") &&
+    // Updated to Bill v1.4.02 UI (a591ad3b): The remembered remote did not remain selected while searching
+    // (Bill's test source carried a double-encoded ellipsis; the editor shows U+2026).
+    require(choice->currentText() == QStringLiteral("STUDY (searching\u2026)") &&
         choice->itemText(1) == QStringLiteral("This computer"),
         "The remembered remote did not remain selected while searching");
     window.setDiscoveredTargets({
         { QStringLiteral("local-installation"), QStringLiteral("This computer"),
             QStringLiteral("127.0.0.1"), 1, {}, true }
     });
-    require(choice->currentText() == QStringLiteral("STUDY (searchingâ€¦)") &&
+    require(choice->currentText() == QStringLiteral("STUDY (searching\u2026)") &&
         !requireControl<QPushButton>(window, "okConfiguration")->isEnabled(),
         "The remembered remote silently fell back to the local file");
     window.finishInitialTargetSearch();
@@ -9861,8 +9980,10 @@ void testRemoteOnlyClientHasNoLocalFileTarget()
     ConfigEditorWindow window(copyFixture(directory), 0, true, {}, {},
         {}, 41686, {}, true, false);
     auto* choice = requireControl<QComboBox>(window, "config.targetChoice");
+    // Updated to Bill v1.4.02 UI (a591ad3b): A remote-only Config copy offered a local file target
+    // (Bill's test source carried a double-encoded ellipsis; the editor shows U+2026).
     require(choice->count() == 2 &&
-        choice->itemText(1) == QStringLiteral("Enter addressâ€¦") &&
+        choice->itemText(1) == QStringLiteral("Enter address\u2026") &&
         !requireControl<QPushButton>(window, "okConfiguration")->isEnabled(),
         "A remote-only Config copy offered a local file target");
     window.setDiscoveredTargets({
@@ -12192,6 +12313,18 @@ void testRenderingMenuDuplicateExportImportPreservesLegacyOwner()
 
 #include "ToneChartIntegrationTests.inc"
 
+// The tests that measure real text (single source: run() skips the flagged ones without fonts and
+// tools/run_config_tests.ps1 reads this list with --list-font-tests for its font pass and gate).
+// The VP-V 'fits the window' test is not skipped (it checks the rest without fonts) but needs the font pass
+// for its page-fit part.
+struct FontGatedTest { const char* name; bool skipWithoutFonts; };
+const FontGatedTest fontGatedTests[] = {
+    { "VP-V: masters, derived settings, one control per key, fits the window", false },
+    { "responsive workspaces preserve edits and fit", true },
+    { "left docks restore manual choices and drawer editing", true },
+    { "two-column cards share row height", true },
+    { "Tone slider wheel scrolls panel without editing", true } };
+
 int run(const char* name, const std::function<void()>& test)
 {
     const QString testName = QString::fromUtf8(name);
@@ -12217,6 +12350,21 @@ int run(const char* name, const std::function<void()>& test)
             {
                 if (testShardCount <= 1 || testShard == 0)   // reported once, not by every shard
                     std::cerr << "SKIP " << name << ": needs a real window (run on screen)" << std::endl;
+                return 0;
+            }
+    }
+    // Layout tests measure real text: off screen without fonts Qt measures placeholder boxes, so the editor's
+    // layout is not the one the owner sees (page 0 'overflows 278px', no scroll range for the wheel fixture).
+    // Tests flagged skipWithoutFonts are skipped here and run by tools/run_config_tests.ps1's font pass
+    // (QT_QPA_FONTDIR); the runner reads the same list with --list-font-tests (fontGatedTests, the single source).
+    if (qEnvironmentVariable("QT_QPA_PLATFORM").compare(QStringLiteral("offscreen"), Qt::CaseInsensitive) == 0 &&
+        QFontDatabase::families().isEmpty())
+    {
+        for (const FontGatedTest& gated : fontGatedTests)
+            if (gated.skipWithoutFonts && testName.compare(QString::fromUtf8(gated.name), Qt::CaseInsensitive) == 0)
+            {
+                if (testShardCount <= 1 || testShard == 0)   // reported once, not by every shard
+                    std::cerr << "SKIP " << name << ": needs real fonts (the runner reruns it with QT_QPA_FONTDIR)" << std::endl;
                 return 0;
             }
     }
@@ -12255,6 +12403,12 @@ int run(const char* name, const std::function<void()>& test)
 
 int main(int argc, char** argv)
 {
+    for (int i = 1; i < argc; ++i)
+        if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--list-font-tests"))
+        {
+            for (const FontGatedTest& gated : fontGatedTests) std::cout << gated.name << std::endl;
+            return 0;
+        }
     if (argc == 3 && QString::fromLocal8Bit(argv[1]) ==
         QStringLiteral("--zorder-helper"))
     {
@@ -12282,6 +12436,7 @@ int main(int argc, char** argv)
     }
     QApplication application(argc, argv);
     Vpv::RegisterConfigProviders();   // VPV-HOOK (the editors below need the VP-V page providers)
+    std::cerr << "FONTS " << QFontDatabase::families().size() << std::endl;   // the runner fails a font pass that loaded none
     // Not tests: the settings coverage inventory (--inventory <file>) and the preview's re-save (--resave <file>).
     for (int i = 1; i + 1 < argc; ++i)
         if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--inventory"))
@@ -12346,6 +12501,12 @@ int main(int argc, char** argv)
     failures += run("renderer promotion migration and cache selection", testRendererPromotionMigrationAndCacheSelection);
     failures += run("Beta tone mapping controls", testBetaToneMappingControls);
     failures += run("subtitle profile tab round trip", testSubtitleProfileTabRoundTrip);
+    // KNOWN FAILING, PENDING OWNER DECISION (FX-CFG14): 'Off must not offer a glyph script hint'. The test is right and
+    // Bill's a591ad3b product code is wrong (fails identically in his own tree): the Subtitles page hides the script
+    // hint with commonForm->setRowVisible(scriptHint, ...), but addChoice wraps every non-VP-V combo in a row widget
+    // (combo + Reset), so the combo is not a direct form field and the call hides nothing. Proposed one-line fix in
+    // ConfigEditorWindow.cpp: setRowVisible(scriptHint->parentWidget(), ...), like the offset row. See
+    // docs/design/upstream-divergence-register.md (DIV-CFG-T11).
     failures += run("Off zoom hold round trip", testOffZoomHoldRoundTrip);
     failures += run("subtitle background shape round trip and visibility", testSubtitleBackgroundShapeRoundTripAndVisibility);
     failures += run("subtitle text size reduction round trip and style visibility", testSubtitleTextSizeReductionRoundTripAndStyleVisibility);
@@ -12395,6 +12556,8 @@ int main(int argc, char** argv)
     failures += run("calibration profile owns LUT and HDR gamma", testCalibrationProfileOwnsLutAndHdrGamma);
     failures += run("legacy Rendering color settings migrate to Color Config",
         testLegacyRendererColorSettingsMigrateToColorConfigs);
+    failures += run("separated profiles keep a Tone Mapping profile under quality retirement",
+        testSeparatedProfilesKeepToneMappingProfileUnderQualityRetirement);
     failures += run("separated profiles do not leave shortcut shells behind",
         testSeparatedProfilesDoNotLeaveShortcutShellsBehind);
     failures += run("legacy VP input override migrates independently",

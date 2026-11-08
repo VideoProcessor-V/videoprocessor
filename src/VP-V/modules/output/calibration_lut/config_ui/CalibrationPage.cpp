@@ -10,6 +10,8 @@
 #include "CalibrationPage.h"
 
 #include <ConfigurationRpcClient.h>
+#include <VP-V/config/VpvFormLayout.h>
+#include <VideoProcessor-Config/FlowLayout.h>
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -234,6 +236,7 @@ QWidget* CalibrationPage::Build(State& st)
     auto* model = bindChoiceField(section, QStringLiteral("meter_model"), models, modelLabels);
     model->setToolTip(QStringLiteral("Any meter ArgyllCMS supports works. The model tunes VP's handling: sensor "
         "calibration prompts (spectros), the low-light floor for near-black averaging, CCSS or CCMX corrections."));
+    Vpv::MakeComboShrinkable(model);   // FX-CFG14 (ported at the cal landing)
     meterForm->addRow(QStringLiteral("Meter"), model);
     auto* port = integer(QStringLiteral("meter_port"), 0, 64, 0, QString());
     port->setSpecialValueText(QStringLiteral("First found"));
@@ -442,6 +445,7 @@ QWidget* CalibrationPage::Build(State& st)
     runKind->addItem(QStringLiteral("Dynamic Drive characterisation (projector LED / CNTR)"), QStringLiteral("led"));
     runKind->addItem(QStringLiteral("Ambient-light check (screen reflectance)"), QStringLiteral("ambient"));
     runKind->addItem(QStringLiteral("HDR (PQ) verify"), QStringLiteral("hdr_verify"));
+    Vpv::MakeComboShrinkable(runKind);   // FX-CFG14 (ported at the cal landing)
     runKind->setToolTip(QStringLiteral("Display calibration builds the LUTs. Dynamic Drive measures the flux table, the "
         "CNTR curve and (with a fast sensor) the LED timing. Ambient-light measures black and white with the room "
         "lights off and on (ambient_screen_reflect). HDR verify measures PQ tracking and dE ITP."));
@@ -459,8 +463,7 @@ QWidget* CalibrationPage::Build(State& st)
     runLayout->addWidget(lux);
     wizardLayout->addWidget(runRow);
     auto* buttons = new QWidget;
-    auto* buttonLayout = new QHBoxLayout(buttons);
-    buttonLayout->setContentsMargins(0, 0, 0, 0);
+    auto* buttonLayout = new FlowLayout(buttons);   // FX-CFG14: the wizard buttons wrap (no 499 px card minimum; ported at the cal landing)
     const QList<QPair<QString, QString>> actions = {
         { QStringLiteral("start"), QStringLiteral("Start") }, { QStringLiteral("continue"), QStringLiteral("Continue") },
         { QStringLiteral("skip"), QStringLiteral("Skip warm-up") }, { QStringLiteral("apply"), QStringLiteral("Apply") },
@@ -484,7 +487,6 @@ QWidget* CalibrationPage::Build(State& st)
             Run(*stp, command, arguments);
         });
     }
-    buttonLayout->addStretch(1);
     wizardLayout->addWidget(buttons);
     if (k->noTarget())
     {

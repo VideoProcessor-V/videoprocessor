@@ -25,7 +25,7 @@ namespace FallbackPlainTextTest
 			const char* ids[] = { "dither", "BTB/WTW", "re-base", "re-base warm-up", "detail pulse", "texture restore", "deband", "motion",
 				"motion consumers", "presentation", "refresh rate", "calibration LUT", "calibration patch", "output range",
 				"output request", "geometry", "subtitle detection", "SDR tone shape", "output scaling", "early upload",
-				"early upload frames", "vector_engine", "vector_engine_producer", "vector_engine_global",
+				"early upload frames", "capture extension", "vector_engine", "vector_engine_producer", "vector_engine_global",
 				"vector producer", "motion look-ahead", "source resolution look-ahead" };
 			const std::string unknownPrefix = "A processing step was switched off";
 			for (const char* id : ids)
