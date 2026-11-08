@@ -12,9 +12,9 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Count | Value |
 |---|---|
 | Modules | 45 |
-| Documented rows | 69 |
-| VP-V keys in code (outside Bill's schema lists) | 385 |
-| of which documented | 64 |
+| Documented rows | 70 |
+| VP-V keys in code (outside Bill's schema lists) | 386 |
+| of which documented | 65 |
 | of which undocumented (appendix A) | 321 |
 | Documented keys with no code entry (appendix B) | 0 |
 
@@ -32,7 +32,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Input | `input.source_analysis.picture.shared.picture_rect` | draft | [README](../../src/VP-V/modules/input/source_analysis/picture/shared/README.md) | 0 | 0 | 0/0 |
 | Input | `input.source_analysis.events.shared.cut_fade_judge` | draft | [README](../../src/VP-V/modules/input/source_analysis/events/shared/README.md) | 0 | 0 | 0/0 |
 | Input | `input.source_analysis.identity.shared.source_quality` | draft | [README](../../src/VP-V/modules/input/source_analysis/identity/shared/README.md) | 0 | 0 | 0/0 |
-| Motion | `motion.estimation` | built | [README](../../src/VP-V/modules/motion/estimation/README.md) | 49 | 32 | 30/32 |
+| Motion | `motion.estimation` | built | [README](../../src/VP-V/modules/motion/estimation/README.md) | 50 | 32 | 30/32 |
 | Motion | `motion.vector_delivery` | partial | [README](../../src/VP-V/modules/motion/vector_delivery/README.md) | 0 | 9 | 0/9 |
 | Motion | `motion.consumers` | built | [README](../../src/VP-V/modules/motion/consumers/README.md) | 0 | 35 | 0/35 |
 | Repair | `repair.encoding` | placeholder | [README](../../src/VP-V/modules/repair/encoding/README.md) | 0 | 1 | 0/1 |
@@ -113,6 +113,7 @@ Modules: `motion.estimation`, `motion.vector_delivery`, `motion.consumers`.
 | `optical_flow_global` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
 | `optical_flow_global_fallback` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
 | `vector_demand` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | on | VP-V > Advanced; VP-V page > Motion (toggle) | Original pathway forces off | `vector_engine`, `vector_engine_producer`, `vector_engine_global`, `vector producer` (all released when off) | same on all |
+| `vpv.camera.camera_ahead_fit` | `motion.estimation` | [vpv.camera] | bool | on, off | off |  | none yet (a link key, not on the Camera model card: planned VP-V > Motion > Advanced > Camera model) | off (forced; no state, no line) | the fit reads the ahead NVOF pair (`IVectorEngine::FlowOf`) instead of the seed and publishes P7 on time when it can; Ctrl+I / Config status / Ctrl+Alt+D line `camera ahead fit: N on time, M bridged ...` with the on-time target (today `none`: every frame is bridged); Fallbacks `camera.ahead.bridged` while frames are bridged; deterministic mode: `camera ahead fit: off in deterministic mode` (the bridge path); camera_model off: shown as inert; invalid value: `camera_settings`, default kept | none (switch, not tiered) |
 | `vpv.camera.camera_labels_gpu` | `motion.estimation` | [vpv.camera] | bool | on, off | off |  | VP-V > Motion > Advanced > Camera model (VpvSection; an off box removes the key) | off (forced; no state, no line) | Ctrl+Alt+D "camera labels:" line (computed on the GPU or uploaded from the fit); needs camera_model on, else inert; invalid value: `camera_settings` | none (switch, not tiered) |
 | `vpv.camera.camera_meas_cut_skip` | `motion.estimation` | [vpv.camera] | bool | on, off | off |  | VP-V > Motion > Advanced > Camera model (VpvSection; an off box removes the key) | off (forced; no state, no line) | measurement switch (no matcher search across a cut), one member of `MeasurementSwitches`; Ctrl+Alt+D "camera guidance:" line; camera_model off: shown as inert (`camera_model` entry: "camera_model is off, so ... have no effect"); invalid value: `camera_settings`, default kept | none (switch, not tiered) |
 | `vpv.camera.camera_meas_e1_skip` | `motion.estimation` | [vpv.camera] | bool | on, off | off |  | VP-V > Motion > Advanced > Camera model (VpvSection; an off box removes the key) | off (forced; no state, no line) | measurement switch (second E1 sweep skipped where the first agrees with the model), one member of `MeasurementSwitches`; Ctrl+Alt+D "camera guidance:" line; camera_model off: shown as inert (`camera_model` entry: "camera_model is off, so ... have no effect"); invalid value: `camera_settings`, default kept | none (switch, not tiered) |

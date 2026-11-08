@@ -17,16 +17,18 @@ namespace CameraLink
 {
 	// F2 provenance: where a copy came from. The readback ring stamps it; the camera fit refuses Live (the GUIDED live
 	// matcher field, which the camera's own guidance shaped) at CameraLinkCore::SubmitField. Synthetic = built by hand (tests,
-	// the accuracy harness, a dump replay).
+	// the accuracy harness, a dump replay). Ahead = the ahead fit's input (AheadFlow.h), accepted like Seed.
 	enum class FieldOrigin
 	{
 		Synthetic,
 		Live,    // IVectorEngine::FieldOf through FieldReadbackRing::Request(const VerifiedField&): never fitted
 		Seed,    // IVectorEngine::SeedFieldOf through FieldReadbackRing::Request(const SeedField&)
+		Ahead,   // camera ahead fit: IVectorEngine::FlowOf (the producer's UNGUIDED NVOF pair) through CopyAhead -> AheadToSourceGrid
 	};
 
 	struct FieldCopy
 	{
+		enum { kSourceBlockPx = 16 };               // the camera fit's source grid (the live field's 16-px blocks)
 		uint64_t seq = 0, pairFrom = 0, pairTo = 0;
 		int gridW = 0, gridH = 0;
 		double blockSize = 0;                       // source px per block

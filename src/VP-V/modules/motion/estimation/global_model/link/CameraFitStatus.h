@@ -57,7 +57,34 @@ namespace CameraLink
 		std::atomic<uint64_t> rebound{ 0 };          // times the worker took a new lane lease (a rebuild was noticed)
 		std::atomic<uint64_t> guidedRefused{ 0 };    // F2: copies of the guided live field refused by SubmitField (never fitted)
 		std::atomic<uint64_t> seedAbsent{ 0 };       // F2: engine pairs without an optical-flow seed (no fit; camera_fit fallback)
+		// AHEAD FIT (camera_ahead_fit; all stay 0 when it is off). On time = P7 sealed with the frame in the on-time target;
+		// bridged = sealed by the lag bridge (N + kSealLag) instead: an ahead fit that missed its frame's seal, or a frame fitted from the
+		// seed because no ahead pair existed.
+		std::atomic<uint64_t> aheadSubmitted{ 0 };   // fits submitted from the ahead pair (FlowOf)
+		std::atomic<uint64_t> aheadOnTime{ 0 };      // ahead fits published into the on-time target before their frame's seal
+		std::atomic<uint64_t> aheadBridged{ 0 };     // ahead fits published into the lag bridge (missed the on-time seal, or no target)
+		std::atomic<uint64_t> aheadLate{ 0 };        // ahead fits published nowhere (late even for the bridge, or the park overflowed)
+		std::atomic<uint64_t> aheadSeedFallback{ 0 };   // frames fitted from the seed while the ahead fit is on (no ahead pair)
+		std::atomic<uint64_t> aheadNoPair{ 0 };      // FlowOf had no pair for a frame that needed one
+		std::atomic<uint64_t> aheadIncomplete{ 0 };  // the pair had no backward vectors or costs (the engine trust cannot be computed)
+		std::atomic<uint64_t> aheadLayout{ 0 };      // the pair's layout did not cover the camera's source grid
+		std::atomic<uint64_t> onTimeSealed{ 0 };     // frames whose P7 the on-time seal accepted (render thread)
+		std::atomic<uint64_t> onTimeRejected{ 0 };   // on-time publishes the seal rejected (a resync after the publish): no P7 for the frame
+		std::atomic<uint64_t> staleAtUse{ 0 };       // records refused at consumption: the frame's stamp moved after the publish
 	};
+
+	// AHEAD FIT: the visible state (Ctrl+I line, Config status, Ctrl+Alt+D). `target` says where an on-time result can go ("" = none).
+	inline std::string AheadStatusLine(const FitCounters& c, const std::string& target)
+	{
+		char b[640];
+		std::snprintf(b, sizeof(b), "camera ahead fit: %llu on time, %llu bridged (%llu ahead fits late for the on-time seal, %llu from the seed: no ahead pair), "
+			"%llu late, %llu rejected after the publish (resync), %llu refused at use; no pair %llu, incomplete %llu, layout %llu; on-time target: %s",
+			(unsigned long long)c.onTimeSealed.load(), (unsigned long long)(c.aheadBridged.load() + c.aheadSeedFallback.load()),
+			(unsigned long long)c.aheadBridged.load(), (unsigned long long)c.aheadSeedFallback.load(), (unsigned long long)c.aheadLate.load(),
+			(unsigned long long)c.onTimeRejected.load(), (unsigned long long)c.staleAtUse.load(), (unsigned long long)c.aheadNoPair.load(),
+			(unsigned long long)c.aheadIncomplete.load(), (unsigned long long)c.aheadLayout.load(), target.empty() ? "none" : target.c_str());
+		return b;
+	}
 
 	// Counts consecutive Ambiguous measured seconds.
 	class AmbiguousTracker

@@ -148,7 +148,7 @@ namespace CameraLink
 	void CameraFitWorker::WaitIdle()
 	{
 		std::unique_lock<std::mutex> lock(m_mutex);
-		m_idleCv.wait(lock, [this]() { return (m_queue.empty() && !m_busy) || !m_running; });
+		m_idleCv.wait(lock, [this]() { return (m_queue.empty() && !m_busy && !m_tick) || !m_running; });
 	}
 
 	void CameraFitWorker::Loop()
@@ -160,9 +160,19 @@ namespace CameraLink
 				std::unique_lock<std::mutex> lock(m_mutex);
 				m_busy = false;
 				m_idleCv.notify_all();
-				m_cv.wait(lock, [this]() { return m_stop || !m_queue.empty(); });
+				m_cv.wait(lock, [this]() { return m_stop || !m_queue.empty() || m_tick; });
 				if (m_stop)
 					return;
+				if (m_queue.empty())
+				{
+					// AHEAD FIT: only a Tick (the render position moved): retry the parked results.
+					m_tick = false;
+					m_busy = true;
+					lock.unlock();
+					RetryParked();
+					continue;
+				}
+				m_tick = false;
 				job = std::move(m_queue.front());
 				m_queue.pop_front();
 				m_busy = true;
@@ -171,24 +181,129 @@ namespace CameraLink
 		}
 	}
 
+	void CameraFitWorker::Tick(uint64_t renderSeq)
+	{
+		if (!m_env.aheadMode)
+			return;
+		uint64_t cur = m_renderSeq.load(std::memory_order_acquire);
+		while (renderSeq > cur && !m_renderSeq.compare_exchange_weak(cur, renderSeq, std::memory_order_acq_rel)) {}
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_tick = true;
+		}
+		m_cv.notify_one();
+	}
+
+	size_t CameraFitWorker::Parked() const
+	{
+		return m_parkedCount.load(std::memory_order_acquire);
+	}
+
+	void CameraFitWorker::Finish(const CameraFitJob& job, const CameraFitResult& fit, PublishOutcome o)
+	{
+		if (m_env.counters && job.ahead)
+		{
+			if (o == PublishOutcome::PublishedOnTime)
+				m_env.counters->aheadOnTime.fetch_add(1, std::memory_order_relaxed);
+			else if (o == PublishOutcome::Published)
+				m_env.counters->aheadBridged.fetch_add(1, std::memory_order_relaxed);
+			else
+				m_env.counters->aheadLate.fetch_add(1, std::memory_order_relaxed);
+		}
+		if (m_env.onResult)
+			m_env.onResult(job, fit, o);
+	}
+
+	bool CameraFitWorker::TryParked(ParkedResult& p, uint64_t renderSeq, PublishOutcome& outcome)
+	{
+		const uint64_t seq = p.job.seq;
+		if (!p.onTimeDone)
+		{
+			if (!m_env.onTimeSource || seq <= renderSeq)
+				p.onTimeDone = true;   // no target, or the frame's seal already ran: the on-time chance is gone
+			else
+			{
+				// The lease is taken for this attempt and held for the whole publish (the lane may rebuild at any frame).
+				const VpSkeleton::LaneLease lease = m_env.onTimeSource();
+				const PublishOutcome o = lease.table ? PublishInto(lease, p.job, p.fit, false) : PublishOutcome::NoProduct;
+				if (o == PublishOutcome::Published)
+				{
+					outcome = PublishOutcome::PublishedOnTime;
+					return true;
+				}
+				if (o != PublishOutcome::LateInputs)
+					p.onTimeDone = true;   // claimed / sealed / not writable / no P7 there: the bridge takes it
+				else
+					return false;          // the target's inputs of seq are not published yet: retried at the next Tick
+			}
+		}
+		if (seq > renderSeq)
+			return false;   // the lag bridge publishes its input markers of seq at seq's Begin: wait for it
+		outcome = PublishFit(p.job, p.fit);
+		return true;
+	}
+
+	size_t CameraFitWorker::RetryParked()
+	{
+		const uint64_t renderSeq = m_renderSeq.load(std::memory_order_acquire);
+		size_t ended = 0;
+		for (auto it = m_parked.begin(); it != m_parked.end();)
+		{
+			PublishOutcome o = PublishOutcome::NoProduct;
+			if (TryParked(*it, renderSeq, o))
+			{
+				const ParkedResult done = std::move(*it);
+				it = m_parked.erase(it);
+				m_parkedCount.store(m_parked.size(), std::memory_order_release);
+				Finish(done.job, done.fit, o);
+				++ended;
+			}
+			else
+				++it;
+		}
+		return ended;
+	}
+
 	PublishOutcome CameraFitWorker::ProcessJob(const CameraFitJob& job)
 	{
 		// Always fit (deterministic history); only the publication can be late.
 		const CameraFitResult fit = m_producer.Fit(job);
+		if (m_env.aheadMode && job.ahead && fit.record)
+		{
+			// AHEAD FIT: parked until it can be published (on time, else bridged); exactly one onResult when it ends.
+			ParkedResult p;
+			p.job = job;
+			p.fit = fit;
+			PublishOutcome o = PublishOutcome::NoProduct;
+			if (TryParked(p, m_renderSeq.load(std::memory_order_acquire), o))
+			{
+				Finish(job, fit, o);
+				return o;
+			}
+			if (m_parked.size() >= (m_env.parkCapacity ? m_env.parkCapacity : 1))
+			{
+				// Bounded: the oldest park ends as late (counted, shown), never silently.
+				const ParkedResult oldest = std::move(m_parked.front());
+				m_parked.pop_front();
+				if (m_env.counters)
+					m_env.counters->late.fetch_add(1, std::memory_order_relaxed);
+				Finish(oldest.job, oldest.fit, PublishOutcome::LateInputs);
+			}
+			m_parked.push_back(std::move(p));
+			m_parkedCount.store(m_parked.size(), std::memory_order_release);
+			RetryParked();   // earlier parks may be publishable now too
+			return PublishOutcome::LateInputs;
+		}
 		const PublishOutcome o = PublishFit(job, fit);
-		if (m_env.onResult)
-			m_env.onResult(job, fit, o);
+		Finish(job, fit, o);
+		if (m_env.aheadMode && !m_parked.empty())
+			RetryParked();
 		return o;
 	}
 
 	PublishOutcome CameraFitWorker::PublishFit(const CameraFitJob& job, const CameraFitResult& fit)
 	{
 		FitCounters* c = m_env.counters;
-		auto late = [&](PublishOutcome o) {
-			if (c)
-				c->late.fetch_add(1, std::memory_order_relaxed);
-			return o;
-		};
 		// The lease is taken ONCE and held for the whole publish: a rebuild during it cannot free the table, the bytes or the Indicator.
 		Rebind();
 		const VpSkeleton::LaneLease lease = Lease();
@@ -200,10 +315,32 @@ namespace CameraLink
 				c->staleLane.fetch_add(1, std::memory_order_relaxed);
 			return PublishOutcome::StaleLane;
 		}
+		return PublishInto(lease, job, fit, true);
+	}
+
+	PublishOutcome CameraFitWorker::PublishInto(const VpSkeleton::LaneLease& lease, const CameraFitJob& job, const CameraFitResult& fit,
+		bool countLate)
+	{
+		FitCounters* c = m_env.counters;
+		auto late = [&](PublishOutcome o) {
+			if (c && countLate)
+				c->late.fetch_add(1, std::memory_order_relaxed);
+			return o;
+		};
 		VpSkeleton::SlotSet* set = lease.table ? lease.table->Find(VpSkeleton::kP7CameraFit) : nullptr;
 		if (!set || !m_env.pool || !fit.record)
 			return PublishOutcome::NoProduct;
 
+		if (!countLate)
+		{
+			// AHEAD FIT on-time attempt (retried): the inputs are checked BEFORE the claim, because a claimed-then-abandoned slot can never
+			// be claimed again for that frame (SlotSet::Claim: Stale), which would end the on-time chance at the first early attempt.
+			VpAncestry::Header probe;
+			VpSkeleton::LaneInputs probePins;
+			if (!lease.table->LaneAncestors(VpSkeleton::kP7CameraFit, job.seq, probe, probePins))
+				return PublishOutcome::LateInputs;
+			probePins.Unpin();
+		}
 		VpSkeleton::LaneTicket ticket;
 		if (set->Claim(job.seq, VpAncestry::Provenance::AheadLane, ~uint64_t(0), &ticket) != VpSkeleton::ClaimResult::Claimed)
 			return late(PublishOutcome::LateClaim);
@@ -228,7 +365,7 @@ namespace CameraLink
 			EncodeRecordPod(*fit.record, bytes, kRecordPodMaxBytes);
 		// The pool entry is written BEFORE the publish (the seal can accept the instant it is Published) and erased if the
 		// publish turns out late, so a late record is never served.
-		m_env.pool->Put(job.seq, fit.record, job.field);
+		m_env.pool->Put(job.seq, fit.record, job.field, m_env.aheadMode ? &hdr.honoured : nullptr, !countLate);
 		const VpSkeleton::PublishResult pr = set->Publish(ticket);
 		pins.Unpin();
 		if (pr != VpSkeleton::PublishResult::Published)

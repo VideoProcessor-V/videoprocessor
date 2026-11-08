@@ -12,6 +12,9 @@
 //   camera_meas_<name>           on | off   (10 keys)                  the measurement switches, one per
 //                                                                      CameraModel::MeasurementSwitches member
 //   camera_use_<consumer>        on | off   (grain, detail, dither, deband, filler, dejudder)
+//   camera_ahead_fit             on | off                              the fit reads the AHEAD NVOF pair (IVectorEngine::FlowOf) and
+//                                                                      publishes P7 on time when it can (link/README.md "Ahead fit");
+//                                                                      a LINK key: not on the Camera model card yet (kCameraLinkKeys)
 //
 // The switches and the consumers need camera_model = on: with it off they are inert, and the status says so. An invalid value
 // keeps the default and is listed in `problems` (shown under Fallbacks, never log-only). Keys of the section this parser does
@@ -71,6 +74,11 @@ namespace Vpv
 			"camera_use_grain", "camera_use_detail", "camera_use_dither", "camera_use_deband", "camera_use_filler",
 			"camera_use_dejudder" };
 		constexpr size_t kCameraKeyCount = sizeof(kCameraKeys) / sizeof(kCameraKeys[0]);
+		// Keys of the section that steer the camera LINK (how the fit is fed), not the model: parsed and validated here like the others,
+		// but not on the Config card (Config placement: none yet; see the module README). Not in kCameraKeys / KeyValues on purpose
+		// (that list is the card's).
+		static const char* const kCameraLinkKeys[] = { "camera_ahead_fit" };
+		constexpr size_t kCameraLinkKeyCount = sizeof(kCameraLinkKeys) / sizeof(kCameraLinkKeys[0]);
 
 		enum class Verdict { NotMine, Valid, Invalid };
 
@@ -81,12 +89,13 @@ namespace Vpv
 			bool labelsGpu = false;                          // camera_labels_gpu
 			CameraModel::MeasurementSwitches meas;           // camera_meas_*  (`objects` has no key: it stays off)
 			UseSwitches use;                                 // camera_use_*
+			bool aheadFit = false;                           // camera_ahead_fit (link key)
 			bool originalPathway = false;                    // [vpv] pipeline_original_pathway = on (set by the caller)
 			std::vector<std::string> problems;               // invalid values (kept at the default)
 			std::vector<std::string> unknownKeys;            // keys of [vpv.camera] this version does not know (kept in the file)
 
 			// True when any key is set on (before the Original pathway and the model switch are applied).
-			bool AnySet() const { return model || overlay != OverlayMode::Off || labelsGpu || meas.Any() || use.Any(); }
+			bool AnySet() const { return model || overlay != OverlayMode::Off || labelsGpu || meas.Any() || use.Any() || aheadFit; }
 			// The camera model runs (or would, once a vector engine exists).
 			bool ModelWanted() const { return !originalPathway && model; }
 			// Something is set that the status must show (a set switch under a model that is off is shown as inert).
@@ -100,6 +109,8 @@ namespace Vpv
 			UseSwitches Use() const { return ModelWanted() ? use : UseSwitches(); }
 			OverlayMode Overlay() const { return ModelWanted() ? overlay : OverlayMode::Off; }
 			bool LabelsGpu() const { return ModelWanted() && labelsGpu; }
+			// The ahead fit runs only with the model (it changes how the fit is fed, nothing else).
+			bool AheadFit() const { return ModelWanted() && aheadFit; }
 			// The same settings with every key forced off when the Original pathway is on (problems are dropped: nothing is shown).
 			CameraSettings Effective() const
 			{
@@ -134,6 +145,7 @@ namespace Vpv
 				if (key == "camera_use_deband") return &s.use.deband;
 				if (key == "camera_use_filler") return &s.use.filler;
 				if (key == "camera_use_dejudder") return &s.use.dejudder;
+				if (key == "camera_ahead_fit") return &s.aheadFit;
 				return nullptr;
 			}
 			inline const bool* BoolSlot(const CameraSettings& s, const std::string& key)
@@ -225,7 +237,7 @@ namespace Vpv
 
 		inline bool operator==(const CameraSettings& a, const CameraSettings& b)
 		{
-			return KeyValues(a) == KeyValues(b);
+			return KeyValues(a) == KeyValues(b) && a.aheadFit == b.aheadFit;
 		}
 	}
 }

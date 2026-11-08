@@ -121,6 +121,11 @@ namespace CameraLink
 		std::shared_ptr<const CameraModel::CameraMotion> record;
 		std::shared_ptr<const FieldCopy> field;
 		bool committed = false;   // set only AFTER the slot publish succeeded: a late / unpublished record is never served
+		// AHEAD FIT: the Indicator stamp honoured at the publish (read after the pins, AheadLane provenance). The consumers re-check it
+		// against the frame's current stamp (CameraLinkCore::SealedRecord): a resync after the publish rejects the record there too.
+		bool haveHonoured = false;
+		VpIndicator::Stamp honoured;
+		bool onTime = false;      // published into the on-time target (its Indicator judges the stamp), else the lag bridge
 	};
 
 	class CameraRecordPool
@@ -131,7 +136,8 @@ namespace CameraLink
 		size_t Ring() const { return m_entries.size(); }
 
 		// Producer (holding the claim for `seq`). Replaces the previous tenant of the slot.
-		void Put(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion> record, std::shared_ptr<const FieldCopy> field)
+		void Put(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion> record, std::shared_ptr<const FieldCopy> field,
+			const VpIndicator::Stamp* honoured = nullptr, bool onTime = false)
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			PoolEntry& e = m_entries[seq % m_entries.size()];
@@ -139,6 +145,9 @@ namespace CameraLink
 			e.record = std::move(record);
 			e.field = std::move(field);
 			e.committed = false;
+			e.haveHonoured = honoured != nullptr;
+			e.honoured = honoured ? *honoured : VpIndicator::Stamp();
+			e.onTime = onTime;
 		}
 
 		// Producer: the slot publish succeeded -> readers may now see the entry.

@@ -40,6 +40,9 @@ namespace CameraLink
 		// The lane generation AT SUBMIT (CameraFitWorker::Submit; AnalysisLane::Generation of the lease the worker held). A job whose
 		// generation is not the worker's current one when it publishes belongs to a graph that was rebuilt: refused and counted.
 		uint64_t laneGen = 0;
+		// AHEAD FIT: the job was submitted from the ahead pair (FlowOf) before its frame started rendering. Its result is parked by the
+		// worker until it can be published: on time into the on-time target (before the frame's seal), else into the lag bridge.
+		bool ahead = false;
 	};
 
 	struct CameraFitResult

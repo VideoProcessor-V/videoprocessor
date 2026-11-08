@@ -18,6 +18,12 @@ namespace CameraLink
 	{
 		constexpr double kHoldSeconds = 0.5;   // same measured interval as the ambiguity engage time
 		constexpr uint64_t kMaxFieldsPerPump = 16;
+		constexpr uint64_t kSeedPendingFrames = 16;   // AHEAD FIT: a seed fallback copy not back after this many frames is given up
+		constexpr size_t kAheadQueue = 16;            // AHEAD FIT: the fit queue (the P2 slot holds 16 pairs: the deepest lead)
+		constexpr size_t kAheadPool = 32;             // AHEAD FIT: records live from the ahead submit to the lag bridge's seal
+		// The stamp counters P7's content depends on (core/Products.h: content = full + continuity, settings = motion).
+		const VpIndicator::CounterMask kP7StampMask =
+			VpIndicator::Bit(VpIndicator::kFull) | VpIndicator::Bit(VpIndicator::kContinuity) | VpIndicator::Bit(VpIndicator::kSettingsMotion);
 
 		std::string TracePath()
 		{
@@ -40,6 +46,9 @@ namespace CameraLink
 
 	CameraLinkCore::CameraLinkCore(FrameAnalysis::Store& store) : m_store(store), m_sealToStore(store)
 	{
+		for (size_t i = 0; i < kAheadMarks; ++i)
+			m_onTimeMark[i].store(0, std::memory_order_relaxed);
+		m_retired.assign(kAheadMarks, 0);
 	}
 
 	CameraLinkCore::~CameraLinkCore()
@@ -63,6 +72,12 @@ namespace CameraLink
 			m_chain.clear();
 		}
 		m_lastRequestedField = 0;
+		m_aheadNext = 0;
+		m_aheadRefusedSeq = 0;
+		m_seedPending.clear();
+		for (size_t i = 0; i < kAheadMarks; ++i)
+			m_onTimeMark[i].store(0, std::memory_order_relaxed);
+		m_retired.assign(kAheadMarks, 0);
 		std::lock_guard<std::mutex> lock(m_traceMutex);
 		if (m_trace.is_open())
 			m_trace.close();
@@ -114,7 +129,8 @@ namespace CameraLink
 		if (!m_active || !table || !table->Find(VpSkeleton::kP7CameraFit))
 			return;
 		const size_t ring = table->Find(VpSkeleton::kP7CameraFit)->Ring();
-		m_pool.reset(new CameraRecordPool((std::max)(static_cast<size_t>(ring), m_settings.poolRing)));
+		const bool ahead = AheadActive();
+		m_pool.reset(new CameraRecordPool((std::max)((std::max)(static_cast<size_t>(ring), m_settings.poolRing), ahead ? kAheadPool : size_t(0))));
 		m_sealedMark.assign(ring, ~uint64_t(0));
 		m_producer.reset(new CameraFitProducer(m_settings.fit, &m_counters));
 		CameraFitEnv env;
@@ -122,7 +138,9 @@ namespace CameraLink
 		env.leaseSource = std::move(source);
 		env.pool = m_pool.get();
 		env.counters = &m_counters;
-		env.queueCapacity = m_settings.queueCapacity;
+		env.queueCapacity = ahead ? (std::max)(m_settings.queueCapacity, kAheadQueue) : m_settings.queueCapacity;
+		env.aheadMode = ahead;
+		env.onTimeSource = ahead ? m_onTimeSource : VpSkeleton::LaneLeaseSource();
 		env.onResult = [this](const CameraFitJob& j, const CameraFitResult& r, PublishOutcome o) { OnResult(j, r, o); };
 		m_worker.reset(new CameraFitWorker(*m_producer, env));
 		if (!m_settings.deterministic)
@@ -186,8 +204,150 @@ namespace CameraLink
 					PassTimers::Inbox::Motion().PostCameraReadback(latency * 1000.0);   // camera.readback: a wait, never counted as work
 				m_requestedAt.erase(at);
 			}
+			if (AheadActive())
+			{
+				// AHEAD FIT: a seed fallback copy is back; the ahead submissions that waited for it (fit order) continue.
+				const auto pending = std::find(m_seedPending.begin(), m_seedPending.end(), fc->seq);
+				if (pending != m_seedPending.end())
+				{
+					m_seedPending.erase(pending);
+					if (SubmitField(fc, f))
+						m_counters.aheadSeedFallback.fetch_add(1, std::memory_order_relaxed);
+					continue;
+				}
+			}
 			SubmitField(fc, f);
 		}
+	}
+
+	bool CameraLinkCore::SubmitAheadField(std::shared_ptr<const FieldCopy> field, const AheadCopy* global)
+	{
+		if (!m_worker || !field || field->origin != FieldOrigin::Ahead)
+			return false;
+		CameraFitJob job;
+		job.seq = field->seq;
+		job.field = field;
+		job.stamp = field->stamp;
+		job.ahead = true;
+		PairDescription d;
+		if (m_aheadFacts && !m_aheadFacts(*field, d))
+			return false;
+		job.facts = d.facts;
+		job.uniqueFramesBetween = d.uniqueFramesBetween;
+		job.haveTimestamps = d.haveTimestamps;
+		job.tsFrom = d.tsFrom;
+		job.tsTo = d.tsTo;
+		job.facts.deadlineMicros = 0;   // as every job: no deadline in the Fitter (the history stays deterministic)
+		if (global && global->globalValid && !job.facts.haveEngineGlobal)
+		{
+			job.facts.haveEngineGlobal = true;   // the ahead pair's own whole-frame motion (the render-time EngineGlobal does not exist yet)
+			job.facts.engineGx = global->globalX;
+			job.facts.engineGy = global->globalY;
+		}
+		if (!m_worker->Submit(job))
+			return false;
+		m_counters.aheadSubmitted.fetch_add(1, std::memory_order_relaxed);
+		return true;
+	}
+
+	bool CameraLinkCore::Retired(uint64_t seq) const
+	{
+		return !m_retired.empty() && m_retired[seq % m_retired.size()] == seq + 1;
+	}
+
+	void CameraLinkCore::MarkRetired(uint64_t seq)
+	{
+		if (!m_retired.empty())
+			m_retired[seq % m_retired.size()] = seq + 1;
+	}
+
+	void CameraLinkCore::PollAhead()
+	{
+		if (!AheadActive() || !m_worker || !m_pool)
+			return;
+		// A seed fallback is in flight: its frame must be fitted before any later ahead pair (the fit history is in frame order).
+		if (!m_seedPending.empty())
+			return;
+		if (m_aheadNext == 0)
+		{
+			// Start after everything the render-time path already asked for: no frame is fitted twice.
+			const uint64_t latest = m_engine ? m_engine->LatestVerifiedFieldSeq() : 0;
+			m_aheadNext = (std::max)((std::max)(m_renderSeq, latest), m_lastRequestedField) + 1;
+		}
+		const VpSkeleton::LaneLease lease = m_worker->Lease();
+		for (uint64_t k = 0; k < kMaxFieldsPerPump; ++k)
+		{
+			if (m_worker->Pending() >= kAheadQueue)
+				break;   // back-pressure: ask again at the next phase (never a drop)
+			const uint64_t seq = m_aheadNext;
+			AheadCopy copy;
+			const AheadRefusal r = m_aheadSource(seq, copy);
+			if (r == AheadRefusal::NoPair)
+				break;   // not computed yet: normal until the producer gets there; a frame the render reaches without one takes the seed
+			std::shared_ptr<FieldCopy> field;
+			bool converted = false;
+			if (r == AheadRefusal::None)
+			{
+				copy.stamp = lease.indicator ? lease.indicator->StampOf(seq) : VpIndicator::Stamp();
+				field = std::make_shared<FieldCopy>();
+				converted = AheadToSourceGrid(copy, m_aheadConsistency, m_aheadGridW, m_aheadGridH, *field);
+			}
+			if (!converted)
+			{
+				if (m_aheadRefusedSeq != seq)
+				{
+					m_aheadRefusedSeq = seq;   // counted once per frame; the frame takes the seed when the render reaches it
+					(r == AheadRefusal::Incomplete ? m_counters.aheadIncomplete : m_counters.aheadLayout).fetch_add(1, std::memory_order_relaxed);
+				}
+				break;
+			}
+			if (!SubmitAheadField(field, copy.globalValid ? &copy : nullptr))
+				break;   // facts refused or the queue is full (counted by the worker): the render-time path takes the frame
+			{
+				std::lock_guard<std::mutex> lock(m_chainMutex);
+				if (m_chain.empty() || seq > m_chain.back())
+				{
+					if (m_chain.size() >= 64)
+						m_chain.erase(m_chain.begin());
+					m_chain.push_back(seq);
+				}
+			}
+			++m_aheadNext;
+		}
+	}
+
+	void CameraLinkCore::OnTimeSeal(uint64_t seq)
+	{
+		if (!AheadActive() || !m_onTimeSource || !m_pool)
+			return;
+		// Only the camera publishes P7 into the on-time target (it is declared published outside the lane, so the seal never live-fills
+		// it): a Sealed P7(seq) there is this link's on-time record. The mark (set by the worker after its publish) catches a publish the
+		// seal REJECTED; a mark still in flight when the seal accepted is covered by the Sealed state itself.
+		const VpSkeleton::LaneLease l = m_onTimeSource();
+		VpSkeleton::SlotSet* set = l.table ? l.table->Find(VpSkeleton::kP7CameraFit) : nullptr;
+		bool sealed = set && set->StateOf(seq) == VpSkeleton::SlotState::Sealed;
+		if (!sealed && m_onTimeMark[seq % kAheadMarks].load(std::memory_order_acquire) != seq + 1)
+			return;   // nothing was published on time for this frame: the lag bridge seals it
+		PoolEntry e;
+		const bool have = m_pool->Get(seq, e, true);
+		// Re-check at the seal: the stamp honoured at the publish against the frame's stamp now (a resync after the publish rejects it).
+		VpIndicator::Indicator* ind = l.indicator ? l.indicator : (m_worker ? m_worker->Lease().indicator : nullptr);
+		if (sealed && have && e.haveHonoured && ind && !VpIndicator::SameFor(e.honoured, ind->StampOf(seq), kP7StampMask))
+			sealed = false;
+		if (sealed && have)
+		{
+			const bool accepted = m_sealToStore.OnSealed(seq, e.record);
+			if (accepted && !m_sealedMark.empty())
+				m_sealedMark[seq % m_sealedMark.size()] = seq;
+			(accepted ? m_counters.sealedOk : m_counters.sealedLate).fetch_add(1, std::memory_order_relaxed);
+			m_counters.onTimeSealed.fetch_add(1, std::memory_order_relaxed);
+		}
+		else
+		{
+			m_counters.onTimeRejected.fetch_add(1, std::memory_order_relaxed);
+			m_pool->Erase(seq);   // never served
+		}
+		MarkRetired(seq);   // the lag bridge's later seal of this frame is not a second verdict
 	}
 
 	bool CameraLinkCore::PreviousRecordSeq(uint64_t seq, unsigned back, uint64_t& out) const
@@ -221,7 +381,8 @@ namespace CameraLink
 		(void)f;
 		if (!m_worker || !field)
 			return false;
-		// F2 provenance: the GUIDED live matcher field is never fitted (the fit would re-measure its own guide).
+		// F2 provenance: the GUIDED live matcher field is never fitted (the fit would re-measure its own guide). Seed, Ahead (the
+		// producer's unguided NVOF pair, AheadFlow.h) and Synthetic are accepted.
 		if (field->origin == FieldOrigin::Live)
 		{
 			m_counters.guidedRefused.fetch_add(1, std::memory_order_relaxed);
@@ -259,23 +420,31 @@ namespace CameraLink
 			return;
 		if (m_worker && m_worker->Rebind())   // the lane was rebuilt: take the new lease (and size the seal marks)
 			OnLaneRebound();
-		// (1) seal observer
-		std::shared_ptr<const CameraModel::CameraMotion> rec;
-		if (f.p7SealedPublished)
+		const bool ahead = AheadActive();
+		m_renderSeq = f.renderSeq != 0 ? f.renderSeq : f.seq;
+		// (0) AHEAD FIT: the on-time seal of the frame starting now (its P7 was published into the on-time target before the seal).
+		if (ahead)
+			OnTimeSeal(m_renderSeq);
+		// (1) seal observer (the lag bridge's seal of f.seq; a frame the on-time seal already decided is skipped)
+		if (!(ahead && Retired(f.seq)))
 		{
-			PoolEntry e;
-			if (m_pool->Get(f.seq, e))
-				rec = e.record;
+			std::shared_ptr<const CameraModel::CameraMotion> rec;
+			if (f.p7SealedPublished)
+			{
+				PoolEntry e;
+				if (m_pool->Get(f.seq, e))
+					rec = e.record;
+			}
+			const bool accepted = m_sealToStore.OnSealed(f.seq, rec);
+			if (accepted && !m_sealedMark.empty())
+				m_sealedMark[f.seq % m_sealedMark.size()] = f.seq;
+			(accepted ? m_counters.sealedOk : m_counters.sealedLate).fetch_add(1, std::memory_order_relaxed);
+			if (m_settings.laneDepthZero)
+				m_counters.depth0.fetch_add(1, std::memory_order_relaxed);
+			// P7 lateness = the seal had no published P7 for this frame (independent of the store acceptance).
+			if (!f.p7SealedPublished)
+				m_events.fetch_or(1u << kEvLate, std::memory_order_relaxed);
 		}
-		const bool accepted = m_sealToStore.OnSealed(f.seq, rec);
-		if (accepted && !m_sealedMark.empty())
-			m_sealedMark[f.seq % m_sealedMark.size()] = f.seq;
-		(accepted ? m_counters.sealedOk : m_counters.sealedLate).fetch_add(1, std::memory_order_relaxed);
-		if (m_settings.laneDepthZero)
-			m_counters.depth0.fetch_add(1, std::memory_order_relaxed);
-		// P7 lateness = the seal had no published P7 for this frame (independent of the store acceptance).
-		if (!f.p7SealedPublished)
-			m_events.fetch_or(1u << kEvLate, std::memory_order_relaxed);
 		// Measured time since the previous frame start (the output period when the host supplies it).
 		const auto now = std::chrono::steady_clock::now();
 		double dt = f.displayPeriodSeconds;
@@ -294,6 +463,8 @@ namespace CameraLink
 				m_lastEra = era;
 				m_lastRequestedField = 0;
 				m_requestedAt.clear();
+				m_aheadNext = 0;          // AHEAD FIT: restarts after the new numbering's newest field
+				m_seedPending.clear();
 				std::lock_guard<std::mutex> lock(m_chainMutex);
 				m_chain.clear();   // the numbering restarted: the old records are not "previous" any more
 			}
@@ -306,15 +477,44 @@ namespace CameraLink
 				from = latest - kMaxFieldsPerPump + 1;
 			for (uint64_t s = from; s <= latest && latest != 0; ++s)
 			{
+				// AHEAD FIT: a frame the ahead fit already took needs no seed readback.
+				if (ahead && m_aheadNext != 0 && s < m_aheadNext)
+					continue;
 				// F2: the fit reads the optical-flow SEED only (never FieldOf, the guided live field).
 				VpMotion::SeedField vf;
 				if (!m_engine->SeedFieldOf(s, vf))
 				{
 					if (s == latest)
 						m_counters.seedAbsent.fetch_add(1, std::memory_order_relaxed);   // the engine has the pair but no seed
+					if (ahead && m_aheadNext != 0 && s >= m_aheadNext)
+						m_aheadNext = s + 1;   // nothing to fit for s (a cadence repeat): the ahead fit goes on after it
 					continue;   // no seed for this seq (a cadence repeat, or no seed: the camera_fit fallback): not a drop
 				}
-				if (!m_ring->Request(vf))
+				bool seedFallback = false;
+				if (ahead)
+				{
+					SetAheadConsistency(vf.consistencyPx);   // the matcher's own limit, as the ahead trust judges it
+					if (m_aheadNext != 0 && s >= m_aheadNext)
+					{
+						// The render reached s without an ahead pair (low latency, a producer drop, a pair not computed in time): the seed
+						// takes s (the bridge path), visibly; later ahead pairs wait until its fit is submitted (fit order).
+						m_counters.aheadNoPair.fetch_add(1, std::memory_order_relaxed);
+						m_aheadNext = s + 1;
+						m_events.fetch_or(1u << kEvAhead, std::memory_order_relaxed);
+						seedFallback = true;
+					}
+				}
+				if (seedFallback && m_ring->Request(vf))
+					m_seedPending.push_back(s);   // the copy is on the way: the ahead submissions wait for its fit
+				else if (seedFallback)
+				{
+					m_counters.readbackDropped.fetch_add(1, std::memory_order_relaxed);
+					m_events.fetch_or(1u << kEvReadback, std::memory_order_relaxed);
+					if (m_producer)
+						m_producer->NoteReset();   // a hole in the pair chain
+					continue;
+				}
+				if (!seedFallback && !m_ring->Request(vf))
 				{
 					m_counters.readbackDropped.fetch_add(1, std::memory_order_relaxed);
 						m_events.fetch_or(1u << kEvReadback, std::memory_order_relaxed);
@@ -340,6 +540,15 @@ namespace CameraLink
 			}
 			if (latest > m_lastRequestedField)
 				m_lastRequestedField = latest;
+		}
+		if (ahead)
+		{
+			// AHEAD FIT: a seed fallback copy that never came back (a dropped readback) does not hold the ahead fit for ever.
+			for (auto it = m_seedPending.begin(); it != m_seedPending.end();)
+				it = *it + kSeedPendingFrames < m_renderSeq ? m_seedPending.erase(it) : it + 1;
+			PollAhead();
+			if (m_worker)
+				m_worker->Tick(m_renderSeq);   // the parked results see the new render position (the bridge's markers of it exist now)
 		}
 		if (m_settings.deterministic && m_worker)
 			m_worker->ProcessQueued();
@@ -371,12 +580,23 @@ namespace CameraLink
 
 	void CameraLinkCore::OnPostSubmitGap()
 	{
-		if (!m_active || !m_ring)
+		if (!m_active)
 			return;
-		std::vector<std::shared_ptr<FieldCopy>> ready;
-		m_ring->Poll(ready);
-		FramePhaseFacts none;
-		SubmitReady(ready, none);
+		if (m_ring)
+		{
+			std::vector<std::shared_ptr<FieldCopy>> ready;
+			m_ring->Poll(ready);
+			FramePhaseFacts none;
+			SubmitReady(ready, none);
+		}
+		if (AheadActive())
+		{
+			// AHEAD FIT: after the render the on-time target's inputs of the next frame exist (the skeleton feeds them at AfterRender):
+			// the parked results try again, and pairs the producer finished meanwhile are taken.
+			PollAhead();
+			if (m_worker)
+				m_worker->Tick(m_renderSeq);
+		}
 	}
 
 	size_t CameraLinkCore::ProcessPending()
@@ -401,12 +621,20 @@ namespace CameraLink
 				m_lastFit.fitMs = double(rec->costMicros) / 1000.0;
 				m_lastFit.reason = rec->reason;
 				m_lastFit.verdictFlags = rec->verdictFlags;
-				m_lastFit.published = o == PublishOutcome::Published;
+				m_lastFit.published = IsPublished(o);
 			}
 			if (r.timingUnknown)
 				m_events.fetch_or(1u << kEvTiming, std::memory_order_relaxed);
 			if (r.status == AssembleStatus::NotFittedSlip || r.status == AssembleStatus::NotFittedAncient)
 				m_events.fetch_or(1u << kEvSlip, std::memory_order_relaxed);
+		}
+		if (job.ahead)
+		{
+			// AHEAD FIT: where the result went. On time: the render thread's on-time seal reads the mark at the frame's Begin.
+			if (o == PublishOutcome::PublishedOnTime)
+				m_onTimeMark[job.seq % kAheadMarks].store(job.seq + 1, std::memory_order_release);
+			else
+				m_events.fetch_or(1u << kEvAhead, std::memory_order_relaxed);   // bridged or late: the frame missed the on-time seal
 		}
 		{
 			std::shared_ptr<CameraDump> dump;
@@ -432,7 +660,7 @@ namespace CameraLink
 					CameraModel::ReasonTextOf(rec->reason, rec->verdictFlags), rec->confidence, int(rec->params.type),
 					rec->params.h[0], rec->params.h[1], rec->params.h[2], rec->params.h[3], rec->params.h[4], rec->params.h[5],
 					rec->params.h[6], rec->params.h[7], rec->params.h[8],
-					(long long)rec->costMicros, o == PublishOutcome::Published ? 0 : 1, o == PublishOutcome::Published ? 1 : 0);
+					(long long)rec->costMicros, IsPublished(o) ? 0 : 1, IsPublished(o) ? 1 : 0);
 				m_trace << b;
 			}
 		}
@@ -462,11 +690,21 @@ namespace CameraLink
 	std::vector<FallbackCatalog::Decision> CameraLinkCore::CollectDecisions()
 	{
 		StatusFacts f;
+		bool bridged = false;
 		{
 			std::lock_guard<std::mutex> lock(m_statusMutex);
 			f = m_facts;
+			bridged = m_hold[kEvAhead].engaged;
 		}
-		return BuildDecisions(f);
+		std::vector<FallbackCatalog::Decision> d = BuildDecisions(f);
+		if (m_settings.aheadFit && !m_settings.deterministic && f.graphHasP7)
+		{
+			// AHEAD FIT (only when it is on): frames sealed by the lag bridge instead of on time are a visible downgrade.
+			const std::string why = std::string("camera: ahead fit bridged: P7 sealed by the lag bridge, not with its frame (") +
+				(m_onTimeSource ? "the fit missed its frame's seal or no ahead pair existed" : "no on-time seal target: SK-W2") + ")";
+			d.push_back(bridged || !m_onTimeSource ? FallbackCatalog::Engaged(kIdAheadBridged, why) : FallbackCatalog::Released(kIdAheadBridged));
+		}
+		return d;
 	}
 
 	void CameraLinkCore::CollectStatus(std::vector<std::string>& lines)
@@ -474,6 +712,9 @@ namespace CameraLink
 		if (!m_active)
 			return;
 		lines.push_back(StatusLine(m_counters));
+		if (m_settings.aheadFit)
+			lines.push_back(m_settings.deterministic ? std::string(kAheadDeterministicText)
+				: AheadStatusLine(m_counters, m_onTimeSource ? m_onTimeName : std::string(kAheadNoTargetText)));
 		for (const FallbackCatalog::Decision& d : CollectDecisions())
 			if (d.engaged)
 				lines.push_back(d.reason);
@@ -490,7 +731,20 @@ namespace CameraLink
 		if (!m_pool || m_sealedMark.empty() || m_sealedMark[seq % m_sealedMark.size()] != seq)
 			return nullptr;
 		PoolEntry e;
-		return m_pool->Get(seq, e) ? e.record : nullptr;
+		if (!m_pool->Get(seq, e))
+			return nullptr;
+		if (e.haveHonoured && m_worker)
+		{
+			// AHEAD FIT re-check at consumption: the stamp honoured at the publish must still be the frame's stamp in the Indicator of the
+			// lane it was published into (a resync after the publish rejects the record here too; counted, shown in the ahead status line).
+			const VpSkeleton::LaneLease l = e.onTime && m_onTimeSource ? m_onTimeSource() : m_worker->Lease();
+			if (l.indicator && !VpIndicator::SameFor(e.honoured, l.indicator->StampOf(seq), kP7StampMask))
+			{
+				m_counters.staleAtUse.fetch_add(1, std::memory_order_relaxed);
+				return nullptr;
+			}
+		}
+		return e.record;
 	}
 
 	std::shared_ptr<const CameraModel::CameraMotion> CameraLinkCore::CausalRecord(uint64_t seq) const

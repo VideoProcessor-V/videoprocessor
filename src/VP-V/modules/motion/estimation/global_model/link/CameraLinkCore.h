@@ -14,6 +14,7 @@
 // Threading: every method except the worker's onResult and the ICameraLink readers runs on the render thread.
 #pragma once
 
+#include "AheadFlow.h"
 #include "CameraFitWorker.h"
 #include "CameraLink.h"
 #include "FieldReadbackRing.h"
@@ -49,7 +50,18 @@ namespace CameraLink
 		uint64_t seq = 0;                 // the frame starting to render
 		double displayPeriodSeconds = 0;  // the measured OUTPUT period (ResolveRate(DisplayRefresh)); 0 = unknown
 		bool p7SealedPublished = false;   // the seal accepted a lane-published P7 for `seq`
+		// AHEAD FIT: the frame STARTING to render (its on-time seal just ran); 0 = the same as `seq` (no lag bridge in between).
+		uint64_t renderSeq = 0;
 	};
+
+	// AHEAD FIT: the decision id (Fallbacks / Config status / Ctrl+Alt+D) engaged while frames are bridged instead of sealed on time.
+	constexpr const char* kIdAheadBridged = "camera.ahead.bridged";
+	// What the on-time target is called in the status line when there is none (production until SK-W2 / the lease accessor).
+	constexpr const char* kAheadNoTargetText =
+		"none (SK-W gives the camera no lease of the skeleton lane's P7: every frame goes to the lag bridge until SK-W2)";
+	// Deterministic runs take ONE path: the lag bridge from the seed (the ahead fit's on-time / bridged split depends on wall-clock).
+	constexpr const char* kAheadDeterministicText =
+		"camera ahead fit: off in deterministic mode (the deterministic path is the seed fit through the lag bridge)";
 
 	struct CameraLinkSettings
 	{
@@ -60,7 +72,14 @@ namespace CameraLink
 		size_t readbackEntries = 0;       // 0 = lane lead + 2, at least 3 (set by the host from the graph)
 		size_t poolRing = 8;              // parallel to the P7 SlotSet ring
 		CameraModel::Config fit;
+		// AHEAD FIT (camera_ahead_fit): the fit takes its input from the ahead NVOF pair (SetAheadSource) when one exists, and publishes
+		// on time into the on-time target (AttachOnTime) when it finished before the frame's seal, else into the lag bridge. Ignored in
+		// deterministic mode (one path: the bridge; shown). Off: nothing below exists or runs.
+		bool aheadFit = false;
 	};
+
+	// AHEAD FIT: the render-thread source of the ahead pair of `seq` (IVectorEngine::FlowOf + CopyAhead, copied at once).
+	using AheadSource = std::function<AheadRefusal(uint64_t seq, AheadCopy& out)>;
 
 	// What the host provides per field copy that is ready: the pair facts (P4 rect and events, engine global, slip).
 	// Returns false when the pair cannot be described (counted as a readback drop).
@@ -91,6 +110,20 @@ namespace CameraLink
 		void DetachGraph();
 		void SetEngine(VpMotion::IVectorEngine* engine) { m_engine = engine; }
 		void SetFactsProvider(PairFactsProvider p) { m_provider = std::move(p); }
+		// ---- AHEAD FIT (render thread, before AttachLane / AttachGraph) ----
+		// The ahead pair source and its facts provider (an ahead pair is not yet estimated by the matcher: the engine's render-time
+		// facts (PairSpansSlip, EngineGlobal) do not exist for it; the host describes it from the pair and the frame-analysis store).
+		void SetAheadSource(AheadSource source, PairFactsProvider facts) { m_aheadSource = std::move(source); m_aheadFacts = std::move(facts); }
+		// The on-time target: the lane that seals P7(N) at N (the skeleton lane's AnalysisLane::Lease(kP7CameraFit)). Empty = none.
+		// `name` is what the status line calls it.
+		void AttachOnTime(VpSkeleton::LaneLeaseSource source, const std::string& name) { m_onTimeSource = std::move(source); m_onTimeName = name; }
+		// The 16-px source grid the ahead pair is converted onto (the live field's grid that sized the camera graph).
+		void SetAheadGrid(int sourceGridW, int sourceGridH) { m_aheadGridW = sourceGridW; m_aheadGridH = sourceGridH; }
+		// The matcher's forward/backward consistency limit in engine px (SeedField::consistencyPx when one is seen; default 2, the
+		// dejudder_consistency_px default, as the TD motion source).
+		void SetAheadConsistency(float enginePx) { if (enginePx > 0.0f) m_aheadConsistency = enginePx; }
+		bool AheadActive() const { return m_active && m_settings.aheadFit && !m_settings.deterministic && static_cast<bool>(m_aheadSource); }
+		uint64_t AheadNext() const { return m_aheadNext; }
 		void SetTimingFacts(const TimingFacts& f);
 		// Registers the reader (reset -> NoteReset, timing -> NoteTiming). Setup, before the first Observe.
 		int RegisterReader(VpIndicator::Indicator& indicator);
@@ -114,6 +147,8 @@ namespace CameraLink
 		size_t ProcessPending();
 		// Test hook for deterministic drivers that have no GPU: submit a ready field copy exactly as the ring path does.
 		bool SubmitField(std::shared_ptr<const FieldCopy> field, const FramePhaseFacts& f);
+		// AHEAD FIT: submit an ahead field (origin Ahead) as the ahead poll does (tests drive it directly). False: refused / queue full.
+		bool SubmitAheadField(std::shared_ptr<const FieldCopy> field, const AheadCopy* global = nullptr);
 
 		// ---- introspection ----
 		bool Active() const { return m_active; }
@@ -122,6 +157,7 @@ namespace CameraLink
 		bool HasThread() const { return m_worker && m_worker->Running(); }
 		bool Allocated() const { return m_producer != nullptr; }
 		const FitCounters& Counters() const { return m_counters; }
+		FitCounters& MutableCounters() { return m_counters; }
 		uint64_t HistoryHash() const { return m_producer ? m_producer->HistoryHash() : 0; }
 		CameraFitProducer* Producer() { return m_producer.get(); }
 		CameraFitWorker* Worker() { return m_worker.get(); }
@@ -158,6 +194,11 @@ namespace CameraLink
 		void AttachLease(const VpSkeleton::LaneLease& first, VpSkeleton::LaneLeaseSource source);
 		void OnLaneRebound();
 		void SubmitReady(const std::vector<std::shared_ptr<FieldCopy>>& ready, const FramePhaseFacts& f);
+		// AHEAD FIT (render thread).
+		void PollAhead();
+		void OnTimeSeal(uint64_t renderSeq);
+		bool Retired(uint64_t seq) const;
+		void MarkRetired(uint64_t seq);
 		void OnResult(const CameraFitJob& job, const CameraFitResult& r, PublishOutcome o);
 
 		FrameAnalysis::Store& m_store;
@@ -166,7 +207,7 @@ namespace CameraLink
 		bool m_active = false;
 		VpMotion::IVectorEngine* m_engine = nullptr;
 		PairFactsProvider m_provider;
-		FitCounters m_counters;
+		mutable FitCounters m_counters;   // mutable: the consumption re-check (SealedRecord, const) counts its refusals
 		std::unique_ptr<CameraRecordPool> m_pool;
 		std::unique_ptr<CameraFitProducer> m_producer;
 		std::unique_ptr<CameraFitWorker> m_worker;
@@ -179,7 +220,7 @@ namespace CameraLink
 		bool m_haveFrameAt = false;
 		// Fallback holds: an event engages the id for kHoldSeconds of MEASURED time, so the status never flickers per call.
 		struct Hold { double remaining = 0; bool engaged = false; };
-		enum { kEvLate, kEvReadback, kEvTiming, kEvSlip, kEvQueue, kEvCount };
+		enum { kEvLate, kEvReadback, kEvTiming, kEvSlip, kEvQueue, kEvAhead, kEvCount };   // kEvAhead: a frame was bridged (AHEAD FIT)
 		Hold m_hold[kEvCount];
 		std::atomic<uint32_t> m_events{ 0 };   // bits set by any thread, consumed by OnFrameStart
 		uint64_t m_seenQueueFull = 0;
@@ -203,5 +244,20 @@ namespace CameraLink
 		mutable std::mutex m_dumpMutex;
 		std::shared_ptr<CameraDump> m_dump;
 		uint64_t m_seenReadbackDropped = 0;
+
+		// AHEAD FIT state (render thread unless noted).
+		AheadSource m_aheadSource;
+		PairFactsProvider m_aheadFacts;
+		VpSkeleton::LaneLeaseSource m_onTimeSource;
+		std::string m_onTimeName;
+		int m_aheadGridW = 0, m_aheadGridH = 0;
+		float m_aheadConsistency = 2.0f;
+		uint64_t m_aheadNext = 0;            // the next frame the ahead pair is asked for (0 = not started)
+		uint64_t m_aheadRefusedSeq = 0;      // the last frame whose pair was refused (counted once)
+		uint64_t m_renderSeq = 0;            // the frame rendering now (the last OnFrameStart)
+		std::vector<uint64_t> m_seedPending; // frames the seed fallback is fetching while the ahead fit is on (ahead submissions wait)
+		enum { kAheadMarks = 256 };
+		std::unique_ptr<std::atomic<uint64_t>[]> m_onTimeMark{ new std::atomic<uint64_t>[kAheadMarks] };   // seq + 1 at seq % size: published on time (the worker writes)
+		std::vector<uint64_t> m_retired;     // seq + 1 at seq % size: sealed (or rejected) by the on-time seal: the bridge seal skips it
 	};
 }

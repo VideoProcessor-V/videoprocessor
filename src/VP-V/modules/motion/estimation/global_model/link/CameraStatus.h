@@ -98,6 +98,8 @@ namespace Vpv
 				for (const std::pair<std::string, std::string>& kv : KeyValues(c))
 					if (kv.second != "off" && kv.first != "camera_model")
 						out.push_back(kv.first == "camera_model_overlay" ? kv.first + "=" + kv.second : kv.first);
+				if (c.aheadFit)
+					out.push_back("camera_ahead_fit");   // the link key (not in KeyValues: kCameraLinkKeys)
 				return out;
 			}
 

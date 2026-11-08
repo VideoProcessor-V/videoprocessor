@@ -17,6 +17,7 @@
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
+#include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 
 #include <atomic>
@@ -79,6 +80,7 @@ namespace Vpv
 			bool fitWanted = false;                     // camera_link report + camera_model on (p7Wanted)
 			bool guideWanted = false;                   // ... and any camera_meas_* switch on
 			bool labelsWanted = false;                  // ... and labels are wanted (overlay, a use switch, camera_labels_gpu)
+			bool aheadWanted = false;                   // ... and camera_ahead_fit on (the fit reads the ahead NVOF pair, FlowOf)
 			bool liveBuilt = false;                     // lane built and the core attached to it
 			bool graphRefused = false;                  // the registry refused the camera graph (until the next settings change)
 			bool liveLabelsGpu = false;                 // camera_labels_gpu the live parts were built with
@@ -199,6 +201,42 @@ namespace Vpv
 					st.sceneUnknown.fetch_add(1, std::memory_order_relaxed);
 				d.uniqueFramesBetween = 1;   // an engine pair is two adjacent UNIQUE source frames
 				return true;
+			}
+
+			// AHEAD FIT: the facts of an ahead pair (render thread). The matcher has not estimated it yet, so the engine's render-time facts
+			// do not exist for it: no slip by construction (FlowOf serves a pair only under the vectors-valid state, never across a resync /
+			// gap / format change), the engine's whole-frame motion comes with the copy (CameraLinkCore sets it), the picture and the scene
+			// from the frame-analysis store when the frame is described already (else counted as camera_scene, as for every pair).
+			bool DescribeAhead(CameraHostState& st, FrameAnalysis::Store* store, const CameraLink::FieldCopy& f, CameraLink::PairDescription& d)
+			{
+				d = CameraLink::PairDescription();
+				bool have = false, cut = false, fade = false;
+				ReadScene(store, f.pairTo, have, cut, fade, &d.facts.picture);
+				d.facts.cut = cut;
+				d.facts.fade = fade;
+				if (!have)
+					st.sceneUnknown.fetch_add(1, std::memory_order_relaxed);
+				d.uniqueFramesBetween = 1;
+				return true;
+			}
+
+			// AHEAD FIT: the ahead pair of `seq` from the engine (render thread: FlowOf's contract), copied at once (the view dies at the
+			// next FlowOf) with its whole-frame motion, worked out exactly as the engine does for its own record (MotionAhead::FlowGlobal on
+			// the forward vectors and costs, one engine cell = cellEnginePx x enginePxToSource source px, usable at ambiguity < 0.9).
+			CameraLink::AheadRefusal TakeAhead(VpMotion::IVectorEngine& engine, uint64_t seq, CameraLink::AheadCopy& out)
+			{
+				VpMotion::FlowView v;
+				if (!engine.FlowOf(seq, v))
+					return CameraLink::AheadRefusal::NoPair;
+				const CameraLink::AheadRefusal r = CameraLink::CopyAhead(v, seq, out);
+				if (r != CameraLink::AheadRefusal::None)
+					return r;
+				float g[4] = {}, second[4] = {};
+				MotionAhead::FlowGlobal(out.forward, out.forwardCost, out.gridW, out.gridH, g, second);
+				out.globalValid = g[3] > 0.5f && g[2] < 0.9f;
+				out.globalX = out.CellSourcePx() * static_cast<double>(g[0]);
+				out.globalY = out.CellSourcePx() * static_cast<double>(g[1]);
+				return r;
 			}
 
 			// The timing the fit latches (film lock when the cadence is locked, else the measured source rate). Relatched only when it moved
@@ -422,6 +460,18 @@ namespace Vpv
 			st.core->SetFactsProvider([sp, engine, store](const CameraLink::FieldCopy& f, CameraLink::PairDescription& d) {
 				return DescribePair(*sp, *engine, store, f, d);
 			});
+			if (st.aheadWanted)
+			{
+				// AHEAD FIT: the ahead pair (FlowOf, render thread), converted onto the seed's 16-px source grid (the grid that sizes the camera
+				// graph), trust from the matcher's own consistency limit. No on-time target: SK-W gives the camera no lease of the skeleton
+				// lane's P7 (link/README.md "Ahead fit: gaps"), so every ahead result is bridged, visibly.
+				st.core->SetAheadSource([engine](uint64_t seq, CameraLink::AheadCopy& out) { return TakeAhead(*engine, seq, out); },
+					[sp, store](const CameraLink::FieldCopy& f, CameraLink::PairDescription& d) { return DescribeAhead(*sp, store, f, d); });
+				st.core->SetAheadGrid(sf.sourceGridW, sf.sourceGridH);
+				st.core->SetAheadConsistency(sf.consistencyPx);
+			}
+			else
+				st.core->SetAheadSource(CameraLink::AheadSource(), CameraLink::PairFactsProvider());
 			if (st.lane.HasLabels() && st.gpu)
 			{
 				// P8 with CPU labels uploaded to a texture (camera_labels_gpu on: computed on the GPU instead).
@@ -551,6 +601,7 @@ namespace Vpv
 					st.core->OnFrameStart(facts);
 					return;
 				}
+				facts.renderSeq = seq;   // AHEAD FIT: the frame starting now (its on-time seal); facts.seq is the bridge's sealed frame
 				if (sealed.any)
 				{
 					facts.seq = sealed.seq;
@@ -635,12 +686,14 @@ namespace Vpv
 			const bool fitWanted = linkWanted && cam.ModelWanted();
 			const bool guideWanted = fitWanted && cam.Measurement().Any();
 			const bool labelsWanted = fitWanted && (cam.Overlay() != OverlayMode::Off || cam.Use().Any() || cam.LabelsGpu());
+			const bool aheadWanted = fitWanted && cam.AheadFit();
 			if (st->liveBuilt && (st->fitWanted != fitWanted || st->guideWanted != guideWanted || st->labelsWanted != labelsWanted ||
-				st->gpu != gpu || st->liveLabelsGpu != cam.LabelsGpu()))
+				st->aheadWanted != aheadWanted || st->gpu != gpu || st->liveLabelsGpu != cam.LabelsGpu()))
 				ReleaseLive(*st);   // rebuilt at the next frame over the new wants
 			st->fitWanted = fitWanted;
 			st->guideWanted = guideWanted;
 			st->labelsWanted = labelsWanted;
+			st->aheadWanted = aheadWanted;
 			st->gpu = gpu;
 			st->graphRefused = false;
 			if (!fitWanted)
@@ -673,6 +726,7 @@ namespace Vpv
 				// p7Wanted only with camera_model on: then the fit exists once the engine has a field (EnsureLive), else nothing is allocated.
 				CameraLink::CameraLinkSettings settings;
 				settings.p7Wanted = fitWanted;
+				settings.aheadFit = aheadWanted;
 				st->core->OnSettings(settings);
 				if (st->adapter)
 				{

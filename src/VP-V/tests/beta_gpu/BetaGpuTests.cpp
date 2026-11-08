@@ -18,6 +18,8 @@
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelFit.h>
 #include <VP-V/modules/motion/estimation/global_model/link/GuidanceScheduler.h>
 #include <VP-V/modules/motion/estimation/global_model/link/PairAssembly.h>
+#include <VP-V/modules/motion/estimation/global_model/link/AheadFlow.h>
+#include "AheadPairReplica.h"
 
 #include <algorithm>
 #include <fstream>
@@ -4577,7 +4579,13 @@ namespace CameraAccuracy
 	struct SceneResult
 	{
 		CamScene scene;
-		VariantResult variants[3];
+		VariantResult variants[5];   // off, model_global, all_switches; + model_global_ahead, all_switches_ahead with VP_TEST_CAMERA_ACCURACY_AHEAD=1
+		// AHEAD FIT (VP_TEST_CAMERA_ACCURACY_AHEAD=1): the reproduced NVOF pair's costs per pair (index = pair) and its conversion time.
+		std::vector<CameraAccuracyAhead::PairTiming> aheadTiming;
+		std::vector<double> aheadConvertMs;
+		std::vector<int> aheadHave;   // 1 = the ahead pair existed and converted
+		int aheadQuarter = 0;         // the engine searched at a quarter (lowRes)
+		std::string aheadProblem;
 	};
 
 	const char* const kSubsetNames[3] = { "all", "background", "mover" };
@@ -4625,6 +4633,248 @@ namespace CameraAccuracy
 						p.guideGx, p.guideGy, p.truthTx, p.truthTy, p.passes, p.topPass.c_str(), p.topPassMs, p.cpuMs, p.seedBlockPx);
 					pairs << row;
 				}
+	}
+
+	// ---- AHEAD FIT (VP_TEST_CAMERA_ACCURACY_AHEAD=1) -----------------------------------------------------------------------------------
+	// The producer's NVOF pair of every pair of the scene, reproduced offline (AheadPairReplica.h), converted by the production units
+	// (CopyAhead over the FlowView FlowOf serves -> AheadToSourceGrid with the matcher's consistency limit). The engine size follows the
+	// matcher's search (half, or a quarter at a lowRes search: the producer makes only those two), read from a seed of this scene (a probe
+	// estimate when no variant ran before, e.g. in reverse order).
+	void MakeAheadPairs(Gpu& gpu, pl_gpu g, bool hardware, const CamScene& cs, const std::vector<std::vector<uint16_t>>& lumas, int srcW, int srcH,
+		int blocksX, int blocksY, bool engineGlobal, int& halvings, float& consistency, const std::function<void(int)>& upload,
+		const std::vector<pl_tex>& lumaT, const std::vector<pl_tex>& chromaT, std::vector<CameraLink::FieldCopy>& fields, SceneResult& sr)
+	{
+		const size_t pairs = static_cast<size_t>(Frames() - 1);
+		sr.aheadTiming.assign(pairs, CameraAccuracyAhead::PairTiming());
+		sr.aheadConvertMs.assign(pairs, 0.0);
+		sr.aheadHave.assign(pairs, 0);
+		if (!hardware)
+		{
+			sr.aheadProblem = "not a hardware GPU: no optical flow engine, no ahead pair";
+			return;
+		}
+		if (halvings < 0)
+		{
+			Dejudder::MotionWarp probe(gpu.Log(), g, ProductionSettings(cs.fps, engineGlobal));
+			upload(0);
+			upload(1);
+			Dejudder::Planes a, b;
+			a.luma = lumaT[0]; a.chroma = chromaT[0]; b.luma = lumaT[1]; b.chroma = chromaT[1];
+			a.chromaShiftX = b.chromaShiftX = 1;
+			a.chromaShiftY = b.chromaShiftY = 1;
+			Check(probe.Estimate(a, b), "camera accuracy (ahead): probe estimate: " + probe.LastError());
+			Dejudder::MotionWarp::SeedState sd;
+			if (probe.LastSeed(sd))
+			{
+				halvings = sd.halvings;
+				consistency = sd.consistencyPx;
+			}
+		}
+		if (halvings < 0)
+			halvings = 0;
+		if (!(consistency > 0.0f))
+			consistency = 2.0f;   // the dejudder_consistency_px default (as the camera core and the TD source)
+		const bool quarter = halvings >= 1;
+		CameraAccuracyAhead::Replica replica;
+		std::string why;
+		if (!replica.Open(g, srcW, srcH, quarter, why))
+		{
+			sr.aheadProblem = "the ahead pair could not be reproduced: " + why;
+			return;
+		}
+		sr.aheadQuarter = quarter ? 1 : 0;
+		pl_gpu_finish(g);
+		for (int f = 0; f < Frames(); ++f)
+		{
+			MotionAhead::Flow flow;
+			CameraAccuracyAhead::PairTiming t;
+			if (!replica.Push(lumas[static_cast<size_t>(f)], flow, t))
+				continue;
+			const size_t p = static_cast<size_t>(f - 1);
+			sr.aheadTiming[p] = t;
+			const auto c0 = std::chrono::steady_clock::now();
+			CameraLink::AheadCopy copy;
+			const VpMotion::FlowView view = CameraAccuracyAhead::ViewOf(flow, static_cast<uint64_t>(f - 1), static_cast<uint64_t>(f), srcW);
+			CameraLink::FieldCopy& fc = fields[p];
+			fc = CameraLink::FieldCopy();
+			if (CameraLink::CopyAhead(view, static_cast<uint64_t>(f), copy) == CameraLink::AheadRefusal::None &&
+				CameraLink::AheadToSourceGrid(copy, consistency, blocksX, blocksY, fc))
+			{
+				fc.seq = p;   // the harness numbers pairs by their first frame
+				fc.pairFrom = p;
+				fc.pairTo = p + 1;
+				sr.aheadHave[p] = 1;
+			}
+			sr.aheadConvertMs[p] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
+		}
+		pl_gpu_finish(g);
+	}
+
+	// The on-time model: frame N + 1 arrives at (N + 1) x T (T = the source period), the producer makes pair N on its own lane (FIFO), the
+	// camera worker converts and fits it on its own lane (FIFO, in order); pair N is ON TIME at lead L when its fit is done within L x T of
+	// its frame's arrival (the frame is sealed when it starts rendering, L frames later). Costs are the measured ones of this run.
+	struct AheadLatency { std::vector<double> latencyMs; };
+	inline AheadLatency AheadModel(const SceneResult& s, const VariantResult& aheadVariant)
+	{
+		AheadLatency out;
+		const double periodMs = 1000.0 / s.scene.fps;
+		double producerFree = 0.0, workerFree = 0.0;
+		for (size_t p = 0; p < s.aheadTiming.size(); ++p)
+		{
+			const double arrival = static_cast<double>(p + 1) * periodMs;
+			const double ready = (std::max)(arrival, producerFree) + s.aheadTiming[p].PairMs();
+			producerFree = ready;
+			const double fitMs = p < aheadVariant.pairs.size() ? aheadVariant.pairs[p].fitMs : 0.0;
+			const double done = (std::max)(ready, workerFree) + s.aheadConvertMs[p] + fitMs;
+			workerFree = done;
+			out.latencyMs.push_back(done - arrival);
+		}
+		return out;
+	}
+
+	inline double Quant(std::vector<double> v, double q)
+	{
+		if (v.empty()) return 0.0;
+		std::sort(v.begin(), v.end());
+		const size_t i = static_cast<size_t>(q * (v.size() - 1) + 0.5);
+		return v[(std::min)(i, v.size() - 1)];
+	}
+
+	inline double FitError(const PairLog& p) { return std::hypot(p.fitTx - p.truthTx, p.fitTy - p.truthTy); }
+	inline bool FitScored(const PairLog& p) { return p.pair >= 1 && !p.fitReason.empty() && p.fitReason.compare(0, 3, "no ") != 0; }
+
+	void WriteAheadCsv(const std::string& dir, const std::vector<SceneResult>& all)
+	{
+		std::ofstream csv(dir + "\\camera-accuracy-ahead.csv", std::ios::trunc);
+		csv << "scene,fps,period_ms,pair,engine_quarter,have_ahead,luma_ms,engine_ms,readback_ms,extras_ms,pair_ms,convert_ms,fit_ms_ahead,"
+			"latency_ms,on_time_lead1,on_time_lead2,on_time_lead3,on_time_lead4,fit_err_ahead_px,fit_err_seed_px,fit_reason_ahead,fit_reason_seed\n";
+		for (const SceneResult& s : all)
+		{
+			if (s.aheadTiming.empty() || s.variants[3].name.empty())
+				continue;
+			const VariantResult& seedV = s.variants[1];
+			const VariantResult& aheadV = s.variants[3];
+			const AheadLatency lat = AheadModel(s, aheadV);
+			const double periodMs = 1000.0 / s.scene.fps;
+			for (size_t p = 0; p < s.aheadTiming.size(); ++p)
+			{
+				const CameraAccuracyAhead::PairTiming& t = s.aheadTiming[p];
+				const PairLog* a = p < aheadV.pairs.size() ? &aheadV.pairs[p] : nullptr;
+				const PairLog* b = p < seedV.pairs.size() ? &seedV.pairs[p] : nullptr;
+				char row[1024];
+				std::snprintf(row, sizeof(row), "%s,%.3f,%.3f,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%.4f,%.4f,\"%s\",\"%s\"\n",
+					s.scene.name.c_str(), s.scene.fps, periodMs, static_cast<int>(p), s.aheadQuarter, s.aheadHave[p], t.lumaMs, t.engineMs, t.readbackMs, t.extrasMs,
+					t.PairMs(), s.aheadConvertMs[p], a ? a->fitMs : 0.0, lat.latencyMs[p], lat.latencyMs[p] <= 1 * periodMs ? 1 : 0,
+					lat.latencyMs[p] <= 2 * periodMs ? 1 : 0, lat.latencyMs[p] <= 3 * periodMs ? 1 : 0, lat.latencyMs[p] <= 4 * periodMs ? 1 : 0,
+					a ? FitError(*a) : 0.0, b ? FitError(*b) : 0.0, a ? a->fitReason.c_str() : "", b ? b->fitReason.c_str() : "");
+				csv << row;
+			}
+		}
+	}
+
+	void WriteAheadSummary(std::ofstream& md, const std::vector<SceneResult>& all)
+	{
+		bool any = false;
+		for (const SceneResult& s : all)
+			any = any || !s.variants[3].name.empty();
+		if (!any)
+			return;   // not asked for: the summary is unchanged
+		char line[1400];
+		md << "\n## Ahead fit (owner decision: the camera fits from the ahead NVOF pair)\n\n";
+		md << "**What ran.** The fit of the `*_ahead` variants reads the producer's NVOF pair of the same frames (VectorEngine's one MotionAhead producer: "
+			"SLOW preset, half-size 8-bit luma, or the quarter at a lowRes search), REPRODUCED OFFLINE (AheadPairReplica.h: the producer's Process() step for "
+			"step on the libplacebo device, synchronously; the Beta host does not link the producer), served as the FlowView FlowOf gives and converted by the "
+			"production CopyAhead -> AheadToSourceGrid (trust = OpticalFlowTrust::CellTrust, the matcher's consistency limit). Everything else is the F2 "
+			"variant: the same fitter, d = " << kGuideLag << ", BuildGuide, matcher. The seed variants (model_global, all_switches) are the F2 baseline of the same run.\n\n";
+		md << "**Timing model.** Frame N+1 arrives at (N+1) x T; the producer makes pair N on its own lane (FIFO), the camera worker converts and fits it in "
+			"order on its own lane; pair N is on time at lead L when its fit is done within L x T of the frame's arrival (its seal is L frames later). The costs "
+			"are this run's measured ones (pair = luma + engine + readback + extras; convert; fit). Not modelled: the render's GPU load on the engine (the live "
+			"pair is slower), FlowOf being polled at the render's Begin / AfterRender (up to half an output period more), and pair 0 (the engine's first pair, "
+			"initialisation) is excluded from the shares.\n\n";
+		md << "| scene | fps | T ms | engine | pair ms median / p95 | readback ms median | convert ms median | fit ms median / p95 | latency ms median / p95 | on time L=1 | L=2 | L=3 | L=4 |\n";
+		md << "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n";
+		std::vector<std::string> faults;
+		for (const SceneResult& s : all)
+		{
+			if (s.variants[3].name.empty())
+				continue;
+			if (s.aheadTiming.empty() || !s.aheadProblem.empty())
+			{
+				md << "| " << s.scene.name << " | no ahead pair: " << s.aheadProblem << " |||||||||||| \n";
+				continue;
+			}
+			const AheadLatency lat = AheadModel(s, s.variants[3]);
+			const double periodMs = 1000.0 / s.scene.fps;
+			std::vector<double> pairMs, rbMs, cvMs, fitMs, latMs;
+			int onTime[5] = {}, n = 0;
+			for (size_t p = 1; p < s.aheadTiming.size(); ++p)
+			{
+				pairMs.push_back(s.aheadTiming[p].PairMs());
+				rbMs.push_back(s.aheadTiming[p].readbackMs);
+				cvMs.push_back(s.aheadConvertMs[p]);
+				fitMs.push_back(p < s.variants[3].pairs.size() ? s.variants[3].pairs[p].fitMs : 0.0);
+				latMs.push_back(lat.latencyMs[p]);
+				++n;
+				for (int L = 1; L <= 4; ++L)
+					onTime[L] += lat.latencyMs[p] <= L * periodMs ? 1 : 0;
+				if (lat.latencyMs[p] + 1e-9 < s.aheadTiming[p].PairMs())
+					faults.push_back(s.scene.name + ": a latency below its own pair time (a model fault)");
+			}
+			std::snprintf(line, sizeof(line), "| %s | %.3f | %.2f | %s | %.2f / %.2f | %.2f | %.3f | %.3f / %.3f | %.2f / %.2f | %.0f%% | %.0f%% | %.0f%% | %.0f%% |\n",
+				s.scene.name.c_str(), s.scene.fps, periodMs, s.aheadQuarter ? "quarter" : "half", Quant(pairMs, 0.5), Quant(pairMs, 0.95), Quant(rbMs, 0.5),
+				Quant(cvMs, 0.5), Quant(fitMs, 0.5), Quant(fitMs, 0.95), Quant(latMs, 0.5), Quant(latMs, 0.95), n ? 100.0 * onTime[1] / n : 0.0,
+				n ? 100.0 * onTime[2] / n : 0.0, n ? 100.0 * onTime[3] / n : 0.0, n ? 100.0 * onTime[4] / n : 0.0);
+			md << line;
+			if (Quant(pairMs, 0.5) > 10.0 * periodMs)
+				faults.push_back(s.scene.name + ": the median pair time is above 10 source periods (implausible for the engine: a measurement fault?)");
+		}
+
+		md << "\n### Accuracy A/B: ahead fit minus F2 seed fit (negative = the ahead fit is better)\n\n";
+		md << "Equal or better is read as dEPE mean <= +0.002 px, dwarp <= +0.005 codes and dfit error <= +0.005 px (the run-to-run noise of this harness is "
+			"about that size; the verdict column applies these tolerances, the coordinator judges).\n\n";
+		md << "| scene | pair of variants | EPE mean seed / ahead | dEPE mean | dEPE p95 | d<0.25 px (eval) | dwarp | fit err mean seed / ahead px | dfit err | mover dEPE | guided seed / ahead | verdict |\n";
+		md << "|---|---|---|---|---|---|---|---|---|---|---|---|\n";
+		int worse = 0, rows = 0;
+		for (const SceneResult& s : all)
+			for (int k = 0; k < 2; ++k)
+			{
+				const VariantResult& seedV = s.variants[1 + k];
+				const VariantResult& aheadV = s.variants[3 + k];
+				if (aheadV.name.empty() || seedV.name.empty())
+					continue;
+				const SubsetStats& a = seedV.stats[0];
+				const SubsetStats& b = aheadV.stats[0];
+				double ea = 0, eb = 0;
+				int na = 0, nb = 0;
+				for (const PairLog& p : seedV.pairs) if (FitScored(p)) { ea += FitError(p); ++na; }
+				for (const PairLog& p : aheadV.pairs) if (FitScored(p)) { eb += FitError(p); ++nb; }
+				ea = na ? ea / na : 0.0;
+				eb = nb ? eb / nb : 0.0;
+				const double dEpe = b.Mean() - a.Mean(), dWarp = aheadV.warp - seedV.warp, dFit = eb - ea;
+				const double moverD = s.scene.mover ? aheadV.stats[2].Mean() - seedV.stats[2].Mean() : 0.0;
+				const bool ok = dEpe <= 0.002 && dWarp <= 0.005 && dFit <= 0.005 && (!s.scene.mover || moverD <= 0.002) && nb >= na;
+				worse += ok ? 0 : 1;
+				++rows;
+				std::snprintf(line, sizeof(line), "| %s | %s vs %s | %.3f / %.3f | %+.4f | %+.4f | %+.1f pts | %+.3f | %.4f / %.4f | %+.4f | %s | %d / %d | %s |\n",
+					s.scene.name.c_str(), aheadV.name.c_str(), seedV.name.c_str(), a.Mean(), b.Mean(), dEpe, b.Percentile(0.95) - a.Percentile(0.95),
+					100.0 * (SubsetStats::Share(b.lt025, b.eval) - SubsetStats::Share(a.lt025, a.eval)), dWarp, ea, eb, dFit,
+					s.scene.mover ? (std::to_string(moverD).substr(0, 7)).c_str() : "-", seedV.Count(&PairLog::guided, true), aheadV.Count(&PairLog::guided, true),
+					ok ? "equal or better" : "WORSE");
+				md << line;
+			}
+		std::snprintf(line, sizeof(line), "\n**A/B verdict:** %d of %d rows equal or better%s.\n", rows - worse, rows, worse ? " (see the WORSE rows)" : "");
+		md << line;
+		md << "\n### Ahead plausibility\n\n";
+		if (faults.empty())
+			md << "- No timing fault found (every latency >= its pair time; median pair time within 10 source periods).\n";
+		for (const std::string& f : faults)
+			md << "- FAULT: " << f << "\n";
+		int haveAll = 0, total = 0;
+		for (const SceneResult& s : all)
+			for (int h : s.aheadHave) { haveAll += h; ++total; }
+		std::snprintf(line, sizeof(line), "- %d of %d pairs had an ahead pair that converted onto the source grid (a missing one is fitted by nothing in the ahead variant and listed as 'no ahead pair').\n",
+			haveAll, total);
+		md << line;
 	}
 
 	void WriteSummary(const std::string& dir, const std::vector<SceneResult>& all, bool hardware, const std::string& device,
@@ -4675,6 +4925,7 @@ namespace CameraAccuracy
 		for (const SceneResult& s : all)
 			for (const VariantResult& v : s.variants)
 			{
+				if (v.name.empty()) continue;   // a variant this run did not ask for
 				const SubsetStats& st = v.stats[0];
 				std::snprintf(line, sizeof(line), "| %s | %s | %.1f%% | %.3f | %.3f | %.3f | %.1f%% / %.1f%% | %.1f%% / %.1f%% | %.2f | %.2f | %.2f | %.2f | %d/%d |\n",
 					s.scene.name.c_str(), v.name.c_str(), 100.0 * SubsetStats::Share(st.trusted, st.eval), st.Mean(), st.Percentile(0.5), st.Percentile(0.95),
@@ -4712,7 +4963,7 @@ namespace CameraAccuracy
 			for (const SceneResult& s : all)
 				if (s.scene.mover)
 					for (const VariantResult& v : s.variants)
-						for (int k = 1; k < 3; ++k)
+						for (int k = 1; k < 3 && !v.name.empty(); ++k)
 						{
 							const SubsetStats& st = v.stats[k];
 							std::snprintf(line, sizeof(line), "| %s | %s | %s | %lld | %.1f%% | %.3f | %.3f | %.3f | %.1f%% | %.1f%% |\n", s.scene.name.c_str(), v.name.c_str(),
@@ -4766,7 +5017,8 @@ namespace CameraAccuracy
 		std::vector<std::pair<int, std::pair<const SceneResult*, const VariantResult*>>> instances;
 		for (const SceneResult& s : all)
 			for (const VariantResult& v : s.variants)
-				instances.push_back(std::make_pair(v.instance, std::make_pair(&s, &v)));
+				if (!v.name.empty())
+					instances.push_back(std::make_pair(v.instance, std::make_pair(&s, &v)));
 		std::sort(instances.begin(), instances.end(), [](const std::pair<int, std::pair<const SceneResult*, const VariantResult*>>& a,
 			const std::pair<int, std::pair<const SceneResult*, const VariantResult*>>& b) { return a.first < b.first; });
 		double minSteady = 1e30, maxSteady = 0.0;
@@ -4833,6 +5085,7 @@ namespace CameraAccuracy
 		for (const SceneResult& s : all)
 			for (const VariantResult& v : s.variants)
 			{
+				if (v.name.empty()) continue;
 				const double gpu = v.MeanEligible(&PairLog::gpuMs), wall = v.MeanEligible(&PairLog::wallMs);
 				if (gpu > 0.0) worstRatio = std::max(worstRatio, wall / gpu);
 				if (gpu > wall * 1.05) md << "- TIMING FAULT: " << s.scene.name << " " << v.name << " pass timers sum to more than the wall clock.\n";
@@ -4850,6 +5103,7 @@ namespace CameraAccuracy
 			"matcher, which this harness's off variant is); the temporal seed has no CPU flow here, so that switch (in all_switches) does nothing; "
 			"PairFacts.haveEngineGlobal is not set (the fit's engine-agreement signal stays neutral; live sets it when the engine's global is used); "
 			"all_switches understates guidedCandidate and tinyMoverRoi (the CPU plan only: the GPU matcher does not apply them yet).\n";
+		WriteAheadSummary(md, all);
 	}
 }
 
@@ -4909,11 +5163,19 @@ void RunBetaCameraAccuracy()
 		Check(lumaT[f] && chromaT[f], "camera accuracy: cannot create the frame planes");
 	}
 	const int blocksX = (srcW + 15) / 16, blocksY = (srcH + 15) / 16;   // one texel per 16x16 source block (240x135 at 4K, 120x68 at 1080)
-	struct Spec { const char* name; bool on; CameraModel::MeasurementSwitches sw; };
+	struct Spec { const char* name; bool on; CameraModel::MeasurementSwitches sw; bool ahead; };
 	std::vector<Spec> specs;
-	specs.push_back(Spec{ "off", false, CameraModel::MeasurementSwitches() });
-	specs.push_back(Spec{ "model_global", true, ModelGlobalOnly() });
-	specs.push_back(Spec{ "all_switches", true, AllSwitches() });
+	specs.push_back(Spec{ "off", false, CameraModel::MeasurementSwitches(), false });
+	specs.push_back(Spec{ "model_global", true, ModelGlobalOnly(), false });
+	specs.push_back(Spec{ "all_switches", true, AllSwitches(), false });
+	// AHEAD FIT A/B (VP_TEST_CAMERA_ACCURACY_AHEAD=1): the same two camera variants with the fit fed from the AHEAD NVOF pair (the producer's
+	// pair, reproduced offline: AheadPairReplica.h) through the production CopyAhead -> AheadToSourceGrid, instead of the F2 seed.
+	const bool aheadRun = EnvText("VP_TEST_CAMERA_ACCURACY_AHEAD") == "1";
+	if (aheadRun)
+	{
+		specs.push_back(Spec{ "model_global_ahead", true, ModelGlobalOnly(), true });
+		specs.push_back(Spec{ "all_switches_ahead", true, AllSwitches(), true });
+	}
 	std::vector<std::string> skipped;
 	const std::vector<CamScene> scenes = Scenes(rateScale, skipped);
 	for (const std::string& s : skipped)
@@ -4949,6 +5211,11 @@ void RunBetaCameraAccuracy()
 		std::cout << "Beta camera accuracy: " << cs.name << " (" << cs.pxPerFrameSource << " px per frame, " << cs.fps << " fps), render " << renderSeconds << " s\n" << std::flush;
 		SceneResult sr;
 		sr.scene = cs;
+		// AHEAD FIT: the reproduced pairs of this scene, made once (they do not depend on the guidance) before the first ahead variant.
+		std::vector<CameraLink::FieldCopy> aheadFields(Frames() - 1);
+		bool aheadMade = false;
+		int seenHalvings = -1;          // the matcher's search halvings and consistency limit, from any variant's seed of this scene
+		float seenConsistency = 0.0f;
 		std::vector<std::vector<int8_t>> classes(Frames() - 1);   // the block classes of each scored pair, shared by the variants
 		for (int p = kGuideLag; p + 1 < Frames(); ++p)
 			classes[p] = ClassifyAll(cs.scene, p, lumas[p], blocksX, blocksY);
@@ -4959,6 +5226,12 @@ void RunBetaCameraAccuracy()
 			VariantResult& vr = sr.variants[vi];
 			vr.name = spec.name;
 			vr.instance = instance++;
+			if (spec.ahead && !aheadMade)
+			{
+				aheadMade = true;
+				MakeAheadPairs(gpu, g, hardware, cs, lumas, srcW, srcH, blocksX, blocksY, engineGlobal, seenHalvings, seenConsistency, uploadFrame,
+					lumaT, chromaT, aheadFields, sr);
+			}
 			Dejudder::MotionWarp warp(gpu.Log(), g, ProductionSettings(cs.fps, engineGlobal));
 			warp.SetPassTiming(true, false);   // GPU timers per pass, the GPU kept busy
 			CameraModel::Config fitConfig;
@@ -5052,9 +5325,24 @@ void RunBetaCameraAccuracy()
 				fc.pairFrom = static_cast<uint64_t>(p);
 				fc.pairTo = static_cast<uint64_t>(p + 1);
 				Dejudder::MotionWarp::SeedState seed;
-				const bool haveSeed = warp.LastSeed(seed);
+				bool haveSeed = warp.LastSeed(seed);
 				Check(!hardware || haveSeed || seed.skipped, "camera accuracy: no optical-flow seed on a hardware GPU (the fit reads only the seed)");
 				if (haveSeed)
+				{
+					seenHalvings = seed.halvings;
+					seenConsistency = seed.consistencyPx;
+				}
+				if (spec.ahead)
+				{
+					// AHEAD FIT: the fit reads the ahead pair of this pair (converted by the production units), never the seed.
+					haveSeed = sr.aheadHave.size() > static_cast<size_t>(p) && sr.aheadHave[static_cast<size_t>(p)] != 0;
+					if (haveSeed)
+					{
+						fc = aheadFields[static_cast<size_t>(p)];
+						log.seedBlockPx = 16;
+					}
+				}
+				else if (haveSeed)
 				{
 					const int per = 1 << seed.halvings;
 					Check((blocksX + per - 1) / per == seed.gridW && (blocksY + per - 1) / per == seed.gridH,
@@ -5089,7 +5377,8 @@ void RunBetaCameraAccuracy()
 				if (spec.on && !haveSeed)
 				{
 					records[p] = CameraModel::CameraMotion();
-					log.fitReason = seed.skipped ? "no seed (camera fit skipped this pair: cut)" : "no seed (camera fit needs the optical-flow seed)";
+					log.fitReason = spec.ahead ? "no ahead pair" :
+						(seed.skipped ? "no seed (camera fit skipped this pair: cut)" : "no seed (camera fit needs the optical-flow seed)");
 				}
 				else if (spec.on)
 				{
@@ -5148,6 +5437,8 @@ void RunBetaCameraAccuracy()
 	for (size_t f = 0; f < lumaT.size(); ++f) { pl_tex_destroy(g, &lumaT[f]); pl_tex_destroy(g, &chromaT[f]); }
 	Check(!results.empty(), "camera accuracy: no scene ran (VP_TEST_CAMERA_ACCURACY_SCENES matched nothing)");
 	WriteCsv(outDir, results);
+	if (aheadRun)
+		WriteAheadCsv(outDir, results);
 	WriteSummary(outDir, results, hardware, device, rateScale, engineGlobal, skipped, reverse);
 	std::cout << "Beta camera accuracy: results in " << outDir << " (camera-accuracy.csv, camera-accuracy-pairs.csv, summary.md)\n" << std::flush;
 }

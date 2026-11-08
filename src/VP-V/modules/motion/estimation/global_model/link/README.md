@@ -18,6 +18,7 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 | K2 | `CameraLabelPack.h`, `CameraLabelProducer.*`, `CameraLabelFill.*`, `CameraConsumerBinding.*` | P8 upload / compute (one unit), lane / live fill, per-consumer binding |
 | K4 | `CameraGuideProduct.h`, `GuidanceScheduler.*`, `GuidanceGate.h`, `GuidanceGovernor.h`, `GuidanceCountsRing.*`, `MotionBenchWriter.h` | `p7g_camera_guide`, refusal gate, hook, governor, counts readback, `VP_MOTION_BENCH` |
 | K4 wiring (on P5a's contract) | `GuidanceLag.h`, `GuideLaneJob.*`, `GuidanceContext.h`, `GuidanceStatus.h`, `GuidanceTimers.h`, `GuidanceAdapter.*` | measured `d`, the guide lane job, the `PairContext` provider + flow resampler, skeleton-visible status, `motion.*` and `camera.*` PassTimers rows, the adapter that registers the ONE pre-estimate hook on the engine (P5a owns the call site: `VectorEngine::Estimate`) |
+| Ahead fit (`camera_ahead_fit`) | `AheadFlow.h`, the park in `CameraFitWorker.*`, `PollAhead` / `OnTimeSeal` in `CameraLinkCore.*` | the fit from the ahead NVOF pair (FlowOf), on-time publish or the lag bridge, visible counters ("Ahead fit" below) |
 
 ## Skeleton products declared
 
@@ -193,6 +194,65 @@ size), so the seed carries steps of 1/16 source px at 1080p and 1/8 source px at
 The history of the issue:
 `FieldOf(seq)` returns the matcher's LIVE block field of the last successful estimate (HOOKS.md section 7; `MotionWarp::Field()`), and production feeds the fit from exactly that. With every guidance switch off that field is the unguided matcher output, so nothing feeds back. With `camera_meas_model_global` (or any switch that changes the estimate) ON, the matcher's field is the one the camera's own model guided, so the fit re-measures its own guide: diagnosis ac283dae2a47417e5 found a feedback drift of about 0.004 px per pair. The fix is to fit from the engine's seed field (the NVOF / pre-guidance field) instead of the guided live field; it needs a second field accessor on `IVectorEngine` and is not done. Until then, a measurement switch that changes the estimate (camera_meas_model_global, and a default-on option (a) if the owner chooses it) carries this drift.
 
+## Ahead fit (owner decision, reset 1; key `camera_ahead_fit`, default off)
+
+The camera fits from the AHEAD motion: the NVOF pair the one MotionAhead producer computed ahead of render (P2, served by
+`IVectorEngine::FlowOf`), so P7 / P8 can be ready before their frame's seal. Off (the default) nothing below exists: no source, no poll,
+no park, no extra line or decision, the pool and queue keep their sizes (`CameraAheadFitTests::OffIsInert`).
+
+| Part | Where | What |
+|---|---|---|
+| Input | `AheadFlow.h` `CopyAhead` | `FlowOf(N)` (pair N-1 -> N) is called on the RENDER thread (`CameraLinkCore::PollAhead`, at Begin and at AfterRender), because FlowOf's contract is "call and read on the render thread" and its view points into the engine's lease, valid only until the next FlowOf call. Every array the fit needs is copied in that same call (`AheadCopy` owns them), so neither a later FlowOf nor a Prune of the P2 slot can free them. The copy goes to the camera worker as a job; the worker never calls the engine and never takes renderMutex (LOCK RULE). |
+| Layout | `CopyAhead` | read from the view, never assumed: `gridW x gridH` cells of `cellEnginePx` engine px, `rawUnitsPerEnginePx` fixed-point units (S10.5 today), `enginePxToSource`, `engineW x engineH`; an inconsistent view is refused (`Layout`), a view without backward vectors or forward costs too (`Incomplete`: the engine trust cannot be computed, never guessed) |
+| Conversion | `AheadToSourceGrid` | onto the camera's 16-px source grid (the seed's `sourceGridW x sourceGridH`, the grid that sized the camera graph): each 16-px block takes the TRUST-WEIGHTED mean of the cells whose centres lie inside it (2 x 2 cells at a half-size search, one at a quarter-size lowRes 4K search), its trust = the mean cell trust. Deterministic (fixed loop order). Origin `FieldOrigin::Ahead` |
+| Trust | `OpticalFlowTrust::CellTrust` (`AheadCellTrust`) | the engine's ONE definition (MV5): the cost weight of the cell's de-judder block (`CostWeights` on the forward costs, the producer's `FlowExtras` maths, block `kEngineTrustBlockPx` = `MotionAhead::Flow::kBlockPx`) x the forward/backward consistency weight (`FbError`, FallOff from the matcher's consistency limit to twice it). The limit is the matcher's own (`SeedField::consistencyPx`, refreshed whenever a seed is seen; default 2, the dejudder_consistency_px default). Bit-equal to SK-MV's inline TD trust (`TheTrustIsTheEngineDefinitionAndIsMonotonic`); SK-MV's `SharedMotionSource::Take` should call `CellTrust` too |
+| Provenance | `FieldOrigin::Ahead`, `SubmitAheadField` | the pair is the producer's UNGUIDED NVOF output. `AheadCopy` is made only from a `FlowView` (static_asserts: not from `VerifiedField` / `SeedField`); `SubmitField` still refuses `Live` (the guided field); `SubmitAheadField` takes only `Ahead` |
+| Facts | `CameraExtension.cpp` `DescribeAhead`, `TakeAhead` | an ahead pair is not estimated by the matcher yet: no `PairSpansSlip` (FlowOf serves only pairs the vectors-valid state holds), the engine global from the pair itself (`MotionAhead::FlowGlobal`, one cell = `cellEnginePx x enginePxToSource` source px, usable at ambiguity < 0.9, as `VectorEngine::NoteEngineGlobal`), picture / cut / fade from the frame-analysis store |
+| Order | `PollAhead`, the seed loop | the fit history is in frame order: the poll asks N = the next frame and stops at the first frame without a pair. When the render reaches a frame without an ahead pair (low latency, a producer drop, a pair not computed in time) that frame takes the SEED (F2's readback, the bridge path) and later ahead pairs wait until its fit is submitted (a seed copy that never comes back is given up after 16 frames). Back-pressure (a full queue) only defers the poll |
+| On time | `CameraFitWorker` (park), `CameraLinkCore::OnTimeSeal` | an ahead job is fitted at once (submit order) and PARKED until it can publish: into the on-time target while its frame's seal has not run (the target's inputs of N are probed BEFORE the claim, because a claimed-then-abandoned slot can never be claimed again; "inputs not published" is retried at every Tick: Begin and AfterRender), else into the lag bridge once N began (its markers exist). At N's Begin the core reads the target's P7(N): Sealed -> the record goes to the store, `SealedRecord` serves it from N on, and the lag bridge's later seal of N is skipped (retired: no second verdict, no false "late") |
+| Resync | `PoolEntry::honoured`, `OnTimeSeal`, `SealedRecord` | the publish reads the Indicator stamp of N after the pins (AheadLane provenance) and keeps it with the record; the seal re-checks it (a resync after the publish: rejected, never served, `onTimeRejected`), and so does every consumer read (`SealedRecord` against the Indicator of the lane it was published into: `staleAtUse`) |
+| Visible | `AheadStatusLine`, `kIdAheadBridged` | Ctrl+I / Config status / Ctrl+Alt+D: `camera ahead fit: N on time, M bridged (A ahead fits late for the on-time seal, S from the seed: no ahead pair), L late, R rejected after the publish (resync), U refused at use; no pair / incomplete / layout; on-time target: <name or none>`. Fallbacks: `camera.ahead.bridged` while frames are bridged (held 0.5 s of measured time), and always while there is no on-time target |
+
+### Deterministic mode: ONE path, the bridge
+
+`CameraLinkSettings::deterministic` (N1 runs, `ProcessPending`): the ahead fit is OFF (`AheadActive()` false), the fit reads the seed through the
+lag bridge as before, and the status says `camera ahead fit: off in deterministic mode (the deterministic path is the seed fit through the lag
+bridge)`. Reason: whether an ahead result is on time or bridged depends on wall-clock (the producer's and the fit's timing); the bridge's
+lagged seal does not. Test: `DeterministicModeTakesTheBridgePathOnly` (the ahead source is never asked).
+
+### Ahead fit: gaps (reported, not worked around)
+
+* **G-A1 no lease of the skeleton lane.** SK-W gives an outside component no way to the skeleton lane's `AnalysisLane::Lease(kP7CameraFit)`:
+  `IExternalDemand` (the only entry the camera can query, `kExternalDemandQueryId`) has `SetExternalDemand` / `ClearExternalDemand` only, and
+  `SkeletonModule::LaneOf` is on the concrete module, render thread only. So production has NO on-time target (`AttachOnTime` is not called):
+  every ahead result is bridged, visibly (`on-time target: none ...`, `camera.ahead.bridged`). The mechanism is complete and tested against a
+  lane that seals at N (`CameraAheadFitTests`); the fix is one accessor on `IExternalDemand` (a lease source per host and product) plus one
+  `AttachOnTime([...]{ return lease; }, "skeleton lane")` line in `CameraExtension::EnsureLive`, with the demand declared as below.
+* **G-A2 late = sealed absent.** The skeleton seals P7(N) at N's Begin with no deferral (`SlotSet::Seal`; `AnalysisLane::LiveFillOf` declines
+  every live fill of a product published outside, `externalDeclined_`). With the demand declared, every frame whose ahead fit misses the seal
+  is sealed ABSENT in the skeleton and counted there ("products published outside the lane ..."); the camera then bridges it in its own table.
+  A frame cannot be "expected later" in the skeleton (SK-W2).
+* **G-A3 P7's lag-0 inputs are render-time products.** P7 declares P3(N), P4(N), P2(N) at lag 0 (`core/Products.h`); the skeleton's P2 / P3
+  slots of N are published by the ENGINE FEED from the matcher's verified field (`SkeletonModule::FeedEngine` at AfterRender of the frame that
+  estimated N's pair, sealed at N's Begin). So an ahead P7(N) can only be claimed in the window [AfterRender(N-1), Begin(N)], however early it
+  was fitted (the park retries at AfterRender for exactly that window). An ahead-fed P7 would need its inputs to be P2 (the NVOF pair) and P4.
+* **G-A4 P8 on time.** P8(N) needs P7(N) and P3(N) published plus a GPU fill before N's seal, and the seal declines a live fill of an external
+  product (G-A2), so P8 stays on the bridge (the label fill and its live fill at the bridge's seal). With an on-time target, a frame sealed on
+  time has no P7 in the bridge, so its P8 would be absent: P8 on time needs the label fill against the target's lease (a second
+  `CameraLabelFill(LaneLeaseSource)` over `kP8CameraLabels`) before the on-time target is switched on with labels wanted.
+* **What the demand would be.** `SetExternalDemand(host, owner, DeclareCameraConsumers(LiveCameraDemand(labels)), {kP7CameraFit (, kP8CameraLabels)})`
+  while the ahead fit is wanted and the target exists; not declared today (G-A1: nothing could publish into it).
+
+### Measurement (prepared, not run)
+
+`VP_TEST_CAMERA_ACCURACY_AHEAD=1` adds `model_global_ahead` and `all_switches_ahead` to the camera accuracy report (BetaGpuTests
+`RunBetaCameraAccuracy`). The producer's NVOF pair is REPRODUCED OFFLINE (`tests/beta_gpu/AheadPairReplica.h`: the producer's `Process()` step
+for step, SLOW preset, half / quarter luma by the shared half-luma unit, ping-pong hints, the same readback and extras; the Beta host does not
+link the producer), served as the FlowView FlowOf gives and converted by the production `CopyAhead -> AheadToSourceGrid`. Outputs:
+`summary.md` sections "Ahead fit" (timing vs the lead: pair / readback / convert / fit / latency, on-time share at leads 1-4 from a FIFO
+two-lane model of the measured costs) and "Accuracy A/B: ahead fit minus F2 seed fit", plus `camera-accuracy-ahead.csv`. Script:
+`D:\codex\videoprocessor\r1cam-ahead-run.ps1` (4 chunks: 24p / 59.94p x 1080 / 4K, FRAMES=120, GPU-QUIET protocol).
+
 ## Rules this code follows
 
 * **Fill rule.** P7: the lane (camera worker) publishes before the seal; a result after the seal is discarded (SlotSet `Late`,
@@ -271,7 +331,7 @@ Also pending: `FieldReadbackRing` becomes an `IReadbackDevice` again at K1-9 (th
 
 ## Tests
 
-CPU: `PairTimingTests`, `PairAssemblyTests`, `VerdictGateTests`, `CameraFitRunnerTests`, `CameraFitThreadingTests`, `CameraOffTests`,
+CPU: `CameraAheadFitTests`, `PairTimingTests`, `PairAssemblyTests`, `VerdictGateTests`, `CameraFitRunnerTests`, `CameraFitThreadingTests`, `CameraOffTests`,
 `CameraSettingsTests`, `CameraStatusTests`, `CameraDumpTests`, `CameraOverlayOffTests`, `CameraLabelUploadTests`, `CameraConsumerBindingTests`, `P8FillRuleTests`, `GuidanceSchedulingTests`, `GuideProductTests`,
 `GuidanceGovernorTests`, `MotionBenchWriterTests`. WARP (category `GpuWarp`): `FieldReadbackRingWarpTests`, `CameraLabelWarpTests`,
 `GuidanceNullIdentityWarpTests`.
@@ -285,6 +345,6 @@ Tests: `../../tests/CameraPhaseInterpTests.cpp`. The P9 producer (`CameraSmoothe
 
 ## All settings (complete list)
 
-The link has exactly one key, `camera_link` (`[vpv.skeleton]`, off / report, default off; Original (Bill): off; Config placement: none yet, planned master VP-V page > Pipeline (expert); visible state: the `camera_link` Fallbacks entry and the camera status line; not tiered). Fit options (`twoLayer`, `dynTexture`) are internal `Config` fields. K3 added the `[vpv.camera]` keys (section "K3" above; full table in `../../README.md`). The full table is in `../README.md` ("All settings") and `../../../../control/skeleton/README.md`.
+The link has one key of its own, `camera_link` (`[vpv.skeleton]`, off / report, default off; Original (Bill): off; Config placement: none yet, planned master VP-V page > Pipeline (expert); visible state: the `camera_link` Fallbacks entry and the camera status line; not tiered). Fit options (`twoLayer`, `dynTexture`) are internal `Config` fields. K3 added the `[vpv.camera]` keys (section "K3" above; full table in `../../README.md`); the ahead fit added `camera_ahead_fit` there (a link key: `kCameraLinkKeys`, not on the Camera model card yet). The full table is in `../README.md` ("All settings") and `../../../../control/skeleton/README.md`.
 
 **Downstream consumers (TEMPORAL DETAIL, docs 71 section Q5 and 72):** per-pair homography (P7/P9), the object layer (per-object motion), P8 per-block membership + confidence, and K4 guided residuals.

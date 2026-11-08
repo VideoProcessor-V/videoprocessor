@@ -187,6 +187,33 @@ namespace OpticalFlowTrust
 		return true;
 	}
 
+	// The ONE per-cell trust of an engine pair (SK-MV MV5, coordinator 2026-11-08: "costWeight x fbError", not 1 - cost / 255):
+	// the cost weight of the de-judder block the cell lies in (blockCost: blocksX x blocksY, CostWeights above) times the cell's
+	// own forward/backward consistency weight (cellError: gridW x gridH, FbError above), 1 within `tolerance` falling to 0 at
+	// twice it (the matcher's consistency limit, the engine's input pixels). Both in [0, 1]; 1 = as sure as the engine usually
+	// is. Monotonic: a higher cost or a higher inconsistency never gives a higher trust. False (out empty) when the inputs do
+	// not fit. The camera fit's ahead input (CameraLink::AheadToSourceGrid) calls it; it is the same arithmetic as the TD motion
+	// source's per-cell trust (SharedMotionSource, SK-MV), which should call it too.
+	inline bool CellTrust(const std::vector<float>& blockCost, int blocksX, int blocksY, const std::vector<float>& cellError,
+		int gridW, int gridH, int grid, int blockPx, float tolerance, std::vector<float>& out)
+	{
+		out.clear();
+		const size_t cells = static_cast<size_t>(gridW > 0 ? gridW : 0) * (gridH > 0 ? gridH : 0);
+		if (cells == 0 || blocksX <= 0 || blocksY <= 0 || blockCost.size() != static_cast<size_t>(blocksX) * blocksY ||
+			cellError.size() < cells || !(tolerance > 0.0f))
+			return false;
+		const int per = CellsPerBlock(grid, blockPx);
+		out.resize(cells);
+		for (int cy = 0; cy < gridH; ++cy)
+			for (int cx = 0; cx < gridW; ++cx)
+			{
+				const size_t i = static_cast<size_t>(cy) * gridW + cx;
+				const size_t block = static_cast<size_t>((std::min)(cy / per, blocksY - 1)) * blocksX + (std::min)(cx / per, blocksX - 1);
+				out[i] = blockCost[block] * FallOff(tolerance, 2.0f * tolerance, cellError[i]);
+			}
+		return true;
+	}
+
 	// The engine's whole-frame motion (D1 format: x, y, ambiguity, valid) is usable when
 	// it is valid and clear (the ambiguity below D1's 0.9: more than a tenth of the confident
 	// cells agree - MotionAhead::FlowGlobal's 1.05 - 1.5 x share). Otherwise the global search
