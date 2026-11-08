@@ -34,15 +34,16 @@ namespace
 	std::function<void(ConfigEditorWindow&)> g_save;
 	void require(bool condition, const char* message) { g_require(condition, message); }
 
-	QString writeFixture(QTemporaryDir& dir)
+	QString writeFixture(QTemporaryDir& dir, const char* commandSource = "compensate")
 	{
 		const QString path = dir.filePath(QStringLiteral("VideoProcessor.cfg"));
 		QFile file(path);
 		require(file.open(QIODevice::WriteOnly | QIODevice::Truncate), "Cannot write fixture");
-		const QByteArray text =
+		const QByteArray text = QByteArray(
 			"[general]\nrenderer: VP Renderer\n"
-			"[led_drive.default]\nenabled: true\ncommand_source: compensate\nled_floor: 90\nshadow_lift_ansi: 0.25\ntick_ms: 500\n"
-			"[projector.default]\nprotocol: barco_ascii\nport: COM7\nled_latency_ms: 120\nbaud: 38400\n";
+			"[led_drive.default]\nenabled: true\ncommand_source: ") + commandSource + QByteArray(
+			"\nled_floor: 90\nshadow_lift_ansi: 0.25\ntick_ms: 500\n"
+			"[projector.default]\nprotocol: barco_ascii\nport: COM7\nled_latency_ms: 120\nbaud: 38400\n");
 		require(file.write(text) == text.size(), "Cannot write fixture");
 		return path;
 	}
@@ -118,14 +119,6 @@ namespace
 			auto* latency = window.findChild<QSpinBox*>(QStringLiteral("config.projector.default.led_latency_ms"));
 			require(latency != nullptr, "no LED response time box");
 			latency->setValue(140);
-			auto* tick = window.findChild<QDoubleSpinBox*>(QStringLiteral("config.led_drive.default.tick_ms"));
-			require(tick != nullptr, "no fixed loop interval box");
-			auto* reset = window.findChild<QToolButton*>(QStringLiteral("config.led_drive.default.tick_ms.reset"));
-			// The Reset itself is enabled when a value is stored. The VP-V page may grey the whole row
-			// (its fixed-loop interval only matters with the fixed-loop pacing), which makes isEnabled()
-			// false and click() a no-op, so the button's own flag is checked and the signal emitted.
-			require(reset != nullptr && reset->isEnabledTo(reset->parentWidget()), "the stored fixed loop interval has no enabled Reset");
-			emit reset->clicked();
 			auto* lift = window.findChild<QDoubleSpinBox*>(QStringLiteral("config.led_drive.default.shadow_lift_ansi"));
 			require(lift != nullptr, "no shadow lift box");
 			lift->setValue(0.4);
@@ -135,7 +128,31 @@ namespace
 		require(saved.contains(QStringLiteral("led_floor: 120")), "an LED floor edit was not saved");
 		require(saved.contains(QStringLiteral("led_latency_ms: 140")), "a projector response time edit was not saved");
 		require(saved.contains(QStringLiteral("shadow_lift_ansi: 0.40")), "a shadow lift edit was not saved");
-		require(!saved.contains(QStringLiteral("tick_ms")), "Reset did not remove the setting from the file");
+	}
+
+	void testFixedLoopResetFollowsTheScriptGrouping()
+	{
+		Vpv::RegisterConfigProviders();
+		// Under Compensate the VP-V page greys the script-only rows: the Reset is there but disabled.
+		{
+			QTemporaryDir dir;
+			ConfigEditorWindow window(writeFixture(dir, "compensate"), 0, true);
+			auto* reset = window.findChild<QToolButton*>(QStringLiteral("config.led_drive.default.tick_ms.reset"));
+			require(reset != nullptr, "no Reset for the fixed loop interval");
+			require(!reset->isEnabled(), "the script-only fixed loop interval is not greyed under Compensate");
+		}
+		// Under VP's copy of the script the row is live: Reset is enabled for a stored value and removes it.
+		QTemporaryDir dir;
+		const QString path = writeFixture(dir, "internal_script");
+		{
+			ConfigEditorWindow window(path, 0, true);
+			auto* reset = window.findChild<QToolButton*>(QStringLiteral("config.led_drive.default.tick_ms.reset"));
+			require(reset != nullptr && reset->isEnabled(), "the stored fixed loop interval has no enabled Reset under the script source");
+			reset->click();
+			require(!reset->isEnabled(), "Reset stayed enabled after removing the setting");
+			g_save(window);
+		}
+		require(!readAll(path).contains(QStringLiteral("tick_ms")), "Reset did not remove the setting from the file");
 	}
 
 	void testSourcePickWritesTheModeToo()
@@ -212,6 +229,7 @@ int RunLedDrivePageTests(const std::function<int(const char*, const std::functio
 	failures += run("LedDrivePageTests: Dynamic Drive is a sub-page before Calibration", testDynamicDriveIsASubPageBeforeCalibration);
 	failures += run("LedDrivePageTests: controls keep names and show stored values", testControlsKeepNamesAndShowStoredValues);
 	failures += run("LedDrivePageTests: edits and resets reach the file", testEditsAndResetsReachTheFile);
+	failures += run("LedDrivePageTests: the fixed-loop Reset follows the script grouping", testFixedLoopResetFollowsTheScriptGrouping);
 	failures += run("LedDrivePageTests: a source pick writes the mode too", testSourcePickWritesTheModeToo);
 	failures += run("LedDrivePageTests: an RS-232 test survives a rebuild and is joined on close", testRs232TestSurvivesARebuildAndIsJoinedOnClose);
 	failures += run("LedDrivePageTests: state goes with the editor", testStateGoesWithTheEditor);
