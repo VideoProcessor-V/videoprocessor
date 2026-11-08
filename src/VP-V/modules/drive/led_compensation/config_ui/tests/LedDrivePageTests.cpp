@@ -106,7 +106,7 @@ namespace
 		require(source && source->currentData().toString() == QStringLiteral("compensate"), "the command source does not show compensate");
 	}
 
-	void testEditsAndResetsReachTheFile()
+	void testEditsReachTheFile()
 	{
 		Vpv::RegisterConfigProviders();
 		QTemporaryDir dir;
@@ -228,7 +228,7 @@ int RunLedDrivePageTests(const std::function<int(const char*, const std::functio
 	int failures = 0;
 	failures += run("LedDrivePageTests: Dynamic Drive is a sub-page before Calibration", testDynamicDriveIsASubPageBeforeCalibration);
 	failures += run("LedDrivePageTests: controls keep names and show stored values", testControlsKeepNamesAndShowStoredValues);
-	failures += run("LedDrivePageTests: edits and resets reach the file", testEditsAndResetsReachTheFile);
+	failures += run("LedDrivePageTests: edits reach the file", testEditsReachTheFile);
 	failures += run("LedDrivePageTests: the fixed-loop Reset follows the script grouping", testFixedLoopResetFollowsTheScriptGrouping);
 	failures += run("LedDrivePageTests: a source pick writes the mode too", testSourcePickWritesTheModeToo);
 	failures += run("LedDrivePageTests: an RS-232 test survives a rebuild and is joined on close", testRs232TestSurvivesARebuildAndIsJoinedOnClose);
