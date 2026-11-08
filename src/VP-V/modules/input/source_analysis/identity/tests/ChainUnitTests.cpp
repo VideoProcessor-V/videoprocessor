@@ -15,6 +15,7 @@
 #include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/ChainEvidence.h>
+#include <VP-V/modules/input/source_analysis/identity/chain/ChainWindowPolicy.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/DescaleVerifier.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/LineSampler.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/PolyphaseProposer.h>
@@ -1102,11 +1103,11 @@ namespace Tests
 			ChainEvidence ev;
 			for (int t = 0; t < 40; ++t)
 			{
-				FeedAt(ev, 540, t, 1 + static_cast<uint32_t>(t / 10), true);
+				FeedAt(ev, 540, t, 1 + static_cast<uint32_t>(t / 5), true);   // shots of 5 s (were 10 s): three shots still fit inside the 15.9 s window (revert window, margin 1.5)
 				VerifyResult other;
 				other.candidates.push_back(MakeCandidate(540, -1.2, 5.0));
 				EvidenceUpdate u0;
-				ev.Submit(0, Observe(other, 1920, 1 + static_cast<uint32_t>(t / 10), false), u0);
+				ev.Submit(0, Observe(other, 1920, 1 + static_cast<uint32_t>(t / 5), false), u0);
 			}
 			Assert::IsTrue(ev.Summary(1).hasBest && ev.Summary(1).aboveC1);
 			VerifyResult many;
@@ -1121,6 +1122,132 @@ namespace Tests
 			Assert::IsFalse(ev.Summary(1).hasBest, L"an overlay / menu / PiP starts the accumulation of that axis over");
 			Assert::IsTrue(ev.Summary(1).informativeEvals == 0 && ev.Summary(1).nativeEvals == 0);
 			Assert::IsTrue(ev.Summary(0).hasBest, L"the other axis is untouched");
+		}
+
+		// ---- Revert window (owner-approved): window margin 3.0 -> 1.5, the first cut after a HOLD clears, black frames and ordinary cuts do not ----
+		TEST_METHOD(TheRevertWindowIsAboutSixteenSecondsAtAOneSecondIntervalAndHoldsMoreEvaluationsThanC1Needs)
+		{
+			using namespace SourceIdentity::Chain;
+			const EvidenceSettings s;
+			const double c1 = ComputeThresholds(s).c1;
+			const double needed = c1 / s.windowYieldNats;    // evaluations the F0 yield needs to reach c1
+			Assert::AreEqual(1.5, s.windowMargin, 0.0, L"the window margin is 1.5 (it was 3.0)");
+			ChainEvidence ev;
+			for (int t = 0; t < 12; ++t)
+				FeedAt(ev, 540, t, 1, true);                // one evaluation per second
+			const double w = ev.WindowSeconds(1);
+			char line[400];
+			snprintf(line, sizeof(line), "revert window: c1 %.3f, yield %.1f nats per evaluation -> %.1f evaluations needed; W = %.1f x %.1f = %.2f s at a 1 s interval, "
+				"so %.1f evaluations fit in the window (%.2f x what c1 needs)", c1, s.windowYieldNats, needed, s.windowMargin, needed, w, w / 1.0, w / needed);
+			Logger::WriteMessage(line);
+			Assert::AreEqual(s.windowMargin * needed, w, 1e-6, L"W = margin x (c1 / yield) x interval");
+			Assert::IsTrue(w > 15.5 && w < 16.5, L"about 16 s at a 1 s interval");
+			Assert::IsTrue(w > needed, L"the window holds more evaluations than the yield needs to reach c1");
+		}
+
+		TEST_METHOD(AnAbrRungChangeWithNoEventLetsTheOldRungGoAndFollowsTheNewOneWithinTheWindowThePrintedTimes)
+		{
+			using namespace SourceIdentity::Chain;
+			// 40 s of a 540 upscale (shots of 10 s), then the truth is 720 with NO event (no discontinuity, no HOLD, no clear): only the
+			// window and the new rung's own evidence move the reading. 540 is no longer evaluated, so no contrary evidence helps: the W case.
+			ChainEvidence ev;
+			for (int t = 0; t < 40; ++t)
+				FeedAt(ev, 540, t, 1 + static_cast<uint32_t>(t / 10), true);
+			Assert::IsTrue(ev.Summary(1).hasBest && ev.Summary(1).n == 540 && ev.Summary(1).aboveC1, L"fixture: 540 is confident before the change");
+			const double window = ev.WindowSeconds(1);
+			const double interval = 1.0;
+			int letGo = -1, follow = -1;
+			for (int t = 40; t <= 90; ++t)
+			{
+				FeedAt(ev, 720, t, 5 + static_cast<uint32_t>((t - 40) / 10), true);
+				const AxisSummary s = ev.Summary(1);
+				if (letGo < 0 && !(s.hasBest && s.n == 540 && s.aboveC1))
+					letGo = t - 40;
+				if (follow < 0 && s.hasBest && s.n == 720 && s.aboveC1)
+					follow = t - 40;
+			}
+			char line[400];
+			snprintf(line, sizeof(line), "ABR rung change, no event: the old rung (540) stops being confident %d s after the change, the new rung (720) is confident %d s after it; "
+				"window %.1f s, evaluation interval %.1f s, shots of 10 s; bound W + 2 x interval = %.1f s", letGo, follow, window, interval, window + 2.0 * interval);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(letGo >= 0 && follow >= 0, L"both happen");
+			Assert::IsTrue(letGo <= follow, L"the old rung is let go no later than the new one is followed");
+			Assert::IsTrue(letGo <= window + interval, L"every old shot is outside the window W after the last old evaluation (plus one evaluation to read it)");
+			Assert::IsTrue(follow <= window + 2.0 * interval, L"the new rung reaches c1 within the window plus the evaluation and the shot granularity (two shots inside W)");
+		}
+
+		TEST_METHOD(TheFirstCutAfterAHoldClearsBothAxesButAnOrdinaryCutAndABlackEvaluationDoNot)
+		{
+			using namespace SourceIdentity::Chain;
+			using namespace ChainSynth;
+			ChainEvidence ev;
+			EvidenceUpdate u;
+			// Both axes read the same 540 upscale (1080 px axes), one evaluation per second, shots of 10 s.
+			auto both = [&ev, &u](const VerifyResult& vr, int t, uint32_t shot) {
+				for (int axis = 0; axis < 2; ++axis)
+				{
+					AxisObservation o = Observe(vr, 1080, shot, false);
+					o.timeUs = static_cast<int64_t>(t) * 1000000;
+					ev.Submit(axis, o, u);
+				}
+			};
+			VerifyResult up;
+			up.candidates.push_back(MakeCandidate(540, -1.2, 5.0));
+			for (int t = 0; t < 40; ++t)
+				both(up, t, 1 + static_cast<uint32_t>(t / 10));
+			Assert::IsTrue(ev.Summary(0).aboveC1 && ev.Summary(1).aboveC1, L"fixture: both axes are confident");
+
+			Assert::IsFalse(ev.NoteCut(), L"an ordinary cut (no HOLD happened) clears nothing");
+			Assert::IsTrue(ev.Summary(0).aboveC1 && ev.Summary(1).aboveC1, L"the window is intact after an ordinary cut");
+
+			// A black / flat evaluation: the line gate fails, nothing is informative, nothing is a HOLD.
+			VerifyResult black;
+			black.candidates.push_back(MakeCandidate(540, 0.0, 0.1));
+			both(black, 40, 4);
+			Assert::IsFalse(u.informative || u.hold, L"fixture: a black evaluation abstains and is no HOLD");
+			Assert::IsFalse(ev.NoteCut(), L"a cut after a black frame clears nothing");
+			Assert::IsTrue(ev.Summary(0).aboveC1 && ev.Summary(1).aboveC1, L"a black frame does not clear the window");
+
+			// A HOLD on the V axis only (an overlay: 10 of 32 lines contradict), at t = 41.
+			VerifyResult overlay;
+			overlay.candidates.push_back(MakeCandidate(720, -0.6, 5.0));
+			for (int j = 0; j < 10; ++j)
+				overlay.candidates[0].lineStat[static_cast<size_t>(j)] = 0.0;
+			AxisObservation oh = Observe(overlay, 1080, 4, true);
+			oh.timeUs = 41 * 1000000LL;
+			Assert::IsTrue(ev.Submit(1, oh, u) && u.hold, L"fixture: the overlay is a HOLD");
+			Assert::IsFalse(ev.Summary(1).hasBest, L"the HOLD itself forgets that axis (the end of the episode needs no further clear)");
+			Assert::IsTrue(ev.Summary(0).hasBest, L"the other axis is untouched");
+
+			// The evidence re-gathers after the episode.
+			for (int t = 42; t < 72; ++t)
+				both(up, t, 1 + static_cast<uint32_t>(t / 10));
+			Assert::IsTrue(ev.Summary(0).aboveC1 && ev.Summary(1).aboveC1, L"fixture: both axes are confident again after the episode");
+
+			// The first cut after the episode: both axes start over (the HOLD was on one axis; the other is cleared too).
+			Assert::IsTrue(ev.NoteCut(), L"the first cut after a HOLD episode clears");
+			Assert::IsFalse(ev.Summary(0).hasBest || ev.Summary(1).hasBest, L"both axes are cleared");
+			Assert::IsTrue(ev.Summary(0).informativeEvals == 0 && ev.Summary(1).informativeEvals == 0 && ev.Summary(1).nativeEvals == 0);
+			Assert::IsFalse(ev.NoteCut(), L"only the first cut after the episode clears");
+			both(up, 72, 8);
+			Assert::IsFalse(ev.Summary(1).aboveC1, L"after the clear the reading needs new evidence (UNSURE): one evaluation does not reach c1");
+		}
+
+		TEST_METHOD(AResetClearsBothAxesAndTheHoldMemory)
+		{
+			using namespace SourceIdentity::Chain;
+			using namespace ChainSynth;
+			ChainEvidence ev;
+			VerifyResult overlay;
+			overlay.candidates.push_back(MakeCandidate(720, -0.6, 5.0));
+			for (int j = 0; j < 10; ++j)
+				overlay.candidates[0].lineStat[static_cast<size_t>(j)] = 0.0;
+			EvidenceUpdate u;
+			AxisObservation oh = Observe(overlay, 1080, 1, true);
+			oh.timeUs = 1000000;
+			Assert::IsTrue(ev.Submit(1, oh, u) && u.hold);
+			ev.Reset();                                     // a resync / format change / ClearWindow: the same path
+			Assert::IsFalse(ev.NoteCut(), L"a reset also ends the HOLD memory: the next cut is an ordinary one");
 		}
 
 		TEST_METHOD(NoDipEvidenceAccumulatesAgainstTheUpscaleAndForNativeOnlyWithPower)
@@ -1622,7 +1749,7 @@ namespace Tests
 	// the lines of a confident 2x upscale, then (the switch) on the lines of a genuinely native picture. The monitor holds the native-looking
 	// frames while the record reads the upscale confidently and tells the estimator (NoteNativeHeld), so the estimator runs at its acquiring
 	// cadence; the chain evidence window follows the measured interval (N3). The bound derived from those two:
-	//   W = windowMargin x (c1 / windowYieldNats) x acquiring interval          (31.9 s with the shipped settings)
+	//   W = windowMargin x (c1 / windowYieldNats) x acquiring interval          (15.9 s with the shipped settings; 31.9 s with the former margin 3.0)
 	//   revert <= (one evaluation interval before the first native evaluation) + W + (one evaluation to read the expiry) + (one frame)
 	// i.e. W + 2 x acquiring interval + one frame interval. Nothing here is a frame count.
 	TEST_CLASS(ChainRevertBoundTests)
@@ -1662,19 +1789,55 @@ namespace Tests
 			return est.SubmitLines(snap);
 		}
 
+		static void MonitorBlackFrame(Mon& m, double seconds, uint64_t seq)
+		{
+			const int T = 128, tiles = 8;
+			const std::vector<float> data(static_cast<size_t>(T) * T * tiles, static_cast<float>(64.0 / 1023.0));   // flat at black: not informative
+			const std::vector<float> none;
+			m.AnalyseTilesForTest(data, tiles, seconds, 3840, 2160, none, none, tiles, T, 64.0 / 1023.0, seq);
+		}
+
 		struct RevertRun
 		{
 			double tAdopt = -1.0, tChainFlip = -1.0, tRevert = -1.0;
+			double tLetGo = -1.0;            // the first moment after the adoption that the consensus reads native, whatever the source is
 			int evaluations = 0, nativeEvaluations = 0;
 			double lastIntervalBeforeSwitch = 0.0;
 			unsigned long long held = 0;
 			std::vector<double> intervals;   // est.IntervalSec() after every monitor frame (the estimator's planned cadence, frame by frame)
+			// Revert window scenarios:
+			bool chainConfidentBeforeSwitch = false;   // the record read the upscale confidently on the last frame before the source became native
+			int blackEvaluations = 0;                  // evaluations that ran on the black picture
+			int chainAfterBlack = -1;                  // the record on the first evaluation after the black picture: 1 confident, 0 not, -1 never
+			unsigned long long clears = 0;             // EstimatorCounters::windowClears
+			unsigned long long discontinuities = 0;    // EstimatorCounters::discontinuities
 		};
 
 		static double SwitchSeconds() { return 60.0; }
+		static double FrameInterval() { return 0.5; }
 
-		// The loop above, in `mode` (On: the monitor holds; Shadow: it holds nothing and decides like Off, but computes the would-be).
+		// What happens when: the source is the 2x upscale until `switchAt`, then genuinely native; the monitor sees native-looking frames throughout.
+		struct Scenario
+		{
+			Mon::SourceIdMode mode = Mon::SourceIdMode::On;
+			double switchAt = 60.0;         // the source is genuinely native from here (< 0: never)
+			double endAt = 140.0;
+			double menuStart = -1.0, menuEnd = -1.0;   // a mixed (menu / overlay) episode as the monitor reads it: [menuStart, menuEnd)
+			double flickerStart = -1.0, flickerEnd = -1.0;   // a flickering menu: mixed on every second monitor frame in [flickerStart, flickerEnd)
+			double cutAt = -1.0;            // the monitor reports a cut on the first frame at or after this time
+			double blackAt = -1.0;          // one second of black (picture lines and monitor frames) from here
+			double formatChangeAt = -1.0;   // Monitor::Discontinuity("source format change") before the frame at or after this time
+		};
+
 		static RevertRun Drive(Mon::SourceIdMode mode)
+		{
+			Scenario sc;
+			sc.mode = mode;
+			return Drive(sc);
+		}
+
+		// The loop above, in `sc.mode` (On: the monitor holds; Shadow: it holds nothing and decides like Off, but computes the would-be).
+		static RevertRun Drive(const Scenario& sc)
 		{
 			using namespace ChainSynth;
 			namespace C = SourceIdentity::Chain;
@@ -1682,32 +1845,57 @@ namespace Tests
 			const Image up = ChainScene(540, 960, kFrameH, kFrameW, kBilinear, 1201u, 8, 0.0, 10.0);
 			Image nat = Scene(kFrameH, kFrameW, 10.0, 906u, 0.5 + 0.15 * 10.0);
 			Quantize(nat, 8);
+			Image blk;                                   // black: flat at the black code, no detail
+			blk.h = kFrameH;
+			blk.w = kFrameW;
+			blk.v.assign(static_cast<size_t>(kFrameH) * static_cast<size_t>(kFrameW), 64.0);
 
 			Tests::ChainFx::ManualClock clk;
 			std::unique_ptr<C::ChainEstimator> owner(new C::ChainEstimator(C::EstimatorSettings(), clk.Fn()));
 			C::ChainEstimator& est = *owner;
 			Mon m;
 			m.SetChainEstimatorForTest(std::move(owner));
-			m.SetSourceIdMode(mode);
+			m.SetSourceIdMode(sc.mode);
 			m.SetChainEnabled(true);
 			est.SetSynchronous(true);
 			Assert::IsTrue(est.Running(), L"fixture: the estimator runs");
 
 			RevertRun r;
-			const double t0 = 10.0, tSwitch = SwitchSeconds(), tEnd = 140.0, dt = 0.5;
+			const double t0 = 10.0, tEnd = sc.endAt, dt = FrameInterval();
 			uint64_t seq = 2;
+			bool formatDone = false, cutDone = false;
 			for (int i = 0; t0 + dt * i <= tEnd; ++i, ++seq)
 			{
 				const double t = t0 + dt * i;
-				const bool native = t >= tSwitch;
+				const bool native = sc.switchAt >= 0.0 && t >= sc.switchAt;
+				const bool black = sc.blackAt >= 0.0 && t >= sc.blackAt && t < sc.blackAt + 1.0;
+				bool postBlackEvaluation = false;
 				clk.Set(t * 1000.0);                     // the wall clock of the estimator follows the source clock (1x playback)
+				if (sc.formatChangeAt >= 0.0 && !formatDone && t >= sc.formatChangeAt)
+				{
+					m.Discontinuity("source format change");   // as Frame() does when the format signature changes
+					formatDone = true;
+				}
 				if (est.Wants())
 				{
-					Assert::IsTrue(SubmitEvaluation(est, native ? nat : up, seq, t, r.evaluations % 2 == 0), L"fixture: the lines were captured");
+					const Image& lines = black ? blk : (native ? nat : up);
+					Assert::IsTrue(SubmitEvaluation(est, lines, seq, t, r.evaluations % 2 == 0), L"fixture: the lines were captured");
 					++r.evaluations;
 					if (native) ++r.nativeEvaluations;
+					if (black) ++r.blackEvaluations;
+					else if (r.blackEvaluations > 0 && r.chainAfterBlack < 0) postBlackEvaluation = true;
 				}
-				MonitorFrame(m, t, seq);
+				bool mixedNow = sc.menuStart >= 0.0 && t >= sc.menuStart && t < sc.menuEnd;
+				if (sc.flickerStart >= 0.0 && t >= sc.flickerStart && t < sc.flickerEnd)
+					mixedNow = (i % 2 == 0);
+				m.SetMixedForTest(mixedNow);
+				if (sc.cutAt >= 0.0 && !cutDone && t >= sc.cutAt)
+				{
+					m.ForceCutForTest();
+					cutDone = true;
+				}
+				if (black) MonitorBlackFrame(m, t, seq);
+				else MonitorFrame(m, t, seq);
 				SourceIdentity::Geometry::Record rec;
 				bool chainConfident = false;
 				if (est.Held().ReadLatest(0, rec))
@@ -1722,11 +1910,29 @@ namespace Tests
 				r.intervals.push_back(est.IntervalSec());
 				if (!native && consensusUp && r.tAdopt < 0.0) r.tAdopt = t;
 				if (!native) r.lastIntervalBeforeSwitch = est.IntervalSec();
+				if (!native) r.chainConfidentBeforeSwitch = chainConfident;
+				if (postBlackEvaluation) r.chainAfterBlack = chainConfident ? 1 : 0;
 				if (native && !chainConfident && r.tChainFlip < 0.0) r.tChainFlip = t;
 				if (native && consensusNative && r.tRevert < 0.0) r.tRevert = t;
+				if (r.tAdopt >= 0.0 && t > r.tAdopt && consensusNative && r.tLetGo < 0.0) r.tLetGo = t;
 			}
 			r.held = m.NativeFramesHeldByChain();
+			r.clears = est.GetCounters().windowClears;
+			r.discontinuities = est.GetCounters().discontinuities;
 			return r;
+		}
+
+		// The bound of the clear triggers (menu end, the first cut after a menu, a format change): the trigger is seen by the monitor on the
+		// frame it happens; the estimator consumes the event at its next evaluation (at most one acquiring interval later; the loop evaluates
+		// BEFORE it analyses the frame, so up to one more frame interval), that evaluation re-makes the reading from fresh evidence (UNSURE), and
+		// the monitor reads it on its next analysed frame (one more frame interval). A due slot just missed costs one more interval:
+		//   clear bound = 2 x acquiring interval + 2 x frame interval        (3.0 s with the shipped settings)
+		static double ClearBoundSeconds(double& acq, double& frame)
+		{
+			namespace C = SourceIdentity::Chain;
+			acq = C::EstimatorSettings().governor.acquiringIntervalSec;
+			frame = FrameInterval();
+			return 2.0 * acq + 2.0 * frame;
 		}
 
 		static double BoundSeconds(double& window, double& acq)
@@ -1783,6 +1989,252 @@ namespace Tests
 			Assert::AreEqual(on.evaluations, shadow.evaluations);
 			Assert::AreEqual(on.tChainFlip, shadow.tChainFlip, 1e-9, L"the chain flips at the same moment");
 			Assert::AreEqual(on.tRevert, shadow.tRevert, 1e-9, L"and the would-be reverts when On's consensus does");
+		}
+		// ---- Revert window (owner-approved): the triggers that clear the evidence window, measured end to end ---------------------------------
+		// Same loop and fixtures; a genuine switch to native at the moment of the trigger. The window is cleared by the trigger, the estimator
+		// reads UNSURE on its next evaluation, the monitor stops holding the native-looking frames and the consensus lets go within the clear bound
+		// (printed): a few seconds, against the W case of the plain switch (AConfidentUpscale...). The tests print the measured times.
+		static void PrintClear(const char* what, const Scenario& sc, const RevertRun& r, double bound)
+		{
+			char line[500];
+			snprintf(line, sizeof(line), "%s: switched to native at %.1f s; adopted at %.1f s; chain reading flipped at %.1f s (+%.1f s); consensus let go at %.1f s (+%.1f s); "
+				"bound 2 x %.1f s + 2 x %.1f s = %.1f s; clears %llu, discontinuities %llu, chain confident just before: %s",
+				what, sc.switchAt, r.tAdopt, r.tChainFlip, r.tChainFlip - sc.switchAt, r.tRevert, r.tRevert - sc.switchAt,
+				SourceIdentity::Chain::EstimatorSettings().governor.acquiringIntervalSec, FrameInterval(), bound, r.clears, r.discontinuities,
+				r.chainConfidentBeforeSwitch ? "yes" : "no");
+			Logger::WriteMessage(line);
+		}
+
+		TEST_METHOD(AGenuineSwitchToNativeRightAfterAMenuEndLetsGoWithinAFewSeconds)
+		{
+			Scenario sc;
+			sc.menuStart = 45.0;
+			sc.menuEnd = 55.0;
+			sc.switchAt = 55.0;           // the menu closes onto a native picture
+			sc.endAt = 80.0;
+			const RevertRun r = Drive(sc);
+			double acq = 0.0, frame = 0.0;
+			const double bound = ClearBoundSeconds(acq, frame);
+			PrintClear("menu end", sc, r, bound);
+			Assert::IsTrue(r.tAdopt > 0.0 && r.tAdopt < sc.menuStart, L"fixture: the consensus adopted the upscale before the menu");
+			Assert::IsTrue(r.chainConfidentBeforeSwitch, L"fixture: the chain read the upscale confidently up to the end of the menu");
+			Assert::IsTrue(r.clears >= 1, L"the end of the mixed episode cleared the evidence window");
+			Assert::IsTrue(r.tChainFlip >= sc.switchAt && r.tChainFlip - sc.switchAt <= bound, L"the chain stopped reading the upscale within the clear bound");
+			Assert::IsTrue(r.tRevert >= sc.switchAt, L"the old reading was held until the source changed");
+			Assert::IsTrue(r.tRevert - sc.switchAt <= bound, L"the consensus let go within the clear bound, not after the window");
+		}
+
+		// Debounce (audit M2): a mixed episode counts only once it has lasted one acquiring interval of source time. The 10 s menu of the test
+		// above is a genuine one (it lets go within the 3.0 s bound); these two are not.
+		TEST_METHOD(AOneFrameMixedBlipMidSceneClearsNothingAndNativeLookingFramesStillAreHeld)
+		{
+			Scenario sc;
+			sc.menuStart = 60.0;
+			sc.menuEnd = 60.5;            // exactly one monitor frame reads mixed
+			sc.switchAt = -1.0;           // the source stays the upscale
+			sc.endAt = 90.0;
+			const RevertRun r = Drive(sc);
+			char line[300];
+			snprintf(line, sizeof(line), "one-frame mixed blip mid-scene: adopted at %.1f s, consensus let go at %.1f s (-1 = never), native-looking frames held %llu, clears %llu",
+				r.tAdopt, r.tLetGo, r.held, r.clears);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(r.tAdopt > 0.0 && r.tAdopt < sc.menuStart, L"fixture: the consensus adopted the upscale before the blip");
+			Assert::AreEqual<unsigned long long>(0ull, r.clears, L"a one-frame mixed blip clears nothing (and arms no cut)");
+			Assert::IsTrue(r.held > 0, L"N2 held the native-looking frames");
+			Assert::IsTrue(r.tLetGo < 0.0, L"N2 still holds: the lock is not let go");
+		}
+
+		TEST_METHOD(AFlickeringMenuClearsAtMostOnce)
+		{
+			Scenario sc;
+			sc.flickerStart = 60.0;
+			sc.flickerEnd = 66.0;         // mixed on / off on every frame for 6 s, then ordinary frames
+			sc.switchAt = -1.0;
+			sc.endAt = 90.0;
+			const RevertRun r = Drive(sc);
+			char line[300];
+			snprintf(line, sizeof(line), "flickering menu (6 s): clears %llu (at most 1 expected), consensus let go at %.1f s (-1 = never)", r.clears, r.tLetGo);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(r.tAdopt > 0.0 && r.tAdopt < sc.flickerStart, L"fixture: the consensus adopted the upscale before the flicker");
+			Assert::IsTrue(r.clears <= 1ull, L"one flickering episode is one clear, not one per frame");
+		}
+
+		TEST_METHOD(AGenuineSwitchToNativeAtTheFirstCutAfterAMenuEpisodeLetsGoWithinAFewSeconds)
+		{
+			Scenario sc;
+			sc.menuStart = 30.0;
+			sc.menuEnd = 35.0;            // the menu closes onto the same upscale; the chain re-gathers its evidence
+			sc.cutAt = 80.0;              // the first cut after the episode ...
+			sc.switchAt = 80.0;           // ... is the switch to a native picture
+			sc.endAt = 100.0;
+			const RevertRun r = Drive(sc);
+			double acq = 0.0, frame = 0.0;
+			const double bound = ClearBoundSeconds(acq, frame);
+			PrintClear("first cut after a menu episode", sc, r, bound);
+			Assert::IsTrue(r.chainConfidentBeforeSwitch, L"fixture: the chain gathered its evidence again after the menu (it was confident at the cut)");
+			Assert::IsTrue(r.clears >= 2, L"two clears: the end of the episode and the first cut after it");
+			Assert::IsTrue(r.tChainFlip >= sc.switchAt && r.tChainFlip - sc.switchAt <= bound, L"the chain stopped reading the upscale within the clear bound");
+			Assert::IsTrue(r.tRevert >= sc.switchAt && r.tRevert - sc.switchAt <= bound, L"the consensus let go within the clear bound, not after the window");
+		}
+
+		TEST_METHOD(AGenuineSwitchToNativeAtASourceFormatChangeLetsGoAtOnce)
+		{
+			Scenario sc;
+			sc.formatChangeAt = 55.0;     // Monitor::Discontinuity("source format change"): the existing reset path
+			sc.switchAt = 55.0;
+			sc.endAt = 80.0;
+			const RevertRun r = Drive(sc);
+			double acq = 0.0, frame = 0.0;
+			const double bound = ClearBoundSeconds(acq, frame);
+			PrintClear("source format change", sc, r, bound);
+			Assert::IsTrue(r.chainConfidentBeforeSwitch, L"fixture: the chain read the upscale confidently before the change");
+			Assert::IsTrue(r.discontinuities >= 1, L"the format change reached the estimator as a discontinuity (the existing path)");
+			Assert::IsTrue(r.clears == 0, L"it did not need the window clear: a reset clears everything");
+			Assert::IsTrue(r.tChainFlip >= sc.switchAt && r.tChainFlip - sc.switchAt <= FrameInterval(), L"the chain reading was reset on the frame of the change");
+			Assert::IsTrue(r.tRevert >= sc.switchAt && r.tRevert - sc.switchAt <= bound, L"the consensus let go within the clear bound");
+		}
+
+		TEST_METHOD(ABlackFrameDoesNotClearTheWindowSoTheUpscaleIsReadAgainAtOnce)
+		{
+			Scenario sc;
+			sc.blackAt = 60.0;            // one second of black in the middle of the scene
+			sc.switchAt = -1.0;           // the source stays the upscale
+			sc.endAt = 80.0;
+			const RevertRun r = Drive(sc);
+			char line[300];
+			snprintf(line, sizeof(line), "black frame: %d evaluation(s) on the black picture; the first evaluation after it read the upscale %s; clears %llu; consensus let go at %.1f s",
+				r.blackEvaluations, r.chainAfterBlack == 1 ? "confidently AT ONCE (the window survived)" : "NOT confidently", r.clears, r.tLetGo);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(r.tAdopt > 0.0 && r.tAdopt < sc.blackAt, L"fixture: the consensus adopted the upscale before the black frame");
+			Assert::IsTrue(r.blackEvaluations >= 1, L"fixture: the estimator evaluated the black picture");
+			Assert::AreEqual<unsigned long long>(0ull, r.clears, L"a black frame (a Blank event) never clears the window");
+			Assert::AreEqual(1, r.chainAfterBlack, L"the window survived: the first evaluation after the black frame reads the upscale confidently again at once");
+		}
+
+		TEST_METHOD(ASwitchToNativeAfterABlackFrameTakesTheWindowCaseNotTheClearCase)
+		{
+			Scenario sc;
+			sc.blackAt = 60.0;
+			sc.switchAt = 61.0;           // native right after the black frame
+			sc.endAt = 100.0;
+			const RevertRun r = Drive(sc);
+			double window = 0.0, acq = 0.0;
+			const double bound = BoundSeconds(window, acq);
+			char line[500];
+			snprintf(line, sizeof(line), "black frame then native: switched at %.1f s; chain flipped at %.1f s (+%.1f s); consensus let go at %.1f s (+%.1f s); the W case: "
+				"window %.1f s + 2 x %.1f s + 0.5 s = %.1f s; clears %llu",
+				sc.switchAt, r.tChainFlip, r.tChainFlip - sc.switchAt, r.tRevert, r.tRevert - sc.switchAt, window, acq, bound, r.clears);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(r.tAdopt > 0.0 && r.tAdopt < sc.blackAt, L"fixture: the consensus adopted the upscale before the black frame");
+			Assert::AreEqual<unsigned long long>(0ull, r.clears, L"the black frame cleared nothing: the old evidence leaves by expiry and by the new contrary evidence");
+			Assert::IsTrue(r.tRevert >= sc.switchAt, L"the old reading was held until the source changed");
+			Assert::IsTrue(r.tRevert - sc.switchAt <= bound, L"within the window case bound, the same as a plain switch");
+		}
+
+		TEST_METHOD(NativeLookingFramesMidSceneNeverLetGoOfAConfidentUpscaleWithoutATrigger)
+		{
+			Scenario sc;
+			sc.switchAt = -1.0;           // the source stays the upscale for the whole run; every monitor frame looks native (N2 holds them)
+			sc.endAt = 100.0;
+			const RevertRun r = Drive(sc);
+			char line[300];
+			snprintf(line, sizeof(line), "mid-scene native-looking frames, no trigger: adopted at %.1f s, consensus let go at %.1f s (-1 = never), native-looking frames held %llu, clears %llu",
+				r.tAdopt, r.tLetGo, r.held, r.clears);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(r.tAdopt > 0.0, L"fixture: the consensus adopted the upscale");
+			Assert::IsTrue(r.held > 0, L"N2 held the native-looking frames");
+			Assert::IsTrue(r.tLetGo < 0.0, L"a native-looking frame mid-scene never clears the lock while the chain reads the upscale (N2 unchanged)");
+			Assert::AreEqual<unsigned long long>(0ull, r.clears, L"nothing cleared the window");
+		}
+	};
+	// ---- Revert window: WHEN the monitor asks the estimator to clear the evidence window (WindowClearPolicy.h) ----------------------------
+	TEST_CLASS(ChainWindowPolicyTests)
+	{
+	public:
+		typedef SourceIdentity::Chain::WindowClearPolicy Policy;
+
+		// One analysed frame every 0.5 s of source time; minSec = one acquiring interval = 1.0 s.
+		static double Interval() { return SourceIdentity::Chain::EstimatorSettings().governor.acquiringIntervalSec; }
+		static Policy::Result Step(Policy& p, double t, bool mixed, bool cut) { return p.Frame(mixed, cut, t, Interval()); }
+
+		TEST_METHOD(OnlyTheEndOfACountedMixedEpisodeAndTheFirstCutAfterItClear)
+		{
+			Policy p;
+			// Ordinary frames and an ordinary cut (no episode yet): nothing. A black frame is an ordinary frame here (it is not mixed).
+			Assert::IsFalse(Step(p, 10.0, false, false).clear);
+			Assert::IsFalse(Step(p, 10.5, false, false).clear);
+			Assert::IsFalse(Step(p, 11.0, false, true).clear, L"an ordinary cut does not clear");
+			// A mixed episode of 3 s: nothing while it lasts, not even a cut inside it.
+			Assert::IsFalse(Step(p, 20.0, true, false).clear);
+			Assert::IsFalse(Step(p, 21.0, true, false).clear);
+			Assert::IsFalse(Step(p, 22.0, true, true).clear, L"a cut inside the episode is not after it");
+			Assert::IsFalse(Step(p, 23.0, true, false).clear);
+			Assert::IsTrue(p.InEpisode());
+			// The end of the episode clears (once).
+			const Policy::Result end = Step(p, 23.5, false, false);
+			Assert::IsTrue(end.clear && end.episodeEnded && !end.cutAfterEpisode, L"the end of a counted episode clears");
+			Assert::IsFalse(p.InEpisode());
+			Assert::IsFalse(Step(p, 24.0, false, false).clear, L"and only once");
+			// The first cut after the episode clears; the second does not.
+			const Policy::Result cut = Step(p, 24.5, false, true);
+			Assert::IsTrue(cut.clear && cut.cutAfterEpisode && !cut.episodeEnded, L"the first cut after the episode clears");
+			Assert::IsFalse(Step(p, 25.0, false, true).clear, L"the next cut is an ordinary one again");
+			Assert::IsFalse(p.CutArmed());
+		}
+
+		TEST_METHOD(AMixedBlipShorterThanAnAcquiringIntervalClearsNothingAndArmsNothing)
+		{
+			Policy p;
+			// One mixed frame mid-scene.
+			Assert::IsFalse(Step(p, 30.0, false, false).clear);
+			Assert::IsFalse(Step(p, 30.5, true, false).clear);
+			Assert::IsFalse(Step(p, 31.0, false, false).clear, L"the end of a one-frame blip clears nothing");
+			Assert::IsFalse(Step(p, 31.5, false, true).clear, L"and a cut after it is an ordinary cut");
+			Assert::IsFalse(p.CutArmed());
+			// Two mixed frames spanning less than the interval (0.5 s < 1.0 s).
+			Step(p, 40.0, true, false);
+			Step(p, 40.5, true, false);
+			Assert::IsFalse(Step(p, 41.0, false, false).clear, L"a sub-interval episode is a blip too");
+			Assert::IsFalse(Step(p, 41.5, false, true).clear);
+		}
+
+		TEST_METHOD(AFlickeringMenuIsOneEpisodeThatClearsAtMostOnce)
+		{
+			Policy p;
+			int clears = 0;
+			// Mixed on / off on every frame for 6 s (the mixed frames are 1.0 s apart, at most one interval: one episode).
+			for (int i = 0; i < 12; ++i)
+			{
+				const double t = 50.0 + 0.5 * i;
+				if (Step(p, t, i % 2 == 0, false).clear)
+					++clears;
+			}
+			// Then ordinary frames.
+			for (int i = 0; i < 8; ++i)
+				if (Step(p, 56.0 + 0.5 * i, false, false).clear)
+					++clears;
+			Assert::IsTrue(clears <= 1, L"a flickering menu clears at most once");
+			Assert::IsTrue(clears == 1, L"and it does clear: the episode lasted longer than the interval");
+		}
+
+		TEST_METHOD(AnEpisodeThatEndsOnACutClearsOnceWithBothCauses)
+		{
+			Policy p;
+			Step(p, 60.0, true, false);
+			Step(p, 61.0, true, false);
+			const Policy::Result r = Step(p, 61.5, false, true);
+			Assert::IsTrue(r.clear && r.episodeEnded && r.cutAfterEpisode, L"one clear, both causes named");
+			Assert::IsFalse(Step(p, 62.0, false, true).clear, L"the cut was consumed by that clear");
+		}
+
+		TEST_METHOD(ResetForgetsAnEpisode)
+		{
+			Policy p;
+			Step(p, 70.0, true, false);
+			Step(p, 71.0, true, false);
+			p.Reset();
+			Assert::IsFalse(Step(p, 71.5, false, false).clear, L"no episode end after a reset");
+			Assert::IsFalse(Step(p, 72.0, false, true).clear, L"and no cut after an episode");
 		}
 	};
 }
