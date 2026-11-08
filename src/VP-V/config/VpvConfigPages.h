@@ -13,6 +13,11 @@
 #include <QStringList>
 #include <QWidget>
 #include <VideoProcessor-Config/ConfigPageHost.h>
+#include <VP-V/config/VpvBothPathwayCards.h>
+#include <VP-V/config/VpvProfileUseRows.h>
+#include <VP-V/config/VpvQueueRows.h>
+#include <VP-V/config/VpvScalingRows.h>
+#include <VP-V/config/VpvSection.h>
 #include <vector>
 
 namespace Vpv
@@ -54,10 +59,21 @@ namespace Vpv
 			return index - bill < vpvNames_.size() ? vpvNames_.at(index - bill) : QString();
 		}
 
-		// Forgets the VP-V pages (the shell is being rebuilt).
+		// Forgets the VP-V pages (the shell is being rebuilt). The unit cards are kept: Bill's pages,
+		// which build them, are created before this call; the VP-V page takes them.
 		void reset() { vpvNames_.clear(); subPages_.clear(); }
 
-		// A page that belongs to another page (ConfigPage::parentPage): no navigation leaf, opened from
+		// Unit cards built by Bill's pages for the VP-V page (VpvScalingRows.h), taken once each.
+		std::vector<UnitCard>& unitCardStash() { return unitCards_; }
+		std::vector<UnitCard> takeUnitCards(const QString& unit)
+		{
+			std::vector<UnitCard> taken, kept;
+			for (const UnitCard& card : unitCards_) (card.unit == unit ? taken : kept).push_back(card);
+			unitCards_.swap(kept);
+			return taken;
+		}
+
+		// A page that belongs to another page (ConfigPage::parentPage): no top-level navigation leaf, opened from
 		// its parent, grouped there under `group`.
 		struct SubPageInfo
 		{
@@ -74,12 +90,14 @@ namespace Vpv
 			return found;
 		}
 
-		// The page whose navigation leaf stands for page `index`: the parent of a sub-page, else itself.
+		// The page whose navigation leaf stands for page `index`: itself. A sub-page of the VP-V master
+		// page has a child leaf under the VP-V leaf (addNavigationLeaves); a sub-page of any other page
+		// has no leaf of its own and its parent's leaf stands for it.
 		int navigationIndex(int index) const
 		{
 			const QString own = name(index);
 			for (const SubPageInfo& sub : subPages_)
-				if (sub.name == own)
+				if (sub.name == own && sub.parent != QStringLiteral("VP-V"))
 				{
 					const int parent = this->index(sub.parent);
 					return parent >= 0 ? parent : index;
@@ -97,9 +115,11 @@ namespace Vpv
 
 		// Adds the pages of registered config page providers (ConfigPageHost.h); nothing registered adds
 		// nothing. The editor calls this after its own VP-V pages (Dynamic Drive) and before the master
-		// VP-V page, so that page can link the sub-pages the providers registered. A page's leafAfter is
-		// advisory and not yet honoured: provider leaves follow Dynamic Drive, before the VP-V leaf. A sub-page (parentPage set) is
-		// named and stacked like any page but gets no navigation leaf.
+		// VP-V page, so that page can link the sub-pages the providers registered. A sub-page (parentPage
+		// set) is named and stacked like any page; a sub-page of VP-V gets a child leaf right after the VP-V
+		// leaf, in registration order, and a sub-page of any other parent gets none. A page's leafAfter is
+		// advisory and not honoured: a provider page without a parent keeps its stack order, so its leaf
+		// comes before the VP-V leaf; child leaves never use it.
 		int appendProviderPages(QStackedWidget* pages, ConfigPageHost::ConfigFormApi& api)
 		{
 			std::vector<ConfigPageHost::ConfigPage> extra;
@@ -116,7 +136,11 @@ namespace Vpv
 			return added;
 		}
 
-		// Adds the VP-V navigation leaves through the host's own leaf builder (title, page index).
+		// Adds the VP-V navigation leaves through the host's own leaf builder (title, page index). The
+		// VP-V master page gets its leaf, and each sub-page registered under it (Dynamic Drive,
+		// Calibration, ...) a child leaf right below it, in registration order, indented. Every VP-V
+		// setting is thus reachable from the VP-V group of the list (owner 2026-11-07); the unit tabs'
+		// "Open ..." buttons reach the same pages. A sub-page of another parent has no leaf.
 		template <class AddLeaf>
 		void addNavigationLeaves(AddLeaf&& addLeaf) const
 		{
@@ -126,12 +150,22 @@ namespace Vpv
 				for (const SubPageInfo& info : subPages_) sub = sub || info.name == title;
 				if (sub) continue;
 				QPushButton* button = addLeaf(title, index(title));
-				if (title == QStringLiteral("VP-V")) button->setObjectName(QStringLiteral("config.openVpv"));
+				if (title != QStringLiteral("VP-V")) continue;
+				button->setObjectName(QStringLiteral("config.openVpv"));
+				for (const SubPageInfo& info : subPages_)
+				{
+					if (info.parent != title) continue;
+					QPushButton* child = addLeaf(info.name, index(info.name));
+					child->setProperty("vpvChild", true);
+					child->setProperty("vpvParent", title);
+					child->setStyleSheet(QStringLiteral("QPushButton { padding-left: 26px; }"));
+				}
 			}
 		}
 
 	private:
 		QStringList vpvNames_;
 		std::vector<SubPageInfo> subPages_;
+		std::vector<UnitCard> unitCards_;
 	};
 }

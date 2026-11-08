@@ -126,7 +126,6 @@ private:
     QWidget* createShortcutsSetupPage();
     QWidget* createShortcutsPage();
     QWidget* createLogsPage();
-    QWidget* createLedDrivePage();
     QWidget* createProfilePage(const QString& title, const QString& description,
         const QString& sectionPrefix);
     QWidget* createCard(const QString& title, const QString& description, QWidget* content);
@@ -356,9 +355,8 @@ private:
     QTimer* activeProfileTimer_ = nullptr;
     QThread* activeProfileThread_ = nullptr;
     QThread* manualCommandThread_ = nullptr;
-    // audit 2026-10-16: the RS-232 connection test and remote Apply/OK run
-    // off the UI thread; the destructor waits for them.
-    QThread* projectorTestThread_ = nullptr;
+    // audit 2026-10-16: remote Apply/OK runs off the UI thread; the destructor
+    // waits for it.
     QThread* remoteApplyThread_ = nullptr;
     QStringList invalidShortcutFields_; // audit 2026-10-16
     QTimer* shaderCacheStatusTimer_ = nullptr;

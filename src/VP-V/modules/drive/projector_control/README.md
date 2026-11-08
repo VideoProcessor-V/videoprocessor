@@ -148,6 +148,10 @@ Forwarding headers at the legacy path (early migration, removed in M2; they only
 - `src/VideoProcessor-Lib/led/ConnectionTest.h`
 - `src/VideoProcessor-Lib/led/SerialPort.h`
 
+## Config cards (`config_ui/`)
+
+`config_ui/ProjectorCards.h/.cpp` builds the projector's cards of the Dynamic Drive page (the Config editor's former `createLedDrivePage`, M2 lane C, P7-3): "Projector connection" (protocol, COM port, LED and contrast response times, read-back, the RS-232 connection test button and its result), "Projector response" (settle times, the contrast limits) and the collapsed "Advanced projector" serial details. `led_compensation/config_ui/LedDrivePage` places them in its card grid at their old positions and reads the few controls its show/hide rules use. `DriveConfigBase.h/.cpp` holds what both builders share (the editor's field helpers through `ConfigPageHost::EditorKit`, the document write path, the clamp flag and the number boxes). The connection test runs on a helper thread that outlives page rebuilds; the provider's `OnEditorClosing` joins it (`ProjectorCards::JoinTest`). Tests: `led_compensation/config_ui/tests/LedDrivePageTests.cpp`.
+
 ## Migration directive
 
 Code moves into this folder only when this slot is touched (opportunistic until M1, a dedicated phase after M1, finished by M2). A move = `git mv` + project/include updates + this module's `live_files` + `docs/design/components-master.json` (regenerate with `python tools/check_module_manifests.py --write`) in the SAME commit, with the build, this module's tests and the chain-gate subset passing. Never leave a copy behind; one module per change; never during a release/deploy window. Update this README in the same commit as any slot change.

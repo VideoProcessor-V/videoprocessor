@@ -29,6 +29,8 @@ namespace Vpv
 		std::function<QWidget*()> createCardGridFn;
 		std::function<void(QWidget*, QWidget*)> addCardFn;
 		std::function<void(const QString&, const QString&, const QString&)> setKnownFn;
+		std::function<void(const QString&, const QString&)> removeKnownFn;
+		std::function<QString()> configPathFn;
 		std::function<void(QObject*)> markDirtyFn;
 		std::function<QWidget*()> windowFn;
 		std::function<QWidget*()> currentPageFn;
@@ -59,6 +61,9 @@ namespace Vpv
 		void addCard(QWidget* grid, QWidget* card) override { if (addCardFn) addCardFn(grid, card); }
 		void setKnown(const QString& section, const QString& key, const QString& text) override
 		{ if (setKnownFn) setKnownFn(section, key, text); }
+		void removeKnown(const QString& section, const QString& key) override
+		{ if (removeKnownFn) removeKnownFn(section, key); }
+		QString configPath() const override { return configPathFn ? configPathFn() : QString(); }
 		void markDirty(QObject* edited) override { if (markDirtyFn) markDirtyFn(edited); }
 		QWidget* window() override { return windowFn ? windowFn() : nullptr; }
 		QWidget* currentPage() const override { return currentPageFn ? currentPageFn() : nullptr; }

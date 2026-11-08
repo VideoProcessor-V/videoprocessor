@@ -28,6 +28,7 @@
 #include <QSet>
 #include <QTabWidget>
 #include <QStackedWidget>
+#include <QStandardItemModel>
 #include <QScrollBar>
 #include <QScrollArea>
 #include <QRegularExpression>
@@ -36,6 +37,7 @@
 #include <QListWidget>
 #include <QToolButton>
 #include <QSlider>
+#include <QSpinBox>
 #include <QTemporaryDir>
 #include <QWidget>
 
@@ -660,10 +662,10 @@ namespace
 		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
 		QCoreApplication::processEvents();
 		require(!RowShown(debandRow), "the duplicate row stays hidden in the Original pathway (one control per key)");
-		// Bill's own Rendering keys are never on the VP-V page (checked against billslack2 v1.4.02-beta's
-		// RendererProfileConfig.h, 2026-10-24: none of the keys VP-V hosts is Bill's).
-		// v1.4.02: Bill retired `quality` (no control) and moved debanding, dithering and dither depth to his
-		// Scaling page; they are still never on the VP-V page.
+		// Bill's own controls of these keys are never on the VP-V page. v1.4.02: Bill retired `quality` (no
+		// control) and moved debanding, dithering and dither depth to his Scaling page. Two of his keys also
+		// have a VP-V control of their own on the VP-V page under another object name (P8 step 2: `.vpv`, e.g.
+		// config.vprenderer.scaling.dithering.vpv, chroma_upscaler.vpv); this checks Bill's, by his name.
 		for (const char* key : { "scaling.deband_strength", "scaling.dithering", "scaling.display_bit_depth", "tone_mapping", "gamut_mapping",
 			"peak_detection", "contrast_recovery", "saturation", "sdr_target_nits", "sdr_black_nits" })
 		{
@@ -1339,6 +1341,284 @@ namespace
 		require(cleared.Load(path.toStdString()) && !cleared.TryGetString("vpv", "retirement_a", v), "Not decided yet removes the stored decision");
 		requireVpReads(path);
 	}
+	// P8 step 2: the VP-V rows that left Bill's pages. The both-pathway cards exist once and stay usable on the
+	// Original pathway; the reports help names the folder with a backslash; Bill's newlldv label is his again;
+	// global_actions marks the document edited and is saved.
+	void testBothPathwayCardsLeaveBillsPages()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir, "[general]\nrenderer: VP Renderer\n[vpv]\npipeline_original_pathway: on\n");
+		ConfigEditorWindow window(path, 0, true);
+		for (const char* id : { "input", "reports", "keyboard", "bill" })
+			require(window.findChildren<QWidget*>(QStringLiteral("vpv.both.card.") + QString::fromLatin1(id)).size() == 1,
+				(std::string("both-pathway card not there exactly once: ") + id).c_str());
+		for (const char* name : { "config.decklink.ycbcr_12bit_capture", "config.general.dv_tunnel_handoff",
+				"config.general.newlldv_sdr_veto", "config.logging.auto_report", "config.logging.report_thumbnail",
+				"config.logging.open_reports", "config.shortcuts.global_hotkeys", "config.shortcuts.global_actions",
+				"config.general.bounded_invalid_capture_recovery" })
+		{
+			const QList<QWidget*> found = window.findChildren<QWidget*>(QString::fromLatin1(name));
+			require(found.size() == 1, (std::string("moved control not there exactly once: ") + name).c_str());
+			require(found.front()->isEnabled(), (std::string("moved control greyed on the Original pathway: ") + name).c_str());
+		}
+		bool folder = false;
+		for (QLabel* label : window.findChildren<QLabel*>())
+		{
+			require(!label->text().contains(QLatin1Char('\r')), "a label holds a carriage return");
+			folder = folder || label->text().contains(QStringLiteral("to logs\\reports (the newest 20"));
+		}
+		require(folder, "the problem-report help does not name logs\\reports");
+		require(control<QCheckBox>(window, QStringLiteral("config.general.newlldv"))->text() == QStringLiteral("Alternate LLDV detection"),
+			"Bill's newlldv label is not his");
+		auto* apply = control<QPushButton>(window, QStringLiteral("applyConfiguration"));
+		control<QLineEdit>(window, QStringLiteral("config.shortcuts.global_actions"))->setText(QStringLiteral("config_editor"));
+		QCoreApplication::processEvents();
+		require(apply->isEnabled(), "editing global_actions did not mark the document edited");
+		save(window);
+		QFile file(path);
+		require(file.open(QIODevice::ReadOnly) && file.readAll().contains("global_actions: config_editor"), "global_actions not saved");
+	}
+
+	// D3: Bill's tests find Bill's own Chroma upscaler (his five filters); VP-V's list is its own control of the
+	// same key, and a VP-V-only choice is written and shown on Bill's control as his loader shows it.
+	void testChromaBillsControlAndVpvList()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir, "[general]\nrenderer: VP Renderer\n[vprenderer.scaling.Default]\nchroma_upscaler: lanczos\n");
+		ConfigEditorWindow window(path, 0, true);
+		window.selectPage(QStringLiteral("Scaling"));
+		QCoreApplication::processEvents();
+		require(window.findChildren<QComboBox*>(QStringLiteral("config.vprenderer.scaling.chroma_upscaler")).size() == 1,
+			"more than one control is named as Bill's Chroma upscaler");
+		auto* bills = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.chroma_upscaler"));
+		QStringList offered;
+		for (int i = 0; i < bills->count(); ++i)
+			if (!bills->itemData(i).toString().isEmpty()) offered << bills->itemData(i).toString();
+		require(offered == QStringList({ "ewa_lanczossharp", "ewa_lanczos", "lanczos", "bicubic", "bilinear" }),
+			("Bill's Chroma upscaler does not offer his five filters: " + offered.join(QStringLiteral(","))).toStdString().c_str());
+		require(bills->currentData().toString() == QStringLiteral("lanczos"), "Bill's control does not show the stored filter");
+		auto* vpv = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.chroma_upscaler.vpv"));
+		require(vpv->currentData().toString() == QStringLiteral("lanczos"), "VP-V's list does not show the stored filter");
+		const int catmull = vpv->findData(QStringLiteral("catmull_rom"));
+		require(catmull >= 0, "VP-V's list lacks Catmull-Rom");
+		vpv->setCurrentIndex(catmull);
+		emit vpv->activated(catmull);
+		QCoreApplication::processEvents();
+		require(bills->currentData().toString() == QStringLiteral("catmull_rom"), "Bill's control does not follow VP-V's choice");
+		save(window);
+		QFile file(path);
+		require(file.open(QIODevice::ReadOnly) && file.readAll().contains("chroma_upscaler: catmull_rom"), "VP-V's chroma choice not saved");
+	}
+	// D4 (WAIVER-P8-05): Bill's Dithering control is his again in VP-V mode too - his four choices; a VP-V-only
+	// value shows as his "Saved legacy method" and nothing is written - while VP-V's own control shows the value.
+	void testBillsDitheringStaysHis()
+	{
+		for (const char* mode : { "ordered_lut", "error_diffusion_stucki", "blue_noise" })
+		{
+			QTemporaryDir dir;
+			const std::string text = std::string("[general]\nrenderer: VP Renderer\n[vprenderer.scaling.Default]\ndithering: ") + mode + "\n";
+			const QString path = WriteFixture(dir, text.c_str());
+			ConfigEditorWindow window(path, 0, true);
+			window.selectPage(QStringLiteral("Scaling"));
+			QCoreApplication::processEvents();
+			auto* bills = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.dithering"));
+			QStringList offered;
+			// Offered = enabled items: his loader keeps a stored retired value as a disabled, hidden item.
+			auto* model = qobject_cast<QStandardItemModel*>(bills->model());
+			for (int i = 0; i < bills->count(); ++i)
+				if (!bills->itemData(i).toString().isEmpty() && (!model || model->item(i)->isEnabled())) offered << bills->itemData(i).toString();
+			require(offered == QStringList({ "blue_noise", "ordered_fixed", "white_noise", "off" }),
+				(std::string("Bill's Dithering does not keep his four choices: ") + S(offered.join(QStringLiteral(",")))).c_str());
+			auto* vpv = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.dithering.vpv"));
+			require(vpv->currentData().toString() == QString::fromLatin1(mode), (std::string("VP-V's Dithering does not show the stored ") + mode).c_str());
+			if (QString::fromLatin1(mode) == QStringLiteral("blue_noise"))
+				require(bills->currentData().toString() == QStringLiteral("blue_noise"), "Bill's control does not show his own value");
+			else
+				require(bills->currentIndex() < 0 && bills->placeholderText().startsWith(QStringLiteral("Saved legacy method")),
+					(std::string("Bill's control does not show a VP-V value as his legacy method: ") + mode).c_str());
+			require(control<QLabel>(window, QStringLiteral("vpv.output.dither.note"))->text().contains(QStringLiteral("legacy method")),
+				"the VP-V dither card does not explain Bill's legacy-method display");
+			QFile file(path);
+			require(file.open(QIODevice::ReadOnly) && file.readAll() == QByteArray(text.c_str()), "opening Config wrote the file");
+		}
+	}
+	// Audit P8-2: the Profile use card is on the VP-V page (On both pathways) and its picker follows Bill's
+	// Queue list both ways; Bill -> VP-V chroma sync, Reset on both controls, and VP-V's dither Auto shown on
+	// Bill's control with his own mapping (Blue noise).
+	void testProfileUseAndSyncDirections()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir, "[general]\nrenderer: VP Renderer\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 3\n"
+			"[queue.Game]\nqueue_size: 2\ntarget_frames: 1\n[vprenderer.scaling.Default]\nchroma_upscaler: lanczos\ndithering: off\n"
+			"[vprenderer.scaling.Named]\nchroma_upscaler: bicubic\n");
+		ConfigEditorWindow window(path, 0, true);
+		auto* section = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section")));
+		auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("both.card.profile_use_queue")));
+		require(section->isAncestorOf(card), "the queue Profile use card is not on the VP-V page");
+		require(section->isAncestorOf(control<QWidget>(window, QStringLiteral("config.queue.rate_rule"))), "the queue rate rule is not on the VP-V page");
+		auto* picker = control<QComboBox>(window, Vpv::ObjectName(QStringLiteral("both.queue.profile")));
+		auto* queues = control<QListWidget>(window, QStringLiteral("config.queue.profiles"));
+		require(picker->count() == queues->count() && picker->count() == 2, "the picker does not list Bill's queue profiles");
+		queues->setCurrentRow(1);
+		QCoreApplication::processEvents();
+		require(picker->currentIndex() == 1, "the picker does not follow Bill's queue list");
+		emit picker->activated(0);
+		QCoreApplication::processEvents();
+		require(queues->currentRow() == 0, "the picker does not select the profile on Bill's list");
+
+		window.selectPage(QStringLiteral("Scaling"));
+		QCoreApplication::processEvents();
+		auto* bills = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.chroma_upscaler"));
+		auto* vpv = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.chroma_upscaler.vpv"));
+		const int bicubic = bills->findData(QStringLiteral("bicubic"));
+		bills->setCurrentIndex(bicubic);
+		emit bills->activated(bicubic);
+		QCoreApplication::processEvents();
+		require(vpv->currentData().toString() == QStringLiteral("bicubic"), "VP-V's chroma list does not follow Bill's choice");
+		vpv->setCurrentIndex(vpv->findData(QStringLiteral("catmull_rom")));
+		QCoreApplication::processEvents();
+		require(bills->currentData().toString() == QStringLiteral("catmull_rom"), "Bill's control does not follow a set on VP-V's list");
+		auto* vpvReset = control<QPushButton>(window, QStringLiteral("config.vprenderer.scaling.chroma_upscaler.vpv.reset_override"));
+		require(vpvReset->isEnabled(), "VP-V's chroma Reset is not enabled after an edit");
+		vpvReset->click();
+		QCoreApplication::processEvents();
+		require(!vpv->currentData().toString().isEmpty(), "VP-V's chroma Reset left no value");
+		require(bills->currentData().toString().compare(vpv->currentData().toString(), Qt::CaseInsensitive) == 0,
+			"Bill's control does not follow VP-V's Reset");
+		int added = 0;
+		for (int i = 0; i < bills->count(); ++i)
+			if (bills->itemData(i, Qt::UserRole + 41).toBool()) ++added;
+		require(added == 0 || bills->itemData(bills->currentIndex(), Qt::UserRole + 41).toBool(), "a stale VP-V item stays in Bill's list");
+
+		auto* billsDither = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.dithering"));
+		auto* vpvDither = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.dithering.vpv"));
+		const int automatic = vpvDither->findData(QStringLiteral("AUTO"));
+		require(automatic >= 0, "VP-V's dither list lacks Auto");
+		vpvDither->setCurrentIndex(automatic);
+		emit vpvDither->activated(automatic);
+		QCoreApplication::processEvents();
+		require(billsDither->currentData().toString() == QStringLiteral("blue_noise") && billsDither->placeholderText().isEmpty(),
+			"Bill's control does not show VP-V's Auto with his mapping (Blue noise)");
+		auto* billsReset = control<QPushButton>(window, QStringLiteral("config.vprenderer.scaling.dithering.reset_override"));
+		require(billsReset->isEnabled(), "Bill's Dithering Reset is not enabled for a set value");
+		billsReset->click();
+		QCoreApplication::processEvents();
+		require(billsDither->currentIndex() >= 0, "Bill's Dithering Reset left no value");
+		require(vpvDither->findData(billsDither->currentData().toString(), Qt::UserRole, Qt::MatchFixedString) == vpvDither->currentIndex(),
+			"VP-V's dither control does not follow Bill's Reset");
+	}
+	// Row c (RESTORED-CFG-04, WAIVER-C-1): VP-V's queue rows sit on the VP-V card "Queue target and low latency",
+	// bound to the queue profile selected on Bill's list; Bill's Queue form is his a591ad3b form again. VP-V's
+	// look-ahead (.vpv) shows an absent key, a stored -1 or "auto" as Auto while Bill's 0..8 control shows 0 the
+	// way his loader does, and opening writes nothing. (A stored -1 / "auto" is outside Bill's queue schema, 0..8,
+	// so Apply refuses such a file before and after row c; Auto is saved as an absent key.) Opening and saving
+	// untouched keeps every stored value (Bill's displayed 0 is never written back); the two controls follow each
+	// other both ways; an explicit 0 shows the notice.
+	void testQueueRowsOnTheVpvCard()
+	{
+		const auto readFile = [](const QString& path) { QFile file(path); return file.open(QIODevice::ReadOnly) ? file.readAll().replace("\r\n", "\n") : QByteArray(); };
+		const auto selectQueue = [](QListWidget* queues, const QString& name)
+		{
+			for (int row = 0; row < queues->count(); ++row)
+				if (queues->item(row)->data(Qt::UserRole).toString().compare(name, Qt::CaseInsensitive) == 0)
+				{
+					queues->setCurrentRow(row);
+					QCoreApplication::processEvents();
+					return true;
+				}
+			return false;
+		};
+		{
+			QTemporaryDir dir;
+			const char* text = "[general]\nrenderer: VP Renderer\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 4\n"
+				"[queue.Minus]\nqueue_size: 16\nactive_picture_lookahead_frames: -1\n"
+				"[queue.Word]\nqueue_size: 16\nactive_picture_lookahead_frames: auto\n"
+				"[queue.Three]\nqueue_size: 16\nactive_picture_lookahead_frames: 3\n";
+			const QString path = WriteFixture(dir, text);
+			ConfigEditorWindow window(path, 0, true);
+			auto* section = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section")));
+			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("both.card.queue_target")));
+			require(section->isAncestorOf(card), "the queue target card is not on the VP-V page");
+			for (const char* name : { "config.queue.low_latency_path", "config.queue.target_latency_ms", "config.queue.target_latency_note",
+					"config.queue.target_mode", "config.queue.target_lookahead_note", "config.queue.active_picture_lookahead_frames.vpv",
+					"config.queue.active_picture_lookahead_notice" })
+			{
+				require(window.findChildren<QWidget*>(QString::fromLatin1(name)).size() == 1, (std::string("not there exactly once: ") + name).c_str());
+				require(card->isAncestorOf(control<QWidget>(window, QString::fromLatin1(name))), (std::string("not on the VP-V queue card: ") + name).c_str());
+			}
+			auto* bills = control<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames"));
+			auto* vpv = control<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames.vpv"));
+			require(!card->isAncestorOf(bills) && !card->isAncestorOf(control<QSpinBox>(window, QStringLiteral("config.queue.target_frames"))),
+				"Bill's look-ahead or Target frames left his Queue page");
+			require(bills->minimum() == 0 && bills->maximum() == 8 && bills->specialValueText().isEmpty(),
+				"Bill's look-ahead is not his plain 0..8 control");
+			require(vpv->minimum() == -1 && vpv->maximum() == 8 && vpv->specialValueText() == QStringLiteral("Auto"), "VP-V's look-ahead has no Auto");
+			auto* queues = control<QListWidget>(window, QStringLiteral("config.queue.profiles"));
+			auto* picker = control<QComboBox>(window, QStringLiteral("vpv.both.queue_target.profile"));
+			auto* notice = control<QLabel>(window, QStringLiteral("config.queue.active_picture_lookahead_notice"));
+			for (const char* name : { "queue.normal", "queue.minus", "queue.word" })
+			{
+				require(selectQueue(queues, QString::fromLatin1(name)), (std::string("profile missing: ") + name).c_str());
+				require(picker->currentIndex() == queues->currentRow(), (std::string("the card's picker does not follow Bill's list: ") + name).c_str());
+				require(vpv->value() == -1 && vpv->text() == QStringLiteral("Auto"), (std::string("VP-V's look-ahead does not show Auto: ") + name).c_str());
+				require(bills->value() == 0, (std::string("Bill's control does not show Auto as his 0: ") + name).c_str());
+				require(!notice->isVisibleTo(card), "the explicit-0 notice shows for Auto");
+			}
+			require(selectQueue(queues, QStringLiteral("queue.three")) && vpv->value() == 3 && bills->value() == 3,
+				"an explicit value is not shown on both controls");
+			require(readFile(path) == QByteArray(text), "opening Config wrote the file");
+		}
+		QTemporaryDir dir;
+		const char* text = "[general]\nrenderer: VP Renderer\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 4\n"
+			"[queue.Zero]\nqueue_size: 16\nactive_picture_lookahead_frames: 0\n"
+			"[queue.Three]\nqueue_size: 16\nactive_picture_lookahead_frames: 3\n";
+		const QString path = WriteFixture(dir, text);
+		{
+			ConfigEditorWindow window(path, 0, true);
+			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("both.card.queue_target")));
+			auto* queues = control<QListWidget>(window, QStringLiteral("config.queue.profiles"));
+			auto* vpv = control<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames.vpv"));
+			auto* notice = control<QLabel>(window, QStringLiteral("config.queue.active_picture_lookahead_notice"));
+			require(selectQueue(queues, QStringLiteral("queue.zero")) && vpv->value() == 0 && notice->isVisibleTo(card),
+				"an explicit 0 does not show 0 and the notice on VP-V's control");
+			require(selectQueue(queues, QStringLiteral("queue.normal")) && vpv->value() == -1 && !notice->isVisibleTo(card),
+				"Auto after an explicit 0 keeps the notice");
+			save(window);
+			const QByteArray saved = readFile(path);
+			for (const char* part : { "[queue.Normal]\nqueue_size: 32\ntarget_frames: 4\n", "[queue.Zero]\nqueue_size: 16\nactive_picture_lookahead_frames: 0\n",
+					"[queue.Three]\nqueue_size: 16\nactive_picture_lookahead_frames: 3\n" })
+				require(saved.contains(part), (std::string("saving untouched changed a queue profile: ") + part + " in " + saved.toStdString()).c_str());
+			require(saved.count("active_picture_lookahead_frames") == 2, "saving untouched wrote Bill's displayed 0 for the Auto profile");
+		}
+		{
+			ConfigEditorWindow window(path, 0, true);
+			auto* bills = control<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames"));
+			auto* vpv = control<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames.vpv"));
+			require(selectQueue(control<QListWidget>(window, QStringLiteral("config.queue.profiles")), QStringLiteral("queue.three")), "Three missing");
+			bills->setValue(5);
+			QCoreApplication::processEvents();
+			require(vpv->value() == 5, "VP-V's look-ahead does not follow Bill's control");
+			vpv->setValue(2);
+			QCoreApplication::processEvents();
+			require(bills->value() == 2, "Bill's control does not follow VP-V's look-ahead");
+			vpv->setValue(-1);
+			QCoreApplication::processEvents();
+			require(bills->value() == 0 && vpv->value() == -1, "VP-V's Auto does not show as 0 on Bill's control");
+			// A buffering preset keeps VP-V's look-ahead Auto (the key removed) and switches the delay off.
+			vpv->setValue(4);
+			QCoreApplication::processEvents();
+			auto* policy = control<QComboBox>(window, QStringLiteral("config.queue.policy_preset"));
+			policy->setCurrentIndex(policy->findData(QStringLiteral("reliable")));
+			QCoreApplication::processEvents();
+			require(vpv->value() == -1 && bills->value() == 0 && control<QSpinBox>(window, QStringLiteral("config.queue.target_latency_ms"))->value() == 0,
+				"a preset left an explicit look-ahead or a delay on the VP-V card");
+			save(window);
+			const QByteArray saved = readFile(path);
+			require(saved.contains("[queue.Three]\n") && saved.contains("target_latency_ms: 0") && saved.count("active_picture_lookahead_frames") == 1 &&
+				saved.contains("[queue.Zero]\nqueue_size: 16\nactive_picture_lookahead_frames: 0\n"),
+				(std::string("VP-V's Auto did not remove the key, or another profile's value changed: ") + saved.toStdString()).c_str());
+		}
+	}
 }
 
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -1365,5 +1645,10 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: a drag from Custom onto the planned step writes nothing", testPlannedDragFromCustomWritesNothing);
 	failures += run("VP-V: retirement Approve and Keep are recorded without hiding", testRetirementDecisions);
 	failures += run("VP-V: Camera model group writes the keys VP reads", testCameraModelControlsReachVp);
+	failures += run("VP-V: both-pathway cards leave Bill's pages", testBothPathwayCardsLeaveBillsPages);
+	failures += run("VP-V: Bill's Chroma upscaler and VP-V's list", testChromaBillsControlAndVpvList);
+	failures += run("VP-V: Bill's Dithering stays his, VP-V's list shows the value", testBillsDitheringStaysHis);
+	failures += run("VP-V: Profile use card and the sync directions", testProfileUseAndSyncDirections);
+	failures += run("VP-V: queue rows on the VP-V card, look-ahead Auto kept", testQueueRowsOnTheVpvCard);
 	return failures;
 }

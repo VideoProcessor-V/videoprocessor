@@ -176,7 +176,7 @@ Config placement: master VP-V page, Output sub-page (`temporal_dither` is the Ou
 | Key | Section | Type | Range | Default | Config placement | What Original (Bill) does | Visible fallbacks / status lines | Tier differences |
 |---|---|---|---|---|---|---|---|---|
 | `temporal_dither` | profile (`[vprenderer.<profile>]`) | choice | auto, off, libplacebo, sigma_delta | auto (the shader list decides) | VP-V > Output (Advanced; tier key) | forced `libplacebo` | `Dither: libplacebo (sigma-delta dropped: <reason>)` under Fallbacks engaged | Classic = libplacebo, Low = auto, Mid = sigma_delta |
-| `dithering` | profile | choice | auto, on, off, blue_noise, ordered_lut, ordered_fixed, white_noise, error_diffusion_* | auto | Rendering > Profile details | Bill's own key (libplacebo dither) | none | none |
+| `dithering` | profile | choice | auto, on, off, blue_noise, ordered_lut, ordered_fixed, white_noise, error_diffusion_* | auto | VP-V > Output > Dithering (VP-V list) (`config.vprenderer.scaling.dithering.vpv`, the full list; edits the Scaling profile selected on VP Renderer > Scaling) | Bill's own key (libplacebo dither); Original = Bill's Dithering on VP Renderer > Scaling, his four choices (a VP-V-only value shows there as his "Saved legacy method") | none | none |
 | `dither_vectors` | profile | choice | auto, own | auto (the de-judder's vectors) | Rendering > Profile details (proposed retirement) | not forced | none | none |
 | `dither_grain_tolerance_scale` | profile | number | 1..8 (1 = off) | 3 | VP-V > Advanced | not read (no sigma-delta) | none | none |
 | `output_segments_merged` | global | choice | on, off | off | VP-V > Pipeline (expert) | forced off | none | none |

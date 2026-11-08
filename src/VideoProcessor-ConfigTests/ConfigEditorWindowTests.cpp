@@ -11,6 +11,8 @@ int RunHookLayerConfigTests(const std::function<int(const char*, const std::func
     const std::function<void(bool, const char*)>& require, const std::function<void(ConfigEditorWindow&)>& save);   // VPV-HOOK
 int RunCalibrationPageTests(const std::function<int(const char*, const std::function<void()>&)>& run,
     const std::function<void(bool, const char*)>& require, const std::function<void(ConfigEditorWindow&)>& save);   // VPV-HOOK
+int RunLedDrivePageTests(const std::function<int(const char*, const std::function<void()>&)>& run,
+    const std::function<void(bool, const char*)>& require, const std::function<void(ConfigEditorWindow&)>& save);   // VPV-HOOK
 int WriteConfigIdentity(const QString& outPath, const QStringList& extraFiles);   // VPV-HOOK identity kit (ConfigIdentityDump.cpp)
 #include <VP-V/config/VpvConfigProviders.h>   // VPV-HOOK
 #include "../VideoProcessor-Config/ToneChartPanel.h"
@@ -2844,6 +2846,7 @@ void testQueueFrameRateRuleIsAPlainControl()
     require(select(QStringLiteral("queue.hdr")), "Hdr missing");
     require(!rateRule->isChecked() && !rateRule->isEnabled(),
         "A custom formula is not left alone by the frame-rate switch");
+    window.selectPage(QStringLiteral("VP-V")); QCoreApplication::processEvents();   // WAIVER-P8-04: the note is on VP-V's Profile use card
     require(requireControl<QLabel>(window, QStringLiteral("config.queue.rate_rule_note"))->isVisibleTo(&window),
         "A custom formula does not explain why the switch is off");
 
@@ -2944,7 +2947,7 @@ void testActivePictureLookaheadIsAutomaticWhenAbsent()
             }
         return false;
     };
-    auto* spin = requireControl<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames"));
+    auto* spin = requireControl<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames.vpv"));   // WAIVER-C-1: VP-V's Auto control
     auto* apply = requireControl<QPushButton>(window, QStringLiteral("applyConfiguration"));
     require(spin->toolTip().contains("(Key: active_picture_lookahead_frames.)") &&
         spin->toolTip().contains("min(target frames - 1, queue size - 1, 8)") && spin->toolTip().contains("low-latency profile uses 0"),
@@ -5450,8 +5453,11 @@ void testRendererProfileSectionsCollapseAndPersist()
         peakDetection->itemData(3).toString() == QStringLiteral("off"),
         "Peak-detection choices are not ordered High quality, On, Off after Auto");
     // Updated to Bill v1.4.02 UI (a591ad3b): dithering and its depth moved to Scaling / Quality.
-    QComboBox* dithering = requireControl<QComboBox>(window,
-        QStringLiteral("config.vprenderer.scaling.dithering"));
+    QComboBox* dithering = requireControl<QComboBox>(window,   // WAIVER-P8-06: VP-V's labels on VP-V's own control
+        QStringLiteral("config.vprenderer.scaling.dithering.vpv"));
+    QComboBox* billsDithering = requireControl<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.dithering"));
+    QStringList billsChoices; for (int i = 0; i < billsDithering->count(); ++i) if (!billsDithering->itemData(i).toString().isEmpty()) billsChoices << billsDithering->itemData(i).toString();
+    require(billsChoices == QStringList({ "blue_noise", "ordered_fixed", "white_noise", "off" }), "Bill's Dithering does not offer exactly his four choices");
     require(window.findChild<QComboBox*>(QStringLiteral("config.vprenderer.dithering")) == nullptr &&
         dithering->itemText(dithering->findData(QStringLiteral("AUTO"))) ==
         QStringLiteral("Auto") &&
@@ -10683,9 +10689,10 @@ void testPagesAreAddressedByName()
     }
     require(window.pageIndex(QStringLiteral("No such page")) == -1, "An unknown page name resolved");
     // Navigation buttons carry the name: they open the same page whatever the order.
-    // (Calibration is a sub-page of the VP-V page: no leaf of its own; CalibrationPageTests covers it.)
+    // (Dynamic Drive and Calibration are children of the VP-V group in the list; LedDrivePageTests and
+    // CalibrationPageTests also check that the child and the unit button reach the same page.)
     for (const QString& name : { QStringLiteral("Display"), QStringLiteral("Updates"), QStringLiteral("Dynamic Drive"),
-            QStringLiteral("VP-V") })
+            QStringLiteral("Calibration"), QStringLiteral("VP-V") })
     {
         QPushButton* found = nullptr;
         for (auto* button : window.findChildren<QPushButton*>())
@@ -10723,7 +10730,7 @@ void testDitheringKeepsBothChoiceSets()
     const QByteArray scaling = "[general]\nrenderer: VP Renderer\n[vprenderer.scaling.Default]\ndithering: %1\n";
     QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
 
-    // VP-V mode: every VP-V value is shown as stored and nothing is written or flagged.
+    // VP-V mode, on VP-V's own Dithering control (WAIVER-P8-05): every VP-V value is shown as stored and nothing is written or flagged.
     for (const QString& mode : QStringList{ "AUTO", "ordered_lut", "error_diffusion_stucki", "off" })
     {
         QByteArray fixture = scaling; fixture.replace("%1", mode.toUtf8());
@@ -10731,7 +10738,7 @@ void testDitheringKeepsBothChoiceSets()
         ConfigEditorWindow window(path, 0, true);
         const bool pendingAtOpen = hasPendingConfigurationChanges(window);
         window.selectPage(QStringLiteral("Scaling")); QCoreApplication::processEvents();
-        auto* dithering = requireControl<QComboBox>(window, "config.vprenderer.scaling.dithering");
+        auto* dithering = requireControl<QComboBox>(window, "config.vprenderer.scaling.dithering.vpv");
         require(choices(dithering) == vpv, "VP-V mode does not offer VP-V's full dithering list");
         require(dithering->currentData().toString() == mode,
             QStringLiteral("VP-V mode shows another dithering value for %1").arg(mode).toStdString().c_str());
@@ -10760,15 +10767,14 @@ void testDitheringKeepsBothChoiceSets()
         writeFixture(path, fixture);
         ConfigEditorWindow window(path, 0, true);
         window.selectPage(QStringLiteral("Scaling")); QCoreApplication::processEvents();
-        auto* dithering = requireControl<QComboBox>(window, "config.vprenderer.scaling.dithering");
+        auto* dithering = requireControl<QComboBox>(window, "config.vprenderer.scaling.dithering"), *vpvDithering = requireControl<QComboBox>(window, "config.vprenderer.scaling.dithering.vpv");   // WAIVER-P8-05
         auto* pathway = requireControl<QComboBox>(window, "vpv.pathway");
         pathway->setCurrentIndex(pathway->findData(QStringLiteral("on"))); QCoreApplication::processEvents();
-        require(choices(dithering) == original, (QStringLiteral("Switching to the Original pathway did not give Bill's list: ") +
-            choices(dithering).join(",") + QStringLiteral(" / ") +
-            QString::number(window.findChildren<QComboBox*>("config.vprenderer.scaling.dithering").size())).toStdString().c_str());
+        require(choices(dithering) == original && !vpvDithering->isEnabled(), (QStringLiteral("The Original pathway does not leave Bill's list "
+            "and grey VP-V's: ") + choices(dithering).join(",")).toStdString().c_str());
         pathway->setCurrentIndex(pathway->findData(QStringLiteral("off"))); QCoreApplication::processEvents();
-        require(choices(dithering) == vpv && dithering->currentData().toString() == "error_diffusion_stucki",
-            "Switching back to VP-V did not restore VP-V's list and value");
+        require(choices(vpvDithering) == vpv && vpvDithering->currentData().toString() == "error_diffusion_stucki" && vpvDithering->isEnabled(),
+            "Switching back to VP-V did not keep VP-V's list and value");
     }
 }
 
@@ -12723,6 +12729,7 @@ int main(int argc, char** argv)
     failures += run("hunt 3: legacy queue fold targets [queue]", testHunt3LegacyQueueFoldTargetsQueueSection);
     failures += run("hunt 3: remote discard folds like a load", testHunt3RemoteDiscardFoldsLikeALoad);
     failures += RunVpvConfigTests(run, require, save);   // VP-V section (VpvConfigTests.cpp)
+    failures += RunLedDrivePageTests(run, require, save);   // VPV-HOOK Dynamic Drive page provider
     failures += RunCalibrationPageTests(run, require, save);   // VPV-HOOK Calibration page provider
     failures += RunHookLayerConfigTests(run, require, save);   // VPV-HOOK generic hook layer (HookLayerConfigTests.cpp)
     if ((!testNameFilter.isEmpty() || !testNameMatches.isEmpty()) && selectedTestsRun == 0)

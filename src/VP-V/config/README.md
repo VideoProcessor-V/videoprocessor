@@ -52,6 +52,8 @@ The hook has four parts.
    ```
 3. With the other navigation leaves, add one:
    `addLeaf(QStringLiteral("VP-V"), vpvPage)->setObjectName(QStringLiteral("config.openVpv"));`
+   The VP-V leaf closes Bill's list (after Updates), and its sub-pages (Dynamic Drive, Calibration)
+   get child leaves right below it (`VpvConfigPages::addNavigationLeaves`).
 4. Add the source files to the projects:
    - `..\VP-V\config\VpvSection.cpp` in `VideoProcessor-Config.vcxproj`;
    - `..\VP-V\config\VpvSection.cpp` and `..\VP-V\config\tests\VpvConfigTests.cpp` in
@@ -146,12 +148,34 @@ Owner decisions of 2026-10-25, built on the pages above:
 
 Bill's editor file only gets call sites; the logic is here (header-only):
 
-- `VpvDitherChoices.h`: the Dithering choice sets. On the Original pathway the Scaling page's
-  control is Bill's (blue_noise, ordered_fixed, white_noise, off); in VP-V mode it is VP-V's
-  full list (Auto, ordered_lut, the error_diffusion_* modes). The editor switches the set when
-  the pathway changes and never rewrites a stored value.
+- `VpvBothPathwayCards.h` (P8 step 2): the VP-V rows that used to sit on Bill's pages and act on both
+  pathways (12-bit YCbCr capture, the DV hand-off and SDR veto, problem reports, global shortcuts, and
+  Bill's `bounded_invalid_capture_recovery`, which his editor has no control for). Built through the
+  EditorKit (same object names, keys, defaults); `Host::bothPathwayCards` places them below the unit tabs,
+  outside the part the Original pathway greys. Bill's General, DV, Logs and Shortcuts pages are his again.
+- `VpvScalingRows.h` (P8 step 2): VP-V's rows of the Scaling profile page (VP-V's chroma list
+  `chroma_upscaler.vpv`, `chroma_upscale_vp`, `downscale_light`; VP-V's Dithering list `dithering.vpv` with
+  its Auto status), built by Bill's `addChoice` (same keys, inheritance, Reset, save) into forms of their own
+  that the VP-V page shows as unit cards (`Host::unitCards`). Bill's Chroma upscaler and Dithering controls
+  stay his (his lists, his text); each pair follows the other's user edits. One `VPV-HOOK` call in his
+  Scaling section; the loader skips his retired-dither mapping only for `vpvOwnChoices` controls.
+- `VpvProfileUseRows.h` (P8 step 2): the frame-rate rule and the queue's "Use this queue" choice, on a
+  VP-V "Profile use" card (On both pathways) whose picker follows Bill's Queue / Rendering profile list.
+  They write Bill's own rule editor and "Use rule" check; his placeholder is his again.
+- `VpvQueueRows.h` (row c, RESTORED-CFG-04): VP-V's rows of the Queue profile page (VP's low-latency
+  path, Target delay and its note, Queue target By frames / By time, the look-ahead note) and VP-V's
+  look-ahead with Auto (`config.queue.active_picture_lookahead_frames.vpv`, explicit-0 notice) on the VP-V
+  card "Queue target and low latency" (On both pathways), built by Bill's addChoice / addInteger and bound to
+  the queue profile selected on his list. Bill's Queue form is his a591ad3b form (one `VPV-HOOK` call); his
+  0..8 look-ahead and VP-V's follow each other (DIV-D-10). Also the loader / preset hooks of these rows.
+- `VpvDitherChoices.h`: the Dithering choice sets: Bill's four (blue_noise, ordered_fixed,
+  white_noise, off) on his Scaling-page control, always; VP-V's full list (Auto, ordered_lut, the
+  error_diffusion_* modes) on VP-V's own control (`VpvScalingRows.h`, P8 step 2). Neither rewrites a
+  stored value.
 - `VpvRenderingDefaults.h`: what an unset VP-V key shows on a Rendering profile (moved out of
   Bill's file) and `IsVpvChoiceKey`, the VP-V choice keys that keep their "Inherited / not set"
   item and whose explicit `auto` is a live value (Bill's concrete-only rules are for his keys).
 - Page lookups are by name (`ConfigEditorWindow::pageIndex`, `selectPage(QString)`): Bill's pages
   keep his order and numbers (0-22); Dynamic Drive, Calibration and VP-V follow them (23-25).
+  In the navigation list the VP-V leaf closes Bill's list and has child leaves (Dynamic Drive,
+  Calibration; properties `vpvChild`/`vpvParent`).

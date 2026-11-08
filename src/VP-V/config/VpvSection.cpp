@@ -1274,7 +1274,6 @@ namespace Vpv
 					{ "scaling", "VP Renderer > Scaling (scaler filters and sharpness)", "VP Renderer", "Scaling" },
 					{ "colour", "VP Renderer > Rendering (tone mapping)", "VP Renderer", "Rendering" },
 					{ "colour", "VP Renderer > Color / Output", "VP Renderer", "Color / Output" },
-					{ "drive", "Dynamic Drive page", "Dynamic Drive", nullptr },
 					{ "output", "VP Renderer > Rendering (bit depth, libplacebo dither)", "VP Renderer", "Rendering" },
 				};
 				QStringList links;
@@ -1300,6 +1299,15 @@ namespace Vpv
 				});
 				layout->addWidget(more);
 			}
+			// Cards whose rows the editor built on another page (VpvScalingRows.h).
+			if (state->host.unitCards)
+				for (const UnitCard& extra : state->host.unitCards(unitId))
+				{
+					if (!extra.body) continue;
+					CardBox card = MakeCard(ObjectName(unitId + QStringLiteral(".card.") + extra.id), extra.title, extra.help, false);
+					card.Add(extra.body);
+					layout->addWidget(card.frame);
+				}
 			// Pages of their own that the Config page host registered under this unit (e.g. Calibration
 			// under Output): one button each opens the page.
 			if (state->host.subPages && state->host.openPage)
@@ -2633,6 +2641,32 @@ namespace Vpv
 		originalNote->setVisible(false);
 		layout->addWidget(originalNote);
 		layout->addWidget(content);
+		// VP-V settings that act on both pathways (they used to sit on Bill's pages, P8 step 2): below
+		// the unit tabs and outside `content`, so the Original pathway does not grey them.
+		if (host.bothPathwayCards)
+		{
+			auto* both = new QWidget;
+			both->setObjectName(ObjectName(QStringLiteral("both")));
+			auto* bothLayout = new QVBoxLayout(both);
+			bothLayout->setContentsMargins(0, 12, 0, 0);
+			bothLayout->setSpacing(8);
+			auto* bothTitle = Help(QStringLiteral("<b>On both pathways</b> - these VP-V settings are not switched off by the Original pathway."));
+			bothTitle->setTextFormat(Qt::RichText);
+			bothTitle->setObjectName(ObjectName(QStringLiteral("both.title")));
+			bothLayout->addWidget(bothTitle);
+			for (QWidget* card : host.bothPathwayCards())
+				if (card) bothLayout->addWidget(card);
+			// Cards Bill's pages built for this block (VpvProfileUseRows.h).
+			if (host.unitCards)
+				for (const UnitCard& extra : host.unitCards(QStringLiteral("both")))
+				{
+					if (!extra.body) continue;
+					CardBox card = MakeCard(ObjectName(QStringLiteral("both.card.") + extra.id), extra.title, extra.help, false);
+					card.Add(extra.body);
+					bothLayout->addWidget(card.frame);
+				}
+			layout->addWidget(both);
+		}
 
 		// The renderer profile. It follows the Rendering page's profile list, whose selected profile
 		// the moved upstream rows edit (one current renderer profile on both pages).

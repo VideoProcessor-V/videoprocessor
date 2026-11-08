@@ -55,6 +55,8 @@ namespace ConfigPageHost
 		virtual QCheckBox* bindCheckField(const QString& label, const QString& section, const QString& key, bool defaultValue)
 		{ (void)label; (void)section; (void)key; (void)defaultValue; return nullptr; }
 		virtual QString controlName(const QString& section, const QString& key) const { return QStringLiteral("config.%1.%2").arg(section, key); }
+		// The path of the configuration file being edited (empty when none).
+		virtual QString configPath() const { return QString(); }
 		virtual QLabel* helpLabel(const QString& text) { (void)text; return nullptr; }
 		virtual QWidget* createCard(const QString& title, const QString& description, QWidget* content) { (void)title; (void)description; return content; }
 		virtual QWidget* createPage(const QString& title, const QString& description, QWidget* body) { (void)title; (void)description; return body; }
@@ -63,6 +65,8 @@ namespace ConfigPageHost
 		virtual void addCard(QWidget* grid, QWidget* card) { (void)grid; (void)card; }
 		// Writes a known key of the document, adding the section when it is missing. Does not mark dirty.
 		virtual void setKnown(const QString& section, const QString& key, const QString& text) { (void)section; (void)key; (void)text; }
+		// Removes a key of the document (a missing section or key is not an error). Does not mark dirty.
+		virtual void removeKnown(const QString& section, const QString& key) { (void)section; (void)key; }
 		// Marks the document edited by `edited` (keeps the editor's edit order for validation messages).
 		virtual void markDirty(QObject* edited) { (void)edited; }
 
@@ -96,7 +100,7 @@ namespace ConfigPageHost
 		QString name;        // navigation title and page name
 		QString leafAfter;   // title of the navigation leaf this one prefers to follow (advisory)
 		QWidget* widget = nullptr;   // ownership passes to the editor
-		// A sub-page has no navigation leaf of its own: it is opened from the page named in parentPage
+		// A sub-page has no top-level navigation leaf: it is opened from the page named in parentPage (a sub-page of "VP-V" also gets a child leaf under the VP-V leaf)
 		// (grouped there under `group`) and keeps its page name and place in the stack.
 		QString parentPage;
 		QString group;

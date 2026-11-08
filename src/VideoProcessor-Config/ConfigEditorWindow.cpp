@@ -1,16 +1,12 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <tlhelp32.h>
 #include <shellapi.h>
 #include <objbase.h>
 // REHEARSAL: unused atlbase.h dropped (ConfigTests toolset has no ATL)
 #include <dxgi1_2.h>
 
 #include "ConfigEditorWindow.h"
-#include <led/ConnectionTest.h>
-#include <led/LedDriveConfig.h>
-#include <led/SerialPort.h>
 #include "ConfigWheelGuard.h"
 #include "SettingsNavigationIcons.h"
 #include "DisplayMonitorInventory.h"
@@ -39,7 +35,6 @@
 #include <QueueLatency.h>
 #include <RefreshKey.h>
 #include <QueueLookahead.h>
-#include <led/LedDriveConfig.h>
 
 #include <QAbstractItemView>
 #include <QAbstractItemModel>
@@ -154,22 +149,6 @@ static bool sandboxPreview()
 
 namespace
 {
-// RS-232 connection test: whether VideoProcessor.exe runs on this computer
-// (then the test goes through it, never around it).
-bool LocalVideoProcessorRunning()
-{
-	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-	if (snapshot == INVALID_HANDLE_VALUE)
-		return true;   // unknown: do not open the port behind VP's back
-	PROCESSENTRY32W entry{};
-	entry.dwSize = sizeof(entry);
-	bool found = false;
-	for (BOOL more = Process32FirstW(snapshot, &entry); more && !found; more = Process32NextW(snapshot, &entry))
-		found = _wcsicmp(entry.szExeFile, L"VideoProcessor.exe") == 0;
-	CloseHandle(snapshot);
-	return found;
-}
-
 // What an unset key in a Rendering profile ([vprenderer] and
 // [vprenderer.<profile>]) means: built-in values only, never another profile's.
 QString RenderingBuiltInDefault(const QString& key)
@@ -1571,12 +1550,14 @@ ConfigEditorWindow::ConfigEditorWindow(QString configPath, quintptr ownerHandle,
     kit.setKnownFn = [this](const QString& s, const QString& k, const QString& text)
     {
         if (!document_) return;
-        if (!document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toStdString()))
+        if (!document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toLocal8Bit().constData()))
         {
             document_->AddSection(s.toStdString());
-            document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toStdString());
+            document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toLocal8Bit().constData());
         }
     };
+    kit.removeKnownFn = [this](const QString& s, const QString& k) { if (document_) document_->RemoveKnown(s.toStdString(), k.toStdString().c_str()); };
+    kit.configPathFn = [this] { return configPath_; };
     kit.markDirtyFn = [this](QObject* edited)
     {
         if (edited && edited->objectName().startsWith(QStringLiteral("config.")))
@@ -1724,13 +1705,8 @@ ConfigEditorWindow::~ConfigEditorWindow()
 		manualCommandThread_->wait();
 		manualCommandThread_ = nullptr;
 	}
-	// audit 2026-10-16: the RS-232 test and a remote Apply may still run.
-	if (projectorTestThread_)
-	{
-		projectorTestThread_->wait();
-		projectorTestThread_ = nullptr;
-	}
-	ConfigPageHost::OnEditorClosing(formApi_);   // VPV-HOOK (a Calibration status request is joined here)
+	// audit 2026-10-16: a remote Apply may still run.
+	ConfigPageHost::OnEditorClosing(formApi_);   // VPV-HOOK (a Calibration status request and the RS-232 test are joined here)
 	if (remoteApplyThread_)
 	{
 		// Second pass (audit 2026-10-16): do not hold exit for up to a
@@ -2281,7 +2257,7 @@ void ConfigEditorWindow::selectPage(int index)
     if (!navigation_) return;
     const int navigationIndex = index == 4 || index == 11 || index == 13 ? 2 :
         index == 12 ? 3 :
-        index == 8 || index == 9 ? 8 : vpvPages_.navigationIndex(index);   // VPV-HOOK (a sub-page lights its parent's leaf)
+        index == 8 || index == 9 ? 8 : vpvPages_.navigationIndex(index);   // VPV-HOOK (a sub-page lights its own VP-V child leaf)
     for (QAbstractButton* button : navigation_->findChildren<QAbstractButton*>())
     {
         const bool selected = button->property("pageIndex").isValid() &&
@@ -5469,7 +5445,6 @@ QWidget* ConfigEditorWindow::createShell()
     const int displayPageIndex = pages_->addWidget(createDisplayPage());
     // VPV-HOOK
     vpvPages_.reset();
-    vpvPages_.append(pages_, QStringLiteral("Dynamic Drive"), createLedDrivePage());
     vpvPages_.appendProviderPages(pages_, formApi_);   // sub-pages first, so the VP-V page can link them
     // VP-V section hook (owner 2026-10-24; src/VP-V/config/README.md). The whole VP-V section lives in src/VP-V/config/;
     // this block and the "VP-V" navigation leaf below are its only footprint in this file.
@@ -5497,6 +5472,8 @@ QWidget* ConfigEditorWindow::createShell()
             return subs;
         };
         vpvHost.openPage = [this](const QString& pageName) { selectPage(pageName); };
+        vpvHost.bothPathwayCards = [this] { return Vpv::BothPathwayCards(formApi_.kit); };
+        vpvHost.unitCards = [this](const QString& unitId) { return vpvPages_.takeUnitCards(unitId); };
         vpvPages_.append(pages_, QStringLiteral("VP-V"), createPage(QStringLiteral("VP-V"),
             QStringLiteral("Everything VP-V adds, by unit: one tier per unit plus a global tier, each unit's settings, and the fallbacks engaged."),
             Vpv::CreateSection(vpvHost)));
@@ -5519,12 +5496,12 @@ QWidget* ConfigEditorWindow::createShell()
     QPushButton* shadersNavigation = addLeaf(QStringLiteral("Shaders"), 14);
     addLeaf(QStringLiteral("Actions"), 7);
     QPushButton* shortcutsNavigation = addLeaf(QStringLiteral("Shortcuts"), 15);
-    vpvPages_.addNavigationLeaves(addLeaf);   // VPV-HOOK
     addLeaf(QStringLiteral("Logs"), 10);
     navLayout->addSpacing(8);
     QPushButton* vpNavigation = addLeaf(QStringLiteral("VP Renderer"), 2);
     QPushButton* directShowNavigation = addLeaf(QStringLiteral("DirectShow"), 3);
     addLeaf(QStringLiteral("Updates"), 20)->setObjectName(QStringLiteral("config.openUpdates"));
+    vpvPages_.addNavigationLeaves(addLeaf);   // VPV-HOOK (the VP-V group and its children close Bill's list)
     navLayout->addStretch();
 
     auto* pageHost = new QWidget;
@@ -5984,19 +5961,6 @@ QWidget* ConfigEditorWindow::createStartupPage()
     });
     hardwareForm->addRow(QStringLiteral("Input connection"), captureConnection);
     auto* vpvForm = Vpv::AddNestedVpvForm(hardwareForm);   // VPV-HOOK
-    // [decklink] ycbcr_12bit_capture (FL35; planner 2026-10-16: every setting has a Config control).
-    auto* ycbcr12 = bindChoiceField(QStringLiteral("decklink"), QStringLiteral("ycbcr_12bit_capture"),
-        { QStringLiteral("v210"), QStringLiteral("rgb12"), QStringLiteral("off") },
-        { QStringLiteral("10-bit 4:2:2, keeps BTB/WTW (default)"),
-          QStringLiteral("12-bit RGB from the card, clips BTB/WTW (earlier default)"),
-          QStringLiteral("Refuse the signal (older behaviour)") });
-    ycbcr12->setToolTip(QStringLiteral(
-        "DeckLink only: a source sending 12-bit YCbCr 4:2:2 (some players and consoles); the SDK has no 12-bit "
-        "YCbCr capture format. 10-bit 4:2:2 (default): the signal as sent minus the lowest two bits; "
-        "below-black/above-white kept and VP owns the colour matrix. 12-bit RGB: the card converts to full-range "
-        "12-bit RGB when it offers that for the mode (all 12 bits, but the card's conversion clips "
-        "below-black/above-white and out-of-gamut values), otherwise 10-bit 4:2:2. Refuse: no picture."));
-    vpvForm->addRow(QStringLiteral("12-bit YCbCr signals (DeckLink)"), ycbcr12);
     // Hunt 2 (2026-10-17, every setting has a control): [decklink] RGB packing,
     // [directshow.conversion] and [directshow.ppm]. The first entry of each choice
     // leaves the key unset (the runtime default).
@@ -6063,13 +6027,6 @@ QWidget* ConfigEditorWindow::createStartupPage()
         configuredBooleanValue(value(QStringLiteral("general"),
             QStringLiteral("no_ui")), false)));
     behaviorLayout->addWidget(bindCheckField(QStringLiteral("Start minimized"), QStringLiteral("general"), QStringLiteral("startminimized")));
-    // Hunt 2 (2026-10-17): VP-0179 recovery policy, read once at startup (default on).
-    auto* boundedRecovery = bindCheckField(QStringLiteral("Bounded invalid-capture recovery"),
-        QStringLiteral("general"), QStringLiteral("bounded_invalid_capture_recovery"), true);
-    boundedRecovery->setToolTip(QStringLiteral(
-        "On (default): a bounded 1500 ms grace after an invalid capture state; only a valid capture state cancels "
-        "recovery. Off: the earlier recovery, which keeps the frame counter. Takes effect when VP restarts."));
-    behaviorLayout->addWidget(boundedRecovery);
     // Delta 6 (settings first): the saved state of what a key or a main-window
     // control can change.
     auto* statsOverlay = bindCheckField(QStringLiteral("Show statistics overlay"),
@@ -6662,150 +6619,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     auto* ruleField = fieldWithHelp(QStringLiteral("When should VP use this profile?"), rule,
         QStringLiteral("Optional source-condition rule. Example: ${renderer} ~= \"VP Renderer\" && ${source_rate} <= 30. ~= matches a literal substring (case-insensitive for renderer names). Use one non-empty quoted string with a text variable, not a number, Boolean, or ${key}. Parentheses group conditions; ! negates, then && binds before ||. Active profiles can still be selected manually when their rule is false."));
     detailLayout->addWidget(ruleField);
-    if (sectionPrefix == QStringLiteral("queue") || sectionPrefix == QStringLiteral("vprenderer"))
-    {
-        // The common queue rule as a plain control: "use this queue above N
-        // fps"; also for rendering profiles, e.g. a low-latency profile
-        // (audit 2026-10-14c: no hand-written rule). It writes the same rule as the formula field and follows it;
-        // any other formula is left alone and the control steps aside.
-        auto* rateRow = new QWidget;
-        auto* rateLayout = new QHBoxLayout(rateRow);
-        rateLayout->setContentsMargins(0, 0, 0, 0);
-        auto* rateRule = new QCheckBox(sectionPrefix == QStringLiteral("queue") ?
-            QStringLiteral("Use this queue for sources above") : QStringLiteral("Use this profile for sources above"));
-        rateRule->setObjectName(controlName(sectionPrefix, QStringLiteral("rate_rule")));
-        auto* rateThreshold = new QDoubleSpinBox;
-        rateThreshold->setObjectName(controlName(sectionPrefix, QStringLiteral("rate_rule_fps")));
-        rateThreshold->setRange(1.0, 1000.0);
-        rateThreshold->setDecimals(2);
-        rateThreshold->setValue(59.0);
-        rateThreshold->setSuffix(QStringLiteral(" fps"));
-        rateThreshold->setMaximumWidth(120);
-        rateLayout->addWidget(rateRule);
-        rateLayout->addWidget(rateThreshold);
-        rateLayout->addStretch();
-        auto* rateNote = helpLabel(QStringLiteral(
-            "This profile has its own rule below; edit it there, or clear it to use the frame-rate switch."));
-        rateNote->setObjectName(controlName(sectionPrefix, QStringLiteral("rate_rule_note")));
-        rateNote->setVisible(false);
-        const int ruleIndex = detailLayout->indexOf(useRule);
-        detailLayout->insertWidget(ruleIndex, rateNote);
-        detailLayout->insertWidget(ruleIndex, rateRow);
-        if (sectionPrefix == QStringLiteral("queue"))
-        {
-            // Owner 2026-10-16: when this queue is used - Off (chosen by hand or shortcut only), By rules
-            // (the formula below), or video-rate sources.
-            // Fixed-constant batch 2026-10-18 (owner [[vp-general-not-fixed]]): the button writes the
-            // class rule - every source at the video rate floor and above (DejudderPolicy::VideoRateFloorHz,
-            // 49 Hz: 50, 59.94, 60, 100, 119.88, 120, 144, 240 ...) - instead of the fixed 49-61 band,
-            // which missed 100/120p. A saved 49-61 rule still reads as this button (and is kept as
-            // written until the button is clicked again).
-            static const QString kRate5060 = QStringLiteral("${cadence} >= 49");
-            static const QString kRate5060Legacy = QStringLiteral("${cadence} == 49-61");
-            const auto isRateRule = [](const QString& text) { return text == kRate5060 || text == kRate5060Legacy; };
-            rateRow->setVisible(false);
-            auto* useRow = new QWidget;
-            useRow->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode")));
-            auto* useLayout = new QHBoxLayout(useRow);
-            useLayout->setContentsMargins(0, 0, 0, 0);
-            useLayout->addWidget(new QLabel(QStringLiteral("Use this queue:")));
-            // audit 2026-10-16: "Off" read as the queue being disabled.
-            auto* offButton = new QRadioButton(QStringLiteral("Only when chosen (shortcut or by hand)"));
-            offButton->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode.off")));
-            auto* rulesButton = new QRadioButton(QStringLiteral("By rules"));
-            rulesButton->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode.rules")));
-            auto* rateButton = new QRadioButton(QStringLiteral("50 Hz and faster sources"));
-            rateButton->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode.rate5060")));
-            rateButton->setToolTip(QStringLiteral(
-                "Writes the rule ${cadence} >= 49: every video-rate signal (50, 59.94, 60, 100, 120 Hz and faster), the "
-                "same 50 Hz floor the film / video classification uses. Film sent in a 60 Hz signal (3:2) matches too "
-                "until the cadence detection keeps it on the regular path. A rule saved as ${cadence} == 49-61 (50/60 Hz "
-                "only) still shows here and is kept until this button is clicked again."));
-            auto* group = new QButtonGroup(useRow);
-            group->setExclusive(true);
-            for (QRadioButton* b : { offButton, rulesButton, rateButton })
-            {
-                group->addButton(b);
-                useLayout->addWidget(b);
-            }
-            useLayout->addStretch();
-            detailLayout->insertWidget(ruleIndex, useRow);
-            auto syncUse = [rule, useRule, offButton, rulesButton, rateButton, isRateRule]
-            {
-                const QString text = useRule->isChecked() ? rule->toPlainText().trimmed() : QString();
-                const QSignalBlocker a(offButton), b(rulesButton), c(rateButton);
-                offButton->setChecked(text.isEmpty() && !useRule->isChecked());
-                rateButton->setChecked(isRateRule(text));
-                rulesButton->setChecked(useRule->isChecked() && !isRateRule(text));
-            };
-            connect(rule, &QPlainTextEdit::textChanged, this, syncUse);
-            connect(useRule, &QCheckBox::toggled, this, syncUse);
-            // Audit 2026-10-16: a hand-written rule is kept aside when Off or 50/60 Hz replaces it, and
-            // By rules brings it back; an empty rule is not saved (the profile reads Off), so say so.
-            auto keepCustom = [rule, isRateRule]() {
-                const QString text = rule->toPlainText().trimmed();
-                if (!text.isEmpty() && !isRateRule(text)) rule->setProperty("customRule", text);
-            };
-            rule->setPlaceholderText(QStringLiteral("Type the rule here; an empty rule is not saved (the queue is then Off)."));
-            connect(offButton, &QRadioButton::toggled, this, [rule, useRule, keepCustom](bool on) {
-                if (!on) return;
-                keepCustom();
-                rule->clear();
-                useRule->setChecked(false);
-            });
-            connect(rulesButton, &QRadioButton::toggled, this, [rule, useRule, isRateRule](bool on) {
-                if (!on) return;
-                const QString text = rule->toPlainText().trimmed();
-                if (text.isEmpty() || isRateRule(text))
-                    rule->setPlainText(rule->property("customRule").toString());
-                useRule->setChecked(true);
-                rule->setFocus();
-            });
-            connect(rateButton, &QRadioButton::toggled, this, [rule, useRule, keepCustom](bool on) {
-                if (!on) return;
-                keepCustom();
-                rule->setPlainText(kRate5060);
-                useRule->setChecked(true);
-            });
-            syncUse();
-        }
-        auto syncFromRule = [rule, useRule, rateRule, rateThreshold, rateNote]
-        {
-            QSignalBlocker blockRule(rateRule);
-            QSignalBlocker blockThreshold(rateThreshold);
-            const QString text = useRule->isChecked() ? rule->toPlainText().trimmed() : QString();
-            // ${cadence} is the exact rate (59.94); ${source_rate} is a whole
-            // number (59.94 reads as 59), so the switch writes cadence. Rules
-            // written with source_rate are still recognised.
-            const QRegularExpressionMatch match = QRegularExpression(QStringLiteral(
-                "^\\$\\{(?:cadence|source_rate)\\}\\s*>\\s*([0-9]+(?:\\.[0-9]+)?)$")).match(text);
-            const bool custom = !text.isEmpty() && !match.hasMatch();
-            rateRule->setChecked(match.hasMatch());
-            if (match.hasMatch()) rateThreshold->setValue(match.captured(1).toDouble());
-            rateRule->setEnabled(!custom && useRule->isEnabled());
-            rateThreshold->setEnabled(!custom && useRule->isEnabled());
-            rateNote->setVisible(custom);
-        };
-        auto applyRateRule = [rule, useRule, rateRule, rateThreshold]
-        {
-            if (rateRule->isChecked())
-            {
-                rule->setPlainText(QStringLiteral("${cadence} > %1")
-                    .arg(QString::number(rateThreshold->value(), 'g', 6)));
-                useRule->setChecked(true);
-            }
-            else
-            {
-                rule->clear();
-                useRule->setChecked(false);
-            }
-        };
-        connect(rule, &QPlainTextEdit::textChanged, this, syncFromRule);
-        connect(useRule, &QCheckBox::toggled, this, syncFromRule);
-        connect(rateRule, &QCheckBox::toggled, this, applyRateRule);
-        connect(rateThreshold, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-            [rateRule, applyRateRule](double) { if (rateRule->isChecked()) applyRateRule(); });
-    }
+    Vpv::AddVpvProfileUseRows(sectionPrefix, title, list, rule, useRule, [](const QString& text) { return helpLabel(text); }, vpvPages_.unitCardStash());   // VPV-HOOK (VP-V page: Profile use)
 
     auto* profileFields = new QWidget;
     auto* profileFieldsLayout = new QVBoxLayout(profileFields);
@@ -7266,19 +7080,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             [this, state, key](int selected)
         {
             if (state->loading || state->section.isEmpty() || !document_) return;
-            // Automatic (the minimum, shown as Auto) is an absent key, never a written number.
-            if (key == QStringLiteral("active_picture_lookahead_frames"))
-            {
-                // Bug hunt 3 F8: the explicit-0 notice follows the edit.
-                if (auto* notice = findChild<QLabel*>(QStringLiteral("config.queue.active_picture_lookahead_notice")))
-                    notice->setVisible(selected == 0);
-            }
-            if (key == QStringLiteral("active_picture_lookahead_frames") && selected < 0)
-            {
-                document_->RemoveKnown(state->section.toStdString(), key.toStdString().c_str());
-                markDirty();
-                return;
-            }
+            if (Vpv::QueueIntegerEdited(this, key, selected)) { document_->RemoveKnown(state->section.toStdString(), key.toStdString().c_str()); markDirty(); return; }   // VPV-HOOK (VP-V look-ahead: Auto = an absent key; the explicit-0 notice)
             document_->SetKnown(state->section.toStdString(),
                 key.toStdString().c_str(), std::to_string(selected));
             markDirty();
@@ -7871,96 +7673,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Choose a policy for a complete queue baseline."));
         queuePolicySummary->setObjectName(QStringLiteral("config.queue.policy_summary"));
         form->addRow(QString(), queuePolicySummary);
-        // Owner 2026-10-16: VP's low-latency path as a property of the queue profile (unset: on for a
-        // profile named Low_Latency, as before).
-        auto* lowLatencyPath = addChoice(QStringLiteral("VP's low-latency path"), QStringLiteral("low_latency_path"),
-            { QStringLiteral("on"), QStringLiteral("off") });
-        lowLatencyPath->setToolTip(QStringLiteral(
-            "On: with this queue VP takes its low-latency path - the de-judder off, no motion computed ahead, "
-            "cinema-only shaders skipped, and early upload with 'Upload frames as they arrive: Auto' (full 32-bit "
-            "precision is kept). Off: the regular path. Not set: on only for a queue named Low_Latency."));
-        // Stage 5: the queue target as time. VP turns it into Target frames
-        // for each source rate, so the delay - and the audio offset - stays
-        // about the same at 24p, 30p and 60p.
-        addInteger(QStringLiteral("Target delay"), QStringLiteral("target_latency_ms"),
-            0, QueueLatency::MaxTargetLatencyMs, QStringLiteral("ms"));
-        auto* latencySpin = qobject_cast<QSpinBox*>(fields->back().widget);
-        latencySpin->setSpecialValueText(QStringLiteral("Off"));
-        // Settings guide audit 2026-10-24 (ADR-0020): one total delay, 4 frames recommended.
-        latencySpin->setToolTip(QStringLiteral(
-            "The total delay from capture to screen: ONE value, the same at every frame rate, so the AVR's "
-            "fixed audio delay always matches. Recommended: 267 ms (4 queued frames at 23.976p, the slowest "
-            "rate). Shorter still works: the look-ahead features (motion ahead, Dynamic Drive, crop and "
-            "subtitle look-ahead, hiccup repair) fall back to 3 or 2 frames. The VP-V page's Input tab shows "
-            "the frames and padding at every rate. Off uses Target frames."));
-        auto* latencyNote = helpLabel(QString());
-        latencyNote->setObjectName(QStringLiteral("config.queue.target_latency_note"));
-        form->addRow(QString(), latencyNote);
-        const auto updateLatencyNote = [latencyNote](int milliseconds)
-        {
-            latencyNote->setText(queueLatencyNoteText(milliseconds));
-        };
-        connect(latencySpin, qOverload<int>(&QSpinBox::valueChanged), this, updateLatencyNote);
-        updateLatencyNote(0);
-        // Owner 2026-10-16: the queue target as an either / or - by frames or by time - with only
-        // the chosen field shown. By frames writes the time as off (also switching off a time
-        // target inherited from the default queue); by time keeps target_frames as the fallback
-        // until the source rate is known.
-        addInteger(QStringLiteral("Target frames"), QStringLiteral("target_frames"),
-            0, 16, QStringLiteral("frames"));
-        auto* framesSpin = qobject_cast<QSpinBox*>(fields->back().widget);
-        {
-            QFormLayout* queueForm = form;
-            auto* modeButtons = new QWidget;
-            modeButtons->setObjectName(controlName(sectionPrefix, QStringLiteral("target_mode")));
-            auto* modeLayout = new QHBoxLayout(modeButtons);
-            modeLayout->setContentsMargins(0, 0, 0, 0);
-            auto* byFrames = new QRadioButton(QStringLiteral("By frames"));
-            byFrames->setObjectName(controlName(sectionPrefix, QStringLiteral("target_mode.frames")));
-            byFrames->setToolTip(QStringLiteral("A fixed number of source frames: the delay changes with the frame rate."));
-            auto* byTime = new QRadioButton(QStringLiteral("By time"));
-            byTime->setObjectName(controlName(sectionPrefix, QStringLiteral("target_mode.time")));
-            byTime->setToolTip(QStringLiteral(
-                "A delay in ms, turned into whole source frames for each frame rate, so the delay (and the audio offset) "
-                "stays about the same at 24p, 30p and 60p."));
-            auto* group = new QButtonGroup(modeButtons);
-            group->setExclusive(true);
-            group->addButton(byFrames);
-            group->addButton(byTime);
-            modeLayout->addWidget(byFrames);
-            modeLayout->addWidget(byTime);
-            modeLayout->addStretch(1);
-            queueForm->insertRow(queueForm->rowCount() - 3, QStringLiteral("Queue target"), modeButtons);
-            auto* lookAheadNote = helpLabel(QStringLiteral(
-                "With the optical-flow look-ahead on (de-judder profiles), the queue holds at least 5 frames either way "
-                "(4 ahead); the low-latency queue is exempt."));
-            lookAheadNote->setObjectName(controlName(sectionPrefix, QStringLiteral("target_lookahead_note")));
-            queueForm->addRow(QString(), lookAheadNote);
-            auto show = [queueForm, latencySpin, framesSpin, latencyNote, byFrames, byTime]() {
-                const bool time = latencySpin->value() > 0;
-                {
-                    const QSignalBlocker a(byFrames), b(byTime);
-                    byTime->setChecked(time);
-                    byFrames->setChecked(!time);
-                }
-                queueForm->setRowVisible(latencySpin, time);
-                queueForm->setRowVisible(latencyNote, time);
-                queueForm->setRowVisible(framesSpin, !time);
-            };
-            connect(byTime, &QRadioButton::toggled, this, [latencySpin, show](bool on) {
-                if (on && latencySpin->value() == 0) latencySpin->setValue(200);
-                show();
-            });
-            connect(byFrames, &QRadioButton::toggled, this, [latencySpin, show](bool on) {
-                if (on && latencySpin->value() != 0) latencySpin->setValue(0);
-                show();
-            });
-            connect(latencySpin, qOverload<int>(&QSpinBox::valueChanged), this, [show](int) { show(); });
-            auto* refresh = new QAction(modeButtons);
-            refresh->setObjectName(controlName(sectionPrefix, QStringLiteral("target_mode_refresh")));
-            connect(refresh, &QAction::triggered, this, [show]() { show(); });
-            show();
-        }
         form = addCollapsibleSection(QStringLiteral("queueAdvanced"),
             QStringLiteral("Advanced"), QStringLiteral(
                 "Fine-tune individual queue values. Editing one switches this profile to Custom."), false);
@@ -7970,28 +7682,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             0, 16, QStringLiteral("frames"));
         addInteger(QStringLiteral("Startup pre-roll"), QStringLiteral("startup_preroll_frames"),
             0, 16, QStringLiteral("frames"));
+        addInteger(QStringLiteral("Target frames"), QStringLiteral("target_frames"),
+            0, 16, QStringLiteral("frames"));
         addInteger(QStringLiteral("Active-picture lookahead"), QStringLiteral("active_picture_lookahead_frames"),
-            -1, 8, QStringLiteral("frames"));
-        {
-            // Owner decision 2026-10-17: the look-ahead follows the queue when the key is absent.
-            auto* lookahead = qobject_cast<QSpinBox*>(fields->back().widget);
-            lookahead->setSpecialValueText(QStringLiteral("Auto"));
-            lookahead->setToolTip(QStringLiteral(
-                "Auto (default; the key is absent): the look-ahead follows the queue. A normal queue profile uses "
-                "min(target frames - 1, queue size - 1, 8) queued future frames; a low-latency profile uses 0. "
-                "A number from 0 to 8 overrides it, including 0 (no look-ahead). Raising it never enlarges the "
-                "queue. (Key: active_picture_lookahead_frames.)"));
-            // Bug hunt 3 F8: an explicit 0 (older queue presets saved one) keeps the automatic
-            // look-ahead off; shown, never migrated (the owner decides).
-            auto* lookaheadNotice = helpLabel(QString::fromLatin1(QueueLookahead::kExplicitZeroLookaheadNotice));
-            lookaheadNotice->setObjectName(QStringLiteral("config.queue.active_picture_lookahead_notice"));
-            lookaheadNotice->setVisible(false);
-            form->addRow(QString(), lookaheadNotice);
-        }
+            0, 8, QStringLiteral("frames"));
         addInteger(QStringLiteral("Queue reset delay"), QStringLiteral("reset_after_render_restart_seconds"),
             1, INT_MAX, QStringLiteral("seconds"));
         addInteger(QStringLiteral("Queue recovery threshold"), QStringLiteral("reset_queue_too_large_percent"),
             1, 200, QStringLiteral("%"));
+        Vpv::AddVpvQueueRows(form, addChoice, addInteger, fields, list, [](int ms) { return queueLatencyNoteText(ms); }, QueueLatency::MaxTargetLatencyMs, [](const QString& text) { return helpLabel(text); }, vpvPages_.unitCardStash());   // VPV-HOOK (VP-V page: Queue target and low latency)
     }
     else if (sectionPrefix == QStringLiteral("vprenderer.color"))
     {
@@ -11511,26 +11210,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 		upscaler->setItemText(upscaler->findData(QStringLiteral("none")),
 			QStringLiteral("Built-in GPU sampling"));
 		addRendererAutoStatus(QStringLiteral("upscaler"), upscaler);
-		auto* chromaUpscaler = addChoice(QStringLiteral("Chroma upscaler"),
-			QStringLiteral("chroma_upscaler"), { QStringLiteral("AUTO"),
-			QStringLiteral("catmull_rom"), QStringLiteral("lanczos"), QStringLiteral("ewa_lanczos"),
-			QStringLiteral("ewa_lanczossharp"), QStringLiteral("upscaler"), QStringLiteral("bicubic"),
-			QStringLiteral("bilinear") });
-		chromaUpscaler->setItemText(chromaUpscaler->findData(QStringLiteral("upscaler")),
-			QStringLiteral("Same as the upscaler (the earlier behaviour)"));
-		chromaUpscaler->setToolTip(QStringLiteral(
-			"How the colour planes of 4:2:0 / 4:2:2 video are brought up to the picture's size before the "
-			"main scaling. Auto = Catmull-Rom: on real footage it looked identical to the polar EWA Lanczos "
-			"filter at about a seventh of its GPU time. 'Same as the "
-			"upscaler' is the previous behaviour (EWA Lanczos sharp with High quality, the costliest)."));
-		MarkGpuCost(form, chromaUpscaler, 2);
-		auto* chromaUpscaleVp = addChoice(QStringLiteral("VP chroma upscale (candidate)"),
-			QStringLiteral("chroma_upscale_vp"), { QStringLiteral("off"), QStringLiteral("cfl") });
-		chromaUpscaleVp->setToolTip(QStringLiteral(
-			"CfL predicts colour detail from the grain-free luma inside the active picture; chroma grain is "
-			"kept exactly as the normal upscaler passes it. Off = libplacebo's chroma upscaler (above). "
-			"Candidate: not yet active in the renderer."));
-		MarkGpuCost(form, chromaUpscaleVp, 1);
 		auto* downscaler = addChoice(QStringLiteral("Downscaler"),
 			QStringLiteral("downscaler"), { QStringLiteral("AUTO"),
 			QStringLiteral("lanczos"), QStringLiteral("mitchell"),
@@ -11547,11 +11226,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 		antiRinging->setToolTip(QStringLiteral(
 			"Optional sigmoidization before upscaling. It reduces ringing artifacts; the default is On."));
 		addRendererAutoStatus(QStringLiteral("sigmoid"), antiRinging);
-		auto* downscaleLight = addChoice(QStringLiteral("Downscale light"),
-			QStringLiteral("downscale_light"), { QStringLiteral("linear"), QStringLiteral("gamma") });
-		downscaleLight->setToolTip(QStringLiteral(
-			"Light domain for frames that are downscaled. Linear is libplacebo's "
-			"default; gamma matches madVR's SSIM look. Upscaled frames always use linear light."));
         addChoice(QStringLiteral("Chroma upscaler"), QStringLiteral("chroma_upscaler"),
             { "ewa_lanczossharp", "ewa_lanczos", "lanczos", "bicubic", "bilinear" });
         form->addRow(helpLabel(QStringLiteral("Chroma reconstruction applies to 4:2:0 and 4:2:2 input even at native image resolution. Bicubic is the default. RGB input does not need chroma upscaling.")));
@@ -11561,10 +11235,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QString(), false);
         auto* debanding = addChoice(QStringLiteral("Debanding"), QStringLiteral("deband_strength"), { QStringLiteral("AUTO"), QStringLiteral("default"), QStringLiteral("light"), QStringLiteral("off") });
         debanding->setItemText(debanding->findData(QStringLiteral("default")), QStringLiteral("Standard"));
-        debanding->setToolTip(QStringLiteral(   // settings guide audit 2026-10-24 (VP-V text, kept on Bill's moved control)
-            "libplacebo's debander (smooths steps in skies and shadows). Auto lets libplacebo decide. While VP's own "
-            "grain-safe debander runs ('VP deband' Auto or On, with 'VP deband replaces libplacebo's'), libplacebo's "
-            "automatic deband is switched off because it thins fine grain; an explicit Standard or Light is kept."));
         addRendererAutoStatus(QStringLiteral("deband_strength"), debanding);
         auto* dithering = addChoice(QStringLiteral("Dithering"), QStringLiteral("dithering"),
             { "blue_noise", "ordered_fixed", "white_noise", "off" });
@@ -11572,10 +11242,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Blue noise is recommended for video. Ordered (fixed) is a fast patterned alternative. "
             "White noise is inexpensive but more visible. Off disables dithering. "
             "Calibration LUT processing runs before final dithering."));
-        // The set follows the pathway (loadDetails): Bill's four on the Original pathway
-        // (as built here), VP-V's full list otherwise.
-        Vpv::MarkOriginalDitherSet(dithering);   // VPV-HOOK
-        addRendererAutoStatus(QStringLiteral("dithering"), dithering);
         auto* displayBitDepth = addChoice(QStringLiteral("Dither target depth"),
             QStringLiteral("display_bit_depth"),
             { QStringLiteral("output"), QStringLiteral("10"), QStringLiteral("8") });
@@ -11585,6 +11251,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         displayBitDepth->setToolTip(QStringLiteral(
             "Dithering precision, clamped to the active surface depth. This does not configure GPU/HDMI bit depth or detect panel precision."));
         addRendererAutoStatus(QStringLiteral("display_bit_depth"), displayBitDepth);
+        Vpv::AddVpvScalingRows(form, addChoice, addRendererAutoStatus, [](QFormLayout* f, QWidget* c, int n) { MarkGpuCost(f, c, n); }, friendlyChoiceLabel, vpvPages_.unitCardStash());   // VPV-HOOK (VP-V rows of this page: VP-V page cards)
         // Legacy Auto remains accepted in configuration files and is migrated
         // into an explicit preset choice. New edits choose the actual algorithm.
         for (auto* choice : { upscaler, downscaler, antiRinging, debanding, dithering })
@@ -12044,19 +11711,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* summary = helpLabel(QStringLiteral(
             "DV Tunneling uses VP Renderer and needs no additional input settings."));
         modeLayout->addWidget(summary);
-        // DV input fixes 2026-10-18: signals that are not a tunnel leave the
-        // tunnel path (10-bit RGB, BT.2020 RGB without tunnel metadata).
-        auto* handoffCheck = bindCheckField(
-            QStringLiteral("Hand LLDV / HDR10 sent as RGB to the normal path"),
-            QStringLiteral("general"), QStringLiteral("dv_tunnel_handoff"), true);
-        handoffCheck->setToolTip(QStringLiteral(
-            "With DV Tunneling, a signal that carries no tunnel metadata for about a second and is either 10-bit RGB "
-            "or BT.2020 RGB without an HDR flag (LLDV or HDR10 converted to RGB, for example by an HDFury) leaves the "
-            "tunnel path: it is shown normally and treated as PQ HDR (8-bit LLDV included) instead of staying black or "
-            "being shown as SDR. A tunnel arriving later takes the signal back. LLDV and HDR10 sent as YCbCr are also "
-            "declined by the tunnel (it is only ever 8-bit RGB), even under a profile set to DV Tunneling, and get the "
-            "normal LLDV / newlldv handling. Default on. Restart VideoProcessor after changing it. Key: dv_tunnel_handoff."));
-        modeLayout->addWidget(handoffCheck);
         detailLayout->insertWidget(2, dvModeControls);
         fields->push_back({ QStringLiteral("dolby_vision_tunnel"), tunneling, Field::DvMode });
 
@@ -12067,31 +11721,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         lldvLayout->setSpacing(12);
         lldvLayout->addWidget(helpLabel(QStringLiteral(
             "Uses this profile's metadata for recognized HDFury LLDV input with DirectShow and VP Renderer.")));
-        auto* newLldvCheck = bindCheckField(
-            QStringLiteral("Treat BT.2020 without HDR flag as HDR (LLDV/HDR10)"),
-            QStringLiteral("general"), QStringLiteral("newlldv"));
-        newLldvCheck->setToolTip(QStringLiteral(
-            "A BT.2020, 10/12-bit signal without an HDR InfoFrame is shown as PQ HDR after 1.5 s: "
-            "LLDV, and HDR10 whose HDR flag was dropped (for example an HDFury with its HDR toggle off). "
-            "Metadata comes from this LLDV profile; peak detection works as usual. "
-            "Never for the DV tunnel, BT.709 or a source that sends an HDR InfoFrame. Key: newlldv."));
-        lldvLayout->addWidget(newLldvCheck);
-        auto* sdrVetoCheck = bindCheckField(
-            QStringLiteral("Return real SDR to SDR from the picture (SDR veto)"),
-            QStringLiteral("general"), QStringLiteral("newlldv_sdr_veto"), true);
-        sdrVetoCheck->setToolTip(QStringLiteral(
-            "With the option above, SDR sent as BT.2020 returns to SDR when the picture shows SDR highlights "
-            "(at a cut, after evidence in two shots; once per signal). Default on. Key: newlldv_sdr_veto."));
-        lldvLayout->addWidget(sdrVetoCheck);
+        lldvLayout->addWidget(bindCheckField(QStringLiteral("Alternate LLDV detection"),
+            QStringLiteral("general"), QStringLiteral("newlldv")));
         lldvLayout->addWidget(helpLabel(QStringLiteral(
-            "These apply to all LLDV profiles and to HDR10 without an HDR flag. Restart VideoProcessor after changing them.")));
+            "Alternate detection applies to all LLDV profiles. Restart VideoProcessor after changing it.")));
         lldvLayout->addWidget(profileFields);
         detailLayout->addWidget(lldvSettings);
-        updateDvModeControls = [tunneling, lldvSettings, summary, handoffCheck]()
+        updateDvModeControls = [tunneling, lldvSettings, summary]()
         {
             lldvSettings->setVisible(!tunneling->isChecked());
             summary->setVisible(tunneling->isChecked());
-            handoffCheck->setVisible(tunneling->isChecked());
         };
         connect(tunneling, &QRadioButton::toggled, this,
             [this, state, updateDvModeControls](bool enabled)
@@ -12149,7 +11788,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 queueValue(QStringLiteral("target_frames")) == policy.target &&
                 queueValue(QStringLiteral("target_latency_ms")) <= 0 &&
                 queueValue(QStringLiteral("startup_preroll_frames")) == 0 &&
-                queueValue(QStringLiteral("active_picture_lookahead_frames")) <= 0 &&
+                queueValue(QStringLiteral("active_picture_lookahead_frames")) == 0 &&
                 queueValue(QStringLiteral("reset_after_render_restart_seconds")) == 5 &&
                 queueValue(QStringLiteral("reset_queue_too_large_percent")) == policy.resetPercent)
             {
@@ -12297,11 +11936,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             }
             if (sectionPrefix == QStringLiteral("queue"))
             {
+                { const QString vpv = Vpv::QueueFallback(key); if (!vpv.isEmpty()) return vpv; }   // VPV-HOOK (target_latency_ms 0, look-ahead auto)
                 if (key == QStringLiteral("queue_size")) return QStringLiteral("32");
                 if (key == QStringLiteral("lead_frames")) return QStringLiteral("1");
                 if (key == QStringLiteral("target_frames")) return QStringLiteral("4");
-                if (key == QStringLiteral("target_latency_ms")) return QStringLiteral("0");
-                if (key == QStringLiteral("active_picture_lookahead_frames")) return QStringLiteral("auto");
+                if (key == QStringLiteral("active_picture_lookahead_frames")) return QStringLiteral("0");
                 if (key == QStringLiteral("startup_preroll_frames")) return QStringLiteral("0");
                 if (key == QStringLiteral("steady_reserve_frames")) return QStringLiteral("4");
                 if (key == QStringLiteral("reset_after_render_restart_seconds")) return QStringLiteral("5");
@@ -12424,7 +12063,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 configured = value(profileSection, alias);
             return configured;
         };
-		const bool ditherOriginal = originalPathwayOn();
 		for (const Field& field : *fields)
 		{
             QString raw = profileValue(section, field.key);
@@ -12476,28 +12114,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                  field.key == QStringLiteral("diagnostic_disable_shader_cache"));
             const bool defaultOnlyField = defaultOnlyRendererField;
             QString configured = raw;
-            // VP never inherits low_latency_path from the default queue
-            // (RendererProfileConfig: unset = on only for the name Low_Latency);
-            // second pass, audit 2026-10-16.
-            const bool ownOnlyQueueField = sectionPrefix == QStringLiteral("queue") &&
-                field.key == QStringLiteral("low_latency_path");
+            const bool ownOnlyQueueField = Vpv::QueueOwnOnlyField(sectionPrefix, field.key);   // VPV-HOOK (low_latency_path is never inherited)
 			if (!requiresExplicitValue && !ownOnlyQueueField && configured.isEmpty() && list->count() > 0)
                 configured = defaultProfile ? fallback(field.key) :
                     profileValue(list->item(0)->data(Qt::UserRole).toString(), field.key);
-			// Stage 5, as VP reads it: a queue's own Target frames switches off a
-			// delay it would inherit, so it shows Off rather than the default's.
-			if (sectionPrefix == QStringLiteral("queue") && !defaultProfile && raw.isEmpty() &&
-				field.key == QStringLiteral("target_latency_ms") &&
-				(!value(section, QStringLiteral("target_frames")).isEmpty() ||
-				 !value(section, QStringLiteral("steady_reserve_frames")).isEmpty()))
-				configured = QStringLiteral("0");
+			if (Vpv::QueueDelayShowsOff(sectionPrefix, defaultProfile, raw, field.key, [&] { return !value(section, QStringLiteral("target_frames")).isEmpty() || !value(section, QStringLiteral("steady_reserve_frames")).isEmpty(); })) configured = QStringLiteral("0");   // VPV-HOOK (own Target frames: the delay shows Off)
 			if (!requiresExplicitValue && configured.isEmpty())
 				configured = fallback(field.key);
             const auto concreteChoice = [&](QString choice) {
                 const QString lower = choice.trimmed().toLower();
-                // Dithering: Bill's display mapping only on the Original pathway; in VP-V mode a
-                // VP-V value (Auto included) is shown as stored.
-                if (field.key == QStringLiteral("dithering") && !ditherOriginal) return choice;
+                // VP-V's own Dithering list (VpvScalingRows.h): its value is shown as stored.
+                if (field.widget->property("vpvOwnChoices").toBool()) return choice;   // VPV-HOOK
                 if (field.key == QStringLiteral("dithering") &&
                     (lower == "auto" || lower == "on" || lower == "true")) return QStringLiteral("blue_noise");
                 if (lower != QStringLiteral("auto")) return choice;
@@ -12597,17 +12224,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 else qobject_cast<QLineEdit*>(field.widget)->setText(displayed);
             }
             else if (field.kind == Field::Integer)
-            {
-                bool numeric = false;
-                int number = configured.toInt(&numeric);
-                // Absent / auto: the look-ahead follows the queue (shown as Auto).
-                if (!numeric && field.key == QStringLiteral("active_picture_lookahead_frames")) number = -1;
-                qobject_cast<QSpinBox*>(field.widget)->setValue(number);
-                // Bug hunt 3 F8: a saved explicit 0 (own or inherited from the default queue profile).
-                if (field.key == QStringLiteral("active_picture_lookahead_frames"))
-                    if (auto* notice = findChild<QLabel*>(QStringLiteral("config.queue.active_picture_lookahead_notice")))
-                        notice->setVisible(QueueLookahead::ExplicitZeroLookahead(configured.toStdString()));
-            }
+                qobject_cast<QSpinBox*>(field.widget)->setValue(Vpv::QueueLoadedInteger(field.widget, configured));   // VPV-HOOK (VP-V look-ahead: absent/auto = Auto; explicit-0 notice)
             else if (field.kind == Field::SdrGamma)
             {
                 const QString mode = configured.toLower();
@@ -12640,8 +12257,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             else
             {
                 auto* combo = qobject_cast<QComboBox*>(field.widget);
-                if (field.key == QStringLiteral("dithering") && sectionPrefix == QStringLiteral("vprenderer.scaling"))
-                    Vpv::ApplyDitherChoiceSet(combo, ditherOriginal, friendlyChoiceLabel);   // VPV-HOOK
                 const bool subtitleCleanupFill =
                     sectionPrefix == QStringLiteral("vprenderer.subtitles") &&
                     field.key == QStringLiteral("cleanup_fill");
@@ -12726,18 +12341,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 }
                 if (hasUnspecifiedChoice && scalingAutoChoice && !defaultProfile)
                     combo->setItemText(0, QStringLiteral("Inherit from default profile"));
-                // audit 2026-10-16: say what an unset low-latency path does.
-                if (hasUnspecifiedChoice && ownOnlyQueueField && raw.isEmpty())
-                {
-                    // As VP decides it: on only when the profile's name normalises to low_latency.
-                    const QString queueName = section.startsWith(QStringLiteral("queue."), Qt::CaseInsensitive) ?
-                        section.mid(6) : QString();
-                    const bool namedLowLatency = !queueName.isEmpty() &&
-                        ConfigFile::NormalizeName(queueName.toStdString()) == "low_latency";
-                    combo->setItemText(0, namedLowLatency ?
-                        QStringLiteral("Not set: on (the Low Latency queue)") :
-                        QStringLiteral("Not set: off (on only for the Low Latency queue)"));
-                }
+                if (hasUnspecifiedChoice && ownOnlyQueueField && raw.isEmpty()) combo->setItemText(0, Vpv::QueueLowLatencyUnsetText(section));   // VPV-HOOK
                 const int effectiveIndex = combo->findData(configured, Qt::UserRole, Qt::MatchFixedString);
                 int index = raw.isEmpty() ?
                     (hideUnspecifiedChoice || !hasUnspecifiedChoice ? effectiveIndex : 0) :
@@ -12790,9 +12394,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 for (int candidate = 0; candidate < combo->count(); ++candidate) {
                     const QString data = combo->itemData(candidate).toString().toLower();
                     const bool legacyCubic = field.key == "frame_mixer" && data == "cubic";
-                    // Bill's retired-value rule for dithering applies on the Original pathway only;
-                    // VP-V's modes (ordered_lut, error_diffusion_*, Auto) are live values there.
-                    const bool vpvDither = field.key == "dithering" && !ditherOriginal;
+                    // Bill's retired-value rule for dithering applies to his control; VP-V's own list
+                    // (ordered_lut, error_diffusion_*, Auto) holds live values (VpvScalingRows.h).
+                    const bool vpvDither = field.widget->property("vpvOwnChoices").toBool();
                     const bool retired = legacyCubic || (field.key == "dithering" && !vpvDither &&
                         (data == "ordered_lut" || data.startsWith("error_diffusion_") || data == "on" || data == "auto"));
                     const bool staticAuto = data == "auto" && !vpvDither && !Vpv::IsVpvChoiceKey(field.key) &&
@@ -12846,13 +12450,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 }
             }
         state->loading = false;
-		// The queue target's mode follows the loaded fields (loading blocks their signals).
-		if (sectionPrefix == QStringLiteral("queue"))
-		{
-			if (auto* refresh = profileFields->findChild<QAction*>(
-				controlName(sectionPrefix, QStringLiteral("target_mode_refresh"))))
-				refresh->trigger();
-		}
+		if (sectionPrefix == QStringLiteral("queue")) Vpv::RefreshQueueRows(*fields);   // VPV-HOOK (VP-V's queue target follows the loaded fields)
 		// VP-V organisation pass (2026-10-24, src/VP-V/config/VpvOrganisation.h): the VP-V page moves some
 		// of this profile's sections and rows onto its unit tabs (still bound to this profile), so a
 		// lookup that misses profileFields also searches the whole editor (the names are unique there).
@@ -13030,7 +12628,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 advanced->setChecked(true);
         });
         connect(queuePolicy, qOverload<int>(&QComboBox::currentIndexChanged), this,
-            [this, queuePolicy, state, fields, profileFields, updateQueuePolicyPresentation](int index)
+            [this, queuePolicy, state, fields, updateQueuePolicyPresentation](int index)
         {
             if (state->loading || state->section.isEmpty() || !document_ || index < 0) return;
             const QString selectedId = queuePolicy->itemData(index).toString();
@@ -13052,9 +12650,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             setValue("lead_frames", selected->lead);
             setValue("startup_preroll_frames", 0);
             setValue("target_frames", selected->target);
-            setValue("target_latency_ms", 0);
-            // Stays automatic (follows the queue): the preset removes any explicit value.
-            document_->RemoveKnown(section, "active_picture_lookahead_frames");
+            setValue("active_picture_lookahead_frames", 0);
+            Vpv::QueuePresetWrites(*document_, section);   // VPV-HOOK (VP-V: the preset switches the delay off and keeps the look-ahead Auto)
             setValue("reset_after_render_restart_seconds", 5);
             setValue("reset_queue_too_large_percent", selected->resetPercent);
             for (const Field& field : *fields)
@@ -13066,28 +12663,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     else if (field.key == QStringLiteral("target_frames")) value = selected->target;
                     else if (field.key == QStringLiteral("reset_after_render_restart_seconds")) value = 5;
                     else if (field.key == QStringLiteral("reset_queue_too_large_percent")) value = selected->resetPercent;
-                    else if (field.key == QStringLiteral("active_picture_lookahead_frames")) value = -1;
+                    else if (field.key == QStringLiteral("active_picture_lookahead_frames")) value = -1;   // VPV-HOOK (VP-V's control: Auto; Bill's 0..8 shows 0)
                     QSignalBlocker blocker(field.widget);
                     qobject_cast<QSpinBox*>(field.widget)->setValue(value);
                 }
-            // A preset switches Target delay off; its note follows.
-            if (auto* note = findChild<QLabel*>(QStringLiteral("config.queue.target_latency_note")))
-                note->setText(queueLatencyNoteText(0));
-            // Low latency also takes VP's low-latency path, whatever the profile is called (audit
-            // 2026-10-16: on another name the look-ahead minimum raised a 1-frame queue's target to 5).
-            // The others return it to Not set (the Low_Latency name rule), so a deep queue never stays on it.
-            if (auto* path = profileFields->findChild<QComboBox*>(QStringLiteral("config.queue.low_latency_path")))
-            {
-                // On a profile named Low_Latency "Not set" means on: the other presets write off there.
-                const bool namedLowLatency = state->section.compare(QStringLiteral("queue.low_latency"), Qt::CaseInsensitive) == 0;
-                const int index = selectedId == QStringLiteral("low_latency") ? path->findData(QStringLiteral("on")) :
-                    (namedLowLatency ? path->findData(QStringLiteral("off")) : 0);
-                if (index >= 0 && path->currentIndex() != index) path->setCurrentIndex(index);
-            }
-            // The spin boxes were set under signal blockers: the By frames / By time buttons follow
-            // (audit 2026-10-16: By time stayed shown with Target frames hidden).
-            if (auto* refresh = profileFields->findChild<QAction*>(QStringLiteral("config.queue.target_mode_refresh")))
-                refresh->trigger();
+            Vpv::QueuePresetApplied(*fields, state->section, selectedId);   // VPV-HOOK (low-latency path, queue target and its note)
             markDirty();
             updateQueuePolicyPresentation();
         });
@@ -15221,1470 +14801,6 @@ QWidget* ConfigEditorWindow::createActionsPage()
         QStringLiteral("Run external commands when selected VideoProcessor events occur."), splitter);
 }
 
-// Audit 2026-10-17 (LED number boxes): enough decimals to show a stored
-// value as it is, so touching the box does not round it (at most 6).
-static int ledDisplayDecimals(const QString& raw, int decimals)
-{
-    const QString text = raw.trimmed();
-    bool valid = false;
-    text.toDouble(&valid);
-    const int point = text.indexOf(u'.');
-    if (!valid || point < 0) return decimals;
-    int digits = 0;
-    for (int i = point + 1; i < text.size() && text[i].isDigit(); ++i) ++digits;
-    return std::max(decimals, std::min(digits, 6));
-}
-
-// A stored value outside the control's range is shown clamped: flag the box
-// (border, tool tip) and remember it for the page's note.
-static void flagClampedLedValue(QAbstractSpinBox* spin, const QString& raw, double minimum, double maximum)
-{
-    bool valid = false;
-    const double stored = raw.trimmed().toDouble(&valid);
-    if (!valid || (stored >= minimum && stored <= maximum)) return;
-    const QString note = QStringLiteral("The saved value %1 is outside %2 to %3; it is shown as %4 and kept in the "
-        "file until this box is changed.").arg(raw.trimmed()).arg(minimum).arg(maximum)
-        .arg(stored < minimum ? minimum : maximum);
-    spin->setProperty("clampedFrom", raw.trimmed());
-    spin->setProperty("clampedNote", note);
-    spin->setToolTip(spin->toolTip().isEmpty() ? note : spin->toolTip() + QStringLiteral("\n") + note);
-    spin->setStyleSheet(QStringLiteral("border: 1px solid #e0a040;"));
-}
-
-QWidget* ConfigEditorWindow::createLedDrivePage()
-{
-    // Plain [led_drive.Default] / [projector.Default] settings (Stage 7). Only
-    // the core choices are here; everything else comes from the built-in
-    // profile (the beta_22 script's curve and tables) or an LED profile file.
-    // VP applies changes on Apply without restarting the LED module unless it
-    // starts or stops driving the projector.
-    const QString led = QStringLiteral("led_drive.default");
-    const QString projector = QStringLiteral("projector.default");
-    auto* cards = new ResponsiveCardGrid;
-
-    // The projector's LED cannot go below 60 with LPW1, so the controls start
-    // there; a configured value below it (the configuration allows 0-255) is
-    // shown as it is, not as 60 (audit 2026-10-16).
-    auto levelControl = [this, led](const QString& key, int fallback)
-    {
-        auto* spin = new QSpinBox;
-        spin->setObjectName(controlName(led, key));
-        bool valid = false;
-        const int configured = value(led, key).toInt(&valid);
-        const bool inRange = valid && configured >= 0 && configured <= 255;
-        spin->setRange(inRange ? std::min(60, configured) : 60, 255);
-        spin->setButtonSymbols(QAbstractSpinBox::UpDownArrows);
-        spin->setMaximumWidth(108);
-        spin->setAlignment(Qt::AlignRight);
-        spin->setValue(inRange ? configured : fallback);
-        flagClampedLedValue(spin, value(led, key), 0, 255);
-        connect(spin, qOverload<int>(&QSpinBox::valueChanged), this, [this, led, key](int level)
-        {
-            if (!document_) return;
-            const std::string section = led.toStdString();
-            if (!document_->SetKnown(section, key.toStdString().c_str(), std::to_string(level)))
-            {
-                document_->AddSection(section);
-                document_->SetKnown(section, key.toStdString().c_str(), std::to_string(level));
-            }
-            markDirty();
-        });
-        return spin;
-    };
-
-    auto* drive = new QWidget;
-    auto* driveForm = new QFormLayout(drive);
-    driveForm->setContentsMargins(0, 0, 0, 0);
-    driveForm->setVerticalSpacing(8);
-    auto* enabled = bindCheckField(QStringLiteral("Dynamic Drive on"), led, QStringLiteral("enabled"), false);
-    enabled->setAccessibleDescription(QStringLiteral(
-        "Lets VideoProcessor drive the projector's LED. Off: nothing is sent to the projector."));
-    driveForm->addRow(QString(), enabled);
-    // The LED core (owner 2026-10-14): one place that holds the port, sends
-    // and logs, fed by a chosen command source, with two switches. Older
-    // configurations name only `mode`; the source shown is read from it, and
-    // choosing a source writes command_source (and the matching mode).
-    QComboBox* ledSource = nullptr;
-    QCheckBox* ledAdaptive = nullptr;
-    QLabel* compensateWarning = nullptr;
-    QWidget* aheadRow = nullptr;
-    QWidget* aheadHelp = nullptr;
-    std::vector<QWidget*> pacingRows;
-    {
-        // An older file's retired source (command_source: python, mode:
-        // listen) shows, and runs, VP's copy of the script (owner 2026-10-15).
-        const QStringList sources = { QStringLiteral("internal_script"), QStringLiteral("compensate"),
-            QStringLiteral("none") };
-        auto* source = new QComboBox;
-        ledSource = source;
-        source->setObjectName(controlName(led, QStringLiteral("command_source")));
-        source->setAccessibleName(QStringLiteral("Command source"));
-        source->addItem(QStringLiteral("VP's copy of your script"), sources[0]);
-        source->addItem(QStringLiteral("Compensate (VP's own controller)"), sources[1]);
-        source->addItem(QStringLiteral("No LED commands"), sources[2]);
-        const QString legacyMode = value(led, QStringLiteral("mode")).trimmed().toLower();
-        QString configuredSource = value(led, QStringLiteral("command_source")).trimmed().toLower();
-        // An older file names `mode` and no command_source; a new file names
-        // neither (audit 2026-10-14c: only the former keeps the old switches).
-        const bool olderFile = configuredSource.isEmpty() && !legacyMode.isEmpty();
-        if (configuredSource.isEmpty())
-            configuredSource = legacyMode == QStringLiteral("listen") || legacyMode == QStringLiteral("script") ? sources[0] :
-                legacyMode == QStringLiteral("compensate") ? sources[1] : sources[2];
-        if (configuredSource == QStringLiteral("python"))
-            configuredSource = sources[0];
-        source->setCurrentIndex(std::max(0, static_cast<int>(sources.indexOf(configuredSource))));
-        driveForm->addRow(QStringLiteral("Command source"), source);
-        {
-            // Owner 2026-10-16: the source as mutually exclusive buttons; the drop-down stays as the
-            // value holder (hidden), so writing and older files behave as before.
-            auto* sourceButtons = new QWidget;
-            sourceButtons->setObjectName(controlName(led, QStringLiteral("command_source.buttons")));
-            auto* sourceLayout = new QHBoxLayout(sourceButtons);
-            sourceLayout->setContentsMargins(0, 0, 0, 0);
-            auto* sourceGroup = new QButtonGroup(sourceButtons);
-            sourceGroup->setExclusive(true);
-            const QStringList labels = { QStringLiteral("VP's copy of your script"), QStringLiteral("Compensate"),
-                QStringLiteral("No LED commands") };
-            QList<QRadioButton*> radios;
-            for (int i = 0; i < sources.size(); ++i)
-            {
-                auto* radio = new QRadioButton(labels[i]);
-                radio->setObjectName(controlName(led, QStringLiteral("command_source.") + sources[i]));
-                sourceGroup->addButton(radio, i);
-                sourceLayout->addWidget(radio);
-                radios.push_back(radio);
-                connect(radio, &QRadioButton::clicked, this, [source, i]() {
-                    if (source->currentIndex() != i) source->setCurrentIndex(i);
-                    else emit source->activated(i);   // converts an older file; writes "No LED commands" on a new one
-                });
-            }
-            sourceLayout->addStretch(1);
-            auto syncRadios = [source, radios]() {
-                for (int i = 0; i < radios.size(); ++i)
-                {
-                    const QSignalBlocker blocker(radios[i]);
-                    radios[i]->setChecked(source->currentIndex() == i);
-                }
-            };
-            connect(source, qOverload<int>(&QComboBox::currentIndexChanged), this, [syncRadios](int) { syncRadios(); });
-            syncRadios();
-            driveForm->addRow(QStringLiteral("Command source"), sourceButtons);
-            driveForm->setRowVisible(source, false);
-        }
-        driveForm->addRow(QString(), helpLabel(QStringLiteral(
-            "Where the LED and contrast commands come from. VP holds the RS-232 port, sends them and logs them. "
-            "VP's copy of your dimming script makes the script's decisions, in its rhythm. No LED "
-            "commands with adaptive gamma on: only VP's picture adjustments, the port left free.")));
-        // Adaptive gamma, shown as the file behaves: named; off for a new
-        // file; for an older mode-only file, on where the picture adapted
-        // there (compensate, picture only, script smoothing or a shadow lift).
-        const QString adaptiveText = value(led, QStringLiteral("adaptive_gamma")).trimmed().toLower();
-        const bool shadowLiftOn = value(led, QStringLiteral("shadow_lift_ansi")).toDouble() > 0.0;
-        const bool smoothingOn = value(led, QStringLiteral("script_smoothing")).trimmed().toLower() == QStringLiteral("true");
-        const bool adaptiveNow = !adaptiveText.isEmpty() ?
-            (adaptiveText == QStringLiteral("true") || adaptiveText == QStringLiteral("on") || adaptiveText == QStringLiteral("1")) :
-            olderFile && (legacyMode == QStringLiteral("compensate") || legacyMode == QStringLiteral("picture_only") ||
-                ((legacyMode == QStringLiteral("script") || legacyMode == QStringLiteral("listen")) && smoothingOn) || shadowLiftOn);
-        auto* adaptive = configuredCheck(QStringLiteral("Adaptive gamma"), QString(), adaptiveNow);
-        ledAdaptive = adaptive;
-        adaptive->setObjectName(controlName(led, QStringLiteral("adaptive_gamma")));
-        adaptive->setEnabled(true);
-        driveForm->addRow(QString(), adaptive);
-        driveForm->addRow(QString(), helpLabel(QStringLiteral(
-            "Off (the default): VP leaves the picture alone - exactly the projector's own steps. On: VP eases the "
-            "picture across each light and contrast step, and lifts the darks next to large highlights (the shadow "
-            "lift's strength, below).")));
-        compensateWarning = helpLabel(QStringLiteral(
-            "Compensate with adaptive gamma off: the LED still dims in dark scenes, but VP does not brighten the "
-            "picture to make up for it, so dark scenes look darker. Tick adaptive gamma for Compensate's normal "
-            "behaviour."));
-        compensateWarning->setObjectName(controlName(led, QStringLiteral("compensate_warning")));
-        driveForm->addRow(QString(), compensateWarning);
-        auto* ahead = bindCheckField(QStringLiteral("Look-ahead"), led, QStringLiteral("lookahead"), true);
-        aheadRow = ahead;
-        driveForm->addRow(QString(), ahead);
-        aheadHelp = helpLabel(QStringLiteral(
-            "VP sees the coming frames (every frame the queue profile holds; Low Latency holds none) and times each "
-            "change for when the LED gets there. Off: it reacts to the frame on screen."));
-        driveForm->addRow(QString(), aheadHelp);
-        // Restore switches (bug hunt 2 2026-10-17, owner decision): led_peak_full_coverage,
-        // led_picture_only.
-        auto* fullPeak = bindCheckField(QStringLiteral("Peak from every pixel of the picture (fix under test)"), led,
-            QStringLiteral("led_peak_full_coverage"), true);
-        fullPeak->setToolTip(QStringLiteral(
-            "On (default): Dynamic Drive's peak (the script's highlight test) is the brightest area of the whole "
-            "picture, averaged over areas the same share of the screen as your script's 854 x 480 screenshot "
-            "downscale - every pixel counts, so a small lamp or specular is never missed. Off: the brightest of "
-            "the sparse sample blocks, as before."));
-        driveForm->addRow(QString(), fullPeak);
-        auto* pictureOnly = bindCheckField(QStringLiteral("Measure the picture only, not subtitles (fix under test)"), led,
-            QStringLiteral("led_picture_only"), true);
-        pictureOnly->setToolTip(QStringLiteral(
-            "On (default): a subtitle VP has detected in the picture (and where VP shows a moved subtitle) is left "
-            "out of everything Dynamic Drive measures - peak, average level and highlights. Subtitles are "
-            "detected only with a subtitle style that moves them (Black or Generated gray); otherwise nothing is "
-            "left out. VP's own on-screen panels are never measured. Off: subtitles inside the picture count, "
-            "as before."));
-        driveForm->addRow(QString(), pictureOnly);
-        // Owner 2026-10-15: the script copy in the original script's own
-        // rhythm (the default) or a fixed loop.
-        auto* pacing = bindChoiceField(led, QStringLiteral("script_pacing"),
-            { QStringLiteral("script"), QStringLiteral("tick") },
-            { QStringLiteral("The script's own rhythm"), QStringLiteral("Fixed loop") });
-        pacing->setToolTip(QStringLiteral(
-            "How often VP's copy of the script decides. The script's own rhythm (the default): its measuring "
-            "time, then its commands with their pauses, then the next loop at once - the same commands at the "
-            "same moments as your original script. Fixed loop: every 400 ms."));
-        driveForm->addRow(QStringLiteral("Script pacing"), pacing);
-        pacingRows.push_back(pacing);
-        // Owner 2026-10-17: script_lookahead - the script copy looks ahead too.
-        auto* scriptAhead = bindCheckField(QStringLiteral("Look-ahead for the script"), led,
-            QStringLiteral("script_lookahead"), true);
-        scriptAhead->setToolTip(QStringLiteral(
-            "On (default): VP's copy of the script decides from the frame that will be on screen when its command "
-            "reaches the projector, using the frames already queued (the queue profile sets how many; Low Latency "
-            "queues none; a shorter queue uses its last frame). The script's own bands, steps, contrast logic and "
-            "rhythm are kept. A rise is aimed so the light has settled by its frame, a fall lands on its frame. A cut "
-            "to a brighter scene gets that scene's light and contrast landing on its first frame; out of black the light may come "
-            "up early, no higher than the pre-lift cap, while the picture is still black. When the queue covers the "
-            "projector's response (LED latency plus settle) the lowest LED level is 'Lowest LED level', otherwise "
-            "'Lowest LED level without look-ahead'. Off: decisions on the frame on screen, as your original script."));
-        driveForm->addRow(QString(), scriptAhead);
-        pacingRows.push_back(scriptAhead);
-        // Restore switch (bug hunt 2026-10-17): script_resend_failed_writes.
-        auto* resend = bindCheckField(QStringLiteral("Re-send a failed LED / contrast write (fix under test)"), led,
-            QStringLiteral("script_resend_failed_writes"), true);
-        resend->setToolTip(QStringLiteral(
-            "Script mode. On (default): an LPW1 or CNTR whose write failed (a port or write error; a missing "
-            "reply is not a failure) is sent again at the next decision with the script's current value (only "
-            "when that decision sends nothing itself, so the script's own commands are unchanged). Off: the pure "
-            "script stream - a failed write is not repeated."));
-        driveForm->addRow(QString(), resend);
-        auto pacingSpin = [this, led, driveForm](const char* key, int maximum, int fallback, const QString& label,
-            const QString& tip)
-        {
-            auto* spin = new QSpinBox;
-            spin->setObjectName(controlName(led, QString::fromLatin1(key)));
-            spin->setRange(0, maximum);
-            spin->setSingleStep(10);
-            spin->setSuffix(QStringLiteral(" ms"));
-            spin->setMaximumWidth(120);
-            spin->setAlignment(Qt::AlignRight);
-            spin->setToolTip(tip);
-            bool valid = false;
-            const int configured = value(led, QString::fromLatin1(key)).toInt(&valid);
-            spin->setValue(valid ? std::max(0, std::min(configured, maximum)) : fallback);
-            flagClampedLedValue(spin, value(led, QString::fromLatin1(key)), 0, maximum);
-            const std::string name = key;
-            connect(spin, qOverload<int>(&QSpinBox::valueChanged), this, [this, led, name](int ms)
-            {
-                if (!document_) return;
-                const std::string section = led.toStdString();
-                if (!document_->SetKnown(section, name.c_str(), std::to_string(ms)))
-                {
-                    document_->AddSection(section);
-                    document_->SetKnown(section, name.c_str(), std::to_string(ms));
-                }
-                markDirty();
-            });
-            driveForm->addRow(label, spin);
-            return spin;
-        };
-        pacingRows.push_back(pacingSpin("script_measure_ms", 2000, 150, QStringLiteral("Script's measuring time"),
-            QStringLiteral("How long your original script took to measure the picture (its screenshot): part of its rhythm. "
-                "Default 150.")));
-        pacingRows.push_back(pacingSpin("script_echo_ms", 1000, 30, QStringLiteral("Script's command time"),
-            QStringLiteral("How long each of the script's commands took to send (its echo to the port). Default 30.")));
-        // What every source change writes: the source, the matching mode for
-        // older builds (no LED commands: picture only when adaptive gamma is
-        // on), and adaptive gamma as shown, so nothing changes behind it.
-        auto writeSource = [this, led, source, adaptive]()
-        {
-            if (!document_) return;
-            const QString chosen = source->currentData().toString();
-            const std::string section = led.toStdString();
-            if (!document_->SetKnown(section, "command_source", chosen.toStdString()))
-            {
-                document_->AddSection(section);
-                document_->SetKnown(section, "command_source", chosen.toStdString());
-            }
-            const char* mode = chosen == QStringLiteral("internal_script") ? "script" :
-                chosen == QStringLiteral("compensate") ? "compensate" :
-                adaptive->isChecked() ? "picture_only" : "log_only";
-            document_->SetKnown(section, "mode", mode);
-            document_->SetKnown(section, "adaptive_gamma", adaptive->isChecked() ? "true" : "false");
-            markDirty();
-        };
-        // A pick writes even when it is the source already shown (an older
-        // file is converted; "No LED commands" can be chosen on a new file).
-        connect(source, qOverload<int>(&QComboBox::currentIndexChanged), this, [writeSource](int) { writeSource(); });
-        connect(source, qOverload<int>(&QComboBox::activated), this, [writeSource](int) { writeSource(); });
-        connect(adaptive, &QCheckBox::toggled, this, [this, led, source, writeSource](bool checked)
-        {
-            if (!document_) return;
-            if (value(led, QStringLiteral("command_source")).trimmed().isEmpty())
-            {
-                // An older file without a source: the box alone.
-                document_->SetKnown(led.toStdString(), "adaptive_gamma", checked ? "true" : "false");
-                markDirty();
-            }
-            else
-                writeSource();   // keeps the matching mode (picture only / log only)
-            (void)source;
-        });
-    }
-    // Compensate's own settings: shown only when it is the command source
-    // (audit 2026-10-14b: show only what the chosen source uses).
-    std::vector<QWidget*> compensateRows;
-    // The floors: compensate's and, with script_lookahead (owner 2026-10-17), the script copy's.
-    std::vector<QWidget*> floorRows;
-    auto* floor = levelControl(QStringLiteral("led_floor"), 100);
-    driveForm->addRow(QStringLiteral("Lowest LED level"), floor);
-    floorRows.push_back(floor);
-    floorRows.push_back(helpLabel(QStringLiteral(
-        "How far the LED may dim in dark scenes, 60 (darkest) to 255 (never dims), when VP can see the "
-        "coming frames far enough for the projector's response (Normal queue). The script copy's darkest band "
-        "continues its curve down to it.")));
-    driveForm->addRow(QString(), floorRows.back());
-    auto* floorReactive = levelControl(QStringLiteral("led_floor_reactive"), 100);
-    driveForm->addRow(QStringLiteral("Lowest LED level without look-ahead"), floorReactive);
-    floorRows.push_back(floorReactive);
-    floorRows.push_back(helpLabel(QStringLiteral(
-        "Used when VP cannot see ahead (Low Latency queue): it cannot prepare for a bright scene, so it "
-        "should not sit as low. Your script used 100.")));
-    driveForm->addRow(QString(), floorRows.back());
-    auto* floorBlack = levelControl(QStringLiteral("led_floor_black"), 60);
-    driveForm->addRow(QStringLiteral("Lowest level in fades to black"), floorBlack);
-    compensateRows.push_back(floorBlack);
-    // A fade can dim further than a scene, never less far.
-    floorBlack->setMaximum(floor->value());
-    connect(floor, qOverload<int>(&QSpinBox::valueChanged), floorBlack,
-        [floorBlack](int level) { floorBlack->setMaximum(level); });
-    auto* highlightProtection = bindChoiceField(led,
-        QStringLiteral("highlight_tolerance_stops"),
-        { QStringLiteral("0.33"), QStringLiteral("0.15"), QStringLiteral("0.6") },
-        { QStringLiteral("Medium"), QStringLiteral("Strong (keep highlights; the LED dims less)"),
-          QStringLiteral("Light (the LED dims more; highlights compress more)") });
-    driveForm->addRow(QStringLiteral("Highlight protection"), highlightProtection);
-    compensateRows.push_back(highlightProtection);
-    driveForm->addRow(QStringLiteral("Gamma boost"), bindChoiceField(led, QStringLiteral("gamma_boost"),
-        { QStringLiteral("off"), QStringLiteral("2.4") },
-        { QStringLiteral("Off (plain output gamma)"),
-          QStringLiteral("2.4 (the look of the old output gamma 2.4)") }));
-    // The projector's light exponent on the final code, which Compensate
-    // linearises with (compensation_eotf). A number, because it is whatever a
-    // light meter says (design review 3, SF-1); 2.41 is the FL35's light-meter
-    // fit (delta 4). The gamma boost no longer depends on it.
-    auto* projectorGamma = new QDoubleSpinBox;
-    projectorGamma->setObjectName(controlName(led, QStringLiteral("compensation_eotf")));
-    projectorGamma->setAccessibleName(QStringLiteral("Projector gamma"));
-    projectorGamma->setRange(1.0, 3.0);
-    projectorGamma->setDecimals(ledDisplayDecimals(value(led, QStringLiteral("compensation_eotf")), 2));
-    projectorGamma->setSingleStep(0.01);
-    projectorGamma->setMaximumWidth(120);
-    projectorGamma->setAlignment(Qt::AlignRight);
-    {
-        bool valid = false;
-        const double configured = value(led, QStringLiteral("compensation_eotf")).toDouble(&valid);
-        // The spin box's own range (1.0-3.0, as the LED validation); was clamped to 1.8 (audit 2026-10-16).
-        projectorGamma->setValue(valid ? std::max(1.0, std::min(configured, 3.0)) : 2.41);
-        flagClampedLedValue(projectorGamma, value(led, QStringLiteral("compensation_eotf")), 1.0, 3.0);
-    }
-    connect(projectorGamma, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-        [this, led, projectorGamma](double exponent)
-    {
-        if (!document_) return;
-        const std::string section = led.toStdString();
-        const std::string text = QString::number(exponent, 'f', projectorGamma->decimals()).toStdString();
-        if (!document_->SetKnown(section, "compensation_eotf", text))
-        {
-            document_->AddSection(section);
-            document_->SetKnown(section, "compensation_eotf", text);
-        }
-        markDirty();
-    });
-    driveForm->addRow(QStringLiteral("Projector gamma"), projectorGamma);
-    driveForm->addRow(QString(), helpLabel(QStringLiteral(
-        "Projector gamma is how the projector turns the final signal into light; Compensate needs it to keep the "
-        "picture's brightness exact while the LED dims. 2.41 is the FL35's light-meter measurement; change it "
-        "only if a new measurement says otherwise. It does not change the gamma boost.\n"
-        "The gamma boost applies even with Dynamic Drive off. Switching Dynamic Drive on or off returns the "
-        "projector to full light; other changes carry on from the current level.")));
-
-    // Experimental: deeper fade to black with the projector's custom LED dim.
-    // Off by default; its options stay greyed out until it is switched on.
-    auto* experiment = new QWidget;
-    auto* experimentForm = new QFormLayout(experiment);
-    experimentForm->setContentsMargins(0, 0, 0, 0);
-    experimentForm->setVerticalSpacing(8);
-    auto saveLed = [this, led](const QString& key, const QString& text)
-    {
-        if (!document_) return;
-        const std::string section = led.toStdString();
-        if (!document_->SetKnown(section, key.toStdString().c_str(), text.toLocal8Bit().constData()))
-        {
-            document_->AddSection(section);
-            document_->SetKnown(section, key.toStdString().c_str(), text.toLocal8Bit().constData());
-        }
-        markDirty();
-    };
-    const QString configuredMethod = value(led, QStringLiteral("ftb_custom_dim")).trimmed().toLower();
-    const bool experimentOn = configuredMethod == QStringLiteral("together") ||
-        configuredMethod == QStringLiteral("turns");
-    auto* experimentEnabled = new QCheckBox(QStringLiteral("Experimental: deeper fade to black (custom LED dim)"));
-    experimentEnabled->setObjectName(QStringLiteral("config.led_drive.default.ftb_experimental"));
-    experimentEnabled->setChecked(experimentOn);
-    experimentForm->addRow(QString(), experimentEnabled);
-    auto* method = new QComboBox;
-    method->setObjectName(QStringLiteral("config.led_drive.default.ftb_custom_dim"));
-    method->addItem(QStringLiteral("All three colours together"), QStringLiteral("together"));
-    method->addItem(QStringLiteral("Colours taking turns in small steps"), QStringLiteral("turns"));
-    method->setCurrentIndex(configuredMethod == QStringLiteral("turns") ? 1 : 0);
-    experimentForm->addRow(QStringLiteral("Method"), method);
-    auto numberSetting = [this, led, saveLed](const QString& key, int minimum, int maximum, int fallback,
-        const QString& suffix)
-    {
-        auto* spin = new QSpinBox;
-        spin->setObjectName(controlName(led, key));
-        spin->setRange(minimum, maximum);
-        spin->setMaximumWidth(120);
-        spin->setAlignment(Qt::AlignRight);
-        if (!suffix.isEmpty()) spin->setSuffix(suffix);
-        bool valid = false;
-        const int configured = value(led, key).toInt(&valid);
-        spin->setValue(valid ? std::max(minimum, std::min(configured, maximum)) : fallback);
-        flagClampedLedValue(spin, value(led, key), minimum, maximum);
-        connect(spin, qOverload<int>(&QSpinBox::valueChanged), this,
-            [saveLed, key](int number) { saveLed(key, QString::number(number)); });
-        return spin;
-    };
-    auto* stepMs = numberSetting(QStringLiteral("ftb_step_ms"), 50, 1000, 100, QStringLiteral(" ms"));
-    experimentForm->addRow(QStringLiteral("Step interval"), stepMs);
-    // How far each colour moves per command when taking turns: smaller keeps
-    // the three colours closer (less colour shift) but takes longer.
-    auto* turnStep = numberSetting(QStringLiteral("ftb_turn_step"), 1, 50, 2, QStringLiteral(" levels"));
-    experimentForm->addRow(QStringLiteral("Step size per colour"), turnStep);
-    // The FL35's custom LED dim runs 0-40 per colour (40 is about 40/255, below
-    // LPW1's 60; 0 is off).
-    auto* customStart = numberSetting(QStringLiteral("ftb_custom_start"), 1, 40, 40, QString());
-    experimentForm->addRow(QStringLiteral("Starting custom level (1-40)"), customStart);
-    auto* customFloor = numberSetting(QStringLiteral("ftb_custom_floor"), 0, 39, 0, QString());
-    experimentForm->addRow(QStringLiteral("Deepest custom level (0 = off)"), customFloor);
-    customFloor->setMaximum(customStart->value() - 1);
-    connect(customStart, qOverload<int>(&QSpinBox::valueChanged), customFloor,
-        [customFloor](int start) { customFloor->setMaximum(start - 1); });
-    experimentForm->addRow(QString(), helpLabel(QStringLiteral(
-        "When the picture has been black for half a second and the LED is at its "
-        "fade-to-black level, VP switches the projector to its custom LED dim and steps the red, green and "
-        "blue LEDs down, one command per step interval; at the first light it switches back. \"Taking turns\" "
-        "keeps the three colours within one small step of each other, so the black does not change colour. "
-        "The custom dim runs 0-40 (40 is about 40/255, a small step down from LPW1's 60; 0 turns the LEDs "
-        "off, true black).")));
-    // Fix under test (audit 2026-10-16), default on.
-    auto* correctionByTime = bindCheckField(QStringLiteral("Fix under test: look-ahead correction smoothed by real time"),
-        led, QStringLiteral("correction_weight_by_time"), true);
-    correctionByTime->setToolTip(QStringLiteral(
-        "VP compares each measured frame with what the look-ahead predicted for it and smooths the "
-        "difference over about three seconds. On: each update counts for the real time since the last one "
-        "(24p film on a 60 Hz output updates once per film frame, so it settles in about three seconds). "
-        "Off: each update counts for one output frame, as before (about 2.5 times slower with 24p on 60 Hz)."));
-    experimentForm->addRow(QString(), correctionByTime);
-    // Audit 2026-10-16: full light after no video (every source), on the main LED card.
-    auto* idleRestore = numberSetting(QStringLiteral("led_idle_restore_s"), 0, 600, 10, QStringLiteral(" s"));
-    idleRestore->setToolTip(QStringLiteral(
-        "After this many seconds without a video frame (pause, stop), VP puts the LED back to the LED ceiling "
-        "and CNTR to 50 (and leaves the custom dim). VP's copy of your script stops acting on the last frame "
-        "until video returns. 0 keeps the projector where it was, as before."));
-    driveForm->addRow(QStringLiteral("Full light after no video (0 = off)"), idleRestore);
-    auto syncExperiment = [experimentEnabled, method, stepMs, turnStep, customStart, customFloor]
-    {
-        const bool on = experimentEnabled->isChecked();
-        for (QWidget* control : std::vector<QWidget*>{ method, stepMs, customStart, customFloor })
-            control->setEnabled(on);
-        // The step size only matters when the colours take turns.
-        turnStep->setEnabled(on && method->currentData().toString() == QStringLiteral("turns"));
-    };
-    syncExperiment();
-    connect(experimentEnabled, &QCheckBox::toggled, this, [syncExperiment, saveLed, method](bool on)
-    {
-        syncExperiment();
-        saveLed(QStringLiteral("ftb_custom_dim"), on ? method->currentData().toString() : QStringLiteral("off"));
-    });
-    connect(method, qOverload<int>(&QComboBox::currentIndexChanged), this,
-        [experimentEnabled, saveLed, method, syncExperiment](int)
-    {
-        syncExperiment();
-        if (experimentEnabled->isChecked())
-            saveLed(QStringLiteral("ftb_custom_dim"), method->currentData().toString());
-    });
-
-    auto* profile = new QWidget;
-    auto* profileLayout = new QVBoxLayout(profile);
-    profileLayout->setContentsMargins(0, 0, 0, 0);
-    profileLayout->setSpacing(8);
-    auto* profileRow = new QHBoxLayout;
-    auto* profilePath = bindTextField(led, QStringLiteral("profile_file"));
-    profilePath->setPlaceholderText(QStringLiteral("Built-in (your dimming script's values)"));
-    auto* browse = new QPushButton(QStringLiteral("Browse…"));
-    browse->setObjectName(QStringLiteral("config.led_drive.default.profile_browse"));
-    auto* builtIn = new QPushButton(QStringLiteral("Use built-in"));
-    builtIn->setObjectName(QStringLiteral("config.led_drive.default.profile_builtin"));
-    profileRow->addWidget(profilePath, 1);
-    profileRow->addWidget(browse);
-    profileRow->addWidget(builtIn);
-    profileLayout->addLayout(profileRow);
-    profileLayout->addWidget(helpLabel(QStringLiteral(
-        "Optional. A profile file can change the light curve, step tables, ramp speeds "
-        "and the other LED details; anything it leaves out uses the built-in value, and the settings on this page "
-        "always win. Projector settings (connection, LED response time, flux table) are not read from a profile. "
-        "See docs\\cinema\\LED-PROFILE-GUIDE.md.")));
-    connect(browse, &QPushButton::clicked, this, [this, profilePath]
-    {
-        const QString start = QFileInfo(configPath_).absolutePath();
-        const QString chosen = QFileDialog::getOpenFileName(this, QStringLiteral("LED profile"),
-            start, QStringLiteral("LED profiles (*.cfg *.txt);;All files (*)"));
-        if (chosen.isEmpty()) return;
-        // Next to the configuration: store just the name, so the folder can move.
-        const QString relative = QDir(start).relativeFilePath(chosen);
-        profilePath->setText(relative.startsWith(QStringLiteral("..")) ? chosen : relative);
-    });
-    connect(builtIn, &QPushButton::clicked, profilePath, [profilePath] { profilePath->clear(); });
-    // Audit round 2: a broken profile no longer stops VP (it is left out),
-    // so say here when VP would leave it out.
-    auto* profileStatus = helpLabel(QString());
-    profileStatus->setObjectName(QStringLiteral("config.led_drive.default.profile_status"));
-    profileLayout->addWidget(profileStatus);
-    const auto checkProfile = [this, profileStatus](const QString& text)
-    {
-        const QString name = text.trimmed();
-        if (name.isEmpty() || remoteClient_)
-        {
-            profileStatus->setVisible(false);
-            return;
-        }
-        const QString full = QFileInfo(name).isAbsolute() ? name :
-            QDir(QFileInfo(configPath_).absolutePath()).filePath(name);
-        std::string problem;
-        const bool ok = LedDrive::ValidateLedProfileFile(
-            QDir::toNativeSeparators(full).toLocal8Bit().toStdString(), problem);
-        profileStatus->setText(ok ? QStringLiteral("Profile file OK.") :
-            QStringLiteral("VP will ignore this profile and use the built-in values: %1")
-                .arg(QString::fromLocal8Bit(problem.c_str())));
-        profileStatus->setVisible(true);
-    };
-    connect(profilePath, &QLineEdit::textChanged, this, checkProfile);
-    checkProfile(profilePath->text());
-    browse->setEnabled(!remoteClient_);
-    if (remoteClient_)
-        browse->setToolTip(QStringLiteral("The profile file must be on the VP computer; type its path."));
-
-    auto* connection = new QWidget;
-    auto* connectionForm = new QFormLayout(connection);
-    connectionForm->setContentsMargins(0, 0, 0, 0);
-    connectionForm->setVerticalSpacing(8);
-    // VP's default is no projector (audit 2026-10-14c: an unset protocol
-    // showed Barco while VP opened nothing); picking a source that drives
-    // the projector switches it to Barco (below).
-    auto* protocolChoice = bindChoiceField(projector, QStringLiteral("protocol"),
-        { QStringLiteral("none"), QStringLiteral("barco_ascii") },
-        { QStringLiteral("No projector (never open a port)"), QStringLiteral("Barco serial (RS232)") });
-    connectionForm->addRow(QStringLiteral("Protocol"), protocolChoice);
-    auto* port = bindTextField(projector, QStringLiteral("port"), QStringLiteral("COM1"));
-    port->setMaximumWidth(140);
-    connectionForm->addRow(QStringLiteral("COM port"), port);
-    // How long the projector takes to change the light after a command; the
-    // picture gain is timed to land with it. Tuned by eye on scene changes.
-    auto* latency = new QSpinBox;
-    latency->setObjectName(controlName(projector, QStringLiteral("led_latency_ms")));
-    latency->setRange(0, 2000);
-    latency->setSingleStep(10);
-    latency->setSuffix(QStringLiteral(" ms"));
-    latency->setMaximumWidth(120);
-    latency->setAlignment(Qt::AlignRight);
-    {
-        bool valid = false;
-        const int configured = value(projector, QStringLiteral("led_latency_ms")).toInt(&valid);
-        latency->setValue(valid ? std::max(0, std::min(configured, 2000)) : 80);
-        flagClampedLedValue(latency, value(projector, QStringLiteral("led_latency_ms")), 0, 2000);
-    }
-    connect(latency, qOverload<int>(&QSpinBox::valueChanged), this, [this, projector](int ms)
-    {
-        if (!document_) return;
-        const std::string section = projector.toStdString();
-        if (!document_->SetKnown(section, "led_latency_ms", std::to_string(ms)))
-        {
-            document_->AddSection(section);
-            document_->SetKnown(section, "led_latency_ms", std::to_string(ms));
-        }
-        markDirty();
-    });
-    connectionForm->addRow(QStringLiteral("LED response time"), latency);
-    connectionForm->addRow(QString(), helpLabel(QStringLiteral(
-        "How long the light takes to change after VP sends a command; the picture gain is timed to land with "
-        "it. On a dark-to-bright cut: a glow or lifted blacks just before the cut - lower it; the bright scene "
-        "starts too dark or dips - raise it. Change in steps of 20 ms. Default 80.")));
-    // The same for the projector's contrast (CNTR): script mode's smoothing
-    // times VP's gain with it.
-    auto* contrastLatency = new QSpinBox;
-    contrastLatency->setObjectName(controlName(projector, QStringLiteral("cntr_latency_ms")));
-    contrastLatency->setRange(0, 2000);
-    contrastLatency->setSingleStep(10);
-    contrastLatency->setSuffix(QStringLiteral(" ms"));
-    contrastLatency->setMaximumWidth(120);
-    contrastLatency->setAlignment(Qt::AlignRight);
-    {
-        bool valid = false;
-        const int configured = value(projector, QStringLiteral("cntr_latency_ms")).toInt(&valid);
-        // audit 2026-10-16: clamp to the control's range (0-2000), not 500.
-        contrastLatency->setValue(valid ? std::max(contrastLatency->minimum(),
-            std::min(configured, contrastLatency->maximum())) : 80);
-        flagClampedLedValue(contrastLatency, value(projector, QStringLiteral("cntr_latency_ms")), 0, 2000);
-    }
-    connect(contrastLatency, qOverload<int>(&QSpinBox::valueChanged), this, [this, projector](int ms)
-    {
-        if (!document_) return;
-        const std::string section = projector.toStdString();
-        if (!document_->SetKnown(section, "cntr_latency_ms", std::to_string(ms)))
-        {
-            document_->AddSection(section);
-            document_->SetKnown(section, "cntr_latency_ms", std::to_string(ms));
-        }
-        markDirty();
-    });
-    connectionForm->addRow(QStringLiteral("Contrast response time"), contrastLatency);
-    connectionForm->addRow(QString(), helpLabel(QStringLiteral(
-        "How long the projector's contrast takes to change after a command. Used to time VP's picture "
-        "adjustment with each contrast step (adaptive gamma, and Compensate): if the picture briefly dips or "
-        "brightens at a contrast step, adjust it in steps of 20 ms. Default 80.")));
-    auto* readBack = bindCheckField(QStringLiteral("Read the projector's replies"), projector,
-        QStringLiteral("read_back"), false);
-    connectionForm->addRow(QString(), readBack);
-    connectionForm->addRow(QString(), helpLabel(QStringLiteral(
-        "Default off: send only, exactly like the original script (which never read the projector back). "
-        "Start-up still reaches a known state without replies: light to the ceiling and CNTR 50 are sent "
-        "unconditionally, and the light range comes from LED floor / ceiling. A send is retried only when the "
-        "write itself fails. On (diagnostics, the old behaviour): wait for each reply, ask the projector its "
-        "range and state at start-up and log lost commands. The RS-232 connection test always reads back. "
-        "19200 baud, 8 data bits, no parity, 1 stop bit, no flow control.")));
-    // RS-232 connection test: LED 60, read back, 5 s, LED 255, read back.
-    auto* testButton = new QPushButton(QStringLiteral("Test RS-232 connection"));
-    testButton->setObjectName(controlName(projector, QStringLiteral("connection_test")));
-    testButton->setToolTip(QStringLiteral(
-        "Sets the LED to 60, reads it back, waits 5 seconds, sets 255 and reads it back (about 8 s). Uses the "
-        "saved settings (Apply first). With VideoProcessor running it pauses Dynamic Drive for the test; it is "
-        "refused while video is playing. Without VideoProcessor, Config opens the port itself."));
-    auto* testResult = new QLabel;
-    testResult->setObjectName(controlName(projector, QStringLiteral("connection_test.result")));
-    testResult->setWordWrap(true);
-    testResult->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    connectionForm->addRow(testButton, testResult);
-    if (projectorTestThread_)
-    {
-        // audit 2026-10-16: a test started before this page was rebuilt.
-        testButton->setEnabled(false);
-        testResult->setText(QStringLiteral("Testing… about 8 s"));
-    }
-    // audit 2026-10-16: a rebuild (Cancel, reload, target switch) deletes
-    // this button and label while the ~8 s test runs; guard them with
-    // QPointer and keep the worker in a member that the destructor waits for.
-    connect(testButton, &QPushButton::clicked, this, [this, projector, button = QPointer<QPushButton>(testButton),
-        label = QPointer<QLabel>(testResult)]
-    {
-        if (noTarget_ || !button || !label) return;
-        if (sandboxPreview())
-        {
-            label->setText(QStringLiteral("Settings preview: VP is not connected, so the projector cannot be tested."));
-            return;
-        }
-        if (projectorTestThread_)
-        {
-            label->setStyleSheet(QString());
-            label->setText(QStringLiteral("A connection test is already running; wait for it to finish."));
-            return;
-        }
-        QPushButton* testButton = button;
-        QLabel* testResult = label;
-        const bool remote = remoteClient_ != nullptr;
-        const QString host = remote ? remoteHost_ : QStringLiteral("127.0.0.1");
-        const quint16 rpcPort = remote ? remotePort_ : 41686;
-        const std::string configPath = configPath_.toStdString();
-        testButton->setEnabled(false);
-        testResult->setStyleSheet(QString());
-        testResult->setText(dirty_ ?
-            QStringLiteral("Testing with the saved settings (unapplied changes are not used)… about 8 s") :
-            QStringLiteral("Testing… about 8 s"));
-        struct Outcome { bool pass = false; bool refused = false; QString summary, details; };
-        const auto outcome = std::make_shared<Outcome>();
-        QThread* worker = QThread::create([outcome, host, rpcPort, remote, configPath]
-        {
-            ConfigurationRpcClient client(host.toStdString(), rpcPort);
-            ConfigurationRpcClient::ProjectorTestResult rpc;
-            std::string error;
-            if (client.RunProjectorTest(rpc, error))
-            {
-                outcome->pass = rpc.pass;
-                outcome->refused = rpc.refused;
-                outcome->summary = QString::fromStdString(rpc.summary);
-                outcome->details = QString::fromStdString(rpc.details);
-                return;
-            }
-            // Config opens the port itself only when no VP runs on this
-            // computer. A VP that runs but does not answer (busy, a test
-            // already running, its RPC off) keeps the port and its playback
-            // refusal: show its error (audit stage8-rs232 item 2).
-            if (remote || LocalVideoProcessorRunning())
-            {
-                outcome->summary = QStringLiteral("FAIL: ") + QString::fromStdString(error);
-                return;
-            }
-            ConfigFile config;
-            if (configPath.empty() || !config.Load(configPath))
-            {
-                outcome->summary = QStringLiteral("FAIL: could not read the configuration");
-                return;
-            }
-            const LedDrive::ConnectionTestResult result = LedDrive::RunConnectionTestOnNewConnection(
-                LedDrive::ReadProjectorConfig(config), [] { return LedDrive::CreateWin32SerialPort(); });
-            outcome->pass = result.pass;
-            outcome->summary = QString::fromStdString(result.summary) +
-                QStringLiteral(" (tested by Config; VideoProcessor is not running)");
-            for (const std::string& line : result.lines)
-                outcome->details += QString::fromStdString(line) + QLatin1Char('\n');
-        });
-        worker->setParent(this);
-        projectorTestThread_ = worker;
-        connect(worker, &QThread::finished, this, [this, projector, worker, outcome, button, label]
-        {
-            if (projectorTestThread_ == worker) projectorTestThread_ = nullptr;
-            worker->deleteLater();
-            // audit 2026-10-16: find the current page's controls by name when
-            // the originals were rebuilt meanwhile.
-            QPointer<QPushButton> shownButton = button;
-            QPointer<QLabel> shownResult = label;
-            if (!shownButton)
-                shownButton = findChild<QPushButton*>(controlName(projector,
-                    QStringLiteral("connection_test")));
-            if (!shownResult)
-                shownResult = findChild<QLabel*>(controlName(projector,
-                    QStringLiteral("connection_test.result")));
-            if (shownButton) shownButton->setEnabled(true);
-            if (!shownResult) return;
-            shownResult->setText(outcome->summary);
-            shownResult->setToolTip(outcome->details.trimmed());
-            shownResult->setStyleSheet(outcome->pass ? QStringLiteral("color: #2e7d32;") :
-                outcome->refused ? QString() : QStringLiteral("color: #c62828;"));
-        });
-        worker->start();
-    });
-
-    // Stage 7 step 7c (control policy; the owner's correction): compensate's
-    // contrast assist, cuts, speeds and the projector's response. Every
-    // setting has a control; a speed set to "preset" is removed from the
-    // file so rate_preset applies.
-    auto numberControl = [this](const QString& section, const QString& key, double minimum, double maximum,
-        int decimals, double step, double fallback, const QString& special)
-    {
-        auto* spin = new QDoubleSpinBox;
-        spin->setObjectName(controlName(section, key));
-        spin->setAccessibleName(accessibleSettingName(key));
-        spin->setDecimals(ledDisplayDecimals(value(section, key), decimals));
-        spin->setSingleStep(step);
-        spin->setRange(special.isEmpty() ? minimum : minimum - step, maximum);
-        if (!special.isEmpty()) spin->setSpecialValueText(special);
-        spin->setMaximumWidth(120);
-        spin->setAlignment(Qt::AlignRight);
-        bool valid = false;
-        const double configured = value(section, key).toDouble(&valid);
-        spin->setValue(valid ? std::max(minimum, std::min(configured, maximum)) :
-            (special.isEmpty() ? fallback : spin->minimum()));
-        // A value below a special value's minimum is that special value (-1).
-        if (special.isEmpty() || !valid || configured >= minimum)
-            flagClampedLedValue(spin, value(section, key), minimum, maximum);
-        connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-            [this, section, key, spin](double number)
-        {
-            if (!document_) return;
-            const std::string name = section.toStdString();
-            if (!spin->specialValueText().isEmpty() && number <= spin->minimum())
-                document_->RemoveKnown(name, key.toStdString().c_str());
-            else
-            {
-                const std::string text = QString::number(number, 'f', spin->decimals()).toStdString();
-                if (!document_->SetKnown(name, key.toStdString().c_str(), text))
-                {
-                    document_->AddSection(name);
-                    document_->SetKnown(name, key.toStdString().c_str(), text);
-                }
-            }
-            markDirty();
-        });
-        return spin;
-    };
-
-    // Delta 11: the boost's toe and the scene-adaptive shadow lift.
-    auto* boostKnee = numberControl(led, QStringLiteral("gamma_boost_knee"), 0.0, 0.5, 2, 0.01, 0.0, QString());
-    boostKnee->setToolTip(QStringLiteral(
-        "Keep the darkest tones out of the gamma boost: below this part of the signal (0.10 = the bottom tenth) "
-        "the picture keeps its native contrast, so dark hair and shadows are not lifted flat. 0 = the boost "
-        "everywhere (as before)."));
-    driveForm->addRow(QStringLiteral("Boost spares the darks below"), boostKnee);
-    auto* boostKneeWidth = numberControl(led, QStringLiteral("gamma_boost_knee_width"), 0.0, 0.5, 2, 0.01, 0.05, QString());
-    boostKneeWidth->setToolTip(QStringLiteral(
-        "How gradually the boost comes in above that point (part of the signal; 0 = a hard switch). "
-        "Only matters when the setting above is not 0."));
-    driveForm->addRow(QStringLiteral("Boost blend width"), boostKneeWidth);
-    if (auto* boostChoice = drive->findChild<QComboBox*>(controlName(led, QStringLiteral("gamma_boost"))))
-    {
-        // The toe rows do nothing without the boost (audit 2026-10-14c).
-        auto greyBoost = [boostChoice, boostKnee, boostKneeWidth]()
-        {
-            const QString chosen = boostChoice->currentData().toString();
-            const bool on = !chosen.isEmpty() && chosen != QStringLiteral("off");
-            boostKnee->setEnabled(on);
-            boostKneeWidth->setEnabled(on);
-        };
-        connect(boostChoice, qOverload<int>(&QComboBox::currentIndexChanged), this, [greyBoost](int) { greyBoost(); });
-        greyBoost();
-    }
-    auto* shadowLift = numberControl(led, QStringLiteral("shadow_lift_ansi"), 0.0, 1.0, 2, 0.05, 0.0, QString());
-    shadowLift->setToolTip(QStringLiteral(
-        "When something bright shares a dark frame, the lens scatters a veil of light over the darks. This lifts "
-        "the darks in proportion to that veil so their texture stays visible; a dark frame with nothing bright "
-        "is left alone. 0 = off; 0.3 is a moderate lift. Needs adaptive gamma."));
-    driveForm->addRow(QStringLiteral("Shadow lift next to highlights"), shadowLift);
-    auto* liftRampLo = numberControl(led, QStringLiteral("shadow_lift_ansi_ramp_lo"), 0.0, 1.0, 3, 0.005, 0.01, QString());
-    liftRampLo->setToolTip(QStringLiteral(
-        "How much highlight it takes before the lift starts: brightness x share of the picture, so 0.01 is a "
-        "full-white area covering 1% of the frame. The lift is full at the next value."));
-    driveForm->addRow(QStringLiteral("Lift starts at highlight amount"), liftRampLo);
-    auto* liftRampHi = numberControl(led, QStringLiteral("shadow_lift_ansi_ramp_hi"), 0.0, 1.0, 3, 0.005, 0.10, QString());
-    liftRampHi->setToolTip(QStringLiteral(
-        "The highlight amount at which the lift reaches its full strength. Keep it above the start value."));
-    driveForm->addRow(QStringLiteral("Lift full at highlight amount"), liftRampHi);
-    auto* liftRate = numberControl(led, QStringLiteral("shadow_lift_ansi_rate"), 0.1, 10.0, 2, 0.1, 1.0, QString());
-    liftRate->setToolTip(QStringLiteral(
-        "How fast the lift follows a change in the highlights (full range per second; 1 = about a second). "
-        "A cut always takes the new value at once. Lower if a flash makes the darks pump."));
-    driveForm->addRow(QStringLiteral("Lift follows within (per second)"), liftRate);
-    const std::vector<QWidget*> shadowLiftRows = { shadowLift, liftRampLo, liftRampHi, liftRate };
-    auto* assist = new QWidget;
-    auto* assistForm = new QFormLayout(assist);
-    assistForm->setContentsMargins(0, 0, 0, 0);
-    assistForm->setVerticalSpacing(8);
-    assistForm->addRow(QString(), bindCheckField(QStringLiteral("Use the projector's contrast to help"), led,
-        QStringLiteral("cntr_assist"), true));
-    assistForm->addRow(QString(), bindCheckField(QStringLiteral("Software first"), led,
-        QStringLiteral("software_first"), true));
-    assistForm->addRow(QString(), bindCheckField(QStringLiteral("Ignore film grain in the highlight measure"), led,
-        QStringLiteral("led_highlight_grain_suppress"), true));
-    assistForm->addRow(QStringLiteral("Highest contrast for the assist"),
-        numberControl(led, QStringLiteral("cntr_assist_max"), 50, 100, 0, 1, 100, QString()));
-    assistForm->addRow(QString(), helpLabel(QStringLiteral(
-        "Compensate only. The contrast adds the light VP's gain cannot add without crushing highlights, so the "
-        "LED can dim further in scenes with highlights. Software first: VP's gain does what it can before the "
-        "contrast moves. 100 = no limit beyond the projector's usable contrast.")));
-    assistForm->addRow(QString(), bindCheckField(QStringLiteral("On a cut to a brighter scene, set the contrast to the cut level"),
-        led, QStringLiteral("cut_cntr_dump"), true));
-    assistForm->addRow(QStringLiteral("Contrast on a bright cut"),
-        numberControl(led, QStringLiteral("cut_cntr_level"), 50, 100, 0, 1, 59, QStringLiteral("auto (white clip)")));
-    assistForm->addRow(QString(), bindCheckField(QStringLiteral("Smooth fade-up after a bright cut"), led,
-        QStringLiteral("shaped_recovery"), true));
-    assistForm->addRow(QStringLiteral("Darkest start of a fade-up"),
-        numberControl(led, QStringLiteral("max_cut_dip"), 0.0, 1.0, 2, 0.05, 0.5, QString()));
-    assistForm->addRow(QStringLiteral("Contrast kept bright-side (%)"),
-        numberControl(led, QStringLiteral("recovery_bias_pct"), 0.0, 20.0, 1, 0.5, 3.0, QString()));
-    auto* prelift = levelControl(QStringLiteral("black_prelift_max"), 120);
-    assistForm->addRow(QStringLiteral("LED lift allowed while still black"), prelift);
-    // Review 2026-10-17 (docs/audit/VP-led-compensate-review-2026-10-17.md).
-    auto* blackOnly = bindCheckField(QStringLiteral("Pre-position only on true black (fix under test)"), led,
-        QStringLiteral("preposition_black_only"), true);
-    blackOnly->setToolTip(QStringLiteral(
-        "On (default): the contrast hold and the LED pre-lift when coming out of black apply only while the frame "
-        "the LED lands on is truly black, so a visible fade-in never carries the cut contrast. Off: also on very "
-        "dark frames, as before."));
-    assistForm->addRow(QString(), blackOnly);
-    auto* landingMs = bindCheckField(QStringLiteral("Time each command from when it was written (fix under test)"), led,
-        QStringLiteral("led_landing_ms"), true);
-    landingMs->setToolTip(QStringLiteral(
-        "On (default): each LED / contrast command lands its response time after the moment the port wrote it, on "
-        "the nearest frame. Off: it is credited to the frame during which it was written and lands whole frames "
-        "later, as before."));
-    assistForm->addRow(QString(), landingMs);
-    auto* cutLead = bindChoiceField(led, QStringLiteral("cut_lead"),
-        { QStringLiteral("off"), QStringLiteral("window") },
-        { QStringLiteral("Off (default)"), QStringLiteral("As soon as the cut is seen (experimental)") });
-    cutLead->setToolTip(QStringLiteral(
-        "Experimental. As soon as the cut is seen: a bright cut found in the look-ahead gets its LED jump when it "
-        "enters the look-ahead window; until the cut the LED holds and the contrast does not rise. Off: the jump "
-        "goes out at the command latency ahead of the cut, as before."));
-    assistForm->addRow(QStringLiteral("Bright cut lead (experimental)"), cutLead);
-    auto* lookaheadMs = numberControl(led, QStringLiteral("led_lookahead_ms"), 0, 2000, 0, 10, 0,
-        QStringLiteral("queue depth"));
-    lookaheadMs->setToolTip(QStringLiteral(
-        "An optional cap on how far ahead the LED looks, in milliseconds (converted with the measured source rate). "
-        "0 (default): every frame the queue profile has queued (Normal, Reliable: their queue; Low Latency: none, "
-        "so the LED reacts to the frame on screen). Above 0: at most that far, never past what is queued. "
-        "Independent of the active-picture look-ahead."));
-    assistForm->addRow(QStringLiteral("LED look-ahead (ms)"), lookaheadMs);
-    // Restore switch (bug hunt 2026-10-17): led_wtw_passthrough.
-    auto* wtw = bindCheckField(QStringLiteral("Above-white keeps its value under a boost (fix under test)"), led,
-        QStringLiteral("led_wtw_passthrough"), true);
-    wtw->setToolTip(QStringLiteral(
-        "On (default): when VP's gain brightens the picture, whiter-than-white detail keeps its own value instead "
-        "of being rolled under white with the boosted picture (owner rule: keep BTB and WTW). Off: as before."));
-    assistForm->addRow(QString(), wtw);
-    // Restore switch (bug hunt 2 2026-10-17): led_btb_passthrough.
-    auto* btb = bindCheckField(QStringLiteral("Below-black passes through unchanged (fix under test)"), led,
-        QStringLiteral("led_btb_passthrough"), true);
-    btb->setToolTip(QStringLiteral(
-        "On (default): blacker-than-black detail leaves VP's compensation exactly as captured - the gain and the "
-        "gamma boost act only on the picture above black, so below-black codes are never pushed to the floor and "
-        "clipped when the LED dims (owner rule: keep BTB and WTW). Off: below black is boosted and gained with the "
-        "picture, as before."));
-    assistForm->addRow(QString(), btb);
-    // Post-merge audit 2026-10-17 (owner rule: CNTR above need is a defect): cntr_pair_predict.
-    auto* pairPredict = bindCheckField(QStringLiteral("Contrast paired with the LED where it lands (fix under test)"), led,
-        QStringLiteral("cntr_pair_predict"), true);
-    pairPredict->setToolTip(QStringLiteral(
-        "On (default): each contrast step is chosen for the LED as it will be when the step lands (contrast "
-        "response time ahead: the LED commands in flight and its settling), so contrast is never left above "
-        "what is needed when it arrives - for example while the LED rises out of a dark scene. During the "
-        "fade-up after a bright cut contrast only goes down, counting only the picture gain the fade-up allows. "
-        "Off: paired with the LED as it is now (the earlier behaviour)."));
-    assistForm->addRow(QString(), pairPredict);
-    assistForm->addRow(QString(), helpLabel(QStringLiteral(
-        "On a cut to a brighter scene the contrast goes to the cut level (auto = where white starts to clip, 59 "
-        "until measured; never 50), VP's gain to its maximum and the knee rolls off highlights; then the picture "
-        "fades up with the LED. The darkest start (0.5 = half brightness) also sets the LED floor in every scene. "
-        "Coming out of black with the look-ahead, the contrast is set and the LED may lift to the level above "
-        "while the screen is still black (60 = keep the black absolutely; 255 = the old behaviour).")));
-
-    auto* speeds = new QWidget;
-    auto* speedsForm = new QFormLayout(speeds);
-    speedsForm->setContentsMargins(0, 0, 0, 0);
-    speedsForm->setVerticalSpacing(8);
-    speedsForm->addRow(QStringLiteral("LED speeds"), bindChoiceField(led, QStringLiteral("rate_preset"),
-        { QStringLiteral("script"), QStringLiteral("compensated") },
-        { QStringLiteral("Script (your beta 22 speeds)"), QStringLiteral("Compensated (faster)") }));
-    const QString preset = QStringLiteral("preset");
-    speedsForm->addRow(QStringLiteral("Brightening: gain / min / max"), [&]
-    {
-        auto* row = new QWidget;
-        auto* layout = new QHBoxLayout(row);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->addWidget(numberControl(led, QStringLiteral("rate_gain_up"), 0.0, 100.0, 2, 0.05, 0.25, preset));
-        layout->addWidget(numberControl(led, QStringLiteral("rate_min_up"), 0.0, 1000.0, 1, 0.5, 2.5, preset));
-        layout->addWidget(numberControl(led, QStringLiteral("rate_max_up"), 1.0, 1000.0, 1, 0.5, 17.5, preset));
-        return row;
-    }());
-    speedsForm->addRow(QStringLiteral("Dimming: gain / min / max"), [&]
-    {
-        auto* row = new QWidget;
-        auto* layout = new QHBoxLayout(row);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->addWidget(numberControl(led, QStringLiteral("rate_gain_down"), 0.0, 100.0, 2, 0.05, 0.15, preset));
-        layout->addWidget(numberControl(led, QStringLiteral("rate_min_down"), 0.0, 1000.0, 1, 0.5, 2.5, preset));
-        layout->addWidget(numberControl(led, QStringLiteral("rate_max_down"), 1.0, 1000.0, 1, 0.5, 12.5, preset));
-        return row;
-    }());
-    speedsForm->addRow(QStringLiteral("Fade-up after a cut: gain / min / max"), [&]
-    {
-        auto* row = new QWidget;
-        auto* layout = new QHBoxLayout(row);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->addWidget(numberControl(led, QStringLiteral("recovery_rate_gain"), 0.0, 100.0, 2, 0.05, 4.0, preset));
-        layout->addWidget(numberControl(led, QStringLiteral("recovery_rate_min"), 0.0, 1000.0, 1, 0.5, 20.0, preset));
-        layout->addWidget(numberControl(led, QStringLiteral("recovery_rate_max"), 1.0, 1000.0, 1, 0.5, 400.0, preset));
-        return row;
-    }());
-    speedsForm->addRow(QString(), helpLabel(QStringLiteral(
-        "Levels per second: gain x distance, kept between min and max, so the LED is fast while far from its "
-        "target and eases in. The LED within a scene, and the LED and contrast moving together after a cut, "
-        "use the brightening / dimming speeds; only the fade-up for what they cannot yet supply uses the "
-        "fade-up speeds. \"preset\" = the LED speeds choice above.")));
-
-    auto* response = new QWidget;
-    auto* responseForm = new QFormLayout(response);
-    responseForm->setContentsMargins(0, 0, 0, 0);
-    responseForm->setVerticalSpacing(8);
-    responseForm->addRow(QStringLiteral("LED settle time (ms)"),
-        numberControl(projector, QStringLiteral("led_settle_ms"), 0, 5000, 0, 10, 300, QString()));
-    responseForm->addRow(QStringLiteral("Contrast settle time (ms)"),
-        numberControl(projector, QStringLiteral("cntr_settle_ms"), 0, 5000, 0, 10, 0, QString()));
-    auto* maxUsable = numberControl(projector, QStringLiteral("cntr_max_usable"), 50, 100, 0, 1, 74, QString());
-    responseForm->addRow(QStringLiteral("Highest useful contrast"), maxUsable);
-    // audit 2026-10-16: dmd_clip_cntr -1 = cntr_max_usable, shown as the
-    // special value below 50 and written as -1 (not removed: unset is 59).
-    auto* whiteClips = numberControl(projector, QStringLiteral("dmd_clip_cntr"), 50, 100, 0, 1, 59,
-        QStringLiteral("Usable max (-1)"));
-    {
-        const QSignalBlocker blocked(whiteClips);
-        bool valid = false;
-        const double configured = value(projector, QStringLiteral("dmd_clip_cntr")).toDouble(&valid);
-        whiteClips->setValue(!valid ? 59.0 : configured < 50.0 ? whiteClips->minimum() : std::min(configured, 100.0));
-    }
-    disconnect(whiteClips, qOverload<double>(&QDoubleSpinBox::valueChanged), this, nullptr);
-    connect(whiteClips, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-        [this, projector, whiteClips](double number)
-    {
-        if (!document_) return;
-        const std::string name = projector.toStdString();
-        const std::string text = number <= whiteClips->minimum() ? std::string("-1") :
-            QString::number(number, 'f', 0).toStdString();
-        if (!document_->SetKnown(name, "dmd_clip_cntr", text))
-        {
-            document_->AddSection(name);
-            document_->SetKnown(name, "dmd_clip_cntr", text);
-        }
-        markDirty();
-    });
-    responseForm->addRow(QStringLiteral("Contrast where white clips"), whiteClips);
-    responseForm->addRow(QString(), helpLabel(QStringLiteral(
-        "From the camera and light-meter measurements; leave the defaults until then. Settle time: how long "
-        "the light takes to arrive after the response time (300 ms is deliberately fast). White clips: the "
-        "contrast at which a white field stops getting brighter at full LED (59 = where your script's dump "
-        "ended).")));
-
-    // Settings VP reads that only a hand edit could set before (audit
-    // 2026-10-14c: every setting has a Config control): collapsed, expert.
-    auto* advancedProjector = new QWidget;
-    auto* advancedForm = new QFormLayout(advancedProjector);
-    advancedForm->setContentsMargins(0, 0, 0, 0);
-    advancedForm->setVerticalSpacing(8);
-    advancedForm->addRow(QString(), helpLabel(QStringLiteral(
-        "Only for a projector other than the FL35, or when the projector's replies say something is wrong. "
-        "The defaults match the FL35.")));
-    advancedForm->addRow(QStringLiteral("Baud rate"),
-        numberControl(projector, QStringLiteral("baud"), 1200, 921600, 0, 1, 19200, QString()));
-    advancedForm->addRow(QStringLiteral("Lowest LED level the projector accepts"),
-        numberControl(projector, QStringLiteral("light_min"), 0, 255, 0, 1, 0, QStringLiteral("Ask the projector")));
-    advancedForm->addRow(QStringLiteral("Highest LED level the projector accepts"),
-        numberControl(projector, QStringLiteral("light_max"), 0, 255, 0, 1, 0, QStringLiteral("Ask the projector")));
-    advancedForm->addRow(QStringLiteral("Wait for a reply (ms)"),
-        numberControl(projector, QStringLiteral("ack_timeout_ms"), 20, 5000, 0, 10, 300, QString()));
-    advancedForm->addRow(QStringLiteral("Gap between commands (ms)"),
-        numberControl(projector, QStringLiteral("min_command_gap_ms"), 0, 5000, 0, 10, 200, QString()));
-    advancedForm->addRow(QStringLiteral("Largest LED step per command"),
-        numberControl(projector, QStringLiteral("max_levels_per_command"), 0, 255, 0, 1, 12, QString()));
-    advancedForm->addRow(QStringLiteral("Commands before a pause (0 = no pause)"),
-        numberControl(projector, QStringLiteral("burst_commands"), 0, 1000, 0, 1, 0, QString()));
-    advancedForm->addRow(QStringLiteral("Pause length (ms)"),
-        numberControl(projector, QStringLiteral("burst_pause_ms"), 0, 60000, 0, 100, 5000, QString()));
-    advancedForm->addRow(QString(), bindCheckField(QStringLiteral("Ask the projector to echo commands"), projector,
-        QStringLiteral("echo"), true));
-    advancedForm->addRow(QStringLiteral("Line ending"), bindChoiceField(projector, QStringLiteral("terminator"),
-        { QStringLiteral("auto"), QStringLiteral("cr"), QStringLiteral("literal_cr"), QStringLiteral("script") },
-        { QStringLiteral("Automatic (try the projector)"), QStringLiteral("Carriage return"),
-          QStringLiteral("The letters \"cr\" then a carriage return"), QStringLiteral("Exactly as your script sent it") }));
-    auto* fluxTable = bindTextField(projector, QStringLiteral("flux_table"));
-    fluxTable->setPlaceholderText(QStringLiteral("empty = light proportional to the LED level"));
-    fluxTable->setToolTip(QStringLiteral(
-        "Light-meter readings as LED level:relative light pairs, e.g. 60:0.21,128:0.49,255:1. Compensate uses "
-        "them to know how much light each LED level really gives."));
-    advancedForm->addRow(QStringLiteral("Measured light per LED level"), fluxTable);
-
-    // Audit 2026-10-17: every LED setting VP reads has a control. The rest of
-    // [led_drive] (LedDriveConfig.h ApplyLedDriveSection), with the parser's
-    // ranges and defaults (LedDriveRules, LedDriveConfig); collapsed, expert.
-    auto* advancedLed = new QWidget;
-    auto* advancedLedForm = new QFormLayout(advancedLed);
-    advancedLedForm->setContentsMargins(0, 0, 0, 0);
-    advancedLedForm->setVerticalSpacing(8);
-    advancedLedForm->addRow(QString(), helpLabel(QStringLiteral(
-        "The curve and the step tables are your dimming script's tables: your script is the reference, and the "
-        "built-in values are its values. Leave a field at its default unless the script changed. Each Reset "
-        "removes the setting, so the built-in value (or an LED profile file's) applies.")));
-    auto ledResetButton = [](const QString& name)
-    {
-        auto* reset = new QToolButton;
-        reset->setObjectName(name + QStringLiteral(".reset"));
-        reset->setText(QStringLiteral("Reset"));
-        reset->setToolTip(QStringLiteral("Remove this setting: the built-in default applies."));
-        return reset;
-    };
-    auto advancedNumber = [this, led, advancedLedForm, ledResetButton](const char* keyText, double minimum,
-        double maximum, int decimals, double step, double fallback, const QString& suffix, const QString& label,
-        const QString& tip)
-    {
-        const QString key = QString::fromLatin1(keyText);
-        auto* spin = new QDoubleSpinBox;
-        spin->setObjectName(controlName(led, key));
-        spin->setAccessibleName(label);
-        const QString raw = value(led, key).trimmed();
-        spin->setDecimals(ledDisplayDecimals(raw, decimals));
-        spin->setSingleStep(step);
-        spin->setRange(minimum, maximum);
-        if (!suffix.isEmpty()) spin->setSuffix(suffix);
-        spin->setMaximumWidth(130);
-        spin->setAlignment(Qt::AlignRight);
-        bool valid = false;
-        const double configured = raw.toDouble(&valid);
-        spin->setValue(valid ? std::max(minimum, std::min(configured, maximum)) : fallback);
-        spin->setToolTip(tip + QStringLiteral("\nRange %1 to %2; default %3.")
-            .arg(minimum).arg(maximum).arg(fallback));
-        flagClampedLedValue(spin, raw, minimum, maximum);
-        auto* reset = ledResetButton(spin->objectName());
-        reset->setEnabled(!raw.isEmpty());
-        connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-            [this, led, key, spin, reset](double number)
-        {
-            if (!document_) return;
-            const std::string section = led.toStdString();
-            const std::string text = QString::number(number, 'f', spin->decimals()).toStdString();
-            if (!document_->SetKnown(section, key.toStdString().c_str(), text))
-            {
-                document_->AddSection(section);
-                document_->SetKnown(section, key.toStdString().c_str(), text);
-            }
-            reset->setEnabled(true);
-            markDirty();
-        });
-        connect(reset, &QToolButton::clicked, this, [this, led, key, spin, reset, fallback]()
-        {
-            if (!document_) return;
-            document_->RemoveKnown(led.toStdString(), key.toStdString().c_str());
-            {
-                const QSignalBlocker blocker(spin);
-                spin->setValue(fallback);
-            }
-            reset->setEnabled(false);
-            markDirty();
-        });
-        auto* row = new QWidget;
-        auto* rowLayout = new QHBoxLayout(row);
-        rowLayout->setContentsMargins(0, 0, 0, 0);
-        rowLayout->addWidget(spin);
-        rowLayout->addWidget(reset);
-        rowLayout->addStretch(1);
-        advancedLedForm->addRow(label, row);
-        return spin;
-    };
-    auto advancedSwitch = [this, led, advancedLedForm, ledResetButton](const char* keyText, bool fallback,
-        const QString& label, const QString& tip)
-    {
-        const QString key = QString::fromLatin1(keyText);
-        auto* check = configuredCheck(label, value(led, key), fallback);
-        check->setObjectName(controlName(led, key));
-        check->setEnabled(true);
-        check->setToolTip(tip + (fallback ? QStringLiteral("\nDefault on.") : QStringLiteral("\nDefault off.")));
-        auto* reset = ledResetButton(check->objectName());
-        reset->setEnabled(!value(led, key).trimmed().isEmpty());
-        connect(check, &QCheckBox::toggled, this, [this, led, key, reset](bool checked)
-        {
-            if (!document_) return;
-            const std::string section = led.toStdString();
-            if (!document_->SetKnown(section, key.toStdString().c_str(), checked ? "true" : "false"))
-            {
-                document_->AddSection(section);
-                document_->SetKnown(section, key.toStdString().c_str(), checked ? "true" : "false");
-            }
-            reset->setEnabled(true);
-            markDirty();
-        });
-        connect(reset, &QToolButton::clicked, this, [this, led, key, check, reset, fallback]()
-        {
-            if (!document_) return;
-            document_->RemoveKnown(led.toStdString(), key.toStdString().c_str());
-            {
-                const QSignalBlocker blocker(check);
-                check->setChecked(fallback);
-            }
-            reset->setEnabled(false);
-            markDirty();
-        });
-        auto* row = new QWidget;
-        auto* rowLayout = new QHBoxLayout(row);
-        rowLayout->setContentsMargins(0, 0, 0, 0);
-        rowLayout->addWidget(check);
-        rowLayout->addWidget(reset);
-        rowLayout->addStretch(1);
-        advancedLedForm->addRow(QString(), row);
-        return check;
-    };
-    // Lists and tables in the parser's own syntax, checked with its parser.
-    auto advancedTable = [this, led, advancedLedForm, ledResetButton](const char* keyText,
-        const QString& fallback, std::function<bool(const std::string&)> parse, const QString& label,
-        const QString& syntax)
-    {
-        const QString key = QString::fromLatin1(keyText);
-        auto* edit = new QLineEdit;
-        edit->setObjectName(controlName(led, key));
-        edit->setAccessibleName(label);
-        edit->setPlaceholderText(fallback);
-        edit->setToolTip(syntax + QStringLiteral(".\nEmpty = the built-in value: ") + fallback);
-        const QString raw = value(led, key).trimmed();
-        edit->setText(raw);
-        auto* problem = new QLabel;
-        problem->setObjectName(controlName(led, key) + QStringLiteral(".problem"));
-        problem->setWordWrap(true);
-        problem->setStyleSheet(QStringLiteral("color: #e57373;"));
-        auto check = [edit, problem, parse, syntax]()
-        {
-            const std::string text = edit->text().trimmed().toStdString();
-            const bool ok = text.empty() || parse(text);
-            problem->setText(ok ? QString() :
-                QStringLiteral("Not valid (VP refuses the configuration until it is fixed): ") + syntax + QStringLiteral("."));
-            problem->setVisible(!ok);
-            edit->setProperty("invalidValue", !ok);
-        };
-        check();
-        auto* reset = ledResetButton(edit->objectName());
-        reset->setEnabled(!raw.isEmpty());
-        connect(edit, &QLineEdit::textEdited, this, [this, led, key, reset, check](const QString& text)
-        {
-            if (!document_) return;
-            const std::string section = led.toStdString();
-            const QString trimmed = text.trimmed();
-            if (trimmed.isEmpty())
-                document_->RemoveKnown(section, key.toStdString().c_str());
-            else if (!document_->SetKnown(section, key.toStdString().c_str(), trimmed.toLocal8Bit().constData()))
-            {
-                document_->AddSection(section);
-                document_->SetKnown(section, key.toStdString().c_str(), trimmed.toLocal8Bit().constData());
-            }
-            reset->setEnabled(!trimmed.isEmpty());
-            check();
-            markDirty();
-        });
-        connect(reset, &QToolButton::clicked, this, [this, led, key, edit, reset, check]()
-        {
-            if (!document_) return;
-            document_->RemoveKnown(led.toStdString(), key.toStdString().c_str());
-            {
-                const QSignalBlocker blocker(edit);
-                edit->clear();
-            }
-            reset->setEnabled(false);
-            check();
-            markDirty();
-        });
-        auto* row = new QWidget;
-        auto* rowLayout = new QHBoxLayout(row);
-        rowLayout->setContentsMargins(0, 0, 0, 0);
-        rowLayout->addWidget(edit, 1);
-        rowLayout->addWidget(reset);
-        advancedLedForm->addRow(label, row);
-        advancedLedForm->addRow(QString(), problem);
-        return edit;
-    };
-    const auto stepTable = [](const std::string& text) { LedDrive::StepTable table; return LedDrive::ParseStepTable(text, table); };
-    const QString stepSyntax = QStringLiteral(
-        "Descending distance:step pairs ending at 0, each step 1 or more (the script's table)");
-    advancedNumber("tick_ms", 50, 5000, 0, 10, 400, QStringLiteral(" ms"), QStringLiteral("Fixed loop interval"),
-        QStringLiteral("How often VP's copy of the script decides when Script pacing is Fixed loop."));
-    advancedNumber("deadband", 0, 50, 0, 1, 3, QStringLiteral(" levels"), QStringLiteral("Dead band"),
-        QStringLiteral("Compensate: no LED movement while the target is within this many levels."));
-    advancedNumber("led_ceiling", 1, 255, 0, 1, 255, QString(), QStringLiteral("Highest LED level"),
-        QStringLiteral("The brightest LED level VP sends."));
-    advancedTable("curve", QStringLiteral("0:100, 20:100, 40:200, 70:230, 100:255, 255:255"),
-        [](const std::string& text) { std::vector<LedDrive::CurvePoint> curve; return LedDrive::ParseCurve(text, curve); },
-        QStringLiteral("Light curve (APL:level)"),
-        QStringLiteral("Ascending APL:level pairs (0-255), at least two, e.g. 0:100, 40:200, 100:255 (the script's curve)"));
-    advancedNumber("knee", 0.0, 0.5, 2, 0.01, 0.08, QString(), QStringLiteral("Highlight knee"),
-        QStringLiteral("Compensate: where VP's gain starts rolling off highlights (part of the signal)."));
-    advancedNumber("anti_pump_band", 0, 50, 0, 1, 3, QStringLiteral(" levels"), QStringLiteral("Anti-pump band"),
-        QStringLiteral("Small target changes inside this band do not reverse a ramp."));
-    advancedTable("steps_up_dark", QStringLiteral("100:7, 50:5, 25:4, 10:1, 0:1"), stepTable,
-        QStringLiteral("Brightening steps (dark scenes)"), stepSyntax);
-    advancedTable("steps_up_bright", QStringLiteral("100:7, 50:4, 25:2, 10:1, 0:1"), stepTable,
-        QStringLiteral("Brightening steps (bright scenes)"), stepSyntax);
-    advancedNumber("steps_up_split_apl", 0, 255, 0, 1, 40, QString(), QStringLiteral("Dark / bright split (APL)"),
-        QStringLiteral("The APL that chooses between the dark and bright brightening tables."));
-    advancedTable("steps_down", QStringLiteral("100:5, 50:3, 25:2, 10:1, 0:1"), stepTable,
-        QStringLiteral("Dimming steps"), stepSyntax);
-    advancedTable("apl_weights", QStringLiteral("0.114, 0.587, 0.299"),
-        [](const std::string& text) { double weights[3]; return LedDrive::ParseWeights(text, weights); },
-        QStringLiteral("APL weights (R, G, B)"),
-        QStringLiteral("Three non-negative R, G, B weights summing to 1 (the script's effective weights)"));
-    advancedNumber("highlight_percentile", 50.0, 100.0, 1, 0.1, 99.5, QStringLiteral(" %"),
-        QStringLiteral("Highlight percentile"), QStringLiteral("The brightness percentile measured as the frame's highlight."));
-    advancedNumber("highlight_persist_ms", 0, 10000, 0, 10, 250, QStringLiteral(" ms"), QStringLiteral("Highlight hold"),
-        QStringLiteral("How long a highlight must last before it counts (flash rejection)."));
-    advancedNumber("apl_persist_ms", 0, 10000, 0, 10, 100, QStringLiteral(" ms"), QStringLiteral("APL hold"),
-        QStringLiteral("Compensate: the window for the sustained APL the LED aims at; a cut uses the new scene's APL at once."));
-    advancedNumber("highlight_area_small", 0.0, 1.0, 3, 0.001, 0.005, QString(), QStringLiteral("Small highlight area"),
-        QStringLiteral("Highlights covering less of the frame than this are small (keep it below the large area)."));
-    advancedNumber("highlight_area_large", 0.0, 1.0, 3, 0.001, 0.05, QString(), QStringLiteral("Large highlight area"),
-        QStringLiteral("Highlights covering more of the frame than this are large."));
-    advancedNumber("highlight_release_ms", 0, 60000, 0, 100, 2000, QStringLiteral(" ms"), QStringLiteral("Highlight release"),
-        QStringLiteral("How long the highlight protection stays after a highlight leaves."));
-    advancedSwitch("early_ramp", true, QStringLiteral("Start a ramp ahead of a cut the look-ahead has seen"),
-        QStringLiteral("Compensate with look-ahead."));
-    advancedSwitch("cut_jump", true, QStringLiteral("Jump the LED on a cut"),
-        QStringLiteral("On a scene cut the LED goes straight to the new scene's level instead of ramping."));
-    advancedSwitch("bright_cut_dump", true, QStringLiteral("Full light at once on a cut to a bright scene"),
-        QStringLiteral("Compensate: a cut to a bright scene takes the LED up at once."));
-    advancedNumber("cut_threshold", 1.0, 255.0, 1, 1.0, 24.0, QString(), QStringLiteral("Cut threshold (APL change)"),
-        QStringLiteral("The APL change between frames that counts as a scene cut."));
-    advancedNumber("fade_ms", 20, 5000, 0, 10, 250, QStringLiteral(" ms"), QStringLiteral("Fade detection window"),
-        QStringLiteral("How long a steady change must last to count as a fade."));
-    advancedNumber("fade_min_slope", 0.0, 1200.0, 1, 0.5, 12.0, QStringLiteral(" /s"), QStringLiteral("Fade minimum slope"),
-        QStringLiteral("The slowest APL change per second that counts as a fade."));
-    advancedNumber("ftb_black_ms", 100, 10000, 0, 50, 500, QStringLiteral(" ms"), QStringLiteral("Black before the custom dim"),
-        QStringLiteral("Experimental fade to black: how long the picture is black before the custom LED dim starts."));
-    advancedNumber("script_highlight_code", 16, 255, 0, 1, 215, QString(), QStringLiteral("Script highlight code"),
-        QStringLiteral("VP's copy of the script: a frame whose maximum reaches this code has a highlight (the script used 215)."));
-    auto* advancedLedHolder = new QWidget;
-    {
-        auto* holderLayout = new QVBoxLayout(advancedLedHolder);
-        holderLayout->setContentsMargins(0, 0, 0, 0);
-        auto* toggle = new QToolButton;
-        toggle->setObjectName(controlName(led, QStringLiteral("advanced_toggle")));
-        toggle->setText(QStringLiteral("Show the advanced LED settings"));
-        toggle->setCheckable(true);
-        toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-        toggle->setArrowType(Qt::RightArrow);
-        holderLayout->addWidget(toggle);
-        holderLayout->addWidget(advancedLed);
-        advancedLed->setVisible(false);
-        connect(toggle, &QToolButton::toggled, this, [toggle, advancedLed](bool open)
-        {
-            advancedLed->setVisible(open);
-            toggle->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
-            toggle->setText(open ? QStringLiteral("Hide the advanced LED settings") :
-                QStringLiteral("Show the advanced LED settings"));
-        });
-    }
-
-    // In setup order (audit 2026-10-14c): what to choose, then the source's
-    // own card, the connection, and the rest; Experimental last. Each card
-    // shows only when the chosen source uses it.
-    cards->addCard(createCard(QStringLiteral("Dynamic Drive"),
-        QStringLiteral("Dim the projector's LED with the picture, as your dimming script does."), drive));
-    QWidget* connectionBox = createCard(QStringLiteral("Projector connection"),
-        QStringLiteral("The serial link to the projector."), connection);
-    cards->addCard(connectionBox);
-    QWidget* responseBox = createCard(QStringLiteral("Projector response"),
-        QStringLiteral("Measured timings and contrast limits."), response);
-    cards->addCard(responseBox);
-    QWidget* profileBox = createCard(QStringLiteral("LED profile"),
-        QStringLiteral("The detailed behaviour of VP's own sources: built-in, or your own file."), profile);
-    cards->addCard(profileBox);
-    QWidget* assistBox = createCard(QStringLiteral("Contrast and cuts"),
-        QStringLiteral("Compensate: the projector's contrast, bright cuts and coming out of black."), assist);
-    cards->addCard(assistBox);
-    QWidget* speedsBox = createCard(QStringLiteral("LED speeds"),
-        QStringLiteral("Compensate: how fast the LED and the fade-up move."), speeds);
-    cards->addCard(speedsBox);
-    // Collapsed until asked for.
-    auto* advancedHolder = new QWidget;
-    auto* advancedLayout = new QVBoxLayout(advancedHolder);
-    advancedLayout->setContentsMargins(0, 0, 0, 0);
-    auto* advancedToggle = new QToolButton;
-    advancedToggle->setObjectName(controlName(projector, QStringLiteral("advanced_toggle")));
-    advancedToggle->setText(QStringLiteral("Show the advanced settings"));
-    advancedToggle->setCheckable(true);
-    advancedToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    advancedToggle->setArrowType(Qt::RightArrow);
-    advancedLayout->addWidget(advancedToggle);
-    advancedLayout->addWidget(advancedProjector);
-    advancedProjector->setVisible(false);
-    connect(advancedToggle, &QToolButton::toggled, this, [advancedToggle, advancedProjector](bool open)
-    {
-        advancedProjector->setVisible(open);
-        advancedToggle->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
-        advancedToggle->setText(open ? QStringLiteral("Hide the advanced settings") : QStringLiteral("Show the advanced settings"));
-    });
-    QWidget* advancedBox = createCard(QStringLiteral("Advanced projector"),
-        QStringLiteral("Serial details for other projectors; the defaults match the FL35."), advancedHolder);
-    cards->addCard(advancedBox);
-    QWidget* advancedLedBox = createCard(QStringLiteral("Advanced LED"),
-        QStringLiteral("The script's tables and the remaining LED details; the defaults are your script's."), advancedLedHolder);
-    cards->addCard(advancedLedBox);
-    QWidget* experimentBox = createCard(QStringLiteral("Experimental"),
-        QStringLiteral("Compensate: deeper fade to black - test on the projector before relying on it."), experiment);
-    cards->addCard(experimentBox);
-    {
-        // Show only what the chosen source uses; grey the shadow lift while
-        // adaptive gamma is off and everything while the LED drive is off
-        // (audits 2026-10-14b/c).
-        QComboBox* source = ledSource;
-        QCheckBox* adaptive = ledAdaptive;
-        auto show = [driveForm, responseForm, compensateRows, floorRows, experimentBox, assistBox, speedsBox,
-            profileBox, source, adaptive, compensateWarning, aheadRow, aheadHelp, maxUsable, whiteClips, pacingRows]()
-        {
-            const QString chosen = source ? source->currentData().toString() : QString();
-            const bool compensate = chosen == QStringLiteral("compensate");
-            const bool own = compensate || chosen == QStringLiteral("internal_script");
-            for (QWidget* row : compensateRows)
-                driveForm->setRowVisible(row, compensate);
-            for (QWidget* row : floorRows)
-                driveForm->setRowVisible(row, own);
-            for (QWidget* box : { experimentBox, assistBox, speedsBox })
-                box->setVisible(compensate);
-            for (QWidget* row : { maxUsable, whiteClips })
-                responseForm->setRowVisible(row, compensate);
-            profileBox->setVisible(own);
-            // Compensate's look-ahead switch; the script copy's is script_lookahead
-            // (with the script pacing rows).
-            driveForm->setRowVisible(aheadRow, compensate);
-            driveForm->setRowVisible(aheadHelp, compensate);
-            for (QWidget* row : pacingRows)
-                driveForm->setRowVisible(row, chosen == QStringLiteral("internal_script"));
-            driveForm->setRowVisible(compensateWarning, compensate && adaptive && !adaptive->isChecked());
-        };
-        auto grey = [shadowLiftRows, adaptive]()
-        {
-            for (QWidget* row : shadowLiftRows)
-                row->setEnabled(!adaptive || adaptive->isChecked());
-        };
-        // A source that drives the projector needs the projector protocol.
-        auto needPort = [source, protocolChoice]()
-        {
-            const QString chosen = source ? source->currentData().toString() : QString();
-            if (chosen != QStringLiteral("none") && protocolChoice->currentData().toString() == QStringLiteral("none"))
-                protocolChoice->setCurrentIndex(protocolChoice->findData(QStringLiteral("barco_ascii")));
-        };
-        auto onOff = [enabled, source, adaptive, connectionBox, responseBox, profileBox, assistBox,
-            speedsBox, advancedBox, experimentBox, aheadRow, pacingRows]()
-        {
-            const bool on = enabled->isChecked();
-            for (QWidget* row : pacingRows) row->setEnabled(on);
-            for (QWidget* w : { static_cast<QWidget*>(source), static_cast<QWidget*>(adaptive), aheadRow,
-                connectionBox, responseBox, profileBox, assistBox, speedsBox, advancedBox, experimentBox })
-                if (w) w->setEnabled(on);
-        };
-        show();
-        grey();
-        onOff();
-        connect(source, qOverload<int>(&QComboBox::currentIndexChanged), this, [show](int) { show(); });
-        connect(source, qOverload<int>(&QComboBox::activated), this, [needPort](int) { needPort(); });
-        connect(source, qOverload<int>(&QComboBox::currentIndexChanged), this, [needPort](int) { needPort(); });
-        connect(adaptive, &QCheckBox::toggled, this, [grey, show](bool) { grey(); show(); });
-        connect(enabled, &QCheckBox::toggled, this, [onOff](bool) { onOff(); });
-        // The advanced LED settings belong to VP's own sources (audit 2026-10-17).
-        auto advancedLedSync = [advancedLedBox, source, enabled]()
-        {
-            const QString chosen = source ? source->currentData().toString() : QString();
-            advancedLedBox->setVisible(chosen == QStringLiteral("compensate") ||
-                chosen == QStringLiteral("internal_script"));
-            advancedLedBox->setEnabled(enabled->isChecked());
-        };
-        advancedLedSync();
-        connect(source, qOverload<int>(&QComboBox::currentIndexChanged), this, [advancedLedSync](int) { advancedLedSync(); });
-        connect(enabled, &QCheckBox::toggled, this, [advancedLedSync](bool) { advancedLedSync(); });
-    }
-    {
-        // Saved values outside a control's range, said once at the top of the
-        // page (audit 2026-10-17); each box is flagged too.
-        QStringList clamped;
-        for (QAbstractSpinBox* spin : cards->findChildren<QAbstractSpinBox*>())
-            if (spin->property("clampedFrom").isValid())
-                clamped.push_back(QStringLiteral("%1 = %2").arg(
-                    spin->objectName().section(u'.', -1), spin->property("clampedFrom").toString()));
-        if (!clamped.isEmpty())
-        {
-            auto* note = helpLabel(QStringLiteral("Saved values outside their control's range (shown clamped, "
-                "kept until changed): %1.").arg(clamped.join(QStringLiteral(", "))));
-            note->setObjectName(QStringLiteral("config.led_drive.default.clamped_note"));
-            note->setStyleSheet(QStringLiteral("color: #e0a040;"));
-            driveForm->insertRow(0, QString(), note);
-        }
-    }
-    return createPage(QStringLiteral("Dynamic Drive"),
-        QStringLiteral("Projector LED dimming and the gamma boost."), cards);
-}
-
 QWidget* ConfigEditorWindow::createLogsPage()
 {
     auto* content = new QWidget;
@@ -16743,32 +14859,6 @@ QWidget* ConfigEditorWindow::createLogsPage()
     layout->addWidget(helpLabel(QStringLiteral(
         "Enhanced logging keeps all logs and writes additional live telemetry files. Use it only while diagnosing an issue.")));
 
-    // Report-a-problem (StateReportSettings.h): the switches beside the
-    // Shortcuts page's "Save problem report" (default Ctrl+Alt+D).
-    auto* reportsTitle = new QLabel(QStringLiteral("Problem reports"));
-    reportsTitle->setObjectName(QStringLiteral("config.logging.reports_title"));
-    QFont reportsFont = reportsTitle->font();
-    reportsFont.setBold(true);
-    reportsTitle->setFont(reportsFont);
-    layout->addWidget(reportsTitle);
-    auto* autoReport = bindCheckField(QStringLiteral("Save a problem report automatically"),
-        QStringLiteral("logging"), QStringLiteral("auto_report"), false);
-    autoReport->setAccessibleDescription(QStringLiteral(
-        "When VP recovers from a stall or a source gap, or a renderer reset fails, it saves a problem report "
-        "by itself: at most one every 10 minutes and five per run. Default: off."));
-    layout->addWidget(autoReport);
-    auto* reportThumbnail = bindCheckField(QStringLiteral("Include a small picture in problem reports"),
-        QStringLiteral("logging"), QStringLiteral("report_thumbnail"), false);
-    reportThumbnail->setAccessibleDescription(QStringLiteral(
-        "Adds a 480-pixel-wide copy of the next rendered frame to each report (VP Renderer only). "
-        "Default: off - reports then hold no pictures."));
-    layout->addWidget(reportThumbnail);
-    layout->addWidget(helpLabel(QStringLiteral(
-        "Press the problem-report shortcut (Shortcuts page, default Ctrl+Alt+D) or choose \"Save problem report\" "
-        "in VP's window menu right after you see a problem. VP saves the last few seconds of its state - timings, "
-        "decisions, Dynamic Drive commands, settings, the log and system details, without your name or private "
-        "folder paths - to logs\reports (the newest 20 are kept). Send the .zip file with a short description.")));
-
     QString logDirectory = QFileInfo(configPath_).absoluteDir().filePath(QStringLiteral("logs"));
     const QString logPath = QDir(logDirectory).filePath(QStringLiteral("vp.log"));
     auto* actions = new QHBoxLayout;
@@ -16783,30 +14873,10 @@ QWidget* ConfigEditorWindow::createLogsPage()
 	}
     openFolder->setAccessibleDescription(QStringLiteral("Open the folder containing VideoProcessor logs."));
     openLog->setAccessibleDescription(QStringLiteral("Open the current VideoProcessor log."));
-    auto* openReports = new QPushButton(QStringLiteral("Open reports folder"));
-    openReports->setObjectName(QStringLiteral("config.logging.open_reports"));
-    openReports->setEnabled(!remoteClient_);
-    if (remoteClient_)
-        openReports->setToolTip(QStringLiteral("Reports are on the VP computer."));
-    openReports->setAccessibleDescription(QStringLiteral("Open the folder containing VideoProcessor problem reports."));
     actions->addWidget(openFolder);
     actions->addWidget(openLog);
-    actions->addWidget(openReports);
     actions->addStretch();
     layout->addLayout(actions);
-    const QString reportsDirectory = QDir(logDirectory).filePath(QStringLiteral("reports"));
-    connect(openReports, &QPushButton::clicked, this, [this, reportsDirectory]
-    {
-        if (!QDir(reportsDirectory).exists())
-        {
-            QMessageBox::information(this, QStringLiteral("Problem reports"),
-                QStringLiteral("No problem report has been saved yet. Press the problem-report shortcut in VP first."));
-            return;
-        }
-        if (!openPathExternally(reportsDirectory))
-            QMessageBox::warning(this, QStringLiteral("Problem reports"),
-                QStringLiteral("Windows could not open the reports folder."));
-    });
     connect(openFolder, &QPushButton::clicked, this, [this, logDirectory]
     {
         if (!QDir(logDirectory).exists())
@@ -17056,53 +15126,6 @@ QWidget* ConfigEditorWindow::createShortcutsSetupPage()
     help->setWordWrap(true);
     help->setObjectName(QStringLiteral("fieldHelp"));
     handlingLayout->addWidget(help);
-    auto* globalHotkeys = bindCheckField(
-        QStringLiteral("Every shortcut works while another application has focus"),
-        QStringLiteral("shortcuts"), QStringLiteral("global_hotkeys"), false);
-    globalHotkeys->setToolTip(QStringLiteral(
-        "Off (recommended): shortcuts act only while VideoProcessor (its window or its fullscreen "
-        "picture) has focus, except the actions listed below; keys pressed in another application "
-        "(MPC-HC, a browser) are left to that application. On: every shortcut also acts, and the "
-        "Config and video-only keys are taken, while another application has focus."));
-    handlingLayout->addWidget(globalHotkeys);
-    // Bug hunt 3 (SH6): the actions that stay global with global_hotkeys off.
-    {
-        auto* globalActionsRow = new QWidget;
-        auto* globalActionsLayout = new QHBoxLayout(globalActionsRow);
-        globalActionsLayout->setContentsMargins(0, 0, 0, 0);
-        auto* globalActionsLabel = new QLabel(QStringLiteral("Global actions"));
-        auto* globalActions = new QLineEdit(value(QStringLiteral("shortcuts"),
-            QStringLiteral("global_actions"), QString()));
-        globalActions->setObjectName(controlName(QStringLiteral("shortcuts"), QStringLiteral("global_actions")));
-        globalActions->setAccessibleName(QStringLiteral("Global actions"));
-        globalActions->setPlaceholderText(QStringLiteral("none (for example: config_editor, toggle_noui)"));
-        globalActions->setToolTip(QStringLiteral(
-            "Comma-separated [shortcuts] actions that act while another application has focus, such as "
-            "config_editor or toggle_noui. Empty (the default): none. For MPC-HC file playback leave "
-            "out actions whose keys MPC uses itself (Alt+Enter, Ctrl+1..4, Ctrl+I)."));
-        connect(globalActions, &QLineEdit::textChanged, this, [this](const QString& text)
-        {
-            if (!document_) return;
-            const std::string valueText = text.trimmed().toLocal8Bit().constData();
-            if (!document_->SetKnown("shortcuts", "global_actions", valueText))
-            {
-                document_->AddSection("shortcuts");
-                document_->SetKnown("shortcuts", "global_actions", valueText);
-            }
-            markDirty();
-        });
-        globalActionsLayout->addWidget(globalActionsLabel);
-        globalActionsLayout->addWidget(globalActions, 1);
-        handlingLayout->addWidget(globalActionsRow);
-    }
-    auto* abHelp = new QLabel(QStringLiteral(
-        "Settings are the primary control; shortcuts are a backup for A/B comparison. A key's change "
-        "lasts until restart, a profile change, or applying that setting here, and the statistics "
-        "overlay shows it on its \"Key override\" line. Keys marked DirectShow only do nothing with "
-        "VP Renderer."));
-    abHelp->setWordWrap(true);
-    abHelp->setObjectName(QStringLiteral("fieldHelp"));
-    handlingLayout->addWidget(abHelp);
     layout->addWidget(createCard(QStringLiteral("Keyboard handling"),
         QStringLiteral("Choose whether shortcuts remain global or require VideoProcessor focus."),
         handling));

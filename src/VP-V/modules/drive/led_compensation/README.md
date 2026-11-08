@@ -174,6 +174,10 @@ Forwarding headers at the legacy path (early migration, removed in M2; they only
 
 `shaders/LED compensation.glsl` stays in the runtime shader folder.
 
+## Config page (`config_ui/`)
+
+`config_ui/LedDrivePage.h/.cpp` is the Config editor's Dynamic Drive page, moved out of `ConfigEditorWindow` (M2 lane C, P7-3): the `[led_drive.default]` cards (Dynamic Drive on/off, the command source, floors, speeds, Contrast and cuts, the LED profile, Experimental, Advanced LED). It is a Config page provider (`ConfigPageHost.h`, registered by `Vpv::RegisterConfigProviders()` in `VP-V/config/VpvConfigProviders.h`, before Calibration so the stack order stays Dynamic Drive, Calibration, VP-V): its page is a sub-page of the master VP-V page grouped under the Drive unit (a child entry under the VP-V entry at the end of the left-hand list, plus an "Open Dynamic Drive" button on the Drive tab; both reach the same page). It reaches the editor only through `ConfigPageHost::EditorKit`, so object names, tooltips, rows, the order of cards and the dirty path are the editor's. The projector's three cards (connection with the RS-232 test, response, advanced serial) are built by `drive.projector_control` (`projector_control/config_ui/ProjectorCards`) and placed by this page at their old positions; the RS-232 test thread is joined in `OnEditorClosing`. Test seam: `ConfigPageHost::Find<Vpv::LedDrivePage>()`; tests in `config_ui/tests/LedDrivePageTests.cpp` (`--match LedDrivePageTests`).
+
 ## Migration directive
 
 Code moves into this folder only when this slot is touched (opportunistic until M1, a dedicated phase after M1, finished by M2). A move = `git mv` + project/include updates + this module's `live_files` + `docs/design/components-master.json` (regenerate with `python tools/check_module_manifests.py --write`) in the SAME commit, with the build, this module's tests and the chain-gate subset passing. Never leave a copy behind; one module per change; never during a release/deploy window. Update this README in the same commit as any slot change.

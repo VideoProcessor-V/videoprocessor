@@ -1223,7 +1223,8 @@
         "src/VP-V/modules/drive/led_compensation/DynamicDriveHost.h",
         "src/VP-V/modules/drive/led_compensation/DynamicDriveFrame.cpp",
         "src/VP-V/modules/drive/led_compensation/DynamicDriveFrame.h",
-        "src/VP-V/modules/drive/led_compensation/LedResyncPolicy.h"
+        "src/VP-V/modules/drive/led_compensation/LedResyncPolicy.h",
+        "src/VP-V/modules/drive/led_compensation/config_ui"
       ],
       "components": {
         "files": {
@@ -1423,7 +1424,8 @@
         "src/VP-V/modules/drive/projector_control/LedClock.h",
         "src/VP-V/modules/drive/projector_control/LedShutdownRestore.h",
         "src/VP-V/modules/drive/projector_control/LedDriveArbiter.cpp",
-        "src/VP-V/modules/drive/projector_control/LedDriveArbiter.h"
+        "src/VP-V/modules/drive/projector_control/LedDriveArbiter.h",
+        "src/VP-V/modules/drive/projector_control/config_ui"
       ],
       "components": {
         "files": {

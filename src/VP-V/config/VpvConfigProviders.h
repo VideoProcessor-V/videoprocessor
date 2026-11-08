@@ -8,12 +8,16 @@
 // stack in registration order, ahead of the master VP-V page (VpvConfigPages.h).
 // Idempotent. Nothing here runs unless a process calls it, so an editor without the call is Bill's.
 
+#include <VP-V/modules/drive/led_compensation/config_ui/LedDrivePage.h>
 #include <VP-V/modules/output/calibration_lut/config_ui/CalibrationPage.h>
 
 namespace Vpv
 {
 	inline void RegisterConfigProviders() noexcept
 	{
+		// Dynamic Drive first, then Calibration: the stack order is Dynamic Drive, Calibration, VP-V.
+		if (!ConfigPageHost::Find<LedDrivePage>())
+			ConfigPageHost::Register(&LedDrivePageInstance());
 		if (!ConfigPageHost::Find<CalibrationPage>())
 			ConfigPageHost::Register(&CalibrationPageInstance());
 	}

@@ -10,6 +10,9 @@
   <ItemGroup>
     <ClCompile Include="..\VP-V\config\VpvSection.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\config_ui\CalibrationPage.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\config_ui\LedDrivePage.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\projector_control\config_ui\DriveConfigBase.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\projector_control\config_ui\ProjectorCards.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\projector_control\SerialPort.cpp">
       <ObjectFileName>$(IntDir)LedSerialPortStandalone.obj</ObjectFileName>
     </ClCompile>

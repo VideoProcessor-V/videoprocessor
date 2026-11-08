@@ -23,7 +23,8 @@ VP's part into it. The owner also wants tiers per unit plus a global tier (queue
 
    It is implemented in VP-V's own files (`src/VP-V/config/`). A minimal,
    documented hook in upstream's `ConfigEditorWindow` adds it: one include, one page block and
-   one navigation leaf (`src/VP-V/config/README.md`).
+   one navigation leaf (`src/VP-V/config/README.md`). The VP-V leaf closes Bill's list (after
+   Updates) and has child leaves for its sub-pages (Dynamic Drive, Calibration).
 2. **The tier table is data.** `docs/design/vpv-tiers.json` is kept in step with
    `docs/design/slots.json` by `tools/gen_vpv_tiers.py`, which generates
    `VpvTierTable.generated.h` and has a `--check` mode.
