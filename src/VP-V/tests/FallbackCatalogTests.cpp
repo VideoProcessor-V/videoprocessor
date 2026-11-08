@@ -125,6 +125,20 @@ namespace FallbackCatalogTest
 			Assert::IsFalse(Motion(false, true, true).engaged, L"optical flow not requested");
 			Assert::IsTrue(Has(Motion(true, true, false, "NvOFExecute"), "matcher only"));
 			Assert::IsTrue(Has(Motion(true, false, true), "look-ahead"));
+			// SK-MV: the no-pair causes. A deliberate choice is informational (released); the others are engaged with their own words.
+			Assert::IsFalse(Motion(true, false, false, "", NoPairCause::None).engaged);
+			Assert::IsFalse(Motion(true, false, false, "", NoPairCause::Deliberate).engaged, L"motion_ahead_frames 0 is a choice, not a fallback");
+			Assert::IsTrue(std::string(NoPairNote(NoPairCause::Deliberate)).find("by setting") != std::string::npos);
+			Assert::IsTrue(Has(Motion(true, false, false, "nvofapi64.dll not found", NoPairCause::ProducerNotRunning), "producer is not running"));
+			Assert::IsTrue(Has(Motion(true, false, false, "nvofapi64.dll not found", NoPairCause::ProducerNotRunning), "nvofapi64.dll not found"));
+			Assert::IsTrue(Has(Motion(true, false, false, "", NoPairCause::SizeMismatch), "does not fit"));
+			Assert::IsTrue(Has(Motion(true, false, false, "", NoPairCause::Missing), "no optical-flow pair"));
+			Assert::IsFalse(Motion(false, false, false, "", NoPairCause::Missing).engaged, L"optical flow not requested");
+			Assert::IsTrue(Has(Motion(true, true, false, "NvOFExecute", NoPairCause::Missing), "optical flow failed"), L"a real failure wins");
+			// The one-engine guard's entry.
+			Assert::IsFalse(NvofSessions(0, 0).engaged);
+			Assert::IsFalse(NvofSessions(1, 0).engaged, L"one session per GPU is the rule");
+			Assert::IsTrue(Has(NvofSessions(2, 1), "2 optical-flow engine sessions"));
 			Assert::IsFalse(Presentation(false, false).engaged);
 			Assert::IsTrue(Has(Presentation(true, false), "open loop"));
 			Assert::IsTrue(Has(Presentation(false, true), "de-judder held"));

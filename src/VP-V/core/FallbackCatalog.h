@@ -186,16 +186,46 @@ namespace FallbackCatalog
 	}
 
 	// ---- motion.estimation ----------------------------------------------------------------------
-	// noAheadPair (SK-MV, doc 83): optical flow is wanted but the one NVOF source (the look-ahead producer) gave no pair for a run of
-	// estimates, so the block searches (the P2m path) ran. `error` then names why.
-	inline Decision Motion(bool opticalFlowRequested, bool engineFailed, bool aheadProducerStopped,
-		const std::string& error = std::string(), bool noAheadPair = false)
+	// SK-MV (doc 83): why an estimate had no pair from the one NVOF source (the look-ahead producer), so the block searches (the P2m
+	// path) ran. Deliberate is a CHOICE (motion_ahead_frames 0, the low-latency path): informational, never an engaged fallback.
+	enum class NoPairCause : unsigned char
 	{
-		if (!opticalFlowRequested || (!engineFailed && !aheadProducerStopped && !noAheadPair))
+		None,
+		Deliberate,            // motion_ahead_frames is 0 or the low-latency path runs without look-ahead
+		ProducerNotRunning,    // wanted but not started / stopped: `error` carries the producer's real reason
+		SizeMismatch,          // a pair was computed but not at the matcher's search size
+		Missing,               // the producer runs but had no pair for these frames (short queue, a gap, a resync)
+	};
+	inline const char* NoPairNote(NoPairCause cause)
+	{
+		switch (cause)
+		{
+		case NoPairCause::Deliberate: return "no optical-flow look-ahead by setting (motion_ahead_frames 0 or the low-latency path): the block searches run";
+		case NoPairCause::ProducerNotRunning: return "matcher only (the optical-flow look-ahead producer is not running";
+		case NoPairCause::SizeMismatch: return "matcher only (the pair computed ahead does not fit the matcher's search size";
+		case NoPairCause::Missing: return "matcher only (no optical-flow pair computed ahead for these frames";
+		default: return "";
+		}
+	}
+	inline Decision Motion(bool opticalFlowRequested, bool engineFailed, bool aheadProducerStopped,
+		const std::string& error = std::string(), NoPairCause noPair = NoPairCause::None)
+	{
+		const bool noPairEngaged = noPair != NoPairCause::None && noPair != NoPairCause::Deliberate;
+		if (!opticalFlowRequested || (!engineFailed && !aheadProducerStopped && !noPairEngaged))
 			return Released("motion");
 		std::string reason = engineFailed ? "matcher only (optical flow failed" :
-			aheadProducerStopped ? "no optical-flow look-ahead (producer stopped" : "matcher only (no optical-flow pair computed ahead";
+			aheadProducerStopped ? "no optical-flow look-ahead (producer stopped" : NoPairNote(noPair);
 		return Engaged("motion", reason + (error.empty() ? std::string() : ": " + error) + ")");
+	}
+
+	// SK-MV runtime one-engine guard (NvOpticalFlow::Sessions): shown while more than one NvOpticalFlow::Engine session is open on one
+	// GPU (the producer owns the only one). `mostOnOneGpu` = the highest open count on any GPU, `violations` = second opens so far.
+	inline Decision NvofSessions(int mostOnOneGpu, unsigned long long violations)
+	{
+		if (mostOnOneGpu <= 1)
+			return Released("nvof sessions");
+		return Engaged("nvof sessions", std::to_string(mostOnOneGpu) + " optical-flow engine sessions are open on one GPU (" +
+			std::to_string(violations) + " second-session open(s) so far); the vector engine's look-ahead producer should hold the only one");
 	}
 
 	// ---- motion.estimation: the vector producer's restarts (bug hunt 35 #1) -----------------------

@@ -353,8 +353,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	if (pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery))
 		motionSegment.Publish(VpMotion::Direction::Forward, aSequence, bSequence,
 		MotionShadowField{ aSequence, bSequence, dejudder->Field(), dejudder->FrameTrust(), dejudder->SubField(), dejudder->Camera() },   // SK-MV: P3 (+P2/P2m by the source) published with its textures
-		dejudder->ExternalFlowUsed() ? VpMotion::Source::EngineAhead :
-		dejudder->OpticalFlowUsed() ? VpMotion::Source::EngineAtRender : VpMotion::Source::Matcher,
+		dejudder->ExternalFlowUsed() ? VpMotion::Source::EngineAhead : VpMotion::Source::Matcher,   // SK-MV: no render-time engine (EngineAtRender is unreachable)
 		motionShadowEpoch, 0, bSequence != aSequence + 1);
 	if (motionEngineWarming)
 		return true;   // r6 fix 1: warm-up only; nothing counted, logged or handed on
@@ -374,7 +373,9 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 				"optical-flow engine (computed ahead, camera from the engine)" : "optical-flow engine (computed ahead)") :
 			dejudder->OpticalFlowUsed() ? "optical-flow engine" :
 			!dejudder->GetSettings().opticalFlow ? "block searches (optical_flow off)" :
-			dejudder->NoPairAhead() ? "block searches (no optical-flow pair computed ahead)" : "block searches (no engine)";
+			dejudder->NoPairAhead() ? (!motionProducer && (vectorEngine.motionAheadSetting == 0 || vectorEngine.motionLowLatencyNoVectors) ?
+				"block searches (no optical-flow look-ahead by setting: motion_ahead_frames 0 or the low-latency path)" :
+				"block searches (no optical-flow pair computed ahead)") : "block searches (no engine)";
 		if (motionSourceLogged != source)
 		{
 			motionSourceLogged = source;
@@ -387,20 +388,52 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		const bool flowFailed = !dejudder->OpticalFlowUsed() && !dejudder->ExternalFlowUsed() &&
 			!dejudder->OpticalFlowError().empty();
 		const bool producerStopped = motionProducer && !motionProducer->Running();
-		// SK-MV (MV2): the P2m path is shown. A run of kNoPairRun estimates without a pair computed ahead (optical flow wanted) is a visible
-		// "motion" entry with the reason; a single missed pair (the start-up fill, a refill) is a counter only; a pair resets the run.
-		if (dejudder->NoPairAhead())
-		{
-			if (vectorEngine.motionNoPairRun < 1000000u) ++vectorEngine.motionNoPairRun;
-		}
+		// SK-MV (MV2): the P2m path is shown, with its SPECIFIC cause. A sustained run (longer than the look-ahead depth at the measured
+		// rate, never fewer than NoPairTracker::kFloor) or a sustained partial miss ratio is the visible "motion" entry; a single miss (the
+		// start-up fill, a refill) is a counter only. A deliberate choice (motion_ahead_frames 0, the low-latency path) is informational
+		// (the source log line), never an engaged fallback.
+		FallbackCatalog::NoPairCause noPairCause = FallbackCatalog::NoPairCause::None;
+		std::string noPairDetail;
+		const bool noPairNow = dejudder->GetSettings().opticalFlow && dejudder->NoPairAhead();
+		const int noPairDepth = vectorEngine.motionAheadConfigured.load(std::memory_order_acquire);
+		if (dejudder->GetSettings().opticalFlow)
+			vectorEngine.motionNoPair.Note(noPairNow, noPairDepth);
 		else
-			vectorEngine.motionNoPairRun = 0;
-		const bool noPairShown = vectorEngine.motionNoPairRun >= VpMotion::VectorEngineState::kNoPairRun;
-		const char* noPairWhy = !motionProducer ? "no look-ahead producer: motion_ahead_frames off, low latency, or no optical-flow engine" :
-			!motionProducer->Running() ? "the look-ahead producer is not running" : "no pair computed ahead for these frames (short queue, a gap or a resync)";
+			vectorEngine.motionNoPair.Reset();
+		if (noPairNow)
+		{
+			if (!motionProducer && (vectorEngine.motionAheadSetting == 0 || vectorEngine.motionLowLatencyNoVectors))
+				noPairCause = FallbackCatalog::NoPairCause::Deliberate;
+			else if (!motionProducer)
+			{
+				noPairCause = FallbackCatalog::NoPairCause::ProducerNotRunning;
+				noPairDetail = vectorEngine.motionProducerStartError.empty() ? std::string("not started yet (waiting for frames ahead)") :
+					vectorEngine.motionProducerStartError;
+			}
+			else if (!motionProducer->Running())
+			{
+				noPairCause = FallbackCatalog::NoPairCause::ProducerNotRunning;
+				noPairDetail = motionProducer->Error();
+			}
+			else if (dejudder->PairSizeMismatch())
+				noPairCause = FallbackCatalog::NoPairCause::SizeMismatch;
+			else
+				noPairCause = FallbackCatalog::NoPairCause::Missing;
+		}
+		const bool noPairShown = noPairCause != FallbackCatalog::NoPairCause::None && noPairCause != FallbackCatalog::NoPairCause::Deliberate &&
+			vectorEngine.motionNoPair.Sustained(noPairDepth);
+		if (noPairShown)
+		{
+			const std::string how = vectorEngine.motionNoPair.Describe(noPairDepth);
+			noPairDetail = noPairDetail.empty() ? how : noPairDetail + "; " + how;
+		}
 		SyncFallback(FallbackCatalog::Motion(dejudder->GetSettings().opticalFlow, flowFailed, producerStopped,
-			flowFailed ? dejudder->OpticalFlowError() : producerStopped ? motionProducer->Error() : noPairShown ? std::string(noPairWhy) : std::string(),
-			noPairShown));
+			flowFailed ? dejudder->OpticalFlowError() : producerStopped ? motionProducer->Error() : noPairShown ? noPairDetail : std::string(),
+			noPairShown ? noPairCause : FallbackCatalog::NoPairCause::None));
+		// SK-MV: the one-engine guard is visible (Ctrl+I / Fallbacks) while more than one Engine session is open on one GPU. Synced here,
+		// not in VectorEngineFallbackSync (VectorEngineTests pins that group's exact sync counts, WAIVER-T1-01).
+		SyncFallback(FallbackCatalog::NvofSessions(NvOpticalFlow::Sessions::MostOpenOnOneGpu(NvOpticalFlow::SessionKind::Engine),
+			NvOpticalFlow::Sessions::Violations()));
 	}
 	if (vectorDemand.estimate)
 	{

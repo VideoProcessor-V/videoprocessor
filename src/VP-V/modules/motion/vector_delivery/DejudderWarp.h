@@ -699,6 +699,7 @@ namespace Dejudder
 		int ofW = 0, ofH = 0;
 		// This estimate found no pair computed ahead (P2) and ran the block searches (the P2m path): not a failure, a state the host shows.
 		bool noPairAhead = false;
+		bool pairSizeMismatch = false;   // ... because a pair WAS handed over but not at this instance's search size
 	public:
 		// The searching instance may be the half-size inner one (lowRes): report it.
 		const std::string& OpticalFlowError() const
@@ -708,6 +709,8 @@ namespace Dejudder
 		bool OpticalFlowUsed() const { return opticalFlowUsed || (inner && HalvesForSearch() && inner->OpticalFlowUsed()); }
 		// SK-MV: optical flow was wanted for the last Estimate but no pair computed ahead (P2) fitted, so the block searches ran (P2m).
 		bool NoPairAhead() const { return noPairAhead || (inner && HalvesForSearch() && inner->NoPairAhead()); }
+		// ... and a pair was computed but at another size than the matcher searches at (a stale target size), not simply missing.
+		bool PairSizeMismatch() const { return pairSizeMismatch || (inner && HalvesForSearch() && inner->PairSizeMismatch()); }
 		// The engine's input size where the searches run (this instance's half size,
 		// or the inner's): the size a flow computed ahead must have. False before the
 		// first estimate.

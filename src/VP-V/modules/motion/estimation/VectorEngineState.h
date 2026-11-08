@@ -90,10 +90,14 @@ namespace VpMotion
 		// stop and restart; a started producer clears it.
 		std::shared_ptr<VpMotion::P2Slot> p2Slot = std::make_shared<VpMotion::P2Slot>(16);
 		VpMotion::P2View P2() const { return VpMotion::P2View(p2Slot); }
-		// SK-MV (MV2): consecutive estimates (optical flow wanted) that found no pair computed ahead and took the matcher path.
-		// A run of kNoPairRun makes the visible "motion" fallback entry (FallbackCatalog::Motion); a pair resets it. Render thread.
-		static constexpr unsigned kNoPairRun = 8;
-		unsigned motionNoPairRun = 0;
+		// SK-MV (MV2): estimates (optical flow wanted) that found no pair computed ahead and took the matcher path; sustained runs or a
+		// sustained partial miss ratio make the visible "motion" fallback entry (NoPairTracker, VectorProducts.h). Render thread.
+		VpMotion::NoPairTracker motionNoPair;
+		// Why the look-ahead producer is not there, for the no-pair cause (render thread, set by PlanProducer): the motion_ahead_frames
+		// setting, the low-latency path and the producer's real start error.
+		int motionAheadSetting = -1;           // -1 = not planned yet
+		bool motionLowLatencyNoVectors = false;
+		std::string motionProducerStartError;
 		// SK-MV: NvOpticalFlow::Sessions::Violations() as last logged (render thread).
 		unsigned long long nvofViolationsSeen = 0;
 		// One vectors-valid state (docs/VP-interpolator-50-60-plan.md step 1; owner [[vp-vector-validity]]):

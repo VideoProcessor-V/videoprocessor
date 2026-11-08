@@ -29,6 +29,7 @@
 #include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <dxgi1_2.h>
+#include <libplacebo/d3d11.h>
 
 #include <algorithm>
 #include <chrono>
@@ -181,6 +182,32 @@ namespace
 		ssim = windows ? sum / windows : 0.0;
 	}
 
+	// The mean vector error of the trusted blocks (the 2-block border excluded) against a known motion given in the FIELD's own unit.
+	// UNIT (audit SK-MV 2026-11-08): the matcher's block field is in HALF-SIZE pixels (the search runs on the half-size luma; the
+	// existing EstimatorHookTests read a 12 x 6 source pan as (6, 3)), so a source-pixel shift must be halved before it is compared.
+	// Returns the error in field units, -1 when no block is trusted; trusted / total count the blocks.
+	double MvFieldError(const DejudderField& field, double dxField, double dyField, long& trusted, long& total)
+	{
+		double sum = 0.0;
+		trusted = total = 0;
+		for (int by = 2; by < field.blocksY - 2; ++by)
+			for (int bx = 2; bx < field.blocksX - 2; ++bx)
+			{
+				++total;
+				if (!field.trusted(bx, by)) continue;
+				sum += std::hypot(field.vx(bx, by) - dxField, field.vy(bx, by) - dyField);
+				++trusted;
+			}
+		return trusted ? sum / trusted : -1.0;
+	}
+
+	// The LUID of the adapter a libplacebo D3D11 device runs on (0 when it is not D3D11), through the one-engine guard's key.
+	uint64_t MvGpuKey(pl_gpu gpu)
+	{
+		pl_d3d11 d3d = pl_d3d11_get(gpu);
+		return d3d && d3d->device ? NvOpticalFlow::Sessions::AdapterKey(d3d->device) : 0;
+	}
+
 	std::vector<uint8_t> MvLuma8(const std::vector<uint16_t>& codes)
 	{
 		std::vector<uint8_t> out(codes.size());
@@ -195,6 +222,29 @@ namespace VideoProcessorTest
 	TEST_CLASS(MotionUnificationBenchTests)
 	{
 	public:
+		// The scorer itself (CPU): exact vectors in the field's unit score ~0, the same vectors read as source pixels score about
+		// half the shift (the audit's unit error), an untrusted block is not counted.
+		TEST_METHOD(FieldErrorScorerUnitsAndPerfectVectors)
+		{
+			DejudderField f;
+			f.blocksX = 8; f.blocksY = 8;
+			f.texels.assign(static_cast<size_t>(f.blocksX) * f.blocksY * 4, 0.0f);
+			for (int i = 0; i < f.blocksX * f.blocksY; ++i)
+			{
+				f.texels[static_cast<size_t>(i) * 4] = 4.0f;       // a 8 source px shift in half-size px
+				f.texels[static_cast<size_t>(i) * 4 + 1] = 1.0f;   // a 2 source px shift
+				f.texels[static_cast<size_t>(i) * 4 + 2] = 1.0f;   // trusted
+			}
+			long trusted = 0, total = 0;
+			Assert::AreEqual(0.0, MvFieldError(f, 4.0, 1.0, trusted, total), 1e-9, L"perfect vectors in the field's unit");
+			Assert::AreEqual<long>(16, total, L"the interior 4 x 4 blocks");
+			Assert::AreEqual<long>(16, trusted);
+			Assert::IsTrue(MvFieldError(f, 8.0, 2.0, trusted, total) > 4.0, L"comparing half-size vectors with the source-pixel shift is the unit error");
+			f.texels[(2 * 8 + 2) * 4 + 2] = 0.0f;   // one interior block untrusted
+			MvFieldError(f, 4.0, 1.0, trusted, total);
+			Assert::AreEqual<long>(15, trusted, L"an untrusted block is not scored");
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(BeforeAfterSingleNvofSource)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
@@ -231,6 +281,11 @@ namespace VideoProcessorTest
 			pl_gpu gpu = fixture.Gpu();
 			CComPtr<ID3D11Device> device;
 			Assert::IsTrue(SUCCEEDED(D3D11CreateDevice(nvidia, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr)));
+			// The producer and the matcher must run on the SAME GPU, or "one session per GPU" and the timings mean nothing: a WARP or
+			// integrated-GPU fixture fails here, clearly (set VP_TEST_GPU=hardware and VP_TEST_ADAPTER=NVIDIA).
+			const uint64_t nvidiaKey = NvOpticalFlow::Sessions::AdapterKey(device), fixtureKey = MvGpuKey(gpu);
+			Assert::IsTrue(nvidiaKey != NvOpticalFlow::Sessions::kUnknownAdapterKey && fixtureKey == nvidiaKey,
+				L"the libplacebo fixture device is not on the NVIDIA adapter the producer uses (VP_TEST_GPU=hardware, VP_TEST_ADAPTER=NVIDIA)");
 
 			std::ofstream csv(outPath, std::ios::trunc);
 			Assert::IsTrue(static_cast<bool>(csv), L"cannot write the csv");
@@ -302,21 +357,18 @@ namespace VideoProcessorTest
 					const bool ok = warp.Estimate(pa.planes, pb.planes);
 					const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 					if (!ok) { row("shift", name, n, "estimate_failed", 1.0); continue; }
+					if (mode == 1)
+						Assert::IsTrue(warp.ExternalFlowUsed(), L"the pair estimate must have taken the pair ahead (size or device mismatch otherwise)");
 					const DejudderField field = DownloadField(gpu, warp);
-					double sum = 0.0;
 					long trusted = 0, total = 0;
-					for (int by = 2; by < field.blocksY - 2; ++by)
-						for (int bx = 2; bx < field.blocksX - 2; ++bx)
-						{
-							++total;
-							if (!field.trusted(bx, by)) continue;
-							sum += std::hypot(field.vx(bx, by) - sh[0], field.vy(bx, by) - sh[1]);
-							++trusted;
-						}
-					row("shift", name, n, "epe_px", trusted ? sum / trusted : -1.0);
+					const double epeHalf = MvFieldError(field, sh[0] / 2.0, sh[1] / 2.0, trusted, total);   // field unit: half-size px
+					row("shift", name, n, "epe_half_px", epeHalf);
+					row("shift", name, n, "epe_px", epeHalf < 0 ? epeHalf : epeHalf * 2.0);   // in source px
 					row("shift", name, n, "trusted_share", total ? static_cast<double>(trusted) / total : 0.0);
 					row("shift", name, n, "estimate_ms", ms);
 					row("shift", name, n, "used_optical_flow_pair", warp.ExternalFlowUsed() ? 1.0 : 0.0);
+					row("shift", name, n, "engine_used", warp.OpticalFlowUsed() ? 1.0 : 0.0);   // OpticalFlowUsed: the pair was the optical-flow input
+					row("shift", name, n, "no_pair_ahead", warp.NoPairAhead() ? 1.0 : 0.0);
 					if (mode == 1) row("shift", name, n, "pair_ms", shiftPairMs);
 				}
 				// ---- interp: frame n+1 reconstructed from n and n+2
@@ -340,6 +392,8 @@ namespace VideoProcessorTest
 					const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 					Dejudder::Planes out;
 					if (!ok || !warp.Warp(pa.planes, 0.5f, out)) { row("interp", name, n, "estimate_failed", 1.0); continue; }
+					if (mode == 1)
+						Assert::IsTrue(warp.ExternalFlowUsed(), L"the pair estimate must have taken the pair ahead (size or device mismatch otherwise)");
 					const std::vector<uint8_t> mid = MvLuma8(DownloadPlane(gpu, out.luma));
 					double psnr = 0.0, ssim = 0.0;
 					MvQuality(mid, lumaMid, width, height, psnr, ssim);
@@ -349,6 +403,8 @@ namespace VideoProcessorTest
 					row("interp", name, n, "hold_ssim", holdSsim);
 					row("interp", name, n, "estimate_ms", ms);
 					row("interp", name, n, "used_optical_flow_pair", warp.ExternalFlowUsed() ? 1.0 : 0.0);
+					row("interp", name, n, "engine_used", warp.OpticalFlowUsed() ? 1.0 : 0.0);
+					row("interp", name, n, "no_pair_ahead", warp.NoPairAhead() ? 1.0 : 0.0);
 					if (mode == 1) row("interp", name, n, "pair_ms", interpPairMs);
 				}
 			}

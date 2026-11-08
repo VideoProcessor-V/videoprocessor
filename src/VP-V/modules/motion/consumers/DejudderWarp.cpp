@@ -3554,11 +3554,13 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		externalFlowUsed = false;
 		ofWeighted = false;
 		noPairAhead = false;
+		pairSizeMismatch = false;
 		const bool useAhead = ahead && ahead->halfW == halfW && ahead->halfH == halfH &&
 			ahead->gridW == (halfW + 3) / 4 && ahead->gridH == (halfH + 3) / 4;
 		if (!useAhead)
 		{
 			noPairAhead = true;
+			pairSizeMismatch = static_cast<bool>(ahead);   // a pair was handed over and did not fit: told apart from a missing pair
 			return false;
 		}
 		auto fail = [this](const std::string& why) {
@@ -3823,6 +3825,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				previousValid = false;
 				opticalFlowUsed = false;
 				noPairAhead = false;
+				pairSizeMismatch = false;
 				globalFromEngine = false;
 				refineCarriesWeight = false;
 				externalFlow.reset();   // a pair computed ahead is for this Estimate only
@@ -3834,6 +3837,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			engineGlobalValid = false;
 			ofWeighted = false;
 			noPairAhead = false;   // set by OpticalFlowSearch when optical flow is wanted and no pair computed ahead fits
+			pairSizeMismatch = false;
 			opticalFlowUsed = settings.opticalFlow && !serialSearchForTest &&
 				(candidateMode ? OpticalFlowSearch(ofSearch[0], ofSearch[1]) : OpticalFlowSearch(forward, backward));
 			const bool replaced = opticalFlowUsed && !candidateMode;

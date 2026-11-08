@@ -34,13 +34,13 @@ namespace NvOpticalFlow
 	uint64_t Sessions::AdapterKey(ID3D11Device* device)
 	{
 		if (!device)
-			return 0;
+			return kUnknownAdapterKey;
 		CComPtr<IDXGIDevice> dxgiDevice;
 		CComPtr<IDXGIAdapter> adapter;
 		DXGI_ADAPTER_DESC desc{};
 		if (FAILED(device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDevice))) || FAILED(dxgiDevice->GetAdapter(&adapter)) ||
 			FAILED(adapter->GetDesc(&desc)))
-			return 0;
+			return kUnknownAdapterKey;
 		return (static_cast<uint64_t>(static_cast<uint32_t>(desc.AdapterLuid.HighPart)) << 32) | desc.AdapterLuid.LowPart;
 	}
 
@@ -75,6 +75,17 @@ namespace NvOpticalFlow
 			if (adapter == 0 || entry.first == adapter)
 				sum += entry.second;
 		return sum;
+	}
+
+	int Sessions::MostOpenOnOneGpu(SessionKind kind)
+	{
+		SessionTable& t = Table();
+		std::lock_guard<std::mutex> lock(t.mutex);
+		int most = 0;
+		for (const auto& entry : t.open[Index(kind)])
+			if (entry.second > most)
+				most = entry.second;
+		return most;
 	}
 
 	int Sessions::Peak(SessionKind kind, uint64_t adapter)

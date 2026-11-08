@@ -13,6 +13,7 @@
 #include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <dxgi1_2.h>
+#include <libplacebo/d3d11.h>
 
 #include <chrono>
 #include <memory>
@@ -30,6 +31,7 @@ namespace VideoProcessorTest
 			using NvOpticalFlow::SessionKind;
 			Sessions::ResetForTest();
 			Assert::AreEqual(0, Sessions::Open(SessionKind::Engine, 0));
+			Assert::IsTrue(Sessions::AdapterKey(nullptr) == Sessions::kUnknownAdapterKey, L"an unknown adapter has its own key, never 0 (all GPUs)");
 			Sessions::Opened(SessionKind::Engine, 11);
 			Sessions::Opened(SessionKind::Engine, 22);   // another GPU: not a second engine
 			Assert::AreEqual(1, Sessions::Open(SessionKind::Engine, 11));
@@ -38,8 +40,13 @@ namespace VideoProcessorTest
 			Sessions::Opened(SessionKind::Hinted, 11);   // the long-pair session is counted apart, never a violation
 			Assert::AreEqual<unsigned long long>(0, Sessions::Violations());
 			Assert::AreEqual(1, Sessions::Open(SessionKind::Hinted, 11));
+			Assert::AreEqual(1, Sessions::MostOpenOnOneGpu(SessionKind::Engine), L"not above one yet");
 			Sessions::Opened(SessionKind::Engine, 11);   // a second Engine on GPU 11
 			Assert::AreEqual<unsigned long long>(1, Sessions::Violations());
+			Assert::AreEqual(2, Sessions::MostOpenOnOneGpu(SessionKind::Engine), L"above one: the guard's fallback entry engages");
+			Sessions::Opened(SessionKind::Engine, Sessions::kUnknownAdapterKey);   // an unknown GPU counts as a GPU of its own
+			Assert::AreEqual<unsigned long long>(1, Sessions::Violations());
+			Sessions::Closed(SessionKind::Engine, Sessions::kUnknownAdapterKey);
 			Assert::AreEqual(2, Sessions::Peak(SessionKind::Engine, 11));
 			Sessions::Closed(SessionKind::Engine, 11);
 			Sessions::Closed(SessionKind::Engine, 11);
@@ -49,6 +56,32 @@ namespace VideoProcessorTest
 			Assert::AreEqual(2, Sessions::Peak(SessionKind::Engine, 11), L"the peak stays");
 			Sessions::ResetForTest();
 			Assert::AreEqual<unsigned long long>(0, Sessions::Violations());
+		}
+
+		// SK-MV: when "no pair ahead" becomes visible: not a bare frame count, and a partial miss ratio shows too.
+		TEST_METHOD(NoPairTrackerThresholdFollowsTheDepthAndShowsPartialMisses)
+		{
+			using VpMotion::NoPairTracker;
+			Assert::AreEqual(8u, NoPairTracker::Threshold(0), L"the floor");
+			Assert::AreEqual(8u, NoPairTracker::Threshold(2), L"24p depth 2 + margin 4 is under the floor");
+			Assert::AreEqual(8u, NoPairTracker::Threshold(4), L"60p depth 4 + margin 4");
+			Assert::AreEqual(20u, NoPairTracker::Threshold(16), L"240p depth 16: a refill takes that long");
+			NoPairTracker t;
+			for (int i = 0; i < 7; ++i) t.Note(true, 4);
+			Assert::IsFalse(t.Sustained(4), L"7 in a row is below the threshold");
+			t.Note(true, 4);
+			Assert::IsTrue(t.Sustained(4), L"8 in a row");
+			Assert::IsTrue(t.Describe(4).find("in a row") != std::string::npos);
+			t.Note(false, 4);
+			Assert::IsFalse(t.Sustained(4), L"a pair resets the run");
+			// 7 misses in 8 (a run counter that keeps resetting): the window ratio shows it.
+			NoPairTracker r;
+			for (int i = 0; i < 32; ++i) r.Note(i % 8 != 7, 4);
+			Assert::IsTrue(r.run < NoPairTracker::Threshold(4), L"the run never reaches the threshold");
+			Assert::IsTrue(r.Sustained(4), L"but 28 of 32 estimates missed");
+			Assert::IsTrue(r.Describe(4).find("28 of the last 32") != std::string::npos, r.Describe(4).empty() ? L"empty" : L"text");
+			for (int i = 0; i < 32; ++i) r.Note(false, 4);
+			Assert::IsFalse(r.Sustained(4), L"a clean window releases it");
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(ExactlyOneEngineAcrossProducerDejudderAndLongPair)
@@ -75,7 +108,7 @@ namespace VideoProcessorTest
 			CComPtr<ID3D11Device> device;
 			Assert::IsTrue(SUCCEEDED(D3D11CreateDevice(nvidia, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr)));
 			const uint64_t gpu = Sessions::AdapterKey(device);
-			Assert::IsTrue(gpu != 0, L"the adapter key");
+			Assert::IsTrue(gpu != Sessions::kUnknownAdapterKey, L"the adapter key");
 			Sessions::ResetForTest();
 
 			// A textured pair (1920 x 1080 P010 for the producer; the same texture family for the matcher).
@@ -128,6 +161,11 @@ namespace VideoProcessorTest
 				TargetLutGpuFixture fixture;
 				Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
 				pl_gpu plgpu = fixture.Gpu();
+				// The matcher must run on the SAME GPU as the producer or the one-per-GPU count proves nothing: fail clearly otherwise
+				// (VP_TEST_GPU=hardware and VP_TEST_ADAPTER=NVIDIA).
+				pl_d3d11 d3dFixture = pl_d3d11_get(plgpu);
+				Assert::IsTrue(d3dFixture && d3dFixture->device && Sessions::AdapterKey(d3dFixture->device) == gpu,
+					L"the libplacebo fixture device is not on the NVIDIA adapter the producer uses");
 				const DejudderFrame a = MakeDejudderFrame(W, H, [&](int x, int y) { return static_cast<uint16_t>(lumaAt(0, x, y) << 8); },
 					[](int, int, int) { return static_cast<uint16_t>(32768); });
 				const DejudderFrame b = MakeDejudderFrame(W, H, [&](int x, int y) { return static_cast<uint16_t>(lumaAt(1, x, y) << 8); },
@@ -143,6 +181,7 @@ namespace VideoProcessorTest
 				Dejudder::MotionWarp warp(fixture.Log(), plgpu, settings);
 				warp.SetExternalFlow(flow);
 				Assert::IsTrue(warp.Estimate(pa.planes, pb.planes), L"estimate with the pair ahead");
+				Assert::IsTrue(warp.ExternalFlowUsed(), L"the pair ahead was taken (size or device mismatch otherwise)");
 				Assert::AreEqual(1, Sessions::Open(SessionKind::Engine, gpu), L"the de-judder opened no engine (pair)");
 				Assert::IsTrue(warp.Estimate(pb.planes, pa.planes), L"estimate without a pair: the matcher");
 				Assert::IsFalse(warp.OpticalFlowUsed(), L"no render-time engine: the block searches ran");
@@ -164,7 +203,14 @@ namespace VideoProcessorTest
 				const VpLongPair::Result r = service.RunNow(hl.data(), hr.data(), W / 2, H / 2, nullptr);
 				Assert::IsTrue(r.ok, L"the long pair produced a field (hinted session or the visible seeded search)");
 				Assert::AreEqual(1, Sessions::Open(SessionKind::Engine, gpu), L"the long-pair service opened no Engine");
-				Logger::WriteMessage(("long-pair hinted sessions at peak: " + std::to_string(Sessions::Peak(SessionKind::Hinted, gpu)) + "\n").c_str());
+				// The step must PROVE a hinted session or say why not: a pair that ran on the NVOF session was counted (peak 1 on this GPU);
+				// a pair that took the seeded search must carry the reason the session did not open (never an unexplained skip).
+				if (r.path == VpLongPair::Path::NvofHinted || r.path == VpLongPair::Path::NvofUnhinted)
+					Assert::AreEqual(1, Sessions::Peak(SessionKind::Hinted, gpu), L"the long pair ran on a hinted session and the guard counted it");
+				else
+					Assert::IsFalse(r.why.reason.empty(), L"seeded search without a reason for the session not opening");
+				Logger::WriteMessage(("long-pair path " + std::string(VpLongPair::PathName(r.path)) + ", hinted sessions at peak: " +
+					std::to_string(Sessions::Peak(SessionKind::Hinted, gpu)) + "\n").c_str());
 			}
 
 			Assert::AreEqual<unsigned long long>(0, Sessions::Violations(), L"a second Engine was never opened");

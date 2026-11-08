@@ -28,10 +28,14 @@ namespace NvOpticalFlow
 	enum class SessionKind { Engine, Hinted };
 	struct Sessions
 	{
-		static uint64_t AdapterKey(ID3D11Device* device);   // the adapter LUID as one word; 0 = unknown
+		// The adapter LUID as one word. A device whose adapter cannot be queried gets kUnknownAdapterKey (its own key, never 0: 0 means
+		// "all GPUs" in Open / Peak, so an unknown GPU is counted as a GPU of its own and cannot hide a second session).
+		static constexpr uint64_t kUnknownAdapterKey = ~uint64_t(0);
+		static uint64_t AdapterKey(ID3D11Device* device);
 		static void Opened(SessionKind kind, uint64_t adapter);
 		static void Closed(SessionKind kind, uint64_t adapter);
 		static int Open(SessionKind kind, uint64_t adapter);    // sessions of `kind` open on that GPU now (adapter 0: all GPUs)
+		static int MostOpenOnOneGpu(SessionKind kind);          // the highest open count on any single GPU (the guard's "exceeds 1")
 		static int Peak(SessionKind kind, uint64_t adapter);    // the most open at once since the process started (adapter 0: the highest of any GPU)
 		static unsigned long long Violations();                  // second Engine sessions opened on a GPU that had one
 		static void ResetForTest();                              // zeroes the table (tests only, nothing may be open)

@@ -33,12 +33,14 @@ namespace VpMotion
 		life.lowLatency = in.lowLatency->load(std::memory_order_acquire);
 		life.opticalFlow = in.opticalFlow;
 		life.motionAheadFrames = in.motionAheadFrames;
+		motionAheadSetting = in.motionAheadFrames;   // SK-MV: kept for the no-pair cause
 		// Owner 2026-10-16: the producer stays alive once wanted (starting it again would cost a device on
 		// every queue refill); with no frames queued ahead it gets no frames, so it computes nothing it
 		// could not use - the startup fill and an emptied queue alike.
 		// Vector engine on demand: also while a consumer of vectors is served (forward, or backward pairs).
 		life.vectorProducer = vectorDemand.producer;
 		life.vectorLowLatencyAllowed = vectorDemand.lowLatencyAllowed;
+		motionLowLatencyNoVectors = life.lowLatency && !vectorDemand.lowLatencyAllowed;
 		life.dejudderPresent = in.dejudderPresent;
 		life.producerExists = motionProducer != nullptr;
 		life.producerRunning = motionProducer && motionProducer->Running();
@@ -55,11 +57,15 @@ namespace VpMotion
 			const NvOpticalFlow::Preset preset = NvOpticalFlow::Preset::Slow;
 			producer->SetSlot(p2Slot);   // SK-MV: the producer publishes P2 into the engine's slot (it owns no store)
 			if (d3d && d3d->device && producer->Start(d3d->device, preset))
+			{
+				motionProducerStartError.clear();
 				PublishProducer(std::shared_ptr<MotionAhead::Producer>(std::move(producer)));   // hardening: atomic publish (HOOKS.md section 2)
+			}
 			else
 			{
 				motionProducerFailedLogged = true;
-				DebugLog::Log("Motion ahead: the producer did not start (%s); the de-judder estimates at render time",
+				motionProducerStartError = producer->Error().empty() ? std::string("no render device") : producer->Error();   // SK-MV: the real reason, shown
+				DebugLog::Log("Motion ahead: the producer did not start (%s); the de-judder takes the block searches (no optical-flow pair)",
 					producer->Error().c_str());
 			}
 		}

@@ -48,6 +48,42 @@ namespace VpMotion
 		uint64_t LiveFieldFrom() const override { return dejudderLiveFieldFrom; }
 		bool MatcherGlobalFromEngine() const override { return dejudder && dejudder->GlobalFromEngine(); }
 
+		// ---- SK-MV (MV1): the VP-side view of the matcher's field set ------------------------------------------
+		// One place that reads today's dejudder-> accessors (Field / FrameTrust / SubField / Camera, and the Snap* copies the extras and
+		// the entrance snapshot read while the next pair is estimated), so a renderer reader asks the view and not the matcher. The
+		// renderer's reads are NOT switched to it here: M2 P5b publishes no field interface and P5c owns the warp, the interpolator and
+		// the live-field bookkeeping, so the reader switch rides P5c (README, doc 83); each future switch is a one-line, byte-identical
+		// call-site change. The same field set is published at every estimate through the motion segment (MotionShadowField).
+		struct FieldSetView
+		{
+			pl_tex field = nullptr, frameTrust = nullptr, subField = nullptr, camera = nullptr;
+			bool Usable() const { return field != nullptr && frameTrust != nullptr; }
+		};
+		FieldSetView LiveFields() const
+		{
+			FieldSetView v;
+			if (dejudder)
+			{
+				v.field = dejudder->Field();
+				v.frameTrust = dejudder->FrameTrust();
+				v.subField = dejudder->SubField();
+				v.camera = dejudder->Camera();
+			}
+			return v;
+		}
+		FieldSetView SnapshotFields() const
+		{
+			FieldSetView v;
+			if (dejudder)
+			{
+				v.field = dejudder->SnapField();
+				v.frameTrust = dejudder->SnapFrameTrust();
+				v.subField = dejudder->SnapSubField();
+				v.camera = dejudder->SnapCamera();
+			}
+			return v;
+		}
+
 		// ---- moved members (verbatim, with their comments) ----------------------------------------------------
 		// Stage 6 de-judder: B's planes (the next source frame) and the matcher.
 		// Created only while the de-judder is on; freed when it goes off.
