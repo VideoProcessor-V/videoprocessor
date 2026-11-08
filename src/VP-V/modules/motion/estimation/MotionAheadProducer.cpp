@@ -482,8 +482,8 @@ namespace MotionAhead
 		// A break the sequence does not show: no pair across it (MotionValidity step 1 F).
 		if (job.breakBefore)
 			havePrevious = false;
-		const int slot = havePrevious ? 1 - current : current;
-		context->UpdateSubresource(lumaTex[slot], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(halfW), 0);
+		const int texIndex = havePrevious ? 1 - current : current;
+		context->UpdateSubresource(lumaTex[texIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(halfW), 0);
 		bool ok = true;
 		if (havePrevious && previousGeneration == job.generation && previousSequence + 1 == job.sequence)
 		{
@@ -496,7 +496,7 @@ namespace MotionAhead
 			// pass-timer inbox the render thread drains; the other pairs run untimed exactly as before.
 			NvOpticalFlow::Result timing;
 			const bool timed = PassTimers::Sampler().Take(job.sequence);
-			if (!engine->Run(lumaTex[prev], lumaTex[slot], flowTex[0], flowTex[1], costTex[0], costTex[1], timed ? &timing : nullptr, continuous))
+			if (!engine->Run(lumaTex[prev], lumaTex[texIndex], flowTex[0], flowTex[1], costTex[0], costTex[1], timed ? &timing : nullptr, continuous))
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				error = engine->LastError();
@@ -560,7 +560,7 @@ namespace MotionAhead
 			++stats.frames;
 			stats.lumaMs = lumaMs;
 		}
-		current = slot;
+		current = texIndex;
 		havePrevious = true;
 		previousSequence = job.sequence;
 		previousGeneration = job.generation;

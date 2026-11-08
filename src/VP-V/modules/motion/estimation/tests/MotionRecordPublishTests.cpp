@@ -5,9 +5,12 @@
 // pan (the same x / y the engine answers through EngineGlobal), an invalid / ambiguous / absent global publishes ABSENT (never the
 // previous value), a discontinuity refuses the write, and no other group of the record is touched.
 #include "pch.h"
+#include "CppUnitTest.h"
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/modules/motion/estimation/MotionRecordPublish.h>
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
+
+using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace VideoProcessorTest
 {

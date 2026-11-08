@@ -5,11 +5,14 @@
 // a pruned pair, a missing producer / size / pair each give false and are counted by reason; a view taken before a Prune stays readable
 // (the engine's lease holds the shared pair); an unbound engine answers false (what a host without the engine sees).
 #include "pch.h"
+#include "CppUnitTest.h"
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 
 #include <cstring>
 #include <memory>
+
+using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace VideoProcessorTest
 {
