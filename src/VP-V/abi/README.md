@@ -36,27 +36,41 @@ is Bill's); they need no change.
   `VpvHostCalls.h` (`VpvCalls::...`), which also return exactly what the old `IVideoRenderer` defaults returned
   when the renderer has no such interface (DirectShow renderers, no renderer, a Bill DLL). `QueryNoCacheTests`
   scans the sources for a stored result.
-- **Threading is unchanged.** Each method keeps the thread contract of the virtual it replaced (copied into
-  `VpvInterfaces.h`); the bridge is stateless beyond a back-pointer, takes no lock and calls the renderer's own
-  public method on the calling thread.
+- **Threading.** The old header stated no thread contract (except the LED shutdown stop and the file-frame slot wait);
+  `VpvInterfaces.h` lists the CALLERS TODAY per method. The bridge is stateless beyond a back-pointer, takes no lock and
+  calls the renderer's own public method on the calling thread.
 - **Pairing.** The plugin exports `VideoProcessorLibplaceboVpvAbi` (defined in `RendererAbiBridge.cpp`, so Bill's
   export file is untouched);
   `Vpv::PluginGuard::Check` (`VpvPluginGuard.h`) refuses a DLL without it or with another number, with a visible
   reason (the same path as an API mismatch). The executable's proxy and the DirectShow filter's loader both call it.
   The build-ID pairing (`VpBuildIdentity.h`) is unchanged.
+- **Attach handshake (extension ABI 2).** The plugin API number is Bill's, but this DLL's shared layouts are not
+  Bill's (`DolbyVisionLuminanceStatus` 24 -> 28 bytes, `VideoState` members inserted mid-class). A Bill executable
+  that loaded it would corrupt memory. So `VideoProcessorLibplaceboCreateRenderer` returns nullptr until the loader
+  calls `VideoProcessorLibplaceboVpvAttach(kVpvExtensionAbi)` (`VpvAttachGate.h`, defined in `RendererAbiBridge.cpp`);
+  the VP loaders (proxy, filter) do it right after `PluginGuard::Check`. A host that does not know it (Bill's) gets
+  its own visible "failed to create a renderer" and never an object of the extended layout. Test code that creates
+  renderers itself must call `PluginGuard::Attach` first.
+- **Only the seven Vpv iids cross the boundary.** `LibplaceboVideoRenderer::QueryExtension` serves the bridge and
+  nothing else; the DLL's module iids (`vpv.vector_engine.v1`, `vpv.camera.v1`, `vpv.resync/1`) stay inside, and DLL
+  code keeps calling `RendererExtension::Query` directly.
+- **One versioned pair.** `VideoProcessor.exe` and `vprenderer\VideoProcessorVPRenderer.dll` (and the Beta pair) are one
+  runtime: deploy them, and back them up, together from the same build. The guard and the attach exist so a mixed pair
+  is refused with a visible reason instead of running.
 - **C++14.** The Lib, renderer and Test projects compile these headers.
 
 ## Files
 
 | File | Role |
 |---|---|
-| `VpvAbi.h` | `kVpvExtensionAbi`, the export name, the retired 25..45 counter history |
+| `VpvAbi.h` | `kVpvExtensionAbi` (2), the export and attach names, the retired 25..45 counter history |
 | `VpvTextSink.h` | `IVpvTextSink`, `StringSink` |
 | `VpvInterfaces.h` | the seven interfaces |
 | `VpvText.h` | `CString` <-> UTF-8 |
 | `VpvRendererAccess.h` | `Vpv::Query<T>` |
 | `VpvHostCalls.h` | `VpvCalls::*` one-line host calls with the old defaults |
-| `VpvPluginGuard.h` | `Vpv::PluginGuard::Check` |
+| `VpvPluginGuard.h` | `Vpv::PluginGuard::Check` (extension ABI export) and `Attach` (the handshake) |
+| `VpvAttachGate.h` | the DLL-side attach state |
 | `RendererAbiBridge.h/.cpp` | the renderer side: `RendererAbiBridgeT<Host>` (header-only, testable with a fake host), `MakeRendererAbiBridge` for `LibplaceboVideoRenderer`, and the `VideoProcessorLibplaceboVpvAbi` export (renderer projects only) |
 
 ## Provenance notes

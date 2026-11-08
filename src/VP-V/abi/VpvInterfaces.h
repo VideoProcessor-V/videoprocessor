@@ -7,9 +7,10 @@
 // the host never caches the pointer (D-P2c, VpvRendererAccess.h). A changed interface gets a NEW iid,
 // never an edit; the iids are the ABI.
 //
-// Thread contracts are those of the virtuals these methods replaced (IRenderer.h at the 45-number line) and are
-// unchanged; each is repeated at its method. The implementation (RendererAbiBridge.h) is stateless beyond a
-// back-pointer and calls the renderer's own public methods on the calling thread.
+// Threads: the old IRenderer.h stated no thread contract for these methods (only the shutdown LED stop and the file
+// frame slot wait had notes, kept below). Each method therefore lists its CALLERS TODAY; that is a fact about the host,
+// not a promise. The bridge (RendererAbiBridge.h) is stateless beyond a back-pointer and calls the renderer's own
+// public method on the calling thread, so the renderer's own locking decides what is safe.
 //
 // C++14: the Lib, renderer and Test projects compile this header.
 
@@ -33,7 +34,7 @@ namespace Vpv
 	{
 	public:
 		static constexpr const char* Iid() { return "vpv.modules.v1"; }
-		// Any thread (the dialog's UI and stats timers). False: the renderer has no such module.
+		// Callers today: the dialog's UI thread (stats timer, crash state, Ctrl+Alt+D). False: the renderer has no such module.
 		virtual bool Status(const char* module, IVpvTextSink& sink) const = 0;
 		// A shortcut or host action a module handles. `reply` is key/value text; its "status" key is the line to
 		// show. False: not handled.
@@ -48,16 +49,20 @@ namespace Vpv
 	{
 	public:
 		static constexpr const char* Iid() { return "vpv.status.v1"; }
-		// Any thread. One line about the de-judder and occlusion mask; false (empty) when both are off.
+		// Callers today: the UI thread, through the module entry. One line about the de-judder and occlusion mask; false
+		// (empty) when both are off.
 		virtual bool GetDejudderStatus(IVpvTextSink& status) const = 0;
-		// Any thread. The source's effective resolution, bitrate quality and bit depth and what source_resolution
+		// Callers today: the UI thread, through the module entry (the tool vp-scale-render at the end of a run). The source's
+		// effective resolution, bitrate quality and bit depth and what source_resolution
 		// auto chose. False when the renderer does not read them.
 		virtual bool GetSourceResolutionStatus(IVpvTextSink& status) const = 0;
-		// Any thread. "Fallbacks engaged: <id> (<reason>); ..." or "Fallbacks engaged: none".
+		// Callers today: the UI thread, through the module entry. "Fallbacks engaged: <id> (<reason>); ..." or
+		// "Fallbacks engaged: none".
 		virtual bool GetFallbacksStatus(IVpvTextSink& status) const = 0;
 		// Report-a-problem: the renderer DLL writes its own DiagnosticHistory rings into `sink` as JSONL rows
 		// tagged src "renderer", times relative to referenceQpc. Never throws; false when there is no history.
-		// Any thread (the report worker). The sink is a C function pointer, not a C++ type.
+		// Callers today: the UI thread, synchronously at the key press (DiagnosticsReportRun.h NewInputs); the report worker
+		// only receives the text afterwards. The sink is a C function pointer, not a C++ type.
 		virtual bool WriteDiagnosticHistory(VpDiagnosticHistorySink sink, void* context, int64_t referenceQpc) const = 0;
 	protected:
 		~IVpvStatus() = default;
@@ -68,16 +73,16 @@ namespace Vpv
 	{
 	public:
 		static constexpr const char* Iid() { return "vpv.led.v1"; }
-		// Any thread. One line about the drive: its source, whether it drives the projector, the last levels sent.
+		// Callers today: the UI thread, through the module entry. One line about the drive: its source, whether it drives the projector, the last levels sent.
 		virtual bool Status(IVpvTextSink& status) const = 0;
-		// RS-232 connection test (dialog thread): frees the projector's COM port for the test. False (with the
+		// RS-232 connection test (caller today: the dialog's UI thread): frees the projector's COM port for the test. False (with the
 		// reason written to the sink) when the drive will not, e.g. while video is playing.
 		virtual bool SuspendForTest(IVpvTextSink& reason) = 0;
-		// After the test (dialog thread): the drive starts again with the saved settings.
+		// After the test (caller today: the dialog's UI thread): the drive starts again with the saved settings.
 		virtual void ResumeAfterTest() = 0;
 		// The forced shutdown stops the drive first so it restores full light. MUST NOT wait on the renderer's
-		// state lock: the caller bounds the call on its own thread (LedShutdownRestore.h). True when stopped or
-		// there is none.
+		// state lock (the old header said so): the caller bounds the call on its own thread (LedShutdownRestore.h; the
+		// caller today is that bounded worker). True when stopped or there is none.
 		virtual bool StopForShutdown() = 0;
 	protected:
 		~IVpvLed() = default;
@@ -88,13 +93,13 @@ namespace Vpv
 	{
 	public:
 		static constexpr const char* Iid() { return "vpv.intent.v1"; }
-		// Dialog thread (about 1 Hz). Motion intent, ambient adaptation, black protection, display mapping
+		// Callers today: the dialog's UI thread (about 1 Hz). Motion intent, ambient adaptation, black protection, display mapping
 		// readout. False (status default: every function off) when the renderer has none.
 		virtual bool GetIntentStatus(IntentStatus& status) const = 0;
-		// Dialog thread. The content class the rules' `content` variable carries, and its source. False (and
+		// Caller today: the dialog's UI thread. The content class the rules' `content` variable carries, and its source. False (and
 		// status.enabled false) when the renderer has none or intent_content is off.
 		virtual bool GetContentIntentStatus(ContentIntentStatus& status) const = 0;
-		// Dialog thread (about 1 Hz). The newest room reading in lux; `valid` false when the detector is lost
+		// Caller today: the dialog's UI thread (about 1 Hz). The newest room reading in lux; `valid` false when the detector is lost
 		// or ambient switching is off. `nowSeconds` is GetTickCount64() / 1000.
 		virtual void SetAmbientLux(double lux, bool valid, double nowSeconds) = 0;
 	protected:
@@ -102,7 +107,7 @@ namespace Vpv
 	};
 
 	// Automatic calibration patches (was GetCalibrationOutput / SetCalibrationPattern, plugin API 39).
-	// Caller: CalibrationController (VP-V), under its own mutex.
+	// Callers today: CalibrationController (VP-V), under its own mutex.
 	class IVpvCalibration
 	{
 	public:
@@ -121,7 +126,7 @@ namespace Vpv
 
 	// Frames from a file source (was SupportsTimedFileFrames, OnTimedVideoFrame, WaitForFileFrameSlot,
 	// CancelFileFrameWait, plugin API 37). The frame carries its own presentation time and exact source rate, so
-	// the renderer skips capture timing and fills its film clock directly. Caller: VPRendererFilter (the
+	// the renderer skips capture timing and fills its film clock directly. Callers today: VPRendererFilter (the
 	// filter's streaming thread; Cancel also from the filter's control thread).
 	class IVpvTimedFileFrames
 	{
@@ -140,7 +145,7 @@ namespace Vpv
 	};
 
 	// Presentation controls (was SetQueueDelayBudget, SetActivePictureLookaheadAutomatic,
-	// ToggleDvCompareCapture). Caller: the dialog thread.
+	// ToggleDvCompareCapture). Callers today: the dialog's UI thread.
 	class IVpvPresentationCtl
 	{
 	public:

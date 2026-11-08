@@ -271,7 +271,7 @@ namespace VideoProcessorTest
 				bool (Vpv::IVpvModules::*)(const char*, const char*, Vpv::IVpvTextSink&)>));
 			// The ABI numbers: Bill's, and VP-V's own.
 			Assert::AreEqual(static_cast<uint32_t>(34), VP_LIBPLACEBO_PLUGIN_API_VERSION);
-			Assert::AreEqual(static_cast<uint32_t>(1), Vpv::kVpvExtensionAbi);
+			Assert::AreEqual(static_cast<uint32_t>(2), Vpv::kVpvExtensionAbi);
 		}
 	};
 }

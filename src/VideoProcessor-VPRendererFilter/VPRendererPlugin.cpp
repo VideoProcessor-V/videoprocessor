@@ -115,8 +115,9 @@ namespace VPRendererFilter
 					result.failure = reason;
 					continue;
 				}
-				// The VP-V extension ABI (src/VP-V/abi): the same pairing rule as the executable's loader.
-				if (!Vpv::PluginGuard::Check(module, reason))
+				// The VP-V extension ABI (src/VP-V/abi): the same pairing rule as the executable's loader, then the
+				// attach handshake (the DLL builds no renderer for a host that has not attached).
+				if (!Vpv::PluginGuard::Check(module, reason) || !Vpv::PluginGuard::Attach(module, reason))
 				{
 					DebugLog::Log("VP Renderer filter plugin refused: %s path=%ls", reason.c_str(), path.c_str());
 					FreeLibrary(module);

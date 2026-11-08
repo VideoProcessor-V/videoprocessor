@@ -30571,7 +30571,7 @@ bool LibplaceboVideoRenderer::GetModuleStatus(const char* module, CString& statu
 }
 
 void* LibplaceboVideoRenderer::QueryExtension(const char* iid) // VPV-HOOK
-{ void* found = m_abiBridge ? m_abiBridge->Query(iid) : nullptr; return found ? found : RendererExtension::Query(iid); } // VPV-HOOK
+{ return m_abiBridge ? m_abiBridge->Query(iid) : nullptr; } // VPV-HOOK
 bool LibplaceboVideoRenderer::InvokeModuleCommand(const char* module, const char* command, CString& reply) // VPV-HOOK
 { std::string text; const bool handled = RendererExtension::CommandFor(m_impl.get(), module, command, text); reply = CString(text.c_str()); return handled; } // VPV-HOOK
 

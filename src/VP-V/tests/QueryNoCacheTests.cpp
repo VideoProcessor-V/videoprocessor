@@ -25,6 +25,7 @@ namespace QueryNoCacheTestsNs
 	// Host-side source folders (the plugin side, src/VP-V/abi/RendererAbiBridge.*, hands out interface objects and is
 	// scanned too: its members are objects, never pointers to an interface).
 	static const char* const kScanDirs[] = {
+		"tools/vp-scale-render",
 		"src/VP-V/abi",
 		"src/VP-V/core",
 		"src/VP-V/gui",
@@ -135,6 +136,33 @@ namespace QueryNoCacheTestsNs
 				Assert::Fail(message.c_str());
 			}
 			Assert::IsTrue(sawQuery, L"no file uses Vpv::Query: the scan covers the wrong folders");
+		}
+
+		// F2 (source level; the CPU bridge test covers the behaviour): LibplaceboVideoRenderer::QueryExtension serves the
+		// bridge only, with no fallback to the extension registry, whose module iids must not reach the executable.
+		TEST_METHOD(RendererQueryExtensionServesOnlyTheBridge)
+		{
+			const std::string text = SettingsTestSupport::ReadFile(Native("src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"));
+			const size_t at = text.find("LibplaceboVideoRenderer::QueryExtension(const char* iid)");
+			Assert::IsTrue(at != std::string::npos, L"QueryExtension definition not found");
+			const size_t end = text.find("InvokeModuleCommand", at);   // the next definition
+			Assert::IsTrue(end != std::string::npos && end - at < 600);
+			const std::string body = text.substr(at, end - at);
+			Assert::IsTrue(body.find("m_abiBridge") != std::string::npos);
+			Assert::IsTrue(body.find("RendererExtension::") == std::string::npos,
+				L"QueryExtension must not fall back to RendererExtension::Query (module iids would reach the host)");
+		}
+
+		// F1 (source level): the factory checks the attach gate before it builds or touches anything.
+		TEST_METHOD(FactoryChecksTheAttachGateBeforeBuildingARenderer)
+		{
+			const std::string text = SettingsTestSupport::ReadFile(Native("src/VideoProcessor-VPRenderer/LibplaceboPluginExports.cpp"));
+			const size_t gate = text.find("Vpv::AttachedForCreate()");
+			const size_t build = text.find("new LibplaceboVideoRenderer");
+			Assert::IsTrue(gate != std::string::npos && build != std::string::npos);
+			Assert::IsTrue(gate < build, L"the attach gate must come before the renderer is constructed");
+			const size_t callbackCheck = text.find("if (!callback)");
+			Assert::IsTrue(callbackCheck != std::string::npos && gate < callbackCheck);
 		}
 
 		TEST_METHOD(ScannerFlagsEveryWayToKeepAResult)

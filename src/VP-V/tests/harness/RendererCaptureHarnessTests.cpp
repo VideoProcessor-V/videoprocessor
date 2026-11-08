@@ -792,6 +792,10 @@ namespace
 		const auto create = reinterpret_cast<Create>(GetProcAddress(dll, "VideoProcessorLibplaceboCreateRenderer"));
 		const auto destroy = reinterpret_cast<Destroy>(GetProcAddress(dll, "VideoProcessorLibplaceboDestroyRenderer"));
 		Assert::IsTrue(create && destroy, L"the renderer DLL's factory");
+		// The factory builds nothing for a host that has not attached (F1); a Bill baseline DLL has no attach export and
+		// needs none, so a failed attach only means the extension interfaces stay off for it.
+		std::string attachReason;
+		const bool attached = Vpv::PluginGuard::Check(dll, attachReason) && Vpv::PluginGuard::Attach(dll, attachReason);
 		// The configuration: the low-latency input profile chosen by the rule.
 		const std::string configPath = folder + "vp-capture-harness.cfg";
 		{
@@ -847,8 +851,7 @@ namespace
 		resources.SetRenderer(renderer, destroy);
 		// The VP-V interfaces exist only on a DLL of this extension ABI: a Bill baseline DLL (g_harnessRendererDll) has no
 		// QueryExtension slot in its vtable, so it is never asked.
-		std::string extensionRefusal;
-		IVideoRenderer* const extension = renderer && Vpv::PluginGuard::Check(dll, extensionRefusal) ? renderer : nullptr;
+		IVideoRenderer* const extension = renderer && attached ? renderer : nullptr;
 		if (renderer)
 		{
 			const int width = g_harnessWidth, height = g_harnessHeight;

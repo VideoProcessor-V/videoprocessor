@@ -2,10 +2,11 @@
   "schema": "vp-abi-manifest/1",
   "note": "Not a module folder: the module checker (tools/check_module_manifests.py) scans src/VP-V/modules only. This manifest lists the extension ABI surface so a change to it is reviewed as one.",
   "name": "vpv.abi",
-  "extension_abi": 1,
+  "extension_abi": 2,
   "bill_plugin_api_version": 34,
   "bill_base": "a591ad3b",
   "export": "VideoProcessorLibplaceboVpvAbi",
+  "attach_export": "VideoProcessorLibplaceboVpvAttach",
   "interfaces": [
     { "iid": "vpv.modules.v1", "header": "VpvInterfaces.h", "class": "Vpv::IVpvModules", "methods": ["Status", "Command"] },
     { "iid": "vpv.status.v1", "header": "VpvInterfaces.h", "class": "Vpv::IVpvStatus", "methods": ["GetDejudderStatus", "GetSourceResolutionStatus", "GetFallbacksStatus", "WriteDiagnosticHistory"] },
@@ -23,6 +24,7 @@
     "src/VP-V/abi/VpvRendererAccess.h",
     "src/VP-V/abi/VpvHostCalls.h",
     "src/VP-V/abi/VpvPluginGuard.h",
+    "src/VP-V/abi/VpvAttachGate.h",
     "src/VP-V/abi/RendererAbiBridge.h",
     "src/VP-V/abi/RendererAbiBridge.cpp"
   ],

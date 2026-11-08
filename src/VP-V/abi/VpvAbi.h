@@ -13,6 +13,11 @@
 // never pair, and the refusal is shown to the user (the same path as an API mismatch).
 //
 // kVpvExtensionAbi history (the numbers are VP-V's own, starting at 1 with the P2 split):
+//   2  The attach handshake (F1 of the P2 opus gate). This DLL's shared layouts are not Bill's although the plugin API
+//      number is (DolbyVisionLuminanceStatus +4 bytes, VideoState members inserted mid-class), so a Bill executable
+//      that loaded it would corrupt memory. createRenderer now returns nullptr until the loader has called the
+//      export VideoProcessorLibplaceboVpvAttach(kVpvExtensionAbi); a host that does not know it (Bill's) gets Bill's
+//      own visible "failed to create a renderer" and never an object of the extended layout.
 //   1  The 22 virtuals that VP-V had appended to IVideoRenderer moved behind QueryExtension (see the table in
 //      README.md): vpv.modules.v1, vpv.status.v1, vpv.led.v1, vpv.intent.v1, vpv.calibration.v1,
 //      vpv.timed_file_frames.v1, vpv.presentation_ctl.v1.
@@ -39,10 +44,16 @@
 
 namespace Vpv
 {
-	static constexpr uint32_t kVpvExtensionAbi = 1;
+	static constexpr uint32_t kVpvExtensionAbi = 2;
 
 	// The plugin's export returning kVpvExtensionAbi. Required: a DLL without it (a Bill DLL, or a VP-V DLL of
 	// the old 45-number line) is refused by PluginGuard.
 	static constexpr const char* kVpvAbiExport = "VideoProcessorLibplaceboVpvAbi";
 	using VpvAbiFn = uint32_t(__cdecl*)();
+
+	// The attach export: the VP loaders call it with kVpvExtensionAbi after PluginGuard::Check; true when the DLL
+	// accepted (it then lets createRenderer build renderers). Any other number is refused (false) and the DLL stays
+	// unattached. The state is per DLL instance (process).
+	static constexpr const char* kVpvAttachExport = "VideoProcessorLibplaceboVpvAttach";
+	using VpvAttachFn = bool(__cdecl*)(uint32_t);
 }

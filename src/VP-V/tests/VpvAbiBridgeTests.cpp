@@ -160,6 +160,18 @@ namespace VpvAbiBridgeTestsNs
 			Assert::IsNull(bridge.Query("test.iid"));
 		}
 
+		// F2 of the P2 opus gate: only the seven Vpv iids cross the plugin boundary. The DLL's own modules
+		// (vector engine, camera, resync) stay inside it, so QueryExtension never hands out their pointers.
+		TEST_METHOD(ModuleIidsStayInsideTheDll)
+		{
+			FakeHost host;
+			Vpv::RendererAbiBridgeT<FakeHost> bridge(host);
+			PlainRenderer renderer;
+			renderer.offer = &bridge;
+			for (const char* iid : { "vpv.vector_engine.v1", "vpv.camera.v1", "vpv.resync/1", "vpv.modules.v2" })
+				Assert::IsNull(renderer.QueryExtension(iid), L"a module iid reached the host");
+		}
+
 		TEST_METHOD(NoRendererAndRenderersWithoutInterfacesGiveNull)
 		{
 			Assert::IsNull(Vpv::Query<Vpv::IVpvModules>(static_cast<IVideoRenderer*>(nullptr)));

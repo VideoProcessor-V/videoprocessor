@@ -120,11 +120,11 @@ namespace VideoProcessorTest
 
 		// M2 P2 (D-P2b): VP_LIBPLACEBO_PLUGIN_API_VERSION is Bill's own number again (34 at the a591ad3b base; the
 		// 25..45 counter VP-V kept is retired, its history is in VP-V/abi/VpvAbi.h). Everything VP-V adds across the
-		// plugin boundary is the extension ABI, which starts at 1.
+		// plugin boundary is the extension ABI (1: the interfaces, 2: the attach handshake).
 		TEST_METHOD(PluginApiVersionIsBillsAndTheExtensionAbiStartsAtOne)
 		{
 			Assert::AreEqual(static_cast<uint32_t>(34), VP_LIBPLACEBO_PLUGIN_API_VERSION);
-			Assert::AreEqual(static_cast<uint32_t>(1), Vpv::kVpvExtensionAbi);
+			Assert::AreEqual(static_cast<uint32_t>(2), Vpv::kVpvExtensionAbi);   // 1: the interfaces; 2: the attach handshake
 		}
 	};
 

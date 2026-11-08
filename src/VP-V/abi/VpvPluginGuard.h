@@ -10,6 +10,7 @@
 // that it returns kVpvExtensionAbi. A missing or different export refuses the plugin with a visible reason,
 // the same path as an API mismatch ("Redeploy VideoProcessor.exe and the vprenderer folders together").
 //
+// Attach (below) is the second step: the DLL refuses to create renderers until a VP loader attached with the number.
 // Check does not log; the caller shows or logs `reason`. C++14, header-only.
 
 #include <VP-V/abi/VpvAbi.h>
@@ -42,6 +43,34 @@ namespace Vpv
 			}
 			reason.clear();
 			return true;
+		}
+
+		// The attach step (after Check): the DLL builds no renderer for a host that has not attached with the
+		// matching number. Pure decision on the export function; null = the plugin lacks it.
+		inline bool AttachFunction(VpvAttachFn function, std::string& reason)
+		{
+			if (!function)
+			{
+				reason = "VP Renderer DLL refused: it lacks the VP-V attach export (" + std::string(kVpvAttachExport) +
+					"). Redeploy VideoProcessor.exe and the vprenderer folders together from the same build.";
+				return false;
+			}
+			if (!function(kVpvExtensionAbi))
+			{
+				reason = "VP Renderer DLL refused: it did not accept VP-V extension ABI " + std::to_string(kVpvExtensionAbi) +
+					". Redeploy VideoProcessor.exe and the vprenderer folders together from the same build.";
+				return false;
+			}
+			reason.clear();
+			return true;
+		}
+
+		// Attaches the loaded plugin module; call it after Check succeeded, before any renderer is created.
+		inline bool Attach(HMODULE module, std::string& reason)
+		{
+			const VpvAttachFn function = module ?
+				reinterpret_cast<VpvAttachFn>(GetProcAddress(module, kVpvAttachExport)) : nullptr;
+			return AttachFunction(function, reason);
 		}
 
 		// True when the loaded plugin module carries the matching extension ABI.

@@ -188,6 +188,10 @@ namespace Vpv
 		PresentationImpl presentation_;
 	};
 
+	// True once a loader attached with kVpvExtensionAbi (the export VideoProcessorLibplaceboVpvAttach); logs a refusal
+	// otherwise. VideoProcessorLibplaceboCreateRenderer returns nullptr while this is false. (RendererAbiBridge.cpp)
+	bool AttachedForCreate();
+
 	// The renderer's bridge (RendererAbiBridge.cpp).
 	std::unique_ptr<RendererAbiBridge> MakeRendererAbiBridge(LibplaceboVideoRenderer& renderer);
 }
