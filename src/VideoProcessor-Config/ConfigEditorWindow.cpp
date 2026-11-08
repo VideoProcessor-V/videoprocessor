@@ -5473,6 +5473,7 @@ QWidget* ConfigEditorWindow::createShell()
         };
         vpvHost.openPage = [this](const QString& pageName) { selectPage(pageName); };
         vpvHost.bothPathwayCards = [this] { return Vpv::BothPathwayCards(formApi_.kit); };
+        vpvHost.unitCards = [this](const QString& unitId) { return vpvPages_.takeUnitCards(unitId); };
         vpvPages_.append(pages_, QStringLiteral("VP-V"), createPage(QStringLiteral("VP-V"),
             QStringLiteral("Everything VP-V adds, by unit: one tier per unit plus a global tier, each unit's settings, and the fallbacks engaged."),
             Vpv::CreateSection(vpvHost)));
@@ -6618,150 +6619,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     auto* ruleField = fieldWithHelp(QStringLiteral("When should VP use this profile?"), rule,
         QStringLiteral("Optional source-condition rule. Example: ${renderer} ~= \"VP Renderer\" && ${source_rate} <= 30. ~= matches a literal substring (case-insensitive for renderer names). Use one non-empty quoted string with a text variable, not a number, Boolean, or ${key}. Parentheses group conditions; ! negates, then && binds before ||. Active profiles can still be selected manually when their rule is false."));
     detailLayout->addWidget(ruleField);
-    if (sectionPrefix == QStringLiteral("queue") || sectionPrefix == QStringLiteral("vprenderer"))
-    {
-        // The common queue rule as a plain control: "use this queue above N
-        // fps"; also for rendering profiles, e.g. a low-latency profile
-        // (audit 2026-10-14c: no hand-written rule). It writes the same rule as the formula field and follows it;
-        // any other formula is left alone and the control steps aside.
-        auto* rateRow = new QWidget;
-        auto* rateLayout = new QHBoxLayout(rateRow);
-        rateLayout->setContentsMargins(0, 0, 0, 0);
-        auto* rateRule = new QCheckBox(sectionPrefix == QStringLiteral("queue") ?
-            QStringLiteral("Use this queue for sources above") : QStringLiteral("Use this profile for sources above"));
-        rateRule->setObjectName(controlName(sectionPrefix, QStringLiteral("rate_rule")));
-        auto* rateThreshold = new QDoubleSpinBox;
-        rateThreshold->setObjectName(controlName(sectionPrefix, QStringLiteral("rate_rule_fps")));
-        rateThreshold->setRange(1.0, 1000.0);
-        rateThreshold->setDecimals(2);
-        rateThreshold->setValue(59.0);
-        rateThreshold->setSuffix(QStringLiteral(" fps"));
-        rateThreshold->setMaximumWidth(120);
-        rateLayout->addWidget(rateRule);
-        rateLayout->addWidget(rateThreshold);
-        rateLayout->addStretch();
-        auto* rateNote = helpLabel(QStringLiteral(
-            "This profile has its own rule below; edit it there, or clear it to use the frame-rate switch."));
-        rateNote->setObjectName(controlName(sectionPrefix, QStringLiteral("rate_rule_note")));
-        rateNote->setVisible(false);
-        const int ruleIndex = detailLayout->indexOf(useRule);
-        detailLayout->insertWidget(ruleIndex, rateNote);
-        detailLayout->insertWidget(ruleIndex, rateRow);
-        if (sectionPrefix == QStringLiteral("queue"))
-        {
-            // Owner 2026-10-16: when this queue is used - Off (chosen by hand or shortcut only), By rules
-            // (the formula below), or video-rate sources.
-            // Fixed-constant batch 2026-10-18 (owner [[vp-general-not-fixed]]): the button writes the
-            // class rule - every source at the video rate floor and above (DejudderPolicy::VideoRateFloorHz,
-            // 49 Hz: 50, 59.94, 60, 100, 119.88, 120, 144, 240 ...) - instead of the fixed 49-61 band,
-            // which missed 100/120p. A saved 49-61 rule still reads as this button (and is kept as
-            // written until the button is clicked again).
-            static const QString kRate5060 = QStringLiteral("${cadence} >= 49");
-            static const QString kRate5060Legacy = QStringLiteral("${cadence} == 49-61");
-            const auto isRateRule = [](const QString& text) { return text == kRate5060 || text == kRate5060Legacy; };
-            rateRow->setVisible(false);
-            auto* useRow = new QWidget;
-            useRow->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode")));
-            auto* useLayout = new QHBoxLayout(useRow);
-            useLayout->setContentsMargins(0, 0, 0, 0);
-            useLayout->addWidget(new QLabel(QStringLiteral("Use this queue:")));
-            // audit 2026-10-16: "Off" read as the queue being disabled.
-            auto* offButton = new QRadioButton(QStringLiteral("Only when chosen (shortcut or by hand)"));
-            offButton->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode.off")));
-            auto* rulesButton = new QRadioButton(QStringLiteral("By rules"));
-            rulesButton->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode.rules")));
-            auto* rateButton = new QRadioButton(QStringLiteral("50 Hz and faster sources"));
-            rateButton->setObjectName(controlName(sectionPrefix, QStringLiteral("use_mode.rate5060")));
-            rateButton->setToolTip(QStringLiteral(
-                "Writes the rule ${cadence} >= 49: every video-rate signal (50, 59.94, 60, 100, 120 Hz and faster), the "
-                "same 50 Hz floor the film / video classification uses. Film sent in a 60 Hz signal (3:2) matches too "
-                "until the cadence detection keeps it on the regular path. A rule saved as ${cadence} == 49-61 (50/60 Hz "
-                "only) still shows here and is kept until this button is clicked again."));
-            auto* group = new QButtonGroup(useRow);
-            group->setExclusive(true);
-            for (QRadioButton* b : { offButton, rulesButton, rateButton })
-            {
-                group->addButton(b);
-                useLayout->addWidget(b);
-            }
-            useLayout->addStretch();
-            detailLayout->insertWidget(ruleIndex, useRow);
-            auto syncUse = [rule, useRule, offButton, rulesButton, rateButton, isRateRule]
-            {
-                const QString text = useRule->isChecked() ? rule->toPlainText().trimmed() : QString();
-                const QSignalBlocker a(offButton), b(rulesButton), c(rateButton);
-                offButton->setChecked(text.isEmpty() && !useRule->isChecked());
-                rateButton->setChecked(isRateRule(text));
-                rulesButton->setChecked(useRule->isChecked() && !isRateRule(text));
-            };
-            connect(rule, &QPlainTextEdit::textChanged, this, syncUse);
-            connect(useRule, &QCheckBox::toggled, this, syncUse);
-            // Audit 2026-10-16: a hand-written rule is kept aside when Off or 50/60 Hz replaces it, and
-            // By rules brings it back; an empty rule is not saved (the profile reads Off), so say so.
-            auto keepCustom = [rule, isRateRule]() {
-                const QString text = rule->toPlainText().trimmed();
-                if (!text.isEmpty() && !isRateRule(text)) rule->setProperty("customRule", text);
-            };
-            rule->setPlaceholderText(QStringLiteral("Type the rule here; an empty rule is not saved (the queue is then Off)."));
-            connect(offButton, &QRadioButton::toggled, this, [rule, useRule, keepCustom](bool on) {
-                if (!on) return;
-                keepCustom();
-                rule->clear();
-                useRule->setChecked(false);
-            });
-            connect(rulesButton, &QRadioButton::toggled, this, [rule, useRule, isRateRule](bool on) {
-                if (!on) return;
-                const QString text = rule->toPlainText().trimmed();
-                if (text.isEmpty() || isRateRule(text))
-                    rule->setPlainText(rule->property("customRule").toString());
-                useRule->setChecked(true);
-                rule->setFocus();
-            });
-            connect(rateButton, &QRadioButton::toggled, this, [rule, useRule, keepCustom](bool on) {
-                if (!on) return;
-                keepCustom();
-                rule->setPlainText(kRate5060);
-                useRule->setChecked(true);
-            });
-            syncUse();
-        }
-        auto syncFromRule = [rule, useRule, rateRule, rateThreshold, rateNote]
-        {
-            QSignalBlocker blockRule(rateRule);
-            QSignalBlocker blockThreshold(rateThreshold);
-            const QString text = useRule->isChecked() ? rule->toPlainText().trimmed() : QString();
-            // ${cadence} is the exact rate (59.94); ${source_rate} is a whole
-            // number (59.94 reads as 59), so the switch writes cadence. Rules
-            // written with source_rate are still recognised.
-            const QRegularExpressionMatch match = QRegularExpression(QStringLiteral(
-                "^\\$\\{(?:cadence|source_rate)\\}\\s*>\\s*([0-9]+(?:\\.[0-9]+)?)$")).match(text);
-            const bool custom = !text.isEmpty() && !match.hasMatch();
-            rateRule->setChecked(match.hasMatch());
-            if (match.hasMatch()) rateThreshold->setValue(match.captured(1).toDouble());
-            rateRule->setEnabled(!custom && useRule->isEnabled());
-            rateThreshold->setEnabled(!custom && useRule->isEnabled());
-            rateNote->setVisible(custom);
-        };
-        auto applyRateRule = [rule, useRule, rateRule, rateThreshold]
-        {
-            if (rateRule->isChecked())
-            {
-                rule->setPlainText(QStringLiteral("${cadence} > %1")
-                    .arg(QString::number(rateThreshold->value(), 'g', 6)));
-                useRule->setChecked(true);
-            }
-            else
-            {
-                rule->clear();
-                useRule->setChecked(false);
-            }
-        };
-        connect(rule, &QPlainTextEdit::textChanged, this, syncFromRule);
-        connect(useRule, &QCheckBox::toggled, this, syncFromRule);
-        connect(rateRule, &QCheckBox::toggled, this, applyRateRule);
-        connect(rateThreshold, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
-            [rateRule, applyRateRule](double) { if (rateRule->isChecked()) applyRateRule(); });
-    }
+    Vpv::AddVpvProfileUseRows(sectionPrefix, title, list, rule, useRule, [](const QString& text) { return helpLabel(text); }, vpvPages_.unitCardStash());   // VPV-HOOK (VP-V page: Profile use)
 
     auto* profileFields = new QWidget;
     auto* profileFieldsLayout = new QVBoxLayout(profileFields);
@@ -11467,26 +11325,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 		upscaler->setItemText(upscaler->findData(QStringLiteral("none")),
 			QStringLiteral("Built-in GPU sampling"));
 		addRendererAutoStatus(QStringLiteral("upscaler"), upscaler);
-		auto* chromaUpscaler = addChoice(QStringLiteral("Chroma upscaler"),
-			QStringLiteral("chroma_upscaler"), { QStringLiteral("AUTO"),
-			QStringLiteral("catmull_rom"), QStringLiteral("lanczos"), QStringLiteral("ewa_lanczos"),
-			QStringLiteral("ewa_lanczossharp"), QStringLiteral("upscaler"), QStringLiteral("bicubic"),
-			QStringLiteral("bilinear") });
-		chromaUpscaler->setItemText(chromaUpscaler->findData(QStringLiteral("upscaler")),
-			QStringLiteral("Same as the upscaler (the earlier behaviour)"));
-		chromaUpscaler->setToolTip(QStringLiteral(
-			"How the colour planes of 4:2:0 / 4:2:2 video are brought up to the picture's size before the "
-			"main scaling. Auto = Catmull-Rom: on real footage it looked identical to the polar EWA Lanczos "
-			"filter at about a seventh of its GPU time. 'Same as the "
-			"upscaler' is the previous behaviour (EWA Lanczos sharp with High quality, the costliest)."));
-		MarkGpuCost(form, chromaUpscaler, 2);
-		auto* chromaUpscaleVp = addChoice(QStringLiteral("VP chroma upscale (candidate)"),
-			QStringLiteral("chroma_upscale_vp"), { QStringLiteral("off"), QStringLiteral("cfl") });
-		chromaUpscaleVp->setToolTip(QStringLiteral(
-			"CfL predicts colour detail from the grain-free luma inside the active picture; chroma grain is "
-			"kept exactly as the normal upscaler passes it. Off = libplacebo's chroma upscaler (above). "
-			"Candidate: not yet active in the renderer."));
-		MarkGpuCost(form, chromaUpscaleVp, 1);
 		auto* downscaler = addChoice(QStringLiteral("Downscaler"),
 			QStringLiteral("downscaler"), { QStringLiteral("AUTO"),
 			QStringLiteral("lanczos"), QStringLiteral("mitchell"),
@@ -11503,11 +11341,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 		antiRinging->setToolTip(QStringLiteral(
 			"Optional sigmoidization before upscaling. It reduces ringing artifacts; the default is On."));
 		addRendererAutoStatus(QStringLiteral("sigmoid"), antiRinging);
-		auto* downscaleLight = addChoice(QStringLiteral("Downscale light"),
-			QStringLiteral("downscale_light"), { QStringLiteral("linear"), QStringLiteral("gamma") });
-		downscaleLight->setToolTip(QStringLiteral(
-			"Light domain for frames that are downscaled. Linear is libplacebo's "
-			"default; gamma matches madVR's SSIM look. Upscaled frames always use linear light."));
         addChoice(QStringLiteral("Chroma upscaler"), QStringLiteral("chroma_upscaler"),
             { "ewa_lanczossharp", "ewa_lanczos", "lanczos", "bicubic", "bilinear" });
         form->addRow(helpLabel(QStringLiteral("Chroma reconstruction applies to 4:2:0 and 4:2:2 input even at native image resolution. Bicubic is the default. RGB input does not need chroma upscaling.")));
@@ -11517,10 +11350,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QString(), false);
         auto* debanding = addChoice(QStringLiteral("Debanding"), QStringLiteral("deband_strength"), { QStringLiteral("AUTO"), QStringLiteral("default"), QStringLiteral("light"), QStringLiteral("off") });
         debanding->setItemText(debanding->findData(QStringLiteral("default")), QStringLiteral("Standard"));
-        debanding->setToolTip(QStringLiteral(   // settings guide audit 2026-10-24 (VP-V text, kept on Bill's moved control)
-            "libplacebo's debander (smooths steps in skies and shadows). Auto lets libplacebo decide. While VP's own "
-            "grain-safe debander runs ('VP deband' Auto or On, with 'VP deband replaces libplacebo's'), libplacebo's "
-            "automatic deband is switched off because it thins fine grain; an explicit Standard or Light is kept."));
         addRendererAutoStatus(QStringLiteral("deband_strength"), debanding);
         auto* dithering = addChoice(QStringLiteral("Dithering"), QStringLiteral("dithering"),
             { "blue_noise", "ordered_fixed", "white_noise", "off" });
@@ -11528,10 +11357,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Blue noise is recommended for video. Ordered (fixed) is a fast patterned alternative. "
             "White noise is inexpensive but more visible. Off disables dithering. "
             "Calibration LUT processing runs before final dithering."));
-        // The set follows the pathway (loadDetails): Bill's four on the Original pathway
-        // (as built here), VP-V's full list otherwise.
-        Vpv::MarkOriginalDitherSet(dithering);   // VPV-HOOK
-        addRendererAutoStatus(QStringLiteral("dithering"), dithering);
         auto* displayBitDepth = addChoice(QStringLiteral("Dither target depth"),
             QStringLiteral("display_bit_depth"),
             { QStringLiteral("output"), QStringLiteral("10"), QStringLiteral("8") });
@@ -11541,6 +11366,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         displayBitDepth->setToolTip(QStringLiteral(
             "Dithering precision, clamped to the active surface depth. This does not configure GPU/HDMI bit depth or detect panel precision."));
         addRendererAutoStatus(QStringLiteral("display_bit_depth"), displayBitDepth);
+        Vpv::AddVpvScalingRows(form, addChoice, addRendererAutoStatus, [](QFormLayout* f, QWidget* c, int n) { MarkGpuCost(f, c, n); }, friendlyChoiceLabel, vpvPages_.unitCardStash());   // VPV-HOOK (VP-V rows of this page: VP-V page cards)
         // Legacy Auto remains accepted in configuration files and is migrated
         // into an explicit preset choice. New edits choose the actual algorithm.
         for (auto* choice : { upscaler, downscaler, antiRinging, debanding, dithering })
@@ -12352,7 +12178,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 configured = value(profileSection, alias);
             return configured;
         };
-		const bool ditherOriginal = originalPathwayOn();
 		for (const Field& field : *fields)
 		{
             QString raw = profileValue(section, field.key);
@@ -12423,9 +12248,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				configured = fallback(field.key);
             const auto concreteChoice = [&](QString choice) {
                 const QString lower = choice.trimmed().toLower();
-                // Dithering: Bill's display mapping only on the Original pathway; in VP-V mode a
-                // VP-V value (Auto included) is shown as stored.
-                if (field.key == QStringLiteral("dithering") && !ditherOriginal) return choice;
+                // VP-V's own Dithering list (VpvScalingRows.h): its value is shown as stored.
+                if (field.widget->property("vpvOwnChoices").toBool()) return choice;   // VPV-HOOK
                 if (field.key == QStringLiteral("dithering") &&
                     (lower == "auto" || lower == "on" || lower == "true")) return QStringLiteral("blue_noise");
                 if (lower != QStringLiteral("auto")) return choice;
@@ -12568,8 +12392,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             else
             {
                 auto* combo = qobject_cast<QComboBox*>(field.widget);
-                if (field.key == QStringLiteral("dithering") && sectionPrefix == QStringLiteral("vprenderer.scaling"))
-                    Vpv::ApplyDitherChoiceSet(combo, ditherOriginal, friendlyChoiceLabel);   // VPV-HOOK
                 const bool subtitleCleanupFill =
                     sectionPrefix == QStringLiteral("vprenderer.subtitles") &&
                     field.key == QStringLiteral("cleanup_fill");
@@ -12718,9 +12540,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 for (int candidate = 0; candidate < combo->count(); ++candidate) {
                     const QString data = combo->itemData(candidate).toString().toLower();
                     const bool legacyCubic = field.key == "frame_mixer" && data == "cubic";
-                    // Bill's retired-value rule for dithering applies on the Original pathway only;
-                    // VP-V's modes (ordered_lut, error_diffusion_*, Auto) are live values there.
-                    const bool vpvDither = field.key == "dithering" && !ditherOriginal;
+                    // Bill's retired-value rule for dithering applies to his control; VP-V's own list
+                    // (ordered_lut, error_diffusion_*, Auto) holds live values (VpvScalingRows.h).
+                    const bool vpvDither = field.widget->property("vpvOwnChoices").toBool();
                     const bool retired = legacyCubic || (field.key == "dithering" && !vpvDither &&
                         (data == "ordered_lut" || data.startsWith("error_diffusion_") || data == "on" || data == "auto"));
                     const bool staticAuto = data == "auto" && !vpvDither && !Vpv::IsVpvChoiceKey(field.key) &&

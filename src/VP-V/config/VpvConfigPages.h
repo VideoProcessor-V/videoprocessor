@@ -14,6 +14,9 @@
 #include <QWidget>
 #include <VideoProcessor-Config/ConfigPageHost.h>
 #include <VP-V/config/VpvBothPathwayCards.h>
+#include <VP-V/config/VpvProfileUseRows.h>
+#include <VP-V/config/VpvScalingRows.h>
+#include <VP-V/config/VpvSection.h>
 #include <vector>
 
 namespace Vpv
@@ -55,8 +58,19 @@ namespace Vpv
 			return index - bill < vpvNames_.size() ? vpvNames_.at(index - bill) : QString();
 		}
 
-		// Forgets the VP-V pages (the shell is being rebuilt).
+		// Forgets the VP-V pages (the shell is being rebuilt). The unit cards are kept: Bill's pages,
+		// which build them, are created before this call; the VP-V page takes them.
 		void reset() { vpvNames_.clear(); subPages_.clear(); }
+
+		// Unit cards built by Bill's pages for the VP-V page (VpvScalingRows.h), taken once each.
+		std::vector<UnitCard>& unitCardStash() { return unitCards_; }
+		std::vector<UnitCard> takeUnitCards(const QString& unit)
+		{
+			std::vector<UnitCard> taken, kept;
+			for (const UnitCard& card : unitCards_) (card.unit == unit ? taken : kept).push_back(card);
+			unitCards_.swap(kept);
+			return taken;
+		}
 
 		// A page that belongs to another page (ConfigPage::parentPage): no top-level navigation leaf, opened from
 		// its parent, grouped there under `group`.
@@ -151,5 +165,6 @@ namespace Vpv
 	private:
 		QStringList vpvNames_;
 		std::vector<SubPageInfo> subPages_;
+		std::vector<UnitCard> unitCards_;
 	};
 }

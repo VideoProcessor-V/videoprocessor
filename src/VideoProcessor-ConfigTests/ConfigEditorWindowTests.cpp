@@ -2846,6 +2846,8 @@ void testQueueFrameRateRuleIsAPlainControl()
     require(select(QStringLiteral("queue.hdr")), "Hdr missing");
     require(!rateRule->isChecked() && !rateRule->isEnabled(),
         "A custom formula is not left alone by the frame-rate switch");
+    window.selectPage(QStringLiteral("VP-V"));   // WAIVER-P8-04: the note is on the VP-V page's Profile use card
+    QCoreApplication::processEvents();
     require(requireControl<QLabel>(window, QStringLiteral("config.queue.rate_rule_note"))->isVisibleTo(&window),
         "A custom formula does not explain why the switch is off");
 
@@ -10726,7 +10728,9 @@ void testDitheringKeepsBothChoiceSets()
     const QByteArray scaling = "[general]\nrenderer: VP Renderer\n[vprenderer.scaling.Default]\ndithering: %1\n";
     QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
 
-    // VP-V mode: every VP-V value is shown as stored and nothing is written or flagged.
+    // VP-V mode (WAIVER-P8-05: these asserts moved from Bill's control to VP-V's own Dithering control on the
+    // VP-V page): every VP-V value is shown as stored and nothing is written or flagged. Bill's control keeps
+    // his four choices and shows a VP-V-only value as his "Saved legacy method", writing nothing.
     for (const QString& mode : QStringList{ "AUTO", "ordered_lut", "error_diffusion_stucki", "off" })
     {
         QByteArray fixture = scaling; fixture.replace("%1", mode.toUtf8());
@@ -10734,7 +10738,7 @@ void testDitheringKeepsBothChoiceSets()
         ConfigEditorWindow window(path, 0, true);
         const bool pendingAtOpen = hasPendingConfigurationChanges(window);
         window.selectPage(QStringLiteral("Scaling")); QCoreApplication::processEvents();
-        auto* dithering = requireControl<QComboBox>(window, "config.vprenderer.scaling.dithering");
+        auto* dithering = requireControl<QComboBox>(window, "config.vprenderer.scaling.dithering.vpv");
         require(choices(dithering) == vpv, "VP-V mode does not offer VP-V's full dithering list");
         require(dithering->currentData().toString() == mode,
             QStringLiteral("VP-V mode shows another dithering value for %1").arg(mode).toStdString().c_str());
@@ -10742,6 +10746,11 @@ void testDitheringKeepsBothChoiceSets()
         require(hasPendingConfigurationChanges(window) == pendingAtOpen, "Showing a VP-V dithering value changed the document");
         require(readBytes(path) == fixture, "Opening Config wrote the file");
         require(window.findChild<QLabel*>("config.vprenderer.scaling.dithering.auto_status"), "The Dithering Auto status is missing");
+        auto* bills = requireControl<QComboBox>(window, "config.vprenderer.scaling.dithering");
+        require(choices(bills) == original, "Bill's Dithering control does not keep his four choices");
+        if (!original.contains(mode))
+            require(bills->currentIndex() < 0 && bills->placeholderText().startsWith(QStringLiteral("Saved legacy method")),
+                QStringLiteral("Bill's control does not show %1 as his legacy method").arg(mode).toStdString().c_str());
     }
     // Original pathway: Bill's control exactly, with his display mapping (display only).
     for (const char* stored : { "auto", "true" })
@@ -10763,15 +10772,17 @@ void testDitheringKeepsBothChoiceSets()
         writeFixture(path, fixture);
         ConfigEditorWindow window(path, 0, true);
         window.selectPage(QStringLiteral("Scaling")); QCoreApplication::processEvents();
+        // WAIVER-P8-05: the either/or is two controls now - Bill's (his list, his page) and VP-V's (its list,
+        // greyed on the Original pathway); switching the pathway changes neither list nor the value.
         auto* dithering = requireControl<QComboBox>(window, "config.vprenderer.scaling.dithering");
+        auto* vpvDithering = requireControl<QComboBox>(window, "config.vprenderer.scaling.dithering.vpv");
         auto* pathway = requireControl<QComboBox>(window, "vpv.pathway");
         pathway->setCurrentIndex(pathway->findData(QStringLiteral("on"))); QCoreApplication::processEvents();
-        require(choices(dithering) == original, (QStringLiteral("Switching to the Original pathway did not give Bill's list: ") +
-            choices(dithering).join(",") + QStringLiteral(" / ") +
-            QString::number(window.findChildren<QComboBox*>("config.vprenderer.scaling.dithering").size())).toStdString().c_str());
+        require(choices(dithering) == original && !vpvDithering->isEnabled(), (QStringLiteral("The Original pathway does not leave Bill's list "
+            "and grey VP-V's: ") + choices(dithering).join(",")).toStdString().c_str());
         pathway->setCurrentIndex(pathway->findData(QStringLiteral("off"))); QCoreApplication::processEvents();
-        require(choices(dithering) == vpv && dithering->currentData().toString() == "error_diffusion_stucki",
-            "Switching back to VP-V did not restore VP-V's list and value");
+        require(choices(vpvDithering) == vpv && vpvDithering->currentData().toString() == "error_diffusion_stucki" && vpvDithering->isEnabled(),
+            "Switching back to VP-V did not keep VP-V's list and value");
     }
 }
 

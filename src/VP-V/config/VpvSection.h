@@ -40,6 +40,16 @@ namespace Vpv
 		QString description;   // the button's tooltip
 	};
 
+	// A card of a unit tab whose body the editor built elsewhere (e.g. VP-V's rows of the Scaling profile
+	// page, VpvScalingRows.h); the VP-V page wraps it in its card frame on the unit's Main sub-page.
+	struct UnitCard
+	{
+		QString unit;          // unit id ("scaling", "output", ...)
+		QString id;            // object name part: vpv.<unit>.card.<id>
+		QString title;
+		QString help;
+		QWidget* body = nullptr;   // ownership passes to the VP-V page
+	};
 	struct Host
 	{
 		// The sub-pages grouped under a unit (unit id, e.g. "output"); may be empty (none).
@@ -62,6 +72,8 @@ namespace Vpv
 		// Cards of VP-V settings that act on both pathways (VpvBothPathwayCards.h), shown below the unit
 		// tabs, outside the part the Original pathway greys; may be empty (none).
 		std::function<std::vector<QWidget*>()> bothPathwayCards;
+		// The unit cards built elsewhere for a unit (taken: each is returned once); may be empty.
+		std::function<std::vector<UnitCard>(const QString& unitId)> unitCards;
 	};
 
 	// The VP-V page body (the host wraps it in its own page frame).

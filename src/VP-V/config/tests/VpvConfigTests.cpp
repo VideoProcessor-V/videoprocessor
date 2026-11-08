@@ -1339,6 +1339,74 @@ namespace
 		require(cleared.Load(path.toStdString()) && !cleared.TryGetString("vpv", "retirement_a", v), "Not decided yet removes the stored decision");
 		requireVpReads(path);
 	}
+	// P8 step 2: the VP-V rows that left Bill's pages. The both-pathway cards exist once and stay usable on the
+	// Original pathway; the reports help names the folder with a backslash; Bill's newlldv label is his again;
+	// global_actions marks the document edited and is saved.
+	void testBothPathwayCardsLeaveBillsPages()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir, "[general]\nrenderer: VP Renderer\n[vpv]\npipeline_original_pathway: on\n");
+		ConfigEditorWindow window(path, 0, true);
+		for (const char* id : { "input", "reports", "keyboard", "bill" })
+			require(window.findChildren<QWidget*>(QStringLiteral("vpv.both.card.") + QString::fromLatin1(id)).size() == 1,
+				(std::string("both-pathway card not there exactly once: ") + id).c_str());
+		for (const char* name : { "config.decklink.ycbcr_12bit_capture", "config.general.dv_tunnel_handoff",
+				"config.general.newlldv_sdr_veto", "config.logging.auto_report", "config.logging.report_thumbnail",
+				"config.logging.open_reports", "config.shortcuts.global_hotkeys", "config.shortcuts.global_actions",
+				"config.general.bounded_invalid_capture_recovery" })
+		{
+			const QList<QWidget*> found = window.findChildren<QWidget*>(QString::fromLatin1(name));
+			require(found.size() == 1, (std::string("moved control not there exactly once: ") + name).c_str());
+			require(found.front()->isEnabled(), (std::string("moved control greyed on the Original pathway: ") + name).c_str());
+		}
+		bool folder = false;
+		for (QLabel* label : window.findChildren<QLabel*>())
+		{
+			require(!label->text().contains(QLatin1Char('\r')), "a label holds a carriage return");
+			folder = folder || label->text().contains(QStringLiteral("to logs\\reports (the newest 20"));
+		}
+		require(folder, "the problem-report help does not name logs\\reports");
+		require(control<QCheckBox>(window, QStringLiteral("config.general.newlldv"))->text() == QStringLiteral("Alternate LLDV detection"),
+			"Bill's newlldv label is not his");
+		auto* apply = control<QPushButton>(window, QStringLiteral("applyConfiguration"));
+		control<QLineEdit>(window, QStringLiteral("config.shortcuts.global_actions"))->setText(QStringLiteral("config_editor"));
+		QCoreApplication::processEvents();
+		require(apply->isEnabled(), "editing global_actions did not mark the document edited");
+		save(window);
+		QFile file(path);
+		require(file.open(QIODevice::ReadOnly) && file.readAll().contains("global_actions: config_editor"), "global_actions not saved");
+	}
+
+	// D3: Bill's tests find Bill's own Chroma upscaler (his five filters); VP-V's list is its own control of the
+	// same key, and a VP-V-only choice is written and shown on Bill's control as his loader shows it.
+	void testChromaBillsControlAndVpvList()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir, "[general]\nrenderer: VP Renderer\n[vprenderer.scaling.Default]\nchroma_upscaler: lanczos\n");
+		ConfigEditorWindow window(path, 0, true);
+		window.selectPage(QStringLiteral("Scaling"));
+		QCoreApplication::processEvents();
+		require(window.findChildren<QComboBox*>(QStringLiteral("config.vprenderer.scaling.chroma_upscaler")).size() == 1,
+			"more than one control is named as Bill's Chroma upscaler");
+		auto* bills = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.chroma_upscaler"));
+		QStringList offered;
+		for (int i = 0; i < bills->count(); ++i)
+			if (!bills->itemData(i).toString().isEmpty()) offered << bills->itemData(i).toString();
+		require(offered == QStringList({ "ewa_lanczossharp", "ewa_lanczos", "lanczos", "bicubic", "bilinear" }),
+			("Bill's Chroma upscaler does not offer his five filters: " + offered.join(QStringLiteral(","))).toStdString().c_str());
+		require(bills->currentData().toString() == QStringLiteral("lanczos"), "Bill's control does not show the stored filter");
+		auto* vpv = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.chroma_upscaler.vpv"));
+		require(vpv->currentData().toString() == QStringLiteral("lanczos"), "VP-V's list does not show the stored filter");
+		const int catmull = vpv->findData(QStringLiteral("catmull_rom"));
+		require(catmull >= 0, "VP-V's list lacks Catmull-Rom");
+		vpv->setCurrentIndex(catmull);
+		emit vpv->activated(catmull);
+		QCoreApplication::processEvents();
+		require(bills->currentData().toString() == QStringLiteral("catmull_rom"), "Bill's control does not follow VP-V's choice");
+		save(window);
+		QFile file(path);
+		require(file.open(QIODevice::ReadOnly) && file.readAll().contains("chroma_upscaler: catmull_rom"), "VP-V's chroma choice not saved");
+	}
 }
 
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -1365,5 +1433,7 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: a drag from Custom onto the planned step writes nothing", testPlannedDragFromCustomWritesNothing);
 	failures += run("VP-V: retirement Approve and Keep are recorded without hiding", testRetirementDecisions);
 	failures += run("VP-V: Camera model group writes the keys VP reads", testCameraModelControlsReachVp);
+	failures += run("VP-V: both-pathway cards leave Bill's pages", testBothPathwayCardsLeaveBillsPages);
+	failures += run("VP-V: Bill's Chroma upscaler and VP-V's list", testChromaBillsControlAndVpvList);
 	return failures;
 }

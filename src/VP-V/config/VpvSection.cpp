@@ -1299,6 +1299,15 @@ namespace Vpv
 				});
 				layout->addWidget(more);
 			}
+			// Cards whose rows the editor built on another page (VpvScalingRows.h).
+			if (state->host.unitCards)
+				for (const UnitCard& extra : state->host.unitCards(unitId))
+				{
+					if (!extra.body) continue;
+					CardBox card = MakeCard(ObjectName(unitId + QStringLiteral(".card.") + extra.id), extra.title, extra.help, false);
+					card.Add(extra.body);
+					layout->addWidget(card.frame);
+				}
 			// Pages of their own that the Config page host registered under this unit (e.g. Calibration
 			// under Output): one button each opens the page.
 			if (state->host.subPages && state->host.openPage)
@@ -2647,6 +2656,15 @@ namespace Vpv
 			bothLayout->addWidget(bothTitle);
 			for (QWidget* card : host.bothPathwayCards())
 				if (card) bothLayout->addWidget(card);
+			// Cards Bill's pages built for this block (VpvProfileUseRows.h).
+			if (host.unitCards)
+				for (const UnitCard& extra : host.unitCards(QStringLiteral("both")))
+				{
+					if (!extra.body) continue;
+					CardBox card = MakeCard(ObjectName(QStringLiteral("both.card.") + extra.id), extra.title, extra.help, false);
+					card.Add(extra.body);
+					bothLayout->addWidget(card.frame);
+				}
 			layout->addWidget(both);
 		}
 
