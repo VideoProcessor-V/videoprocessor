@@ -274,6 +274,18 @@ namespace VideoProcessorTest
 			Assert::IsTrue(rig.engine.history.empty(), L"... and no hook on the engine");
 		}
 
+		// Audit F2: a deterministic lane (analysis_lane_deterministic = on) takes the bridge path: the ahead fit is not wanted, no demand.
+		TEST_METHOD(ADeterministicRunTakesTheBridgePathAndSaysSo)
+		{
+			Rig rig("[vpv.skeleton]\ncamera_link=report\nanalysis_lane_deterministic=on\n[vpv.camera]\ncamera_model=on\ncamera_ahead_fit=on\n");
+			rig.Start(6);
+			Assert::IsTrue(rig.ext.FitWanted(rig.Host()), L"the fit runs");
+			CameraLink::CameraLinkCore* core = rig.ext.CoreOf(rig.Host());
+			Assert::IsNotNull(core);
+			Assert::IsFalse(core->AheadActive(), L"no ahead fit in a deterministic run");
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Lines), "off in deterministic mode"), L"shown");
+		}
+
 		// GUIDANCE LOCK (owner, reset 1): a guidance switch set with the camera live leaves guidance off, registers no hook and says so.
 		TEST_METHOD(GuidanceIsLockedThisResetASetSwitchRegistersNoHookAndIsShown)
 		{

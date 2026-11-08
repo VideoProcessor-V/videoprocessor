@@ -84,6 +84,7 @@ namespace Vpv
 			bool labelsWanted = false;                  // ... and labels are wanted (overlay, a use switch, camera_labels_gpu)
 			bool aheadWanted = false;                   // ... and camera_ahead_fit on (the fit reads the ahead NVOF pair, FlowOf)
 			bool guideLocked = false;                   // a camera_meas_* switch is set but the guidance lock holds it off (shown)
+			bool aheadDeterministic = false;            // camera_ahead_fit set, but the run is deterministic: the bridge path (shown)
 			Skeleton::IExternalDemand* demand = nullptr;   // AHEAD FIT: the skeleton's demand entry the P7 demand was declared through (null = none)
 			bool liveBuilt = false;                     // lane built and the core attached to it
 			bool graphRefused = false;                  // the registry refused the camera graph (until the next settings change)
@@ -721,7 +722,12 @@ namespace Vpv
 			const bool guideWanted = guideRequested && !guidanceLocked_;   // GUIDANCE LOCK: off this reset (a late camera never guides)
 			st->guideLocked = guideRequested && guidanceLocked_;
 			const bool labelsWanted = fitWanted && (cam.Overlay() != OverlayMode::Off || cam.Use().Any() || cam.LabelsGpu());
-			const bool aheadWanted = fitWanted && cam.AheadFit();
+			// Audit F2: a deterministic run takes ONE path, the seed fit through the lag bridge. The flag is the lane's
+			// (analysis_lane_deterministic = on; auto follows the host's deterministic run, which the skeleton passes as false): then no ahead
+			// fit and no skeleton demand. Shown, never silent.
+			const bool deterministic = s.lane.deterministic == VpSkeleton::LaneSettings::Det::On;
+			const bool aheadWanted = fitWanted && cam.AheadFit() && !deterministic;
+			st->aheadDeterministic = fitWanted && cam.AheadFit() && deterministic;
 			if (st->liveBuilt && (st->fitWanted != fitWanted || st->guideWanted != guideWanted || st->labelsWanted != labelsWanted ||
 				st->aheadWanted != aheadWanted || st->gpu != gpu || st->liveLabelsGpu != cam.LabelsGpu()))
 				ReleaseLive(*st);   // rebuilt at the next frame over the new wants
@@ -919,6 +925,8 @@ namespace Vpv
 				}
 				if (!st.gpu)
 					fb.push_back("camera_gpu: no render device for this renderer; the fit cannot read the engine's fields back");
+				if (st.aheadDeterministic)
+					lines.push_back(CameraLink::kAheadDeterministicText);
 				if (st.guideLocked)
 				{
 					lines.push_back(std::string("camera: ") + kGuidanceLockedText);
