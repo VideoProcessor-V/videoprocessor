@@ -57,7 +57,7 @@ namespace Vpv
 		// Forgets the VP-V pages (the shell is being rebuilt).
 		void reset() { vpvNames_.clear(); subPages_.clear(); }
 
-		// A page that belongs to another page (ConfigPage::parentPage): no navigation leaf, opened from
+		// A page that belongs to another page (ConfigPage::parentPage): no top-level navigation leaf, opened from
 		// its parent, grouped there under `group`.
 		struct SubPageInfo
 		{
@@ -101,7 +101,7 @@ namespace Vpv
 		// nothing. The editor calls this after its own VP-V pages (Dynamic Drive) and before the master
 		// VP-V page, so that page can link the sub-pages the providers registered. A page's leafAfter is
 		// advisory and not yet honoured: provider leaves follow Dynamic Drive, before the VP-V leaf. A sub-page (parentPage set) is
-		// named and stacked like any page but gets no navigation leaf.
+		// named and stacked like any page; a sub-page of VP-V gets a child leaf under the VP-V leaf, any other none.
 		int appendProviderPages(QStackedWidget* pages, ConfigPageHost::ConfigFormApi& api)
 		{
 			std::vector<ConfigPageHost::ConfigPage> extra;

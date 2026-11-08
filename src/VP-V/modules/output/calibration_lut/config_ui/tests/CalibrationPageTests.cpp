@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 // The Calibration settings page as a Config page provider (R1 W1 CAL-C): it is registered as a
-// sub-page of the master VP-V page (grouped under Output, no navigation leaf of its own), it keeps
+// sub-page of the master VP-V page (grouped under Output, with a child entry under the VP-V entry in the list), it keeps
 // the editor's object names and write path, it takes a status reply through the test seam found by
 // ConfigPageHost::Find<CalibrationPage>(), and its per-editor state goes with the editor.
 // Registered from ConfigEditorWindowTests.cpp's main with one line: RunCalibrationPageTests().

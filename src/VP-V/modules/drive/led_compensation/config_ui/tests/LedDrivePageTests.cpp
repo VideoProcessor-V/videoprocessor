@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 // The Dynamic Drive page as a Config page provider (M2 lane C, P7-3): it is registered as a sub-page of
-// the master VP-V page (grouped under Drive, no navigation leaf of its own) ahead of Calibration, it keeps
+// the master VP-V page (grouped under Drive, with a child entry under the VP-V entry in the list) ahead of Calibration, it keeps
 // the editor's object names, write path (including Reset removing a key), card order and the projector
 // cards, and its per-editor state goes with the editor.
 // Registered from ConfigEditorWindowTests.cpp's main with one line: RunLedDrivePageTests().

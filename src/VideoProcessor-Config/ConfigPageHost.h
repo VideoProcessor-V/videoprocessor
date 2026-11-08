@@ -100,7 +100,7 @@ namespace ConfigPageHost
 		QString name;        // navigation title and page name
 		QString leafAfter;   // title of the navigation leaf this one prefers to follow (advisory)
 		QWidget* widget = nullptr;   // ownership passes to the editor
-		// A sub-page has no navigation leaf of its own: it is opened from the page named in parentPage
+		// A sub-page has no top-level navigation leaf: it is opened from the page named in parentPage (a sub-page of "VP-V" also gets a child leaf under the VP-V leaf)
 		// (grouped there under `group`) and keeps its page name and place in the stack.
 		QString parentPage;
 		QString group;
