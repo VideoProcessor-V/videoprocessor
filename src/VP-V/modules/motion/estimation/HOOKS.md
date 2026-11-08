@@ -10,12 +10,14 @@ alias table the package leaves behind.
 
 | Item | What | State at this tip | Where it lives now |
 |---|---|---|---|
-| a | estimate state (ahead payload/textures/schedule, upload layout, `dejudder`, estimated seq/epoch, idle keeper, live-field bookkeeping) | NOT moved (P5a-5: heavy host coupling: textures, GPU unpack, early upload) | Impl |
+| a | estimate state (B's planes, ahead payload/textures/schedule, upload layout, `dejudder`, estimated seq/epoch/periods, idle keeper + budget adapter, live-field bookkeeping, warm-up flags) | MOVED (P5a-5), members verbatim with their comments; aliases in Impl (section 4). Left in Impl: `dejudderReason` (policy, P5b), `dejudderAheadLogTick` (`LogDejudderAhead`, P5b), `motionEngineIdleReleasesLogged`, the upload-reuse records `dejudderNextUpload/AheadUpload` (+ `dejudderNextUploadedSequence`, `uploadsReused*`), `dejudderRgbLuma/RgbScratch`, `dejudderMask*`, `dejudderEstimates/Failures`, `motionSourceLogged` (shared with P5b/P10 readers) | `EstimateState.h` (`VpMotion::EstimateState<Payload>`, member `vectorEstimate`) |
 | b | vector engine: demand decision, statistics service, global-pair hysteresis, delivered log, engine size | MOVED (`VectorDemandInput` stays in Impl: it only gathers the renderer's facts) | `VectorEngine.cpp` |
 | c | producer / look-ahead / validity members, `MotionShadowCheck` | MOVED (members: `VectorEngineState`; shadow check: `VectorEngine`) | `VectorEngineState.h` |
 | d | invalidation requests, apply point, counters | PARTLY: counters, epoch consume and the rate-limited log moved; `RequestMotionInvalidate` (also feeds `frameAnalysis`) and the consumer-forget body of `ApplyMotionInvalidate` stay in Impl | `VectorEngine::TakeInvalidation/LogInvalidation` |
-| e | `WarmIdleMotionEngine`, `PollMotionEngineBudget`, `QueryMotionEngineBudget` | NOT moved (P5a-5, with a) | Impl |
-| f | `UploadDejudderPlanes`, `TakeNextPlanes`, `RunDejudderEstimate`, `EstimateAhead` | NOT moved (P5a-5) | Impl |
+| e | `WarmIdleMotionEngine`, `PollMotionEngineBudget`, `QueryMotionEngineBudget` | MOVED (P5a-5) verbatim: out-of-line `Impl` member definitions; Impl keeps one declaration line each (same names, same default arguments) | `EngineKeeper.inl` |
+| f | `UploadDejudderPlanes`, `TakeNextPlanes`, `RunDejudderEstimate`, `EstimateAhead` | MOVED (P5a-5) verbatim, as e. Only edits in the bodies: the K4 wrap of the matcher's `Estimate` call (`VectorEngine::Estimate`), the `NoteEngineGlobal` CPU record next to `NoteGlobalPair`, and `RunDejudderEstimate`'s defaulted `ahead` argument (true only from `EstimateAhead`'s estimate step). Callers in the P5b zone (`UpdateDejudderEstimate`, `EntranceOnceFieldAhead`, the extras) are unchanged | `VectorEngineEstimate.inl` (includes `EngineKeeper.inl`; included ONCE by the renderer right after the Impl struct) |
+| K4 | camera-guided matching insertion point | DONE (P5a-5): `IPreEstimateHook::BeforeEstimate` right before / `AfterEstimate` right after the matcher's `Estimate`, inside `RunDejudderEstimate` (so both the in-render estimate and the estimate ahead); never for the warm-up's dummy estimate. No hook = `estimate()` only | `VectorEngine::Estimate` (VectorEngine.h), call site `VectorEngineEstimate.inl` |
+| IVectorEngine | `vpv.vector_engine.v1` | DONE (P5a-5): `VectorEngine` implements it from today's state (section 7); the renderer's engine registers under its host (`vectorEngine{ this }`); `VectorEngineExtension` (hub module, after ResyncExtension) answers the query with the `IVectorEngineDirectory` | `VectorEngine.h/.cpp`, `VectorEngineExtension.h/.cpp`, `core/hub/HubBootstrap.cpp` |
 | g | producer lifecycle and depth decision | MOVED: pure `ProducerPlan::Lifecycle/Depth` + `VectorEngine::PlanProducer` (a plain-value call site in `RenderLocked`, not a hook phase: it needs the pass's own facts) | `ProducerPlan.h`, `VectorEngine.cpp` |
 | h, i | look-ahead copy under the queue lock; engage rule, `Submit` loop and its catch | NOT moved: Z3a (LVR RenderLoop 33700-34050) is held by T1 (`r1w1/t1` a9627e41, not merged), which rewrites the catch (B4 `LookAheadFailures`) | Impl |
 | j, k | invalidate requests at Reset / ResetLiveQueue / gap / seek / format change as `OnQueue` events | NOT done: the six `RequestMotionInvalidate` sites in Z6 call a VP one-liner; converting needs the engine to reach `frameAnalysis` from a hub event (host binding), then net-0 lines | Impl |
@@ -50,7 +52,8 @@ thread. `Ui` = UI / config thread.
 2. Render loop, no lock: engage / disengage and `Submit` (item i, still in Impl); reads the atomics written below.
 3. Render thread, in `RenderLocked`, per rendered source frame: `UpdateDejudderEstimate` -> `ApplyMotionInvalidate`
    (engine half `TakeInvalidation`, the renderer's consumers forget, engine half `LogInvalidation`) ->
-   `VectorEngine::UpdateVectorEngine` -> `VectorEngine::ServeStatistics` -> the estimate (item f, Impl) ...;
+   `VectorEngine::UpdateVectorEngine` -> `VectorEngine::ServeStatistics` -> the estimate (item f, `VectorEngineEstimate.inl`:
+   `RunDejudderEstimate` -> [K4 `BeforeEstimate`] matcher `Estimate` [K4 `AfterEstimate`]) ...;
    later in the same pass `VectorEngine::PlanProducer` (producer lifecycle + depth for the NEXT loop pass).
 
 ## 4. Aliases left in `Impl` (one VPV-HOOK block; each deleted by the package that moves its last reader)
@@ -71,7 +74,27 @@ Declared right after the `vectorEngine` member, reference to the field of the sa
 | `motionInvalidations`, `motionRecoveryLogPending` | status line, first-estimate log in `RunDejudderEstimate` | P5a-5 |
 | `motionGapDetail` | dequeue (Z6) | P5a-7 (j/k) |
 
+The rows above marked "P5a-5" stay after P5a-5: the moved bodies are verbatim and still read these names through the
+aliases; they go when the bodies are rewritten against the engine state (P5a-rest), or with item i (P5a-6).
+
+P5a-5 aliases (reference to the field of the same name in `EstimateState`, member `vectorEstimate`, declared right after
+the block above; `using DejudderUploadLayout` for the moved type):
+
+| Alias | Readers outside P5a | Deleted by |
+|---|---|---|
+| `dejudder` | the whole de-judder / interpolator / extras / entrance / dither code (`->Field()`, `->Snap*`, `ReleaseDejudder`) | P5b (last reader), P4 |
+| `dejudderNextTextures`, `dejudderAheadTextures`, `dejudderAheadPayload`, `dejudderAheadPayloadSequence` | `UpdateDejudderEstimate` (B upload, C ahead payload), `ReleaseDejudder`, the frame upload (`textures` swap), the entrance's B ahead | P5b / P4 / P10 |
+| `dejudderAhead`, `dejudderLayout` (+ `DejudderUploadLayout`) | `UpdateDejudderEstimate`, `LogDejudderAhead`, status line, `ReleaseDejudder`, extras | P5b |
+| `dejudderEstimatedSequence`, `dejudderEstimatedEpoch`, `dejudderEstimatedPeriods`, `dejudderLiveFieldFrom` | `DejudderLiveFieldFor`, entrance / repeat reuse / dither gate / adaptive stage / extras | P5b / P4 / P6 |
+| `motionEngineIdle`, `motionEngineBudgetAdapter`, `motionEngineWarmPending`, `motionEngineWarming`, `dejudderCreates`, `dejudderMotionSourceKey` | `UpdateDejudderEstimate` (keeper decision), `RetireOutput` (adapter release), resync / format change (warm pending), `ReleaseDejudder` | P5b / P11 |
+
 ## 5. Teardown
+
+P5a-5: `vectorEstimate` is declared right after `vectorEngine`, i.e. later than the old positions of its members, so at
+member destruction it goes earlier than the members declared in between; none of them holds the matcher (grep:
+`MotionWarp*` / `MotionWarp&` only inside the matcher itself). The GPU release is unchanged: `ReleaseDejudder` (and
+`RetireOutput`'s budget-adapter release) run before the device goes, through the aliases. `~EstimateState` unbinds its
+matcher view from the engine; `~VectorEngine` removes the engine from the directory.
 
 `~Impl` still destroys the producer (its own optical-flow device). GPU objects of the matcher are released by
 `ReleaseDejudder` (item a, unchanged). The state struct is declared at the position of the earliest moved member (the
@@ -83,7 +106,33 @@ Fix C (explicit producer stop on GPU release) is not in this base; when it lands
 
 | Proof | State |
 |---|---|
+| P5a-5 move | bodies verbatim against d378d4f0 except the listed edits (move script `D:/codex/videoprocessor/m2-p5a-move-ef.py`; diff of the dedented old ranges against the .inl files shows only the `Impl::` qualifications and the dropped default arguments before the K4 edits) |
+| `VectorEngineHookTests` (null hook and all-off hook leave the matcher's call sequence unchanged; warm-up never hooked; bound guidance reaches the matcher before its estimate; IVectorEngine absent values, live field, epoch, engine global, directory) | written, syntax-checked (`cl /Zs`); project run after the gate |
 | `ProducerPlanTests` (3.2 M rows against a test-only copy of the old logic; a mutation fails it) | written; run in the scratch harness, passes; project run after the gate |
 | `VectorEngineTests` (fake host: sync/publish rules, hysteresis, size, shadow, reservations) | written and syntax-checked; project run after the gate |
 | existing: VectorDemand, MotionValidity, MotionAhead, DejudderPolicy, `EstimatorHookTests`, QueueStressHarness | to run on the fresh full-solution build |
 | chain-gate motion subset, frame hashes vs G1; skeleton timing gate; "Motion ahead:" log diff | coordinator, after the gate |
+
+## 7. IVectorEngine (vpv.vector_engine.v1) from today's state (P5a-5)
+
+`Query("vpv.vector_engine.v1")` (hub, `VectorEngineExtension`) returns an `IVectorEngineDirectory*`; `EngineFor(host)` gives
+that renderer's `VectorEngine` (host = the RendererExtension `Context::host`, the renderer's Impl). Render thread unless noted.
+
+| Method | Source state | Absent value |
+|---|---|---|
+| `LatestVerifiedFieldSeq` | the last successful estimate's pair `to`, while `FieldOf(to)` holds | 0 |
+| `FieldEra` | `motionValidity.Epoch()` (any thread) | - |
+| `FieldOf(seq)` | the matcher's live block field (`MotionWarp::Field()`, rgba32f, vx/vy source px, trust, error; 16x16 source px blocks) of the last successful estimate (from, to = seq) while `dejudderLiveFieldFrom == from` and the epoch it was made in is current; `bwd`, `trust` null; `scaleToSourcePx` 1 | false |
+| `FieldScale` | 1 (the field is in source px) | - |
+| `GlobalFromEngine` | `dejudder->GlobalFromEngine()` | false (no matcher) |
+| `EngineGlobal(seq)` | the producer pair's `flow->global[0]` taken in `RunDejudderEstimate` (pair to = seq, current epoch, z < 0.9), x/y = cell px (`EngineCellSourcePixels`) x the D1 texels | false |
+| `PairSpansSlip(from, to)` | false only when every adjacent pair in [from, to] is `PairValidAt` in the current epoch, from >= the first estimate of that epoch, span <= 64 | true (unknown = slip) |
+| `FlowIsCpuResident`, `FlowOf` | none kept today | false |
+| `SetPreEstimateHook` | atomic pointer read once per estimate (any thread writes; the camera link sets it, and clears it before its hook goes) | null = none |
+| reservations (`RefinedFieldOf`, `SubmitLongPair`, ...) | interface defaults | absent |
+
+Hook contract notes for K4: `pairSeq` = the pair's later frame (`bSequence`); `ahead` is true for the estimate ahead,
+which today also runs on the render thread (inside `RenderLocked`, from the extras / entrance), never on a lane;
+`nextPairSeconds` = (b - a) / the content rate (`dejudderSourceHz`), 0 when unknown; `guidanceUsed` = the matcher's
+`CameraGuidanceUsed()` reports a guided part and no rejection; `countsTex` = `CameraGuidanceCounts()` only when a narrow
+or E1 pass ran.
