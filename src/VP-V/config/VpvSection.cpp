@@ -964,6 +964,134 @@ namespace Vpv
 			return page;
 		}
 
+		void SetGreyReason(QWidget* w, const QString& reason);   // defined below
+
+		// Camera K3 (docs 61 section 3.1): the "Camera model" group of the Motion unit. Keys of [vpv.camera], all default off
+		// (an off box removes the key); greyed in the Original pathway, and everything but the model switch is greyed while the
+		// model is off ("used only when Camera model is on"; the stored values are kept). The runtime state of the camera model is
+		// not shown here: it is the Ctrl+I "camera:" line, Fallbacks engaged (camera_model, camera_model_overlay, camera_settings,
+		// camera_dump) and the Ctrl+Alt+D section; the status row says so.
+		CardBox MakeCameraCard(const std::shared_ptr<State>& state, const QString& unitId)
+		{
+			struct Box { const char* key; const char* label; const char* tip; };
+			static const Box kBoxes[] = {
+				{ "camera_labels_gpu", "Compute the labels on the GPU", "Key camera_labels_gpu. The per-block camera / object labels are computed on the GPU instead of uploaded from the fit." },
+				{ "camera_meas_model_global", "Measurement: the model as the global candidate", "Key camera_meas_model_global. The camera model replaces the separate global search (D1)." },
+				{ "camera_meas_guided_candidate", "Measurement: the model's prediction as a candidate", "Key camera_meas_guided_candidate. Adds the model's per-block prediction to the candidates only." },
+				{ "camera_meas_narrow_window", "Measurement: narrow the search around the prediction", "Key camera_meas_narrow_window. Camera blocks are searched in a small window around the prediction; a failed check searches in full." },
+				{ "camera_meas_e1_skip", "Measurement: skip the second sweep where the model agrees", "Key camera_meas_e1_skip." },
+				{ "camera_meas_static_gate", "Measurement: static blocks from the model", "Key camera_meas_static_gate. Zero motion with high confidence is taken from the model." },
+				{ "camera_meas_cut_skip", "Measurement: no search across a cut", "Key camera_meas_cut_skip." },
+				{ "camera_meas_fade_normalised", "Measurement: gain-corrected cost in a fade", "Key camera_meas_fade_normalised." },
+				{ "camera_meas_flash_bridge", "Measurement: bridge a flash frame", "Key camera_meas_flash_bridge." },
+				{ "camera_meas_temporal_seed", "Measurement: seed from the previous vector", "Key camera_meas_temporal_seed." },
+				{ "camera_meas_tiny_mover_roi", "Measurement: finer grid for tiny movers", "Key camera_meas_tiny_mover_roi." },
+				{ "camera_use_grain", "Use in the grain map", "Key camera_use_grain." },
+				{ "camera_use_detail", "Use in the detail steps", "Key camera_use_detail." },
+				{ "camera_use_dither", "Use in the dither vectors", "Key camera_use_dither." },
+				{ "camera_use_deband", "Use in the debander", "Key camera_use_deband." },
+				{ "camera_use_filler", "Use in the occlusion filler", "Key camera_use_filler." },
+				{ "camera_use_dejudder", "Use in the de-judder", "Key camera_use_dejudder." },
+			};
+			const QString camSection = QStringLiteral("vpv.camera");
+			CardBox card = MakeCard(ObjectName(unitId + QStringLiteral(".card.camera")), QStringLiteral("Camera model"),
+				QStringLiteral("Diagnostics and switches for the global camera model. Everything is off by default and the Original "
+					"pathway keeps it off. The switches act only while the camera model is on."), true);
+
+			auto* model = new QCheckBox(QStringLiteral("Camera model"));
+			model->setObjectName(ObjectName(QStringLiteral("camera.camera_model")));
+			model->setToolTip(QStringLiteral("Key camera_model (section [vpv.camera]). Fits one camera motion per source frame pair "
+				"for the steps below. Needs camera_link = report in [vpv.skeleton] to attach (cfg only)."));
+			card.Form()->addRow(QStringLiteral("Camera model"), model);
+
+			auto* overlay = new QComboBox;
+			overlay->setObjectName(ObjectName(QStringLiteral("camera.camera_model_overlay")));
+			overlay->addItem(QStringLiteral("Off (default)"), QString());
+			overlay->addItem(QStringLiteral("Labels (camera / object / untrusted)"), QStringLiteral("labels"));
+			overlay->addItem(QStringLiteral("Residual magnitude"), QStringLiteral("residual"));
+			overlay->addItem(QStringLiteral("Model vectors"), QStringLiteral("vectors"));
+			overlay->setToolTip(QStringLiteral("Key camera_model_overlay. A diagnostic overlay; never a default. It cannot draw yet: a "
+				"request is shown under Fallbacks engaged."));
+			card.Form()->addRow(QStringLiteral("Diagnostic overlay"), overlay);
+
+			std::vector<QCheckBox*> boxes;
+			for (const Box& b : kBoxes)
+			{
+				auto* box = new QCheckBox;
+				box->setObjectName(ObjectName(QStringLiteral("camera.") + QString::fromLatin1(b.key)));
+				box->setToolTip(QString::fromLatin1(b.tip));
+				boxes.push_back(box);
+				card.Form()->addRow(QString::fromLatin1(b.label), box);
+			}
+
+			auto* status = Help(QStringLiteral("Status: the camera model's state is the 'camera:' line of the Ctrl+I overlay, the "
+				"Fallbacks engaged list here (camera_model, camera_model_overlay, camera_settings, camera_dump) and the Ctrl+Alt+D section."));
+			status->setObjectName(ObjectName(QStringLiteral("camera.status")));
+			card.Add(status);
+
+			// An off box removes the key (empty value): off is the default.
+			const auto write = [state, camSection](const QString& key, const QString& value)
+			{
+				if (state->refreshing || !state->host.setValue) return;
+				state->host.setValue(camSection, key, value);
+			};
+			QObject::connect(model, &QCheckBox::toggled, model, [write, state](bool on)
+			{
+				write(QStringLiteral("camera_model"), on ? QStringLiteral("on") : QString());
+				state->RefreshAll();   // the dependants grey or un-grey at once (a no-op while refreshing)
+			});
+			QObject::connect(overlay, qOverload<int>(&QComboBox::currentIndexChanged), overlay, [write, overlay](int i)
+			{
+				if (i >= 0) write(QStringLiteral("camera_model_overlay"), overlay->itemData(i).toString());
+			});
+			for (size_t i = 0; i < boxes.size(); ++i)
+			{
+				const QString key = QString::fromLatin1(kBoxes[i].key);
+				QObject::connect(boxes[i], &QCheckBox::toggled, boxes[i], [write, key](bool on)
+				{
+					write(key, on ? QStringLiteral("on") : QString());
+				});
+			}
+
+			state->refreshers.push_back([state, model, overlay, boxes, camSection]()
+			{
+				const auto get = [&](const QString& section, const QString& key)
+				{
+					return state->host.value ? state->host.value(section, key).trimmed() : QString();
+				};
+				const auto isOn = [](const QString& v) { return v.compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0; };
+				const bool original = isOn(get(Q(TierTable().section), QStringLiteral("pipeline_original_pathway")));
+				const bool modelOn = isOn(get(camSection, QStringLiteral("camera_model")));
+				const QString originalReason = QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).");
+				const QString modelReason = QStringLiteral("Greyed: used only when Camera model is on (the stored value is kept).");
+				{
+					const QSignalBlocker blocker(model);
+					model->setChecked(modelOn);
+					model->setEnabled(!original);
+					SetGreyReason(model, original ? originalReason : QString());
+				}
+				{
+					const QSignalBlocker blocker(overlay);
+					const QString value = get(camSection, QStringLiteral("camera_model_overlay")).toLower();
+					int index = 0;
+					for (int i = 0; i < overlay->count(); ++i)
+						if (overlay->itemData(i).toString() == value) index = i;
+					overlay->setCurrentIndex(index);
+					overlay->setEnabled(!original && modelOn);
+					SetGreyReason(overlay, original ? originalReason : !modelOn ? modelReason : QString());
+				}
+				const int prefix = ObjectName(QStringLiteral("camera.")).size();
+				for (QCheckBox* box : boxes)
+				{
+					const QSignalBlocker blocker(box);
+					box->setChecked(isOn(get(camSection, box->objectName().mid(prefix))));
+					box->setEnabled(!original && modelOn);
+					SetGreyReason(box, original ? originalReason : !modelOn ? modelReason : QString());
+				}
+			});
+			return card;
+		}
+
 		QWidget* MakeUnitPage(const std::shared_ptr<State>& state, const Unit& unit)
 		{
 			const Table& table = TierTable();
@@ -1175,6 +1303,11 @@ namespace Vpv
 			layout->addStretch();
 
 			// 3. Advanced, last: the planned settings and the unit's stages.
+			if (unitId == QStringLiteral("motion"))
+			{
+				CardBox camera = MakeCameraCard(state, unitId);
+				advanced->addWidget(camera.frame);
+			}
 			if (!unit.planned.empty())
 			{
 				CardBox planned = MakeCard(ObjectName(unitId + QStringLiteral(".card.planned")), QStringLiteral("Planned (not yet implemented)"),
