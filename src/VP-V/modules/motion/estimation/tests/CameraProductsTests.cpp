@@ -263,7 +263,7 @@ namespace CameraProductsTestsNs
 
 			// The same edge at lag 0 closing a loop is a lag-0 cycle.
 			std::vector<ProductDecl> cyc = SkeletonProducts().All();
-			VpSkeleton::detail::AddInput(cyc[kP3AnalysisField], kP7CameraFit, 0);
+			VpSkeleton::detail::AddInput(cyc[kP4SourceStats], kP7CameraFit, 0);   // G-A3: P7 reads P4 (not P3), so P4 reading P7 at lag 0 closes the cycle
 			Assert::IsTrue(ValidateFails(cyc), L"the same edge at lag 0 is a cycle");
 
 			// A substitute that reads the product it replaces.
