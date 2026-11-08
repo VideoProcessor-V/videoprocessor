@@ -142,6 +142,7 @@ Listed with their design note: `vprenderer/LibplaceboVideoRenderer.{h,cpp}` (doc
 |---|---|---|---|---|
 | WAIVER-SU-01 | `tools/shared_units_baseline.json` U8 `known_false_positive`, `src/VP-V/modules/motion/estimation/MatcherSettings.h` | `settings\.pictureArea` not counted as a duplicate of active_picture_rect | `settings.pictureArea` flag assignment moved verbatim from LVR (P3-6), not a PictureRect implementation; same class as the DejudderWarp entries | owner-approved 2026-11-07 (relayed by the M2 lead) |
 | WAIVER-SU-02 | `tools/shared_units_baseline.json` U6 `known_false_positive`, `src/VP-V/modules/motion/estimation/MatcherSettings.h` | `settings\.cutHistogram` not counted as a duplicate of histogram_apl (U6 blocking, baseline 0 since camera train 3) | `settings.cutHistogram` setting feed moved verbatim from LVR (P3-6); integ classifies the identical DejudderWarp.cpp line the same way | coordinator, under SU-01; owner informed in the morning summary (2026-11-07) |
+| WAIVER-SU-03 | `tools/shared_units_baseline.json` U6 and U8 `known_false_positive`, `src/VP-V/modules/motion/estimation/VectorEngineEstimate.inl` | `current.cutHistogram != next.cutHistogram` (U6) and `current.pictureArea != next.pictureArea` (U8) not counted as duplicates | matcher-settings comparison (meaningChanged) moved verbatim from LVR RunDejudderEstimate (M2 P5a-5); same class as SU-01/SU-02 | coordinator, under SU-01; owner informed in the morning summary (2026-11-07) |
 
 ## Open (not yet a row)
 
