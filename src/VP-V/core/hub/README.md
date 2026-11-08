@@ -36,3 +36,10 @@ Phase rule (`RendererExtension::PhaseFansOut`): the phases P0b adds as fan-out a
 AfterPresent, PresentSample and ResolveTime; every other phase keeps the first-wins rule it had. A module writes
 its payload only once it has succeeded (a contained throw leaves what it wrote). R12 is experimental in the Bill
 PR text (doc 59 D-10).
+
+Semantics note (deliberate, inert): the phases AfterPublish, QueueTarget, AfterPresent and PresentSample already
+existed in the enum and were first-wins by default. P0b makes them fan-out. Nothing called or handled them before
+this package, so no behaviour changes today; the change is recorded here because it alters the rule of declared
+phases. R12 outcomes are merged per module by the hub (OR / max / sum); a throwing module's partial writes are
+discarded. R19 results are clamped to capacity by the helper. The earlier unused payload structs `UploadJob`,
+`ConvertJob` and `QueueTargetView` were removed and `OutputPlan` was reshaped (no users).

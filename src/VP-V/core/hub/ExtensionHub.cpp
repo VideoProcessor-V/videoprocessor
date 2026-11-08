@@ -97,6 +97,23 @@ namespace Vpv
 		void ExtensionHub::OnIngress(RE::IngressContext& c) { for (auto& m : modules_) { try { m->OnIngress(c); } catch (...) { Contain(c, m->Name()); } } }
 		void ExtensionHub::OnQueue(const RE::QueueFacts& f) { for (auto& m : modules_) { try { m->OnQueue(f); } catch (...) { Contain(f, m->Name()); } } }
 
+		// R12: the module sees an empty outcome and writes only its own contribution; it is merged into what the earlier
+		// modules (and the caller) left (OR / max / sum). A throw discards the module's partial writes.
+		static void AfterPresentMerged(ISkeletonModule& m, RE::FrameContext& c, RE::PresentContext& p)
+		{
+			const RE::PresentOutcome before = p.outcome;
+			p.outcome = RE::PresentOutcome();
+			try { m.OnAfterPresent(c, p); }
+			catch (...) { p.outcome = before; throw; }
+			const RE::PresentOutcome own = p.outcome;
+			p.outcome = before;
+			p.outcome.extrasRan = before.extrasRan || own.extrasRan;
+			p.outcome.committed = before.committed || own.committed;
+			if (own.targetLeadMs > before.targetLeadMs) p.outcome.targetLeadMs = own.targetLeadMs;
+			if (own.estimatedLeadMs > before.estimatedLeadMs) p.outcome.estimatedLeadMs = own.estimatedLeadMs;
+			p.outcome.spentSeconds = before.spentSeconds + own.spentSeconds;
+		}
+
 		// One module's share of a phase: the M2 P0b phases go to their typed method (null payload = skipped), the
 		// earlier phases to OnFrame as before. Fan-out phases return false (the hub ORs nothing for them).
 		static bool DispatchPhase(ISkeletonModule& m, RE::FrameContext& c)
@@ -105,7 +122,7 @@ namespace Vpv
 			{
 			case RE::FramePhase::PlanOutputs:   if (auto* p = RE::PayloadOf<RE::OutputPlan>(c)) return m.OnPlanOutputs(c, *p); return false;
 			case RE::FramePhase::PlanPresent:   if (auto* p = RE::PayloadOf<RE::PresentPlan>(c)) return m.OnPlanPresent(c, *p); return false;
-			case RE::FramePhase::AfterPresent:  if (auto* p = RE::PayloadOf<RE::PresentContext>(c)) m.OnAfterPresent(c, *p); return false;
+			case RE::FramePhase::AfterPresent:  if (auto* p = RE::PayloadOf<RE::PresentContext>(c)) AfterPresentMerged(m, c, *p); return false;
 			case RE::FramePhase::PresentSample: if (auto* p = RE::PayloadOf<RE::PresentSampleView>(c)) m.OnPresentSample(c, *p); return false;
 			case RE::FramePhase::ResolveTime:   if (auto* p = RE::PayloadOf<RE::TimeQuery>(c)) m.OnResolveTime(c, *p); return false;
 			case RE::FramePhase::DecideIngress: if (auto* p = RE::PayloadOf<RE::IngressContext>(c)) return m.OnDecideIngress(c, *p); return false;

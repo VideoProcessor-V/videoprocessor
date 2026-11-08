@@ -168,8 +168,9 @@ namespace RendererExtension
 		uint32_t flags = 0;
 	};
 
-	// R12 AfterPresent (fan-out; render thread, renderMutex, after the main present). Handlers only add to the
-	// outcome (OR / max / sum), never clear it; default = nothing ran.
+	// R12 AfterPresent (fan-out; render thread, renderMutex, after the main present). Each module writes only its own
+	// contribution; the hub merges the contributions (extrasRan / committed OR, targetLeadMs / estimatedLeadMs max,
+	// spentSeconds sum) and discards a throwing module's partial writes. Default = nothing ran.
 	struct PresentOutcome
 	{
 		bool extrasRan = false, committed = false;
@@ -235,7 +236,8 @@ namespace RendererExtension
 		void (*setIngressStatus)(void* user, const char* text) = nullptr;
 	};
 
-	// R19 ResolveQueueTarget (fan-out, chained; any thread holding the host's queue mutex). Default = billTarget.
+	// R19 ResolveQueueTarget (fan-out, chained; any thread holding the host's queue mutex). Default = billTarget;
+	// the helper clamps the chained result to capacity (when set).
 	struct QueueTargetContext
 	{
 		size_t desired = 0, capacity = 0;
@@ -527,6 +529,9 @@ namespace RendererExtension
 		qc.billTarget = billTarget; qc.target = billTarget;
 		if (!Any()) return billTarget;
 		detail::Phase(FramePhase::QueueTarget, host, -1, 0, qc);
+		// A handler never takes the target past the queue's capacity (or the host's own value, if that is larger).
+		const size_t ceiling = qc.capacity > billTarget ? qc.capacity : billTarget;
+		if (qc.capacity > 0 && qc.target > ceiling) qc.target = ceiling;
 		return qc.target;
 	}
 }

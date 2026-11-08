@@ -248,11 +248,22 @@ namespace HookAmendmentTest
 			Assert::IsTrue(s.log.empty());
 		}
 
-		TEST_METHOD(ExistingPhaseValuesAndRulesAreUnchanged)
+		TEST_METHOD(PhaseValuesAndRules)
 		{
-			// New phases are appended: the numbering the earlier packages see does not move.
+			// New phases are appended: the numbering the earlier packages see does not move. All 16 are pinned.
+			Assert::AreEqual(0, static_cast<int>(RE::FramePhase::Convert));
+			Assert::AreEqual(1, static_cast<int>(RE::FramePhase::AfterPublish));
+			Assert::AreEqual(2, static_cast<int>(RE::FramePhase::CollectAhead));
+			Assert::AreEqual(3, static_cast<int>(RE::FramePhase::QueueTarget));
 			Assert::AreEqual(4, static_cast<int>(RE::FramePhase::Begin));
+			Assert::AreEqual(5, static_cast<int>(RE::FramePhase::PlanOutputs));
+			Assert::AreEqual(6, static_cast<int>(RE::FramePhase::Entrance));
+			Assert::AreEqual(7, static_cast<int>(RE::FramePhase::Upload));
+			Assert::AreEqual(8, static_cast<int>(RE::FramePhase::CollectHooks));
+			Assert::AreEqual(9, static_cast<int>(RE::FramePhase::Draw));
 			Assert::AreEqual(10, static_cast<int>(RE::FramePhase::AfterRender));
+			Assert::AreEqual(11, static_cast<int>(RE::FramePhase::PlanPresent));
+			Assert::AreEqual(12, static_cast<int>(RE::FramePhase::AfterPresent));
 			Assert::AreEqual(13, static_cast<int>(RE::FramePhase::PresentSample));
 			Assert::AreEqual(14, static_cast<int>(RE::FramePhase::ResolveTime));
 			Assert::AreEqual(15, static_cast<int>(RE::FramePhase::DecideIngress));
@@ -396,6 +407,61 @@ namespace HookAmendmentTest
 			Assert::AreEqual<size_t>(4, RE::ResolveQueueTarget(&host, qc, 3));   // 3 -> 4 -> capped at desired 4
 			Assert::AreEqual<size_t>(3, qc.billTarget);
 			Assert::AreEqual<size_t>(4, RE::ResolveQueueTarget(&host, qc, 4));   // already at desired: stays
+		}
+
+		TEST_METHOD(QueueTargetResultIsClampedToCapacity)
+		{
+			Scope s;
+			AddMod(new Mod("a")); AddMod(new Mod("b"));
+			RegisterHubForwarder();
+			int host = 0;
+			RE::QueueTargetContext qc;
+			qc.desired = 100; qc.capacity = 2;   // the modules add 2 (1 -> 3); the helper holds the target at capacity
+			Assert::AreEqual<size_t>(2, RE::ResolveQueueTarget(&host, qc, 1));
+			Assert::AreEqual<size_t>(2, qc.target);
+		}
+
+		TEST_METHOD(AfterPresentOutcomeIsMergedPerModuleAndAThrowDiscardsItsPartialWrites)
+		{
+			Scope s;
+			struct Partial : Hub::ISkeletonModule
+			{
+				const char* Name() const override { return "partial"; }
+				void OnAfterPresent(RE::FrameContext&, RE::PresentContext& p) override { p.outcome.committed = true; p.outcome.spentSeconds = 9.0; throw 1; }
+			};
+			struct Clear : Hub::ISkeletonModule
+			{
+				const char* Name() const override { return "clear"; }
+				// A module that tries to wipe the outcome only wipes its own (empty) contribution.
+				void OnAfterPresent(RE::FrameContext&, RE::PresentContext& p) override { p.outcome = RE::PresentOutcome(); }
+			};
+			AddMod(new Mod("a"));
+			Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Hub::ISkeletonModule>(new Partial()));
+			Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Hub::ISkeletonModule>(new Clear()));
+			AddMod(new Mod("b"));
+			RegisterHubForwarder();
+			int host = 0;
+			RE::PresentContext pc;
+			pc.renderMs = 2.0;
+			const RE::PresentOutcome o = RE::AfterPresent(&host, 1, 1, pc);
+			Assert::IsTrue(o.extrasRan);
+			Assert::IsFalse(o.committed);               // the throwing module's write is gone
+			Assert::AreEqual(1.0, o.spentSeconds);      // a + b, not 9
+			Assert::AreEqual(3.0, o.targetLeadMs);
+		}
+
+		TEST_METHOD(AThrowingModuleInAChainedPhaseIsContainedAndTheChainContinues)
+		{
+			Scope s;
+			Mod* a = new Mod("a"); a->throws = true;
+			AddMod(a); AddMod(new Mod("b"));
+			RegisterHubForwarder();
+			int host = 0;
+			Assert::AreEqual<int64_t>(201, RE::ResolveTime(&host, RE::TimeKind::FramePresentEnd, 100));   // a threw before writing; b: 100*2+1
+			RE::QueueTargetContext qc;
+			qc.desired = 5; qc.capacity = 8;
+			Assert::AreEqual<size_t>(2, RE::ResolveQueueTarget(&host, qc, 1));                             // only b's +1
+			Assert::IsTrue((std::vector<std::string>{ "a:resolve_time", "b:resolve_time", "a:queue_target", "b:queue_target" }) == s.log);
 		}
 
 		TEST_METHOD(DecideIngressOutFieldsAndCaptureThreadCallsReachTheModule)

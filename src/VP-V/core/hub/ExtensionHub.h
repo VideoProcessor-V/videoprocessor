@@ -46,6 +46,8 @@ namespace Vpv
 			// "no change". Take-over phases (first-wins, bool): PlanOutputs, PlanPresent, DecideIngress, Convert,
 			// Upload. Fan-out phases (every module, in order, void): AfterPresent, PresentSample, ResolveTime,
 			// AfterPublish, QueueTarget; ResolveTime and QueueTarget are chained (each sees the previous result).
+			// OnAfterPresent writes only ITS OWN contribution to p.outcome (it starts empty); the hub merges per module
+			// (extrasRan/committed OR, targetLeadMs/estimatedLeadMs max, spentSeconds sum).
 			// Threads and locks per hook are in RendererExtension.h and doc 59 section 1.1; DecideIngress runs on the
 			// capture thread and ResolveQueueTarget under the host's queue mutex: no blocking, no locks.
 			virtual bool OnPlanOutputs(RE::FrameContext&, RE::OutputPlan&) { return false; }
