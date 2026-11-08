@@ -556,6 +556,70 @@ namespace Tests
 			Assert::AreEqual(0.75, w[0], 1e-12);
 			Assert::AreEqual(0.25, w[1], 1e-12);
 		}
+
+		// SID-OPT step 1: the batched solve and the shared tap memo are result-preserving. 11 lines (a full batch of 8 and a partial one of 3)
+		// of noisy ramps, three kernels of different tap counts; every number of ResidualBatch (residual, segment sums and rows) is compared
+		// BYTE for byte with the single-line Residual of an operator built without a shared memo.
+		TEST_METHOD(ResidualBatchAndASharedTapMemoAreBitIdenticalToTheSingleLineSolve)
+		{
+			using namespace SourceIdentity::Chain;
+			const int N = 1080;
+			const int n = 810;
+			const int origin = 48;
+			const int length = 984;
+			const int lines = 11;
+			ChainSynth::Lcg g(77u);
+			std::vector<std::vector<double> > y(static_cast<size_t>(lines), std::vector<double>(static_cast<size_t>(length), 0.0));
+			for (int l = 0; l < lines; ++l)
+				for (int j = 0; j < length; ++j)
+					y[static_cast<size_t>(l)][static_cast<size_t>(j)] = 400.0 + 0.3 * j + 60.0 * g.Normal() + 25.0 * std::sin(0.37 * j + l);
+			const int kernels[3] = { 0, 5, 8 };
+			TapMemo shared;
+			for (int ki = 0; ki < 3; ++ki)
+			{
+				DescaleOperator plain;
+				DescaleOperator memoed;
+				DescaleOperator warm;
+				Assert::IsTrue(plain.Build(N, n, kernels[ki], 0.0, origin, length));
+				Assert::IsTrue(memoed.Build(N, n, kernels[ki], 0.0, origin, length, &shared));
+				Assert::IsTrue(warm.Build(N, n, kernels[ki], 0.0, origin, length, &shared));   // every tap weight now comes from the memo
+				Assert::IsTrue(plain.Nodes() == warm.Nodes() && plain.Margin() == warm.Margin());
+				std::vector<double> scratch;
+				for (int first = 0; first < lines; first += kResidualBatch)
+				{
+					const int lanes = (std::min)(kResidualBatch, lines - first);
+					const double* ys[kResidualBatch];
+					for (int l = 0; l < lanes; ++l)
+						ys[l] = y[static_cast<size_t>(first + l)].data();
+					double rssB[kResidualBatch];
+					double segB[kResidualBatch * kMaxSegs];
+					int segRowsB[kMaxSegs];
+					int rowsB = 0;
+					warm.ResidualBatch(ys, lanes, scratch, rssB, rowsB, segB, segRowsB);
+					for (int l = 0; l < lanes; ++l)
+					{
+						double rss1 = 0.0;
+						double rssM = 0.0;
+						int rows1 = 0;
+						int rowsM = 0;
+						double seg1[kMaxSegs];
+						double segM[kMaxSegs];
+						int segRows1[kMaxSegs];
+						int segRowsM[kMaxSegs];
+						plain.Residual(ys[l], scratch, rss1, rows1, seg1, segRows1);
+						memoed.Residual(ys[l], scratch, rssM, rowsM, segM, segRowsM);
+						Assert::IsTrue(rows1 == rowsB && rows1 == rowsM, L"same inner rows");
+						Assert::IsTrue(std::memcmp(&rss1, &rssB[l], sizeof(double)) == 0, L"batched residual is bit-identical");
+						Assert::IsTrue(std::memcmp(&rss1, &rssM, sizeof(double)) == 0, L"shared tap memo gives a bit-identical operator");
+						Assert::IsTrue(std::memcmp(seg1, &segB[l * kMaxSegs], sizeof(seg1)) == 0, L"batched segment sums are bit-identical");
+						Assert::IsTrue(std::memcmp(seg1, segM, sizeof(seg1)) == 0);
+						Assert::IsTrue(std::memcmp(segRows1, segRowsB, sizeof(segRows1)) == 0 && std::memcmp(segRows1, segRowsM, sizeof(segRows1)) == 0);
+					}
+				}
+				Assert::IsTrue(plain.Bytes() > 0 && plain.Bytes() == memoed.Bytes());
+			}
+			Assert::IsTrue(shared.Size() > 0 && shared.Size() < 3 * 1024, L"a rational ratio costs a handful of weight evaluations per kernel");
+		}
 	};
 
 	TEST_CLASS(ChainLineSamplerTests)
@@ -871,6 +935,56 @@ namespace Tests
 				Assert::IsTrue(ChainSynth::SameCandidate(r1.candidates[i], r3.candidates[3 - i]), L"candidate order and a warm cache never change a number");
 			}
 			Assert::IsTrue(v1.CachedOperators() <= v1.Settings().cacheLimit);
+		}
+
+		// SID-OPT step 1: candidates that share integers (720/724 and 540/543 overlap in their coarse scans) read each other's solves; the
+		// lines of a stage are solved as a batch. Neither may change a bit: every candidate of the combined call equals the same candidate
+		// evaluated alone on a fresh verifier (no shared solves, nothing cached) and equals the single-line reference path.
+		TEST_METHOD(SharedSolvesBatchedLinesAndTheOperatorCacheNeverChangeACandidate)
+		{
+			using namespace ChainSynth;
+			const Axes& a = FullChain(720, 1280, kBicubic, 232u, 10);
+			const int cands[6] = { 720, 724, 540, 543, 810, 360 };
+			VerifierSettings all;
+			all.maxExactCandidates = 8;   // every candidate to the exact stage, so a lone candidate and a combined one are comparable
+			VerifierSettings single = all;
+			single.batchedSolve = false;
+			VerifierSettings tiny = all;
+			tiny.cacheBytes = 3u * 1024u * 1024u;
+			tiny.cacheLimit = 40;
+			const LineSet* axes[2] = { &a.v, &a.h };
+			for (int ax = 0; ax < 2; ++ax)
+			{
+				DescaleVerifier combined(all);
+				DescaleVerifier reference(single);
+				DescaleVerifier evicting(tiny);
+				VerifyResult rc, rr, rs, rw;
+				Assert::IsTrue(combined.Evaluate(*axes[ax], cands, 6, VerifyOptions(), rc));
+				Assert::IsTrue(reference.Evaluate(*axes[ax], cands, 6, VerifyOptions(), rr));
+				Assert::IsTrue(evicting.Evaluate(*axes[ax], cands, 6, VerifyOptions(), rs));
+				Assert::IsTrue(evicting.Evaluate(*axes[ax], cands, 6, VerifyOptions(), rw));   // evicting cache, second pass
+				Assert::IsTrue(rc.solves + rc.solvesReused == rr.solves + rr.solvesReused, L"same demand on the reference path");
+				Assert::IsTrue(rc.solves == rr.solves, L"and the same executed solves (both share within the call)");
+				int compared = 0;
+				for (size_t i = 0; i < 6; ++i)
+				{
+					Assert::IsTrue(ChainSynth::SameCandidate(rc.candidates[i], rr.candidates[i]), L"batched = single-line reference path");
+					Assert::IsTrue(ChainSynth::SameCandidate(rc.candidates[i], rs.candidates[i]), L"a evicting evicting cache never changes a number");
+					Assert::IsTrue(ChainSynth::SameCandidate(rc.candidates[i], rw.candidates[i]), L"second pass on an evicting cache");
+					if (!rc.candidates[i].valid)
+						continue;   // a refined size equal to an earlier candidate's is dropped as a duplicate: only the combined call sees that
+					DescaleVerifier alone(all);
+					VerifyResult r1;
+					Assert::IsTrue(alone.Evaluate(*axes[ax], &cands[i], 1, VerifyOptions(), r1));
+					Assert::IsTrue(ChainSynth::SameCandidate(rc.candidates[i], r1.candidates[0]), L"shared solves equal a lone fresh evaluation");
+					++compared;
+				}
+				Assert::IsTrue(compared >= 4, L"most candidates were compared");
+				Assert::IsTrue(rc.solvesReused > 0, L"overlapping scans share solves");
+				Assert::IsTrue(evicting.CachedOperators() <= tiny.cacheLimit);
+				Assert::IsTrue(evicting.CachedBytes() <= tiny.cacheBytes + 2u * 1024u * 1024u, L"the byte budget holds (plus the evicting tap memo)");
+				Assert::IsTrue(evicting.CachedOperators() < combined.CachedOperators(), L"the evicting cache evicted");
+			}
 		}
 	};
 
@@ -1738,6 +1852,77 @@ namespace Tests
 					m << " total " << total << " ms]";
 				}
 				m << " cached operators " << verifier.CachedOperators();
+				Logger::WriteMessage(m.str().c_str());
+			}
+		}
+
+		// SID-OPT: the cost of a real acquiring evaluation. 8 candidates per axis (the proposer's cap; real reels average 7.8), both axes of a
+		// 3840x2160 picture plus the power probe, 20 evaluations of the same lines, timed with the governor's own clock (the verifier hook =
+		// the steady clock the estimator's governor reads; "wall" is the same span measured around the whole evaluation, as the evaluation
+		// harness's lastEvalMs does). Cold = fresh verifiers for every evaluation (every operator built); warm = the verifiers of the first
+		// evaluation kept (the first of the 20 is cold). No timing assertion: the numbers go to the log for the measurement script.
+		TEST_METHOD(LogsMedianAndP95OfTwentyMultiCandidateEvaluationsAtUltraHd)
+		{
+			using namespace ChainSynth;
+			using Clock = std::chrono::steady_clock;
+			Image latent = Scene(1080, 1920, kHf, 1101u, kGrain, 5);
+			Image up = ResizeAxis(ResizeAxis(latent, 0, 2160, kLanczos3), 1, 3840, kLanczos3);
+			Quantize(up, 10);
+			Axes ax = MakeAxes(up, MakeRect(0, 0, 3840, 2160), 1);
+			Assert::IsTrue(ax.ok);
+			const int evals = 20;
+			auto pick = [](std::vector<double> v, double q) {
+				std::sort(v.begin(), v.end());
+				const size_t i = static_cast<size_t>(std::ceil(q * static_cast<double>(v.size()))) - 1u;
+				return v[i < v.size() ? i : v.size() - 1];
+			};
+			for (int pass = 0; pass < 2; ++pass)
+			{
+				VerifierSettings vsettings;
+				vsettings.nowMs = &NowMs;
+				std::unique_ptr<DescaleVerifier> verifier(new DescaleVerifier(vsettings));
+				std::unique_ptr<DescaleVerifier> probe(new DescaleVerifier(vsettings));
+				std::vector<double> wall;
+				std::vector<double> reported;
+				int builds = 0;
+				int solves = 0;
+				int reused = 0;
+				for (int e = 0; e < evals; ++e)
+				{
+					if (pass == 0)
+					{
+						verifier.reset(new DescaleVerifier(vsettings));
+						probe.reset(new DescaleVerifier(vsettings));
+					}
+					double rep = 0.0;
+					builds = 0;
+					solves = 0;
+					reused = 0;
+					const Clock::time_point t0 = Clock::now();
+					for (int axis = 0; axis < 2; ++axis)
+					{
+						const LineSet& ls = axis == 0 ? ax.h : ax.v;
+						const int N = ls.axisLen;
+						const int cand[8] = { N / 2, N * 2 / 3, N * 3 / 4, N * 5 / 12, N / 3, N / 4, N * 3 / 8, N * 7 / 12 };
+						VerifyOptions opt;
+						opt.forceExactN = N / 2;
+						VerifyResult vr;
+						Assert::IsTrue(verifier->Evaluate(ls, cand, 8, opt, vr));
+						ProbeResult pr;
+						PowerProbe::Run(*probe, ls, 0.29, 1.0, ProbeSettings(), pr);
+						rep += vr.costMs + pr.costMs;
+						builds += vr.operatorBuilds;
+						solves += vr.solves;
+						reused += vr.solvesReused;
+					}
+					wall.push_back(std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+					reported.push_back(rep);
+				}
+				std::ostringstream m;
+				m << "8 candidates per axis, UHD, " << evals << " evaluations, " << (pass == 0 ? "COLD" : "WARM") << ": wall median " << pick(wall, 0.5)
+					<< " ms p95 " << pick(wall, 0.95) << " ms; governor timer median " << pick(reported, 0.5) << " ms p95 " << pick(reported, 0.95)
+					<< " ms; last evaluation: " << builds << " builds, " << solves << " solves executed, " << reused << " reused; cached operators "
+					<< verifier->CachedOperators() << ", cached MB " << static_cast<double>(verifier->CachedBytes()) / 1048576.0;
 				Logger::WriteMessage(m.str().c_str());
 			}
 		}
