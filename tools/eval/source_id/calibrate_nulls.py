@@ -46,7 +46,7 @@ MIN_EVALS_CANDIDATE = 4                 # a c1 crossing needs >= 4 informative e
 WINDOW_YIELD_NATS, WINDOW_MARGIN, WINDOW_MIN_SEC, WINDOW_MAX_SEC, RATE_SMOOTHING = 1.4, 1.5, 10.0, 600.0, 0.25
 # E2 (owner-approved latch-semantics change): the minimum informative-shot dwell, source seconds (ChainEvidence.h kMinShotDwellSec).
 # 0 = the estimator without E2.
-MIN_SHOT_DWELL_SEC = 0.0
+MIN_SHOT_DWELL_SEC = 3.0
 REQUIRED_V2 = ["reel_id", "title", "eval_seq", "time_s", "axis", "N", "n", "class", "T", "stage", "best_kernel",
                "kernel_margin", "lines_passed", "lines", "power_seen", "floor_codes", "truth_n", "bit_depth",
                "truth_kernel", "truth_sharpen", "shot_id"]
@@ -1139,13 +1139,15 @@ def selftest():
         return it
     c1 = thresholds()
     idx1 = {("r", "x", i): [mk("x", i, 1317)] for i in range(40)}
-    e1 = simulate_segment(seg_for(["x"]), idx1, tabs, c1, 0.5, False)
+    pol_nd = Policy()
+    pol_nd.dwell_sec = 0.0       # the prior / cap checks below are about those rules alone (E2 has its own checks further down)
+    e1 = simulate_segment(seg_for(["x"]), idx1, tabs, c1, 0.5, False, pol_nd)
     idx2 = dict(idx1)
     idx2.update({("r", "y", i): [mk("y", i, 1317)] for i in range(40)})
-    e2 = simulate_segment(seg_for(["x", "y"]), idx2, tabs, c1, 0.5, False)
+    e2 = simulate_segment(seg_for(["x", "y"]), idx2, tabs, c1, 0.5, False, pol_nd)
     idx3 = dict(idx1)
     idx3.update({("r", "y", i): [mk("y", i, 1700)] for i in range(40)})
-    e3 = simulate_segment(seg_for(["x", "y"]), idx3, tabs, c1, 0.5, False)
+    e3 = simulate_segment(seg_for(["x", "y"]), idx3, tabs, c1, 0.5, False, pol_nd)
     ox = [e[1] for e in e1 if e[0] == "x"]
     jx = [e[1] for e in e2 if e[0] == "x"]
     dx = [e[1] for e in e3 if e[0] == "x"]
@@ -1168,9 +1170,12 @@ def selftest():
             out[("r", "x", i)] = [it]
         return out
     pol0 = Policy()
+    pol0.dwell_sec = 0.0           # the window / HOLD checks below are about those rules alone
     pol_nowin = Policy()
+    pol_nowin.dwell_sec = 0.0
     pol_nowin.sim_window = False
     pol_nohold = Policy()
+    pol_nohold.dwell_sec = 0.0
     pol_nohold.sim_hold = False
     pol_dwell = Policy()
     pol_dwell.dwell_sec = 3.0

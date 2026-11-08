@@ -1303,6 +1303,114 @@ namespace Tests
 			Assert::IsTrue(ev.Summary(0).hasBest, L"the other axis is untouched");
 		}
 
+		// ---- SID-CAL2 E2 (owner-approved latch-semantics change): the minimum informative-shot dwell, in source seconds --------------------------
+		// A shot's evidence counts toward a candidate once the shot has lasted kMinShotDwellSec (3 s); a shot that ends sooner adds nothing.
+		TEST_METHOD(TheMinimumShotDwellIsThreeSecondsAndDefaultsOn)
+		{
+			using namespace SourceIdentity::Chain;
+			Assert::AreEqual(3.0, kMinShotDwellSec, 0.0, L"the owner decision: about 3 s of source time");
+			Assert::AreEqual(kMinShotDwellSec, EvidenceSettings().minShotDwellSec, 0.0, L"the shipped setting is the named constant");
+		}
+
+		TEST_METHOD(RapidCutsShorterThanTheDwellAddNoEvidence)
+		{
+			using namespace SourceIdentity::Chain;
+			EvidenceSettings off;
+			off.minShotDwellSec = 0.0;
+			ChainEvidence control(off);
+			ChainEvidence everyOne, everyTwo;
+			for (int t = 0; t < 40; ++t)
+			{
+				FeedAt(control, 540, t, 1 + static_cast<uint32_t>(t), true);           // a cut at every evaluation, no dwell: the evidence adds up
+				FeedAt(everyOne, 540, t, 1 + static_cast<uint32_t>(t), true);          // a cut every 1 s
+				FeedAt(everyTwo, 540, t, 1 + static_cast<uint32_t>(t / 2), true);      // a cut every 2 s
+			}
+			Assert::IsTrue(control.Summary(1).hasBest && control.Summary(1).aboveC1, L"fixture: without the dwell forty one-evaluation shots reach c1");
+			const AxisSummary a = everyOne.Summary(1), b = everyTwo.Summary(1);
+			Assert::IsFalse(a.hasBest || a.aboveC1, L"cuts every 1 s: every shot ended before it lasted 3 s, nothing was credited");
+			Assert::IsFalse(b.hasBest || b.aboveC1, L"cuts every 2 s: the same");
+			Assert::IsTrue(a.shots == 40 && a.informativeEvals == 40, L"the reading's own counters still see every informative evaluation");
+			Assert::AreEqual(0.0, a.llr, 0.0);
+		}
+
+		TEST_METHOD(AShotThatLastsTheDwellIsCreditedWhenItsSuccessorStartsAndNotBefore)
+		{
+			using namespace SourceIdentity::Chain;
+			ChainEvidence ev;
+			// Shots of exactly 3 s (evaluations at t, t+1, t+2; the next shot starts at t+3): the shot lasted 3 s at the cut and is credited then.
+			for (int t = 0; t < 40; ++t)
+				FeedAt(ev, 540, t, 1 + static_cast<uint32_t>(t / 3), true);
+			const AxisSummary s = ev.Summary(1);
+			Assert::IsTrue(s.hasBest && s.n == 540 && s.aboveC1, L"three-second shots count in full (the boundary is inclusive)");
+		}
+
+		TEST_METHOD(ANormalFiveSecondShotKeepsItsEvidenceAndItIsOnlyLater)
+		{
+			using namespace SourceIdentity::Chain;
+			EvidenceSettings off;
+			off.minShotDwellSec = 0.0;
+			ChainEvidence before(off), after;
+			double llrBefore11 = 0.0, llrAfter11 = 0.0;
+			for (int t = 0; t < 15; ++t)
+			{
+				const uint32_t shot = 1 + static_cast<uint32_t>(t / 5);              // three shots of 5 s
+				FeedAt(before, 540, t, shot, true);
+				FeedAt(after, 540, t, shot, true);
+				if (t == 11)
+				{
+					llrBefore11 = before.Summary(1).llr;
+					llrAfter11 = after.Summary(1).llr;
+				}
+			}
+			Assert::IsTrue(llrAfter11 < llrBefore11 - 1.0, L"2 s into the third shot its evidence is still held (it has not lasted 3 s yet)");
+			const AxisSummary b = before.Summary(1), a = after.Summary(1);
+			Assert::AreEqual(b.llr, a.llr, 1e-9, L"once the shot has lasted the dwell its evidence is exactly what it was without the dwell");
+			Assert::IsTrue(a.hasBest && a.n == b.n && a.shots == b.shots && a.informativeEvals == b.informativeEvals);
+			Assert::IsTrue(a.aboveC1 == b.aboveC1);
+		}
+
+		TEST_METHOD(ThePerShotCapStillHoldsWithTheDwell)
+		{
+			using namespace SourceIdentity::Chain;
+			ChainEvidence ev;
+			for (int t = 0; t < 30; ++t)
+				FeedAt(ev, 540, t, 1, true);                                            // one 30 s shot, decisive evaluations
+			const AxisSummary s = ev.Summary(1);
+			Assert::IsTrue(s.hasBest && s.n == 540);
+			Assert::AreEqual(0.5 * ev.GetThresholds().c1, s.llr, 1e-9, L"one shot saturates at c1 / 2");
+			Assert::IsFalse(s.aboveC1, L"c1 still needs two shots");
+		}
+
+		TEST_METHOD(WithoutSourceTimeTheDwellCannotApplyAndTheEvidenceCountsAtOnce)
+		{
+			using namespace SourceIdentity::Chain;
+			ChainEvidence ev;
+			for (int t = 0; t < 40; ++t)
+				FeedAt(ev, 540, t, 1 + static_cast<uint32_t>(t), false);               // no timeUs: nothing to measure the dwell with
+			Assert::IsTrue(ev.Summary(1).hasBest && ev.Summary(1).aboveC1, L"no source time: the former behaviour (evidence counts per shot at once)");
+		}
+
+		TEST_METHOD(AHoldEvaluationDropsTheEvidenceHeldForTheCurrentShot)
+		{
+			using namespace SourceIdentity::Chain;
+			using namespace ChainSynth;
+			ChainEvidence ev;
+			FeedAt(ev, 540, 0, 1, true);                                                // held: the shot is 0 s old
+			FeedAt(ev, 540, 1, 1, true);                                                // held
+			VerifyResult many;
+			many.candidates.push_back(MakeCandidate(720, -0.6, 5.0));
+			for (int j = 0; j < 10; ++j)
+				many.candidates[0].lineStat[static_cast<size_t>(j)] = 0.0;              // an overlay: HOLD
+			AxisObservation o = Observe(many, 1080, 1, true);
+			o.timeUs = 2 * 1000000LL;
+			EvidenceUpdate u;
+			Assert::IsTrue(ev.Submit(1, o, u) && u.hold);
+			FeedAt(ev, 540, 3, 1, true);                                                // the shot has now lasted 3 s: only THIS evaluation is credited
+			const AxisSummary s = ev.Summary(1);
+			Assert::IsTrue(s.hasBest && s.n == 540 && s.informativeEvals == 1, L"the HOLD started the accumulation over, held evidence included");
+			Assert::IsTrue(s.llr > 0.0 && s.llr < 6.0, L"one evaluation's increment (clamped at 5 nats), not three");
+		}
+
 		// ---- Revert window (owner-approved): window margin 3.0 -> 1.5, the first cut after a HOLD clears, black frames and ordinary cuts do not ----
 		TEST_METHOD(TheRevertWindowIsAboutSixteenSecondsAtAOneSecondIntervalAndHoldsMoreEvaluationsThanC1Needs)
 		{

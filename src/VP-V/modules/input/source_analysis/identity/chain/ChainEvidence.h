@@ -39,6 +39,14 @@
 // the picture: what came before says nothing about what is shown); the estimator also calls Reset() (both axes) when a menu / mixed episode
 // ends, at the first cut after such an episode and on a ClearWindow event (ChainEstimator.h), so a switch to native at one of those
 // moments is not outvoted by the old evidence. Black frames and ordinary cuts do not clear it.
+// MINIMUM SHOT DWELL (SID-CAL2 E2, OWNER-APPROVED latch-semantics change, 2026-11-08): the evidence of a shot counts toward a candidate hypothesis only
+// once that shot (the caller's shotId, bumped at every cut) has lasted at least kMinShotDwellSec of SOURCE time. The evidence of a shot is held while
+// the shot is younger than the dwell and credited, in order and with its own times, the moment the shot has lasted it (an evaluation of the shot at
+// least the dwell after its first, or the first evaluation of the NEXT shot at least the dwell after it: the cut time is the best end of a shot the
+// sampled evaluations give). A shot that ends before it has lasted the dwell adds nothing: rapid cuts (a trailer, a montage; the calibration reel with cut ids 15, 17, 19, 21 inside 5 s)
+// cannot add up to c1 out of single-evaluation shots. A shot that lasts the dwell is credited in full, so its evidence is the same as
+// without the dwell, only later (by at most the dwell); the per-shot cap is unchanged. Source time unknown (timeUs < 0) = no dwell (nothing can be
+// measured). The native hypothesis is not a candidate and is not held. No frame counts: the dwell is seconds.
 // Two axes: when both axes' best hypotheses are positive, agreeing ratios add +agreementBonus to each and
 // disagreeing ones subtract it; when one axis abstains nothing is added or subtracted (relaxed).
 // Threshold: c1 = -ln(alpha) + ln(candidates x kernels), alpha = target rate per hour x interval / 3600. It is the DETECTION-confidence
@@ -50,6 +58,11 @@ namespace SourceIdentity
 {
 	namespace Chain
 	{
+		// SID-CAL2 E2 (owner decision 2026-11-08): minimum informative-shot dwell, source seconds. The evidence of a shot counts toward a candidate
+		// once the shot has lasted this long (about the 2 x acquiring interval of a 1 s cadence plus one evaluation); shorter shots add no evidence.
+		// 3 s: the calibration's live run showed false confident readings built from rapid cuts (cut ids 15, 17, 19, 21 within 5 s).
+		constexpr double kMinShotDwellSec = 3.0;
+
 		struct EvidenceSettings
 		{
 			double targetRatePerHour = 0.01;     // confident-wrong target: 1 per 100 title-hours
@@ -78,6 +91,7 @@ namespace SourceIdentity
 			double windowMinSec = 10.0;
 			double windowMaxSec = 600.0;
 			double rateSmoothing = 0.25;         // weight of the newest gap in the running mean of the evaluation interval
+			double minShotDwellSec = kMinShotDwellSec;   // E2: a shot's evidence counts once the shot lasted this many source seconds (0 = off)
 		};
 
 		struct Thresholds
@@ -214,6 +228,12 @@ namespace SourceIdentity
 					st = AxisState();   // the axis changed size (active area / zoom): old hypotheses mean nothing
 				st.axisLen = obs.axisLen;
 				NoteTime(st, obs.timeUs);
+				const double cap = s_.shotCapFraction * thr_.c1;
+				const bool dwellOn = s_.minShotDwellSec > 0.0 && obs.timeUs >= 0;   // E2: needs the source time
+				if (dwellOn)
+					TrackShot(st, obs.shotId, obs.timeUs, cap);
+				else
+					FlushPending(st, cap);   // no time on this evaluation: whatever was held counts now
 				bool anyUsable = false;
 				for (size_t i = 0; i < vr.candidates.size() && out.candidateCount < kMaxCandidates; ++i)
 				{
@@ -305,13 +325,21 @@ namespace SourceIdentity
 					out.reason |= kReasonNoPower | obs.probeReason;
 				}
 
-				const double cap = s_.shotCapFraction * thr_.c1;
 				for (int i = 0; i < out.candidateCount; ++i)
 					if (out.cand[i].informative)
 					{
-						Hypothesis& h = FindSlot(st, out.cand[i].n);
-						h.n = out.cand[i].n;   // the slot follows the latest best exact size
-						Add(h, out.cand[i].increment, obs.shotId, obs.timeUs, cap);
+						if (dwellOn && !st.shotMet)
+						{
+							// E2: the shot has not lasted the dwell yet: held (credited when it does, dropped when it ends first).
+							PendingEvidence p;
+							p.n = out.cand[i].n;
+							p.increment = out.cand[i].increment;
+							p.shotId = obs.shotId;
+							p.timeUs = obs.timeUs;
+							st.pending.push_back(p);
+						}
+						else
+							AddCandidate(st, out.cand[i].n, out.cand[i].increment, obs.shotId, obs.timeUs, cap);
 					}
 				if (out.nativeCounted)
 					Add(st.native, out.nativeIncrement, obs.shotId, obs.timeUs, cap);
@@ -367,8 +395,22 @@ namespace SourceIdentity
 				int evals = 0;
 			};
 
+			struct PendingEvidence
+			{
+				int n = 0;
+				double increment = 0.0;
+				uint32_t shotId = 0;
+				int64_t timeUs = -1;
+			};
+
 			struct AxisState
 			{
+				// E2 (minimum shot dwell): the shot being gathered, when it started, whether it has lasted the dwell, and its held evidence.
+				bool haveShot = false;
+				uint32_t shotKey = 0;
+				int64_t shotStartUs = 0;     // source time of the first evaluation of the shot
+				bool shotMet = false;        // the shot has lasted the dwell: its evidence counts at once
+				std::vector<PendingEvidence> pending;
 				int64_t lastTimeUs = -1;     // source time of the newest submitted evaluation
 				double intervalUs = 0.0;     // running mean of the gaps between submitted evaluations (0: not measured yet)
 				std::vector<Hypothesis> slots;
@@ -379,6 +421,49 @@ namespace SourceIdentity
 				uint32_t lastReason = 0;
 				int axisLen = 0;
 			};
+
+			void AddCandidate(AxisState& st, int n, double increment, uint32_t shotId, int64_t timeUs, double cap)
+			{
+				Hypothesis& h = FindSlot(st, n);
+				h.n = n;   // the slot follows the latest best exact size
+				Add(h, increment, shotId, timeUs, cap);
+			}
+
+			// E2: the held evidence of a shot that has lasted the dwell is credited, in order and with its own shot id and time.
+			void FlushPending(AxisState& st, double cap)
+			{
+				if (st.pending.empty())
+					return;
+				std::vector<PendingEvidence> held;
+				held.swap(st.pending);
+				for (size_t i = 0; i < held.size(); ++i)
+					AddCandidate(st, held[i].n, held[i].increment, held[i].shotId, held[i].timeUs, cap);
+			}
+
+			// E2: follows the shot of the evaluation (source time known). A shot that ends (the next shot's first evaluation) after at least the dwell is
+			// credited at that evaluation; a shot that ends sooner adds nothing (its held evidence is dropped).
+			void TrackShot(AxisState& st, uint32_t shotId, int64_t timeUs, double cap)
+			{
+				const int64_t dwellUs = static_cast<int64_t>(s_.minShotDwellSec * 1e6);
+				if (!st.haveShot || st.shotKey != shotId)
+				{
+					if (st.haveShot && !st.shotMet && timeUs - st.shotStartUs >= dwellUs)
+					{
+						st.shotMet = true;
+						FlushPending(st, cap);
+					}
+					st.pending.clear();
+					st.haveShot = true;
+					st.shotKey = shotId;
+					st.shotStartUs = timeUs;
+					st.shotMet = false;
+				}
+				else if (!st.shotMet && timeUs - st.shotStartUs >= dwellUs)
+				{
+					st.shotMet = true;
+					FlushPending(st, cap);
+				}
+			}
 
 			Hypothesis& FindSlot(AxisState& st, int n)
 			{
@@ -506,6 +591,7 @@ namespace SourceIdentity
 			static void ForgetAccumulation(AxisState& st)
 			{
 				st.slots.clear();
+				st.pending.clear();       // E2: the held evidence of the shot belongs to what the overlay replaces
 				st.native = Hypothesis();
 				st.informativeEvals = 0;
 				st.shots = 0;
