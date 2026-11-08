@@ -27412,6 +27412,7 @@ LibplaceboVideoRenderer::~LibplaceboVideoRenderer()
 
 bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
 {
+	const Vpv::Ingress::CallbackGate::Use ingressUse(m_ingressGate); if (!ingressUse) return false;   // P10-8: capture thread too (slice 4 F1)   // VPV-HOOK
 	if (!videoState)
 		throw std::runtime_error("null video state is invalid");
 
@@ -27995,8 +27996,9 @@ void LibplaceboVideoRenderer::Build()
 	// D3D11 device/swapchain creation and persistent cache loading can enter the
 	// driver for seconds. Build only captures an immutable construction request;
 	// RenderLoop performs the actual initialization on its own thread.
+	std::unique_ptr<Impl> builtImpl(new Impl());   // P10-8: built first, so a throw leaves the gate open   // VPV-HOOK
 	m_ingressGate.CloseAndDrain();   // P10-8: the old Impl (if any) has no callback inside   // VPV-HOOK
-	m_impl.reset(new Impl());
+	m_impl.swap(builtImpl); builtImpl.reset();   // VPV-HOOK
 	m_ingressGate.Open();   // VPV-HOOK
 	m_impl->diagRendererGeneration = m_callbackGeneration;   // report-a-problem rows
 	DiagnosticHistory::Global().RecordDecision("renderer-build", "renderer constructed",

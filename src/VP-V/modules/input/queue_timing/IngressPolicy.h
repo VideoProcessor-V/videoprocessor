@@ -53,7 +53,7 @@ namespace Vpv
 		void QueueTarget(const void* host, RE::QueueTargetContext& qc);
 		size_t BoundHosts();
 		size_t UnboundRenderers();   // live renderers that could not register
-		uint64_t IngressFaults();    // contained throws in a renderer's decision (process lifetime)
+		uint64_t IngressFaults();    // contained throws in the decisions of the live renderers
 
 		class IngressPolicy : public Hub::ISkeletonModule
 		{

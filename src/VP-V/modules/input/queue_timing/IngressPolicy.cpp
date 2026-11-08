@@ -24,16 +24,12 @@ namespace Vpv
 				QueueTargetFn queueTarget = nullptr;
 				FaultFn fault = nullptr;
 				void* self = nullptr;
+				std::atomic<uint64_t> faults{ 0 };   // this renderer's contained throws (slice 4 F4: per renderer)
 			};
 			Hub::HostSlots<Entry>& Slots()
 			{
 				static Hub::HostSlots<Entry> slots;
 				return slots;
-			}
-			std::atomic<uint64_t>& Faults()
-			{
-				static std::atomic<uint64_t> count{ 0 };
-				return count;
 			}
 			std::atomic<size_t>& Unbound()
 			{
@@ -76,6 +72,10 @@ namespace Vpv
 			if (!entry || !entry->decide)
 				return false;
 			const int64_t arrivalBefore = ic.arrivalQpc;
+			// Slice 4 F2: the host's own gap facts, restored if the decision throws half-way.
+			const bool gapBefore = ic.gapBefore, discontinuity = ic.discontinuity;
+			const uint32_t gapFrames = ic.gapFrames;
+			const char* const gapCause = ic.gapCause;
 			try
 			{
 				return entry->decide(entry->self, ic);
@@ -85,14 +85,21 @@ namespace Vpv
 			}
 			// Audit slice 3 F1: visible, never silent. The frame is queued (no drop), as a no-fill gap without film
 			// timing at its pre-decision arrival; the detector starts over on the next frame.
-			const uint64_t faults = Faults().fetch_add(1, std::memory_order_relaxed) + 1;
+			const uint64_t faults = entry->faults.fetch_add(1, std::memory_order_relaxed) + 1;
 			if ((faults & (faults - 1)) == 0)
 				DebugLog::Log("Ingress policy: the pulldown / film clock decision threw (%llu so far); the frame is queued as a gap "
 					"and the detector restarts", static_cast<unsigned long long>(faults));
 			ic.drop = false;
-			ic.gapBefore = true;
-			ic.gapFrames = 0;
-			ic.gapCause = "ingress policy fault";
+			ic.gapBefore = gapBefore;
+			ic.gapFrames = gapFrames;
+			ic.gapCause = gapCause;
+			ic.discontinuity = discontinuity;
+			if (!ic.gapBefore)
+			{
+				ic.gapBefore = true;   // never a pair across the fault
+				ic.gapFrames = 0;
+				ic.gapCause = "ingress policy fault";
+			}
 			ic.arrivalQpc = arrivalBefore;
 			ic.filmHz = 0.0;
 			ic.filmUpdate = false;
@@ -113,7 +120,12 @@ namespace Vpv
 
 		size_t BoundHosts() { return Slots().States(); }
 		size_t UnboundRenderers() { return Unbound().load(std::memory_order_relaxed); }
-		uint64_t IngressFaults() { return Faults().load(std::memory_order_relaxed); }
+		uint64_t IngressFaults()
+		{
+			uint64_t total = 0;   // over the live renderers only: a retired renderer's faults go with it
+			Slots().ForEach([&](const void*, const std::shared_ptr<Entry>& e) { total += e->faults.load(std::memory_order_relaxed); });
+			return total;
+		}
 
 		void IngressPolicy::OnStatus(const RE::Context&, RE::StatusKind kind, std::vector<std::string>& lines, const char*, const char*)
 		{

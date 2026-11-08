@@ -178,6 +178,33 @@ namespace VideoProcessorTest
 					Assert::IsTrue(l.find("; ") > l.find('(') && l.find("; ") < close, L"one id: the '; ' is inside the brackets");
 				}
 			Assert::IsTrue(found);
+			// Slice 4 F2: a host gap survives the fault (its cause and frame count are the host's).
+			RE::IngressContext ih;
+			ih.host = &t;
+			ih.gapBefore = true;
+			ih.gapFrames = 3;
+			ih.gapCause = "missed frames";
+			Assert::IsTrue(RE::DecideIngress(ih));
+			Assert::IsTrue(ih.gapBefore);
+			Assert::AreEqual<uint32_t>(3, ih.gapFrames, L"the host's lost frames kept (gap fill may pair across them)");
+			Assert::AreEqual(std::string("missed frames"), std::string(ih.gapCause));
+		}
+
+		// Slice 4 F4: faults are counted per renderer: a retired renderer's faults leave with it.
+		TEST_METHOD(FaultsLeaveWithTheirRenderer)
+		{
+			HubScope hub;
+			struct Throwing { static bool Decide(void*, RE::IngressContext&) { throw 1; } };
+			const uint64_t before = Vpv::Ingress::IngressFaults();
+			int key = 0;
+			{
+				Vpv::Ingress::HostBinding bind(&key, &Throwing::Decide, &key);
+				RE::IngressContext ic;
+				ic.host = &key;
+				RE::DecideIngress(ic);
+				Assert::AreEqual(before + 1, Vpv::Ingress::IngressFaults());
+			}
+			Assert::AreEqual(before, Vpv::Ingress::IngressFaults(), L"a new renderer starts clean");
 		}
 
 		TEST_METHOD(AFullTableIsVisibleUnderFallbacks)
