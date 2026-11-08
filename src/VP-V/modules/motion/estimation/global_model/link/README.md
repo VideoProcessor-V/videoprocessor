@@ -58,12 +58,13 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 
 ## K4 wiring on P5a's contract (2026-11-07)
 
-**STATUS: K4 is NOT reachable at runtime yet.** Nothing instantiates `CameraGuidanceAdapter`, and the guidance sources are not in the renderer
-projects (`GuidanceScheduler.cpp`, `GuideLaneJob.cpp`, `GuidanceAdapter.cpp`, `GuidanceCountsRing.cpp` are in the Test project only). It becomes
-reachable only when `CameraExtension` wires the adapter in ONE commit: the four .cpp files into `VideoProcessor-VPRenderer.items.props` /
-`...Beta.items.props`, the host instantiation (`Attach` with the renderer's engine from `IVectorEngineDirectory`, `OnFrame`, `FeedPassTimers`,
-`Detach`) and the `MeasurementSwitches` from K3's `vector_*` keys. That step needs K3 (keys, rows, status: audited on `r1cam/k3b` `4c52b7e86`).
-Until then every switch is off by construction and the engine runs its `Estimate` only.
+**STATUS (camera live wiring, branch `r1cam/camlive`): K4 is reachable, default OFF.** `CameraExtension` builds the camera's own product table
+(`CameraLane`, below) at the first verified engine field and attaches the core to it when `camera_link = report` AND `camera_model = on` (`p7Wanted`);
+with any `camera_meas_*` switch also on it creates the `CameraGuidanceAdapter` and attaches it to the renderer's engine
+(`Query("vpv.vector_engine.v1")` -> `IVectorEngineDirectory::EngineFor(host)`), which registers the ONE pre-estimate hook. The four .cpp files
+(`GuidanceScheduler`, `GuideLaneJob`, `GuidanceAdapter`, `GuidanceCountsRing`) and what they need (`CameraLane`, `CameraLabelFill`, `CameraLabelProducer`,
+`CameraModelGpu`, `GlobalModelMeasurement`, `GlobalModelSearchHints`) are in both renderer items props. All keys default off: nothing below exists then.
+No Bill file changed; nothing is fed into the PassTimers accumulator (that needs a renderer call site: gap G3 below).
 
 **LOCK RULE.** `CameraGuidanceAdapter::Detach` (also `SetSettings` / `Attach` when they unregister) runs on the render thread with `renderMutex`
 held and waits on `CameraLinkCore`'s observer mutex; the camera worker holds that mutex while it pumps the lane job. So the host's `p4` reader,
@@ -108,6 +109,26 @@ P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` 
 | `staticGate` | the E4 flag reaches the refinement | also the block search |
 | `cutSkip` / `flashBridge` | the whole pair is skipped, the seeds with it (by design: nothing is searched across a cut) | same |
 | `fadeNormalised` | cost normalisation of the E1 check only | narrow pass and E1 check |
+
+## Camera live wiring (default off; what is live and what is not)
+
+| Part | Live now | How |
+|---|---|---|
+| P7 fit | yes, with camera_link = report + camera_model = on | `p7Wanted` is set by the keys, NOT by P5a's vector demand (that decision only covers P2/P3 and nothing in a renderer declares P7 as a consumer). The fit reads the engine's verified fields (`IVectorEngine::FieldOf`) through the readback ring |
+| P7 as a skeleton product | yes, in the camera's own table | `CameraLane.h`: the same registry, SlotTable, SlotSet and CpuBuffers as the skeleton lane, built with the camera consumers. The skeleton lane carries only its report consumer, so no renderer graph holds P7; nothing publishes P2 / P3 as slots (the engine keeps its field as a texture). The camera publishes empty-content input markers for P3 / P4 / P2m / P1 each frame (ancestry + honoured stamp) and seals `kSealLag = 6` frames behind the render, with the Indicator's stamp of that frame |
+| validity | era / stamp / slip | the record's honoured stamp is checked at the seal (a resync event or a slip between marker and seal rejects it); a pair that spans a slip or has an ancient stamp is not fitted (`camera.no_model.slip`) |
+| trust | confidence, reason, P8 untrusted code | in the record (`CameraMotion`), the status line and `Usable()`; the labels carry the untrusted code (K2) |
+| P8 labels | yes, when labels are wanted (overlay != off, any camera_use_* switch, camera_labels_gpu) and a render device exists | `CameraLabelProducer` in UPLOAD mode (CPU labels uploaded to a texture; compute mode with camera_labels_gpu on), `CameraLabelFill` as the post-submit gap work and the seal's live fill. Because the seal lags, a consumer reads the labels of a frame that has been sealed (`LabelsFor(seq)`); no consumer is wired to them yet |
+| P9 smoothed | NO | no producer exists (K9-1 `CameraSmoother` is not built); declared by no consumer, so the graph never holds it |
+| K4 guidance | yes, with a `camera_meas_*` switch on | adapter + hook; P4 facts for the lane job come from the frame-analysis store (`Identity.picture`, `Scene.cut / fade` when the scene group was written); a pair without a scene record is counted and shown (`camera_scene`) |
+| status | Ctrl+I, Config status, Fallbacks, Ctrl+Alt+D | `CameraStatus.h` + the adapter's lines and decisions + `camera_engine` / `camera_graph` / `camera_fit` / `camera_gpu` / `camera_scene` |
+
+**Gaps (not closed here).** G1 P2 / P3 / P4 content is not in a skeleton slot: the markers carry ancestry only; moving P7 into the skeleton lane (K1-9 / SK-W) removes the private
+table. G2 `AfterEstimate` carries no `EstimateOutcome` until `m2/p5a-outcome` is merged (it was not on the remote when this was built): "engine field used, narrow idle" and the bench
+`gpu_ms` stay empty; the edit is one override on `CameraGuidanceHook` mapping the plain-data outcome onto `CameraLink::EstimateOutcome` and calling `AfterEstimateEx`. G3 `camera.fit` /
+`camera.readback` PassTimers rows need `FeedPassTimers(passTimerHook.acc)` at a renderer call site (a Bill hunk under a zone lock); the samples are bounded and unread until then.
+G4 flash events and fade gain / offset have no producer (flash false, gain 1, offset 0). G5 `measuredSourceHz` is the ingress rate (`HostResync::measuredRateHz`); a cadence-locked source
+uses the store's film rate when its cadence group was written, else the ingress rate.
 
 ## Rules this code follows
 
