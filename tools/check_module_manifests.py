@@ -143,9 +143,10 @@ def check(write):
                 errors.append(f"{s['id']}: zone {s['zone']} in slots.json, {header_zone.get(s['id'])} in PipelineSlots.h")
 
     # The Original pathway (ADR-0019): one list (core/OriginalPathway.h), the renderer sets exactly
-    # those keys ("// key=" comments in ApplyOriginalPathwaySettings), and slots.json names no other.
+    # those keys ("// key=" comments in VpvRendererSettings.cpp PostLoad / ApplyOriginal), and slots.json names no other.
     op_header = os.path.join(ROOT, "src", "VP-V", "core", "OriginalPathway.h")
-    renderer = os.path.join(ROOT, "src", "VideoProcessor-Lib", "vprenderer", "LibplaceboVideoRenderer.cpp")
+    # M2 P3: the Original pathway settings moved from the renderer file to the VP-V settings file (PostLoad, ApplyOriginal).
+    renderer = os.path.join(ROOT, "src", "VP-V", "modules", "control", "config", "VpvRendererSettings.cpp")
     if os.path.exists(op_header) and os.path.exists(renderer):
         with open(op_header, encoding="utf-8") as f:
             entries = re.findall(r'\{\s*"([\w.]+)",\s*"([^"]*)",\s*"([\w.]+)"\s*\}', f.read())
@@ -155,12 +156,12 @@ def check(write):
                 errors.append(f"OriginalPathway.h: {k} names unknown slot {slot}")
         with open(renderer, encoding="utf-8") as f:
             text = f.read()
-        start = text.find("static void ApplyOriginalPathwaySettings")
-        end = text.find("\n\t}\n", start)
+        start = text.find("Overrides PostLoad(")
+        end = text.find("\n\t}\n", text.find("void ApplyOriginal(VpvRenderer::Fields& settings)\n"))
         body = text[start:end] if start >= 0 and end > start else ""
         renderer_keys = set(re.findall(r"//\s*key=([\w.]+)", body))
         if not body:
-            errors.append("ApplyOriginalPathwaySettings not found in the renderer")
+            errors.append("PostLoad / ApplyOriginal not found in VpvRendererSettings.cpp")
         for k in sorted(core_keys - renderer_keys):
             errors.append(f"Original pathway: {k} is in OriginalPathway.h but the renderer does not set it")
         for k in sorted(renderer_keys - core_keys):

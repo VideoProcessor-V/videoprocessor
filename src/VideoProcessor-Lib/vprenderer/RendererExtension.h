@@ -54,7 +54,7 @@ namespace RendererExtension
 	};
 
 	// ---- Settings load ---------------------------------------------------------------------
-	enum class SettingsPhase { ReadProfile, ReadGlobal, PostLoad, Fingerprint, Delta, CopyLive };
+	enum class SettingsPhase { ReadProfile, ReadGlobal, PostLoad, Fingerprint, Delta, CopyLive, ReadBase };
 	struct SettingsLoadContext : Context
 	{
 		SettingsPhase phase = SettingsPhase::ReadProfile;
@@ -66,6 +66,16 @@ namespace RendererExtension
 		std::string* out = nullptr; // fingerprint text sink
 		std::vector<const char*>* changed = nullptr;
 		bool includeLive = false;
+		bool flag = false;        // phase input: ReadProfile = the rule's when: reads content; PostLoad = the host's own present_every_vsync
+		void* result = nullptr;   // phase output: PostLoad = SettingsOverrides
+	};
+
+	// What an extension decides for settings the HOST owns (either/or), applied by the host after PostLoad.
+	struct SettingsOverrides
+	{
+		bool hasPresentEveryVsync = false;
+		bool presentEveryVsync = false;
+		const char* chromaUpscaler = nullptr;   // nullptr = keep the host's value
 	};
 
 	// ---- Ingress (capture/file thread, before the frame is queued) ---------------------------

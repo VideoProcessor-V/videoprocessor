@@ -40,6 +40,7 @@ int RunHookLayerConfigTests(const std::function<int(const char*, const std::func
 #include <cstring>
 #include <RendererConfigView.h>
 #include <RetiredSettings.h>
+#include <VP-V/tests/SchemaKeyScan.h>
 #include <ToneMappingTuning.h>
 
 #include <QApplication>
@@ -10840,6 +10841,10 @@ static std::set<std::string> RendererValidatedKeys()
         for (std::sregex_iterator it(body.begin(), body.end(), marker), last; it != last; ++it)
             keys.insert((*it)[1].str());
     }
+    // M2 P3-7: the VP-V profile keys live in VpvSchemaKeys.h (the schema extension header the host includes).
+    const std::set<std::string> vpvKeys = SchemaKeyScan::VpvProfileKeys(path);
+    require(!vpvKeys.empty(), "VpvSchemaKeys.h was not found from __FILE__");
+    keys.insert(vpvKeys.begin(), vpvKeys.end());
     return keys;
 }
 
@@ -10863,21 +10868,21 @@ static std::vector<CoverageSource> CoverageSources()
     return {
         { "led_drive", { "led_drive" }, keysOf(LedDrive::LedDriveRules()) },
         { "projector", { "projector" }, keysOf(LedDrive::ProjectorRules()) },
-        { "general", { "general", "command_line" }, keysOf(MainConfigSchema::GeneralRules()) },
+        { "general", { "general", "command_line" }, keysOf(MainConfigSchema::WithVpKeys("general", MainConfigSchema::GeneralRules())) },
         { "general", { "general" }, { MainConfigSchema::BoundedInvalidCaptureRecoveryRule().key } },
-        { "queue", { "queue" }, keysOf(MainConfigSchema::QueueRules()) },
+        { "queue", { "queue" }, keysOf(MainConfigSchema::WithVpKeys("queue", MainConfigSchema::QueueRules())) },
         { "queue_recovery", { "queue_recovery", "queue" }, keysOf(MainConfigSchema::RecoveryRules()) },
         { "directshow", { "directshow" }, keysOf(MainConfigSchema::DirectShowRules()) },
         { "vprenderer.input_processing", { "vprenderer.input_processing" }, keysOf(MainConfigSchema::VpRendererInputRules()) },
-        { "decklink", { "decklink" }, keysOf(MainConfigSchema::DeckLinkRules()) },
+        { "decklink", { "decklink" }, keysOf(MainConfigSchema::WithVpKeys("decklink", MainConfigSchema::DeckLinkRules())) },
         { "directshow.conversion", { "directshow.conversion" }, keysOf(MainConfigSchema::ConversionRules()) },
         { "directshow.ppm", { "directshow.ppm" }, keysOf(MainConfigSchema::PpmRules()) },
-        { "shortcuts", { "shortcuts" }, keysOf(MainConfigSchema::ShortcutSwitchRules()) },
+        { "shortcuts", { "shortcuts" }, keysOf(MainConfigSchema::WithVpKeys("shortcuts", MainConfigSchema::ShortcutSwitchRules())) },
         { "ambient", { "ambient" }, keysOf(Ambient::SchemaRules()) },
         // Automatic calibration: every [calibration] key has a control on the Calibration page.
         { "calibration", { "calibration" }, keysOf(Calibration::ConfigRules()) },
         { "lldv", { "lldv" }, keysOf(MainConfigSchema::LldvRules()) },
-        { "logging", { "logging" }, keysOf(MainConfigSchema::LoggingRules()) },
+        { "logging", { "logging" }, keysOf(MainConfigSchema::WithVpKeys("logging", MainConfigSchema::LoggingRules())) },
         // RendererProfileConfig's validators also own the [queue.*] and [lldv.*] profile groups.
         { "renderer", { "vprenderer", "queue", "lldv" }, std::vector<std::string>(rendererKeySet.begin(), rendererKeySet.end()) },
         // Coverage audit 2026-10-24: the renderer also accepts keys through tables that the

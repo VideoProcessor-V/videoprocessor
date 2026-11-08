@@ -529,7 +529,6 @@ namespace DisplayRuleExpression
 
 			Operation operation = Operation::Equal;
 			const std::string operatorText = m_current.text;
-			bool operatorConsumed = true;
 			switch (m_current.kind)
 			{
 			case TokenKind::Contains: operation = Operation::Contains; Next(); break;
@@ -542,20 +541,8 @@ namespace DisplayRuleExpression
 			default:
 				if (type != ValueType::Boolean)
 					return Fail("expected comparison operator after '${" + variable + "}'", error);
-				operatorConsumed = false;
 				break;
 			}
-			// audit 2026-10-16: a bare Boolean variable means "== true".  A
-			// value word after it without an operator (`${hdr_metadata} false`)
-			// used to be read as `== false`, silently inverting the apparent
-			// meaning and slipping past strict mode.  Without an operator only
-			// the implicit true is accepted: non-strict rules may still spell
-			// the redundant `true`, any other word is a parse error, and strict
-			// (unified) rules reject every bare value word.
-			if (!operatorConsumed && m_current.kind == TokenKind::Word &&
-				(m_strict || ConfigFile::NormalizeName(m_current.text) != "true"))
-				return Fail("expected comparison operator between '${" + variable +
-					"}' and '" + m_current.text + "'", error);
 			if (m_strict && operatorText == "=")
 				return Fail("unified expressions require '==' rather than '='", error);
 
@@ -571,8 +558,6 @@ namespace DisplayRuleExpression
 				Next();
 				while (m_current.kind == TokenKind::Alternative)
 				{
-					if (!operatorConsumed) // audit 2026-10-16: `${b} true|false`
-						return Fail("expected comparison operator after '${" + variable + "}'", error);
 					if (m_strict)
 						return Fail("unified expressions require full comparisons joined by '||'", error);
 					Next();
