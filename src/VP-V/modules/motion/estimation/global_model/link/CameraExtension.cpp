@@ -17,7 +17,6 @@
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
-#include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 
 #include <atomic>
@@ -77,8 +76,6 @@ namespace Vpv
 
 			// Camera live (render thread). Members are declared in dependency order (destroyed in reverse): the table outlives the core's
 			// worker, the core outlives what refers to it. ReleaseLive undoes them explicitly in the detach order of the header.
-			Skeleton::IExternalDemand* demandSink = nullptr;   // where the camera consumers were declared (null = not declared)
-			bool demandLabels = false;                  // ... with the labels consumer
 			bool fitWanted = false;                     // camera_link report + camera_model on (p7Wanted)
 			bool guideWanted = false;                   // ... and any camera_meas_* switch on
 			bool labelsWanted = false;                  // ... and labels are wanted (overlay, a use switch, camera_labels_gpu)
@@ -238,18 +235,15 @@ namespace Vpv
 			}
 		}
 
-		CameraExtension::CameraExtension(Skeleton::ConfigLoader loader, EngineDirectoryProvider engines, DemandProvider demand)
-			: loader_(std::move(loader)), engines_(std::move(engines)), demand_(std::move(demand)) {}
+		CameraExtension::CameraExtension(Skeleton::ConfigLoader loader, EngineDirectoryProvider engines)
+			: loader_(std::move(loader)), engines_(std::move(engines)) {}
 
 		CameraExtension::~CameraExtension()
 		{
 			std::vector<std::shared_ptr<CameraHostState>> all;
 			hosts_.ForEach([&all](const void*, const std::shared_ptr<CameraHostState>& st) { all.push_back(st); });
 			for (const std::shared_ptr<CameraHostState>& st : all)
-			{
-				st->demandSink = nullptr;   // process end: the skeleton module may already be gone (the hub destroys its modules in order)
 				Teardown(st, false);
-			}
 		}
 
 		bool CameraExtension::Active(const void* host) const
@@ -340,44 +334,6 @@ namespace Vpv
 			VpMotion::IVectorEngineDirectory* directory = engines_ ? engines_() :
 				static_cast<VpMotion::IVectorEngineDirectory*>(Hub::ExtensionHub::Instance().Query(VpMotion::kVectorEngineQueryId));
 			return directory ? directory->EngineFor(host) : nullptr;
-		}
-
-		Skeleton::IExternalDemand* CameraExtension::FindDemand() const
-		{
-			return demand_ ? demand_() :
-				static_cast<Skeleton::IExternalDemand*>(Hub::ExtensionHub::Instance().Query(Skeleton::kExternalDemandQueryId));
-		}
-
-		// SK-W demand: the camera's consumers (the SAME list the lag bridge builds its graph from: LiveCameraDemand) and the products
-		// the camera publishes itself (P7, and P8 with labels). Declared while the fit is wanted, independent of the first field (the
-		// declaration is what starts the engine through VectorDemand when the skeleton lane is on), replaced when the labels change and
-		// cleared when the fit is not wanted any more or the host goes. Render thread (Reconcile / Teardown).
-		void CameraExtension::UpdateDemand(CameraHostState& st)
-		{
-			if (!st.fitWanted)
-			{
-				if (st.demandSink)
-					st.demandSink->ClearExternalDemand(st.host, &st);
-				st.demandSink = nullptr;
-				st.demandLabels = false;
-				return;
-			}
-			Skeleton::IExternalDemand* sink = FindDemand();
-			if (sink == st.demandSink && st.demandLabels == st.labelsWanted && sink)
-				return;
-			if (st.demandSink && st.demandSink != sink)
-				st.demandSink->ClearExternalDemand(st.host, &st);
-			st.demandSink = sink;
-			st.demandLabels = st.labelsWanted;
-			if (!sink)
-				return;
-			std::vector<VpSkeleton::ConsumerDecl> consumers;
-			CameraLink::DeclareCameraConsumers(CameraLink::LiveCameraDemand(st.labelsWanted), consumers);
-			std::vector<VpSkeleton::ProductId> outside;
-			outside.push_back(VpSkeleton::kP7CameraFit);
-			if (st.labelsWanted)
-				outside.push_back(VpSkeleton::kP8CameraLabels);
-			sink->SetExternalDemand(st.host, &st, consumers, outside);
 		}
 
 		// Detach order (render thread, renderMutex held; the LOCK RULE in GuidanceAdapter.h applies): the adapter clears the engine's hook
@@ -681,7 +637,6 @@ namespace Vpv
 			st->labelsWanted = labelsWanted;
 			st->gpu = gpu;
 			st->graphRefused = false;
-			UpdateDemand(*st);   // SK-W external demand: the camera consumers, declared while the fit is wanted
 			if (!fitWanted)
 			{
 				st->engineProblem.clear();
@@ -750,8 +705,6 @@ namespace Vpv
 				return;
 			st->active.store(false, std::memory_order_release);
 			st->reporting.store(false, std::memory_order_release);
-			st->fitWanted = false;
-			UpdateDemand(*st);   // the skeleton forgets the camera's consumers (ClearExternalDemand)
 			ReleaseLive(*st);   // adapter (hook off the engine first), core worker, table, GPU objects: before the core goes
 			if (st->core)
 				st->core->SetDump(nullptr);

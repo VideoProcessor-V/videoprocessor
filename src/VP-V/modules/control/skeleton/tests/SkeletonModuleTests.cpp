@@ -1102,6 +1102,38 @@ namespace SkeletonModuleTestsNs
 			Assert::IsFalse(eng.fitWanted, L"and the engine is told");
 		}
 
+		// camera-live step 2: the demand entry a component reaches through the hub query (without including this module), on a REAL module.
+		TEST_METHOD(TheExternalDemandQueryGivesTheModulesOwnSetAndClear)
+		{
+			FakeEngine eng;
+			Rig rig(Lane("on"));
+			rig.sk.SetEngineProviderForTesting([&eng](const void*) { return &eng; });
+			Assert::IsNull(rig.sk.Query("vpv.something.else"), L"other ids: nothing");
+			Assert::IsNull(rig.sk.Query(nullptr));
+			Vpv::Skeleton::IExternalDemand* demand =
+				static_cast<Vpv::Skeleton::IExternalDemand*>(rig.sk.Query(Vpv::Skeleton::kExternalDemandQueryId));
+			Assert::IsNotNull(demand);
+			Assert::IsTrue(static_cast<Vpv::Skeleton::IExternalDemand*>(&rig.sk) == demand, L"the module itself");
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 2; ++s)
+				rig.Frame(s);
+			int owner = 0;
+			demand->SetExternalDemand(rig.Host(), &owner, CameraConsumers(), { VpSkeleton::kP7CameraFit, VpSkeleton::kP8CameraLabels });
+			for (int64_t s = 3; s <= 12; ++s)
+				rig.Frame(s);
+			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+			Assert::IsTrue(lane->State()->graph.Has(VpSkeleton::kP7CameraFit), L"declared through the interface: the graph holds P7");
+			Assert::IsTrue(eng.fitWanted, L"and the engine is asked for the fit");
+			// Why the camera does NOT declare yet (until SK-W2's lagged seal): nothing published P7 before the seal of its frame, so the
+			// skeleton holds it absent for every frame.
+			Assert::IsTrue(lane->ReadOf(VpSkeleton::kP7CameraFit, 11).state == VpSkeleton::AnalysisLane::ProductRead::None);
+			demand->ClearExternalDemand(rig.Host(), &owner);
+			rig.Frame(13);
+			Assert::IsFalse(rig.sk.LaneOf(rig.Host())->State()->graph.Has(VpSkeleton::kP7CameraFit), L"cleared through the interface");
+			Assert::IsFalse(eng.fitWanted, L"and the engine is told");
+		}
+
 		TEST_METHOD(WithoutAnEngineTheFeedSaysSo)
 		{
 			Rig rig(Lane("on"));

@@ -19,7 +19,6 @@
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
-#include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraExtension.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraFitWorker.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraLane.h>
@@ -147,64 +146,10 @@ namespace CameraLiveWiringTestsNs
 		VpMotion::IVectorEngine* EngineFor(const void* h) override { return h == host ? engine : nullptr; }
 	};
 
-	// The skeleton's external demand entry (camera-live step 2), recording what the camera declares.
-	struct FakeDemand : Vpv::Skeleton::IExternalDemand
-	{
-		struct Entry
-		{
-			const void* host = nullptr;
-			const void* owner = nullptr;
-			std::vector<uint16_t> consumerIds;
-			std::vector<VpSkeleton::ProductId> products;
-		};
-		std::vector<Entry> live;   // the current entries, as the module would hold them
-		int sets = 0, clears = 0;
-
-		void SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
-			const std::vector<VpSkeleton::ProductId>& publishedOutside) override
-		{
-			++sets;
-			Entry e;
-			e.host = host;
-			e.owner = owner;
-			for (const VpSkeleton::ConsumerDecl& c : consumers)
-				e.consumerIds.push_back(c.id);
-			e.products = publishedOutside;
-			for (Entry& have : live)
-				if (have.host == host && have.owner == owner)
-				{
-					have = e;
-					return;
-				}
-			live.push_back(e);
-		}
-		void ClearExternalDemand(const void* host, const void* owner) override
-		{
-			++clears;
-			for (size_t i = 0; i < live.size(); ++i)
-				if (live[i].host == host && live[i].owner == owner)
-				{
-					live.erase(live.begin() + static_cast<std::ptrdiff_t>(i));
-					return;
-				}
-		}
-		bool Declares(uint16_t consumerId) const
-		{
-			for (const Entry& e : live)
-				for (uint16_t id : e.consumerIds)
-					if (id == consumerId)
-						return true;
-			return false;
-		}
-	};
-
-	uint16_t ConsumerId(CameraLink::CameraConsumer c) { return uint16_t(CameraLink::kCameraConsumerIdBase + static_cast<int>(c)); }
-
 	struct Rig
 	{
 		explicit Rig(const std::string& text, bool engineThere = true) : cfg(text),
-			ext(cfg.Loader(), [this]() -> VpMotion::IVectorEngineDirectory* { return &dir; },
-				[this]() -> Vpv::Skeleton::IExternalDemand* { return &demand; })
+			ext(cfg.Loader(), [this]() -> VpMotion::IVectorEngineDirectory* { return &dir; })
 		{
 			dir.host = &r;
 			dir.engine = engineThere ? &engine : nullptr;
@@ -220,7 +165,6 @@ namespace CameraLiveWiringTestsNs
 		TempCfg cfg;
 		FakeEngine engine;
 		FakeDirectory dir;
-		FakeDemand demand;   // before ext: the extension clears its demand at teardown
 		CameraExtension ext;
 		ResyncExtension resync;
 		FakeRenderer r;
@@ -511,74 +455,12 @@ namespace VideoProcessorTest
 			Assert::IsTrue(reply.find("camera fit skipped this pair (cut: no seed)") != std::string::npos);
 		}
 
-		// ---- camera-live step 2: the skeleton's external demand (SK-W) ----------------------------------------------------------
+		// ---- camera-live step 2: the lag bridge on the lease path -------------------------------------------------------------
 
-		TEST_METHOD(TheCameraDeclaresItsConsumersToTheSkeletonOnlyWhileTheFitIsWanted)
+		TEST_METHOD(TheCameraRunsOnTheLagBridgeWithoutTheSkeletonLane)
 		{
-			{
-				Rig off("[general]\nx=1\n");
-				off.Start(4);
-				Assert::AreEqual(0, off.demand.sets, L"camera off: nothing is declared");
-			}
-			{
-				Rig report(kLinkOn);
-				report.Start(4);
-				Assert::AreEqual(0, report.demand.sets, L"camera_link without camera_model: no fit, no demand");
-			}
-			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\n");
-			rig.ResyncApply("on");
-			rig.Life(RE::Lifecycle::GpuCreated);
-			// Declared at the settings, BEFORE any field: the declaration is what starts the engine through VectorDemand.
-			Assert::AreEqual<size_t>(1, rig.demand.live.size());
-			const FakeDemand::Entry e = rig.demand.live[0];
-			Assert::IsTrue(e.host == rig.Host());
-			Assert::IsTrue(rig.demand.Declares(ConsumerId(CameraLink::CameraConsumer::Measurement)), L"the fit's own consumer (P7 at lag 1)");
-			Assert::IsFalse(rig.demand.Declares(ConsumerId(CameraLink::CameraConsumer::Diagnostics)), L"no labels wanted: no P8 consumer");
-			Assert::AreEqual<size_t>(1, e.products.size());
-			Assert::AreEqual(int(VpSkeleton::kP7CameraFit), int(e.products[0]), L"P7 is published by the camera, outside the lane");
-			for (int64_t s = 1; s <= 6; ++s)
-				rig.Frame(s);
-			Assert::IsTrue(rig.ext.LiveBuilt(rig.Host()));
-			Assert::AreEqual(1, rig.demand.sets, L"frames do not re-declare");
-			// The same declarations as the lag bridge's graph (LiveCameraDemand): its graph holds exactly the declared camera product.
-			const CameraLink::CameraLane* lane = rig.ext.LaneOf(rig.Host());
-			Assert::IsTrue(lane->Table()->Find(VpSkeleton::kP7CameraFit) != nullptr);
-			Assert::IsTrue(lane->Table()->NodeOf(VpSkeleton::kP8CameraLabels) == nullptr);
-			// The renderer goes: the demand is cleared.
-			rig.Life(RE::Lifecycle::GpuReleased);
-			Assert::AreEqual<size_t>(0, rig.demand.live.size(), L"cleared at GpuReleased");
-			Assert::IsTrue(rig.demand.clears >= 1);
-		}
-
-		TEST_METHOD(ASettingsChangeReDeclaresTheLabelsAndTurningTheModelOffClearsTheDemand)
-		{
-			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\n");
-			rig.Start(4);
-			Assert::AreEqual<size_t>(1, rig.demand.live.size());
-			{
-				std::ofstream out(rig.cfg.path, std::ios::binary | std::ios::trunc);
-				out << std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\ncamera_labels_gpu=on\n";
-			}
-			rig.Life(RE::Lifecycle::SettingsApplied);
-			Assert::AreEqual<size_t>(1, rig.demand.live.size(), L"replaced, not added: one entry per (host, owner)");
-			Assert::IsTrue(rig.demand.Declares(ConsumerId(CameraLink::CameraConsumer::Diagnostics)), L"labels wanted: the P7 + P8 consumer");
-			Assert::AreEqual<size_t>(2, rig.demand.live[0].products.size(), L"P7 and P8 published outside the lane");
-			{
-				std::ofstream out(rig.cfg.path, std::ios::binary | std::ios::trunc);
-				out << std::string(kLinkOn);
-			}
-			rig.Life(RE::Lifecycle::SettingsApplied);
-			Assert::AreEqual<size_t>(0, rig.demand.live.size(), L"camera_model off: the demand is withdrawn");
-			for (int64_t s = 5; s <= 7; ++s)
-				rig.Frame(s);
-			Assert::AreEqual<size_t>(0, rig.demand.live.size(), L"and stays withdrawn");
-			Assert::IsFalse(rig.ext.LiveBuilt(rig.Host()));
-		}
-
-		TEST_METHOD(WithoutASkeletonModuleNothingIsDeclaredAndTheCameraRunsAsBefore)
-		{
-			// No skeleton module answers the demand query (analysis_lane off is the same case for the camera): the camera does not depend on
-			// the skeleton lane until SK-W2, the lag bridge carries the fit exactly as before.
+			// No skeleton module and no analysis lane: until SK-W2 the camera declares nothing to the skeleton and does not depend on its lane;
+			// the lag bridge carries the fit exactly as before, through the lease path.
 			TempCfg cfg(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\n");
 			FakeEngine engine;
 			engine.latest = 8;
@@ -587,8 +469,7 @@ namespace VideoProcessorTest
 			dir.host = &r;
 			dir.engine = &engine;
 			ResyncExtension resync;
-			CameraExtension ext(cfg.Loader(), [&dir]() -> VpMotion::IVectorEngineDirectory* { return &dir; },
-				[]() -> Vpv::Skeleton::IExternalDemand* { return nullptr; });
+			CameraExtension ext(cfg.Loader(), [&dir]() -> VpMotion::IVectorEngineDirectory* { return &dir; });
 			Tap::SetStore(&r, &r.store);
 			RE::LifecycleFacts lf;
 			lf.host = &r; lf.kind = RE::Lifecycle::SettingsApplied; lf.subject = "on"; lf.code = 0; lf.value = 0;
@@ -610,6 +491,7 @@ namespace VideoProcessorTest
 			}
 			Assert::IsTrue(ext.LiveBuilt(&r), L"the lag bridge carries the fit without the skeleton lane");
 			Assert::IsTrue(ext.CoreOf(&r)->Allocated());
+			Assert::IsTrue(ext.LaneOf(&r)->Lease(VpSkeleton::kP7CameraFit).Owned(), L"the fit holds an owned lease, not borrowed pointers");
 			lf.kind = RE::Lifecycle::GpuReleased;
 			ext.OnLifecycle(lf);
 			Tap::SetStore(&r, nullptr);

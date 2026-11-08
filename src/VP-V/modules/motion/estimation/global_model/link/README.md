@@ -58,7 +58,7 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 
 ## K4 wiring on P5a's contract (2026-11-07)
 
-**STATUS (camera live wiring, branch `r1cam/camlive`; step 2 `r1cam/slots`): K4 is reachable, default OFF.** `CameraExtension` declares the camera consumers to the
+**STATUS (camera live wiring, branch `r1cam/camlive`; step 2 `r1cam/slots`): K4 is reachable, default OFF.** `CameraExtension` (no skeleton demand until SK-W2, see below)
 skeleton, builds the lag bridge (`CameraLane`, below) at the first verified engine field and attaches the core to it when `camera_link = report` AND `camera_model = on` (`p7Wanted`);
 with any `camera_meas_*` switch also on it creates the `CameraGuidanceAdapter` and attaches it to the renderer's engine
 (`Query("vpv.vector_engine.v1")` -> `IVectorEngineDirectory::EngineFor(host)`), which registers the ONE pre-estimate hook. The four .cpp files
@@ -114,9 +114,7 @@ P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` 
 
 ## Camera live wiring (default off; what is live and what is not)
 
-> **LAG BRIDGE UNTIL SK-W2** (camera-live step 2). What SK-W covers now goes through SK-W: the camera consumers are declared to the skeleton
-> (`SkeletonModule::SetExternalDemand` via `Query(kExternalDemandQueryId)`, the list `CameraLink::LiveCameraDemand`; with `analysis_lane` on the skeleton graph then
-> holds P7 / P8 and their inputs and the declaration starts the engine through VectorDemand), the fit and the label fill hold their table through OWNED leases
+> **LAG BRIDGE UNTIL SK-W2** (camera-live step 2). What SK-W covers now goes through SK-W: the fit and the label fill hold their table through OWNED leases
 > (`CameraLinkCore::AttachLane`, `CameraLabelFill(LaneLeaseSource, ...)`; a generation change rebinds and refuses a stale job, `PublishOutcome::StaleLane`), and the
 > costs go to the pass-timer inbox. `CameraLane` remains ONLY as the lagged seal, because the skeleton lane seals every product of frame N at the render
 > start of N (`SlotTable::Resolve`; `SlotSet::Seal` has no deferral) and P7(N) only exists a readback + fit later. See "Lag bridge until SK-W2" below.
@@ -129,6 +127,19 @@ P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` 
 | the table P7 / P8 are published into, and its `Lease()` / `Source()` (owned, one generation per `Build` / `Clear`) | a lagged seal needs the slots it seals | the lease source becomes `[lane]{ return lane->Lease(kP7CameraFit); }` (and `kP8CameraLabels`): one line in `CameraExtension::EnsureLive` |
 | the input markers (empty P3 / P4 / P2m / P1 slots with the honoured stamp) | the lagged seal checks P7's ancestry inside its own table; the skeleton's P3 / P4 slots are sealed and released on the skeleton's schedule | P7's ancestors are the skeleton's own P3 (engine feed) / P4 / P2m slots |
 | the field marks (`NoteField`) telling a cadence repeat from a late fit | same seal | the skeleton's engine feed knows which frames had a field |
+| the P8 LIVE fill: `SealOne` passes `CameraLabelFill::FillLive` as the seal's fill for P8 | the skeleton seal declines every live fill of a product published outside the lane (`AnalysisLane::LiveFillOf`, `externalDeclined_`, AnalysisLane.h ~l.1469) | a fill hook for an external product (P8 live from a sealed P7) in the skeleton seal |
+| `NextFloor()` (the label fill's gap-work floor: the first frame not sealed yet) | follows the bridge's own seal position | the skeleton's lagged seal position |
+| `LabelRing()` / `LabelLive()` (P8 ring and live-pool sizes the label producer's textures are sized by) | read from the bridge's P8 node | the skeleton graph's P8 node |
+| `ReleaseAfter(seq)` after each lagged seal (the N2 retire: a frame's slots are released only after it was sealed) | the bridge seals late, so it must also retire late | the skeleton retires P7 / P8 (and the ancestors they pin) after their lagged seal |
+| (not in the bridge) the skeleton demand: `SetExternalDemand(host, owner, DeclareCameraConsumers(LiveCameraDemand(labels)), {P7, P8})` | see "No skeleton demand yet" below | declared in `CameraExtension::Reconcile` while the fit is wanted, cleared when off / at GpuReleased |
+
+**No skeleton demand yet (decision, camera-live step 2).** `publishedOutside` only stops the skeleton from attempting a live fill: the frame is still sealed
+absent and counted (`ExternalDeclined`, "Analysis: products published outside the lane ...") on EVERY frame, and the demand also sets `feedNeeded` /
+`SetCameraFitWanted` (SkeletonModule.cpp ~l.1296 / ~l.1381), so the engine feed would publish P2m / P3 slots that nothing consumes. No SK-W mechanism lets a
+declared product be "expected later". So the camera declares NOTHING to the skeleton until SK-W2; P7 / P8 stay on the bridge, the skeleton status is unchanged
+with the camera on, and the camera's own behaviour is unchanged (it never depended on the demand: the engine runs for the camera as before). The entry SK-W2 uses
+is in place and tested on a real module: `Query(Skeleton::kExternalDemandQueryId)` -> `IExternalDemand` (SkeletonModuleTests
+`TheExternalDemandQueryGivesTheModulesOwnSetAndClear`, which also shows the absent-every-frame P7).
 
 Open for SK-W2 too: with the bridge gone the camera needs the skeleton lane, which exists only with `analysis_lane` on (and `resync_event` on); today the
 camera runs without it. P9 (no producer, K9-1) and p7g (the guide is not slot-backed) are not declared. Validity stays on the P5a `MotionValidity` facade
@@ -137,7 +148,7 @@ camera runs without it. P9 (no producer, K9-1) and p7g (the guide is not slot-ba
 | Part | Live now | How |
 |---|---|---|
 | P7 fit | yes, with camera_link = report + camera_model = on | `p7Wanted` is set by the keys, NOT by P5a's vector demand (that decision only covers P2/P3 and nothing in a renderer declares P7 as a consumer). The fit reads the engine's verified fields (`IVectorEngine::FieldOf`) through the readback ring |
-| P7 as a skeleton product | declared to the skeleton; sealed in the lag bridge | the camera consumers are the skeleton's external demand (`LiveCameraDemand`; P7 / P8 published outside the lane). The fit is held by lease on `CameraLane.h` (the lag bridge, same registry / SlotTable / SlotSet / CpuBuffers, graph from the same declarations), which publishes empty-content input markers for P3 / P4 / P2m / P1 each frame (ancestry + honoured stamp) and seals `kSealLag = 6` frames behind the render, with the Indicator's stamp of that frame |
+| P7 as a skeleton product | sealed in the lag bridge; not yet declared to the skeleton (SK-W2) | the bridge graph is built from `LiveCameraDemand`, the list SK-W2 declares to the skeleton. The fit is held by lease on `CameraLane.h` (the lag bridge, same registry / SlotTable / SlotSet / CpuBuffers, graph from the same declarations), which publishes empty-content input markers for P3 / P4 / P2m / P1 each frame (ancestry + honoured stamp) and seals `kSealLag = 6` frames behind the render, with the Indicator's stamp of that frame |
 | validity | era / stamp / slip | the record's honoured stamp is checked at the seal (a resync event or a slip between marker and seal rejects it); a pair that spans a slip or has an ancient stamp is not fitted (`camera.no_model.slip`) |
 | trust | confidence, reason, P8 untrusted code | in the record (`CameraMotion`), the status line and `Usable()`; the labels carry the untrusted code (K2) |
 | P8 labels | yes, when labels are wanted (overlay != off, any camera_use_* switch, camera_labels_gpu) and a render device exists | `CameraLabelProducer` in UPLOAD mode (CPU labels uploaded to a texture; compute mode with camera_labels_gpu on), `CameraLabelFill` as the post-submit gap work and the seal's live fill. Because the seal lags, a consumer reads the labels of a frame that has been sealed (`LabelsFor(seq)`); no consumer is wired to them yet |

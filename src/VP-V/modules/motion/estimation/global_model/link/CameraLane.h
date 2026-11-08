@@ -1,19 +1,19 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// *** LAG BRIDGE UNTIL SK-W2 *** (camera-live step 2). The camera's products are held through the skeleton's APIs (SK-W): the consumers
-// are declared to the skeleton (SkeletonModule::SetExternalDemand with CameraLink::LiveCameraDemand, which also starts the vector
-// engine through VectorDemand), the fit and the label fill hold their table through a LaneLease and rebind on a generation change
+// *** LAG BRIDGE UNTIL SK-W2 *** (camera-live step 2). The camera's products are held through the skeleton's APIs (SK-W): the fit and
+// the label fill hold their table through a LaneLease and rebind on a generation change
 // (CameraLinkCore::AttachLane, CameraLabelFill(LaneLeaseSource, ...)), and the costs go to the pass-timer inbox. What this class still
 // does is ONLY what SK-W does not provide: the LAGGED SEAL. The skeleton lane seals every product of frame N at the render start of N
 // (SlotTable::Resolve; SlotSet::Seal has no deferral), but P7(N) is fitted from a field the engine made while rendering N and read
-// back a frame or two later, so in the skeleton's table P7 would be sealed absent on every frame. Until SK-W2 seals P7(N) at N + lag in
+// back a frame or two later, so in the skeleton's table P7 would be sealed absent on every frame (which is also why the camera declares no
+// skeleton demand yet: link/README.md "No skeleton demand yet"). Until SK-W2 seals P7(N) at N + lag in
 // the skeleton lane, the fit and the labels are published into THIS small table, whose seal runs kSealLag frames behind the render:
-//   * a graph built from the SAME declarations the skeleton receives (LiveCameraDemand), so it holds P7 (+ P8) and their inputs;
+//   * a graph built from the declarations SK-W2 gives the skeleton (LiveCameraDemand), so it holds P7 (+ P8) and their inputs;
 //   * input markers: empty-content P3 / P4 / P2m / P1 slots per frame with the honoured stamp, because a lagged seal can only check
 //     P7's ancestry inside its own table (the skeleton's P3 / P4 slots are sealed and released on the skeleton's own schedule);
 //   * the lagged seal itself (SealOne at N + kSealLag, with the Indicator's stamp OF THAT FRAME) and the field marks that tell a
-//     cadence repeat from a late fit;
+//     cadence repeat from a late fit; the P8 live fill at that seal (FillLive), NextFloor, LabelRing / LabelLive and ReleaseAfter (N2);
 //   * Lease(): an OWNED lease (shared hold of the state + a generation bumped at every Build / Clear), so the holders use exactly the
 //     lease path they will use on the skeleton lane (AnalysisLane::Lease) and a rebuild is a StaleLane refusal, never a freed table.
 // SK-W2 REMOVES this file: the lease source becomes [lane]{ return lane->Lease(kP7CameraFit); } (and kP8CameraLabels), the extension's

@@ -137,8 +137,8 @@ namespace CameraLink
 	}
 
 	// The consumers camera live declares (camera-live step 2): the fit's own measurement (P7 at lag 1) and, when labels are wanted, the
-	// diagnostics consumer (P7 + P8). ONE list for both users: the skeleton's external demand (SkeletonModule::SetExternalDemand) and the
-	// camera's lag bridge graph (CameraLane::Build), so the two graphs cannot drift apart.
+	// diagnostics consumer (P7 + P8). ONE list for both users: the camera's lag bridge graph (CameraLane::Build) today and the skeleton's
+	// external demand (SkeletonModule::SetExternalDemand) from SK-W2, so the two graphs cannot drift apart.
 	inline CameraDemandInput LiveCameraDemand(bool labels)
 	{
 		CameraDemandInput in;
