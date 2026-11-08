@@ -70,6 +70,31 @@ namespace VectorEngineTest
 			Assert::IsTrue(engine.vectorDemand.mode != VectorDemand::Mode::Off, L"the decision is still made");
 		}
 
+		TEST_METHOD(TheCameraFitWantStartsTheEngineLikeAnyFieldConsumer)
+		{
+			// SK-W stage D: nobody in the renderer wants vectors, but the camera link declared the fit: the engine counts CameraFit as the consumer.
+			VectorEngine engine;
+			FakeHost host;
+			VectorEngine::UpdateFacts facts;
+			facts.vectorDemandSetting = true;
+			VectorDemand::Input none;
+			none.enabled = true;
+			none.slotsRun = true;
+			none.queueAheadCapacity = 4;
+			engine.UpdateVectorEngine(none, facts, host);
+			Assert::IsTrue(engine.vectorDemand.mode == VectorDemand::Mode::Off, L"no consumer: idle");
+			engine.SetCameraFitWanted(true);
+			Assert::IsTrue(engine.CameraFitWanted());
+			engine.UpdateVectorEngine(none, facts, host);
+			Assert::IsTrue(engine.vectorDemand.mode == VectorDemand::Mode::Forward, L"the camera fit starts the engine");
+			Assert::IsTrue(engine.vectorDemand.Serves(VectorDemand::Consumer::CameraFit));
+			Assert::IsTrue(engine.vectorDemand.estimate && engine.vectorDemand.producer, L"a source-field consumer: the producer and the render-time estimate");
+			engine.SetCameraFitWanted(false);
+			engine.UpdateVectorEngine(none, facts, host);
+			Assert::IsTrue(engine.vectorDemand.mode == VectorDemand::Mode::Off, L"withdrawn: idle again");
+		}
+
+
 		TEST_METHOD(DemandOnSyncsTheThreeEntriesEveryFrameAndPublishesOnlyWhenTheLineChanges)
 		{
 			VectorEngine engine;

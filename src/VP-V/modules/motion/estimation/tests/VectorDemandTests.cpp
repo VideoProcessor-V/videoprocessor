@@ -12,6 +12,7 @@
 #include <VP-V/core/OriginalPathway.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
+#include <VP-V/modules/motion/estimation/VectorDemandProducts.h>
 
 #include <initializer_list>
 #include <string>
@@ -97,6 +98,24 @@ namespace VectorDemandTest
 			Assert::IsFalse(d.estimate || d.producer, L"nothing on");
 			Assert::AreEqual(std::string("Vector engine: idle (no consumer)"), StatusLine(d));
 		}
+
+		TEST_METHOD(TheCameraFitIsASourceFieldConsumerThatReadsThePairAndTheField)
+		{
+			// SK-W stage D: appended at index 14, so no earlier index moved; it reads P2 and P3 like any source-field consumer.
+			Assert::AreEqual(14, static_cast<int>(Consumer::CameraFit));
+			Assert::AreEqual(15, kConsumerCount);
+			Assert::IsTrue(DomainOf(Consumer::CameraFit) == Domain::SourceField);
+			Assert::AreEqual(std::string("camera fit"), std::string(Name(Consumer::CameraFit)));
+			const Decision d = Decide(Make({ Consumer::CameraFit }));
+			Assert::IsTrue(d.mode == Mode::Forward);
+			Assert::IsTrue(d.Serves(Consumer::CameraFit));
+			Assert::IsTrue(d.estimate && d.producer);
+			const VpSkeleton::ConsumerDecl decl = VectorDemand::DeclarationOf(Consumer::CameraFit);
+			Assert::AreEqual(2, static_cast<int>(decl.count));
+			Assert::AreEqual(static_cast<int>(VpSkeleton::kP2VectorPair), static_cast<int>(decl.consumes[0].product));
+			Assert::AreEqual(static_cast<int>(VpSkeleton::kP3AnalysisField), static_cast<int>(decl.consumes[1].product));
+		}
+
 
 		TEST_METHOD(SynthesisConsumersOnlyAreNeverServedHere)
 		{

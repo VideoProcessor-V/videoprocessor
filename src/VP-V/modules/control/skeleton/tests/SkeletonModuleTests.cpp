@@ -24,6 +24,8 @@
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
+#include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 
 #include <atomic>
@@ -257,6 +259,60 @@ namespace SkeletonModuleTestsNs
 		c.host = rig.Host(); c.phase = RE::FramePhase::CollectAhead; c.phaseData = &view;
 		Assert::IsFalse(rig.sk.OnFrame(c), L"the skeleton never takes a phase over");
 	}
+
+	// A scripted vector engine (P5a's IVectorEngine): what the feed reads.
+	struct FakeEngine : VpMotion::IVectorEngine
+	{
+		uint64_t latest = 0, era = 1;
+		uint64_t pairFrom = 0;
+		bool slip = false;
+		bool global = true;
+		bool fitWanted = false;
+		int fitCalls = 0;
+		VpIndicator::Stamp stamp;
+		uint64_t LatestVerifiedFieldSeq() const override { return latest; }
+		uint64_t FieldEra() const override { return era; }
+		bool FieldOf(uint64_t seq, VpMotion::VerifiedField& out) const override
+		{
+			if (seq != latest || seq == 0)
+				return false;
+			out = VpMotion::VerifiedField();
+			out.seq = seq;
+			out.pairFrom = pairFrom;
+			out.pairTo = seq;
+			out.gridW = 4;
+			out.gridH = 3;
+			out.blockSize = 16;
+			out.stamp = stamp;
+			return true;
+		}
+		float FieldScale() const override { return 1.0f; }
+		bool GlobalFromEngine() const override { return global; }
+		bool EngineGlobal(uint64_t, VpMotion::GlobalVec& out) const override
+		{
+			out.valid = global;
+			out.x = 1.5;
+			out.y = -0.5;
+			return global;
+		}
+		bool PairSpansSlip(uint64_t, uint64_t) const override { return slip; }
+		bool FlowIsCpuResident() const override { return false; }
+		bool FlowOf(uint64_t, VpMotion::FlowView&) const override { return false; }
+		void SetPreEstimateHook(VpMotion::IPreEstimateHook*) override {}
+		void SetCameraFitWanted(bool wanted) override { fitWanted = wanted; ++fitCalls; }
+	};
+
+	// Camera consumers as the camera extension declares them: the fit (P7 at lag 1) and the diagnostics (P7 + P8).
+	std::vector<VpSkeleton::ConsumerDecl> CameraConsumers()
+	{
+		CameraLink::CameraDemandInput in;
+		in.active[static_cast<int>(CameraLink::CameraConsumer::Measurement)] = true;
+		in.active[static_cast<int>(CameraLink::CameraConsumer::Diagnostics)] = true;
+		std::vector<VpSkeleton::ConsumerDecl> out;
+		CameraLink::DeclareCameraConsumers(in, out);
+		return out;
+	}
+
 
 	Vpv::Skeleton::Settings ParseText(const std::string& text)
 	{
@@ -1003,6 +1059,156 @@ namespace SkeletonModuleTestsNs
 			}
 			registry.ResetForTesting();
 		}
+
+		TEST_METHOD(ExternalCameraConsumersJoinTheLaneGraphAndStartTheEngine)
+		{
+			// SK-W stage D: the camera link's consumers (P7 / P8 with P2 / P3 / P4 as inputs) are in the SKELETON lane graph, and declaring
+			// them starts the vector engine (IVectorEngine::SetCameraFitWanted); clearing them takes both away again.
+			FakeEngine eng;
+			Rig rig(Lane("on"));
+			rig.sk.SetEngineProviderForTesting([&eng](const void*) { return &eng; });
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 2; ++s)
+				rig.Frame(s);
+			Assert::IsFalse(rig.sk.LaneOf(rig.Host())->State()->graph.Has(VpSkeleton::kP7CameraFit), L"no camera demand: no camera product");
+			int owner = 0;
+			rig.sk.SetExternalDemand(rig.Host(), &owner, CameraConsumers(), { VpSkeleton::kP7CameraFit, VpSkeleton::kP8CameraLabels });
+			for (int64_t s = 3; s <= 4; ++s)
+				rig.Frame(s);
+			const std::shared_ptr<VpSkeleton::LaneState> laneState = rig.sk.LaneOf(rig.Host())->State();
+			Assert::IsTrue(laneState != nullptr);
+			const VpSkeleton::Graph& g = laneState->graph;
+			Assert::IsTrue(g.valid);
+			Assert::IsTrue(g.Has(VpSkeleton::kP7CameraFit) && g.Has(VpSkeleton::kP8CameraLabels));
+			Assert::IsTrue(g.Has(VpSkeleton::kP3AnalysisField) && g.Has(VpSkeleton::kP2mMatcherPair) && g.Has(VpSkeleton::kP4SourceStats),
+				L"the inputs of P7 / P8 are in the graph (P2 resolves to the matcher pair without an engine session)");
+			Assert::IsTrue(eng.fitWanted, L"the camera fit asked the engine to run");
+			const std::string text = rig.Command();
+			Assert::IsTrue(text.find("Skeleton engine feed:") != std::string::npos);
+			Assert::IsTrue(text.find("camera fit wanted") != std::string::npos);
+			Assert::IsTrue(text.find("products published outside the lane:") != std::string::npos);
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_engine_feed"), L"an engine exists: nothing to show");
+			// A second owner repeating an id is counted, the first wins.
+			int other = 0;
+			rig.sk.SetExternalDemand(rig.Host(), &other, CameraConsumers(), {});
+			rig.Frame(5);
+			Assert::IsTrue(rig.Command().find("2 duplicate id(s)") != std::string::npos);
+			rig.sk.ClearExternalDemand(rig.Host(), &other);
+			rig.sk.ClearExternalDemand(rig.Host(), &owner);
+			rig.Frame(6);
+			Assert::IsFalse(rig.sk.LaneOf(rig.Host())->State()->graph.Has(VpSkeleton::kP7CameraFit), L"withdrawn: the graph is rebuilt without it");
+			Assert::IsFalse(eng.fitWanted, L"and the engine is told");
+		}
+
+		TEST_METHOD(WithoutAnEngineTheFeedSaysSo)
+		{
+			Rig rig(Lane("on"));
+			rig.sk.SetEngineProviderForTesting([](const void*) -> VpMotion::IVectorEngine* { return nullptr; });
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			int owner = 0;
+			rig.sk.SetExternalDemand(rig.Host(), &owner, CameraConsumers(), {});
+			for (int64_t s = 1; s <= 4; ++s)
+				rig.Frame(s);
+			Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_engine_feed"), L"visible, not log-only");
+			Assert::IsTrue(rig.sk.FeedCountersOf(rig.Host()).noEngine > 0);
+			Assert::AreEqual(uint64_t(0), rig.sk.FeedCountersOf(rig.Host()).published);
+		}
+
+		TEST_METHOD(TheEngineFeedPublishesTheFieldSlotsWithTheFieldsOwnStamp)
+		{
+			FakeEngine eng;
+			Rig rig(Lane("on"));
+			rig.sk.SetEngineProviderForTesting([&eng](const void*) { return &eng; });
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			int owner = 0;
+			rig.sk.SetExternalDemand(rig.Host(), &owner, CameraConsumers(), { VpSkeleton::kP7CameraFit, VpSkeleton::kP8CameraLabels });
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			// The engine made the field of the pair (4, 5) while frame 4 renders: the stamp it was computed under is the Indicator's stamp of 5
+			// (MotionValidity::StampAt). The module publishes P2m / P3 of frame 5 at the AfterRender of frame 4.
+			std::shared_ptr<VpIndicator::Indicator> ind = Vpv::Resync::ResyncExtension::For(rig.Host())->seal.Current();
+			Assert::IsTrue(ind != nullptr);
+			eng.latest = 5;
+			eng.pairFrom = 4;
+			eng.stamp = ind->StampOf(5);
+			rig.Frame(4);
+			for (int i = 0; i < 400 && rig.sk.FeedCountersOf(rig.Host()).published == 0; ++i)
+			{
+				rig.sk.RetryEngineFeedForTesting(rig.Host());   // the P1 inputs come from the lane's own threads
+				Sleep(5);
+			}
+			const Vpv::Skeleton::FeedCounters fc = rig.sk.FeedCountersOf(rig.Host());
+			Assert::AreEqual(uint64_t(1), fc.published);
+			Assert::AreEqual(uint64_t(5), fc.lastSeq);
+			Vpv::Skeleton::EngineFieldFacts f;
+			Assert::IsTrue(rig.sk.EngineFieldFactsOf(rig.Host(), 5, f));
+			Assert::AreEqual(uint64_t(4), f.pairFrom);
+			Assert::AreEqual(uint64_t(5), f.pairTo);
+			Assert::AreEqual(4, f.gridW);
+			Assert::AreEqual(16, f.blockSize);
+			Assert::IsTrue(f.globalValid);
+			Assert::AreEqual(1.5, f.globalX, 1e-12);
+			Assert::IsTrue(f.p2mPublished && f.p3Published);
+			Assert::IsFalse(f.p2Published, L"no optical-flow session in this graph: the pair is P2m");
+			Assert::IsFalse(rig.sk.EngineFieldFactsOf(rig.Host(), 4, f), L"no field was made for frame 4");
+			// The seal of frame 5 accepts what was published under the stamp the field was made under: a sealed slot is readable.
+			rig.Frame(5);
+			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+			Assert::IsTrue(lane->ReadOf(VpSkeleton::kP3AnalysisField, 5).state != VpSkeleton::AnalysisLane::ProductRead::None, L"P3(5) sealed");
+			Assert::IsTrue(lane->ReadOf(VpSkeleton::kP2mMatcherPair, 5).state != VpSkeleton::AnalysisLane::ProductRead::None, L"P2m(5) sealed");
+			// A field whose pair spans a slip is not published (the engine's facade says so) and is counted.
+			eng.latest = 7;
+			eng.pairFrom = 6;
+			eng.slip = true;
+			rig.Frame(6);
+			Assert::AreEqual(uint64_t(1), rig.sk.FeedCountersOf(rig.Host()).slip);
+			Assert::IsFalse(rig.sk.EngineFieldFactsOf(rig.Host(), 7, f));
+			// The engine's numbering restarted (seek / resync): counted, nothing carried over.
+			eng.slip = false;
+			eng.era = 2;
+			eng.latest = 0;
+			rig.Frame(7);
+			Assert::AreEqual(uint64_t(1), rig.sk.FeedCountersOf(rig.Host()).eraResets);
+			Assert::IsTrue(rig.Command().find("1 slipped") != std::string::npos);
+		}
+
+		TEST_METHOD(ASceneIsDerivedFromTwoP4RecordsNeverStored)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			rig.Ingress(4);
+			rig.Deliver(5);
+			rig.Begin(4);   // P4(4) is sealed; P4(3) is still in its ring
+			Vpv::Skeleton::SceneFacts f;
+			Assert::IsTrue(rig.sk.SceneFactsOf(rig.Host(), 4, f));
+			Assert::IsTrue(f.valid);
+			Assert::IsFalse(f.fullBetween, L"no resync event between the frames");
+			// The same classification the shared unit gives for those two records (U7): nothing is stored, the module derives it.
+			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+			const VpSkeleton::AnalysisLane::ProductRead cur = lane->ReadOf(VpSkeleton::kP4SourceStats, 4);
+			const VpSkeleton::AnalysisLane::ProductRead prev = lane->ReadOf(VpSkeleton::kP4SourceStats, 3);
+			VpLaneProducts::SourceStatsRecord a, c;
+			Assert::IsTrue(VpLaneProducts::ReadSourceStats(prev.cpu, prev.cpuBytes, &a) && VpLaneProducts::ReadSourceStats(cur.cpu, cur.cpuBytes, &c));
+			const VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(a, c, false, false);
+			Assert::AreEqual(e.cut, f.cut);
+			Assert::AreEqual(e.flash, f.flash);
+			Assert::AreEqual(e.fade, f.fade);
+			Assert::AreEqual(e.cutPossible, f.cutPossible);
+			Assert::AreEqual(e.histDistance, f.histDistance);
+			Assert::IsTrue(f.histDistance > 0u, L"two different noise frames never have identical histograms");
+			Assert::AreEqual(c.mean, f.curMean);
+			Assert::AreEqual(a.mean, f.prevMean);
+			Assert::IsTrue(f.curSpread > 0u);
+			rig.After(4);
+			Assert::IsFalse(rig.sk.SceneFactsOf(rig.Host(), 1, f), L"there is no frame before 1");
+		}
+
 
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)
 		{

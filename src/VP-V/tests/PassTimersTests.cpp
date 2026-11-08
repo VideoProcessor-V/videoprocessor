@@ -125,6 +125,25 @@ namespace VideoProcessorTest
 			Assert::IsTrue(lines[0].find("(2 sample(s))") != std::string::npos);
 		}
 
+		TEST_METHOD(TheCameraRowsAreCpuWorkAndAWaitKeyedByTheBenchmarkNames)
+		{
+			PassTimers::Inbox inbox;
+			inbox.PostCameraFit(0.4);
+			inbox.PostCameraReadback(1.6);
+			inbox.PostCameraReadback(0.0);   // a CPU row accepts a zero (nothing waited)
+			PassTimers::Accumulator acc;
+			Assert::AreEqual(size_t(3), inbox.DrainInto(acc));
+			const PassTimers::Stat* fit = acc.Find("camera.fit");
+			const PassTimers::Stat* rb = acc.Find("camera.readback");
+			Assert::IsNotNull(fit);
+			Assert::IsNotNull(rb);
+			Assert::IsTrue(fit->kind == PassTimers::Kind::CpuWork);
+			Assert::IsTrue(rb->kind == PassTimers::Kind::CpuWait, L"a wait, never counted as work");
+			Assert::AreEqual(0.8, rb->MeanMs(), 1e-9);
+			Assert::AreEqual(0.4, acc.TotalMeanMs(PassTimers::Kind::CpuWork), 1e-9);
+		}
+
+
 		TEST_METHOD(TheMotionInboxIsBoundedWhenNobodyDrainsIt)
 		{
 			PassTimers::Inbox inbox;

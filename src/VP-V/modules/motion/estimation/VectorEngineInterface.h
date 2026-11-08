@@ -118,6 +118,9 @@ namespace VpMotion
 		// PollLongPair is lock-free for the caller. The textures passed to SubmitLongPair must stay valid until
 		// PollLongPair reports completion or CancelLongPair returns; the engine never keeps them beyond that. A
 		// completed pair is a VerifiedField whose stamp is the pair's stamp era (stale-stamp results are dropped).
+		// SK-W stage D: the camera link (through the skeleton's external demand) says the camera fit wants the verified field: the engine
+		// counts it as the consumer VectorDemand::Consumer::CameraFit at its next decision (any thread: an atomic). The default ignores it.
+		virtual void SetCameraFitWanted(bool /*wanted*/) {}
 		// (a) the refined field of seq (P3r / U15); false = absent.
 		virtual bool RefinedFieldOf(uint64_t /*seq*/, VerifiedField& /*out*/) const { return false; }
 		virtual bool RefinedFieldAvailable() const { return false; }

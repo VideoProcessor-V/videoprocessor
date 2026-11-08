@@ -23,14 +23,18 @@
 #include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/core/hub/HostSlots.h>
 #include <VP-V/modules/control/skeleton/SkeletonSettings.h>
+#include <VP-V/modules/control/skeleton/SkeletonFacts.h>
 
 #include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
+
+namespace VpMotion { class IVectorEngine; }   // modules/motion/estimation/VectorEngineInterface.h (the P5a engine)
 
 namespace Vpv
 {
@@ -39,6 +43,7 @@ namespace Vpv
 		namespace RE = RendererExtension;
 
 		struct HostState;   // per renderer (SkeletonModule.cpp)
+		struct Bundle;      // the lane and its producers for one source size (SkeletonModule.cpp)
 		class SkeletonGpuDispatcher;   // gpu/SkeletonGpuDispatcher.h (libplacebo; not included here)
 		struct GpuSlotTag { const void* host = nullptr; };   // the per-renderer pl_gpu, kept as a HostSlots aux
 
@@ -87,6 +92,32 @@ namespace Vpv
 				bool derived = true;
 			};
 			TimingFeed TimingFeedOf(const void* host) const;
+
+			// ---- SK-W stage D: demand and products from outside the lane (the camera link, the vector engine) ----------------------------
+			// EXTERNAL DEMAND. A component beside the lane (the camera extension) declares its consumers here (for example
+			// CameraLink::DeclareCameraConsumers: P7 / P8 / P9 / p7g with P2 / P3 / P4 as their inputs) and the products it publishes itself
+			// (`publishedOutside`, e.g. P7 / P8 / p7g by the camera fit worker straight into the lane's slot table: LaneOf(host)->State()->table).
+			// The next frame reconfigures the lane graph, which then holds those products and their ancestors; the declared consumers also start the
+			// vector engine (IVectorEngine::SetCameraFitWanted) when any of them reads a camera product. `owner` identifies the declaring object;
+			// one entry per (host, owner), replaced by the next call. Any thread. Consumer ids must be unique across owners (the first wins; the
+			// rest are counted and shown). Cleared with ClearExternalDemand (the declaring component's GpuReleased / Shutdown).
+			void SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
+				const std::vector<VpSkeleton::ProductId>& publishedOutside);
+			void ClearExternalDemand(const void* host, const void* owner);
+			// The engine of a renderer (null = none). Default: Query("vpv.vector_engine.v1") -> IVectorEngineDirectory::EngineFor(host). Tests inject a fake.
+			using EngineProvider = std::function<VpMotion::IVectorEngine*(const void* host)>;
+			void SetEngineProviderForTesting(EngineProvider provider) { engineProvider_ = std::move(provider); }
+			// The ENGINE FEED (render thread): once per frame (AfterRender, retried at Begin) the module publishes the P2m / P3 (and P2) slots of the
+			// frame the engine just made a verified field for (IVectorEngine::LatestVerifiedFieldSeq), with the stamp the field was computed under;
+			// the frame's own seal at Begin accepts or rejects them like any lane result. The slot CONTENT of P3 is the engine's texture (a GPU
+			// product: no kernel copies it into the slot yet, see README); what the module records and serves here are the facts of the field.
+			FeedCounters FeedCountersOf(const void* host) const;
+			bool EngineFieldFactsOf(const void* host, uint64_t seq, EngineFieldFacts& out) const;
+			// Tests: the retry step the module runs at every Begin and AfterRender (the P1 inputs are published by the lane's own threads).
+			void RetryEngineFeedForTesting(const void* host);
+			// The scene of frame `seq` against `seq - 1` from the two P4 records (render thread, after the seal of `seq`). False when a record is not readable.
+			bool SceneFactsOf(const void* host, uint64_t seq, SceneFacts& out) const;
+
 			// The queue the lane graph is sized for: the terms the record histories are derived from (render-ahead R, lane lead L,
 			// look-ahead walk frames; VpSkeleton::QueueFramesFor). `wired` says which of the three a feed has delivered (kRenderAhead |
 			// kLaneLead | kLookAhead); an undelivered term keeps its default (0 / 1 / 0), so the histories stay at their floors, and the
@@ -181,6 +212,10 @@ namespace Vpv
 			void AfterRender(HostState& st, int64_t seq);
 			void Refresh(HostState& st);
 			void OnCollectAhead(HostState& st, const RE::QueueView& view);
+			void FeedEngine(HostState& st, bool retryOnly);
+			bool PublishEngineSlots(HostState& st, Bundle& b, EngineFieldFacts& facts, unsigned& doneMask);
+			bool CollectExternal(const void* host, std::vector<VpSkeleton::ConsumerDecl>& consumers, std::vector<VpSkeleton::ProductId>& products,
+				bool& wantsCameraFit, size_t& duplicates) const;
 			template<class F> void MergeTerm(F&& set)
 			{
 				uint64_t cur = queueBits_.load(std::memory_order_relaxed);
@@ -200,6 +235,17 @@ namespace Vpv
 			Hub::HostSlots<GpuSlotTag> gpuSlots_;   // aux = the renderer's pl_gpu (GpuCreated), cleared at GpuReleased
 			bool cardOverride_ = false;
 			bool startWorkers_ = true;
+			struct ExternalEntry
+			{
+				const void* host = nullptr;
+				const void* owner = nullptr;
+				std::vector<VpSkeleton::ConsumerDecl> consumers;
+				std::vector<VpSkeleton::ProductId> products;
+			};
+			mutable std::mutex externalMutex_;
+			std::vector<ExternalEntry> external_;
+			std::atomic<uint64_t> externalVersion_{ 0 };
+			EngineProvider engineProvider_;
 			VpSkeleton::CardProfile card_;
 			static uint64_t Pack(QueueShape q)
 			{

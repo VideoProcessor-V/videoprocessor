@@ -120,6 +120,20 @@ No `VP_*` variable changes the module's behaviour.
   job ..."); the render thread's pass-timer readout needs one generic host call at the existing timer site (`Inbox::Motion().DrainInto(passTimerHook.acc)`), which is a
   Z3 hunk and is handed to the owner of that zone (not applied here). DejudderWarp's own `SetPassSampling` / `TakePassGpuMs` have no caller yet: the same host site.
 
+## Demand and products from outside the lane (SK-W stage D: what the camera link ports to)
+
+| API (all `Vpv::Skeleton::SkeletonModule` unless noted) | Meaning |
+|---|---|
+| `SetExternalDemand(host, owner, consumers, publishedOutside)` / `ClearExternalDemand(host, owner)` | the camera extension declares its consumers (`CameraLink::DeclareCameraConsumers`: P7 / P8 / P9 / p7g with P2 / P3 / P4 as inputs) and the products it publishes itself. The next Begin reconfigures the lane graph (`externalVersion_`), which then holds them. Consumer ids must be unique (first wins; duplicates are counted and shown) |
+| `LaneOf(host)->State()->table` (`VpSkeleton::SlotTable`) | where the camera fit worker publishes P7 / P8 / p7g (`Claim` -> `LaneAncestors` -> `Publish`, as `CameraLane` did in its own table); `State()->bufs[idx]` are the CPU buffers of the CPU products (P7, P9, p7g) |
+| `AnalysisLane::SetExternalProducts` (set by the module from `publishedOutside` and, with any external consumer, P2 / P2m / P3) | the seal's live fill DECLINES these products (counted, "Analysis: products published outside the lane: ..."): the lane never makes them, a frame the outside producer did not publish in time is Unavailable and its readers fall back |
+| `IVectorEngine::SetCameraFitWanted(bool)` (engine interface) and `VectorDemand::Consumer::CameraFit` | an external consumer that reads P7 / P8 / P9 / p7g starts the engine: the module calls it (render thread, on change); the engine merges the want into its next `VectorDemand::Decide` (source-field consumer: producer + render-time estimate). Withdrawn when the demand is cleared |
+| the ENGINE FEED: `FeedCountersOf`, `EngineFieldFactsOf(host, seq, EngineFieldFacts&)` | at AfterRender (retried at Begin) the module takes `LatestVerifiedFieldSeq()`; unless `PairSpansSlip(from, to)` it publishes the P2m / P3 slots (P2 only with an engine session and a valid `EngineGlobal`) of frame `seq` = pairTo under `hdr.honoured = VerifiedField::stamp` (the engine's `MotionValidity::StampAt`); `FieldEra()` changes forget what was pending. The frame's own seal at its Begin accepts or rejects them. Facts: pair, grid, block size, scale, stamp, `EngineGlobal` (`SkeletonFacts.h`) |
+| `SceneFactsOf(host, seq, SceneFacts&)` | cut / cut-possible / fade / flash and the raw record values derived from P4(seq) and P4(seq-1) by `VpUnit::CutFadeJudge::ClassifyEvents` (never stored), plus whether the Indicator saw a FULL / continuity event between the two frames and Bill's picture rectangle. Fade gain / offset: run `CutFadeJudge::FadeFit` on the given means and spreads with the reader's own scaling |
+| `PassTimers::Inbox::Motion().PostCameraFit(ms)` / `PostCameraReadback(ms)` (`core/PassTimerInbox.h`) | the `camera.fit` (CPU work) and `camera.readback` (CPU wait) rows; the skeleton prints them ("Skeleton cost row ..."), the host drain puts them in the pass-timer readout |
+
+**What the module does NOT do (named gaps).** (1) The CONTENT of P3 / P2m is the engine's texture (rgba32f, 16 x 16 source-pixel blocks); the P3 declaration is one texel per 8 x 8 block and a GPU product has no CPU buffer, so the slot is a published, sealed, stamp-checked marker plus the facts above, not a copy of the field: copying needs a resample kernel on the GPU-work hook. A reader that needs the pixels asks the engine (`FieldOf`) on the render thread, as the camera's readback ring does. (2) The seal of frame N is at the Begin of N (the hub's "BeforeRender": `NotifyFrame(Begin)`, after ResyncExtension's FrameSeal, already dispatched at LVR; the release is `AfterRender` -> `OnFrameRetired`, also dispatched), so a product that needs frames AFTER N to exist (the camera fit, which finishes a few frames after the engine made the field) cannot be sealed for N: its seal would have to lag by k frames with the frame's own stamp and its ancestors kept k frames longer. That is a core change (a per-node seal lag in `SlotTable::Resolve` / `AnalysisLane`, ring headroom of renderAhead + lag), not a host line; it is NOT in this stage and needs a decision (the camera keeps `CameraLane`'s lagged seal until then). (3) The `skeleton.report` consumer is unchanged; with external demand the governor also plans P2m / P3 / P7 / P8 rings, which cost memory the lane never fills for P2m / P3 (a few MB at 4K).
+
 ## Products
 
 | Id | Unit version | Fill rule | Consumer fallback when absent |
@@ -148,6 +162,7 @@ Every downgrade is visible (Ctrl+I line, Ctrl+Alt+D, Config status); none is log
 | `skeleton_lane_lead` | `lane lead capped at N frame(s) (queue holds M; ring slot budget)` (and the render-ahead form) | the fed lane lead / render-ahead depth exceeds the ring-slot budget shared by R + L |
 | `skeleton_regulator` | `regulator input: slack derived from render time; presentation facts not wired` | the S5 regulator is fed derived slack (no host presentation facts yet) |
 | `skeleton_vram_users` | `VRAM not declared to the governor: <modules> (its memory is not in the budget)` | a module that holds video memory called `VramUsers::MarkActive` but declared none of it (MV7 guard) |
+| `skeleton_engine_feed` | `no vector engine for this renderer: the pair and field slots (P2m, P3) are not published; their readers fall back` | external consumers are declared (P2m / P3 are in the graph) but the renderer has no vector engine |
 | `skeleton_history` | `quality pattern history capped at N frames (...)` | the rate or the queue asks for deeper record histories than the 255-slot rings allow |
 | `skeleton_gpu_shadow` | `shadow: GPU products skipped (no GPU dispatcher, no GPU work)` | `analysis_lane = shadow` |
 | `skeleton_gpu_device` | `GPU products: no render device (...)` | `analysis_lane = on` without a usable `pl_gpu` |
@@ -190,7 +205,8 @@ CPU only (no GPU): classes `SkeletonSettingsTests` (incl. `skeleton_gpu_gap` / `
 `SkeletonLaneTests`, `AnalysisLaneGpuHookTests` (lane deferral, `ReadOf`, `StepsFor`). Live queue feed and regulator input (`SkeletonModuleTests`):
 `TheQueueFeedsEachMergeOnlyTheirOwnTerm` (three threads CAS-merging their terms), `TheLaneLeadIsTheQueueTheHostCollectedAheadAndIsShown` (0 and 255 cases),
 `AQueueStarveIsShownAndRecovers`, `TheQueuePhaseIsInertWhenTheLaneIsOffOrOriginal`, `TheRegulatorGetsTheDerivedSlackEveryFrameAndSaysSo`,
-`TheThreeFeedsTogetherWireTheWholeQueue`, `DeclaredVramUsersAreInThePlanTheLedgerAndTheGuard`.
+`TheThreeFeedsTogetherWireTheWholeQueue`, `DeclaredVramUsersAreInThePlanTheLedgerAndTheGuard`, stage D: `ExternalCameraConsumersJoinTheLaneGraphAndStartTheEngine`,
+`WithoutAnEngineTheFeedSaysSo`, `TheEngineFeedPublishesTheFieldSlotsWithTheFieldsOwnStamp`, `ASceneIsDerivedFromTwoP4RecordsNeverStored`.
 GPU (libplacebo WARP unless `VP_TEST_GPU=hardware`): `SkeletonGpuDispatcherWarpTests` (1024 codes exact, extend == CPU, alloc == declaration, lane == live),
 `LaneGpuGrainKernelWarpTests`, `LaneGpuRegionKernelWarpTests`, `LaneGpuLightKernelWarpTests`.
 

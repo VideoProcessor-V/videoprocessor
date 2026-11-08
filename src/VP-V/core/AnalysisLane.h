@@ -543,6 +543,12 @@ public:
     void SetGpuDispatcher(IGpuDispatcher* d) { dispatcher_ = d; }
     void SetLiveFill(LiveFill fill) { liveFill_ = std::move(fill); }
     void RegisterCpuLiveCompute(ProductId id, CpuLiveCompute fn) { cpuLive_[id] = std::move(fn); }
+    // SK-W stage D: products whose frames are PUBLISHED by a producer outside the lane (the vector engine feed for P2m / P3, the camera
+    // fit worker for P7 ...): the lane never makes them, so the seal's live fill declines them (counted, shown) instead of recording a GPU
+    // fill nothing can run. A frame the outside producer published in time is sealed like any lane result. Render thread.
+    void SetExternalProducts(const std::vector<ProductId>& ids) { externalIds_ = ids; }
+    const std::vector<ProductId>& ExternalProducts() const { return externalIds_; }
+    uint64_t ExternalDeclined() const { return externalDeclined_; }
     // The render-device release fence's completed value for a product (lane polls it before reuse).
     void SetReleaseCompleted(std::function<uint64_t(ProductId)> f) { releaseCompleted_ = std::move(f); }
     // 70b G0: GPU live deferral. On, a GPU-compute product's live fill at the seal (OnRenderStart, BEFORE the
@@ -1098,6 +1104,15 @@ public:
             out.push_back("Analysis: " + std::to_string(totalDeclined_) +
                           " product frames unavailable (no producer result and no live fill; the consumer uses its own fallback)");
         out.push_back(std::string("Analysis lead: ") + LeadText(lead_));
+        if (!externalIds_.empty()) {
+            std::string names;
+            for (ProductId id : externalIds_)
+                if (st->IndexOf(id) >= 0)
+                    names += (names.empty() ? "" : ", ") + NameOf(*st, id);
+            if (!names.empty())
+                out.push_back("Analysis: products published outside the lane: " + names + "; " + std::to_string(externalDeclined_) +
+                              " frame(s) were not published in time (the readers use their own fallback)");
+        }
         out.push_back("Analysis level: " + std::to_string(unsigned(regulator_.Level())) + "/"
                       + std::to_string(unsigned(regulator_.MaxLevel())));
         out.push_back("Analysis late: " + std::to_string(lateRingSum_) + " per 10 s");
@@ -1420,6 +1435,11 @@ private:
         const int idx = st.IndexOf(n.id);
         if (idx < 0)
             return false;
+        for (ProductId e : externalIds_)
+            if (e == n.id) {
+                ++externalDeclined_;   // published outside the lane or not at all: never a GPU / CPU fill of the lane's
+                return false;
+            }
         const uint64_t t0 = nowUs_ ? nowUs_() : 0u;
         bool ok = false;
         if (n.backend == Backend::Cpu) {
@@ -1564,6 +1584,8 @@ private:
     std::vector<std::pair<ProductId, uint64_t>> failed_;
     DeferredReport deferredTotals_;
     std::map<ProductId, CpuLiveCompute> cpuLive_;
+    std::vector<ProductId> externalIds_;   // products published outside the lane (SetExternalProducts)
+    uint64_t externalDeclined_ = 0;        // seal-time live fills of those products that were declined (nothing published in time)
     std::function<uint64_t(ProductId)> releaseCompleted_;
     std::vector<ProductFrameResult> empty_;
     std::string error_;

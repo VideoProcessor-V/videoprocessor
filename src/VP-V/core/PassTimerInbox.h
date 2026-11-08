@@ -20,6 +20,13 @@
 // draining it the oldest sample is dropped and counted, never grown. Header-only, C++14.
 namespace PassTimers {
 
+// Row names the benchmark and the readout key on (PassTimers keys rows by name).
+namespace Rows {
+constexpr const char* kCameraFit = "camera.fit";              // CPU work: the camera fit on the camera worker
+constexpr const char* kCameraReadback = "camera.readback";    // CPU wait: the field copy's request -> ready latency (never counted as work)
+}
+
+
 class Inbox {
 public:
     static constexpr size_t kCapacity = 256;
@@ -54,6 +61,10 @@ public:
         queue_.push_back(s);
         ++posted_;
     }
+
+    // The camera's two CPU rows (SK-W stage D): the fit on the camera worker (work) and the field readback latency (a wait).
+    void PostCameraFit(double ms) { Post(Kind::CpuWork, Rows::kCameraFit, ms); }
+    void PostCameraReadback(double ms) { Post(Kind::CpuWait, Rows::kCameraReadback, ms); }
 
     // Render thread: moves the queued samples into `acc` (the hook's accumulator); returns how many.
     size_t DrainInto(Accumulator& acc)
