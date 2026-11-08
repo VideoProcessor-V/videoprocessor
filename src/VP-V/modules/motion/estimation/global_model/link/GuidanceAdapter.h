@@ -52,6 +52,10 @@ namespace CameraLink
 		// Binds to this renderer's engine. `counts` = the 16 B readback (ownership taken; null = the counts are never read and the
 		// pairs are judged on the plan counters). Registers the hook only when a switch is on.
 		void Attach(VpMotion::IVectorEngine* engine, std::unique_ptr<IGuidanceCountsSource> counts);
+		// LOCK RULE: Detach (and SetSettings / Attach, which may unregister) run on the render thread with renderMutex held and wait on the core's
+		// observer mutex; the camera worker holds that mutex while it pumps the lane job. So the host's p4 reader, nextPair hint and anything
+		// they call must NEVER take renderMutex or wait for the render thread, or Detach deadlocks. (CameraLinkCore::SetFitDoneObserver asserts
+		// in debug builds that it is not called from the observer's own thread.)
 		void Detach();
 		bool Attached() const { return m_engine != nullptr; }
 		bool Hooked() const { return m_hooked; }

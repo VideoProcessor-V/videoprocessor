@@ -36,6 +36,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace CameraLink
@@ -124,6 +125,10 @@ namespace CameraLink
 
 		// K4: the guide lane job's trigger. Called on the fitting thread after EVERY fit (published or late), with the record's seq,
 		// once its pool entry is committed (publish happened before). Set at setup; a copy is taken per call under a mutex.
+		// LOCK RULE: the observer runs under m_observerMutex on the camera worker, and SetFitDoneObserver (the adapter's Detach / Reconcile, render
+		// thread, renderMutex held) takes the same mutex, so it waits for a call in flight. Therefore nothing the observer reaches (the guide
+		// lane job: the host's p4 reader, the nextPair hint, the context provider) may ever take renderMutex or wait for the render thread.
+		// Debug builds assert that SetFitDoneObserver is not called from the observer's own thread (a self-deadlock).
 		void SetFitDoneObserver(std::function<void(uint64_t fitSeq)> f);
 		// K4: the measured fit cost (p95) and the readback latency the guide lag d is derived from (GuidanceLag.h).
 		GuideLagMeter& LagMeter() { return m_lagMeter; }
@@ -175,6 +180,7 @@ namespace CameraLink
 		void AddTimerSample(const char* row, double ms, bool wait);
 		std::map<uint64_t, std::chrono::steady_clock::time_point> m_requestedAt;   // render thread: field copy requests in flight
 		std::mutex m_observerMutex;
+		std::atomic<std::thread::id> m_observerThread{ std::thread::id() };   // the thread inside the observer right now (debug check)
 		std::function<void(uint64_t)> m_fitDone;
 
 		// status state touched by the worker's onResult

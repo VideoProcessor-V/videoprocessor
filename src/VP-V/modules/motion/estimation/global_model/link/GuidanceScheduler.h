@@ -170,6 +170,10 @@ namespace CameraLink
 		// The GPU ms of the Estimate that ran pair N guided (the sum of the motion pass timers the host took after Estimate;
 		// < 0 = not measured). Goes into the pair's VP_MOTION_BENCH row. Render thread, after BeforeEstimate.
 		void NoteGpuMs(uint64_t pairSeq, double ms);
+		// TEST SEAM ONLY: stores `result` as the lane result of pair N exactly as TryPublishLane would, but as if it had been built under
+		// the thresholds `builtUnder` (the switches, lag and record are the current ones). It bypasses SetSettings' clear, so a test can
+		// prove that the threshold key ALONE rejects a stored result. Never called by production code.
+		void StoreLaneForTest(uint64_t pairSeq, const GuideResult& result, const CameraModel::MeasurementConfig& builtUnder);
 		// What the matcher did with the guide (render thread, right after Estimate): visible diagnostics and the bench's gpu_ms.
 		void OnEstimateOutcome(uint64_t pairSeq, const EstimateOutcome& o);
 

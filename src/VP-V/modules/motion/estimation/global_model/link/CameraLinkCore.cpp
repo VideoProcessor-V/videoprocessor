@@ -5,6 +5,7 @@
 #include "CameraUsable.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 
@@ -217,6 +218,8 @@ namespace CameraLink
 
 	void CameraLinkCore::SetFitDoneObserver(std::function<void(uint64_t fitSeq)> f)
 	{
+		// Called from inside the observer it would wait for itself: the lock rule (CameraLinkCore.h) forbids it.
+		assert(m_observerThread.load() != std::this_thread::get_id());
 		std::lock_guard<std::mutex> lock(m_observerMutex);
 		m_fitDone = std::move(f);
 	}
@@ -416,7 +419,11 @@ namespace CameraLink
 		// SetFitDoneObserver(nullptr) (the adapter's Detach) returns only when no call is in flight: the observer's captures stay valid.
 		std::lock_guard<std::mutex> lock(m_observerMutex);
 		if (m_fitDone)
+		{
+			m_observerThread.store(std::this_thread::get_id());
 			m_fitDone(job.seq);
+			m_observerThread.store(std::thread::id());
+		}
 	}
 
 	std::vector<FallbackCatalog::Decision> CameraLinkCore::CollectDecisions()

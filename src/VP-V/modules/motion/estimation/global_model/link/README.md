@@ -58,6 +58,18 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 
 ## K4 wiring on P5a's contract (2026-11-07)
 
+**STATUS: K4 is NOT reachable at runtime yet.** Nothing instantiates `CameraGuidanceAdapter`, and the guidance sources are not in the renderer
+projects (`GuidanceScheduler.cpp`, `GuideLaneJob.cpp`, `GuidanceAdapter.cpp`, `GuidanceCountsRing.cpp` are in the Test project only). It becomes
+reachable only when `CameraExtension` wires the adapter in ONE commit: the four .cpp files into `VideoProcessor-VPRenderer.items.props` /
+`...Beta.items.props`, the host instantiation (`Attach` with the renderer's engine from `IVectorEngineDirectory`, `OnFrame`, `FeedPassTimers`,
+`Detach`) and the `MeasurementSwitches` from K3's `vector_*` keys. That step needs K3 (keys, rows, status: audited on `r1cam/k3b` `4c52b7e86`).
+Until then every switch is off by construction and the engine runs its `Estimate` only.
+
+**LOCK RULE.** `CameraGuidanceAdapter::Detach` (also `SetSettings` / `Attach` when they unregister) runs on the render thread with `renderMutex`
+held and waits on `CameraLinkCore`'s observer mutex; the camera worker holds that mutex while it pumps the lane job. So the host's `p4` reader,
+its `nextPair` hint and anything they call must NEVER take `renderMutex` or wait for the render thread (they read published slots only), or
+`Detach` deadlocks. `CameraLinkCore::SetFitDoneObserver` asserts in debug builds that it is not called from the observer's own thread.
+
 P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` calls `BeforeEstimate` / `AfterEstimate` around the matcher's
 `Estimate` for the in-render AND the ahead estimate (render thread, never for the warm-up pair). The camera side adds no host hunk.
 * **Adapter (`CameraGuidanceAdapter`).** The engine of a renderer comes from `Query("vpv.vector_engine.v1")` -> `IVectorEngineDirectory::EngineFor(host)`.

@@ -35,6 +35,7 @@ namespace CameraLink
 
 	void CameraGuidanceAdapter::Detach()
 	{
+		// Render thread, renderMutex held (GuidanceAdapter.h LOCK RULE): SetFitDoneObserver below waits for the worker's pump.
 		if (m_hooked && m_engine)
 			m_engine->SetPreEstimateHook(nullptr);   // FIRST: the engine must not call a hook that is going away
 		m_hooked = false;

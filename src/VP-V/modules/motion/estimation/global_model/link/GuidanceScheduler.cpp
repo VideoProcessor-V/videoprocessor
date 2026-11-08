@@ -270,6 +270,20 @@ namespace CameraLink
 		return LaneOutcome::Published;
 	}
 
+	void GuidanceScheduler::StoreLaneForTest(uint64_t pairSeq, const GuideResult& result, const CameraModel::MeasurementConfig& builtUnder)
+	{
+		uint64_t recSeq = 0;
+		m_link.PreviousRecordSeq(pairSeq, m_lag, recSeq);
+		std::lock_guard<std::mutex> lock(m_mutex);
+		Stored& s = m_lane[pairSeq % m_lane.size()];
+		s.seq = pairSeq;
+		s.key = KeyOf(m_governor.Apply(m_settings.switches), m_lag);
+		s.cfgKey = CfgKeyOf(builtUnder);
+		s.recSeq = recSeq;
+		s.result = result;
+		s.result.fromLane = true;
+	}
+
 	GuideResult GuidanceScheduler::Guide(uint64_t pairSeq, double pairSeconds)
 	{
 		// The cool-down runs on MEASURED pair time for every pair asked about, guided or not (a narrow-only configuration

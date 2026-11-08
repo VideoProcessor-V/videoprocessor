@@ -441,6 +441,31 @@ namespace VideoProcessorTest
 			Assert::IsTrue(sched.Guide(4).fromLane);
 		}
 
+		TEST_METHOD(TheThresholdKeyAloneRejectsAStoredLaneResultBuiltUnderOtherThresholds)
+		{
+			WireLink link;
+			ChainOf(link, { 1, 2 });
+			CameraLink::GuidanceSettings s = GuideOn();
+			CameraLink::GuidanceScheduler sched(link, s);
+			sched.SetLag(2);
+			// A real guide for pair 3 (the same function the lane runs), stored WITHOUT SetSettings: nothing clears the store.
+			CameraLink::GuidanceScheduler maker(link, s);
+			maker.SetLag(2);
+			const CameraLink::GuideResult made = maker.Guide(3);
+			Assert::IsTrue(made.frame != nullptr);
+			// Control: stored as built under the scheduler's own thresholds, it is used.
+			sched.StoreLaneForTest(3, made, s.config);
+			Assert::IsTrue(sched.Guide(3).fromLane, L"same thresholds: the stored result is consumed");
+			// Same switches, same lag, same record, same pair: only one threshold differs in what it was built under.
+			CameraModel::MeasurementConfig other = s.config;
+			other.narrowRadiusSigmas += 1.0;
+			sched.StoreLaneForTest(3, made, other);
+			const CameraLink::GuideResult r = sched.Guide(3);
+			Assert::IsFalse(r.fromLane, L"the threshold key alone rejects it: the render computes live");
+			Assert::IsTrue(r.frame != nullptr);
+			Assert::AreEqual(uint64_t(1), sched.Counters().fromLane, L"only the control was consumed from the lane");
+		}
+
 		TEST_METHOD(ASlipThatAppearsAfterTheLaneStoredItIsSeenAtConsumption)
 		{
 			WireLink link;
