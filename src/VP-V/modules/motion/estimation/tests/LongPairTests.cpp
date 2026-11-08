@@ -248,9 +248,9 @@ namespace VideoProcessorTest
 		// MV4: the service is catalogued with its three cost routes before it is wired, and a finished pair reaches the pass-timer inbox.
 		TEST_METHOD(ServiceProductIsCataloguedWithItsVramUserAndPassTimerRoute)
 		{
-			const std::vector<VpSkeleton::ServiceProductRow>& rows = VpSkeleton::ServiceProductRows();
+			const std::vector<VpSkeleton::Catalog::ServiceProductRow>& rows = VpSkeleton::Catalog::ServiceProductRows();
 			Assert::AreEqual(size_t(1), rows.size());
-			const VpSkeleton::ServiceProductRow& row = rows[0];
+			const VpSkeleton::Catalog::ServiceProductRow& row = rows[0];
 			Assert::AreEqual(std::string("long_pair_field"), std::string(row.token));
 			Assert::IsTrue(row.tier == VpSkeleton::Tier::T2, L"optional, shed first");
 			Assert::AreEqual(std::string(VpMotion::kLongPairFallbackId), std::string(row.fallbackId), L"the visible absence entry is the service's own");
