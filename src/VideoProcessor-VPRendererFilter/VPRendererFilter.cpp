@@ -11,6 +11,7 @@
 #include <DebugLog.h>
 #include <IMediaSideData.h>
 #include <VideoFrame.h>
+#include <VP-V/abi/VpvHostCalls.h>
 #include <VideoConversionOverride.h>
 
 #include <exception>
@@ -390,7 +391,7 @@ namespace VPRendererFilter
 				destroy(r);
 			});
 
-			if (!renderer->SupportsTimedFileFrames())
+			if (!VpvCalls::SupportsTimedFileFrames(renderer.get()))
 			{
 				reason = "the VP renderer does not support timed file frames (ABI 37 renderer side missing)";
 				return E_FAIL;
@@ -457,7 +458,7 @@ namespace VPRendererFilter
 			m_host->SetRenderer(nullptr);
 		try
 		{
-			renderer->CancelFileFrameWait();
+			VpvCalls::CancelFileFrameWait(renderer.get());
 		}
 		catch (...)
 		{
@@ -657,7 +658,7 @@ namespace VPRendererFilter
 		m_waitCancelled = true;
 		if (renderer)
 		{
-			try { renderer->CancelFileFrameWait(); }
+			try { VpvCalls::CancelFileFrameWait(renderer.get()); }
 			catch (...) {}
 		}
 	}
@@ -669,7 +670,7 @@ namespace VPRendererFilter
 		{
 			if (m_pInputPin->IsFlushing() || m_State == State_Stopped)
 				return false;
-			if (renderer->WaitForFileFrameSlot(kQueueWaitSliceMs))
+			if (VpvCalls::WaitForFileFrameSlot(renderer.get(), kQueueWaitSliceMs))
 				return true;
 			if (m_waitCancelled.load())
 			{
@@ -834,7 +835,7 @@ namespace VPRendererFilter
 
 			const int64_t now = m_timingClock.TimingClockNow();
 			VideoFrame frame(buffer->Data(), ++m_frameCounter, now, buffer);
-			renderer->OnTimedVideoFrame(frame, timing);
+			VpvCalls::OnTimedVideoFrame(renderer.get(), frame, timing);
 			buffer->Release();   // VP holds its own reference while queued
 
 			m_waitCancelled = false;

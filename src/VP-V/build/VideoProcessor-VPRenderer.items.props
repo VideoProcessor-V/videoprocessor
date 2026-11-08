@@ -16,6 +16,7 @@
     <ClCompile Include="..\VP-V\modules\motion\estimation\VectorEngineExtension.cpp" />
     <ClCompile Include="..\VP-V\modules\output\dither\OutputEncodingRepair.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
+    <ClCompile Include="..\VP-V\abi\RendererAbiBridge.cpp" />
     <ClCompile Include="..\VP-V\segments\OutputSegmentsMerge.cpp" />
     <ClCompile Include="..\VP-V\segments\OutputSegments.cpp" />
     <ClCompile Include="..\VP-V\segments\EntranceSegment.cpp" />
