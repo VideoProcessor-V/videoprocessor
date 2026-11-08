@@ -179,6 +179,64 @@ namespace VramGovernorTestsNs
 			Assert::IsTrue(p.fits);
 		}
 
+		TEST_METHOD(ASingleStoreLaneDropRanksAsLossyNotLossless)
+		{
+			// S2: a single-store product has no live fill, so its lane-drop level is "not kept" (its readers lose the store and run their own
+			// fallback): a reduced, NON-identical mode. It must rank as lossy: an ordinary product of the same tier, whose lane drop is an
+			// identical in-render recompute, sheds first even though the store would otherwise come earlier in the reverse topological order.
+			using namespace VpIndicator;
+			constexpr ProductId kPlain = 0, kStore = 1, kReader = 2;
+			const CounterMask content = Bit(kFull) | Bit(kContinuity);
+			std::vector<ProductDecl> d;
+			d.push_back(detail::Make(kPlain, "plain", "plain product", Backend::GpuCompute, 0, Tier::T0, content, 0));
+			ProductDecl store = detail::Make(kStore, "store", "single store", Backend::GpuCompute, 0, Tier::T0, content, 0);
+			store.singletonStore = true;
+			d.push_back(store);
+			ProductDecl reader = detail::Make(kReader, "reader", "store reader", Backend::RenderOnly, 0, Tier::T0, content, 0);
+			detail::AddInput(reader, kStore, 1);
+			d.push_back(reader);
+			d[kPlain].size.fixedBytes = 64u * 1024u * 1024u;
+			d[kStore].size.fixedBytes = 64u * 1024u * 1024u;
+			d[kReader].size.fixedBytes = 64u;
+			const Registry reg(d);
+			ConsumerDecl c;
+			c.id = 1;
+			AddConsume(c, kPlain);
+			AddConsume(c, kReader);
+			GraphSettings gs;
+			gs.dims.width = 64;
+			gs.dims.height = 64;
+			gs.renderAhead = 0;
+			gs.laneLead = 1;
+			gs.queueDepth = 4;
+			const Graph g = BuildGraph(reg, { c }, gs);
+			Assert::IsTrue(g.valid);
+			Assert::AreEqual(2, int(g.Find(kStore)->ring), L"the store is a two-buffer ping-pong with no live pool");
+			Assert::AreEqual(0, int(g.Find(kStore)->livePool));
+			// Full need: plain 3 ring + 1 live buffers, store 2 buffers = 6 x 64 MiB. One step is enough at 300 MiB, whichever sheds first.
+			CardProfile card = Card4GB();
+			card.vramUsageBytes = 0;
+			card.vramBudgetBytes = 375 * kMB;   // x the starting headroom 0.80 = 300 MiB
+			TierInput in;
+			const TierPlan p = PlanTiers(reg, g, card, in);
+			const UserGrant* plain = p.governor.Find(uint16_t(kUserProductBase + kPlain));
+			const UserGrant* st = p.governor.Find(uint16_t(kUserProductBase + kStore));
+			Assert::IsNotNull(plain);
+			Assert::IsNotNull(st);
+			Assert::AreEqual(size_t(1), plain->level, L"the lossless in-render drop of the ordinary product goes first");
+			Assert::AreEqual(size_t(0), st->level, L"the single store keeps its lane: dropping it changes the picture (lossy)");
+			Assert::IsTrue(p.governor.fits);
+			// With the budget cut further the store is shed too, after the ordinary product, and says so visibly.
+			card.vramBudgetBytes = 100 * kMB;   // 80 MiB
+			const TierPlan tight = PlanTiers(reg, g, card, in);
+			Assert::AreEqual(size_t(1), tight.governor.Find(uint16_t(kUserProductBase + kPlain))->level);
+			Assert::AreEqual(size_t(1), tight.governor.Find(uint16_t(kUserProductBase + kStore))->level);
+			bool said = false;
+			for (const std::string& l : tight.governor.lines)
+				said = said || l.find("not kept (no live fill") != std::string::npos;
+			Assert::IsTrue(said, L"the store's drop is on the status lines");
+		}
+
 		TEST_METHOD(TransientPoolAtASizeChangeShedsMoreButStaysVisible)
 		{
 			const Registry reg = R4b();

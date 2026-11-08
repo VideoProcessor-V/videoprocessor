@@ -11,11 +11,11 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 
 | Count | Value |
 |---|---|
-| Modules | 43 |
-| Documented rows | 5 |
-| VP-V keys in code (outside Bill's schema lists) | 364 |
-| of which documented | 2 |
-| of which undocumented (appendix A) | 362 |
+| Modules | 45 |
+| Documented rows | 50 |
+| VP-V keys in code (outside Bill's schema lists) | 366 |
+| of which documented | 45 |
+| of which undocumented (appendix A) | 321 |
 | Documented keys with no code entry (appendix B) | 0 |
 
 ## Modules index
@@ -27,25 +27,27 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Input | `input.queue_timing` | built | [README](../../src/VP-V/modules/input/queue_timing/README.md) | 0 | 15 | 0/15 |
 | Input | `input.source_analysis` | partial | [README](../../src/VP-V/modules/input/source_analysis/README.md) | 0 | 19 | 0/19 |
 | Input | `input.light_level` | draft | [README](../../src/VP-V/modules/input/source_analysis/light_level/README.md) | 0 | 33 | 0/33 |
+| Input | `input.source_analysis.identity.chain` | draft | [README](../../src/VP-V/modules/input/source_analysis/identity/chain/README.md) | 1 | 0 | 0/0 |
 | Input | `input.source_analysis.lane.shared.half_luma` | draft | [README](../../src/VP-V/modules/input/source_analysis/lane/shared/README.md) | 1 | 0 | 0/0 |
 | Input | `input.source_analysis.picture.shared.picture_rect` | draft | [README](../../src/VP-V/modules/input/source_analysis/picture/shared/README.md) | 0 | 0 | 0/0 |
 | Input | `input.source_analysis.events.shared.cut_fade_judge` | draft | [README](../../src/VP-V/modules/input/source_analysis/events/shared/README.md) | 0 | 0 | 0/0 |
 | Input | `input.source_analysis.identity.shared.source_quality` | draft | [README](../../src/VP-V/modules/input/source_analysis/identity/shared/README.md) | 0 | 0 | 0/0 |
-| Motion | `motion.estimation` | built | [README](../../src/VP-V/modules/motion/estimation/README.md) | 0 | 32 | 0/32 |
+| Motion | `motion.estimation` | built | [README](../../src/VP-V/modules/motion/estimation/README.md) | 30 | 32 | 30/32 |
 | Motion | `motion.vector_delivery` | partial | [README](../../src/VP-V/modules/motion/vector_delivery/README.md) | 0 | 9 | 0/9 |
 | Motion | `motion.consumers` | built | [README](../../src/VP-V/modules/motion/consumers/README.md) | 0 | 35 | 0/35 |
 | Repair | `repair.encoding` | placeholder | [README](../../src/VP-V/modules/repair/encoding/README.md) | 0 | 1 | 0/1 |
 | Repair | `repair.deband` | built | [README](../../src/VP-V/modules/repair/deband/README.md) | 0 | 7 | 0/7 |
 | Repair | `repair.grain_split` | draft | [README](../../src/VP-V/modules/repair/grain_split/README.md) | 0 | 0 | 0/0 |
 | Repair | `repair.grain_split.shared.band_from_base` | draft | [README](../../src/VP-V/modules/repair/grain_split/shared/README.md) | 0 | 0 | 0/0 |
-| Repair | `repair.temporal_detail` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/README.md) | 0 | 5 | 0/5 |
+| Repair | `repair.temporal_detail` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/README.md) | 5 | 5 | 5/5 |
 | Repair | `repair.texture_restore` | built | [README](../../src/VP-V/modules/repair/texture_restore/README.md) | 0 | 5 | 0/5 |
 | Repair | `repair.temporal_detail.products` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/products/README.md) | 1 | 0 | 0/0 |
 | Repair | `repair.temporal_detail.shared` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/shared/README.md) | 0 | 0 | 0/0 |
+| Repair | `repair.stack` | draft | [README](../../src/VP-V/modules/repair/stack/README.md) | 0 | 0 | 0/0 |
 | Scaling | `scaling.rebase` | built | [README](../../src/VP-V/modules/scaling/rebase/README.md) | 0 | 4 | 0/4 |
 | Scaling | `scaling.route_4k` | placeholder | [README](../../src/VP-V/modules/scaling/route_4k/README.md) | 0 | 1 | 0/1 |
 | Scaling | `scaling.refine` | placeholder | [README](../../src/VP-V/modules/scaling/refine/README.md) | 0 | 1 | 0/1 |
-| Scaling | `scaling.chroma_upscale` | placeholder | [README](../../src/VP-V/modules/scaling/chroma_upscale/README.md) | 0 | 2 | 0/2 |
+| Scaling | `scaling.chroma_upscale` | placeholder | [README](../../src/VP-V/modules/scaling/chroma_upscale/README.md) | 1 | 2 | 1/2 |
 | Scaling | `scaling.chroma_upscale.basic` | draft | [README](../../src/VP-V/modules/scaling/chroma_upscale/basic/README.md) | 1 | 0 | 0/0 |
 | Scaling | `scaling.geometry` | built | [README](../../src/VP-V/modules/scaling/geometry/README.md) | 0 | 8 | 0/8 |
 | Scaling | `scaling.output` | partial | [README](../../src/VP-V/modules/scaling/output/README.md) | 0 | 30 | 0/30 |
@@ -64,14 +66,15 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Control | `control.diagnostics` | partial | [README](../../src/VP-V/modules/control/diagnostics/README.md) | 0 | 4 | 0/4 |
 | Control | `control.config` | partial | [README](../../src/VP-V/modules/control/config/README.md) | 0 | 0 | 0/0 |
 | Control | `control.gpu_memory` | draft | [README](../../src/VP-V/modules/control/gpu_memory/README.md) | 0 | 0 | 0/0 |
-| Control | `control.skeleton` | draft | [README](../../src/VP-V/modules/control/skeleton/README.md) | 0 | 5 | 0/5 |
+| Control | `control.skeleton` | draft | [README](../../src/VP-V/modules/control/skeleton/README.md) | 8 | 7 | 7/7 |
 
 ## Input
 
-Modules: `input.capture`, `input.signal`, `input.queue_timing`, `input.source_analysis`, `input.light_level`, `input.source_analysis.lane.shared.half_luma`, `input.source_analysis.picture.shared.picture_rect`, `input.source_analysis.events.shared.cut_fade_judge`, `input.source_analysis.identity.shared.source_quality`.
+Modules: `input.capture`, `input.signal`, `input.queue_timing`, `input.source_analysis`, `input.light_level`, `input.source_analysis.identity.chain`, `input.source_analysis.lane.shared.half_luma`, `input.source_analysis.picture.shared.picture_rect`, `input.source_analysis.events.shared.cut_fade_judge`, `input.source_analysis.identity.shared.source_quality`.
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
+| `source_id_evidence` | `input.source_analysis.identity.chain` | profile (VP-owned key lists, plumbing with P3) | enum | off, log, log+lines, log+lines+frames | log+lines (only active in shadow / on; until P3 the setter default is off) |  | VP-V > Input > Source identity | forced off | planned (setter only until P3: `ChainEstimator::SetEvidence` / `Monitor::SetChainEvidence`); Config status row "evidence: <level>, <size> in sid-evidence (cap 2048 MB), <n> dumps"; one-time notice "Source identity: evidence logging on (shadow)"; a failing disk is a visible notice once per episode; a level with no history folder reads "evidence: <level> requested, no folder (set the history folder)" plus one notice (never silently off); a refused hotkey press is a notice | storage-budgeted (2 GB FIFO cap), never GPU-dependent |
 | `source_stats_authority` | `input.source_analysis.lane.shared.half_luma` | profile (deferred) | enum | original, p4 | original |  | not in Config (deferred to SA3; needs the SCHEMA lock, RendererProfileConfig.h / MainConfigSchema.h) | Original = Bill's SceneDetector and analysis | Declared: deferred to SA3, not implemented in this package (the key is documented once, here; events/shared shares it) | same on all |
 
 ## Motion
@@ -80,15 +83,49 @@ Modules: `motion.estimation`, `motion.vector_delivery`, `motion.consumers`.
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
-| (none documented yet) | | | | | | | | | | |
+| `dejudder_consistency_px` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.5 .. 8.0 | 2 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_cut_histogram` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 2.0 | 0.3 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_est_candidates` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_est_gate` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_est_lambda` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 8.0 | 0.5 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_est_qpel` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | Motion tier presets: Classic off, Low on, Mid on, Upper on |
+| `dejudder_est_split` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | off | off | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | Motion tier presets: Low off, Mid off, Upper on |
+| `dejudder_est_split_sad` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 16.0 | 0 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_estimate_ahead` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | 1 | VP-V > Advanced; VP-V page > Motion (toggle) | Original pathway forces off | none of its own (the estimate ahead falls back to the render-time estimate) | same on all |
+| `dejudder_fade_floor` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 1.0 | 0.25 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_fade_match` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_global_prior` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_global_two` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_low_res` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | enum | off, search, all | all |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_match_tolerance` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.5 .. 16.0 | 4.5 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_regional_hold` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_search_range` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | int | 1 .. 16 | 8 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_texture_tolerance` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 4.0 | 0.25 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_vector_smooth` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_verify` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | off |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own (retirement candidate D) | same on all |
+| `dejudder_verify_share` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.02 .. 1.0 | 0.2 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own (retirement candidate D) | same on all |
+| `motion_ahead_frames` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | int | 0, 1, 2, 3, 4 (above 0: the time-based depth at the content rate; 0 = none ahead) | 4 | 4 | VP-V > Advanced | Original pathway forces 0 | `vector_engine_producer` (look-ahead stores nothing for this size), `motion look-ahead`; "Motion ahead:" log | Motion tier presets: Classic 0, Low 0, Mid 4, Upper 4 |
+| `motion_engine` | `motion.estimation` | profile (`vprenderer.<profile>`, motion group) | enum | auto, vp, smooth_motion | auto |  | Motion > Profile details | not forced (either/or: VP motion or libplacebo smooth motion) | smooth motion owns output: output-domain vector consumers fall back visibly ("libplacebo smooth motion owns output") | same on all |
+| `motion_history_fixes` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | on | VP-V > Proposed retirement | Original pathway forces off | none of its own (retirement candidate A) | same on all |
+| `optical_flow` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | on | VP-V > Advanced | Original pathway forces off | `vector_engine` (unserved consumers), `vector producer` (producer recovering / stopped), `motion look-ahead` (hand-off failures); status line "Vector engine" | Motion tier presets: Classic off, Low off, Mid on, Upper on |
+| `optical_flow_cost_trust` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | off | off | VP-V > Proposed retirement | not forced; unused while the Original pathway runs no VP motion estimate | none of its own (retirement candidate B) | same on all |
+| `optical_flow_fb_check` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | off | off | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `optical_flow_global` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `optical_flow_global_fallback` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `vector_demand` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | on | VP-V > Advanced; VP-V page > Motion (toggle) | Original pathway forces off | `vector_engine`, `vector_engine_producer`, `vector_engine_global`, `vector producer` (all released when off) | same on all |
 
 ## Repair
 
-Modules: `repair.encoding`, `repair.deband`, `repair.grain_split`, `repair.grain_split.shared.band_from_base`, `repair.temporal_detail`, `repair.texture_restore`, `repair.temporal_detail.products`, `repair.temporal_detail.shared`.
+Modules: `repair.encoding`, `repair.deband`, `repair.grain_split`, `repair.grain_split.shared.band_from_base`, `repair.temporal_detail`, `repair.texture_restore`, `repair.temporal_detail.products`, `repair.temporal_detail.shared`, `repair.stack`.
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
+| `temporal_detail` | `repair.temporal_detail` | profile | enum | off, steady, auto | off |  | not in Config (module not wired) | n/a (VP-only) | declared: "Temporal detail: inactive (<reason>)"; `Status()` line | budget-governed: the VRAM governor keeps fewer reference slots first (5 down to 1, `Params::slots`), then drops the scratch-arena temporaries (T1), then the module; nothing is fixed to a GPU model |
+| `temporal_detail_boost` | `repair.temporal_detail` | profile | bool | on, off (the fallback boost) | off |  | not in Config (module not wired) | n/a (VP-only) | declared: off unless re-validated on real encodes (owner 2026-10-31) | same as `temporal_detail` |
+| `temporal_detail_boost_max` | `repair.temporal_detail` | profile | float | 0.0 .. 0.3 | 0.15 |  | not in Config (module not wired) | n/a (VP-only) | declared; used when the boost is on | same as `temporal_detail` |
 | `temporal_detail_engine` | `repair.temporal_detail.products` | deferred (profile; SCHEMA lock held by W1-P3, reset 2 adds it) | enum | off, auto | off (`TdProducts::kEngineRequestedToday = false`) |  | deferred: VP-V > Repair > Temporal detail | n/a (VP-only) | Declared (deferred key; reset 2 adds it): `product.adaptive_downscale`, `product.dither_need`, `product.sigma_delta`, `product.chroma_cfl`, `product.debander`, `product.td_engine`; status lines "<consumer>: classical form (temporal-detail products: <reason>)" | budget-governed: the VRAM / ms governor decides which stage of each governed buffer fits (see Products) |
+| `temporal_detail_max_age` | `repair.temporal_detail` | profile | float | 0.25 .. 4.0 (seconds) | 2.0 |  | not in Config (module not wired) | n/a (VP-only) | declared | same as `temporal_detail` |
+| `temporal_detail_strength` | `repair.temporal_detail` | profile | float | 0.0 .. 1.0 | 1.0 |  | not in Config (module not wired) | n/a (VP-only) | declared | same as `temporal_detail` |
 
 ## Scaling
 
@@ -97,6 +134,7 @@ Modules: `scaling.rebase`, `scaling.route_4k`, `scaling.refine`, `scaling.chroma
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `chroma_upscale_basic` | `scaling.chroma_upscale.basic` | deferred (profile; added when the SCHEMA lock is free) | enum | off, lanczos | off |  | deferred: VP-V > Scaling > Chroma upscale | libplacebo's chroma upscaler (either/or: Original = libplacebo chroma) | Declared (deferred key): "Chroma upscale: libplacebo (<reason>)" | same on all (one pass, ~36 texel fetches per output pixel and plane pair) |
+| `chroma_upscale_vp` | `scaling.chroma_upscale` | profile | enum | off, cfl | off |  | Config editor > Scaling > VP chroma upscale (candidate) | libplacebo's own chroma upscaler (`chroma_upscaler`) | "Chroma upscale: libplacebo (<reason>)"; `Status()`; "grain split (chroma-from-luma)" while an own split runs | budget-governed: the VRAM governor drops the scratch-arena temporaries (T1) before the T0 ones; the module then fails visibly for the frame and libplacebo's chroma upscaler runs; nothing is fixed to a GPU model |
 
 ## Colour
 
@@ -129,7 +167,14 @@ Modules: `control.net_runtime`, `control.diagnostics`, `control.config`, `contro
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
-| (none documented yet) | | | | | | | | | | |
+| `vpv.skeleton.analysis_lane` | `control.skeleton` | [vpv.skeleton] | enum | off, shadow, on | off |  | not in Config (cfg-only until the M2 Config page) | off (nothing built) | `analysis_lane` (reduced / forced live / at minimum), `skeleton_lane` (waiting for `resync_event=on` or `frame_analysis_store=on`), `skeleton_gpu_shadow` ("shadow: GPU products skipped"), `skeleton_gpu_device` ("GPU products: no render device"), Ctrl+I line, Ctrl+Alt+D | the lane plans its tiers by video memory (VramGovernor); shadow = CPU lane only, no GPU dispatcher; on + a render device = CPU and GPU products (see the shed order under Status and fallbacks) |
+| `vpv.skeleton.analysis_lane_chunk_us` | `control.skeleton` | [vpv.skeleton] | int | 0..4000000 (0 = derived from the frame period) | 0 |  | not in Config (cfg-only until the M2 Config page) | n/a (VP-only) | invalid value: `skeleton_settings`, default kept | same on all |
+| `vpv.skeleton.analysis_lane_deterministic` | `control.skeleton` | [vpv.skeleton] | enum | auto, on, off | auto |  | not in Config (cfg-only until the M2 Config page) | n/a (VP-only) | `analysis_lane_determinism` when frames miss the bounded wait | same on all |
+| `vpv.skeleton.analysis_lane_test_wait_ms` | `control.skeleton` | [vpv.skeleton] | int | 0..4000000 | 0 |  | not in Config (cfg-only until the M2 Config page; test only) | n/a (VP-only) | invalid value: `skeleton_settings` | same on all |
+| `vpv.skeleton.camera_link` | `control.skeleton` | [vpv.skeleton] | enum | off, report | off |  | not in Config (cfg-only until the M2 Config page) | off (no state, no line) | `camera_link` when asked to report but unable (no store, no seal); status line when on | same on all |
+| `vpv.skeleton.grain_split_storage` | `control.skeleton` | [vpv.skeleton] | enum | full, compact | full |  | not in Config (cfg-only until the M2 Config page) | n/a (VP-only) | `grain_split_storage` entry of the kernel (Compact refused for the plane -> Full, with the reason; Compact granted -> Released); invalid value: `skeleton_settings` | P10 storage either/or; Compact is also the governor's visible budget step (Compact -> Full / Full -> Compact is shown by the kernel's decision, never silent) |
+| `vpv.skeleton.skeleton_gpu_gap` | `control.skeleton` | [vpv.skeleton] | enum | off, after_render | off |  | not in Config (cfg-only until the M2 Config page) | n/a (VP-only; off in the Original pathway) | after_render: `skeleton_gpu_gap` ("GPU lane work runs ahead of the present"); off with a dispatcher: `skeleton_gpu_gap_off`; invalid value: `skeleton_settings` | off: the GPU products get no lane producer (in-render-only, live form deferred); after_render: P10/P11/P12 lane jobs run in the AfterRender gap, chunked by the gap budget (one chunk per pass); the CPU products' gap is unchanged either way |
+| `vpv.skeleton.source_stats_walk` | `control.skeleton` | [vpv.skeleton] | enum | original, lane | original |  | not in Config (cfg-only until the M2 Config page) | Bill's active-picture walk | planned: the cfg key is not read from the file yet (a lane key set by tests and tooling); `source_stats_walk` entry when the lane's source stats are unavailable | same on all |
 
 ## Tier presets
 
@@ -173,28 +218,28 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 
 | Key | Module hint (manifest) | Golden default | VpvSection hint | Found in |
 |---|---|---|---|---|
-| `active_picture_startup_hold` | unassigned | on |  | RendererProfileConfig.h |
-| `adaptive_chroma_ssim` | scaling.output |  |  | RendererProfileConfig.h |
-| `adaptive_downscale` | scaling.output | 0 |  | RendererProfileConfig.h |
-| `adaptive_edge_hi` | scaling.output |  |  | RendererProfileConfig.h |
-| `adaptive_edge_lo` | scaling.output |  |  | RendererProfileConfig.h |
-| `adaptive_faithful` | scaling.output | auto | VP-V > Scaling > Grain-true downscale filter | RendererProfileConfig.h |
-| `adaptive_grain_floor` | scaling.output |  |  | RendererProfileConfig.h |
-| `adaptive_grain_hi` | scaling.output |  |  | RendererProfileConfig.h |
-| `adaptive_grain_lo` | scaling.output |  |  | RendererProfileConfig.h |
-| `adaptive_grain_map` | scaling.output | on | VP-V > Scaling > Grain map steers the downscale | RendererProfileConfig.h |
-| `adaptive_grain_map_smooth_ms` | scaling.output |  |  | RendererProfileConfig.h |
-| `adaptive_grain_shadow_bias` | scaling.output |  |  | RendererProfileConfig.h |
-| `adaptive_grain_smooth_ms` | scaling.output |  |  | RendererProfileConfig.h |
-| `adaptive_motion` | scaling.output | off |  | RendererProfileConfig.h |
-| `adaptive_motion_floor` | scaling.output | 0 |  | RendererProfileConfig.h |
-| `adaptive_motion_smooth_ms` | scaling.output | 250 |  | RendererProfileConfig.h |
-| `adaptive_motion_speed_hi` | scaling.output | 0.4 |  | RendererProfileConfig.h |
-| `adaptive_motion_speed_lo` | scaling.output | 0.1 |  | RendererProfileConfig.h |
-| `adaptive_upscale` | scaling.output | 0 | VP-V > Scaling > Grain-aware upscale for small sources | RendererProfileConfig.h |
-| `adaptive_upscale_superres_scale` | scaling.output |  |  | RendererProfileConfig.h |
-| `adaptive_upscale_w_base` | scaling.output |  |  | RendererProfileConfig.h |
-| `adaptive_w_base` | scaling.output | 1.0 |  | RendererProfileConfig.h |
+| `active_picture_startup_hold` | unassigned | on |  | VpvSchemaKeys.h |
+| `adaptive_chroma_ssim` | scaling.output |  |  | VpvSchemaKeys.h |
+| `adaptive_downscale` | scaling.output | 0 |  | VpvSchemaKeys.h |
+| `adaptive_edge_hi` | scaling.output |  |  | VpvSchemaKeys.h |
+| `adaptive_edge_lo` | scaling.output |  |  | VpvSchemaKeys.h |
+| `adaptive_faithful` | scaling.output | auto | VP-V > Scaling > Grain-true downscale filter | VpvSchemaKeys.h |
+| `adaptive_grain_floor` | scaling.output |  |  | VpvSchemaKeys.h |
+| `adaptive_grain_hi` | scaling.output |  |  | VpvSchemaKeys.h |
+| `adaptive_grain_lo` | scaling.output |  |  | VpvSchemaKeys.h |
+| `adaptive_grain_map` | scaling.output | on | VP-V > Scaling > Grain map steers the downscale | VpvSchemaKeys.h |
+| `adaptive_grain_map_smooth_ms` | scaling.output |  |  | VpvSchemaKeys.h |
+| `adaptive_grain_shadow_bias` | scaling.output |  |  | VpvSchemaKeys.h |
+| `adaptive_grain_smooth_ms` | scaling.output |  |  | VpvSchemaKeys.h |
+| `adaptive_motion` | scaling.output | off |  | VpvSchemaKeys.h |
+| `adaptive_motion_floor` | scaling.output | 0 |  | VpvSchemaKeys.h |
+| `adaptive_motion_smooth_ms` | scaling.output | 250 |  | VpvSchemaKeys.h |
+| `adaptive_motion_speed_hi` | scaling.output | 0.4 |  | VpvSchemaKeys.h |
+| `adaptive_motion_speed_lo` | scaling.output | 0.1 |  | VpvSchemaKeys.h |
+| `adaptive_upscale` | scaling.output | 0 | VP-V > Scaling > Grain-aware upscale for small sources | VpvSchemaKeys.h |
+| `adaptive_upscale_superres_scale` | scaling.output |  |  | VpvSchemaKeys.h |
+| `adaptive_upscale_w_base` | scaling.output |  |  | VpvSchemaKeys.h |
+| `adaptive_w_base` | scaling.output | 1.0 |  | VpvSchemaKeys.h |
 | `ambient.baud` | unassigned |  |  | AmbientConfig.h |
 | `ambient.hold_s` | unassigned |  |  | AmbientConfig.h |
 | `ambient.lux_dark` | unassigned |  |  | AmbientConfig.h |
@@ -202,17 +247,17 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `ambient.mode` | unassigned |  |  | AmbientConfig.h |
 | `ambient.port` | unassigned |  |  | AmbientConfig.h |
 | `ambient.room` | unassigned |  |  | AmbientConfig.h |
-| `ambient_adapt` | unassigned | off | VP-V > Colour > Room-light adaptation (experimental) | RendererProfileConfig.h |
-| `ambient_adapt_strength` | unassigned | 1 |  | RendererProfileConfig.h |
-| `ambient_max_black_nits` | unassigned | 1 |  | RendererProfileConfig.h |
-| `ambient_screen_reflect` | unassigned | 0.01 |  | RendererProfileConfig.h |
-| `ambient_tau_down_s` | unassigned | 90 |  | RendererProfileConfig.h |
-| `ambient_tau_up_s` | unassigned | 15 |  | RendererProfileConfig.h |
-| `blank_bottom` | unassigned |  |  | RendererProfileConfig.h |
-| `blank_left` | unassigned |  |  | RendererProfileConfig.h |
-| `blank_right` | unassigned |  |  | RendererProfileConfig.h |
-| `blank_top` | unassigned |  |  | RendererProfileConfig.h |
-| `cadence_class_fixes` | input.queue_timing, motion.consumers | on |  | RendererProfileConfig.h |
+| `ambient_adapt` | unassigned | off | VP-V > Colour > Room-light adaptation (experimental) | VpvSchemaKeys.h |
+| `ambient_adapt_strength` | unassigned | 1 |  | VpvSchemaKeys.h |
+| `ambient_max_black_nits` | unassigned | 1 |  | VpvSchemaKeys.h |
+| `ambient_screen_reflect` | unassigned | 0.01 |  | VpvSchemaKeys.h |
+| `ambient_tau_down_s` | unassigned | 90 |  | VpvSchemaKeys.h |
+| `ambient_tau_up_s` | unassigned | 15 |  | VpvSchemaKeys.h |
+| `blank_bottom` | unassigned |  |  | VpvSchemaKeys.h |
+| `blank_left` | unassigned |  |  | VpvSchemaKeys.h |
+| `blank_right` | unassigned |  |  | VpvSchemaKeys.h |
+| `blank_top` | unassigned |  |  | VpvSchemaKeys.h |
+| `cadence_class_fixes` | input.queue_timing, motion.consumers | on |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, RendererProfileConfig.h |
 | `calibration.argyll_path` | unassigned |  |  | CalibrationConfig.h |
 | `calibration.background_percent` | unassigned |  |  | CalibrationConfig.h |
 | `calibration.display_kind` | unassigned |  |  | CalibrationConfig.h |
@@ -247,98 +292,76 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `calibration.transcript_folder` | unassigned |  |  | CalibrationConfig.h |
 | `calibration.verify_after` | unassigned |  |  | CalibrationConfig.h |
 | `calibration.warmup_minutes` | unassigned |  |  | CalibrationConfig.h |
-| `calibration_lut_stage` | output.calibration_lut |  |  | RendererProfileConfig.h |
-| `capture_display_fixes` | unassigned |  |  | MainConfigSchema.h |
-| `capture_path` | input.capture | gpu | VP-V > Input > Capture unpack on the GPU | RendererProfileConfig.h |
-| `capture_upload` | input.capture | auto | VP-V > Input > Upload frames as they arrive | RendererProfileConfig.h |
-| `chroma_upscale_vp` | scaling.chroma_upscale |  |  | ChromaCfl.h, RendererProfileConfig.h |
-| `cnn_residual_stabilise` | scaling.output | on | VP-V > Scaling > Steady the upscaler's added detail along motion | RendererProfileConfig.h |
-| `deband_grain` | repair.deband | off |  | RendererProfileConfig.h |
-| `deband_vp` | repair.deband | off |  | RendererProfileConfig.h |
-| `deband_vp_exclusive` | repair.deband | on | VP-V > Repair > VP deband replaces libplacebo's | RendererProfileConfig.h |
-| `deband_vp_grain_guard` | repair.deband | on | VP-V > Repair > VP deband leaves grain alone | RendererProfileConfig.h |
-| `dejudder_block_taper` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_consistency_px` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_cut_histogram` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_est_candidates` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_est_gate` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_est_lambda` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_est_qpel` | motion.estimation | on |  | RendererProfileConfig.h |
-| `dejudder_est_split` | motion.estimation | off |  | RendererProfileConfig.h |
-| `dejudder_est_split_sad` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_est_still_zero` | unassigned | 1 |  | RendererProfileConfig.h |
-| `dejudder_estimate_ahead` | motion.estimation, motion.consumers | 1 | VP-V > Motion > Estimate motion ahead | RendererProfileConfig.h |
-| `dejudder_even_rates` | motion.vector_delivery, motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_fade_floor` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_fade_match` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_frame_trust` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_gate` | output.presentation | auto |  | RendererProfileConfig.h |
-| `dejudder_global_prior` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_global_two` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_hold_feather_px` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_hold_hysteresis` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_landing_check` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_low_res` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_match_tolerance` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_motion_rolloff` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_motion_scale_hi` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_motion_scale_lo` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_object_strength` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_occlusion_fill` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_pixel_trust` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_pixel_trust_hi` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_pixel_trust_lo` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_pulldown` | unassigned | 0 |  | RendererProfileConfig.h |
-| `dejudder_regional_hold` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_roll_floor` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_roll_hi` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_roll_lo` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_search_range` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_source_warp_filter` | motion.consumers | catmull |  | RendererProfileConfig.h |
-| `dejudder_strength` | motion.vector_delivery, motion.consumers | 0 |  | RendererProfileConfig.h |
-| `dejudder_strength_even` | motion.vector_delivery, motion.consumers | 0 |  | RendererProfileConfig.h |
-| `dejudder_taper_sad` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_texture_tolerance` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_trust_scale` | motion.consumers |  |  | RendererProfileConfig.h |
-| `dejudder_vector_smooth` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_verify` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_verify_share` | motion.estimation |  |  | RendererProfileConfig.h |
-| `dejudder_warp_stage` | motion.consumers |  |  | RendererProfileConfig.h |
-| `detail_pulse_cap` | repair.texture_restore | 1.35 |  | RendererProfileConfig.h |
-| `detail_pulse_fast` | repair.texture_restore | on | VP-V > Repair > Detail pulse: fast path | RendererProfileConfig.h |
-| `detail_pulse_stabilise` | repair.texture_restore | on |  | RendererProfileConfig.h |
-| `dither_grain_tolerance_scale` | output.dither | 3 |  | RendererProfileConfig.h |
+| `calibration_lut_stage` | output.calibration_lut |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
+| `capture_display_fixes` | unassigned |  |  | VpvStartupSchema.h |
+| `capture_path` | input.capture | gpu | VP-V > Input > Capture unpack on the GPU | VpvSchemaKeys.h |
+| `capture_upload` | input.capture | auto | VP-V > Input > Upload frames as they arrive | VpvSchemaKeys.h |
+| `cnn_residual_stabilise` | scaling.output | on | VP-V > Scaling > Steady the upscaler's added detail along motion | VpvSchemaKeys.h |
+| `deband_grain` | repair.deband | off |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
+| `deband_vp` | repair.deband | off |  | VpvSchemaKeys.h |
+| `deband_vp_exclusive` | repair.deband | on | VP-V > Repair > VP deband replaces libplacebo's | VpvSchemaKeys.h |
+| `deband_vp_grain_guard` | repair.deband | on | VP-V > Repair > VP deband leaves grain alone | VpvSchemaKeys.h |
+| `dejudder_block_taper` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_est_still_zero` | unassigned | 1 |  | VpvSchemaKeys.h |
+| `dejudder_even_rates` | motion.vector_delivery, motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_frame_trust` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_gate` | output.presentation | auto |  | VpvSchemaKeys.h |
+| `dejudder_hold_feather_px` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_hold_hysteresis` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_landing_check` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_motion_rolloff` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_motion_scale_hi` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_motion_scale_lo` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_object_strength` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_occlusion_fill` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_pixel_trust` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_pixel_trust_hi` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_pixel_trust_lo` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_pulldown` | unassigned | 0 |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, RendererProfileConfig.h |
+| `dejudder_roll_floor` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_roll_hi` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_roll_lo` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_source_warp_filter` | motion.consumers | catmull |  | VpvSchemaKeys.h |
+| `dejudder_strength` | motion.vector_delivery, motion.consumers | 0 |  | VpvSchemaKeys.h |
+| `dejudder_strength_even` | motion.vector_delivery, motion.consumers | 0 |  | VpvSchemaKeys.h |
+| `dejudder_taper_sad` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_trust_scale` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `dejudder_warp_stage` | motion.consumers |  |  | VpvSchemaKeys.h |
+| `detail_pulse_cap` | repair.texture_restore | 1.35 |  | VpvSchemaKeys.h |
+| `detail_pulse_fast` | repair.texture_restore | on | VP-V > Repair > Detail pulse: fast path | VpvSchemaKeys.h |
+| `detail_pulse_stabilise` | repair.texture_restore | on |  | VpvSchemaKeys.h |
+| `dither_grain_tolerance_scale` | output.dither | 3 |  | VpvSchemaKeys.h |
 | `dither_need` | output.dither |  |  | DitherNeed.h |
-| `dither_vectors` | motion.consumers, output.dither | auto | VP-V > Motion > Dither reuses the de-judder's motion | RendererProfileConfig.h |
-| `downscale_light` | scaling.output |  |  | RendererProfileConfig.h |
-| `dv_compare_capture_folder` | input.signal |  |  | RendererProfileConfig.h |
-| `dv_tone_mapping` | colour.sdr_tone_shape | libplacebo |  | RendererProfileConfig.h |
-| `dv_trims` | colour.sdr_tone_shape | 1 | VP-V > Colour > Dolby Vision trims for your display | RendererProfileConfig.h |
-| `dv_tunnel_fixes` | input.signal | on |  | RendererProfileConfig.h |
-| `dv_tunnel_gpu_unpack` | input.signal | 1 | VP-V > Input > Dolby Vision tunnel: GPU unpack | RendererProfileConfig.h |
-| `dv_tunnel_handoff` | input.signal |  |  | MainConfigSchema.h |
-| `efficiency_fixes` | unassigned | on |  | RendererProfileConfig.h |
-| `entrance_gpu_drain` | scaling.rebase | off |  | RendererProfileConfig.h |
-| `fbo_float32` | scaling.output | -1 | VP-V > Colour > Full precision for every tier (32-bit float intermediates) | RendererProfileConfig.h |
-| `file_av_offset_ms` | unassigned |  |  | MainConfigSchema.h |
-| `file_led_holdover_ms` | unassigned |  |  | MainConfigSchema.h |
-| `frame_analysis_store` | input.source_analysis |  |  | RendererProfileConfig.h |
-| `general_rate_fixes` | input.queue_timing, motion.estimation, motion.vector_delivery, motion.consumers | on |  | RendererProfileConfig.h |
-| `global_hotkeys` | unassigned |  |  | MainConfigSchema.h |
-| `hdr_inference` | input.signal | vp |  | HdrInferenceChoice.h, RendererProfileConfig.h |
-| `intent_black` | drive.led_compensation | off |  | RendererProfileConfig.h |
-| `intent_content` | unassigned | off | VP-V > Input > Content labels for profile rules (film / video / sports) | RendererProfileConfig.h |
-| `intent_content_hold_seconds` | unassigned | 5 |  | RendererProfileConfig.h |
-| `intent_display` | unassigned | off |  | RendererProfileConfig.h |
-| `intent_ease_s` | unassigned | 1.5 |  | RendererProfileConfig.h |
-| `intent_motion` | unassigned | off | VP-V > Motion > Ease the de-judder per shot (only ever lower) | RendererProfileConfig.h |
-| `intent_motion_min` | unassigned | 0.5 |  | RendererProfileConfig.h |
-| `intent_motion_min_shot_s` | unassigned | 2 |  | RendererProfileConfig.h |
-| `intent_motion_policy` | unassigned | display |  | RendererProfileConfig.h |
-| `interpolation` | motion.consumers | off | VP-V > Motion > Frame interpolation (50/60p) | RendererProfileConfig.h |
-| `interpolation_fallback` | motion.consumers | hold | VP-V > Motion > Where motion is not trusted: hold or blend | RendererProfileConfig.h |
-| `interpolation_fill_gaps` | motion.consumers | on | VP-V > Motion > Fill dropped frames (hiccup repair) | RendererProfileConfig.h |
-| `interpolation_grain` | motion.consumers | preserve |  | RendererProfileConfig.h |
+| `dither_vectors` | motion.consumers, output.dither | auto | VP-V > Motion > Dither reuses the de-judder's motion | VpvSchemaKeys.h |
+| `downscale_light` | scaling.output |  |  | VpvSchemaKeys.h |
+| `dv_compare_capture_folder` | input.signal |  |  | VpvSchemaKeys.h |
+| `dv_tone_mapping` | colour.sdr_tone_shape | libplacebo |  | VpvSchemaKeys.h |
+| `dv_trims` | colour.sdr_tone_shape | 1 | VP-V > Colour > Dolby Vision trims for your display | VpvSchemaKeys.h |
+| `dv_tunnel_fixes` | input.signal | on |  | VpvSchemaKeys.h |
+| `dv_tunnel_gpu_unpack` | input.signal | 1 | VP-V > Input > Dolby Vision tunnel: GPU unpack | VpvSchemaKeys.h |
+| `dv_tunnel_handoff` | input.signal |  |  | VpvStartupSchema.h |
+| `efficiency_fixes` | unassigned | on |  | VpvSchemaKeys.h |
+| `entrance_gpu_drain` | scaling.rebase | off |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
+| `fbo_float32` | scaling.output | -1 | VP-V > Colour > Full precision for every tier (32-bit float intermediates) | VpvSchemaKeys.h |
+| `file_av_offset_ms` | unassigned |  |  | VpvStartupSchema.h |
+| `file_led_holdover_ms` | unassigned |  |  | VpvStartupSchema.h |
+| `frame_analysis_store` | input.source_analysis |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
+| `general_rate_fixes` | input.queue_timing, motion.estimation, motion.vector_delivery, motion.consumers | on |  | VpvSchemaKeys.h |
+| `global_hotkeys` | unassigned |  |  | VpvStartupSchema.h |
+| `hdr_inference` | input.signal | vp |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, HdrInferenceChoice.h |
+| `intent_black` | drive.led_compensation | off |  | VpvSchemaKeys.h |
+| `intent_content` | unassigned | off | VP-V > Input > Content labels for profile rules (film / video / sports) | VpvRendererSettings.cpp, VpvSchemaKeys.h, RendererProfileConfig.h |
+| `intent_content_hold_seconds` | unassigned | 5 |  | VpvSchemaKeys.h |
+| `intent_display` | unassigned | off |  | VpvSchemaKeys.h |
+| `intent_ease_s` | unassigned | 1.5 |  | VpvSchemaKeys.h |
+| `intent_motion` | unassigned | off | VP-V > Motion > Ease the de-judder per shot (only ever lower) | VpvSchemaKeys.h |
+| `intent_motion_min` | unassigned | 0.5 |  | VpvSchemaKeys.h |
+| `intent_motion_min_shot_s` | unassigned | 2 |  | VpvSchemaKeys.h |
+| `intent_motion_policy` | unassigned | display |  | VpvSchemaKeys.h |
+| `interpolation` | motion.consumers | off | VP-V > Motion > Frame interpolation (50/60p) | VpvSchemaKeys.h |
+| `interpolation_fallback` | motion.consumers | hold | VP-V > Motion > Where motion is not trusted: hold or blend | VpvSchemaKeys.h |
+| `interpolation_fill_gaps` | motion.consumers | on | VP-V > Motion > Fill dropped frames (hiccup repair) | VpvSchemaKeys.h |
+| `interpolation_grain` | motion.consumers | preserve |  | VpvSchemaKeys.h |
 | `led_drive.adaptive_gamma` | unassigned |  |  | LedDriveConfig.h |
 | `led_drive.anti_pump_band` | unassigned |  |  | LedDriveConfig.h |
 | `led_drive.apl_persist_ms` | unassigned |  |  | LedDriveConfig.h |
@@ -434,26 +457,18 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `light_level_weber` | input.light_level |  |  | LightLevelSettings.h |
 | `logging.auto_report` | unassigned |  |  | StateReportSettings.h |
 | `logging.report_thumbnail` | unassigned |  |  | StateReportSettings.h |
-| `low_bitrate_handling` | repair.deband | auto | VP-V > Repair > Deband reacts to compression | RendererProfileConfig.h |
-| `low_latency_path` | input.queue_timing |  |  | MainConfigSchema.h, RendererProfileConfig.h |
-| `magewell_recover_faults` | unassigned |  |  | MainConfigSchema.h |
-| `motion_ahead_frames` | motion.estimation | 4 |  | RendererProfileConfig.h |
-| `motion_engine` | motion.estimation, motion.vector_delivery |  |  | RendererProfileConfig.h |
-| `motion_history_fixes` | motion.estimation, motion.vector_delivery | on |  | RendererProfileConfig.h |
-| `native_rgb_ingest` | input.capture | 1 | VP-V > Input > Native 10/12-bit RGB capture | RendererProfileConfig.h |
-| `newlldv_sdr_veto` | input.signal |  |  | MainConfigSchema.h |
-| `nls_sampling` | scaling.geometry | catmull |  | RendererProfileConfig.h |
-| `occlusion_mask` | motion.vector_delivery, motion.consumers | 0 | VP-V > Output > Dither: no smear where new picture appears | RendererProfileConfig.h |
-| `optical_flow` | motion.estimation | on |  | RendererProfileConfig.h |
-| `optical_flow_cost_trust` | motion.estimation | off |  | RendererProfileConfig.h |
-| `optical_flow_fb_check` | motion.estimation | off |  | RendererProfileConfig.h |
-| `optical_flow_global` | motion.estimation | on |  | RendererProfileConfig.h |
-| `optical_flow_global_fallback` | motion.estimation | on |  | RendererProfileConfig.h |
-| `output_segments_merged` | output.dither |  |  | RendererProfileConfig.h |
-| `pipeline_entrance_once` | unassigned |  |  | RendererProfileConfig.h |
-| `pipeline_order` | unassigned |  |  | RendererProfileConfig.h |
-| `pipeline_original_pathway` | unassigned |  |  | SkeletonSettings.h, HdrInferenceChoice.h, RendererProfileConfig.h |
-| `pipeline_slots_off` | unassigned |  |  | RendererProfileConfig.h |
+| `low_bitrate_handling` | repair.deband | auto | VP-V > Repair > Deband reacts to compression | VpvSchemaKeys.h |
+| `low_latency_path` | input.queue_timing |  |  | VpvSchemaKeys.h, VpvStartupSchema.h |
+| `magewell_recover_faults` | unassigned |  |  | VpvStartupSchema.h |
+| `native_rgb_ingest` | input.capture | 1 | VP-V > Input > Native 10/12-bit RGB capture | VpvSchemaKeys.h |
+| `newlldv_sdr_veto` | input.signal |  |  | VpvStartupSchema.h |
+| `nls_sampling` | scaling.geometry | catmull |  | VpvSchemaKeys.h |
+| `occlusion_mask` | motion.vector_delivery, motion.consumers | 0 | VP-V > Output > Dither: no smear where new picture appears | VpvSchemaKeys.h |
+| `output_segments_merged` | output.dither |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
+| `pipeline_entrance_once` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
+| `pipeline_order` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
+| `pipeline_original_pathway` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, SkeletonSettings.h, HdrInferenceChoice.h |
+| `pipeline_slots_off` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `projector.ack_timeout_ms` | unassigned |  |  | LedDriveConfig.h |
 | `projector.baud` | unassigned |  |  | LedDriveConfig.h |
 | `projector.burst_commands` | unassigned |  |  | LedDriveConfig.h |
@@ -474,67 +489,56 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `projector.protocol` | unassigned |  |  | LedDriveConfig.h |
 | `projector.read_back` | unassigned |  |  | LedDriveConfig.h |
 | `projector.terminator` | unassigned |  |  | LedDriveConfig.h |
-| `pulldown_fixes` | input.queue_timing | on |  | RendererProfileConfig.h |
-| `queue_auto_reset` | input.queue_timing |  |  | MainConfigSchema.h |
-| `queue_timing_fixes` | input.queue_timing | on |  | RendererProfileConfig.h |
-| `rebase_kernel_match` | scaling.rebase | on | VP-V > Scaling > Re-base: undo the player's upscaler | RendererProfileConfig.h |
-| `render_ahead` | output.presentation | off | VP-V > Motion > De-judder: render ahead (under test) | RendererProfileConfig.h |
-| `render_ahead_queue_credit` | output.presentation | off |  | RendererProfileConfig.h |
-| `render_ahead_utilisation` | output.presentation | 0.85 |  | RendererProfileConfig.h |
-| `renderer_failure_keep_fullscreen` | unassigned |  |  | MainConfigSchema.h |
-| `repeat_render_reuse` | output.presentation |  |  | RendererProfileConfig.h |
-| `residual_stabilise_grain_guard` | scaling.output | on |  | RendererProfileConfig.h |
-| `resync_event` | input.signal |  |  | RendererProfileConfig.h |
-| `retirement_a` | unassigned |  |  | RendererProfileConfig.h |
-| `retirement_b` | unassigned |  |  | RendererProfileConfig.h |
-| `retirement_c` | unassigned |  |  | RendererProfileConfig.h |
-| `retirement_d` | unassigned |  |  | RendererProfileConfig.h |
-| `saturation` | unassigned |  |  | RendererProfileConfig.h |
-| `sdr_contrast_recovery` | colour.sdr_tone_shape |  |  | RendererProfileConfig.h |
-| `sdr_knee_start` | input.light_level, colour.sdr_tone_shape | 0.8 |  | RendererProfileConfig.h |
-| `sdr_knee_strength` | input.light_level, colour.sdr_tone_shape | 0.5 |  | RendererProfileConfig.h |
-| `sdr_tone_shape` | input.light_level, colour.sdr_tone_shape | off | VP-V > Colour > SDR tone shape | RendererProfileConfig.h |
-| `sdr_white_headroom` | input.light_level, colour.sdr_tone_shape |  |  | RendererProfileConfig.h |
+| `pulldown_fixes` | input.queue_timing | on |  | VpvSchemaKeys.h |
+| `queue_auto_reset` | input.queue_timing |  |  | VpvStartupSchema.h |
+| `queue_timing_fixes` | input.queue_timing | on |  | VpvSchemaKeys.h |
+| `rebase_kernel_match` | scaling.rebase | on | VP-V > Scaling > Re-base: undo the player's upscaler | VpvSchemaKeys.h |
+| `render_ahead` | output.presentation | off | VP-V > Motion > De-judder: render ahead (under test) | VpvSchemaKeys.h |
+| `render_ahead_queue_credit` | output.presentation | off |  | VpvSchemaKeys.h |
+| `render_ahead_utilisation` | output.presentation | 0.85 |  | VpvSchemaKeys.h |
+| `renderer_failure_keep_fullscreen` | unassigned |  |  | VpvStartupSchema.h |
+| `repeat_render_reuse` | output.presentation |  |  | VpvSchemaKeys.h |
+| `residual_stabilise_grain_guard` | scaling.output | on |  | VpvSchemaKeys.h |
+| `resync_event` | input.signal |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
+| `retirement_a` | unassigned |  |  | VpvSchemaKeys.h |
+| `retirement_b` | unassigned |  |  | VpvSchemaKeys.h |
+| `retirement_c` | unassigned |  |  | VpvSchemaKeys.h |
+| `retirement_d` | unassigned |  |  | VpvSchemaKeys.h |
+| `saturation` | unassigned |  |  | VpvSchemaKeys.h |
+| `sdr_contrast_recovery` | colour.sdr_tone_shape |  |  | VpvSchemaKeys.h |
+| `sdr_knee_start` | input.light_level, colour.sdr_tone_shape | 0.8 |  | VpvSchemaKeys.h |
+| `sdr_knee_strength` | input.light_level, colour.sdr_tone_shape | 0.5 |  | VpvSchemaKeys.h |
+| `sdr_tone_shape` | input.light_level, colour.sdr_tone_shape | off | VP-V > Colour > SDR tone shape | VpvSchemaKeys.h |
+| `sdr_white_headroom` | input.light_level, colour.sdr_tone_shape |  |  | VpvSchemaKeys.h |
 | `shaders.cinema_only` | unassigned |  |  | MadVRShaderLoader.cpp |
-| `shortcuts.global_actions` | unassigned |  |  | MainConfigSchema.h |
+| `shortcuts.global_actions` | unassigned |  |  | VpvStartupSchema.h |
 | `shortcuts.state_report` | unassigned |  |  | StateReportSettings.h |
-| `source_class` | motion.consumers | legacy |  | RendererProfileConfig.h |
-| `source_coding_fixes` | input.source_analysis | on |  | RendererProfileConfig.h |
-| `source_range` | unassigned | auto | VP-V > Input > Source range (when the source mislabels it) | RendererProfileConfig.h |
-| `source_resolution` | input.source_analysis, scaling.rebase | auto |  | RendererProfileConfig.h |
-| `source_resolution_auto_min_confidence` | input.source_analysis | 0.8 |  | RendererProfileConfig.h |
-| `source_resolution_crossfade_s` | input.source_analysis | 1.5 |  | RendererProfileConfig.h |
-| `source_resolution_cut_fixes` | input.source_analysis | on |  | RendererProfileConfig.h |
-| `source_resolution_engage_max_wait_s` | input.source_analysis | 20 |  | RendererProfileConfig.h |
-| `source_resolution_evidence_seconds` | input.source_analysis | 10 |  | RendererProfileConfig.h |
-| `source_resolution_evidence_shots` | input.source_analysis | 3 |  | RendererProfileConfig.h |
-| `source_resolution_latch_fixes` | input.source_analysis | on |  | RendererProfileConfig.h |
-| `source_resolution_mixed_guard` | input.source_analysis | on | VP-V > Scaling > Never re-base a mixed screen (menu, picture-in-picture) | RendererProfileConfig.h |
-| `source_resolution_release_fade_s` | input.source_analysis | 0.25 |  | RendererProfileConfig.h |
-| `source_resolution_text_guard` | input.source_analysis | on | VP-V > Scaling > Re-base ignores the player's own subtitles | RendererProfileConfig.h |
-| `ssim_bitrate_aware` | scaling.output | on | VP-V > Scaling > Gentler sharpening on poor streams | RendererProfileConfig.h |
-| `ssim_bitrate_floor` | scaling.output | 0.4 |  | RendererProfileConfig.h |
-| `ssim_residual_stabilise` | scaling.output | on | VP-V > Scaling > Steady the downscaler's added detail along motion | RendererProfileConfig.h |
-| `stats_overlay` | unassigned |  |  | MainConfigSchema.h |
-| `target_latency_ms` | input.queue_timing |  |  | MainConfigSchema.h, RendererProfileConfig.h |
-| `temporal_detail` | repair.temporal_detail |  |  | TemporalDetail.h |
-| `temporal_detail_boost` | repair.temporal_detail |  |  | TemporalDetail.h |
-| `temporal_detail_boost_max` | repair.temporal_detail |  |  | TemporalDetail.h |
-| `temporal_detail_max_age` | repair.temporal_detail |  |  | TemporalDetail.h |
-| `temporal_detail_strength` | repair.temporal_detail |  |  | TemporalDetail.h |
-| `temporal_dither` | output.dither | auto |  | RendererProfileConfig.h |
-| `texture_restore` | repair.texture_restore | off |  | RendererProfileConfig.h |
-| `texture_restore_cap` | repair.texture_restore | 1.5 |  | RendererProfileConfig.h |
-| `timing_continuity_fixes` | input.queue_timing, motion.vector_delivery | on |  | RendererProfileConfig.h |
-| `upscale_light` | scaling.output | linear |  | RendererProfileConfig.h |
-| `use_frame_queue` | input.queue_timing |  |  | MainConfigSchema.h |
-| `vector_demand` | motion.estimation, motion.vector_delivery | on | VP-V > Motion > Vector engine on demand | RendererProfileConfig.h |
-| `vpv.skeleton.analysis_lane` | control.skeleton |  |  | SkeletonSettings.h |
-| `vpv.skeleton.analysis_lane_chunk_us` | control.skeleton |  |  | SkeletonSettings.h |
-| `vpv.skeleton.analysis_lane_deterministic` | control.skeleton |  |  | SkeletonSettings.h |
-| `vpv.skeleton.analysis_lane_test_wait_ms` | control.skeleton |  |  | SkeletonSettings.h |
-| `vpv.skeleton.camera_link` | control.skeleton |  |  | SkeletonSettings.h |
-| `ycbcr_12bit_capture` | unassigned |  |  | MainConfigSchema.h |
+| `source_class` | motion.consumers | legacy |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, RendererProfileConfig.h |
+| `source_coding_fixes` | input.source_analysis | on |  | VpvSchemaKeys.h |
+| `source_range` | unassigned | auto | VP-V > Input > Source range (when the source mislabels it) | VpvSchemaKeys.h |
+| `source_resolution` | input.source_analysis, scaling.rebase | auto |  | VpvSchemaKeys.h |
+| `source_resolution_auto_min_confidence` | input.source_analysis | 0.8 |  | VpvSchemaKeys.h |
+| `source_resolution_crossfade_s` | input.source_analysis | 1.5 |  | VpvSchemaKeys.h |
+| `source_resolution_cut_fixes` | input.source_analysis | on |  | VpvSchemaKeys.h |
+| `source_resolution_engage_max_wait_s` | input.source_analysis | 20 |  | VpvSchemaKeys.h |
+| `source_resolution_evidence_seconds` | input.source_analysis | 10 |  | VpvSchemaKeys.h |
+| `source_resolution_evidence_shots` | input.source_analysis | 3 |  | VpvSchemaKeys.h |
+| `source_resolution_latch_fixes` | input.source_analysis | on |  | VpvSchemaKeys.h |
+| `source_resolution_mixed_guard` | input.source_analysis | on | VP-V > Scaling > Never re-base a mixed screen (menu, picture-in-picture) | VpvSchemaKeys.h |
+| `source_resolution_release_fade_s` | input.source_analysis | 0.25 |  | VpvSchemaKeys.h |
+| `source_resolution_text_guard` | input.source_analysis | on | VP-V > Scaling > Re-base ignores the player's own subtitles | VpvSchemaKeys.h |
+| `ssim_bitrate_aware` | scaling.output | on | VP-V > Scaling > Gentler sharpening on poor streams | VpvSchemaKeys.h |
+| `ssim_bitrate_floor` | scaling.output | 0.4 |  | VpvSchemaKeys.h |
+| `ssim_residual_stabilise` | scaling.output | on | VP-V > Scaling > Steady the downscaler's added detail along motion | VpvSchemaKeys.h |
+| `stats_overlay` | unassigned |  |  | VpvStartupSchema.h |
+| `target_latency_ms` | input.queue_timing |  |  | VpvSchemaKeys.h, VpvStartupSchema.h |
+| `temporal_dither` | output.dither | auto |  | VpvSchemaKeys.h |
+| `texture_restore` | repair.texture_restore | off |  | VpvSchemaKeys.h |
+| `texture_restore_cap` | repair.texture_restore | 1.5 |  | VpvSchemaKeys.h |
+| `timing_continuity_fixes` | input.queue_timing, motion.vector_delivery | on |  | VpvSchemaKeys.h |
+| `upscale_light` | scaling.output | linear |  | VpvSchemaKeys.h |
+| `use_frame_queue` | input.queue_timing |  |  | VpvStartupSchema.h |
+| `ycbcr_12bit_capture` | unassigned |  |  | VpvStartupSchema.h |
 
 ## Appendix B: documented keys with no entry in code
 

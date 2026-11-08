@@ -11,6 +11,7 @@
 
 #include <ConfigFile.h>
 #include <IRenderer.h>
+#include <VP-V/abi/VpvHostCalls.h>
 
 #include <cctype>
 #include <sstream>
@@ -85,7 +86,7 @@ namespace Calibration
 			strncpy_s(info.reason, sizeof(info.reason), "no renderer is running (start VP with any source)", _TRUNCATE);
 			return false;
 		}
-		const bool ok = current->GetCalibrationOutput(info);
+		const bool ok = VpvCalls::GetCalibrationOutput(current.get(), info);
 		format = info;
 		return ok;
 	}
@@ -103,7 +104,7 @@ namespace Calibration
 		const std::shared_ptr<IVideoRenderer> current = renderer ? renderer() : nullptr;
 		if (!current) { error = "no renderer is running"; return !request.active; }
 		CString reason;
-		const bool ok = current->SetCalibrationPattern(request, reason);
+		const bool ok = VpvCalls::SetCalibrationPattern(current.get(), request, reason);
 		if (!ok) error = std::string(CStringA(reason).GetString());
 		else last = request;
 		return ok;

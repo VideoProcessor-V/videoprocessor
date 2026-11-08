@@ -303,7 +303,11 @@ def cpu(a):
             shutil.rmtree(os.path.join(s['dir'], 'match_rerun'), ignore_errors=True)
             if not ok:
                 return 1
-        score_seq(s)
+        if s['truth'] == 'gt':  # Sintel / KITTI ground truth (gt_datasets.py), read from --gt-root, never copied here
+            import gt_datasets
+            gt_datasets.score_seq_gt(s, pred_path, CONTENDERS)
+        else:
+            score_seq(s)
         if not a.keep_flo:  # keep match.csv (cost proxy), drop the dense predictions
             for e in os.listdir(os.path.join(s['dir'], 'match')):
                 if e.startswith('pair_'):

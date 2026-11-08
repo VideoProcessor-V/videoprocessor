@@ -373,16 +373,16 @@ namespace CameraLink
 			m_waiting.erase(m_waiting.begin());
 	}
 
-	void CameraGuidanceHook::AfterEstimate(uint64_t pairSeq, bool guidanceUsed, pl_tex countsTex)
+	void CameraGuidanceHook::AfterEstimate(uint64_t pairSeq, const VpMotion::EstimateOutcome& outcome)
 	{
 		double secs = 0;
 		for (const auto& w : m_waiting)
 			if (w.first == pairSeq)
 				secs = w.second;
 		static const float kNone[4] = { -1, -1, -1, -1 };
-		if (guidanceUsed)
+		if (outcome.guidanceUsed)
 			++m_used;
-		if (guidanceUsed && countsTex && m_counts && m_counts->Request(pairSeq, countsTex))
+		if (outcome.guidanceUsed && outcome.countsTex && m_counts && m_counts->Request(pairSeq, outcome.countsTex))
 			return;   // finished in Poll() a frame later
 		m_sched.OnCounts(pairSeq, kNone, secs);
 	}

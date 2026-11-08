@@ -27,6 +27,12 @@ SCHEMA_FILES = [
     "src/VideoProcessor-Lib/MainConfigSchema.h",
     "src/VideoProcessor-Lib/ConfigSchema.h",
 ]
+# VP-owned schema lists: the VP-V keys that were moved out of Bill's schema files (M2 P3). They are read exactly
+# like the schema files they came from (bare key ids), but belong to VP-V scope: they are never upstream keys.
+VP_SCHEMA_LISTS = [
+    "src/VP-V/modules/control/config/VpvSchemaKeys.h",
+    "src/VP-V/modules/control/config/VpvStartupSchema.h",
+]
 FIELD_TABLE_GLOBS = [
     "src/VP-V/modules/control/config/VpvRenderer*.h",
     "src/VP-V/modules/control/config/VpvRenderer*.cpp",
@@ -232,7 +238,7 @@ def _scan_code(root, problems=None):
             into.setdefault(k, set()).add(rel)
 
     schema = []
-    for rel in SCHEMA_FILES:
+    for rel in SCHEMA_FILES + VP_SCHEMA_LISTS:
         p = os.path.join(root, *rel.split("/"))
         if os.path.isfile(p):
             schema.append((rel, read_text(p)))
@@ -249,6 +255,8 @@ def _scan_code(root, problems=None):
         rel = os.path.relpath(p, root).replace(os.sep, "/")
         add(extract_field_table_keys(read_text(p)), rel)
     for rel, text in vpv:
+        if rel in VP_SCHEMA_LISTS:      # read above as a schema list
+            continue
         r = set()
         if problems is not None:
             problems.extend(section_map_problems(rel, text, consts))
@@ -295,7 +303,7 @@ def extract_code_keys(root, problems=None):
     upstream = load_upstream(root)
     for k in [k for k in found if "." not in k and k not in upstream
               and any(o.endswith("." + k) and not o.startswith("vpv.") for o in found)]:
-        if all(f in SCHEMA_FILES for f in found[k]):
+        if all(f in SCHEMA_FILES or f in VP_SCHEMA_LISTS for f in found[k]):
             del found[k]
     return {k: sorted(v) for k, v in found.items()}
 

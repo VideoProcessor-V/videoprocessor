@@ -3,7 +3,7 @@
 // VP-V GUI adapter (WP-11): the ONE place the dialog and the stats overlay get VP's status
 // lines and dispatch VP's shortcuts. VideoProcessorDlg.cpp (Bill's file) keeps one call per
 // site; the wording and order live in src/VP-V/core/StatusText.h (CPU-tested), the renderer's VP
-// lines arrive through the generic IVideoRenderer::GetModuleStatus entry (module "vp").
+// lines arrive through the vpv.modules.v1 extension interface (Status, module "vp"; src/VP-V/abi).
 //
 // Windows/MFC side (CString, IVideoRenderer); header-only so it needs no project registration
 // beyond the includer. Every function reproduces the old dialog code's text byte for byte
@@ -12,6 +12,7 @@
 #include <IRenderer.h>
 #include <IntentInterpreterSupport.h>
 #include <VP-V/modules/control/diagnostics/RawCaptureRecorder.h>
+#include <VP-V/abi/VpvHostCalls.h>
 #include <VP-V/core/StatusText.h>
 #include <VP-V/gui/VpShortcuts.h>
 
@@ -42,7 +43,7 @@ namespace VpvGui
 		Snapshot snapshot;
 		snapshot.rendererPresent = renderer != nullptr;
 		CString text;
-		if (renderer && renderer->GetModuleStatus(VpStatusText::kRendererModule, text))
+		if (renderer && VpvCalls::GetModuleStatus(renderer, VpStatusText::kRendererModule, text))
 			snapshot.vp = VpStatusText::ReadRendererModule(Wide(text));
 		return snapshot;
 	}

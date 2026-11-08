@@ -8,20 +8,30 @@
 
 #include "ExtensionHub.h"
 
+#include <VP-V/modules/control/config/VpvSettingsModule.h>
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraExtension.h>
+#include <VP-V/modules/motion/estimation/VectorEngineExtension.h>
+// Last: DiagnosticOverrides.h includes <windows.h> without NOMINMAX; the headers above use (std::min/max) forms that its macros break.
+#include <VP-V/modules/control/diagnostics/DiagnosticOverridesModule.h>
 
 namespace
 {
 	int RegisterAtLoad()
 	{
+		// The settings module serves the host's settings-load hooks (M2 P3); the hub order does not matter to it.
+		Vpv::Settings::RegisterSettingsModule();
 		// Fixed fan-out order (doc 63 section 1): resync / FrameSeal first, so every later module
 		// sees the frame already sealed.
 		Vpv::Resync::RegisterResyncExtension();
+		// The vector engine (M2 P5a): answers vpv.vector_engine.v1, turns the queue events into motion invalidation
+		// requests (OnQueue) and stops the optical-flow producer at GpuReleased; before its consumers.
+		VpMotion::RegisterVectorEngineExtension();
 		// Activation (all off by default, [vpv.skeleton]): the analysis lane, then the camera link (report).
 		Vpv::Skeleton::RegisterSkeletonModule();
 		Vpv::Camera::RegisterCameraExtension();
+		Vpv::Diagnostics::RegisterDiagnosticOverridesModule();   // status only: the diagnostic override line
 		Vpv::Hub::RegisterHub();
 		return 1;
 	}

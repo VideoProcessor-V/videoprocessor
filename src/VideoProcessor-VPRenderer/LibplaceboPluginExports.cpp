@@ -9,6 +9,7 @@
 #include <vprenderer/LibplaceboVideoRenderer.h>
 #include <VpBuildIdentity.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveHoldover.h>
+#include <VP-V/abi/RendererAbiBridge.h> // VPV-HOOK
 
 #include <type_traits>
 
@@ -78,6 +79,7 @@ VideoProcessorLibplaceboCreateRenderer(
 	try
 	{
 		DebugLog::SetExternalSink(logSink);
+		if (!Vpv::AttachedForCreate()) return nullptr; // VPV-HOOK
 		DebugLog::Log("VP build identity: module=renderer commit=%ls branch=%ls dirty=%d build=%ls build_id=%s",
 			VERSION_URL, VERSION_BRANCH, VERSION_DIRTY ? 1 : 0, VERSION_DESCRIBE, VpBuildIdentity::Id());
 		ConfigFile::SetRendererConfigurationPath(

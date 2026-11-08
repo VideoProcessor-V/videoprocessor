@@ -3,6 +3,7 @@
 #include "PreparedOutwardWindow.h"
 
 #include <IRenderer.h>
+#include <VP-V/abi/VpvInterfaces.h> // VPV-HOOK
 #include <StartupPresentationReadiness.h>
 #include <AnalysisFrame.h>
 #include <vprenderer/OptionalAnalysisWorker.h>
@@ -42,6 +43,7 @@ class ConfigFile;
 struct SceneDescriptor;
 struct DisplayProfile;
 class EarlyUploadHandoff;
+namespace Vpv { class RendererAbiBridge; } // VPV-HOOK
 
 // In-process D3D11 renderer. HDR input is color-managed and tone-mapped to
 // an SDR Rec.709 swapchain; this backend deliberately does not emit HDR.
@@ -64,11 +66,11 @@ public:
 	void OnVideoFrame(VideoFrame& videoFrame) override;
 	// ABI 37 (VP Renderer DirectShow filter): file frames carry their own
 	// presentation time and rate; capture frames keep OnVideoFrame unchanged.
-	bool SupportsTimedFileFrames() const override { return true; }
+	bool SupportsTimedFileFrames() const { return true; }
 	void OnTimedVideoFrame(VideoFrame& videoFrame,
-		const FileFrameTiming& timing) override;
-	bool WaitForFileFrameSlot(uint32_t timeoutMs) override;
-	void CancelFileFrameWait() override;
+		const FileFrameTiming& timing);
+	bool WaitForFileFrameSlot(uint32_t timeoutMs);
+	void CancelFileFrameWait();
 	bool HasPresentedLiveFrame() const override
 	{
 		return m_hasPresentedLiveFrame.load(std::memory_order_acquire);
@@ -102,7 +104,7 @@ public:
 	void SetQueueFramePolicy(size_t startupPrerollFrames,
 		size_t steadyReserveFrames, bool hasSteadyReserveFrames) override;
 	void SetActivePictureLookaheadFrames(size_t frames) override;
-	void SetActivePictureLookaheadAutomatic(bool automatic) override;   // Bug hunt 3 F2
+	void SetActivePictureLookaheadAutomatic(bool automatic);   // Bug hunt 3 F2
 	void SetSceneAwareTimingCorrection(bool enabled) override;
 	uint64_t SceneAwareCorrectionDropCount() const override;
 	uint64_t SceneAwareCorrectionRepeatCount() const override;
@@ -148,13 +150,13 @@ public:
 	bool GetDetectedPictureAspect(DetectedPictureAspect& result) const override;
 	bool GetVideoIngressInfo(CString& details) const override;
 	bool GetDolbyVisionLuminanceStatus(DolbyVisionLuminanceStatus& status) const override;
-	bool GetContentIntentStatus(ContentIntentStatus& status) const override;
+	bool GetContentIntentStatus(ContentIntentStatus& status) const;
 	// Report-a-problem: this DLL's DiagnosticHistory rings as JSONL (src "renderer").
 	bool WriteDiagnosticHistory(VpDiagnosticHistorySink sink, void* context,
-		int64_t referenceQpc) const override;
+		int64_t referenceQpc) const;
 	// Intent interpreter items 2-5 (2026-10-17): motion / ambient / black / display.
-	bool GetIntentStatus(IntentStatus& status) const override;
-	void SetAmbientLux(double lux, bool valid, double nowSeconds) override;
+	bool GetIntentStatus(IntentStatus& status) const;
+	void SetAmbientLux(double lux, bool valid, double nowSeconds);
 	// DV next step (f): the last rendered frame's format-neutral scene
 	// descriptor and display profile (SceneDescriptor.h / DisplayProfile.h),
 	// for future consumers (LED look-ahead, stats). False until a frame was rendered.
@@ -162,19 +164,19 @@ public:
 	bool GetPresentationTargetTiming(double& leadMs,
 		double& captureToTargetMs) const override;
 	bool GetPresentationTimingStatus(CString& status) const override;
-	bool GetDejudderStatus(CString& status) const override;
-	bool GetFallbacksStatus(CString& status) const override;
-	bool ToggleDvCompareCapture(CString& status) override;   // feat/dv-l8 WIP (plugin API 43)
-	void SetQueueDelayBudget(int totalMs) override;
+	bool GetDejudderStatus(CString& status) const;
+	bool GetFallbacksStatus(CString& status) const;
+	bool ToggleDvCompareCapture(CString& status);   // feat/dv-l8 WIP (plugin API 43)
+	void SetQueueDelayBudget(int totalMs);
 	// VP-V (WP-11): VP's status lines through the generic entry (module "vp").
-	bool GetModuleStatus(const char* module, CString& status) const override;
+	bool GetModuleStatus(const char* module, CString& status) const;
 	void* QueryExtension(const char* iid) override; // VPV-HOOK
-	bool InvokeModuleCommand(const char* module, const char* command, CString& reply) override; // VPV-HOOK
-	bool GetLedDriveStatus(CString& status) const override;
-	bool GetSourceResolutionStatus(CString& status) const override;
-	bool SuspendLedDriveForTest(CString& reason) override;
-	bool StopLedDriveForShutdown() override;
-	void ResumeLedDriveAfterTest() override;
+	bool InvokeModuleCommand(const char* module, const char* command, CString& reply); // VPV-HOOK
+	bool GetLedDriveStatus(CString& status) const;
+	bool GetSourceResolutionStatus(CString& status) const;
+	bool SuspendLedDriveForTest(CString& reason);
+	bool StopLedDriveForShutdown();
+	void ResumeLedDriveAfterTest();
 	bool GetRenderLoad(RendererRenderLoad& load) const override;
 	// Reached through the plugin's HDR status export, not IRenderer.
 	bool GetHdrStatus(RendererHdrStatus& status) const;
@@ -188,8 +190,8 @@ public:
 		int width, int height, int stride) override;
 	bool GetConversionPerformance(double& currentUs, double& avg10s, double& max10s) const override;
 	bool GetFrameRateAndPPM(double& measuredFps, int& ppmDeviation) const override;
-	bool GetCalibrationOutput(Calibration::PatternOutputInfo& info) const override;
-	bool SetCalibrationPattern(const Calibration::PatternRequest& request, CString& reason) override;
+	bool GetCalibrationOutput(Calibration::PatternOutputInfo& info) const;
+	bool SetCalibrationPattern(const Calibration::PatternRequest& request, CString& reason);
 
 private:
 	struct Impl;
@@ -231,6 +233,7 @@ private:
 			// bits of the r210 channels.
 			bool dvTunnelRaw = false;
 			bool dvTunnelHighAligned = false;
+			std::shared_ptr<void> extension; // VPV-HOOK
 			bool Raw() const { return rawFrame != nullptr; }
 			size_t Bytes() const { return Raw() ? rawBytes : pixels.size(); }
 		};
@@ -439,6 +442,7 @@ private:
 	std::atomic_bool m_stopWorkerStarted{false};
 
 	std::unique_ptr<Impl> m_impl;
+	std::unique_ptr<Vpv::RendererAbiBridge> m_abiBridge; // VPV-HOOK
 	std::shared_ptr<const ConfigFile> m_rendererConfiguration;
 	std::shared_ptr<const ConfigFile> m_applicationConfiguration;
 	std::shared_ptr<const ConfigFile> m_buildConfiguration;

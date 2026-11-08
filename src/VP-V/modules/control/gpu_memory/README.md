@@ -9,6 +9,7 @@ One place that owns VP's shared GPU temporaries (doc 51 section 3). Per-render t
 ## Contract
 
 - Core (pure C++14, no GPU): `src/VP-V/core/GpuAllocator.h` (TexFormat, TexShape, `PlanArena`, `ScratchArenaUser`, `ArenaGrantFor`, `ProductTextures`, `VramLedgerLines`) and `src/VP-V/core/ScratchArena.h` (`ScratchArena<Backend>`).
+- Product-store backend: `GpuProductTexBackend.h` (this folder: the `ProductTextures` backend of the lane GPU products P10/P11/P12; creates product textures, host readback only where the format supports it, records why a create failed). The skeleton dispatcher also owns the small constant textures of those kernels (stand-ins, the light level LUT) through `IStaticTextures`: kernels never create textures.
 - Backend: `PlTexBackend.h` (this folder, header-only, libplacebo: `pl_find_fmt` with fixed caps sampleable|storable, `pl_tex_create`/`pl_tex_destroy`).
 - Governor: user `kUserScratchArena`, levels [plan(T2), plan(T1), plan(T0), 0] (equal levels dropped), tier T1, not lossless. `Residency::Transient` products are not ring products (no lane grant, no governor user); the arena user counts them.
 - Determinism: the plan does not depend on request order; the k-th Acquire of a shape in a scope gets pool slot k; Acquire never allocates.

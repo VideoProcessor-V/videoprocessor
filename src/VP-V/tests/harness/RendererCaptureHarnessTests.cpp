@@ -4,6 +4,8 @@
 #include <VP-V/core/SlotRegistry.h>   // the slot table and which switches are honoured
 #include <VP-V/tests/SlotOverrideLayout.h>   // where the slot-off test writes each override (CPU-checked)
 #include <FileFrameTiming.h>
+#include <VP-V/abi/VpvHostCalls.h>   // the 22 former IVideoRenderer virtuals, through the extension interfaces (M2 P2)
+#include <VP-V/abi/VpvPluginGuard.h>
 #include <wincodec.h>
 #include <atlbase.h>
 #pragma comment(lib, "windowscodecs.lib")
@@ -790,6 +792,10 @@ namespace
 		const auto create = reinterpret_cast<Create>(GetProcAddress(dll, "VideoProcessorLibplaceboCreateRenderer"));
 		const auto destroy = reinterpret_cast<Destroy>(GetProcAddress(dll, "VideoProcessorLibplaceboDestroyRenderer"));
 		Assert::IsTrue(create && destroy, L"the renderer DLL's factory");
+		// The factory builds nothing for a host that has not attached (F1); a Bill baseline DLL has no attach export and
+		// needs none, so a failed attach only means the extension interfaces stay off for it.
+		std::string attachReason;
+		const bool attached = Vpv::PluginGuard::Check(dll, attachReason) && Vpv::PluginGuard::Attach(dll, attachReason);
 		// The configuration: the low-latency input profile chosen by the rule.
 		const std::string configPath = folder + "vp-capture-harness.cfg";
 		{
@@ -843,6 +849,9 @@ namespace
 			VideoConversionOverride::VIDEOCONVERSION_NONE, configPath.c_str(), &CaptureLog);
 		result.created = renderer != nullptr;
 		resources.SetRenderer(renderer, destroy);
+		// The VP-V interfaces exist only on a DLL of this extension ABI: a Bill baseline DLL (g_harnessRendererDll) has no
+		// QueryExtension slot in its vtable, so it is never asked.
+		IVideoRenderer* const extension = renderer && attached ? renderer : nullptr;
 		if (renderer)
 		{
 			const int width = g_harnessWidth, height = g_harnessHeight;
@@ -911,10 +920,10 @@ namespace
 			}
 			renderer->SetQueueFramePolicy(2, g_harnessQueueTarget ? g_harnessQueueTarget : (film ? 4 : 3), true);
 			if (g_harnessDelayBudgetMs > 0)   // VP-V delay budget (plugin API 42; never called on an older DLL)
-				renderer->SetQueueDelayBudget(g_harnessDelayBudgetMs);
+				VpvCalls::SetQueueDelayBudget(extension, g_harnessDelayBudgetMs);
 			if (g_harnessActivePictureLookahead >= 0)
 			{
-				renderer->SetActivePictureLookaheadAutomatic(g_harnessLookaheadAutomatic);
+				VpvCalls::SetActivePictureLookaheadAutomatic(extension, g_harnessLookaheadAutomatic);
 				renderer->SetActivePictureLookaheadFrames(static_cast<size_t>(g_harnessActivePictureLookahead));
 			}
 			renderer->Start();
@@ -1014,7 +1023,8 @@ namespace
 						timing.sampleStart100ns = static_cast<int64_t>(n) * 10000000LL * plan->fileRateDenominator / plan->fileRateNumerator;
 						timing.sampleStop100ns = static_cast<int64_t>(n + 1) * 10000000LL * plan->fileRateDenominator / plan->fileRateNumerator;
 						timing.discontinuity = n == 0;
-						renderer->OnTimedVideoFrame(frame, timing);
+						Assert::IsNotNull(extension, L"file frames need a renderer DLL with the VP-V extension interfaces");
+						VpvCalls::OnTimedVideoFrame(extension, frame, timing);
 					}
 					else
 						renderer->OnVideoFrame(frame);
@@ -1085,10 +1095,10 @@ namespace
 			}
 			result.presented = renderer->HasPresentedLiveFrame();
 			CString status;
-			if (renderer->GetDejudderStatus(status)) result.dejudderStatus = CStringA(status).GetString();
-			if (renderer->GetLedDriveStatus(status)) result.ledStatus = CStringA(status).GetString();
-			if (renderer->GetFallbacksStatus(status)) result.fallbacksStatus = CStringA(status).GetString();
-			if (renderer->GetSourceResolutionStatus(status)) result.sourceStatus = CStringA(status).GetString();
+			if (VpvCalls::GetDejudderStatus(extension, status)) result.dejudderStatus = CStringA(status).GetString();
+			if (VpvCalls::GetLedDriveStatus(extension, status)) result.ledStatus = CStringA(status).GetString();
+			if (VpvCalls::GetFallbacksStatus(extension, status)) result.fallbacksStatus = CStringA(status).GetString();
+			if (VpvCalls::GetSourceResolutionStatus(extension, status)) result.sourceStatus = CStringA(status).GetString();
 			status.Empty();
 			if (renderer->GetPresentationTimingStatus(status)) result.presentationStatus = CStringA(status).GetString();
 			resources.ReleaseRenderer();
@@ -6489,7 +6499,7 @@ namespace Tests
 			{
 				if (!formatRead && t >= 1.0)
 				{
-					formatRead = renderer.GetCalibrationOutput(format);
+					formatRead = VpvCalls::GetCalibrationOutput(&renderer, format);
 					if (!formatRead) return;
 					std::string reason;
 					if (!Calibration::PatternFormatSupported(format, reason)) return;
@@ -6519,14 +6529,14 @@ namespace Tests
 						shots[i].request.generation = static_cast<uint64_t>(i + 1);
 						shots[i].request.flags = Calibration::PatternReadback;
 						CString reason;
-						shots[i].shown = renderer.SetCalibrationPattern(shots[i].request, reason);
+						shots[i].shown = VpvCalls::SetCalibrationPattern(&renderer, shots[i].request, reason);
 						shots[i].error = CStringA(reason).GetString();
 						shots[i].shownAt = t;
 						if (!shots[i].shown) { shots[i].checked = true; shots[i].checkedAt = t; }
 					}
 					if (shots[i].shown && !shots[i].checked && t >= shots[i].shownAt + 0.6)
 					{
-						renderer.GetCalibrationOutput(shots[i].after);
+						VpvCalls::GetCalibrationOutput(&renderer, shots[i].after);
 						const uint64_t generation = static_cast<uint64_t>(i + 1);
 						const bool done = shots[i].after.presentedGeneration == generation && shots[i].after.presentsOfGeneration >= 2 &&
 							(shots[i].after.containerBits != 10 || shots[i].after.readbackGeneration == generation);
@@ -6541,7 +6551,7 @@ namespace Tests
 				{
 					Calibration::PatternRequest off;
 					CString reason;
-					ended = renderer.SetCalibrationPattern(off, reason);
+					ended = VpvCalls::SetCalibrationPattern(&renderer, off, reason);
 				}
 			};
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 12.0, false, std::string(), false, &plan);
@@ -6721,7 +6731,7 @@ namespace Tests
 			FramePlan plan;
 			plan.tick = [&](IVideoRenderer& renderer, double t)
 			{
-				if (!read && t >= 1.5) read = renderer.GetCalibrationOutput(info);
+				if (!read && t >= 1.5) read = VpvCalls::GetCalibrationOutput(&renderer, info);
 			};
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 3.0, false, std::string(), false, &plan);
 			Assert::IsTrue(r.presented, r.Tail().c_str());

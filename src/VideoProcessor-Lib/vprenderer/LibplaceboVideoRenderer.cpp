@@ -15,6 +15,8 @@
 #include <VP-V/modules/output/presentation/RepeatReuseRegistryKey.h>
 #include <KernelInverse.h>
 #include <vprenderer/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/MotionAheadWalk.h>
+#include <VP-V/modules/input/source_analysis/SourceAheadWalk.h>
 #include "../SubtitleProfileUpdatePolicy.h"
 #include "SubtitleBarRecovery.h"
 
@@ -70,6 +72,8 @@
 #include <vprenderer/EdgeBlanking.h>
 #include <vprenderer/NlsHookRecovery.h>
 #include <vprenderer/RendererExtension.h> // VPV-HOOK
+#include <vprenderer/RendererSettingsExtension.h> // VPV-HOOK: H2, VP-V settings members as a base
+#include <VP-V/modules/control/config/VpvRendererSettings.h>   // VPV-HOOK: VP-V settings functions (Describe, DebandYieldsToVp)
 #include <vprenderer/CaptureTimestampGap.h>
 #include <vprenderer/FileFrameClock.h>
 #include <vprenderer/DisplayRateHold.h>
@@ -86,7 +90,9 @@
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>   // WP-23 frame analysis store
 #include <VP-V/modules/input/signal/ResyncCallSites.h>   // R1 call-site helpers
 #include <VP-V/modules/input/signal/ResyncExtension.h>   // VPV-HOOK: resync Q1 (Shadow, Drive, HostBinding, pulldown step)
+#include <VP-V/modules/motion/estimation/VectorEngineHost.h>   // P5a: the vector engine: state, logic and the host adapter   // VPV-HOOK
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>   // R4a: the re-base decision product P0
+#include <VP-V/modules/scaling/rebase/RebaseWarmupJob.h>   // FX-RB re-base shader warm-up // VPV-HOOK
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
@@ -139,6 +145,7 @@
 #include <QueuedFrameStatistics.h>
 #include <ContentIntentObserver.h>
 #include <IntentInterpreterObserver.h>
+#include <VP-V/abi/RendererAbiBridge.h> // VPV-HOOK
 #include <IntentInterpreterSupport.h>
 #include <AmbientAdaptation.h>
 #include <BlackIntent.h>
@@ -1145,7 +1152,7 @@ namespace
 		std::string commandLine;
 	};
 
-	struct RendererSettings
+	struct RendererSettings : RendererSettingsExtension
 	{
 		double sdrTargetNits = PL_COLOR_SDR_WHITE;
 		double sdrBlackNits = HdrTargetLuminance::DefaultBlack;
@@ -1155,7 +1162,6 @@ namespace
 		ProfileUpdateMode profileUpdateMode = ProfileUpdateMode::REBUILD;
 		bool switchRefreshRate = true;
         bool presentEveryVsync = false;
-        bool presentEveryVsyncWithheld = false;   // VP-V PresentationOwner: requested, render-ahead owns presentation
         int presentationQueueDepth = PresentationConfig::DefaultDepth;
 		RefreshRateSwitchMode refreshRateSwitchMode =
 			RefreshRateSwitchMode::FullscreenOnly;
@@ -1176,371 +1182,12 @@ namespace
 		bool customToneMapping = false;
 		bool hasContrastRecovery = false;
 		float contrastRecovery = 0.0f;
-		int saturation = 0;
-		// Stage 6 de-judder: 0 = off (today's path); its own match tolerance.
-		double dejudderStrength = 0.0;
-		// Delta 10: even (2:2) cadences, 0 = off; 29.97 included or not.
-		double dejudderStrengthEven = 0.0;
-		bool dejudderEvenIncludes1001 = false;
-		double dejudderMatchTolerance = 4.5;   // owner 2026-10-14: with the fade match (planner Q8's condition met)
-		double dejudderFrameTrust = 0.25;   // 6b-2: whole-frame hold below this share
-		bool occlusionMask = false;         // 6c: the de-judder's occlusion mask for the sigma-delta
-		bool repeatRenderReuse = false;     // WP-24: captured repeats drawn from the rendered-picture cache (draft: off)
-		// Refinements (docs/VP-build-plan-refinements.md); inert while the
-		// de-judder and the grain map are off.
-		bool dejudderGlobalPrior = true;          // D1
-		double dejudderMotionScaleLo = 0.25;      // D2, source px per source frame
-		double dejudderMotionScaleHi = 1.5;       // D2 (0 = off)
-		bool dejudderVectorSmooth = true;         // D3
-		double dejudderTrustScale = 0.6;          // D4: share at full strength (0 = off)
-		bool dejudderOcclusionFill = false;       // D5 (experiment)
-		// Stage 11a estimator-lite (docs/VP-stage11a-estimator-lite.md).
-		bool dejudderEstCandidates = true;        // E1
-		double dejudderEstLambda = 0.5;           // E1 smoothness penalty, codes per source px
-		bool dejudderEstQpel = true;              // E3
-		bool dejudderEstStillZero = true;         // identical blocks: exactly the zero vector (bug hunt 2026-10-25)
-		bool dejudderEstGate = true;              // E4
-		bool dejudderEstSplit = false;            // E2 (off from 2026-10-14: with the 4.5 tolerance and M6 it costs benefit)
-		double dejudderEstSplitSad = 0.0;         // E2 threshold (0 = the match tolerance)
-		// Delta 14 (docs/VP-delta-14-soe-rules.md): R-A the strength's roll-off
-		// above a fast pan, R-B the camera/object split (1 = off).
-		bool dejudderMotionRolloff = false;
-		double dejudderRollLo = 8.0;
-		double dejudderRollHi = 24.0;
-		double dejudderRollFloor = 0.25;
-		double dejudderObjectStrength = 1.0;
-		// Motion fixes (owner 2026-10-13 night; DejudderWarp.h M1-M3): M1 the
-		// texture-scaled tolerance (0 = off), M2 two global candidates, M3
-		// regional hold with its cut test, the coarse search range (1/32
-		// texels) and the forward/backward agreement (half-resolution px).
-		// Defaults (owner 2026-10-14, the night's measurements): with the 4.5
-		// tolerance, texture 0.25, the fade match, the split off and M6's
-		// per-pixel trust, the 7 real HFR clips go from 22.8% to 42.1% of the
-		// judder removed (film-like motion 14.4 -> 31.8%), damaged 32x32 tiles
-		// 0.4 -> 0.9% (film-like 0.19 -> 0.36%), the synthetic corpus 833 ->
-		// 942, wrongly trusted at most 1.9%. "More": dejudder_match_tolerance 8
-		// with dejudder_pixel_trust_lo 1.7 / hi 4.5 (45.1%).
-		double dejudderTextureTolerance = 0.25;
-		bool dejudderGlobalTwo = true;
-		bool dejudderRegionalHold = true;
-		double dejudderCutHistogram = 0.3;
-		int dejudderSearchRange = 8;
-		double dejudderConsistencyPx = 2.0;
-		// M4 (planner Q11): smooth fades matched after a global gain, at most
-		// at the floor strength (off by default until measured on the projector).
-		bool dejudderFadeMatch = true;
-		double dejudderFadeFloor = 0.25;
-		// M5: the pixel verification of trusted blocks (share of off pixels).
-		bool dejudderVerify = false;
-		double dejudderVerifyShare = 0.2;
-		// M6: per-pixel trust on trusted blocks' vectors (multiples of the
-		// match tolerance where a pixel's weight starts to fall and reaches 0).
-		bool dejudderPixelTrust = true;
-		// The landing check (owner 2026-10-14, on: damage to a third).
-		bool dejudderLandingCheck = true;
-		// Pruning 2026-10-17 (RetiredSettings.h): dejudder_picture_area, fix_scene_cooldown and
-		// dither_vectors_new_frame are retired - black bars are always left out of the matcher's
-		// statistics, the scene-cut cooldown is always 2 s at the content rate, and a new frame's
-		// dither always takes the de-judder's motion when it is valid.
-		// Roadmap item 2 (owner 2026-10-15, on): DeckLink R12B/R12L/r210 as
-		// native RGB (GpuRgbUnpack) instead of the CPU's 10-bit 4:2:0 P010.
-		bool nativeRgbIngest = true;
-		// DV extension item 7 (owner 2026-10-16, off until validated): the
-		// Dolby Vision tunnel's picture unpacked on the GPU; the CPU keeps the
-		// DM packet (its pixels only). A failed unpack falls back to the CPU.
-		bool dvTunnelGpuUnpack = true;   // default on (test/dv-synthetic verdict, 2026-10-24; failures listed under Fallbacks engaged)
-		// DV extension item 3 (owner 2026-10-17, off): Dolby Vision L2 trims as a
-		// VP pass after libplacebo's tone mapping (shaders\DV trims.glsl; a
-		// non-certified reimplementation, see DolbyVisionTrims.h).
-		bool dvTrims = true;             // default on (test/dv-synthetic verdict, 2026-10-24; not certified)
-		std::string dvToneMapping = "libplacebo";   // feat/dv-l8: libplacebo | dolby_style (DvDolbyStyle.h; approx.)
-		std::string dvCompareCaptureFolder;          // feat/dv-l8 WIP: DV comparison capture folder ("" = VP_DV_COMPARE_PATH / off)
-		// Restore switch (DV tunnel bug hunt 2026-10-17, default on): the whole-raster
-		// SDR alignment probe, the grey SDR exit, the loss limit in source pictures
-		// and L2 trims before L8 (CRGBDolbyVisionTunnelFormatter). Off = before them.
-		bool dvTunnelFixes = true;
-		// Pulldown detection (owner 2026-10-14, off): film carried in a faster
-		// signal by repeated frames is found and shown at its film rate.
-		bool dejudderPulldown = false;
-		double dejudderPixelTrustLo = 3.0;
-		double dejudderPixelTrustHi = 8.0;
-		// Owner 2026-10-13 efficiency: the matcher one level coarser above 1920
-		// wide (off | search = the searches only | all = every pass).
-		std::string dejudderLowRes = "all";
-		// Owner 2026-10-13: the next pair estimated in an extra's spare refresh
-		// when the frame after next is queued (else before the frame, as before).
-		bool dejudderEstimateAhead = true;
-		// Owner 2026-10-13 (docs/VP-gpu-capture-low-latency-plan.md): gpu =
-		// V210 / UYVY / HDYC unpacked on the GPU from the raw frame (the same
-		// planes, byte for byte); standard = the CPU formatters. Default gpu on
-		// both pathways (owner 2026-10-15: about half the time at 4K, no CPU
-		// conversion; every CPU consumer reads the raw frame - audited).
-		std::string capturePath = "gpu";
-		// Experimental (owner 2026-10-15, option A of the pinned-memory work):
-		// early = each raw frame uploaded on the conversion thread as it arrives
-		// (EarlyUpload, a second device and shared textures); render = the
-		// render thread uploads it (today).
-		std::string captureUpload = "auto";   // auto: early upload in every mode (VRAM-guarded); efficiency_fixes off: low-latency path only
-		// Planner Q4 (2026-10-16): every key and value of the profile sections applied, so a
-		// profile edit always changes the effective fingerprint (and is applied live) - also
-		// for keys added later, without anyone having to list them in the fingerprint.
-		std::string profileValues;
-		// Owner 2026-10-15: the captured signal's range. auto = from the
-		// capture format (YCbCr and 10-bit RGB limited; 8- and 12-bit RGB
-		// full), as before; full / limited override it for a source that
-		// sends otherwise (the DeckLink SDK reports no range). The picture and
-		// the LED drive (its exact measurement follows the picture; its
-		// look-ahead reads the captured frame) both follow it.
-		std::string sourceRange = "auto";
-		// Stage 12 step A (owner 2026-10-15): source_resolution - native |
-		// auto (the default since 2026-10-16: the Picture slider's Standard) | any
-		// height in lines. A height below the frame's re-bases the source to it
-		// (SourceRebase.h).
-		std::string sourceResolution = "auto";
-		// Stage 12: the confidence auto needs before it re-bases (spec 3).
-		double sourceResolutionAutoMinConfidence = 0.8;
-		// The Picture slider (owner 2026-10-16): the shots and seconds of agreeing evidence
-		// before auto declares a lower source (standard 3 and 10 s).
-		int sourceResolutionEvidenceShots = 3;
-		double sourceResolutionEvidenceSeconds = 10.0;
-		// Stage 12 §2b/§2d: VP's own debander (off | auto | on) and whether the
-		// bitrate quality reading raises it (auto | off | on).
-		std::string debandVp = "off";
-		std::string lowBitrateHandling = "auto";
-		// Delta 15 S8-2: the SSIM weight (and the CNN's, 2c) lowered at a low
-		// bitrate quality, down to the floor; the faithful anti-ringing raised.
-		bool ssimBitrateAware = true;
-		double ssimBitrateFloor = 0.4;
-		// docs/VP-nvof-ahead.md (owner 2026-10-16): how many source frames ahead the
-		// optical-flow engine works (0 = off); off in low latency; never more than queued.
-		int motionAheadFrames = MotionAhead::kDefaultDepth;
-		// The engine is the established default (owner 2026-10-16); off = the matcher only.
-		bool opticalFlow = true;
-		// Planner Q1 (2026-10-16): the whole-frame motion from the engine's field when its pair
-		// came ahead (the global search the fallback). On the corpus identical without the
-		// taste; on known pans the engine reads the speed exactly where the search overshot
-		// medium pans by a step, so the taste's roll-off and camera follow the true speed.
-		bool opticalFlowGlobal = true;
-		// 2026-10-17 (docs/VP-nvof-ahead.md, the engine's extras): the global search when the
-		// engine's whole-frame motion is not clear; the engine's cost and its own forward/
-		// backward consistency as trust inputs (Dejudder::Settings).
-		bool opticalFlowGlobalFallback = true;
-		// corpus 2026-10-17: no measured benefit on real clips (cost trust identical; fb check trades removal for damage) - off by default, owner gate
-		bool opticalFlowCostTrust = false;
-		bool opticalFlowFbCheck = false;
-		// VP's 50/60p frame interpolation (docs/VP-interpolator-50-60-plan.md; owner
-		// defaults 2026-10-16, open for confirmation): off | auto (a non-integer
-		// source/display ratio only) | always (smooth-motion parity for video-class
-		// sources); where the vectors are untrusted hold (the nearest frame) or blend;
-		// gap fill off; the film / video classification legacy (IsFilmLike) or measured.
-		InterpolationPolicy::Mode interpolation = InterpolationPolicy::Mode::Off;
-		InterpolationPolicy::Fallback interpolationFallback = InterpolationPolicy::Fallback::Hold;
-		bool interpolationFillGaps = true;   // hiccup repair: on by default (owner 2026-10-18)
-		InterpolationPolicy::SourceClass sourceClass = InterpolationPolicy::SourceClass::Legacy;
-		// Content recognition (intent interpreter item 1, 2026-10-17; default off):
-		// the rule-based content class for the rules' `content` variable, and the
-		// seconds a new class must hold before it is taken (at a cut).
-		bool intentContent = false;
-		double intentContentHoldSeconds = 5.0;
-		// Intent interpreter items 2-5 (2026-10-17; every function default off;
-		// docs/VP-intent-interpreter-design.md): motion intent (a multiplier on the
-		// de-judder strength in [intent_motion_min, 1], decided per shot, applied at
-		// cuts), ambient adaptation (render to the effective black B_eff), black
-		// protection (report / LED shadow cap) and the display mapping readout.
-		bool intentMotion = false;
-		MotionIntentPolicy intentMotionPolicy = MotionIntentPolicy::Display;
-		double intentMotionMin = 0.5;
-		double intentMotionMinShotSeconds = 2.0;
-		double intentEaseSeconds = 1.5;   // intent_ease_s: the fade model (0 = instant at the cut)
-		bool ambientAdapt = false;
-		double ambientAdaptStrength = 1.0;
-		double ambientScreenReflect = 0.01;
-		double ambientMaxBlackNits = 1.0;
-		double ambientTauUpSeconds = 15.0;
-		double ambientTauDownSeconds = 90.0;
-		BlackIntentMode intentBlack = BlackIntentMode::Off;
-		bool intentDisplay = false;
-		// Film grain (owner 2026-10-17: never averaged or interpolated away; each switch's
-		// default is the faithful path, the other value the established one byte for byte;
-		// docs/audit/grain-audit-2026-10-17.md): interpolation_grain, deband_vp_grain_guard,
-		// dejudder_source_warp_filter (residual_stabilise_grain_guard is in `adaptive`,
-		// deband_grain beside deband_strength).
-		InterpolationPolicy::Grain interpolationGrain = InterpolationPolicy::Grain::Preserve;
-		bool debandVpGrainGuard = true;
-		// deband_vp_grain_guard on (hunt 2 07-scaling H1; the default) = the grain split: the
-		// guard keeps grain by debanding only the low band; veto = the 2026-10-17 spatial-share
-		// veto (debandVpGrainSplit false); off = no guard.
-		bool debandVpGrainSplit = true;
-		// deband_vp_exclusive (hunt 2 15-intent C14: libplacebo's deband on SDR thins fine
-		// grain, 0.86x at 0.5 code): on (default) = while VP's debander runs (deband_vp auto
-		// or on) with its grain guard, libplacebo's automatic deband (deband_strength auto)
-		// is off; an explicit deband_strength (light / default) is kept. off = both run.
-		bool debandVpExclusive = true;
-		// detail_pulse_stabilise / texture_restore (docs/VP-detail-restore.md, 2026-10-17):
-		// run after the VP debander on the plane libplacebo scales from, before every scaling
-		// step; both read the source-resolution monitor's original frame never. detail_pulse_stabilise
-		// on (default) scales each frame's own detail towards its best-coded recent neighbour
-		// (cap detail_pulse_cap); texture_restore statistical (off by default, experimental)
-		// repairs grain and in-focus texture towards the reference (cap texture_restore_cap).
-		// Off = the stage is not called at all.
-		bool detailPulseStabilise = true;
-		double detailPulseCap = DetailPulse::kDefaultCap;
-		// detail_pulse_fast (2026-10-18, default on): the same pulse in fewer GPU passes' work
-		// (docs/agent-reports/detail-pulse-perf.md); off = the original passes, for A/B.
-		bool detailPulseFast = DetailPulse::kDefaultFast;
-		bool textureRestore = false;
-		double textureRestoreCap = TextureRestore::kDefaultCap;
-		bool dejudderSourceWarpCatmull = true;
-		// Hunt 2 M1: nls_sampling. catmull (default): the NLS / NLS+ warp samples the
-		// source with a separable Catmull-Rom widened by the map's local minification
-		// (a low-pass at the centre); bilinear: the hooked texture's bilinear sampler,
-		// the earlier output.
-		bool nlsSamplingCatmull = true;
-		// Owner 2026-10-16: the dither as one choice per profile - off, libplacebo's (the dithering
-		// method below), or VP's temporal sigma-delta (loaded by the renderer itself, whatever the
-		// shader list says). auto (unset): as before - the shader list and the dithering setting.
-		std::string temporalDither = "auto";
-		// Pipeline skeleton (design freeze 2026-10-24; docs/design/VP-pipeline-final.md):
-		// pipeline_original_pathway on = every VP addition off, mixed slots in their upstream
-		// form (ADR-0019); pipeline_order = slots moved within their zone (ADR-0021, validated;
-		// empty = the designed order); pipeline_slots_off = slots switched off at slot level;
-		// calibration_lut_stage = where the projector calibration LUT runs (libplacebo = its
-		// target LUT, before VP's output hooks, as before; vp = VP's last colour hook, R1).
-		bool pipelineOriginalPathway = false;
-		std::string pipelineOrder;
-		std::string pipelineSlotsOff;
-		std::string calibrationLutStage = "libplacebo";
-		std::string hdrInference = "vp";   // [vpv] hdr_inference (F-8): the GUI's choice; dumped and fingerprinted here
-		// pipeline_entrance_once (B3, ADR-0024): the motion consumers (interpolated pictures, hiccup
-		// gap pairs, source-warp extras) warp or blend the PROCESSED A and B - the entrance stages
-		// run once per source frame - instead of re-running the stages on every picture. The
-		// default (owner accepted 2026-10-24); off = the per-picture stages (a diagnostic). The
-		// Original pathway never uses it.
-		bool pipelineEntranceOnce = true;
-		// frame_analysis_store (WP-23): VP's per-source-frame analysis record + ONE shared luma decode
-		// read by every analyser (VpFrameAnalysisHost.h). Off until the big test; never in Original.
-		bool frameAnalysisStore = false;
-		// resync_event (R1/R3): off | shadow | on. Shadow detects resync/discontinuity events for the status
-		// line and problem report only; the picture is unchanged. On (expert until the R5 gate): the central
-		// Indicator drives the timing-family readers, the libplacebo flush and the re-base decision (R3, L1,
-		// R4a). Never in Original.
-		std::string resyncEvent = "off";
-		// entrance_gpu_drain (expert; bug hunt 2026-10-25, root cause open): after the entrance stages
-		// ran on a draw, "flush" submits the GPU queue and "finish" waits for it before libplacebo's
-		// render. Pictures between frames then match plain draws byte for byte (without it libplacebo's
-		// scaling passes vary by +-1 of 16 bits on scattered textured pixels with the GPU's timing).
-		// off = today's path (the default until it is costed on the 3090); Original pathway: off.
-		std::string entranceGpuDrain = "off";
-		std::string pipelineSettingsProblems;   // refused values, shown under "Fallbacks engaged" (audit item 4)
-		// Kernel-matched re-base (docs/VP-stage12-build-plan.md; owner 2026-10-16: optimise
-		// 1080p): the identified player kernel's inverse for an exact 2:1 luma re-base.
-		bool rebaseKernelMatch = true;
-		// Owner 2026-10-16: tiles holding overlay text (the player's own subtitles, drawn at
-		// the output resolution) are no evidence for source_resolution auto.
-		bool sourceResolutionTextGuard = true;
-		// Audit 2026-10-16: a mixed screen (a native UI with a lower-resolution video in it, a 4K
-		// overlay, picture-in-picture) is read as native - no whole-frame re-base.
-		bool sourceResolutionMixedGuard = true;
-		// Hunt 2 M2/M3: the coding readings (effective bits, blocking, banding) robust to
-		// upscales, dither and noise; off = the fixed 8/16-px grid and one-pixel occupancy.
-		bool sourceCodingFixes = true;
-		// Latch review 2026-10-17 (owner): source_resolution auto's latch fixes - re-engage on the
-		// standard after native evidence, level-aware native readings, per-tile floor test, shape
-		// cuts, the switch at a cut / real black / fast pan / low-detail moment or a crossfade, a
-		// short release fade; off = the behaviour before (and no fades).
-		bool sourceResolutionLatchFixes = true;
-		// h3-latch 2026-10-18: [vprenderer] source_resolution_cut_fixes (default on, with the latch fixes):
-		// camera moves, scrolls, dark passes and flashes are not cuts, same-level shot / reverse-shot cuts
-		// are, and shots also need part of the evidence time (SourceResolution::Tracker::Settings::cutFixes).
-		bool sourceResolutionCutFixes = true;
-		// h3-latch 2026-10-18 (K3): [vprenderer] active_picture_startup_hold (default on): until the first crop
-		// decision of a queue generation the output is black, or the remembered crop of the same source
-		// (StartupCropHold); presentation only.
-		bool activePictureStartupHold = true;
-		double sourceResolutionEngageMaxWait = 20.0;   // s: the longest wait for a switching moment
-		double sourceResolutionCrossfade = 1.5;        // s: the crossfade after that wait
-		double sourceResolutionReleaseFade = 0.25;     // s: the fade back to native (at most 0.25)
-		// Audit 2026-10-16 (pulldown review D1/D3/D4): keep the lock across counted misses, re-phase
-		// in place, a cadence-aware film clock; off = the 2026-10-14 behaviour.
-		bool pulldownFixes = true;
-		// Bug hunt 2026-10-17: a capture timestamp break is a gap (and the dequeue checks a
-		// pair's times), the film clock re-bases on a signal-rate change, and the timeline
-		// holds the last measured display rate; off = the behaviour before.
-		bool timingContinuityFixes = true;
-		// Hunt 2 2026-10-17 (06-interp, 02-dv classifier): the exclusive 15 fps pulldown floor,
-		// the film clock re-anchored on a re-phase (robust anchor), the queue target scaled while
-		// locked, the source-only film / video class, the content classifier's carrier / animation /
-		// static UI rules and content intent without look-ahead; off = the behaviour before.
-		bool cadenceClassFixes = true;
-		// Hunt 2 fix group 5 (motion): the matcher's history restarts on a pair not chained
-		// to the last estimate and forgets the strength state with the rest; A's repeat
-		// draws never read the (B, C) field estimated ahead; the ahead frame C is chosen by
-		// B's adjacency and DV rules; DV pairs need byte-equal DM matrices; a matcher setting
-		// or motion source change invalidates the vectors; a repeat-preserving queue drop
-		// marks a gap; off = the behaviour before.
-		bool motionHistoryFixes = true;
-		bool vectorDemand = true;
-		// Hunt 2 group 5 (13-timing, 05-renderahead M5): the backlog flush measures
-		// staleness beyond the queue target, the timeline steering is in seconds, the cadence
-		// correction measures the capture rate on QPC with constants in seconds and
-		// a bounded phase, an overflow drop keeps the dropped frame's gap, the
-		// credit-reduced target keeps the look-ahead's frames, and open loop ranks the
-		// whole-hertz mode below the vblank cadence; off = the behaviour before.
-		bool queueTimingFixes = true;
-		// Fixed-constant batch 2026-10-18 (owner [[vp-general-not-fixed]]): the film / video class
-		// derived from the measured rate (DejudderPolicy::IsFilmLike(hz, true), no fixed bands) and
-		// the gap-fill span as a time (InterpolationTimeline::MaxSpanFrames); off = the behaviour before.
-		bool generalRateFixes = true;
-		// Efficiency round 2026-10-18 (docs/agent-reports/efficiency.md): work the renderer did
-		// twice is done once - the frame shown takes the planes the de-judder uploaded for it
-		// as the next frame (UploadReuse.h), and the look-ahead walk measures a frame's active
-		// picture only for an observer that still wants the frame. Bit-identical output; off =
-		// the earlier behaviour (both computations again).
-		bool efficiencyFixes = true;
-		// Render-ahead (docs/VP-render-ahead-design.md, owner's top priority 2026-10-17): the
-		// de-judder's extras queued straight after their frame (no vblank waits), so the next
-		// frame renders while they are shown; off until the owner's on-screen runs pass.
-		// dejudder_gate: auto (period with render_ahead, else refresh) | period | refresh;
-		// render_ahead_utilisation: the GPU share of a source period the gate budgets;
-		// render_ahead_queue_credit: the queue target gives back the planned lead.
-		bool renderAhead = false;
-		std::string dejudderGate = "auto";
-		double renderAheadUtilisation = 0.85;
-		bool renderAheadQueueCredit = false;
-		// Delta 9 synthesis-lite (docs/VP-delta-8-9-10.md).
-		double dejudderHoldFeatherPx = 4.0;       // H1 (0 = off)
-		int dejudderHoldHysteresis = 2;           // H2 (1 = off)
-		bool dejudderBlockTaper = false;          // H3 (experiment)
-		double dejudderTaperSad = 0.0;            // H3 (0 = 2 x match tolerance)
-		double ditherGrainToleranceScale = 3.0;   // S1: sigma-delta tolerance x this on grain (1 = off)
-		bool ditherVectorsOwn = false;   // delta 8 R1: dither_vectors own (auto = the de-judder's on extras)
-		// S2 (planner 2026-10-12): every libplacebo FBO in rgba32f. -1 auto
-		// (on, on everywhere (owner 2026-10-16)), 0 off, 1 on. The output pass is
-		// rgba32f regardless (LibplaceboRenderParameters).
-		int fboFloat32 = -1;
-		bool preserveExtendedRange = true;  // Stage 10: BTB/WTW kept through scaling (SDR); on by default (owner 2026-10-16: keep BTB and WTW)
-		// Audit 2026-10-16: the carry also for BT.1886 / sRGB, SDR in other primaries, a calibration
-		// LUT and HDR passed through unmapped (off = the Stage 10 eligibility).
-		bool extendedRangeMoreCases = true;   // GPU tests pass (2026-10-17 night); owner: BTB/WTW in all cases
-		SdrToneShape::Settings sdrTone;     // delta 13: SDR tone shape and headroom (off)
-		bool dejudderWarpRendered = true;   // 6d: extras warp A's rendered picture (false: a warped source)
-		bool outputSegmentsMerged = false;   // S2/S3 as one PRE_OUTPUT + one OUTPUT hook (draft; tolerance gate)
 		std::string upscaler = "auto";
 		std::string chromaUpscaler = "auto";   // owner 2026-10-13: plane_upscaler (auto = Catmull-Rom, upscaler = the upscaler)
 		std::string downscaler = "auto";
-		std::string downscaleLight = "linear";   // Stage 8-1: linear | gamma
-		bool adaptiveDownscale = false;          // Stage 8-2: the SSIM / faithful blend
-		// Stage 8b: the CNN / faithful upscale blend (grain only), its weight,
-		// SSimSuperRes's strength by the grain term, and the light domain.
-		bool adaptiveUpscale = false;
-		double adaptiveUpscaleWBase = 1.0;
-		bool adaptiveUpscaleSuperresScale = true;
-		std::string upscaleLight = "linear";     // linear | gamma
-		AdaptiveDownscale::Settings adaptive;
         MotionConfig::Settings motion;   // v1.4.02 (Bill): smooth motion / frame mixer / deinterlacing
 		std::string debandStrength = "auto";
 		AutoToggle deband = AutoToggle::AUTO;
-		bool debandGrain = false;   // deband_grain: libplacebo's deband adds grain (off: VP's dither does that job)
 		AutoToggle sigmoid = AutoToggle::AUTO;
 		std::string dithering = "blue_noise";
 		std::string displayBitDepth = "output";
@@ -1595,7 +1242,6 @@ namespace
 		bool configuredScreenTarget = false;
 		std::string verticalAlignment = "center";
 		int screenEdgePadding = 0;
-		EdgeBlanking::Insets edgeBlanking;
 		double anamorphicScale = 1.0;
 		bool automaticSourceCrop = false;
 		bool automaticSourceCropRequested = false;
@@ -1632,6 +1278,7 @@ namespace
 		std::string calibrationLutConstrainedBaseDirectory;
 	};
 
+#include <VP-V/modules/control/config/VpvSettingsDump.h>   // VPV-HOOK: P3-0 identity kit (tests only)
 	AlphaSourceCrop::VerticalPictureAlignment ResolveVerticalPictureAlignment(
 		const std::string& alignment)
 	{
@@ -1675,62 +1322,10 @@ namespace
 			<< static_cast<int>(settings.peakDetection) << '|'
 			<< settings.customToneMapping << '|'
 			<< settings.dynamicTarget << '|'
-			<< ToneMappingTuning::Fingerprint(settings.toneTuning)
-			<< settings.hasContrastRecovery << '|' << settings.contrastRecovery << '|'
-			<< settings.saturation << '|'
-			<< settings.dejudderStrength << '|' << settings.dejudderStrengthEven << '|'
-			<< settings.dejudderEvenIncludes1001 << '|' << settings.dejudderMatchTolerance << '|'
-			<< settings.dejudderFrameTrust << '|' << settings.occlusionMask << '|'
-			<< settings.dejudderGlobalPrior << '|' << settings.dejudderMotionScaleLo << '|'
-			<< settings.dejudderMotionScaleHi << '|' << settings.dejudderVectorSmooth << '|'
-			<< settings.dejudderTrustScale << '|' << settings.dejudderOcclusionFill << '|'
-			<< settings.dejudderEstCandidates << '|' << settings.dejudderEstLambda << '|'
-			<< settings.dejudderEstQpel << '|' << settings.dejudderEstStillZero << '|' << settings.dejudderEstGate << '|'
-			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|' << settings.dejudderLowRes << '|' << settings.dejudderEstimateAhead << '|' << settings.capturePath << '|' << settings.dejudderMotionRolloff << '|' << settings.dejudderRollLo << '|'
-			<< settings.dejudderRollHi << '|' << settings.dejudderRollFloor << '|' << settings.dejudderObjectStrength << '|'
-			<< settings.dejudderTextureTolerance << '|' << settings.dejudderGlobalTwo << '|' << settings.dejudderRegionalHold << '|'
-			<< settings.dejudderCutHistogram << '|' << settings.dejudderSearchRange << '|' << settings.dejudderConsistencyPx << '|'
-			<< settings.dejudderFadeMatch << '|' << settings.dejudderFadeFloor << '|'
-			<< settings.dejudderVerify << '|' << settings.dejudderVerifyShare << '|'
-			<< settings.dejudderPixelTrust << '|' << settings.dejudderPixelTrustLo << '|' << settings.dejudderPixelTrustHi << '|'
-			<< settings.dejudderLandingCheck << '|'
-			<< settings.dejudderPulldown << '|' << settings.nativeRgbIngest << '|' << settings.dvTunnelGpuUnpack << '|' << settings.dvTrims << '|' << settings.dvTunnelFixes << '|'
-			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
-			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
-			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
-			<< settings.preserveExtendedRange << '|' << settings.extendedRangeMoreCases << '|' << settings.dejudderWarpRendered << '|'
-			<< settings.outputSegmentsMerged << '|'
-			// Settings applied live must change the fingerprint, or a profile edit
-			// touching only them is not applied until something else changes.
-			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|' << settings.dvToneMapping << '|' << settings.dvCompareCaptureFolder << '|'
-			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
-			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
-			<< settings.pipelineOriginalPathway << '|' << settings.pipelineOrder << '|' << settings.pipelineSlotsOff << '|'
-			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|' << settings.frameAnalysisStore << '|' << settings.resyncEvent << '|' << settings.entranceGpuDrain << '|' << settings.hdrInference << '|'
-			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
-			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|'
-			<< settings.opticalFlowGlobalFallback << '|' << settings.opticalFlowCostTrust << '|' << settings.opticalFlowFbCheck << '|'
-			// Film grain switches (docs/audit/grain-audit-2026-10-17.md): applied live, so they
-			// must change the fingerprint like the engine's extras above.
-			<< static_cast<int>(settings.interpolationGrain) << '|' << settings.dejudderSourceWarpCatmull << '|'
-			<< settings.nlsSamplingCatmull << '|' << settings.sourceCodingFixes << '|'
-			<< settings.debandVpGrainGuard << '|' << settings.debandVpGrainSplit << '|' << settings.debandVpExclusive << '|' << settings.detailPulseStabilise << '|' << settings.detailPulseCap << '|' << settings.detailPulseFast << '|' << settings.textureRestore << '|' << settings.textureRestoreCap << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
-			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
-			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.intentMotion << '|' << static_cast<int>(settings.intentMotionPolicy) << '|' << settings.intentMotionMin << '|' << settings.intentMotionMinShotSeconds << '|' << settings.intentEaseSeconds << '|' << settings.ambientAdapt << '|' << settings.ambientAdaptStrength << '|' << settings.ambientScreenReflect << '|' << settings.ambientMaxBlackNits << '|' << settings.ambientTauUpSeconds << '|' << settings.ambientTauDownSeconds << '|' << static_cast<int>(settings.intentBlack) << '|' << settings.intentDisplay << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionCutFixes << '|' << settings.activePictureStartupHold << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.cadenceClassFixes << '|' << settings.motionHistoryFixes << '|' << settings.vectorDemand << '|' << settings.queueTimingFixes << '|' << settings.generalRateFixes << '|' << settings.efficiencyFixes << '|'
-			<< settings.renderAhead << '|' << settings.dejudderGate << '|' << settings.renderAheadUtilisation << '|' << settings.renderAheadQueueCredit << '|'
-			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
-			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
-			<< settings.upscaler << '|' << settings.chromaUpscaler << '|' << settings.downscaler << '|' << settings.downscaleLight << '|'
-			<< settings.adaptiveUpscale << '|' << settings.adaptiveUpscaleWBase << '|'
-			<< settings.adaptiveUpscaleSuperresScale << '|' << settings.upscaleLight << '|'
-			<< settings.adaptiveDownscale << '|' << settings.adaptive.wBase << '|' << settings.adaptive.edgeLo << '|'
-			<< settings.adaptive.edgeHi << '|' << settings.adaptive.grainLo << '|' << settings.adaptive.grainHi << '|'
-			<< settings.adaptive.grainFloor << '|' << settings.adaptive.grainSmoothMs << '|'
-			<< settings.adaptive.shadowBias << '|' << settings.adaptive.chromaSsim << '|' << settings.adaptive.faithfulOrtho << '|' << settings.adaptive.faithfulAuto << '|'
-			<< settings.adaptive.grainMap << '|' << settings.adaptive.grainMapSmoothMs << '|'
-			<< settings.adaptive.motionAdaptive << '|' << settings.adaptive.motionSpeedLo << '|' << settings.adaptive.motionSpeedHi << '|'
-			<< settings.adaptive.motionFloor << '|' << settings.adaptive.motionSmoothMs << '|'
-            << settings.motion.Fingerprint() << '|'
+            << ToneMappingTuning::Fingerprint(settings.toneTuning)
+            << settings.hasContrastRecovery << '|' << settings.contrastRecovery << '|'
+			<< settings.upscaler << '|' << settings.downscaler << '|'
+            << settings.chromaUpscaler << '|' << settings.motion.Fingerprint() << '|'
 			<< settings.debandStrength << '|'
 			<< static_cast<int>(settings.deband) << '|'
 			<< static_cast<int>(settings.sigmoid) << '|'
@@ -1747,10 +1342,6 @@ namespace
         // Keep it in the effective fingerprint to queue live changes, but out
         // of the rebuild fingerprint used by transport compatibility checks.
         if (includeViewportSettings) {
-            // Planner Q4: the applied profiles' raw values (structural: any key, present or
-            // future). Not in the rebuild / transport fingerprint (includeViewportSettings off),
-            // so they never force a restart by themselves.
-            stream << settings.profileValues << '|';
             stream
             << settings.subtitleBoxTest << '|'
             << settings.subtitleCutPasteTest << '|'
@@ -1827,7 +1418,7 @@ namespace
 			<< settings.calibrationLutP3D65PathRejected << '|'
 			<< settings.calibrationLutBt2020PathRejected << '|'
 			<< settings.calibrationLutConstrainedBaseDirectory;
-		return stream.str();
+		return stream.str() + RendererSettingsHooks::Fingerprint(settings, includeViewportSettings);   // VPV-HOOK: the VP-V terms
 	}
 
 	struct DisplayRule
@@ -2454,14 +2045,6 @@ namespace
 		return defaultValue;
 	}
 
-	// deband_vp_exclusive: libplacebo's automatic deband yields to VP's debander when that
-	// runs (deband_vp auto / on) with its grain guard; an explicit deband_strength stays.
-	bool LibplaceboDebandYieldsToVp(const RendererSettings& settings)
-	{
-		return settings.debandVpExclusive && settings.debandVp != "off" && settings.debandVpGrainGuard &&
-			settings.debandStrength == "auto" && settings.deband == AutoToggle::AUTO;
-	}
-
 	bool ApplyDebandStrength(const std::string& rawValue,
 		RendererSettings& settings)
 	{
@@ -2499,27 +2082,6 @@ namespace
 			settings.sdrBlackNits);
 	}
 
-	// Pruning 2026-10-17: one log line per retired key or value a profile section still holds
-	// (once per section and key for the process); the file loads and the setting is ignored or
-	// migrated (RetiredSettings.h).
-	void LogRetiredSettings(const std::string& section, const std::map<std::string, std::string>& values)
-	{
-		static std::mutex lock;
-		static std::set<std::string> logged;
-		for (const auto& value : values)
-		{
-			std::string note;
-			if (const RetiredSettings::Key* key = RetiredSettings::FindKey(value.first))
-				note = RetiredSettings::KeyNote(section, *key);
-			else if (const RetiredSettings::Value* retired = RetiredSettings::FindValue(value.first, value.second))
-				note = RetiredSettings::ValueNote(section, *retired);
-			if (note.empty()) continue;
-			std::lock_guard<std::mutex> guard(lock);
-			if (logged.insert(note).second)
-				DebugLog::Log("profile settings: %s", note.c_str());
-		}
-	}
-
 	void ApplyDisplayRuleOverrides(
 		const ConfigFile& config,
 		const DisplayRule& rule,
@@ -2528,43 +2090,6 @@ namespace
 		if (rule.name.empty())
 			return;
 		appliedRuleSections.insert(ConfigFile::NormalizeName(rule.section));   // r6 fix 6
-		// Hunt 2 (cadence_class_fixes, 02-dv L6): a profile selected by `content` that set the
-		// classifier's own inputs (intent_content, source_class, dejudder_pulldown,
-		// cadence_class_fixes) would drop itself and loop with the hold time: those keys are
-		// ignored there (the configuration check warns). Restored when this rule is done.
-		struct ContentInputsGuard
-		{
-			RendererSettings& settings;
-			bool active;
-			InterpolationPolicy::SourceClass sourceClass;
-			bool intentContent, dejudderPulldown, cadenceClassFixes;
-			~ContentInputsGuard()
-			{
-				if (!active)
-					return;
-				settings.sourceClass = sourceClass;
-				settings.intentContent = intentContent;
-				settings.dejudderPulldown = dejudderPulldown;
-				settings.cadenceClassFixes = cadenceClassFixes;
-			}
-		} contentInputsGuard{ settings, rule.contentGated && settings.cadenceClassFixes, settings.sourceClass,
-			settings.intentContent, settings.dejudderPulldown, settings.cadenceClassFixes };
-		if (contentInputsGuard.active)
-			for (const char* key : { "intent_content", "source_class", "dejudder_pulldown", "cadence_class_fixes" })
-			{
-				std::string ignored;
-				if (config.TryGetString(rule.section, key, ignored))
-					DebugLog::Log("profile '%s': %s ignored - its when: rule reads content (cadence_class_fixes)",
-						rule.section.c_str(), key);
-			}
-		if (const auto* values = config.GetSectionValues(rule.section))
-		{
-			LogRetiredSettings(rule.section, *values);
-			settings.profileValues += rule.section + "{";
-			for (const auto& value : *values)
-				settings.profileValues += value.first + "=" + value.second + ";";
-			settings.profileValues += "}";
-		}
 
         config.TryGetBool(rule.section, "subtitle_bbox_test", settings.subtitleBoxTest);
         config.TryGetBool(rule.section, "subtitle_cut_paste_test", settings.subtitleCutPasteTest);
@@ -2595,14 +2120,6 @@ namespace
 			for (const char* choice : choices)
 				if (value == choice) { target = value; return; }
 			DebugLog::Log("display rule '%s': invalid %s value '%s'; retaining base setting", rule.name.c_str(), key, raw.c_str());
-		};
-		// The raw on/off-style compares below, case-insensitive like the validation (audit 2026-10-16:
-		// a hand-written "On" passed Apply and was then ignored).
-		auto tryChoice = [&config, &rule](const char* key, std::string& out)
-		{
-			if (!config.TryGetString(rule.section, key, out)) return false;
-			out = ConfigFile::NormalizeName(out);
-			return true;
 		};
 		auto readToggle = [&config, &rule](const char* key, AutoToggle& target)
 		{
@@ -2686,74 +2203,8 @@ namespace
 		readChoice("gamut_mapping", settings.gamutMapping, { "auto", "perceptual", "softclip", "relative", "desaturate" });
 		readPeakDetection(settings.peakDetection);
 		readChoice("upscaler", settings.upscaler, { "auto", "none", "nearest", "bilinear", "oversample", "bicubic", "gaussian", "catmull_rom", "lanczos", "ewa_lanczos", "ewa_lanczossharp", "ewa_lanczos4sharpest" });
-		readChoice("dejudder_low_res", settings.dejudderLowRes, { "off", "search", "all" });
-		readChoice("capture_path", settings.capturePath, { "standard", "gpu" });
-		readChoice("capture_upload", settings.captureUpload, { "auto", "render", "early" });
-		readChoice("dv_tone_mapping", settings.dvToneMapping, { "libplacebo", "dolby_style" });   // feat/dv-l8
-		config.TryGetString(rule.section, "dv_compare_capture_folder", settings.dvCompareCaptureFolder);   // feat/dv-l8 WIP
-		readChoice("source_range", settings.sourceRange, { "auto", "full", "limited" });
-		readChoice("deband_vp", settings.debandVp, { "off", "auto", "on" });
-		readChoice("low_bitrate_handling", settings.lowBitrateHandling, { "auto", "off", "on" });
-		{
-			// native | auto | any height in lines (general, owner's standing rule).
-			std::string value;
-			if (config.TryGetString(rule.section, "source_resolution", value))
-			{
-				value = ConfigFile::NormalizeName(value);
-				if (value == "native" || value == "auto" || SourceRebase::ClassHeight(value) > 0)
-					settings.sourceResolution = value;
-				else
-					DebugLog::Log("display rule '%s': invalid source_resolution '%s'; retaining base setting",
-						rule.name.c_str(), value.c_str());
-			}
-			if (config.TryGetString(rule.section, "source_resolution_auto_min_confidence", value))
-			{
-				char* end = nullptr;
-				const double v = std::strtod(value.c_str(), &end);
-				if (end != value.c_str() && *end == '\0' && v >= 0.0 && v <= 1.0)
-					settings.sourceResolutionAutoMinConfidence = v;
-				else
-					DebugLog::Log("display rule '%s': invalid source_resolution_auto_min_confidence '%s'; retaining base setting",
-						rule.name.c_str(), value.c_str());
-			}
-			// Latch review 2026-10-17: the switch timing (seconds).
-			auto readSeconds = [&](const char* key, double lo, double hi, double& out) {
-				if (!config.TryGetString(rule.section, key, value)) return;
-				char* end = nullptr;
-				const double v = std::strtod(value.c_str(), &end);
-				if (end != value.c_str() && *end == '\0' && v >= lo && v <= hi)
-					out = v;
-				else
-					DebugLog::Log("display rule '%s': invalid %s '%s'; retaining base setting", rule.name.c_str(), key, value.c_str());
-			};
-			readSeconds("source_resolution_engage_max_wait_s", 0.0, 600.0, settings.sourceResolutionEngageMaxWait);
-			readSeconds("source_resolution_crossfade_s", 0.0, 10.0, settings.sourceResolutionCrossfade);
-			readSeconds("source_resolution_release_fade_s", 0.0, 0.25, settings.sourceResolutionReleaseFade);
-			if (config.TryGetString(rule.section, "source_resolution_evidence_shots", value))
-			{
-				char* end = nullptr;
-				const long v = std::strtol(value.c_str(), &end, 10);
-				if (end != value.c_str() && *end == '\0' && v >= 1 && v <= 10)
-					settings.sourceResolutionEvidenceShots = static_cast<int>(v);
-				else
-					DebugLog::Log("display rule '%s': invalid source_resolution_evidence_shots '%s'; retaining base setting",
-						rule.name.c_str(), value.c_str());
-			}
-			if (config.TryGetString(rule.section, "source_resolution_evidence_seconds", value))
-			{
-				char* end = nullptr;
-				const double v = std::strtod(value.c_str(), &end);
-				if (end != value.c_str() && *end == '\0' && v >= 2.0 && v <= 120.0)
-					settings.sourceResolutionEvidenceSeconds = v;
-				else
-					DebugLog::Log("display rule '%s': invalid source_resolution_evidence_seconds '%s'; retaining base setting",
-						rule.name.c_str(), value.c_str());
-			}
-		}
 		readChoice("chroma_upscaler", settings.chromaUpscaler, { "auto", "upscaler", "ewa_lanczossharp", "ewa_lanczos", "lanczos", "catmull_rom", "bicubic", "bilinear" });
 		readChoice("downscaler", settings.downscaler, { "auto", "gpu", "box", "hermite", "bilinear", "bicubic", "gaussian", "catmull_rom", "mitchell", "lanczos" });
-		readChoice("downscale_light", settings.downscaleLight, { "linear", "gamma" });
-		readChoice("upscale_light", settings.upscaleLight, { "linear", "gamma" });
         MotionConfig::Read(config,rule.section,settings.motion);
 		readToggle("deband", settings.deband);
 		if (config.TryGetString(rule.section, "deband_strength", raw))
@@ -2837,609 +2288,6 @@ namespace
             readChoice("hdr_tone_map_target_gamma", settings.hdrToneMapTargetGamma,
                 { "bt1886", "srgb", "1.8", "2.0", "2.2", "2.4", "2.6", "2.8" });
         }
-		if (config.TryGetString(rule.section, "saturation", raw))
-		{
-			int parsedSaturation = 0;
-			if (ParseInteger(raw, -100, 100, parsedSaturation))
-				settings.saturation = parsedSaturation;
-			else
-				DebugLog::Log("profile '%s': invalid saturation '%s'; using 0",
-					rule.section.c_str(), raw.c_str());
-		}
-		if (tryChoice("dejudder_even_rates", raw))
-		{
-			// General (owner 2026-10-14): whole-number source rates, or also the
-			// 1000/1001 rates; "30" / "30_and_29.97" are retired names (RetiredSettings).
-			raw = RetiredSettings::Migrate("dejudder_even_rates", raw);
-			if (raw == "whole")
-				settings.dejudderEvenIncludes1001 = false;
-			else if (raw == "whole_and_1001")
-				settings.dejudderEvenIncludes1001 = true;
-			else
-				DebugLog::Log("profile '%s': invalid dejudder_even_rates '%s'; keeping %s", rule.section.c_str(),
-					raw.c_str(), settings.dejudderEvenIncludes1001 ? "whole_and_1001" : "whole");
-		}
-		for (const auto& numeric : { std::make_tuple("dejudder_strength", 0.0, 1.0, &settings.dejudderStrength),
-			std::make_tuple("dejudder_strength_even", 0.0, 1.0, &settings.dejudderStrengthEven),
-			std::make_tuple("dejudder_match_tolerance", 0.5, 16.0, &settings.dejudderMatchTolerance),
-			std::make_tuple("dejudder_frame_trust", 0.0, 1.0, &settings.dejudderFrameTrust),
-			std::make_tuple("dejudder_motion_scale_lo", 0.0, 16.0, &settings.dejudderMotionScaleLo),
-			std::make_tuple("dejudder_motion_scale_hi", 0.0, 32.0, &settings.dejudderMotionScaleHi),
-			std::make_tuple("dejudder_trust_scale", 0.0, 1.0, &settings.dejudderTrustScale),
-			std::make_tuple("dejudder_est_lambda", 0.0, 8.0, &settings.dejudderEstLambda),
-			std::make_tuple("dejudder_est_split_sad", 0.0, 16.0, &settings.dejudderEstSplitSad),
-			std::make_tuple("dejudder_roll_lo", 0.0, 200.0, &settings.dejudderRollLo),
-			std::make_tuple("dejudder_roll_hi", 0.0, 400.0, &settings.dejudderRollHi),
-			std::make_tuple("dejudder_roll_floor", 0.0, 1.0, &settings.dejudderRollFloor),
-			std::make_tuple("dejudder_object_strength", 0.0, 1.0, &settings.dejudderObjectStrength),
-			std::make_tuple("dejudder_texture_tolerance", 0.0, 4.0, &settings.dejudderTextureTolerance),
-			std::make_tuple("dejudder_cut_histogram", 0.0, 2.0, &settings.dejudderCutHistogram),
-			std::make_tuple("dejudder_consistency_px", 0.5, 8.0, &settings.dejudderConsistencyPx),
-			std::make_tuple("dejudder_fade_floor", 0.0, 1.0, &settings.dejudderFadeFloor),
-			std::make_tuple("dejudder_verify_share", 0.02, 1.0, &settings.dejudderVerifyShare),
-			std::make_tuple("dejudder_pixel_trust_lo", 0.25, 16.0, &settings.dejudderPixelTrustLo),
-			std::make_tuple("dejudder_pixel_trust_hi", 0.5, 32.0, &settings.dejudderPixelTrustHi),
-			std::make_tuple("dejudder_hold_feather_px", 0.0, 16.0, &settings.dejudderHoldFeatherPx),
-			std::make_tuple("dejudder_taper_sad", 0.0, 32.0, &settings.dejudderTaperSad),
-			std::make_tuple("dither_grain_tolerance_scale", 1.0, 8.0, &settings.ditherGrainToleranceScale),
-			std::make_tuple("intent_content_hold_seconds", 1.0, 60.0, &settings.intentContentHoldSeconds),
-			std::make_tuple("detail_pulse_cap", DetailPulse::kCapMin, DetailPulse::kCapMax, &settings.detailPulseCap),
-			std::make_tuple("texture_restore_cap", TextureRestore::kCapMin, TextureRestore::kCapMax, &settings.textureRestoreCap),
-			std::make_tuple("intent_motion_min", 0.0, 1.0, &settings.intentMotionMin),
-			std::make_tuple("intent_motion_min_shot_s", 0.5, 30.0, &settings.intentMotionMinShotSeconds),
-			std::make_tuple("intent_ease_s", 0.0, 5.0, &settings.intentEaseSeconds),
-			std::make_tuple("ambient_adapt_strength", 0.0, 1.0, &settings.ambientAdaptStrength),
-			std::make_tuple("ambient_screen_reflect", 0.0, 1.0, &settings.ambientScreenReflect),
-			std::make_tuple("ambient_max_black_nits", 0.0, 10.0, &settings.ambientMaxBlackNits),
-			std::make_tuple("ambient_tau_up_s", 1.0, 600.0, &settings.ambientTauUpSeconds),
-			std::make_tuple("ambient_tau_down_s", 1.0, 1800.0, &settings.ambientTauDownSeconds) })
-		{
-			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
-				continue;
-			double parsed = 0.0;
-			if (DisplayRuleExpression::ParseNumber(raw, parsed) &&
-				parsed >= std::get<1>(numeric) && parsed <= std::get<2>(numeric))
-				*std::get<3>(numeric) = parsed;
-			else
-				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %g",
-					rule.section.c_str(), std::get<0>(numeric), raw.c_str(), *std::get<3>(numeric));
-		}
-		if (config.TryGetString(rule.section, "dejudder_search_range", raw))
-		{
-			int parsed = 0;
-			if (ParseInteger(raw, 1, 16, parsed))
-				settings.dejudderSearchRange = parsed;
-			else
-				DebugLog::Log("profile '%s': invalid dejudder_search_range '%s'; keeping %d",
-					rule.section.c_str(), raw.c_str(), settings.dejudderSearchRange);
-		}
-		if (config.TryGetString(rule.section, "dejudder_hold_hysteresis", raw))
-		{
-			int parsed = 0;
-			if (ParseInteger(raw, 1, 8, parsed))
-				settings.dejudderHoldHysteresis = parsed;
-			else
-				DebugLog::Log("profile '%s': invalid dejudder_hold_hysteresis '%s'; keeping %d",
-					rule.section.c_str(), raw.c_str(), settings.dejudderHoldHysteresis);
-		}
-		if (tryChoice("dither_vectors", raw))
-		{
-			if (raw == "auto" || raw == "own")
-				settings.ditherVectorsOwn = raw == "own";
-			else
-				DebugLog::Log("profile '%s': invalid dither_vectors '%s'; keeping %s", rule.section.c_str(), raw.c_str(),
-					settings.ditherVectorsOwn ? "own" : "auto");
-		}
-		if (tryChoice("fbo_float32", raw))
-		{
-			if (raw == "auto" || raw == "on" || raw == "off")
-				settings.fboFloat32 = raw == "auto" ? -1 : (raw == "on" ? 1 : 0);
-			else
-				DebugLog::Log("profile '%s': invalid fbo_float32 '%s'; keeping %s", rule.section.c_str(), raw.c_str(),
-					settings.fboFloat32 < 0 ? "auto" : (settings.fboFloat32 ? "on" : "off"));
-		}
-		for (const auto& toggle : { std::make_pair("occlusion_mask", &settings.occlusionMask),
-			std::make_pair("repeat_render_reuse", &settings.repeatRenderReuse),
-			std::make_pair("dejudder_global_prior", &settings.dejudderGlobalPrior),
-			std::make_pair("dejudder_vector_smooth", &settings.dejudderVectorSmooth),
-			std::make_pair("dejudder_occlusion_fill", &settings.dejudderOcclusionFill),
-			std::make_pair("dejudder_est_candidates", &settings.dejudderEstCandidates),
-			std::make_pair("dejudder_est_qpel", &settings.dejudderEstQpel),
-			std::make_pair("dejudder_est_still_zero", &settings.dejudderEstStillZero),
-			std::make_pair("dejudder_est_gate", &settings.dejudderEstGate),
-			std::make_pair("dejudder_est_split", &settings.dejudderEstSplit),
-			std::make_pair("dejudder_block_taper", &settings.dejudderBlockTaper),
-			std::make_pair("dejudder_estimate_ahead", &settings.dejudderEstimateAhead),
-			std::make_pair("dejudder_motion_rolloff", &settings.dejudderMotionRolloff),
-			std::make_pair("dejudder_global_two", &settings.dejudderGlobalTwo),
-			std::make_pair("dejudder_regional_hold", &settings.dejudderRegionalHold),
-			std::make_pair("dejudder_fade_match", &settings.dejudderFadeMatch),
-			std::make_pair("dejudder_verify", &settings.dejudderVerify),
-			std::make_pair("dejudder_pixel_trust", &settings.dejudderPixelTrust),
-			std::make_pair("dejudder_landing_check", &settings.dejudderLandingCheck),
-			std::make_pair("dejudder_pulldown", &settings.dejudderPulldown),
-			std::make_pair("native_rgb_ingest", &settings.nativeRgbIngest),
-			std::make_pair("dv_tunnel_gpu_unpack", &settings.dvTunnelGpuUnpack),
-			std::make_pair("dv_trims", &settings.dvTrims),
-			std::make_pair("dv_tunnel_fixes", &settings.dvTunnelFixes),
-			// Stage 12 §2c / S8-1: the residual held along the vectors (on = when they exist).
-			std::make_pair("cnn_residual_stabilise", &settings.adaptive.cnnResidualStabilise),
-			std::make_pair("ssim_residual_stabilise", &settings.adaptive.ssimResidualStabilise),
-			std::make_pair("ssim_bitrate_aware", &settings.ssimBitrateAware),
-			// Film grain (owner 2026-10-17): the faithful defaults on / deband_grain off.
-			std::make_pair("residual_stabilise_grain_guard", &settings.adaptive.residualGrainGuard),
-			std::make_pair("deband_grain", &settings.debandGrain),
-			std::make_pair("deband_vp_exclusive", &settings.debandVpExclusive),
-			std::make_pair("detail_pulse_stabilise", &settings.detailPulseStabilise),
-			std::make_pair("detail_pulse_fast", &settings.detailPulseFast) })
-		{
-			if (!tryChoice(toggle.first, raw))
-				continue;
-			if (raw == "on" || raw == "off")
-				*toggle.second = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %s",
-					rule.section.c_str(), toggle.first, raw.c_str(), *toggle.second ? "on" : "off");
-		}
-		// Stage 8-2: the adaptive downscale (rendering profile).
-		for (const auto& numeric : { std::make_tuple("adaptive_w_base", 0.0, 1.0, &settings.adaptive.wBase),
-			std::make_tuple("adaptive_edge_lo", 0.0, 255.0, &settings.adaptive.edgeLo),
-			std::make_tuple("adaptive_edge_hi", 0.0, 255.0, &settings.adaptive.edgeHi),
-			std::make_tuple("adaptive_grain_lo", 0.0, 64.0, &settings.adaptive.grainLo),
-			std::make_tuple("adaptive_grain_hi", 0.0, 64.0, &settings.adaptive.grainHi),
-			std::make_tuple("adaptive_grain_floor", 0.0, 1.0, &settings.adaptive.grainFloor),
-			std::make_tuple("adaptive_grain_smooth_ms", 0.0, 10000.0, &settings.adaptive.grainSmoothMs),
-			std::make_tuple("adaptive_grain_map_smooth_ms", 0.0, 10000.0, &settings.adaptive.grainMapSmoothMs),
-			std::make_tuple("adaptive_grain_shadow_bias", 0.0, 1.0, &settings.adaptive.shadowBias),
-			// The motion-adapted blend (VP-V scaling.output; owner 2026-10-31).
-			std::make_tuple("adaptive_motion_speed_lo", 0.0, 10.0, &settings.adaptive.motionSpeedLo),
-			std::make_tuple("adaptive_motion_speed_hi", 0.0, 10.0, &settings.adaptive.motionSpeedHi),
-			std::make_tuple("adaptive_motion_floor", 0.0, 1.0, &settings.adaptive.motionFloor),
-			std::make_tuple("adaptive_motion_smooth_ms", 0.0, 10000.0, &settings.adaptive.motionSmoothMs) })
-		{
-			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
-				continue;
-			double parsed = 0.0;
-			if (DisplayRuleExpression::ParseNumber(raw, parsed) &&
-				parsed >= std::get<1>(numeric) && parsed <= std::get<2>(numeric))
-				*std::get<3>(numeric) = static_cast<float>(parsed);
-			else
-				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %g",
-					rule.section.c_str(), std::get<0>(numeric), raw.c_str(), *std::get<3>(numeric));
-		}
-		if (settings.adaptive.edgeHi <= settings.adaptive.edgeLo)
-			settings.adaptive.edgeHi = settings.adaptive.edgeLo + 1.0f;
-		if (settings.adaptive.grainHi <= settings.adaptive.grainLo)
-			settings.adaptive.grainHi = settings.adaptive.grainLo + 0.5f;
-		if (settings.adaptive.motionSpeedHi <= settings.adaptive.motionSpeedLo)
-			settings.adaptive.motionSpeedHi = settings.adaptive.motionSpeedLo + 0.05f;
-		if (tryChoice("adaptive_faithful", raw))
-		{
-			// "polar" retired 2026-10-17 (owner: Auto or 1D): runs as auto (RetiredSettings).
-			raw = RetiredSettings::Migrate("adaptive_faithful", raw);
-			if (raw == "ortho" || raw == "auto")
-			{
-				settings.adaptive.faithfulOrtho = raw == "ortho";
-				settings.adaptive.faithfulAuto = raw == "auto";
-			}
-			else
-				DebugLog::Log("profile '%s': invalid adaptive_faithful '%s'; keeping %s", rule.section.c_str(), raw.c_str(),
-					settings.adaptive.faithfulAuto ? "auto" : settings.adaptive.faithfulOrtho ? "ortho" : "polar");
-		}
-		if (tryChoice("rebase_kernel_match", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.rebaseKernelMatch = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid rebase_kernel_match '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.rebaseKernelMatch ? "on" : "off");
-		}
-		if (tryChoice("source_resolution_mixed_guard", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.sourceResolutionMixedGuard = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid source_resolution_mixed_guard '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.sourceResolutionMixedGuard ? "on" : "off");
-		}
-		if (tryChoice("source_coding_fixes", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.sourceCodingFixes = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid source_coding_fixes '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.sourceCodingFixes ? "on" : "off");
-		}
-		if (tryChoice("source_resolution_latch_fixes", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.sourceResolutionLatchFixes = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid source_resolution_latch_fixes '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.sourceResolutionLatchFixes ? "on" : "off");
-		}
-		if (tryChoice("active_picture_startup_hold", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.activePictureStartupHold = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid active_picture_startup_hold '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.activePictureStartupHold ? "on" : "off");
-		}
-		if (tryChoice("source_resolution_cut_fixes", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.sourceResolutionCutFixes = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid source_resolution_cut_fixes '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.sourceResolutionCutFixes ? "on" : "off");
-		}
-		if (tryChoice("timing_continuity_fixes", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.timingContinuityFixes = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid timing_continuity_fixes '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.timingContinuityFixes ? "on" : "off");
-		}
-		if (tryChoice("cadence_class_fixes", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.cadenceClassFixes = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid cadence_class_fixes '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.cadenceClassFixes ? "on" : "off");
-		}
-		if (tryChoice("motion_history_fixes", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.motionHistoryFixes = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid motion_history_fixes '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.motionHistoryFixes ? "on" : "off");
-		}
-		if (tryChoice("vector_demand", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.vectorDemand = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid vector_demand '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.vectorDemand ? "on" : "off");
-		}
-		if (tryChoice("queue_timing_fixes", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.queueTimingFixes = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid queue_timing_fixes '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.queueTimingFixes ? "on" : "off");
-		}
-		if (tryChoice("general_rate_fixes", raw))   // fixed-constant batch 2026-10-18
-		{
-			if (raw == "on" || raw == "off")
-				settings.generalRateFixes = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid general_rate_fixes '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.generalRateFixes ? "on" : "off");
-		}
-		if (tryChoice("efficiency_fixes", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.efficiencyFixes = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid efficiency_fixes '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.efficiencyFixes ? "on" : "off");
-		}
-		// Render-ahead (docs/VP-render-ahead-design.md).
-		for (const auto& toggle : { std::make_pair("render_ahead", &settings.renderAhead),
-				std::make_pair("render_ahead_queue_credit", &settings.renderAheadQueueCredit) })
-			if (tryChoice(toggle.first, raw))
-			{
-				if (raw == "on" || raw == "off")
-					*toggle.second = raw == "on";
-				else
-					DebugLog::Log("profile '%s': invalid %s '%s'; keeping %s",
-						rule.section.c_str(), toggle.first, raw.c_str(), *toggle.second ? "on" : "off");
-			}
-		if (tryChoice("dejudder_gate", raw))
-		{
-			if (raw == "auto" || raw == "period" || raw == "refresh")
-				settings.dejudderGate = raw;
-			else
-				DebugLog::Log("profile '%s': invalid dejudder_gate '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.dejudderGate.c_str());
-		}
-		if (config.TryGetString(rule.section, "render_ahead_utilisation", raw))
-		{
-			double parsed = 0.0;
-			if (DisplayRuleExpression::ParseNumber(raw, parsed) && parsed >= 0.5 && parsed <= 1.0)
-				settings.renderAheadUtilisation = parsed;
-			else
-				DebugLog::Log("profile '%s': invalid render_ahead_utilisation '%s'; keeping %g",
-					rule.section.c_str(), raw.c_str(), settings.renderAheadUtilisation);
-		}
-		if (tryChoice("pulldown_fixes", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.pulldownFixes = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid pulldown_fixes '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.pulldownFixes ? "on" : "off");
-		}
-		if (tryChoice("source_resolution_text_guard", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.sourceResolutionTextGuard = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid source_resolution_text_guard '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.sourceResolutionTextGuard ? "on" : "off");
-		}
-		if (tryChoice("interpolation", raw))
-		{
-			if (raw == "off" || raw == "auto" || raw == "always")
-				settings.interpolation = InterpolationPolicy::ParseMode(raw);
-			else
-				DebugLog::Log("profile '%s': invalid interpolation '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), InterpolationPolicy::Name(settings.interpolation));
-		}
-		if (tryChoice("interpolation_fallback", raw))
-		{
-			if (raw == "hold" || raw == "blend")
-				settings.interpolationFallback = InterpolationPolicy::ParseFallback(raw);
-			else
-				DebugLog::Log("profile '%s': invalid interpolation_fallback '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), InterpolationPolicy::Name(settings.interpolationFallback));
-		}
-		if (tryChoice("interpolation_grain", raw))
-		{
-			if (raw == "preserve" || raw == "blend")
-				settings.interpolationGrain = InterpolationPolicy::ParseGrain(raw);
-			else
-				DebugLog::Log("profile '%s': invalid interpolation_grain '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), InterpolationPolicy::Name(settings.interpolationGrain));
-		}
-		// deband_vp_grain_guard: on (the grain split) | veto (the 2026-10-17 spatial-share veto) | off.
-		if (tryChoice("deband_vp_grain_guard", raw))
-		{
-			if (raw == "on" || raw == "veto" || raw == "off")
-			{
-				settings.debandVpGrainGuard = raw != "off";
-				settings.debandVpGrainSplit = raw == "on";
-			}
-			else
-				DebugLog::Log("profile '%s': invalid deband_vp_grain_guard '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), !settings.debandVpGrainGuard ? "off" : settings.debandVpGrainSplit ? "on" : "veto");
-		}
-		// texture_restore: off | statistical (docs/VP-detail-restore.md).
-		if (tryChoice("texture_restore", raw))
-		{
-			if (raw == "off" || raw == "statistical")
-				settings.textureRestore = raw == "statistical";
-			else
-				DebugLog::Log("profile '%s': invalid texture_restore '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.textureRestore ? "statistical" : "off");
-		}
-		if (tryChoice("dejudder_source_warp_filter", raw))
-		{
-			if (raw == "catmull" || raw == "bilinear")
-				settings.dejudderSourceWarpCatmull = raw == "catmull";
-			else
-				DebugLog::Log("profile '%s': invalid dejudder_source_warp_filter '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.dejudderSourceWarpCatmull ? "catmull" : "bilinear");
-		}
-		if (tryChoice("nls_sampling", raw))
-		{
-			if (raw == "catmull" || raw == "bilinear")
-				settings.nlsSamplingCatmull = raw == "catmull";
-			else
-				DebugLog::Log("profile '%s': invalid nls_sampling '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.nlsSamplingCatmull ? "catmull" : "bilinear");
-		}
-		if (tryChoice("interpolation_fill_gaps", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.interpolationFillGaps = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid interpolation_fill_gaps '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.interpolationFillGaps ? "on" : "off");
-		}
-		if (tryChoice("source_class", raw))
-		{
-			if (raw == "legacy" || raw == "measured")
-				settings.sourceClass = InterpolationPolicy::ParseSourceClass(raw);
-			else
-				DebugLog::Log("profile '%s': invalid source_class '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), InterpolationPolicy::Name(settings.sourceClass));
-		}
-		if (tryChoice("intent_content", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.intentContent = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid intent_content '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.intentContent ? "on" : "off");
-		}
-		// Intent interpreter items 2-5 (2026-10-17).
-		for (const auto& toggle : { std::make_pair("intent_motion", &settings.intentMotion),
-			std::make_pair("ambient_adapt", &settings.ambientAdapt) })
-		{
-			if (!tryChoice(toggle.first, raw))
-				continue;
-			if (raw == "on" || raw == "off")
-				*toggle.second = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %s",
-					rule.section.c_str(), toggle.first, raw.c_str(), *toggle.second ? "on" : "off");
-		}
-		if (tryChoice("intent_motion_policy", raw))
-		{
-			MotionIntentPolicy policy = settings.intentMotionPolicy;
-			if (ParseMotionIntentPolicy(raw, policy))
-				settings.intentMotionPolicy = policy;
-			else
-				DebugLog::Log("profile '%s': invalid intent_motion_policy '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), ToString(settings.intentMotionPolicy));
-		}
-		if (tryChoice("intent_black", raw))
-		{
-			BlackIntentMode mode = settings.intentBlack;
-			if (ParseBlackIntentMode(raw, mode))
-				settings.intentBlack = mode;
-			else
-				DebugLog::Log("profile '%s': invalid intent_black '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), ToString(settings.intentBlack));
-		}
-		if (tryChoice("intent_display", raw))
-		{
-			if (raw == "report" || raw == "off")
-				settings.intentDisplay = raw == "report";
-			else
-				DebugLog::Log("profile '%s': invalid intent_display '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.intentDisplay ? "report" : "off");
-		}
-		if (tryChoice("optical_flow", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.opticalFlow = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid optical_flow '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.opticalFlow ? "on" : "off");
-		}
-		if (config.TryGetString(rule.section, "temporal_dither", raw))
-		{
-			const std::string v = ConfigFile::NormalizeName(raw);
-			if (v == "auto" || v == "off" || v == "libplacebo" || v == "sigma_delta")
-				settings.temporalDither = v;
-			else
-				DebugLog::Log("profile '%s': invalid temporal_dither '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.temporalDither.c_str());
-		}
-		if (tryChoice("optical_flow_global", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.opticalFlowGlobal = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid optical_flow_global '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.opticalFlowGlobal ? "on" : "off");
-		}
-		// The engine's extras (2026-10-17): on | off each.
-		for (const auto& extra : { std::make_pair("optical_flow_global_fallback", &settings.opticalFlowGlobalFallback),
-				std::make_pair("optical_flow_cost_trust", &settings.opticalFlowCostTrust),
-				std::make_pair("optical_flow_fb_check", &settings.opticalFlowFbCheck) })
-			if (tryChoice(extra.first, raw))
-			{
-				if (raw == "on" || raw == "off")
-					*extra.second = raw == "on";
-				else
-					DebugLog::Log("profile '%s': invalid %s '%s'; keeping %s",
-						rule.section.c_str(), extra.first, raw.c_str(), *extra.second ? "on" : "off");
-			}
-		if (config.TryGetString(rule.section, "motion_ahead_frames", raw))
-		{
-			double parsed = 0.0;
-			// Owner 2026-10-16: on or off - the look-ahead works only with 4 frames ahead, so any
-			// value above 0 (older files may say 1-3) is 4.
-			if (DisplayRuleExpression::ParseNumber(raw, parsed) && parsed >= 0.0 && parsed <= MotionAhead::kMaxDepth && parsed == static_cast<int>(parsed))
-				settings.motionAheadFrames = parsed > 0.0 ? MotionAhead::kDefaultDepth : 0;
-			else
-				DebugLog::Log("profile '%s': invalid motion_ahead_frames '%s'; keeping %d",
-					rule.section.c_str(), raw.c_str(), settings.motionAheadFrames);
-		}
-		if (config.TryGetString(rule.section, "ssim_bitrate_floor", raw))
-		{
-			double parsed = 0.0;
-			if (DisplayRuleExpression::ParseNumber(raw, parsed) && parsed >= 0.0 && parsed <= 1.0)
-				settings.ssimBitrateFloor = parsed;
-			else
-				DebugLog::Log("profile '%s': invalid ssim_bitrate_floor '%s'; keeping %g",
-					rule.section.c_str(), raw.c_str(), settings.ssimBitrateFloor);
-		}
-		if (config.TryGetString(rule.section, "adaptive_upscale_w_base", raw))
-		{
-			double parsed = 0.0;
-			if (DisplayRuleExpression::ParseNumber(raw, parsed) && parsed >= 0.0 && parsed <= 1.0)
-				settings.adaptiveUpscaleWBase = parsed;
-			else
-				DebugLog::Log("profile '%s': invalid adaptive_upscale_w_base '%s'; keeping %g",
-					rule.section.c_str(), raw.c_str(), settings.adaptiveUpscaleWBase);
-		}
-		for (const auto& toggle : { std::make_pair("adaptive_downscale", &settings.adaptiveDownscale),
-			std::make_pair("adaptive_chroma_ssim", &settings.adaptive.chromaSsim),
-			std::make_pair("adaptive_grain_map", &settings.adaptive.grainMap),
-			std::make_pair("adaptive_upscale", &settings.adaptiveUpscale),
-			std::make_pair("adaptive_upscale_superres_scale", &settings.adaptiveUpscaleSuperresScale),
-			std::make_pair("adaptive_motion", &settings.adaptive.motionAdaptive) })
-		{
-			if (!tryChoice(toggle.first, raw))
-				continue;
-			if (raw == "on" || raw == "off")
-				*toggle.second = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %s",
-					rule.section.c_str(), toggle.first, raw.c_str(), *toggle.second ? "on" : "off");
-		}
-		if (tryChoice("dejudder_warp_stage", raw))
-		{
-			if (raw == "rendered" || raw == "source")
-				settings.dejudderWarpRendered = raw == "rendered";
-			else
-				DebugLog::Log("profile '%s': invalid dejudder_warp_stage '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.dejudderWarpRendered ? "rendered" : "source");
-		}
-		if (tryChoice("extended_range_more_cases", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.extendedRangeMoreCases = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid extended_range_more_cases '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.extendedRangeMoreCases ? "on" : "off");
-		}
-		if (tryChoice("preserve_extended_range", raw))
-		{
-			if (raw == "on" || raw == "off")
-				settings.preserveExtendedRange = raw == "on";
-			else
-				DebugLog::Log("profile '%s': invalid preserve_extended_range '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.preserveExtendedRange ? "on" : "off");
-		}
-		// Delta 13: the SDR tone shape and headroom.
-		if (tryChoice("sdr_tone_shape", raw))
-		{
-			if (raw == "off" || raw == "knee")
-				settings.sdrTone.knee = raw == "knee";
-			else
-				DebugLog::Log("profile '%s': invalid sdr_tone_shape '%s'; keeping %s",
-					rule.section.c_str(), raw.c_str(), settings.sdrTone.knee ? "knee" : "off");
-		}
-		{
-			const auto readTone = [&](const char* key, double minimum, double maximum, double& target)
-			{
-				std::string text;
-				if (!config.TryGetString(rule.section, key, text))
-					return;
-				double value = 0.0;
-				if (ParseDouble(text, value) && value >= minimum && value <= maximum)
-					target = value;
-				else
-					DebugLog::Log("profile '%s': invalid %s '%s'; keeping %.3f", rule.section.c_str(), key, text.c_str(), target);
-			};
-			readTone("sdr_white_headroom", 0.0, 0.5, settings.sdrTone.headroom);
-			readTone("sdr_knee_start", 0.5, 0.99, settings.sdrTone.kneeStart);
-			readTone("sdr_knee_strength", 0.0, 1.0, settings.sdrTone.kneeStrength);
-		}
-		if (config.TryGetString(rule.section, "sdr_contrast_recovery", raw))
-		{
-			const std::string normalized = ConfigFile::NormalizeName(raw);
-			double value = 0.0;
-			if (normalized == "auto")
-				settings.sdrTone.recovery = -1.0;
-			else if (normalized == "off")
-				settings.sdrTone.recovery = 0.0;
-			else if (ParseDouble(raw, value) && value >= 0.0 && value <= 2.0)
-				settings.sdrTone.recovery = value;
-			else
-				DebugLog::Log("profile '%s': invalid sdr_contrast_recovery '%s'; keeping it", rule.section.c_str(), raw.c_str());
-		}
         ToneMappingTuning::Read([&](const char* key, std::string& value) {
             return config.TryGetString(rule.section, key, value);
         }, settings.toneTuning);
@@ -3508,17 +2356,6 @@ namespace
 		if (readViewportString("screen_edge_padding", raw) &&
 			ParseInteger(raw, 0, 100000, parsedScreenEdgePadding))
 			settings.screenEdgePadding = parsedScreenEdgePadding;
-		for (const auto& blank : {
-			std::make_pair("blank_left", &settings.edgeBlanking.left),
-			std::make_pair("blank_top", &settings.edgeBlanking.top),
-			std::make_pair("blank_right", &settings.edgeBlanking.right),
-			std::make_pair("blank_bottom", &settings.edgeBlanking.bottom) })
-		{
-			int parsed = 0;
-			if (readViewportString(blank.first, raw) &&
-				ParseInteger(raw, 0, EdgeBlanking::MAX_INSET_PIXELS, parsed))
-				*blank.second = parsed;
-		}
 		if (config.TryGetString(rule.section, "anamorphic_scale", raw))
 		{
 			double value = 0.0;
@@ -3684,242 +2521,7 @@ namespace
 					static_cast<int>(std::llround(pixels));
 			}
 		}
-	}
-
-	// The matcher's settings from a profile (refinements included): what
-	// RunDejudderEstimate gives the matcher, and what the settings test
-	// checks against (VideoProcessorLibplaceboDescribeSettingsForTest).
-	Dejudder::Settings DejudderMatcherSettings(const RendererSettings& profile, Dejudder::Settings settings)
-	{
-		settings.matchTolerance = static_cast<float>(profile.dejudderMatchTolerance);
-		settings.minTrustedShare = static_cast<float>(profile.dejudderFrameTrust);
-		settings.globalPrior = profile.dejudderGlobalPrior;
-		settings.vectorSmooth = profile.dejudderVectorSmooth;
-		settings.motionScaleLo = static_cast<float>(profile.dejudderMotionScaleLo);
-		settings.motionScaleHi = static_cast<float>(profile.dejudderMotionScaleHi);
-		settings.trustScaleFull = static_cast<float>(profile.dejudderTrustScale);
-		// D5 is source-warp only (planner 2026-10-12): with the rendered
-		// warp it is ignored (logged once) and its pass not run.
-		settings.occlusionFill = profile.dejudderOcclusionFill && !profile.dejudderWarpRendered;
-		settings.estCandidates = profile.dejudderEstCandidates;
-		settings.historyFixes = profile.motionHistoryFixes;   // Hunt 2 04 M1 / L2
-		// docs/VP-nvof-ahead.md (owner 2026-10-16): the optical-flow engine is the
-		// established default motion source; optical_flow: off = the block searches only.
-		// Without the engine (not NVIDIA, a failure) the searches run as before.
-		settings.opticalFlow = profile.opticalFlow;
-		settings.opticalFlowGlobal = profile.opticalFlowGlobal;
-		settings.opticalFlowGlobalFallback = profile.opticalFlowGlobalFallback;
-		settings.opticalFlowCostTrust = profile.opticalFlowCostTrust;
-		settings.opticalFlowFbCheck = profile.opticalFlowFbCheck;
-		settings.estLambda = static_cast<float>(profile.dejudderEstLambda);
-		settings.estQpel = profile.dejudderEstQpel;
-		settings.estStillZero = profile.dejudderEstStillZero;
-		settings.estGate = profile.dejudderEstGate;
-		settings.estSplit = profile.dejudderEstSplit;
-		settings.estSplitSad = static_cast<float>(profile.dejudderEstSplitSad);
-		settings.motionRolloff = profile.dejudderMotionRolloff;
-		settings.rollLo = static_cast<float>(profile.dejudderRollLo);
-		settings.rollHi = static_cast<float>(profile.dejudderRollHi);
-		settings.rollFloor = static_cast<float>(profile.dejudderRollFloor);
-		settings.objectStrength = static_cast<float>(profile.dejudderObjectStrength);
-		settings.textureTolerance = static_cast<float>(profile.dejudderTextureTolerance);
-		settings.globalTwo = profile.dejudderGlobalTwo;
-		settings.regionalHold = profile.dejudderRegionalHold;
-		settings.cutHistogram = static_cast<float>(profile.dejudderCutHistogram);
-		settings.coarseRange = profile.dejudderSearchRange;
-		settings.consistencyPixels = static_cast<float>(profile.dejudderConsistencyPx);
-		settings.fadeMatch = profile.dejudderFadeMatch;
-		settings.fadeFloor = static_cast<float>(profile.dejudderFadeFloor);
-		settings.verifyPixels = profile.dejudderVerify;
-		settings.verifyShare = static_cast<float>(profile.dejudderVerifyShare);
-		settings.pixelTrust = profile.dejudderPixelTrust;
-		settings.pixelTrustLo = static_cast<float>(profile.dejudderPixelTrustLo);
-		settings.pixelTrustHi = static_cast<float>(profile.dejudderPixelTrustHi);
-		settings.landingCheck = profile.dejudderLandingCheck ? 1.5f : 0.0f;
-		settings.sourceWarpCatmull = profile.dejudderSourceWarpCatmull;
-		settings.pictureArea = true;   // dejudder_picture_area retired 2026-10-17: always the picture only
-		// General (owner 2026-10-14): pixel values for a 2160-line picture,
-		// per-frame values at 23.976p; the matcher scales them to the source.
-		settings.referenceHeight = 2160.0f;
-		settings.referenceRateHz = 24000.0 / 1001.0;
-		settings.pixelTrustedVectors = true;
-		settings.lowRes = profile.dejudderLowRes != "off";
-		settings.lowResAll = profile.dejudderLowRes == "all";
-		settings.holdFeatherPx = static_cast<float>(profile.dejudderHoldFeatherPx);
-		settings.holdHysteresis = profile.dejudderHoldHysteresis;
-		settings.blockTaper = profile.dejudderBlockTaper;
-		settings.taperSad = static_cast<float>(profile.dejudderTaperSad);
-		return settings;
-	}
-
-	// ADR-0019: the Original pathway baseline. Every VP addition is switched off and every slot
-	// that exists upstream runs in its upstream form, so the renderer reproduces Bill's original
-	// pathway. The list is src/VP-V/core/OriginalPathway.h (verified against bill-v1.4.02); each
-	// line here names its key, and the drift check fails when the two disagree.
-	static void ApplyOriginalPathwaySettings(RendererSettings& settings)
-	{
-		settings.capturePath = "standard";                 // key=capture_path
-		settings.captureUpload = "render";                 // key=capture_upload
-		settings.nativeRgbIngest = false;                  // key=native_rgb_ingest
-		settings.dvTunnelGpuUnpack = false;                // key=dv_tunnel_gpu_unpack
-		settings.dvTunnelFixes = false;                    // key=dv_tunnel_fixes
-		settings.dvCompareCaptureFolder.clear();           // key=dv_compare_capture_folder
-		settings.dvTrims = false;                          // key=dv_trims
-		settings.dvToneMapping = "libplacebo";             // key=dv_tone_mapping
-		settings.queueTimingFixes = false;                 // key=queue_timing_fixes
-		settings.pulldownFixes = false;                    // key=pulldown_fixes
-		settings.timingContinuityFixes = false;            // key=timing_continuity_fixes
-		settings.cadenceClassFixes = false;                // key=cadence_class_fixes
-		settings.generalRateFixes = false;                 // key=general_rate_fixes
-		settings.efficiencyFixes = false;                  // key=efficiency_fixes
-		settings.sourceResolution = "native";              // key=source_resolution
-		settings.rebaseKernelMatch = false;                // key=rebase_kernel_match
-		settings.sourceCodingFixes = false;                // key=source_coding_fixes
-		settings.sourceResolutionLatchFixes = false;       // key=source_resolution_latch_fixes
-		settings.sourceResolutionCutFixes = false;         // key=source_resolution_cut_fixes
-		settings.debandVp = "off";                         // key=deband_vp
-		settings.debandVpExclusive = false;                // key=deband_vp_exclusive
-		settings.debandGrain = true;                       // key=deband_grain
-		settings.chromaUpscaler = "bicubic";               // key=chroma_upscaler
-		settings.sourceRange = "auto";                     // key=source_range
-		settings.upscaleLight = "linear";                  // key=upscale_light
-		settings.detailPulseStabilise = false;             // key=detail_pulse_stabilise
-		settings.textureRestore = false;                   // key=texture_restore
-		settings.dejudderStrength = 0.0;                   // key=dejudder_strength
-		settings.dejudderStrengthEven = 0.0;               // key=dejudder_strength_even
-		settings.interpolation = InterpolationPolicy::Mode::Off;   // key=interpolation
-		settings.interpolationFillGaps = false;            // key=interpolation_fill_gaps
-		settings.occlusionMask = false;                    // key=occlusion_mask
-		settings.repeatRenderReuse = false;                // key=repeat_render_reuse
-		settings.dejudderEstStillZero = false;             // key=dejudder_est_still_zero
-		settings.opticalFlow = false;                      // key=optical_flow
-		settings.motionAheadFrames = 0;                    // key=motion_ahead_frames
-		settings.motionHistoryFixes = false;               // key=motion_history_fixes
-		settings.vectorDemand = false;                     // key=vector_demand
-		settings.dejudderSourceWarpCatmull = false;        // key=dejudder_source_warp_filter
-		settings.nlsSamplingCatmull = false;               // key=nls_sampling
-		settings.adaptiveDownscale = false;                // key=adaptive_downscale
-		settings.adaptiveUpscale = false;                  // key=adaptive_upscale
-		settings.ssimBitrateAware = false;                 // key=ssim_bitrate_aware
-		settings.downscaleLight = "linear";                // key=downscale_light
-		settings.fboFloat32 = 0;                           // key=fbo_float32
-		settings.preserveExtendedRange = false;            // key=preserve_extended_range
-		settings.extendedRangeMoreCases = false;           // key=extended_range_more_cases
-		settings.sdrTone.knee = false;                     // key=sdr_tone_shape
-		settings.intentContent = false;                    // key=intent_content
-		settings.intentMotion = false;                     // key=intent_motion
-		settings.intentDisplay = false;                    // key=intent_display
-		settings.intentBlack = BlackIntentMode::Off;       // key=intent_black
-		settings.ambientAdapt = false;                     // key=ambient_adapt
-		settings.temporalDither = "libplacebo";            // key=temporal_dither
-		settings.outputSegmentsMerged = false;             // key=output_segments_merged
-		settings.renderAhead = false;                      // key=render_ahead
-		settings.calibrationLutStage = "libplacebo";       // key=calibration_lut_stage
-		settings.hdrInference = "original";                // key=hdr_inference
-		// Settings audit 2026-10-24: VP additions the first table missed (absent from Bill's v1.4.02-beta).
-		settings.activePictureStartupHold = false;         // key=active_picture_startup_hold
-		settings.lowBitrateHandling = "off";               // key=low_bitrate_handling
-		settings.adaptive.ssimResidualStabilise = false;   // key=ssim_residual_stabilise
-		settings.adaptive.cnnResidualStabilise = false;    // key=cnn_residual_stabilise
-		settings.adaptive.residualGrainGuard = false;      // key=residual_stabilise_grain_guard
-		settings.adaptive.motionAdaptive = false;          // key=adaptive_motion
-		settings.dejudderEstimateAhead = false;            // key=dejudder_estimate_ahead
-		settings.interpolationFallback = InterpolationPolicy::Fallback::Hold; // key=interpolation_fallback
-		settings.pipelineOrder.clear();                    // the designed order
-		settings.pipelineEntranceOnce = false;             // B3: per-picture stages, as upstream
-		settings.frameAnalysisStore = false;               // key=frame_analysis_store (WP-23: upstream's own decodes only)
-		settings.resyncEvent = "off";                      // key=resync_event
-		settings.entranceGpuDrain = "off";                 // key=entrance_gpu_drain
-	}
-
-	// Pipeline skeleton settings (global: [vpv] first, then [vprenderer]); see RendererSettings.
-	void ReadPipelineSettings(const ConfigFile& config, RendererSettings& settings)
-	{
-		std::string raw;
-		// ADR-0023: the VP-V Config section stores these global keys in [vpv] (renderer profiles are
-		// renamed and reordered by Config, the [vpv] section never is); [vprenderer] stays readable.
-		const auto TryGetPipelineString = [](const ConfigFile& file, const char* key, std::string& value)
-		{
-			return file.TryGetString("vpv", key, value) || TryGetDisplayString(file, key, value);
-		};
-		if (TryGetPipelineString(config, "pipeline_original_pathway", raw))
-		{
-			const std::string value = ConfigFile::NormalizeName(raw);
-			if (value == "on" || value == "off")
-				settings.pipelineOriginalPathway = value == "on";
-			else
-				settings.pipelineSettingsProblems += "pipeline_original_pathway '" + raw + "' (on|off); ";
-		}
-		if (TryGetPipelineString(config, "pipeline_order", raw))
-			settings.pipelineOrder = ConfigFile::Trim(raw);
-		if (TryGetPipelineString(config, "pipeline_slots_off", raw))
-			settings.pipelineSlotsOff = ConfigFile::Trim(raw);
-		if (TryGetPipelineString(config, "calibration_lut_stage", raw))
-		{
-			const std::string value = ConfigFile::NormalizeName(raw);
-			if (value == "libplacebo" || value == "vp")
-				settings.calibrationLutStage = value;
-			else
-				settings.pipelineSettingsProblems += "calibration_lut_stage '" + raw + "' (libplacebo|vp); ";
-		}
-		if (TryGetPipelineString(config, "output_segments_merged", raw))
-		{
-			const std::string value = ConfigFile::NormalizeName(raw);
-			if (value == "on" || value == "off")
-				settings.outputSegmentsMerged = value == "on";
-			else
-				settings.pipelineSettingsProblems += "output_segments_merged '" + raw + "' (on|off); ";
-		}
-		if (TryGetPipelineString(config, "hdr_inference", raw))   // F-8 (HdrInferenceChoice.h)
-		{
-			const std::string value = ConfigFile::NormalizeName(raw);
-			if (value == "vp" || value == "original")
-				settings.hdrInference = value;
-			else
-				settings.pipelineSettingsProblems += "hdr_inference '" + raw + "' (vp|original); ";
-		}
-		if (TryGetPipelineString(config, "pipeline_entrance_once", raw))
-		{
-			const std::string value = ConfigFile::NormalizeName(raw);
-			if (value == "on" || value == "off")
-				settings.pipelineEntranceOnce = value == "on";
-			else
-				settings.pipelineSettingsProblems += "pipeline_entrance_once '" + raw + "' (on|off); ";
-		}
-		if (TryGetPipelineString(config, "frame_analysis_store", raw))
-		{
-			const std::string value = ConfigFile::NormalizeName(raw);
-			if (value == "on" || value == "off")
-				settings.frameAnalysisStore = value == "on";
-			else
-				settings.pipelineSettingsProblems += "frame_analysis_store '" + raw + "' (on|off); ";
-		}
-		if (TryGetPipelineString(config, "resync_event", raw))
-		{
-			const std::string value = ConfigFile::NormalizeName(raw);
-			if (value == "off" || value == "shadow" || value == "on")
-				settings.resyncEvent = value;
-			else
-				settings.pipelineSettingsProblems += "resync_event '" + raw + "' (off|shadow|on); ";
-		}
-		if (TryGetPipelineString(config, "entrance_gpu_drain", raw))
-		{
-			const std::string value = ConfigFile::NormalizeName(raw);
-			if (value == "off" || value == "flush" || value == "finish")
-				settings.entranceGpuDrain = value;
-			else
-				settings.pipelineSettingsProblems += "entrance_gpu_drain '" + raw + "' (off|flush|finish); ";
-		}
-		if (settings.pipelineOriginalPathway)
-			ApplyOriginalPathwaySettings(settings);
-		// Motion + queue/timing slots switched off run in their upstream form (owner 2026-10-25).
-		SlotSwitchSettings::Apply(SlotSwitchSettings::FromText(settings.pipelineSlotsOff), settings);
-		// Bill merge (owner decision 2): Bill's presentation vs VP-V's render-ahead, either/or on
-		// render_ahead (off on the Original pathway = Bill's presentation exactly).
-		const PresentationOwner::Decision presentation =
-			PresentationOwner::Decide(settings.renderAhead, settings.presentEveryVsync);
-		settings.presentEveryVsync = presentation.presentEveryVsync;
-		settings.presentEveryVsyncWithheld = presentation.presentEveryVsyncWithheld;
+		RendererSettingsHooks::ReadProfile(config, rule.section, rule.name, rule.contentGated, settings);   // VPV-HOOK: the VP-V profile keys (VpvRendererSettings.cpp)
 	}
 
 	RendererSettings LoadRendererSettings(const ConfigFile& config,
@@ -4025,8 +2627,6 @@ namespace
 		settings.downscaler = ReadChoice(
 			config, "downscaler", "auto",
 			{ "auto", "gpu", "box", "hermite", "bilinear", "bicubic", "gaussian", "catmull_rom", "mitchell", "lanczos" });
-		settings.downscaleLight = ReadChoice(config, "downscale_light", "linear", { "linear", "gamma" });
-		settings.upscaleLight = ReadChoice(config, "upscale_light", "linear", { "linear", "gamma" });
 		settings.deband = ReadAutoToggle(config, "deband");
 		if (TryGetDisplayString(config, "deband_strength", rawValue))
 		{
@@ -4034,14 +2634,7 @@ namespace
 				DebugLog::Log(
 					"libplacebo: deband_strength must be Auto, off, light, or default; retaining the debanding setting");
 		}
-		if (TryGetDisplayString(config, "deband_grain", rawValue))
-		{
-			const std::string value = ConfigFile::NormalizeName(rawValue);
-			if (value == "on" || value == "off")
-				settings.debandGrain = value == "on";
-			else
-				DebugLog::Log("libplacebo: deband_grain must be on or off; retaining %s", settings.debandGrain ? "on" : "off");
-		}
+		RendererSettingsHooks::ReadBase(config, settings);   // VPV-HOOK: downscale_light, upscale_light, deband_grain
 		settings.sigmoid = ReadAutoToggle(config, "sigmoid");
         MotionConfig::Read(config,"vprenderer.motion",settings.motion);
 		settings.dithering = ReadDithering(config, "dithering");
@@ -4711,7 +3304,7 @@ namespace
 		// dependency once all profiles have been applied, so it never reaches the
 		// output path in an invalid state.
 		NormalizeSdrBlackLevel(settings);
-		ReadPipelineSettings(config, settings);
+		RendererSettingsHooks::ApplyGlobal(config, settings);   // VPV-HOOK: global pipeline keys, Original overlay, slot switches, presentation owner
 		return settings;
 	}
 
@@ -6051,6 +4644,26 @@ std::string LibplaceboRendererSettingsFingerprintForTest(const char* configPath)
 	return EffectiveSettingsFingerprint(LoadRendererSettings(config, state, rule));
 }
 
+// P3-0 identity kit (tests only): every settings field (Bill first, then VP-V), then both effective
+// fingerprints; exported by VP-V/modules/control/config/VpvSettingsExports.cpp.
+std::string LibplaceboRendererSettingsDumpForTest(const char* configPath)   // VPV-HOOK
+{
+	ConfigFile config;
+	if (!configPath || !config.Load(configPath, ConfigFile::ReadPolicy::Fresh))
+		return std::string();
+	VideoState state;
+	std::string rule;
+	const RendererSettings settings = LoadRendererSettings(config, state, rule);
+	std::ostringstream out;
+	out.imbue(std::locale::classic());
+	out.precision(17);
+	out << "rule=" << rule << "\n";
+	VpvDumpRendererSettings(settings, out);
+	out << "@@fingerprint-live\n" << EffectiveSettingsFingerprint(settings) << "\n"
+		<< "@@fingerprint-restart\n" << EffectiveSettingsFingerprint(settings, false) << "\n";
+	return out.str();
+}
+
 
 // Owns one caller-bounded timestamp-disjoint query for a candidate output
 // frame. Any early return closes and rejects the query.
@@ -6275,10 +4888,6 @@ struct LibplaceboVideoRenderer::Impl
     };
 
 	pl_tex textures[2] = { nullptr, nullptr };
-	// Stage 6 de-judder: B's planes (the next source frame) and the matcher.
-	// Created only while the de-judder is on; freed when it goes off.
-	// (A later optimisation could reuse B's upload when B becomes current.)
-	pl_tex dejudderNextTextures[2] = { nullptr, nullptr };
 	// capture_path: gpu. The conversion thread reads the two flags; a failed
 	// unpack turns the session back to the CPU formatters (the fallback is shown: Ctrl+I line, one-time notice, Config status).
 	std::atomic<bool> captureGpuWanted{ true };
@@ -6470,6 +5079,7 @@ struct LibplaceboVideoRenderer::Impl
 	int rebasePauseSeconds = 5;
 	double rebaseFactorX = 1.0;         // the width's (per axis; = rebaseFactor when uniform)
 	std::string rebaseLogged;           // the last state logged
+	VpRebaseWarmup::Controller rebaseWarmup;   // FX-RB: holds a re-base until its shaders are warm // VPV-HOOK
 	// Stage 12 step B: effective resolution, bitrate quality and bit depth
 	// of every source, read on the native frame; auto acts on it.
 	SourceResolutionMonitor::Monitor sourceMonitor;
@@ -6962,49 +5572,9 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		return false;
 	}
-	// Owner 2026-10-13 (estimate ahead): C, the frame after B, when queued
-	// and converted; its planes; the pair estimated ahead (B, C) during A's
-	// extras; B's upload layout (C must match it).
-	std::shared_ptr<const QueuedFrame::ConvertedPayload> dejudderAheadPayload;
-	uint64_t dejudderAheadPayloadSequence = 0;
-	pl_tex dejudderAheadTextures[2] = { nullptr, nullptr };
-	Dejudder::AheadSchedule dejudderAhead;
 	ULONGLONG dejudderAheadLogTick = 0;
-	struct DejudderUploadLayout
-	{
-		bool valid = false;
-		int width = 0, height = 0, chromaHeight = 0;
-		size_t rowBytes = 0, pixelBytes = 0;
-		bool lossless422 = false, fullRange = false;
-		bool raw = false;   // the raw (GPU unpack) route, with its encoding
-		bool rgb = false, bt2020 = false;   // an RGB raw route: luma only, its matrix
-		VideoFrameEncoding rawEncoding = VideoFrameEncoding::UNKNOWN;
-		bool dvTunnelRaw = false;   // the Dolby Vision tunnel's GPU unpack route
-		VideoFrameFormatterOutputContract contract{};
-	} dejudderLayout;
-	std::unique_ptr<Dejudder::MotionWarp> dejudder;
 	DejudderPolicy::Reason dejudderReason = DejudderPolicy::Reason::Off;
-	uint64_t dejudderEstimatedSequence = 0;
-	uint64_t dejudderEstimatedEpoch = 0;   // the motion epoch the estimate was made in (MotionValidity)
-	// Bug hunt 3 F10: the source periods the estimated pair's field spans (a gap pair: k + 1).
-	int dejudderEstimatedPeriods = 1;
-	// Bug hunt 3 F4: the idle motion engine kept for hiccup repair, and its low-memory fallback.
-	MotionEngineIdle::Keeper motionEngineIdle;
-	CComPtr<IDXGIAdapter3> motionEngineBudgetAdapter;
-	unsigned long long dejudderCreates = 0;
 	unsigned long long motionEngineIdleReleasesLogged = 0;
-	// H3 F4 follow-up: load the idle engine (and the interpolator) once at a source's start, so
-	// the first hiccup does not pay its creation on the render thread (about 100 ms here, 9.7 s
-	// under CPU load: a backlog flush that swallowed the next gap). Set at renderer start and at
-	// a resync / format change; cleared once loaded or when low memory released it.
-	bool motionEngineWarmPending = true;
-	// Hunt 2 04 M2: the A of the pair whose field the matcher's live outputs hold (0 = none).
-	// After an ahead estimate it is B while A is still showing, so A's repeat draws must not
-	// read the live field as A's (the extras read their snapshot).
-	uint64_t dejudderLiveFieldFrom = 0;
-	// Hunt 2 04 L3: the motion source last estimated with (0 matcher only, 1 render-time
-	// engine, 2 engine with the producer ahead); -1 = none yet.
-	int dejudderMotionSourceKey = -1;
 	// Whether the matcher's live outputs (field, trust, grain error) are this source
 	// frame's (sequence, sequence + 1) pair of the current motion epoch.
 	bool DejudderLiveFieldFor(uint64_t sequence) const
@@ -7586,7 +6156,10 @@ struct LibplaceboVideoRenderer::Impl
 		// WIP DEBUG (near-black residual, 2026-10-24): VP_DEBUG_PHASE_NOVECTORS=1 forces the no-vector path.
 		const bool forceNoVectors = debugPhaseNoVectors;   // C10: read once at construction
 		const bool vectors = (DejudderLiveFieldFor(sourceSequence) || snapshot) && !forceNoVectors;
-		MotionShadowCheck(sourceSequence, nextSourceSequence, DejudderLiveFieldFor(sourceSequence));
+		// VPV-HOOK
+		vectorEngine.MotionShadowCheck(pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery), sourceSequence, nextSourceSequence,
+			DejudderLiveFieldFor(sourceSequence));
+		// VPV-HOOK-END
 		vpPhaseVectors = vectors;
 		if (vectors)
 		{
@@ -7810,23 +6383,55 @@ struct LibplaceboVideoRenderer::Impl
 	}
 
 	// ---- Vector engine on demand (VP-V/modules/motion/estimation/VectorDemand.h) --------------------
-	// The engine (producer + render-time estimate) runs for the consumers that want vectors, at any rate.
-	// The decision uses the previous frame's state (one frame of latency); with vector_demand off it is
-	// the default-constructed Decision and every use below reduces to the old expression.
-	VectorDemand::Decision vectorDemand;
-	std::atomic<int> queueAheadCapacity{ 0 };         // frames the queue holds after the current one (queue pass)
-	std::atomic<bool> motionAheadBackward{ false };   // backward pairs: the producer is fed the current frame
+	// M2 P5a: the vector engine's state (vector demand, producer, look-ahead, validity, invalidation) lives in
+	// VpMotion::VectorEngineState; the aliases keep every reader outside P5a's ranges unchanged. Each alias
+	// is deleted by the package that moves its last reader (VP-V/modules/motion/estimation/HOOKS.md).
+	// VPV-HOOK
+	VpMotion::VectorEngine vectorEngine{ this, &VpMotion::InvalidateHost<Impl> };   // registered for IVectorEngine (vpv.vector_engine.v1) under this host; queue-event invalidations reach RequestMotionInvalidate
+	VectorDemand::Decision& vectorDemand = vectorEngine.vectorDemand;
+	std::atomic<int>& queueAheadCapacity = vectorEngine.queueAheadCapacity;
+	std::atomic<bool>& motionAheadBackward = vectorEngine.motionAheadBackward;
+	unsigned long long& vectorPairs = vectorEngine.vectorPairs;
+	std::atomic<bool>& motionAheadEngaged = vectorEngine.motionAheadEngaged;
+	uint64_t& motionAheadEngagedGeneration = vectorEngine.motionAheadEngagedGeneration;
+	bool& motionAheadPrevKnown = vectorEngine.motionAheadPrevKnown;
+	uint64_t& motionAheadPrevGeneration = vectorEngine.motionAheadPrevGeneration;
+	DejudderPolicy::MotionAheadFrame& motionAheadPrev = vectorEngine.motionAheadPrev;
+	std::shared_ptr<MotionAhead::Producer>& motionProducer = vectorEngine.motionProducer;
+	MotionValidity::State& motionValidity = vectorEngine.motionValidity;
+	using MotionShadowField = VpMotion::VectorEngineState::MotionShadowField;
+	VpMotion::MotionSegment<MotionShadowField>& motionSegment = vectorEngine.motionSegment;
+	std::atomic<int>& motionAheadDepth = vectorEngine.motionAheadDepth;
+	std::atomic<int>& motionAheadConfigured = vectorEngine.motionAheadConfigured;
+	unsigned long long& motionAheadHits = vectorEngine.motionAheadHits;
+	unsigned long long& motionAheadMisses = vectorEngine.motionAheadMisses;
+	std::atomic<double>& motionHandoffMaxMs = vectorEngine.motionHandoffMaxMs;
+	std::atomic<double>& motionHandoffTotalMs = vectorEngine.motionHandoffTotalMs;
+	std::atomic<unsigned long long>& motionHandoffCount = vectorEngine.motionHandoffCount;
+	uint64_t& motionInvalidations = vectorEngine.motionInvalidations;
+	bool& motionRecoveryLogPending = vectorEngine.motionRecoveryLogPending;
+	// P5a-5: the estimate state (item a; VP-V/modules/motion/estimation/EstimateState.h).
+	VpMotion::EstimateState<QueuedFrame::ConvertedPayload> vectorEstimate{ vectorEngine };
+	pl_tex (&dejudderNextTextures)[2] = vectorEstimate.dejudderNextTextures;
+	std::shared_ptr<const QueuedFrame::ConvertedPayload>& dejudderAheadPayload = vectorEstimate.dejudderAheadPayload;
+	uint64_t& dejudderAheadPayloadSequence = vectorEstimate.dejudderAheadPayloadSequence;
+	pl_tex (&dejudderAheadTextures)[2] = vectorEstimate.dejudderAheadTextures;
+	Dejudder::AheadSchedule& dejudderAhead = vectorEstimate.dejudderAhead;
+	using DejudderUploadLayout = VpMotion::EstimateState<QueuedFrame::ConvertedPayload>::DejudderUploadLayout;
+	DejudderUploadLayout& dejudderLayout = vectorEstimate.dejudderLayout;
+	std::unique_ptr<Dejudder::MotionWarp>& dejudder = vectorEstimate.dejudder;
+	uint64_t& dejudderEstimatedSequence = vectorEstimate.dejudderEstimatedSequence;
+	uint64_t& dejudderEstimatedEpoch = vectorEstimate.dejudderEstimatedEpoch;
+	int& dejudderEstimatedPeriods = vectorEstimate.dejudderEstimatedPeriods;
+	MotionEngineIdle::Keeper& motionEngineIdle = vectorEstimate.motionEngineIdle;
+	CComPtr<IDXGIAdapter3>& motionEngineBudgetAdapter = vectorEstimate.motionEngineBudgetAdapter;
+	unsigned long long& dejudderCreates = vectorEstimate.dejudderCreates;
+	bool& motionEngineWarmPending = vectorEstimate.motionEngineWarmPending;
+	uint64_t& dejudderLiveFieldFrom = vectorEstimate.dejudderLiveFieldFrom;
+	int& dejudderMotionSourceKey = vectorEstimate.dejudderMotionSourceKey;
+	bool& motionEngineWarming = vectorEstimate.motionEngineWarming;
+	// VPV-HOOK-END
 	bool sigmaDeltaRanLast = false;                   // the sigma-delta quantiser ran in the last frame's output pass
-	std::string vectorEngineLogged;
-	int vectorDeliveredLogged = -1;
-	int vectorDitherKeyLogged = -1;
-	unsigned long long vectorPairs = 0, vectorBackwardPairs = 0;
-	ULONGLONG vectorStatsTick = 0;
-	uint64_t vectorBackwardSequence = 0;
-	bool vectorGlobalMissSustained = false;
-	unsigned vectorGlobalMisses = 0;
-	uint64_t vectorProducerFirstSubmit = 0;
-	bool vectorProducerSkipSustained = false;
 	// C10: the debug switches are read once, not per frame.
 	const bool debugPhaseNoVectors = [] { char f[4] = {}; return GetEnvironmentVariableA("VP_DEBUG_PHASE_NOVECTORS", f, sizeof(f)) > 0 && f[0] == '1'; }();
 	const bool debugPhaseAb = [] { char f[4] = {}; return GetEnvironmentVariableA("VP_DEBUG_PHASE_AB", f, sizeof(f)) > 0 && f[0] == '1'; }();
@@ -7855,83 +6460,6 @@ struct LibplaceboVideoRenderer::Impl
 		want(C::SourceMonitorPan, activeSettings.sourceResolution == "auto");
 		want(C::MotionIntent, intentInterpreter && intentInterpreter->Active());
 		return in;
-	}
-	// Decides for this source frame, then keeps the engine's state visible: fallback entry, status line,
-	// Ctrl+Alt+D record and the logs (on change, once per mode, every 5 s while on).
-	void UpdateVectorEngine(bool interlaced)
-	{
-		vectorDemand = VectorDemand::Decide(VectorDemandInput(interlaced));
-		const ULONGLONG now = GetTickCount64();
-		if (!activeSettings.vectorDemand)
-		{
-			if (!vectorEngineLogged.empty())
-			{
-				vectorEngineLogged.clear();
-				SyncFallback(FallbackCatalog::Released("vector_engine"));
-				SyncFallback(FallbackCatalog::Released("vector_engine_producer"));
-				SyncFallback(FallbackCatalog::Released("vector_engine_global"));
-			}
-			return;
-		}
-		// What decides the output dither's want, logged when it changes (a dither that runs but is not served
-		// is explained by one of the three).
-		{
-			const int ditherKey = (sigmaDeltaRanLast ? 1 : 0) | (activeSettings.ditherVectorsOwn ? 2 : 0) | (DitherVectorsSupported() ? 4 : 0);
-			if (ditherKey != vectorDitherKeyLogged)
-			{
-				vectorDitherKeyLogged = ditherKey;
-				DebugLog::Log("Vector engine: output dither inputs: sigma-delta ran %s, own search requested %s, vectors supported %s",
-					(ditherKey & 1) ? "yes" : "no", (ditherKey & 2) ? "yes" : "no", (ditherKey & 4) ? "yes" : "no");
-			}
-		}
-		const std::string line = VectorDemand::StatusLine(vectorDemand);
-		if (line != vectorEngineLogged)
-		{
-			vectorEngineLogged = line;
-			DebugLog::Log("%s", line.c_str());
-			DiagnosticHistory::Global().RecordDecision("vector-engine", line.c_str(),
-				static_cast<int64_t>(vectorDemand.mode), static_cast<int64_t>(vectorDemand.served),
-				static_cast<double>(vectorDemand.unserved), 0.0);
-			PublishDejudderStatus(true);
-		}
-		// The look-ahead stores nothing for this size while pairs are submitted: sustained = visible.
-		if (motionProducer && motionProducer->Running() && vectorDemand.producer)
-		{
-			const uint64_t last = motionProducer->LastSubmitted();
-			if (vectorProducerFirstSubmit == 0 && last != 0) vectorProducerFirstSubmit = last;
-			const auto ps = motionProducer->GetStats();
-			if (ps.pairs > 0) vectorProducerSkipSustained = false;
-			else if (vectorProducerFirstSubmit != 0 && last >= vectorProducerFirstSubmit + 48) vectorProducerSkipSustained = true;
-		}
-		else
-		{
-			vectorProducerFirstSubmit = 0;
-			vectorProducerSkipSustained = false;
-		}
-		SyncFallback(FallbackCatalog::VectorEngine(vectorDemand));
-		SyncFallback(FallbackCatalog::VectorEngineProducer(vectorProducerSkipSustained));
-		SyncFallback(FallbackCatalog::VectorEngineGlobal(vectorGlobalMissSustained));
-		if (vectorDemand.mode != VectorDemand::Mode::Off && (vectorStatsTick == 0 || now - vectorStatsTick >= 5000))
-		{
-			vectorStatsTick = now;
-			DebugLog::Log("Vector engine: %llu pairs (ahead hits %llu, misses %llu, backward %llu)", vectorPairs,
-				static_cast<unsigned long long>(motionAheadHits), static_cast<unsigned long long>(motionAheadMisses), vectorBackwardPairs);
-		}
-	}
-	// Whole-frame motion for the statistics consumers: a producer pair (hit) or none (miss). A miss run
-	// is visible (never log-only): hysteresis, so a single missed pair does not flap the entry.
-	unsigned vectorGlobalHits = 0;
-	void NoteGlobalPair(bool hit)
-	{
-		if (!vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan) && !vectorDemand.Serves(VectorDemand::Consumer::MotionIntent))
-		{
-			vectorGlobalMisses = vectorGlobalHits = 0;
-			vectorGlobalMissSustained = false;
-			return;
-		}
-		constexpr unsigned kRun = 24;   // consecutive pairs, either way, before the entry changes
-		if (hit) { ++vectorGlobalHits; vectorGlobalMisses = 0; if (vectorGlobalHits >= kRun) vectorGlobalMissSustained = false; }
-		else { ++vectorGlobalMisses; vectorGlobalHits = 0; if (vectorGlobalMisses >= kRun) vectorGlobalMissSustained = true; }
 	}
 	// The sigma-delta's vectors on a frame whose extras do not run: B's first present takes the pair's field
 	// at the full vector (previousShift 0), exactly as the extras path builds them (payback of the 4.2 ms own search).
@@ -7962,93 +6490,6 @@ struct LibplaceboVideoRenderer::Impl
 			dejudderNextVectorsW = w;
 			dejudderNextVectorsH = h;
 		}
-	}
-	// Once per mode: the first vectors the engine delivered and where they came from.
-	void NoteVectorsDelivered(bool backward, const char* source)
-	{
-		const int mode = backward ? 1 : 0;
-		if (vectorDeliveredLogged == mode)
-			return;
-		vectorDeliveredLogged = mode;
-		DebugLog::Log("Vector engine: vectors delivered (%s, source %s)", backward ? "backward" : "forward", source);
-	}
-	// Engine size the producer works at for a picture of this size, as the matcher would use it
-	// (halvings of the search input), and the halvings themselves for the pixel scaling.
-	void VectorEngineSizeFor(int width, int height, int& engineW, int& engineH, int& halvings) const
-	{
-		halvings = DejudderPolicy::SearchHalvingsFor(activeSettings.dejudderLowRes != "off", height);
-		engineW = (width + 1) / 2;
-		engineH = (height + 1) / 2;
-		for (int i = 0; i < halvings; ++i) { engineW = (engineW + 1) / 2; engineH = (engineH + 1) / 2; }
-	}
-	// Backward pairs (no frame ahead): once per new source frame the statistics consumers read the pair
-	// (n-1, n) if the producer has it, else the frame-old (n-2, n-1); statistics only, never a field.
-	// Forward without a render-time estimate: statistics consumers only, and no de-judder / interpolator
-	// estimate takes this frame's pair (the legacy producer-consumer expression); the pair (n, n+1) comes from
-	// the producer. Never published to the motion segment: Forward there means the live matcher field.
-	void ServeStatistics(uint64_t sequence, uint64_t nextSequence, int width, int height)
-	{
-		const bool backward = vectorDemand.mode == VectorDemand::Mode::Backward;
-		const bool legacyConsumer = (dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
-			dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers)) || interpolating;
-		const bool forwardStats = vectorDemand.mode == VectorDemand::Mode::Forward && !vectorDemand.estimate && !legacyConsumer &&
-			(vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan) || vectorDemand.Serves(VectorDemand::Consumer::MotionIntent));
-		if ((!backward && !forwardStats) || !motionProducer || !motionProducer->Running() ||
-			sequence == 0 || sequence == vectorBackwardSequence)
-			return;
-		vectorBackwardSequence = sequence;
-		int engineW = 0, engineH = 0, halvings = 0;
-		VectorEngineSizeFor(width, height, engineW, engineH, halvings);
-		motionProducer->SetTargetSize(engineW, engineH);
-		MotionAhead::FlowPtr flow;
-		uint64_t from = 0, to = 0;
-		if (forwardStats)
-		{
-			from = sequence;
-			to = nextSequence;
-			if (nextSequence == sequence + 1 &&
-				motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
-				flow = motionProducer->Take(from, to);
-			NoteGlobalPair(flow != nullptr);
-		}
-		else
-			for (int age = 0; age < 2 && !flow && sequence > static_cast<uint64_t>(age + 1); ++age)
-			{
-				from = sequence - 1 - age;
-				to = sequence - age;
-				if (motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
-					flow = motionProducer->Take(from, to);
-			}
-		if (!flow)
-		{
-			++motionAheadMisses;
-			motionProducer->Prune(forwardStats ? sequence : (sequence > 2 ? sequence - 2 : 0));
-			return;
-		}
-		++motionAheadHits;
-		if (backward) ++vectorBackwardPairs;
-		++vectorPairs;
-		NoteVectorsDelivered(backward, backward ? "engine" : "engine ahead");
-		const int pictureHeight = dejudderPicture.available && dejudderPicture.rasterHeight == height &&
-			dejudderPicture.bottom > dejudderPicture.top ? dejudderPicture.bottom - dejudderPicture.top : height;
-		const VectorDemand::GlobalSample g = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
-			static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1]), halvings),
-			flow->global[0][2], flow->global[0][3], pictureHeight);
-		if (g.usable && vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan))
-			sourceMonitor.SetMotion(g.sourcePixels, to);
-		if (vectorDemand.Serves(VectorDemand::Consumer::MotionIntent) && intentInterpreter->Active())
-		{
-			IntentInterpreter::VectorSample vectors;
-			vectors.from = from;
-			vectors.to = to;
-			vectors.valid = g.intentValid;
-			vectors.heightsPerFrame = g.heightsPerFrame;
-			intentInterpreter->NoteVectors(vectors);
-		}
-		if (backward && pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery))
-			motionSegment.Publish(VpMotion::Direction::Backward, from, to, MotionShadowField{ from, to },
-				VpMotion::Source::EngineAhead, motionValidity.Epoch(), 0, false);
-		motionProducer->Prune(forwardStats ? sequence : (sequence > 2 ? sequence - 2 : 0));
 	}
 	// output.dither's vector producers run only while the slot runs (WP-13, DitherSlot.h).
 	bool DitherVectorsSupported() const
@@ -8703,12 +7144,7 @@ struct LibplaceboVideoRenderer::Impl
 	// source_resolution auto is selected (the render loop then shows the monitor the frames ahead).
 	std::atomic<bool> sourceAutoActive{ false };
 	bool sourceAheadLogged = false;   // render loop thread
-	std::string motionAheadLogged;
-	SteadyClock::time_point motionAheadLoggedAt{};
 	std::string motionSourceLogged;   // the de-judder's motion source, logged on change
-	// r6 fix 1: WarmIdleMotionEngine's dummy A -> A estimate. It loads the engine only: no
-	// estimate count, no "motion estimated"/motion-source logs, no vectors to the consumers.
-	bool motionEngineWarming = false;
 	// r6 fix 7 (owner rule vp-no-silent-fallbacks): the renderer's automatic fallbacks, published
 	// as "Fallbacks engaged: <list> / none" (GetFallbacksStatus: Ctrl+I, Config status, Ctrl+Alt+D).
 	FallbackStatus::Registry fallbacks;
@@ -8757,6 +7193,7 @@ struct LibplaceboVideoRenderer::Impl
 	}
 	// motion.consumers (group D audit D3): failed warp / interpolation passes, visible while recent.
 	FallbackCatalog::MotionConsumerFailures motionConsumerFailures;
+	FallbackCatalog::LookAheadFailures motionAheadFailures = FallbackCatalog::MotionAheadWorker(), sourceAheadFailures = FallbackCatalog::SourceResolutionWorker();   // render-loop thread only
 	// The de-judder held this frame because the display rate is not known (presentation entry).
 	bool dejudderHeldNoDisplayRate = false;
 	// Pipeline skeleton (design freeze 2026-10-24): the ONE slot registry (VP-V/core/SlotRegistry.h). It
@@ -8902,64 +7339,6 @@ struct LibplaceboVideoRenderer::Impl
 		else
 			ReleaseFallback("render-ahead");
 	}
-	// Owner 2026-10-16: the look-ahead engages with 4 frames queued ahead and disengages when the
-	// queue holds none or the sequence breaks (a skip, seek or reset: a new motion generation);
-	// it re-engages only once 4 are queued again. Render-loop thread only.
-	bool motionAheadEngaged = false;
-	uint64_t motionAheadEngagedGeneration = 0;
-	// Integration 2026-10-17: the frame last submitted to the producer (its time and DV kind),
-	// for the break rule (DejudderPolicy::MotionAheadBreakBefore). Render-loop thread only.
-	bool motionAheadPrevKnown = false;
-	uint64_t motionAheadPrevGeneration = 0;
-	DejudderPolicy::MotionAheadFrame motionAheadPrev;
-	// Set when the optical-flow producer's engine has produced a pair (docs/VP-nvof-ahead.md).
-	std::atomic<bool> motionEngineReady{ false };
-	// The producer computing the pairs ahead (render thread starts / stops it; the
-	// render loop submits frames; the de-judder takes its pairs). It stores them
-	// under motionValidity.StreamGeneration() (a resync, queue reset, seek or
-	// format change moves it).
-	std::unique_ptr<MotionAhead::Producer> motionProducer;
-	// One vectors-valid state (docs/VP-interpolator-50-60-plan.md step 1; owner
-	// [[vp-vector-validity]]): every discontinuity moves its epoch from any thread;
-	// the render thread applies it (ApplyMotionInvalidate) and every vector consumer
-	// checks the epoch its vectors were made in.
-	MotionValidity::State motionValidity;
-	uint64_t motionValiditySeen = MotionValidity::State::kInitialEpoch;   // render thread
-	// S0 motion segment, SHADOW step (P-b1, 2026-10-24 draft): it shares motionValidity, records every
-	// live estimate (RunDejudderEstimate) and withdraws it where the host clears
-	// dejudderLiveFieldFrom; the VP phase picture asks it in parallel with the host's own predicate
-	// (DejudderLiveFieldFor). Mismatches are counted and logged; nothing is delivered from it yet, so
-	// pixels are unchanged. Step 2 switches the consumers once the byte-identity gate shows 0.
-	struct MotionShadowField { uint64_t from = 0, to = 0; };
-	VpMotion::MotionSegment<MotionShadowField> motionSegment{ &motionValidity };
-	unsigned long long motionShadowChecks = 0, motionShadowMismatches = 0;
-	void MotionShadowCheck(uint64_t sequence, uint64_t nextSequence, bool hostLive)
-	{
-		// Modularity sweep 2026-10-25: no shadow state while the delivery slot is off (Original pathway).
-		if (!pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery))
-			return;
-		const auto d = motionSegment.Fetch(VpMotion::Consumer::Interpolator, VpMotion::Direction::Forward,
-			sequence, nextSequence, 0);
-		++motionShadowChecks;
-		if (static_cast<bool>(d) == hostLive)
-			return;
-		if (++motionShadowMismatches == 1 || motionShadowMismatches % 2400 == 0)
-			DebugLog::Log("Motion segment (shadow): mismatch source=%llu next=%llu host=%d segment=%d (%s; %llu of %llu)",
-				static_cast<unsigned long long>(sequence), static_cast<unsigned long long>(nextSequence), hostLive ? 1 : 0,
-				d ? 1 : 0, VpMotion::Describe(d.miss), motionShadowMismatches, motionShadowChecks);
-	}
-	std::atomic<int> motionAheadDepth{ 0 };   // the frames ahead to submit (0 = none)
-	// r6 fix 3: the time-based depth at this source rate (MotionAhead::DepthAt; 2 at 24p, 4 at 60p):
-	// the look-ahead engages once that many are queued ahead (was always 4).
-	std::atomic<int> motionAheadConfigured{ MotionAhead::kDefaultDepth };
-	bool motionProducerFailedLogged = false;
-	// Audit 2026-10-16: since when the producer has been unwanted only because the de-judder was
-	// released (a resync or reset releases it): kept alive instead of a join on the render thread and
-	// a new device on every resync.
-	unsigned long long motionAheadHits = 0, motionAheadMisses = 0;
-	// The render loop's hand-off of frames to the producer (render loop thread writes).
-	std::atomic<double> motionHandoffMaxMs{ 0.0 }, motionHandoffTotalMs{ 0.0 };
-	std::atomic<unsigned long long> motionHandoffCount{ 0 };
 	bool customHooksPublishedLowLatency = false;
 	double customHookRefreshHz = 0.0;
 	ULONGLONG customHookRefreshTick = 0;
@@ -9714,6 +8093,7 @@ struct LibplaceboVideoRenderer::Impl
 		if (!outputResourcesRetired)
 		{
             nlsPreparation.Stop();
+            rebaseWarmup.Stop(); // VPV-HOOK
             subtitlePipelinePreparation.Stop();
             pictureProofWorker.Stop();
             lookaheadMeasurementWorker.Stop();
@@ -10520,7 +8900,7 @@ struct LibplaceboVideoRenderer::Impl
 		const LibplaceboRenderParameters::Settings unyieldedSettings = parameterSettings;
 		debandYieldedToVp = false;
 		yieldedDebandOn = false;
-		if (LibplaceboDebandYieldsToVp(settings) && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband))   // modularity: slot off = no yield
+		if (VpvRendererSettings::DebandYieldsToVp(settings) && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband))   // modularity: slot off = no yield
 		{
 			debandYieldedToVp = true;
 			// deband_vp_exclusive: VP's grain-guarded debander does the job; libplacebo's
@@ -13294,73 +11674,12 @@ struct LibplaceboVideoRenderer::Impl
         currentTransport.customToneMapping = next.customToneMapping;
 		currentTransport.hasContrastRecovery = next.hasContrastRecovery;
 		currentTransport.contrastRecovery = next.contrastRecovery;
-		currentTransport.saturation = next.saturation;
-		currentTransport.dejudderStrength = next.dejudderStrength;
-		currentTransport.dejudderStrengthEven = next.dejudderStrengthEven;
-		currentTransport.dejudderEvenIncludes1001 = next.dejudderEvenIncludes1001;
-		currentTransport.dejudderMatchTolerance = next.dejudderMatchTolerance;
-		currentTransport.dejudderFrameTrust = next.dejudderFrameTrust;
-		currentTransport.occlusionMask = next.occlusionMask;
-		currentTransport.dejudderGlobalPrior = next.dejudderGlobalPrior;
-		currentTransport.dejudderMotionScaleLo = next.dejudderMotionScaleLo;
-		currentTransport.dejudderMotionScaleHi = next.dejudderMotionScaleHi;
-		currentTransport.dejudderVectorSmooth = next.dejudderVectorSmooth;
-		currentTransport.dejudderTrustScale = next.dejudderTrustScale;
-		currentTransport.dejudderOcclusionFill = next.dejudderOcclusionFill;
-		currentTransport.dejudderEstCandidates = next.dejudderEstCandidates;
-		currentTransport.dejudderEstLambda = next.dejudderEstLambda;
-		currentTransport.dejudderEstQpel = next.dejudderEstQpel;
-		currentTransport.dejudderEstStillZero = next.dejudderEstStillZero;
-		currentTransport.dejudderEstGate = next.dejudderEstGate;
-		currentTransport.dejudderEstSplit = next.dejudderEstSplit;
-		currentTransport.dejudderEstSplitSad = next.dejudderEstSplitSad;
-		currentTransport.dejudderMotionRolloff = next.dejudderMotionRolloff;
-		currentTransport.dejudderRollLo = next.dejudderRollLo;
-		currentTransport.dejudderRollHi = next.dejudderRollHi;
-		currentTransport.dejudderRollFloor = next.dejudderRollFloor;
-		currentTransport.dejudderObjectStrength = next.dejudderObjectStrength;
-		currentTransport.dejudderTextureTolerance = next.dejudderTextureTolerance;
-		currentTransport.dejudderGlobalTwo = next.dejudderGlobalTwo;
-		currentTransport.dejudderRegionalHold = next.dejudderRegionalHold;
-		currentTransport.dejudderCutHistogram = next.dejudderCutHistogram;
-		currentTransport.dejudderSearchRange = next.dejudderSearchRange;
-		currentTransport.dejudderConsistencyPx = next.dejudderConsistencyPx;
-		currentTransport.dejudderFadeMatch = next.dejudderFadeMatch;
-		currentTransport.dejudderFadeFloor = next.dejudderFadeFloor;
-		currentTransport.dejudderVerify = next.dejudderVerify;
-		currentTransport.dejudderVerifyShare = next.dejudderVerifyShare;
-		currentTransport.dejudderPixelTrust = next.dejudderPixelTrust;
-		currentTransport.dejudderPixelTrustLo = next.dejudderPixelTrustLo;
-		currentTransport.dejudderPixelTrustHi = next.dejudderPixelTrustHi;
-		currentTransport.dejudderLowRes = next.dejudderLowRes;
-		currentTransport.dejudderEstimateAhead = next.dejudderEstimateAhead;
-		currentTransport.capturePath = next.capturePath;
-		currentTransport.captureUpload = next.captureUpload;
-		currentTransport.dejudderHoldFeatherPx = next.dejudderHoldFeatherPx;
-		currentTransport.dejudderHoldHysteresis = next.dejudderHoldHysteresis;
-		currentTransport.dejudderBlockTaper = next.dejudderBlockTaper;
-		currentTransport.dejudderTaperSad = next.dejudderTaperSad;
-		currentTransport.ditherGrainToleranceScale = next.ditherGrainToleranceScale;
-		currentTransport.ditherVectorsOwn = next.ditherVectorsOwn;
-		currentTransport.fboFloat32 = next.fboFloat32;
-		currentTransport.preserveExtendedRange = next.preserveExtendedRange;
-		currentTransport.extendedRangeMoreCases = next.extendedRangeMoreCases;
-		currentTransport.sdrTone = next.sdrTone;
-		currentTransport.dejudderWarpRendered = next.dejudderWarpRendered;
+		RendererSettingsHooks::CopyLive(currentTransport, next);   // VPV-HOOK: the live-applied VP-V settings
 		currentTransport.upscaler = next.upscaler;
 		currentTransport.chromaUpscaler = next.chromaUpscaler;
 		currentTransport.downscaler = next.downscaler;
-		currentTransport.downscaleLight = next.downscaleLight;
-		currentTransport.adaptiveDownscale = next.adaptiveDownscale;
-		currentTransport.adaptiveUpscale = next.adaptiveUpscale;
-		currentTransport.adaptiveUpscaleWBase = next.adaptiveUpscaleWBase;
-		currentTransport.adaptiveUpscaleSuperresScale = next.adaptiveUpscaleSuperresScale;
-		currentTransport.upscaleLight = next.upscaleLight;
-		currentTransport.adaptive = next.adaptive;
 		currentTransport.debandStrength = next.debandStrength;
 		currentTransport.deband = next.deband;
-		currentTransport.debandGrain = next.debandGrain;
-		currentTransport.debandVpExclusive = next.debandVpExclusive;
 		currentTransport.sigmoid = next.sigmoid;
 		currentTransport.dithering = next.dithering;
 		currentTransport.displayBitDepth = next.displayBitDepth;
@@ -13416,150 +11735,12 @@ struct LibplaceboVideoRenderer::Impl
         changed(current.customToneMapping != next.customToneMapping, "custom_tone_mapping");
 		changed(current.hasContrastRecovery != next.hasContrastRecovery ||
 			current.contrastRecovery != next.contrastRecovery, "contrast_recovery");
-		changed(current.saturation != next.saturation, "saturation");
-		changed(current.captureUpload != next.captureUpload, "capture_upload");
-		changed(current.sourceRange != next.sourceRange, "source_range");
-		changed(current.sourceResolution != next.sourceResolution ||
-			current.sourceResolutionAutoMinConfidence != next.sourceResolutionAutoMinConfidence ||
-			current.sourceResolutionEvidenceShots != next.sourceResolutionEvidenceShots ||
-			current.sourceResolutionEvidenceSeconds != next.sourceResolutionEvidenceSeconds, "source_resolution");
-		changed(current.debandVp != next.debandVp || current.lowBitrateHandling != next.lowBitrateHandling, "deband_vp");
-		changed(current.pipelineOriginalPathway != next.pipelineOriginalPathway, "pipeline_original_pathway");
-		changed(current.pipelineOrder != next.pipelineOrder, "pipeline_order");
-		changed(current.pipelineSlotsOff != next.pipelineSlotsOff, "pipeline_slots_off");
-		changed(current.calibrationLutStage != next.calibrationLutStage, "calibration_lut_stage");
-		changed(current.hdrInference != next.hdrInference, "hdr_inference");
-		changed(current.pipelineEntranceOnce != next.pipelineEntranceOnce, "pipeline_entrance_once");
-		changed(current.outputSegmentsMerged != next.outputSegmentsMerged, "output_segments_merged");
-		changed(current.entranceGpuDrain != next.entranceGpuDrain, "entrance_gpu_drain");
-		changed(current.adaptive.cnnResidualStabilise != next.adaptive.cnnResidualStabilise ||
-			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
-		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");
-		changed(current.motionAheadFrames != next.motionAheadFrames, "motion_ahead_frames");
-		changed(current.opticalFlow != next.opticalFlow, "optical_flow");
-		changed(current.opticalFlowGlobal != next.opticalFlowGlobal, "optical_flow_global");
-		changed(current.opticalFlowGlobalFallback != next.opticalFlowGlobalFallback, "optical_flow_global_fallback");
-		changed(current.opticalFlowCostTrust != next.opticalFlowCostTrust, "optical_flow_cost_trust");
-		changed(current.opticalFlowFbCheck != next.opticalFlowFbCheck, "optical_flow_fb_check");
-		changed(current.interpolationGrain != next.interpolationGrain, "interpolation_grain");
-		changed(current.dejudderSourceWarpCatmull != next.dejudderSourceWarpCatmull, "dejudder_source_warp_filter");
-		changed(current.nlsSamplingCatmull != next.nlsSamplingCatmull, "nls_sampling");
-		changed(current.sourceCodingFixes != next.sourceCodingFixes, "source_coding_fixes");
-		changed(current.debandVpGrainGuard != next.debandVpGrainGuard || current.debandVpGrainSplit != next.debandVpGrainSplit, "deband_vp_grain_guard");
-		changed(current.debandGrain != next.debandGrain, "deband_grain");
-		changed(current.debandVpExclusive != next.debandVpExclusive, "deband_vp_exclusive");
-		changed(current.detailPulseStabilise != next.detailPulseStabilise, "detail_pulse_stabilise");
-		changed(current.detailPulseCap != next.detailPulseCap, "detail_pulse_cap");
-		changed(current.detailPulseFast != next.detailPulseFast, "detail_pulse_fast");
-		changed(current.textureRestore != next.textureRestore, "texture_restore");
-		changed(current.textureRestoreCap != next.textureRestoreCap, "texture_restore_cap");
-		changed(current.adaptive.residualGrainGuard != next.adaptive.residualGrainGuard, "residual_stabilise_grain_guard");
-		changed(current.adaptive.motionAdaptive != next.adaptive.motionAdaptive, "adaptive_motion");
-		changed(current.interpolation != next.interpolation, "interpolation");
-		changed(current.interpolationFallback != next.interpolationFallback, "interpolation_fallback");
-		changed(current.interpolationFillGaps != next.interpolationFillGaps, "interpolation_fill_gaps");
-		changed(current.sourceClass != next.sourceClass, "source_class");
-		changed(current.intentContent != next.intentContent ||
-			current.intentContentHoldSeconds != next.intentContentHoldSeconds, "intent_content");
-		changed(current.intentMotion != next.intentMotion || current.intentMotionPolicy != next.intentMotionPolicy ||
-			current.intentMotionMin != next.intentMotionMin ||
-			current.intentMotionMinShotSeconds != next.intentMotionMinShotSeconds ||
-			current.intentEaseSeconds != next.intentEaseSeconds, "intent_motion");
-		changed(current.ambientAdapt != next.ambientAdapt || current.ambientAdaptStrength != next.ambientAdaptStrength ||
-			current.ambientScreenReflect != next.ambientScreenReflect || current.ambientMaxBlackNits != next.ambientMaxBlackNits ||
-			current.ambientTauUpSeconds != next.ambientTauUpSeconds ||
-			current.ambientTauDownSeconds != next.ambientTauDownSeconds, "ambient_adapt");
-		changed(current.intentBlack != next.intentBlack, "intent_black");
-		changed(current.intentDisplay != next.intentDisplay, "intent_display");
-		changed(current.temporalDither != next.temporalDither, "temporal_dither");
-		changed(current.rebaseKernelMatch != next.rebaseKernelMatch, "rebase_kernel_match");
-		changed(current.sourceResolutionTextGuard != next.sourceResolutionTextGuard, "source_resolution_text_guard");
-		changed(current.sourceResolutionMixedGuard != next.sourceResolutionMixedGuard, "source_resolution_mixed_guard");
-		changed(current.sourceResolutionLatchFixes != next.sourceResolutionLatchFixes, "source_resolution_latch_fixes");
-		changed(current.sourceResolutionCutFixes != next.sourceResolutionCutFixes, "source_resolution_cut_fixes");
-		changed(current.activePictureStartupHold != next.activePictureStartupHold, "active_picture_startup_hold");
-		changed(current.sourceResolutionEngageMaxWait != next.sourceResolutionEngageMaxWait ||
-			current.sourceResolutionCrossfade != next.sourceResolutionCrossfade ||
-			current.sourceResolutionReleaseFade != next.sourceResolutionReleaseFade, "source_resolution_crossfade_s");
-		changed(current.pulldownFixes != next.pulldownFixes, "pulldown_fixes");
-		changed(current.timingContinuityFixes != next.timingContinuityFixes, "timing_continuity_fixes");
-		changed(current.cadenceClassFixes != next.cadenceClassFixes, "cadence_class_fixes");
-		changed(current.motionHistoryFixes != next.motionHistoryFixes, "motion_history_fixes");
-		changed(current.vectorDemand != next.vectorDemand, "vector_demand");
-		changed(current.queueTimingFixes != next.queueTimingFixes, "queue_timing_fixes");
-		changed(current.generalRateFixes != next.generalRateFixes, "general_rate_fixes");
-		changed(current.efficiencyFixes != next.efficiencyFixes, "efficiency_fixes");
-		changed(current.renderAhead != next.renderAhead, "render_ahead");
-		changed(current.dejudderGate != next.dejudderGate, "dejudder_gate");
-		changed(current.renderAheadUtilisation != next.renderAheadUtilisation, "render_ahead_utilisation");
-		changed(current.renderAheadQueueCredit != next.renderAheadQueueCredit, "render_ahead_queue_credit");
-		changed(current.dejudderStrength != next.dejudderStrength, "dejudder_strength");
-		changed(current.dejudderStrengthEven != next.dejudderStrengthEven ||
-			current.dejudderEvenIncludes1001 != next.dejudderEvenIncludes1001, "dejudder_strength_even");
-		changed(current.dejudderMatchTolerance != next.dejudderMatchTolerance, "dejudder_match_tolerance");
-		changed(current.dejudderFrameTrust != next.dejudderFrameTrust, "dejudder_frame_trust");
-		changed(current.occlusionMask != next.occlusionMask, "occlusion_mask");
-		changed(current.dejudderGlobalPrior != next.dejudderGlobalPrior, "dejudder_global_prior");
-		changed(current.dejudderMotionScaleLo != next.dejudderMotionScaleLo, "dejudder_motion_scale_lo");
-		changed(current.dejudderMotionScaleHi != next.dejudderMotionScaleHi, "dejudder_motion_scale_hi");
-		changed(current.dejudderVectorSmooth != next.dejudderVectorSmooth, "dejudder_vector_smooth");
-		changed(current.dejudderTrustScale != next.dejudderTrustScale, "dejudder_trust_scale");
-		changed(current.dejudderOcclusionFill != next.dejudderOcclusionFill, "dejudder_occlusion_fill");
-		changed(current.dejudderEstCandidates != next.dejudderEstCandidates ||
-			current.dejudderEstLambda != next.dejudderEstLambda || current.dejudderEstQpel != next.dejudderEstQpel ||
-			current.dejudderEstStillZero != next.dejudderEstStillZero ||
-			current.dejudderEstGate != next.dejudderEstGate || current.dejudderEstSplit != next.dejudderEstSplit ||
-			current.dejudderEstSplitSad != next.dejudderEstSplitSad, "dejudder_est");
-		changed(current.dejudderLowRes != next.dejudderLowRes, "dejudder_low_res");
-		changed(current.dejudderEstimateAhead != next.dejudderEstimateAhead, "dejudder_estimate_ahead");
-		changed(current.capturePath != next.capturePath, "capture_path");
-		changed(current.captureUpload != next.captureUpload, "capture_upload");
-		changed(current.dejudderMotionRolloff != next.dejudderMotionRolloff || current.dejudderRollLo != next.dejudderRollLo ||
-			current.dejudderRollHi != next.dejudderRollHi || current.dejudderRollFloor != next.dejudderRollFloor,
-			"dejudder_motion_rolloff");
-		changed(current.dejudderObjectStrength != next.dejudderObjectStrength, "dejudder_object_strength");
-		changed(current.dejudderTextureTolerance != next.dejudderTextureTolerance || current.dejudderGlobalTwo != next.dejudderGlobalTwo ||
-			current.dejudderRegionalHold != next.dejudderRegionalHold || current.dejudderCutHistogram != next.dejudderCutHistogram ||
-			current.dejudderSearchRange != next.dejudderSearchRange || current.dejudderConsistencyPx != next.dejudderConsistencyPx ||
-			current.dejudderFadeMatch != next.dejudderFadeMatch || current.dejudderFadeFloor != next.dejudderFadeFloor ||
-			current.dejudderVerify != next.dejudderVerify || current.dejudderVerifyShare != next.dejudderVerifyShare ||
-			current.dejudderPixelTrust != next.dejudderPixelTrust || current.dejudderPixelTrustLo != next.dejudderPixelTrustLo ||
-			current.dejudderPixelTrustHi != next.dejudderPixelTrustHi ||
-			current.dejudderLandingCheck != next.dejudderLandingCheck,
-			"dejudder_motion_fixes");
-		changed(current.dejudderPulldown != next.dejudderPulldown, "dejudder_pulldown");
-		changed(current.nativeRgbIngest != next.nativeRgbIngest, "native_rgb_ingest");
-		changed(current.dvTunnelGpuUnpack != next.dvTunnelGpuUnpack, "dv_tunnel_gpu_unpack");
-		changed(current.dvTrims != next.dvTrims, "dv_trims");
-		changed(current.dvToneMapping != next.dvToneMapping, "dv_tone_mapping");
-		changed(current.dvCompareCaptureFolder != next.dvCompareCaptureFolder, "dv_compare_capture_folder");
-		changed(current.dvTunnelFixes != next.dvTunnelFixes, "dv_tunnel_fixes");
-		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
-			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
-			current.dejudderBlockTaper != next.dejudderBlockTaper || current.dejudderTaperSad != next.dejudderTaperSad,
-			"dejudder_hold");
-		changed(current.ditherGrainToleranceScale != next.ditherGrainToleranceScale, "dither_grain_tolerance_scale");
-		changed(current.ditherVectorsOwn != next.ditherVectorsOwn, "dither_vectors");
-		changed(current.fboFloat32 != next.fboFloat32, "fbo_float32");
-		changed(current.preserveExtendedRange != next.preserveExtendedRange, "preserve_extended_range");
-		changed(current.extendedRangeMoreCases != next.extendedRangeMoreCases, "extended_range_more_cases");
-		changed(current.sdrTone.knee != next.sdrTone.knee || current.sdrTone.headroom != next.sdrTone.headroom ||
-			current.sdrTone.kneeStart != next.sdrTone.kneeStart || current.sdrTone.kneeStrength != next.sdrTone.kneeStrength ||
-			current.sdrTone.recovery != next.sdrTone.recovery, "sdr_tone_shape");
-		changed(current.dejudderWarpRendered != next.dejudderWarpRendered, "dejudder_warp_stage");
 		changed(current.upscaler != next.upscaler, "upscaler");
-		changed(current.chromaUpscaler != next.chromaUpscaler, "chroma_upscaler");
 		changed(current.downscaler != next.downscaler, "downscaler");
-		changed(current.downscaleLight != next.downscaleLight, "downscale_light");
-		changed(current.upscaleLight != next.upscaleLight, "upscale_light");
-		changed(current.adaptiveUpscale != next.adaptiveUpscale ||
-			current.adaptiveUpscaleWBase != next.adaptiveUpscaleWBase ||
-			current.adaptiveUpscaleSuperresScale != next.adaptiveUpscaleSuperresScale, "adaptive_upscale");
-		changed(current.adaptiveDownscale != next.adaptiveDownscale ||
-			!(current.adaptive == next.adaptive), "adaptive_downscale");
 		changed(current.debandStrength != next.debandStrength ||
-			current.deband != next.deband || current.debandGrain != next.debandGrain, "deband");
+			current.deband != next.deband, "deband");
 		changed(current.sigmoid != next.sigmoid, "sigmoid");
+        changed(current.chromaUpscaler != next.chromaUpscaler,"chroma_upscaler");
         changed(current.motion.Fingerprint()!=next.motion.Fingerprint(),"motion");
 		changed(current.dithering != next.dithering, "dithering");
 		changed(current.displayBitDepth != next.displayBitDepth, "display_bit_depth");
@@ -13911,6 +12092,7 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		changedFields = DescribeProfileSettingsDelta(
 			publishedActiveSettings, settings);
+		RendererSettingsHooks::AppendDeltaText(publishedActiveSettings, settings, changedFields);   // VPV-HOOK
 		return LiveProfileSettingsCompatible(publishedActiveSettings, settings);
 	}
 
@@ -14120,6 +12302,7 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		status.Empty();
 		if (nlsPreparationPending.load(std::memory_order_acquire) ||
+            rebaseWarmup.Pending() || // VPV-HOOK
             subtitlePipelinePreparationPending.load(std::memory_order_acquire)) {
 			status = TEXT("Preparing shaders...");
 			return true;
@@ -14927,11 +13110,6 @@ struct LibplaceboVideoRenderer::Impl
 		return state.displayMode ? state.displayMode->RefreshRateHz() : 0.0;
 	}
 
-	uint64_t motionInvalidations = 0;
-	ULONGLONG motionInvalidateLogTick = 0;
-	bool motionRecoveryLogPending = false;   // log the first estimate after a logged invalidation
-	int motionInvalidateLoggedCause = -1;    // a MotionValidity::Cause, -1 = none yet
-	std::atomic<const char*> motionGapDetail{ nullptr };   // a frame gap's own cause (a static string), for the log
 	// The cause names the discontinuity (MotionValidity::Describe for the log);
 	// Resync and SourceFormatChange also release the de-judder's resources.
 	// Any thread; applied on the render thread before the next estimate.
@@ -14962,10 +13140,9 @@ struct LibplaceboVideoRenderer::Impl
 	// epoch is forgotten (each consumer also checks the epoch it was made in).
 	void ApplyMotionInvalidate()
 	{
-		const MotionValidity::Pending pending = motionValidity.Consume(motionValiditySeen);
-		if (!pending.changed)
+		MotionValidity::Pending pending;   // VPV-HOOK
+		if (!vectorEngine.TakeInvalidation(pending))   // VPV-HOOK
 			return;
-		motionInvalidations += pending.invalidations;
 		if (pending.release)
 		{
 			ReleaseDejudder();
@@ -14989,26 +13166,7 @@ struct LibplaceboVideoRenderer::Impl
 		debander.ForgetHold();
 		detailPulse.Forget();      // detail restore: both histories restart (docs/VP-detail-restore.md)
 		textureRestore.Forget();
-		const int cause = static_cast<int>(pending.cause);
-		const ULONGLONG now = GetTickCount64();
-		// The first 50 are all logged; then at most one line per 5 s, but a
-		// new cause is always logged.
-		if (motionInvalidations <= 50 || now - motionInvalidateLogTick >= 5000 || cause != motionInvalidateLoggedCause)
-		{
-			// The text as before the MotionValidity wiring (the harness reads it): a frame gap
-			// names its own cause ("missed frames", "backlog flush", "queue overflow drop",
-			// "pulldown lock change"), and a release pending with other causes reads as the
-			// resync it is (the strongest request names the line, as the old flag did).
-			const char* detail = pending.cause == MotionValidity::Cause::Gap ?
-				motionGapDetail.load(std::memory_order_relaxed) : nullptr;
-			const char* text = pending.release && !MotionValidity::ReleasesResources(pending.cause) ?
-				MotionValidity::Describe(MotionValidity::Cause::Resync) : detail ? detail : MotionValidity::Describe(pending.cause);
-			DebugLog::Log("De-judder: motion invalidated (%s; %llu in total); the vectors' users fall back until a fresh pair",
-				text, static_cast<unsigned long long>(motionInvalidations));
-			motionInvalidateLogTick = now;
-			motionInvalidateLoggedCause = cause;
-			motionRecoveryLogPending = true;
-		}
+		vectorEngine.LogInvalidation(pending);   // VPV-HOOK
 	}
 
 	// Consumed after RenderLocked returns, so this frame's geometry references
@@ -17789,9 +15947,26 @@ struct LibplaceboVideoRenderer::Impl
 		ApplyMotionInvalidate();
 		dejudderSourceHz = sourceHz;
 		// Vector engine on demand: what wants vectors this frame (previous-frame state), and backward pairs.
-		UpdateVectorEngine(interlaced);
+		// VPV-HOOK
+		{
+		auto vectorHost = VpMotion::MakeVectorEngineHost(*this);
+		VpMotion::VectorEngine::UpdateFacts vectorFacts;
+		vectorFacts.vectorDemandSetting = activeSettings.vectorDemand; vectorFacts.sigmaDeltaRanLast = sigmaDeltaRanLast;
+		vectorFacts.ditherVectorsOwn = activeSettings.ditherVectorsOwn;
+		vectorEngine.UpdateVectorEngine(VectorDemandInput(interlaced), vectorFacts, vectorHost);
 		if (vectorDemand.mode != VectorDemand::Mode::Off && !cadenceRepeat)
-			ServeStatistics(sourceSequence, nextSourceSequence, width, height);
+		{
+			VpMotion::VectorEngine::ServeFacts serve;
+			serve.legacyConsumer = (dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
+				dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers)) || interpolating;
+			serve.lowResSearch = activeSettings.dejudderLowRes != "off";
+			serve.vectorDeliveryRuns = pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery);
+			serve.pictureHeight = dejudderPicture.available && dejudderPicture.rasterHeight == height &&
+				dejudderPicture.bottom > dejudderPicture.top ? dejudderPicture.bottom - dejudderPicture.top : height;
+			vectorEngine.ServeStatistics(sourceSequence, nextSourceSequence, width, height, serve, vectorHost);
+		}
+		}
+		// VPV-HOOK-END
 		// Off and settled: today's path, nothing else is done.
 		if (!(activeSettings.dejudderStrength > 0.0) && !(activeSettings.dejudderStrengthEven > 0.0) &&
 			!activeSettings.occlusionMask && !adaptiveGrainMapWanted && !vectorDemand.estimate &&
@@ -18100,83 +16275,10 @@ struct LibplaceboVideoRenderer::Impl
 		}
 	}
 
-	// H3 F4 follow-up: create the matcher, its optical-flow engine and textures, and the
-	// interpolator's planes and passes once, on A's own planes (A -> A); nothing they produce
-	// is used (no live field, no picture), and the history is forgotten.
-	void WarmIdleMotionEngine(const VideoFrameFormatterOutputContract& contract, bool lossless422, bool nativeRgb)
-	{
-		motionEngineWarmPending = false;
-		if (nativeRgb || dejudderRgbLuma || !textures[0] || !textures[1] || !d3d11 || !d3d11->gpu)
-			return;
-		Dejudder::Planes a;
-		a.luma = textures[0];
-		a.chroma = textures[1];
-		a.chromaShiftX = 1;
-		a.chromaShiftY = lossless422 ? 0 : 1;
-		a.fullRange = contract.sampleRange == VideoFrameSampleRange::FULL;
-		const auto started = std::chrono::steady_clock::now();
-		motionEngineWarming = true;
-		const bool estimated = RunDejudderEstimate(a, a, 0, 0);
-		motionEngineWarming = false;
-		dejudderLiveFieldFrom = 0;
-		motionSegment.Retract(VpMotion::Direction::Forward);
-		bool pictured = false;
-		if (estimated && dejudder)
-		{
-			Interpolator::Motion motion;
-			motion.field = dejudder->Field();
-			motion.frameTrust = dejudder->FrameTrust();
-			motion.subField = dejudder->SubField();
-			motion.minTrustedShare = dejudder->GetSettings().minTrustedShare;
-			if (!frameInterpolator)
-				frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
-			frameInterpolator->SetGrain(activeSettings.interpolationGrain);
-			Dejudder::Planes scratch;
-			pictured = frameInterpolator->Run(a, a, motion, 0.5f, activeSettings.interpolationFallback, scratch);
-			vpPhasePlanesValid = false;
-		}
-		if (dejudder)
-			dejudder->ForgetHistory();
-		DebugLog::Log("Motion engine: loaded idle for hiccup repair at the source's start (%.1f ms; estimate %s, interpolator %s)",
-			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count(),
-			estimated ? "ok" : "failed", pictured ? "ok" : "not run");
-	}
+	void WarmIdleMotionEngine(const VideoFrameFormatterOutputContract& contract, bool lossless422, bool nativeRgb);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/EngineKeeper.inl
 
-	// Bug hunt 3 F4: one DXGI video memory reading a second for the idle motion engine's
-	// low-memory fallback (engineHeld: its bytes are already in the usage).
-	void PollMotionEngineBudget(int width, int height, bool engineHeld)
-	{
-		const double now = static_cast<double>(GetTickCount64()) / 1000.0;
-		motionEngineIdle.NoteTime(now);
-		if (!motionEngineIdle.BudgetDue(now))
-			return;
-		uint64_t usage = 0, budget = 0;
-		const bool reported = QueryMotionEngineBudget(usage, budget);
-		motionEngineIdle.NoteBudgetReported(reported);
-		motionEngineIdle.NoteBudget(reported ? usage : 0, reported ? budget : 0,
-			engineHeld ? 0 : MotionEngineIdle::IdleBytes(width, height), now);
-	}
-	bool QueryMotionEngineBudget(uint64_t& usage, uint64_t& budget)
-	{
-		if (!d3d11 || !d3d11->gpu)
-			return false;
-		if (!motionEngineBudgetAdapter)
-		{
-			pl_d3d11 d3d = pl_d3d11_get(d3d11->gpu);
-			CComPtr<IDXGIDevice> dxgiDevice;
-			CComPtr<IDXGIAdapter> adapter;
-			if (!d3d || !d3d->device || FAILED(d3d->device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) ||
-				FAILED(dxgiDevice->GetAdapter(&adapter)) || FAILED(adapter->QueryInterface(IID_PPV_ARGS(&motionEngineBudgetAdapter))))
-				return false;
-		}
-		// Local: a discrete card's own memory; on an integrated GPU Windows reports its shared budget here.
-		DXGI_QUERY_VIDEO_MEMORY_INFO info{};
-		if (FAILED(motionEngineBudgetAdapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)) || info.Budget == 0)
-			return false;
-		usage = info.CurrentUsage;
-		budget = info.Budget;
-		return true;
-	}
+	void PollMotionEngineBudget(int width, int height, bool engineHeld);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/EngineKeeper.inl
+	bool QueryMotionEngineBudget(uint64_t& usage, uint64_t& budget);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/EngineKeeper.inl
 
 	// Interpolation: the decision when it changes (at most one line per 5 s), with the
 	// measured rates it came from.
@@ -18225,463 +16327,13 @@ struct LibplaceboVideoRenderer::Impl
 			Dejudder::AheadSchedule::Name(dejudderAhead.LastReason()));
 	}
 
-	// The next frames' planes (B, or C ahead) in B's layout.
-	// upload (efficiency_fixes): filled with how the planes were made, for the reuse when this
-	// frame is shown; cleared first (a failed or luma-only upload is never reused).
-	bool UploadDejudderPlanes(const std::shared_ptr<const QueuedFrame::ConvertedPayload>& payloadPtr, pl_tex (&dst)[2],
-		DejudderPlaneUpload* upload = nullptr, uint64_t sequence = 0)
-	{
-		if (upload)
-			upload->Clear();
-		if (!payloadPtr)
-			return false;
-		const QueuedFrame::ConvertedPayload& payload = *payloadPtr;
-		const DejudderUploadLayout& l = dejudderLayout;
-		if (!l.valid || payload.Bytes() != l.pixelBytes)
-			return false;
-		auto record = [&](bool raw, const pl_plane* planes)
-		{
-			if (!upload)
-				return;
-			upload->record.valid = true;
-			upload->record.payload = payloadPtr.get();
-			// Gate r3 (2026-10-18, measured on the GeForce): the payload's source frame. It was never
-			// recorded, so CanReuse (r.sequence == q.sequence) refused every reuse as "layout differs".
-			upload->record.sequence = sequence;
-			upload->record.width = l.width;
-			upload->record.height = l.height;
-			upload->record.chromaHeight = l.chromaHeight;
-			upload->record.rowBytes = l.rowBytes;
-			upload->record.raw = raw;
-			upload->payload = payloadPtr;
-			if (planes)
-			{
-				upload->planes[0] = planes[0];
-				upload->planes[1] = planes[1];
-			}
-		};
-		// native_rgb_ingest: an RGB raw frame gives the matcher its luma only
-		// (dst[0]; dst[1] untouched), unpacked as the frame A was.
-		if (payload.Raw() && !payload.dvTunnelRaw && GpuRgbUnpack::Supports(payload.rawEncoding))
-		{
-			if (!l.raw || !l.rgb || payload.rawEncoding != l.rawEncoding || !d3d11)
-				return false;
-			if (!rgbUnpack)
-				rgbUnpack = std::make_unique<GpuRgbUnpack>(log, d3d11->gpu);
-			EarlyUpload::Slot* slot = nullptr;
-			const pl_tex early = EarlyTexture(payload, slot);
-			bool unpacked = rgbUnpack->Unpack(payload.rawEncoding, l.bt2020, payload.rawFrame->GetData(), payload.rawRowBytes,
-				l.width, l.height, dejudderRgbScratch, dst[0], true, early);
-			if (slot)
-				earlyUpload->Used(*slot);
-			if (!unpacked && early)
-				unpacked = rgbUnpack->Unpack(payload.rawEncoding, l.bt2020, payload.rawFrame->GetData(), payload.rawRowBytes,
-					l.width, l.height, dejudderRgbScratch, dst[0], true);
-			if (unpacked)
-				return true;
-			DebugLog::Log("Native RGB ingest: a de-judder frame's GPU unpack failed (%s); that frame skipped",
-				rgbUnpack->Error().c_str());
-			return false;
-		}
-		if (payload.Raw())
-		{
-			// capture_path: gpu; the route and format must be B's (A's layout).
-			if (!l.raw || payload.rawEncoding != l.rawEncoding || payload.dvTunnelRaw != l.dvTunnelRaw)
-				return false;
-			if (!UnpackRawPayload(payload, l.width, l.height, dst, false))
-				return false;
-			record(true, nullptr);
-			return true;
-		}
-		struct pl_plane_data planes[2]{};
-		const BYTE* yPixels = payload.pixels.data();
-		const BYTE* uvPixels = yPixels + l.rowBytes * static_cast<size_t>(l.height);
-		planes[0].type = PL_FMT_UNORM;
-		planes[0].width = l.width;
-		planes[0].height = l.height;
-		planes[0].component_size[0] = 16;
-		planes[0].component_map[0] = PL_CHANNEL_Y;
-		planes[0].pixel_stride = sizeof(uint16_t);
-		planes[0].row_stride = l.rowBytes;
-		planes[0].pixels = yPixels;
-		planes[1] = planes[0];
-		planes[1].width = (l.width + 1) / 2;
-		planes[1].height = l.chromaHeight;
-		planes[1].component_size[1] = 16;
-		planes[1].component_map[0] = PL_CHANNEL_CB;
-		planes[1].component_map[1] = PL_CHANNEL_CR;
-		planes[1].pixel_stride = sizeof(uint16_t) * 2;
-		planes[1].pixels = uvPixels;
-		pl_plane uploaded[2]{};
-		for (int plane = 0; plane < 2; ++plane)
-			if (!pl_upload_plane(d3d11->gpu, &uploaded[plane], &dst[plane], &planes[plane]))
-				return false;
-		record(false, uploaded);
-		return true;
-	}
+	bool UploadDejudderPlanes(const std::shared_ptr<const QueuedFrame::ConvertedPayload>& payloadPtr, pl_tex (&dst)[2], DejudderPlaneUpload* upload = nullptr, uint64_t sequence = 0);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/VectorEngineEstimate.inl
 
-	// efficiency_fixes (UploadReuse.h): the frame about to be shown was the last frame's B,
-	// uploaded (or GPU-unpacked) for the motion estimate from this same payload in this same
-	// layout. Its planes are swapped in as the frame's own (bit-identical: the same bytes,
-	// route and formats) and `out` receives the planes the upload would have made. False:
-	// upload as before. YCbCr routes only (the RGB route uploads the matcher's luma alone).
-	bool TakeNextPlanes(const std::shared_ptr<const QueuedFrame::ConvertedPayload>& payload, uint64_t sourceSequence,
-		int width, int height, int chromaHeight, size_t rowBytes, bool flipped, pl_plane* out)
-	{
-		if (!payload)
-			return false;
-		UploadReuse::Record record = dejudderNextUpload.record;
-		// The recorded payload's identity holds only while that payload is alive.
-		const auto alive = dejudderNextUpload.payload.lock();
-		record.payload = alive.get();
-		UploadReuse::Request request;
-		request.enabled = activeSettings.efficiencyFixes;
-		request.payload = payload.get();
-		request.sequence = sourceSequence;
-		request.width = width;
-		request.height = height;
-		request.chromaHeight = chromaHeight;
-		request.rowBytes = rowBytes;
-		request.raw = payload->Raw();
-		request.texturesPresent = dejudderNextTextures[0] && dejudderNextTextures[1];
-		request.uploadedSequenceMatches = sourceSequence != 0 && dejudderNextUploadedSequence == sourceSequence;
-		if (!UploadReuse::CanReuse(record, request))
-		{
-			// The next frame's planes were there but could not be taken: counted (and the first
-			// few logged), so an on-screen run shows whether the saving engages.
-			if (request.enabled && request.uploadedSequenceMatches && ++uploadsReuseMissed <= 5)
-				DebugLog::Log("Efficiency: the next frame's planes not reused for frame %llu (%s)",
-					static_cast<unsigned long long>(sourceSequence),
-					!record.valid ? "not recorded" : record.payload != request.payload ? "another payload" :
-					!request.texturesPresent ? "no planes" : "layout differs");
-			return false;
-		}
-		std::swap(textures[0], dejudderNextTextures[0]);
-		std::swap(textures[1], dejudderNextTextures[1]);
-		if (request.raw)
-		{
-			// As the GPU unpack's planes are described below (UnpackRawPayload).
-			out[0] = pl_plane{};
-			out[0].texture = textures[0];
-			out[0].components = 1;
-			out[0].component_mapping[0] = PL_CHANNEL_Y;
-			out[1] = pl_plane{};
-			out[1].texture = textures[1];
-			out[1].components = 2;
-			out[1].component_mapping[0] = PL_CHANNEL_CB;
-			out[1].component_mapping[1] = PL_CHANNEL_CR;
-		}
-		else
-			for (int plane = 0; plane < 2; ++plane)
-			{
-				// pl_upload_plane's description of the same upload, on the swapped-in texture.
-				out[plane] = dejudderNextUpload.planes[plane];
-				out[plane].texture = textures[plane];
-				out[plane].shift_x = 0.0f;
-				out[plane].shift_y = 0.0f;
-			}
-		for (int plane = 0; plane < 2; ++plane)
-			out[plane].flipped = flipped;
-		// dejudderNextTextures now hold the previous frame's planes: nothing valid there.
-		dejudderNextUploadedSequence = 0;
-		dejudderNextUpload.Clear();
-		if (++uploadsReused == 1 || uploadsReused % 2400 == 0)
-			DebugLog::Log("Efficiency: the frame shown took the planes uploaded for the motion estimate (%llu frames, "
-				"no second upload; %llu not reused)", uploadsReused, uploadsReuseMissed);
-		return true;
-	}
+	bool TakeNextPlanes(const std::shared_ptr<const QueuedFrame::ConvertedPayload>& payload, uint64_t sourceSequence, int width, int height, int chromaHeight, size_t rowBytes, bool flipped, pl_plane* out);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/VectorEngineEstimate.inl
 
-	// The matcher on (a, b): its settings from the profile, b's occlusion mask
-	// into the slot not holding a's.
-	bool RunDejudderEstimate(const Dejudder::Planes& a, const Dejudder::Planes& b, uint64_t aSequence, uint64_t bSequence)
-	{
-		const uint64_t motionShadowEpoch = motionValidity.Epoch();   // shadow segment: as the callers' estimateEpoch
-		// The matcher's settings from the profile, refinements included.
-		auto wanted = [&](Dejudder::Settings settings)
-		{
-			Dejudder::Settings result = DejudderMatcherSettings(activeSettings, settings);
-			result.sourceHz = dejudderSourceHz;   // the content rate (the film rate with pulldown)
-			result.generalRates = activeSettings.generalRateFixes;   // fixed-constant batch B4 2026-10-18
-			return result;
-		};
-		if (activeSettings.dejudderOcclusionFill && activeSettings.dejudderWarpRendered && !dejudderFillIgnoredLogged)
-		{
-			DebugLog::Log("De-judder occlusion fill: source warp path only; ignored with dejudder_warp_stage: rendered");
-			dejudderFillIgnoredLogged = true;
-		}
-		if (!dejudder)
-		{
-			dejudder = std::make_unique<Dejudder::MotionWarp>(log, d3d11->gpu, wanted(Dejudder::Settings()));
-			// Bug hunt 3 F4: logged, so a test sees that a second hiccup does not recreate it.
-			if (++dejudderCreates <= 20 || dejudderCreates % 100 == 0)
-				DebugLog::Log("Motion engine: created (%llu times this renderer; hiccup repair %s)",
-					dejudderCreates, activeSettings.interpolationFillGaps ? "on: kept loaded and idle between gaps" : "off");
-		}
-		else
-		{
-			const Dejudder::Settings current = dejudder->GetSettings();
-			const Dejudder::Settings next = wanted(current);
-			const bool meaningChanged = current.matchTolerance != next.matchTolerance || current.minTrustedShare != next.minTrustedShare ||
-				current.globalPrior != next.globalPrior || current.vectorSmooth != next.vectorSmooth ||
-				current.motionScaleLo != next.motionScaleLo || current.motionScaleHi != next.motionScaleHi ||
-				current.trustScaleFull != next.trustScaleFull || current.occlusionFill != next.occlusionFill ||
-				current.estCandidates != next.estCandidates || current.estLambda != next.estLambda ||
-				current.estQpel != next.estQpel || current.estStillZero != next.estStillZero || current.estGate != next.estGate ||
-				current.estSplit != next.estSplit || current.estSplitSad != next.estSplitSad ||
-				current.lowRes != next.lowRes || current.lowResAll != next.lowResAll ||
-				current.holdFeatherPx != next.holdFeatherPx || current.holdHysteresis != next.holdHysteresis ||
-				current.blockTaper != next.blockTaper || current.taperSad != next.taperSad ||
-				current.motionRolloff != next.motionRolloff || current.rollLo != next.rollLo ||
-				current.rollHi != next.rollHi || current.rollFloor != next.rollFloor ||
-				current.objectStrength != next.objectStrength ||
-				// The motion fixes (audit 2026-10-14: these never reached a live matcher).
-				current.textureTolerance != next.textureTolerance || current.globalTwo != next.globalTwo ||
-				current.regionalHold != next.regionalHold || current.cutHistogram != next.cutHistogram ||
-				current.coarseRange != next.coarseRange || current.consistencyPixels != next.consistencyPixels ||
-				current.fadeMatch != next.fadeMatch || current.fadeFloor != next.fadeFloor ||
-				current.verifyPixels != next.verifyPixels || current.verifyShare != next.verifyShare ||
-				current.pixelTrust != next.pixelTrust || current.pixelTrustLo != next.pixelTrustLo ||
-				current.pixelTrustHi != next.pixelTrustHi || current.pixelTrustedVectors != next.pixelTrustedVectors ||
-				current.landingCheck != next.landingCheck || current.pictureArea != next.pictureArea ||
-				current.sourceWarpCatmull != next.sourceWarpCatmull ||
-				current.referenceHeight != next.referenceHeight ||
-				current.generalRates != next.generalRates ||   // fixed-constant batch B4 2026-10-18
-				// The optical-flow engine and its camera estimate (audit 2026-10-16: never reached a live matcher).
-				current.opticalFlow != next.opticalFlow || current.opticalFlowGlobal != next.opticalFlowGlobal ||
-				current.opticalFlowGlobalFallback != next.opticalFlowGlobalFallback ||
-				current.opticalFlowCostTrust != next.opticalFlowCostTrust || current.opticalFlowFbCheck != next.opticalFlowFbCheck;
-			// The measured content rate (it follows the source; converts the per-frame values) and
-			// the switch itself change no vector's meaning.
-			if (meaningChanged || current.sourceHz != next.sourceHz || current.referenceRateHz != next.referenceRateHz ||
-				current.historyFixes != next.historyFixes)
-				dejudder->SetSettings(next);
-			// Hunt 2 04 L3 (motion_history_fixes): a matcher setting that changes what the vectors
-			// mean invalidates them (the consumers fall back until a fresh pair) and this pair is
-			// estimated without the old history.
-			if (meaningChanged && activeSettings.motionHistoryFixes)
-			{
-				RequestMotionInvalidate(MotionValidity::Cause::SettingsChange);
-				dejudder->ForgetHistory();
-			}
-		}
-		// Hunt 2 04 L3 (motion_history_fixes): the motion source (the optical-flow engine on or
-		// off, the producer ahead wanted or not) changed while the matcher kept its history.
-		{
-			const int sourceKey = !activeSettings.opticalFlow ? 0 : activeSettings.motionAheadFrames > 0 ? 2 : 1;
-			if (activeSettings.motionHistoryFixes && dejudderMotionSourceKey >= 0 && sourceKey != dejudderMotionSourceKey)
-			{
-				RequestMotionInvalidate(MotionValidity::Cause::MotionSourceChange);
-				dejudder->ForgetHistory();
-			}
-			dejudderMotionSourceKey = sourceKey;
-		}
-		// 6c: B's occlusion mask into the slot not holding the mask for the
-		// frame A (now showing, or B itself ahead), so A's survives until it
-		// is rendered.
-		int maskSlot = -1;
-		if (activeSettings.occlusionMask)
-			maskSlot = dejudderMaskSequence[0] == aSequence ? 1 : 0;
-		// Black bars: the latest trusted active picture when it is this
-		// raster's (else the matcher finds the bars itself).
-		const int width = a.luma ? a.luma->params.w : 0, height = a.luma ? a.luma->params.h : 0;
-		if (dejudderPicture.available && dejudderPicture.rasterWidth == width && dejudderPicture.rasterHeight == height &&
-			dejudderPicture.right > dejudderPicture.left && dejudderPicture.bottom > dejudderPicture.top)
-			dejudder->SetPictureArea(dejudderPicture.left, dejudderPicture.top, dejudderPicture.right, dejudderPicture.bottom);
-		else
-			dejudder->SetPictureArea(0, 0, 0, 0);
-		// The frame numbers let a pair whose A is the last pair's B reuse its
-		// planes (2026-10-15; a gap or resync forgets them).
-		Dejudder::Planes sa = a, sb = b;
-		sa.sequence = aSequence;
-		sb.sequence = bSequence;
-		if (motionProducer && motionProducer->Running() && !motionEngineWarming)
-		{
-			int engineW = 0, engineH = 0;
-			if (dejudder->EngineInputSize(engineW, engineH))
-				motionProducer->SetTargetSize(engineW, engineH);
-			// MotionValidity step 1 D: a stored pair only for adjacent frames of the current
-			// epoch (otherwise the matcher runs).
-			MotionAhead::FlowPtr flow = motionValidity.PairValid(aSequence, bSequence, motionValidity.EpochOfLastKept(),
-				motionValidity.Epoch()) ? motionProducer->Take(aSequence, bSequence) : nullptr;
-			if (flow) ++motionAheadHits; else ++motionAheadMisses;
-			// Latch review 2026-10-17: the engine's whole-frame motion (z < 0.9 usable) for
-			// source_resolution auto's fast-pan switch. Bug hunt 3 F1: one cell is 8 source px
-			// per halving of the search input (4K 16, 8K 32), not 8 at every size.
-			const int searchHalvings = dejudder->SearchHalvings();
-			NoteGlobalPair(flow != nullptr);   // vector engine: a missed pair is counted and, sustained, visible
-			if (flow)
-			{
-				const VectorDemand::GlobalSample sample = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
-					static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1]), searchHalvings),
-					flow->global[0][2], flow->global[0][3], 0);
-				if (sample.usable)
-					sourceMonitor.SetMotion(sample.sourcePixels, bSequence);
-			}
-			// Motion intent (2026-10-17): the same whole-frame motion for this valid pair (the
-			// vectors-valid state accepted it above), in picture heights per frame; read-only.
-			if (flow && intentInterpreter->Active())
-			{
-				const int pictureHeight = dejudderPicture.available && dejudderPicture.rasterHeight == height &&
-					dejudderPicture.bottom > dejudderPicture.top ? dejudderPicture.bottom - dejudderPicture.top : height;
-				IntentInterpreter::VectorSample vectors;
-				vectors.from = aSequence;
-				vectors.to = bSequence;
-				const VectorDemand::GlobalSample sample = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
-					static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1]), searchHalvings),
-					flow->global[0][2], flow->global[0][3], pictureHeight);
-				vectors.valid = sample.intentValid;
-				vectors.heightsPerFrame = sample.heightsPerFrame;
-				intentInterpreter->NoteVectors(vectors);
-			}
-			dejudder->SetExternalFlow(std::move(flow));
-			motionProducer->Prune(aSequence);
-		}
-		dejudderLiveFieldFrom = 0;   // the live outputs are being replaced
-		motionSegment.Retract(VpMotion::Direction::Forward);
-		dejudder->SetPassSampling(passTimerHook.Sampling());   // efficiency timers T3: polled, never drained
-		const bool motionEstimated = dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted);
-		passTimerHook.AddGpuGroups("motion: ", dejudder->TakePassGpuMs());
-		if (!motionEstimated)
-		{
-			// Bug hunt 3 F4: a texture the engine could not create (low video memory).
-			if (dejudder->LastError().find("cannot create") != std::string::npos)
-				motionEngineIdle.NoteAllocationFailure(static_cast<double>(GetTickCount64()) / 1000.0);
-			if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
-				DebugLog::Log("De-judder: motion estimate failed (%s; %llu failures)",
-					dejudder->LastError().c_str(), dejudderFailures);
-			return false;
-		}
-		dejudderLiveFieldFrom = aSequence;
-		if (pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery))
-			motionSegment.Publish(VpMotion::Direction::Forward, aSequence, bSequence, MotionShadowField{ aSequence, bSequence },
-			dejudder->ExternalFlowUsed() ? VpMotion::Source::EngineAhead :
-			dejudder->OpticalFlowUsed() ? VpMotion::Source::EngineAtRender : VpMotion::Source::Matcher,
-			motionShadowEpoch, 0, bSequence != aSequence + 1);
-		if (motionEngineWarming)
-			return true;   // r6 fix 1: warm-up only; nothing counted, logged or handed on
-		if (maskSlot >= 0)
-		{
-			dejudderMaskSequence[maskSlot] = bSequence;
-			dejudderMaskEpoch[maskSlot] = motionValidity.Epoch();
-		}
-		if (motionRecoveryLogPending)
-		{
-			DebugLog::Log("De-judder: estimating again on a fresh contiguous pair");
-			motionRecoveryLogPending = false;
-		}
-		// The motion source: the optical-flow engine, or the block searches (logged on change).
-		{
-			const char* source = dejudder->ExternalFlowUsed() ? (dejudder->GlobalFromEngine() ?
-					"optical-flow engine (computed ahead, camera from the engine)" : "optical-flow engine (computed ahead)") :
-				dejudder->OpticalFlowUsed() ? "optical-flow engine" :
-				!dejudder->GetSettings().opticalFlow ? "block searches (optical_flow off)" : "block searches (no engine)";
-			if (motionSourceLogged != source)
-			{
-				motionSourceLogged = source;
-				if (!dejudder->OpticalFlowUsed() && dejudder->GetSettings().opticalFlow && !dejudder->OpticalFlowError().empty())
-					DebugLog::Log("De-judder motion: %s - %s", source, dejudder->OpticalFlowError().c_str());
-				else
-					DebugLog::Log("De-judder motion: %s", source);
-			}
-			// Silent-fallbacks batch: the matcher standing in for the optical-flow engine is visible.
-			const bool flowFailed = !dejudder->OpticalFlowUsed() && !dejudder->ExternalFlowUsed() &&
-				!dejudder->OpticalFlowError().empty();
-			const bool producerStopped = motionProducer && !motionProducer->Running();
-			SyncFallback(FallbackCatalog::Motion(dejudder->GetSettings().opticalFlow, flowFailed, producerStopped,
-				flowFailed ? dejudder->OpticalFlowError() : producerStopped ? motionProducer->Error() : std::string()));
-		}
-		if (vectorDemand.estimate)
-		{
-			++vectorPairs;
-			NoteVectorsDelivered(false, dejudder->ExternalFlowUsed() ? "engine ahead" : dejudder->OpticalFlowUsed() ? "engine" : "matcher");
-		}
-		static GeneralRate::LogInterval motionAheadStatsLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
-		if (motionProducer && dejudderEstimates + 1 >= 24 && motionAheadStatsLog.DueOr((dejudderEstimates + 1) == 24))   // as the other periodic logs (audit 2026-10-16)
-		{
-			std::string counts;
-			for (size_t n = 0; n < queuedAheadCounts.size(); ++n)
-			{
-				const unsigned long long c = queuedAheadCounts[n].load(std::memory_order_relaxed);
-				if (c) counts += (counts.empty() ? "" : " ") + std::to_string(n) + (n == 9 ? "+" : "") + ":" + std::to_string(c);
-			}
-			DebugLog::Log("Motion ahead: frames queued ahead when taken (count:frames) %s", counts.c_str());
-			const auto ps = motionProducer->GetStats();
-			const unsigned long long handoffs = motionHandoffCount.load(std::memory_order_relaxed);
-			DebugLog::Log("Motion ahead: %llu frames, %llu pairs (last %.1f ms, luma %.1f ms, on the worker), %llu dropped; pairs taken %llu, missed %llu; render-loop hand-off mean %.3f ms, max %.3f ms",
-				ps.frames, ps.pairs, ps.lastPairMs, ps.lumaMs, ps.dropped, motionAheadHits, motionAheadMisses,
-				handoffs ? motionHandoffTotalMs.load(std::memory_order_relaxed) / handoffs : 0.0, motionHandoffMaxMs.load(std::memory_order_relaxed));
-			DebugLog::Log("Motion ahead extras: %.2f ms per pair on the worker; engine trust weights %s; camera from the search when unclear %llu times",
-				ps.extrasMs, dejudder->EngineWeightsUsed() ? "applied" : "not applied", dejudder->GlobalFallbacks());
-		}
-		static GeneralRate::LogInterval estimatesLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
-		if (estimatesLog.DueOr(++dejudderEstimates == 1))
-			DebugLog::Log("De-judder: motion estimated for %llu source frames (%dx%d, %s)",
-				dejudderEstimates, dejudderLayout.width, dejudderLayout.height,
-				dejudderLayout.rgb ? "RGB, luma from the unpack" : dejudderLayout.lossless422 ? "4:2:2" : "4:2:0");
-		return true;
-	}
+	bool RunDejudderEstimate(const Dejudder::Planes& a, const Dejudder::Planes& b, uint64_t aSequence, uint64_t bSequence, bool ahead = false);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/VectorEngineEstimate.inl
 
-	// Owner 2026-10-13 (estimate ahead): after an extra of A, with C (the
-	// frame after B) already queued, the next pair (B, C) is estimated in
-	// that extra's spare refresh, so B's own refresh holds only its render.
-	// The extras still to come read a copy of (A, B)'s field. Without C, or
-	// with anything not matching, B is estimated before its render as before.
-	// renderedPath: the extras of this frame really use the rendered warp (the
-	// cache exists). With the source warp they read the matcher's live field,
-	// which an ahead estimate would replace (audit 2026-10-14).
-	// timing (render-ahead gate, E): the estimate's GPU stages - the snapshot and the
-	// estimate. The next frame's upload is left out: its CPU copy runs between the
-	// timestamps with the GPU idle and was measured as GPU time (p95 20-37 ms on a
-	// 3050 Ti for an estimate of a few ms; render-ahead follow-up 2026-10-17).
-	// forEntranceOnce: B3's B ahead (any path: its consumers read the snapshot; ProcessedB).
-	bool EstimateAhead(uint64_t sourceSequence, uint64_t nextSourceSequence, bool renderedPath,
-		AlphaFrameGpuTimingScope* timing = nullptr, bool forEntranceOnce = false)
-	{
-		Dejudder::AheadSchedule::Conditions c;
-		c.enabled = activeSettings.dejudderEstimateAhead;
-		c.renderedWarp = forEntranceOnce || (activeSettings.dejudderWarpRendered && renderedPath);
-		c.active = dejudder && dejudderReason == DejudderPolicy::Reason::Active &&
-			dejudderNextTextures[0] && (dejudderNextTextures[1] || dejudderLayout.rgb);
-		c.source = sourceSequence;
-		c.next = nextSourceSequence;
-		c.after = dejudderAheadPayload ? dejudderAheadPayloadSequence : 0;
-		c.estimated = dejudderEstimatedSequence;
-		c.layoutMatches = dejudderAheadPayload && dejudderLayout.valid &&
-			dejudderAheadPayload->Bytes() == dejudderLayout.pixelBytes &&
-			dejudderAheadPayload->Raw() == dejudderLayout.raw &&
-			(!dejudderLayout.raw || dejudderAheadPayload->rawEncoding == dejudderLayout.rawEncoding) &&
-			dejudderAheadPayload->dvTunnelRaw == dejudderLayout.dvTunnelRaw &&
-			dejudderAheadPayload->contract.sampleRange == dejudderLayout.contract.sampleRange &&
-			dejudderAheadPayload->contract.colorDepth == dejudderLayout.contract.colorDepth &&
-			dejudderAheadPayload->contract.bitShift == dejudderLayout.contract.bitShift;
-		Dejudder::AheadSchedule::Steps steps;
-		steps.snapshot = [this, timing]()
-		{
-			if (timing) timing->BeginStage(AlphaD3D11FrameGpuTimer::Stage::CoreRender);
-			const bool done = dejudder->SnapshotForWarp();
-			if (timing) timing->EndStage();
-			return done;
-		};
-		steps.uploadAfter = [this]() { return UploadDejudderPlanes(dejudderAheadPayload, dejudderAheadTextures, &dejudderAheadUpload,
-			dejudderAheadPayloadSequence); };
-		steps.estimate = [this, timing](uint64_t bSequence, uint64_t cSequence)
-		{
-			Dejudder::Planes b, c;
-			b.luma = dejudderNextTextures[0];
-			b.chroma = dejudderLayout.rgb ? nullptr : dejudderNextTextures[1];
-			b.chromaShiftX = 1;
-			b.chromaShiftY = dejudderLayout.lossless422 ? 0 : 1;
-			b.fullRange = dejudderLayout.fullRange;
-			c = b;
-			c.luma = dejudderAheadTextures[0];
-			c.chroma = dejudderLayout.rgb ? nullptr : dejudderAheadTextures[1];
-			if (timing) timing->BeginStage(AlphaD3D11FrameGpuTimer::Stage::CoreRender);
-			const bool done = RunDejudderEstimate(b, c, bSequence, cSequence);
-			if (timing) timing->EndStage();
-			return done;
-		};
-		return dejudderAhead.TryAhead(c, steps);
-	}
+	bool EstimateAhead(uint64_t sourceSequence, uint64_t nextSourceSequence, bool renderedPath, AlphaFrameGpuTimingScope* timing = nullptr, bool forEntranceOnce = false);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/VectorEngineEstimate.inl
 
 	// Stage 6b-2: extra presents. After A's own present, each further
 	// refresh A owns gets one picture of A warped by s*delta, presented one
@@ -26763,102 +24415,18 @@ releaseDriftBaseRetention =
             hdrPeakAnalysisMotionProtectionPixels=SubtitleHdrProtectionPixels(relocatedSubtitle,true,
                 hdrTrustedPicture.top,hdrTrustedPicture.bottom);
 
-		// docs/VP-nvof-ahead.md (owner 2026-10-16): the optical-flow depth for this frame -
-		// the configured depth, off in low latency or without the engine, never more than
-		// the frames queued. Logged when it changes (the matcher covers the rest).
+		// M2 P5a: the optical-flow producer's lifecycle and the look-ahead depth for this frame (VpMotion::VectorEngine::PlanProducer).
 		{
-			// The producer runs while the de-judder does, with optical flow on, outside low
-			// latency and with a depth set; it stops otherwise (the matcher covers all).
-			const bool lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
-			// Owner 2026-10-16: the producer stays alive once wanted (starting it again would cost a
-			// device on every queue refill); with no frames queued ahead it gets no frames (below),
-			// so it computes nothing it could not use - the startup fill and an emptied queue alike.
-			// Vector engine on demand: also while a consumer of vectors is served (forward, or backward pairs).
-			const bool vectorProducer = vectorDemand.producer && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 &&
-				(!lowLatency || vectorDemand.lowLatencyAllowed);
-			const bool wantProducer = (dejudder && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 && !lowLatency) || vectorProducer;
-			if (wantProducer && !motionProducer && !motionProducerFailedLogged && d3d11 && d3d11->gpu)
-			{
-				pl_d3d11 d3d = pl_d3d11_get(d3d11->gpu);
-				auto producer = std::make_unique<MotionAhead::Producer>();
-				// The slow (best) preset: off the render path, and on the 7 real clips the seed
-				// with it removed 41.9% of the judder vs the matcher's 41.3% (damage 0.35 vs 0.40;
-				// medium 41.2%, 0.37). The render-time fallback keeps the matcher's preset (medium).
-				const NvOpticalFlow::Preset preset = NvOpticalFlow::Preset::Slow;
-				if (d3d && d3d->device && producer->Start(d3d->device, preset))
-					motionProducer = std::move(producer);
-				else
-				{
-					motionProducerFailedLogged = true;
-					DebugLog::Log("Motion ahead: the producer did not start (%s); the de-judder estimates at render time",
-						producer->Error().c_str());
-				}
-			}
-			else if (!wantProducer)
-			{
-				const bool onlyReleased = !dejudder && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 && !lowLatency;
-				// Owner: the producer stays alive once wanted - kept while the settings still want it
-				// (a resync or format change can take longer than any timer); stopped when they change.
-				const bool keepBriefly = motionProducer && motionProducer->Running() && onlyReleased;   // never a dead one
-				if (motionProducer && !keepBriefly)
-				{
-					motionProducer->Stop();
-					motionProducer.reset();
-					motionEngineReady.store(false, std::memory_order_release);
-				}
-				// Audit 2026-10-16: a failure is retried once the producer is wanted again (optical flow
-				// off and on, low latency and back), and the look-ahead re-engages only after the
-				// refill (4 queued ahead) - never on a stale engagement.
-				if (!keepBriefly)
-					motionProducerFailedLogged = false;
-				motionAheadEngaged = false;
-			}
-			if (motionProducer && !motionProducer->Running() && !motionProducerFailedLogged)
-			{
-				motionProducerFailedLogged = true;
-				DebugLog::Log("Motion ahead: the producer stopped (%s); the de-judder estimates at render time",
-					motionProducer->Error().c_str());
-			}
-			motionEngineReady.store(motionProducer && motionProducer->Running() && motionProducer->EngineReady(), std::memory_order_release);
-			// Frames are submitted only while a motion estimate runs for this source (the de-judder or
-			// the interpolator); otherwise the producer stays alive, idle.
-			const bool motionConsumer = (dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
-				dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers)) ||
-				vectorDemand.producer;
-			// Fixed-constant batch B3 2026-10-18 (general_rate_fixes): the depth as a time with a frame floor.
-			const MotionAhead::Decision ahead = MotionAhead::Decide(
-				MotionAhead::DepthAt(activeSettings.motionAheadFrames, dejudderSourceHz, activeSettings.generalRateFixes),
-				lowLatency && (!vectorDemand.lowLatencyAllowed || vectorDemand.mode == VectorDemand::Mode::Backward),
-				motionProducer && motionProducer->Running(),
-				queuedFutureFrames.load(std::memory_order_acquire), activeSettings.opticalFlow, motionConsumer,
-				vectorDemand.mode == VectorDemand::Mode::Backward);
-			motionAheadDepth.store(motionProducer && motionProducer->Running() ? ahead.depth : 0, std::memory_order_release);
-			motionAheadBackward.store(motionProducer && motionProducer->Running() && ahead.reason == MotionAhead::Reason::BackwardPairs,
-				std::memory_order_release);
-			motionAheadConfigured.store((std::max)(1, ahead.configured), std::memory_order_release);
-			if (motionProducer)   // fixed-constant batch B3/B4 2026-10-18
-			{
-				motionProducer->SetDepth(ahead.configured);
-				motionProducer->SetGeneralRates(activeSettings.generalRateFixes);
-			}
-			if (!(motionProducer && motionProducer->Running()) || ahead.depth == 0)
-				motionAheadEngaged = false;   // no frames collected below: no stale engagement (audit 2026-10-16)
-			char text[200];
-			snprintf(text, sizeof(text), "Motion ahead: configured %d, queued ahead %d, depth %d (%s)",
-				ahead.configured, (std::min)(ahead.available, 99), ahead.depth, MotionAhead::Describe(ahead.reason));
-			// Log the reason and depth, not every change of the queued count.
-			char key[96];
-			snprintf(key, sizeof(key), "%d|%d|%d", ahead.configured, ahead.depth, static_cast<int>(ahead.reason));
-			// The queue level swings around the depth as frames arrive and are shown: an Active /
-			// ShallowQueue flip is logged at most every 5 s (audit 2026-10-16: up to once per frame).
-			const bool levelOnly = ahead.reason == MotionAhead::Reason::Active || ahead.reason == MotionAhead::Reason::ShallowQueue;
-			const auto now = SteadyClock::now();
-			if (motionAheadLogged != key && (!levelOnly || now - motionAheadLoggedAt >= std::chrono::seconds(5)))
-			{
-				motionAheadLogged = key;
-				motionAheadLoggedAt = now;
-				DebugLog::Log("%s", text);
-			}
+			// VPV-HOOK
+			VpMotion::VectorEngine::ProducerInputs pin;
+			pin.lowLatency = &lowLatencyQueueActive; pin.queuedFutureFrames = &queuedFutureFrames;
+			pin.opticalFlow = activeSettings.opticalFlow; pin.motionAheadFrames = activeSettings.motionAheadFrames;
+			pin.generalRateFixes = activeSettings.generalRateFixes; pin.sourceHz = dejudderSourceHz; pin.gpu = d3d11 ? d3d11->gpu : nullptr;
+			pin.dejudderPresent = dejudder != nullptr;
+			pin.dejudderEstimating = dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
+				dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers);
+			vectorEngine.PlanProducer(pin);
+			// VPV-HOOK-END
 		}
 
 		// Stage 12 step A: the re-base factor for this frame. Geometry above
@@ -26962,6 +24530,16 @@ releaseDriftBaseRetention =
 			const double previousRebase = rebaseFactor, previousRebaseX = rebaseFactorX;
 			rebaseFactor = wanted < 1.0 && !temporal && !rebasePaused ? wanted : 1.0;
 			rebaseFactorX = wantedX < 1.0 && !temporal && !rebasePaused ? wantedX : 1.0;
+			{ // VPV-HOOK
+				// FX-RB: hold a re-base on the current path until a worker has its shaders // VPV-HOOK
+				const VpRebaseWarmup::Context warmContext{ renderImage, target, renderParams, d3d11->device, cache, // VPV-HOOK
+					shaderCacheEnabled, nlsPreparationRevision, nlsPreparationNoCompute, sourceRebase.Kernel() }; // VPV-HOOK
+				const VpRebaseWarmup::Controller::Outcome warm = rebaseWarmup.Frame(luma && // VPV-HOOK
+					!pipelineSlots.OriginalPathway() && pipelineSlots.Runs(PipelineSlots::Id::ScalingRebase), // VPV-HOOK
+					warmContext, rebaseFactorX, rebaseFactor, previousRebaseX, previousRebase); // VPV-HOOK
+				if (warm.hold) { rebaseFactorX = warm.x; rebaseFactor = warm.y; } // VPV-HOOK
+				if (warm.fallbackChanged) SyncFallback(warm.fallback); // VPV-HOOK
+			} // VPV-HOOK
 			// Silent-fallbacks batch: with scaling.rebase switched off the planes stay native, so every
 			// downstream stage (debander, detail pulse, texture restore, adaptive upscale) uses factor 1.
 			{
@@ -29995,6 +27573,7 @@ releaseDriftBaseRetention =
 		return d3d11 && pl_gpu_is_failed(d3d11->gpu);
 	}
 };
+#include <VP-V/modules/motion/estimation/VectorEngineEstimate.inl>   // VPV-HOOK P5a-5: the estimate and the engine keeper (Impl members)
 
 
 namespace
@@ -30043,6 +27622,7 @@ LibplaceboVideoRenderer::LibplaceboVideoRenderer(
 	m_frameQueueDesiredDepth(AlphaQueuePolicy::NormalizeDesiredDepth(frameQueueMaxSize)),
 	m_frameQueueMaxSize(AlphaQueuePolicy::HardCapacity(frameQueueMaxSize))
 {
+	m_abiBridge = Vpv::MakeRendererAbiBridge(*this); // VPV-HOOK
 	{
 		std::lock_guard<std::mutex> guard(g_runtimeDisplayRuleMutex);
 		m_manualDisplayRule = g_runtimeManualDisplayRule;
@@ -30063,6 +27643,7 @@ LibplaceboVideoRenderer::LibplaceboVideoRenderer(
 
 LibplaceboVideoRenderer::~LibplaceboVideoRenderer()
 {
+	m_abiBridge.reset(); // VPV-HOOK
 	if (m_stopWorker.joinable())
 		m_stopWorker.join();
 	{
@@ -31985,7 +29566,7 @@ void LibplaceboVideoRenderer::Reset()
 		// opening the new generation, so its first admitted frame cannot present
 		// with geometry from the discarded generation.
 		m_impl->RequestPresentationStateReset();
-		m_impl->RequestMotionInvalidate(MotionValidity::Cause::Resync);
+		RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Reset, m_impl.get()); // VPV-HOOK: motion invalidation (resync)
 		m_impl->motionLastStateReset.store(true, std::memory_order_release);
 		// Stage 12: a resync or source change - the resolution evidence belongs to what came before.
 		m_impl->sourceMonitor.Discontinuity("resync or source change");
@@ -32028,7 +29609,7 @@ void LibplaceboVideoRenderer::ResetLiveQueue()
 	{
 		m_impl->RequestPresentationStateReset(QueueNativeResetKind::QUEUE_ONLY);
 		// The discarded frames break the sequence: no pair or history across it.
-		m_impl->RequestMotionInvalidate(MotionValidity::Cause::QueueReset);
+		RendererExtension::NotifyQueue(RendererExtension::QueueEvent::LiveQueueReset, m_impl.get()); // VPV-HOOK: motion invalidation
 		// The last frame's video state is kept: QueueReset does not release, so a format
 		// change across this reset still releases (SourceFormatChange).
 		m_impl->sourceMonitor.Discontinuity("live queue reset (seek or skip)");
@@ -32975,7 +30556,8 @@ bool LibplaceboVideoRenderer::GetModuleStatus(const char* module, CString& statu
 	return answered;
 }
 
-void* LibplaceboVideoRenderer::QueryExtension(const char* iid) { return RendererExtension::Query(iid); } // VPV-HOOK
+void* LibplaceboVideoRenderer::QueryExtension(const char* iid) // VPV-HOOK
+{ return m_abiBridge ? m_abiBridge->Query(iid) : nullptr; } // VPV-HOOK
 bool LibplaceboVideoRenderer::InvokeModuleCommand(const char* module, const char* command, CString& reply) // VPV-HOOK
 { std::string text; const bool handled = RendererExtension::CommandFor(m_impl.get(), module, command, text); reply = CString(text.c_str()); return handled; } // VPV-HOOK
 
@@ -35561,25 +33143,7 @@ void LibplaceboVideoRenderer::RenderLoop()
             // the queued frames after the current one (not cadence repeats), up to 4,
             // whatever Bill's active-picture look-ahead is set to. Only frames already
             // queued: no waiting; an empty or short queue simply gives fewer.
-            // Optical flow ahead (docs/VP-nvof-ahead.md): the current frame and up to the
-            // depth after it, each once (only frames already queued: an empty or short
-            // queue gives fewer).
-            if (m_impl && m_impl->motionProducer && (m_impl->motionAheadDepth.load(std::memory_order_acquire) > 0 ||
-                m_impl->motionAheadBackward.load(std::memory_order_acquire)))
-            {
-                const size_t depth = static_cast<size_t>(m_impl->motionAheadDepth.load(std::memory_order_acquire));
-                const uint64_t last = m_impl->motionProducer->LastSubmitted();
-                size_t taken = 0;
-                for (size_t index = 0; index < m_frameQueue.size() && taken <= depth; ++index)
-                {
-                    const QueuedFrame& q = m_frameQueue[index];
-                    if (q.cadenceRepeat || !q.state) continue;
-                    ++taken;
-                    if (q.sourceSequence <= last) continue;
-                    motionAheadFrames.push_back(q);
-                    motionAheadFrames.back().frame.SourceBufferAddRef();
-                }
-            }
+            MotionAhead::CollectQueueAhead(m_impl.get(), m_frameQueue, motionAheadFrames);   // VPV-HOOK: optical flow ahead (MotionAheadWalk.h)
             if (m_impl && m_impl->sourceAutoActive.load(std::memory_order_acquire))
                 for (size_t index = 1; index < m_frameQueue.size() && sourceAheadFrames.size() < 4; ++index)
                 {
@@ -35761,92 +33325,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 		if (!motionAheadFrames.empty())
 		{
 			const auto handoffStarted = SteadyClock::now();
-			try
-			{
-				// The stream generation (resync / queue reset / seek / format change), as before
-				// step 1: a gap moves only the epoch, so the ahead pairs after it are kept.
-				const uint64_t generation = m_impl->motionValidity.StreamGeneration();
-				// Owner 2026-10-16: the look-ahead engages once 4 frames are queued ahead (the startup
-				// fill, a refilled queue), disengages with none queued or a broken sequence (a new
-				// generation: skip, seek, reset) and waits for 4 again; disengaged, the producer gets
-				// no work (no pair could be used before its frames are shown).
-				const size_t queuedAhead = m_impl->queuedFutureFrames.load(std::memory_order_acquire);
-				const size_t engageAhead = m_impl->activeSettings.vectorDemand ?
-					static_cast<size_t>(VectorDemand::EngageAhead(m_impl->motionAheadConfigured.load(std::memory_order_acquire),
-						m_impl->queueAheadCapacity.load(std::memory_order_acquire))) :
-					static_cast<size_t>((std::max)(1, m_impl->motionAheadConfigured.load(std::memory_order_acquire)));
-				const bool backwardPairs = m_impl->motionAheadBackward.load(std::memory_order_acquire);   // vector engine: engaged while it runs
-				// A break always disengages and the next pass must see 4 queued ahead again (a re-engage
-				// in the same pass would skip the refill wait: the reset test, 2026-10-16).
-				if (m_impl->motionAheadEngaged &&
-					(queuedAhead == 0 || generation != m_impl->motionAheadEngagedGeneration))
-				{
-					m_impl->motionAheadEngaged = false;
-					DebugLog::Log("Motion ahead: waiting for %zu frames queued ahead (%s)", engageAhead,
-						queuedAhead == 0 ? "the queue holds none" : "the sequence broke: skip, seek or reset");
-				}
-				else if (!m_impl->motionAheadEngaged && queuedAhead >= engageAhead && !backwardPairs)
-				{
-					m_impl->motionAheadEngaged = true;
-					m_impl->motionAheadEngagedGeneration = generation;
-					DebugLog::Log("Motion ahead: engaged (%zu frames queued ahead%s)", queuedAhead,
-						m_impl->vectorDemand.lowLatencyAllowed ? "; vector engine: shallow queue" : "");
-				}
-				const bool framesAhead = m_impl->motionAheadEngaged || backwardPairs;
-				// A frame's time as the dequeue reads it (the film clock when pulldown is locked,
-				// else the capture timestamp; 0 = not known).
-				LARGE_INTEGER aheadQpcFrequency{};
-				const bool aheadQpcKnown = QueryPerformanceFrequency(&aheadQpcFrequency) && aheadQpcFrequency.QuadPart > 0;
-				auto aheadTime = [&](const QueuedFrame& q) -> double {
-					if (q.filmHz > 0.0 && q.arrivalQpc > 0 && aheadQpcKnown)
-						return static_cast<double>(q.arrivalQpc) / static_cast<double>(aheadQpcFrequency.QuadPart);
-					if (m_timingClock && m_timingClock->TimingClockTicksPerSecond() > 0)
-						return static_cast<double>(q.frame.GetTimingTimestamp()) / static_cast<double>(m_timingClock->TimingClockTicksPerSecond());
-					return 0.0;
-				};
-				for (QueuedFrame& ahead : motionAheadFrames)
-				{
-					const VideoState& aheadState = *ahead.state;
-					if (!framesAhead || !aheadState.displayMode || !m_impl->motionProducer) continue;
-					// The luma source keeps the frame's own buffer alive for the producer's worker.
-					const auto prepared = Impl::PrepareFrameAnalysis(ahead.frame, aheadState, ahead.converted, ahead.analysis,
-						AnalysisSourceProfile::QueuedCapture, ahead.activePictureIdentity.sourceFormatGeneration, false,
-						aheadState.dolbyVisionTunnel);
-					// The first frame not ready yet (a conversion pending) stops this pass: the producer's
-					// high-water mark would otherwise pass it and its pairs would never exist (audit 2026-10-16).
-					if (!prepared.source.IsValid())
-						break;
-					// Integration 2026-10-17: also a break when the pair's times are not adjacent
-					// (the dequeue's AdjacentPairTimes rule, with timing_continuity_fixes) or, on the
-					// DV tunnel, when the pair is not trusted (DolbyVisionPairTrusted).
-					DejudderPolicy::MotionAheadFrame aheadFrame;
-					aheadFrame.time = aheadTime(ahead);
-					aheadFrame.filmClock = ahead.filmHz > 0.0;
-					// Hunt 2 02-dv L1: the kind by the payload's capture encoding, as the dequeue
-					// classifies it (ClassifyDolbyVisionPayload), not the walk's state encoding.
-					if (ahead.converted)
-					{
-						aheadFrame.kind = DejudderPolicy::ClassifyDolbyVisionPayload(*ahead.converted);
-						aheadFrame.matrices = DejudderPolicy::DolbyVisionMatricesOf(ahead.converted->dolby);
-					}
-					const double aheadRateHz = ahead.filmHz > 0.0 ? ahead.filmHz :
-						m_measuredFrameRate.load(std::memory_order_relaxed) > 0.0 ? m_measuredFrameRate.load(std::memory_order_relaxed) :
-						aheadState.displayMode->RefreshRateHz();
-					const bool havePrev = m_impl->motionAheadPrevKnown && m_impl->motionAheadPrevGeneration == generation;
-					const bool breakBefore = DejudderPolicy::MotionAheadBreakBefore(ahead.gapBefore, ahead.filmUpdate,
-						m_impl->activeSettings.timingContinuityFixes, aheadRateHz, aheadState.dolbyVisionTunnel,
-						havePrev, m_impl->motionAheadPrev, aheadFrame, m_impl->activeSettings.motionHistoryFixes);
-					m_impl->motionProducer->Submit(ahead.sourceSequence, generation, prepared.source, breakBefore);
-					m_impl->motionAheadPrevKnown = true;
-					m_impl->motionAheadPrevGeneration = generation;
-					m_impl->motionAheadPrev = aheadFrame;
-				}
-			}
-			catch (const std::exception& e)
-			{
-				DebugLog::Log("Motion ahead: frames skipped: %s", e.what());
-				RendererExtension::ReportWorker(m_impl.get(), "motion-ahead", e.what()); // VPV-HOOK
-			}
+			MotionAhead::AheadView<Impl, QueuedFrame, ITimingClock> aheadView{ *m_impl, motionAheadFrames, m_timingClock, m_measuredFrameRate };
+			MotionAhead::RunQueueWalk(aheadView);
 			for (QueuedFrame& ahead : motionAheadFrames)
 				ahead.frame.SourceBufferRelease();
 			motionAheadFrames.clear();
@@ -35858,29 +33338,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 		}
 		if (!sourceAheadFrames.empty())
 		{
-			try
-			{
-				for (QueuedFrame& ahead : sourceAheadFrames)
-				{
-					const VideoState& aheadState = *ahead.state;
-					if (!aheadState.displayMode) continue;
-					const auto prepared = Impl::PrepareFrameAnalysis(ahead.frame, aheadState, ahead.converted, ahead.analysis,
-						AnalysisSourceProfile::QueuedCapture, ahead.activePictureIdentity.sourceFormatGeneration, false,
-						aheadState.dolbyVisionTunnel);
-					const AnalysisLumaSource& luma = prepared.source;
-					if (!luma.IsValid()) continue;
-					m_impl->sourceMonitor.LookAheadFrame(ahead.sourceSequence, luma.width, luma.height,
-						[&luma](int x, int y) {
-							uint16_t code = 0;   // WP-23: the shared decode when ready
-							return luma.SampleLuma(x, y, code) ? static_cast<int>(code) : 0;
-						}, 0, 0, luma.width, luma.height);
-				}
-			}
-			catch (const std::exception& e)
-			{
-				DebugLog::Log("Source resolution look-ahead skipped: %s", e.what());
-				RendererExtension::ReportWorker(m_impl.get(), "source-look-ahead", e.what()); // VPV-HOOK
-			}
+			SourceResolution::SourceAheadView<Impl, QueuedFrame> sourceView{ *m_impl, sourceAheadFrames };
+			SourceResolution::RunAheadWalk(sourceView);
 			if (!m_impl->sourceAheadLogged)
 			{
 				m_impl->sourceAheadLogged = true;
@@ -36021,16 +33480,13 @@ void LibplaceboVideoRenderer::RenderLoop()
 				m_activePictureTimeline.MarkConsumed(
 					dequeued.activePictureIdentity);
 			if (dequeued.gapBefore && m_impl)
-			{
-				m_impl->motionGapDetail.store(dequeued.gapCause, std::memory_order_relaxed);   // why, for the log
-				m_impl->RequestMotionInvalidate(MotionValidity::Cause::Gap);
-			}
+				RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Gap, m_impl.get(), -1, 0, 0, 0, dequeued.gapCause); // VPV-HOOK: motion invalidation, the gap's cause for the log
 			// ABI 37: a file discontinuity (seek, frame step, rate change) is a source
 			// discontinuity at this frame: the one vectors-valid state and the resolution
 			// evidence start over, as on a capture resync.
 			if (dequeued.fileDiscontinuity && m_impl)
 			{
-				m_impl->RequestMotionInvalidate(MotionValidity::Cause::Seek);
+				RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Discontinuity, m_impl.get()); // VPV-HOOK: motion invalidation (seek)
 				m_impl->sourceMonitor.Discontinuity("file discontinuity (seek, step or rate change)");
 			}
 			// A format change without a reset (normally a Reset comes first: then this is
@@ -36039,7 +33495,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 				motionLastState = nullptr;
 			if (m_impl && motionLastState && state && motionLastState->valid && state->valid &&
 				!SameDejudderVideoState(motionLastState, state))
-				m_impl->RequestMotionInvalidate(MotionValidity::Cause::SourceFormatChange);
+				RendererExtension::NotifyQueue(RendererExtension::QueueEvent::FormatChange, m_impl.get()); // VPV-HOOK: motion invalidation
 			if (state)
 				motionLastState = state;
 			m_frameQueue.pop_front();
@@ -37649,156 +35105,8 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 	VideoState state;
 	std::string rule;
 	const RendererSettings s = LoadRendererSettings(config, state, rule);
-	const Dejudder::Settings m = DejudderMatcherSettings(s, Dejudder::Settings());
-	std::ostringstream o;
-	o << "rule=" << rule << "\n"
-		<< "capture_path=" << s.capturePath << "\n"
-		<< "capture_upload=" << s.captureUpload << "\n"
-		<< "source_range=" << s.sourceRange << "\n"
-		<< "source_resolution=" << s.sourceResolution << "\n"
-		<< "source_resolution_auto_min_confidence=" << s.sourceResolutionAutoMinConfidence << "\n"
-		<< "source_resolution_evidence_shots=" << s.sourceResolutionEvidenceShots << "\n"
-		<< "source_resolution_evidence_seconds=" << s.sourceResolutionEvidenceSeconds << "\n"
-		<< "deband_vp=" << s.debandVp << "\n"
-		<< "low_bitrate_handling=" << s.lowBitrateHandling << "\n"
-		<< "cnn_residual_stabilise=" << (s.adaptive.cnnResidualStabilise ? "on" : "off") << "\n"
-		<< "ssim_residual_stabilise=" << (s.adaptive.ssimResidualStabilise ? "on" : "off") << "\n"
-		<< "ssim_bitrate_aware=" << (s.ssimBitrateAware ? "on" : "off") << "\n"
-		<< "ssim_bitrate_floor=" << s.ssimBitrateFloor << "\n"
-		<< "motion_ahead_frames=" << s.motionAheadFrames << "\n"
-		<< "optical_flow=" << (s.opticalFlow ? "on" : "off") << "\n"
-		<< "optical_flow_global=" << (s.opticalFlowGlobal ? "on" : "off") << "\n"
-		<< "optical_flow_global_fallback=" << (s.opticalFlowGlobalFallback ? "on" : "off") << "\n"
-		<< "optical_flow_cost_trust=" << (s.opticalFlowCostTrust ? "on" : "off") << "\n"
-		<< "optical_flow_fb_check=" << (s.opticalFlowFbCheck ? "on" : "off") << "\n"
-		<< "motion=" << s.motion.Fingerprint() << "\n"
-		<< "interpolation_grain=" << InterpolationPolicy::Name(s.interpolationGrain) << "\n"
-		<< "dejudder_source_warp_filter=" << (s.dejudderSourceWarpCatmull ? "catmull" : "bilinear") << "\n"
-		<< "nls_sampling=" << (s.nlsSamplingCatmull ? "catmull" : "bilinear") << "\n"
-		<< "source_coding_fixes=" << (s.sourceCodingFixes ? "on" : "off") << "\n"
-		<< "deband_vp_grain_guard=" << (!s.debandVpGrainGuard ? "off" : s.debandVpGrainSplit ? "on" : "veto") << "\n"
-		<< "deband_vp_exclusive=" << (s.debandVpExclusive ? "on" : "off") << "\n"
-		<< "detail_pulse_stabilise=" << (s.detailPulseStabilise ? "on" : "off") << "\n"
-		<< "detail_pulse_cap=" << s.detailPulseCap << "\n"
-		<< "detail_pulse_fast=" << (s.detailPulseFast ? "on" : "off") << "\n"
-		<< "texture_restore=" << (s.textureRestore ? "statistical" : "off") << "\n"
-		<< "texture_restore_cap=" << s.textureRestoreCap << "\n"
-		<< "deband_grain=" << (s.debandGrain ? "on" : "off") << "\n"
-		<< "residual_stabilise_grain_guard=" << (s.adaptive.residualGrainGuard ? "on" : "off") << "\n"
-		<< "adaptive_motion=" << (s.adaptive.motionAdaptive ? "on" : "off") << "\n"
-		<< "adaptive_motion_speed_lo=" << s.adaptive.motionSpeedLo << "\n"
-		<< "adaptive_motion_speed_hi=" << s.adaptive.motionSpeedHi << "\n"
-		<< "adaptive_motion_floor=" << s.adaptive.motionFloor << "\n"
-		<< "adaptive_motion_smooth_ms=" << s.adaptive.motionSmoothMs << "\n"
-		<< "interpolation=" << InterpolationPolicy::Name(s.interpolation) << "\n"
-		<< "interpolation_fallback=" << InterpolationPolicy::Name(s.interpolationFallback) << "\n"
-		<< "interpolation_fill_gaps=" << (s.interpolationFillGaps ? "on" : "off") << "\n"
-		<< "source_class=" << InterpolationPolicy::Name(s.sourceClass) << "\n"
-		<< "intent_content=" << (s.intentContent ? "on" : "off") << "\n"
-		<< "intent_content_hold_seconds=" << s.intentContentHoldSeconds << "\n"
-		<< "intent_motion=" << (s.intentMotion ? "on" : "off") << "\n"
-		<< "intent_motion_policy=" << ToString(s.intentMotionPolicy) << "\n"
-		<< "intent_motion_min=" << s.intentMotionMin << "\n"
-		<< "intent_motion_min_shot_s=" << s.intentMotionMinShotSeconds << "\n"
-		<< "intent_ease_s=" << s.intentEaseSeconds << "\n"
-		<< "ambient_adapt=" << (s.ambientAdapt ? "on" : "off") << "\n"
-		<< "ambient_adapt_strength=" << s.ambientAdaptStrength << "\n"
-		<< "ambient_screen_reflect=" << s.ambientScreenReflect << "\n"
-		<< "ambient_max_black_nits=" << s.ambientMaxBlackNits << "\n"
-		<< "ambient_tau_up_s=" << s.ambientTauUpSeconds << "\n"
-		<< "ambient_tau_down_s=" << s.ambientTauDownSeconds << "\n"
-		<< "intent_black=" << ToString(s.intentBlack) << "\n"
-		<< "intent_display=" << (s.intentDisplay ? "report" : "off") << "\n"
-		<< "temporal_dither=" << s.temporalDither << "\n"
-		<< "rebase_kernel_match=" << (s.rebaseKernelMatch ? "on" : "off") << "\n"
-		<< "source_resolution_text_guard=" << (s.sourceResolutionTextGuard ? "on" : "off") << "\n"
-		<< "source_resolution_mixed_guard=" << (s.sourceResolutionMixedGuard ? "on" : "off") << "\n"
-		<< "source_resolution_latch_fixes=" << (s.sourceResolutionLatchFixes ? "on" : "off") << "\n"
-		<< "source_resolution_cut_fixes=" << (s.sourceResolutionCutFixes ? "on" : "off") << "\n"
-		<< "active_picture_startup_hold=" << (s.activePictureStartupHold ? "on" : "off") << "\n"
-		<< "source_resolution_engage_max_wait_s=" << s.sourceResolutionEngageMaxWait << "\n"
-		<< "source_resolution_crossfade_s=" << s.sourceResolutionCrossfade << "\n"
-		<< "source_resolution_release_fade_s=" << s.sourceResolutionReleaseFade << "\n"
-		<< "pulldown_fixes=" << (s.pulldownFixes ? "on" : "off") << "\n"
-		<< "timing_continuity_fixes=" << (s.timingContinuityFixes ? "on" : "off") << "\n"
-		<< "cadence_class_fixes=" << (s.cadenceClassFixes ? "on" : "off") << "\n"
-		<< "motion_history_fixes=" << (s.motionHistoryFixes ? "on" : "off") << "\n"
-		<< "queue_timing_fixes=" << (s.queueTimingFixes ? "on" : "off") << "\n"
-		<< "general_rate_fixes=" << (s.generalRateFixes ? "on" : "off") << "\n"
-		<< "efficiency_fixes=" << (s.efficiencyFixes ? "on" : "off") << "\n"
-		<< "render_ahead=" << (s.renderAhead ? "on" : "off") << "\n"
-		<< "dejudder_gate=" << s.dejudderGate << "\n"
-		<< "render_ahead_utilisation=" << s.renderAheadUtilisation << "\n"
-		<< "render_ahead_queue_credit=" << (s.renderAheadQueueCredit ? "on" : "off") << "\n"
-		<< "dejudder_strength=" << s.dejudderStrength << "\n"
-		<< "dejudder_strength_even=" << s.dejudderStrengthEven << "\n"
-		<< "dejudder_even_includes_1001=" << s.dejudderEvenIncludes1001 << "\n"
-		<< "dejudder_warp_rendered=" << s.dejudderWarpRendered << "\n"
-		<< "dejudder_estimate_ahead=" << s.dejudderEstimateAhead << "\n"
-		<< "dejudder_pulldown=" << s.dejudderPulldown << "\n"
-		<< "native_rgb_ingest=" << s.nativeRgbIngest << "\n"
-		<< "dv_tunnel_gpu_unpack=" << s.dvTunnelGpuUnpack << "\n"
-		<< "dv_trims=" << s.dvTrims << "\n"
-		<< "dv_tone_mapping=" << s.dvToneMapping << "\n"
-		<< "dv_compare_capture_folder=" << s.dvCompareCaptureFolder << "\n"
-		<< "dv_tunnel_fixes=" << (s.dvTunnelFixes ? "on" : "off") << "\n"
-		<< "hdr_inference=" << s.hdrInference << "\n"
-		<< "occlusion_mask=" << s.occlusionMask << "\n"
-		<< "dither_vectors_own=" << s.ditherVectorsOwn << "\n"
-		<< "dither_grain_tolerance_scale=" << s.ditherGrainToleranceScale << "\n"
-		<< "sdr_knee=" << s.sdrTone.knee << "\n"
-		<< "sdr_headroom=" << s.sdrTone.headroom << "\n"
-		<< "sdr_knee_start=" << s.sdrTone.kneeStart << "\n"
-		<< "sdr_knee_strength=" << s.sdrTone.kneeStrength << "\n"
-		<< "sdr_recovery=" << s.sdrTone.recovery << "\n"
-		<< "adaptive_downscale=" << s.adaptiveDownscale << "\n"
-		<< "adaptive_upscale=" << s.adaptiveUpscale << "\n"
-		<< "upscale_light=" << s.upscaleLight << "\n"
-		<< "fbo_float32=" << s.fboFloat32 << "\n"
-		<< "matcher.matchTolerance=" << m.matchTolerance << "\n"
-		<< "matcher.minTrustedShare=" << m.minTrustedShare << "\n"
-		<< "matcher.globalPrior=" << m.globalPrior << "\n"
-		<< "matcher.vectorSmooth=" << m.vectorSmooth << "\n"
-		<< "matcher.motionScaleLo=" << m.motionScaleLo << "\n"
-		<< "matcher.motionScaleHi=" << m.motionScaleHi << "\n"
-		<< "matcher.trustScaleFull=" << m.trustScaleFull << "\n"
-		<< "matcher.occlusionFill=" << m.occlusionFill << "\n"
-		<< "matcher.estCandidates=" << m.estCandidates << "\n"
-		<< "matcher.opticalFlow=" << m.opticalFlow << "\n"
-		<< "matcher.estLambda=" << m.estLambda << "\n"
-		<< "matcher.estQpel=" << m.estQpel << "\n"
-		<< "dejudder_est_still_zero=" << m.estStillZero << "\n"
-		<< "entrance_gpu_drain=" << s.entranceGpuDrain << "\n"
-		<< "matcher.estGate=" << m.estGate << "\n"
-		<< "matcher.estSplit=" << m.estSplit << "\n"
-		<< "matcher.estSplitSad=" << m.estSplitSad << "\n"
-		<< "matcher.motionRolloff=" << m.motionRolloff << "\n"
-		<< "matcher.rollLo=" << m.rollLo << "\n"
-		<< "matcher.rollHi=" << m.rollHi << "\n"
-		<< "matcher.rollFloor=" << m.rollFloor << "\n"
-		<< "matcher.objectStrength=" << m.objectStrength << "\n"
-		<< "matcher.textureTolerance=" << m.textureTolerance << "\n"
-		<< "matcher.globalTwo=" << m.globalTwo << "\n"
-		<< "matcher.regionalHold=" << m.regionalHold << "\n"
-		<< "matcher.cutHistogram=" << m.cutHistogram << "\n"
-		<< "matcher.coarseRange=" << m.coarseRange << "\n"
-		<< "matcher.consistencyPixels=" << m.consistencyPixels << "\n"
-		<< "matcher.fadeMatch=" << m.fadeMatch << "\n"
-		<< "matcher.fadeFloor=" << m.fadeFloor << "\n"
-		<< "matcher.verifyPixels=" << m.verifyPixels << "\n"
-		<< "matcher.verifyShare=" << m.verifyShare << "\n"
-		<< "matcher.pixelTrust=" << m.pixelTrust << "\n"
-		<< "matcher.pixelTrustLo=" << m.pixelTrustLo << "\n"
-		<< "matcher.pixelTrustHi=" << m.pixelTrustHi << "\n"
-		<< "matcher.landingCheck=" << m.landingCheck << "\n"
-		<< "matcher.pictureArea=" << m.pictureArea << "\n"
-		<< "matcher.lowRes=" << m.lowRes << "\n"
-		<< "matcher.lowResAll=" << m.lowResAll << "\n"
-		<< "matcher.holdFeatherPx=" << m.holdFeatherPx << "\n"
-		<< "matcher.holdHysteresis=" << m.holdHysteresis << "\n"
-		<< "matcher.blockTaper=" << m.blockTaper << "\n"
-		<< "matcher.taperSad=" << m.taperSad << "\n";
-	const std::string text = o.str();
+	const Dejudder::Settings m = MatcherSettingsFromProfile::MatcherSettings(s, Dejudder::Settings());
+	const std::string text = VpvRendererSettings::Describe(s, s.motion.Fingerprint(), m, rule);
 	if (out && outSize > 0)
 	{
 		const size_t n = std::min(text.size(), static_cast<size_t>(outSize - 1));

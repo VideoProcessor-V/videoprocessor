@@ -4,6 +4,7 @@
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -238,6 +239,9 @@ namespace FallbackCatalog
 	};
 	inline LookAheadFailures MotionAheadWorker() { return LookAheadFailures("motion look-ahead", "no optical-flow look-ahead for some frames"); }
 	inline LookAheadFailures SourceResolutionWorker() { return LookAheadFailures("source resolution look-ahead", "resolution judged on arrival only"); }
+	// motion.estimation (M2 P5a-5): the K4 pre-estimate hook (camera-guided matching) threw; those pairs were estimated
+	// without camera guidance.
+	inline LookAheadFailures PreEstimateHookFailures() { return LookAheadFailures("vector_engine_hook", "camera guidance skipped for some pairs"); }
 
 	// ---- control.diagnostics: diagnostic overrides (bug hunt 39 #6) -----------------------------
 	// Test / debug switches set in the environment outside a test harness
@@ -524,17 +528,86 @@ namespace FallbackCatalog
 	{
 		return waiting.empty() ? Released("skeleton_lane") : Engaged("skeleton_lane", waiting);
 	}
-	// Products the lane's graph holds that nothing can make yet (no producer, no live fill): they are declined,
-	// their consumers keep their own computation.
-	inline Decision SkeletonProductsDeclined(const std::string& products, const std::string& why)
+	// 70b G5: the GPU products of the lane (P10 grain split, P11 region stats, P12 light level). Each entry is Released
+	// when it does not apply; the skeleton lists the engaged ones (Ctrl+I line, Ctrl+Alt+D, Config status).
+	// No render device (pl_gpu) was handed to the module: the three products are not made, their readers compute their own.
+	inline Decision SkeletonGpuDevice(bool missing)
 	{
-		return products.empty() ? Released("skeleton_products") : Engaged("skeleton_products", products + " declined: " + why);
+		return missing ? Engaged("skeleton_gpu_device", "GPU products: no render device (P10 grain split, P11 region stats and P12 light level are not made; their readers use their own computation)")
+		               : Released("skeleton_gpu_device");
+	}
+	// Shadow mode runs the CPU lane only.
+	inline Decision SkeletonGpuShadow(bool shadow)
+	{
+		return shadow ? Engaged("skeleton_gpu_shadow", "shadow: GPU products skipped (no GPU dispatcher, no GPU work)") : Released("skeleton_gpu_shadow");
+	}
+	// The GPU products' in-render (live) form needs the Entrance phase, which the hub does not offer yet.
+	inline Decision SkeletonGpuLive(bool waiting)
+	{
+		return waiting ? Engaged("skeleton_gpu_live", "live: waits for the Entrance phase (M2 P4)") : Released("skeleton_gpu_live");
+	}
+	// skeleton_gpu_gap = after_render: the lane's GPU work runs before the frame is presented.
+	inline Decision SkeletonGpuGapAhead(bool ahead)
+	{
+		return ahead ? Engaged("skeleton_gpu_gap", "GPU lane work runs ahead of the present") : Released("skeleton_gpu_gap");
+	}
+	// skeleton_gpu_gap = off (default) while the dispatcher exists: the GPU products have no lane work yet.
+	inline Decision SkeletonGpuGapOff(bool off)
+	{
+		return off ? Engaged("skeleton_gpu_gap_off", "GPU lane work off (skeleton_gpu_gap = off): the GPU products are not made ahead")
+		           : Released("skeleton_gpu_gap_off");
+	}
+	// The VRAM governor took the lane ring of GPU products away (tier): they are made in the render only.
+	inline Decision SkeletonGpuShed(const std::string& products)
+	{
+		return products.empty() ? Released("skeleton_gpu_shed")
+		                        : Engaged("skeleton_gpu_shed", "VRAM shed: " + products + " lost the lane ring (not enough free video memory); made in the render only");
+	}
+	// The GPU products' private working memory (tap ring, grain-split working textures: not shed by the governor) does not
+	// fit in the free video memory: the GPU products are not made at all (the consumers keep their own computation).
+	inline Decision SkeletonGpuMemory(const std::string& why)
+	{
+		return why.empty() ? Released("skeleton_gpu_memory") : Engaged("skeleton_gpu_memory", why);
+	}
+	// A GPU dispatch failed (counted); `lastError` is the dispatcher's last reason.
+	inline Decision SkeletonGpuFailed(uint64_t failures, const std::string& lastError)
+	{
+		return failures == 0 ? Released("skeleton_gpu_failed")
+		                     : Engaged("skeleton_gpu_failed", "dispatch failed " + std::to_string(failures) + " time(s): " + (lastError.empty() ? std::string("no reason recorded") : lastError));
+	}
+	// P12's begin gate read a previous frame that is still Pending (a live fill recorded for the Entrance phase, which nothing runs
+	// before G6) as "not made": P12(N) started without a previous frame and the one-pole smoothing restarted. Engaged from the
+	// first such read; `count` is how many times it happened.
+	inline Decision SkeletonGpuLightPending(uint64_t count)
+	{
+		return count == 0 ? Released("skeleton_gpu_light_pending")
+		                  : Engaged("skeleton_gpu_light_pending", "light level: pending (G6 not wired): the previous P12 frame was read as not made " + std::to_string(count) + " time(s); the smoothing restarted");
+	}
+	// P10c (the chroma planes of the grain split) is not made until the source ring exists.
+	inline Decision SkeletonGpuChroma(bool declined)
+	{
+		return declined ? Engaged("skeleton_gpu_chroma", "P10c declined: chroma needs the source ring (M2 P10)") : Released("skeleton_gpu_chroma");
 	}
 	// A record history (quality pattern, td trail summary) the measured source rate asked deeper than the slot counts allow; the note
 	// is VpSkeleton::RecordHistoryCapNote (plain text with the cap and the rate where it starts). Never capped silently.
 	inline Decision SkeletonHistoryCapped(const std::string& note)
 	{
 		return note.empty() ? Released("skeleton_history") : Engaged("skeleton_history", note);
+	}
+	// The record histories (quality pattern, td trail summary) are derived from the configured queue (render-ahead + lane lead +
+	// look-ahead), but some of those values are not delivered to the skeleton yet: it sizes them at their floors. `unwired` names the
+	// values (empty = all delivered, nothing to show).
+	inline Decision SkeletonQueueNotWired(const std::string& unwired)
+	{
+		return unwired.empty() ? Released("skeleton_queue")
+		                       : Engaged("skeleton_queue", "record history: queue not yet wired (" + unwired + "); floors in use");
+	}
+	// A lead read of an ordered-chain product is in THIS graph (WARNING level: nothing is rejected). The reader cannot be sealed ahead,
+	// so it live-fills its reduced form; the note is Graph::leadChainWarning ("quality_pattern -> coding_evidence (lead 2): lead read of an
+	// ordered chain: reader live-fills its reduced form"). Engaged only while such a read is in the graph.
+	inline Decision SkeletonLeadChain(const std::string& note)
+	{
+		return note.empty() ? Released("skeleton_lead_chain") : Engaged("skeleton_lead_chain", note);
 	}
 	// A [vpv.skeleton] key that could not be read (kept at its default).
 	inline Decision SkeletonKeys(const std::string& problems)
@@ -586,6 +659,10 @@ namespace FallbackCatalog
 			// products (adaptive scaling, dither need, sigma-delta, chroma upscale, debander) keep their OWN entries above for the classical
 			// form; this one is the engine's own: its products are not produced, so repairs run their classical forms.
 			{ "product.td_engine", "temporal-detail engine products are not produced: repairs run their classical forms (engine reserved, not built)" },
+			// Source geometry (P14g, doc 78; input/source_analysis/identity/SourceGeometryProduct.h): the held-state record is absent, stale or of
+			// another unit version, so every reader keeps the delivered raster / its classical form (the grid-free evidence of the frame pattern,
+			// the delivered coded raster of temporal detail, today's scaler and chroma behaviour).
+			{ "product.source_geometry", "source geometry record unavailable, stale or of another unit version: readers use the delivered raster and their classical forms" },
 		};
 		if (count)
 			*count = sizeof(kEntries) / sizeof(kEntries[0]);

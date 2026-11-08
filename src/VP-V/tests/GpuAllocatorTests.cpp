@@ -889,6 +889,76 @@ namespace GpuAllocatorTestsNs
 			}
 		}
 
+		// Skeleton-finisher A5: MatchesDecl no longer compares fixedBytes for an absolute-grid layout (P12's 16 KB LUT is a texture the
+		// kernel holds itself). The governor's ledger is not MatchesDecl: it counts BytesOf(decl.size) = fixedBytes + grid terms for every
+		// buffer (ring + live), so those bytes are still planned (a conservative count: the LUT exists once, the ledger counts it per
+		// buffer). Shown three ways: the node's bytes, the tier entry's lane bytes, and the governor total with and without the fixed bytes.
+		TEST_METHOD(P12FixedBytesAreStillInTheGovernorLedger)
+		{
+			const Dims sizes[] = { MkDims(1920, 1080), MkDims(3840, 2160) };
+			for (const Dims& dims : sizes) {
+				const Registry reg(SkeletonProducts(false).All());
+				const uint32_t fixed = reg.Get(kP12LightLevel).size.fixedBytes;
+				Assert::IsTrue(fixed != 0, L"P12 declares the LUT as fixed bytes");
+				std::vector<ProductDecl> noFixed = SkeletonProducts(false).All();
+				noFixed[kP12LightLevel].size.fixedBytes = 0;
+				const Registry regNoFixed(std::move(noFixed));
+
+				ConsumerDecl c;
+				c.id = 1;
+				AddConsume(c, kP12LightLevel);
+				GraphSettings gs;
+				gs.dims = dims;
+				gs.renderAhead = 2;
+				gs.laneLead = 1;
+				gs.ofaPresent = true;
+				const Graph g = BuildGraph(reg, { c }, gs);
+				const Graph gNoFixed = BuildGraph(regNoFixed, { c }, gs);
+				Assert::IsTrue(g.valid && gNoFixed.valid, L"graphs valid");
+				const Node* node = g.Find(kP12LightLevel);
+				const Node* nodeNoFixed = gNoFixed.Find(kP12LightLevel);
+				Assert::IsNotNull(node, L"P12 node");
+				Assert::IsNotNull(nodeNoFixed, L"P12 node (no fixed bytes)");
+
+				// (1) the node's bytes per buffer are the fixed bytes plus the grid term: the layout check does not change them.
+				const uint64_t grid = CellsAt(dims, 4) * 16;
+				Assert::AreEqual(uint64_t(fixed) + grid, uint64_t(node->bufferBytes), L"bufferBytes = fixed + grid");
+				Assert::AreEqual(grid, uint64_t(nodeNoFixed->bufferBytes), L"without the fixed bytes only the grid is counted");
+
+				// (2) the layout matches the declaration although the declaration has fixed bytes (the A5 change) ...
+				ProductTexLayout layout;
+				TexTerm t;
+				t.shift = 4;
+				t.fmt = TexFormat::RGBA32F;
+				t.absW = (dims.width + 15) / 16;
+				t.absH = (dims.height + 15) / 16;
+				layout.terms.push_back(t);
+				Assert::IsTrue(layout.MatchesDecl(reg.Get(kP12LightLevel), dims), L"the abs-grid layout matches despite fixedBytes");
+				//     ... and the textures hold the grid only: the ledger over-counts them by exactly the fixed bytes per buffer.
+				FakeBackend be;
+				ProductTextures<FakeBackend> tex(be);
+				Assert::IsTrue(tex.Allocate(*node, reg.Get(kP12LightLevel), layout, dims, TierPlan()), L"allocates (live pool)");
+				Assert::AreEqual(uint64_t(node->livePool) * grid, uint64_t(tex.Bytes()), L"the textures hold the grid terms only");
+				Assert::AreEqual(uint64_t(node->livePool) * uint64_t(fixed) + uint64_t(tex.Bytes()), uint64_t(node->liveBytes),
+					L"the ledger's live bytes = textures + fixed bytes per buffer");
+
+				// (3) the tier plan and the governor total count them.
+				const TierPlan plan = PlanTiers(reg, g, Card3090(), TierInput());
+				const TierPlan planNoFixed = PlanTiers(regNoFixed, gNoFixed, Card3090(), TierInput());
+				const TierEntry* e = plan.Find(kP12LightLevel);
+				const TierEntry* eNoFixed = planNoFixed.Find(kP12LightLevel);
+				Assert::IsNotNull(e, L"P12 tier entry");
+				Assert::IsNotNull(eNoFixed, L"P12 tier entry (no fixed bytes)");
+				Assert::AreEqual(uint64_t(node->bufferBytes) * uint64_t(node->ring), uint64_t(e->extraBytes), L"the lane ring bytes include the fixed bytes");
+				Assert::AreEqual(uint64_t(nodeNoFixed->bufferBytes) * uint64_t(nodeNoFixed->ring), uint64_t(eNoFixed->extraBytes), L"and exclude them when none are declared");
+				Assert::IsTrue(e->residency == Residency::Vram && eNoFixed->residency == Residency::Vram, L"P12 is VRAM-resident in both plans");
+				const uint64_t buffers = uint64_t(plan.Laned(kP12LightLevel) ? node->ring : 0) + uint64_t(node->livePool);
+				Assert::IsTrue(plan.Laned(kP12LightLevel) == planNoFixed.Laned(kP12LightLevel), L"the same grant in both plans (24 GB card)");
+				Assert::AreEqual(uint64_t(fixed) * buffers, uint64_t(plan.vramBytes - planNoFixed.vramBytes),
+					L"the governor total counts the fixed bytes of every P12 buffer");
+			}
+		}
+
 		// Finisher SHOULD: an absolute grid is bounded in EACH axis, not only in total bytes.
 		TEST_METHOD(AbsoluteGridIsCheckedPerAxis)
 		{

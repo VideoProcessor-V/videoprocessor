@@ -3,9 +3,11 @@
 #include "pch.h"
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelFit.h>
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.h>
+#include <VP-V/modules/motion/estimation/global_model/StaticHypothesis.h>
 #include "SyntheticCameraFields.h"
 #include "CppUnitTest.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <set>
@@ -90,7 +92,8 @@ namespace VideoProcessorTest
 				&& SameBits(a.temporal, b.temporal) && SameBits(a.conditioning, b.conditioning) && SameBits(a.engineAgreement, b.engineAgreement)
 				&& SameBits(a.inverse, b.inverse) && SameBits(a.ambiguity, b.ambiguity) && SameBits(a.logit, b.logit)
 				&& a.haveBackward == b.haveBackward && a.haveEngine == b.haveEngine
-				&& SameBits(a.border, b.border) && SameBits(a.continuity, b.continuity);
+				&& SameBits(a.border, b.border) && SameBits(a.continuity, b.continuity)
+				&& SameBits(a.staticRing, b.staticRing) && SameBits(a.staticFit, b.staticFit);
 		}
 
 		int64_t g_fakeNow = 0;
@@ -1394,6 +1397,219 @@ namespace VideoProcessorTest
 			Field w2 = AnchoredWater(901, 3.0);
 			const CameraMotion r = fitter.Fit(w2.Input(kPairSeconds, 7));
 			Require(r.reason == Reason::Ambiguous && r.signals.dynTemporal == 0.0, "after a cut: " + Describe(r) + " temporal=" + std::to_string(r.signals.dynTemporal));
+		}
+	};
+
+	// Static-camera hypothesis (R1-STATIC, Config::staticCamera). Every test states its Config explicitly.
+	TEST_CLASS(CameraStaticHypothesisTests)
+	{
+	public:
+		// The shipped thresholds (StaticCameraConfig defaults) are tuned on the real clips (README, tuning table). The synthetic fields
+		// below make the fitter confident only when the water is strong enough that static explains about a third of the ring, so the
+		// end-to-end tests lower minStaticShare to 0.3 (margin as shipped). The evaluator test uses the shipped defaults.
+		static Config SC() { Config c; c.staticCamera = true; c.staticCfg.minStaticShare = 0.3; return c; }
+
+		static bool Usable(const CameraMotion& r) { return r.valid && r.confidence >= 0.5 && ReasonUsable(r.reason); }
+
+		// A near-static camera over water (random vectors of +-1.15 px in every block, so the identity model explains about a third of any
+		// block set) with a coherent foreground object that does not touch the border: 168 x 95 of 240 x 135 blocks = 49 %, 36 blocks
+		// from the side edges, 20 from top and bottom, moving (1.2, -0.36) px. Without the hypothesis the object is fitted as the camera.
+		static Field BoatLike(uint64_t seed)
+		{
+			Field f(Grid4K());
+			SplitMix64 rng(seed);
+			for (size_t i = 0; i < f.Count(); ++i)
+			{
+				f.fx[i] = static_cast<float>((rng.Unit() - 0.5) * 2.3);
+				f.fy[i] = static_cast<float>((rng.Unit() - 0.5) * 2.3);
+			}
+			f.AddObject(36, 20, 168, 95, 1.2, -0.36);
+			f.AddNoise(0.05, seed + 1000);
+			return f;
+		}
+
+		static std::string Flags(const CameraMotion& r)
+		{
+			return Describe(r) + " verdictFlags=" + std::to_string(static_cast<int>(r.verdictFlags)) + " staticRing=" + std::to_string(r.signals.staticRing)
+				+ " staticFit=" + std::to_string(r.signals.staticFit);
+		}
+
+		TEST_METHOD(BoatLikeForegroundOverWater)
+		{
+			for (uint64_t seed = 0; seed < 4; ++seed)
+			{
+				Field f = BoatLike(40 + seed);
+				Fitter off;
+				const CameraMotion a = off.Fit(f.Input(kPairSeconds, 5 + seed));
+				// Premise: the fitter without the hypothesis takes the object as the camera, confidently.
+				Require(Usable(a) && std::fabs(a.params.h[2] - 1.2) < 0.3 && std::fabs(a.params.h[5] + 0.36) < 0.3, "premise (off): " + Flags(a));
+				Fitter on(SC());
+				const CameraMotion r = on.Fit(f.Input(kPairSeconds, 5 + seed));
+				Require(r.valid && r.reason == Reason::Ambiguous && r.confidence < 0.5 && (r.verdictFlags & kVerdictStaticCamera) != 0, "demoted: " + Flags(r));
+				Require(!Usable(r), "never usable: " + Flags(r));
+				Require(r.signals.staticRing >= 0.3 && r.signals.staticRing >= r.signals.staticFit - 0.2, "static explains the ring: " + Flags(r));
+				Require(std::string(ReasonTextOf(r.reason, r.verdictFlags)).find("static background") != std::string::npos, "status text names the cause");
+			}
+		}
+
+		TEST_METHOD(AlreadyAmbiguousRecordsAreNotJudged)
+		{
+			// A static ring around a centred coherent object (56 % of the blocks): the fitter's own ambiguity signal already refuses it (two
+			// competing coherent motions), so the hypothesis does not run on it: the record is the same with and without it.
+			Field f(Grid4K());
+			f.AddObject(30, 17, 180, 101, 5, 2);
+			f.AddNoise(0.05, 7);
+			Fitter off, on(SC());
+			const CameraMotion a = off.Fit(f.Input(kPairSeconds, 5)), r = on.Fit(f.Input(kPairSeconds, 5));
+			Require(!Usable(a) && a.reason == Reason::Ambiguous, "premise (off): " + Flags(a));
+			Require(r.reason == a.reason && SameBits(r.confidence, a.confidence) && SameParams(r.params, a.params) && r.verdictFlags == 0 && r.signals.staticRing > 0.9,
+				"unchanged, statistics recorded: " + Flags(r));
+		}
+
+		TEST_METHOD(RealPanStillFitted)
+		{
+			// A global pan, a pan with a crowd (40 % random blocks), a pan with a centred mover and a zoom: the ring follows the camera, static never wins.
+			std::vector<std::string> names;
+			std::vector<Field> fields;
+			{ Field f(Grid4K()); f.FromModel(Pan4K()); f.AddNoise(0.05, 1); names.push_back("pan"); fields.push_back(f); }
+			{
+				Field f(Grid4K()); f.FromModel(Pan4K());
+				SplitMix64 rng(2);
+				for (size_t i = 0; i < f.Count(); ++i)
+					if (rng.Unit() < 0.4) { f.fx[i] = static_cast<float>((rng.Unit() - 0.5) * 30); f.fy[i] = static_cast<float>((rng.Unit() - 0.5) * 30); }
+				f.AddNoise(0.05, 3); names.push_back("crowd pan"); fields.push_back(f);
+			}
+			{ Field f(Grid4K()); f.FromModel(Pan4K()); f.AddObject(80, 40, 80, 50, -9, 6); f.AddNoise(0.05, 4); names.push_back("pan + centred mover"); fields.push_back(f); }
+			{ Field f(Grid4K()); f.FromModel(ZoomModel(1.02)); f.AddNoise(0.05, 5); names.push_back("zoom"); fields.push_back(f); }
+			for (size_t i = 0; i < fields.size(); ++i)
+			{
+				Fitter off, on(SC());
+				const CameraMotion a = off.Fit(fields[i].Input(kPairSeconds, 5)), r = on.Fit(fields[i].Input(kPairSeconds, 5));
+				Require(Usable(a), names[i] + " premise: " + Flags(a));
+				Require(Usable(r) && r.verdictFlags == 0 && r.reason == a.reason && SameBits(r.confidence, a.confidence) && SameParams(r.params, a.params),
+					"real camera motion must stay fitted: " + names[i] + ": " + Flags(r));
+			}
+		}
+
+		TEST_METHOD(SubNoisePanIsLeftAlone)
+		{
+			// A pan below the vector noise floor (0.2 px, under 3 x precision): static and fit are the same model within noise; nothing is demoted.
+			Field f(Grid4K());
+			f.FromModel(PanModel(0.2, 0.0));
+			f.AddNoise(0.02, 9);
+			Fitter off, on(SC());
+			const CameraMotion a = off.Fit(f.Input(kPairSeconds, 5)), r = on.Fit(f.Input(kPairSeconds, 5));
+			Require(a.reason == r.reason && SameBits(a.confidence, r.confidence) && SameParams(a.params, r.params) && r.verdictFlags == 0, "unchanged: " + Flags(r));
+		}
+
+		TEST_METHOD(OffIsByteIdentical)
+		{
+			Config odd;
+			odd.staticCamera = false;
+			odd.staticCfg.margin = 5.0; odd.staticCfg.minStaticShare = 0.0; odd.staticCfg.minRingBlocks = 1; odd.staticCfg.requireMotion = false;
+			for (uint64_t seed = 0; seed < 3; ++seed)
+			{
+				Field f = BoatLike(60 + seed);
+				Fitter a, b(odd);
+				const CameraMotion x = a.Fit(f.Input(kPairSeconds, 5)), y = b.Fit(f.Input(kPairSeconds, 5));
+				Require(x.valid == y.valid && x.reason == y.reason && SameBits(x.confidence, y.confidence) && SameParams(x.params, y.params)
+					&& SameSignals(x.signals, y.signals) && SameBlocks(x, y) && x.verdictFlags == 0 && y.verdictFlags == 0
+					&& x.signals.staticRing == 0 && y.signals.staticRing == 0 && y.signals.staticFit == 0, "off must not touch the record");
+			}
+		}
+
+		TEST_METHOD(IsDeterministic)
+		{
+			for (int rep = 0; rep < 2; ++rep)
+			{
+				Fitter a(SC()), b(SC());
+				for (uint64_t seed = 0; seed < 4; ++seed)
+				{
+					Field f = BoatLike(80 + seed);
+					const CameraMotion x = a.Fit(f.Input(kPairSeconds, 5 + seed)), y = b.Fit(f.Input(kPairSeconds, 5 + seed));
+					Require(x.valid == y.valid && x.reason == y.reason && SameBits(x.confidence, y.confidence) && SameParams(x.params, y.params)
+						&& SameBits(x.signals.staticRing, y.signals.staticRing) && SameBits(x.signals.staticFit, y.signals.staticFit) && x.verdictFlags == y.verdictFlags, "differs between runs");
+				}
+			}
+		}
+
+		TEST_METHOD(NeverCreatesAUsableVerdict)
+		{
+			// Over a mixed set (pans, crowds, boat-like, random, object over static, letterbox) the hypothesis only ever demotes: wherever it is
+			// on and the record is usable, the same pair without it is usable with the same parameters.
+			std::vector<Field> set;
+			for (uint64_t s = 0; s < 3; ++s) set.push_back(BoatLike(100 + s));
+			{ Field f(Grid4K()); f.FromModel(Pan4K()); f.AddNoise(0.05, 11); set.push_back(f); }
+			{ Field f(Grid4K()); f.FromModel(PanModel(1.5, 0.5)); f.AddObject(80, 40, 80, 50, -3, 2); f.AddNoise(0.05, 12); set.push_back(f); }
+			{
+				Field f(Grid4K());
+				SplitMix64 rng(13);
+				for (size_t i = 0; i < f.Count(); ++i) { f.fx[i] = static_cast<float>((rng.Unit() - 0.5) * 20); f.fy[i] = static_cast<float>((rng.Unit() - 0.5) * 20); }
+				set.push_back(f);
+			}
+			{ Field f(Grid4K()); f.AddObject(30, 17, 180, 101, 5, 2); f.AddNoise(0.05, 14); set.push_back(f); }
+			Rect lb; lb.left = 0; lb.top = 160; lb.right = 3840; lb.bottom = 2000;
+			{ Field f(Grid4K(), lb); f.FromModel(PanModel(2.0, 0.0)); f.AddNoise(0.05, 15); set.push_back(f); }
+			int demoted = 0;
+			for (size_t i = 0; i < set.size(); ++i)
+			{
+				Fitter off, on(SC());   // a fresh pair of fitters per case: no state carries over
+				const CameraMotion a = off.Fit(set[i].Input(kPairSeconds, 5 + i)), r = on.Fit(set[i].Input(kPairSeconds, 5 + i));
+				if (Usable(r))
+					Require(Usable(a) && SameParams(a.params, r.params) && r.verdictFlags == 0, "no new usable verdict, case " + std::to_string(i) + ": " + Flags(r));
+				if ((r.verdictFlags & kVerdictStaticCamera) != 0)
+				{
+					++demoted;
+					Require(Usable(a) && r.reason == Reason::Ambiguous && r.confidence < 0.5, "a demotion only follows a usable record, case " + std::to_string(i));
+				}
+			}
+			Require(demoted <= 3, "at most the three boat-like cases are demoted, got " + std::to_string(demoted));
+		}
+
+		TEST_METHOD(DemotedPairDoesNotFeedTheCameraPrediction)
+		{
+			// After a demoted pair, a clean pan is accepted at once (the temporal filter did not learn the object's motion).
+			Fitter on(SC());
+			Field boat = BoatLike(120);
+			const CameraMotion d = on.Fit(boat.Input(kPairSeconds, 5));
+			Require((d.verdictFlags & kVerdictStaticCamera) != 0, "premise: " + Flags(d));
+			Field pan(Grid4K()); pan.FromModel(Pan4K()); pan.AddNoise(0.05, 21);
+			const CameraMotion r = on.Fit(pan.Input(kPairSeconds, 6));
+			Require(Usable(r) && std::fabs(r.params.h[2] - 12.3) < 0.2, "clean pan after a demotion: " + Flags(r));
+		}
+
+		TEST_METHOD(EvaluatorUnitBehaviourAndCost)
+		{
+			Field f(Grid4K());
+			f.AddObject(30, 17, 180, 101, 5, 2);
+			const PairInput in = f.Input(kPairSeconds, 5);
+			const Params obj = PanModel(5, 2), none = PanModel(0, 0);
+			const StaticCameraConfig cfg;
+			const StaticCameraResult w = EvaluateStaticCamera(cfg, in, obj);
+			Require(w.computed && w.detected && w.staticShare > 0.99 && w.fitShare < 0.01, "object model on a static ring: static wins");
+			const StaticCameraResult same = EvaluateStaticCamera(cfg, in, none);
+			Require(same.computed && !same.detected, "an identity fit is left alone (requireMotion)");
+			Params nothing; nothing.type = ModelType::None;
+			Require(!EvaluateStaticCamera(cfg, in, nothing).computed, "no model, no verdict");
+			StaticCameraConfig few = cfg; few.minRingBlocks = 1000000;
+			Require(!EvaluateStaticCamera(few, in, obj).computed, "too few ring blocks, no verdict");
+			const auto t0 = std::chrono::steady_clock::now();
+			int hits = 0;
+			for (int i = 0; i < 200; ++i) hits += EvaluateStaticCamera(cfg, in, obj).detected ? 1 : 0;
+			const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / 200;
+			Logger::WriteMessage(("EvaluateStaticCamera on the 240 x 135 grid: " + std::to_string(us) + " us per call (hits " + std::to_string(hits) + ")").c_str());
+			Require(hits == 200 && us < 40000.0, "cost bound (loose; indicative only): " + std::to_string(us) + " us");
+			// The same at the 1080p grid of the real-clip evaluation (120 x 68 blocks).
+			GridSpec g1080; g1080.w = 120; g1080.h = 68; g1080.blockSize = 16;
+			Field f2(g1080);
+			f2.AddObject(15, 9, 90, 50, 5, 2);
+			const PairInput in2 = f2.Input(kPairSeconds, 5);
+			const auto t1 = std::chrono::steady_clock::now();
+			int hits2 = 0;
+			for (int i = 0; i < 200; ++i) hits2 += EvaluateStaticCamera(cfg, in2, obj).detected ? 1 : 0;
+			const double us2 = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t1).count() / 200;
+			Logger::WriteMessage(("EvaluateStaticCamera on the 120 x 68 grid: " + std::to_string(us2) + " us per call (hits " + std::to_string(hits2) + ")").c_str());
+			Require(hits2 == 200 && us2 < 20000.0, "1080p cost bound (loose; indicative only): " + std::to_string(us2) + " us");
 		}
 	};
 }

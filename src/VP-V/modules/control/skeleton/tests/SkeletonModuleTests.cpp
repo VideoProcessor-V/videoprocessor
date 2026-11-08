@@ -7,7 +7,9 @@
 // worker does. Settings parse; off is inert; the Original pathway forces off; waiting reasons are
 // visible; with the shared seal driving and source frames tapped, P1 / P4 are sealed or live-filled with
 // the bytes of the one-shot reference and P10-12 are declined with the visible reason; hosts are
-// independent. CPU only (the lane's own CPU worker threads run).
+// independent. 70b G5: skeleton_gpu_gap / grain_split_storage parse; Off, Shadow, the Original pathway and "no render
+// device" construct no GPU dispatcher and make no GPU call (the status says why); the GPU status texts. CPU only (the
+// lane's own CPU worker threads run); the dispatcher itself is covered by SkeletonGpuDispatcherWarpTests (WARP).
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -15,6 +17,7 @@
 #include <windows.h>
 #include "CppUnitTest.h"
 
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/FramesInFlight.h>
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
@@ -47,6 +50,17 @@ namespace SkeletonModuleTestsNs
 	{
 		for (const std::string& l : lines)
 			if (l.find(part) != std::string::npos)
+				return true;
+		return false;
+	}
+
+	// True when the status carries an engaged entry for this reason id ("<id>: <reason>"). The audit rule: assert on the id,
+	// never on the status prose (the lane's own card note may also say "no render device").
+	bool HasId(const std::vector<std::string>& lines, const char* id)
+	{
+		const std::string prefix = std::string(id) + ": ";
+		for (const std::string& l : lines)
+			if (l.compare(0, prefix.size(), prefix) == 0)
 				return true;
 		return false;
 	}
@@ -116,10 +130,10 @@ namespace SkeletonModuleTestsNs
 
 		const void* Host() const { return &r; }
 
-		void Life(RE::Lifecycle kind, int code = 0)
+		void Life(RE::Lifecycle kind, int code = 0, double value = 0.0)
 		{
 			RE::LifecycleFacts f;
-			f.host = &r; f.kind = kind; f.code = code;
+			f.host = &r; f.kind = kind; f.code = code; f.value = value;
 			sk.OnLifecycle(f);
 		}
 
@@ -273,6 +287,30 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(s.camera == Vpv::Skeleton::CameraLinkMode::Off);
 			Assert::AreEqual<size_t>(3, s.laneProblems.size());
 			Assert::AreEqual<size_t>(1, s.cameraProblems.size());
+		}
+
+		TEST_METHOD(DispatchKeysDefaultAndParse)
+		{
+			const Vpv::Skeleton::Settings d = ParseText("[vpv.skeleton]\nanalysis_lane=on\n");
+			Assert::IsTrue(d.gpuGap == Vpv::Skeleton::GpuGapMode::Off, L"skeleton_gpu_gap defaults to off");
+			Assert::IsTrue(d.grainStorage == Vpv::Skeleton::GrainStorage::Full, L"grain_split_storage defaults to full");
+			const Vpv::Skeleton::Settings s = ParseText("[vpv.skeleton]\nanalysis_lane=on\nskeleton_gpu_gap=After_Render\ngrain_split_storage=Compact\n");
+			Assert::IsTrue(s.gpuGap == Vpv::Skeleton::GpuGapMode::AfterRender);
+			Assert::IsTrue(s.grainStorage == Vpv::Skeleton::GrainStorage::Compact);
+			Assert::IsTrue(s.laneProblems.empty());
+			const Vpv::Skeleton::Settings o = ParseText("[vpv.skeleton]\nskeleton_gpu_gap=off\ngrain_split_storage=full\n");
+			Assert::IsTrue(o.gpuGap == Vpv::Skeleton::GpuGapMode::Off && o.grainStorage == Vpv::Skeleton::GrainStorage::Full);
+			Assert::IsTrue(o.laneProblems.empty());
+		}
+
+		TEST_METHOD(InvalidDispatchKeysKeepTheDefaultAndAreReported)
+		{
+			const Vpv::Skeleton::Settings s = ParseText("[vpv.skeleton]\nskeleton_gpu_gap=sometimes\ngrain_split_storage=tiny\n");
+			Assert::IsTrue(s.gpuGap == Vpv::Skeleton::GpuGapMode::Off);
+			Assert::IsTrue(s.grainStorage == Vpv::Skeleton::GrainStorage::Full);
+			Assert::AreEqual<size_t>(2, s.laneProblems.size());
+			Assert::IsTrue(s.laneProblems[0] == "skeleton_gpu_gap 'sometimes' is not valid (off|after_render); kept off");
+			Assert::IsTrue(s.laneProblems[1] == "grain_split_storage 'tiny' is not valid (full|compact); kept full");
 		}
 
 		TEST_METHOD(OriginalPathwayForcesBothOff)
@@ -432,7 +470,8 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(rig.sk.WorkersRunning(rig.Host()), L"started after the producers were registered");
 			Assert::IsTrue(rig.sk.LaneOf(rig.Host())->TotalDeclined() > 0, L"P10-12 have no producer and no live fill yet");
 			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
-			Assert::IsTrue(Has(fb, "skeleton_products: P10 grain split, P11 region stats, P12 light level declined: render-thread GPU dispatch hook pending (M2 Upload/Entrance phase)"));
+			Assert::IsTrue(Has(fb, "skeleton_gpu_device: GPU products: no render device"), L"no pl_gpu in a unit test: P10-12 are not made, visibly");
+			Assert::IsFalse(Has(fb, "skeleton_products"), L"the old declined entry is gone");
 			Assert::IsFalse(Has(fb, "skeleton_lane: waiting"), L"nothing is waiting any more");
 			Assert::IsFalse(Has(fb, "skeleton_history"), L"no capped record history is in this graph: no cap note");
 			const std::vector<std::string> lines = rig.Lines(RE::StatusKind::Lines);
@@ -618,6 +657,98 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(rig.sk.WorkersRunning(rig.Host()));
 		}
 
+		TEST_METHOD(AQueueChangeReconfiguresTheGraphAtTheNextFrame)
+		{
+			// The record histories follow R + L + look-ahead: a queue change rebuilds the graph like a moved source period.
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			auto configures = [&rig]() {
+				const std::string text = rig.Command();
+				const size_t k = text.find(" graph configure");
+				Assert::IsTrue(k != std::string::npos);
+				const size_t b = text.rfind(' ', k - 1);
+				return std::stoi(text.substr(b + 1, k - b - 1));
+			};
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			const int before = configures();
+			for (int64_t s = 4; s <= 6; ++s)
+				rig.Frame(s);
+			Assert::AreEqual(before, configures(), L"an unchanged queue does not reconfigure");
+			Assert::AreEqual(1, int(rig.sk.LaneOf(rig.Host())->State()->graph.settings.laneLead));
+			SkeletonModule::QueueShape q;
+			q.renderAhead = 4;
+			q.laneLead = 3;
+			q.lookAheadWalk = 5;
+			rig.sk.SetQueueForTesting(q);
+			rig.Frame(7);
+			Assert::AreEqual(before + 1, configures(), L"the queue change reconfigured the graph once");
+			const VpSkeleton::GraphSettings gs = rig.sk.LaneOf(rig.Host())->State()->graph.settings;
+			Assert::AreEqual(4, int(gs.renderAhead));
+			Assert::AreEqual(3, int(gs.laneLead));
+			Assert::AreEqual(5, int(gs.lookAheadWalk));
+			rig.Frame(8);
+			Assert::AreEqual(before + 1, configures(), L"and only once");
+		}
+
+		TEST_METHOD(ALongerConfiguredQueueGivesALongerHistory)
+		{
+			// The module's queue snapshot is what SkeletonProducts is built from: floor on a short queue, deeper on a long one.
+			const double p24 = 1001.0 / 24.0;
+			SkeletonModule::QueueShape shortQ;
+			shortQ.renderAhead = 2; shortQ.laneLead = 3; shortQ.lookAheadWalk = 2; shortQ.wired = SkeletonModule::QueueShape::kAll;
+			SkeletonModule::QueueShape longQ;
+			longQ.renderAhead = 8; longQ.laneLead = 4; longQ.lookAheadWalk = 88; longQ.wired = SkeletonModule::QueueShape::kAll;
+			SkeletonModule sk;
+			sk.PublishQueue(shortQ);
+			const SkeletonModule::QueueShape gotShort = sk.CurrentQueue();
+			const unsigned shortFrames = VpSkeleton::QueueFramesFor(gotShort.renderAhead, gotShort.laneLead, gotShort.lookAheadWalk);
+			sk.PublishQueue(longQ);
+			const SkeletonModule::QueueShape got = sk.CurrentQueue();
+			Assert::IsTrue(got == longQ, L"the snapshot round-trips");
+			const unsigned longFrames = VpSkeleton::QueueFramesFor(got.renderAhead, got.laneLead, got.lookAheadWalk);
+			Assert::AreEqual(unsigned(7), shortFrames);
+			Assert::AreEqual(unsigned(100), longFrames);
+			const int floorQp = int(VpSkeleton::SkeletonProducts(false, false, p24, shortFrames).Get(VpSkeleton::kQualityPattern).history);
+			const int longQp = int(VpSkeleton::SkeletonProducts(false, false, p24, longFrames).Get(VpSkeleton::kQualityPattern).history);
+			Assert::AreEqual(48, floorQp, L"a short queue keeps the 2 s floor");
+			Assert::AreEqual(100, longQp, L"a long queue gives a longer history");
+			// An undelivered term keeps its default (0 / 1 / 0) whatever value a feed passes for it.
+			SkeletonModule::QueueShape partial;
+			partial.renderAhead = 9; partial.laneLead = 5; partial.lookAheadWalk = 7; partial.wired = SkeletonModule::QueueShape::kLaneLead;
+			sk.PublishQueue(partial);
+			Assert::AreEqual(0, int(sk.CurrentQueue().renderAhead));
+			Assert::AreEqual(5, int(sk.CurrentQueue().laneLead));
+			Assert::AreEqual(0, int(sk.CurrentQueue().lookAheadWalk));
+		}
+
+		TEST_METHOD(AnUnwiredQueueIsShownAsAFallbackUntilItIsDelivered)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks),
+				"skeleton_queue: record history: queue not yet wired (render-ahead depth, lane lead, look-ahead walk); floors in use"));
+			// The look-ahead walk arrives with the host's SettingsApplied call (value = the motion look-ahead depth): that term leaves the line.
+			rig.Life(RE::Lifecycle::SettingsApplied, 0, 4.0);
+			Assert::AreEqual(4, int(rig.sk.CurrentQueue().lookAheadWalk));
+			Assert::AreEqual(0, int(rig.sk.CurrentQueue().renderAhead));
+			Assert::AreEqual(1, int(rig.sk.CurrentQueue().laneLead));
+			rig.Frame(4);
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks),
+				"skeleton_queue: record history: queue not yet wired (render-ahead depth, lane lead); floors in use"));
+			SkeletonModule::QueueShape q;
+			q.renderAhead = 1; q.laneLead = 2; q.lookAheadWalk = 3;
+			rig.sk.SetQueueForTesting(q);
+			rig.Frame(5);
+			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue"), L"all three delivered: nothing to show");
+			Assert::IsFalse(SkeletonModule::QueueDecision(SkeletonModule::QueueShape::kAll).engaged);
+			Assert::AreEqual(std::string("lane lead, look-ahead walk"), SkeletonModule::QueueNotWiredNote(SkeletonModule::QueueShape::kRenderAhead));
+		}
+
 		TEST_METHOD(QueueDropsReachTheLaneAtTheNextFrame)
 		{
 			Rig rig(Lane("on"));
@@ -629,6 +760,75 @@ namespace SkeletonModuleTestsNs
 			rig.sk.OnQueue(d);
 			rig.Frame(4);
 			Assert::IsTrue(rig.Command().find("2 drops applied") != std::string::npos);
+		}
+
+		TEST_METHOD(OffAndOriginalNeverConstructADispatcher)
+		{
+			const unsigned long long before = SkeletonModule::GpuDispatchersCreated();
+			{
+				Rig off("[general]\nx=1\n");
+				off.ResyncApply("on");
+				off.Life(RE::Lifecycle::GpuCreated);
+				off.Life(RE::Lifecycle::SettingsApplied);
+				for (int64_t s = 1; s <= 3; ++s)
+					off.Frame(s);
+				Assert::IsNull(off.sk.GpuDispatcherFor(off.Host()), L"off: no dispatcher");
+			}
+			{
+				Rig orig(Lane("on", "skeleton_gpu_gap=after_render\n"));
+				orig.Life(RE::Lifecycle::GpuCreated, 0);
+				orig.Life(RE::Lifecycle::SettingsApplied, 1);   // the Original pathway
+				Assert::IsFalse(orig.sk.Active(orig.Host()));
+				Assert::IsNull(orig.sk.GpuDispatcherFor(orig.Host()), L"Original: no dispatcher");
+				Assert::IsNull(orig.sk.LaneOf(orig.Host()));
+			}
+			Assert::AreEqual(before, SkeletonModule::GpuDispatchersCreated(), L"no dispatcher was ever constructed");
+		}
+
+		TEST_METHOD(WithoutARenderDeviceTheOnModeHasNoDispatcherAndSaysSo)
+		{
+			const unsigned long long before = SkeletonModule::GpuDispatchersCreated();
+			Rig rig(Lane("on", "skeleton_gpu_gap=after_render\ngrain_split_storage=compact\n"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);   // f.gpu is null in a unit test
+			for (int64_t s = 1; s <= 6; ++s)
+				rig.Frame(s);
+			Assert::IsNotNull(rig.sk.LaneOf(rig.Host()));
+			Assert::IsNull(rig.sk.GpuDispatcherFor(rig.Host()));
+			Assert::AreEqual(before, SkeletonModule::GpuDispatchersCreated());
+			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
+			Assert::IsTrue(HasId(fb, "skeleton_gpu_device"), L"no render device is its own reason id");
+			Assert::IsFalse(HasId(fb, "skeleton_gpu_gap"), L"nothing runs ahead without a device");
+			Assert::IsFalse(HasId(fb, "skeleton_gpu_live"), L"no dispatcher, no live wait");
+			Assert::IsFalse(HasId(fb, "skeleton_gpu_shadow"), L"not shadow: no shadow entry");
+			Assert::IsTrue(rig.sk.LaneOf(rig.Host())->TotalDeclined() > 0, L"the declining live fill is still installed without a dispatcher");
+		}
+
+		TEST_METHOD(ShadowModeSkipsTheDeviceProductsVisibly)
+		{
+			const unsigned long long before = SkeletonModule::GpuDispatchersCreated();
+			Rig rig(Lane("shadow", "skeleton_gpu_gap=after_render\n"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 6; ++s)
+				rig.Frame(s);
+			Assert::IsNull(rig.sk.GpuDispatcherFor(rig.Host()));
+			Assert::AreEqual(before, SkeletonModule::GpuDispatchersCreated());
+			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
+			Assert::IsTrue(HasId(fb, "skeleton_gpu_shadow"), L"shadow is reported under its own reason id");
+			Assert::IsFalse(HasId(fb, "skeleton_gpu_device"), L"shadow is not reported as a missing render device");
+			Assert::IsFalse(HasId(fb, "skeleton_gpu_gap"), L"shadow runs no GPU work ahead");
+			Assert::IsFalse(HasId(fb, "skeleton_gpu_live"), L"shadow has no live GPU wait");
+		}
+
+		TEST_METHOD(AnInvalidDispatchKeyIsShownWhileTheLaneRuns)
+		{
+			Rig rig(Lane("on", "skeleton_gpu_gap=sometimes\n"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_settings: skeleton_gpu_gap 'sometimes' is not valid (off|after_render); kept off"));
 		}
 
 		TEST_METHOD(ACommandForAnotherModuleIsNotAnswered)
@@ -651,6 +851,30 @@ namespace SkeletonModuleTestsNs
 			rig.sk.OnStatus(c, RE::StatusKind::WorkerFault, none, "skeleton", "exception");
 			rig.sk.OnStatus(c, RE::StatusKind::WorkerFault, none, "resync", "exception");
 			Assert::AreEqual<unsigned long long>(before + 1, SkeletonModule::ContainedFaults());
+		}
+	};
+
+	TEST_CLASS(SkeletonGpuStatusTexts)
+	{
+	public:
+		TEST_METHOD(TheDispatcherStatusTextsAreTheAgreedOnes)
+		{
+			namespace FC = FallbackCatalog;
+			Assert::IsTrue(FC::SkeletonGpuLive(true).engaged);
+			Assert::IsTrue(FC::SkeletonGpuLive(true).reason == "live: waits for the Entrance phase (M2 P4)");
+			Assert::IsFalse(FC::SkeletonGpuLive(false).engaged);
+			Assert::IsTrue(FC::SkeletonGpuGapAhead(true).reason == "GPU lane work runs ahead of the present");
+			Assert::IsFalse(FC::SkeletonGpuGapAhead(false).engaged);
+			Assert::IsTrue(FC::SkeletonGpuDevice(true).reason.find("GPU products: no render device") == 0);
+			Assert::IsFalse(FC::SkeletonGpuDevice(false).engaged);
+			Assert::IsTrue(FC::SkeletonGpuShadow(true).reason.find("shadow: GPU products skipped") == 0);
+			Assert::IsTrue(FC::SkeletonGpuChroma(true).reason == "P10c declined: chroma needs the source ring (M2 P10)");
+			Assert::IsFalse(FC::SkeletonGpuFailed(0, "x").engaged);
+			const FC::Decision failed = FC::SkeletonGpuFailed(3, "the extend pass failed");
+			Assert::IsTrue(failed.engaged && failed.reason.find("3 time(s)") != std::string::npos && failed.reason.find("the extend pass failed") != std::string::npos);
+			Assert::IsFalse(FC::SkeletonGpuShed("").engaged);
+			const FC::Decision shed = FC::SkeletonGpuShed("light level (T1)");
+			Assert::IsTrue(shed.engaged && shed.reason.find("VRAM shed: light level (T1)") == 0);
 		}
 	};
 }

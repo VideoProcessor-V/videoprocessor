@@ -9,7 +9,12 @@
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
+#include <VP-V/modules/input/source_analysis/lane/LaneGpuGrainKernel.h>
+#include <VP-V/modules/input/source_analysis/lane/LaneGpuJobs.h>
+#include <VP-V/modules/input/source_analysis/lane/LaneGpuLightKernel.h>
+#include <VP-V/modules/input/source_analysis/lane/LaneGpuRegionKernel.h>
 
 #include <d3d11.h>
 #include <dxgi1_4.h>
@@ -61,6 +66,21 @@ namespace Vpv
 
 			bool SameDims(Dims a, Dims b) { return a.width == b.width && a.height == b.height; }
 
+			std::atomic<unsigned long long>& DispatchersCreated()
+			{
+				static std::atomic<unsigned long long> n{ 0 };
+				return n;
+			}
+
+			// Lane GPU job cost prediction: the declaration's reference ms scaled by the pixel count, times this
+			// safety factor, until the dispatcher has a measured time (the larger of the two is used).
+			constexpr double kGpuPredictSafety = 2.0;
+
+			GrainSplit::Storage RequestedStorage(const Settings& s)
+			{
+				return s.grainStorage == GrainStorage::Compact ? GrainSplit::Storage::Compact : GrainSplit::Storage::Full;
+			}
+
 			// VRAM and adapter facts for the tier plan: the render device's adapter, local segment. A failure
 			// leaves zeros and says why (shown, not silent).
 			bool QueryCard(void* device, CardProfile& card, std::string& why)
@@ -100,12 +120,25 @@ namespace Vpv
 			}
 		}
 
+		// What the GPU products of a lane are wired to (70b G5). `dispatcher` null = none (Off / Shadow / no pl_gpu).
+		struct GpuWiring
+		{
+			SkeletonGpuDispatcher* dispatcher = nullptr;
+			bool gapAhead = false;       // skeleton_gpu_gap = after_render: the three GPU lane jobs are registered
+			bool compactGrain = false;   // P10 declared (and made) Compact
+			bool Same(const GpuWiring& o) const { return dispatcher == o.dispatcher && gapAhead == o.gapAhead && compactGrain == o.compactGrain; }
+		};
+
 		// Everything that depends on the source dimensions: the producers (P4 is built for a size), the
-		// lane and its worker threads. Replaced as a whole when the source size changes.
+		// lane and its worker threads. Replaced as a whole when the source size or the GPU wiring changes.
 		struct Bundle
 		{
-			Bundle(Dims d, uint64_t seq, const std::function<uint64_t()>& clock)
-				: dims(d), createdSeq(seq), p1(clock), p4(d, clock), lane(std::shared_ptr<VpIndicator::Indicator>(), clock), threads(lane)
+			Bundle(Dims d, uint64_t seq, const std::function<uint64_t()>& clock, const GpuWiring& gpuWiring)
+				: dims(d), createdSeq(seq), wiring(gpuWiring),
+				  // Without a GPU the registry is exactly the one the lane always used; with one, the tap form (P10 / P11 read
+				  // the tap plane, not the P13 ring that is RenderOnly and never filled: without this P10 is InputMissing).
+				  registry(MakeRegistry(gpuWiring, 0.0, 0)),
+				  p1(clock), p4(d, clock), lane(std::shared_ptr<VpIndicator::Indicator>(), clock), threads(lane)
 			{
 				lane.SetExternalSeal(true);   // FrameSeal owns the one seal
 				lane.RegisterProducer(&p1);
@@ -116,24 +149,96 @@ namespace Vpv
 				lane.RegisterCpuLiveCompute(VpSkeleton::kP4SourceStats,
 					[d](const VpSkeleton::Node&, const SourceFrameView*, const std::array<const uint8_t*, VpSkeleton::kMaxInputs>& in,
 						uint8_t* dst, size_t n) { return in[0] != nullptr && VpLaneProducts::ComputeSourceStats(in[0], d, dst, n); });
-				// Every other product (P10, P11, P12, ...): no producer and no live fill yet. Declined, counted.
-				lane.SetLiveFill([this](const VpSkeleton::Node&, uint64_t, int, VpSkeleton::Header&, uint32_t) {
-					liveDeclined.fetch_add(1, std::memory_order_relaxed);
-					return false;
-				});
+				if (wiring.dispatcher != nullptr)
+				{
+					// Producers are registered BEFORE the worker threads start (RegisterProducer asserts). Without
+					// skeleton_gpu_gap the GPU products have no lane producer: they are in-render-only.
+					if (wiring.gapAhead)
+					{
+						AddGpuJob(VpSkeleton::kP10GrainSplit, job10);
+						AddGpuJob(VpSkeleton::kP11RegionBlockStats, job11);
+						AddGpuJob(VpSkeleton::kP12LightLevel, job12);
+						if (job12)
+						{
+							// P12(N) needs P12(N-1) (the one-pole state): readable in the ring or live, else Begin says no.
+							const AnalysisLane* l = &lane;
+							SkeletonGpuDispatcher* disp = wiring.dispatcher;
+							std::atomic<uint64_t>* pendingAsNone = &lightPendingAsNone;   // a Bundle member: it outlives the job
+							job12->SetBeginGate([l, disp, pendingAsNone](const VpSkeleton::LaneJobContext& job) {
+								if (!disp->Available(VpSkeleton::kP12LightLevel))
+									return false;   // refused / not allocated yet: declined, shown by the dispatcher's own entry
+								return VpLaneProducts::LightLevelBeginGate(job.seq, [l, pendingAsNone](uint64_t s) {
+									// LightPrevStateOf: Pending reads as None until G6 (a pending live fill is run by nothing before it).
+									// Counted and shown (skeleton_gpu_light_pending), never silent.
+									return VpLaneProducts::LightPrevStateOf(l->ReadOf(VpSkeleton::kP12LightLevel, s).state, *pendingAsNone);
+								});
+							});
+						}
+					}
+					// The dispatcher serves the GPU products; their live (in-render) form is only RECORDED here and runs at
+					// the Entrance phase (RunDeferredLive, M2 P4): until then those fills stay pending (shown).
+					lane.SetGpuDispatcher(wiring.dispatcher);
+					lane.SetGpuLiveDeferred(true);
+					wiring.dispatcher->SetLane(&lane);
+				}
+				else
+				{
+					// No dispatcher: every other product (P10, P11, P12, ...) has no producer and no live fill. Declined,
+					// counted. (liveFill_ wins over a dispatcher in LiveFillOf, so this is installed ONLY without one.)
+					lane.SetLiveFill([this](const VpSkeleton::Node&, uint64_t, int, VpSkeleton::Header&, uint32_t) {
+						liveDeclined.fetch_add(1, std::memory_order_relaxed);
+						return false;
+					});
+				}
+			}
+
+			// The registry for a wiring, the measured source period and the queue frames (0 = the unmeasured defaults). Re-made at each
+			// Configure so the record histories follow the period and the queue; the GPU declarations do not depend on either.
+			static VpSkeleton::Registry MakeRegistry(const GpuWiring& w, double periodMs, unsigned queueFrames)
+			{
+				VpSkeleton::Registry reg = VpSkeleton::SkeletonProducts(w.compactGrain, w.compactGrain, periodMs, queueFrames);
+				return w.dispatcher != nullptr ? VpLaneProducts::TapFormProducts(reg) : reg;
+			}
+
+			// One fixed-step GPU lane job (steps = StepsFor of the dims; cost from the dispatcher's measurement, else a
+			// conservative figure derived from the declaration's reference ms and the pixel count).
+			void AddGpuJob(VpSkeleton::ProductId id, std::unique_ptr<VpLaneProducts::GpuComputeLaneJob>& slot)
+			{
+				const uint32_t steps = VpLaneProducts::StepsFor(id, dims);
+				if (steps == 0 || !registry.Has(id))
+					return;
+				SkeletonGpuDispatcher* disp = wiring.dispatcher;
+				const double refMs = registry.Get(id).refRenderMs;
+				const double pixels = double(dims.width) * double(dims.height);
+				std::function<double()> predicted = [disp, id, refMs, pixels]() {
+					const double derived = refMs * (pixels / VpSkeleton::kReferencePixels) * kGpuPredictSafety;
+					const double measured = disp->MeasuredMs(id);
+					return measured > derived ? measured : derived;
+				};
+				slot.reset(new VpLaneProducts::GpuComputeLaneJob(VpLaneProducts::GpuComputeLaneJob::FixedStepsTag(), id, disp,
+					std::move(predicted), steps));
+				// A product the dispatcher could not allocate (refused: shown) or has not allocated yet declines its lane job
+				// instead of failing every chunk (P12 adds its own gate below).
+				slot->SetBeginGate([disp, id](const VpSkeleton::LaneJobContext&) { return disp->Available(id); });
+				lane.RegisterProducer(slot.get());
 			}
 
 			Dims dims;
 			uint64_t createdSeq;
+			GpuWiring wiring;
+			VpSkeleton::Registry registry;   // what the lane (and the dispatcher's Configure) are built on
 			// Declared before the lane: they outlive its state (the runner points at them).
+			std::atomic<uint64_t> lightPendingAsNone{ 0 };   // P12 gate: a Pending previous frame read as not made (until G6)
 			VpLaneProducts::HalfLumaProducer p1;
 			VpLaneProducts::SourceStatsProducer p4;
+			std::unique_ptr<VpLaneProducts::GpuComputeLaneJob> job10, job11, job12;   // null unless the GPU gap is on
 			AnalysisLane lane;
 			VpSkeleton::LaneWorkerThreads threads;
 			std::atomic<uint64_t> liveDeclined{ 0 };
 			// Render thread.
 			uint32_t configuredGen = 0;
 			double configuredPeriodMs = 0.0;
+			SkeletonModule::QueueShape configuredQueue;
 			uint64_t framesSinceConfigure = 0;
 		};
 
@@ -154,6 +259,18 @@ namespace Vpv
 			bool sealLateHook = false;
 			bool tapOn = false;
 			std::string cardNote;           // why video memory is unknown, if it is
+			// 70b G5 (lifecycle / render thread): the renderer's pl_gpu (GpuCreated) and, only for analysis_lane = on with a
+			// pl_gpu, the GPU dispatcher with its three kernels. Null in Off / Shadow / Original / no render device.
+			pl_gpu gpu = nullptr;
+			std::unique_ptr<SkeletonGpuDispatcher> dispatcher;
+			GrainSplit::Storage dispatcherStorage = GrainSplit::Storage::Full;
+			bool dispatcherCompact = false;   // the storage the kernel was GRANTED (declared the same way)
+			pl_gpu dispatcherGpu = nullptr;
+			// Render thread: set when the dispatcher's private working memory does not fit the free video memory (the GPU
+			// products are then not wired; shown as skeleton_gpu_memory). Cleared at a settings or size change.
+			std::string gpuMemoryNote;
+			uint64_t gpuMemorySizeKey = 0;
+			uint32_t gpuMemoryGen = 0;
 
 			// Any thread.
 			std::atomic<uint32_t> srcW{ 0 }, srcH{ 0 };
@@ -180,6 +297,7 @@ namespace Vpv
 			std::string waiting;
 			std::string shownWaiting;
 			bool shownBundle = false;
+			uint8_t shownQueueWired = 0xFF;   // the queue-delivery state the cached status text was built for
 
 			// The render-thread status cache, read by any thread.
 			std::mutex statusMutex;
@@ -237,6 +355,57 @@ namespace Vpv
 			}
 
 			std::string Dimensions(Dims d) { return std::to_string(d.width) + "x" + std::to_string(d.height); }
+
+			// Stops and drops the lane bundle (joins its threads first). Lifecycle / render thread.
+			void StopBundle(HostState& st)
+			{
+				std::shared_ptr<Bundle> old = std::atomic_exchange(&st.bundle, std::shared_ptr<Bundle>());
+				if (old)
+					old->threads.Stop();   // joined here, before anything the threads read goes away
+			}
+
+			// Destroys the GPU dispatcher (and everything it allocated). The bundle (whose lane and jobs point at it) goes first.
+			void ReleaseDispatcher(HostState& st, bool gpuAlive = true)
+			{
+				if (!st.dispatcher)
+					return;
+				StopBundle(st);
+				if (gpuAlive)
+					st.dispatcher->Release();
+				else
+					st.dispatcher->Abandon();   // the renderer's device died without GpuReleased: no libplacebo call may touch it
+				st.dispatcher.reset();
+				st.dispatcherGpu = nullptr;
+			}
+
+			// 70b G5: the dispatcher exists only while the lane is wanted AND mode == on AND a pl_gpu was given. Shadow, Off,
+			// the Original pathway and "no render device" never construct one (no GPU call at all). A changed pl_gpu or
+			// storage choice rebuilds it (kernels carry the storage) and drops the lane bundle that points at the old one.
+			void UpdateDispatcher(HostState& st)
+			{
+				const bool want = st.settings.lane.mode == LaneSettings::Mode::On && st.gpu != nullptr;
+				const GrainSplit::Storage storage = RequestedStorage(st.settings);
+				if (!want)
+				{
+					ReleaseDispatcher(st);
+					return;
+				}
+				if (st.dispatcher && st.dispatcherGpu == st.gpu && st.dispatcherStorage == storage)
+					return;
+				ReleaseDispatcher(st, st.dispatcherGpu == st.gpu);   // another pl_gpu: the old device is gone
+				std::unique_ptr<SkeletonGpuDispatcher> d(new SkeletonGpuDispatcher(st.gpu));
+				DispatchersCreated().fetch_add(1, std::memory_order_relaxed);
+				if (!d->Valid())
+					return;   // no usable dispatch on this device: shown as "no render device"
+				VpLaneProducts::GrainSplitKernel* grain = new VpLaneProducts::GrainSplitKernel(storage);
+				st.dispatcherCompact = grain->Granted() == GrainSplit::Storage::Compact;
+				d->AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel>(grain));
+				d->AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel>(new VpLaneProducts::RegionStatsKernel()));
+				d->AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel>(new VpLaneProducts::LightLevelKernel()));
+				st.dispatcher = std::move(d);
+				st.dispatcherGpu = st.gpu;
+				st.dispatcherStorage = storage;
+			}
 		}
 
 		// ---- construction -------------------------------------------------------------------------
@@ -250,7 +419,7 @@ namespace Vpv
 			std::vector<std::shared_ptr<HostState>> all;
 			hosts_.ForEach([&all](const void*, const std::shared_ptr<HostState>& st) { all.push_back(st); });
 			for (const std::shared_ptr<HostState>& st : all)
-				Teardown(st, false);
+				Teardown(st, false, false);   // process end: the render device may already be gone
 		}
 
 		// ---- diagnostics --------------------------------------------------------------------------
@@ -280,6 +449,12 @@ namespace Vpv
 			return b && b->threads.Running();
 		}
 		unsigned long long SkeletonModule::ContainedFaults() { return Faults().load(std::memory_order_relaxed); }
+		const SkeletonGpuDispatcher* SkeletonModule::GpuDispatcherFor(const void* host) const
+		{
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			return st ? st->dispatcher.get() : nullptr;
+		}
+		unsigned long long SkeletonModule::GpuDispatchersCreated() { return DispatchersCreated().load(std::memory_order_relaxed); }
 
 		// ---- lifecycle (render thread) --------------------------------------------------------------
 		void SkeletonModule::OnLifecycle(RE::LifecycleFacts& f)
@@ -290,9 +465,11 @@ namespace Vpv
 			{
 			case RE::Lifecycle::GpuCreated:
 				hosts_.SetAux(f.host, f.device);   // the raw device, for the video memory query only
+				gpuSlots_.SetAux(f.host, const_cast<void*>(static_cast<const void*>(f.gpu)));   // 70b G5: the renderer's pl_gpu (null in a unit test: no GPU products)
 				Reconcile(f.host, -1);
 				break;
 			case RE::Lifecycle::SettingsApplied:
+				PublishLookAheadWalk(f.value);   // the host passes the motion look-ahead depth (frames) here: the one queue term it delivers
 				Reconcile(f.host, f.code != 0 ? 1 : 0);   // code != 0: the Original pathway
 				break;
 			case RE::Lifecycle::GpuReleased:
@@ -303,6 +480,7 @@ namespace Vpv
 					Teardown(st, true);
 				else
 					hosts_.Remove(f.host, true);
+				gpuSlots_.Remove(f.host, true);   // the pl_gpu is going away: the dispatcher was released by Teardown above
 				break;
 			}
 			default:
@@ -321,7 +499,7 @@ namespace Vpv
 			{
 				// A new renderer at the address of one that died without GpuReleased (a failed device create):
 				// the old state's seal hooks, tap and lane belong to the dead one.
-				Teardown(st, false);
+				Teardown(st, false, false);   // the dead renderer's device objects are not ours to destroy
 				hosts_.Remove(host, false);
 				st.reset();
 			}
@@ -362,6 +540,8 @@ namespace Vpv
 				}
 			}
 			st->settings = s;
+			st->gpu = static_cast<pl_gpu>(gpuSlots_.Aux(host));   // const pl_gpu_t*
+			UpdateDispatcher(*st);
 			st->settingsGen.fetch_add(1, std::memory_order_relaxed);
 			const bool wasActive = st->active.load(std::memory_order_acquire);
 			// The shared seal: hooked once per renderer (a FrameSeal cannot drop a provider or subscriber).
@@ -403,7 +583,7 @@ namespace Vpv
 			Refresh(*st);
 		}
 
-		void SkeletonModule::Teardown(const std::shared_ptr<HostState>& st, bool releaseSlot)
+		void SkeletonModule::Teardown(const std::shared_ptr<HostState>& st, bool releaseSlot, bool gpuAlive)
 		{
 			if (!st)
 				return;
@@ -415,10 +595,8 @@ namespace Vpv
 				VpFrameAnalysis::SourceFrameTap::Unregister(host);
 				st->tapOn = false;
 			}
-			std::shared_ptr<Bundle> old = std::atomic_exchange(&st->bundle, std::shared_ptr<Bundle>());
-			if (old)
-				old->threads.Stop();   // joined here, before anything the threads read goes away
-			old.reset();
+			StopBundle(*st);
+			ReleaseDispatcher(*st, gpuAlive);   // 70b G5: the GPU textures go with the lane (GpuReleased / switched off)
 			{
 				std::lock_guard<std::mutex> lock(st->pendingMutex);
 				st->pending.clear();
@@ -539,12 +717,25 @@ namespace Vpv
 			}
 			st.waiting.clear();
 
+			GpuWiring wiring;
+			const uint64_t sizeKey = (uint64_t(dims.width) << 32) | dims.height;
+			if (st.gpuMemorySizeKey != sizeKey || st.gpuMemoryGen != st.settingsGen.load(std::memory_order_relaxed))
+			{
+				st.gpuMemoryNote.clear();   // a new size or settings generation: ask again
+				st.gpuMemorySizeKey = sizeKey;
+				st.gpuMemoryGen = st.settingsGen.load(std::memory_order_relaxed);
+			}
+			wiring.dispatcher = st.gpuMemoryNote.empty() ? st.dispatcher.get() : nullptr;
+			if (st.dispatcher && wiring.dispatcher == nullptr)
+				st.dispatcher->SetLane(nullptr);   // the old lane is about to be replaced: no dangling pointer
+			wiring.gapAhead = wiring.dispatcher != nullptr && st.settings.gpuGap == GpuGapMode::AfterRender;
+			wiring.compactGrain = wiring.dispatcher != nullptr && st.dispatcherCompact;
 			const std::shared_ptr<Bundle> current = std::atomic_load(&st.bundle);
-			const bool rebuild = !current || !SameDims(current->dims, dims);
+			const bool rebuild = !current || !SameDims(current->dims, dims) || !current->wiring.Same(wiring);
 			std::shared_ptr<Bundle> b = current;
 			if (rebuild)
 			{
-				b = std::make_shared<Bundle>(dims, seq, nowUs_);
+				b = std::make_shared<Bundle>(dims, seq, nowUs_, wiring);
 				b->lane.BindIndicator(seal->Current());
 				b->lane.OnSealed(seq, 0);   // the shared seal already passed this frame before this lane existed
 			}
@@ -552,7 +743,9 @@ namespace Vpv
 			const bool periodMoved = b->configuredPeriodMs > 0.0 && st.periodMs > 0.0 &&
 				std::abs(st.periodMs - b->configuredPeriodMs) > 0.3 * b->configuredPeriodMs;
 			const bool periodKnown = b->configuredPeriodMs <= 0.0 && st.periodMs > 0.0;
-			if (rebuild || b->configuredGen != gen || ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
+			const QueueShape queue = CurrentQueue();   // one snapshot per frame: a feed on another thread never races the graph build
+			const bool queueMoved = b->configuredQueue != queue;   // the record histories follow the queue (R + L + look-ahead)
+			if (rebuild || b->configuredGen != gen || queueMoved || ((periodMoved || periodKnown) && b->framesSinceConfigure >= kReconfigureMinFrames))
 			{
 				CardProfile card;
 				std::string why;
@@ -564,11 +757,11 @@ namespace Vpv
 				tier.framePeriodMs = st.periodMs;
 				GraphSettings gs;
 				gs.dims = dims;
-				gs.renderAhead = 0;
-				gs.laneLead = 1;
+				gs.renderAhead = queue.renderAhead;
+				gs.laneLead = queue.laneLead;
 				const size_t capacity = resync->queueCapacity.load(std::memory_order_acquire);
 				gs.queueDepth = static_cast<uint16_t>((std::max<size_t>)(4u, (std::min<size_t>)(capacity, 64u)));
-				gs.lookAheadWalk = 0;
+				gs.lookAheadWalk = queue.lookAheadWalk;
 				gs.ofaPresent = false;
 				gs.cardProfileKey = card.Identity();
 				ConsumerDecl report;
@@ -580,10 +773,30 @@ namespace Vpv
 					VpSkeleton::AddConsume(report, p);
 				const std::vector<ConsumerDecl> consumers{ report };
 				b->lane.SetStormHold(Resync::ResyncExtension::StormHeld(st.host));
-				// The record histories (quality_pattern, td.trail_summary) are seconds of source time: frames follow the measured period.
-				b->lane.Configure(st.settings.lane, VpSkeleton::SkeletonProducts(false, false, st.periodMs), consumers, gs, card, tier, seq, false);
+				// The dispatcher's private working memory (tap ring, grain-split working textures) is outside the product
+				// declarations the governor plans: count it as used, and refuse the GPU products when it alone does not fit.
+				if (wiring.dispatcher != nullptr)
+				{
+					// Counted only while the dispatcher holds nothing yet: afterwards the device query (CurrentUsage) already
+					// includes the textures it allocated, and counting them again would shed more than needed.
+					const bool held = wiring.dispatcher->HoldsVideoMemory();
+					const uint64_t priv = held ? 0 : wiring.dispatcher->PrivateBytes(dims, wiring.gapAhead);
+					if (known && !held && priv > card.FreeVram())
+					{
+						st.gpuMemoryNote = "GPU products not made: private working memory " + std::to_string(priv >> 20) +
+							" MiB exceeds the free video memory " + std::to_string(card.FreeVram() >> 20) + " MiB (" +
+							Dimensions(dims) + ")";
+					}
+					card.vramUsageBytes += priv;
+				}
+				// The registry is the Bundle's: the tap form (TapFormProducts) when a GPU dispatcher is wired, else the plain one;
+				// either way built with the measured source period and the queue frames: the record histories
+				// (quality_pattern, td.trail_summary) are max(floor seconds, queue x period).
+				b->registry = Bundle::MakeRegistry(b->wiring, st.periodMs, VpSkeleton::QueueFrames(gs));
+				b->lane.Configure(st.settings.lane, b->registry, consumers, gs, card, tier, seq, false);
 				b->configuredGen = gen;
 				b->configuredPeriodMs = st.periodMs;
+				b->configuredQueue = queue;
 				b->framesSinceConfigure = 0;
 				++st.configures;
 			}
@@ -625,6 +838,21 @@ namespace Vpv
 			if (!b)
 				return;
 			const uint64_t seq = static_cast<uint64_t>(seqIn);
+			if (st.dispatcher && b->wiring.dispatcher == st.dispatcher.get() && st.gpuMemoryNote.empty())
+			{
+				// GPU-legal (before the flush and the gap): destroy what a size / graph change queued, then (re)allocate the
+				// product textures for the lane's current graph (a no-op while nothing changed). Never at Begin (no render
+				// lock there). A refused product shows through the dispatcher's Fallbacks().
+				st.dispatcher->FlushReleases();
+				if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
+					if (ls->graph.valid)
+						st.dispatcher->Configure(ls->graph, b->registry, ls->plan, b->dims, b->configuredGen);
+			}
+			else if (st.dispatcher && !st.gpuMemoryNote.empty() && st.dispatcher->HoldsVideoMemory())
+			{
+				// The memory refusal took effect after the frame that already allocated: give it all back now (GPU-legal).
+				st.dispatcher->Release();
+			}
 			if (st.periodMs > 0.0)
 			{
 				b->lane.OnPostSubmitGap(nowUs_() + static_cast<uint64_t>(st.periodMs * 500.0));   // half the measured period
@@ -642,10 +870,12 @@ namespace Vpv
 		{
 			const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
 			const bool hasBundle = b != nullptr;
+			const uint8_t queueWired = CurrentQueue().wired;
 			const bool due = st.frames <= kEarlyRefreshFrames || st.frames % kRefreshEvery == 1 || st.waiting != st.shownWaiting ||
-				hasBundle != st.shownBundle;
+				hasBundle != st.shownBundle || queueWired != st.shownQueueWired;
 			if (!due)
 				return;
+			st.shownQueueWired = queueWired;
 			st.shownWaiting = st.waiting;
 			st.shownBundle = hasBundle;
 
@@ -660,6 +890,12 @@ namespace Vpv
 			for (const std::string& p : st.settings.laneProblems)
 				problems += (problems.empty() ? "" : "; ") + p;
 			addDecision(FallbackCatalog::SkeletonKeys(problems));
+			addDecision(QueueDecision(queueWired));   // visible: the record histories sit at their floors until the queue is delivered
+			// The GPU products (70b G5): shadow and "no render device" have no dispatcher and say so.
+			const SkeletonGpuDispatcher* gd = st.dispatcher.get();
+			const bool shadow = st.settings.lane.mode == LaneSettings::Mode::Shadow;
+			addDecision(FallbackCatalog::SkeletonGpuShadow(shadow));
+			addDecision(FallbackCatalog::SkeletonGpuDevice(!shadow && gd == nullptr));
 			if (st.sealLateHook)
 				fb.push_back("skeleton_lane: switched on after the first frame; the lane binds the shared seal at the next source era");
 			if (!st.cardNote.empty())
@@ -684,8 +920,36 @@ namespace Vpv
 				const AnalysisLane& lane = b->lane;
 				for (const FallbackCatalog::Decision& d : lane.Fallbacks())
 					addDecision(d);
-				addDecision(FallbackCatalog::SkeletonProductsDeclined("P10 grain split, P11 region stats, P12 light level",
-					SkeletonModule::kDeclinedReason));
+				addDecision(FallbackCatalog::SkeletonGpuMemory(st.gpuMemoryNote));
+				if (gd != nullptr && st.gpuMemoryNote.empty())
+				{
+					const bool gap = st.settings.gpuGap == GpuGapMode::AfterRender;
+					addDecision(FallbackCatalog::SkeletonGpuLive(true));   // RunDeferredLive is not called before the Entrance phase
+					addDecision(FallbackCatalog::SkeletonGpuGapAhead(gap));
+					addDecision(FallbackCatalog::SkeletonGpuGapOff(!gap));
+					addDecision(FallbackCatalog::SkeletonGpuChroma(true));   // P10c is not made before the source ring exists
+					addDecision(FallbackCatalog::SkeletonGpuLightPending(b->lightPendingAsNone.load(std::memory_order_relaxed)));   // A2: visible until G6
+					addDecision(FallbackCatalog::SkeletonGpuFailed(gd->Stats().failures, gd->LastError()));
+					// The governor's tier decision: a GPU product whose lane ring did not fit is made in the render only.
+					std::string shed;
+					if (const std::shared_ptr<VpSkeleton::LaneState> ls = lane.State())
+					{
+						const VpSkeleton::ProductId gpuIds[] = { VpSkeleton::kP10GrainSplit, VpSkeleton::kP11RegionBlockStats,
+							VpSkeleton::kP12LightLevel };
+						for (VpSkeleton::ProductId id : gpuIds)
+						{
+							const VpSkeleton::TierEntry* e = ls->plan.Find(id);
+							if (e != nullptr && e->why == VpSkeleton::GrantWhy::OverBudget && b->registry.Has(id))
+								shed += std::string(shed.empty() ? "" : ", ") + b->registry.Get(id).name + " (T" +
+									std::to_string(static_cast<unsigned>(e->tier)) + ")";
+						}
+					}
+					addDecision(FallbackCatalog::SkeletonGpuShed(shed));
+					// The dispatcher's own list already carries every kernel's (storage Compact/Full, P11 without bands, P12
+					// frame-level, display facts: defaults, smoothing reset) and the products it could not allocate.
+					for (const FallbackCatalog::Decision& d : gd->Fallbacks())
+						addDecision(d);
+				}
 				if (const std::shared_ptr<VpSkeleton::LaneState> laneState = lane.State())
 					addDecision(SkeletonModule::HistoryCapDecision(laneState->graph, b->configuredPeriodMs));
 				full = lane.StatusLines();

@@ -104,3 +104,19 @@ hashed (`determinism.txt`). Dense predictions are deleted after scoring unless `
   Where: MPI-Sintel-training_images.zip (1.7 GB) + MPI-Sintel-training_extras.zip (3.1 GB, flow + occlusions).
 - **KITTI**: not downloaded (owner OK required, non-commercial licence).
 - Real clips: Tears of Steel (CC BY 3.0, Blender Foundation) and Cosmos Laundromat (CC BY 4.0), see D:	estclips\README.md.
+
+## Long-pair rows (R1-LP)
+`longpair_bench.py` (numpy only) adds two matrix rows: (1) hint benefit, a long pair A->B with and without external hints (the TD composed trail
+model), and (2) long-pair accuracy on I-to-I spans (default 12, 24, 48 frames; sequences need >= 49 frames, scenes `pan_subpix,zoom,rot,pan_occlusion`).
+Generate data with `python -I synth_gt.py DIR --only pan_subpix zoom rot pan_occlusion --frames 49`, then, with `--root DIR --scenes a,b --spans 12,24,48 --seed N`:
+
+| stage | what |
+|---|---|
+| `prep` | per scene/span up to 3 start frames: long-span GT by composing the per-pair GT (pair t = t-1 -> t, span i->i+k composes pairs i+1..i+k, bilinear, border-clamped; invalid if any step's occ band is nonzero or the point leaves the frame), half-luma 8-bit frames `half/f_%06d.y8` (640x360), `pairs.csv` (`span,from,to`), hints `hint/h_<from>_<to>.bin` (int16 LE S10.5 on the 160x90 cell grid, GT cell mean plus a per-16x16-px random-walk drift, sigma 0.15 half px per frame x sqrt(k), zero where GT is invalid), `hint_gt_*.npy` (half px, NaN invalid), `hint_lab_*.npy` |
+| `gpu` | prints / writes `GPU-COMMAND.txt`: the `LongPairBenchDump` vstest command per scene (env `VP_LONGPAIR_BENCH_DIR`, `VP_TEST_GPU=hardware`); the test writes `out/{nohint,hint}/l_<from>_<to>.bin` + `path.txt` |
+| `cpu` | contenders in the same format: `hint_only` (hint as forward, -hint backward, cost 0), `seeded_zero`, `seeded_hint` (seeded block search, 8x8 half-px window on the 4x4 cell, +-6, SAD, first-lowest tie-break, parabolic sub-pel, cost u8 = min(255, round(sad*255/2048)); backward seeded by -hint) |
+| `score` | `longpair-summary.csv/.md`: rows `epe` (scene, span, mode), `span_accuracy` (pooled over scenes), `hint_benefit` (EPE nohint - hint and seeded_zero - seeded_hint, positive = hints help); EPE in half and source px, outliers > 3 source px, camera / object EPE; scored twice, bytes must match |
+
+`.bin` layout (little endian, no header, gw=160, gh=90): int16 forward (x,y) S10.5, int16 backward, uint8 forward cost, uint8 backward cost.
+`python -I longpair_bench.py --self-test` needs no dataset (composition vs analytic similarity flow, seeded-search range / sub-pel, `.bin` round trip, summary arithmetic).
+Note: a parabolic fit on SAD costs is biased towards the integer (about 0.11 px at a 0.3 px shift).

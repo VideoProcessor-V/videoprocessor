@@ -15,6 +15,8 @@
     <ClCompile Include="..\VP-V\modules\motion\consumers\FrameInterpolator.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\estimation\NvOpticalFlow.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\estimation\MotionAheadProducer.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\estimation\VectorEngine.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\estimation\VectorEngineExtension.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\OcclusionMaskHook.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\extended_range\ExtendedRange.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\extended_range\ExtendedRangeStage.cpp" />
@@ -29,12 +31,16 @@
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\DynamicDriveFrame.cpp" />
     <ClCompile Include="..\VP-V\modules\scaling\rebase\SourceRebase.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\SourceResolutionMonitor.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\chain\ChainEstimator.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\chain\ChainEvidenceLog.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\SourceHistoryLog.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\VP-V\modules\repair\deband\VpDebander.cpp" />
     <ClCompile Include="..\VP-V\modules\repair\texture_restore\DetailPulse.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CrossfadeMix.cpp" />
     <ClCompile Include="..\VP-V\modules\repair\texture_restore\TextureRestore.cpp" />
     <ClCompile Include="..\VP-V\modules\output\dither\OutputEncodingRepair.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
+    <ClCompile Include="..\VP-V\abi\RendererAbiBridge.cpp" />
     <ClCompile Include="..\VP-V\segments\OutputSegmentsMerge.cpp" />
     <ClCompile Include="..\VP-V\segments\OutputSegments.cpp" />
     <ClCompile Include="..\VP-V\segments\EntranceSegment.cpp" />
@@ -48,8 +54,25 @@
   <ItemGroup>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\core\hub\ExtensionHub.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\core\hub\HubBootstrap.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\config\VpvSettingsExports.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\config\VpvRendererSettings.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\config\VpvSettingsModule.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\signal\ResyncExtension.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\skeleton\SkeletonModule.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\skeleton\gpu\SkeletonGpuDispatcher.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\lane\LaneGpuProducts.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\lane\LaneGpuGrainKernel.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\lane\LaneGpuRegionKernel.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\lane\LaneGpuLightKernel.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\repair\grain_split\GrainSplitGpu.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraExtension.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraLinkCore.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraFitProducer.cpp" />
@@ -59,9 +82,16 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelGeometry.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelTemporal.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\DynamicTexture.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\StaticHypothesis.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelObjects.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelFit.cpp" />
   </ItemGroup>
+  <!-- M2 P3 (H2): the host settings struct derives from RendererSettingsExtension; this header adds the VP-V members. -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PreprocessorDefinitions>RENDERER_SETTINGS_EXTENSION_HEADER=&quot;VP-V/modules/control/config/VpvRendererExtension.h&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup>
     <Link>
       <AdditionalOptions>%(AdditionalOptions) /INCLUDE:VpvHubBootstrapAnchor</AdditionalOptions>
