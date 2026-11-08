@@ -159,6 +159,33 @@ def measure(bill, head, only_files=None, repo=None):
             "hook_files": {"count": len(hookfiles), "lines": sum(m["lines"] for m in hookfiles), "files": hookfiles}}
 
 
+def check_budget(rows, budget):
+    """Return (bad, notes). `upstream_candidates` (path -> {lines, ids, waiver}) annotates stray lines that are
+    owner-approved updates of Bill's own code/tests (PR candidates). They still count as stray (the ceiling holds
+    them, by waiver); the annotation is checked so it cannot go stale: the file must still carry at least that
+    many stray lines and its ceiling must cover them."""
+    default = budget.get("default")
+    limits = budget.get("files", {})
+    bad, notes = [], []
+    by_path = {r["path"]: r for r in rows}
+    for r in rows:
+        lim = limits.get(r["path"], default)
+        if lim is not None and r["stray"] > lim:
+            bad.append("%s stray %d > budget %d" % (r["path"], r["stray"], lim))
+    for path, up in sorted(budget.get("upstream_candidates", {}).items()):
+        n = int(up.get("lines", 0))
+        lim = limits.get(path, default)
+        stray = by_path[path]["stray"] if path in by_path else 0
+        notes.append("Upstream candidates: %s %d of %d stray lines (%s, %s)" % (path, n, stray, up.get("ids", "?"),
+                                                                                 up.get("waiver", "no waiver id")))
+        if lim is None or n > lim:
+            bad.append("%s upstream candidates %d exceed budget %s" % (path, n, lim))
+        if n > stray:
+            bad.append("%s upstream candidates %d > stray %d: lines upstreamed or removed, ratchet the annotation "
+                       "and the ceiling down" % (path, n, stray))
+    return bad, notes
+
+
 def render(res, top):
     out = ["Footprint: bill=%s head=%s" % (res["bill"], res["head"]),
            "%-6s %-5s %-5s %-6s %-5s  %s" % ("stray", "adds", "dels", "hunks", "hook", "file (bucket)")]
@@ -187,6 +214,12 @@ def selftest():
     assert hook_line_set("// VPV-HOOK-FILE\nx\n") == {1, 2}
     assert bucket_of("src/X/Foo.vcxproj") == "project" and bucket_of("src/VideoProcessor-Test/a.cpp") == "tests"
     assert bucket_of("src/VideoProcessor-Lib/Foo.cpp") == "production"
+    rows = [{"path": "t.cpp", "stray": 10}]
+    b = {"default": 0, "files": {"t.cpp": 10}, "upstream_candidates": {"t.cpp": {"lines": 4}}}
+    assert check_budget(rows, b)[0] == [], check_budget(rows, b)
+    b["upstream_candidates"]["t.cpp"]["lines"] = 11
+    assert len(check_budget(rows, b)[0]) == 2, check_budget(rows, b)
+    assert check_budget([{"path": "t.cpp", "stray": 11}], {"default": 0, "files": {"t.cpp": 10}})[0]
     print("selftest OK")
 
 
@@ -230,12 +263,9 @@ def main():
                         res["misplaced"]["count"], res["misplaced"]["lines"], res["hook_files"]["lines"]])
     if a.budget:
         budget = json.load(open(a.budget))
-        default = budget.get("default")
-        bad = []
-        for r in res["files"]:
-            lim = budget.get("files", {}).get(r["path"], default)
-            if lim is not None and r["stray"] > lim:
-                bad.append("%s stray %d > budget %d" % (r["path"], r["stray"], lim))
+        bad, notes = check_budget(res["files"], budget)
+        for n in notes:
+            print(n)
         if bad:
             print("BUDGET EXCEEDED:\n" + "\n".join(bad), file=sys.stderr)
             return 1
