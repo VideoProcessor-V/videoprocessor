@@ -125,3 +125,15 @@ Writes `NullTables.generated.h` (an inline `GeneratedNullTables()` returning the
   (every one is a denominator; inf = never), 8- and 10-bit separately. Segments are maximal runs of one truth; evaluations without
   truth are boundaries. c1 = -ln(rate x 10 s / 3600) + ln(8 x 10) = 14.87 nats.
 * Not simulated: the native hypothesis (it cannot raise a false size) and HOLD masking. The writer (ChainEvalRegistrationTests) marks NO candidate `informative` in an evaluation the estimator judged HOLD (it accumulates nothing there, SID-CAL r2 M1), so those evaluations never reach the fit.
+
+## compare_eval_runs.py (SID-OPT: did a cost change alter a result, and what did it do to the time)
+
+* Run: `python -I tools/eval/source_id/compare_eval_runs.py <before-eval-dir> <after-eval-dir> [--reels a,b] [--out report.txt] [--expect identical|any]`.
+  Test: `python -I tools/eval/source_id/compare_eval_runs.py --selftest`.
+* Per reel: the `chain` lane rows of `reels/<reel>/evaluations.csv` matched by `out_frame` (core fields n, llr, kernel, state identical as text; all columns
+  except the wall-clock `ms`), the `caldump/<reel>.csv` rows matched by (eval_seq, axis, candidate index), and `ms` median / p95 of the distinct evaluations before
+  vs after. Exit 0 = identical, 1 = a difference (with `--expect identical`, the default), 3 = a reel could not be compared, 2 = unreadable input.
+* The harness runs the estimator on the SOURCE clock, so the governor's cadence and every decision are independent of how fast the verifier runs: a pure
+  speed-up leaves every row identical, which is what the comparison asserts for a result-preserving step.
+* Driven by `D:/codex/videoprocessor/sid-opt-measure.ps1` (build, focused tests, the 4-reel run with `VP_SOURCE_ID_CAL_DUMP`, this comparison).
+
