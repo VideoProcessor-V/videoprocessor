@@ -124,7 +124,7 @@ namespace VideoProcessorTest
 			Rig rig;
 			VpMotion::FlowView view;
 			Assert::IsTrue(rig.engine.FlowOf(11, view));
-			rig.engine.motionValidity.Invalidate(VpMotion::MotionValidity::Cause::Resync);
+			rig.engine.motionValidity.Invalidate(::MotionValidity::Cause::Resync);
 			VpMotion::FlowView after;
 			after.gridW = 99;
 			Assert::IsFalse(rig.engine.FlowOf(11, after));
