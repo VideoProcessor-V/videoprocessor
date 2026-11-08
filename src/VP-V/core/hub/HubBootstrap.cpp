@@ -9,11 +9,12 @@
 #include "ExtensionHub.h"
 
 #include <VP-V/modules/control/config/VpvSettingsModule.h>
-#include <VP-V/modules/control/diagnostics/DiagnosticOverridesModule.h>
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraExtension.h>
 #include <VP-V/modules/motion/estimation/VectorEngineExtension.h>
+// Last: DiagnosticOverrides.h includes <windows.h> without NOMINMAX; the headers above use (std::min/max) forms that its macros break.
+#include <VP-V/modules/control/diagnostics/DiagnosticOverridesModule.h>
 
 namespace
 {
