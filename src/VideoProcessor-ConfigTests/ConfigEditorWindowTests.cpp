@@ -2947,7 +2947,7 @@ void testActivePictureLookaheadIsAutomaticWhenAbsent()
             }
         return false;
     };
-    auto* spin = requireControl<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames"));
+    auto* spin = requireControl<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames.vpv"));   // WAIVER-C-1: VP-V's Auto control
     auto* apply = requireControl<QPushButton>(window, QStringLiteral("applyConfiguration"));
     require(spin->toolTip().contains("(Key: active_picture_lookahead_frames.)") &&
         spin->toolTip().contains("min(target frames - 1, queue size - 1, 8)") && spin->toolTip().contains("low-latency profile uses 0"),
