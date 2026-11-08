@@ -146,8 +146,19 @@ Read from the code, not measured. NO hook is registered (`guideWanted` is false:
 | P8 labels upload | only when labels are wanted (overlay != off, any `camera_use_*`, `camera_labels_gpu`): none with the defaults | 0 |
 | GPU operations added | the one copy pass and the one CopyResource + query per verified field, and nothing else (no guidance counts readback, no label upload, no change to any matcher pass) | |
 
-### Known issue (owner decision): the fit reads the GUIDED live field
+### Resolved (F2, 2026-11-08): the fit reads the optical-flow SEED, never the guided live field
 
+The camera fit's only input is now `IVectorEngine::SeedFieldOf` (HOOKS.md section 7): the engine's seed (`ofSearch`), which the
+camera guidance never shapes. `CameraLinkCore` and `CameraExtension` never call `FieldOf`. Provenance by type: `SeedField` is a
+distinct type with no conversion from `VerifiedField`; the ring stamps each copy (`FieldOrigin::Seed` / `Live`) and
+`CameraLinkCore::SubmitField` refuses a `Live` copy (counted `guidedRefused`). No seed for a pair (engine off or matcher-only) = no
+fit and the visible fallback `camera_fit: camera fit needs the optical-flow seed (engine off or matcher-only)`; never the guided field
+instead. Readback: the same two-plane copy (D3D11: the target was already two planes; the copy pass now also reads the backward
+seed plane), converted on the CPU onto the 16-px source grid (each 16-px block takes the seed texel its centre lies in; trust =
+the live consistency rule on the seed). Note: the NVOF vectors are quantised to 1/32 px of the engine's input (the searching half
+size), so the seed carries steps of 1/16 source px at 1080p and 1/8 source px at a lowRes 4K search before the fit pools blocks.
+
+The history of the issue:
 `FieldOf(seq)` returns the matcher's LIVE block field of the last successful estimate (HOOKS.md section 7; `MotionWarp::Field()`), and production feeds the fit from exactly that. With every guidance switch off that field is the unguided matcher output, so nothing feeds back. With `camera_meas_model_global` (or any switch that changes the estimate) ON, the matcher's field is the one the camera's own model guided, so the fit re-measures its own guide: diagnosis ac283dae2a47417e5 found a feedback drift of about 0.004 px per pair. The fix is to fit from the engine's seed field (the NVOF / pre-guidance field) instead of the guided live field; it needs a second field accessor on `IVectorEngine` and is not done. Until then, a measurement switch that changes the estimate (camera_meas_model_global, and a default-on option (a) if the owner chooses it) carries this drift.
 
 ## Rules this code follows

@@ -450,6 +450,7 @@
         "src/VP-V/modules/motion/estimation/tests/CameraFitRunnerTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/CameraFitThreadingTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/CameraOffTests.cpp",
+        "src/VP-V/modules/motion/estimation/tests/CameraSeedFieldTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/FieldReadbackRingWarpTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/CameraLabelUploadTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/CameraLabelWarpTests.cpp",

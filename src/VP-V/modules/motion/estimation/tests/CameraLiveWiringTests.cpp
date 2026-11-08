@@ -81,6 +81,7 @@ namespace CameraLiveWiringTestsNs
 	struct FakeEngine : VpMotion::IVectorEngine
 	{
 		uint64_t latest = 0;
+		bool seeded = true;   // F2: the optical-flow seed fed every pair (the camera fit's only input)
 		VpMotion::IPreEstimateHook* hook = nullptr;
 		std::vector<VpMotion::IPreEstimateHook*> history;
 		std::function<void(VpMotion::IPreEstimateHook*)> onSet;
@@ -101,6 +102,24 @@ namespace CameraLiveWiringTestsNs
 			return true;
 		}
 		float FieldScale() const override { return 1.0f; }
+		bool SeedFieldOf(uint64_t seq, VpMotion::SeedField& out) const override
+		{
+			if (!seeded || seq == 0 || seq > latest)
+				return false;
+			out = VpMotion::SeedField();
+			out.seq = seq;
+			out.pairFrom = seq - 1;
+			out.pairTo = seq;
+			out.gridW = 120;
+			out.gridH = 68;
+			out.blockSize = 16;
+			out.scaleToSourcePx = 2.0f;
+			out.sourceGridW = 120;
+			out.sourceGridH = 68;
+			out.sadTrustMax = 3.0f;
+			out.consistencyPx = 1.5f;
+			return true;
+		}
 		bool GlobalFromEngine() const override { return false; }
 		bool EngineGlobal(uint64_t, VpMotion::GlobalVec&) const override { return false; }
 		bool PairSpansSlip(uint64_t, uint64_t) const override { return false; }
@@ -380,6 +399,30 @@ namespace VideoProcessorTest
 			for (int64_t s = 5; s <= 8; ++s)
 				rig.Frame(s);
 			Assert::IsTrue(rig.ext.LiveBuilt(rig.Host()), L"built as soon as the engine has a field");
+		}
+
+		// F2: an engine with fields but no optical-flow seed (engine off or matcher-only): no fit, a visible camera_fit entry, never
+		// the guided live field instead; the seed's return builds the live parts.
+		TEST_METHOD(AnEngineWithoutTheOpticalFlowSeedIsAVisibleCameraFitFallback)
+		{
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]
+camera_model=on
+");
+			rig.engine.seeded = false;
+			rig.Start(4);
+			Assert::IsFalse(rig.ext.LiveBuilt(rig.Host()), L"FieldOf answers, but the fit never reads it");
+			const std::string want = "camera_fit: camera fit needs the optical-flow seed (engine off or matcher-only)";
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), want.c_str()), L"a fallback entry with id camera_fit");
+			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Lines), "waiting for the first vector field"), L"named, not a plain wait");
+			rig.engine.seeded = true;
+			for (int64_t s = 5; s <= 8; ++s)
+				rig.Frame(s);
+			Assert::IsTrue(rig.ext.LiveBuilt(rig.Host()));
+			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Fallbacks), "optical-flow seed"), L"released with the seed");
+			rig.engine.seeded = false;
+			for (int64_t s = 9; s <= 10; ++s)
+				rig.Frame(s);
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), want.c_str()), L"also visible once live");
 		}
 	};
 }

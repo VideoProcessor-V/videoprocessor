@@ -89,6 +89,7 @@ namespace Vpv
 			std::shared_ptr<VpIndicator::Indicator> indicator;   // keeps the Indicator the lane's stamps and the P4 reader read alive
 			std::string engineProblem;                  // the engine is absent (visible)
 			std::string graphProblem;                   // the camera graph was refused (visible)
+			std::string seedProblem;                    // F2: the engine has fields but no optical-flow seed (visible camera_fit)
 			uint64_t lastFieldNoted = 0;
 			CameraLink::TimingFacts timing;
 			bool haveTiming = false;
@@ -387,12 +388,19 @@ namespace Vpv
 			if (st.liveBuilt)
 				ReleaseLive(st);   // another engine, or another Indicator era: rebuild over the new ones
 
+			// F2: the fit's input is the optical-flow seed (its 16-px source grid sizes the declarations); never FieldOf.
 			const uint64_t latest = engine->LatestVerifiedFieldSeq();
-			VpMotion::VerifiedField vf;
-			if (latest == 0 || !engine->FieldOf(latest, vf) || vf.gridW <= 0 || vf.gridH <= 0 || vf.blockSize <= 0)
+			VpMotion::SeedField sf;
+			if (latest == 0)
 				return false;
-			const uint32_t width = static_cast<uint32_t>(vf.gridW) * static_cast<uint32_t>(vf.blockSize);
-			const uint32_t height = static_cast<uint32_t>(vf.gridH) * static_cast<uint32_t>(vf.blockSize);
+			if (!engine->SeedFieldOf(latest, sf) || sf.sourceGridW <= 0 || sf.sourceGridH <= 0)
+			{
+				st.seedProblem = CameraLink::kSeedAbsentText;
+				return false;
+			}
+			st.seedProblem.clear();
+			const uint32_t width = static_cast<uint32_t>(sf.sourceGridW) * static_cast<uint32_t>(VpMotion::SeedField::kSourceBlockSize);
+			const uint32_t height = static_cast<uint32_t>(sf.sourceGridH) * static_cast<uint32_t>(VpMotion::SeedField::kSourceBlockSize);
 			if (!st.lane.Build(width, height, st.labelsWanted))
 			{
 				st.graphProblem = st.lane.Error();
@@ -492,6 +500,7 @@ namespace Vpv
 					st.liveWait = "camera fit waits for resync_event: turn resync_event on";
 					st.liveWaitIsFault = true;
 				}
+				st.seedProblem.clear();   // not judged while nothing drives the fit
 				return;
 			}
 			st.liveWait.clear();
@@ -513,9 +522,16 @@ namespace Vpv
 				const uint64_t first = latest > st.lastFieldNoted + 16 ? latest - 15 : st.lastFieldNoted + 1;
 				for (uint64_t s = first; s <= latest && latest != 0; ++s)
 				{
-					VpMotion::VerifiedField vf;
-					if (engine->FieldOf(s, vf))
+					VpMotion::SeedField sf;   // F2: a frame has a fit input only when its pair has a seed
+					if (engine->SeedFieldOf(s, sf))
 						st.lane.NoteField(s);
+				}
+				{
+					VpMotion::SeedField sf;
+					if (latest != 0 && !engine->SeedFieldOf(latest, sf))
+						st.seedProblem = CameraLink::kSeedAbsentText;
+					else if (latest != 0)
+						st.seedProblem.clear();
 				}
 				st.lastFieldNoted = latest;
 				CameraLink::CameraLane::Sealed sealed;
@@ -537,7 +553,7 @@ namespace Vpv
 					st.labelFill->OnFrameStart(st.lane.NextFloor());
 				return;
 			}
-			if (st.fitWanted && st.engineProblem.empty() && st.graphProblem.empty())
+			if (st.fitWanted && st.engineProblem.empty() && st.graphProblem.empty() && st.seedProblem.empty())
 				st.liveWait = "waiting for the first vector field from the engine";
 			st.core->OnFrameStart(facts);   // not live (yet): the plain report-mode frame start (inert without a graph)
 		}
@@ -787,6 +803,8 @@ namespace Vpv
 					else
 						lines.push_back("camera: " + st.liveWait + "; no fit yet");
 				}
+				if (st.engineProblem.empty() && !st.seedProblem.empty())
+					fb.push_back("camera_fit: " + st.seedProblem);
 				if (!st.graphProblem.empty())
 					fb.push_back("camera_graph: " + st.graphProblem);
 				if (st.liveBuilt && st.lane.MarkerFailures() != 0)

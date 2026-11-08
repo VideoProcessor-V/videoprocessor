@@ -106,6 +106,20 @@ namespace VectorEngineHookTest
 			bool MatcherGlobalFromEngine() const override { return global; }
 		};
 
+		// F2: a matcher view whose last Estimate was (or was not) seeded by the optical-flow engine.
+		struct SeedView : FakeView
+		{
+			bool seeded = true;
+			Seed seed;
+			bool LiveSeed(Seed& out) const override
+			{
+				if (!seeded)
+					return false;
+				out = seed;
+				return true;
+			}
+		};
+
 		// The fallback decisions the engine handed to the renderer's registry (the syncFallback argument).
 		std::vector<FallbackCatalog::Decision> g_decisions;
 
@@ -639,6 +653,165 @@ namespace VectorEngineHookTest
 			RendererExtension::ResetForTesting();   // no hub registered (the dependency VectorEngineExtension.h states)
 			RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Reset, &impl);
 			Assert::AreEqual<size_t>(2, impl.causes.size(), L"without the hub the event reaches nothing");
+		}
+	};
+
+	// F2: IVectorEngine::SeedFieldOf, the camera fit's only input (the optical-flow seed, never the guided live field).
+	TEST_CLASS(VectorEngineSeedFieldTests)
+	{
+	public:
+		struct Rig
+		{
+			pl_tex_t live{}, seedF{}, seedB{};
+			SeedView view;
+			// halvings 0: a 1080p search (seed 120 x 68 = the live grid); 1: a lowRes 4K search (seed 120 x 68 under a live 240 x 135).
+			explicit Rig(int halvings = 0)
+			{
+				live.params.w = halvings ? 240 : 120;
+				live.params.h = halvings ? 135 : 68;
+				seedF.params.w = seedB.params.w = 120;
+				seedF.params.h = seedB.params.h = 68;
+				view.field = &live;
+				view.seed.fwd = &seedF;
+				view.seed.bwd = &seedB;
+				view.seed.gridW = 120;
+				view.seed.gridH = 68;
+				view.seed.halvings = halvings;
+				view.seed.tolerance = 3.0f;
+				view.seed.consistencyPx = 1.5f;
+				view.seed.liveGridW = live.params.w;
+				view.seed.liveGridH = live.params.h;
+			}
+		};
+
+		TEST_METHOD(TheSeedIsAbsentWhenItDidNotFeedThePair)
+		{
+			VectorEngine engine;
+			SeedField seed;
+			Assert::IsFalse(engine.SeedFieldOf(6, seed), L"no matcher bound");
+			// A matcher view that predates the seed (the interface default): FieldOf answers, SeedFieldOf never does.
+			FakeView plain;
+			pl_tex_t tex{};
+			tex.params.w = 120;
+			tex.params.h = 68;
+			plain.field = &tex;
+			plain.from = 5;
+			engine.BindMatcher(&plain);
+			FakeMatcher matcher;
+			RunOne(engine, matcher, true, true, 5, 6);
+			VerifiedField field;
+			Assert::IsTrue(engine.FieldOf(6, field));
+			Assert::IsFalse(engine.SeedFieldOf(6, seed), L"the live field is never served as the seed");
+			// Engine off / failed / matcher-only / candidate or replace mode: the matcher says the seed did not feed it.
+			Rig rig;
+			rig.view.from = 5;
+			rig.view.seeded = false;
+			engine.BindMatcher(&rig.view);
+			Assert::IsTrue(engine.FieldOf(6, field));
+			Assert::IsFalse(engine.SeedFieldOf(6, seed));
+			rig.view.seeded = true;
+			Assert::IsTrue(engine.SeedFieldOf(6, seed));
+			rig.view.seed.bwd = nullptr;
+			Assert::IsFalse(engine.SeedFieldOf(6, seed), L"both seed planes are needed (the consistency check)");
+			engine.BindMatcher(nullptr);
+		}
+
+		TEST_METHOD(TheSeedFollowsFieldOfsPairEpochAndLifetimeRules)
+		{
+			VectorEngine engine;
+			Rig rig;
+			engine.BindMatcher(&rig.view);
+			FakeMatcher matcher;
+			SeedField seed;
+			RunOne(engine, matcher, true, false, 5, 6);   // a failed estimate records nothing
+			rig.view.from = 5;
+			Assert::IsFalse(engine.SeedFieldOf(6, seed));
+			RunOne(engine, matcher, true, true, 5, 6);
+			Assert::IsTrue(engine.SeedFieldOf(6, seed));
+			Assert::AreEqual<uint64_t>(6, seed.seq);
+			Assert::AreEqual<uint64_t>(5, seed.pairFrom);
+			Assert::AreEqual<uint64_t>(6, seed.pairTo);
+			Assert::IsTrue(seed.fwd == &rig.seedF && seed.bwd == &rig.seedB, L"the seed planes, never the live field");
+			Assert::IsTrue(seed.fwd != &rig.live);
+			Assert::IsFalse(engine.SeedFieldOf(5, seed), L"only the live pair");
+			Assert::IsFalse(engine.SeedFieldOf(0, seed));
+			rig.view.from = 0;   // the live outputs are being replaced: the seed goes with them (valid until the next estimate)
+			Assert::IsFalse(engine.SeedFieldOf(6, seed));
+			rig.view.from = 5;
+			Assert::IsTrue(engine.SeedFieldOf(6, seed));
+			// The stamp: unbound the default; bound, the Indicator's stamp of the pair's later frame (as FieldOf).
+			Assert::AreEqual<uint32_t>(0, seed.stamp.era);
+			const std::shared_ptr<VpIndicator::Indicator> ind = std::make_shared<VpIndicator::Indicator>(VpIndicator::NextEra(), 64);
+			ind->Seal(6);
+			engine.motionValidity.Bind(ind);
+			Assert::IsTrue(engine.SeedFieldOf(6, seed));
+			VerifiedField field;
+			Assert::IsTrue(engine.FieldOf(6, field));
+			Assert::AreNotEqual<uint32_t>(0, seed.stamp.era);
+			Assert::IsTrue(VpIndicator::SameFor(field.stamp, seed.stamp, ~VpIndicator::CounterMask(0)), L"the same stamp as FieldOf");
+			engine.motionValidity.Unbind();
+			// An invalidation: vectors of an older epoch are never served.
+			engine.motionValidity.Invalidate(MotionValidity::Cause::Gap);
+			Assert::IsFalse(engine.SeedFieldOf(6, seed));
+			// An invalidation during the estimate is never recorded as current.
+			const uint64_t chosen = engine.motionValidity.Epoch();
+			std::vector<std::string> calls;
+			matcher.calls = &calls;
+			engine.Estimate(6, 7, false, 24.0, chosen, true, matcher,
+				[&]() { engine.motionValidity.Invalidate(MotionValidity::Cause::Gap); return true; },
+				[](const FallbackCatalog::Decision& d) { g_decisions.push_back(d); });
+			rig.view.from = 6;
+			Assert::IsFalse(engine.SeedFieldOf(7, seed));
+			engine.BindMatcher(nullptr);
+		}
+
+		TEST_METHOD(TheSeedLayoutIsCheckedAndReportedInSourcePixels)
+		{
+			FakeMatcher matcher;
+			SeedField seed;
+			{
+				// 1080p: 8x8 blocks of the half size = 16 source px per texel, vectors x 2; the seed grid is the live grid.
+				VectorEngine engine;
+				Rig rig(0);
+				rig.view.from = 5;
+				engine.BindMatcher(&rig.view);
+				RunOne(engine, matcher, true, true, 5, 6);
+				Assert::IsTrue(engine.SeedFieldOf(6, seed));
+				Assert::AreEqual(120, seed.gridW);
+				Assert::AreEqual(68, seed.gridH);
+				Assert::AreEqual(16, seed.blockSize);
+				Assert::AreEqual(2.0f, seed.scaleToSourcePx);
+				Assert::AreEqual(120, seed.sourceGridW);
+				Assert::AreEqual(68, seed.sourceGridH);
+				Assert::AreEqual(3.0f, seed.sadTrustMax);
+				Assert::AreEqual(1.5f, seed.consistencyPx);
+				rig.view.seed.gridW = 119;   // a seed that does not cover the live grid: refused, never guessed
+				rig.seedF.params.w = rig.seedB.params.w = 119;
+				Assert::IsFalse(engine.SeedFieldOf(6, seed));
+				engine.BindMatcher(nullptr);
+			}
+			{
+				// lowRes 4K: the inner searched a half-size copy: 32 source px per texel, vectors x 4, onto the live 240 x 135.
+				VectorEngine engine;
+				Rig rig(1);
+				rig.view.from = 5;
+				engine.BindMatcher(&rig.view);
+				RunOne(engine, matcher, true, true, 5, 6);
+				Assert::IsTrue(engine.SeedFieldOf(6, seed));
+				Assert::AreEqual(32, seed.blockSize);
+				Assert::AreEqual(4.0f, seed.scaleToSourcePx);
+				Assert::AreEqual(240, seed.sourceGridW);
+				Assert::AreEqual(135, seed.sourceGridH);
+				rig.seedB.params.h = 67;   // the two planes differ: refused
+				Assert::IsFalse(engine.SeedFieldOf(6, seed));
+				rig.seedB.params.h = 68;
+				rig.view.seed.halvings = 0;   // claimed 16-px texels under a 240 x 135 live grid: the layout does not add up
+				Assert::IsFalse(engine.SeedFieldOf(6, seed));
+				rig.view.seed.halvings = 1;
+				rig.view.seed.tolerance = 0.0f;   // no trust rule: refused
+				Assert::IsFalse(engine.SeedFieldOf(6, seed));
+				engine.BindMatcher(nullptr);
+			}
 		}
 	};
 }

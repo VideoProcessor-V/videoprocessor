@@ -848,7 +848,45 @@ namespace Dejudder
 		unsigned long long GlobalFallbacks() const { return globalFallbacks + (inner ? inner->GlobalFallbacks() : 0ull); }
 		// The last Estimate applied the engine's trust weights (cost / consistency).
 		bool EngineWeightsUsed() const { return ofWeighted || (inner && HalvesForSearch() && inner->EngineWeightsUsed()); }
+		// F2 (camera fit input): the optical-flow engine's seed of the last Estimate, read-only, no GPU work. The seed
+		// is the searching instance's ofSearch pair (the engine's block vectors that stood in for the first sweep:
+		// the camera guidance never writes them; its E1 pass only samples them). Layout, explicitly: one texel per
+		// 8x8 block of the SEARCHING instance's half size, rgba = (vx, vy) in that half size's px, the block SAD
+		// (8-bit codes per px; 1e4 = beyond the searches' reach), the engine weight (1 = none). The searching
+		// instance is the lowRes inner when this one halves (recursively), so one texel covers 16 x 2^halvings
+		// source px and a vector times 2 x 2^halvings is source px. False when the last Estimate was not seeded by
+		// the engine (engine off or failed, candidate / replace mode, a skipped pair) or before any Estimate. The
+		// textures are valid until the next Estimate (the caller copies, never keeps them).
+		struct SeedState
+		{
+			pl_tex fwd = nullptr, bwd = nullptr;
+			int gridW = 0, gridH = 0;        // seed texels
+			int halvings = 0;                // how often the search input was halved (lowRes)
+			float tolerance = 0.0f;          // the searching instance's match_tolerance (the SAD's units)
+			float consistencyPx = 0.0f;      // its forward/backward agreement, in seed px
+		};
+		bool LastSeed(SeedState& out) const
+		{
+			if (HalvesForSearch())
+			{
+				if (!inner || !inner->LastSeed(out))
+					return false;
+				++out.halvings;
+				return true;
+			}
+			if (!seedFed || !ofSearch[0] || !ofSearch[1])
+				return false;
+			out = SeedState();
+			out.fwd = ofSearch[0];
+			out.bwd = ofSearch[1];
+			out.gridW = ofSearch[0]->params.w;
+			out.gridH = ofSearch[0]->params.h;
+			out.tolerance = settings.matchTolerance;
+			out.consistencyPx = ConsistencyPixels();
+			return true;
+		}
 	private:
+		bool seedFed = false;             // F2: the last Estimate's first sweep was the engine's seed (ofSearch)
 		bool globalFromEngine = false;
 		unsigned long long globalFallbacks = 0;
 		bool ofWeighted = false;          // this Estimate's engine block vectors carry trust weights (w)

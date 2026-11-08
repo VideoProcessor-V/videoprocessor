@@ -606,6 +606,47 @@ namespace VpMotion
 		return true;
 	}
 
+	// F2: the engine's seed of the live pair (the camera fit's input; never the guided live field). The same validity,
+	// epoch and lifetime rules as FieldOf (the last successful estimate, its epoch current, the matcher's live outputs still
+	// that pair's), the same stamp, plus the matcher's own record that the seed fed this estimate. The seed's layout is
+	// checked against the live field's grid (never assumed): a texel per 16 x 2^halvings source px, the seed covering the
+	// live 16-px grid exactly (ceil(live / 2^halvings) texels per axis).
+	bool VectorEngine::SeedFieldOf(uint64_t pairTo, SeedField& out) const
+	{
+		if (!matcher_ || pairTo == 0 || field_.from == 0 || pairTo != field_.to || matcher_->LiveFieldFrom() != field_.from ||
+			!motionValidity.Current(field_.epoch))
+			return false;
+		IMatcherView::Seed s;
+		if (!matcher_->LiveSeed(s) || !s.fwd || !s.bwd)
+			return false;
+		constexpr int kMaxHalvings = 4;   // 16K; MotionWarp halves while the input is about 1530 lines or taller
+		if (s.halvings < 0 || s.halvings > kMaxHalvings || s.gridW <= 0 || s.gridH <= 0 || s.liveGridW <= 0 || s.liveGridH <= 0)
+			return false;
+		if (s.fwd->params.w != s.gridW || s.fwd->params.h != s.gridH || s.bwd->params.w != s.gridW || s.bwd->params.h != s.gridH)
+			return false;
+		const int per = 1 << s.halvings;   // live 16-px blocks per seed texel and axis
+		if ((s.liveGridW + per - 1) / per != s.gridW || (s.liveGridH + per - 1) / per != s.gridH)
+			return false;
+		if (!(s.tolerance > 0.0f) || !(s.consistencyPx > 0.0f))
+			return false;
+		out = SeedField();
+		out.seq = field_.to;
+		out.pairFrom = field_.from;
+		out.pairTo = field_.to;
+		out.fwd = s.fwd;
+		out.bwd = s.bwd;
+		out.gridW = s.gridW;
+		out.gridH = s.gridH;
+		out.blockSize = SeedField::kSourceBlockSize * per;
+		out.scaleToSourcePx = 2.0f * static_cast<float>(per);   // half-size px of the searching instance -> source px
+		out.sourceGridW = s.liveGridW;
+		out.sourceGridH = s.liveGridH;
+		out.sadTrustMax = s.tolerance;
+		out.consistencyPx = s.consistencyPx;
+		motionValidity.StampAt(field_.to, out.stamp);
+		return true;
+	}
+
 	bool VectorEngine::GlobalFromEngine() const
 	{
 		return matcher_ && matcher_->MatcherGlobalFromEngine();

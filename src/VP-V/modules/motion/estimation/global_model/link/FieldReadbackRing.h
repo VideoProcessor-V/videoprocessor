@@ -41,6 +41,11 @@ namespace CameraLink
 		// Render thread. Starts the copy. False
 		// when the ring is full (newest request dropped, counted), the field is unusable, or the download failed.
 		bool Request(const VpMotion::VerifiedField& f);
+		// F2: the optical-flow seed (the camera fit's only input). Both seed planes are read back in the same copy as a
+		// field with a backward plane (the D3D11 target is always two planes, so its size is unchanged); Poll converts them
+		// on the CPU onto the 16-px source grid (SeedToSourceGrid), forward only, origin Seed. A field from the overload above
+		// is stamped origin Live, which the fit refuses.
+		bool Request(const VpMotion::SeedField& f);
 
 		// Appends every finished entry, in request order, as a new FieldCopy (source px) and frees it. Never blocks.
 		size_t Poll(std::vector<std::shared_ptr<FieldCopy>>& ready);
@@ -69,7 +74,11 @@ namespace CameraLink
 			bool haveBwd = false;
 			bool mapped = false;
 			bool native = false;   // read through NativeCopyReadback (slot = the entry index)
+			bool seed = false;     // F2: a SeedField (converted in Poll with `layout`)
+			SeedLayout layout;
 		};
+		Entry* FreeSlot();     // null = full (counted as dropped)
+		bool Begin(Entry& e);  // ticket + Start; on failure released and counted
 
 		bool Start(Entry& e);
 		void Release(Entry& e);

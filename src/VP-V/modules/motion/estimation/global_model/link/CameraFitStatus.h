@@ -31,6 +31,10 @@ namespace CameraLink
 
 	constexpr double kAmbiguousEngageSeconds = 0.5;
 
+	// F2: the camera fit reads only the optical-flow seed (IVectorEngine::SeedFieldOf); without one there is no fit (never the
+	// guided live field instead). Shown as the camera_fit fallback entry ("camera_fit: " + this).
+	constexpr const char* kSeedAbsentText = "camera fit needs the optical-flow seed (engine off or matcher-only)";
+
 	struct FitCounters
 	{
 		std::atomic<uint64_t> submitted{ 0 };        // jobs accepted by the worker queue
@@ -49,6 +53,8 @@ namespace CameraLink
 		std::atomic<uint64_t> relatches{ 0 };
 		std::atomic<uint64_t> staleLane{ 0 };        // posts REFUSED: the job's lane generation is not the worker's (the lane graph was rebuilt)
 		std::atomic<uint64_t> rebound{ 0 };          // times the worker took a new lane lease (a rebuild was noticed)
+		std::atomic<uint64_t> guidedRefused{ 0 };    // F2: copies of the guided live field refused by SubmitField (never fitted)
+		std::atomic<uint64_t> seedAbsent{ 0 };       // F2: engine pairs without an optical-flow seed (no fit; camera_fit fallback)
 	};
 
 	// Counts consecutive Ambiguous measured seconds.

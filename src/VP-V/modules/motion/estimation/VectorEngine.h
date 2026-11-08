@@ -61,6 +61,17 @@ namespace VpMotion
 		virtual pl_tex LiveField() const = 0;             // the matcher's block field of its last Estimate (null = none)
 		virtual uint64_t LiveFieldFrom() const = 0;       // the A of the pair the live outputs hold (0 = none)
 		virtual bool MatcherGlobalFromEngine() const = 0; // the last Estimate's D1 came from the optical-flow engine
+		// F2: the optical-flow seed of the last Estimate (MotionWarp::LastSeed) and the live field's grid; false = the
+		// seed did not feed it. Default: none (fakes that predate the seed).
+		struct Seed
+		{
+			pl_tex fwd = nullptr, bwd = nullptr;
+			int gridW = 0, gridH = 0;          // seed texels
+			int halvings = 0;                  // lowRes halvings of the search input
+			float tolerance = 0.0f, consistencyPx = 0.0f;
+			int liveGridW = 0, liveGridH = 0;  // the live field's 16-px source-block grid
+		};
+		virtual bool LiveSeed(Seed& /*out*/) const { return false; }
 	};
 
 	// K4: the guidance sink handed to the pre-estimate hook, 1:1 onto the matcher's SetCameraGuidance.
@@ -263,6 +274,8 @@ namespace VpMotion
 		uint64_t FieldEra() const override;                  // the validity epoch
 		bool FieldOf(uint64_t seq, VerifiedField& out) const override;
 		float FieldScale() const override { return 1.0f; }   // the field is in source px
+		// F2: the seed of the live pair under FieldOf's rules (VectorEngine.cpp; HOOKS.md section 7).
+		bool SeedFieldOf(uint64_t pairTo, SeedField& out) const override;
 		bool GlobalFromEngine() const override;
 		bool EngineGlobal(uint64_t seq, GlobalVec& out) const override;
 		// True unless every adjacent pair in [from, to] is valid in the current epoch and lies at or after the first

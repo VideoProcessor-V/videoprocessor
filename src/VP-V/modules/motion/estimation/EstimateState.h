@@ -48,6 +48,24 @@ namespace VpMotion
 		pl_tex LiveField() const override { return dejudder ? dejudder->Field() : nullptr; }
 		uint64_t LiveFieldFrom() const override { return dejudderLiveFieldFrom; }
 		bool MatcherGlobalFromEngine() const override { return dejudder && dejudder->GlobalFromEngine(); }
+		bool LiveSeed(Seed& out) const override
+		{
+			Dejudder::MotionWarp::SeedState s;
+			const pl_tex live = dejudder ? dejudder->Field() : nullptr;
+			if (!live || !dejudder->LastSeed(s))
+				return false;
+			out = Seed();
+			out.fwd = s.fwd;
+			out.bwd = s.bwd;
+			out.gridW = s.gridW;
+			out.gridH = s.gridH;
+			out.halvings = s.halvings;
+			out.tolerance = s.tolerance;
+			out.consistencyPx = s.consistencyPx;
+			out.liveGridW = live->params.w;
+			out.liveGridH = live->params.h;
+			return true;
+		}
 
 		// ---- SK-MV pass-through (TEMPORARY until P5c): Dejudder::IFieldSource ----------------------------------
 		// ONE source for the renderer's motion reads when the matcher is bound (RunDejudderEstimate binds it). Live: the motion segment's

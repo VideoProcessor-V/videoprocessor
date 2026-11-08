@@ -3756,6 +3756,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		if (inner)
 			inner->cameraGuidanceUse = CameraGuidanceUse();
 		estimated = false;
+		seedFed = false;   // F2: set below only when the engine's seed stands in for the first sweep
 		grainErrorValid = false;
 		fillReady = false;
 		searchSeedUsed = false;   // SK-MV gap seed: set again below only by the instance that searched with it (an early return reads false)
@@ -3877,6 +3878,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			const bool replaced = opticalFlowUsed && !candidateMode;
 			// Seed: the engine's vectors stand in for the first sweep (no searches).
 			const bool seeded = opticalFlowUsed && candidateMode && settings.opticalFlowSeed;
+			seedFed = seeded;   // F2: LastSeed (CPU record only)
 			// Planner Q1: the engine's whole-frame motion when its field is known here and it
 			// seeds the refinement (the searches, which read M2's second candidate, do not run).
 			globalFromEngine = false;

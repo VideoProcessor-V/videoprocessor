@@ -241,6 +241,12 @@ namespace CameraLink
 		(void)f;
 		if (!m_worker || !field)
 			return false;
+		// F2 provenance: the GUIDED live matcher field is never fitted (the fit would re-measure its own guide).
+		if (field->origin == FieldOrigin::Live)
+		{
+			m_counters.guidedRefused.fetch_add(1, std::memory_order_relaxed);
+			return false;
+		}
 		CameraFitJob job;
 		job.seq = field->seq;
 		job.field = field;
@@ -320,9 +326,14 @@ namespace CameraLink
 				from = latest - kMaxFieldsPerPump + 1;
 			for (uint64_t s = from; s <= latest && latest != 0; ++s)
 			{
-				VpMotion::VerifiedField vf;
-				if (!m_engine->FieldOf(s, vf))
-					continue;   // no field for this seq (a cadence repeat): not a drop
+				// F2: the fit reads the optical-flow SEED only (never FieldOf, the guided live field).
+				VpMotion::SeedField vf;
+				if (!m_engine->SeedFieldOf(s, vf))
+				{
+					if (s == latest)
+						m_counters.seedAbsent.fetch_add(1, std::memory_order_relaxed);   // the engine has the pair but no seed
+					continue;   // no seed for this seq (a cadence repeat, or no seed: the camera_fit fallback): not a drop
+				}
 				if (!m_ring->Request(vf))
 				{
 					m_counters.readbackDropped.fetch_add(1, std::memory_order_relaxed);

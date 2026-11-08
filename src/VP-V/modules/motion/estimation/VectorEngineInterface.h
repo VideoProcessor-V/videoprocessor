@@ -41,6 +41,33 @@ namespace VpMotion
 		VpIndicator::Stamp stamp;                  // the stamp the field was computed under
 	};
 
+	// F2 (camera fit input): the optical-flow engine's SEED of one source pair (the searching matcher's ofSearch pair, the
+	// engine's block vectors that stood in for the matcher's first sweep), which the camera guidance never shapes. A DISTINCT
+	// type from VerifiedField on purpose (provenance): there is no conversion between the two, so a consumer that takes a
+	// SeedField can never be handed the guided live field (FieldOf). Textures are owned by the engine and valid until the
+	// next estimate (the consumer copies, never keeps the pl_tex).
+	// Layout (checked, never assumed): gridW x gridH texels, one per blockSize x blockSize SOURCE px (16 x 2^halvings: 16
+	// at 1080p, 32 at a lowRes 4K search, 64 at 8K), rgba = (vx, vy) in seed px (x scaleToSourcePx = source px; 2 x
+	// 2^halvings), the block SAD (8-bit codes per px; >= 1e4 = beyond the searches' reach), the engine weight (0..1, 1 =
+	// none). sourceGridW x sourceGridH is the 16-px source-block grid the live field has (the camera fit's grid); the
+	// seed is converted onto it on the CPU (each 16-px block takes the seed texel its centre lies in), trust = the live
+	// consistency pass's rule on the seed (forward/backward agreement within consistencyPx seed px AND the SAD, raised by
+	// (1 - weight) x 2 x sadTrustMax, within sadTrustMax).
+	struct SeedField
+	{
+		uint64_t seq = 0, pairFrom = 0, pairTo = 0;
+		pl_tex fwd = nullptr;            // A -> B seed (rgba, see above)
+		pl_tex bwd = nullptr;            // B -> A seed (the consistency check only; the fit reads no backward field)
+		int gridW = 0, gridH = 0;        // seed texels
+		int blockSize = 0;               // source px per seed texel
+		float scaleToSourcePx = 0.0f;    // seed px -> source px
+		int sourceGridW = 0, sourceGridH = 0;
+		enum { kSourceBlockSize = 16 };   // source px per block of the fit's grid (the live field's)
+		float sadTrustMax = 0.0f;        // the searching matcher's match_tolerance
+		float consistencyPx = 0.0f;      // its forward/backward agreement, seed px
+		VpIndicator::Stamp stamp;        // the stamp the pair was estimated under
+	};
+
 	struct GlobalVec
 	{
 		bool valid = false;
@@ -118,6 +145,11 @@ namespace VpMotion
 		virtual uint64_t FieldEra() const = 0;
 		virtual bool FieldOf(uint64_t seq, VerifiedField& out) const = 0;
 		virtual float FieldScale() const = 0;
+		// F2: the optical-flow seed of the pair whose later frame is pairTo, under FieldOf's rules (the last successful
+		// estimate only, its epoch current, valid until the next estimate, render thread / renderMutex). False whenever
+		// the seed did not feed that pair (engine off or failed, matcher-only, candidate or replace mode, a skipped pair).
+		// The camera fit reads ONLY this (never FieldOf: that field is the guided one). Default: absent (existing fakes).
+		virtual bool SeedFieldOf(uint64_t /*pairTo*/, SeedField& /*out*/) const { return false; }
 		virtual bool GlobalFromEngine() const = 0;
 		virtual bool EngineGlobal(uint64_t seq, GlobalVec& out) const = 0;
 		virtual bool PairSpansSlip(uint64_t from, uint64_t to) const = 0;

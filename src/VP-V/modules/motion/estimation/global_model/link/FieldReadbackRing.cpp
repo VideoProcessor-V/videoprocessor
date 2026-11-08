@@ -44,6 +44,7 @@ namespace CameraLink
 		e.bwd = nullptr;
 		e.mapped = false;
 		e.haveBwd = false;
+		e.seed = false;
 	}
 
 	void FieldReadbackRing::DrainParked()
@@ -165,6 +166,67 @@ namespace CameraLink
 		return true;
 	}
 
+	FieldReadbackRing::Entry* FieldReadbackRing::FreeSlot()
+	{
+		DrainParked();
+		for (Entry& e : m_entries)
+			if (e.state == State::Free)
+				return &e;
+		++m_stats.dropped;
+		return nullptr;
+	}
+
+	bool FieldReadbackRing::Begin(Entry& e)
+	{
+		e.mapped = false;
+		e.ticket = ++m_ticket;
+		if (!Start(e))
+		{
+			Release(e);
+			++m_stats.failed;
+			return false;
+		}
+		return true;
+	}
+
+	bool FieldReadbackRing::Request(const VpMotion::SeedField& f)
+	{
+		++m_stats.requested;
+		const int per = f.blockSize / VpMotion::SeedField::kSourceBlockSize;
+		if (!m_gpu || !f.fwd || !f.bwd || f.gridW <= 0 || f.gridH <= 0 || per <= 0 ||
+			per * VpMotion::SeedField::kSourceBlockSize != f.blockSize || f.sourceGridW <= 0 || f.sourceGridH <= 0)
+		{
+			++m_stats.failed;
+			return false;
+		}
+		Entry* slot = FreeSlot();
+		if (!slot)
+			return false;
+		Entry& e = *slot;
+		e.fwd = f.fwd;
+		e.bwd = f.bwd;
+		e.haveBwd = true;
+		e.seq = f.seq;
+		e.pairFrom = f.pairFrom;
+		e.pairTo = f.pairTo;
+		e.gridW = f.gridW;
+		e.gridH = f.gridH;
+		e.blockSize = f.blockSize;
+		e.scale = f.scaleToSourcePx;
+		e.stamp = f.stamp;
+		e.seed = true;
+		e.layout = SeedLayout();
+		e.layout.gridW = f.gridW;
+		e.layout.gridH = f.gridH;
+		e.layout.per = per;
+		e.layout.scaleToSourcePx = f.scaleToSourcePx;
+		e.layout.sourceGridW = f.sourceGridW;
+		e.layout.sourceGridH = f.sourceGridH;
+		e.layout.sadTrustMax = f.sadTrustMax;
+		e.layout.consistencyPx = f.consistencyPx;
+		return Begin(e);
+	}
+
 	bool FieldReadbackRing::Request(const VpMotion::VerifiedField& f)
 	{
 		++m_stats.requested;
@@ -173,16 +235,11 @@ namespace CameraLink
 			++m_stats.failed;
 			return false;
 		}
-		DrainParked();
-		Entry* slot = nullptr;
-		for (Entry& e : m_entries)
-			if (e.state == State::Free) { slot = &e; break; }
+		Entry* slot = FreeSlot();
 		if (!slot)
-		{
-			++m_stats.dropped;
 			return false;
-		}
 		Entry& e = *slot;
+		e.seed = false;
 		e.fwd = f.fwd;
 		e.bwd = f.bwd;
 		e.haveBwd = f.bwd != nullptr;
@@ -194,15 +251,7 @@ namespace CameraLink
 		e.blockSize = f.blockSize;
 		e.scale = f.scaleToSourcePx;
 		e.stamp = f.stamp;
-		e.mapped = false;
-		e.ticket = ++m_ticket;
-		if (!Start(e))
-		{
-			Release(e);
-			++m_stats.failed;
-			return false;
-		}
-		return true;
+		return Begin(e);
 	}
 
 	size_t FieldReadbackRing::Poll(std::vector<std::shared_ptr<FieldCopy>>& ready)
@@ -254,9 +303,24 @@ namespace CameraLink
 				}
 				base = tmp.data();
 			}
-			UnpackRgba(base, blocks, e.scale, c->fwdX, c->fwdY, c->fwdTrust);
-			if (e.haveBwd)
-				UnpackRgba(base + blocks * 4, blocks, e.scale, c->bwdX, c->bwdY, c->bwdTrust);
+			if (e.seed)
+			{
+				// F2: the seed onto the 16-px source grid (CPU only; the readback is the same two-plane copy).
+				if (!SeedToSourceGrid(base, base + blocks * 4, e.layout, *c))
+				{
+					m_lastError = "the optical-flow seed's layout does not match its source grid";
+					Release(e);
+					++m_stats.failed;
+					continue;
+				}
+			}
+			else
+			{
+				c->origin = FieldOrigin::Live;
+				UnpackRgba(base, blocks, e.scale, c->fwdX, c->fwdY, c->fwdTrust);
+				if (e.haveBwd)
+					UnpackRgba(base + blocks * 4, blocks, e.scale, c->bwdX, c->bwdY, c->bwdTrust);
+			}
 			Release(e);
 			++m_stats.completed;
 			ready.push_back(std::move(c));
