@@ -3156,6 +3156,7 @@ namespace Corpus
 	{
 		std::string cls, name;
 		float panX = 0, panY = 0, zoom = 0, rot = 0, fade = 0, grain = 0, level = 1, fencePeriod = 0;
+		float originX = 0;   // the frame's place on the canvas moves right by this at t = 0 (0 = OX; the camera accuracy report uses it for long pans)
 		bool cut = false, blur = false, subtitle = false;
 		std::vector<Obj> objects;
 	};
@@ -3181,14 +3182,14 @@ namespace Corpus
 		const float scale = std::pow(1.0f + s.zoom, t);
 		const float a = -s.rot * t * 3.14159265f / 180.0f;
 		const float dx = (px - CX) / scale, dy = (py - CY) / scale;
-		wx = dx * std::cos(a) - dy * std::sin(a) + CX + OX - s.panX * t;
+		wx = dx * std::cos(a) - dy * std::sin(a) + CX + OX + s.originX - s.panX * t;
 		wy = dx * std::sin(a) + dy * std::cos(a) + CY + OY - s.panY * t;
 	}
 	void ToScreen(const Scene& s, float wx, float wy, float t, float& px, float& py)
 	{
 		const float scale = std::pow(1.0f + s.zoom, t);
 		const float a = s.rot * t * 3.14159265f / 180.0f;
-		const float dx = wx - CX - OX + s.panX * t, dy = wy - CY - OY + s.panY * t;
+		const float dx = wx - CX - OX - s.originX + s.panX * t, dy = wy - CY - OY + s.panY * t;
 		px = (dx * std::cos(a) - dy * std::sin(a)) * scale + CX;
 		py = (dx * std::sin(a) + dy * std::cos(a)) * scale + CY;
 	}
@@ -4133,13 +4134,17 @@ void RunBetaMotionCorpus()
 // Report only: VP_TEST_CAMERA_ACCURACY=1 (VP_TEST_GPU=hardware, VP_TEST_ADAPTER=NVIDIA for the engine; WARP runs the searches
 // only and says so), VP_TEST_REPORT_MODE=1 for the test host. Results (CSV + summary.md): VP_TEST_CAMERA_ACCURACY_DIR
 // (default D:\codex\videoprocessor\r1cam-camacc-results). Optional: VP_TEST_CAMERA_ACCURACY_SCENES=<name substring>,
-// VP_TEST_CAMERA_ACCURACY_ENGINE_GLOBAL=0 (D1 from the global search instead of the engine's field).
+// VP_TEST_CAMERA_ACCURACY_ENGINE_GLOBAL=0 (D1 from the global search instead of the engine's field),
+// VP_TEST_CAMERA_ACCURACY_FRAMES=<n> (frames per scene, default 8, at least d + 4, at most 64: the 59.94p scenes need about 32 to get past the
+// fit warm-up; a pan that would leave the canvas is skipped and listed), VP_TEST_CAMERA_ACCURACY_ORDER=reverse (scenes and variants in reverse
+// order: the timing control), VP_TEST_CAMERA_ACCURACY_SIZE=1080 (the same scenes box-filtered to 1920x1080, so the picture fraction per frame is
+// the same; default 2160) and a comma list in _SCENES. The summary adds the per-instance GPU timing and the per-frame cost the camera adds.
 namespace CameraAccuracy
 {
 	using Corpus::Obj;
 	using Corpus::Scene;
 
-	constexpr int kFrames = 8;                      // frames per scene (pairs 0 .. 6); the warp is scored on the last pair
+	constexpr int kDefaultFrames = 8;               // frames per scene (pairs 0 .. 6); the warp is scored on the last pair (VP_TEST_CAMERA_ACCURACY_FRAMES)
 	constexpr int kGuideLag = 2;                    // d: the guide of pair N is planned from the record of pair N - d
 	constexpr double kTexturedMinGradient = 4.0;    // textured block: mean |dx| + |dy| of A's luma, 10-bit codes per pixel
 	constexpr int kMoverSize = 256;                 // px (16 x 16 blocks)
@@ -4154,7 +4159,7 @@ namespace CameraAccuracy
 	{
 		std::string name, cls;
 		Scene scene;
-		double fps = 0, ratePxS = 0, pxPerFrame = 0;
+		double fps = 0, ratePxS = 0, pxPerFrame = 0, pxPerFrameSource = 0;   // pxPerFrame in the 4K scene, pxPerFrameSource in the source frame
 		bool fade = false, mover = false;
 		double Level(double t) const { return 1.0 - static_cast<double>(scene.fade) * t; }
 		double FadeGain(int pair) const { return fade ? Level(pair + 1.0) / Level(pair) : 1.0; }
@@ -4176,17 +4181,69 @@ namespace CameraAccuracy
 		return text.empty() ? fallback : std::atof(text.c_str());
 	}
 
-	std::vector<CamScene> Scenes(double rateScale)
+	// VP_TEST_CAMERA_ACCURACY_FRAMES: frames per scene (default 8, the first run's). At least d + 4, so the scoring pools several pairs.
+	inline int Frames()
+	{
+		static const int frames = []()
+		{
+			const int n = static_cast<int>(EnvDouble("VP_TEST_CAMERA_ACCURACY_FRAMES", kDefaultFrames));
+			if (n < kGuideLag + 4 || n > 64)
+				throw std::runtime_error("camera accuracy: VP_TEST_CAMERA_ACCURACY_FRAMES must be " + std::to_string(kGuideLag + 4) + " to 64");
+			return n;
+		}();
+		return frames;
+	}
+
+	// VP_TEST_CAMERA_ACCURACY_SIZE: 2160 (default: 3840x2160) or 1080 (1920x1080: the same scenes box-filtered by 2). Returns the divisor.
+	inline int SizeDiv()
+	{
+		static const int divisor = []()
+		{
+			const int h = static_cast<int>(EnvDouble("VP_TEST_CAMERA_ACCURACY_SIZE", 2160));
+			if (h != 2160 && h != 1080)
+				throw std::runtime_error("camera accuracy: VP_TEST_CAMERA_ACCURACY_SIZE must be 2160 or 1080");
+			return h == 2160 ? 1 : 2;
+		}();
+		return divisor;
+	}
+
+	std::vector<CamScene> Scenes(double rateScale, std::vector<std::string>& skipped)
 	{
 		static const Rate rates[2] = { { "24p", 24000, 1001 }, { "59.94p", 60000, 1001 } };
 		static const double speeds[3] = { 120.0, 480.0, 1440.0 };
 		std::vector<CamScene> list;
+		// A scene is kept when its pan stays on the canvas over all frames (the frame's place on the canvas is moved right at t = 0 as far as it takes,
+		// as far as the canvas allows) and its mover stays inside the picture; otherwise it is skipped and listed (never run degenerate).
+		auto push = [&](CamScene c)
+		{
+			const double frames = static_cast<double>(Frames());
+			const double travel = std::fabs(c.pxPerFrame) * frames + 64.0;
+			const double originX = std::max(0.0, travel - static_cast<double>(Corpus::OX));
+			if (static_cast<double>(Corpus::OX) + originX > 2559.0)
+			{
+				skipped.push_back(c.name + ": the pan travels " + std::to_string(static_cast<int>(travel)) + " px over " + std::to_string(Frames()) +
+					" frames, more than the canvas holds");
+				return;
+			}
+			c.scene.originX = static_cast<float>(originX);
+			for (const Obj& o : c.scene.objects)
+			{
+				const double x0 = o.x0, y0 = o.y0, x1 = o.x0 + o.vx * (frames - 1.0), y1 = o.y0 + o.vy * (frames - 1.0);
+				if (std::min(x0, x1) < 64.0 || std::max(x0, x1) + o.w > Corpus::W - 64.0 || std::min(y0, y1) < 64.0 || std::max(y0, y1) + o.h > Corpus::H - 64.0)
+				{
+					skipped.push_back(c.name + ": the mover leaves the picture over " + std::to_string(Frames()) + " frames");
+					return;
+				}
+			}
+			list.push_back(c);
+		};
 		auto base = [&](const Rate& r, double speed, const std::string& name, const char* cls)
 		{
 			CamScene c;
 			c.fps = r.Fps();
 			c.ratePxS = speed;
 			c.pxPerFrame = speed * rateScale / c.fps;
+			c.pxPerFrameSource = c.pxPerFrame / SizeDiv();
 			c.name = name + "_" + r.label;
 			c.cls = cls;
 			c.scene.cls = cls;
@@ -4196,13 +4253,13 @@ namespace CameraAccuracy
 		};
 		for (const Rate& r : rates)
 			for (double speed : speeds)
-				list.push_back(base(r, speed, "pan_" + std::to_string(static_cast<int>(speed)) + "pxs", "pan"));
+				push(base(r, speed, "pan_" + std::to_string(static_cast<int>(speed)) + "pxs", "pan"));
 		for (const Rate& r : rates)
 		{
 			CamScene c = base(r, 480.0, "pan_480pxs_fade", "pan + fade");
 			c.fade = true;
 			c.scene.fade = static_cast<float>(1.0 / (3.0 * c.fps));   // to black over 3 s, as the loop clip
-			list.push_back(c);
+			push(c);
 		}
 		for (const Rate& r : rates)
 		{
@@ -4216,10 +4273,10 @@ namespace CameraAccuracy
 			o.srcX = 4000.0f;
 			o.srcY = 2400.0f;
 			// Centred on the screen halfway through the last pair, so it stays inside the picture over all frames.
-			o.x0 = Corpus::W / 2.0f - o.w / 2.0f - o.vx * (kFrames - 1.5f);
-			o.y0 = Corpus::H / 2.0f - o.h / 2.0f - o.vy * (kFrames - 1.5f);
+			o.x0 = Corpus::W / 2.0f - o.w / 2.0f - o.vx * (Frames() - 1.5f);
+			o.y0 = Corpus::H / 2.0f - o.h / 2.0f - o.vy * (Frames() - 1.5f);
 			c.scene.objects.push_back(o);
-			list.push_back(c);
+			push(c);
 		}
 		return list;
 	}
@@ -4287,7 +4344,7 @@ namespace CameraAccuracy
 
 	// One 16x16 block of pair `t`: one moving entity over all 64 sample points (no object edge inside), every sample still
 	// visible at t + 1 inside the picture and not covered by another entity (non-occluded), and textured (A's luma gradient).
-	BlockClass Classify(const Scene& s, float t, int bx, int by, const std::vector<uint16_t>& lumaA)
+	BlockClass Classify(const Scene& s, float t, int bx, int by, const std::vector<uint16_t>& lumaA, int sizeDiv, int srcW)
 	{
 		BlockClass c;
 		int first = -2;
@@ -4295,7 +4352,7 @@ namespace CameraAccuracy
 		for (int j = 0; j < 8; ++j)
 			for (int i = 0; i < 8; ++i)
 			{
-				const float px = static_cast<float>(bx * 16 + 1 + i * 2), py = static_cast<float>(by * 16 + 1 + j * 2);
+				const float px = static_cast<float>(sizeDiv * (bx * 16 + 1 + i * 2)), py = static_cast<float>(sizeDiv * (by * 16 + 1 + j * 2));   // 4K scene coordinates
 				const int k = Corpus::ObjectAt(s, px, py, t);
 				float vx, vy;
 				if (k >= 0)
@@ -4324,15 +4381,50 @@ namespace CameraAccuracy
 		for (int y = y0; y < y0 + 16; ++y)
 			for (int x = x0; x < x0 + 16; ++x)
 			{
-				const int a = lumaA[static_cast<size_t>(y) * Corpus::W + x];
-				gradient += std::abs(static_cast<int>(lumaA[static_cast<size_t>(y) * Corpus::W + x + 1]) - a) +
-					std::abs(static_cast<int>(lumaA[static_cast<size_t>(y + 1) * Corpus::W + x]) - a);
+				const int a = lumaA[static_cast<size_t>(y) * srcW + x];
+				gradient += std::abs(static_cast<int>(lumaA[static_cast<size_t>(y) * srcW + x + 1]) - a) +
+					std::abs(static_cast<int>(lumaA[static_cast<size_t>(y + 1) * srcW + x]) - a);
 			}
 		c.single = single;
 		c.visible = visible;
 		c.entity = first;
 		c.textured = gradient / 256.0 / 64.0 >= kTexturedMinGradient;
 		return c;
+	}
+
+	// One frame at the source size: the corpus's 4K render, box-filtered by SizeDiv() (luma and chroma means).
+	void RenderSource(const Scene& s, const Canvas& canvas, float t, uint32_t seed, std::vector<uint16_t>& luma, std::vector<uint16_t>& chroma)
+	{
+		const int d = SizeDiv();
+		if (d == 1)
+		{
+			Corpus::Render(s, canvas, t, seed, luma, chroma);
+			return;
+		}
+		std::vector<uint16_t> luma4k, chroma4k;
+		Corpus::Render(s, canvas, t, seed, luma4k, chroma4k);
+		const int w = Corpus::W / d, h = Corpus::H / d, cw = Corpus::W / 2 / d, ch = Corpus::H / 2 / d;
+		luma.assign(static_cast<size_t>(w) * h, 0);
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+			{
+				unsigned sum = 0;
+				for (int j = 0; j < d; ++j)
+					for (int i = 0; i < d; ++i)
+						sum += luma4k[static_cast<size_t>(y * d + j) * Corpus::W + x * d + i];
+				luma[static_cast<size_t>(y) * w + x] = static_cast<uint16_t>((sum + d * d / 2) / (d * d));
+			}
+		chroma.assign(static_cast<size_t>(cw) * ch * 2, 0);
+		for (int y = 0; y < ch; ++y)
+			for (int x = 0; x < cw; ++x)
+				for (int k = 0; k < 2; ++k)
+				{
+					unsigned sum = 0;
+					for (int j = 0; j < d; ++j)
+						for (int i = 0; i < d; ++i)
+							sum += chroma4k[(static_cast<size_t>(y * d + j) * (Corpus::W / 2) + x * d + i) * 2 + k];
+					chroma[(static_cast<size_t>(y) * cw + x) * 2 + k] = static_cast<uint16_t>((sum + d * d / 2) / (d * d));
+				}
 	}
 
 	struct SubsetStats
@@ -4366,21 +4458,64 @@ namespace CameraAccuracy
 		static double Share(long long n, long long d) { return d > 0 ? static_cast<double>(n) / d : 0.0; }
 	};
 
-	// subsets: 0 all evaluated blocks, 1 background (camera-only) blocks, 2 mover blocks.
-	void ScorePair(const Scene& s, int pair, const std::vector<uint16_t>& lumaA, const std::vector<uint16_t>& field,
-		int blocksX, int blocksY, SubsetStats* subsets)
+	// Per block of pair `pair` (once per scene, shared by the variants): -2 not evaluated (mixed motion, occluded or flat), -1 background, k >= 0 object k.
+	std::vector<int8_t> ClassifyAll(const Scene& s, int pair, const std::vector<uint16_t>& lumaA, int blocksX, int blocksY)
 	{
-		const std::vector<float> truth = Corpus::TrueField(s, static_cast<float>(pair), blocksX, blocksY);
+		std::vector<int8_t> out(static_cast<size_t>(blocksX) * blocksY, static_cast<int8_t>(-2));
 		for (int by = 2; by < blocksY - 2; ++by)
 			for (int bx = 2; bx < blocksX - 2; ++bx)
 			{
-				const BlockClass c = Classify(s, static_cast<float>(pair), bx, by, lumaA);
-				if (!c.single || !c.visible || !c.textured) continue;
+				const BlockClass c = Classify(s, static_cast<float>(pair), bx, by, lumaA, SizeDiv(), Corpus::W / SizeDiv());
+				if (c.single && c.visible && c.textured)
+					out[static_cast<size_t>(by) * blocksX + bx] = static_cast<int8_t>(c.entity);
+			}
+		return out;
+	}
+
+	// The exact motion of each block in source px: the corpus's TrueField at 4K; at 1080 the same sample points in the 4K scene, halved.
+	std::vector<float> TruthField(const Scene& s, float t, int blocksX, int blocksY)
+	{
+		const int d = SizeDiv();
+		if (d == 1)
+			return Corpus::TrueField(s, t, blocksX, blocksY);
+		std::vector<float> v(static_cast<size_t>(blocksX) * blocksY * 2, 0.0f);
+		for (int by = 0; by < blocksY; ++by)
+			for (int bx = 0; bx < blocksX; ++bx)
+			{
+				float sx = 0, sy = 0;
+				for (int j = 0; j < 4; ++j)
+					for (int i = 0; i < 4; ++i)
+					{
+						const float px = static_cast<float>(d * (bx * 16 + 2 + i * 4)), py = static_cast<float>(d * (by * 16 + 2 + j * 4));
+						const int k = Corpus::ObjectAt(s, px, py, t);
+						if (k >= 0) { sx += s.objects[k].vx; sy += s.objects[k].vy; continue; }
+						float wx, wy, qx, qy;
+						Corpus::ToWorld(s, px, py, t, wx, wy);
+						Corpus::ToScreen(s, wx, wy, t + 1.0f, qx, qy);
+						sx += qx - px;
+						sy += qy - py;
+					}
+				v[(static_cast<size_t>(by) * blocksX + bx) * 2] = sx / 16.0f / d;
+				v[(static_cast<size_t>(by) * blocksX + bx) * 2 + 1] = sy / 16.0f / d;
+			}
+		return v;
+	}
+
+	// subsets: 0 all evaluated blocks, 1 background (camera-only) blocks, 2 mover blocks.
+	void ScorePair(const Scene& s, int pair, const std::vector<int8_t>& classes, const std::vector<uint16_t>& field,
+		int blocksX, int blocksY, SubsetStats* subsets)
+	{
+		const std::vector<float> truth = TruthField(s, static_cast<float>(pair), blocksX, blocksY);
+		for (int by = 2; by < blocksY - 2; ++by)
+			for (int bx = 2; bx < blocksX - 2; ++bx)
+			{
 				const size_t i = static_cast<size_t>(by) * blocksX + bx;
+				const int entity = classes[i];
+				if (entity == -2) continue;
 				const bool trusted = HalfToFloat(field[i * 4 + 2]) >= 0.5f;
 				const double e = std::hypot(HalfToFloat(field[i * 4]) - truth[i * 2], HalfToFloat(field[i * 4 + 1]) - truth[i * 2 + 1]);
 				subsets[0].Add(trusted, e);
-				subsets[c.entity < 0 ? 1 : 2].Add(trusted, e);
+				subsets[entity < 0 ? 1 : 2].Add(trusted, e);
 			}
 	}
 
@@ -4391,6 +4526,10 @@ namespace CameraAccuracy
 		std::string refusal, use, fitReason;
 		double gpuMs = 0, wallMs = 0, planMs = 0, fitMs = 0, fitConf = 0, fitTx = 0, fitTy = 0;
 		double guideGx = 0, guideGy = 0, truthTx = 0, truthTy = 0;
+		int passes = 0;                // timed passes of this pair
+		std::string topPass;           // the slowest pass and its ms
+		double topPassMs = 0;
+		double cpuMs = 0;              // AssemblePair + Fitter::Fit (fitMs) + BuildGuide (planMs), steady_clock (QPC)
 	};
 
 	struct VariantResult
@@ -4398,6 +4537,7 @@ namespace CameraAccuracy
 		std::string name;
 		SubsetStats stats[3];
 		double hold = 0, warp = 0;
+		int instance = 0;   // the MotionWarp instance number in execution order (0 = the first of the run)
 		std::vector<PairLog> pairs;
 		// Mean over the pairs that can be guided (pair >= d): the same pairs in every variant.
 		double MeanEligible(double PairLog::*field) const
@@ -4416,6 +4556,20 @@ namespace CameraAccuracy
 			return n;
 		}
 		double Last(double PairLog::*field) const { return pairs.empty() ? 0.0 : pairs.back().*field; }
+		double First(double PairLog::*field, size_t index) const { return index < pairs.size() ? pairs[index].*field : 0.0; }
+		// A quantile of a per-pair value over the pairs >= fromPair, optionally only the guided / eligible ones.
+		double Quantile(double PairLog::*field, int fromPair, bool guidedOnly, bool eligibleOnly, double q) const
+		{
+			std::vector<double> v;
+			for (const PairLog& p : pairs)
+				if (p.pair >= fromPair && (!guidedOnly || p.guided) && (!eligibleOnly || p.eligible))
+					v.push_back(p.*field);
+			if (v.empty()) return 0.0;
+			std::sort(v.begin(), v.end());
+			const double pos = q * (v.size() - 1);
+			const size_t lo = static_cast<size_t>(pos), hi = std::min(lo + 1, v.size() - 1);
+			return v[lo] + (v[hi] - v[lo]) * (pos - lo);
+		}
 	};
 
 	struct SceneResult
@@ -4431,7 +4585,8 @@ namespace CameraAccuracy
 		std::ofstream csv(dir + "\\camera-accuracy.csv", std::ios::trunc);
 		csv << "scene,class,fps,rate_px_s,px_per_frame,variant,subset,eval_blocks,trusted_blocks,trusted_share,epe_mean_px,epe_p50_px,"
 			"epe_p95_px,share_lt025_of_eval,share_lt05_of_eval,share_lt025_of_trusted,share_lt05_of_trusted,hold_codes,warp_codes,"
-			"benefit_codes,gpu_ms_mean,gpu_ms_last,wall_ms_mean,wall_ms_last,fit_ms_mean,plan_ms_mean,guided_pairs,eligible_pairs,nvof_pairs,pairs\n";
+			"benefit_codes,gpu_ms_mean,gpu_ms_last,wall_ms_mean,wall_ms_last,fit_ms_mean,plan_ms_mean,guided_pairs,eligible_pairs,nvof_pairs,pairs,instance,gpu_ms_pair0,gpu_ms_pair1,gpu_ms_steady_median,wall_ms_steady_median,"
+			"cpu_ms_median,cpu_ms_p95,fit_ms_median,plan_ms_median,gpu_ms_guided_median,frame_height\n";
 		for (const SceneResult& s : all)
 			for (const VariantResult& v : s.variants)
 				for (int k = 0; k < 3; ++k)
@@ -4440,34 +4595,38 @@ namespace CameraAccuracy
 					if (st.eval == 0) continue;
 					char row[1536];
 					std::snprintf(row, sizeof(row),
-						"%s,%s,%.3f,%.0f,%.3f,%s,%s,%lld,%lld,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d\n",
-						s.scene.name.c_str(), s.scene.cls.c_str(), s.scene.fps, s.scene.ratePxS, s.scene.pxPerFrame, v.name.c_str(), kSubsetNames[k],
+						"%s,%s,%.3f,%.0f,%.3f,%s,%s,%lld,%lld,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d\n",
+						s.scene.name.c_str(), s.scene.cls.c_str(), s.scene.fps, s.scene.ratePxS, s.scene.pxPerFrameSource, v.name.c_str(), kSubsetNames[k],
 						st.eval, st.trusted, SubsetStats::Share(st.trusted, st.eval), st.Mean(), st.Percentile(0.5), st.Percentile(0.95),
 						SubsetStats::Share(st.lt025, st.eval), SubsetStats::Share(st.lt05, st.eval),
 						SubsetStats::Share(st.lt025, st.trusted), SubsetStats::Share(st.lt05, st.trusted), v.hold, v.warp, v.hold - v.warp,
 						v.MeanEligible(&PairLog::gpuMs), v.Last(&PairLog::gpuMs), v.MeanEligible(&PairLog::wallMs), v.Last(&PairLog::wallMs),
 						v.MeanEligible(&PairLog::fitMs), v.MeanEligible(&PairLog::planMs), v.Count(&PairLog::guided, true),
-						static_cast<int>(kFrames - 1 - kGuideLag), v.Count(&PairLog::nvof, false), static_cast<int>(v.pairs.size()));
+						static_cast<int>(Frames() - 1 - kGuideLag), v.Count(&PairLog::nvof, false), static_cast<int>(v.pairs.size()), v.instance,
+						v.First(&PairLog::gpuMs, 0), v.First(&PairLog::gpuMs, 1), v.Quantile(&PairLog::gpuMs, 1, false, false, 0.5),
+						v.Quantile(&PairLog::wallMs, 1, false, false, 0.5), v.Quantile(&PairLog::cpuMs, 1, false, true, 0.5),
+						v.Quantile(&PairLog::cpuMs, 1, false, true, 0.95), v.Quantile(&PairLog::fitMs, 1, false, true, 0.5),
+						v.Quantile(&PairLog::planMs, 1, true, true, 0.5), v.Quantile(&PairLog::gpuMs, 1, true, true, 0.5), Corpus::H / SizeDiv());
 					csv << row;
 				}
 		std::ofstream pairs(dir + "\\camera-accuracy-pairs.csv", std::ios::trunc);
 		pairs << "scene,variant,pair,eligible,guided,refusal,use,nvof,gpu_ms,wall_ms,plan_ms,fit_ms,fit_reason,fit_confidence,fit_tx_px,fit_ty_px,"
-			"guide_global_x_px,guide_global_y_px,truth_camera_x_px,truth_camera_y_px\n";
+			"guide_global_x_px,guide_global_y_px,truth_camera_x_px,truth_camera_y_px,passes,top_pass,top_pass_ms,cpu_ms\n";
 		for (const SceneResult& s : all)
 			for (const VariantResult& v : s.variants)
 				for (const PairLog& p : v.pairs)
 				{
 					char row[1536];
-					std::snprintf(row, sizeof(row), "%s,%s,%d,%d,%d,\"%s\",\"%s\",%d,%.3f,%.3f,%.3f,%.3f,\"%s\",%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+					std::snprintf(row, sizeof(row), "%s,%s,%d,%d,%d,\"%s\",\"%s\",%d,%.3f,%.3f,%.3f,%.3f,\"%s\",%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,\"%s\",%.3f,%.3f\n",
 						s.scene.name.c_str(), v.name.c_str(), p.pair, p.eligible ? 1 : 0, p.guided ? 1 : 0, p.refusal.c_str(), p.use.c_str(),
 						p.nvof ? 1 : 0, p.gpuMs, p.wallMs, p.planMs, p.fitMs, p.fitReason.c_str(), p.fitConf, p.fitTx, p.fitTy,
-						p.guideGx, p.guideGy, p.truthTx, p.truthTy);
+						p.guideGx, p.guideGy, p.truthTx, p.truthTy, p.passes, p.topPass.c_str(), p.topPassMs, p.cpuMs);
 					pairs << row;
 				}
 	}
 
 	void WriteSummary(const std::string& dir, const std::vector<SceneResult>& all, bool hardware, const std::string& device,
-		double rateScale, bool engineGlobal)
+		double rateScale, bool engineGlobal, const std::vector<std::string>& skipped, bool reverse)
 	{
 		std::ofstream md(dir + "\\summary.md", std::ios::trunc);
 		char line[1400];
@@ -4479,20 +4638,29 @@ namespace CameraAccuracy
 		md << "# Camera guidance accuracy on synthetic camera pans (R1-CAMACC)\n\n";
 		md << "Run " << stamp << " on " << device << (hardware ? " (hardware GPU)" : " (NOT hardware: the optical flow engine did not run)") << ".\n\n";
 		md << "**What ran.** The production motion estimator (MotionWarp: optical flow engine on, medium preset, seed mode, the renderer's "
-			"refinements; accuracy-only strength settings as the motion corpus) on " << kFrames << "-frame synthetic camera pans at "
-			<< Corpus::W << "x" << Corpus::H << ", against the exact block truth. Variants: **off** (no guidance), **model_global** (the proposed "
+			"refinements; accuracy-only strength settings as the motion corpus) on " << Frames() << "-frame synthetic camera pans at "
+			<< Corpus::W / SizeDiv() << "x" << Corpus::H / SizeDiv() << ", against the exact block truth. Variants: **off** (no guidance), **model_global** (the proposed "
 			"default: only vector_model_global), **all_switches** (every measurement switch, information only).\n\n";
 		md << "**Guide.** Built by the production units: the estimator's own forward field of each pair -> AssemblePair -> Fitter::Fit (default "
 			"Config, no backward field so the inverse signal is neutral) -> BuildGuide (BuildMeasurementPlan -> MakeGuidanceFrame, default "
 			"MeasurementConfig, minimum confidence 0.7) -> MotionWarp::SetCameraGuidance. Lag **d = " << kGuideLag << "** (fixed: the guide of "
 			"pair N is planned from the record of pair N-" << kGuideLag << "), so pairs 0-" << (kGuideLag - 1) << " run unguided in every variant and "
-			"the scoring pools pairs " << kGuideLag << "-" << (kFrames - 2) << " (" << (kFrames - 1 - kGuideLag) << " pairs per scene). The warp error is "
+			"the scoring pools pairs " << kGuideLag << "-" << (Frames() - 2) << " (" << (Frames() - 1 - kGuideLag) << " pairs per scene). The warp error is "
 			"the last pair's.\n\n";
-		std::snprintf(line, sizeof(line), "**Rates.** Pan speeds are px/s of the harness frame (%dx%d) x %.2f; per-frame shift = rate x scale / fps (24p = 23.976, "
+		std::snprintf(line, sizeof(line), "**Rates.** Pan speeds are px/s of the 4K scene (%dx%d) x %.2f (the frames are box-filtered by %d to the source size: the per-frame shift in source px is that divided by %d); per-frame shift = rate x scale / fps (24p = 23.976, "
 			"59.94p = 59.94). The loop clips are 1920 px wide: scale 2 gives the same fraction of the picture per second. D1 from the %s.\n\n",
-			Corpus::W, Corpus::H, rateScale, engineGlobal ? "optical flow engine's field (the render-ahead path; the render-time engine is read back)" :
+			Corpus::W, Corpus::H, rateScale, SizeDiv(), SizeDiv(), engineGlobal ? "optical flow engine's field (the render-ahead path; the render-time engine is read back)" :
 			"global search");
 		md << line;
+		md << "**Run shape.** " << Frames() << " frames per scene, source frames " << Corpus::W / SizeDiv() << "x" << Corpus::H / SizeDiv() << ", scenes and variants in "
+			<< (reverse ? "REVERSE" : "normal") << " order.\n\n";
+		if (!skipped.empty())
+		{
+			md << "**Skipped scenes** (they do not fit this frame count):\n\n";
+			for (const std::string& s : skipped)
+				md << "- " << s << "\n";
+			md << "\n";
+		}
 		md << "**Metrics.** Block EPE = |field vector - exact truth| (source px) over TRUSTED blocks that are textured (mean |dx|+|dy| of A's luma >= "
 			<< kTexturedMinGradient << " codes of 10 bit), single-motion (no object edge inside) and non-occluded (every sample visible at t+1). The "
 			"sub-pixel shares are given of the evaluated blocks (an untrusted block counts as a miss) and of the trusted blocks. Warp / hold = mean abs "
@@ -4510,7 +4678,7 @@ namespace CameraAccuracy
 					s.scene.name.c_str(), v.name.c_str(), 100.0 * SubsetStats::Share(st.trusted, st.eval), st.Mean(), st.Percentile(0.5), st.Percentile(0.95),
 					100.0 * SubsetStats::Share(st.lt025, st.eval), 100.0 * SubsetStats::Share(st.lt025, st.trusted),
 					100.0 * SubsetStats::Share(st.lt05, st.eval), 100.0 * SubsetStats::Share(st.lt05, st.trusted), v.hold, v.warp,
-					v.MeanEligible(&PairLog::gpuMs), v.MeanEligible(&PairLog::wallMs), v.Count(&PairLog::guided, true), kFrames - 1 - kGuideLag);
+					v.MeanEligible(&PairLog::gpuMs), v.MeanEligible(&PairLog::wallMs), v.Count(&PairLog::guided, true), Frames() - 1 - kGuideLag);
 				md << line;
 			}
 
@@ -4552,7 +4720,74 @@ namespace CameraAccuracy
 						}
 		}
 
+		md << "\n## What the camera adds per frame (steady state, pairs >= 1)\n\n";
+		md << "dGPU / dwall = the median of the GUIDED pairs of the variant minus the median of the same scene's off variant (pass timers / drained wall clock, ms). "
+			"CPU ms = AssemblePair + Fitter::Fit + BuildGuide of one pair, steady_clock (QueryPerformanceCounter), median and p95 over the pairs that can be guided. "
+			"Source frames " << Corpus::W / SizeDiv() << "x" << Corpus::H / SizeDiv() << ".\n\n";
+		md << "| scene | variant | GPU ms off | GPU ms guided | dGPU | dwall | CPU ms median | CPU ms p95 | fit ms median | BuildGuide ms median | guided pairs |\n|---|---|---|---|---|---|---|---|---|---|---|\n";
+		std::vector<double> dGpuAll[3], dWallAll[3], cpuMedAll[3], cpuP95All[3];
+		for (const SceneResult& s : all)
+			for (int vi = 1; vi < 3; ++vi)
+			{
+				const VariantResult& off = s.variants[0];
+				const VariantResult& on = s.variants[vi];
+				const double gpuOff = off.Quantile(&PairLog::gpuMs, 1, false, true, 0.5), gpuOn = on.Quantile(&PairLog::gpuMs, 1, true, true, 0.5);
+				const double wallOff = off.Quantile(&PairLog::wallMs, 1, false, true, 0.5), wallOn = on.Quantile(&PairLog::wallMs, 1, true, true, 0.5);
+				const double cpuMed = on.Quantile(&PairLog::cpuMs, 1, false, true, 0.5), cpu95 = on.Quantile(&PairLog::cpuMs, 1, false, true, 0.95);
+				const int guidedPairs = on.Count(&PairLog::guided, true);
+				if (guidedPairs > 0)
+				{
+					dGpuAll[vi].push_back(gpuOn - gpuOff);
+					dWallAll[vi].push_back(wallOn - wallOff);
+				}
+				cpuMedAll[vi].push_back(cpuMed);
+				cpuP95All[vi].push_back(cpu95);
+				std::snprintf(line, sizeof(line), "| %s | %s | %.2f | %.2f | %+.2f | %+.2f | %.3f | %.3f | %.3f | %.4f | %d |\n", s.scene.name.c_str(), on.name.c_str(), gpuOff, gpuOn,
+					gpuOn - gpuOff, wallOn - wallOff, cpuMed, cpu95, on.Quantile(&PairLog::fitMs, 1, false, true, 0.5), on.Quantile(&PairLog::planMs, 1, true, true, 0.5), guidedPairs);
+				md << line;
+			}
+		auto medianOf = [](std::vector<double> v) { if (v.empty()) return 0.0; std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
+		auto maxOf = [](const std::vector<double>& v) { double m = -1e30; for (double x : v) m = std::max(m, x); return v.empty() ? 0.0 : m; };
+		md << "\nAcross the scenes (the bound to quote): ";
+		for (int vi = 1; vi < 3; ++vi)
+		{
+			std::snprintf(line, sizeof(line), "**%s** dGPU median %+.2f max %+.2f ms, dwall median %+.2f max %+.2f ms, CPU ms median %.3f, worst p95 %.3f. ", vi == 1 ? "model_global" : "all_switches",
+				medianOf(dGpuAll[vi]), maxOf(dGpuAll[vi]), medianOf(dWallAll[vi]), maxOf(dWallAll[vi]), medianOf(cpuMedAll[vi]), maxOf(cpuP95All[vi]));
+			md << line;
+		}
+		md << "\n";
+
+		md << "\n## GPU ms per MotionWarp instance (execution order: " << (reverse ? "reversed" : "normal") << ")\n\n";
+		md << "Pair 0 is the instance's first estimate (initialisation); steady = the median of pairs >= 1. passes / slowest pass are of the instance's last pair. "
+			"A first-instance effect shows as the first instances differing from all later ones, timer accumulation as a drift with the instance number, a real cost as a step with the variant.\n\n";
+		md << "| instance | scene | variant | pair 0 GPU | pair 1 GPU | steady GPU median | steady wall median | passes | slowest pass (ms) |\n|---|---|---|---|---|---|---|---|---|\n";
+		std::vector<std::pair<int, std::pair<const SceneResult*, const VariantResult*>>> instances;
+		for (const SceneResult& s : all)
+			for (const VariantResult& v : s.variants)
+				instances.push_back(std::make_pair(v.instance, std::make_pair(&s, &v)));
+		std::sort(instances.begin(), instances.end(), [](const std::pair<int, std::pair<const SceneResult*, const VariantResult*>>& a,
+			const std::pair<int, std::pair<const SceneResult*, const VariantResult*>>& b) { return a.first < b.first; });
+		double minSteady = 1e30, maxSteady = 0.0;
+		int minInstance = 0, maxInstance = 0;
+		for (const auto& entry : instances)
+		{
+			const VariantResult& v = *entry.second.second;
+			const double steady = v.Quantile(&PairLog::gpuMs, 1, false, false, 0.5);
+			if (steady < minSteady) { minSteady = steady; minInstance = v.instance; }
+			if (steady > maxSteady) { maxSteady = steady; maxInstance = v.instance; }
+			const PairLog* last = v.pairs.empty() ? nullptr : &v.pairs.back();
+			std::snprintf(line, sizeof(line), "| %d | %s | %s | %.2f | %.2f | %.2f | %.2f | %d | %.2f %s |\n", v.instance, entry.second.first->scene.name.c_str(), v.name.c_str(),
+				v.First(&PairLog::gpuMs, 0), v.First(&PairLog::gpuMs, 1), steady, v.Quantile(&PairLog::wallMs, 1, false, false, 0.5), last ? last->passes : 0,
+				last ? last->topPassMs : 0.0, last ? last->topPass.c_str() : "");
+			md << line;
+		}
+
 		md << "\n## Plausibility checks (every number sanity-checked by the run itself)\n\n";
+		std::snprintf(line, sizeof(line), "- Steady GPU ms per instance ranges from %.2f (instance %d) to %.2f (instance %d), a factor %.1f: %s\n", minSteady, minInstance, maxSteady,
+			maxInstance, minSteady > 0.0 ? maxSteady / minSteady : 0.0, (minSteady > 0.0 && maxSteady / minSteady > 3.0) ?
+			"MORE THAN 3x between instances: a first-instance effect, timer accumulation or a measurement fault (see the instance table); do not quote an absolute GPU cost from this run." :
+			"consistent between instances.");
+		md << line;
 		int nvofPairs = 0, pairsTotal = 0;
 		double worstGuide = 0.0, worstFit = 0.0;
 		int guidedModelGlobal = 0, eligibleModelGlobal = 0;
@@ -4630,7 +4865,23 @@ void RunBetaCameraAccuracy()
 	CreateDirectoryA(outDir.c_str(), nullptr);
 	const double rateScale = EnvDouble("VP_TEST_CAMERA_ACCURACY_RATE_SCALE", 1.0);
 	const bool engineGlobal = EnvDouble("VP_TEST_CAMERA_ACCURACY_ENGINE_GLOBAL", 1.0) != 0.0;
-	const std::string filter = EnvText("VP_TEST_CAMERA_ACCURACY_SCENES");
+	const std::string filter = EnvText("VP_TEST_CAMERA_ACCURACY_SCENES");   // comma list of name substrings
+	const bool reverse = EnvText("VP_TEST_CAMERA_ACCURACY_ORDER") == "reverse";
+	auto sceneWanted = [&](const std::string& name)
+	{
+		if (filter.empty()) return true;
+		size_t from = 0;
+		while (from <= filter.size())
+		{
+			size_t comma = filter.find(',', from);
+			if (comma == std::string::npos) comma = filter.size();
+			const std::string token = filter.substr(from, comma - from);
+			if (!token.empty() && name.find(token) != std::string::npos) return true;
+			from = comma + 1;
+		}
+		return false;
+	};
+	const int srcW = Corpus::W / SizeDiv(), srcH = Corpus::H / SizeDiv();
 	std::cout << "Beta camera accuracy: building the canvas (" << (hardware ? "hardware GPU, " : "NOT a hardware GPU: the optical flow engine will not run, ")
 		<< device << ")\n" << std::flush;
 	Canvas canvas;
@@ -4644,64 +4895,81 @@ void RunBetaCameraAccuracy()
 		p.sampleable = true; p.storable = true; p.host_writable = true; p.host_readable = true;
 		return pl_tex_create(g, &p);
 	};
-	std::vector<pl_tex> lumaT(kFrames), chromaT(kFrames);
-	for (int f = 0; f < kFrames; ++f)
+	std::vector<pl_tex> lumaT(Frames()), chromaT(Frames());
+	for (int f = 0; f < Frames(); ++f)
 	{
-		lumaT[f] = plane(Corpus::W, Corpus::H, 1);
-		chromaT[f] = plane(Corpus::W / 2, Corpus::H / 2, 2);
+		lumaT[f] = plane(srcW, srcH, 1);
+		chromaT[f] = plane(srcW / 2, srcH / 2, 2);
 		Check(lumaT[f] && chromaT[f], "camera accuracy: cannot create the frame planes");
 	}
-	const int blocksX = ((Corpus::W + 1) / 2 + 7) / 8, blocksY = ((Corpus::H + 1) / 2 + 7) / 8;
+	const int blocksX = (srcW + 15) / 16, blocksY = (srcH + 15) / 16;   // one texel per 16x16 source block (240x135 at 4K, 120x68 at 1080)
 	struct Spec { const char* name; bool on; CameraModel::MeasurementSwitches sw; };
 	std::vector<Spec> specs;
 	specs.push_back(Spec{ "off", false, CameraModel::MeasurementSwitches() });
 	specs.push_back(Spec{ "model_global", true, ModelGlobalOnly() });
 	specs.push_back(Spec{ "all_switches", true, AllSwitches() });
-	const std::vector<CamScene> scenes = Scenes(rateScale);
+	std::vector<std::string> skipped;
+	const std::vector<CamScene> scenes = Scenes(rateScale, skipped);
+	for (const std::string& s : skipped)
+		std::cout << "Beta camera accuracy: SKIPPED " << s << "\n";
+	std::vector<size_t> sceneOrder;
+	for (size_t i = 0; i < scenes.size(); ++i)
+		sceneOrder.push_back(scenes.size() - 1 - i);
+	if (!reverse)
+		std::reverse(sceneOrder.begin(), sceneOrder.end());
+	int instance = 0;
 	std::vector<SceneResult> results;
-	std::vector<uint16_t> chroma, truthMid, truthChroma, warped(static_cast<size_t>(Corpus::W) * Corpus::H);
+	std::vector<uint16_t> chroma, truthMid, truthChroma, warped(static_cast<size_t>(srcW) * srcH);
 	std::vector<uint16_t> fieldHalf(static_cast<size_t>(blocksX) * blocksY * 4);
-	for (const CamScene& cs : scenes)
+	for (size_t sceneIndex : sceneOrder)
 	{
-		if (!filter.empty() && cs.name.find(filter) == std::string::npos)
+		const CamScene& cs = scenes[sceneIndex];
+		if (!sceneWanted(cs.name))
 			continue;
 		const auto renderStart = std::chrono::steady_clock::now();
-		std::vector<std::vector<uint16_t>> lumas(kFrames);
-		for (int f = 0; f < kFrames; ++f)
+		std::vector<std::vector<uint16_t>> lumas(Frames());
+		for (int f = 0; f < Frames(); ++f)
 		{
-			Corpus::Render(cs.scene, canvas, static_cast<float>(f), 1000u + f, lumas[f], chroma);
+			RenderSource(cs.scene, canvas, static_cast<float>(f), 1000u + f, lumas[f], chroma);
 			pl_tex_transfer_params up{};
 			up.tex = lumaT[f]; up.ptr = lumas[f].data();
 			Check(pl_tex_upload(g, &up), "camera accuracy: upload");
 			up.tex = chromaT[f]; up.ptr = chroma.data();
 			Check(pl_tex_upload(g, &up), "camera accuracy: upload");
 		}
-		Corpus::Render(cs.scene, canvas, kFrames - 1.5f, 999u, truthMid, truthChroma);   // the true midpoint of the last pair
+		RenderSource(cs.scene, canvas, Frames() - 1.5f, 999u, truthMid, truthChroma);   // the true midpoint of the last pair
 		const double renderSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - renderStart).count();
-		std::cout << "Beta camera accuracy: " << cs.name << " (" << cs.pxPerFrame << " px per frame, " << cs.fps << " fps), render " << renderSeconds << " s\n" << std::flush;
+		std::cout << "Beta camera accuracy: " << cs.name << " (" << cs.pxPerFrameSource << " px per frame, " << cs.fps << " fps), render " << renderSeconds << " s\n" << std::flush;
 		SceneResult sr;
 		sr.scene = cs;
-		for (size_t vi = 0; vi < specs.size(); ++vi)
+		std::vector<std::vector<int8_t>> classes(Frames() - 1);   // the block classes of each scored pair, shared by the variants
+		for (int p = kGuideLag; p + 1 < Frames(); ++p)
+			classes[p] = ClassifyAll(cs.scene, p, lumas[p], blocksX, blocksY);
+		for (size_t vk = 0; vk < specs.size(); ++vk)
 		{
+			const size_t vi = reverse ? specs.size() - 1 - vk : vk;
 			const Spec& spec = specs[vi];
 			VariantResult& vr = sr.variants[vi];
 			vr.name = spec.name;
+			vr.instance = instance++;
 			Dejudder::MotionWarp warp(gpu.Log(), g, ProductionSettings(cs.fps, engineGlobal));
 			warp.SetPassTiming(true, false);   // GPU timers per pass, the GPU kept busy
 			CameraModel::Config fitConfig;
 			fitConfig.clock = &SteadyMicros;
 			CameraModel::Fitter fitter(fitConfig);
-			std::vector<CameraModel::CameraMotion> records(kFrames - 1);
-			std::vector<CameraLink::FieldCopy> fields(kFrames - 1);
+			std::vector<CameraModel::CameraMotion> records(Frames() - 1);
+			std::vector<CameraLink::FieldCopy> fields(Frames() - 1);
 			const CameraModel::MeasurementConfig measurementConfig;
 			Dejudder::Planes lastA;
-			for (int p = 0; p + 1 < kFrames; ++p)
+			for (int p = 0; p + 1 < Frames(); ++p)
 			{
 				PairLog log;
 				log.pair = p;
 				log.eligible = p >= kGuideLag;
 				log.refusal = !spec.on ? "camera off" : (log.eligible ? "" : "no record yet (pair < d)");
 				CameraTruth(cs.scene, static_cast<float>(p), log.truthTx, log.truthTy);
+				log.truthTx /= SizeDiv();
+				log.truthTy /= SizeDiv();   // source px
 				std::shared_ptr<const CameraModel::GuidanceFrame> frame;
 				if (spec.on && log.eligible)
 				{
@@ -4736,7 +5004,15 @@ void RunBetaCameraAccuracy()
 				warp.FlushPassTimers();   // drains the GPU and collects the pass timers of this pair
 				log.wallMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - estimateStart).count();
 				for (const auto& entry : warp.TakePassGpuMs())
+				{
 					log.gpuMs += entry.second;
+					++log.passes;
+					if (entry.second > log.topPassMs)
+					{
+						log.topPassMs = entry.second;
+						log.topPass = entry.first;
+					}
+				}
 				log.nvof = warp.OpticalFlowUsed();
 				Check(!hardware || log.nvof, "camera accuracy: the optical flow engine did not run on a hardware GPU: " + warp.OpticalFlowError());
 				const Dejudder::MotionWarp::CameraGuidanceUse u = warp.CameraGuidanceUsed();
@@ -4788,9 +5064,10 @@ void RunBetaCameraAccuracy()
 					log.fitReason = CameraModel::ReasonTextOf(records[p].reason, records[p].verdictFlags);
 					log.fitConf = records[p].confidence;
 					CameraModel::Displacement(records[p].params, 0.0, 0.0, &log.fitTx, &log.fitTy);
+					log.cpuMs = log.planMs + log.fitMs;
 				}
 				if (log.eligible)
-					ScorePair(cs.scene, p, lumas[p], fieldHalf, blocksX, blocksY, vr.stats);
+					ScorePair(cs.scene, p, classes[p], fieldHalf, blocksX, blocksY, vr.stats);
 				vr.pairs.push_back(log);
 				lastA = a;
 			}
@@ -4800,13 +5077,14 @@ void RunBetaCameraAccuracy()
 			pl_tex_transfer_params dw{};
 			dw.tex = out.luma; dw.ptr = warped.data();
 			Check(pl_tex_download(g, &dw), "camera accuracy: warped download");
-			const std::vector<uint16_t>& heldLuma = lumas[kFrames - 2];
+			const std::vector<uint16_t>& heldLuma = lumas[Frames() - 2];
 			double hold = 0.0, wr = 0.0;
 			long long n = 0;
-			for (int y = 64; y < Corpus::H - 64; y += 2)
-				for (int x = 64; x < Corpus::W - 64; x += 2)
+			const int margin = 64 / SizeDiv();
+			for (int y = margin; y < srcH - margin; y += 2)
+				for (int x = margin; x < srcW - margin; x += 2)
 				{
-					const size_t i = static_cast<size_t>(y) * Corpus::W + x;
+					const size_t i = static_cast<size_t>(y) * srcW + x;
 					hold += std::abs(static_cast<int>(heldLuma[i]) - static_cast<int>(truthMid[i]));
 					wr += std::abs(static_cast<int>(warped[i]) - static_cast<int>(truthMid[i]));
 					++n;
@@ -4819,7 +5097,7 @@ void RunBetaCameraAccuracy()
 				"GPU %6.2f ms wall %6.2f ms  guided %d/%d",
 				vr.name.c_str(), 100.0 * SubsetStats::Share(st.trusted, st.eval), st.Mean(), st.Percentile(0.5), st.Percentile(0.95),
 				100.0 * SubsetStats::Share(st.lt025, st.eval), 100.0 * SubsetStats::Share(st.lt05, st.eval), vr.hold, vr.warp,
-				vr.MeanEligible(&PairLog::gpuMs), vr.MeanEligible(&PairLog::wallMs), vr.Count(&PairLog::guided, true), kFrames - 1 - kGuideLag);
+				vr.MeanEligible(&PairLog::gpuMs), vr.MeanEligible(&PairLog::wallMs), vr.Count(&PairLog::guided, true), Frames() - 1 - kGuideLag);
 			std::cout << line << "\n" << std::flush;
 		}
 		results.push_back(sr);
@@ -4827,7 +5105,7 @@ void RunBetaCameraAccuracy()
 	for (size_t f = 0; f < lumaT.size(); ++f) { pl_tex_destroy(g, &lumaT[f]); pl_tex_destroy(g, &chromaT[f]); }
 	Check(!results.empty(), "camera accuracy: no scene ran (VP_TEST_CAMERA_ACCURACY_SCENES matched nothing)");
 	WriteCsv(outDir, results);
-	WriteSummary(outDir, results, hardware, device, rateScale, engineGlobal);
+	WriteSummary(outDir, results, hardware, device, rateScale, engineGlobal, skipped, reverse);
 	std::cout << "Beta camera accuracy: results in " << outDir << " (camera-accuracy.csv, camera-accuracy-pairs.csv, summary.md)\n" << std::flush;
 }
 
