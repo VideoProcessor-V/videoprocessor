@@ -130,6 +130,20 @@ Contract tests:
 Chain tests:
 - delay gate (`DelayGate`): the recommended total and lower totals (4/3/2 frames) at 23.976/24/25/30/50/60p; identical measured total across rates; no stalls; recovery when frames return
 
+## M2 P10 (doc 59 section 5): moved so far
+
+- `QueueDelayHold.inl` (item m): SetQueueDelayBudget, CurrentQueueHold, QueuePolicy (the either/or with Bill's queue
+  policy), UpdateQueueDelayHold, HoldTicksUntilDueLocked, WaitForDequeueLocked. `TimedFileFrames.inl` (item l):
+  OnTimedVideoFrame, the file slot gate, FileHeadTicksUntilDueLocked. Both are VP-only member definitions of the
+  renderer, included ONCE by LibplaceboVideoRenderer.cpp at the exact place the text stood (the translation unit is
+  textually unchanged); threads and locks as before (each file's header lists them).
+- `tests/QueueTargetNeverExceedsDesiredTests.cpp`: the owner rule "queue depth is never added for vectors" over every
+  vector demand x cadence x look-ahead x credit x queue_timing_fixes.
+- Waiting for the LibplaceboVideoRenderer.h zone (LVRH): the state these functions use (hold, budget, policies, file
+  gate, pulldown detector / film clock / arrival tracker), R15 `DecideIngress` (`IngressPolicy`, items j/k), R19
+  `ResolveQueueTarget` (items q/m), R20 `IQueueAdmission`, and the P10-8 lifetime snapshot (`m_impl` is a
+  `unique_ptr` in the header).
+
 ## Known issues / open items
 
 - DONE: the forced 5-frame minimum is gone (r6 fix 2; `ApplyFrameMinimum` removed).
