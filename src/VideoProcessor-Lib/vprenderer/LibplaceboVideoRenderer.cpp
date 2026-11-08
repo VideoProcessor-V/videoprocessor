@@ -5120,7 +5120,7 @@ struct LibplaceboVideoRenderer::Impl
 	// entrance_gpu_drain (VP-V/modules/scaling/rebase/EntranceGpuDrain.h, group E): call sites only.
 	// S1 notes every entrance run through EntranceHost::OnStagesRun.
 	EntranceGpuDrain::Drain entranceDrain;
-	void DrainEntranceBeforeRender();   // VPV-HOOK P4-2: defined in VP-V/segments/EntranceHostMembers.inl
+	void DrainEntranceBeforeRender();   // VPV-HOOK P4-5: defined in VP-V/segments/EntranceHostMembers.inl
 
 	// S1, the entrance segment (VP-V/segments/EntranceSegment.h; WP-8, M2 steps 10-13): the input
 	// side at source size - re-base, [repair A], deband, texture restore / detail pulse, [4K route] -
@@ -5208,7 +5208,7 @@ struct LibplaceboVideoRenderer::Impl
 		return dejudder && aSequence != 0 && entranceOnceSnapFor == aSequence && motionValidity.Current(entranceOnceSnapEpoch) &&
 			dejudder->SnapField() && dejudder->SnapFrameTrust();
 	}
-	bool EntranceOnceFieldAhead(uint64_t aSequence, uint64_t bSequence, std::string& why);   // VPV-HOOK P4-2: defined in VP-V/segments/EntranceHostMembers.inl
+	bool EntranceOnceFieldAhead(uint64_t aSequence, uint64_t bSequence, std::string& why);   // VPV-HOOK P4-5: defined in VP-V/segments/EntranceHostMembers.inl
 
 	// A crossfade between source resolutions renders both paths per picture: the per-picture
 	// stages there (visible), never a processed picture of the other path.
@@ -5216,11 +5216,11 @@ struct LibplaceboVideoRenderer::Impl
 
 	// B3 for the timeline's picture between frames (interpolation, hiccup gap pairs): interpolated
 	// from the processed A and B. True: `frame` is the picture (no further entrance stages).
-	bool EntranceOncePhasePicture(const pl_frame& source, uint64_t sequence, uint64_t nextSequence, const pl_frame* image, pl_frame& frame, const OwnedEntrance** heldA = nullptr);   // VPV-HOOK P4-2: defined in VP-V/segments/EntranceHostMembers.inl
+	bool EntranceOncePhasePicture(const pl_frame& source, uint64_t sequence, uint64_t nextSequence, const pl_frame* image, pl_frame& frame, const OwnedEntrance** heldA = nullptr);   // VPV-HOOK P4-5: defined in VP-V/segments/EntranceHostMembers.inl
 
 	// B3 for a de-judder extra on the source path (the warp, or Stage A interpolation): the
 	// processed A (and B). False: today's path (the raw planes, then the per-picture stages).
-	bool EntranceOnceExtra(const pl_frame& image, uint64_t sequence, uint64_t nextSequence, bool interpolating, const Dejudder::Planes& a, Dejudder::Planes& processedA, Dejudder::Planes& processedB, const pl_frame*& processedFrame);   // VPV-HOOK P4-2: defined in VP-V/segments/EntranceHostMembers.inl
+	bool EntranceOnceExtra(const pl_frame& image, uint64_t sequence, uint64_t nextSequence, bool interpolating, const Dejudder::Planes& a, Dejudder::Planes& processedA, Dejudder::Planes& processedB, const pl_frame*& processedFrame);   // VPV-HOOK P4-5: defined in VP-V/segments/EntranceHostMembers.inl
 	pl_frame entranceOnceExtraFrame{};   // the extra's processed A as drawn (EntranceSegment::OwnedFrame)
 
 	// Hunt 3 F1: the crossfade mixed in the output signal domain (CrossfadeMix.h): `from` (the
@@ -5228,7 +5228,7 @@ struct LibplaceboVideoRenderer::Impl
 	// `to` rendered with the mix hook right after the extended-range late restore. BTB/WTW are
 	// carried exactly (no linear-light clamp), the late restore runs once per path before the
 	// mix. False (nothing shown yet): the caller falls back to libplacebo's frame mixer.
-	bool RenderCrossfadeMix(const pl_frame& from, const pl_frame& to, const pl_frame& destination, const pl_render_params& parameters, const pl_color_space* historyColor, double weight);   // VPV-HOOK P4-2: defined in VP-V/segments/EntranceHostMembers.inl
+	bool RenderCrossfadeMix(const pl_frame& from, const pl_frame& to, const pl_frame& destination, const pl_render_params& parameters, const pl_color_space* historyColor, double weight);   // VPV-HOOK P4-5: defined in VP-V/segments/EntranceHostMembers.inl
 
 	bool UnpackRgbPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, bool bt2020, pl_tex& rgb, pl_tex& luma)
 	{
