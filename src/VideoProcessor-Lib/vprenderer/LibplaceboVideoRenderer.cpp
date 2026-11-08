@@ -32499,153 +32499,14 @@ void LibplaceboVideoRenderer::ConversionLoop()
 			sequence = queued->sourceSequence;
 		}
 		std::shared_ptr<QueuedFrame::ConvertedPayload> converted;
-		std::shared_ptr<EarlyUploadHandoff> earlyHandoff;   // capture_upload: early, uploaded after the publish
-		std::shared_ptr<VideoFrame> earlyFrame;
-		size_t earlyRowBytes = 0;
-		int earlyHeight = 0;
 		std::string error;
 		try
 		{
 			if (!state || !m_impl->formatter)
 				throw std::runtime_error("formatter or frame state unavailable");
 			const auto started = SteadyClock::now();
-			// capture_path: gpu (owner 2026-10-13): V210 / UYVY / HDYC go on raw
-			// (the render unpacks them on the GPU); anything else, an override,
-			// or a failed unpack earlier this session: the CPU formatter.
-			// native_rgb_ingest: R12B / R12L / r210 go on raw (native RGB in the
-			// render); the contract is the CPU formatter's (the unpack's luma
-			// equals its Y plane).
-			// Never on the Dolby Vision tunnel: its r210 words carry packed
-			// 12-bit IPT and the DM packet, not RGB (the render excludes it too,
-			// so a raw RGB payload there had no metadata and showed black).
-			const bool rgbRaw = !state->dolbyVisionTunnel &&
-				m_impl->rgbGpuWanted.load(std::memory_order_acquire) &&
-				!m_impl->rgbGpuFailed.load(std::memory_order_acquire) &&
-				m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
-				GpuRgbUnpack::Supports(state->videoFrameEncoding) && state->displayMode &&
-				((state->videoFrameEncoding != VideoFrameEncoding::R12B && state->videoFrameEncoding != VideoFrameEncoding::R12L) ||
-					state->displayMode->FrameWidth() % 8 == 0);
-			// The raw frame held for the render's GPU unpack (capture_path gpu,
-			// native_rgb_ingest, dv_tunnel_gpu_unpack).
-			auto makeRaw = [&]()
-			{
-				auto raw = std::make_shared<QueuedFrame::ConvertedPayload>();
-				frame.SourceBufferAddRef();   // released with the payload
-				// Capture buffers held by raw payloads (owner 2026-10-15): the most
-				// at once is logged when it rises, to check against the card's pool.
-				const int held = ++*m_impl->rawBuffersHeld;
-				int peak = m_impl->rawBuffersPeak.load(std::memory_order_relaxed);
-				while (held > peak && !m_impl->rawBuffersPeak.compare_exchange_weak(peak, held))
-				{
-				}
-				if (held > peak)
-					DebugLog::Log("Capture raw route: up to %d capture buffers held at once (queue, next / ahead frames)", held);
-				std::shared_ptr<std::atomic<int>> heldCounter = m_impl->rawBuffersHeld;
-				raw->rawFrame = std::shared_ptr<VideoFrame>(new VideoFrame(frame), [heldCounter](VideoFrame* f)
-				{
-					f->SourceBufferRelease();
-					delete f;
-					--*heldCounter;
-				});
-				raw->rawRowBytes = static_cast<size_t>(state->BytesPerRow());
-				raw->rawBytes = static_cast<size_t>(state->BytesPerFrame());
-				raw->rawEncoding = state->videoFrameEncoding;
-				// capture_upload: early - the upload runs after the payload is
-				// published (EarlyUploadHandoff::RunUpload below); the frame is
-				// held here so the upload can read it.
-				if (m_impl->EarlyActive() && m_impl->earlyUpload->IsOpen() && state->displayMode)
-				{
-					raw->earlyHandoff = std::make_shared<EarlyUploadHandoff>();
-					earlyHandoff = raw->earlyHandoff;
-					earlyFrame = raw->rawFrame;
-					earlyRowBytes = raw->rawRowBytes;
-					earlyHeight = static_cast<int>(state->displayMode->FrameHeight());
-				}
-				return raw;
-			};
-			// dv_tunnel_gpu_unpack: the DV formatter finds and checks the DM
-			// packet (its pixels only); the picture goes on raw and the render
-			// unpacks it on the GPU. Off, an override or a failed unpack this
-			// session: the CPU unpack.
-			const bool dvRaw = state->dolbyVisionTunnel &&
-				m_impl->dvGpuWanted.load(std::memory_order_acquire) &&
-				!m_impl->dvGpuFailed.load(std::memory_order_acquire) &&
-				m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
-				GpuDolbyVisionTunnelUnpack::Supports(state->videoFrameEncoding) && state->displayMode;
-			// libplacebo's native upload (ARGB / BGRA with native_rgb_ingest off):
-			// no conversion. The frame is marked prepared with an empty payload
-			// (the queue waits for one now that these encodings have a
-			// formatter; the native upload reads the frame itself).
-			if (!rgbRaw && IsNativeRgbUpload(state->videoFrameEncoding, m_videoConversionOverride, state->dolbyVisionTunnel))
-			{
-				converted = std::make_shared<QueuedFrame::ConvertedPayload>();
-				converted->contract.sampleRange = VideoFrameSampleRange::FULL;
-				converted->contract.colorDepth = 8;
-				converted->contract.bitShift = 0;
-			}
-			else if (rgbRaw ||
-				(m_impl->captureGpuWanted.load(std::memory_order_acquire) &&
-				!m_impl->captureGpuFailed.load(std::memory_order_acquire) &&
-				m_videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
-				GpuCaptureUnpack::Supports(state->videoFrameEncoding)))
-			{
-				auto raw = makeRaw();
-				if (rgbRaw)
-				{
-					raw->contract.sampleRange = GpuRgbUnpack::FullRange(state->videoFrameEncoding) ?
-						VideoFrameSampleRange::FULL : VideoFrameSampleRange::LIMITED;
-					raw->contract.colorDepth = 10;
-					raw->contract.bitShift = 6;
-				}
-				else
-					raw->contract = GpuCaptureUnpack::Contract(state->videoFrameEncoding);
-				converted = raw;
-			}
-			else if (dvRaw)
-			{
-				CRGBDolbyVisionTunnelFormatter::FrameResult result = CRGBDolbyVisionTunnelFormatter::FrameResult::REJECTED;
-				bool highAligned = false;
-				LONG byteCount = 0;
-				VideoFrameFormatterOutputContract contract;
-				DolbyVisionTunnelFrameMetadata dolby;
-				{
-					std::lock_guard<std::mutex> formatterGuard(m_impl->formatterMutex);
-					if (!m_impl->formatterState ||
-						m_impl->formatterState->colorspace != state->colorspace)
-					{
-						m_impl->formatter->OnVideoState(state);
-						m_impl->formatterState = state;
-					}
-					auto* dv = dynamic_cast<CRGBDolbyVisionTunnelFormatter*>(m_impl->formatter.get());
-					if (!dv)
-						throw std::runtime_error("Dolby Vision tunnel formatter unavailable");
-					byteCount = dv->GetOutFrameSize();
-					if (byteCount <= 0)
-						throw std::runtime_error("formatter returned an empty frame size");
-					result = dv->AnalyzeFrame(frame);
-					if (result == CRGBDolbyVisionTunnelFormatter::FrameResult::REJECTED)
-						throw std::runtime_error("frame conversion failed");
-					highAligned = dv->PlanesHighAligned();
-					contract = dv->GetOutputContract();
-					dolby = dv->GetDolbyVisionTunnelMetadata();
-				}
-				if (result == CRGBDolbyVisionTunnelFormatter::FrameResult::PICTURE)
-				{
-					auto raw = makeRaw();
-					raw->dvTunnelRaw = true;
-					raw->dvTunnelHighAligned = highAligned;
-					converted = raw;
-				}
-				else
-				{
-					// No lock / no valid DM: the CPU path's zero planes (the render
-					// presents black or the SDR RGB passthrough; never these bytes).
-					converted = AcquireConversionPayload();
-					converted->pixels.assign(static_cast<size_t>(byteCount), 0);
-				}
-				converted->contract = contract;
-				converted->dolby = dolby;
-			}
+			RendererExtension::ConvertContext capture; capture.frame = &frame; capture.state = &state; capture.payload = &converted; capture.hostObject = this; capture.error = &error;   // VPV-HOOK
+			if (RendererExtension::OnConvertedFrame(m_impl.get(), capture)) { if (!error.empty()) throw std::runtime_error(error); }   // P10: the capture routes (input/capture CaptureImpl.inl)   // VPV-HOOK
 			else
 			{
 			converted = AcquireConversionPayload();
@@ -32687,6 +32548,7 @@ void LibplaceboVideoRenderer::ConversionLoop()
 		frame.SourceBufferRelease();
 		const double conversionUs = converted ?
 			converted->conversionCpuMs * 1000.0 : 0.0;
+		std::shared_ptr<void> publishedExtension = converted ? converted->extension : nullptr;   // P10: capture_upload early (R18 slot)   // VPV-HOOK
 		bool published = false;
 		QueuedFrame analysed;   // WP-23: the frame for the analysis producer (on arrival)
 		bool analyse = false;
@@ -32734,13 +32596,8 @@ void LibplaceboVideoRenderer::ConversionLoop()
 			}
 			m_queueChanged.notify_all();
 		}
-		// capture_upload: early - after the notify, so readiness waiters wake first;
-		// the render takes the slot (or abandons it and uploads itself).
-		if (published && error.empty() && earlyHandoff)
-			earlyHandoff->RunUpload([&] { return m_impl->EarlyActive() && m_impl->earlyUpload->IsOpen() ?
-				std::shared_ptr<void>(m_impl->earlyUpload->Upload(earlyFrame->GetData(), earlyRowBytes, earlyHeight)) : std::shared_ptr<void>(); });
-		earlyHandoff.reset();
-		earlyFrame.reset();
+		if (published && error.empty() && publishedExtension) { RendererExtension::PublishView publish; publish.frame = &frame; publish.state = &state; publish.extension = std::move(publishedExtension); RendererExtension::AfterPublish(m_impl.get(), publish); }   // VPV-HOOK
+		publishedExtension.reset();   // VPV-HOOK
 		if (analyse)
 		{
 			// WP-23: prepared once here (the cache every later walk reuses), measured off this thread.

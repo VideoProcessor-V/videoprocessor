@@ -215,6 +215,10 @@ namespace RendererExtension
 		void* formatterUser = nullptr;
 		void (*lockFormatter)(void* user) = nullptr;
 		void (*unlockFormatter)(void* user) = nullptr;
+		// M2 P10: the host object a handler may call back (opaque here), and the handler's failure text. A handler that
+		// returns true with a non-empty *error failed the frame exactly as the host's own conversion would have.
+		void* hostObject = nullptr;
+		std::string* error = nullptr;
 	};
 	struct PublishView
 	{
