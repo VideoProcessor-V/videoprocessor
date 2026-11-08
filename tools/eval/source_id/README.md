@@ -113,7 +113,9 @@ Writes `NullTables.generated.h` (an inline `GeneratedNullTables()` returning the
 * Samples (stage exact only): `has_truth == 1`, `informative == 1` and the line gate (`lines_passed >= max(3, ceil(lines/4))`),
   then candidates of one evaluation and axis within +-1 px are clustered and the lowest `T_ev` kept, as `ChainEvidence` does.
   NULL = native-truth (`truth_n == 0`), plus clusters more than 1 px from `truth_n` on upscaled rows; ALT = within +-1 of
-  `truth_n` (or of `truth_n1` of a double-scaled reel); off-latent rows of a double-scaled reel are dropped, never null. The class
+  `truth_n` (or of `truth_n1` of a double-scaled reel); off-latent rows of a double-scaled reel are dropped, never null. SID-CAL2 C4: a cluster of an upscaled
+  reel within +-2% of p/q x `truth_n` (p >= 1, q <= 4: the half-size reel's own 1/2, 1/3, 2/3, 3/2, 2 x aliases, and the +-2% band around the truth itself) is
+  dropped (`is_alias`; counted in the report; `--keep-aliases` restores the cal1 behaviour). The class
   is recomputed from (n, N) (port of `ClassifyLatent`; mismatches with the dump are counted). The power rule is NOT applied to
   candidate rows by default (the estimator applies it to the native hypothesis only); `--require-power` applies it to all.
 * Effective sample size: consecutive evaluations of one shot are near-identical, so every count (minimum, full, standard-error

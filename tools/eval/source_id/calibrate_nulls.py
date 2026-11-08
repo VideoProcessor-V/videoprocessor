@@ -68,6 +68,7 @@ class Policy(object):
         self.se_terms = 2.0          # ... and by (1 + se_terms / sqrt(n_eff)) for the estimate's own uncertainty
         self.sd_floor = 0.005
         self.min_separation = 0.25   # alt mean must sit this many null-sds below the null mean, else placeholder
+        self.drop_aliases = True     # C4: no null from the aliases (+-2% of p/q x truth_n, q <= 4) of an upscaled reel
         # Simulation of the estimator (false crossings, evaluations to c1): the same switches as ChainEvidence.
         self.sim_window = True       # the recent window (N3), seconds from the measured evaluation gap
         self.sim_hold = True         # a HOLD evaluation forgets its axis, the first cut after one clears both axes
@@ -215,11 +216,29 @@ def is_alt(n, truth_n, truth_n1):
     return abs(n - truth_n) <= 1 or (truth_n1 > 0 and abs(n - truth_n1) <= 1)
 
 
-def build_samples(rows, require_power=False, null_side="both"):
+ALIAS_Q_MAX, ALIAS_TOL = 4, 0.02       # C4: an upscaled reel's null excludes sizes within +-2% of p/q x truth_n, q <= 4
+
+
+def is_alias(n, truth_n, q_max=ALIAS_Q_MAX, tol=ALIAS_TOL):
+    """True when n is within +-tol (relative) of p/q x truth_n for some p >= 1 and q <= q_max. On an upscaled reel the picture's own
+    latent grid makes those sizes dip too (a half-size reel dips at 1/2, 1/3, 2/3, 3/2, 2 ... times its true size): an alias of the
+    truth, not a null."""
+    if truth_n <= 0:
+        return False
+    ratio = n / float(truth_n)
+    for q in range(1, q_max + 1):
+        p = int(round(ratio * q))
+        if p >= 1 and abs(ratio - p / float(q)) <= tol * p / float(q):
+            return True
+    return False
+
+
+def build_samples(rows, require_power=False, null_side="both", drop_aliases=True):
     """Returns (items, stats). Only exact, informative, has_truth rows that pass the line gate count; candidates of one
-    evaluation and axis within +-1 px are clustered and the one with the lowest T_ev kept, as ChainEvidence does."""
+    evaluation and axis within +-1 px are clustered and the one with the lowest T_ev kept, as ChainEvidence does. With
+    drop_aliases (C4) a cluster of an upscaled reel within +-2% of p/q x truth_n (q <= 4) is neither null nor alt: dropped."""
     stats = {"rows": len(rows), "coarse": 0, "no_truth": 0, "not_informative": 0, "gate_fail": 0, "power_fail": 0,
-             "double_drop": 0, "class_mismatch": 0, "exact": 0}
+             "double_drop": 0, "class_mismatch": 0, "exact": 0, "alias_drop": 0}
     per_eval = {}
     for r in rows:
         if r.stage != "exact":
@@ -265,6 +284,9 @@ def build_samples(rows, require_power=False, null_side="both"):
                 continue
             elif null_side == "below" and r.n > r.truth_n:
                 continue   # above the true latent size a descale is lossless: alt-like
+            elif drop_aliases and is_alias(r.n, r.truth_n):
+                stats["alias_drop"] += 1       # C4: an alias of the true size (p/q x truth_n), not an independent null
+                continue
             else:
                 it.label = "null"
             items.append(it)
@@ -825,10 +847,11 @@ def render_report(tabs, diag, prov, cv, fold_of, c1, stats, policy=None):
              " per-shot cap c1/2 = %.2f, shots = the estimator's cut_id." % (
                  prov["hash"][:12], prov["date"], prov["files"], prov["rows"], prov["bad"], prov["items"],
                  prov["masters"], prov["n_eff"], c1, c1 / 2.0))
-    L.append("Exact rows %d: dropped %d no truth, %d not informative, %d gate, %d power%s, %d double-scaled off-latent;"
-             " %d class mismatches vs dump. T_ev is the statistic used." % (
+    L.append("Exact rows %d: dropped %d no truth, %d not informative, %d gate, %d power%s, %d double-scaled off-latent, %d aliases"
+             " (+-2%% of p/q x truth_n, q <= 4, upscaled reels)%s; %d class mismatches vs dump. T_ev is the statistic used." % (
                  stats["exact"], stats["no_truth"], stats["not_informative"], stats["gate_fail"], stats["power_fail"],
-                 "" if prov["require_power"] else " (not applied)", stats["double_drop"], stats["class_mismatch"]))
+                 "" if prov["require_power"] else " (not applied)", stats["double_drop"], stats["alias_drop"],
+                 "" if (policy or Policy()).drop_aliases else " (NOT dropped: --keep-aliases)", stats["class_mismatch"]))
     L += ["", "## Fitted tables (stage exact; n_eff = distinct reel x axis x shot groups)",
           "| class | null rows/n_eff/masters | alt rows/n_eff/masters | null mean, sd | alt mean, sd | max null T | status |",
           "|---|---|---|---|---|---|---|"]
@@ -889,13 +912,15 @@ def apply_args(policy, args):
         policy.sim_hold = False
     if getattr(args, "dwell_sec", None) is not None:
         policy.dwell_sec = float(args.dwell_sec)
+    if getattr(args, "keep_aliases", False):
+        policy.drop_aliases = False
     return policy
 
 
 def run(args):
     policy = apply_args(Policy(), args)
     rows, info = load_dumps(args.dump)
-    items, stats = build_samples(rows, args.require_power, args.null_side)
+    items, stats = build_samples(rows, args.require_power, args.null_side, policy.drop_aliases)
     segs = build_segments(rows)
     masters = sorted(set(r.master for r in rows))
     c1 = thresholds()
@@ -1029,6 +1054,10 @@ def selftest():
     check(len(REQUIRED) == 27, "dump v3 has 27 required columns")
     check(abs(thresholds() - 14.87) < 0.02, "c1 = %.3f (README ~14.9)" % thresholds())
     check(abs(auc([1, 2, 3], [0, 0.5, 1.5]) - 8.0 / 9.0) < 1e-9, "AUC rank formula")
+    check(is_alias(1080, 1080) and is_alias(1100, 1080) and not is_alias(1110, 1080) and is_alias(540, 1080) and is_alias(720, 1080)
+          and is_alias(1620, 1080) and is_alias(2160, 1080) and is_alias(810, 1080) and not is_alias(1000, 1080) and not is_alias(400, 0)
+          and not is_alias(900, 1080) and not is_alias(1230, 1080),
+          "C4 alias rule: p/q x truth_n within +-2% for q <= 4 (1/1, 1/2, 2/3, 3/4, 3/2, 2 yes; 5/6, 9/10 no)")
     check(poisson_upper95(0) == 3.0 and poisson_upper95(2) > 6.0 and poisson_upper95(30) > 30, "Poisson upper bound (3/H at 0)")
 
     # --- tail-matched null sd: a null with a deep dip tail gets a spread covering it
@@ -1159,6 +1188,10 @@ def selftest():
         ns = argparse.Namespace(dump=dd, out=out, date="2026-11-07", require_power=False, null_side="both", seed="sid-cal")
         rows, info = load_dumps(dd)
         check(len(rows) > 0 and info["bad"] == 0, "v3 rows load (%d rows, %d bad; quoted ids, 27 columns)" % (len(rows), info["bad"]))
+        _, st_keep = build_samples(rows, drop_aliases=False)
+        _, st_drop = build_samples(rows)
+        check(st_keep["alias_drop"] == 0 and st_drop["alias_drop"] > 0, "C4: aliases of an upscaled reel are dropped from the null (%d clusters), kept with --keep-aliases" %
+              st_drop["alias_drop"])
         hdr, rep, tabs, diag, cv, fold_of, items, segs = run(ns)
         _, st = build_samples(rows)
         check(st["no_truth"] > 0 and st["not_informative"] > 0, "has_truth=0 (%d) and informative=0 (%d) exact rows dropped" % (
@@ -1251,6 +1284,8 @@ def main(argv=None):
                     help="null rows on upscaled reels: n more than 1 from truth on both sides (default, the "
                          "spec) or only below the truth (above it a descale is lossless and alt-like)")
     ap.add_argument("--seed", default="sid-cal", help="seed of the deterministic by-master fold split")
+    ap.add_argument("--keep-aliases", action="store_true",
+                    help="keep the aliases (+-2%% of p/q x truth_n, q <= 4) of upscaled reels in the null (the cal1 behaviour; ablation only)")
     ap.add_argument("--no-window", action="store_true", help="simulate WITHOUT the recent window (the cal1 behaviour; extra row only)")
     ap.add_argument("--no-hold", action="store_true", help="simulate without the HOLD forget / first-cut clear")
     ap.add_argument("--dwell-sec", type=float, default=None,
