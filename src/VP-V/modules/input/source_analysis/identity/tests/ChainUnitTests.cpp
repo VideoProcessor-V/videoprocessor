@@ -556,6 +556,70 @@ namespace Tests
 			Assert::AreEqual(0.75, w[0], 1e-12);
 			Assert::AreEqual(0.25, w[1], 1e-12);
 		}
+
+		// SID-OPT step 1: the batched solve and the shared tap memo are result-preserving. 11 lines (a full batch of 8 and a partial one of 3)
+		// of noisy ramps, three kernels of different tap counts; every number of ResidualBatch (residual, segment sums and rows) is compared
+		// BYTE for byte with the single-line Residual of an operator built without a shared memo.
+		TEST_METHOD(ResidualBatchAndASharedTapMemoAreBitIdenticalToTheSingleLineSolve)
+		{
+			using namespace SourceIdentity::Chain;
+			const int N = 1080;
+			const int n = 810;
+			const int origin = 48;
+			const int length = 984;
+			const int lines = 11;
+			ChainSynth::Lcg g(77u);
+			std::vector<std::vector<double> > y(static_cast<size_t>(lines), std::vector<double>(static_cast<size_t>(length), 0.0));
+			for (int l = 0; l < lines; ++l)
+				for (int j = 0; j < length; ++j)
+					y[static_cast<size_t>(l)][static_cast<size_t>(j)] = 400.0 + 0.3 * j + 60.0 * g.Normal() + 25.0 * std::sin(0.37 * j + l);
+			const int kernels[3] = { 0, 5, 8 };
+			TapMemo shared;
+			for (int ki = 0; ki < 3; ++ki)
+			{
+				DescaleOperator plain;
+				DescaleOperator memoed;
+				DescaleOperator warm;
+				Assert::IsTrue(plain.Build(N, n, kernels[ki], 0.0, origin, length));
+				Assert::IsTrue(memoed.Build(N, n, kernels[ki], 0.0, origin, length, &shared));
+				Assert::IsTrue(warm.Build(N, n, kernels[ki], 0.0, origin, length, &shared));   // every tap weight now comes from the memo
+				Assert::IsTrue(plain.Nodes() == warm.Nodes() && plain.Margin() == warm.Margin());
+				std::vector<double> scratch;
+				for (int first = 0; first < lines; first += kResidualBatch)
+				{
+					const int lanes = (std::min)(kResidualBatch, lines - first);
+					const double* ys[kResidualBatch];
+					for (int l = 0; l < lanes; ++l)
+						ys[l] = y[static_cast<size_t>(first + l)].data();
+					double rssB[kResidualBatch];
+					double segB[kResidualBatch * kMaxSegs];
+					int segRowsB[kMaxSegs];
+					int rowsB = 0;
+					warm.ResidualBatch(ys, lanes, scratch, rssB, rowsB, segB, segRowsB);
+					for (int l = 0; l < lanes; ++l)
+					{
+						double rss1 = 0.0;
+						double rssM = 0.0;
+						int rows1 = 0;
+						int rowsM = 0;
+						double seg1[kMaxSegs];
+						double segM[kMaxSegs];
+						int segRows1[kMaxSegs];
+						int segRowsM[kMaxSegs];
+						plain.Residual(ys[l], scratch, rss1, rows1, seg1, segRows1);
+						memoed.Residual(ys[l], scratch, rssM, rowsM, segM, segRowsM);
+						Assert::IsTrue(rows1 == rowsB && rows1 == rowsM, L"same inner rows");
+						Assert::IsTrue(std::memcmp(&rss1, &rssB[l], sizeof(double)) == 0, L"batched residual is bit-identical");
+						Assert::IsTrue(std::memcmp(&rss1, &rssM, sizeof(double)) == 0, L"shared tap memo gives a bit-identical operator");
+						Assert::IsTrue(std::memcmp(seg1, &segB[l * kMaxSegs], sizeof(seg1)) == 0, L"batched segment sums are bit-identical");
+						Assert::IsTrue(std::memcmp(seg1, segM, sizeof(seg1)) == 0);
+						Assert::IsTrue(std::memcmp(segRows1, segRowsB, sizeof(segRows1)) == 0 && std::memcmp(segRows1, segRowsM, sizeof(segRows1)) == 0);
+					}
+				}
+				Assert::IsTrue(plain.Bytes() > 0 && plain.Bytes() == memoed.Bytes());
+			}
+			Assert::IsTrue(shared.Size() > 0 && shared.Size() < 3 * 1024, L"a rational ratio costs a handful of weight evaluations per kernel");
+		}
 	};
 
 	TEST_CLASS(ChainLineSamplerTests)
@@ -871,6 +935,121 @@ namespace Tests
 				Assert::IsTrue(ChainSynth::SameCandidate(r1.candidates[i], r3.candidates[3 - i]), L"candidate order and a warm cache never change a number");
 			}
 			Assert::IsTrue(v1.CachedOperators() <= v1.Settings().cacheLimit);
+		}
+
+		// SID-OPT step 1: candidates that share integers (720/724 and 540/543 overlap in their coarse scans) read each other's solves; the
+		// lines of a stage are solved as a batch. Neither may change a bit: every candidate of the combined call equals the same candidate
+		// evaluated alone on a fresh verifier (no shared solves, nothing cached) and equals the single-line reference path.
+		TEST_METHOD(SharedSolvesBatchedLinesAndTheOperatorCacheNeverChangeACandidate)
+		{
+			using namespace ChainSynth;
+			const Axes& a = FullChain(720, 1280, kBicubic, 232u, 10);
+			const int cands[6] = { 720, 724, 540, 543, 810, 360 };
+			VerifierSettings all;
+			all.maxExactCandidates = 8;   // every candidate to the exact stage, so a lone candidate and a combined one are comparable
+			VerifierSettings single = all;
+			single.batchedSolve = false;
+			VerifierSettings tiny = all;
+			tiny.cacheBytes = 3u * 1024u * 1024u;
+			tiny.cacheLimit = 40;
+			const LineSet* axes[2] = { &a.v, &a.h };
+			for (int ax = 0; ax < 2; ++ax)
+			{
+				DescaleVerifier combined(all);
+				DescaleVerifier reference(single);
+				DescaleVerifier evicting(tiny);
+				VerifyResult rc, rr, rs, rw;
+				Assert::IsTrue(combined.Evaluate(*axes[ax], cands, 6, VerifyOptions(), rc));
+				Assert::IsTrue(reference.Evaluate(*axes[ax], cands, 6, VerifyOptions(), rr));
+				Assert::IsTrue(evicting.Evaluate(*axes[ax], cands, 6, VerifyOptions(), rs));
+				Assert::IsTrue(evicting.Evaluate(*axes[ax], cands, 6, VerifyOptions(), rw));   // evicting cache, second pass
+				Assert::IsTrue(rc.solves + rc.solvesReused == rr.solves + rr.solvesReused, L"same demand on the reference path");
+				Assert::IsTrue(rc.solves == rr.solves, L"and the same executed solves (both share within the call)");
+				int compared = 0;
+				for (size_t i = 0; i < 6; ++i)
+				{
+					Assert::IsTrue(ChainSynth::SameCandidate(rc.candidates[i], rr.candidates[i]), L"batched = single-line reference path");
+					Assert::IsTrue(ChainSynth::SameCandidate(rc.candidates[i], rs.candidates[i]), L"a evicting evicting cache never changes a number");
+					Assert::IsTrue(ChainSynth::SameCandidate(rc.candidates[i], rw.candidates[i]), L"second pass on an evicting cache");
+					if (!rc.candidates[i].valid)
+						continue;   // a refined size equal to an earlier candidate's is dropped as a duplicate: only the combined call sees that
+					DescaleVerifier alone(all);
+					VerifyResult r1;
+					Assert::IsTrue(alone.Evaluate(*axes[ax], &cands[i], 1, VerifyOptions(), r1));
+					Assert::IsTrue(ChainSynth::SameCandidate(rc.candidates[i], r1.candidates[0]), L"shared solves equal a lone fresh evaluation");
+					++compared;
+				}
+				Assert::IsTrue(compared >= 4, L"most candidates were compared");
+				Assert::IsTrue(rc.solvesReused > 0, L"overlapping scans share solves");
+				Assert::IsTrue(evicting.CachedOperators() <= tiny.cacheLimit);
+				Assert::IsTrue(evicting.CachedBytes() <= tiny.cacheBytes, L"the byte budget holds for the TOTAL: operators + tap memo (+ kept solves, gone after the call)");
+				Assert::IsTrue(combined.CachedBytes() <= all.cacheBytes, L"and the default budget too");
+				Assert::IsTrue(evicting.CachedOperators() < combined.CachedOperators(), L"the evicting cache evicted");
+			}
+		}
+
+		// SID-OPT levers on the coarse stage (Narrowing::kCoarseWindows, kCoarseRefine; OFF by default, measured later in order): one coarse window
+		// per line, and a step-2 coarse grid with a refinement of the skipped integers. Both still refine an off-by-two candidate to the true size.
+		TEST_METHOD(TheCoarseLeversAreOffByDefaultAndStillFindTheTrueSize)
+		{
+			using namespace ChainSynth;
+			const Axes& a = FullChain(720, 1280, kBicubic, 232u, 10);
+			Assert::IsTrue(VerifierSettings().coarseWindows == 2 && !VerifierSettings().coarseRefine && VerifierSettings().coarseStep == 1, L"shipped coarse stage");
+			VerifierSettings one;
+			one.coarseWindows = 1;
+			VerifierSettings grid;
+			grid.coarseStep = 2;
+			grid.coarseRefine = true;
+			const int cands[3] = { 722, 718, 720 };
+			for (int c = 0; c < 3; ++c)
+			{
+				DescaleVerifier shipped;
+				DescaleVerifier v1(one);
+				DescaleVerifier v2(grid);
+				VerifyResult r0, r1, r2;
+				Assert::IsTrue(shipped.Evaluate(a.v, &cands[c], 1, VerifyOptions(), r0));
+				Assert::IsTrue(v1.Evaluate(a.v, &cands[c], 1, VerifyOptions(), r1));
+				Assert::IsTrue(v2.Evaluate(a.v, &cands[c], 1, VerifyOptions(), r2));
+				Assert::IsTrue(r0.candidates[0].exactDone && r0.candidates[0].n == 720, L"shipped finds the true size");
+				Assert::IsTrue(r1.candidates[0].exactDone && r1.candidates[0].n == 720, L"one coarse window finds it too");
+				Assert::IsTrue(r2.candidates[0].exactDone && r2.candidates[0].n == 720, L"the step-2 grid with refinement finds it too");
+				Assert::IsTrue(r1.solves < r0.solves && r2.solves < r0.solves, L"and does less work");
+			}
+		}
+
+		// SID-OPT step 2 lever (Narrowing::kConfidentMaxExactCandidates, default 0 = off): when the caller forces its confident n, only that many
+		// coarse-ranked challengers get the exact stage besides it. Default off: the shipped counts; on: the best challenger and the forced size.
+		TEST_METHOD(TheConfidentAxisLeverPromotesFewerChallengersAndIsOffByDefault)
+		{
+			using namespace ChainSynth;
+			const Axes& a = FullChain(720, 1280, kBicubic, 232u, 10);
+			const int cand[4] = { 720, 360, 540, 810 };
+			VerifyOptions forced;
+			forced.forceExactN = 810;
+			Assert::IsTrue(VerifierSettings().confidentMaxExactCandidates == 0 && VerifierSettings().exactHalfWidth == 1 && VerifierSettings().maxExactCandidates == 2,
+				L"the shipped narrowing constants");
+			DescaleVerifier shipped;
+			VerifierSettings lv;
+			lv.confidentMaxExactCandidates = 1;
+			DescaleVerifier lever(lv);
+			VerifyResult rs, rl, rn;
+			Assert::IsTrue(shipped.Evaluate(a.v, cand, 4, forced, rs));
+			Assert::IsTrue(lever.Evaluate(a.v, cand, 4, forced, rl));
+			DescaleVerifier lever2(lv);
+			Assert::IsTrue(lever2.Evaluate(a.v, cand, 4, VerifyOptions(), rn));   // nothing forced: the lever does not apply
+			auto exactCount = [](const VerifyResult& r) {
+				int e = 0;
+				for (size_t i = 0; i < r.candidates.size(); ++i)
+					if (r.candidates[i].exactDone)
+						++e;
+				return e;
+			};
+			Assert::IsTrue(exactCount(rl) == 2, L"the best challenger and the forced size");
+			Assert::IsTrue(exactCount(rs) >= exactCount(rl) && exactCount(rs) <= 3, L"shipped: top 2 plus the forced size");
+			Assert::IsTrue(exactCount(rn) == 2, L"unforced: the lever is idle");
+			for (size_t i = 0; i < 4; ++i)
+				if (rl.candidates[i].exactDone && rs.candidates[i].exactDone)
+					Assert::IsTrue(ChainSynth::SameCandidate(rl.candidates[i], rs.candidates[i]), L"a candidate that gets the exact stage in both is the same number");
 		}
 	};
 
@@ -1741,6 +1920,77 @@ namespace Tests
 				Logger::WriteMessage(m.str().c_str());
 			}
 		}
+
+		// SID-OPT: the cost of a real acquiring evaluation. 8 candidates per axis (the proposer's cap; real reels average 7.8), both axes of a
+		// 3840x2160 picture plus the power probe, 20 evaluations of the same lines, timed with the governor's own clock (the verifier hook =
+		// the steady clock the estimator's governor reads; "wall" is the same span measured around the whole evaluation, as the evaluation
+		// harness's lastEvalMs does). Cold = fresh verifiers for every evaluation (every operator built); warm = the verifiers of the first
+		// evaluation kept (the first of the 20 is cold). No timing assertion: the numbers go to the log for the measurement script.
+		TEST_METHOD(LogsMedianAndP95OfTwentyMultiCandidateEvaluationsAtUltraHd)
+		{
+			using namespace ChainSynth;
+			using Clock = std::chrono::steady_clock;
+			Image latent = Scene(1080, 1920, kHf, 1101u, kGrain, 5);
+			Image up = ResizeAxis(ResizeAxis(latent, 0, 2160, kLanczos3), 1, 3840, kLanczos3);
+			Quantize(up, 10);
+			Axes ax = MakeAxes(up, MakeRect(0, 0, 3840, 2160), 1);
+			Assert::IsTrue(ax.ok);
+			const int evals = 20;
+			auto pick = [](std::vector<double> v, double q) {
+				std::sort(v.begin(), v.end());
+				const size_t i = static_cast<size_t>(std::ceil(q * static_cast<double>(v.size()))) - 1u;
+				return v[i < v.size() ? i : v.size() - 1];
+			};
+			for (int pass = 0; pass < 2; ++pass)
+			{
+				VerifierSettings vsettings;
+				vsettings.nowMs = &NowMs;
+				std::unique_ptr<DescaleVerifier> verifier(new DescaleVerifier(vsettings));
+				std::unique_ptr<DescaleVerifier> probe(new DescaleVerifier(vsettings));
+				std::vector<double> wall;
+				std::vector<double> reported;
+				int builds = 0;
+				int solves = 0;
+				int reused = 0;
+				for (int e = 0; e < evals; ++e)
+				{
+					if (pass == 0)
+					{
+						verifier.reset(new DescaleVerifier(vsettings));
+						probe.reset(new DescaleVerifier(vsettings));
+					}
+					double rep = 0.0;
+					builds = 0;
+					solves = 0;
+					reused = 0;
+					const Clock::time_point t0 = Clock::now();
+					for (int axis = 0; axis < 2; ++axis)
+					{
+						const LineSet& ls = axis == 0 ? ax.h : ax.v;
+						const int N = ls.axisLen;
+						const int cand[8] = { N / 2, N * 2 / 3, N * 3 / 4, N * 5 / 12, N / 3, N / 4, N * 3 / 8, N * 7 / 12 };
+						VerifyOptions opt;
+						opt.forceExactN = N / 2;
+						VerifyResult vr;
+						Assert::IsTrue(verifier->Evaluate(ls, cand, 8, opt, vr));
+						ProbeResult pr;
+						PowerProbe::Run(*probe, ls, 0.29, 1.0, ProbeSettings(), pr);
+						rep += vr.costMs + pr.costMs;
+						builds += vr.operatorBuilds;
+						solves += vr.solves;
+						reused += vr.solvesReused;
+					}
+					wall.push_back(std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+					reported.push_back(rep);
+				}
+				std::ostringstream m;
+				m << "8 candidates per axis, UHD, " << evals << " evaluations, " << (pass == 0 ? "COLD" : "WARM") << ": wall median " << pick(wall, 0.5)
+					<< " ms p95 " << pick(wall, 0.95) << " ms; governor timer median " << pick(reported, 0.5) << " ms p95 " << pick(reported, 0.95)
+					<< " ms; last evaluation: " << builds << " builds, " << solves << " solves executed, " << reused << " reused; cached operators "
+					<< verifier->CachedOperators() << ", cached MB " << static_cast<double>(verifier->CachedBytes()) / 1048576.0;
+				Logger::WriteMessage(m.str().c_str());
+			}
+		}
 	};
 
 	// ---- S1 (SID train r2, round 1): how long N2 can keep a source that became native on the old reading, measured end to end ------------
@@ -1827,6 +2077,7 @@ namespace Tests
 			double cutAt = -1.0;            // the monitor reports a cut on the first frame at or after this time
 			double blackAt = -1.0;          // one second of black (picture lines and monitor frames) from here
 			double formatChangeAt = -1.0;   // Monitor::Discontinuity("source format change") before the frame at or after this time
+			int confidentAxisLines = 0;     // EstimatorSettings::confidentAxisExactLines (0 = the shipped, off)
 		};
 
 		static RevertRun Drive(Mon::SourceIdMode mode)
@@ -1851,7 +2102,9 @@ namespace Tests
 			blk.v.assign(static_cast<size_t>(kFrameH) * static_cast<size_t>(kFrameW), 64.0);
 
 			Tests::ChainFx::ManualClock clk;
-			std::unique_ptr<C::ChainEstimator> owner(new C::ChainEstimator(C::EstimatorSettings(), clk.Fn()));
+			C::EstimatorSettings es;
+			es.confidentAxisExactLines = sc.confidentAxisLines;
+			std::unique_ptr<C::ChainEstimator> owner(new C::ChainEstimator(es, clk.Fn()));
 			C::ChainEstimator& est = *owner;
 			Mon m;
 			m.SetChainEstimatorForTest(std::move(owner));
@@ -2022,6 +2275,67 @@ namespace Tests
 			Assert::IsTrue(r.tChainFlip >= sc.switchAt && r.tChainFlip - sc.switchAt <= bound, L"the chain stopped reading the upscale within the clear bound");
 			Assert::IsTrue(r.tRevert >= sc.switchAt, L"the old reading was held until the source changed");
 			Assert::IsTrue(r.tRevert - sc.switchAt <= bound, L"the consensus let go within the clear bound, not after the window");
+		}
+
+		// SID-OPT step 3 lever (EstimatorSettings::confidentAxisExactLines, Narrowing::kConfidentAxisExactLines): OFF by default. The line
+		// selection is one pure function (ExactLinesFor): latched = latchedExactLines on both axes; the lever only for a confident axis whose
+		// other axis is not; both confident WITHOUT latched mode (N2: natives held out) and every other case = all lines (0).
+		TEST_METHOD(TheConfidentAxisLinesLeverIsOffByDefaultAndSelectsLinesPerAxis)
+		{
+			namespace C = SourceIdentity::Chain;
+			C::EstimatorSettings off;
+			Assert::AreEqual(0, off.confidentAxisExactLines, L"shipped: off");
+			Assert::AreEqual(16, off.latchedExactLines);
+			C::EstimatorSettings on;
+			on.confidentAxisExactLines = 16;
+			for (int thisC = 0; thisC < 2; ++thisC)
+				for (int otherC = 0; otherC < 2; ++otherC)
+				{
+					Assert::AreEqual(off.latchedExactLines, C::ExactLinesFor(off, true, thisC != 0, otherC != 0), L"latched mode wins, lever off");
+					Assert::AreEqual(on.latchedExactLines, C::ExactLinesFor(on, true, thisC != 0, otherC != 0), L"latched mode wins, lever on");
+					Assert::AreEqual(0, C::ExactLinesFor(off, false, thisC != 0, otherC != 0), L"lever off: all lines in every other state");
+					const int expectOn = (thisC != 0 && otherC == 0) ? 16 : 0;
+					Assert::AreEqual(expectOn, C::ExactLinesFor(on, false, thisC != 0, otherC != 0), L"lever on: only a confident axis beside an unsettled one");
+				}
+			Assert::AreEqual(0, C::ExactLinesFor(on, false, true, true), L"both confident but not latched (N2 hold): all lines re-test");
+		}
+
+		// With the lever ON the N2 hold and the N3 window must behave as without it: the same end-to-end scenarios and the same asserts as the
+		// two tests above (this fixture is a 2x upscale on both axes, so the lever can only act while one axis is confident before the other).
+		TEST_METHOD(WithTheConfidentAxisLinesLeverOnN2StillHoldsAndTheRevertStaysInsideTheWindowBound)
+		{
+			Scenario sc;
+			sc.confidentAxisLines = 16;
+			const RevertRun r = Drive(sc);
+			double window = 0.0, acq = 0.0;
+			const double bound = BoundSeconds(window, acq);
+			char line[300];
+			snprintf(line, sizeof(line), "N2 revert, lever on: adopted at %.1f s, chain flip +%.1f s, consensus reverted +%.1f s (bound %.1f s), frames held %llu",
+				r.tAdopt, r.tChainFlip - SwitchSeconds(), r.tRevert - SwitchSeconds(), bound, r.held);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(r.tAdopt > 0.0 && r.tAdopt < SwitchSeconds() - 3.0, L"fixture: adopted well before the switch");
+			Assert::IsTrue(r.held > 0, L"N2 still holds the native-looking frames while the chain reads the upscale");
+			Assert::AreEqual(acq, r.lastIntervalBeforeSwitch, 1e-9, L"and the estimator runs at the acquiring cadence while holding");
+			Assert::IsTrue(r.tRevert > SwitchSeconds() && r.tRevert - SwitchSeconds() <= bound, L"N3: the revert comes inside the window bound");
+			Assert::IsTrue(r.tChainFlip >= 0.0 && r.tChainFlip <= r.tRevert, L"the revert follows the chain's own reading");
+		}
+
+		TEST_METHOD(WithTheConfidentAxisLinesLeverOnAMenuEndOntoNativeStillLetsGoWithinTheClearBound)
+		{
+			Scenario sc;
+			sc.confidentAxisLines = 16;
+			sc.menuStart = 45.0;
+			sc.menuEnd = 55.0;
+			sc.switchAt = 55.0;
+			sc.endAt = 80.0;
+			const RevertRun r = Drive(sc);
+			double acq = 0.0, frame = 0.0;
+			const double bound = ClearBoundSeconds(acq, frame);
+			PrintClear("menu end, lever on", sc, r, bound);
+			Assert::IsTrue(r.tAdopt > 0.0 && r.tAdopt < sc.menuStart, L"fixture: adopted before the menu");
+			Assert::IsTrue(r.clears >= 1, L"the end of the mixed episode still cleared the evidence window");
+			Assert::IsTrue(r.tChainFlip >= sc.switchAt && r.tChainFlip - sc.switchAt <= bound, L"the chain stopped reading the upscale within the clear bound");
+			Assert::IsTrue(r.tRevert >= sc.switchAt && r.tRevert - sc.switchAt <= bound, L"the consensus let go within the clear bound");
 		}
 
 		// Debounce (audit M2): a mixed episode counts only once it has lasted one acquiring interval of source time. The 10 s menu of the test

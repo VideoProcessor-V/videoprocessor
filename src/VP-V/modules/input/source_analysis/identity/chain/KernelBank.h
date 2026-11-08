@@ -22,9 +22,18 @@
 // edge nodes are poorly constrained there), plus its per-256-px segment sums.
 // Build memoises the tap weights per distinct fractional position (quantised to 2^-30, so a rational ratio
 // costs a handful of weight evaluations, not one per row); the factor stores the RECIPROCAL of its diagonal.
+// The memo is a TapMemo: the weights of (kernel, quantised position) are a pure function of that pair, so one memo can be
+// shared by every operator a verifier builds (SID-OPT step 1) without changing a single bit of any operator.
+// ResidualBatch solves up to kResidualBatch lines at once against the same factor: every line runs exactly the operations of
+// Residual, in the same order, on its own lane (no reduction is reordered, no operation fused), so each line's result is
+// bit-identical to Residual's; the lanes only give the CPU independent chains to overlap and the factor is read once for all.
 #include <map>
 
 #include "ChainCommon.h"
+
+// No contraction (fused multiply-add) in the descale arithmetic: Residual and ResidualBatch must round identically under any /arch
+// (the translation units that include this header are built without FMA today; this keeps it true if /arch:AVX2 is ever set).
+#pragma fp_contract(off)
 
 namespace SourceIdentity
 {
@@ -185,6 +194,75 @@ namespace SourceIdentity
 			return m < 8 ? 8 : m;
 		}
 
+		// Lines solved together by DescaleOperator::ResidualBatch (a multiple of the usual line counts 8 / 16 / 32).
+		constexpr int kResidualBatch = 8;
+
+		// Memo of tap weights, keyed by (kernel, key) where key = round(fractional latent position * 2^30). TapWeights(kernel, key / 2^30)
+		// is a pure function of the pair, so a hit returns exactly the bytes a fresh evaluation would. Flat open-addressing table,
+		// lookup and insert only (nothing iterates it, so no order exists to depend on). At most `maxEntries` distinct pairs are
+		// kept (8 doubles each, about 80 bytes with the table); beyond that a miss is computed and not stored. Not thread safe.
+		class TapMemo
+		{
+		public:
+			explicit TapMemo(size_t maxEntries = 65536) : maxEntries_(maxEntries < 16 ? 16 : maxEntries) {}
+			size_t Size() const { return count_; }
+			size_t Bytes() const { return slots_.capacity() * sizeof(uint32_t) + keys_.capacity() * sizeof(uint64_t) + w_.capacity() * sizeof(double); }
+
+			// The 2 * radius normalised weights of `kernel` at `key`. `scratch` (8 doubles) is used when the entry cannot be stored.
+			// The returned pointer is valid until the next Get.
+			const double* Get(int kernel, int64_t key, double* scratch)
+			{
+				const uint64_t k = (static_cast<uint64_t>(kernel) << 32) | static_cast<uint64_t>(key);
+				if (!slots_.empty())
+				{
+					const size_t s = Slot(k);
+					if (slots_[s] != 0u)
+						return &w_[static_cast<size_t>(slots_[s] - 1u) * kStride];
+				}
+				TapWeights(kernel, static_cast<double>(key) / 1073741824.0, scratch);
+				if (count_ >= maxEntries_)
+					return scratch;
+				if (slots_.empty() || (count_ + 1) * 2 > slots_.size())
+					Grow();
+				const size_t s = Slot(k);
+				const size_t idx = count_;
+				keys_.push_back(k);
+				w_.resize((idx + 1) * kStride, 0.0);
+				const int taps = 2 * Kernel(kernel).radius;
+				for (int t = 0; t < taps; ++t)
+					w_[idx * kStride + static_cast<size_t>(t)] = scratch[t];
+				slots_[s] = static_cast<uint32_t>(idx + 1);
+				++count_;
+				return &w_[idx * kStride];
+			}
+
+		private:
+			enum { kStride = 8 };
+
+			size_t Slot(uint64_t k) const
+			{
+				const size_t mask = slots_.size() - 1;
+				size_t h = static_cast<size_t>(Hash32(static_cast<uint32_t>(k) ^ Hash32(static_cast<uint32_t>(k >> 32) + 0x9e3779b9u))) & mask;
+				while (slots_[h] != 0u && keys_[static_cast<size_t>(slots_[h] - 1u)] != k)
+					h = (h + 1) & mask;
+				return h;
+			}
+
+			void Grow()
+			{
+				const size_t cap = slots_.empty() ? 1024 : slots_.size() * 2;
+				slots_.assign(cap, 0u);
+				for (size_t e = 0; e < count_; ++e)
+					slots_[Slot(keys_[e])] = static_cast<uint32_t>(e + 1);
+			}
+
+			size_t maxEntries_;
+			size_t count_ = 0;
+			std::vector<uint32_t> slots_;   // entry index + 1, 0 = empty; size a power of two
+			std::vector<uint64_t> keys_;
+			std::vector<double> w_;         // kStride doubles per entry
+		};
+
 		class DescaleOperator
 		{
 		public:
@@ -192,9 +270,13 @@ namespace SourceIdentity
 			int Length() const { return L_; }
 			int Margin() const { return margin_; }
 			int Nodes() const { return m_; }
+			// Heap bytes held by this operator (the verifier's cache is bounded by the sum of these).
+			size_t Bytes() const { return sizeof(DescaleOperator) + w_.capacity() * sizeof(double) + cl_.capacity() * sizeof(int) + chol_.capacity() * sizeof(double); }
 
 			// Output rows [origin, origin + length) of an N-pixel axis, latent size n, kernel, sub-sample phase.
-			bool Build(int N, int n, int kernel, double phase, int origin, int length)
+			// `memo` (optional) is a TapMemo shared with other Build calls; without one a private memo of 256 entries is used.
+			// The operator is the same, bit for bit, either way.
+			bool Build(int N, int n, int kernel, double phase, int origin, int length, TapMemo* memo = nullptr)
 			{
 				ok_ = false;
 				if (N <= 0 || n <= 1 || n >= N || length <= 0)
@@ -211,31 +293,18 @@ namespace SourceIdentity
 				int cmin = 0;
 				int cmax = 0;
 				const double ratio = static_cast<double>(n) / static_cast<double>(N);
-				std::map<int64_t, size_t> memoIdx;
-				std::vector<double> memoW;
+				TapMemo localMemo(256);
+				TapMemo& tapMemo = memo != nullptr ? *memo : localMemo;
+				double tapScratch[8];
 				for (int j = 0; j < L_; ++j)
 				{
 					const double p = (static_cast<double>(origin + j) + 0.5) * ratio - 0.5 + phase;
 					const double fl = std::floor(p);
 					const int64_t key = static_cast<int64_t>(std::floor((p - fl) * 1073741824.0 + 0.5));
-					const double tq = static_cast<double>(key) / 1073741824.0;
 					double* row = &w_[static_cast<size_t>(j) * static_cast<size_t>(taps_)];
-					auto it = memoIdx.find(key);
-					if (it != memoIdx.end())
-					{
-						for (int s = 0; s < taps_; ++s)
-							row[s] = memoW[it->second * static_cast<size_t>(taps_) + static_cast<size_t>(s)];
-					}
-					else
-					{
-						TapWeights(kernel, tq, row);
-						if (memoIdx.size() < 256)
-						{
-							memoIdx[key] = memoW.size() / static_cast<size_t>(taps_);
-							for (int s = 0; s < taps_; ++s)
-								memoW.push_back(row[s]);
-						}
-					}
+					const double* tw = tapMemo.Get(kernel, key, tapScratch);   // TapWeights(kernel, key / 2^30), memoised
+					for (int s = 0; s < taps_; ++s)
+						row[s] = tw[s];
 					const int c = static_cast<int>(fl) - r_ + 1;
 					cl_[static_cast<size_t>(j)] = c;
 					if (j == 0 || c < cmin)
@@ -339,6 +408,116 @@ namespace SourceIdentity
 				}
 			}
 
+			// The same solve for up to kResidualBatch lines of one window at once. y[g] (g < count) is the start of line g's window (L
+			// samples); count is 1..kResidualBatch. Outputs: rss[g] (kResidualBatch entries, the first `count` are meaningful), rows (the
+			// same for every line), segSum (kResidualBatch x kMaxSegs, line g at [g * kMaxSegs]) and segRows (kMaxSegs; the same for
+			// every line). Line g gets exactly the operations of Residual(y[g], ...) in the same order, so its numbers are
+			// bit-identical; the lanes beyond `count` repeat line 0 and their results are ignored. scratch is a caller-owned work vector.
+			void ResidualBatch(const double* const* y, int count, std::vector<double>& scratch, double* rss, int& rows, double* segSum, int* segRows) const
+			{
+				const int G = kResidualBatch;
+				const size_t bw = static_cast<size_t>(u_ + 1);
+				const size_t Gs = static_cast<size_t>(G);
+				const int lanes = count < 1 ? 1 : (count > G ? G : count);
+				const double* yl[kResidualBatch];
+				for (int g = 0; g < G; ++g)
+					yl[g] = y[g < lanes ? g : 0];
+				scratch.assign(static_cast<size_t>(m_) * Gs, 0.0);
+				double* z = scratch.data();
+				for (int j = 0; j < L_; ++j)
+				{
+					const double* w = &w_[static_cast<size_t>(j) * static_cast<size_t>(taps_)];
+					double* zc = z + static_cast<size_t>(cl_[static_cast<size_t>(j)]) * Gs;
+					double yj[kResidualBatch];
+					for (int g = 0; g < G; ++g)
+						yj[g] = yl[g][j];
+					for (int s = 0; s < taps_; ++s)
+					{
+						const double ws = w[s];
+						double* zs = zc + static_cast<size_t>(s) * Gs;
+						for (int g = 0; g < G; ++g)
+							zs[g] += ws * yj[g];
+					}
+				}
+				// Forward: L v = b.
+				for (int i = 0; i < m_; ++i)
+				{
+					double* zi = z + static_cast<size_t>(i) * Gs;
+					double v[kResidualBatch];
+					for (int g = 0; g < G; ++g)
+						v[g] = zi[g];
+					const int k0 = i - u_ > 0 ? i - u_ : 0;
+					for (int k = k0; k < i; ++k)
+					{
+						const double l = chol_[static_cast<size_t>(i) * bw + static_cast<size_t>(i - k)];
+						const double* zk = z + static_cast<size_t>(k) * Gs;
+						for (int g = 0; g < G; ++g)
+							v[g] -= l * zk[g];
+					}
+					const double inv = chol_[static_cast<size_t>(i) * bw];
+					for (int g = 0; g < G; ++g)
+						zi[g] = v[g] * inv;
+				}
+				// Backward: L^T x = v.
+				for (int i = m_ - 1; i >= 0; --i)
+				{
+					double* zi = z + static_cast<size_t>(i) * Gs;
+					double v[kResidualBatch];
+					for (int g = 0; g < G; ++g)
+						v[g] = zi[g];
+					const int k1 = i + u_ < m_ - 1 ? i + u_ : m_ - 1;
+					for (int k = i + 1; k <= k1; ++k)
+					{
+						const double l = chol_[static_cast<size_t>(k) * bw + static_cast<size_t>(k - i)];
+						const double* zk = z + static_cast<size_t>(k) * Gs;
+						for (int g = 0; g < G; ++g)
+							v[g] -= l * zk[g];
+					}
+					const double inv = chol_[static_cast<size_t>(i) * bw];
+					for (int g = 0; g < G; ++g)
+						zi[g] = v[g] * inv;
+				}
+				for (int s = 0; s < kMaxSegs; ++s)
+				{
+					segRows[s] = 0;
+					for (int g = 0; g < G; ++g)
+						segSum[static_cast<size_t>(g) * kMaxSegs + static_cast<size_t>(s)] = 0.0;
+				}
+				double acc[kResidualBatch];
+				for (int g = 0; g < G; ++g)
+					acc[g] = 0.0;
+				rows = 0;
+				for (int j = margin_; j < L_ - margin_; ++j)
+				{
+					const double* w = &w_[static_cast<size_t>(j) * static_cast<size_t>(taps_)];
+					const double* zc = z + static_cast<size_t>(cl_[static_cast<size_t>(j)]) * Gs;
+					double pred[kResidualBatch];
+					for (int g = 0; g < G; ++g)
+						pred[g] = 0.0;
+					for (int s = 0; s < taps_; ++s)
+					{
+						const double ws = w[s];
+						const double* zs = zc + static_cast<size_t>(s) * Gs;
+						for (int g = 0; g < G; ++g)
+							pred[g] += ws * zs[g];
+					}
+					int seg = j / kSegPx;
+					if (seg >= kMaxSegs)
+						seg = kMaxSegs - 1;
+					for (int g = 0; g < G; ++g)
+					{
+						const double e = yl[g][j] - pred[g];
+						const double e2 = e * e;
+						acc[g] += e2;
+						segSum[static_cast<size_t>(g) * kMaxSegs + static_cast<size_t>(seg)] += e2;
+					}
+					++rows;
+					++segRows[seg];
+				}
+				for (int g = 0; g < G; ++g)
+					rss[g] = acc[g];
+			}
+
 		private:
 			bool Factor()
 			{
@@ -383,3 +562,4 @@ namespace SourceIdentity
 		};
 	}
 }
+#pragma fp_contract(on)

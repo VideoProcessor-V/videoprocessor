@@ -179,7 +179,10 @@ namespace SourceIdentity
 				vs.nowMs = &State::VerifierClock;
 				vs.clockCtx = this;
 				verifier.reset(new DescaleVerifier(vs));
-				probeVerifier.reset(new DescaleVerifier(vs));
+				// The probe's operators are 1.64x longer but only a handful (one kernel, five sizes per axis): an eighth of the byte budget holds them.
+				VerifierSettings pvs = vs;
+				pvs.cacheBytes = vs.cacheBytes / 8;
+				probeVerifier.reset(new DescaleVerifier(pvs));
 			}
 
 			// ---- lifecycle ------------------------------------------------------------------------------------------------
@@ -1082,8 +1085,7 @@ namespace SourceIdentity
 					for (int i = 0; i < pc; ++i)
 						cands[i] = prop[i].n;
 					VerifyOptions opt;
-					if (latchedMode)
-						opt.exactLines = cfg.latchedExactLines;
+					opt.exactLines = ExactLinesFor(cfg, latchedMode, reader[a].HasConfident(), reader[1 - a].HasConfident());
 					if (reader[a].HasConfident() && !reader[a].ConfidentNative())
 						opt.forceExactN = reader[a].ConfidentN();
 					verifier->Evaluate(r.ls, cands, pc, opt, r.vr);
@@ -1112,6 +1114,7 @@ namespace SourceIdentity
 					d.streamKey = s.streamKey;
 					d.shotId = shotId;   // the estimator's own detected shot (obs.shotId above)
 					d.stepCodes = step;
+					d.cachedMB = static_cast<double>(verifier->CachedBytes() + probeVerifier->CachedBytes()) / 1048576.0;
 					for (int a = 0; a < 2; ++a)
 					{
 						AxisDetail& ad = d.axis[a];
@@ -1120,6 +1123,12 @@ namespace SourceIdentity
 							continue;
 						ad.N = run[a].ls.axisLen;
 						ad.lines = run[a].ls.count;
+						ad.operatorBuilds = run[a].vr.operatorBuilds;
+						ad.solves = run[a].vr.solves;
+						ad.solvesReused = run[a].vr.solvesReused;
+						for (size_t ci = 0; ci < run[a].vr.candidates.size() && ad.exactLines == 0; ++ci)
+							if (run[a].vr.candidates[ci].valid && run[a].vr.candidates[ci].exactDone)
+								ad.exactLines = run[a].vr.candidates[ci].lineCount;
 						ad.probeRan = run[a].pr.ran;
 						ad.probeSeen = run[a].pr.seen;
 						ad.floorCodes = floorCodes;
