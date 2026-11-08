@@ -4136,7 +4136,7 @@ void RunBetaMotionCorpus()
 // only and says so), VP_TEST_REPORT_MODE=1 for the test host. Results (CSV + summary.md): VP_TEST_CAMERA_ACCURACY_DIR
 // (default D:\codex\videoprocessor\r1cam-camacc-results). Optional: VP_TEST_CAMERA_ACCURACY_SCENES=<name substring>,
 // VP_TEST_CAMERA_ACCURACY_ENGINE_GLOBAL=0 (D1 from the global search instead of the engine's field),
-// VP_TEST_CAMERA_ACCURACY_FRAMES=<n> (frames per scene, default 8, at least d + 4, at most 64: the 59.94p scenes need about 32 to get past the
+// VP_TEST_CAMERA_ACCURACY_FRAMES=<n> (frames per scene, default 8, at least d + 4, at most 240 (three frame slots on the GPU); the 59.94p scenes need about 32 to get past the
 // fit warm-up; a pan that would leave the canvas is skipped and listed), VP_TEST_CAMERA_ACCURACY_ORDER=reverse (scenes and variants in reverse
 // order: the timing control), VP_TEST_CAMERA_ACCURACY_SIZE=1080 (the same scenes box-filtered to 1920x1080, so the picture fraction per frame is
 // the same; default 2160) and a comma list in _SCENES. The summary adds the per-instance GPU timing and the per-frame cost the camera adds.
@@ -4188,8 +4188,8 @@ namespace CameraAccuracy
 		static const int frames = []()
 		{
 			const int n = static_cast<int>(EnvDouble("VP_TEST_CAMERA_ACCURACY_FRAMES", kDefaultFrames));
-			if (n < kGuideLag + 4 || n > 64)
-				throw std::runtime_error("camera accuracy: VP_TEST_CAMERA_ACCURACY_FRAMES must be " + std::to_string(kGuideLag + 4) + " to 64");
+			if (n < kGuideLag + 4 || n > 240)
+				throw std::runtime_error("camera accuracy: VP_TEST_CAMERA_ACCURACY_FRAMES must be " + std::to_string(kGuideLag + 4) + " to 240");
 			return n;
 		}();
 		return frames;
@@ -4898,8 +4898,11 @@ void RunBetaCameraAccuracy()
 		p.sampleable = true; p.storable = true; p.host_writable = true; p.host_readable = true;
 		return pl_tex_create(g, &p);
 	};
-	std::vector<pl_tex> lumaT(Frames()), chromaT(Frames());
-	for (int f = 0; f < Frames(); ++f)
+	// F2: three frame slots on the GPU (frame f in slot f % 3, uploaded before the pair that needs it; the matcher's A is the
+	// previous pair's B, still in its slot), the frames kept on the CPU: long runs (FRAMES=120 at 4K) fit the laptop's VRAM.
+	constexpr int kSlots = 3;
+	std::vector<pl_tex> lumaT(kSlots), chromaT(kSlots);
+	for (int f = 0; f < kSlots; ++f)
 	{
 		lumaT[f] = plane(srcW, srcH, 1);
 		chromaT[f] = plane(srcW / 2, srcH / 2, 2);
@@ -4922,7 +4925,7 @@ void RunBetaCameraAccuracy()
 		std::reverse(sceneOrder.begin(), sceneOrder.end());
 	int instance = 0;
 	std::vector<SceneResult> results;
-	std::vector<uint16_t> chroma, truthMid, truthChroma, warped(static_cast<size_t>(srcW) * srcH);
+	std::vector<uint16_t> truthMid, truthChroma, warped(static_cast<size_t>(srcW) * srcH);
 	std::vector<uint16_t> fieldHalf(static_cast<size_t>(blocksX) * blocksY * 4);
 	for (size_t sceneIndex : sceneOrder)
 	{
@@ -4930,16 +4933,17 @@ void RunBetaCameraAccuracy()
 		if (!sceneWanted(cs.name))
 			continue;
 		const auto renderStart = std::chrono::steady_clock::now();
-		std::vector<std::vector<uint16_t>> lumas(Frames());
+		std::vector<std::vector<uint16_t>> lumas(Frames()), chromas(Frames());
 		for (int f = 0; f < Frames(); ++f)
+			RenderSource(cs.scene, canvas, static_cast<float>(f), 1000u + f, lumas[f], chromas[f]);
+		auto uploadFrame = [&](int f)
 		{
-			RenderSource(cs.scene, canvas, static_cast<float>(f), 1000u + f, lumas[f], chroma);
 			pl_tex_transfer_params up{};
-			up.tex = lumaT[f]; up.ptr = lumas[f].data();
+			up.tex = lumaT[f % kSlots]; up.ptr = lumas[f].data();
 			Check(pl_tex_upload(g, &up), "camera accuracy: upload");
-			up.tex = chromaT[f]; up.ptr = chroma.data();
+			up.tex = chromaT[f % kSlots]; up.ptr = chromas[f].data();
 			Check(pl_tex_upload(g, &up), "camera accuracy: upload");
-		}
+		};
 		RenderSource(cs.scene, canvas, Frames() - 1.5f, 999u, truthMid, truthChroma);   // the true midpoint of the last pair
 		const double renderSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - renderStart).count();
 		std::cout << "Beta camera accuracy: " << cs.name << " (" << cs.pxPerFrameSource << " px per frame, " << cs.fps << " fps), render " << renderSeconds << " s\n" << std::flush;
@@ -4998,7 +5002,10 @@ void RunBetaCameraAccuracy()
 				}
 				warp.SetCameraGuidance(frame);
 				Dejudder::Planes a, b;
-				a.luma = lumaT[p]; a.chroma = chromaT[p]; b.luma = lumaT[p + 1]; b.chroma = chromaT[p + 1];
+				if (p == 0)
+					uploadFrame(0);
+				uploadFrame(p + 1);   // overwrites frame p - 2's slot: nothing reads it any more
+				a.luma = lumaT[p % kSlots]; a.chroma = chromaT[p % kSlots]; b.luma = lumaT[(p + 1) % kSlots]; b.chroma = chromaT[(p + 1) % kSlots];
 				a.chromaShiftX = b.chromaShiftX = 1;
 				a.chromaShiftY = b.chromaShiftY = 1;
 				pl_gpu_finish(g);
