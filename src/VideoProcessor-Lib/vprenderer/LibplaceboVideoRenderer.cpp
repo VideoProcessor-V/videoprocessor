@@ -5685,6 +5685,7 @@ struct LibplaceboVideoRenderer::Impl
 		uint64_t sourceSequence, uint64_t nextSourceSequence, bool& entranceOnceDone, bool& bAlreadyA, const AsADone& bAsADone);   // VPV-HOOK M2 P5b-4: defined in VP-V/modules/motion/consumers/PhaseTimeline.inl
 	MotionConfig::Settings ResolveMotionEngine(bool fileMotionOff);   // VPV-HOOK M2 P5b-5: defined in VP-V/modules/motion/consumers/PhaseTimeline.inl
 	bool PlanVpOutputs(RendererExtension::OutputPlan& plan);   // VPV-HOOK M2 P5b-5: R10 PlanOutputs (PhaseTimeline.inl)
+	void NoteTimelinePlanned(bool planned);   // VPV-HOOK M2 P5b-5: no stale timeline flags without a plan (PhaseTimeline.inl)
 	void RegisterDejudderCacheFrame(const pl_frame& target, const pl_frame& renderImage, const SubtitleCutPasteGeometry& relocatedSubtitle,   // VPV-HOOK M2 P5b-6
 		bool subtitleCompositionSucceeded, bool nlsSubmitted, bool cadenceRepeat, uint64_t sourceSequence);   // defined in VP-V/modules/motion/consumers/PhaseTimeline.inl
 	// A picture between frames is drawn for this image: Stage B's picture is ready and the
@@ -32077,8 +32078,8 @@ void LibplaceboVideoRenderer::RenderLoop()
                 vpPlan.seq=static_cast<int64_t>(sourceSequence);vpPlan.nextSeq=static_cast<int64_t>(nextSourceSequence);vpPlan.generation=static_cast<int64_t>(frameGeneration);   // VPV-HOOK
                 vpPlan.ptsA=sourcePts;vpPlan.ptsB=nextPts;vpPlan.filmHz=frameFilmHz;vpPlan.captureHz=captureRateHz;vpPlan.arrivalQpc=arrivalQpc;   // VPV-HOOK
                 vpPlan.discontinuity=frame.IsSourceDiscontinuity();vpPlan.fileFrame=currentFileFrame;vpPlan.queueDepthAfterDequeue=queueDepthAfterDequeue;   // VPV-HOOK
-                vpPlan.desiredDepth=desiredQueueDepth;vpPlan.holdFraction=CurrentQueueHold().fraction;vpPlan.queueTimingFixes=m_queueTimingFixes.load(std::memory_order_relaxed);   // VPV-HOOK
-                vpPlan.outputs=&motionOutputs;vpPlan.phases=&vpPhases;RendererExtension::PlanOutputs(m_impl.get(),vpPlan);   // VPV-HOOK
+                vpPlan.desiredDepth=desiredQueueDepth;vpPlan.holdFraction=CurrentQueueHoldFraction();vpPlan.queueTimingFixes=m_queueTimingFixes.load(std::memory_order_relaxed);   // VPV-HOOK
+                vpPlan.outputs=&motionOutputs;vpPlan.phases=&vpPhases;m_impl->NoteTimelinePlanned(RendererExtension::PlanOutputs(m_impl.get(),vpPlan));   // VPV-HOOK
                 // Bill merge (c-item 11): Bill's display repeat cadence (present_every_vsync) and VP's
                 // per-vsync timeline or de-judder extras would both schedule refreshes: VP's own owns
                 // them while active (VP-V only: the Original pathway has neither), visibly.

@@ -10,6 +10,8 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/core/hub/ExtensionHub.h>
+#include <VP-V/modules/motion/consumers/DejudderExtension.h>
 #include <VP-V/modules/motion/consumers/tests/TimelinePlanRunnerHost.h>
 #include <VP-V/modules/motion/consumers/tests/TimelinePlanScenarios.h>
 
@@ -110,6 +112,82 @@ namespace TimelinePlanTraceTest
 						Assert::IsFalse(st.vpTimelineActive, Wide(sc.name + " frame " + std::to_string(i)).c_str());
 				}
 			}
+		}
+	};
+
+	// M2 P5b-5 audit F1 / F3: the no-plan guard and the real hook routes (hook layer -> hub -> DejudderExtension ->
+	// the renderer's binding).
+	TEST_CLASS(DejudderExtensionHookTests)
+	{
+	public:
+		// Not planned (no binding / hub, or the plan threw): no stale timeline flags; planned: untouched.
+		TEST_METHOD(NoPlanLeavesNoStaleTimelineFlags)
+		{
+			VpMotion::DejudderPolicyState st;
+			st.vpTimelineActive = true;
+			st.vpSkipOutput = true;
+			st.vpSkipIsUpdate = true;
+			st.vpOutputPhase = 0.5;
+			Assert::IsFalse(VpMotion::TimelineNotPlanned(st, true), L"planned: no fallback");
+			Assert::IsTrue(st.vpTimelineActive && st.vpSkipOutput, L"planned: the plan's flags stand");
+			Assert::IsTrue(VpMotion::TimelineNotPlanned(st, false), L"not planned: the visible fallback");
+			Assert::IsFalse(st.vpTimelineActive || st.vpSkipOutput || st.vpSkipIsUpdate);
+			Assert::IsTrue(st.vpOutputPhase == 0.0);
+		}
+
+		// The BacklogFlush event and R10 PlanOutputs reach the registered renderer's binding through the hub; the
+		// queue generation's Flush does not touch the steering; without the hub nothing is planned (the guard's case).
+		TEST_METHOD(BacklogFlushAndPlanOutputsReachTheBinding)
+		{
+			struct FakeImpl
+			{
+				int flushes = 0, plans = 0;
+				int64_t plannedSeq = -1;
+			} impl;
+			struct Fwd : RendererExtension::IRendererExtension
+			{
+				void OnQueue(const RendererExtension::QueueFacts& f) override { Vpv::Hub::ExtensionHub::Instance().OnQueue(f); }
+				bool OnFrame(RendererExtension::FrameContext& c) override { return Vpv::Hub::ExtensionHub::Instance().OnFrame(c); }
+			};
+			struct Scope
+			{
+				Scope() { RendererExtension::ResetForTesting(); Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting(); }
+				~Scope() { RendererExtension::ResetForTesting(); Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting(); }
+			} scope;
+			Vpv::Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new VpMotion::DejudderExtension()));
+			RendererExtension::Register(std::unique_ptr<RendererExtension::IRendererExtension>(new Fwd()));
+			VpMotion::DejudderBindingSpec spec;
+			spec.self = &impl;
+			spec.queueFlush = [](void* self) { ++static_cast<FakeImpl*>(self)->flushes; };
+			spec.planOutputs = [](void* self, RendererExtension::OutputPlan& plan)
+			{
+				FakeImpl* i = static_cast<FakeImpl*>(self);
+				++i->plans;
+				i->plannedSeq = plan.seq;
+				plan.skip = true;
+				return true;
+			};
+			{
+				VpMotion::DejudderHostBinding binding(&impl, spec);
+				Assert::IsTrue(binding.Registered());
+				RendererExtension::NotifyQueue(RendererExtension::QueueEvent::BacklogFlush, &impl);
+				Assert::AreEqual(1, impl.flushes, L"the backlog flush reaches the binding");
+				RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Flush, &impl, -1, 2, 64, 0, "live queue reset");
+				Assert::AreEqual(1, impl.flushes, L"the queue generation's Flush is not the steering's event");
+				int other = 0;
+				RendererExtension::NotifyQueue(RendererExtension::QueueEvent::BacklogFlush, &other);
+				Assert::AreEqual(1, impl.flushes, L"another renderer's flush is not ours");
+				RendererExtension::OutputPlan plan;
+				plan.seq = 7;
+				Assert::IsTrue(RendererExtension::PlanOutputs(&impl, plan), L"planned through the hub");
+				Assert::AreEqual(1, impl.plans);
+				Assert::IsTrue(impl.plannedSeq == 7 && plan.skip);
+				Assert::IsFalse(RendererExtension::PlanOutputs(&other, plan), L"no binding for that host: not planned");
+			}
+			RendererExtension::OutputPlan plan;
+			Assert::IsFalse(RendererExtension::PlanOutputs(&impl, plan), L"binding gone: not planned");
+			RendererExtension::ResetForTesting();
+			Assert::IsFalse(RendererExtension::PlanOutputs(&impl, plan), L"no hub: not planned (the guard engages the fallback)");
 		}
 	};
 }

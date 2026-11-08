@@ -23,6 +23,7 @@ namespace FallbackPlainText
 			{ "deband", "The standard debander is being used instead of VP's" },
 			{ "motion", "The motion engine is not running, so motion-based steps are off" },
 			{ "motion consumers", "Motion-based steps are showing the source frame instead" },
+			{ "timeline", "The per-refresh motion timeline is off; frames are shown at their own times" },
 			{ "presentation", "Frames are being presented in a simpler way than requested" },
 			{ "refresh rate", "The display refresh rate could not be switched as requested" },
 			{ "calibration LUT", "The calibration table was switched off after a drawing error" },

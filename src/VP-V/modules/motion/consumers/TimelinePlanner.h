@@ -45,7 +45,21 @@ namespace VpMotion
 		return line;
 	}
 
-	// Plan inputs the R10 payload carries beyond its generic fields (the host fills them).
+	// After the R10 call: when no handler planned this frame (no binding / hub, or the plan threw and the hub contained
+	// it), the timeline flags from the last plan must not stand (a stale skip would drop frames): the frame is
+	// drawn as the host built it. True = not planned (the caller engages the visible "timeline" fallback).
+	inline bool TimelineNotPlanned(DejudderPolicyState& st, bool planned)
+	{
+		if (planned)
+			return false;
+		st.vpTimelineActive = false;
+		st.vpSkipOutput = false;
+		st.vpSkipIsUpdate = false;
+		st.vpOutputPhase = 0.0;
+		return true;
+	}
+
+	// The per-vsync timeline plan of one dequeued frame (statements as before; see the file comment).
 	template<class Settings, class Plan, class Host>
 	void PlanVpTimeline(const Settings& activeSettings, DejudderPolicyState& st, Plan& plan, Host& host)
 	{

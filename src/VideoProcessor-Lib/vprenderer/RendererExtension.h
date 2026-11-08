@@ -159,7 +159,8 @@ namespace RendererExtension
 	};
 	struct QueueView { const void* queue = nullptr; size_t size = 0; };
 
-	// R10 PlanOutputs (take-over; render loop, after the host's own timeline Begin, no renderMutex). In: the facts.
+	// R10 PlanOutputs (take-over; render loop, after the host's own timeline Begin, WITH renderMutex held: the loop's
+	// unique_lock, released only between draws (M2 P5b-1)). In: the facts.
 	// In/out: the host's output list. Default (no handler): the lists are left as the host built them.
 	struct OutputPlan
 	{

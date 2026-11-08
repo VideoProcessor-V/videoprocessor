@@ -506,3 +506,19 @@ void LibplaceboVideoRenderer::Impl::RegisterDejudderCacheFrame(const pl_frame& t
         dejudderCacheStage.Register(cacheFrame, [this]() { return KnownNlsMapping(); }, frameHooks);
     }
 }
+// M2 P5b-5 (audit F1): after the R10 call. Not planned (no binding / hub, or the plan threw): no stale timeline
+// flags, Bill's draw of the host's list, and the visible "timeline" fallback; planned: released.
+void LibplaceboVideoRenderer::Impl::NoteTimelinePlanned(bool planned)
+{
+	if (VpMotion::TimelineNotPlanned(dejudderPolicy, planned))
+		EngageFallback("timeline", "de-judder module did not plan");
+	else
+		ReleaseFallback("timeline");
+}
+
+// M2 P5b-5 (audit F5): the hold fraction alone under the hold's lock (no copy of the whole plan per frame).
+double LibplaceboVideoRenderer::CurrentQueueHoldFraction() const
+{
+	std::lock_guard<std::mutex> guard(m_queueHoldMutex);
+	return m_queueHold.fraction;
+}
