@@ -23,6 +23,8 @@
 
 namespace CameraLink
 {
+	struct AheadCopy;   // AheadFlow.h
+
 	// One pair to fit. The FieldCopy is shared (kept alive by the pool entry of a published record).
 	struct CameraFitJob
 	{
@@ -46,6 +48,10 @@ namespace CameraLink
 		// The consumer grid the record's per-block outputs are put on after a NATIVE-grid fit (AheadFlow.h RegridToConsumerGrid; the
 		// 16-px grid of the P8 labels and the lane). 0 = none (the record keeps the fit's grid).
 		int outGridW = 0, outGridH = 0;
+		// AHEAD FIT (audit F3): the ahead pair as copied on the render thread; the camera WORKER converts it (AheadToSourceGrid: the native
+		// field and the engine cell trust) and works out its whole-frame motion before the fit. `field` is then null until that conversion.
+		std::shared_ptr<const AheadCopy> aheadCopy;
+		float aheadConsistency = 0.0f;   // the matcher's consistency limit, engine px
 	};
 
 	struct CameraFitResult

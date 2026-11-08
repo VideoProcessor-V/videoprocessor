@@ -123,7 +123,14 @@ namespace CameraLink
 		// ---- AHEAD FIT (render thread, before AttachLane / AttachGraph) ----
 		// The ahead pair source and its facts provider (an ahead pair is not yet estimated by the matcher: the engine's render-time
 		// facts (PairSpansSlip, EngineGlobal) do not exist for it; the host describes it from the pair and the frame-analysis store).
-		void SetAheadSource(AheadSource source, PairFactsProvider facts) { m_aheadSource = std::move(source); m_aheadFacts = std::move(facts); }
+		// `global` (optional, any thread) works out the pair's whole-frame motion; it runs on the camera WORKER with the conversion (audit F3:
+		// the render thread only copies).
+		void SetAheadSource(AheadSource source, PairFactsProvider facts, std::function<void(AheadCopy&)> global = std::function<void(AheadCopy&)>())
+		{
+			m_aheadSource = std::move(source);
+			m_aheadFacts = std::move(facts);
+			m_aheadGlobal = std::move(global);
+		}
 		// The on-time target: the lane that seals P7(N) at N (the skeleton lane's AnalysisLane::Lease(kP7CameraFit)). Empty = none.
 		// `name` is what the status line calls it.
 		void AttachOnTime(VpSkeleton::LaneLeaseSource source, const std::string& name) { m_onTimeSource = std::move(source); m_onTimeName = name; }
@@ -164,6 +171,8 @@ namespace CameraLink
 		bool SubmitField(std::shared_ptr<const FieldCopy> field, const FramePhaseFacts& f);
 		// AHEAD FIT: submit an ahead field (origin Ahead) as the ahead poll does (tests drive it directly). False: refused / queue full.
 		bool SubmitAheadField(std::shared_ptr<const FieldCopy> field, const AheadCopy* global = nullptr);
+		// AHEAD FIT (audit F3): submit the COPY; the worker converts it. The facts are taken here from the pair's frames (render thread).
+		bool SubmitAheadCopy(std::shared_ptr<const AheadCopy> copy);
 
 		// ---- introspection ----
 		bool Active() const { return m_active; }
@@ -266,6 +275,7 @@ namespace CameraLink
 		VpSkeleton::LaneLeaseSource m_onTimeSource;
 		std::string m_onTimeName;
 		std::function<uint64_t()> m_p2Epoch;
+		std::function<void(AheadCopy&)> m_aheadGlobal;
 		bool P2Stale(const PoolEntry& e) const
 		{
 			return e.field && e.field->haveP2 && m_p2Epoch && m_p2Epoch() != e.field->p2Epoch;

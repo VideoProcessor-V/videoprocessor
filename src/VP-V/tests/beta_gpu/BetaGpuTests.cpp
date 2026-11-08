@@ -4582,7 +4582,8 @@ namespace CameraAccuracy
 		VariantResult variants[5];   // off, model_global, all_switches; + model_global_ahead, all_switches_ahead with VP_TEST_CAMERA_ACCURACY_AHEAD=1
 		// AHEAD FIT (VP_TEST_CAMERA_ACCURACY_AHEAD=1): the reproduced NVOF pair's costs per pair (index = pair) and its conversion time.
 		std::vector<CameraAccuracyAhead::PairTiming> aheadTiming;
-		std::vector<double> aheadConvertMs;
+		std::vector<double> aheadConvertMs;   // camera WORKER: AheadToSourceGrid (native field + trust) + FlowGlobal (audit F3)
+		std::vector<double> aheadCopyMs;      // RENDER thread: CopyAhead only (FlowOf's view copied at once)
 		std::vector<int> aheadHave;   // 1 = the ahead pair existed and converted
 		// RAW field vs the exact camera translation (trusted samples, trust >= 0.5; source px): the native P2 field and the F2 seed field
 		// of the same pairs (does NVOF itself under-estimate slow motion?). Index = pair.
@@ -4676,6 +4677,7 @@ namespace CameraAccuracy
 		const size_t pairs = static_cast<size_t>(Frames() - 1);
 		sr.aheadTiming.assign(pairs, CameraAccuracyAhead::PairTiming());
 		sr.aheadConvertMs.assign(pairs, 0.0);
+		sr.aheadCopyMs.assign(pairs, 0.0);
 		sr.aheadHave.assign(pairs, 0);
 		sr.aheadRaw.assign(pairs, SceneResult::RawStats());
 		if (!hardware)
@@ -4722,13 +4724,24 @@ namespace CameraAccuracy
 				continue;
 			const size_t p = static_cast<size_t>(f - 1);
 			sr.aheadTiming[p] = t;
+			// Audit F3: the time split as production runs it: the copy on the render thread, the conversion + trust + global on the worker.
 			const auto c0 = std::chrono::steady_clock::now();
 			CameraLink::AheadCopy copy;
 			const VpMotion::FlowView view = CameraAccuracyAhead::ViewOf(flow, static_cast<uint64_t>(f - 1), static_cast<uint64_t>(f), srcW);
 			CameraLink::FieldCopy& fc = fields[p];
 			fc = CameraLink::FieldCopy();
-			if (CameraLink::CopyAhead(view, static_cast<uint64_t>(f), copy) == CameraLink::AheadRefusal::None &&
-				CameraLink::AheadToSourceGrid(copy, consistency, blocksX, blocksY, fc))
+			const bool copied = CameraLink::CopyAhead(view, static_cast<uint64_t>(f), copy) == CameraLink::AheadRefusal::None;
+			const auto c1 = std::chrono::steady_clock::now();
+			sr.aheadCopyMs[p] = std::chrono::duration<double, std::milli>(c1 - c0).count();
+			bool converted = false;
+			if (copied)
+			{
+				float gl[4] = {}, second[4] = {};
+				MotionAhead::FlowGlobal(copy.forward, copy.forwardCost, copy.gridW, copy.gridH, gl, second);   // the worker's AheadGlobal
+				converted = CameraLink::AheadToSourceGrid(copy, consistency, blocksX, blocksY, fc);
+			}
+			sr.aheadConvertMs[p] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c1).count();
+			if (converted)
 			{
 				fc.seq = p;   // the harness numbers pairs by their first frame
 				fc.pairFrom = p;
@@ -4737,9 +4750,8 @@ namespace CameraAccuracy
 				sr.aheadCells = fc.Blocks();
 				double tx = 0, ty = 0;
 				CameraTruth(cs.scene, static_cast<float>(p), tx, ty);
-				sr.aheadRaw[p] = RawVsTruth(fc, tx / SizeDiv(), ty / SizeDiv());
+				sr.aheadRaw[p] = RawVsTruth(fc, tx / SizeDiv(), ty / SizeDiv());   // same source-px scale as the seed row (log.truthTx / SizeDiv)
 			}
-			sr.aheadConvertMs[p] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count();
 		}
 		pl_gpu_finish(g);
 	}
@@ -4825,8 +4837,11 @@ namespace CameraAccuracy
 			"are this run's measured ones (pair = luma + engine + readback + extras; convert; fit). Not modelled: the render's GPU load on the engine (the live "
 			"pair is slower), FlowOf being polled at the render's Begin / AfterRender (up to half an output period more), and pair 0 (the engine's first pair, "
 			"initialisation) is excluded from the shares.\n\n";
-		md << "| scene | fps | T ms | engine | pair ms median / p95 | readback ms median | convert ms median | fit ms median / p95 | latency ms median / p95 | on time L=1 | L=2 | L=3 | L=4 |\n";
-		md << "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n";
+		md << "Render-thread cost of the ahead fit = the CopyAhead only (column 'copy ms'); the conversion, trust and global run on the camera worker "
+			"(column 'convert ms', inside the worker lane of the model). Fit precision (the inlier threshold base): 0.25 px for the ahead fields, the "
+			"16-px path's value, set explicitly (audit F4), not the Fitter's 0.25 x cell / 16 default.\n\n";
+		md << "| scene | fps | T ms | engine | pair ms median / p95 | readback ms median | copy ms median (render) | convert ms median (worker) | fit ms median / p95 | latency ms median / p95 | on time L=1 | L=2 | L=3 | L=4 |\n";
+		md << "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n";
 		std::vector<std::string> faults;
 		for (const SceneResult& s : all)
 		{
@@ -4839,13 +4854,14 @@ namespace CameraAccuracy
 			}
 			const AheadLatency lat = AheadModel(s, s.variants[3]);
 			const double periodMs = 1000.0 / s.scene.fps;
-			std::vector<double> pairMs, rbMs, cvMs, fitMs, latMs;
+			std::vector<double> pairMs, rbMs, cvMs, fitMs, latMs, cpMs;
 			int onTime[5] = {}, n = 0;
 			for (size_t p = 1; p < s.aheadTiming.size(); ++p)
 			{
 				pairMs.push_back(s.aheadTiming[p].PairMs());
 				rbMs.push_back(s.aheadTiming[p].readbackMs);
 				cvMs.push_back(s.aheadConvertMs[p]);
+				cpMs.push_back(p < s.aheadCopyMs.size() ? s.aheadCopyMs[p] : 0.0);
 				fitMs.push_back(p < s.variants[3].pairs.size() ? s.variants[3].pairs[p].fitMs : 0.0);
 				latMs.push_back(lat.latencyMs[p]);
 				++n;
@@ -4854,9 +4870,9 @@ namespace CameraAccuracy
 				if (lat.latencyMs[p] + 1e-9 < s.aheadTiming[p].PairMs())
 					faults.push_back(s.scene.name + ": a latency below its own pair time (a model fault)");
 			}
-			std::snprintf(line, sizeof(line), "| %s | %.3f | %.2f | %s | %.2f / %.2f | %.2f | %.3f | %.3f / %.3f | %.2f / %.2f | %.0f%% | %.0f%% | %.0f%% | %.0f%% |\n",
+			std::snprintf(line, sizeof(line), "| %s | %.3f | %.2f | %s | %.2f / %.2f | %.2f | %.3f | %.3f | %.3f / %.3f | %.2f / %.2f | %.0f%% | %.0f%% | %.0f%% | %.0f%% |\n",
 				s.scene.name.c_str(), s.scene.fps, periodMs, s.aheadQuarter ? "quarter" : "half", Quant(pairMs, 0.5), Quant(pairMs, 0.95), Quant(rbMs, 0.5),
-				Quant(cvMs, 0.5), Quant(fitMs, 0.5), Quant(fitMs, 0.95), Quant(latMs, 0.5), Quant(latMs, 0.95), n ? 100.0 * onTime[1] / n : 0.0,
+				Quant(cpMs, 0.5), Quant(cvMs, 0.5), Quant(fitMs, 0.5), Quant(fitMs, 0.95), Quant(latMs, 0.5), Quant(latMs, 0.95), n ? 100.0 * onTime[1] / n : 0.0,
 				n ? 100.0 * onTime[2] / n : 0.0, n ? 100.0 * onTime[3] / n : 0.0, n ? 100.0 * onTime[4] / n : 0.0);
 			md << line;
 			if (Quant(pairMs, 0.5) > 10.0 * periodMs)

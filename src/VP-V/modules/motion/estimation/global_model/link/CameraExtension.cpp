@@ -243,12 +243,19 @@ namespace Vpv
 				if (r != CameraLink::AheadRefusal::None)
 					return r;
 				out.epoch = e0;
+				return r;
+			}
+
+			// The ahead pair's whole-frame motion, worked out exactly as the engine does for its own record (MotionAhead::FlowGlobal on the
+			// forward vectors and costs, one engine cell = cellEnginePx x enginePxToSource source px, usable at ambiguity < 0.9). Runs on the
+			// camera WORKER (audit F3), pure CPU.
+			void AheadGlobal(CameraLink::AheadCopy& out)
+			{
 				float g[4] = {}, second[4] = {};
 				MotionAhead::FlowGlobal(out.forward, out.forwardCost, out.gridW, out.gridH, g, second);
 				out.globalValid = g[3] > 0.5f && g[2] < 0.9f;
 				out.globalX = out.CellSourcePx() * static_cast<double>(g[0]);
 				out.globalY = out.CellSourcePx() * static_cast<double>(g[1]);
-				return r;
 			}
 
 			// The timing the fit latches (film lock when the cadence is locked, else the measured source rate). Relatched only when it moved
@@ -481,11 +488,12 @@ namespace Vpv
 			});
 			if (st.aheadWanted)
 			{
-				// AHEAD FIT: the ahead pair (FlowOf, render thread), converted onto the seed's 16-px source grid (the grid that sizes the camera
-				// graph), trust from the matcher's own consistency limit. No on-time target: SK-W gives the camera no lease of the skeleton
-				// lane's P7 (link/README.md "Ahead fit: gaps"), so every ahead result is bridged, visibly.
+				// AHEAD FIT: the ahead pair is COPIED on the render thread (FlowOf's contract, the epoch read around it); the camera worker
+				// converts it at the native cell grid with the engine cell trust (the matcher's own consistency limit) and puts the record's
+				// outputs on the seed's 16-px grid (the grid that sizes the camera graph). The on-time target is the skeleton lane (below).
 				st.core->SetAheadSource([engine](uint64_t seq, CameraLink::AheadCopy& out) { return TakeAhead(*engine, seq, out); },
-					[sp, store](const CameraLink::FieldCopy& f, CameraLink::PairDescription& d) { return DescribeAhead(*sp, store, f, d); });
+					[sp, store](const CameraLink::FieldCopy& f, CameraLink::PairDescription& d) { return DescribeAhead(*sp, store, f, d); },
+					[](CameraLink::AheadCopy& c) { AheadGlobal(c); });
 				st.core->SetAheadGrid(sf.sourceGridW, sf.sourceGridH);
 				st.core->SetP2EpochSource([engine]() { return engine->FieldEra(); });   // any thread (IVectorEngine::FieldEra)
 				st.core->SetAheadConsistency(sf.consistencyPx);

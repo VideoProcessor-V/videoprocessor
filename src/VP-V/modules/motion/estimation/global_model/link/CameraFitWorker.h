@@ -73,6 +73,9 @@ namespace CameraLink
 		// G-A3: the engine's CURRENT vectors-valid epoch (IVectorEngine::FieldEra, any thread); an Ahead field whose p2Epoch differs is
 		// refused at the claim (PublishOutcome::StaleP2, FitCounters::p2RefusedClaim). Empty = no check.
 		std::function<uint64_t()> p2Epoch;
+		// AHEAD FIT (audit F3): the pair's whole-frame motion (the engine's FlowGlobal), worked out on the camera worker before the fit. Any
+		// thread, pure CPU. Empty = no engine-global prior for ahead jobs.
+		std::function<void(AheadCopy&)> aheadGlobal;
 		size_t parkCapacity = 64;
 	};
 

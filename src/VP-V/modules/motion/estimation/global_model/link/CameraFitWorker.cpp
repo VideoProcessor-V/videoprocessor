@@ -270,8 +270,33 @@ namespace CameraLink
 		return ended;
 	}
 
-	PublishOutcome CameraFitWorker::ProcessJob(const CameraFitJob& job)
+	PublishOutcome CameraFitWorker::ProcessJob(const CameraFitJob& submitted)
 	{
+		CameraFitJob job = submitted;
+		if (job.aheadCopy && !job.field)
+		{
+			// AHEAD FIT (audit F3): the conversion and the trust run HERE, on the camera worker, not on the render thread.
+			AheadCopy copy = *job.aheadCopy;
+			if (m_env.aheadGlobal)
+				m_env.aheadGlobal(copy);
+			auto field = std::make_shared<FieldCopy>();
+			if (!AheadToSourceGrid(copy, job.aheadConsistency, job.outGridW, job.outGridH, *field))
+			{
+				// Not fitted: a hole in the pair chain (the next fit must not seed from the previous pair), counted and shown (layout).
+				if (m_env.counters)
+					m_env.counters->aheadLayout.fetch_add(1, std::memory_order_relaxed);
+				m_producer.NoteReset();
+				Finish(job, CameraFitResult(), PublishOutcome::NoProduct);
+				return PublishOutcome::NoProduct;
+			}
+			job.field = field;
+			if (copy.globalValid && !job.facts.haveEngineGlobal)
+			{
+				job.facts.haveEngineGlobal = true;   // the ahead pair's own whole-frame motion (the render-time EngineGlobal does not exist yet)
+				job.facts.engineGx = copy.globalX;
+				job.facts.engineGy = copy.globalY;
+			}
+		}
 		// Always fit (deterministic history); only the publication can be late.
 		CameraFitResult fit = m_producer.Fit(job);
 		if (job.ahead && job.outGridW > 0 && job.outGridH > 0)

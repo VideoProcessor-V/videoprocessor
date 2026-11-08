@@ -142,6 +142,7 @@ namespace CameraLink
 		env.aheadMode = ahead;
 		env.onTimeSource = ahead ? m_onTimeSource : VpSkeleton::LaneLeaseSource();
 		env.p2Epoch = ahead ? m_p2Epoch : std::function<uint64_t()>();
+		env.aheadGlobal = ahead ? m_aheadGlobal : std::function<void(AheadCopy&)>();
 		env.onResult = [this](const CameraFitJob& j, const CameraFitResult& r, PublishOutcome o) { OnResult(j, r, o); };
 		m_worker.reset(new CameraFitWorker(*m_producer, env));
 		if (!m_settings.deterministic)
@@ -253,6 +254,41 @@ namespace CameraLink
 		return true;
 	}
 
+	bool CameraLinkCore::SubmitAheadCopy(std::shared_ptr<const AheadCopy> copy)
+	{
+		if (!m_worker || !copy)
+			return false;
+		CameraFitJob job;
+		job.seq = copy->seq;
+		job.stamp = copy->stamp;
+		job.ahead = true;
+		job.aheadCopy = copy;
+		job.aheadConsistency = m_aheadConsistency;
+		job.outGridW = m_aheadGridW;
+		job.outGridH = m_aheadGridH;
+		PairDescription d;
+		if (m_aheadFacts)
+		{
+			FieldCopy header;   // the pair's frames only: the facts read the frame-analysis store, not the vectors
+			header.seq = copy->seq;
+			header.pairFrom = copy->pairFrom;
+			header.pairTo = copy->pairTo;
+			header.origin = FieldOrigin::Ahead;
+			if (!m_aheadFacts(header, d))
+				return false;
+		}
+		job.facts = d.facts;
+		job.uniqueFramesBetween = d.uniqueFramesBetween;
+		job.haveTimestamps = d.haveTimestamps;
+		job.tsFrom = d.tsFrom;
+		job.tsTo = d.tsTo;
+		job.facts.deadlineMicros = 0;
+		if (!m_worker->Submit(job))
+			return false;
+		m_counters.aheadSubmitted.fetch_add(1, std::memory_order_relaxed);
+		return true;
+	}
+
 	bool CameraLinkCore::Retired(uint64_t seq) const
 	{
 		return !m_retired.empty() && m_retired[seq % m_retired.size()] == seq + 1;
@@ -287,15 +323,7 @@ namespace CameraLink
 			const AheadRefusal r = m_aheadSource(seq, copy);
 			if (r == AheadRefusal::NoPair)
 				break;   // not computed yet: normal until the producer gets there; a frame the render reaches without one takes the seed
-			std::shared_ptr<FieldCopy> field;
-			bool converted = false;
-			if (r == AheadRefusal::None)
-			{
-				copy.stamp = lease.indicator ? lease.indicator->StampOf(seq) : VpIndicator::Stamp();
-				field = std::make_shared<FieldCopy>();
-				converted = AheadToSourceGrid(copy, m_aheadConsistency, m_aheadGridW, m_aheadGridH, *field);
-			}
-			if (!converted)
+			if (r != AheadRefusal::None)
 			{
 				if (m_aheadRefusedSeq != seq)
 				{
@@ -305,7 +333,10 @@ namespace CameraLink
 				}
 				break;
 			}
-			if (!SubmitAheadField(field, copy.globalValid ? &copy : nullptr))
+			// Audit F3: only the copy (and the epoch read) happen on the render thread; the conversion, the trust and the global run on
+			// the camera worker.
+			copy.stamp = lease.indicator ? lease.indicator->StampOf(seq) : VpIndicator::Stamp();
+			if (!SubmitAheadCopy(std::make_shared<const AheadCopy>(std::move(copy))))
 				break;   // facts refused or the queue is full (counted by the worker): the render-time path takes the frame
 			{
 				std::lock_guard<std::mutex> lock(m_chainMutex);
