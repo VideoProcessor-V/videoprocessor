@@ -121,8 +121,11 @@ namespace
 			auto* tick = window.findChild<QDoubleSpinBox*>(QStringLiteral("config.led_drive.default.tick_ms"));
 			require(tick != nullptr, "no fixed loop interval box");
 			auto* reset = window.findChild<QToolButton*>(QStringLiteral("config.led_drive.default.tick_ms.reset"));
-			require(reset != nullptr && reset->isEnabled(), "the stored fixed loop interval has no enabled Reset");
-			reset->click();
+			// The Reset itself is enabled when a value is stored. The VP-V page may grey the whole row
+			// (its fixed-loop interval only matters with the fixed-loop pacing), which makes isEnabled()
+			// false and click() a no-op, so the button's own flag is checked and the signal emitted.
+			require(reset != nullptr && reset->isEnabledTo(reset->parentWidget()), "the stored fixed loop interval has no enabled Reset");
+			emit reset->clicked();
 			auto* lift = window.findChild<QDoubleSpinBox*>(QStringLiteral("config.led_drive.default.shadow_lift_ansi"));
 			require(lift != nullptr, "no shadow lift box");
 			lift->setValue(0.4);
