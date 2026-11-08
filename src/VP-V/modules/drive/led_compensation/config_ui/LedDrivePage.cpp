@@ -1173,7 +1173,6 @@ QWidget* LedDriveBuilder::createLedDrivePage()
 }
 
 }
-}
 
 struct LedDrivePage::State
 {
