@@ -12628,7 +12628,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 advanced->setChecked(true);
         });
         connect(queuePolicy, qOverload<int>(&QComboBox::currentIndexChanged), this,
-            [this, queuePolicy, state, fields, profileFields, updateQueuePolicyPresentation](int index)
+            [this, queuePolicy, state, fields, updateQueuePolicyPresentation](int index)
         {
             if (state->loading || state->section.isEmpty() || !document_ || index < 0) return;
             const QString selectedId = queuePolicy->itemData(index).toString();
@@ -12650,7 +12650,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             setValue("lead_frames", selected->lead);
             setValue("startup_preroll_frames", 0);
             setValue("target_frames", selected->target);
-            setValue("target_latency_ms", 0); document_->RemoveKnown(section, "active_picture_lookahead_frames");   // VPV-HOOK (a preset: no delay; the look-ahead stays Auto, any explicit value removed)
+            setValue("active_picture_lookahead_frames", 0);
+            Vpv::QueuePresetWrites(*document_, section);   // VPV-HOOK (VP-V: the preset switches the delay off and keeps the look-ahead Auto)
             setValue("reset_after_render_restart_seconds", 5);
             setValue("reset_queue_too_large_percent", selected->resetPercent);
             for (const Field& field : *fields)

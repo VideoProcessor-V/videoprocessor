@@ -1604,9 +1604,17 @@ namespace
 			vpv->setValue(-1);
 			QCoreApplication::processEvents();
 			require(bills->value() == 0 && vpv->value() == -1, "VP-V's Auto does not show as 0 on Bill's control");
+			// A buffering preset keeps VP-V's look-ahead Auto (the key removed) and switches the delay off.
+			vpv->setValue(4);
+			QCoreApplication::processEvents();
+			auto* policy = control<QComboBox>(window, QStringLiteral("config.queue.policy_preset"));
+			policy->setCurrentIndex(policy->findData(QStringLiteral("reliable")));
+			QCoreApplication::processEvents();
+			require(vpv->value() == -1 && bills->value() == 0 && control<QSpinBox>(window, QStringLiteral("config.queue.target_latency_ms"))->value() == 0,
+				"a preset left an explicit look-ahead or a delay on the VP-V card");
 			save(window);
 			const QByteArray saved = readFile(path);
-			require(saved.contains("[queue.Three]\nqueue_size: 16\n") && saved.count("active_picture_lookahead_frames") == 1 &&
+			require(saved.contains("[queue.Three]\n") && saved.contains("target_latency_ms: 0") && saved.count("active_picture_lookahead_frames") == 1 &&
 				saved.contains("[queue.Zero]\nqueue_size: 16\nactive_picture_lookahead_frames: 0\n"),
 				(std::string("VP-V's Auto did not remove the key, or another profile's value changed: ") + saved.toStdString()).c_str());
 		}

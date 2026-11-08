@@ -38,6 +38,7 @@
 #include <VP-V/config/VpvSection.h>
 #include <algorithm>
 #include <functional>
+#include <string>
 #include <vector>
 
 namespace Vpv
@@ -342,6 +343,17 @@ namespace Vpv
 			if (field.widget)
 				if (auto* refresh = qobject_cast<QAction*>(field.widget->property(QueueRowsDetail::kRefreshProperty).value<QObject*>()))
 					refresh->trigger();
+	}
+
+	// Bill's buffering preset, after his own writes (he writes active_picture_lookahead_frames 0): VP-V's
+	// preset is a frame-count baseline, so it switches Target delay off (target_latency_ms 0) and keeps the
+	// look-ahead automatic (follows the queue): the explicit value is removed (Bug hunt 3 F8 / owner
+	// decision 2026-10-17). The document ends exactly as before row c.
+	template <class Document>
+	void QueuePresetWrites(Document& document, const std::string& section)
+	{
+		document.SetKnown(section, "target_latency_ms", "0");
+		document.RemoveKnown(section, "active_picture_lookahead_frames");
 	}
 
 	// After Bill's buffering preset wrote its values (VP-V's look-ahead set to Auto by the preset loop):
