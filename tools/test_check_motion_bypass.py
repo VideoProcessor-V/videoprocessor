@@ -83,6 +83,18 @@ class CheckMotionBypassTest(unittest.TestCase):
                     rc, out = _run(td)
                     self.assertEqual(rc, 1, out)
 
+    def test_an_engine_constant_is_not_a_session_but_an_engine_still_is(self):
+        # Coordinator rule 9b (2026-11-08): NvOpticalFlow::Engine::Grid (a static constant) is not an NVOF session; the red cases stay red.
+        _w(self.root, "src/VP-V/modules/repair/a/Const.h", "const int g = NvOpticalFlow::Engine::Grid;\nint h = NvOpticalFlow::Engine :: Grid;\n")
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        for text in ("NvOpticalFlow::Engine engine;\n", "std::unique_ptr<NvOpticalFlow::Engine> e;\n", "NvOpticalFlow::HintedEngine h(dev);\n"):
+            with self.subTest(text=text):
+                with tempfile.TemporaryDirectory() as td:
+                    _w(td, "src/VP-V/modules/repair/a/Red.cpp", text)
+                    rc, out = _run(td)
+                    self.assertEqual(rc, 1, out)
+
     def test_inside_motion_comments_tests_and_spatial_code_are_not_hits(self):
         _w(self.root, "src/VP-V/modules/motion/estimation/Own.glsl", SAD_KERNEL)
         _w(self.root, "src/VP-V/modules/repair/a/Prose.cpp", "// a BestShift or PhaseCorrelate in a comment\n/* NvOFInit(\n SearchSad */\n")

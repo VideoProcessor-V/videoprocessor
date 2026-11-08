@@ -8,7 +8,8 @@ Greps the code under src/ and shaders/ OUTSIDE src/VP-V/modules/motion/ for a NE
 motion estimation and exits 1 on any hit that is not on the allow-list below:
 
   nvof    NVOF session creation (NvOFAPICreateInstance, NvOFInit, new NvOpticalFlow::...,
-          NvOpticalFlow::Engine / HintedEngine use, make_unique/make_shared of an engine)
+          NvOpticalFlow::Engine / HintedEngine use, make_unique/make_shared of an engine; a static member read
+          such as NvOpticalFlow::Engine::Grid is a constant, not a session, and is not a hit)
   sad     SAD / block-match search kernels (BestShift, BlockMatch*, SearchSad*, a sad() function
           or `sad* +=`, and `+= abs(<cur ... prev/ref/last/old>)` accumulation over a search window)
   phase   phase correlation (PhaseCorrelat*, FFT cross-power / cross-spectrum)
@@ -34,7 +35,7 @@ EXEMPT_PREFIXES = ("src/VP-V/modules/motion/",)
 _F = re.IGNORECASE
 PATTERNS = [
     ("nvof", re.compile(r"NvOFAPICreateInstance|\bNvOFInit\b|new\s+NvOpticalFlow::|"
-                        r"NvOpticalFlow::(Hinted)?Engine\b|\bHintedEngine\b|"
+                        r"NvOpticalFlow::(Hinted)?Engine\b(?!\s*::)|\bHintedEngine\b|"
                         r"make_(unique|shared)\s*<\s*(NvOpticalFlow::)?(Hinted)?Engine\b")),
     ("sad", re.compile(r"\b(BestShift|BlockMatch\w*|SearchSad\w*|BlockSad\w*)\b|"
                        r"\bsad\w*\s*(\(|\+=)|\b(float|int|uint|double)\s+sad\w*\b|\bSumAbsDiff\w*|"
