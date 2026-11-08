@@ -75,10 +75,10 @@ namespace VideoProcessorTest
 					[](int x, int y, int c) { return DejudderTexture((x - 6) * 2, y - 6, 7 + c); });
 				const DejudderFrame other = MakeDejudderFrame(w, h / 2, [](int x, int y) { return DejudderTexture(x, y); },
 					[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
-				DejudderGpuPlanes a, b, small;
+				DejudderGpuPlanes a, b, otherSize;
 				UploadDejudderFrame(gpu, fa, a);
 				UploadDejudderFrame(gpu, fb, b);
-				UploadDejudderFrame(gpu, other, small);
+				UploadDejudderFrame(gpu, other, otherSize);
 				Dejudder::Settings settings = DejudderTestSettings();
 				settings.opticalFlow = false;
 				settings.lowRes = true;
@@ -94,7 +94,7 @@ namespace VideoProcessorTest
 				Assert::IsTrue(warp.Estimate(a.planes, b.planes), L"second estimate");
 				Assert::IsFalse(warp.LastSeed(seed), L"a later unseeded estimate clears it");
 				warp.SetSeedFedForTest(true);
-				Assert::IsFalse(warp.Estimate(a.planes, small.planes), L"A and B differ in size: the estimate fails early");
+				Assert::IsFalse(warp.Estimate(a.planes, otherSize.planes), L"A and B differ in size: the estimate fails early");
 				Assert::IsFalse(warp.LastSeed(seed), L"a failed estimate clears it too (the inner's as well)");
 			}
 		}
