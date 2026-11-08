@@ -7080,19 +7080,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             [this, state, key](int selected)
         {
             if (state->loading || state->section.isEmpty() || !document_) return;
-            // Automatic (the minimum, shown as Auto) is an absent key, never a written number.
-            if (key == QStringLiteral("active_picture_lookahead_frames"))
-            {
-                // Bug hunt 3 F8: the explicit-0 notice follows the edit.
-                if (auto* notice = findChild<QLabel*>(QStringLiteral("config.queue.active_picture_lookahead_notice")))
-                    notice->setVisible(selected == 0);
-            }
-            if (key == QStringLiteral("active_picture_lookahead_frames") && selected < 0)
-            {
-                document_->RemoveKnown(state->section.toStdString(), key.toStdString().c_str());
-                markDirty();
-                return;
-            }
+            if (Vpv::QueueIntegerEdited(this, key, selected)) { document_->RemoveKnown(state->section.toStdString(), key.toStdString().c_str()); markDirty(); return; }   // VPV-HOOK (VP-V look-ahead: Auto = an absent key; the explicit-0 notice)
             document_->SetKnown(state->section.toStdString(),
                 key.toStdString().c_str(), std::to_string(selected));
             markDirty();
@@ -7685,96 +7673,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Choose a policy for a complete queue baseline."));
         queuePolicySummary->setObjectName(QStringLiteral("config.queue.policy_summary"));
         form->addRow(QString(), queuePolicySummary);
-        // Owner 2026-10-16: VP's low-latency path as a property of the queue profile (unset: on for a
-        // profile named Low_Latency, as before).
-        auto* lowLatencyPath = addChoice(QStringLiteral("VP's low-latency path"), QStringLiteral("low_latency_path"),
-            { QStringLiteral("on"), QStringLiteral("off") });
-        lowLatencyPath->setToolTip(QStringLiteral(
-            "On: with this queue VP takes its low-latency path - the de-judder off, no motion computed ahead, "
-            "cinema-only shaders skipped, and early upload with 'Upload frames as they arrive: Auto' (full 32-bit "
-            "precision is kept). Off: the regular path. Not set: on only for a queue named Low_Latency."));
-        // Stage 5: the queue target as time. VP turns it into Target frames
-        // for each source rate, so the delay - and the audio offset - stays
-        // about the same at 24p, 30p and 60p.
-        addInteger(QStringLiteral("Target delay"), QStringLiteral("target_latency_ms"),
-            0, QueueLatency::MaxTargetLatencyMs, QStringLiteral("ms"));
-        auto* latencySpin = qobject_cast<QSpinBox*>(fields->back().widget);
-        latencySpin->setSpecialValueText(QStringLiteral("Off"));
-        // Settings guide audit 2026-10-24 (ADR-0020): one total delay, 4 frames recommended.
-        latencySpin->setToolTip(QStringLiteral(
-            "The total delay from capture to screen: ONE value, the same at every frame rate, so the AVR's "
-            "fixed audio delay always matches. Recommended: 267 ms (4 queued frames at 23.976p, the slowest "
-            "rate). Shorter still works: the look-ahead features (motion ahead, Dynamic Drive, crop and "
-            "subtitle look-ahead, hiccup repair) fall back to 3 or 2 frames. The VP-V page's Input tab shows "
-            "the frames and padding at every rate. Off uses Target frames."));
-        auto* latencyNote = helpLabel(QString());
-        latencyNote->setObjectName(QStringLiteral("config.queue.target_latency_note"));
-        form->addRow(QString(), latencyNote);
-        const auto updateLatencyNote = [latencyNote](int milliseconds)
-        {
-            latencyNote->setText(queueLatencyNoteText(milliseconds));
-        };
-        connect(latencySpin, qOverload<int>(&QSpinBox::valueChanged), this, updateLatencyNote);
-        updateLatencyNote(0);
-        // Owner 2026-10-16: the queue target as an either / or - by frames or by time - with only
-        // the chosen field shown. By frames writes the time as off (also switching off a time
-        // target inherited from the default queue); by time keeps target_frames as the fallback
-        // until the source rate is known.
-        addInteger(QStringLiteral("Target frames"), QStringLiteral("target_frames"),
-            0, 16, QStringLiteral("frames"));
-        auto* framesSpin = qobject_cast<QSpinBox*>(fields->back().widget);
-        {
-            QFormLayout* queueForm = form;
-            auto* modeButtons = new QWidget;
-            modeButtons->setObjectName(controlName(sectionPrefix, QStringLiteral("target_mode")));
-            auto* modeLayout = new QHBoxLayout(modeButtons);
-            modeLayout->setContentsMargins(0, 0, 0, 0);
-            auto* byFrames = new QRadioButton(QStringLiteral("By frames"));
-            byFrames->setObjectName(controlName(sectionPrefix, QStringLiteral("target_mode.frames")));
-            byFrames->setToolTip(QStringLiteral("A fixed number of source frames: the delay changes with the frame rate."));
-            auto* byTime = new QRadioButton(QStringLiteral("By time"));
-            byTime->setObjectName(controlName(sectionPrefix, QStringLiteral("target_mode.time")));
-            byTime->setToolTip(QStringLiteral(
-                "A delay in ms, turned into whole source frames for each frame rate, so the delay (and the audio offset) "
-                "stays about the same at 24p, 30p and 60p."));
-            auto* group = new QButtonGroup(modeButtons);
-            group->setExclusive(true);
-            group->addButton(byFrames);
-            group->addButton(byTime);
-            modeLayout->addWidget(byFrames);
-            modeLayout->addWidget(byTime);
-            modeLayout->addStretch(1);
-            queueForm->insertRow(queueForm->rowCount() - 3, QStringLiteral("Queue target"), modeButtons);
-            auto* lookAheadNote = helpLabel(QStringLiteral(
-                "With the optical-flow look-ahead on (de-judder profiles), the queue holds at least 5 frames either way "
-                "(4 ahead); the low-latency queue is exempt."));
-            lookAheadNote->setObjectName(controlName(sectionPrefix, QStringLiteral("target_lookahead_note")));
-            queueForm->addRow(QString(), lookAheadNote);
-            auto show = [queueForm, latencySpin, framesSpin, latencyNote, byFrames, byTime]() {
-                const bool time = latencySpin->value() > 0;
-                {
-                    const QSignalBlocker a(byFrames), b(byTime);
-                    byTime->setChecked(time);
-                    byFrames->setChecked(!time);
-                }
-                queueForm->setRowVisible(latencySpin, time);
-                queueForm->setRowVisible(latencyNote, time);
-                queueForm->setRowVisible(framesSpin, !time);
-            };
-            connect(byTime, &QRadioButton::toggled, this, [latencySpin, show](bool on) {
-                if (on && latencySpin->value() == 0) latencySpin->setValue(200);
-                show();
-            });
-            connect(byFrames, &QRadioButton::toggled, this, [latencySpin, show](bool on) {
-                if (on && latencySpin->value() != 0) latencySpin->setValue(0);
-                show();
-            });
-            connect(latencySpin, qOverload<int>(&QSpinBox::valueChanged), this, [show](int) { show(); });
-            auto* refresh = new QAction(modeButtons);
-            refresh->setObjectName(controlName(sectionPrefix, QStringLiteral("target_mode_refresh")));
-            connect(refresh, &QAction::triggered, this, [show]() { show(); });
-            show();
-        }
         form = addCollapsibleSection(QStringLiteral("queueAdvanced"),
             QStringLiteral("Advanced"), QStringLiteral(
                 "Fine-tune individual queue values. Editing one switches this profile to Custom."), false);
@@ -7784,28 +7682,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             0, 16, QStringLiteral("frames"));
         addInteger(QStringLiteral("Startup pre-roll"), QStringLiteral("startup_preroll_frames"),
             0, 16, QStringLiteral("frames"));
+        addInteger(QStringLiteral("Target frames"), QStringLiteral("target_frames"),
+            0, 16, QStringLiteral("frames"));
         addInteger(QStringLiteral("Active-picture lookahead"), QStringLiteral("active_picture_lookahead_frames"),
-            -1, 8, QStringLiteral("frames"));
-        {
-            // Owner decision 2026-10-17: the look-ahead follows the queue when the key is absent.
-            auto* lookahead = qobject_cast<QSpinBox*>(fields->back().widget);
-            lookahead->setSpecialValueText(QStringLiteral("Auto"));
-            lookahead->setToolTip(QStringLiteral(
-                "Auto (default; the key is absent): the look-ahead follows the queue. A normal queue profile uses "
-                "min(target frames - 1, queue size - 1, 8) queued future frames; a low-latency profile uses 0. "
-                "A number from 0 to 8 overrides it, including 0 (no look-ahead). Raising it never enlarges the "
-                "queue. (Key: active_picture_lookahead_frames.)"));
-            // Bug hunt 3 F8: an explicit 0 (older queue presets saved one) keeps the automatic
-            // look-ahead off; shown, never migrated (the owner decides).
-            auto* lookaheadNotice = helpLabel(QString::fromLatin1(QueueLookahead::kExplicitZeroLookaheadNotice));
-            lookaheadNotice->setObjectName(QStringLiteral("config.queue.active_picture_lookahead_notice"));
-            lookaheadNotice->setVisible(false);
-            form->addRow(QString(), lookaheadNotice);
-        }
+            0, 8, QStringLiteral("frames"));
         addInteger(QStringLiteral("Queue reset delay"), QStringLiteral("reset_after_render_restart_seconds"),
             1, INT_MAX, QStringLiteral("seconds"));
         addInteger(QStringLiteral("Queue recovery threshold"), QStringLiteral("reset_queue_too_large_percent"),
             1, 200, QStringLiteral("%"));
+        Vpv::AddVpvQueueRows(form, addChoice, addInteger, fields, list, [](int ms) { return queueLatencyNoteText(ms); }, QueueLatency::MaxTargetLatencyMs, [](const QString& text) { return helpLabel(text); }, vpvPages_.unitCardStash());   // VPV-HOOK (VP-V page: Queue target and low latency)
     }
     else if (sectionPrefix == QStringLiteral("vprenderer.color"))
     {
@@ -11903,7 +11788,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 queueValue(QStringLiteral("target_frames")) == policy.target &&
                 queueValue(QStringLiteral("target_latency_ms")) <= 0 &&
                 queueValue(QStringLiteral("startup_preroll_frames")) == 0 &&
-                queueValue(QStringLiteral("active_picture_lookahead_frames")) <= 0 &&
+                queueValue(QStringLiteral("active_picture_lookahead_frames")) == 0 &&
                 queueValue(QStringLiteral("reset_after_render_restart_seconds")) == 5 &&
                 queueValue(QStringLiteral("reset_queue_too_large_percent")) == policy.resetPercent)
             {
@@ -12051,11 +11936,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             }
             if (sectionPrefix == QStringLiteral("queue"))
             {
+                { const QString vpv = Vpv::QueueFallback(key); if (!vpv.isEmpty()) return vpv; }   // VPV-HOOK (target_latency_ms 0, look-ahead auto)
                 if (key == QStringLiteral("queue_size")) return QStringLiteral("32");
                 if (key == QStringLiteral("lead_frames")) return QStringLiteral("1");
                 if (key == QStringLiteral("target_frames")) return QStringLiteral("4");
-                if (key == QStringLiteral("target_latency_ms")) return QStringLiteral("0");
-                if (key == QStringLiteral("active_picture_lookahead_frames")) return QStringLiteral("auto");
+                if (key == QStringLiteral("active_picture_lookahead_frames")) return QStringLiteral("0");
                 if (key == QStringLiteral("startup_preroll_frames")) return QStringLiteral("0");
                 if (key == QStringLiteral("steady_reserve_frames")) return QStringLiteral("4");
                 if (key == QStringLiteral("reset_after_render_restart_seconds")) return QStringLiteral("5");
@@ -12229,21 +12114,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                  field.key == QStringLiteral("diagnostic_disable_shader_cache"));
             const bool defaultOnlyField = defaultOnlyRendererField;
             QString configured = raw;
-            // VP never inherits low_latency_path from the default queue
-            // (RendererProfileConfig: unset = on only for the name Low_Latency);
-            // second pass, audit 2026-10-16.
-            const bool ownOnlyQueueField = sectionPrefix == QStringLiteral("queue") &&
-                field.key == QStringLiteral("low_latency_path");
+            const bool ownOnlyQueueField = Vpv::QueueOwnOnlyField(sectionPrefix, field.key);   // VPV-HOOK (low_latency_path is never inherited)
 			if (!requiresExplicitValue && !ownOnlyQueueField && configured.isEmpty() && list->count() > 0)
                 configured = defaultProfile ? fallback(field.key) :
                     profileValue(list->item(0)->data(Qt::UserRole).toString(), field.key);
-			// Stage 5, as VP reads it: a queue's own Target frames switches off a
-			// delay it would inherit, so it shows Off rather than the default's.
-			if (sectionPrefix == QStringLiteral("queue") && !defaultProfile && raw.isEmpty() &&
-				field.key == QStringLiteral("target_latency_ms") &&
-				(!value(section, QStringLiteral("target_frames")).isEmpty() ||
-				 !value(section, QStringLiteral("steady_reserve_frames")).isEmpty()))
-				configured = QStringLiteral("0");
+			if (Vpv::QueueDelayShowsOff(sectionPrefix, defaultProfile, raw, field.key, [&] { return !value(section, QStringLiteral("target_frames")).isEmpty() || !value(section, QStringLiteral("steady_reserve_frames")).isEmpty(); })) configured = QStringLiteral("0");   // VPV-HOOK (own Target frames: the delay shows Off)
 			if (!requiresExplicitValue && configured.isEmpty())
 				configured = fallback(field.key);
             const auto concreteChoice = [&](QString choice) {
@@ -12349,17 +12224,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 else qobject_cast<QLineEdit*>(field.widget)->setText(displayed);
             }
             else if (field.kind == Field::Integer)
-            {
-                bool numeric = false;
-                int number = configured.toInt(&numeric);
-                // Absent / auto: the look-ahead follows the queue (shown as Auto).
-                if (!numeric && field.key == QStringLiteral("active_picture_lookahead_frames")) number = -1;
-                qobject_cast<QSpinBox*>(field.widget)->setValue(number);
-                // Bug hunt 3 F8: a saved explicit 0 (own or inherited from the default queue profile).
-                if (field.key == QStringLiteral("active_picture_lookahead_frames"))
-                    if (auto* notice = findChild<QLabel*>(QStringLiteral("config.queue.active_picture_lookahead_notice")))
-                        notice->setVisible(QueueLookahead::ExplicitZeroLookahead(configured.toStdString()));
-            }
+                qobject_cast<QSpinBox*>(field.widget)->setValue(Vpv::QueueLoadedInteger(field.widget, configured));   // VPV-HOOK (VP-V look-ahead: absent/auto = Auto; explicit-0 notice)
             else if (field.kind == Field::SdrGamma)
             {
                 const QString mode = configured.toLower();
@@ -12476,18 +12341,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 }
                 if (hasUnspecifiedChoice && scalingAutoChoice && !defaultProfile)
                     combo->setItemText(0, QStringLiteral("Inherit from default profile"));
-                // audit 2026-10-16: say what an unset low-latency path does.
-                if (hasUnspecifiedChoice && ownOnlyQueueField && raw.isEmpty())
-                {
-                    // As VP decides it: on only when the profile's name normalises to low_latency.
-                    const QString queueName = section.startsWith(QStringLiteral("queue."), Qt::CaseInsensitive) ?
-                        section.mid(6) : QString();
-                    const bool namedLowLatency = !queueName.isEmpty() &&
-                        ConfigFile::NormalizeName(queueName.toStdString()) == "low_latency";
-                    combo->setItemText(0, namedLowLatency ?
-                        QStringLiteral("Not set: on (the Low Latency queue)") :
-                        QStringLiteral("Not set: off (on only for the Low Latency queue)"));
-                }
+                if (hasUnspecifiedChoice && ownOnlyQueueField && raw.isEmpty()) combo->setItemText(0, Vpv::QueueLowLatencyUnsetText(section));   // VPV-HOOK
                 const int effectiveIndex = combo->findData(configured, Qt::UserRole, Qt::MatchFixedString);
                 int index = raw.isEmpty() ?
                     (hideUnspecifiedChoice || !hasUnspecifiedChoice ? effectiveIndex : 0) :
@@ -12596,13 +12450,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 }
             }
         state->loading = false;
-		// The queue target's mode follows the loaded fields (loading blocks their signals).
-		if (sectionPrefix == QStringLiteral("queue"))
-		{
-			if (auto* refresh = profileFields->findChild<QAction*>(
-				controlName(sectionPrefix, QStringLiteral("target_mode_refresh"))))
-				refresh->trigger();
-		}
+		if (sectionPrefix == QStringLiteral("queue")) Vpv::RefreshQueueRows(*fields);   // VPV-HOOK (VP-V's queue target follows the loaded fields)
 		// VP-V organisation pass (2026-10-24, src/VP-V/config/VpvOrganisation.h): the VP-V page moves some
 		// of this profile's sections and rows onto its unit tabs (still bound to this profile), so a
 		// lookup that misses profileFields also searches the whole editor (the names are unique there).
@@ -12802,9 +12650,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             setValue("lead_frames", selected->lead);
             setValue("startup_preroll_frames", 0);
             setValue("target_frames", selected->target);
-            setValue("target_latency_ms", 0);
-            // Stays automatic (follows the queue): the preset removes any explicit value.
-            document_->RemoveKnown(section, "active_picture_lookahead_frames");
+            setValue("target_latency_ms", 0); document_->RemoveKnown(section, "active_picture_lookahead_frames");   // VPV-HOOK (a preset: no delay; the look-ahead stays Auto, any explicit value removed)
             setValue("reset_after_render_restart_seconds", 5);
             setValue("reset_queue_too_large_percent", selected->resetPercent);
             for (const Field& field : *fields)
@@ -12816,28 +12662,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     else if (field.key == QStringLiteral("target_frames")) value = selected->target;
                     else if (field.key == QStringLiteral("reset_after_render_restart_seconds")) value = 5;
                     else if (field.key == QStringLiteral("reset_queue_too_large_percent")) value = selected->resetPercent;
-                    else if (field.key == QStringLiteral("active_picture_lookahead_frames")) value = -1;
+                    else if (field.key == QStringLiteral("active_picture_lookahead_frames")) value = -1;   // VPV-HOOK (VP-V's control: Auto; Bill's 0..8 shows 0)
                     QSignalBlocker blocker(field.widget);
                     qobject_cast<QSpinBox*>(field.widget)->setValue(value);
                 }
-            // A preset switches Target delay off; its note follows.
-            if (auto* note = findChild<QLabel*>(QStringLiteral("config.queue.target_latency_note")))
-                note->setText(queueLatencyNoteText(0));
-            // Low latency also takes VP's low-latency path, whatever the profile is called (audit
-            // 2026-10-16: on another name the look-ahead minimum raised a 1-frame queue's target to 5).
-            // The others return it to Not set (the Low_Latency name rule), so a deep queue never stays on it.
-            if (auto* path = profileFields->findChild<QComboBox*>(QStringLiteral("config.queue.low_latency_path")))
-            {
-                // On a profile named Low_Latency "Not set" means on: the other presets write off there.
-                const bool namedLowLatency = state->section.compare(QStringLiteral("queue.low_latency"), Qt::CaseInsensitive) == 0;
-                const int index = selectedId == QStringLiteral("low_latency") ? path->findData(QStringLiteral("on")) :
-                    (namedLowLatency ? path->findData(QStringLiteral("off")) : 0);
-                if (index >= 0 && path->currentIndex() != index) path->setCurrentIndex(index);
-            }
-            // The spin boxes were set under signal blockers: the By frames / By time buttons follow
-            // (audit 2026-10-16: By time stayed shown with Target frames hidden).
-            if (auto* refresh = profileFields->findChild<QAction*>(QStringLiteral("config.queue.target_mode_refresh")))
-                refresh->trigger();
+            Vpv::QueuePresetApplied(*fields, state->section, selectedId);   // VPV-HOOK (low-latency path, queue target and its note)
             markDirty();
             updateQueuePolicyPresentation();
         });

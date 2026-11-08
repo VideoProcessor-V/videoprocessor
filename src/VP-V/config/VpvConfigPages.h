@@ -15,6 +15,7 @@
 #include <VideoProcessor-Config/ConfigPageHost.h>
 #include <VP-V/config/VpvBothPathwayCards.h>
 #include <VP-V/config/VpvProfileUseRows.h>
+#include <VP-V/config/VpvQueueRows.h>
 #include <VP-V/config/VpvScalingRows.h>
 #include <VP-V/config/VpvSection.h>
 #include <vector>
