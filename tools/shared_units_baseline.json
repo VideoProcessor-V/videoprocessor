@@ -187,7 +187,14 @@
    "name": "block_statistics",
    "blocking": false,
    "baseline_duplicates": 19,
-   "known_false_positive": []
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
+     "pattern": "kP11RegionBlockStats",
+     "kind": "false_positive",
+     "reason": "owner-approved 2026-11-07: product-id references only (VpSkeleton::kP11RegionBlockStats: registers the lane's own P11 GPU job, lists it as a consumed product, names it in the VRAM shed status); the skeleton module computes no block statistics"
+    }
+   ]
   },
   "U5": {
    "name": "laplacian_ringing",
