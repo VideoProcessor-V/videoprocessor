@@ -309,14 +309,14 @@ Degenerate, TooFewSamples and LowConfidence records are published for diagnostic
 
 ## Settings
 
-The fitter has no runtime config key yet: `Config` fields are set by the tests and `tools/camera_eval`. K3 adds the `camera_*` keys. Config placement for the keys that exist (`camera_link`, `analysis_lane`): see `control/skeleton/README.md`. "Original (Bill)" = the Original pathway builds no camera link (`camera_link` off).
+The fitter's own options are `Config` fields set by the tests and `tools/camera_eval`. Camera K3 added the `[vpv.camera]` keys (switches only, all off; table in `../README.md` Settings, parser `link/CameraSettings.h`). Config placement for the keys that exist (`camera_link`, `analysis_lane`): see `control/skeleton/README.md`. "Original (Bill)" = the Original pathway builds no camera link (`camera_link` off).
 
 | Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|
 | `camera_link` (see `link/README.md`) | `[vpv.skeleton]` | choice | off, report | off | none yet (master VP-V page, Pipeline) | off | `camera_link` entry (cannot report); status line | none |
-| `Config::twoLayer` (internal; no key yet, K3 adds `camera_*` keys) | internal | bool | false, true | false | none (internal) | not built | foreground-suspect records are `Ambiguous` (`ForegroundSuspect`) in the camera status text; never usable | same on every tier |
-| `Config::dynTexture` (internal; no key yet, K3 adds `camera_*` keys) | internal | bool | false, true | false | none (internal) | not built | `Ambiguous` with the dynamic-texture reason text; never usable (visible fallback) | same on every tier |
-| `Config::staticCamera` (internal; no key yet, K3 adds `camera_*` keys) | internal | bool | false, true | false | none (internal) | not built | `Ambiguous` with the static-background reason text (foreground object); never usable (visible fallback) | same on every tier |
+| `Config::twoLayer` (internal; no key) | internal | bool | false, true | false | none (internal) | not built | foreground-suspect records are `Ambiguous` (`ForegroundSuspect`) in the camera status text; never usable | same on every tier |
+| `Config::dynTexture` (internal; no key) | internal | bool | false, true | false | none (internal) | not built | `Ambiguous` with the dynamic-texture reason text; never usable (visible fallback) | same on every tier |
+| `Config::staticCamera` (internal; no key) | internal | bool | false, true | false | none (internal) | not built | `Ambiguous` with the static-background reason text (foreground object); never usable (visible fallback) | same on every tier |
 | `Config::staticCfg.minStaticShare` | internal | float | 0..1 | 0.4 | none (internal) | not built | none | same on every tier |
 | `Config::staticCfg.margin` | internal | float | 0..1 | 0.2 | none (internal) | not built | none | same on every tier |
 | `Config::staticCfg.ringFraction` | internal | float | 0..0.5 | 0.125 | none (internal) | not built | none | same on every tier |

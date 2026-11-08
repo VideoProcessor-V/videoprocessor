@@ -12,6 +12,8 @@
 // Pure, header-only, C++14.
 #pragma once
 
+#include "GuidanceLag.h"
+
 #include <VP-V/core/ProductCatalog.h>
 #include <VP-V/core/Products.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
@@ -26,19 +28,7 @@ namespace CameraLink
 	constexpr VpSkeleton::ProductId kP7gCameraGuide = VpSkeleton::kP7gCameraGuide;       // registered in core/Products.h
 	constexpr uint16_t kGuideConsumerId = kCameraConsumerIdBase + 0x40;                   // beside the 14 camera consumers
 	constexpr uint32_t kGuideBytesPerBlock = 20;                                          // RGBA32F guide + R32F code
-	constexpr uint8_t kMinGuideLag = 2;
-	constexpr uint8_t kMaxGuideLag = 16;   // was kMaxInputs * 4 (= 16 when kMaxInputs was 4): pinned, not tied to the input limit
-
-	// d = max(2, 1 + ceil((readback + p95 fit) / source period)). All three in seconds, measured; unknown (<= 0) period -> 2.
-	inline uint8_t GuideLagFor(double readbackSeconds, double p95FitSeconds, double sourcePeriodSeconds)
-	{
-		if (!(sourcePeriodSeconds > 0))
-			return kMinGuideLag;
-		const double need = std::max(0.0, readbackSeconds) + std::max(0.0, p95FitSeconds);
-		const double d = 1.0 + std::ceil(need / sourcePeriodSeconds - 1e-9);
-		const double clamped = std::min(static_cast<double>(kMaxGuideLag), std::max(static_cast<double>(kMinGuideLag), d));
-		return static_cast<uint8_t>(clamped);
-	}
+	// kMinGuideLag, kMaxGuideLag and GuideLagFor(readback, p95 fit, source period) live in GuidanceLag.h.
 
 	// Sets the measured lag d on the guide's P7 input (the registered declaration carries the floor lag).
 	inline void SetGuideLag(std::vector<VpSkeleton::ProductDecl>& decls, uint8_t lagD)

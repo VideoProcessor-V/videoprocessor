@@ -11,6 +11,11 @@
 #include <ConfigFile.h>
 #include <VP-V/core/DelayBudgetLadder.h>
 #include <RendererProfileConfig.h>
+// CameraMotion.h has a member named `signals`, which Qt's keyword macro would rewrite: parse the header without it.
+#pragma push_macro("signals")
+#undef signals
+#include <VP-V/modules/motion/estimation/global_model/link/CameraSettings.h>
+#pragma pop_macro("signals")
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -403,6 +408,98 @@ namespace
 			QCoreApplication::processEvents();
 			require(!control<QCheckBox>(window, Vpv::ObjectName("expert.output_segments_merged"))->isEnabled(),
 				"the merged output chain is disabled in the Original pathway");
+		}
+	}
+
+	// Camera K3 (docs 61 section 3.1): the "Camera model" group of the Motion unit writes the [vpv.camera] keys VP reads (every key
+	// of CameraSettings.h, same names and values), an off box removes the key (off is the default), the switches are greyed while
+	// the model is off, and everything is greyed in the Original pathway.
+	void testCameraModelControlsReachVp()
+	{
+		static const char* const kBoolKeys[] = { "camera_labels_gpu", "camera_meas_model_global", "camera_meas_guided_candidate",
+			"camera_meas_narrow_window", "camera_meas_e1_skip", "camera_meas_static_gate", "camera_meas_cut_skip",
+			"camera_meas_fade_normalised", "camera_meas_flash_bridge", "camera_meas_temporal_seed", "camera_meas_tiny_mover_roi",
+			"camera_use_grain", "camera_use_detail", "camera_use_dither", "camera_use_deband", "camera_use_filler", "camera_use_dejudder" };
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir);
+		{
+			ConfigEditorWindow window(path, 0, true);
+			auto* model = control<QCheckBox>(window, Vpv::ObjectName("camera.camera_model"));
+			auto* overlay = control<QComboBox>(window, Vpv::ObjectName("camera.camera_model_overlay"));
+			require(!model->isChecked() && overlay->currentIndex() == 0, "the camera model and its overlay are off by default");
+			require(control<QWidget>(window, Vpv::ObjectName("motion.card.camera.body"))->isAncestorOf(model),
+				"the controls sit in the Camera model group of the Motion unit");
+			require(control<QLabel>(window, Vpv::ObjectName("camera.status")) != nullptr, "the group has a status row");
+			for (const char* key : kBoolKeys)
+			{
+				auto* box = control<QCheckBox>(window, Vpv::ObjectName(QStringLiteral("camera.") + QString::fromLatin1(key)));
+				require(!box->isChecked(), (std::string("off by default: ") + key).c_str());
+				require(!box->isEnabled(), (std::string("greyed while the camera model is off: ") + key).c_str());
+			}
+			require(!overlay->isEnabled(), "the overlay is greyed while the camera model is off");
+			model->setChecked(true);
+			QCoreApplication::processEvents();
+			for (const char* key : kBoolKeys)
+				require(control<QCheckBox>(window, Vpv::ObjectName(QStringLiteral("camera.") + QString::fromLatin1(key)))->isEnabled(),
+					(std::string("usable once the camera model is on: ") + key).c_str());
+			require(overlay->isEnabled() && overlay->count() == 4 && overlay->itemData(3).toString() == QStringLiteral("vectors"),
+				"the overlay offers off, labels, residual and vectors");
+			for (const char* key : { "camera_labels_gpu", "camera_meas_guided_candidate", "camera_meas_static_gate", "camera_use_dejudder", "camera_use_grain" })
+				control<QCheckBox>(window, Vpv::ObjectName(QStringLiteral("camera.") + QString::fromLatin1(key)))->setChecked(true);
+			overlay->setCurrentIndex(2);
+			save(window);
+		}
+		ConfigFile config;
+		std::string v;
+		require(config.Load(path.toStdString()), "reload");
+		const char* const kSet[] = { "camera_model", "camera_labels_gpu", "camera_meas_guided_candidate", "camera_meas_static_gate",
+			"camera_use_dejudder", "camera_use_grain" };
+		for (const char* key : kSet)
+			require(config.TryGetString("vpv.camera", key, v) && v == "on", (std::string("stored in [vpv.camera]: ") + key).c_str());
+		require(config.TryGetString("vpv.camera", "camera_model_overlay", v) && v == "residual", "the overlay is stored as residual");
+		for (const char* key : kBoolKeys)
+		{
+			bool set = false;
+			for (const char* s : kSet) set = set || std::string(s) == key;
+			require(set || !config.TryGetString("vpv.camera", key, v), (std::string("an off box writes nothing: ") + key).c_str());
+		}
+		requireVpReads(path);
+		// The real parser reads what the page saved (same names, same values, nothing invalid or unknown), and the card offers
+		// exactly the keys the parser knows: camera_model, the overlay and the boolean keys above.
+		{
+			const Vpv::Camera::CameraSettings read = Vpv::Camera::Parse(config);
+			require(read.model && read.overlay == Vpv::Camera::OverlayMode::Residual && read.labelsGpu, "the parser reads the model, overlay and labels");
+			require(read.meas.guidedCandidate && read.meas.staticGate && !read.meas.modelGlobal && !read.meas.narrowWindow &&
+				!read.meas.e1Skip && !read.meas.cutSkip && !read.meas.fadeNormalised && !read.meas.flashBridge &&
+				!read.meas.temporalSeed && !read.meas.tinyMoverRoi, "the parser reads exactly the two measurement switches the page set");
+			require(read.use.dejudder && read.use.grain && !read.use.detail && !read.use.dither && !read.use.deband && !read.use.filler,
+				"the parser reads exactly the two consumers the page set");
+			require(read.problems.empty() && read.unknownKeys.empty(), "the parser finds nothing invalid or unknown in the saved section");
+			std::set<std::string> cardKeys = { "camera_model", "camera_model_overlay" };
+			for (const char* key : kBoolKeys) cardKeys.insert(key);
+			std::set<std::string> parserKeys;
+			for (size_t i = 0; i < Vpv::Camera::kCameraKeyCount; ++i) parserKeys.insert(Vpv::Camera::kCameraKeys[i]);
+			require(cardKeys == parserKeys, "the card's keys equal CameraSettings kCameraKeys");
+			require(Vpv::Camera::Validate("camera_model_overlay", "residual") == Vpv::Camera::Verdict::Valid, "the validator accepts the page's overlay value");
+		}
+		{
+			ConfigEditorWindow window(path, 0, true);
+			require(control<QCheckBox>(window, Vpv::ObjectName("camera.camera_model"))->isChecked() &&
+				control<QCheckBox>(window, Vpv::ObjectName("camera.camera_use_dejudder"))->isChecked() &&
+				control<QComboBox>(window, Vpv::ObjectName("camera.camera_model_overlay"))->currentIndex() == 2,
+				"the camera settings read back after reopening");
+			control<QCheckBox>(window, Vpv::ObjectName("camera.camera_model"))->setChecked(false);
+			QCoreApplication::processEvents();
+			require(!control<QCheckBox>(window, Vpv::ObjectName("camera.camera_use_dejudder"))->isEnabled() &&
+				control<QCheckBox>(window, Vpv::ObjectName("camera.camera_use_dejudder"))->isChecked(),
+				"model off greys the switch and keeps its stored value");
+			control<QCheckBox>(window, Vpv::ObjectName("camera.camera_model"))->setChecked(true);
+			control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
+			QCoreApplication::processEvents();
+			require(!control<QCheckBox>(window, Vpv::ObjectName("camera.camera_model"))->isEnabled() &&
+				!control<QCheckBox>(window, Vpv::ObjectName("camera.camera_use_grain"))->isEnabled() &&
+				!control<QComboBox>(window, Vpv::ObjectName("camera.camera_model_overlay"))->isEnabled(),
+				"the Original pathway greys the whole group");
 		}
 	}
 }
@@ -1267,5 +1364,6 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: four tier steps, Upper shown as planned", testFourTierSteps);
 	failures += run("VP-V: a drag from Custom onto the planned step writes nothing", testPlannedDragFromCustomWritesNothing);
 	failures += run("VP-V: retirement Approve and Keep are recorded without hiding", testRetirementDecisions);
+	failures += run("VP-V: Camera model group writes the keys VP reads", testCameraModelControlsReachVp);
 	return failures;
 }
