@@ -9,6 +9,11 @@
 // Gap = frame gap with its detail text, Discontinuity = file seek / step / rate change, FormatChange = source format
 // change); any thread, no state of its own (the engine directory keys by host). These requests ran with every
 // VP-V motion feature off and on the Original pathway too (the epochs are always kept), so they still do.
+// DEPENDENCY: these invalidations (and the GPU-release producer stop) now happen only while this module is
+// registered in the hub, i.e. only when HubBootstrap.cpp is linked in (/INCLUDE:VpvHubBootstrapAnchor in the
+// renderer projects' items props). A renderer built without it, or a test that clears the registry
+// (RendererExtension::ResetForTesting), raises the queue events into nothing: no motion invalidation at Reset,
+// ResetLiveQueue, gap, file discontinuity or format change.
 // No per-frame work. Registered by HubBootstrap right after ResyncExtension (doc 52 3.2 list order).
 #pragma once
 

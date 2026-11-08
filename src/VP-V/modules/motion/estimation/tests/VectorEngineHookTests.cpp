@@ -14,6 +14,8 @@
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/motion/estimation/VectorEngineExtension.h>
+#include <VP-V/modules/motion/estimation/VectorEngineHost.h>
+#include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <vprenderer/RendererExtension.h>
 
@@ -604,6 +606,39 @@ namespace VectorEngineHookTest
 			Assert::IsFalse(VectorEngine::ReleaseProducerFor(&host));
 			Assert::IsTrue(VectorEngine::ReleaseProducerFor(&replacement));
 			Assert::IsTrue(next.motionProducer == nullptr);
+		}
+
+		// P5a-rest (audit F4): the whole route as the renderer has it - the hook layer's NotifyQueue, the hub, this
+		// module registered in it, the directory, and the real sink InvalidateHost<Impl> calling the host's own
+		// RequestMotionInvalidate. Reset and Gap arrive with their old causes, in order; the gap's detail is stored.
+		TEST_METHOD(QueueEventsThroughTheHubReachTheHostsRequestMotionInvalidate)
+		{
+			struct FakeImpl
+			{
+				std::vector<MotionValidity::Cause> causes;
+				void RequestMotionInvalidate(MotionValidity::Cause cause) { causes.push_back(cause); }
+			} impl;
+			struct Fwd : RendererExtension::IRendererExtension
+			{
+				void OnQueue(const RendererExtension::QueueFacts& f) override { Vpv::Hub::ExtensionHub::Instance().OnQueue(f); }
+			};
+			struct Scope
+			{
+				Scope() { RendererExtension::ResetForTesting(); Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting(); }
+				~Scope() { RendererExtension::ResetForTesting(); Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting(); }
+			} scope;
+			Vpv::Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new VectorEngineExtension()));
+			RendererExtension::Register(std::unique_ptr<RendererExtension::IRendererExtension>(new Fwd()));
+			VectorEngine engine(&impl, &InvalidateHost<FakeImpl>);
+			RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Reset, &impl);
+			RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Gap, &impl, -1, 0, 0, 0, "missed frames");
+			Assert::AreEqual<size_t>(2, impl.causes.size());
+			Assert::IsTrue(impl.causes[0] == MotionValidity::Cause::Resync);
+			Assert::IsTrue(impl.causes[1] == MotionValidity::Cause::Gap);
+			Assert::AreEqual(std::string("missed frames"), std::string(engine.motionGapDetail.load()));
+			RendererExtension::ResetForTesting();   // no hub registered (the dependency VectorEngineExtension.h states)
+			RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Reset, &impl);
+			Assert::AreEqual<size_t>(2, impl.causes.size(), L"without the hub the event reaches nothing");
 		}
 	};
 }

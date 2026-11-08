@@ -37,7 +37,7 @@ Checked against the code 2026-10-25 (M2 pass). The estimator itself (`Dejudder::
 ### Threading
 
 - Render thread: `MotionWarp::Estimate` (all GPU passes through libplacebo, plus the render-time engine on the same D3D11 immediate context after `pl_gpu_flush`), `Take`/`Prune`, the producer start/stop decision, `NoteKept`, `Consume`.
-- Render loop (queue walk): `Submit` (takes the producer mutex briefly; never waits: beyond `PendingJobsFor(depth)` pending jobs the oldest is dropped). The loop reaches the producer only through one `std::atomic_load` copy per use (`VectorEngineState::LoopProducer`, the walk's per-frame copy); the render thread publishes it with `std::atomic_store` (`PublishProducer`), so a stop or reset there never frees the producer under the loop's hand-off (P5a-rest `fix:`, test `ProducerRaceTests`).
+- Render loop (queue walk): `Submit` (takes the producer mutex briefly; never waits: beyond `PendingJobsFor(depth)` pending jobs the oldest is dropped). The render loop and the render pass (`RenderLocked`, `PlanProducer`) are the same OS thread; the producer's only other writer is the retirement path, after the render thread is joined. As hardening the loop still reaches the producer through one `std::atomic_load` copy per use (`CollectQueueAhead`, the walk's per-frame copy) and the writers publish it with `std::atomic_store` (`PublishProducer`) (P5a-rest; test `ProducerRaceTests`).
 - Any thread: the renderer's queue events (Reset, LiveQueueReset, Gap, Discontinuity, FormatChange) reach `VectorEngineExtension::OnQueue`, which requests the invalidation of that host's engine (`VectorEngine::RequestInvalidationFor`, under the engine directory's leaf lock). GPU release: `OnLifecycle(GpuReleased)` stops that host's producer (`ReleaseProducerFor`).
 - Producer worker thread: creates its own D3D11 device (so a start never stalls the render thread), runs the engine and the CPU extras; `HalfLuma8` splits rows over up to 4 short-lived threads for frames 512 lines and taller. Three consecutive failures stop it for the session (`Running()` false); exceptions are caught and counted.
 - Locks: the producer's mutex (jobs, error, stats); the store's own mutex; `MotionValidity::State` is lock-free except the small kept-run mutex. `Invalidate` may be called from any thread.
@@ -136,7 +136,8 @@ member and the alias table: [HOOKS.md](HOOKS.md).
   the old causes and hands to the host's own `RequestMotionInvalidate` through the engine's invalidation sink
   (`VectorEngineHost.h` `InvalidateHost<Impl>`). The optical-flow producer stops at the renderer's GPU release
   (`OnLifecycle(GpuReleased)`, doc 30 F4 "fix C") instead of living until the renderer object goes. The look-ahead copy
-  under the queue lock (item h) stays in the render loop (HOOKS.md section 1).
+  under the queue lock (item h) moved verbatim into `MotionAhead::CollectQueueAhead` (`MotionAheadWalk.h`), called
+  from the render loop with the queue lock held as before (HOOKS.md section 1).
 - No settings were added or changed by P5a (P5a-5 and P5a-rest included); defaults are untouched. With VP motion off and in Original
   the engine does nothing (its decision returns before any work, the producer plan wants nothing, no hook is bound).
 
@@ -207,7 +208,7 @@ Placeholder tests:
 - (none yet)
 
 Isolation tests:
-- `NvOpticalFlowTests` (GPU), `VectorStoreTests`, `MotionAhead*Tests`, `OpticalFlowTrustTests`, `MotionValidityTests`, `H3TimingTests` (idle keeper), `ProducerPlanTests`, `VectorEngineTests`, `VectorEngineHookTests` (K4 hook: null / all-off hook leave the matcher's call sequence unchanged; IVectorEngine answers; queue-event invalidation causes and order; producer stop at GPU release), `LookAheadWalkTests`, `ProducerRaceTests` (CPU, two threads: producer publish / reset vs the loop's hand-off, about 0.5 s); no class is named "DejudderWarp estimator tests" (the estimator is covered by the GPU regressions in `LibplaceboLutParserTests` / `BetaGpuTests`)
+- `NvOpticalFlowTests` (GPU), `VectorStoreTests`, `MotionAhead*Tests`, `OpticalFlowTrustTests`, `MotionValidityTests`, `H3TimingTests` (idle keeper), `ProducerPlanTests`, `VectorEngineTests`, `VectorEngineHookTests` (K4 hook: null / all-off hook leave the matcher's call sequence unchanged; IVectorEngine answers; queue-event invalidation causes and order; producer stop at GPU release), `LookAheadWalkTests`, `LookAheadCopyTests` (item h), `ProducerRaceTests` (CPU, two threads: the producer publish / reset pattern vs the loop's hand-off, about 0.5 s); no class is named "DejudderWarp estimator tests" (the estimator is covered by the GPU regressions in `LibplaceboLutParserTests` / `BetaGpuTests`)
 
 Contract tests:
 - vectors estimated on the original (not repaired/re-based) frame at the matcher's half size (not yet a dedicated test)

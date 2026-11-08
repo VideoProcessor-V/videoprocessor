@@ -73,10 +73,12 @@ namespace VpMotion
 		std::atomic<bool> motionEngineReady{ false };
 		// The producer computing the pairs ahead (render thread starts / stops it; the render loop submits frames;
 		// the de-judder takes its pairs). It stores them under motionValidity.StreamGeneration().
-		// fix (producer race): a shared_ptr published with std::atomic_store (PublishProducer: the render thread's
-		// start / stop, the GPU release) and read by the render loop only through LoopProducer() (std::atomic_load,
-		// one copy per use), so a reset on the render thread can no longer free the producer, or the mutex Submit
-		// locks, under the loop's hand-off. Render-thread readers (the writer's own thread) read it directly.
+		// Hardening (P5a-rest; audit correction): RenderLocked runs only inside RenderLoop, so the "render thread"
+		// (PlanProducer) and the "render loop" are the SAME OS thread and no race existed between them. The one
+		// cross-thread writer is the retirement path (GPU release, VectorEngine::ReleaseProducerFor), which is safe
+		// because Retire joins m_renderThread before RetireOutput; ~Impl is single-threaded. The shared_ptr is kept as
+		// cheap hardening: published with std::atomic_store (PublishProducer) and read by the loop's hand-off through
+		// one std::atomic_load copy per use (LoopProducer), so it stays safe if a writer ever moves to another thread.
 		std::shared_ptr<MotionAhead::Producer> motionProducer;
 		void PublishProducer(std::shared_ptr<MotionAhead::Producer> producer) { std::atomic_store(&motionProducer, std::move(producer)); }
 		std::shared_ptr<MotionAhead::Producer> LoopProducer() const { return std::atomic_load(&motionProducer); }

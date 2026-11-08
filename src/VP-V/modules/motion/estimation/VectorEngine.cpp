@@ -54,7 +54,7 @@ namespace VpMotion
 			// render-time fallback keeps the matcher's preset (medium).
 			const NvOpticalFlow::Preset preset = NvOpticalFlow::Preset::Slow;
 			if (d3d && d3d->device && producer->Start(d3d->device, preset))
-				PublishProducer(std::shared_ptr<MotionAhead::Producer>(std::move(producer)));   // fix: producer race (atomic publish)
+				PublishProducer(std::shared_ptr<MotionAhead::Producer>(std::move(producer)));   // hardening: atomic publish (HOOKS.md section 2)
 			else
 			{
 				motionProducerFailedLogged = true;
@@ -67,7 +67,7 @@ namespace VpMotion
 			// Owner: the producer stays alive once wanted - kept while the settings still want it (a resync
 			// or format change can take longer than any timer); stopped when they change.
 			motionProducer->Stop();
-			PublishProducer(nullptr);   // fix: producer race (a loop copy keeps the stopped producer alive until its use ends)
+			PublishProducer(nullptr);   // hardening: a loop copy keeps the stopped producer alive until its use ends
 			motionEngineReady.store(false, std::memory_order_release);
 		}
 		// Audit 2026-10-16: a failure is retried once the producer is wanted again (optical flow off and on,
