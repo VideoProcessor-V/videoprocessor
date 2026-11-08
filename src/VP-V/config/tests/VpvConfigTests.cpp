@@ -28,6 +28,7 @@
 #include <QSet>
 #include <QTabWidget>
 #include <QStackedWidget>
+#include <QStandardItemModel>
 #include <QScrollBar>
 #include <QScrollArea>
 #include <QRegularExpression>
@@ -1421,9 +1422,12 @@ namespace
 			QCoreApplication::processEvents();
 			auto* bills = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.dithering"));
 			QStringList offered;
+			// Offered = enabled items: his loader keeps a stored retired value as a disabled, hidden item.
+			auto* model = qobject_cast<QStandardItemModel*>(bills->model());
 			for (int i = 0; i < bills->count(); ++i)
-				if (!bills->itemData(i).toString().isEmpty()) offered << bills->itemData(i).toString();
-			require(offered == QStringList({ "blue_noise", "ordered_fixed", "white_noise", "off" }), "Bill's Dithering does not keep his four choices");
+				if (!bills->itemData(i).toString().isEmpty() && (!model || model->item(i)->isEnabled())) offered << bills->itemData(i).toString();
+			require(offered == QStringList({ "blue_noise", "ordered_fixed", "white_noise", "off" }),
+				(std::string("Bill's Dithering does not keep his four choices: ") + S(offered.join(QStringLiteral(",")))).c_str());
 			auto* vpv = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.dithering.vpv"));
 			require(vpv->currentData().toString() == QString::fromLatin1(mode), (std::string("VP-V's Dithering does not show the stored ") + mode).c_str());
 			if (QString::fromLatin1(mode) == QStringLiteral("blue_noise"))
