@@ -24,6 +24,7 @@ namespace VideoProcessorTest
 		struct Counts
 		{
 			int settings = 0, release = 0, convert = 0, publish = 0;
+			std::vector<FallbackCatalog::Decision> fallbacks;
 		};
 
 		class FakeHost : public Vpv::Capture::ICaptureHost
@@ -34,6 +35,7 @@ namespace VideoProcessorTest
 			void ReleaseGpu() override { ++c_.release; }
 			bool Convert(RE::ConvertContext&) override { ++c_.convert; return handles_; }
 			void AfterPublish(RE::PublishView&) override { ++c_.publish; }
+			void SyncFallback(const FallbackCatalog::Decision& d) override { c_.fallbacks.push_back(d); }
 
 		private:
 			Counts& c_;
@@ -124,6 +126,37 @@ namespace VideoProcessorTest
 			RE::ConvertContext cc;
 			Assert::IsTrue(module.OnConvertedFrame(c, cc));
 			Assert::AreEqual(1, n.convert);
+		}
+
+		TEST_METHOD(AFullBindingTableEngagesTheVisibleFallback)
+		{
+			// No silent fallbacks: a renderer that finds no free slot raises FallbackCatalog::CaptureUnbound on its own
+			// "Fallbacks engaged"; the registered ones raise nothing.
+			std::vector<std::unique_ptr<Vpv::Capture::HostBinding>> bindings;
+			std::vector<Counts> counts(64);
+			std::vector<int> keys(64);
+			size_t failed = counts.size();
+			for (size_t i = 0; i < counts.size(); ++i)
+			{
+				bindings.emplace_back(new Vpv::Capture::HostBinding(&keys[i],
+					std::unique_ptr<Vpv::Capture::ICaptureHost>(new FakeHost(counts[i], true))));
+				if (!bindings.back()->Registered())
+				{
+					failed = i;
+					break;
+				}
+			}
+			Assert::IsTrue(failed < counts.size(), L"the table is bounded");
+			for (size_t i = 0; i < failed; ++i)
+				Assert::IsTrue(counts[i].fallbacks.empty(), L"registered: no entry");
+			Assert::AreEqual<size_t>(1, counts[failed].fallbacks.size());
+			Assert::IsTrue(counts[failed].fallbacks[0].engaged);
+			Assert::AreEqual(std::string("capture extension"), counts[failed].fallbacks[0].id);
+			bindings.clear();
+			int again = 0;
+			Counts c;
+			Vpv::Capture::HostBinding fresh(&again, std::unique_ptr<Vpv::Capture::ICaptureHost>(new FakeHost(c, true)));
+			Assert::IsTrue(fresh.Registered(), L"slots come back with their bindings");
 		}
 
 		TEST_METHOD(ConversionThreadDeliveringWhileBindingsComeAndGo)

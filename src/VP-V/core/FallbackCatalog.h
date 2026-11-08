@@ -677,6 +677,18 @@ namespace FallbackCatalog
 				return &e[i];
 		return nullptr;
 	}
+	// ---- input.capture: the capture extension's renderer binding (M2 P10) ------------------------
+	// The renderer could not register with the capture extension (its host slot table is full): the capture routes
+	// (capture_path gpu, native_rgb_ingest, dv_tunnel_gpu_unpack, early upload) are off for that renderer and the
+	// CPU formatters and the render upload run instead.
+	inline Decision CaptureUnbound(bool unbound)
+	{
+		if (!unbound)
+			return Released("capture extension");
+		return Engaged("capture extension", "capture routes off for this renderer (no extension slot): the CPU formatters "
+			"and the render upload");
+	}
+
 	inline Decision ProductFallback(const char* id, const std::string& why)
 	{
 		const ProductEntry* e = FindProductEntry(id);

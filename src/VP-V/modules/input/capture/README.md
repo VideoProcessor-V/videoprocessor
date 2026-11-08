@@ -121,7 +121,7 @@ Doc 59 section 5. The capture code leaves the renderer's file; the renderer keep
 | File | Role |
 |---|---|
 | `CaptureExtension.h/.cpp` | the hub module: Lifecycle `SettingsApplied` / `GpuReleased`, R16 `OnConvertedFrame` / `AfterPublish`, each routed to the renderer registered under the hook's host; registered in `core/hub/HubBootstrap.cpp` after resync |
-| `CaptureHost.h` | `ICaptureHost`, the header-only Impl adapter (`CaptureImplHost<Impl>`) and `HostBinding` (the Impl's LAST member: registered last, removed first; fixed lock-free host-keyed slot table, `core/hub/HostSlots.h`). A failed registration is logged (the routes are then off for that renderer, never silently) |
+| `CaptureHost.h` | `ICaptureHost`, the header-only Impl adapter (`CaptureImplHost<Impl>`) and `HostBinding` (the Impl's LAST member: registered last, removed first; fixed lock-free host-keyed slot table, `core/hub/HostSlots.h`). A failed registration engages the renderer's "capture extension" fallback (`FallbackCatalog::CaptureUnbound`) and logs a line |
 | `CaptureImpl.inl` | the moved code, as out-of-line members of the renderer's Impl (the P5a pattern): `CaptureApplySettings` (item f), `CaptureReleaseGpu` (d), `CaptureConvert` (h), `CaptureAfterPublish` (i), the early upload and the unpackers (a functions, b). Included ONCE by the renderer after its Impl |
 | `CaptureRoutes.h` | `ChooseRoute`: the conversion route as a pure decision (pinned by `CaptureRouteTableTests`, 32768 rows against a copy of the old expressions) |
 | `CapturePayload.h` | the R18 slot's content (`PayloadExtension`; P10-3: the early hand-off) |
@@ -143,7 +143,8 @@ Bill's path: with the routes off (Original: capture_path standard, capture_uploa
 dv_tunnel_gpu_unpack off) `ChooseRoute` returns the host formatter, except libplacebo's native RGB upload (ARGB /
 BGRA), which the renderer took before P10 too. Bill's formatter block and log text in `ConversionLoop` are unchanged.
 
-Not done yet (P10 open items): the R18 header fields (LVRH zone), the upload branches via R17 `TryUpload` (item g:
+Not done yet (P10 open items): the R18 header fields (LVRH zone, after P2 lands), the upload branches via R17 `TryUpload`
+(item g, DEFERRED until after P5b by the M2 lead: R17 stays unwired and `UploadContext` is not widened;
 the branches are interleaved with Bill's plane upload and the de-judder's `UpdateDejudderEstimate` / `TakeNextPlanes`,
 P5b's; `UploadContext` lacks the frame facts they read), the data members of item a, the init log (e), and the queue
 / cadence / file-frame items (j-q, P10-5..P10-8).

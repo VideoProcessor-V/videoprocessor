@@ -27,14 +27,17 @@ namespace Vpv
 		{
 			if (!host || !view)
 				return;
+			ICaptureHost* const sink = view.get();   // alive until the entry below is destroyed
 			std::shared_ptr<HostEntry> entry = std::make_shared<HostEntry>();
 			entry->host = host;
 			entry->view = std::move(view);
-			registered_ = Slots().Put(host, std::move(entry));
-			if (!registered_)
-				// Visible, never silent: without the binding the capture routes are not served for this renderer
-				// (the host's own formatter and upload run instead).
-				DebugLog::Log("Capture extension: renderer %p not registered (slot table full or key in use); the capture "
+			registered_ = Slots().Put(host, entry);
+			if (registered_)
+				return;
+			// Visible, never silent: without the binding the capture routes are not served for this renderer (the host's
+			// own formatter and upload run instead): its "Fallbacks engaged" entry, plus the log line.
+			sink->SyncFallback(FallbackCatalog::CaptureUnbound(true));
+			DebugLog::Log("Capture extension: renderer %p not registered (slot table full or key in use); the capture "
 					"routes (capture_path gpu, native_rgb_ingest, dv_tunnel_gpu_unpack, early upload) are off for it", host);
 		}
 

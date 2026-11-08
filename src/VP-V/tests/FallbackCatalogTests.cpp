@@ -322,6 +322,17 @@ namespace FallbackCatalogTest
 			Assert::IsFalse(f.Current(14100).engaged);
 		}
 
+		TEST_METHOD(CaptureUnboundIsVisibleAndReleased)
+		{
+			const FallbackCatalog::Decision on = FallbackCatalog::CaptureUnbound(true);
+			Assert::IsTrue(on.engaged);
+			Assert::AreEqual(std::string("capture extension"), on.id);
+			Assert::IsTrue(on.reason.find("CPU formatters") != std::string::npos);
+			const FallbackCatalog::Decision off = FallbackCatalog::CaptureUnbound(false);
+			Assert::IsFalse(off.engaged);
+			Assert::AreEqual(std::string("capture extension"), off.id);
+		}
+
 		TEST_METHOD(EarlyUploadRenderUploadsAreVisibleAboveTheShare)
 		{
 			FallbackCatalog::EarlyUploadRenderUploads f;

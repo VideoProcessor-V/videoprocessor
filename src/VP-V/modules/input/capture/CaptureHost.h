@@ -21,6 +21,7 @@
 // destroyed; the renderer's threads that raise these hooks (conversion worker, render thread) are joined before the
 // Impl is destroyed, so a found adapter never outlives its Impl while it is used. C++14.
 
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/hub/HostSlots.h>
 #include <vprenderer/RendererExtension.h>
 
@@ -47,6 +48,9 @@ namespace Vpv
 			virtual bool Convert(RE::ConvertContext& cc) = 0;
 			// R16 AfterPublish (conversion thread, after the notify): the early upload of a published raw payload.
 			virtual void AfterPublish(RE::PublishView& pv) = 0;
+			// The renderer's "Fallbacks engaged" entry (no silent fallbacks): HostBinding raises
+			// FallbackCatalog::CaptureUnbound when the renderer could not be registered.
+			virtual void SyncFallback(const FallbackCatalog::Decision& decision) = 0;
 		};
 
 		template<class Impl>
@@ -58,6 +62,7 @@ namespace Vpv
 			void ReleaseGpu() override { impl_.CaptureReleaseGpu(); }
 			bool Convert(RE::ConvertContext& cc) override { return impl_.CaptureConvert(cc); }
 			void AfterPublish(RE::PublishView& pv) override { impl_.CaptureAfterPublish(pv); }
+			void SyncFallback(const FallbackCatalog::Decision& decision) override { impl_.SyncFallback(decision); }
 
 		private:
 			Impl& impl_;
