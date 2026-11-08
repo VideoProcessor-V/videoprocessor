@@ -159,7 +159,7 @@ namespace VpMotion
 		void BindMatcher(const IMatcherView* matcher) { matcher_ = matcher; }
 		// Runs the matcher's estimate of the pair (aSequence, bSequence). With a pre-estimate hook registered and
 		// `hookable` (not the warm-up's dummy estimate): BeforeEstimate(ctx, sink) right before, AfterEstimate(pairSeq,
-		// guidanceUsed, countsTex) right after. With no hook it is `estimate()` and nothing else (no sink, no matcher
+		// EstimateOutcome) right after. With no hook it is `estimate()` and nothing else (no sink, no matcher
 		// call, no GPU work). Either way a successful estimate is recorded for FieldOf, but only when the validity
 		// epoch is still `epochAtChoice` (the epoch the caller chose the pair under) after the estimate. ahead: called
 		// from the estimate ahead (EstimateContext::ahead; today that is the render thread too). sourceHz: the content
@@ -168,7 +168,7 @@ namespace VpMotion
 		// A hook that throws never stops the estimate: BeforeEstimate throwing = the guidance is cleared and the plain
 		// estimate runs (AfterEstimate is then skipped); AfterEstimate throwing is contained. Each failure is counted,
 		// logged and raised as the "vector_engine_hook" fallback entry (released after 8 hooked estimates without one).
-		// An exception from the estimate itself is rethrown as before, after AfterEstimate(pairSeq, false, null).
+		// An exception from the estimate itself is rethrown as before, after AfterEstimate(pairSeq, an all-absent EstimateOutcome).
 		template<class Matcher, class EstimateFn, class SyncFallbackFn>
 		bool Estimate(uint64_t aSequence, uint64_t bSequence, bool ahead, double sourceHz, uint64_t epochAtChoice, bool hookable,
 			Matcher& matcher, EstimateFn&& estimate, SyncFallbackFn&& syncFallback)
@@ -200,7 +200,7 @@ namespace VpMotion
 			{
 				if (before)
 				{
-					try { hook->AfterEstimate(ctx.pairSeq, false, nullptr); }
+					try { hook->AfterEstimate(ctx.pairSeq, EstimateOutcome()); }
 					catch (...) { if (failure.empty()) failure = "AfterEstimate: exception after a failed estimate"; }
 				}
 				syncFallback(NoteHookOutcome(!failure.empty(), failure));
@@ -211,7 +211,12 @@ namespace VpMotion
 				const auto use = matcher.CameraGuidanceUsed();
 				const bool used = !(use.rejected && use.rejected[0]) &&
 					(use.modelGlobal || use.staticFromModel || use.matcherSkipped || use.narrowPass || use.e1Pass);
-				try { hook->AfterEstimate(ctx.pairSeq, used, used && (use.narrowPass || use.e1Pass) ? matcher.CameraGuidanceCounts() : nullptr); }
+				EstimateOutcome outcome;
+				outcome.guidanceUsed = used;
+				outcome.narrowIdle = use.narrowDroppedEngine;
+				outcome.rejection = use.rejected && use.rejected[0] ? use.rejected : nullptr;
+				outcome.countsTex = used && (use.narrowPass || use.e1Pass) ? matcher.CameraGuidanceCounts() : nullptr;
+				try { hook->AfterEstimate(ctx.pairSeq, outcome); }
 				catch (const std::exception& e) { failure = std::string("AfterEstimate: ") + e.what(); }
 				catch (...) { failure = "AfterEstimate: unknown exception"; }
 			}

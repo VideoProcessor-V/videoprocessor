@@ -138,12 +138,22 @@ that renderer's `VectorEngine` (host = the RendererExtension `Context::host`, th
 
 Hook contract notes for K4: `pairSeq` = the pair's later frame (`bSequence`); `ahead` is true for the estimate ahead,
 which today also runs on the render thread (inside `RenderLocked`, from the extras / entrance), never on a lane;
-`nextPairSeconds` = (b - a) / the content rate (`dejudderSourceHz`), 0 when unknown; `guidanceUsed` = the matcher's
-`CameraGuidanceUsed()` reports a guided part and no rejection; `countsTex` = `CameraGuidanceCounts()` only when a narrow
-or E1 pass ran. The hook is called for both ahead == false and ahead == true, on the render thread with renderMutex
+`nextPairSeconds` = (b - a) / the content rate (`dejudderSourceHz`), 0 when unknown. `AfterEstimate(pairSeq, const
+EstimateOutcome&)` gets plain data (`VectorEngineInterface.h`, valid for the call only; one `CameraGuidanceUsed()` read,
+`CameraGuidanceCounts()` only when used with a narrow or E1 pass, exactly as before; no new GPU work):
+
+| `EstimateOutcome` field | Source | Absent value |
+|---|---|---|
+| `guidanceUsed` | `CameraGuidanceUsed()` reports a guided part (model global, static-from-model, matcher skipped, narrow or E1 pass) and no rejection | false |
+| `narrowIdle` | `CameraGuidanceUsed().narrowDroppedEngine` (narrow planned, the engine seeded or replaced the searches) | false |
+| `rejection` | `CameraGuidanceUsed().rejected` when non-empty (the matcher's literals, static lifetime) | nullptr |
+| `gpuMs` | none today: the matcher's per-pass GPU timers (`TakePassGpuMs`) are polled a frame later and taken by the renderer after the estimate returns, so no per-estimate figure exists at the hook; no new timer query is added | -1.0 (always, today) |
+| `countsTex` | `CameraGuidanceCounts()` only when `guidanceUsed` and a narrow or E1 pass ran (`pl_tex`, engine-owned, valid until the next estimate: copy, never keep) | nullptr |
+
+The hook is called for both ahead == false and ahead == true, on the render thread with renderMutex
 held; a future off-render lane estimate must not call `GuidanceScheduler::Guide` from it. A throwing hook is contained:
 `BeforeEstimate` throwing clears the guidance and runs the plain estimate (no `AfterEstimate`); `AfterEstimate` throwing
-is caught; an exception of the estimate itself is rethrown after `AfterEstimate(pairSeq, false, null)`. Each hook
+is caught; an exception of the estimate itself is rethrown after `AfterEstimate(pairSeq, an all-absent EstimateOutcome)`. Each hook
 failure is counted, logged (first 20, then every 100th) and raised as the fallback entry `vector_engine_hook`
 ("camera guidance skipped for some pairs", released after 8 clean hooked estimates, or at once when the hook is gone).
 

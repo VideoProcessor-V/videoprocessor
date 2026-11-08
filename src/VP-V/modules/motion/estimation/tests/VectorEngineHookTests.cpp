@@ -59,6 +59,8 @@ namespace VectorEngineHookTest
 			uint64_t afterSeq = 0;
 			bool afterUsed = true;
 			pl_tex afterCounts = reinterpret_cast<pl_tex>(0x2);
+			EstimateOutcome afterOutcome;   // the whole outcome of the last AfterEstimate
+			int afterCalls = 0;
 			void BeforeEstimate(const EstimateContext& c, IGuidanceSink& sink) override
 			{
 				calls->push_back("before");
@@ -68,14 +70,16 @@ namespace VectorEngineHookTest
 				if (throwBefore)
 					throw std::runtime_error("before failed");
 			}
-			void AfterEstimate(uint64_t pairSeq, bool used, pl_tex countsTex) override
+			void AfterEstimate(uint64_t pairSeq, const EstimateOutcome& outcome) override
 			{
 				calls->push_back("after");
 				if (throwAfter)
 					throw std::runtime_error("after failed");
 				afterSeq = pairSeq;
-				afterUsed = used;
-				afterCounts = countsTex;
+				afterUsed = outcome.guidanceUsed;
+				afterCounts = outcome.countsTex;
+				afterOutcome = outcome;
+				++afterCalls;
 			}
 		};
 
@@ -189,6 +193,72 @@ namespace VectorEngineHookTest
 			RunOne(engine, matcher, true);
 			Assert::IsFalse(hook.afterUsed, L"rejected guidance is not used");
 			Assert::IsTrue(hook.afterCounts == nullptr);
+		}
+
+		// M2 P5a-out: the outcome struct carries the matcher's report to the hook (guidanceUsed, narrowIdle, rejection,
+		// countsTex; gpuMs is unknown = -1 today); absent values on a quiet matcher; an estimate that throws gives an
+		// all-absent outcome; and with no hook the matcher is not queried and no outcome is built.
+		TEST_METHOD(TheOutcomeFieldsReachTheHookAndNoHookIsUnchanged)
+		{
+			{
+				VectorEngine engine;
+				FakeMatcher matcher;
+				RunOne(engine, matcher, true);
+				Assert::AreEqual(0, matcher.reads, L"no hook: no matcher query for an outcome");
+			}
+			VectorEngine engine;
+			FakeMatcher matcher;
+			RecordingHook hook;
+			std::vector<std::string> hookCalls;
+			hook.calls = &hookCalls;
+			engine.SetPreEstimateHook(&hook);
+
+			RunOne(engine, matcher, true);   // quiet matcher: every field is its absent value
+			Assert::AreEqual(1, hook.afterCalls);
+			Assert::IsFalse(hook.afterOutcome.guidanceUsed);
+			Assert::IsFalse(hook.afterOutcome.narrowIdle);
+			Assert::IsTrue(hook.afterOutcome.rejection == nullptr, L"the matcher's empty string is reported as absent");
+			Assert::AreEqual(-1.0, hook.afterOutcome.gpuMs, L"no per-estimate GPU time exists: unknown");
+			Assert::IsTrue(hook.afterOutcome.countsTex == nullptr);
+
+			matcher.use.narrowPass = true;       // a narrow pass ran...
+			matcher.use.narrowDroppedEngine = true;   // ...planned, but the engine replaced the searches
+			RunOne(engine, matcher, true);
+			Assert::AreEqual(2, hook.afterCalls);
+			Assert::IsTrue(hook.afterOutcome.guidanceUsed);
+			Assert::IsTrue(hook.afterOutcome.narrowIdle, L"narrowDroppedEngine reaches the hook as narrowIdle");
+			Assert::IsTrue(hook.afterOutcome.rejection == nullptr);
+			Assert::IsTrue(hook.afterOutcome.countsTex == matcher.counts);
+			Assert::AreEqual(-1.0, hook.afterOutcome.gpuMs);
+
+			static const char kReason[] = "camera guidance: texture upload failed";
+			matcher.use.rejected = kReason;
+			RunOne(engine, matcher, true);
+			Assert::AreEqual(3, hook.afterCalls);
+			Assert::IsFalse(hook.afterOutcome.guidanceUsed, L"a rejection means not used");
+			Assert::IsTrue(hook.afterOutcome.rejection == kReason, L"the matcher's static string, not a copy");
+			Assert::IsTrue(hook.afterOutcome.countsTex == nullptr);
+
+			// An estimate that throws: AfterEstimate still runs, with every field absent, and the throw is rethrown.
+			matcher.use.rejected = "";
+			std::vector<std::string> calls;
+			matcher.calls = &calls;
+			bool rethrown = false;
+			try
+			{
+				engine.Estimate(5, 6, false, 24.0, engine.motionValidity.Epoch(), true, matcher,
+					[&]() -> bool { throw std::runtime_error("estimate failed"); },
+					[](const FallbackCatalog::Decision&) {});
+			}
+			catch (const std::runtime_error&) { rethrown = true; }
+			Assert::IsTrue(rethrown);
+			Assert::AreEqual(4, hook.afterCalls);
+			Assert::IsFalse(hook.afterOutcome.guidanceUsed);
+			Assert::IsFalse(hook.afterOutcome.narrowIdle);
+			Assert::IsTrue(hook.afterOutcome.rejection == nullptr);
+			Assert::AreEqual(-1.0, hook.afterOutcome.gpuMs);
+			Assert::IsTrue(hook.afterOutcome.countsTex == nullptr);
+			engine.SetPreEstimateHook(nullptr);
 		}
 
 		// IVectorEngine with nothing estimated, or no matcher bound: every answer is the documented "absent" value.

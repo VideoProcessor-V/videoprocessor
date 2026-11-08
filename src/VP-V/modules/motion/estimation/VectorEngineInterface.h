@@ -159,12 +159,39 @@ namespace VpMotion
 		virtual void SetCameraGuidance(std::shared_ptr<const CameraModel::GuidanceFrame> frame) = 0;
 	};
 
+	// What the matcher's estimate did with the guidance the hook bound, as plain data (M2 P5a-out). Built by the engine
+	// right after the matcher's Estimate (or, when the estimate threw, with every field absent) and passed by const
+	// reference to IPreEstimateHook::AfterEstimate; valid for the duration of that call only. Every field has an
+	// "absent" value, so a hook that reads a field the engine cannot fill yet sees "unknown", never a wrong value.
+	struct EstimateOutcome
+	{
+		// MotionWarp::CameraGuidanceUsed() reports a guided part (model global, static-from-model, matcher skipped,
+		// narrow pass or E1 pass) and no rejection. Absent: false (also when the estimate itself threw).
+		bool guidanceUsed = false;
+		// CameraGuidanceUsed().narrowDroppedEngine (MotionWarp's "narrowDroppedEngine"): the narrow pass was planned but
+		// the optical-flow engine seeded or replaced the searches, so the narrow pass stayed idle. Absent: false.
+		bool narrowIdle = false;
+		// CameraGuidanceUsed().rejected: the reason the matcher did not use the per-block guidance (for example "camera
+		// guidance: texture upload failed"). A static-lifetime string (the matcher's literals): the hook may keep the
+		// pointer, never frees it. Absent: nullptr (the matcher's empty string is reported as nullptr).
+		const char* rejection = nullptr;
+		// The GPU time of this estimate in ms. The matcher's per-pass GPU timers (PassTimers, sampled 1 frame in N and
+		// polled a frame later, TakePassGpuMs) are asynchronous and are collected by the renderer after the estimate
+		// returns, so no per-estimate figure exists at this point and the engine adds no GPU timer query for it.
+		// Absent / unknown: -1.0 (today always -1.0).
+		double gpuMs = -1.0;
+		// The 1x1 CameraGuidanceCounts() texture (16 B: r/g = narrow accepted fwd/bwd, b/a = E1 skipped fwd/bwd, -1 = not
+		// run). Engine-owned: valid only until the next estimate; the hook copies, never keeps it. Absent: nullptr (no
+		// guidance used, or neither a narrow nor an E1 pass ran). Typed pl_tex, as the parameter it replaces was.
+		pl_tex countsTex = nullptr;
+	};
+
 	class IPreEstimateHook
 	{
 	public:
 		virtual ~IPreEstimateHook() {}
 		virtual void BeforeEstimate(const EstimateContext& ctx, IGuidanceSink& sink) = 0;
-		// countsTex: the 1x1 CameraGuidanceCounts() texture (16 B), null when no guidance ran.
-		virtual void AfterEstimate(uint64_t pairSeq, bool guidanceUsed, pl_tex countsTex) = 0;
+		// pairSeq: the pair's later frame (EstimateContext::pairSeq). outcome: see EstimateOutcome.
+		virtual void AfterEstimate(uint64_t pairSeq, const EstimateOutcome& outcome) = 0;
 	};
 }
