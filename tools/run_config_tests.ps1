@@ -79,13 +79,29 @@ for ($i = 0; $i -lt $Shards; ++$i) {
 # Off screen Qt has no fonts, so text measures as placeholder boxes; the layout-fit test (the VP-V page
 # must not scroll sideways at the default window size) skips its check then. It runs once more here
 # with the Windows fonts, so it measures what the owner sees (organisation pass 2, 2026-10-24).
-if (-not $OnScreen -and (-not $Match -or "VP-V: masters, derived settings, one control per key, fits the window" -match $Match)) {
+# FX-CFG14: Bill's layout tests (responsive workspaces, Tone slider wheel) are skipped without fonts by the
+# test exe (SKIP line) and run here too. -Match keeps the exe's rule: a test runs when its name contains a word.
+$fontTests = @("VP-V: masters, derived settings, one control per key, fits the window",
+    "responsive workspaces preserve edits and fit", "left docks restore manual choices and drawer editing",
+    "two-column cards share row height", "Tone slider wheel scrolls panel without editing")
+$fontFragments = @("fits the window", "responsive workspaces preserve edits and fit",
+    "left docks restore manual choices and drawer editing", "two-column cards share row height",
+    "Tone slider wheel scrolls panel without editing")
+$fontSelected = @()
+for ($f = 0; $f -lt $fontTests.Count; ++$f) {
+    $testName = $fontTests[$f]
+    $words = if ($Match) { @($Match -split '\|' | Where-Object { $_ }) } else { @() }
+    $hit = -not $Match
+    foreach ($word in $words) { if ($testName.IndexOf($word, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hit = $true } }
+    if ($hit) { $fontSelected += $fontFragments[$f] }
+}
+if (-not $OnScreen -and $fontSelected.Count -gt 0) {
     $fontLog = Join-Path $OutDir "fonts.txt"
     $previousFontDir = $env:QT_QPA_FONTDIR
     $env:QT_QPA_PLATFORM = "offscreen"
     $env:QT_QPA_FONTDIR = Join-Path $env:WINDIR "Fonts"
     try {
-        $fp = Start-Process -FilePath $Exe -WorkingDirectory (Split-Path $Exe) -ArgumentList @("--match", "`"fits the window`"") `
+        $fp = Start-Process -FilePath $Exe -WorkingDirectory (Split-Path $Exe) -ArgumentList @("--match", "`"$($fontSelected -join '|')`"") `
             -RedirectStandardOutput $fontLog -RedirectStandardError "$fontLog.err" -PassThru -NoNewWindow
         $null = $fp.Handle
         $fp.WaitForExit()
