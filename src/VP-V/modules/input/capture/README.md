@@ -114,6 +114,44 @@ GPU (not run by agents): `GpuCaptureUnpackMatchesTheCpuFormatters`,
 `GpuRgbUnpackMatchesTheCpuDecode`, the early-upload byte-identity and slot tests in
 `LibplaceboLutParserTests`, the renderer capture harness.
 
+## M2 P10: the capture extension (hub module `input.capture`)
+
+Doc 59 section 5. The capture code leaves the renderer's file; the renderer keeps generic, inert call sites.
+
+| File | Role |
+|---|---|
+| `CaptureExtension.h/.cpp` | the hub module: Lifecycle `SettingsApplied` / `GpuReleased`, R16 `OnConvertedFrame` / `AfterPublish`, each routed to the renderer registered under the hook's host; registered in `core/hub/HubBootstrap.cpp` after resync |
+| `CaptureHost.h` | `ICaptureHost`, the header-only Impl adapter (`CaptureImplHost<Impl>`) and `HostBinding` (the Impl's LAST member: registered last, removed first; fixed lock-free host-keyed slot table, `core/hub/HostSlots.h`). A failed registration is logged (the routes are then off for that renderer, never silently) |
+| `CaptureImpl.inl` | the moved code, as out-of-line members of the renderer's Impl (the P5a pattern): `CaptureApplySettings` (item f), `CaptureReleaseGpu` (d), `CaptureConvert` (h), `CaptureAfterPublish` (i), the early upload and the unpackers (a functions, b). Included ONCE by the renderer after its Impl |
+| `CaptureRoutes.h` | `ChooseRoute`: the conversion route as a pure decision (pinned by `CaptureRouteTableTests`, 32768 rows against a copy of the old expressions) |
+| `CapturePayload.h` | the R18 slot's content (`PayloadExtension`; P10-3: the early hand-off) |
+
+Threads and locks (unchanged from before the move):
+
+- conversion thread: `CaptureConvert` (no queue lock; `formatterMutex` inside the Dolby Vision analyse only), then
+  `CaptureAfterPublish` after the notify (no lock; the hand-off's own mutex). `m_queueMutex` is never held across either.
+- render thread (`renderMutex`): `SyncEarlyUpload`, `EarlyTexture`, `BookUploadTimers`, `Unpack*` (as before).
+- Retire path (`renderMutex`): `CaptureReleaseGpu` at the `GpuReleased` notification, still before `pl_d3d11_destroy`;
+  it now runs after the renderer's other VP releases there (de-judder, rebase, calibration, ...), not before them.
+- settings thread: `CaptureApplySettings` at `SettingsApplied` (raised by `UpdatePipelineSlots`, after
+  `activeSettings = settings` at both sites), release stores read by the conversion and render threads.
+- The raw frame's deleter captures the shared `rawBuffersHeld` counter, never the extension or the Impl.
+- A route's throw is caught in `CaptureConvert` and returned through `ConvertContext::error`; the loop rethrows it, so
+  the frame fails with the same text (the hub would otherwise contain the throw and run the host formatter).
+
+Bill's path: with the routes off (Original: capture_path standard, capture_upload render, native_rgb_ingest off,
+dv_tunnel_gpu_unpack off) `ChooseRoute` returns the host formatter, except libplacebo's native RGB upload (ARGB /
+BGRA), which the renderer took before P10 too. Bill's formatter block and log text in `ConversionLoop` are unchanged.
+
+Not done yet (P10 open items): the R18 header fields (LVRH zone), the upload branches via R17 `TryUpload` (item g:
+the branches are interleaved with Bill's plane upload and the de-judder's `UpdateDejudderEstimate` / `TakeNextPlanes`,
+P5b's; `UploadContext` lacks the frame facts they read), the data members of item a, the init log (e), and the queue
+/ cadence / file-frame items (j-q, P10-5..P10-8).
+
+Tests: `CaptureRouteTableTests` (the recorded route table), `CaptureExtensionTests` (routing per host, a retired
+renderer, lookups during binding churn), plus the existing EarlyUpload*, CaptureUnpackHookTests, DvTunnelUnpackHookTests,
+HookAmendmentTests and the renderer capture harness.
+
 ## Known issues / open items
 
 - CPU fallback keeps 4:2:2 (CV210toP210) instead of 4:2:0 (item 44, low priority)
@@ -134,6 +172,7 @@ VP files (in this folder):
 - `src/VP-V/modules/input/capture/EarlyUpload.cpp`
 - `src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.h` (M2 item 11: our file-frame NV12/P010/P016 formatter, moved out of Bill's `video_frame_formatter/`; forwarding header kept at the old path for the renderer host `LibplaceboVideoRenderer.cpp`)
 - `src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.cpp`
+- `src/VP-V/modules/input/capture/CaptureExtension.h`, `CaptureExtension.cpp`, `CaptureHost.h`, `CaptureImpl.inl`, `CaptureRoutes.h`, `CapturePayload.h` (M2 P10)
 
 Bill's files used (stay):
 

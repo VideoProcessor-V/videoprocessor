@@ -10,6 +10,8 @@ hook layer (`src/VideoProcessor-Lib/vprenderer/RendererExtension.h`). It fans ev
 - Modules are added at start-up only (`AddModule`); the list is read-only afterwards and dispatch is lock-free.
 - Not a module folder: no `MANIFEST.json` (core/ has none); the module checker does not scan it.
 - Later packages add modules (resync/seal first, vector engine, entrance, motion, presentation, capture, camera/LED).
+- M2 P10: `input.capture` (`modules/input/capture/CaptureExtension`), registered right after resync; it reaches its
+  renderer through its own host binding (`CaptureHost.h`), not through the hub's host map.
 
 ## M2 P0b: hook amendment R10-R20 (doc 59 section 1.1)
 
