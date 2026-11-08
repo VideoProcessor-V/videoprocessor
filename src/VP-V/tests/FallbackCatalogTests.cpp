@@ -135,6 +135,8 @@ namespace FallbackCatalogTest
 			Assert::IsTrue(Has(Motion(true, false, false, "", NoPairCause::Missing), "no optical-flow pair"));
 			Assert::IsFalse(Motion(false, false, false, "", NoPairCause::Missing).engaged, L"optical flow not requested");
 			Assert::IsTrue(Has(Motion(true, true, false, "NvOFExecute", NoPairCause::Missing), "optical flow failed"), L"a real failure wins");
+			Assert::IsFalse(MotionEnginePressure(false).engaged);
+			Assert::IsTrue(Has(MotionEnginePressure(true), "standing optical-flow demand is dropped"), L"dropping the standing demand is visible");
 			// The one-engine guard's entry.
 			Assert::IsFalse(NvofSessions(0, 0).engaged);
 			Assert::IsFalse(NvofSessions(1, 0).engaged, L"one session per GPU is the rule");

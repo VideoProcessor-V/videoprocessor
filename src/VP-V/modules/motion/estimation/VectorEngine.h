@@ -118,6 +118,10 @@ namespace VpMotion
 			bool generalRateFixes = true;       // the general_rate_fixes setting
 			bool dejudderPresent = false;       // the de-judder's matcher exists
 			bool dejudderEstimating = false;    // its reason is Active / NoNextFrame / NextFrameDiffers
+			// SK-MV: the de-judder can engage on this source (DejudderPolicy::CanEngage: also UnknownRates / PlaneFormat). Set by the host's
+			// hook block (one line, with the Z3 turn); until then false, and dejudderEstimating alone keeps the engine warm for the three
+			// estimating reasons.
+			bool dejudderCanEngage = false;
 			double sourceHz = 0.0;              // the measured content rate (0 = unmeasured)
 			pl_gpu gpu = nullptr;               // the device the engine needs; null = none
 		};

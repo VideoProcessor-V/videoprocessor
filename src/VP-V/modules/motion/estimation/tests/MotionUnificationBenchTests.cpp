@@ -210,11 +210,37 @@ namespace
 		return trusted ? sum / trusted : -1.0;
 	}
 
-	// The LUID of the adapter a libplacebo D3D11 device runs on (0 when it is not D3D11), through the one-engine guard's key.
+	// The LUID of the adapter a D3D11 device runs on, as one word (0 = not known). Local to the harness so the SAME test builds in the
+	// before tree (which has no NvOpticalFlow::Sessions).
+	uint64_t MvAdapterKey(ID3D11Device* device)
+	{
+		if (!device)
+			return 0;
+		CComPtr<IDXGIDevice> dxgiDevice;
+		CComPtr<IDXGIAdapter> adapter;
+		DXGI_ADAPTER_DESC desc{};
+		if (FAILED(device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDevice))) || FAILED(dxgiDevice->GetAdapter(&adapter)) ||
+			FAILED(adapter->GetDesc(&desc)))
+			return 0;
+		return (static_cast<uint64_t>(static_cast<uint32_t>(desc.AdapterLuid.HighPart)) << 32) | desc.AdapterLuid.LowPart;
+	}
 	uint64_t MvGpuKey(pl_gpu gpu)
 	{
 		pl_d3d11 d3d = pl_d3d11_get(gpu);
-		return d3d && d3d->device ? NvOpticalFlow::Sessions::AdapterKey(d3d->device) : 0;
+		return d3d && d3d->device ? MvAdapterKey(d3d->device) : 0;
+	}
+
+	// warp.NoPairAhead() exists only in the tree with the single NVOF source; the before tree reports -1 (not applicable). SFINAE keeps one
+	// source file for both trees.
+	template <class W>
+	auto MvNoPairAhead(const W& warp, int) -> decltype(static_cast<double>(warp.NoPairAhead()))
+	{
+		return warp.NoPairAhead() ? 1.0 : 0.0;
+	}
+	template <class W>
+	double MvNoPairAhead(const W&, long)
+	{
+		return -1.0;
 	}
 
 	std::vector<uint8_t> MvLuma8(const std::vector<uint16_t>& codes)
@@ -292,8 +318,8 @@ namespace VideoProcessorTest
 			Assert::IsTrue(SUCCEEDED(D3D11CreateDevice(nvidia, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr)));
 			// The producer and the matcher must run on the SAME GPU, or "one session per GPU" and the timings mean nothing: a WARP or
 			// integrated-GPU fixture fails here, clearly (set VP_TEST_GPU=hardware and VP_TEST_ADAPTER=NVIDIA).
-			const uint64_t nvidiaKey = NvOpticalFlow::Sessions::AdapterKey(device), fixtureKey = MvGpuKey(gpu);
-			Assert::IsTrue(nvidiaKey != NvOpticalFlow::Sessions::kUnknownAdapterKey && fixtureKey == nvidiaKey,
+			const uint64_t nvidiaKey = MvAdapterKey(device), fixtureKey = MvGpuKey(gpu);
+			Assert::IsTrue(nvidiaKey != 0 && fixtureKey == nvidiaKey,
 				L"the libplacebo fixture device is not on the NVIDIA adapter the producer uses (VP_TEST_GPU=hardware, VP_TEST_ADAPTER=NVIDIA)");
 
 			std::ofstream csv(outPath, std::ios::trunc);
@@ -376,7 +402,7 @@ namespace VideoProcessorTest
 					row("shift", name, n, "estimate_ms", ms);
 					row("shift", name, n, "used_optical_flow_pair", warp.ExternalFlowUsed() ? 1.0 : 0.0);
 					row("shift", name, n, "engine_used", warp.OpticalFlowUsed() ? 1.0 : 0.0);   // OpticalFlowUsed: the pair was the optical-flow input
-					row("shift", name, n, "no_pair_ahead", warp.NoPairAhead() ? 1.0 : 0.0);
+					row("shift", name, n, "no_pair_ahead", MvNoPairAhead(warp, 0));
 					if (mode == 1) row("shift", name, n, "pair_ms", shiftPairMs);
 				}
 				// ---- interp: frame n+1 reconstructed from n and n+2
@@ -412,7 +438,7 @@ namespace VideoProcessorTest
 					row("interp", name, n, "estimate_ms", ms);
 					row("interp", name, n, "used_optical_flow_pair", warp.ExternalFlowUsed() ? 1.0 : 0.0);
 					row("interp", name, n, "engine_used", warp.OpticalFlowUsed() ? 1.0 : 0.0);
-					row("interp", name, n, "no_pair_ahead", warp.NoPairAhead() ? 1.0 : 0.0);
+					row("interp", name, n, "no_pair_ahead", MvNoPairAhead(warp, 0));
 					if (mode == 1) row("interp", name, n, "pair_ms", interpPairMs);
 				}
 			}
@@ -470,8 +496,7 @@ namespace VideoProcessorTest
 			pl_gpu gpu = fixture.Gpu();
 			CComPtr<ID3D11Device> device;
 			Assert::IsTrue(SUCCEEDED(D3D11CreateDevice(nvidia, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr)));
-			Assert::IsTrue(NvOpticalFlow::Sessions::AdapterKey(device) != NvOpticalFlow::Sessions::kUnknownAdapterKey &&
-				MvGpuKey(gpu) == NvOpticalFlow::Sessions::AdapterKey(device),
+			Assert::IsTrue(MvAdapterKey(device) != 0 && MvGpuKey(gpu) == MvAdapterKey(device),
 				L"the libplacebo fixture device is not on the NVIDIA adapter the producer uses (VP_TEST_GPU=hardware, VP_TEST_ADAPTER=NVIDIA)");
 			CComPtr<IDXGIAdapter3> adapter3;
 			nvidia->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&adapter3));

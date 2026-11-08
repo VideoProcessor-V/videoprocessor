@@ -98,6 +98,17 @@ namespace VpMotion
 		int motionAheadSetting = -1;           // -1 = not planned yet
 		bool motionLowLatencyNoVectors = false;
 		std::string motionProducerStartError;
+		// SK-MV: the standing cost status line ("motion engine standing for de-judder: N pairs/s, M ms/pair"; empty when not standing)
+		// for Ctrl+I, refreshed every 5 s by PlanProducer. Render thread.
+		std::string motionStandingLine;
+		bool motionStandingHookSeen = false;   // the host has set ProducerInputs::dejudderCanEngage at least once
+		std::chrono::steady_clock::time_point motionStandingAt{};
+		unsigned long long motionStandingPairs = 0;
+		double motionStandingMsSum = 0.0;
+		// SK-MV: the cause and words of the last no-pair miss, kept while the miss is SUSTAINED so the fallback entry does not toggle with
+		// every pair that does arrive (NoPairCause as unsigned char; 0 = none).
+		unsigned char motionNoPairCause = 0;
+		std::string motionNoPairDetail;
 		// SK-MV: NvOpticalFlow::Sessions::Violations() as last logged (render thread).
 		unsigned long long nvofViolationsSeen = 0;
 		// One vectors-valid state (docs/VP-interpolator-50-60-plan.md step 1; owner [[vp-vector-validity]]):

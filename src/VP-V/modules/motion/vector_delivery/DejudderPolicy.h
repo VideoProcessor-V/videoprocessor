@@ -37,6 +37,16 @@ namespace DejudderPolicy
 		SmoothMotion,     // libplacebo's smooth motion (frame mixing, v1.4.02) is active
 	};
 
+	// SK-MV warm engine (owner MUST KEEP): the reasons under which an ENABLED, ELIGIBLE de-judder can act now or at the next transient, so
+	// the shared engine stays warm: Active, the two "waiting for B" states, UnknownRates (the rates are measured in a moment) and
+	// PlaneFormat. The reasons where it can never act on this source stay idle - Off (strength 0), IneligibleCadence, VideoRateMaskOnly,
+	// LowLatency, Interlaced, NativeRgb, SmoothMotion - so an idle matcher kept loaded for hiccup repair does NOT run NVOF on every frame.
+	inline bool CanEngage(Reason reason)
+	{
+		return reason == Reason::Active || reason == Reason::NoNextFrame || reason == Reason::NextFrameDiffers ||
+			reason == Reason::UnknownRates || reason == Reason::PlaneFormat;
+	}
+
 	struct Input
 	{
 		double strength = 0.0;

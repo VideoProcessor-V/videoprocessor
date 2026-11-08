@@ -112,7 +112,7 @@ constexpr uint32_t kExpectedLongPairUnit = 1;
 inline const std::vector<ServiceProductRow>& ServiceProductRows()
 {
     static const std::vector<ServiceProductRow> rows = {
-        { "long_pair_field", "motion/estimation/longpair", kExpectedLongPairUnit, kUserNvofProducer, PassTimers::Rows::kLongPairNvof, Tier::T2,
+        { "long_pair_field", "motion/estimation/longpair", kExpectedLongPairUnit, kUserLongPair, PassTimers::Rows::kLongPairNvof, Tier::T2,
           "vector_engine_long_pair", "async I-to-I long-range flow (hinted NVOF session or the seeded search); unwired; optional, absent = visible" },
     };
     return rows;

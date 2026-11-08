@@ -232,7 +232,7 @@ namespace MotionAhead
 		VpMotion::P2Slot::Stats StoreStats() const { return slot->GetStats(); }
 
 		// extrasMs: the trust extras of the last pair (global, cost, consistency) on the worker.
-		struct Stats { unsigned long long frames = 0, pairs = 0, dropped = 0, failures = 0; double lastPairMs = 0.0, lumaMs = 0.0, extrasMs = 0.0; };
+		struct Stats { unsigned long long frames = 0, pairs = 0, dropped = 0, failures = 0; double lastPairMs = 0.0, lumaMs = 0.0, extrasMs = 0.0; double pairMsSum = 0.0; /* SK-MV: the sum of all pair times, for the standing-cost line */ };
 		Stats GetStats() const;
 
 		// Bug hunt 35 #1: the stop/restart state (FallbackCatalog::VectorProducer builds the entry).

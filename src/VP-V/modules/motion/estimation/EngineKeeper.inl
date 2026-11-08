@@ -66,6 +66,7 @@ void LibplaceboVideoRenderer::Impl::PollMotionEngineBudget(int width, int height
 	motionEngineIdle.NoteBudgetReported(reported);
 	motionEngineIdle.NoteBudget(reported ? usage : 0, reported ? budget : 0,
 		engineHeld ? 0 : MotionEngineIdle::IdleBytes(width, height), now);
+	SyncFallback(FallbackCatalog::MotionEnginePressure(motionEngineIdle.Pressured()));   // SK-MV: dropping the standing demand is visible
 }
 
 bool LibplaceboVideoRenderer::Impl::QueryMotionEngineBudget(uint64_t& usage, uint64_t& budget)

@@ -551,6 +551,7 @@ namespace MotionAhead
 					++stats.pairs;
 					stats.extrasMs = extrasMs;
 					stats.lastPairMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+					stats.pairMsSum += stats.lastPairMs;
 				}
 			}
 		}

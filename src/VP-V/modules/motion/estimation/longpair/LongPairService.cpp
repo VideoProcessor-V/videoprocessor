@@ -135,8 +135,8 @@ namespace VpLongPair
 				luma[i].Release(); flow[i].Release(); cost[i].Release(); flowRead[i].Release(); costRead[i].Release();
 			}
 			// MV7: the long pair's ring textures leave the governor's budget with the engine.
-			VpSkeleton::VramUsers::Instance().Withdraw(this, VpSkeleton::kUserNvofProducer);
-			VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserNvofProducer, false);
+			VpSkeleton::VramUsers::Instance().Withdraw(this, VpSkeleton::kUserLongPair);
+			VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserLongPair, false);
 			hintTex.Release();
 			sizeW = sizeH = 0;
 		}
@@ -175,7 +175,7 @@ namespace VpLongPair
 				ReleaseEngine();
 				return false;
 			}
-			VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserNvofProducer, true);   // declared below once the engine is open
+			VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserLongPair, true);   // declared below once the engine is open
 			engine = std::make_unique<NvOpticalFlow::HintedEngine>();
 			if (!engine->Open(device, context, w, h, static_cast<NvOpticalFlow::Preset>(config.nvofPreset)))
 			{
@@ -185,7 +185,9 @@ namespace VpLongPair
 				return false;
 			}
 			// MV7 (the long pair is the 3rd NVOF user): its textures and hint (the readback staging copies are system RAM), counted by the governor (VramUsers.h).
-			VpSkeleton::VramUsers::Instance().DeclareFixed(this, VpSkeleton::kUserNvofProducer, NvOpticalFlow::RingBytes(w, h, false, true));
+			// Its own user at T2, SHEDDABLE (two levels: the ring, or none = the seeded search): the long pair is optional and goes before
+			// anything else; it must never share the producer's protected, fixed T0 user. When the service is wired it honours a shed grant.
+			VpSkeleton::VramUsers::Instance().DeclareSheddable(this, VpSkeleton::kUserLongPair, NvOpticalFlow::RingBytes(w, h, false, true), VpSkeleton::Tier::T2);
 			sizeW = w;
 			sizeH = h;
 			return true;
@@ -322,7 +324,7 @@ namespace VpLongPair
 			// MV4: the pass-timer route. Every long pair is posted (one per I frame: rare, so no sampling): the NVOF session's pair plus its
 			// readback as the GPU group, the seeded-search fallback as CPU work, so the cost shows in the same readout as the producer's.
 			if (res.ok && (res.path == Path::NvofHinted || res.path == Path::NvofUnhinted))
-				PassTimers::Inbox::Motion().Post(PassTimers::Kind::GpuGroup, PassTimers::Rows::kLongPairNvof, res.ms);
+				PassTimers::Inbox::Motion().Post(PassTimers::Kind::CpuWait, PassTimers::Rows::kLongPairNvof, res.ms);   // wall time of the worker: a wait, never added to GPU totals
 			else if (res.ok && res.path == Path::SeededSearch)
 				PassTimers::Inbox::Motion().Post(PassTimers::Kind::CpuWork, PassTimers::Rows::kLongPairSeeded, res.ms);
 			{

@@ -42,6 +42,7 @@ inline const char* VramUserName(uint16_t id)
     case kUserInterpolator: return "interpolator";
     case kUserEnhancers: return "texture restore / detail pulse / debander";
     case kUserBasicChroma: return "basic chroma upscale output";
+    case kUserLongPair: return "long-pair optical flow";
     default: break;
     }
     return "";
@@ -51,7 +52,7 @@ inline const char* VramUserName(uint16_t id)
 inline const uint16_t* DeclarableVramUsers(size_t* count)
 {
     static const uint16_t kIds[] = { kUserNvofProducer, kUserTemporalDetail, kUserCameraModel, kUserInterpolator, kUserEnhancers,
-                                     kUserBasicChroma };
+                                     kUserBasicChroma, kUserLongPair };
     if (count)
         *count = sizeof(kIds) / sizeof(kIds[0]);
     return kIds;
@@ -116,6 +117,21 @@ public:
         u.lossless = false;
         u.levels.push_back(bytes);
         u.levelText.push_back(nullptr);
+        Declare(owner, u, bytes);
+    }
+
+    // A user that can step down to nothing (two levels: `bytes`, then 0): the module's call site reads the grant and frees its memory.
+    void DeclareSheddable(const void* owner, uint16_t id, uint64_t bytes, Tier tier)
+    {
+        VramUser u;
+        u.id = id;
+        u.name = VramUserName(id);
+        u.tier = tier;
+        u.lossless = false;
+        u.levels.push_back(bytes);
+        u.levels.push_back(0);
+        u.levelText.push_back(nullptr);
+        u.levelText.push_back("not available (the seeded search runs)");
         Declare(owner, u, bytes);
     }
 

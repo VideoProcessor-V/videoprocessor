@@ -218,6 +218,16 @@ namespace FallbackCatalog
 		return Engaged("motion", reason + (error.empty() ? std::string() : ": " + error) + ")");
 	}
 
+	// SK-MV warm engine (protected tier): MotionEngineIdle released the matcher under video-memory pressure, which drops the de-judder's
+	// standing optical-flow demand until the pressure eases. Never silent.
+	inline Decision MotionEnginePressure(bool pressured)
+	{
+		if (!pressured)
+			return Released("motion engine pressure");
+		return Engaged("motion engine pressure", "video memory pressure: the idle motion engine was released, so the de-judder's standing "
+			"optical-flow demand is dropped (the block searches run) until the pressure eases");
+	}
+
 	// SK-MV runtime one-engine guard (NvOpticalFlow::Sessions): shown while more than one NvOpticalFlow::Engine session is open on one
 	// GPU (the producer owns the only one). `mostOnOneGpu` = the highest open count on any GPU, `violations` = second opens so far.
 	inline Decision NvofSessions(int mostOnOneGpu, unsigned long long violations)

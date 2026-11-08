@@ -421,12 +421,25 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			else
 				noPairCause = FallbackCatalog::NoPairCause::Missing;
 		}
-		const bool noPairShown = noPairCause != FallbackCatalog::NoPairCause::None && noPairCause != FallbackCatalog::NoPairCause::Deliberate &&
-			vectorEngine.motionNoPair.Sustained(noPairDepth);
+		// The entry stays engaged for as long as the miss is SUSTAINED, with the cause of the last miss: a pair that does arrive in
+		// between (a partial ratio) must not toggle it off and on.
+		if (noPairCause != FallbackCatalog::NoPairCause::None && noPairCause != FallbackCatalog::NoPairCause::Deliberate)
+		{
+			vectorEngine.motionNoPairCause = static_cast<unsigned char>(noPairCause);
+			vectorEngine.motionNoPairDetail = noPairDetail;
+		}
+		const bool noPairShown = vectorEngine.motionNoPairCause != 0 && vectorEngine.motionNoPair.Sustained(noPairDepth);
+		if (!vectorEngine.motionNoPair.Sustained(noPairDepth) || noPairCause == FallbackCatalog::NoPairCause::Deliberate)
+		{
+			if (noPairCause == FallbackCatalog::NoPairCause::None || noPairCause == FallbackCatalog::NoPairCause::Deliberate)
+				vectorEngine.motionNoPairCause = 0;
+			vectorEngine.motionNoPairDetail.clear();
+		}
 		if (noPairShown)
 		{
+			noPairCause = static_cast<FallbackCatalog::NoPairCause>(vectorEngine.motionNoPairCause);
 			const std::string how = vectorEngine.motionNoPair.Describe(noPairDepth);
-			noPairDetail = noPairDetail.empty() ? how : noPairDetail + "; " + how;
+			noPairDetail = vectorEngine.motionNoPairDetail.empty() ? how : vectorEngine.motionNoPairDetail + "; " + how;
 		}
 		SyncFallback(FallbackCatalog::Motion(dejudder->GetSettings().opticalFlow, flowFailed, producerStopped,
 			flowFailed ? dejudder->OpticalFlowError() : producerStopped ? motionProducer->Error() : noPairShown ? noPairDetail : std::string(),

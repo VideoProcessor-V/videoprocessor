@@ -99,6 +99,47 @@ namespace VpMotion
 				nvofViolations);
 		}
 		motionEngineReady.store(motionProducer && motionProducer->Running() && motionProducer->EngineReady(), std::memory_order_release);
+		// SK-MV: the standing cost is visible. While the de-judder keeps the engine warm (it is a consumer by the estimating reasons or
+		// the standing demand) the producer's pairs per second and ms per pair are a status line, every 5 s, and the accessor for Ctrl+I.
+		{
+			const bool standing = motionProducer && motionProducer->Running() && (in.dejudderEstimating || in.dejudderCanEngage) && in.dejudderPresent;
+			const auto nowSteady = std::chrono::steady_clock::now();
+			if (in.dejudderCanEngage)
+				motionStandingHookSeen = true;
+			if (!standing)
+			{
+				// Without the host's hook line (one line, the P5b Z3 turn) the standing demand cannot cover the reasons that precede Active
+				// (UnknownRates, PlaneFormat); the engine is warm only for Active / NoNextFrame / NextFrameDiffers. Said, never silent.
+				const bool waiting = !motionStandingHookSeen && in.dejudderPresent && in.opticalFlow && motionProducer && motionProducer->Running();
+				const std::string line = waiting ? "motion engine standing: waiting for host hook (P5b Z3 turn); warm for Active / NoNextFrame / NextFrameDiffers only" : std::string();
+				if (line != motionStandingLine)
+				{
+					motionStandingLine = line;
+					if (!line.empty())
+						DebugLog::Log("%s", line.c_str());
+				}
+				motionStandingAt = nowSteady;
+			}
+			else if (motionStandingAt.time_since_epoch().count() == 0 || nowSteady - motionStandingAt >= std::chrono::seconds(motionStandingLine.empty() ? 1 : 5))   // the first figure after 1 s, then every 5 s
+			{
+				const MotionAhead::Producer::Stats ps = motionProducer->GetStats();
+				if (motionStandingAt.time_since_epoch().count() != 0 && ps.pairs >= motionStandingPairs)
+				{
+					const double seconds = std::chrono::duration<double>(nowSteady - motionStandingAt).count();
+					const unsigned long long pairs = ps.pairs - motionStandingPairs;
+					const double sum = ps.pairMsSum - motionStandingMsSum;
+					char line[160];
+					std::snprintf(line, sizeof(line), "motion engine standing for de-judder: %.1f pairs/s, %.2f ms/pair", seconds > 0.0 ? pairs / seconds : 0.0,
+						pairs ? sum / static_cast<double>(pairs) : 0.0);
+					if (motionStandingLine != line)
+						DebugLog::Log("%s", line);
+					motionStandingLine = line;
+				}
+				motionStandingAt = nowSteady;
+				motionStandingPairs = ps.pairs;
+				motionStandingMsSum = ps.pairMsSum;
+			}
+		}
 		// Frames are submitted only while a motion estimate runs for this source (the de-judder or the
 		// interpolator); otherwise the producer stays alive, idle. Fixed-constant batch B3 2026-10-18
 		// (general_rate_fixes): the depth as a time with a frame floor.
@@ -112,7 +153,11 @@ namespace VpMotion
 		depth.vectorBackward = vectorDemand.mode == VectorDemand::Mode::Backward;
 		depth.vectorProducer = vectorDemand.producer;
 		depth.dejudderEstimating = in.dejudderEstimating;
-		depth.dejudderStanding = in.dejudderPresent && in.opticalFlow;   // SK-MV: the standing demand while the de-judder is enabled
+		// SK-MV: the standing demand while the de-judder is enabled AND eligible (DejudderPolicy::CanEngage). The estimating reasons
+		// (Active / NoNextFrame / NextFrameDiffers) are already a consumer through dejudderEstimating; this widens it to the reasons
+		// that become Active at a transient (UnknownRates, PlaneFormat) once the host sets dejudderCanEngage. An idle matcher kept loaded
+		// for hiccup repair (Off / IneligibleCadence / VideoRateMaskOnly) is NOT standing: the idle engine is not run.
+		depth.dejudderStanding = in.dejudderPresent && in.opticalFlow && in.dejudderCanEngage;
 		depth.producerRunning = motionProducer && motionProducer->Running();
 		depth.queuedFutureFrames = in.queuedFutureFrames->load(std::memory_order_acquire);
 		const ProducerPlan::DepthOutput plan = ProducerPlan::Depth(depth);

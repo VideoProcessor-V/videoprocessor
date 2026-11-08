@@ -16,6 +16,7 @@
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/ProducerPlan.h>
 #include <VP-V/modules/motion/estimation/VectorProducts.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 
 #include <algorithm>
 #include <initializer_list>
@@ -303,6 +304,102 @@ namespace ProducerPlanTest
 			};
 			Assert::IsFalse(firstTransientHasAPair(false), L"without the standing demand the first transient frame has no pair (the warm-up gap)");
 			Assert::IsTrue(firstTransientHasAPair(true), L"with it, the pair is already there");
+		}
+
+		// SK-MV warm engine: the standing class by reason. The coordinator's trigger is "the de-judder setting is on AND the cadence is
+		// eligible": the reasons that act now or become Active at a transient keep the engine warm; the reasons where it can never act stay
+		// idle (an idle matcher kept loaded for hiccup repair runs no NVOF).
+		TEST_METHOD(OnlyReasonsThatCanBecomeActiveAreStanding)
+		{
+			using R = DejudderPolicy::Reason;
+			const R standing[] = { R::Active, R::NoNextFrame, R::NextFrameDiffers, R::UnknownRates, R::PlaneFormat };
+			const R idle[] = { R::Off, R::LowLatency, R::Interlaced, R::IneligibleCadence, R::VideoRateMaskOnly, R::NativeRgb, R::SmoothMotion };
+			for (R r : standing) Assert::IsTrue(DejudderPolicy::CanEngage(r), L"can engage: the engine stays warm");
+			for (R r : idle) Assert::IsFalse(DejudderPolicy::CanEngage(r), L"cannot act on this source: idle");
+			// Each idle reason keeps the engine idle: with no other demand there is no consumer and no frame goes to the producer.
+			for (R r : idle)
+			{
+				DepthInput d;
+				d.opticalFlow = true;
+				d.motionAheadFrames = 4;
+				d.sourceHz = 60.0;
+				d.producerRunning = true;
+				d.queuedFutureFrames = 8;
+				d.dejudderStanding = DejudderPolicy::CanEngage(r);
+				Assert::IsFalse(Depth(d).motionConsumer, L"idle reason: no standing consumer");
+				Assert::AreEqual(0, Depth(d).storedDepth);
+			}
+		}
+
+		// The other demands keep their OWN trigger: hiccup repair, the camera fit and TD ask through the vector demand (vectorProducer), which
+		// is unchanged by the standing flag in both directions.
+		TEST_METHOD(OtherDemandsDoNotRideOnTheDejudderStandingTrigger)
+		{
+			DepthInput d;
+			d.opticalFlow = true;
+			d.motionAheadFrames = 4;
+			d.sourceHz = 24.0;
+			d.producerRunning = true;
+			d.queuedFutureFrames = 8;
+			for (bool standing : { false, true })
+				for (bool other : { false, true })
+				{
+					d.dejudderStanding = standing;
+					d.vectorProducer = other;
+					Assert::AreEqual(standing || other, Depth(d).motionConsumer);
+				}
+			// A vector-demand consumer without the de-judder standing still gets its frames, and the standing flag alone never sets or
+			// clears the vector demand's own fields.
+			d.dejudderStanding = false;
+			d.vectorProducer = true;
+			Assert::IsTrue(Depth(d).storedDepth > 0, L"camera / TD / hiccup repair demand: served on its own");
+			d.vectorProducer = false;
+			Assert::AreEqual(0, Depth(d).storedDepth, L"no demand, no standing: idle");
+		}
+
+		// The transient-start failure the owner fixed once: the cadence switches from ineligible (60p video) to eligible (24p-in-60). The
+		// reasons run IneligibleCadence ..., UnknownRates (the rates are measured), Active. Standing from the first eligible
+		// reason means pairs exist BEFORE the de-judder first engages (Active); without the standing reasons the first Active frame is a miss.
+		TEST_METHOD(ACadenceSwitchToEligibleFindsTheEngineWarmBeforeTheDejudderFirstEngages)
+		{
+			using R = DejudderPolicy::Reason;
+			struct Frame { R reason; };
+			std::vector<R> sequence(10, R::IneligibleCadence);
+			sequence.push_back(R::UnknownRates);
+			sequence.push_back(R::UnknownRates);
+			sequence.push_back(R::Active);
+			sequence.push_back(R::Active);
+			auto pairAtFirstActive = [&](bool hookDeliversStanding) {
+				VpMotion::P2Slot slot(16);
+				slot.SetGeneration(1);
+				uint64_t nextSubmit = 1;
+				for (size_t i = 0; i < sequence.size(); ++i)
+				{
+					const uint64_t n = i + 1;
+					const R r = sequence[i];
+					if (r == R::Active)
+						return static_cast<bool>(slot.Find(n, n + 1));   // what the first estimate takes, before this frame's plan
+					DepthInput d;
+					d.opticalFlow = true;
+					d.motionAheadFrames = 4;
+					d.sourceHz = 24.0;
+					d.producerRunning = true;
+					d.queuedFutureFrames = 8;
+					d.dejudderEstimating = r == R::NoNextFrame || r == R::NextFrameDiffers;   // the existing hook input
+					d.dejudderStanding = hookDeliversStanding && DejudderPolicy::CanEngage(r);
+					const DepthOutput o = Depth(d);
+					if (o.storedDepth <= 0)
+						continue;
+					for (; nextSubmit <= n + static_cast<uint64_t>(o.storedDepth); ++nextSubmit)
+						if (nextSubmit > 1)
+							slot.Publish(nextSubmit - 1, nextSubmit, 1, std::make_shared<const MotionAhead::Flow>());
+				}
+				return false;
+			};
+			Assert::IsTrue(pairAtFirstActive(true), L"with the standing reasons: warm, valid pairs before the first Active frame");
+			// Without the host hook line (UnknownRates not delivered as standing) nothing runs before the first Active frame, which finds its
+			// pair missing: the gap the hook line closes (the status line says "waiting for host hook").
+			Assert::IsFalse(pairAtFirstActive(false), L"without the hook line the UnknownRates frames are not standing");
 		}
 
 		TEST_METHOD(DepthIsZeroWhileTheProducerDoesNotRun)

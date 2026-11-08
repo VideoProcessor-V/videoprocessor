@@ -15,6 +15,7 @@
 
 #include <dxgi1_2.h>
 #include <libplacebo/d3d11.h>
+#include <VP-V/modules/motion/estimation/VectorEngine.h>
 
 #include <chrono>
 #include <memory>
@@ -66,19 +67,21 @@ namespace VideoProcessorTest
 			VpSkeleton::VramUsers& users = VpSkeleton::VramUsers::Instance();
 			users.ResetForTesting();
 			int owner = 0;
-			users.MarkActive(&owner, VpSkeleton::kUserNvofProducer, true);
+			users.MarkActive(&owner, VpSkeleton::kUserLongPair, true);
 			VpSkeleton::VramUsers::Snapshot s = users.Take();
 			Assert::AreEqual(size_t(1), s.unpopulated.size(), L"active and undeclared: flagged");
-			Assert::IsTrue(s.unpopulated[0] == VpSkeleton::kUserNvofProducer);
+			Assert::IsTrue(s.unpopulated[0] == VpSkeleton::kUserLongPair);
 			const uint64_t bytes = NvOpticalFlow::RingBytes(960, 540, false, true);   // the long pair's ring: input, flow, cost x2 and the hint
 			Assert::IsTrue(bytes > 960u * 540u * 2u, L"the ring is more than the two inputs");
-			users.DeclareFixed(&owner, VpSkeleton::kUserNvofProducer, bytes);
+			users.DeclareSheddable(&owner, VpSkeleton::kUserLongPair, bytes, VpSkeleton::Tier::T2);
 			s = users.Take();
 			Assert::IsTrue(s.unpopulated.empty(), L"declared: not flagged");
 			Assert::AreEqual(size_t(1), s.heldById.size());
 			Assert::AreEqual<uint64_t>(bytes, s.heldById[0].second);
-			users.Withdraw(&owner, VpSkeleton::kUserNvofProducer);
-			users.MarkActive(&owner, VpSkeleton::kUserNvofProducer, false);
+			// Its own user at T2 with a shed level: NOT the producer's protected, fixed T0 user.
+			Assert::IsTrue(s.users[0].tier == VpSkeleton::Tier::T2 && s.users[0].levels.size() == 2 && s.users[0].levels[1] == 0);
+			users.Withdraw(&owner, VpSkeleton::kUserLongPair);
+			users.MarkActive(&owner, VpSkeleton::kUserLongPair, false);
 			Assert::IsTrue(users.Take().unpopulated.empty());
 			users.ResetForTesting();
 		}
@@ -114,12 +117,14 @@ namespace VideoProcessorTest
 			in.users.push_back(user(kUserLibplacebo, "libplacebo", Tier::T0, { budget / 4 }));
 			in.users.push_back(user(kUserEnhancers, "enhancers", Tier::T1, { budget / 2, budget / 4, 0 }));
 			in.users.push_back(user(kUserInterpolator, "interpolator", Tier::T2, { budget / 2, 0 }));
+			in.users.push_back(user(kUserLongPair, "long pair", Tier::T2, { budget / 8, 0 }));   // the long pair: sheddable, never the engine's
 			GovernorPlan plan = PlanVram(in);
 			Assert::IsTrue(plan.fits);
 			const UserGrant* engine = plan.Find(kUserNvofProducer);
 			Assert::IsNotNull(engine);
 			Assert::IsTrue(!engine->reduced && !engine->shed && engine->level == 0, L"the engine's ring is untouched");
 			Assert::IsTrue(plan.Find(kUserInterpolator)->shed, L"the lower tier went first");
+			Assert::IsTrue(plan.Find(kUserLongPair)->shed || plan.Find(kUserLongPair)->level == 0, L"the long pair is shed-first material, not protected");
 			// Not enough even with every lower tier at its minimum: the engine still keeps its ring and the shortfall is said, never silent.
 			in.card.vramBudgetBytes = (budget / 4) * 2 / 2;   // less than the two fixed T0 users together
 			plan = PlanVram(in);
@@ -130,6 +135,111 @@ namespace VideoProcessorTest
 			for (uint16_t id : { kUserEnhancers, kUserInterpolator })
 				Assert::IsTrue(plan.Find(id)->level + 1 == (id == kUserEnhancers ? 3u : 2u), L"every lower tier is at its minimum first");
 			registry.ResetForTesting();
+		}
+
+		// SK-MV warm engine, REAL WIRING (owner MUST KEEP 2): VectorEngine::PlanProducer sets the standing demand and starts the producer, the
+		// look-ahead walk's hand-off (emulated here by the same Submit calls at motionAheadDepth) feeds it while the de-judder is idle, and at
+		// the transient the first estimate's pair is in the P2 slot and valid for the epoch (MotionValidity::PairValid). Hardware only.
+		BEGIN_TEST_METHOD_ATTRIBUTE(WarmEngineThroughThePlanHasAValidPairOnTheFirstTransientFrame)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(WarmEngineThroughThePlanHasAValidPairOnTheFirstTransientFrame)
+		{
+			CComPtr<IDXGIFactory1> factory;
+			CComPtr<IDXGIAdapter1> nvidia;
+			if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
+				for (UINT i = 0;; ++i)
+				{
+					CComPtr<IDXGIAdapter1> adapter;
+					if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+					DXGI_ADAPTER_DESC1 desc{};
+					adapter->GetDesc1(&desc);
+					if (desc.VendorId == 0x10DE) nvidia = adapter;
+				}
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "WarmEngineThroughThePlanHasAValidPairOnTheFirstTransientFrame",
+					nvidia != nullptr, "no NVIDIA adapter"))
+				return;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu plgpu = fixture.Gpu();
+			CComPtr<ID3D11Device> device;
+			Assert::IsTrue(SUCCEEDED(D3D11CreateDevice(nvidia, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr)));
+			pl_d3d11 d3dFixture = pl_d3d11_get(plgpu);
+			Assert::IsTrue(d3dFixture && d3dFixture->device &&
+				NvOpticalFlow::Sessions::AdapterKey(d3dFixture->device) == NvOpticalFlow::Sessions::AdapterKey(device),
+				L"the libplacebo fixture device is not on the NVIDIA adapter (VP_TEST_GPU=hardware, VP_TEST_ADAPTER=NVIDIA)");
+
+			const int W = 1280, H = 720, dx = 6, dy = 2, BW = W + 64, BH = H + 64;
+			std::vector<uint8_t> base(static_cast<size_t>(BW) * BH);
+			uint32_t seed = 99u;
+			for (uint8_t& v : base) { seed = seed * 1664525u + 1013904223u; v = static_cast<uint8_t>(seed >> 24); }
+			auto source = [&](uint64_t index) {
+				auto buffer = std::make_shared<std::vector<uint16_t>>(static_cast<size_t>(W) * H * 3 / 2, static_cast<uint16_t>(512 << 6));
+				for (int y = 0; y < H; ++y)
+					for (int x = 0; x < W; ++x)
+					{
+						int sx = x - static_cast<int>(index) * dx + 32, sy = y - static_cast<int>(index) * dy + 32;
+						sx = sx < 0 ? 0 : sx >= BW ? BW - 1 : sx;
+						sy = sy < 0 ? 0 : sy >= BH ? BH - 1 : sy;
+						(*buffer)[static_cast<size_t>(y) * W + x] = static_cast<uint16_t>((64 + base[static_cast<size_t>(sy) * BW + sx] * 3) << 6);
+					}
+				AnalysisLumaSource s;
+				s.data = reinterpret_cast<const uint8_t*>(buffer->data());
+				s.dataBytes = buffer->size() * 2;
+				s.width = W;
+				s.height = H;
+				s.rowBytes = static_cast<size_t>(W) * 2;
+				s.chromaRowBytes = static_cast<size_t>(W) * 2;
+				s.format = AnalysisLumaFormat::P010;
+				s.backingOwner = buffer;
+				return s;
+			};
+
+			VpMotion::VectorEngine engine;
+			std::atomic<bool> lowLatency{ false };
+			std::atomic<size_t> queued{ 8 };
+			VpMotion::VectorEngine::ProducerInputs pin;
+			pin.lowLatency = &lowLatency;
+			pin.queuedFutureFrames = &queued;
+			pin.opticalFlow = true;
+			pin.motionAheadFrames = 4;
+			pin.generalRateFixes = true;
+			pin.sourceHz = 24.0;
+			pin.gpu = plgpu;
+			pin.dejudderPresent = true;
+			pin.dejudderCanEngage = true;   // the standing reasons (UnknownRates ...): the host's hook line
+			const uint64_t transient = 40;
+			uint64_t submitted = 0;
+			bool pairBeforeThePlan = false, valid = false;
+			for (uint64_t n = 1; n <= transient; ++n)
+			{
+				if (n == transient)
+				{
+					const uint64_t epoch = engine.motionValidity.Epoch();
+					pairBeforeThePlan = static_cast<bool>(engine.P2().Find(transient, transient + 1));
+					valid = engine.motionValidity.PairValid(transient, transient + 1, epoch, epoch);
+				}
+				pin.dejudderEstimating = n >= transient;   // the de-judder is idle until the transient
+				engine.PlanProducer(pin);
+				const std::shared_ptr<MotionAhead::Producer> producer = engine.LoopProducer();
+				if (!producer)
+				{
+					HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "WarmEngineThroughThePlanHasAValidPairOnTheFirstTransientFrame", false,
+						"the producer did not start: " + engine.motionProducerStartError);
+					return;
+				}
+				const int depth = engine.motionAheadDepth.load(std::memory_order_acquire);
+				while (depth > 0 && submitted < n + static_cast<uint64_t>(depth))
+				{
+					++submitted;
+					producer->Submit(submitted, engine.motionValidity.StreamGeneration(), source(submitted));
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(42));   // one 24p period: the producer's pair (about 10 ms) is done well within it
+			}
+			Assert::IsTrue(pairBeforeThePlan, L"the idle but standing de-judder found the pair of its first transient estimate already made");
+			Assert::IsTrue(valid, L"and it is valid for the epoch (MotionValidity::PairValid)");
+			Assert::IsFalse(engine.motionStandingLine.empty(), L"the standing cost is a status line");
+			Logger::WriteMessage((engine.motionStandingLine + "\n").c_str());
 		}
 
 		// SK-MV: when "no pair ahead" becomes visible: not a bare frame count, and a partial miss ratio shows too.
@@ -283,13 +393,17 @@ namespace VideoProcessorTest
 				if (r.path == VpLongPair::Path::NvofHinted || r.path == VpLongPair::Path::NvofUnhinted)
 				{
 					Assert::AreEqual(1, Sessions::Peak(SessionKind::Hinted, gpu), L"the long pair ran on a hinted session and the guard counted it");
-					// Its textures are in the governor's ledger next to the producer's (same user id, summed): the half-size ring of each.
+					// Both rings are in the governor's ledger, each under its own user: the producer's (protected, fixed T0) and the long pair's
+					// (T2, sheddable).
 					const VpSkeleton::VramUsers::Snapshot held = VpSkeleton::VramUsers::Instance().Take();
-					uint64_t nvof = 0;
+					uint64_t nvof = 0, longPair = 0;
 					for (const auto& h : held.heldById)
+					{
 						if (h.first == VpSkeleton::kUserNvofProducer) nvof = h.second;
-					Assert::AreEqual<uint64_t>(NvOpticalFlow::RingBytes(W / 2, H / 2, false, false) + NvOpticalFlow::RingBytes(W / 2, H / 2, false, true), nvof,
-						L"the producer's and the long pair's rings are both declared");
+						if (h.first == VpSkeleton::kUserLongPair) longPair = h.second;
+					}
+					Assert::AreEqual<uint64_t>(NvOpticalFlow::RingBytes(W / 2, H / 2, false, false), nvof, L"the producer's ring");
+					Assert::AreEqual<uint64_t>(NvOpticalFlow::RingBytes(W / 2, H / 2, false, true), longPair, L"the long pair's ring, its own user");
 					Assert::IsTrue(held.unpopulated.empty(), L"no active optical-flow user is undeclared");
 				}
 				else
