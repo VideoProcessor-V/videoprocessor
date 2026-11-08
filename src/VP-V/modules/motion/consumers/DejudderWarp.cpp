@@ -6,6 +6,7 @@
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
+#include <VP-V/modules/motion/estimation/GapSeed.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h>
 
@@ -2379,7 +2380,7 @@ if (q.x < size.x && q.y < size.y) {
 			&sweep[0], &sweep[1], &ofSearch[0], &ofSearch[1], &ofNone, &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
 			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &globalBothSad2, &globalBothSad1, &globalBothPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &stillField, &stillSub, &pixelMask, &snapMask, &vectorOk, &snapVectorOk, &picture,
-			&ofFlowTex[0], &ofFlowTex[1], &ofWeight, &cgGuide, &cgCode, &cgKeep[0], &cgKeep[1], &cgCounts })
+			&ofFlowTex[0], &ofFlowTex[1], &ofWeight, &cgGuide, &cgCode, &cgKeep[0], &cgKeep[1], &cgCounts, &seedCheck })
 			pl_tex_destroy(gpu, tex);
 		for (int i = 0; i < 2; ++i) { ofFlow[i].Release(); }
 		inner.reset();   // its textures before the dispatch and the device
@@ -3058,6 +3059,95 @@ if (li == 0) {
 		const pl_shader_desc d[3] = { Sampled("keep_f", cgKeep[0], false), Sampled("keep_b", cgKeep[1], false), out };
 		return DispatchPerBlock("VideoProcessor de-judder: camera guidance counts (plan 19)",
 			"shared float cg_sf[256];\nshared float cg_sb[256];\n", body, d, 3, var, 1, 1, 1, 16, 16);
+	}
+
+	// SK-MV gap seed validation (SAD vs the zero vector): over a sampled grid of interior 8x8 blocks of the half-size pair, the summed absolute
+	// difference at the zero vector, at the forward seed (A to B) and at the backward seed (B to A), read back as (zero, forward, backward).
+	// The seed holds only when GapSeed::Beats says both directions explain the pair far better than zero does. A wrong seed (the motion
+	// changed during the hiccup) otherwise replaces the measured global and leaves blocks without the true start: dropped, the unseeded
+	// global search runs instead. One work group, fixed-order reduction (deterministic).
+	bool MotionWarp::GapSeedHolds()
+	{
+		static const char* const header = R"GLSL(
+shared float gs_sz[256];
+shared float gs_sf[256];
+shared float gs_sb[256];
+float gs_a(ivec2 p) { return texelFetch(gs_ta, clamp(p, ivec2(0), textureSize(gs_ta, 0) - ivec2(1)), 0).r; }
+float gs_t(ivec2 p) { return texelFetch(gs_tb, clamp(p, ivec2(0), textureSize(gs_tb, 0) - ivec2(1)), 0).r; }
+)GLSL";
+		static const char* const body = R"GLSL(
+int li = int(gl_LocalInvocationIndex);
+ivec2 nb = textureSize(gs_ta, 0) / 8;
+int gx = min(32, nb.x - 4);
+int gy = min(18, nb.y - 4);
+ivec2 vf = ivec2(round(gs_seed.xy * 4.0));
+ivec2 vb = ivec2(round(gs_seed.zw * 4.0));
+float acc_z = 0.0, acc_f = 0.0, acc_b = 0.0;
+if (gx > 0 && gy > 0) {
+    int sx = max(1, (nb.x - 4) / gx);
+    int sy = max(1, (nb.y - 4) / gy);
+    for (int i = li; i < gx * gy; i += 256) {
+        ivec2 o = (ivec2(2) + ivec2(i % gx, i / gx) * ivec2(sx, sy)) * 8;
+        // Only blocks whose seeded windows lie inside the picture (a clamped read is a false mismatch for the seed).
+        ivec2 hs = textureSize(gs_ta, 0);
+        ivec2 lo = min(o + vf, o + vb);
+        ivec2 hi = max(o + vf, o + vb) + ivec2(7);
+        if (lo.x < 0 || lo.y < 0 || hi.x >= hs.x || hi.y >= hs.y)
+            continue;
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++) {
+                ivec2 p = o + ivec2(x, y);
+                float va = gs_a(p);
+                float vt = gs_t(p);
+                acc_z += abs(va - vt);
+                acc_f += abs(va - gs_t(p + vf));
+                acc_b += abs(vt - gs_a(p + vb));
+            }
+    }
+}
+gs_sz[li] = acc_z;
+gs_sf[li] = acc_f;
+gs_sb[li] = acc_b;
+memoryBarrierShared();
+barrier();
+if (li == 0) {
+    float tz = 0.0, tf = 0.0, tb_ = 0.0;
+    for (int k = 0; k < 256; k++) { tz += gs_sz[k]; tf += gs_sf[k]; tb_ += gs_sb[k]; }
+    imageStore(dst, ivec2(0), vec4(tz, tf, tb_, 1.0));
+}
+)GLSL";
+		if (!halfA || !halfB)
+			return false;
+		if (!seedCheck)
+		{
+			pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_HOST_READABLE));
+			if (!fmt)
+				return false;
+			pl_tex_params params{};
+			params.w = params.h = 1;
+			params.format = fmt;
+			params.sampleable = true;
+			params.storable = true;
+			params.host_readable = true;
+			if (!pl_tex_recreate(gpu, &seedCheck, &params))
+				return false;
+		}
+		const float seedVar[4] = { searchSeed[0][0], searchSeed[0][1], searchSeed[1][0], searchSeed[1][1] };
+		const pl_shader_var vars[1] = { { pl_var_vec4("gs_seed"), seedVar, true } };
+		const pl_shader_desc d[3] = { Sampled("gs_ta", halfA, false), Sampled("gs_tb", halfB, false), Storage("dst", seedCheck) };
+		if (!DispatchPerBlock("VideoProcessor de-judder: gap seed check (SAD vs zero)", header, body, d, 3, vars, 1, 1, 1, 16, 16))
+		{
+			error.clear();
+			return false;
+		}
+		float sums[4] = {};
+		pl_tex_transfer_params download{};
+		download.tex = seedCheck;
+		download.ptr = sums;
+		if (!pl_tex_download(gpu, &download))
+			return false;
+		return VpMotion::GapSeed::Beats(sums[0], sums[1], sums[2]);
 	}
 
 	// A cut / flash pair (camera guidance skipMatcher): both searches untrusted (a match error far above any
@@ -3893,9 +3983,14 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			const bool engineGlobalClear = !settings.opticalFlowGlobalFallback ||
 				(OpticalFlowTrust::GlobalUsable(engineGlobal[0]) && OpticalFlowTrust::GlobalUsable(engineGlobal[1]));
 			const bool modelGlobal = cg && cg->useModelGlobal && settings.globalPrior;
-			const bool gapSeed = searchSeedValid && settings.globalPrior;   // SK-MV hiccup gap seed: used (or dropped) by THIS estimate only
+			bool gapSeed = searchSeedValid && settings.globalPrior;   // SK-MV hiccup gap seed: used (or dropped) by THIS estimate only
 			searchSeedValid = false;
 			searchSeedUsed = false;
+			// A gap seed that would reach D1 must first explain this pair better than the zero vector does (pre-approved SAD-vs-zero rejection):
+			// otherwise it is dropped and the global search below runs exactly as without a seed.
+			if (gapSeed && !modelGlobal &&
+				!(settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid && engineGlobalClear) && !GapSeedHolds())
+				gapSeed = false;
 			if (!modelGlobal && settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid && !engineGlobalClear)
 				++globalFallbacks;
 			if (modelGlobal)

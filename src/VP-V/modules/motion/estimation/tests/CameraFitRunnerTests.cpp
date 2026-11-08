@@ -74,7 +74,9 @@ namespace VideoProcessorTest
 			VpSkeleton::SlotSet* set = rig.table->Find(VpSkeleton::kP7CameraFit);
 			Assert::IsTrue(set->StateOf(1) == VpSkeleton::SlotState::Published);
 			const VpSkeleton::SealResult sr = set->Seal(1, [](const VpAncestry::Header& h) {
-				return h.ancestorCount == 3 ? VpSkeleton::SealReason::Accepted : VpSkeleton::SealReason::AncestryIncomplete; });
+				// G-A3: P4 is P7's only lane ancestor; its P2 provenance is the FlowOf pair id + epoch, not a header ancestor.
+				return (h.ancestorCount == 1 && h.ancestors[0].productId == VpSkeleton::kP4SourceStats) ? VpSkeleton::SealReason::Accepted
+					: VpSkeleton::SealReason::AncestryIncomplete; });
 			Assert::IsTrue(sr.outcome == VpSkeleton::SealOutcome::Sealed, L"ancestors recorded for the seal");
 			CameraLink::PoolEntry e;
 			Assert::IsTrue(pool.Get(1, e) && e.record && e.field);

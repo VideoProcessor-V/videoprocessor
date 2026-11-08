@@ -390,8 +390,9 @@ namespace VramGovernorTestsNs
 			// skeleton as skeleton_vram_users); once the module declares, the report clears.
 			size_t n = 0;
 			const uint16_t* ids = DeclarableVramUsers(&n);
-			Assert::AreEqual(size_t(6), n, L"the five motion / repair users and BasicChroma");
-			const uint16_t expected[] = { kUserNvofProducer, kUserTemporalDetail, kUserCameraModel, kUserInterpolator, kUserEnhancers, kUserBasicChroma };
+			// coordinator-approved 2026-11-08 (long-pair T2 user): kUserLongPair is the 7th declarable user (6 -> 7).
+			Assert::AreEqual(size_t(7), n, L"the five motion / repair users, BasicChroma and the long-pair T2 user");
+			const uint16_t expected[] = { kUserNvofProducer, kUserTemporalDetail, kUserCameraModel, kUserInterpolator, kUserEnhancers, kUserBasicChroma, kUserLongPair };
 			for (size_t i = 0; i < n; ++i)
 				Assert::AreEqual(int(expected[i]), int(ids[i]));
 			VramUsers& r = VramUsers::Instance();

@@ -510,7 +510,7 @@ namespace VideoProcessorTest
 			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\n");
 			rig.Start(6);
 			Assert::IsTrue(rig.ext.LiveBuilt(rig.Host()));
-			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Lines), ("camera: " + text).c_str()), L"the Ctrl+I line");
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Lines), (std::string(CameraExtension::kLineKey) + "=" + text).c_str()), L"the Ctrl+I line (OnStatus renders camera: text as the key=value row camera=text)");
 			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), entry.c_str()), L"the Fallbacks entry: id and text");
 			// The fit turned off: the bridge is released and the entry goes.
 			{

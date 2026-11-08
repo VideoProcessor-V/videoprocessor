@@ -244,10 +244,11 @@ namespace CameraProductsTestsNs
 			const char* why = "";
 			Assert::IsTrue(Registry(d).Validate(&why), L"an acyclic lead is valid");
 
-			// A lead loop: P3 reads P7 ahead while P7 reads P3.
+			// A lead loop: P4 reads P7 ahead while P7 reads P4 (G-A3: P4 is P7's only lane input, so P2 / P3 cannot close a loop through P7;
+			// P7's P2 ancestry is the FlowOf pair id + epoch carried by the record, a non-lead provenance).
 			std::vector<ProductDecl> loop = SkeletonProducts().All();
-			VpSkeleton::detail::AddLead(loop[kP3AnalysisField], kP7CameraFit, 1);
-			loop[kP3AnalysisField].shortQueueSubstitute = kP4SourceStats;
+			VpSkeleton::detail::AddLead(loop[kP4SourceStats], kP7CameraFit, 1);
+			loop[kP4SourceStats].shortQueueSubstitute = kP1HalfLuma;
 			Assert::IsTrue(ValidateFails(loop), L"a lead that closes a loop");
 
 			// A lead chain: P5 reads P9, which itself looks ahead.

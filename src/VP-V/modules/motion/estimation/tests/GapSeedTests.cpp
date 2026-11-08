@@ -37,6 +37,11 @@ namespace VideoProcessorTest
 			Assert::IsFalse(GapSeed::Make(g, 10, 10, 12, 7, 7, true).valid, L"the epoch did not move: not a gap");
 			g[1][2] = 1.0f;
 			Assert::IsFalse(GapSeed::Make(g, 10, 10, 12, 7, 8, true).valid, L"an ambiguous whole-frame motion is no prior");
+			// The SAD-vs-zero rejection (the matcher's check): the seed must explain both directions far better than the zero vector.
+			Assert::IsTrue(GapSeed::Beats(1000.0f, 10.0f, 20.0f), L"a seed that removes nearly all the zero mismatch holds");
+			Assert::IsFalse(GapSeed::Beats(1000.0f, 900.0f, 10.0f), L"worse than zero in one direction: dropped");
+			Assert::IsFalse(GapSeed::Beats(1000.0f, 1100.0f, 1100.0f), L"worse than zero: dropped");
+			Assert::IsFalse(GapSeed::Beats(0.0f, 0.0f, 0.0f), L"identical frames: nothing to seed");
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(SeededFillPairIsNoWorseThanUnseededAndAnInvalidSeedIsByteIdentical)

@@ -672,6 +672,11 @@ namespace Dejudder
 			pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex previous, pl_tex out, pl_tex globalTwo = nullptr,
 			pl_tex cameraKeep = nullptr, bool cameraStatic = false);
 		bool Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out, pl_tex second = nullptr);
+		// SK-MV gap seed validation: the seed must explain the half-size pair better than the zero vector does (GapSeed::Beats), else it is
+		// dropped and the estimate runs the unseeded global search exactly as without a seed. One sampled-block SAD pass and one 1x1 readback,
+		// only on a pair that carries a seed (a rare hiccup fill pair). False on any failure (no readable format): the seed is dropped.
+		bool GapSeedHolds();
+		pl_tex seedCheck = nullptr;
 		// Both directions (A to B into out[0], B to A into out[1]) in the same
 		// four dispatches instead of eight (2026-10-15; each direction's sums,
 		// order and picks as Global's).

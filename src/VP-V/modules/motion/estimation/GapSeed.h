@@ -21,6 +21,14 @@ namespace VpMotion
 	struct GapSeed
 	{
 		static constexpr uint64_t kMaxPeriods = 16;   // a longer gap is not a hiccup: no seed
+		// Pre-approved SAD-vs-zero rejection (the matcher, MotionWarp::GapSeedHolds): over a sampled grid of the fill pair's half-size blocks the
+		// seed vector must leave less than this share of the zero vector's mismatch, in BOTH directions. A seed that explains the pair no better
+		// than "nothing moved" (the motion changed during the hiccup) is dropped and the unseeded global search runs, byte-identical to no seed.
+		static constexpr float kMaxSadVsZero = 0.25f;
+		static bool Beats(float zeroSad, float forwardSad, float backwardSad)
+		{
+			return zeroSad > 0.0f && forwardSad < kMaxSadVsZero * zeroSad && backwardSad < kMaxSadVsZero * zeroSad;
+		}
 
 		bool valid = false;
 		float global[2][4] = {};   // forward then backward, D1 format (1/8-size texels: x, y, ambiguity, 1), ready for MotionWarp::SetSearchSeed
