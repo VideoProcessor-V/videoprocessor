@@ -10,9 +10,11 @@
 //
 // Threading: the render-loop thread, outside renderMutex (as before). The LookAheadFailures counter
 // (Impl::motionAheadFailures) is touched by that thread only; no atomics.
-// Existing hazard, unchanged by this move: impl.motionProducer (a unique_ptr) is null-checked and
-// dereferenced here without a lock while the render thread may create / reset it (PlanProducer);
-// see HOOKS.md section 2, row `motionProducer`.
+// fix (producer race, P5a-rest): impl.motionProducer is a shared_ptr the render thread publishes with
+// std::atomic_store (PlanProducer, GPU release); the walk takes ONE std::atomic_load copy per frame and
+// null-checks and submits through that copy, so a reset on the render thread cannot free the producer
+// (or the mutex Submit locks) between the check and the Submit. Same checks, same order as before.
+// HOOKS.md section 2, row `motionProducer`.
 //
 // Templated on the host Impl / queued-frame / timing-clock types so the walk is testable with a fake
 // host. Impl provides the fields the body names, SyncFallback() and motionAheadFailures; Queued
@@ -23,6 +25,7 @@
 #include <atomic>
 #include <cstdint>
 #include <exception>
+#include <memory>
 #include <vector>
 
 #include <AnalysisFrame.h>
@@ -95,7 +98,8 @@ namespace MotionAhead
 			for (Queued& ahead : view.frames)
 			{
 				const auto& aheadState = *ahead.state;
-				if (!framesAhead || !aheadState.displayMode || !impl.motionProducer) continue;
+				const auto producer = std::atomic_load(&impl.motionProducer);   // fix: producer race (one copy per frame)
+				if (!framesAhead || !aheadState.displayMode || !producer) continue;
 				// The luma source keeps the frame's own buffer alive for the producer's worker.
 				const auto prepared = Impl::PrepareFrameAnalysis(ahead.frame, aheadState, ahead.converted, ahead.analysis,
 					AnalysisSourceProfile::QueuedCapture, ahead.activePictureIdentity.sourceFormatGeneration, false,
@@ -124,7 +128,7 @@ namespace MotionAhead
 				const bool breakBefore = DejudderPolicy::MotionAheadBreakBefore(ahead.gapBefore, ahead.filmUpdate,
 					impl.activeSettings.timingContinuityFixes, aheadRateHz, aheadState.dolbyVisionTunnel,
 					havePrev, impl.motionAheadPrev, aheadFrame, impl.activeSettings.motionHistoryFixes);
-				impl.motionProducer->Submit(ahead.sourceSequence, generation, prepared.source, breakBefore);
+				producer->Submit(ahead.sourceSequence, generation, prepared.source, breakBefore);
 				impl.motionAheadPrevKnown = true;
 				impl.motionAheadPrevGeneration = generation;
 				impl.motionAheadPrev = aheadFrame;

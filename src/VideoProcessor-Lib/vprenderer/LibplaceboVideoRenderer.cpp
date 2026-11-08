@@ -6394,7 +6394,7 @@ struct LibplaceboVideoRenderer::Impl
 	bool& motionAheadPrevKnown = vectorEngine.motionAheadPrevKnown;
 	uint64_t& motionAheadPrevGeneration = vectorEngine.motionAheadPrevGeneration;
 	DejudderPolicy::MotionAheadFrame& motionAheadPrev = vectorEngine.motionAheadPrev;
-	std::unique_ptr<MotionAhead::Producer>& motionProducer = vectorEngine.motionProducer;
+	std::shared_ptr<MotionAhead::Producer>& motionProducer = vectorEngine.motionProducer;
 	MotionValidity::State& motionValidity = vectorEngine.motionValidity;
 	using MotionShadowField = VpMotion::VectorEngineState::MotionShadowField;
 	VpMotion::MotionSegment<MotionShadowField>& motionSegment = vectorEngine.motionSegment;
@@ -33167,11 +33167,12 @@ void LibplaceboVideoRenderer::RenderLoop()
             // Optical flow ahead (docs/VP-nvof-ahead.md): the current frame and up to the
             // depth after it, each once (only frames already queued: an empty or short
             // queue gives fewer).
-            if (m_impl && m_impl->motionProducer && (m_impl->motionAheadDepth.load(std::memory_order_acquire) > 0 ||
+            const auto aheadProducer = m_impl ? m_impl->vectorEngine.LoopProducer() : nullptr;   // VPV-HOOK: fix producer race (one atomic copy)
+            if (aheadProducer && (m_impl->motionAheadDepth.load(std::memory_order_acquire) > 0 ||
                 m_impl->motionAheadBackward.load(std::memory_order_acquire)))
             {
                 const size_t depth = static_cast<size_t>(m_impl->motionAheadDepth.load(std::memory_order_acquire));
-                const uint64_t last = m_impl->motionProducer->LastSubmitted();
+                const uint64_t last = aheadProducer->LastSubmitted();
                 size_t taken = 0;
                 for (size_t index = 0; index < m_frameQueue.size() && taken <= depth; ++index)
                 {

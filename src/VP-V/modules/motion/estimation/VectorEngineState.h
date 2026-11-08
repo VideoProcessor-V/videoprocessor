@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 
 #ifndef _WINDOWS_
 #ifndef NOMINMAX
@@ -72,7 +73,13 @@ namespace VpMotion
 		std::atomic<bool> motionEngineReady{ false };
 		// The producer computing the pairs ahead (render thread starts / stops it; the render loop submits frames;
 		// the de-judder takes its pairs). It stores them under motionValidity.StreamGeneration().
-		std::unique_ptr<MotionAhead::Producer> motionProducer;
+		// fix (producer race): a shared_ptr published with std::atomic_store (PublishProducer: the render thread's
+		// start / stop, the GPU release) and read by the render loop only through LoopProducer() (std::atomic_load,
+		// one copy per use), so a reset on the render thread can no longer free the producer, or the mutex Submit
+		// locks, under the loop's hand-off. Render-thread readers (the writer's own thread) read it directly.
+		std::shared_ptr<MotionAhead::Producer> motionProducer;
+		void PublishProducer(std::shared_ptr<MotionAhead::Producer> producer) { std::atomic_store(&motionProducer, std::move(producer)); }
+		std::shared_ptr<MotionAhead::Producer> LoopProducer() const { return std::atomic_load(&motionProducer); }
 		// One vectors-valid state (docs/VP-interpolator-50-60-plan.md step 1; owner [[vp-vector-validity]]):
 		// every discontinuity moves its epoch from any thread; the render thread applies it
 		// (ApplyMotionInvalidate) and every vector consumer checks the epoch its vectors were made in.

@@ -3,6 +3,7 @@
 //
 // Plan 58 T1 (call-site group B, B3/B4): the look-ahead walks and the vector-engine fallback sync,
 // run against a fake host. Pure CPU, no GPU.
+// P5a-rest fix (producer race): ProducerRaceTests, two threads (publish / reset vs the loop's hand-off).
 // Built without the test project's precompiled header: keep windows.h from defining min/max.
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -14,13 +15,17 @@
 #include <VP-V/modules/input/source_analysis/SourceAheadWalk.h>
 #include <VP-V/modules/motion/estimation/MotionAheadWalk.h>
 #include <VP-V/modules/motion/estimation/VectorEngineFallbackSync.h>
+#include <VP-V/modules/motion/estimation/VectorEngineState.h>
 
 #include <VideoFrameEncoding.h>
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -63,8 +68,9 @@ namespace LookAheadWalkTest
 		struct FakeProducer
 		{
 			MotionAhead::Producer::Health health;
+			std::atomic<unsigned long long> submitted{ 0 };
 			MotionAhead::Producer::Health GetHealth() const { return health; }
-			void Submit(unsigned long long, unsigned long long, const AnalysisLumaSource&, bool) {}
+			void Submit(unsigned long long, unsigned long long, const AnalysisLumaSource&, bool) { submitted.fetch_add(1, std::memory_order_relaxed); }
 		};
 		struct FakeMonitor
 		{
@@ -85,7 +91,7 @@ namespace LookAheadWalkTest
 			bool motionAheadEngaged = false;
 			unsigned long long motionAheadEngagedGeneration = 0;
 			VectorDemand::Decision vectorDemand;
-			std::unique_ptr<FakeProducer> motionProducer;
+			std::shared_ptr<FakeProducer> motionProducer;   // the walk loads it with std::atomic_load (producer race fix)
 			bool motionAheadPrevKnown = false;
 			unsigned long long motionAheadPrevGeneration = 0;
 			DejudderPolicy::MotionAheadFrame motionAheadPrev;
@@ -100,7 +106,115 @@ namespace LookAheadWalkTest
 			q.state->displayMode = std::make_shared<FakeMode>();
 			return q;
 		}
+
+		// A valid 4x4 luma source (packed RGB, 4 bytes a pixel), so the walk reaches the producer's Submit.
+		AnalysisLumaSource ValidLuma()
+		{
+			static uint8_t pixels[4 * 4 * 4] = {};
+			AnalysisLumaSource s;
+			s.data = pixels;
+			s.dataBytes = sizeof(pixels);
+			s.width = 4;
+			s.height = 4;
+			s.rowBytes = 16;
+			s.format = AnalysisLumaFormat::NativeRgb;
+			return s;
+		}
+
+		// The walk's host with a preparation that succeeds (the base one throws).
+		struct RaceImpl : FakeImpl
+		{
+			template <class... A> static Prepared PrepareFrameAnalysis(A&&...) { Prepared p; p.source = ValidLuma(); return p; }
+		};
 	}
+
+	// fix (producer race): the render thread creates / stops / resets the producer while the render loop
+	// null-checks it and submits to it. With the shared_ptr published by std::atomic_store and read by one
+	// std::atomic_load copy per use, the loop's copy keeps the object (and the mutex Submit locks) alive.
+	// Two threads for a fixed time; no crash, and the hand-off really reached Submit.
+	TEST_CLASS(ProducerRaceTests)
+	{
+	public:
+		TEST_METHOD(WalkSubmitsWhileTheProducerIsReplacedAndReset)
+		{
+			RaceImpl impl;
+			impl.motionAheadBackward.store(true);   // frames ahead without the engage wait
+			std::vector<FakeQueued> frames;
+			for (int i = 0; i < 4; ++i)
+			{
+				frames.push_back(OneFrame());
+				frames.back().sourceSequence = static_cast<unsigned long long>(i + 1);
+			}
+			const std::atomic<double> rate{ 24.0 };
+			const FakeClock clock;
+			std::atomic<bool> stop{ false };
+			std::thread publisher([&] {
+				unsigned long long n = 0;
+				while (!stop.load(std::memory_order_acquire))
+				{
+					if ((++n & 1) != 0)
+						std::atomic_store(&impl.motionProducer, std::make_shared<FakeProducer>());
+					else
+						std::atomic_store(&impl.motionProducer, std::shared_ptr<FakeProducer>());
+				}
+			});
+			MotionAhead::AheadView<RaceImpl, FakeQueued, FakeClock> view{ impl, frames, &clock, rate };
+			const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+			unsigned long long walks = 0;
+			while (std::chrono::steady_clock::now() < until)
+			{
+				MotionAhead::RunQueueWalk(view);
+				++walks;
+			}
+			stop.store(true, std::memory_order_release);
+			publisher.join();
+			Assert::IsTrue(walks > 0);
+			Assert::IsFalse(impl.fallbacks.Engaged("motion look-ahead"), L"no walk threw");
+			// One last producer, so the walk's Submit is shown reached even when the timing never overlapped.
+			std::atomic_store(&impl.motionProducer, std::make_shared<FakeProducer>());
+			MotionAhead::RunQueueWalk(view);
+			Assert::AreEqual<unsigned long long>(4, impl.motionProducer->submitted.load(), L"the walk submits every frame ahead");
+		}
+
+		// The real producer type through the engine state's publish / loop accessors (not started: no device;
+		// Submit returns early, LastSubmitted and GetStats read its atomics and lock its mutex).
+		TEST_METHOD(EngineStateLoopCopyOutlivesTheRenderThreadsReset)
+		{
+			VpMotion::VectorEngineState state;
+			std::atomic<bool> stop{ false };
+			std::thread renderThread([&] {
+				unsigned long long n = 0;
+				while (!stop.load(std::memory_order_acquire))
+				{
+					if ((++n & 1) != 0)
+						state.PublishProducer(std::make_shared<MotionAhead::Producer>());
+					else
+					{
+						if (state.motionProducer)   // the writer's own thread reads directly (as PlanProducer)
+							state.motionProducer->Stop();
+						state.PublishProducer(nullptr);
+					}
+				}
+			});
+			const AnalysisLumaSource luma = ValidLuma();
+			const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+			unsigned long long seen = 0, seq = 0;
+			while (std::chrono::steady_clock::now() < until)
+			{
+				const std::shared_ptr<MotionAhead::Producer> producer = state.LoopProducer();
+				if (!producer)
+					continue;
+				++seen;
+				producer->Submit(++seq, 1, luma, false);
+				(void)producer->LastSubmitted();
+				(void)producer->GetStats();
+				Assert::IsFalse(producer->Running(), L"never started (no device)");
+			}
+			stop.store(true, std::memory_order_release);
+			renderThread.join();
+			Assert::IsTrue(seen > 0, L"the loop saw published producers");
+		}
+	};
 
 	TEST_CLASS(LookAheadWalkTests)
 	{
