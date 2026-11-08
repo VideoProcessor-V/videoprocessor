@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "CameraFitWorker.h"
 
+#include "AheadFlow.h"
 #include "CameraUsable.h"
 
 #include <atomic>
@@ -272,7 +273,9 @@ namespace CameraLink
 	PublishOutcome CameraFitWorker::ProcessJob(const CameraFitJob& job)
 	{
 		// Always fit (deterministic history); only the publication can be late.
-		const CameraFitResult fit = m_producer.Fit(job);
+		CameraFitResult fit = m_producer.Fit(job);
+		if (job.ahead && job.outGridW > 0 && job.outGridH > 0)
+			fit.record = RegridToConsumerGrid(fit.record, job.outGridW, job.outGridH, static_cast<double>(FieldCopy::kSourceBlockPx));
 		if (m_env.aheadMode && job.ahead && fit.record)
 		{
 			// AHEAD FIT: parked until it can be published (on time, else bridged); exactly one onResult when it ends.

@@ -230,6 +230,8 @@ namespace CameraLink
 		job.field = field;
 		job.stamp = field->stamp;
 		job.ahead = true;
+		job.outGridW = m_aheadGridW;   // the record's outputs on the consumer grid; the fit runs on the native cells
+		job.outGridH = m_aheadGridH;
 		PairDescription d;
 		if (m_aheadFacts && !m_aheadFacts(*field, d))
 			return false;

@@ -43,6 +43,9 @@ namespace CameraLink
 		// AHEAD FIT: the job was submitted from the ahead pair (FlowOf) before its frame started rendering. Its result is parked by the
 		// worker until it can be published: on time into the on-time target (before the frame's seal), else into the lag bridge.
 		bool ahead = false;
+		// The consumer grid the record's per-block outputs are put on after a NATIVE-grid fit (AheadFlow.h RegridToConsumerGrid; the
+		// 16-px grid of the P8 labels and the lane). 0 = none (the record keeps the fit's grid).
+		int outGridW = 0, outGridH = 0;
 	};
 
 	struct CameraFitResult

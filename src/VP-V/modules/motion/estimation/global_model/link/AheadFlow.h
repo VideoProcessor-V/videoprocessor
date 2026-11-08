@@ -17,14 +17,15 @@
 // px; x enginePxToSource = source px); one cost byte per cell (higher = less sure). Today: S10.5 (32 units per px), 4 x 4 cells of the
 // half-size luma, so a cell is 8 source px at a half-size search and 16 at a quarter-size (lowRes 4K) search.
 //
-// Conversion onto the camera's 16-px source grid (AheadToSourceGrid): each 16 x 16 source block takes the TRUST-WEIGHTED mean of the
-// cells whose centres lie inside it (2 x 2 cells at a half-size search; at a cell of 16 px or more the one cell holding the block's
-// centre), and the mean cell trust as its trust. Cell trust = the engine's ONE trust definition, OpticalFlowTrust::CellTrust (the
+// FULL NATIVE RESOLUTION (owner): AheadToSourceGrid gives the fit the NATIVE cell grid, one sample per cell, full sub-pel, never an
+// aggregate; only the record's per-block OUTPUTS are put on the 16-px consumer grid (RegridToConsumerGrid). Cell trust = the engine's ONE trust definition, OpticalFlowTrust::CellTrust (the
 // cost weight of the cell's de-judder block x the forward/backward consistency weight from the matcher's consistency limit), the same
 // arithmetic as SK-MV MV5's TD source. Deterministic: fixed loop order, no threads, no hash or time input.
 #pragma once
 
 #include "FieldCopy.h"
+
+#include <VP-V/modules/motion/estimation/global_model/CameraMotion.h>
 
 #include <VP-V/core/Indicator.h>
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
@@ -33,6 +34,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace CameraLink
@@ -152,9 +154,13 @@ namespace CameraLink
 		double meanTrust = 0;         // mean block trust
 	};
 
-	// The ahead pair onto the camera's 16-px source grid (sourceGridW x sourceGridH: the live field's grid, which sizes the camera
-	// graph; given by the caller, never derived from a guess). Forward only (the fit reads no backward field). False when the pair does
-	// not cover the grid or its trust cannot be computed. See the header comment for the pooling rule.
+	// FULL NATIVE RESOLUTION (owner, 2026-11-08): the ahead pair AS the fit's field, one sample per native cell (cellEnginePx engine px =
+	// CellSourcePx() source px: 8 at a half-size search of a 1080 source, 16 at a quarter-size 4K search), full sub-pel (raw units /
+	// unitsPerEnginePx x enginePxToSource), trust = the engine's cell trust (AheadCellTrust). NO aggregation: the fit runs on the native
+	// cell grid (the Fitter is grid-generic: blockSize = the cell's source px). sourceGridW x sourceGridH is the camera's 16-px consumer
+	// grid, used only to check that the pair covers the picture. Forward only (the fit reads no backward field). False when the pair does
+	// not cover the grid or its trust cannot be computed. Deterministic (fixed loop order). The record's per-block OUTPUTS are put on the
+	// consumer grid afterwards (RegridToConsumerGrid); the input is never reduced.
 	inline bool AheadToSourceGrid(const AheadCopy& a, float consistencyEnginePx, int sourceGridW, int sourceGridH, FieldCopy& out,
 		AheadConvertInfo* info = nullptr)
 	{
@@ -163,7 +169,7 @@ namespace CameraLink
 		if (cells == 0 || sourceGridW <= 0 || sourceGridH <= 0 || !(cs > 0) || !(a.unitsPerEnginePx > 0) ||
 			a.forward.size() < cells * 2 || a.backward.size() < cells * 2 || a.forwardCost.size() < cells)
 			return false;
-		// The pair must cover the grid: the cells span at least the source blocks (to within one cell of rounding).
+		// The pair must cover the consumer grid (to within one cell of rounding).
 		const double spanW = a.gridW * cs, spanH = a.gridH * cs;
 		const double needW = (sourceGridW - 1) * static_cast<double>(FieldCopy::kSourceBlockPx), needH = (sourceGridH - 1) * static_cast<double>(FieldCopy::kSourceBlockPx);
 		if (spanW + cs < needW || spanH + cs < needH)
@@ -171,89 +177,111 @@ namespace CameraLink
 		std::vector<float> trust;
 		if (!AheadCellTrust(a, consistencyEnginePx, trust))
 			return false;
-		const double bs = FieldCopy::kSourceBlockPx;
 		const double toSource = a.enginePxToSource / a.unitsPerEnginePx;
 		out.seq = a.seq;
 		out.pairFrom = a.pairFrom;
 		out.pairTo = a.pairTo;
-		out.gridW = sourceGridW;
-		out.gridH = sourceGridH;
-		out.blockSize = bs;
+		out.gridW = a.gridW;
+		out.gridH = a.gridH;
+		out.blockSize = cs;
 		out.stamp = a.stamp;
 		out.origin = FieldOrigin::Ahead;
 		out.haveP2 = true;
 		out.p2Epoch = a.epoch;
-		const size_t blocks = static_cast<size_t>(sourceGridW) * static_cast<size_t>(sourceGridH);
-		out.fwdX.assign(blocks, 0.0f);
-		out.fwdY.assign(blocks, 0.0f);
-		out.fwdTrust.assign(blocks, 0.0f);
+		out.fwdX.resize(cells);
+		out.fwdY.resize(cells);
+		out.fwdTrust = trust;
 		out.bwdX.clear();
 		out.bwdY.clear();
 		out.bwdTrust.clear();
-		// Cell index range whose centres (c + 0.5) * cs lie in [lo, lo + bs); empty -> the cell holding the block centre.
-		auto range = [cs, bs](int t, int grid, int& c0, int& c1) {
-			const double lo = t * bs;
-			c0 = static_cast<int>(std::ceil(lo / cs - 0.5));
-			c1 = static_cast<int>(std::ceil((lo + bs) / cs - 0.5)) - 1;
-			if (c0 < 0) c0 = 0;
-			if (c1 > grid - 1) c1 = grid - 1;
-			if (c0 > c1)
-			{
-				int c = static_cast<int>(std::floor((lo + 0.5 * bs) / cs));
-				c = c < 0 ? 0 : c > grid - 1 ? grid - 1 : c;
-				c0 = c1 = c;
-			}
-		};
-		int maxPooled = 0;
 		double trustSum = 0;
-		for (int ty = 0; ty < sourceGridH; ++ty)
+		for (size_t i = 0; i < cells; ++i)
 		{
-			int cy0 = 0, cy1 = 0;
-			range(ty, a.gridH, cy0, cy1);
-			for (int tx = 0; tx < sourceGridW; ++tx)
-			{
-				int cx0 = 0, cx1 = 0;
-				range(tx, a.gridW, cx0, cx1);
-				double sw = 0, sx = 0, sy = 0, ux = 0, uy = 0;
-				int n = 0;
-				for (int cy = cy0; cy <= cy1; ++cy)
-					for (int cx = cx0; cx <= cx1; ++cx)
-					{
-						const size_t i = static_cast<size_t>(cy) * static_cast<size_t>(a.gridW) + static_cast<size_t>(cx);
-						const double vx = a.forward[i * 2] * toSource, vy = a.forward[i * 2 + 1] * toSource;
-						const double w = trust[i];
-						sw += w;
-						sx += w * vx;
-						sy += w * vy;
-						ux += vx;
-						uy += vy;
-						++n;
-					}
-				const size_t o = static_cast<size_t>(ty) * static_cast<size_t>(sourceGridW) + static_cast<size_t>(tx);
-				if (n == 0)
-					continue;
-				if (sw > 0)
-				{
-					out.fwdX[o] = static_cast<float>(sx / sw);
-					out.fwdY[o] = static_cast<float>(sy / sw);
-				}
-				else
-				{
-					out.fwdX[o] = static_cast<float>(ux / n);
-					out.fwdY[o] = static_cast<float>(uy / n);
-				}
-				out.fwdTrust[o] = static_cast<float>(sw / n);
-				trustSum += sw / n;
-				if (n > maxPooled)
-					maxPooled = n;
-			}
+			out.fwdX[i] = static_cast<float>(a.forward[i * 2] * toSource);
+			out.fwdY[i] = static_cast<float>(a.forward[i * 2 + 1] * toSource);
+			trustSum += trust[i];
 		}
 		if (info)
 		{
 			info->cellSourcePx = cs;
-			info->maxCellsPerBlock = maxPooled;
-			info->meanTrust = blocks ? trustSum / static_cast<double>(blocks) : 0.0;
+			info->maxCellsPerBlock = 1;   // one sample per native cell: nothing pooled
+			info->meanTrust = trustSum / static_cast<double>(cells);
 		}
 		return true;
+	}
+
+	// The record's per-block OUTPUTS on the consumer grid (the 16-px grid the P8 labels and the lane are sized by). Fitted on the native
+	// cell grid, the record's BlockData is put onto gridW x gridH blocks of blockSize source px: each block takes the native cell its centre
+	// lies in for the categorical / measured arrays (label, residual, object id, tiny mover, excluded), and the model prediction is evaluated
+	// at the block's own centre (exact, from the params). The fit itself and its params are unchanged; only what the consumers index is
+	// re-gridded. A record already on that grid, or without blocks, is returned as is.
+	inline std::shared_ptr<const CameraModel::CameraMotion> RegridToConsumerGrid(const std::shared_ptr<const CameraModel::CameraMotion>& rec,
+		int gridW, int gridH, double blockSize)
+	{
+		if (!rec || !rec->blocks || gridW <= 0 || gridH <= 0 || !(blockSize > 0))
+			return rec;
+		const CameraModel::BlockData& b = *rec->blocks;
+		if (b.gridW == gridW && b.gridH == gridH && b.blockSize == blockSize)
+			return rec;
+		if (b.gridW <= 0 || b.gridH <= 0 || !(b.blockSize > 0))
+			return rec;
+		auto out = std::make_shared<CameraModel::BlockData>();
+		out->gridW = gridW;
+		out->gridH = gridH;
+		out->blockSize = blockSize;
+		out->absThresholdPx = b.absThresholdPx;
+		out->relThreshold = b.relThreshold;
+		const size_t n = static_cast<size_t>(gridW) * static_cast<size_t>(gridH);
+		const size_t src = static_cast<size_t>(b.gridW) * static_cast<size_t>(b.gridH);
+		auto cellOf = [&](int t, int grid, double centre) {
+			int c = static_cast<int>(std::floor(centre / b.blockSize));
+			(void)t;
+			return c < 0 ? 0 : c > grid - 1 ? grid - 1 : c;
+		};
+		auto take8 = [&](const std::vector<uint8_t>& from, std::vector<uint8_t>& to, const std::vector<size_t>& map) {
+			if (from.size() != src) return;
+			to.resize(n);
+			for (size_t i = 0; i < n; ++i) to[i] = from[map[i]];
+		};
+		auto takeF = [&](const std::vector<float>& from, std::vector<float>& to, const std::vector<size_t>& map) {
+			if (from.size() != src) return;
+			to.resize(n);
+			for (size_t i = 0; i < n; ++i) to[i] = from[map[i]];
+		};
+		std::vector<size_t> map(n);
+		for (int ty = 0; ty < gridH; ++ty)
+		{
+			const int cy = cellOf(ty, b.gridH, (ty + 0.5) * blockSize);
+			for (int tx = 0; tx < gridW; ++tx)
+			{
+				const int cx = cellOf(tx, b.gridW, (tx + 0.5) * blockSize);
+				map[static_cast<size_t>(ty) * static_cast<size_t>(gridW) + static_cast<size_t>(tx)] =
+					static_cast<size_t>(cy) * static_cast<size_t>(b.gridW) + static_cast<size_t>(cx);
+			}
+		}
+		take8(b.label, out->label, map);
+		takeF(b.resX, out->resX, map);
+		takeF(b.resY, out->resY, map);
+		take8(b.objectId, out->objectId, map);
+		take8(b.tinyMover, out->tinyMover, map);
+		take8(b.excluded, out->excluded, map);
+		if (b.modelX.size() == src && b.modelY.size() == src)
+		{
+			out->modelX.resize(n);
+			out->modelY.resize(n);
+			for (int ty = 0; ty < gridH; ++ty)
+				for (int tx = 0; tx < gridW; ++tx)
+				{
+					double x = 0, y = 0, dx = 0, dy = 0;
+					CameraModel::BlockCentre(tx, ty, blockSize, rec->picture, &x, &y);
+					CameraModel::Displacement(rec->params, x, y, &dx, &dy);
+					const size_t o = static_cast<size_t>(ty) * static_cast<size_t>(gridW) + static_cast<size_t>(tx);
+					out->modelX[o] = static_cast<float>(dx);
+					out->modelY[o] = static_cast<float>(dy);
+				}
+		}
+		auto copy = std::make_shared<CameraModel::CameraMotion>(*rec);
+		copy->blocks = out;
+		return copy;
 	}
 }

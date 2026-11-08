@@ -169,7 +169,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(CameraLink::CopyAhead(v, 7, a) == CameraLink::AheadRefusal::Layout);
 		}
 
-		TEST_METHOD(AHalfSizePairPoolsTwoByTwoCellsPerSourceBlockDeterministically)
+		TEST_METHOD(AHalfSizePairIsTheNativeCellGridAtFullSubPelDeterministically)
 		{
 			// 1080p: half-size 960 x 540 engine luma, 8-px cells: each 16-px block holds 2 x 2 cell centres.
 			Pair p(960, 540, 2.0);
@@ -181,9 +181,9 @@ namespace VideoProcessorTest
 			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 2.0f, 120, 68, f1, &info));
 			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 2.0f, 120, 68, f2));
 			Assert::IsTrue(f1.origin == CameraLink::FieldOrigin::Ahead);
-			Assert::AreEqual(4, info.maxCellsPerBlock);
-			Assert::AreEqual(16.0, f1.blockSize);
-			Assert::IsTrue(f1.Valid() && f1.Blocks() == 120u * 68u);
+			Assert::AreEqual(1, info.maxCellsPerBlock, L"native: one sample per cell, nothing pooled");
+			Assert::AreEqual(8.0, f1.blockSize, L"the native cell: 4 engine px x 2 source px");
+			Assert::IsTrue(f1.Valid() && f1.Blocks() == 240u * 135u, L"the native grid, not the 16-px grid");
 			for (size_t i = 0; i < f1.Blocks(); ++i)
 			{
 				Assert::AreEqual(3.25f, f1.fwdX[i], 1e-6f);
@@ -212,8 +212,9 @@ namespace VideoProcessorTest
 			CameraLink::AheadConvertInfo info;
 			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 2.0f, 240, 135, f, &info));
 			Assert::AreEqual(1, info.maxCellsPerBlock);
+			Assert::AreEqual(16.0, f.blockSize);
 			for (int tx = 0; tx < 240; ++tx)
-				Assert::AreEqual(static_cast<float>((tx % 7) / 32.0 * 4.0), f.fwdX[static_cast<size_t>(tx)], 1e-6f, L"block t takes cell t");
+				Assert::AreEqual(static_cast<float>((tx % 7) / 32.0 * 4.0), f.fwdX[static_cast<size_t>(tx)], 1e-6f, L"cell t, full sub-pel (1/32 engine px)");
 		}
 
 		TEST_METHOD(TheTrustIsTheEngineDefinitionAndIsMonotonic)
@@ -267,11 +268,46 @@ namespace VideoProcessorTest
 			costly.forwardCost[c] = 255;
 			Assert::IsTrue(CameraLink::AheadCellTrust(costly, 1.5f, t2));
 			Assert::IsTrue(t2[c] <= t0[c] + 1e-6f, L"a higher cost never gives a higher trust");
-			// The block trust is the mean of its cells' trust (cells whose centres lie in the block).
+			// Native: the field's trust IS the cell trust, cell for cell.
 			CameraLink::FieldCopy f;
 			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 1.5f, 40, 23, f));
-			const float mean00 = (t[0] + t[1] + t[static_cast<size_t>(a.gridW)] + t[static_cast<size_t>(a.gridW) + 1]) / 4.0f;
-			Assert::AreEqual(mean00, f.fwdTrust[0], 1e-6f);
+			Assert::IsTrue(f.fwdTrust == t, L"one trust per native cell");
+		}
+
+		TEST_METHOD(TheRecordOutputsAreReGriddedToTheConsumerGridAndTheParamsKept)
+		{
+			auto rec = std::make_shared<CameraModel::CameraMotion>();
+			rec->params.h[2] = 3.0;   // a pure translation of (3, -1) source px
+			rec->params.h[5] = -1.0;
+			rec->picture.right = 1920;
+			rec->picture.bottom = 1080;
+			auto b = std::make_shared<CameraModel::BlockData>();
+			b->gridW = 240;
+			b->gridH = 135;
+			b->blockSize = 8.0;
+			b->absThresholdPx = 0.5f;
+			const size_t n = 240u * 135u;
+			b->label.assign(n, 0);
+			b->resX.assign(n, 0.0f);
+			b->resY.assign(n, 0.0f);
+			b->modelX.assign(n, 3.0f);
+			b->modelY.assign(n, -1.0f);
+			b->excluded.assign(n, 0);
+			for (int cy = 0; cy < 135; ++cy)
+				for (int cx = 0; cx < 240; ++cx)
+					b->label[static_cast<size_t>(cy) * 240 + cx] = static_cast<uint8_t>((cx + cy) % 3);
+			rec->blocks = b;
+			const auto out = CameraLink::RegridToConsumerGrid(rec, 120, 68, 16.0);
+			Assert::IsTrue(out != rec && out->blocks->gridW == 120 && out->blocks->gridH == 68 && out->blocks->blockSize == 16.0);
+			Assert::AreEqual(size_t(120u * 68u), out->blocks->label.size());
+			// Block (tx, ty) centre (16 tx + 8, 16 ty + 8) lies in native cell (2 tx + 1, 2 ty + 1).
+			for (int ty = 0; ty < 67; ++ty)
+				for (int tx = 0; tx < 120; ++tx)
+					Assert::AreEqual(int(((2 * tx + 1) + (2 * ty + 1)) % 3), int(out->blocks->label[static_cast<size_t>(ty) * 120 + tx]));
+			Assert::AreEqual(3.0f, out->blocks->modelX[5], 1e-6f, L"the model at the block's own centre");
+			Assert::AreEqual(0.5f, out->blocks->absThresholdPx);
+			Assert::IsTrue(out->params.h[2] == 3.0 && out->params.h[5] == -1.0, L"the fit's params are untouched");
+			Assert::IsTrue(CameraLink::RegridToConsumerGrid(out, 120, 68, 16.0) == out, L"already on the grid: as is");
 		}
 
 		TEST_METHOD(AheadIsAcceptedTheGuidedFieldIsStillRefused)
