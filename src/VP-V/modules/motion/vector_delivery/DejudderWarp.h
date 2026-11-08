@@ -452,7 +452,7 @@ namespace Dejudder
 				for (int k = 0; k < 4; ++k) searchSeed[d][k] = global[d][k];
 			searchSeedValid = true;
 		}
-		void ClearSearchSeed() { searchSeedValid = false; }   // the host clears it after the estimate (an early return must not leak it into the next one)
+		void ClearSearchSeed() { searchSeedValid = false; if (inner) inner->searchSeedValid = false; }   // the host clears it after the estimate (an early return must not leak it into the next one)
 		bool SearchSeedUsed() const { return searchSeedUsed; }
 		const IFieldSource* FieldSource() const { return fieldSource; }
 		// SK-MV pass-through: the snapshot LEASE. SnapshotForWarp bumps this to a process-unique non-zero generation when the copies are

@@ -402,6 +402,53 @@ namespace ProducerPlanTest
 			Assert::IsFalse(pairAtFirstActive(false), L"without the hook line the UnknownRates frames are not standing");
 		}
 
+		// A DIRECT switch IneligibleCadence -> Active (no UnknownRates in between) is COLD by design, and that is measured here, not assumed: an
+		// ineligible cadence (60p video, no strength for the cadence) is not standing, because keeping NVOF running on every frame of a source the
+		// de-judder can never act on is exactly what the MUST KEEP forbids. The first Active frame finds no pair (one counted P2m miss, far below the
+		// sustained threshold, so not shown), the plan of that frame submits the queue, and the next frame is served by the producer.
+		TEST_METHOD(ADirectIneligibleCadenceToActiveSwitchIsColdForOneFrameAndNotShown)
+		{
+			using R = DejudderPolicy::Reason;
+			std::vector<R> sequence(10, R::IneligibleCadence);
+			sequence.push_back(R::Active);
+			sequence.push_back(R::Active);
+			sequence.push_back(R::Active);
+			Assert::IsFalse(DejudderPolicy::CanEngage(R::IneligibleCadence), L"the ineligible cadence is not standing");
+			VpMotion::P2Slot slot(16);
+			slot.SetGeneration(1);
+			uint64_t nextSubmit = 1;
+			std::vector<bool> activeFrameFoundPair;
+			int depthSeen = 0;
+			for (size_t i = 0; i < sequence.size(); ++i)
+			{
+				const uint64_t n = i + 1;
+				const R r = sequence[i];
+				if (r == R::Active)
+					activeFrameFoundPair.push_back(static_cast<bool>(slot.Find(n, n + 1)));   // what this frame's estimate takes, before this frame's plan
+				DepthInput d;
+				d.opticalFlow = true;
+				d.motionAheadFrames = 4;
+				d.sourceHz = 24.0;
+				d.producerRunning = true;
+				d.queuedFutureFrames = 8;
+				d.dejudderEstimating = r == R::Active;
+				d.dejudderStanding = DejudderPolicy::CanEngage(r);
+				const DepthOutput o = Depth(d);
+				depthSeen = o.storedConfigured;
+				if (o.storedDepth <= 0)
+					continue;
+				for (; nextSubmit <= n + static_cast<uint64_t>(o.storedDepth); ++nextSubmit)
+					if (nextSubmit > 1)
+						slot.Publish(nextSubmit - 1, nextSubmit, 1, std::make_shared<const MotionAhead::Flow>());
+			}
+			Assert::AreEqual<size_t>(3, activeFrameFoundPair.size());
+			Assert::IsFalse(activeFrameFoundPair[0], L"the first Active frame after a direct switch is cold (documented)");
+			Assert::IsTrue(activeFrameFoundPair[1] && activeFrameFoundPair[2], L"the producer serves from the next frame on");
+			VpMotion::NoPairTracker tracker;
+			tracker.Note(true, depthSeen);
+			Assert::IsFalse(tracker.Sustained(depthSeen), L"one cold frame is a counter only, never an engaged fallback");
+		}
+
 		TEST_METHOD(DepthIsZeroWhileTheProducerDoesNotRun)
 		{
 			DepthInput d;

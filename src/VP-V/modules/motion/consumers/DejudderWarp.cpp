@@ -3468,11 +3468,20 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		// Plan 19 phase 2: the camera guidance belongs to the instance that searches (its pixels are half ours).
 		inner->SetCameraGuidance(cameraGuidance);
 		inner->cgInputScale = cgInputScale * 0.5f;
+		// SK-MV hiccup gap seed: like the pair computed ahead, it belongs to the instance that searches. The shared pair's whole-frame motion
+		// was handed to that instance in its own input pixels (the same space as an engine global seed), so it is forwarded as given. The
+		// outer's "used" answer is the inner's: the host counts "seeded" from SearchSeedUsed().
+		if (searchSeedValid)
+		{
+			inner->SetSearchSeed(searchSeed);
+			searchSeedValid = false;
+		}
 		if (!inner->Estimate(la, lb, -1, false))
 		{
 			error = "lowRes: " + inner->LastError();
 			return false;
 		}
+		searchSeedUsed = inner->SearchSeedUsed();
 		auto up = [&](pl_tex src, pl_tex dst) -> bool
 		{
 			const pl_shader_desc d[2] = { Sampled("src", src, false), Storage("dst", dst) };
@@ -3749,6 +3758,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		estimated = false;
 		grainErrorValid = false;
 		fillReady = false;
+		searchSeedUsed = false;   // SK-MV gap seed: set again below only by the instance that searched with it (an early return reads false)
 		// Hunt 2 04 M1 (motion_history_fixes): the temporal state is the last estimated
 		// pair's; a pair whose A is not that pair's B (a pair in between was never
 		// estimated) starts it over - as ForgetHistory, the fade state kept. Before

@@ -47,6 +47,7 @@ namespace VideoProcessorTest
 			auto slot = std::make_shared<VpMotion::P2Slot>(16);
 			slot->SetGeneration(1);
 			const auto flow = MakeFlow(96, 48);
+			MotionAhead::FlowExtras(*flow);   // the producer's worker does this: the de-judder's cost and consistency weights
 			Assert::IsTrue(slot->Publish(4, 5, 1, flow));
 			MotionValidity::State validity;
 			validity.NoteKept(4);
@@ -64,13 +65,29 @@ namespace VideoProcessorTest
 			Assert::AreEqual(8.0, fwd.blockPx, 1e-9, L"an engine cell is 4 producer pixels = 8 source pixels");
 			const size_t cells = static_cast<size_t>(held->gridW) * held->gridH;
 			Assert::AreEqual(cells, fwd.vx.size());
+			// Trust is the de-judder's engine-trust weighting (MV5 follow-up): the block cost weight Flow::costWeight times the engine's
+			// forward/backward consistency weight from Flow::fbError (FallOff from the matcher's limit to twice it), per cell. Forward uses what the
+			// producer worked out; backward the same maths on the backward fields.
+			std::vector<float> backCost, backErr;
+			const int perBlock = OpticalFlowTrust::CellsPerBlock(NvOpticalFlow::Engine::Grid, MotionAhead::Flow::kBlockPx);
+			Assert::IsTrue(OpticalFlowTrust::CostWeights(held->backwardCost, held->gridW, held->gridH, NvOpticalFlow::Engine::Grid,
+				MotionAhead::Flow::kBlockPx, held->blocksX, held->blocksY, backCost));
+			Assert::IsTrue(OpticalFlowTrust::FbError(held->backward, held->forward, held->gridW, held->gridH, NvOpticalFlow::Engine::Grid, backErr));
+			for (size_t i = 0; i < cells; ++i)
+			{
+				const int cx = static_cast<int>(i % static_cast<size_t>(held->gridW)), cy = static_cast<int>(i / static_cast<size_t>(held->gridW));
+				const size_t block = static_cast<size_t>(cy / perBlock) * static_cast<size_t>(held->blocksX) + static_cast<size_t>(cx / perBlock);
+				const double expectedFwd = held->costWeight[block] * OpticalFlowTrust::FallOff(1.0f, 2.0f, held->fbError[i]);
+				const double expectedBwd = backCost[block] * OpticalFlowTrust::FallOff(1.0f, 2.0f, backErr[i]);
+				Assert::AreEqual(expectedFwd, static_cast<double>(fwd.trust[i]), 1e-6, L"forward trust = cost weight x consistency weight");
+				Assert::AreEqual(expectedBwd, static_cast<double>(bwd.trust[i]), 1e-6, L"backward trust = the same maths on the backward fields");
+				Assert::IsTrue(fwd.trust[i] >= 0.0f && fwd.trust[i] <= 1.0f && bwd.trust[i] >= 0.0f && bwd.trust[i] <= 1.0f);
+			}
 			for (size_t i = 0; i < cells; ++i)
 			{
 				Assert::AreEqual(held->forward[i * 2] / 32.0 * 2.0, static_cast<double>(fwd.vx[i]), 1e-4);
 				Assert::AreEqual(held->forward[i * 2 + 1] / 32.0 * 2.0, static_cast<double>(fwd.vy[i]), 1e-4);
-				Assert::AreEqual(1.0 - held->forwardCost[i] / 255.0, static_cast<double>(fwd.trust[i]), 1e-4);
 				Assert::AreEqual(held->backward[i * 2] / 32.0 * 2.0, static_cast<double>(bwd.vx[i]), 1e-4);
-				Assert::AreEqual(1.0 - held->backwardCost[i] / 255.0, static_cast<double>(bwd.trust[i]), 1e-4);
 			}
 			Assert::AreEqual<uint64_t>(2, source.GetStats().hits);
 			Assert::IsFalse(source.CurrentDecision().engaged, L"served: nothing to show");
@@ -78,6 +95,82 @@ namespace VideoProcessorTest
 			TemporalDetail::FieldMotionSource own;
 			TemporalDetail::MotionPair none;
 			Assert::IsFalse(own.Forward(5, none));
+		}
+
+		// Plausibility of the weighting (not a copy of the formula): in a consistent pair an engine-unsure patch loses all its trust and the
+		// rest keeps it; an inconsistent pair (forward and backward disagree by more than twice the limit) is not trusted anywhere.
+		TEST_METHOD(AnUnsurePatchLosesTrustAndAnInconsistentPairIsNotTrusted)
+		{
+			auto slot = std::make_shared<VpMotion::P2Slot>(16);
+			slot->SetGeneration(1);
+			auto flow = std::make_shared<MotionAhead::Flow>();
+			flow->halfW = 64;
+			flow->halfH = 64;
+			flow->gridW = flow->gridH = 16;
+			const size_t cells = 256;
+			flow->forward.assign(cells * 2, 0);
+			flow->backward.assign(cells * 2, 0);
+			flow->forwardCost.assign(cells, 10);
+			flow->backwardCost.assign(cells, 10);
+			for (int cy = 0; cy < 4; ++cy)
+				for (int cx = 0; cx < 4; ++cx)
+					flow->forwardCost[static_cast<size_t>(cy) * 16 + cx] = 250;   // the top-left 4 x 4 cells (2 x 2 blocks): the engine is far less sure
+			MotionAhead::FlowExtras(*flow);
+			Assert::IsTrue(slot->Publish(1, 2, 1, flow));
+			MotionValidity::State validity;
+			validity.NoteKept(1);
+			validity.NoteKept(2);
+			TemporalDetail::SharedMotionSource source(VpMotion::P2View(slot), &validity);
+			source.SetSourceSize(128, 128);
+			TemporalDetail::MotionPair fwd;
+			Assert::IsTrue(source.Forward(2, fwd));
+			Assert::AreEqual(0.0, static_cast<double>(fwd.trust[0]), 1e-6, L"an engine-unsure block is not trusted");
+			Assert::AreEqual(0.0, static_cast<double>(fwd.trust[3 * 16 + 3]), 1e-6);
+			Assert::AreEqual(1.0, static_cast<double>(fwd.trust[8 * 16 + 8]), 1e-6, L"a sure, consistent cell keeps full trust");
+			// Forward says +8 px, backward says +8 px too (not the inverse): |f + b| = 16 px >> twice the limit everywhere.
+			for (size_t i = 0; i < cells; ++i)
+			{
+				flow->forward[i * 2] = static_cast<int16_t>(8 * 32);
+				flow->backward[i * 2] = static_cast<int16_t>(8 * 32);
+			}
+			flow->forwardCost.assign(cells, 10);
+			MotionAhead::FlowExtras(*flow);
+			auto slot2 = std::make_shared<VpMotion::P2Slot>(16);
+			slot2->SetGeneration(1);
+			Assert::IsTrue(slot2->Publish(1, 2, 1, flow));
+			TemporalDetail::SharedMotionSource inconsistent(VpMotion::P2View(slot2), &validity);
+			inconsistent.SetSourceSize(128, 128);
+			TemporalDetail::MotionPair bad;
+			Assert::IsTrue(inconsistent.Forward(2, bad));
+			for (size_t i = 0; i < cells; ++i)
+				Assert::AreEqual(0.0, static_cast<double>(bad.trust[i]), 1e-6, L"forward and backward disagree: not trusted");
+			// The matcher's own limit can be handed over: a larger limit accepts the same disagreement.
+			inconsistent.SetConsistencyPixels(40.0f);
+			TemporalDetail::MotionPair lenient;
+			Assert::IsTrue(inconsistent.Forward(2, lenient));
+			Assert::AreEqual(1.0, static_cast<double>(lenient.trust[0]), 1e-6, L"within the handed-over limit");
+		}
+
+		// The sustained-absent threshold is derived from the look-ahead depth the way the "motion" entry's NoPairTracker does, not a constant.
+		TEST_METHOD(TheSustainedAbsentThresholdFollowsTheLookAheadDepth)
+		{
+			Assert::AreEqual(8u, TemporalDetail::SharedMotionSource::AbsentRun(0), L"the floor");
+			Assert::AreEqual(8u, TemporalDetail::SharedMotionSource::AbsentRun(4), L"60p depth 4 + margin 4");
+			Assert::AreEqual(20u, TemporalDetail::SharedMotionSource::AbsentRun(16), L"240p depth 16 + margin 4");
+			TemporalDetail::SharedMotionSource shallow((VpMotion::P2View()), nullptr), deep((VpMotion::P2View()), nullptr);
+			shallow.SetSourceSize(192, 96);
+			deep.SetSourceSize(192, 96);
+			deep.SetDepth(16);
+			TemporalDetail::MotionPair out;
+			for (unsigned i = 0; i < 19; ++i)
+			{
+				shallow.Forward(2, out);
+				deep.Forward(2, out);
+			}
+			Assert::IsTrue(shallow.CurrentDecision().engaged, L"19 absent in a row is long past the shallow queue's threshold");
+			Assert::IsFalse(deep.CurrentDecision().engaged, L"a refill of a deep queue is not yet a sustained loss");
+			deep.Forward(2, out);
+			Assert::IsTrue(deep.CurrentDecision().engaged, L"20 in a row shows");
 		}
 
 		TEST_METHOD(AMissingStaleOrUnfitPairIsAbsentCountedAndVisible)
@@ -105,7 +198,7 @@ namespace VideoProcessorTest
 			Assert::IsFalse(source.Forward(2, out), L"stale after a resync");
 			Assert::AreEqual<uint64_t>(1, source.GetStats().stale);
 			// A sustained run is a visible entry with the reason; a served pair releases it.
-			for (unsigned i = 0; i < TemporalDetail::SharedMotionSource::kAbsentRun; ++i)
+			for (unsigned i = 0; i < TemporalDetail::SharedMotionSource::AbsentRun(0); ++i)
 				Assert::IsFalse(source.Forward(2, out));
 			const FallbackCatalog::Decision shown = source.CurrentDecision();
 			Assert::IsTrue(shown.engaged && shown.id == "td motion");

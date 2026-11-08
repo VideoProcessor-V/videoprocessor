@@ -338,6 +338,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		dejudder->SetExternalFlow(std::move(flow));
 		vectorEngine.P2().Prune(aSequence);
 	}
+	bool gapSeedHanded = false;   // a valid seed was given to the matcher: counted "seeded" only if its D1 actually started from it (SearchSeedUsed)
 	if (!motionEngineWarming && bSequence > aSequence + 1)
 	{
 		// A fill pair across a gap (hiccup repair): start D1 from the last valid shared pair when the state moved only for this gap; else the
@@ -347,8 +348,8 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			motionValidity.LastCause() == MotionValidity::Cause::Gap);
 		if (seed.valid)
 		{
-			dejudder->SetSearchSeed(seed.global);
-			++vectorEngine.motionGapSeeded;
+			dejudder->SetSearchSeed(seed.global);   // forwarded to the lowRes inner by the matcher, like the pair computed ahead
+			gapSeedHanded = true;
 		}
 		else
 			++vectorEngine.motionGapUnseeded;
@@ -365,6 +366,14 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		!motionEngineWarming, *dejudder, [&]() { return dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted); },
 		[this](const FallbackCatalog::Decision& decision) { SyncFallback(decision); });
 	dejudder->ClearSearchSeed();
+	if (gapSeedHanded)
+	{
+		// Counted from what happened, not from what was handed over: an engine global (or the camera model) wins over the seed, and a failed estimate used none.
+		if (motionEstimated && dejudder->SearchSeedUsed())
+			++vectorEngine.motionGapSeeded;
+		else
+			++vectorEngine.motionGapUnseeded;
+	}
 	passTimerHook.AddGpuGroups("motion: ", dejudder->TakePassGpuMs());
 	if (!motionEstimated)
 	{

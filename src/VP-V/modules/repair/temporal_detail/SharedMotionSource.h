@@ -10,8 +10,11 @@
 //  * Backward(seq) = pair (seq -> seq - 1) on frame seq's grid: the pair's backward vectors.
 //  Vectors are in SOURCE pixels of the frame the producer saw (the engine's grid cell is 4 pixels of the producer's input, which is the
 //  source scaled by sourceWidth / flow.halfW); the host scales them to the re-based plane as for any source (the module never rescales).
-//  Trust is 1 - cost / 255 per cell (the engine's own confidence). Camera() stays false (the camera model reaches TD through its own
-//  adapter).
+//  Trust per cell is the de-judder's own engine-trust weighting (OpticalFlowTrust), not a raw cost scale: the cell's block cost weight
+//  (Flow::costWeight for the forward direction, the same CostWeights maths on the backward costs; cost judged against the pair's own median and
+//  spread) times the engine's forward/backward consistency weight (Flow::fbError, FallOff from the matcher's consistency limit to twice it;
+//  the backward direction swaps the two fields). Both are in [0, 1], 1 = as sure as the engine usually is; a pair without them is not guessed
+//  at (absent: "the pair has no vectors or costs"). Camera() stays false (the camera model reaches TD through its own adapter).
 //
 // ABSENT is visible: a pair that is not in the slot, is stale (the vectors-valid state moved: MotionValidity::PairValid), or does not fit
 // the source size answers false (TD takes its causal substitute) and is counted by kind; a sustained run raises the "td motion" entry
@@ -26,18 +29,22 @@
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/MotionValidity.h>
+#include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <VP-V/modules/motion/estimation/VectorProducts.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace TemporalDetail
 {
 	class SharedMotionSource : public IMotionSource
 	{
 	public:
-		static constexpr unsigned kAbsentRun = 8;   // consecutive absent answers that make the visible entry (a refill is fewer)
+		// Consecutive absent answers that make the visible entry: derived as the "motion" entry's NoPairTracker does - the look-ahead depth at the
+		// measured rate plus a margin, never fewer than its floor (a refill takes about the depth) - not a constant of its own.
+		static unsigned AbsentRun(int depthFrames) { return VpMotion::NoPairTracker::Threshold(depthFrames); }
 
 		struct Stats
 		{
@@ -48,15 +55,23 @@ namespace TemporalDetail
 		// engine's cells into source pixels (the producer may have worked at half again).
 		SharedMotionSource(VpMotion::P2View view, const MotionValidity::State* validity) : m_view(std::move(view)), m_validity(validity) {}
 		void SetSourceSize(int width, int height) { m_srcW = width; m_srcH = height; }
+		// The measured look-ahead depth in frames (VectorEngineState::motionAheadConfigured, the number the "motion" entry uses): the visible
+		// entry's threshold follows it. 0 (the default) = the tracker's floor.
+		void SetDepth(int depthFrames) { m_depth = depthFrames; }
+		// The matcher's forward/backward consistency limit in producer (half-size) pixels (Dejudder::MotionWarp::ConsistencyPixels): the host
+		// hands over the value its matcher uses, so TD judges the engine's consistency exactly as the de-judder does. The default is the matcher's
+		// own default setting.
+		void SetConsistencyPixels(float pixels) { if (pixels > 0.0f) m_consistencyPx = pixels; }
 
 		bool Forward(uint64_t seq, MotionPair& out) const override { return Take(seq, true, out); }
 		bool Backward(uint64_t seq, MotionPair& out) const override { return Take(seq, false, out); }
 
 		const Stats& GetStats() const { return m_stats; }
-		// Visible state: engaged while the last kAbsentRun answers were all absent.
+		// Visible state: engaged while the absent answers are SUSTAINED (a run of AbsentRun(depth), or at least half of the last window of
+		// four such runs - the NoPairTracker rule, so a partial miss ratio cannot hide under a run counter that keeps resetting).
 		FallbackCatalog::Decision CurrentDecision() const
 		{
-			return FallbackCatalog::TdMotionSource(m_run >= kAbsentRun, m_lastWhy);
+			return FallbackCatalog::TdMotionSource(m_tracker.Sustained(m_depth), m_lastWhy);
 		}
 
 	private:
@@ -77,6 +92,23 @@ namespace TemporalDetail
 			const size_t cells = static_cast<size_t>(flow->gridW) * flow->gridH;
 			if (vec.size() < cells * 2 || cost.size() < cells)
 				return Absent(m_stats.unfit, "the pair has no vectors or costs");
+			// The de-judder's trust weights for this direction (OpticalFlowTrust), per cell.
+			std::vector<float> cellError, blockCost;
+			const std::vector<int16_t>& other = forward ? flow->backward : flow->forward;
+			if (other.size() < cells * 2 || !OpticalFlowTrust::FbError(vec, other, flow->gridW, flow->gridH, NvOpticalFlow::Engine::Grid, cellError))
+				return Absent(m_stats.unfit, "the pair has no vectors or costs");
+			const int blocksX = (flow->halfW + MotionAhead::Flow::kBlockPx - 1) / MotionAhead::Flow::kBlockPx;
+			const int blocksY = (flow->halfH + MotionAhead::Flow::kBlockPx - 1) / MotionAhead::Flow::kBlockPx;
+			const size_t blocks = static_cast<size_t>(blocksX) * blocksY;
+			const std::vector<float>* costBlocks = nullptr;
+			if (forward && flow->blocksX == blocksX && flow->blocksY == blocksY && flow->costWeight.size() == blocks)
+				costBlocks = &flow->costWeight;   // the producer already worked it out
+			else if (OpticalFlowTrust::CostWeights(cost, flow->gridW, flow->gridH, NvOpticalFlow::Engine::Grid, MotionAhead::Flow::kBlockPx,
+					blocksX, blocksY, blockCost))
+				costBlocks = &blockCost;
+			if (!costBlocks)
+				return Absent(m_stats.unfit, "the pair has no vectors or costs");
+			const int perBlock = OpticalFlowTrust::CellsPerBlock(NvOpticalFlow::Engine::Grid, MotionAhead::Flow::kBlockPx);
 			const double scale = static_cast<double>(m_srcW) / flow->halfW;   // producer pixels -> source pixels
 			MotionPair pair;
 			pair.valid = true;
@@ -90,18 +122,20 @@ namespace TemporalDetail
 			{
 				pair.vx[i] = static_cast<float>(vec[i * 2] / 32.0 * scale);       // S10.5 producer pixels -> source pixels
 				pair.vy[i] = static_cast<float>(vec[i * 2 + 1] / 32.0 * scale);
-				pair.trust[i] = static_cast<float>(1.0 - cost[i] / 255.0);
+				const int cx = static_cast<int>(i % static_cast<size_t>(flow->gridW)), cy = static_cast<int>(i / static_cast<size_t>(flow->gridW));
+				const size_t block = static_cast<size_t>((std::min)(cy / perBlock, blocksY - 1)) * blocksX + (std::min)(cx / perBlock, blocksX - 1);
+				pair.trust[i] = (*costBlocks)[block] * OpticalFlowTrust::FallOff(m_consistencyPx, 2.0f * m_consistencyPx, cellError[i]);
 			}
 			out = std::move(pair);
 			++m_stats.hits;
-			m_run = 0;
+			m_tracker.Note(false, m_depth);
 			return true;
 		}
 
 		bool Absent(uint64_t& counter, const char* why) const
 		{
 			++counter;
-			++m_run;
+			m_tracker.Note(true, m_depth);
 			m_lastWhy = why;
 			return false;
 		}
@@ -109,8 +143,10 @@ namespace TemporalDetail
 		VpMotion::P2View m_view;
 		const MotionValidity::State* m_validity = nullptr;
 		int m_srcW = 0, m_srcH = 0;
+		float m_consistencyPx = 1.0f;   // = Dejudder::Settings::consistencyPixels' default; the host sets its matcher's value
 		mutable Stats m_stats;
-		mutable unsigned m_run = 0;
+		mutable VpMotion::NoPairTracker m_tracker;
+		int m_depth = 0;
 		mutable std::string m_lastWhy;
 	};
 }
