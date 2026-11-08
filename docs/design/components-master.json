@@ -832,7 +832,12 @@
         "src/VP-V/modules/motion/consumers/tests/TimelinePlanScenarios.h",
         "src/VP-V/modules/motion/consumers/tests/TimelinePlanTraceRows.inl",
         "src/VP-V/modules/motion/consumers/DejudderCacheStage.h",
-        "src/VP-V/modules/motion/consumers/DejudderCacheStage.cpp"
+        "src/VP-V/modules/motion/consumers/DejudderCacheStage.cpp",
+        "src/VP-V/modules/motion/consumers/DejudderState.h",
+        "src/VP-V/modules/motion/consumers/DejudderInterface.h",
+        "src/VP-V/modules/motion/consumers/DejudderExtension.h",
+        "src/VP-V/modules/motion/consumers/DejudderExtension.cpp",
+        "src/VP-V/modules/motion/consumers/DejudderViews.h"
       ],
       "components": {
         "files": {

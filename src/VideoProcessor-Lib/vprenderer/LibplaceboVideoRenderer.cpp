@@ -114,6 +114,8 @@
 #include <VP-V/modules/colour/extended_range/ExtendedRangeStage.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
 #include <VP-V/modules/motion/consumers/DejudderCacheStage.h>
+#include <VP-V/modules/motion/consumers/DejudderExtension.h>   // VPV-HOOK M2 P5b-2
+#include <VP-V/modules/motion/consumers/DejudderViews.h>   // VPV-HOOK M2 P5b-2 (includes DejudderState.h)
 #include <VP-V/modules/output/dither/SigmaDeltaVectors.h>
 #include <VP-V/modules/output/dither/DitherSlot.h>
 // VP-V pipeline skeleton (src/VP-V; see src/VP-V/README.md): the slot registry, the entrance
@@ -5138,8 +5140,51 @@ struct LibplaceboVideoRenderer::Impl
 	// back to the CPU path) when it fails.
 	bool UnpackRawPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],   // VPV-HOOK
 		bool sessionFallback = true);   // P10: defined in VP-V/modules/input/capture/CaptureImpl.inl   // VPV-HOOK
-	ULONGLONG dejudderAheadLogTick = 0;
-	DejudderPolicy::Reason dejudderReason = DejudderPolicy::Reason::Off;
+	// VPV-HOOK M2 P5b-2: the de-judder policy and per-vsync timeline state (VP-V/modules/motion/consumers/DejudderState.h);
+	// one alias per moved member, deleted with its last reader outside the module (module README, alias table).
+	VpMotion::DejudderPolicyState dejudderPolicy;
+	ULONGLONG& dejudderAheadLogTick = dejudderPolicy.dejudderAheadLogTick;
+	DejudderPolicy::Reason& dejudderReason = dejudderPolicy.dejudderReason;
+	ULONGLONG& dejudderReasonLogTick = dejudderPolicy.dejudderReasonLogTick;
+	unsigned long long& dejudderReasonChangesNotLogged = dejudderPolicy.dejudderReasonChangesNotLogged;
+	ULONGLONG& diagDejudderModeTick = dejudderPolicy.diagDejudderModeTick;
+	unsigned long long& diagDejudderModeSkipped = dejudderPolicy.diagDejudderModeSkipped;
+	uint32_t& diagLastHoldCode = dejudderPolicy.diagLastHoldCode;
+	bool& dejudderExtrasAllowed = dejudderPolicy.dejudderExtrasAllowed;
+	InterpolationPolicy::Decision& interpolationDecision = dejudderPolicy.interpolationDecision;
+	bool& interpolating = dejudderPolicy.interpolating;
+	int& interpolationReasonLogged = dejudderPolicy.interpolationReasonLogged;
+	ULONGLONG& interpolationLogTick = dejudderPolicy.interpolationLogTick;
+	unsigned& interpolationLogCount = dejudderPolicy.interpolationLogCount;
+	float& dejudderEffectiveStrength = dejudderPolicy.dejudderEffectiveStrength;
+	int& dejudderEvenCycle = dejudderPolicy.dejudderEvenCycle;
+	bool& smoothMotionEngine = dejudderPolicy.smoothMotionEngine;
+	bool& motionEngineLogged = dejudderPolicy.motionEngineLogged;
+	bool& smoothMotionMixingLogged = dejudderPolicy.smoothMotionMixingLogged;
+	bool& dejudderMaskRateLogged = dejudderPolicy.dejudderMaskRateLogged;
+	double& dejudderSourceHz = dejudderPolicy.dejudderSourceHz;
+	DejudderPolicy::LatencyFloor& dejudderLatencyFloor = dejudderPolicy.dejudderLatencyFloor;
+	double& dejudderCallLatency = dejudderPolicy.dejudderCallLatency;
+	double& dejudderLoggedFloor = dejudderPolicy.dejudderLoggedFloor;
+	uint64_t& dejudderPhaseGeneration = dejudderPolicy.dejudderPhaseGeneration;
+	bool& dejudderPhaseLogPending = dejudderPolicy.dejudderPhaseLogPending;
+	double& dejudderPredictedVsync = dejudderPolicy.dejudderPredictedVsync;
+	uint64_t& dejudderPredictedGeneration = dejudderPolicy.dejudderPredictedGeneration;
+	uint64_t& dejudderPredictedSequence = dejudderPolicy.dejudderPredictedSequence;
+	InterpolationTimeline::Timeline& vpTimeline = dejudderPolicy.vpTimeline;
+	bool& vpTimelineActive = dejudderPolicy.vpTimelineActive;
+	bool& vpSkipOutput = dejudderPolicy.vpSkipOutput;
+	bool& vpSkipIsUpdate = dejudderPolicy.vpSkipIsUpdate;
+	unsigned long long& vpFilmUpdates = dejudderPolicy.vpFilmUpdates;
+	double& vpOutputPhase = dejudderPolicy.vpOutputPhase;
+	bool& vpTimelineLogged = dejudderPolicy.vpTimelineLogged;
+	double& vpCaptureRateHz = dejudderPolicy.vpCaptureRateHz;
+	float& vpGapPhaseScale = dejudderPolicy.vpGapPhaseScale;
+	AlphaQueuePolicy::TimelineQueueSteering& vpQueueSteering = dejudderPolicy.vpQueueSteering;
+	uint64_t& vpQueueGeneration = dejudderPolicy.vpQueueGeneration;
+	std::atomic<bool>& vpQueueErrorReset = dejudderPolicy.vpQueueErrorReset;
+	DisplayRateHold& timelineDisplayRateHold = dejudderPolicy.timelineDisplayRateHold;
+	// VPV-HOOK-END
 	unsigned long long motionEngineIdleReleasesLogged = 0;
 	// Whether the matcher's live outputs (field, trust, grain error) are this source
 	// frame's (sequence, sequence + 1) pair of the current motion epoch.
@@ -5151,10 +5196,6 @@ struct LibplaceboVideoRenderer::Impl
 	}
 	unsigned long long dejudderEstimates = 0;
 	unsigned long long dejudderFailures = 0;
-	ULONGLONG dejudderReasonLogTick = 0;
-	unsigned long long dejudderReasonChangesNotLogged = 0;
-	ULONGLONG diagDejudderModeTick = 0;          // report-a-problem: <= 4 mode rows per second
-	unsigned long long diagDejudderModeSkipped = 0;
 	// 6b-2 extra presents: phase state, the vsync output and the counters.
 	struct DejudderExtraStats
 	{
@@ -5176,18 +5217,10 @@ struct LibplaceboVideoRenderer::Impl
 		std::string lastHold;
 	};
 	DejudderExtraStats dejudderExtraStats;
-	DejudderPolicy::LatencyFloor dejudderLatencyFloor;
-	double dejudderCallLatency = 0.0;
-	double dejudderLoggedFloor = 0.0;   // the floor last reported (s)
-	uint64_t dejudderPhaseGeneration = 0;
-	bool dejudderPhaseLogPending = true;
 	CComPtr<IDXGIOutput> dejudderOutput;
 	IDXGISwapChain* dejudderOutputSwapchain = nullptr;   // identity only, not owned
 	IDXGISwapChain* dejudderOutputFailedSwapchain = nullptr;   // GetContainingOutput failed (identity only)
 	VpDiagnostics::HoldLog dejudderHoldLog;   // "De-judder: hold" lines (WP-17 adapter)
-	double dejudderPredictedVsync = 0.0;   // where the frame after extras should show (s)
-	uint64_t dejudderPredictedGeneration = 0;
-	uint64_t dejudderPredictedSequence = 0;   // the source frame the prediction is for
 	// Present ids of recent extras and the refresh each main present (A)
 	// showed on, so presentation telemetry sees what it would without extras.
 	std::deque<uint32_t> dejudderExtraIds;
@@ -5255,7 +5288,6 @@ struct LibplaceboVideoRenderer::Impl
 	bool renderAheadOpenLoopLate = false;   // seen on the last frame's extras: the gate's lateness for this one
 	// Report-a-problem (DiagnosticHistory, 2026-10-17): render-loop thread only.
 	uint32_t diagRendererGeneration = 0;     // the renderer generation (set by the owner)
-	uint32_t diagLastHoldCode = 0;           // last de-judder hold code recorded as a decision
 	uint64_t diagExtrasCounter = 0;          // capture counter of the frame whose extras run
 	uint64_t diagExtrasSequence = 0;         // its accepted source sequence
 
@@ -5579,29 +5611,13 @@ struct LibplaceboVideoRenderer::Impl
 	// says which source frame each slot is for (0 = none/used).
 	uint64_t dejudderMaskSequence[2] = { 0, 0 };
 	uint64_t dejudderMaskEpoch[2] = { 0, 0 };   // the motion epoch each slot's mask was made in
-	bool dejudderExtrasAllowed = false;
 	// VP's 50/60p interpolation (docs/VP-interpolator-50-60-plan.md step 4, Stage A):
 	// the refreshes a source frame owns after its own present show the interpolated
 	// picture at their true phase instead of repeating it. The extras' machinery
 	// (timing, phase, presents) with the interpolator in place of the warp; one or
 	// the other per frame (film class stays with the de-judder).
 	std::unique_ptr<Interpolator::FrameInterpolator> frameInterpolator;
-	InterpolationPolicy::Decision interpolationDecision;
-	bool interpolating = false;              // this frame's extras interpolate
-	int interpolationReasonLogged = -1;
-	ULONGLONG interpolationLogTick = 0;
-	unsigned interpolationLogCount = 0;
 	unsigned long long interpolatedPresents = 0, interpolationFailures = 0;
-	// Stage B (plan step 4): the per-vsync timeline. The render loop plans each source
-	// frame's refreshes (InterpolationTimeline: none, one or several, each with its true
-	// phase between A and B, any ratio) and draws each one; RenderLocked renders the
-	// picture at that phase. Render-loop thread (RenderLocked runs on it).
-	InterpolationTimeline::Timeline vpTimeline;
-	bool vpTimelineActive = false;   // this source frame is presented by the timeline
-	bool vpSkipOutput = false;       // no refresh falls in this frame's interval (source faster)
-	bool vpSkipIsUpdate = false;     // Hunt 2 (06-interp L4): ... because it is a pulldown film update
-	unsigned long long vpFilmUpdates = 0;
-	double vpOutputPhase = 0.0;      // the phase of the refresh being drawn
 	bool vpPhasePlanesValid = false; // vpPhasePlanes hold this draw's picture
 	Dejudder::Planes vpPhasePlanes;
 	// The picture's inputs (raw A and B, the motion, the phase). B3 on: the picture is made in the
@@ -5643,17 +5659,12 @@ struct LibplaceboVideoRenderer::Impl
 	DejudderPlaneUpload dejudderNextUpload, dejudderAheadUpload;
 	unsigned long long uploadsReused = 0, uploadsReuseMissed = 0;
 	ULONGLONG uploadReuseLogTick = 0;
-	double vpCaptureRateHz = 0.0;     // the content rate the loop schedules with (film or measured capture)
 	uint64_t vpFillNextSequence = 0;  // B offered across a short loss (gap fill), else 0
 	int vpFillMaxSpan = InterpolationTimeline::kMaxSpanFrames;   // that pair's span limit (general_rate_fixes: from its rate)
 	uint32_t vpFillGapFrames = 0;     // Bug hunt 3 F10: the frames that pair spans beyond one (0 = not a gap)
-	float vpGapPhaseScale = 1.0f;     // Bug hunt 3 F5: a standalone gap pair's phases x the de-judder strength
 	// Hiccup repair without motion smoothing (owner 2026-10-17): this frame's B is a gap
 	// pair the timeline presents alone (vectors and phases for that pair only).
 	bool vpGapFillStandalone = false;
-	AlphaQueuePolicy::TimelineQueueSteering vpQueueSteering;   // smoothed (queued - target) frames: the timeline's steering
-	uint64_t vpQueueGeneration = 0;   // the queue generation vpQueueSteering belongs to
-	std::atomic<bool> vpQueueErrorReset{ false };   // a backlog flush: the steering starts over
 	// Render-ahead: a backlog flush dropped queued frames to shed latency; the chain
 	// re-anchors on the next frame (else its fixed L holds the shed latency back in
 	// and the queue overflows again: a flush every few frames on the laptop panel).
@@ -5679,7 +5690,6 @@ struct LibplaceboVideoRenderer::Impl
 		return timelineDisplayRateHold.Update(measured, renderLoadDisplayRefreshHz.load(std::memory_order_acquire),
 			activeSettings.timingContinuityFixes);
 	}
-	mutable DisplayRateHold timelineDisplayRateHold;
 	// The timeline presents while the interpolation policy interpolates (the last
 	// decision; a change takes effect from the next frame), never in low latency.
 	bool VpTimelineWanted() const
@@ -5843,15 +5853,9 @@ struct LibplaceboVideoRenderer::Impl
 			vpOutputPhase, vpPhasePictures, vpHeldPictures, vpSkippedFrames, vpFilmUpdates, vpGapPairs, vpTimeline.Restarts(),
 			vpTimeline.Reanchors(), vpTimeline.LastSpanFrames());
 	}
-	bool vpTimelineLogged = false;   // engaged / released, logged on change
 	bool dejudderMaskParamSet = false;
 	bool grainToleranceParamSet = false;
 	bool dejudderFillIgnoredLogged = false;   // D5 with the rendered warp (logged once)
-	float dejudderEffectiveStrength = 0.0f;   // delta 10: uneven or even strength for this source
-	int dejudderEvenCycle = 0;   // refreshes per film frame on an even cadence, 0 = uneven
-	bool smoothMotionEngine = false;   // motion_engine resolved to libplacebo's smooth motion
-	bool motionEngineLogged = false;
-	bool smoothMotionMixingLogged = false;
 	bool sourceRangeCpuLogged = false;   // source_range not applicable: logged once
 	int sigmaDeltaDomainLogged = -1;   // delta 5: the last logged code domain
 	bool sigmaDeltaReorderLogged = false;   // the sigma-delta moved to run last
@@ -5859,7 +5863,6 @@ struct LibplaceboVideoRenderer::Impl
 	bool dejudderMaskNlsLogged = false;
 	ULONGLONG dejudderMaskUsedTick = 0;    // last refresh the mask was used on
 	std::string dejudderMaskState;         // why the mask is not used, for the stats line
-	bool dejudderMaskRateLogged = false;
 	unsigned long long dejudderMaskFrames = 0;
 	OcclusionMask::Hook occlusionMaskHook;
 	// Stage 6d: A's PRE_OUTPUT picture for the extras, and its warp.
@@ -12478,7 +12481,6 @@ struct LibplaceboVideoRenderer::Impl
 	// Black bars: the latest trusted active picture, for the matcher.
 	HdrPeakAnalysisCrop::TrustedPicture dejudderPicture;
 	// The content rate the matcher's per-frame settings are converted to.
-	double dejudderSourceHz = 0.0;
 	// Bug hunt 2026-10-17: this frame's state is on the Dolby Vision tunnel
 	// (set by the render before UpdateDejudderEstimate).
 	bool dejudderDolbyVisionTunnel = false;
@@ -27002,6 +27004,12 @@ releaseDriftBaseRetention =
 		std::lock_guard<std::mutex> guard(renderMutex);
 		return d3d11 && pl_gpu_is_failed(d3d11->gpu);
 	}
+	// VPV-HOOK M2 P5b-2: the de-judder module's views (vpv.dejudder.v1, vpv.phase_timeline.v1) and its host binding
+	VpMotion::DejudderView dejudderView{ dejudderPolicy, dejudderEstimatedSequence,
+		[](void* self, const char* why) { static_cast<Impl*>(self)->DejudderHold(why); }, this };
+	VpMotion::PhaseTimelineView phaseTimelineView{ dejudderPolicy };
+	VpMotion::DejudderHostBinding dejudderBinding{ this, VpMotion::DejudderBindingSpec{ &dejudderView, &phaseTimelineView, nullptr, nullptr, this } };
+	// VPV-HOOK-END
 	Vpv::Capture::HostBinding captureBinding{ this, Vpv::Capture::MakeCaptureHost(*this) };   // P10: last member (registered last, removed first)   // VPV-HOOK
 };
 #include <VP-V/modules/motion/estimation/VectorEngineEstimate.inl>   // VPV-HOOK P5a-5: the estimate and the engine keeper (Impl members)
