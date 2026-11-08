@@ -69,6 +69,7 @@ class Policy(object):
         self.sd_floor = 0.005
         self.min_separation = 0.25   # alt mean must sit this many null-sds below the null mean, else placeholder
         self.drop_aliases = True     # C4: no null from the aliases (+-2% of p/q x truth_n, q <= 4) of an upscaled reel
+        self.null_sd_floor = True    # C3: a class's null sd >= the dip-side sd of its own null data; alt n_eff < min_alt_hard: alt = null
         # Simulation of the estimator (false crossings, evaluations to c1): the same switches as ChainEvidence.
         self.sim_window = True       # the recent window (N3), seconds from the measured evaluation gap
         self.sim_hold = True         # a HOLD evaluation forgets its axis, the first cut after one clears both axes
@@ -353,13 +354,18 @@ def median(xs):
     return quantile(xs, 0.5)
 
 
+def dip_sd(xs, floor):
+    """The dip-side spread matched at 1, 2 and 2.5 sigma (median - P15.9, (median - P2.3)/2, (median - P0.6)/2.5): the false-confident
+    risk sits in the dip tail, not at one sigma."""
+    med = median(xs)
+    return max(med - quantile(xs, 0.1587), (med - quantile(xs, 0.0228)) / 2.0, (med - quantile(xs, 0.0062)) / 2.5, floor)
+
+
 def null_sd(xs, floor):
-    """Tail-matched null spread: the largest of the MAD sd and the dip-side spread matched at 1, 2 and 2.5 sigma
-    (the false-confident risk sits in the dip tail, not at one sigma)."""
+    """Tail-matched null spread: the largest of the MAD sd and the dip-side spread (dip_sd)."""
     med = median(xs)
     mad = 1.4826 * median([abs(x - med) for x in xs])
-    return max(mad, med - quantile(xs, 0.1587), (med - quantile(xs, 0.0228)) / 2.0,
-               (med - quantile(xs, 0.0062)) / 2.5, floor)
+    return max(mad, dip_sd(xs, floor))
 
 
 def alt_sd(xs, floor):
@@ -380,18 +386,46 @@ def dominated(fit_null, fit_alt, c, grid):
 
 def fit_class(null_x, alt_x, null_grp, alt_grp, null_mst, alt_mst, c, policy, grid):
     """null_x/alt_x: T_ev samples; *_grp: (reel, axis, truth shot) keys (effective size = distinct keys); *_mst: masters.
-    Returns (null (mean, sd), alt (mean, sd), diag)."""
+    Returns (null (mean, sd), alt (mean, sd), diag).
+
+    SID-CAL2 C3 (both can be switched off with policy.null_sd_floor = False):
+      * the null sd of a class is never below the fitted dip-side sd of its own null data (widened like the fit), also when the class
+        otherwise keeps the placeholder or a blend of it: the placeholder nulls (k/16 0.08, generic 0.06) were narrower than the tails the
+        data shows, which turned ordinary native dips into confident-looking evidence;
+      * a class with enough null data but alt n_eff < min_alt_hard gets alt = null: a zero increment everywhere, i.e. no evidence for sizes of
+        that class until calibrated alt data exist (it used to keep the placeholder alt, which let uncalibrated sizes accumulate)."""
     ph_n, ph_a = PLACEHOLDER["null"][c], PLACEHOLDER["alt"][c]
     ne, ae = len(set(null_grp)), len(set(alt_grp))
     d = {"n_null": len(null_x), "n_alt": len(alt_x), "eff_null": ne, "eff_alt": ae, "m_null": len(set(null_mst)),
          "m_alt": len(set(alt_mst)), "status": "placeholder", "why": "", "blend": 1.0,
-         "max_null_T": max(null_x) if null_x else float("nan")}
-    if ne < policy.min_null_hard or ae < policy.min_alt_hard:
-        d["why"] = "sparse (n_eff null %d < %d or alt %d < %d)" % (ne, policy.min_null_hard, ae, policy.min_alt_hard)
+         "max_null_T": max(null_x) if null_x else float("nan"), "floor": None, "floored": False, "sd_before": None,
+         "alt_zero": False}
+    floor = None
+    if policy.null_sd_floor and null_x and ne >= policy.min_null_hard:
+        floor = dip_sd(null_x, policy.sd_floor) * policy.null_widen * (1.0 + policy.se_terms / math.sqrt(ne))
+        d["floor"] = floor
+
+    def finish(nul, alt):
+        if floor is not None and nul[1] < floor:
+            d["floored"], d["sd_before"] = True, nul[1]
+            nul = (nul[0], floor)
+        return nul, alt, d
+
+    if ne < policy.min_null_hard:
+        d["why"] = "sparse (n_eff null %d < %d)" % (ne, policy.min_null_hard)
+        return ph_n, ph_a, d
+    if ae < policy.min_alt_hard:
+        if policy.null_sd_floor:
+            nsd = null_sd(null_x, policy.sd_floor) * policy.null_widen * (1.0 + policy.se_terms / math.sqrt(ne))
+            nul, _, _ = finish((median(null_x), max(nsd, policy.sd_floor)), None)
+            d["status"], d["alt_zero"], d["blend"] = "no-alt", True, 0.0
+            d["why"] = "alt n_eff %d < %d: alt = null, no evidence" % (ae, policy.min_alt_hard)
+            return nul, nul, d
+        d["why"] = "sparse (alt %d < %d)" % (ae, policy.min_alt_hard)
         return ph_n, ph_a, d
     if d["m_null"] < policy.min_masters or d["m_alt"] < policy.min_masters:
         d["why"] = "too few masters (null %d, alt %d < %d)" % (d["m_null"], d["m_alt"], policy.min_masters)
-        return ph_n, ph_a, d
+        return finish(ph_n, ph_a)
     m0 = median(null_x)
     nsd = null_sd(null_x, policy.sd_floor) * policy.null_widen * (1.0 + policy.se_terms / math.sqrt(ne))
     nul = (m0, max(nsd, policy.sd_floor))
@@ -401,7 +435,7 @@ def fit_class(null_x, alt_x, null_grp, alt_grp, null_mst, alt_mst, c, policy, gr
     alt = (nul[0] + lam * (m1 - nul[0]), max(nul[1] + lam * (asd - nul[1]), policy.sd_floor))
     if alt[0] > nul[0] - policy.min_separation * nul[1]:
         d["why"] = "alt not separated from null (alt %.3f null %.3f sd %.3f)" % (alt[0], nul[0], nul[1])
-        return ph_n, ph_a, d
+        return finish(ph_n, ph_a)
     d["status"], d["blend"] = "fitted", 0.0
     if ne < policy.full_null or ae < policy.full_alt:
         d["status"] = "thin"
@@ -418,7 +452,8 @@ def fit_class(null_x, alt_x, null_grp, alt_grp, null_mst, alt_mst, c, policy, gr
             d["why"] = "thin and no blend dominated by the placeholder"
         else:
             d["why"] = "thin (n_eff %d/%d, %d/%d): shrunk, blend %.1f" % (ne, policy.full_null, ae, policy.full_alt, b)
-    d["dominated"] = dominated(nul, alt, c, grid)
+    d["dominated"] = dominated(nul, alt, c, grid)        # the blend itself (before the C3 floor, which widens the null on purpose)
+    nul, alt, d = finish(nul, alt)
     return nul, alt, d
 
 
@@ -788,16 +823,17 @@ def cross_validate(items, segs, all_masters, policy, c1, seed):
 # Outputs
 # ----------------------------------------------------------------------------------------------------------
 def render_header(tabs, diag, prov):
-    any_fit = any(d["status"] in ("fitted", "thin") for d in diag)
+    any_fit = any(d["status"] in ("fitted", "thin", "no-alt") for d in diag)
     P = prov["policy"]
     L = ["// Copyright(C) 2026 VP-V contributors", "// SPDX-License-Identifier: GPL-3.0-only", "#pragma once", "",
          "// GENERATED by tools/eval/source_id/calibrate_nulls.py. DO NOT EDIT: rerun the calibration instead.",
          "// Provenance: dump set sha256 %s" % prov["hash"],
          "//             date %s, %d files, %d rows, %d informative clusters from %d masters (n_eff %d shots), cv %s" % (
              prov["date"], prov["files"], prov["rows"], prov["items"], prov["masters"], prov["n_eff"], prov["cv"]),
-         "//             policy: min n_eff null/alt %d/%d, full %d/%d, masters >= %d, null widen %.2f, require_power %s" % (
+         "//             policy: min n_eff null/alt %d/%d, full %d/%d, masters >= %d, null widen %.2f, require_power %s,"
+         " null sd floor + alt-null %s, aliases dropped %s" % (
              P.min_null_hard, P.min_alt_hard, P.full_null, P.full_alt, P.min_masters, P.null_widen,
-             prov["require_power"])]
+             prov["require_power"], P.null_sd_floor, P.drop_aliases)]
     for c in range(4):
         d = diag[c]
         L.append("//   %-12s null %5d rows (n_eff %d, %d masters), alt %5d (n_eff %d, %d masters): %s%s" % (
@@ -862,6 +898,16 @@ def render_report(tabs, diag, prov, cv, fold_of, c1, stats, policy=None):
             CLASS_NAMES[c], d["n_null"], d["eff_null"], d["m_null"], d["n_alt"], d["eff_alt"], d["m_alt"],
             tabs["null"][c][0], tabs["null"][c][1], tabs["alt"][c][0], tabs["alt"][c][1],
             "n/a" if mx != mx else "%.3f" % mx, d["status"], (": " + d["why"][:50]) if d["why"] else ""))
+    hits = []
+    for c in range(4):
+        d = diag[c]
+        if d["floored"]:
+            hits.append("%s null sd %.3f -> %.3f (floor = dip-side sd of its own data)" % (CLASS_NAMES[c], d["sd_before"], d["floor"]))
+        if d["alt_zero"]:
+            hits.append("%s alt = null (alt n_eff %d < %d: zero increment)" % (CLASS_NAMES[c], d["eff_alt"], (policy or Policy()).min_alt_hard))
+    L.append("")
+    L.append("C3 (null sd floor, alt = null below n_eff 20)%s: %s." % (
+        "" if (policy or Policy()).null_sd_floor else " OFF", "; ".join(hits) if hits else "no class hit"))
     L.append("")
     if cv is None:
         L.append("## Cross-validation: NOT POSSIBLE (fewer than 4 masters or one fold empty). Tables are UNVALIDATED.")
@@ -914,6 +960,8 @@ def apply_args(policy, args):
         policy.dwell_sec = float(args.dwell_sec)
     if getattr(args, "keep_aliases", False):
         policy.drop_aliases = False
+    if getattr(args, "no_null_floor", False):
+        policy.null_sd_floor = False
     return policy
 
 
@@ -1160,8 +1208,28 @@ def selftest():
     ks = lambda n_: [("r", "x", i) for i in range(n_)]
     ms = lambda n_: ["m%d" % (i % 6) for i in range(n_)]
     tn, ta, dg = fit_class(nx, axx, ks(100), ks(40), ms(100), ms(40), 0, pol, grid)
-    check(dg["status"] == "thin" and 0.0 < dg["blend"] < 1.0 and dominated(tn, ta, 0, grid),
-          "thin class: partial blend %.1f toward the placeholder, then dominated" % dg["blend"])
+    check(dg["status"] == "thin" and 0.0 < dg["blend"] < 1.0 and dg["dominated"],
+          "thin class: partial blend %.1f toward the placeholder, dominated before the C3 floor" % dg["blend"])
+    check(dg["floor"] is not None and tn[1] >= dg["floor"] - 1e-12,
+          "C3: the blended null sd %.4f is not below the dip-side sd of its own data %.4f" % (tn[1], dg["floor"]))
+    pol_off = Policy()
+    pol_off.null_sd_floor = False
+    tnf, taf, dgf = fit_class(nx, axx, ks(100), ks(40), ms(100), ms(40), 0, pol_off, grid)
+    check(dgf["floor"] is None and dominated(tnf, taf, 0, grid) and tnf[1] <= tn[1] + 1e-12,
+          "C3 off: no floor, the blend stays dominated by the placeholder")
+    # C3: a placeholder class (too few masters) keeps the placeholder MEAN but not a null sd below its data's dip-side sd
+    wide = [-0.1 + 0.12 * rng.gauss() for _ in range(300)]
+    tnp, tap, dgp = fit_class(wide, axx, ks(60), ks(40), ["a", "b"] * 30, ["a", "b"] * 20, 1, pol, grid)
+    check(dgp["status"] == "placeholder" and tnp[0] == PLACEHOLDER["null"][1][0] and tnp[1] > PLACEHOLDER["null"][1][1] and tnp[1] >= dgp["floor"] - 1e-12
+          and dgp["floored"] and tap == PLACEHOLDER["alt"][1],
+          "C3: placeholder class with 60 shots of data: null sd %.3f floored from %.3f" % (tnp[1], PLACEHOLDER["null"][1][1]))
+    # C3: alt n_eff < 20 (with enough null data): alt = null, a zero increment everywhere; C3 off: the placeholder
+    tna, taa, dga = fit_class(wide, axx[:10], ks(60), ks(10), ms(60), ms(10), 1, pol, grid)
+    zero = all(increment({"null": [tna] * 4, "alt": [taa] * 4}, 1, t_) == 0.0 for t_ in (-2.0, -0.5, -0.1, 0.0, 0.5))
+    check(dga["status"] == "no-alt" and dga["alt_zero"] and taa == tna and zero,
+          "C3: alt n_eff 10 < 20 gives alt = null (status %s, zero increment on the grid)" % dga["status"])
+    tno, tao, dgo = fit_class(wide, axx[:10], ks(60), ks(10), ms(60), ms(10), 1, pol_off, grid)
+    check(dgo["status"] == "placeholder" and tno == PLACEHOLDER["null"][1] and tao == PLACEHOLDER["alt"][1], "C3 off: alt n_eff 10 keeps the placeholder")
     tn1, ta1, dg1 = fit_class(nx[:20], axx, ks(20), ks(40), ms(20), ms(40), 0, pol, grid)
     check(dg1["status"] == "placeholder" and tn1 == PLACEHOLDER["null"][0], "too few effective nulls -> placeholder")
     tn2, ta2, dg2 = fit_class(nx, axx, ks(100), ks(40), ["a"] * 100, ms(40), 0, pol, grid)
@@ -1221,7 +1289,8 @@ def selftest():
         grid = make_grid(max(it.T for it in items))
         for c in range(4):
             if diag[c]["status"] in ("thin", "placeholder"):
-                check(dominated(tabs["null"][c], tabs["alt"][c], c, grid), "class %s never more permissive than placeholder" % CLASSES[c])
+                check(dominated(tabs["null"][c], tabs["alt"][c], c, grid) or diag[c]["floored"],
+                      "class %s never more permissive than placeholder (or widened by the C3 floor)" % CLASSES[c])
 
         # one fold per master (the title column is unique per reel and must be ignored)
         masters = sorted(set(r.master for r in rows))
@@ -1284,6 +1353,8 @@ def main(argv=None):
                     help="null rows on upscaled reels: n more than 1 from truth on both sides (default, the "
                          "spec) or only below the truth (above it a descale is lossless and alt-like)")
     ap.add_argument("--seed", default="sid-cal", help="seed of the deterministic by-master fold split")
+    ap.add_argument("--no-null-floor", action="store_true",
+                    help="no C3: the null sd may fall below the dip-side sd of its own data, a class with alt n_eff < 20 keeps the placeholder (ablation only)")
     ap.add_argument("--keep-aliases", action="store_true",
                     help="keep the aliases (+-2%% of p/q x truth_n, q <= 4) of upscaled reels in the null (the cal1 behaviour; ablation only)")
     ap.add_argument("--no-window", action="store_true", help="simulate WITHOUT the recent window (the cal1 behaviour; extra row only)")
