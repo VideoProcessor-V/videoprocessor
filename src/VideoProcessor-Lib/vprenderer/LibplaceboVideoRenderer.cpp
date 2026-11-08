@@ -5682,6 +5682,8 @@ struct LibplaceboVideoRenderer::Impl
 		bool fullRange);   // VPV-HOOK M2 P5b-4: defined in VP-V/modules/motion/consumers/PhaseTimeline.inl
 	template<class AsADone> bool DrawVpPhasePicture(const pl_frame& source, const pl_frame& image, pl_frame& frame,
 		uint64_t sourceSequence, uint64_t nextSourceSequence, bool& entranceOnceDone, bool& bAlreadyA, const AsADone& bAsADone);   // VPV-HOOK M2 P5b-4: defined in VP-V/modules/motion/consumers/PhaseTimeline.inl
+	MotionConfig::Settings ResolveMotionEngine(bool fileMotionOff);   // VPV-HOOK M2 P5b-5: defined in VP-V/modules/motion/consumers/PhaseTimeline.inl
+	bool PlanVpOutputs(RendererExtension::OutputPlan& plan);   // VPV-HOOK M2 P5b-5: R10 PlanOutputs (PhaseTimeline.inl)
 	// A picture between frames is drawn for this image: Stage B's picture is ready and the
 	// image renders A's own planes (a subtitle-composed picture keeps A and its A-aligned
 	// consumers: the residual hold motion, the grain field, the occlusion mask).
@@ -26289,7 +26291,9 @@ releaseDriftBaseRetention =
 	VpMotion::DejudderView dejudderView{ dejudderPolicy, dejudderEstimatedSequence,
 		[](void* self, const char* why) { static_cast<Impl*>(self)->DejudderHold(why); }, this };
 	VpMotion::PhaseTimelineView phaseTimelineView{ dejudderPolicy };
-	VpMotion::DejudderHostBinding dejudderBinding{ this, VpMotion::DejudderBindingSpec{ &dejudderView, &phaseTimelineView, nullptr, nullptr, this } };
+	VpMotion::DejudderHostBinding dejudderBinding{ this, VpMotion::DejudderBindingSpec{ &dejudderView, &phaseTimelineView,
+		[](void* self, RendererExtension::OutputPlan& plan) { return static_cast<Impl*>(self)->PlanVpOutputs(plan); },
+		[](void* self) { static_cast<Impl*>(self)->vpQueueErrorReset.store(true, std::memory_order_release); }, this } };
 	// VPV-HOOK-END
 	Vpv::Capture::HostBinding captureBinding{ this, Vpv::Capture::MakeCaptureHost(*this) };   // P10: last member (registered last, removed first)   // VPV-HOOK
 };
@@ -32050,30 +32054,9 @@ void LibplaceboVideoRenderer::RenderLoop()
                     m_timingClock&&m_timingClock->TimingClockTicksPerSecond()>0?
                     static_cast<double>(frame.GetTimingTimestamp())/m_timingClock->TimingClockTicksPerSecond():
                     (captureRateHz>0.0?static_cast<double>(sourceSequence)/captureRateHz:NAN);   // hunt 2 13-timing L5: 0 = unknown
-                // One motion engine (owner 2026-10-15, motion_engine): VP's motion
-                // handling or libplacebo's smooth motion, chosen by the profile
-                // rules; deinterlacing is independent of it.
-                MotionConfig::Settings motionSettings=m_impl->activeSettings.motion;
-                {
-                    const auto engine=DejudderPolicy::ResolveEngine(motionSettings.engine,
-                        DejudderPolicy::Configured(m_impl->activeSettings.dejudderStrength,m_impl->activeSettings.dejudderStrengthEven),
-                        motionSettings.smoothMotion!="off");
-                    const bool smooth=engine==DejudderPolicy::MotionEngine::SmoothMotion;
-                    if(!smooth)motionSettings.smoothMotion="off";
-                    if(smooth!=m_impl->smoothMotionEngine||!m_impl->motionEngineLogged) {
-                        if(smooth!=m_impl->smoothMotionEngine)
-                            m_impl->RequestMotionInvalidate(MotionValidity::Cause::SmoothMotionMix);
-                        m_impl->smoothMotionEngine=smooth;
-                        m_impl->motionEngineLogged=true;
-                        DebugLog::Log("Motion engine: %s (motion_engine=%s)",smooth?"libplacebo smooth motion; VP's de-judder off":
-                            "VP (de-judder); smooth motion off",motionSettings.engine.c_str());
-                        DiagnosticHistory::Global().RecordDecision("motion-engine",
-                            smooth?"libplacebo smooth motion":"VP de-judder",smooth?1:0);
-                    }
-                }
-                // ABI 37: a file frame shown without motion (playback rate != 1, paused)
-                // is not mixed by smooth motion either.
-                if(currentFileMotionOff)motionSettings.smoothMotion="off";
+                // One motion engine (owner 2026-10-15, motion_engine): VP's or libplacebo's smooth motion, and no mixing
+                // for a file frame shown without motion (de-judder module: PhaseTimeline.inl).
+                MotionConfig::Settings motionSettings=m_impl->ResolveMotionEngine(currentFileMotionOff);   // VPV-HOOK M2 P5b-5
                 const bool currentWillMix=TemporalRenderer::WillMix(motionSettings,
                     captureRateHz,m_impl->renderLoadDisplayRefreshHz.load(std::memory_order_acquire),
                     state&&state->displayMode&&state->displayMode->IsInterlaced(),
@@ -32099,69 +32082,18 @@ void LibplaceboVideoRenderer::RenderLoop()
                     state&&state->displayMode?static_cast<int>(state->displayMode->FirstFieldOrder()):0,
                     temporalCaptureEpoch,sourceSequence,sourcePts,frame.IsSourceDiscontinuity(),
                     sourceSubtitleComposition,cadenceRepeat);
-                if(m_impl->temporalRenderer.Mixing()!=m_impl->smoothMotionMixingLogged) {
-                    m_impl->RequestMotionInvalidate(MotionValidity::Cause::SmoothMotionMix);
-                    m_impl->smoothMotionMixingLogged=m_impl->temporalRenderer.Mixing();
-                    DebugLog::Log("Motion: smooth motion mixing %s (%s)",m_impl->smoothMotionMixingLogged?"on":"off",
-                        m_impl->temporalRenderer.status.c_str());
-                }
                 auto motionOutputs=m_impl->temporalRenderer.outputs;
                 // Stage B: VP's per-vsync timeline (exclusive with smooth motion, never in low
                 // latency): this frame's refreshes, each at its true phase between A and B.
                 std::vector<double> vpPhases;
-                // R3 (resync_event on): a continuity slip or a timing event re-anchors the timeline's
-                // source clock; a FULL restarts it through the generation (VpResync::ReaderGeneration).
-                if((VpResync::TakeIfDriving(m_impl->resync,m_impl->resyncDrive,VpResync::Reader::Timeline)&
-                    (VpIndicator::Bit(VpIndicator::kContinuity)|VpIndicator::Bit(VpIndicator::kTiming)))!=0)
-                    m_impl->vpTimeline.Reanchor();
-                m_impl->vpTimelineActive=false;
-                m_impl->vpSkipOutput=false;
-                m_impl->vpOutputPhase=0.0;
-                if(!m_impl->temporalRenderer.Active()&&m_impl->VpTimelineWanted()) {
-                    LARGE_INTEGER qpcFrequencyTimeline{};
-                    const bool film=frameFilmHz>0.0&&arrivalQpc>0&&QueryPerformanceFrequency(&qpcFrequencyTimeline)&&
-                        qpcFrequencyTimeline.QuadPart>0;
-                    const double ptsA=film?static_cast<double>(arrivalQpc)/static_cast<double>(qpcFrequencyTimeline.QuadPart):sourcePts;
-                    const double rateHz=frameFilmHz>0.0?frameFilmHz:captureRateHz;
-                    // (8) Closed on the queue: the refresh spacing is trimmed (at most 0.3%) by the
-                    // smoothed distance of the queue from its target, so a ppm difference between
-                    // the capture and display clocks cannot walk the queue.
-                    // A backlog flush or a new queue generation starts the steering over.
-                    // Hunt 2 13-timing H2/L3 (queue_timing_fixes): the smoothing is a time
-                    // constant in seconds (AlphaQueuePolicy::TimelineQueueSteering); the
-                    // one-frame margin it steers to is no longer flushed (H1).
-                    if(m_impl->vpQueueErrorReset.exchange(false,std::memory_order_acq_rel)||frameGeneration!=m_impl->vpQueueGeneration) {
-                        m_impl->vpQueueSteering.Reset();
-                        m_impl->vpQueueGeneration=frameGeneration;
-                    }
-                    // ABI 37: a file source is paced by its due times and keeps the queue
-                    // full by design: no steering on its depth.
-                    if(currentFileFrame)
-                        m_impl->vpQueueSteering.Reset();
-                    else
-                        m_impl->vpQueueSteering.Update(queueDepthAfterDequeue,desiredQueueDepth,rateHz,
-                            m_queueTimingFixes.load(std::memory_order_relaxed),
-                            CurrentQueueHold().fraction);
-                    m_impl->vpTimeline.SetRateTrim(currentFileFrame?1.0:m_impl->vpQueueSteering.RateTrim());
-                    m_impl->vpTimeline.SetSpanInTime(m_impl->activeSettings.generalRateFixes);   // fixed-constant batch 2026-10-18
-                    const unsigned long long updatesBefore=m_impl->vpTimeline.Updates();
-                    const auto& planned=m_impl->vpTimeline.Plan(VpResync::ReaderGeneration(m_impl->resync,frameGeneration,sourceSequence),
-                        sourceSequence,ptsA,nextSourceSequence?nextPts:0.0,
-                        rateHz,m_impl->TimelineDisplayHz(),frame.IsSourceDiscontinuity());
-                    m_impl->vpTimelineActive=true;
-                    m_impl->vpSkipOutput=planned.empty();
-                    m_impl->vpSkipIsUpdate=planned.empty()&&m_impl->vpTimeline.Updates()!=updatesBefore;
-                    motionOutputs.clear();
-                    for(const auto& o:planned){motionOutputs.push_back(o.pts);vpPhases.push_back(o.phase);}
-                } else if(m_impl->vpTimeline.Initialized()) {
-                    m_impl->vpTimeline.Reset();
-                    m_impl->vpQueueSteering.Reset();
-                }
-                m_impl->vpCaptureRateHz=frameFilmHz>0.0?frameFilmHz:captureRateHz;
-                if(m_impl->vpTimelineActive!=m_impl->vpTimelineLogged) {
-                    m_impl->vpTimelineLogged=m_impl->vpTimelineActive;
-                    m_impl->LogVpTimeline(m_impl->vpTimelineActive?"engaged (one picture per display refresh)":"released");
-                }
+                // R10 (M2 P5b-5): the smooth-motion mixing log and VP's per-vsync timeline plan (de-judder module,
+                // TimelinePlanner.h / PhaseTimeline.inl): this frame's refreshes and phases replace motionOutputs.
+                RendererExtension::OutputPlan vpPlan;   // VPV-HOOK
+                vpPlan.seq=static_cast<int64_t>(sourceSequence);vpPlan.nextSeq=static_cast<int64_t>(nextSourceSequence);vpPlan.generation=static_cast<int64_t>(frameGeneration);   // VPV-HOOK
+                vpPlan.ptsA=sourcePts;vpPlan.ptsB=nextPts;vpPlan.filmHz=frameFilmHz;vpPlan.captureHz=captureRateHz;vpPlan.arrivalQpc=arrivalQpc;   // VPV-HOOK
+                vpPlan.discontinuity=frame.IsSourceDiscontinuity();vpPlan.fileFrame=currentFileFrame;vpPlan.queueDepthAfterDequeue=queueDepthAfterDequeue;   // VPV-HOOK
+                vpPlan.desiredDepth=desiredQueueDepth;vpPlan.holdFraction=CurrentQueueHold().fraction;vpPlan.queueTimingFixes=m_queueTimingFixes.load(std::memory_order_relaxed);   // VPV-HOOK
+                vpPlan.outputs=&motionOutputs;vpPlan.phases=&vpPhases;RendererExtension::PlanOutputs(m_impl.get(),vpPlan);   // VPV-HOOK
                 // Bill merge (c-item 11): Bill's display repeat cadence (present_every_vsync) and VP's
                 // per-vsync timeline or de-judder extras would both schedule refreshes: VP's own owns
                 // them while active (VP-V only: the Original pathway has neither), visibly.
@@ -32446,7 +32378,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 								// (the queue is back at its hold, not restarted).
 								if (m_impl && backlogDecision.restartsTiming)
 								{
-									m_impl->vpQueueErrorReset.store(true, std::memory_order_release);
+									RendererExtension::NotifyQueue(RendererExtension::QueueEvent::BacklogFlush, m_impl.get());   // VPV-HOOK M2 P5b-5: the timeline's steering starts over (de-judder module)
 									if (m_impl->RenderAheadActive())
 										m_impl->renderAheadFlushReanchor.store(true, std::memory_order_release);
 								}

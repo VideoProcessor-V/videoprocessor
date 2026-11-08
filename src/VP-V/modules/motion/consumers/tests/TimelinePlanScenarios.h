@@ -7,6 +7,7 @@
 
 #include <VP-V/modules/motion/consumers/tests/TimelinePlanLegacyCopy.h>
 
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -115,7 +116,7 @@ namespace TimelinePlanLegacy
 				f.sourceSequence = seq;
 				f.frameFilmHz = film;
 				f.captureRateHz = 60.0;
-				f.filmArrivalSeconds = 100.0 + filmFrame / film;
+				f.arrivalQpc = static_cast<int64_t>(1000000000LL + std::llround(filmFrame / film * 10000000.0));
 				f.sourcePts = f.sourceSequence / 60.0;
 				f.nextSourceSequence = seq + 1;
 				f.nextPts = 100.0 + (filmFrame + 1) / film;
@@ -199,6 +200,15 @@ namespace TimelinePlanLegacy
 			s.frames = Steady(12, 50.0, 60.0);
 			s.frames[6].nextSourceSequence = 0;
 			s.frames[7].nextSourceSequence = 0;
+			list.push_back(s);
+		}
+		{
+			// The draw-time counters in the engaged / released lines (the renderer counts pictures between plans).
+			Scenario s; s.name = "release-log-counters";
+			s.setup = [](State& st) { Interpolating(st); st.vpPhasePictures = 41; st.vpHeldPictures = 3; st.vpSkippedFrames = 2;
+				st.vpFilmUpdates = 5; st.vpGapPairs = 1; };
+			s.beforeFrame = [](State& st, size_t i) { st.lowLatency = i >= 6; st.vpPhasePictures += 7; };
+			s.frames = Steady(10, 50.0, 60.0);
 			list.push_back(s);
 		}
 		{

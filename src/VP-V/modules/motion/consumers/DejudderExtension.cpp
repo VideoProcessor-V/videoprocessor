@@ -73,10 +73,12 @@ namespace VpMotion
 		return static_cast<void*>(static_cast<IDejudderDirectory*>(&TheDirectory()));
 	}
 
-	// The render loop's backlog flush (the queue lock is held by the caller; no lock here).
+	// The render loop's backlog flush that restarts the timing (BacklogFlush; the queue lock is held by the caller).
+	// Not QueueEvent::Flush: that is BeginQueueGeneration's generation arm (ResyncExtension), which the steering
+	// already follows through the generation compare.
 	void DejudderExtension::OnQueue(const RE::QueueFacts& f)
 	{
-		if (f.kind != RE::QueueEvent::Flush)
+		if (f.kind != RE::QueueEvent::BacklogFlush)
 			return;
 		const std::shared_ptr<Entry> e = Slots().Find(f.host);
 		if (e && e->spec.queueFlush)

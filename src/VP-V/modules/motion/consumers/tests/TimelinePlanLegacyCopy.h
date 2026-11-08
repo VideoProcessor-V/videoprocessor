@@ -39,7 +39,8 @@ namespace TimelinePlanLegacy
 		uint64_t nextSourceSequence = 0;
 		double nextPts = 0.0;
 		double sourcePts = 0.0;            // displaySourceClock.Select(...)
-		double filmArrivalSeconds = 0.0;   // arrivalQpc / QPF (0 = arrivalQpc 0)
+		int64_t arrivalQpc = 0;             // the capture-arrival QPC (0 = not known)
+		int64_t qpcFrequency = 10000000;    // QueryPerformanceFrequency
 		double frameFilmHz = 0.0;
 		double captureRateHz = 0.0;
 		bool discontinuity = false;        // frame.IsSourceDiscontinuity()
@@ -112,13 +113,14 @@ namespace TimelinePlanLegacy
 			return activeSettings.interpolation != InterpolationPolicy::Mode::Off && (interpolating || keep) &&
 				!lowLatency;
 		}
-		// Verbatim apart from the draw-time counters (0 here: they count pictures drawn later).
+		// The draw-time counters (renderer members of the same names; a scenario may set them).
+		unsigned long long vpPhasePictures = 0, vpHeldPictures = 0, vpSkippedFrames = 0, vpFilmUpdates = 0, vpGapPairs = 0;
+		// Verbatim.
 		void LogVpTimeline(const char* what)
 		{
-			const unsigned long long zero = 0;
 			Log("Interpolation timeline: %s (phase %.3f; %llu pictures between frames, %llu without vectors or B, "
 				"%llu source frames skipped, %llu film updates, %llu gap pairs, %llu restarts, %llu re-anchors, span %d)", what,
-				vpOutputPhase, zero, zero, zero, zero, zero, vpTimeline.Restarts(),
+				vpOutputPhase, vpPhasePictures, vpHeldPictures, vpSkippedFrames, vpFilmUpdates, vpGapPairs, vpTimeline.Restarts(),
 				vpTimeline.Reanchors(), vpTimeline.LastSpanFrames());
 		}
 
@@ -147,8 +149,8 @@ namespace TimelinePlanLegacy
 			vpSkipOutput=false;
 			vpOutputPhase=0.0;
 			if(!f.temporalActive&&VpTimelineWanted()) {
-				const bool film=frameFilmHz>0.0&&f.filmArrivalSeconds>0.0;   // COPY: arrivalQpc>0 && QPF
-				const double ptsA=film?f.filmArrivalSeconds:sourcePts;
+				const bool film=frameFilmHz>0.0&&f.arrivalQpc>0&&f.qpcFrequency>0;   // COPY: QueryPerformanceFrequency
+				const double ptsA=film?static_cast<double>(f.arrivalQpc)/static_cast<double>(f.qpcFrequency):sourcePts;
 				const double rateHz=frameFilmHz>0.0?frameFilmHz:captureRateHz;
 				if(vpQueueErrorReset.exchange(false,std::memory_order_acq_rel)||frameGeneration!=vpQueueGeneration) {
 					vpQueueSteering.Reset();

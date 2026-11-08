@@ -112,7 +112,8 @@ namespace RendererExtension
 	};
 
 	// ---- Queue -----------------------------------------------------------------------------
-	enum class QueueEvent { Reset, LiveQueueReset, Flush, Drop, Discontinuity, Gap, FormatChange };
+	enum class QueueEvent { Reset, LiveQueueReset, Flush, Drop, Discontinuity, Gap, FormatChange,
+		BacklogFlush };   // M2 P5b-5 (appended): a backlog flush that restarts the timing (not a queue generation)
 	struct QueueFacts : Context
 	{
 		QueueEvent kind = QueueEvent::Reset;
@@ -172,6 +173,9 @@ namespace RendererExtension
 		std::vector<double>* phases = nullptr;             // matching phases between A and B; null = not wanted
 		bool skip = false;                                 // out: draw no output for this frame
 		bool schedulesRefreshes = false;                   // out: the extension owns the refresh schedule
+		// M2 P5b-5 (appended): the frame's capture-arrival QPC (0 = unknown) and the host's queue timing fixes switch.
+		int64_t arrivalQpc = 0;
+		bool queueTimingFixes = false;
 	};
 
 	// R11 PlanPresent (take-over; render thread, renderMutex). Default interval 1 = the host's Present(1, 0).

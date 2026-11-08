@@ -10,6 +10,8 @@
 // Render thread (RenderLocked, renderMutex held); ReleaseDejudder also from RetireOutput (stop path, renderMutex).
 #pragma once
 
+#include <VP-V/modules/motion/consumers/TimelinePlanner.h>
+
 bool LibplaceboVideoRenderer::Impl::RunVpPhaseInterpolation()
 {
 	if (!frameInterpolator)
@@ -187,10 +189,14 @@ bool LibplaceboVideoRenderer::Impl::VpPhaseDrawn(const pl_frame& image) const
 
 void LibplaceboVideoRenderer::Impl::LogVpTimeline(const char* what)
 {
-	DebugLog::Log("Interpolation timeline: %s (phase %.3f; %llu pictures between frames, %llu without vectors or B, "
-		"%llu source frames skipped, %llu film updates, %llu gap pairs, %llu restarts, %llu re-anchors, span %d)", what,
-		vpOutputPhase, vpPhasePictures, vpHeldPictures, vpSkippedFrames, vpFilmUpdates, vpGapPairs, vpTimeline.Restarts(),
-		vpTimeline.Reanchors(), vpTimeline.LastSpanFrames());
+	// M2 P5b-5: the format and arguments are VpMotion::VpTimelineLine's (TimelinePlanner.h, CPU-tested).
+	VpMotion::VpTimelineCounters counters;
+	counters.phasePictures = vpPhasePictures;
+	counters.heldPictures = vpHeldPictures;
+	counters.skippedFrames = vpSkippedFrames;
+	counters.filmUpdates = vpFilmUpdates;
+	counters.gapPairs = vpGapPairs;
+	DebugLog::Log("%s", VpMotion::VpTimelineLine(what, vpOutputPhase, counters, vpTimeline).c_str());
 }
 
 void LibplaceboVideoRenderer::Impl::PublishDejudderStatus(bool force)
@@ -391,4 +397,80 @@ bool LibplaceboVideoRenderer::Impl::DrawVpPhasePicture(const pl_frame& source, c
         frame.planes[1].texture = vpPhasePlanes.chroma;
     }
 	return phasePicture;
+}
+
+// M2 P5b-5 (item h): the motion-engine either/or (owner 2026-10-15, motion_engine): VP's motion handling or
+// libplacebo's smooth motion, chosen by the profile rules (deinterlacing is independent of it), and no mixing for
+// a file frame shown without motion (ABI 37). The render loop's old statements (m_impl-> dropped); Bill's
+// TemporalRenderer::WillMix / Begin then read the returned settings as before. Render loop, renderMutex held.
+MotionConfig::Settings LibplaceboVideoRenderer::Impl::ResolveMotionEngine(bool currentFileMotionOff)
+{
+	MotionConfig::Settings motionSettings=activeSettings.motion;
+	{
+	    const auto engine=DejudderPolicy::ResolveEngine(motionSettings.engine,
+	        DejudderPolicy::Configured(activeSettings.dejudderStrength,activeSettings.dejudderStrengthEven),
+	        motionSettings.smoothMotion!="off");
+	    const bool smooth=engine==DejudderPolicy::MotionEngine::SmoothMotion;
+	    if(!smooth)motionSettings.smoothMotion="off";
+	    if(smooth!=smoothMotionEngine||!motionEngineLogged) {
+	        if(smooth!=smoothMotionEngine)
+	            RequestMotionInvalidate(MotionValidity::Cause::SmoothMotionMix);
+	        smoothMotionEngine=smooth;
+	        motionEngineLogged=true;
+	        DebugLog::Log("Motion engine: %s (motion_engine=%s)",smooth?"libplacebo smooth motion; VP's de-judder off":
+	            "VP (de-judder); smooth motion off",motionSettings.engine.c_str());
+	        DiagnosticHistory::Global().RecordDecision("motion-engine",
+	            smooth?"libplacebo smooth motion":"VP de-judder",smooth?1:0);
+	    }
+	}
+	// ABI 37: a file frame shown without motion (playback rate != 1, paused)
+	// is not mixed by smooth motion either.
+	if(currentFileMotionOff)motionSettings.smoothMotion="off";
+	return motionSettings;
+}
+
+namespace
+{
+	// The renderer side of VpMotion::PlanVpTimeline (the old statements, at the old points).
+	template<class ImplT>
+	struct ImplTimelineHost
+	{
+		ImplT& impl;
+		bool TakeReanchor()
+		{
+			return (VpResync::TakeIfDriving(impl.resync,impl.resyncDrive,VpResync::Reader::Timeline)&
+				(VpIndicator::Bit(VpIndicator::kContinuity)|VpIndicator::Bit(VpIndicator::kTiming)))!=0;
+		}
+		bool TemporalActive() const { return impl.temporalRenderer.Active(); }
+		bool VpTimelineWanted() const { return impl.VpTimelineWanted(); }
+		double QpcFrequency() const
+		{
+			LARGE_INTEGER qpcFrequencyTimeline{};
+			return QueryPerformanceFrequency(&qpcFrequencyTimeline) && qpcFrequencyTimeline.QuadPart > 0 ?
+				static_cast<double>(qpcFrequencyTimeline.QuadPart) : 0.0;
+		}
+		uint64_t ReaderGeneration(uint64_t frameGeneration, uint64_t sourceSequence) const
+		{
+			return VpResync::ReaderGeneration(impl.resync,frameGeneration,sourceSequence);
+		}
+		double TimelineDisplayHz() const { return impl.TimelineDisplayHz(); }
+		void LogVpTimeline(const char* what) { impl.LogVpTimeline(what); }
+	};
+}
+
+// M2 P5b-5 (item h, R10 PlanOutputs; DejudderExtension calls it through the binding): the smooth-motion mixing
+// log (moved from just before the render loop's motionOutputs copy), then VP's per-vsync timeline (exclusive
+// with smooth motion, never in low latency): this frame's refreshes, each at its true phase between A and B.
+// Render loop, renderMutex held. True: handled (the plan is the timeline's, or the host's list left as it was).
+bool LibplaceboVideoRenderer::Impl::PlanVpOutputs(RendererExtension::OutputPlan& plan)
+{
+	if(temporalRenderer.Mixing()!=smoothMotionMixingLogged) {
+	    RequestMotionInvalidate(MotionValidity::Cause::SmoothMotionMix);
+	    smoothMotionMixingLogged=temporalRenderer.Mixing();
+	    DebugLog::Log("Motion: smooth motion mixing %s (%s)",smoothMotionMixingLogged?"on":"off",
+	        temporalRenderer.status.c_str());
+	}
+	ImplTimelineHost<Impl> host{ *this };
+	VpMotion::PlanVpTimeline(activeSettings, dejudderPolicy, plan, host);
+	return true;
 }

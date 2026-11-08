@@ -10,6 +10,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/modules/motion/consumers/tests/TimelinePlanRunnerHost.h>
 #include <VP-V/modules/motion/consumers/tests/TimelinePlanScenarios.h>
 
 #include <sstream>
@@ -69,6 +70,22 @@ namespace TimelinePlanTraceTest
 				const std::vector<std::string> expected = Lines(kRecorded[i].trace);
 				const std::vector<std::string> actual = TimelinePlanLegacy::Trace(scenarios[i]);
 				const std::wstring n = Wide(scenarios[i].name);
+				Assert::AreEqual(expected.size(), actual.size(), (n + L": frame count").c_str());
+				for (size_t k = 0; k < expected.size(); ++k)
+					Assert::AreEqual(expected[k], actual[k], (n + L": frame " + std::to_wstring(k)).c_str());
+			}
+		}
+
+		// M2 P5b-5: the MOVED plan (TimelinePlanner.h through an R10 OutputPlan, VpTimelineLine) over the same
+		// scenarios must give the recorded traces.
+		TEST_METHOD(NewPlannerReproducesEveryRecordedTrace)
+		{
+			const std::vector<TimelinePlanLegacy::Scenario> scenarios = TimelinePlanLegacy::Scenarios();
+			for (size_t i = 0; i < scenarios.size() && i < sizeof(kRecorded) / sizeof(kRecorded[0]); ++i)
+			{
+				const std::vector<std::string> expected = Lines(kRecorded[i].trace);
+				const std::vector<std::string> actual = TimelinePlanRunner::Trace(scenarios[i]);
+				const std::wstring n = L"planner " + Wide(scenarios[i].name);
 				Assert::AreEqual(expected.size(), actual.size(), (n + L": frame count").c_str());
 				for (size_t k = 0; k < expected.size(); ++k)
 					Assert::AreEqual(expected[k], actual[k], (n + L": frame " + std::to_wstring(k)).c_str());

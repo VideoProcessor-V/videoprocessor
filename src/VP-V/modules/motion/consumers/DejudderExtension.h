@@ -10,7 +10,7 @@
 //     through IDejudderDirectory;
 //   - planOutputs (P5b-5, R10 PlanOutputs): the per-vsync timeline plan of a dequeued frame. Render loop
 //     thread, renderMutex HELD (P5b-1 correction of doc 59 2.2);
-//   - queueFlush (P5b-5, OnQueue(Flush)): the backlog flush that restarts the timeline's queue steering.
+//   - queueFlush (P5b-5, OnQueue(BacklogFlush)): the backlog flush that restarts the timeline's queue steering.
 //     Today's semantics: the flag is set at the flush and taken (exchange) by the next frame's plan.
 // No renderer registered under a host: nothing is planned (the host's own output list stands) and the
 // views are null. DEPENDENCY: like the other hub modules, active only when HubBootstrap is linked in.
