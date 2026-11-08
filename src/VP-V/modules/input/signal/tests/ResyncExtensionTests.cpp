@@ -182,6 +182,25 @@ namespace Tests
 					L"the Flush keeps the queue's capacity, as before");
 			}
 
+			// M2 P5b-5 (audit F3): the backlog flush's own event (BacklogFlush, the de-judder timeline's steering) is not the
+			// queue generation's Flush: it arms nothing and keeps no capacity.
+			TEST_METHOD(BacklogFlushDoesNotArm)
+			{
+				ResyncExtension ext;
+				FakeRenderer baseline, flushed;
+				Apply(ext, &baseline, "on");
+				Apply(ext, &flushed, "on");
+				RE::QueueFacts q; q.host = &flushed; q.kind = RE::QueueEvent::BacklogFlush; q.generation = 2; q.frames = 64;
+				ext.OnQueue(q);
+				for (FakeRenderer* r : { &baseline, &flushed })
+				{
+					RE::IngressContext c = Frame(r, 1); c.queueGeneration = 2; ext.OnIngress(c);
+					Begin(ext, r, 1);
+				}
+				Assert::AreEqual(baseline.resync.GetIndicator()->Capacity(), flushed.resync.GetIndicator()->Capacity(),
+					L"BacklogFlush keeps no capacity and arms nothing");
+			}
+
 			TEST_METHOD(LateSlipsReachTheShadow)
 			{
 				ResyncExtension ext;

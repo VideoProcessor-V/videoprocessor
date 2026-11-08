@@ -70,6 +70,12 @@
     <ClCompile Include="..\VP-V\modules\motion\consumers\tests\OcclusionMaskHookTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\consumers\tests\DejudderDecisionTableTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\consumers\tests\TimelinePlanTraceTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\VectorDemandTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -480,6 +486,10 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderExtension.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\tests\suite\LedDriveDelta1Tests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\LedDriveHunt2Tests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\LedDriveHunt3Tests.cpp" />
@@ -678,6 +688,10 @@
   <ItemGroup>
     <ClInclude Include="..\VP-V\tests\VpLutGpuTestSupport.h" />
     <ClInclude Include="..\VP-V\tests\SettingsTestSupport.h" />
+    <ClInclude Include="..\VP-V\modules\motion\consumers\tests\DejudderDecisionLegacyCopy.h" />
+    <ClInclude Include="..\VP-V\modules\motion\consumers\tests\DejudderDecisionSequences.h" />
+    <ClInclude Include="..\VP-V\modules\motion\consumers\tests\TimelinePlanLegacyCopy.h" />
+    <ClInclude Include="..\VP-V\modules\motion\consumers\tests\TimelinePlanScenarios.h" />
     <ClInclude Include="..\VP-V\tests\support\RealClipLibrary.h" />
     <ClInclude Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelGolden.generated.h" />
     <ClInclude Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelCrossCheck.generated.h" />

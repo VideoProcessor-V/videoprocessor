@@ -15,6 +15,7 @@
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraExtension.h>
 #include <VP-V/modules/motion/estimation/VectorEngineExtension.h>
+#include <VP-V/modules/motion/consumers/DejudderExtension.h>
 // Last: DiagnosticOverrides.h includes <windows.h> without NOMINMAX; the headers above use (std::min/max) forms that its macros break.
 #include <VP-V/modules/control/diagnostics/DiagnosticOverridesModule.h>
 
@@ -39,6 +40,9 @@ namespace
 		// Activation (all off by default, [vpv.skeleton]): the analysis lane, then the camera link (report).
 		Vpv::Skeleton::RegisterSkeletonModule();
 		Vpv::Camera::RegisterCameraExtension();
+		// The de-judder / per-refresh timeline (M2 P5b): after the vector engine and the camera link, before the
+		// entrance and core segments (doc 59 2.2 list order); its views, PlanOutputs and the QueueFlush steering reset.
+		VpMotion::RegisterDejudderExtension();
 		Vpv::Diagnostics::RegisterDiagnosticOverridesModule();   // status only: the diagnostic override line
 		Vpv::Hub::RegisterHub();
 		return 1;

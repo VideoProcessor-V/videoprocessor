@@ -475,6 +475,7 @@ private:
 	mutable std::mutex m_queueHoldMutex;
 	QueueHold m_queueHold;
 	QueueHold CurrentQueueHold() const;
+	double CurrentQueueHoldFraction() const;   // VPV-HOOK M2 P5b-5: defined in VP-V/modules/motion/consumers/PhaseTimeline.inl
 	std::string m_queueHoldLogged;
 	// Queue/timing policy (either/or, owner 2026-10-24): VP's fixed total delay (default) or upstream's.
 	// Commit (a): the VP policy serves both pathways (its options mirror the Original pathway and
