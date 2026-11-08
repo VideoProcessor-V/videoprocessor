@@ -85,6 +85,13 @@ namespace Vpv
 			const CameraLink::CameraLane* LaneOf(const void* host) const;
 			CameraLink::CameraGuidanceAdapter* AdapterOf(const void* host) const;   // null: no measurement switch on, or not live yet
 			std::string EngineProblemOf(const void* host) const;   // "" when the engine was found (or not asked for)
+			// GUIDANCE LOCK (owner, reset 1): every camera guidance switch (camera_meas_*) is forced off until the on-time rule (d = 0, the
+			// camera of frame N guides only N's matcher and only when ready before it) is built next reset; a late camera never guides.
+			// The switches parse and are shown ("camera guidance waits for the on-time rule"); no adapter, no hook. Tests of the wiring the
+			// next reset unlocks call SetGuidanceLockForTesting(false) BEFORE the first lifecycle call.
+			static constexpr const char* kGuidanceLockedText = "camera guidance waits for the on-time rule (next reset): the camera_meas_* switches are off";
+			void SetGuidanceLockForTesting(bool locked) { guidanceLocked_ = locked; }
+			bool GuidanceLocked() const { return guidanceLocked_; }
 
 		private:
 			void Reconcile(const void* host, int originalFlag, pl_gpu gpu);
@@ -99,6 +106,7 @@ namespace Vpv
 			Skeleton::ConfigLoader loader_;
 			EngineDirectoryProvider engines_;
 			Hub::HostSlots<CameraHostState> hosts_;
+			bool guidanceLocked_ = true;
 		};
 
 		// Adds CameraExtension to the hub. Start-up only; idempotent. After SkeletonModule.

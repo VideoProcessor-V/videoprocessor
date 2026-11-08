@@ -83,6 +83,7 @@ namespace Vpv
 			bool guideWanted = false;                   // ... and any camera_meas_* switch on
 			bool labelsWanted = false;                  // ... and labels are wanted (overlay, a use switch, camera_labels_gpu)
 			bool aheadWanted = false;                   // ... and camera_ahead_fit on (the fit reads the ahead NVOF pair, FlowOf)
+			bool guideLocked = false;                   // a camera_meas_* switch is set but the guidance lock holds it off (shown)
 			Skeleton::IExternalDemand* demand = nullptr;   // AHEAD FIT: the skeleton's demand entry the P7 demand was declared through (null = none)
 			bool liveBuilt = false;                     // lane built and the core attached to it
 			bool graphRefused = false;                  // the registry refused the camera graph (until the next settings change)
@@ -707,7 +708,9 @@ namespace Vpv
 			st->problem.clear();
 			// Camera live: what the keys ask for. The switches and consumers are inert unless camera_model is on (CameraSettings).
 			const bool fitWanted = linkWanted && cam.ModelWanted();
-			const bool guideWanted = fitWanted && cam.Measurement().Any();
+			const bool guideRequested = fitWanted && cam.Measurement().Any();
+			const bool guideWanted = guideRequested && !guidanceLocked_;   // GUIDANCE LOCK: off this reset (a late camera never guides)
+			st->guideLocked = guideRequested && guidanceLocked_;
 			const bool labelsWanted = fitWanted && (cam.Overlay() != OverlayMode::Off || cam.Use().Any() || cam.LabelsGpu());
 			const bool aheadWanted = fitWanted && cam.AheadFit();
 			if (st->liveBuilt && (st->fitWanted != fitWanted || st->guideWanted != guideWanted || st->labelsWanted != labelsWanted ||
@@ -907,6 +910,11 @@ namespace Vpv
 				}
 				if (!st.gpu)
 					fb.push_back("camera_gpu: no render device for this renderer; the fit cannot read the engine's fields back");
+				if (st.guideLocked)
+				{
+					lines.push_back(std::string("camera: ") + kGuidanceLockedText);
+					fb.push_back(std::string("camera_guidance: ") + kGuidanceLockedText);
+				}
 				if (st.adapter)
 				{
 					st.adapter->CollectStatus(lines);

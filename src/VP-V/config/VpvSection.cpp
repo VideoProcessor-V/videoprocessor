@@ -996,7 +996,8 @@ namespace Vpv
 			const QString camSection = QStringLiteral("vpv.camera");
 			CardBox card = MakeCard(ObjectName(unitId + QStringLiteral(".card.camera")), QStringLiteral("Camera model"),
 				QStringLiteral("Diagnostics and switches for the global camera model. Everything is off by default and the Original "
-					"pathway keeps it off. The switches act only while the camera model is on."), true);
+					"pathway keeps it off. The switches act only while the camera model is on. Camera guidance (the Measurement "
+					"switches) waits for the on-time rule (next reset): those switches have no effect yet."), true);
 
 			auto* model = new QCheckBox(QStringLiteral("Camera model"));
 			model->setObjectName(ObjectName(QStringLiteral("camera.camera_model")));

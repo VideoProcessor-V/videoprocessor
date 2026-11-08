@@ -194,6 +194,16 @@ size), so the seed carries steps of 1/16 source px at 1080p and 1/8 source px at
 The history of the issue:
 `FieldOf(seq)` returns the matcher's LIVE block field of the last successful estimate (HOOKS.md section 7; `MotionWarp::Field()`), and production feeds the fit from exactly that. With every guidance switch off that field is the unguided matcher output, so nothing feeds back. With `camera_meas_model_global` (or any switch that changes the estimate) ON, the matcher's field is the one the camera's own model guided, so the fit re-measures its own guide: diagnosis ac283dae2a47417e5 found a feedback drift of about 0.004 px per pair. The fix is to fit from the engine's seed field (the NVOF / pre-guidance field) instead of the guided live field; it needs a second field accessor on `IVectorEngine` and is not done. Until then, a measurement switch that changes the estimate (camera_meas_model_global, and a default-on option (a) if the owner chooses it) carries this drift.
 
+## Guidance lock (owner, reset 1)
+
+Every camera guidance switch (`camera_meas_*`) is forced OFF this reset (`CameraExtension::guidanceLocked_`, default true): the switches parse
+and stay in the file, the fit runs, but no `CameraGuidanceAdapter` is made and no pre-estimate hook is registered. Shown as the line and the
+Fallbacks entry `camera_guidance: camera guidance waits for the on-time rule (next reset): the camera_meas_* switches are off` and as a note
+on the Config card. Reason: the on-time rule (d = 0: the matcher of frame N is guided only by camera(N), only when it is ready before that
+matcher runs, else N runs unguided; a late or older camera never guides) is built next reset. Test:
+`CameraLiveWiringTests::GuidanceIsLockedThisResetASetSwitchRegistersNoHookAndIsShown`; the wiring tests unlock it explicitly
+(`SetGuidanceLockForTesting(false)`), so the code the next reset enables stays covered.
+
 ## Ahead fit (owner decision, reset 1; key `camera_ahead_fit`, default off)
 
 The camera fits from the AHEAD motion: the NVOF pair the one MotionAhead producer computed ahead of render (P2, served by

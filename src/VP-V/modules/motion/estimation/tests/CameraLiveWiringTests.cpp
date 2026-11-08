@@ -151,6 +151,7 @@ namespace CameraLiveWiringTestsNs
 		explicit Rig(const std::string& text, bool engineThere = true) : cfg(text),
 			ext(cfg.Loader(), [this]() -> VpMotion::IVectorEngineDirectory* { return &dir; })
 		{
+			ext.SetGuidanceLockForTesting(false);   // these tests pin the guidance wiring the next reset unlocks (the lock: GuidanceIsLocked...)
 			dir.host = &r;
 			dir.engine = engineThere ? &engine : nullptr;
 			engine.latest = 8;
@@ -271,6 +272,24 @@ namespace VideoProcessorTest
 			Assert::IsTrue(rig.ext.CoreOf(rig.Host())->Allocated(), L"the fit is allocated on that graph (p7Wanted)");
 			Assert::IsNull(rig.ext.AdapterOf(rig.Host()), L"all measurement switches off: no adapter");
 			Assert::IsTrue(rig.engine.history.empty(), L"... and no hook on the engine");
+		}
+
+		// GUIDANCE LOCK (owner, reset 1): a guidance switch set with the camera live leaves guidance off, registers no hook and says so.
+		TEST_METHOD(GuidanceIsLockedThisResetASetSwitchRegistersNoHookAndIsShown)
+		{
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\ncamera_meas_model_global=on\n");
+			rig.ext.SetGuidanceLockForTesting(true);   // the shipped default (the rig unlocks for the wiring tests)
+			Assert::IsTrue(rig.ext.GuidanceLocked());
+			rig.Start(6);
+			Assert::IsTrue(rig.ext.FitWanted(rig.Host()), L"the fit itself still runs");
+			Assert::IsNull(rig.ext.AdapterOf(rig.Host()), L"no guidance adapter");
+			Assert::IsTrue(rig.engine.hook == nullptr, L"no pre-estimate hook registered");
+			bool line = false, entry = false;
+			for (const std::string& l : rig.Lines(RE::StatusKind::Lines))
+				line = line || l.find("camera guidance waits for the on-time rule") != std::string::npos;
+			for (const std::string& l : rig.Lines(RE::StatusKind::Fallbacks))
+				entry = entry || l.find("camera_guidance: camera guidance waits for the on-time rule") != std::string::npos;
+			Assert::IsTrue(line && entry, L"shown in Ctrl+I / Config status and Fallbacks");
 		}
 
 		TEST_METHOD(LinkOnModelOnWithGlobalAttachesTheAdapterAndRegistersTheHook)
