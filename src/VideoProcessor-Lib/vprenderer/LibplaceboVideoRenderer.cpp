@@ -15,6 +15,8 @@
 #include <VP-V/modules/output/presentation/RepeatReuseRegistryKey.h>
 #include <KernelInverse.h>
 #include <vprenderer/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/MotionAheadWalk.h>
+#include <VP-V/modules/input/source_analysis/SourceAheadWalk.h>
 #include "../SubtitleProfileUpdatePolicy.h"
 #include "SubtitleBarRecovery.h"
 
@@ -7189,6 +7191,7 @@ struct LibplaceboVideoRenderer::Impl
 	}
 	// motion.consumers (group D audit D3): failed warp / interpolation passes, visible while recent.
 	FallbackCatalog::MotionConsumerFailures motionConsumerFailures;
+	FallbackCatalog::LookAheadFailures motionAheadFailures = FallbackCatalog::MotionAheadWorker(), sourceAheadFailures = FallbackCatalog::SourceResolutionWorker();   // render-loop thread only
 	// The de-judder held this frame because the display rate is not known (presentation entry).
 	bool dejudderHeldNoDisplayRate = false;
 	// Pipeline skeleton (design freeze 2026-10-24): the ONE slot registry (VP-V/core/SlotRegistry.h). It
@@ -33361,92 +33364,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 		if (!motionAheadFrames.empty())
 		{
 			const auto handoffStarted = SteadyClock::now();
-			try
-			{
-				// The stream generation (resync / queue reset / seek / format change), as before
-				// step 1: a gap moves only the epoch, so the ahead pairs after it are kept.
-				const uint64_t generation = m_impl->motionValidity.StreamGeneration();
-				// Owner 2026-10-16: the look-ahead engages once 4 frames are queued ahead (the startup
-				// fill, a refilled queue), disengages with none queued or a broken sequence (a new
-				// generation: skip, seek, reset) and waits for 4 again; disengaged, the producer gets
-				// no work (no pair could be used before its frames are shown).
-				const size_t queuedAhead = m_impl->queuedFutureFrames.load(std::memory_order_acquire);
-				const size_t engageAhead = m_impl->activeSettings.vectorDemand ?
-					static_cast<size_t>(VectorDemand::EngageAhead(m_impl->motionAheadConfigured.load(std::memory_order_acquire),
-						m_impl->queueAheadCapacity.load(std::memory_order_acquire))) :
-					static_cast<size_t>((std::max)(1, m_impl->motionAheadConfigured.load(std::memory_order_acquire)));
-				const bool backwardPairs = m_impl->motionAheadBackward.load(std::memory_order_acquire);   // vector engine: engaged while it runs
-				// A break always disengages and the next pass must see 4 queued ahead again (a re-engage
-				// in the same pass would skip the refill wait: the reset test, 2026-10-16).
-				if (m_impl->motionAheadEngaged &&
-					(queuedAhead == 0 || generation != m_impl->motionAheadEngagedGeneration))
-				{
-					m_impl->motionAheadEngaged = false;
-					DebugLog::Log("Motion ahead: waiting for %zu frames queued ahead (%s)", engageAhead,
-						queuedAhead == 0 ? "the queue holds none" : "the sequence broke: skip, seek or reset");
-				}
-				else if (!m_impl->motionAheadEngaged && queuedAhead >= engageAhead && !backwardPairs)
-				{
-					m_impl->motionAheadEngaged = true;
-					m_impl->motionAheadEngagedGeneration = generation;
-					DebugLog::Log("Motion ahead: engaged (%zu frames queued ahead%s)", queuedAhead,
-						m_impl->vectorDemand.lowLatencyAllowed ? "; vector engine: shallow queue" : "");
-				}
-				const bool framesAhead = m_impl->motionAheadEngaged || backwardPairs;
-				// A frame's time as the dequeue reads it (the film clock when pulldown is locked,
-				// else the capture timestamp; 0 = not known).
-				LARGE_INTEGER aheadQpcFrequency{};
-				const bool aheadQpcKnown = QueryPerformanceFrequency(&aheadQpcFrequency) && aheadQpcFrequency.QuadPart > 0;
-				auto aheadTime = [&](const QueuedFrame& q) -> double {
-					if (q.filmHz > 0.0 && q.arrivalQpc > 0 && aheadQpcKnown)
-						return static_cast<double>(q.arrivalQpc) / static_cast<double>(aheadQpcFrequency.QuadPart);
-					if (m_timingClock && m_timingClock->TimingClockTicksPerSecond() > 0)
-						return static_cast<double>(q.frame.GetTimingTimestamp()) / static_cast<double>(m_timingClock->TimingClockTicksPerSecond());
-					return 0.0;
-				};
-				for (QueuedFrame& ahead : motionAheadFrames)
-				{
-					const VideoState& aheadState = *ahead.state;
-					if (!framesAhead || !aheadState.displayMode || !m_impl->motionProducer) continue;
-					// The luma source keeps the frame's own buffer alive for the producer's worker.
-					const auto prepared = Impl::PrepareFrameAnalysis(ahead.frame, aheadState, ahead.converted, ahead.analysis,
-						AnalysisSourceProfile::QueuedCapture, ahead.activePictureIdentity.sourceFormatGeneration, false,
-						aheadState.dolbyVisionTunnel);
-					// The first frame not ready yet (a conversion pending) stops this pass: the producer's
-					// high-water mark would otherwise pass it and its pairs would never exist (audit 2026-10-16).
-					if (!prepared.source.IsValid())
-						break;
-					// Integration 2026-10-17: also a break when the pair's times are not adjacent
-					// (the dequeue's AdjacentPairTimes rule, with timing_continuity_fixes) or, on the
-					// DV tunnel, when the pair is not trusted (DolbyVisionPairTrusted).
-					DejudderPolicy::MotionAheadFrame aheadFrame;
-					aheadFrame.time = aheadTime(ahead);
-					aheadFrame.filmClock = ahead.filmHz > 0.0;
-					// Hunt 2 02-dv L1: the kind by the payload's capture encoding, as the dequeue
-					// classifies it (ClassifyDolbyVisionPayload), not the walk's state encoding.
-					if (ahead.converted)
-					{
-						aheadFrame.kind = DejudderPolicy::ClassifyDolbyVisionPayload(*ahead.converted);
-						aheadFrame.matrices = DejudderPolicy::DolbyVisionMatricesOf(ahead.converted->dolby);
-					}
-					const double aheadRateHz = ahead.filmHz > 0.0 ? ahead.filmHz :
-						m_measuredFrameRate.load(std::memory_order_relaxed) > 0.0 ? m_measuredFrameRate.load(std::memory_order_relaxed) :
-						aheadState.displayMode->RefreshRateHz();
-					const bool havePrev = m_impl->motionAheadPrevKnown && m_impl->motionAheadPrevGeneration == generation;
-					const bool breakBefore = DejudderPolicy::MotionAheadBreakBefore(ahead.gapBefore, ahead.filmUpdate,
-						m_impl->activeSettings.timingContinuityFixes, aheadRateHz, aheadState.dolbyVisionTunnel,
-						havePrev, m_impl->motionAheadPrev, aheadFrame, m_impl->activeSettings.motionHistoryFixes);
-					m_impl->motionProducer->Submit(ahead.sourceSequence, generation, prepared.source, breakBefore);
-					m_impl->motionAheadPrevKnown = true;
-					m_impl->motionAheadPrevGeneration = generation;
-					m_impl->motionAheadPrev = aheadFrame;
-				}
-			}
-			catch (const std::exception& e)
-			{
-				DebugLog::Log("Motion ahead: frames skipped: %s", e.what());
-				RendererExtension::ReportWorker(m_impl.get(), "motion-ahead", e.what()); // VPV-HOOK
-			}
+			MotionAhead::AheadView<Impl, QueuedFrame, ITimingClock> aheadView{ *m_impl, motionAheadFrames, m_timingClock, m_measuredFrameRate };
+			MotionAhead::RunQueueWalk(aheadView);
 			for (QueuedFrame& ahead : motionAheadFrames)
 				ahead.frame.SourceBufferRelease();
 			motionAheadFrames.clear();
@@ -33458,29 +33377,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 		}
 		if (!sourceAheadFrames.empty())
 		{
-			try
-			{
-				for (QueuedFrame& ahead : sourceAheadFrames)
-				{
-					const VideoState& aheadState = *ahead.state;
-					if (!aheadState.displayMode) continue;
-					const auto prepared = Impl::PrepareFrameAnalysis(ahead.frame, aheadState, ahead.converted, ahead.analysis,
-						AnalysisSourceProfile::QueuedCapture, ahead.activePictureIdentity.sourceFormatGeneration, false,
-						aheadState.dolbyVisionTunnel);
-					const AnalysisLumaSource& luma = prepared.source;
-					if (!luma.IsValid()) continue;
-					m_impl->sourceMonitor.LookAheadFrame(ahead.sourceSequence, luma.width, luma.height,
-						[&luma](int x, int y) {
-							uint16_t code = 0;   // WP-23: the shared decode when ready
-							return luma.SampleLuma(x, y, code) ? static_cast<int>(code) : 0;
-						}, 0, 0, luma.width, luma.height);
-				}
-			}
-			catch (const std::exception& e)
-			{
-				DebugLog::Log("Source resolution look-ahead skipped: %s", e.what());
-				RendererExtension::ReportWorker(m_impl.get(), "source-look-ahead", e.what()); // VPV-HOOK
-			}
+			SourceResolution::SourceAheadView<Impl, QueuedFrame> sourceView{ *m_impl, sourceAheadFrames };
+			SourceResolution::RunAheadWalk(sourceView);
 			if (!m_impl->sourceAheadLogged)
 			{
 				m_impl->sourceAheadLogged = true;
