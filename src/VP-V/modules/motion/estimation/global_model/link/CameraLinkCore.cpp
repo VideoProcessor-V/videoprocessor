@@ -60,9 +60,6 @@ namespace CameraLink
 			std::lock_guard<std::mutex> lock(m_chainMutex);
 			m_chain.clear();
 		}
-		m_table = nullptr;
-		m_bytes = nullptr;
-		m_indicator = nullptr;
 		m_lastRequestedField = 0;
 		std::lock_guard<std::mutex> lock(m_traceMutex);
 		if (m_trace.is_open())
@@ -87,29 +84,43 @@ namespace CameraLink
 
 	void CameraLinkCore::AttachGraph(VpSkeleton::SlotTable* table, VpSkeleton::CpuBuffers* p7Bytes, VpIndicator::Indicator* indicator)
 	{
+		AttachLease(VpSkeleton::LaneLease::Borrow(table, p7Bytes, indicator), VpSkeleton::LaneLeaseSource());
+	}
+
+	void CameraLinkCore::AttachLane(VpSkeleton::LaneLeaseSource source)
+	{
+		const VpSkeleton::LaneLease first = source ? source() : VpSkeleton::LaneLease();
+		AttachLease(first, std::move(source));
+	}
+
+	void CameraLinkCore::OnLaneRebound()
+	{
+		// A rebuilt graph can size the P7 ring differently: the seal marks follow it (the pool keeps its own capacity).
+		const VpSkeleton::LaneLease l = m_worker ? m_worker->Lease() : VpSkeleton::LaneLease();
+		VpSkeleton::SlotSet* set = l.table ? l.table->Find(VpSkeleton::kP7CameraFit) : nullptr;
+		if (set && set->Ring() != m_sealedMark.size())
+			m_sealedMark.assign(set->Ring(), ~uint64_t(0));
+	}
+
+	void CameraLinkCore::AttachLease(const VpSkeleton::LaneLease& first, VpSkeleton::LaneLeaseSource source)
+	{
 		Teardown();
 		// The measured costs belong to the graph that made them: a rebuild starts a fresh window (the caller derives d from
 		// the old window BEFORE it attaches the new graph).
 		m_lagMeter.Clear();
+		VpSkeleton::SlotTable* table = first.table;
 		if (!m_active || !table || !table->Find(VpSkeleton::kP7CameraFit))
 			return;
-		m_table = table;
-		m_bytes = p7Bytes;
-		m_indicator = indicator;
 		const size_t ring = table->Find(VpSkeleton::kP7CameraFit)->Ring();
 		m_pool.reset(new CameraRecordPool((std::max)(static_cast<size_t>(ring), m_settings.poolRing)));
 		m_sealedMark.assign(ring, ~uint64_t(0));
 		m_producer.reset(new CameraFitProducer(m_settings.fit, &m_counters));
 		CameraFitEnv env;
-		env.table = table;
+		env.lease = first;
+		env.leaseSource = std::move(source);
 		env.pool = m_pool.get();
 		env.counters = &m_counters;
 		env.queueCapacity = m_settings.queueCapacity;
-		VpSkeleton::CpuBuffers* bytes = p7Bytes;
-		env.slotBytes = [bytes](int slot) -> uint8_t* { return bytes ? bytes->Ring(static_cast<size_t>(slot)) : nullptr; };
-		VpIndicator::Indicator* ind = indicator;
-		if (ind)
-			env.stampOf = [ind](uint64_t seq) { return ind->StampOf(seq); };
 		env.onResult = [this](const CameraFitJob& j, const CameraFitResult& r, PublishOutcome o) { OnResult(j, r, o); };
 		m_worker.reset(new CameraFitWorker(*m_producer, env));
 		if (!m_settings.deterministic)
@@ -260,6 +271,8 @@ namespace CameraLink
 	{
 		if (!m_active || !m_pool)
 			return;
+		if (m_worker && m_worker->Rebind())   // the lane was rebuilt: take the new lease (and size the seal marks)
+			OnLaneRebound();
 		// (1) seal observer
 		std::shared_ptr<const CameraModel::CameraMotion> rec;
 		if (f.p7SealedPublished)

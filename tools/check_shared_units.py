@@ -135,7 +135,9 @@ REGISTRY = [
      "owning_unit": ["src/VP-V/modules/motion/estimation"],
      "signatures": _c(r"\bnew\s+NvOpticalFlow::",
                       r"make_(unique|shared)<\s*(\w+::)*NvOpticalFlow::\w*Engine",
-                      r"\bNvOpticalFlow::(Hinted)?Engine\s+\w+\s*[;({=\[]",
+                      r"\bNvOpticalFlow::(Hinted)?Engine\s+\w+\s*[;({=\[,)]",   # by value: a local, a member or a by-value parameter
+                      r"using\s+namespace\s+(\w+::)*NvOpticalFlow\b",               # after this a bare Engine is the same type
+                      r"using\s+(\w+::)*NvOpticalFlow::\w*Engine\s*;",
                       r"(using\s+\w+\s*=|typedef)\s*(\w+::)*NvOpticalFlow::\w*Engine",
                       r"VectorStore\s*<",
                       r"using\s+\w+\s*=\s*(\w+::)*VectorStore"),

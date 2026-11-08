@@ -37,6 +37,9 @@ namespace CameraLink
 		// THIS job's Fit, never before an earlier queued one, so the history does not depend on when the worker gets to the queue.
 		bool gensStamped = false;
 		uint64_t resetGen = 0, timingGen = 0;
+		// The lane generation AT SUBMIT (CameraFitWorker::Submit; AnalysisLane::Generation of the lease the worker held). A job whose
+		// generation is not the worker's current one when it publishes belongs to a graph that was rebuilt: refused and counted.
+		uint64_t laneGen = 0;
 	};
 
 	struct CameraFitResult

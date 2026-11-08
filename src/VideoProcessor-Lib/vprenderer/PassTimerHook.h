@@ -1,5 +1,6 @@
 #pragma once
 
+#include <VP-V/core/PassTimerInbox.h>   // the motion jobs' posted timings (the one host call in LibplaceboVideoRenderer drains it)
 #include <VP-V/core/PassTimers.h>
 
 #include <libplacebo/renderer.h>

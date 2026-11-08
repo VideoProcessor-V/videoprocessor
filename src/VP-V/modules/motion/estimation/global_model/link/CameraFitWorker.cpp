@@ -18,6 +18,39 @@ namespace CameraLink
 	{
 		if (m_env.queueCapacity == 0)
 			m_env.queueCapacity = 1;
+		m_lease = std::move(m_env.lease);   // the worker's own copy is m_lease: env must not pin an old state for ever
+		if (m_env.leaseSource && !m_lease.Valid())
+			m_lease = m_env.leaseSource();
+	}
+
+	VpSkeleton::LaneLease CameraFitWorker::Lease() const
+	{
+		std::lock_guard<std::mutex> lock(m_leaseMutex);
+		return m_lease;
+	}
+
+	uint64_t CameraFitWorker::LaneGeneration() const
+	{
+		std::lock_guard<std::mutex> lock(m_leaseMutex);
+		return m_lease.generation;
+	}
+
+	bool CameraFitWorker::Rebind()
+	{
+		if (!m_env.leaseSource)
+			return false;
+		VpSkeleton::LaneLease cur = m_env.leaseSource();
+		VpSkeleton::LaneLease old;   // released after the unlock: the last hold of an old state dies outside the mutex
+		{
+			std::lock_guard<std::mutex> lock(m_leaseMutex);
+			if (cur.generation == m_lease.generation && cur.table == m_lease.table)
+				return false;
+			old = std::move(m_lease);
+			m_lease = std::move(cur);
+		}
+		if (m_env.counters)
+			m_env.counters->rebound.fetch_add(1, std::memory_order_relaxed);
+		return true;
 	}
 
 	CameraFitWorker::~CameraFitWorker()
@@ -61,6 +94,8 @@ namespace CameraLink
 	bool CameraFitWorker::Submit(const CameraFitJob& submitted)
 	{
 		CameraFitJob job = submitted;
+		Rebind();   // a rebuilt lane is noticed before the job is stamped with the generation it will be published into
+		job.laneGen = LaneGeneration();
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			if (m_queue.size() >= m_env.queueCapacity)
@@ -151,7 +186,18 @@ namespace CameraLink
 				c->late.fetch_add(1, std::memory_order_relaxed);
 			return o;
 		};
-		VpSkeleton::SlotSet* set = m_env.table ? m_env.table->Find(VpSkeleton::kP7CameraFit) : nullptr;
+		// The lease is taken ONCE and held for the whole publish: a rebuild during it cannot free the table, the bytes or the Indicator.
+		Rebind();
+		const VpSkeleton::LaneLease lease = Lease();
+		if (job.laneGen != lease.generation)
+		{
+			// The job was submitted against another graph (its seq lives in slots that no longer exist): refused, counted, visible
+			// (status line "stale lane", and the seal sees no P7 for that frame: camera.no_model.late).
+			if (c)
+				c->staleLane.fetch_add(1, std::memory_order_relaxed);
+			return PublishOutcome::StaleLane;
+		}
+		VpSkeleton::SlotSet* set = lease.table ? lease.table->Find(VpSkeleton::kP7CameraFit) : nullptr;
 		if (!set || !m_env.pool || !fit.record)
 			return PublishOutcome::NoProduct;
 
@@ -165,15 +211,16 @@ namespace CameraLink
 		}
 		VpAncestry::Header& hdr = set->LaneHeader(ticket);
 		VpSkeleton::LaneInputs pins;
-		if (!m_env.table->LaneAncestors(VpSkeleton::kP7CameraFit, job.seq, hdr, pins))
+		if (!lease.table->LaneAncestors(VpSkeleton::kP7CameraFit, job.seq, hdr, pins))
 		{
 			set->Abandon(ticket);
 			return late(PublishOutcome::LateInputs);
 		}
 		// The stamp is read AFTER the pins (as the LaneRunner does): a late event is then either honoured here or seen by the seal.
-		hdr.honoured = m_env.stampOf ? m_env.stampOf(job.seq) : job.stamp;
+		hdr.honoured = m_env.stampOf ? m_env.stampOf(job.seq) : (lease.indicator ? lease.indicator->StampOf(job.seq) : job.stamp);
 		hdr.costUs = fit.record->costMicros > 0 ? static_cast<uint32_t>(fit.record->costMicros) : 0u;
-		uint8_t* bytes = m_env.slotBytes ? m_env.slotBytes(ticket.slot) : nullptr;
+		uint8_t* bytes = m_env.slotBytes ? m_env.slotBytes(ticket.slot)
+			: (lease.bytes ? lease.bytes->Ring(static_cast<size_t>(ticket.slot)) : nullptr);
 		if (bytes)
 			EncodeRecordPod(*fit.record, bytes, kRecordPodMaxBytes);
 		// The pool entry is written BEFORE the publish (the seal can accept the instant it is Published) and erased if the

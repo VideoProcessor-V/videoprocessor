@@ -195,7 +195,7 @@ Not in K3: the **overlay** itself (K2's P8 is not instantiated and the fit has n
 | `OnRenderPhase(FrameStart)` after FrameSeal | `OnFrameStart({seq, sealUs, displayPeriod, p7SealedPublished})` (also `table.Resolve(...)` with `fill` calling `CameraLabelFill::FillLive` for P8) |
 | `OnRenderPhase(PostSubmitGap)` | `OnPostSubmitGap()` |
 | GPU created / released | `OnGpuCreated(pl_gpu)` / `OnGpuReleased()` |
-| settings change | `OnSettings(...)`, `AttachGraph(...)` on a graph rebuild, `CameraLabelProducer` mode from `ChooseLabelMode` |
+| settings change | `OnSettings(...)`, `AttachLane(source)` (live; see "Holding the lane" below) or `AttachGraph(table, bytes, indicator)` (tests / standalone), `CameraLabelProducer` mode from `ChooseLabelMode` |
 | `CollectStatus` | `CollectStatus(lines)` + `CollectDecisions()` into the fallback registry |
 | `QueryInterface("vpv.camera.v1")` | `Link()` |
 | graph rebuild | `GuideLagMeter::Lag(sourcePeriod, deterministic)` -> `GuidanceScheduler::SetLag(d)` + `SkeletonProductsWithGuide(d)` |
@@ -203,6 +203,23 @@ Not in K3: the **overlay** itself (K2's P8 is not instantiated and the fit has n
 | `Estimate` / `EstimateAhead` (P5a) | none: P5a's `VectorEngine::Estimate` calls the registered hook |
 | Indicator setup | `RegisterReader(indicator)` |
 | P5a engine | `SetEngine(IVectorEngine*)`, `engine->SetPreEstimateHook(&CameraGuidanceHook)` |
+
+## Holding the lane (SK-W fix: the use-after-free)
+
+The lane swaps its whole `LaneState` (graph, `SlotTable`, buffers, Indicator hold) at every rebuild: an external-demand change, a VRAM re-plan, a moved queue or period.
+A raw `SlotTable*` kept by the fit thread across that swap was a use-after-free. The link now holds the lane through a lease (`core/LaneLease.h`):
+
+| API | Meaning |
+|---|---|
+| `AnalysisLane::Lease(kP7CameraFit)` | the current `LaneLease` (shared hold of the `LaneState`, the P7 bytes ring, the Indicator, `generation`); any thread |
+| `CameraLinkCore::AttachLane(std::function<LaneLease()> source)` | live attach: the link takes the first lease now and re-acquires through `source` (bind `[lane]{ return lane->Lease(kP7CameraFit); }`) |
+| `CameraLinkCore::AttachGraph(table, bytes, indicator)` | borrowed, unowned, generation 0: for tests / standalone drivers whose objects outlive the link (never stale) |
+| `CameraFitWorker::Rebind()` | takes the lane's current lease; true when it changed (`FitCounters::rebound`). Called by `Submit`, by every publish and by `CameraLinkCore::OnFrameStart` (which also resizes the seal marks if the P7 ring changed) |
+| `CameraFitWorker::Lease()` / `LaneGeneration()` | a copy of the held lease (safe to use after any rebuild) / its generation |
+| `CameraFitJob::laneGen` | the generation stamped at `Submit`; a job whose generation is not the worker's at publish time returns `PublishOutcome::StaleLane`: refused, `FitCounters::staleLane`++, shown in `StatusLine` ("stale lane (refused after a graph rebuild)", "lane rebinds"); the frame then seals without P7 (`camera.no_model.late`) |
+
+The publish takes the lease once and keeps it for the whole Claim -> write -> Publish, so a rebuild during it cannot free what it writes; the old state dies with its last holder
+(outside the worker's mutex). Tests: `CameraFitThreadingTests` (a rebuild with a held lease: old state alive, stale post refused and counted, then a rebound post; a threaded stress).
 
 Also pending: `FieldReadbackRing` becomes an `IReadbackDevice` again at K1-9 (the half-wired methods were removed); `items.props` (H7) listing `GlobalModel*.cpp` and `link/*.cpp`; K1-9 (LaneRunner registration of
 `CameraFitProducer` at SK-W); a text-guard / pixel-residual producer ("text guard: none" is shown until then).

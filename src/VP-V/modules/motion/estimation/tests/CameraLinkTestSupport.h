@@ -127,7 +127,7 @@ namespace CameraLinkTest
 		CameraLink::CameraFitEnv Env(CameraLink::CameraRecordPool* pool, CameraLink::FitCounters* counters, size_t queue = 4)
 		{
 			CameraLink::CameraFitEnv e;
-			e.table = table.get();
+			e.lease = VpSkeleton::LaneLease::Borrow(table.get(), bytes.get(), indicator.get());   // a borrowed lease: this rig outlives the worker
 			e.pool = pool;
 			e.counters = counters;
 			e.queueCapacity = queue;

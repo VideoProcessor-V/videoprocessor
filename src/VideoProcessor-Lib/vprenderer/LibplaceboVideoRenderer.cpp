@@ -25565,6 +25565,7 @@ releaseDriftBaseRetention =
 		passTimerHook.CpuMark("render: submit + present (may wait for the swap chain)", PassTimers::Kind::CpuWait);
 		passTimerHook.CpuEnd();
 		entranceSpans.Poll(passTimerHook.acc);   // T2: finished entrance spans (never waits)
+		PassTimers::Inbox::Motion().DrainInto(passTimerHook.acc);   // VPV-HOOK
 		{
 			const std::string readout = passTimerHook.DueReadout(
 				std::chrono::duration<double>(SteadyClock::now().time_since_epoch()).count());

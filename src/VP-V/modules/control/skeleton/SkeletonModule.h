@@ -122,6 +122,12 @@ namespace Vpv
 			// frame the engine just made a verified field for (IVectorEngine::LatestVerifiedFieldSeq), with the stamp the field was computed under;
 			// the frame's own seal at Begin accepts or rejects them like any lane result. The slot CONTENT of P3 is the engine's texture (a GPU
 			// product: no kernel copies it into the slot yet, see README); what the module records and serves here are the facts of the field.
+			// THREADING: FeedCountersOf and EngineFieldFactsOf are RENDER THREAD ONLY (and tests that drive the frames on their own thread). They
+			// read the host state's plain (non-atomic) feed counters and facts ring, which the render thread writes in Begin / AfterRender; a call
+			// from another thread would race those writes (torn counters, a facts entry read while it is stored). Not guarded on purpose: a lock
+			// on the per-frame feed path would cost every frame for a reader that must sit on the render thread anyway (it consumes the facts
+			// for the frame being rendered). Another thread that needs the numbers reads the status lines (Ctrl+I, the command), which are
+			// published under the status mutex. SceneFactsOf is render-thread-only for the same reason (it reads the lane's slots at the seal).
 			FeedCounters FeedCountersOf(const void* host) const;
 			bool EngineFieldFactsOf(const void* host, uint64_t seq, EngineFieldFacts& out) const;
 			// Tests: the retry step the module runs at every Begin and AfterRender (the P1 inputs are published by the lane's own threads).

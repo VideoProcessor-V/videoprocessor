@@ -857,13 +857,10 @@ namespace Vpv
 			if (cur.cpu == nullptr || prev.cpu == nullptr || !VpLaneProducts::ReadSourceStats(prev.cpu, prev.cpuBytes, &a) ||
 				!VpLaneProducts::ReadSourceStats(cur.cpu, cur.cpuBytes, &c))
 				return false;
-			if (Resync::HostResync* resync = Resync::ResyncExtension::For(host))
-				if (const std::shared_ptr<VpIndicator::Indicator> ind = resync->seal.Current())
-				{
-					out.fullBetween = !VpIndicator::TemporalValid(*ind, seq - 1, seq, VpIndicator::Bit(VpIndicator::kFull));
-					out.continuityBetween = !VpIndicator::TemporalValid(*ind, seq - 1, seq, VpIndicator::Bit(VpIndicator::kContinuity));
-				}
-			const VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(a, c, out.fullBetween, out.continuityBetween);
+			// Scene EVENTS (cut / fade / flash) are scene facts: classified from the two P4 records alone. This function reads NO validity source
+			// (no VpIndicator::TemporalValid, no Indicator at all): whether a vector pair is usable across a resync is answered only by the P5a
+			// MotionValidity facade (coordinator ruling 2026-11-08; tools/test_check_shared_units.py test_scene_facts_reads_no_validity_source).
+			const VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(a, c, false, false);
 			out.valid = true;
 			out.cut = e.cut;
 			out.cutPossible = e.cutPossible;
@@ -1005,28 +1002,37 @@ namespace Vpv
 					continue;
 				}
 				VpSkeleton::SlotSet& set = table.At(i);
+				// The inputs are pinned BEFORE the claim (into a scratch header): a claim that is then abandoned leaves the slot Abandoned for
+				// this frame, and the retry would find it Stale (a lost frame, counted as a claim failure: the engine feed's retry for
+				// missing inputs could never succeed once a first attempt had claimed). Nothing is claimed while an input is missing.
+				VpAncestry::Header scratch;
+				VpSkeleton::LaneInputs pins;
+				if (!table.LaneAncestors(n.id, seq, scratch, pins))
+				{
+					++st.feed.ancestorsMissing;   // an input (P1, P2m) is not published yet: retried at the next Begin / AfterRender
+					all = false;
+					continue;
+				}
 				VpSkeleton::LaneTicket ticket;
 				const VpSkeleton::ClaimResult cr = set.Claim(seq, VpAncestry::Provenance::AheadLane, ~uint64_t(0), &ticket);
 				if (cr == VpSkeleton::ClaimResult::TooEarly || cr == VpSkeleton::ClaimResult::ReleasePending)
 				{
+					pins.Unpin();
 					all = false;   // the ring has not reached this frame yet: try again
 					continue;
 				}
 				if (cr != VpSkeleton::ClaimResult::Claimed)
 				{
+					pins.Unpin();
 					++st.feed.claimFailed;   // Stale / out of range: the frame already left the ring (or is published)
 					doneMask |= bit;
 					continue;
 				}
 				VpAncestry::Header& hdr = set.LaneHeader(ticket);
-				VpSkeleton::LaneInputs pins;
-				if (!table.LaneAncestors(n.id, seq, hdr, pins))
-				{
-					set.Abandon(ticket);
-					++st.feed.ancestorsMissing;   // an input (P1, P2m) is not published yet: retried at the next Begin / AfterRender
-					all = false;
-					continue;
-				}
+				hdr.ancestors = scratch.ancestors;
+				hdr.ancestorCount = scratch.ancestorCount;
+				hdr.chainReduced = scratch.chainReduced;
+				hdr.reads = scratch.reads;
 				hdr.honoured = facts.stamp;   // the stamp the engine made the field under; the seal of the frame compares it with StampOf(seq)
 				const VpSkeleton::PublishResult pr = set.Publish(ticket);
 				pins.Unpin();
@@ -1372,18 +1378,18 @@ namespace Vpv
 				++st.dropsApplied;
 			}
 
-			if (st.feedNeeded || st.wantsCameraFit)
+			if ((st.feedNeeded || st.wantsCameraFit) && !st.engine)
+				st.engine = engineProvider_ ? engineProvider_(st.host) : DefaultEngine(st.host);
+			// Both directions: declaring the camera fit starts the engine (VectorDemand::Consumer::CameraFit), and WITHDRAWING the whole external
+			// demand (feedNeeded and wantsCameraFit both false) must tell it so too. The push used to sit inside the "something is wanted" branch,
+			// so the last demand going away left the engine running the fit for nobody.
+			if (st.engine && st.wantsCameraFit != st.fitWantedPushed)
 			{
-				if (!st.engine)
-					st.engine = engineProvider_ ? engineProvider_(st.host) : DefaultEngine(st.host);
-				if (st.engine && st.wantsCameraFit != st.fitWantedPushed)
-				{
-					st.engine->SetCameraFitWanted(st.wantsCameraFit);   // declaring the camera fit starts the engine (VectorDemand::Consumer::CameraFit)
-					st.fitWantedPushed = st.wantsCameraFit;
-				}
-				else if (!st.engine && st.fitWantedPushed)
-					st.fitWantedPushed = false;
+				st.engine->SetCameraFitWanted(st.wantsCameraFit);
+				st.fitWantedPushed = st.wantsCameraFit;
 			}
+			else if (!st.engine && st.fitWantedPushed)
+				st.fitWantedPushed = false;
 			FeedEngine(st, true);   // a field whose input slots (P1) were not published yet last time: publish before the seal of its frame
 			b->lane.SetStormHold(Resync::ResyncExtension::StormHeld(st.host));
 			uint32_t wait = 0;
@@ -1597,7 +1603,7 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 					", lane lead " + term((fq.wired & QueueShape::kLaneLead) != 0, fq.laneLead, uq.laneLead) + ", look-ahead walk " +
 					term((fq.wired & QueueShape::kLookAhead) != 0, fq.lookAheadWalk, uq.lookAheadWalk) + "; queued ahead of output " +
 					std::to_string(unsigned(uq.renderAhead) + unsigned(uq.laneLead)) + " frame(s); " + std::to_string(st.starveEvents) + " lead fall(s)");
-				char regLine[240] = {};
+				char regLine[512] = {};   // the fixed text alone is 237 characters: 240 cut off the " (none: shedding off)" suffix
 				std::snprintf(regLine, sizeof(regLine), "Skeleton regulator input: derived from render time (observe only: the Begin..AfterRender span includes waits), %llu frame(s) observed (%llu skipped), last slack %.2f ms, span %.2f ms, %llu over the period; %llu measured frame(s) fed to the regulator%s",
 					static_cast<unsigned long long>(st.timing.frames), static_cast<unsigned long long>(st.timing.skipped), st.timing.lastSlackMs,
 					st.timing.lastRenderOnlyMs, static_cast<unsigned long long>(st.timing.missed), static_cast<unsigned long long>(st.timing.fed),
@@ -1605,7 +1611,7 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				full.push_back(regLine);
 				if (st.feedNeeded || st.externalConsumers != 0)
 				{
-					char feedLine[320] = {};
+					char feedLine[640] = {};
 					std::snprintf(feedLine, sizeof(feedLine),
 						"Skeleton engine feed: %llu field(s) published (last frame %llu), %llu without a field, %llu slipped, %llu retried for missing inputs, %llu given up, %llu claim failure(s), %llu era reset(s); external demand: %llu consumer(s), %llu duplicate id(s), camera fit %s",
 						static_cast<unsigned long long>(st.feed.published), static_cast<unsigned long long>(st.feed.lastSeq),
@@ -1615,6 +1621,9 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 						static_cast<unsigned long long>(st.externalConsumers), static_cast<unsigned long long>(st.externalDuplicates),
 						st.wantsCameraFit ? "wanted" : "not wanted");
 					full.push_back(feedLine);
+					const std::string claimNote = ClaimFailedNote(st.feed.claimFailed, st.queueUsed.laneLead == 0);
+					if (!claimNote.empty())
+						full.push_back(claimNote);
 				}
 				for (const std::string& l : PassTimers::Inbox::Motion().Lines())
 					full.push_back("Skeleton cost row " + l);

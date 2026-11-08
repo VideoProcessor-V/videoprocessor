@@ -9,6 +9,7 @@
 #include <VP-V/core/Indicator.h>
 
 #include <cstdint>
+#include <string>
 
 namespace Vpv
 {
@@ -40,8 +41,8 @@ namespace Vpv
 			bool valid = false;               // both P4 records were readable
 			bool cut = false, cutPossible = false, fade = false, flash = false;
 			uint32_t histDistance = 0;        // 0..65535
-			bool fullBetween = false;         // the Indicator saw a FULL event between the two frames
-			bool continuityBetween = false;   // ... a continuity event
+			bool fullBetween = false;         // RESERVED, always false: scene events come from P4 alone; resync / validity is the P5a MotionValidity facade's
+			bool continuityBetween = false;   // RESERVED, always false (see above)
 			uint32_t prevMean = 0, curMean = 0;
 			uint32_t prevSpread = 0, curSpread = 0;   // p99 - p01
 			bool rectFound = false;           // Bill's active-picture rectangle of the CURRENT frame (half-plane px)
@@ -61,5 +62,19 @@ namespace Vpv
 			uint64_t eraResets = 0;       // the engine's numbering restarted (seek, resync, format change)
 			uint64_t lastSeq = 0;         // the last frame published
 		};
+
+		// The visible explanation of FeedCounters::claimFailed (empty while none). `backward` = the lane runs without a look-ahead lead (low-latency /
+		// backward pairs, lane lead 0): the engine's pair (N-1, N) is only complete AFTER frame N was sealed, so the slot is already taken and the field
+		// cannot be published for that frame; its readers fall back to their own form. That is how this mode works, not a fault, and it is said so.
+		// With a lead the same counter means the frame had left the ring (or was published already) before the field arrived.
+		inline std::string ClaimFailedNote(uint64_t claimFailed, bool backward)
+		{
+			if (claimFailed == 0)
+				return std::string();
+			const std::string n = std::to_string(claimFailed);
+			return backward
+				? "Skeleton engine feed: " + n + " pair(s) arrived after the seal of their frame (backward / low-latency mode: no look-ahead lead, so the field is complete only after its frame was sealed); no field is published for those frames and their readers use their own form (expected in this mode)"
+				: "Skeleton engine feed: " + n + " field(s) not published because their frame had already left the ring or was published before the field arrived; their readers use their own form";
+		}
 	}
 }

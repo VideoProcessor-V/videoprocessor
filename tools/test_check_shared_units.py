@@ -171,6 +171,46 @@ class CheckSharedUnitsTest(unittest.TestCase):
         self.assertEqual(u["duplicates"], 9)
         self.assertEqual(u["inside_owner"], 2)
 
+    def test_u21_by_value_parameters_and_using_namespace_forms(self):
+        # A by-value parameter (an engine copied or moved into a function), `using namespace NvOpticalFlow;` (a bare Engine is then the same type)
+        # and a using-declaration are duplicates outside the owner; a reference or pointer parameter is not.
+        _w(self.root, "src/VP-V/modules/motion/other/Param.h",
+           "void A(NvOpticalFlow::Engine e);\nvoid B(int x, NvOpticalFlow::HintedEngine e, int y);\nvoid C(NvOpticalFlow::Engine& r);\nvoid D(NvOpticalFlow::Engine* p);\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Using.h",
+           "using namespace NvOpticalFlow;\nusing namespace VpMotion::NvOpticalFlow;\nusing NvOpticalFlow::Engine;\nusing NvOpticalFlow::HintedEngine;\n")
+        _w(self.root, "src/VP-V/modules/motion/estimation/OwnUsing.h", "using namespace NvOpticalFlow;\nvoid A(NvOpticalFlow::Engine e);\n")
+        u = _unit(csu.scan(self.root, baseline={"units": {}}), "U21")
+        by_file = {}
+        for h in u["hits"]:
+            by_file.setdefault(h["file"].rsplit("/", 1)[-1], []).append((h["line"], h["role"]))
+        self.assertEqual(by_file["Param.h"], [(1, "duplicate"), (2, "duplicate")], by_file)
+        self.assertEqual(by_file["Using.h"], [(1, "duplicate"), (2, "duplicate"), (3, "duplicate"), (4, "duplicate")], by_file)
+        self.assertNotIn("OwnUsing.h", by_file)
+
+    def test_scene_facts_reads_no_validity_source(self):
+        # Coordinator ruling 2026-11-08: scene EVENTS (cut / fade / flash) are scene facts, classified from P4 through ClassifyEvents; SceneFactsOf
+        # must NOT read VpIndicator::TemporalValid or any other validity source. Vector validity comes ONLY from the P5a MotionValidity facade.
+        path = os.path.join(ROOT, "src", "VP-V", "modules", "control", "skeleton", "SkeletonModule.cpp")
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        start = text.find("bool SkeletonModule::SceneFactsOf(")
+        self.assertGreaterEqual(start, 0, "SceneFactsOf not found")
+        open_at = text.find("{", start)
+        depth, i = 0, open_at
+        while i < len(text):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        body = text[open_at:i]
+        code = "\n".join(l for l in body.splitlines() if not l.strip().startswith("//"))
+        for forbidden in ("TemporalValid", "VpIndicator::", "StampOf", "seal.Current", "MotionValidity", "kFull", "kContinuity"):
+            self.assertNotIn(forbidden, code, "SceneFactsOf reads a validity source: " + forbidden)
+        self.assertIn("ClassifyEvents", code)
+
     # ---- strict + baseline --------------------------------------------------------------------
     def _baseline(self, blocking, n):
         _w(self.root, "tools/shared_units_baseline.json", json.dumps(

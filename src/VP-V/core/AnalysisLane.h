@@ -5,6 +5,7 @@
 #include "GapScheduler.h"
 #include "Indicator.h"
 #include "LaneInterfaces.h"
+#include "LaneLease.h"
 #include "LaneRunner.h"
 #include "ProductGraph.h"
 #include "ProductSlots.h"
@@ -417,6 +418,7 @@ struct LaneState {
     std::vector<uint64_t> lateSeen;                   // per node index (render thread)
     std::vector<uint64_t> missSeen;                   // per node index (render thread)
     uint64_t firstSeq = 0;                            // the first frame this graph serves
+    uint64_t generation = 0;                          // 1,2,3...: one per built state (LaneLease staleness check)
     std::string capsMismatch;                         // non-empty: the real plan's history caps differ from the trial's
 
     int IndexOf(ProductId id) const { return id < indexOfId.size() ? indexOfId[id] : -1; }
@@ -1066,6 +1068,27 @@ public:
     bool ShadowOnly() const { return settings_.mode == LaneSettings::Mode::Shadow; }
     const LaneSettings& Settings() const { return settings_; }
     std::shared_ptr<LaneState> State() const { return std::atomic_load(&state_); }
+    // The generation of the CURRENT state (0 = no state). Any thread.
+    uint64_t Generation() const { const std::shared_ptr<LaneState> st = std::atomic_load(&state_); return st ? st->generation : 0; }
+    // A lease on the CURRENT state for an outside worker (the camera fit thread): the shared hold keeps the table, the buffers
+    // and the Indicator alive across any number of rebuilds; the holder compares `generation` with Generation() and rebinds.
+    // `bytesProduct` names the CPU product whose bytes ring the holder writes (kInvalidProduct-style: pass a product not in the
+    // graph, or leave default, for none). Empty lease (Valid() false) when the lane is inactive. Any thread.
+    LaneLease Lease(ProductId bytesProduct = ProductId(0xFFFFu)) const
+    {
+        LaneLease l;
+        const std::shared_ptr<LaneState> st = std::atomic_load(&state_);
+        if (!st || !st->table)
+            return l;
+        l.hold = st;
+        l.table = st->table.get();
+        l.indicator = st->indHold.get();
+        l.generation = st->generation;
+        const int i = st->IndexOf(bytesProduct);
+        if (i >= 0 && size_t(i) < st->bufs.size() && st->bufs[size_t(i)])
+            l.bytes = st->bufs[size_t(i)].get();
+        return l;
+    }
     const Regulator& GetRegulator() const { return regulator_; }
     uint32_t ChunkCapUs() const { return chunkCapUs_.load(std::memory_order_relaxed); }
     bool Deterministic() const { return det_; }
@@ -1270,6 +1293,7 @@ private:
         std::shared_ptr<LaneState> st = std::make_shared<LaneState>();
         st->graph = owner_.Current();
         st->firstSeq = fromSeq;
+        st->generation = ++stateGeneration_;
         st->ring.reset(new LaneSourceRing(std::max<size_t>(st->graph.framesInFlight, 4u)));
         st->table.reset(new SlotTable(st->graph));
         assert(st->table->Valid());
@@ -1568,6 +1592,7 @@ private:
     std::function<uint64_t()> nowUs_;
     LaneSettings settings_;
     std::shared_ptr<LaneState> state_;         // swapped with std::atomic_store / atomic_load
+    uint64_t stateGeneration_ = 0;             // last LaneState::generation handed out (render thread, BuildState)
     std::shared_ptr<LaneState> renderState_;   // the render thread's hold (keeps returned references valid)
     GraphOwner owner_;
     VramGovernor governor_;

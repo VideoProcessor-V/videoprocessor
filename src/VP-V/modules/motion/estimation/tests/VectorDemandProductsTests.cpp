@@ -22,7 +22,7 @@ using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 namespace VectorDemandProductsTestsNs
 {
 	using namespace VectorDemand;
-	constexpr int kOriginalConsumerCount = 11;   // the first consumers; the camera three are swept as a group
+	constexpr int kOriginalConsumerCount = 11;   // the first consumers; the camera three (bits 11..13) are swept as a group, CameraFit (bit 14) on its own
 	using VpSkeleton::BuildGraph;
 	using VpSkeleton::ConsumerDecl;
 	using VpSkeleton::Graph;
@@ -46,9 +46,11 @@ namespace VectorDemandProductsTestsNs
 				for (int ahead = 0; ahead <= 2; ++ahead)
 					for (int under = 0; under <= 1; ++under)
 						for (unsigned wants = 0; wants < (1u << kConsumerCount); ++wants) {
-							// The three camera consumers are covered as a group (none / all) to keep the sweep size.
+							// The three camera consumers (bits 11..13) are covered as a group (none / all) to keep the sweep size; the camera fit (bit 14,
+							// Consumer::CameraFit: a source-field consumer) is swept on its own, so all four combinations of {group, fit} are checked.
 							const unsigned extra = wants >> kOriginalConsumerCount;
-							if (extra != 0 && extra != 7u)
+							const unsigned group = extra & 7u;
+							if (group != 0 && group != 7u)
 								continue;
 							Input in;
 							in.enabled = (flags & 1) != 0;
@@ -75,7 +77,8 @@ namespace VectorDemandProductsTestsNs
 							Assert::AreEqual(uint8_t(d.mode == Mode::Backward ? 0 : 1), LaneLeadFor(d, 1));
 							++checked;
 						}
-			Assert::AreEqual((size_t(32 * 3 * 2) << kOriginalConsumerCount) * 2, checked);
+			// 32 flag sets x 3 queue depths x 2 under-load x 2^11 original wants x 2 camera-group states (none / all) x 2 camera-fit states.
+			Assert::AreEqual((size_t(32 * 3 * 2) << kOriginalConsumerCount) * 2 * 2, checked);
 		}
 
 		TEST_METHOD(DeclarationsFollowTheDomains)

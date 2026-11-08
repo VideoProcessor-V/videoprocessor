@@ -47,6 +47,8 @@ namespace CameraLink
 		std::atomic<uint64_t> unusable{ 0 };         // published records outside the usable set
 		std::atomic<uint64_t> resets{ 0 };           // fitter resets consumed by the worker
 		std::atomic<uint64_t> relatches{ 0 };
+		std::atomic<uint64_t> staleLane{ 0 };        // posts REFUSED: the job's lane generation is not the worker's (the lane graph was rebuilt)
+		std::atomic<uint64_t> rebound{ 0 };          // times the worker took a new lane lease (a rebuild was noticed)
 	};
 
 	// Counts consecutive Ambiguous measured seconds.
@@ -125,11 +127,11 @@ namespace CameraLink
 	inline std::string StatusLine(const FitCounters& c)
 	{
 		char b[256];
-		std::snprintf(b, sizeof(b), "camera fit: %llu fitted, %llu published, %llu late, %llu not used, %llu slip, %llu timing unknown, %llu queue full, %llu readback dropped",
+		std::snprintf(b, sizeof(b), "camera fit: %llu fitted, %llu published, %llu late, %llu not used, %llu slip, %llu timing unknown, %llu queue full, %llu readback dropped, %llu stale lane (refused after a graph rebuild), %llu lane rebinds",
 			(unsigned long long)c.fitted.load(), (unsigned long long)c.published.load(), (unsigned long long)c.late.load(),
 			(unsigned long long)c.unusable.load(), (unsigned long long)c.notFittedSlip.load(),
 			(unsigned long long)c.timingUnknown.load(), (unsigned long long)c.queueFull.load(),
-			(unsigned long long)c.readbackDropped.load());
+			(unsigned long long)c.readbackDropped.load(), (unsigned long long)c.staleLane.load(), (unsigned long long)c.rebound.load());
 		return b;
 	}
 }

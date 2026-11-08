@@ -644,13 +644,13 @@ namespace FallbackCatalog
 		                : Released("skeleton_engine_feed");
 	}
 	// MV7 standing gap: these users hold video memory and do not declare it to the governor (core/VramUsers.h KnownUndeclaredVramUsers), so the
-// budget does not see their memory. Engaged while the lane runs, until each module declares.
-inline Decision SkeletonVramKnown(const std::string& names)
-{
-	return names.empty() ? Released("skeleton_vram_known")
-	                     : Engaged("skeleton_vram_known", "VRAM not yet declared to the governor (known gaps): " + names + "; the budget does not count their memory");
-}
-// A lead read of an ordered-chain product is in THIS graph (WARNING level: nothing is rejected). The reader cannot be sealed ahead,
+	// budget does not see their memory. Engaged while the lane runs, until each module declares.
+	inline Decision SkeletonVramKnown(const std::string& names)
+	{
+		return names.empty() ? Released("skeleton_vram_known")
+		                     : Engaged("skeleton_vram_known", "VRAM not yet declared to the governor (known gaps): " + names + "; the budget does not count their memory");
+	}
+	// A lead read of an ordered-chain product is in THIS graph (WARNING level: nothing is rejected). The reader cannot be sealed ahead,
 	// so it live-fills its reduced form; the note is Graph::leadChainWarning ("quality_pattern -> coding_evidence (lead 2): lead read of an
 	// ordered chain: reader live-fills its reduced form"). Engaged only while such a read is in the graph.
 	inline Decision SkeletonLeadChain(const std::string& note)

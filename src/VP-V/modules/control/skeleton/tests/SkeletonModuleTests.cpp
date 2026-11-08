@@ -1210,6 +1210,19 @@ namespace SkeletonModuleTestsNs
 			Assert::IsFalse(rig.sk.SceneFactsOf(rig.Host(), 1, f), L"there is no frame before 1");
 		}
 
+		TEST_METHOD(AClaimFailureIsExplainedAndTheBackwardModeSaysItIsExpected)
+		{
+			Assert::IsTrue(Vpv::Skeleton::ClaimFailedNote(0, true).empty(), L"nothing to explain");
+			Assert::IsTrue(Vpv::Skeleton::ClaimFailedNote(0, false).empty());
+			const std::string backward = Vpv::Skeleton::ClaimFailedNote(3, true);
+			Assert::IsTrue(backward.find("3 pair(s) arrived after the seal") != std::string::npos, L"the count and the cause");
+			Assert::IsTrue(backward.find("backward / low-latency") != std::string::npos);
+			Assert::IsTrue(backward.find("expected in this mode") != std::string::npos);
+			const std::string ahead = Vpv::Skeleton::ClaimFailedNote(2, false);
+			Assert::IsTrue(ahead.find("2 field(s) not published") != std::string::npos);
+			Assert::IsTrue(ahead.find("left the ring") != std::string::npos);
+			Assert::IsTrue(ahead.find("expected in this mode") == std::string::npos, L"with a lead it is not the mode's normal behaviour");
+		}
 
 		TEST_METHOD(AnObservedSpanWithAWaitInsideNeverShedsAnything)
 		{
