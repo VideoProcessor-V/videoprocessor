@@ -114,7 +114,7 @@ namespace SourceIdentity
 			std::atomic<uint64_t> streamKeyA{ 0 };
 			std::atomic<bool> haveKeyA{ false };
 			std::atomic<uint64_t> cEvaluations{ 0 }, cDelivered{ 0 }, cDropped{ 0 }, cRepeats{ 0 }, cNoClock{ 0 }, cUnusable{ 0 },
-				cStale{ 0 }, cDiscontinuities{ 0 };
+				cStale{ 0 }, cDiscontinuities{ 0 }, cWindowClears{ 0 };
 
 			// ---- the worker's own state (procMutex: one processing thread at a time) ---------------------------------------
 			mutable std::mutex procMutex;
@@ -626,6 +626,8 @@ namespace SourceIdentity
 								flags |= kEvCut;
 								++cuts;   // each cut is a shot (ChainEvidence's per-shot cap)
 							}
+							else if (events[i].kind == static_cast<int>(EstimatorEvent::ClearWindow))
+								flags |= kEvClearWindow;   // the evidence window is cleared before this evaluation (Process)
 							else
 								flags |= events[i].kind == static_cast<int>(EstimatorEvent::Blank) ? kEvBlank : kEvFade;
 							events.erase(events.begin() + static_cast<std::ptrdiff_t>(i));
@@ -665,10 +667,23 @@ namespace SourceIdentity
 				if (!running.load(std::memory_order_acquire))
 					return false;
 				Job job;
-				job.snap = std::shared_ptr<const LineSnapshot>(std::make_shared<LineSnapshot>(snap));
+				std::shared_ptr<LineSnapshot> copy = std::make_shared<LineSnapshot>(snap);
 				{
 					std::lock_guard<std::mutex> lk(m);
 					job.gen = gen;
+					// A pending ClearWindow event of a frame at or before this snapshot's sequence is consumed here as Deliver would (the clear is
+					// idempotent, so a dumped flag and a pending event cannot double count); cuts / blanks / fades are NOT merged: the replay carries its own.
+					for (size_t i = 0; i < events.size();)
+					{
+						if (events[i].kind == static_cast<int>(EstimatorEvent::ClearWindow) && events[i].seq <= snap.seq)
+						{
+							copy->flags |= kEvClearWindow;
+							events.erase(events.begin() + static_cast<std::ptrdiff_t>(i));
+						}
+						else
+							++i;
+					}
+					job.snap = copy;
 					while (static_cast<int>(jobs.size()) >= cfg.queueDepth)
 					{
 						jobs.pop_front();
@@ -1012,6 +1027,25 @@ namespace SourceIdentity
 				}
 				const int cutsNow = s.cuts > 0 ? s.cuts : ((flags & kEvCut) != 0u ? 1 : 0);
 				shotId += static_cast<uint32_t>(cutsNow);
+				// Revert window: the evidence window (both axes, as a resync reset does without the reset record) is cleared BEFORE this evaluation
+				// on a ClearWindow event (the monitor: the end of a menu / mixed episode, the first cut after one) and at the first cut after a HOLD
+				// evaluation of this estimator (ChainEvidence::NoteCut). Black frames and ordinary cuts do not clear. The reading is a pure function
+				// of the evidence, so this evaluation reads UNSURE until new evidence builds; a genuine native picture is then no longer
+				// contradicted by the old reading.
+				bool windowCleared = false;
+				if ((flags & kEvClearWindow) != 0u)
+				{
+					evidence.Reset();
+					windowCleared = true;
+				}
+				else if (cutsNow > 0)
+					windowCleared = evidence.NoteCut();
+				if (windowCleared)
+				{
+					proposer[0].Reset();
+					proposer[1].Reset();
+					cWindowClears.fetch_add(1, std::memory_order_relaxed);
+				}
 				const bool latchedMode = latchedPower.load(std::memory_order_acquire);
 				const int step = cfg.outputStepOverride > 0 ? cfg.outputStepOverride : DetectStepCodes(s);
 				const double floorCodes = step >= 4 ? 1.155 : 0.289;   // the dof-normalised rounding / dither sigma (ChainEvidence.h)
@@ -1256,6 +1290,7 @@ namespace SourceIdentity
 				in.noClock = c.noClock;
 				in.unusable = c.unusable;
 				in.stale = c.stale;
+				in.windowClears = c.windowClears;
 				in.evidence = log.GetStatus();
 				in.evidenceText = log.StatusText();
 				return in;
@@ -1278,6 +1313,7 @@ namespace SourceIdentity
 				c.unusable = cUnusable.load(std::memory_order_relaxed);
 				c.stale = cStale.load(std::memory_order_relaxed);
 				c.discontinuities = cDiscontinuities.load(std::memory_order_relaxed);
+				c.windowClears = cWindowClears.load(std::memory_order_relaxed);
 				return c;
 			}
 
@@ -1364,6 +1400,7 @@ namespace SourceIdentity
 		bool ChainEstimator::LatchedPowerForTest() const { return st_->latchedPower.load(std::memory_order_acquire); }
 		void ChainEstimator::ForceNextDueForTest(double ms) { st_->nextDueMs.store(ms, std::memory_order_release); st_->intervalMs.store(ms - st_->lastStartMs.load(std::memory_order_acquire), std::memory_order_release); }
 		double ChainEstimator::IntervalSec() const { return st_->intervalMs.load(std::memory_order_acquire) / 1000.0; }
+		double ChainEstimator::AcquiringIntervalSec() const { return st_->acquiringIntervalMs.load(std::memory_order_acquire) / 1000.0; }
 		bool ChainEstimator::SubmitLines(const LineSnapshot& snapshot) { return st_->SubmitSnapshot(snapshot); }
 	}
 }

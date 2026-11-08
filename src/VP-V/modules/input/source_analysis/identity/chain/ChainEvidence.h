@@ -33,8 +33,12 @@
 // evaluation rate (never a frame count): windowMargin x (c1 / windowYieldNats) evaluation intervals, clamped to
 // [windowMinSec, windowMaxSec]; the interval is a running mean of the source-time gaps between submitted evaluations. So an ABR rung
 // change mid-play is not outvoted for ever by hundreds of nats of old evidence. The window needs the evaluation's source time
-// (AxisObservation::timeUs; -1 = unknown: nothing expires). The accumulation of an axis is RESET by ResetAxis (resync, format change,
-// discontinuity) and by a HOLD evaluation (an overlay / menu / PiP over the picture: what came before says nothing about what is shown).
+// (AxisObservation::timeUs; -1 = unknown: nothing expires). windowMargin is 1.5 (SID revert window, owner-approved): W = 1.5 x (c1 / yield)
+// x the acquiring interval, about 16 s at a 1 s interval (c1 14.873 / yield 1.4 = 10.6 evaluations needed, 15.9 in the window). The
+// accumulation of an axis is RESET by ResetAxis (resync, format change, discontinuity) and by a HOLD evaluation (an overlay / menu / PiP over
+// the picture: what came before says nothing about what is shown); the estimator also calls Reset() (both axes) when a menu / mixed episode
+// ends, at the first cut after such an episode and on a ClearWindow event (ChainEstimator.h), so a switch to native at one of those
+// moments is not outvoted by the old evidence. Black frames and ordinary cuts do not clear it.
 // Two axes: when both axes' best hypotheses are positive, agreeing ratios add +agreementBonus to each and
 // disagreeing ones subtract it; when one axis abstains nothing is added or subtracted (relaxed).
 // Threshold: c1 = -ln(alpha) + ln(candidates x kernels), alpha = target rate per hour x interval / 3600. It is the DETECTION-confidence
@@ -70,7 +74,7 @@ namespace SourceIdentity
 			int maxHypotheses = 16;
 			// The recent window (N3): seconds = windowMargin x (c1 / windowYieldNats) x measured evaluation interval, clamped.
 			double windowYieldNats = 1.4;        // F0: the hard 8-bit grainy cases gain about 1.4 nats per evaluation
-			double windowMargin = 3.0;           // the window spans this many times the time that yield needs to reach c1
+			double windowMargin = 1.5;           // the window spans this many times the time that yield needs to reach c1 (3.0 until the revert window: 31.9 s -> 15.9 s at 1 s)
 			double windowMinSec = 10.0;
 			double windowMaxSec = 600.0;
 			double rateSmoothing = 0.25;         // weight of the newest gap in the running mean of the evaluation interval
@@ -173,6 +177,18 @@ namespace SourceIdentity
 			{
 				ResetAxis(0);
 				ResetAxis(1);
+				holdSinceCut_ = false;
+			}
+
+			// A cut was consumed (the estimator calls it for the evaluation that carries one, BEFORE its Submit). If a HOLD evaluation (an overlay /
+			// menu / PiP) was read since the last clear, this is the first cut after such an episode: both axes are cleared (the window starts
+			// over) and true is returned. An ordinary cut (no HOLD since the last clear) and a black / abstaining evaluation clear nothing.
+			bool NoteCut()
+			{
+				if (!holdSinceCut_)
+					return false;
+				Reset();
+				return true;
 			}
 
 			void ResetAxis(int axis)
@@ -269,6 +285,7 @@ namespace SourceIdentity
 					out.reason |= kReasonMixed;
 					st.lastReason = out.reason;
 					ForgetAccumulation(st);   // an overlay / menu / PiP: nothing accumulated, and what came before says nothing about it
+					holdSinceCut_ = true;     // the first cut after the episode clears both axes (NoteCut)
 					return true;
 				}
 
@@ -637,6 +654,7 @@ namespace SourceIdentity
 			NullTables nulls_;
 			Thresholds thr_;
 			AxisState ax_[2];
+			bool holdSinceCut_ = false;   // a HOLD evaluation was read since the last clear: the next cut clears the window (NoteCut)
 		};
 	}
 }

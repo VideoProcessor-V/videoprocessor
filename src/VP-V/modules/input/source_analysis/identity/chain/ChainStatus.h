@@ -43,6 +43,7 @@ namespace SourceIdentity
 			LogEval last;                   // the latest evaluation (Ctrl+Alt+D)
 			GovernorPlan governor;
 			uint64_t evaluations = 0, delivered = 0, dropped = 0, repeatsSkipped = 0, noClock = 0, unusable = 0, stale = 0;
+			uint64_t windowClears = 0;      // evidence-window clears (menu end, first cut after a menu / HOLD episode)
 			std::string unusableReason;     // the latest "no lines" reason ("" = none)
 			double wallMsSinceLastEvaluation = -1.0;   // wall time since the newest evaluation (or the clean start); -1 = not known
 			EvidenceStatus evidence;
@@ -222,7 +223,7 @@ namespace SourceIdentity
 			t += "  counts: evaluations " + std::to_string(in.evaluations) + ", frames taken " + std::to_string(in.delivered) + ", dropped (newest wins) " +
 				std::to_string(in.dropped) + ", repeats skipped " + std::to_string(in.repeatsSkipped) + ", no clock " + std::to_string(in.noClock) +
 				", no lines " + std::to_string(in.unusable) + (in.unusableReason.empty() ? std::string() : " (" + in.unusableReason + ")") +
-				", stale " + std::to_string(in.stale) + "\n";
+				", stale " + std::to_string(in.stale) + ", window clears " + std::to_string(in.windowClears) + "\n";
 			if (!in.evidenceText.empty())
 				t += "  " + in.evidenceText + "\n";
 			return t;
