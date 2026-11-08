@@ -474,3 +474,35 @@ bool LibplaceboVideoRenderer::Impl::PlanVpOutputs(RendererExtension::OutputPlan&
 	VpMotion::PlanVpTimeline(activeSettings, dejudderPolicy, plan, host);
 	return true;
 }
+
+// M2 P5b-6 (item i): the de-judder rendered-picture cache and the extras' geometry for this frame (RenderLocked,
+// after the hook list is built, at today's position: the registration order inside the frame's hooks is unchanged).
+// Owner change: stays IN PLACE as this one call; retired when P4 moves the hook block (CollectHooks). The old
+// statements; nlsSubmitted = (submittedNls != nullptr), evaluated by the caller.
+void LibplaceboVideoRenderer::Impl::RegisterDejudderCacheFrame(const pl_frame& target, const pl_frame& renderImage,
+	const SubtitleCutPasteGeometry& relocatedSubtitle, bool subtitleCompositionSucceeded, bool nlsSubmitted, bool cadenceRepeat,
+	uint64_t sourceSequence)
+{
+    dejudderSubtitleComposed = subtitleCompositionSucceeded;
+    {
+        const pl_tex framebuffer = target.planes[0].texture;
+        const SubtitleBoxRect subtitleHolds[] = { relocatedSubtitle.source, relocatedSubtitle.generatedCleanup,
+            relocatedSubtitle.destination, relocatedSubtitle.layoutCoverage };
+        DejudderCacheStage::Frame cacheFrame;
+        cacheFrame.extrasMayFollow = dejudderReason == DejudderPolicy::Reason::Active &&
+            dejudderExtrasAllowed && dejudder && !cadenceRepeat && sourceSequence != 0;
+        cacheFrame.geometryForVectors = !cacheFrame.extrasMayFollow && vectorDemand.Serves(VectorDemand::Consumer::SigmaDelta) &&
+            dejudder && !cadenceRepeat && sourceSequence != 0 && !interpolating && !vpTimelineActive;   // vector engine: the sigma-delta's vectors need the geometry
+        cacheFrame.sourceSequence = sourceSequence;
+        cacheFrame.sourceCrop = renderImage.crop;
+        cacheFrame.targetCrop = target.crop;
+        cacheFrame.framebufferW = framebuffer ? static_cast<float>(framebuffer->params.w) : 0.0f;
+        cacheFrame.framebufferH = framebuffer ? static_cast<float>(framebuffer->params.h) : 0.0f;
+        cacheFrame.nlsSubmitted = nlsSubmitted;
+        cacheFrame.warpRendered = activeSettings.dejudderWarpRendered;
+        cacheFrame.interpolating = interpolating;
+        cacheFrame.subtitleHolds = subtitleCompositionSucceeded ? subtitleHolds : nullptr;
+        cacheFrame.numSubtitleHolds = 4;
+        dejudderCacheStage.Register(cacheFrame, [this]() { return KnownNlsMapping(); }, frameHooks);
+    }
+}

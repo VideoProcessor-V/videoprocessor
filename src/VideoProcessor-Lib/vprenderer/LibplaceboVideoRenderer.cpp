@@ -5684,6 +5684,8 @@ struct LibplaceboVideoRenderer::Impl
 		uint64_t sourceSequence, uint64_t nextSourceSequence, bool& entranceOnceDone, bool& bAlreadyA, const AsADone& bAsADone);   // VPV-HOOK M2 P5b-4: defined in VP-V/modules/motion/consumers/PhaseTimeline.inl
 	MotionConfig::Settings ResolveMotionEngine(bool fileMotionOff);   // VPV-HOOK M2 P5b-5: defined in VP-V/modules/motion/consumers/PhaseTimeline.inl
 	bool PlanVpOutputs(RendererExtension::OutputPlan& plan);   // VPV-HOOK M2 P5b-5: R10 PlanOutputs (PhaseTimeline.inl)
+	void RegisterDejudderCacheFrame(const pl_frame& target, const pl_frame& renderImage, const SubtitleCutPasteGeometry& relocatedSubtitle,   // VPV-HOOK M2 P5b-6
+		bool subtitleCompositionSucceeded, bool nlsSubmitted, bool cadenceRepeat, uint64_t sourceSequence);   // defined in VP-V/modules/motion/consumers/PhaseTimeline.inl
 	// A picture between frames is drawn for this image: Stage B's picture is ready and the
 	// image renders A's own planes (a subtitle-composed picture keeps A and its A-aligned
 	// consumers: the residual hold motion, the grain field, the occlusion mask).
@@ -24386,30 +24388,10 @@ releaseDriftBaseRetention =
             // Silent-fallbacks batch (WP-4): BTB/WTW clipping is visible; the stage's Fallback is the same mapping.
             SyncFallback(extendedRange.Fallback(activeSettings.preserveExtendedRange));
         }
-        // Stage 6d (motion.consumers): the de-judder rendered-picture cache and the extras' geometry
-        // (VP-V/modules/motion/consumers/DejudderCacheStage.h; WP-13).
-        dejudderSubtitleComposed = subtitleCompositionSucceeded;
-        {
-            const pl_tex framebuffer = target.planes[0].texture;
-            const SubtitleBoxRect subtitleHolds[] = { relocatedSubtitle.source, relocatedSubtitle.generatedCleanup,
-                relocatedSubtitle.destination, relocatedSubtitle.layoutCoverage };
-            DejudderCacheStage::Frame cacheFrame;
-            cacheFrame.extrasMayFollow = dejudderReason == DejudderPolicy::Reason::Active &&
-                dejudderExtrasAllowed && dejudder && !cadenceRepeat && sourceSequence != 0;
-            cacheFrame.geometryForVectors = !cacheFrame.extrasMayFollow && vectorDemand.Serves(VectorDemand::Consumer::SigmaDelta) &&
-                dejudder && !cadenceRepeat && sourceSequence != 0 && !interpolating && !vpTimelineActive;   // vector engine: the sigma-delta's vectors need the geometry
-            cacheFrame.sourceSequence = sourceSequence;
-            cacheFrame.sourceCrop = renderImage.crop;
-            cacheFrame.targetCrop = target.crop;
-            cacheFrame.framebufferW = framebuffer ? static_cast<float>(framebuffer->params.w) : 0.0f;
-            cacheFrame.framebufferH = framebuffer ? static_cast<float>(framebuffer->params.h) : 0.0f;
-            cacheFrame.nlsSubmitted = submittedNls != nullptr;
-            cacheFrame.warpRendered = activeSettings.dejudderWarpRendered;
-            cacheFrame.interpolating = interpolating;
-            cacheFrame.subtitleHolds = subtitleCompositionSucceeded ? subtitleHolds : nullptr;
-            cacheFrame.numSubtitleHolds = 4;
-            dejudderCacheStage.Register(cacheFrame, [this]() { return KnownNlsMapping(); }, frameHooks);
-        }
+        // Stage 6d (motion.consumers): the de-judder rendered-picture cache and the extras' geometry, at today's position
+        // (DejudderCacheStage.h; WP-13). In place until P4 moves the hook block (module README open item).
+        RegisterDejudderCacheFrame(target, renderImage, relocatedSubtitle, subtitleCompositionSucceeded, submittedNls != nullptr,   // VPV-HOOK M2 P5b-6
+            cadenceRepeat, sourceSequence);
         // WP-24 repeat reuse, call 1 of 3: decide this refresh; arm the cache for a first present the
         // queue holds a repeat of (before the encoding-repair check, which looks at PRE_OUTPUT hooks).
         repeatReuse.SetOptions({ activeSettings.repeatRenderReuse, pipelineSlots.OriginalPathway(),
