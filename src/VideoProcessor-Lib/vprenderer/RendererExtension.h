@@ -476,6 +476,8 @@ namespace RendererExtension
 	// Entrance (fan-out; render thread, renderMutex held, before the frame's hook list is built): the point where the
 	// host's entrance-decision block starts. Handlers may record GPU work on their own objects and read the facts; they
 	// never write the frame's textures, params or hooks (70b section 9.2).
+	// OPEN ITEM: 'never write' is a contract, not enforced by the types: image and target are non-const pl_frame pointers;
+	// const-ness comes in a later package (audit 2 of M2 P4).
 	inline void NotifyEntrance(const void* host, int64_t seq, int64_t nextSeq, int64_t generation, pl_frame* image, pl_frame* target,
 		int width, int height, bool cadenceRepeat, double captureRateHz) noexcept
 	{

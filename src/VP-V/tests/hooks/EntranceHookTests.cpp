@@ -64,8 +64,17 @@ namespace EntranceHookTest
 			RE::FrameContext seen;
 			RE::DrawJob seenJob;
 			bool sawJob = false;
+			int faults = 0;                 // WorkerFault reports this module received
+			std::string faultWorker, faultWhat;
 			explicit Mod(const char* name) : n(name) {}
 			const char* Name() const override { return n.c_str(); }
+			void OnStatus(const RE::Context&, RE::StatusKind kind, std::vector<std::string>&, const char* worker, const char* what) override
+			{
+				if (kind != RE::StatusKind::WorkerFault) return;
+				++faults;
+				faultWorker = worker ? worker : "";
+				faultWhat = what ? what : "";
+			}
 			bool OnFrame(RE::FrameContext& c) override
 			{
 				g_log->push_back(n + ":" + std::to_string(static_cast<int>(c.phase)));
@@ -168,6 +177,10 @@ namespace EntranceHookTest
 			RE::NotifyEntrance(&host, 1, 2, 1, nullptr, nullptr, 0, 0, false, 0.0);
 			const std::vector<std::string> expected = { "a:6", "b:6" };
 			Assert::IsTrue(expected == s.log);
+			// The fault is reported, once, with the throwing module's name (audit 2).
+			Assert::AreEqual(1, b->faults);
+			Assert::AreEqual(std::string("a"), b->faultWorker);
+			Assert::AreEqual(std::string("exception"), b->faultWhat);
 		}
 
 		TEST_METHOD(NothingRegisteredAndAnEmptyHubAreInert)
