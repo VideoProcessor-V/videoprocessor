@@ -111,7 +111,11 @@ namespace TemporalDetail
 				costBlocks = &blockCost;
 			if (!costBlocks)
 				return Absent(m_stats.unfit, "the pair has no vectors or costs");
-			const int perBlock = OpticalFlowTrust::CellsPerBlock(NvOpticalFlow::Engine::Grid, MotionAhead::Flow::kBlockPx);
+			// The engine's ONE per-cell trust (OpticalFlowTrust::CellTrust: the camera ahead fit calls the same function).
+			std::vector<float> cellTrust;
+			if (!OpticalFlowTrust::CellTrust(*costBlocks, blocksX, blocksY, cellError, flow->gridW, flow->gridH, NvOpticalFlow::Engine::Grid,
+					MotionAhead::Flow::kBlockPx, m_consistencyPx, cellTrust))
+				return Absent(m_stats.unfit, "the pair has no vectors or costs");
 			const double scale = static_cast<double>(m_srcW) / flow->halfW;   // producer pixels -> source pixels
 			MotionPair pair;
 			pair.valid = true;
@@ -125,9 +129,7 @@ namespace TemporalDetail
 			{
 				pair.vx[i] = static_cast<float>(vec[i * 2] / 32.0 * scale);       // S10.5 producer pixels -> source pixels
 				pair.vy[i] = static_cast<float>(vec[i * 2 + 1] / 32.0 * scale);
-				const int cx = static_cast<int>(i % static_cast<size_t>(flow->gridW)), cy = static_cast<int>(i / static_cast<size_t>(flow->gridW));
-				const size_t block = static_cast<size_t>((std::min)(cy / perBlock, blocksY - 1)) * blocksX + (std::min)(cx / perBlock, blocksX - 1);
-				pair.trust[i] = (*costBlocks)[block] * OpticalFlowTrust::FallOff(m_consistencyPx, 2.0f * m_consistencyPx, cellError[i]);
+				pair.trust[i] = cellTrust[i];
 			}
 			out = std::move(pair);
 			++m_stats.hits;
