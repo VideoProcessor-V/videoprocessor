@@ -6639,7 +6639,7 @@ namespace Tests
 				Calibration::PatternOutputInfo ready;
 				if (!started && t >= 1.0)
 				{
-					const bool got = renderer.GetCalibrationOutput(ready);
+					const bool got = VpvCalls::GetCalibrationOutput(&renderer, ready);
 					lastReason = got ? std::string(ready.reason) : std::string("GetCalibrationOutput returned false");
 				}
 				if (!started && t >= 1.0 && ready.available)
