@@ -26,6 +26,7 @@ namespace SourceIdentity
 		constexpr uint32_t kEvFade = 1u << 2;
 		constexpr uint32_t kEvDiscontinuity = 1u << 3;
 		constexpr uint32_t kEvAreaChanged = 1u << 4;
+		constexpr uint32_t kEvClearWindow = 1u << 5;   // a ClearWindow event was consumed: the evidence window was cleared before this evaluation
 
 		struct LineSnapshot
 		{

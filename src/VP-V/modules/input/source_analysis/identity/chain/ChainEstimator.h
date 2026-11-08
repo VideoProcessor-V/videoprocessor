@@ -26,6 +26,13 @@
 // skipped without consuming the due slot. The active area and the source time of a frame come from NoteFrame (the monitor's per-frame
 // call on the render thread); a frame whose time is not known yet is extrapolated from the newest two, else skipped (counted).
 //
+// Revert window (owner-approved): NoteEvent(ClearWindow, seq) asks for the evidence window (both axes, ChainEvidence::Reset + the proposers, the
+// path of a resync reset without the reader reset and without a reset record: the reading is a pure function of the evidence, so the next
+// evaluation reads UNSURE until new evidence builds) to be cleared before the first evaluation of a frame with seq >= the event's. The monitor
+// sends it at the END of a mixed (menu / overlay) episode and at the first cut after one (WindowClearPolicy.h); the estimator also clears at
+// its own first cut after a HOLD evaluation. Black frames (Blank) and ordinary cuts never clear. A clear event pulls the next evaluation
+// forward while the readings are confident, like any event, so the reading is re-made at once.
+//
 // Modes: Off (nothing runs, the sink is unregistered, the held record is reset), Shadow (published + logged, the classical decision
 // stands; the record carries kFlagShadow), On (published; the consensus may use it). `Original pathway` = Off.
 //
@@ -54,7 +61,7 @@ namespace SourceIdentity
 	namespace Chain
 	{
 		enum class EstimatorMode : int { Off = 0, Shadow = 1, On = 2 };
-		enum class EstimatorEvent : int { Cut = 0, Blank = 1, Fade = 2 };
+		enum class EstimatorEvent : int { Cut = 0, Blank = 1, Fade = 2, ClearWindow = 3 };
 
 		// Every tunable is hidden tuning (doc 78 section 7; the README "Tuning (not in Config)" table), none is read from a config file yet.
 		struct EstimatorSettings
@@ -86,6 +93,7 @@ namespace SourceIdentity
 			uint64_t unusable = 0;           // frames whose active area leaves no room for the lines
 			uint64_t stale = 0;              // queued jobs of an earlier era / a stopped estimator
 			uint64_t discontinuities = 0;    // resets
+			uint64_t windowClears = 0;       // evidence-window clears (ClearWindow events consumed, first cut after a HOLD): no reset record
 		};
 
 		// What one evaluation tested, per axis and candidate (the calibration dump of the harness reads it; any other observer may).
@@ -154,7 +162,7 @@ namespace SourceIdentity
 			// The render thread, every source frame: the frame's source time (the frame clock's domain) and its active rectangle
 			// (w <= 0: the whole frame).
 			void NoteFrame(uint64_t seq, double seconds, int x, int y, int w, int h);
-			void NoteEvent(EstimatorEvent kind, uint64_t seq);
+			void NoteEvent(EstimatorEvent kind, uint64_t seq);   // Cut | Blank | Fade | ClearWindow (see "Revert window" above)
 			void NoteRepeat(uint64_t seq);
 			// N2 (S1 bound): the monitor left a native-looking informative frame out on the axes of `axisMask` (bit 0 = H, bit 1 = V) because
 			// this estimator's record reads them confidently below native. While such notes keep coming the estimator evaluates at its

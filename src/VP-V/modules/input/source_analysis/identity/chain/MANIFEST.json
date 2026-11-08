@@ -17,6 +17,7 @@
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainReading.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainGovernor.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainLines.h",
+    "src/VP-V/modules/input/source_analysis/identity/chain/ChainWindowPolicy.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainStatus.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainEvidenceLog.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainEvidenceLog.cpp",

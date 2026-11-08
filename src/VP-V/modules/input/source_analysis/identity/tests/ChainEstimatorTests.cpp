@@ -498,6 +498,66 @@ namespace Tests
 			Assert::AreEqual<uint32_t>(0u, est.StatusInput().last.flags, L"and only once");
 		}
 
+		// ---- Revert window: ClearWindow events ------------------------------------------------------------------------------------
+		TEST_METHOD(AClearWindowEventIsConsumedByTheFirstEvaluationAfterItAndNeitherABlankNorACutClears)
+		{
+			ManualClock clk;
+			C::ChainEstimator est(C::EstimatorSettings(), clk.Fn());
+			StartShadow(est);
+			const Plane plane = MakePlane(kW, kH, 43, 4);
+			est.NoteEvent(C::EstimatorEvent::Cut, 20);
+			est.NoteEvent(C::EstimatorEvent::Blank, 21);
+			Feed(est, plane, 30, 1.0);
+			Assert::AreEqual<uint32_t>(C::kEvCut | C::kEvBlank, est.StatusInput().last.flags);
+			Assert::AreEqual<uint64_t>(0, est.GetCounters().windowClears, L"a cut and a black frame clear nothing");
+			clk.Set(1100.0);
+			est.NoteEvent(C::EstimatorEvent::ClearWindow, 40);
+			Feed(est, plane, 35, 2.0);   // before the event's frame
+			Assert::AreEqual<uint32_t>(0u, est.StatusInput().last.flags);
+			Assert::AreEqual<uint64_t>(0, est.GetCounters().windowClears);
+			clk.Set(2200.0);
+			Feed(est, plane, 50, 3.0);   // after it
+			Assert::AreEqual<uint32_t>(C::kEvClearWindow, est.StatusInput().last.flags, L"the clear travels with the evaluation (log flag)");
+			Assert::AreEqual<uint64_t>(1, est.GetCounters().windowClears);
+			Assert::AreEqual<uint64_t>(0, est.GetCounters().discontinuities, L"a window clear is not a reset: no reset record, the era goes on");
+			clk.Set(3300.0);
+			Feed(est, plane, 60, 4.0);
+			Assert::AreEqual<uint32_t>(0u, est.StatusInput().last.flags, L"consumed once");
+			Assert::AreEqual<uint64_t>(1, est.GetCounters().windowClears);
+		}
+
+		TEST_METHOD(AClearWindowEventReachesAReplayedSnapshotButCutsAndBlanksDoNot)
+		{
+			ManualClock clk;
+			C::ChainEstimator est(C::EstimatorSettings(), clk.Fn());
+			StartShadow(est);
+			const Plane plane = MakePlane(kW, kH, 44, 4);
+			C::LineRect active;
+			active.x = 0; active.y = 0; active.w = kW; active.h = kH;
+			const C::LinePlan plan = C::LineSampler::Plan(active, 9);
+			Assert::IsTrue(plan.valid);
+			C::LineSnapshot snap;
+			Assert::IsTrue(C::CaptureLines<uint16_t>(plan, plane.luma.data(), plane.w, 1.0, snap));
+			snap.seq = 10;
+			snap.timeUs = 1000000;
+			est.NoteEvent(C::EstimatorEvent::ClearWindow, 4);
+			est.NoteEvent(C::EstimatorEvent::Cut, 4);
+			est.NoteEvent(C::EstimatorEvent::ClearWindow, 99);   // a later frame: not consumed by this snapshot
+			Assert::IsTrue(est.SubmitLines(snap));
+			Assert::AreEqual<uint32_t>(C::kEvClearWindow, est.StatusInput().last.flags, L"the clear of an earlier frame is consumed; the replay carries its own cuts");
+			Assert::AreEqual<uint64_t>(1, est.GetCounters().windowClears);
+			snap.seq = 11;
+			snap.timeUs = 2000000;
+			snap.flags = 0;
+			Assert::IsTrue(est.SubmitLines(snap));
+			Assert::AreEqual<uint32_t>(0u, est.StatusInput().last.flags, L"the later event is still pending");
+			snap.seq = 100;
+			snap.timeUs = 3000000;
+			Assert::IsTrue(est.SubmitLines(snap));
+			Assert::AreEqual<uint32_t>(C::kEvClearWindow, est.StatusInput().last.flags, L"and is consumed once its frame is reached");
+			Assert::AreEqual<uint64_t>(2, est.GetCounters().windowClears);
+		}
+
 		TEST_METHOD(AnEventPullsTheNextEvaluationForwardWhileConfidentAtMostOncePerSecond)
 		{
 			ManualClock clk;

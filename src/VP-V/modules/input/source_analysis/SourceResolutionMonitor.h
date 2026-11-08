@@ -2,6 +2,7 @@
 
 #include <VP-V/modules/input/source_analysis/SourceHistoryLog.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
+#include <VP-V/modules/input/source_analysis/identity/chain/ChainWindowPolicy.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceGeometryView.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdPipeline.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceQualityView.h>
@@ -269,6 +270,12 @@ namespace SourceResolutionMonitor
 		SourceIdentity::Chain::ChainEstimator& ChainEstimatorRef() { return *chainEst; }
 		// Tests: replaces the (inert) estimator with one built with an injected clock / settings. Before SetChainEnabled(true) only.
 		void SetChainEstimatorForTest(std::unique_ptr<SourceIdentity::Chain::ChainEstimator> estimator);
+		// Tests: reads every analysed frame as a mixed screen (a menu / overlay episode) for the chain window policy ONLY; the trackers and the
+		// classical decision are not affected. Off in every ordinary run.
+		void SetMixedForTest(bool mixed) { mixedForTest.store(mixed, std::memory_order_release); }
+		// Tests: the next analysed frame is reported as a cut to the chain events ONLY (NoteEvent Cut and the window policy); the trackers' own
+		// cut detection, the pipeline and the history row are not affected. One-shot, consumed with the consensus On / Shadow and the chain enabled; off in every ordinary run.
+		void ForceCutForTest() { cutForTest.store(true, std::memory_order_release); }
 		// N2 (diagnostic): native-looking frames the trackers left out because the consensus held an upscaled source on confident chain
 		// evidence (Tracker::ChainHeld, summed over the three trackers; 0 in Off / Shadow).
 		unsigned long long NativeFramesHeldByChain() const { return nativeHeldByChain.load(std::memory_order_relaxed); }
@@ -578,6 +585,9 @@ namespace SourceResolutionMonitor
 		mutable bool chainStatusValid = false;
 		std::atomic<bool> chainTapExplicit{ false };   // SetChainTap(owner) was called (any thread): no auto-discovery (render thread reads it)
 		bool chainWasBlank = false;         // worker: the previous analysed frame was non-informative (the Blank event fires on the rising edge only)
+		SourceIdentity::Chain::WindowClearPolicy chainWindowPolicy;   // worker: the end of a mixed episode / the first cut after one asks the estimator to clear its window
+		std::atomic<bool> mixedForTest{ false };
+		std::atomic<bool> cutForTest{ false };
 		unsigned chainProbe = 0;             // render thread: frames since the last owner probe
 		std::string chainFormatSent;         // render thread: the input format text last handed to the estimator
 		std::deque<std::pair<double, double>> live;          // (seconds, ratio) of informative frames
