@@ -179,6 +179,9 @@ namespace CameraModel
 		bool haveObjectLayer = false;
 		ObjectModel objectLayer;     // params, blocks = support count, cx/cy = support centre, id = persistent layer id 1..255
 		double layerRisk = 0;        // 1 at an accepted layer swap, decaying linearly to 0 over the swap window
+		// FULL-RESOLUTION FINAL REFINE (owner, ahead fit): the cells the final IRLS refine of the chosen model weighted (> 0) over EVERY
+		// cell of the field; 0 = not run (the seed / live path: the final refine stays on the sampled cells, unchanged).
+		uint32_t finalRefineCells = 0;
 	};
 
 	// Map a point (picture-centred, source px) through Params.

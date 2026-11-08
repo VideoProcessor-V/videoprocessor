@@ -45,6 +45,11 @@ namespace CameraModel
 		double precisionPx = 0;                     // <= 0 -> 0.25 * blockSize / 16
 		int64_t deadlineMicros = 0;                 // absolute, in Clock microseconds; 0 = none
 		const PairInput* next = nullptr;            // queued next pair (or null)
+		// FULL-RESOLUTION FINAL REFINE (owner: what informs the matcher uses full resolution). Hypothesis scoring and the model ladder keep
+		// the sampled cells (targetCells); with this on, the CHOSEN model is then refined (IRLS, its own type, the same sigma-marginalised
+		// inlier weights) over EVERY cell of the field inside the picture that is not excluded and has trust > 0. Set for the ahead fit's
+		// native field (CameraLink::AssemblePair); off = byte-identical to before (the seed / live path).
+		bool fullFinalRefine = false;
 	};
 
 	struct Config

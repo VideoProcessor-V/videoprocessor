@@ -333,6 +333,38 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.0, sin.precisionPx, L"the seed path unchanged (the default)");
 		}
 
+		// Owner (full resolution): the ahead fit's FINAL refine runs over every native inlier cell (far more than the ~1296 sampled), and
+		// the seed path keeps its sampled final refine (finalRefineCells 0, the record unchanged).
+		TEST_METHOD(TheFinalRefineSeesEveryNativeInlierCell)
+		{
+			Pair p(960, 540, 2.0);
+			p.Uniform(3.0, -1.0);
+			CameraLink::AheadCopy a;
+			Assert::IsTrue(CameraLink::CopyAhead(p.View(5), 5, a) == CameraLink::AheadRefusal::None);
+			CameraLink::FieldCopy f;
+			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 2.0f, 120, 68, f));
+			CameraLink::PairFacts facts;
+			facts.pairSeconds = 1.0 / 24;
+			CameraModel::PairInput in;
+			Assert::IsTrue(CameraLink::AssemblePair(f, facts, VpIndicator::Stamp(), in) == CameraLink::AssembleStatus::Ready);
+			Assert::IsTrue(in.fullFinalRefine);
+			CameraModel::Fitter fitter{ CameraModel::Config() };
+			const CameraModel::CameraMotion rec = fitter.Fit(in);
+			Assert::IsTrue(rec.valid);
+			Assert::AreEqual(uint32_t(240u * 135u), rec.finalRefineCells, L"every cell of a clean pan is an inlier of the final refine");
+			double dx = 0, dy = 0;
+			CameraModel::Displacement(rec.params, 0.0, 0.0, &dx, &dy);
+			Assert::AreEqual(3.0, dx, 1e-3);
+			Assert::AreEqual(-1.0, dy, 1e-3);
+			CameraLink::FieldCopy seed = f;
+			seed.origin = CameraLink::FieldOrigin::Seed;
+			CameraModel::PairInput sin;
+			Assert::IsTrue(CameraLink::AssemblePair(seed, facts, VpIndicator::Stamp(), sin) == CameraLink::AssembleStatus::Ready);
+			Assert::IsFalse(sin.fullFinalRefine);
+			CameraModel::Fitter seedFitter{ CameraModel::Config() };
+			Assert::AreEqual(uint32_t(0), seedFitter.Fit(sin).finalRefineCells, L"the seed path keeps its sampled final refine");
+		}
+
 		TEST_METHOD(AheadIsAcceptedTheGuidedFieldIsStillRefused)
 		{
 			CameraLinkTest::Rig rig;

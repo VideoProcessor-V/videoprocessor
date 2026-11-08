@@ -650,6 +650,38 @@ namespace CameraModel
 		}
 
 		// Backward check, temporal consistency, confidence and verdict of one layer's candidate fit.
+		// FULL-RESOLUTION FINAL REFINE (PairInput::fullFinalRefine): every field cell inside the picture rectangle the sampling uses, not
+		// excluded (bars / text guard), with trust > 0 and finite values, is a sample; the chosen model is refined over them with the same
+		// IRLS (sigma-marginalised inlier weights, its own type, the same convergence rule). Returns the cells that carried a weight > 0 in the
+		// last weighting (the inliers the final estimate saw). The model is left unchanged when the refine finds no accepted step.
+		static uint32_t FullFinalRefine(const PairInput& in, const Field& f, Params& model, int irls)
+		{
+			std::vector<Sample> all;
+			all.reserve(static_cast<size_t>(std::max(0, f.bx1 - f.bx0)) * static_cast<size_t>(std::max(0, f.by1 - f.by0)));
+			for (int by = f.by0; by < f.by1; ++by)
+				for (int bx = f.bx0; bx < f.bx1; ++bx)
+				{
+					const int b = by * in.gridW + bx;
+					if (f.excluded[static_cast<size_t>(b)] != 0)
+						continue;
+					const float tr = in.fwdTrust[b];
+					if (!(tr > 0.0f) || !FiniteF(tr) || !FiniteF(in.fwdX[b]) || !FiniteF(in.fwdY[b]))
+						continue;
+					Sample s;
+					BlockCentre(bx, by, in.blockSize, in.picture, &s.x, &s.y);
+					s.dx = in.fwdX[b];
+					s.dy = in.fwdY[b];
+					s.w = tr;
+					all.push_back(s);
+				}
+			Params p = model;
+			if (Refine(f, all, p, std::max(1, irls)))
+				model = p;
+			std::vector<Sample> used;
+			BuildWeighted(f, all, model, used);
+			return static_cast<uint32_t>(used.size());
+		}
+
 		static void Finish(Fitter& F, const PairInput& in, const Config& c, const Field& f, bool temporalRead, Cand& cd, double ambiguity, CameraMotion& rec)
 		{
 			Signals sg = cd.sg;
@@ -1364,7 +1396,11 @@ namespace CameraModel
 					tl.objId = objLayer.id;
 				}
 			}
+			uint32_t fullCells = 0;
+			if (in.fullFinalRefine)
+				fullCells = FullFinalRefine(in, f, cam->model, irls);   // the chosen model over every native cell (owner)
 			Finish(F, in, c, f, temporalRead, *cam, ambiguity, rec);
+			rec.finalRefineCells = fullCells;
 			if (c.twoLayer)
 			{
 				if (layerRisk > 0)

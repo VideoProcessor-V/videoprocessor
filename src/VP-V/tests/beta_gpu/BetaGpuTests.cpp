@@ -4534,6 +4534,7 @@ namespace CameraAccuracy
 		double topPassMs = 0;
 		double cpuMs = 0;              // AssemblePair + Fitter::Fit (fitMs) + BuildGuide (planMs), steady_clock (QPC)
 		int seedBlockPx = 0;           // F2: source px per seed texel of the fit's input (16 at 1080, 32 at a lowRes 4K search; 0 = no seed)
+		unsigned finalRefineCells = 0; // ahead fit: the cells the full-resolution final refine weighted (0 = the sampled final refine)
 	};
 
 	struct VariantResult
@@ -4900,8 +4901,8 @@ namespace CameraAccuracy
 		md << "Criteria: 1080 |mean fit bias| <= 0.02 px on both pans (120 and 480 px/s); 4K records non-ambiguous on the 480 px/s pans; model_global "
 			"EPE at least as good as the f32 baseline at 1080 and 4K (compare `model_global_ahead` here with the f32 run's model_global); 60p mover not "
 			"worse than off. Fit bias = mean (fit - truth) camera translation over the scored pairs (x / y). Fit cost on the camera worker, median / p95.\n\n";
-		md << "| scene | variant | fit bias x / y px | |bias| ok (1080 pans) | ambiguous pairs | non-ambiguous ok (4K 480) | fit ms median / p95 | worker share of one core (median) | memory per pair (KiB) |\n";
-		md << "|---|---|---|---|---|---|---|---|---|\n";
+		md << "| scene | variant | fit bias x / y px | final-refine cells per pair (median) | |bias| ok (1080 pans) | ambiguous pairs | non-ambiguous ok (4K 480) | fit ms median / p95 | worker share of one core (median) | memory per pair (KiB) |\n";
+		md << "|---|---|---|---|---|---|---|---|---|---|\n";
 		const bool is1080 = Corpus::H / SizeDiv() == 1080;
 		for (const SceneResult& s : all)
 			for (int vi = 1; vi < 5; vi += 2)
@@ -4910,13 +4911,14 @@ namespace CameraAccuracy
 				if (v.name.empty() || s.variants[3].name.empty())
 					continue;
 				double bx = 0, by = 0; int n = 0, amb = 0;
-				std::vector<double> fit;
+				std::vector<double> fit, refineCells;
 				for (const PairLog& p : v.pairs)
 				{
 					if (p.pair >= 1 && p.fitReason.find("mbiguous") != std::string::npos) ++amb;
 					if (!FitScored(p)) continue;
 					bx += p.fitTx - p.truthTx; by += p.fitTy - p.truthTy; ++n;
 					fit.push_back(p.fitMs);
+					refineCells.push_back(static_cast<double>(p.finalRefineCells));
 				}
 				bx = n ? bx / n : 0.0; by = n ? by / n : 0.0;
 				const bool pan = !s.scene.mover && !s.scene.fade && (s.scene.name.find("120pxs") != std::string::npos || s.scene.name.find("480pxs") != std::string::npos);
@@ -4928,7 +4930,8 @@ namespace CameraAccuracy
 					share.push_back((v.pairs[p].fitMs + (vi == 3 && p < s.aheadConvertMs.size() ? s.aheadConvertMs[p] : 0.0)) / periodMs);
 				// Memory per pair held: the ahead copy (2 int16 x 2 directions + 1 cost byte per cell) + the native field (3 floats per cell).
 				const double kib = vi == 3 ? (s.aheadCells * (2.0 * 2 * 2 + 1) + s.aheadCells * 3.0 * 4) / 1024.0 : 0.0;
-				std::snprintf(line, sizeof(line), "| %s | %s | %+.4f / %+.4f | %s | %d | %s | %.3f / %.3f | %.1f%% | %.0f |\n", s.scene.name.c_str(), v.name.c_str(), bx, by,
+				std::snprintf(line, sizeof(line), "| %s | %s | %+.4f / %+.4f | %.0f | %s | %d | %s | %.3f / %.3f | %.1f%% | %.0f |\n", s.scene.name.c_str(), v.name.c_str(), bx, by,
+					Quant(refineCells, 0.5),
 					(is1080 && pan) ? (biasOk ? "PASS" : "FAIL") : "-", amb, (!is1080 && is480) ? (amb == 0 ? "PASS" : "FAIL") : "-",
 					Quant(fit, 0.5), Quant(fit, 0.95), 100.0 * Quant(share, 0.5), kib);
 				md << line;
@@ -5542,6 +5545,7 @@ void RunBetaCameraAccuracy()
 					const CameraLink::AssembleStatus status = CameraLink::AssemblePair(fc, facts, VpIndicator::Stamp(), input);
 					Check(status == CameraLink::AssembleStatus::Ready, std::string("camera accuracy: pair not assembled: ") + CameraLink::Text(status));
 					records[p] = fitter.Fit(input);
+					log.finalRefineCells = records[p].finalRefineCells;
 					log.fitMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fitStart).count();
 					log.fitReason = CameraModel::ReasonTextOf(records[p].reason, records[p].verdictFlags);
 					log.fitConf = records[p].confidence;
