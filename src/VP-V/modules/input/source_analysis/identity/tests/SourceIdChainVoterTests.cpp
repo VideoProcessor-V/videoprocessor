@@ -197,8 +197,13 @@ namespace Tests
 				c.Submit(SidChain::Classical(1.0, 0.9, t));   // the classical voters say native all along
 				r = c.Evaluate(static_cast<uint64_t>(i + 1), t);
 				Assert::IsTrue(r.value.ratioH == 1.0 && r.value.ratioV == 1.0, L"the chain alone against a confident classical vote never moves the field");
+				Assert::IsFalse(r.Changed(Field::AxisH) || r.Changed(Field::AxisV), L"no axis change is ever committed");
+				// The kernel field is not contested here (the classical vote carries no kernel), so the chain's verified kernel may be
+				// adopted after its dwell, as any lone kernel voter's is; with both axes native it requests no re-base.
+				if (r.Changed(Field::Kernel))
+					Assert::IsTrue(r.value.kernel == 4);
 			}
-			Assert::IsTrue(c.GetStats().changes == 0);
+			Assert::IsTrue(c.GetStats().changes <= 1, L"at most the uncontested kernel field changed (no axis change)");
 		}
 
 		TEST_METHOD(AWeakChainReadingAloneDoesNotReachTheMinimumWeight)
