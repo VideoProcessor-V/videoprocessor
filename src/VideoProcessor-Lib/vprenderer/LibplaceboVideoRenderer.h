@@ -357,6 +357,7 @@ private:
 	size_t LockedFilmQueueTarget(size_t desired) const;   // Hunt 2 (06-interp M3)
 	size_t QueueTargetVp() const;   // P10-6: defined in VP-V/modules/input/queue_timing/QueueTarget.inl   // VPV-HOOK
 	static void QueueTargetThunk(const void* self, RendererExtension::QueueTargetContext& qc);   // VPV-HOOK
+	static void IngressFaultThunk(void* self);   // VPV-HOOK
 	bool CanDequeueLocked() const;
 	void SetState(RendererState state);
 	void ApplyViewportTarget(bool configured, double aspect,
@@ -571,7 +572,7 @@ private:
 	// loop presents it each refresh; incoming frames are dropped). The LED drive
 	// is stopped (full light) for the patches and restarted after them (m_dynamicDrive).
 	std::atomic_bool m_calibrationPatternActive{false};
-	Vpv::Ingress::HostBinding m_ingressBinding{ this, &LibplaceboVideoRenderer::IngressDecideThunk, this, &LibplaceboVideoRenderer::QueueTargetThunk };   // P10-5/6: last member (R15, R19)   // VPV-HOOK
+	Vpv::Ingress::HostBinding m_ingressBinding{ this, &LibplaceboVideoRenderer::IngressDecideThunk, this, &LibplaceboVideoRenderer::QueueTargetThunk, &LibplaceboVideoRenderer::IngressFaultThunk };   // P10-5/6: last member (R15, R19)   // VPV-HOOK
 };
 
 // Tests only (planner Q4): see LibplaceboVideoRenderer.cpp.

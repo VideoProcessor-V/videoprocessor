@@ -10,12 +10,17 @@
 // `host` its DecideIngress call passes) with a plain function pointer to its decision; this module finds it per call.
 // No renderer registered under the host: not handled (the host's pre-filled values stand: no pulldown, no stale gap).
 // A renderer that could not register (slot table full) is logged and shown under "Fallbacks engaged" (OnStatus).
+// A throw in the decision is caught HERE (not left to the hub's containment, which would lose the drop decision
+// silently): counted, logged at powers of two, shown under "Fallbacks engaged" (ingress_fault); the frame is queued
+// as a no-fill gap without film timing and the renderer restarts its pulldown detector (FaultFn).
 //
 // Threading: Decide runs on the capture thread and takes no lock: a key compare and one shared_ptr load
 // (core/hub/HostSlots.h). The binding is created with the renderer and removed first at its destruction; the capture
 // callbacks end before the renderer is destroyed (Stop / StopWithIngressDrain), as for its other members. C++14.
 
 #include <VP-V/core/hub/ExtensionHub.h>
+
+#include <cstdint>
 
 namespace Vpv
 {
@@ -25,11 +30,12 @@ namespace Vpv
 
 		using DecideFn = bool (*)(void* self, RE::IngressContext& ic);
 		using QueueTargetFn = void (*)(const void* self, RE::QueueTargetContext& qc);   // R19: sets qc.target
+		using FaultFn = void (*)(void* self);   // after a contained throw in decide: the renderer restarts its detector
 
 		class HostBinding
 		{
 		public:
-			HostBinding(const void* host, DecideFn decide, void* self, QueueTargetFn queueTarget = nullptr);
+			HostBinding(const void* host, DecideFn decide, void* self, QueueTargetFn queueTarget = nullptr, FaultFn fault = nullptr);
 			~HostBinding();
 			HostBinding(const HostBinding&) = delete;
 			HostBinding& operator=(const HostBinding&) = delete;
@@ -47,6 +53,7 @@ namespace Vpv
 		void QueueTarget(const void* host, RE::QueueTargetContext& qc);
 		size_t BoundHosts();
 		size_t UnboundRenderers();   // live renderers that could not register
+		uint64_t IngressFaults();    // contained throws in a renderer's decision (process lifetime)
 
 		class IngressPolicy : public Hub::ISkeletonModule
 		{

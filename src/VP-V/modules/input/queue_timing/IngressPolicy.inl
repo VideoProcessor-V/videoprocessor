@@ -339,3 +339,10 @@ bool LibplaceboVideoRenderer::IngressDecideThunk(void* self, RendererExtension::
 {
 	return static_cast<LibplaceboVideoRenderer*>(self)->IngressPulldown(ic);
 }
+
+// Audit slice 3 F1: after a contained throw in IngressPulldown, the detector and the film clock start over on the next
+// frame (the renderer's own reset request, as a resync FULL would).
+void LibplaceboVideoRenderer::IngressFaultThunk(void* self)
+{
+	static_cast<LibplaceboVideoRenderer*>(self)->m_pulldownResetRequested.store(true, std::memory_order_release);
+}

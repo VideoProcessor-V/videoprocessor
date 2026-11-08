@@ -9,6 +9,7 @@
 #include <VP-V/modules/input/queue_timing/IngressPolicy.h>
 
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -134,6 +135,51 @@ namespace VideoProcessorTest
 			Assert::AreEqual<size_t>(4, RE::ResolveQueueTarget(&other, qn, 4), L"a binding without a target function keeps it too");
 		}
 
+		// Audit slice 3 F1: a throw in the decision is not lost: counted, shown under Fallbacks as ONE id, the frame queued as
+		// a no-fill gap at its pre-decision arrival without film timing, and the renderer asked to restart its detector.
+		TEST_METHOD(AThrowingDecisionIsVisibleAndQueuesTheFrameAsAGap)
+		{
+			HubScope hub;
+			struct Throwing
+			{
+				int resets = 0;
+				static bool Decide(void*, RE::IngressContext& ic)
+				{
+					ic.filmHz = 24.0;          // half-advanced state, then the throw
+					ic.arrivalQpc = 999;
+					ic.drop = true;
+					throw std::runtime_error("detector");
+				}
+				static void Fault(void* self) { ++static_cast<Throwing*>(self)->resets; }
+			} t;
+			Vpv::Ingress::HostBinding bind(&t, &Throwing::Decide, &t, nullptr, &Throwing::Fault);
+			const uint64_t before = Vpv::Ingress::IngressFaults();
+			RE::IngressContext ic;
+			ic.host = &t;
+			ic.arrivalQpc = 100;
+			Assert::IsTrue(RE::DecideIngress(ic), L"decided (by the fault path)");
+			Assert::IsFalse(ic.drop, L"the frame is queued");
+			Assert::IsTrue(ic.gapBefore);
+			Assert::AreEqual<uint32_t>(0, ic.gapFrames);
+			Assert::AreEqual(std::string("ingress policy fault"), std::string(ic.gapCause));
+			Assert::AreEqual<int64_t>(100, ic.arrivalQpc, L"the pre-decision arrival");
+			Assert::AreEqual(0.0, ic.filmHz);
+			Assert::AreEqual(1, t.resets, L"the detector restarts");
+			Assert::AreEqual(before + 1, Vpv::Ingress::IngressFaults());
+			Vpv::Ingress::IngressPolicy module;
+			std::vector<std::string> lines;
+			module.OnStatus(RE::Context(), RE::StatusKind::Fallbacks, lines, nullptr, nullptr);
+			bool found = false;
+			for (const std::string& l : lines)
+				if (l.find("ingress_fault (") == 0)
+				{
+					found = true;
+					const size_t close = l.rfind(')');
+					Assert::IsTrue(l.find("; ") > l.find('(') && l.find("; ") < close, L"one id: the '; ' is inside the brackets");
+				}
+			Assert::IsTrue(found);
+		}
+
 		TEST_METHOD(AFullTableIsVisibleUnderFallbacks)
 		{
 			std::vector<std::unique_ptr<FakeRenderer>> renderers;
@@ -151,8 +197,10 @@ namespace VideoProcessorTest
 			Vpv::Ingress::IngressPolicy module;
 			std::vector<std::string> lines;
 			module.OnStatus(RE::Context(), RE::StatusKind::Fallbacks, lines, nullptr, nullptr);
-			Assert::AreEqual<size_t>(1, lines.size());
-			Assert::IsTrue(lines[0].find("pulldown detection") != std::string::npos);
+			bool unbound = false;
+			for (const std::string& l : lines)
+				unbound = unbound || l == "ingress policy (renderer not registered: pulldown, film clock, stale gap off)";
+			Assert::IsTrue(unbound, L"one id, no top-level '; '");
 			bindings.clear();
 			Assert::AreEqual(before, Vpv::Ingress::UnboundRenderers(), L"released with the renderer");
 		}

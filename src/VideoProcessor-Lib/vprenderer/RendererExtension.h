@@ -202,6 +202,7 @@ namespace RendererExtension
 	// IngressContext: the facts are the in fields; the caller pre-fills drop = false and gapBefore / gapFrames /
 	// gapCause / discontinuity / filmHz / filmUpdate / arrivalQpc with the host's values, and a handler may
 	// overwrite them (drop = a cadence repeat). Default (no handler): the host's values stand.
+	// The R15 host is the renderer object itself (`this`), not its Impl: stable across Impl rebuilds (M2 P10-5).
 
 	// R16 OnConvertedFrame (take-over; conversion thread, no queue lock) and R16 AfterPublish (fan-out; after the
 	// payload is published and the queue notified). `payload` is the host's converted payload (opaque here);

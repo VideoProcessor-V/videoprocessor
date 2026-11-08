@@ -144,7 +144,7 @@ Bill's path: with the routes off (Original: capture_path standard, capture_uploa
 dv_tunnel_gpu_unpack off) `ChooseRoute` returns the host formatter, except libplacebo's native RGB upload (ARGB /
 BGRA), which the renderer took before P10 too. Bill's formatter block and log text in `ConversionLoop` are unchanged.
 
-Not done yet (P10 open items): the R18 header fields (LVRH zone, after P2 lands), the upload branches via R17 `TryUpload`
+Not done yet (P10 open items): the R18 header fields (DEFERRED until SK-W releases Z3, then one pass: D-8 open; readers at LVR 15747-15749 / 15964-15967, 11674-11675, 25098 / 25106), the upload branches via R17 `TryUpload`
 (item g, DEFERRED until after P5b by the M2 lead: R17 stays unwired and `UploadContext` is not widened;
 the branches are interleaved with Bill's plane upload and the de-judder's `UpdateDejudderEstimate` / `TakeNextPlanes`,
 P5b's; `UploadContext` lacks the frame facts they read), the data members of item a, the init log (e), and the queue

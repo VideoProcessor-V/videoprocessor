@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <memory>
+#include <string>
 
 namespace Vpv
 {
@@ -21,12 +22,18 @@ namespace Vpv
 				const void* host = nullptr;
 				DecideFn decide = nullptr;
 				QueueTargetFn queueTarget = nullptr;
+				FaultFn fault = nullptr;
 				void* self = nullptr;
 			};
 			Hub::HostSlots<Entry>& Slots()
 			{
 				static Hub::HostSlots<Entry> slots;
 				return slots;
+			}
+			std::atomic<uint64_t>& Faults()
+			{
+				static std::atomic<uint64_t> count{ 0 };
+				return count;
 			}
 			std::atomic<size_t>& Unbound()
 			{
@@ -35,7 +42,7 @@ namespace Vpv
 			}
 		}
 
-		HostBinding::HostBinding(const void* host, DecideFn decide, void* self, QueueTargetFn queueTarget)
+		HostBinding::HostBinding(const void* host, DecideFn decide, void* self, QueueTargetFn queueTarget, FaultFn fault)
 			: host_(host)
 		{
 			if (!host || !decide)
@@ -45,6 +52,7 @@ namespace Vpv
 			entry->decide = decide;
 			entry->self = self;
 			entry->queueTarget = queueTarget;
+			entry->fault = fault;
 			registered_ = Slots().Put(host, entry);
 			if (registered_)
 				return;
@@ -65,7 +73,35 @@ namespace Vpv
 		bool Decide(RE::IngressContext& ic)
 		{
 			const std::shared_ptr<Entry> entry = Slots().Find(ic.host);
-			return entry && entry->decide && entry->decide(entry->self, ic);
+			if (!entry || !entry->decide)
+				return false;
+			const int64_t arrivalBefore = ic.arrivalQpc;
+			try
+			{
+				return entry->decide(entry->self, ic);
+			}
+			catch (...)
+			{
+			}
+			// Audit slice 3 F1: visible, never silent. The frame is queued (no drop), as a no-fill gap without film
+			// timing at its pre-decision arrival; the detector starts over on the next frame.
+			const uint64_t faults = Faults().fetch_add(1, std::memory_order_relaxed) + 1;
+			if ((faults & (faults - 1)) == 0)
+				DebugLog::Log("Ingress policy: the pulldown / film clock decision threw (%llu so far); the frame is queued as a gap "
+					"and the detector restarts", static_cast<unsigned long long>(faults));
+			ic.drop = false;
+			ic.gapBefore = true;
+			ic.gapFrames = 0;
+			ic.gapCause = "ingress policy fault";
+			ic.arrivalQpc = arrivalBefore;
+			ic.filmHz = 0.0;
+			ic.filmUpdate = false;
+			if (entry->fault)
+			{
+				try { entry->fault(entry->self); }
+				catch (...) {}
+			}
+			return true;
 		}
 
 		void QueueTarget(const void* host, RE::QueueTargetContext& qc)
@@ -77,13 +113,17 @@ namespace Vpv
 
 		size_t BoundHosts() { return Slots().States(); }
 		size_t UnboundRenderers() { return Unbound().load(std::memory_order_relaxed); }
+		uint64_t IngressFaults() { return Faults().load(std::memory_order_relaxed); }
 
 		void IngressPolicy::OnStatus(const RE::Context&, RE::StatusKind kind, std::vector<std::string>& lines, const char*, const char*)
 		{
-			if (kind != RE::StatusKind::Fallbacks || UnboundRenderers() == 0)
+			if (kind != RE::StatusKind::Fallbacks)
 				return;
-			lines.push_back("ingress policy: a renderer could not register; pulldown detection, the film clock and the "
-				"stale-delivery gap are off for it");
+			// One id per line (FallbackStatus::Ids splits a heading on top-level "; ").
+			if (UnboundRenderers() > 0)
+				lines.push_back("ingress policy (renderer not registered: pulldown, film clock, stale gap off)");
+			if (const uint64_t faults = IngressFaults())
+				lines.push_back("ingress_fault (" + std::to_string(faults) + " pulldown/film clock exception(s); detector restarted)");
 		}
 
 		void RegisterIngressPolicy()
