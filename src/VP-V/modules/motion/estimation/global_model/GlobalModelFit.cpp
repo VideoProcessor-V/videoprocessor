@@ -1780,12 +1780,25 @@ namespace CameraModel
 					fit.confidence *= 0.495;   // below 0.5 for any logistic confidence <= 1
 				}
 			}
+			if (m_config.staticCamera && fit.valid)
+			{
+				const StaticCameraResult sc = EvaluateStaticCamera(m_config.staticCfg, in, fit.params);
+				fit.signals.staticRing = sc.staticShare;
+				fit.signals.staticFit = sc.fitShare;
+				// Only a record a consumer could use is judged: demote, never promote.
+				if (sc.detected && (fit.reason == Reason::Ok || fit.reason == Reason::LowConfidence))
+				{
+					fit.reason = Reason::Ambiguous;
+					fit.verdictFlags |= kVerdictStaticCamera;
+					fit.confidence *= 0.495;
+				}
+			}
 			if (fit.valid)
 			{
 				m_previous = fit;
 				m_havePrevious = true;
 				m_seedPending = false;
-				if ((fit.verdictFlags & kVerdictDynamicTexture) == 0)
+				if ((fit.verdictFlags & (kVerdictDynamicTexture | kVerdictStaticCamera)) == 0)
 					m_temporal.Update(in.pairSeconds, fit.rates, updateFloor(in));   // a water-locked fit never feeds the camera prediction
 			}
 			if (m_config.twoLayer)

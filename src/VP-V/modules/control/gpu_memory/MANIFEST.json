@@ -11,6 +11,7 @@
     "src/VP-V/core/GpuAllocator.h",
     "src/VP-V/core/ScratchArena.h",
     "src/VP-V/modules/control/gpu_memory/PlTexBackend.h",
+    "src/VP-V/modules/control/gpu_memory/GpuProductTexBackend.h",
     "src/VP-V/tests/GpuAllocatorTests.cpp",
     "src/VP-V/tests/PrivateTextureScanTests.cpp"
   ],

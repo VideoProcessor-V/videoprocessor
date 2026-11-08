@@ -10,5 +10,5 @@ set ROOT=%~dp0..\..
 set GM=%ROOT%\src\VP-V\modules\motion\estimation\global_model
 set OUT=%~dp0bin
 if not exist "%OUT%" mkdir "%OUT%"
-cl /nologo /std:c++17 /EHsc /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /I "%ROOT%\src" /I "%GM%" "%~dp0camera_eval.cpp" "%GM%\GlobalModelFit.cpp" "%GM%\GlobalModelGeometry.cpp" "%GM%\GlobalModelObjects.cpp" "%GM%\GlobalModelTemporal.cpp" "%GM%\DynamicTexture.cpp" "%GM%\GlobalModelSearchHints.cpp" "%GM%\GlobalModelMeasurement.cpp" "%GM%\ReferenceMatcher.cpp" /Fo"%OUT%\\" /Fe"%OUT%\camera_eval.exe" || exit /b 1
+cl /nologo /std:c++17 /EHsc /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /I "%ROOT%\src" /I "%GM%" "%~dp0camera_eval.cpp" "%GM%\GlobalModelFit.cpp" "%GM%\GlobalModelGeometry.cpp" "%GM%\GlobalModelObjects.cpp" "%GM%\GlobalModelTemporal.cpp" "%GM%\DynamicTexture.cpp" "%GM%\StaticHypothesis.cpp" "%GM%\GlobalModelSearchHints.cpp" "%GM%\GlobalModelMeasurement.cpp" "%GM%\ReferenceMatcher.cpp" /Fo"%OUT%\\" /Fe"%OUT%\camera_eval.exe" || exit /b 1
 echo built %OUT%\camera_eval.exe

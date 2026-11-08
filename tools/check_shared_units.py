@@ -103,8 +103,16 @@ REGISTRY = [
      "owning_unit": ["src/VP-V/modules/input/source_analysis/identity"],
      "signatures": _c(r"snap(shot)?\.bitrateQuality", r"\.bitrateQuality.*(strength|allowance|tier)"),
      "allow": _c(r"SourceQuality::", r"shared/SourceQuality\.h")},
+    # U15 FieldRefine (doc 72 sections 2 and 9): the one DMVR / BDOF / PROF-style refinement of a motion field (error surface over a
+    # small offset window). Blocking from birth, baseline 0. refined_field (product id 24) is declared by the W1-RES catalog: consumers
+    # read it, they never redeclare it. Matching is case-insensitive (_F); only `prof` is word-bounded (it would hit profile/professional). A hit counts on a code
+    # line only (a comment-only line is a declaration: Products.h notes on dropped BDOF/PROF offsets); test_u15_field_refine_signatures.
+    {"id": "U15", "name": "field_refine",
+     "owning_unit": ["src/VP-V/modules/motion/estimation/refine"],
+     "signatures": _c(r"dmvr", r"bdof", r"\bprof\b", r"error[_ ]?surface"),
+     "allow": _c(r"vpu_field_refine\w*")},
     # R1-W1-RES (doc 72): U19 TdMapsView, the one read API of td.maps (accessor only: no signatures). U13 CodingEvidence, U14 TrailCompose,
-    # U15 FieldRefine, U16 LightingFit and U18 CodecModel of doc 72 are registered by their owners with their units.
+    # U16 LightingFit and U18 CodecModel of doc 72 are registered by their owners with their units.
     {"id": "U19", "name": "td_maps_view",
      "owning_unit": ["src/VP-V/modules/repair/temporal_detail/shared"],
      "signatures": [],

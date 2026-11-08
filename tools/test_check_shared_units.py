@@ -65,7 +65,7 @@ class CheckSharedUnitsTest(unittest.TestCase):
 
     def test_every_unit_registered(self):
         ids = [e["id"] for e in csu.REGISTRY]
-        self.assertEqual(ids, ["U%d" % i for i in range(1, 13)] + ["U19", "U20", "U21"])
+        self.assertEqual(ids, ["U%d" % i for i in range(1, 13)] + ["U15", "U19", "U20", "U21"])
 
     def test_default_run_exits_zero_even_with_duplicates(self):
         rc, out = _run(["--root", self.root])
@@ -128,6 +128,23 @@ class CheckSharedUnitsTest(unittest.TestCase):
         self.assertIn(7, {h["line"] for h in _unit(r, "U5")["hits"]})
         lines3 = {h["line"] for h in _unit(r, "U3")["hits"] if h["file"].endswith("K.h")}
         self.assertTrue({8, 9} <= lines3, lines3)
+
+    def test_u15_field_refine_signatures(self):
+        # DMVR / BDOF / error surface match anywhere, PROF only as a word: a code line outside the owner is a duplicate; a comment-only line (the W1-RES "BDOF/PROF offsets dropped"
+        # notes), the owner's own files, a word that merely contains the letters, and the accessor are not.
+        _w(self.root, "src/VP-V/modules/motion/other/Dmvr.h", "float e = DMVR_cost(x);\nfloat s = errorSurface[i];\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Cmt.h", "// the per-pixel BDOF/PROF offsets are dropped (doc 72)\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Word.h", "int profile = 1; int professional = 2;\n")
+        _w(self.root, "src/VP-V/modules/motion/other/Cons.h", "auto r = vpu_field_refine_offsets(x);\n")
+        _w(self.root, "src/VP-V/modules/motion/estimation/refine/Own.h", "float bdof = 1;\n")
+        u = _unit(csu.scan(self.root, baseline={"units": {}}), "U15")
+        got = {(h["file"].rsplit("/", 1)[-1], h["role"]) for h in u["hits"]}
+        self.assertIn(("Dmvr.h", "duplicate"), got)
+        self.assertIn(("Cmt.h", "declaration"), got)
+        self.assertEqual(sorted(h["line"] for h in u["hits"] if h["file"].endswith("Dmvr.h")), [1, 2])
+        self.assertFalse(any(f in ("Word.h", "Cons.h", "Own.h") for f, _ in got), got)
+        self.assertEqual(u["duplicates"], 2)
+        self.assertEqual(u["inside_owner"], 1)
 
     # ---- strict + baseline --------------------------------------------------------------------
     def _baseline(self, blocking, n):
