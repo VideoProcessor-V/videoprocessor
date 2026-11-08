@@ -351,6 +351,18 @@ namespace Dejudder
 	// camera: the warp binds `camera` (MotionWarp::Camera()) for R-B.
 	std::string WarpHeader(const Settings& settings, bool split, bool camera = false);
 
+	// SK-MV pass-through (TEMPORARY until P5c): where the renderer reads the matcher's LIVE field set through the SHARED view (the motion
+	// segment's published pair) instead of through the matcher's members. Optional: unbound (the default, every test, the Original pathway)
+	// the accessors return their own members, byte-identical. Render thread only; the pointers are valid until the next estimate.
+	class IFieldSource
+	{
+	public:
+		virtual ~IFieldSource() {}
+		// The live set of the last estimated pair when it is published and still valid (epoch current, not retracted); false otherwise
+		// (the accessor then returns its own member). Never null-only: a valid set carries the same textures the members hold.
+		virtual bool LiveFieldSet(pl_tex& field, pl_tex& frameTrust, pl_tex& subField) const = 0;
+	};
+
 	class MotionWarp
 	{
 	public:
@@ -402,11 +414,16 @@ namespace Dejudder
 
 		// The block field from the last Estimate: rgba = (vx, vy) in source
 		// pixels, trust (1/0), match error. One texel per 16x16 source block.
-		pl_tex Field() const { return field; }
+		// TEMPORARY until P5c (SK-MV pass-through): with a field source bound this is the shared view's pointer for the same pair / epoch
+		// (the same texture as the member), else the member.
+		pl_tex Field() const { pl_tex f = nullptr, t = nullptr, s = nullptr; return fieldSource && fieldSource->LiveFieldSet(f, t, s) ? f : field; }
+		void SetFieldSource(const IFieldSource* source) { fieldSource = source; }
+		const IFieldSource* FieldSource() const { return fieldSource; }
 		// From the last Estimate (1x1): r = the share of trusted blocks,
 		// g = the strength scale (D2/D4; 1 when both are off), b = the mean
 		// trusted |v| in source pixels.
-		pl_tex FrameTrust() const { return frameTrust; }
+		// TEMPORARY until P5c: as Field().
+		pl_tex FrameTrust() const { pl_tex f = nullptr, t = nullptr, s = nullptr; return fieldSource && fieldSource->LiveFieldSet(f, t, s) ? t : frameTrust; }
 		// D1: the global vector of the last forward search (1x1): xy in 1/8
 		// resolution texels (source pixels / 8), z = best / second-best match
 		// (the prior is used below 0.9), w = 1 once written.
@@ -448,6 +465,8 @@ namespace Dejudder
 		// field, the frame trust, the sub-field) for the extras still to come,
 		// taken before the next pair is estimated over them.
 		bool SnapshotForWarp();
+		// TEMPORARY until P5c: the Snap* copies are NOT published (the motion segment holds the live set only), so these forward to the
+		// matcher's own members; the renderer's reads of them stay as they are.
 		pl_tex SnapField() const { return snapField; }
 		pl_tex SnapFrameTrust() const { return snapTrust; }
 		pl_tex SnapSubField() const { return snapSubValid ? snapSub : nullptr; }
@@ -473,7 +492,12 @@ namespace Dejudder
 		pl_tex Camera() const { return settings.objectStrength < 1.0f && settings.globalPrior ? camera : nullptr; }
 		// The same passes by the GPU's timestamp queries (no drain overhead).
 		const std::map<std::string, double>& PassGpuMs() const { return passGpuMs; }
-		pl_tex SubField() const { return settings.estSplit && estimated ? subField : nullptr; }
+		// TEMPORARY until P5c: as Field() (the published sub-field was read through this same gate when it was published).
+		pl_tex SubField() const
+		{
+			pl_tex f = nullptr, t = nullptr, s = nullptr;
+			return fieldSource && fieldSource->LiveFieldSet(f, t, s) ? s : (settings.estSplit && estimated ? subField : nullptr);
+		}
 		// B's occlusion mask (6c), one texel per 16x16 source block of B:
 		// r = 1 where B's content was visible in A (consistent both ways and
 		// a good match), 0 where it is new or uncovered.
@@ -700,6 +724,7 @@ namespace Dejudder
 		// This estimate found no pair computed ahead (P2) and ran the block searches (the P2m path): not a failure, a state the host shows.
 		bool noPairAhead = false;
 		bool pairSizeMismatch = false;   // ... because a pair WAS handed over but not at this instance's search size
+		const IFieldSource* fieldSource = nullptr;   // SK-MV pass-through (TEMPORARY until P5c); null = the members
 	public:
 		// The searching instance may be the half-size inner one (lowRes): report it.
 		const std::string& OpticalFlowError() const

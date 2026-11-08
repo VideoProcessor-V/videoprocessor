@@ -36,7 +36,7 @@
 namespace VpMotion
 {
 	template<class Payload>
-	struct EstimateState : IMatcherView
+	struct EstimateState : IMatcherView, Dejudder::IFieldSource
 	{
 		explicit EstimateState(VectorEngine& engine) : engine_(engine) { engine_.BindMatcher(this); }
 		~EstimateState() override { engine_.BindMatcher(nullptr); }
@@ -47,6 +47,23 @@ namespace VpMotion
 		pl_tex LiveField() const override { return dejudder ? dejudder->Field() : nullptr; }
 		uint64_t LiveFieldFrom() const override { return dejudderLiveFieldFrom; }
 		bool MatcherGlobalFromEngine() const override { return dejudder && dejudder->GlobalFromEngine(); }
+
+		// ---- SK-MV pass-through (TEMPORARY until P5c): Dejudder::IFieldSource ----------------------------------
+		// The matcher's Field / FrameTrust / SubField accessors ask this when it is bound (RunDejudderEstimate binds it): the answer is the
+		// motion segment's published live set of the last estimated pair (the same textures the members hold), valid while the epoch is
+		// current and the segment has not been retracted by the next estimate. Otherwise false and the accessor returns its member.
+		bool LiveFieldSet(pl_tex& field, pl_tex& frameTrust, pl_tex& subField) const override
+		{
+			if (dejudderLiveFieldFrom == 0)
+				return false;
+			const auto d = engine_.motionSegment.PeekFrom(VpMotion::Direction::Forward, dejudderLiveFieldFrom, 0);
+			if (!d || d.field == nullptr || d.field->field == nullptr)
+				return false;
+			field = d.field->field;
+			frameTrust = d.field->frameTrust;
+			subField = d.field->subField;
+			return true;
+		}
 
 		// ---- SK-MV (MV1): the VP-side view of the matcher's field set ------------------------------------------
 		// One place that reads today's dejudder-> accessors (Field / FrameTrust / SubField / Camera, and the Snap* copies the extras and

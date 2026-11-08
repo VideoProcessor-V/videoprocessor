@@ -186,6 +186,24 @@ namespace VpMotion
 			return Count(consumer, d);
 		}
 
+		// A read-only look (no use counted, no stats) at the NEWEST published pair of `direction` that starts at `from`, under the same
+		// validity rules as Fetch (engaged, epoch current, geometry). For forwarding accessors that must not disturb the consumers'
+		// fallback counters (SK-MV pass-through, TEMPORARY until P5c).
+		Delivery<Field> PeekFrom(Direction direction, uint64_t from, uint64_t geometryGeneration) const
+		{
+			Delivery<Field> d;
+			d.from = from;
+			const Slot* newest = nullptr;
+			for (const Slot& s : m_slots)
+				if (s.used && s.direction == direction && s.from == from && (!newest || s.serial > newest->serial))
+					newest = &s;
+			if (!newest)
+				return d;   // miss = NotEstimated
+			d.to = newest->to;
+			d.miss = Evaluate(direction, from, newest->to, geometryGeneration, d);
+			return d;
+		}
+
 		// The pair that starts at `from` (extras of A, next-frame VPVEC made from A's field).
 		Delivery<Field> FetchFrom(Consumer consumer, uint64_t from, uint64_t geometryGeneration)
 		{

@@ -329,6 +329,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		dejudder->SetExternalFlow(std::move(flow));
 		vectorEngine.P2().Prune(aSequence);
 	}
+	dejudder->SetFieldSource(&vectorEstimate);   // SK-MV pass-through (TEMPORARY until P5c): Field/FrameTrust/SubField read the shared view
 	dejudderLiveFieldFrom = 0;   // the live outputs are being replaced
 	motionSegment.Retract(VpMotion::Direction::Forward);
 	dejudder->SetPassSampling(passTimerHook.Sampling());   // efficiency timers T3: polled, never drained
