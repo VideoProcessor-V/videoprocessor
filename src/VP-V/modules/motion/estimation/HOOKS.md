@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
 # Vector engine: what moved out of the renderer, what is left, who reads what (M2 P5a)
 
-Plan: doc 52 section 3 (inventory a-l, hooks, identity, commit sequence). Base cda5794e for P5a-0..4; P5a-5 (items a, e, f, K4, IVectorEngine) is on bff1c35e (line numbers below: at d8605823). This file is the P5a-1
+Plan: doc 52 section 3 (inventory a-l, hooks, identity, commit sequence). Base cda5794e for P5a-0..4; P5a-5 (items a, e, f, K4, IVectorEngine) is on bff1c35e (line numbers below: at d8605823). P5a-rest (items h, j, k, l and the producer hardening) is on 852424a7 (m2/p5a: f0ac0f11 + the HubBootstrap include-order fix). This file is the P5a-1
 inventory (member list, readers outside P5a's ranges = the alias list, the thread of every access) and the
 alias table the package leaves behind.
 
@@ -19,9 +19,9 @@ alias table the package leaves behind.
 | K4 | camera-guided matching insertion point | DONE (P5a-5): `IPreEstimateHook::BeforeEstimate` right before / `AfterEstimate` right after the matcher's `Estimate`, inside `RunDejudderEstimate` (so both the in-render estimate and the estimate ahead); never for the warm-up's dummy estimate. No hook = `estimate()` only | `VectorEngine::Estimate` (VectorEngine.h), call site `VectorEngineEstimate.inl` |
 | IVectorEngine | `vpv.vector_engine.v1` | DONE (P5a-5): `VectorEngine` implements it from today's state (section 7); the renderer's engine registers under its host (`vectorEngine{ this }`); `VectorEngineExtension` (hub module, after ResyncExtension) answers the query with the `IVectorEngineDirectory` | `VectorEngine.h/.cpp`, `VectorEngineExtension.h/.cpp`, `core/hub/HubBootstrap.cpp` |
 | g | producer lifecycle and depth decision | MOVED: pure `ProducerPlan::Lifecycle/Depth` + `VectorEngine::PlanProducer` (a plain-value call site in `RenderLocked`, not a hook phase: it needs the pass's own facts) | `ProducerPlan.h`, `VectorEngine.cpp` |
-| h, i | look-ahead copy under the queue lock; engage rule, `Submit` loop and its catch | PARTLY (T1 port, `m2/p5a-t1`): the engage rule, the `Submit` loop and its catch (item i) moved verbatim into `MotionAheadWalk.h` (`MotionAhead::RunQueueWalk`; a throw engages `FallbackCatalog::MotionAheadWorker`, released after 8 good batches); the source-resolution look-ahead likewise (`SourceAheadWalk.h`). The walks read the engine state through the Impl aliases (`view.impl.motionAheadEngaged` ...). The queue-lock copy (item h) stays in the render loop | `MotionAheadWalk.h`, Impl (item h) |
-| j, k | invalidate requests at Reset / ResetLiveQueue / gap / seek / format change as `OnQueue` events | NOT done: the six `RequestMotionInvalidate` sites in Z6 call a VP one-liner; converting needs the engine to reach `frameAnalysis` from a hub event (host binding), then net-0 lines | Impl |
-| l | producer stop on GPU release (fix C, `fix-module-lifetime` 5f9c96b0) | NOT in this base: `RetireOutput` does not stop the producer here; `~Impl` does | - |
+| h, i | look-ahead copy under the queue lock; engage rule, `Submit` loop and its catch | DONE. Item i (T1 port, `m2/p5a-t1`): the engage rule, the `Submit` loop and its catch moved verbatim into `MotionAheadWalk.h` (`MotionAhead::RunQueueWalk`; a throw engages `FallbackCatalog::MotionAheadWorker`, released after 8 good batches); the source-resolution look-ahead likewise (`SourceAheadWalk.h`). Item h (P5a-rest, lead decision after the audit): the queue-lock copy moved verbatim into `MotionAhead::CollectQueueAhead(impl, queue, out)` next to `RunQueueWalk`, a templated direct call from the render loop with m_queueMutex held as before (not the R5 `CollectAhead(QueueView&)` hook: its `QueueView` is opaque; a typed view waits for P10). Only edits: `m_impl->` -> `impl->`, `m_frameQueue` -> `queue`, `const QueuedFrame&` -> `const auto&`, the producer read through one `std::atomic_load` copy. Test: `LookAheadCopyTests`. The walks read the engine state through the Impl aliases (`view.impl.motionAheadEngaged` ...) | `MotionAheadWalk.h` |
+| j, k | invalidate requests at Reset / ResetLiveQueue / gap / seek / format change as `OnQueue` events | DONE (P5a-rest): the five sites (Reset, ResetLiveQueue: UI thread; the dequeue's gap, file discontinuity, format change: render loop) are one-line `RendererExtension::NotifyQueue` call sites (QueueEvent Reset / LiveQueueReset / Gap with the gap's cause as text / Discontinuity / FormatChange); `VectorEngineExtension::OnQueue` maps each to the old cause (Resync / QueueReset / Gap / Seek / SourceFormatChange) and calls `VectorEngine::RequestInvalidationFor(host)`: under the engine directory's leaf lock the gap detail is stored (gap only, null too) and the engine's sink `InvalidateHost<Impl>` calls the Impl's own `RequestMotionInvalidate` (validity epoch + frame-analysis epoch). Synchronous dispatch: same causes, same order, same logs. `sourceMonitor.Discontinuity` stays in the host (P11). The drift drop and the smooth-motion mix still call `RequestMotionInvalidate` directly (not items j/k). `ResyncExtension` arms its generation on the Flush only (Reset / LiveQueueReset were never raised before) | `VectorEngineExtension.cpp`, `VectorEngine::RequestInvalidationFor`, `VectorEngineHost.h` |
+| l | producer stop on GPU release (fix C = doc 30 F4; it was never committed: `fix-module-lifetime` 5f9c96b0 is a test-text commit) | DONE (P5a-rest): `VectorEngineExtension::OnLifecycle(GpuReleased)` (raised by `RetireOutput` before `pl_d3d11_destroy`) calls `VectorEngine::ReleaseProducerFor(host)`: the newest engine of that host unpublishes its producer (`atomic_exchange` under the directory lock), clears `motionEngineReady`; the producer is stopped outside the lock. Keyed by host (70b section 7: a replacement renderer's producer is untouched). Nothing logged | `VectorEngine.cpp`, `VectorEngineExtension.cpp` |
 | reservations | `refined_field` (P3r / U15), `SubmitLongPair` with external hints | interface + contracts, default "absent" | `VectorEngineInterface.h` |
 
 ## 2. Cross-thread map (the P5a-1 thread column)
@@ -36,11 +36,11 @@ thread. `Ui` = UI / config thread.
 | `motionAheadBackward`, `motionAheadDepth`, `motionAheadConfigured` | Rt (`PlanProducer`) | Loop, Rt | atomics (acquire/release) |
 | `motionAheadEngaged` | Loop (engage/disengage), **Rt** (`PlanProducer`, two writes) | Loop, Rt | **atomic since this package** (was a plain bool written under two different locks: doc 52 D-3, no value change) |
 | `motionAheadEngagedGeneration`, `motionAheadPrev*` | Loop | Loop | single thread |
-| `motionProducer` (the unique_ptr) | Rt (`PlanProducer`: create via `motionProducer = std::move(producer)`, stop, reset) | Rt; **Loop** (`RenderLoop`: 33170, 33174 `m_impl->motionProducer && ...->LastSubmitted()` in the queue-lock copy; `MotionAheadWalk.h:98` null check `!impl.motionProducer`, `:127` `->Submit`) | **none. Existing hazard, unchanged by P5a** (byte-identical rule; first audit: not better, not worse). The walk null-checks at `MotionAheadWalk.h:98` and dereferences at `:127` with `PrepareFrameAnalysis` (a conversion) in between, so the window is the whole per-frame hand-off, not only `LastSubmitted()`; a `reset()` destroys the `Producer` including the mutex `Submit` locks (use-after-free on a mutex), and the creating `std::move` assignment is a racing write to the same pointer. Fix options for the 2A audit: `std::shared_ptr` with atomic load, or a small mutex the loop and the render thread both take. Not done here. |
+| `motionProducer` (a `std::shared_ptr` since the P5a-rest hardening commit) | Rt (`PlanProducer`: start / stop through `PublishProducer` = `std::atomic_store`); retirement (GPU release, `VectorEngine::ReleaseProducerFor`, `atomic_exchange`) | Rt directly; Loop through one `std::atomic_load` copy per use (`CollectQueueAhead`, the walk's per-frame copy) | **Rt == Loop: the same OS thread** (audit correction: `RenderLocked` runs only inside `RenderLoop`, and `PlanProducer` only inside `RenderLocked`), so the earlier "race" between them could not occur. The only cross-thread writer is the retirement path: `Retire` joins `m_renderThread` (and the conversion thread) before `RetireOutput` raises GpuReleased, and `~Impl` is single-threaded; that join is the precondition for `ReleaseProducerFor`'s exchange. The shared_ptr publish / copy is kept as cheap **hardening** (not a race fix): it stays safe if a writer ever moves to another thread. A loop copy keeps a stopped producer alive until its use ends (`Submit` on a stopped producer returns at once). Stress test of the pattern: `ProducerRaceTests` (LookAheadWalkTests.cpp). The 541079b7/c31721fd "fix: motion producer race" commit message overstates this: read it as hardening |
 | `motionEngineReady` | Rt | Any | atomic (no reader left in the renderer file) |
 | `motionValidity` | Any (`Invalidate`), Rt (`Consume`) | Any | atomics inside `MotionValidity::State` |
 | `motionValiditySeen`, counters (`motionInvalidations`, log tick/cause, `motionRecoveryLogPending`) | Rt | Rt | single thread |
-| `motionGapDetail` | Loop (dequeue gap) | Rt (log) | atomic pointer to a static string |
+| `motionGapDetail` | Loop / Any (`RequestInvalidationFor`, the dequeue's gap event) | Rt (log) | atomic pointer to a static string |
 | `motionHandoff*` | Loop | Rt (periodic log) | atomics |
 | `motionSegment`, shadow counters | Rt | Rt | single thread |
 | `motionAheadHits/Misses`, `vectorPairs`, vector counters | Rt | Rt | single thread |
@@ -48,7 +48,8 @@ thread. `Ui` = UI / config thread.
 
 ## 3. Call order (unchanged by the move)
 
-1. Render loop, queue lock: the look-ahead copy (item h, still in Impl).
+0. Any thread: the queue events of items j/k (`OnQueue`, synchronous, in the order the host raises them) request the invalidation; consumed at step 3 as before.
+1. Render loop, queue lock: the look-ahead copy (item h, `MotionAhead::CollectQueueAhead`).
 2. Render loop, no lock: engage / disengage and `Submit` (item i, still in Impl); reads the atomics written below.
 3. Render thread, in `RenderLocked`, per rendered source frame: `UpdateDejudderEstimate` -> `ApplyMotionInvalidate`
    (engine half `TakeInvalidation`, the renderer's consumers forget, engine half `LogInvalidation`) ->
@@ -66,13 +67,14 @@ Declared right after the `vectorEngine` member, reference to the field of the sa
 | `queueAheadCapacity` | render loop (queue pass, engage depth), `VectorDemandInput` | P10 / T1 |
 | `motionAheadBackward`, `motionAheadDepth`, `motionAheadConfigured` | render loop (queue pass), `MotionAheadWalk.h` (reads them through `view.impl`) | P5a-6 (the walk can take `VectorEngineState&` instead of the Impl once the aliases go) |
 | `motionAheadEngaged`, `motionAheadEngagedGeneration`, `motionAheadPrev*` | render loop (engage rule, break rule) | P5a-6 |
-| `motionProducer` | render loop; `RunDejudderEstimate`, `EstimateAhead` (item f) | P5a-5 / P5a-6 |
+| `motionProducer` (now `std::shared_ptr`) | `MotionAheadWalk.h` (`std::atomic_load(&impl.motionProducer)`); `RunDejudderEstimate`, `EstimateAhead` (item f). `CollectQueueAhead` (item h) reads it through `impl->motionProducer` with `std::atomic_load` | P5a-6 / P5b (with the walk taking `VectorEngineState&`) |
 | `motionValidity` | every vector consumer (P4, P5b, P5c, P10), `RequestMotionInvalidate`, dequeue | P5b/P6/P10 |
 | `motionSegment` + `using MotionShadowField` | `ReleaseDejudder`, `ApplyMotionInvalidate`, `RunDejudderEstimate`, `WarmIdleMotionEngine` | P5a-5 |
 | `motionAheadHits`, `motionAheadMisses`, `vectorPairs` | `RunDejudderEstimate` (item f) | P5a-5 |
 | `motionHandoffMaxMs/TotalMs/Count` | render loop hand-off timing, `RunDejudderEstimate` stats log | P5a-5 / P5a-6 |
 | `motionInvalidations`, `motionRecoveryLogPending` | status line, first-estimate log in `RunDejudderEstimate` | P5a-5 |
-| `motionGapDetail` | dequeue (Z6) | P5a-7 (j/k) |
+
+Deleted by P5a-rest: `motionGapDetail` (its last reader, the dequeue, now raises the Gap queue event; the engine stores the detail).
 
 The rows above marked "P5a-5" stay after P5a-5: the moved bodies are verbatim and still read these names through the
 aliases; they go when the bodies are rewritten against the engine state (P5a-rest), or with item i (P5a-6).
@@ -105,7 +107,7 @@ matcher) first, before the device goes, so member destruction normally finds the
 `ReleaseDejudder` (item a, unchanged). The state struct is declared at the position of the earliest moved member (the
 vector-demand block), earlier than the old `motionProducer` / `motionValidity` positions; destruction order against the
 members declared in between changed, none of which the producer or the validity state uses (the audit greps this).
-Fix C (explicit producer stop on GPU release) is not in this base; when it lands it belongs in `OnLifecycle(GpuReleased)`.
+P5a-rest (item l, fix C): the producer is stopped at the GPU release (`OnLifecycle(GpuReleased)`, before the render device goes); `~Impl` then finds it empty. A render-loop copy still in flight keeps the stopped object until its use ends (`Submit` returns at once on a stopped producer).
 
 ## 6. Identity proof status
 

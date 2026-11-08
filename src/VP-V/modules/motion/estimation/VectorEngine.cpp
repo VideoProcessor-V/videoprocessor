@@ -54,7 +54,7 @@ namespace VpMotion
 			// render-time fallback keeps the matcher's preset (medium).
 			const NvOpticalFlow::Preset preset = NvOpticalFlow::Preset::Slow;
 			if (d3d && d3d->device && producer->Start(d3d->device, preset))
-				motionProducer = std::move(producer);
+				PublishProducer(std::shared_ptr<MotionAhead::Producer>(std::move(producer)));   // hardening: atomic publish (HOOKS.md section 2)
 			else
 			{
 				motionProducerFailedLogged = true;
@@ -67,7 +67,7 @@ namespace VpMotion
 			// Owner: the producer stays alive once wanted - kept while the settings still want it (a resync
 			// or format change can take longer than any timer); stopped when they change.
 			motionProducer->Stop();
-			motionProducer.reset();
+			PublishProducer(nullptr);   // hardening: a loop copy keeps the stopped producer alive until its use ends
 			motionEngineReady.store(false, std::memory_order_release);
 		}
 		// Audit 2026-10-16: a failure is retried once the producer is wanted again (optical flow off and on,
@@ -335,11 +335,18 @@ namespace VpMotion
 			IVectorEngine* EngineFor(const void* host) override
 			{
 				std::lock_guard<std::mutex> lock(mutex_);
-				// The newest registration of a host wins (a replacement renderer never shares its predecessor's key).
-				for (auto it = engines_.rbegin(); it != engines_.rend(); ++it)
-					if (it->first == host)
-						return it->second;
-				return nullptr;
+				return Newest(host);
+			}
+			// f(engine) for the newest engine of `host`, under the lock (the engine cannot be removed meanwhile).
+			template<class F>
+			bool WithEngine(const void* host, F&& f)
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				VectorEngine* engine = Newest(host);
+				if (!engine)
+					return false;
+				f(*engine);
+				return true;
 			}
 			void Add(const void* host, VectorEngine* engine)
 			{
@@ -358,6 +365,15 @@ namespace VpMotion
 			}
 
 		private:
+			// The newest registration of a host wins (a replacement renderer never shares its predecessor's key).
+			VectorEngine* Newest(const void* host) const
+			{
+				for (auto it = engines_.rbegin(); it != engines_.rend(); ++it)
+					if (it->first == host)
+						return it->second;
+				return nullptr;
+			}
+
 			std::mutex mutex_;
 			std::vector<std::pair<const void*, VectorEngine*>> engines_;
 		};
@@ -375,6 +391,12 @@ namespace VpMotion
 			Engines().Add(host_, this);
 	}
 
+	VectorEngine::VectorEngine(const void* host, InvalidateSink sink) : host_(host), invalidateSink_(sink)
+	{
+		if (host_)
+			Engines().Add(host_, this);
+	}
+
 	VectorEngine::~VectorEngine()
 	{
 		// Contract (SetPreEstimateHook): the consumer clears its hook before the engine goes; say so if it did not.
@@ -387,6 +409,34 @@ namespace VpMotion
 	IVectorEngineDirectory& VectorEngine::Directory()
 	{
 		return Engines();
+	}
+
+	bool VectorEngine::RequestInvalidationFor(const void* host, MotionValidity::Cause cause, const char* gapDetail)
+	{
+		if (!host)
+			return false;
+		return Engines().WithEngine(host, [&](VectorEngine& engine) {
+			if (cause == MotionValidity::Cause::Gap)   // stored even when null, as the old dequeue code did
+				engine.motionGapDetail.store(gapDetail, std::memory_order_relaxed);   // why, for the log
+			if (engine.invalidateSink_)
+				engine.invalidateSink_(engine.host_, cause);
+			else
+				engine.motionValidity.Invalidate(cause);
+		});
+	}
+
+	bool VectorEngine::ReleaseProducerFor(const void* host)
+	{
+		std::shared_ptr<MotionAhead::Producer> producer;
+		if (host)
+			Engines().WithEngine(host, [&](VectorEngine& engine) {
+				producer = std::atomic_exchange(&engine.motionProducer, std::shared_ptr<MotionAhead::Producer>());
+				engine.motionEngineReady.store(false, std::memory_order_release);
+			});
+		if (!producer)
+			return false;
+		producer->Stop();   // joins its worker; a render-loop copy still held only sees a stopped producer
+		return true;
 	}
 
 	// ---- P5a-5: records for IVectorEngine (render thread; CPU only, nothing logged) ----------------------------------
