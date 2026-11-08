@@ -218,6 +218,16 @@ namespace FallbackCatalog
 		return Engaged("motion", reason + (error.empty() ? std::string() : ": " + error) + ")");
 	}
 
+	// SK-MV MV5: TemporalDetail's shared motion source (TemporalDetail::SharedMotionSource) answered "absent" for a sustained run: TD runs its
+	// causal substitute. `why` is the last absent answer's plain reason. Released as soon as a pair is served.
+	inline Decision TdMotionSource(bool sustainedAbsent, const std::string& why)
+	{
+		if (!sustainedAbsent)
+			return Released("td motion");
+		return Engaged("td motion", "temporal detail has no shared motion pair (" + (why.empty() ? std::string("absent") : why) +
+			"): its causal substitute runs");
+	}
+
 	// SK-MV warm engine (protected tier): MotionEngineIdle released the matcher under video-memory pressure, which drops the de-judder's
 	// standing optical-flow demand until the pressure eases. Never silent.
 	inline Decision MotionEnginePressure(bool pressured)
