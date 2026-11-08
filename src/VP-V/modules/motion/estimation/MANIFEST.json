@@ -17,6 +17,8 @@
     "src/VP-V/modules/motion/estimation/VectorProducts.h",
     "src/VP-V/modules/motion/estimation/GapSeed.h",
     "src/VP-V/modules/motion/estimation/tests/GapSeedTests.cpp",
+    "src/VP-V/modules/motion/estimation/MotionRecordPublish.h",
+    "src/VP-V/modules/motion/estimation/tests/MotionRecordPublishTests.cpp",
     "src/VP-V/modules/motion/estimation/MotionValidity.h",
     "src/VP-V/modules/motion/estimation/OpticalFlowTrust.h",
     "src/VideoProcessor-Lib/MotionConfig.h",

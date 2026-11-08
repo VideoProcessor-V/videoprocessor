@@ -9,6 +9,8 @@
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <libplacebo/d3d11.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/MotionRecordPublish.h>
+#include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/motion/estimation/VectorEngineFallbackSync.h>
 
 #include <algorithm>
@@ -317,9 +319,14 @@ namespace VpMotion
 				if (motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
 					flow = P2().Find(from, to);
 			}
+		// SK-MV row 24: the frame-analysis record carries the shared engine's global, or "absent" (never a stale value). The store is
+		// null while frame_analysis_store is off / the Original pathway runs.
+		FrameAnalysis::Store* const recordStore = host_ ? VpFrameAnalysis::SourceFrameTap::StoreFor(host_) : nullptr;
 		if (!flow)
 		{
 			++motionAheadMisses;
+			if (recordStore && (!forwardStats || nextSequence > sequence))
+				MotionRecord::Publish(recordStore, forwardStats ? nextSequence : sequence, MotionRecord::Absent());
 			P2().Prune(forwardStats ? sequence : (sequence > 2 ? sequence - 2 : 0));
 			return;
 		}
@@ -330,6 +337,9 @@ namespace VpMotion
 		const VectorDemand::GlobalSample g = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
 			static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1]), halvings),
 			flow->global[0][2], flow->global[0][3], facts.pictureHeight);
+		if (recordStore)
+			MotionRecord::Publish(recordStore, to, MotionRecord::SummaryOf(
+				motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()), from, to, flow->global[0], halvings));
 		if (g.usable && vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan))
 			host.NoteSourceMonitorMotion(g.sourcePixels, to);
 		if (vectorDemand.Serves(VectorDemand::Consumer::MotionIntent) && host.IntentActive())
