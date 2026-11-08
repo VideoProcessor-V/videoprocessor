@@ -27573,34 +27573,7 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 	// Q1 (queue stress 2026-10-18): the hardware time is kept at any age; the
 	// CaptureArrival tracker below decides whether a stale frame (>= 0.5 s old)
 	// keeps it (queue_timing_fixes, when plausible) or the callback time.
-	int64_t arrivalQpc = 0;
-	int64_t hardwareQpc = 0;
-	bool hardwareAgeKnown = false;
-	{
-		const timingclocktime_t frameTicks = videoFrame.GetTimingTimestamp();
-		if (m_timingClock && frameTicks > 0)
-		{
-			try
-			{
-				const timingclocktime_t nowTicks = m_timingClock->TimingClockNow();
-				const int64_t nowQpc = PerformanceCounterNow();
-				const timingclocktime_t ticksPerSecond = m_timingClock->TimingClockTicksPerSecond();
-				LARGE_INTEGER frequency{};
-				QueryPerformanceFrequency(&frequency);
-				const timingclocktime_t age = nowTicks - frameTicks;
-				if (ticksPerSecond > 0 && frequency.QuadPart > 0 && age >= 0)
-				{
-					hardwareQpc = nowQpc - static_cast<int64_t>(static_cast<double>(age) *
-						static_cast<double>(frequency.QuadPart) / static_cast<double>(ticksPerSecond));
-					hardwareAgeKnown = true;
-				}
-			}
-			catch (const std::exception&)
-			{
-				hardwareAgeKnown = false;   // the callback time is used
-			}
-		}
-	}
+	IngressHardwareArrival(videoFrame);   // P10-5: the hardware arrival (queue_timing IngressPolicy.inl)   // VPV-HOOK
 
 	uint64_t enqueueGeneration = 0;
 	{
@@ -27611,61 +27584,9 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 	}
 
 	const uint64_t counter = m_frameCounter.fetch_add(1, std::memory_order_relaxed);
-	const uint64_t missedBefore = m_captureMissedFrames.load(std::memory_order_relaxed);
-	const uint64_t breaksBefore = m_captureTimestampBreaks.load(std::memory_order_relaxed);
+	IngressCountersBefore();   // VPV-HOOK
 	UpdateFrameRateAndPPM(videoFrame.GetTimingTimestamp());
-	const uint64_t missedNow = m_captureMissedFrames.load(std::memory_order_relaxed);
-	bool gapBefore = missedNow != missedBefore;
-	const char* gapCause = gapBefore ? "missed frames" : nullptr;
-	uint32_t gapFrames = gapBefore ? static_cast<uint32_t>((std::min)(missedNow - missedBefore, uint64_t{ 1000 })) : 0;
-	// Bug hunt 2026-10-17 (timing_continuity_fixes): a timestamp break (a jump of
-	// 9+ periods, an odd jump, a backward step) is a gap too - not whole missed
-	// frames, so never filled - else motion pairs and history carry across it.
-	const bool timingFixes = m_timingContinuityFixes.load(std::memory_order_relaxed);
-	const bool timestampBreak = m_captureTimestampBreaks.load(std::memory_order_relaxed) != breaksBefore;
-	if (timingFixes && timestampBreak)
-	{
-		gapBefore = true;
-		gapFrames = 0;
-		gapCause = "capture timestamp discontinuity";
-	}
-	// Q1 (queue stress 2026-10-18, queue_timing_fixes): the arrival. A stale frame (a stalled
-	// capture delivering its held frames at once) keeps its hardware time when plausible,
-	// else the callback time (as before). The delivery discontinuity is a no-fill gap, marked
-	// on the kept frame after the pulldown detector (the cadence lock is kept, no gap-fill
-	// pair spans the stall).
-	{
-		LARGE_INTEGER arrivalFrequency{};
-		QueryPerformanceFrequency(&arrivalFrequency);
-		const double qpcPerSecond = static_cast<double>(arrivalFrequency.QuadPart);
-		const bool queueFixes = m_queueTimingFixes.load(std::memory_order_relaxed);
-		if (qpcPerSecond > 0.0)
-		{
-			const CaptureArrival::Result arrival = m_captureArrival.Next(
-				static_cast<double>(callbackQpc) / qpcPerSecond, hardwareAgeKnown,
-				static_cast<double>(hardwareQpc) / qpcPerSecond, !timestampBreak, queueFixes);
-			arrivalQpc = arrival.Hardware() ? hardwareQpc : 0;
-			m_enqueueArrivalIsFrameStart = arrivalQpc != 0;   // re-audit MED 1
-			if (arrival.staleStart || arrival.staleEnd)
-			{
-				m_captureStaleGapPending = true;
-				m_captureStaleGapCause = arrival.staleStart ? "stale capture delivery" : "stale capture delivery ended";
-				const uint64_t stale = ++m_captureStaleRuns;
-				if ((stale & (stale - 1)) == 0)
-					DebugLog::Log("Capture: %s (age %.0f ms, %s time; runs %llu, stale frames on hardware time %llu, on callback time %llu)",
-						m_captureStaleGapCause, static_cast<double>(callbackQpc - hardwareQpc) * 1000.0 / qpcPerSecond,
-						arrival.Hardware() ? "hardware" : "callback", static_cast<unsigned long long>(stale),
-						m_captureArrival.StaleHardware(), m_captureArrival.StaleCallback());
-			}
-		}
-		else
-		{
-			arrivalQpc = 0;
-			m_enqueueArrivalIsFrameStart = false;
-		}
-		if (!queueFixes)
-			m_captureStaleGapPending = false;
-	}
+	IngressAfterRate(callbackQpc);   // P10-5: gaps from missed frames / timestamp breaks, the arrival   // VPV-HOOK
 	if (m_timingClock && counter % 20 == 0)
 	{
 		m_entryLatencyMs.store(
@@ -27703,200 +27624,11 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		return;
 	}
 
-	// Pulldown detection (owner 2026-10-14; off by default): a frame that
-	// repeats the previous one where the locked cadence has a repeat is not
-	// queued; the unique frames get the film rate and an even film clock.
-	double filmHz = 0.0;
-	bool filmUpdate = false;
-	if (m_pulldownDetection.load(std::memory_order_relaxed) && frameState->displayMode)
-	{
-		const Vpv::Resync::PulldownStep pulldownResync = Vpv::Resync::PulldownResyncStep(m_impl.get(), m_pulldownResetRequested.exchange(false, std::memory_order_acq_rel)); // VPV-HOOK: resync cursor (on: FULL resets, timing re-latches)
-		m_pulldown.SetTimingRelatch(pulldownResync.driving); // VPV-HOOK
-		if (pulldownResync.reset) // VPV-HOOK
-		{
-			m_pulldown.Reset();
-			m_pulldownClock.Reset();
-			m_pulldownSignature = 0;
-			m_pulldownFilmQpc = 0;
-		}
-		const uint64_t signature = Pulldown::Signature(videoFrame.GetData(),
-			static_cast<size_t>(frameState->BytesPerRow()),
-			static_cast<size_t>(frameState->displayMode->FrameHeight()));
-		const bool repeat = signature != 0 && signature == m_pulldownSignature;
-		m_pulldownSignature = signature;
-		const double measuredRateHz = m_measuredFrameRate.load(std::memory_order_relaxed);
-		const double signalHz = RendererExtension::ResolveFor(RendererExtension::Resolve::SourceSignalRate, m_impl.get(), measuredRateHz > 0.0 ? measuredRateHz : frameState->displayMode->RefreshRateHz()); // VPV-HOOK
-		const bool fixes = m_pulldownFixes.load(std::memory_order_relaxed);
-		const bool classFixes = m_cadenceClassFixes.load(std::memory_order_relaxed);
-		if (fixes != m_pulldownFixesApplied || classFixes != m_cadenceClassFixesApplied)
-		{
-			const bool clockForm = fixes != m_pulldownFixesApplied;
-			m_pulldownFixesApplied = fixes;
-			m_cadenceClassFixesApplied = classFixes;
-			Pulldown::Settings settings;
-			settings.keepLockAcrossMisses = settings.rephaseInPlace = settings.cadenceAwareClock = fixes;
-			// Hunt 2 (cadence_class_fixes): the exclusive film floor (H1), lateness while the
-			// phase is uncertain (M1) and a retry that needs the locked phase to fail (L3).
-			settings.exclusiveFilmFloor = settings.trackingLatenessMax = settings.retryNeedsFailure = classFixes;
-			// Real-footage suite 2026-10-18: a lock needs a maximally even pattern (no mixed-cadence lock).
-			settings.maximallyEvenPattern = classFixes;
-			m_pulldown.SetSettings(settings);
-			// Bug hunt 2026-10-17: the clock's form changes with the switch (cadence-aware
-			// or not): start it over, and no pair across the change.
-			if (clockForm)
-			{
-				// Hunt 2 (L1): a clock in use restarting is a break whatever pulldown_fixes now says.
-				m_pulldownForceGap = m_pulldownForceGap || m_pulldownClock.InUse();
-				m_pulldownClock.Reset();
-				m_pulldown.MarkDiscontinuity();
-			}
-		}
-		// Hunt 2 (cadence_class_fixes, 06-interp L6): the second-largest anchor; toggled mid-lock the
-		// offsets start over and no pair crosses the change.
-		if (m_pulldownClock.SetRobustAnchor(classFixes))
-		{
-			m_pulldown.MarkDiscontinuity();
-			m_pulldownForceGap = true;
-		}
-		// Bug hunt 2026-10-17 (timing_continuity_fixes): the film clock re-bases when
-		// the film rate (from signalHz: measured or nominal) changes mid-lock.
-		// Post-merge audit 2026-10-17: toggled mid-lock, the clock starts over and no
-		// pair crosses the change.
-		if (m_pulldownClock.SetRebaseOnRateChange(timingFixes))
-		{
-			m_pulldown.MarkDiscontinuity();
-			m_pulldownForceGap = true;   // Hunt 2 (L1)
-			DebugLog::Log("Pulldown: film clock re-basing %s (timing_continuity_fixes); clock restarted",
-				timingFixes ? "on" : "off");
-		}
-		// Q1 (pulldown_fixes): the film clock's late-arrival guard (never backwards inside a lock).
-		m_pulldownClock.SetLateGuard(fixes);
-		const bool wasLocked = m_pulldown.Locked();
-		const int previousCycle = m_pulldown.Cycle(), previousUnique = m_pulldown.Unique();
-		// R3 (resync_event on): an unannounced rate move (timing) re-latches the signal rate; the lock
-		// is dropped only when the cadence class changes (Pulldown::Detector::RelatchSignalHz).
-		if (pulldownResync.relatchTiming && m_pulldown.RelatchSignalHz(signalHz)) // VPV-HOOK
-			DebugLog::Log("Pulldown: signal rate moved to %.3f Hz beyond the lock's resolution (resync timing); lock dropped",
-				signalHz);
-		// D4: the counted misses keep the lock (verified over the next cycle).
-		const uint64_t missed = m_captureMissedFrames.load(std::memory_order_relaxed) - missedBefore;
-		static GeneralRate::FallbackNotice pulldownRateFallback;   // fixed-constant batch B7 2026-10-18: logged (PulldownDetector assumes 60)
-		GeneralRate::NoteFallback(pulldownRateFallback, signalHz > 0.0, "pulldown contradiction window", 60.0);
-		const Pulldown::Decision decision = m_pulldown.Next(repeat, gapBefore, signalHz,
-			gapBefore && fixes ? static_cast<int>((std::min)(missed, uint64_t{ 1000 })) : -1);
-		if (decision.locked != wasLocked || decision.relocked)
-		{
-			// The frame timing changes here: no pair across it.
-			if (!gapBefore)
-				gapCause = "pulldown lock change";
-			gapBefore = true;
-			gapFrames = 0;   // not a loss of whole frames: never filled
-			m_pulldownClock.Reset();
-			// Not rate-limited: a lock needs two seconds, so changes are rare.
-			const std::string lockText = decision.locked ?
-				Pulldown::Describe(decision.filmHz, signalHz, decision.unique, decision.cycle) : std::string("lost");
-			const std::string before = wasLocked && previousUnique > 0 ?
-				Pulldown::Describe(signalHz * previousUnique / previousCycle, signalHz, previousUnique, previousCycle) :
-				std::string("none");
-			DebugLog::Log("Pulldown: %s (was %s)", lockText.c_str(), before.c_str());
-		}
-		const int cadence = decision.locked ? (decision.cycle << 16) | decision.unique : 0;
-		// Hunt 2 (06-interp M3): the queue target follows the lock (PrefillTargetLocked): wake
-		// the waiters when it changes.
-		if (m_pulldownCadence.exchange(cadence, std::memory_order_relaxed) != cadence && classFixes)
-			m_queueChanged.notify_all();
-		if (decision.drop)
-		{
-			// D1: a lock change (or a gap) on a dropped repeat marks the next kept frame.
-			if (gapBefore && fixes)
-				m_pulldown.MarkDiscontinuity();
-			m_pulldownSkipped.fetch_add(1, std::memory_order_relaxed);
-			return;
-		}
-		// Hunt 2 (cadence_class_fixes, 06-interp L1): a clock restarted by a switch toggle is a
-		// break even when pulldown_fixes is now off (the consume below ignores the mark then);
-		// kept across dropped repeats until this kept frame.
-		const bool forcedGap = m_pulldownForceGap;
-		m_pulldownForceGap = false;
-		if (forcedGap && classFixes)
-		{
-			if (!gapBefore)
-			{
-				gapCause = "pulldown film clock restarted (switch toggled)";
-				gapBefore = true;
-			}
-			gapFrames = 0;
-		}
-		// Consumed always (a mark left while the fixes were off must not fire later); labelled by cause.
-		if (m_pulldown.ConsumeDiscontinuity() && fixes)
-		{
-			if (!gapBefore)
-			{
-				gapCause = decision.rephased ? "pulldown re-phase" : "pulldown lock change (on a skipped repeat)";
-				gapBefore = true;
-			}
-			gapFrames = 0;   // the film timing changed: never a gap-fill pair, missed frames or not
-		}
-		if (decision.rephased)
-		{
-			gapFrames = 0;
-			// Hunt 2 (cadence_class_fixes, 06-interp M1): the offsets from before the shift would
-			// hold the anchor for the clock's window and then step it mid-shot; this frame
-			// carries the re-phase discontinuity, so the clock re-anchors here.
-			if (classFixes)
-				m_pulldownClock.Reanchor();
-			DebugLog::Log("Pulldown: re-phased in place (lock kept)");
-		}
-		if (decision.locked)
-		{
-			filmHz = decision.filmHz;
-			if (decision.update && m_pulldownFilmQpc > 0)
-			{
-				// Option b: the same film frame, updated - at its time.
-				filmUpdate = true;
-				arrivalQpc = m_pulldownFilmQpc;
-			}
-			else
-			{
-				LARGE_INTEGER frequency{};
-				QueryPerformanceFrequency(&frequency);
-				const double qpcPerSecond = static_cast<double>(frequency.QuadPart);
-				const int64_t arrived = arrivalQpc > 0 ? arrivalQpc : callbackQpc;
-				m_enqueueArrivalIsFrameStart = arrivalQpc > 0;   // the film clock keeps its anchor's meaning
-				arrivalQpc = static_cast<int64_t>((fixes ? m_pulldownClock.Time(decision.filmIndex,
-					static_cast<double>(arrived) / qpcPerSecond, filmHz, decision.cadenceLateness, decision.cadenceLatenessMax) :
-					m_pulldownClock.Time(decision.filmIndex, static_cast<double>(arrived) / qpcPerSecond, filmHz)) * qpcPerSecond);
-				m_pulldownFilmQpc = arrivalQpc;
-			}
-		}
-		else
-			m_pulldownFilmQpc = 0;
-	}
-	else if (m_pulldownCadence.load(std::memory_order_relaxed) != 0 || m_pulldown.Locked())
-	{
-		m_pulldown.Reset();
-		m_pulldownClock.Reset();
-		m_pulldownSignature = 0;
-		m_pulldownFilmQpc = 0;
-		m_pulldownCadence.store(0, std::memory_order_relaxed);
-		if (!gapBefore)
-			gapCause = "pulldown off";
-		gapBefore = true;
-		gapFrames = 0;
-	}
-	// Q1 (queue_timing_fixes): a stale delivery's gap, kept across dropped pulldown repeats
-	// until this kept frame; never filled.
-	if (m_captureStaleGapPending)
-	{
-		m_captureStaleGapPending = false;
-		if (!gapBefore)
-			gapCause = m_captureStaleGapCause;
-		gapBefore = true;
-		gapFrames = 0;
-	}
+	RendererExtension::IngressContext ingress; ingress.host = this; ingress.frame = &videoFrame; ingress.state = &frameState; ingress.gapBefore = m_ingressGapBefore; ingress.gapCause = m_ingressGapCause; ingress.gapFrames = m_ingressGapFrames; ingress.arrivalQpc = m_ingressArrivalQpc;   // VPV-HOOK
+	if (RendererExtension::DecideIngress(ingress) && ingress.drop) return;   // P10-5 R15: pulldown, film clock, stale gap (IngressPolicy)   // VPV-HOOK
 
-	EnqueueFrame(videoFrame, frameState, enqueueGeneration, callbackQpc, arrivalQpc,
-		gapBefore, gapCause, gapFrames, filmHz, filmUpdate, nullptr);
+	EnqueueFrame(videoFrame, frameState, enqueueGeneration, callbackQpc, ingress.arrivalQpc,
+		ingress.gapBefore, ingress.gapCause, ingress.gapFrames, ingress.filmHz, ingress.filmUpdate, nullptr);
 }
 
 
@@ -28088,6 +27820,7 @@ void LibplaceboVideoRenderer::EnqueueFrame(VideoFrame& videoFrame,
 }
 
 
+#include <VP-V/modules/input/queue_timing/IngressPolicy.inl>   // P10-5: OnVideoFrame's VP ingress blocks (renderer members)   // VPV-HOOK
 #include <VP-V/modules/input/queue_timing/TimedFileFrames.inl>   // P10-7a: OnTimedVideoFrame, the file slot gate, the file head due time   // VPV-HOOK
 
 

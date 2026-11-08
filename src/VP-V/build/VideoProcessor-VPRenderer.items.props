@@ -59,6 +59,7 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\config\VpvSettingsModule.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\signal\ResyncExtension.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\capture\CaptureExtension.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\queue_timing\IngressPolicy.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\skeleton\SkeletonModule.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\skeleton\gpu\SkeletonGpuDispatcher.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>

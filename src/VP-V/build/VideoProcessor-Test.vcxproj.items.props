@@ -701,6 +701,9 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\capture\CaptureExtension.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\queue_timing\IngressPolicy.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\signal\tests\ResyncExtensionTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -743,6 +746,7 @@
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncShadowQ0Tests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\queue_timing\tests\PulldownResyncTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\queue_timing\tests\QueueTargetNeverExceedsDesiredTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\queue_timing\tests\IngressPolicyTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncQ0Tests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncAuditTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncInjectScheduleTests.cpp" />

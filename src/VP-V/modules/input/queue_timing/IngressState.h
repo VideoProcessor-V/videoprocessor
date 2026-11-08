@@ -8,7 +8,7 @@
 // header and every reader keeps its text, as P5a's settings base did). R15 DecideIngress then runs the pulldown /
 // stale-gap block before EnqueueFrame from IngressPolicy; the hardware-age block and the missed / break counters
 // around Bill's UpdateFrameRateAndPPM become one-line helpers into it; Bill's lines keep their order.
-// NOT included anywhere yet (the header still declares these members). Threads: as each comment says; the atomics are
+// The renderer takes it as a private base (LibplaceboVideoRenderer.h, M2 P10-5). Threads: as each comment says; the atomics are
 // read by the render loop (cadence, skipped count) and written by its settings refresh. C++14.
 
 #include <vprenderer/CaptureTimestampGap.h>   // CaptureArrival::Tracker
@@ -23,8 +23,10 @@ namespace Vpv
 	{
 		struct IngressState
 		{
-	// Pulldown detection (owner 2026-10-14; off by default). The detector runs on the capture thread only; the switch is
-	// refreshed from the active settings by the render loop; Reset asks for a fresh start.
+	// Pulldown detection (owner 2026-10-14; dejudder_pulldown, off by
+	// default). The detector runs on the capture thread only; the switch is
+	// refreshed from the active settings by the render loop; Reset asks for a
+	// fresh start.
 	std::atomic<bool> m_pulldownDetection{false};
 	std::atomic<bool> m_pulldownFixes{true};   // pulldown_fixes (audit 2026-10-16)
 	bool m_pulldownFixesApplied = true;        // capture thread
@@ -50,6 +52,15 @@ namespace Vpv
 	Pulldown::FilmClock m_pulldownClock;
 	uint64_t m_pulldownSignature = 0;
 	int64_t m_pulldownFilmQpc = 0;   // the last film frame's even time (QPC)
+	// M2 P10-5: OnVideoFrame's locals shared by its three ingress blocks (IngressPolicy.inl), per frame on the capture
+	// thread (callbacks are serial). Written by blocks 1-2, read by the R15 call site and block 3.
+	int64_t m_ingressArrivalQpc = 0, m_ingressHardwareQpc = 0, m_ingressCallbackQpc = 0;
+	bool m_ingressHardwareAgeKnown = false;
+	uint64_t m_ingressMissedBefore = 0, m_ingressBreaksBefore = 0;
+	bool m_ingressGapBefore = false;
+	const char* m_ingressGapCause = nullptr;
+	uint32_t m_ingressGapFrames = 0;
+	bool m_ingressTimingFixes = true;
 		};
 	}
 }

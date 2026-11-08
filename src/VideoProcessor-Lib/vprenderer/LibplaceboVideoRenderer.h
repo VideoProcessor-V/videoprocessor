@@ -21,6 +21,8 @@
 #include <vprenderer/FileFrameSlotGate.h>
 #include <vprenderer/QueueTimingPolicy.h>
 #include <VP-V/modules/input/queue_timing/VpFixedBudgetPolicy.h>
+#include <VP-V/modules/input/queue_timing/IngressState.h> // VPV-HOOK
+#include <VP-V/modules/input/queue_timing/IngressPolicy.h> // VPV-HOOK
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 
 #include <array>
@@ -47,7 +49,7 @@ namespace Vpv { class RendererAbiBridge; } // VPV-HOOK
 
 // In-process D3D11 renderer. HDR input is color-managed and tone-mapped to
 // an SDR Rec.709 swapchain; this backend deliberately does not emit HDR.
-class LibplaceboVideoRenderer final : public IVideoRenderer
+class LibplaceboVideoRenderer final : public IVideoRenderer, private Vpv::Ingress::IngressState // VPV-HOOK
 {
 public:
 	LibplaceboVideoRenderer(
@@ -358,6 +360,11 @@ private:
 	void ApplyViewportTarget(bool configured, double aspect,
 		const char* reason);
 	void UpdateFrameRateAndPPM(timingclocktime_t frameTimestamp);
+	void IngressHardwareArrival(VideoFrame& videoFrame);   // P10-5: defined in VP-V/modules/input/queue_timing/IngressPolicy.inl   // VPV-HOOK
+	void IngressCountersBefore();   // VPV-HOOK
+	void IngressAfterRate(int64_t callbackQpc);   // VPV-HOOK
+	bool IngressPulldown(RendererExtension::IngressContext& ic);   // VPV-HOOK
+	static bool IngressDecideThunk(void* self, RendererExtension::IngressContext& ic);   // VPV-HOOK
 	// The queue admission shared by OnVideoFrame and OnTimedVideoFrame (the
 	// former's code, moved unchanged; file fields only set file frames).
 	struct FileQueueFields
@@ -473,7 +480,6 @@ private:
 	QueueTimingPolicy::BillQueuePolicy m_upstreamQueuePolicy;
 	const QueueTimingPolicy::IQueueTimingPolicy& QueuePolicy() const;
 	QueueTimingPolicy::BacklogRunState m_backlogRun;   // was m_heldExcessRun
-	bool m_enqueueArrivalIsFrameStart = false;   // OnVideoFrame -> EnqueueFrame (capture callbacks are serial; re-audit MED 1)
 	std::atomic<uint64_t> m_droppedFrames{0};
 	std::atomic<uint64_t> m_queueCapacityDrops{0};
 	std::atomic<uint64_t> m_conversionFailures{0};
@@ -521,25 +527,7 @@ private:
 	// Frames the capture missed (whole-period timestamp gaps), and the last
 	// time that was logged (stream robustness, owner 2026-10-14).
 	std::atomic<uint64_t> m_captureMissedFrames{0};
-	// Pulldown detection (owner 2026-10-14; dejudder_pulldown, off by
-	// default). The detector runs on the capture thread only; the switch is
-	// refreshed from the active settings by the render loop; Reset asks for a
-	// fresh start.
-	std::atomic<bool> m_pulldownDetection{false};
-	std::atomic<bool> m_pulldownFixes{true};   // pulldown_fixes (audit 2026-10-16)
-	bool m_pulldownFixesApplied = true;        // capture thread
-	// timing_continuity_fixes (Bug hunt 2026-10-17): refreshed by the render loop.
-	std::atomic<bool> m_timingContinuityFixes{true};
-	// cadence_class_fixes (Hunt 2, 2026-10-17): refreshed by the render loop.
-	std::atomic<bool> m_cadenceClassFixes{true};
-	bool m_cadenceClassFixesApplied = true;   // capture thread
-	bool m_pulldownForceGap = false;          // capture thread: a toggle restarted the film clock (06-interp L1)
-	// Q1 (queue stress 2026-10-18, queue_timing_fixes): stale-frame arrivals and their
-	// delivery gap (capture thread).
-	CaptureArrival::Tracker m_captureArrival;
-	bool m_captureStaleGapPending = false;
-	const char* m_captureStaleGapCause = nullptr;
-	uint64_t m_captureStaleRuns = 0;
+	// M2 P10-5: the pulldown / film clock / arrival members are the private base Vpv::Ingress::IngressState   // VPV-HOOK
 	// motion_history_fixes (Hunt 2 fix group 5): refreshed by the render loop.
 	std::atomic<bool> m_motionHistoryFixes{true};
 	// Hunt 2 04 L4: incoming frames dropped to preserve queued cadence repeats since the
@@ -552,15 +540,6 @@ private:
 	// The look-ahead's queue frames (MotionAhead::QueueFramesFor) while it is wanted,
 	// else 0: the floor of a render_ahead_queue_credit-reduced target (13-timing M3).
 	std::atomic<size_t> m_queueTargetFloor{0};
-	// Capture timestamp breaks (UpdateFrameRateAndPPM's discontinuity branch).
-	std::atomic<uint64_t> m_captureTimestampBreaks{0};
-	std::atomic<bool> m_pulldownResetRequested{false};
-	std::atomic<int> m_pulldownCadence{0};   // (cycle << 16) | new frames per cycle; 0 = not locked
-	std::atomic<uint64_t> m_pulldownSkipped{0};
-	Pulldown::Detector m_pulldown;
-	Pulldown::FilmClock m_pulldownClock;
-	uint64_t m_pulldownSignature = 0;
-	int64_t m_pulldownFilmQpc = 0;   // the last film frame's even time (QPC)
 	std::atomic<ULONGLONG> m_captureMissedLogTick{0};
 	std::atomic<int> m_ppmDeviation{0};
 	std::atomic_bool m_hasPpmData{false};
@@ -590,6 +569,7 @@ private:
 	// loop presents it each refresh; incoming frames are dropped). The LED drive
 	// is stopped (full light) for the patches and restarted after them (m_dynamicDrive).
 	std::atomic_bool m_calibrationPatternActive{false};
+	Vpv::Ingress::HostBinding m_ingressBinding{ this, &LibplaceboVideoRenderer::IngressDecideThunk, this };   // P10-5: last member (R15)   // VPV-HOOK
 };
 
 // Tests only (planner Q4): see LibplaceboVideoRenderer.cpp.
