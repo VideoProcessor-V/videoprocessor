@@ -3850,6 +3850,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			const bool engineGlobalClear = !settings.opticalFlowGlobalFallback ||
 				(OpticalFlowTrust::GlobalUsable(engineGlobal[0]) && OpticalFlowTrust::GlobalUsable(engineGlobal[1]));
 			const bool modelGlobal = cg && cg->useModelGlobal && settings.globalPrior;
+			const bool gapSeed = searchSeedValid && settings.globalPrior;   // SK-MV hiccup gap seed: used (or dropped) by THIS estimate only
+			searchSeedValid = false;
+			searchSeedUsed = false;
 			if (!modelGlobal && settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid && !engineGlobalClear)
 				++globalFallbacks;
 			if (modelGlobal)
@@ -3893,6 +3896,32 @@ if (b.x < blocks.x && b.y < blocks.y) {
 						return false;
 				}
 				globalFromEngine = true;
+			}
+			else if (gapSeed)
+			{
+				// SK-MV: D1 starts from the last valid shared pair's motion scaled by the gap (z = 0.5: confident enough to start from);
+				// M2's second candidate is cleared. A prior only: every block still searches and its own match decides.
+				for (int d = 0; d < 2; ++d)
+				{
+					const float value[4] = { searchSeed[d][0], searchSeed[d][1], searchSeed[d][2], searchSeed[d][3] };
+					const pl_shader_desc out[1] = { Storage("dst", globalVector[d]) };
+					const pl_shader_var var[1] = { { pl_var_vec4("gvec"), value, true } };
+					if (!Dispatch("VideoProcessor de-judder: global motion (gap seed)", nullptr,
+							"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n",
+							out, 1, var, 1, 1, 1, 1))
+						return false;
+					if (two && globalSecond[d])
+					{
+						const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+						const pl_shader_desc out2[1] = { Storage("dst", globalSecond[d]) };
+						const pl_shader_var var2[1] = { { pl_var_vec4("gvec"), none, true } };
+						if (!Dispatch("VideoProcessor de-judder: global motion second (gap seed)", nullptr,
+								"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n",
+								out2, 1, var2, 1, 1, 1, 1))
+							return false;
+					}
+				}
+				searchSeedUsed = true;
 			}
 			else if (settings.globalPrior && (serialSearchForTest ?
 					(!Global(l1A, l1B, l2A, l2B, globalVector[0], two ? globalSecond[0] : nullptr) ||

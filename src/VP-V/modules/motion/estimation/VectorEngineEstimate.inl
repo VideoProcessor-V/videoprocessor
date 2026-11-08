@@ -326,8 +326,32 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			vectors.heightsPerFrame = sample.heightsPerFrame;
 			intentInterpreter->NoteVectors(vectors);
 		}
+		if (flow)
+		{
+			// Hiccup gap seed: remember this shared pair's whole-frame motion (a copy of 8 floats, no standing cost).
+			for (int d = 0; d < 2; ++d)
+				for (int k = 0; k < 4; ++k) vectorEngine.motionLastSharedGlobal[d][k] = flow->global[d][k];
+			vectorEngine.motionLastSharedValid = true;
+			vectorEngine.motionLastSharedTo = bSequence;
+			vectorEngine.motionLastSharedEpoch = motionShadowEpoch;
+		}
 		dejudder->SetExternalFlow(std::move(flow));
 		vectorEngine.P2().Prune(aSequence);
+	}
+	if (!motionEngineWarming && bSequence > aSequence + 1)
+	{
+		// A fill pair across a gap (hiccup repair): start D1 from the last valid shared pair when the state moved only for this gap; else the
+		// estimate runs unseeded exactly as before (GapSeed::Make says why).
+		const VpMotion::GapSeed seed = VpMotion::GapSeed::Make(vectorEngine.motionLastSharedValid ? vectorEngine.motionLastSharedGlobal : nullptr,
+			vectorEngine.motionLastSharedTo, aSequence, bSequence, vectorEngine.motionLastSharedEpoch, motionValidity.Epoch(),
+			motionValidity.LastCause() == MotionValidity::Cause::Gap);
+		if (seed.valid)
+		{
+			dejudder->SetSearchSeed(seed.global);
+			++vectorEngine.motionGapSeeded;
+		}
+		else
+			++vectorEngine.motionGapUnseeded;
 	}
 	dejudder->SetFieldSource(&vectorEstimate);   // SK-MV pass-through (TEMPORARY until P5c): Field/FrameTrust/SubField read the shared view
 	dejudderLiveFieldFrom = 0;   // the live outputs are being replaced
@@ -339,6 +363,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	const bool motionEstimated = vectorEngine.Estimate(aSequence, bSequence, ahead, dejudderSourceHz, motionShadowEpoch,
 		!motionEngineWarming, *dejudder, [&]() { return dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted); },
 		[this](const FallbackCatalog::Decision& decision) { SyncFallback(decision); });
+	dejudder->ClearSearchSeed();
 	passTimerHook.AddGpuGroups("motion: ", dejudder->TakePassGpuMs());
 	if (!motionEstimated)
 	{

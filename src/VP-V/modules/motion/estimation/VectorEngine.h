@@ -16,6 +16,7 @@
 #pragma once
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/modules/motion/estimation/GapSeed.h>
 #include <VP-V/modules/motion/estimation/ProducerPlan.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 #include <VP-V/modules/motion/estimation/VectorEngineState.h>

@@ -418,6 +418,16 @@ namespace Dejudder
 		// (the same texture as the member), else the member.
 		pl_tex Field() const { pl_tex f = nullptr, t = nullptr, s = nullptr; return fieldSource && fieldSource->LiveFieldSet(f, t, s) ? f : field; }
 		void SetFieldSource(const IFieldSource* source) { fieldSource = source; }
+		// SK-MV hiccup gap seed (VpMotion::GapSeed): the last valid shared pair's whole-frame motion, scaled by the gap, as D1's start for the next
+		// Estimate (a prior only: the blocks' own matches decide). Consumed by that Estimate; never set = the search exactly as before.
+		void SetSearchSeed(const float global[2][4])
+		{
+			for (int d = 0; d < 2; ++d)
+				for (int k = 0; k < 4; ++k) searchSeed[d][k] = global[d][k];
+			searchSeedValid = true;
+		}
+		void ClearSearchSeed() { searchSeedValid = false; }   // the host clears it after the estimate (an early return must not leak it into the next one)
+		bool SearchSeedUsed() const { return searchSeedUsed; }
 		const IFieldSource* FieldSource() const { return fieldSource; }
 		// From the last Estimate (1x1): r = the share of trusted blocks,
 		// g = the strength scale (D2/D4; 1 when both are off), b = the mean
@@ -723,7 +733,11 @@ namespace Dejudder
 		int ofW = 0, ofH = 0;
 		// This estimate found no pair computed ahead (P2) and ran the block searches (the P2m path): not a failure, a state the host shows.
 		bool noPairAhead = false;
+		bool searchSeedUsed = false;     // the last Estimate started D1 from the gap seed
 		bool pairSizeMismatch = false;   // ... because a pair WAS handed over but not at this instance's search size
+		// SK-MV hiccup gap seed: D1's start for the NEXT Estimate only (forward, backward; D1 format), then cleared. Unset = today's search.
+		float searchSeed[2][4] = {};
+		bool searchSeedValid = false;
 		const IFieldSource* fieldSource = nullptr;   // SK-MV pass-through (TEMPORARY until P5c); null = the members
 	public:
 		// The searching instance may be the half-size inner one (lowRes): report it.

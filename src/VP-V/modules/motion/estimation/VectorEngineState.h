@@ -109,6 +109,12 @@ namespace VpMotion
 		// every pair that does arrive (NoPairCause as unsigned char; 0 = none).
 		unsigned char motionNoPairCause = 0;
 		std::string motionNoPairDetail;
+		// SK-MV hiccup gap seed: the last adjacent pair the shared P2 slot served (its whole-frame motion, the later frame, the epoch it was
+		// taken in), kept so a fill pair across a gap can start from it (GapSeed.h). Render thread.
+		bool motionLastSharedValid = false;
+		float motionLastSharedGlobal[2][4] = {};
+		uint64_t motionLastSharedTo = 0, motionLastSharedEpoch = 0;
+		unsigned long long motionGapSeeded = 0, motionGapUnseeded = 0;   // fill pairs estimated with / without the seed (counters, shown in the log line)
 		// SK-MV: NvOpticalFlow::Sessions::Violations() as last logged (render thread).
 		unsigned long long nvofViolationsSeen = 0;
 		// One vectors-valid state (docs/VP-interpolator-50-60-plan.md step 1; owner [[vp-vector-validity]]):
