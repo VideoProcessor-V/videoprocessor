@@ -4123,8 +4123,9 @@ void RunBetaMotionCorpus()
 //   off           no guidance (today's matcher)
 //   model_global  the proposed default: only the model-as-D1 switch (vector_model_global)
 //   all_switches  information: every measurement switch on
-// The guide is what K4 hands the matcher, built by the production units and nothing else: the pair's forward field (the
-// estimator's own Field(), source px) -> CameraLink::AssemblePair -> CameraModel::Fitter::Fit (one record per pair, in order,
+// The guide is what K4 hands the matcher, built by the production units and nothing else: the pair's forward field (F2: the
+// estimator's optical-flow seed, MotionWarp::LastSeed -> CameraLink::SeedToSourceGrid, source px; never the guided Field(),
+// which is still scored) -> CameraLink::AssemblePair -> CameraModel::Fitter::Fit (one record per pair, in order,
 // default Config) -> CameraLink::BuildGuide (BuildMeasurementPlan -> MakeGuidanceFrame) for the pair d = 2 later, from the
 // record d pairs back (d = kGuideLag, fixed so the test is deterministic) -> MotionWarp::SetCameraGuidance. No runtime code is
 // touched. Pairs 0 .. d-1 have no record yet and run unguided in every variant; scoring pools the pairs d .. last.
@@ -4530,6 +4531,7 @@ namespace CameraAccuracy
 		std::string topPass;           // the slowest pass and its ms
 		double topPassMs = 0;
 		double cpuMs = 0;              // AssemblePair + Fitter::Fit (fitMs) + BuildGuide (planMs), steady_clock (QPC)
+		int seedBlockPx = 0;           // F2: source px per seed texel of the fit's input (16 at 1080, 32 at a lowRes 4K search; 0 = no seed)
 	};
 
 	struct VariantResult
@@ -4611,16 +4613,16 @@ namespace CameraAccuracy
 				}
 		std::ofstream pairs(dir + "\\camera-accuracy-pairs.csv", std::ios::trunc);
 		pairs << "scene,variant,pair,eligible,guided,refusal,use,nvof,gpu_ms,wall_ms,plan_ms,fit_ms,fit_reason,fit_confidence,fit_tx_px,fit_ty_px,"
-			"guide_global_x_px,guide_global_y_px,truth_camera_x_px,truth_camera_y_px,passes,top_pass,top_pass_ms,cpu_ms\n";
+			"guide_global_x_px,guide_global_y_px,truth_camera_x_px,truth_camera_y_px,passes,top_pass,top_pass_ms,cpu_ms,seed_block_px\n";
 		for (const SceneResult& s : all)
 			for (const VariantResult& v : s.variants)
 				for (const PairLog& p : v.pairs)
 				{
 					char row[1536];
-					std::snprintf(row, sizeof(row), "%s,%s,%d,%d,%d,\"%s\",\"%s\",%d,%.3f,%.3f,%.3f,%.3f,\"%s\",%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,\"%s\",%.3f,%.3f\n",
+					std::snprintf(row, sizeof(row), "%s,%s,%d,%d,%d,\"%s\",\"%s\",%d,%.3f,%.3f,%.3f,%.3f,\"%s\",%.3f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,\"%s\",%.3f,%.3f,%d\n",
 						s.scene.name.c_str(), v.name.c_str(), p.pair, p.eligible ? 1 : 0, p.guided ? 1 : 0, p.refusal.c_str(), p.use.c_str(),
 						p.nvof ? 1 : 0, p.gpuMs, p.wallMs, p.planMs, p.fitMs, p.fitReason.c_str(), p.fitConf, p.fitTx, p.fitTy,
-						p.guideGx, p.guideGy, p.truthTx, p.truthTy, p.passes, p.topPass.c_str(), p.topPassMs, p.cpuMs);
+						p.guideGx, p.guideGy, p.truthTx, p.truthTy, p.passes, p.topPass.c_str(), p.topPassMs, p.cpuMs, p.seedBlockPx);
 					pairs << row;
 				}
 	}
@@ -4842,7 +4844,8 @@ namespace CameraAccuracy
 		md << "- Same: the fit, plan and guide units (AssemblePair, Fitter, BuildGuide, MakeGuidanceFrame), the default Config / MeasurementConfig, "
 			"the matcher's SetCameraGuidance path and the optical flow seed mode. The matcher's response to a given guide is therefore what live gets.\n";
 		md << "- Different (a live run can differ by these): the lag d is fixed at " << kGuideLag << " here, live uses the measured lag (>= 2); the fit reads the "
-			"estimator's final Field() with no backward field (the live readback may add one); the fade flag and gain come from the scene's truth, live "
+			"estimator's optical-flow seed (MotionWarp::LastSeed, F2) through the live readback's own CPU conversion (SeedToSourceGrid), here downloaded "
+			"synchronously; the fade flag and gain come from the scene's truth, live "
 			"from P4's detector; the guidance governor, the lane-versus-live race, a late record and a slip refusal are not modelled (a refused pair is today's "
 			"matcher, which this harness's off variant is); the temporal seed has no CPU flow here, so that switch (in all_switches) does nothing; "
 			"PairFacts.haveEngineGlobal is not set (the fit's engine-agreement signal stays neutral; live sets it when the engine's global is used); "
@@ -5032,23 +5035,55 @@ void RunBetaCameraAccuracy()
 					"camera accuracy: the field grid is not the corpus's block grid");
 				pl_tex_transfer_params d{};
 				d.tex = warp.Field(); d.ptr = fieldHalf.data();
-				Check(pl_tex_download(g, &d), "camera accuracy: field download");
+				Check(pl_tex_download(g, &d), "camera accuracy: field download");   // the live (guided) field: scored, never fitted
+				// F2 (as production): the fit reads the optical-flow SEED of this pair (MotionWarp::LastSeed, the searching
+				// instance's ofSearch), converted onto the 16-px source grid by the live readback's own CPU step
+				// (CameraLink::SeedToSourceGrid). No seed (WARP: no engine) = no fit, as live (camera_fit fallback).
 				CameraLink::FieldCopy& fc = fields[p];
+				fc = CameraLink::FieldCopy();
 				fc.seq = static_cast<uint64_t>(p);
 				fc.pairFrom = static_cast<uint64_t>(p);
 				fc.pairTo = static_cast<uint64_t>(p + 1);
-				fc.gridW = blocksX;
-				fc.gridH = blocksY;
-				fc.blockSize = 16.0;
-				const size_t blocks = static_cast<size_t>(blocksX) * blocksY;
-				fc.fwdX.resize(blocks); fc.fwdY.resize(blocks); fc.fwdTrust.resize(blocks);
-				for (size_t i = 0; i < blocks; ++i)
+				Dejudder::MotionWarp::SeedState seed;
+				const bool haveSeed = warp.LastSeed(seed);
+				Check(!hardware || haveSeed, "camera accuracy: no optical-flow seed on a hardware GPU (the fit reads only the seed)");
+				if (haveSeed)
 				{
-					fc.fwdX[i] = HalfToFloat(fieldHalf[i * 4]);
-					fc.fwdY[i] = HalfToFloat(fieldHalf[i * 4 + 1]);
-					fc.fwdTrust[i] = HalfToFloat(fieldHalf[i * 4 + 2]);
+					const int per = 1 << seed.halvings;
+					Check((blocksX + per - 1) / per == seed.gridW && (blocksY + per - 1) / per == seed.gridH,
+						"camera accuracy: the seed grid does not cover the 16-px source grid");
+					const size_t seedTexels = static_cast<size_t>(seed.gridW) * seed.gridH;
+					std::vector<uint16_t> seedHalf(seedTexels * 4);
+					std::vector<float> seedRgba[2];
+					for (int dir = 0; dir < 2; ++dir)
+					{
+						pl_tex_transfer_params ds{};
+						ds.tex = dir == 0 ? seed.fwd : seed.bwd; ds.ptr = seedHalf.data();
+						Check(ds.tex && ds.tex->params.format->num_components == 4 && ds.tex->params.format->texel_size == 8,
+							"camera accuracy: the seed is not rgba16f");
+						Check(pl_tex_download(g, &ds), "camera accuracy: seed download");
+						seedRgba[dir].resize(seedTexels * 4);
+						for (size_t i = 0; i < seedTexels * 4; ++i)
+							seedRgba[dir][i] = HalfToFloat(seedHalf[i]);
+					}
+					CameraLink::SeedLayout layout;
+					layout.gridW = seed.gridW;
+					layout.gridH = seed.gridH;
+					layout.per = per;
+					layout.scaleToSourcePx = 2.0f * static_cast<float>(per);
+					layout.sourceGridW = blocksX;
+					layout.sourceGridH = blocksY;
+					layout.sadTrustMax = seed.tolerance;
+					layout.consistencyPx = seed.consistencyPx;
+					Check(CameraLink::SeedToSourceGrid(seedRgba[0].data(), seedRgba[1].data(), layout, fc), "camera accuracy: seed layout");
+					log.seedBlockPx = 16 * per;
 				}
-				if (spec.on)
+				if (spec.on && !haveSeed)
+				{
+					records[p] = CameraModel::CameraMotion();
+					log.fitReason = "no seed (camera fit needs the optical-flow seed)";
+				}
+				else if (spec.on)
 				{
 					// The fit of this pair, in order, whether or not anything uses it yet (as the camera worker does).
 					const auto fitStart = std::chrono::steady_clock::now();
