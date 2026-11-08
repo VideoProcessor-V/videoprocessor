@@ -1087,6 +1087,9 @@ namespace SourceIdentity
 					VerifyOptions opt;
 					if (latchedMode)
 						opt.exactLines = cfg.latchedExactLines;
+					else if (cfg.confidentAxisExactLines > 0 && reader[a].HasConfident() && !reader[1 - a].HasConfident())
+						opt.exactLines = cfg.confidentAxisExactLines;   // SID-OPT step 3: this axis is settled, the other one is not (when both read
+						                                                // confident but the monitor holds natives out (N2), all lines re-test as before)
 					if (reader[a].HasConfident() && !reader[a].ConfidentNative())
 						opt.forceExactN = reader[a].ConfidentN();
 					verifier->Evaluate(r.ls, cands, pc, opt, r.vr);

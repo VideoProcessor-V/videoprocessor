@@ -77,7 +77,9 @@ namespace SourceIdentity
 			EvidenceLogSettings log;
 			int queueDepth = 1;                  // jobs waiting for the worker (1..2); a newer job replaces the oldest, counted
 			int outputStepOverride = 0;          // 0 = detect from the samples; 4 = an 8-bit picture; 1 = 10-bit
-			int latchedExactLines = 16;          // exact-stage lines while confident (a confident n always gets the exact stage)
+			int latchedExactLines = 16;          // exact-stage lines while both axes are confident (a confident n always gets the exact stage)
+			int confidentAxisExactLines = Narrowing::kConfidentAxisExactLines;   // exact-stage lines of ONE confident axis while the other is still
+			                                                                   // acquiring (0 = off: all sampled lines); step 3 of SID-OPT
 			int clockRing = 64;                  // frames of (seq, source time, active area) remembered
 			int eventCap = 64;                   // pending events kept (oldest dropped)
 			int repeatCap = 16;                  // pending repeat marks kept
