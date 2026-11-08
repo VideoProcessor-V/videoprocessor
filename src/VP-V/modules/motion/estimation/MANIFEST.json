@@ -19,6 +19,8 @@
     "src/VideoProcessor-Lib/MotionConfig.h",
     "src/VP-V/modules/motion/estimation/MotionEngineIdle.h",
     "src/VP-V/modules/motion/estimation/MotionAheadProducer.h",
+    "src/VP-V/modules/motion/estimation/MotionAheadWalk.h",
+    "src/VP-V/modules/motion/estimation/VectorEngineFallbackSync.h",
     "src/VP-V/modules/motion/estimation/global_model/CameraMotion.h",
     "src/VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.h",
     "src/VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.cpp",

@@ -9,6 +9,7 @@
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <libplacebo/d3d11.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/VectorEngineFallbackSync.h>
 
 #include <algorithm>
 #include <chrono>
@@ -138,9 +139,7 @@ namespace VpMotion
 			if (!vectorEngineLogged.empty())
 			{
 				vectorEngineLogged.clear();
-				host.SyncFallback(FallbackCatalog::Released("vector_engine"));
-				host.SyncFallback(FallbackCatalog::Released("vector_engine_producer"));
-				host.SyncFallback(FallbackCatalog::Released("vector_engine_global"));
+				VectorEngineFallbackSync::Release(host);
 			}
 			return;
 		}
@@ -179,9 +178,7 @@ namespace VpMotion
 			vectorProducerFirstSubmit = 0;
 			vectorProducerSkipSustained = false;
 		}
-		host.SyncFallback(FallbackCatalog::VectorEngine(vectorDemand));
-		host.SyncFallback(FallbackCatalog::VectorEngineProducer(vectorProducerSkipSustained));
-		host.SyncFallback(FallbackCatalog::VectorEngineGlobal(vectorGlobalMissSustained));
+		VectorEngineFallbackSync::Sync(*this, host);
 		if (vectorDemand.mode != VectorDemand::Mode::Off && (vectorStatsTick == 0 || now - vectorStatsTick >= 5000))
 		{
 			vectorStatsTick = now;

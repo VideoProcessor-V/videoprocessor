@@ -11,6 +11,7 @@
     "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h",
     "src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp",
     "src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.h",
+    "src/VP-V/modules/input/source_analysis/SourceAheadWalk.h",
     "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
     "src/VideoProcessor-Lib/ActivePictureAnalyzer.cpp",
     "src/VideoProcessor-Lib/SceneDetector.cpp",

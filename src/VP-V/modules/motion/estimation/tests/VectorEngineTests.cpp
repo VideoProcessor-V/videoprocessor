@@ -79,13 +79,15 @@ namespace VectorEngineTest
 			const VectorDemand::Input in = OneConsumer(VectorDemand::Consumer::GrainMap);
 			engine.UpdateVectorEngine(in, facts, host);
 			Assert::AreEqual(1, host.publishes, L"first line is new");
-			Assert::AreEqual<size_t>(3, host.fallbackIds.size());
+			// T1 (plan 58 B3): the fourth entry, "vector producer" (the look-ahead's restarts), joins the three.
+			Assert::AreEqual<size_t>(4, host.fallbackIds.size());
 			Assert::AreEqual(std::string("vector_engine"), host.fallbackIds[0]);
 			Assert::AreEqual(std::string("vector_engine_producer"), host.fallbackIds[1]);
 			Assert::AreEqual(std::string("vector_engine_global"), host.fallbackIds[2]);
+			Assert::AreEqual(std::string("vector producer"), host.fallbackIds[3]);
 			engine.UpdateVectorEngine(in, facts, host);
 			Assert::AreEqual(1, host.publishes, L"an unchanged line is not republished");
-			Assert::AreEqual<size_t>(6, host.fallbackIds.size());
+			Assert::AreEqual<size_t>(8, host.fallbackIds.size());
 		}
 
 		TEST_METHOD(SwitchingDemandOffReleasesTheEntriesOnce)
@@ -98,7 +100,7 @@ namespace VectorEngineTest
 			host.fallbackIds.clear();
 			facts.vectorDemandSetting = false;
 			engine.UpdateVectorEngine(OneConsumer(VectorDemand::Consumer::GrainMap), facts, host);
-			Assert::AreEqual<size_t>(3, host.fallbackIds.size());
+			Assert::AreEqual<size_t>(4, host.fallbackIds.size());
 			for (bool engaged : host.fallbackEngaged)
 				Assert::IsFalse(engaged, L"released");
 			host.fallbackIds.clear();
