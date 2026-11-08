@@ -8,6 +8,10 @@
 // I-to-I long-pair service, CPU only: S10.5 + hint resampling, the seeded search law, the service paths with the NVOF
 // session OFF (no GPU touched) and the visibility of the fallback. The hinted NVOF session itself is GPU-only
 // (LongPairBenchDump / hardware).
+#include <VP-V/core/PassTimerInbox.h>
+#include <VP-V/core/ProductCatalog.h>
+#include <VP-V/core/VramUsers.h>
+#include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/motion/estimation/longpair/LongPairService.h>
 #include <VP-V/modules/motion/estimation/longpair/NvOpticalFlowHinted.h>
 
@@ -239,6 +243,40 @@ namespace VideoProcessorTest
 			Assert::IsTrue(d.reason.find("long-pair seeded search (NVOF with hints unavailable: long-pair NVOF off)") != std::string::npos);
 			Assert::IsTrue(svc.StatusLine().find("seeded search") != std::string::npos);
 			Assert::AreEqual(1ull, svc.GetStats().seeded);
+		}
+
+		// MV4: the service is catalogued with its three cost routes before it is wired, and a finished pair reaches the pass-timer inbox.
+		TEST_METHOD(ServiceProductIsCataloguedWithItsVramUserAndPassTimerRoute)
+		{
+			const std::vector<VpSkeleton::ServiceProductRow>& rows = VpSkeleton::ServiceProductRows();
+			Assert::AreEqual(size_t(1), rows.size());
+			const VpSkeleton::ServiceProductRow& row = rows[0];
+			Assert::AreEqual(std::string("long_pair_field"), std::string(row.token));
+			Assert::IsTrue(row.tier == VpSkeleton::Tier::T2, L"optional, shed first");
+			Assert::AreEqual(std::string(VpMotion::kLongPairFallbackId), std::string(row.fallbackId), L"the visible absence entry is the service's own");
+			size_t count = 0;
+			const uint16_t* declarable = VpSkeleton::DeclarableVramUsers(&count);
+			bool declared = false;
+			for (size_t i = 0; i < count; ++i) declared = declared || declarable[i] == row.vramUser;
+			Assert::IsTrue(declared, L"its VRAM user is one the governor's population guard knows");
+			Assert::AreEqual(std::string(PassTimers::Rows::kLongPairNvof), std::string(row.passTimerRow));
+			Assert::IsTrue(std::string(row.passTimerRow).compare(0, 8, "motion: ") == 0, L"a motion row");
+		}
+
+		TEST_METHOD(AFinishedLongPairPostsItsCostToThePassTimerInbox)
+		{
+			const int w = 48, h = 32;
+			std::vector<uint8_t> a, b;
+			Frames(w, h, 2.0, 1.0, a, b);
+			Service svc(CpuOnly());
+			const uint64_t before = PassTimers::Inbox::Motion().Posted();
+			const Result r = svc.RunNow(a.data(), b.data(), w, h, nullptr);
+			Assert::IsTrue(r.ok && r.path == Path::SeededSearch);
+			Assert::AreEqual(before + 1, PassTimers::Inbox::Motion().Posted(), L"one post per finished pair");
+			bool seen = false;
+			for (const std::string& line : PassTimers::Inbox::Motion().Lines())
+				seen = seen || line.compare(0, std::string(PassTimers::Rows::kLongPairSeeded).size(), PassTimers::Rows::kLongPairSeeded) == 0;
+			Assert::IsTrue(seen, L"the seeded-search row is in the readout");
 		}
 
 		TEST_METHOD(ServiceWithoutAHintStillShowsTheNvofDowngrade)

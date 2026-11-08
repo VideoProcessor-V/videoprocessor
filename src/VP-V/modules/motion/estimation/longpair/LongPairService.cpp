@@ -4,6 +4,7 @@
 #include "LongPairService.h"
 #include "NvOpticalFlowHinted.h"
 
+#include <VP-V/core/PassTimerInbox.h>
 #include <VP-V/core/VramUsers.h>
 
 #include <d3d11.h>
@@ -318,6 +319,12 @@ namespace VpLongPair
 				}
 			}
 			res.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+			// MV4: the pass-timer route. Every long pair is posted (one per I frame: rare, so no sampling): the NVOF session's pair plus its
+			// readback as the GPU group, the seeded-search fallback as CPU work, so the cost shows in the same readout as the producer's.
+			if (res.ok && (res.path == Path::NvofHinted || res.path == Path::NvofUnhinted))
+				PassTimers::Inbox::Motion().Post(PassTimers::Kind::GpuGroup, PassTimers::Rows::kLongPairNvof, res.ms);
+			else if (res.ok && res.path == Path::SeededSearch)
+				PassTimers::Inbox::Motion().Post(PassTimers::Kind::CpuWork, PassTimers::Rows::kLongPairSeeded, res.ms);
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				++stats.done;

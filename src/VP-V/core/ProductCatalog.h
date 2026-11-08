@@ -3,8 +3,10 @@
 #pragma once
 
 #include "FallbackCatalog.h"
+#include "PassTimerInbox.h"
 #include "ProductGraph.h"
 #include "Products.h"
+#include "VramGovernor.h"
 
 #include <VP-V/modules/motion/estimation/VectorDemandProducts.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
@@ -91,6 +93,30 @@ constexpr uint32_t kExpectedCodingEvidenceUnit = 1;
 constexpr uint32_t kExpectedQualityPatternUnit = 1;
 constexpr uint32_t kExpectedFieldRefineUnit = 1;
 constexpr uint32_t kExpectedTdMapsViewUnit = 1;
+
+// Doc 83 MV4: SERVICE products. The long-pair field is not a per-frame ring product (its pair distance is the measured GOP length and the
+// service is asynchronous), so it has no id in the per-frame registry (adding one would move kSkeletonProductEnd and the live-fill owner
+// rule, which every per-frame product must satisfy). It is CATALOGUED here instead, with its three cost routes, before the service is wired:
+// the VRAM user it declares to the governor, the pass-timer row it posts, and the visible fallback entry for its absence.
+struct ServiceProductRow {
+    const char* token;           // the product's name in the status text and the ledger
+    const char* unitFolder;      // the owning module folder
+    uint32_t expectedUnit;       // the unit version
+    uint16_t vramUser;           // the governor user its textures are declared under (VramUsers.h)
+    const char* passTimerRow;    // the row its jobs post to PassTimers::Inbox::Motion()
+    Tier tier;                   // T2: optional, shed first
+    const char* fallbackId;      // the FallbackCatalog entry id raised while it is absent (VpMotion::kLongPairFallbackId)
+    const char* note;
+};
+constexpr uint32_t kExpectedLongPairUnit = 1;
+inline const std::vector<ServiceProductRow>& ServiceProductRows()
+{
+    static const std::vector<ServiceProductRow> rows = {
+        { "long_pair_field", "motion/estimation/longpair", kExpectedLongPairUnit, kUserNvofProducer, PassTimers::Rows::kLongPairNvof, Tier::T2,
+          "vector_engine_long_pair", "async I-to-I long-range flow (hinted NVOF session or the seeded search); unwired; optional, absent = visible" },
+    };
+    return rows;
+}
 
 inline const std::vector<ProductRow>& ProductRows()
 {

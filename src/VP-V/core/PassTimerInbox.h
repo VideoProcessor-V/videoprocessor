@@ -24,6 +24,9 @@ namespace PassTimers {
 namespace Rows {
 constexpr const char* kCameraFit = "camera.fit";              // CPU work: the camera fit on the camera worker
 constexpr const char* kCameraReadback = "camera.readback";    // CPU wait: the field copy's request -> ready latency (never counted as work)
+// SK-MV MV4: the long-pair service (one pair per detected I frame; posted from its worker, every pair - they are rare).
+constexpr const char* kLongPairNvof = "motion: long-pair NVOF (hinted session, pair + readback, wall)";
+constexpr const char* kLongPairSeeded = "motion.long_pair_seeded";   // CPU work: the seeded-search fallback of the same pair
 }
 
 

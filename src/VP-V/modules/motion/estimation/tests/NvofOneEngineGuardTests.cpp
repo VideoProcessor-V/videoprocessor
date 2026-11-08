@@ -7,6 +7,7 @@
 // NvOpticalFlow::Engine is open on the GPU throughout and that no second one was ever opened.
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/NvOpticalFlow.h>
 #include <VP-V/modules/motion/estimation/longpair/LongPairService.h>
@@ -56,6 +57,30 @@ namespace VideoProcessorTest
 			Assert::AreEqual(2, Sessions::Peak(SessionKind::Engine, 11), L"the peak stays");
 			Sessions::ResetForTest();
 			Assert::AreEqual<unsigned long long>(0, Sessions::Violations());
+		}
+
+		// SK-MV guard 3 for the long pair: an ACTIVE optical-flow user that declared nothing is flagged by the governor's population guard
+		// (skeleton_vram_users), and a declared one (what the producer and the long-pair service do, RingBytes) is not.
+		TEST_METHOD(AnActiveOpticalFlowUserWithoutADeclarationIsFlaggedAndADeclaredOneIsNot)
+		{
+			VpSkeleton::VramUsers& users = VpSkeleton::VramUsers::Instance();
+			users.ResetForTesting();
+			int owner = 0;
+			users.MarkActive(&owner, VpSkeleton::kUserNvofProducer, true);
+			VpSkeleton::VramUsers::Snapshot s = users.Take();
+			Assert::AreEqual(size_t(1), s.unpopulated.size(), L"active and undeclared: flagged");
+			Assert::IsTrue(s.unpopulated[0] == VpSkeleton::kUserNvofProducer);
+			const uint64_t bytes = NvOpticalFlow::RingBytes(960, 540, false, true);   // the long pair's ring: input, flow, cost x2 and the hint
+			Assert::IsTrue(bytes > 960u * 540u * 2u, L"the ring is more than the two inputs");
+			users.DeclareFixed(&owner, VpSkeleton::kUserNvofProducer, bytes);
+			s = users.Take();
+			Assert::IsTrue(s.unpopulated.empty(), L"declared: not flagged");
+			Assert::AreEqual(size_t(1), s.heldById.size());
+			Assert::AreEqual<uint64_t>(bytes, s.heldById[0].second);
+			users.Withdraw(&owner, VpSkeleton::kUserNvofProducer);
+			users.MarkActive(&owner, VpSkeleton::kUserNvofProducer, false);
+			Assert::IsTrue(users.Take().unpopulated.empty());
+			users.ResetForTesting();
 		}
 
 		// SK-MV: when "no pair ahead" becomes visible: not a bare frame count, and a partial miss ratio shows too.
@@ -110,6 +135,7 @@ namespace VideoProcessorTest
 			const uint64_t gpu = Sessions::AdapterKey(device);
 			Assert::IsTrue(gpu != Sessions::kUnknownAdapterKey, L"the adapter key");
 			Sessions::ResetForTest();
+			VpSkeleton::VramUsers::Instance().ResetForTesting();
 
 			// A textured pair (1920 x 1080 P010 for the producer; the same texture family for the matcher).
 			const int W = 1920, H = 1080, dx = 8, dy = 4, BW = W + 64, BH = H + 64;
@@ -206,7 +232,17 @@ namespace VideoProcessorTest
 				// The step must PROVE a hinted session or say why not: a pair that ran on the NVOF session was counted (peak 1 on this GPU);
 				// a pair that took the seeded search must carry the reason the session did not open (never an unexplained skip).
 				if (r.path == VpLongPair::Path::NvofHinted || r.path == VpLongPair::Path::NvofUnhinted)
+				{
 					Assert::AreEqual(1, Sessions::Peak(SessionKind::Hinted, gpu), L"the long pair ran on a hinted session and the guard counted it");
+					// Its textures are in the governor's ledger next to the producer's (same user id, summed): the half-size ring of each.
+					const VpSkeleton::VramUsers::Snapshot held = VpSkeleton::VramUsers::Instance().Take();
+					uint64_t nvof = 0;
+					for (const auto& h : held.heldById)
+						if (h.first == VpSkeleton::kUserNvofProducer) nvof = h.second;
+					Assert::AreEqual<uint64_t>(NvOpticalFlow::RingBytes(W / 2, H / 2, false, false) + NvOpticalFlow::RingBytes(W / 2, H / 2, false, true), nvof,
+						L"the producer's and the long pair's rings are both declared");
+					Assert::IsTrue(held.unpopulated.empty(), L"no active optical-flow user is undeclared");
+				}
 				else
 					Assert::IsFalse(r.why.reason.empty(), L"seeded search without a reason for the session not opening");
 				Logger::WriteMessage(("long-pair path " + std::string(VpLongPair::PathName(r.path)) + ", hinted sessions at peak: " +
