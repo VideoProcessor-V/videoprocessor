@@ -17,6 +17,7 @@
 #include "CameraFitWorker.h"
 #include "CameraLink.h"
 #include "FieldReadbackRing.h"
+#include "GuidanceLag.h"
 #include "PairAssembly.h"
 
 #include <VP-V/core/FallbackCatalog.h>
@@ -30,6 +31,7 @@
 #include <chrono>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -117,6 +119,12 @@ namespace CameraLink
 		bool LabelsFor(uint64_t seq, CameraConsumer c, CameraLabelsView& out) override;
 		std::shared_ptr<const CameraModel::GuidanceFrame> GuideFor(uint64_t seq) override;
 
+		// K4: the guide lane job's trigger. Called on the fitting thread after EVERY fit (published or late), with the record's seq,
+		// once its pool entry is committed (publish happened before). Set at setup; a copy is taken per call under a mutex.
+		void SetFitDoneObserver(std::function<void(uint64_t fitSeq)> f);
+		// K4: the measured fit cost (p95) and the readback latency the guide lag d is derived from (GuidanceLag.h).
+		GuideLagMeter& LagMeter() { return m_lagMeter; }
+
 		// K2 / K4 plug in here (set by their owners; null = unavailable).
 		std::function<bool(uint64_t, CameraConsumer, CameraLabelsView&)> labelsProvider;
 		std::function<std::shared_ptr<const CameraModel::GuidanceFrame>(uint64_t)> guideProvider;
@@ -153,6 +161,10 @@ namespace CameraLink
 		std::atomic<uint32_t> m_events{ 0 };   // bits set by any thread, consumed by OnFrameStart
 		uint64_t m_seenQueueFull = 0;
 		std::vector<uint64_t> m_sealedMark;   // seq accepted at the seal, indexed seq mod size
+		GuideLagMeter m_lagMeter;
+		std::map<uint64_t, std::chrono::steady_clock::time_point> m_requestedAt;   // render thread: field copy requests in flight
+		std::mutex m_observerMutex;
+		std::function<void(uint64_t)> m_fitDone;
 
 		// status state touched by the worker's onResult
 		mutable std::mutex m_statusMutex;
