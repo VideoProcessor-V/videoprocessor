@@ -21,7 +21,6 @@
 // be registered there unchanged when these keys become per-profile; see link/README.md "K3".
 
 #include <ConfigFile.h>
-#include <VP-V/modules/control/skeleton/SkeletonSettings.h>
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelMeasurement.h>
 
 #include <cstddef>
@@ -188,13 +187,14 @@ namespace Vpv
 			return s;
 		}
 
-		// Reads through `loader` (null = the renderer's selected configuration, else the working directory's file: the skeleton's
-		// DefaultLoader, one rule for both sections). An unreadable file gives defaults (everything off).
-		inline CameraSettings Load(const Skeleton::ConfigLoader& loader = Skeleton::ConfigLoader())
+		// A loader of the configuration file (the same type as Skeleton::ConfigLoader; this header stays free of the skeleton so the
+		// Config tests can include it). The caller passes the skeleton's loader, or Skeleton::DefaultLoader when it has none.
+		// An unreadable file (or no loader) gives defaults (everything off).
+		using ConfigLoader = std::function<bool(ConfigFile&)>;
+		inline CameraSettings Load(const ConfigLoader& loader)
 		{
 			ConfigFile config;
-			const bool ok = loader ? loader(config) : Skeleton::DefaultLoader(config);
-			if (!ok)
+			if (!loader || !loader(config))
 				return CameraSettings();
 			return Parse(config);
 		}

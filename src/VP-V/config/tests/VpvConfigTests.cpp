@@ -11,6 +11,11 @@
 #include <ConfigFile.h>
 #include <VP-V/core/DelayBudgetLadder.h>
 #include <RendererProfileConfig.h>
+// CameraMotion.h has a member named `signals`, which Qt's keyword macro would rewrite: parse the header without it.
+#pragma push_macro("signals")
+#undef signals
+#include <VP-V/modules/motion/estimation/global_model/link/CameraSettings.h>
+#pragma pop_macro("signals")
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -459,6 +464,24 @@ namespace
 			require(set || !config.TryGetString("vpv.camera", key, v), (std::string("an off box writes nothing: ") + key).c_str());
 		}
 		requireVpReads(path);
+		// The real parser reads what the page saved (same names, same values, nothing invalid or unknown), and the card offers
+		// exactly the keys the parser knows: camera_model, the overlay and the boolean keys above.
+		{
+			const Vpv::Camera::CameraSettings read = Vpv::Camera::Parse(config);
+			require(read.model && read.overlay == Vpv::Camera::OverlayMode::Residual && read.labelsGpu, "the parser reads the model, overlay and labels");
+			require(read.meas.guidedCandidate && read.meas.staticGate && !read.meas.modelGlobal && !read.meas.narrowWindow &&
+				!read.meas.e1Skip && !read.meas.cutSkip && !read.meas.fadeNormalised && !read.meas.flashBridge &&
+				!read.meas.temporalSeed && !read.meas.tinyMoverRoi, "the parser reads exactly the two measurement switches the page set");
+			require(read.use.dejudder && read.use.grain && !read.use.detail && !read.use.dither && !read.use.deband && !read.use.filler,
+				"the parser reads exactly the two consumers the page set");
+			require(read.problems.empty() && read.unknownKeys.empty(), "the parser finds nothing invalid or unknown in the saved section");
+			std::set<std::string> cardKeys = { "camera_model", "camera_model_overlay" };
+			for (const char* key : kBoolKeys) cardKeys.insert(key);
+			std::set<std::string> parserKeys;
+			for (size_t i = 0; i < Vpv::Camera::kCameraKeyCount; ++i) parserKeys.insert(Vpv::Camera::kCameraKeys[i]);
+			require(cardKeys == parserKeys, "the card's keys equal CameraSettings kCameraKeys");
+			require(Vpv::Camera::Validate("camera_model_overlay", "residual") == Vpv::Camera::Verdict::Valid, "the validator accepts the page's overlay value");
+		}
 		{
 			ConfigEditorWindow window(path, 0, true);
 			require(control<QCheckBox>(window, Vpv::ObjectName("camera.camera_model"))->isChecked() &&

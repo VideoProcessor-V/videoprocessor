@@ -180,7 +180,8 @@ namespace Vpv
 			Skeleton::Settings s = Skeleton::Load(loader_);
 			if (originalFlag >= 0)
 				s.originalPathway = originalFlag != 0;
-			CameraSettings cam = Load(loader_);   // [vpv.camera] (K3)
+			// [vpv.camera] (K3): the same file through the same loader (the default one when the hub registered none).
+			CameraSettings cam = Load(loader_ ? loader_ : Skeleton::ConfigLoader(&Skeleton::DefaultLoader));
 			cam.originalPathway = s.originalPathway;
 			if (!gpu)
 				gpu = static_cast<pl_gpu>(hosts_.Aux(host));
