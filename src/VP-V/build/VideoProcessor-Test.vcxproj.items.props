@@ -685,6 +685,7 @@
     <ClInclude Include="..\VP-V\tests\VpLutGpuTestSupport.h" />
     <ClInclude Include="..\VP-V\tests\SettingsTestSupport.h" />
     <ClInclude Include="..\VP-V\modules\motion\consumers\tests\DejudderDecisionLegacyCopy.h" />
+    <ClInclude Include="..\VP-V\modules\motion\consumers\tests\DejudderDecisionSequences.h" />
     <ClInclude Include="..\VP-V\modules\motion\consumers\tests\TimelinePlanLegacyCopy.h" />
     <ClInclude Include="..\VP-V\modules\motion\consumers\tests\TimelinePlanScenarios.h" />
     <ClInclude Include="..\VP-V\tests\support\RealClipLibrary.h" />

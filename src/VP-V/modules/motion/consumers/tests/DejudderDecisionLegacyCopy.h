@@ -11,8 +11,15 @@
 // that needs a GPU, a payload or a clock: the payload / texture comparisons (nextMatches,
 // planeFormatsUsable), the presentation telemetry, the intent interpreter's scale, GetTickCount64, and
 // the side effects (logs, diagnostics, release, warm, budget poll), which are recorded instead of run.
-// Left out (not decision): MotionValidity NoteKept / ApplyMotionInvalidate, the vector engine's
-// UpdateVectorEngine / ServeStatistics, and everything after the pair check (layout, upload, estimate).
+// Left out (not decision): MotionValidity NoteKept / ApplyMotionInvalidate, `dejudderSourceHz = sourceHz`,
+// the vector engine's UpdateVectorEngine / ServeStatistics, the report-a-problem decision record, and
+// everything after the pair check (layout, upload, estimate; the pair validity itself is covered by the
+// MotionValidity* tests). The status text is the head of the line only (the ahead / render-ahead / dither /
+// pulldown / mask / motion-source tail segments are out of scope: they do not depend on the decision).
+//
+// The inputs are a neutral Facts struct (the rows and sequences write Facts only). The copy runs on a
+// State that derives from Facts (Begin / ApplyInputs are the adapters); P5b-3's runner gets its own
+// adapter from the same Facts, so both are checked against the same recorded rows.
 
 #include <VP-V/modules/motion/consumers/InterpolationPolicy.h>
 #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
@@ -69,7 +76,9 @@ namespace DejudderDecisionLegacy
 		bool generalRateFixes = true;
 	};
 
-	struct State
+	// The neutral inputs. "Prior" fields are the state the frame starts from (set once by Begin; a
+	// sequence carries them over from frame to frame); every other field is a per-frame input.
+	struct Facts
 	{
 		// ---- inputs: settings and Impl members of the same names ----
 		Settings activeSettings;
@@ -112,6 +121,31 @@ namespace DejudderDecisionLegacy
 		bool interlaced = false;
 		bool cadenceRepeat = false;
 		uint64_t sourceSequence = 10;
+	};
+
+	struct State : Facts
+	{
+		// Adapters: Begin = the whole Facts (prior state included); ApplyInputs = the per-frame inputs only
+		// (the prior fields evolve with the copied code).
+		void Begin(const Facts& f) { static_cast<Facts&>(*this) = f; }
+		void ApplyInputs(const Facts& f)
+		{
+			const DejudderPolicy::Reason reason = dejudderReason;
+			const int notLogged = dejudderReasonChangesNotLogged;
+			const ULONGLONG logTick = dejudderReasonLogTick, statusTick = dejudderStatusTick, now = nowTick;
+			const bool interp = interpolating, warm = motionEngineWarmPending, maskLogged = dejudderMaskRateLogged;
+			const uint64_t idleLogged = motionEngineIdleReleasesLogged;
+			static_cast<Facts&>(*this) = f;
+			dejudderReason = reason;
+			dejudderReasonChangesNotLogged = notLogged;
+			dejudderReasonLogTick = logTick;
+			dejudderStatusTick = statusTick;
+			nowTick = now;
+			interpolating = interp;
+			motionEngineWarmPending = warm;
+			dejudderMaskRateLogged = maskLogged;
+			motionEngineIdleReleasesLogged = idleLogged;
+		}
 
 		// ---- outputs (Impl members written by the copied code) ----
 		bool dejudderExtrasAllowed = false;
@@ -131,6 +165,12 @@ namespace DejudderDecisionLegacy
 		bool warmed = false;
 		bool released = false;
 		std::string statusHead;                    // the hold / status text the last publish showed (its head)
+		std::string firstStatusHead;               // the first publish's text (on a change: the previous reason)
+		// LogInterpolationDecision's state (Impl members of the same names)
+		int interpolationReasonLogged = -1;
+		ULONGLONG interpolationLogTick = 0;
+		unsigned interpolationLogCount = 0;
+		unsigned long long interpolatedPresents = 0;
 
 		MotionEngineIdle::Keeper motionEngineIdle;
 
@@ -154,18 +194,43 @@ namespace DejudderDecisionLegacy
 			++statusPublishes;
 			statusForced = statusForced || force;
 			statusHead = StatusHead();
+			if (statusPublishes == 1)
+				firstStatusHead = statusHead;
 		}
 		double TimelineDisplayHz() const { return timelineDisplayHz; }
 		bool RenderAheadActive() const { return renderAheadActive; }
-		void LogInterpolationDecision(const InterpolationPolicy::Input&) {}   // its throttle: P5b-0 timeline/log rows
+		// Verbatim (GetTickCount64 and DebugLog::Log are COPY).
+		void LogInterpolationDecision(const InterpolationPolicy::Input& in)
+		{
+			if (in.mode == InterpolationPolicy::Mode::Off && interpolationReasonLogged < 0)
+				return;
+			const int reason = static_cast<int>(interpolationDecision.reason);
+			if (reason == interpolationReasonLogged)
+				return;
+			// The first changes are all logged (the start: rates and the queue settling);
+			// then at most one line per 5 s.
+			const ULONGLONG now = nowTick;   // COPY
+			if (interpolationLogCount >= 20 && interpolationLogTick != 0 && now - interpolationLogTick < 5000)
+				return;
+			++interpolationLogCount;
+			interpolationLogTick = now;
+			interpolationReasonLogged = reason;
+			Log("Interpolation: %s (interpolation=%s, fallback=%s, source_class=%s, source %.3f Hz%s, display %.3f Hz, "
+				"ratio %.4f, %s; %llu interpolated pictures so far)",
+				InterpolationPolicy::Name(interpolationDecision.reason), InterpolationPolicy::Name(in.mode),
+				InterpolationPolicy::Name(activeSettings.interpolationFallback), InterpolationPolicy::Name(in.sourceClass),
+				in.sourceHz, in.pulldownLocked ? " (pulldown film clock)" : "", in.displayHz, interpolationDecision.ratio,
+				interpolationDecision.filmLike ? "film-like" : "video", interpolatedPresents);
+		}
 		void PollMotionEngineBudget(int, int, bool) { budgetPolled = true; }
-		void WarmIdleMotionEngine() { warmed = true; }
+		// COPY: EngineKeeper.inl's first statement; the warm-up itself (GPU) is recorded.
+		void WarmIdleMotionEngine() { motionEngineWarmPending = false; warmed = true; }
 		void ReleaseDejudder() { released = true; }
 
 		// The decision part of UpdateDejudderEstimate (verbatim apart from the COPY: lines).
 		void Run()
 		{
-			if (motionEnginePressured)
+			if (motionEnginePressured)   // COPY: not in the renderer; models an earlier allocation failure
 				motionEngineIdle.NoteAllocationFailure(1.0);
 			const int width = 1920, height = 1080;
 			// Off and settled: today's path, nothing else is done.
@@ -404,4 +469,84 @@ namespace DejudderDecisionLegacy
 			return line;
 		}
 	};
+
+	// What a decision run shows (the copy and P5b-3's runner are compared through this).
+	struct Observed
+	{
+		DejudderPolicy::Reason reason = DejudderPolicy::Reason::Off;
+		bool extrasAllowed = false;
+		float effectiveStrength = 0.0f;
+		int evenCycle = 0;
+		bool interpolating = false;
+		InterpolationPolicy::Decision interpolation;
+		float gapPhaseScale = 1.0f;
+		double cadenceRatio = 0.0;
+		bool analysisEstimate = false;
+		Outcome outcome = Outcome::PairCheck;
+		bool warmPendingAfter = false, budgetPolled = false, warmed = false, released = false;
+		int statusPublishes = 0;
+		bool statusCleared = false;
+		std::string statusHead, firstStatusHead;
+		std::vector<std::string> logs;
+	};
+	inline Observed Observe(const State& s)
+	{
+		Observed o;
+		o.reason = s.dejudderReason; o.extrasAllowed = s.dejudderExtrasAllowed; o.effectiveStrength = s.dejudderEffectiveStrength;
+		o.evenCycle = s.dejudderEvenCycle; o.interpolating = s.interpolating; o.interpolation = s.interpolationDecision;
+		o.gapPhaseScale = s.vpGapPhaseScale; o.cadenceRatio = s.cadenceRatio; o.analysisEstimate = s.analysisEstimate;
+		o.outcome = s.outcome; o.warmPendingAfter = s.motionEngineWarmPending; o.budgetPolled = s.budgetPolled;
+		o.warmed = s.warmed; o.released = s.released; o.statusPublishes = s.statusPublishes; o.statusCleared = s.statusCleared;
+		o.statusHead = s.statusHead; o.firstStatusHead = s.firstStatusHead; o.logs = s.logs;
+		return o;
+	}
+
+	// A row: Begin(facts), run, 600 ms later run again.
+	inline Observed RunRowLegacy(const Facts& f)
+	{
+		State s;
+		s.Begin(f);
+		s.Run();
+		s.nowTick += 600;
+		s.Run();
+		return Observe(s);
+	}
+
+	// A multi-frame sequence: each step edits the running Facts (cumulative), advances the clock by dtMs
+	// and runs one frame; one trace line per frame.
+	struct Step
+	{
+		unsigned dtMs;
+		void (*edit)(Facts&);
+	};
+	inline std::string FrameLine(const Observed& o, size_t logsFrom)
+	{
+		char head[200];
+		std::snprintf(head, sizeof(head), "r=%s x=%d s=%.9g c=%d i=%d ir=%s pub=%d out=%s rel=%d warm=%d st=",
+			DejudderPolicy::Name(o.reason), o.extrasAllowed ? 1 : 0, static_cast<double>(o.effectiveStrength), o.evenCycle,
+			o.interpolating ? 1 : 0, InterpolationPolicy::Name(o.interpolation.reason), o.statusPublishes, Name(o.outcome),
+			o.released ? 1 : 0, o.warmed ? 1 : 0);
+		std::string line = std::string(head) + o.statusHead;
+		for (size_t i = logsFrom; i < o.logs.size(); ++i)
+			line += " | " + o.logs[i];
+		return line;
+	}
+	inline std::vector<std::string> RunSequenceLegacy(const Facts& base, const std::vector<Step>& steps)
+	{
+		State s;
+		s.Begin(base);
+		Facts f = base;
+		std::vector<std::string> lines;
+		for (const Step& st : steps)
+		{
+			if (st.edit)
+				st.edit(f);
+			s.ApplyInputs(f);
+			s.nowTick += st.dtMs;
+			const size_t from = s.logs.size();
+			s.Run();
+			lines.push_back(FrameLine(Observe(s), from));
+		}
+		return lines;
+	}
 }
