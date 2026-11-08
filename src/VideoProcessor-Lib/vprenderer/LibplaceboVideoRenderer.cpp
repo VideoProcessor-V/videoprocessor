@@ -33163,26 +33163,7 @@ void LibplaceboVideoRenderer::RenderLoop()
             // the queued frames after the current one (not cadence repeats), up to 4,
             // whatever Bill's active-picture look-ahead is set to. Only frames already
             // queued: no waiting; an empty or short queue simply gives fewer.
-            // Optical flow ahead (docs/VP-nvof-ahead.md): the current frame and up to the
-            // depth after it, each once (only frames already queued: an empty or short
-            // queue gives fewer).
-            const auto aheadProducer = m_impl ? m_impl->vectorEngine.LoopProducer() : nullptr;   // VPV-HOOK: fix producer race (one atomic copy)
-            if (aheadProducer && (m_impl->motionAheadDepth.load(std::memory_order_acquire) > 0 ||
-                m_impl->motionAheadBackward.load(std::memory_order_acquire)))
-            {
-                const size_t depth = static_cast<size_t>(m_impl->motionAheadDepth.load(std::memory_order_acquire));
-                const uint64_t last = aheadProducer->LastSubmitted();
-                size_t taken = 0;
-                for (size_t index = 0; index < m_frameQueue.size() && taken <= depth; ++index)
-                {
-                    const QueuedFrame& q = m_frameQueue[index];
-                    if (q.cadenceRepeat || !q.state) continue;
-                    ++taken;
-                    if (q.sourceSequence <= last) continue;
-                    motionAheadFrames.push_back(q);
-                    motionAheadFrames.back().frame.SourceBufferAddRef();
-                }
-            }
+            MotionAhead::CollectQueueAhead(m_impl.get(), m_frameQueue, motionAheadFrames);   // VPV-HOOK: optical flow ahead (MotionAheadWalk.h)
             if (m_impl && m_impl->sourceAutoActive.load(std::memory_order_acquire))
                 for (size_t index = 1; index < m_frameQueue.size() && sourceAheadFrames.size() < 4; ++index)
                 {

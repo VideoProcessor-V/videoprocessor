@@ -3,7 +3,7 @@
 //
 // Plan 58 T1 (call-site group B, B3/B4): the look-ahead walks and the vector-engine fallback sync,
 // run against a fake host. Pure CPU, no GPU.
-// P5a-rest fix (producer race): ProducerRaceTests, two threads (publish / reset vs the loop's hand-off).
+// P5a-rest hardening: ProducerRaceTests, two threads (publish / reset vs the loop's hand-off); LookAheadCopyTests (item h).
 // Built without the test project's precompiled header: keep windows.h from defining min/max.
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -45,7 +45,12 @@ namespace LookAheadWalkTest
 			float linear[9] = {};
 		};
 		struct FakeConverted { FakeDolby dolby; VideoFrameEncoding captureEncoding = VideoFrameEncoding::UNKNOWN; };
-		struct FakeFrame { long long GetTimingTimestamp() const { return 0; } };
+		struct FakeFrame
+		{
+			std::shared_ptr<int> addRefs = std::make_shared<int>(0);   // shared by the copies of one queued frame
+			long long GetTimingTimestamp() const { return 0; }
+			void SourceBufferAddRef() { ++*addRefs; }
+		};
 		struct FakeIdentity { int sourceFormatGeneration = 0; };
 		struct FakeQueued
 		{
@@ -56,7 +61,7 @@ namespace LookAheadWalkTest
 			FakeIdentity activePictureIdentity;
 			double filmHz = 0.0;
 			long long arrivalQpc = 0;
-			bool gapBefore = false, filmUpdate = false;
+			bool gapBefore = false, filmUpdate = false, cadenceRepeat = false;
 			unsigned long long sourceSequence = 0;
 		};
 		struct FakeClock { long long TimingClockTicksPerSecond() const { return 1000; } };
@@ -69,7 +74,9 @@ namespace LookAheadWalkTest
 		{
 			MotionAhead::Producer::Health health;
 			std::atomic<unsigned long long> submitted{ 0 };
+			unsigned long long last = 0;
 			MotionAhead::Producer::Health GetHealth() const { return health; }
+			unsigned long long LastSubmitted() const { return last; }
 			void Submit(unsigned long long, unsigned long long, const AnalysisLumaSource&, bool) { submitted.fetch_add(1, std::memory_order_relaxed); }
 		};
 		struct FakeMonitor
@@ -86,12 +93,12 @@ namespace LookAheadWalkTest
 			FakeValidity motionValidity;
 			std::atomic<size_t> queuedFutureFrames{ 0 };
 			struct { bool vectorDemand = false, timingContinuityFixes = false, motionHistoryFixes = false; } activeSettings;
-			std::atomic<int> motionAheadConfigured{ 4 }, queueAheadCapacity{ 0 };
+			std::atomic<int> motionAheadConfigured{ 4 }, queueAheadCapacity{ 0 }, motionAheadDepth{ 0 };
 			std::atomic<bool> motionAheadBackward{ false };
 			bool motionAheadEngaged = false;
 			unsigned long long motionAheadEngagedGeneration = 0;
 			VectorDemand::Decision vectorDemand;
-			std::shared_ptr<FakeProducer> motionProducer;   // the walk loads it with std::atomic_load (producer race fix)
+			std::shared_ptr<FakeProducer> motionProducer;   // the walk loads it with std::atomic_load (hardening)
 			bool motionAheadPrevKnown = false;
 			unsigned long long motionAheadPrevGeneration = 0;
 			DejudderPolicy::MotionAheadFrame motionAheadPrev;
@@ -128,7 +135,55 @@ namespace LookAheadWalkTest
 		};
 	}
 
-	// fix (producer race): the render thread creates / stops / resets the producer while the render loop
+	// P5a-rest item h: the look-ahead copy (render loop, queue lock), moved verbatim into CollectQueueAhead. The rule:
+	// the current frame and up to `depth` more non-repeat frames with a state are counted; those after the producer's
+	// last submitted sequence are copied and AddRef'd once; nothing without a producer or with neither a depth nor
+	// backward pairs.
+	TEST_CLASS(LookAheadCopyTests)
+	{
+	public:
+		TEST_METHOD(CopiesTheUnsubmittedFramesUpToTheDepth)
+		{
+			FakeImpl impl;
+			std::vector<FakeQueued> queue;
+			for (int i = 0; i < 6; ++i)
+			{
+				queue.push_back(OneFrame());
+				queue.back().sourceSequence = static_cast<unsigned long long>(i + 1);
+			}
+			queue[1].cadenceRepeat = true;   // seq 2: a repeat, not counted
+			queue[4].state.reset();          // seq 5: no state, not counted
+			std::vector<FakeQueued> out;
+			MotionAhead::CollectQueueAhead(&impl, queue, out);
+			Assert::AreEqual<size_t>(0, out.size(), L"no producer");
+			impl.motionProducer = std::make_shared<FakeProducer>();
+			MotionAhead::CollectQueueAhead(&impl, queue, out);
+			Assert::AreEqual<size_t>(0, out.size(), L"no depth and no backward pairs");
+			MotionAhead::CollectQueueAhead(static_cast<FakeImpl*>(nullptr), queue, out);
+			Assert::AreEqual<size_t>(0, out.size(), L"no renderer impl");
+			impl.motionAheadDepth.store(2);
+			impl.motionProducer->last = 1;   // seq 1 already submitted
+			MotionAhead::CollectQueueAhead(&impl, queue, out);
+			// counted: seq 1 (taken 1, submitted), seq 3 (2), seq 4 (3 = depth + 1); seq 6 is beyond the depth
+			Assert::AreEqual<size_t>(2, out.size());
+			Assert::AreEqual<unsigned long long>(3, out[0].sourceSequence);
+			Assert::AreEqual<unsigned long long>(4, out[1].sourceSequence);
+			Assert::AreEqual(1, *queue[2].frame.addRefs);
+			Assert::AreEqual(1, *queue[3].frame.addRefs);
+			Assert::AreEqual(0, *queue[0].frame.addRefs);
+			out.clear();
+			impl.motionAheadDepth.store(0);
+			impl.motionAheadBackward.store(true);   // backward pairs: the current frame only
+			impl.motionProducer->last = 0;
+			MotionAhead::CollectQueueAhead(&impl, queue, out);
+			Assert::AreEqual<size_t>(1, out.size());
+			Assert::AreEqual<unsigned long long>(1, out[0].sourceSequence);
+		}
+	};
+
+	// Hardening (P5a-rest): in the renderer the producer's writer and the loop are one OS thread (or the writer runs
+	// after the join); these two threads exercise the shared_ptr publish / copy pattern itself: a writer creates / stops /
+	// resets the producer while a reader
 	// null-checks it and submits to it. With the shared_ptr published by std::atomic_store and read by one
 	// std::atomic_load copy per use, the loop's copy keeps the object (and the mutex Submit locks) alive.
 	// Two threads for a fixed time; no crash, and the hand-off really reached Submit.

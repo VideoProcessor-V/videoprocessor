@@ -10,11 +10,11 @@
 //
 // Threading: the render-loop thread, outside renderMutex (as before). The LookAheadFailures counter
 // (Impl::motionAheadFailures) is touched by that thread only; no atomics.
-// fix (producer race, P5a-rest): impl.motionProducer is a shared_ptr the render thread publishes with
-// std::atomic_store (PlanProducer, GPU release); the walk takes ONE std::atomic_load copy per frame and
-// null-checks and submits through that copy, so a reset on the render thread cannot free the producer
-// (or the mutex Submit locks) between the check and the Submit. Same checks, same order as before.
-// HOOKS.md section 2, row `motionProducer`.
+// Hardening (P5a-rest): impl.motionProducer is a shared_ptr published with std::atomic_store; the walk takes
+// ONE std::atomic_load copy per frame and null-checks and submits through it. PlanProducer runs on this same
+// OS thread (RenderLocked is called only from RenderLoop), so no race existed; the copy keeps the walk safe
+// should a writer ever run elsewhere (the retirement writer runs only after the render thread is joined).
+// Same checks, same order as before. HOOKS.md section 2, row `motionProducer`.
 //
 // Templated on the host Impl / queued-frame / timing-clock types so the walk is testable with a fake
 // host. Impl provides the fields the body names, SyncFallback() and motionAheadFailures; Queued
@@ -47,6 +47,37 @@ namespace MotionAhead
 		const Clock* timingClock;
 		const std::atomic<double>& measuredFrameRate;
 	};
+
+	// M2 P5a-rest (item h): the look-ahead copy, moved verbatim out of the render loop's queue pass (the
+	// "Optical flow ahead" block; `m_impl->` -> `impl->`, `m_frameQueue` -> `queue`). Render-loop thread, the
+	// caller holds m_queueMutex (as before): the frames to submit are copied (and AddRef'd) into the loop's own
+	// list, which RunQueueWalk then submits and the loop releases. Templated like RunQueueWalk (a direct call,
+	// not the R5 CollectAhead hook: its QueueView is opaque). The producer is read through one std::atomic_load
+	// copy (the same object the renderer's vectorEngine.LoopProducer() returns).
+	template <class Impl, class Queue, class Frames>
+	void CollectQueueAhead(Impl* impl, const Queue& queue, Frames& motionAheadFrames)
+	{
+		// Optical flow ahead (docs/VP-nvof-ahead.md): the current frame and up to the
+		// depth after it, each once (only frames already queued: an empty or short
+		// queue gives fewer).
+		const auto aheadProducer = impl ? std::atomic_load(&impl->motionProducer) : nullptr;
+		if (aheadProducer && (impl->motionAheadDepth.load(std::memory_order_acquire) > 0 ||
+			impl->motionAheadBackward.load(std::memory_order_acquire)))
+		{
+			const size_t depth = static_cast<size_t>(impl->motionAheadDepth.load(std::memory_order_acquire));
+			const uint64_t last = aheadProducer->LastSubmitted();
+			size_t taken = 0;
+			for (size_t index = 0; index < queue.size() && taken <= depth; ++index)
+			{
+				const auto& q = queue[index];
+				if (q.cadenceRepeat || !q.state) continue;
+				++taken;
+				if (q.sourceSequence <= last) continue;
+				motionAheadFrames.push_back(q);
+				motionAheadFrames.back().frame.SourceBufferAddRef();
+			}
+		}
+	}
 
 	template <class Impl, class Queued, class Clock>
 	void RunQueueWalk(AheadView<Impl, Queued, Clock>& view)
@@ -98,7 +129,7 @@ namespace MotionAhead
 			for (Queued& ahead : view.frames)
 			{
 				const auto& aheadState = *ahead.state;
-				const auto producer = std::atomic_load(&impl.motionProducer);   // fix: producer race (one copy per frame)
+				const auto producer = std::atomic_load(&impl.motionProducer);   // hardening: one copy per frame
 				if (!framesAhead || !aheadState.displayMode || !producer) continue;
 				// The luma source keeps the frame's own buffer alive for the producer's worker.
 				const auto prepared = Impl::PrepareFrameAnalysis(ahead.frame, aheadState, ahead.converted, ahead.analysis,
