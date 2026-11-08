@@ -17,7 +17,9 @@
 
 #include "CameraLink.h"
 #include "CameraUsable.h"
+#include "GuidanceGate.h"
 #include "GuidanceGovernor.h"
+#include "GuidanceStatus.h"
 #include "MotionBenchWriter.h"
 
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
@@ -33,28 +35,11 @@
 
 namespace CameraLink
 {
-	enum class Refusal : uint8_t { None, AllOff, NoRecord, Slip, NotUsable, LowConfidence, Governor, NoPlan, Count };
-
-	inline const char* Text(Refusal r)
-	{
-		switch (r)
-		{
-		case Refusal::None: return "guided";
-		case Refusal::AllOff: return "all camera guidance switches off";
-		case Refusal::NoRecord: return "camera record late";
-		case Refusal::Slip: return "pair spans a slip";
-		case Refusal::NotUsable: return "no dominant motion";
-		case Refusal::LowConfidence: return "camera confidence too low";
-		case Refusal::Governor: return "escalations high";
-		case Refusal::NoPlan: return "plan empty";
-		default: return "?";
-		}
-	}
-
 	// What the host knows about the pair about to be searched.
 	struct PairContext
 	{
-		bool spansSlip = false;                 // IVectorEngine::PairSpansSlip(N-d, N) or an ancient stamp
+		bool spansSlip = false;                 // IVectorEngine::PairSpansSlip(N-d, N)
+		bool ancientStamp = false;              // the stamp of the pair is ancient (Indicator::StampOf(...).ancient): counted as a slip
 		bool cut = false, fade = false, flash = false;   // P4(N) scene flags
 		double fadeGain = 1, fadeOffset = 0;
 		double nextPairSeconds = 0;             // duration of the pair about to be searched; <= 0 unknown
@@ -105,6 +90,21 @@ namespace CameraLink
 	{
 		std::array<uint64_t, size_t(Refusal::Count)> refusals{};
 		uint64_t guided = 0, fromLane = 0, fromLive = 0, laneDiscarded = 0, lanePublished = 0, pairsJudged = 0;
+		uint64_t narrowIdleEngine = 0, rejectedByMatcher = 0;   // from EstimateOutcome (narrow idle under the engine / per-block guidance refused)
+	};
+
+	// What the host read from the matcher after Estimate (MotionWarp::CameraGuidanceUsed / CameraGuidanceCounts / the pass timers).
+	// The plain IPreEstimateHook::AfterEstimate carries only guidanceUsed and the counts texture; the rest rides here
+	// (CameraGuidanceHook::AfterEstimateEx) so the diagnostics and the benchmark row are complete.
+	struct EstimateOutcome
+	{
+		bool guidanceUsed = false;         // any guided effect ran (model global, static, skip, narrow, E1, fade)
+		bool narrowPass = false, e1Pass = false;   // the passes that write the 16 B counts (the counts are stale otherwise)
+		bool narrowDroppedEngine = false;  // narrow planned, the engine's field seeds / replaces the searches (never a dropped seed)
+		const char* rejected = "";         // non-empty: the per-block guidance was not used (reason)
+		const char* gpuNotApplied = "";    // plan parts the GPU matcher does not do yet
+		double gpuMs = -1;                 // GPU ms of this Estimate (sum of the motion pass timers), < 0 = not measured
+		pl_tex counts = nullptr;           // CameraGuidanceCounts() (read only when a pass that writes it ran)
 	};
 
 	// A 16 B counts readback (K1's readback ring shape, one texel). Poll never blocks.
@@ -131,7 +131,15 @@ namespace CameraLink
 		void SetContextProvider(std::function<bool(uint64_t pairSeq, PairContext&)> p) { m_context = std::move(p); RefreshSnapshot(); }
 
 		// Camera worker: right after Fit(N-d) once P4(N) is published. Stores the result unless the render already asked.
-		bool PublishLane(uint64_t pairSeq);
+		// Published: stored for the render. NotReady: the record or P4(N) is not there yet (ask again later; nothing stored).
+		// Discarded: the render asked first (counted) or the pair cannot be a lane pair. Off: no switch is on.
+		enum class LaneOutcome : uint8_t { Published, NotReady, Discarded, Off };
+		LaneOutcome TryPublishLane(uint64_t pairSeq);
+		bool PublishLane(uint64_t pairSeq) { return TryPublishLane(pairSeq) == LaneOutcome::Published; }
+		// The lag the lane job must use (the snapshot the worker reads; thread-safe, unlike Lag()).
+		uint8_t SnapshotLag() const;
+		// True when the worker-side snapshot has any switch on (the lane job adds nothing otherwise). Thread-safe.
+		bool LaneWanted() const;
 		// Render thread: the guidance for pair N (the lane result when it was there first, else the live computation).
 		// pairSeconds = the measured duration of the pair (advances the governor's cool-down for every pair asked).
 		GuideResult Guide(uint64_t pairSeq, double pairSeconds = 0);
@@ -146,9 +154,16 @@ namespace CameraLink
 		const CameraModel::MeasurementDiagnostics& Diagnostics() const { return m_diag; }
 		void ResetForDiscontinuity();   // drops stored lane results and pending plans (vectors-valid state)
 		std::vector<std::string> StatusLines() const;
+		// The skeleton's visible state (FallbackCatalog Decisions: camera.guidance.escalations_high / .refused). Render thread.
+		std::vector<FallbackCatalog::Decision> CollectDecisions() const;
+		// The GPU ms of the Estimate that ran pair N guided (the sum of the motion pass timers the host took after Estimate;
+		// < 0 = not measured). Goes into the pair's VP_MOTION_BENCH row. Render thread, after BeforeEstimate.
+		void NoteGpuMs(uint64_t pairSeq, double ms);
+		// What the matcher did with the guide (render thread, right after Estimate): visible diagnostics and the bench's gpu_ms.
+		void OnEstimateOutcome(uint64_t pairSeq, const EstimateOutcome& o);
 
 	private:
-		struct Stored { uint64_t seq = ~uint64_t(0); uint32_t key = 0; GuideResult result; };
+		struct Stored { uint64_t seq = ~uint64_t(0); uint32_t key = 0; GuideResult result; double gpuMs = -1; };
 		static constexpr uint8_t kMinGuideLagLocal = 2;
 		GuideResult Compute(uint64_t pairSeq);
 		void RefreshSnapshot();   // render thread: publishes the governed switches / lag / config / provider for PublishLane
@@ -159,6 +174,9 @@ namespace CameraLink
 		GuidanceGovernor m_governor;
 		CameraModel::MeasurementDiagnostics m_diag;
 		GuidanceCounters m_counters;
+		RefusalHold m_hold;
+		double m_narrowIdleRemaining = 0;   // measured seconds the narrow-idle entry is still held
+		std::string m_rejectedText, m_gpuNotAppliedText;
 		uint8_t m_lag = kMinGuideLagLocal;
 		MotionBenchWriter* m_bench = nullptr;
 		std::function<bool(uint64_t, PairContext&)> m_context;
@@ -181,8 +199,12 @@ namespace CameraLink
 			: m_sched(scheduler), m_counts(counts), m_link(link) {}
 		void BeforeEstimate(const VpMotion::EstimateContext& ctx, VpMotion::IGuidanceSink& sink) override;
 		void AfterEstimate(uint64_t pairSeq, bool guidanceUsed, pl_tex countsTex) override;
+		// The full form: everything the host read from the matcher (see EstimateOutcome). AfterEstimate forwards here.
+		void AfterEstimateEx(uint64_t pairSeq, const EstimateOutcome& outcome);
 		// Render thread, once per frame: finish the pairs whose counts arrived.
 		void Poll();
+		// The motion pass GPU ms of the Estimate of pair N (< 0 = not measured), for its bench row. Optional.
+		void NoteEstimateGpuMs(uint64_t pairSeq, double ms) { m_sched.NoteGpuMs(pairSeq, ms); }
 		uint64_t UsedPairs() const { return m_used; }
 
 	private:
