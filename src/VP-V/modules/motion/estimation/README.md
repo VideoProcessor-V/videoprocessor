@@ -37,7 +37,8 @@ Checked against the code 2026-10-25 (M2 pass). The estimator itself (`Dejudder::
 ### Threading
 
 - Render thread: `MotionWarp::Estimate` (all GPU passes through libplacebo, plus the render-time engine on the same D3D11 immediate context after `pl_gpu_flush`), `Take`/`Prune`, the producer start/stop decision, `NoteKept`, `Consume`.
-- Render loop (queue walk): `Submit` (takes the producer mutex briefly; never waits: beyond `PendingJobsFor(depth)` pending jobs the oldest is dropped).
+- Render loop (queue walk): `Submit` (takes the producer mutex briefly; never waits: beyond `PendingJobsFor(depth)` pending jobs the oldest is dropped). The loop reaches the producer only through one `std::atomic_load` copy per use (`VectorEngineState::LoopProducer`, the walk's per-frame copy); the render thread publishes it with `std::atomic_store` (`PublishProducer`), so a stop or reset there never frees the producer under the loop's hand-off (P5a-rest `fix:`, test `ProducerRaceTests`).
+- Any thread: the renderer's queue events (Reset, LiveQueueReset, Gap, Discontinuity, FormatChange) reach `VectorEngineExtension::OnQueue`, which requests the invalidation of that host's engine (`VectorEngine::RequestInvalidationFor`, under the engine directory's leaf lock). GPU release: `OnLifecycle(GpuReleased)` stops that host's producer (`ReleaseProducerFor`).
 - Producer worker thread: creates its own D3D11 device (so a start never stalls the render thread), runs the engine and the CPU extras; `HalfLuma8` splits rows over up to 4 short-lived threads for frames 512 lines and taller. Three consecutive failures stop it for the session (`Running()` false); exceptions are caught and counted.
 - Locks: the producer's mutex (jobs, error, stats); the store's own mutex; `MotionValidity::State` is lock-free except the small kept-run mutex. `Invalidate` may be called from any thread.
 
@@ -130,7 +131,13 @@ member and the alias table: [HOOKS.md](HOOKS.md).
   field as the verified field, the validity epoch as the field era, the producer's whole-frame motion; everything the
   renderer does not keep today answers "absent" (HOOKS.md section 7). The hub module `VectorEngineExtension` answers the
   query with a directory: `EngineFor(host)` gives that renderer's engine.
-- No settings were added or changed by P5a (P5a-5 included); defaults are untouched. With VP motion off and in Original
+- P5a-rest: the invalidation requests at Reset / ResetLiveQueue (UI thread) and at the dequeue (gap, file discontinuity,
+  format change) are queue events (`RendererExtension::NotifyQueue`, R9) that `VectorEngineExtension::OnQueue` maps to
+  the old causes and hands to the host's own `RequestMotionInvalidate` through the engine's invalidation sink
+  (`VectorEngineHost.h` `InvalidateHost<Impl>`). The optical-flow producer stops at the renderer's GPU release
+  (`OnLifecycle(GpuReleased)`, doc 30 F4 "fix C") instead of living until the renderer object goes. The look-ahead copy
+  under the queue lock (item h) stays in the render loop (HOOKS.md section 1).
+- No settings were added or changed by P5a (P5a-5 and P5a-rest included); defaults are untouched. With VP motion off and in Original
   the engine does nothing (its decision returns before any work, the producer plan wants nothing, no hook is bound).
 
 ## Contract
@@ -142,6 +149,41 @@ member and the alias table: [HOOKS.md](HOOKS.md).
 - Look-ahead: `motion_ahead_frames` (time-based depth; a short queue gives fewer pairs ahead, the rest is estimated at render time)
 
 ## Settings
+
+Every key the estimation side reads (the host parses them per profile and hands them over as plain values; P5a added or changed none). Defaults from the defaults golden; type, range, placement and Original from the generated table in [control/config/README.md](../../control/config/README.md). `general_rate_fixes` is read here too but is documented with its general owner (it is not motion-only); `motion_ahead_ms` is planned and read nowhere.
+
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `optical_flow` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | VP-V > Advanced | Original pathway forces off | `vector_engine` (unserved consumers), `vector producer` (producer recovering / stopped), `motion look-ahead` (hand-off failures); status line "Vector engine" | Motion tier presets: Classic off, Low off, Mid on, Upper on |
+| `optical_flow_global` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `optical_flow_global_fallback` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `optical_flow_cost_trust` | profile (`vprenderer.<profile>`, input group) | bool | on, off | off | VP-V > Proposed retirement | not forced; unused while the Original pathway runs no VP motion estimate | none of its own (retirement candidate B) | same on all |
+| `optical_flow_fb_check` | profile (`vprenderer.<profile>`, input group) | bool | on, off | off | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `motion_ahead_frames` | profile (`vprenderer.<profile>`, input group) | int | 0, 1, 2, 3, 4 (above 0: the time-based depth at the content rate; 0 = none ahead) | 4 | VP-V > Advanced | Original pathway forces 0 | `vector_engine_producer` (look-ahead stores nothing for this size), `motion look-ahead`; "Motion ahead:" log | Motion tier presets: Classic 0, Low 0, Mid 4, Upper 4 |
+| `vector_demand` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | VP-V > Advanced; VP-V page > Motion (toggle) | Original pathway forces off | `vector_engine`, `vector_engine_producer`, `vector_engine_global`, `vector producer` (all released when off) | same on all |
+| `motion_history_fixes` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | VP-V > Proposed retirement | Original pathway forces off | none of its own (retirement candidate A) | same on all |
+| `dejudder_estimate_ahead` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | VP-V > Advanced; VP-V page > Motion (toggle) | Original pathway forces off | none of its own (the estimate ahead falls back to the render-time estimate) | same on all |
+| `motion_engine` | profile (`vprenderer.<profile>`, motion group) | enum | auto, vp, smooth_motion | auto | Motion > Profile details | not forced (either/or: VP motion or libplacebo smooth motion) | smooth motion owns output: output-domain vector consumers fall back visibly ("libplacebo smooth motion owns output") | same on all |
+| `dejudder_search_range` | profile (`vprenderer.<profile>`, input group) | int | 1 .. 16 | 8 | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_low_res` | profile (`vprenderer.<profile>`, input group) | enum | off, search, all | all | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_global_prior` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_global_two` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_est_candidates` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_est_qpel` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | Motion tier presets: Classic off, Low on, Mid on, Upper on |
+| `dejudder_est_gate` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_est_split` | profile (`vprenderer.<profile>`, input group) | bool | on, off | off | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | Motion tier presets: Low off, Mid off, Upper on |
+| `dejudder_est_split_sad` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 16.0 | 0 | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_est_lambda` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 8.0 | 0.5 | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_vector_smooth` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_match_tolerance` | profile (`vprenderer.<profile>`, input group) | float | 0.5 .. 16.0 | 4.5 | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_consistency_px` | profile (`vprenderer.<profile>`, input group) | float | 0.5 .. 8.0 | 2 | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_texture_tolerance` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 4.0 | 0.25 | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_regional_hold` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_cut_histogram` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 2.0 | 0.3 | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_fade_match` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_fade_floor` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 1.0 | 0.25 | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_verify` | profile (`vprenderer.<profile>`, input group) | bool | on, off | off | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own (retirement candidate D) | same on all |
+| `dejudder_verify_share` | profile (`vprenderer.<profile>`, input group) | float | 0.02 .. 1.0 | 0.2 | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own (retirement candidate D) | same on all |
 
 - Existing keys: see "Config keys actually read" above (`optical_flow*`, `motion_ahead_frames`, `motion_history_fixes`, `motion_engine`, `general_rate_fixes`, `dejudder_estimate_ahead`, `dejudder_search_range`, `dejudder_low_res` and the `dejudder_est_*` / search keys). `dejudder_est` is not a key.
 - Planned keys: `motion_ahead_ms`
@@ -165,7 +207,7 @@ Placeholder tests:
 - (none yet)
 
 Isolation tests:
-- `NvOpticalFlowTests` (GPU), `VectorStoreTests`, `MotionAhead*Tests`, `OpticalFlowTrustTests`, `MotionValidityTests`, `H3TimingTests` (idle keeper), `ProducerPlanTests`, `VectorEngineTests`, `VectorEngineHookTests` (K4 hook: null / all-off hook leave the matcher's call sequence unchanged; IVectorEngine answers); no class is named "DejudderWarp estimator tests" (the estimator is covered by the GPU regressions in `LibplaceboLutParserTests` / `BetaGpuTests`)
+- `NvOpticalFlowTests` (GPU), `VectorStoreTests`, `MotionAhead*Tests`, `OpticalFlowTrustTests`, `MotionValidityTests`, `H3TimingTests` (idle keeper), `ProducerPlanTests`, `VectorEngineTests`, `VectorEngineHookTests` (K4 hook: null / all-off hook leave the matcher's call sequence unchanged; IVectorEngine answers; queue-event invalidation causes and order; producer stop at GPU release), `LookAheadWalkTests`, `ProducerRaceTests` (CPU, two threads: producer publish / reset vs the loop's hand-off, about 0.5 s); no class is named "DejudderWarp estimator tests" (the estimator is covered by the GPU regressions in `LibplaceboLutParserTests` / `BetaGpuTests`)
 
 Contract tests:
 - vectors estimated on the original (not repaired/re-based) frame at the matcher's half size (not yet a dedicated test)

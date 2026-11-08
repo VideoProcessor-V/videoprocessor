@@ -12,10 +12,10 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Count | Value |
 |---|---|
 | Modules | 44 |
-| Documented rows | 19 |
+| Documented rows | 49 |
 | VP-V keys in code (outside Bill's schema lists) | 366 |
-| of which documented | 15 |
-| of which undocumented (appendix A) | 351 |
+| of which documented | 45 |
+| of which undocumented (appendix A) | 321 |
 | Documented keys with no code entry (appendix B) | 0 |
 
 ## Modules index
@@ -31,7 +31,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Input | `input.source_analysis.picture.shared.picture_rect` | draft | [README](../../src/VP-V/modules/input/source_analysis/picture/shared/README.md) | 0 | 0 | 0/0 |
 | Input | `input.source_analysis.events.shared.cut_fade_judge` | draft | [README](../../src/VP-V/modules/input/source_analysis/events/shared/README.md) | 0 | 0 | 0/0 |
 | Input | `input.source_analysis.identity.shared.source_quality` | draft | [README](../../src/VP-V/modules/input/source_analysis/identity/shared/README.md) | 0 | 0 | 0/0 |
-| Motion | `motion.estimation` | built | [README](../../src/VP-V/modules/motion/estimation/README.md) | 0 | 32 | 0/32 |
+| Motion | `motion.estimation` | built | [README](../../src/VP-V/modules/motion/estimation/README.md) | 30 | 32 | 30/32 |
 | Motion | `motion.vector_delivery` | partial | [README](../../src/VP-V/modules/motion/vector_delivery/README.md) | 0 | 9 | 0/9 |
 | Motion | `motion.consumers` | built | [README](../../src/VP-V/modules/motion/consumers/README.md) | 0 | 35 | 0/35 |
 | Repair | `repair.encoding` | placeholder | [README](../../src/VP-V/modules/repair/encoding/README.md) | 0 | 1 | 0/1 |
@@ -81,7 +81,36 @@ Modules: `motion.estimation`, `motion.vector_delivery`, `motion.consumers`.
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
-| (none documented yet) | | | | | | | | | | |
+| `dejudder_consistency_px` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.5 .. 8.0 | 2 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_cut_histogram` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 2.0 | 0.3 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_est_candidates` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_est_gate` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_est_lambda` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 8.0 | 0.5 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_est_qpel` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | Motion tier presets: Classic off, Low on, Mid on, Upper on |
+| `dejudder_est_split` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | off | off | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | Motion tier presets: Low off, Mid off, Upper on |
+| `dejudder_est_split_sad` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 16.0 | 0 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_estimate_ahead` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | 1 | VP-V > Advanced; VP-V page > Motion (toggle) | Original pathway forces off | none of its own (the estimate ahead falls back to the render-time estimate) | same on all |
+| `dejudder_fade_floor` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 1.0 | 0.25 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_fade_match` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_global_prior` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_global_two` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_low_res` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | enum | off, search, all | all |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_match_tolerance` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.5 .. 16.0 | 4.5 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_regional_hold` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_search_range` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | int | 1 .. 16 | 8 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_texture_tolerance` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 4.0 | 0.25 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_vector_smooth` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `dejudder_verify` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | off |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own (retirement candidate D) | same on all |
+| `dejudder_verify_share` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | float | 0.02 .. 1.0 | 0.2 |  | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own (retirement candidate D) | same on all |
+| `motion_ahead_frames` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | int | 0, 1, 2, 3, 4 (above 0: the time-based depth at the content rate; 0 = none ahead) | 4 | 4 | VP-V > Advanced | Original pathway forces 0 | `vector_engine_producer` (look-ahead stores nothing for this size), `motion look-ahead`; "Motion ahead:" log | Motion tier presets: Classic 0, Low 0, Mid 4, Upper 4 |
+| `motion_engine` | `motion.estimation` | profile (`vprenderer.<profile>`, motion group) | enum | auto, vp, smooth_motion | auto |  | Motion > Profile details | not forced (either/or: VP motion or libplacebo smooth motion) | smooth motion owns output: output-domain vector consumers fall back visibly ("libplacebo smooth motion owns output") | same on all |
+| `motion_history_fixes` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | on | VP-V > Proposed retirement | Original pathway forces off | none of its own (retirement candidate A) | same on all |
+| `optical_flow` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | on | VP-V > Advanced | Original pathway forces off | `vector_engine` (unserved consumers), `vector producer` (producer recovering / stopped), `motion look-ahead` (hand-off failures); status line "Vector engine" | Motion tier presets: Classic off, Low off, Mid on, Upper on |
+| `optical_flow_cost_trust` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | off | off | VP-V > Proposed retirement | not forced; unused while the Original pathway runs no VP motion estimate | none of its own (retirement candidate B) | same on all |
+| `optical_flow_fb_check` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | off | off | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `optical_flow_global` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `optical_flow_global_fallback` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | on | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
+| `vector_demand` | `motion.estimation` | profile (`vprenderer.<profile>`, input group) | bool | on, off | on | on | VP-V > Advanced; VP-V page > Motion (toggle) | Original pathway forces off | `vector_engine`, `vector_engine_producer`, `vector_engine_global`, `vector producer` (all released when off) | same on all |
 
 ## Repair
 
@@ -271,28 +300,13 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `deband_vp_exclusive` | repair.deband | on | VP-V > Repair > VP deband replaces libplacebo's | VpvSchemaKeys.h |
 | `deband_vp_grain_guard` | repair.deband | on | VP-V > Repair > VP deband leaves grain alone | VpvSchemaKeys.h |
 | `dejudder_block_taper` | motion.consumers |  |  | VpvSchemaKeys.h |
-| `dejudder_consistency_px` | motion.estimation |  |  | VpvSchemaKeys.h |
-| `dejudder_cut_histogram` | motion.estimation |  |  | VpvSchemaKeys.h |
-| `dejudder_est_candidates` | motion.estimation |  |  | VpvSchemaKeys.h |
-| `dejudder_est_gate` | motion.estimation |  |  | VpvSchemaKeys.h |
-| `dejudder_est_lambda` | motion.estimation |  |  | VpvSchemaKeys.h |
-| `dejudder_est_qpel` | motion.estimation | on |  | VpvSchemaKeys.h |
-| `dejudder_est_split` | motion.estimation | off |  | VpvSchemaKeys.h |
-| `dejudder_est_split_sad` | motion.estimation |  |  | VpvSchemaKeys.h |
 | `dejudder_est_still_zero` | unassigned | 1 |  | VpvSchemaKeys.h |
-| `dejudder_estimate_ahead` | motion.estimation, motion.consumers | 1 | VP-V > Motion > Estimate motion ahead | VpvSchemaKeys.h |
 | `dejudder_even_rates` | motion.vector_delivery, motion.consumers |  |  | VpvSchemaKeys.h |
-| `dejudder_fade_floor` | motion.estimation |  |  | VpvSchemaKeys.h |
-| `dejudder_fade_match` | motion.estimation |  |  | VpvSchemaKeys.h |
 | `dejudder_frame_trust` | motion.consumers |  |  | VpvSchemaKeys.h |
 | `dejudder_gate` | output.presentation | auto |  | VpvSchemaKeys.h |
-| `dejudder_global_prior` | motion.estimation |  |  | VpvSchemaKeys.h |
-| `dejudder_global_two` | motion.estimation |  |  | VpvSchemaKeys.h |
 | `dejudder_hold_feather_px` | motion.consumers |  |  | VpvSchemaKeys.h |
 | `dejudder_hold_hysteresis` | motion.consumers |  |  | VpvSchemaKeys.h |
 | `dejudder_landing_check` | motion.consumers |  |  | VpvSchemaKeys.h |
-| `dejudder_low_res` | motion.estimation |  |  | VpvSchemaKeys.h |
-| `dejudder_match_tolerance` | motion.estimation |  |  | VpvSchemaKeys.h |
 | `dejudder_motion_rolloff` | motion.consumers |  |  | VpvSchemaKeys.h |
 | `dejudder_motion_scale_hi` | motion.consumers |  |  | VpvSchemaKeys.h |
 | `dejudder_motion_scale_lo` | motion.consumers |  |  | VpvSchemaKeys.h |
@@ -302,20 +316,14 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `dejudder_pixel_trust_hi` | motion.consumers |  |  | VpvSchemaKeys.h |
 | `dejudder_pixel_trust_lo` | motion.consumers |  |  | VpvSchemaKeys.h |
 | `dejudder_pulldown` | unassigned | 0 |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, RendererProfileConfig.h |
-| `dejudder_regional_hold` | motion.estimation |  |  | VpvSchemaKeys.h |
 | `dejudder_roll_floor` | motion.consumers |  |  | VpvSchemaKeys.h |
 | `dejudder_roll_hi` | motion.consumers |  |  | VpvSchemaKeys.h |
 | `dejudder_roll_lo` | motion.consumers |  |  | VpvSchemaKeys.h |
-| `dejudder_search_range` | motion.estimation |  |  | VpvSchemaKeys.h |
 | `dejudder_source_warp_filter` | motion.consumers | catmull |  | VpvSchemaKeys.h |
 | `dejudder_strength` | motion.vector_delivery, motion.consumers | 0 |  | VpvSchemaKeys.h |
 | `dejudder_strength_even` | motion.vector_delivery, motion.consumers | 0 |  | VpvSchemaKeys.h |
 | `dejudder_taper_sad` | motion.consumers |  |  | VpvSchemaKeys.h |
-| `dejudder_texture_tolerance` | motion.estimation |  |  | VpvSchemaKeys.h |
 | `dejudder_trust_scale` | motion.consumers |  |  | VpvSchemaKeys.h |
-| `dejudder_vector_smooth` | motion.estimation |  |  | VpvSchemaKeys.h |
-| `dejudder_verify` | motion.estimation |  |  | VpvSchemaKeys.h |
-| `dejudder_verify_share` | motion.estimation |  |  | VpvSchemaKeys.h |
 | `dejudder_warp_stage` | motion.consumers |  |  | VpvSchemaKeys.h |
 | `detail_pulse_cap` | repair.texture_restore | 1.35 |  | VpvSchemaKeys.h |
 | `detail_pulse_fast` | repair.texture_restore | on | VP-V > Repair > Detail pulse: fast path | VpvSchemaKeys.h |
@@ -450,18 +458,10 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `low_bitrate_handling` | repair.deband | auto | VP-V > Repair > Deband reacts to compression | VpvSchemaKeys.h |
 | `low_latency_path` | input.queue_timing |  |  | VpvSchemaKeys.h, VpvStartupSchema.h |
 | `magewell_recover_faults` | unassigned |  |  | VpvStartupSchema.h |
-| `motion_ahead_frames` | motion.estimation | 4 |  | VpvSchemaKeys.h |
-| `motion_engine` | motion.estimation, motion.vector_delivery |  |  | VpvSchemaKeys.h |
-| `motion_history_fixes` | motion.estimation, motion.vector_delivery | on |  | VpvSchemaKeys.h |
 | `native_rgb_ingest` | input.capture | 1 | VP-V > Input > Native 10/12-bit RGB capture | VpvSchemaKeys.h |
 | `newlldv_sdr_veto` | input.signal |  |  | VpvStartupSchema.h |
 | `nls_sampling` | scaling.geometry | catmull |  | VpvSchemaKeys.h |
 | `occlusion_mask` | motion.vector_delivery, motion.consumers | 0 | VP-V > Output > Dither: no smear where new picture appears | VpvSchemaKeys.h |
-| `optical_flow` | motion.estimation | on |  | VpvSchemaKeys.h |
-| `optical_flow_cost_trust` | motion.estimation | off |  | VpvSchemaKeys.h |
-| `optical_flow_fb_check` | motion.estimation | off |  | VpvSchemaKeys.h |
-| `optical_flow_global` | motion.estimation | on |  | VpvSchemaKeys.h |
-| `optical_flow_global_fallback` | motion.estimation | on |  | VpvSchemaKeys.h |
 | `output_segments_merged` | output.dither |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `pipeline_entrance_once` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `pipeline_order` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
@@ -536,7 +536,6 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `timing_continuity_fixes` | input.queue_timing, motion.vector_delivery | on |  | VpvSchemaKeys.h |
 | `upscale_light` | scaling.output | linear |  | VpvSchemaKeys.h |
 | `use_frame_queue` | input.queue_timing |  |  | VpvStartupSchema.h |
-| `vector_demand` | motion.estimation, motion.vector_delivery | on | VP-V > Motion > Vector engine on demand | VpvSchemaKeys.h |
 | `ycbcr_12bit_capture` | unassigned |  |  | VpvStartupSchema.h |
 
 ## Appendix B: documented keys with no entry in code
