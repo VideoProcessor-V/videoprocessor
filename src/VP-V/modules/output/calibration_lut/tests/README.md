@@ -3,6 +3,9 @@
 The automatic-calibration tests live here (M2 step 3, WP-12). VideoProcessor-Test compiles them (filter "VP-V"); run them single-threaded and read the TRX (see ../README.md, "Test it standalone").
 
 - `CalibrationCoreTests.cpp`, `CalibrationRemainderTests.cpp`, `CalibrationPhase2Tests.cpp`: CPU, no hardware.
+  `CalibrationRemainderTests.cpp` holds `CalibrationSessionTests` (simulated display + meter sessions),
+  `CalibrationSpotreadTextTests`, `CalibrationMeterStateTests` and `CalibrationPatternTests`.
+- `CalibrationLutHostTests.cpp`: `CalibrationLutHostPolicyTests` (CPU; the renderer adapter's policy).
 - `CalibrationMeterTests.cpp`: the real ConPTY with `x64\Release\test-tools\fake_spotread.exe` (project `src/VideoProcessor-FakeSpotread`); hardware cases skip unless `VP_TEST_METER=1`.
 - `CalibrationTestSupport.h`: the scripted terminal and paths; `data/spotread/`: the spotread transcripts it plays.
 

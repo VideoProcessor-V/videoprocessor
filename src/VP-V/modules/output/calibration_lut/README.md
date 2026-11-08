@@ -40,7 +40,10 @@ Newcomer notes (gaps found by a docs-only newcomer check, 2026-11-08):
   it through `VP_QT_ROOT`, else `%LOCALAPPDATA%\VideoProcessor\dependencies\Qt\6.8.3\msvc2022_64`, else
   `.dependencies\Qt\6.8.3\msvc2022_64` in the repository. Toolset v143 (Visual Studio 2022 17.x or newer).
 - `vstest.console.exe` is not on PATH outside a Developer PowerShell. It lives under the Visual Studio install, e.g.
-  `C:\Program Files\Microsoft Visual Studio\<version>\<edition>\Common7\IDE\CommonExtensions\Microsoft\TestWindow\`.
+  `C:\Program Files\Microsoft Visual Studio\<version>\<edition>\Common7\IDE\CommonExtensions\Microsoft\TestWindow\`
+  (for Visual Studio 2026 Community: `...\Microsoft Visual Studio\18\Community\...`; `dir /s /b vstest.console.exe` under the install finds it).
+- Qt itself: the Qt online installer (qt.io, open source use), component Qt 6.8.3 > MSVC 2022 64-bit; point
+  `VP_QT_ROOT` at its `6.8.3\msvc2022_64` folder.
   From Git Bash, set `MSYS_NO_PATHCONV=1` so `/ResultsDirectory:` paths are not rewritten.
 - Build with the MSBuild command below, straight from a Developer PowerShell; no other build tooling is needed.
 - The ConPTY tests need Windows 10 1809 or newer (the meter talks to spotread through a pseudo-console).
@@ -73,6 +76,8 @@ the renderer or GUI, delete the stale `.iobj` / `.ipdb` files under `x64\Release
 4. The Calibration settings page (Qt, not vstest): `VideoProcessorConfigTests.exe` is a separate test program built
    with the solution, run through `tools\run_config_tests.ps1` (off screen by default):
    `powershell -NoProfile -ExecutionPolicy Bypass -File tools\run_config_tests.ps1 -Match CalibrationPage -OutDir <scratch folder>`
+   from the repository root (the folder holding `VideoProcessor.sln`; every command in this README runs from there). It needs
+   only `x64\Release\VideoProcessorConfigTests.exe` from the build; `-Match CalibrationPage` runs 4 tests today.
    (PASS/FAIL counts are printed; exit 1 on any failure).
 
 A CPU-only simulated calibration session (no GPU, no meter): `CalibrationSessionTests` in
