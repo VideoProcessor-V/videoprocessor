@@ -20,6 +20,9 @@
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <VP-V/modules/motion/vector_delivery/MotionSegment.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/VectorProducts.h>
+
+#include <libplacebo/gpu.h>
 
 #include <atomic>
 #include <chrono>
@@ -82,6 +85,15 @@ namespace VpMotion
 		std::shared_ptr<MotionAhead::Producer> motionProducer;
 		void PublishProducer(std::shared_ptr<MotionAhead::Producer> producer) { std::atomic_store(&motionProducer, std::move(producer)); }
 		std::shared_ptr<MotionAhead::Producer> LoopProducer() const { return std::atomic_load(&motionProducer); }
+		// SK-MV (MV3): the P2 slot, the ONE store of the NVOF pairs. The producer PUBLISHES into it (PlanProducer injects it with
+		// SetSlot); every consumer reads through P2() (a read-only view), never from the producer. It outlives a producer's
+		// stop and restart; a started producer clears it.
+		std::shared_ptr<VpMotion::P2Slot> p2Slot = std::make_shared<VpMotion::P2Slot>(16);
+		VpMotion::P2View P2() const { return VpMotion::P2View(p2Slot); }
+		// SK-MV (MV2): consecutive estimates (optical flow wanted) that found no pair computed ahead and took the matcher path.
+		// A run of kNoPairRun makes the visible "motion" fallback entry (FallbackCatalog::Motion); a pair resets it. Render thread.
+		static constexpr unsigned kNoPairRun = 8;
+		unsigned motionNoPairRun = 0;
 		// One vectors-valid state (docs/VP-interpolator-50-60-plan.md step 1; owner [[vp-vector-validity]]):
 		// every discontinuity moves its epoch from any thread; the render thread applies it
 		// (ApplyMotionInvalidate) and every vector consumer checks the epoch its vectors were made in.
@@ -90,7 +102,14 @@ namespace VpMotion
 		// S0 motion segment, SHADOW step (P-b1, 2026-10-24 draft): it shares motionValidity, records every live
 		// estimate and withdraws it where the host clears dejudderLiveFieldFrom. Mismatches are counted and
 		// logged; nothing is delivered from it yet, so pixels are unchanged.
-		struct MotionShadowField { uint64_t from = 0, to = 0; };
+		// SK-MV (MV1): the pair's P3 field set (the matcher's live outputs of the pair, published right after its Estimate; the
+		// source of the delivery says whether P2 (EngineAhead) or P2m (Matcher) fed it). The textures are the matcher's: valid
+		// until the next Estimate replaces them (the host Retracts the segment then) and never owned or freed here.
+		struct MotionShadowField
+		{
+			uint64_t from = 0, to = 0;
+			pl_tex field = nullptr, frameTrust = nullptr, subField = nullptr, camera = nullptr;
+		};
 		VpMotion::MotionSegment<MotionShadowField> motionSegment{ &motionValidity };
 		unsigned long long motionShadowChecks = 0, motionShadowMismatches = 0;
 		std::atomic<int> motionAheadDepth{ 0 };   // the frames ahead to submit (0 = none)

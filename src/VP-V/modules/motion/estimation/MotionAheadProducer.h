@@ -10,9 +10,11 @@
 // makes the half-size 8-bit luma (the matcher's half size), uploads it on its own
 // D3D11 device on the render GPU, runs the NVIDIA optical-flow engine for each
 // consecutive pair (both directions, costs), reads the small flow fields back and
-// stores them per pair in a VectorStore under the continuity generation. The
-// de-judder takes its pair from there (no engine work at render time); a miss
-// means it runs the engine itself, or the searches, as before. Never waits: a
+// PUBLISHES them per pair into the P2 slot (VectorProducts.h: P2Slot, owned by the vector engine and
+// injected with SetSlot; this class owns no store of its own) under the continuity generation. The
+// de-judder reads its pair through the engine's P2View (no engine work at render time); a miss means
+// it takes the matcher path (P2m, shown as a fallback): this producer is the ONE NvOpticalFlow session
+// per device (SK-MV, doc 83: the de-judder opens none). Never waits: a
 // full queue drops the oldest submissions; three failures in a row stop the producer
 // and everything falls back - and (bug hunt 35 #1) it restarts itself with a back-off
 // (ProducerRecovery.h) on a fresh device while it is still wanted (not Stop()ped).
@@ -21,7 +23,7 @@
 #include <AnalysisLumaSource.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
-#include <VP-V/modules/motion/estimation/VectorStore.h>
+#include <VP-V/modules/motion/estimation/VectorProducts.h>
 #include <VP-V/modules/motion/estimation/NvOpticalFlow.h>
 #include <VP-V/modules/motion/estimation/ProducerRecovery.h>
 
@@ -68,7 +70,7 @@ namespace MotionAhead
 		std::vector<float> costWeight;
 		std::vector<float> fbError;
 	};
-	using FlowPtr = std::shared_ptr<const Flow>;
+	// FlowPtr (std::shared_ptr<const Flow>) is declared in VectorProducts.h.
 
 	// The whole frame's motion from one engine field (S10.5 half-size pixels per 4 x 4
 	// cell; costs higher = less sure): the most common vector (a 3 x 3 vote on a
@@ -196,6 +198,11 @@ namespace MotionAhead
 		// False (Error()) when D3D11 or the adapter is not available; the engine
 		// itself is opened on the first frame (size known).
 		bool Start(ID3D11Device* renderDevice, NvOpticalFlow::Preset preset);
+		// SK-MV: the P2 slot this producer publishes its pairs into (the vector engine's; call before Start). The slot is
+		// cleared by Start, so the pairs of an older producer are never read as this one's. A producer without a slot makes a
+		// slot of its own at construction (a standalone producer in a test); the engine always injects its own.
+		void SetSlot(std::shared_ptr<VpMotion::P2Slot> target) { if (target) slot = std::move(target); }
+		std::shared_ptr<VpMotion::P2Slot> Slot() const { return slot; }
 		void Stop();
 		bool Running() const { return running.load(std::memory_order_acquire); }
 		// The engine opened and ran at least one pair (the depth decision's "engine").
@@ -218,10 +225,11 @@ namespace MotionAhead
 		// general_rate_fixes for the engine's global vote range (FlowVoteRange).
 		void SetGeneralRates(bool on) { generalRates.store(on, std::memory_order_release); }
 
-		// The consumer: the pair's flow if it is ready (a hit), else null (a miss).
-		FlowPtr Take(uint64_t from, uint64_t to);
-		void Prune(uint64_t oldestNeeded) { store.Prune(oldestNeeded); }
-		VectorStore<FlowPtr>::Stats StoreStats() const { return store.GetStats(); }
+		// Reads of the slot this producer publishes into (for a standalone producer; the vector engine's consumers read
+		// through its P2View instead): the pair's flow if it is ready (a hit), else null (a miss).
+		FlowPtr Take(uint64_t from, uint64_t to) { return slot->Find(from, to); }
+		void Prune(uint64_t oldestNeeded) { slot->Prune(oldestNeeded); }
+		VpMotion::P2Slot::Stats StoreStats() const { return slot->GetStats(); }
 
 		// extrasMs: the trust extras of the last pair (global, cost, consistency) on the worker.
 		struct Stats { unsigned long long frames = 0, pairs = 0, dropped = 0, failures = 0; double lastPairMs = 0.0, lumaMs = 0.0, extrasMs = 0.0; };
@@ -280,6 +288,6 @@ namespace MotionAhead
 		uint64_t previousSequence = 0, previousGeneration = 0;
 		uint64_t hintSequence = UINT64_MAX, hintGeneration = 0;   // the "to" frame of the engine's last pair
 		std::vector<uint8_t> lumaBuffer;
-		VectorStore<FlowPtr> store{ 16 };
+		std::shared_ptr<VpMotion::P2Slot> slot{ std::make_shared<VpMotion::P2Slot>(16) };   // published into (SetSlot injects the engine's)
 	};
 }

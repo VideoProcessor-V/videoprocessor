@@ -18,7 +18,7 @@
 #include <vprenderer/NlsHookRecovery.h>
 #include <vprenderer/CustomHookChain.h>
 #include <vprenderer/DejudderWarp.h>
-#include <vprenderer/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <vprenderer/FrameInterpolator.h>
 #include <vprenderer/DejudderAhead.h>
 #include <vprenderer/GpuCaptureUnpack.h>

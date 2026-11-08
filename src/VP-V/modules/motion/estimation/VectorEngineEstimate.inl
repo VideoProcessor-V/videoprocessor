@@ -294,7 +294,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		// MotionValidity step 1 D: a stored pair only for adjacent frames of the current
 		// epoch (otherwise the matcher runs).
 		MotionAhead::FlowPtr flow = motionValidity.PairValid(aSequence, bSequence, motionValidity.EpochOfLastKept(),
-			motionValidity.Epoch()) ? motionProducer->Take(aSequence, bSequence) : nullptr;
+			motionValidity.Epoch()) ? vectorEngine.P2().Find(aSequence, bSequence) : nullptr;   // SK-MV: P2 read through the view
 		if (flow) ++motionAheadHits; else ++motionAheadMisses;
 		// Latch review 2026-10-17: the engine's whole-frame motion (z < 0.9 usable) for
 		// source_resolution auto's fast-pan switch. Bug hunt 3 F1: one cell is 8 source px
@@ -327,7 +327,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			intentInterpreter->NoteVectors(vectors);
 		}
 		dejudder->SetExternalFlow(std::move(flow));
-		motionProducer->Prune(aSequence);
+		vectorEngine.P2().Prune(aSequence);
 	}
 	dejudderLiveFieldFrom = 0;   // the live outputs are being replaced
 	motionSegment.Retract(VpMotion::Direction::Forward);
@@ -351,7 +351,8 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	}
 	dejudderLiveFieldFrom = aSequence;
 	if (pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery))
-		motionSegment.Publish(VpMotion::Direction::Forward, aSequence, bSequence, MotionShadowField{ aSequence, bSequence },
+		motionSegment.Publish(VpMotion::Direction::Forward, aSequence, bSequence,
+		MotionShadowField{ aSequence, bSequence, dejudder->Field(), dejudder->FrameTrust(), dejudder->SubField(), dejudder->Camera() },   // SK-MV: P3 (+P2/P2m by the source) published with its textures
 		dejudder->ExternalFlowUsed() ? VpMotion::Source::EngineAhead :
 		dejudder->OpticalFlowUsed() ? VpMotion::Source::EngineAtRender : VpMotion::Source::Matcher,
 		motionShadowEpoch, 0, bSequence != aSequence + 1);

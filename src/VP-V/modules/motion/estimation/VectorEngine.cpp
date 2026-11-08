@@ -53,6 +53,7 @@ namespace VpMotion
 			// 41.9% of the judder vs the matcher's 41.3% (damage 0.35 vs 0.40; medium 41.2%, 0.37). The
 			// render-time fallback keeps the matcher's preset (medium).
 			const NvOpticalFlow::Preset preset = NvOpticalFlow::Preset::Slow;
+			producer->SetSlot(p2Slot);   // SK-MV: the producer publishes P2 into the engine's slot (it owns no store)
 			if (d3d && d3d->device && producer->Start(d3d->device, preset))
 				PublishProducer(std::shared_ptr<MotionAhead::Producer>(std::move(producer)));   // hardening: atomic publish (HOOKS.md section 2)
 			else
@@ -245,7 +246,7 @@ namespace VpMotion
 			to = nextSequence;
 			if (nextSequence == sequence + 1 &&
 				motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
-				flow = motionProducer->Take(from, to);
+				flow = P2().Find(from, to);
 			NoteGlobalPair(flow != nullptr);
 		}
 		else
@@ -254,12 +255,12 @@ namespace VpMotion
 				from = sequence - 1 - age;
 				to = sequence - age;
 				if (motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
-					flow = motionProducer->Take(from, to);
+					flow = P2().Find(from, to);
 			}
 		if (!flow)
 		{
 			++motionAheadMisses;
-			motionProducer->Prune(forwardStats ? sequence : (sequence > 2 ? sequence - 2 : 0));
+			P2().Prune(forwardStats ? sequence : (sequence > 2 ? sequence - 2 : 0));
 			return;
 		}
 		++motionAheadHits;
@@ -283,7 +284,7 @@ namespace VpMotion
 		if (backward && facts.vectorDeliveryRuns)
 			motionSegment.Publish(VpMotion::Direction::Backward, from, to, MotionShadowField{ from, to },
 				VpMotion::Source::EngineAhead, motionValidity.Epoch(), 0, false);
-		motionProducer->Prune(forwardStats ? sequence : (sequence > 2 ? sequence - 2 : 0));
+		P2().Prune(forwardStats ? sequence : (sequence > 2 ? sequence - 2 : 0));
 	}
 
 	void VectorEngine::MotionShadowCheck(bool deliveryRuns, uint64_t sequence, uint64_t nextSequence, bool hostLive)

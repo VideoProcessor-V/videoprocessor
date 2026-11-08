@@ -210,6 +210,7 @@ namespace MotionAhead
 		consecutiveFailures = 0;
 		recovery = ProducerRecovery();
 		stopError.clear();
+		slot->Clear();   // a fresh producer starts from an empty P2 slot (the pairs of an older one are not its own)
 		renderAdapter = adapter;
 		running = true;
 		worker = std::thread([this] {
@@ -327,12 +328,6 @@ namespace MotionAhead
 		}
 		lastSubmitted.store(sequence, std::memory_order_release);
 		wake.notify_all();
-	}
-
-	FlowPtr Producer::Take(uint64_t from, uint64_t to)
-	{
-		VectorStore<FlowPtr>::Entry entry;
-		return store.Get(from, to, entry) ? entry.payload : nullptr;
 	}
 
 	void Producer::Worker()
@@ -460,7 +455,7 @@ namespace MotionAhead
 		if (tw > 0 && th > 0 && !(tw == halfW && th == halfH))
 		{
 			if (tw != (halfW + 1) / 2 || th != (halfH + 1) / 2)
-				return true;   // a size this producer does not make: nothing stored (the engine runs at render time)
+				return true;   // a size this producer does not make: nothing published (the consumer takes the matcher path, shown as a fallback)
 			quarterBuffer.resize(static_cast<size_t>(tw) * th);
 			for (int y = 0; y < th; ++y)
 			{
@@ -478,10 +473,10 @@ namespace MotionAhead
 		}
 		const double lumaMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 		if (!EnsureSize(halfW, halfH)) return false;
-		// A new continuity generation clears the store and the chain.
-		if (store.Generation() != job.generation)
+		// A new continuity generation clears the P2 slot and the chain.
+		if (slot->Generation() != job.generation)
 		{
-			store.SetGeneration(job.generation);
+			slot->SetGeneration(job.generation);
 			havePrevious = false;
 		}
 		// A break the sequence does not show: no pair across it (MotionValidity step 1 F).
@@ -550,7 +545,7 @@ namespace MotionAhead
 					// The cost and the engine's own forward/backward consistency as trust inputs.
 					FlowExtras(*flow);
 					const double extrasMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - extrasStart).count();
-					store.Put(previousSequence, job.sequence, job.generation, flow);
+					slot->Publish(previousSequence, job.sequence, job.generation, flow);   // P2: the pair, for the readers' P2View
 					engineReady = true;
 					std::lock_guard<std::mutex> lock(mutex);
 					++stats.pairs;

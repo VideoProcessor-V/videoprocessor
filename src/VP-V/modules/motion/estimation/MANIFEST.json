@@ -14,6 +14,7 @@
     "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
     "src/VP-V/modules/motion/estimation/MotionAhead.h",
     "src/VP-V/modules/motion/estimation/VectorStore.h",
+    "src/VP-V/modules/motion/estimation/VectorProducts.h",
     "src/VP-V/modules/motion/estimation/MotionValidity.h",
     "src/VP-V/modules/motion/estimation/OpticalFlowTrust.h",
     "src/VideoProcessor-Lib/MotionConfig.h",
