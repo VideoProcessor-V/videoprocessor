@@ -69,3 +69,11 @@ words, recorded so the count cannot grow (non-blocking until the re-base kernels
 | 6-8 | `scaling/rebase/SourceRebase.cpp:4, 343, 344` | the `ChromaSiting` include and the two plane-shift updates of the re-based frame (callers of the helper in 1) |
 
 Plus one Bill hit (`LibplaceboVideoRenderer.cpp:21625`, reported, never blocking).
+
+## VRAM (MV7)
+
+The output texture `Module::m_out` is kept across frames (luma-size, two-component 16-bit unorm: 4 B/px, 33.2 MB at 3840x2160). It has a governor entry before any call
+site exists: `BasicChroma::Gpu::TextureBytes`, `DeclaredUser` (T1, lossy, levels kept / off, shed first among T1) and `Granted(plan)` for the future call site; `Apply`
+declares the real texture size to `VpSkeleton::VramUsers` and `Release` withdraws it. When the governor sheds it the status says "Video memory: basic chroma upscale
+output off: the libplacebo chroma upscale runs (not enough free video memory)" and the caller keeps the plain libplacebo chroma upscale. Inert today: nothing calls `Apply`
+outside the tests. Test: `VramUsersTests.BasicChromaOutputIsAGovernorUserWithAVisibleShed`.

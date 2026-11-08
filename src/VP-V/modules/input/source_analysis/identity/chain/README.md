@@ -124,11 +124,14 @@ Every tunable is a member of a settings struct with its default in the header (h
 | chain_min_run | SamplerSettings::minRun | int px | 16.. | 64 | inner extent below this: plan invalid (kReasonShortLines); tiers: same on all |
 | chain_coarse_half_width | VerifierSettings::coarseHalfWidth | int | 0..16 | 4 | coarse stage scans n +- this; tiers: same on all |
 | chain_coarse_step | VerifierSettings::coarseStep | int | 1..8 | 1 | a short-window notch is only a few integers wide: step 1 (doc 78 said 4; measured, see Method); tiers: same on all |
+| chain_coarse_windows | VerifierSettings::coarseWindows | int | 1..2 | 2 | lever (result-changing, off): short coarse windows per line, 2 = both line ends, 1 = the left end only (about half the coarse stage); tiers: budget-governed |
+| chain_coarse_refine | VerifierSettings::coarseRefine | bool | on/off | off | lever (result-changing, off): with chain_coarse_step > 1, also scan the integers the step skipped within step - 1 of the best (step 2 + refine = 7 instead of 9 integers); tiers: budget-governed |
 | chain_coarse_lines | VerifierSettings::coarseLines | int | 4..64 | 8 | lines of the coarse stage (it only refines and ranks candidates; F0: the size is right down to 8 lines); tiers: budget-governed |
 | chain_coarse_window_fraction | VerifierSettings::coarseWindowFraction | float | 0.05..0.5 | 0.125 | coarse window = N x this; tiers: same on all |
 | chain_coarse_min_window | VerifierSettings::coarseMinWindow | int px | 64.. | 160 | lower bound of the coarse window; tiers: same on all |
 | chain_exact_half_width | VerifierSettings::exactHalfWidth | int | 0..8 | 1 | exact stage scans the refined n +- this (the coarse stage already centres it); tiers: same on all |
-| chain_max_exact_candidates | VerifierSettings::maxExactCandidates | int | 1..8 | 2 | candidates promoted to full lines; the rest are reported coarse-only (kReasonCoarseOnly); tiers: budget-governed (1 when latched with power) |
+| chain_max_exact_candidates | VerifierSettings::maxExactCandidates | int | 1..8 | 2 | candidates promoted to full lines (plus the caller's confident n); the rest are reported coarse-only (kReasonCoarseOnly); tiers: budget-governed |
+| chain_confident_max_exact_candidates | VerifierSettings::confidentMaxExactCandidates | int | 0..8 | 0 (= chain_max_exact_candidates) | search-narrowing lever (`Narrowing`): when the caller forces its confident n, promote at most this many coarse-ranked candidates besides it; 0 = off (shipped behaviour); tiers: budget-governed |
 | chain_exact_families | VerifierSettings::exactFamilies | int | 1..4 | 2 | kernel families evaluated in full at the best integer; tiers: budget-governed |
 | chain_ref_fraction_1 | VerifierSettings::refFraction1 | float | 0.02..0.1 | 0.04 | baseline sizes n(1 +- f1), n(1 +- f2); fewer than two valid = kReasonNoReference; tiers: same on all |
 | chain_ref_fraction_2 | VerifierSettings::refFraction2 | float | 0.04..0.12 | 0.08 | see chain_ref_fraction_1; tiers: same on all |
@@ -138,7 +141,9 @@ Every tunable is a member of a settings struct with its default in the header (h
 | chain_max_latent_ratio | VerifierSettings::maxLatentRatio | float | 0.9..0.999 | 0.985 | n/N above this is not an upscale; tiers: same on all |
 | chain_phase_count | VerifierSettings::phaseCount | int (odd) | 1..7 | 1 | sub-sample phases tried at the best integer (1 = centre aligned only); tiers: budget-governed |
 | chain_phase_step | VerifierSettings::phaseStep | float | 0.05..0.5 | 0.25 | latent samples between phases; tiers: same on all |
-| chain_cache_limit | VerifierSettings::cacheLimit | int | 1..2048 | 512 | operators kept, oldest evicted first (time only, never changes a result); about 70 MB at 3840x2160 with 3 candidates per axis; tiers: budget: memory about 30-400 KB per operator |
+| chain_cache_limit | VerifierSettings::cacheLimit | int | 1..8192 | 4096 | operators kept at most, least recently used evicted first (time only, never changes a result); the byte budget below binds first at 3840x2160; tiers: budget: memory about 30-400 KB per operator |
+| chain_cache_bytes | VerifierSettings::cacheBytes | int bytes | 0 (no limit), 1 MiB.. | 167772160 (160 MiB) | heap bytes of ALL cached state at most: operators (30 KB coarse to 400 KB full line each at 3840x2160) + tap memo (at most 1/16 of this, about 120 bytes per entry, 65536 entries at most) + the solves kept for the running call (about 8 KB per exact-stage entry, about 2 MB per call); least recently used operators are evicted first; time only, never changes a result; the power probe's verifier gets an eighth of it (20 MiB), so both together stay under 180 MiB; tiers: budget: lower it on a small machine, builds then repeat per evaluation |
+| chain_batched_solve | VerifierSettings::batchedSolve | bool | on/off | on | the lines of a stage are solved together against one factor (same arithmetic in the same order per line, so the same bits); off = one line at a time, the reference routine kept for the equality test and for bisecting; tiers: same on all |
 | chain_q_max | ProposerSettings::qMax | int | 2..32 | 16 | longest phase period tested; ratios needing a longer period come from the caller candidates; tiers: budget-governed (cost grows with q_max) |
 | chain_proposer_lines | ProposerSettings::maxLines | int | 1..64 | 16 | lines of a LineSet used per proposer evaluation; tiers: budget-governed |
 | chain_ratio_min | ProposerSettings::ratioMin | float | 2..20 | 5 | per-degree-of-freedom gain a period must reach (natives measured below 3.6); tiers: same on all |
@@ -192,6 +197,7 @@ Every tunable is a member of a settings struct with its default in the header (h
 | chain_queue_depth | EstimatorSettings::queueDepth | int | 1..2 | 1 | jobs waiting for the worker; a newer job replaces the oldest, counted; tiers: same on all |
 | chain_output_step_override | EstimatorSettings::outputStepOverride | int | 0, 1, 4 | 0 (detect) | forces the output quantisation step in 10-bit codes (4 = 8-bit picture); tiers: same on all |
 | chain_latched_exact_lines | EstimatorSettings::latchedExactLines | int | 4..64 | 16 | exact-stage lines while confident; tiers: budget-governed |
+| chain_confident_axis_exact_lines | EstimatorSettings::confidentAxisExactLines | int | 0 (off), 4..64 | 0 (off) | lever (result-changing, measured later in order): exact-stage lines of one confident axis while the other axis is still acquiring; 16 = on (both confident: chain_latched_exact_lines applies, or all lines when the monitor holds natives out); the sampled lines per frame stay 32 + 32 until both are confident; selected by `ExactLinesFor`; tiers: budget-governed |
 | chain_clock_ring | EstimatorSettings::clockRing | int | 4..4096 | 64 | frames of (seq, source time, active area) remembered for the sink; tiers: same on all |
 | chain_event_cap | EstimatorSettings::eventCap | int | 1.. | 64 | pending cut / blank / fade events kept (oldest dropped); tiers: same on all |
 | chain_repeat_cap | EstimatorSettings::repeatCap | int | 1.. | 16 | pending repeat marks kept; tiers: same on all |
@@ -222,8 +228,8 @@ Every tunable is a member of a settings struct with its default in the header (h
 | `ChainCommon.h` | shared | constants, reason bits, `LineSet`, deterministic helpers (median, trimmed mean, hash) |
 | `LineSampler.h` | 1 | `LineSampler::Plan(active, seq)`: 32 rows + 32 columns (`SamplerSettings::Latched()`: 16 + 16), one per stratum of the inner area (48 px from the bars), position from an integer hash of the sequence number; `Fill` copies one axis out of a plane into a `LineSet` in 10-bit code units; the `LineSet` carries the geometry of the scaler axis (`axisLen`, `origin`), by default the active rectangle, or the whole frame when the bars were part of the raster the player scaled (`scalerRect`). It skips nothing: the caller skips repeats and blanks |
 | `PolyphaseProposer.h` | 2 | `PolyphaseProposer`: cheap candidate sizes per axis, `AddEvaluation`, `Periods`, `AllScores`, `Propose` (at most 8, caller sizes first, then round robin over the periods in strength order), `Reset` |
-| `KernelBank.h` | 3a | 10 kernels (bilinear, bicubic B/C 0/0.5, 0/0.6, 1/3 1/3, lanczos2/3/4, spline16/36/64), `TapWeights`, `DescaleOperator` (banded Cholesky with reciprocal diagonal, memoised tap weights, per-256-px segment sums) |
-| `DescaleVerifier.h` | 3b | `DescaleVerifier::Evaluate`: coarse scan, exact stage, kernel and family margins, floor, per-line values, segment map; operator cache keyed by (N, n, kernel, phase step, window) |
+| `KernelBank.h` | 3a | 10 kernels (bilinear, bicubic B/C 0/0.5, 0/0.6, 1/3 1/3, lanczos2/3/4, spline16/36/64), `TapWeights`, `TapMemo` (tap weights memoised across operators), `DescaleOperator` (banded Cholesky with reciprocal diagonal, per-256-px segment sums, `Residual` for one line and `ResidualBatch` for up to 8 lines at once with identical per-line arithmetic) |
+| `DescaleVerifier.h` | 3b | `DescaleVerifier::Evaluate`: coarse scan, exact stage, kernel and family margins, floor, per-line values, segment map; operator cache keyed by (N, n, kernel, phase step, window), LRU, bounded by count and bytes; the solves of one call are kept so candidates that share an integer read them |
 | `ChainNullTables.h` | 4 | `NullTables` (placeholder, conservative), `ClassifyLatent` (k/8, k/16, rationals <= 6, generic) |
 | `ChainEvidence.h` | 4 | `ChainEvidence`: line gate, spatial agreement, LLR increments, clustering, per-shot cap, recent window in seconds, two-axis prior, threshold c1 |
 | `ChainReading.h` | train r2 | `AxisReader` (one per axis: confident vs UNSURE), `ReadingSettings`, `ReadingLevels` (c1), `FieldEvidence` + `MakeFieldEvidence` (kernel class), `EvalContext`, `ReadingOutput`, `ReadingReason`, `ConfFromLlr`, `ConfidenceOfLlr`, `KernelConfidence` |
@@ -260,6 +266,27 @@ NullTables are PLACEHOLDERS (conservative: wide and deep nulls where natives are
 
 The sampled lines are upscaled at ratio 0.61 (bicubic, rounded to the delivered output step) and the verifier is run on that with the known latent size N. Seen (T <= -0.15 on the informative lines) = a "native" verdict of the real candidates is positive evidence. Unseen = abstain with the reason: dark (mean level), flat (almost no line structure), soft (structure but no fine detail above the floor). A really upscaled picture is usually unseen by the probe (its detail stops at the latent Nyquist): that is fine, its dip evidence needs no probe.
 
-### Cost (estimate, NOT measured; one thread, 3840x2160, +-2x; the timing test logs the real numbers)
+### Cost: SID-OPT (measured before: median 613 ms, p95 1288 ms per evaluation at 3840x2160, budget 250 ms)
+
+Measured before SID-OPT (evaluation harness, reel R1.film_dragon.asis, 150 evaluations, 8 candidates per axis, 2 promoted): one candidate = 1888 line solves
+and 136 operator builds per axis (832 solves in the coarse stage: baseline 4 sizes x 4 kernels x 2 windows x 8 lines = 256 plus scan 9 integers x 4 x 2 x 8 = 576;
+1056 in the exact stage on 32 lines: baseline 4 x 4 x 32 = 512, scan 3 x 4 x 32 = 384, further kernels 4 x 32 = 128, final pass 32). Step 1 (result preserving, byte
+identical n, LLR, kernel, records): the lines of a stage are solved as a batch of 8 against one factor (`ResidualBatch`, same arithmetic per line), the tap weights are
+memoised across operators (`TapMemo`), the solves of a call are kept so candidates that share an integer read them, and the operator cache is LRU bounded by count and
+bytes (160 MiB, probe 20 MiB) instead of a FIFO of 512, smaller than the working set of one acquiring evaluation (estimated about 1800 distinct operators for 8 candidates on
+two axes), which evicts an operator before the next evaluation can reuse it. Reciprocal diagonals were already in place (`Factor` stores 1/d and the solves multiply). Step 2 (search narrowing): the two narrowings asked for
+(exact stage only for n within +-1 of the coarse best; exact stage only for the top 2 coarse candidates plus the confident n) were already the shipped values; they are now
+one documented constant set (`Narrowing` in `DescaleVerifier.h`); the new levers are all OFF (shipped behaviour unchanged) and are measured later, one at a time, with the
+acceptance rule: no confident-wrong reading, UNSURE share and latch latency not worse than before on the same reels. The levers: `confidentMaxExactCandidates` (cap the promoted
+challengers of a confident axis), `coarseWindows` = 1 (one coarse window per line) and `coarseStep` = 2 with `coarseRefine` (7 instead of 9 coarse integers). Step 3
+(`confidentAxisExactLines` = 16, selected by `ExactLinesFor`) is a lever too, OFF: it would run the exact stage of a confident axis on 16 lines while the other axis still
+acquires; the sampler already drops to 16 + 16 lines when both axes are confident, and with both confident nothing changes. The evaluation harness test seam
+`VP_SOURCE_ID_LEVER` = none | step3 | coarse1 | coarse2 (read only by ChainEvalRegistrationTests) sets a lever without a rebuild. The multi-candidate timing test (`LogsMedianAndP95OfTwentyMultiCandidateEvaluationsAtUltraHd`) logs median and p95 of 20
+evaluations, cold and warm.
+
+Measured with SID-OPT step 1 (4 reels): warm evaluations run at about 166 ms median; the first evaluations after a start or a discontinuity are cold, about 907 ms median
+(1760 operator builds), because every operator of the acquiring candidates is built once; the cache then serves the recurring candidates.
+
+### Cost (the older estimate, NOT measured; one thread, 3840x2160, +-2x; the timing test logs the real numbers)
 
 One full line solve is about 40 us at 3744 samples. Per evaluation (both axes), coarse stage on 8 lines and probe on 16 lines: latched, one candidate, exact stage only on 16 lines: about 63 ms cold and 40 ms warm (operator cache) including the probe; acquiring, 3 candidates, exact stage on 32 lines: about 270 ms cold and 190 ms warm (proposer 16, coarse 3 x 9 x 2, exact 2 x (60 + 33), probe 16). The result reports its own cost: `VerifyResult::costMs`, `cold`, `operatorBuilds`, `solves` (and `ProbeResult::costMs`, `cold`), with the wall time read through the optional `VerifierSettings::nowMs` hook (the units never read a clock; C2 passes steady_clock). A CPU-share governor in C2 sets the interval to max(nominal, cost / share budget): at 15% while acquiring that is about 1.3 to 1.8 s, at 2% latched about 2 to 3 s, shown in Ctrl+Alt+D. Cache memory is about 70 MB at 3 candidates per axis (`cacheLimit` 512).

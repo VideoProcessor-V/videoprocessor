@@ -95,6 +95,7 @@ namespace CameraModel
 		pl_dispatch m_dispatch = nullptr;
 		pl_tex m_tex[2] = { nullptr, nullptr };
 		bool m_readable;
+		uint64_t m_declared = ~uint64_t(0);   // the bytes last declared to the VRAM governor (declare on a change only)
 		std::string m_error;
 	};
 }

@@ -188,6 +188,8 @@ namespace Tests
 			std::string reel;
 			std::ofstream cal;
 			bool calOpen = false;
+			std::ofstream cost;   // <VP_SOURCE_ID_CAL_DUMP>\cost\<reel>.csv: the verifier work of every evaluation (builds, solves, cached MiB)
+			bool costOpen = false;
 			int rasterW = 0, rasterH = 0;
 			double lastFrameT = 0.0;
 			uint64_t lastFrameSeq = 0;
@@ -267,6 +269,33 @@ namespace Tests
 			}
 		}
 
+		// One row per evaluation: the cost counters (deterministic) next to the lines used by the exact stage.
+		inline void WriteCostRow(Rig& r, const C::EvaluationDetail& d)
+		{
+			if (!r.costOpen)
+				return;
+			r.cost << d.seq << ',' << Num(static_cast<double>(d.timeUs) / 1e6);
+			for (int a = 0; a < 2; ++a)
+				r.cost << ',' << d.axis[a].operatorBuilds << ',' << d.axis[a].solves << ',' << d.axis[a].solvesReused << ',' << d.axis[a].exactLines;
+			r.cost << ',' << Num(d.cachedMB) << '\n';
+		}
+
+		// Test seam for the cost levers (read only here, in the test build; the shipped estimator reads no environment):
+		// VP_SOURCE_ID_LEVER = none | step3 (16 exact lines on a confident axis) | coarse1 (one coarse window) | coarse2 (coarse step 2 + refine).
+		inline void ApplyLever(C::EstimatorSettings& s)
+		{
+			const std::string lever = RealClip::Env("VP_SOURCE_ID_LEVER");
+			if (lever == "step3")
+				s.confidentAxisExactLines = 16;
+			else if (lever == "coarse1")
+				s.verifier.coarseWindows = 1;
+			else if (lever == "coarse2")
+			{
+				s.verifier.coarseStep = 2;
+				s.verifier.coarseRefine = true;
+			}
+		}
+
 		inline void ReelBegin(const std::string& reelId)
 		{
 			Rig& r = R();
@@ -296,13 +325,17 @@ namespace Tests
 			r.haveLast = false;
 			r.clock.Set(0.0);
 			C::EstimatorSettings settings;
+			ApplyLever(settings);
 			r.est.reset(new C::ChainEstimator(settings, r.clock.Fn()));
 			r.est->SetSynchronous(true);
-			r.est->SetEvaluationObserver([](const C::EvaluationDetail& d) { WriteCalibrationRows(R(), d); });
+			r.est->SetEvaluationObserver([](const C::EvaluationDetail& d) { WriteCalibrationRows(R(), d); WriteCostRow(R(), d); });
 			r.est->SetMode(C::EstimatorMode::Shadow);
 			if (r.cal.is_open())
 				r.cal.close();
 			r.calOpen = false;
+			if (r.cost.is_open())
+				r.cost.close();
+			r.costOpen = false;
 			const std::string dir = RealClip::Env("VP_SOURCE_ID_CAL_DUMP");
 			if (!dir.empty())
 			{
@@ -318,6 +351,13 @@ namespace Tests
 					r.cal << "reel_id,title,eval_seq,time_s,axis,N,n,class,T,stage,best_kernel,kernel_margin,lines_passed,lines,power_seen,floor_codes,"
 						"truth_n,bit_depth,truth_kernel,truth_sharpen,shot_id,T_ev,informative,master,has_truth,truth_n1,cut_id\n";
 				}
+				CreateDirectoryA((dir + sep + "cost").c_str(), nullptr);
+				r.cost.open(dir + sep + "cost" + sep + name + ".csv", std::ios::out | std::ios::trunc);
+				if (r.cost.is_open())
+				{
+					r.costOpen = true;
+					r.cost << "eval_seq,time_s,builds_x,solves_x,reused_x,exact_lines_x,builds_y,solves_y,reused_y,exact_lines_y,cached_mb\n";
+				}
 			}
 		}
 
@@ -327,6 +367,9 @@ namespace Tests
 			if (r.cal.is_open())
 				r.cal.close();
 			r.calOpen = false;
+			if (r.cost.is_open())
+				r.cost.close();
+			r.costOpen = false;
 			if (r.est)
 				r.est->Stop();
 			r.est.reset();

@@ -8,6 +8,7 @@
 // Camera link K1-5 (F2): the reader hooks only bump atomics; the worker thread owns the Fitter. 10 000 reset requests
 // from the "render thread" during fits leave a deterministic, race-free sequence; the single thread drains the queue.
 #include "CameraLinkTestSupport.h"
+#include <VP-V/core/AnalysisLane.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraReaders.h>
 
 #include <atomic>
@@ -161,6 +162,189 @@ namespace VideoProcessorTest
 			}
 			worker.ProcessQueued();
 			Assert::IsTrue(producer.HistoryHash() != oneByOne);
+		}
+
+		// ---- the lane lease: a rebuild of the analysis lane while the camera worker holds its objects ----
+		// (SK-W fix: the worker used to hold a raw SlotTable*; AnalysisLane::Configure swaps the whole LaneState at every rebuild.)
+		struct LaneRig
+		{
+			VpIndicator::Indicator ind;
+			std::atomic<uint64_t> clock{ 0 };
+			VpSkeleton::AnalysisLane lane;
+			VpSkeleton::Registry reg;
+			std::vector<VpSkeleton::ConsumerDecl> consumers;
+			VpSkeleton::GraphSettings gs;
+			VpSkeleton::CardProfile card;
+			VpSkeleton::TierInput tier;
+			VpSkeleton::LaneSettings ls;
+
+			LaneRig()
+				: ind(1, 256)
+				, lane(&ind, [this]() { return clock.fetch_add(3) + 3; })
+				, reg(VpSkeleton::SkeletonProducts())
+				, consumers(CameraLinkTest::Consumers({ CameraLink::CameraConsumer::Diagnostics }))
+				, gs(CameraLinkTest::Settings(2))
+			{
+				card.vramBudgetBytes = 1ull << 33;
+				card.systemRamFreeBytes = 1ull << 33;
+				card.uploadGBps = 10.0;
+				card.computeScale = 1.0;
+				card.ofaPresent = true;
+				card.ofaMsPerPairRef = 2.0;
+				tier.framePeriodMs = 40.0;
+				ls.mode = VpSkeleton::LaneSettings::Mode::On;
+			}
+			uint32_t Configure() { return lane.Configure(ls, reg, consumers, gs, card, tier, 0, true); }
+			// A rebuild: a different lane lead is a different graph (the same trigger class as an external-demand or period change).
+			void Rebuild() { gs.laneLead = gs.laneLead == 2 ? uint8_t(3) : uint8_t(2); Configure(); }
+			VpSkeleton::LaneLeaseSource Source() { return [this]() { return lane.Lease(VpSkeleton::kP7CameraFit); }; }
+		};
+
+		TEST_METHOD(ALaneRebuildWhileTheWorkerHoldsALeaseKeepsTheOldStateAliveAndRefusesTheStalePostVisibly)
+		{
+			LaneRig rig;
+			rig.Configure();
+			Assert::IsTrue(rig.lane.Active(), L"the lane built a state with P7");
+			const uint64_t gen1 = rig.lane.Generation();
+			Assert::IsTrue(gen1 >= 1);
+			CameraLink::FitCounters counters;
+			CameraLink::CameraFitProducer producer(CameraModel::Config(), &counters);
+			std::vector<CameraLink::PublishOutcome> outcomes;
+			std::weak_ptr<const void> oldState;
+			std::unique_ptr<CameraLink::CameraFitWorker> worker;
+			CameraLink::CameraRecordPool* poolRaw = nullptr;
+			std::unique_ptr<CameraLink::CameraRecordPool> pool;
+			{
+				VpSkeleton::LaneLease first = rig.Source()();
+				Assert::IsTrue(first.Owned() && first.Valid() && first.generation == gen1);
+				Assert::IsTrue(first.bytes != nullptr, L"P7 is a CPU product: its bytes ring is in the lease");
+				oldState = first.hold;
+				pool.reset(new CameraLink::CameraRecordPool(first.table->Find(VpSkeleton::kP7CameraFit)->Ring()));
+				poolRaw = pool.get();
+				CameraLink::CameraFitEnv env;
+				env.lease = first;
+				env.leaseSource = rig.Source();
+				env.pool = poolRaw;
+				env.counters = &counters;
+				env.queueCapacity = 4;
+				env.onResult = [&outcomes](const CameraLink::CameraFitJob&, const CameraLink::CameraFitResult&, CameraLink::PublishOutcome o) { outcomes.push_back(o); };
+				worker.reset(new CameraLink::CameraFitWorker(producer, env));
+			}   // the test keeps no hold of its own: only the worker's lease keeps generation 1 alive
+			Assert::AreEqual(gen1, worker->LaneGeneration());
+			Assert::IsTrue(worker->Submit(CameraLinkTest::PanJob(1, 6.0)), L"queued against generation 1");
+			rig.Rebuild();
+			const uint64_t gen2 = rig.lane.Generation();
+			Assert::IsTrue(gen2 > gen1, L"the rebuild produced a new LaneState generation");
+			Assert::IsFalse(oldState.expired(), L"the lane dropped the old state, the worker's lease still owns it: nothing is freed under the worker");
+			// The old table is still readable through the lease (this is the access that was a use-after-free with a raw pointer).
+			const VpSkeleton::LaneLease held = worker->Lease();
+			Assert::IsTrue(held.table != nullptr && held.table->Find(VpSkeleton::kP7CameraFit) != nullptr);
+			Assert::IsTrue(held.table->Find(VpSkeleton::kP7CameraFit)->Ring() >= 1u);
+			Assert::AreEqual(gen1, held.generation);
+			Assert::AreEqual(size_t(1), worker->ProcessQueued());
+			Assert::AreEqual(size_t(1), outcomes.size());
+			Assert::IsTrue(outcomes[0] == CameraLink::PublishOutcome::StaleLane, L"a post into the old generation is refused");
+			Assert::AreEqual(uint64_t(1), counters.staleLane.load(), L"... and counted");
+			Assert::AreEqual(uint64_t(0), counters.published.load());
+			Assert::AreEqual(uint64_t(1), counters.rebound.load(), L"the worker rebound to the new generation");
+			Assert::AreEqual(gen2, worker->LaneGeneration());
+			Assert::IsTrue(CameraLink::StatusLine(counters).find("1 stale lane") != std::string::npos, L"and visible in the camera status line");
+			// A post stamped with the NEW generation is not refused as stale (it may still be late: no inputs are published here).
+			Assert::IsTrue(worker->Submit(CameraLinkTest::PanJob(2, 6.0)));
+			worker->ProcessQueued();
+			Assert::AreEqual(size_t(2), outcomes.size());
+			Assert::IsTrue(outcomes[1] != CameraLink::PublishOutcome::StaleLane);
+			Assert::AreEqual(uint64_t(1), counters.staleLane.load(), L"no further refusals");
+		}
+
+		// Two threads rebind (Submit on the render thread, the publish on the fit thread) and each reads the lease OUTSIDE the mutex. The order
+		// "A reads the old lease, B reads and installs the new one, A installs" is injected here deterministically: A's source call runs B's
+		// whole Rebind before returning the older lease. The older read must NOT put the worker back on the old graph.
+		TEST_METHOD(AnOlderLeaseReadNeverReplacesANewerOneWhateverTheInterleaving)
+		{
+			CameraLinkTest::Rig rig(2);
+			CameraLink::CameraRecordPool pool(rig.Ring());
+			CameraLink::FitCounters counters;
+			CameraLink::CameraFitProducer producer(CameraModel::Config(), &counters);
+			VpSkeleton::LaneLease older = VpSkeleton::LaneLease::Borrow(rig.table.get(), rig.bytes.get(), rig.indicator.get());
+			VpSkeleton::LaneLease newer = older;
+			older.generation = 1;
+			newer.generation = 2;
+			CameraLink::CameraFitWorker* wp = nullptr;
+			int calls = 0;
+			CameraLink::CameraFitEnv env = rig.Env(&pool, &counters, 4);
+			env.lease = older;
+			env.leaseSource = [&]() {
+				++calls;
+				if (calls == 1)
+				{
+					wp->Rebind();   // "thread B": reads (call 2 -> the newer lease) and installs it
+					return older;   // "thread A" resumes with what it read BEFORE B ran
+				}
+				return newer;
+			};
+			CameraLink::CameraFitWorker worker(producer, env);
+			wp = &worker;
+			Assert::AreEqual(uint64_t(1), worker.LaneGeneration());
+			Assert::IsFalse(worker.Rebind(), L"A's call installed nothing: B's install (inside it) was newer");
+			Assert::AreEqual(2, calls);
+			Assert::AreEqual(uint64_t(2), worker.LaneGeneration(), L"A's older read was rejected: the lease did not go backwards");
+			Assert::AreEqual(uint64_t(1), counters.rebound.load(), L"one install, not two");
+			// An empty lease (the lane dropped its state) carries the counter: newer than the state it replaces, and a valid lease of the same
+			// generation then replaces the empty one.
+			VpSkeleton::LaneLease empty;
+			empty.generation = 3;
+			VpSkeleton::LaneLease valid3 = newer;
+			valid3.generation = 3;
+			VpSkeleton::LaneLease stale = older;
+			int phase = 0;
+			env.leaseSource = [&]() { return phase == 0 ? empty : phase == 1 ? valid3 : stale; };
+			CameraLink::CameraFitWorker w2(producer, env);   // starts on env.lease (generation 1)
+			Assert::IsTrue(w2.Rebind(), L"the empty lease of generation 3 is newer than generation 1");
+			Assert::AreEqual(uint64_t(3), w2.LaneGeneration());
+			Assert::IsFalse(w2.Lease().Valid(), L"the empty lease of generation 3 was installed (the lane is gone)");
+			phase = 1;
+			Assert::IsTrue(w2.Rebind(), L"a valid lease of the same generation replaces the empty one");
+			Assert::IsTrue(w2.Lease().Valid());
+			phase = 2;
+			Assert::IsFalse(w2.Rebind(), L"an older generation is never installed");
+			Assert::AreEqual(uint64_t(3), w2.LaneGeneration());
+		}
+
+		TEST_METHOD(RebuildingTheLaneRepeatedlyUnderARunningWorkerThreadIsSafe)
+		{
+			LaneRig rig;
+			rig.Configure();
+			Assert::IsTrue(rig.lane.Active());
+			CameraLink::FitCounters counters;
+			CameraLink::CameraFitProducer producer(CameraModel::Config(), &counters);
+			VpSkeleton::LaneLease first = rig.Source()();
+			CameraLink::CameraRecordPool pool(first.table->Find(VpSkeleton::kP7CameraFit)->Ring());
+			CameraLink::CameraFitEnv env;
+			env.lease = first;
+			env.leaseSource = rig.Source();
+			env.pool = &pool;
+			env.counters = &counters;
+			env.queueCapacity = 8;
+			first = VpSkeleton::LaneLease();
+			CameraLink::CameraFitWorker worker(producer, env);
+			env.lease = VpSkeleton::LaneLease();
+			Assert::IsTrue(worker.Start());
+			int submitted = 0;
+			for (int i = 1; i <= 40; ++i)
+			{
+				if (worker.Submit(CameraLinkTest::PanJob(static_cast<uint64_t>(i), 6.0 + i * 0.1)))
+					++submitted;
+				if (i % 4 == 0)
+					rig.Rebuild();   // the render thread swaps the LaneState while the worker thread fits and publishes
+				if (i % 8 == 0)
+					worker.WaitIdle();
+			}
+			worker.WaitIdle();
+			worker.Stop();
+			Assert::IsTrue(counters.fitted.load() >= 1 && counters.fitted.load() <= uint64_t(submitted), L"pairs were fitted, none invented");
+			Assert::IsTrue(counters.rebound.load() >= 1, L"the rebuilds were noticed");
+			Assert::IsTrue(counters.staleLane.load() + counters.late.load() + counters.published.load() <= uint64_t(submitted));
 		}
 	};
 }

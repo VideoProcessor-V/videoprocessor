@@ -54,7 +54,8 @@ namespace RendererExtension
 	struct Context { const void* host = nullptr; void* hostView = nullptr; };
 
 	// ---- Lifecycle -------------------------------------------------------------------------
-	enum class Lifecycle { GpuCreated, GpuReleased, SettingsApplied, DisplayChange, StateAccepted, StateRefused, Shutdown };
+	enum class Lifecycle { GpuCreated, GpuReleased, SettingsApplied, DisplayChange, StateAccepted, StateRefused, Shutdown,
+		QueueDepth /* value = frames the render-ahead plan keeps ahead of the present (a fact; change-only on the receiver) */ };
 	struct LifecycleFacts : Context
 	{
 		Lifecycle kind = Lifecycle::GpuCreated;

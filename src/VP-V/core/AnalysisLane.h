@@ -5,6 +5,7 @@
 #include "GapScheduler.h"
 #include "Indicator.h"
 #include "LaneInterfaces.h"
+#include "LaneLease.h"
 #include "LaneRunner.h"
 #include "ProductGraph.h"
 #include "ProductSlots.h"
@@ -417,6 +418,7 @@ struct LaneState {
     std::vector<uint64_t> lateSeen;                   // per node index (render thread)
     std::vector<uint64_t> missSeen;                   // per node index (render thread)
     uint64_t firstSeq = 0;                            // the first frame this graph serves
+    uint64_t generation = 0;                          // 1,2,3...: one per built state (LaneLease staleness check)
     std::string capsMismatch;                         // non-empty: the real plan's history caps differ from the trial's
 
     int IndexOf(ProductId id) const { return id < indexOfId.size() ? indexOfId[id] : -1; }
@@ -543,6 +545,12 @@ public:
     void SetGpuDispatcher(IGpuDispatcher* d) { dispatcher_ = d; }
     void SetLiveFill(LiveFill fill) { liveFill_ = std::move(fill); }
     void RegisterCpuLiveCompute(ProductId id, CpuLiveCompute fn) { cpuLive_[id] = std::move(fn); }
+    // SK-W stage D: products whose frames are PUBLISHED by a producer outside the lane (the vector engine feed for P2m / P3, the camera
+    // fit worker for P7 ...): the lane never makes them, so the seal's live fill declines them (counted, shown) instead of recording a GPU
+    // fill nothing can run. A frame the outside producer published in time is sealed like any lane result. Render thread.
+    void SetExternalProducts(const std::vector<ProductId>& ids) { externalIds_ = ids; }
+    const std::vector<ProductId>& ExternalProducts() const { return externalIds_; }
+    uint64_t ExternalDeclined() const { return externalDeclined_; }
     // The render-device release fence's completed value for a product (lane polls it before reuse).
     void SetReleaseCompleted(std::function<uint64_t(ProductId)> f) { releaseCompleted_ = std::move(f); }
     // 70b G0: GPU live deferral. On, a GPU-compute product's live fill at the seal (OnRenderStart, BEFORE the
@@ -607,6 +615,7 @@ public:
         const Graph& g = owner_.Current();
         if (!g.valid) {
             error_ = g.ErrorText();
+            stateGeneration_.fetch_add(1, std::memory_order_acq_rel);
             std::atomic_store(&state_, std::shared_ptr<LaneState>());
             renderState_.reset();
             return reasons;
@@ -631,6 +640,7 @@ public:
             // The graph was sized for the trial's history grant but the real plan grants otherwise: the memory plan
             // does not describe the rings. Fail closed and visibly (Analysis lane unavailable + the Fallbacks entry).
             error_ = st->capsMismatch;
+            stateGeneration_.fetch_add(1, std::memory_order_acq_rel);
             std::atomic_store(&state_, std::shared_ptr<LaneState>());
             renderState_.reset();
             return reasons;
@@ -1060,6 +1070,29 @@ public:
     bool ShadowOnly() const { return settings_.mode == LaneSettings::Mode::Shadow; }
     const LaneSettings& Settings() const { return settings_; }
     std::shared_ptr<LaneState> State() const { return std::atomic_load(&state_); }
+    // The generation of the CURRENT state (0 = no state). Any thread.
+    uint64_t Generation() const { const std::shared_ptr<LaneState> st = std::atomic_load(&state_); return st ? st->generation : 0; }
+    // A lease on the CURRENT state for an outside worker (the camera fit thread): the shared hold keeps the table, the buffers
+    // and the Indicator alive across any number of rebuilds; the holder compares `generation` with Generation() and rebinds.
+    // `bytesProduct` names the CPU product whose bytes ring the holder writes (kInvalidProduct-style: pass a product not in the
+    // graph, or leave default, for none). Empty lease (Valid() false) when the lane is inactive. Any thread.
+    LaneLease Lease(ProductId bytesProduct = ProductId(0xFFFFu)) const
+    {
+        LaneLease l;
+        // The counter is read BEFORE the state: an empty lease carries it, so a holder orders it against the states (LaneLeaseNewer).
+        l.generation = stateGeneration_.load(std::memory_order_acquire);
+        const std::shared_ptr<LaneState> st = std::atomic_load(&state_);
+        if (!st || !st->table)
+            return l;
+        l.hold = st;
+        l.table = st->table.get();
+        l.indicator = st->indHold.get();
+        l.generation = st->generation;
+        const int i = st->IndexOf(bytesProduct);
+        if (i >= 0 && size_t(i) < st->bufs.size() && st->bufs[size_t(i)])
+            l.bytes = st->bufs[size_t(i)].get();
+        return l;
+    }
     const Regulator& GetRegulator() const { return regulator_; }
     uint32_t ChunkCapUs() const { return chunkCapUs_.load(std::memory_order_relaxed); }
     bool Deterministic() const { return det_; }
@@ -1098,6 +1131,15 @@ public:
             out.push_back("Analysis: " + std::to_string(totalDeclined_) +
                           " product frames unavailable (no producer result and no live fill; the consumer uses its own fallback)");
         out.push_back(std::string("Analysis lead: ") + LeadText(lead_));
+        if (!externalIds_.empty()) {
+            std::string names;
+            for (ProductId id : externalIds_)
+                if (st->IndexOf(id) >= 0)
+                    names += (names.empty() ? "" : ", ") + NameOf(*st, id);
+            if (!names.empty())
+                out.push_back("Analysis: products published outside the lane: " + names + "; " + std::to_string(externalDeclined_) +
+                              " frame(s) were not published in time (the readers use their own fallback)");
+        }
         out.push_back("Analysis level: " + std::to_string(unsigned(regulator_.Level())) + "/"
                       + std::to_string(unsigned(regulator_.MaxLevel())));
         out.push_back("Analysis late: " + std::to_string(lateRingSum_) + " per 10 s");
@@ -1220,7 +1262,8 @@ private:
 
     void Clear()
     {
-        std::atomic_store(&state_, std::shared_ptr<LaneState>());
+        stateGeneration_.fetch_add(1, std::memory_order_acq_rel);
+            std::atomic_store(&state_, std::shared_ptr<LaneState>());
         renderState_.reset();
         owner_ = GraphOwner();
         regProducts_.clear();
@@ -1255,6 +1298,7 @@ private:
         std::shared_ptr<LaneState> st = std::make_shared<LaneState>();
         st->graph = owner_.Current();
         st->firstSeq = fromSeq;
+        st->generation = stateGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1u;
         st->ring.reset(new LaneSourceRing(std::max<size_t>(st->graph.framesInFlight, 4u)));
         st->table.reset(new SlotTable(st->graph));
         assert(st->table->Valid());
@@ -1420,6 +1464,11 @@ private:
         const int idx = st.IndexOf(n.id);
         if (idx < 0)
             return false;
+        for (ProductId e : externalIds_)
+            if (e == n.id) {
+                ++externalDeclined_;   // published outside the lane or not at all: never a GPU / CPU fill of the lane's
+                return false;
+            }
         const uint64_t t0 = nowUs_ ? nowUs_() : 0u;
         bool ok = false;
         if (n.backend == Backend::Cpu) {
@@ -1548,6 +1597,7 @@ private:
     std::function<uint64_t()> nowUs_;
     LaneSettings settings_;
     std::shared_ptr<LaneState> state_;         // swapped with std::atomic_store / atomic_load
+    std::atomic<uint64_t> stateGeneration_{ 0 };   // last LaneState::generation handed out; also bumped when the state is dropped (Lease() reads it)
     std::shared_ptr<LaneState> renderState_;   // the render thread's hold (keeps returned references valid)
     GraphOwner owner_;
     VramGovernor governor_;
@@ -1564,6 +1614,8 @@ private:
     std::vector<std::pair<ProductId, uint64_t>> failed_;
     DeferredReport deferredTotals_;
     std::map<ProductId, CpuLiveCompute> cpuLive_;
+    std::vector<ProductId> externalIds_;   // products published outside the lane (SetExternalProducts)
+    uint64_t externalDeclined_ = 0;        // seal-time live fills of those products that were declined (nothing published in time)
     std::function<uint64_t(ProductId)> releaseCompleted_;
     std::vector<ProductFrameResult> empty_;
     std::string error_;

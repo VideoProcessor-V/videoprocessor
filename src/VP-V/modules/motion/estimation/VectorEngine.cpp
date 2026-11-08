@@ -132,7 +132,14 @@ namespace VpMotion
 	// ---- P5a-4 -------------------------------------------------------------------------------------------------
 	void VectorEngine::UpdateVectorEngine(const VectorDemand::Input& input, const UpdateFacts& facts, IVectorEngineHost& host)
 	{
-		vectorDemand = VectorDemand::Decide(input);
+		if (cameraFitWanted_.load(std::memory_order_acquire) && !input.wants[static_cast<int>(VectorDemand::Consumer::CameraFit)])
+		{
+			VectorDemand::Input merged = input;   // the camera fit asked for the field: one more consumer of the same decision
+			merged.wants[static_cast<int>(VectorDemand::Consumer::CameraFit)] = true;
+			vectorDemand = VectorDemand::Decide(merged);
+		}
+		else
+			vectorDemand = VectorDemand::Decide(input);
 		const ULONGLONG now = GetTickCount64();
 		if (!facts.vectorDemandSetting)
 		{

@@ -14,6 +14,7 @@
 
 #include "CameraFitProducer.h"
 
+#include <VP-V/core/LaneLease.h>
 #include <VP-V/core/ProductSlots.h>
 
 #include <condition_variable>
@@ -24,7 +25,7 @@
 
 namespace CameraLink
 {
-	enum class PublishOutcome : uint8_t { Published, LateClaim, LateNotWritable, LateInputs, LateSeal, NoProduct };
+	enum class PublishOutcome : uint8_t { Published, LateClaim, LateNotWritable, LateInputs, LateSeal, NoProduct, StaleLane };
 
 	inline const char* Text(PublishOutcome o)
 	{
@@ -35,16 +36,22 @@ namespace CameraLink
 		case PublishOutcome::LateNotWritable: return "late (slot still pinned)";
 		case PublishOutcome::LateInputs: return "late (inputs not published)";
 		case PublishOutcome::LateSeal: return "late (sealed before the publish)";
+		case PublishOutcome::StaleLane: return "refused (the lane graph was rebuilt after the job was submitted)";
 		default: return "no P7 product in the graph";
 		}
 	}
 
 	struct CameraFitEnv
 	{
-		VpSkeleton::SlotTable* table = nullptr;
+		// The lane objects (SlotTable, the P7 bytes ring, the Indicator) are held through a LaneLease, never raw pointers: the lane
+		// swaps them on every rebuild. `leaseSource` re-acquires the current lease (AnalysisLane::Lease bound to P7; thread-safe);
+		// `lease` is the first one. Standalone / tests without a lane: lease = LaneLease::Borrow(...) and no source (never stale).
+		VpSkeleton::LaneLease lease;
+		VpSkeleton::LaneLeaseSource leaseSource;
 		CameraRecordPool* pool = nullptr;
 		FitCounters* counters = nullptr;
-		std::function<uint8_t*(int slot)> slotBytes;                   // the P7 ring slot bytes (>= kRecordPodMaxBytes)
+		// Optional overrides; unset, the lease's bytes ring (>= kRecordPodMaxBytes per slot) and Indicator::StampOf are used.
+		std::function<uint8_t*(int slot)> slotBytes;                   // the P7 ring slot bytes
 		std::function<VpIndicator::Stamp(uint64_t seq)> stampOf;       // Indicator::StampOf, read AFTER the pins
 		size_t queueCapacity = 4;
 		// Called on the fitting thread after every job (published or late): status and the trace. Must be short.
@@ -66,7 +73,15 @@ namespace CameraLink
 		static int ThreadsEverStarted();   // test hook: the CameraOff test asserts it stays at its starting value
 
 		// Render thread. True: queued (a thread, or ProcessQueued, runs it). False: the queue is full (counted, fitter reset requested).
+		// Rebinds first (a changed lane generation is noticed here), then stamps the job with the lease's generation.
 		bool Submit(const CameraFitJob& job);
+
+		// ---- lane rebind (any thread; the camera link calls it every frame start) ----
+		// Takes the lane's CURRENT lease from env.leaseSource; true when it differs (counted in FitCounters::rebound). The old lease
+		// is released only when no publish in flight still holds it. No source (borrowed lease): never changes.
+		bool Rebind();
+		VpSkeleton::LaneLease Lease() const;   // a copy (shares the hold): safe to use after any rebuild
+		uint64_t LaneGeneration() const;       // the held lease's generation (0 = borrowed or none)
 		size_t Pending() const;
 
 		// Fit + publish on the calling thread (the worker thread calls this too).
@@ -82,6 +97,8 @@ namespace CameraLink
 
 		CameraFitProducer& m_producer;
 		CameraFitEnv m_env;
+		mutable std::mutex m_leaseMutex;      // guards m_lease (the render thread rebinds, the fit thread publishes)
+		VpSkeleton::LaneLease m_lease;
 		mutable std::mutex m_mutex;
 		std::condition_variable m_cv, m_idleCv;
 		std::deque<CameraFitJob> m_queue;

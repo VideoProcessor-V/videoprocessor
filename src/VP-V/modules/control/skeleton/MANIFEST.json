@@ -11,6 +11,7 @@
     "src/VP-V/modules/control/skeleton/SkeletonModule.h",
     "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
     "src/VP-V/modules/control/skeleton/SkeletonSettings.h",
+    "src/VP-V/modules/control/skeleton/SkeletonFacts.h",
     "src/VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h",
     "src/VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
     "src/VP-V/modules/control/skeleton/README.md",
