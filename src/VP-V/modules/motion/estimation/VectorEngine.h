@@ -5,7 +5,9 @@
 // (VectorEngineState) and the logic that used to be member functions of the renderer's Impl:
 //   P5a-3  the optical-flow producer's lifecycle and the look-ahead depth (PlanProducer);
 //   P5a-4  the vector-demand decision, its statistics service and the invalidation requests
-//          (UpdateVectorEngine, ServeStatistics, TakeInvalidation / LogInvalidation, the global-pair and shadow checks).
+//          (UpdateVectorEngine, ServeStatistics, TakeInvalidation / LogInvalidation, the global-pair and shadow checks);
+//   P5a-5  the matcher estimate's K4 pre-estimate hook (Estimate) and IVectorEngine (vpv.vector_engine.v1) from the
+//          state today's renderer has (the live matcher field, the validity epoch, the engine's whole-frame motion).
 // The renderer holds one member of this type (`vectorEngine`) and calls it at the sites the code used
 // to sit at. What the engine needs from the renderer comes in as plain values (ProducerInputs, the
 // VectorDemand::Input) or through the small IVectorEngineHost interface the renderer implements with
@@ -17,6 +19,7 @@
 #include <VP-V/modules/motion/estimation/ProducerPlan.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 #include <VP-V/modules/motion/estimation/VectorEngineState.h>
+#include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <IntentInterpreterObserver.h>
 
 #include <libplacebo/gpu.h>
@@ -24,6 +27,8 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <utility>
 
 namespace VpMotion
 {
@@ -42,9 +47,45 @@ namespace VpMotion
 		virtual void NoteIntentVectors(const IntentInterpreter::VectorSample& sample) = 0;
 	};
 
-	class VectorEngine : public VectorEngineState
+	// What the engine reads of the matcher whose type it does not see (EstimateState implements it; tests use a fake).
+	// Render thread.
+	class IMatcherView
 	{
 	public:
+		virtual ~IMatcherView() {}
+		virtual pl_tex LiveField() const = 0;             // the matcher's block field of its last Estimate (null = none)
+		virtual uint64_t LiveFieldFrom() const = 0;       // the A of the pair the live outputs hold (0 = none)
+		virtual bool MatcherGlobalFromEngine() const = 0; // the last Estimate's D1 came from the optical-flow engine
+	};
+
+	// K4: the guidance sink handed to the pre-estimate hook, 1:1 onto the matcher's SetCameraGuidance.
+	template<class Matcher>
+	class MatcherGuidanceSink : public IGuidanceSink
+	{
+	public:
+		explicit MatcherGuidanceSink(Matcher& matcher) : matcher_(matcher) {}
+		void SetCameraGuidance(std::shared_ptr<const CameraModel::GuidanceFrame> frame) override
+		{
+			matcher_.SetCameraGuidance(std::move(frame));
+		}
+
+	private:
+		Matcher& matcher_;
+	};
+
+	class VectorEngine : public VectorEngineState, public IVectorEngine
+	{
+	public:
+		// host: the renderer's RendererExtension host key; non-null registers this engine in the directory that
+		// Query(kVectorEngineQueryId) answers with (until destruction). Default: unregistered (tests).
+		VectorEngine() {}
+		explicit VectorEngine(const void* host);
+		~VectorEngine() override;
+		VectorEngine(const VectorEngine&) = delete;
+		VectorEngine& operator=(const VectorEngine&) = delete;
+		// The process-wide host -> engine directory (never destroyed: a renderer may outlive static teardown).
+		static IVectorEngineDirectory& Directory();
+
 		// What the producer plan reads from the renderer, as plain values. The two atomics are read
 		// at the points the old inline block read them (low latency first, the queue depth after the
 		// producer was acted on).
@@ -110,5 +151,74 @@ namespace VpMotion
 		bool TakeInvalidation(MotionValidity::Pending& pending);
 		// The first 50 invalidations are all logged; then at most one line per 5 s, but a new cause is always logged.
 		void LogInvalidation(const MotionValidity::Pending& pending);
+
+		// ---- P5a-5: the matcher estimate and its K4 pre-estimate hook (render thread) ---------------------------
+		// The estimate state binds itself as the engine's view of the matcher (null = unbound).
+		void BindMatcher(const IMatcherView* matcher) { matcher_ = matcher; }
+		// Runs the matcher's estimate of the pair (aSequence, bSequence). With a pre-estimate hook registered and
+		// `hookable` (not the warm-up's dummy estimate): BeforeEstimate(ctx, sink) right before, AfterEstimate(pairSeq,
+		// guidanceUsed, countsTex) right after. With no hook it is `estimate()` and nothing else (no sink, no matcher
+		// call, no GPU work). Either way a successful estimate is recorded for FieldOf. ahead: called from the estimate
+		// ahead (EstimateContext::ahead; today that is the render thread too). sourceHz: the content rate for
+		// nextPairSeconds (<= 0 unknown).
+		template<class Matcher, class EstimateFn>
+		bool Estimate(uint64_t aSequence, uint64_t bSequence, bool ahead, double sourceHz, bool hookable, Matcher& matcher,
+			EstimateFn&& estimate)
+		{
+			IPreEstimateHook* hook = hookable ? preEstimateHook_.load(std::memory_order_acquire) : nullptr;
+			if (!hook)
+			{
+				const bool done = estimate();
+				NoteEstimated(done, aSequence, bSequence);
+				return done;
+			}
+			EstimateContext ctx;
+			ctx.pairSeq = bSequence;
+			ctx.ahead = ahead;
+			ctx.nextPairSeconds = sourceHz > 0 && bSequence > aSequence ? static_cast<double>(bSequence - aSequence) / sourceHz : 0.0;
+			MatcherGuidanceSink<Matcher> sink(matcher);
+			hook->BeforeEstimate(ctx, sink);
+			const bool done = estimate();
+			const auto use = matcher.CameraGuidanceUsed();
+			const bool used = !(use.rejected && use.rejected[0]) &&
+				(use.modelGlobal || use.staticFromModel || use.matcherSkipped || use.narrowPass || use.e1Pass);
+			hook->AfterEstimate(ctx.pairSeq, used, used && (use.narrowPass || use.e1Pass) ? matcher.CameraGuidanceCounts() : nullptr);
+			NoteEstimated(done, aSequence, bSequence);
+			return done;
+		}
+		bool PreEstimateHooked() const { return preEstimateHook_.load(std::memory_order_acquire) != nullptr; }
+		// The optical-flow engine's whole-frame motion of the pair the matcher took ahead (flow->global[0], D1 format:
+		// 1/8-size texels, z ambiguity, w written); null = no producer pair. CPU record for EngineGlobal only.
+		void NoteEngineGlobal(uint64_t from, uint64_t to, const float* global, int searchHalvings);
+
+		// ---- IVectorEngine (vpv.vector_engine.v1), from today's state; render thread -----------------------------
+		// The verified field = the matcher's live block field (rgba32f: vx, vy in source px, trust, match error; one
+		// texel per 16x16 source block) of the last successful estimate, while the live outputs still hold that pair
+		// in the current validity epoch. seq = the pair's later frame (pairTo). Absent (0 / false) otherwise.
+		uint64_t LatestVerifiedFieldSeq() const override;
+		uint64_t FieldEra() const override;                  // the validity epoch
+		bool FieldOf(uint64_t seq, VerifiedField& out) const override;
+		float FieldScale() const override { return 1.0f; }   // the field is in source px
+		bool GlobalFromEngine() const override;
+		bool EngineGlobal(uint64_t seq, GlobalVec& out) const override;
+		// True unless every adjacent pair in [from, to] is valid in the current epoch and lies at or after the first
+		// estimate made in it; unknown = true (conservative).
+		bool PairSpansSlip(uint64_t from, uint64_t to) const override;
+		bool FlowIsCpuResident() const override { return false; }   // absent: no CPU field view is kept today
+		bool FlowOf(uint64_t, FlowView&) const override { return false; }
+		void SetPreEstimateHook(IPreEstimateHook* hook) override { preEstimateHook_.store(hook, std::memory_order_release); }
+		// Reservations (RefinedFieldOf, SubmitLongPair ...): IVectorEngine's "absent" defaults.
+
+	private:
+		void NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence);
+
+		const void* host_ = nullptr;
+		const IMatcherView* matcher_ = nullptr;
+		std::atomic<IPreEstimateHook*> preEstimateHook_{ nullptr };
+		struct FieldRecord { uint64_t from = 0, to = 0, epoch = 0; };
+		FieldRecord field_;                 // the last successful estimate (render thread)
+		uint64_t eraFirstFrom_ = 0;         // the A of the first successful estimate in field_.epoch
+		struct GlobalRecord { uint64_t from = 0, to = 0, epoch = 0; bool valid = false; double x = 0, y = 0; };
+		GlobalRecord global_;
 	};
 }

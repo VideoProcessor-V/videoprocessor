@@ -13,7 +13,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace VpMotion
 {
@@ -324,5 +327,156 @@ namespace VpMotion
 			motionInvalidateLoggedCause = cause;
 			motionRecoveryLogPending = true;
 		}
+	}
+
+	// ---- P5a-5: the host -> engine directory (Query("vpv.vector_engine.v1")) --------------------------------------
+	namespace
+	{
+		class EngineDirectory : public IVectorEngineDirectory
+		{
+		public:
+			IVectorEngine* EngineFor(const void* host) override
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				// The newest registration of a host wins (a replacement renderer never shares its predecessor's key).
+				for (auto it = engines_.rbegin(); it != engines_.rend(); ++it)
+					if (it->first == host)
+						return it->second;
+				return nullptr;
+			}
+			void Add(const void* host, VectorEngine* engine)
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				engines_.emplace_back(host, engine);
+			}
+			void Remove(const void* host, VectorEngine* engine)
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				for (auto it = engines_.begin(); it != engines_.end(); ++it)
+					if (it->first == host && it->second == engine)
+					{
+						engines_.erase(it);
+						return;
+					}
+			}
+
+		private:
+			std::mutex mutex_;
+			std::vector<std::pair<const void*, VectorEngine*>> engines_;
+		};
+
+		EngineDirectory& Engines()
+		{
+			static EngineDirectory* directory = new EngineDirectory();   // never destroyed (see VectorEngine::Directory)
+			return *directory;
+		}
+	}
+
+	VectorEngine::VectorEngine(const void* host) : host_(host)
+	{
+		if (host_)
+			Engines().Add(host_, this);
+	}
+
+	VectorEngine::~VectorEngine()
+	{
+		if (host_)
+			Engines().Remove(host_, this);
+	}
+
+	IVectorEngineDirectory& VectorEngine::Directory()
+	{
+		return Engines();
+	}
+
+	// ---- P5a-5: records for IVectorEngine (render thread; CPU only, nothing logged) ----------------------------------
+	void VectorEngine::NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence)
+	{
+		if (!done || aSequence == 0 || bSequence <= aSequence)
+			return;
+		const uint64_t epoch = motionValidity.Epoch();
+		if (epoch != field_.epoch || field_.from == 0)
+			eraFirstFrom_ = aSequence;
+		field_.from = aSequence;
+		field_.to = bSequence;
+		field_.epoch = epoch;
+	}
+
+	void VectorEngine::NoteEngineGlobal(uint64_t from, uint64_t to, const float* global, int searchHalvings)
+	{
+		global_ = GlobalRecord();
+		if (!global || from == 0 || to <= from)
+			return;
+		const double cell = DejudderPolicy::EngineCellSourcePixels(searchHalvings);
+		global_.from = from;
+		global_.to = to;
+		global_.epoch = motionValidity.Epoch();
+		// Usable as the statistics consumers use it (VectorDemand::SampleGlobal: ambiguity z < 0.9).
+		global_.valid = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(static_cast<double>(global[0]),
+			static_cast<double>(global[1]), searchHalvings), global[2], global[3], 0).usable;
+		global_.x = cell * static_cast<double>(global[0]);
+		global_.y = cell * static_cast<double>(global[1]);
+	}
+
+	// ---- P5a-5: IVectorEngine from today's state ---------------------------------------------------------------------
+	uint64_t VectorEngine::LatestVerifiedFieldSeq() const
+	{
+		VerifiedField field;
+		return FieldOf(field_.to, field) ? field_.to : 0;
+	}
+
+	uint64_t VectorEngine::FieldEra() const
+	{
+		return motionValidity.Epoch();
+	}
+
+	bool VectorEngine::FieldOf(uint64_t seq, VerifiedField& out) const
+	{
+		if (!matcher_ || seq == 0 || field_.from == 0 || seq != field_.to || matcher_->LiveFieldFrom() != field_.from ||
+			!motionValidity.Current(field_.epoch))
+			return false;
+		const pl_tex fwd = matcher_->LiveField();
+		if (!fwd)
+			return false;
+		out = VerifiedField();
+		out.seq = field_.to;
+		out.pairFrom = field_.from;
+		out.pairTo = field_.to;
+		out.fwd = fwd;
+		out.gridW = fwd->params.w;
+		out.gridH = fwd->params.h;
+		out.blockSize = 16;          // one texel per 16x16 source block (MotionWarp::Field)
+		out.scaleToSourcePx = 1.0f;  // the field's vectors are in source px
+		return true;
+	}
+
+	bool VectorEngine::GlobalFromEngine() const
+	{
+		return matcher_ && matcher_->MatcherGlobalFromEngine();
+	}
+
+	bool VectorEngine::EngineGlobal(uint64_t seq, GlobalVec& out) const
+	{
+		out = GlobalVec();
+		if (seq == 0 || seq != global_.to || !global_.valid || !motionValidity.Current(global_.epoch))
+			return false;
+		out.valid = true;
+		out.x = global_.x;
+		out.y = global_.y;
+		return true;
+	}
+
+	bool VectorEngine::PairSpansSlip(uint64_t from, uint64_t to) const
+	{
+		constexpr uint64_t kLongestKnownSpan = 64;
+		if (from == 0 || to <= from || to - from > kLongestKnownSpan)
+			return true;
+		// No estimate in the current epoch: where its run starts is unknown.
+		if (field_.from == 0 || !motionValidity.Current(field_.epoch) || from < eraFirstFrom_)
+			return true;
+		for (uint64_t k = from; k < to; ++k)
+			if (!motionValidity.PairValidAt(k, k + 1))
+				return true;
+		return false;
 	}
 }

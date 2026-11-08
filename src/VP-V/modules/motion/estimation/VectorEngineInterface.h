@@ -18,6 +18,8 @@
 
 namespace VpMotion
 {
+	// Query("vpv.vector_engine.v1") answers an IVectorEngineDirectory* (below): the hub's query carries no host and an
+	// engine is per renderer, so the consumer asks the directory for its host's engine (M2 P5a).
 	constexpr const char* kVectorEngineQueryId = "vpv.vector_engine.v1";
 
 	// Required texture capabilities: fwd, bwd and the counts texture must be SAMPLEABLE rgba32f (the camera readback copy pass
@@ -127,6 +129,18 @@ namespace VpMotion
 		}
 		virtual bool PollLongPair(uint64_t /*ticket*/, VerifiedField& /*out*/) { return false; }
 		virtual void CancelLongPair(uint64_t /*ticket*/) {}
+	};
+
+	// What Query(kVectorEngineQueryId) returns. EngineFor(host) = the engine of that renderer (host = the pointer the
+	// renderer passes as RendererExtension Context::host), or null when that renderer has none (not created yet,
+	// destroyed). Any thread (a mutex, never taken per frame by the engine). The pointer is valid until that renderer
+	// is destroyed: a consumer drops it at the host's GpuReleased / Shutdown and calls SetPreEstimateHook(nullptr)
+	// before its hook object goes.
+	class IVectorEngineDirectory
+	{
+	public:
+		virtual ~IVectorEngineDirectory() {}
+		virtual IVectorEngine* EngineFor(const void* host) = 0;
 	};
 
 	struct EstimateContext
