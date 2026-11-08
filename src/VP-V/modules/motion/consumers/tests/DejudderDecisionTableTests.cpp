@@ -12,6 +12,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/modules/motion/consumers/tests/DejudderDecisionRunnerHost.h>
 #include <VP-V/modules/motion/consumers/tests/DejudderDecisionSequences.h>
 
 #include <sstream>
@@ -171,6 +172,24 @@ namespace DejudderDecisionTableTest
 			const std::vector<DejudderDecisionLegacy::Sequence> sequences = DejudderDecisionLegacy::Sequences();
 			for (size_t i = 0; i < sequences.size() && i < sizeof(kSequences) / sizeof(kSequences[0]); ++i)
 				CheckSequence(kSequences[i], DejudderDecisionLegacy::RunSequenceLegacy(sequences[i].base, sequences[i].steps), L"copy");
+		}
+
+		// M2 P5b-3: the MOVED decision (DejudderPolicyRunner.h, the product template) over the same Facts.
+		TEST_METHOD(NewRunnerReproducesEveryRecordedRow)
+		{
+			for (const Row& row : kRows)
+			{
+				Facts f;
+				row.setup(f);
+				CheckRow(row, DejudderDecisionRunner::RunRow(f), L"runner");
+			}
+		}
+
+		TEST_METHOD(NewRunnerReproducesEveryRecordedSequence)
+		{
+			const std::vector<DejudderDecisionLegacy::Sequence> sequences = DejudderDecisionLegacy::Sequences();
+			for (size_t i = 0; i < sequences.size() && i < sizeof(kSequences) / sizeof(kSequences[0]); ++i)
+				CheckSequence(kSequences[i], DejudderDecisionRunner::RunSequence(sequences[i].base, sequences[i].steps), L"runner");
 		}
 	};
 }

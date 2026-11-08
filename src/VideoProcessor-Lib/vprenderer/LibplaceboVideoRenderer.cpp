@@ -116,6 +116,7 @@
 #include <VP-V/modules/motion/consumers/DejudderCacheStage.h>
 #include <VP-V/modules/motion/consumers/DejudderExtension.h>   // VPV-HOOK M2 P5b-2
 #include <VP-V/modules/motion/consumers/DejudderViews.h>   // VPV-HOOK M2 P5b-2 (includes DejudderState.h)
+#include <VP-V/modules/motion/consumers/DejudderEstimateCall.h>   // VPV-HOOK M2 P5b-3
 #include <VP-V/modules/output/dither/SigmaDeltaVectors.h>
 #include <VP-V/modules/output/dither/DitherSlot.h>
 // VP-V pipeline skeleton (src/VP-V; see src/VP-V/README.md): the slot registry, the entrance
@@ -15371,340 +15372,11 @@ struct LibplaceboVideoRenderer::Impl
 		bool flipped, uint64_t sourceSequence, bool cadenceRepeat, bool nativeRgb, bool interlaced,
 		double sourceHz, uint64_t nextSourceSequence)
 	{
-		// MotionValidity step 1 C: the kept run. Cadence repeats and smooth motion's
-		// extra draws carry the same sequence (Repeat: the run continues); a hole
-		// nothing else reported (a drop) invalidates here, before this estimate.
-		motionValidity.NoteKept(sourceSequence, MotionValidity::Cause::DriftDrop);
-		ApplyMotionInvalidate();
-		dejudderSourceHz = sourceHz;
-		// Vector engine on demand: what wants vectors this frame (previous-frame state), and backward pairs.
-		// VPV-HOOK
-		{
-		auto vectorHost = VpMotion::MakeVectorEngineHost(*this);
-		VpMotion::VectorEngine::UpdateFacts vectorFacts;
-		vectorFacts.vectorDemandSetting = activeSettings.vectorDemand; vectorFacts.sigmaDeltaRanLast = sigmaDeltaRanLast;
-		vectorFacts.ditherVectorsOwn = activeSettings.ditherVectorsOwn;
-		vectorEngine.UpdateVectorEngine(VectorDemandInput(interlaced), vectorFacts, vectorHost);
-		if (vectorDemand.mode != VectorDemand::Mode::Off && !cadenceRepeat)
-		{
-			VpMotion::VectorEngine::ServeFacts serve;
-			serve.legacyConsumer = (dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
-				dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers)) || interpolating;
-			serve.lowResSearch = activeSettings.dejudderLowRes != "off";
-			serve.vectorDeliveryRuns = pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery);
-			serve.pictureHeight = dejudderPicture.available && dejudderPicture.rasterHeight == height &&
-				dejudderPicture.bottom > dejudderPicture.top ? dejudderPicture.bottom - dejudderPicture.top : height;
-			vectorEngine.ServeStatistics(sourceSequence, nextSourceSequence, width, height, serve, vectorHost);
-		}
-		}
-		// VPV-HOOK-END
-		// Off and settled: today's path, nothing else is done.
-		if (!(activeSettings.dejudderStrength > 0.0) && !(activeSettings.dejudderStrengthEven > 0.0) &&
-			!activeSettings.occlusionMask && !adaptiveGrainMapWanted && !vectorDemand.estimate &&
-			activeSettings.interpolation == InterpolationPolicy::Mode::Off && !interpolating && !vpGapFillStandalone &&
-			dejudderReason == DejudderPolicy::Reason::Off &&
-			dejudderReasonChangesNotLogged == 0 && !dejudder && !dejudderNextTextures[0] &&
-			!(activeSettings.interpolationFillGaps && motionEngineWarmPending))   // H3 F4: load the idle engine first
-		{
-			if (activeSettings.vectorDemand && vectorDemand.mode != VectorDemand::Mode::Off)
-				PublishDejudderStatus();   // the vector engine's line stays on the stats
-			else if (dejudderStatusTick != 0)
-			{
-				dejudderStatusTick = 0;
-				std::lock_guard<std::mutex> guard(dejudderStatusMutex);
-				dejudderStatus.clear();
-			}
-			return;
-		}
-		const AlphaPresentationSnapshot telemetry = presentationTelemetry.Snapshot();
-		DejudderPolicy::Input in;
-		in.strength = activeSettings.dejudderStrength;
-		in.strengthEven = activeSettings.dejudderStrengthEven;
-		in.evenIncludes1001 = activeSettings.dejudderEvenIncludes1001;
-		in.occlusionMask = activeSettings.occlusionMask;
-		in.grainMap = adaptiveGrainMapWanted;
-		in.lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
-		in.sourceHz = sourceHz;
-		// Render-ahead without statistics: the extras' open-loop rate (the same one
-		// PresentDejudderExtras plans with), so the cadence ratio agrees.
-		in.displayHz = telemetry.measuredDisplayHz > 0.0 ? telemetry.measuredDisplayHz :
-			RenderAheadActive() && dejudderDisplayRate.openLoop ? dejudderDisplayRate.hz : customHookRefreshHz;
-		in.interlaced = interlaced;
-		in.nativeRgb = nativeRgb;
-		in.haveNext = next != nullptr;
-		in.nextMatches = next && current &&
-			next->Bytes() == current->Bytes() && next->Raw() == current->Raw() &&
-			(!next->Raw() || next->rawEncoding == current->rawEncoding) &&
-			next->dvTunnelRaw == current->dvTunnelRaw &&
-			next->contract.sampleRange == contract.sampleRange &&
-			next->contract.colorDepth == contract.colorDepth &&
-			next->contract.bitShift == contract.bitShift &&
-			// Bug hunt 2026-10-17: on the DV tunnel never pair an untrusted B
-			// (black frame) or a DV picture with an SDR fallback.
-			// By the capture encoding (every payload), not rawEncoding (raw only).
-			DejudderPolicy::DolbyVisionNextPairs(dejudderDolbyVisionTunnel, *current, *next,
-				activeSettings.motionHistoryFixes);   // Hunt 2 02-dv L2: byte-equal DM matrices
-		const auto usable = [](pl_tex tex)
-		{
-			return tex && tex->params.sampleable && (tex->params.format->caps & PL_FMT_CAP_LINEAR) &&
-				(tex->params.format->caps & PL_FMT_CAP_STORABLE);
-		};
-		in.planeFormatsUsable = nativeRgb || (dejudderRgbLuma ? usable(dejudderRgbLuma) :
-			(usable(textures[0]) && usable(textures[1])));
-		in.smoothMotion = smoothMotionEngine || temporalRenderer.Mixing();
-		in.generalRates = activeSettings.generalRateFixes;   // fixed-constant batch 2026-10-18
-		DejudderPolicy::Reason reason = DejudderPolicy::Decide(in);
-		dejudderExtrasAllowed = DejudderPolicy::ExtrasAllowed(in);
-		// Delta 10 (general): the strength the extras run at, and on an even
-		// cadence its cycle N (extras at the exact phases k/N).
-		dejudderEffectiveStrength = static_cast<float>(DejudderPolicy::EffectiveStrength(in));
-		// Motion intent (intent interpreter item 2, 2026-10-17): the owner's strength times
-		// the per-shot scale in [intent_motion_min, 1], changed only at cuts (1 while off).
-		if (activeSettings.intentMotion)
-			dejudderEffectiveStrength *= static_cast<float>(intentInterpreter->AppliedMotionScale(sourceSequence));
-		dejudderEvenCycle = DejudderPolicy::EvenCycle(DejudderPolicy::CadenceRatio(in.sourceHz, in.displayHz));
-		// 50/60p interpolation (plan step 2 / 4): from the same measured rates; it takes
-		// a source the de-judder does not (exclusive per frame).
-		{
-			InterpolationPolicy::Input ii;
-			ii.mode = activeSettings.interpolation;
-			ii.sourceClass = activeSettings.sourceClass;
-			// The measured content rate and display rate the timeline schedules with.
-			ii.sourceHz = pulldownFilmHz > 0.0 ? pulldownFilmHz : vpCaptureRateHz > 0.0 ? vpCaptureRateHz : in.sourceHz;
-			ii.displayHz = TimelineDisplayHz() > 0.0 ? TimelineDisplayHz() : in.displayHz;
-			ii.pulldownLocked = pulldownFilmHz > 0.0;
-			ii.dejudderStrength = in.strength;
-			ii.dejudderStrengthEven = in.strengthEven;
-			ii.dejudderEvenIncludes1001 = in.evenIncludes1001;
-			ii.smoothMotion = in.smoothMotion;
-			ii.lowLatency = in.lowLatency;
-			ii.interlaced = in.interlaced;
-			ii.nativeRgb = nativeRgb || dejudderRgbLuma != nullptr;   // RGB holds (owner)
-			// A subtitle-composed picture holds in the extras (no source planes to interpolate), per
-			// frame: not decided here, so a cue does not release and rebuild the matcher.
-			ii.subtitleComposed = false;
-			ii.haveNext = in.haveNext && in.nextMatches;
-			ii.perVsyncAvailable = true;   // Stage B: the per-vsync timeline (ratios below 1)
-			ii.classFixes = activeSettings.cadenceClassFixes;   // Hunt 2 (06-interp M2/L5)
-			ii.generalRates = activeSettings.generalRateFixes;   // fixed-constant batch 2026-10-18
-			interpolationDecision = InterpolationPolicy::Decide(ii);
-			interpolating = interpolationDecision.Interpolates();
-			LogInterpolationDecision(ii);
-		}
-		if (interpolating)
-		{
-			// The estimate runs for the interpolator whatever the de-judder's cadence
-			// rules say (a video-rate source); the checks the policy has not made.
-			reason = !in.planeFormatsUsable ? DejudderPolicy::Reason::PlaneFormat :
-				!in.haveNext ? DejudderPolicy::Reason::NoNextFrame :
-				!in.nextMatches ? DejudderPolicy::Reason::NextFrameDiffers : DejudderPolicy::Reason::Active;
-			// Stage A (the extras) only until the per-vsync timeline presents (Stage B): it
-			// covers every ratio and every refresh's true phase, A's own included.
-			dejudderExtrasAllowed = !vpTimelineActive;
-			dejudderEffectiveStrength = 1.0f;   // the true phase: no taste
-			const int whole = InterpolationPolicy::WholeRatio(interpolationDecision.ratio);
-			dejudderEvenCycle = whole >= 2 ? whole : 0;   // always: exact k/N at a whole ratio
-		}
-		else if (interpolationDecision.reason == InterpolationPolicy::Reason::NoNextFrame)
-		{
-			// Interpolating but for B (not queued yet, or a different layout): keep the matcher,
-			// the interpolator and the producer (the de-judder's own rules would release them for
-			// a video-rate source); this frame holds A.
-			reason = !in.haveNext ? DejudderPolicy::Reason::NoNextFrame : DejudderPolicy::Reason::NextFrameDiffers;
-			dejudderExtrasAllowed = false;
-		}
-		// Hiccup repair without motion smoothing (owner 2026-10-17, interpolation_fill_gaps):
-		// a gap pair the render loop offered is presented by the timeline's interpolator,
-		// with the pair's vectors, for this frame only; every other frame is decided as above.
-		vpGapPhaseScale = 1.0f;
-		if (vpGapFillStandalone && !interpolating && !in.lowLatency && !in.interlaced && !in.smoothMotion &&
-			!nativeRgb && !dejudderRgbLuma && in.sourceHz > 0.0 && in.displayHz > 0.0)
-		{
-			// Bug hunt 3 F5: on a source the de-judder is active on, its decision stands for
-			// this frame (the owner's strength x the intent scale, the even cycle): the timeline
-			// draws the pair at phase x strength. Otherwise the true phase (strength 1).
-			const InterpolationTimeline::StandaloneGapDecision gap = InterpolationTimeline::StandaloneGap(
-				reason == DejudderPolicy::Reason::Active, dejudderEffectiveStrength);
-			interpolating = true;
-			reason = !in.planeFormatsUsable ? DejudderPolicy::Reason::PlaneFormat :
-				!in.haveNext ? DejudderPolicy::Reason::NoNextFrame :
-				!in.nextMatches ? DejudderPolicy::Reason::NextFrameDiffers : DejudderPolicy::Reason::Active;
-			dejudderExtrasAllowed = false;   // the timeline draws this frame's refreshes
-			dejudderEffectiveStrength = gap.strength;
-			if (!gap.keepActive)
-				dejudderEvenCycle = 0;
-			vpGapPhaseScale = gap.phaseScale;
-		}
-		if (in.sourceHz > 0.0 && in.displayHz > 0.0)
-			dejudderExtraStats.cadenceRatio = DejudderPolicy::CadenceRatio(in.sourceHz, in.displayHz);
-		if (reason == DejudderPolicy::Reason::VideoRateMaskOnly && !dejudderMaskRateLogged)
-		{
-			DebugLog::Log("De-judder: the occlusion mask / grain map alone is for film-like sources (source %.3f Hz is video); off for this source",
-				in.sourceHz);
-			dejudderMaskRateLogged = true;
-		}
-		// Vector engine on demand: a forward estimate for an analysis consumer although the de-judder's own
-		// policy says the extras do not run. dejudderReason / dejudderExtrasAllowed stay as decided above.
-		const bool analysisEstimate = vectorDemand.estimate && vectorDemand.mode == VectorDemand::Mode::Forward &&
-			in.planeFormatsUsable && in.haveNext && in.nextMatches &&
-			(reason == DejudderPolicy::Reason::Off || reason == DejudderPolicy::Reason::VideoRateMaskOnly ||
-			reason == DejudderPolicy::Reason::IneligibleCadence ||
-			(reason == DejudderPolicy::Reason::LowLatency && vectorDemand.lowLatencyAllowed) ||
-			reason == DejudderPolicy::Reason::SmoothMotion ||
-			(reason == DejudderPolicy::Reason::NativeRgb && dejudderRgbLuma));
-		PublishDejudderStatus(reason != dejudderReason);
-		// A reason that flips (e.g. the queue running low) logs at most one
-		// line per 5 s; once the 5 s pass, the reason then current is logged
-		// with the number of changes not shown, so the log never ends stale.
-		if (reason != dejudderReason)
-		{
-			++dejudderReasonChangesNotLogged;
-			dejudderReason = reason;
-			// Report-a-problem: a = reason code, b = changes skipped by the 250 ms limit,
-			// x = source Hz, y = display Hz.
-			const ULONGLONG diagNow = GetTickCount64();
-			if (diagDejudderModeTick == 0 || diagNow - diagDejudderModeTick >= 250)
-			{
-				DiagnosticHistory::Global().RecordDecision("dejudder-mode", DejudderPolicy::Name(reason),
-					static_cast<int64_t>(reason), static_cast<int64_t>(diagDejudderModeSkipped), in.sourceHz, in.displayHz);
-				diagDejudderModeTick = diagNow;
-				diagDejudderModeSkipped = 0;
-			}
-			else
-				++diagDejudderModeSkipped;
-		}
-		if (dejudderReasonChangesNotLogged > 0)
-		{
-			const ULONGLONG now = GetTickCount64();
-			if (dejudderReasonLogTick == 0 || now - dejudderReasonLogTick >= 5000)
-			{
-				const std::string skipped = dejudderReasonChangesNotLogged > 1 ?
-					", " + std::to_string(dejudderReasonChangesNotLogged - 1) + " changes not logged" : std::string();
-				DebugLog::Log("De-judder: %s (strength %.2f, extras %s, occlusion mask %s, source %.3f Hz, display %.3f Hz, match tolerance %.1f%s)",
-					DejudderPolicy::Name(reason), in.strength, dejudderExtrasAllowed ? "on" : "off",
-					in.occlusionMask ? "on" : "off", in.sourceHz, in.displayHz,
-					activeSettings.dejudderMatchTolerance, skipped.c_str());
-				dejudderReasonLogTick = now;
-				dejudderReasonChangesNotLogged = 0;
-			}
-		}
-		if (!analysisEstimate && (reason == DejudderPolicy::Reason::Off || reason == DejudderPolicy::Reason::LowLatency ||
-			reason == DejudderPolicy::Reason::Interlaced || reason == DejudderPolicy::Reason::VideoRateMaskOnly ||
-			reason == DejudderPolicy::Reason::IneligibleCadence || reason == DejudderPolicy::Reason::NativeRgb ||
-			reason == DejudderPolicy::Reason::SmoothMotion))
-		{
-			// Bug hunt 3 F4 (owner 2026-10-18): with hiccup repair on, the motion engine stays
-			// loaded and idle for every reason a gap pair can still be repaired under (the
-			// standalone repair needs no low latency, interlacing, smooth motion or native RGB):
-			// no create at a hiccup, no release after it, nothing run per frame. Low video memory
-			// (an allocation failed, or DXGI reports budget pressure) releases it; the next gap
-			// pair recreates it once the pressure has passed (MotionEngineIdle).
-			const bool repairPossible = reason == DejudderPolicy::Reason::Off ||
-				reason == DejudderPolicy::Reason::VideoRateMaskOnly || reason == DejudderPolicy::Reason::IneligibleCadence;
-			const bool held = dejudder || dejudderNextTextures[0];
-			if (held && activeSettings.interpolationFillGaps && repairPossible)
-				PollMotionEngineBudget(width, height, true);
-			const bool keepForGaps = motionEngineIdle.Keep(activeSettings.interpolationFillGaps, repairPossible);
-			// H3 F4 follow-up: loaded and idle from the source's start, not at its first hiccup.
-			if (!held && keepForGaps && motionEngineWarmPending)
-				WarmIdleMotionEngine(contract, lossless422, nativeRgb);
-			else if (!keepForGaps)
-				motionEngineWarmPending = false;   // not wanted for this source: the first gap pair creates it
-			if (held && !keepForGaps)
-			{
-				motionEngineWarmPending = false;   // recreated by the next gap pair, never mid-play
-				if (activeSettings.interpolationFillGaps && repairPossible && motionEngineIdle.Pressured() &&
-					motionEngineIdleReleasesLogged != motionEngineIdle.Pressures())
-				{
-					motionEngineIdleReleasesLogged = motionEngineIdle.Pressures();
-					DebugLog::Log("Motion engine: released while idle (low video memory: an allocation failed or the "
-						"budget is under pressure; %llu times); hiccup repair recreates it once the pressure has passed",
-						static_cast<unsigned long long>(motionEngineIdle.Pressures()));
-				}
-				ReleaseDejudder();
-			}
-			return;
-		}
-		if ((reason != DejudderPolicy::Reason::Active && !analysisEstimate) || cadenceRepeat ||
-			sourceSequence == dejudderEstimatedSequence)
-			return;
-		// MotionValidity step 1 D: (A, B) only as adjacent frames of the current epoch
-		// (the dequeue already drops B after a gap, a repeat, a film update or a
-		// different state).
-		// Gap fill: the pair the render loop offered across a short loss (a dropped queued frame
-		// leaves a sequence hole), in the current epoch.
-		const bool fillPair = vpFillNextSequence != 0 && vpFillNextSequence == nextSourceSequence &&
-			nextSourceSequence > sourceSequence &&
-			nextSourceSequence - sourceSequence <= static_cast<uint64_t>((std::max)(vpFillMaxSpan, 1)) &&
-			motionValidity.Current(motionValidity.EpochOfLastKept());
-		if (!fillPair && !motionValidity.PairValid(sourceSequence, nextSourceSequence, motionValidity.EpochOfLastKept(),
-			motionValidity.Epoch()))
-			return;
-		// Stage B: a frame no refresh shows (a source faster than the display) needs no
-		// pair (the producer still computes its pairs ahead).
-		if (vpTimelineActive && vpSkipOutput)
-			return;
-		// B's layout, for C (estimate ahead) to match.
-		dejudderLayout.valid = true;
-		dejudderLayout.width = width;
-		dejudderLayout.height = height;
-		dejudderLayout.chromaHeight = chromaHeight;
-		dejudderLayout.rowBytes = rowBytes;
-		dejudderLayout.pixelBytes = next->Bytes();
-		dejudderLayout.raw = next->Raw();
-		dejudderLayout.rawEncoding = next->Raw() ? next->rawEncoding : VideoFrameEncoding::UNKNOWN;
-		dejudderLayout.dvTunnelRaw = next->dvTunnelRaw;
-		dejudderLayout.rgb = dejudderRgbLuma != nullptr;
-		dejudderLayout.bt2020 = dejudderRgbBt2020;
-		dejudderLayout.lossless422 = lossless422;
-		dejudderLayout.fullRange = contract.sampleRange == VideoFrameSampleRange::FULL;
-		dejudderLayout.contract = contract;
-		// Owner 2026-10-13 (estimate ahead): this pair (A, B) was estimated in
-		// the last frame's extras, with B the same frame: the field, the trust,
-		// A's mask and the grain are ready, and B's planes are the ahead ones.
-		if (dejudderAhead.Consume(sourceSequence, nextSourceSequence))
-		{
-			std::swap(dejudderNextTextures[0], dejudderAheadTextures[0]);
-			std::swap(dejudderNextTextures[1], dejudderAheadTextures[1]);
-			std::swap(dejudderNextUpload, dejudderAheadUpload);   // efficiency_fixes: the records follow
-			dejudderNextUploadedSequence = nextSourceSequence;
-			dejudderEstimatedSequence = sourceSequence;
-			dejudderEstimatedEpoch = motionValidity.Epoch();
-			dejudderEstimatedPeriods = 1;   // estimated ahead: an adjacent pair
-			LogDejudderAhead();
-			return;
-		}
-		LogDejudderAhead();
-		// B: the same plane layout as A's upload above.
-		dejudderNextUploadedSequence = 0;
-		if (!UploadDejudderPlanes(next, dejudderNextTextures, &dejudderNextUpload, nextSourceSequence))
-		{
-			motionEngineIdle.NoteAllocationFailure(static_cast<double>(GetTickCount64()) / 1000.0);   // Bug hunt 3 F4
-			if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
-				DebugLog::Log("De-judder: uploading the next frame failed; off for this frame (%llu failures)",
-					dejudderFailures);
-			return;
-		}
-		dejudderNextUploadedSequence = nextSourceSequence;
-		(void)flipped;   // A and B share the orientation; the warp keeps it.
-		Dejudder::Planes a, b;
-		a.luma = dejudderRgbLuma ? dejudderRgbLuma : textures[0];
-		a.chroma = dejudderRgbLuma ? nullptr : textures[1];
-		a.chromaShiftX = 1;
-		a.chromaShiftY = lossless422 ? 0 : 1;
-		a.fullRange = contract.sampleRange == VideoFrameSampleRange::FULL;   // delta 5, D5-3
-		b = a;
-		b.luma = dejudderNextTextures[0];
-		b.chroma = dejudderRgbLuma ? nullptr : dejudderNextTextures[1];
-		const uint64_t estimateEpoch = motionValidity.Epoch();
-		if (RunDejudderEstimate(a, b, sourceSequence, nextSourceSequence))
-		{
-			dejudderEstimatedSequence = sourceSequence;
-			dejudderEstimatedEpoch = estimateEpoch;
-			// Bug hunt 3 F10: a gap pair's field spans the missed periods too.
-			dejudderEstimatedPeriods = InterpolationTimeline::FieldPeriods(fillPair && vpFillGapFrames > 0, vpFillGapFrames);
-		}
+		RunDejudderPolicy(DejudderEstimateCall{ next, current, contract, width, height, rowBytes, chromaHeight, lossless422,
+			flipped, sourceSequence, cadenceRepeat, nativeRgb, interlaced, sourceHz, nextSourceSequence });   // VPV-HOOK M2 P5b-3
 	}
+	using DejudderEstimateCall = VpMotion::DejudderEstimateCallT<QueuedFrame::ConvertedPayload, VideoFrameFormatterOutputContract>;   // VPV-HOOK M2 P5b-3
+	void RunDejudderPolicy(const DejudderEstimateCall& call);   // VPV-HOOK M2 P5b-3: defined in VP-V/modules/motion/consumers/DejudderPolicyRunner.inl
 
 	void WarmIdleMotionEngine(const VideoFrameFormatterOutputContract& contract, bool lossless422, bool nativeRgb);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/EngineKeeper.inl
 
@@ -15713,50 +15385,11 @@ struct LibplaceboVideoRenderer::Impl
 
 	// Interpolation: the decision when it changes (at most one line per 5 s), with the
 	// measured rates it came from.
-	void LogInterpolationDecision(const InterpolationPolicy::Input& in)
-	{
-		if (in.mode == InterpolationPolicy::Mode::Off && interpolationReasonLogged < 0)
-			return;
-		const int reason = static_cast<int>(interpolationDecision.reason);
-		if (reason == interpolationReasonLogged)
-			return;
-		// The first changes are all logged (the start: rates and the queue settling);
-		// then at most one line per 5 s.
-		const ULONGLONG now = GetTickCount64();
-		if (interpolationLogCount >= 20 && interpolationLogTick != 0 && now - interpolationLogTick < 5000)
-			return;
-		++interpolationLogCount;
-		interpolationLogTick = now;
-		interpolationReasonLogged = reason;
-		DebugLog::Log("Interpolation: %s (interpolation=%s, fallback=%s, source_class=%s, source %.3f Hz%s, display %.3f Hz, "
-			"ratio %.4f, %s; %llu interpolated pictures so far)",
-			InterpolationPolicy::Name(interpolationDecision.reason), InterpolationPolicy::Name(in.mode),
-			InterpolationPolicy::Name(activeSettings.interpolationFallback), InterpolationPolicy::Name(in.sourceClass),
-			in.sourceHz, in.pulldownLocked ? " (pulldown film clock)" : "", in.displayHz, interpolationDecision.ratio,
-			interpolationDecision.filmLike ? "film-like" : "video", interpolatedPresents);
-	}
+	void LogInterpolationDecision(const InterpolationPolicy::Input& in);   // VPV-HOOK M2 P5b-3: defined in VP-V/modules/motion/consumers/DejudderPolicyRunner.inl
 
 	// Estimate ahead: at most one line per 5 s, with the paths so far and the
 	// last reason a frame was not estimated ahead.
-	void LogDejudderAhead()
-	{
-		if (!activeSettings.dejudderEstimateAhead)
-			return;
-		const ULONGLONG now = GetTickCount64();
-		if (dejudderAheadLogTick != 0 && now - dejudderAheadLogTick < 5000)
-			return;
-		dejudderAheadLogTick = now;
-		using Reason = Dejudder::AheadSchedule::Reason;
-		DebugLog::Log("De-judder estimate ahead: %llu frames ahead, %llu before the frame (%llu estimated ahead for a "
-			"pair that did not come); not ahead: no frame after next %llu, source warp %llu, other %llu; last: %s",
-			dejudderAhead.Hits(), dejudderAhead.Sequential(), dejudderAhead.Misses(),
-			dejudderAhead.Count(Reason::NoAfter), dejudderAhead.Count(Reason::SourceWarp),
-			dejudderAhead.Count(Reason::AfterNotNew) + dejudderAhead.Count(Reason::NotEstimated) +
-				dejudderAhead.Count(Reason::Layout) + dejudderAhead.Count(Reason::SnapshotFailed) +
-				dejudderAhead.Count(Reason::UploadFailed) + dejudderAhead.Count(Reason::EstimateFailed) +
-				dejudderAhead.Count(Reason::NoNext) + dejudderAhead.Count(Reason::NotActive),
-			Dejudder::AheadSchedule::Name(dejudderAhead.LastReason()));
-	}
+	void LogDejudderAhead();   // VPV-HOOK M2 P5b-3: defined in VP-V/modules/motion/consumers/DejudderPolicyRunner.inl
 
 	bool UploadDejudderPlanes(const std::shared_ptr<const QueuedFrame::ConvertedPayload>& payloadPtr, pl_tex (&dst)[2], DejudderPlaneUpload* upload = nullptr, uint64_t sequence = 0);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/VectorEngineEstimate.inl
 
@@ -15799,22 +15432,10 @@ struct LibplaceboVideoRenderer::Impl
 		int64_t swapEndQpc = 0;   // render-ahead: when A's Present returned (the target lead's base)
 	};
 
-	void DejudderHold(const char* why)
-	{
-		// Report-a-problem: one repeated-stage frame row per hold and a decision when the
-		// reason changes; the hold lines (VP diagnostics adapter).
-		VpDiagnostics::RecordDejudderHold({ why, diagExtrasCounter, diagExtrasSequence, RenderAheadActive(),
-			dejudderDisplayRate.openLoop, diagRendererGeneration, dejudderExtraStats.holds }, diagLastHoldCode);
-		++dejudderExtraStats.holds;
-		dejudderExtraStats.lastHold = why;
-		dejudderHoldLog.OnHold(why, dejudderExtraStats.holds);
-		// Render-ahead: every hold also shows on the "Render-ahead:" line with the gate's level.
-		if (RenderAheadActive())
-			LogRenderAhead(dejudderExtraStats.cadenceRatio, renderAheadGate.Level(), why);
-	}
+	void DejudderHold(const char* why);   // VPV-HOOK M2 P5b-3: defined in VP-V/modules/motion/consumers/DejudderPolicyRunner.inl
 
 	// The last hold lines at teardown, so the last holds are never lost.
-	void FlushDejudderHolds() { dejudderHoldLog.Flush(dejudderExtraStats.holds); }
+	void FlushDejudderHolds();   // VPV-HOOK M2 P5b-3: defined in VP-V/modules/motion/consumers/DejudderPolicyRunner.inl
 
 	bool PresentDejudderExtras(const DejudderExtrasFrame& f)
 	{
@@ -27013,6 +26634,7 @@ releaseDriftBaseRetention =
 	Vpv::Capture::HostBinding captureBinding{ this, Vpv::Capture::MakeCaptureHost(*this) };   // P10: last member (registered last, removed first)   // VPV-HOOK
 };
 #include <VP-V/modules/motion/estimation/VectorEngineEstimate.inl>   // VPV-HOOK P5a-5: the estimate and the engine keeper (Impl members)
+#include <VP-V/modules/motion/consumers/DejudderPolicyRunner.inl>   // VPV-HOOK M2 P5b-3: the de-judder policy (Impl members)
 #include <VP-V/modules/input/capture/CaptureImpl.inl>   // P10: the capture code (Impl members)   // VPV-HOOK
 #include <VP-V/segments/CoreSegments.inl>   // VPV-HOOK P4-2: UpdatePipelineSlots, OrderFrameSlotHooks (Impl members)
 #include <VP-V/segments/EntranceHostMembers.inl>   // VPV-HOOK P4-5: the entrance host B3 helpers, RenderCrossfadeMix, DrainEntranceBeforeRender (Impl members)
