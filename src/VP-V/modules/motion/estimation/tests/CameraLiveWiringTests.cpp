@@ -82,6 +82,7 @@ namespace CameraLiveWiringTestsNs
 	{
 		uint64_t latest = 0;
 		bool seeded = true;   // F2: the optical-flow seed fed every pair (the camera fit's only input)
+		bool skipped = false; // ... with seeded false: the latest pair's searches were skipped (a cut)
 		VpMotion::IPreEstimateHook* hook = nullptr;
 		std::vector<VpMotion::IPreEstimateHook*> history;
 		std::function<void(VpMotion::IPreEstimateHook*)> onSet;
@@ -104,9 +105,13 @@ namespace CameraLiveWiringTestsNs
 		float FieldScale() const override { return 1.0f; }
 		bool SeedFieldOf(uint64_t seq, VpMotion::SeedField& out) const override
 		{
-			if (!seeded || seq == 0 || seq > latest)
-				return false;
 			out = VpMotion::SeedField();
+			if (!seeded || seq == 0 || seq > latest)
+			{
+				if (!seeded && skipped && seq == latest)
+					out.absence = VpMotion::SeedAbsence::Skipped;
+				return false;
+			}
 			out.seq = seq;
 			out.pairFrom = seq - 1;
 			out.pairTo = seq;
@@ -405,24 +410,49 @@ namespace VideoProcessorTest
 		// the guided live field instead; the seed's return builds the live parts.
 		TEST_METHOD(AnEngineWithoutTheOpticalFlowSeedIsAVisibleCameraFitFallback)
 		{
-			Rig rig(std::string(kLinkOn) + "[vpv.camera]
-camera_model=on
-");
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\n");
 			rig.engine.seeded = false;
 			rig.Start(4);
 			Assert::IsFalse(rig.ext.LiveBuilt(rig.Host()), L"FieldOf answers, but the fit never reads it");
 			const std::string want = "camera_fit: camera fit needs the optical-flow seed (engine off or matcher-only)";
 			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), want.c_str()), L"a fallback entry with id camera_fit");
 			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Lines), "waiting for the first vector field"), L"named, not a plain wait");
+			// M2 condition 2: the Fallbacks kind is what the renderer's GetFallbacksStatus (Config status, Ctrl+I) shows; the camera
+			// status command (Ctrl+Alt+D) carries it too.
+			{
+				std::string reply;
+				RE::Context c;
+				c.host = rig.Host();
+				Assert::IsTrue(rig.ext.OnCommand(c, "camera", "status", reply));
+				Assert::IsTrue(reply.find(want) != std::string::npos, L"also in the Ctrl+Alt+D text");
+			}
 			rig.engine.seeded = true;
 			for (int64_t s = 5; s <= 8; ++s)
 				rig.Frame(s);
 			Assert::IsTrue(rig.ext.LiveBuilt(rig.Host()));
 			Assert::IsFalse(Has(rig.Lines(RE::StatusKind::Fallbacks), "optical-flow seed"), L"released with the seed");
 			rig.engine.seeded = false;
-			for (int64_t s = 9; s <= 10; ++s)
+			for (int64_t s = 9; s <= 17; ++s)   // the cached status refreshes at frames <= 8, then every 16th (frame 17)
 				rig.Frame(s);
 			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), want.c_str()), L"also visible once live");
+		}
+
+		// F2: a pair whose searches were skipped (a cut) has no seed: its own wording, not "engine off or matcher-only".
+		TEST_METHOD(ACutPairWithoutASeedSaysSo)
+		{
+			Rig rig(std::string(kLinkOn) + "[vpv.camera]\ncamera_model=on\n");
+			rig.engine.seeded = false;
+			rig.engine.skipped = true;
+			rig.Start(4);
+			Assert::IsFalse(rig.ext.LiveBuilt(rig.Host()));
+			const std::vector<std::string> fb = rig.Lines(RE::StatusKind::Fallbacks);
+			Assert::IsTrue(Has(fb, "camera_fit: camera fit skipped this pair (cut: no seed)"));
+			Assert::IsFalse(Has(fb, "engine off or matcher-only"), L"a cut is not an engine fault");
+			std::string reply;
+			RE::Context c;
+			c.host = rig.Host();
+			Assert::IsTrue(rig.ext.OnCommand(c, "camera", "status", reply));
+			Assert::IsTrue(reply.find("camera fit skipped this pair (cut: no seed)") != std::string::npos);
 		}
 	};
 }

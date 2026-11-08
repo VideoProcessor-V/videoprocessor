@@ -74,6 +74,7 @@ namespace CameraSeedFieldTestsNs
 		l.sourceGridW = srcW;
 		l.sourceGridH = srcH;
 		l.sadTrustMax = 3.0f;
+		l.weightPenalty = 6.0f;   // the engine's trust weights applied: 2 x the limit (the live of_penalty)
 		l.consistencyPx = 1.5f;
 		return l;
 	}
@@ -150,6 +151,21 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.0f, c.fwdTrust[0], L"reach sentinel");
 			Assert::AreEqual(1.0f, c.fwdTrust[1], L"at the tolerance, consistent");
 			Assert::AreEqual(0.0f, c.fwdTrust[2], L"engine weight 0");
+			{
+				// Without the engine's trust weights (the live pass has no OF_TRUST) the weight is not read; the limit is the
+				// live one passed in (taper_sad with block_taper): block 2's backward disagrees, so make it agree first.
+				std::vector<float> f2, b2;
+				Uniform(f2, b2, 4, 1, 1.0f, 0.0f);
+				Put(f2, 4, 2, 0, 1.0f, 0.0f, 5.0f, 0.0f);   // SAD 5: above match_tolerance 3, within taper_sad 6
+				CameraLink::SeedLayout noWeights = Layout(4, 1, 1, 4, 1);
+				noWeights.weightPenalty = 0.0f;
+				CameraLink::FieldCopy c2;
+				Assert::IsTrue(CameraLink::SeedToSourceGrid(f2.data(), b2.data(), noWeights, c2));
+				Assert::AreEqual(0.0f, c2.fwdTrust[2], L"SAD 5 > match_tolerance 3");
+				noWeights.sadTrustMax = 6.0f;   // block_taper on: the live limit is taper_sad
+				Assert::IsTrue(CameraLink::SeedToSourceGrid(f2.data(), b2.data(), noWeights, c2));
+				Assert::AreEqual(1.0f, c2.fwdTrust[2], L"within taper_sad, weight ignored without trust weights");
+			}
 			Assert::AreEqual(0.0f, c.fwdTrust[3], L"non-finite");
 			Assert::AreEqual(0.0f, c.fwdX[3]);
 			// A backward vector that disagrees (block 1 lands in block 1, whose backward is now +1 instead of -1).
@@ -209,6 +225,7 @@ namespace VideoProcessorTest
 		{
 			Assert::AreEqual(std::string("camera fit needs the optical-flow seed (engine off or matcher-only)"),
 				std::string(CameraLink::kSeedAbsentText));
+			Assert::AreEqual(std::string("camera fit skipped this pair (cut: no seed)"), std::string(CameraLink::kSeedSkippedText));
 		}
 	};
 }

@@ -62,7 +62,8 @@ namespace CameraLink
 		int per = 0;                            // 16-px source blocks per seed texel and axis (2^halvings)
 		float scaleToSourcePx = 0.0f;           // seed px -> source px
 		int sourceGridW = 0, sourceGridH = 0;   // the 16-px source-block grid of the result
-		float sadTrustMax = 0.0f;               // the matcher's match_tolerance
+		float sadTrustMax = 0.0f;               // the live SAD limit (taper_sad with block_taper, else match_tolerance)
+		float weightPenalty = 0.0f;             // the live engine-weight penalty (2 x sadTrustMax with trust weights, else 0)
 		float consistencyPx = 0.0f;             // forward/backward agreement, seed px
 	};
 
@@ -70,13 +71,13 @@ namespace CameraLink
 	// each) onto the 16-px source-block grid, forward only (the fit reads no backward field, as with the live field). Each
 	// source block takes the seed texel its centre lies in (block t -> texel t / per, clamped). Trust (1/0) is the live
 	// consistency pass's rule on the seed: forward and backward agree within consistencyPx (the backward texel where the
-	// block's centre lands, seed px of 8-px blocks), and SAD + (1 - weight) x 2 x sadTrustMax <= sadTrustMax (a reach
+	// block's centre lands, seed px of 8-px blocks), and SAD + (1 - weight) x weightPenalty <= sadTrustMax (a reach
 	// sentinel SAD of 1e4 fails); a non-finite texel is untrusted with zero motion. Deterministic, order independent.
 	inline bool SeedToSourceGrid(const float* fwd, const float* bwd, const SeedLayout& l, FieldCopy& out)
 	{
 		if (!fwd || !bwd || l.gridW <= 0 || l.gridH <= 0 || l.per <= 0 || l.sourceGridW <= 0 || l.sourceGridH <= 0 ||
 			(l.sourceGridW + l.per - 1) / l.per != l.gridW || (l.sourceGridH + l.per - 1) / l.per != l.gridH ||
-			!(l.scaleToSourcePx > 0.0f) || !(l.sadTrustMax > 0.0f) || !(l.consistencyPx > 0.0f))
+			!(l.scaleToSourcePx > 0.0f) || !(l.sadTrustMax > 0.0f) || !(l.consistencyPx > 0.0f) || !(l.weightPenalty >= 0.0f))
 			return false;
 		out.gridW = l.sourceGridW;
 		out.gridH = l.sourceGridH;
@@ -89,7 +90,7 @@ namespace CameraLink
 		out.bwdX.clear();
 		out.bwdY.clear();
 		out.bwdTrust.clear();
-		const float penalty = 2.0f * l.sadTrustMax;
+		const float penalty = l.weightPenalty;
 		for (int ty = 0; ty < l.sourceGridH; ++ty)
 		{
 			const int sy = (std::min)(ty / l.per, l.gridH - 1);

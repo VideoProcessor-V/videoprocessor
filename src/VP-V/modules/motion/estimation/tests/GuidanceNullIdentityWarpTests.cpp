@@ -54,6 +54,51 @@ namespace VideoProcessorTest
 			Assert::IsTrue(none.texels == withNull.texels, L"SetCameraGuidance(nullptr) changed the field");
 		}
 
+		// F2 (M2 condition 1): every Estimate clears the "seeded" record, for the matcher and its lowRes inner, even an Estimate
+		// that fails before the inner runs; the seed is never fed here (optical flow off, on any device), so after any Estimate
+		// LastSeed must be false. A stale record is planted with the test setter first.
+		BEGIN_TEST_METHOD_ATTRIBUTE(EveryEstimateClearsAStaleSeedRecord)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(EveryEstimateClearsAStaleSeedRecord)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			for (int tall = 0; tall < 2; ++tall)
+			{
+				// tall: 1536 lines halve the search (lowRes): the seed would be the inner's.
+				const int w = tall ? 128 : kW, h = tall ? 1536 : kH;
+				const DejudderFrame fa = MakeDejudderFrame(w, h, [](int x, int y) { return DejudderTexture(x, y); },
+					[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+				const DejudderFrame fb = MakeDejudderFrame(w, h, [](int x, int y) { return DejudderTexture(x - 12, y - 6); },
+					[](int x, int y, int c) { return DejudderTexture((x - 6) * 2, y - 6, 7 + c); });
+				const DejudderFrame other = MakeDejudderFrame(w, h / 2, [](int x, int y) { return DejudderTexture(x, y); },
+					[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+				DejudderGpuPlanes a, b, small;
+				UploadDejudderFrame(gpu, fa, a);
+				UploadDejudderFrame(gpu, fb, b);
+				UploadDejudderFrame(gpu, other, small);
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.opticalFlow = false;
+				settings.lowRes = true;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				Dejudder::MotionWarp::SeedState seed;
+				Assert::IsFalse(warp.LastSeed(seed), L"before any Estimate");
+				Assert::IsTrue(warp.Estimate(a.planes, b.planes), L"first estimate");
+				Assert::AreEqual(tall ? 1 : 0, warp.SearchHalvings());
+				Assert::IsFalse(warp.LastSeed(seed), L"optical flow off: never seeded");
+				warp.SetSeedFedForTest(true);
+				Assert::IsTrue(warp.LastSeed(seed), L"the planted record is seen (the setter works)");
+				Assert::AreEqual(tall ? 1 : 0, seed.halvings);
+				Assert::IsTrue(warp.Estimate(a.planes, b.planes), L"second estimate");
+				Assert::IsFalse(warp.LastSeed(seed), L"a later unseeded estimate clears it");
+				warp.SetSeedFedForTest(true);
+				Assert::IsFalse(warp.Estimate(a.planes, small.planes), L"A and B differ in size: the estimate fails early");
+				Assert::IsFalse(warp.LastSeed(seed), L"a failed estimate clears it too (the inner's as well)");
+			}
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(CountsRingRoundTripsSixteenBytesWithoutBlocking)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
 		END_TEST_METHOD_ATTRIBUTE()

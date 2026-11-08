@@ -223,6 +223,7 @@ namespace CameraLink
 		e.layout.sourceGridW = f.sourceGridW;
 		e.layout.sourceGridH = f.sourceGridH;
 		e.layout.sadTrustMax = f.sadTrustMax;
+		e.layout.weightPenalty = f.weightPenalty;
 		e.layout.consistencyPx = f.consistencyPx;
 		return Begin(e);
 	}

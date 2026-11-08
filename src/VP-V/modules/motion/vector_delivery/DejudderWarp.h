@@ -862,31 +862,58 @@ namespace Dejudder
 			pl_tex fwd = nullptr, bwd = nullptr;
 			int gridW = 0, gridH = 0;        // seed texels
 			int halvings = 0;                // how often the search input was halved (lowRes)
-			float tolerance = 0.0f;          // the searching instance's match_tolerance (the SAD's units)
-			float consistencyPx = 0.0f;      // its forward/backward agreement, in seed px
+			// The live consistency pass's SAD rule (this instance's, the one that makes Field()): a block is good when
+			// SAD + (1 - weight) x weightPenalty <= tolerance. tolerance = taper_sad with block_taper on, else
+			// match_tolerance; weightPenalty = 2 x that limit when the engine's trust weights are applied (cost trust /
+			// fb check), else 0 (the weight is not read).
+			float tolerance = 0.0f;
+			float weightPenalty = 0.0f;
+			float consistencyPx = 0.0f;      // the searching instance's forward/backward agreement, in seed px
+			bool skipped = false;            // false return: the pair was skipped (camera guidance: a cut / flash)
 		};
 		bool LastSeed(SeedState& out) const
 		{
+			out = SeedState();
+			if (!LastSeedOfSearch(out))
+				return false;
+			// The SAD limit of the instance that makes the field (the outer; a lowRes inner copies its settings).
+			const float taperSad = settings.taperSad > 0.0f ? settings.taperSad : 2.0f * settings.matchTolerance;
+			const float limit = settings.blockTaper ? taperSad : settings.matchTolerance;
+			const bool ofTrust = settings.opticalFlow && (settings.opticalFlowCostTrust || settings.opticalFlowFbCheck);
+			out.tolerance = limit;
+			out.weightPenalty = ofTrust ? 2.0f * limit : 0.0f;
+			return true;
+		}
+		// Tests only: a stale "seeded" record on this instance and its inners, so a test can show every Estimate clears it.
+		void SetSeedFedForTest(bool on)
+		{
+			for (MotionWarp* w = this; w; w = w->inner.get())
+				w->seedFed = on;
+		}
+	private:
+		bool LastSeedOfSearch(SeedState& out) const
+		{
 			if (HalvesForSearch())
 			{
-				if (!inner || !inner->LastSeed(out))
+				if (!inner || !inner->LastSeedOfSearch(out))
 					return false;
 				++out.halvings;
 				return true;
 			}
 			if (!seedFed || !ofSearch[0] || !ofSearch[1])
+			{
+				out.skipped = seedSkipped;
 				return false;
-			out = SeedState();
+			}
 			out.fwd = ofSearch[0];
 			out.bwd = ofSearch[1];
 			out.gridW = ofSearch[0]->params.w;
 			out.gridH = ofSearch[0]->params.h;
-			out.tolerance = settings.matchTolerance;
 			out.consistencyPx = ConsistencyPixels();
 			return true;
 		}
-	private:
 		bool seedFed = false;             // F2: the last Estimate's first sweep was the engine's seed (ofSearch)
+		bool seedSkipped = false;         // F2: the last Estimate skipped the searches (camera guidance: a cut / flash)
 		bool globalFromEngine = false;
 		unsigned long long globalFallbacks = 0;
 		bool ofWeighted = false;          // this Estimate's engine block vectors carry trust weights (w)

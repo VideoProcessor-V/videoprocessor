@@ -51,16 +51,20 @@ namespace VpMotion
 		bool LiveSeed(Seed& out) const override
 		{
 			Dejudder::MotionWarp::SeedState s;
+			out = Seed();
 			const pl_tex live = dejudder ? dejudder->Field() : nullptr;
 			if (!live || !dejudder->LastSeed(s))
+			{
+				out.skipped = live && s.skipped;
 				return false;
-			out = Seed();
+			}
 			out.fwd = s.fwd;
 			out.bwd = s.bwd;
 			out.gridW = s.gridW;
 			out.gridH = s.gridH;
 			out.halvings = s.halvings;
 			out.tolerance = s.tolerance;
+			out.weightPenalty = s.weightPenalty;
 			out.consistencyPx = s.consistencyPx;
 			out.liveGridW = live->params.w;
 			out.liveGridH = live->params.h;

@@ -613,11 +613,18 @@ namespace VpMotion
 	// live 16-px grid exactly (ceil(live / 2^halvings) texels per axis).
 	bool VectorEngine::SeedFieldOf(uint64_t pairTo, SeedField& out) const
 	{
+		out = SeedField();   // absence NotSeeded unless the matcher says the live pair was skipped
 		if (!matcher_ || pairTo == 0 || field_.from == 0 || pairTo != field_.to || matcher_->LiveFieldFrom() != field_.from ||
 			!motionValidity.Current(field_.epoch))
 			return false;
 		IMatcherView::Seed s;
-		if (!matcher_->LiveSeed(s) || !s.fwd || !s.bwd)
+		if (!matcher_->LiveSeed(s))
+		{
+			if (s.skipped)
+				out.absence = SeedAbsence::Skipped;
+			return false;
+		}
+		if (!s.fwd || !s.bwd)
 			return false;
 		constexpr int kMaxHalvings = 4;   // 16K; MotionWarp halves while the input is about 1530 lines or taller
 		if (s.halvings < 0 || s.halvings > kMaxHalvings || s.gridW <= 0 || s.gridH <= 0 || s.liveGridW <= 0 || s.liveGridH <= 0)
@@ -627,7 +634,7 @@ namespace VpMotion
 		const int per = 1 << s.halvings;   // live 16-px blocks per seed texel and axis
 		if ((s.liveGridW + per - 1) / per != s.gridW || (s.liveGridH + per - 1) / per != s.gridH)
 			return false;
-		if (!(s.tolerance > 0.0f) || !(s.consistencyPx > 0.0f))
+		if (!(s.tolerance > 0.0f) || !(s.consistencyPx > 0.0f) || !(s.weightPenalty >= 0.0f))
 			return false;
 		out = SeedField();
 		out.seq = field_.to;
@@ -642,6 +649,7 @@ namespace VpMotion
 		out.sourceGridW = s.liveGridW;
 		out.sourceGridH = s.liveGridH;
 		out.sadTrustMax = s.tolerance;
+		out.weightPenalty = s.weightPenalty;
 		out.consistencyPx = s.consistencyPx;
 		motionValidity.StampAt(field_.to, out.stamp);
 		return true;

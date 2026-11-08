@@ -110,11 +110,16 @@ namespace VectorEngineHookTest
 		struct SeedView : FakeView
 		{
 			bool seeded = true;
+			bool skipped = false;   // with seeded false: the pair's searches were skipped (a cut)
 			Seed seed;
 			bool LiveSeed(Seed& out) const override
 			{
+				out = Seed();
 				if (!seeded)
+				{
+					out.skipped = skipped;
 					return false;
+				}
 				out = seed;
 				return true;
 			}
@@ -678,6 +683,7 @@ namespace VectorEngineHookTest
 				view.seed.gridH = 68;
 				view.seed.halvings = halvings;
 				view.seed.tolerance = 3.0f;
+				view.seed.weightPenalty = 6.0f;
 				view.seed.consistencyPx = 1.5f;
 				view.seed.liveGridW = live.params.w;
 				view.seed.liveGridH = live.params.h;
@@ -709,7 +715,22 @@ namespace VectorEngineHookTest
 			engine.BindMatcher(&rig.view);
 			Assert::IsTrue(engine.FieldOf(6, field));
 			Assert::IsFalse(engine.SeedFieldOf(6, seed));
+			Assert::IsTrue(seed.absence == SeedAbsence::NotSeeded);
+			rig.view.skipped = true;   // a cut: the searches were skipped, so this pair has no seed
+			Assert::IsFalse(engine.SeedFieldOf(6, seed));
+			Assert::IsTrue(seed.absence == SeedAbsence::Skipped, L"the skipped pair says so");
+			rig.view.skipped = false;
 			rig.view.seeded = true;
+			Assert::IsTrue(engine.SeedFieldOf(6, seed));
+			// M2 condition 1: a seeded pair, then a pair the seed did not feed: never the old seed.
+			rig.view.seeded = false;
+			RunOne(engine, matcher, true, true, 6, 7);
+			rig.view.from = 6;
+			Assert::IsFalse(engine.SeedFieldOf(7, seed), L"the next, unseeded pair has no seed");
+			Assert::IsFalse(engine.SeedFieldOf(6, seed), L"and the seeded pair is no longer live");
+			rig.view.seeded = true;
+			rig.view.from = 5;
+			RunOne(engine, matcher, true, true, 5, 6);
 			Assert::IsTrue(engine.SeedFieldOf(6, seed));
 			rig.view.seed.bwd = nullptr;
 			Assert::IsFalse(engine.SeedFieldOf(6, seed), L"both seed planes are needed (the consistency check)");
@@ -784,6 +805,7 @@ namespace VectorEngineHookTest
 				Assert::AreEqual(120, seed.sourceGridW);
 				Assert::AreEqual(68, seed.sourceGridH);
 				Assert::AreEqual(3.0f, seed.sadTrustMax);
+				Assert::AreEqual(6.0f, seed.weightPenalty);
 				Assert::AreEqual(1.5f, seed.consistencyPx);
 				rig.view.seed.gridW = 119;   // a seed that does not cover the live grid: refused, never guessed
 				rig.seedF.params.w = rig.seedB.params.w = 119;

@@ -68,10 +68,11 @@ namespace VpMotion
 			pl_tex fwd = nullptr, bwd = nullptr;
 			int gridW = 0, gridH = 0;          // seed texels
 			int halvings = 0;                  // lowRes halvings of the search input
-			float tolerance = 0.0f, consistencyPx = 0.0f;
+			float tolerance = 0.0f, weightPenalty = 0.0f, consistencyPx = 0.0f;   // the live trust rule (MotionWarp::SeedState)
 			int liveGridW = 0, liveGridH = 0;  // the live field's 16-px source-block grid
+			bool skipped = false;              // on a false return: the matcher skipped the pair (a cut / flash)
 		};
-		virtual bool LiveSeed(Seed& /*out*/) const { return false; }
+		virtual bool LiveSeed(Seed& out) const { out = Seed(); return false; }
 	};
 
 	// K4: the guidance sink handed to the pre-estimate hook, 1:1 onto the matcher's SetCameraGuidance.

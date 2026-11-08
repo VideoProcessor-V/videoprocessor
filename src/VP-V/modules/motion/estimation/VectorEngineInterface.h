@@ -52,7 +52,13 @@ namespace VpMotion
 	// none). sourceGridW x sourceGridH is the 16-px source-block grid the live field has (the camera fit's grid); the
 	// seed is converted onto it on the CPU (each 16-px block takes the seed texel its centre lies in), trust = the live
 	// consistency pass's rule on the seed (forward/backward agreement within consistencyPx seed px AND the SAD, raised by
-	// (1 - weight) x 2 x sadTrustMax, within sadTrustMax).
+	// (1 - weight) x weightPenalty, within sadTrustMax; sadTrustMax = taper_sad with block_taper on, else match_tolerance;
+	// weightPenalty = 2 x sadTrustMax when the engine's trust weights are applied, else 0).
+	enum class SeedAbsence
+	{
+		NotSeeded,   // engine off or failed, matcher-only, candidate / replace mode, no such live pair, layout mismatch
+		Skipped,     // the live pair's searches were skipped (camera guidance: a cut / flash): no seed for that pair only
+	};
 	struct SeedField
 	{
 		uint64_t seq = 0, pairFrom = 0, pairTo = 0;
@@ -63,8 +69,10 @@ namespace VpMotion
 		float scaleToSourcePx = 0.0f;    // seed px -> source px
 		int sourceGridW = 0, sourceGridH = 0;
 		enum { kSourceBlockSize = 16 };   // source px per block of the fit's grid (the live field's)
-		float sadTrustMax = 0.0f;        // the searching matcher's match_tolerance
-		float consistencyPx = 0.0f;      // its forward/backward agreement, seed px
+		float sadTrustMax = 0.0f;        // the live SAD limit (taper_sad with block_taper, else match_tolerance)
+		float weightPenalty = 0.0f;      // 2 x sadTrustMax with the engine's trust weights applied, else 0
+		float consistencyPx = 0.0f;      // the searching matcher's forward/backward agreement, seed px
+		SeedAbsence absence = SeedAbsence::NotSeeded;   // why, when SeedFieldOf returned false
 		VpIndicator::Stamp stamp;        // the stamp the pair was estimated under
 	};
 
@@ -148,8 +156,9 @@ namespace VpMotion
 		// F2: the optical-flow seed of the pair whose later frame is pairTo, under FieldOf's rules (the last successful
 		// estimate only, its epoch current, valid until the next estimate, render thread / renderMutex). False whenever
 		// the seed did not feed that pair (engine off or failed, matcher-only, candidate or replace mode, a skipped pair).
-		// The camera fit reads ONLY this (never FieldOf: that field is the guided one). Default: absent (existing fakes).
-		virtual bool SeedFieldOf(uint64_t /*pairTo*/, SeedField& /*out*/) const { return false; }
+		// The camera fit reads ONLY this (never FieldOf: that field is the guided one). On false, out is reset and
+		// out.absence says why. Default: absent (existing fakes).
+		virtual bool SeedFieldOf(uint64_t /*pairTo*/, SeedField& out) const { out = SeedField(); return false; }
 		virtual bool GlobalFromEngine() const = 0;
 		virtual bool EngineGlobal(uint64_t seq, GlobalVec& out) const = 0;
 		virtual bool PairSpansSlip(uint64_t from, uint64_t to) const = 0;

@@ -5053,7 +5053,7 @@ void RunBetaCameraAccuracy()
 				fc.pairTo = static_cast<uint64_t>(p + 1);
 				Dejudder::MotionWarp::SeedState seed;
 				const bool haveSeed = warp.LastSeed(seed);
-				Check(!hardware || haveSeed, "camera accuracy: no optical-flow seed on a hardware GPU (the fit reads only the seed)");
+				Check(!hardware || haveSeed || seed.skipped, "camera accuracy: no optical-flow seed on a hardware GPU (the fit reads only the seed)");
 				if (haveSeed)
 				{
 					const int per = 1 << seed.halvings;
@@ -5081,6 +5081,7 @@ void RunBetaCameraAccuracy()
 					layout.sourceGridW = blocksX;
 					layout.sourceGridH = blocksY;
 					layout.sadTrustMax = seed.tolerance;
+					layout.weightPenalty = seed.weightPenalty;
 					layout.consistencyPx = seed.consistencyPx;
 					Check(CameraLink::SeedToSourceGrid(seedRgba[0].data(), seedRgba[1].data(), layout, fc), "camera accuracy: seed layout");
 					log.seedBlockPx = 16 * per;
@@ -5088,7 +5089,7 @@ void RunBetaCameraAccuracy()
 				if (spec.on && !haveSeed)
 				{
 					records[p] = CameraModel::CameraMotion();
-					log.fitReason = "no seed (camera fit needs the optical-flow seed)";
+					log.fitReason = seed.skipped ? "no seed (camera fit skipped this pair: cut)" : "no seed (camera fit needs the optical-flow seed)";
 				}
 				else if (spec.on)
 				{

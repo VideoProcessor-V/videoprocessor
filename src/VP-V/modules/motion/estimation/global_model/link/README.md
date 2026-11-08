@@ -151,11 +151,13 @@ Read from the code, not measured. NO hook is registered (`guideWanted` is false:
 The camera fit's only input is now `IVectorEngine::SeedFieldOf` (HOOKS.md section 7): the engine's seed (`ofSearch`), which the
 camera guidance never shapes. `CameraLinkCore` and `CameraExtension` never call `FieldOf`. Provenance by type: `SeedField` is a
 distinct type with no conversion from `VerifiedField`; the ring stamps each copy (`FieldOrigin::Seed` / `Live`) and
-`CameraLinkCore::SubmitField` refuses a `Live` copy (counted `guidedRefused`). No seed for a pair (engine off or matcher-only) = no
-fit and the visible fallback `camera_fit: camera fit needs the optical-flow seed (engine off or matcher-only)`; never the guided field
-instead. Readback: the same two-plane copy (D3D11: the target was already two planes; the copy pass now also reads the backward
+`CameraLinkCore::SubmitField` refuses a `Live` copy (counted `guidedRefused`). No seed for a pair = no fit and a visible fallback, never the
+guided field instead: `camera_fit: camera fit needs the optical-flow seed (engine off or matcher-only)`, or for a pair whose
+searches were skipped at a cut `camera_fit: camera fit skipped this pair (cut: no seed)` (Fallbacks = Config status / Ctrl+I, and the
+camera status command). Readback: the same two-plane copy (D3D11: the target was already two planes; the copy pass now also reads the backward
 seed plane), converted on the CPU onto the 16-px source grid (each 16-px block takes the seed texel its centre lies in; trust =
-the live consistency rule on the seed). Note: the NVOF vectors are quantised to 1/32 px of the engine's input (the searching half
+the live consistency rule on the seed, with the live SAD limit: taper_sad under block_taper, the engine-weight penalty only when the
+trust weights are applied). Note: the NVOF vectors are quantised to 1/32 px of the engine's input (the searching half
 size), so the seed carries steps of 1/16 source px at 1080p and 1/8 source px at a lowRes 4K search before the fit pools blocks.
 
 The history of the issue:

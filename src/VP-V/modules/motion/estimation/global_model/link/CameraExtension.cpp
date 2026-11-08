@@ -395,7 +395,7 @@ namespace Vpv
 				return false;
 			if (!engine->SeedFieldOf(latest, sf) || sf.sourceGridW <= 0 || sf.sourceGridH <= 0)
 			{
-				st.seedProblem = CameraLink::kSeedAbsentText;
+				st.seedProblem = sf.absence == VpMotion::SeedAbsence::Skipped ? CameraLink::kSeedSkippedText : CameraLink::kSeedAbsentText;
 				return false;
 			}
 			st.seedProblem.clear();
@@ -529,7 +529,7 @@ namespace Vpv
 				{
 					VpMotion::SeedField sf;
 					if (latest != 0 && !engine->SeedFieldOf(latest, sf))
-						st.seedProblem = CameraLink::kSeedAbsentText;
+						st.seedProblem = sf.absence == VpMotion::SeedAbsence::Skipped ? CameraLink::kSeedSkippedText : CameraLink::kSeedAbsentText;
 					else if (latest != 0)
 						st.seedProblem.clear();
 				}
