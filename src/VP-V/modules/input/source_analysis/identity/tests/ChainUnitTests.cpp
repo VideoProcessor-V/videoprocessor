@@ -2240,7 +2240,9 @@ namespace Tests
 				if (est.Wants())
 				{
 					const Image& lines = black ? blk : (native ? nat : up);
-					Assert::IsTrue(SubmitEvaluation(est, lines, seq, t, r.evaluations % 2 == 0), L"fixture: the lines were captured");
+					// WAIVER-SID-E2-01 (coordinator, fixture only): a cut at every 6th evaluation (about 6 s shots at the 1 s acquiring cadence). It was every
+					// 2nd (about 2 s shots), which the E2 minimum shot dwell (3 s) correctly treats as rapid cuts that add no evidence; no assertion changed.
+					Assert::IsTrue(SubmitEvaluation(est, lines, seq, t, r.evaluations % 6 == 0), L"fixture: the lines were captured");
 					++r.evaluations;
 					if (native) ++r.nativeEvaluations;
 					if (black) ++r.blackEvaluations;
