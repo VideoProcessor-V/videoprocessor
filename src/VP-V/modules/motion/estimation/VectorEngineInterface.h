@@ -55,6 +55,20 @@ namespace VpMotion
 		int gridW = 0, gridH = 0;
 		double blockSize = 0;
 		uint64_t from = 0, to = 0;
+		// The producer's ORIGINAL payload at its NATIVE NVOF grid and full precision (no resampled or quantised copy): the same memory the
+		// P2 slot holds (kept alive by the engine's lease until the next FlowOf call). Vectors are interleaved (x, y) per cell, row-major
+		// gridW x gridH, in signed fixed point: value / rawUnitsPerEnginePx = engine px; x enginePxToSource = source px. A cell covers
+		// cellEnginePx x cellEnginePx engine px = blockSize source px. Costs are one byte per cell (higher = less sure). Any pointer may be
+		// null (backward / costs empty); rawForward is non-null whenever FlowOf returned true. x / y above are these values converted
+		// to source px (float).
+		const int16_t* rawForward = nullptr;
+		const int16_t* rawBackward = nullptr;
+		const uint8_t* forwardCost = nullptr;
+		const uint8_t* backwardCost = nullptr;
+		double rawUnitsPerEnginePx = 0;   // 32 (S10.5)
+		double enginePxToSource = 0;      // source px per engine px (source width / engine width)
+		int cellEnginePx = 0;             // 4
+		int engineW = 0, engineH = 0;     // the engine-size luma the flow is for
 	};
 
 	class IPreEstimateHook;

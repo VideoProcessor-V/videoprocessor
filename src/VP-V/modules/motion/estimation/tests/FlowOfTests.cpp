@@ -8,6 +8,7 @@
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 
+#include <cstring>
 #include <memory>
 
 namespace VideoProcessorTest
@@ -70,6 +71,49 @@ namespace VideoProcessorTest
 			const auto reads = rig.engine.FlowReads();
 			Assert::AreEqual(1ull, reads.requests);
 			Assert::AreEqual(1ull, reads.served);
+		}
+
+		TEST_METHOD(TheViewCarriesTheNativeGridAndTheOriginalPayloadBitForBit)
+		{
+			Rig rig;
+			// Costs and a backward field on the stored pair, so the view's optional planes are exercised.
+			auto full = std::make_shared<MotionAhead::Flow>(*rig.flow);
+			full->backward = full->forward;
+			for (int16_t& v : full->backward) v = static_cast<int16_t>(-v);
+			full->forwardCost.assign(8, 7);
+			full->backwardCost.assign(8, 9);
+			rig.engine.p2Slot->Publish(11, 12, rig.engine.p2Slot->Generation(), full);
+			rig.engine.motionValidity.NoteKept(12);
+			VpMotion::FlowView view;
+			Assert::IsTrue(rig.engine.FlowOf(12, view));
+			Assert::AreEqual(full->gridW, view.gridW, L"native NVOF grid, not resampled");
+			Assert::AreEqual(full->gridH, view.gridH);
+			Assert::AreEqual(full->halfW, view.engineW);
+			Assert::AreEqual(full->halfH, view.engineH);
+			Assert::AreEqual(4, view.cellEnginePx);
+			Assert::AreEqual(32.0, view.rawUnitsPerEnginePx, 0.0);
+			Assert::AreEqual(4.0, view.enginePxToSource, 1e-12);
+			Assert::AreEqual(16.0, view.blockSize, 1e-12, L"cellEnginePx x enginePxToSource");
+			Assert::IsTrue(view.rawForward == full->forward.data(), L"the original payload, not a copy");
+			Assert::IsTrue(view.rawBackward == full->backward.data());
+			Assert::IsTrue(view.forwardCost == full->forwardCost.data());
+			Assert::IsTrue(view.backwardCost == full->backwardCost.data());
+			const size_t cells = static_cast<size_t>(full->gridW) * full->gridH;
+			Assert::AreEqual(0, std::memcmp(view.rawForward, full->forward.data(), cells * 2 * sizeof(int16_t)), L"bit for bit");
+			Assert::AreEqual(0, std::memcmp(view.rawBackward, full->backward.data(), cells * 2 * sizeof(int16_t)));
+			Assert::AreEqual(0, std::memcmp(view.forwardCost, full->forwardCost.data(), cells));
+			// The float planes are exactly the raw values in source px.
+			for (size_t i = 0; i < cells; ++i)
+			{
+				Assert::AreEqual(static_cast<float>(view.rawForward[i * 2] / view.rawUnitsPerEnginePx * view.enginePxToSource), view.x[i]);
+				Assert::AreEqual(static_cast<float>(view.rawForward[i * 2 + 1] / view.rawUnitsPerEnginePx * view.enginePxToSource), view.y[i]);
+			}
+			// A pair without a backward field or costs: those planes are null, the forward payload is still the original.
+			VpMotion::FlowView plain;
+			Assert::IsTrue(rig.engine.FlowOf(11, plain));
+			Assert::IsTrue(plain.rawForward == rig.flow->forward.data());
+			Assert::IsNull(plain.rawBackward);
+			Assert::IsNull(plain.forwardCost);
 		}
 
 		TEST_METHOD(AfterAResyncTheAnswerIsFalseAndCounted)

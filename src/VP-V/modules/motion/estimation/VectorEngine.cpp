@@ -672,6 +672,17 @@ namespace VpMotion
 		out.gridW = flow->gridW;
 		out.gridH = flow->gridH;
 		out.blockSize = 4.0 * scale;   // a cell is 4 x 4 engine px
+		// The original payload, not a copy: the lease keeps `flow` (and so these arrays) alive until the next FlowOf call.
+		const size_t flowCells = static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH);
+		out.rawForward = flow->forward.data();
+		out.rawBackward = flow->backward.size() >= flowCells * 2 ? flow->backward.data() : nullptr;
+		out.forwardCost = flow->forwardCost.size() >= flowCells ? flow->forwardCost.data() : nullptr;
+		out.backwardCost = flow->backwardCost.size() >= flowCells ? flow->backwardCost.data() : nullptr;
+		out.rawUnitsPerEnginePx = 32.0;
+		out.enginePxToSource = scale;
+		out.cellEnginePx = 4;
+		out.engineW = flow->halfW;
+		out.engineH = flow->halfH;
 		out.from = from;
 		out.to = to;
 		++flowReads_.served;
