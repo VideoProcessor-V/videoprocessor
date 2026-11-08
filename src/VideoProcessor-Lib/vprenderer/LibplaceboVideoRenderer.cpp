@@ -14,7 +14,7 @@
 #include <VP-V/modules/output/presentation/RepeatReuseGlue.h>
 #include <VP-V/modules/output/presentation/RepeatReuseRegistryKey.h>
 #include <KernelInverse.h>
-#include <vprenderer/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/MotionAheadProducer.h>   // SK-MV: the forwarding header vprenderer/MotionAheadProducer.h is gone
 #include <VP-V/modules/motion/estimation/MotionAheadWalk.h>
 #include <VP-V/modules/input/source_analysis/SourceAheadWalk.h>
 #include "../SubtitleProfileUpdatePolicy.h"
@@ -12187,6 +12187,7 @@ struct LibplaceboVideoRenderer::Impl
 	// paced by its own due times, so no capture drift correction (drop/repeat).
 	bool fileFrameSource = false;
 	int pulldownCadence = 0;   // (cycle << 16) | new frames per cycle
+	bool pulldownAcquiring = false;   // SK-MV: a film cadence is being acquired (not yet locked): keeps the motion engine warm
 	// Black bars: the latest trusted active picture, for the matcher.
 	HdrPeakAnalysisCrop::TrustedPicture dejudderPicture;
 	// Bug hunt 2026-10-17: this frame's state is on the Dolby Vision tunnel
@@ -23164,6 +23165,7 @@ releaseDriftBaseRetention =
 			pin.dejudderPresent = dejudder != nullptr;
 			pin.dejudderEstimating = dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
 				dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers);
+			pin.dejudderCanEngage = dejudder && DejudderPolicy::CanEngageOrAcquiring(dejudderReason, pulldownAcquiring);   // SK-MV: the standing (warm engine) class, also UnknownRates / PlaneFormat
 			vectorEngine.PlanProducer(pin);
 			// VPV-HOOK-END
 		}
@@ -31787,6 +31789,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			m_impl->pulldownFilmHz = frameFilmHz;
 			m_impl->fileFrameSource = currentFileFrame;
 			m_impl->pulldownCadence = m_pulldownCadence.load(std::memory_order_relaxed);
+			m_impl->pulldownAcquiring = m_pulldownAcquiring.load(std::memory_order_relaxed);
 			m_impl->pulldownSkipped = m_pulldownSkipped.load(std::memory_order_relaxed);
 		}
 		const SteadyClock::time_point renderCycleStart = SteadyClock::now();

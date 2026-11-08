@@ -309,7 +309,6 @@ Forwarding headers (old paths kept for Bill's files, the renderer host and Rende
 
 - `src/VideoProcessor-Lib/MotionAhead.h`
 - `src/VideoProcessor-Lib/MotionValidity.h`
-- `src/VideoProcessor-Lib/vprenderer/MotionAheadProducer.h`
 - `src/VideoProcessor-Lib/vprenderer/MotionEngineIdle.h`
 
 ## Migration directive

@@ -175,7 +175,6 @@
   "forwarding_headers": [
     "src/VideoProcessor-Lib/MotionAhead.h",
     "src/VideoProcessor-Lib/MotionValidity.h",
-    "src/VideoProcessor-Lib/vprenderer/MotionAheadProducer.h",
     "src/VideoProcessor-Lib/vprenderer/MotionEngineIdle.h"
   ],
   "components": {
