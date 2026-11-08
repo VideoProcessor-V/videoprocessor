@@ -1103,11 +1103,11 @@ namespace Tests
 			ChainEvidence ev;
 			for (int t = 0; t < 40; ++t)
 			{
-				FeedAt(ev, 540, t, 1 + static_cast<uint32_t>(t / 10), true);
+				FeedAt(ev, 540, t, 1 + static_cast<uint32_t>(t / 5), true);   // shots of 5 s (were 10 s): three shots still fit inside the 15.9 s window (revert window, margin 1.5)
 				VerifyResult other;
 				other.candidates.push_back(MakeCandidate(540, -1.2, 5.0));
 				EvidenceUpdate u0;
-				ev.Submit(0, Observe(other, 1920, 1 + static_cast<uint32_t>(t / 10), false), u0);
+				ev.Submit(0, Observe(other, 1920, 1 + static_cast<uint32_t>(t / 5), false), u0);
 			}
 			Assert::IsTrue(ev.Summary(1).hasBest && ev.Summary(1).aboveC1);
 			VerifyResult many;
