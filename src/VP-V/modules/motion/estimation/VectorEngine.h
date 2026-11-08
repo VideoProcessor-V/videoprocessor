@@ -13,16 +13,35 @@
 // C++14: included by VideoProcessor-Lib code.
 #pragma once
 
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/ProducerPlan.h>
+#include <VP-V/modules/motion/estimation/VectorDemand.h>
 #include <VP-V/modules/motion/estimation/VectorEngineState.h>
+#include <IntentInterpreterObserver.h>
 
 #include <libplacebo/gpu.h>
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 
 namespace VpMotion
 {
+	// What the engine needs from the renderer besides plain values: the renderer's fallback registry, its stats
+	// overlay, the source monitor's pan input and the intent interpreter's vector input. Implemented for the
+	// renderer by VectorEngineImplHost (VectorEngineHost.h); tests use a fake.
+	class IVectorEngineHost
+	{
+	public:
+		virtual ~IVectorEngineHost() {}
+		virtual void SyncFallback(const FallbackCatalog::Decision& decision) = 0;
+		virtual void PublishStatus(bool force) = 0;
+		virtual bool DitherVectorsSupported() const = 0;
+		virtual void NoteSourceMonitorMotion(double sourcePixelsPerFrame, uint64_t sequence) = 0;
+		virtual bool IntentActive() const = 0;
+		virtual void NoteIntentVectors(const IntentInterpreter::VectorSample& sample) = 0;
+	};
+
 	class VectorEngine : public VectorEngineState
 	{
 	public:
@@ -46,5 +65,41 @@ namespace VpMotion
 		// optical-flow producer and publishes the look-ahead depth the render loop submits to
 		// (motionAheadDepth / Backward / Configured), with the one "Motion ahead:" log line.
 		void PlanProducer(const ProducerInputs& in);
+
+		// ---- P5a-4: the vector-demand decision and its statistics service ------------------------------------
+		struct UpdateFacts
+		{
+			bool vectorDemandSetting = false;   // the vector_demand setting
+			bool sigmaDeltaRanLast = false;     // the sigma-delta quantiser ran in the last frame's output pass
+			bool ditherVectorsOwn = false;      // the dither_vectors_own setting
+		};
+		// Decides for this source frame (from the renderer's facts, VectorDemand::Input), then keeps the engine's state
+		// visible: fallback entry, status line, Ctrl+Alt+D record and the logs (on change, once per mode, every 5 s
+		// while on). Render thread.
+		void UpdateVectorEngine(const VectorDemand::Input& input, const UpdateFacts& facts, IVectorEngineHost& host);
+
+		struct ServeFacts
+		{
+			bool legacyConsumer = false;          // a de-judder / interpolator estimate takes this frame's pair
+			bool lowResSearch = true;             // dejudder_low_res != "off"
+			bool vectorDeliveryRuns = true;       // the motion.vector_delivery slot runs
+			int pictureHeight = 0;                // the trusted picture's height (the raster's when none)
+		};
+		// Backward pairs (no frame ahead): once per new source frame the statistics consumers read the pair (n-1, n)
+		// if the producer has it, else the frame-old (n-2, n-1); statistics only, never a field. Forward without a
+		// render-time estimate: statistics consumers only. Render thread.
+		void ServeStatistics(uint64_t sequence, uint64_t nextSequence, int width, int height, const ServeFacts& facts,
+			IVectorEngineHost& host);
+
+		// Whole-frame motion for the statistics consumers: a producer pair (hit) or none (miss). A miss run is visible
+		// (never log-only): hysteresis, so a single missed pair does not flap the entry.
+		void NoteGlobalPair(bool hit);
+		// Once per mode: the first vectors the engine delivered and where they came from.
+		void NoteVectorsDelivered(bool backward, const char* source);
+		// Engine size the producer works at for a picture of this size, as the matcher would use it (halvings of the
+		// search input), and the halvings themselves for the pixel scaling.
+		static void SizeFor(bool lowResSearch, int width, int height, int& engineW, int& engineH, int& halvings);
+		// S0 shadow step: the segment's answer against the host's own predicate; nothing is delivered from it.
+		void MotionShadowCheck(bool deliveryRuns, uint64_t sequence, uint64_t nextSequence, bool hostLive);
 	};
 }

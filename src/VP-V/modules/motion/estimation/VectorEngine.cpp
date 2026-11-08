@@ -4,6 +4,8 @@
 #include "VectorEngine.h"
 
 #include <DebugLog.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <libplacebo/d3d11.h>
 #include <vprenderer/MotionAheadProducer.h>
 
@@ -120,5 +122,175 @@ namespace VpMotion
 			motionAheadLoggedAt = now;
 			DebugLog::Log("%s", text);
 		}
+	}
+
+	// ---- P5a-4 -------------------------------------------------------------------------------------------------
+	void VectorEngine::UpdateVectorEngine(const VectorDemand::Input& input, const UpdateFacts& facts, IVectorEngineHost& host)
+	{
+		vectorDemand = VectorDemand::Decide(input);
+		const ULONGLONG now = GetTickCount64();
+		if (!facts.vectorDemandSetting)
+		{
+			if (!vectorEngineLogged.empty())
+			{
+				vectorEngineLogged.clear();
+				host.SyncFallback(FallbackCatalog::Released("vector_engine"));
+				host.SyncFallback(FallbackCatalog::Released("vector_engine_producer"));
+				host.SyncFallback(FallbackCatalog::Released("vector_engine_global"));
+			}
+			return;
+		}
+		// What decides the output dither's want, logged when it changes (a dither that runs but is not served
+		// is explained by one of the three).
+		{
+			const int ditherKey = (facts.sigmaDeltaRanLast ? 1 : 0) | (facts.ditherVectorsOwn ? 2 : 0) | (host.DitherVectorsSupported() ? 4 : 0);
+			if (ditherKey != vectorDitherKeyLogged)
+			{
+				vectorDitherKeyLogged = ditherKey;
+				DebugLog::Log("Vector engine: output dither inputs: sigma-delta ran %s, own search requested %s, vectors supported %s",
+					(ditherKey & 1) ? "yes" : "no", (ditherKey & 2) ? "yes" : "no", (ditherKey & 4) ? "yes" : "no");
+			}
+		}
+		const std::string line = VectorDemand::StatusLine(vectorDemand);
+		if (line != vectorEngineLogged)
+		{
+			vectorEngineLogged = line;
+			DebugLog::Log("%s", line.c_str());
+			DiagnosticHistory::Global().RecordDecision("vector-engine", line.c_str(),
+				static_cast<int64_t>(vectorDemand.mode), static_cast<int64_t>(vectorDemand.served),
+				static_cast<double>(vectorDemand.unserved), 0.0);
+			host.PublishStatus(true);
+		}
+		// The look-ahead stores nothing for this size while pairs are submitted: sustained = visible.
+		if (motionProducer && motionProducer->Running() && vectorDemand.producer)
+		{
+			const uint64_t last = motionProducer->LastSubmitted();
+			if (vectorProducerFirstSubmit == 0 && last != 0) vectorProducerFirstSubmit = last;
+			const auto ps = motionProducer->GetStats();
+			if (ps.pairs > 0) vectorProducerSkipSustained = false;
+			else if (vectorProducerFirstSubmit != 0 && last >= vectorProducerFirstSubmit + 48) vectorProducerSkipSustained = true;
+		}
+		else
+		{
+			vectorProducerFirstSubmit = 0;
+			vectorProducerSkipSustained = false;
+		}
+		host.SyncFallback(FallbackCatalog::VectorEngine(vectorDemand));
+		host.SyncFallback(FallbackCatalog::VectorEngineProducer(vectorProducerSkipSustained));
+		host.SyncFallback(FallbackCatalog::VectorEngineGlobal(vectorGlobalMissSustained));
+		if (vectorDemand.mode != VectorDemand::Mode::Off && (vectorStatsTick == 0 || now - vectorStatsTick >= 5000))
+		{
+			vectorStatsTick = now;
+			DebugLog::Log("Vector engine: %llu pairs (ahead hits %llu, misses %llu, backward %llu)", vectorPairs,
+				static_cast<unsigned long long>(motionAheadHits), static_cast<unsigned long long>(motionAheadMisses), vectorBackwardPairs);
+		}
+	}
+
+	void VectorEngine::NoteGlobalPair(bool hit)
+	{
+		if (!vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan) && !vectorDemand.Serves(VectorDemand::Consumer::MotionIntent))
+		{
+			vectorGlobalMisses = vectorGlobalHits = 0;
+			vectorGlobalMissSustained = false;
+			return;
+		}
+		constexpr unsigned kRun = 24;   // consecutive pairs, either way, before the entry changes
+		if (hit) { ++vectorGlobalHits; vectorGlobalMisses = 0; if (vectorGlobalHits >= kRun) vectorGlobalMissSustained = false; }
+		else { ++vectorGlobalMisses; vectorGlobalHits = 0; if (vectorGlobalMisses >= kRun) vectorGlobalMissSustained = true; }
+	}
+
+	void VectorEngine::NoteVectorsDelivered(bool backward, const char* source)
+	{
+		const int mode = backward ? 1 : 0;
+		if (vectorDeliveredLogged == mode)
+			return;
+		vectorDeliveredLogged = mode;
+		DebugLog::Log("Vector engine: vectors delivered (%s, source %s)", backward ? "backward" : "forward", source);
+	}
+
+	void VectorEngine::SizeFor(bool lowResSearch, int width, int height, int& engineW, int& engineH, int& halvings)
+	{
+		halvings = DejudderPolicy::SearchHalvingsFor(lowResSearch, height);
+		engineW = (width + 1) / 2;
+		engineH = (height + 1) / 2;
+		for (int i = 0; i < halvings; ++i) { engineW = (engineW + 1) / 2; engineH = (engineH + 1) / 2; }
+	}
+
+	void VectorEngine::ServeStatistics(uint64_t sequence, uint64_t nextSequence, int width, int height, const ServeFacts& facts,
+		IVectorEngineHost& host)
+	{
+		const bool backward = vectorDemand.mode == VectorDemand::Mode::Backward;
+		const bool forwardStats = vectorDemand.mode == VectorDemand::Mode::Forward && !vectorDemand.estimate && !facts.legacyConsumer &&
+			(vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan) || vectorDemand.Serves(VectorDemand::Consumer::MotionIntent));
+		if ((!backward && !forwardStats) || !motionProducer || !motionProducer->Running() ||
+			sequence == 0 || sequence == vectorBackwardSequence)
+			return;
+		vectorBackwardSequence = sequence;
+		int engineW = 0, engineH = 0, halvings = 0;
+		SizeFor(facts.lowResSearch, width, height, engineW, engineH, halvings);
+		motionProducer->SetTargetSize(engineW, engineH);
+		MotionAhead::FlowPtr flow;
+		uint64_t from = 0, to = 0;
+		if (forwardStats)
+		{
+			from = sequence;
+			to = nextSequence;
+			if (nextSequence == sequence + 1 &&
+				motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
+				flow = motionProducer->Take(from, to);
+			NoteGlobalPair(flow != nullptr);
+		}
+		else
+			for (int age = 0; age < 2 && !flow && sequence > static_cast<uint64_t>(age + 1); ++age)
+			{
+				from = sequence - 1 - age;
+				to = sequence - age;
+				if (motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
+					flow = motionProducer->Take(from, to);
+			}
+		if (!flow)
+		{
+			++motionAheadMisses;
+			motionProducer->Prune(forwardStats ? sequence : (sequence > 2 ? sequence - 2 : 0));
+			return;
+		}
+		++motionAheadHits;
+		if (backward) ++vectorBackwardPairs;
+		++vectorPairs;
+		NoteVectorsDelivered(backward, backward ? "engine" : "engine ahead");
+		const VectorDemand::GlobalSample g = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
+			static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1]), halvings),
+			flow->global[0][2], flow->global[0][3], facts.pictureHeight);
+		if (g.usable && vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan))
+			host.NoteSourceMonitorMotion(g.sourcePixels, to);
+		if (vectorDemand.Serves(VectorDemand::Consumer::MotionIntent) && host.IntentActive())
+		{
+			IntentInterpreter::VectorSample vectors;
+			vectors.from = from;
+			vectors.to = to;
+			vectors.valid = g.intentValid;
+			vectors.heightsPerFrame = g.heightsPerFrame;
+			host.NoteIntentVectors(vectors);
+		}
+		if (backward && facts.vectorDeliveryRuns)
+			motionSegment.Publish(VpMotion::Direction::Backward, from, to, MotionShadowField{ from, to },
+				VpMotion::Source::EngineAhead, motionValidity.Epoch(), 0, false);
+		motionProducer->Prune(forwardStats ? sequence : (sequence > 2 ? sequence - 2 : 0));
+	}
+
+	void VectorEngine::MotionShadowCheck(bool deliveryRuns, uint64_t sequence, uint64_t nextSequence, bool hostLive)
+	{
+		// Modularity sweep 2026-10-25: no shadow state while the delivery slot is off (Original pathway).
+		if (!deliveryRuns)
+			return;
+		const auto d = motionSegment.Fetch(VpMotion::Consumer::Interpolator, VpMotion::Direction::Forward,
+			sequence, nextSequence, 0);
+		++motionShadowChecks;
+		if (static_cast<bool>(d) == hostLive)
+			return;
+		if (++motionShadowMismatches == 1 || motionShadowMismatches % 2400 == 0)
+			DebugLog::Log("Motion segment (shadow): mismatch source=%llu next=%llu host=%d segment=%d (%s; %llu of %llu)",
+				static_cast<unsigned long long>(sequence), static_cast<unsigned long long>(nextSequence), hostLive ? 1 : 0,
+				d ? 1 : 0, VpMotion::Describe(d.miss), motionShadowMismatches, motionShadowChecks);
 	}
 }
