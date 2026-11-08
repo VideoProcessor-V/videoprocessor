@@ -1691,6 +1691,13 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 			return true;
 		}
 
+		void* SkeletonModule::Query(const char* iid)
+		{
+			if (iid && std::strcmp(iid, kExternalDemandQueryId) == 0)
+				return static_cast<IExternalDemand*>(this);
+			return nullptr;
+		}
+
 		void RegisterSkeletonModule()
 		{
 			static bool registered = false;

@@ -18,6 +18,7 @@
 #include <VP-V/modules/motion/estimation/global_model/link/GuidanceScheduler.h>
 #include <VP-V/modules/motion/estimation/global_model/link/GuidanceStatus.h>
 #include <VP-V/modules/motion/estimation/global_model/link/GuidanceTimers.h>
+#include <VP-V/core/PassTimerInbox.h>
 
 #include <atomic>
 #include <chrono>
@@ -569,6 +570,10 @@ namespace VideoProcessorTest
 			CameraLink::FramePhaseFacts f;
 			f.seq = 1;
 			rig.PublishInputs(1);
+			{
+				PassTimers::Accumulator earlier;   // what other tests left in the process-wide inbox
+				PassTimers::Inbox::Motion().DrainInto(earlier);
+			}
 			Assert::IsTrue(core.SubmitField(CameraLinkTest::PanJob(1, 8).field, f));
 			Assert::AreEqual(size_t(1), core.ProcessPending());
 			Assert::AreEqual(size_t(1), seen.size());
@@ -576,18 +581,17 @@ namespace VideoProcessorTest
 			Assert::IsTrue(recordWasThere, L"the observer runs after the publish");
 			Assert::AreEqual(size_t(1), core.LagMeter().FitSamples(), L"the record's own fit cost reached the lag meter");
 			Assert::AreEqual(0.003, core.LagMeter().P95FitSeconds(), 1e-9);
-			std::vector<CameraLink::TimerSample> samples;
-			Assert::IsTrue(core.DrainTimerSamples(samples) >= 1);
-			bool fitRow = false;
-			for (const CameraLink::TimerSample& s : samples)
-				if (std::string(s.row) == CameraLink::kTimerFit)
-				{
-					fitRow = true;
-					Assert::AreEqual(3.0, s.ms, 1e-9);
-					Assert::IsFalse(s.wait, L"the fit is work");
-				}
-			Assert::IsTrue(fitRow, L"camera.fit is fed");
-			Assert::AreEqual(size_t(0), core.DrainTimerSamples(samples), L"drained");
+			// camera-live step 2: the fit cost goes to the motion pass-timer inbox (the camera-private timer queue is gone). The inbox is
+			// process-wide, so the test drains it before the fit (in the rig setup above nothing fitted yet) and reads what this fit posted.
+			PassTimers::Accumulator acc;
+			Assert::IsTrue(PassTimers::Inbox::Motion().DrainInto(acc) >= 1);
+			const PassTimers::Stat* fitRow = acc.Find(CameraLink::kTimerFit);
+			Assert::IsNotNull(fitRow, L"camera.fit is fed");
+			Assert::AreEqual(3.0, fitRow->lastMs, 1e-9);
+			Assert::IsTrue(fitRow->kind == PassTimers::Kind::CpuWork, L"the fit is work");
+			PassTimers::Accumulator again;
+			PassTimers::Inbox::Motion().DrainInto(again);
+			Assert::IsNull(again.Find(CameraLink::kTimerFit), L"drained");
 			// A graph rebuild starts a fresh measuring window.
 			core.AttachGraph(rig.table.get(), rig.bytes.get(), rig.indicator.get());
 			Assert::AreEqual(size_t(0), core.LagMeter().FitSamples());
@@ -598,14 +602,12 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(TheCameraRowsReachThePassTimersAccumulatorAsWorkAndAsAWait)
 		{
+			// camera-live step 2: the rows go through the motion pass-timer inbox (the host drains it into the readout's accumulator).
 			PassTimers::Accumulator acc;
-			std::vector<CameraLink::TimerSample> samples(2);
-			samples[0].row = CameraLink::kTimerFit;
-			samples[0].ms = 3.5;
-			samples[1].row = CameraLink::kTimerReadback;
-			samples[1].ms = 12.0;
-			samples[1].wait = true;
-			CameraLink::AddCameraRows(acc, samples);
+			PassTimers::Inbox inbox;
+			inbox.PostCameraFit(3.5);
+			inbox.PostCameraReadback(12.0);
+			inbox.DrainInto(acc);
 			const PassTimers::Stat* fit = acc.Find("camera.fit");
 			const PassTimers::Stat* readback = acc.Find("camera.readback");
 			Assert::IsNotNull(fit);

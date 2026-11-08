@@ -12,7 +12,8 @@
 //     then drops everything. Call it at the host's GpuReleased / Shutdown, before the engine pointer goes.
 //   * OnFrame() once per frame on the render thread: finish the counts a frame late, pump the lane job.
 //   * the d lag is derived at a graph rebuild from the MEASURED costs (RebuildGraph), then the core's meter restarts with the graph.
-//   * status through FallbackCatalog decisions and status lines; costs as PassTimers rows (FeedPassTimers).
+//   * status through FallbackCatalog decisions and status lines; costs as PassTimers rows (the core posts camera.fit /
+//     camera.readback to PassTimers::Inbox::Motion(); no adapter call).
 // AfterEstimate: P5a's AfterEstimate(pairSeq, VpMotion::EstimateOutcome) (M2 P5a-out) is mapped by CameraGuidanceHook::AfterEstimate onto
 // CameraLink::EstimateOutcome (the ONE mapping: narrow idle, rejection text, gpuMs, counts) and forwarded to AfterEstimateEx.
 // C++14, header + .cpp, render thread unless noted.
@@ -64,14 +65,12 @@ namespace CameraLink
 		// New switches / thresholds: re-registers or unregisters the hook, drops stored lane results.
 		void SetSettings(const GuidanceSettings& settings);
 		// A graph rebuild: d from the measured fit cost and readback latency over the measured source period (the floor when
-		// unmeasured or deterministic). Call BEFORE core.AttachGraph (which restarts the meter). Returns d.
+		// unmeasured or deterministic). Call BEFORE core.AttachLane / AttachGraph (which restart the meter). Returns d.
 		uint8_t RebuildGraph(double sourcePeriodSeconds, bool deterministic);
 		// A discontinuity (seek, resync, field era change): stored plans, wanted pairs and holds are dropped.
 		void OnDiscontinuity();
 		void OnFrame();
 
-		// Costs: camera.fit / camera.readback into the skeleton's PassTimers accumulator (PassTimerHook::acc). Render thread.
-		void FeedPassTimers(PassTimers::Accumulator& acc);
 		std::vector<FallbackCatalog::Decision> CollectDecisions() const { return m_sched.CollectDecisions(); }
 		void CollectStatus(std::vector<std::string>& lines) const;
 

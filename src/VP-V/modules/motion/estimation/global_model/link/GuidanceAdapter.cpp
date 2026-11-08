@@ -102,13 +102,6 @@ namespace CameraLink
 		m_job.Pump();
 	}
 
-	void CameraGuidanceAdapter::FeedPassTimers(PassTimers::Accumulator& acc)
-	{
-		std::vector<TimerSample> samples;
-		if (m_core.DrainTimerSamples(samples) > 0)
-			AddCameraRows(acc, samples);
-	}
-
 	void CameraGuidanceAdapter::CollectStatus(std::vector<std::string>& lines) const
 	{
 		const std::vector<std::string> s = m_sched.StatusLines();

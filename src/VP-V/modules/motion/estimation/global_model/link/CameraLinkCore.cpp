@@ -5,6 +5,8 @@
 #include "CameraDump.h"
 #include "CameraUsable.h"
 
+#include <VP-V/core/PassTimerInbox.h>
+
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
@@ -180,34 +182,12 @@ namespace CameraLink
 			{
 				const double latency = std::chrono::duration<double>(now - at->second).count();
 				m_lagMeter.AddReadbackSeconds(latency);
-				AddTimerSample(kTimerReadback, latency * 1000.0, true);
+				if (latency > 0)
+					PassTimers::Inbox::Motion().PostCameraReadback(latency * 1000.0);   // camera.readback: a wait, never counted as work
 				m_requestedAt.erase(at);
 			}
 			SubmitField(fc, f);
 		}
-	}
-
-	void CameraLinkCore::AddTimerSample(const char* row, double ms, bool wait)
-	{
-		if (!(ms > 0))
-			return;
-		std::lock_guard<std::mutex> lock(m_timerMutex);
-		if (m_timerSamples.size() >= 256)
-			m_timerSamples.erase(m_timerSamples.begin());   // bounded: an undrained queue keeps the newest
-		TimerSample s;
-		s.row = row;
-		s.ms = ms;
-		s.wait = wait;
-		m_timerSamples.push_back(s);
-	}
-
-	size_t CameraLinkCore::DrainTimerSamples(std::vector<TimerSample>& out)
-	{
-		std::lock_guard<std::mutex> lock(m_timerMutex);
-		const size_t n = m_timerSamples.size();
-		out.insert(out.end(), m_timerSamples.begin(), m_timerSamples.end());
-		m_timerSamples.clear();
-		return n;
 	}
 
 	bool CameraLinkCore::PreviousRecordSeq(uint64_t seq, unsigned back, uint64_t& out) const
@@ -440,7 +420,7 @@ namespace CameraLink
 		if (rec && rec->costMicros > 0)
 		{
 			m_lagMeter.AddFitSeconds(static_cast<double>(rec->costMicros) * 1e-6);
-			AddTimerSample(kTimerFit, static_cast<double>(rec->costMicros) * 1e-3, false);
+			PassTimers::Inbox::Motion().PostCameraFit(static_cast<double>(rec->costMicros) * 1e-3);   // camera.fit: CPU work (the worker)
 		}
 		{
 			std::lock_guard<std::mutex> lock(m_traceMutex);

@@ -135,4 +135,15 @@ namespace CameraLink
 			if (in.active[i])
 				out.push_back(DeclarationOf(ConsumerAt(i)));
 	}
+
+	// The consumers camera live declares (camera-live step 2): the fit's own measurement (P7 at lag 1) and, when labels are wanted, the
+	// diagnostics consumer (P7 + P8). ONE list for both users: the skeleton's external demand (SkeletonModule::SetExternalDemand) and the
+	// camera's lag bridge graph (CameraLane::Build), so the two graphs cannot drift apart.
+	inline CameraDemandInput LiveCameraDemand(bool labels)
+	{
+		CameraDemandInput in;
+		in.active[static_cast<int>(CameraConsumer::Measurement)] = true;
+		in.active[static_cast<int>(CameraConsumer::Diagnostics)] = labels;
+		return in;
+	}
 }

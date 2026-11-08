@@ -47,7 +47,7 @@ namespace Vpv
 		class SkeletonGpuDispatcher;   // gpu/SkeletonGpuDispatcher.h (libplacebo; not included here)
 		struct GpuSlotTag { const void* host = nullptr; };   // the per-renderer pl_gpu, kept as a HostSlots aux
 
-		class SkeletonModule : public Hub::ISkeletonModule
+		class SkeletonModule : public Hub::ISkeletonModule, public IExternalDemand
 		{
 		public:
 			static constexpr const char* kName = "skeleton";
@@ -70,6 +70,8 @@ namespace Vpv
 			bool OnFrame(RE::FrameContext&) override;
 			void OnStatus(const RE::Context&, RE::StatusKind, std::vector<std::string>&, const char*, const char*) override;
 			bool OnCommand(const RE::Context&, const char*, const char*, std::string&) override;
+			// Query(kExternalDemandQueryId) = this module's IExternalDemand (the camera extension declares its consumers through it).
+			void* Query(const char* iid) override;
 
 			// Diagnostics and tests.
 			bool Active(const void* host) const;                      // the lane is switched on for this renderer
@@ -113,8 +115,8 @@ namespace Vpv
 			// one entry per (host, owner), replaced by the next call. Any thread. Consumer ids must be unique across owners (the first wins; the
 			// rest are counted and shown). Cleared with ClearExternalDemand (the declaring component's GpuReleased / Shutdown).
 			void SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
-				const std::vector<VpSkeleton::ProductId>& publishedOutside);
-			void ClearExternalDemand(const void* host, const void* owner);
+				const std::vector<VpSkeleton::ProductId>& publishedOutside) override;
+			void ClearExternalDemand(const void* host, const void* owner) override;
 			// The engine of a renderer (null = none). Default: Query("vpv.vector_engine.v1") -> IVectorEngineDirectory::EngineFor(host). Tests inject a fake.
 			using EngineProvider = std::function<VpMotion::IVectorEngine*(const void* host)>;
 			void SetEngineProviderForTesting(EngineProvider provider) { engineProvider_ = std::move(provider); }

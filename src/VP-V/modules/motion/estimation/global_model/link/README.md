@@ -58,13 +58,13 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 
 ## K4 wiring on P5a's contract (2026-11-07)
 
-**STATUS (camera live wiring, branch `r1cam/camlive`): K4 is reachable, default OFF.** `CameraExtension` builds the camera's own product table
-(`CameraLane`, below) at the first verified engine field and attaches the core to it when `camera_link = report` AND `camera_model = on` (`p7Wanted`);
+**STATUS (camera live wiring, branch `r1cam/camlive`; step 2 `r1cam/slots`): K4 is reachable, default OFF.** `CameraExtension` declares the camera consumers to the
+skeleton, builds the lag bridge (`CameraLane`, below) at the first verified engine field and attaches the core to it when `camera_link = report` AND `camera_model = on` (`p7Wanted`);
 with any `camera_meas_*` switch also on it creates the `CameraGuidanceAdapter` and attaches it to the renderer's engine
 (`Query("vpv.vector_engine.v1")` -> `IVectorEngineDirectory::EngineFor(host)`), which registers the ONE pre-estimate hook. The four .cpp files
 (`GuidanceScheduler`, `GuideLaneJob`, `GuidanceAdapter`, `GuidanceCountsRing`) and what they need (`CameraLane`, `CameraLabelFill`, `CameraLabelProducer`,
 `CameraModelGpu`, `GlobalModelMeasurement`, `GlobalModelSearchHints`) are in both renderer items props. All keys default off: nothing below exists then.
-No Bill file changed; nothing is fed into the PassTimers accumulator (that needs a renderer call site: gap G3 below).
+No Bill file changed; the camera's cost rows reach the pass-timer readout through the motion inbox that SK-W's host call drains (G3 below, closed).
 
 **LOCK RULE.** `CameraGuidanceAdapter::Detach` (also `SetSettings` / `Attach` when they unregister) runs on the render thread with `renderMutex`
 held and waits on `CameraLinkCore`'s observer mutex; the camera worker holds that mutex while it pumps the lane job. So the host's `p4` reader,
@@ -91,7 +91,9 @@ P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` 
   Lane == live byte for byte (`GuideProductTests`, `GuidanceWiringTests`, including a barrier thread test of the ask-while-computing interleaving).
 * **Status through the skeleton.** `CollectDecisions()`: FallbackCatalog Decisions `camera.guidance.escalations_high`, `.refused`, `.narrow_idle`.
 * **Costs through the skeleton's pass-timer path.** `MotionTimerRows()` -> `motion.estimate / guided_pass / block_search / d1` (host: `AddGpuGroups`);
-  `FeedPassTimers()` -> `camera.fit` (CPU work, the worker's fit) and `camera.readback` (a WAIT: request -> ready latency) into `PassTimerHook::acc`.
+  `CameraLinkCore` posts `camera.fit` (CPU work, the worker's fit) and `camera.readback` (a WAIT: request -> ready latency) to the motion pass-timer
+  inbox (`PassTimers::Inbox::Motion().PostCameraFit / PostCameraReadback`, SK-W); the host drains it into `PassTimerHook::acc` (LVR, SK-W's drain).
+  The camera-private sample queue (`DrainTimerSamples`, `FeedPassTimers`, `TimerSample`, `AddCameraRows`) is gone (camera-live step 2).
   `camera.labels` (P8) has no producer clock in this scope. The governor trips on escalation counts; a skeleton feed of a consumer's measured GPU ms
   into a governor does not exist yet (MV7 item).
 * **AfterEstimate.** M2's `AfterEstimate(pairSeq, VpMotion::EstimateOutcome)` (`m2/p5a-outcome`, merged) is mapped by `CameraGuidanceHook::AfterEstimate` onto
@@ -112,14 +114,30 @@ P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` 
 
 ## Camera live wiring (default off; what is live and what is not)
 
-> **STOPGAP - TO BE RETIRED.** `CameraLane` is the camera's PRIVATE SlotTable (owner rule: products live in the skeleton). It is retired for skeleton slots once SK-W
-> provides live P2 / P3 / P4 content, the camera consumer declarations in the skeleton graph and the BeforeRender seal; then the markers and the lagged seal are deleted and the
-> camera worker becomes a LaneRunner producer (K1-9).
+> **LAG BRIDGE UNTIL SK-W2** (camera-live step 2). What SK-W covers now goes through SK-W: the camera consumers are declared to the skeleton
+> (`SkeletonModule::SetExternalDemand` via `Query(kExternalDemandQueryId)`, the list `CameraLink::LiveCameraDemand`; with `analysis_lane` on the skeleton graph then
+> holds P7 / P8 and their inputs and the declaration starts the engine through VectorDemand), the fit and the label fill hold their table through OWNED leases
+> (`CameraLinkCore::AttachLane`, `CameraLabelFill(LaneLeaseSource, ...)`; a generation change rebinds and refuses a stale job, `PublishOutcome::StaleLane`), and the
+> costs go to the pass-timer inbox. `CameraLane` remains ONLY as the lagged seal, because the skeleton lane seals every product of frame N at the render
+> start of N (`SlotTable::Resolve`; `SlotSet::Seal` has no deferral) and P7(N) only exists a readback + fit later. See "Lag bridge until SK-W2" below.
+
+### Lag bridge until SK-W2
+
+| Kept in `CameraLane` (smallest surface) | Why it cannot move yet | What SK-W2 does instead |
+|---|---|---|
+| the lagged seal (`OnFrame` -> `SealOne` at N + `kSealLag`, the Indicator's stamp of N) and its `Sealed {p7Published, hadField}` result | the skeleton seals P7(N) at N: it would be absent on every frame | seals P7(N) (and P8(N)) at N + lag in the skeleton lane and reports the result to the camera |
+| the table P7 / P8 are published into, and its `Lease()` / `Source()` (owned, one generation per `Build` / `Clear`) | a lagged seal needs the slots it seals | the lease source becomes `[lane]{ return lane->Lease(kP7CameraFit); }` (and `kP8CameraLabels`): one line in `CameraExtension::EnsureLive` |
+| the input markers (empty P3 / P4 / P2m / P1 slots with the honoured stamp) | the lagged seal checks P7's ancestry inside its own table; the skeleton's P3 / P4 slots are sealed and released on the skeleton's schedule | P7's ancestors are the skeleton's own P3 (engine feed) / P4 / P2m slots |
+| the field marks (`NoteField`) telling a cadence repeat from a late fit | same seal | the skeleton's engine feed knows which frames had a field |
+
+Open for SK-W2 too: with the bridge gone the camera needs the skeleton lane, which exists only with `analysis_lane` on (and `resync_event` on); today the
+camera runs without it. P9 (no producer, K9-1) and p7g (the guide is not slot-backed) are not declared. Validity stays on the P5a `MotionValidity` facade
+(`PairSpansSlip`); scene facts come from the frame-analysis store, not `SceneFactsOf`. `NoteRenderOnlyMs` is not fed: the camera has no measured render-only span.
 
 | Part | Live now | How |
 |---|---|---|
 | P7 fit | yes, with camera_link = report + camera_model = on | `p7Wanted` is set by the keys, NOT by P5a's vector demand (that decision only covers P2/P3 and nothing in a renderer declares P7 as a consumer). The fit reads the engine's verified fields (`IVectorEngine::FieldOf`) through the readback ring |
-| P7 as a skeleton product | yes, in the camera's own table | `CameraLane.h`: the same registry, SlotTable, SlotSet and CpuBuffers as the skeleton lane, built with the camera consumers. The skeleton lane carries only its report consumer, so no renderer graph holds P7; nothing publishes P2 / P3 as slots (the engine keeps its field as a texture). The camera publishes empty-content input markers for P3 / P4 / P2m / P1 each frame (ancestry + honoured stamp) and seals `kSealLag = 6` frames behind the render, with the Indicator's stamp of that frame |
+| P7 as a skeleton product | declared to the skeleton; sealed in the lag bridge | the camera consumers are the skeleton's external demand (`LiveCameraDemand`; P7 / P8 published outside the lane). The fit is held by lease on `CameraLane.h` (the lag bridge, same registry / SlotTable / SlotSet / CpuBuffers, graph from the same declarations), which publishes empty-content input markers for P3 / P4 / P2m / P1 each frame (ancestry + honoured stamp) and seals `kSealLag = 6` frames behind the render, with the Indicator's stamp of that frame |
 | validity | era / stamp / slip | the record's honoured stamp is checked at the seal (a resync event or a slip between marker and seal rejects it); a pair that spans a slip or has an ancient stamp is not fitted (`camera.no_model.slip`) |
 | trust | confidence, reason, P8 untrusted code | in the record (`CameraMotion`), the status line and `Usable()`; the labels carry the untrusted code (K2) |
 | P8 labels | yes, when labels are wanted (overlay != off, any camera_use_* switch, camera_labels_gpu) and a render device exists | `CameraLabelProducer` in UPLOAD mode (CPU labels uploaded to a texture; compute mode with camera_labels_gpu on), `CameraLabelFill` as the post-submit gap work and the seal's live fill. Because the seal lags, a consumer reads the labels of a frame that has been sealed (`LabelsFor(seq)`); no consumer is wired to them yet |
@@ -127,9 +145,8 @@ P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` 
 | K4 guidance | yes, with a `camera_meas_*` switch on | adapter + hook; P4 facts for the lane job come from the frame-analysis store (`Identity.picture`, `Scene.cut / fade` when the scene group was written); a pair without a scene record is counted and shown (`camera_scene`) |
 | status | Ctrl+I, Config status, Fallbacks, Ctrl+Alt+D | `CameraStatus.h` + the adapter's lines and decisions + `camera_engine` / `camera_graph` / `camera_fit` / `camera_gpu` / `camera_scene`; `camera_fit` = "camera fit waits for resync_event: turn resync_event on" (the seal is not driving: a visible fallback, since every camera default is off and an enabled camera is explicit) |
 
-**Gaps (not closed here).** G1 P2 / P3 / P4 content is not in a skeleton slot: the markers carry ancestry only; moving P7 into the skeleton lane (K1-9 / SK-W) removes the private
-table. G2 (closed) `m2/p5a-outcome` is merged and mapped (see AfterEstimate above); the bench `gpu_ms` stays empty until the engine can measure a per-estimate GPU time. G3 `camera.fit` /
-`camera.readback` PassTimers rows need `FeedPassTimers(passTimerHook.acc)` at a renderer call site (a Bill hunk under a zone lock); the samples are bounded and unread until then.
+**Gaps (not closed here).** G1 the lagged seal: SK-W2 (see "Lag bridge until SK-W2"); the bridge's markers carry ancestry only. G2 (closed) `m2/p5a-outcome` is merged and mapped (see AfterEstimate above); the bench `gpu_ms` stays empty until the engine can measure a per-estimate GPU time. G3 (closed, camera-live step 2) `camera.fit` /
+`camera.readback` go through the pass-timer inbox, which SK-W's host call drains into the readout.
 G4 flash events and fade gain / offset have no producer (flash false, gain 1, offset 0). G5 `measuredSourceHz` is the ingress rate (`HostResync::measuredRateHz`); a cadence-locked source
 uses the store's film rate when its cadence group was written, else the ingress rate.
 
@@ -141,7 +158,7 @@ Read from the code, not measured. NO hook is registered (`guideWanted` is false:
 |---|---|---|
 | CPU fit | the ONE camera worker thread, once per verified field (cadence repeats have none); `Fitter::Fit` on the readback copy | async: the render thread never waits; p95 not yet measured on the laptop (indicative 9-12 ms CPU) |
 | GPU -> CPU readback of `IVectorEngine::FieldOf(seq)` | D3D11 (the production backend): ONE small copy pass (a shader writes the engine's rgba32f forward field into a VP-owned slot texture by imageStore), ONE native CopyResource into a staging texture and an event query; read later with Map(DO_NOT_WAIT). Not D3D11: `pl_tex_download` into a host-mapped `pl_buf`, `pl_buf_poll(..., 0)`. The backward plane is requested only when the engine gives one (`FieldOf` gives none today) | 16 B per 16x16 block: 1080p 120 x 68 = 8,160 blocks = 130,560 B (0.12 MiB) per pair; 4K 240 x 135 = 32,400 blocks = 518,400 B (0.49 MiB) per pair. Ring of at least 3 slots allocated at attach (about 0.4 MiB at 1080p, 1.5 MiB at 4K); a full ring drops the request visibly |
-| `CameraLane` | CPU only: input-marker headers for about 4 nodes per frame (atomic claims / publishes), the lagged seal (`Resolve`, `ReleaseAfter`), no GPU, no allocation per frame | microseconds |
+| `CameraLane` (lag bridge) | CPU only: one lease read per frame (an atomic shared_ptr load), input-marker headers for about 4 nodes per frame (atomic claims / publishes), the lagged seal (`Resolve`, `ReleaseAfter`), no GPU, no allocation per frame | microseconds |
 | Frame-analysis store reads | `UpdateTiming` (one cadence read per frame) and `DescribePair` (one record read per fit); each copies a `Record` (about 4 KB) under the store mutex | negligible |
 | P8 labels upload | only when labels are wanted (overlay != off, any `camera_use_*`, `camera_labels_gpu`): none with the defaults | 0 |
 | GPU operations added | the one copy pass and the one CopyResource + query per verified field, and nothing else (no guidance counts readback, no label upload, no change to any matcher pass) | |
@@ -212,7 +229,7 @@ Not in K3: the **overlay** itself (K2's P8 is not instantiated and the fit has n
 | `CollectStatus` | `CollectStatus(lines)` + `CollectDecisions()` into the fallback registry |
 | `QueryInterface("vpv.camera.v1")` | `Link()` |
 | graph rebuild | `GuideLagMeter::Lag(sourcePeriod, deterministic)` -> `GuidanceScheduler::SetLag(d)` + `SkeletonProductsWithGuide(d)` |
-| camera adapter, once the engine exists | `CameraGuidanceAdapter(core, settings, {p4Reader, nextPair, onRenderThread})`; `Attach(engine, std::make_unique<GuidanceCountsRing>(gpu))`; per frame `OnFrame()` and `FeedPassTimers(passTimerHook.acc)`; `CollectDecisions()` into the fallback registry; `RebuildGraph(period, deterministic)` before `AttachGraph`; `Detach()` at GpuReleased. Add `GuidanceScheduler.cpp`, `GuideLaneJob.cpp`, `GuidanceAdapter.cpp`, `GuidanceCountsRing.cpp` to the renderer items props in that commit |
+| camera adapter, once the engine exists | `CameraGuidanceAdapter(core, settings, {p4Reader, nextPair, onRenderThread})`; `Attach(engine, std::make_unique<GuidanceCountsRing>(gpu))`; per frame `OnFrame()` (the costs go to the pass-timer inbox, no adapter call); `CollectDecisions()` into the fallback registry; `RebuildGraph(period, deterministic)` before `AttachLane`; `Detach()` at GpuReleased. Add `GuidanceScheduler.cpp`, `GuideLaneJob.cpp`, `GuidanceAdapter.cpp`, `GuidanceCountsRing.cpp` to the renderer items props in that commit |
 | `Estimate` / `EstimateAhead` (P5a) | none: P5a's `VectorEngine::Estimate` calls the registered hook |
 | Indicator setup | `RegisterReader(indicator)` |
 | P5a engine | `SetEngine(IVectorEngine*)`, `engine->SetPreEstimateHook(&CameraGuidanceHook)` |

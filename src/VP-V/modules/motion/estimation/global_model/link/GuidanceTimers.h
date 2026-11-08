@@ -68,22 +68,9 @@ namespace CameraLink
 		return rows;
 	}
 
-	// One camera-link timing for the skeleton's PassTimers accumulator: camera.fit (CPU work, the fit on the camera worker) and
-	// camera.readback (a WAIT: the request -> ready latency of the field copy; kept in its own line so it is never counted as work).
-	// camera.labels (P8, GPU) has no producer-side clock in K4's scope and is not fed.
-	struct TimerSample
-	{
-		const char* row = "";
-		double ms = 0;
-		bool wait = false;
-	};
-
-	// The skeleton path: PassTimerHook::acc.Add(...) for each sample (host call: `AddCameraRows(passTimerHook.acc, samples)`).
-	inline void AddCameraRows(PassTimers::Accumulator& acc, const std::vector<TimerSample>& samples)
-	{
-		for (size_t i = 0; i < samples.size(); ++i)
-			acc.Add(samples[i].wait ? PassTimers::Kind::CpuWait : PassTimers::Kind::CpuWork, samples[i].row, samples[i].ms);
-	}
+	// camera.fit (CPU work) and camera.readback (a WAIT) are posted by CameraLinkCore to PassTimers::Inbox::Motion() (core/PassTimerInbox.h,
+	// PostCameraFit / PostCameraReadback); the host drains the inbox into the pass-timer readout. camera.labels (P8, GPU) has no
+	// producer-side clock yet and is not fed.
 
 	// The estimate row for the bench's gpu_ms column (-1 = not measured).
 	inline double EstimateGpuMs(const std::map<std::string, double>& rows)

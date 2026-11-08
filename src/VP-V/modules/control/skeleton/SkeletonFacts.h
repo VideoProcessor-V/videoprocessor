@@ -7,9 +7,11 @@
 // on the render thread. SK-W stage D.
 
 #include <VP-V/core/Indicator.h>
+#include <VP-V/core/Products.h>
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace Vpv
 {
@@ -61,6 +63,19 @@ namespace Vpv
 			uint64_t abandoned = 0;       // fields given up after the retries
 			uint64_t eraResets = 0;       // the engine's numbering restarted (seek, resync, format change)
 			uint64_t lastSeq = 0;         // the last frame published
+		};
+
+		// The EXTERNAL DEMAND entry of the skeleton module (SK-W stage D), for a component beside the lane that does not include the module
+		// (the camera extension). SkeletonModule implements it and hands it out through Query(kExternalDemandQueryId). Any thread. The
+		// contract is SkeletonModule::SetExternalDemand / ClearExternalDemand (one entry per (host, owner), replaced by the next call).
+		constexpr const char* kExternalDemandQueryId = "vpv.skeleton.external_demand.v1";
+		struct IExternalDemand
+		{
+			virtual void SetExternalDemand(const void* host, const void* owner, const std::vector<VpSkeleton::ConsumerDecl>& consumers,
+				const std::vector<VpSkeleton::ProductId>& publishedOutside) = 0;
+			virtual void ClearExternalDemand(const void* host, const void* owner) = 0;
+		protected:
+			~IExternalDemand() {}
 		};
 
 		// The visible explanation of FeedCounters::claimFailed (empty while none). `backward` = the lane runs without a look-ahead lead (low-latency /

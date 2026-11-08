@@ -9,9 +9,11 @@
 //
 // CAMERA LIVE (default off; nothing below exists unless the keys ask for it):
 //   * camera_link = report AND camera_model = on: the fit is wanted (p7Wanted). The extension finds the renderer's vector engine
-//     through Query("vpv.vector_engine.v1") -> IVectorEngineDirectory::EngineFor(host), builds the camera's own product table
-//     (CameraLane.h: P7, and P8 when labels are wanted) at the first verified field, attaches the core to it and feeds the fit from
-//     the engine's fields. An absent engine is refused VISIBLY (Fallbacks "camera_engine"), never silently.
+//     through Query("vpv.vector_engine.v1") -> IVectorEngineDirectory::EngineFor(host) and DECLARES the camera consumers to the
+//     skeleton (SkeletonModule external demand, CameraLink::LiveCameraDemand: the skeleton lane then holds P7 / P8 and starts the
+//     engine through VectorDemand when analysis_lane is on). At the first verified field it builds the lag bridge (CameraLane.h:
+//     the lagged seal of P7 / P8 until SK-W2), attaches the core and the label fill to it through LEASES (AttachLane) and feeds the
+//     fit from the engine's seed fields. An absent engine is refused VISIBLY (Fallbacks "camera_engine"), never silently.
 //   * ... AND any camera_meas_* switch on (K3's keys, [vpv.camera]): a CameraGuidanceAdapter is attached to the engine, which
 //     registers the ONE pre-estimate hook (P5a's call site; nothing in the renderer changes). All switches off: no adapter, no hook.
 //   * Threading: everything runs on the render thread (OnLifecycle, OnFrame). The adapter's detach order: hook cleared first,
@@ -27,6 +29,7 @@
 
 #include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/core/hub/HostSlots.h>
+#include <VP-V/modules/control/skeleton/SkeletonFacts.h>
 #include <VP-V/modules/control/skeleton/SkeletonSettings.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 
@@ -56,9 +59,12 @@ namespace Vpv
 
 			// Where the renderer's vector engines are looked up; empty = the hub's Query("vpv.vector_engine.v1") (tests pass a fake).
 			using EngineDirectoryProvider = std::function<VpMotion::IVectorEngineDirectory*()>;
+			// Where the camera declares its consumers to the skeleton (camera-live step 2); empty = the hub's
+			// Query(Skeleton::kExternalDemandQueryId) (the SkeletonModule). A null result = no skeleton module: nothing is declared.
+			using DemandProvider = std::function<Skeleton::IExternalDemand*()>;
 
 			explicit CameraExtension(Skeleton::ConfigLoader loader = Skeleton::ConfigLoader(),
-				EngineDirectoryProvider engines = EngineDirectoryProvider());
+				EngineDirectoryProvider engines = EngineDirectoryProvider(), DemandProvider demand = DemandProvider());
 			~CameraExtension() override;
 
 			const char* Name() const override { return kName; }
@@ -90,9 +96,13 @@ namespace Vpv
 			bool EnsureLive(CameraHostState& st, const void* host, const std::shared_ptr<VpIndicator::Indicator>& indicator);
 			void ReleaseLive(CameraHostState& st);
 			void DriveFrame(CameraHostState& st, const void* host, int64_t seq);
+			// The skeleton's external demand follows fitWanted / labelsWanted: declared, re-declared on a change, cleared when off.
+			void UpdateDemand(CameraHostState& st);
+			Skeleton::IExternalDemand* FindDemand() const;
 
 			Skeleton::ConfigLoader loader_;
 			EngineDirectoryProvider engines_;
+			DemandProvider demand_;
 			Hub::HostSlots<CameraHostState> hosts_;
 		};
 

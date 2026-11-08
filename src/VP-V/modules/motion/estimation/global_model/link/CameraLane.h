@@ -1,43 +1,36 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// *** STOPGAP - TO BE RETIRED. *** This is the camera's PRIVATE SlotTable. Owner rule: products live in the skeleton. It exists only because
-// the skeleton lane cannot carry the camera products yet: no renderer graph declares P7 / P2 / P3 as consumers, nothing publishes P2 / P3 / P4
-// as live-content slots, and the seal of a frame (BeforeRender) is not available to a module. When SK-W provides live P2 / P3 / P4 content,
-// the camera consumer declarations in the skeleton graph and the BeforeRender seal, this class, its markers and its lagged seal are DELETED
-// and P7 / P8 are filled in the skeleton's own table (K1-9: the camera worker becomes a LaneRunner producer).
+// *** LAG BRIDGE UNTIL SK-W2 *** (camera-live step 2). The camera's products are held through the skeleton's APIs (SK-W): the consumers
+// are declared to the skeleton (SkeletonModule::SetExternalDemand with CameraLink::LiveCameraDemand, which also starts the vector
+// engine through VectorDemand), the fit and the label fill hold their table through a LaneLease and rebind on a generation change
+// (CameraLinkCore::AttachLane, CameraLabelFill(LaneLeaseSource, ...)), and the costs go to the pass-timer inbox. What this class still
+// does is ONLY what SK-W does not provide: the LAGGED SEAL. The skeleton lane seals every product of frame N at the render start of N
+// (SlotTable::Resolve; SlotSet::Seal has no deferral), but P7(N) is fitted from a field the engine made while rendering N and read
+// back a frame or two later, so in the skeleton's table P7 would be sealed absent on every frame. Until SK-W2 seals P7(N) at N + lag in
+// the skeleton lane, the fit and the labels are published into THIS small table, whose seal runs kSealLag frames behind the render:
+//   * a graph built from the SAME declarations the skeleton receives (LiveCameraDemand), so it holds P7 (+ P8) and their inputs;
+//   * input markers: empty-content P3 / P4 / P2m / P1 slots per frame with the honoured stamp, because a lagged seal can only check
+//     P7's ancestry inside its own table (the skeleton's P3 / P4 slots are sealed and released on the skeleton's own schedule);
+//   * the lagged seal itself (SealOne at N + kSealLag, with the Indicator's stamp OF THAT FRAME) and the field marks that tell a
+//     cadence repeat from a late fit;
+//   * Lease(): an OWNED lease (shared hold of the state + a generation bumped at every Build / Clear), so the holders use exactly the
+//     lease path they will use on the skeleton lane (AnalysisLane::Lease) and a rebuild is a StaleLane refusal, never a freed table.
+// SK-W2 REMOVES this file: the lease source becomes [lane]{ return lane->Lease(kP7CameraFit); } (and kP8CameraLabels), the extension's
+// per-frame OnFrame / NoteField calls go, and the lagged seal result (p7SealedPublished, hadField) comes from the skeleton's lagged seal.
+// See link/README.md "Lag bridge until SK-W2".
 //
-// Camera link (camera-live wiring): the camera's own product table, until P7 moves into the skeleton lane (K1-9 / SK-W).
-//
-// WHY IT EXISTS. P7 (camera fit) is a skeleton product: the fit worker claims P7(N) in a SlotSet, pins its ancestors P3 / P4 / P2
-// (CameraFitWorker::PublishFit -> SlotTable::LaneAncestors), publishes, and the seal accepts or rejects it by the stamp. The skeleton
-// lane (SkeletonModule) carries only its report consumer today: no graph in a renderer holds P7, P2 or P3, and nothing publishes those
-// as slots (the vector engine keeps its field as a texture; P4's scene facts reach the frame-analysis store, not a P4 slot the
-// camera could pin). So the camera builds its OWN graph with the same registry and the same SlotTable / SlotSet / CpuBuffers code
-// (SkeletonProducts + the camera consumers), and acts as the producer of the INPUT slots:
-//   * input markers: for every frame the camera publishes empty-content slots for P3 / P4 / P2m / P1 (every node but P7..P9) with the
-//     recorded ancestors and the honoured stamp, exactly as a lane producer would. The CONTENT the fit reads is not in those slots: P3's
-//     is the engine's verified field (read back by the FieldReadbackRing into a FieldCopy), P4's is the frame-analysis store's scene
-//     record (PairFactsProvider). The markers are what P7's ancestry (cgen, stamp) rests on, so a stamp that moves between the
-//     marker and the seal (a resync event, a slip) rejects the record, as it would for any product.
-//   * the seal runs kSealLag frames BEHIND the render: P7(N) is fitted from a field the engine made while rendering N, read back a
-//     frame or two later, so it cannot exist at the seal of N. SlotTable::Resolve seals the frame that left the window, with the
-//     Indicator's stamp OF THAT FRAME (StampOf(s)), and ReleaseAfter retires it (the N2 rule). The record chain, the guidance lag d
-//     and the guidance gate read records by seq (ICameraLink::CausalRecord / PreviousRecordSeq), never "the record of the frame being
-//     rendered", so the lag is invisible to them.
-//   * P8 (camera labels) lives in the same table when labels are wanted: its fill (CameraLabelFill) runs as the P8 gap work and as the
-//     seal's live fill, with CPU labels uploaded to a texture (CameraLabelProducer, upload mode).
-// P9 (smoothed camera) is declared by no consumer here: its producer (K9-1 CameraSmoother) does not exist yet.
-//
-// Render thread only (the table is also read by the camera worker, which is what SlotSet is for). Header + .cpp, C++14.
+// Render thread only, except Lease() / Source() / Generation() (any thread: atomic loads). Header + .cpp, C++14.
 #pragma once
 
 #include "CameraLabelFill.h"
 
 #include <VP-V/core/Indicator.h>
+#include <VP-V/core/LaneLease.h>
 #include <VP-V/core/ProductGraph.h>
 #include <VP-V/core/ProductSlots.h>
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -65,14 +58,24 @@ namespace CameraLink
 		CameraLane& operator=(const CameraLane&) = delete;
 
 		// Builds the graph for a source of width x height (the dimensions only size the declarations; nothing is allocated per pixel).
-		// `labels` adds the P8 consumer. False and Error() when the registry refuses the graph (shown by the caller).
-		bool Build(uint32_t width, uint32_t height, bool labels);
+		// `labels` adds the P8 consumer. `indicator` is the stamp source the leases carry (kept alive by them; null = the holders use the
+		// stamp they were given). False and Error() when the registry refuses the graph (shown by the caller). Every call (and Clear)
+		// starts a new lease generation: a holder of the previous state rebinds and refuses work stamped with the old one.
+		bool Build(uint32_t width, uint32_t height, bool labels, std::shared_ptr<VpIndicator::Indicator> indicator = nullptr);
 		void Clear();
-		bool Built() const { return m_table != nullptr; }
+		bool Built() const { return m_state != nullptr; }
 		const std::string& Error() const { return m_error; }
 
-		VpSkeleton::SlotTable* Table() { return m_table.get(); }
-		VpSkeleton::CpuBuffers* P7Bytes() { return m_p7Bytes.get(); }
+		// The current lease (any thread). bytesProduct = kP7CameraFit adds the P7 bytes ring; any other id none. Without a state: an
+		// invalid lease carrying the generation counter (LaneLeaseNewer orders it against the states, as AnalysisLane::Lease does).
+		VpSkeleton::LaneLease Lease(VpSkeleton::ProductId bytesProduct) const;
+		// A lease source bound to this bridge (the bridge outlives every holder of the source; the leases keep the state alive).
+		VpSkeleton::LaneLeaseSource Source(VpSkeleton::ProductId bytesProduct) const;
+		uint64_t Generation() const { return m_generation.load(std::memory_order_acquire); }
+
+		// Render thread / tests: the current state's objects (null without one).
+		VpSkeleton::SlotTable* Table() const { return m_state ? m_state->table.get() : nullptr; }
+		VpSkeleton::CpuBuffers* P7Bytes() const { return m_state ? m_state->p7Bytes.get() : nullptr; }
 		bool HasLabels() const { return m_labels; }
 		// Ring slots and live buffers of P8 (the texture mirror the label producer is sized by); 0 without P8.
 		int LabelRing() const;
@@ -97,12 +100,22 @@ namespace CameraLink
 		uint64_t FramesSealed() const { return m_sealedFrames; }
 
 	private:
+		// What a lease holds: the table and everything it needs, alive for as long as any holder keeps it (the bridge drops its own
+		// reference at Build / Clear while the fit thread may still be in a publish on the old one).
+		struct State
+		{
+			VpSkeleton::Graph graph;
+			std::unique_ptr<VpSkeleton::SlotTable> table;
+			std::unique_ptr<VpSkeleton::CpuBuffers> p7Bytes;
+			std::shared_ptr<VpIndicator::Indicator> indicator;
+			uint64_t generation = 0;
+		};
+
 		void PublishMarkers(uint64_t seq, VpIndicator::Indicator& indicator, bool warmUp);
 		void SealOne(uint64_t seq, VpIndicator::Indicator& indicator, Sealed& out);
 
-		VpSkeleton::Graph m_graph;
-		std::unique_ptr<VpSkeleton::SlotTable> m_table;
-		std::unique_ptr<VpSkeleton::CpuBuffers> m_p7Bytes;
+		std::shared_ptr<State> m_state;              // swapped by the render thread (std::atomic_store), read by Lease (std::atomic_load)
+		std::atomic<uint64_t> m_generation{ 0 };     // the last generation handed out; bumped at Build and Clear
 		CameraLabelFill* m_fill = nullptr;
 		std::string m_error;
 		uint32_t m_width = 0, m_height = 0;

@@ -145,9 +145,9 @@ namespace CameraLink
 		void SetFitDoneObserver(std::function<void(uint64_t fitSeq)> f);
 		// K4: the measured fit cost (p95) and the readback latency the guide lag d is derived from (GuidanceLag.h).
 		GuideLagMeter& LagMeter() { return m_lagMeter; }
-		// K4: the fit time (CPU work, the camera worker) and the readback latency (a wait, request -> ready) as PassTimers samples,
-		// buffered thread-safely and drained on the render thread into the skeleton's accumulator (AddCameraRows). Bounded.
-		size_t DrainTimerSamples(std::vector<TimerSample>& out);
+		// Costs (camera-live step 2): the fit time (CPU work, on the camera worker) and the readback latency (a WAIT, request -> ready) are
+		// posted to the motion pass-timer inbox (PassTimers::Inbox::Motion().PostCameraFit / PostCameraReadback: rows camera.fit and
+		// camera.readback). The host drains it into the pass-timer readout (LibplaceboVideoRenderer, SK-W); the skeleton shows the totals.
 
 		// K2 / K4 plug in here (set by their owners; null = unavailable).
 		std::function<bool(uint64_t, CameraConsumer, CameraLabelsView&)> labelsProvider;
@@ -187,9 +187,6 @@ namespace CameraLink
 		GuideLagMeter m_lagMeter;
 		mutable std::mutex m_chainMutex;
 		std::vector<uint64_t> m_chain;   // requested record seqs, ascending (bounded); cleared on a new field era / teardown
-		std::mutex m_timerMutex;
-		std::vector<TimerSample> m_timerSamples;
-		void AddTimerSample(const char* row, double ms, bool wait);
 		std::map<uint64_t, std::chrono::steady_clock::time_point> m_requestedAt;   // render thread: field copy requests in flight
 		std::mutex m_observerMutex;
 		std::atomic<std::thread::id> m_observerThread{ std::thread::id() };   // the thread inside the observer right now (debug check)
