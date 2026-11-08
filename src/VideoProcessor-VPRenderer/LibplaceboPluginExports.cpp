@@ -9,6 +9,7 @@
 #include <vprenderer/LibplaceboVideoRenderer.h>
 #include <VpBuildIdentity.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveHoldover.h>
+#include <VP-V/abi/VpvAbi.h>
 
 #include <type_traits>
 
@@ -32,6 +33,15 @@ extern "C" __declspec(dllexport) const char* __cdecl
 VideoProcessorLibplaceboGetBuildId()
 {
 	return VpBuildIdentity::Id();
+}
+
+
+// VP-V extension ABI (M2 P2, D-P2b): the loader requires this export and refuses a DLL whose value differs
+// from its own kVpvExtensionAbi (VP-V/abi/VpvPluginGuard.h). The name is Vpv::kVpvAbiExport.
+extern "C" __declspec(dllexport) uint32_t __cdecl
+VideoProcessorLibplaceboVpvAbi()
+{
+	return Vpv::kVpvExtensionAbi;
 }
 
 

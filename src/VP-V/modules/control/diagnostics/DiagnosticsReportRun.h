@@ -23,6 +23,7 @@
 #include <ConfigFile.h>
 #include <DebugLog.h>
 #include <IRenderer.h>
+#include <VP-V/abi/VpvHostCalls.h>
 #include <vprenderer/OptionalRendererLayout.h>
 
 #include <atlstr.h>
@@ -171,7 +172,7 @@ namespace VpDiagnostics
 			// The rings, at the moment of the key press.
 			inputs->historyExe = DiagnosticHistory::ToJsonl(DiagnosticHistory::Global(), "exe", referenceQpc);
 			if (renderer)
-				inputs->rendererContributed = renderer->WriteDiagnosticHistory(
+				inputs->rendererContributed = VpvCalls::WriteDiagnosticHistory(renderer,
 					&DiagnosticHistory::AppendToStringSink, &inputs->historyRenderer, referenceQpc);
 
 			CrashState::Recorder& crashState = CrashState::Global();

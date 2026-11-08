@@ -5,6 +5,7 @@
 
 #include <DebugLog.h>
 #include <VpBuildIdentity.h>
+#include <VP-V/abi/VpvPluginGuard.h>
 #include <vprenderer/OptionalRendererLayout.h>
 
 
@@ -110,6 +111,14 @@ namespace VPRendererFilter
 					ToString(check), path.c_str(), reason.c_str());
 				if (check != PluginCheck::Ok)
 				{
+					FreeLibrary(module);
+					result.failure = reason;
+					continue;
+				}
+				// The VP-V extension ABI (src/VP-V/abi): the same pairing rule as the executable's loader.
+				if (!Vpv::PluginGuard::Check(module, reason))
+				{
+					DebugLog::Log("VP Renderer filter plugin refused: %s path=%ls", reason.c_str(), path.c_str());
 					FreeLibrary(module);
 					result.failure = reason;
 					continue;

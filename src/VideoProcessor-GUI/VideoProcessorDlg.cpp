@@ -3236,7 +3236,7 @@ void CVideoProcessorDlg::StartProjectorTest(
 		return;
 	}
 	CString reason;
-	if (m_videoRenderer && !m_videoRenderer->SuspendLedDriveForTest(reason))
+	if (m_videoRenderer && !VpvCalls::SuspendLedDriveForTest(m_videoRenderer.get(), reason)) // VP-V: extension interface (src/VP-V/abi)
 	{
 		DebugLog::Log("RS-232 connection test refused: %S", static_cast<LPCTSTR>(reason));
 		pending->response = ProjectorTestResponse(false, true, std::string(CStringA(reason)), std::string());
@@ -3357,7 +3357,7 @@ LRESULT CVideoProcessorDlg::OnProjectorTestDone(WPARAM, LPARAM)
 	// Bug hunt 3 (SH5): not while closing - the close path cancelled the test
 	// so the light stays restored; resuming would start the drive again.
 	if (m_videoRenderer && !m_wantToTerminate)
-		m_videoRenderer->ResumeLedDriveAfterTest();
+		VpvCalls::ResumeLedDriveAfterTest(m_videoRenderer.get());
 	m_projectorTestSuspendedRenderer = false;
 	const auto pending = std::move(m_projectorTestPending);
 	m_projectorTestPending.reset();
@@ -8933,7 +8933,7 @@ LRESULT CVideoProcessorDlg::OnStateReportDone(WPARAM, LPARAM lParam)
 void CVideoProcessorDlg::OnCommandDvCompareCapture()
 {
 	CString status;
-	if (!m_videoRenderer || !m_videoRenderer->ToggleDvCompareCapture(status))
+	if (!m_videoRenderer || !VpvCalls::ToggleDvCompareCapture(m_videoRenderer.get(), status))
 		status = _T("DV comparison capture: needs the VP Renderer");
 	OnRendererDetailString(status, m_rendererGeneration.load(std::memory_order_acquire));
 }
@@ -10195,7 +10195,7 @@ std::vector<std::shared_ptr<IVideoRenderer>> CVideoProcessorDlg::RestoreLedForEx
 	for (const std::shared_ptr<IVideoRenderer>& renderer : renderers)
 	{
 		const LedDrive::BoundedRestoreResult restore = LedDrive::RunBoundedRestore(
-			[renderer]() { return renderer->StopLedDriveForShutdown(); },
+			[renderer]() { return VpvCalls::StopLedDriveForShutdown(renderer.get()); },
 			ShutdownLedRestoreTimeoutMs);
 		DebugLog::Log("%s LED restore: %s (timeout_ms=%u)", site,
 			LedDrive::Name(restore), ShutdownLedRestoreTimeoutMs);
@@ -14873,7 +14873,7 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 				m_profileBaseTargetLatencyMs > 0;
 			const int delayBudgetMs = snapshot->queue.lowLatencyPath ? 0 :
 				ownLatency ? snapshot->queue.targetLatencyMs : inherited ? m_profileBaseTargetLatencyMs : 0;
-			m_videoRenderer->SetQueueDelayBudget(delayBudgetMs);
+			VpvCalls::SetQueueDelayBudget(m_videoRenderer.get(), delayBudgetMs);
 		}
 		{
 			static size_t s_loggedShortTarget = 0;
@@ -14926,7 +14926,7 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 		if (m_activePictureLookaheadAutomatic == lookaheadConfigured)
 		{
 			m_activePictureLookaheadAutomatic = !lookaheadConfigured;
-			m_videoRenderer->SetActivePictureLookaheadAutomatic(m_activePictureLookaheadAutomatic);
+			VpvCalls::SetActivePictureLookaheadAutomatic(m_videoRenderer.get(), m_activePictureLookaheadAutomatic);
 			queuePolicyChanged = true;
 		}
 		if (videoProcessorApp.GetActivePictureLookaheadFrames() != desiredLookahead)
@@ -15308,7 +15308,7 @@ void CVideoProcessorDlg::UpdateContentIntent(const char* reason)
 	const bool rendering = m_videoRenderer &&
 		m_rendererState == RendererState::RENDERSTATE_RENDERING;
 	const bool statusAvailable = rendering &&
-		m_videoRenderer->GetContentIntentStatus(status);
+		VpvCalls::GetContentIntentStatus(m_videoRenderer.get(), status);
 	if (!statusAvailable)
 		status = ContentIntentStatus();
 	if (rendering)
@@ -15355,7 +15355,7 @@ void CVideoProcessorDlg::ApplyStartupActivePictureLookahead()
 	if (!m_videoRenderer)
 		return;
 	const size_t frames = StartupActivePictureLookaheadFrames();
-	m_videoRenderer->SetActivePictureLookaheadAutomatic(m_activePictureLookaheadAutomatic);
+	VpvCalls::SetActivePictureLookaheadAutomatic(m_videoRenderer.get(), m_activePictureLookaheadAutomatic);
 	m_videoRenderer->SetActivePictureLookaheadFrames(frames);
 }
 
@@ -15375,8 +15375,8 @@ void CVideoProcessorDlg::UpdateIntentInterpreter()
 		const Ambient::Room overrideRoom = m_ambientOverrideRoom;
 		const bool valid = IntentInterpreter::AmbientLuxFromDetector(m_ambientState, now, lux,
 			m_ambientOverride ? &overrideRoom : nullptr);
-		m_videoRenderer->SetAmbientLux(lux, valid, now);
-		if (!m_videoRenderer->GetIntentStatus(status))
+		VpvCalls::SetAmbientLux(m_videoRenderer.get(), lux, valid, now);
+		if (!VpvCalls::GetIntentStatus(m_videoRenderer.get(), status))
 			status = IntentStatus();
 	}
 	m_intentStatus = status;

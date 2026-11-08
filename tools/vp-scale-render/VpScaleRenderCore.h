@@ -15,6 +15,7 @@
 #include <VideoFrame.h>
 #include <VideoState.h>
 #include <vprenderer/LibplaceboRendererPluginApi.h>
+#include <VP-V/abi/VpvHostCalls.h>
 #include <ConfigFile.h>
 #include <RendererProfileConfig.h>
 
@@ -881,7 +882,7 @@ namespace VpScaleRenderCore
 		}
 		failures += static_cast<int>(backPressureTimeouts + captureTimeouts);   // legacy pictures' waits that gave up
 		CString status;
-		if (renderer->GetSourceResolutionStatus(status)) CaptureLog(("VpScaleRender: source resolution: " + std::string(CStringA(status).GetString())).c_str());
+		if (VpvCalls::GetSourceResolutionStatus(renderer, status)) CaptureLog(("VpScaleRender: source resolution: " + std::string(CStringA(status).GetString())).c_str());
 		renderer->Stop();
 		destroy(renderer);
 		DestroyWindow(hwnd);

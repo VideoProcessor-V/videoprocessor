@@ -8,6 +8,7 @@
 #include <DebugLog.h>
 #include <AnalysisDiagnosticHooks.h>
 #include <VpBuildIdentity.h>
+#include <VP-V/abi/VpvPluginGuard.h> // VPV-HOOK
 
 #include <stdexcept>
 #include <string>
@@ -158,6 +159,7 @@ namespace
             DebugLog::Log("VP Renderer plugin flavor mismatch: path=%ls", pluginPath.c_str());
             return refuse(result.module, "VP Renderer DLL refused: flavor mismatch (Beta/non-Beta folder swapped).");
         }
+		if (!Vpv::PluginGuard::Check(result.module, pairing)) return refuse(result.module, pairing); // VPV-HOOK: the VP-V extension ABI export (src/VP-V/abi)
 		result.startupReadiness = reinterpret_cast<VideoProcessorLibplaceboGetStartupReadinessFn>(
 			GetProcAddress(result.module, VP_LIBPLACEBO_STARTUP_READINESS_EXPORT));
 		result.getHdrStatus = reinterpret_cast<VideoProcessorLibplaceboGetHdrStatusFn>(
@@ -282,32 +284,6 @@ bool LibplaceboPluginVideoRenderer::SupportsDynamicVideoState() const
 void LibplaceboPluginVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 {
 	m_renderer->OnVideoFrame(videoFrame);
-}
-
-
-bool LibplaceboPluginVideoRenderer::SupportsTimedFileFrames() const
-{
-	return m_renderer && m_renderer->SupportsTimedFileFrames();
-}
-
-
-void LibplaceboPluginVideoRenderer::OnTimedVideoFrame(VideoFrame& videoFrame,
-	const FileFrameTiming& timing)
-{
-	m_renderer->OnTimedVideoFrame(videoFrame, timing);
-}
-
-
-bool LibplaceboPluginVideoRenderer::WaitForFileFrameSlot(uint32_t timeoutMs)
-{
-	return m_renderer && m_renderer->WaitForFileFrameSlot(timeoutMs);
-}
-
-
-void LibplaceboPluginVideoRenderer::CancelFileFrameWait()
-{
-	if (m_renderer)
-		m_renderer->CancelFileFrameWait();
 }
 
 
@@ -454,13 +430,6 @@ void LibplaceboPluginVideoRenderer::SetActivePictureLookaheadFrames(
 	size_t frames)
 {
 	m_renderer->SetActivePictureLookaheadFrames(frames);
-}
-
-
-void LibplaceboPluginVideoRenderer::SetActivePictureLookaheadAutomatic(
-	bool automatic)
-{
-	m_renderer->SetActivePictureLookaheadAutomatic(automatic);
 }
 
 
@@ -713,79 +682,6 @@ bool LibplaceboPluginVideoRenderer::GetPresentationTimingStatus(
 	return m_renderer && m_renderer->GetPresentationTimingStatus(status);
 }
 
-bool LibplaceboPluginVideoRenderer::GetLedDriveStatus(CString& status) const
-{
-	status.Empty();
-	return m_renderer && m_renderer->GetLedDriveStatus(status);
-}
-
-bool LibplaceboPluginVideoRenderer::GetFallbacksStatus(CString& status) const
-{
-	status.Empty();
-	return m_renderer && m_renderer->GetFallbacksStatus(status);
-}
-
-bool LibplaceboPluginVideoRenderer::ToggleDvCompareCapture(CString& status)
-{
-	status.Empty();
-	return m_renderer && m_renderer->ToggleDvCompareCapture(status);
-}
-
-void LibplaceboPluginVideoRenderer::SetQueueDelayBudget(int totalMs)
-{
-	if (m_renderer)
-		m_renderer->SetQueueDelayBudget(totalMs);
-}
-
-bool LibplaceboPluginVideoRenderer::GetModuleStatus(const char* module, CString& status) const
-{
-	status.Empty();
-	return m_renderer && m_renderer->GetModuleStatus(module, status);
-}
-
-bool LibplaceboPluginVideoRenderer::InvokeModuleCommand(const char* module, const char* command, CString& reply)
-{
-	reply.Empty();
-	return m_renderer && m_renderer->InvokeModuleCommand(module, command, reply);
-}
-
-bool LibplaceboPluginVideoRenderer::GetSourceResolutionStatus(CString& status) const
-{
-	status.Empty();
-	return m_renderer && m_renderer->GetSourceResolutionStatus(status);
-}
-
-bool LibplaceboPluginVideoRenderer::GetDejudderStatus(CString& status) const
-{
-	status.Empty();
-	return m_renderer && m_renderer->GetDejudderStatus(status);
-}
-
-bool LibplaceboPluginVideoRenderer::GetCalibrationOutput(Calibration::PatternOutputInfo& info) const
-{
-	if (m_renderer)
-		return m_renderer->GetCalibrationOutput(info);
-	return IVideoRenderer::GetCalibrationOutput(info);
-}
-
-bool LibplaceboPluginVideoRenderer::SetCalibrationPattern(const Calibration::PatternRequest& request,
-	CString& reason)
-{
-	reason.Empty();
-	if (!m_renderer)
-	{
-		reason = TEXT("the VP Renderer is not running");
-		return !request.active;
-	}
-	return m_renderer->SetCalibrationPattern(request, reason);
-}
-
-bool LibplaceboPluginVideoRenderer::SuspendLedDriveForTest(CString& reason)
-{
-	reason.Empty();
-	return !m_renderer || m_renderer->SuspendLedDriveForTest(reason);
-}
-
 // Hunt 2 LOW-1: the host's post-stall suppression deadline never reached the DLL
 // (IVideoRenderer's default no-op ran), so advisory post-stall telemetry was logged
 // during the settle interval the host had already armed.
@@ -795,17 +691,8 @@ void LibplaceboPluginVideoRenderer::SetPostStallResetTelemetrySuppressedUntil(ui
 		m_renderer->SetPostStallResetTelemetrySuppressedUntil(untilMs);
 }
 
-
-bool LibplaceboPluginVideoRenderer::StopLedDriveForShutdown()
-{
-	return !m_renderer || m_renderer->StopLedDriveForShutdown();
-}
-
-void LibplaceboPluginVideoRenderer::ResumeLedDriveAfterTest()
-{
-	if (m_renderer)
-		m_renderer->ResumeLedDriveAfterTest();
-}
+void* LibplaceboPluginVideoRenderer::QueryExtension(const char* iid) // VPV-HOOK
+{ return m_renderer ? m_renderer->QueryExtension(iid) : nullptr; } // VPV-HOOK
 
 
 bool LibplaceboPluginVideoRenderer::GetConversionPerformance(
@@ -828,31 +715,4 @@ bool LibplaceboPluginVideoRenderer::GetDolbyVisionLuminanceStatus(
 {
 	status = {};
 	return m_renderer && m_renderer->GetDolbyVisionLuminanceStatus(status);
-}
-
-bool LibplaceboPluginVideoRenderer::GetContentIntentStatus(
-	ContentIntentStatus& status) const
-{
-	status = {};
-	return m_renderer && m_renderer->GetContentIntentStatus(status);
-}
-
-bool LibplaceboPluginVideoRenderer::WriteDiagnosticHistory(
-	VpDiagnosticHistorySink sink, void* context, int64_t referenceQpc) const
-{
-	// The DLL catches internally; it records into its own module's rings.
-	return m_renderer && sink &&
-		m_renderer->WriteDiagnosticHistory(sink, context, referenceQpc);
-}
-
-bool LibplaceboPluginVideoRenderer::GetIntentStatus(IntentStatus& status) const
-{
-	status = {};
-	return m_renderer && m_renderer->GetIntentStatus(status);
-}
-
-void LibplaceboPluginVideoRenderer::SetAmbientLux(double lux, bool valid, double nowSeconds)
-{
-	if (m_renderer)
-		m_renderer->SetAmbientLux(lux, valid, nowSeconds);
 }

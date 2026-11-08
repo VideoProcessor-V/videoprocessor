@@ -144,6 +144,7 @@
 #include <QueuedFrameStatistics.h>
 #include <ContentIntentObserver.h>
 #include <IntentInterpreterObserver.h>
+#include <VP-V/abi/RendererAbiBridge.h> // VPV-HOOK
 #include <IntentInterpreterSupport.h>
 #include <AmbientAdaptation.h>
 #include <BlackIntent.h>
@@ -27607,6 +27608,7 @@ LibplaceboVideoRenderer::LibplaceboVideoRenderer(
 	m_frameQueueDesiredDepth(AlphaQueuePolicy::NormalizeDesiredDepth(frameQueueMaxSize)),
 	m_frameQueueMaxSize(AlphaQueuePolicy::HardCapacity(frameQueueMaxSize))
 {
+	m_abiBridge = Vpv::MakeRendererAbiBridge(*this); // VPV-HOOK
 	{
 		std::lock_guard<std::mutex> guard(g_runtimeDisplayRuleMutex);
 		m_manualDisplayRule = g_runtimeManualDisplayRule;
@@ -27627,6 +27629,7 @@ LibplaceboVideoRenderer::LibplaceboVideoRenderer(
 
 LibplaceboVideoRenderer::~LibplaceboVideoRenderer()
 {
+	m_abiBridge.reset(); // VPV-HOOK: before the render and conversion threads and Impl go
 	if (m_stopWorker.joinable())
 		m_stopWorker.join();
 	{
@@ -30567,7 +30570,8 @@ bool LibplaceboVideoRenderer::GetModuleStatus(const char* module, CString& statu
 	return answered;
 }
 
-void* LibplaceboVideoRenderer::QueryExtension(const char* iid) { return RendererExtension::Query(iid); } // VPV-HOOK
+void* LibplaceboVideoRenderer::QueryExtension(const char* iid) // VPV-HOOK
+{ void* found = m_abiBridge ? m_abiBridge->Query(iid) : nullptr; return found ? found : RendererExtension::Query(iid); } // VPV-HOOK
 bool LibplaceboVideoRenderer::InvokeModuleCommand(const char* module, const char* command, CString& reply) // VPV-HOOK
 { std::string text; const bool handled = RendererExtension::CommandFor(m_impl.get(), module, command, text); reply = CString(text.c_str()); return handled; } // VPV-HOOK
 

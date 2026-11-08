@@ -31,12 +31,6 @@ public:
 	bool OnVideoState(VideoStateComPtr& videoState) override;
 	bool SupportsDynamicVideoState() const override;
 	void OnVideoFrame(VideoFrame& videoFrame) override;
-	// ABI 37 (VP Renderer DirectShow filter): forwarded to the plugin.
-	bool SupportsTimedFileFrames() const override;
-	void OnTimedVideoFrame(VideoFrame& videoFrame,
-		const FileFrameTiming& timing) override;
-	bool WaitForFileFrameSlot(uint32_t timeoutMs) override;
-	void CancelFileFrameWait() override;
 	bool HasPresentedLiveFrame() const override;
 	const char* PresentedLiveFrameEvidence() const override;
 	StartupPresentation::QueryStatus GetStartupPresentationReadiness(
@@ -59,7 +53,6 @@ public:
 	void SetQueueFramePolicy(size_t startupPrerollFrames,
 		size_t steadyReserveFrames, bool hasSteadyReserveFrames) override;
 	void SetActivePictureLookaheadFrames(size_t frames) override;
-	void SetActivePictureLookaheadAutomatic(bool automatic) override;
 	void SetSceneAwareTimingCorrection(bool enabled) override;
 	uint64_t SceneAwareCorrectionDropCount() const override;
 	uint64_t SceneAwareCorrectionRepeatCount() const override;
@@ -107,26 +100,11 @@ public:
 	bool GetDetectedPictureAspect(DetectedPictureAspect& result) const override;
 	bool GetVideoIngressInfo(CString& details) const override;
 	bool GetDolbyVisionLuminanceStatus(DolbyVisionLuminanceStatus& status) const override;
-	bool GetContentIntentStatus(ContentIntentStatus& status) const override;
-	bool WriteDiagnosticHistory(VpDiagnosticHistorySink sink, void* context,
-		int64_t referenceQpc) const override;
-	bool GetIntentStatus(IntentStatus& status) const override;
-	void SetAmbientLux(double lux, bool valid, double nowSeconds) override;
 	bool GetPresentationTargetTiming(double& leadMs,
 		double& captureToTargetMs) const override;
 	bool GetPresentationTimingStatus(CString& status) const override;
-	bool GetDejudderStatus(CString& status) const override;
-	bool GetLedDriveStatus(CString& status) const override;
-	bool GetSourceResolutionStatus(CString& status) const override;
-	bool GetFallbacksStatus(CString& status) const override;
-	bool ToggleDvCompareCapture(CString& status) override;   // feat/dv-l8 WIP (plugin API 43)
-	void SetQueueDelayBudget(int totalMs) override;
-	bool GetModuleStatus(const char* module, CString& status) const override;
-	bool InvokeModuleCommand(const char* module, const char* command, CString& reply) override;
-	bool SuspendLedDriveForTest(CString& reason) override;
 	void SetPostStallResetTelemetrySuppressedUntil(uint64_t untilMs) override;
-	bool StopLedDriveForShutdown() override;
-	void ResumeLedDriveAfterTest() override;
+	void* QueryExtension(const char* iid) override; // VPV-HOOK: the VP-V extension interfaces live in the plugin (src/VP-V/abi)
 	bool SupportsNativeStatsOverlay() const override;
 	bool SetNativeStatsOverlay(const uint8_t* pixels, size_t byteCount,
 		int width, int height, int stride) override;
@@ -137,8 +115,6 @@ public:
 	bool GetConversionPerformance(
 		double& currentUs, double& avg10s, double& max10s) const override;
 	bool GetFrameRateAndPPM(double& measuredFps, int& ppmDeviation) const override;
-	bool GetCalibrationOutput(Calibration::PatternOutputInfo& info) const override;
-	bool SetCalibrationPattern(const Calibration::PatternRequest& request, CString& reason) override;
 
 	// HDR luminance for the stats OSD, through the plugin's optional export.
 	// False when the plugin lacks it or has not rendered a frame yet.
