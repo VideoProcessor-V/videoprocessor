@@ -98,6 +98,13 @@ namespace VpMotion
 		// for the invalidation log; other causes leave the stored detail alone. Runs under the directory's lock (a leaf lock: the sink only moves the two epochs), so
 		// the engine cannot go meanwhile. False = no engine for `host` (nothing requested).
 		static bool RequestInvalidationFor(const void* host, MotionValidity::Cause cause, const char* gapDetail);
+		// P5a-rest (item l; doc 30 F4 "fix C"): the GPU release of `host` (RendererExtension GpuReleased, from
+		// RetireOutput before the device goes) stops and drops that engine's optical-flow producer (its worker, its own
+		// D3D11 device and VRAM) instead of keeping it until the Impl is destroyed, and clears motionEngineReady. Keyed by
+		// host: the release can run on the retirement worker after a replacement renderer has started (70b section 7),
+		// whose engine is untouched. The producer is unpublished under the directory lock and stopped outside it. False =
+		// no engine for `host` or no producer.
+		static bool ReleaseProducerFor(const void* host);
 
 		// What the producer plan reads from the renderer, as plain values. The two atomics are read
 		// at the points the old inline block read them (low latency first, the queue depth after the

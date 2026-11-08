@@ -11,6 +11,7 @@
 #endif
 #include "CppUnitTest.h"
 
+#include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/motion/estimation/VectorEngineExtension.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
@@ -573,6 +574,36 @@ namespace VectorEngineHookTest
 			MotionValidity::Pending pending;
 			Assert::IsTrue(engine.TakeInvalidation(pending));
 			Assert::IsTrue(pending.cause == MotionValidity::Cause::Seek);
+		}
+
+		// P5a-rest (item l, fix C): GpuReleased of a host stops and drops that host's producer and clears the engine-ready
+		// flag; another host's producer (a replacement renderer) is untouched; other lifecycle events do nothing.
+		TEST_METHOD(GpuReleasedStopsOnlyThatHostsProducer)
+		{
+			int host = 0, replacement = 0;
+			VectorEngine engine(&host);
+			VectorEngine next(&replacement);
+			engine.PublishProducer(std::make_shared<MotionAhead::Producer>());
+			next.PublishProducer(std::make_shared<MotionAhead::Producer>());
+			engine.motionEngineReady.store(true);
+			next.motionEngineReady.store(true);
+			const std::shared_ptr<MotionAhead::Producer> loopCopy = engine.LoopProducer();   // a render-loop copy in flight
+			VectorEngineExtension extension;
+			RendererExtension::LifecycleFacts f;
+			f.host = &host;
+			f.kind = RendererExtension::Lifecycle::GpuCreated;
+			extension.OnLifecycle(f);
+			Assert::IsTrue(engine.motionProducer != nullptr, L"only the release stops it");
+			f.kind = RendererExtension::Lifecycle::GpuReleased;
+			extension.OnLifecycle(f);
+			Assert::IsTrue(engine.motionProducer == nullptr);
+			Assert::IsFalse(engine.motionEngineReady.load());
+			Assert::IsTrue(loopCopy != nullptr && !loopCopy->Running(), L"a copy in flight keeps a stopped producer");
+			Assert::IsTrue(next.motionProducer != nullptr && next.motionEngineReady.load(), L"the replacement is untouched");
+			extension.OnLifecycle(f);   // a second release: nothing left
+			Assert::IsFalse(VectorEngine::ReleaseProducerFor(&host));
+			Assert::IsTrue(VectorEngine::ReleaseProducerFor(&replacement));
+			Assert::IsTrue(next.motionProducer == nullptr);
 		}
 	};
 }

@@ -425,6 +425,20 @@ namespace VpMotion
 		});
 	}
 
+	bool VectorEngine::ReleaseProducerFor(const void* host)
+	{
+		std::shared_ptr<MotionAhead::Producer> producer;
+		if (host)
+			Engines().WithEngine(host, [&](VectorEngine& engine) {
+				producer = std::atomic_exchange(&engine.motionProducer, std::shared_ptr<MotionAhead::Producer>());
+				engine.motionEngineReady.store(false, std::memory_order_release);
+			});
+		if (!producer)
+			return false;
+		producer->Stop();   // joins its worker; a render-loop copy still held only sees a stopped producer
+		return true;
+	}
+
 	// ---- P5a-5: records for IVectorEngine (render thread; CPU only, nothing logged) ----------------------------------
 	void VectorEngine::NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence, uint64_t epochAtChoice)
 	{

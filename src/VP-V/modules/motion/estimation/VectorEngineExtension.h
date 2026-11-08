@@ -23,6 +23,8 @@ namespace VpMotion
 		const char* Name() const override { return kName; }
 		void* Query(const char* iid) override;
 		void OnQueue(const RendererExtension::QueueFacts& f) override;
+		// P5a-rest (item l): GpuReleased stops this host's optical-flow producer (VectorEngine::ReleaseProducerFor).
+		void OnLifecycle(RendererExtension::LifecycleFacts& f) override;
 	};
 
 	// Adds VectorEngineExtension to the hub. Start-up only; idempotent.

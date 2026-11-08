@@ -40,6 +40,16 @@ namespace VpMotion
 		VectorEngine::RequestInvalidationFor(f.host, cause, f.text);
 	}
 
+	// The renderer's GPU release (RetireOutput, before pl_d3d11_destroy; renderMutex held on the Retire path). Fix C
+	// (doc 30 F4): the producer no longer outlives the retired output (a kept Impl awaiting an external-state retry
+	// held its worker and its device's VRAM indefinitely). Keyed by host (70b section 7). Nothing is logged (as the
+	// producer's stop in PlanProducer).
+	void VectorEngineExtension::OnLifecycle(RE::LifecycleFacts& f)
+	{
+		if (f.kind == RE::Lifecycle::GpuReleased)
+			VectorEngine::ReleaseProducerFor(f.host);
+	}
+
 	void RegisterVectorEngineExtension()
 	{
 		static bool registered = false;
