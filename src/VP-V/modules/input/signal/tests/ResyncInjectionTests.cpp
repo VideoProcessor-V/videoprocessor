@@ -202,6 +202,48 @@ namespace Tests
 			else
 				Assert::AreEqual(std::string(kMoved), why, L"a full / seek refuses the gap seed");
 		}
+
+		// C2a-F S3 / S4: the window after a resync and before the producer's asynchronous SetGeneration re-keys the slot. A pair
+		// finished under the old key (S4: a producer key of the old stream generation; S3: a slot never keyed, generation 0) is
+		// still stored, but every P2 reader refuses it, visibly (FlowReadCounters::invalidated, FindCurrent's stale flag), until
+		// the slot is re-keyed and the pair published again. The pair (5, 6) lies wholly after the event, so only the generation
+		// refuses it.
+		void WindowRun(bool on, bool keyed)
+		{
+			Rig rig(on ? "on" : "off");
+			for (int64_t s = 1; s <= 6; ++s) rig.Ingress(s);
+			for (int64_t s = 1; s <= 4; ++s) rig.Render(s);
+			if (keyed)
+				rig.engine.p2Slot->SetGeneration(rig.engine.motionValidity.StreamGeneration());
+			const uint64_t oldKey = rig.engine.p2Slot->Generation();
+			if (!keyed)
+				Assert::AreEqual<uint64_t>(0, oldKey, L"premise: a slot never keyed by a producer is generation 0");
+			Assert::IsTrue(rig.engine.motionValidity.PairGenerationCurrent(oldKey), L"premise: the slot's key is current before the event");
+			Assert::IsTrue(rig.engine.p2Slot->Publish(4, 5, oldKey, MakeFlow()));
+			Assert::IsTrue(rig.Flow(5), L"control: before the event the pair is served");
+
+			rig.Inject(Kind::Full, 5);
+			rig.Render(5);
+			Assert::IsFalse(rig.engine.motionValidity.PairGenerationCurrent(oldKey), L"the resync moved the stream generation");
+			// The producer has not re-keyed yet: a pair it finishes under the old key is still stored.
+			Assert::IsTrue(rig.engine.p2Slot->Publish(5, 6, oldKey, MakeFlow()), L"control: the slot takes a pair under its old key");
+			rig.Render(6);
+			Assert::IsTrue(rig.engine.P2().Find(5, 6) != nullptr, L"control: the slot holds (5, 6)");
+			const unsigned long long invalidatedBefore = rig.engine.FlowReads().invalidated;
+			Assert::IsFalse(rig.Flow(6), L"FlowOf refuses the pair of the old generation");
+			Assert::AreEqual(invalidatedBefore + 1ull, rig.engine.FlowReads().invalidated, L"counted invalidated");
+			bool stale = false;
+			Assert::IsTrue(rig.engine.FindCurrent(5, 6, &stale) == nullptr, L"FindCurrent refuses it");
+			Assert::IsTrue(stale, L"and says it was found and refused");
+
+			// The producer re-keys the slot (MotionAheadWalk: StreamGeneration()) and publishes again: served.
+			rig.engine.p2Slot->SetGeneration(rig.engine.motionValidity.StreamGeneration());
+			Assert::IsTrue(rig.engine.p2Slot->Publish(5, 6, rig.engine.p2Slot->Generation(), MakeFlow()));
+			Assert::IsTrue(rig.Flow(6), L"after the re-key the pair is served");
+			stale = true;
+			Assert::IsTrue(rig.engine.FindCurrent(5, 6, &stale) != nullptr, L"FindCurrent serves it");
+			Assert::IsFalse(stale);
+		}
 	}
 
 	namespace ResyncInjectionA6
@@ -680,6 +722,9 @@ namespace Tests
 		TEST_METHOD(SeekOff) { Run(Kind::Seek, false); }
 		TEST_METHOD(GapOn) { Run(Kind::Gap, true); }
 		TEST_METHOD(GapOff) { Run(Kind::Gap, false); }
+		TEST_METHOD(AnOldGenerationPairIsRefusedUntilTheProducerReKeysOn) { WindowRun(true, true); }   // C2a-F S4
+		TEST_METHOD(AnOldGenerationPairIsRefusedUntilTheProducerReKeysOff) { WindowRun(false, true); }
+		TEST_METHOD(AnUnkeyedGenerationZeroPairIsRefusedAfterAResyncOff) { WindowRun(false, false); }   // C2a-F S3
 
 		TEST_METHOD(OffThenOnRebindsTheSameEngine)
 		{
