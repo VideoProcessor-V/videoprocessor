@@ -1048,4 +1048,107 @@ namespace Tests
 			}
 		}
 	};
+
+	// Crop-aware convention (coordinator design call 2026-11-11, Scaling::GeometrySet CroppedRatiosFor): a raster WIDER than an entry's
+	// display aspect (a scope / flat film coded as its active area) is that entry cropped to the raster's aspect, width-fitted. Uniform
+	// two-axis pairs engage; non-uniform crops stay held; 16:9 rasters, natives and the Original pathway are unchanged.
+	namespace SidCrop
+	{
+		inline SidConv::Snap UniformOn(double r, int w, int h)
+		{
+			SidConv::Snap s = SidConv::Uniform(r);
+			s.nativeWidth = w;
+			s.nativeHeight = h;
+			return s;
+		}
+
+		inline SidConv::Run DriveOn(const SidConv::Snap& s, int w, int h, bool conventionOnly, bool original = false)
+		{
+			SidConv::Mon m;
+			m.SetRebaseConventionOnly(conventionOnly);
+			m.SetOriginalPathway(original);
+			return SidConv::Drive(m, s, w, h);
+		}
+	}
+
+	TEST_CLASS(SourceGeometryCropAwareTests)
+	{
+	public:
+		TEST_METHOD(ScopeAndFlatCodedActiveAreasEngage)
+		{
+			struct Case { int w, h; double rH, rV; const wchar_t* what; };
+			const Case cases[] = {
+				{ 1920, 800, 0.5, 0.5, L"scope 2.40 1920x800 from 960x400 (960x540 cropped)" },
+				{ 1920, 804, 0.5, 0.5, L"scope 2.39 1920x804 from 960x402" },
+				{ 1920, 1038, 0.5, 0.5, L"flat 1.85 1920x1038 from 960x519" },
+				{ 1920, 800, 1280.0 / 1920.0, 536.0 / 800.0, L"scope 1280x536 at 2/3 on 1920x800 (1280x720 cropped)" },
+			};
+			for (const Case& c : cases)
+			{
+				const bool uniform = c.rH == c.rV;
+				const SidConv::Snap s = uniform ? SidCrop::UniformOn(c.rH, c.w, c.h) : SidNamed::PerAxisOn(c.rH, c.rV, c.w, c.h);
+				const SidConv::Run r = SidCrop::DriveOn(s, c.w, c.h, true);
+				const SidConv::Run r0 = SidCrop::DriveOn(s, c.w, c.h, false);
+				Assert::AreEqual(c.rH, r.fx, 1e-9, (std::wstring(c.what) + L": " + SidConv::W16(r.trace)).c_str());
+				Assert::AreEqual(c.rV, r.fy, 1e-9, c.what);
+				Assert::AreEqual(r0.trace, r.trace, (std::wstring(c.what) + L": byte-identical with the restriction switched off").c_str());
+				Assert::IsTrue(r.note.empty() && !SidConv::Has(r.shown, "re-base held"), c.what);
+			}
+			// The uniform 2/3 reading on the same scope raster (the classical tracker's form) engages too.
+			const SidConv::Run u = SidCrop::DriveOn(SidCrop::UniformOn(2.0 / 3.0, 1920, 800), 1920, 800, true);
+			Assert::AreEqual(2.0 / 3.0, u.fx, 1e-9, SidConv::W16(u.trace).c_str());
+			Assert::IsTrue(u.note.empty());
+		}
+
+		TEST_METHOD(ANonUniformCropStaysHeld)
+		{
+			const SidConv::Snap s = SidNamed::PerAxisOn(0.5, 2.0 / 3.0, 1920, 800);
+			const SidConv::Run r = SidCrop::DriveOn(s, 1920, 800, true);
+			Assert::IsTrue(SidNamed::AllNative(r.trace), SidConv::W16(r.trace).c_str());
+			Assert::IsTrue(SidConv::Has(r.note, "non-standard size H 0.5000 x V 0.6667"), SidConv::W16(r.note).c_str());
+			const SidConv::Run single = SidCrop::DriveOn(SidNamed::PerAxisOn(0.5, 1.0, 1920, 800), 1920, 800, true);
+			Assert::IsTrue(SidNamed::AllNative(single.trace), L"single-axis stays held on a cropped raster");
+			Assert::IsFalse(single.note.empty());
+			const SidConv::Run odd = SidCrop::DriveOn(SidCrop::UniformOn(0.7, 1920, 800), 1920, 800, true);
+			Assert::IsTrue(SidNamed::AllNative(odd.trace), L"a uniform size outside the list stays held");
+		}
+
+		TEST_METHOD(NativesAndTheOriginalPathwayAreUnaffected)
+		{
+			for (int h : { 800, 804, 1038 })
+			{
+				const SidConv::Run n = SidCrop::DriveOn(SidCrop::UniformOn(1.0, 1920, h), 1920, h, true);
+				Assert::IsTrue(SidNamed::AllNative(n.trace) && n.note.empty(), SidConv::W16(n.trace).c_str());
+				const SidConv::Run p = SidCrop::DriveOn(SidNamed::PerAxisOn(1.0, 1.0, 1920, h), 1920, h, true);
+				Assert::IsTrue(SidNamed::AllNative(p.trace) && p.note.empty(), SidConv::W16(p.trace).c_str());
+			}
+			const SidConv::Snap s = SidCrop::UniformOn(0.7, 1920, 800);
+			const SidConv::Run o = SidCrop::DriveOn(s, 1920, 800, true, true);
+			const SidConv::Run o0 = SidCrop::DriveOn(s, 1920, 800, false, true);
+			Assert::AreEqual(o0.trace, o.trace, L"the Original pathway: no convention check (byte-identical)");
+			Assert::IsTrue(o.note.empty());
+		}
+
+		TEST_METHOD(TheCropFormOnlyAddsRastersWiderThanTheEntry)
+		{
+			namespace G = Scaling::GeometrySet;
+			std::size_t count = 0;
+			const G::Geometry* g = G::Geometries(count);
+			double rx = 0.0, ry = 0.0;
+			for (std::size_t i = 0; i < count; ++i)
+			{
+				Assert::IsFalse(G::CroppedRatiosFor(g[i], 1920, 1080, rx, ry), L"16:9 raster: the fit only (unchanged)");
+				Assert::IsFalse(G::CroppedRatiosFor(g[i], 3840, 2160, rx, ry), L"2160p raster: the fit only (unchanged)");
+			}
+			Assert::AreEqual(std::string("960x540"), std::string(G::ConventionalPair(960, 1920, 400, 800, 1920, 800)));
+			Assert::AreEqual(std::string("960x540"), std::string(G::ConventionalPair(960, 1920, 519, 1038, 1920, 1038)));
+			Assert::AreEqual(std::string("1280x720"), std::string(G::ConventionalPair(1280, 1920, 536, 800, 1920, 800)));
+			Assert::IsTrue(G::AgreeingPair(960, 1920, 402, 804, 1920, 804));
+			Assert::IsNull(G::ConventionalPair(960, 1920, 533, 800, 1920, 800), L"non-uniform: no entry");
+			bool parked = false;
+			const char* hdv = G::ConventionalPair(1440, 1920, 600, 800, 1920, 800, &parked);
+			Assert::IsTrue(hdv == nullptr || parked, L"anamorphic entries stay parked in the crop form too");
+			Assert::IsFalse(G::AgreeingPair(1440, 1920, 600, 800, 1920, 800));
+		}
+	};
 }
