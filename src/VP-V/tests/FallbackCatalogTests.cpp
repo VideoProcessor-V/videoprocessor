@@ -42,6 +42,21 @@ namespace FallbackCatalogTest
 			Assert::AreEqual(std::string("Fallbacks engaged: none"), registry.Heading());
 		}
 
+		TEST_METHOD(SourceResolutionHeldEngagesOnlyWithANote)
+		{
+			const Decision off = SourceResolutionHeld(std::string());
+			Assert::AreEqual(std::string("source resolution held"), off.id);
+			Assert::IsFalse(off.engaged);
+			const Decision on = SourceResolutionHeld("single-axis re-base held (H 0.7500; two axes are required)");
+			Assert::AreEqual(std::string("source resolution held"), on.id);
+			Assert::IsTrue(on.engaged);
+			Assert::IsTrue(on.reason.find("single-axis re-base held") == 0 && on.reason.find("native size") != std::string::npos);
+			FallbackStatus::Registry registry;
+			Assert::IsTrue(Sync(registry, on));
+			Assert::IsFalse(Sync(registry, on), L"one notice per episode");
+			Assert::IsTrue(Sync(registry, off));
+		}
+
 		TEST_METHOD(DitherNeedEngagesOnlyWhenRequestedAndAnInputIsMissing)
 		{
 			Assert::IsFalse(DitherNeed(false, "no grain split").engaged, L"not requested");

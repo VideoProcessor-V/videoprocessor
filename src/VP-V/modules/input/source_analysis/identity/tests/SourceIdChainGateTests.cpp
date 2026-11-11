@@ -541,7 +541,7 @@ namespace Tests
 
 		// The classical path on the frame-bound source clock: one scripted reading, then 8 decisions 62.5 ms apart (a 50 ms wait:
 		// a re-base that is applied engages on the second). The trace is every factor, fade and reason a viewer could see.
-		inline Run Drive(Mon& m, const Snap& s)
+		inline Run Drive(Mon& m, const Snap& s, int rasterW = W)
 		{
 			m.SetEngageTiming(0.05, 0.125, 0.05);
 			m.SetFrameBound(true, 0);
@@ -552,7 +552,7 @@ namespace Tests
 				std::string why;
 				double fx = 1.0, fy = 1.0;
 				const double t = 100.0 + 0.0625 * static_cast<double>(seq - 1);
-				m.AutoFactors(W, H, 0.5, why, fx, fy, t, seq);
+				m.AutoFactors(rasterW, H, 0.5, why, fx, fy, t, seq);
 				const Mon::Transition tr = m.AutoTransition(t);
 				char line[400];
 				std::snprintf(line, sizeof(line), "%llu f=%.6f,%.6f tr=%.6f,%.6f>%.6f,%.6f w=%.6f why=%s\n", static_cast<unsigned long long>(seq),
@@ -657,6 +657,123 @@ namespace Tests
 			Assert::AreEqual(n0.trace, n.trace, L"natives: byte-identical");
 			Assert::AreEqual(1.0, n.fx, 1e-9);
 			Assert::IsTrue(n.note.empty() && !SidConv::Has(n.shown, "re-base held"));
+		}
+
+		// MED SD (owner 2026-11-11): 720x576 / 720x480 shown at 16:9 on 1080p re-base ONLY through the per-axis reading matching the
+		// listed pair (0.375 x lines/1080). The classical UNIFORM misread (lines/1080 on both axes: 1024x576 / 853x480, not listed) is
+		// held as non-standard and never applied, also when a per-axis reading of another size accompanies it.
+		TEST_METHOD(SdReBasesOnlyAsItsListedPerAxisPair)
+		{
+			for (int lines : { 576, 480 })
+			{
+				const double rv = lines / 1080.0;
+				const SidConv::Run u = SidConv::DriveFresh(SidConv::Uniform(rv), true);
+				Assert::AreEqual(1.0, u.fx, 1e-9, SidConv::W16(u.trace).c_str());
+				Assert::AreEqual(1.0, u.fy, 1e-9);
+				Assert::IsTrue(SidConv::Has(u.note, "re-base held (non-standard size"), SidConv::W16(u.note).c_str());
+				Assert::IsTrue(SidConv::Has(u.trace, "f=1.000000,1.000000") && !SidConv::Has(u.trace, "tr=1.000000,1.000000>0."),
+					L"the uniform misread is never applied, not even for one frame");
+				SidConv::Snap both = SidConv::Uniform(rv);
+				both.axisRatioX = 720.0 / 1920.0;
+				both.axisRatioY = rv;
+				both.axisConfidence = 0.9;
+				const SidConv::Run p = SidConv::DriveFresh(both, true);
+				Assert::AreEqual(0.375, p.fx, 1e-9, SidConv::W16(p.trace).c_str());
+				Assert::AreEqual(rv, p.fy, 1e-9);
+				Assert::IsTrue(p.note.empty(), SidConv::W16(p.note).c_str());
+				SidConv::Snap other = both;
+				other.axisRatioX = 0.45;   // 864 columns: not the SD pair
+				const SidConv::Run o = SidConv::DriveFresh(other, true);
+				Assert::AreEqual(1.0, o.fx, 1e-9, SidConv::W16(o.trace).c_str());
+				Assert::AreEqual(1.0, o.fy, 1e-9);
+				Assert::IsTrue(SidConv::Has(o.note, "re-base held (non-standard size"), SidConv::W16(o.note).c_str());
+			}
+		}
+
+		// F3: the Original pathway shows no held note (also one left from before the switch), and its fallback is released.
+		TEST_METHOD(TheOriginalPathwayShowsNoStaleNote)
+		{
+			SidConv::Mon m;
+			const SidConv::Run r = SidConv::Drive(m, SidConv::Uniform(0.7));
+			Assert::IsFalse(r.note.empty(), L"fixture: held while the convention applies");
+			Assert::IsTrue(m.ConventionHoldFallback().engaged);
+			m.SetOriginalPathway(true);
+			Assert::IsTrue(m.Read().conventionNote.empty(), SidConv::W16(m.Read().conventionNote).c_str());
+			Assert::IsFalse(m.ConventionHoldFallback().engaged);
+		}
+
+		// F3: the consensus's single-axis hold (L6) does not outlive its fresh record, also when no per-axis branch runs.
+		TEST_METHOD(TheSingleAxisHoldEndsWhenTheRecordIsNotFresh)
+		{
+			SidGate::Mon m;
+			GeoFx::G::HeldState geo;
+			m.SetGeometrySource(&geo);
+			m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+			uint64_t seq = 2;
+			for (int i = 0; i < 13; ++i)
+			{
+				const double t = 10.0 + 0.5 * i;
+				if (i % 2 == 0)
+					geo.Publish(GeoFx::MakeRecord(seq, SidGate::Us(t - 0.1), GeoFx::AppliedAxis(720, 3840, 5), GeoFx::AppliedAxis(2160, 2160, -1)));
+				SidGate::Analyse(m, t, seq++);
+			}
+			std::string why;
+			double fx = 1.0, fy = 1.0;
+			m.InjectResultForTest(SidGate::CleanSnapshot(1, false), seq - 1);
+			m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 16.1, seq);
+			const std::string before = m.Read().conventionNote;
+			Logger::WriteMessage(("fresh: " + before + "\n").c_str());
+			// Long after the last record (not fresh) and with no per-axis reading (neither branch runs).
+			SidConv::Snap none = SidGate::CleanSnapshot(2, false);
+			none.reading = false;
+			m.InjectResultForTest(none, seq);
+			m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 200.0, seq + 1);
+			const std::string after = m.Read().conventionNote;
+			Assert::IsFalse(SidConv::Has(after, "single-axis"), SidConv::W16(before + " -> " + after).c_str());
+			if (!SidConv::Has(before, "single-axis"))
+				Logger::WriteMessage("the consensus did not hold a single axis here (the stale clear is exercised without a prior hold)\n");
+		}
+
+		// F4: a raster width <= 0 through AutoFactors holds on the uniform path as on the per-axis path (the list cannot be checked);
+		// AutoFactor called alone keeps the earlier law.
+		TEST_METHOD(AnUnknownRasterWidthHoldsOnBothPaths)
+		{
+			SidConv::Mon mu;
+			const SidConv::Run u = SidConv::Drive(mu, SidConv::Uniform(0.5), 0);
+			Assert::AreEqual(1.0, u.fx, 1e-9, SidConv::W16(u.trace).c_str());
+			Assert::AreEqual(1.0, u.fy, 1e-9);
+			Assert::IsTrue(SidConv::Has(u.note, "re-base held (non-standard size"), SidConv::W16(u.note).c_str());
+			SidConv::Mon mp;
+			const SidConv::Run p = SidConv::Drive(mp, SidConv::PerAxis(720.0 / 1920.0, 480.0 / 1080.0), 0);
+			Assert::AreEqual(1.0, p.fx, 1e-9, SidConv::W16(p.trace).c_str());
+			Assert::AreEqual(1.0, p.fy, 1e-9);
+			Assert::IsTrue(SidConv::Has(p.note, "re-base held (non-standard size"), SidConv::W16(p.note).c_str());
+			// AutoFactor alone (no raster width): the earlier law, the non-standard 0.7 applied.
+			SidConv::Mon m;
+			m.SetEngageTiming(0.05, 0.125, 0.05);
+			m.SetFrameBound(true, 0);
+			m.InjectResultForTest(SidConv::Uniform(0.7), 1);
+			double f = 1.0;
+			for (uint64_t seq = 1; seq <= 8; ++seq)
+			{
+				std::string why;
+				f = m.AutoFactor(SidConv::H, 0.5, why, 100.0 + 0.0625 * static_cast<double>(seq - 1), seq);
+			}
+			Assert::AreEqual(756.0 / 1080.0, f, 1e-9, L"AutoFactor alone keeps the earlier law");
+		}
+
+		// LOW: the held state has a one-time notice (FallbackCatalog "source resolution held"), released when nothing is held.
+		TEST_METHOD(TheHeldStateHasAOneTimeNotice)
+		{
+			SidConv::Mon m;
+			SidConv::Drive(m, SidConv::PerAxis(0.75, 1.0));
+			const FallbackCatalog::Decision d = m.ConventionHoldFallback();
+			Assert::AreEqual(std::string("source resolution held"), d.id);
+			Assert::IsTrue(d.engaged);
+			Assert::IsTrue(SidConv::Has(d.reason, "single-axis re-base held (H 0.7500"), SidConv::W16(d.reason).c_str());
+			SidConv::Mon n;
+			SidConv::Drive(n, SidConv::Uniform(0.5));
+			Assert::IsFalse(n.ConventionHoldFallback().engaged, L"a listed size: nothing held, no notice");
 		}
 
 		// The consensus On with a fresh record: the same restriction on its latched pair (the uniform wish and the per-axis path).

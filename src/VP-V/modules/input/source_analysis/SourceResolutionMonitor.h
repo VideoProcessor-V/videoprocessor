@@ -233,6 +233,9 @@ namespace SourceResolutionMonitor
 		std::string SourceIdStatusLine(double seconds = -1.0) const;
 		// The auto-engage gate's own fallback: engaged while consensus is on but the record could not be used.
 		FallbackCatalog::Decision SourceIdGateFallback() const;
+		// SID r2: engaged ("source resolution held") while a single-axis or non-standard re-base is held (ConventionNote); the
+		// one-time notice keys on it. Released in the Original pathway and while nothing is held.
+		FallbackCatalog::Decision ConventionHoldFallback() const;
 		// SID train r2: the chain estimator's P14g holder (nullptr = none; the holder must outlive the monitor's worker). It feeds the
 		// chain voter of the pipeline: the CONSENSUS (chain + classical voters) is then what AutoFactor(s) ask in place of the tracker's
 		// declared value (N1, with source_id_consensus On; Off = the original, Shadow = the original decides and the would-be is logged).
@@ -253,14 +256,16 @@ namespace SourceResolutionMonitor
 		void SetSourceIdLatchAbrTrigger(bool on);
 		// SID r2: the single-axis re-base (exactly one axis wanted below native by the consensus) is OFF by default: the re-base needs
 		// BOTH axes (a single-axis reading is a codec-grid fluke far more often than a real anamorphic source). The detection is still
-		// logged ("single-axis re-base held"). On restores the earlier behaviour. Only the consensus per-axis path is gated.
+		// logged ("single-axis re-base held"). On restores the earlier behaviour. Both per-axis paths are gated: the consensus's and,
+		// with SetRebaseConventionOnly (default on), the classical tracker's per-axis reading too.
 		void SetSingleAxisRebase(bool on) { singleAxisRebase.store(on, std::memory_order_release); }
 		bool SingleAxisRebase() const { return singleAxisRebase.load(std::memory_order_acquire); }
 		// SID r2 (owner 2026-11-11): the CLASSICAL path (consensus Off, or no fresh record) and the consensus's uniform gate re-base ONLY
 		// two-axis conventional pairs: both axes below native and the pair one listed, non-parked Scaling::GeometrySet geometry on the
 		// delivered raster (AgreeingPair, tolerance 0.6 %). A single-axis reading (unless SetSingleAxisRebase) or a size outside the list
 		// is logged once per episode and shown (Snapshot::conventionNote), never applied. The Original pathway is untouched. Needs the
-		// raster width, so only AutoFactors (the host's entry) applies it; AutoFactor called alone keeps the earlier law. Default ON;
+		// raster width, so only AutoFactors (the host's entry) applies it (a width <= 0 there holds every re-base on both paths: the
+		// list cannot be checked); AutoFactor called alone keeps the earlier law. Default ON;
 		// Off restores the earlier behaviour (a setter only: no Config key, SID-5 plumbing pending).
 		void SetRebaseConventionOnly(bool on) { rebaseConventionOnly.store(on, std::memory_order_release); }
 		bool RebaseConventionOnly() const { return rebaseConventionOnly.load(std::memory_order_acquire); }
@@ -612,6 +617,7 @@ namespace SourceResolutionMonitor
 		std::atomic<double> singleAxisHeldRatio{ 1.0 };
 		std::atomic<bool> rebaseConventionOnly{ true };  // see SetRebaseConventionOnly
 		bool ConventionApplies() const;                  // the restriction is on and the Original pathway is not selected
+		bool autoConventionCheck = false;               // render thread: AutoFactor called by AutoFactors (the convention check runs)
 		int autoRasterWidth = 0;                         // render thread: AutoFactors' raster width for AutoFactor (0 = unknown: no check)
 		bool uniformConventionHeld = false;              // render thread: AutoFactor held its uniform wish (non-standard size)
 		double uniformHeldH = 1.0, uniformHeldV = 1.0;
