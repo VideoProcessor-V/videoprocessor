@@ -794,12 +794,13 @@ public:
 
         const VpIndicator::Stamp stamp = ind_->StampOf(seq);
         LaneState* sp = st.get();
-        const std::vector<ProductFrameResult>& res = st->table->Resolve(
-            seq, stamp, [this, sp](const Node& n, uint64_t s, int live, Header& hdr, uint32_t missing) {
-                if (regulator_.StateOf(n.id) == ProductState::Dropped)
-                    return false;   // dropped by the regulator: declined, visible
-                return LiveFillOf(*sp, n, s, live, hdr, missing);
-            });
+        auto fill = [this, sp](const Node& n, uint64_t s, int live, Header& hdr, uint32_t missing) {
+            if (regulator_.StateOf(n.id) == ProductState::Dropped)
+                return false;   // dropped by the regulator: declined, visible
+            return LiveFillOf(*sp, n, s, live, hdr, missing);
+        };
+        st->table->SetDeterministicSeal(det_);   // B3 X1: a deterministic run seals lagged-seal products at the final seal only
+        const std::vector<ProductFrameResult>& res = st->table->Resolve(seq, stamp, fill);
         lastAhead_ = lastInRender_ = lastDeclined_ = 0;
         for (const ProductFrameResult& r : res) {
             if (r.seal.outcome == SealOutcome::Sealed && r.seal.reason == SealReason::Accepted)
@@ -808,6 +809,17 @@ public:
                 ++lastInRender_;
             if (r.final == SealOutcome::Unavailable && r.finalReason == SealReason::FillDeclined)
                 ++lastDeclined_;
+        }
+        if (st->graph.maxSealLag > 0) {
+            // B3 X1: the final seal of lagged-seal frames N = seq - sealLag (after this frame's seal, so a lead ancestor is
+            // sealed). Their classes are counted on the product's set (ahead / live-filled / late / absent, StatusLines).
+            const std::vector<ProductFrameResult>& lag = st->table->ResolveLagged(seq, stamp, fill);
+            for (const ProductFrameResult& r : lag) {
+                if (r.liveFilled)
+                    ++lastInRender_;
+                if (r.final == SealOutcome::Unavailable && r.finalReason == SealReason::FillDeclined)
+                    ++lastDeclined_;
+            }
         }
         totalAhead_ += lastAhead_;
         totalInRender_ += lastInRender_;
@@ -850,6 +862,8 @@ public:
             const Node& n = st->table->NodeAt(i);
             if (n.backend == Backend::RenderOnly || !st->runner->Laned(n.id) || !st->runner->HasProducer(n.id))
                 continue;   // no producer: nothing to wait for (the seal fills it live), no bound burnt
+            if (n.sealLag > 0)
+                continue;   // B3 X1: a lagged-seal product is sealed at its final seal only in a deterministic run (no wait at N)
             uint32_t m = 0;
             const Variants v = st->info[i].identical ? Variants::Identical : Variants::NonIdentical;
             const SlotSet& set = st->table->At(i);
@@ -1019,13 +1033,17 @@ public:
         const std::shared_ptr<LaneState> st = std::atomic_load(&state_);
         if (!st)
             return;
+        // B3 X1: with a lagged-seal product (graph K = maxSealLag > 0) every release and the source drop run K frames later: a
+        // frame and its ancestors stay until the final seal at N + K (the rings were sized + K). K = 0: today.
+        const uint64_t K = st->graph.maxSealLag;
         for (size_t i = 0; i < st->table->Count(); ++i) {
-            const uint64_t h = st->table->NodeAt(i).history;
+            const uint64_t h = uint64_t(st->table->NodeAt(i).history) + K;
             // A frame that left its history before this graph's first frame was never in this table.
             if (seq >= h && seq - h >= st->firstSeq)
                 st->table->At(i).Release(seq - h, releaseFenceValue);
         }
-        st->ring->Drop(seq);   // the ring's copy (and its host plane hold) ends with the frame; a running job keeps its own
+        if (seq >= K)
+            st->ring->Drop(seq - K);   // the ring's copy (and its host plane hold) ends with the frame; a running job keeps its own
         NotifyWake();
     }
 
@@ -1204,6 +1222,31 @@ public:
             out.push_back("Analysis: " + std::to_string(totalDeclined_) +
                           " product frames unavailable (no producer result and no live fill; the consumer uses its own fallback)");
         out.push_back(std::string("Analysis lead: ") + LeadText(lead_));
+        if (st->graph.maxSealLag > 0) {
+            // B3 X1 (CHAR GAP-2): per lagged-seal product, how each frame ended; never log-only.
+            for (size_t i = 0; i < st->table->Count(); ++i) {
+                const Node& n = st->table->NodeAt(i);
+                if (n.sealLag == 0)
+                    continue;
+                const SlotCounters& c = st->table->At(i).Counters();
+                std::string line = "Analysis seal " + NameOf(*st, n.id) + " (seal lag " + std::to_string(unsigned(n.sealLag)) + "): " +
+                                   std::to_string(c.sealAhead.load(std::memory_order_relaxed)) + " ahead, " +
+                                   std::to_string(c.sealLiveFilled.load(std::memory_order_relaxed)) + " live-filled, " +
+                                   std::to_string(c.sealLate.load(std::memory_order_relaxed)) + " late, " +
+                                   std::to_string(c.sealAbsent.load(std::memory_order_relaxed)) + " absent";
+                const uint64_t rej = c.lateResyncRejected.load(std::memory_order_relaxed);
+                const uint64_t ota = c.onTimeAbsent.load(std::memory_order_relaxed);
+                if (rej > 0)
+                    line += " (" + std::to_string(rej) + " rejected by a resync)";
+                if (ota > 0)
+                    line += "; readers found it absent on time x" + std::to_string(ota);
+                if (det_)
+                    line += "; deterministic: final seal only";
+                out.push_back(line);
+            }
+        }
+        if (st->graph.sealLagForcedZero)
+            out.push_back("Analysis seal: lagged-seal products run at seal lag 0 in this mode (competitive low latency or no lane lead)");
         if (!externalIds_.empty()) {
             std::string names;
             for (ProductId id : externalIds_)

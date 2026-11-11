@@ -128,6 +128,17 @@ namespace SkeletonGraphTestsNs
 			});
 		}
 		const ProductFrameResult& Result(const std::vector<ProductFrameResult>& r, ProductId p) const { return r[IndexOf(p)]; }
+		// B3 X1: the final seal of lagged-seal frames after Resolve(seq) (the render stamp of seq), then the frame retires.
+		// (FinalSeal: the render of seq still reads the result; Retire: the frame is done.)
+		const std::vector<ProductFrameResult>& FinalSeal(uint64_t seq)
+		{
+			const Stamp st = ind.StampOf(seq);
+			return table.ResolveLagged(seq, st, [this](const Node& n, uint64_t s, int live, Header&, uint32_t) {
+				std::memset(bufs[IndexOf(n.id)].Live(size_t(live)), int(s + n.id + 100u), bufs[IndexOf(n.id)].Bytes());
+				return true;
+			});
+		}
+		void Retire(uint64_t seq) { table.ReleaseAfter(seq); }
 	};
 
 	std::vector<ConsumerDecl> OneConsumer(ProductId p)
@@ -240,6 +251,15 @@ namespace SkeletonGraphTestsNs
 		detail::AddInput(d[kBase], kBase, 1);
 		d[kBase].orderedChain = true;
 		d[kBase].missingInputForm = true;
+		return Registry(std::move(d));
+	}
+
+	// B3 X1: the lead-of-chain registry with the reader at lead `lead` and seal lag `lag` (lag >= lead: the chain is read SEALED).
+	Registry LaggedLeadOfChainRegistry(uint8_t lead, uint8_t lag)
+	{
+		std::vector<ProductDecl> d = LeadOfChainRegistry().All();
+		d[kLeadReader].inputs[0].lead = lead;
+		d[kLeadReader].sealLag = lag;
 		return Registry(std::move(d));
 	}
 
@@ -1525,6 +1545,141 @@ namespace SkeletonGraphTestsNs
 			for (int poll = 0; poll < 3; ++poll)
 				Assert::IsFalse(h.table.LaneAncestors(kHeldReader, 1, scratch, pins));
 			Assert::AreEqual(uint64_t(1), h.Set(kHeld).Counters().storeWaitRejected.load(), L"once per reader frame, not per poll");
+		}
+
+		// ---- B3 X1: lead reads of an ordered chain with a seal lag (td.delta(N) reads td.blocks(N+2)) ----
+
+		// The reader (lead 2, seal lag 2) over the chain at a lane lead: no lead-chain warning; every reader frame is sealed at N + 2
+		// from the SEALED chain frame N + 2: late (its lane result) or live-filled in its FULL form, never the reduced one.
+		static void LeadReadOfAnOrderedChainAt(uint8_t laneLead)
+		{
+			const Registry reg = LaggedLeadOfChainRegistry(2, 2);
+			const char* why = "";
+			std::string warning = "stale";
+			Assert::IsTrue(reg.Validate(&why, &warning));
+			Assert::IsTrue(warning.empty() && reg.LeadChainReads().empty(), L"a sealed lead read is not the warned lead-chain read");
+			Rig r(reg, OneConsumer(kLeadReader), laneLead);
+			Assert::IsTrue(r.graph.valid && r.table.Valid());
+			Assert::IsTrue(r.graph.Has(kLeadReader) && !r.graph.Has(kCausal), L"the declared lead is supplied: no substitute");
+			const Node* n = r.graph.Find(kLeadReader);
+			Assert::AreEqual(2, int(n->inputs[0].lead));
+			Assert::AreEqual(2, int(n->sealLag));
+			Assert::AreEqual(2, int(r.graph.maxSealLag));
+			Assert::IsTrue(r.graph.leadChainReads.empty() && r.graph.leadChainWarning.empty());
+			for (uint64_t s = 0; s < 8; ++s) {
+				if (s >= 1)
+					Assert::IsTrue(r.Lane(kBase, s), L"the chain runs in order");
+				if (s >= 2 && (s % 2u) == 0u)
+					Assert::IsTrue(r.Lane(kLeadReader, s - 2u), L"the reader job runs once base(N+2) is published");
+				const auto& res = r.Resolve(s);
+				Assert::IsTrue(r.Result(res, kLeadReader).pending, L"never accepted at N: its lead ancestor is not sealed yet");
+				Assert::IsTrue(r.Result(res, kBase).final == SealOutcome::Sealed);
+				const auto& fin = r.FinalSeal(s);
+				if (s < 2) {
+					r.Retire(s);
+					continue;
+				}
+				const uint64_t f = s - 2u;
+				const ProductFrameResult& x = r.Result(fin, kLeadReader);
+				Assert::AreEqual(f, x.seq);
+				Assert::IsTrue(x.final == SealOutcome::Sealed && x.missingInputs == 0u);
+				if ((f % 2u) == 0u) {
+					Assert::IsTrue(x.late && !x.liveFilled, L"the lane result accepted at the final seal");
+					Assert::IsTrue(r.Set(kLeadReader).Read(f).kind == ReadInfo::Ring);
+				} else {
+					Assert::IsTrue(x.liveFilled && !x.late);
+					Assert::IsTrue(r.Set(kLeadReader).Read(f).header->prov == Provenance::LiveRender, L"full form, not LiveFallback");
+				}
+				Assert::AreEqual(f + 2u, r.Set(kLeadReader).Read(f).header->ancestors[0].seq);
+				r.Retire(s);
+			}
+			const SlotCounters& c = r.Set(kLeadReader).Counters();
+			Assert::AreEqual(uint64_t(3), c.sealLate.load());
+			Assert::AreEqual(uint64_t(3), c.sealLiveFilled.load());
+			Assert::AreEqual(uint64_t(0), c.sealAhead.load() + c.sealAbsent.load());
+			Assert::AreEqual(uint64_t(0), r.Set(kBase).Counters().leadAccepted.load(), L"no K1 residual: the ancestor was sealed");
+		}
+
+		TEST_METHOD(LeadReadOfAnOrderedChainAtLaneLead3) { LeadReadOfAnOrderedChainAt(3); }
+		TEST_METHOD(LeadReadOfAnOrderedChainAtLaneLead4) { LeadReadOfAnOrderedChainAt(4); }
+		TEST_METHOD(LeadReadOfAnOrderedChainAtLaneLead5) { LeadReadOfAnOrderedChainAt(5); }
+
+		TEST_METHOD(LeadReadSubstitutesAtLeadTwoOrLess)
+		{
+			const Registry reg = LaggedLeadOfChainRegistry(2, 2);
+			for (uint8_t laneLead : { uint8_t(2), uint8_t(1) }) {
+				const Graph g = BuildGraph(reg, OneConsumer(kLeadReader), Rig::MakeSettings(laneLead));
+				Assert::IsTrue(g.valid && g.Has(kCausal) && !g.Has(kLeadReader), L"the substitute, never a partial lead");
+				Assert::AreEqual(size_t(1), g.ReducedNodes().size());
+				Assert::AreEqual(0, int(g.maxSealLag));
+				Assert::IsTrue(g.leadChainReads.empty());
+			}
+			// Unchanged without a seal lag: at lane lead 2 the reader of today runs at the reduced lead 1.
+			const Graph today = BuildGraph(LeadOfChainRegistry(), OneConsumer(kLeadReader), Rig::MakeSettings(2));
+			Assert::IsTrue(today.Has(kLeadReader) && !today.Has(kCausal));
+			Assert::AreEqual(1, int(today.Find(kLeadReader)->inputs[0].lead));
+		}
+
+		static void DeclaredLeadModeRow(uint8_t lead)
+		{
+			const Registry reg = LaggedLeadOfChainRegistry(lead, lead);
+			Assert::IsTrue(reg.Validate());
+			// Lane lead lead + 1 supplies the declared lead: the reader runs at it.
+			const Graph full = BuildGraph(reg, OneConsumer(kLeadReader), Rig::MakeSettings(uint8_t(lead + 1)));
+			Assert::IsTrue(full.valid && full.Has(kLeadReader) && !full.Has(kCausal));
+			Assert::AreEqual(int(lead), int(full.Find(kLeadReader)->inputs[0].lead));
+			Assert::AreEqual(int(lead), int(full.maxSealLag));
+			// One less: the substitute (the mode follows the declared lead).
+			const Graph shortQ = BuildGraph(reg, OneConsumer(kLeadReader), Rig::MakeSettings(lead));
+			Assert::IsTrue(shortQ.valid && shortQ.Has(kCausal) && !shortQ.Has(kLeadReader));
+		}
+
+		TEST_METHOD(ALaggedLeadReaderOfDeclaredLead3RunsAtLaneLead4AndSubstitutesBelow) { DeclaredLeadModeRow(3); }
+		TEST_METHOD(ALaggedLeadReaderOfDeclaredLead4RunsAtLaneLead5AndSubstitutesBelow) { DeclaredLeadModeRow(4); }
+
+		TEST_METHOD(OnTimeOrAbsentReadNeverInheritsLag)
+		{
+			// base has seal lag 2; causal reads it at lag 0 and declares none: it is sealed at N with base(N) ABSENT.
+			std::vector<ProductDecl> d = LeadRegistry().All();
+			d[kBase].sealLag = 2;
+			const Registry reg(std::move(d));
+			Assert::IsTrue(reg.Validate());
+			Rig r(reg, OneConsumer(kCausal), 4);
+			Assert::AreEqual(2, int(r.graph.Find(kBase)->sealLag));
+			Assert::AreEqual(0, int(r.graph.Find(kCausal)->sealLag));
+			const auto& res = r.Resolve(0);
+			Assert::IsTrue(r.Result(res, kBase).pending);
+			const ProductFrameResult& c = r.Result(res, kCausal);
+			Assert::IsFalse(c.pending);
+			Assert::IsTrue(c.final == SealOutcome::Unavailable && c.finalReason == SealReason::InputMissing,
+				L"no missing-input form: unavailable on time, never deferred");
+			Assert::AreEqual(uint64_t(1), r.Set(kBase).Counters().onTimeAbsent.load());
+			// With the base on time the reader reads it in full at N.
+			Assert::IsTrue(r.Lane(kBase, 1));
+			const auto& r1 = r.Resolve(1);
+			Assert::IsTrue(r.Result(r1, kBase).final == SealOutcome::Sealed && r.Result(r1, kCausal).final == SealOutcome::Sealed);
+			Assert::AreEqual(uint64_t(1), r.Set(kBase).Counters().sealAhead.load());
+		}
+
+		TEST_METHOD(TheAnalysisLaneShowsTheSealClassesOnStatus)
+		{
+			Indicator ind(9, 256);
+			LaneSettings ls;
+			ls.mode = LaneSettings::Mode::On;
+			TierInput tier;
+			tier.framePeriodMs = 40.0;
+			AnalysisLane lane(&ind, []() { return uint64_t(0); });
+			lane.Configure(ls, LaggedLeadOfChainRegistry(2, 2), OneConsumer(kLeadReader), Rig::MakeSettings(4), BigCard(1ull << 30), tier, 0, false);
+			Assert::IsTrue(lane.Active());
+			bool line = false;
+			for (const std::string& l : lane.StatusLines())
+				line = line || Has(l, "Analysis seal lead reader (seal lag 2): 0 ahead, 0 live-filled, 0 late, 0 absent");
+			Assert::IsTrue(line, L"on the status lines (Ctrl+I), never log-only");
+			// No seal lag: no seal line (the lines of today).
+			AnalysisLane quiet(&ind, []() { return uint64_t(0); });
+			quiet.Configure(ls, LeadOfChainRegistry(), OneConsumer(kLeadReader), Rig::MakeSettings(4), BigCard(1ull << 30), tier, 0, false);
+			for (const std::string& l : quiet.StatusLines())
+				Assert::IsFalse(Has(l, "Analysis seal"));
 		}
 	};
 }
