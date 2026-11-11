@@ -9,6 +9,7 @@
 #include <VP-V/modules/input/capture/CaptureHost.h>
 
 #include <atomic>
+#include <chrono>
 #include <stdexcept>
 #include <string>
 #include <memory>
@@ -213,10 +214,25 @@ namespace VideoProcessorTest
 		{
 			// The conversion thread looks its renderer up on every frame while other renderers' bindings are
 			// created and removed (doc 59 section 5.3 lifetime test, CPU form).
+			// AUDIT-R2 F2 race fix (rule 28: test-only, no assertion weakened; the assertions are the same plus
+			// Registered). Before: the churn loop could finish and stop.store(true) before the conversion thread ran
+			// once (c.convert stayed 0, so IsTrue(c.convert > 0) failed ~2 in 5 under load), and c.convert was a plain int
+			// written by the conversion thread and read by the test thread. After: the host counts convert calls in a
+			// std::atomic, and the churn starts only after the conversion thread has delivered its first frame.
+			struct AtomicHost : Vpv::Capture::ICaptureHost
+			{
+				std::atomic<int> converts{ 0 };
+				void ApplySettings() override {}
+				void ReleaseGpu() override {}
+				bool Convert(RE::ConvertContext&) override { converts.fetch_add(1); return true; }
+				void AfterPublish(RE::PublishView&) override {}
+				void SyncFallback(const FallbackCatalog::Decision&) override {}
+			};
 			Vpv::Capture::CaptureExtension module;
 			int key = 0;
-			Counts c;
-			Vpv::Capture::HostBinding bind(&key, std::unique_ptr<Vpv::Capture::ICaptureHost>(new FakeHost(c, true)));
+			AtomicHost* host = new AtomicHost();
+			Vpv::Capture::HostBinding bind(&key, std::unique_ptr<Vpv::Capture::ICaptureHost>(host));
+			Assert::IsTrue(bind.Registered(), L"the live renderer's binding is registered");
 			std::atomic<bool> stop{ false };
 			std::atomic<int> misses{ 0 };
 			std::thread conversion([&]
@@ -227,6 +243,9 @@ namespace VideoProcessorTest
 					if (!module.OnConvertedFrame(ctx, cc))
 						misses.fetch_add(1);
 			});
+			// Start handshake: the churn below begins only once the conversion thread is delivering.
+			for (int waited = 0; host->converts.load() == 0 && waited < 10000; ++waited)
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
 			std::vector<int> others(8);
 			for (int i = 0; i < 20000; ++i)
 			{
@@ -237,7 +256,8 @@ namespace VideoProcessorTest
 			stop.store(true);
 			conversion.join();
 			Assert::AreEqual(0, misses.load(), L"the live renderer is found on every frame");
-			Assert::IsTrue(c.convert > 0);
+			Assert::IsTrue(host->converts.load() > 0, L"the conversion thread delivered frames");
+			Assert::IsTrue(bind.Registered(), L"the live binding survives the churn");
 		}
 
 		// Audit F2: Convert is first-wins. An observer registered AFTER capture never sees a frame capture takes; one
