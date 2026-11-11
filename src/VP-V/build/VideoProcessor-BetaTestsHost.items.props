@@ -18,6 +18,7 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelMeasurement.cpp"/>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\GuidanceScheduler.cpp"/>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\MotionAheadProducer.cpp"/>
-    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\VideoProcessor-Lib\AnalysisLumaSource.cpp"/>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\..\VideoProcessor-Lib\AnalysisLumaSource.cpp"><PreprocessorDefinitions>_AFXDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+    <!-- _AFXDLL: this one source includes the Lib pch (MFC); the host builds with /MD, so afx.h needs the shared-DLL flag. -->
   </ItemGroup>
 </Project>

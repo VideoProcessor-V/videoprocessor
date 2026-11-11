@@ -4701,7 +4701,10 @@ namespace CameraAccuracy
 			a.chromaShiftY = b.chromaShiftY = 1;
 			Check(probe.Estimate(a, b), "camera accuracy (ahead): probe estimate: " + probe.LastError());   // no pair given: the block search
 			halvings = probe.SearchHalvings();   // the size the matcher searches at (the producer's target follows it)
-			consistency = probe.ConsistencyPixels();
+			{
+				const Dejudder::Settings st = ProductionSettings(cs.fps, engineGlobal);
+				consistency = static_cast<float>(st.consistencyPixels * GeneralScale::AboveReference(srcH, st.generalRates));   // as MotionWarp::ConsistencyPixels (private)
+			}
 		}
 		if (halvings < 0)
 			halvings = 0;
