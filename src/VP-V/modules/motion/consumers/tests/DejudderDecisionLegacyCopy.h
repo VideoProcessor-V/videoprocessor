@@ -421,13 +421,15 @@ namespace DejudderDecisionLegacy
 			if (!analysisEstimate && (reason == DejudderPolicy::Reason::Off || reason == DejudderPolicy::Reason::LowLatency ||
 				reason == DejudderPolicy::Reason::Interlaced || reason == DejudderPolicy::Reason::VideoRateMaskOnly ||
 				reason == DejudderPolicy::Reason::IneligibleCadence || reason == DejudderPolicy::Reason::NativeRgb ||
-				reason == DejudderPolicy::Reason::SmoothMotion))
+				reason == DejudderPolicy::Reason::SmoothMotion ||
+				(reason == DejudderPolicy::Reason::UnknownRates && activeSettings.interpolationFillGaps)))   // W2-C1 (H3Idle)
 			{
 				const bool repairPossible = reason == DejudderPolicy::Reason::Off ||
-					reason == DejudderPolicy::Reason::VideoRateMaskOnly || reason == DejudderPolicy::Reason::IneligibleCadence;
+					reason == DejudderPolicy::Reason::VideoRateMaskOnly || reason == DejudderPolicy::Reason::IneligibleCadence ||
+					reason == DejudderPolicy::Reason::UnknownRates;   // W2-C1
 				const bool held = dejudder || dejudderNextTexture0;   // COPY
-				if (held && activeSettings.interpolationFillGaps && repairPossible)
-					PollMotionEngineBudget(width, height, true);
+				if ((held || motionEngineIdle.Pressured()) && activeSettings.interpolationFillGaps && repairPossible)   // W2-C1
+					PollMotionEngineBudget(width, height, held);
 				const bool keepForGaps = motionEngineIdle.Keep(activeSettings.interpolationFillGaps, repairPossible);
 				// H3 F4 follow-up: loaded and idle from the source's start, not at its first hiccup.
 				if (!held && keepForGaps && motionEngineWarmPending)

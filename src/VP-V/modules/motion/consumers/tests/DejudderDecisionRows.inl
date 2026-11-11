@@ -177,7 +177,22 @@ ROW("s05-40-on-60-legacy-rates", { DJ24 s.sourceHz=40.0; s.activeSettings.genera
 	"De-judder: cadence not eligible (no strength for it, or a video-rate source) (strength 0.50, extras off, occlusion mask off, source 40.000 Hz, display 60.000 Hz, match tolerance 4.5)\n",
 	100000ull, 0ull,
 	"dejudder-mode cadence not eligible (no strength for it, or a video-rate source) a=5 b=0 x=40 y=60\n" })
+// W2-C1 (H3Idle): rates not known with hiccup repair on takes the idle-engine branch (warmed at the source's start).
 ROW("rates-source-unknown", { DJ24 s.sourceHz=0.0; },
+	{ R::UnknownRates, false, 0.0f, 0, false, I::Off, 0, false, false, 1.0f, 0, false, O::ReleaseBranch, false, false, false, false, 2, false,
+	"off",
+	"rates not known",
+	"De-judder: rates not known (strength 0.50, extras off, occlusion mask off, source 0.000 Hz, display 60.000 Hz, match tolerance 4.5)\n",
+	100000ull, 0ull,
+	"dejudder-mode rates not known a=4 b=0 x=0 y=60\n" })
+ROW("rates-unknown-fillgaps-warm-at-start", { DJ24 s.sourceHz=0.0; s.motionEngineWarmPending=true; },
+	{ R::UnknownRates, false, 0.0f, 0, false, I::Off, 0, false, false, 1.0f, 0, false, O::ReleaseBranch, false, false, true, false, 2, false,
+	"off",
+	"rates not known",
+	"De-judder: rates not known (strength 0.50, extras off, occlusion mask off, source 0.000 Hz, display 60.000 Hz, match tolerance 4.5)\n",
+	100000ull, 0ull,
+	"dejudder-mode rates not known a=4 b=0 x=0 y=60\n" })
+ROW("rates-unknown-no-fillgaps", { DJ24 s.sourceHz=0.0; s.activeSettings.interpolationFillGaps=false; },
 	{ R::UnknownRates, false, 0.0f, 0, false, I::Off, 0, false, false, 1.0f, 0, false, O::NoEstimate, false, false, false, false, 2, false,
 	"off",
 	"rates not known",
@@ -185,7 +200,7 @@ ROW("rates-source-unknown", { DJ24 s.sourceHz=0.0; },
 	100000ull, 0ull,
 	"dejudder-mode rates not known a=4 b=0 x=0 y=60\n" })
 ROW("rates-display-unknown", { DJ24 s.measuredDisplayHz=0.0; },
-	{ R::UnknownRates, false, 0.0f, 0, false, I::Off, 0, false, false, 1.0f, 0, false, O::NoEstimate, false, false, false, false, 2, false,
+	{ R::UnknownRates, false, 0.0f, 0, false, I::Off, 0, false, false, 1.0f, 0, false, O::ReleaseBranch, false, false, false, false, 2, false,
 	"off",
 	"rates not known",
 	"De-judder: rates not known (strength 0.50, extras off, occlusion mask off, source 23.976 Hz, display 0.000 Hz, match tolerance 4.5)\n",

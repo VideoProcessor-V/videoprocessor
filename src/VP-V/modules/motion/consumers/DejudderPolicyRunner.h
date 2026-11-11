@@ -248,8 +248,12 @@ namespace VpMotion
 		if (!analysisEstimate && (reason == DejudderPolicy::Reason::Off || reason == DejudderPolicy::Reason::LowLatency ||
 			reason == DejudderPolicy::Reason::Interlaced || reason == DejudderPolicy::Reason::VideoRateMaskOnly ||
 			reason == DejudderPolicy::Reason::IneligibleCadence || reason == DejudderPolicy::Reason::NativeRgb ||
-			reason == DejudderPolicy::Reason::SmoothMotion))
+			reason == DejudderPolicy::Reason::SmoothMotion ||
+			(reason == DejudderPolicy::Reason::UnknownRates && activeSettings.interpolationFillGaps)))
 		{
+			// W2-C1 (H3Idle): rates not known yet (the first frames of a source) is a reason a gap pair can still be repaired
+			// under, so the idle engine is warmed then instead of the warm-up waiting for the rates to settle.
+
 			// Bug hunt 3 F4 (owner 2026-10-18): with hiccup repair on, the motion engine stays
 			// loaded and idle for every reason a gap pair can still be repaired under (the
 			// standalone repair needs no low latency, interlacing, smooth motion or native RGB):
@@ -257,11 +261,14 @@ namespace VpMotion
 			// (an allocation failed, or DXGI reports budget pressure) releases it; the next gap
 			// pair recreates it once the pressure has passed (MotionEngineIdle).
 			const bool repairPossible = reason == DejudderPolicy::Reason::Off ||
-				reason == DejudderPolicy::Reason::VideoRateMaskOnly || reason == DejudderPolicy::Reason::IneligibleCadence;
+				reason == DejudderPolicy::Reason::VideoRateMaskOnly || reason == DejudderPolicy::Reason::IneligibleCadence ||
+				reason == DejudderPolicy::Reason::UnknownRates;   // W2-C1: reached only with hiccup repair on
 			const bool held = f.dejudderHeld || f.nextTextureHeld;
-			if (held && activeSettings.interpolationFillGaps && repairPossible)
-				host.PollMotionEngineBudget(width, height, true);
 			MotionEngineIdle::Keeper& motionEngineIdle = host.IdleKeeper();
+			// W2-C1 (lead 2026-11-11): released under pressure, the budget is still read (once a second, BudgetDue) with the idle
+			// engine's bytes as headroom, so the pressure (and the engine's VramRelease state) clears when the memory comes back.
+			if ((held || motionEngineIdle.Pressured()) && activeSettings.interpolationFillGaps && repairPossible)
+				host.PollMotionEngineBudget(width, height, held);
 			const bool keepForGaps = motionEngineIdle.Keep(activeSettings.interpolationFillGaps, repairPossible);
 			// H3 F4 follow-up: loaded and idle from the source's start, not at its first hiccup.
 			if (!held && keepForGaps && host.WarmPending())

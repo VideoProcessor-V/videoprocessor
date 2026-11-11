@@ -11,14 +11,35 @@
 // VpMotion::EstimateState (EstimateState.h) and is reached through the Impl aliases (HOOKS.md section 4).
 #pragma once
 
+#include <VP-V/core/VramUsers.h>
+
 // H3 F4 follow-up: create the matcher, its optical-flow engine and textures, and the
 // interpolator's planes and passes once, on A's own planes (A -> A); nothing they produce
 // is used (no live field, no picture), and the history is forgotten.
 void LibplaceboVideoRenderer::Impl::WarmIdleMotionEngine(const VideoFrameFormatterOutputContract& contract, bool lossless422, bool nativeRgb)
 {
-	motionEngineWarmPending = false;
-	if (nativeRgb || dejudderRgbLuma || !textures[0] || !textures[1] || !d3d11 || !d3d11->gpu)
+	// W2-C1 (H3Idle): a permanent bail (the source's format never takes the matcher) ends the warm-up for this source; a transient
+	// one (textures or the render device not there yet) keeps it pending for the next frame. Every bail is logged (a transient
+	// reason once per change).
+	if (nativeRgb || dejudderRgbLuma)
+	{
+		motionEngineWarmPending = false;
+		DebugLog::Log("Motion engine: idle warm-up skipped (%s)", nativeRgb ? "native RGB" : "RGB luma");
 		return;
+	}
+	const char* transient = !d3d11 || !d3d11->gpu ? "no render device yet" : (!textures[0] || !textures[1]) ? "no source textures yet" : nullptr;
+	if (transient)
+	{
+		if (vectorEngine.motionWarmSkipLogged != transient)
+		{
+			vectorEngine.motionWarmSkipLogged = transient;
+			DebugLog::Log("Motion engine: idle warm-up skipped (%s; retried next frame)", transient);
+		}
+		return;
+	}
+	motionEngineWarmPending = false;
+	vectorEngine.motionWarmSkipLogged = nullptr;
+	++vectorEngine.WorkCounters().warmUps;
 	Dejudder::Planes a;
 	a.luma = textures[0];
 	a.chroma = textures[1];
@@ -69,6 +90,13 @@ void LibplaceboVideoRenderer::Impl::PollMotionEngineBudget(int width, int height
 	motionEngineIdle.NoteBudget(reported ? usage : 0, reported ? budget : 0,
 		engineHeld ? 0 : MotionEngineIdle::IdleBytes(width, height), now);
 	SyncFallback(FallbackCatalog::MotionEnginePressure(motionEngineIdle.Pressured()));   // SK-MV: dropping the standing demand is visible
+	// W2-C1 (B9): the release is a hard engine state (VramRelease), and the one reading is shared with the skeleton's tier plan
+	// (QueryCard reads it while fresh instead of querying DXGI again).
+	vectorEngine.NoteVramRelease(motionEngineIdle.Pressured());
+	DXGI_ADAPTER_DESC desc{};
+	if (reported && motionEngineBudgetAdapter && SUCCEEDED(motionEngineBudgetAdapter->GetDesc(&desc)))
+		VpSkeleton::VramUsers::Instance().NoteBudget((static_cast<uint64_t>(static_cast<uint32_t>(desc.AdapterLuid.HighPart)) << 32) |
+			static_cast<uint64_t>(desc.AdapterLuid.LowPart), usage, budget, now);
 }
 
 bool LibplaceboVideoRenderer::Impl::QueryMotionEngineBudget(uint64_t& usage, uint64_t& budget)

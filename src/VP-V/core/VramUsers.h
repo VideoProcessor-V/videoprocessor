@@ -189,6 +189,29 @@ public:
     // Changes whenever the set or the size of a declaration changes (the skeleton re-plans when it moved).
     uint64_t Version() const { return version_.load(std::memory_order_relaxed); }
 
+    // W2-C1 (B9): the last DXGI budget reading of an adapter (by LUID), so the motion engine's once-a-second reading also serves
+    // the skeleton's tier plan. nowSec: GetTickCount64 seconds. Not a declaration: Version() does not move.
+    void NoteBudget(uint64_t luid, uint64_t usage, uint64_t budget, double nowSec)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        budgetLuid_ = luid;
+        budgetUsage_ = usage;
+        budgetBytes_ = budget;
+        budgetAtSec_ = nowSec;
+        budgetValid_ = budget != 0;
+    }
+
+    // The reading of that adapter when it is at most maxAge seconds old (false: query DXGI).
+    bool LastBudget(uint64_t luid, uint64_t& usage, uint64_t& budget, double nowSec, double maxAge = 1.0) const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!budgetValid_ || budgetLuid_ != luid || nowSec < budgetAtSec_ || nowSec - budgetAtSec_ > maxAge)
+            return false;
+        usage = budgetUsage_;
+        budget = budgetBytes_;
+        return true;
+    }
+
     struct Snapshot {
         std::vector<VramUser> users;        // one per id (declarations of one id are summed level by level)
         uint64_t heldBytes = 0;             // what they hold now: VP's own usage inside CurrentUsage
@@ -286,6 +309,11 @@ private:
     std::vector<Entry> entries_;
     std::vector<Mark> active_;
     std::atomic<uint64_t> version_{ 0 };
+    uint64_t budgetLuid_ = 0;      // W2-C1: the shared budget reading (NoteBudget / LastBudget)
+    uint64_t budgetUsage_ = 0;
+    uint64_t budgetBytes_ = 0;
+    double budgetAtSec_ = 0.0;
+    bool budgetValid_ = false;
 };
 
 // "optical-flow engines, camera model" for the Fallbacks line; empty when nothing is unpopulated.
