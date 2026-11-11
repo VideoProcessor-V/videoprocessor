@@ -130,6 +130,7 @@ namespace CameraLink
 	GuidanceScheduler::GuidanceScheduler(ICameraLink& link, const GuidanceSettings& settings)
 		: m_link(link), m_settings(settings), m_governor(settings.governor), m_lane(kLaneRing), m_pending(kPendingRing), m_asked(kLaneRing, ~uint64_t(0))
 	{
+		RefreshSnapshot();   // the worker's snapshot is valid from the start (SetLag used to publish it; d = 0 has no lag)
 	}
 
 	void GuidanceScheduler::SetSettings(const GuidanceSettings& s)
