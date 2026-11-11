@@ -53,6 +53,12 @@ namespace VpQueueTiming
 			return Options{ m_originalPathway.load(std::memory_order_relaxed), m_queueTimingFixes.load(std::memory_order_relaxed) };
 		}
 
+		// S1 amendment (TD design (a)4/(b)6; RenderAhead::FloorPolicy::RaiseQueue): the look-ahead
+		// floor may raise the queue target above the desired one (up to capacity). Default off:
+		// QueueTarget is CombineQueueTarget exactly. Any thread.
+		void SetRaiseQueueForAnalysis(bool raise) { m_raiseQueueForAnalysis.store(raise, std::memory_order_relaxed); }
+		bool RaiseQueueForAnalysis() const { return m_raiseQueueForAnalysis.load(std::memory_order_relaxed); }
+
 		Kind GetKind() const override { return Kind::External; }
 		const char* Name() const override { return m_originalPathway.load(std::memory_order_relaxed) ? "vp (original pathway)" : "vp fixed delay"; }
 
@@ -133,7 +139,8 @@ namespace VpQueueTiming
 				AlphaQueuePolicy::ClampDesiredDepthToCapacity(c.hold.targetFrames, c.capacity) :
 				c.cadenceScaledDepth;
 			return VpQueueRules::CombineQueueTarget(desired, c.renderAheadCreditFrames, c.lookaheadFloor,
-				m_queueTimingFixes.load(std::memory_order_relaxed));
+				m_queueTimingFixes.load(std::memory_order_relaxed), m_raiseQueueForAnalysis.load(std::memory_order_relaxed),
+				c.capacity);
 		}
 
 		// HoldTicksUntilDueLocked, d0212534 26978-26997 + e9f27487 (the host checks the empty queue / no Impl).
@@ -196,6 +203,7 @@ namespace VpQueueTiming
 	private:
 		std::atomic<bool> m_originalPathway{ false };
 		std::atomic<bool> m_queueTimingFixes{ true };
+		std::atomic<bool> m_raiseQueueForAnalysis{ false };
 	};
 
 	// The either/or selection (owner 2026-10-24): queue_policy = vp (default) | upstream. The

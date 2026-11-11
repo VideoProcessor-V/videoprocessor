@@ -107,9 +107,14 @@ namespace RenderAhead
 	//    says the floor holds the queue above the credit and gives the real delay.
 	//  - FloorWins: the credit is only what the floor leaves; a lead it no longer covers
 	//    vetoes render-ahead (its fallback says why).
-	// Either way the queue keeps the floor (CombineQueueTarget), and the decision is the same
-	// as without a floor while the floor is at most kBudgetMinQueued.
-	enum class FloorPolicy { CreditWins, FloorWins };
+	//  - RaiseQueue (S1 amendment, TD design (a)4/(b)6; for TD on, default off): the credit is
+	//    taken as before and the floor is NOT capped at the desired queue, so the queue target
+	//    rises above the user's setting (VpQueueRules::CombineQueueTarget, raiseAboveDesired);
+	//    the report gives the raised queue and the real delay.
+	// The queue keeps the floor (CombineQueueTarget; capped at the desired queue except with
+	// RaiseQueue), and the decision is the same as without a floor while the floor is at most
+	// kBudgetMinQueued.
+	enum class FloorPolicy { CreditWins, FloorWins, RaiseQueue };
 
 	struct BudgetDecision
 	{
@@ -123,6 +128,8 @@ namespace RenderAhead
 		size_t floorFrames = 0;    // the input
 		bool floorCompetes = false;   // the floor took (FloorWins) or kept (CreditWins) a frame of the credit
 		double realTotalMs = 0.0;  // the delay with the queue held at the floor: max(target - credit, floor) x P_s + lead
+		size_t queueFrames = 0;    // the desired queue (the input)
+		size_t raisedQueueFrames = 0;   // RaiseQueue: the queue the floor takes above the desired one (0 = not raised)
 	};
 	inline BudgetDecision FitDelayBudget(double sourcePeriod, double displayPeriod, size_t queueFrames, bool creditOn,
 		size_t floorFrames, FloorPolicy policy);
@@ -135,6 +142,7 @@ namespace RenderAhead
 	{
 		BudgetDecision d;
 		d.floorFrames = floorFrames;
+		d.queueFrames = queueFrames;
 		const double lead = PlannedLead(sourcePeriod, displayPeriod);
 		d.leadMs = lead * 1000.0;
 		d.budgetMs = sourcePeriod > 0.0 ? static_cast<double>(queueFrames) * sourcePeriod * 1000.0 : 0.0;
@@ -146,8 +154,10 @@ namespace RenderAhead
 		const size_t wanted = static_cast<size_t>(std::ceil(lead / sourcePeriod - 1e-9));
 		if (creditOn && queueFrames >= wanted + kBudgetMinQueued)
 		{
-			// The floor the queue keeps (CombineQueueTarget: never above the target).
-			const size_t floorKept = (std::min)(floorFrames, queueFrames);
+			// The floor the queue keeps (CombineQueueTarget: never above the target, except RaiseQueue).
+			const size_t floorKept = policy == FloorPolicy::RaiseQueue ? floorFrames : (std::min)(floorFrames, queueFrames);
+			if (floorKept > queueFrames)
+				d.raisedQueueFrames = floorKept;
 			size_t credit = wanted;
 			if (floorKept > queueFrames - wanted)
 			{
@@ -874,6 +884,10 @@ namespace RenderAhead
 		double extraMs = 0.0;          // X: one extra (p95), as it runs now
 		double extraCheaperMs = 0.0;   // X at L1 (the de-judder's vectors), 0 = not known
 		double estimateMs = 0.0;       // E: the estimate ahead (p95)
+		// S1 amendment (TD design (b)6): GPU work a look-ahead user runs in the spare slot, per
+		// source frame (ms; 0 = none). ADDITIVE in the average check only: it never shares a
+		// present's refresh, so the single-frame check does not see it.
+		double spareSlotMs = 0.0;
 	};
 
 	// X per vector mode (bug hunt 05 M7): the extras timed with the sigma-delta's own
@@ -917,7 +931,7 @@ namespace RenderAhead
 		const double extras = ExtrasPerFrame(ratio, DropsAt(level));
 		const double x = level >= 1 && in.costs.extraCheaperMs > 0.0 ? std::min(in.costs.extraMs, in.costs.extraCheaperMs) :
 			in.costs.extraMs;
-		return in.costs.newFrameMs + (extras > 0.0 ? in.costs.estimateMs : 0.0) + extras * x;
+		return in.costs.newFrameMs + (extras > 0.0 ? in.costs.estimateMs : 0.0) + extras * x + in.costs.spareSlotMs;
 	}
 
 	// Both checks of the design: the average, sum(N + E + extras * X) + margin <=
@@ -1215,6 +1229,9 @@ namespace RenderAhead
 		// the credit (the owner's policy; CreditWins = today).
 		std::atomic<size_t> analysisFloor{ 0 };
 		FloorPolicy floorPolicy = FloorPolicy::CreditWins;
+		// The spare-slot GPU ms per source frame a look-ahead user declares (S1 amendment; any
+		// thread; 0 = none): GateCosts::spareSlotMs, added to the gate's average check.
+		std::atomic<double> spareSlotMs{ 0.0 };
 		// The vector mode each extra's GPU timer ran with (timer serial -> de-judder vectors).
 		std::deque<std::pair<unsigned long long, bool>> extraTimerModes;
 
@@ -1295,6 +1312,7 @@ namespace RenderAhead
 			g.l1Available = frame.l1Available;
 			g.costs.newFrameMs = newFrameCost.P95();
 			g.costs.estimateMs = estimateCost.Current();
+			g.costs.spareSlotMs = spareSlotMs.load(std::memory_order_acquire);
 			// X per vector mode, each level priced with its own (M7). A degraded level renders
 			// fewer extras (none at hold), so their windows empty: the last p95 measured
 			// stands for them (KnownCost, 30 s), and with none known the ladder probes one
@@ -1376,6 +1394,10 @@ namespace RenderAhead
 			if (policy == FloorPolicy::FloorWins)
 				snprintf(line, sizeof(line), "the analysis floor (%zu frames) wins: render-ahead's credit is vetoed, "
 					"its %.0f ms lead does not fit", d.floorFrames, d.leadMs);
+			else if (policy == FloorPolicy::RaiseQueue && d.raisedQueueFrames > 0)
+				snprintf(line, sizeof(line), "the analysis floor (%zu frames) raises the queue above the desired %zu frames: "
+					"the real delay is %.0f ms, not %.0f ms (%.0f ms budget)", d.floorFrames, d.queueFrames, d.realTotalMs,
+					d.totalMs, d.budgetMs);
 			else
 				snprintf(line, sizeof(line), "the credit wins over the analysis floor (%zu frames): the queue stays at the "
 					"floor, so the real delay is %.0f ms, not %.0f ms (%.0f ms budget)", d.floorFrames, d.realTotalMs,

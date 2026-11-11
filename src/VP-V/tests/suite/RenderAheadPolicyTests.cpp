@@ -2437,11 +2437,13 @@ namespace RenderAheadPolicyTest
 					for (size_t q = 0; q <= 12; ++q)
 						for (int c = 0; c < 2; ++c)
 							for (size_t f = 0; f <= kBudgetMinQueued; ++f)
-								for (int pol = 0; pol < 2; ++pol)
+								for (int pol = 0; pol < 3; ++pol)
 								{
 									const BudgetDecision a = FitDelayBudget(1.0 / sh, 1.0 / dh, q, c != 0);
 									const BudgetDecision b = FitDelayBudget(1.0 / sh, 1.0 / dh, q, c != 0, f,
-										pol ? FloorPolicy::FloorWins : FloorPolicy::CreditWins);
+										static_cast<FloorPolicy>(pol));
+									Assert::IsFalse(b.floorCompetes);
+									Assert::AreEqual(size_t(0), b.raisedQueueFrames);
 									const std::wstring n = Name(sh, dh) + L" q " + std::to_wstring(q) + L" f " + std::to_wstring(f);
 									Assert::AreEqual(a.fits, b.fits, n.c_str());
 									Assert::AreEqual(a.creditFrames, b.creditFrames, n.c_str());
@@ -2527,6 +2529,119 @@ namespace RenderAheadPolicyTest
 			Assert::IsFalse(Presenter::FloorReport(floorWins, FloorPolicy::FloorWins).empty(), L"visible");
 			// The queue rule keeps the floor (capped at the target) in both.
 			Assert::AreEqual(q, VpQueueRules::CombineQueueTarget(q, credit.creditFrames, floorFrames, true));
+		}
+
+		// S1 amendment (TD design (a)4/(b)6): the floor is capped at the desired queue (200 ms at
+		// 24p = 4 frames, 3 ahead: a TD lead 3 is given what the queue holds, never a veto); the
+		// RaiseQueue choice leaves it uncapped.
+		TEST_METHOD(TheFloorIsCappedAtTheDesiredQueueUnlessRaised)
+		{
+			const double ps = 1.0 / 24.0;
+			const size_t q = static_cast<size_t>(std::floor(0.200 / ps + 1e-9));
+			Assert::AreEqual(size_t(4), q);
+			Assert::AreEqual(size_t(4), VpQueueRules::AnalysisFloorFrames(3, 3, q, false), L"capped at the desired queue");
+			Assert::AreEqual(size_t(5), VpQueueRules::AnalysisFloorFrames(3, 3, q, true), L"RaiseQueue: uncapped");
+			Assert::AreEqual(size_t(5), VpQueueRules::AnalysisFloorFrames(3, 3, 0, false), L"desired not known: no cap");
+			Assert::AreEqual(size_t(3), VpQueueRules::AnalysisFloorFrames(3, 0, q, false), L"the motion floor as today");
+			for (size_t m = 0; m <= 8; ++m)
+				for (unsigned l = 0; l <= 6; ++l)
+					for (size_t d = 0; d <= 10; ++d)
+					{
+						const size_t capped = VpQueueRules::AnalysisFloorFrames(m, l, d, false);
+						const size_t raw = VpQueueRules::AnalysisFloorFrames(m, l);
+						Assert::AreEqual(d == 0 ? raw : (std::min)(raw, d), capped);
+						Assert::AreEqual(raw, VpQueueRules::AnalysisFloorFrames(m, l, d, true));
+					}
+			// The capped floor never vetoes the credit by itself under the default policy.
+			const BudgetDecision dflt = FitDelayBudget(ps, 1.0 / 60.0, q, true, VpQueueRules::AnalysisFloorFrames(3, 3, q, false),
+				FloorPolicy::CreditWins);
+			Assert::IsTrue(dflt.fits);
+			Assert::AreEqual(size_t(0), dflt.raisedQueueFrames);
+		}
+
+		TEST_METHOD(CombineQueueTargetRaiseOffIsTodaysRule)
+		{
+			for (size_t desired = 0; desired <= 12; ++desired)
+				for (size_t credit = 0; credit <= 3; ++credit)
+					for (size_t floor = 0; floor <= 14; ++floor)
+						for (int fixes = 0; fixes < 2; ++fixes)
+						{
+							const size_t caps[] = { 0, 8, 16 };
+							for (size_t cap : caps)
+							{
+								const size_t today = VpQueueRules::CombineQueueTarget(desired, credit, floor, fixes != 0);
+								Assert::AreEqual(today, VpQueueRules::CombineQueueTarget(desired, credit, floor, fixes != 0, false, cap));
+								const size_t raised = VpQueueRules::CombineQueueTarget(desired, credit, floor, fixes != 0, true, cap);
+								Assert::IsTrue(raised >= today);
+								if (!fixes)
+									Assert::AreEqual(today, raised, L"no queue_timing_fixes: no floor, nothing raised");
+								else
+								{
+									const size_t f = cap > 0 ? (std::min)(floor, cap) : floor;
+									Assert::AreEqual((std::max)(today, f), raised);
+									if (cap > 0)
+										Assert::IsTrue(raised <= (std::max)(today, cap), L"never above capacity");
+								}
+							}
+						}
+		}
+
+		TEST_METHOD(RaiseQueueKeepsTheCreditAndReportsTheRaisedQueue)
+		{
+			const double ps = 1.0 / 24.0, pd = 1.0 / 60.0;
+			const size_t floorFrames = VpQueueRules::AnalysisFloorFrames(3, 3, 4, true);
+			Assert::AreEqual(size_t(5), floorFrames);
+			const BudgetDecision today = FitDelayBudget(ps, pd, 4, true);
+			const BudgetDecision d = FitDelayBudget(ps, pd, 4, true, floorFrames, FloorPolicy::RaiseQueue);
+			Assert::AreEqual(today.fits, d.fits);
+			Assert::AreEqual(today.creditFrames, d.creditFrames, L"the credit as today");
+			Assert::AreEqual(today.totalMs, d.totalMs);
+			Assert::IsTrue(d.floorCompetes);
+			Assert::AreEqual(size_t(5), d.raisedQueueFrames);
+			Assert::AreEqual(size_t(4), d.queueFrames);
+			Assert::AreEqual((5.0 * ps + PlannedLead(ps, pd)) * 1000.0, d.realTotalMs, 1e-9);
+			const std::string report = Presenter::FloorReport(d, FloorPolicy::RaiseQueue);
+			Assert::IsTrue(report.find("raises the queue above the desired 4 frames") != std::string::npos);
+			// Not raised (the floor inside the queue): the credit-wins line.
+			const BudgetDecision inside = FitDelayBudget(ps, pd, 4, true, 4, FloorPolicy::RaiseQueue);
+			Assert::AreEqual(size_t(0), inside.raisedQueueFrames);
+			Assert::IsTrue(Presenter::FloorReport(inside, FloorPolicy::RaiseQueue).find("the credit wins") != std::string::npos);
+		}
+
+		// S1 amendment (TD design (b)6): GateCosts' spare-slot GPU ms is additive in the average
+		// check, absent from the single-frame check, 0 = today.
+		TEST_METHOD(TheSpareSlotCostIsAdditiveInTheAverageOnly)
+		{
+			GateInput in;
+			in.sourcePeriod = 1.0 / 24.0;
+			in.displayPeriod = 1.0 / 60.0;
+			in.costs.newFrameMs = 10.0;
+			in.costs.extraMs = 4.0;
+			in.costs.estimateMs = 1.0;
+			const double base = FrameCostMs(in, 0);
+			const bool fitsBase = Fits(in, 0, in.utilisation);
+			Assert::IsTrue(fitsBase);
+			in.costs.spareSlotMs = 0.0;
+			Assert::AreEqual(base, FrameCostMs(in, 0), L"0 = today exactly");
+			in.costs.spareSlotMs = 2.5;
+			Assert::AreEqual(base + 2.5, FrameCostMs(in, 0), 1e-12);
+			in.costs.spareSlotMs = in.utilisation * 1000.0 * in.sourcePeriod;   // the whole average budget
+			Assert::IsFalse(Fits(in, 0, in.utilisation), L"the average check sees it");
+			// The single-frame check alone: an average budget so wide only it can fail.
+			GateInput single = in;
+			single.costs.spareSlotMs = 0.0;
+			single.costs.newFrameMs = 60.0;
+			const bool a = Fits(single, 0, 100.0);
+			single.costs.spareSlotMs = 30.0;
+			Assert::AreEqual(a, Fits(single, 0, 100.0), L"the single-frame check does not see it");
+
+			Presenter p;
+			PresenterGateFrame f;
+			f.sourcePeriod = in.sourcePeriod;
+			f.displayPeriod = in.displayPeriod;
+			Assert::AreEqual(0.0, p.UpdateGate(1.0, f).input.costs.spareSlotMs, L"default none");
+			p.spareSlotMs.store(1.5);
+			Assert::AreEqual(1.5, p.UpdateGate(2.0, f).input.costs.spareSlotMs, L"the Presenter's input reaches the gate");
 		}
 	};
 }

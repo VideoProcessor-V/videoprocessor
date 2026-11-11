@@ -90,6 +90,30 @@ namespace VpQueueRules
 		return declaredLead > 0 ? (std::max)(motionFloor, static_cast<size_t>(declaredLead) + 2) : motionFloor;
 	}
 
+	// S1 amendment (TD design (a)4 / (b)6): the floor is capped at the desired queue - a short
+	// queue (200 ms at 24p: 4 frames, 3 ahead) gives the look-ahead what it holds and is never
+	// vetoed by it. raiseAboveDesired (RenderAhead::FloorPolicy::RaiseQueue: TD on, default off)
+	// leaves the floor uncapped so the queue target may rise above the desired setting.
+	// desiredQueue 0 = not known: no cap.
+	inline size_t AnalysisFloorFrames(size_t motionFloor, unsigned declaredLead, size_t desiredQueue, bool raiseAboveDesired)
+	{
+		const size_t floor = AnalysisFloorFrames(motionFloor, declaredLead);
+		return raiseAboveDesired || desiredQueue == 0 ? floor : (std::min)(floor, desiredQueue);
+	}
+
+	// CombineQueueTarget with the RaiseQueue choice: off, exactly CombineQueueTarget (the floor
+	// never above desired); on (queue_timing_fixes only), the floor may take the target above
+	// desired, never above the queue's capacity (0 = not known: no limit).
+	inline size_t CombineQueueTarget(size_t desired, size_t credit, size_t lookaheadFloor, bool queueTimingFixes,
+		bool raiseAboveDesired, size_t capacity)
+	{
+		if (!raiseAboveDesired || !queueTimingFixes)
+			return CombineQueueTarget(desired, credit, lookaheadFloor, queueTimingFixes);
+		const size_t target = credit > 0 && desired > 2 ? desired - (std::min)(credit, desired - 2) : desired;
+		const size_t floor = capacity > 0 ? (std::min)(lookaheadFloor, capacity) : lookaheadFloor;
+		return (std::max)(target, floor);
+	}
+
 	// Hunt 2 13-timing H1 (queue_timing_fixes): the front frame of a queue that
 	// holds its target has already waited about target periods; that wait is the
 	// queue doing its job, not staleness. With staleBeyondTarget the age is measured
