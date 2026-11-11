@@ -366,7 +366,8 @@ namespace Tests
 				if (!o.latched)
 					releasedAt = t;
 			}
-			Assert::IsTrue(releasedAt == deferredAt + 10, L"released at the end of the 3 s dwell (no re-confirmation)");
+			// N2 (LOW-b): the dwell's end (deferredAt + 10, the first credited evaluation of the new shot) plus one evaluation (1 s steps).
+			Assert::IsTrue(releasedAt == deferredAt + 11, L"released one evaluation after the end of the 3 s dwell (no re-confirmation)");
 			Assert::IsTrue(o.event == LatchEvent::Released && (o.reasonBits & kReasonLatchRelease) != 0);
 			Assert::AreEqual(static_cast<uint64_t>(1), latch.Counters().releasesAtCut);
 			Assert::AreEqual(static_cast<uint64_t>(1), latch.Counters().releases);
@@ -579,6 +580,7 @@ namespace Tests
 			}
 			Assert::IsTrue(LatchSettings().deferStarvation, L"deferral is the default of the rules");
 			Assert::AreEqual(3.0, LatchSettings().deferDwellSec, 1e-12);
+			Assert::AreEqual(1, LatchSettings().deferDwellExtraEvaluations);
 			Assert::AreEqual(60.0, LatchSettings().deferCeilingSec, 1e-12);
 		}
 
@@ -599,7 +601,8 @@ namespace Tests
 			Assert::IsTrue(a.Deferred() && a.Dwelling(), L"the bound's own boundary opens the dwell");
 			const int64_t at = t - 1;
 			Assert::IsTrue(a.Step(Quiet(at + 2, 0.0, true)).latched);
-			Assert::IsFalse(a.Step(Quiet(at + 3, 0.0, true)).latched, L"released 3 s after the bound evaluation");
+			Assert::IsTrue(a.Step(Quiet(at + 3, 0.0, true)).latched, L"N2: the dwell's end (3 s) is not yet the release");
+			Assert::IsFalse(a.Step(Quiet(at + 4, 0.0, true)).latched, L"released one evaluation after the 3 s dwell from the bound evaluation");
 			Assert::AreEqual(static_cast<uint64_t>(1), a.Counters().releasesAtCut);
 
 			UpscaleLatch b(On());
@@ -610,6 +613,106 @@ namespace Tests
 			const LatchOutput o = b.Step(Quiet(t + 5, 10.0, true));   // new evidence of the latched size, no boundary yet
 			Assert::IsTrue(o.latched && o.confirmed && o.deferCancelled && !b.Deferred());
 			Assert::AreEqual(static_cast<uint64_t>(1), b.Counters().deferCancelled);
+		}
+
+		// N2 (LOW-a): every new shot inside the dwell restarts it (the release does not land inside the next of a run of short shots);
+		// restarts stop once the ceiling (60 s after the bound) has passed, so cuts every 2 s still release, at the cut's dwell end.
+		TEST_METHOD(ASecondCutInsideTheDwellRestartsItAndTheCeilingEndsTheRestarts)
+		{
+			using namespace SafetyFx;
+			auto deferredAt = [](UpscaleLatch& l) {
+				l.Step(Pair1080(0, 40.0, 40.0));
+				int64_t t = 1;
+				for (; t <= 70 && !l.Deferred(); ++t)
+					l.Step(Quiet(t, 0.0, true));
+				return l.Deferred() ? t - 1 : -1;
+			};
+			auto cutAt = [](int64_t t) {
+				LatchInput in = Quiet(t, 0.0, true);
+				in.shotBoundary = true;
+				return in;
+			};
+			{
+				UpscaleLatch l(On());
+				const int64_t d = deferredAt(l);
+				Assert::IsTrue(d > 0 && !l.Dwelling());
+				Assert::IsTrue(l.Step(cutAt(d + 1)).latched && l.Dwelling(), L"the first cut opens the dwell");
+				Assert::IsTrue(l.Step(Quiet(d + 2, 0.0, true)).latched);
+				Assert::IsTrue(l.Step(cutAt(d + 3)).latched, L"a second cut 2 s into the dwell restarts it");
+				// Without the restart: dwell end d+4, release d+5. With it: dwell end d+3+3 = d+6, release one evaluation later, d+7.
+				for (int64_t t = d + 4; t <= d + 6; ++t)
+					Assert::IsTrue(l.Step(Quiet(t, 0.0, true)).latched, (L"held in the restarted dwell (t = d + " + std::to_wstring(t - d) + L")").c_str());
+				const LatchOutput o = l.Step(Quiet(d + 7, 0.0, true));
+				Assert::IsTrue(!o.latched && o.event == LatchEvent::Released, L"released at the restarted dwell's end + one evaluation");
+				Assert::AreEqual(static_cast<uint64_t>(1), l.Counters().releasesAtCut);
+			}
+			{
+				UpscaleLatch l(On());
+				const int64_t d = deferredAt(l);
+				int64_t releasedAt = -1;
+				LatchOutput o;
+				for (int64_t t = d + 2; t <= d + 120 && releasedAt < 0; ++t)
+				{
+					o = l.Step((t - d) % 2 == 0 ? cutAt(t) : Quiet(t, 0.0, true));   // a cut every 2 s from d + 2: no dwell ever completes
+					if (!o.latched)
+						releasedAt = t;
+				}
+				// The last restart is the cut at d + 58 (58 < 60); the cut at d + 60 comes after the ceiling (60 >= 60) and is ignored, so
+				// the dwell from d + 58 ends at d + 61 and releases one evaluation later: d + 62, at a cut's dwell (not the ceiling).
+				Assert::IsTrue(releasedAt == d + 62, (L"released by the last pre-ceiling dwell; at d + " + std::to_wstring(releasedAt - d)).c_str());
+				Assert::IsTrue(o.event == LatchEvent::Released);
+				Assert::AreEqual(static_cast<uint64_t>(1), l.Counters().releasesAtCut);
+				Assert::AreEqual(static_cast<uint64_t>(0), l.Counters().releasesCeiling);
+			}
+		}
+
+		// N1 / N2: a backward source-time step (L5) during a deferral re-anchors the ceiling and an open dwell to the new time.
+		TEST_METHOD(ABackwardStepDuringADeferralReanchorsTheCeilingAndTheDwell)
+		{
+			using namespace SafetyFx;
+			auto deferredAt = [](UpscaleLatch& l) {
+				l.Step(Pair1080(0, 40.0, 40.0));
+				int64_t t = 1;
+				for (; t <= 70 && !l.Deferred(); ++t)
+					l.Step(Quiet(t, 0.0, true));
+				return l.Deferred() ? t - 1 : -1;
+			};
+			{
+				// No boundary: the ceiling runs from the step-back time b. Without the re-anchor it would run from d (60 s before d + 60,
+				// which source time reaches only 90 s after b = d - 30).
+				UpscaleLatch l(On());
+				const int64_t d = deferredAt(l);
+				Assert::IsTrue(d > 30);
+				Assert::IsTrue(l.Step(Quiet(d + 5, 0.0, true)).latched);
+				const int64_t b = d - 30;
+				Assert::IsTrue(l.Step(Quiet(b, 0.0, true)).latched && l.Deferred(), L"the backward step keeps the deferral");
+				int64_t at = -1;
+				LatchOutput o;
+				for (int64_t t = b + 1; t <= b + 120 && at < 0; ++t)
+				{
+					o = l.Step(Quiet(t, 0.0, true));
+					if (!o.latched)
+						at = t;
+				}
+				Assert::IsTrue(at == b + 60, (L"the ceiling 60 s after the re-anchored time; at b + " + std::to_wstring(at - b)).c_str());
+				Assert::IsTrue(o.event == LatchEvent::ReleasedCeiling);
+			}
+			{
+				// An open dwell: the cut at d + 1 opens it; the step back to b = d - 20 re-anchors it, so it ends at b + 3 and releases at b + 4
+				// (without the re-anchor the dwell would not reach 3 s until d + 4 = b + 24).
+				UpscaleLatch l(On());
+				const int64_t d = deferredAt(l);
+				LatchInput cut = Quiet(d + 1, 0.0, true);
+				cut.shotBoundary = true;
+				Assert::IsTrue(l.Step(cut).latched && l.Dwelling());
+				const int64_t b = d - 20;
+				Assert::IsTrue(l.Step(Quiet(b, 0.0, true)).latched && l.Dwelling(), L"the backward step keeps the open dwell");
+				for (int64_t t = b + 1; t <= b + 3; ++t)
+					Assert::IsTrue(l.Step(Quiet(t, 0.0, true)).latched);
+				const LatchOutput o = l.Step(Quiet(b + 4, 0.0, true));
+				Assert::IsTrue(!o.latched && o.event == LatchEvent::Released, L"released at the re-anchored dwell's end + one evaluation");
+				Assert::AreEqual(static_cast<uint64_t>(1), l.Counters().releasesAtCut);
+			}
 		}
 
 		// R5b: through no-evidence stretches the release clock runs at 1/4 speed, but 120 s without confirmation always releases.

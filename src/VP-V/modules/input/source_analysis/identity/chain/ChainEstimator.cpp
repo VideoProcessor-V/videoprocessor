@@ -120,7 +120,7 @@ namespace SourceIdentity
 			std::atomic<uint64_t> streamKeyA{ 0 };
 			std::atomic<bool> haveKeyA{ false };
 			std::atomic<uint64_t> cEvaluations{ 0 }, cDelivered{ 0 }, cDropped{ 0 }, cRepeats{ 0 }, cNoClock{ 0 }, cUnusable{ 0 },
-				cStale{ 0 }, cDiscontinuities{ 0 }, cWindowClears{ 0 };
+				cStale{ 0 }, cDiscontinuities{ 0 }, cWindowClears{ 0 }, cFadeShots{ 0 };
 			std::atomic<uint64_t> cLatchEntries{ 0 }, cLatchMoves{ 0 }, cLatchReleases{ 0 }, cLatchRelBound{ 0 }, cLatchRelNative{ 0 }, cLatchRelMenu{ 0 },
 				cLatchRelAbr{ 0 }, cLatchRelReset{ 0 }, cLatchHeldBack{ 0 }, cLatchNonConv{ 0 }, cLatchConfirms{ 0 }, cLatchRelHard{ 0 },
 				cLatchDeferred{ 0 }, cLatchDeferCancelled{ 0 }, cLatchRelAtCut{ 0 }, cLatchRelCeiling{ 0 };
@@ -158,6 +158,11 @@ namespace SourceIdentity
 			bool haveArea = false;
 			LineRect lastActive;
 			uint32_t shotId = 0;
+			// SID r2 N2 (F1): with the safety rules on, a black or fade evaluation without a cut also starts a new evidence shot, at most one
+			// per minimum shot dwell after the previous shot start (a run of black frames never splits one shot into many capped shots).
+			bool haveShotStart = false;
+			int64_t shotStartUs = 0;
+			bool shotStartedNow = false;   // this evaluation started a new evidence shot (a cut, or the F1 black / fade): the latch's boundary
 			uint64_t discontinuities = 0, geometryGen = 0, appliedGen = 0;
 			int64_t lastTimeUs = 0;
 			uint64_t lastSeq = 0;
@@ -926,6 +931,9 @@ namespace SourceIdentity
 				probeVerifier->ClearCache();
 				gov.Reset();
 				shotId = 0;
+				haveShotStart = false;
+				shotStartUs = 0;
+				shotStartedNow = false;
 				discontinuities = 0;
 				geometryGen = 0;
 				appliedGen = 0;
@@ -1374,7 +1382,7 @@ namespace SourceIdentity
 				in.menuHold = (flags & (kEvMenuHold | kEvClearWindow)) != 0u || (run[0].have && run[0].up.hold) || (run[1].have && run[1].up.hold);
 				in.abrStep = (flags & kEvAbrStep) != 0u;
 				in.nativeBoth = nat[0] && nat[1];
-				in.shotBoundary = (flags & (kEvCut | kEvBlank | kEvFade)) != 0u;   // N1: a deferred starvation release's moment
+				in.shotBoundary = shotStartedNow;   // N1 / N2: a new evidence shot (a cut, or a rate-limited black / fade, F1) starts the dwell
 				in.havePair = conf[0] && conf[1] && !(nat[0] && nat[1]);
 				if (in.havePair)
 				{
@@ -1468,6 +1476,26 @@ namespace SourceIdentity
 				}
 				const int cutsNow = s.cuts > 0 ? s.cuts : ((flags & kEvCut) != 0u ? 1 : 0);
 				shotId += static_cast<uint32_t>(cutsNow);
+				shotStartedNow = cutsNow > 0;
+				if (!shotStartedNow && safetyOn && (flags & (kEvBlank | kEvFade)) != 0u)
+				{
+					// N2 (F1): a black / fade with no cut is a visible transition: a new evidence shot, so a true upscale can re-confirm in
+					// the scene after it (and a deferred starvation release waits for that shot's dwell, ChainLatch N1). Rate-limited to
+					// one per minimum shot dwell since the previous shot start (a backward time step re-anchors).
+					const double minDwell = cfg.evidence.minShotDwellSec > 0.0 ? cfg.evidence.minShotDwellSec : kMinShotDwellSec;
+					const int64_t since = s.timeUs - shotStartUs;
+					if (!haveShotStart || since < 0 || static_cast<double>(since) / 1e6 >= minDwell)
+					{
+						++shotId;
+						shotStartedNow = true;
+						cFadeShots.fetch_add(1, std::memory_order_relaxed);
+					}
+				}
+				if (shotStartedNow)
+				{
+					haveShotStart = true;
+					shotStartUs = s.timeUs;
+				}
 				// Revert window: the evidence window (both axes, as a resync reset does without the reset record) is cleared BEFORE this evaluation
 				// on a ClearWindow event (the monitor: the end of a menu / mixed episode, the first cut after one) and at the first cut after a HOLD
 				// evaluation of this estimator (ChainEvidence::NoteCut). Black frames and ordinary cuts do not clear. The reading is a pure function
@@ -1808,6 +1836,7 @@ namespace SourceIdentity
 				c.latch.deferCancelled = cLatchDeferCancelled.load(std::memory_order_relaxed);
 				c.latch.releasesAtCut = cLatchRelAtCut.load(std::memory_order_relaxed);
 				c.latch.releasesCeiling = cLatchRelCeiling.load(std::memory_order_relaxed);
+				c.fadeShots = cFadeShots.load(std::memory_order_relaxed);
 				return c;
 			}
 

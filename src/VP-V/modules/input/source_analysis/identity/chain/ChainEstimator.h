@@ -112,6 +112,7 @@ namespace SourceIdentity
 			uint64_t stale = 0;              // queued jobs of an earlier era / a stopped estimator
 			uint64_t discontinuities = 0;    // resets
 			uint64_t windowClears = 0;       // evidence-window clears (ClearWindow events consumed, first cut after a HOLD): no reset record
+			uint64_t fadeShots = 0;          // SID r2 N2 (F1): evidence shots started by a black / fade without a cut (safety rules on only)
 			LatchCounters latch;             // SID r2: latch entries / moves / releases by cause, held back, non-conventional (zero while the rules are off)
 		};
 
