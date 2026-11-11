@@ -273,6 +273,7 @@ namespace CameraModel
 			double gain = 1, offset = 0, sigma = o.minScaleCodes;
 			bool done = false, degenerate = false;
 			int iterations = 0;
+			double lastStep = 0;
 			for (int pass = 0;; ++pass)
 			{
 				// Residuals r = gain * T + offset - I(W(x; p)) and the robust sigma (1.4826 x median |r|).
@@ -370,6 +371,7 @@ namespace CameraModel
 					break;
 				}
 				const double step = MaxCornerDifference(next, p, pic) * diag;
+				lastStep = step;
 				p = next;
 				if (o.fadeTerms)
 				{
@@ -380,6 +382,7 @@ namespace CameraModel
 				done = !(step > o.convergeLumaPx * s) || iterations >= std::max(1, o.maxIterations);
 			}
 			res.iterations = iterations;
+			res.lastStepPx = lastStep;
 			res.robustSigma = sigma;
 			if (degenerate || IsDegenerate(p, pic) || !IsFiniteBits(gain) || !IsFiniteBits(offset))
 			{

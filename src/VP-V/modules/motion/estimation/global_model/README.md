@@ -315,13 +315,32 @@ mean Huber cost before / after on the same pixels and sigma, correction in sourc
 
 - Inputs: the producer's engine luma of frames N-1 (template) and N, 8-bit (`HalfLuma8` / quarter buffer) or R16 (P1 half
   luma, `codeScale` 255/65535); `sourcePxPerPixel` 2 (half) or 4 (quarter); the record's `BlockData` labels via `MaskOf`
-  (Camera and not excluded only; an empty label array = no mask, `maskUsed` false). Never shrinks the input (doc 91 D).
+  (Camera and not excluded only; an empty label array = no mask, `maskUsed` false).
+- Resolution per case (this CPU reference): 1080 sources refine on the 8-bit half luma (960x540, s = 2); 4K sources on
+  the 8-bit QUARTER luma (960x540, s = 4) or, in the R16 path, the P1 half luma (1920x1080, s = 2); always on a subset of
+  at most `targetPixels` (50k) strongest-gradient pixels.
+- Resolution decision (OWNER, 2026-11-11 about 15:30, supersedes coordinator call R3-RES 14:58): the refinement resolution
+  is a MEASURED choice, not fixed at native. The GPU form is measured at quarter, half and full resolution (bias and EPE
+  on the acceptance rows, ms per resolution) and uses the CHEAPEST resolution that meets the accuracy target (<= 0.02
+  source px at 1080, <= 0.04 at 4K); full only if measurably better (doc 91 D tail). It becomes a named setting whose
+  default is that cheapest passing resolution. Owner's reason: the quarter-size reference already reaches about 0.02 px
+  at 4K; the vector-fit bias comes from NVOF's quantised vectors, not from the resolution. This CPU reference's half /
+  quarter input is therefore within the decision, recorded here for traceability (an audit had flagged the earlier text
+  "never shrinks the input" as inaccurate).
 - Method: inverse-compositional Gauss-Newton (template gradients and Jacobian once), Translation models 2 parameters,
   every other type a 4-parameter similarity correction composed onto the model (`W(p) <- W(p) o W(d)^-1`, type kept),
   plus photometric gain/offset (`RefineOptions::fadeTerms`). Pixels: the `targetPixels` (50k) strongest-gradient inlier pixels,
   chosen by a gradient-bin threshold with ties in raster order (deterministic). Huber weights (1.345 robust sigma,
   sigma = 1.4826 median |r|, floor 0.5 code), Keys bicubic sampling of frame N without clamping (a tap outside the plane
   drops the pixel), at most `maxIterations` (4) steps, stop when no corner moves more than 0.001 engine px.
+  `RefineResult::lastStepPx` reports the last step (source px); the tests require it below the bias target (0.02 source
+  px at 1080, 0.04 at 4K), so a run that ends on the iteration cap has stopped moving at the accuracy that matters.
+  Most test runs end on the cap (4): the last step is 0.0003-0.004 source px, just above the 0.001 engine-px stop rule,
+  which sits at the step noise of Huber re-weighting on 8-bit codes; that motion is 10-100x below the bias target.
+- Real content (`RealTextureKnownShift`, opt-in by `VP_R3_REAL_GRAY` / `_W` / `_H`): one real luma frame cropped at
+  integer source-px offsets and box-downscaled, so the truth is exact and the phase sub-pixel. 2026-11-11: Meridian 4K
+  s 2 bias -0.003 / -0.002 (max 0.004), s 4 bias -0.001 / +0.013 (max 0.045); Tears of Steel 1920x800 s 2 bias 0.0007 /
+  0.0002 (max 0.001) source px. Real clips have no camera truth finer than about 0.5 px (tools/camera_eval).
 - Verified fall-back: the input model (gain 1, offset 0) is returned unless the final mean Huber cost is lower than the
   input model's on the same pixels by `minImprovement` (1e-6 relative); also on a correction above `maxCorrectionLumaPx`
   (1 engine px, the sub-pixel basin), gain outside [0.5, 2], or a degenerate system. The status says which

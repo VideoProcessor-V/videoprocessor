@@ -13,6 +13,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <fstream>
+#include <string>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -178,7 +181,7 @@ namespace VideoProcessorTest
 			return L;
 		}
 
-		struct PanStats { double meanX = 0, meanY = 0, maxAbs = 0; int refined = 0, pairs = 0; };
+		struct PanStats { double meanX = 0, meanY = 0, maxAbs = 0, maxLastStep = 0; int refined = 0, pairs = 0, maxIter = 0; };
 
 		// A pan of `pairs` pairs: frame k is the texture shifted by k * t; pair k = (frame k, frame k + 1); the model starts
 		// at t + err. Errors are measured in source px.
@@ -201,6 +204,8 @@ namespace VideoProcessorTest
 				st.meanX += ex;
 				st.meanY += ey;
 				st.maxAbs = std::max(st.maxAbs, std::max(std::fabs(ex), std::fabs(ey)));
+				st.maxIter = std::max(st.maxIter, r.iterations);
+				st.maxLastStep = std::max(st.maxLastStep, r.lastStepPx);
 				if (r.status == RefineStatus::Refined)
 					++st.refined;
 				++st.pairs;
@@ -213,6 +218,52 @@ namespace VideoProcessorTest
 		void Log(const char* text)
 		{
 			Logger::WriteMessage(text);
+		}
+
+		// Convergence (audit SHOULD 3): never more than maxIterations steps, and the last step moves no corner by more than
+		// `limit` source px (the bias target), so the iteration cap does not cut off a solution still moving at that scale.
+		void CheckConvergence(const char* name, int maxIter, double maxLastStep, double limit)
+		{
+			char msg[200];
+			std::snprintf(msg, sizeof(msg), "%s convergence: max iterations %d (cap %d), max last step %.5f source px (limit %.3f)\n", name, maxIter,
+				RefineOptions().maxIterations, maxLastStep, limit);
+			Log(msg);
+			Assert::IsTrue(maxIter >= 1 && maxIter <= RefineOptions().maxIterations, L"iterations outside 1..maxIterations");
+			Assert::IsTrue(maxLastStep <= limit, L"last Gauss-Newton step above the bias target");
+		}
+
+		// Box-downscale (integer factor s) of an 8-bit full-resolution plane from crop origin (ox, oy), cw x ch source px,
+		// plus deterministic uniform noise of +-noiseAmp codes; the producer's box convention (pixel centre s*(i + 0.5)).
+		std::vector<uint8_t> BoxCrop(const std::vector<uint8_t>& full, int fullW, int ox, int oy, int cw, int ch, int s, uint64_t noiseSeed, double noiseAmp)
+		{
+			const int w = cw / s, h = ch / s;
+			std::vector<uint8_t> o(static_cast<size_t>(w) * h);
+			for (int j = 0; j < h; ++j)
+				for (int i = 0; i < w; ++i)
+				{
+					double sum = 0;
+					for (int b = 0; b < s; ++b)
+						for (int a = 0; a < s; ++a)
+							sum += full[static_cast<size_t>(oy + j * s + b) * fullW + (ox + i * s + a)];
+					const size_t idx = static_cast<size_t>(j) * w + i;
+					const uint32_t hv = Hash(noiseSeed * 0x100000001B3ull + idx);
+					const double v = sum / (s * s) + noiseAmp * ((hv & 0xFFFFu) / 32767.5 - 1.0);
+					o[idx] = static_cast<uint8_t>(std::min(255.0, std::max(0.0, std::floor(v + 0.5))));
+				}
+			return o;
+		}
+
+		std::string EnvText(const char* n)
+		{
+			char* v = nullptr;
+			size_t sz = 0;
+			std::string out;
+			if (_dupenv_s(&v, &sz, n) == 0 && v)
+			{
+				out = v;
+				free(v);
+			}
+			return out;
 		}
 	}
 
@@ -229,6 +280,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual(st.pairs, st.refined);
 			Assert::IsTrue(std::fabs(st.meanX) <= 0.02 && std::fabs(st.meanY) <= 0.02, L"1080 bias above 0.02 source px");
 			Assert::IsTrue(st.maxAbs <= 0.05, L"1080 per-pair error above 0.05 source px");
+			CheckConvergence("1080 pan", st.maxIter, st.maxLastStep, 0.02);
 		}
 
 		TEST_METHOD(Pan4KQuarterAlternatingPhaseBias)
@@ -241,6 +293,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual(st.pairs, st.refined);
 			Assert::IsTrue(std::fabs(st.meanX) <= 0.04 && std::fabs(st.meanY) <= 0.04, L"4K bias above 0.04 source px");
 			Assert::IsTrue(st.maxAbs <= 0.1, L"4K per-pair error above 0.1 source px");
+			CheckConvergence("4K pan", st.maxIter, st.maxLastStep, 0.04);
 		}
 
 		TEST_METHOD(DiagonalPanBothAxes)
@@ -252,6 +305,7 @@ namespace VideoProcessorTest
 			Log(msg);
 			Assert::AreEqual(st.pairs, st.refined);
 			Assert::IsTrue(std::fabs(st.meanX) <= 0.02 && std::fabs(st.meanY) <= 0.02);
+			CheckConvergence("diagonal pan", st.maxIter, st.maxLastStep, 0.02);
 		}
 
 		TEST_METHOD(FadePanGainOffset)
@@ -317,6 +371,10 @@ namespace VideoProcessorTest
 			Assert::IsFalse(unmasked.maskUsed);
 			Assert::IsTrue(masked.status == RefineStatus::Refined);
 			Assert::IsTrue(std::fabs(masked.model.h[2] - tx) <= 0.02 && std::fabs(masked.model.h[5]) <= 0.02);
+			// The labels matter (audit SHOULD 6): without the mask the mover pulls the fit further from the camera truth.
+			const double errMasked = std::max(std::fabs(masked.model.h[2] - tx), std::fabs(masked.model.h[5]));
+			const double errUnmasked = std::max(std::fabs(unmasked.model.h[2] - tx), std::fabs(unmasked.model.h[5]));
+			Assert::IsTrue(errUnmasked > errMasked, L"unmasked error not above masked error");
 		}
 
 		TEST_METHOD(SimilarityAndAffineKeepType)
@@ -474,8 +532,9 @@ namespace VideoProcessorTest
 			// ms per call (median of 5) at 1080 half luma (960x540, s 2), 4K quarter luma (960x540, s 4) and 4K R16 half
 			// luma (1920x1080, s 2). QUALITY 2 plausibility: ns per unit of work (one selection pixel, or one sampled
 			// pixel-iteration counted as 16 taps), must lie in a sane CPU band.
-			struct Case { const char* name; int frameW, frameH; double s; bool r16; };
-			const Case cases[3] = { { "1080 half 8-bit", 1920, 1080, 2.0, false }, { "4K quarter 8-bit", 3840, 2160, 4.0, false }, { "4K half R16", 3840, 2160, 2.0, true } };
+			struct Case { const char* name; int frameW, frameH; double s; bool r16; double stepLimit; };
+			const Case cases[3] = { { "1080 half 8-bit", 1920, 1080, 2.0, false, 0.02 }, { "4K quarter 8-bit", 3840, 2160, 4.0, false, 0.04 },
+				{ "4K half R16", 3840, 2160, 2.0, true, 0.04 } };
 			for (int ci = 0; ci < 3; ++ci)
 			{
 				const Case& cs = cases[ci];
@@ -516,11 +575,76 @@ namespace VideoProcessorTest
 				const double work = static_cast<double>(w) * h + static_cast<double>(r.pixels) * (r.iterations + 1) * 16.0;
 				const double nsPerUnit = med * 1e6 / work;
 				char msg[256];
-				std::snprintf(msg, sizeof(msg), "cost %s: %.2f ms/call (median of 5; min %.2f max %.2f), %u px, %d it, %s, %.2f ns/unit\n", cs.name, med, ms[0], ms[4],
-					r.pixels, r.iterations, RefineStatusText(r.status), nsPerUnit);
+				std::snprintf(msg, sizeof(msg), "cost %s: %.2f ms/call (median of 5; min %.2f max %.2f), %u px, %d it (last step %.5f source px), %s, %.2f ns/unit\n",
+					cs.name, med, ms[0], ms[4], r.pixels, r.iterations, r.lastStepPx, RefineStatusText(r.status), nsPerUnit);
 				Log(msg);
 				Assert::IsTrue(r.status == RefineStatus::Refined);
 				Assert::IsTrue(nsPerUnit > 0.05 && nsPerUnit < 100.0, L"cost outside the plausible CPU band");
+				CheckConvergence(cs.name, r.iterations, r.lastStepPx, cs.stepLimit);
+			}
+		}
+
+		TEST_METHOD(RealTextureKnownShift)
+		{
+			// Audit SHOULD 5: real picture texture with exact motion. One real full-resolution luma frame (8-bit raw, path in
+			// VP_R3_REAL_GRAY, size in VP_R3_REAL_W / VP_R3_REAL_H) is cropped at two origins that differ by an integer number of
+			// source px and box-downscaled to the engine scale s (2 and, for frames >= 3000 wide, 4), so the engine-scale motion
+			// has sub-pixel phase (shift / s) and exact truth; +-1 code independent noise per frame. Real clips have no camera
+			// truth finer than about 0.5 px in tools/camera_eval (DIS / NVOF agreement), so this is the finest real-content check.
+			// Without the variables the test logs that it did not run and passes (no repository test data).
+			const std::string path = EnvText("VP_R3_REAL_GRAY");
+			const int fullW = std::atoi(EnvText("VP_R3_REAL_W").c_str()), fullH = std::atoi(EnvText("VP_R3_REAL_H").c_str());
+			if (path.empty() || fullW <= 0 || fullH <= 0)
+			{
+				Log("real texture: VP_R3_REAL_GRAY / _W / _H not set, not run\n");
+				return;
+			}
+			std::vector<uint8_t> full(static_cast<size_t>(fullW) * fullH);
+			{
+				std::ifstream in(path, std::ios::binary);
+				Assert::IsTrue(static_cast<bool>(in), L"real texture file not readable");
+				in.read(reinterpret_cast<char*>(full.data()), static_cast<std::streamsize>(full.size()));
+				Assert::IsTrue(in.gcount() == static_cast<std::streamsize>(full.size()), L"real texture file shorter than W x H");
+			}
+			const double limit = fullW >= 3000 ? 0.04 : 0.02;
+			const int margin = 16;
+			const int shifts[6][2] = { { 3, 1 }, { 5, -2 }, { 7, 3 }, { -2, 5 }, { 1, -3 }, { 6, 2 } };
+			for (int si = 0; si < 2; ++si)
+			{
+				const int s = si == 0 ? 2 : 4;
+				if (s == 4 && fullW < 3000)
+					continue;
+				const int cw = (fullW - 2 * margin) / s * s, ch = (fullH - 2 * margin) / s * s;
+				const Rect pic = Pic(cw, ch);
+				double meanX = 0, meanY = 0, maxAbs = 0, maxLast = 0, before = 0, after = 0;
+				int refined = 0, maxIt = 0;
+				for (int k = 0; k < 6; ++k)
+				{
+					const int sx = shifts[k][0], sy = shifts[k][1];
+					// B(x) = A(x - shift): B's crop origin is A's minus the shift.
+					const std::vector<uint8_t> A = BoxCrop(full, fullW, margin, margin, cw, ch, s, 900 + 2 * k, 1.0);
+					const std::vector<uint8_t> B = BoxCrop(full, fullW, margin - sx, margin - sy, cw, ch, s, 901 + 2 * k, 1.0);
+					const RefineResult r = PhotometricRefine(Translation(sx + 0.4 * s, sy - 0.3 * s), View8(A, B, cw / s, ch / s, s), pic, InlierMask());
+					const double ex = r.model.h[2] - sx, ey = r.model.h[5] - sy;
+					meanX += ex;
+					meanY += ey;
+					maxAbs = std::max(maxAbs, std::max(std::fabs(ex), std::fabs(ey)));
+					maxLast = std::max(maxLast, r.lastStepPx);
+					maxIt = std::max(maxIt, r.iterations);
+					before += r.residualBefore;
+					after += r.residualAfter;
+					if (r.status == RefineStatus::Refined)
+						++refined;
+				}
+				meanX /= 6;
+				meanY /= 6;
+				char msg[320];
+				std::snprintf(msg, sizeof(msg), "real texture %dx%d s %d: refined %d/6, bias x %.4f y %.4f, max |err| %.4f source px, mean cost %.2f -> %.2f\n",
+					fullW, fullH, s, refined, meanX, meanY, maxAbs, before / 6, after / 6);
+				Log(msg);
+				Assert::AreEqual(6, refined);
+				Assert::IsTrue(std::fabs(meanX) <= limit && std::fabs(meanY) <= limit, L"real-texture bias above the target");
+				CheckConvergence("real texture", maxIt, maxLast, limit);
 			}
 		}
 	};

@@ -104,6 +104,7 @@ namespace CameraModel
 		double robustSigma = 0;                     // codes, the final iteration's
 		double correctionPx = 0;                    // largest corner / centre displacement change of the candidate vs the input, source px
 		int iterations = 0;                         // Gauss-Newton steps taken
+		double lastStepPx = 0;                      // largest corner move of the last Gauss-Newton step, source px (convergence check)
 		uint32_t candidates = 0;                    // gradient pixels in the inlier blocks
 		uint32_t pixels = 0;                        // pixels used (<= targetPixels)
 		bool maskUsed = false;
