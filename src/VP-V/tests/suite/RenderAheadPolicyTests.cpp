@@ -4,6 +4,7 @@
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 #include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
+#include <VP-V/modules/input/queue_timing/VpFixedBudgetPolicy.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
@@ -2614,6 +2615,50 @@ namespace RenderAheadPolicyTest
 			const BudgetDecision inside = FitDelayBudget(ps, pd, 4, true, 4, FloorPolicy::RaiseQueue);
 			Assert::AreEqual(size_t(0), inside.raisedQueueFrames);
 			Assert::IsTrue(Presenter::FloorReport(inside, FloorPolicy::RaiseQueue).find("the credit wins") != std::string::npos);
+		}
+
+		// P6-rest audit S1: the two RaiseQueue switches (the queue target's VpFixedBudgetPolicy::SetRaiseQueueForAnalysis and
+		// the budget's Presenter::floorPolicy = RaiseQueue) agree: whenever the budget reports a raised queue the queue
+		// target is that queue, and the reverse; both are capped at the queue's capacity (0 = no cap), and the reported
+		// real delay is the raised queue's.
+		TEST_METHOD(TheTwoRaiseQueueSwitchesAgreeOnTheRaisedQueue)
+		{
+			const double ps = 1.0 / 24.0, pd = 1.0 / 60.0;
+			VpQueueTiming::VpFixedBudgetPolicy policy;
+			policy.SetRaiseQueueForAnalysis(true);
+			Presenter p;
+			p.floorPolicy = FloorPolicy::RaiseQueue;
+			size_t compared = 0, raisedSeen = 0;
+			for (size_t q = 3; q <= 8; ++q)
+				for (size_t floorFrames = 0; floorFrames <= 12; ++floorFrames)
+					for (size_t cap = 0; cap <= 10; ++cap)
+					{
+						if (cap > 0 && cap < q)
+							continue;   // a capacity is never below the desired queue the host clamps to it
+						p.analysisFloor.store(floorFrames);
+						p.queueCapacity.store(cap);
+						const BudgetDecision d = p.FitBudget(ps, pd, q, true);
+						if (d.creditFrames == 0)
+							continue;   // the credit path not taken: no queue decision to compare
+						QueueTimingPolicy::TargetContext c;
+						c.useFrameQueue = true;
+						c.capacity = cap;
+						c.cadenceScaledDepth = q;
+						c.renderAheadCreditFrames = 0;   // the raise compared on the queue the floor holds
+						c.lookaheadFloor = floorFrames;
+						const size_t target = policy.QueueTarget(c);
+						Assert::AreEqual(d.raisedQueueFrames > 0, target > q, L"both raise or neither");
+						if (d.raisedQueueFrames > 0)
+						{
+							Assert::AreEqual(target, d.raisedQueueFrames, L"the same raised queue");
+							Assert::IsTrue(cap == 0 || d.raisedQueueFrames <= cap, L"never above capacity");
+							Assert::AreEqual((double(d.raisedQueueFrames) * ps + PlannedLead(ps, pd)) * 1000.0, d.realTotalMs, 1e-9,
+								L"the real delay is the raised queue's");
+							++raisedSeen;
+						}
+						++compared;
+					}
+			Assert::IsTrue(compared > 100 && raisedSeen > 10, L"the sweep compared raised and unraised cases");
 		}
 
 		// S1 amendment (TD design (b)6): GateCosts' spare-slot GPU ms is additive in the average

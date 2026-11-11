@@ -55,7 +55,9 @@ namespace VpQueueTiming
 
 		// S1 amendment (TD design (a)4/(b)6; RenderAhead::FloorPolicy::RaiseQueue): the look-ahead
 		// floor may raise the queue target above the desired one (up to capacity). Default off:
-		// QueueTarget is CombineQueueTarget exactly. Any thread.
+		// QueueTarget is CombineQueueTarget exactly. Any thread. Set together with RenderAhead::Presenter::floorPolicy =
+		// RaiseQueue (+ queueCapacity): the coupling test TheTwoRaiseQueueSwitchesAgreeOnTheRaisedQueue pins that both
+		// give the same raised queue (P6-rest audit S1).
 		void SetRaiseQueueForAnalysis(bool raise) { m_raiseQueueForAnalysis.store(raise, std::memory_order_relaxed); }
 		bool RaiseQueueForAnalysis() const { return m_raiseQueueForAnalysis.load(std::memory_order_relaxed); }
 

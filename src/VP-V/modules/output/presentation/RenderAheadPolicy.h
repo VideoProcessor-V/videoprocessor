@@ -131,14 +131,16 @@ namespace RenderAhead
 		size_t queueFrames = 0;    // the desired queue (the input)
 		size_t raisedQueueFrames = 0;   // RaiseQueue: the queue the floor takes above the desired one (0 = not raised)
 	};
+	// capacity (P6-rest audit S1): the queue's capacity, 0 = not known (no cap); only RaiseQueue reads it, exactly as
+	// VpQueueRules::CombineQueueTarget(..., raiseAboveDesired, capacity) caps the raised target.
 	inline BudgetDecision FitDelayBudget(double sourcePeriod, double displayPeriod, size_t queueFrames, bool creditOn,
-		size_t floorFrames, FloorPolicy policy);
+		size_t floorFrames, FloorPolicy policy, size_t capacity = 0);
 	inline BudgetDecision FitDelayBudget(double sourcePeriod, double displayPeriod, size_t queueFrames, bool creditOn)
 	{
 		return FitDelayBudget(sourcePeriod, displayPeriod, queueFrames, creditOn, 0, FloorPolicy::CreditWins);
 	}
 	inline BudgetDecision FitDelayBudget(double sourcePeriod, double displayPeriod, size_t queueFrames, bool creditOn,
-		size_t floorFrames, FloorPolicy policy)
+		size_t floorFrames, FloorPolicy policy, size_t capacity)
 	{
 		BudgetDecision d;
 		d.floorFrames = floorFrames;
@@ -154,8 +156,11 @@ namespace RenderAhead
 		const size_t wanted = static_cast<size_t>(std::ceil(lead / sourcePeriod - 1e-9));
 		if (creditOn && queueFrames >= wanted + kBudgetMinQueued)
 		{
-			// The floor the queue keeps (CombineQueueTarget: never above the target, except RaiseQueue).
-			const size_t floorKept = policy == FloorPolicy::RaiseQueue ? floorFrames : (std::min)(floorFrames, queueFrames);
+			// The floor the queue keeps (CombineQueueTarget: never above the target, except RaiseQueue, which is never above
+			// the capacity when it is known and never below today's capped floor; audit S1).
+			const size_t cappedFloor = (std::min)(floorFrames, queueFrames);
+			const size_t raisedFloor = capacity > 0 ? (std::min)(floorFrames, capacity) : floorFrames;
+			const size_t floorKept = policy == FloorPolicy::RaiseQueue ? (std::max)(cappedFloor, raisedFloor) : cappedFloor;
 			if (floorKept > queueFrames)
 				d.raisedQueueFrames = floorKept;
 			size_t credit = wanted;
@@ -1229,6 +1234,10 @@ namespace RenderAhead
 		// the credit (the owner's policy; CreditWins = today).
 		std::atomic<size_t> analysisFloor{ 0 };
 		FloorPolicy floorPolicy = FloorPolicy::CreditWins;
+		// The queue's capacity for RaiseQueue's cap (audit S1; any thread; 0 = not known: no cap). RaiseQueue here must be
+		// set together with VpFixedBudgetPolicy::SetRaiseQueueForAnalysis (the queue target); the coupling test
+		// TheTwoRaiseQueueSwitchesAgreeOnTheRaisedQueue pins that both give the same raised queue.
+		std::atomic<size_t> queueCapacity{ 0 };
 		// The spare-slot GPU ms per source frame a look-ahead user declares (S1 amendment; any
 		// thread; 0 = none): GateCosts::spareSlotMs, added to the gate's average check.
 		std::atomic<double> spareSlotMs{ 0.0 };
@@ -1381,7 +1390,7 @@ namespace RenderAhead
 		BudgetDecision FitBudget(double sourcePeriod, double displayPeriod, size_t queueFrames, bool creditOn) const
 		{
 			return FitDelayBudget(sourcePeriod, displayPeriod, queueFrames, creditOn,
-				analysisFloor.load(std::memory_order_acquire), floorPolicy);
+				analysisFloor.load(std::memory_order_acquire), floorPolicy, queueCapacity.load(std::memory_order_acquire));
 		}
 
 		// The visible line when the floor and the credit compete (both policies; empty when
