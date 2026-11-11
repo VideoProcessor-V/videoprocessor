@@ -35,6 +35,8 @@ void LibplaceboVideoRenderer::Impl::WarmIdleMotionEngine(const VideoFrameFormatt
 	if (estimated && dejudder)
 	{
 		Interpolator::Motion motion;
+		// P5c: the ONE allowed direct read of the matcher's outputs outside the P3 field view (the producer side, inside
+		// motion\estimation: the keeper's own warm-up estimate, the segment just retracted, so the members are the answer).
 		motion.field = dejudder->Field();
 		motion.frameTrust = dejudder->FrameTrust();
 		motion.subField = dejudder->SubField();

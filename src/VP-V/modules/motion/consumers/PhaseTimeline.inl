@@ -81,13 +81,25 @@ void LibplaceboVideoRenderer::Impl::PrepareVpPhasePicture(uint64_t sourceSequenc
 	vpPhaseVectors = vectors;
 	if (vectors)
 	{
-		motion.field = snapshot ? dejudder->SnapField() : dejudder->Field();
-		motion.frameTrust = snapshot ? dejudder->SnapFrameTrust() : dejudder->FrameTrust();
-		motion.subField = snapshot ? dejudder->SnapSubField() : dejudder->SubField();
-		motion.minTrustedShare = dejudder->GetSettings().minTrustedShare;
+		// P5c: the P3 field view (R4 snapshot handle, else R0 live; the validity is decided above).
+		if (snapshot)
+		{
+			const auto snapSet = vectorEstimate.Snapshot();
+			motion.field = snapSet.Field();
+			motion.frameTrust = snapSet.FrameTrust();
+			motion.subField = snapSet.SubField();
+		}
+		else
+		{
+			const VpMotion::P3FieldSet liveSet = vectorEstimate.Live();
+			motion.field = liveSet.field;
+			motion.frameTrust = liveSet.frameTrust;
+			motion.subField = liveSet.subField;
+		}
+		motion.minTrustedShare = vectorEstimate.MinTrustedShare();
 		for (int slot = 0; slot < 2; ++slot)
 			if (dejudderMaskSequence[slot] == nextSourceSequence && motionValidity.Current(dejudderMaskEpoch[slot]))
-				motion.occlusionB = dejudder->Occlusion(slot);
+				motion.occlusionB = vectorEstimate.Occlusion(slot);
 	}
 	// WIP DEBUG (near-black residual, 2026-10-24; VP_DEBUG_PHASE_AB=1 only): are A's and B's raw
 	// planes bit-identical when the source repeats a frame bit-exactly? Logs the differing luma

@@ -73,9 +73,10 @@ bool LibplaceboVideoRenderer::Impl::EntranceOncePhasePicture(const pl_frame& sou
 	// (i) the estimate ahead replaced the live (A, B) field: A's picture reads the snapshot.
 	if (vpPhaseVectors && EntranceOnceSnapshotFor(sequence) && dejudderLiveFieldFrom != sequence)
 	{
-		vpPhaseMotion.field = dejudder->SnapField();
-		vpPhaseMotion.frameTrust = dejudder->SnapFrameTrust();
-		vpPhaseMotion.subField = dejudder->SnapSubField();
+		const auto snapSet = vectorEstimate.Snapshot();   // P5c: R4 of the P3 field view
+		vpPhaseMotion.field = snapSet.Field();
+		vpPhaseMotion.frameTrust = snapSet.FrameTrust();
+		vpPhaseMotion.subField = snapSet.SubField();
 	}
 	if (heldA && !pa->identity) *heldA = pa;
 	if (!pb)

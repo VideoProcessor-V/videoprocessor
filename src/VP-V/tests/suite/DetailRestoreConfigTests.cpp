@@ -6,6 +6,7 @@
 #include <MainConfigSchema.h>
 #include <RendererProfileConfig.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
+#include <VP-V/modules/motion/estimation/EstimateState.h>
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 #include <VP-V/modules/repair/texture_restore/TextureRestore.h>
 
@@ -453,6 +454,36 @@ namespace DetailRestoreConfigTestsNs
 			// Each stage's Apply in the segment (on the drawn picture, and on A before a Stage B
 			// picture) and on a de-judder extra; MeasureAhead once (the look-ahead).
 			Assert::AreEqual(7, calls, L"three Apply calls per stage and one MeasureAhead");
+		}
+
+		// P5c W1-G: the detail pulse / texture restore read the de-judder's live field under rule R1 (DejudderLiveFieldFor), the
+		// debander's condition. Before, the gate lacked the motion_history_fixes clause: with it on, an estimate ahead had moved the
+		// live outputs to the next pair while this frame still showed, and the stages read that pair's field. With it off the rule is
+		// unchanged (the same four conjuncts), so the output is byte-identical.
+		TEST_METHOD(DetailRestoreFieldGateIsTheLiveFieldRuleWithMotionHistoryFixes)
+		{
+			using R = VpMotion::P3Rules;
+			// This frame A = 7 was estimated (estimated sequence 7, current epoch), then the live outputs moved to B (live field from 8).
+			Assert::IsTrue(R::LiveFor(true, 7, 7, true, false, 8), L"motion_history_fixes off: the old gate's answer (the field is used)");
+			Assert::IsFalse(R::LiveFor(true, 7, 7, true, true, 8), L"motion_history_fixes on: not A's live field, no field");
+			Assert::IsTrue(R::LiveFor(true, 7, 7, true, true, 7), L"motion_history_fixes on, A's own live field: used");
+			// The old gate (matcher, estimated == sequence, current epoch, sequence != 0) equals R1 with the fixes off on every input.
+			for (int bits = 0; bits < 32; ++bits)
+			{
+				const bool matcher = (bits & 1) != 0, epoch = (bits & 2) != 0;
+				const uint64_t sequence = (bits & 4) ? 7u : 0u;
+				const uint64_t estimated = (bits & 8) ? sequence : 6u;
+				const uint64_t from = (bits & 16) ? sequence : 9u;
+				const bool oldGate = matcher && estimated == sequence && epoch && sequence != 0;
+				Assert::AreEqual(oldGate, R::LiveFor(matcher, sequence, estimated, epoch, false, from), L"fixes off = the old gate");
+			}
+			// The renderer's block reads the view under R1 and no longer carries the old condition.
+			const std::string text = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
+			Assert::IsFalse(text.empty(), L"the renderer source");
+			Assert::IsTrue(text.find("pl_tex field = vectorEstimate.LiveFor(sourceSequence, activeSettings.motionHistoryFixes).field;") != std::string::npos,
+				L"the detail-restore field gate is R1");
+			Assert::IsTrue(text.find("motionValidity.Current(dejudderEstimatedEpoch) && sourceSequence != 0)") == std::string::npos,
+				L"the old gate is gone");
 		}
 	};
 }
