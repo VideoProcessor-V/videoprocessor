@@ -15,7 +15,7 @@
 //
 // SELF-CONTAINED: this module never includes ConfigEditorWindow. The host editor reaches it only
 // through Host (below) and two calls, so the hook can be re-applied to a fresh upstream
-// ConfigEditorWindow (M2 rebuild). See src/VP-V/modules/control/config/config_pages/README.md for the exact hook.
+// ConfigEditorWindow (M2 rebuild). See src/VP-V/modules/control/config/README.md (section "Config pages") for the exact hook.
 //
 // While the VP-V pathway is on, upstream controls for the keys VP-V manages are greyed with
 // "Managed by VP-V" (never removed). In Original pathway mode VP-V's tiers and toggles are disabled and the
