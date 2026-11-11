@@ -86,9 +86,7 @@ namespace VpMotion
 		// while a cadence reset zeroes it (DisplayRateHold); the monitor's rate only when
 		// nothing was measured since start or a mode change. Render thread.
 		DisplayRateHold timelineDisplayRateHold;
-
-		// ---- P5b-7 (doc 50 Q4): the `motion-history` reader the de-judder's apply point takes from (R2 on and
-		// registered on the seal only; DejudderHistory.h). Not copyable: the seal's callbacks hold its address. ----
-		VpMotionResync::Readers motionHistory;
+		// W1-C2a MUST 2: the `motion-history` reader the apply point takes from is VectorEngineState::motionResyncReaders
+		// (the readers the resync "motion" provider registers); the separate, never-registered copy here was removed.
 	};
 }

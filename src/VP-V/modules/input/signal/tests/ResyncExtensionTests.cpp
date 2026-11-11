@@ -9,6 +9,7 @@
 #endif
 #include "CppUnitTest.h"
 
+#include <VP-V/core/FallbackStatus.h>
 #include <VP-V/core/FramesInFlight.h>
 #include <VP-V/core/StatusText.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
@@ -329,7 +330,11 @@ namespace Tests
 				ext.OnStatus(c, RE::StatusKind::WorkerFault, none, "resync", "exception");
 				Assert::AreEqual(before + 1, ResyncExtension::ContainedFaults(&r));
 				const std::vector<std::string> fb = StatusLines(ext, &r, RE::StatusKind::Fallbacks);
-				Assert::IsTrue(!fb.empty() && fb[0].compare(0, 13, "resync_fault:") == 0);
+				Assert::IsTrue(!fb.empty() && fb[0].compare(0, 14, "resync_fault (") == 0);
+				// W1-C2a A5: the reason's "; " is inside the parentheses, so the heading parser sees ONE id.
+				const std::vector<std::string> ids = FallbackStatus::Ids(std::string(FallbackStatus::kHeading) + fb[0]);
+				Assert::AreEqual(size_t(1), ids.size());
+				Assert::AreEqual(std::string("resync_fault"), ids[0]);
 				std::string reply;
 				Apply(ext, &r, "off");
 				Assert::IsTrue(ext.OnCommand(c, "resync", "inject full", reply));

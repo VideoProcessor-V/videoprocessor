@@ -232,6 +232,15 @@ namespace VideoProcessorTest
 			Assert::IsTrue(from == 2 && to == 3);
 			Assert::IsTrue(DownloadField(gpu, warp, warp.SnapField()).texels == liveNow.texels, L"the new snapshot is the live pair then");
 			Assert::AreEqual(1ull, state.SnapshotLeaseLostReads());
+			// W1-C2a A2: an epoch move ends the lease on both sides (ApplyMotionInvalidate, every resync mode): the snapshot is gone
+			// and no lost lease is counted (the warp's next read is None, not Lost).
+			warp.InvalidateSnapshot();
+			state.ResetSnapshot();
+			Assert::IsNotNull(warp.SnapField(), L"the member answers");
+			Assert::AreEqual(1ull, state.SnapshotLeaseLostReads(), L"an epoch move is not a lost lease");
+			Assert::IsFalse(state.SnapshotLeaseLost());
+			state.SnapshotPair(from, to);
+			Assert::IsTrue(from == 0 && to == 0, L"the snapshot ended with the epoch");
 			// A recreated matcher does not inherit the old matcher's capture (a fresh binding resets it).
 			Dejudder::MotionWarp second(fixture.Log(), gpu, settings);
 			second.SetFieldSource(&state);

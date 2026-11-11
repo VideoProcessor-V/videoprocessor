@@ -11,6 +11,7 @@
 #include <VP-V/core/PassTimerInbox.h>
 #include <VP-V/core/ProductCatalog.h>
 #include <VP-V/core/VramUsers.h>
+#include <VP-V/modules/motion/estimation/MotionValidity.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/motion/estimation/longpair/LongPairService.h>
 #include <VP-V/modules/motion/estimation/longpair/NvOpticalFlowHinted.h>
@@ -322,6 +323,40 @@ namespace VideoProcessorTest
 			Assert::IsTrue(got, L"the worker finished the pair");
 			Assert::IsTrue(r.ok && r.ticket == t && r.path == Path::SeededSearch);
 			Assert::IsFalse(svc.TryTake(t, r), L"a result is taken once");
+		}
+
+		// W1-C2a A7 (doc 88 gap 6): the resync contract the wiring must keep (README "Resync contract").
+		TEST_METHOD(EpochSourceRefusesAPairAcrossAnEpochMove)
+		{
+			const int w = 48, h = 32;
+			std::vector<uint8_t> a, b;
+			Frames(w, h, 4.0, 0.0, a, b);
+			Service svc(CpuOnly());
+			Assert::IsFalse(svc.EpochSourceBound());
+			MotionValidity::State validity;
+			svc.SetEpochSource(&validity);
+			Assert::IsTrue(svc.EpochSourceBound());
+			auto waitStored = [&](uint64_t n) {
+				for (int i = 0; i < 400 && svc.GetStats().stored < n; ++i)
+					std::this_thread::sleep_for(std::chrono::milliseconds(25));
+				Assert::AreEqual(n, svc.GetStats().stored, L"the worker finished the pair");
+			};
+			const uint64_t t1 = svc.SubmitLongPair(a.data(), b.data(), w, h, nullptr);
+			Assert::IsTrue(t1 > 0);
+			waitStored(1);
+			validity.Invalidate(MotionValidity::Cause::Seek);   // unbound: the epoch moves at once
+			Result r;
+			Assert::IsFalse(svc.TryTake(t1, r), L"a pair submitted before the epoch moved is refused");
+			Assert::AreEqual(1ull, svc.GetStats().staleEpoch);
+			Assert::IsFalse(svc.TryTake(t1, r), L"and dropped, not kept");
+			const uint64_t t2 = svc.SubmitLongPair(a.data(), b.data(), w, h, nullptr);
+			waitStored(2);
+			Assert::IsTrue(svc.TryTake(t2, r), L"a pair of the current epoch is served");
+			Assert::IsTrue(r.ok && r.epoch == validity.Epoch());
+			Assert::AreEqual(0ull, svc.GetStats().withoutEpochSource);
+			svc.SetEpochSource(nullptr);
+			Assert::IsTrue(svc.SubmitLongPair(a.data(), b.data(), w, h, nullptr) > 0);
+			Assert::AreEqual(1ull, svc.GetStats().withoutEpochSource, L"an unbound submit is counted");
 		}
 
 		TEST_METHOD(BadInputsAreRefusedAndCounted)

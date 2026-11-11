@@ -73,6 +73,10 @@ namespace Vpv
 			int motionAheadFrames = 0;
 			uint64_t lastSealedSeq = 0;
 			uint64_t lastInjectSeq = 0;
+			// W1-C2a A1: the "motion" provider. motionReadersOn = the era the motion readers were registered on (the vector engine's
+			// own readers); motionBound = the engine's validity is bound to it now (off unbinds; on again over the same era rebinds).
+			std::weak_ptr<VpIndicator::Indicator> motionReadersOn;
+			bool motionBound = false;
 
 			// Capture thread only (the pulldown runs in OnVideoFrame before the frame is queued).
 			VpResync::Drive::Cursor pulldownCursor;
@@ -89,6 +93,10 @@ namespace Vpv
 			std::atomic<unsigned> sealLateProviders{ 0 };
 			std::atomic<unsigned> sealRejectedReaders{ 0 };
 			std::atomic<unsigned long long> injectUnavailable{ 0 };
+			// W1-C2a A1 (writer: the "motion" provider, render thread; readers: status). Eras that started with no vector engine for
+			// this host (motion stays unbound for that era: immediate epochs), and whether the current era is one of them.
+			std::atomic<unsigned long long> motionNoEngine{ 0 };
+			std::atomic<bool> motionNoEngineNow{ false };
 
 			// Source seconds of recently enqueued frames, by sequence (single writer: the ingress, under the
 			// renderer's queue mutex; reader: the render thread at the seal). A slot whose sequence does not

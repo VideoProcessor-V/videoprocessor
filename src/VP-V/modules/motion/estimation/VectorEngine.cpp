@@ -313,7 +313,7 @@ namespace VpMotion
 			from = sequence;
 			to = nextSequence;
 			if (nextSequence == sequence + 1 &&
-				motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
+				motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))   // W1-C2a A1 / S2
 				flow = P2().Find(from, to);
 			NoteGlobalPair(flow != nullptr);
 		}
@@ -322,7 +322,7 @@ namespace VpMotion
 			{
 				from = sequence - 1 - age;
 				to = sequence - age;
-				if (motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
+				if (motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))   // W1-C2a A1 / S2
 					flow = P2().Find(from, to);
 			}
 		// SK-MV row 24: the frame-analysis record carries the shared engine's global, or "absent" (never a stale value). The store is
@@ -345,7 +345,8 @@ namespace VpMotion
 			flow->global[0][2], flow->global[0][3], facts.pictureHeight);
 		if (recordStore)
 			MotionRecord::Publish(recordStore, to, MotionRecord::SummaryOf(
-				motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()), from, to, flow->global[0], halvings));
+				motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()), from, to,
+				flow->global[0], halvings));   // W1-C2a A1 / S2
 		if (g.usable && vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan))
 			host.NoteSourceMonitorMotion(g.sourcePixels, to);
 		if (vectorDemand.Serves(VectorDemand::Consumer::MotionIntent) && host.IntentActive())
@@ -507,6 +508,35 @@ namespace VpMotion
 			else
 				engine.motionValidity.Invalidate(cause);
 		});
+	}
+
+	bool VectorEngine::RegisterResyncFor(const void* host, const std::shared_ptr<VpIndicator::Indicator>& indicator)
+	{
+		if (!host)
+			return false;
+		return Engines().WithEngine(host, [&](VectorEngine& engine) {
+			VpMotionResync::RegisterOn(indicator, engine.motionValidity, engine.motionResyncReaders);
+		});
+	}
+
+	bool VectorEngine::BindResyncFor(const void* host, const std::shared_ptr<VpIndicator::Indicator>& indicator)
+	{
+		if (!host)
+			return false;
+		return Engines().WithEngine(host, [&](VectorEngine& engine) {
+			if (indicator)
+				engine.motionValidity.Bind(indicator);
+			else
+				engine.motionValidity.Unbind();
+		});
+	}
+
+	bool VectorEngine::ResyncBoundFor(const void* host)
+	{
+		bool bound = false;
+		if (host)
+			Engines().WithEngine(host, [&](VectorEngine& engine) { bound = engine.motionValidity.Driven(); });
+		return bound;
 	}
 
 	bool VectorEngine::ReleaseProducerFor(const void* host)
@@ -689,7 +719,7 @@ namespace VpMotion
 			return absent(flowReads_.noPair);
 		const uint64_t from = seq - 1, to = seq;
 		// The one vectors-valid state decides first: a pair across a resync / gap / format change is never served.
-		if (!motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()) || !motionValidity.PairValidAt(from, to))
+		if (!motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))   // W1-C2a S2
 			return absent(flowReads_.invalidated);
 		// The shared pointer is copied out of the slot before anything can Prune it: from here the pair cannot be freed under us.
 		const MotionAhead::FlowPtr flow = P2().Find(from, to);

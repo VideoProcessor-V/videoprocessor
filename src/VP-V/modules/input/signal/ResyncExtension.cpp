@@ -10,6 +10,7 @@
 
 #include <VP-V/core/FramesInFlight.h>
 #include <VP-V/modules/input/signal/ResyncCallSites.h>
+#include <VP-V/modules/motion/estimation/VectorEngine.h>
 
 #include <algorithm>
 #include <chrono>
@@ -89,6 +90,22 @@ namespace Vpv
 			// The one seal (G3): providers in order, then subscribers in order. Render thread only.
 			seal.AddProvider("resync-drive", [this](const std::shared_ptr<VpIndicator::Indicator>& ind) { drive.RegisterOn(ind); });
 			seal.AddProvider(VpDvResync::Reader::kName, [this](const std::shared_ptr<VpIndicator::Indicator>& ind) { dv.RegisterOn(ind); });
+			// W1-C2a A1 (doc 88 gap 1): motion joins the coordinator. The engine's MotionValidity::State is bound to this era's
+			// Indicator and its motion readers registered (RegisterOn, shared_ptr form): pairs spanning a FULL are refused by
+			// PairValidAt and the deferred causes move the epoch at the seal. Runs only inside Seal, i.e. only while `on`.
+			// SetVectorsRequired stays false: no vector consumer reports OnVectorsValid yet.
+			seal.AddProvider("motion", [this](const std::shared_ptr<VpIndicator::Indicator>& ind)
+				{
+					motionBound = VpMotion::VectorEngine::RegisterResyncFor(host, ind) && ind != nullptr;
+					if (motionBound)
+						motionReadersOn = ind;
+					else
+					{
+						motionReadersOn.reset();
+						motionNoEngine.fetch_add(1, std::memory_order_relaxed);
+					}
+					motionNoEngineNow.store(!motionBound, std::memory_order_relaxed);
+				});
 			seal.Subscribe("resync-drive", [this](const std::shared_ptr<VpIndicator::Indicator>& ind, uint64_t seq, VpIndicator::CounterMask changed)
 				{ drive.OnObserved(ind, seq, changed); });
 			// The DV reader acts inside the seal, before the FULL is known to the metrics: its acts are
@@ -234,7 +251,12 @@ namespace Vpv
 				// Frames in flight: queue capacity + motion look-ahead + render-ahead 2 + this frame (as before).
 				h->shadow.Configure(h->mode, FramesInFlight(capacity, static_cast<size_t>((std::max)(0, h->motionAheadFrames)), 0, 2, 0));
 				if (!h->shadow.Driving())
+				{
 					h->drive.Detach();   // R3: the readers' pending changes are dropped when not `on`
+					if (h->motionBound)   // W1-C2a A1: off again: the motion epoch is immediate again (never deferred to a seal that will not come)
+						VpMotion::VectorEngine::BindResyncFor(h->host, nullptr);
+					h->motionBound = false;
+				}
 				break;
 			}
 			case RE::Lifecycle::StateRefused:
@@ -358,6 +380,14 @@ namespace Vpv
 				h->shadow.Configure(h->mode, FramesInFlight(capacity, static_cast<size_t>((std::max)(0, h->motionAheadFrames)), 0, 2, 0));
 			}
 
+			// W1-C2a A1: `on` again over the era the motion readers were registered on (FrameSeal runs providers only on a new era):
+			// bind the engine's validity again. A new era binds in the provider.
+			if (!h->motionBound)
+			{
+				const std::shared_ptr<VpIndicator::Indicator> readersOn = h->motionReadersOn.lock();
+				if (readersOn && readersOn == h->seal.Current() && readersOn == h->shadow.GetIndicator())
+					h->motionBound = VpMotion::VectorEngine::BindResyncFor(h->host, readersOn);
+			}
 			const uint32_t erasBefore = h->seal.Eras();
 			h->seal.Seal(h->shadow.GetIndicator(), seq);
 			if (seq != 0)
@@ -403,7 +433,7 @@ namespace Vpv
 				// Visible in every mode (no silent fallbacks): contained throws, and a renderer left without state.
 				const unsigned long long faults = ContainedFaults(ctx.host);
 				if (faults != 0)
-					lines.push_back("resync_fault: " + std::to_string(faults) + " resync callback exception(s) contained; resync may be incomplete");
+					lines.push_back("resync_fault (" + std::to_string(faults) + " resync callback exception(s) contained; resync may be incomplete)");   // W1-C2a A5: one FallbackStatus id
 				if (Overflows().load(std::memory_order_relaxed) != 0 && ctx.host && !For(ctx.host))
 					lines.push_back("resync_host_table: no resync state for this renderer (host table full); resync is off");
 			}
@@ -423,6 +453,9 @@ namespace Vpv
 						if (!h->driveStatus.empty())
 							events += " | " + h->driveStatus;
 					}
+					const unsigned long long noEngine = h->motionNoEngine.load(std::memory_order_relaxed);
+					if (h->shadow.Driving() && noEngine != 0)
+						events += " | motion: " + std::to_string(noEngine) + " era(s) with no vector engine";
 					const std::string inject = h->inject.StatusText();
 					if (!inject.empty())
 					{
@@ -444,6 +477,10 @@ namespace Vpv
 					h->sealLateProviders.load(std::memory_order_relaxed), h->sealRejectedReaders.load(std::memory_order_relaxed));
 				if (sealFallback.engaged)
 					lines.push_back(sealFallback.id + ": " + sealFallback.reason);
+				// W1-C2a A1: an era with no vector engine leaves motion out of the coordinator (no silent fallbacks). One FallbackStatus id.
+				if (h->motionNoEngineNow.load(std::memory_order_relaxed))
+					lines.push_back("resync_motion: no vector engine for this renderer at the era start; motion epochs immediate until the next era (" +
+						std::to_string(h->motionNoEngine.load(std::memory_order_relaxed)) + " era(s) so far)");
 			}
 		}
 

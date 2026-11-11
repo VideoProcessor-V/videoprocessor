@@ -69,6 +69,8 @@ namespace CameraLink
 		uint8_t RebuildGraph(double sourcePeriodSeconds, bool deterministic);
 		// A discontinuity (seek, resync, field era change): stored plans, wanted pairs and holds are dropped.
 		void OnDiscontinuity();
+		// Discontinuities taken since construction (render thread; diagnostics and the W1-C2a A6 injection test).
+		uint64_t Discontinuities() const { return m_discontinuities; }
 		void OnFrame();
 
 		std::vector<FallbackCatalog::Decision> CollectDecisions() const { return m_sched.CollectDecisions(); }
@@ -92,5 +94,6 @@ namespace CameraLink
 		GuideLaneJob m_job;
 		MotionBenchWriter m_bench;
 		bool m_hooked = false;
+		uint64_t m_discontinuities = 0;
 	};
 }

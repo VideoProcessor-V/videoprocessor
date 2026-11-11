@@ -108,6 +108,7 @@ namespace Vpv
 			std::unique_ptr<CameraLink::CameraLabelProducer> labelProducer;
 			std::unique_ptr<CameraLink::CameraLabelFill> labelFill;
 			std::unique_ptr<CameraLink::CameraGuidanceAdapter> adapter;
+			uint64_t adapterEra = 0;   // W1-C2a A3: the engine's validity epoch (FieldEra) the adapter last saw (0 = none yet)
 
 			uint64_t frames = 0;
 			std::chrono::steady_clock::time_point lastDump;
@@ -655,7 +656,16 @@ namespace Vpv
 				}
 				st.core->OnFrameStart(facts);
 				if (st.adapter)
+				{
+					// W1-C2a A3 (resync_event on only: DriveFrame returns above while not Driving): the epoch ApplyMotionInvalidate
+					// consumes moved (resync, seek, gap, format or settings change): the guidance lane forgets its pass before this
+					// frame's poll (CameraGuidanceAdapter::OnDiscontinuity). Off: the adapter is not driven here (today's path).
+					const uint64_t era = engine->FieldEra();
+					if (st.adapterEra != 0 && era != st.adapterEra)
+						st.adapter->OnDiscontinuity();
+					st.adapterEra = era;
 					st.adapter->OnFrame();
+				}
 				if (st.labelFill)
 					st.labelFill->OnFrameStart(st.lane.NextFloor());
 				return;

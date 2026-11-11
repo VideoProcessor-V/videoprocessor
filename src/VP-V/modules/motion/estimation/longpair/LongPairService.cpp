@@ -6,6 +6,7 @@
 
 #include <VP-V/core/PassTimerInbox.h>
 #include <VP-V/core/VramUsers.h>
+#include <VP-V/modules/motion/estimation/MotionValidity.h>
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -25,6 +26,7 @@ namespace VpLongPair
 		int w = 0, h = 0;
 		bool hasHint = false;
 		HintField hint;
+		uint64_t epoch = 0;   // W1-C2a A7: the epoch source's epoch at submit
 	};
 
 	struct Service::Impl
@@ -47,6 +49,7 @@ namespace VpLongPair
 		std::mutex backendMutex;
 		ISeededBackend* backend = nullptr;
 		CComPtr<IDXGIAdapter> adapter;       // guarded by mutex; null = SetAdapter not called (the NVOF session refuses to run)
+		const MotionValidity::State* epochSource = nullptr;   // guarded by mutex (W1-C2a A7)
 
 		// GPU state, guarded by execMutex (the worker and RunNow share it).
 		std::mutex execMutex;
@@ -354,6 +357,7 @@ namespace VpLongPair
 					queue.pop_front();
 				}
 				Result res = Process(r);
+				res.epoch = r.epoch;
 				const uint64_t ticket = res.ticket;
 				std::lock_guard<std::mutex> lock(mutex);
 				results[ticket] = std::move(res);
@@ -464,6 +468,10 @@ namespace VpLongPair
 			}
 			ticket = impl->nextTicket++;
 			r.ticket = ticket;
+			if (impl->epochSource)
+				r.epoch = impl->epochSource->Epoch();
+			else
+				++impl->stats.withoutEpochSource;
 			impl->queue.push_back(std::move(r));
 		}
 		impl->wake.notify_one();
@@ -476,10 +484,27 @@ namespace VpLongPair
 		auto it = impl->results.find(ticket);
 		if (it == impl->results.end())
 			return false;
-		out = std::move(it->second);
+		// W1-C2a A7: a pair submitted before the epoch moved spans the discontinuity: refused (counted), never served.
+		const bool stale = impl->epochSource && it->second.epoch != impl->epochSource->Epoch();
+		if (stale)
+			++impl->stats.staleEpoch;
+		else
+			out = std::move(it->second);
 		impl->results.erase(it);
 		impl->resultOrder.erase(std::remove(impl->resultOrder.begin(), impl->resultOrder.end(), ticket), impl->resultOrder.end());
-		return true;
+		return !stale;
+	}
+
+	void Service::SetEpochSource(const MotionValidity::State* validity)
+	{
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		impl->epochSource = validity;
+	}
+
+	bool Service::EpochSourceBound() const
+	{
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		return impl->epochSource != nullptr;
 	}
 
 	Result Service::RunNow(const uint8_t* lumaA, const uint8_t* lumaB, int w, int h, const HintField* hint)

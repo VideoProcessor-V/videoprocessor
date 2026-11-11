@@ -90,6 +90,7 @@ namespace CameraLink
 	{
 		m_sched.ResetForDiscontinuity();   // bumps the epoch first: a lane pass mid-compute cannot store afterwards
 		m_job.Reset();
+		++m_discontinuities;
 	}
 
 	void CameraGuidanceAdapter::OnFrame()

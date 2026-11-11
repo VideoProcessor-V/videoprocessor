@@ -16,6 +16,7 @@
 
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/motion/estimation/MotionValidity.h>
+#include <VP-V/modules/motion/estimation/MotionResyncReaders.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <VP-V/modules/motion/estimation/MotionSegment.h>
@@ -123,6 +124,9 @@ namespace VpMotion
 		// (ApplyMotionInvalidate) and every vector consumer checks the epoch its vectors were made in.
 		MotionValidity::State motionValidity;
 		uint64_t motionValiditySeen = MotionValidity::State::kInitialEpoch;   // render thread
+		// W1-C2a A1: the motion readers the resync "motion" provider registers on each era's Indicator (VectorEngine::RegisterResyncFor).
+		// Declared after motionValidity (its callbacks hold both addresses; the Indicator's owner, the host's Shadow, goes first).
+		VpMotionResync::Readers motionResyncReaders;
 		// S0 motion segment, SHADOW step (P-b1, 2026-10-24 draft): it shares motionValidity, records every live
 		// estimate and withdraws it where the host clears dejudderLiveFieldFrom. Mismatches are counted and
 		// logged; nothing is delivered from it yet, so pixels are unchanged.

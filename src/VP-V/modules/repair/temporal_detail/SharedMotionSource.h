@@ -84,7 +84,7 @@ namespace TemporalDetail
 			if (seq == 0)
 				return Absent(m_stats.absent, "no previous frame");
 			const uint64_t from = seq - 1, to = seq;
-			if (m_validity && !m_validity->PairValid(from, to, m_validity->EpochOfLastKept(), m_validity->Epoch()))
+			if (m_validity && !m_validity->PairServes(from, to, m_validity->EpochOfLastKept(), m_validity->Epoch()))   // W1-C2a A1 / S2
 				return Absent(m_stats.stale, "the vectors-valid state moved (a resync, a gap or a settings change)");
 			const MotionAhead::FlowPtr flow = m_view.Find(from, to);
 			if (!flow)
