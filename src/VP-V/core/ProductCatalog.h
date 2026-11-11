@@ -133,7 +133,7 @@ inline const std::vector<ProductRow>& ProductRows()
         { kP8CameraLabels, "motion/estimation/global_model", kExpectedCameraUnit, "camera label pass" },
         { kP9CameraSmoothed, "motion/estimation/global_model", kExpectedCameraUnit, "camera smoothing (CPU)" },
         { kP10GrainSplit, "repair/grain_split", kExpectedGrainSplitUnit, "grain split pass" },
-        // P10c: RESERVED, NO PRODUCER (C17, doc 93 section 2 D4): declared, never registered as a lane job (SkeletonModule.cpp registers P10/P11/P12
+        // P10c: RESERVED, NO PRODUCER (C17, doc 93 section 2 D4): declared, never registered as a lane job (modules/control/skeleton/SkeletonModule.cpp registers P10/P11/P12
         // only) and never live-filled; made real by C10. A reader of P10c finds it absent and takes its classical form (visible).
         { kP10cGrainSplitChroma, "repair/grain_split", kExpectedGrainSplitUnit, "reserved (no producer: built with C10)" },
         { kP11RegionBlockStats, "input/source_analysis/regions", kExpectedRegionUnit, "region block statistics pass" },
@@ -558,19 +558,19 @@ inline const std::vector<ProductFlag>& ProductFlags()
 {
     static const std::vector<ProductFlag> flags = {
         // D1: P2 / P2m / P3 keep their P1 declaration; they read their own half-luma copies until C9 makes it true (doc 93 section 2 D1).
-        { kP2VectorPair, kP1HalfLuma, FlagKind::NotYetConsumed, "C9", "reads its own half-luma copy (producer HalfLuma8); Products.h P2 declaration kept" },
-        { kP2mMatcherPair, kP1HalfLuma, FlagKind::NotYetConsumed, "C9", "reads the matcher's own Downsample copies; Products.h P2m declaration kept" },
-        { kP3AnalysisField, kP1HalfLuma, FlagKind::NotYetConsumed, "C9", "reads the matcher's own inner pyramids; Products.h P3 declaration kept" },
+        { kP2VectorPair, kP1HalfLuma, FlagKind::NotYetConsumed, "C9", "reads its own half-luma copy (producer HalfLuma8); core/Products.h P2 declaration kept" },
+        { kP2mMatcherPair, kP1HalfLuma, FlagKind::NotYetConsumed, "C9", "reads the matcher's own Downsample copies; core/Products.h P2m declaration kept" },
+        { kP3AnalysisField, kP1HalfLuma, FlagKind::NotYetConsumed, "C9", "reads the matcher's own inner pyramids; core/Products.h P3 declaration kept" },
         // D2: P10 declares P13 and reads the lane's extended TAP (the one GPU luma of the frame), not the ring planes.
         { kP10GrainSplit, kP13SourceRing, FlagKind::ViewIsActual, "C9b",
-          "actual input = the lane tap view (LaneGpuProducts.cpp UploadTapRows: SourceFrameView luma uploaded to the tap texture)" },
+          "actual input = the lane tap view (modules/input/source_analysis/lane/LaneGpuProducts.cpp UploadTapRows: SourceFrameView luma uploaded to the tap texture)" },
         // D4: P10c has no producer.
-        { kP10cGrainSplitChroma, kNoProduct, FlagKind::Reserved, "C10", "no lane job (SkeletonModule.cpp registers P10/P11/P12 only), no live fill" },
+        { kP10cGrainSplitChroma, kNoProduct, FlagKind::Reserved, "C10", "no lane job (modules/control/skeleton/SkeletonModule.cpp registers P10/P11/P12 only), no live fill" },
         // P14g: its producing evaluation takes its pixels from the source-frame tap sink, P5 is the monitor snapshot it declares.
         { kSourceGeometry, kP5MonitorTiles, FlagKind::ViewIsActual, "C9b",
-          "pixel evidence = the SourceFrameTap view (identity/chain/ChainEstimator.cpp UpdateTap); P5 stays the declared monitor snapshot" },
+          "pixel evidence = the SourceFrameTap view (modules/input/source_analysis/identity/chain/ChainEstimator.cpp UpdateTap); P5 stays the declared monitor snapshot" },
         // D3: P7 reads P2 through IVectorEngine::FlowOf (pair id recorded) and declares only P4 (by design).
-        { kP7CameraFit, kP2VectorPair, FlagKind::ExternalView, "C3", "external view: P2 via FlowOf (CameraExtension.cpp ahead fit); pair id recorded, not a declared input" },
+        { kP7CameraFit, kP2VectorPair, FlagKind::ExternalView, "C3", "external view: P2 via FlowOf (modules/motion/estimation/global_model/link/CameraExtension.cpp ahead fit); pair id recorded, not a declared input" },
     };
     return flags;
 }
@@ -578,7 +578,7 @@ inline const std::vector<ProductFlag>& ProductFlags()
 inline const std::vector<ConsumerFlag>& ConsumerFlags()
 {
     static const std::vector<ConsumerFlag> flags = {
-        // D4: DetailPulse / TextureRestore are catalogued as P10 / P11 / P4 readers but read none (DetailPulse.cpp, TextureRestore.cpp:
+        // D4: DetailPulse / TextureRestore are catalogued as P10 / P11 / P4 readers but read none (modules/repair/texture_restore/DetailPulse.cpp, TextureRestore.cpp:
         // private bands / tiles and private cut-fade logic, host scalar params); the declarations stay, the code is made to read them by C10 / C7.
         { uint16_t(kCatalogConsumerIdBase + 0), kP10GrainSplit, FlagKind::NotRead, "C10", "private bands (DetailPulse.h)" },
         { uint16_t(kCatalogConsumerIdBase + 0), kP11RegionBlockStats, FlagKind::NotRead, "C10", "private 32-px tiles" },

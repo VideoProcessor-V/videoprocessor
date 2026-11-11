@@ -710,10 +710,12 @@ namespace ProductCatalogTestsNs
 			Assert::IsTrue(ConsumerFlags().size() == dpTr);
 
 			// 5. The flags carry teeth: the NotRead claim is checked against the sources. If DetailPulse / TextureRestore start to reference a
-			// skeleton product, the flag is stale and must be removed (C10 / C7 made it true).
+			// skeleton product (any product alias, the product header, the analysis store or the lane producers), the flag is stale and must be
+			// removed (C10 / C7 made it true). The other flags (P2 / P2m / P3 -> P1 not yet consumed, P10 -> P13 view, P14g -> P5 view, P7 -> P2
+			// external view) stay human-pinned: they are counted and cross-checked against the registry above, but no scan proves them.
 			namespace fs = std::filesystem;
 			const std::string dir = SettingsTestSupport::RepoRoot() + "src\\VP-V\\modules\\repair\\texture_restore\\";
-			const std::regex reads("\\bk(P10GrainSplit|P11RegionBlockStats|P4SourceStats)\\b|\\bGrainSplit::|RegionEvidence|SourceStats\\.h|LaneGpuProducts|LaneCpuProducts");
+			const std::regex reads("\\bk(P10|P11|P4)\\w*|\\bGrainSplit::|RegionEvidence|SourceStats\\.h|LaneGpuProducts|LaneCpuProducts|LaneProducts|Products\\.h|FrameAnalysisStore|\\bProductId\\b");
 			for (const char* name : { "DetailPulse.h", "DetailPulse.cpp", "TextureRestore.h", "TextureRestore.cpp" }) {
 				const std::string path = dir + name;
 				Assert::IsTrue(fs::exists(path), L"the DetailPulse / TextureRestore sources exist where the flag says");

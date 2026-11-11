@@ -4,11 +4,12 @@ The product graph of the VP-V skeleton: what is made once, who makes it, who rea
 
 ## How to read
 
-The generated region holds three tables:
+The generated region holds four tables:
 
 - **Products.** One row per declared product: id, name, backend, history depth, tier, residency, producing unit and unit version, lane producer, live-fill owner and consumers.
 - **Consumers.** One row per consumer, in pathway order (input, motion, repair, scaling, colour, drive, output; inside a unit, render order), with the products it reads and its fallback (kind and FallbackCatalog `product.*` id).
 - **VRAM per tier.** The declared bytes of the products for each tier at 1080p, 4K and 8K. Decimal MB. These are declared/estimated, not measured.
+- **Declared vs actually read.** The additive flags where a declaration and the code differ today (not yet consumed, view is the actual input, external view, reserved with no producer, declared but not read), with the work item that makes each true. These flags do not change a declaration.
 
 The declaration is split in three files, each with one job:
 
