@@ -16,6 +16,17 @@ Quantise last for output links/displays of limited bit depth (8- or 10-bit): tem
 
 ## Settings
 
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `shaders.cinema_only` | shader rule section [shader.<name>] (per rule) | bool | true, false | false | not exposed in Config (cfg only) | Bill's custom hook entries; cinema_only is VP's addition | libplacebo backend only (custom GLSL hook rules): true skips the hook in the Low_Latency queue; a value that is not true/false marks the rule invalid. | not tiered |
+| `dither_need` | profile (draft, header-only) | enum | off, auto (case-insensitive; other values give an error and off) | off | none yet (cfg only) | n/a (VP-only) | declared (draft, DitherNeed::Parse only, not read by the host): auto adds extra sigma-delta amplitude only where the grain does not dither the link and one link step is visible; off = today's amplitude. | not tiered |
+| `dither_grain_tolerance_scale` | profile ([vprenderer.Default] and matching profiles) | float | 1.0 - 8.0 | 3 | VP-V > Output > Advanced > Temporal dither: tuning | n/a (VP-only): unchanged by the Original pathway | The sigma-delta's motion-match tolerance is multiplied by this on grain (1 = off), keeping the averaging alive on grain | same on all (not tiered) |
+| `dither_vectors` | profile ([vprenderer.Default] and matching profiles) | enum | auto, own | auto | VP Renderer > Rendering > Temporal dither | n/a (VP-only): unchanged by the Original pathway | auto = the dither takes the de-judder's motion on in-between pictures; own = it always searches itself. proposed for retirement (group C); status line: motion consumers: <warp failed | same on all (not tiered) |
+| `occlusion_mask` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | VP-V > Output > Main > Temporal dither; also VP Renderer > Rendering > Temporal dither (upstream copy greyed while VP-V is on) | Original pathway sets `off` (ADR-0019) | Tells the sigma-delta where new picture appears so it carries no residual into it (no smears at moving edges); works with dejudder_strength 0 (mask-only mode). status line: dither: libplacebo dither | same on all (not tiered) |
+| `output_segments_merged` | [vpv] (global; also read from the profile) | bool | on, off | off | VP-V > Pipeline (expert) (stored in [vpv]) | Original pathway sets `off` (ADR-0019) | Draft: the S2/S3 output chain as one PRE_OUTPUT and one OUTPUT hook; off until its GPU tolerance gate passes | same on all (not tiered) |
+| `temporal_dither` | profile ([vprenderer.Default] and matching profiles) | enum | auto, off, libplacebo, sigma_delta | auto | VP-V > Output > Advanced > Set by the Output tier | Original pathway sets `libplacebo` (ADR-0019) | The dither as one choice per profile: off, libplacebo's, or VP's temporal sigma-delta (loaded by the renderer itself); auto = the shader list and the dithering setting decide. Spreads steps finer than the output depth over time along the motion (keeps 10-bit smoothness through an 8-bit link) | Output Classic=libplacebo; Output Low=auto; Output Mid=sigma_delta |
+
+
 - Existing keys: `temporal_dither`, `dithering`, `dither_vectors`, `dither_grain_tolerance_scale`
 - Planned keys: (none)
 - Tiers: Classic libplacebo dither; Low..Upper sigma-delta

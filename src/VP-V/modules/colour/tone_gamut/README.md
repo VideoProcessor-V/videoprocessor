@@ -112,6 +112,11 @@ Cost when off: there is no off. Per frame the policy costs a few µs of CPU (ite
 
 ## Settings
 
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `saturation` | profile ([vprenderer.Default] and matching profiles) | int | -100 - 100 | 0 | VP Renderer > Rendering > Tone mapping: Saturation (-100 to +100) | n/a (VP-only): unchanged by the Original pathway | Profile saturation adjustment in percent (0 = none) | same on all (not tiered) |
+
+
 - Existing keys: `tone_mapping`, `gamut_mapping`, `peak_detection`, the tone tuning keys (logged as `tone_mapping_tuning`; see above), and the output-policy keys above
 - Planned keys: `combined_hdr_lut`
 - Tiers: Classic/Low may use the combined LUT; Mid/Upper libplacebo

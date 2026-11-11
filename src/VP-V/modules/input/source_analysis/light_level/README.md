@@ -69,6 +69,14 @@ clips the PQ signal to 1.
 
 ## Settings
 
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `light_level_weber` | not read by the host yet (draft) | float | 0.001 to 0.2 | 0.02 | none yet (cfg only; module is a draft) | n/a (VP-only) | declared (draft): provisional default; relative luminance step the viewer just notices, one visibility unit. | not tiered |
+| `light_level_ambient_nits` | not read by the host yet (draft) | float | 0 to 1000 | 0 | none yet (cfg only; module is a draft) | n/a (VP-only) | declared (draft): provisional default; room light reflected from the screen (nits), added in the visibility denominator. | not tiered |
+| `light_level_display_white_nits` | not read by the host yet (draft) | float | auto, or 1 to 10000 | auto (sdr_target_nits) | none yet (cfg only; module is a draft) | n/a (VP-only) | declared (draft): physical peak white of the display in nits; must exceed the black or both fall back to auto with a note. | not tiered |
+| `light_level_display_black_nits` | not read by the host yet (draft) | float | auto, or 0 to 100 | auto (sdr_black_nits) | none yet (cfg only; module is a draft) | n/a (VP-only) | declared (draft): physical black of the display in nits; must stay below the white or both fall back to auto with a note. | not tiered |
+
+
 VP-owned (`Specs()`): `light_level_weber` (default 0.02, 0.001 to 0.2, provisional), `light_level_ambient_nits`
 (default 0, 0 to 1000, provisional), `light_level_display_white_nits` (`auto` = `sdr_target_nits`, or 1 to 10000,
 provisional) and `light_level_display_black_nits` (`auto` = `sdr_black_nits`, or 0 to 100, provisional); white must

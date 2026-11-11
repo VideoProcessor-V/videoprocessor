@@ -125,6 +125,12 @@ Cost when off: with the factor at 1 (`native`, `auto` reading native, temporal r
 
 ## Settings
 
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `entrance_gpu_drain` | [vpv] (global; also read from the profile) | enum | off, flush, finish | off | VP-V > Pipeline (expert) (stored in [vpv]) | Original pathway sets `off` (ADR-0019) | Expert workaround: after the entrance stages ran on a draw, flush submits the GPU queue and finish waits for it before libplacebo renders, so pictures between frames match plain draws byte for byte (without it libplacebo's scaling passes vary by +-1 of 16 bits on scattered textured pixels). Root cause open | same on all (not tiered) |
+| `rebase_kernel_match` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | VP-V > Scaling > Main > Re-base (your picture slider); also VP Renderer > Rendering > Fixes under test (upstream copy greyed while VP-V is on) | Original pathway sets `off` (ADR-0019) | Kernel-matched re-base: identifies the player's upscale filter and undoes it exactly for an exact 2:1 luma re-base; off = the generic faithful re-base runs when no kernel is identified (opt-in since SID r2). status line: re-base precision: <the re-base's float-intermediate note> | same on all (not tiered) |
+
+
 - Existing keys: `source_resolution`, `rebase_kernel_match`
 - Planned keys: `entrance_rebase`
 - Tiers: Classic off; Low off; Mid/Upper on

@@ -16,6 +16,23 @@ CAM16 Stevens/Hunt appearance matching from reference to dim-screen conditions (
 
 ## Settings
 
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `mode` | [ambient] | enum | off, manual, sensor | off | Config > General page > Room lights card > Room lights | n/a (VP-only) | off: rules see no room state; manual: the room set by room; sensor: a serial light sensor decides, falling back to room without readings. | not tiered |
+| `room` | [ambient] | enum | dark, lit | dark | Config > General page > Room lights card > Room | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | The room in manual mode and the fallback when the sensor is not reporting. | not tiered |
+| `lux_lit` | [ambient] | float | 0 to 100000 | 20 | Config > General page > Room lights card > Lit above (lux) | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | Sensor mode: above this the room is lit. | not tiered |
+| `lux_dark` | [ambient] | float | 0 to 100000 | 8 | Config > General page > Room lights card > Dark below (lux) | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | Sensor mode: below this the room is dark, in between it stays as it was; clamped so it never exceeds lux_lit. | not tiered |
+| `hold_s` | [ambient] | float | 0 to 600 | 5 | Config > General page > Room lights card > Hold (seconds) | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | Sensor mode: a new room state must last this many seconds before it is taken. | not tiered |
+| `port` | [ambient] | string | COM1 to COM256 (sensor mode) | empty | Config > General page > Room lights card > Sensor port | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | The light sensor's own serial port; refused when equal to the projector's port. | not tiered |
+| `baud` | [ambient] | int | 1200 to 921600 | 115200 | Config > General page > Room lights card > Sensor speed (baud) | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | Serial speed of the light sensor. | not tiered |
+| `ambient_adapt` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | VP-V > Colour > Main > Room-light adaptation (experimental); also VP Renderer > Rendering > Experimental content-adaptive settings (upstream copy greyed while VP-V is on) | Original pathway sets `off` (ADR-0019) | Experimental ambient adaptation: renders to the black the room light leaves visible (screen reflection of the room light adds to the display's black), using the [ambient] light sensor (or manual lux_lit), applied at cuts with slow time constants; never moves code 0 or below-black. status line: Appearance: off (shader failed) | same on all (not tiered) |
+| `ambient_adapt_strength` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 1 | VP-V > Colour > Advanced > Room-light adaptation: values | n/a (VP-only): unchanged by the Original pathway | How much of the room light's veil is rendered into the black (0 changes nothing) | same on all (not tiered) |
+| `ambient_max_black_nits` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 10.0 | 1 | VP-V > Colour > Advanced > Room-light adaptation: values | n/a (VP-only): unchanged by the Original pathway | The black level (nits) the adaptation never exceeds | same on all (not tiered) |
+| `ambient_screen_reflect` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 0.01 | VP-V > Colour > Advanced > Room-light adaptation: values | n/a (VP-only): unchanged by the Original pathway | Light the screen reflects back, cd/m2 per lux of room light; effective black = display black + strength x lux x this | same on all (not tiered) |
+| `ambient_tau_down_s` | profile ([vprenderer.Default] and matching profiles) | float | 1.0 - 1800.0 | 90 | VP-V > Colour > Advanced > Room-light adaptation: values | n/a (VP-only): unchanged by the Original pathway | Seconds the target takes to follow a falling room light | same on all (not tiered) |
+| `ambient_tau_up_s` | profile ([vprenderer.Default] and matching profiles) | float | 1.0 - 600.0 | 15 | VP-V > Colour > Advanced > Room-light adaptation: values | n/a (VP-only): unchanged by the Original pathway | Seconds the target takes to follow a rising room light | same on all (not tiered) |
+
+
 - Existing keys: (none)
 - Planned keys: `appearance_adaptation`, `appearance_strength`, `appearance_reference_white_nits`, `appearance_reference_surround`, `appearance_screen_white_nits`, `appearance_screen_surround`
 - Tiers: every tier when on (cost ~0)
