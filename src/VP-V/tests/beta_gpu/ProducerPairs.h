@@ -4,7 +4,7 @@
 // Camera accuracy report (test code only): the REAL MotionAhead producer for the Beta test host (WAIVER-MV-04). After motion unification
 // (SK-MV, owner decision 2026-11-08: ONE motion source) the matcher opens no NVOF engine; the only optical-flow input is the pair the
 // MotionAhead::Producer publishes (P2). This host used to have no producer, so the camera accuracy report could not run its baseline
-// variants ("the optical flow engine did not run") and reproduced the ahead pair with a private engine copy. Now the host links the
+// variants ("the optical flow engine did not run") and reproduced the ahead pair with a private engine copy (AheadPairReplica.h, removed). Now the host links the
 // production MotionAheadProducer.cpp and drives MotionAhead::Producer itself (Start on the render device's adapter, Submit each frame as a
 // P010 AnalysisLumaSource, Take the pair from its P2 slot), and hands the same pair to the de-judder through SetExternalFlow, exactly as the
 // renderer does through the vector engine's P2View. No private motion estimation lives in the test (rule 21).
@@ -37,7 +37,7 @@ namespace CameraAccuracyAhead
 	{
 		double lumaMs = 0;       // half (and quarter) luma on the CPU (the producer's lumaMs)
 		double engineMs = 0;     // upload + engine (both directions) + staging copies + readback (the producer's lastPairMs less luma and extras)
-		double readbackMs = 0;   // included in engineMs: the real producer reports one pair time
+		double readbackMs = 0;   // n/a: always 0 (the real producer reports one pair time; the readback is inside engineMs)
 		double extrasMs = 0;     // FlowGlobal x 2 + FlowExtras (the producer's extrasMs)
 		double PairMs() const { return lumaMs + engineMs + readbackMs + extrasMs; }
 	};
@@ -82,6 +82,8 @@ namespace CameraAccuracyAhead
 			buf.resize(lumaBytes + chromaBytes);   // P010: the luma plane, then the interleaved chroma plane, rows of srcW words
 			std::memcpy(buf.data(), luma.data(), lumaBytes);
 			std::memcpy(buf.data() + lumaBytes, chroma.data(), chromaBytes);
+			// Only data/size/strides/format are set: the producer's half-luma step reads the P010 words (>> 6) directly and ignores range,
+			// encoding and fullRangeYuv (PrepareAnalysisFrame's flags), and the synthetic pans carry one code domain end to end.
 			AnalysisLumaSource source;
 			source.data = buf.data();
 			source.dataBytes = buf.size();
