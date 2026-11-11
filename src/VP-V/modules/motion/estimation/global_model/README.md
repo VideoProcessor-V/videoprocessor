@@ -27,6 +27,7 @@ texture), and to narrow the matcher's search.
 | `StaticHypothesis.h/.cpp` | `EvaluateStaticCamera`: the competing static (identity) camera hypothesis on the border ring (`Config::staticCamera`; Ambiguous + `verdictFlags`, demotes only) |
 | `GlobalModelObjects.h/.cpp` | 1-3 object models with persistent ids (only when `Config::objects`) |
 | `PixelResidualReference.h/.cpp` | CPU reference / shader-mirror spec of the tiny-mover measure (not on the runtime path yet) |
+| `PhotometricRefine.h/.cpp` | R3 direct photometric refinement of the chosen model on the luma pair (CPU reference; inverse-compositional Gauss-Newton + fade terms, inlier blocks, verified fall-back, counters). Not wired yet |
 | `CameraAccessor.h` | per-consumer policy, blend state, `FieldVector` (pure, header-only) |
 | `GlobalModelSearchHints.h/.cpp` | phase-2 matcher hints (data API only, nothing wired) |
 | `GlobalModelMeasurement.h/.cpp` | phase-2 measurement plan: switches, `BuildMeasurementPlan`, verification / escalation, diagnostics, GPU guide texels |
@@ -307,6 +308,41 @@ the guided-matching scheduler, governor and `p7g_camera_guide` product. All of i
 one set shared by `BlendState::ForcesZero` and the guidance gate (Ok, PostCutSeeded, FlashBridged); Ambiguous, InverseMismatch,
 Degenerate, TooFewSamples and LowConfidence records are published for diagnostics and never used.
 
+## Photometric refinement (R3)
+Doc 103 s3 R3: the only model source independent of the NVOF field. `PhotometricRefiner::Refine(model, LumaPairView, picture,
+InlierMask)` polishes the vector fit's chosen model on the PIXELS of the pair and returns `RefineResult` (model, gain/offset,
+mean Huber cost before / after on the same pixels and sigma, correction in source px, iterations, pixels, status).
+
+- Inputs: the producer's engine luma of frames N-1 (template) and N, 8-bit (`HalfLuma8` / quarter buffer) or R16 (P1 half
+  luma, `codeScale` 255/65535); `sourcePxPerPixel` 2 (half) or 4 (quarter); the record's `BlockData` labels via `MaskOf`
+  (Camera and not excluded only; an empty label array = no mask, `maskUsed` false). Never shrinks the input (doc 91 D).
+- Method: inverse-compositional Gauss-Newton (template gradients and Jacobian once), Translation models 2 parameters,
+  every other type a 4-parameter similarity correction composed onto the model (`W(p) <- W(p) o W(d)^-1`, type kept),
+  plus photometric gain/offset (`RefineOptions::fadeTerms`). Pixels: the `targetPixels` (50k) strongest-gradient inlier pixels,
+  chosen by a gradient-bin threshold with ties in raster order (deterministic). Huber weights (1.345 robust sigma,
+  sigma = 1.4826 median |r|, floor 0.5 code), Keys bicubic sampling of frame N without clamping (a tap outside the plane
+  drops the pixel), at most `maxIterations` (4) steps, stop when no corner moves more than 0.001 engine px.
+- Verified fall-back: the input model (gain 1, offset 0) is returned unless the final mean Huber cost is lower than the
+  input model's on the same pixels by `minImprovement` (1e-6 relative); also on a correction above `maxCorrectionLumaPx`
+  (1 engine px, the sub-pixel basin), gain outside [0.5, 2], or a degenerate system. The status says which
+  (`RefineStatusText`).
+- Counters (`PhotometricRefiner::Counters()`): refined / fell back / skipped no luma / skipped other. They are the
+  visible R3 status lines once wired (not wired yet: the fit worker holds no luma; the camfix integration plumbs the
+  producer's luma pair to the worker and adds the status line).
+- Determinism: single thread, fixed order, double accumulation, no clocks; the scratch buffers are cost only. Byte-equal
+  repeat runs are a test.
+- Cost (CPU, laptop, `PhotometricRefineTests::CostLine`, median of 5): see the TRX `cost ...` lines; recorded in the
+  commit and the lane hand-back.
+
+INPUT SCAN (rules 24/25). Read before writing: `PixelResidualReference.h/.cpp` (per-block residual shares from float luma
+under a frozen shader-mirror spec; measures, never refines: extended would disturb that spec, so a new unit), `GlobalModelFit.h`
+(`PairInput`, `Config`, `Fitter`, `BlockData` use; warm start and stop rule), `GlobalModelGeometry.h/.cpp` (reused: `Compose`,
+`Invert`, `MaxCornerDifference`, `IsDegenerate`, `SplitMix64`), `CameraMotion.h` (conventions, `Apply`, `Rect`, labels),
+`MotionAheadProducer.cpp` (`HalfLuma8` 2x2 box and the quarter 2x2 box of it: the pixel-centre convention used here),
+`link/AheadFlow.h` (`AheadCopy` carries no luma: the plumbing is open), `core/Products.h` P1 (R16 half luma), `CameraProducts.h`
+(P7/P8/P9 consumers). No existing photometric / direct alignment code in the estimation module; the matcher's sub-pixel
+refine works per block on vectors, not on the global model.
+
 ## Settings
 
 The fitter's own options are `Config` fields set by the tests and `tools/camera_eval`. Camera K3 added the `[vpv.camera]` keys (switches only, all off; table in `../README.md` Settings, parser `link/CameraSettings.h`). Config placement for the keys that exist (`camera_link`, `analysis_lane`): see `control/skeleton/README.md`. "Original (Bill)" = the Original pathway builds no camera link (`camera_link` off).
@@ -325,6 +361,8 @@ The fitter's own options are `Config` fields set by the tests and `tools/camera_
 | `Config::staticCfg.rel` | internal | float | 0..1 | 0.05 | none (internal) | not built | none | same on every tier |
 | `Config::staticCfg.requireMotion` | internal | bool | false, true | true | none (internal) | not built | none | same on every tier |
 | `Config::dynTextureCfg` (minShare, minTemporal, minSpatial, agreeRatio, absSigmas, rel, minBlocks, minCompared) | internal | numbers | 0.5 / 0.6 / 0.5 / 0.5 / 3 / 0.05 / 64 / 48 | as listed | none (internal) | not built | none | none |
+
+| `RefineOptions` (R3; internal; no key) | internal | struct | see `PhotometricRefine.h` | as listed there | none (internal) | not built | fall-back returns the input model, status + counters | same on every tier |
 
 Tiers: the fit is cheap CPU work and is not tiered (cost lines `CAMERA_COST`).
 
