@@ -4,7 +4,7 @@
 // Camera link (K4-3): the per-pair refusal gate of the guided matcher, as ONE pure function. BuildGuide() (lane and live)
 // calls it, so the two can never disagree about whether a pair is guided. Reasons, in the order they are judged:
 //   AllOff         every measurement switch is off: nothing is bound, today's matcher runs, byte-identical
-//   NoRecord       P7(N-d) is not there ("camera record late")
+//   NotOnTime      camera(N) = P7(N) is not ready in time for the matcher of N (d = 0; the cause is counted by the scheduler)
 //   Slip           the pair spans a drop / repeat / resync, or the stamp of the record is ancient
 //   NotUsable      !Usable(record): the D-K4 verdict set (Ambiguous, InverseMismatch, Degenerate, TooFewSamples,
 //                  LowConfidence) or an invalid record ("no dominant motion")
@@ -25,7 +25,7 @@
 
 namespace CameraLink
 {
-	enum class Refusal : uint8_t { None, AllOff, NoRecord, Slip, NotUsable, LowConfidence, Governor, NoPlan, Count };
+	enum class Refusal : uint8_t { None, AllOff, NotOnTime, Slip, NotUsable, LowConfidence, Governor, NoPlan, Count };
 
 	inline const char* Text(Refusal r)
 	{
@@ -33,7 +33,7 @@ namespace CameraLink
 		{
 		case Refusal::None: return "guided";
 		case Refusal::AllOff: return "all camera guidance switches off";
-		case Refusal::NoRecord: return "camera record late";
+		case Refusal::NotOnTime: return "camera(N) not ready in time";
 		case Refusal::Slip: return "pair spans a slip";
 		case Refusal::NotUsable: return "no dominant motion";
 		case Refusal::LowConfidence: return "camera confidence too low";
@@ -59,14 +59,14 @@ namespace CameraLink
 		return OnlyStaticGate(sw) ? (std::max)(cfg.minConfidence, cfg.staticConfidence) : cfg.minConfidence;
 	}
 
-	// The gate. `record` is P7(N-d) (null = late). `spansSlip` / `ancientStamp` come from the host's pair context.
+	// The gate. `record` is camera(N) on time (null = not ready in time). `spansSlip` / `ancientStamp` come from the host's pair context.
 	inline Refusal GuidanceRefusal(const CameraModel::MeasurementSwitches& sw, const CameraModel::MeasurementConfig& cfg,
 		const CameraModel::CameraMotion* record, bool spansSlip, bool ancientStamp)
 	{
 		if (!sw.Any())
 			return Refusal::AllOff;
 		if (!record)
-			return Refusal::NoRecord;
+			return Refusal::NotOnTime;
 		if (spansSlip || ancientStamp)
 			return Refusal::Slip;
 		if (!Usable(*record))

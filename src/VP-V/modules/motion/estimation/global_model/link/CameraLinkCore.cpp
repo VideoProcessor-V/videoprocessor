@@ -46,14 +46,23 @@ namespace CameraLink
 
 	CameraLinkCore::CameraLinkCore(FrameAnalysis::Store& store) : m_store(store), m_sealToStore(store)
 	{
-		for (size_t i = 0; i < kAheadMarks; ++i)
-			m_onTimeMark[i].store(0, std::memory_order_relaxed);
-		m_retired.assign(kAheadMarks, 0);
+		ClearAheadMarks();
 	}
 
 	CameraLinkCore::~CameraLinkCore()
 	{
 		Teardown();
+	}
+
+	void CameraLinkCore::ClearAheadMarks()
+	{
+		for (size_t i = 0; i < kAheadMarks; ++i)
+		{
+			m_onTimeMark[i].store(0, std::memory_order_relaxed);
+			m_aheadAsked[i].store(0, std::memory_order_relaxed);
+			m_sealVerdict[i].store(0, std::memory_order_relaxed);
+		}
+		m_retired.assign(kAheadMarks, 0);
 	}
 
 	void CameraLinkCore::Teardown()
@@ -67,17 +76,11 @@ namespace CameraLink
 		m_ring.reset();
 		m_sealedMark.clear();
 		m_requestedAt.clear();
-		{
-			std::lock_guard<std::mutex> lock(m_chainMutex);
-			m_chain.clear();
-		}
 		m_lastRequestedField = 0;
 		m_aheadNext = 0;
 		m_aheadRefusedSeq = 0;
 		m_seedPending.clear();
-		for (size_t i = 0; i < kAheadMarks; ++i)
-			m_onTimeMark[i].store(0, std::memory_order_relaxed);
-		m_retired.assign(kAheadMarks, 0);
+		ClearAheadMarks();
 		std::lock_guard<std::mutex> lock(m_traceMutex);
 		if (m_trace.is_open())
 			m_trace.close();
@@ -122,9 +125,6 @@ namespace CameraLink
 	void CameraLinkCore::AttachLease(const VpSkeleton::LaneLease& first, VpSkeleton::LaneLeaseSource source)
 	{
 		Teardown();
-		// The measured costs belong to the graph that made them: a rebuild starts a fresh window (the caller derives d from
-		// the old window BEFORE it attaches the new graph).
-		m_lagMeter.Clear();
 		VpSkeleton::SlotTable* table = first.table;
 		if (!m_active || !table || !table->Find(VpSkeleton::kP7CameraFit))
 			return;
@@ -196,12 +196,11 @@ namespace CameraLink
 		const auto now = std::chrono::steady_clock::now();
 		for (const std::shared_ptr<FieldCopy>& fc : ready)
 		{
-			// The readback latency (request -> ready) is one of the two measured terms of the guide lag d.
+			// The readback latency (request -> ready): a measured wait, posted as camera.readback.
 			const auto at = m_requestedAt.find(fc->seq);
 			if (at != m_requestedAt.end())
 			{
 				const double latency = std::chrono::duration<double>(now - at->second).count();
-				m_lagMeter.AddReadbackSeconds(latency);
 				if (latency > 0)
 					PassTimers::Inbox::Motion().PostCameraReadback(latency * 1000.0);   // camera.readback: a wait, never counted as work
 				m_requestedAt.erase(at);
@@ -338,15 +337,7 @@ namespace CameraLink
 			copy.stamp = lease.indicator ? lease.indicator->StampOf(seq) : VpIndicator::Stamp();
 			if (!SubmitAheadCopy(std::make_shared<const AheadCopy>(std::move(copy))))
 				break;   // facts refused or the queue is full (counted by the worker): the render-time path takes the frame
-			{
-				std::lock_guard<std::mutex> lock(m_chainMutex);
-				if (m_chain.empty() || seq > m_chain.back())
-				{
-					if (m_chain.size() >= 64)
-						m_chain.erase(m_chain.begin());
-					m_chain.push_back(seq);
-				}
-			}
+			m_aheadAsked[seq % kAheadMarks].store(seq + 1, std::memory_order_release);   // d = 0: asked in time (OnTimeRecord's causes a / b)
 			++m_aheadNext;
 		}
 	}
@@ -381,31 +372,15 @@ namespace CameraLink
 				m_sealedMark[seq % m_sealedMark.size()] = seq;
 			(accepted ? m_counters.sealedOk : m_counters.sealedLate).fetch_add(1, std::memory_order_relaxed);
 			m_counters.onTimeSealed.fetch_add(1, std::memory_order_relaxed);
+			m_sealVerdict[seq % kAheadMarks].store((seq + 1) * 2, std::memory_order_release);
 		}
 		else
 		{
 			m_counters.onTimeRejected.fetch_add(1, std::memory_order_relaxed);
 			m_pool->Erase(seq);   // never served
+			m_sealVerdict[seq % kAheadMarks].store((seq + 1) * 2 + 1, std::memory_order_release);   // a guide that used it counts as R
 		}
 		MarkRetired(seq);   // the lag bridge's later seal of this frame is not a second verdict
-	}
-
-	bool CameraLinkCore::PreviousRecordSeq(uint64_t seq, unsigned back, uint64_t& out) const
-	{
-		if (back == 0)
-			return false;
-		std::lock_guard<std::mutex> lock(m_chainMutex);
-		const size_t k = static_cast<size_t>(std::lower_bound(m_chain.begin(), m_chain.end(), seq) - m_chain.begin());
-		if (k < back)
-			return false;
-		out = m_chain[k - back];
-		return true;
-	}
-
-	uint64_t CameraLinkCore::LatestRecordSeq() const
-	{
-		std::lock_guard<std::mutex> lock(m_chainMutex);
-		return m_chain.empty() ? 0 : m_chain.back();
 	}
 
 	void CameraLinkCore::SetFitDoneObserver(std::function<void(uint64_t fitSeq)> f)
@@ -512,8 +487,8 @@ namespace CameraLink
 				m_requestedAt.clear();
 				m_aheadNext = 0;          // AHEAD FIT: restarts after the new numbering's newest field
 				m_seedPending.clear();
-				std::lock_guard<std::mutex> lock(m_chainMutex);
-				m_chain.clear();   // the numbering restarted: the old records are not "previous" any more
+				for (size_t i = 0; i < kAheadMarks; ++i)
+					m_aheadAsked[i].store(0, std::memory_order_relaxed);   // the numbering restarted: nothing was asked in it yet
 			}
 		}
 		if (m_ring && m_engine)
@@ -570,16 +545,6 @@ namespace CameraLink
 				}
 				else
 				{
-					{
-						// The record chain: this field WILL be a record (its copy is on the way), whatever its fit does later.
-						std::lock_guard<std::mutex> lock(m_chainMutex);
-						if (m_chain.empty() || vf.seq > m_chain.back())
-						{
-							if (m_chain.size() >= 64)
-								m_chain.erase(m_chain.begin());
-							m_chain.push_back(vf.seq);
-						}
-					}
 					if (m_requestedAt.size() >= 64)
 						m_requestedAt.erase(m_requestedAt.begin());   // bounded: a copy that never came back is not timed
 					m_requestedAt[vf.seq] = now;
@@ -694,7 +659,6 @@ namespace CameraLink
 		}
 		if (rec && rec->costMicros > 0)
 		{
-			m_lagMeter.AddFitSeconds(static_cast<double>(rec->costMicros) * 1e-6);
 			PassTimers::Inbox::Motion().PostCameraFit(static_cast<double>(rec->costMicros) * 1e-3);   // camera.fit: CPU work (the worker)
 		}
 		{
@@ -801,6 +765,68 @@ namespace CameraLink
 			}
 		}
 		return e.record;
+	}
+
+	std::shared_ptr<const CameraModel::CameraMotion> CameraLinkCore::OnTimeRecord(uint64_t seq, OnTimeCheck check, OnTimeMiss& why) const
+	{
+		// K4 at d = 0 (refs 93-prep-cam-d0 section 1): SealedRecord's checks without the sealed mark (the matcher of N runs before N's seal).
+		why = OnTimeMiss::None;
+		if (!m_pool)
+		{
+			why = OnTimeMiss::Bridged;   // no camera fit at all: structural (shown as "no on-time target")
+			return nullptr;
+		}
+		PoolEntry e;
+		if (!m_pool->Get(seq, e))
+		{
+			// Not committed (yet, or never). The seal rejected and erased it: stale. Its ahead copy was asked for: not published in time.
+			if (m_sealVerdict[seq % kAheadMarks].load(std::memory_order_acquire) == (seq + 1) * 2 + 1)
+				why = OnTimeMiss::Stale;
+			else
+				why = m_aheadAsked[seq % kAheadMarks].load(std::memory_order_acquire) == seq + 1 ? OnTimeMiss::NotPublished : OnTimeMiss::NoAheadPair;
+			return nullptr;
+		}
+		if (!e.field || e.field->origin != FieldOrigin::Ahead)
+		{
+			why = OnTimeMiss::NoAheadPair;   // a seed / live record: read back after the matcher ran, never on time by construction
+			return nullptr;
+		}
+		if (!e.onTime)
+		{
+			why = OnTimeMiss::Bridged;   // published through the lag bridge (N's seal had run) or without an on-time target
+			return nullptr;
+		}
+		if (m_onTimeMark[seq % kAheadMarks].load(std::memory_order_acquire) != seq + 1)
+		{
+			why = OnTimeMiss::NotPublished;   // committed, the worker's on-time mark not written yet
+			return nullptr;
+		}
+		if (check == OnTimeCheck::PublishOnly)
+			return e.record;
+		if (m_sealVerdict[seq % kAheadMarks].load(std::memory_order_acquire) == (seq + 1) * 2 + 1 || P2Stale(e))
+		{
+			why = OnTimeMiss::Stale;
+			return nullptr;
+		}
+		if (e.haveHonoured)
+		{
+			// The stamp honoured at the publish against N's stamp now, in the on-time target's Indicator (as SealedRecord does).
+			const VpSkeleton::LaneLease l = m_onTimeSource ? m_onTimeSource() : (m_worker ? m_worker->Lease() : VpSkeleton::LaneLease());
+			if (l.indicator && !VpIndicator::SameFor(e.honoured, l.indicator->StampOf(seq), kP7StampMask))
+			{
+				why = OnTimeMiss::Stale;   // a resync moved N's stamp after the publish
+				return nullptr;
+			}
+		}
+		return e.record;
+	}
+
+	SealVerdict CameraLinkCore::OnTimeSealVerdict(uint64_t seq) const
+	{
+		const uint64_t v = m_sealVerdict[seq % kAheadMarks].load(std::memory_order_acquire);
+		if (v / 2 != seq + 1)
+			return SealVerdict::Pending;
+		return (v & 1u) != 0 ? SealVerdict::Rejected : SealVerdict::Accepted;
 	}
 
 	std::shared_ptr<const CameraModel::CameraMotion> CameraLinkCore::CausalRecord(uint64_t seq) const

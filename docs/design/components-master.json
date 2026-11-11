@@ -447,7 +447,6 @@
         "src/VP-V/modules/motion/estimation/global_model/link/GuidanceContext.h",
         "src/VP-V/modules/motion/estimation/global_model/link/GuidanceGate.h",
         "src/VP-V/modules/motion/estimation/global_model/link/GuidanceGovernor.h",
-        "src/VP-V/modules/motion/estimation/global_model/link/GuidanceLag.h",
         "src/VP-V/modules/motion/estimation/global_model/link/GuidanceScheduler.cpp",
         "src/VP-V/modules/motion/estimation/global_model/link/GuidanceScheduler.h",
         "src/VP-V/modules/motion/estimation/global_model/link/GuidanceStatus.h",

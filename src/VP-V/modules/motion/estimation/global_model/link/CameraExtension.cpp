@@ -542,7 +542,7 @@ namespace Vpv
 				hooks.p4 = [sp, store, ind](uint64_t pair, CameraLink::PairContext& ctx) -> bool {
 					bool have = false, cut = false, fade = false;
 					if (ReadScene(store, pair, have, cut, fade, nullptr) == SceneRead::Missing)
-						return false;   // not described yet: the lane asks again, the live fill treats it as "record late"
+						return false;   // not described yet: the lane asks again, the live fill counts camera(N) as not ready in time
 					if (!have)
 						sp->sceneUnknown.fetch_add(1, std::memory_order_relaxed);
 					ctx.ancientStamp = ind->StampOf(pair).ancient;
@@ -551,24 +551,11 @@ namespace Vpv
 					ctx.nextPairSeconds = sp->periodSeconds.load(std::memory_order_relaxed);
 					return true;
 				};
-				hooks.nextPair = [store](uint64_t after, uint64_t& next) -> bool {
-					for (uint64_t s = after + 1; s <= after + 16; ++s)
-					{
-						bool have = false, cut = false, fade = false;
-						if (ReadScene(store, s, have, cut, fade, nullptr) == SceneRead::Present)
-						{
-							next = s;
-							return true;
-						}
-					}
-					return false;
-				};
 				hooks.onRenderThread = [sp]() { return sp->renderThread.load(std::memory_order_relaxed) == std::this_thread::get_id(); };
 				st.adapter.reset(new CameraLink::CameraGuidanceAdapter(*st.core, gs, hooks));
 				std::unique_ptr<CameraLink::IGuidanceCountsSource> counts;
 				if (st.gpu)
 					counts.reset(new CameraLink::GuidanceCountsRing(st.gpu));
-				st.adapter->RebuildGraph(st.periodSeconds.load(std::memory_order_relaxed), false);   // d from the MEASURED costs, before AttachLane restarts the meter
 				st.adapter->Attach(engine, std::move(counts));                                      // registers the ONE hook (switches are on)
 			}
 			// LEASE path (SK-W): the fit worker holds the table, the P7 bytes and the Indicator through an owned lease and rebinds when the
@@ -953,6 +940,15 @@ namespace Vpv
 				{
 					lines.push_back(std::string("camera: ") + kGuidanceLockedText);
 					fb.push_back(std::string("camera_guidance: ") + kGuidanceLockedText);
+				}
+				if (st.guideWanted)
+				{
+					// d = 0 (refs 93-prep-cam-d0): guidance needs camera(N) ON TIME. Where that can never happen it is structural, named once
+					// here, not per pair: no ahead fit (off, or a deterministic run's bridge path), or no on-time target (no skeleton lane).
+					const char* cause = !st.aheadWanted ? (st.aheadDeterministic ? "deterministic run" : "camera_ahead_fit is off") :
+						(st.liveBuilt && !st.demand ? "no on-time target (analysis_lane off)" : nullptr);
+					if (cause)
+						fb.push_back(std::string("camera_guidance: unguided - ") + cause);
 				}
 				if (st.adapter)
 				{

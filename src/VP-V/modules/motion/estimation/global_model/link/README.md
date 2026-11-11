@@ -17,17 +17,16 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 | K1-6 | `CameraLinkCore.*`, `CameraFitStatus.h` | phases as plain methods, status, `camera.no_model.*` ids, `VP_CAMERA_FIT_TRACE` |
 | K2 | `CameraLabelPack.h`, `CameraLabelProducer.*`, `CameraLabelFill.*`, `CameraConsumerBinding.*` | P8 upload / compute (one unit), lane / live fill, per-consumer binding |
 | K4 | `CameraGuideProduct.h`, `GuidanceScheduler.*`, `GuidanceGate.h`, `GuidanceGovernor.h`, `GuidanceCountsRing.*`, `MotionBenchWriter.h` | `p7g_camera_guide`, refusal gate, hook, governor, counts readback, `VP_MOTION_BENCH` |
-| K4 wiring (on P5a's contract) | `GuidanceLag.h`, `GuideLaneJob.*`, `GuidanceContext.h`, `GuidanceStatus.h`, `GuidanceTimers.h`, `GuidanceAdapter.*` | measured `d`, the guide lane job, the `PairContext` provider + flow resampler, skeleton-visible status, `motion.*` and `camera.*` PassTimers rows, the adapter that registers the ONE pre-estimate hook on the engine (P5a owns the call site: `VectorEngine::Estimate`) |
-| Ahead fit (`camera_ahead_fit`) | `AheadFlow.h`, the park in `CameraFitWorker.*`, `PollAhead` / `OnTimeSeal` in `CameraLinkCore.*` | the fit from the ahead NVOF pair (FlowOf), on-time publish or the lag bridge, visible counters ("Ahead fit" below) |
+| K4 wiring (on P5a's contract) | `GuideLaneJob.*`, `GuidanceContext.h`, `GuidanceStatus.h`, `GuidanceTimers.h`, `GuidanceAdapter.*` | the guide lane job, the `PairContext` provider + flow resampler, skeleton-visible status, `motion.*` and `camera.*` PassTimers rows, the adapter that registers the ONE pre-estimate hook on the engine (P5a owns the call site: `VectorEngine::Estimate`) |
+| Ahead fit (`camera_ahead_fit`) | `AheadFlow.h`, the park in `CameraFitWorker.*`, `PollAhead` / `OnTimeSeal` in `CameraLinkCore.*` | the fit from the ahead NVOF pair (FlowOf), on-time publish (the d = 0 guide reads only this) or the lag bridge, visible counters ("Ahead fit" below) |
 
 ## Skeleton products declared
 
 * P7 camera fit, P8 camera labels, P9 camera smoothed: K0 (`core/Products.h`). P8 is RGBA32F, 16 B per 16x16 block.
-* `p7g_camera_guide` (D-K3): `CameraGuideProduct.h`. Cpu, T0, inputs P7 at lag d and P4 at lag 0, 20 B per block. It is REGISTERED
-  (id 20, `core/Products.h`, with the floor lag 2) and has its catalog row and the "camera guidance" consumer; the tests pin the
-  declaration (`GuideProductTests`, `ProductCatalogTests`). `SkeletonProductsWithGuide(d)` sets the measured d on a graph rebuild;
-  d comes from `GuideLagMeter` (`GuidanceLag.h`): p95 of the fit cost (`CameraMotion::costMicros`) + the readback latency, over the
-  measured source period; the floor when nothing is measured or the run is deterministic.
+* `p7g_camera_guide` (D-K3): `CameraGuideProduct.h`. Cpu, T0, inputs P7 at lag 0 and P4 at lag 0, 20 B per block. It is REGISTERED
+  (id 20, `core/Products.h`, `kGuideDefaultLag = 0`) and has its catalog row and the "camera guidance" consumer; the tests pin the
+  declaration (`GuideProductTests`, `ProductCatalogTests`). d = 0 (refs 93-prep-cam-d0): pair N reads camera(N) = P7(N), the fit
+  of the same pair published on time from the ahead field; there is no measured lag and no late path (`GuidanceLag.h` removed).
 * Unit version: `kCameraUnitVersion` covers the fit, the labels (both modes) and the guide.
 
 ## Private history: justification (TEAM-RULES "skeleton first")
@@ -52,7 +51,7 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 * **A pool entry is served only after the slot publish succeeded** (`committed`); only the seal observer may read an uncommitted one.
 * **Guidance cool-down runs on measured pair time for every pair asked** (`GuidanceScheduler::Guide`), so narrow / E1-only configurations
   recover; lane and live both use the governed switches (snapshot under the mutex) and a lane result built under other switches or
-  another lag is dropped. A NoRecord verdict is never stored by the lane.
+  for another record is dropped. A not-on-time verdict is never stored by the lane.
 * **Status holds**: each `camera.no_model.*` event engages its id for 0.5 s of measured time (frame period), then releases;
   `camera.no_model.queue` reports queue-full drops.
 * **Binding**: the per-consumer define and the sampler follow the policy, never P8 presence; a 1x1 dummy is bound with `camera_enabled = 0`.
@@ -69,7 +68,7 @@ No Bill file changed; the camera's cost rows reach the pass-timer readout throug
 
 **LOCK RULE.** `CameraGuidanceAdapter::Detach` (also `SetSettings` / `Attach` when they unregister) runs on the render thread with `renderMutex`
 held and waits on `CameraLinkCore`'s observer mutex; the camera worker holds that mutex while it pumps the lane job. So the host's `p4` reader,
-its `nextPair` hint and anything they call must NEVER take `renderMutex` or wait for the render thread (they read published slots only), or
+the context provider and anything they call must NEVER take `renderMutex` or wait for the render thread (they read published slots only), or
 `Detach` deadlocks. `CameraLinkCore::SetFitDoneObserver` asserts in debug builds that it is not called from the observer's own thread.
 
 P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` calls `BeforeEstimate` / `AfterEstimate` around the matcher's
@@ -77,17 +76,19 @@ P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` 
 * **Adapter (`CameraGuidanceAdapter`).** The engine of a renderer comes from `Query("vpv.vector_engine.v1")` -> `IVectorEngineDirectory::EngineFor(host)`.
   `Attach(engine, countsSource)` registers one hook only when a switch is on (all off: nothing registered, no observer; the engine runs its
   `Estimate` only). `Detach()` (at GpuReleased / Shutdown, render thread) clears the engine's hook FIRST, then the fit-done observer (it waits for a
-  call in flight), then drops everything. `OnFrame()` finishes the counts a frame late and pumps the lane job; `RebuildGraph()` derives d.
+  call in flight), then drops everything. `OnFrame()` finishes the counts a frame late and pumps the lane job.
 * **Engine contract used.** Every `IVectorEngine` method except `FieldEra` is render-thread only: the provider asks `PairSpansSlip` only on the render
   thread; the camera worker never touches the engine and never calls `FieldOf` (its texture lives until the next estimate). `pairSeq` = `bSequence`
   = `FieldOf`'s `pairTo`. A hook failure is contained by P5a (visible fallback `vector_engine_hook`).
-* **The d-th PREVIOUS record, not N - d.** `ICameraLink::PreviousRecordSeq(N, d)` walks the chain of REQUESTED fields (known the moment the copy is
-  asked for), so cadence repeats (24p in 30) leave no false "record late" and a fit that is still running is "late", never replaced by an older record.
-* **One gate, one unit.** `GuidanceRefusal()` (`GuidanceGate.h`): all switches off, record late, slip / ancient stamp, `!Usable`, confidence < 0.7
+* **d = 0: camera(N) or nothing.** `ICameraLink::OnTimeRecord(N, ...)` returns the record of pair N only when it was published on time
+  (else a cause: a no ahead pair, b not published, c bridged, d stale, e not the pair; `SameCameraPair`). A pair without it runs unguided
+  (`Refusal::NotOnTime`, counted per cause, never an older or newer record); pairs guided and then rejected at the seal are counted as R and
+  shown (`camera_guidance: unguided`). Status: `camera guidance (d=0): G guided on time (x% of pairs), U unguided - camera(N) not ready: a .. e; R ..`.
+* **One gate, one unit.** `GuidanceRefusal()` (`GuidanceGate.h`): all switches off, camera(N) not on time, slip / ancient stamp, `!Usable`, confidence < 0.7
   (0.85 when the static gate is the only switch). `BuildGuide()` calls it for lane and live; every refusal is counted per reason and shown.
-* **Lane job.** `CameraLinkCore::SetFitDoneObserver` fires on the fitting thread after the publish; `GuideLaneJob` wants the NEXT pair (the host's
-  `nextPair` hint, the first P4-published seq after the newest requested record) and stores it through `TryPublishLane` once the record and P4(N) are
-  there. A stored lane result is used only when the render's own inputs are identical (switches, lag, thresholds, record seq, epoch); a slip that
+* **Lane job.** `CameraLinkCore::SetFitDoneObserver` fires on the fitting thread after the publish; `GuideLaneJob` wants the pair just fitted (d = 0:
+  pair N for record N) until P4(N) arrives and stores it through `TryPublishLane` once the on-time record and P4(N) are there. A stored lane
+  result is used only when the render's own inputs are identical (switches, thresholds, the very record the render reads, epoch); a slip that
   appeared meanwhile is re-checked at consumption (`SetSlipCheck`); a discontinuity bumps the epoch, so a pass that is mid-compute cannot store.
   Lane == live byte for byte (`GuideProductTests`, `GuidanceWiringTests`, including a barrier thread test of the ask-while-computing interleaving).
 * **Status through the skeleton.** `CollectDecisions()`: FallbackCatalog Decisions `camera.guidance.escalations_high`, `.refused`, `.narrow_idle`.
@@ -318,8 +319,7 @@ Not in K3: the **overlay** itself (K2's P8 is not instantiated and the fit has n
 | settings change | `OnSettings(...)`, `AttachLane(source)` (live; see "Holding the lane" below) or `AttachGraph(table, bytes, indicator)` (tests / standalone), `CameraLabelProducer` mode from `ChooseLabelMode` |
 | `CollectStatus` | `CollectStatus(lines)` + `CollectDecisions()` into the fallback registry |
 | `QueryInterface("vpv.camera.v1")` | `Link()` |
-| graph rebuild | `GuideLagMeter::Lag(sourcePeriod, deterministic)` -> `GuidanceScheduler::SetLag(d)` + `SkeletonProductsWithGuide(d)` |
-| camera adapter, once the engine exists | `CameraGuidanceAdapter(core, settings, {p4Reader, nextPair, onRenderThread})`; `Attach(engine, std::make_unique<GuidanceCountsRing>(gpu))`; per frame `OnFrame()` (the costs go to the pass-timer inbox, no adapter call); `CollectDecisions()` into the fallback registry; `RebuildGraph(period, deterministic)` before `AttachLane`; `Detach()` at GpuReleased. Add `GuidanceScheduler.cpp`, `GuideLaneJob.cpp`, `GuidanceAdapter.cpp`, `GuidanceCountsRing.cpp` to the renderer items props in that commit |
+| camera adapter, once the engine exists | `CameraGuidanceAdapter(core, settings, {p4Reader, onRenderThread})`; `Attach(engine, std::make_unique<GuidanceCountsRing>(gpu))`; per frame `OnFrame()` (the costs go to the pass-timer inbox, no adapter call); `CollectDecisions()` into the fallback registry; `Detach()` at GpuReleased. Add `GuidanceScheduler.cpp`, `GuideLaneJob.cpp`, `GuidanceAdapter.cpp`, `GuidanceCountsRing.cpp` to the renderer items props in that commit |
 | `Estimate` / `EstimateAhead` (P5a) | none: P5a's `VectorEngine::Estimate` calls the registered hook |
 | Indicator setup | `RegisterReader(indicator)` |
 | P5a engine | `SetEngine(IVectorEngine*)`, `engine->SetPreEstimateHook(&CameraGuidanceHook)` |

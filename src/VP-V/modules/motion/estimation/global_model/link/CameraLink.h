@@ -28,29 +28,53 @@ namespace CameraLink
 		int gridW = 0, gridH = 0;
 	};
 
+	// Why camera(N) was not ready in time for the matcher's pair N (the d = 0 rule). Counted per cause, shown in one status line.
+	//   NoAheadPair    no ahead copy was asked for N (the producer's pair was not there in time, or a seed-path record)
+	//   NotPublished   the ahead fit of N was asked for but not published on time before the matcher ran
+	//   Bridged        published through the lag bridge (N's seal had run), or there is no on-time target
+	//   Stale          stale at use: the P2 epoch or N's stamp moved since the publish, or the seal rejected it
+	//   NotThePair     the matcher's pair is not the camera's pair (a gap / hiccup fill pair)
+	enum class OnTimeMiss : uint8_t { None, NoAheadPair, NotPublished, Bridged, Stale, NotThePair, Count };
+	enum class OnTimeCheck : uint8_t { Full, PublishOnly };
+	enum class SealVerdict : uint8_t { Pending, Accepted, Rejected };
+
+	inline const char* Text(OnTimeMiss m)
+	{
+		switch (m)
+		{
+		case OnTimeMiss::None: return "on time";
+		case OnTimeMiss::NoAheadPair: return "no ahead pair";
+		case OnTimeMiss::NotPublished: return "fit not published before the matcher";
+		case OnTimeMiss::Bridged: return "bridged / no on-time target";
+		case OnTimeMiss::Stale: return "stale at use (epoch / stamp)";
+		case OnTimeMiss::NotThePair: return "not the camera's pair (gap)";
+		default: return "?";
+		}
+	}
+
 	class ICameraLink
 	{
 	public:
 		virtual ~ICameraLink() {}
 		// The record P7 published AND the seal accepted for frame `seq` (null when late or absent).
 		virtual std::shared_ptr<const CameraModel::CameraMotion> SealedRecord(uint64_t seq) const = 0;
-		// The newest published record for `seq` regardless of the seal: the causal input of the guidance (lag d), read on
-		// the render thread of a LATER frame, by which time the record is final.
+		// The newest published record for `seq` regardless of the seal (diagnostics, the governor's skip confirmation, the context
+		// provider's flow resample).
 		virtual std::shared_ptr<const CameraModel::CameraMotion> CausalRecord(uint64_t seq) const = 0;
-		// The seq of the `back`-th PREVIOUS camera record before `seq` (back = 1 is the newest record older than seq). The guide of
-		// pair N reads the d-th previous record, never N - d: the field numbering has gaps (cadence repeats, 24p in 30), so N - d
-		// would answer "record late" for a record that exists. The chain is of REQUESTED fields (in order, known the moment the
-		// field copy is asked for), so a record whose fit or readback is still running is "late", never replaced by an older one.
-		// Default: the arithmetic N - back (fakes without a chain keep it). False: fewer than `back` records before seq.
-		virtual bool PreviousRecordSeq(uint64_t seq, unsigned back, uint64_t& out) const
+		// K4 at d = 0: camera(N) for the matcher's pair of N, READY IN TIME or null with the miss cause (refs 93-prep-cam-d0 section 1):
+		// published on time into the on-time target (the mark), a committed on-time pool entry, an AHEAD field (a seed record is never
+		// on time), and with check == Full also the P2 epoch, the stamp honoured at the publish and the seal verdict (render thread).
+		// PublishOnly reads only the pool and the marks (the camera worker's lane job; the render thread re-checks in full before use).
+		// Default (fakes): every published record counts as on time.
+		virtual std::shared_ptr<const CameraModel::CameraMotion> OnTimeRecord(uint64_t seq, OnTimeCheck check, OnTimeMiss& why) const
 		{
-			if (back == 0 || seq < back)
-				return false;
-			out = seq - back;
-			return true;
+			(void)check;
+			std::shared_ptr<const CameraModel::CameraMotion> r = CausalRecord(seq);
+			why = r ? OnTimeMiss::None : OnTimeMiss::NotPublished;
+			return r;
 		}
-		// The newest requested record seq (0 = none). The lane job derives the next pair from it.
-		virtual uint64_t LatestRecordSeq() const { return 0; }
+		// The on-time seal's verdict on frame `seq` (Pending until OnTimeSeal(seq) ran; render thread). Default (fakes): Pending.
+		virtual SealVerdict OnTimeSealVerdict(uint64_t seq) const { (void)seq; return SealVerdict::Pending; }
 		virtual std::shared_ptr<const FieldCopy> FieldOf(uint64_t seq) const = 0;
 		// P8 for consumer `c` at frame `seq` (K2: first consumer fills, later ones reuse).
 		virtual bool LabelsFor(uint64_t seq, CameraConsumer c, CameraLabelsView& out) = 0;

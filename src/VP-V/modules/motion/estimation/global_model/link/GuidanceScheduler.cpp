@@ -13,6 +13,7 @@ namespace CameraLink
 	{
 		constexpr size_t kLaneRing = 16;
 		constexpr size_t kPendingRing = 16;
+		constexpr size_t kAwaitingSealMax = 32;   // pairs guided before their on-time seal (the seal runs within a few frames)
 
 		bool SameVec(const std::vector<float>& a, const std::vector<float>& b)
 		{
@@ -33,7 +34,7 @@ namespace CameraLink
 		GuideResult r;
 		// K4-3: the ONE refusal gate (GuidanceGate.h). Lane and live both pass through here.
 		r.refusal = GuidanceRefusal(sw, cfg, in.record, in.ctx.spansSlip, in.ctx.ancientStamp);
-		if (r.refusal == Refusal::AllOff || r.refusal == Refusal::NoRecord)
+		if (r.refusal == Refusal::AllOff || r.refusal == Refusal::NotOnTime)
 			return r;
 		// The record's own confidence and reason are reported for refused pairs too (bench rows, status).
 		r.confidence = in.record->confidence;
@@ -151,7 +152,6 @@ namespace CameraLink
 		std::lock_guard<std::mutex> lock(m_mutex);
 		m_snapSwitches = governed;
 		m_snapConfig = m_settings.config;
-		m_snapLag = m_lag;
 		m_snapContext = m_context;
 	}
 
@@ -166,46 +166,32 @@ namespace CameraLink
 		}
 		for (Stored& s : m_pending)
 			s = Stored();
+		m_awaitingSeal.clear();   // the numbering may restart: an old seq's verdict slot is not this pair's
 		m_governor.Reset();
 		m_hold.Reset();
 		m_narrowIdleRemaining = 0;
 		RefreshSnapshot();
 	}
 
-	GuideResult GuidanceScheduler::Compute(uint64_t pairSeq)
+	GuideResult GuidanceScheduler::Compute(uint64_t pairSeq, const std::shared_ptr<const CameraModel::CameraMotion>& rec, OnTimeMiss miss)
 	{
+		// d = 0: camera(N) on time or nothing (no late path). prevFwd stays absent: the only other field at hand is N's own.
 		GuideInputs in;
-		std::shared_ptr<const CameraModel::CameraMotion> rec;
-		std::shared_ptr<const FieldCopy> field;
-		uint64_t recSeq = 0;
-		if (m_link.PreviousRecordSeq(pairSeq, m_lag, recSeq))   // the d-th PREVIOUS record, not N - d (gaps in the numbering)
-		{
-			rec = m_link.CausalRecord(recSeq);
-			field = m_link.FieldOf(recSeq);
-			in.ctx.recordSeq = recSeq;
-		}
 		in.record = rec.get();
-		in.prevField = field.get();
-		bool haveCtx = true;
-		if (m_context)
-			haveCtx = m_context(pairSeq, in.ctx);
-		if (!haveCtx)
+		in.ctx.recordSeq = pairSeq;
+		if (rec && m_context && !m_context(pairSeq, in.ctx))
 		{
-			GuideResult r;
-			r.refusal = Refusal::NoRecord;
-			return r;
+			// P4(N) not published when the matcher of N runs: camera(N) is not usable in time.
+			in.record = nullptr;
+			miss = OnTimeMiss::NotPublished;
 		}
 		const CameraModel::MeasurementSwitches sw = m_governor.Apply(m_settings.switches);
 		GuideResult r = BuildGuide(sw, m_settings.config, in);
 		if (r.refusal == Refusal::AllOff && m_settings.switches.Any())
 			r.refusal = Refusal::Governor;   // only narrow / E1 were on and the governor turned them off
+		if (r.refusal == Refusal::NotOnTime)
+			r.miss = miss == OnTimeMiss::None ? OnTimeMiss::NotPublished : miss;
 		return r;
-	}
-
-	uint8_t GuidanceScheduler::SnapshotLag() const
-	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-		return m_snapLag;
 	}
 
 	bool GuidanceScheduler::LaneWanted() const
@@ -219,14 +205,12 @@ namespace CameraLink
 		// Everything the worker thread reads is a snapshot taken under the mutex (same governed switches as the render thread).
 		CameraModel::MeasurementSwitches sw;
 		CameraModel::MeasurementConfig cfg;
-		uint8_t lag;
 		std::function<bool(uint64_t, PairContext&)> context;
 		uint64_t epoch;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			sw = m_snapSwitches;
 			cfg = m_snapConfig;
-			lag = m_snapLag;
 			context = m_snapContext;
 			epoch = m_epoch;
 			if (!sw.Any())
@@ -237,20 +221,20 @@ namespace CameraLink
 				return LaneOutcome::Discarded;
 			}
 		}
-		uint64_t recSeq = 0;
-		if (!m_link.PreviousRecordSeq(pairSeq, lag, recSeq))
-			return LaneOutcome::NotReady;   // fewer than d records before this pair (yet)
+		// Worker thread: the publish-side checks only (the stamp / seal checks read render-thread state; Guide re-reads camera(N)
+		// in full and uses this result only for the very same record).
+		OnTimeMiss why = OnTimeMiss::None;
+		const std::shared_ptr<const CameraModel::CameraMotion> rec = m_link.OnTimeRecord(pairSeq, OnTimeCheck::PublishOnly, why);
+		if (!rec)
+			return LaneOutcome::NotReady;   // camera(N) not on time: nothing stored (the render counts the cause)
 		GuideInputs in;
-		const std::shared_ptr<const CameraModel::CameraMotion> rec = m_link.CausalRecord(recSeq);
-		const std::shared_ptr<const FieldCopy> field = m_link.FieldOf(recSeq);
 		in.record = rec.get();
-		in.prevField = field.get();
-		in.ctx.recordSeq = recSeq;
+		in.ctx.recordSeq = pairSeq;
 		if (context && !context(pairSeq, in.ctx))
 			return LaneOutcome::NotReady;   // P4(N) is not published yet
 		GuideResult r = BuildGuide(sw, cfg, in);
-		if (r.refusal == Refusal::NoRecord)
-			return LaneOutcome::NotReady;   // "late" is not a stored verdict: the render asks again with the record it then has
+		if (r.refusal == Refusal::NotOnTime)
+			return LaneOutcome::NotReady;
 		r.fromLane = true;
 		std::lock_guard<std::mutex> lock(m_mutex);
 		if (m_epoch != epoch)
@@ -262,9 +246,9 @@ namespace CameraLink
 		}
 		Stored& s = m_lane[pairSeq % m_lane.size()];
 		s.seq = pairSeq;
-		s.key = KeyOf(sw, lag);
+		s.key = KeyOf(sw);
 		s.cfgKey = CfgKeyOf(cfg);
-		s.recSeq = recSeq;
+		s.rec = rec;
 		s.result = std::move(r);
 		m_lanePublished.fetch_add(1, std::memory_order_relaxed);
 		return LaneOutcome::Published;
@@ -272,19 +256,19 @@ namespace CameraLink
 
 	void GuidanceScheduler::StoreLaneForTest(uint64_t pairSeq, const GuideResult& result, const CameraModel::MeasurementConfig& builtUnder)
 	{
-		uint64_t recSeq = 0;
-		m_link.PreviousRecordSeq(pairSeq, m_lag, recSeq);
+		OnTimeMiss why = OnTimeMiss::None;
+		const std::shared_ptr<const CameraModel::CameraMotion> rec = m_link.OnTimeRecord(pairSeq, OnTimeCheck::Full, why);
 		std::lock_guard<std::mutex> lock(m_mutex);
 		Stored& s = m_lane[pairSeq % m_lane.size()];
 		s.seq = pairSeq;
-		s.key = KeyOf(m_governor.Apply(m_settings.switches), m_lag);
+		s.key = KeyOf(m_governor.Apply(m_settings.switches));
 		s.cfgKey = CfgKeyOf(builtUnder);
-		s.recSeq = recSeq;
+		s.rec = rec;
 		s.result = result;
 		s.result.fromLane = true;
 	}
 
-	GuideResult GuidanceScheduler::Guide(uint64_t pairSeq, double pairSeconds)
+	GuideResult GuidanceScheduler::Guide(uint64_t pairSeq, double pairSeconds, uint64_t fromSeq)
 	{
 		// The cool-down runs on MEASURED pair time for every pair asked about, guided or not (a narrow-only configuration
 		// has no guided pair to judge, and must still recover).
@@ -293,25 +277,35 @@ namespace CameraLink
 			m_governor.Elapse(pairSeconds);
 			RefreshSnapshot();
 		}
-		const uint32_t key = KeyOf(m_governor.Apply(m_settings.switches), m_lag);
+		const uint32_t key = KeyOf(m_governor.Apply(m_settings.switches));
 		const uint32_t cfgKey = CfgKeyOf(m_settings.config);
-		uint64_t recNow = 0;
-		const bool haveRecNow = m_link.PreviousRecordSeq(pairSeq, m_lag, recNow);
+		// THE d = 0 decision, once per pair: camera(N) ready in time, in full, for exactly this pair - or unguided.
+		OnTimeMiss miss = OnTimeMiss::None;
+		std::shared_ptr<const CameraModel::CameraMotion> recNow;
+		if (m_settings.switches.Any())
+		{
+			recNow = m_link.OnTimeRecord(pairSeq, OnTimeCheck::Full, miss);
+			if (recNow && !SameCameraPair(*recNow, fromSeq, pairSeconds))
+			{
+				recNow.reset();
+				miss = OnTimeMiss::NotThePair;   // a gap / hiccup fill pair: camera(N) measured another pair
+			}
+		}
 		GuideResult out;
 		bool haveLane = false;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			m_asked[pairSeq % m_asked.size()] = pairSeq;
 			Stored& s = m_lane[pairSeq % m_lane.size()];
-			// A lane result built under other switches / thresholds / lag, or from another record, is never used.
-			if (s.seq == pairSeq && s.key == key && s.cfgKey == cfgKey && haveRecNow && s.recSeq == recNow)
+			// A lane result built under other switches / thresholds, or from another record, is never used.
+			if (s.seq == pairSeq && s.key == key && s.cfgKey == cfgKey && recNow && s.rec == recNow)
 			{
 				out = s.result;
 				haveLane = true;
 			}
 			s = Stored();
 		}
-		if (haveLane && out.frame && m_slipCheck && m_slipCheck(recNow, pairSeq))
+		if (haveLane && out.frame && m_slipCheck && m_slipCheck(recNow->pairFrom, pairSeq))
 		{
 			// The slip appeared after the lane built the guide: the same refusal the live fill would give.
 			out.frame.reset();
@@ -321,12 +315,14 @@ namespace CameraLink
 			++m_counters.fromLane;
 		else
 		{
-			out = Compute(pairSeq);
+			out = Compute(pairSeq, recNow, miss);
 			out.fromLane = false;
 			if (out.frame)
 				++m_counters.fromLive;
 		}
 		++m_counters.refusals[size_t(out.refusal)];
+		if (out.refusal == Refusal::NotOnTime)
+			++m_counters.notOnTime[size_t(out.miss)];
 		m_hold.Observe(out.refusal, pairSeconds);
 		if (m_narrowIdleRemaining > 0)
 			m_narrowIdleRemaining -= pairSeconds > 0 ? pairSeconds : kGuidanceRefusalHoldSeconds;
@@ -334,9 +330,9 @@ namespace CameraLink
 		{
 			BenchRow row;
 			row.pair = pairSeq;
-			row.seq = haveRecNow ? recNow : 0;
+			row.seq = recNow ? pairSeq : 0;
 			row.switchMask = SwitchMask(m_settings.switches);
-			row.d = m_lag;
+			row.d = 0;
 			row.confidence = out.confidence;
 			row.reason = Text(out.refusal);
 			row.governorState = m_governor.Tripped() ? 1 : 0;
@@ -347,11 +343,32 @@ namespace CameraLink
 			++m_counters.guided;
 			Stored& p = m_pending[pairSeq % m_pending.size()];
 			p.seq = pairSeq;
-			p.recSeq = haveRecNow ? recNow : 0;
+			p.rec = recNow;
 			p.result = out;
 			p.gpuMs = -1;
+			// Guided before N's on-time seal (the usual order): the seal's verdict is read back by PollSeals (R when rejected).
+			if (m_link.OnTimeSealVerdict(pairSeq) == SealVerdict::Pending)
+			{
+				if (m_awaitingSeal.size() >= kAwaitingSealMax)
+					m_awaitingSeal.erase(m_awaitingSeal.begin());
+				m_awaitingSeal.push_back(pairSeq);
+			}
 		}
 		return out;
+	}
+
+	void GuidanceScheduler::PollSeals()
+	{
+		size_t keep = 0;
+		for (size_t i = 0; i < m_awaitingSeal.size(); ++i)
+		{
+			const SealVerdict v = m_link.OnTimeSealVerdict(m_awaitingSeal[i]);
+			if (v == SealVerdict::Rejected)
+				++m_counters.rejectedAtSeal;
+			else if (v == SealVerdict::Pending)
+				m_awaitingSeal[keep++] = m_awaitingSeal[i];
+		}
+		m_awaitingSeal.resize(keep);
 	}
 
 	void GuidanceScheduler::NoteGpuMs(uint64_t pairSeq, double ms)
@@ -369,6 +386,7 @@ namespace CameraLink
 		f.refusedNow = m_hold.Engaged();
 		f.lastRefusal = m_hold.Last();
 		f.narrowIdleNow = m_narrowIdleRemaining > 0;
+		f.rejectedAtSeal = m_counters.rejectedAtSeal;
 		return BuildGuidanceDecisions(f);
 	}
 
@@ -404,9 +422,9 @@ namespace CameraLink
 		{
 			BenchRow row;
 			row.pair = pairSeq;
-			row.seq = p.recSeq;
+			row.seq = p.rec ? pairSeq : 0;
 			row.switchMask = SwitchMask(m_settings.switches);
-			row.d = m_lag;
+			row.d = 0;
 			row.confidence = p.result.confidence;
 			row.reason = p.result.reason;
 			row.narrow = plan.counters.narrowBlocks;
@@ -465,8 +483,27 @@ namespace CameraLink
 		}
 		if (!m_gpuNotAppliedText.empty())
 			lines.push_back("camera guidance: " + m_gpuNotAppliedText);
+		{
+			uint64_t total = 0;
+			for (size_t i = 0; i < size_t(Refusal::Count); ++i)
+				total += m_counters.refusals[i];
+			if (total > 0)
+			{
+				const uint64_t guided = m_counters.guided;
+				const uint64_t unguided = total > guided ? total - guided : 0;
+				const auto& n = m_counters.notOnTime;
+				char b[320];
+				std::snprintf(b, sizeof(b), "camera guidance (d=0): %llu guided on time (%.0f%% of pairs), %llu unguided - camera(N) not ready: "
+					"a %llu, b %llu, c %llu, d %llu, e %llu; R %llu guided then rejected at the seal",
+					(unsigned long long)guided, 100.0 * double(guided) / double(total), (unsigned long long)unguided,
+					(unsigned long long)n[size_t(OnTimeMiss::NoAheadPair)], (unsigned long long)n[size_t(OnTimeMiss::NotPublished)],
+					(unsigned long long)n[size_t(OnTimeMiss::Bridged)], (unsigned long long)n[size_t(OnTimeMiss::Stale)],
+					(unsigned long long)n[size_t(OnTimeMiss::NotThePair)], (unsigned long long)m_counters.rejectedAtSeal);
+				lines.push_back(b);
+			}
+		}
 		for (size_t i = 1; i < size_t(Refusal::Count); ++i)
-			if (m_counters.refusals[i] > 0)
+			if (i != size_t(Refusal::NotOnTime) && m_counters.refusals[i] > 0)
 			{
 				char b[160];
 				std::snprintf(b, sizeof(b), "camera guidance refused: %s, %llu pairs (full search)", Text(static_cast<Refusal>(i)),
@@ -478,7 +515,7 @@ namespace CameraLink
 
 	void CameraGuidanceHook::BeforeEstimate(const VpMotion::EstimateContext& ctx, VpMotion::IGuidanceSink& sink)
 	{
-		const GuideResult r = m_sched.Guide(ctx.pairSeq, ctx.nextPairSeconds);
+		const GuideResult r = m_sched.Guide(ctx.pairSeq, ctx.nextPairSeconds, 0);   // 0: EstimateContext carries no A yet (SameCameraPair)
 		sink.SetCameraGuidance(r.frame);   // null = nothing bound: today's matcher exactly
 		m_waiting.push_back(std::make_pair(ctx.pairSeq, ctx.nextPairSeconds));
 		if (m_waiting.size() > 32)
@@ -519,6 +556,7 @@ namespace CameraLink
 
 	void CameraGuidanceHook::Poll()
 	{
+		m_sched.PollSeals();
 		if (!m_counts)
 			return;
 		std::vector<IGuidanceCountsSource::Done> done;

@@ -6,41 +6,23 @@
 
 namespace CameraLink
 {
-	void GuideLaneJob::SetNextPairHint(std::function<bool(uint64_t afterSeq, uint64_t& next)> f)
-	{
-		std::lock_guard<std::mutex> lock(m_mutex);
-		m_next = std::move(f);
-	}
-
 	void GuideLaneJob::OnFitDone(uint64_t fitSeq)
-	{
-		(void)fitSeq;   // the trigger only: the wanted pair follows the newest requested record, not this fit
-		WantNext();
-	}
-
-	void GuideLaneJob::WantNext()
 	{
 		if (!m_sched.LaneWanted())
 			return;   // every switch off: nothing is wanted, nothing is stored
-		const uint64_t latest = m_link.LatestRecordSeq();
-		std::function<bool(uint64_t, uint64_t&)> next;
-		{
-			std::lock_guard<std::mutex> lock(m_mutex);
-			next = m_next;
-		}
-		uint64_t pair = latest + 1;
-		if (next && !next(latest, pair))
-			return;   // no next pair is published yet: asked again at the next call
+		OnTimeMiss why = OnTimeMiss::None;
+		if (!m_link.OnTimeRecord(fitSeq, OnTimeCheck::PublishOnly, why))
+			return;   // d = 0: only an on-time camera(N) guides pair N (no late path)
 		std::lock_guard<std::mutex> lock(m_mutex);
-		if (pair == m_lastWanted || std::find(m_wanted.begin(), m_wanted.end(), pair) != m_wanted.end())
+		if (fitSeq == m_lastWanted || std::find(m_wanted.begin(), m_wanted.end(), fitSeq) != m_wanted.end())
 			return;   // already wanted, or already judged (published / discarded): not asked for again
-		m_lastWanted = pair;
+		m_lastWanted = fitSeq;
 		if (m_wanted.size() >= m_cap)
 		{
 			m_wanted.erase(m_wanted.begin());   // the oldest: its P4 never came; the render computes it live
 			++m_stats.dropped;
 		}
-		m_wanted.push_back(pair);
+		m_wanted.push_back(fitSeq);
 		++m_stats.wanted;
 	}
 
@@ -49,7 +31,6 @@ namespace CameraLink
 		std::unique_lock<std::mutex> pumping(m_pumpMutex, std::try_to_lock);
 		if (!pumping.owns_lock())
 			return 0;
-		WantNext();   // the P4 of the next pair may have been published since the last fit
 		std::vector<uint64_t> todo;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);

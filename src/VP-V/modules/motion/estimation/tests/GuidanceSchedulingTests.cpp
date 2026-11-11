@@ -5,7 +5,7 @@
 #endif
 #include "CppUnitTest.h"
 
-// Camera link K4-2/3: the guidance gate. Fixed d per graph; every refusal reason gives a null guidance AND a counter; all
+// Camera link K4-2/3: the guidance gate. d = 0: pair N reads camera(N) only; every refusal reason gives a null guidance AND a counter; all
 // switches off gives nullptr on every pair (nothing bound, byte-identical); the hook binds null when refused and counts the
 // escalations a frame later. CPU only.
 #include "CameraLinkTestSupport.h"
@@ -50,6 +50,14 @@ namespace VideoProcessorTest
 				records[seq] = std::make_shared<const CameraModel::CameraMotion>(fitter.Fit(in));
 				fields[seq] = copy;
 			}
+
+			// The camera measured pair `seq` over `seconds` (the same pair the matcher is asked about: SameCameraPair).
+			void Retime(uint64_t seq, double seconds)
+			{
+				auto r = std::make_shared<CameraModel::CameraMotion>(*records[seq]);
+				r->pairSeconds = seconds;
+				records[seq] = r;
+			}
 		};
 
 		struct FakeSink : VpMotion::IGuidanceSink
@@ -80,14 +88,28 @@ namespace VideoProcessorTest
 	TEST_CLASS(GuidanceSchedulingTests)
 	{
 	public:
-		TEST_METHOD(TheLagIsFixedPerGraphFromMeasuredCostsAndNeverBelowTwo)
+		TEST_METHOD(PairNReadsCameraNOnlyAndAFillPairIsNotTheCamerasPair)
 		{
-			using CameraLink::GuideLagFor;
-			Assert::AreEqual(2, int(GuideLagFor(0, 0, 1.0 / 24)));
-			Assert::AreEqual(2, int(GuideLagFor(0.020, 0.010, 1.0 / 24)), L"30 ms < one frame: 1 + 1 = 2");
-			Assert::AreEqual(3, int(GuideLagFor(0.030, 0.020, 1.0 / 24)), L"50 ms over 41.7 ms: 1 + 2");
-			Assert::AreEqual(4, int(GuideLagFor(0.030, 0.020, 1.0 / 60)), L"the same costs at 60 fps need more frames");
-			Assert::AreEqual(2, int(GuideLagFor(0.5, 0.5, 0.0)), L"unknown period: the minimum");
+			using CameraLink::Refusal;
+			FakeLink link;
+			link.AddPan(5);   // camera(5): the fit of pair 5 itself, 1/24 s
+			CameraLink::GuidanceScheduler sched(link, On());
+			Assert::IsTrue(sched.Guide(5, 1.0 / 24).frame != nullptr, L"d = 0: pair 5 is guided by camera(5)");
+			CameraLink::GuideResult r = sched.Guide(6, 1.0 / 24);
+			Assert::IsTrue(r.frame == nullptr && r.refusal == Refusal::NotOnTime, L"camera(6) absent: unguided, never camera(5)");
+			r = sched.Guide(5, 2.0 / 24);
+			Assert::IsTrue(r.frame == nullptr && r.refusal == Refusal::NotOnTime && r.miss == CameraLink::OnTimeMiss::NotThePair,
+				L"a fill pair spanning two camera pairs is not the camera's pair");
+			Assert::IsTrue(sched.Guide(5, 1.0 / 30).frame != nullptr, L"24p in 30: the 1/30 span of the camera's 1/24 pair");
+			Assert::IsTrue(sched.Guide(5, 2.0 / 30).frame != nullptr, L"24p in 30: the 2/30 span (1.6x)");
+			Assert::IsTrue(sched.Guide(5, 0).frame != nullptr, L"duration unknown: accepted");
+			const CameraLink::GuidanceCounters& c = sched.Counters();
+			Assert::AreEqual(uint64_t(2), c.refusals[size_t(Refusal::NotOnTime)]);
+			Assert::AreEqual(uint64_t(1), c.notOnTime[size_t(CameraLink::OnTimeMiss::NotThePair)]);
+			Assert::AreEqual(uint64_t(1), c.notOnTime[size_t(CameraLink::OnTimeMiss::NotPublished)], L"the fake link's default cause");
+			const CameraModel::CameraMotion& rec = *link.records[5];
+			Assert::IsTrue(CameraLink::SameCameraPair(rec, rec.pairFrom, 99.0), L"the matcher's A, when known, decides exactly");
+			Assert::IsFalse(CameraLink::SameCameraPair(rec, rec.pairFrom + 1, 1.0 / 24));
 		}
 
 		TEST_METHOD(AllSwitchesOffGivesNullOnEveryPairAndNothingIsBound)
@@ -117,40 +139,39 @@ namespace VideoProcessorTest
 		{
 			using CameraLink::Refusal;
 			FakeLink link;
-			link.AddPan(1);   // pair 3 reads P7(3 - 2) = P7(1)
+			link.AddPan(3);   // d = 0: pair 3 reads camera(3) = P7(3)
 			CameraLink::GuidanceScheduler sched(link, On());
-			sched.SetLag(2);
 			// guided
 			CameraLink::GuideResult r = sched.Guide(3);
 			Assert::IsTrue(r.frame != nullptr && r.refusal == Refusal::None, L"the happy path really guides");
 			Assert::IsTrue(r.frame->active);
-			// record late (absent)
+			// camera(4) not ready in time (absent)
 			r = sched.Guide(4);
-			Assert::IsTrue(r.frame == nullptr && r.refusal == Refusal::NoRecord);
+			Assert::IsTrue(r.frame == nullptr && r.refusal == Refusal::NotOnTime);
 			// slip
 			sched.SetContextProvider([](uint64_t, CameraLink::PairContext& c) { c.spansSlip = true; return true; });
 			r = sched.Guide(3);
 			Assert::IsTrue(r.frame == nullptr && r.refusal == Refusal::Slip);
 			sched.SetContextProvider(nullptr);
 			// not usable: ambiguous
-			auto amb = std::make_shared<CameraModel::CameraMotion>(*link.records[1]);
+			auto amb = std::make_shared<CameraModel::CameraMotion>(*link.records[3]);
 			amb->reason = CameraModel::Reason::Ambiguous;
-			link.records[1] = amb;
+			link.records[3] = amb;
 			r = sched.Guide(3);
 			Assert::IsTrue(r.frame == nullptr && r.refusal == Refusal::NotUsable);
 			// low confidence (usable by reason, below the plan floor)
-			auto low = std::make_shared<CameraModel::CameraMotion>(*link.records[1]);
+			auto low = std::make_shared<CameraModel::CameraMotion>(*link.records[3]);
 			low->reason = CameraModel::Reason::Ok;
 			low->confidence = 0.6;
-			link.records[1] = low;
+			link.records[3] = low;
 			r = sched.Guide(3);
 			Assert::IsTrue(r.frame == nullptr && r.refusal == Refusal::LowConfidence);
-			// the lag is fixed: pair 2 would read P7(0), absent
+			// d = 0: pair 2 reads camera(2) only, absent (never an older or newer record)
 			r = sched.Guide(2);
-			Assert::IsTrue(r.frame == nullptr && r.refusal == Refusal::NoRecord);
+			Assert::IsTrue(r.frame == nullptr && r.refusal == Refusal::NotOnTime);
 			const CameraLink::GuidanceCounters& c = sched.Counters();
 			Assert::AreEqual(uint64_t(1), c.guided);
-			Assert::AreEqual(uint64_t(2), c.refusals[size_t(Refusal::NoRecord)]);
+			Assert::AreEqual(uint64_t(2), c.refusals[size_t(Refusal::NotOnTime)]);
 			Assert::AreEqual(uint64_t(1), c.refusals[size_t(Refusal::Slip)]);
 			Assert::AreEqual(uint64_t(1), c.refusals[size_t(Refusal::NotUsable)]);
 			Assert::AreEqual(uint64_t(1), c.refusals[size_t(Refusal::LowConfidence)]);
@@ -167,8 +188,8 @@ namespace VideoProcessorTest
 			CameraLink::GuidanceSettings s;
 			s.switches.narrowWindow = true;   // narrow only
 			CameraLink::GuidanceScheduler sched(link, s);
-			sched.SetLag(2);
 			uint64_t pair = 3;
+			link.Retime(pair, dts[0]);
 			Assert::IsTrue(sched.Guide(pair, dts[0]).frame != nullptr, L"guided before the trip");
 			const float bad[4] = { 1.0f, 1.0f, -1.0f, -1.0f };   // far fewer accepted than planned
 			sched.OnCounts(pair, bad, dts[0]);
@@ -180,6 +201,7 @@ namespace VideoProcessorTest
 			{
 				++pair;
 				last = dts[n % dts.size()];
+				link.Retime(pair, last);
 				const CameraLink::GuideResult r = sched.Guide(pair, last);
 				elapsed += last;
 				++n;
@@ -189,6 +211,7 @@ namespace VideoProcessorTest
 			Assert::IsFalse(sched.Governor().Tripped(), L"recovered without any guided pair");
 			Assert::IsTrue(elapsed >= 1.0 - 1e-9 && elapsed - last < 1.0, L"after exactly 1 s of measured pair time");
 			Assert::AreEqual(uint32_t(1), sched.Governor().Recoveries());
+			link.Retime(pair + 1, last);
 			Assert::IsTrue(sched.Guide(pair + 1, last).frame != nullptr, L"guidance is back");
 		}
 
@@ -202,10 +225,9 @@ namespace VideoProcessorTest
 		TEST_METHOD(TheHookBindsNullWhenRefusedAndTheFrameWhenGuidedAndParsesCountsLater)
 		{
 			FakeLink link;
-			link.AddPan(1);
+			link.AddPan(3);
 			CameraLink::GuidanceSettings s = On();
 			CameraLink::GuidanceScheduler sched(link, s);
-			sched.SetLag(2);
 			FakeCounts counts;
 			CameraLink::CameraGuidanceHook hook(sched, &counts, link);
 			FakeSink sink;

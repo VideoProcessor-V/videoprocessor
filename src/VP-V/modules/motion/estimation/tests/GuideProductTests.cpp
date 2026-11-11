@@ -5,8 +5,8 @@
 #endif
 #include "CppUnitTest.h"
 
-// Camera link K4-1/2: the p7g_camera_guide declaration pins, and lane == live (the same unit BuildGuide, byte-equal); a late
-// lane result is discarded. CPU only.
+// Camera link K4-1/2: the p7g_camera_guide declaration pins (d = 0: P7 read at lag 0), and lane == live (the same unit
+// BuildGuide, byte-equal); a late lane result is discarded. CPU only.
 #include "CameraLinkTestSupport.h"
 #include <VP-V/modules/motion/estimation/global_model/link/CameraGuideProduct.h>
 #include <VP-V/modules/motion/estimation/global_model/link/GuidanceScheduler.h>
@@ -55,7 +55,7 @@ namespace VideoProcessorTest
 		{
 			using namespace VpSkeleton;
 			Assert::AreEqual(int(kSourceIdentity) + 1, int(CameraLink::kP7gCameraGuide), L"registered right after P14 (doc 72 item 1)");
-			const Registry reg = CameraLink::SkeletonProductsWithGuide(3);
+			const Registry reg = SkeletonProducts();
 			const char* why = "";
 			Assert::IsTrue(reg.Validate(&why), L"dense, inputs known, no cycle");
 			Assert::AreEqual(size_t(kSkeletonProductEnd), reg.Size());
@@ -64,21 +64,14 @@ namespace VideoProcessorTest
 			Assert::IsTrue(p.backend == Backend::Cpu && p.tier == Tier::T0 && p.residency == Residency::SystemRam);
 			Assert::AreEqual(2, int(p.inputCount));
 			Assert::AreEqual(int(kP7CameraFit), int(p.inputs[0].product));
-			Assert::AreEqual(3, int(p.inputs[0].lag));
+			Assert::AreEqual(0, int(p.inputs[0].lag), L"d = 0: camera(N) = P7(N), the fit of the same pair");
 			Assert::AreEqual(int(kP4SourceStats), int(p.inputs[1].product));
 			Assert::AreEqual(0, int(p.inputs[1].lag));
 			Assert::AreEqual(uint32_t(20), uint32_t(p.size.terms[0].bytesPerCell));
 			Dims d4k;
 			d4k.width = 3840; d4k.height = 2160;
 			Assert::AreEqual(uint64_t(240u * 135u * 20u + 256u), BytesOf(p.size, d4k), L"about 0.6 MB at 4K");
-			// The lag floor.
-			const Registry low = CameraLink::SkeletonProductsWithGuide(0);
-			Assert::AreEqual(int(CameraLink::kMinGuideLag), int(low.Get(CameraLink::kP7gCameraGuide).inputs[0].lag));
-			// The registered declaration carries the floor lag; the measured d only changes that input (tokens identical everywhere).
-			const Registry base = SkeletonProducts();
-			Assert::AreEqual(int(kGuideDefaultLag), int(base.Get(CameraLink::kP7gCameraGuide).inputs[0].lag));
-			for (size_t i = 0; i < base.Size(); ++i)
-				Assert::AreEqual(std::string(base.All()[i].token), std::string(reg.All()[i].token));
+			Assert::AreEqual(0, int(kGuideDefaultLag), L"the registered lag is 0: there is no measured lag and no late path");
 			// The row and the consumer.
 			const Catalog::ProductRow row = CameraLink::GuideRow();
 			Assert::AreEqual(int(CameraLink::kP7gCameraGuide), int(row.id));
@@ -88,16 +81,17 @@ namespace VideoProcessorTest
 			Assert::AreEqual(int(CameraLink::kP7gCameraGuide), int(c.consumes[0].product));
 		}
 
-		TEST_METHOD(AGraphWithTheGuideConsumerKeepsP7AtHistoryDAndBuilds)
+		TEST_METHOD(AGraphWithTheGuideConsumerReadsP7AtLagZeroAndBuilds)
 		{
 			using namespace VpSkeleton;
-			const Registry reg = CameraLink::SkeletonProductsWithGuide(3);
+			const Registry reg = SkeletonProducts();
 			std::vector<ConsumerDecl> cs;
 			cs.push_back(CameraLink::GuideConsumerDecl());
 			const Graph g = BuildGraph(reg, cs, CameraLinkTest::Settings(2));
 			Assert::IsTrue(g.valid, L"valid graph");
 			Assert::IsTrue(g.Has(CameraLink::kP7gCameraGuide) && g.Has(kP7CameraFit) && g.Has(kP4SourceStats));
-			Assert::IsTrue(g.Find(kP7CameraFit)->history >= 3, L"P7 is kept d frames");
+			Assert::AreEqual(int(reg.Get(kP7CameraFit).history), int(g.Find(kP7CameraFit)->historyFull),
+				L"d = 0: the guide keeps no extra P7 history");
 			const Graph none = BuildGraph(reg, {}, CameraLinkTest::Settings(2));
 			Assert::IsFalse(none.Has(CameraLink::kP7gCameraGuide), L"absent when nobody wants it");
 		}
@@ -108,8 +102,6 @@ namespace VideoProcessorTest
 			Fill(link);
 			CameraLink::GuidanceScheduler lane(link, Settings());
 			CameraLink::GuidanceScheduler live(link, Settings());
-			lane.SetLag(2);
-			live.SetLag(2);
 			Assert::IsTrue(lane.PublishLane(3), L"the worker published first");
 			const CameraLink::GuideResult a = lane.Guide(3);
 			const CameraLink::GuideResult b = live.Guide(3);
@@ -126,7 +118,6 @@ namespace VideoProcessorTest
 			Link link;
 			Fill(link);
 			CameraLink::GuidanceScheduler s(link, Settings());
-			s.SetLag(2);
 			const CameraLink::GuideResult live = s.Guide(3);
 			Assert::IsTrue(live.frame != nullptr && !live.fromLane);
 			Assert::IsFalse(s.PublishLane(3), L"the render asked first");
@@ -163,8 +154,6 @@ namespace VideoProcessorTest
 			CameraLink::GuidanceSettings st = Settings();
 			CameraLink::GuidanceScheduler lane(link, st);
 			CameraLink::GuidanceScheduler live(link, st);
-			lane.SetLag(2);
-			live.SetLag(2);
 			// Trip both governors (narrow + E1 off, model global / static stay).
 			const float bad[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 			for (CameraLink::GuidanceScheduler* s : { &lane, &live })
@@ -188,8 +177,7 @@ namespace VideoProcessorTest
 			Link link;
 			Fill(link);
 			CameraLink::GuidanceScheduler s(link, Settings());
-			s.SetLag(2);
-			Assert::IsFalse(s.PublishLane(1), L"before the first lagged pair: nothing to build, nothing stored");
+			Assert::IsFalse(s.PublishLane(0), L"no camera(0): nothing to build, nothing stored");
 			Assert::AreEqual(uint64_t(0), s.Counters().lanePublished);
 			Assert::IsTrue(s.PublishLane(4));   // built with narrow + E1 on
 			const float bad[4] = { 1.0f, 1.0f, 1.0f, 1.0f };

@@ -29,7 +29,6 @@ namespace CameraLink
 		m_sched.SetContextProvider(MakeContextProvider(engine, *m_core.Link(), m_hooks.p4, m_hooks.onRenderThread,
 			[this]() { return m_flowMayBeResident.load(std::memory_order_relaxed); }));
 		m_sched.SetSlipCheck([engine](uint64_t recordSeq, uint64_t pairSeq) { return engine->PairSpansSlip(recordSeq, pairSeq); });
-		m_job.SetNextPairHint(m_hooks.nextPair);
 		Reconcile();
 	}
 
@@ -76,14 +75,6 @@ namespace CameraLink
 		m_settings = settings;
 		m_sched.SetSettings(settings);
 		Reconcile();
-	}
-
-	uint8_t CameraGuidanceAdapter::RebuildGraph(double sourcePeriodSeconds, bool deterministic)
-	{
-		const uint8_t d = m_core.LagMeter().Lag(sourcePeriodSeconds, deterministic);
-		m_sched.SetLag(d);
-		m_job.Reset();
-		return d;
 	}
 
 	void CameraGuidanceAdapter::OnDiscontinuity()

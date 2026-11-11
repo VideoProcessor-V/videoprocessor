@@ -11,7 +11,7 @@
 //   * Detach() clears the engine's hook FIRST (render thread / under renderMutex), then the observer (waiting for a call in flight),
 //     then drops everything. Call it at the host's GpuReleased / Shutdown, before the engine pointer goes.
 //   * OnFrame() once per frame on the render thread: finish the counts a frame late, pump the lane job.
-//   * the d lag is derived at a graph rebuild from the MEASURED costs (RebuildGraph), then the core's meter restarts with the graph.
+//   * d = 0: pair N is guided only by camera(N) ready in time (GuidanceScheduler); no lag is derived, there is no late path.
 //   * status through FallbackCatalog decisions and status lines; costs as PassTimers rows (the core posts camera.fit /
 //     camera.readback to PassTimers::Inbox::Motion(); no adapter call).
 // AfterEstimate: P5a's AfterEstimate(pairSeq, VpMotion::EstimateOutcome) (M2 P5a-out) is mapped by CameraGuidanceHook::AfterEstimate onto
@@ -37,7 +37,6 @@ namespace CameraLink
 	struct GuidanceAdapterHooks
 	{
 		P4Reader p4;                                               // P4(N) scene facts from a PUBLISHED slot (required)
-		std::function<bool(uint64_t afterSeq, uint64_t& next)> nextPair;   // lane: the first P4-published seq after afterSeq (optional)
 		std::function<bool()> onRenderThread;                      // true on the render thread (the engine is render-thread only, P5a contract)
 	};
 
@@ -53,7 +52,7 @@ namespace CameraLink
 		// pairs are judged on the plan counters). Registers the hook only when a switch is on.
 		void Attach(VpMotion::IVectorEngine* engine, std::unique_ptr<IGuidanceCountsSource> counts);
 		// LOCK RULE: Detach (and SetSettings / Attach, which may unregister) run on the render thread with renderMutex held and wait on the core's
-		// observer mutex; the camera worker holds that mutex while it pumps the lane job. So the host's p4 reader, nextPair hint and anything
+		// observer mutex; the camera worker holds that mutex while it pumps the lane job. So the host's p4 reader and anything
 		// they call must NEVER take renderMutex or wait for the render thread, or Detach deadlocks. (CameraLinkCore::SetFitDoneObserver asserts
 		// in debug builds that it is not called from the observer's own thread.)
 		// engineValid = false: the engine pointer is not known to be valid any more (the renderer was torn down without a GpuReleased, or the
@@ -64,9 +63,6 @@ namespace CameraLink
 
 		// New switches / thresholds: re-registers or unregisters the hook, drops stored lane results.
 		void SetSettings(const GuidanceSettings& settings);
-		// A graph rebuild: d from the measured fit cost and readback latency over the measured source period (the floor when
-		// unmeasured or deterministic). Call BEFORE core.AttachLane / AttachGraph (which restart the meter). Returns d.
-		uint8_t RebuildGraph(double sourcePeriodSeconds, bool deterministic);
 		// A discontinuity (seek, resync, field era change): stored plans, wanted pairs and holds are dropped.
 		void OnDiscontinuity();
 		// Discontinuities taken since construction (render thread; diagnostics and the W1-C2a A6 injection test).

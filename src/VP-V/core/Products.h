@@ -987,13 +987,10 @@ inline void AppendSourceGeometryProduct(std::vector<ProductDecl>& decls)
 }
 
 // p7g_camera_guide (doc 56, K4-1; claimed as id 20 by CameraGuideProduct.h, registered here): the measurement plan for pair N is a
-// pure function of P7(N-d), the CPU field copy of that pair and P4(N), known ahead and declared as a lane product. d is fixed per
-// graph (CameraLink::GuideLagFor); the registry carries the floor d = kGuideDefaultLag and CameraLink::SkeletonProductsWithGuide(d)
-// sets the measured one on a graph rebuild.
-// kGuideDefaultLag is a STRUCTURAL minimum, not a rate: the guide of pair N needs P7(N-d) read back (one frame behind the fit that made
-// it) and its CPU field copy, so d >= 2 whatever the source rate. The rate-dependent part (readback + p95 fit over the measured source
-// period) is CameraLink::GuideLagFor, which replaces this floor on every graph rebuild (SetGuideLag).
-constexpr uint8_t kGuideDefaultLag = 2;
+// pure function of camera(N) = P7(N) and P4(N), known ahead and declared as a lane product. d = 0 (refs 93-prep-cam-d0): the fit of
+// the SAME pair, published on time from the ahead field before the matcher of N runs; a pair whose camera is not ready in time runs
+// unguided (counted, visible). There is no late path and no measured lag.
+constexpr uint8_t kGuideDefaultLag = 0;
 constexpr uint32_t kGuideBytesPerBlock = 20;   // RGBA32F guide + R32F code per 16 px block
 inline void AppendCameraGuideProduct(std::vector<ProductDecl>& decls)
 {

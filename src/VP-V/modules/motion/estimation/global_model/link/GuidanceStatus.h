@@ -5,8 +5,10 @@
 // same path as camera.no_model.*: Ctrl+I, Config status, the one-time notice), never a camera-private channel.
 //   camera.guidance.escalations_high   the governor tripped: narrow and E1 skip are off for the cool-down ("camera guidance:
 //                                      escalations high, full search"); released when it recovers
-//   camera.guidance.refused            the last pairs were refused (record late, slip, no dominant motion, confidence, plan
-//                                      empty); held for 0.5 s of MEASURED pair time after the last refusal, so it never flickers
+//   camera.guidance.refused            the last pairs were refused (slip, no dominant motion, confidence, plan empty); held for
+//                                      0.5 s of MEASURED pair time after the last refusal, so it never flickers. "camera(N) not
+//                                      ready in time" is per-pair and expected at d = 0: counted per cause in the status line only
+//   camera.guidance.unguided           guided pairs were rejected at their on-time seal afterwards (R > 0, expected 0: a defect)
 //   camera.guidance.narrow_idle        the narrow window was planned but the engine's field seeds the matcher (NVOF seed mode):
 //                                      "engine field used, narrow idle". The seeds are never dropped; the narrow pass just does
 //                                      not run. Held like the refusal entry.
@@ -27,6 +29,7 @@ namespace CameraLink
 	constexpr const char* kIdGuidanceEscalations = "camera.guidance.escalations_high";
 	constexpr const char* kIdGuidanceRefused = "camera.guidance.refused";
 	constexpr const char* kIdGuidanceNarrowIdle = "camera.guidance.narrow_idle";
+	constexpr const char* kIdGuidanceUnguided = "camera.guidance.unguided";
 	constexpr double kGuidanceRefusalHoldSeconds = 0.5;
 
 	// Engages for kGuidanceRefusalHoldSeconds of measured time after each refusal worth showing.
@@ -36,7 +39,7 @@ namespace CameraLink
 		// One pair judged. pairSeconds <= 0 (unknown) lets the hold run out at the first pair that is not refused.
 		void Observe(Refusal r, double pairSeconds)
 		{
-			if (r != Refusal::None && r != Refusal::AllOff && r != Refusal::Governor)
+			if (r != Refusal::None && r != Refusal::AllOff && r != Refusal::Governor && r != Refusal::NotOnTime)
 			{
 				m_remaining = kGuidanceRefusalHoldSeconds;
 				m_last = r;
@@ -62,6 +65,7 @@ namespace CameraLink
 		bool refusedNow = false;        // RefusalHold::Engaged()
 		Refusal lastRefusal = Refusal::None;
 		bool narrowIdleNow = false;     // narrow planned, the engine's field used instead (held)
+		uint64_t rejectedAtSeal = 0;    // R: guided pairs whose on-time seal rejected camera(N) afterwards
 	};
 
 	inline std::vector<FallbackCatalog::Decision> BuildGuidanceDecisions(const GuidanceStatusFacts& f)
@@ -76,6 +80,8 @@ namespace CameraLink
 		d.push_back(f.switchesOn && f.narrowIdleNow ?
 			Engaged(kIdGuidanceNarrowIdle, "camera guidance: engine field used, narrow idle (the engine's vectors seed the matcher; no seed is dropped)") :
 			Released(kIdGuidanceNarrowIdle));
+		d.push_back(f.switchesOn && f.rejectedAtSeal > 0 ?
+			Engaged(kIdGuidanceUnguided, "camera_guidance: unguided - guided pairs rejected at the seal") : Released(kIdGuidanceUnguided));
 		return d;
 	}
 }
