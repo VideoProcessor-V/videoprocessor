@@ -14,7 +14,7 @@
 //    the remaining budget runs a row split that fits (VpLaneProducts::PlanChunks rule, LaneGpuJobs.h), and an
 //    unsplittable one is DEFERRED (counted, stays first next slot; its consumer computes at render as today);
 //  - a slice work runs inside its Configure-time slice and the remaining budget; fill only in what is left;
-//  - no fixed cost: each work predicts from its own measurement (MeasuredCost); an unmeasured work runs only as
+//  - no fixed cost: each work predicts from its own measurement (SpareMeasuredCost); an unmeasured work runs only as
 //    the first work of a slot (so it is measured once without stacking on other work); an unmeasured unpack /
 //    core work deferred behind other work goes FIRST in the next slot that runs (once; then it is measured), so
 //    it is never starved by an earlier work that always has work (audit S4);
@@ -73,7 +73,7 @@ inline const char* SpareOutcomeName(SpareOutcome o)
 }
 
 // A work's own cost model: an EWMA of its measured ms (0 = not measured). Per-row cost when the work is split.
-class MeasuredCost {
+class SpareMeasuredCost {
 public:
     void Note(double ms, uint32_t rows = 0, uint32_t ofRows = 0)
     {
@@ -317,7 +317,7 @@ private:
     unsigned long long m_noKey = 0;
 };
 
-// A work built from functions (the host's adapters and the tests): it keeps its own MeasuredCost from what Run
+// A work built from functions (the host's adapters and the tests): it keeps its own SpareMeasuredCost from what Run
 // reports, so no slot size is fixed before costs are measured.
 class FunctionSpareWork : public ISpareWork {
 public:
@@ -348,13 +348,13 @@ public:
         if (RowsLeft() == 0) m_rowsWhole = 0;   // the work finished: the next one starts its own whole
         return ms;
     }
-    const MeasuredCost& Cost() const { return m_cost; }
+    const SpareMeasuredCost& Cost() const { return m_cost; }
 
 private:
     uint16_t m_id;
     SpareClass m_class;
     uint32_t m_order;
-    MeasuredCost m_cost;
+    SpareMeasuredCost m_cost;
     uint32_t m_rowsWhole = 0;
 };
 

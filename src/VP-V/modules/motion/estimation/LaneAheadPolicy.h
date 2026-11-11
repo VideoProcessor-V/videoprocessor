@@ -15,7 +15,7 @@
 // - Depth target 4 frames ahead, ring minimum 2 (TD 99 s3.4; doc 93 s8e); bounded by the frames really queued
 //   after the render frame's next and by the lane lead (lead - 1) when the lane is on - never added queueing.
 // - E3: a lane pair only when its P2 is in the slot or the producer is not running (P2NotReady, retried next slot).
-// - No fixed matcher cost: the spare slot's MeasuredCost decides fit (NoSpare is the slot's verdict, counted here).
+// - No fixed matcher cost: the spare slot's SpareMeasuredCost decides fit (NoSpare is the slot's verdict, counted here).
 namespace VpMotion {
 namespace LaneAhead {
 
