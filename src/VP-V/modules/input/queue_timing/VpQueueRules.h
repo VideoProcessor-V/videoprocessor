@@ -81,6 +81,15 @@ namespace VpQueueRules
 		return (std::max)(target, floor);
 	}
 
+	// P6 rest S1 (TD-readiness audit 93 (a)2): the analysis floor - the frames the queue keeps
+	// for its look-ahead users: the motion look-ahead's (MotionAhead::QueueFramesFor) and an
+	// analysis product's largest DECLARED lead + 2 (A shown, the lead's frames, one arriving;
+	// declared, not measured, so it cannot ratchet). No declared lead: the motion floor alone.
+	inline size_t AnalysisFloorFrames(size_t motionFloor, unsigned declaredLead)
+	{
+		return declaredLead > 0 ? (std::max)(motionFloor, static_cast<size_t>(declaredLead) + 2) : motionFloor;
+	}
+
 	// Hunt 2 13-timing H1 (queue_timing_fixes): the front frame of a queue that
 	// holds its target has already waited about target periods; that wait is the
 	// queue doing its job, not staleness. With staleBeyondTarget the age is measured

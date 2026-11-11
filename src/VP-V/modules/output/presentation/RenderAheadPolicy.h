@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <string>
 #include <utility>
@@ -97,6 +98,19 @@ namespace RenderAhead
 	// render_ahead off's; a lead the queue cannot give back keeps render-ahead OFF for the source
 	// (shown under "Fallbacks engaged"). No lead (no extras: 50/60p on 60 Hz) always fits.
 	constexpr size_t kBudgetMinQueued = 3;
+
+	// P6 rest S1 (TD-readiness audit 93 (a)2): which side gives way when the analysis floor
+	// (the frames the queue's look-ahead users keep: the motion depth floor, a declared
+	// analysis lead + 2) and the render-ahead credit compete for the same queued frame. The
+	// policy is the owner's (parked for the TD planning), so it is an input:
+	//  - CreditWins (default, today's decision): the credit is taken as before; the report
+	//    says the floor holds the queue above the credit and gives the real delay.
+	//  - FloorWins: the credit is only what the floor leaves; a lead it no longer covers
+	//    vetoes render-ahead (its fallback says why).
+	// Either way the queue keeps the floor (CombineQueueTarget), and the decision is the same
+	// as without a floor while the floor is at most kBudgetMinQueued.
+	enum class FloorPolicy { CreditWins, FloorWins };
+
 	struct BudgetDecision
 	{
 		bool fits = true;
@@ -105,27 +119,61 @@ namespace RenderAhead
 		double budgetMs = 0.0;     // render_ahead off's delay: the queue target
 		double totalMs = 0.0;      // with render-ahead: (target - credit) x P_s + lead
 		const char* reason = "no lead";
+		// The analysis floor (P6 rest S1).
+		size_t floorFrames = 0;    // the input
+		bool floorCompetes = false;   // the floor took (FloorWins) or kept (CreditWins) a frame of the credit
+		double realTotalMs = 0.0;  // the delay with the queue held at the floor: max(target - credit, floor) x P_s + lead
 	};
+	inline BudgetDecision FitDelayBudget(double sourcePeriod, double displayPeriod, size_t queueFrames, bool creditOn,
+		size_t floorFrames, FloorPolicy policy);
 	inline BudgetDecision FitDelayBudget(double sourcePeriod, double displayPeriod, size_t queueFrames, bool creditOn)
 	{
+		return FitDelayBudget(sourcePeriod, displayPeriod, queueFrames, creditOn, 0, FloorPolicy::CreditWins);
+	}
+	inline BudgetDecision FitDelayBudget(double sourcePeriod, double displayPeriod, size_t queueFrames, bool creditOn,
+		size_t floorFrames, FloorPolicy policy)
+	{
 		BudgetDecision d;
+		d.floorFrames = floorFrames;
 		const double lead = PlannedLead(sourcePeriod, displayPeriod);
 		d.leadMs = lead * 1000.0;
 		d.budgetMs = sourcePeriod > 0.0 ? static_cast<double>(queueFrames) * sourcePeriod * 1000.0 : 0.0;
 		d.totalMs = d.budgetMs;
+		d.realTotalMs = d.totalMs;
 		if (!(lead > 0.0) || !(sourcePeriod > 0.0) || !std::isfinite(lead / sourcePeriod))
 			return d;
 		constexpr double kSlackMs = 0.5;   // timestamp rounding
 		const size_t wanted = static_cast<size_t>(std::ceil(lead / sourcePeriod - 1e-9));
 		if (creditOn && queueFrames >= wanted + kBudgetMinQueued)
 		{
-			d.creditFrames = wanted;
-			d.totalMs = (static_cast<double>(queueFrames - wanted) * sourcePeriod + lead) * 1000.0;
+			// The floor the queue keeps (CombineQueueTarget: never above the target).
+			const size_t floorKept = (std::min)(floorFrames, queueFrames);
+			size_t credit = wanted;
+			if (floorKept > queueFrames - wanted)
+			{
+				d.floorCompetes = true;
+				if (policy == FloorPolicy::FloorWins)
+					credit = queueFrames - (std::max)(floorKept, kBudgetMinQueued);   // what the floor leaves
+			}
+			if (credit < wanted)
+			{
+				// FloorWins: the frames left do not cover the lead.
+				d.creditFrames = 0;
+				d.totalMs = d.budgetMs + d.leadMs;
+				d.realTotalMs = d.totalMs;
+				d.fits = false;
+				d.reason = "the analysis floor keeps the frames the lead needs";
+				return d;
+			}
+			d.creditFrames = credit;
+			d.totalMs = (static_cast<double>(queueFrames - credit) * sourcePeriod + lead) * 1000.0;
+			d.realTotalMs = (static_cast<double>((std::max)(queueFrames - credit, floorKept)) * sourcePeriod + lead) * 1000.0;
 			d.fits = d.totalMs <= d.budgetMs + kSlackMs;
 			d.reason = d.fits ? "the queue gives the lead back" : "the lead exceeds the frames given back";
 			return d;
 		}
 		d.totalMs = d.budgetMs + d.leadMs;
+		d.realTotalMs = d.totalMs;
 		d.fits = false;
 		d.reason = !creditOn ? "the lead would add delay (render_ahead_queue_credit off)" :
 			"the queue is too short to give the lead back";
@@ -1162,6 +1210,11 @@ namespace RenderAhead
 		// (FitDelayBudget); vetoed, the plain per-refresh path runs as with render_ahead off.
 		bool budgetVeto = false;
 		size_t budgetCredit = 0;         // the frames the budget lets the queue give back
+		// The analysis floor's inputs (S1, TD-readiness 93 (a)2): the frames the queue keeps for
+		// its look-ahead users (any thread; 0 = none) and who gives way when it competes with
+		// the credit (the owner's policy; CreditWins = today).
+		std::atomic<size_t> analysisFloor{ 0 };
+		FloorPolicy floorPolicy = FloorPolicy::CreditWins;
 		// The vector mode each extra's GPU timer ran with (timer serial -> de-judder vectors).
 		std::deque<std::pair<unsigned long long, bool>> extraTimerModes;
 
@@ -1304,6 +1357,30 @@ namespace RenderAhead
 			change.veto = !d.fits;
 			change.changed = change.veto != budgetVeto;
 			return change;
+		}
+
+		// The budget for this source with the Presenter's floor inputs.
+		BudgetDecision FitBudget(double sourcePeriod, double displayPeriod, size_t queueFrames, bool creditOn) const
+		{
+			return FitDelayBudget(sourcePeriod, displayPeriod, queueFrames, creditOn,
+				analysisFloor.load(std::memory_order_acquire), floorPolicy);
+		}
+
+		// The visible line when the floor and the credit compete (both policies; empty when
+		// they do not): what was vetoed or kept and why.
+		static std::string FloorReport(const BudgetDecision& d, FloorPolicy policy)
+		{
+			if (!d.floorCompetes)
+				return std::string();
+			char line[240];
+			if (policy == FloorPolicy::FloorWins)
+				snprintf(line, sizeof(line), "the analysis floor (%zu frames) wins: render-ahead's credit is vetoed, "
+					"its %.0f ms lead does not fit", d.floorFrames, d.leadMs);
+			else
+				snprintf(line, sizeof(line), "the credit wins over the analysis floor (%zu frames): the queue stays at the "
+					"floor, so the real delay is %.0f ms, not %.0f ms (%.0f ms budget)", d.floorFrames, d.realTotalMs,
+					d.totalMs, d.budgetMs);
+			return line;
 		}
 
 		// A changed veto: off breaks the chain and returns the credit at once; on starts

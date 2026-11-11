@@ -6,6 +6,7 @@
 #include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
+#include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/output/presentation/RenderAheadPolicy.h>
 #include <VP-V/modules/output/presentation/OpenLoopDisplayRate.h>
 #include <DisplayRefreshRatePolicy.h>
@@ -2410,6 +2411,122 @@ namespace RenderAheadPolicyTest
 				Assert::AreEqual(r.observedSeen, p.observedSeen);
 			}
 			Assert::IsTrue(p.shownCount[0] > 0 && p.shownCount[1] > 0, L"both kinds seen");
+		}
+	};
+	// P6 rest S1 (TD-readiness audit 93 (a)2): the analysis floor is an input of the delay
+	// budget and the floor-vs-credit policy is selectable; with no floor above
+	// kBudgetMinQueued the decision is today's in both policies.
+	TEST_CLASS(PresenterFloorTests)
+	{
+	public:
+		TEST_METHOD(AnalysisFloorTakesTheDeclaredLeadPlusTwo)
+		{
+			Assert::AreEqual(size_t{ 0 }, VpQueueRules::AnalysisFloorFrames(0, 0));
+			Assert::AreEqual(size_t{ 3 }, VpQueueRules::AnalysisFloorFrames(3, 0), L"no declared lead: the motion floor");
+			Assert::AreEqual(size_t{ 4 }, VpQueueRules::AnalysisFloorFrames(3, 2), L"lead 2 + 2 above the motion floor");
+			Assert::AreEqual(size_t{ 5 }, VpQueueRules::AnalysisFloorFrames(5, 2), L"the motion floor above lead + 2");
+			Assert::AreEqual(size_t{ 3 }, VpQueueRules::AnalysisFloorFrames(0, 1));
+		}
+
+		TEST_METHOD(NoFloorAboveTheMinimumKeepsTodaysDecision)
+		{
+			const double sources[] = { 23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0 };
+			const double displays[] = { 48.0, 50.0, 59.94, 60.0, 100.0, 120.0, 144.0 };
+			for (double sh : sources)
+				for (double dh : displays)
+					for (size_t q = 0; q <= 12; ++q)
+						for (int c = 0; c < 2; ++c)
+							for (size_t f = 0; f <= kBudgetMinQueued; ++f)
+								for (int pol = 0; pol < 2; ++pol)
+								{
+									const BudgetDecision a = FitDelayBudget(1.0 / sh, 1.0 / dh, q, c != 0);
+									const BudgetDecision b = FitDelayBudget(1.0 / sh, 1.0 / dh, q, c != 0, f,
+										pol ? FloorPolicy::FloorWins : FloorPolicy::CreditWins);
+									const std::wstring n = Name(sh, dh) + L" q " + std::to_wstring(q) + L" f " + std::to_wstring(f);
+									Assert::AreEqual(a.fits, b.fits, n.c_str());
+									Assert::AreEqual(a.creditFrames, b.creditFrames, n.c_str());
+									Assert::AreEqual(a.leadMs, b.leadMs, n.c_str());
+									Assert::AreEqual(a.budgetMs, b.budgetMs, n.c_str());
+									Assert::AreEqual(a.totalMs, b.totalMs, n.c_str());
+									Assert::AreEqual(std::string(a.reason), std::string(b.reason), n.c_str());
+									Assert::IsFalse(b.floorCompetes, n.c_str());
+									Assert::AreEqual(b.totalMs, b.realTotalMs, n.c_str());
+									Assert::IsTrue(Presenter::FloorReport(b, FloorPolicy::CreditWins).empty(), n.c_str());
+								}
+		}
+
+		TEST_METHOD(FloorAboveTheMotionDepthCreditWinsReportsTheRealDelay)
+		{
+			// 24p on 60 Hz: lead 2 extras = 33.3 ms, credit 1 frame; queue 4; motion floor 3,
+			// a declared analysis lead 2 -> floor 4 > 4 - 1.
+			const double ps = 1.0 / 24.0, pd = 1.0 / 60.0;
+			const size_t floorFrames = VpQueueRules::AnalysisFloorFrames(3, 2);
+			const BudgetDecision d = FitDelayBudget(ps, pd, 4, true, floorFrames, FloorPolicy::CreditWins);
+			const BudgetDecision today = FitDelayBudget(ps, pd, 4, true);
+			Assert::IsTrue(d.floorCompetes);
+			Assert::AreEqual(today.fits, d.fits, L"CreditWins keeps today's decision");
+			Assert::AreEqual(today.creditFrames, d.creditFrames);
+			Assert::AreEqual(size_t{ 1 }, d.creditFrames);
+			Assert::AreEqual(today.totalMs, d.totalMs);
+			Assert::AreEqual((4.0 * ps + 2.0 * pd) * 1000.0, d.realTotalMs, 1e-9, L"the queue stays at the floor");
+			Assert::IsTrue(d.realTotalMs > d.budgetMs, L"the real delay exceeds the budget");
+			const std::string report = Presenter::FloorReport(d, FloorPolicy::CreditWins);
+			Assert::IsTrue(report.find("credit wins") != std::string::npos);
+			Assert::IsTrue(report.find("200 ms") != std::string::npos, L"the real delay is shown");
+
+			Presenter p;
+			p.analysisFloor.store(floorFrames);
+			const BudgetDecision viaPresenter = p.FitBudget(ps, pd, 4, true);
+			Assert::AreEqual(d.creditFrames, viaPresenter.creditFrames, L"the default policy is CreditWins");
+			Assert::IsFalse(p.UpdateBudget(viaPresenter).veto);
+			Assert::AreEqual(size_t{ 1 }, p.budgetCredit);
+		}
+
+		TEST_METHOD(FloorAboveTheMotionDepthFloorWinsShrinksTheCreditAndVetoesVisibly)
+		{
+			const double ps = 1.0 / 24.0, pd = 1.0 / 60.0;
+			const size_t floorFrames = VpQueueRules::AnalysisFloorFrames(3, 2);
+			const BudgetDecision d = FitDelayBudget(ps, pd, 4, true, floorFrames, FloorPolicy::FloorWins);
+			Assert::IsTrue(d.floorCompetes);
+			Assert::IsFalse(d.fits, L"the frames the floor leaves do not cover the lead");
+			Assert::AreEqual(size_t{ 0 }, d.creditFrames, L"the credit shrinks to what the floor leaves");
+			Assert::AreEqual(std::string("the analysis floor keeps the frames the lead needs"), std::string(d.reason));
+			Assert::IsTrue(Presenter::FloorReport(d, FloorPolicy::FloorWins).find("vetoed") != std::string::npos);
+
+			Presenter p;
+			p.analysisFloor.store(floorFrames);
+			p.floorPolicy = FloorPolicy::FloorWins;
+			const PresenterBudgetChange change = p.UpdateBudget(p.FitBudget(ps, pd, 4, true));
+			Assert::IsTrue(change.veto && change.changed);
+			Assert::AreEqual(size_t{ 0 }, p.budgetCredit);
+
+			// A queue long enough for both: no competition, the credit as today.
+			const BudgetDecision longer = FitDelayBudget(ps, pd, 6, true, floorFrames, FloorPolicy::FloorWins);
+			Assert::IsFalse(longer.floorCompetes);
+			Assert::IsTrue(longer.fits);
+			Assert::AreEqual(size_t{ 1 }, longer.creditFrames);
+		}
+
+		TEST_METHOD(AvrTier200MsAt24p)
+		{
+			// The 200 ms AVR tier at 24p: the whole frames inside it (4 = 166.7 ms); a TD lead 3
+			// declares floor 5, capped at the queue. Both policies report; FloorWins vetoes.
+			const double ps = 1.0 / 24.0, pd = 1.0 / 60.0;
+			const size_t q = static_cast<size_t>(std::floor(0.200 / ps + 1e-9));
+			Assert::AreEqual(size_t{ 4 }, q);
+			const size_t floorFrames = VpQueueRules::AnalysisFloorFrames(MotionAhead::QueueFramesFor(2), 3);
+			Assert::AreEqual(size_t{ 5 }, floorFrames);
+			const BudgetDecision credit = FitDelayBudget(ps, pd, q, true, floorFrames, FloorPolicy::CreditWins);
+			Assert::IsTrue(credit.fits && credit.floorCompetes);
+			Assert::IsTrue(credit.totalMs <= 200.0 + 0.5, L"the counted delay fits the tier");
+			Assert::AreEqual((4.0 * ps + 2.0 * pd) * 1000.0, credit.realTotalMs, 1e-9);
+			Assert::IsFalse(Presenter::FloorReport(credit, FloorPolicy::CreditWins).empty(), L"visible");
+			const BudgetDecision floorWins = FitDelayBudget(ps, pd, q, true, floorFrames, FloorPolicy::FloorWins);
+			Assert::IsFalse(floorWins.fits);
+			Assert::IsTrue(floorWins.totalMs <= floorWins.budgetMs + floorWins.leadMs + 1e-9);
+			Assert::IsFalse(Presenter::FloorReport(floorWins, FloorPolicy::FloorWins).empty(), L"visible");
+			// The queue rule keeps the floor (capped at the target) in both.
+			Assert::AreEqual(q, VpQueueRules::CombineQueueTarget(q, credit.creditFrames, floorFrames, true));
 		}
 	};
 }
