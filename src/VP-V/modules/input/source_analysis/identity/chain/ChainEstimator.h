@@ -38,6 +38,7 @@
 //
 // Header + .cpp, C++14. One persistent worker thread, created the first time the estimator runs, joined by Stop() / the destructor.
 #include "ChainEvidence.h"
+#include "ChainLatch.h"
 #include "ChainEvidenceLog.h"
 #include "ChainGovernor.h"
 #include "ChainLines.h"
@@ -61,7 +62,8 @@ namespace SourceIdentity
 	namespace Chain
 	{
 		enum class EstimatorMode : int { Off = 0, Shadow = 1, On = 2 };
-		enum class EstimatorEvent : int { Cut = 0, Blank = 1, Fade = 2, ClearWindow = 3 };
+		// MenuHold / AbrStep (SID r2): ignored unless the safety rules are on, so off stays byte identical.
+		enum class EstimatorEvent : int { Cut = 0, Blank = 1, Fade = 2, ClearWindow = 3, MenuHold = 4, AbrStep = 5 };
 
 		// Every tunable is hidden tuning (doc 78 section 7; the README "Tuning (not in Config)" table), none is read from a config file yet.
 		struct EstimatorSettings
@@ -72,6 +74,8 @@ namespace SourceIdentity
 			ProposerSettings proposer;
 			ProbeSettings probe;
 			EvidenceSettings evidence;
+			LatchSettings latch;                 // SID r2 R5 / R7: the asymmetric upscale latch (inert unless safetyRules)
+			bool safetyRules = false;            // SID r2 rules R2 + R3 + R5 + R7 as one switch, default OFF (SetSafetyRules)
 			ReadingSettings reading;
 			GovernorSettings governor;
 			EvidenceLogSettings log;
@@ -108,6 +112,7 @@ namespace SourceIdentity
 			uint64_t stale = 0;              // queued jobs of an earlier era / a stopped estimator
 			uint64_t discontinuities = 0;    // resets
 			uint64_t windowClears = 0;       // evidence-window clears (ClearWindow events consumed, first cut after a HOLD): no reset record
+			LatchCounters latch;             // SID r2: latch entries / moves / releases by cause, held back, non-conventional (zero while the rules are off)
 		};
 
 		// What one evaluation tested, per axis and candidate (the calibration dump of the harness reads it; any other observer may).
@@ -200,6 +205,13 @@ namespace SourceIdentity
 			void SetClassical(bool valid, double ratioH, double ratioV);
 			// Free text for the evidence segments (input size, rate, bit depth, colour format, transfer).
 			void SetFormatInfo(const std::string& text);
+
+			// ---- SID r2 safety rules (default OFF; the Monitor setter / key plumbing is pending, SID-5) ----------------------------
+			// R2 conventional geometry only, R3 convention-pair prior, R5 asymmetric latch, R7 no latch into a menu. Applied at the next clean start.
+			void SetSafetyRules(bool on);
+			bool SafetyRules() const;
+			// R5 switch, default OFF: an ABR rendition step (NoteEvent AbrStep) drops an upscaled latch (E0: helps only after a rendition change).
+			void SetLatchAbrStepTrigger(bool on);
 
 			// ---- evidence log (setter only; the key `source_id_evidence` is plumbed with P3) -----------------------------
 			void SetEvidence(const std::string& folder, EvidenceLevel level);

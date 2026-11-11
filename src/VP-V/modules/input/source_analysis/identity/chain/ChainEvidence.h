@@ -5,6 +5,12 @@
 // ChainEvidence (SID-C1 unit 4): turns verifier results into calibrated evidence, per axis. It is an
 // ACCUMULATOR with reason bits; the per-axis reading (confident vs UNSURE, ChainReading.h) reads its summaries. There is no latch
 // state machine anywhere (doc 78 section 5: parked).
+// SID r2 (default off, EvidenceSettings::conventionOnly / pairPrior): R2 a candidate whose ratio is no published conventional geometry
+// (SourceGeometrySet.h, ratios derived from the delivered raster, AxisObservation::rasterW/H) earns no evidence; R3 the two-axis prior is whether
+// the ratio PAIR is one listed, NON-parked geometry (+agreementBonus) or not (-agreementBonus), and (r2 fix M5) a pair that is not one such
+// geometry is NEVER above c1 on both axes: Summary vetoes both (kReasonNonConventional), so a mismatched pair such as 1920x720 cannot become
+// confident through strong per-axis evidence. The latch lives in ChainLatch.h, above the readers; it confirms only on the evidence CREDITED by
+// the newest evaluation (CreditAtN, r2 fix M1), never on the windowed total, so its hard bound limits the age of the evidence.
 //
 // floorCodes (AxisObservation) is the dof-NORMALISED sigma of the rounding/dither noise (1.155 for an 8-bit output,
 // 0.289 for 10-bit), the same unit as the verifier's line baselines; the verifier's CandidateResult.floorCodes is
@@ -39,6 +45,14 @@
 // the picture: what came before says nothing about what is shown); the estimator also calls Reset() (both axes) when a menu / mixed episode
 // ends, at the first cut after such an episode and on a ClearWindow event (ChainEstimator.h), so a switch to native at one of those
 // moments is not outvoted by the old evidence. Black frames and ordinary cuts do not clear it.
+// MINIMUM SHOT DWELL (SID-CAL2 E2, OWNER-APPROVED latch-semantics change, 2026-11-08): the evidence of a shot counts toward a candidate hypothesis only
+// once that shot (the caller's shotId, bumped at every cut) has lasted at least kMinShotDwellSec of SOURCE time. The evidence of a shot is held while
+// the shot is younger than the dwell and credited, in order and with its own times, the moment the shot has lasted it (an evaluation of the shot at
+// least the dwell after its first, or the first evaluation of the NEXT shot at least the dwell after it: the cut time is the best end of a shot the
+// sampled evaluations give). A shot that ends before it has lasted the dwell adds nothing: rapid cuts (a trailer, a montage; the calibration reel with cut ids 15, 17, 19, 21 inside 5 s)
+// cannot add up to c1 out of single-evaluation shots. A shot that lasts the dwell is credited in full, so its evidence is the same as
+// without the dwell, only later (by at most the dwell); the per-shot cap is unchanged. Source time unknown (timeUs < 0) = no dwell (nothing can be
+// measured). The native hypothesis is not a candidate and is not held. No frame counts: the dwell is seconds.
 // Two axes: when both axes' best hypotheses are positive, agreeing ratios add +agreementBonus to each and
 // disagreeing ones subtract it; when one axis abstains nothing is added or subtracted (relaxed).
 // Threshold: c1 = -ln(alpha) + ln(candidates x kernels), alpha = target rate per hour x interval / 3600. It is the DETECTION-confidence
@@ -46,10 +60,17 @@
 #include "ChainNullTables.h"
 #include "DescaleVerifier.h"
 
+#include <VP-V/modules/scaling/geometry/SourceGeometrySet.h>
+
 namespace SourceIdentity
 {
 	namespace Chain
 	{
+		// SID-CAL2 E2 (owner decision 2026-11-08): minimum informative-shot dwell, source seconds. The evidence of a shot counts toward a candidate
+		// once the shot has lasted this long (about the 2 x acquiring interval of a 1 s cadence plus one evaluation); shorter shots add no evidence.
+		// 3 s: the calibration's live run showed false confident readings built from rapid cuts (cut ids 15, 17, 19, 21 within 5 s).
+		constexpr double kMinShotDwellSec = 3.0;
+
 		struct EvidenceSettings
 		{
 			double targetRatePerHour = 0.01;     // confident-wrong target: 1 per 100 title-hours
@@ -59,6 +80,9 @@ namespace SourceIdentity
 			double shotCapFraction = 0.5;
 			double agreementBonus = 2.0;
 			double agreementTolerance = 0.015;   // relative difference of n/N counted as agreeing
+			// SID E0 safety rules (owner 2026-11-07). Both OFF by default (EstimatorSettings::safetyRules turns them on).
+			bool conventionOnly = false;         // R2: only candidate sizes whose ratio is a published conventional geometry (SourceGeometrySet.h) earn evidence
+			bool pairPrior = false;              // R3: the two-axis prior is the convention PAIR (the ratio pair is one listed geometry), replacing the ratio agreement
 			double lineGateFactor = 1.5;        // detail baseline must reach this x the rounding/dither floor (a cliff: tune with care)
 			double minGateFraction = 0.25;       // 8 of 32
 			int minGateLinesFloor = 3;
@@ -78,6 +102,7 @@ namespace SourceIdentity
 			double windowMinSec = 10.0;
 			double windowMaxSec = 600.0;
 			double rateSmoothing = 0.25;         // weight of the newest gap in the running mean of the evaluation interval
+			double minShotDwellSec = kMinShotDwellSec;   // E2: a shot's evidence counts once the shot lasted this many source seconds (0 = off)
 		};
 
 		struct Thresholds
@@ -110,6 +135,18 @@ namespace SourceIdentity
 			uint32_t probeReason = 0;     // reason bits of the PowerProbe (flat / dark / soft)
 			uint32_t shotId = 0;          // bumped by the caller at every cut
 			int64_t timeUs = -1;          // source time of the evaluation (non-decreasing); -1 = unknown: the recent window cannot expire anything
+			int rasterW = 0;              // delivered raster (R2/R3 ratios, SourceGeometrySet.h); 0 = unknown: nothing is conventional
+			int rasterH = 0;
+		};
+
+		// R5 support (r2 fix M1): the change of the windowed total of one hypothesis caused by one credit of the newest evaluation (after the
+		// shot cap), with the source time of the evidence (a dwell-held credit keeps its own, older, time).
+		struct EvidenceCredit
+		{
+			int n = 0;
+			double gain = 0.0;            // change of the hypothesis' shot-capped windowed total
+			double raw = 0.0;             // the increment before the cap
+			int64_t timeUs = -1;
 		};
 
 		struct CandidateEvidence
@@ -120,6 +157,7 @@ namespace SourceIdentity
 			int linesGated = 0;
 			int linesMasked = 0;
 			bool gatedOk = false;         // enough informative lines
+			bool nonConventional = false; // R2: judged informative but not a published conventional ratio: no evidence (conventionOnly)
 			bool mixed = false;           // line or segment disagreement beyond the mask limit
 			bool clustered = false;       // dropped: a neighbour within +-1 px has more evidence
 			double median = 0.0;          // median line value of the informative lines (the top hypothesis has the lowest)
@@ -197,11 +235,71 @@ namespace SourceIdentity
 				a = AxisState();
 			}
 
+			// R5 support (M1): forgets the credits of the newest evaluation on both axes. The estimator calls it at the start of every evaluation,
+			// so an axis that is not submitted this time reports no new credit (Submit clears its own axis too).
+			void ClearCredits()
+			{
+				ax_[0].credits.clear();
+				ax_[1].credits.clear();
+			}
+
+			// R5 support (M1): the evidence for size n (+-1 px) CREDITED by the newest Submit of the axis (the change of the shot-capped windowed
+			// total, summed per slot; the best slot), the sum of the positive raw increments of that slot (before the cap) and the source time of
+			// its newest positive credit (-1: none). 0 when nothing was credited: old evidence that still sits in the window is NOT new evidence.
+			double CreditAtN(int axis, int n, int64_t* newestPositiveUs = nullptr, double* rawPositive = nullptr) const
+			{
+				const AxisState& st = ax_[axis == 0 ? 0 : 1];
+				if (newestPositiveUs != nullptr)
+					*newestPositiveUs = -1;
+				if (rawPositive != nullptr)
+					*rawPositive = 0.0;
+				double bestRaw = 0.0;
+				int64_t bestNewest = -1;
+				double best = 0.0;
+				bool any = false;
+				for (size_t i = 0; i < st.credits.size(); ++i)
+				{
+					const int di = st.credits[i].n > n ? st.credits[i].n - n : n - st.credits[i].n;
+					if (di > 1)
+						continue;
+					bool seen = false;   // this slot was already summed at an earlier credit
+					for (size_t j = 0; j < i && !seen; ++j)
+						seen = st.credits[j].n == st.credits[i].n;
+					if (seen)
+						continue;
+					double sum = 0.0, raw = 0.0;
+					int64_t newest = -1;
+					for (size_t j = i; j < st.credits.size(); ++j)
+					{
+						if (st.credits[j].n != st.credits[i].n)
+							continue;
+						sum += st.credits[j].gain;
+						if (st.credits[j].raw > 0.0)
+							raw += st.credits[j].raw;
+						if (st.credits[j].gain > 0.0 && st.credits[j].timeUs > newest)
+							newest = st.credits[j].timeUs;
+					}
+					if (!any || sum > best)
+					{
+						best = sum;
+						bestRaw = raw;
+						bestNewest = newest;
+					}
+					any = true;
+				}
+				if (newestPositiveUs != nullptr)
+					*newestPositiveUs = bestNewest;
+				if (rawPositive != nullptr)
+					*rawPositive = bestRaw;
+				return any ? best : 0.0;
+			}
+
 			// One evaluation of one axis. Returns false only on unusable input (reason bits in `out`).
 			bool Submit(int axis, const AxisObservation& obs, EvidenceUpdate& out)
 			{
 				out = EvidenceUpdate();
 				AxisState& st = ax_[axis == 0 ? 0 : 1];
+				st.credits.clear();
 				if (obs.verify == nullptr || obs.axisLen < 64)
 				{
 					out.reason = kReasonBadInput;
@@ -213,7 +311,15 @@ namespace SourceIdentity
 				if (st.axisLen != 0 && st.axisLen != obs.axisLen)
 					st = AxisState();   // the axis changed size (active area / zoom): old hypotheses mean nothing
 				st.axisLen = obs.axisLen;
+				st.rasterW = obs.rasterW;
+				st.rasterH = obs.rasterH;
 				NoteTime(st, obs.timeUs);
+				const double cap = s_.shotCapFraction * thr_.c1;
+				const bool dwellOn = s_.minShotDwellSec > 0.0 && obs.timeUs >= 0;   // E2: needs the source time
+				if (dwellOn)
+					TrackShot(st, obs.shotId, obs.timeUs, cap);
+				else
+					FlushPending(st, cap);   // no time on this evaluation: whatever was held counts now
 				bool anyUsable = false;
 				for (size_t i = 0; i < vr.candidates.size() && out.candidateCount < kMaxCandidates; ++i)
 				{
@@ -221,7 +327,16 @@ namespace SourceIdentity
 					if (!cr.valid || !cr.exactDone || cr.lineCount < 1)
 						continue;
 					anyUsable = true;
-					Judge(cr, obs.axisLen, floorC, out.cand[out.candidateCount++]);
+					Judge(cr, obs.axisLen, floorC, out.cand[out.candidateCount]);
+					CandidateEvidence& ce = out.cand[out.candidateCount++];
+					// R2 (E0): a size that is not a conventional ratio of the measured axis is UNSURE material, never evidence.
+					if (s_.conventionOnly && ce.informative
+						&& !Scaling::GeometrySet::ConventionalAxis(ce.n, obs.axisLen, axis == 0 ? 0 : 1, obs.rasterW, obs.rasterH))
+					{
+						ce.informative = false;
+						ce.nonConventional = true;
+						ce.reason |= kReasonNonConventional;
+					}
 				}
 				// The top hypothesis (informative lines, lowest median line value; ties: smaller n) decides HOLD.
 				int top = -1;
@@ -305,13 +420,21 @@ namespace SourceIdentity
 					out.reason |= kReasonNoPower | obs.probeReason;
 				}
 
-				const double cap = s_.shotCapFraction * thr_.c1;
 				for (int i = 0; i < out.candidateCount; ++i)
 					if (out.cand[i].informative)
 					{
-						Hypothesis& h = FindSlot(st, out.cand[i].n);
-						h.n = out.cand[i].n;   // the slot follows the latest best exact size
-						Add(h, out.cand[i].increment, obs.shotId, obs.timeUs, cap);
+						if (dwellOn && !st.shotMet)
+						{
+							// E2: the shot has not lasted the dwell yet: held (credited when it does, dropped when it ends first).
+							PendingEvidence p;
+							p.n = out.cand[i].n;
+							p.increment = out.cand[i].increment;
+							p.shotId = obs.shotId;
+							p.timeUs = obs.timeUs;
+							st.pending.push_back(p);
+						}
+						else
+							AddCandidate(st, out.cand[i].n, out.cand[i].increment, obs.shotId, obs.timeUs, cap);
 					}
 				if (out.nativeCounted)
 					Add(st.native, out.nativeIncrement, obs.shotId, obs.timeUs, cap);
@@ -330,26 +453,79 @@ namespace SourceIdentity
 				return true;
 			}
 
+			// R5 support: the evidence of the size n on one axis (the slot within +-1 px), shot-capped, WITHOUT the two-axis prior; -1e9 = none.
+			double LlrAtN(int axis, int n) const
+			{
+				const AxisState& st = ax_[axis == 0 ? 0 : 1];
+				const double cap = s_.shotCapFraction * thr_.c1;
+				double best = -1e9;
+				for (size_t i = 0; i < st.slots.size(); ++i)
+				{
+					const int d = st.slots[i].n > n ? st.slots[i].n - n : n - st.slots[i].n;
+					if (d > 1)
+						continue;
+					const double v = Total(st.slots[i], cap);
+					if (v > best)
+						best = v;
+				}
+				return best;
+			}
+
 			// The recent window of an axis in seconds (N3): derived from the measured evaluation rate; 0 = the rate is not measured yet (no window).
 			double WindowSeconds(int axis) const { return WindowUs(ax_[axis == 0 ? 0 : 1]) / 1e6; }
 
 			AxisSummary Summary(int axis) const
 			{
 				const int a = axis == 0 ? 0 : 1;
+				AxisSummary r = WithPrior(a);
+				if (s_.pairPrior && r.aboveC1)
+				{
+					// M5: a pair that is not one listed, non-parked geometry is never confident on BOTH axes (the prior alone, -bonus, does not
+					// guarantee it: strong per-axis evidence can pass c1 + bonus). Both axes are vetoed, the safe direction (native never wrongly
+					// called upscaled; single-axis re-base is parked anyway).
+					const AxisSummary o = WithPrior(1 - a);
+					if (o.aboveC1 && !PairAgrees(a == 0 ? r.n : o.n, a == 0 ? o.n : r.n))
+					{
+						r.aboveC1 = false;
+						r.lastReason |= kReasonNonConventional;
+					}
+				}
+				return r;
+			}
+
+		private:
+			int PairRasterW() const { return ax_[0].rasterW > 0 ? ax_[0].rasterW : ax_[1].rasterW; }
+			int PairRasterH() const { return ax_[0].rasterH > 0 ? ax_[0].rasterH : ax_[1].rasterH; }
+
+			// R3 (L1): the ratio PAIR (x first) is one listed, NON-parked geometry on the delivered raster.
+			bool PairAgrees(int nx, int ny) const
+			{
+				return Scaling::GeometrySet::AgreeingPair(nx, ax_[0].axisLen, ny, ax_[1].axisLen, PairRasterW(), PairRasterH());
+			}
+
+			AxisSummary WithPrior(int a) const
+			{
 				AxisSummary r = Own(ax_[a]);
 				const AxisSummary o = Own(ax_[1 - a]);
 				r.otherAxisAbstains = o.informativeEvals == 0 || !o.hasBest || o.llr <= 0.0;
 				if (r.hasBest && r.llr > 0.0 && o.hasBest && o.llr > 0.0)
 				{
-					const double d = std::abs(r.ratio - o.ratio);
-					r.prior = (d <= s_.agreementTolerance * r.ratio) ? s_.agreementBonus : -s_.agreementBonus;
+					if (s_.pairPrior)
+					{
+						// R3: a non-square listed pair agrees too; an unlisted pair and the PARKED anamorphic pair do not (L1).
+						r.prior = PairAgrees(a == 0 ? r.n : o.n, a == 0 ? o.n : r.n) ? s_.agreementBonus : -s_.agreementBonus;
+					}
+					else
+					{
+						const double d = std::abs(r.ratio - o.ratio);
+						r.prior = (d <= s_.agreementTolerance * r.ratio) ? s_.agreementBonus : -s_.agreementBonus;
+					}
 				}
 				r.llrWithPrior = r.llr + r.prior;
 				r.aboveC1 = r.hasBest && r.llrWithPrior >= thr_.c1;
 				return r;
 			}
 
-		private:
 			struct ClosedShot
 			{
 				int64_t timeUs = -1;     // source time of the shot's newest increment (-1: unknown, never expires)
@@ -367,8 +543,22 @@ namespace SourceIdentity
 				int evals = 0;
 			};
 
+			struct PendingEvidence
+			{
+				int n = 0;
+				double increment = 0.0;
+				uint32_t shotId = 0;
+				int64_t timeUs = -1;
+			};
+
 			struct AxisState
 			{
+				// E2 (minimum shot dwell): the shot being gathered, when it started, whether it has lasted the dwell, and its held evidence.
+				bool haveShot = false;
+				uint32_t shotKey = 0;
+				int64_t shotStartUs = 0;     // source time of the first evaluation of the shot
+				bool shotMet = false;        // the shot has lasted the dwell: its evidence counts at once
+				std::vector<PendingEvidence> pending;
 				int64_t lastTimeUs = -1;     // source time of the newest submitted evaluation
 				double intervalUs = 0.0;     // running mean of the gaps between submitted evaluations (0: not measured yet)
 				std::vector<Hypothesis> slots;
@@ -378,7 +568,60 @@ namespace SourceIdentity
 				uint32_t lastInformativeShot = 0;
 				uint32_t lastReason = 0;
 				int axisLen = 0;
+				int rasterW = 0;
+				int rasterH = 0;
+				std::vector<EvidenceCredit> credits;   // M1: what the newest Submit credited (cleared by Submit and ClearCredits)
 			};
+
+			void AddCandidate(AxisState& st, int n, double increment, uint32_t shotId, int64_t timeUs, double cap)
+			{
+				Hypothesis& h = FindSlot(st, n);
+				const double before = Total(h, cap);
+				h.n = n;   // the slot follows the latest best exact size
+				Add(h, increment, shotId, timeUs, cap);
+				EvidenceCredit c;
+				c.n = h.n;
+				c.gain = Total(h, cap) - before;
+				c.raw = increment;
+				c.timeUs = timeUs;
+				st.credits.push_back(c);
+			}
+
+			// E2: the held evidence of a shot that has lasted the dwell is credited, in order and with its own shot id and time.
+			void FlushPending(AxisState& st, double cap)
+			{
+				if (st.pending.empty())
+					return;
+				std::vector<PendingEvidence> held;
+				held.swap(st.pending);
+				for (size_t i = 0; i < held.size(); ++i)
+					AddCandidate(st, held[i].n, held[i].increment, held[i].shotId, held[i].timeUs, cap);
+			}
+
+			// E2: follows the shot of the evaluation (source time known). A shot that ends (the next shot's first evaluation) after at least the dwell is
+			// credited at that evaluation; a shot that ends sooner adds nothing (its held evidence is dropped).
+			void TrackShot(AxisState& st, uint32_t shotId, int64_t timeUs, double cap)
+			{
+				const int64_t dwellUs = static_cast<int64_t>(s_.minShotDwellSec * 1e6);
+				if (!st.haveShot || st.shotKey != shotId)
+				{
+					if (st.haveShot && !st.shotMet && timeUs - st.shotStartUs >= dwellUs)
+					{
+						st.shotMet = true;
+						FlushPending(st, cap);
+					}
+					st.pending.clear();
+					st.haveShot = true;
+					st.shotKey = shotId;
+					st.shotStartUs = timeUs;
+					st.shotMet = false;
+				}
+				else if (!st.shotMet && timeUs - st.shotStartUs >= dwellUs)
+				{
+					st.shotMet = true;
+					FlushPending(st, cap);
+				}
+			}
 
 			Hypothesis& FindSlot(AxisState& st, int n)
 			{
@@ -506,6 +749,7 @@ namespace SourceIdentity
 			static void ForgetAccumulation(AxisState& st)
 			{
 				st.slots.clear();
+				st.pending.clear();       // E2: the held evidence of the shot belongs to what the overlay replaces
 				st.native = Hypothesis();
 				st.informativeEvals = 0;
 				st.shots = 0;

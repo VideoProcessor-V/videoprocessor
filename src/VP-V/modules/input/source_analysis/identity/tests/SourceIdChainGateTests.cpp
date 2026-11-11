@@ -365,5 +365,43 @@ namespace Tests
 			m.SetOriginalPathway(false);
 			Assert::IsTrue(m.SourceIdConsensus(), L"leaving the Original pathway the requested mode takes effect again");
 		}
+
+		// SID r2 (L6 / missing test): a consensus reading of ONE axis below native is held (two axes are required unless the single-axis
+		// switch is on), and the hold is visible in the status line while it lasts, not only in the debug log.
+		TEST_METHOD(ASingleAxisRebaseIsHeldAndVisibleInTheStatus)
+		{
+			auto run = [](bool singleAxisSwitch, double& fx, double& fy) {
+				SidGate::Mon m;
+				GeoFx::G::HeldState geo;
+				m.SetGeometrySource(&geo);
+				m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+				m.SetSingleAxisRebase(singleAxisSwitch);
+				uint64_t seq = 2;
+				for (int i = 0; i < 13; ++i)
+				{
+					const double t = 10.0 + 0.5 * i;
+					if (i % 2 == 0)   // applied H 1920 -> 3840, V native
+						geo.Publish(GeoFx::MakeRecord(seq, SidGate::Us(t - 0.1), GeoFx::AppliedAxis(1920, 3840, 5), GeoFx::AppliedAxis(2160, 2160, -1)));
+					SidGate::Analyse(m, t, seq++);
+				}
+				std::string why;
+				fx = fy = 1.0;
+				m.InjectResultForTest(SidGate::CleanSnapshot(1, false), seq - 1);
+				m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 16.1, seq);
+				m.InjectResultForTest(SidGate::CleanSnapshot(2, true), seq);
+				m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 16.6, seq + 1);
+				return m.SourceIdStatusLine(16.7);
+			};
+			double fx = 0.0, fy = 0.0;
+			const std::string held = run(false, fx, fy);
+			Assert::AreEqual(1.0, fx, 1e-9, L"one axis below native: not applied (two axes are required)");
+			Assert::AreEqual(1.0, fy, 1e-9);
+			Assert::IsTrue(held.find("single-axis re-base held (H 0.5000") != std::string::npos,
+				std::wstring(L"the hold is in the status line: ").append(held.begin(), held.end()).c_str());
+			const std::string on = run(true, fx, fy);
+			Assert::IsTrue(on.find("single-axis re-base held") == std::string::npos, L"the switch on: nothing is held, nothing shown");
+			Assert::AreEqual(0.5, fx, 1e-9, L"the switch on: the single-axis re-base is applied");
+			Assert::AreEqual(1.0, fy, 1e-9);
+		}
 	};
 }

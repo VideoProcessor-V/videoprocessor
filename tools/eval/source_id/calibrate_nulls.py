@@ -12,7 +12,8 @@ Run:  python -I tools/eval/source_id/calibrate_nulls.py --dump <dir> --out <dir>
 Test: python -I tools/eval/source_id/calibrate_nulls.py --selftest
 
 Conservative by construction (a table can only make the estimator abstain MORE than the placeholder where
-data is thin); see tools/eval/source_id/README.md, section "calibrate_nulls.py".
+data is thin); see tools/eval/source_id/README.md, section "calibrate_nulls.py". The false-crossing simulation replays
+ChainEvidence.h exactly (recent window in seconds, HOLD forget, first-cut clear, E2 shot dwell).
 """
 import argparse
 import csv
@@ -40,6 +41,12 @@ CANDIDATE_COUNT, KERNEL_COUNT = 8, 10   # multiplicity of c1
 SHOT_CAP_FRACTION = 0.5
 MAX_HYPOTHESES = 16
 MIN_EVALS_CANDIDATE = 4                 # a c1 crossing needs >= 4 informative evaluations (non-binding: the per-shot cap already needs 2 shots)
+# The recent window (EvidenceSettings, SID train r2 N3 + the owner-approved revert window): closed shots expire after
+# windowMargin x (c1 / windowYieldNats) x the MEASURED mean gap between the axis's evaluations, clamped (seconds).
+WINDOW_YIELD_NATS, WINDOW_MARGIN, WINDOW_MIN_SEC, WINDOW_MAX_SEC, RATE_SMOOTHING = 1.4, 1.5, 10.0, 600.0, 0.25
+# E2 (owner-approved latch-semantics change): the minimum informative-shot dwell, source seconds (ChainEvidence.h kMinShotDwellSec).
+# 0 = the estimator without E2.
+MIN_SHOT_DWELL_SEC = 3.0
 REQUIRED_V2 = ["reel_id", "title", "eval_seq", "time_s", "axis", "N", "n", "class", "T", "stage", "best_kernel",
                "kernel_margin", "lines_passed", "lines", "power_seen", "floor_codes", "truth_n", "bit_depth",
                "truth_kernel", "truth_sharpen", "shot_id"]
@@ -61,6 +68,12 @@ class Policy(object):
         self.se_terms = 2.0          # ... and by (1 + se_terms / sqrt(n_eff)) for the estimate's own uncertainty
         self.sd_floor = 0.005
         self.min_separation = 0.25   # alt mean must sit this many null-sds below the null mean, else placeholder
+        self.drop_aliases = True     # C4: no null from the aliases (+-2% of p/q x truth_n, q <= 4) of an upscaled reel
+        self.null_sd_floor = True    # C3: a class's null sd >= the dip-side sd of its own null data; alt n_eff < min_alt_hard: alt = null
+        # Simulation of the estimator (false crossings, evaluations to c1): the same switches as ChainEvidence.
+        self.sim_window = True       # the recent window (N3), seconds from the measured evaluation gap
+        self.sim_hold = True         # a HOLD evaluation forgets its axis, the first cut after one clears both axes
+        self.dwell_sec = MIN_SHOT_DWELL_SEC   # E2: a shot's evidence counts once the shot has lasted this many source seconds
 
 
 def make_grid(hi):
@@ -204,11 +217,29 @@ def is_alt(n, truth_n, truth_n1):
     return abs(n - truth_n) <= 1 or (truth_n1 > 0 and abs(n - truth_n1) <= 1)
 
 
-def build_samples(rows, require_power=False, null_side="both"):
+ALIAS_Q_MAX, ALIAS_TOL = 4, 0.02       # C4: an upscaled reel's null excludes sizes within +-2% of p/q x truth_n, q <= 4
+
+
+def is_alias(n, truth_n, q_max=ALIAS_Q_MAX, tol=ALIAS_TOL):
+    """True when n is within +-tol (relative) of p/q x truth_n for some p >= 1 and q <= q_max. On an upscaled reel the picture's own
+    latent grid makes those sizes dip too (a half-size reel dips at 1/2, 1/3, 2/3, 3/2, 2 ... times its true size): an alias of the
+    truth, not a null."""
+    if truth_n <= 0:
+        return False
+    ratio = n / float(truth_n)
+    for q in range(1, q_max + 1):
+        p = int(round(ratio * q))
+        if p >= 1 and abs(ratio - p / float(q)) <= tol * p / float(q):
+            return True
+    return False
+
+
+def build_samples(rows, require_power=False, null_side="both", drop_aliases=True):
     """Returns (items, stats). Only exact, informative, has_truth rows that pass the line gate count; candidates of one
-    evaluation and axis within +-1 px are clustered and the one with the lowest T_ev kept, as ChainEvidence does."""
+    evaluation and axis within +-1 px are clustered and the one with the lowest T_ev kept, as ChainEvidence does. With
+    drop_aliases (C4) a cluster of an upscaled reel within +-2% of p/q x truth_n (q <= 4) is neither null nor alt: dropped."""
     stats = {"rows": len(rows), "coarse": 0, "no_truth": 0, "not_informative": 0, "gate_fail": 0, "power_fail": 0,
-             "double_drop": 0, "class_mismatch": 0, "exact": 0}
+             "double_drop": 0, "class_mismatch": 0, "exact": 0, "alias_drop": 0}
     per_eval = {}
     for r in rows:
         if r.stage != "exact":
@@ -254,21 +285,39 @@ def build_samples(rows, require_power=False, null_side="both"):
                 continue
             elif null_side == "below" and r.n > r.truth_n:
                 continue   # above the true latent size a descale is lossless: alt-like
+            elif drop_aliases and is_alias(r.n, r.truth_n):
+                stats["alias_drop"] += 1       # C4: an alias of the true size (p/q x truth_n), not an independent null
+                continue
             else:
                 it.label = "null"
             items.append(it)
     return items, stats
 
 
+def _is_hold(flags):
+    """The dump has no HOLD column. The estimator's HOLD evaluation (its top candidate is mixed) leaves a gated candidate whose
+    statistic was never reached (T_ev empty, the line gate passed) and NO informative candidate (the writer clears them). That
+    is the proxy; a HOLD-looking evaluation without any informative candidate over-detects only when a wrong, non-top candidate
+    is mixed while the top one is merely low-detail (rare)."""
+    return bool(flags) and flags[0] and not flags[1]
+
+
 def build_segments(rows):
     """Truth segments from ALL rows (any stage): maximal runs of consecutive evaluations of a reel with the same
     per-axis (truth_n, truth_n1). Evaluations without truth (has_truth=0 on any axis) are boundaries and never
     simulated. Returns [dict(reel, master, truth {axis: n}, truth1 {axis: n1}, bits {axis: bits},
-    evals [(seq, {axis: (time, cut)})])]."""
+    evals [(seq, {axis: (time, cut, hold)})])]; hold = the HOLD proxy (see _is_hold)."""
     ev = {}
+    hold = {}      # (reel, seq, axis) -> [a gated candidate was never judged (mixed), some candidate was informative]
     for r in rows:
         e = ev.setdefault(r.reel, {}).setdefault(r.seq, {})
         e[r.axis] = (r.time, r.cut, r.truth_n, r.bits, r.has_truth, r.master, r.truth_n1)
+        if r.stage == "exact":
+            hk = hold.setdefault((r.reel, r.seq, r.axis), [False, False])
+            if r.informative and r.Tev is not None:
+                hk[1] = True
+            elif r.Tev is None and gate_ok(r):
+                hk[0] = True
     segs = []
     for reel in sorted(ev):
         cur, cur_key = None, None
@@ -284,7 +333,7 @@ def build_segments(rows):
                        "truth1": dict((a, t1) for a, _, t1 in key), "bits": {a: v[3] for a, v in e.items()},
                        "evals": []}
                 segs.append(cur)
-            cur["evals"].append((seq, {a: (v[0], v[1]) for a, v in e.items()}))
+            cur["evals"].append((seq, {a: (v[0], v[1], _is_hold(hold.get((reel, seq, a)))) for a, v in e.items()}))
     return segs
 
 
@@ -305,13 +354,18 @@ def median(xs):
     return quantile(xs, 0.5)
 
 
+def dip_sd(xs, floor):
+    """The dip-side spread matched at 1, 2 and 2.5 sigma (median - P15.9, (median - P2.3)/2, (median - P0.6)/2.5): the false-confident
+    risk sits in the dip tail, not at one sigma."""
+    med = median(xs)
+    return max(med - quantile(xs, 0.1587), (med - quantile(xs, 0.0228)) / 2.0, (med - quantile(xs, 0.0062)) / 2.5, floor)
+
+
 def null_sd(xs, floor):
-    """Tail-matched null spread: the largest of the MAD sd and the dip-side spread matched at 1, 2 and 2.5 sigma
-    (the false-confident risk sits in the dip tail, not at one sigma)."""
+    """Tail-matched null spread: the largest of the MAD sd and the dip-side spread (dip_sd)."""
     med = median(xs)
     mad = 1.4826 * median([abs(x - med) for x in xs])
-    return max(mad, med - quantile(xs, 0.1587), (med - quantile(xs, 0.0228)) / 2.0,
-               (med - quantile(xs, 0.0062)) / 2.5, floor)
+    return max(mad, dip_sd(xs, floor))
 
 
 def alt_sd(xs, floor):
@@ -332,18 +386,46 @@ def dominated(fit_null, fit_alt, c, grid):
 
 def fit_class(null_x, alt_x, null_grp, alt_grp, null_mst, alt_mst, c, policy, grid):
     """null_x/alt_x: T_ev samples; *_grp: (reel, axis, truth shot) keys (effective size = distinct keys); *_mst: masters.
-    Returns (null (mean, sd), alt (mean, sd), diag)."""
+    Returns (null (mean, sd), alt (mean, sd), diag).
+
+    SID-CAL2 C3 (both can be switched off with policy.null_sd_floor = False):
+      * the null sd of a class is never below the fitted dip-side sd of its own null data (widened like the fit), also when the class
+        otherwise keeps the placeholder or a blend of it: the placeholder nulls (k/16 0.08, generic 0.06) were narrower than the tails the
+        data shows, which turned ordinary native dips into confident-looking evidence;
+      * a class with enough null data but alt n_eff < min_alt_hard gets alt = null: a zero increment everywhere, i.e. no evidence for sizes of
+        that class until calibrated alt data exist (it used to keep the placeholder alt, which let uncalibrated sizes accumulate)."""
     ph_n, ph_a = PLACEHOLDER["null"][c], PLACEHOLDER["alt"][c]
     ne, ae = len(set(null_grp)), len(set(alt_grp))
     d = {"n_null": len(null_x), "n_alt": len(alt_x), "eff_null": ne, "eff_alt": ae, "m_null": len(set(null_mst)),
          "m_alt": len(set(alt_mst)), "status": "placeholder", "why": "", "blend": 1.0,
-         "max_null_T": max(null_x) if null_x else float("nan")}
-    if ne < policy.min_null_hard or ae < policy.min_alt_hard:
-        d["why"] = "sparse (n_eff null %d < %d or alt %d < %d)" % (ne, policy.min_null_hard, ae, policy.min_alt_hard)
+         "max_null_T": max(null_x) if null_x else float("nan"), "floor": None, "floored": False, "sd_before": None,
+         "alt_zero": False}
+    floor = None
+    if policy.null_sd_floor and null_x and ne >= policy.min_null_hard:
+        floor = dip_sd(null_x, policy.sd_floor) * policy.null_widen * (1.0 + policy.se_terms / math.sqrt(ne))
+        d["floor"] = floor
+
+    def finish(nul, alt):
+        if floor is not None and nul[1] < floor:
+            d["floored"], d["sd_before"] = True, nul[1]
+            nul = (nul[0], floor)
+        return nul, alt, d
+
+    if ne < policy.min_null_hard:
+        d["why"] = "sparse (n_eff null %d < %d)" % (ne, policy.min_null_hard)
+        return ph_n, ph_a, d
+    if ae < policy.min_alt_hard:
+        if policy.null_sd_floor:
+            nsd = null_sd(null_x, policy.sd_floor) * policy.null_widen * (1.0 + policy.se_terms / math.sqrt(ne))
+            nul, _, _ = finish((median(null_x), max(nsd, policy.sd_floor)), None)
+            d["status"], d["alt_zero"], d["blend"] = "no-alt", True, 0.0
+            d["why"] = "alt n_eff %d < %d: alt = null, no evidence" % (ae, policy.min_alt_hard)
+            return nul, nul, d
+        d["why"] = "sparse (alt %d < %d)" % (ae, policy.min_alt_hard)
         return ph_n, ph_a, d
     if d["m_null"] < policy.min_masters or d["m_alt"] < policy.min_masters:
         d["why"] = "too few masters (null %d, alt %d < %d)" % (d["m_null"], d["m_alt"], policy.min_masters)
-        return ph_n, ph_a, d
+        return finish(ph_n, ph_a)
     m0 = median(null_x)
     nsd = null_sd(null_x, policy.sd_floor) * policy.null_widen * (1.0 + policy.se_terms / math.sqrt(ne))
     nul = (m0, max(nsd, policy.sd_floor))
@@ -353,7 +435,7 @@ def fit_class(null_x, alt_x, null_grp, alt_grp, null_mst, alt_mst, c, policy, gr
     alt = (nul[0] + lam * (m1 - nul[0]), max(nul[1] + lam * (asd - nul[1]), policy.sd_floor))
     if alt[0] > nul[0] - policy.min_separation * nul[1]:
         d["why"] = "alt not separated from null (alt %.3f null %.3f sd %.3f)" % (alt[0], nul[0], nul[1])
-        return ph_n, ph_a, d
+        return finish(ph_n, ph_a)
     d["status"], d["blend"] = "fitted", 0.0
     if ne < policy.full_null or ae < policy.full_alt:
         d["status"] = "thin"
@@ -370,7 +452,8 @@ def fit_class(null_x, alt_x, null_grp, alt_grp, null_mst, alt_mst, c, policy, gr
             d["why"] = "thin and no blend dominated by the placeholder"
         else:
             d["why"] = "thin (n_eff %d/%d, %d/%d): shrunk, blend %.1f" % (ne, policy.full_null, ae, policy.full_alt, b)
-    d["dominated"] = dominated(nul, alt, c, grid)
+    d["dominated"] = dominated(nul, alt, c, grid)        # the blend itself (before the C3 floor, which widens the null on purpose)
+    nul, alt, d = finish(nul, alt)
     return nul, alt, d
 
 
@@ -399,32 +482,45 @@ def fit_tables(items, policy):
 
 
 # ----------------------------------------------------------------------------------------------------------
-# Simulation of ChainEvidence (Add / Total / FindSlot / Own / Summary prior), both axes jointly, per truth segment
+# Simulation of ChainEvidence (Add / Total / FindSlot / Own / Summary prior, the RECENT WINDOW of N3, the HOLD forget and the
+# first-cut clear, the minimum shot dwell of E2), both axes jointly, per truth segment. A line-by-line port of ChainEvidence.h:
+# times are SECONDS from the dump's time_s, the window comes from the MEASURED mean gap between the axis's evaluations.
 # ----------------------------------------------------------------------------------------------------------
 class _Slot(object):
-    __slots__ = ("n", "cls", "llr", "shot_sum", "shot_id", "shots", "evals")
+    """One hypothesis (ChainEvidence::Hypothesis): the closed shots inside the window ([time, capped value]) and the open shot."""
+    __slots__ = ("n", "cls", "closed", "shot_sum", "shot_time", "shot_id", "shots", "evals")
 
     def __init__(self, n, cls):
-        self.n, self.cls, self.llr, self.shot_sum, self.shot_id, self.shots, self.evals = n, cls, 0.0, 0.0, None, 0, 0
+        self.n, self.cls = n, cls
+        self.closed = []
+        self.shot_sum, self.shot_time, self.shot_id, self.shots, self.evals = 0.0, None, None, 0, 0
 
 
 class _Axis(object):
+    """ChainEvidence::AxisState (plus the reading's counters and the rising-edge memory of the simulation)."""
     def __init__(self):
         self.slots, self.inf_evals, self.shots, self.last_shot, self.N = [], 0, 0, None, 0
         self.prev = (False, 0)
+        self.last_time, self.interval = None, 0.0          # newest evaluation time (s), running mean gap (s; 0 = not measured)
+        self.shot_key, self.shot_start, self.shot_met, self.pending = None, 0.0, False, []   # E2: the dwell of the current shot
 
 
 def _total(s, cap):
-    return s.llr + clampd(s.shot_sum, -cap, cap)
+    t = clampd(s.shot_sum, -cap, cap)
+    for c in s.closed:
+        t += c[1]
+    return t
 
 
-def _add(s, inc, shot, cap):
+def _add(s, inc, shot, time, cap):
     if s.shots == 0 or s.shot_id != shot:
-        s.llr += clampd(s.shot_sum, -cap, cap)
+        if s.shots > 0:
+            s.closed.append([s.shot_time, clampd(s.shot_sum, -cap, cap)])
         s.shot_sum = 0.0
         s.shot_id = shot
         s.shots += 1
     s.shot_sum += inc
+    s.shot_time = time
     s.evals += 1
 
 
@@ -451,28 +547,121 @@ def _find_slot(st, it):
     return h
 
 
-def simulate_segment(seg, items_idx, tables, c1, cap_fraction, reset_on_candidate):
-    """Replays one truth segment with all its axes together (the two-axis agreement prior included).
-    Events: (axis, ordinal of the evaluation in the segment, time, n, cls, correct) at each rising edge of
-    hasBest && llr + prior >= c1 (with >= 4 informative evaluations over >= 2 shots), per axis."""
+def _window_sec(ax, c1):
+    """ChainEvidence::WindowUs: windowMargin x (c1 / windowYieldNats) measured intervals, clamped; 0 = not measured yet."""
+    if not ax.interval > 0.0:
+        return 0.0
+    return clampd(WINDOW_MARGIN * (c1 / WINDOW_YIELD_NATS) * ax.interval, WINDOW_MIN_SEC, WINDOW_MAX_SEC)
+
+
+def _expire(s, cutoff):
+    k = 0
+    while k < len(s.closed) and s.closed[k][0] is not None and s.closed[k][0] < cutoff:
+        k += 1
+    if k:
+        del s.closed[:k]
+    if s.shots > 0 and s.shot_time is not None and s.shot_time < cutoff:
+        if not s.closed:
+            s.shots = 0               # no live evidence left: the hypothesis is dropped by the caller
+        else:
+            s.shot_sum, s.shot_time = 0.0, None
+
+
+def _note_time(ax, t, c1):
+    """ChainEvidence::NoteTime: the running mean of the gaps (rateSmoothing 0.25), then the expiry of old closed shots."""
+    if ax.last_time is not None and t > ax.last_time:
+        gap = t - ax.last_time
+        ax.interval = (1.0 - RATE_SMOOTHING) * ax.interval + RATE_SMOOTHING * gap if ax.interval > 0.0 else gap
+    if ax.last_time is None or t > ax.last_time:
+        ax.last_time = t
+    w = _window_sec(ax, c1)
+    if not w > 0.0:
+        return
+    cutoff = ax.last_time - w
+    keep = []
+    for s in ax.slots:
+        _expire(s, cutoff)
+        if s.closed or s.shots > 0:
+            keep.append(s)
+    ax.slots = keep
+
+
+def _flush(ax, cap):
+    """E2: the held evidence of a shot that has now lasted the dwell is credited, in order and with its own times."""
+    pend, ax.pending = ax.pending, []
+    for it, inc, cut, tm in pend:
+        slot = _find_slot(ax, it)
+        slot.n, slot.cls = it.n, it.cls
+        _add(slot, inc, cut, tm, cap)
+
+
+def _track_shot(ax, cut, t, cap, dwell):
+    """E2 (ChainEvidence::TrackShot): a shot's evidence counts once the shot has lasted `dwell` source seconds. A shot that ends
+    (the next shot's first evaluation) after at least the dwell is credited at that evaluation; a shorter one adds nothing."""
+    if not dwell > 0.0:
+        return
+    if ax.shot_key is None or ax.shot_key != cut:
+        if ax.shot_key is not None and not ax.shot_met and t - ax.shot_start >= dwell:
+            ax.shot_met = True
+            _flush(ax, cap)
+        ax.pending = []
+        ax.shot_key, ax.shot_start, ax.shot_met = cut, t, False
+    elif not ax.shot_met and t - ax.shot_start >= dwell:
+        ax.shot_met = True
+        _flush(ax, cap)
+
+
+def _forget(ax):
+    """ChainEvidence::ForgetAccumulation (a HOLD evaluation): the rate measurement, the axis length and the shot tracking stay."""
+    ax.slots, ax.inf_evals, ax.shots, ax.last_shot, ax.pending = [], 0, 0, None, []
+
+
+def simulate_segment(seg, items_idx, tables, c1, cap_fraction, reset_on_candidate, policy=None):
+    """Replays one truth segment with all its axes together (the two-axis agreement prior included), as ChainEvidence does it:
+    the recent window (seconds, from the measured evaluation gap), a HOLD evaluation forgetting its axis and the first cut after
+    a HOLD clearing both, and (policy.dwell_sec > 0) the minimum shot dwell of E2. seg["evals"] entries are
+    (seq, {axis: (time, cut_id[, hold])}). Events: (axis, ordinal of the evaluation in the segment, time, n, cls, correct) at each
+    rising edge of hasBest && llr + prior >= c1 (with >= 4 informative evaluations over >= 2 shots), per axis."""
+    pol = policy or Policy()
     cap = cap_fraction * c1
     axes = sorted(seg["truth"])
     st = {a: _Axis() for a in axes}
     events = []
+    hold_since_cut, prev_cut = False, None
     for ordinal, (seq, per_axis) in enumerate(seg["evals"], 1):
+        cut_now = next((per_axis[a][1] for a in axes if a in per_axis), None)
+        if pol.sim_hold and prev_cut is not None and cut_now is not None and cut_now != prev_cut and hold_since_cut:
+            st = {a: _Axis() for a in axes}      # ChainEvidence::NoteCut -> Reset(): both axes, the rate measurement included
+            hold_since_cut = False
+        if cut_now is not None:
+            prev_cut = cut_now
         for a in axes:
             if a not in per_axis:
                 continue
+            v = per_axis[a]
+            tm, cut = v[0], v[1]
+            hold = pol.sim_hold and len(v) > 2 and v[2]
             its = items_idx.get((seg["reel"], a, seq), ())
-            tm, cut = per_axis[a]
             s = st[a]
+            if its and s.N and s.N != its[0].N:
+                st[a] = s = _Axis()
+            if its:
+                s.N = its[0].N
+            if pol.sim_window:
+                _note_time(s, tm, c1)
+            _track_shot(s, cut, tm, cap, pol.dwell_sec)
+            if hold:
+                _forget(s)
+                hold_since_cut = True
+                continue
             for it in its:
-                if s.N and s.N != it.N:
-                    st[a] = s = _Axis()
-                s.N = it.N
+                inc = increment(tables, it.cls, it.T)
+                if pol.dwell_sec > 0.0 and not s.shot_met:
+                    s.pending.append((it, inc, cut, tm))
+                    continue
                 slot = _find_slot(s, it)
                 slot.n, slot.cls = it.n, it.cls
-                _add(slot, increment(tables, it.cls, it.T), cut, cap)
+                _add(slot, inc, cut, tm, cap)
             if its:
                 s.inf_evals += 1
                 if s.shots == 0 or s.last_shot != cut:
@@ -549,7 +738,7 @@ def poisson_upper95(k):
     return POISSON95[k] if k < len(POISSON95) else k + 2.0 * math.sqrt(k) + 2.0
 
 
-def evaluate_heldout(test_items, test_segs, tables, ref_tables, c1):
+def evaluate_heldout(test_items, test_segs, tables, ref_tables, c1, policy=None):
     res = {}
     pos = [[] for _ in range(4)]
     neg = [[] for _ in range(4)]
@@ -567,7 +756,7 @@ def evaluate_heldout(test_items, test_segs, tables, ref_tables, c1):
                 if any(t > 0 for t in seg["truth"].values()):
                     continue
                 v["hours"] += seg_hours(seg)
-                for e in simulate_segment(seg, idx, tabs, c1, cf, True):
+                for e in simulate_segment(seg, idx, tabs, c1, cf, True, policy):
                     v["events"] += 1
                     v["by_class"][e[4]] += 1
             fa[(name, cf)] = v
@@ -579,7 +768,7 @@ def evaluate_heldout(test_items, test_segs, tables, ref_tables, c1):
     for seg in test_segs:
         if not any(t > 0 for t in seg["truth"].values()):
             continue
-        evs = simulate_segment(seg, idx, tables, c1, SHOT_CAP_FRACTION, False)
+        evs = simulate_segment(seg, idx, tables, c1, SHOT_CAP_FRACTION, False, policy)
         for a, t in sorted(seg["truth"].items()):
             if t <= 0:
                 continue
@@ -610,7 +799,7 @@ def cross_validate(items, segs, all_masters, policy, c1, seed):
         test = [it for it in items if fold_of[it.master] == f]
         tsegs = [s for s in segs if fold_of[s["master"]] == f]
         tabs, diag = fit_tables(train, policy)
-        r = evaluate_heldout(test, tsegs, tabs, {"null": PLACEHOLDER["null"], "alt": PLACEHOLDER["alt"]}, c1)
+        r = evaluate_heldout(test, tsegs, tabs, {"null": PLACEHOLDER["null"], "alt": PLACEHOLDER["alt"]}, c1, policy)
         for c in range(4):
             pooled["pos"][c] += r["pos"][c]
             pooled["neg"][c] += r["neg"][c]
@@ -634,16 +823,17 @@ def cross_validate(items, segs, all_masters, policy, c1, seed):
 # Outputs
 # ----------------------------------------------------------------------------------------------------------
 def render_header(tabs, diag, prov):
-    any_fit = any(d["status"] in ("fitted", "thin") for d in diag)
+    any_fit = any(d["status"] in ("fitted", "thin", "no-alt") for d in diag)
     P = prov["policy"]
     L = ["// Copyright(C) 2026 VP-V contributors", "// SPDX-License-Identifier: GPL-3.0-only", "#pragma once", "",
          "// GENERATED by tools/eval/source_id/calibrate_nulls.py. DO NOT EDIT: rerun the calibration instead.",
          "// Provenance: dump set sha256 %s" % prov["hash"],
          "//             date %s, %d files, %d rows, %d informative clusters from %d masters (n_eff %d shots), cv %s" % (
              prov["date"], prov["files"], prov["rows"], prov["items"], prov["masters"], prov["n_eff"], prov["cv"]),
-         "//             policy: min n_eff null/alt %d/%d, full %d/%d, masters >= %d, null widen %.2f, require_power %s" % (
+         "//             policy: min n_eff null/alt %d/%d, full %d/%d, masters >= %d, null widen %.2f, require_power %s,"
+         " null sd floor + alt-null %s, aliases dropped %s" % (
              P.min_null_hard, P.min_alt_hard, P.full_null, P.full_alt, P.min_masters, P.null_widen,
-             prov["require_power"])]
+             prov["require_power"], P.null_sd_floor, P.drop_aliases)]
     for c in range(4):
         d = diag[c]
         L.append("//   %-12s null %5d rows (n_eff %d, %d masters), alt %5d (n_eff %d, %d masters): %s%s" % (
@@ -662,23 +852,42 @@ def render_header(tabs, diag, prov):
     return "\n".join(L) + "\n"
 
 
+def median_inf(v):
+    """Median of a list that may hold inf (never reached) without the nan of inf - inf interpolation: inf when the middle is inf."""
+    s = sorted(v)
+    if not s:
+        return float("nan")
+    m = len(s) // 2
+    lo, hi = (s[m - 1], s[m]) if len(s) % 2 == 0 else (s[m], s[m])
+    return float("inf") if hi == float("inf") else (lo + hi) / 2.0
+
+
 def _med_lat(v):
     if not v:
         return "n/a"
-    m = median(v)
+    m = median_inf(v)
     return "inf" if m == float("inf") else "%.0f" % m
 
 
-def render_report(tabs, diag, prov, cv, fold_of, c1, stats):
+def sim_desc(policy):
+    p = policy or Policy()
+    w = "recent window %.1f x (c1 / %.1f) measured intervals, %.0f-%.0f s" % (WINDOW_MARGIN, WINDOW_YIELD_NATS, WINDOW_MIN_SEC, WINDOW_MAX_SEC) \
+        if p.sim_window else "NO recent window"
+    return "%s; HOLD %s; shot dwell %s" % (w, "forgets (proxy from the dump)" if p.sim_hold else "not simulated",
+                                           ("%.1f s" % p.dwell_sec) if p.dwell_sec > 0 else "off")
+
+
+def render_report(tabs, diag, prov, cv, fold_of, c1, stats, policy=None):
     L = ["# SID calibration report", ""]
     L.append("Dump set %s, %s, %d files, %d rows (%d bad), %d informative clusters, %d masters, n_eff %d shots. c1 = %.2f nats,"
              " per-shot cap c1/2 = %.2f, shots = the estimator's cut_id." % (
                  prov["hash"][:12], prov["date"], prov["files"], prov["rows"], prov["bad"], prov["items"],
                  prov["masters"], prov["n_eff"], c1, c1 / 2.0))
-    L.append("Exact rows %d: dropped %d no truth, %d not informative, %d gate, %d power%s, %d double-scaled off-latent;"
-             " %d class mismatches vs dump. T_ev is the statistic used." % (
+    L.append("Exact rows %d: dropped %d no truth, %d not informative, %d gate, %d power%s, %d double-scaled off-latent, %d aliases"
+             " (+-2%% of p/q x truth_n, q <= 4, upscaled reels)%s; %d class mismatches vs dump. T_ev is the statistic used." % (
                  stats["exact"], stats["no_truth"], stats["not_informative"], stats["gate_fail"], stats["power_fail"],
-                 "" if prov["require_power"] else " (not applied)", stats["double_drop"], stats["class_mismatch"]))
+                 "" if prov["require_power"] else " (not applied)", stats["double_drop"], stats["alias_drop"],
+                 "" if (policy or Policy()).drop_aliases else " (NOT dropped: --keep-aliases)", stats["class_mismatch"]))
     L += ["", "## Fitted tables (stage exact; n_eff = distinct reel x axis x shot groups)",
           "| class | null rows/n_eff/masters | alt rows/n_eff/masters | null mean, sd | alt mean, sd | max null T | status |",
           "|---|---|---|---|---|---|---|"]
@@ -689,6 +898,16 @@ def render_report(tabs, diag, prov, cv, fold_of, c1, stats):
             CLASS_NAMES[c], d["n_null"], d["eff_null"], d["m_null"], d["n_alt"], d["eff_alt"], d["m_alt"],
             tabs["null"][c][0], tabs["null"][c][1], tabs["alt"][c][0], tabs["alt"][c][1],
             "n/a" if mx != mx else "%.3f" % mx, d["status"], (": " + d["why"][:50]) if d["why"] else ""))
+    hits = []
+    for c in range(4):
+        d = diag[c]
+        if d["floored"]:
+            hits.append("%s null sd %.3f -> %.3f (floor = dip-side sd of its own data)" % (CLASS_NAMES[c], d["sd_before"], d["floor"]))
+        if d["alt_zero"]:
+            hits.append("%s alt = null (alt n_eff %d < %d: zero increment)" % (CLASS_NAMES[c], d["eff_alt"], (policy or Policy()).min_alt_hard))
+    L.append("")
+    L.append("C3 (null sd floor, alt = null below n_eff 20)%s: %s." % (
+        "" if (policy or Policy()).null_sd_floor else " OFF", "; ".join(hits) if hits else "no class hit"))
     L.append("")
     if cv is None:
         L.append("## Cross-validation: NOT POSSIBLE (fewer than 4 masters or one fold empty). Tables are UNVALIDATED.")
@@ -701,15 +920,22 @@ def render_report(tabs, diag, prov, cv, fold_of, c1, stats):
             tail = "n/a" if not nl else "%.2f / %.2f" % (quantile(nl, 0.99), quantile(nl, 0.999))
             L.append("| %s | %d/%d | %s | %s |" % (CLASS_NAMES[c], len(nl), len(cv["pos"][c]),
                                                   "n/a" if a != a else "%.3f" % a, tail))
-        L += ["", "False c1 crossings (false confident readings) on native segments (both axes jointly with the agreement prior; reset after each;"
-              " held-out only):", "| tables, shot cap | entries | hours H | per hour | upper 95% (3/H if 0) | by class k8/k16/rat/gen |",
+        L += ["", "False c1 crossings (false confident readings) on native segments, simulated as ChainEvidence runs: %s;"
+              " both axes jointly with the agreement prior; reset after each; held-out only. HEADLINE = the live setting"
+              " (calibrated tables, per-shot cap c1/2); the other rows are extras:" % sim_desc(policy),
+              "| tables, shot cap | entries | hours H | per hour | upper 95% (3/H if 0) | by class k8/k16/rat/gen |",
               "|---|---|---|---|---|---|"]
-        for (name, cf), v in sorted(cv["fa"].items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        order = [("cal", SHOT_CAP_FRACTION), ("cal", 1.0), ("ph", SHOT_CAP_FRACTION), ("ph", 1.0)]
+        for key in order:
+            v = cv["fa"].get(key)
+            if v is None:
+                continue
+            name, cf = key
             H = v["hours"]
             rate = "n/a" if H <= 0 else "%.3f" % (v["events"] / H)
             ub = "n/a" if H <= 0 else "%.3f /h" % (poisson_upper95(v["events"]) / H)
-            L.append("| %s, c1*%.1f | %d | %.2f | %s | %s | %s |" % (
-                "calibrated" if name == "cal" else "placeholder", cf, v["events"], H, rate, ub,
+            L.append("| %s%s, c1*%.1f | %d | %.2f | %s | %s | %s |" % (
+                "**HEADLINE** " if key == order[0] else "", "calibrated" if name == "cal" else "placeholder", cf, v["events"], H, rate, ub,
                 "/".join(str(x) for x in v["by_class"])))
         L.append("Budget <= 1/h. Zero events in H hours only bounds the rate at 3/H (95%%): that, not 0, is the claim. Wrong-n entries"
                  " on alt segments (calibrated): %d." % cv["wrong_on_alt"])
@@ -718,15 +944,31 @@ def render_report(tabs, diag, prov, cv, fold_of, c1, stats):
         for b in (8, 10):
             r = cv["reached"][b]
             L.append("| %d | %d | %d | %s | %d |" % (b, r[1], r[0], _med_lat(cv["lat"][b]), cv["wrong_first"][b]))
-    L += ["", "Not simulated: the native hypothesis (cannot raise a candidate), HOLD masking. Power rule %s." % (
+    L += ["", "Not simulated: the native hypothesis (cannot raise a candidate). HOLD is simulated from a dump proxy (%d of %d axis"
+          " evaluations). Power rule %s." % (prov.get("holds", 0), prov.get("axis_evals", 0),
         "applied to every row" if prov["require_power"] else "not applied to candidate rows (the estimator applies it to native only)")]
     return "\n".join(L) + "\n"
 
 
+def apply_args(policy, args):
+    """The simulation switches (and, later, the fit switches) from the command line; absent attributes keep the defaults."""
+    if getattr(args, "no_window", False):
+        policy.sim_window = False
+    if getattr(args, "no_hold", False):
+        policy.sim_hold = False
+    if getattr(args, "dwell_sec", None) is not None:
+        policy.dwell_sec = float(args.dwell_sec)
+    if getattr(args, "keep_aliases", False):
+        policy.drop_aliases = False
+    if getattr(args, "no_null_floor", False):
+        policy.null_sd_floor = False
+    return policy
+
+
 def run(args):
-    policy = Policy()
+    policy = apply_args(Policy(), args)
     rows, info = load_dumps(args.dump)
-    items, stats = build_samples(rows, args.require_power, args.null_side)
+    items, stats = build_samples(rows, args.require_power, args.null_side, policy.drop_aliases)
     segs = build_segments(rows)
     masters = sorted(set(r.master for r in rows))
     c1 = thresholds()
@@ -736,10 +978,12 @@ def run(args):
             "masters": len(set(it.master for it in items)), "n_eff": len(set((it.reel, it.axis, it.tshot) for it in items)),
             "date": args.date or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
             "cv": "2-fold by master" if cv else "NOT POSSIBLE (unvalidated)", "policy": policy,
-            "require_power": args.require_power}
+            "require_power": args.require_power,
+            "holds": sum(1 for s in segs for _, e in s["evals"] for v in e.values() if len(v) > 2 and v[2]),
+            "axis_evals": sum(len(e) for s in segs for _, e in s["evals"])}
     os.makedirs(args.out, exist_ok=True)
     hdr = render_header(tabs, diag, prov)
-    rep = render_report(tabs, diag, prov, cv, fold_of, c1, stats)
+    rep = render_report(tabs, diag, prov, cv, fold_of, c1, stats, policy)
     if len(rep.splitlines()) > 60:
         raise SystemExit("report exceeds 60 lines")
     with open(os.path.join(args.out, "NullTables.generated.h"), "w", encoding="utf-8", newline="\n") as fh:
@@ -858,6 +1102,10 @@ def selftest():
     check(len(REQUIRED) == 27, "dump v3 has 27 required columns")
     check(abs(thresholds() - 14.87) < 0.02, "c1 = %.3f (README ~14.9)" % thresholds())
     check(abs(auc([1, 2, 3], [0, 0.5, 1.5]) - 8.0 / 9.0) < 1e-9, "AUC rank formula")
+    check(is_alias(1080, 1080) and is_alias(1100, 1080) and not is_alias(1110, 1080) and is_alias(540, 1080) and is_alias(720, 1080)
+          and is_alias(1620, 1080) and is_alias(2160, 1080) and is_alias(810, 1080) and not is_alias(1000, 1080) and not is_alias(400, 0)
+          and not is_alias(900, 1080) and not is_alias(1230, 1080),
+          "C4 alias rule: p/q x truth_n within +-2% for q <= 4 (1/1, 1/2, 2/3, 3/4, 3/2, 2 yes; 5/6, 9/10 no)")
     check(poisson_upper95(0) == 3.0 and poisson_upper95(2) > 6.0 and poisson_upper95(30) > 30, "Poisson upper bound (3/H at 0)")
 
     # --- tail-matched null sd: a null with a deep dip tail gets a spread covering it
@@ -891,13 +1139,15 @@ def selftest():
         return it
     c1 = thresholds()
     idx1 = {("r", "x", i): [mk("x", i, 1317)] for i in range(40)}
-    e1 = simulate_segment(seg_for(["x"]), idx1, tabs, c1, 0.5, False)
+    pol_nd = Policy()
+    pol_nd.dwell_sec = 0.0       # the prior / cap checks below are about those rules alone (E2 has its own checks further down)
+    e1 = simulate_segment(seg_for(["x"]), idx1, tabs, c1, 0.5, False, pol_nd)
     idx2 = dict(idx1)
     idx2.update({("r", "y", i): [mk("y", i, 1317)] for i in range(40)})
-    e2 = simulate_segment(seg_for(["x", "y"]), idx2, tabs, c1, 0.5, False)
+    e2 = simulate_segment(seg_for(["x", "y"]), idx2, tabs, c1, 0.5, False, pol_nd)
     idx3 = dict(idx1)
     idx3.update({("r", "y", i): [mk("y", i, 1700)] for i in range(40)})
-    e3 = simulate_segment(seg_for(["x", "y"]), idx3, tabs, c1, 0.5, False)
+    e3 = simulate_segment(seg_for(["x", "y"]), idx3, tabs, c1, 0.5, False, pol_nd)
     ox = [e[1] for e in e1 if e[0] == "x"]
     jx = [e[1] for e in e2 if e[0] == "x"]
     dx = [e[1] for e in e3 if e[0] == "x"]
@@ -906,6 +1156,53 @@ def selftest():
     check(ox and dx and dx[0] > ox[0], "disagreeing axes (-2) are slower: %s > %s" % (dx[:1], ox[:1]))
     # per-shot cap: with 1-nat increments a 6-eval cut accumulates 6 < c1/2, so c1 needs several shots
     check(ox and ox[0] >= 15, "single-axis c1 needs >= 15 one-nat evaluations (%s)" % ox[:1])
+
+    # --- the simulation is the estimator's: recent window (seconds), HOLD forget + first-cut clear, E2 dwell (ChainEvidence.h)
+    def seg_x(n_evals, cut_of, holds=()):
+        return {"reel": "r", "master": "m", "truth": {"x": 0}, "truth1": {}, "bits": {"x": 8},
+                "evals": [(i, {"x": (float(i), cut_of(i), i in holds)}) for i in range(n_evals)]}
+
+    def idx_x(ids, T=-1.0):          # a decisive dip (increment clamps at +5 nats) at those evaluations
+        out = {}
+        for i in ids:
+            it = mk("x", i, 1317)
+            it.T = T
+            out[("r", "x", i)] = [it]
+        return out
+    pol0 = Policy()
+    pol0.dwell_sec = 0.0           # the window / HOLD checks below are about those rules alone
+    pol_nowin = Policy()
+    pol_nowin.dwell_sec = 0.0
+    pol_nowin.sim_window = False
+    pol_nohold = Policy()
+    pol_nohold.dwell_sec = 0.0
+    pol_nohold.sim_hold = False
+    pol_dwell = Policy()
+    pol_dwell.dwell_sec = 3.0
+    cut2 = lambda i: 0 if i < 2 else (1 if i < 22 else 2)
+    ids = [0, 1, 22, 23]
+    wl = simulate_segment(seg_x(24, cut2), idx_x(ids), tabs, c1, 0.5, False, pol0)
+    wn = simulate_segment(seg_x(24, cut2), idx_x(ids), tabs, c1, 0.5, False, pol_nowin)
+    check(not wl and len(wn) == 1, "recent window: a shot 22 s old (window %.1f s at a 1 s gap) has expired; without the window it counts"
+          % _window_sec(type("A", (), {"interval": 1.0})(), c1))
+    cut_b = lambda i: 0 if i < 2 else 1
+    ws = simulate_segment(seg_x(12, cut_b), idx_x([0, 1, 10, 11]), tabs, c1, 0.5, False, pol0)
+    check(len(ws) == 1 and ws[0][1] == 12, "recent window: a shot 10 s old is still inside it (event at evaluation %s)" % (ws[0][1] if ws else None))
+    ct = lambda i: 0 if i < 2 else (1 if i < 5 else 2)
+    hs = simulate_segment(seg_x(7, ct, holds=(2,)), idx_x([0, 1, 3, 4, 5, 6]), tabs, c1, 0.5, False, pol0)
+    hn = simulate_segment(seg_x(7, ct, holds=(2,)), idx_x([0, 1, 3, 4, 5, 6]), tabs, c1, 0.5, False, pol_nohold)
+    check(not hs and len(hn) == 1, "HOLD forgets its axis and the first cut after it clears both (no event); without the HOLD model the evidence adds up")
+    rapid = lambda i: i
+    check(not simulate_segment(seg_x(40, rapid), idx_x(range(40)), tabs, c1, 0.5, False, pol_dwell)
+          and len(simulate_segment(seg_x(40, rapid), idx_x(range(40)), tabs, c1, 0.5, False, pol_nowin)) >= 1,
+          "E2: rapid cuts every 1 s add no evidence with the 3 s dwell (they do without it)")
+    five = lambda i: i // 5
+    e_off = simulate_segment(seg_x(40, five), idx_x(range(40)), tabs, c1, 0.5, False, pol0)
+    e_on = simulate_segment(seg_x(40, five), idx_x(range(40)), tabs, c1, 0.5, False, pol_dwell)
+    check(e_off and e_on and e_off[0][1] <= e_on[0][1] <= e_off[0][1] + 3,
+          "E2: normal 5 s shots reach c1 within one dwell of the no-dwell time (%s vs %s evaluations)" % (e_on[0][1] if e_on else None, e_off[0][1] if e_off else None))
+    one_long = simulate_segment(seg_x(60, lambda i: 0), idx_x(range(60)), tabs, c1, 0.5, False, pol_dwell)
+    check(not one_long, "E2: the per-shot cap still holds (one 60 s shot never reaches c1)")
 
     # --- thin class: shrunk and blended, 0 < blend < 1 case, and sparse/too-few-masters fallbacks
     pol = Policy()
@@ -916,8 +1213,28 @@ def selftest():
     ks = lambda n_: [("r", "x", i) for i in range(n_)]
     ms = lambda n_: ["m%d" % (i % 6) for i in range(n_)]
     tn, ta, dg = fit_class(nx, axx, ks(100), ks(40), ms(100), ms(40), 0, pol, grid)
-    check(dg["status"] == "thin" and 0.0 < dg["blend"] < 1.0 and dominated(tn, ta, 0, grid),
-          "thin class: partial blend %.1f toward the placeholder, then dominated" % dg["blend"])
+    check(dg["status"] == "thin" and 0.0 < dg["blend"] < 1.0 and dg["dominated"],
+          "thin class: partial blend %.1f toward the placeholder, dominated before the C3 floor" % dg["blend"])
+    check(dg["floor"] is not None and tn[1] >= dg["floor"] - 1e-12,
+          "C3: the blended null sd %.4f is not below the dip-side sd of its own data %.4f" % (tn[1], dg["floor"]))
+    pol_off = Policy()
+    pol_off.null_sd_floor = False
+    tnf, taf, dgf = fit_class(nx, axx, ks(100), ks(40), ms(100), ms(40), 0, pol_off, grid)
+    check(dgf["floor"] is None and dominated(tnf, taf, 0, grid) and tnf[1] <= tn[1] + 1e-12,
+          "C3 off: no floor, the blend stays dominated by the placeholder")
+    # C3: a placeholder class (too few masters) keeps the placeholder MEAN but not a null sd below its data's dip-side sd
+    wide = [-0.1 + 0.12 * rng.gauss() for _ in range(300)]
+    tnp, tap, dgp = fit_class(wide, axx, ks(60), ks(40), ["a", "b"] * 30, ["a", "b"] * 20, 1, pol, grid)
+    check(dgp["status"] == "placeholder" and tnp[0] == PLACEHOLDER["null"][1][0] and tnp[1] > PLACEHOLDER["null"][1][1] and tnp[1] >= dgp["floor"] - 1e-12
+          and dgp["floored"] and tap == PLACEHOLDER["alt"][1],
+          "C3: placeholder class with 60 shots of data: null sd %.3f floored from %.3f" % (tnp[1], PLACEHOLDER["null"][1][1]))
+    # C3: alt n_eff < 20 (with enough null data): alt = null, a zero increment everywhere; C3 off: the placeholder
+    tna, taa, dga = fit_class(wide, axx[:10], ks(60), ks(10), ms(60), ms(10), 1, pol, grid)
+    zero = all(increment({"null": [tna] * 4, "alt": [taa] * 4}, 1, t_) == 0.0 for t_ in (-2.0, -0.5, -0.1, 0.0, 0.5))
+    check(dga["status"] == "no-alt" and dga["alt_zero"] and taa == tna and zero,
+          "C3: alt n_eff 10 < 20 gives alt = null (status %s, zero increment on the grid)" % dga["status"])
+    tno, tao, dgo = fit_class(wide, axx[:10], ks(60), ks(10), ms(60), ms(10), 1, pol_off, grid)
+    check(dgo["status"] == "placeholder" and tno == PLACEHOLDER["null"][1] and tao == PLACEHOLDER["alt"][1], "C3 off: alt n_eff 10 keeps the placeholder")
     tn1, ta1, dg1 = fit_class(nx[:20], axx, ks(20), ks(40), ms(20), ms(40), 0, pol, grid)
     check(dg1["status"] == "placeholder" and tn1 == PLACEHOLDER["null"][0], "too few effective nulls -> placeholder")
     tn2, ta2, dg2 = fit_class(nx, axx, ks(100), ks(40), ["a"] * 100, ms(40), 0, pol, grid)
@@ -944,6 +1261,10 @@ def selftest():
         ns = argparse.Namespace(dump=dd, out=out, date="2026-11-07", require_power=False, null_side="both", seed="sid-cal")
         rows, info = load_dumps(dd)
         check(len(rows) > 0 and info["bad"] == 0, "v3 rows load (%d rows, %d bad; quoted ids, 27 columns)" % (len(rows), info["bad"]))
+        _, st_keep = build_samples(rows, drop_aliases=False)
+        _, st_drop = build_samples(rows)
+        check(st_keep["alias_drop"] == 0 and st_drop["alias_drop"] > 0, "C4: aliases of an upscaled reel are dropped from the null (%d clusters), kept with --keep-aliases" %
+              st_drop["alias_drop"])
         hdr, rep, tabs, diag, cv, fold_of, items, segs = run(ns)
         _, st = build_samples(rows)
         check(st["no_truth"] > 0 and st["not_informative"] > 0, "has_truth=0 (%d) and informative=0 (%d) exact rows dropped" % (
@@ -973,7 +1294,8 @@ def selftest():
         grid = make_grid(max(it.T for it in items))
         for c in range(4):
             if diag[c]["status"] in ("thin", "placeholder"):
-                check(dominated(tabs["null"][c], tabs["alt"][c], c, grid), "class %s never more permissive than placeholder" % CLASSES[c])
+                check(dominated(tabs["null"][c], tabs["alt"][c], c, grid) or diag[c]["floored"],
+                      "class %s never more permissive than placeholder (or widened by the C3 floor)" % CLASSES[c])
 
         # one fold per master (the title column is unique per reel and must be ignored)
         masters = sorted(set(r.master for r in rows))
@@ -995,7 +1317,7 @@ def selftest():
         check("3/H" in rep and "upper 95%" in rep and "%.3f /h" % (3.0 / fa["hours"]) in rep, "report prints the 3/H bound (%.1f /h)" % (3.0 / fa["hours"]))
         for b in (8, 10):
             r = cv["reached"][b]
-            m = median(cv["lat"][b]) if cv["lat"][b] else float("inf")
+            m = median_inf(cv["lat"][b]) if cv["lat"][b] else float("inf")
             check(r[1] > 0 and r[0] == r[1] and m <= 30, "%d-bit alt segment-axes reach c1 (%d/%d, median %s evals)" % (b, r[0], r[1], "%.0f" % m))
             check(cv["wrong_first"][b] == 0, "%d-bit: no wrong n first" % b)
         check(sum(r_[1] for r_ in cv["reached"].values()) == sum(1 for s in segs for a_, t_ in s["truth"].items() if t_ > 0 and True),
@@ -1036,6 +1358,14 @@ def main(argv=None):
                     help="null rows on upscaled reels: n more than 1 from truth on both sides (default, the "
                          "spec) or only below the truth (above it a descale is lossless and alt-like)")
     ap.add_argument("--seed", default="sid-cal", help="seed of the deterministic by-master fold split")
+    ap.add_argument("--no-null-floor", action="store_true",
+                    help="no C3: the null sd may fall below the dip-side sd of its own data, a class with alt n_eff < 20 keeps the placeholder (ablation only)")
+    ap.add_argument("--keep-aliases", action="store_true",
+                    help="keep the aliases (+-2%% of p/q x truth_n, q <= 4) of upscaled reels in the null (the cal1 behaviour; ablation only)")
+    ap.add_argument("--no-window", action="store_true", help="simulate WITHOUT the recent window (the cal1 behaviour; extra row only)")
+    ap.add_argument("--no-hold", action="store_true", help="simulate without the HOLD forget / first-cut clear")
+    ap.add_argument("--dwell-sec", type=float, default=None,
+                    help="E2 minimum shot dwell in source seconds (default: the estimator's kMinShotDwellSec; 0 = without E2)")
     ap.add_argument("--date", default="", help="date for the provenance (default: today, UTC)")
     a = ap.parse_args(argv)
     if a.selftest:

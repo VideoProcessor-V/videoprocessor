@@ -23,6 +23,8 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
+#include <fstream>
 #include <cstring>
 #include <functional>
 #include <algorithm>
@@ -1303,6 +1305,114 @@ namespace Tests
 			Assert::IsTrue(ev.Summary(0).hasBest, L"the other axis is untouched");
 		}
 
+		// ---- SID-CAL2 E2 (owner-approved latch-semantics change): the minimum informative-shot dwell, in source seconds --------------------------
+		// A shot's evidence counts toward a candidate once the shot has lasted kMinShotDwellSec (3 s); a shot that ends sooner adds nothing.
+		TEST_METHOD(TheMinimumShotDwellIsThreeSecondsAndDefaultsOn)
+		{
+			using namespace SourceIdentity::Chain;
+			Assert::AreEqual(3.0, kMinShotDwellSec, 0.0, L"the owner decision: about 3 s of source time");
+			Assert::AreEqual(kMinShotDwellSec, EvidenceSettings().minShotDwellSec, 0.0, L"the shipped setting is the named constant");
+		}
+
+		TEST_METHOD(RapidCutsShorterThanTheDwellAddNoEvidence)
+		{
+			using namespace SourceIdentity::Chain;
+			EvidenceSettings off;
+			off.minShotDwellSec = 0.0;
+			ChainEvidence control(off);
+			ChainEvidence everyOne, everyTwo;
+			for (int t = 0; t < 40; ++t)
+			{
+				FeedAt(control, 540, t, 1 + static_cast<uint32_t>(t), true);           // a cut at every evaluation, no dwell: the evidence adds up
+				FeedAt(everyOne, 540, t, 1 + static_cast<uint32_t>(t), true);          // a cut every 1 s
+				FeedAt(everyTwo, 540, t, 1 + static_cast<uint32_t>(t / 2), true);      // a cut every 2 s
+			}
+			Assert::IsTrue(control.Summary(1).hasBest && control.Summary(1).aboveC1, L"fixture: without the dwell forty one-evaluation shots reach c1");
+			const AxisSummary a = everyOne.Summary(1), b = everyTwo.Summary(1);
+			Assert::IsFalse(a.hasBest || a.aboveC1, L"cuts every 1 s: every shot ended before it lasted 3 s, nothing was credited");
+			Assert::IsFalse(b.hasBest || b.aboveC1, L"cuts every 2 s: the same");
+			Assert::IsTrue(a.shots == 40 && a.informativeEvals == 40, L"the reading's own counters still see every informative evaluation");
+			Assert::AreEqual(0.0, a.llr, 0.0);
+		}
+
+		TEST_METHOD(AShotThatLastsTheDwellIsCreditedWhenItsSuccessorStartsAndNotBefore)
+		{
+			using namespace SourceIdentity::Chain;
+			ChainEvidence ev;
+			// Shots of exactly 3 s (evaluations at t, t+1, t+2; the next shot starts at t+3): the shot lasted 3 s at the cut and is credited then.
+			for (int t = 0; t < 40; ++t)
+				FeedAt(ev, 540, t, 1 + static_cast<uint32_t>(t / 3), true);
+			const AxisSummary s = ev.Summary(1);
+			Assert::IsTrue(s.hasBest && s.n == 540 && s.aboveC1, L"three-second shots count in full (the boundary is inclusive)");
+		}
+
+		TEST_METHOD(ANormalFiveSecondShotKeepsItsEvidenceAndItIsOnlyLater)
+		{
+			using namespace SourceIdentity::Chain;
+			EvidenceSettings off;
+			off.minShotDwellSec = 0.0;
+			ChainEvidence before(off), after;
+			double llrBefore11 = 0.0, llrAfter11 = 0.0;
+			for (int t = 0; t < 15; ++t)
+			{
+				const uint32_t shot = 1 + static_cast<uint32_t>(t / 5);              // three shots of 5 s
+				FeedAt(before, 540, t, shot, true);
+				FeedAt(after, 540, t, shot, true);
+				if (t == 11)
+				{
+					llrBefore11 = before.Summary(1).llr;
+					llrAfter11 = after.Summary(1).llr;
+				}
+			}
+			Assert::IsTrue(llrAfter11 < llrBefore11 - 1.0, L"2 s into the third shot its evidence is still held (it has not lasted 3 s yet)");
+			const AxisSummary b = before.Summary(1), a = after.Summary(1);
+			Assert::AreEqual(b.llr, a.llr, 1e-9, L"once the shot has lasted the dwell its evidence is exactly what it was without the dwell");
+			Assert::IsTrue(a.hasBest && a.n == b.n && a.shots == b.shots && a.informativeEvals == b.informativeEvals);
+			Assert::IsTrue(a.aboveC1 == b.aboveC1);
+		}
+
+		TEST_METHOD(ThePerShotCapStillHoldsWithTheDwell)
+		{
+			using namespace SourceIdentity::Chain;
+			ChainEvidence ev;
+			for (int t = 0; t < 30; ++t)
+				FeedAt(ev, 540, t, 1, true);                                            // one 30 s shot, decisive evaluations
+			const AxisSummary s = ev.Summary(1);
+			Assert::IsTrue(s.hasBest && s.n == 540);
+			Assert::AreEqual(0.5 * ev.GetThresholds().c1, s.llr, 1e-9, L"one shot saturates at c1 / 2");
+			Assert::IsFalse(s.aboveC1, L"c1 still needs two shots");
+		}
+
+		TEST_METHOD(WithoutSourceTimeTheDwellCannotApplyAndTheEvidenceCountsAtOnce)
+		{
+			using namespace SourceIdentity::Chain;
+			ChainEvidence ev;
+			for (int t = 0; t < 40; ++t)
+				FeedAt(ev, 540, t, 1 + static_cast<uint32_t>(t), false);               // no timeUs: nothing to measure the dwell with
+			Assert::IsTrue(ev.Summary(1).hasBest && ev.Summary(1).aboveC1, L"no source time: the former behaviour (evidence counts per shot at once)");
+		}
+
+		TEST_METHOD(AHoldEvaluationDropsTheEvidenceHeldForTheCurrentShot)
+		{
+			using namespace SourceIdentity::Chain;
+			using namespace ChainSynth;
+			ChainEvidence ev;
+			FeedAt(ev, 540, 0, 1, true);                                                // held: the shot is 0 s old
+			FeedAt(ev, 540, 1, 1, true);                                                // held
+			VerifyResult many;
+			many.candidates.push_back(MakeCandidate(720, -0.6, 5.0));
+			for (int j = 0; j < 10; ++j)
+				many.candidates[0].lineStat[static_cast<size_t>(j)] = 0.0;              // an overlay: HOLD
+			AxisObservation o = Observe(many, 1080, 1, true);
+			o.timeUs = 2 * 1000000LL;
+			EvidenceUpdate u;
+			Assert::IsTrue(ev.Submit(1, o, u) && u.hold);
+			FeedAt(ev, 540, 3, 1, true);                                                // the shot has now lasted 3 s: only THIS evaluation is credited
+			const AxisSummary s = ev.Summary(1);
+			Assert::IsTrue(s.hasBest && s.n == 540 && s.informativeEvals == 1, L"the HOLD started the accumulation over, held evidence included");
+			Assert::IsTrue(s.llr > 0.0 && s.llr < 6.0, L"one evaluation's increment (clamped at 5 nats), not three");
+		}
+
 		// ---- Revert window (owner-approved): window margin 3.0 -> 1.5, the first cut after a HOLD clears, black frames and ordinary cuts do not ----
 		TEST_METHOD(TheRevertWindowIsAboutSixteenSecondsAtAOneSecondIntervalAndHoldsMoreEvaluationsThanC1Needs)
 		{
@@ -2061,6 +2171,10 @@ namespace Tests
 			int chainAfterBlack = -1;                  // the record on the first evaluation after the black picture: 1 confident, 0 not, -1 never
 			unsigned long long clears = 0;             // EstimatorCounters::windowClears
 			unsigned long long discontinuities = 0;    // EstimatorCounters::discontinuities
+			// SID r2 (safety rules on): the latch counters at the end, and whether a latch was held inside the menu after the hold bound.
+			SourceIdentity::Chain::LatchCounters latch;
+			bool latchedInMenu = false;
+			bool latchedBeforeMenu = false;
 		};
 
 		static double SwitchSeconds() { return 60.0; }
@@ -2078,6 +2192,7 @@ namespace Tests
 			double blackAt = -1.0;          // one second of black (picture lines and monitor frames) from here
 			double formatChangeAt = -1.0;   // Monitor::Discontinuity("source format change") before the frame at or after this time
 			int confidentAxisLines = 0;     // EstimatorSettings::confidentAxisExactLines (0 = the shipped, off)
+			bool safetyRules = false;       // EstimatorSettings::safetyRules (SID r2, default off)
 		};
 
 		static RevertRun Drive(Mon::SourceIdMode mode)
@@ -2104,6 +2219,7 @@ namespace Tests
 			Tests::ChainFx::ManualClock clk;
 			C::EstimatorSettings es;
 			es.confidentAxisExactLines = sc.confidentAxisLines;
+			es.safetyRules = sc.safetyRules;
 			std::unique_ptr<C::ChainEstimator> owner(new C::ChainEstimator(es, clk.Fn()));
 			C::ChainEstimator& est = *owner;
 			Mon m;
@@ -2132,7 +2248,9 @@ namespace Tests
 				if (est.Wants())
 				{
 					const Image& lines = black ? blk : (native ? nat : up);
-					Assert::IsTrue(SubmitEvaluation(est, lines, seq, t, r.evaluations % 2 == 0), L"fixture: the lines were captured");
+					// WAIVER-SID-E2-01 (coordinator, fixture only): a cut at every 6th evaluation (about 6 s shots at the 1 s acquiring cadence). It was every
+					// 2nd (about 2 s shots), which the E2 minimum shot dwell (3 s) correctly treats as rapid cuts that add no evidence; no assertion changed.
+					Assert::IsTrue(SubmitEvaluation(est, lines, seq, t, r.evaluations % 6 == 0), L"fixture: the lines were captured");
 					++r.evaluations;
 					if (native) ++r.nativeEvaluations;
 					if (black) ++r.blackEvaluations;
@@ -2168,8 +2286,18 @@ namespace Tests
 				if (native && !chainConfident && r.tChainFlip < 0.0) r.tChainFlip = t;
 				if (native && consensusNative && r.tRevert < 0.0) r.tRevert = t;
 				if (r.tAdopt >= 0.0 && t > r.tAdopt && consensusNative && r.tLetGo < 0.0) r.tLetGo = t;
+				if (sc.safetyRules && sc.menuStart >= 0.0)
+				{
+					// The hold bound inside the menu: the episode counts after one acquiring interval, the event reaches the next evaluation
+					// (at most one latched interval), plus two frames.
+					const C::GovernorSettings gs;
+					const bool latchedNow = est.StatusInput().latchNx > 0;
+					if (t < sc.menuStart && latchedNow) r.latchedBeforeMenu = true;
+					if (t >= sc.menuStart + gs.acquiringIntervalSec + gs.latchedIntervalSec + 2.0 * dt && t < sc.menuEnd && latchedNow) r.latchedInMenu = true;
+				}
 			}
 			r.held = m.NativeFramesHeldByChain();
+			r.latch = est.GetCounters().latch;
 			r.clears = est.GetCounters().windowClears;
 			r.discontinuities = est.GetCounters().discontinuities;
 			return r;
@@ -2462,6 +2590,295 @@ namespace Tests
 		}
 	};
 	// ---- Revert window: WHEN the monitor asks the estimator to clear the evidence window (WindowClearPolicy.h) ----------------------------
+	// ---- SID r2 safety rules at the ESTIMATOR level (fix round: H1, M2, M3, M4, off identity) ---------------------------------------
+	// The real estimator (manual or tick clock, synchronous) on the synthetic upscales above; the latch, the evidence and the status are
+	// the production ones. The latch alone is tested in ChainSafetyRulesTests.cpp.
+	TEST_CLASS(ChainSafetyEstimatorTests)
+	{
+	public:
+		typedef ChainRevertBoundTests::Mon Mon;
+
+		static SourceIdentity::Chain::EstimatorSettings Safe()
+		{
+			SourceIdentity::Chain::EstimatorSettings es;
+			es.safetyRules = true;
+			return es;
+		}
+
+		static std::wstring W(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+
+		// |a - b| <= 1
+		static bool Near1(int a, int b) { return (a > b ? a - b : b - a) <= 1; }
+
+		// H1: while latched only the latched size (+-1 px per axis) is ever published, whatever the readers measure; any other confident
+		// upscaled size on an axis is never applied while the latch holds another. Phase 1 is the 960x540 bilinear upscale, phase 2 a
+		// 1280x720 bicubic one (another listed size) on the same 1920x1080 raster.
+		TEST_METHOD(WhileLatchedOnlyTheLatchedSizeIsPublished)
+		{
+			using namespace ChainSynth;
+			namespace C = SourceIdentity::Chain;
+			namespace G = SourceIdentity::Geometry;
+			const Image up540 = ChainScene(540, 960, kFrameH, kFrameW, kBilinear, 1201u, 8, 0.0, 10.0);
+			const Image up720 = ChainScene(720, 1280, kFrameH, kFrameW, kBicubic, 232u, 10, 0.0);
+			Tests::ChainFx::ManualClock clk;
+			C::ChainEstimator est(Safe(), clk.Fn());
+			est.SetSynchronous(true);
+			est.SetMode(C::EstimatorMode::On);
+			const double tSwitch = 100.0, tEnd = 300.0, dt = 0.5;
+			uint64_t seq = 2;
+			int evals = 0, evalsSinceSwitch = 0;
+			bool enteredBeforeSwitch = false, sawOtherWhileLatched = false, sawOtherApplied = false;
+			uint64_t lastAppliedGen = 0;
+			for (int i = 0; 10.0 + dt * i <= tEnd; ++i, ++seq)
+			{
+				const double t = 10.0 + dt * i;
+				clk.Set(t * 1000.0);
+				if (!est.Wants())
+					continue;
+				const bool second = t >= tSwitch;
+				const bool cut = second ? (evalsSinceSwitch % 3 == 0) : (evals % 6 == 0);
+				Assert::IsTrue(ChainRevertBoundTests::SubmitEvaluation(est, second ? up720 : up540, seq, t, cut), L"fixture: the lines were captured");
+				++evals;
+				if (second) ++evalsSinceSwitch;
+				const C::ChainStatusInput si = est.StatusInput();
+				G::Record rec;
+				if (!est.Held().ReadLatest(0, rec))
+					continue;
+				lastAppliedGen = rec.appliedGen;
+				const int L[2] = { si.latchNx, si.latchNy };
+				for (int a = 0; a < 2; ++a)
+				{
+					const G::AxisGeom& ap = rec.applied[a];
+					const bool confUp = ap.state == G::LatchState::Latched && ap.n < ap.N;
+					if (confUp)
+					{
+						Assert::IsTrue(L[0] > 0 && L[1] > 0, (L"a confident upscaled size is published only while latched (t " + std::to_wstring(t) + L")").c_str());
+						Assert::IsTrue(Near1(ap.n, L[a]), (L"H1: the published size is the latched one (axis " + std::to_wstring(a) + L", n " +
+							std::to_wstring(ap.n) + L", latch " + std::to_wstring(L[a]) + L", t " + std::to_wstring(t) + L")").c_str());
+					}
+					const int other = a == 0 ? 1280 : 720;
+					if (L[0] > 0 && Near1(L[0], 960) && Near1(rec.measured[a].n, other))
+						sawOtherWhileLatched = true;
+					if (confUp && Near1(ap.n, other))
+						sawOtherApplied = true;
+				}
+				if (!second && Near1(si.latchNx, 960) && Near1(si.latchNy, 540))
+					enteredBeforeSwitch = true;
+			}
+			const C::LatchCounters lc = est.GetCounters().latch;
+			std::ostringstream os;
+			os << "evals " << evals << " entries " << lc.entries << " moves " << lc.moves << " confirms " << lc.confirms << " releases " << lc.releases
+			   << " (clock " << lc.releasesBound << ", hard " << lc.releasesHardBound << ") heldBack " << lc.heldBack << " sawOtherWhileLatched "
+			   << sawOtherWhileLatched << " sawOtherApplied " << sawOtherApplied << " appliedGen " << lastAppliedGen;
+			Logger::WriteMessage(os.str().c_str());
+			Assert::IsTrue(enteredBeforeSwitch, W("fixture: the 960x540 upscale latched before the switch; " + os.str()).c_str());
+			Assert::IsTrue(sawOtherWhileLatched, W("the readers measured 1280x720 while the latch held 960x540 (the H1 case); " + os.str()).c_str());
+			Assert::IsTrue(!sawOtherApplied || lc.moves > 0 || lc.releases > 0,
+				W("1280x720 was applied only after a move or a release and re-entry; " + os.str()).c_str());
+		}
+
+		// Off: byte identical to the default estimator, whatever is posted (MenuHold / AbrStep are dropped) and the ABR switch.
+		TEST_METHOD(OffIsByteIdenticalWithEveryR2InputPosted)
+		{
+			namespace C = SourceIdentity::Chain;
+			namespace G = SourceIdentity::Geometry;
+			using namespace Tests::ChainFx;
+			std::vector<Plane> planes;
+			for (int i = 0; i < 6; ++i)
+				planes.push_back(MakePlane(320, 240, 40 + static_cast<uint32_t>(i), 4));
+			std::vector<G::Packed> runs[2];
+			std::string status[2], detail[2];
+			for (int run = 0; run < 2; ++run)
+			{
+				ManualClock clk;
+				C::EstimatorSettings es;
+				es.safetyRules = false;
+				C::ChainEstimator est(es, clk.Fn());
+				est.SetSynchronous(true);
+				if (run == 1)
+				{
+					est.SetSafetyRules(false);
+					est.SetLatchAbrStepTrigger(true);
+				}
+				est.SetMode(C::EstimatorMode::On);
+				for (int i = 0; i < 6; ++i)
+				{
+					const uint64_t s = 100u + 30u * static_cast<uint64_t>(i);
+					if (run == 1)
+					{
+						est.NoteEvent(C::EstimatorEvent::MenuHold, s - 1);
+						est.NoteEvent(C::EstimatorEvent::AbrStep, s - 1);
+					}
+					clk.Set(1100.0 * i);
+					Feed(est, planes[static_cast<size_t>(i)], s, 10.0 + 1.1 * i);
+					G::Record r;
+					Assert::IsTrue(est.Held().ReadLatest(0, r), L"a record was published");
+					runs[run].push_back(G::Pack(r));
+					Assert::AreEqual<uint32_t>(0u, est.StatusInput().last.flags & (C::kEvMenuHold | C::kEvAbrStep), L"the r2 events are not taken while off");
+				}
+				status[run] = est.StatusLine();
+				detail[run] = est.DetailText();
+				Assert::AreEqual<uint64_t>(0, est.GetCounters().latch.entries + est.GetCounters().latch.heldBack + est.GetCounters().latch.nonConventional);
+				Assert::IsFalse(est.StatusInput().safetyRules);
+			}
+			for (size_t i = 0; i < runs[0].size(); ++i)
+				Assert::IsTrue(Tests::ChainFx::SameBytes(runs[0][i], runs[1][i]), L"off: record bytes identical to the default");
+			Assert::IsTrue(status[0] == status[1], L"off: the status line is identical");
+			Assert::IsTrue(detail[0] == detail[1], L"off: Ctrl+Alt+D is identical");
+			Assert::IsTrue(status[0].find("upscale latch") == std::string::npos && detail[0].find("safety rules") == std::string::npos,
+				L"off: nothing of the latch is shown");
+		}
+
+		// M3: the R4 dump runs after the cost is measured: with a tick clock (every clock read advances it) the records and the governor's
+		// cost are identical with and without the dump, and the dump file is written.
+		TEST_METHOD(TheR4DumpIsDecisionNeutral)
+		{
+			using namespace ChainSynth;
+			namespace C = SourceIdentity::Chain;
+			namespace G = SourceIdentity::Geometry;
+			const Image up = ChainScene(540, 960, kFrameH, kFrameW, kBilinear, 1201u, 8, 0.0, 10.0);
+			char tmp[512] = {};
+			std::string folder;
+			{
+				char* v = nullptr;
+				size_t len = 0;
+				if (_dupenv_s(&v, &len, "TEMP") == 0 && v != nullptr)
+				{
+					folder = v;
+					std::free(v);
+				}
+			}
+			Assert::IsFalse(folder.empty(), L"fixture: TEMP is set");
+			std::snprintf(tmp, sizeof(tmp), "%s\\vp-sid-r4-neutral-%u.csv", folder.c_str(), static_cast<unsigned>(std::chrono::steady_clock::now().time_since_epoch().count() & 0xffffffu));
+			const std::string path = tmp;
+			std::remove(path.c_str());
+			std::vector<G::Packed> recs[2];
+			std::vector<double> costs[2];
+			for (int run = 0; run < 2; ++run)
+			{
+				if (run == 1)
+					_putenv_s("VP_SID_R4_DUMP_PATH", path.c_str());
+				Tests::ChainFx::TickClock clk;
+				C::ChainEstimator est(C::EstimatorSettings(), clk.Fn());
+				est.SetSynchronous(true);
+				est.SetMode(C::EstimatorMode::On);
+				for (int i = 0; i < 8; ++i)
+				{
+					Assert::IsTrue(ChainRevertBoundTests::SubmitEvaluation(est, up, 10u + 30u * static_cast<uint64_t>(i), 10.0 + i, i % 4 == 0));
+					G::Record r;
+					Assert::IsTrue(est.Held().ReadLatest(0, r));
+					recs[run].push_back(G::Pack(r));
+					costs[run].push_back(est.GetGovernorPlan().costMs);
+				}
+				if (run == 1)
+					_putenv_s("VP_SID_R4_DUMP_PATH", "");
+			}
+			std::string dump;
+			{
+				std::ifstream f(path.c_str());
+				std::ostringstream os;
+				os << f.rdbuf();
+				dump = os.str();
+			}
+			std::remove(path.c_str());
+			const std::string header = "seq,timeUs,axis,N,n,valid,stat,kernel,lines\n";
+			Assert::IsTrue(dump.compare(0, header.size(), header) == 0, L"the dump was written with its header");
+			Assert::IsTrue(dump.size() > header.size() + 10, L"and rows");
+			for (size_t i = 0; i < recs[0].size(); ++i)
+			{
+				Assert::IsTrue(Tests::ChainFx::SameBytes(recs[0][i], recs[1][i]), L"the dump changes no record byte");
+				Assert::AreEqual(costs[0][i], costs[1][i], 1e-9, L"nor the measured cost the governor plans from");
+			}
+		}
+
+		// M2: a menu posted on every frame never evicts a pending cut from the capped event queue (MenuHold is coalesced to one).
+		TEST_METHOD(AMenuOnEveryFrameNeverEvictsAPendingCut)
+		{
+			namespace C = SourceIdentity::Chain;
+			using namespace Tests::ChainFx;
+			ManualClock clk;
+			C::ChainEstimator est(Safe(), clk.Fn());
+			est.SetSynchronous(true);
+			est.SetMode(C::EstimatorMode::On);
+			Assert::IsTrue(est.SafetyRules());
+			const Plane plane = MakePlane(320, 240, 7, 4);
+			est.NoteEvent(C::EstimatorEvent::Cut, 5);
+			for (uint64_t s = 6; s <= 205; ++s)
+				est.NoteEvent(C::EstimatorEvent::MenuHold, s);   // 200 > eventCap 64
+			Feed(est, plane, 300, 1.0);
+			Assert::AreEqual<uint32_t>(C::kEvCut | C::kEvMenuHold, est.StatusInput().last.flags & (C::kEvCut | C::kEvMenuHold),
+				L"the cut survived and the menu was seen");
+			clk.Set(1100.0);
+			Feed(est, plane, 330, 2.1);
+			Assert::AreEqual<uint32_t>(0u, est.StatusInput().last.flags & (C::kEvCut | C::kEvMenuHold), L"both consumed once");
+		}
+
+		// R7 through the monitor (the MenuHold feed of the window policy): a latched upscale is released in a menu, nothing is latched
+		// inside it, and it latches again afterwards.
+		TEST_METHOD(TheMonitorsMenuFeedReleasesTheLatch)
+		{
+			ChainRevertBoundTests::Scenario sc;
+			sc.safetyRules = true;
+			sc.switchAt = -1.0;
+			sc.menuStart = 70.0;
+			sc.menuEnd = 85.0;
+			sc.endAt = 130.0;
+			const ChainRevertBoundTests::RevertRun r = ChainRevertBoundTests::Drive(sc);
+			std::ostringstream os;
+			os << "entries " << r.latch.entries << " releases " << r.latch.releases << " menu " << r.latch.releasesMenu << " clears " << r.clears;
+			Logger::WriteMessage(os.str().c_str());
+			Assert::IsTrue(r.latchedBeforeMenu, W("fixture: latched before the menu; " + os.str()).c_str());
+			Assert::IsTrue(r.latch.releasesMenu >= 1, W("released by the menu; " + os.str()).c_str());
+			Assert::IsFalse(r.latchedInMenu, W("nothing latched inside the menu; " + os.str()).c_str());
+			Assert::IsTrue(r.latch.entries >= 2, W("latched again after the menu; " + os.str()).c_str());
+		}
+
+		// M4: the latch is visible (status line, Ctrl+Alt+D with the counters) and a reset releases it visibly (counted, noticed).
+		TEST_METHOD(TheLatchIsVisibleAndAResetReleasesItVisibly)
+		{
+			using namespace ChainSynth;
+			namespace C = SourceIdentity::Chain;
+			const Image up = ChainScene(540, 960, kFrameH, kFrameW, kBilinear, 1201u, 8, 0.0, 10.0);
+			Tests::ChainFx::ManualClock clk;
+			C::ChainEstimator est(Safe(), clk.Fn());
+			est.SetSynchronous(true);
+			est.SetMode(C::EstimatorMode::On);
+			uint64_t seq = 2;
+			int evals = 0;
+			double t = 10.0;
+			for (; t <= 80.0 && est.StatusInput().latchNx == 0; t += 0.5, ++seq)
+			{
+				clk.Set(t * 1000.0);
+				if (!est.Wants())
+					continue;
+				Assert::IsTrue(ChainRevertBoundTests::SubmitEvaluation(est, up, seq, t, evals % 6 == 0));
+				++evals;
+			}
+			Assert::IsTrue(est.StatusInput().latchNx == 960 && est.StatusInput().latchNy == 540, L"fixture: latched 960x540");
+			const std::string line = est.StatusLine(), detail = est.DetailText();
+			Assert::IsTrue(line.find("upscale latch 960x540") != std::string::npos, W("the status line names the latch: " + line).c_str());
+			Assert::IsTrue(detail.find("safety rules on: latch 960x540, entries 1") != std::string::npos, W("Ctrl+Alt+D has the counters: " + detail).c_str());
+			std::string notice;
+			while (est.TakeNotice(notice))
+			{
+			}
+			est.NoteDiscontinuity("test reset");
+			for (int k = 0; k < 40 && est.GetCounters().latch.releasesReset == 0; ++k, t += 0.5, ++seq)
+			{
+				clk.Set(t * 1000.0);
+				if (est.Wants())
+					ChainRevertBoundTests::SubmitEvaluation(est, up, seq, t, false);
+			}
+			Assert::AreEqual<uint64_t>(1, est.GetCounters().latch.releasesReset, L"the reset released the latch (counted)");
+			bool noticed = false;
+			for (int k = 0; k < 64 && est.TakeNotice(notice); ++k)
+				noticed = noticed || notice.find("released to native (reset)") != std::string::npos;
+			Assert::IsTrue(noticed, L"and noticed");
+			Assert::IsTrue(est.StatusLine().find("no upscale latch") != std::string::npos || est.StatusInput().latchNx > 0,
+				W("the status follows: " + est.StatusLine()).c_str());
+		}
+	};
+
 	TEST_CLASS(ChainWindowPolicyTests)
 	{
 	public:

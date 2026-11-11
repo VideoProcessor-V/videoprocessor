@@ -285,7 +285,7 @@ namespace VpvRenderer
 		std::string pipelineSettingsProblems;   // refused values, shown under "Fallbacks engaged" (audit item 4)
 		// Kernel-matched re-base (docs/VP-stage12-build-plan.md; owner 2026-10-16: optimise
 		// 1080p): the identified player kernel's inverse for an exact 2:1 luma re-base.
-		bool rebaseKernelMatch = true;
+		bool rebaseKernelMatch = false;   // SID r2: default OFF (the kernel-matched re-base is opt-in; the generic faithful re-base runs when no kernel is identified)
 		// Owner 2026-10-16: tiles holding overlay text (the player's own subtitles, drawn at
 		// the output resolution) are no evidence for source_resolution auto.
 		bool sourceResolutionTextGuard = true;

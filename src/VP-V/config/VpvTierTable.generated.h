@@ -36,7 +36,7 @@ namespace Vpv
             t.defaults.push_back({ "detail_pulse_stabilise", "on" });
             t.defaults.push_back({ "detail_pulse_fast", "on" });
             t.defaults.push_back({ "source_resolution", "auto" });
-            t.defaults.push_back({ "rebase_kernel_match", "on" });
+            t.defaults.push_back({ "rebase_kernel_match", "off" });
             t.defaults.push_back({ "adaptive_downscale", "off" });
             t.defaults.push_back({ "adaptive_w_base", "1.0" });
             t.defaults.push_back({ "adaptive_faithful", "auto" });

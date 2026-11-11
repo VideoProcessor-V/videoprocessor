@@ -58,7 +58,7 @@
     "detail_pulse_stabilise": "on",
     "detail_pulse_fast": "on",
     "source_resolution": "auto",
-    "rebase_kernel_match": "on",
+    "rebase_kernel_match": "off",
     "adaptive_downscale": "off",
     "adaptive_w_base": "1.0",
     "adaptive_faithful": "auto",

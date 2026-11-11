@@ -41,6 +41,14 @@ manifest live in `D:\testclips\sourceid\` (see its README for sources and licenc
    (`VP_SOURCE_ID_REELS_ONLY=<id substrings>` selects reels). Output: one file set per reel under `<out>\reels\<reel>\` (written to `<reel>.tmp` and renamed when complete, so a restart skips finished reels; `VP_SOURCE_ID_EVAL_FORCE=1` redoes them) and `reels_done.csv`. Between reels the harness honours `<out>\STOP`, pauses while `D:\codex\build-slots\PRIORITY` exists and stops below 40 GB free. A STOP file is consumed at the end of the run (renamed `STOP.done.<timestamp>`), so a rerun of the same output folder runs. A reel whose directory cannot be placed is a failure (`rename_failed`), and a later success removes its stale `<reel>.failed` directory.
 4. `python -I tools/eval/source_id/score_identity.py --reels <reels.json> --eval-dir <dir>` writes `summary.md` and `gates.json` (the GO table of doc 78
    section 9). `--selftest` runs the scorer on a tiny synthetic CSV.
+   * Confident-wrong is counted two ways (SID-CAL2 C2): the JOINT `state` (both axes confident and agreeing, `n_x`, `n_y` against the truth) and PER AXIS from
+     the chain lane's `state_x` / `state_y` (an axis CONFIDENT with `measured_n_<axis>` different from that axis's truth; same boundary grace; the x and y episodes
+     are counted separately). A single confident wrong axis never appears in the joint state, so the joint count alone missed it. The GO table shows
+     `confident_wrong` (joint) and `confident_wrong_axis` (x/y split, reels with one), every wrong-count gate (R1, dark / credits, R2 clean, dirty, R7) fails on
+     either kind, and the per-family tables carry the per-axis count and rate. Classical lanes have no per-axis columns: their per-axis count is 0.
+   * Cost counts DISTINCT evaluations: the harness repeats the last evaluation's `ms` on each 0.5 s row in between (the chain evaluates about every 1 s), so one
+     `ms` value = one evaluation. `core_pct` = mean ms x the measured evaluations per second of reel time / 10 (native: per second of native-segment time).
+   * An evaluation without any R7 reel no longer crashes the scorer (the R7 gate is NA).
 
 ### Reel families (reel counts and hours are printed by `--plan`; every non-R1 reel is >= 30 s, R2.clean >= 60 s, R1 is the FULL length of its master; no loops except the flagged sol levante / nocturne masters)
 
@@ -105,7 +113,9 @@ Writes `NullTables.generated.h` (an inline `GeneratedNullTables()` returning the
 * Samples (stage exact only): `has_truth == 1`, `informative == 1` and the line gate (`lines_passed >= max(3, ceil(lines/4))`),
   then candidates of one evaluation and axis within +-1 px are clustered and the lowest `T_ev` kept, as `ChainEvidence` does.
   NULL = native-truth (`truth_n == 0`), plus clusters more than 1 px from `truth_n` on upscaled rows; ALT = within +-1 of
-  `truth_n` (or of `truth_n1` of a double-scaled reel); off-latent rows of a double-scaled reel are dropped, never null. The class
+  `truth_n` (or of `truth_n1` of a double-scaled reel); off-latent rows of a double-scaled reel are dropped, never null. SID-CAL2 C4: a cluster of an upscaled
+  reel within +-2% of p/q x `truth_n` (p >= 1, q <= 4: the half-size reel's own 1/2, 1/3, 2/3, 3/2, 2 x aliases, and the +-2% band around the truth itself) is
+  dropped (`is_alias`; counted in the report; `--keep-aliases` restores the cal1 behaviour). The class
   is recomputed from (n, N) (port of `ClassifyLatent`; mismatches with the dump are counted). The power rule is NOT applied to
   candidate rows by default (the estimator applies it to the native hypothesis only); `--require-power` applies it to all.
 * Effective sample size: consecutive evaluations of one shot are near-identical, so every count (minimum, full, standard-error
@@ -113,8 +123,14 @@ Writes `NullTables.generated.h` (an inline `GeneratedNullTables()` returning the
 * Fit per class: null mean = median; sd = the largest of 1.4826 MAD and the dip-side spread matched at 1, 2 and 2.5 sigma
   (median - P15.9, (median - P2.3)/2, (median - P0.6)/2.5), widened x1.25 and by (1 + 2/sqrt(n_eff)); alt = median /
   max(MAD sd, upper-side spread), shrunk toward the null by min(1, n_eff_alt/75).
-* Conservative rules: fewer than 30 null or 20 alt effective samples, fewer than 5 masters, or an alt not 0.25 null-sd below the null
-  KEEPS THE PLACEHOLDER. Below the full counts (150 null / 75 alt) a class is "thin": blended toward the placeholder in steps of
+* SID-CAL2 C3 (`--no-null-floor` switches both rules off, ablation only): (a) a class's null sd is NEVER below the fitted dip-side sd of its own null data
+  (`dip_sd` = max(median - P15.9, (median - P2.3)/2, (median - P0.6)/2.5), widened x1.25 and by (1 + 2/sqrt(n_eff)) like the fit), also for a class that keeps the
+  placeholder or a blend of it (the placeholder nulls k/16 0.08 and generic 0.06 were narrower than the tails of the native data) - the floor is applied last,
+  so a blended class is no longer guaranteed to be dominated by the placeholder (the blend itself still is: `diag["dominated"]`); needs >= 30 null shots; (b) a class
+  with >= 30 null but < 20 alt effective samples gets alt = null (a zero increment everywhere: no evidence for sizes of that class until alt data exist), status
+  `no-alt`, instead of the placeholder alt. The report line "C3 ..." names the classes each rule hit.
+* Conservative rules: fewer than 30 null effective samples, fewer than 5 masters, or an alt not 0.25 null-sd below the null
+  KEEPS THE PLACEHOLDER (fewer than 20 alt effective samples: C3b above). Below the full counts (150 null / 75 alt) a class is "thin": blended toward the placeholder in steps of
   0.1 until its clamped increment is nowhere larger than the placeholder's on T in [-2, max(1, largest observed T)]. Every number is a
   field of `Policy`.
 * Validation: 2-fold CV BY MASTER (sha1-ordered, alternating; all reels of a footage, native or upscaled, share a fold). Held out: per
@@ -124,7 +140,18 @@ Writes `NullTables.generated.h` (an inline `GeneratedNullTables()` returning the
   (3/H when no event: zero events in H hours supports only that bound); wrong-n entries on alt segments; evaluations to c1 on alt segment-axes
   (every one is a denominator; inf = never), 8- and 10-bit separately. Segments are maximal runs of one truth; evaluations without
   truth are boundaries. c1 = -ln(rate x 10 s / 3600) + ln(8 x 10) = 14.87 nats.
-* Not simulated: the native hypothesis (it cannot raise a false size) and HOLD masking. The writer (ChainEvalRegistrationTests) marks NO candidate `informative` in an evaluation the estimator judged HOLD (it accumulates nothing there, SID-CAL r2 M1), so those evaluations never reach the fit.
+* The simulation is a line-by-line port of `ChainEvidence.h` (SID-CAL2 C1): the RECENT WINDOW in seconds (closed shots expire after
+  1.5 x (c1 / 1.4) x the measured running-mean gap between the axis's evaluations, 10-600 s; about 16 s at a 1 s gap), a HOLD
+  evaluation forgets its axis, the first cut after a HOLD clears both axes (rate measurement included), and the E2 minimum shot dwell
+  (`--dwell-sec`, default = the estimator's `kMinShotDwellSec` = 3 s, owner-approved; 0 = the estimator without E2: a shot's evidence counts once the shot lasted
+  the dwell, shorter shots add nothing). The HEADLINE row is the live setting:
+  calibrated tables, per-shot cap c1/2, window on; the c1*1.0 cap and the placeholder tables are extra rows. Switches for ablations:
+  `--no-window` (the cal1 behaviour), `--no-hold`, `--dwell-sec`.
+* HOLD from the dump: the dump has no HOLD column. A HOLD evaluation (the top candidate is mixed) leaves a gated candidate whose
+  statistic was never reached (`T_ev` empty, line gate passed) and no informative candidate (the writer clears them): that is the proxy
+  (`_is_hold`). On the cal1 dump it flags 197 of 23396 axis evaluations and tracks the live run's HOLD rows reel by reel (22 vs 25, 23 vs 23, 8 vs 8 ...);
+  on the dark reels it over-detects (it counts dark frames the live state machine did not hold).
+* Not simulated: the native hypothesis (it cannot raise a false size). The writer (ChainEvalRegistrationTests) marks NO candidate `informative` in an evaluation the estimator judged HOLD (it accumulates nothing there, SID-CAL r2 M1), so those evaluations never reach the fit.
 
 ## compare_eval_runs.py (SID-OPT: did a cost change alter a result, and what did it do to the time)
 

@@ -242,6 +242,16 @@ namespace SourceResolutionMonitor
 		// blanks / discontinuities / stream key / classical decision (the worker's analysis), and exposes P14g through GeometryView().
 		// The estimator publishes into its own held-state holder, which the monitor wires as its geometry source (SetGeometrySource).
 		void SetChainEnabled(bool on);
+		// SID r2 safety rules (E0 validated; default OFF, nothing changes while off): R2 conventional geometry only, R3 convention-pair prior,
+		// R5 asymmetric latch, R7 no latch into a menu. Takes effect at the estimator's next clean start. Setters only: the key is plumbed
+		// with SID-5 (README Settings rows, plumbing pending).
+		void SetSourceIdSafetyRules(bool on);
+		void SetSourceIdLatchAbrTrigger(bool on);
+		// SID r2: the single-axis re-base (exactly one axis wanted below native by the consensus) is OFF by default: the re-base needs
+		// BOTH axes (a single-axis reading is a codec-grid fluke far more often than a real anamorphic source). The detection is still
+		// logged ("single-axis re-base held"). On restores the earlier behaviour. Only the consensus per-axis path is gated.
+		void SetSingleAxisRebase(bool on) { singleAxisRebase.store(on, std::memory_order_release); }
+		bool SingleAxisRebase() const { return singleAxisRebase.load(std::memory_order_acquire); }
 		bool ChainEnabled() const { return chainEnabled.load(std::memory_order_acquire); }
 		// The renderer identity (the owner key of VpFrameAnalysis::Host::Owner) whose source frames the estimator reads; nullptr
 		// detaches. Idempotent: a lost registration is made again. OPTIONAL: while no owner was given, Frame() finds it itself (once a
@@ -571,6 +581,10 @@ namespace SourceResolutionMonitor
 		std::atomic<const SourceIdentity::Geometry::HeldState*> geometrySource{ nullptr };
 		// the chain estimator (created by the constructor, never null; inert until SetChainEnabled(true)).
 		std::unique_ptr<SourceIdentity::Chain::ChainEstimator> chainEst;
+		std::atomic<bool> singleAxisRebase{ false };   // SID r2: see SetSingleAxisRebase
+		bool singleAxisHeldLogged = false;             // AutoFactors thread: the held detection was logged for the current episode
+		std::atomic<int> singleAxisHeldAxis{ -1 };      // SID r2 L6: the held single axis (0 H, 1 V; -1 none) for the status line
+		std::atomic<double> singleAxisHeldRatio{ 1.0 };
 		std::atomic<bool> chainEnabled{ false };
 		std::atomic<unsigned long long> nativeHeldByChain{ 0 };
 		std::string chainHistoryFolder;      // SetHistoryFolder's folder (guarded by `mutex`)

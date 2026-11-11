@@ -27,6 +27,8 @@ namespace SourceIdentity
 		constexpr uint32_t kEvDiscontinuity = 1u << 3;
 		constexpr uint32_t kEvAreaChanged = 1u << 4;
 		constexpr uint32_t kEvClearWindow = 1u << 5;   // a ClearWindow event was consumed: the evidence window was cleared before this evaluation
+		constexpr uint32_t kEvMenuHold = 1u << 6;      // SID r2 R7 (safety rules on): a menu / overlay episode began; the upscaled latch is not carried into it
+		constexpr uint32_t kEvAbrStep = 1u << 7;       // SID r2 R5 (safety rules on, switch): an ABR rendition step event
 
 		struct LineSnapshot
 		{
@@ -36,6 +38,8 @@ namespace SourceIdentity
 			uint32_t flags = 0;               // kEv* consumed with this evaluation
 			int32_t cuts = 0;                 // cuts consumed with this evaluation (each is a shot; kEvCut set means >= 1)
 			int64_t eventTimeUs = -1;         // source time of the newest consumed cut / blank / fade (-1: unknown)
+			int32_t rasterW = 0;              // delivered frame size (SID r2 L3: the geometry set derives its ratios from it); 0 = unknown,
+			int32_t rasterH = 0;              // the estimator then uses the active extent (SubmitLines callers that do not set it)
 			LineRect active;                  // the active rectangle of the frame
 			LineRect inner;                   // active shrunk by the sampler margin (the lines' extent)
 			int rowCount = 0;

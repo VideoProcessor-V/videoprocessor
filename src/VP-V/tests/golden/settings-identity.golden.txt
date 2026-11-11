@@ -217,7 +217,7 @@ frameAnalysisStore=0
 resyncEvent=off
 entranceGpuDrain=off
 pipelineSettingsProblems=
-rebaseKernelMatch=1
+rebaseKernelMatch=0
 sourceResolutionTextGuard=1
 sourceResolutionMixedGuard=1
 sourceCodingFixes=1
@@ -14810,7 +14810,6 @@ fp live=g32 restart=g24
 + pipelineOriginalPathway=1
 + hdrInference=original
 + pipelineEntranceOnce=0
-+ rebaseKernelMatch=0
 + sourceCodingFixes=0
 + sourceResolutionLatchFixes=0
 + sourceResolutionCutFixes=0
@@ -19872,7 +19871,6 @@ fp live=g54 restart=g36
 + pipelineSlotsOff=on
 + hdrInference=original
 + pipelineEntranceOnce=0
-+ rebaseKernelMatch=0
 + sourceCodingFixes=0
 + sourceResolutionLatchFixes=0
 + sourceResolutionCutFixes=0
