@@ -1,0 +1,44 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "motion.vector_delivery",
+  "unit": "motion",
+  "order": 130,
+  "status": "partial",
+  "code_location": "partly migrated",
+  "live_files": [
+    "src/VP-V/core/VectorScale.h",
+    "src/VP-V/modules/motion/consumers/DejudderPolicy.h",
+    "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h",
+    "src/VP-V/modules/motion/estimation/MotionSegment.h"
+  ],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [
+      "dejudder_even_rates",
+      "dejudder_strength",
+      "dejudder_strength_even",
+      "general_rate_fixes",
+      "motion_engine",
+      "motion_history_fixes",
+      "occlusion_mask",
+      "timing_continuity_fixes",
+      "vector_demand"
+    ],
+    "upstream_modules": [
+      "motion.estimation",
+      "scaling.rebase",
+      "scaling.route_4k",
+      "scaling.geometry"
+    ]
+  },
+  "fallback_when_missing": "No entry of its own: invalid vectors make every consumer take its no-motion form (by design, not a downgrade). Engine/matcher downgrades are motion.estimation's entry.",
+  "fallback_entry": "motion: matcher (optical flow unavailable)"
+}

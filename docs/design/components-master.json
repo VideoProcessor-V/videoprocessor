@@ -327,6 +327,8 @@
         "src/VP-V/modules/motion/estimation/NvOpticalFlow.cpp",
         "src/VP-V/modules/motion/estimation/NvOpticalFlow.h",
         "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
+        "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h",
+        "src/VP-V/modules/motion/estimation/MotionSegment.h",
         "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
         "src/VP-V/modules/motion/estimation/MotionAhead.h",
         "src/VP-V/modules/motion/estimation/VectorStore.h",
@@ -821,7 +823,8 @@
       "code_location": "partly migrated",
       "live_files": [
         "src/VP-V/modules/motion/consumers/TemporalHistoryPolicy.h",
-        "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
+        "src/VP-V/core/VectorScale.h",
+        "src/VP-V/modules/motion/consumers/DejudderPolicy.h",
         "src/VP-V/modules/motion/consumers/DejudderAhead.h",
         "src/VP-V/modules/motion/consumers/RenderedWarp.cpp",
         "src/VP-V/modules/motion/consumers/FrameInterpolator.cpp",
