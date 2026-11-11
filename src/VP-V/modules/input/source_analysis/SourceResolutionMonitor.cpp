@@ -572,6 +572,8 @@ if (tile < int(tiles) && g.y < ts) {
 
 	std::string Monitor::ConventionNote() const
 	{
+		if (OriginalPathway())
+			return std::string();   // F3: the Original pathway holds nothing (no stale note)
 		const int kind = conventionHeldKind.load(std::memory_order_acquire);
 		const double h = conventionHeldH.load(std::memory_order_acquire), v = conventionHeldV.load(std::memory_order_acquire);
 		char buf[160];
@@ -594,6 +596,11 @@ if (tile < int(tiles) && g.y < ts) {
 			return buf;
 		}
 		return std::string();
+	}
+
+	FallbackCatalog::Decision Monitor::ConventionHoldFallback() const
+	{
+		return FallbackCatalog::SourceResolutionHeld(ConventionNote());
 	}
 
 	FallbackCatalog::Decision Monitor::SourceIdGateFallback() const
@@ -1856,7 +1863,7 @@ if (tile < int(tiles) && g.y < ts) {
 		// ratio on both axes) and the consensus's uniform wish (its two latched ratios) alike; anything else is held (shown by
 		// AutoFactors, never applied). Only with the raster width (AutoFactors); not in the Original pathway.
 		uniformConventionHeld = false;
-		if (wanted < 1.0 && autoRasterWidth > 0 && nativeHeight > 0 && ConventionApplies())
+		if (wanted < 1.0 && autoConventionCheck && ConventionApplies())   // F4: width <= 0 holds (ConventionalRebase), as on the per-axis path
 		{
 			const double rH = gateUsed ? gateH : wanted, rV = gateUsed ? gateV : wanted;
 			if (!ConventionalRebase(rH, rV, autoRasterWidth, nativeHeight))
@@ -2004,7 +2011,9 @@ if (tile < int(tiles) && g.y < ts) {
 		double& factorX, double& factorY, double seconds, uint64_t renderSequence)
 	{
 		autoRasterWidth = nativeWidth;   // SID r2 (owner 2026-11-11): AutoFactor's convention check needs the raster width
+		autoConventionCheck = true;
 		const double uniform = AutoFactor(nativeHeight, minimumConfidence, why, seconds, renderSequence);
+		autoConventionCheck = false;
 		autoRasterWidth = 0;
 		// What is held (shown through Snapshot::conventionNote, logged once per episode): 0 nothing, 1 single-axis, 2 non-standard size.
 		const auto publishHeld = [this](int kind, double h, double v)
@@ -2049,6 +2058,8 @@ if (tile < int(tiles) && g.y < ts) {
 		{
 			factorX = factorY = uniform;
 			axisApplied[0] = axisApplied[1] = axisPending[0] = axisPending[1] = 1.0;
+			singleAxisHeldAxis.store(-1, std::memory_order_release);   // F3: a uniform re-base holds no single axis
+			singleAxisHeldLogged = false;
 			if (uniformConventionHeld) publishHeld(2, uniformHeldH, uniformHeldV); else publishHeld(0, 1.0, 1.0);
 			Transit(factorX, factorY, now);
 			return;
@@ -2058,6 +2069,12 @@ if (tile < int(tiles) && g.y < ts) {
 		// Source identity (N1): with the consensus On and a fresh record the per-axis wish is the CONSENSUS's latched ratio of that axis
 		// (native for an axis it has not latched), in place of the tracker's per-axis reading; otherwise the tracker's.
 		const IdGate gate = SourceIdGate(now);
+		if (!gate.fresh)
+		{
+			// F3: the consensus's single-axis hold lasts only while its record is fresh (also when no per-axis branch runs below).
+			singleAxisHeldAxis.store(-1, std::memory_order_release);
+			singleAxisHeldLogged = false;
+		}
 		int heldKind = 0;
 		double heldH = 1.0, heldV = 1.0;
 		if (gate.fresh || (s.reading && s.axisConfidence >= minimumConfidence))

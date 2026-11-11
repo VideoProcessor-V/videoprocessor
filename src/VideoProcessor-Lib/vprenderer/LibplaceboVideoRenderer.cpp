@@ -23201,6 +23201,7 @@ releaseDriftBaseRetention =
 				// and height factors of a source upscaled in one direction.
 				sourceMonitor.AutoFactors(luma ? luma->params.w : 0, nativeHeight, activeSettings.sourceResolutionAutoMinConfidence,
 					why, wantedX, wanted, -1.0, sourceSequence);
+				SyncFallback(sourceMonitor.ConventionHoldFallback());   // SID r2: the held re-base's one-time notice
 				if (!why.empty())
 				{
 					const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
@@ -23210,6 +23211,7 @@ releaseDriftBaseRetention =
 			}
 			else
 			{
+				SyncFallback(FallbackCatalog::SourceResolutionHeld(std::string()));   // SID r2: auto off, nothing held
 				wanted = SourceRebase::Factor(activeSettings.sourceResolution, nativeHeight);
 				wantedX = SourceRebase::FactorX(activeSettings.sourceResolution, luma ? luma->params.w : 0, nativeHeight);
 			}

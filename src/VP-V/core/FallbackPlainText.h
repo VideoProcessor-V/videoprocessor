@@ -17,6 +17,7 @@ namespace FallbackPlainText
 			{ "dither", "The smooth-gradient dither was replaced by the standard one" },
 			{ "BTB/WTW", "Blacker-than-black and whiter-than-white detail is being clipped" },
 			{ "re-base", "Picture scaling is using the native frame for now" },
+			{ "source resolution held", "An unusual source size was found; the picture keeps its native size instead of re-scaling" },
 			{ "re-base warm-up", "A resolution change is waiting for its shaders; the picture stays as it was" },
 			{ "detail pulse", "The detail stabiliser was skipped for this frame" },
 			{ "texture restore", "The texture restore was skipped for this frame" },
