@@ -34,8 +34,19 @@ summary line); they fail only with --fail-untagged (the footprint ratchet govern
 
 Summary line: `hook gating: <hooks> hook statements, <unguarded> unguarded, <unverified> unverified markers,
 <allowed> allowed, <untagged> untagged; exit <n>` (machine-readable like the other cheap checks).
+
+SITES (rule 32, refs/107-host-seams-plan.md s5): a SITE is one maximal run of consecutive hook lines in a Bill-owned
+file (a block, a cluster, or one line). docs/audit/hook-sites.json is the MANIFEST (one record per site: id, file,
+anchor = enclosing symbol + 1-2 Bill lines before/after, the hook lines, the gate class; seeded with --write-manifest,
+the re-graft script's input); docs/audit/hook-budget.json holds the sites-per-file ceilings (only DOWN; seeded with
+--write-budget); docs/audit/hook-approvals.json lists the coordinator-approved seam ids (HOOK-APPROVAL-<n>: file +
+a text fragment + seam + expiry). A site whose (file, whitespace-insensitive text) is not in the manifest is NEW and
+fails unless an approval matches it; a production file over its ceiling fails; a count below the ceiling is reported
+as "ratchet down". Second summary line: `hook sites: <n> sites, <new> new (<approved> approved), <removed> removed,
+<over> over budget; manifest <state>`.
 """
 import argparse
+import datetime
 import importlib.util
 import json
 import os
@@ -153,6 +164,12 @@ ALLOW_SITES = [
 
 
 HOOK_MARK_RE = re.compile(r"//\s*VPV-HOOK(?![-\w])")
+MANIFEST_PATH = "docs/audit/hook-sites.json"
+BUDGET_PATH = "docs/audit/hook-budget.json"
+APPROVALS_PATH = "docs/audit/hook-approvals.json"
+SITE_NOTE = ("a site = one maximal run of consecutive VPV-HOOK lines (vp_footprint hook_line_set widened to any line carrying "
+             "`// VPV-HOOK`) in a Bill-owned file (present at the base ref, outside src/VP-V/); matched by file + whitespace-"
+             "insensitive text; the anchor (enclosing symbol, Bill lines before / after) is for the re-graft script")
 
 
 def hook_line_set(content):
@@ -691,6 +708,135 @@ def classify_statement(stmt, hook_lines, added, vp_slots, gated, allow_used):
     return "unguarded", None
 
 
+def _norm(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _key(text):
+    """The match key: every whitespace removed (indentation, spacing inside parentheses and line breaks do not matter)."""
+    return re.sub(r"\s+", "", text)
+
+
+def _short_name(rel):
+    base = rel.rsplit("/", 1)[-1]
+    stem, _, ext = base.rpartition(".")
+    initials = "".join(ch for ch in stem if ch.isupper()) or stem[:3].upper()
+    return "%s.%s" % (initials, ext)
+
+
+def extract_sites(rel, text, hook_lines, tree_parse, classes_by_line):
+    """One record per maximal run of consecutive hook lines."""
+    lines = text.splitlines()
+    runs = []
+    for n in sorted(hook_lines):
+        if runs and runs[-1][1] == n - 1:
+            runs[-1][1] = n
+        else:
+            runs.append([n, n])
+    # enclosing symbol: the nearest function header whose block spans the site
+    headers = []
+    stack = [tree_parse]
+    while stack:
+        node = stack.pop()
+        for ch in node.children:
+            if ch.kind == "open":
+                stack.append(ch)
+                if is_function_header(ch.text):
+                    headers.append(ch)
+    out = []
+    for k, (a, b) in enumerate(runs, 1):
+        sym = ""
+        best = None
+        for h in headers:
+            if h.start <= a and b <= h.end and (best is None or h.start >= best.start):
+                best = h
+        if best is not None:
+            m = re.search(r"([A-Za-z_][\w:<>~]*)\s*\([^()]*(?:\([^()]*\)[^()]*)*\)\s*(?:const|noexcept|override|final)?\s*$", best.text)
+            sym = m.group(1) if m else best.text[:60]
+        before, after = [], []
+        i = a - 2
+        while i >= 0 and len(before) < 2:
+            if lines[i].strip() and (i + 1) not in hook_lines:
+                before.insert(0, _norm(lines[i]))
+            i -= 1
+        i = b
+        while i < len(lines) and len(after) < 1:
+            if lines[i].strip() and (i + 1) not in hook_lines:
+                after.append(_norm(lines[i]))
+            i += 1
+        site_lines = [lines[n - 1].rstrip() for n in range(a, b + 1)]
+        gate = "declaration"
+        order = ["unguarded", "gated-marker-unverified", "non-pathway", "vp-function", "allowed", "allowed-enclosing",
+                 "gated", "gated-enclosing", "guarded", "inert", "declaration"]
+        found = [classes_by_line[n] for n in range(a, b + 1) if n in classes_by_line]
+        for cls in order:
+            if cls in found:
+                gate = cls
+                break
+        out.append({"id": "%s-%04d" % (_short_name(rel), k), "file": rel, "start": a, "end": b,
+                    "anchor": {"symbol": sym, "before": before, "after": after}, "lines": site_lines,
+                    "text": _norm(" ".join(re.sub(r"//.*$", "", l) for l in site_lines)) or _norm(" ".join(site_lines)),
+                    "gate": gate, "seam": None, "expiry": None})
+    return out
+
+
+def load_json(tree, rel):
+    try:
+        return json.loads(tree.read(rel))
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def site_checks(tree, per_file):
+    """Manifest / budget / approvals: returns a dict with the counts and the failures."""
+    sites = [s for r in per_file for s in r.get("sites", [])]
+    prod = {r["file"] for r in per_file if r["bucket"] == "production"}
+    manifest = load_json(tree, MANIFEST_PATH)
+    budget = load_json(tree, BUDGET_PATH)
+    approvals = load_json(tree, APPROVALS_PATH) or {"approvals": []}
+    res = {"sites": len(sites), "new": [], "approved": [], "removed": [], "over": [], "ratchet": [],
+           "manifest": "none" if manifest is None else MANIFEST_PATH, "budget": "none" if budget is None else BUDGET_PATH,
+           "approvals_used": []}
+    if manifest is not None:
+        known = {}
+        for m in manifest.get("sites", []):
+            known.setdefault((m["file"], _key(m["text"])), []).append(m["id"])
+        seen = set()
+        for s in sites:
+            key = (s["file"], _key(s["text"]))
+            if key in known:
+                seen.add(key)
+                continue
+            if s["file"] not in prod:
+                continue
+            ok = None
+            for ap in approvals.get("approvals", []):
+                if ap.get("file") == s["file"] and ap.get("text_contains") and _key(ap["text_contains"]) in _key(s["text"]):
+                    ok = ap["id"]
+                    break
+            if ok:
+                res["approved"].append(dict(s, approval=ok))
+                res["approvals_used"].append(ok)
+            else:
+                res["new"].append(s)
+        for key, ids in known.items():
+            if key not in seen:
+                res["removed"].extend(ids)
+    if budget is not None:
+        limits = budget.get("files", {})
+        counts = {}
+        for s in sites:
+            if s["file"] in prod:
+                counts[s["file"]] = counts.get(s["file"], 0) + 1
+        for f, n in sorted(counts.items()):
+            lim = limits.get(f, 0)
+            if n > lim:
+                res["over"].append("%s %d sites > budget %d" % (f, n, lim))
+            elif n < lim:
+                res["ratchet"].append("%s %d sites < budget %d (ratchet the ceiling down)" % (f, n, lim))
+    return res
+
+
 def non_pathway(rel):
     return rel.startswith(NON_PATHWAY_PREFIXES) or rel in NON_PATHWAY_FILES
 
@@ -699,9 +845,10 @@ def check_file(tree, rel, vp_slots, gated, allow_used, base_ref=None, no_git=Fal
     text = tree.read(rel)
     hook_lines = hook_line_set(text)
     if text.splitlines() and text.splitlines()[0].strip().startswith("// VPV-HOOK-FILE"):
-        return {"file": rel, "hook_file": True, "statements": [], "untagged": []}
+        return {"file": rel, "hook_file": True, "statements": [], "untagged": [], "sites": []}
     added = set(added or ())
     tree = parse_statements(strip_code(text))
+    tree_parse_cache = [tree]
     results = []
     stack = [tree]
     all_stmts = []
@@ -729,6 +876,10 @@ def check_file(tree, rel, vp_slots, gated, allow_used, base_ref=None, no_git=Fal
             if cls == "unguarded" and non_pathway(rel):
                 cls = "non-pathway"
             results.append({"file": rel, "line": st.start, "class": cls, "why": why, "text": st.text[:120]})
+    classes_by_line = {}
+    for r in results:
+        classes_by_line.setdefault(r["line"], r["class"])
+    sites = extract_sites(rel, text, hook_lines, tree_parse_cache[0], classes_by_line)
     untagged = []
     if added:
         lines = text.splitlines()
@@ -739,7 +890,7 @@ def check_file(tree, rel, vp_slots, gated, allow_used, base_ref=None, no_git=Fal
             code = stripped_lines[n - 1] if n - 1 < len(stripped_lines) else ""
             if VP_CALL_RE.search(code):
                 untagged.append({"file": rel, "line": n, "class": "untagged", "text": lines[n - 1].strip()[:120]})
-    return {"file": rel, "hook_file": False, "statements": results, "untagged": untagged}
+    return {"file": rel, "hook_file": False, "statements": results, "untagged": untagged, "sites": sites}
 
 
 def bill_files(tree, base_ref, only=None, no_git=False):
@@ -815,8 +966,9 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None):
             allow_used[("callee", k)] = 0   # reached through an enclosing header
     stale = [("callee", k) for k in range(len(ALLOW_CALLEES)) if ("callee", k) not in allow_used] + \
             [("site", k) for k in range(len(ALLOW_SITES)) if ("site", k) not in allow_used]
-    rc = 1 if (hits or unverified or (fail_untagged and untagged)) else 0
-    return {"base_ref": base_ref, "rev": rev, "vp_slots": sorted(vp_slots), "gated": {k: list(v) for k, v in gated.items()},
+    sc = site_checks(tree, per_file)
+    rc = 1 if (hits or unverified or (fail_untagged and untagged) or sc["new"] or sc["over"]) else 0
+    return {"base_ref": base_ref, "rev": rev, "vp_slots": sorted(vp_slots), "site_checks": sc, "gated": {k: list(v) for k, v in gated.items()},
             "files": per_file, "counts": counts, "hits": hits, "unverified": unverified, "untagged": untagged,
             "allowed": allowed, "allow_used": {"%s:%d" % k: v for k, v in allow_used.items()}, "stale_allow": stale, "rc": rc}
 
@@ -845,9 +997,26 @@ def render(res):
     for name, (rel, line, verified) in sorted(res["gated"].items()):
         out.append("  VPV-GATED %s (%s:%d) %s" % (name, rel, line, "verified" if verified else "NOT VERIFIED"))
     out.append("  classes: " + ", ".join("%s %d" % (k, v) for k, v in sorted(c.items())))
+    sc = res["site_checks"]
+    for s in sc["new"]:
+        out.append("  NEW SITE (not in %s, no HOOK-APPROVAL) %s:%d-%d [%s] %s" % (MANIFEST_PATH, s["file"], s["start"], s["end"], s["gate"], s["text"][:100]))
+    for s in sc["approved"]:
+        out.append("  new site approved by %s %s:%d-%d %s" % (s["approval"], s["file"], s["start"], s["end"], s["text"][:80]))
+    for line in sc["over"]:
+        out.append("  OVER BUDGET " + line)
+    for line in sc["ratchet"]:
+        out.append("  " + line)
+    if sc["removed"]:
+        out.append("  removed sites (ids no longer present; regenerate the manifest with --write-manifest): " + ", ".join(sc["removed"][:20]) + (" ..." if len(sc["removed"]) > 20 else ""))
+    out.append("hook sites: %d sites, %d new (%d approved), %d removed, %d over budget; manifest %s, budget %s" % (
+        sc["sites"], len(sc["new"]) + len(sc["approved"]), len(sc["approved"]), len(sc["removed"]), len(sc["over"]), sc["manifest"], sc["budget"]))
     out.append("hook gating: %d hook statements, %d unguarded, %d unverified markers, %d allowed, %d untagged; exit %d" % (
         hook_stmts, len(res["hits"]), len(res["unverified"]), len(res["allowed"]), len(res["untagged"]), res["rc"]))
-    if res["rc"]:
+    if sc["new"] or sc["over"]:
+        out.append("FAIL (rule 32): a NEW hook site in a Bill file, or a file over its site ceiling: route the feature through an "
+                   "existing seam (refs/107-host-seams-plan.md s1), or get a HOOK-APPROVAL id from the coordinator "
+                   "(docs/audit/hook-approvals.json); ceilings only go down.")
+    if res["rc"] and not (sc["new"] or sc["over"]) or res["hits"] or res["unverified"]:
         out.append("FAIL: a VP-V hook in a Bill file runs in the Original pathway. Wrap the call site in the canonical guard "
                    "(`if (!pipelineSlots.OriginalPathway())`), or move the logic into its VP-V module behind a `// VPV-GATED` "
                    "function with `if (originalPathway) return;`, or ask the lead for an allow-list entry with a reason.")
@@ -863,8 +1032,45 @@ def main(argv=None):
     ap.add_argument("--fail-untagged", action="store_true")
     ap.add_argument("--no-git", action="store_true", help="no git: --files are the Bill-owned files; no untagged report")
     ap.add_argument("--rev", help="check this git revision's tree instead of the working tree (no checkout needed)")
+    ap.add_argument("--write-manifest", action="store_true", help="(re)seed docs/audit/hook-sites.json from the tree")
+    ap.add_argument("--write-budget", action="store_true", help="(re)seed docs/audit/hook-budget.json from the tree (ceilings = current counts)")
     args = ap.parse_args(argv)
     res = run(args.root, args.base_ref, args.files, args.no_git, args.fail_untagged, args.rev)
+    if args.write_manifest or args.write_budget:
+        if args.rev:
+            print("--write-* needs the working tree", file=sys.stderr)
+            return 2
+        sites = [s for r in res["files"] for s in r.get("sites", [])]
+        if args.write_manifest:
+            doc = {"_note": SITE_NOTE + "; seam / expiry are filled by hand from refs/107-host-seams-plan.md s2; regenerate with "
+                            "`python -I tools/check_hook_gating.py --write-manifest` (keeps hand-filled seam / expiry by id)",
+                   "base_ref": args.base_ref, "generated_at": datetime.date.today().isoformat(), "sites": sites}
+            old = load_json(Tree(args.root), MANIFEST_PATH) or {}
+            keep = {m["id"]: m for m in old.get("sites", [])}
+            for s_ in sites:
+                o = keep.get(s_["id"])
+                if o and o.get("text") == s_["text"]:
+                    s_["seam"], s_["expiry"] = o.get("seam"), o.get("expiry")
+            os.makedirs(os.path.join(args.root, "docs", "audit"), exist_ok=True)
+            with open(os.path.join(args.root, *MANIFEST_PATH.split("/")), "w", encoding="utf-8") as fh:
+                json.dump(doc, fh, indent=1)
+                fh.write("\n")
+            print("wrote %s (%d sites)" % (MANIFEST_PATH, len(sites)))
+        if args.write_budget:
+            counts = {}
+            for r in res["files"]:
+                if r["bucket"] == "production" and r.get("sites"):
+                    counts[r["file"]] = len(r["sites"])
+            doc = {"_note": "Per-file ceiling on VPV-HOOK SITES in Bill-owned files (tools/check_hook_gating.py; " + SITE_NOTE +
+                            "). Ratchet: lower a value when a site is collapsed into a seam; never raise one without a HOOK-APPROVAL "
+                            "id (rule 32). A file not listed has a ceiling of 0.",
+                   "base_ref": args.base_ref, "generated_at": datetime.date.today().isoformat(), "files": dict(sorted(counts.items()))}
+            os.makedirs(os.path.join(args.root, "docs", "audit"), exist_ok=True)
+            with open(os.path.join(args.root, *BUDGET_PATH.split("/")), "w", encoding="utf-8") as fh:
+                json.dump(doc, fh, indent=1)
+                fh.write("\n")
+            print("wrote %s (%d files, %d sites)" % (BUDGET_PATH, len(counts), sum(counts.values())))
+        return 0
     if args.json:
         print(json.dumps({k: v for k, v in res.items() if k != "files"}, indent=1))
     else:

@@ -1,0 +1,4 @@
+{
+ "_note": "Coordinator-approved NEW hook sites in Bill-owned files (INTEGRATOR-RULES rule 32; refs/107-host-seams-plan.md s5.2 rule 2). tools/check_hook_gating.py accepts a site that is not in docs/audit/hook-sites.json only when an entry here names its file and a whitespace-insensitive fragment of its text. Every entry: id HOOK-APPROVAL-<n>, file, text_contains, seam (S1..S8), who, when, expiry (the item that removes the site, or null). No verbal approvals.",
+ "approvals": []
+}

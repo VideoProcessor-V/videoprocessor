@@ -160,6 +160,60 @@ class CheckHookGatingTest(unittest.TestCase):
         self.assertIn('Log("", g(1));', texts)
         self.assertIn("if (x) y();", texts)
 
+    def _seed(self, body):
+        _w(self.root, BILL, _bill(body))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = chg.main(["--root", self.root, "--no-git", "--files", BILL, "--write-manifest", "--write-budget"])
+        self.assertEqual(rc, 0, buf.getvalue())
+
+    def test_sites_manifest_matches_whitespace_insensitively_and_counts_runs(self):
+        self._seed("\t\tif (!pipelineSlots.OriginalPathway())   // VPV-HOOK\n\t\t\tvectorEngine.PlanAhead(frame);   // VPV-HOOK\n\t\tdoBill();\n\t\tint keep = 0;   // VPV-HOOK\n")
+        manifest = chg.load_json(chg.Tree(self.root), chg.MANIFEST_PATH)
+        self.assertEqual(len(manifest["sites"]), 2)
+        self.assertEqual(manifest["sites"][0]["anchor"]["symbol"], "Render")
+        self.assertEqual(chg.load_json(chg.Tree(self.root), chg.BUDGET_PATH)["files"][BILL], 2)
+        # re-indented and re-commented: still the same two sites
+        _w(self.root, BILL, _bill("\tif (!pipelineSlots.OriginalPathway())  // VPV-HOOK: moved\n\t\t\t\tvectorEngine.PlanAhead( frame );   // VPV-HOOK\n\t\tdoBill();\n\t\tint keep = 0;   // VPV-HOOK\n"))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("2 sites, 0 new (0 approved), 0 removed, 0 over budget", out)
+
+    def test_red_a_new_site_fails_until_a_hook_approval_names_it(self):
+        self._seed("\t\tint keep = 0;   // VPV-HOOK\n")
+        _w(self.root, BILL, _bill("\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n\t\tif (!pipelineSlots.OriginalPathway()) vectorEngine.PlanAhead(frame);   // VPV-HOOK\n"))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NEW SITE", out)
+        self.assertIn("OVER BUDGET %s 2 sites > budget 1" % BILL, out)
+        _w(self.root, chg.APPROVALS_PATH, '{"approvals": [{"id": "HOOK-APPROVAL-1", "file": "%s", "text_contains": "vectorEngine.PlanAhead(frame)", "seam": "S2", "who": "coordinator", "when": "2026-11-11", "expiry": null}]}' % BILL)
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("approved by HOOK-APPROVAL-1", out)
+        self.assertIn("1 new (1 approved)", out)
+        self.assertIn("OVER BUDGET", out, "an approval does not raise the ceiling: the budget file does")
+        _w(self.root, chg.BUDGET_PATH, '{"files": {"%s": 2}}' % BILL)
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+
+    def test_a_removed_site_is_reported_and_the_ceiling_ratchets_down(self):
+        self._seed("\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n\t\tint other = 1;   // VPV-HOOK\n")
+        _w(self.root, BILL, _bill("\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n"))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("1 removed", out)
+        self.assertIn("ratchet the ceiling down", out)
+
+    def test_the_real_manifest_and_budget_match_the_tree(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = chg.main(["--root", ROOT])
+        out = buf.getvalue()
+        self.assertEqual(rc, 0, out)
+        self.assertIn(" 0 new (0 approved), 0 removed, 0 over budget; manifest docs/audit/hook-sites.json, budget docs/audit/hook-budget.json", out)
+        self.assertNotIn("ratchet the ceiling down", out, "regenerate docs/audit/hook-budget.json with --write-budget")
+        self.assertNotIn("removed sites", out, "regenerate docs/audit/hook-sites.json with --write-manifest")
+
 
 if __name__ == "__main__":
     unittest.main()
