@@ -163,16 +163,16 @@ namespace StatusExtensionTest
 		{
 			// Escaped, ASCII source: U+00E9 (e acute) and U+2014 (em dash).
 			VpStatusText::RendererLines<wchar_t> lines;
-			lines.dejudder.Set(true, L"café");
-			lines.fallbacks.Set(true, L"Fallbacks engaged: a — b");
-			lines.resyncEvents.Set(true, L"evé");
+			lines.dejudder.Set(true, L"caf\u00e9");
+			lines.fallbacks.Set(true, L"Fallbacks engaged: a \u2014 b");
+			lines.resyncEvents.Set(true, L"ev\u00e9");
 			const auto snapshot = StatusExtension::Read(true, true, VpStatusText::ComposeRendererModule(lines));
 			Assert::AreEqual(std::string("Fallbacks engaged: a <u2014> b"), StatusExtension::FallbacksHeading(snapshot, TaggedNarrow));
 
 			StatusExtension::HostLines host;
-			host.presentation.Set(true, L"pé");
+			host.presentation.Set(true, L"p\u00e9");
 			StatusExtension::DialogTexts dialog = Dialog();
-			dialog.content = L"film — inferred";
+			dialog.content = L"film \u2014 inferred";
 			const auto crash = StatusExtension::CrashState(snapshot, host, dialog, TaggedNarrow);
 			Assert::AreEqual(std::string("caf<u00E9>"), crash[0].second);
 			Assert::AreEqual(std::string("Fallbacks engaged: a <u2014> b"), crash[1].second);
