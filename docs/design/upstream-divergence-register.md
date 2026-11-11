@@ -18,6 +18,20 @@ re-verification against Bill's tip where marked. PRs to billslack2 need the owne
 Owner decisions are binding: in every either/or the Original pathway (`pipeline_original_pathway on`,
 `src/VP-V/core/OriginalPathway.h`, now 66 rows) is Bill's code exactly.
 
+Original GATING (owner E3 2026-11-11, rule 32; refs/107-host-seams-plan.md s2.4 items 1 + 3, PHASE 1, branch
+r2/fix-r26-ph1; no id of its own, the rows above stay the register of DIVERGENCES): a VP-V call site in a Bill file does
+NOTHING in the Original pathway. Module side, every gate is a `// VPV-GATED` function whose first statement returns on the
+pathway fact (verified by `tools/check_hook_gating.py`): the hub's per-host fact (`ExtensionHub::OriginalPathway`, set at
+SettingsApplied) gates `VectorEngineExtension::OnQueue` and `DejudderExtension::OnQueue` / `OnPlanOutputs`; the PhaseTimeline
+Impl bodies and `RenderAhead::Presenter` reporting gate on the renderer's own fact; `IngressPolicy` R15 / R19 gate on the
+fact its binding is told at the first arrival, where the five fix switches are also synced from the active settings
+(the FIRST-FRAMES defect: before, Original's first frames ran the VP fix paths). Two hand-overs at the SWITCH are VP
+decisions confirmed by the lead (2026-11-11 18:43), not Bill-behaviour changes: (1) the settings LEAVING Original request
+ONE Resync motion invalidation (the Original stretch's queue events were ignored); (2) ENTERING Original breaks the
+render-ahead chain, resets its gate and releases the VP timeline once, from the settings seam (CoreSegments.inl
+UpdatePipelineSlots), so no VP-V plan outlives the switch. Tests: `OriginalPathwayGateTests`; proof of the pathway itself:
+`OriginalPathwayByteIdenticalToBill`.
+
 | Id | Area | Divergence | Original / off | Kind |
 |---|---|---|---|---|
 | DR-M-TEMPORAL | `TemporalRenderer` vs entrance stages (`TemporalHistoryPolicy.h`) | While Bill's temporal renderer (smooth motion mixing / deinterlacing) is active it owns the draw: VP's entrance stages (re-base, VP deband, detail) pause, listed under Fallbacks engaged, and Bill gets the captured picture's crop. Before, a re-based crop reached his raw history. A history of VP-processed pictures is the allowed alternative, not built. | Original: no entrance stages; Bill's renderer untouched | Either/or (owner decision 1) |
