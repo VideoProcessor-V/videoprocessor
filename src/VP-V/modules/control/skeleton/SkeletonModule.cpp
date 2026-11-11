@@ -352,7 +352,12 @@ namespace Vpv
 			VpMotion::IVectorEngine* engine = nullptr;   // this renderer's engine; dropped at Teardown (valid until the renderer goes)
 			FeedCounters feed;
 			// The scene product's counters (W1-C7): written by the render thread (seal) and by any SceneOf caller, so atomic and relaxed.
-			std::atomic<uint64_t> scenePublished{ 0 }, sceneAlready{ 0 }, sceneNotReady{ 0 }, sceneStoreReads{ 0 }, sceneLiveFills{ 0 }, sceneUnknown{ 0 };
+			std::atomic<uint64_t> scenePublished{ 0 }, sceneAlready{ 0 }, sceneNotReady{ 0 }, sceneStoreReads{ 0 }, sceneLiveFills{ 0 }, sceneCacheHits{ 0 }, sceneUnknown{ 0 };
+			// The live classification of ONE frame, kept until the next Begin (a frame number can restart after a seek, so nothing outlives a frame).
+			std::mutex sceneMutex;
+			uint64_t sceneCacheSeq = 0;
+			bool sceneCacheValid = false;
+			bool sceneCacheCut = false, sceneCacheFade = false;
 			uint64_t feedEra = 0;
 			bool feedHadEra = false;
 			uint64_t feedLastEngineSeq = 0;      // the last field seq handled (published, slipped or given up)
@@ -929,24 +934,51 @@ namespace Vpv
 		// frame's record. The same body serves the seal (Begin) and a reader that arrives before the seal / with no record.
 		bool SkeletonModule::FillScene(HostState& st, uint64_t seq, SceneAnswer* answer) const
 		{
-			SceneFacts f;
-			if (!SceneFactsOf(st.host, seq, f) || !f.valid)
-				return false;
+			bool cut = false, fade = false;
+			bool cached = false;
+			{
+				std::lock_guard<std::mutex> lock(st.sceneMutex);
+				if (st.sceneCacheValid && st.sceneCacheSeq == seq)
+				{
+					cut = st.sceneCacheCut;
+					fade = st.sceneCacheFade;
+					cached = true;
+				}
+			}
+			if (!cached)
+			{
+				SceneFacts f;
+				if (!SceneFactsOf(st.host, seq, f) || !f.valid)
+					return false;
+				cut = f.cut;
+				fade = f.fade;
+				std::lock_guard<std::mutex> lock(st.sceneMutex);
+				st.sceneCacheSeq = seq;
+				st.sceneCacheValid = true;
+				st.sceneCacheCut = cut;
+				st.sceneCacheFade = fade;
+			}
 			if (answer)
 			{
 				answer->known = true;
-				answer->cut = f.cut;
-				answer->fade = f.fade;
+				answer->cut = cut;
+				answer->fade = fade;
 			}
+			if (cached)
+				st.sceneCacheHits.fetch_add(1, std::memory_order_relaxed);
+			// A store that is registered but OFF (frame_analysis_store=false: the Host always registers it, disabled) takes nothing.
+			// Peek-then-publish is not atomic, but the skeleton is the only scene producer today (a second one could at worst be overwritten
+			// with the same classification), so no compare-and-set is spent on it.
 			if (FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(st.host))
-			{
-				FrameAnalysis::Scene scene;
-				scene.cut = f.cut;
-				scene.fade = f.fade;
-				scene.origin = FrameAnalysis::SceneOrigin::Vp;
-				if (store->PublishScene(seq, scene))
-					st.scenePublished.fetch_add(1, std::memory_order_relaxed);
-			}
+				if (store->Enabled())
+				{
+					FrameAnalysis::Scene scene;
+					scene.cut = cut;
+					scene.fade = fade;
+					scene.origin = FrameAnalysis::SceneOrigin::Vp;
+					if (store->PublishScene(seq, scene))
+						st.scenePublished.fetch_add(1, std::memory_order_relaxed);
+				}
 			return true;
 		}
 
@@ -969,10 +1001,12 @@ namespace Vpv
 					return a;
 				}
 			}
+			const uint64_t hitsBefore = st->sceneCacheHits.load(std::memory_order_relaxed);
 			if (FillScene(*st, seq, &a))
 			{
 				a.from = SceneAnswer::From::Live;
-				st->sceneLiveFills.fetch_add(1, std::memory_order_relaxed);
+				if (st->sceneCacheHits.load(std::memory_order_relaxed) == hitsBefore)
+					st->sceneLiveFills.fetch_add(1, std::memory_order_relaxed);
 				return a;
 			}
 			st->sceneUnknown.fetch_add(1, std::memory_order_relaxed);
@@ -989,6 +1023,7 @@ namespace Vpv
 				c.notReady = st->sceneNotReady.load(std::memory_order_relaxed);
 				c.storeReads = st->sceneStoreReads.load(std::memory_order_relaxed);
 				c.liveFills = st->sceneLiveFills.load(std::memory_order_relaxed);
+				c.cacheHits = st->sceneCacheHits.load(std::memory_order_relaxed);
 				c.unknown = st->sceneUnknown.load(std::memory_order_relaxed);
 			}
 			return c;
@@ -1511,16 +1546,24 @@ namespace Vpv
 			for (int guard = 0; guard < 64 && (wait = b->lane.DeterministicWaitUs(seq, 0)) > 0; ++guard)
 				std::this_thread::sleep_for(std::chrono::microseconds(wait));   // N1: only a deterministic run or an explicit test wait
 			b->lane.OnRenderStart(seq, 0);
+			{
+				std::lock_guard<std::mutex> cacheLock(st.sceneMutex);
+				st.sceneCacheValid = false;   // one frame's classification only
+			}
 			// The SCENE record of this frame, at its seal (W1-C7): once per frame, skipped when already written, and no work at all while the
 			// frame-analysis store is off (no store registered for the renderer). Published here, not at the P4 slot, because only a sealed P4
 			// slot is readable (ReadOf); the camera describes its pairs after the seal of their frame.
 			if (FrameAnalysis::Store* sceneStore = VpFrameAnalysis::SourceFrameTap::StoreFor(st.host))
 			{
-				FrameAnalysis::Scene already;
-				if (sceneStore->PeekScene(seq, already))
-					st.sceneAlready.fetch_add(1, std::memory_order_relaxed);
-				else if (!FillScene(st, seq, nullptr))
-					st.sceneNotReady.fetch_add(1, std::memory_order_relaxed);
+				// The Host registers its store even with frame_analysis_store=false, then DISABLED: Enabled() first, so an off store costs nothing.
+				if (sceneStore->Enabled())
+				{
+					FrameAnalysis::Scene already;
+					if (sceneStore->PeekScene(seq, already))
+						st.sceneAlready.fetch_add(1, std::memory_order_relaxed);
+					else if (!sceneStore->HasRecord(seq) || !FillScene(st, seq, nullptr))
+						st.sceneNotReady.fetch_add(1, std::memory_order_relaxed);   // no record to write into, or no pair of P4 records: counted, not classified for nothing
+				}
 			}
 			st.renderBeginSeq = seqIn;   // the render-only clock starts here (after the deterministic wait and the seal, which are not render work)
 			st.renderBeginUs = nowUs_();

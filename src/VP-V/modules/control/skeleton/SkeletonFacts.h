@@ -69,9 +69,10 @@ namespace Vpv
 		{
 			uint64_t published = 0;       // records written at a seal
 			uint64_t alreadyPresent = 0;  // seal found the scene already there (compute-once: nothing recomputed)
-			uint64_t notReady = 0;        // seal could not classify (no frame before it, or a P4 record missing)
+			uint64_t notReady = 0;        // seal could not classify or had no record to write into (counted once, not re-tried every call)
 			uint64_t storeReads = 0;      // SceneOf answered from the store
 			uint64_t liveFills = 0;       // SceneOf answered by classifying the P4 records now (and filled the store when it holds the record)
+			uint64_t cacheHits = 0;       // SceneOf answered from this frame's live classification (no second classification)
 			uint64_t unknown = 0;         // SceneOf could not answer
 		};
 
