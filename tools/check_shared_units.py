@@ -62,8 +62,10 @@ REGISTRY = [
                       r"sum\s*>>\s*4", r"\+\s*2u?\)\s*>>\s*2",
                       r"2x2\s+box|box\s+average",
                       r"0\.25\s*\*\s*\(", r"\*\s*0\.25"),
+     # VpLaneProducts::HalfLuma*: the owner's own lane API (HalfLumaBytes / HalfLumaRows), called, not recomputed (C9 4a);
+     # kP1HalfLuma: the catalog's product id, naming the published product to read it (C9 4a).
      "allow": _c(r"VpUnit::HalfLuma::\w+", r"vpu_half_luma\w*", r"vpu_quarter_luma\w*",
-                 r"shared/HalfLuma\.h")},
+                 r"shared/HalfLuma\.h", r"VpLaneProducts::HalfLuma\w+", r"\bkP1HalfLuma\b")},
     {"id": "U4", "name": "block_statistics",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/regions"],
      "signatures": _c(r"block[_ ]?(mean|var|stats|stat)", r"structure[_ ]?tensor"),
