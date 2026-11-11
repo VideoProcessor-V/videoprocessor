@@ -152,6 +152,10 @@ namespace VpMotion
 			bool dejudderCanEngage = false;
 			double sourceHz = 0.0;              // the measured content rate (0 = unmeasured)
 			pl_gpu gpu = nullptr;               // the device the engine needs; null = none
+			// W2-C5b: optical_flow_on_demand, parsed from the settings on the render thread (renderMutex held) by the host's hook
+			// block; PlanProducer publishes it (OnDemandSettingNow) for the dequeue hook. Every rendered frame, so a cold start and
+			// an Apply both reach it.
+			OnDemand::Setting onDemand = OnDemand::Setting::Auto;
 		};
 
 		// Render thread, renderMutex held, once per rendered source frame: starts, keeps or stops the
@@ -367,6 +371,9 @@ namespace VpMotion
 			// computed ahead when the estimate came (the request abandoned); gapServed = a hiccup gap pair served on demand (no
 			// gap seed needed); idleSkips = not issued because no estimate read a pair within kConsumerIdleCycles hook calls.
 			unsigned long long issued = 0, unclaimed = 0, aheadCovered = 0, gapServed = 0, idleSkips = 0;
+			// uncached = not issued because a frame's luma analysis was not cached yet at the dequeue (the hook never decodes under
+			// the queue mutex; at depth 0 nothing walks ahead, so this is the share the path cannot serve there).
+			unsigned long long uncached = 0;
 			double budgetMs = 0.0, renderMs = 0.0;   // the last budget issued with; the measured render time (EWMA)
 		};
 		OnDemandCounters OnDemandReads() const;
@@ -381,7 +388,7 @@ namespace VpMotion
 		// True while an estimate read (or asked for) a pair within the last kConsumerIdleCycles hook calls, or before the first
 		// kConsumerIdleCycles calls: no consumer = no request (no GPU work for a pair nobody reads).
 		bool OnDemandConsumerActive();
-		// The hook's setting each cycle; PlanProducer reads it (`on` = ProducerPlan onDemandWanted).
+		// The setting PlanProducer published from ProducerInputs::onDemand (render thread); the dequeue hook reads it.
 		void SetOnDemandSetting(OnDemand::Setting s) { onDemandSetting_.store(static_cast<unsigned char>(s), std::memory_order_release); }
 		OnDemand::Setting OnDemandSettingNow() const { return static_cast<OnDemand::Setting>(onDemandSetting_.load(std::memory_order_acquire)); }
 		// Issues ONE request for the dequeue's selected pair (through RequestPair); an older one not yet claimed is abandoned.
@@ -396,6 +403,10 @@ namespace VpMotion
 		bool OnDemandServed(uint64_t from, uint64_t to) const;
 		FallbackCatalog::NoPairCause OnDemandLastCause() const;
 		void NoteOnDemandGapServed();
+		void NoteOnDemandUncached();
+		// The Ctrl+I segment (the de-judder's stats line): "on demand: issued N, served N, late N, no budget N, uncached N";
+		// empty while nothing was issued or skipped (off / auto: nothing shown, nothing changed).
+		std::string OnDemandStatusSegment() const;
 
 	private:
 		void NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence, uint64_t epochAtChoice);

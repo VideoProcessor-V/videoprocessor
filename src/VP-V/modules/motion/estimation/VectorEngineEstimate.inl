@@ -403,10 +403,13 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		return false;
 	}
 	dejudderLiveFieldFrom = aSequence;
+	// W2-C5b: an engine pair served on demand (the dequeue's request, computed at render time) is told apart from one computed
+	// ahead everywhere it is shown: the segment's source, the motion-source line and the vector-delivery note (visible truth).
+	const bool onDemandPair = dejudder->ExternalFlowUsed() && vectorEngine.OnDemandServed(aSequence, bSequence);
 	if (pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery))
 		motionSegment.Publish(VpMotion::Direction::Forward, aSequence, bSequence,
 		MotionShadowField{ aSequence, bSequence, dejudder->Field(), dejudder->FrameTrust(), dejudder->SubField(), dejudder->Camera(), dejudder->GrainError() },   // SK-MV: P3 (+P2/P2m by the source) published with its textures
-		dejudder->ExternalFlowUsed() ? VpMotion::Source::EngineAhead : VpMotion::Source::Matcher,   // SK-MV: no render-time engine (EngineAtRender is unreachable)
+		onDemandPair ? VpMotion::Source::EngineAtRender : dejudder->ExternalFlowUsed() ? VpMotion::Source::EngineAhead : VpMotion::Source::Matcher,   // W2-C5b: EngineAtRender = served on demand
 		motionShadowEpoch, 0, bSequence != aSequence + 1);
 	if (motionEngineWarming)
 		return true;   // r6 fix 1: warm-up only; nothing counted, logged or handed on
@@ -422,7 +425,9 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	}
 	// The motion source: the optical-flow engine, or the block searches (logged on change).
 	{
-		const char* source = dejudder->ExternalFlowUsed() ? (dejudder->GlobalFromEngine() ?
+		const char* source = onDemandPair ? (dejudder->GlobalFromEngine() ?
+				"optical-flow engine (computed on demand, camera from the engine)" : "optical-flow engine (computed on demand)") :
+			dejudder->ExternalFlowUsed() ? (dejudder->GlobalFromEngine() ?
 				"optical-flow engine (computed ahead, camera from the engine)" : "optical-flow engine (computed ahead)") :
 			dejudder->OpticalFlowUsed() ? "optical-flow engine" :
 			!dejudder->GetSettings().opticalFlow ? "block searches (optical_flow off)" :
@@ -506,7 +511,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	if (vectorDemand.estimate)
 	{
 		++vectorPairs;
-		vectorEngine.NoteVectorsDelivered(false, dejudder->ExternalFlowUsed() ? "engine ahead" : dejudder->OpticalFlowUsed() ? "engine" : "matcher");   // VPV-HOOK
+		vectorEngine.NoteVectorsDelivered(false, onDemandPair ? "engine on demand" : dejudder->ExternalFlowUsed() ? "engine ahead" : dejudder->OpticalFlowUsed() ? "engine" : "matcher");   // VPV-HOOK
 	}
 	static GeneralRate::LogInterval motionAheadStatsLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
 	if (motionProducer && dejudderEstimates + 1 >= 24 && motionAheadStatsLog.DueOr((dejudderEstimates + 1) == 24))   // as the other periodic logs (audit 2026-10-16)

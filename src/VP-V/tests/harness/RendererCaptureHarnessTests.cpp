@@ -2445,6 +2445,53 @@ namespace Tests
 					(L"no fingerprint change for: " + std::wstring(change, change + strlen(change))).c_str());
 		}
 
+		// W2-C5b: optical_flow_on_demand parses on / off, keeps the default (auto) for an invalid value, and on / off change the
+		// live-apply fingerprint (an Apply reaches the renderer's PlanProducer block).
+		TEST_METHOD(OnDemandSettingParsesOnOffAndKeepsAutoForAnInvalidValue)
+		{
+			const HarnessScope harnessScope;
+			const std::string folder = Here();
+			HMODULE dll = LoadLibraryExA((folder + "vprenderer\\VideoProcessorVPRenderer.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+			Assert::IsNotNull(dll, L"the renderer DLL");
+			using Export = int(__cdecl*)(const char*, char*, int);
+			const auto fingerprintOf = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboSettingsFingerprintForTest"));
+			const auto describe = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboDescribeSettingsForTest"));
+			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf), L"the fingerprint export");
+			Assert::IsNotNull(reinterpret_cast<void*>(describe), L"the describe export");
+			static std::atomic<int> freshConfig{ 0 };
+			auto call = [&](Export function, const std::string& text) {
+				const std::string path = folder + "vp-on-demand-key-test-" + std::to_string(freshConfig++) + ".cfg";
+				{
+					std::ofstream config(path, std::ios::trunc | std::ios::binary);
+					config << text;
+				}
+				std::vector<char> buffer(1 << 20);
+				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+				DeleteFileA(path.c_str());
+				Assert::IsTrue(length > 0, L"the export ran");
+				return std::string(buffer.data());
+			};
+			auto value = [](const std::string& dump) {
+				const std::string key = "\noptical_flow_on_demand=";
+				const size_t at = dump.find(key);
+				if (at == std::string::npos) return std::string("(missing)");
+				const size_t start = at + key.size();
+				return dump.substr(start, dump.find('\n', start) - start);
+			};
+			const std::string head = "[general]\npersist_profile_selection: false\n[vprenderer.Default]\nquality: high\n";
+			const std::string baseFingerprint = call(fingerprintOf, head);
+			Assert::AreEqual(std::string("auto"), value(call(describe, head)), L"the default");
+			Assert::AreEqual(std::string("on"), value(call(describe, head + "optical_flow_on_demand: on\n")));
+			Assert::AreEqual(std::string("off"), value(call(describe, head + "optical_flow_on_demand: off\n")));
+			Assert::AreEqual(std::string("on"), value(call(describe, head + "optical_flow_on_demand: ON\n")), L"names are normalised");
+			Assert::AreEqual(std::string("auto"), value(call(describe, head + "optical_flow_on_demand: sometimes\n")),
+				L"an invalid value keeps the default");
+			Assert::AreEqual(baseFingerprint, call(fingerprintOf, head + "optical_flow_on_demand: sometimes\n"),
+				L"an invalid value changes nothing");
+			Assert::AreNotEqual(baseFingerprint, call(fingerprintOf, head + "optical_flow_on_demand: on\n"), L"on reaches the renderer");
+			Assert::AreNotEqual(baseFingerprint, call(fingerprintOf, head + "optical_flow_on_demand: off\n"), L"off reaches the renderer");
+		}
+
 		// Integration 2026-10-17: the keys the merge brought (the engine's extras, the
 		// grain switches, dv_tunnel_fixes) are parsed, dumped and change the live and the
 		// rebuild-independent settings; at profile defaults the interpolator keeps grain

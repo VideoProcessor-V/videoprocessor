@@ -299,6 +299,10 @@ void LibplaceboVideoRenderer::Impl::PublishDejudderStatus(bool force)
 		// Turing or later, driver 528+; without it the block searches, as before).
 		if (!motionSourceLogged.empty())
 			text += ", motion: " + motionSourceLogged;
+		// W2-C5b: the on-demand path's counters while it runs (empty with off / auto: nothing issued).
+		const std::string onDemandSegment = vectorEngine.OnDemandStatusSegment();
+		if (!onDemandSegment.empty())
+			text += ", " + onDemandSegment;
 	}
 	if (activeSettings.vectorDemand)
 	{

@@ -222,8 +222,9 @@ namespace ProducerPlanTest
 			Assert::IsTrue(rows > 100000u, L"the enumeration really ran");
 		}
 
-		// W2-C5b commit 5: optical_flow_on_demand=on keeps a producer in low latency (depth stays 0); default false = unchanged.
-		TEST_METHOD(OnDemandWantedKeepsAProducerInLowLatencyOnlyWithTheDejudderAndOpticalFlow)
+		// W2-C5b commit 5: optical_flow_on_demand=on keeps a producer in low latency only with a queue ahead (depth stays 0);
+		// competitive (no queue ahead) stays motion-free; default false = unchanged.
+		TEST_METHOD(OnDemandWantedKeepsAProducerInLowLatencyOnlyWithAQueueAheadTheDejudderAndOpticalFlow)
 		{
 			LifecycleInput l;
 			l.lowLatency = true;
@@ -231,6 +232,10 @@ namespace ProducerPlanTest
 			l.gpuAvailable = true;
 			Assert::IsFalse(Lifecycle(l).wanted, L"default: not wanted in low latency");
 			l.onDemandWanted = true;
+			l.queueAheadCapacity = 0;
+			Assert::IsFalse(Lifecycle(l).wanted, L"competitive (no queue ahead): motion-free even with on");
+			Assert::IsTrue(Lifecycle(l).action != Action::Start);
+			l.queueAheadCapacity = 1;
 			Assert::IsTrue(Lifecycle(l).wanted);
 			Assert::IsTrue(Lifecycle(l).action == Action::Start);
 			l.opticalFlow = false;

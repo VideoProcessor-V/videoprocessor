@@ -97,7 +97,11 @@ namespace VpMotion
 		life.backoffActive = motionProducerStartRetry.Recovering() && nowMs < motionProducerStartRetry.RetryAtMs();
 		const bool startFailureInjected = !producerStartFailureForTesting_.empty();   // C1-4 test seam: empty in the product
 		life.gpuAvailable = in.gpu != nullptr || startFailureInjected;
-		life.onDemandWanted = OnDemandSettingNow() == OnDemand::Setting::On;   // W2-C5b: `on` only (auto starts nothing)
+		// W2-C5b: the setting from the host's hook block (every frame: cold start and Apply alike), published for the dequeue hook.
+		// `on` only (auto starts nothing), and in low latency only with a queue ahead (competitive stays motion-free).
+		SetOnDemandSetting(in.onDemand);
+		life.queueAheadCapacity = queueAheadCapacity.load(std::memory_order_acquire);
+		life.onDemandWanted = OnDemand::Wanted(in.onDemand, life.lowLatency, life.queueAheadCapacity);
 		const ProducerPlan::LifecycleOutput act = ProducerPlan::Lifecycle(life);
 		if (act.action == ProducerPlan::Action::Start)
 		{
@@ -1172,5 +1176,22 @@ namespace VpMotion
 	{
 		std::lock_guard<std::mutex> lock(onDemandMutex_);
 		++onDemand_.gapServed;
+	}
+
+	void VectorEngine::NoteOnDemandUncached()
+	{
+		std::lock_guard<std::mutex> lock(onDemandMutex_);
+		++onDemand_.uncached;
+	}
+
+	std::string VectorEngine::OnDemandStatusSegment() const
+	{
+		const OnDemandCounters c = OnDemandReads();
+		if (c.issued == 0 && c.uncached == 0 && c.idleSkips == 0)
+			return std::string();
+		char line[200];
+		std::snprintf(line, sizeof(line), "on demand: issued %llu, served %llu, late %llu, no budget %llu, uncached %llu",
+			c.issued, c.served, c.late, c.noBudget, c.uncached);
+		return line;
 	}
 }

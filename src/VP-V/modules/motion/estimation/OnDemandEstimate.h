@@ -303,11 +303,13 @@ namespace VpMotion
 		};
 
 		// optical_flow_on_demand (profile key; README Settings): auto | on | off, default auto.
-		//   auto (DEFAULT) = today's behaviour on the low-latency path: the on-demand path is OFF there (no producer is started
-		//        for it) until the owner decides from the W2-C5b measurement table (latency impact and benefit per fed feature,
-		//        owner answer 4). While the look-ahead producer runs (standard mode) it serves that producer's misses and the
-		//        hiccup gap pairs it never computes, on its existing session, while idle.
-		//   on   = also on the low-latency path (ProducerPlan onDemandWanted starts the producer for it; depth stays 0).
+		//   auto (DEFAULT) = today's behaviour on EVERY profile: the on-demand path is OFF (no producer is started for it, no request
+		//        is issued) until the owner decides from the W2-C5b measurement table (latency impact and benefit per fed feature,
+		//        owner answer 4). The candidate the table decides is "auto = on in standard mode" (the look-ahead producer's misses
+		//        and the hiccup gap pairs it never computes, served on its existing session while idle).
+		//   on   = the on-demand path runs: in standard mode, and on the low-latency path only with a queue ahead
+		//        (queueAheadCapacity >= 1; ProducerPlan onDemandWanted starts the producer there, the look-ahead depth stays 0).
+		//        Competitive (low latency with no queue ahead) stays motion-free even with `on`.
 		//   off  = never asked: the matcher covers every miss, exactly as before W2-C5b.
 		enum class Setting : unsigned char { Off, Auto, On };
 		inline Setting SettingOf(const std::string& value)
@@ -318,9 +320,11 @@ namespace VpMotion
 		{
 			return s == Setting::On ? "on" : s == Setting::Off ? "off" : "auto";
 		}
-		inline bool Wanted(Setting s, bool lowLatency)
+		inline bool Wanted(Setting s, bool lowLatency, int queueAheadCapacity)
 		{
-			return s == Setting::On || (s == Setting::Auto && !lowLatency);
+			if (s != Setting::On)
+				return false;   // auto = off until the owner decides (see above); off = never
+			return !lowLatency || queueAheadCapacity >= 1;   // competitive (no queue ahead) stays motion-free
 		}
 	}
 }

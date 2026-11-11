@@ -108,47 +108,49 @@ namespace VideoProcessorTest
 			return seam;
 		}
 
-		// Commit 4: a fake host for the dequeue hook (MotionAhead::IssueOnDemandAtDequeue).
+		// Commit 4: a fake host for the dequeue hook (MotionAhead::IssueOnDemandAtDequeue). The hook only peeks the frames'
+		// analysis caches (never decodes under the queue mutex): FakeCache stands for QueuedFrame::AnalysisPayload.
 		struct FakeSource
 		{
-			bool valid = true;
+			bool valid = false;   // default-constructed = no analysis (as the real Prepared)
+			uint64_t generation = 0;
 			bool IsValid() const { return valid; }
 			operator AnalysisLumaSource() const { return AnalysisLumaSource(); }
 		};
-		struct FakePrepared { FakeSource source; };
-		struct FakeState { bool dolbyVisionTunnel = false; };
+		struct FakePrepared
+		{
+			FakeSource source;
+			bool IsValid() const { return source.IsValid(); }
+		};
+		struct FakeCache
+		{
+			std::mutex mutex;
+			FakePrepared queued;
+		};
 		struct FakeIdentity { uint64_t sourceFormatGeneration = 0; };
 		struct FakeQueued
 		{
-			int frame = 0;
-			std::shared_ptr<FakeState> state = std::make_shared<FakeState>();
-			int converted = 0, analysis = 0;
+			std::shared_ptr<FakeCache> analysis = std::make_shared<FakeCache>();
 			FakeIdentity activePictureIdentity;
 			uint64_t sourceSequence = 0;
 		};
-		struct FakeSettings { std::string opticalFlowOnDemand = "auto"; };
 		struct FakeHost
 		{
 			VpMotion::VectorEngine vectorEngine;
 			std::shared_ptr<MotionAhead::Producer>& motionProducer = vectorEngine.motionProducer;
 			MotionValidity::State& motionValidity = vectorEngine.motionValidity;
-			FakeSettings activeSettings;
+			std::atomic<int>& queueAheadCapacity = vectorEngine.queueAheadCapacity;
 			std::atomic<bool> lowLatencyQueueActive{ false };
-			static bool prepareValid;
-			static FakePrepared PrepareFrameAnalysis(int, const FakeState&, int, int, int, uint64_t, bool, bool)
-			{
-				FakePrepared p;
-				p.source.valid = prepareValid;
-				return p;
-			}
+			bool cached = true;   // both frames' luma is in their caches
 		};
-		bool FakeHost::prepareValid = true;
 		void Dequeue(FakeHost& host, uint64_t from, uint64_t to)
 		{
 			FakeQueued next;
 			next.sourceSequence = to;
-			const std::shared_ptr<FakeState> state = std::make_shared<FakeState>();
-			MotionAhead::IssueOnDemandAtDequeue(&host, 0, state, 0, 0, 0, uint64_t(0), from, next, 1.0, 1.0);   // 1 Hz: a deadline of ~0.9 s (no timing flake)
+			next.analysis->queued.source.valid = host.cached;
+			const std::shared_ptr<FakeCache> cache = std::make_shared<FakeCache>();
+			cache->queued.source.valid = host.cached;
+			MotionAhead::IssueOnDemandAtDequeue(&host, cache, uint64_t(0), from, next, 1.0, 1.0);   // 1 Hz: a deadline of ~0.9 s (no timing flake)
 		}
 
 		// Waits until the worker has run `n` seam calls (bounded).
@@ -698,9 +700,6 @@ namespace VideoProcessorTest
 			Assert::AreEqual(c.requests, c.served + c.fromSlot + c.late + c.unavailable + c.noBudget, L"each counted once");
 		}
 
-		// W2-C5b commit 2 (hardware, NVIDIA): a request's Flow is byte-equal to the look-ahead job's for the same pair - Adopt, Chain
-		// and OffChain alike - and all of it runs on the ONE engine session (NvOpticalFlow::Sessions: one Engine, no violation). The
-		// off-chain textures are declared (VramUsers) only once an off-chain request was served.
 		// Commit 4: the deadline is the source period minus the MEASURED render time (never a fixed number of ms).
 		TEST_METHOD(TheBudgetIsTheSourcePeriodMinusTheMeasuredRenderTime)
 		{
@@ -729,17 +728,24 @@ namespace VideoProcessorTest
 			Assert::IsFalse(RenderSample(0.0, 0.0, 0.0, 60.0, r));
 		}
 
-		// Commit 4: the DEFAULT keeps today's behaviour on the low-latency path (owner decision pending, answer 4).
-		TEST_METHOD(TheSettingDefaultsToAutoWhichIsOffInLowLatency)
+		// Commit 4: the DEFAULT keeps today's behaviour on EVERY profile (owner decision pending, answer 4: auto = on in standard
+		// mode is the candidate the measurement table decides); `on` never reaches competitive (low latency, no queue ahead).
+		TEST_METHOD(TheSettingDefaultsToAutoWhichIsOffOnEveryProfileAndOnStaysOutOfCompetitive)
 		{
 			Assert::IsTrue(SettingOf("auto") == Setting::Auto);
 			Assert::IsTrue(SettingOf("bogus") == Setting::Auto);
 			Assert::IsTrue(SettingOf("on") == Setting::On);
 			Assert::IsTrue(SettingOf("off") == Setting::Off);
-			Assert::IsTrue(Wanted(Setting::Auto, false));
-			Assert::IsFalse(Wanted(Setting::Auto, true), L"auto: not on the low-latency path");
-			Assert::IsTrue(Wanted(Setting::On, true));
-			Assert::IsFalse(Wanted(Setting::Off, false));
+			for (int capacity = 0; capacity <= 2; ++capacity)
+			{
+				Assert::IsFalse(Wanted(Setting::Auto, false, capacity), L"auto: off in standard mode (today's behaviour)");
+				Assert::IsFalse(Wanted(Setting::Auto, true, capacity), L"auto: off in low latency");
+				Assert::IsFalse(Wanted(Setting::Off, false, capacity));
+				Assert::IsFalse(Wanted(Setting::Off, true, capacity));
+				Assert::IsTrue(Wanted(Setting::On, false, capacity), L"on: standard mode");
+			}
+			Assert::IsFalse(Wanted(Setting::On, true, 0), L"on: competitive stays motion-free");
+			Assert::IsTrue(Wanted(Setting::On, true, 1), L"on: low latency with a queue ahead");
 			Assert::AreEqual(std::string("auto"), std::string(SettingName(Setting::Auto)));
 		}
 
@@ -775,25 +781,36 @@ namespace VideoProcessorTest
 		{
 			using FallbackCatalog::NoPairCause;
 			FakeHost host;
-			FakeHost::prepareValid = true;
-			Dequeue(host, 5, 6);   // no producer: the cycle counts, nothing is issued
+			host.vectorEngine.SetOnDemandSetting(Setting::On);
+			Dequeue(host, 5, 6);   // no producer: zero work (checked first)
 			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued);
 			Trace trace;
 			auto producer = std::make_shared<MotionAhead::Producer>();
 			Assert::IsTrue(producer->StartForTest(Seam(trace)));
 			host.vectorEngine.PublishProducer(producer);
+			host.vectorEngine.SetOnDemandSetting(Setting::Auto);
+			Dequeue(host, 5, 7);
+			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued, L"auto: off in standard mode (the default)");
 			host.lowLatencyQueueActive = true;
-			Dequeue(host, 5, 6);
-			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued, L"auto: off in low latency (the default)");
-			host.activeSettings.opticalFlowOnDemand = "off";
+			Dequeue(host, 5, 7);
+			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued, L"auto: off in low latency");
+			host.vectorEngine.SetOnDemandSetting(Setting::On);
+			host.queueAheadCapacity = 0;
+			Dequeue(host, 5, 7);
+			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued, L"on: competitive (no queue ahead) stays motion-free");
+			host.vectorEngine.SetOnDemandSetting(Setting::Off);
 			host.lowLatencyQueueActive = false;
-			Dequeue(host, 5, 6);
+			Dequeue(host, 5, 7);
 			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued, L"off: never asked");
-			host.activeSettings.opticalFlowOnDemand = "auto";
-			FakeHost::prepareValid = false;
-			Dequeue(host, 5, 6);
-			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued, L"a frame not ready yet");
-			FakeHost::prepareValid = true;
+			Assert::AreEqual(std::string(), host.vectorEngine.OnDemandStatusSegment(), L"nothing shown while nothing ran");
+			host.vectorEngine.SetOnDemandSetting(Setting::On);
+			host.cached = false;
+			Dequeue(host, 5, 7);
+			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued, L"a frame's luma not cached: never decoded here");
+			Assert::AreEqual(1ull, host.vectorEngine.OnDemandReads().uncached, L"counted, visible");
+			Assert::AreEqual(std::string("on demand: issued 0, served 0, late 0, no budget 0, uncached 1"),
+				host.vectorEngine.OnDemandStatusSegment());
+			host.cached = true;
 			Dequeue(host, 6, 6);
 			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued, L"not a pair");
 			Dequeue(host, 5, 7);   // a gap pair the walk never computes
@@ -803,15 +820,41 @@ namespace VideoProcessorTest
 			Assert::IsTrue(flow != nullptr && flow->halfW == 7, L"served on the producer's session");
 			Assert::IsTrue(cause == NoPairCause::None);
 			Assert::IsTrue(host.vectorEngine.OnDemandServed(5, 7));
+			host.lowLatencyQueueActive = true;
+			host.queueAheadCapacity = 1;
+			Dequeue(host, 7, 9);
+			Assert::AreEqual(2ull, host.vectorEngine.OnDemandReads().issued, L"on: low latency with a queue ahead");
 			for (int i = 0; i < 6; ++i) host.vectorEngine.NoteOnDemandCycle(60.0, 0.0);   // no estimate reads a pair
 			Dequeue(host, 8, 10);
 			const VpMotion::VectorEngine::OnDemandCounters c = host.vectorEngine.OnDemandReads();
-			Assert::AreEqual(1ull, c.issued, L"no consumer: no request");
+			Assert::AreEqual(2ull, c.issued, L"no consumer: no request");
 			Assert::AreEqual(1ull, c.idleSkips);
 			Assert::AreEqual(1ull, c.served);
 			producer->Stop();
 		}
 
+		// W2-C5b commit 5: PlanProducer takes the setting from ProducerInputs (the host's hook block, every frame: cold start and
+		// Apply alike) and publishes it for the dequeue hook.
+		TEST_METHOD(PlanProducerPublishesTheSettingFromItsInputs)
+		{
+			VpMotion::VectorEngine engine;
+			std::atomic<bool> lowLatency{ false };
+			std::atomic<size_t> queued{ 0 };
+			VpMotion::VectorEngine::ProducerInputs in;
+			in.lowLatency = &lowLatency;
+			in.queuedFutureFrames = &queued;
+			Assert::IsTrue(engine.OnDemandSettingNow() == Setting::Auto, L"the default before any frame");
+			in.onDemand = Setting::On;
+			engine.PlanProducer(in);
+			Assert::IsTrue(engine.OnDemandSettingNow() == Setting::On);
+			in.onDemand = Setting::Off;
+			engine.PlanProducer(in);
+			Assert::IsTrue(engine.OnDemandSettingNow() == Setting::Off);
+		}
+
+		// W2-C5b commit 2 (hardware, NVIDIA): a request's Flow is byte-equal to the look-ahead job's for the same pair - Adopt, Chain
+		// and OffChain alike - and all of it runs on the ONE engine session (NvOpticalFlow::Sessions: one Engine, no violation). The
+		// off-chain textures are declared (VramUsers) only once an off-chain request was served.
 		BEGIN_TEST_METHOD_ATTRIBUTE(RequestFlowsMatchTheLookAheadFlowsOnTheOneSession)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()

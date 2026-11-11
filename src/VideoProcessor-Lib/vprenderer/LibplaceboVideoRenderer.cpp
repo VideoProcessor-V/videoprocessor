@@ -23134,6 +23134,7 @@ releaseDriftBaseRetention =
 			pin.dejudderEstimating = dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
 				dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers);
 			pin.dejudderCanEngage = dejudder && DejudderPolicy::CanEngageOrAcquiring(dejudderReason, pulldownAcquiring);   // SK-MV: the standing (warm engine) class, also UnknownRates / PlaneFormat
+			pin.onDemand = VpMotion::OnDemand::SettingOf(activeSettings.opticalFlowOnDemand);   // W2-C5b (render thread, renderMutex held)
 			vectorEngine.PlanProducer(pin);
 			// VPV-HOOK-END
 		}
@@ -31520,7 +31521,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 					nextConvertedPayload = next.converted;
 					nextSourceSequence = next.sourceSequence;
 					nextPts = timeB;
-					MotionAhead::IssueOnDemandAtDequeue(m_impl.get(), frame, state, convertedPayload, analysisCache, AnalysisSourceProfile::QueuedCapture, activePictureIdentity.sourceFormatGeneration, sourceSequence, next, pairRateHz, dequeueWaitMs);   // VPV-HOOK W2-C5b
+					MotionAhead::IssueOnDemandAtDequeue(m_impl.get(), analysisCache, activePictureIdentity.sourceFormatGeneration, sourceSequence, next, pairRateHz, dequeueWaitMs);   // VPV-HOOK W2-C5b
 					// A pair the estimate's adjacency test would refuse (across a gap or an update).
 					m_impl->vpFillNextSequence = fillGap || skipUpdate ? next.sourceSequence : 0;
 					m_impl->vpFillMaxSpan = maxSpan;
