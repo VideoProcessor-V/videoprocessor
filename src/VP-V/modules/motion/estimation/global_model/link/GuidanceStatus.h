@@ -32,6 +32,15 @@ namespace CameraLink
 	constexpr const char* kIdGuidanceUnguided = "camera.guidance.unguided";
 	constexpr double kGuidanceRefusalHoldSeconds = 0.5;
 
+	// d = 0: where camera(N) can never be on time the cause is structural and named once in the Fallbacks list ("camera_guidance:
+	// unguided - <cause>"), not per pair. Null = no structural cause (guidance can be on time). Called only while guidance is wanted.
+	inline const char* GuidanceStructuralCause(bool aheadWanted, bool aheadDeterministic, bool liveBuilt, bool demand)
+	{
+		if (!aheadWanted)
+			return aheadDeterministic ? "deterministic run" : "camera_ahead_fit is off";
+		return liveBuilt && !demand ? "no on-time target (analysis_lane off)" : nullptr;
+	}
+
 	// Engages for kGuidanceRefusalHoldSeconds of measured time after each refusal worth showing.
 	class RefusalHold
 	{

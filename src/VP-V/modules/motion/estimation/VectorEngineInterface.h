@@ -251,6 +251,7 @@ namespace VpMotion
 	struct EstimateContext
 	{
 		uint64_t pairSeq = 0;
+		uint64_t fromSeq = 0;          // the pair's earlier frame (A); 0 = unknown
 		bool ahead = false;            // EstimateAhead (the lane) rather than the in-render Estimate
 		double nextPairSeconds = 0;    // duration of the pair about to be searched; <= 0 unknown
 	};

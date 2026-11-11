@@ -310,12 +310,26 @@ namespace VideoProcessorTest
 			bool line = false;
 			for (const std::string& l : sched.StatusLines())
 			{
-				line = line || l == "camera guidance (d=0): 1 guided on time (17% of pairs), 5 unguided - camera(N) not ready: "
-					"a 1, b 1, c 1, d 1, e 1; R 0 guided then rejected at the seal";
+				line = line || l == "camera guidance (d=0): 1 guided on time (17% of pairs), 5 unguided: 5 camera(N) not ready "
+					"(a 1, b 1, c 1, d 1, e 1), 0 refused; R 0 guided then rejected at the seal";
 				Assert::IsTrue(l.find("refused: camera(N)") == std::string::npos, L"not ready in time is not listed as a refusal");
 			}
 			Assert::IsTrue(line, L"the NotOnTime counter is visible, per cause");
 			Assert::IsFalse(IsEngaged(sched.CollectDecisions(), CameraLink::kIdGuidanceRefused), L"expected at d = 0: no held refusal entry");
+		}
+
+		// MUST 3: where camera(N) can never be on time the Fallbacks list names the structural cause once (CameraExtension's Refresh
+		// prints "camera_guidance: unguided - " + this); an on-time-capable setup names nothing.
+		TEST_METHOD(TheStructuralUnguidedCauseIsNamedOnlyWhereOnTimeIsImpossible)
+		{
+			using CameraLink::GuidanceStructuralCause;
+			Assert::AreEqual(std::string("camera_ahead_fit is off"), std::string(GuidanceStructuralCause(false, false, true, true)));
+			Assert::AreEqual(std::string("deterministic run"), std::string(GuidanceStructuralCause(false, true, true, true)));
+			Assert::AreEqual(std::string("deterministic run"), std::string(GuidanceStructuralCause(false, true, false, false)),
+				L"no ahead fit outranks the lane");
+			Assert::AreEqual(std::string("no on-time target (analysis_lane off)"), std::string(GuidanceStructuralCause(true, false, true, false)));
+			Assert::IsNull(GuidanceStructuralCause(true, false, true, true), L"ahead fit + on-time target: nothing structural");
+			Assert::IsNull(GuidanceStructuralCause(true, false, false, false), L"live parts not built yet: not claimed structural");
 		}
 
 		TEST_METHOD(WithGapsInTheNumberingPairNStillReadsCameraNOnlyAndLaneEqualsLive)

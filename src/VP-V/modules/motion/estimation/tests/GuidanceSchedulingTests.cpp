@@ -112,6 +112,32 @@ namespace VideoProcessorTest
 			Assert::IsFalse(CameraLink::SameCameraPair(rec, rec.pairFrom + 1, 1.0 / 24));
 		}
 
+		// SHOULD 6: the engine's A (EstimateContext::fromSeq) reaches the scheduler through the hook and decides SameCameraPair exactly,
+		// whatever the duration says.
+		TEST_METHOD(TheHookPassesTheEnginesAToTheSameCameraPairCheck)
+		{
+			FakeLink link;
+			link.AddPan(5);
+			CameraLink::GuidanceScheduler sched(link, On());
+			CameraLink::CameraGuidanceHook hook(sched, nullptr, link);
+			FakeSink sink;
+			const uint64_t from = link.records[5]->pairFrom;
+			Assert::IsTrue(from != 0, L"the record knows its A");
+			VpMotion::EstimateContext c;
+			c.pairSeq = 5;
+			c.fromSeq = from;
+			c.nextPairSeconds = 3.0 / 24;   // outside the duration ratio: only the exact A can accept it
+			hook.BeforeEstimate(c, sink);
+			Assert::IsTrue(sink.last != nullptr, L"the camera's own A: guided");
+			hook.AfterEstimate(5, VpMotion::EstimateOutcome());
+			c.fromSeq = from + 1;
+			c.nextPairSeconds = 1.0 / 24;   // inside the ratio: only the A mismatch refuses it
+			hook.BeforeEstimate(c, sink);
+			Assert::IsTrue(sink.last == nullptr, L"another A: not the camera's pair, unguided");
+			hook.AfterEstimate(5, VpMotion::EstimateOutcome());
+			Assert::AreEqual(uint64_t(1), sched.Counters().notOnTime[size_t(CameraLink::OnTimeMiss::NotThePair)]);
+		}
+
 		TEST_METHOD(AllSwitchesOffGivesNullOnEveryPairAndNothingIsBound)
 		{
 			FakeLink link;

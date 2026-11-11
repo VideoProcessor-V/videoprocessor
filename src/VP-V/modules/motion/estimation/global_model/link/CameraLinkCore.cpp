@@ -487,8 +487,14 @@ namespace CameraLink
 				m_requestedAt.clear();
 				m_aheadNext = 0;          // AHEAD FIT: restarts after the new numbering's newest field
 				m_seedPending.clear();
+				// The numbering restarted: nothing was asked, published on time or sealed in it yet. A reused seq must not read the old
+				// era's marks (a stale "rejected" verdict would count a new pair as Stale / R; a stale on-time mark would pass cause b).
 				for (size_t i = 0; i < kAheadMarks; ++i)
-					m_aheadAsked[i].store(0, std::memory_order_relaxed);   // the numbering restarted: nothing was asked in it yet
+				{
+					m_aheadAsked[i].store(0, std::memory_order_relaxed);
+					m_onTimeMark[i].store(0, std::memory_order_relaxed);
+					m_sealVerdict[i].store(0, std::memory_order_relaxed);
+				}
 			}
 		}
 		if (m_ring && m_engine)

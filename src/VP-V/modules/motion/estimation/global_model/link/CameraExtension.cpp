@@ -12,6 +12,7 @@
 #include "CameraStatus.h"
 #include "GuidanceAdapter.h"
 #include "GuidanceCountsRing.h"
+#include "GuidanceStatus.h"
 
 #include <DebugLog.h>
 
@@ -270,28 +271,24 @@ namespace Vpv
 				CameraLink::TimingFacts t;
 				if (resync)
 					t.measuredSourceHz = resync->measuredRateHz.load(std::memory_order_relaxed);
-				bool cadenceRead = false;
+				// C7b (CameraLink::ApplyCadenceRead): a seq-1 record not written yet / evicted (Missing, Late) holds the latched film
+				// timing; only an Ok read decides locked / unlocked; a stale epoch, an invalid group or the store off unlock.
+				CameraLink::CadenceRead read = CameraLink::CadenceRead::None;
+				double filmHz = 0.0;
 				if (store && seq > 1)
 				{
 					FrameAnalysis::Record rec;
-					if (store->Read(seq - 1, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kCadence, rec) == FrameAnalysis::ReadStatus::Ok)
+					const FrameAnalysis::ReadStatus rs = store->Read(seq - 1, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kCadence, rec);
+					if (rs == FrameAnalysis::ReadStatus::Ok)
 					{
-						cadenceRead = true;
-						if (rec.cadence.filmHz > 0.0)
-						{
-							t.filmHz = rec.cadence.filmHz;
-							t.cadenceLocked = true;
-						}
+						read = CameraLink::CadenceRead::Ok;
+						filmHz = rec.cadence.filmHz;
 					}
+					else
+						read = rs == FrameAnalysis::ReadStatus::Missing || rs == FrameAnalysis::ReadStatus::Late ? CameraLink::CadenceRead::NotYet :
+							CameraLink::CadenceRead::Refused;
 				}
-				// C7b: a seq-1 record that cannot be read (not written yet, evicted) is no evidence that the cadence unlocked; holding
-				// the latched film timing avoids a one-frame relatch (and the fit's timing reset) on a single missed read. Only the
-				// measured source rate is refreshed then.
-				if (!cadenceRead && st.haveTiming)
-				{
-					t.filmHz = st.timing.filmHz;
-					t.cadenceLocked = st.timing.cadenceLocked;
-				}
+				CameraLink::ApplyCadenceRead(t, read, filmHz, st.haveTiming, st.timing);
 				auto moved = [](double a, double b) { return (a > 0.0) != (b > 0.0) || (a > 0.0 && std::fabs(a - b) > 0.01 * b); };
 				if (st.haveTiming && st.timing.cadenceLocked == t.cadenceLocked && !moved(st.timing.measuredSourceHz, t.measuredSourceHz) &&
 					!moved(st.timing.filmHz, t.filmHz))
@@ -959,8 +956,7 @@ namespace Vpv
 				{
 					// d = 0 (refs 93-prep-cam-d0): guidance needs camera(N) ON TIME. Where that can never happen it is structural, named once
 					// here, not per pair: no ahead fit (off, or a deterministic run's bridge path), or no on-time target (no skeleton lane).
-					const char* cause = !st.aheadWanted ? (st.aheadDeterministic ? "deterministic run" : "camera_ahead_fit is off") :
-						(st.liveBuilt && !st.demand ? "no on-time target (analysis_lane off)" : nullptr);
+					const char* cause = CameraLink::GuidanceStructuralCause(st.aheadWanted, st.aheadDeterministic, st.liveBuilt, st.demand != nullptr);
 					if (cause)
 						fb.push_back(std::string("camera_guidance: unguided - ") + cause);
 				}

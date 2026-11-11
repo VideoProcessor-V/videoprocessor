@@ -83,7 +83,10 @@ P5a (m2/p5a, `HOOKS.md` section 7) owns the call site: `VectorEngine::Estimate` 
 * **d = 0: camera(N) or nothing.** `ICameraLink::OnTimeRecord(N, ...)` returns the record of pair N only when it was published on time
   (else a cause: a no ahead pair, b not published, c bridged, d stale, e not the pair; `SameCameraPair`). A pair without it runs unguided
   (`Refusal::NotOnTime`, counted per cause, never an older or newer record); pairs guided and then rejected at the seal are counted as R and
-  shown (`camera_guidance: unguided`). Status: `camera guidance (d=0): G guided on time (x% of pairs), U unguided - camera(N) not ready: a .. e; R ..`.
+  shown (`camera_guidance: unguided`). Status: `camera guidance (d=0): G guided on time (x% of pairs), U unguided: N camera(N) not ready (a .. e), F refused; R ..`
+  (U = N + F; F = the gate's other refusals, each also on its own `refused:` line). `pairSeq` / `fromSeq` = the engine's B / A: a known A decides
+  `SameCameraPair` exactly. Structural causes (no ahead fit, deterministic run, no on-time target) are one Fallbacks entry
+  (`GuidanceStructuralCause`, `GuidanceStatus.h`), never per pair. A field-era change clears the asked / on-time / seal marks.
 * **One gate, one unit.** `GuidanceRefusal()` (`GuidanceGate.h`): all switches off, camera(N) not on time, slip / ancient stamp, `!Usable`, confidence < 0.7
   (0.85 when the static gate is the only switch). `BuildGuide()` calls it for lane and live; every refusal is counted per reason and shown.
 * **Lane job.** `CameraLinkCore::SetFitDoneObserver` fires on the fitting thread after the publish; `GuideLaneJob` wants the pair just fitted (d = 0:

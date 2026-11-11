@@ -491,14 +491,17 @@ namespace CameraLink
 			{
 				const uint64_t guided = m_counters.guided;
 				const uint64_t unguided = total > guided ? total - guided : 0;
+				const uint64_t notReady = m_counters.refusals[size_t(Refusal::NotOnTime)];
+				const uint64_t refused = unguided > notReady ? unguided - notReady : 0;   // the gate's refusals (slip, confidence, ...)
 				const auto& n = m_counters.notOnTime;
-				char b[320];
-				std::snprintf(b, sizeof(b), "camera guidance (d=0): %llu guided on time (%.0f%% of pairs), %llu unguided - camera(N) not ready: "
-					"a %llu, b %llu, c %llu, d %llu, e %llu; R %llu guided then rejected at the seal",
+				char b[360];
+				std::snprintf(b, sizeof(b), "camera guidance (d=0): %llu guided on time (%.0f%% of pairs), %llu unguided: %llu camera(N) not ready "
+					"(a %llu, b %llu, c %llu, d %llu, e %llu), %llu refused; R %llu guided then rejected at the seal",
 					(unsigned long long)guided, 100.0 * double(guided) / double(total), (unsigned long long)unguided,
+					(unsigned long long)notReady,
 					(unsigned long long)n[size_t(OnTimeMiss::NoAheadPair)], (unsigned long long)n[size_t(OnTimeMiss::NotPublished)],
 					(unsigned long long)n[size_t(OnTimeMiss::Bridged)], (unsigned long long)n[size_t(OnTimeMiss::Stale)],
-					(unsigned long long)n[size_t(OnTimeMiss::NotThePair)], (unsigned long long)m_counters.rejectedAtSeal);
+					(unsigned long long)n[size_t(OnTimeMiss::NotThePair)], (unsigned long long)refused, (unsigned long long)m_counters.rejectedAtSeal);
 				lines.push_back(b);
 			}
 		}
@@ -515,7 +518,7 @@ namespace CameraLink
 
 	void CameraGuidanceHook::BeforeEstimate(const VpMotion::EstimateContext& ctx, VpMotion::IGuidanceSink& sink)
 	{
-		const GuideResult r = m_sched.Guide(ctx.pairSeq, ctx.nextPairSeconds, 0);   // 0: EstimateContext carries no A yet (SameCameraPair)
+		const GuideResult r = m_sched.Guide(ctx.pairSeq, ctx.nextPairSeconds, ctx.fromSeq);   // SameCameraPair: A when the engine knows it
 		sink.SetCameraGuidance(r.frame);   // null = nothing bound: today's matcher exactly
 		m_waiting.push_back(std::make_pair(ctx.pairSeq, ctx.nextPairSeconds));
 		if (m_waiting.size() > 32)

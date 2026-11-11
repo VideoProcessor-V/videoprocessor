@@ -5062,9 +5062,10 @@ namespace CameraAccuracy
 		md << "model_global_d0 / all_switches_d0: pair p guided by camera(p), the ahead fit of pair p itself, fitted before its matcher, regridded "
 			"onto the 16-px consumer grid, no previous field. EPE = trusted blocks, scored pairs " << kGuideLag << "-" << (Frames() - 2) << " (the same pool "
 			"as off). Time = steady medians (pairs >= 1): off = matcher GPU ms; guided total = guided matcher GPU ms + camera fit ms + plan ms (the fit "
-			"runs on the camera worker, counted anyway per the owner rule). PASS = EPE_d0 <= EPE_off (all blocks, and mover blocks where the scene has a "
-			"mover) AND guided total <= off. EPE_expected(L) uses the on-time share at lead L.\n\n";
-		md << "| scene | variant | EPE off | EPE d0 | mover EPE off / d0 | matcher ms off | matcher ms d0 | fit ms p50 / p95 | plan ms p50 | total d0 | "
+			"runs on the camera worker, counted anyway per the owner rule); total p95 uses the fit p95. PASS = more accurate (EPE_d0 <= EPE_off on all blocks "
+			"and on mover blocks where the scene has a mover, strictly lower on at least one) AND no slower (guided total p50 and p95 <= off). NO-GAIN = "
+			"no worse and no slower but not more accurate (equal EPE). DEFECT = worse EPE or slower. EPE_expected(L) uses the on-time share at lead L.\n\n";
+		md << "| scene | variant | EPE off | EPE d0 | mover EPE off / d0 | matcher ms off | matcher ms d0 | fit ms p50 / p95 | plan ms p50 | total d0 p50 / p95 | "
 			"guided (all pairs) | on time L=1..4 | EPE_expected L=1..4 | verdict |\n";
 		md << "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n";
 		for (const SceneResult& s : all)
@@ -5094,22 +5095,24 @@ namespace CameraAccuracy
 				const double tD0 = d0.Quantile(&PairLog::gpuMs, 1, false, false, 0.5);
 				const double fit50 = d0.Quantile(&PairLog::fitMs, 1, false, false, 0.5), fit95 = d0.Quantile(&PairLog::fitMs, 1, false, false, 0.95);
 				const double plan50 = d0.Quantile(&PairLog::planMs, 1, true, false, 0.5);
-				const double total = tD0 + fit50 + plan50;
-				const bool accurate = eD0 <= eOff && (!mover || mD0 <= mOff);
-				const bool fast = total <= tOff;
+				const double total = tD0 + fit50 + plan50, total95 = tD0 + fit95 + plan50;
+				const bool noWorse = eD0 <= eOff && (!mover || mD0 <= mOff);
+				const bool better = noWorse && (eD0 < eOff || (mover && mD0 < mOff));
+				const bool fast = total <= tOff && total95 <= tOff;
+				const char* verdict = !noWorse || !fast ? "DEFECT" : better ? "PASS" : "NO-GAIN";
 				char moverText[64] = "-";
 				if (mover)
 					std::snprintf(moverText, sizeof(moverText), "%.4f / %.4f", mOff, mD0);
 				double expected[5] = {};
 				for (int L = 1; L <= 4; ++L)
 					expected[L] = share[L] * eD0 + (1.0 - share[L]) * eOff;
-				std::snprintf(line, sizeof(line), "| %s | %s | %.4f | %.4f | %s | %.3f | %.3f | %.3f / %.3f | %.3f | %.3f | %d of %d | %.0f / %.0f / %.0f / %.0f%% | "
+				std::snprintf(line, sizeof(line), "| %s | %s | %.4f | %.4f | %s | %.3f | %.3f | %.3f / %.3f | %.3f | %.3f / %.3f | %d of %d | %.0f / %.0f / %.0f / %.0f%% | "
 					"%.4f / %.4f / %.4f / %.4f | %s%s%s |\n",
 					s.scene.name.c_str(), d0.name.c_str(), eOff, eD0,
 					moverText,
-					tOff, tD0, fit50, fit95, plan50, total, d0.Count(&PairLog::guided, false), Frames() - 1,
+					tOff, tD0, fit50, fit95, plan50, total, total95, d0.Count(&PairLog::guided, false), Frames() - 1,
 					100.0 * share[1], 100.0 * share[2], 100.0 * share[3], 100.0 * share[4], expected[1], expected[2], expected[3], expected[4],
-					accurate && fast ? "PASS" : "DEFECT", accurate ? "" : " (accuracy)", fast ? "" : " (time)");
+					verdict, noWorse ? "" : " (accuracy)", fast ? "" : " (time)");
 				md << line;
 			}
 		}
