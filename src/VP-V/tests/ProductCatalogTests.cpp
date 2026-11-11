@@ -688,7 +688,7 @@ namespace ProductCatalogTestsNs
 			Assert::IsTrue(std::string(c->laneProducer).find("reserved") == 0, L"P10c is marked reserved / no producer in the product row");
 
 			// 4. Consumer-level flags: each names a catalog consumer row; NotRead / ViewIsActual name a DECLARED read of the row,
-			// ExternalView names a read the row does NOT declare (B3-Z Z-DECL, lead 2026-11-11).
+			// ExternalView names a read the row does NOT declare (B3-Z Z-DECL, lead 2026-11-11; expectation change = WAIVER-B3Z-01, approved).
 			size_t cNotRead = 0, cViews = 0, cExt = 0;
 			for (const ConsumerFlag& f : ConsumerFlags()) {
 				const ConsumerRow* row = nullptr;
