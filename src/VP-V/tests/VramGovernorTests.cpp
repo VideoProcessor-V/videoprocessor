@@ -413,7 +413,7 @@ namespace VramGovernorTestsNs
 			size_t n = 0;
 			const uint16_t* ids = DeclarableVramUsers(&n);
 			// coordinator-approved 2026-11-08 (long-pair T2 user): kUserLongPair is the 7th declarable user (6 -> 7).
-			// WAIVER candidate (W2-C1 C1-3, brief-directed): kUserMotionMatcher is the 8th (7 -> 8), declared at the matcher's create site.
+			// WAIVER-C1-05 (W2-C1 C1-3, approved by the coordinator): kUserMotionMatcher is the 8th (7 -> 8), declared at the matcher's create site.
 			Assert::AreEqual(size_t(8), n, L"the five motion / repair users, BasicChroma, the long-pair T2 user and the motion engine matcher");
 			const uint16_t expected[] = { kUserNvofProducer, kUserTemporalDetail, kUserCameraModel, kUserInterpolator, kUserEnhancers, kUserBasicChroma, kUserLongPair, kUserMotionMatcher };
 			for (size_t i = 0; i < n; ++i)

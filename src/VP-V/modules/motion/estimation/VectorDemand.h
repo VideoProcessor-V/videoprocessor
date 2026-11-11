@@ -147,6 +147,7 @@ namespace VectorDemand
 		bool anyWant = false;
 		unsigned wanted = 0;   // non-synthesis wants
 		unsigned starterWants = 0;
+		unsigned synthesisReuse = 0;   // W2-C1 (C1-4): reuse-only synthesis wants (the occlusion mask): refused like the others without a starter
 		for (int i = 0; i < kConsumerCount; ++i)
 		{
 			if (!in.wants[i])
@@ -156,6 +157,8 @@ namespace VectorDemand
 				starterWants |= 1u << i;
 			if (DomainOf(ConsumerAt(i)) != Domain::Synthesis)
 				wanted |= 1u << i;
+			else if (!IsStarter(ConsumerAt(i)))
+				synthesisReuse |= 1u << i;
 		}
 		d.reason = Reason::NoConsumer;
 		if (!anyWant)
@@ -164,6 +167,14 @@ namespace VectorDemand
 		if (wanted == 0)
 		{
 			d.synthesisOnly = true;
+			// W2-C1 (C1-4): the occlusion mask alone, with no starter running, is a refused start (its own matcher never runs):
+			// DejudderPolicy reads the refusal (occlusionMaskServed), and the status names it.
+			if (synthesisReuse != 0 && !in.starterEngaged)
+			{
+				d.refused = synthesisReuse;
+				d.unserved = synthesisReuse;
+				d.reason = Reason::NoStarter;
+			}
 			return d;
 		}
 		d.smoothMotion = in.smoothMotion;
@@ -196,7 +207,7 @@ namespace VectorDemand
 		const bool engaged = in.starterEngaged || (served & StarterMask()) != 0;
 		if (!engaged)
 		{
-			d.refused = served & ~StarterMask();
+			d.refused = (served & ~StarterMask()) | synthesisReuse;   // C1-4: the occlusion mask too (never in served)
 			d.unserved |= d.refused;
 			served &= StarterMask();
 			if (served == 0)

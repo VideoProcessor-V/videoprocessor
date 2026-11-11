@@ -95,18 +95,19 @@ namespace VpMotion
 		life.retryDue = motionProducerStartFailed && motionProducerStartRetry.Recovering() && nowMs >= motionProducerStartRetry.RetryAtMs();
 		// ... and a latch cleared by an unwanted frame does not skip the back-off (a want flip never restarts it early).
 		life.backoffActive = motionProducerStartRetry.Recovering() && nowMs < motionProducerStartRetry.RetryAtMs();
-		life.gpuAvailable = in.gpu != nullptr;
+		const bool startFailureInjected = !producerStartFailureForTesting_.empty();   // C1-4 test seam: empty in the product
+		life.gpuAvailable = in.gpu != nullptr || startFailureInjected;
 		const ProducerPlan::LifecycleOutput act = ProducerPlan::Lifecycle(life);
 		if (act.action == ProducerPlan::Action::Start)
 		{
-			pl_d3d11 d3d = pl_d3d11_get(in.gpu);
+			pl_d3d11 d3d = startFailureInjected ? nullptr : pl_d3d11_get(in.gpu);
 			auto producer = std::make_unique<MotionAhead::Producer>();
 			// The slow (best) preset: off the render path, and on the 7 real clips the seed with it removed
 			// 41.9% of the judder vs the matcher's 41.3% (damage 0.35 vs 0.40; medium 41.2%, 0.37). The
 			// render-time fallback keeps the matcher's preset (medium).
 			const NvOpticalFlow::Preset preset = NvOpticalFlow::Preset::Slow;
 			producer->SetSlot(p2Slot);   // SK-MV: the producer publishes P2 into the engine's slot (it owns no store)
-			if (d3d && d3d->device && producer->Start(d3d->device, preset))
+			if (!startFailureInjected && d3d && d3d->device && producer->Start(d3d->device, preset))
 			{
 				motionProducerStartError.clear();
 				motionProducerStartFailed = false;
@@ -118,7 +119,8 @@ namespace VpMotion
 			}
 			else
 			{
-				const std::string startError = producer->Error().empty() ? std::string("no render device") : producer->Error();
+				const std::string startError = startFailureInjected ? producerStartFailureForTesting_ :
+					producer->Error().empty() ? std::string("no render device") : producer->Error();
 				// W2-C1 (lead 2026-11-11): logged once per failure episode (and when the reason changes), not at every retry.
 				const bool logIt = !motionProducerStartFailed || startError != motionProducerStartError;
 				motionProducerStartFailed = true;
@@ -126,7 +128,7 @@ namespace VpMotion
 				const uint64_t retryMs = motionProducerStartRetry.OnStopped(nowMs);
 				if (logIt)
 					DebugLog::Log("Motion ahead: the producer did not start (%s); the de-judder takes the block searches (no optical-flow pair); retried in %llu s",
-					producer->Error().c_str(), static_cast<unsigned long long>(retryMs / 1000));
+					startError.c_str(), static_cast<unsigned long long>(retryMs / 1000));
 			}
 		}
 		else if (act.action == ProducerPlan::Action::Stop)

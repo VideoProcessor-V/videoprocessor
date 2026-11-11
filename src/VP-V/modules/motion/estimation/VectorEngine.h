@@ -339,6 +339,10 @@ namespace VpMotion
 		void SetPreEstimateHook(IPreEstimateHook* hook) override { preEstimateHook_.store(hook, std::memory_order_release); }
 		void SetCameraFitWanted(bool wanted) override { cameraFitWanted_.store(wanted, std::memory_order_release); }
 		bool CameraFitWanted() const { return cameraFitWanted_.load(std::memory_order_acquire); }
+		// W2-C1 (C1-4) TEST SEAM (rule 25; README "One motion-engine state"): every producer start fails with this reason, as NVOF
+		// does on an adapter or size it cannot serve, without a device (PlanProducer then treats the device as present). Empty (the
+		// default; nothing in the product sets it) = the real start. CPU tests only: EngineAbsentPipelineTests scenario 2.
+		void FailProducerStartsForTesting(const std::string& reason) { producerStartFailureForTesting_ = reason; }
 		// Reservations (RefinedFieldOf, SubmitLongPair ...): IVectorEngine's "absent" defaults.
 
 	private:
@@ -377,6 +381,7 @@ namespace VpMotion
 		const IMatcherView* matcher_ = nullptr;
 		std::atomic<IPreEstimateHook*> preEstimateHook_{ nullptr };
 		std::atomic<bool> cameraFitWanted_{ false };   // SK-W stage D: the external CameraFit want, merged into the next decision
+		std::string producerStartFailureForTesting_;   // C1-4 test seam (FailProducerStartsForTesting); empty in the product
 		struct FieldRecord { uint64_t from = 0, to = 0, epoch = 0; };
 		FieldRecord field_;                 // the last successful estimate (render thread)
 		uint64_t eraFirstFrom_ = 0;         // the A of the first successful estimate in field_.epoch

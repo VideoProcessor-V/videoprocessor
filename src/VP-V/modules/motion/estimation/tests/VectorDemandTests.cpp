@@ -355,6 +355,33 @@ namespace VectorDemandTest
 			Assert::IsTrue(d.reason == Reason::NoStarter && !d.producer, L"competitive low latency: no backward producer for statistics alone");
 		}
 
+		// W2-C1 (C1-4 defect fix): the occlusion mask is reuse-only but synthesis-domain (never in served). Without a starter it is a
+		// refused start too - alone (the synthesis-only return) and beside other reuse-only wants - so DejudderPolicy's
+		// occlusionMaskServed reads false and its own matcher never runs. With a starter it is not refused.
+		TEST_METHOD(TheOcclusionMaskWithoutAStarterIsARefusedStart)
+		{
+			const unsigned mask = 1u << static_cast<int>(Consumer::OcclusionMask);
+			Input alone = Make({ Consumer::OcclusionMask });
+			alone.starterEngaged = false;
+			const Decision a = Decide(alone);
+			Assert::IsTrue(a.mode == Mode::Off && a.reason == Reason::NoStarter, L"mask alone, no starter: off, NoStarter");
+			Assert::AreEqual(mask, a.refused, L"mask alone: a refused start");
+			Assert::AreEqual(mask, a.unserved, L"mask alone: unserved (named)");
+			Assert::AreEqual(0u, a.served);
+			Assert::IsFalse(a.estimate || a.producer, L"nothing starts");
+			Input withReuse = Make({ Consumer::OcclusionMask, Consumer::GrainMap, Consumer::DetailPulse });
+			withReuse.starterEngaged = false;
+			const Decision b = Decide(withReuse);
+			Assert::IsTrue(b.reason == Reason::NoStarter, L"mask + reuse, no starter: NoStarter");
+			Assert::AreEqual(mask, b.refused & mask, L"mask + reuse: the mask is refused too");
+			Assert::AreEqual(mask, b.unserved & mask, L"mask + reuse: the mask is unserved");
+			Assert::IsTrue(UnservedText(b).find("occlusion mask") != std::string::npos, L"the mask is named");
+			Input engaged = Make({ Consumer::OcclusionMask });
+			Assert::AreEqual(0u, Decide(engaged).refused, L"mask alone with a starter: not refused");
+			Input engagedReuse = Make({ Consumer::OcclusionMask, Consumer::GrainMap });
+			Assert::AreEqual(0u, Decide(engagedReuse).refused, L"mask + reuse with a starter: not refused");
+		}
+
 		TEST_METHOD(TheCameraFitStartsAloneAndEngagesTheReuseOnlyConsumers)
 		{
 			Input in = Make({ Consumer::CameraFit, Consumer::DetailPulse, Consumer::SourceMonitorPan });
