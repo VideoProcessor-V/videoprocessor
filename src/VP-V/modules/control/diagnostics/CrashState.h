@@ -120,4 +120,22 @@ namespace CrashState
 
 	// The process-wide recorder the app starts.
 	Recorder& Global();
+
+	// ONE recent-lines ring (consolidation C15, P14). The ring of the last 600 log
+	// lines used to live in DebugLog.h (Bill's logger); it lives here now and
+	// DebugLog is only a client: DebugLog::Log hands each committed line to
+	// DebugLog's generic observer slot, and InstallLogRing() puts LogLineObserver
+	// in that slot. The ring is kept with file logging off (owner 2026-10-15): with
+	// an observer installed DebugLog::Log still formats the line; with none it
+	// returns early exactly as Bill's logger does.
+	// Each line is stamped "HH:MM:SS.mmm " (local time) and carries its tick.
+	void RememberLine(const char* text);
+	// The newest lines (newest last) no older than maxAgeMs, at most maxLines.
+	std::vector<std::string> RecentLines(unsigned long long maxAgeMs = 5000, size_t maxLines = 300);
+	// DebugLog::LogObserver signature (level is not used).
+	void LogLineObserver(int level, const char* text);
+	// Installs LogLineObserver as DebugLog's observer (idempotent). Called by the
+	// app at start-up and by Recorder::Start. The single slot is not shared: a
+	// test that installs its own observer replaces it until the next call.
+	void InstallLogRing();
 }

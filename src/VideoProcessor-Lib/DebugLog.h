@@ -62,9 +62,14 @@ public:
 	static void Log(const char* format, Args... args)
 	{
 		ExternalSink sink = GetExternalSink().load(std::memory_order_acquire);
-		// VP-V (DIV-LOG-01): the crash state's recent lines are kept even with
-		// file logging off (owner 2026-10-15), so a disabled log still formats
-		// the message for the recent-lines ring (QueueMessage).
+		// VPV-HOOK
+		// VP-V (DIV-LOG-01, C15): the crash state's ONE recent-lines ring lives in
+		// control\diagnostics\CrashState and is fed through the observer, so an
+		// installed observer keeps a disabled log formatting. With no sink, no
+		// observer and logging off this returns early exactly as Bill's logger does.
+		LogObserver observer = GetLogObserver().load(std::memory_order_acquire);
+		if (!sink && !observer && !GetLoggingEnabled().load(std::memory_order_acquire)) return;
+		// VPV-HOOK-END
 		// Preserve printf and plugin callback lifetimes: pointer arguments cannot
 		// be deferred safely. Formatted output is capped at 4096 bytes; timestamp
 		// formatting and every file operation belong to the writer thread.
@@ -78,28 +83,11 @@ public:
 			return;
 		}
 		QueueMessage(buffer, length >= static_cast<int>(sizeof(buffer)));
-		if (LogObserver observer = GetLogObserver().load(std::memory_order_acquire)) observer(0, buffer); // VPV-HOOK
+		if (observer) observer(0, buffer); // VPV-HOOK
 	}
 
 	using Metrics = DebugLogAsync::Metrics;
 	static Metrics GetMetrics() { return GetTransport().Snapshot(); }
-
-	/**
-	 * The most recent messages (newest last), each with its local time, no
-	 * older than maxAgeMs: the crash state's "recent log" (CrashState.h).
-	 */
-	static std::vector<std::string> RecentLines(unsigned long long maxAgeMs = 5000, size_t maxLines = 300)
-	{
-		std::vector<std::string> lines;
-		const unsigned long long now = GetTickCount64();
-		std::lock_guard<std::mutex> lock(GetRecentMutex());
-		for (const RecentLine& line : GetRecentLines())
-			if (now - line.tick <= maxAgeMs)
-				lines.push_back(line.text);
-		if (lines.size() > maxLines)
-			lines.erase(lines.begin(), lines.end() - static_cast<std::ptrdiff_t>(maxLines));
-		return lines;
-	}
 
 	/**
 	 * Get the full path to the log file for reference
@@ -242,9 +230,6 @@ private:
 
 	static void QueueMessage(const char* message, bool truncated)
 	{
-		// The crash state's recent lines are kept even with file logging off
-		// (owner 2026-10-15). VP-V: kept on top of Bill's async transport.
-		RememberRecent(message);
 		if (!GetLoggingEnabled().load(std::memory_order_acquire)) return;
 		GetTransport().TryPublish(message, std::time(nullptr), truncated);
 	}
@@ -392,37 +377,6 @@ private:
 			return WriteBatch(&record, 1);
 		}
 	};
-
-	struct RecentLine
-	{
-		unsigned long long tick = 0;
-		std::string text;
-	};
-
-	static std::mutex& GetRecentMutex()
-	{
-		static std::mutex mutex;
-		return mutex;
-	}
-
-	static std::deque<RecentLine>& GetRecentLines()
-	{
-		static std::deque<RecentLine> lines;
-		return lines;
-	}
-
-	static void RememberRecent(const std::string& message)
-	{
-		SYSTEMTIME t{};
-		GetLocalTime(&t);
-		char stamp[32];
-		snprintf(stamp, sizeof(stamp), "%02u:%02u:%02u.%03u ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
-		std::lock_guard<std::mutex> lock(GetRecentMutex());
-		auto& lines = GetRecentLines();
-		lines.push_back({ GetTickCount64(), stamp + message });
-		while (lines.size() > 600)
-			lines.pop_front();
-	}
 
 	static void WriterThreadProc()
 	{

@@ -31,6 +31,7 @@
     "src/VideoProcessor-Lib/ProfileSchemaHooks.h",
     "src/VP-V/modules/control/config/VpvStartupSchema.h",
     "src/VP-V/modules/control/config/VpvSchemaKeys.h",
+    "src/VP-V/modules/control/config/VpvProfileQueueAdvice.h",
     "src/VideoProcessor-Lib/RendererProfileConfig.h"
   ],
   "components": {

@@ -83,11 +83,12 @@ namespace VideoProcessorTest
 		TEST_METHOD(CleanExitDeletesTheStateAnUncleanOneLeavesIt)
 		{
 			const std::string folder = TempFolder("rolling");
+			CrashState::InstallLogRing();
 			DebugLog::Log("crash state test marker %d", 42);
 			{
 				CrashState::Recorder recorder;
 				recorder.SetValue("build", "test build");
-				Assert::IsTrue(recorder.Start(folder, [] { return DebugLog::RecentLines(5000, 300); }, 100));
+				Assert::IsTrue(recorder.Start(folder, [] { return CrashState::RecentLines(5000, 300); }, 100));
 				Sleep(350);
 				const std::string text = Read(recorder.LivePath());
 				Assert::IsTrue(text.find("build: test build") != std::string::npos, L"the state values are written");

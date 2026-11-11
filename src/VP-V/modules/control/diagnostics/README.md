@@ -8,7 +8,7 @@ One "Fallbacks engaged: (list)" heading in the Ctrl+I overlay, the Config status
 
 ## Contract
 
-- Input: fallback events (`Engage(id, reason)` / `Release(id)`). Today only the VP Renderer DLL publishes them (`FallbackStatus::Registry` in LibplaceboVideoRenderer.cpp). State values from the GUI (`CrashState::Recorder::SetValue`). Recent log lines from `DebugLog::RecentLines`.
+- Input: fallback events (`Engage(id, reason)` / `Release(id)`). Today only the VP Renderer DLL publishes them (`FallbackStatus::Registry` in LibplaceboVideoRenderer.cpp). State values from the GUI (`CrashState::Recorder::SetValue`). Recent log lines from `CrashState::RecentLines` (the one 600-line ring; `DebugLog` feeds it through its observer hook, `CrashState::InstallLogRing`).
 - Output: the "Fallbacks engaged: ..." heading; one brief transient notice per fallback id per session; the live crash-state file and kept "crash state (N).txt/.dmp" files; `logs\reports\vp-report-<time>.zip`.
 - Geometry: n/a
 - Delay share: n/a
@@ -27,7 +27,7 @@ Public API (namespace `CrashState`):
 
 Data flow:
 
-1. VideoProcessorApp.cpp calls `PreserveLeftover` on the log folder (the folder of `DebugLog::GetLogFilePath()`), logs each kept file, sets the `build` value, calls `Start` and `InstallCrashHandler`.
+1. VideoProcessorApp.cpp calls `CrashState::InstallLogRing()` (first lines of InitInstance, before logging starts), then `PreserveLeftover` on the log folder (the folder of `DebugLog::GetLogFilePath()`), logs each kept file, sets the `build` value, calls `Start` and `InstallCrashHandler`.
 2. The live file is `crash-state-<pid>.txt`. Each instance holds `crash-state-<pid>.lock` open exclusively with delete-on-close; `PreserveLeftover` treats an instance as running while that lock cannot be opened.
 3. Every second the writer thread composes a header (times, pid, working set), a `[state]` section (the values) and a `[recent log]` section, and writes it atomically: `.tmp`, `FlushFileBuffers`, `MoveFileEx` replace with write-through.
 4. VideoProcessorDlg.cpp sets values (`source`, `exit`, ...) from its diagnostics tick. A clean exit calls `Stop(true)`, which deletes the live file and dump. Forced shutdown, session end with a kept state, or a crash leaves it for the next start.
@@ -111,7 +111,7 @@ Read the TRX for the result.
 
 Efficiency review 2026-10-24 (code reading only; estimates from loop bounds and file sizes x frequency, not measured). Ranked by saving.
 
-1. **Crash-state write, once per second** (writer thread, never the render or GUI thread). Each write composes the header, ~20 `[state]` values and up to 300 recent lines from the last 5 s (`DebugLog::RecentLines(5000, 300)`): about 2-60 KB depending on log volume. It writes `.tmp` through `std::ofstream`, reopens it with `CreateFileA` only to call `FlushFileBuffers`, then `MoveFileEx(... MOVEFILE_WRITE_THROUGH)`. That is two opens and two forced flushes per second, 86,400 rewrites a day (~0.2-5 GB/day written), and an antivirus scan of each closed `.tmp`.
+1. **Crash-state write, once per second** (writer thread, never the render or GUI thread). Each write composes the header, ~20 `[state]` values and up to 300 recent lines from the last 5 s (`CrashState::RecentLines(5000, 300)`): about 2-60 KB depending on log volume. It writes `.tmp` through `std::ofstream`, reopens it with `CreateFileA` only to call `FlushFileBuffers`, then `MoveFileEx(... MOVEFILE_WRITE_THROUGH)`. That is two opens and two forced flushes per second, 86,400 rewrites a day (~0.2-5 GB/day written), and an antivirus scan of each closed `.tmp`.
    - Fix a: write the `.tmp` through one `CreateFile` handle (`WriteFile`, then `FlushFileBuffers` on the same handle). Saves one open/close and one scan trigger per second. Byte-identical file: yes. Risk: low.
    - Fix b: skip the rewrite when `[state]` and `[recent log]` are unchanged since the last write (paused, idle, no signal). Removes most writes when nothing happens. Byte-identical: no (the `written:` / `uptime:` header stays at the last change). Risk: low.
    - Keep the flush and the write-through: they are the power-loss guarantee (audit 2026-10-16).
@@ -119,7 +119,7 @@ Efficiency review 2026-10-24 (code reading only; estimates from loop bounds and 
 3. **Report thumbnail** (`report_thumbnail` on): the rendered-output capture blocks the render thread for ~30-80 ms per capture. Costed and fixed under colour.tone_gamut (`AnalyzePackedR10` is there).
 4. **Problem report, worker part** (per report, off the GUI thread): SHA-256 of `VideoProcessor.exe` and each renderer DLL (BCrypt, ~0.5-2 GB/s: tens of ms for tens of MB), redaction line by line (four passes plus word replacement on each of ~4,000 lines of the 512 KiB log tail, a `substr` copy per line), the in-memory store ZIP, flush and write-through rename. Acceptable for an event; no change.
 5. **`WriteNow` copies the recent lines twice** (into `lines`, then into `lastRecent` under the state mutex): up to 300 string copies a second, ~30 µs/s. Fix: compose, then move `lines` into `lastRecent`. Byte-identical: yes. Risk: low.
-6. **GUI 1-second tick**: ~17 `SetValue` calls (map insert under the mutex, `CStringA` conversions), ~10-20 µs/s. No change. The 600-line ring that feeds the recent lines (`DebugLog::RememberRecent`, a timestamp and a copy per log line, kept even with file logging off) is logging's cost, not this slot's.
+6. **GUI 1-second tick**: ~17 `SetValue` calls (map insert under the mutex, `CStringA` conversions), ~10-20 µs/s. No change. The 600-line ring that feeds the recent lines (`CrashState::RememberLine`, one timestamp and a copy per log line, kept even with file logging off) is this module's since C15 (P14): `DebugLog` only calls its generic observer hook; with no observer and logging off `DebugLog::Log` returns early as Bill's does.
 
 7. **Diagnostic history rows** (render thread, per frame): one presented row per frame plus drop/hold rows, ~20-40 ns each (measured by `DiagnosticHistoryTests`). The WP-17 adapter only moved them; same work.
 8. **Raw capture / test switches:** nothing unless `VP_RAW_CAPTURE_PATH` / a `VP_TEST_*` variable is set (one environment read where the host read it before).

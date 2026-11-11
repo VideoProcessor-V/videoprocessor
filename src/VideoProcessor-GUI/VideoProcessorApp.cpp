@@ -1435,6 +1435,12 @@ BOOL CVideoProcessorApp::InitInstance()
 		return FALSE;
 	}
 
+	// VPV-HOOK
+	// C15: the one recent-lines ring (control\diagnostics\CrashState) listens to
+	// DebugLog from the first line, as DebugLog's own ring did.
+	CrashState::InstallLogRing();
+	// VPV-HOOK-END
+
 	// Resolve startup-only logging configuration before rotation and before
 	// any producer thread can enqueue a diagnostic.
 	if (cpuCheckRequested || avx2ProbeRequested || LoadDebugLoggingEnabled())
@@ -1522,7 +1528,7 @@ BOOL CVideoProcessorApp::InitInstance()
 		snprintf(build, sizeof(build), "%ls (%ls, commit %ls%s)", VERSION_DESCRIBE, VERSION_BRANCH, VERSION_URL,
 			VERSION_DIRTY ? ", dirty" : "");
 		recorder.SetValue("build", build);
-		recorder.Start(folder, [] { return DebugLog::RecentLines(5000, 300); });
+		recorder.Start(folder, [] { return CrashState::RecentLines(5000, 300); });
 		recorder.InstallCrashHandler();
 	}
 

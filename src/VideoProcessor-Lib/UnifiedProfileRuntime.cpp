@@ -4,7 +4,7 @@
 
 #include <DebugLog.h>
 #include <EventActionLauncher.h>
-#include <MotionAhead.h>
+#include <VP-V/modules/control/config/VpvProfileQueueAdvice.h>
 
 #include <algorithm>
 #include <atomic>
@@ -1217,25 +1217,18 @@ namespace UnifiedProfileRuntime
 				}
 				return ConfigFile::NormalizeName(value);
 			};
-			const bool flow = setting("optical_flow", "on") != "off";
-			const bool ahead = std::atof(setting("motion_ahead_frames", "4").c_str()) > 0.0;
-			const bool dejudder = std::atof(setting("dejudder_strength", "0").c_str()) > 0.0 ||
-				std::atof(setting("dejudder_strength_even", "0").c_str()) > 0.0;
-			// The interpolator takes its pairs from the producer too (plan step 5).
-			const bool interpolation = setting("interpolation", "off") != "off";
-			// Fixed-constant batch B3 (2026-10-18, general_rate_fixes): the depth at the source rate
-			// (MotionAhead::DepthAt: 4 at 60 Hz and below, the same time above).
-			generalRateFixes = setting("general_rate_fixes", "on") != "off";
 			double sourceHz = 0.0;
 			{
 				std::string cadence;
 				if (values("cadence", cadence) && !cadence.empty())
 					DisplayRuleExpression::ParseNumber(cadence, sourceHz);
 			}
-			if (flow && ahead && (dejudder || interpolation))
-				// audit 2026-10-16: derived from the engine depth, not a literal 5 (4 ahead + the frame shown).
-				lookAheadQueueFrames = MotionAhead::QueueFramesFor(
-					MotionAhead::DepthAt(MotionAhead::kDefaultDepth, sourceHz, generalRateFixes));
+			// VPV-HOOK
+			// P14: the VP-V look-ahead / general_rate_fixes rule lives in the control\config module.
+			const Vpv::ProfileQueueAdvice::Advice advice = Vpv::ProfileQueueAdvice::Compute(setting, sourceHz);
+			lookAheadQueueFrames = advice.lookAheadQueueFrames;
+			generalRateFixes = advice.generalRateFixes;
+			// VPV-HOOK-END
 		}
 		std::map<std::string, StateVariables::Value> variables;
 		PublishSourceVariables(values, variables);

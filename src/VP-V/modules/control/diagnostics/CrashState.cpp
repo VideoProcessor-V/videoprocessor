@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <deque>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -302,6 +303,7 @@ namespace CrashState
 		unsigned long instanceIdIn)
 	{
 		if (running.load()) return true;
+		InstallLogRing();
 		directory = directoryIn;
 		instanceId = instanceIdIn ? instanceIdIn : GetCurrentProcessId();
 		recent = std::move(recentIn);
@@ -560,5 +562,64 @@ namespace CrashState
 	{
 		static Recorder recorder;
 		return recorder;
+	}
+
+	namespace
+	{
+		struct RingLine
+		{
+			unsigned long long tick = 0;
+			std::string text;
+		};
+
+		std::mutex& RingMutex()
+		{
+			static std::mutex mutex;
+			return mutex;
+		}
+
+		std::deque<RingLine>& Ring()
+		{
+			static std::deque<RingLine> lines;
+			return lines;
+		}
+
+		constexpr size_t kRingCapacity = 600;
+	}
+
+	void RememberLine(const char* text)
+	{
+		SYSTEMTIME t{};
+		GetLocalTime(&t);
+		char stamp[32];
+		snprintf(stamp, sizeof(stamp), "%02u:%02u:%02u.%03u ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+		std::lock_guard<std::mutex> lock(RingMutex());
+		auto& lines = Ring();
+		lines.push_back({ GetTickCount64(), std::string(stamp) + (text ? text : "") });
+		while (lines.size() > kRingCapacity)
+			lines.pop_front();
+	}
+
+	std::vector<std::string> RecentLines(unsigned long long maxAgeMs, size_t maxLines)
+	{
+		std::vector<std::string> lines;
+		const unsigned long long now = GetTickCount64();
+		std::lock_guard<std::mutex> lock(RingMutex());
+		for (const RingLine& line : Ring())
+			if (now - line.tick <= maxAgeMs)
+				lines.push_back(line.text);
+		if (lines.size() > maxLines)
+			lines.erase(lines.begin(), lines.end() - static_cast<std::ptrdiff_t>(maxLines));
+		return lines;
+	}
+
+	void LogLineObserver(int, const char* text)
+	{
+		RememberLine(text);
+	}
+
+	void InstallLogRing()
+	{
+		DebugLog::SetLogObserver(&LogLineObserver);
 	}
 }

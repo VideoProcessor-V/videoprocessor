@@ -188,7 +188,7 @@ namespace VpDiagnostics
 			inputs->configFiles = ReportConfigFiles();
 			pendingLogPath = WidenAnsi(DebugLog::GetLogFilePath());
 			pendingRecentLog.clear();
-			for (const std::string& line : DebugLog::RecentLines(~0ull, 600))
+			for (const std::string& line : CrashState::RecentLines(~0ull, 600))
 				pendingRecentLog += line + "\n";
 			return inputs;
 		}
