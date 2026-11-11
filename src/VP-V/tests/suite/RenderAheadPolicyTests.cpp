@@ -1835,7 +1835,6 @@ namespace RenderAheadPolicyTest
 		{
 			Presenter p;
 			PresenterLegacy::State s;
-			
 			p.creditFrames.store(p.credit.CommitFrames(1, 2.5));
 			s.creditFrames = s.credit.CommitFrames(1, 2.5);
 			p.mainInterval = 3;
