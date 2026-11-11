@@ -151,6 +151,7 @@ namespace VideoProcessorTest
 			const std::shared_ptr<FakeCache> cache = std::make_shared<FakeCache>();
 			cache->queued.source.valid = host.cached;
 			MotionAhead::IssueOnDemandAtDequeue(&host, cache, uint64_t(0), from, next, 1.0, 1.0);   // 1 Hz: a deadline of ~0.9 s (no timing flake)
+			MotionAhead::PostStagedOnDemand(&host);   // the renderer's second hook line, after the queue block
 		}
 
 		// Waits until the worker has run `n` seam calls (bounded).
@@ -830,6 +831,45 @@ namespace VideoProcessorTest
 			Assert::AreEqual(2ull, c.issued, L"no consumer: no request");
 			Assert::AreEqual(1ull, c.idleSkips);
 			Assert::AreEqual(1ull, c.served);
+			producer->Stop();
+		}
+
+		// Stall fix (re-check MUST 3): the hook under the queue mutex only stages the pair - it takes no cache lock and issues
+		// nothing; the post after the queue block issues it. A stage not yet posted is replaced by the next (only the newest
+		// pair is asked for); a post with nothing staged does nothing.
+		TEST_METHOD(TheDequeueHookOnlyStagesAndThePostOutsideTheQueueMutexIssues)
+		{
+			using FallbackCatalog::NoPairCause;
+			FakeHost host;
+			host.vectorEngine.SetOnDemandSetting(Setting::On);
+			Trace trace;
+			auto producer = std::make_shared<MotionAhead::Producer>();
+			Assert::IsTrue(producer->StartForTest(Seam(trace)));
+			host.vectorEngine.PublishProducer(producer);
+			FakeQueued next;
+			next.sourceSequence = 7;
+			next.analysis->queued.source.valid = true;
+			const std::shared_ptr<FakeCache> cache = std::make_shared<FakeCache>();
+			cache->queued.source.valid = true;
+			{
+				// Both caches' mutexes held by "another thread" (here: this one, the hook runs on a second): the hook must not wait.
+				std::lock_guard<std::mutex> holdA(cache->mutex);
+				std::lock_guard<std::mutex> holdB(next.analysis->mutex);
+				std::thread hook([&] { MotionAhead::IssueOnDemandAtDequeue(&host, cache, uint64_t(0), 5, next, 1.0, 1.0); });
+				hook.join();   // returns while both locks are held: no cache lock taken under the queue mutex
+			}
+			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued, L"staged only: nothing issued under the queue mutex");
+			Assert::AreEqual(0ull, producer->GetRequestStats().requests, L"the producer's mutex not taken by the hook");
+			next.sourceSequence = 8;
+			MotionAhead::IssueOnDemandAtDequeue(&host, cache, uint64_t(0), 6, next, 1.0, 1.0);   // replaces the unposted 5 -> 7
+			MotionAhead::PostStagedOnDemand(&host);
+			Assert::AreEqual(1ull, host.vectorEngine.OnDemandReads().issued, L"the post issues the newest staged pair");
+			MotionAhead::PostStagedOnDemand(&host);
+			Assert::AreEqual(1ull, host.vectorEngine.OnDemandReads().issued, L"nothing staged: nothing issued");
+			NoPairCause cause = NoPairCause::OnDemandLate;
+			MotionAhead::FlowPtr flow = host.vectorEngine.OnDemandFill(nullptr, 6, 8, true, cause);
+			Assert::IsTrue(flow != nullptr && flow->halfW == 8, L"the posted pair is served");
+			Assert::IsTrue(cause == NoPairCause::None);
 			producer->Stop();
 		}
 

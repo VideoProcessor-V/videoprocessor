@@ -28,6 +28,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <functional>
 #include <cstdint>
 #include <exception>
 #include <list>
@@ -391,6 +392,19 @@ namespace VpMotion
 		// The setting PlanProducer published from ProducerInputs::onDemand (render thread); the dequeue hook reads it.
 		void SetOnDemandSetting(OnDemand::Setting s) { onDemandSetting_.store(static_cast<unsigned char>(s), std::memory_order_release); }
 		OnDemand::Setting OnDemandSettingNow() const { return static_cast<OnDemand::Setting>(onDemandSetting_.load(std::memory_order_acquire)); }
+		// Stall fix (W2-C5b re-check, MUST 3): the dequeue hook only STAGES the accepted pair under the renderer's queue mutex
+		// (plain copies: the two frames' analysis caches as a peek closure, sequences, rate, wait); PostStagedOnDemand
+		// (OnDemandIssue.h), after the queue block, takes it and does every lock and the issue (cache peeks, P2 lookup, the
+		// producer's mutex and wake) outside the queue mutex. Render thread; the small mutex only makes a stray caller safe.
+		struct OnDemandStaged
+		{
+			bool active = false;
+			uint64_t from = 0, to = 0;
+			double pairRateHz = 0.0, dequeueWaitMs = 0.0;
+			std::function<bool(AnalysisLumaSource& lumaFrom, AnalysisLumaSource& lumaTo)> peek;   // false: a frame not cached yet
+		};
+		void StageOnDemand(OnDemandStaged staged);       // replaces one not posted yet
+		bool TakeStagedOnDemand(OnDemandStaged& out);    // false: nothing staged since the last take
 		// Issues ONE request for the dequeue's selected pair (through RequestPair); an older one not yet claimed is abandoned.
 		void IssueOnDemand(OnDemand::PairRequest request);
 		// The estimate's fill: `ahead` (the pair found computed ahead) is returned as is; else the pending request for exactly
@@ -464,6 +478,8 @@ namespace VpMotion
 			double budgetMs = 0.0;
 		};
 		OnDemandPendingRequest onDemandPending_;
+		std::mutex onDemandStagedMutex_;            // the stall fix's staged pair (never held with onDemandMutex_)
+		OnDemandStaged onDemandStaged_;
 		std::atomic<unsigned char> onDemandSetting_{ static_cast<unsigned char>(OnDemand::Setting::Auto) };   // not under the mutex
 		OnDemand::RenderBudget onDemandBudget_;
 		OnDemand::Clock::time_point onDemandLastCycle_;

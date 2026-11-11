@@ -835,7 +835,7 @@ namespace VideoProcessorTest
 		}
 		// W2-C5b commit 6 (owner answer 4: measure the latency impact AND the benefit; the owner decides the default): the on-demand
 		// path end to end at the clip's own rate, through the REAL pieces - a live Producer (one NVOF session), the VectorEngine, the
-		// dequeue hook (MotionAhead::IssueOnDemandAtDequeue, timed: it runs under the queue mutex in the renderer) and the estimate's fill
+		// dequeue hook (MotionAhead::IssueOnDemandAtDequeue, timed as hook_us: it runs under the queue mutex in the renderer; the post after the block as post_us) and the estimate's fill
 		// (VectorEngine::OnDemandFill, timed: the render thread waits there) - with the real matcher on the render path (with the pair when
 		// one came, else the block searches). Every VP_MV_BENCH_DROP_EVERY-th frame (default 25) is dropped, so hiccup gap pairs occur.
 		// Modes (one fresh engine + producer each; the first VP_MV_BENCH_ONDEMAND_WARM cycles, default 30, are not in the figures):
@@ -975,7 +975,7 @@ namespace VideoProcessorTest
 				std::vector<Delivered> delivered;
 				unsigned long long counts[6] = {};   // ahead, served, late, no budget, unavailable, none
 				unsigned long long gapPairs = 0, gapServed = 0;
-				std::vector<double> fillMs, matcherPairMs, matcherNoPairMs, renderMs, hookUs, budgetMs;
+				std::vector<double> fillMs, matcherPairMs, matcherNoPairMs, renderMs, hookUs, postUs, budgetMs;
 				double waitBeforeMs = 0.0;
 				int cycles = 0;
 				const auto wallStart = std::chrono::steady_clock::now();
@@ -1012,6 +1012,9 @@ namespace VideoProcessorTest
 					const auto h0 = std::chrono::steady_clock::now();
 					MotionAhead::IssueOnDemandAtDequeue(host.get(), from.cache, uint64_t(0), from.seq, next, clip.fps, dequeueWaitMs);
 					const double hook = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - h0).count();
+					const auto p0 = std::chrono::steady_clock::now();   // the second hook line: after the queue block (no queue mutex)
+					MotionAhead::PostStagedOnDemand(host.get());
+					const double post = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - p0).count();
 					// The estimate: the pair computed ahead (no wait: the P2 read is a lookup), else the fill.
 					MotionAhead::FlowPtr ahead = mode.lowLatency ? nullptr : producer->Take(from.seq, to.seq);
 					NoPairCause cause = NoPairCause::None;
@@ -1045,6 +1048,7 @@ namespace VideoProcessorTest
 					(pairUsed ? matcherPairMs : matcherNoPairMs).push_back(matcher);
 					renderMs.push_back(render);
 					hookUs.push_back(hook);
+					postUs.push_back(post);
 					budgetMs.push_back(engine.OnDemandBudgetMs(clip.fps));
 				}
 				const VpMotion::VectorEngine::OnDemandCounters c = engine.OnDemandReads();
@@ -1076,6 +1080,9 @@ namespace VideoProcessorTest
 				row(mode.name, "hook_us_p50", pct(hookUs, 0.5));
 				row(mode.name, "hook_us_p99", pct(hookUs, 0.99));
 				row(mode.name, "hook_us_max", pct(hookUs, 1.0));
+				row(mode.name, "post_us_p50", pct(postUs, 0.5));
+				row(mode.name, "post_us_p99", pct(postUs, 0.99));
+				row(mode.name, "post_us_max", pct(postUs, 1.0));
 				row(mode.name, "budget_ms_mean", avg(budgetMs));
 				row(mode.name, "engine_render_ms_ewma", c.renderMs);
 				row(mode.name, "c_requests", static_cast<double>(c.requests));

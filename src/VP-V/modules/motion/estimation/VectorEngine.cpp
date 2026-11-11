@@ -1178,6 +1178,28 @@ namespace VpMotion
 		++onDemand_.gapServed;
 	}
 
+	void VectorEngine::StageOnDemand(OnDemandStaged staged)
+	{
+		staged.active = true;
+		OnDemandStaged old;
+		{
+			std::lock_guard<std::mutex> lock(onDemandStagedMutex_);
+			std::swap(old, onDemandStaged_);
+			onDemandStaged_ = std::move(staged);
+		}
+		// `old` (a stage never posted) is released here, outside the small mutex.
+	}
+
+	bool VectorEngine::TakeStagedOnDemand(OnDemandStaged& out)
+	{
+		std::lock_guard<std::mutex> lock(onDemandStagedMutex_);
+		if (!onDemandStaged_.active)
+			return false;
+		out = std::move(onDemandStaged_);
+		onDemandStaged_ = OnDemandStaged();
+		return true;
+	}
+
 	void VectorEngine::NoteOnDemandUncached()
 	{
 		std::lock_guard<std::mutex> lock(onDemandMutex_);

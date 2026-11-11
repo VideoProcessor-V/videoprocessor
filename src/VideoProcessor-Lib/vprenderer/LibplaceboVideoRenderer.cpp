@@ -31657,6 +31657,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// bounded preparation window even when no new capture has arrived.
 		m_queueChanged.notify_all();
 		m_fileSlotGate.Notify();   // ABI 37: a file source may queue its next frame
+		MotionAhead::PostStagedOnDemand(m_impl.get());   // VPV-HOOK W2-C5b: the staged on-demand pair is issued outside the queue mutex
 
 		if (prefillReleased)
 		{
