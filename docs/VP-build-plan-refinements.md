@@ -19,7 +19,7 @@ together at the end, not after each step.
   scalars that steer strength are computed on the GPU and read by the warp
   shaders.
 
-## De-judder (src/VideoProcessor-Lib/vprenderer/DejudderWarp.*)
+## De-judder (src/VP-V/modules/motion/estimation/matcher/DejudderWarp.*)
 
 ### D1 — global-motion prior (`dejudder_global_prior: on`)
 - New pass **GLOBAL** before SEARCH: one 16×16 workgroup at L2 (1/32 res).

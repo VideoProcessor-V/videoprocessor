@@ -8,7 +8,7 @@
 // consumer with counted fallbacks, smooth-motion exclusivity, low-latency backward vectors
 // (current + last), the visible engine->matcher downgrade, and timers that never drain.
 
-#include <VP-V/modules/motion/vector_delivery/MotionSegment.h>
+#include <VP-V/modules/motion/estimation/MotionSegment.h>
 
 #include <deque>
 #include <string>

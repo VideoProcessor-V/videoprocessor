@@ -4,8 +4,8 @@
 #include <ConfigFile.h>
 #include <MainConfigSchema.h>
 #include <RendererProfileConfig.h>
-#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
-#include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
+#include <VP-V/modules/motion/consumers/DejudderPolicy.h>
+#include <VP-V/modules/motion/estimation/matcher/DejudderWarp.h>
 #include <VP-V/modules/repair/deband/VpDebander.h>
 
 #include <algorithm>

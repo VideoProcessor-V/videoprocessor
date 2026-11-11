@@ -75,7 +75,7 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp` | `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp` | 14e3962a5 |  |
 | `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h` | `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.h` | 14e3962a5 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DejudderAhead.h` | `src/VP-V/modules/motion/consumers/DejudderAhead.h` | c64ec0ca5 | fwd |
-| `src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp` | `src/VP-V/modules/motion/consumers/DejudderWarp.cpp` | c64ec0ca5 |  |
+| `src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h` | `src/VP-V/modules/motion/consumers/DejudderPolicy.h` | e7f20a6e6 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/FrameInterpolator.cpp` | `src/VP-V/modules/motion/consumers/FrameInterpolator.cpp` | c64ec0ca5 |  |
 | `src/VideoProcessor-Lib/vprenderer/FrameInterpolator.h` | `src/VP-V/modules/motion/consumers/FrameInterpolator.h` | c64ec0ca5 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/InterpolationPolicy.h` | `src/VP-V/modules/motion/consumers/InterpolationPolicy.h` | c64ec0ca5 | fwd |
@@ -87,13 +87,14 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/MotionAhead.h` | `src/VP-V/modules/motion/estimation/MotionAhead.h` | 6b04d45e6 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/MotionAheadProducer.cpp` | `src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp` | 6b04d45e6 |  |
 | `src/VideoProcessor-Lib/vprenderer/MotionEngineIdle.h` | `src/VP-V/modules/motion/estimation/MotionEngineIdle.h` | 6b04d45e6 | fwd |
+| `src/VP-V/modules/motion/vector_delivery/MotionSegment.h` | `src/VP-V/modules/motion/estimation/MotionSegment.h` | e7f20a6e6 | fwd |
 | `src/VideoProcessor-Lib/MotionValidity.h` | `src/VP-V/modules/motion/estimation/MotionValidity.h` | 6b04d45e6 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.cpp` | `src/VP-V/modules/motion/estimation/NvOpticalFlow.cpp` | 6b04d45e6 |  |
 | `src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.h` | `src/VP-V/modules/motion/estimation/NvOpticalFlow.h` | 6b04d45e6 |  |
 | `src/VideoProcessor-Lib/OpticalFlowTrust.h` | `src/VP-V/modules/motion/estimation/OpticalFlowTrust.h` | 6b04d45e6 |  |
 | `src/VideoProcessor-Lib/VectorStore.h` | `src/VP-V/modules/motion/estimation/VectorStore.h` | 6b04d45e6 |  |
-| `src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h` | `src/VP-V/modules/motion/vector_delivery/DejudderPolicy.h` | f262bde0f | fwd |
-| `src/VideoProcessor-Lib/vprenderer/DejudderWarp.h` | `src/VP-V/modules/motion/vector_delivery/DejudderWarp.h` | f262bde0f | fwd |
+| `src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp` | `src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp` | e7f20a6e6 |  |
+| `src/VideoProcessor-Lib/vprenderer/DejudderWarp.h` | `src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h` | e7f20a6e6 | fwd |
 | `src/VideoProcessor-Lib/calibration/AmbientCheck.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/AmbientCheck.cpp` | d2517eb10 |  |
 | `src/VideoProcessor-Lib/calibration/AmbientCheck.h` | `src/VP-V/modules/output/calibration_lut/calibration/AmbientCheck.h` | d2517eb10 |  |
 | `src/VideoProcessor-Lib/calibration/ArgyllInstall.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/ArgyllInstall.cpp` | d2517eb10 |  |

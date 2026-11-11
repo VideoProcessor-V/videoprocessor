@@ -303,7 +303,7 @@ struct Histogram10 {
 // picture (the picture's own rect, U8); the distance of two frames is the L1 of the INTEGER counts over the picture's texel
 // count, 0..2 (a cut changes it, a hard pan does not). It is the histogram input of U7's matcher cut rule
 // (CutFadeJudge::TrustCut). CoarseBin / CoarseL1 are the CPU twin; CoarseHistHeader / CoarseHistBody are the matcher's GPU
-// text, moved byte-for-byte from motion/consumers/DejudderWarp.cpp (FRAME_TRUST_HEADER / FRAME_TRUST_BODY, M3 block): one work
+// text, moved byte-for-byte from motion/estimation/matcher/DejudderWarp.cpp (FRAME_TRUST_HEADER / FRAME_TRUST_BODY, M3 block): one work
 // group of 256, the kernel provides `i` (local index), samplers hist_a / hist_b (the 1/32 luma of A and B), the helpers
 // in_picture_(centre) and picture_texels_(size, 32.0), and consumes the result as `hist_d`.
 constexpr int kCoarseBins = 16;

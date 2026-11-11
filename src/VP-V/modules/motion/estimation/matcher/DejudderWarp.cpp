@@ -1,5 +1,5 @@
 ﻿#include <pch.h>
-#include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
+#include <VP-V/modules/motion/estimation/matcher/DejudderWarp.h>
 #include <vprenderer/GrainPreserve.h>
 #include <VP-V/modules/input/source_analysis/picture/shared/PictureRect.h>
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
@@ -7,7 +7,7 @@
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <VP-V/modules/motion/estimation/GapSeed.h>
-#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
+#include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h>
 
 #include <chrono>

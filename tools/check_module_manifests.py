@@ -217,7 +217,11 @@ def check(write):
     for dirpath, _, files in os.walk(MODULES):
         for name in files:
             if os.path.splitext(name)[1].lower() in SOURCE_EXT:
-                moved[name.lower()] = os.path.join(dirpath, name)
+                full = os.path.join(dirpath, name)
+                with open(full, encoding="utf-8", errors="replace") as fh:
+                    if FORWARDER_MARKER in fh.read(400):
+                        continue   # a forwarder kept inside src/VP-V/modules (old path of a moved file) is not the moved original
+                moved[name.lower()] = full
     # Forwarding headers (early migrations, docs/design/migration-early-inventory.md): a moved
     # header may leave a one-line forwarder at its legacy path, so files on other active branches
     # that still include the old path build unchanged. Each one is listed in its module's

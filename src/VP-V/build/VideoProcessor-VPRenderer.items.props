@@ -8,7 +8,7 @@
 -->
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderWarp.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\estimation\matcher\DejudderWarp.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\FrameInterpolator.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\estimation\NvOpticalFlow.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\estimation\MotionAheadProducer.cpp" />

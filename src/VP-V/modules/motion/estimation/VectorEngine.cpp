@@ -6,7 +6,7 @@
 
 #include <DebugLog.h>
 #include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
-#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
+#include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <libplacebo/d3d11.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/MotionRecordPublish.h>

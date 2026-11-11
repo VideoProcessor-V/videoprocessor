@@ -47,7 +47,7 @@ rendered-warp version would also need B rendered one refresh early.
 
 ## To bring it back
 
-Use `git log storage/d3-two-frame-blend` and `git diff <current> storage/d3-two-frame-blend -- src/VideoProcessor-Lib/vprenderer/DejudderWarp.*`.
+Use `git log storage/d3-two-frame-blend` and `git diff <current> storage/d3-two-frame-blend -- src/VP-V/modules/motion/estimation/matcher/DejudderWarp.*`.
 Re-apply the D3 parts onto the current code, and keep the landing check on both A and B. A better motion estimate
 for B is the prerequisite. Planner D3 (docs/VP-review-2026-10-14-overnight-answers.md) also requires
 `dejudder_blend: off` by default and a rendered-warp-only version.

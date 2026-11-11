@@ -7,7 +7,7 @@
 #include <VP-V/tests/support/HardwarePrerequisites.h>
 #include "../../tools/vp-scale-render/VpScaleRenderCore.h"
 #include "vprenderer/CaptureTimestampGap.h"
-#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
+#include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 
 #include <algorithm>
 #include <cstring>

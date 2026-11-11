@@ -11,7 +11,7 @@
     <ClCompile Include="..\VP-V\modules\drive\led_measure\LedMeasurementHook.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedRawTransfer.cpp" />
     <ClCompile Include="..\VP-V\modules\output\dither\CustomHookChain.cpp" />
-    <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderWarp.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\estimation\matcher\DejudderWarp.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\FrameInterpolator.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\estimation\NvOpticalFlow.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\estimation\MotionAheadProducer.cpp" />

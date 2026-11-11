@@ -6,7 +6,7 @@
 // whole frame. The unit carries that one rule to every VP consumer: the matcher's PICTURE pass emits the kernel below, the
 // P4 / TD / CfL readers ask InPicture / Coverage instead of keeping a private rect convention.
 //
-// Law (moved unchanged from motion/consumers/DejudderWarp.cpp PICTURE_BODY):
+// Law (moved unchanged from motion/estimation/matcher/DejudderWarp.cpp PICTURE_BODY):
 //   given   a non-empty rect (right > left and bottom > top, right/bottom exclusive, input pixels) is clamped to the frame
 //   detect  otherwise, on the 1/8 luma: the first and last rows and columns whose maximum exceeds black + barCodes
 //           (black = 16 limited / 0 full range; barCodes = 4), scaled back by the plane scale; none found = whole frame

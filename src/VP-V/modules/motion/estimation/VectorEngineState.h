@@ -17,8 +17,8 @@
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/motion/estimation/MotionValidity.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
-#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
-#include <VP-V/modules/motion/vector_delivery/MotionSegment.h>
+#include <VP-V/modules/motion/consumers/DejudderPolicy.h>
+#include <VP-V/modules/motion/estimation/MotionSegment.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/VectorProducts.h>
 
