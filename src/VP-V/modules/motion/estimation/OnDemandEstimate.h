@@ -255,8 +255,8 @@ namespace VpMotion
 		}
 
 		// ---- W2-C5b commit 4: the frame budget and the setting -------------------------------------------------------------
-		// One render-time sample from the dequeue hook (OnDemandIssue.h), called once per accepted pair: the time since the last
-		// call is the last render cycle plus this dequeue's wait for a frame; minus that wait and minus the time the last cycle
+		// One render-time sample from the post (OnDemandIssue.h), called once per staged pair: the time since the last
+		// call is the last render cycle plus the loop's wait for a frame (passed as 0 since rule 32: no hook line sees it); minus that wait and minus the time the last cycle
 		// spent waiting for an on-demand answer, it is the render loop's own work for one frame. False (no sample) when the source
 		// rate is unknown or the interval spans more than two source periods (a stall, a cycle that paired nothing).
 		inline bool RenderSample(double intervalMs, double dequeueWaitMs, double onDemandWaitMs, double sourceHz, double& renderMs)
@@ -329,5 +329,5 @@ namespace VpMotion
 	}
 }
 
-// The dequeue hook (W2-C5b commit 4): a template on the host types, reached through VectorEngine.h.
+// The on-demand stage and post (W2-C5b commit 4, rule 32 call sites): templates on the host types, reached through VectorEngine.h.
 #include <VP-V/modules/motion/estimation/OnDemandIssue.h>

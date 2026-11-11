@@ -32,6 +32,7 @@
 #include <DebugLog.h>
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
+#include <VP-V/modules/motion/estimation/OnDemandEstimate.h>   // OnDemandIssue.h: the on-demand stage (rule 32)
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <vprenderer/RendererExtension.h>
@@ -103,6 +104,9 @@ namespace MotionAhead
 				motionAheadFrames.back().frame.SourceBufferAddRef();
 			}
 		}
+		// W2-C5b, rule 32: the on-demand pair is staged here, at this existing call (no hook line of its own): the predicted
+		// dequeue pair, copies only (OnDemandIssue.h). Posted from Impl::ResolveMotionEngine after the queue block.
+		StageOnDemandIfHosted(impl, queue);
 	}
 
 	template <class Impl, class Queued, class Clock>

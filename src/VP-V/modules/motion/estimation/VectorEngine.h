@@ -382,17 +382,17 @@ namespace VpMotion
 		static bool OnDemandStateOn() { return true; }
 		// ---- W2-C5b commit 4: the dequeue issues, the estimate fills (OnDemandIssue.h; VectorEngineEstimate.inl) -----------
 		enum : unsigned { kConsumerIdleCycles = 4 };   // enum constant: ODR-safe in C++14
-		// The dequeue hook, once per accepted pair: the render-time sample (OnDemand::RenderSample) and the consumer clock.
+		// The post (OnDemandIssue.h), once per staged pair (once per new A): the render-time sample (OnDemand::RenderSample) and the consumer clock.
 		void NoteOnDemandCycle(double sourceHz, double dequeueWaitMs);
 		// The deadline for a request issued now: OnDemand::RenderBudget at the pair's source rate.
 		double OnDemandBudgetMs(double sourceHz) const;
 		// True while an estimate read (or asked for) a pair within the last kConsumerIdleCycles hook calls, or before the first
 		// kConsumerIdleCycles calls: no consumer = no request (no GPU work for a pair nobody reads).
 		bool OnDemandConsumerActive();
-		// The setting PlanProducer published from ProducerInputs::onDemand (render thread); the dequeue hook reads it.
+		// The setting PlanProducer published from ProducerInputs::onDemand (render thread); the walk's stage reads it.
 		void SetOnDemandSetting(OnDemand::Setting s) { onDemandSetting_.store(static_cast<unsigned char>(s), std::memory_order_release); }
 		OnDemand::Setting OnDemandSettingNow() const { return static_cast<OnDemand::Setting>(onDemandSetting_.load(std::memory_order_acquire)); }
-		// Stall fix (W2-C5b re-check, MUST 3): the dequeue hook only STAGES the accepted pair under the renderer's queue mutex
+		// Stall fix (W2-C5b re-check, MUST 3): the walk's stage only STAGES the predicted pair under the renderer's queue mutex
 		// (plain copies: the two frames' analysis caches as a peek closure, sequences, rate, wait); PostStagedOnDemand
 		// (OnDemandIssue.h), after the queue block, takes it and does every lock and the issue (cache peeks, P2 lookup, the
 		// producer's mutex and wake) outside the queue mutex. Render thread; the small mutex only makes a stray caller safe.
@@ -404,6 +404,17 @@ namespace VpMotion
 			std::function<bool(AnalysisLumaSource& lumaFrom, AnalysisLumaSource& lumaTo)> peek;   // false: a frame not cached yet
 		};
 		void StageOnDemand(OnDemandStaged staged);       // replaces one not posted yet
+		// Rule 32 (no new hook lines): the walk stages (StageOnDemandAtWalk, OnDemandIssue.h). True once per new A (the frame
+		// the dequeue takes next); false when the walk sees the same A again (the dequeue held it): no second request and no
+		// second cycle sample for it. Render thread only.
+		bool NoteOnDemandWalkFrame(uint64_t from)
+		{
+			if (onDemandWalkFromKnown_ && onDemandWalkFrom_ == from)
+				return false;
+			onDemandWalkFrom_ = from;
+			onDemandWalkFromKnown_ = true;
+			return true;
+		}
 		bool TakeStagedOnDemand(OnDemandStaged& out);    // false: nothing staged since the last take
 		// Issues ONE request for the dequeue's selected pair (through RequestPair); an older one not yet claimed is abandoned.
 		void IssueOnDemand(OnDemand::PairRequest request);
@@ -481,6 +492,8 @@ namespace VpMotion
 		OnDemandPendingRequest onDemandPending_;
 		std::mutex onDemandStagedMutex_;            // the stall fix's staged pair (never held with onDemandMutex_)
 		OnDemandStaged onDemandStaged_;
+		uint64_t onDemandWalkFrom_ = 0;             // the last A the walk staged (render thread only)
+		bool onDemandWalkFromKnown_ = false;
 		std::atomic<unsigned char> onDemandSetting_{ static_cast<unsigned char>(OnDemand::Setting::Auto) };   // not under the mutex
 		OnDemand::RenderBudget onDemandBudget_;
 		OnDemand::Clock::time_point onDemandLastCycle_;

@@ -428,6 +428,9 @@ bool LibplaceboVideoRenderer::Impl::DrawVpPhasePicture(const pl_frame& source, c
 // TemporalRenderer::WillMix / Begin then read the returned settings as before. Render loop, renderMutex held.
 MotionConfig::Settings LibplaceboVideoRenderer::Impl::ResolveMotionEngine(bool currentFileMotionOff)
 {
+	// W2-C5b, rule 32: the on-demand pair the walk staged (CollectQueueAhead) is posted here, at this existing call: after the
+	// queue block (queue mutex not held) and before RenderLocked's estimate claims it (OnDemandIssue.h). No stage: zero work.
+	MotionAhead::PostOnDemandIfHosted(this);
 	MotionConfig::Settings motionSettings=activeSettings.motion;
 	{
 	    const auto engine=DejudderPolicy::ResolveEngine(motionSettings.engine,

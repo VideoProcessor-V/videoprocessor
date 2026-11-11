@@ -31521,7 +31521,6 @@ void LibplaceboVideoRenderer::RenderLoop()
 					nextConvertedPayload = next.converted;
 					nextSourceSequence = next.sourceSequence;
 					nextPts = timeB;
-					MotionAhead::IssueOnDemandAtDequeue(m_impl.get(), analysisCache, activePictureIdentity.sourceFormatGeneration, sourceSequence, next, pairRateHz, dequeueWaitMs);   // VPV-HOOK W2-C5b
 					// A pair the estimate's adjacency test would refuse (across a gap or an update).
 					m_impl->vpFillNextSequence = fillGap || skipUpdate ? next.sourceSequence : 0;
 					m_impl->vpFillMaxSpan = maxSpan;
@@ -31657,7 +31656,6 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// bounded preparation window even when no new capture has arrived.
 		m_queueChanged.notify_all();
 		m_fileSlotGate.Notify();   // ABI 37: a file source may queue its next frame
-		MotionAhead::PostStagedOnDemand(m_impl.get());   // VPV-HOOK W2-C5b: the staged on-demand pair is issued outside the queue mutex
 
 		if (prefillReleased)
 		{

@@ -143,6 +143,20 @@ namespace VideoProcessorTest
 			std::atomic<bool> lowLatencyQueueActive{ false };
 			bool cached = true;   // both frames' luma is in their caches
 		};
+		// Rule 32: the walk's stage (MotionAhead::StageOnDemandAtWalk, from CollectQueueAhead) reads the queue entries' selection
+		// fields and the host's interpolation flag and measured content rate.
+		struct FakeWalkQueued : FakeQueued
+		{
+			std::shared_ptr<int> state = std::make_shared<int>(0);
+			bool cadenceRepeat = false, fileMotionOff = false, filmUpdate = false, gapBefore = false;
+			uint64_t generation = 1;
+			double filmHz = 0.0;
+		};
+		struct FakeWalkHost : FakeHost
+		{
+			bool interpolating = false;
+			double dejudderSourceHz = 1.0;   // 1 Hz: a deadline of ~0.9 s (no timing flake)
+		};
 		void Dequeue(FakeHost& host, uint64_t from, uint64_t to)
 		{
 			FakeQueued next;
@@ -897,6 +911,68 @@ namespace VideoProcessorTest
 			MotionAhead::FlowPtr flow = host.vectorEngine.OnDemandFill(nullptr, 6, 8, true, cause);
 			Assert::IsTrue(flow != nullptr && flow->halfW == 8, L"the posted pair is served");
 			Assert::IsTrue(cause == NoPairCause::None);
+			producer->Stop();
+		}
+
+		// Rule 32 (no hook line of its own): the walk stages the predicted dequeue pair (A = the head, B = the next entry, or the
+		// one after a pulldown film update while interpolating), once per new A; a pair the dequeue would refuse is not staged;
+		// the post (from ResolveMotionEngine) issues it and the fill serves it. A host without the walk's fields stages nothing.
+		TEST_METHOD(TheWalkStagesThePredictedPairOncePerFrameAndThePostIssuesIt)
+		{
+			using FallbackCatalog::NoPairCause;
+			static_assert(MotionAhead::detail::HostsOnDemand<FakeWalkHost>::value, "the walk host runs the engine");
+			static_assert(!MotionAhead::detail::HostsOnDemand<FakeHost>::value, "a host without the walk's fields: no stage");
+			FakeWalkHost host;
+			host.vectorEngine.SetOnDemandSetting(Setting::On);
+			Trace trace;
+			auto producer = std::make_shared<MotionAhead::Producer>();
+			Assert::IsTrue(producer->StartForTest(Seam(trace)));
+			host.vectorEngine.PublishProducer(producer);
+			std::vector<FakeWalkQueued> queue(2);
+			for (size_t i = 0; i < queue.size(); ++i)
+			{
+				queue[i].sourceSequence = 5 + i;
+				queue[i].analysis->queued.source.valid = true;
+			}
+			queue[1].cadenceRepeat = true;
+			MotionAhead::StageOnDemandIfHosted(&host, queue);
+			MotionAhead::PostOnDemandIfHosted(&host);
+			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued, L"B a cadence repeat: the dequeue refuses it");
+			queue[1].cadenceRepeat = false;
+			queue[1].generation = 2;
+			MotionAhead::StageOnDemandIfHosted(&host, queue);
+			MotionAhead::PostOnDemandIfHosted(&host);
+			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued, L"a new generation: no pair across it");
+			queue[1].generation = 1;
+			MotionAhead::StageOnDemandIfHosted(&host, queue);
+			MotionAhead::PostOnDemandIfHosted(&host);
+			Assert::AreEqual(1ull, host.vectorEngine.OnDemandReads().issued, L"the predicted pair 5 -> 6");
+			MotionAhead::StageOnDemandIfHosted(&host, queue);
+			MotionAhead::PostOnDemandIfHosted(&host);
+			Assert::AreEqual(1ull, host.vectorEngine.OnDemandReads().issued, L"the same A again (held): asked once");
+			NoPairCause cause = NoPairCause::OnDemandLate;
+			MotionAhead::FlowPtr flow = host.vectorEngine.OnDemandFill(nullptr, 5, 6, true, cause);
+			Assert::IsTrue(flow != nullptr && flow->halfW == 6, L"served on the producer's session");
+			Assert::IsTrue(cause == NoPairCause::None);
+			queue.erase(queue.begin());   // the dequeue took 5: A = 6
+			queue.emplace_back();
+			queue.back().sourceSequence = 8;
+			queue.back().analysis->queued.source.valid = true;
+			queue[1].sourceSequence = 7;
+			queue[1].filmUpdate = true;
+			host.interpolating = true;
+			MotionAhead::StageOnDemandIfHosted(&host, queue);
+			MotionAhead::PostOnDemandIfHosted(&host);
+			Assert::AreEqual(2ull, host.vectorEngine.OnDemandReads().issued, L"interpolating: B skips the film update");
+			cause = NoPairCause::OnDemandLate;
+			flow = host.vectorEngine.OnDemandFill(nullptr, 6, 8, true, cause);
+			Assert::IsTrue(flow != nullptr && flow->halfW == 8, L"the pair 6 -> 8 is served");
+			Assert::IsTrue(cause == NoPairCause::None);
+			FakeHost plain;
+			std::vector<FakeWalkQueued> plainQueue(2);
+			MotionAhead::StageOnDemandIfHosted(&plain, plainQueue);   // compiles to nothing
+			MotionAhead::PostOnDemandIfHosted(&plain);
+			Assert::AreEqual(0ull, plain.vectorEngine.OnDemandReads().issued);
 			producer->Stop();
 		}
 
