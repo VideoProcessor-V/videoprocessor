@@ -397,7 +397,10 @@ private:
 	// ABI 37: WaitForFileFrameSlot / CancelFileFrameWait (own mutex; never
 	// held with m_queueMutex across a wait).
 	FileFrameSlotGate m_fileSlotGate;
-	Vpv::QueueTiming::TimedFileState m_timedFile;   // VPV-HOOK R20: the file thread's reject counter and logged film clock (TimedFileFrames.inl)
+	// VPV-HOOK
+	// R20: the file thread's reject counter and logged film clock (TimedFileFrames.inl)
+	Vpv::QueueTiming::TimedFileState m_timedFile;
+	// VPV-HOOK-END
 	std::deque<QueuedFrame> m_frameQueue;
 	ActivePictureDecisionTimeline m_activePictureTimeline;
 	size_t m_frameQueueDesiredDepth = 1;
