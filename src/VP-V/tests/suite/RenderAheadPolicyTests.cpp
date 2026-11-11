@@ -1992,4 +1992,424 @@ namespace RenderAheadPolicyTest
 			Assert::IsTrue((levelsSeen & ~1) != 0, L"a degraded level was reached");
 		}
 	};
+
+	// M2 P6 rest: the Presenter's budget, commit, restart and bookkeeping methods. The
+	// legacy copies are the renderer's bodies at r2/p6-4 7e521b9aa
+	// (LibplaceboVideoRenderer.cpp: UpdateRenderAheadBudget :6434, ResolveRenderAheadTimers
+	// :5440, TakeRenderAheadExtraTimerMode :5468, the commit sites :15488 and :16180, the
+	// estimate :25904, the bookkeeping :15257, :15352-15372, :15652, :16055, :16074),
+	// written against a second Presenter's members, so a drift in either shows here.
+	namespace PresenterRestLegacy
+	{
+		inline void Budget(Presenter& r, const BudgetDecision& d, double now)
+		{
+			r.budgetCredit = d.fits ? d.creditFrames : 0;
+			const bool veto = !d.fits;
+			if (veto != r.budgetVeto)
+			{
+				if (veto)
+				{
+					r.Break(now);
+					r.credit.Reset();
+					r.creditFrames.store(0, std::memory_order_release);
+				}
+				else
+					r.epoch.Invalidate();
+				r.budgetVeto = veto;
+			}
+		}
+
+		inline void CommitHoldOnly(Presenter& r, const FramePlan& plan,
+			const std::vector<std::pair<uint32_t, double>>& plannedIds, uint32_t lastPresent)
+		{
+			r.schedule.Commit(plan.nextFirstVsync, plannedIds);
+			r.mainInterval = plan.nextInterval;
+			r.expectedPresent = lastPresent != 0 ? lastPresent + 1 : 0;
+			r.committed = true;
+		}
+
+		inline void CommitExtras(Presenter& r, const FramePlan& plan,
+			const std::vector<std::pair<uint32_t, double>>& plannedIds, uint32_t lastPresent,
+			int openLoopLateRefreshes, double displayPeriod, bool queueCredit, double ratio)
+		{
+			r.schedule.Commit(plan.nextFirstVsync, plannedIds);
+			if (openLoopLateRefreshes > 0)
+				r.openLoopLate = r.schedule.NoteLate(openLoopLateRefreshes, displayPeriod);
+			r.mainInterval = plan.nextInterval;
+			r.expectedPresent = lastPresent != 0 ? lastPresent + 1 : 0;
+			r.committed = true;
+			r.creditFrames.store(queueCredit ? r.credit.CommitFrames(r.budgetCredit, ratio) : 0,
+				std::memory_order_release);
+		}
+
+		inline bool TakeMode(std::deque<std::pair<unsigned long long, bool>>& modes, unsigned long long serial,
+			bool lastExternal)
+		{
+			bool external = lastExternal;
+			while (!modes.empty() && modes.front().first <= serial)
+			{
+				if (modes.front().first == serial)
+					external = modes.front().second;
+				modes.pop_front();
+			}
+			return external;
+		}
+
+		inline void Observation(Presenter& r)
+		{
+			if (r.schedule.ObservedCount() != r.observedSeen)
+			{
+				r.observedSeen = r.schedule.ObservedCount();
+				const uint32_t id = r.schedule.LastObservedId();
+				const auto known = std::find_if(r.presentIntervals.begin(), r.presentIntervals.end(),
+					[id](const std::pair<uint32_t, int>& p) { return p.first == id; });
+				if (known != r.presentIntervals.end())
+				{
+					const int kind = known->second > 1 ? 1 : 0;
+					const double e = r.schedule.LastObservedError();
+					r.shownError[kind] += e;
+					++r.shownCount[kind];
+					if (std::abs(e) <= 0.5) ++r.shownOnTime[kind];
+				}
+			}
+		}
+
+		// A stand-in for AlphaD3D11FrameGpuTimer: its Sample / ResolveResult shape.
+		struct FakeTimer
+		{
+			struct Sample
+			{
+				uint64_t submissionSerial = 0;
+				double milliseconds = 0.0;
+			};
+			enum class ResolveResult
+			{
+				Empty,
+				NotReady,
+				Discarded,
+				Resolved,
+			};
+			std::deque<std::pair<ResolveResult, Sample>> results;
+			int calls = 0;
+			ResolveResult TryResolveOldest(int* context, Sample& sample)
+			{
+				++calls;
+				if (!context || results.empty())
+					return ResolveResult::Empty;
+				const std::pair<ResolveResult, Sample> r = results.front();
+				results.pop_front();
+				sample = r.second;
+				return r.first;
+			}
+		};
+
+		inline void SameSchedule(Presenter& a, Presenter& b)
+		{
+			Assert::AreEqual(a.schedule.Active(), b.schedule.Active());
+			Assert::AreEqual(a.schedule.Pending(), b.schedule.Pending());
+			Assert::AreEqual(a.schedule.Reanchors(), b.schedule.Reanchors());
+			Assert::AreEqual(a.schedule.TakeLateDrops(), b.schedule.TakeLateDrops());
+		}
+	}
+
+	TEST_CLASS(PresenterRestApiTests)
+	{
+	public:
+		TEST_METHOD(MovedMembersKeepTheRendererDefaults)
+		{
+			Presenter p;
+			Assert::IsFalse(p.budgetVeto);
+			Assert::AreEqual<size_t>(0, p.budgetCredit);
+			Assert::IsTrue(p.extraTimerModes.empty());
+			Assert::IsTrue(p.extraIds.empty());
+			Assert::IsTrue(p.mainRefresh.empty());
+			Assert::IsTrue(p.idsSwapchain == nullptr);
+			Assert::AreEqual(0.0, p.displayRate.hz);
+			Assert::IsTrue(p.displayRate.source == OpenLoopDisplayRate::Source::None);
+			Assert::IsFalse(p.displayRate.openLoop);
+			Assert::AreEqual(0u, p.expectedPresent);
+			Assert::AreEqual(0.0, p.lead);
+			Assert::AreEqual(0ull, p.frames + p.restarts + p.late + p.dropped + p.held);
+			Assert::IsTrue(p.presentIntervals.empty());
+			Assert::AreEqual(0ull, p.observedSeen);
+			Assert::AreEqual(0.0, p.shownError[0] + p.shownError[1]);
+			Assert::AreEqual(0ull, p.shownCount[0] + p.shownCount[1] + p.shownOnTime[0] + p.shownOnTime[1]);
+			Assert::AreEqual(0ull, p.openLoopFrames + p.lateByPresent + p.flushReanchors);
+			Assert::IsFalse(p.openLoopLate);
+			Assert::IsTrue(p.Active(true));
+			Assert::IsFalse(p.Active(false));
+			const double a = Presenter::Now();
+			const double b = Presenter::Now();
+			Assert::IsTrue(a > 0.0 && b >= a, L"the steady clock");
+		}
+
+		// UpdateBudget + ApplyBudgetVeto (the caller logs between them) against the
+		// renderer's body over a seeded run of fits, vetoes and credits.
+		TEST_METHOD(BudgetMatchesTheLegacyBody)
+		{
+			Presenter p, r;
+			std::mt19937 random(6061);
+			std::uniform_int_distribution<int> coin(0, 3), frames(0, 3);
+			int changes = 0;
+			for (int i = 0; i < 400; ++i)
+			{
+				const double now = 1.0 + i * 0.3;
+				if (coin(random) == 0)
+				{
+					// A queued extras frame latches the credit (so a veto has one to return).
+					PresenterCommit c;
+					c.storeCredit = true;
+					c.queueCredit = true;
+					c.cadenceRatio = 2.5;
+					const std::vector<std::pair<uint32_t, double>> none;
+					p.Commit(c, none);
+					FramePlan plan;
+					PresenterRestLegacy::CommitExtras(r, plan, none, 0, 0, 0.0, true, 2.5);
+				}
+				BudgetDecision d;
+				d.fits = coin(random) != 0;
+				d.creditFrames = static_cast<size_t>(frames(random));
+				const PresenterBudgetChange change = p.UpdateBudget(d);
+				if (change.changed)
+				{
+					p.ApplyBudgetVeto(change.veto, now);
+					++changes;
+				}
+				PresenterRestLegacy::Budget(r, d, now);
+				Assert::AreEqual(r.budgetVeto, p.budgetVeto);
+				Assert::AreEqual(r.budgetCredit, p.budgetCredit);
+				Assert::AreEqual(r.creditFrames.load(), p.creditFrames.load());
+				Assert::AreEqual(r.credit.Frames(), p.credit.Frames());
+				Assert::AreEqual(r.Active(true), p.Active(true));
+				Assert::AreEqual(r.mainInterval, p.mainInterval);
+				PresenterRestLegacy::SameSchedule(p, r);
+				Assert::AreEqual(r.epoch.Changed(7, 2.5), p.epoch.Changed(7, 2.5));
+			}
+			Assert::IsTrue(changes > 20, L"the veto changed");
+			p.ClearBudget();
+			Assert::IsFalse(p.budgetVeto);
+			Assert::AreEqual<size_t>(0, p.budgetCredit);
+		}
+
+		// Both commit sites, against their legacy bodies, with open-loop lateness after a
+		// new anchor (re-anchor only) and in a running chain (late).
+		TEST_METHOD(CommitMatchesBothRendererSites)
+		{
+			Presenter p, r;
+			p.budgetCredit = r.budgetCredit = 2;
+			std::mt19937 random(6062);
+			std::uniform_int_distribution<int> kind(0, 5), late(0, 3), interval(1, 4);
+			uint32_t id = 10;
+			for (int i = 0; i < 300; ++i)
+			{
+				FramePlan plan;
+				plan.nextFirstVsync = 2.0 + i / 24.0;
+				plan.nextInterval = interval(random);
+				std::vector<std::pair<uint32_t, double>> planned;
+				planned.emplace_back(++id, plan.nextFirstVsync - 0.01);
+				planned.emplace_back(++id, plan.nextFirstVsync - 0.005);
+				const uint32_t lastPresent = i % 7 == 0 ? 0u : id;
+				const int k = kind(random);
+				p.BeginFrame();
+				r.committed = false;
+				if (k == 0)
+				{
+					p.RestartChain();
+					r.schedule.Break();
+				}
+				PresenterCommit c;
+				c.nextFirstVsync = plan.nextFirstVsync;
+				c.nextInterval = plan.nextInterval;
+				c.expectedPresent = lastPresent != 0 ? lastPresent + 1 : 0;
+				if (k == 1)
+				{
+					p.Commit(c, planned);
+					PresenterRestLegacy::CommitHoldOnly(r, plan, planned, lastPresent);
+				}
+				else if (k > 1)
+				{
+					c.lateRefreshes = late(random);
+					c.displayPeriod = 1.0 / 60.0;
+					c.storeCredit = true;
+					c.queueCredit = k != 2;
+					c.cadenceRatio = 2.5;
+					p.Commit(c, planned);
+					PresenterRestLegacy::CommitExtras(r, plan, planned, lastPresent, c.lateRefreshes, c.displayPeriod,
+						c.queueCredit, 2.5);
+				}
+				Assert::AreEqual(r.committed, p.committed);
+				Assert::AreEqual(r.mainInterval, p.mainInterval);
+				Assert::AreEqual(r.expectedPresent, p.expectedPresent);
+				Assert::AreEqual(r.openLoopLate, p.openLoopLate);
+				Assert::AreEqual(r.creditFrames.load(), p.creditFrames.load());
+				PresenterRestLegacy::SameSchedule(p, r);
+				// The estimate the renderer publishes after the extras.
+				const bool known = i % 3 == 0;
+				p.displayRate.openLoop = r.displayRate.openLoop = i % 2 == 0;
+				p.targetLeadMs = r.targetLeadMs = 5.0 + i;
+				p.PublishEstimatedLead(known);
+				r.estimatedLeadMs.store(r.committed && !known && r.displayRate.openLoop ? r.targetLeadMs : 0.0,
+					std::memory_order_relaxed);
+				Assert::AreEqual(r.estimatedLeadMs.load(), p.estimatedLeadMs.load());
+			}
+			Assert::IsTrue(p.schedule.Reanchors() > 0, L"open-loop lateness after a new anchor re-anchored");
+		}
+
+		// RestartChain is the schedule's break only, unlike Break(now).
+		TEST_METHOD(RestartChainKeepsTheCommitState)
+		{
+			Presenter p;
+			p.budgetCredit = 1;
+			PresenterCommit c;
+			c.nextInterval = 3;
+			c.storeCredit = true;
+			c.queueCredit = true;
+			c.cadenceRatio = 2.5;
+			std::vector<std::pair<uint32_t, double>> planned{ { 5u, 1.0 } };
+			p.Commit(c, planned);
+			p.targetLeadMs = 12.0;
+			p.estimatedLeadMs.store(9.0);
+			Assert::IsTrue(p.schedule.Active());
+			Assert::AreEqual<size_t>(1, p.creditFrames.load());
+			p.RestartChain();
+			Assert::IsFalse(p.schedule.Active());
+			Assert::AreEqual<size_t>(0, p.schedule.Pending());
+			Assert::AreEqual(3, p.mainInterval);
+			Assert::AreEqual(12.0, p.targetLeadMs);
+			Assert::AreEqual(9.0, p.estimatedLeadMs.load());
+			Assert::AreEqual<size_t>(1, p.creditFrames.load());
+			Assert::IsTrue(p.committed);
+			p.Break(100.0);
+			Assert::AreEqual(1, p.mainInterval, L"Break(now) is the other one");
+		}
+
+		// The GPU timers: X by its serial's vector mode, E into its own window, at most 8
+		// per timer, a pending one stops that timer; against the legacy loop.
+		TEST_METHOD(ResolveTimersFeedsTheCostWindows)
+		{
+			using PresenterRestLegacy::FakeTimer;
+			Presenter p;
+			std::deque<std::pair<unsigned long long, bool>> legacyModes;
+			for (unsigned long long serial = 1; serial <= 12; ++serial)
+			{
+				const bool external = serial % 3 == 0;
+				p.NoteExtraTimerMode(serial, external);
+				legacyModes.emplace_back(serial, external);
+			}
+			FakeTimer extra, estimate;
+			double ownExpected = 0.0, externalExpected = 0.0;
+			int own = 0, external = 0;
+			for (unsigned long long serial = 1; serial <= 10; ++serial)
+			{
+				FakeTimer::Sample sample;
+				sample.submissionSerial = serial;
+				sample.milliseconds = static_cast<double>(serial);
+				extra.results.emplace_back(serial == 4 ? FakeTimer::ResolveResult::Discarded :
+					FakeTimer::ResolveResult::Resolved, sample);
+			}
+			FakeTimer::Sample e;
+			e.milliseconds = 2.0;
+			estimate.results.emplace_back(FakeTimer::ResolveResult::Resolved, e);
+			estimate.results.emplace_back(FakeTimer::ResolveResult::NotReady, e);
+			estimate.results.emplace_back(FakeTimer::ResolveResult::Resolved, e);
+			// The legacy loop's choices, by serial (8 per call; serial 4 discarded).
+			for (unsigned long long serial = 1; serial <= 8; ++serial)
+			{
+				if (serial == 4)
+					continue;
+				if (PresenterRestLegacy::TakeMode(legacyModes, serial, false))
+				{
+					externalExpected = static_cast<double>(serial);
+					++external;
+				}
+				else
+				{
+					ownExpected = static_cast<double>(serial);
+					++own;
+				}
+			}
+			int context = 0;
+			p.ResolveTimers(extra, estimate, &context, 5.0, false);
+			Assert::AreEqual(8, extra.calls, L"at most 8 per timer");
+			Assert::AreEqual(2, estimate.calls, L"a pending timer stops");
+			Assert::AreEqual<size_t>(static_cast<size_t>(own), p.extraCostOwn.Count());
+			Assert::AreEqual<size_t>(static_cast<size_t>(external), p.extraCostExternal.Count());
+			Assert::AreEqual<size_t>(1, p.estimateCost.Count());
+			Assert::IsTrue(ownExpected > 0.0 && externalExpected > 0.0);
+			Assert::AreEqual(legacyModes.size(), p.extraTimerModes.size(), L"the same modes consumed");
+			// An unknown serial takes the last extra's mode; the 64 newest are kept.
+			Assert::IsTrue(p.TakeExtraTimerMode(1000, true));
+			Assert::IsTrue(p.extraTimerModes.empty());
+			for (unsigned long long serial = 0; serial < 100; ++serial)
+				p.NoteExtraTimerMode(serial, false);
+			Assert::AreEqual<size_t>(64, p.extraTimerModes.size());
+			Assert::AreEqual(36ull, p.extraTimerModes.front().first);
+		}
+
+		// The bookkeeping the extension reads: one swapchain's ids, the renderer's caps,
+		// a main refresh kept once and never for an extra, the shown-error diagnostics.
+		TEST_METHOD(PresentBookkeepingKeepsTheRendererRules)
+		{
+			Presenter p, r;
+			int chainA = 0, chainB = 0;
+			p.NoteIdsSwapchain(&chainA);
+			for (uint32_t id = 1; id <= 300; ++id)
+				p.NoteExtraPresent(id);
+			Assert::AreEqual<size_t>(256, p.extraIds.size());
+			Assert::AreEqual(45u, p.extraIds.front());
+			for (uint32_t id = 1000; id < 1100; ++id)
+				p.NoteMainRefresh(id, id * 2);
+			Assert::AreEqual<size_t>(64, p.mainRefresh.size());
+			p.NoteIdsSwapchain(&chainA);
+			Assert::AreEqual<size_t>(256, p.extraIds.size(), L"the same swapchain keeps its ids");
+			p.NoteIdsSwapchain(&chainB);
+			Assert::IsTrue(p.extraIds.empty() && p.mainRefresh.empty());
+			Assert::IsTrue(p.idsSwapchain == &chainB);
+			p.NoteExtraPresent(7);
+			p.NoteStatisticsPresent(7, 70);
+			Assert::IsTrue(p.mainRefresh.empty(), L"an extra is not a main present");
+			p.NoteStatisticsPresent(8, 80);
+			p.NoteStatisticsPresent(8, 81);
+			Assert::AreEqual<size_t>(1, p.mainRefresh.size(), L"kept once");
+			Assert::AreEqual(80u, p.mainRefresh.back().second);
+			p.ClearPresentIds();
+			Assert::IsTrue(p.extraIds.empty() && p.mainRefresh.empty() && p.idsSwapchain == nullptr);
+			// Intervals: uncapped at the main present, 128 kept after an extra.
+			for (uint32_t id = 1; id <= 200; ++id)
+				p.NotePresentInterval(id, 1, 0);
+			Assert::AreEqual<size_t>(200, p.presentIntervals.size());
+			p.NotePresentInterval(201, 2, 128);
+			Assert::AreEqual<size_t>(128, p.presentIntervals.size());
+			// Observations, against the legacy diagnostics: planned presents shown late,
+			// on time and early, after holds and not.
+			p.presentIntervals.clear();
+			const double period = 1.0 / 60.0;
+			std::vector<std::pair<uint32_t, double>> planned;
+			for (uint32_t id = 1; id <= 40; ++id)
+			{
+				planned.emplace_back(id, id * period);
+				p.NotePresentInterval(id, id % 4 == 0 ? 2 : 1, 128);
+				r.presentIntervals.emplace_back(id, id % 4 == 0 ? 2 : 1);
+			}
+			p.schedule.Commit(41 * period, planned);
+			r.schedule.Commit(41 * period, planned);
+			for (uint32_t id = 1; id <= 40; ++id)
+			{
+				const double shown = id * period + (id % 5 == 0 ? 0.7 : id % 3 == 0 ? -0.2 : 0.1) * period;
+				p.schedule.Observe(id, shown, period);
+				r.schedule.Observe(id, shown, period);
+				p.NoteObservation();
+				PresenterRestLegacy::Observation(r);
+				p.NoteObservation();   // nothing new: no second count
+				for (int kindIndex = 0; kindIndex < 2; ++kindIndex)
+				{
+					Assert::AreEqual(r.shownError[kindIndex], p.shownError[kindIndex]);
+					Assert::AreEqual(r.shownCount[kindIndex], p.shownCount[kindIndex]);
+					Assert::AreEqual(r.shownOnTime[kindIndex], p.shownOnTime[kindIndex]);
+				}
+				Assert::AreEqual(r.observedSeen, p.observedSeen);
+			}
+			Assert::IsTrue(p.shownCount[0] > 0 && p.shownCount[1] > 0, L"both kinds seen");
+		}
+	};
 }
