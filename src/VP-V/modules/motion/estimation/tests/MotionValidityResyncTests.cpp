@@ -228,7 +228,7 @@ namespace Tests
 		}
 
 		// W1-C2a MUST 1: StampsAgree has no adjacency test (the gap-fill pair); bound, a FULL between the frames refuses
-		// it; unbound, true. PairServes = PairValid && PairValidAt.
+		// it; unbound, false (C2a-F 1). PairServes = PairValid && PairValidAt.
 		TEST_METHOD(StampsAgreeRefusesAPairSpanningAFullWithoutAdjacency)
 		{
 			Rig rig;
@@ -248,7 +248,7 @@ namespace Tests
 			Assert::IsTrue(rig.state.StampsAgree(7, 9, true), L"the gap fill bridges the loss");
 			Assert::IsFalse(rig.state.StampsAgree(3, 9, true), L"never across the FULL");
 			MotionValidity::State unbound;
-			Assert::IsTrue(unbound.StampsAgree(3, 5), L"unbound: true");
+			Assert::IsFalse(unbound.StampsAgree(3, 5), L"unbound: never true (C2a-F 1: SpanStatus Unknown)");
 		}
 	};
 

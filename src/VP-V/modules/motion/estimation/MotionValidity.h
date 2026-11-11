@@ -240,8 +240,10 @@ namespace MotionValidity
 				deferred.fetch_add(1, std::memory_order_relaxed);
 				NoteRequest(cause);   // W1-C2a: Unbind applies it if no seal does
 				// S1: an Unbind that ran between the bound check and NoteRequest has already looked; move now (at worst one
-				// extra conservative move, never a lost one).
-				if (!bound.load(std::memory_order_acquire))
+				// extra conservative move, never a lost one). C2a-F S3: a store-then-load handshake with Unbind (Dekker: this
+				// thread writes requests then reads bound, Unbind writes bound then reads requests); acquire/release does not
+				// order a store before a later load, so all four operations are seq_cst: at least one side sees the other.
+				if (!bound.load(std::memory_order_seq_cst))
 					return InvalidateNow(cause);
 				return epoch.load(std::memory_order_acquire);
 			case Cause::SettingsChange:
@@ -253,7 +255,7 @@ namespace MotionValidity
 						indicator->HasSealed() ? indicator->LastSealed() + 1 : 0);
 					settingsAdvances.fetch_add(1, std::memory_order_relaxed);
 					NoteRequest(cause);
-					if (!bound.load(std::memory_order_acquire))
+					if (!bound.load(std::memory_order_seq_cst))   // C2a-F S3: the Dekker load (see the Resync case)
 						return InvalidateNow(cause);   // S1: raced an Unbind
 					return epoch.load(std::memory_order_acquire);
 				}
@@ -315,9 +317,9 @@ namespace MotionValidity
 		void Unbind()
 		{
 			const std::shared_ptr<VpIndicator::Indicator> indicator = VpIndicator::Indicator::Latest(std::atomic_load(&ind));
-			bound.store(false, std::memory_order_release);
+			bound.store(false, std::memory_order_seq_cst);   // C2a-F S3: Dekker with Invalidate (store bound, then load requests)
 			std::atomic_store(&ind, std::shared_ptr<VpIndicator::Indicator>());
-			const uint64_t made = requests.load(std::memory_order_acquire);
+			const uint64_t made = requests.load(std::memory_order_seq_cst);
 			const uint64_t was = covered.exchange(made, std::memory_order_acq_rel);
 			Cause cause = static_cast<Cause>(lastRequest.load(std::memory_order_acquire));
 			bool pending = made != was;
@@ -353,19 +355,31 @@ namespace MotionValidity
 		uint64_t DeferredToSeal() const noexcept { return deferred.load(std::memory_order_relaxed); }
 		uint64_t SettingsAdvances() const noexcept { return settingsAdvances.load(std::memory_order_relaxed); }
 
-		// W1-C2a MUST 1: when bound, the Indicator stamps of a and b agree on FULL, continuity and settings[motion]; no
-		// adjacency test. acrossLoss (the gap-fill pair): continuity is left out, because the loss the pair bridges is itself
-		// a continuity event (MissedFrames / OverflowDrop ...); FULL and settings[motion] still refuse it. Unbound, or no
-		// Indicator: true.
-		bool StampsAgree(uint64_t a, uint64_t b, bool acrossLoss = false) const
+		// W1-C2a-F 1: what the Indicator says about the span (a, b) (a <= b, any length: 1, 2, a whole GOP I-to-I). Unknown when
+		// unbound or with no Indicator (nothing to stamp the frames: the caller keeps the epoch form and must never read Unknown as
+		// valid). Invalid when a FULL (resync / seek / queue reset / format change), a continuity change (drop, missed frames,
+		// overflow) or a settings[motion] advance lies in (a, b] (a change at seq k stamps frames >= k). Valid otherwise. acrossLoss
+		// (the gap-fill pair): continuity is left out, because the loss the pair bridges is itself a continuity event; FULL and
+		// settings[motion] still make it Invalid.
+		enum class SpanState { Unknown, Invalid, Valid };
+		SpanState SpanStatus(uint64_t a, uint64_t b, bool acrossLoss = false) const
 		{
 			if (!bound.load(std::memory_order_acquire))
-				return true;
+				return SpanState::Unknown;
 			const std::shared_ptr<VpIndicator::Indicator> indicator = VpIndicator::Indicator::Latest(std::atomic_load(&ind));
 			if (!indicator)
-				return true;
+				return SpanState::Unknown;
 			return VpIndicator::TemporalValid(*indicator, a, b,
-				acrossLoss ? MotionMask() & ~VpIndicator::Bit(VpIndicator::kContinuity) : MotionMask());
+				acrossLoss ? MotionMask() & ~VpIndicator::Bit(VpIndicator::kContinuity) : MotionMask()) ? SpanState::Valid :
+				SpanState::Invalid;
+		}
+
+		// W1-C2a MUST 1 / C2a-F 1: true only when the Indicator positively agrees (SpanStatus == Valid). Unbound (Unknown) it is
+		// FALSE: the stamps never vouch for a span they did not see. The gates that only REFUSE on the stamps (PairValidAt, the
+		// gap-fill pair) use SpanStatus(...) != SpanState::Invalid instead.
+		bool StampsAgree(uint64_t a, uint64_t b, bool acrossLoss = false) const
+		{
+			return SpanStatus(a, b, acrossLoss) == SpanState::Valid;
 		}
 
 		// W1-C2a S2: the one pair test of the vector consumers: PairValid (epoch form) && PairValidAt (stamp form).
@@ -380,7 +394,7 @@ namespace MotionValidity
 		// the epoch form of PairValid).
 		bool PairValidAt(uint64_t a, uint64_t b) const
 		{
-			return Adjacent(a, b) && StampsAgree(a, b);
+			return Adjacent(a, b) && SpanStatus(a, b) != SpanState::Invalid;   // C2a-F 1: Unknown (unbound) refuses nothing
 		}
 
 		// Bound: the Indicator's stamp of seq (true). Unbound: false and `out` untouched (M2 P5a-5, IVectorEngine::FieldOf).
@@ -565,7 +579,7 @@ namespace MotionValidity
 		void NoteRequest(Cause cause) noexcept
 		{
 			lastRequest.store(static_cast<int>(cause), std::memory_order_release);
-			requests.fetch_add(1, std::memory_order_acq_rel);
+			requests.fetch_add(1, std::memory_order_seq_cst);   // C2a-F S3: Dekker with Unbind (store requests, then load bound)
 		}
 		// The masked counters that differ between the stamp of `seq` and every event written (all frames after it).
 		static VpIndicator::CounterMask ChangeAfter(const VpIndicator::Indicator& indicator, uint64_t seq)
@@ -577,7 +591,8 @@ namespace MotionValidity
 			const std::shared_ptr<VpIndicator::Indicator> indicator = VpIndicator::Indicator::Latest(std::atomic_load(&ind));
 			return indicator && ChangeAfter(*indicator, seq) != 0;
 		}
-		// Masked changes on frames never sealed (all of them when nothing is sealed yet and events exist).
+		// Masked changes on frames never sealed; NONE (0) when nothing is sealed yet (no frame's history exists to be reused across
+		// the change, so Unbind has nothing to move for it).
 		static VpIndicator::CounterMask UnsealedChange(const VpIndicator::Indicator& indicator)
 		{
 			if (!indicator.HasSealed())

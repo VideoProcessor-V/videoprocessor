@@ -718,7 +718,16 @@ namespace VpMotion
 		if (!motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))   // W1-C2a S2
 			return absent(flowReads_.invalidated);
 		// The shared pointer is copied out of the slot before anything can Prune it: from here the pair cannot be freed under us.
-		const MotionAhead::FlowPtr flow = P2().Find(from, to);
+		uint64_t pairGeneration = 0;
+		const MotionAhead::FlowPtr flow = P2().Find(from, to, pairGeneration);
+		// C2a-F 2: the slot keeps a pair computed before a resync / seek / queue reset / format change until the producer's
+		// asynchronous SetGeneration re-keys it, and once a frame is kept in the new epoch the epoch form above no longer refuses
+		// it (resync_event off; and on, after the seal). The producer stores its pairs under StreamGeneration() in both modes
+		// (MotionAheadWalk), so a pair from another stream generation is refused here. A slot never keyed by a producer
+		// (generation 0) belongs to the initial stream generation.
+		if (flow && (pairGeneration != 0 ? pairGeneration : static_cast<uint64_t>(::MotionValidity::State::kInitialEpoch)) !=
+			motionValidity.StreamGeneration())
+			return absent(flowReads_.invalidated);
 		if (!flow || flow->gridW <= 0 || flow->gridH <= 0 || flow->halfW <= 0 ||
 			flow->forward.size() < static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH) * 2)
 			return absent(flowReads_.noPair);

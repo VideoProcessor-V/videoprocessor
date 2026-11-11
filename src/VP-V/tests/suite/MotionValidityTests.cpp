@@ -1,7 +1,10 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/core/Indicator.h>
 #include <VP-V/modules/motion/estimation/MotionValidity.h>
+
+#include <memory>
 
 #include <atomic>
 #include <string>
@@ -31,6 +34,100 @@ namespace MotionValidityTest
 	TEST_CLASS(MotionValidityTests)
 	{
 	public:
+		// ---- C2a-F 1: SpanStatus(a, b) - Unknown unbound, Invalid across any resync / drop / settings-stamp change, Valid otherwise;
+		// spans of 1, 2 and a whole GOP (I to I, doc 99 s12 item 8: here frames 1..25 and 10..34). ----
+		typedef MotionValidity::State::SpanState Span;
+
+		static std::shared_ptr<VpIndicator::Indicator> BoundIndicator(MotionValidity::State& state)
+		{
+			auto ind = std::make_shared<VpIndicator::Indicator>(VpIndicator::NextEra(), 64);
+			state.Bind(ind);
+			ind->SealAndObserve(1);
+			ind->SealAndObserve(2);
+			return ind;
+		}
+
+		// The change at 10 stamps frames >= 10: every span (a, b) with a < 10 <= b is Invalid, the others Valid.
+		static void ExpectSplitAt10(const MotionValidity::State& state, bool acrossLoss, Span across)
+		{
+			Assert::IsTrue(state.SpanStatus(9, 10, acrossLoss) == across, L"span 1 across");
+			Assert::IsTrue(state.SpanStatus(8, 10, acrossLoss) == across, L"span 2 across (change at b)");
+			Assert::IsTrue(state.SpanStatus(9, 11, acrossLoss) == across, L"span 2 across (change inside)");
+			Assert::IsTrue(state.SpanStatus(1, 25, acrossLoss) == across, L"GOP across");
+			Assert::IsTrue(state.SpanStatus(8, 9, acrossLoss) == Span::Valid, L"span 1 before");
+			Assert::IsTrue(state.SpanStatus(10, 11, acrossLoss) == Span::Valid, L"span 1 after");
+			Assert::IsTrue(state.SpanStatus(7, 9, acrossLoss) == Span::Valid, L"span 2 before");
+			Assert::IsTrue(state.SpanStatus(10, 12, acrossLoss) == Span::Valid, L"span 2 after");
+			Assert::IsTrue(state.SpanStatus(1, 9, acrossLoss) == Span::Valid, L"GOP-length run before");
+			Assert::IsTrue(state.SpanStatus(10, 34, acrossLoss) == Span::Valid, L"GOP after");
+			Assert::AreEqual(across == Span::Valid, state.StampsAgree(9, 11, acrossLoss), L"StampsAgree == (SpanStatus == Valid)");
+		}
+
+		TEST_METHOD(SpanStatusUnboundIsUnknownAndStampsAgreeIsNeverTrue)
+		{
+			MotionValidity::State state;
+			Assert::IsTrue(state.SpanStatus(1, 2) == Span::Unknown, L"span 1");
+			Assert::IsTrue(state.SpanStatus(1, 3) == Span::Unknown, L"span 2");
+			Assert::IsTrue(state.SpanStatus(1, 25) == Span::Unknown, L"GOP");
+			Assert::IsTrue(state.SpanStatus(1, 25, true) == Span::Unknown, L"gap-fill form");
+			Assert::IsFalse(state.StampsAgree(1, 2), L"unbound: never true");
+			Assert::IsFalse(state.StampsAgree(1, 25, true), L"unbound: never true (gap-fill form)");
+			Assert::IsTrue(state.PairValidAt(1, 2), L"Unknown refuses nothing: the epoch form decides unbound");
+			Assert::IsFalse(state.PairValidAt(1, 3), L"adjacency still holds unbound");
+			// Bound, then unbound again: Unknown once more.
+			auto ind = std::make_shared<VpIndicator::Indicator>(VpIndicator::NextEra(), 64);
+			state.Bind(ind);
+			Assert::IsTrue(state.SpanStatus(1, 2) == Span::Valid, L"bound: the stamps vouch");
+			state.Unbind();
+			Assert::IsTrue(state.SpanStatus(1, 2) == Span::Unknown, L"unbound again");
+		}
+
+		TEST_METHOD(SpanStatusIsValidForSpansOfOneTwoAndAGopWithoutChange)
+		{
+			MotionValidity::State state;
+			auto ind = BoundIndicator(state);
+			Assert::IsTrue(state.SpanStatus(1, 2) == Span::Valid, L"span 1");
+			Assert::IsTrue(state.SpanStatus(1, 3) == Span::Valid, L"span 2");
+			Assert::IsTrue(state.SpanStatus(1, 25) == Span::Valid, L"GOP");
+			Assert::IsTrue(state.SpanStatus(1, 25, true) == Span::Valid, L"GOP, gap-fill form");
+			Assert::IsTrue(state.StampsAgree(1, 25));
+		}
+
+		TEST_METHOD(SpanStatusIsInvalidAcrossAResyncOrSeek)
+		{
+			const VpResync::Cause causes[] = { VpResync::Cause::RendererReset, VpResync::Cause::FileDiscontinuity };
+			for (const VpResync::Cause cause : causes)
+			{
+				MotionValidity::State state;
+				auto ind = BoundIndicator(state);
+				ind->Advance(VpIndicator::kFull, cause, 10);
+				ExpectSplitAt10(state, false, Span::Invalid);
+				ExpectSplitAt10(state, true, Span::Invalid);   // a FULL is never bridged
+			}
+		}
+
+		TEST_METHOD(SpanStatusIsInvalidAcrossADrop)
+		{
+			const VpResync::Cause causes[] = { VpResync::Cause::OverflowDrop, VpResync::Cause::MissedFrames };
+			for (const VpResync::Cause cause : causes)
+			{
+				MotionValidity::State state;
+				auto ind = BoundIndicator(state);
+				ind->Advance(VpIndicator::kContinuity, cause, 10, 1);
+				ExpectSplitAt10(state, false, Span::Invalid);
+				ExpectSplitAt10(state, true, Span::Valid);   // the gap-fill pair bridges the loss it is made for
+			}
+		}
+
+		TEST_METHOD(SpanStatusIsInvalidAcrossASettingsStampChange)
+		{
+			MotionValidity::State state;
+			auto ind = BoundIndicator(state);
+			ind->Advance(VpIndicator::kSettingsMotion, VpResync::Cause::SettingsApply, 10);
+			ExpectSplitAt10(state, false, Span::Invalid);
+			ExpectSplitAt10(state, true, Span::Invalid);   // settings[motion] is never bridged
+		}
+
 		TEST_METHOD(EveryCauseMovesTheEpochAndIsCountedOnItsOwn)
 		{
 			Assert::AreEqual(kCauses, sizeof(kAllCauses) / sizeof(kAllCauses[0]));
