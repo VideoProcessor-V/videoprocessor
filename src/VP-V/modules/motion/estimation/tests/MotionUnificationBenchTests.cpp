@@ -46,6 +46,9 @@
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/OnDemandIssue.h>
+#include <VP-V/modules/motion/estimation/VectorEngine.h>
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <dxgi1_2.h>
@@ -59,6 +62,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <memory>
+#include <mutex>
+#include <atomic>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -827,6 +832,266 @@ namespace VideoProcessorTest
 			}
 			csv.close();
 			Logger::WriteMessage(("MotionUnificationBench steady: written to " + outPath + ".steady.csv\n").c_str());
+		}
+		// W2-C5b commit 6 (owner answer 4: measure the latency impact AND the benefit; the owner decides the default): the on-demand
+		// path end to end at the clip's own rate, through the REAL pieces - a live Producer (one NVOF session), the VectorEngine, the
+		// dequeue hook (MotionAhead::IssueOnDemandAtDequeue, timed: it runs under the queue mutex in the renderer) and the estimate's fill
+		// (VectorEngine::OnDemandFill, timed: the render thread waits there) - with the real matcher on the render path (with the pair when
+		// one came, else the block searches). Every VP_MV_BENCH_DROP_EVERY-th frame (default 25) is dropped, so hiccup gap pairs occur.
+		// Modes (one fresh engine + producer each; the first VP_MV_BENCH_ONDEMAND_WARM cycles, default 30, are not in the figures):
+		//   std_off     standard: the walk submits every frame, the render is one frame behind; optical_flow_on_demand=off (today).
+		//   std_on      the same with on: gap pairs and walk misses are asked of the session. The pacing wait (the swap chain / present
+		//               wait in the renderer: PassTimers CpuWait) is NOT given to the hook, as the renderer does today: the render-time
+		//               sample counts it as render time.
+		//   std_on_xw   the same, the pacing wait given to the hook as wait (= excluding CpuWait from the render-time EWMA).
+		//   ll_off      low latency with a queue ahead (capacity 1): no walk (depth 0), the render takes the newest pair at once; off.
+		//   ll_on       the same with on: every pair (current + last frame, no look-ahead) is asked of the session at the dequeue (the
+		//               hook's request carries both frames' luma; the bench's caches always hold it, so `uncached` is a renderer-only
+		//               figure, see Ctrl+I).
+		//   ll_competitive_on  low latency with no queue ahead (capacity 0) and on: competitive stays motion-free (nothing asked).
+		// The wait until the next frame's slot is the dequeue wait in low latency (the frame has not arrived).
+		// Figures (csv kind "ondemand"): the share of render pairs ahead / served / late / no budget / unavailable / none (nothing asked),
+		// fill wait, matcher ms with and without a pair, render-thread ms (hand-over -> matcher done: the in-process latency proxy) p50 / p99,
+		// the hook's time p50 / p99 / max (us), the budget and the measured render time (the engine's EWMA), the engine's counters.
+		BEGIN_TEST_METHOD_ATTRIBUTE(OnDemandServedShareAndStallPerMode)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(OnDemandServedShareAndStallPerMode)
+		{
+			const std::string clipPath = MvEnv("VP_MV_BENCH_CLIP"), outPath = MvEnv("VP_MV_BENCH_OUT");
+			const int frames = MvEnvInt("VP_MV_BENCH_ONDEMAND_FRAMES", 0), start = MvEnvInt("VP_MV_BENCH_START", 0);
+			const int dropEvery = std::max(2, MvEnvInt("VP_MV_BENCH_DROP_EVERY", 25)), warmCycles = std::max(0, MvEnvInt("VP_MV_BENCH_ONDEMAND_WARM", 30));
+			if (clipPath.empty() || outPath.empty() || frames <= 0)
+			{
+				Logger::WriteMessage("MotionUnificationBench on demand: VP_MV_BENCH_CLIP / VP_MV_BENCH_OUT / VP_MV_BENCH_ONDEMAND_FRAMES not set: not run\n");
+				return;
+			}
+			CComPtr<IDXGIFactory1> factory;
+			CComPtr<IDXGIAdapter1> nvidia;
+			if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
+				for (UINT i = 0;; ++i)
+				{
+					CComPtr<IDXGIAdapter1> adapter;
+					if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+					DXGI_ADAPTER_DESC1 desc{};
+					adapter->GetDesc1(&desc);
+					if (desc.VendorId == 0x10DE) nvidia = adapter;
+				}
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "OnDemandServedShareAndStallPerMode", nvidia != nullptr, "no NVIDIA adapter"))
+				return;
+			Y4mClip clip;
+			std::string why;
+			Assert::IsTrue(clip.Open(clipPath, why), std::wstring(why.begin(), why.end()).c_str());
+			Assert::IsTrue(clip.fps > 1.0, L"the y4m has no F tag (frame rate): the run is paced at the clip's rate");
+			const int width = clip.width, height = clip.height;
+			const double periodMs = 1000.0 / clip.fps;
+			const std::string label = MvEnv("VP_MV_BENCH_LABEL").empty() ? "run" : MvEnv("VP_MV_BENCH_LABEL");
+			const std::string clipName = clipPath.substr(clipPath.find_last_of("\\/") == std::string::npos ? 0 : clipPath.find_last_of("\\/") + 1);
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			CComPtr<ID3D11Device> device;
+			Assert::IsTrue(SUCCEEDED(D3D11CreateDevice(nvidia, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr)));
+			Assert::IsTrue(MvAdapterKey(device) != 0 && MvGpuKey(gpu) == MvAdapterKey(device),
+				L"the libplacebo fixture device is not on the NVIDIA adapter the producer uses (VP_TEST_GPU=hardware, VP_TEST_ADAPTER=NVIDIA)");
+
+			std::ofstream csv(outPath + ".ondemand.csv", std::ios::trunc);
+			Assert::IsTrue(static_cast<bool>(csv), L"cannot write the csv");
+			csv << "label,clip,kind,mode,position,metric,value\n";
+			auto row = [&](const char* mode, const char* metric, double value) {
+				csv << label << ',' << clipName << ",ondemand," << mode << ",0," << metric << ',' << value << '\n';
+			};
+
+			// The renderer's shapes the hook template reads (QueuedFrame::AnalysisPayload, the queued frame, the host's impl).
+			struct BenchPrepared
+			{
+				AnalysisLumaSource source;
+				bool IsValid() const { return source.IsValid(); }
+			};
+			struct BenchCache
+			{
+				std::mutex mutex;
+				BenchPrepared queued;
+			};
+			struct BenchIdentity { uint64_t sourceFormatGeneration = 0; };
+			struct BenchQueued
+			{
+				std::shared_ptr<BenchCache> analysis;
+				BenchIdentity activePictureIdentity;
+				uint64_t sourceSequence = 0;
+			};
+			struct BenchHost
+			{
+				VpMotion::VectorEngine vectorEngine;
+				std::shared_ptr<MotionAhead::Producer>& motionProducer = vectorEngine.motionProducer;
+				MotionValidity::State& motionValidity = vectorEngine.motionValidity;
+				std::atomic<int>& queueAheadCapacity = vectorEngine.queueAheadCapacity;
+				std::atomic<bool> lowLatencyQueueActive{ false };
+			};
+			struct Delivered
+			{
+				uint64_t seq = 0;
+				std::shared_ptr<std::vector<uint8_t>> luma;
+				std::shared_ptr<BenchCache> cache;
+			};
+			struct Mode { const char* name; bool lowLatency; int capacity; VpMotion::OnDemand::Setting setting; bool waitExcluded; };
+			const Mode modes[] = {
+				{ "std_off", false, 1, VpMotion::OnDemand::Setting::Off, false },
+				{ "std_on", false, 1, VpMotion::OnDemand::Setting::On, false },
+				{ "std_on_xw", false, 1, VpMotion::OnDemand::Setting::On, true },
+				{ "ll_off", true, 1, VpMotion::OnDemand::Setting::Off, false },
+				{ "ll_on", true, 1, VpMotion::OnDemand::Setting::On, false },
+				{ "ll_competitive_on", true, 0, VpMotion::OnDemand::Setting::On, false } };
+			auto pct = [](std::vector<double> v, double q) {
+				if (v.empty()) return 0.0;
+				std::sort(v.begin(), v.end());
+				return v[static_cast<size_t>(q * (v.size() - 1))];
+			};
+			auto avg = [](const std::vector<double>& v) { double s = 0; for (double x : v) s += x; return v.empty() ? 0.0 : s / v.size(); };
+			Dejudder::Settings settings = DejudderTestSettings();
+			settings.opticalFlow = true;
+			settings.opticalFlowCandidate = true;
+			settings.opticalFlowSeed = true;
+			settings.globalPrior = true;
+			settings.estCandidates = true;
+			settings.globalTwo = true;
+			settings.opticalFlowGlobal = true;
+			settings.hostReadable = false;
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);   // ONE matcher for every mode (doc 93 W2-C5a)
+			for (const Mode& mode : modes)
+			{
+				using FallbackCatalog::NoPairCause;
+				std::unique_ptr<BenchHost> host(new BenchHost());
+				VpMotion::VectorEngine& engine = host->vectorEngine;
+				engine.SetOnDemandSetting(mode.setting);
+				host->lowLatencyQueueActive = mode.lowLatency;
+				host->queueAheadCapacity = mode.capacity;
+				auto producer = std::make_shared<MotionAhead::Producer>();
+				producer->SetSlot(engine.p2Slot);   // as PlanProducer: the producer publishes into the engine's P2 slot
+				Assert::IsTrue(producer->Start(device, NvOpticalFlow::Preset::Slow), L"producer started");
+				engine.PublishProducer(producer);
+				const uint64_t generation = host->motionValidity.StreamGeneration();
+				std::vector<Delivered> delivered;
+				unsigned long long counts[6] = {};   // ahead, served, late, no budget, unavailable, none
+				unsigned long long gapPairs = 0, gapServed = 0;
+				std::vector<double> fillMs, matcherPairMs, matcherNoPairMs, renderMs, hookUs, budgetMs;
+				double waitBeforeMs = 0.0;
+				int cycles = 0;
+				const auto wallStart = std::chrono::steady_clock::now();
+				auto nowMs = [&]() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wallStart).count(); };
+				for (int k = 0; k < frames; ++k)
+				{
+					const double slotStart = static_cast<double>(k) * periodMs;
+					const double waitStart = nowMs();
+					while (nowMs() < slotStart) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					waitBeforeMs = nowMs() - waitStart;   // the pacing wait before this cycle (present in standard, frame arrival in low latency)
+					if (k % dropEvery == dropEvery - 1)
+						continue;   // dropped: never queued, never submitted (the next render pair spans it)
+					Delivered entry;
+					entry.seq = static_cast<uint64_t>(k + 1);
+					entry.luma = std::make_shared<std::vector<uint8_t>>();
+					if (!clip.Luma(start + k, *entry.luma)) break;
+					entry.cache = std::make_shared<BenchCache>();
+					entry.cache->queued.source = MvSource(*entry.luma, width, height);
+					if (!mode.lowLatency)
+						producer->Submit(entry.seq, generation, entry.cache->queued.source);   // the walk (depth > 0)
+					delivered.push_back(entry);
+					if (delivered.size() > 4) delivered.erase(delivered.begin());
+					const size_t behind = mode.lowLatency ? 0 : 1;   // standard renders one frame behind the newest
+					if (delivered.size() < 2 + behind)
+						continue;
+					const Delivered& from = delivered[delivered.size() - 2 - behind];
+					const Delivered& to = delivered[delivered.size() - 1 - behind];
+					const double handedOver = nowMs();
+					// The dequeue: the hook under (what is in the renderer) the queue mutex.
+					BenchQueued next;
+					next.analysis = to.cache;
+					next.sourceSequence = to.seq;
+					const double dequeueWaitMs = mode.lowLatency || mode.waitExcluded ? waitBeforeMs : 0.0;
+					const auto h0 = std::chrono::steady_clock::now();
+					MotionAhead::IssueOnDemandAtDequeue(host.get(), from.cache, uint64_t(0), from.seq, next, clip.fps, dequeueWaitMs);
+					const double hook = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - h0).count();
+					// The estimate: the pair computed ahead (no wait: the P2 read is a lookup), else the fill.
+					MotionAhead::FlowPtr ahead = mode.lowLatency ? nullptr : producer->Take(from.seq, to.seq);
+					NoPairCause cause = NoPairCause::None;
+					const auto f0 = std::chrono::steady_clock::now();
+					MotionAhead::FlowPtr flow = engine.OnDemandFill(ahead, from.seq, to.seq, true, cause);
+					const double fill = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - f0).count();
+					const bool served = !ahead && flow && engine.OnDemandServed(from.seq, to.seq);
+					const bool gap = to.seq > from.seq + 1;
+					DejudderFrame fa, fb;
+					MvFrame(*from.luma, width, height, fa);
+					MvFrame(*to.luma, width, height, fb);
+					DejudderGpuPlanes pa, pb;
+					UploadDejudderFrame(gpu, fa, pa);
+					UploadDejudderFrame(gpu, fb, pb);
+					warp.SetExternalFlow(flow);
+					pl_gpu_finish(gpu);
+					const auto m0 = std::chrono::steady_clock::now();
+					const bool ok = warp.Estimate(pa.planes, pb.planes);
+					pl_gpu_finish(gpu);
+					const double matcher = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m0).count();
+					const bool pairUsed = ok && flow && warp.ExternalFlowUsed();
+					warp.SetExternalFlow(nullptr);
+					const double render = nowMs() - handedOver;
+					if (++cycles <= warmCycles)
+						continue;
+					const int category = ahead ? 0 : served ? 1 : cause == NoPairCause::OnDemandLate ? 2 : cause == NoPairCause::OnDemandNoBudget ? 3
+						: cause == NoPairCause::OnDemandUnavailable ? 4 : 5;
+					++counts[category];
+					if (gap) { ++gapPairs; if (served) ++gapServed; }
+					fillMs.push_back(fill);
+					(pairUsed ? matcherPairMs : matcherNoPairMs).push_back(matcher);
+					renderMs.push_back(render);
+					hookUs.push_back(hook);
+					budgetMs.push_back(engine.OnDemandBudgetMs(clip.fps));
+				}
+				const VpMotion::VectorEngine::OnDemandCounters c = engine.OnDemandReads();
+				engine.PublishProducer(nullptr);
+				producer->Stop();
+				unsigned long long measured = 0;
+				for (unsigned long long n : counts) measured += n;
+				const double scale = measured ? 100.0 / static_cast<double>(measured) : 0.0;
+				row(mode.name, "width", width);
+				row(mode.name, "height", height);
+				row(mode.name, "fps", clip.fps);
+				row(mode.name, "render_pairs", static_cast<double>(measured));
+				row(mode.name, "ahead_pct", counts[0] * scale);
+				row(mode.name, "served_pct", counts[1] * scale);
+				row(mode.name, "late_pct", counts[2] * scale);
+				row(mode.name, "nobudget_pct", counts[3] * scale);
+				row(mode.name, "unavailable_pct", counts[4] * scale);
+				row(mode.name, "none_pct", counts[5] * scale);
+				row(mode.name, "gap_pairs", static_cast<double>(gapPairs));
+				row(mode.name, "gap_served", static_cast<double>(gapServed));
+				row(mode.name, "fill_wait_ms_p50", pct(fillMs, 0.5));
+				row(mode.name, "fill_wait_ms_p99", pct(fillMs, 0.99));
+				row(mode.name, "matcher_pair_ms_mean", avg(matcherPairMs));
+				row(mode.name, "matcher_pair_n", static_cast<double>(matcherPairMs.size()));
+				row(mode.name, "matcher_nopair_ms_mean", avg(matcherNoPairMs));
+				row(mode.name, "matcher_nopair_n", static_cast<double>(matcherNoPairMs.size()));
+				row(mode.name, "render_thread_ms_p50", pct(renderMs, 0.5));
+				row(mode.name, "render_thread_ms_p99", pct(renderMs, 0.99));
+				row(mode.name, "hook_us_p50", pct(hookUs, 0.5));
+				row(mode.name, "hook_us_p99", pct(hookUs, 0.99));
+				row(mode.name, "hook_us_max", pct(hookUs, 1.0));
+				row(mode.name, "budget_ms_mean", avg(budgetMs));
+				row(mode.name, "engine_render_ms_ewma", c.renderMs);
+				row(mode.name, "c_requests", static_cast<double>(c.requests));
+				row(mode.name, "c_issued", static_cast<double>(c.issued));
+				row(mode.name, "c_served", static_cast<double>(c.served));
+				row(mode.name, "c_late", static_cast<double>(c.late));
+				row(mode.name, "c_nobudget", static_cast<double>(c.noBudget));
+				row(mode.name, "c_unavailable", static_cast<double>(c.unavailable));
+				row(mode.name, "c_unclaimed", static_cast<double>(c.unclaimed));
+				row(mode.name, "c_ahead_covered", static_cast<double>(c.aheadCovered));
+				row(mode.name, "c_gap_served", static_cast<double>(c.gapServed));
+				row(mode.name, "c_idle_skips", static_cast<double>(c.idleSkips));
+				row(mode.name, "c_uncached", static_cast<double>(c.uncached));
+			}
+			csv.close();
+			Logger::WriteMessage(("MotionUnificationBench on demand: written to " + outPath + ".ondemand.csv\n").c_str());
 		}
 	};
 }
