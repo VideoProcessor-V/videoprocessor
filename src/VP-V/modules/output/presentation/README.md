@@ -69,7 +69,7 @@ The renderer host and Bill's files do the rest: they create the swapchain, prese
 - `queue_timing_fixes` is read here but owned by `input.queue_timing`. It selects the whole-Hz-last order and turns on the DWM grid refinement.
 - The refresh switch keys (`[general] switch_refresh_rate` and the `[display_refresh_rate_override]` section) are read by the GUI (VideoProcessorDlg.cpp), not by this module's files.
 - Analysis-floor controls (P6 rest S1; audit S2): no settings key; set by the TD/owner wiring, which has no production caller yet:
-  - `Presenter::floorPolicy` - no settings key; default `CreditWins`; set by the TD/owner wiring. `RaiseQueue` must be set together with
+  - `Presenter::floorPolicy` - no settings key; default `CreditWins`; set by the TD/owner wiring `CreditWins` stays the default: it is a policy value and owner decision 1 (refs/101 row 14, contradiction 3) is still open; this package does not change it. `RaiseQueue` must be set together with
     `VpQueueTiming::VpFixedBudgetPolicy::SetRaiseQueueForAnalysis(true)` (and `Presenter::queueCapacity`); the test
     `TheTwoRaiseQueueSwitchesAgreeOnTheRaisedQueue` pins that both give the same raised queue, capped at the capacity.
   - `Presenter::queueCapacity` - no settings key; default 0 (not known: no cap); set by the TD/owner wiring.
