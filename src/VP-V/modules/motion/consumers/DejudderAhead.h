@@ -74,6 +74,7 @@ namespace Dejudder
 			if (!steps.estimate || !steps.estimate(c.next, c.after)) { Note(Reason::EstimateFailed); return true; }
 			aheadFor = c.next;
 			aheadNext = c.after;
+			aheadEpoch = epochNow;   // E12 (B3-Z Z2): the entry keeps the epoch it was made in
 			Note(Reason::Ahead);
 			return true;
 		}
@@ -95,9 +96,42 @@ namespace Dejudder
 			return hit;
 		}
 
+		// E12 (B3-Z Z2, refs 93-prep-B3Z s4): the epoch-checked form. A hit needs the entry's own epoch (the one
+		// NoteEpoch held when TryAhead made it) to equal `epoch`, the epoch the caller stamps the field with; an
+		// entry of the right pair from another epoch is a miss (also counted in EpochMisses) and the pair is
+		// estimated now. Before, the caller stamped a hit with the CURRENT epoch while the engine refused the same
+		// field for its older one (VectorEngine NoteEstimated). An entry made with no epoch noted (0) never hits
+		// this form. The two-argument Consume above is unchanged (no epoch check).
+		bool Consume(uint64_t source, uint64_t next, uint64_t epoch)
+		{
+			const bool pair = next != 0 && aheadFor == source && aheadNext == next;
+			const bool hit = pair && epoch != 0 && aheadEpoch == epoch;
+			if (hit)
+				++hits;
+			else
+			{
+				if (aheadFor != 0)
+					++misses;
+				if (pair)
+					++epochMisses;
+				++sequential;
+			}
+			consumedEpoch = hit ? aheadEpoch : 0;
+			aheadFor = aheadNext = 0;
+			aheadEpoch = 0;
+			return hit;
+		}
+
+		// E12: the epoch of the estimate the matcher holds now (the render-time estimate's, or a consumed entry's).
+		// TryAhead records it with the entry it makes.
+		void NoteEpoch(uint64_t epoch) { epochNow = epoch; }
+		uint64_t ConsumedEpoch() const { return consumedEpoch; }
+		unsigned long long EpochMisses() const { return epochMisses; }
+
 		void Reset()
 		{
 			aheadFor = aheadNext = 0;
+			aheadEpoch = 0;
 		}
 
 		Reason LastReason() const { return last; }
@@ -136,6 +170,8 @@ namespace Dejudder
 		}
 
 		uint64_t aheadFor = 0, aheadNext = 0;
+		uint64_t aheadEpoch = 0, epochNow = 0, consumedEpoch = 0;   // E12
+		unsigned long long epochMisses = 0;
 		Reason last = Reason::Off;
 		std::array<unsigned long long, static_cast<size_t>(Reason::Count)> counts{};
 		unsigned long long hits = 0, misses = 0, sequential = 0;

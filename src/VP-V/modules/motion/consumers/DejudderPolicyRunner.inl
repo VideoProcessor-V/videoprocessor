@@ -201,14 +201,16 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	// Owner 2026-10-13 (estimate ahead): this pair (A, B) was estimated in
 	// the last frame's extras, with B the same frame: the field, the trust,
 	// A's mask and the grain are ready, and B's planes are the ahead ones.
-	if (dejudderAhead.Consume(sourceSequence, nextSourceSequence))
+	// E12 (B3-Z Z2): a hit only for an entry made in the current epoch, stamped with the entry's own epoch.
+	if (dejudderAhead.Consume(sourceSequence, nextSourceSequence, motionValidity.Epoch()))
 	{
 		std::swap(dejudderNextTextures[0], dejudderAheadTextures[0]);
 		std::swap(dejudderNextTextures[1], dejudderAheadTextures[1]);
 		std::swap(dejudderNextUpload, dejudderAheadUpload);   // efficiency_fixes: the records follow
 		dejudderNextUploadedSequence = nextSourceSequence;
 		dejudderEstimatedSequence = sourceSequence;
-		dejudderEstimatedEpoch = motionValidity.Epoch();
+		dejudderEstimatedEpoch = dejudderAhead.ConsumedEpoch();
+		dejudderAhead.NoteEpoch(dejudderEstimatedEpoch);   // E12: the next entry is made in this field's epoch
 		dejudderEstimatedPeriods = 1;   // estimated ahead: an adjacent pair
 		LogDejudderAhead();
 		return;
@@ -240,6 +242,7 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	{
 		dejudderEstimatedSequence = sourceSequence;
 		dejudderEstimatedEpoch = estimateEpoch;
+		dejudderAhead.NoteEpoch(estimateEpoch);   // E12: an entry made ahead of this field keeps its epoch
 		// Bug hunt 3 F10: a gap pair's field spans the missed periods too.
 		dejudderEstimatedPeriods = InterpolationTimeline::FieldPeriods(fillPair && vpFillGapFrames > 0, vpFillGapFrames);
 	}
