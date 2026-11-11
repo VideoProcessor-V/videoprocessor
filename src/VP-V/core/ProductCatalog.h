@@ -294,7 +294,7 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
         // Motion
         r.push_back(MakeRow(14, "optical-flow producer", "VP-V/modules/motion/estimation/MotionAheadProducer",
                             PathwayUnit::Input, 5, { kP1HalfLuma, kP2VectorPair }, own, "product.nvof_producer"));
-        r.push_back(MakeRow(13, "matcher / motion warp", "VP-V/modules/motion/consumers/DejudderWarp", PathwayUnit::Motion,
+        r.push_back(MakeRow(13, "matcher / motion warp", "VP-V/modules/motion/estimation/matcher/DejudderWarp", PathwayUnit::Motion,
                             20, { kP1HalfLuma, kP2VectorPair, kP4SourceStats }, own, "product.motion_warp"));
         r.push_back(MakeRow(9, "interpolator / hiccup repair", "VP-V/modules/motion/consumers", PathwayUnit::Motion, 40,
                             { kP3AnalysisField, kP10GrainSplit }, own, "product.interpolator"));
