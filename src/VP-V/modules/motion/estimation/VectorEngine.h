@@ -359,6 +359,8 @@ namespace VpMotion
 		struct OnDemandCounters
 		{
 			unsigned long long requests = 0, served = 0, fromSlot = 0, late = 0, unavailable = 0, noBudget = 0, gated = 0;
+			// requests counted by RequestPair; each awaited one lands once in served / fromSlot / late / unavailable / noBudget
+			// (AwaitPair). gated is a breakdown of unavailable (the C1 state gate said no).
 			double lastWaitMs = 0.0, waitMsSum = 0.0;   // AwaitPair's wait (served ones in the sum)
 		};
 		OnDemandCounters OnDemandReads() const;

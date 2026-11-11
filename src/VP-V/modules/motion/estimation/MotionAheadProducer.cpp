@@ -210,6 +210,9 @@ namespace MotionAhead
 		engineReady = false;
 		sizeW = sizeH = 0;
 		consecutiveFailures = 0;
+		requestStreak = 0;           // W2-C5b
+		lastJobMs = 0;
+		adoptOverWalk = requestResetHints = false;
 		recovery = ProducerRecovery();
 		stopError.clear();
 		slot->Clear();   // a fresh producer starts from an empty P2 slot (the pairs of an older one are not its own)
@@ -222,6 +225,7 @@ namespace MotionAhead
 				std::lock_guard<std::mutex> lock(mutex);
 				error = why;
 				running = false;
+				requestStats.unavailable += requests.FailAll(OnDemand::Status::Unavailable);   // W2-C5b: never a broken promise
 				return;
 			}
 			Worker();
@@ -327,6 +331,12 @@ namespace MotionAhead
 			{
 				jobs.pop_front();
 				++stats.dropped;
+				if (!requests.Empty() || requestStreak > 0)   // W2-C5b: dropped while requests were served - never silent
+				{
+					const unsigned long long n = ++requestStats.droppedBehindRequests;
+					if (n == 1 || n % 10 == 0)
+						DebugLog::Log("Motion ahead: %llu look-ahead job(s) dropped while on-demand requests were served", n);
+				}
 			}
 			jobs.push_back(Job{ sequence, generation, luma, breakBefore });
 		}
@@ -345,9 +355,17 @@ namespace MotionAhead
 				std::unique_lock<std::mutex> lock(mutex);
 				wake.wait(lock, [this] { return stopping || !requests.Empty() || !jobs.empty(); });
 				if (stopping) return;
-				isRequest = requests.Pop(request);
+				// Requests first, but at most kMaxRequestStreak in a row while a job waits (W2-C5b audit: the walk is never starved).
+				if (!requests.Empty() && (jobs.empty() || requestStreak < kMaxRequestStreak))
+				{
+					isRequest = requests.Pop(request);
+					++requestStreak;
+				}
 				if (!isRequest)
 				{
+					if (!requests.Empty())
+						++requestStats.fairnessJobs;
+					requestStreak = 0;
 					job = std::move(jobs.front());
 					jobs.pop_front();
 				}
@@ -355,7 +373,8 @@ namespace MotionAhead
 			// An exception escaping the worker would end the process: counted as a failure instead.
 			// Three failures IN A ROW stop the producer (audit 2026-10-16: three over a whole session did).
 			bool ok = false;
-			try { ok = isRequest ? ProcessRequest(request) : testEngine ? ProcessJobForTest(job) : Process(job); }
+			bool engineRan = true;   // W2-C5b: a request answered without engine work leaves the failure count alone
+			try { ok = isRequest ? ProcessRequest(request, engineRan) : testEngine ? ProcessJobForTest(job) : Process(job); }
 			catch (...) { ok = false; }
 			if (isRequest && request.state && !request.state->fulfilled.load(std::memory_order_acquire))
 			{
@@ -366,7 +385,8 @@ namespace MotionAhead
 			std::unique_lock<std::mutex> lock(mutex);
 			if (ok)
 			{
-				consecutiveFailures = 0;
+				if (engineRan)
+					consecutiveFailures = 0;
 				continue;
 			}
 			++stats.failures;
@@ -470,6 +490,7 @@ namespace MotionAhead
 			return true;   // not a readable frame, or a size this producer does not make: nothing published (the consumer takes the matcher path, shown as a fallback)
 		const double lumaMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 		if (!EnsureSize(halfW, halfH)) return false;
+		ReleaseStaleRequestTextures(halfW, halfH);   // W2-C5b
 		// A new continuity generation clears the P2 slot and the chain.
 		if (slot->Generation() != job.generation)
 		{
@@ -479,6 +500,7 @@ namespace MotionAhead
 		// A break the sequence does not show: no pair across it (MotionValidity step 1 F).
 		if (job.breakBefore)
 			havePrevious = false;
+		NoteWalkJob(job);   // W2-C5b
 		const int texIndex = havePrevious ? 1 - current : current;
 		context->UpdateSubresource(lumaTex[texIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(halfW), 0);
 		bool ok = true;
@@ -710,8 +732,9 @@ namespace MotionAhead
 		}
 	}
 
-	bool Producer::ProcessRequest(OnDemand::Pending& pending)
+	bool Producer::ProcessRequest(OnDemand::Pending& pending, bool& engineRan)
 	{
+		engineRan = false;
 		using OnDemand::Status;
 		using OnDemand::Mode;
 		const auto taken = OnDemand::Clock::now();
@@ -736,6 +759,24 @@ namespace MotionAhead
 				answer(Status::FromSlot);
 				return true;
 			}
+		// The generation (audit MUST 1): the stream's generation only moves forward and the walk owns its changes.
+		// Older than the slot's: the stream moved on after the request was issued -> Late, no GPU work. Newer while the
+		// walk is present: run off the chain (no slot, chain or generation change, nothing published). Newer with no walk
+		// (low latency without look-ahead jobs): the request starts the new generation, as a job would.
+		const uint64_t slotGeneration = slot->Generation();
+		bool walkActive = false;
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			walkActive = WalkActiveLocked();
+			if (rq.generation < slotGeneration)
+				++requestStats.staleGeneration;
+		}
+		if (rq.generation < slotGeneration)
+		{
+			answer(Status::Late);
+			return true;
+		}
+		const bool forceOffChain = rq.generation > slotGeneration && walkActive;
 		int w = 0, h = 0;
 		if (!testEngine)
 		{
@@ -744,14 +785,17 @@ namespace MotionAhead
 				answer(Status::Failed);   // not a readable frame / a size not made: nothing to run, not an engine failure
 				return true;
 			}
+			engineRan = true;   // EnsureSize may open the engine: from here on a failure is the engine's
 			if (!EnsureSize(w, h))
 			{
 				answer(Status::Failed);
 				return false;
 			}
+			ReleaseStaleRequestTextures(w, h);
 		}
-		// A new continuity generation clears the P2 slot and the chain, exactly as for a job.
-		if (slot->Generation() != rq.generation)
+		engineRan = true;
+		// A newer generation with no walk clears the P2 slot and the chain, exactly as for a job.
+		if (rq.generation > slotGeneration && !forceOffChain)
 		{
 			slot->SetGeneration(rq.generation);
 			havePrevious = false;
@@ -761,7 +805,14 @@ namespace MotionAhead
 		chain.previousSequence = previousSequence;
 		chain.previousGeneration = previousGeneration;
 		chain.slotGeneration = slot->Generation();
-		const Mode mode = OnDemand::ChooseMode(chain, rq);
+		const Mode mode = forceOffChain ? Mode::OffChain : OnDemand::ChooseMode(chain, rq);
+		if (forceOffChain)
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			++requestStats.forcedOffChain;
+		}
+		if (mode == Mode::Adopt && walkActive)
+			adoptOverWalk = true;   // the walk's next job may now sit behind the chain (counted in NoteWalkJob)
 		bool ok = true;
 		std::shared_ptr<Flow> flow;
 		double extrasMs = 0.0;
@@ -780,6 +831,7 @@ namespace MotionAhead
 				int fw = 0, fh = 0;
 				if (!LumaAtTarget(rq.lumaFrom, requestLumaBuffer, fw, fh) || fw != w || fh != h)
 				{
+					engineRan = false;        // nothing ran: leaves the failure count alone
 					answer(Status::Failed);   // the two frames are not one size: no pair
 					return true;
 				}
@@ -817,6 +869,7 @@ namespace MotionAhead
 			// The temporal hints only for an adjacent Chain pair right after the engine's last pair ended at `from`.
 			const bool continuous = mode == Mode::Chain && rq.Adjacent() && hintSequence == rq.from && hintGeneration == rq.generation;
 			hintSequence = UINT64_MAX;   // any run here moves the engine's internal hint state
+			requestResetHints = true;    // a walk pair that would have used them runs without (counted in NoteWalkJob)
 			ok = RunPair(texFrom, texTo, w, h, continuous, rq.to, ran, flow, extrasMs);
 			if (ran && mode != Mode::OffChain && rq.Adjacent())
 			{
@@ -845,12 +898,38 @@ namespace MotionAhead
 			return false;   // counted like a failed job (three in a row stop and restart the producer)
 		}
 		// Adjacent pairs into P2 as well (any later reader hits); gap pairs are returned only (P2 stays adjacency-only).
-		if (rq.Adjacent())
+		// A forced off-chain pair is of a generation the slot has not reached: returned only.
+		if (rq.Adjacent() && !forceOffChain)
 			slot->Publish(rq.from, rq.to, rq.generation, flow);
 		engineReady = true;
 		result.flow = flow;
 		answer(Status::Ready);
 		return true;
+	}
+
+	bool Producer::WalkActiveLocked() const
+	{
+		return !jobs.empty() || (lastJobMs != 0 && NowMs() - lastJobMs < kWalkIdleMs);
+	}
+
+	void Producer::NoteWalkJob(const Job& job)
+	{
+		// Called after the generation / break handling, before the job pairs against the chain.
+		const bool adjacent = havePrevious && previousGeneration == job.generation && previousSequence + 1 == job.sequence;
+		const bool lostToAdopt = adoptOverWalk && havePrevious && previousGeneration == job.generation && job.sequence <= previousSequence;
+		const bool lostHints = requestResetHints && adjacent && hintSequence == UINT64_MAX;
+		adoptOverWalk = false;
+		requestResetHints = false;   // counted once: the walk's next job either pairs (and may lose the hints) or re-seeds
+		std::lock_guard<std::mutex> lock(mutex);
+		lastJobMs = NowMs();
+		if (lostToAdopt) ++requestStats.adoptLostPairs;
+		if (lostHints) ++requestStats.hintsLost;
+	}
+
+	void Producer::ReleaseStaleRequestTextures(int w, int h)
+	{
+		if ((requestTex[0] || requestTex[1]) && (requestTexW != w || requestTexH != h))
+			ReleaseRequestTextures();
 	}
 
 	bool Producer::StartForTest(std::shared_ptr<TestEngine> seam)
@@ -866,6 +945,9 @@ namespace MotionAhead
 		engineReady = false;
 		sizeW = sizeH = 0;
 		consecutiveFailures = 0;
+		requestStreak = 0;
+		lastJobMs = 0;
+		adoptOverWalk = requestResetHints = false;
 		recovery = ProducerRecovery();
 		stopError.clear();
 		slot->Clear();
@@ -885,6 +967,7 @@ namespace MotionAhead
 		}
 		if (job.breakBefore)
 			havePrevious = false;
+		NoteWalkJob(job);
 		const bool pairs = havePrevious && previousGeneration == job.generation && previousSequence + 1 == job.sequence;
 		const bool ok = testEngine->job ? testEngine->job(job.sequence, job.generation) : true;
 		if (ok && pairs)

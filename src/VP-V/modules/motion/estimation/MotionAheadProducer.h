@@ -260,8 +260,21 @@ namespace MotionAhead
 		{
 			unsigned long long requests = 0, fromSlot = 0, ready = 0, late = 0, refused = 0, failed = 0, unavailable = 0, noBudget = 0;
 			unsigned long long chainRuns = 0, adoptRuns = 0, offChainRuns = 0;   // engine runs by OnDemand::Mode
+			// Audit fixes (W2-C5b stage 1): staleGeneration - answered Late, the stream moved to a newer generation after the
+			// request was issued (in `late` too); forcedOffChain - a request of a NEWER generation than the walk has reached ran
+			// off the chain (the walk owns the generation change); fairnessJobs - look-ahead jobs run ahead of a waiting request
+			// by the streak bound (kMaxRequestStreak); droppedBehindRequests - look-ahead jobs dropped (Stats::dropped) while
+			// requests were being served; adoptLostPairs - walk pairs lost because an Adopt moved the chain past the walk's next
+			// frame (it re-seeds); hintsLost - walk pairs run without the temporal hints because a request run reset them.
+			unsigned long long staleGeneration = 0, forcedOffChain = 0, fairnessJobs = 0, droppedBehindRequests = 0;
+			unsigned long long adoptLostPairs = 0, hintsLost = 0;
 			double lastQueuedMs = 0.0, lastRunMs = 0.0, runMsSum = 0.0;
 		};
+		// At most this many requests in a row while a look-ahead job waits; then one job runs (the walk is never starved).
+		static const int kMaxRequestStreak = 2;
+		// The walk counts as present while a job waits or one ran within this long (ms); a request then never moves the
+		// slot's generation (the walk owns it) - a newer-generation request runs off the chain instead.
+		static const uint64_t kWalkIdleMs = 1000;
 		RequestStats GetRequestStats() const;
 
 		// W2-C5b test seam (OnDemandEstimateTests, CPU): a producer with no D3D11 device and no engine. The worker runs as
@@ -301,7 +314,12 @@ namespace MotionAhead
 		void Worker();
 		bool Process(const Job& job);
 		bool ProcessJobForTest(const Job& job);
-		bool ProcessRequest(OnDemand::Pending& pending);   // W2-C5b; false = an engine failure (counted like a job's)
+		// W2-C5b; false = an engine failure (counted like a job's). engineRan = the engine did work (only that resets the
+		// consecutive-failure count; a Late / FromSlot / nothing-to-run answer does not).
+		bool ProcessRequest(OnDemand::Pending& pending, bool& engineRan);
+		void NoteWalkJob(const Job& job);                 // W2-C5b: the walk's bookkeeping (adoptLostPairs, hintsLost, lastJobMs)
+		bool WalkActiveLocked() const;                    // W2-C5b, under mutex
+		void ReleaseStaleRequestTextures(int w, int h);   // W2-C5b: the off-chain textures go on an engine size change
 		void Answer(OnDemand::Pending& pending, OnDemand::PairResult result);
 		// The frame's 8-bit luma at the engine size (HalfLuma8, then the quarter step when the target asks for it).
 		// False = nothing to do: not a readable frame, or a size this producer does not make.
@@ -323,6 +341,10 @@ namespace MotionAhead
 		std::deque<Job> jobs;
 		OnDemand::Queue requests;           // W2-C5b, under mutex: taken before `jobs`
 		RequestStats requestStats;          // under mutex
+		int requestStreak = 0;              // W2-C5b, under mutex: requests run in a row while a job waited
+		uint64_t lastJobMs = 0;             // W2-C5b, under mutex: NowMs() of the last look-ahead job (0 = none yet)
+		bool adoptOverWalk = false;         // W2-C5b, worker only: an Adopt moved the chain while the walk was present
+		bool requestResetHints = false;     // W2-C5b, worker only: a request run reset the temporal hints
 		std::shared_ptr<TestEngine> testEngine;   // W2-C5b test seam (set before the worker starts)
 		bool stopping = false;
 		std::thread worker;

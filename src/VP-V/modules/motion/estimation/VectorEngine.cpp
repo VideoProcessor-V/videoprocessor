@@ -964,16 +964,15 @@ namespace VpMotion
 		{
 			std::lock_guard<std::mutex> lock(onDemandMutex_);
 			++onDemand_.requests;
+			// Every outcome is counted once, by AwaitPair (served + fromSlot + late + unavailable + noBudget == the awaited
+			// requests); `gated` is a breakdown of `unavailable` (the C1 state gate said no).
 			if (!OnDemandStateOn())
 			{
 				++onDemand_.gated;
 				return OnDemand::PairFuture::Answered(Status::Unavailable);
 			}
 			if (request.budgetMs <= 0.0)
-			{
-				++onDemand_.noBudget;
 				return OnDemand::PairFuture::Answered(Status::NoBudget);
-			}
 		}
 		const std::shared_ptr<MotionAhead::Producer> producer = LoopProducer();
 		if (!producer || !producer->Running())
@@ -993,8 +992,16 @@ namespace VpMotion
 		if (!answered)
 		{
 			future.Abandon();   // the worker skips it before any GPU work
-			++onDemand_.late;
-			cause = future.Valid() ? NoPairCause::OnDemandLate : NoPairCause::OnDemandUnavailable;
+			if (future.Valid())
+			{
+				++onDemand_.late;
+				cause = NoPairCause::OnDemandLate;
+			}
+			else
+			{
+				++onDemand_.unavailable;
+				cause = NoPairCause::OnDemandUnavailable;
+			}
 			return nullptr;
 		}
 		OnDemand::PairResult result = future.Get();
@@ -1015,7 +1022,8 @@ namespace VpMotion
 			cause = NoPairCause::OnDemandLate;
 			return nullptr;
 		case Status::NoBudget:
-			cause = NoPairCause::OnDemandNoBudget;   // counted by RequestPair
+			++onDemand_.noBudget;
+			cause = NoPairCause::OnDemandNoBudget;
 			return nullptr;
 		default:
 			break;

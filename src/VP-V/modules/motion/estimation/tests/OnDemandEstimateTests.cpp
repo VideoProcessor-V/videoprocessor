@@ -9,6 +9,8 @@
 #include "pch.h"
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/OnDemandEstimate.h>
+#include <VP-V/modules/motion/estimation/VectorEngine.h>
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/VectorProducts.h>
 #include <VP-V/modules/motion/estimation/NvOpticalFlow.h>
 #include <VP-V/core/VramUsers.h>
@@ -371,6 +373,248 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1ull, producer.GetRequestStats().failed);
 		}
 
+		// Audit MUST 1: the stream's generation only moves forward and the walk owns its changes.
+		TEST_METHOD(AStaleGenerationRequestIsLateAndLeavesTheWalkIntact)
+		{
+			MotionAhead::Producer producer;
+			Trace trace;
+			Assert::IsTrue(producer.StartForTest(Seam(trace)));
+			AnalysisLumaSource luma;
+			for (uint64_t s = 1; s <= 3; ++s) producer.Submit(s, 2, luma);
+			Assert::IsTrue(WaitCalls(trace, 3));
+			PairFuture f = producer.Request(Pair(2, 3, 1));   // issued before the stream moved to generation 2
+			Assert::IsTrue(f.WaitFor(5000.0) && f.Get().status == Status::Late);
+			producer.Submit(4, 2, luma);
+			Assert::IsTrue(WaitCalls(trace, 4));
+			producer.Stop();
+			for (long long v : trace.Order())
+				Assert::IsTrue(v > 0, L"no engine work for the stale request");
+			Assert::IsTrue(producer.Take(2, 3) != nullptr, L"the walk's pairs stay stored");
+			Assert::IsTrue(producer.Take(3, 4) != nullptr, L"the walk's chain was not reset");
+			const MotionAhead::Producer::RequestStats s = producer.GetRequestStats();
+			Assert::AreEqual(1ull, s.staleGeneration);
+			Assert::AreEqual(1ull, s.late);
+		}
+
+		TEST_METHOD(ANewerGenerationRequestRunsOffTheChainWhileTheWalkIsPresent)
+		{
+			MotionAhead::Producer producer;
+			Trace trace;
+			Assert::IsTrue(producer.StartForTest(Seam(trace)));
+			AnalysisLumaSource luma;
+			for (uint64_t s = 1; s <= 3; ++s) producer.Submit(s, 1, luma);
+			Assert::IsTrue(WaitCalls(trace, 3));
+			PairFuture f = producer.Request(Pair(5, 6, 2));
+			Assert::IsTrue(f.WaitFor(5000.0));
+			const PairResult r = f.Get();
+			Assert::IsTrue(r.status == Status::Ready && r.flow && r.flow->halfW == 6);
+			producer.Submit(4, 1, luma);
+			Assert::IsTrue(WaitCalls(trace, 5));
+			producer.Stop();
+			const std::vector<Mode> modes = trace.Modes();
+			Assert::AreEqual(size_t(1), modes.size());
+			Assert::IsTrue(modes[0] == Mode::OffChain);
+			Assert::IsTrue(producer.Take(5, 6) == nullptr, L"not published: the slot has not reached generation 2");
+			Assert::IsTrue(producer.Take(2, 3) != nullptr, L"the slot kept generation 1");
+			Assert::IsTrue(producer.Take(3, 4) != nullptr, L"the walk's chain continues");
+			Assert::AreEqual(1ull, producer.GetRequestStats().forcedOffChain);
+		}
+
+		TEST_METHOD(ANewerGenerationRequestWithoutAWalkStartsTheGeneration)
+		{
+			MotionAhead::Producer producer;
+			Trace trace;
+			Assert::IsTrue(producer.StartForTest(Seam(trace)));
+			auto run = [&producer](PairRequest rq) {
+				PairFuture f = producer.Request(rq);
+				return f.WaitFor(5000.0) ? f.Get().status : Status::Pending;
+			};
+			Assert::IsTrue(run(Pair(1, 2, 1)) == Status::Ready);
+			Assert::IsTrue(run(Pair(5, 6, 3)) == Status::Ready);
+			Assert::IsTrue(run(Pair(2, 3, 1)) == Status::Late, L"the generation never moves backwards");
+			producer.Stop();
+			Assert::IsTrue(producer.Take(5, 6) != nullptr, L"published under the new generation");
+			const MotionAhead::Producer::RequestStats s = producer.GetRequestStats();
+			Assert::AreEqual(0ull, s.forcedOffChain);
+			Assert::AreEqual(1ull, s.staleGeneration);
+			Assert::AreEqual(size_t(2), trace.Order().size());
+		}
+
+		// Audit MUST 2: at most kMaxRequestStreak requests in a row while a job waits; dropped jobs are counted.
+		TEST_METHOD(AStreakOfRequestsLetsAWaitingLookAheadJobRun)
+		{
+			Assert::AreEqual(2, MotionAhead::Producer::kMaxRequestStreak, L"the order below assumes a streak of two");
+			MotionAhead::Producer producer;
+			Trace trace;
+			Gate gate;
+			Gate requestGate;
+			auto seam = Seam(trace, &gate, 1);
+			auto inner = seam->request;
+			seam->request = [inner, &requestGate](const PairRequest& rq, Mode mode, MotionAhead::Flow& flow) {
+				if (rq.to == 11) requestGate.Enter();
+				return inner(rq, mode, flow);
+			};
+			Assert::IsTrue(producer.StartForTest(seam));
+			AnalysisLumaSource luma;
+			producer.Submit(1, 1, luma);
+			Assert::IsTrue(gate.WaitEntered());
+			producer.Submit(2, 1, luma);
+			PairFuture a = producer.Request(Pair(10, 11));
+			PairFuture b = producer.Request(Pair(11, 12));
+			gate.Open();
+			Assert::IsTrue(requestGate.WaitEntered(), L"the first request is running");
+			PairFuture c = producer.Request(Pair(12, 13));   // waiting behind b while job 2 waits
+			requestGate.Open();
+			Assert::IsTrue(a.WaitFor(5000.0) && b.WaitFor(5000.0) && c.WaitFor(5000.0));
+			Assert::IsTrue(WaitCalls(trace, 5));
+			producer.Stop();
+			const std::vector<long long> order = trace.Order();
+			Assert::AreEqual(size_t(5), order.size());
+			Assert::AreEqual(1ll, order[0]);
+			Assert::AreEqual(-11ll, order[1]);
+			Assert::AreEqual(-12ll, order[2]);
+			Assert::AreEqual(2ll, order[3], L"the job runs after two requests although a third waits");
+			Assert::AreEqual(-13ll, order[4]);
+			Assert::AreEqual(1ull, producer.GetRequestStats().fairnessJobs);
+		}
+
+		TEST_METHOD(LookAheadJobsDroppedWhileRequestsAreServedAreCounted)
+		{
+			MotionAhead::Producer producer;
+			Trace trace;
+			Gate gate;
+			Assert::IsTrue(producer.StartForTest(Seam(trace, &gate, 1)));
+			AnalysisLumaSource luma;
+			producer.Submit(1, 1, luma);
+			Assert::IsTrue(gate.WaitEntered());
+			PairFuture f = producer.Request(Pair(10, 11));
+			const uint64_t bound = 6;   // the default look-ahead bound (maxPendingJobs)
+			for (uint64_t s = 2; s <= bound + 2; ++s) producer.Submit(s, 1, luma);   // one more than the bound
+			gate.Open();
+			Assert::IsTrue(f.WaitFor(5000.0));
+			producer.Stop();
+			Assert::AreEqual(1ull, producer.GetStats().dropped);
+			Assert::AreEqual(1ull, producer.GetRequestStats().droppedBehindRequests);
+		}
+
+		// Audit SHOULD 4: a walk pair lost because an Adopt moved the chain past the walk is counted.
+		TEST_METHOD(AnAdoptAheadOfTheWalkCountsTheWalkPairItCosts)
+		{
+			MotionAhead::Producer producer;
+			Trace trace;
+			Assert::IsTrue(producer.StartForTest(Seam(trace)));
+			AnalysisLumaSource luma;
+			for (uint64_t s = 1; s <= 3; ++s) producer.Submit(s, 1, luma);
+			Assert::IsTrue(WaitCalls(trace, 3));
+			PairFuture f = producer.Request(Pair(8, 9));
+			Assert::IsTrue(f.WaitFor(5000.0) && f.Get().status == Status::Ready);
+			producer.Submit(4, 1, luma);
+			producer.Submit(5, 1, luma);
+			Assert::IsTrue(WaitCalls(trace, 6));
+			producer.Stop();
+			Assert::IsTrue(trace.Modes()[0] == Mode::Adopt);
+			Assert::IsTrue(producer.Take(3, 4) == nullptr, L"the chain held 9: no pair into 4");
+			Assert::IsTrue(producer.Take(4, 5) != nullptr, L"the walk re-seeds");
+			Assert::AreEqual(1ull, producer.GetRequestStats().adoptLostPairs);
+		}
+
+		// Audit MUST 3: the VectorEngine entry - every outcome is counted once and maps to one NoPairCause.
+		TEST_METHOD(VectorEngineRequestPairAnswersWithoutAProducerOrBudget)
+		{
+			using FallbackCatalog::NoPairCause;
+			VpMotion::VectorEngine engine;
+			NoPairCause cause = NoPairCause::None;
+			Assert::IsTrue(engine.AwaitPair(engine.RequestPair(Pair(1, 2)), 100.0, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::OnDemandUnavailable, L"no producer");
+			auto idle = std::make_shared<MotionAhead::Producer>();   // published, never started
+			engine.PublishProducer(idle);
+			Assert::IsTrue(engine.AwaitPair(engine.RequestPair(Pair(1, 2)), 100.0, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::OnDemandUnavailable, L"not running");
+			Assert::IsTrue(engine.AwaitPair(engine.RequestPair(Pair(1, 2, 1, 0.0)), 100.0, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::OnDemandNoBudget);
+			Assert::IsTrue(engine.AwaitPair(engine.RequestPair(Pair(1, 2, 1, -1.0)), 100.0, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::OnDemandNoBudget);
+			const VpMotion::VectorEngine::OnDemandCounters c = engine.OnDemandReads();
+			Assert::AreEqual(4ull, c.requests);
+			Assert::AreEqual(2ull, c.unavailable);
+			Assert::AreEqual(2ull, c.noBudget);
+			Assert::AreEqual(0ull, c.gated + c.late + c.served + c.fromSlot);
+			Assert::IsTrue(VpMotion::VectorEngine::OnDemandStateOn(), L"the C1 gate is stubbed On");
+		}
+
+		TEST_METHOD(VectorEngineAwaitPairMapsEveryAnswer)
+		{
+			using FallbackCatalog::NoPairCause;
+			VpMotion::VectorEngine engine;
+			MotionAhead::FlowPtr flow = std::make_shared<MotionAhead::Flow>();
+			NoPairCause cause = NoPairCause::OnDemandLate;
+			Assert::IsTrue(engine.AwaitPair(PairFuture::Answered(Status::Ready, flow), 0.0, cause) == flow);
+			Assert::IsTrue(cause == NoPairCause::None);
+			cause = NoPairCause::OnDemandLate;
+			Assert::IsTrue(engine.AwaitPair(PairFuture::Answered(Status::FromSlot, flow), 0.0, cause) == flow);
+			Assert::IsTrue(cause == NoPairCause::None);
+			Assert::IsTrue(engine.AwaitPair(PairFuture::Answered(Status::Ready), 0.0, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::OnDemandUnavailable, L"Ready without a flow");
+			Assert::IsTrue(engine.AwaitPair(PairFuture::Answered(Status::Late), 0.0, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::OnDemandLate);
+			Assert::IsTrue(engine.AwaitPair(PairFuture::Answered(Status::NoBudget), 0.0, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::OnDemandNoBudget);
+			const Status misses[] = { Status::Failed, Status::Refused, Status::Unavailable };
+			for (Status s : misses)
+			{
+				cause = NoPairCause::None;
+				Assert::IsTrue(engine.AwaitPair(PairFuture::Answered(s), 0.0, cause) == nullptr);
+				Assert::IsTrue(cause == NoPairCause::OnDemandUnavailable);
+			}
+			cause = NoPairCause::None;
+			Assert::IsTrue(engine.AwaitPair(PairFuture(), 0.0, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::OnDemandUnavailable, L"an invalid handle");
+			const VpMotion::VectorEngine::OnDemandCounters c = engine.OnDemandReads();
+			Assert::AreEqual(0ull, c.requests, L"none issued through RequestPair");
+			Assert::AreEqual(1ull, c.served);
+			Assert::AreEqual(1ull, c.fromSlot);
+			Assert::AreEqual(1ull, c.late);
+			Assert::AreEqual(1ull, c.noBudget);
+			Assert::AreEqual(5ull, c.unavailable);
+		}
+
+		TEST_METHOD(VectorEngineAwaitPairAbandonsALateRequestAndServesThroughTheProducer)
+		{
+			using FallbackCatalog::NoPairCause;
+			VpMotion::VectorEngine engine;
+			auto producer = std::make_shared<MotionAhead::Producer>();
+			Trace trace;
+			Gate gate;
+			std::atomic<bool> fail{ false };
+			Assert::IsTrue(producer->StartForTest(Seam(trace, &gate, 1, &fail)));
+			engine.PublishProducer(producer);
+			AnalysisLumaSource luma;
+			producer->Submit(1, 1, luma);
+			Assert::IsTrue(gate.WaitEntered(), L"the worker is busy");
+			NoPairCause cause = NoPairCause::None;
+			PairFuture late = engine.RequestPair(Pair(4, 5));
+			Assert::IsTrue(engine.AwaitPair(late, 20.0, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::OnDemandLate);
+			gate.Open();
+			Assert::IsTrue(late.WaitFor(5000.0) && late.Get().status == Status::Late, L"the worker skipped it");
+			MotionAhead::FlowPtr served = engine.AwaitPair(engine.RequestPair(Pair(5, 6)), 5000.0, cause);
+			Assert::IsTrue(served != nullptr && served->halfW == 6 && cause == NoPairCause::None);
+			Assert::IsTrue(engine.AwaitPair(engine.RequestPair(Pair(5, 6)), 5000.0, cause) != nullptr, L"from the slot");
+			fail = true;
+			Assert::IsTrue(engine.AwaitPair(engine.RequestPair(Pair(6, 7)), 5000.0, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::OnDemandUnavailable, L"a failed run");
+			producer->Stop();
+			for (long long v : trace.Order())
+				Assert::IsTrue(v != -5, L"the abandoned request did no engine work");
+			const VpMotion::VectorEngine::OnDemandCounters c = engine.OnDemandReads();
+			Assert::AreEqual(4ull, c.requests);
+			Assert::AreEqual(1ull, c.late);
+			Assert::AreEqual(1ull, c.served);
+			Assert::AreEqual(1ull, c.fromSlot);
+			Assert::AreEqual(1ull, c.unavailable);
+			Assert::AreEqual(c.requests, c.served + c.fromSlot + c.late + c.unavailable + c.noBudget, L"each counted once");
+		}
+
 		// W2-C5b commit 2 (hardware, NVIDIA): a request's Flow is byte-equal to the look-ahead job's for the same pair - Adopt, Chain
 		// and OffChain alike - and all of it runs on the ONE engine session (NvOpticalFlow::Sessions: one Engine, no violation). The
 		// off-chain textures are declared (VramUsers) only once an off-chain request was served.
@@ -495,7 +739,36 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1ull, s.adoptRuns);
 			Assert::AreEqual(3ull, s.chainRuns);
 			Assert::AreEqual(1ull, s.offChainRuns);
+			// A cold (no temporal hints) (3,4) for the walk check below: off the chain, the chain holds 5.
+			producer.Prune(5);   // pairs ending before 5 leave the slot
+			Assert::IsTrue(producer.Take(3, 4) == nullptr);
+			const PairResult cold = ask(3, 4);
+			Assert::IsTrue(cold.status == Status::Ready && cold.flow);
 			producer.Stop();
+
+			// Audit SHOULD 10: the walk keeps submitting while a request runs off its chain; the walk's next pair is still right
+			// (byte-equal to the cold pair: the off-chain run reset the hints, counted as hintsLost) and nothing else moved.
+			{
+				MotionAhead::Producer walk;
+				Assert::IsTrue(walk.Start(device, NvOpticalFlow::Preset::Medium));
+				for (uint64_t f = 1; f <= 3; ++f) walk.Submit(f, generation, source(f));
+				Assert::IsTrue(waitPairs(walk, 2), L"the walk paired (1,2) (2,3)");
+				PairRequest rq = Pair(1, 3, generation, 2000.0);
+				rq.lumaFrom = source(1);
+				rq.lumaTo = source(3);
+				PairFuture gap = walk.Request(rq);
+				walk.Submit(4, generation, source(4));   // queued behind the request
+				Assert::IsTrue(gap.WaitFor(5000.0) && gap.Get().status == Status::Ready, L"the gap pair was served");
+				Assert::IsTrue(waitPairs(walk, 3), L"the walk paired (3,4)");
+				const MotionAhead::FlowPtr walked = walk.Take(3, 4);
+				Assert::IsTrue(walked && same(*walked, *cold.flow), L"the walk's next pair is byte-equal to the cold pair");
+				Assert::IsTrue(walk.Take(2, 3) != nullptr && walk.Take(1, 3) == nullptr, L"the walk's pairs stay; the gap pair is returned only");
+				const MotionAhead::Producer::RequestStats w = walk.GetRequestStats();
+				Assert::AreEqual(1ull, w.offChainRuns);
+				Assert::AreEqual(0ull, w.chainRuns + w.adoptRuns + w.forcedOffChain);
+				Assert::AreEqual(1ull, w.hintsLost);
+				walk.Stop();
+			}
 			Assert::AreEqual(1, NvOpticalFlow::Sessions::Peak(NvOpticalFlow::SessionKind::Engine, 0), L"one engine session at a time (the peak: the walk stopped before the request producer started)");
 			Assert::AreEqual<unsigned long long>(0, NvOpticalFlow::Sessions::Violations(), L"never a second session");
 			char line[200];
