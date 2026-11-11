@@ -116,13 +116,13 @@
    "baseline_duplicates": 18,
    "known_false_positive": [
     {
-     "file": "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
+     "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
      "pattern": "DOWNSAMPLE_BODY|MotionWarp::Downsample|FADE_APPLY|Downsample\\(",
      "kind": "residual",
      "reason": "matcher half-resolution downsample: GLSL float 2x2 sum with the M4 fade gain applied in the same pass; byte identity needs a GPU run and the vector-suite identity proof (doc 62 order 9), not available in this wave"
     },
     {
-     "file": "src/VP-V/modules/motion/vector_delivery/DejudderWarp.h",
+     "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h",
      "pattern": "Downsample\\(",
      "kind": "residual",
      "reason": "matcher half-resolution downsample: GLSL float 2x2 sum with the M4 fade gain applied in the same pass; byte identity needs a GPU run and the vector-suite identity proof (doc 62 order 9), not available in this wave"
@@ -256,13 +256,13 @@
      "reason": "histogram of optical-flow MATCH COSTS (median and MAD of the cost), not a luma histogram"
     },
     {
-     "file": "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
+     "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
      "pattern": "settings\\.cutHistogram",
      "kind": "false_positive",
      "reason": "uniform feed of the dejudder_cut_histogram setting into the trust pass; the M3 histogram GLSL and its CPU twin are SourceStats::CoarseHistBody / CoarseL1 and the cut rule is CutFadeJudge::TrustCut"
     },
     {
-     "file": "src/VP-V/modules/motion/vector_delivery/DejudderWarp.h",
+     "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h",
      "pattern": "cutHistogram",
      "kind": "false_positive",
      "reason": "the dejudder_cut_histogram setting (threshold handed to CutFadeJudge::TrustCut / the unit's trust cut lines); no histogram computation here"
@@ -396,13 +396,13 @@
    "baseline_duplicates": 0,
    "known_false_positive": [
     {
-     "file": "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
+     "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
      "pattern": "PictureArea\\(\\)|settings\\.pictureArea",
      "kind": "false_positive",
      "reason": "dispatcher / gate of the unit's rect pass (kernel text is PictureRect::KernelHeader/KernelBody)"
     },
     {
-     "file": "src/VP-V/modules/motion/vector_delivery/DejudderWarp.h",
+     "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h",
      "pattern": "pictureArea|PictureArea\\(\\)",
      "kind": "false_positive",
      "reason": "setting flag or texture binding of the unit's rect pass; the PICTURE kernel and its law moved to VpUnit::PictureRect"

@@ -21,7 +21,7 @@
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/motion/estimation/MotionEngineIdle.h>
 #include <VP-V/modules/motion/consumers/DejudderAhead.h>
-#include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
+#include <VP-V/modules/motion/estimation/matcher/DejudderWarp.h>
 #include <VideoFrameEncoding.h>
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 

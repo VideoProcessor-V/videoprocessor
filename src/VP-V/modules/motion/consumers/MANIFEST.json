@@ -7,7 +7,8 @@
   "code_location": "partly migrated",
   "live_files": [
     "src/VP-V/modules/motion/consumers/TemporalHistoryPolicy.h",
-    "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
+    "src/VP-V/core/VectorScale.h",
+    "src/VP-V/modules/motion/consumers/DejudderPolicy.h",
     "src/VP-V/modules/motion/consumers/DejudderAhead.h",
     "src/VP-V/modules/motion/consumers/RenderedWarp.cpp",
     "src/VP-V/modules/motion/consumers/FrameInterpolator.cpp",
@@ -47,6 +48,7 @@
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/DejudderAhead.h",
+    "src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h",
     "src/VideoProcessor-Lib/vprenderer/FrameInterpolator.h",
     "src/VideoProcessor-Lib/vprenderer/InterpolationPolicy.h",
     "src/VideoProcessor-Lib/vprenderer/InterpolationTimeline.h",

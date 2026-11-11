@@ -25,7 +25,7 @@
 #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
 #include <VP-V/modules/motion/estimation/MotionEngineIdle.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
-#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
+#include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 
 #include <cstdarg>
 #include <cstdint>

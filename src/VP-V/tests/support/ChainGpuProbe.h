@@ -25,7 +25,7 @@
 #include "ExtendedRangeGpuProbe.h"
 
 #include <VP-V/modules/scaling/output/AdaptiveDownscale.h>
-#include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
+#include <VP-V/modules/motion/estimation/matcher/DejudderWarp.h>
 #include <vprenderer/HookInstanceTag.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/output/dither/OutputEncodingRepair.h>

@@ -32,7 +32,7 @@
 #include <DebugLog.h>
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
-#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
+#include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <vprenderer/RendererExtension.h>
 
 namespace MotionAhead

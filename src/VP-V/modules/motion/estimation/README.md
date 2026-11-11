@@ -8,7 +8,7 @@ Estimate motion on the ORIGINAL frame (source raster, before re-base/repair) wit
 
 ## How the code works
 
-Checked against the code 2026-10-25 (M2 pass). The estimator itself (`Dejudder::MotionWarp::Estimate` and its searches) is compiled from `src/VP-V/modules/motion/consumers/DejudderWarp.cpp`, with its class in `src/VP-V/modules/motion/vector_delivery/DejudderWarp.h`; the renderer host (`src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp`) owns every instance and wires the settings, the producer and the validity state.
+Checked against the code 2026-10-25 (M2 pass). The estimator itself (`Dejudder::MotionWarp::Estimate` and its searches) is compiled from `src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp`, with its class in `src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h`; the renderer host (`src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp`) owns every instance and wires the settings, the producer and the validity state.
 
 ### Public API
 
@@ -71,7 +71,7 @@ None of this module's downgrades engages a "Fallbacks engaged" entry today; all 
 - Pure, CPU-only (C++ standard library): `MotionAhead.h` (needs `GeneralRate.h`), `VectorStore.h`, `OpticalFlowTrust.h`, `MotionValidity.h`, `MotionEngineIdle.h`.
 - `NvOpticalFlow.*`: Windows, D3D11, ATL, the `3rdparty/nvidia-optical-flow` headers, an NVIDIA driver at run time.
 - `MotionAheadProducer.*`: the above plus `AnalysisLumaSource.h` (VideoProcessor-Lib) and DXGI.
-- The estimator: libplacebo (`pl_gpu`, D3D11 interop), `DejudderPolicy.h`, `DejudderWarp.h`, `GeneralScale`; it is one class with the consumers' warp, so it lifts with `motion.consumers` unless split.
+- The estimator: libplacebo (`pl_gpu`, D3D11 interop), `consumers/DejudderPolicy.h`, `matcher/DejudderWarp.h`, `GeneralScale`; it is one class with the consumers' warp, so it lifts with `motion.consumers` unless split.
 - The host wiring (producer start/stop, submit, validity causes, settings) stays in the renderer until the M2 adapter.
 
 ### Test it standalone
@@ -292,7 +292,9 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 
 - `src/VP-V/modules/motion/estimation/NvOpticalFlow.cpp`
 - `src/VP-V/modules/motion/estimation/NvOpticalFlow.h`
-- `src/VP-V/modules/motion/consumers/DejudderWarp.cpp`
+- `src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp`
+- `src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h`
+- `src/VP-V/modules/motion/estimation/MotionSegment.h` (forwarder at the old `motion/vector_delivery/MotionSegment.h` path until the next Bill-merge window)
 - `src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp`
 - `src/VP-V/modules/motion/estimation/MotionAhead.h`
 - `src/VP-V/modules/motion/estimation/VectorStore.h`

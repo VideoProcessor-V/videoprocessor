@@ -22,7 +22,7 @@
 #include <VP-V/modules/motion/estimation/MotionResyncReaders.h>
 #include <VP-V/modules/motion/consumers/InterpolationPolicy.h>
 #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
-#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
+#include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <vprenderer/DisplayRateHold.h>
 
 #include <atomic>

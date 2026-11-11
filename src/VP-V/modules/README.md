@@ -43,7 +43,7 @@ The tree mirrors `docs/design/slots.json`. The master component list is
 | 100 | 4K route (entrance stage 2b) (`scaling.route_4k`) | input | front_end | placeholder | [scaling/route_4k](scaling/route_4k/README.md) |
 | 110 | Refine net (`scaling.refine`) | input | front_end | placeholder | [scaling/refine](scaling/refine/README.md) |
 | 120 | Chroma upscale (placeholder) (`scaling.chroma_upscale`) | input | front_end | placeholder | [scaling/chroma_upscale](scaling/chroma_upscale/README.md) |
-| 130 | Vector delivery (`motion.vector_delivery`) | processing | host | partial | [motion/vector_delivery](motion/vector_delivery/README.md) |
+| 130 | Vector delivery (`motion.vector_delivery`) | processing | host | partial | [motion/consumers](motion/consumers/README.md) (folded, W0-1) |
 | 140 | Motion consumers (`motion.consumers`) | processing | front_end | built | [motion/consumers](motion/consumers/README.md) |
 | 150 | Geometry (`scaling.geometry`) | processing | libplacebo | built | [scaling/geometry](scaling/geometry/README.md) |
 | 160 | Output scaling (hybrid SSIM + D) (`scaling.output`) | processing | libplacebo | partial | [scaling/output](scaling/output/README.md) |

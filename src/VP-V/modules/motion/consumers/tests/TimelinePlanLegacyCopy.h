@@ -14,7 +14,7 @@
 #include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
 #include <VP-V/modules/motion/consumers/InterpolationPolicy.h>
 #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
-#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
+#include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 
 #include <atomic>
 #include <cstdarg>
