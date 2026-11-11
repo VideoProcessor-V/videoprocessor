@@ -111,7 +111,9 @@ No `VP_*` variable changes the module's behaviour.
   B4 S2 (doc 96 section 4): `NoteRenderOnlyMs` passes the span to the regulator only with `SetRegulatorGate(RegulatorGate::Act)`. The
   default gate is Observe: the span is recorded (`TimingFeed::noted`, `notedMsSum`, `lastNotedMs`; the `skeleton_regulator` entry says
   "observe only (gate): N host-measured render-only frame(s) recorded"; Ctrl+Alt+D "Skeleton regulator gate: observe ...") and nothing is shed,
-  until the owner decides the regulator's role.
+  until the owner decides the regulator's role. B4 S3: a step-down taken without the feed (indicator change, cut, storm hold) recovers after one
+  regulator window of rendered frames with no feed and no hold (`Regulator::OnUnfedFrame`, called by `AnalysisLane::OnRenderStart`); before, it
+  stayed (a standing "forced live") until a graph rebuild, which a FULL resync does not cause.
 * **Audit fixes (stage A-C).** The lane-lead window is timestamped: every `CollectAhead` call is one sample, the window is the last 0.5 s of REAL time
   whatever the call rate (call contract: any thread, any rate; a host that stops calling leaves the last value, which then ages out through the starve peak).
   The starve peak is the best lead of the last 10 s (it decays to the lead in use; not a permanent high-water mark). The render-ahead term is unwired

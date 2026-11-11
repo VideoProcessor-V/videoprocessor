@@ -142,12 +142,14 @@ public:
         pinned_ = false;
         lastSeq_ = 0;
         traceCount_ = 0;
+        unfedFrames_ = 0;
     }
 
     // ---- per frame ------------------------------------------------------------------------------
     void OnFrame(uint64_t seq, double slackMs, double renderOnlyMs, bool deadlineMissed)
     {
         lastSeq_ = seq;
+        unfedFrames_ = 0;
         if (windowFrames_ == 0)
             return;
         slack_.push_back(deadlineMissed && slackMs > 0.0 ? 0.0 : slackMs);
@@ -171,6 +173,28 @@ public:
     }
 
     void OnCut() { StepDown(RegAction::StepDownCut); }
+
+    // B4 S3 (doc 96 section 1 FINDING): a step-down taken WITHOUT the feed (an indicator change, a cut, a storm
+    // hold) has no window to recover in, since only EndWindow grows and it needs OnFrame. Called once per
+    // rendered frame: after a window's worth of frames with no OnFrame and no hold in force, the lane level
+    // returns to full (the products are restored, traced). A fed regulator resets the count every frame, so its
+    // behaviour is unchanged.
+    void OnUnfedFrame(bool held)
+    {
+        if (windowFrames_ == 0)
+            return;
+        if (held) {
+            unfedFrames_ = 0;
+            return;
+        }
+        if (++unfedFrames_ < windowFrames_)
+            return;
+        unfedFrames_ = 0;
+        if (lane_ < laneSteps_)
+            SetLane(uint16_t(laneSteps_), RegAction::Grow, false);
+    }
+    // Frames since the last OnFrame (B4 S3).
+    uint64_t UnfedFrames() const { return unfedFrames_; }
 
     // Per-window lateness delta of a laned product (from the runner/slot counters).
     void OnLaneLate(ProductId id, uint32_t lateFrames)
@@ -553,6 +577,7 @@ private:
     uint64_t lastSeq_ = 0;
     std::array<RegTrace, kTraceCapacity> trace_{};
     uint64_t traceCount_ = 0;
+    uint64_t unfedFrames_ = 0;   // rendered frames since the last OnFrame (B4 S3)
 };
 
 } // namespace VpSkeleton

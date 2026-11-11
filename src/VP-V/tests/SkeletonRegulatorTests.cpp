@@ -505,5 +505,51 @@ namespace SkeletonRegulatorTestsNs
 			Assert::AreEqual(std::string("source_stats_walk"), w.id);
 			Assert::IsTrue(w.reason.find("original walk") != std::string::npos);
 		}
+
+		// B4 S3 (doc 96 section 1 FINDING): a FULL change with no feed floors the ladder with no window (budget 0), so an
+		// identical product is forced live; only EndWindow grows, and it never runs unfed. OnUnfedFrame restores it after a
+		// window of frames without a feed, never while a hold is in force.
+		TEST_METHOD(AnUnfedStepDownRecoversAfterAWindowWithoutTheFeed)
+		{
+			using namespace VpIndicator;
+			Regulator r;
+			r.Configure(Products(), kPeriod, true);   // deterministic: no drop, so the shed identical product is forced live
+			Assert::AreEqual(size_t(2), r.T0StepCount());
+			const uint16_t full = r.LaneLevel();
+			Assert::AreEqual(uint16_t(3), full);
+			r.OnIndicatorChange(Bit(kFull));
+			Assert::AreEqual(uint16_t(2), r.LaneLevel());
+			Assert::IsTrue(r.StateOf(2) == ProductState::ForcedLive, L"no window: budget 0, the identical product cannot move");
+			Assert::IsTrue(r.Notice().find("forced live") != std::string::npos, L"the notice the defect left standing");
+			for (size_t i = 0; i < 3 * r.WindowFrames(); ++i)
+				r.OnUnfedFrame(true);
+			Assert::AreEqual(uint16_t(2), r.LaneLevel(), L"a hold in force keeps the floor");
+			for (size_t i = 0; i + 1 < r.WindowFrames(); ++i)
+				r.OnUnfedFrame(false);
+			Assert::AreEqual(uint16_t(2), r.LaneLevel(), L"not before a whole window");
+			r.OnUnfedFrame(false);
+			Assert::AreEqual(full, r.LaneLevel(), L"restored after a window without the feed");
+			Assert::IsTrue(r.StateOf(2) == ProductState::Laned);
+			Assert::IsTrue(r.ForcedLiveIds().empty());
+			Assert::IsTrue(r.Notice().empty(), L"no stale forced-live notice");
+			Assert::AreEqual(size_t(1), CountAction(r, RegAction::Restore));
+		}
+
+		TEST_METHOD(AFedRegulatorIsNeverRestoredByTheUnfedPath)
+		{
+			using namespace VpIndicator;
+			Regulator r;
+			r.Configure(Products(), kPeriod, true);
+			uint64_t seq = 0;
+			r.OnIndicatorChange(Bit(kFull));
+			for (size_t i = 0; i < 3 * r.WindowFrames(); ++i)
+			{
+				r.OnUnfedFrame(false);
+				r.OnFrame(seq++, 0.0, 5.0, false);   // fed, every window low
+				Assert::IsTrue(r.UnfedFrames() == 0);
+			}
+			Assert::IsTrue(r.LaneLevel() < 2, L"the fed windows back off as before");
+			Assert::AreEqual(size_t(0), CountAction(r, RegAction::Grow), L"nothing restored by the unfed path");
+		}
 	};
 }

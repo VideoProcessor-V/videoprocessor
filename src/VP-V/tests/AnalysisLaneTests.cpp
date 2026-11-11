@@ -2038,5 +2038,31 @@ namespace AnalysisLaneTestsNs
 			const ResyncStress::Result a = ResyncStress::Run(777, 600, true);
 			Check(a);
 		}
+
+		// B4 S3: a FULL Advance with the regulator unfed (no OnFrameTiming) floors it; the lane restores it after one
+		// regulator window of rendered frames without a feed (before: it stayed floored until a graph rebuild).
+		TEST_METHOD(AnUnfedFullAdvanceRecoversWithoutAFeed)
+		{
+			Rig r;
+			r.Configure(LaneSettings::Mode::On, false);
+			r.lane.OnSourceFrame(r.View(0));
+			for (uint64_t s = 0; s < 10; ++s) {
+				r.Begin(s);
+				r.lane.OnFrameRetired(s, 0);
+			}
+			const Regulator& reg = r.lane.GetRegulator();
+			Assert::IsTrue(reg.Level() == reg.MaxLevel() && reg.MaxLevel() > reg.T0StepCount(), L"full level before");
+			r.ind.Advance(VpIndicator::kFull, Cause::LiveQueueReset, 10);
+			r.Begin(10);
+			r.lane.OnFrameRetired(10, 0);
+			Assert::IsTrue(reg.LaneLevel() == reg.T0StepCount(), L"floored without the feed");
+			const uint64_t w = reg.WindowFrames();
+			for (uint64_t s = 11; s < 11 + w; ++s) {
+				r.Begin(s);
+				r.lane.OnFrameRetired(s, 0);
+			}
+			Assert::IsTrue(reg.Level() == reg.MaxLevel(), L"restored after a window without the feed");
+			Assert::IsTrue(reg.Notice().empty());
+		}
 	};
 }

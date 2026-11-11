@@ -777,6 +777,7 @@ public:
             observedOnce_ = true;
             ApplyStorm();
         }
+        regulator_.OnUnfedFrame(stormHold_);   // B4 S3: an unfed step-down recovers (no-op while fed)
         ApplyRegulator(*st);
         if (seq < st->firstSeq)
             return empty_;
