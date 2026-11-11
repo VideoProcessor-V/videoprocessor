@@ -49,6 +49,7 @@ namespace TemporalDetail
 		struct Stats
 		{
 			uint64_t hits = 0, absent = 0, stale = 0, unfit = 0;   // absent = not in the slot; stale = epoch moved; unfit = size unknown / mismatched
+			uint64_t fbErrorComputed = 0;   // W1-C3: FbError worked out here (the backward direction, or a pair without the producer's extras)
 		};
 
 		// view: the engine's P2 view. validity: its vectors-valid state (null = trust the slot). The source size is needed to put the
@@ -96,10 +97,21 @@ namespace TemporalDetail
 			if (vec.size() < cells * 2 || cost.size() < cells)
 				return Absent(m_stats.unfit, "the pair has no vectors or costs");
 			// The de-judder's trust weights for this direction (OpticalFlowTrust), per cell.
-			std::vector<float> cellError, blockCost;
+			std::vector<float> cellErrorLocal, blockCost;
 			const std::vector<int16_t>& other = forward ? flow->backward : flow->forward;
-			if (other.size() < cells * 2 || !OpticalFlowTrust::FbError(vec, other, flow->gridW, flow->gridH, NvOpticalFlow::Engine::Grid, cellError))
+			if (other.size() < cells * 2)
 				return Absent(m_stats.unfit, "the pair has no vectors or costs");
+			// W1-C3: the forward direction's error is the producer's Flow::fbError (FbError(forward, backward), worked out once on its
+			// worker); the backward direction (fields swapped) has no producer extra and is computed here, as before.
+			const std::vector<float>* cellError = &cellErrorLocal;
+			if (forward && flow->fbError.size() == cells)
+				cellError = &flow->fbError;
+			else
+			{
+				++m_stats.fbErrorComputed;
+				if (!OpticalFlowTrust::FbError(vec, other, flow->gridW, flow->gridH, NvOpticalFlow::Engine::Grid, cellErrorLocal))
+					return Absent(m_stats.unfit, "the pair has no vectors or costs");
+			}
 			const int blocksX = (flow->halfW + MotionAhead::Flow::kBlockPx - 1) / MotionAhead::Flow::kBlockPx;
 			const int blocksY = (flow->halfH + MotionAhead::Flow::kBlockPx - 1) / MotionAhead::Flow::kBlockPx;
 			const size_t blocks = static_cast<size_t>(blocksX) * blocksY;
@@ -113,7 +125,7 @@ namespace TemporalDetail
 				return Absent(m_stats.unfit, "the pair has no vectors or costs");
 			// The engine's ONE per-cell trust (OpticalFlowTrust::CellTrust: the camera ahead fit calls the same function).
 			std::vector<float> cellTrust;
-			if (!OpticalFlowTrust::CellTrust(*costBlocks, blocksX, blocksY, cellError, flow->gridW, flow->gridH, NvOpticalFlow::Engine::Grid,
+			if (!OpticalFlowTrust::CellTrust(*costBlocks, blocksX, blocksY, *cellError, flow->gridW, flow->gridH, NvOpticalFlow::Engine::Grid,
 					MotionAhead::Flow::kBlockPx, m_consistencyPx, cellTrust))
 				return Absent(m_stats.unfit, "the pair has no vectors or costs");
 			const double scale = static_cast<double>(m_srcW) / flow->halfW;   // producer pixels -> source pixels

@@ -60,6 +60,10 @@ namespace MotionAhead
 		// motion layer (x, y, -, w = 1 when there is one), forward then backward. The
 		// de-judder takes them instead of its own global search when the pair came ahead.
 		float global[2][4] = {}, second[2][4] = {};
+		// W1-C3: global / second were worked out (FlowGlobals) and with which general_rate_fixes flag; a Flow built without them (a
+		// test, a replica) leaves globalSet false and every reader computes the vote itself, as before.
+		bool globalSet = false;
+		bool globalGeneral = true;
 		// The engine's extras as trust inputs (OpticalFlowTrust.h), worked out on the
 		// worker: the forward cost per de-judder block (blocks of kBlockPx half-size px,
 		// blocksX x blocksY) as a weight in [0, 1], and the engine's own forward/backward
@@ -164,6 +168,16 @@ namespace MotionAhead
 			second[1] = static_cast<float>((syBin - 2 * kRange) / 2.0);
 			second[3] = 1.0f;
 		}
+	}
+
+	// W1-C3: the pair's whole-frame motion both ways (Flow::global / second), worked out once on the producer's worker and flagged so
+	// readers (the FlowOf view: the camera ahead fit) take it instead of voting again.
+	inline void FlowGlobals(Flow& flow, bool general)
+	{
+		FlowGlobal(flow.forward, flow.forwardCost, flow.gridW, flow.gridH, flow.global[0], flow.second[0], general);
+		FlowGlobal(flow.backward, flow.backwardCost, flow.gridW, flow.gridH, flow.global[1], flow.second[1], general);
+		flow.globalSet = true;
+		flow.globalGeneral = general;
 	}
 
 	// The trust extras of one pair (Flow::costWeight, Flow::fbError) from its fields: the

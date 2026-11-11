@@ -702,6 +702,8 @@ namespace VpMotion
 		if (!flowLease_ || flowLease_->flow != flow || flowLease_->from != from || flowLease_->to != to || flowLease_->scale != scale)
 		{
 			auto lease = std::make_shared<FlowLease>();
+			++flowReads_.conversions;   // W1-C3: once per pair id (a repeated FlowOf of the same pair reuses the lease)
+			lease->computes = &flowTrustComputes_;
 			lease->flow = flow;
 			lease->from = from;
 			lease->to = to;
@@ -734,14 +736,76 @@ namespace VpMotion
 		out.engineH = flow->halfH;
 		out.from = from;
 		out.to = to;
+		// W1-C3: the producer's extras as they are (worked out once on its worker), never recomputed here.
+		out.haveGlobal = flow->globalSet;
+		out.globalGeneral = flow->globalGeneral;
+		for (int d = 0; d < 2; ++d)
+			for (int k = 0; k < 4; ++k)
+			{
+				out.global[d][k] = flow->global[d][k];
+				out.second[d][k] = flow->second[d][k];
+			}
+		if (flow->blocksX > 0 && flow->blocksY > 0 &&
+			flow->costWeight.size() == static_cast<size_t>(flow->blocksX) * static_cast<size_t>(flow->blocksY))
+		{
+			out.costWeight = flow->costWeight.data();
+			out.blocksX = flow->blocksX;
+			out.blocksY = flow->blocksY;
+		}
+		out.fbError = flow->fbError.size() == flowCells ? flow->fbError.data() : nullptr;
+		out.extrasBlockPx = MotionAhead::Flow::kBlockPx;
+		out.extrasCellPx = NvOpticalFlow::Engine::Grid;
+		out.extrasUnitsPerEnginePx = 32.0;   // FbError reads S10.5
+		out.trustMemo = flowLease_.get();
 		++flowReads_.served;
 		return true;
+	}
+
+	// W1-C3: the pair's cell trust, computed once per pair and tolerance (the same OpticalFlowTrust functions as every consumer used
+	// to call itself: the producer's CostWeights / FbError when it worked them out, else the same maths on the raw fields).
+	const float* VectorEngine::FlowLease::CellTrust(float toleranceEnginePx) const
+	{
+		std::lock_guard<std::mutex> lock(trustMutex);
+		if (trustDone && trustTolerance == toleranceEnginePx)
+			return trustOk ? trust.data() : nullptr;
+		trustDone = true;
+		trustTolerance = toleranceEnginePx;
+		trustOk = false;
+		trust.clear();
+		if (computes)
+			computes->fetch_add(1, std::memory_order_relaxed);
+		if (!flow)
+			return nullptr;
+		const MotionAhead::Flow& f = *flow;
+		const size_t cells = static_cast<size_t>(f.gridW > 0 ? f.gridW : 0) * static_cast<size_t>(f.gridH > 0 ? f.gridH : 0);
+		const int grid = NvOpticalFlow::Engine::Grid;
+		const int blockPx = MotionAhead::Flow::kBlockPx;
+		const int blocksX = (f.halfW + blockPx - 1) / blockPx, blocksY = (f.halfH + blockPx - 1) / blockPx;
+		std::vector<float> blockCostLocal, cellErrorLocal;
+		const std::vector<float>* blockCost = &f.costWeight;
+		if (!(f.blocksX == blocksX && f.blocksY == blocksY && f.costWeight.size() == static_cast<size_t>(blocksX) * static_cast<size_t>(blocksY)))
+		{
+			if (!OpticalFlowTrust::CostWeights(f.forwardCost, f.gridW, f.gridH, grid, blockPx, blocksX, blocksY, blockCostLocal))
+				return nullptr;
+			blockCost = &blockCostLocal;
+		}
+		const std::vector<float>* cellError = &f.fbError;
+		if (cells == 0 || f.fbError.size() != cells)
+		{
+			if (!OpticalFlowTrust::FbError(f.forward, f.backward, f.gridW, f.gridH, grid, cellErrorLocal))
+				return nullptr;
+			cellError = &cellErrorLocal;
+		}
+		trustOk = OpticalFlowTrust::CellTrust(*blockCost, blocksX, blocksY, *cellError, f.gridW, f.gridH, grid, blockPx, toleranceEnginePx, trust);
+		return trustOk ? trust.data() : nullptr;
 	}
 
 	VectorEngine::FlowReadCounters VectorEngine::FlowReads() const
 	{
 		std::lock_guard<std::mutex> lock(flowMutex_);
-		return flowReads_;
+		FlowReadCounters r = flowReads_;
+		r.trustComputes = flowTrustComputes_.load(std::memory_order_relaxed);
+		return r;
 	}
 
 	bool VectorEngine::PairSpansSlip(uint64_t from, uint64_t to) const
