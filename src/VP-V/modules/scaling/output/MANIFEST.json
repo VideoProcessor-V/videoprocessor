@@ -17,7 +17,8 @@
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h",
-    "src/VideoProcessor-Lib/vprenderer/DownscaleLight.h"
+    "src/VideoProcessor-Lib/vprenderer/DownscaleLight.h",
+    "src/VideoProcessor-Lib/vprenderer/NlsMaskMapping.h"
   ],
   "components": {
     "files": {

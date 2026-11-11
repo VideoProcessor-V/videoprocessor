@@ -112,7 +112,7 @@ The listed entry `Motion consumers: no-motion form (vectors invalid / short queu
 
 ### What is needed to lift it
 
-libplacebo (gpu, dispatch, renderer, shaders), D3D11 (the optical-flow engine path in `DejudderWarp.cpp`), `../estimation/matcher/DejudderWarp.h` and `DejudderPolicy.h` (this folder), `../estimation/NvOpticalFlow.h`, `MotionAhead.h`, `OpticalFlowTrust.h`, `VP-V/modules/scaling/geometry/NlsMaskMapping.h`, `GeneralRate.h`, the grain helpers (`GrainPreserve`). The pure headers (`InterpolationPolicy.h`, `InterpolationTimeline.h`, `DejudderAhead.h`) need only the standard library (InterpolationPolicy also `DejudderPolicy.h`).
+libplacebo (gpu, dispatch, renderer, shaders), D3D11 (the optical-flow engine path in `DejudderWarp.cpp`), `../estimation/matcher/DejudderWarp.h` and `DejudderPolicy.h` (this folder), `../estimation/NvOpticalFlow.h`, `MotionAhead.h`, `OpticalFlowTrust.h`, `VP-V/modules/scaling/output/NlsMaskMapping.h`, `GeneralRate.h`, the grain helpers (`GrainPreserve`). The pure headers (`InterpolationPolicy.h`, `InterpolationTimeline.h`, `DejudderAhead.h`) need only the standard library (InterpolationPolicy also `DejudderPolicy.h`).
 
 ### Test it standalone
 

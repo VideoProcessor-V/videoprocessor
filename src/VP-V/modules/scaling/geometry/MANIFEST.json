@@ -15,9 +15,7 @@
     "shaders/NLS.glsl",
     "shaders/NLSPlus.glsl"
   ],
-  "forwarding_headers": [
-    "src/VideoProcessor-Lib/vprenderer/NlsMaskMapping.h"
-  ],
+  "forwarding_headers": [],
   "components": {
     "files": {
       "required": [
