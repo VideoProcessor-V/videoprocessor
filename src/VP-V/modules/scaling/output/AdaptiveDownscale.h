@@ -3,7 +3,7 @@
 #include <libplacebo/renderer.h>
 #include <libplacebo/shaders.h>
 
-#include <VP-V/modules/scaling/geometry/NlsMaskMapping.h>
+#include <VP-V/modules/scaling/output/NlsMaskMapping.h>
 #include <VP-V/modules/drive/led_measure/ReadbackRing.h>
 
 #include <algorithm>

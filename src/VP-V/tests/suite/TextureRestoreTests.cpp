@@ -7,7 +7,7 @@
 #include <VP-V/modules/repair/texture_restore/TextureRestore.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 
-#include <VP-V/modules/control/gpu_memory/PlTexBackend.h>
+#include <VP-V/modules/control/skeleton/PlTexBackend.h>
 
 #include <libplacebo/dispatch.h>
 

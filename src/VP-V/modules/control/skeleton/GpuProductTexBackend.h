@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-#include <VP-V/modules/control/gpu_memory/PlTexBackend.h>
+#include <VP-V/modules/control/skeleton/PlTexBackend.h>
 
 #include <libplacebo/gpu.h>
 

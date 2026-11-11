@@ -102,7 +102,7 @@ released live buffer; ring and live pool are separate memory (a lane costs its w
 
 ## GPU allocator (SA1)
 
-`GpuAllocator.h` / `ScratchArena.h`: the shared scratch arena (per-render temporaries, capacity = busiest scope per texture shape), `ProductTextures` (ring + live pool from a declared layout that must equal the product's `SizeRule`), the arena as governor user `kUserScratchArena`, `Residency::Transient` (not a ring product) and `VramLedgerLines` for Ctrl+Alt+D. Details and call sites: `modules/control/gpu_memory/README.md`. `kP10GrainSplit` (SA2) is the only product added after the camera products; SA0 adopts its declaration.
+`GpuAllocator.h` / `ScratchArena.h`: the shared scratch arena (per-render temporaries, capacity = busiest scope per texture shape), `ProductTextures` (ring + live pool from a declared layout that must equal the product's `SizeRule`), the arena as governor user `kUserScratchArena`, `Residency::Transient` (not a ring product) and `VramLedgerLines` for Ctrl+Alt+D. Details and call sites: the "GPU memory" section of `modules/control/skeleton/README.md`. `kP10GrainSplit` (SA2) is the only product added after the camera products; SA0 adopts its declaration.
 
 ## Seal and graph capabilities (W1-SKG, doc 72 section 5 items 1-4)
 

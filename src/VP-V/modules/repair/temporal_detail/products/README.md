@@ -54,7 +54,7 @@ table (short-queue substitutes for the lead edges).
 
 **Repair-stack order (WP9) recorded here: TD -> deband -> contrast recovery** (today's text: deband -> TD -> CR). Deband becomes the fallback layer under
 temporal detail: it reads `td.maps` validity and stability (and `coding_evidence` for its blocking need) so a TD-covered block is not debanded twice; with the
-products absent (reset 1) it debands everywhere exactly as today. The order table is now an explicit, tested declaration: `repair/stack/RepairStackOrder.h` (wave S2; `VpDebander::Module::StackPlan()` / `StackStatusLine()` give the plan and the visible fallback-layer line).
+products absent (reset 1) it debands everywhere exactly as today. The order table is now an explicit, tested declaration: `repair/RepairStackOrder.h` (wave S2; `VpDebander::Module::StackPlan()` / `StackStatusLine()` give the plan and the visible fallback-layer line).
 
 ## Status and fallbacks
 

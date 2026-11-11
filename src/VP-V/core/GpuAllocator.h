@@ -17,7 +17,7 @@
 
 // Skeleton SA1: the GPU allocator core (doc 51 section 3, P10 / arena). Two things live here, both pure
 // C++14 (no Windows, no GPU, no libplacebo; a Backend template creates the real textures, see
-// modules/control/gpu_memory/PlTexBackend.h):
+// modules/control/skeleton/PlTexBackend.h):
 //
 //   1. The SCRATCH ARENA plan: per-render temporaries (row passes, bands, quiet maps, half-resolution
 //      work textures) are requested per SCOPE (one render stage = one scope). Scopes run one after the

@@ -3,7 +3,7 @@
 #include <libplacebo/dispatch.h>
 #include <libplacebo/renderer.h>
 
-#include <VP-V/modules/scaling/geometry/NlsMaskMapping.h>
+#include <VP-V/modules/scaling/output/NlsMaskMapping.h>
 #include <VP-V/modules/motion/estimation/matcher/DejudderWarp.h>
 
 #include <array>

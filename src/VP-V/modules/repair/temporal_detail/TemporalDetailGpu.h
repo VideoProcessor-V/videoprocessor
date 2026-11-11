@@ -30,7 +30,7 @@
 #pragma once
 
 #include <VP-V/core/ScratchArena.h>
-#include <VP-V/modules/control/gpu_memory/PlTexBackend.h>
+#include <VP-V/modules/control/skeleton/PlTexBackend.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 #include <VP-V/modules/repair/grain_split/GrainNode.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>

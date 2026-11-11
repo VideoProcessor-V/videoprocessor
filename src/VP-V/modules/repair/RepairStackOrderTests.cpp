@@ -10,7 +10,7 @@
 
 #include <VP-V/core/ProductCatalog.h>
 #include <VP-V/modules/repair/deband/VpDebander.h>
-#include <VP-V/modules/repair/stack/RepairStackOrder.h>
+#include <VP-V/modules/repair/RepairStackOrder.h>
 
 #include <array>
 #include <string>
