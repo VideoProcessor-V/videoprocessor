@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Hook-gating checker (owner directive 2026-11-11: a VP-V call site in a Bill file does NOTHING in the Original pathway).
 
-Usage: python -I tools/check_hook_gating.py [--base-ref a591ad3b5] [--root PATH] [--rev TIP] [--files F...] [--json]
-                                            [--fail-untagged] [--no-git]
+Usage: python -I tools/check_hook_gating.py [--base-ref a591ad3b5] [--root PATH] [--rev TIP] [--since MERGE-BASE]
+                                            [--files F...] [--json] [--fail-untagged] [--no-git]
+
+--base-ref is BILL's tip (the file-ownership baseline; a ref whose tree contains src/VP-V/ is refused). To see only
+what a branch ADDED, use --since <merge-base> (hits, untagged lines and new sites on added lines only).
 
 Bill-owned files = the files present at --base-ref (Bill's tip, the vp_footprint.py convention: every file
 outside src/VP-V/) that are production code (vp_footprint.bucket_of == "production"; tests and project files
@@ -923,8 +926,21 @@ def all_code_files(root):
     return out
 
 
-def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None):
+def bill_tip_check(root, base_ref):
+    """--base-ref must be BILL's tip (no src/VP-V/ in its tree); a merge base of ours is the wrong ref (use --since)."""
+    try:
+        names = git(["ls-tree", "-d", "--name-only", base_ref, "--", "src/VP-V"], root).strip()
+    except RuntimeError:
+        return None
+    return "src/VP-V" in names
+
+
+def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, since=None):
     tree = Tree(root, rev)
+    if not no_git and bill_tip_check(root, base_ref):
+        raise SystemExit("--base-ref %s has src/VP-V/ in its tree: it is one of OUR tips, not Bill's baseline (a591ad3b5). "
+                         "To report only what a branch ADDED since a merge base, use --since <merge-base> (the Bill baseline stays "
+                         "--base-ref)." % base_ref)
     vp_slots = vp_slots_from(tree)
     gated = gated_markers(tree, tree.code_files())
     allow_used = {}
@@ -967,14 +983,32 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None):
     stale = [("callee", k) for k in range(len(ALLOW_CALLEES)) if ("callee", k) not in allow_used] + \
             [("site", k) for k in range(len(ALLOW_SITES)) if ("site", k) not in allow_used]
     sc = site_checks(tree, per_file)
+    since_added = None
+    if since and not no_git:
+        try:
+            d = vp_footprint.parse_diff(git(["diff"] + vp_footprint.DIFF_ARGS + ["-U0", since] + ([rev] if rev else []) +
+                                            ["--", "src", ":(exclude)src/VP-V"], root))
+            since_added = {k: set(v["added_lines"]) for k, v in d.items()}
+        except RuntimeError:
+            since_added = {}
+        def _new(s):
+            return s["line"] in since_added.get(s["file"], set())
+        def _new_site(s):
+            return any(n in since_added.get(s["file"], set()) for n in range(s["start"], s["end"] + 1))
+        hits = [h for h in hits if _new(h)]
+        unverified = [u for u in unverified if u["file"] in since_added and _new(u)]
+        untagged = [u for u in untagged if _new(u)]
+        sc["new"] = [x for x in sc["new"] if _new_site(x)]
+        sc["approved"] = [x for x in sc["approved"] if _new_site(x)]
     rc = 1 if (hits or unverified or (fail_untagged and untagged) or sc["new"] or sc["over"]) else 0
-    return {"base_ref": base_ref, "rev": rev, "vp_slots": sorted(vp_slots), "site_checks": sc, "gated": {k: list(v) for k, v in gated.items()},
+    return {"base_ref": base_ref, "rev": rev, "since": since, "vp_slots": sorted(vp_slots), "site_checks": sc, "gated": {k: list(v) for k, v in gated.items()},
             "files": per_file, "counts": counts, "hits": hits, "unverified": unverified, "untagged": untagged,
             "allowed": allowed, "allow_used": {"%s:%d" % k: v for k, v in allow_used.items()}, "stale_allow": stale, "rc": rc}
 
 
 def render(res):
-    out = ["hook gating: base %s, tree %s" % (res["base_ref"], res.get("rev") or "working tree")]
+    out = ["hook gating: base %s, tree %s%s" % (res["base_ref"], res.get("rev") or "working tree",
+                                                 (", only lines added since %s" % res["since"]) if res.get("since") else "")]
     c = res["counts"]
     hook_stmts = sum(v for k, v in c.items() if k != "declaration")
     for s in res["hits"]:
@@ -1032,10 +1066,12 @@ def main(argv=None):
     ap.add_argument("--fail-untagged", action="store_true")
     ap.add_argument("--no-git", action="store_true", help="no git: --files are the Bill-owned files; no untagged report")
     ap.add_argument("--rev", help="check this git revision's tree instead of the working tree (no checkout needed)")
+    ap.add_argument("--since", help="report only hits / untagged lines / new sites on lines ADDED since this ref (a merge base); "
+                                    "the budget still applies to the whole file")
     ap.add_argument("--write-manifest", action="store_true", help="(re)seed docs/audit/hook-sites.json from the tree")
     ap.add_argument("--write-budget", action="store_true", help="(re)seed docs/audit/hook-budget.json from the tree (ceilings = current counts)")
     args = ap.parse_args(argv)
-    res = run(args.root, args.base_ref, args.files, args.no_git, args.fail_untagged, args.rev)
+    res = run(args.root, args.base_ref, args.files, args.no_git, args.fail_untagged, args.rev, args.since)
     if args.write_manifest or args.write_budget:
         if args.rev:
             print("--write-* needs the working tree", file=sys.stderr)

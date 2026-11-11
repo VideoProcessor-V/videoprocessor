@@ -204,6 +204,20 @@ class CheckHookGatingTest(unittest.TestCase):
         self.assertIn("1 removed", out)
         self.assertIn("ratchet the ceiling down", out)
 
+    def test_since_a_merge_base_reports_only_added_lines_and_base_ref_refuses_our_tips(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = chg.main(["--root", ROOT, "--since", "HEAD"])
+        out = buf.getvalue()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("only lines added since HEAD", out)
+        self.assertIn(" 0 unguarded, 0 unverified markers", out)
+        self.assertIn(" 0 untagged", out)
+        with self.assertRaises(SystemExit) as cm:
+            with contextlib.redirect_stdout(io.StringIO()):
+                chg.main(["--root", ROOT, "--base-ref", "HEAD"])
+        self.assertIn("not Bill's baseline", str(cm.exception))
+
     def test_the_real_manifest_and_budget_match_the_tree(self):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
