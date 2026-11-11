@@ -68,6 +68,14 @@ The renderer host and Bill's files do the rest: they create the swapchain, prese
   - `dejudder_gate` (auto | period | refresh; `RenderAhead::ResolveGate`).
 - `queue_timing_fixes` is read here but owned by `input.queue_timing`. It selects the whole-Hz-last order and turns on the DWM grid refinement.
 - The refresh switch keys (`[general] switch_refresh_rate` and the `[display_refresh_rate_override]` section) are read by the GUI (VideoProcessorDlg.cpp), not by this module's files.
+- Analysis-floor controls (P6 rest S1; audit S2): no settings key; set by the TD/owner wiring, which has no production caller yet:
+  - `Presenter::floorPolicy` - no settings key; default `CreditWins`; set by the TD/owner wiring. `RaiseQueue` must be set together with
+    `VpQueueTiming::VpFixedBudgetPolicy::SetRaiseQueueForAnalysis(true)` (and `Presenter::queueCapacity`); the test
+    `TheTwoRaiseQueueSwitchesAgreeOnTheRaisedQueue` pins that both give the same raised queue, capped at the capacity.
+  - `Presenter::queueCapacity` - no settings key; default 0 (not known: no cap); set by the TD/owner wiring.
+  - `Presenter::spareSlotMs` - no settings key; default 0.0 (no spare-slot GPU work); set by the TD/owner wiring.
+  - `Presenter::analysisFloor` - fed by the host from `VpQueueRules::AnalysisFloorFrames`; the declared analysis lead the host passes is 0
+    today (LibplaceboVideoRenderer.cpp, the analysis-floor `// VPV-HOOK` block), so the floor is the motion look-ahead's alone.
 
 ### Original pathway (PHASE 1 of the host seams plan, refs/107 s2.4 item 1; owner E3 2026-11-11)
 

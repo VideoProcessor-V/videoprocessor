@@ -33,6 +33,18 @@ pathway = off), on the render thread. An invalid value keeps the default and is 
 `source_stats_walk` is a lane key (`LaneSettings::Parse`) that the module's key loop does not pass from the file yet (tests and tooling set it; the cfg key has no effect today). `skeleton_gpu_gap` and `grain_split_storage` are parsed in `SkeletonSettings.h` with the same problem-reporting style as the lane keys.
 `camera_link = report` only creates the camera link core and its status line; there is no vector engine yet, so it never feeds a consumer.
 
+Controls without a settings key (P6 rest audit S2): `SkeletonModule::SetRegulatorGate` - no settings key; default `Observe` (the
+host-measured render-only span is recorded and shown, the regulator is not fed); set by the TD/owner wiring (no production caller yet).
+`VpFixedBudgetPolicy::SetRaiseQueueForAnalysis` - no settings key; default off; set by the TD/owner wiring together with the presentation
+module's `Presenter::floorPolicy = RaiseQueue` (see output/presentation/README.md). The declared analysis lead the host feeds the analysis
+floor is 0 today.
+
+Host footprint with the lane or render_ahead off (P6 rest audit S5; not zero): the render-only span runs from `PassTimerHook::CpuBegin`
+(LibplaceboVideoRenderer.cpp, the render pass's CPU begin) to the render mark, so it is CPU time, not GPU time. Every refresh costs one
+extra QPC read for that span and one `RendererExtension::NotifyRenderTiming` fan-out to the registered extensions, even when
+`analysis_lane = off` and `render_ahead = off`; the module's handler then does one host lookup and returns (no lane bundle). The ledger
+line lists it as a per-refresh cost, not zero footprint; a timed measurement is still open.
+
 ## Environment and diagnostics
 
 | Name | Purpose | Default | Scope |
