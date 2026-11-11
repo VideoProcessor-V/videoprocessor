@@ -109,9 +109,10 @@ namespace VpQueueRules
 	{
 		if (!raiseAboveDesired || !queueTimingFixes)
 			return CombineQueueTarget(desired, credit, lookaheadFloor, queueTimingFixes);
-		const size_t target = credit > 0 && desired > 2 ? desired - (std::min)(credit, desired - 2) : desired;
+		// Never below today's rule (a capacity under the desired queue must not undo the capped floor).
+		const size_t today = CombineQueueTarget(desired, credit, lookaheadFloor, queueTimingFixes);
 		const size_t floor = capacity > 0 ? (std::min)(lookaheadFloor, capacity) : lookaheadFloor;
-		return (std::max)(target, floor);
+		return (std::max)(today, floor);
 	}
 
 	// Hunt 2 13-timing H1 (queue_timing_fixes): the front frame of a queue that

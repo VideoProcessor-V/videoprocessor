@@ -2529,6 +2529,14 @@ namespace RenderAheadPolicyTest
 			Assert::IsFalse(Presenter::FloorReport(floorWins, FloorPolicy::FloorWins).empty(), L"visible");
 			// The queue rule keeps the floor (capped at the target) in both.
 			Assert::AreEqual(q, VpQueueRules::CombineQueueTarget(q, credit.creditFrames, floorFrames, true));
+			// Audit SHOULD 2 (f445678ad cap, TD design (a)4): the floor the host now passes is capped at the desired queue (5 -> 4).
+			// CreditWins still fits (never a TD veto); FloorWins keeps its definition: credit q - max(4, 3) = 0 < 1 wanted, a veto.
+			const size_t capped = VpQueueRules::AnalysisFloorFrames(MotionAhead::QueueFramesFor(2), 3, q, false);
+			Assert::AreEqual(size_t{ 4 }, capped);
+			const BudgetDecision cappedCredit = FitDelayBudget(ps, pd, q, true, capped, FloorPolicy::CreditWins);
+			Assert::IsTrue(cappedCredit.fits && cappedCredit.floorCompetes);
+			Assert::AreEqual((4.0 * ps + 2.0 * pd) * 1000.0, cappedCredit.realTotalMs, 1e-9);
+			Assert::IsFalse(FitDelayBudget(ps, pd, q, true, capped, FloorPolicy::FloorWins).fits);
 		}
 
 		// S1 amendment (TD design (a)4/(b)6): the floor is capped at the desired queue (200 ms at
