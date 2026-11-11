@@ -15,6 +15,7 @@
     "src/VP-V/tests/PipelineSkeletonTests.cpp",
     "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
     "src/VP-V/modules/control/config/tests/ConfigIdentityDump.cpp",
+    "src/VP-V/modules/control/config/tests/VpvProfileQueueAdviceTests.cpp",
     "src/VideoProcessor-Lib/ConfigFile.cpp",
     "src/VideoProcessor-Lib/ConfigSchema.h",
     "src/VideoProcessor-Lib/MainConfigSchema.h",

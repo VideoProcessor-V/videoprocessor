@@ -182,6 +182,46 @@ namespace VideoProcessorTest
 			recorder.Stop(true);
 		}
 
+		// C15 (P14): the ONE recent-lines ring.
+		TEST_METHOD(OneRingKeepsSixHundredLinesStampedAndTrimmed)
+		{
+			for (int i = 0; i < 700; ++i)
+			{
+				char line[64];
+				snprintf(line, sizeof(line), "ringtest %d", i);
+				CrashState::RememberLine(line);
+			}
+			const auto all = CrashState::RecentLines(~0ull, 100000);
+			Assert::AreEqual(size_t(600), all.size(), L"the ring keeps the newest 600 lines");
+			Assert::IsTrue(all.back().size() > 13 && all.back().compare(13, std::string::npos, "ringtest 699") == 0,
+				L"newest last, text after the 13-character stamp");
+			const std::string& first = all.front();
+			Assert::IsTrue(first.size() > 13 && first[2] == ':' && first[5] == ':' && first[8] == '.' && first[12] == ' ',
+				L"HH:MM:SS.mmm stamp prefix");
+			for (const int i : { 0, 1, 3, 4, 6, 7, 9, 10, 11 })
+				Assert::IsTrue(first[i] >= '0' && first[i] <= '9', L"stamp digits");
+			const auto last5 = CrashState::RecentLines(~0ull, 5);
+			Assert::AreEqual(size_t(5), last5.size(), L"maxLines keeps the newest");
+			Assert::IsTrue(last5.back().find("ringtest 699") != std::string::npos);
+			Assert::IsTrue(last5.front().find("ringtest 695") != std::string::npos);
+			Sleep(80);
+			Assert::AreEqual(size_t(0), CrashState::RecentLines(5, 1000).size(), L"maxAgeMs drops older lines");
+			Assert::IsTrue(!CrashState::RecentLines(60000, 1000).empty());
+		}
+
+		TEST_METHOD(DebugLogFeedsTheRingThroughTheObserverEvenWithLoggingDisabled)
+		{
+			CrashState::InstallLogRing();
+			CrashState::InstallLogRing();   // idempotent
+			DebugLog::Log("ringtest observer marker %d", 7);
+			bool found = false;
+			for (const std::string& line : CrashState::RecentLines(60000, 1000))
+				found = found || line.find("ringtest observer marker 7") != std::string::npos;
+			Assert::IsTrue(found, L"a log line reaches the ring through DebugLog's observer hook (file logging off)");
+			CrashState::LogLineObserver(0, "ringtest direct 8");
+			Assert::IsTrue(CrashState::RecentLines(60000, 1).back().find("ringtest direct 8") != std::string::npos);
+		}
+
 		TEST_METHOD(MinidumpIsWrittenBesideTheState)
 		{
 			const std::string folder = TempFolder("dump");

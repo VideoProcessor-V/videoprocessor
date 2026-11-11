@@ -24,6 +24,7 @@ Public API (namespace `CrashState`):
 - `KeptNumbers(directory)`, `InstanceFileName(id, ext)`.
 - `Recorder`: `Start(directory, recentLines, periodMs = 1000, instanceId = 0)`, `SetValue(key, value)`, `WriteNow()`, `Stop(clean)`, `Text()`, `LivePath()`, `LiveDumpPath()`, `InstallCrashHandler()`, `WriteMinidump()`, `WriteFromHandler()`.
 - `Global()`: the process-wide recorder the app uses.
+- The one recent-lines ring (C15): `RememberLine(text)` (stamps "HH:MM:SS.mmm ", keeps the newest 600), `RecentLines(maxAgeMs = 5000, maxLines = 300)` (newest last), `LogLineObserver(level, text)` (the `DebugLog::LogObserver` callback) and `InstallLogRing()` (idempotent; puts the observer into DebugLog's single slot; the app calls it first, `Recorder::Start` calls it again).
 
 Data flow:
 
