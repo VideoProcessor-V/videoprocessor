@@ -53,6 +53,7 @@ namespace SourceIdentity
 			// shown while the rules are off (the lines stay byte identical).
 			bool safetyRules = false;
 			int latchNx = 0, latchNy = 0;
+			bool latchDeferred = false;     // N1: a starvation release of the latch waits for the next cut / black / fade
 			LatchCounters latch;
 		};
 
@@ -115,7 +116,8 @@ namespace SourceIdentity
 				if (!in.safetyRules)
 					return std::string();
 				if (in.latchNx > 0 && in.latchNy > 0)
-					return "; upscale latch " + std::to_string(in.latchNx) + "x" + std::to_string(in.latchNy);
+					return "; upscale latch " + std::to_string(in.latchNx) + "x" + std::to_string(in.latchNy) +
+						(in.latchDeferred ? " (release deferred to the next cut)" : "");
 				return "; no upscale latch";
 			}
 
@@ -247,11 +249,14 @@ namespace SourceIdentity
 			{
 				const LatchCounters& c = in.latch;
 				t += "  safety rules on: latch " + (in.latchNx > 0 && in.latchNy > 0 ? std::to_string(in.latchNx) + "x" + std::to_string(in.latchNy) :
-					std::string("none")) + ", entries " + std::to_string(c.entries) + ", moves " + std::to_string(c.moves) + ", confirms " +
-					std::to_string(c.confirms) + ", releases " + std::to_string(c.releases) + " (clock " + std::to_string(c.releasesBound) +
-					", hard bound " + std::to_string(c.releasesHardBound) + ", native " + std::to_string(c.releasesNative) + ", menu " +
-					std::to_string(c.releasesMenu) + ", ABR " + std::to_string(c.releasesAbr) + ", reset " + std::to_string(c.releasesReset) +
-					"), held back " + std::to_string(c.heldBack) + ", not conventional " + std::to_string(c.nonConventional) + "\n";
+					std::string("none")) + (in.latchDeferred ? " (release deferred to the next cut)" : "") + ", entries " +
+					std::to_string(c.entries) + ", moves " + std::to_string(c.moves) + ", confirms " +
+					std::to_string(c.confirms) + ", releases " + std::to_string(c.releases) + " (native " + std::to_string(c.releasesNative) +
+					", menu " + std::to_string(c.releasesMenu) + ", ABR " + std::to_string(c.releasesAbr) + ", reset " + std::to_string(c.releasesReset) +
+					", after a cut " + std::to_string(c.releasesAtCut) + ", ceiling " + std::to_string(c.releasesCeiling) + "), bounds reached (clock " +
+					std::to_string(c.releasesBound) + ", hard bound " + std::to_string(c.releasesHardBound) + "), deferred " + std::to_string(c.deferred) +
+					" (cancelled " + std::to_string(c.deferCancelled) + "), held back " + std::to_string(c.heldBack) + ", not conventional " +
+					std::to_string(c.nonConventional) + "\n";
 			}
 			if (!in.evidenceText.empty())
 				t += "  " + in.evidenceText + "\n";

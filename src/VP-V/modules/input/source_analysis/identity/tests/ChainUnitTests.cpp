@@ -2719,6 +2719,10 @@ namespace Tests
 				status[run] = est.StatusLine();
 				detail[run] = est.DetailText();
 				Assert::AreEqual<uint64_t>(0, est.GetCounters().latch.entries + est.GetCounters().latch.heldBack + est.GetCounters().latch.nonConventional);
+				// N1: off, nothing is deferred and the monitor's crossfade cue never moves.
+				Assert::AreEqual<uint64_t>(0, est.LatchCeilingReleases(), L"off: no ceiling release cue for the monitor");
+				Assert::AreEqual<uint64_t>(0, est.GetCounters().latch.deferred + est.GetCounters().latch.deferCancelled);
+				Assert::IsFalse(est.StatusInput().latchDeferred);
 				Assert::IsFalse(est.StatusInput().safetyRules);
 			}
 			for (size_t i = 0; i < runs[0].size(); ++i)
@@ -2727,6 +2731,8 @@ namespace Tests
 			Assert::IsTrue(detail[0] == detail[1], L"off: Ctrl+Alt+D is identical");
 			Assert::IsTrue(status[0].find("upscale latch") == std::string::npos && detail[0].find("safety rules") == std::string::npos,
 				L"off: nothing of the latch is shown");
+			Assert::IsTrue(status[0].find("deferred") == std::string::npos && detail[0].find("deferred") == std::string::npos,
+				L"off: nothing of the N1 deferral is shown");
 		}
 
 		// M3: the R4 dump runs after the cost is measured: with a tick clock (every clock read advances it) the records and the governor's
@@ -2876,6 +2882,123 @@ namespace Tests
 			Assert::IsTrue(noticed, L"and noticed");
 			Assert::IsTrue(est.StatusLine().find("no upscale latch") != std::string::npos || est.StatusInput().latchNx > 0,
 				W("the status follows: " + est.StatusLine()).c_str());
+		}
+
+		// Latches the 960x540 upscale (cuts every 6th evaluation, as the other fixtures); returns false if it did not latch by 80 s.
+		static bool LatchUp540(SourceIdentity::Chain::ChainEstimator& est, Tests::ChainFx::ManualClock& clk, const ChainSynth::Image& up, double& t, uint64_t& seq)
+		{
+			int evals = 0;
+			for (; t <= 80.0 && est.StatusInput().latchNx == 0; t += 0.5, ++seq)
+			{
+				clk.Set(t * 1000.0);
+				if (!est.Wants())
+					continue;
+				if (!ChainRevertBoundTests::SubmitEvaluation(est, up, seq, t, evals % 6 == 0))
+					return false;
+				++evals;
+			}
+			return est.StatusInput().latchNx == 960 && est.StatusInput().latchNy == 540;
+		}
+
+		// N1: a TRUE upscale in one very long cut-free shot (150 s: the capped shot adds no new evidence, so the hard bound is reached).
+		// The release is deferred, visibly, and never happens mid-shot; the next cut's shot re-confirms the latch and the deferred
+		// release is cancelled: the picture never changes.
+		TEST_METHOD(ALongTrueUpscaleShotNeverChangesThePictureMidShot)
+		{
+			using namespace ChainSynth;
+			namespace C = SourceIdentity::Chain;
+			const Image up = ChainScene(540, 960, kFrameH, kFrameW, kBilinear, 1201u, 8, 0.0, 10.0);
+			Tests::ChainFx::ManualClock clk;
+			C::ChainEstimator est(Safe(), clk.Fn());
+			est.SetSynchronous(true);
+			est.SetMode(C::EstimatorMode::On);
+			double t = 10.0;
+			uint64_t seq = 2;
+			Assert::IsTrue(LatchUp540(est, clk, up, t, seq), L"fixture: latched 960x540");
+			const double tShot = t;
+			bool sawDeferred = false;
+			std::string lineDeferred, detailDeferred;
+			for (; t <= tShot + 150.0; t += 0.5, ++seq)
+			{
+				clk.Set(t * 1000.0);
+				if (!est.Wants())
+					continue;
+				Assert::IsTrue(ChainRevertBoundTests::SubmitEvaluation(est, up, seq, t, false));
+				const C::ChainStatusInput si = est.StatusInput();
+				Assert::IsTrue(si.latchNx == 960 && si.latchNy == 540, (L"never released mid-shot (t " + std::to_wstring(t) + L")").c_str());
+				if (si.latchDeferred && !sawDeferred)
+				{
+					sawDeferred = true;
+					lineDeferred = est.StatusLine();
+					detailDeferred = est.DetailText();
+				}
+			}
+			C::LatchCounters lc = est.GetCounters().latch;
+			std::ostringstream os;
+			os << "confirms " << lc.confirms << " releases " << lc.releases << " bounds (clock " << lc.releasesBound << ", hard " << lc.releasesHardBound
+			   << ") deferred " << lc.deferred << " cancelled " << lc.deferCancelled;
+			Assert::IsTrue(sawDeferred && lc.deferred >= 1, W("the starvation bound was reached inside the long shot and deferred; " + os.str()).c_str());
+			Assert::IsTrue(lineDeferred.find("release deferred to the next cut") != std::string::npos, W("visible on the status line: " + lineDeferred).c_str());
+			Assert::IsTrue(detailDeferred.find("(release deferred to the next cut)") != std::string::npos &&
+				detailDeferred.find("deferred 1 (cancelled 0)") != std::string::npos, W("and in Ctrl+Alt+D: " + detailDeferred).c_str());
+			// The next cut: a new shot of the same true upscale.
+			bool first = true;
+			for (const double tEnd = t + 30.0; t <= tEnd; t += 0.5, ++seq)
+			{
+				clk.Set(t * 1000.0);
+				if (!est.Wants())
+					continue;
+				Assert::IsTrue(ChainRevertBoundTests::SubmitEvaluation(est, up, seq, t, first));
+				first = false;
+				const C::ChainStatusInput si = est.StatusInput();
+				Assert::IsTrue(si.latchNx == 960 && si.latchNy == 540, (L"a true upscale never changes the picture (t " + std::to_wstring(t) + L")").c_str());
+			}
+			lc = est.GetCounters().latch;
+			os.str("");
+			os << "confirms " << lc.confirms << " releases " << lc.releases << " deferred " << lc.deferred << " cancelled " << lc.deferCancelled;
+			Logger::WriteMessage(os.str().c_str());
+			Assert::AreEqual<uint64_t>(0, lc.releases, W("no release at all; " + os.str()).c_str());
+			Assert::IsTrue(lc.deferCancelled >= 1 && !est.StatusInput().latchDeferred, W("the new shot re-confirmed: cancelled; " + os.str()).c_str());
+			Assert::AreEqual<uint64_t>(0, est.LatchCeilingReleases());
+		}
+
+		// N1: a cut-free NATIVE stream with a wrong latch (the 960x540 upscale latched, then the source is native with no cut, black or
+		// fade at all) is still released: by native evidence at once, or at the latest by the no-cut ceiling (bound + 60 s, <= 180 s).
+		TEST_METHOD(ACutFreeNativeStreamWithAWrongLatchReleasesByTheCeiling)
+		{
+			using namespace ChainSynth;
+			namespace C = SourceIdentity::Chain;
+			const Image up = ChainScene(540, 960, kFrameH, kFrameW, kBilinear, 1201u, 8, 0.0, 10.0);
+			Image nat = Scene(kFrameH, kFrameW, 10.0, 906u, 0.5 + 0.15 * 10.0);
+			Quantize(nat, 8);
+			Tests::ChainFx::ManualClock clk;
+			C::ChainEstimator est(Safe(), clk.Fn());
+			est.SetSynchronous(true);
+			est.SetMode(C::EstimatorMode::On);
+			double t = 10.0;
+			uint64_t seq = 2;
+			Assert::IsTrue(LatchUp540(est, clk, up, t, seq), L"fixture: latched 960x540");
+			const double tSwitch = t;
+			double tReleased = -1.0;
+			for (; t <= tSwitch + 240.0 && tReleased < 0.0; t += 0.5, ++seq)
+			{
+				clk.Set(t * 1000.0);
+				if (!est.Wants())
+					continue;
+				Assert::IsTrue(ChainRevertBoundTests::SubmitEvaluation(est, nat, seq, t, false));
+				if (est.StatusInput().latchNx == 0)
+					tReleased = t;
+			}
+			const C::LatchCounters lc = est.GetCounters().latch;
+			std::ostringstream os;
+			os << "released after " << (tReleased - tSwitch) << " s; releases " << lc.releases << " (native " << lc.releasesNative << ", ceiling "
+			   << lc.releasesCeiling << ", after a cut " << lc.releasesAtCut << ") bounds (clock " << lc.releasesBound << ", hard " << lc.releasesHardBound
+			   << ") deferred " << lc.deferred;
+			Logger::WriteMessage(os.str().c_str());
+			Assert::IsTrue(tReleased > 0.0 && tReleased - tSwitch <= 185.0, W("released within the ceiling; " + os.str()).c_str());
+			Assert::AreEqual<uint64_t>(0, lc.releasesAtCut, W("no cut was there to release at; " + os.str()).c_str());
+			Assert::IsTrue(lc.releasesNative + lc.releasesCeiling >= 1, W("by native evidence or the ceiling; " + os.str()).c_str());
+			Assert::AreEqual<uint64_t>(lc.releasesCeiling, est.LatchCeilingReleases(), L"the monitor's crossfade cue counts the ceiling releases");
 		}
 	};
 

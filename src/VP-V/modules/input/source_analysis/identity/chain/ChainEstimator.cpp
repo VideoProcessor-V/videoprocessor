@@ -121,7 +121,9 @@ namespace SourceIdentity
 			std::atomic<uint64_t> cEvaluations{ 0 }, cDelivered{ 0 }, cDropped{ 0 }, cRepeats{ 0 }, cNoClock{ 0 }, cUnusable{ 0 },
 				cStale{ 0 }, cDiscontinuities{ 0 }, cWindowClears{ 0 };
 			std::atomic<uint64_t> cLatchEntries{ 0 }, cLatchMoves{ 0 }, cLatchReleases{ 0 }, cLatchRelBound{ 0 }, cLatchRelNative{ 0 }, cLatchRelMenu{ 0 },
-				cLatchRelAbr{ 0 }, cLatchRelReset{ 0 }, cLatchHeldBack{ 0 }, cLatchNonConv{ 0 }, cLatchConfirms{ 0 }, cLatchRelHard{ 0 };
+				cLatchRelAbr{ 0 }, cLatchRelReset{ 0 }, cLatchHeldBack{ 0 }, cLatchNonConv{ 0 }, cLatchConfirms{ 0 }, cLatchRelHard{ 0 },
+				cLatchDeferred{ 0 }, cLatchDeferCancelled{ 0 }, cLatchRelAtCut{ 0 }, cLatchRelCeiling{ 0 };
+			std::atomic<bool> latchDeferredA{ false };   // SID r2 N1: a starvation release waits for the next cut / black / fade (status)
 			std::atomic<bool> safetyLiveA{ false };      // SID r2: the rules applied at the clean start (status)
 			std::atomic<int> latchNxA{ 0 }, latchNyA{ 0 };   // SID r2: the latched size (0 = no latch; status)
 
@@ -896,6 +898,7 @@ namespace SourceIdentity
 					safetyOn = safe;
 					safetyLiveA.store(safe, std::memory_order_release);
 					latchNxA.store(0, std::memory_order_release);
+					latchDeferredA.store(false, std::memory_order_release);
 					latchNyA.store(0, std::memory_order_release);
 					cfg.evidence.conventionOnly = safe;   // R2
 					cfg.evidence.pairPrior = safe;        // R3
@@ -1008,6 +1011,7 @@ namespace SourceIdentity
 					FoldLatchCounters();
 					NoteLatchEvent(lo, lastTimeUs);
 					latchNxA.store(0, std::memory_order_release);
+					latchDeferredA.store(false, std::memory_order_release);
 					latchNyA.store(0, std::memory_order_release);
 					for (int a = 0; a < 2; ++a)
 					{
@@ -1217,6 +1221,11 @@ namespace SourceIdentity
 				cLatchNonConv.fetch_add(c.nonConventional - latchBase.nonConventional, std::memory_order_relaxed);
 				cLatchConfirms.fetch_add(c.confirms - latchBase.confirms, std::memory_order_relaxed);
 				cLatchRelHard.fetch_add(c.releasesHardBound - latchBase.releasesHardBound, std::memory_order_relaxed);
+				cLatchDeferred.fetch_add(c.deferred - latchBase.deferred, std::memory_order_relaxed);
+				cLatchDeferCancelled.fetch_add(c.deferCancelled - latchBase.deferCancelled, std::memory_order_relaxed);
+				cLatchRelAtCut.fetch_add(c.releasesAtCut - latchBase.releasesAtCut, std::memory_order_relaxed);
+				cLatchRelCeiling.fetch_add(c.releasesCeiling - latchBase.releasesCeiling, std::memory_order_relaxed);   // the monitor's crossfade cue
+				latchDeferredA.store(latch.Deferred(), std::memory_order_release);
 				latchBase = c;
 			}
 
@@ -1225,6 +1234,11 @@ namespace SourceIdentity
 				// Every release is visible: a one-time notice (the counters are in the status).
 				if (LatchEventIsRelease(lo.event))
 					log.PostNotice(std::string("Source identity: upscale latch ") + LatchEventText(lo.event) + " at " + std::to_string(timeUs / 1000000) + " s");
+				else if (lo.deferredNow)
+					log.PostNotice("Source identity: upscale latch not re-confirmed in time at " + std::to_string(timeUs / 1000000) +
+						" s; its release waits for the next cut, black or fade (the new shot may re-confirm it)");
+				else if (lo.deferCancelled)
+					log.PostNotice("Source identity: upscale latch re-confirmed at " + std::to_string(timeUs / 1000000) + " s; the deferred release is cancelled");
 			}
 
 			// TODO(SID r2 R1): R1 = the fundamental-harmonic rule (integer-ratio family, the lowest member confirmed by spectral roll-off) is NOT
@@ -1249,6 +1263,7 @@ namespace SourceIdentity
 				in.menuHold = (flags & (kEvMenuHold | kEvClearWindow)) != 0u || (run[0].have && run[0].up.hold) || (run[1].have && run[1].up.hold);
 				in.abrStep = (flags & kEvAbrStep) != 0u;
 				in.nativeBoth = nat[0] && nat[1];
+				in.shotBoundary = (flags & (kEvCut | kEvBlank | kEvFade)) != 0u;   // N1: a deferred starvation release's moment
 				in.havePair = conf[0] && conf[1] && !(nat[0] && nat[1]);
 				if (in.havePair)
 				{
@@ -1536,7 +1551,10 @@ namespace SourceIdentity
 				const bool bothConfident = safetyOn ? (out[0].applied.state == Geometry::LatchState::Latched && out[1].applied.state == Geometry::LatchState::Latched)
 					: (AxisConfident(reader[0]) && AxisConfident(reader[1]));
 				const bool nativeHeld = nativeHeldMask.exchange(0u, std::memory_order_acq_rel) != 0u;
-				const bool latchedWithPower = bothConfident && !nativeHeld;
+				// N1: while the new shot's re-confirm dwell is open the latch is re-tested at the acquiring cadence (the dwell is 3 s, the
+				// confident cadence 5 s). Rules on only.
+				const bool dwell = safetyOn && latch.Dwelling();
+				const bool latchedWithPower = bothConfident && !nativeHeld && !dwell;
 				latchedPower.store(latchedWithPower, std::memory_order_release);
 				acquiringIntervalMs.store(gov.Plan(false).intervalSec * 1000.0, std::memory_order_release);
 				const GovernorPlan plan = gov.Plan(latchedWithPower);
@@ -1630,6 +1648,7 @@ namespace SourceIdentity
 				in.safetyRules = safetyLiveA.load(std::memory_order_acquire);
 				in.latchNx = latchNxA.load(std::memory_order_acquire);
 				in.latchNy = latchNyA.load(std::memory_order_acquire);
+				in.latchDeferred = latchDeferredA.load(std::memory_order_acquire);
 				in.latch = c.latch;
 				in.evidence = log.GetStatus();
 				in.evidenceText = log.StatusText();
@@ -1666,6 +1685,10 @@ namespace SourceIdentity
 				c.latch.nonConventional = cLatchNonConv.load(std::memory_order_relaxed);
 				c.latch.confirms = cLatchConfirms.load(std::memory_order_relaxed);
 				c.latch.releasesHardBound = cLatchRelHard.load(std::memory_order_relaxed);
+				c.latch.deferred = cLatchDeferred.load(std::memory_order_relaxed);
+				c.latch.deferCancelled = cLatchDeferCancelled.load(std::memory_order_relaxed);
+				c.latch.releasesAtCut = cLatchRelAtCut.load(std::memory_order_relaxed);
+				c.latch.releasesCeiling = cLatchRelCeiling.load(std::memory_order_relaxed);
 				return c;
 			}
 
@@ -1740,6 +1763,8 @@ namespace SourceIdentity
 		void ChainEstimator::SetSafetyRules(bool on) { st_->SetSafety(on); }
 		bool ChainEstimator::SafetyRules() const { return st_->safetyA.load(std::memory_order_acquire); }
 		void ChainEstimator::SetLatchAbrStepTrigger(bool on) { st_->SetAbr(on); }
+		uint64_t ChainEstimator::LatchCeilingReleases() const { return st_->cLatchRelCeiling.load(std::memory_order_acquire); }
+		void ChainEstimator::NoteLatchCeilingForTest() { st_->cLatchRelCeiling.fetch_add(1, std::memory_order_acq_rel); }
 		EstimatorCounters ChainEstimator::GetCounters() const { return st_->Counters(); }
 		GovernorPlan ChainEstimator::GetGovernorPlan() const
 		{
