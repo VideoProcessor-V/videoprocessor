@@ -1085,6 +1085,10 @@ namespace VideoProcessorTest
 				row(mode.name, "post_us_max", pct(postUs, 1.0));
 				row(mode.name, "budget_ms_mean", avg(budgetMs));
 				row(mode.name, "engine_render_ms_ewma", c.renderMs);
+				// Re-check MUST 2 caveat: 0 = the budget never adapted and stayed the fixed half period (RenderSample rejects intervals
+				// beyond two source periods, and this bench renders slower than real time), so served / late in that mode do NOT test
+				// "period minus the measured render time"; 1 = the measured EWMA set the budget.
+				row(mode.name, "budget_adapted", c.renderMs > 0.0 ? 1.0 : 0.0);
 				row(mode.name, "c_requests", static_cast<double>(c.requests));
 				row(mode.name, "c_issued", static_cast<double>(c.issued));
 				row(mode.name, "c_served", static_cast<double>(c.served));

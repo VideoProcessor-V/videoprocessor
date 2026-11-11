@@ -112,7 +112,7 @@ namespace MotionAhead
 		::VpMotion::OnDemand::PairRequest request;
 		if (!staged.peek || !staged.peek(request.lumaFrom, request.lumaTo))
 		{
-			engine.NoteOnDemandUncached();   // never decoded here either: counted, visible
+			engine.NoteOnDemandUncached(from, to);   // never decoded here either: counted, and the fill names the cause
 			return;
 		}
 		request.from = from;

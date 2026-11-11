@@ -199,6 +199,7 @@ namespace FallbackCatalog
 		OnDemandLate,          // asked, but not answered within the frame budget (or the asker gave up): the matcher ran instead
 		OnDemandUnavailable,   // asked, but the producer was not running / stopping / restarting, or the request was refused or failed
 		OnDemandNoBudget,      // not asked: no time left in this frame for an engine run
+		OnDemandUncached,      // not asked: a frame's luma analysis was not cached at the dequeue (the hook never decodes; low latency)
 	};
 	inline const char* NoPairNote(NoPairCause cause)
 	{
@@ -211,6 +212,7 @@ namespace FallbackCatalog
 		case NoPairCause::OnDemandLate: return "matcher only (the on-demand optical-flow pair was not ready within the frame budget";
 		case NoPairCause::OnDemandUnavailable: return "matcher only (the on-demand optical-flow pair could not be made";
 		case NoPairCause::OnDemandNoBudget: return "matcher only (no time left in the frame for an on-demand optical-flow pair";
+		case NoPairCause::OnDemandUncached: return "matcher only (the frames were not analysed yet when the on-demand optical-flow pair would have been asked";
 		default: return "";
 		}
 	}

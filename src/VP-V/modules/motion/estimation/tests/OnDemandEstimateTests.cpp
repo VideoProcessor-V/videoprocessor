@@ -777,6 +777,33 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1ull, c.unavailable, L"only the claimed one was awaited");
 		}
 
+		// Re-check SHOULD 5: a pair not asked for because its frames were not analysed at the dequeue (depth 0) reaches the fill
+		// as its own visible cause, OnDemandUncached, not plain Missing; only for that pair, and only once.
+		TEST_METHOD(AnUncachedPairReachesTheFillAsItsOwnCause)
+		{
+			using FallbackCatalog::NoPairCause;
+			VpMotion::VectorEngine engine;
+			NoPairCause cause = NoPairCause::None;
+			engine.NoteOnDemandUncached(5, 6);
+			Assert::IsTrue(engine.OnDemandFill(nullptr, 4, 5, true, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::None, L"an older pair is not the uncached one");
+			Assert::IsTrue(engine.OnDemandFill(nullptr, 5, 6, true, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::OnDemandUncached, L"the uncached pair names its cause");
+			Assert::IsTrue(engine.OnDemandLastCause() == NoPairCause::OnDemandUncached, L"reaches the no-pair cause");
+			Assert::IsTrue(engine.OnDemandFill(nullptr, 5, 6, true, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::None, L"reported once");
+			engine.NoteOnDemandUncached(7, 8);
+			MotionAhead::FlowPtr ahead = std::make_shared<MotionAhead::Flow>();
+			Assert::IsTrue(engine.OnDemandFill(ahead, 7, 8, true, cause) == ahead);
+			Assert::IsTrue(cause == NoPairCause::None, L"computed ahead wins");
+			engine.NoteOnDemandUncached(9, 10);
+			Assert::IsTrue(engine.OnDemandFill(nullptr, 9, 10, false, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::None, L"refused by the vectors-valid state: not an on-demand cause");
+			const std::string note = FallbackCatalog::NoPairNote(NoPairCause::OnDemandUncached);
+			Assert::IsTrue(note.find("not analysed yet") != std::string::npos, L"its own plain note");
+			Assert::AreEqual(3ull, engine.OnDemandReads().uncached);
+		}
+
 		// Commit 4: the dequeue hook issues the selected pair through the producer, and the fill serves it.
 		TEST_METHOD(TheDequeueHookIssuesTheSelectedPairAndTheFillServesIt)
 		{

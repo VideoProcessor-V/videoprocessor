@@ -2471,6 +2471,14 @@ namespace Tests
 				Assert::IsTrue(length > 0, L"the export ran");
 				return std::string(buffer.data());
 			};
+			// the fingerprint starts with the content identity and the (fresh) config path, which differ on every call:
+			// compare only the settings part after identity|path|, as EveryProfileKeyChangesTheLiveSettingsFingerprint does
+			auto settingsPart = [](const std::string& full) {
+				const size_t identityEnd = full.find('|');
+				const size_t pathEnd = identityEnd == std::string::npos ? std::string::npos : full.find('|', identityEnd + 1);
+				Assert::IsTrue(pathEnd != std::string::npos, L"fingerprint starts with identity|path|");
+				return full.substr(pathEnd + 1);
+			};
 			auto value = [](const std::string& dump) {
 				const std::string key = "\noptical_flow_on_demand=";
 				const size_t at = dump.find(key);
@@ -2479,17 +2487,17 @@ namespace Tests
 				return dump.substr(start, dump.find('\n', start) - start);
 			};
 			const std::string head = "[general]\npersist_profile_selection: false\n[vprenderer.Default]\nquality: high\n";
-			const std::string baseFingerprint = call(fingerprintOf, head);
+			const std::string baseFingerprint = settingsPart(call(fingerprintOf, head));
 			Assert::AreEqual(std::string("auto"), value(call(describe, head)), L"the default");
 			Assert::AreEqual(std::string("on"), value(call(describe, head + "optical_flow_on_demand: on\n")));
 			Assert::AreEqual(std::string("off"), value(call(describe, head + "optical_flow_on_demand: off\n")));
 			Assert::AreEqual(std::string("on"), value(call(describe, head + "optical_flow_on_demand: ON\n")), L"names are normalised");
 			Assert::AreEqual(std::string("auto"), value(call(describe, head + "optical_flow_on_demand: sometimes\n")),
 				L"an invalid value keeps the default");
-			// (the fingerprint embeds the config path, so the invalid value is checked through the parsed value above, as the
-			// other key tests do; on / off must still change it)
-			Assert::AreNotEqual(baseFingerprint, call(fingerprintOf, head + "optical_flow_on_demand: on\n"), L"on reaches the renderer");
-			Assert::AreNotEqual(baseFingerprint, call(fingerprintOf, head + "optical_flow_on_demand: off\n"), L"off reaches the renderer");
+			// (the invalid value is checked through the parsed value above, as the other key tests do; on / off must
+			// change the settings part of the fingerprint)
+			Assert::AreNotEqual(baseFingerprint, settingsPart(call(fingerprintOf, head + "optical_flow_on_demand: on\n")), L"on reaches the renderer");
+			Assert::AreNotEqual(baseFingerprint, settingsPart(call(fingerprintOf, head + "optical_flow_on_demand: off\n")), L"off reaches the renderer");
 		}
 
 		// Integration 2026-10-17: the keys the merge brought (the engine's extras, the

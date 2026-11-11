@@ -417,7 +417,8 @@ namespace VpMotion
 		bool OnDemandServed(uint64_t from, uint64_t to) const;
 		FallbackCatalog::NoPairCause OnDemandLastCause() const;
 		void NoteOnDemandGapServed();
-		void NoteOnDemandUncached();
+		// Counts the pair and remembers it, so the fill of that pair reports NoPairCause::OnDemandUncached (not plain Missing).
+		void NoteOnDemandUncached(uint64_t from, uint64_t to);
 		// The Ctrl+I segment (the de-judder's stats line): "on demand: issued N, served N, late N, no budget N, uncached N";
 		// empty while nothing was issued or skipped (off / auto: nothing shown, nothing changed).
 		std::string OnDemandStatusSegment() const;
@@ -487,5 +488,6 @@ namespace VpMotion
 		double onDemandCycleWaitMs_ = 0.0;           // this cycle's on-demand wait (excluded from the render sample)
 		unsigned long long onDemandCycles_ = 0, onDemandConsumerCycle_ = 0;
 		struct { uint64_t from = 0, to = 0; bool served = false; FallbackCatalog::NoPairCause cause = FallbackCatalog::NoPairCause::None; } onDemandLast_;
+		struct { uint64_t from = 0, to = 0; bool active = false; } onDemandUncachedPair_;   // the last pair not asked for: uncached (onDemandMutex_)
 	};
 }

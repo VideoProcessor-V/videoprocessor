@@ -1134,6 +1134,14 @@ namespace VpMotion
 				}
 				// else: a request for a LATER pair (the dequeue ran ahead of this estimate) stays pending
 			}
+			if (!ahead && !match && allowed && onDemandUncachedPair_.active && onDemandUncachedPair_.from == from &&
+				onDemandUncachedPair_.to == to)
+			{
+				cause = NoPairCause::OnDemandUncached;   // not asked: the frames were not analysed at the dequeue (visible, not Missing)
+				onDemandLast_.cause = cause;
+			}
+			if (onDemandUncachedPair_.active && onDemandUncachedPair_.to <= to)
+				onDemandUncachedPair_.active = false;
 		}
 		if (ahead || !match || !allowed)
 		{
@@ -1200,10 +1208,13 @@ namespace VpMotion
 		return true;
 	}
 
-	void VectorEngine::NoteOnDemandUncached()
+	void VectorEngine::NoteOnDemandUncached(uint64_t from, uint64_t to)
 	{
 		std::lock_guard<std::mutex> lock(onDemandMutex_);
 		++onDemand_.uncached;
+		onDemandUncachedPair_.from = from;
+		onDemandUncachedPair_.to = to;
+		onDemandUncachedPair_.active = true;
 	}
 
 	std::string VectorEngine::OnDemandStatusSegment() const
