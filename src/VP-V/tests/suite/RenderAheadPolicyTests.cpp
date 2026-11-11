@@ -1700,4 +1700,297 @@ namespace RenderAheadPolicyTest
 			Assert::IsTrue(stepped);
 		}
 	};
+
+	// M2 P6-4: the Presenter API. Its methods are the renderer's RenderAheadBreak /
+	// ResetRenderAheadGate / UpdateRenderAheadGate / TakeRenderAheadMainInterval bodies
+	// moved without change; the legacy copies below are those bodies as they stood at
+	// integ b756faa01 (LibplaceboVideoRenderer.cpp), so a drift in either shows here.
+	namespace PresenterLegacy
+	{
+		struct State
+		{
+			Schedule schedule;
+			Gate gate;
+			CostWindow newFrameCost;
+			KnownCost extraCostOwn{ 4 }, extraCostExternal{ 4 }, estimateCost{ 1 };
+			SustainedLateness driftLateness;
+			CreditLatch credit;
+			ChainDepth chainDepth;
+			unsigned long long gateResets = 0;
+			bool l1 = false;
+			int mainInterval = 1;
+			double targetLeadMs = 0.0;
+			double estimatedLeadMs = 0.0;
+			size_t creditFrames = 0;
+			int lastMainInterval = 1;
+			unsigned long long intervalPresents = 0;
+		};
+
+		inline void Break(State& s, double now)
+		{
+			s.schedule.Break();
+			s.mainInterval = 1;
+			s.targetLeadMs = 0.0;
+			s.creditFrames = s.credit.Break(now);
+			s.estimatedLeadMs = 0.0;
+		}
+
+		inline int ResetGate(State& s)
+		{
+			const int level = s.gate.Level();
+			s.gate.Reset();
+			s.newFrameCost.Reset();
+			s.extraCostOwn.Reset();
+			s.extraCostExternal.Reset();
+			s.estimateCost.Reset();
+			s.driftLateness.Reset();
+			s.credit.Reset();
+			s.creditFrames = 0;
+			s.l1 = false;
+			++s.gateResets;
+			return level;
+		}
+
+		struct GateOut
+		{
+			int level = 0;
+			bool evaluated = false;
+			bool probing = false;
+			GateChange change;
+			GateInput input;
+		};
+
+		inline GateOut UpdateGate(State& s, double now, double sourcePeriod, double displayPeriod, bool late,
+			int maxExtras, double utilisation, bool vpOwnedSwapchain, bool l1Available, double ditherMsOwn,
+			double ditherMsExternal)
+		{
+			GateOut out;
+			s.newFrameCost.Trim(now);
+			s.extraCostOwn.Trim(now);
+			s.extraCostExternal.Trim(now);
+			s.estimateCost.Trim(now);
+			GateInput g;
+			g.sourcePeriod = sourcePeriod;
+			g.displayPeriod = displayPeriod;
+			g.utilisation = utilisation;
+			g.queueDepth = vpOwnedSwapchain ? static_cast<int>(s.chainDepth.latency) : 2;
+			g.l1Available = l1Available;
+			g.costs.newFrameMs = s.newFrameCost.P95();
+			g.costs.estimateMs = s.estimateCost.Current();
+			const double saving = ditherMsOwn > 0.0 && ditherMsExternal > 0.0 ? ditherMsOwn - ditherMsExternal : 0.0;
+			const GateCosts extra = ExtraCosts(s.extraCostOwn.Current(), s.extraCostExternal.Current(), saving,
+				g.l1Available);
+			g.costs.extraMs = extra.extraMs;
+			g.costs.extraCheaperMs = extra.extraCheaperMs;
+			const bool degraded = s.gate.Level() > 0;
+			const bool extraMeasured = s.extraCostOwn.Measured() || s.extraCostExternal.Measured();
+			const bool extraKnown = s.extraCostOwn.Known() || s.extraCostExternal.Known();
+			out.probing = degraded && !extraKnown;
+			const bool measured = s.newFrameCost.Count() >= 10 && (maxExtras == 0 || extraMeasured || degraded);
+			if (measured || late)
+			{
+				if (!measured)
+					g.costs = GateCosts();
+				out.change = s.gate.Update(now, g, late);
+				out.evaluated = true;
+			}
+			out.input = g;
+			const int level = s.gate.Level();
+			s.l1 = g.l1Available && level >= 1 && level < HoldLevel(maxExtras);
+			out.level = level;
+			return out;
+		}
+
+		inline int TakeMainInterval(State& s, int pending)
+		{
+			const int interval = std::max(1, std::min(pending, kMaxSyncInterval));
+			s.lastMainInterval = interval;
+			if (interval > 1)
+				++s.intervalPresents;
+			return interval;
+		}
+	}
+
+	TEST_CLASS(PresenterApiTests)
+	{
+	public:
+		TEST_METHOD(DefaultsMatchTheRendererMembers)
+		{
+			Presenter p;
+			Assert::AreEqual(0, p.gate.Level());
+			Assert::AreEqual(1, p.mainInterval);
+			Assert::AreEqual(1, p.lastMainInterval);
+			Assert::AreEqual(0.0, p.targetLeadMs);
+			Assert::AreEqual(0.0, p.estimatedLeadMs.load());
+			Assert::AreEqual<size_t>(0, p.creditFrames.load());
+			Assert::IsFalse(p.committed);
+			Assert::IsFalse(p.l1);
+			Assert::AreEqual(0ull, p.gateResets);
+			Assert::AreEqual(0ull, p.intervalPresents);
+			Assert::IsTrue(p.chainDepth == ChainDepth());
+			Assert::IsFalse(p.schedule.Active());
+		}
+
+		TEST_METHOD(BreakKeepsTheLatchedCreditThenReturnsIt)
+		{
+			Presenter p;
+			PresenterLegacy::State s;
+			
+			p.creditFrames.store(p.credit.CommitFrames(1, 2.5));
+			s.creditFrames = s.credit.CommitFrames(1, 2.5);
+			p.mainInterval = 3;
+			s.mainInterval = 3;
+			p.targetLeadMs = 12.0;
+			s.targetLeadMs = 12.0;
+			p.estimatedLeadMs.store(9.0);
+			s.estimatedLeadMs = 9.0;
+			Assert::IsTrue(p.creditFrames.load() > 0, L"one frame latched");
+			const double times[] = { 10.0, 10.5, 11.9, 12.0, 12.1 };
+			for (double now : times)
+			{
+				p.Break(now);
+				PresenterLegacy::Break(s, now);
+				Assert::AreEqual(s.creditFrames, p.creditFrames.load());
+				Assert::AreEqual(1, p.mainInterval);
+				Assert::AreEqual(0.0, p.targetLeadMs);
+				Assert::AreEqual(0.0, p.estimatedLeadMs.load());
+				Assert::IsFalse(p.schedule.Active());
+			}
+			Assert::AreEqual<size_t>(0, p.creditFrames.load(), L"returned after CreditLatch::kReleaseSeconds broken");
+		}
+
+		TEST_METHOD(ResetGateStartsTheEpochAgain)
+		{
+			Presenter p;
+			for (int i = 0; i < 20; ++i)
+			{
+				p.newFrameCost.Add(i * 0.01, 30.0);
+				p.extraCostOwn.Add(i * 0.01, 9.0);
+				p.extraCostExternal.Add(i * 0.01, 8.0);
+				p.estimateCost.Add(i * 0.01, 2.0);
+			}
+			p.creditFrames.store(p.credit.CommitFrames(1, 2.5));
+			p.l1 = true;
+			// Over budget: a late frame steps the ladder down at once.
+			PresenterGateFrame f;
+			f.sourcePeriod = 1.0 / 24.0;
+			f.displayPeriod = 1.0 / 60.0;
+			f.late = true;
+			f.maxExtras = 2;
+			p.UpdateGate(1.0, f);
+			const int before = p.gate.Level();
+			Assert::IsTrue(before > 0);
+			Assert::AreEqual(before, p.ResetGate());
+			Assert::AreEqual(0, p.gate.Level());
+			Assert::AreEqual<size_t>(0, p.newFrameCost.Count());
+			Assert::IsFalse(p.extraCostOwn.Known());
+			Assert::IsFalse(p.extraCostExternal.Known());
+			Assert::IsFalse(p.estimateCost.Known());
+			Assert::AreEqual<size_t>(0, p.credit.Frames());
+			Assert::AreEqual<size_t>(0, p.creditFrames.load());
+			Assert::IsFalse(p.l1);
+			Assert::AreEqual(1ull, p.gateResets);
+			Assert::AreEqual(0, p.ResetGate());
+			Assert::AreEqual(2ull, p.gateResets);
+		}
+
+		TEST_METHOD(TakeMainIntervalClampsAndCounts)
+		{
+			Presenter p;
+			PresenterLegacy::State s;
+			const int pending[] = { -3, 0, 1, 2, 3, 4, 5, 9, 1, 2 };
+			for (int value : pending)
+			{
+				Assert::AreEqual(PresenterLegacy::TakeMainInterval(s, value), p.TakeMainInterval(value));
+				Assert::AreEqual(s.lastMainInterval, p.lastMainInterval);
+				Assert::AreEqual(s.intervalPresents, p.intervalPresents);
+			}
+			Assert::AreEqual(6ull, p.intervalPresents);
+			Assert::AreEqual(kMaxSyncInterval, p.TakeMainInterval(100));
+		}
+
+		// The gate, step for step against the legacy body: random costs, cadences, chain
+		// depths, lateness and vector modes over 4000 source periods (seeded).
+		TEST_METHOD(UpdateGateMatchesTheLegacyBody)
+		{
+			Presenter p;
+			PresenterLegacy::State s;
+			std::mt19937 rng(20261110u);
+			std::uniform_real_distribution<double> unit(0.0, 1.0);
+			const double displays[] = { 1.0 / 60.0, 1.0 / 59.94, 1.0 / 50.0, 1.0 / 120.0 };
+			const double sources[] = { 1.0 / 24.0, 1.001 / 24.0, 1.0 / 25.0, 1.0 / 30.0, 1.0 / 60.0 };
+			int changes = 0, evaluated = 0, levelsSeen = 0;
+			double now = 0.0;
+			for (int i = 0; i < 4000; ++i)
+			{
+				if (i % 700 == 0)
+				{
+					const ChainDepth depth = ChainDepthFor(true, false, 2.5);
+					p.chainDepth = (i / 700) % 2 ? depth : ChainDepth();
+					s.chainDepth = p.chainDepth;
+				}
+				if (i == 2500)
+				{
+					Assert::AreEqual(PresenterLegacy::ResetGate(s), p.ResetGate());
+				}
+				const double sourcePeriod = sources[(i / 400) % 5];
+				const double displayPeriod = displays[(i / 900) % 4];
+				now += sourcePeriod;
+				const double load = (i / 300) % 3 == 1 ? 3.0 : 1.0;   // phases over budget
+				if (unit(rng) < 0.9)
+				{
+					const double ms = 4.0 + load * 9.0 * unit(rng);
+					p.newFrameCost.Add(now, ms);
+					s.newFrameCost.Add(now, ms);
+				}
+				if (unit(rng) < 0.5)
+				{
+					const double ms = 2.0 + load * 4.0 * unit(rng);
+					(i % 2 ? p.extraCostOwn : p.extraCostExternal).Add(now, ms);
+					(i % 2 ? s.extraCostOwn : s.extraCostExternal).Add(now, ms);
+				}
+				if (unit(rng) < 0.7)
+				{
+					const double ms = 1.0 + unit(rng);
+					p.estimateCost.Add(now, ms);
+					s.estimateCost.Add(now, ms);
+				}
+				PresenterGateFrame f;
+				f.sourcePeriod = sourcePeriod;
+				f.displayPeriod = displayPeriod;
+				f.utilisation = (i / 1000) % 2 ? 0.85 : 0.6;
+				f.vpOwnedChain = (i / 250) % 2 == 0;
+				f.l1Available = (i / 500) % 2 == 1;
+				f.ditherMsOwn = (i / 350) % 3 == 0 ? 0.0 : 1.5;
+				f.ditherMsExternal = (i / 450) % 2 == 0 ? 0.0 : 0.6;
+				f.late = unit(rng) < 0.01;
+				f.maxExtras = MaxExtras(sourcePeriod / displayPeriod);
+				const PresenterGateResult r = p.UpdateGate(now, f);
+				const PresenterLegacy::GateOut o = PresenterLegacy::UpdateGate(s, now, sourcePeriod, displayPeriod,
+					f.late, f.maxExtras, f.utilisation, f.vpOwnedChain, f.l1Available, f.ditherMsOwn, f.ditherMsExternal);
+				Assert::AreEqual(o.level, r.level);
+				Assert::AreEqual(o.evaluated, r.evaluated);
+				Assert::AreEqual(o.probing, r.probing);
+				Assert::AreEqual(o.change.changed, r.change.changed);
+				Assert::AreEqual(o.change.from, r.change.from);
+				Assert::AreEqual(o.change.to, r.change.to);
+				Assert::AreEqual(std::string(o.change.why), std::string(r.change.why));
+				Assert::AreEqual(o.input.queueDepth, r.input.queueDepth);
+				Assert::AreEqual(o.input.l1Available, r.input.l1Available);
+				Assert::AreEqual(o.input.utilisation, r.input.utilisation);
+				Assert::AreEqual(o.input.costs.newFrameMs, r.input.costs.newFrameMs);
+				Assert::AreEqual(o.input.costs.extraMs, r.input.costs.extraMs);
+				Assert::AreEqual(o.input.costs.extraCheaperMs, r.input.costs.extraCheaperMs);
+				Assert::AreEqual(o.input.costs.estimateMs, r.input.costs.estimateMs);
+				Assert::AreEqual(s.l1, p.l1);
+				changes += r.change.changed ? 1 : 0;
+				evaluated += r.evaluated ? 1 : 0;
+				levelsSeen |= 1 << std::min(r.level, 15);
+			}
+			// The sequence exercises the ladder (not a run that never moved).
+			Assert::IsTrue(changes >= 4, L"the gate changed level");
+			Assert::IsTrue(evaluated > 1000, L"the gate was evaluated");
+			Assert::IsTrue((levelsSeen & ~1) != 0, L"a degraded level was reached");
+		}
+	};
 }
