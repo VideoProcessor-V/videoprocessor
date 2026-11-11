@@ -102,6 +102,12 @@ Build x64 Release (the AGENTS.md command). Run tests single-threaded and read th
 
 ## Settings
 
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `use_frame_queue` | general (startup) | bool | true, false | true | Config > General page > General behavior > Use the frame queue | Bill has the main-window use-queue check only; the key saves its start state | The renderer's frame queue at start (the main window's use-queue check); on is the normal setting. | not tiered |
+| `queue_auto_reset` | general (startup) | bool | true, false | true | Config > General page > General behavior > Reset the queue automatically | Bill has the main-window auto-reset check only; the key saves its start state | Resets an over-full queue by itself at the queue recovery threshold. | not tiered |
+
+
 - Existing keys (checked 2026-10-25; sections in "How the code works"): `target_latency_ms`, `target_frames`, `queue_size`, `active_picture_lookahead_frames`, `startup_preroll_frames`, `low_latency_path`, `reset_after_render_restart_seconds`, `reset_queue_too_large_percent`, `use_frame_queue`, `queue_auto_reset`, `queue_timing_fixes`, `pulldown_fixes`, `cadence_class_fixes`, `timing_continuity_fixes`, `general_rate_fixes`. (`queue_recovery` is a legacy section and `low_latency` a queue profile name, not keys.)
 - Planned keys: `queue_policy` (vp | upstream; call-site patch step P-c)
 - Tiers: not tiered; one user-set total delay (recommended = 4 frames at the slowest rate)

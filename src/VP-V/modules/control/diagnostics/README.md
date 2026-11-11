@@ -144,6 +144,14 @@ Cost when off: the crash state has no switch, so item 1 always runs. The report 
 
 ## Settings
 
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `auto_report` | [logging] | bool | true, false | false | Config > VP-V page > Problem reports > Save a problem report automatically | n/a (VP-only) | VP saves a problem report itself on renderer recovery resets and render stalls, at most one per 10 minutes and five per run. | not tiered |
+| `report_thumbnail` | [logging] | bool | true, false | false | Config > VP-V page > Problem reports > Include a small picture in problem reports | n/a (VP-only) | Adds a 480-pixel-wide copy of the next rendered frame (VP Renderer only) to each report; off = no pictures in reports. | not tiered |
+| `state_report` | [shortcuts] | string | a key chord (Ctrl, Alt, Shift plus one key); empty = no shortcut | Ctrl+Alt+D | Config > Shortcuts page > Save problem report | n/a (VP-only) | Chord that saves a problem report; a value that does not parse is reported and binds nothing. | not tiered |
+| `stats_overlay` | general (startup) | bool | true, false | false | Config > General page > General behavior > Show statistics overlay | n/a (VP-only) | Shows the statistics overlay at start; the statistics key toggles it until restart. | not tiered |
+
+
 - Existing keys: `[shortcuts] state_report`, `[shortcuts] raw_capture`, `[logging] auto_report`, `[logging] report_thumbnail` (slots.json `settings_keys`, manifest `config_keys`: corrected in WP-17; they were empty)
 - The status reader (W1-C14) adds no key and has no switch: it only reads the lines the renderer already publishes
 - Planned keys: (none)

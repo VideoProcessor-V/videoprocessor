@@ -16,6 +16,13 @@ Bring frames in from DeckLink/Magewell (or a file source) without losing precisi
 
 ## Settings
 
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `ycbcr_12bit_capture` | decklink (startup) | enum | v210, rgb12, off (auto is accepted and means v210) | v210 | Config > VP-V page > Input (both pathways) > 12-bit YCbCr signals (DeckLink) | n/a (VP-only) | DeckLink only, for a source sending 12-bit YCbCr 4:2:2: v210 = 10-bit 4:2:2 keeping below-black/above-white; rgb12 = the card's 12-bit RGB (clips BTB/WTW); off = refuse the signal. | not tiered |
+| `magewell_recover_faults` | general (startup) | bool | true, false | true | Config > General page > General behavior > Magewell: recover from capture faults | n/a (VP-only) | fix under test (proposed retirement, group A); on = a fault the card recovers from restarts the device by itself, off = capture stops and needs a manual Restart. | not tiered |
+| `capture_display_fixes` | general (startup) | bool | true, false | true | Config > General page > General behavior > Capture / display fixes in Bill's code | off = Bill's earlier behaviour | fix under test (proposed retirement, group A); on = target-only full-screen takes the largest mode first and never an interlaced one, and a DeckLink Rec.601 source is recognised by its active lines (486/480 NTSC, 576 PAL); off = Bill's earlier behaviour. | not tiered |
+
+
 - Existing keys: `capture_path`, `capture_upload`, `native_rgb_ingest` (`dv_tunnel_gpu_unpack` belongs to `input.signal`, where the DV unpack lives)
 - Planned keys: (none)
 - Tiers: not tiered (always on); manual paths in Config

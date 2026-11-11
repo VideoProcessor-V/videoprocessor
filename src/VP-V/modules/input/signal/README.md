@@ -16,6 +16,12 @@ Identify the signal (SDR / HDR10 / LLDV / DV tunnel), its metadata and its color
 
 ## Settings
 
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `dv_tunnel_handoff` | general (startup) | bool | true, false | true | Config > VP-V page > Input (both pathways) > Hand LLDV / HDR10 sent as RGB to the normal path | n/a (VP-only); acts on both pathways | With DV Tunneling, a signal with no tunnel metadata for about a second that is 10-bit RGB or BT.2020 RGB without an HDR flag leaves the tunnel path and is shown as PQ HDR; a later tunnel takes it back. Restart needed. | not tiered |
+| `newlldv_sdr_veto` | general (startup) | bool | true, false | true | Config > VP-V page > Input (both pathways) > Return real SDR to SDR from the picture (SDR veto) | n/a (VP-only); extends Bill's Alternate LLDV detection (newlldv) | With Bill's alternate LLDV detection, SDR sent as BT.2020 returns to SDR when the picture shows SDR highlights (at a cut, after evidence in two shots, once per signal). Restart needed. | not tiered |
+
+
 - Existing keys: `newlldv` (Bill's key, enables VP's inference), `newlldv_sdr_veto`, `dv_tunnel_handoff` (all `[general]`), `dv_tunnel_gpu_unpack`, `dv_tunnel_fixes`, `dv_compare_capture_folder` (renderer profile)
 - Keys: `resync_event` (off | shadow | on; R1 shadow mode, no behaviour change; R3/L1/R4a `on`: the Indicator drives the readers' resets, expert until the R5 gate)
 - Tiers: not tiered

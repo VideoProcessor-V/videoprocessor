@@ -16,6 +16,12 @@ Quantise last for output links/displays of limited bit depth (8- or 10-bit): tem
 
 ## Settings
 
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `cinema_only` | [shaders] | bool | true, false | false | Config > Shaders page (a [shaders] custom hook entry) | Bill's custom hook entries; cinema_only is VP's addition | libplacebo custom GLSL hook entries only: true skips the hook in the Low_Latency queue; a value that is not true/false marks the rule invalid. | not tiered |
+| `dither_need` | profile (draft, header-only) | enum | off, auto (case-insensitive; other values give an error and off) | off | none yet (cfg only) | n/a (VP-only) | declared (draft, DitherNeed::Parse only, not read by the host): auto adds extra sigma-delta amplitude only where the grain does not dither the link and one link step is visible; off = today's amplitude. | not tiered |
+
+
 - Existing keys: `temporal_dither`, `dithering`, `dither_vectors`, `dither_grain_tolerance_scale`
 - Planned keys: (none)
 - Tiers: Classic libplacebo dither; Low..Upper sigma-delta

@@ -16,6 +16,17 @@ CAM16 Stevens/Hunt appearance matching from reference to dim-screen conditions (
 
 ## Settings
 
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `mode` | [ambient] | enum | off, manual, sensor | off | Config > General page > Room lights card > Room lights | n/a (VP-only) | off: rules see no room state; manual: the room set by room; sensor: a serial light sensor decides, falling back to room without readings. | not tiered |
+| `room` | [ambient] | enum | dark, lit | dark | Config > General page > Room lights card > Room | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | The room in manual mode and the fallback when the sensor is not reporting. | not tiered |
+| `lux_lit` | [ambient] | float | 0 to 100000 | 20 | Config > General page > Room lights card > Lit above (lux) | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | Sensor mode: above this the room is lit. | not tiered |
+| `lux_dark` | [ambient] | float | 0 to 100000 | 8 | Config > General page > Room lights card > Dark below (lux) | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | Sensor mode: below this the room is dark, in between it stays as it was; clamped so it never exceeds lux_lit. | not tiered |
+| `hold_s` | [ambient] | float | 0 to 600 | 5 | Config > General page > Room lights card > Hold (seconds) | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | Sensor mode: a new room state must last this many seconds before it is taken. | not tiered |
+| `port` | [ambient] | string | COM1 to COM256 (sensor mode) | empty | Config > General page > Room lights card > Sensor port | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | The light sensor's own serial port; refused when equal to the projector's port. | not tiered |
+| `baud` | [ambient] | int | 1200 to 921600 | 115200 | Config > General page > Room lights card > Sensor speed (baud) | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | Serial speed of the light sensor. | not tiered |
+
+
 - Existing keys: (none)
 - Planned keys: `appearance_adaptation`, `appearance_strength`, `appearance_reference_white_nits`, `appearance_reference_surround`, `appearance_screen_white_nits`, `appearance_screen_surround`
 - Tiers: every tier when on (cost ~0)

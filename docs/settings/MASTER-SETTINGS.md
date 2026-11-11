@@ -12,21 +12,21 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Count | Value |
 |---|---|
 | Modules | 43 |
-| Documented rows | 70 |
+| Documented rows | 242 |
 | VP-V keys in code (outside Bill's schema lists) | 386 |
-| of which documented | 65 |
-| of which undocumented (appendix A) | 321 |
+| of which documented | 237 |
+| of which undocumented (appendix A) | 149 |
 | Documented keys with no code entry (appendix B) | 0 |
 
 ## Modules index
 
 | Unit | Module | Status | README | Documented keys | Keys in manifest | Documented / manifest |
 |---|---|---|---|---|---|---|
-| Input | `input.capture` | built | [README](../../src/VP-V/modules/input/capture/README.md) | 0 | 3 | 0/3 |
-| Input | `input.signal` | built | [README](../../src/VP-V/modules/input/signal/README.md) | 0 | 8 | 0/8 |
-| Input | `input.queue_timing` | built | [README](../../src/VP-V/modules/input/queue_timing/README.md) | 0 | 15 | 0/15 |
+| Input | `input.capture` | built | [README](../../src/VP-V/modules/input/capture/README.md) | 3 | 3 | 0/3 |
+| Input | `input.signal` | built | [README](../../src/VP-V/modules/input/signal/README.md) | 2 | 8 | 2/8 |
+| Input | `input.queue_timing` | built | [README](../../src/VP-V/modules/input/queue_timing/README.md) | 2 | 15 | 2/15 |
 | Input | `input.source_analysis` | partial | [README](../../src/VP-V/modules/input/source_analysis/README.md) | 0 | 19 | 0/19 |
-| Input | `input.light_level` | draft | [README](../../src/VP-V/modules/input/source_analysis/light_level/README.md) | 0 | 33 | 0/33 |
+| Input | `input.light_level` | draft | [README](../../src/VP-V/modules/input/source_analysis/light_level/README.md) | 4 | 33 | 4/33 |
 | Input | `input.source_analysis.identity.chain` | draft | [README](../../src/VP-V/modules/input/source_analysis/identity/chain/README.md) | 1 | 0 | 0/0 |
 | Input | `input.source_analysis.lane.shared.half_luma` | draft | [README](../../src/VP-V/modules/input/source_analysis/lane/shared/README.md) | 1 | 0 | 0/0 |
 | Input | `input.source_analysis.picture.shared.picture_rect` | draft | [README](../../src/VP-V/modules/input/source_analysis/picture/shared/README.md) | 0 | 0 | 0/0 |
@@ -53,17 +53,17 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Colour | `colour.tone_gamut` | built | [README](../../src/VP-V/modules/colour/tone_gamut/README.md) | 0 | 5 | 0/5 |
 | Colour | `colour.extended_range` | built | [README](../../src/VP-V/modules/colour/extended_range/README.md) | 2 | 2 | 2/2 |
 | Colour | `colour.sdr_tone_shape` | built | [README](../../src/VP-V/modules/colour/sdr_tone_shape/README.md) | 0 | 7 | 0/7 |
-| Colour | `colour.appearance` | placeholder | [README](../../src/VP-V/modules/colour/appearance/README.md) | 0 | 6 | 0/6 |
+| Colour | `colour.appearance` | placeholder | [README](../../src/VP-V/modules/colour/appearance/README.md) | 7 | 6 | 0/6 |
 | Dynamic drive | `drive.led_measure` | built | [README](../../src/VP-V/modules/drive/led_measure/README.md) | 0 | 14 | 0/14 |
-| Dynamic drive | `drive.led_compensation` | built | [README](../../src/VP-V/modules/drive/led_compensation/README.md) | 0 | 5 | 0/5 |
+| Dynamic drive | `drive.led_compensation` | built | [README](../../src/VP-V/modules/drive/led_compensation/README.md) | 89 | 5 | 0/5 |
 | Dynamic drive | `drive.black_level` | placeholder | [README](../../src/VP-V/modules/drive/black_level/README.md) | 0 | 1 | 0/1 |
-| Dynamic drive | `drive.projector_control` | built | [README](../../src/VP-V/modules/drive/projector_control/README.md) | 0 | 1 | 0/1 |
-| Output | `output.calibration_lut` | partial | [README](../../src/VP-V/modules/output/calibration_lut/README.md) | 0 | 7 | 0/7 |
-| Output | `output.dither` | built | [README](../../src/VP-V/modules/output/dither/README.md) | 0 | 6 | 0/6 |
+| Dynamic drive | `drive.projector_control` | built | [README](../../src/VP-V/modules/drive/projector_control/README.md) | 20 | 1 | 0/1 |
+| Output | `output.calibration_lut` | partial | [README](../../src/VP-V/modules/output/calibration_lut/README.md) | 34 | 7 | 0/7 |
+| Output | `output.dither` | built | [README](../../src/VP-V/modules/output/dither/README.md) | 2 | 6 | 1/6 |
 | Output | `output.presentation` | built | [README](../../src/VP-V/modules/output/presentation/README.md) | 0 | 5 | 0/5 |
 | Control | `control.net_runtime` | placeholder | [README](../../src/VP-V/modules/control/net_runtime/README.md) | 0 | 1 | 0/1 |
-| Control | `control.diagnostics` | partial | [README](../../src/VP-V/modules/control/diagnostics/README.md) | 0 | 4 | 0/4 |
-| Control | `control.config` | partial | [README](../../src/VP-V/modules/control/config/README.md) | 0 | 0 | 0/0 |
+| Control | `control.diagnostics` | partial | [README](../../src/VP-V/modules/control/diagnostics/README.md) | 4 | 4 | 0/4 |
+| Control | `control.config` | partial | [README](../../src/VP-V/modules/control/config/README.md) | 5 | 0 | 0/0 |
 | Control | `control.skeleton` | draft | [README](../../src/VP-V/modules/control/skeleton/README.md) | 8 | 7 | 7/7 |
 
 ## Input
@@ -72,8 +72,19 @@ Modules: `input.capture`, `input.signal`, `input.queue_timing`, `input.source_an
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
+| `capture_display_fixes` | `input.capture` | general (startup) | bool | true, false | true |  | Config > General page > General behavior > Capture / display fixes in Bill's code | off = Bill's earlier behaviour | fix under test (proposed retirement, group A); on = target-only full-screen takes the largest mode first and never an interlaced one, and a DeckLink Rec.601 source is recognised by its active lines (486/480 NTSC, 576 PAL); off = Bill's earlier behaviour. | not tiered |
+| `dv_tunnel_handoff` | `input.signal` | general (startup) | bool | true, false | true |  | Config > VP-V page > Input (both pathways) > Hand LLDV / HDR10 sent as RGB to the normal path | n/a (VP-only); acts on both pathways | With DV Tunneling, a signal with no tunnel metadata for about a second that is 10-bit RGB or BT.2020 RGB without an HDR flag leaves the tunnel path and is shown as PQ HDR; a later tunnel takes it back. Restart needed. | not tiered |
+| `light_level_ambient_nits` | `input.light_level` | profile (and [vpv]) | float | 0 to 1000 | 0 |  | none yet (cfg only; module is a draft) | n/a (VP-only) | declared (draft): provisional default; room light reflected from the screen (nits), added in the visibility denominator. | not tiered |
+| `light_level_display_black_nits` | `input.light_level` | profile (and [vpv]) | float | auto, or 0 to 100 | auto (sdr_black_nits) |  | none yet (cfg only; module is a draft) | n/a (VP-only) | declared (draft): physical black of the display in nits; must stay below the white or both fall back to auto with a note. | not tiered |
+| `light_level_display_white_nits` | `input.light_level` | profile (and [vpv]) | float | auto, or 1 to 10000 | auto (sdr_target_nits) |  | none yet (cfg only; module is a draft) | n/a (VP-only) | declared (draft): physical peak white of the display in nits; must exceed the black or both fall back to auto with a note. | not tiered |
+| `light_level_weber` | `input.light_level` | profile (and [vpv]) | float | 0.001 to 0.2 | 0.02 |  | none yet (cfg only; module is a draft) | n/a (VP-only) | declared (draft): provisional default; relative luminance step the viewer just notices, one visibility unit. | not tiered |
+| `magewell_recover_faults` | `input.capture` | general (startup) | bool | true, false | true |  | Config > General page > General behavior > Magewell: recover from capture faults | n/a (VP-only) | fix under test (proposed retirement, group A); on = a fault the card recovers from restarts the device by itself, off = capture stops and needs a manual Restart. | not tiered |
+| `newlldv_sdr_veto` | `input.signal` | general (startup) | bool | true, false | true |  | Config > VP-V page > Input (both pathways) > Return real SDR to SDR from the picture (SDR veto) | n/a (VP-only); extends Bill's Alternate LLDV detection (newlldv) | With Bill's alternate LLDV detection, SDR sent as BT.2020 returns to SDR when the picture shows SDR highlights (at a cut, after evidence in two shots, once per signal). Restart needed. | not tiered |
+| `queue_auto_reset` | `input.queue_timing` | general (startup) | bool | true, false | true |  | Config > General page > General behavior > Reset the queue automatically | Bill has the main-window auto-reset check only; the key saves its start state | Resets an over-full queue by itself at the queue recovery threshold. | not tiered |
 | `source_id_evidence` | `input.source_analysis.identity.chain` | profile (VP-owned key lists, plumbing with P3) | enum | off, log, log+lines, log+lines+frames | log+lines (only active in shadow / on; until P3 the setter default is off) |  | VP-V > Input > Source identity | forced off | planned (setter only until P3: `ChainEstimator::SetEvidence` / `Monitor::SetChainEvidence`); Config status row "evidence: <level>, <size> in sid-evidence (cap 2048 MB), <n> dumps"; one-time notice "Source identity: evidence logging on (shadow)"; a failing disk is a visible notice once per episode; a level with no history folder reads "evidence: <level> requested, no folder (set the history folder)" plus one notice (never silently off); a refused hotkey press is a notice | storage-budgeted (2 GB FIFO cap), never GPU-dependent |
 | `source_stats_authority` | `input.source_analysis.lane.shared.half_luma` | profile (deferred) | enum | original, p4 | original |  | not in Config (deferred to SA3; needs the SCHEMA lock, RendererProfileConfig.h / MainConfigSchema.h) | Original = Bill's SceneDetector and analysis | Declared: deferred to SA3, not implemented in this package (the key is documented once, here; events/shared shares it) | same on all |
+| `use_frame_queue` | `input.queue_timing` | general (startup) | bool | true, false | true |  | Config > General page > General behavior > Use the frame queue | Bill has the main-window use-queue check only; the key saves its start state | The renderer's frame queue at start (the main window's use-queue check); on is the normal setting. | not tiered |
+| `ycbcr_12bit_capture` | `input.capture` | decklink (startup) | enum | v210, rgb12, off (auto is accepted and means v210) | v210 |  | Config > VP-V page > Input (both pathways) > 12-bit YCbCr signals (DeckLink) | n/a (VP-only) | DeckLink only, for a source sending 12-bit YCbCr 4:2:2: v210 = 10-bit 4:2:2 keeping below-black/above-white; rgb12 = the card's 12-bit RGB (clips BTB/WTW); off = refuse the signal. | not tiered |
 
 ## Motion
 
@@ -160,6 +171,13 @@ Modules: `colour.tone_gamut`, `colour.extended_range`, `colour.sdr_tone_shape`, 
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
+| `ambient.baud` | `colour.appearance` | [ambient] | int | 1200 to 921600 | 115200 |  | Config > General page > Room lights card > Sensor speed (baud) | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | Serial speed of the light sensor. | not tiered |
+| `ambient.hold_s` | `colour.appearance` | [ambient] | float | 0 to 600 | 5 |  | Config > General page > Room lights card > Hold (seconds) | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | Sensor mode: a new room state must last this many seconds before it is taken. | not tiered |
+| `ambient.lux_dark` | `colour.appearance` | [ambient] | float | 0 to 100000 | 8 |  | Config > General page > Room lights card > Dark below (lux) | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | Sensor mode: below this the room is dark, in between it stays as it was; clamped so it never exceeds lux_lit. | not tiered |
+| `ambient.lux_lit` | `colour.appearance` | [ambient] | float | 0 to 100000 | 20 |  | Config > General page > Room lights card > Lit above (lux) | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | Sensor mode: above this the room is lit. | not tiered |
+| `ambient.mode` | `colour.appearance` | [ambient] | enum | off, manual, sensor | off |  | Config > General page > Room lights card > Room lights | n/a (VP-only) | off: rules see no room state; manual: the room set by room; sensor: a serial light sensor decides, falling back to room without readings. | not tiered |
+| `ambient.port` | `colour.appearance` | [ambient] | string | COM1 to COM256 (sensor mode) | empty |  | Config > General page > Room lights card > Sensor port | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | The light sensor's own serial port; refused when equal to the projector's port. | not tiered |
+| `ambient.room` | `colour.appearance` | [ambient] | enum | dark, lit | dark |  | Config > General page > Room lights card > Room | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | The room in manual mode and the fallback when the sensor is not reporting. | not tiered |
 | `extended_range_more_cases` | `colour.extended_range` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | `on` |  | VP Renderer > Rendering > Processing > Below-black / above-white: also BT.1886, sRGB, wide-gamut SDR, LUT, HDR (VP-V > Proposed retirement, group A) | n/a (VP-only) | fix under test, proposed for retirement (group A); `off` = the Stage 10 eligibility; the Original pathway sets it `off` | same on all (not tiered) |
 | `preserve_extended_range` | `colour.extended_range` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | `on` | on | VP-V > Colour > Keep below-black and above-white (SDR); also VP Renderer > Rendering > Processing | n/a (VP-only): libplacebo's standard path clips below-black and above-white | `BTB/WTW: clipped (<reason>)` (FallbackCatalog::BtbWtw); the Original pathway sets it `off` | same on all (not tiered) |
 
@@ -169,7 +187,115 @@ Modules: `drive.led_measure`, `drive.led_compensation`, `drive.black_level`, `dr
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
-| (none documented yet) | | | | | | | | | | |
+| `led_drive.adaptive_gamma` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | off when the file names neither command_source nor mode; on when only an older `mode` is named (with command_source it is on only if set on) |  | Dynamic Drive page > Dynamic Drive card > Adaptive gamma | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | VP's picture adapts to the LED: the gain across each step (script smoothing for the script sources, the compensation gain for compensate) and the ANSI shadow lift; off = the LED is driven without picture compensation | not tiered |
+| `led_drive.anti_pump_band` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 50 (levels) | 3 |  | Dynamic Drive page > Advanced LED card > Anti-pump band | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Script/compensate: a level change smaller than this band is not sent, to stop the LED pumping | not tiered |
+| `led_drive.apl_persist_ms` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 10000 (ms) | 100 |  | Dynamic Drive page > Advanced LED card > APL hold | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Compensate: window of the sustained APL the LED is aimed at (flash rejection); a cut uses the new scene's APL at once | not tiered |
+| `led_drive.apl_weights` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | string | three non-negative R, G, B weights summing to 1 (within 0.01), comma separated | 0.114, 0.587, 0.299 |  | Dynamic Drive page > Advanced LED card > APL weights | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The RGB weights of the average picture level; the default is the script's effective weights (BGR2GRAY applied to an RGB array) | not tiered |
+| `led_drive.black_prelift_max` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 255 | 120 |  | Dynamic Drive page > Contrast and cuts card > LED lift allowed while still black | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Compensate exit from black: while the picture is black and the look-ahead shows a bright scene the LED may go at once to at most this level; 60 = no pre-lift, 255 = no cap and no pre-positioning | not tiered |
+| `led_drive.bright_cut_dump` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Advanced LED card > Full light at once on a cut to a bright scene | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | A dark-to-bright cut the look-ahead has not seen: the LED goes straight up in one command like the old script's contrast dump, instead of ramping | not tiered |
+| `led_drive.cntr_assist` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Contrast and cuts card > Use the projector's contrast to help | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Compensate: CNTR (projector contrast) moves paired with the LED for the part of the compensation VP's gain cannot do without compressing highlights; off = no CNTR commands | not tiered |
+| `led_drive.cntr_assist_max` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 50 to 100 | 100 |  | Dynamic Drive page > Contrast and cuts card > Highest contrast for the assist | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Highest CNTR the assist may use; the lower of this and projector.cntr_max_usable applies (100 = no cap beyond cntr_max_usable) | not tiered |
+| `led_drive.cntr_pair_predict` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Contrast and cuts card > contrast pairing option | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Fix under test: CNTR is paired against the LED level where it will be when the CNTR lands, so CNTR is never above the need; during a bright cut's fade-up CNTR only goes down. Off = paired against the LED as it is now | not tiered |
+| `led_drive.command_source` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | enum | internal_script, compensate, none (python is retired: runs internal_script) | unset: `mode` decides (a fresh file runs log_only) |  | Dynamic Drive page > Dynamic Drive card > Command source | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Selects what decides the LED commands: VP's copy of the script, VP's own compensate controller, or none (none runs picture_only when adaptive_gamma is on, else log_only); when named it sets the mode and script_smoothing | not tiered |
+| `led_drive.compensation_eotf` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 1.0 to 3.0 | 2.41 |  | Dynamic Drive page > Dynamic Drive card > Projector gamma | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The projector's light exponent on the final code (light-meter fit); used once at the end for the gain in linear light and the highlight-linear calculation, independent of gamma_boost | not tiered |
+| `led_drive.correction_weight_by_time` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Experimental card > time-weighted correction option | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Fix under test: the look-ahead's correction ratio is smoothed by the time since its last update; off = one output frame period per update (slower to converge when source frames repeat) | not tiered |
+| `led_drive.curve` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | string | ascending APL:level pairs (0-255), at least two, e.g. 0:100, 40:200, 100:255 | 0:100, 20:100, 40:200, 70:230, 100:255, 255:255 |  | Dynamic Drive page > Advanced LED card > Curve | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The APL-to-LED-level curve of the script modes (the beta_22 script's curve) | not tiered |
+| `led_drive.cut_cntr_dump` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Contrast and cuts card > Contrast on a bright cut | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Compensate bright cut: CNTR dumps to the cut level on the cut (partially if a full dump would start the fade-up below max_cut_dip); off = CNTR held through the cut and descending paired | not tiered |
+| `led_drive.cut_cntr_level` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 50 to 100 (unset = follow projector.dmd_clip_cntr) | unset (-1): dmd_clip_cntr, 59 by default |  | Dynamic Drive page > Contrast and cuts card > Contrast on a bright cut | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The CNTR level a bright cut goes to, never to 50 because of the cut | not tiered |
+| `led_drive.cut_jump` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Advanced LED card > Jump the LED on a cut | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | A cut the look-ahead has seen: one jump to the new scene's level, timed to land on the cut frame (both directions) | not tiered |
+| `led_drive.cut_lead` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | enum | off, window | off |  | Dynamic Drive page > Contrast and cuts card > cut lead option | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Experimental: a bright cut seen in the look-ahead window gets its LED jump as soon as it enters the window; until the cut the LED holds and CNTR does not rise. off = as before | not tiered |
+| `led_drive.cut_threshold` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 1 to 255 (APL change) | 24 |  | Dynamic Drive page > Advanced LED card > Cut threshold (APL change) | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The APL change between frames that counts as a cut | not tiered |
+| `led_drive.deadband` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 50 (levels) | 3 |  | Dynamic Drive page > Advanced LED card > Dead band | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Compensate: no LED movement while the target is within this many levels of the current level | not tiered |
+| `led_drive.early_ramp` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Advanced LED card > Start a ramp ahead of a cut the look-ahead has seen | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Compensate: lets the ramp start ahead of a cut the look-ahead has seen | not tiered |
+| `led_drive.enabled` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | off |  | Dynamic Drive page > Dynamic Drive card > Dynamic Drive on | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Master switch of the LED drive module; when off (or mode log_only/picture_only) the projector port is never driven (dry-run driver) | not tiered |
+| `led_drive.fade_frames` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 2 to 120 (source frames) | unset (the time-based fade_ms is used) |  | not exposed in Config (cfg only) | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Earlier frame-based fade window, converted at the measured source frame period at run time (24p when unmeasured); a time-based fade_ms clears it | not tiered |
+| `led_drive.fade_min_slope` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0 to 1200 (APL codes per second) | 12 |  | Dynamic Drive page > Advanced LED card > Fade minimum slope | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Fade to black detection: APL must fall at no less than this slope; setting it clears fade_min_step | not tiered |
+| `led_drive.fade_min_step` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0 to 50 (APL codes per source frame) | unset (the time-based fade_min_slope is used) |  | not exposed in Config (cfg only) | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Earlier frame-based minimum fade step, converted at the measured source frame period; fade_min_slope clears it | not tiered |
+| `led_drive.fade_ms` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 20 to 5000 (ms) | 250 |  | Dynamic Drive page > Advanced LED card > Fade detection window | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Fade to black detection: the APL must keep falling for at least this long; setting it clears fade_frames | not tiered |
+| `led_drive.ftb_black_ms` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 100 to 10000 (ms) | 500 |  | Dynamic Drive page > Advanced LED card > Black before the custom dim | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Experimental fade to black: how long the picture is black (LED at led_floor_black) before the custom LED dim starts | not tiered |
+| `led_drive.ftb_custom_dim` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | enum | off, together, turns | off |  | Dynamic Drive page > Experimental card > Experimental: deeper fade to black | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Experimental: deeper fade to black with the projector's custom LED dim (LDMM 1 + LDCR/LDCG/LDCB): all three colours at once, or the colours taking turns in small steps; test on the projector first | not tiered |
+| `led_drive.ftb_custom_floor` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 39 (must be below ftb_custom_start) | 0 |  | Dynamic Drive page > Experimental card > Custom dim floor | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Experimental fade to black: the lowest custom dim value (0 turns that LED off) | not tiered |
+| `led_drive.ftb_custom_start` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 1 to 40 | 40 |  | Dynamic Drive page > Experimental card > Custom dim start | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Experimental fade to black: the custom dim value the step-down starts from | not tiered |
+| `led_drive.ftb_step_ms` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 50 to 1000 (ms) | 100 |  | Dynamic Drive page > Experimental card > Step interval | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Experimental fade to black: one custom-dim command every this many ms | not tiered |
+| `led_drive.ftb_turn_step` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 1 to 50 (levels) | 2 |  | Dynamic Drive page > Experimental card > Step size per colour | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Experimental fade to black (turns method): level step per colour | not tiered |
+| `led_drive.gamma_boost` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | string | off, or a display gamma 1.0 to 3.0 (e.g. 2.4) | off |  | Dynamic Drive page > Dynamic Drive card > Gamma boost | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Encode as if for this display gamma on VP's output gamma (exponent = output gamma / gamma_boost); applied by the module even when it does not drive the LED; off = none | not tiered |
+| `led_drive.gamma_boost_knee` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0.0 to 0.5 | 0 (global boost) |  | Dynamic Drive page > Dynamic Drive card > Boost spares the darks below | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The boost's toe: below this share of the encoded range the boost blends into the identity over gamma_boost_knee_width; 0 = the global boost | not tiered |
+| `led_drive.gamma_boost_knee_width` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0.0 to 0.5 | 0.05 |  | Dynamic Drive page > Dynamic Drive card > Boost blend width | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Width of the blend of the boost toe (see gamma_boost_knee) | not tiered |
+| `led_drive.highlight_area_large` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0.0 to 1.0 (screen share; must exceed highlight_area_small) | 0.05 |  | Dynamic Drive page > Advanced LED card > Large highlight area | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Compensate: above this highlight area the global gain makes room for the highlight | not tiered |
+| `led_drive.highlight_area_small` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0.0 to 1.0 (screen share; must be below highlight_area_large) | 0.005 |  | Dynamic Drive page > Advanced LED card > Small highlight area | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Compensate: below this highlight area the knee absorbs sustained highlights; blended with the global gain in between | not tiered |
+| `led_drive.highlight_percentile` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 50 to 100 (%) | 99.5 |  | Dynamic Drive page > Advanced LED card > Highlight percentile | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The brightness percentile measured as the frame's highlight | not tiered |
+| `led_drive.highlight_persist_ms` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 10000 (ms) | 250 |  | Dynamic Drive page > Advanced LED card > Highlight hold | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Compensate: protection engages over this time | not tiered |
+| `led_drive.highlight_release_ms` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 60000 (ms) | 2000 |  | Dynamic Drive page > Advanced LED card > Highlight release | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Compensate: protection relaxes over this time | not tiered |
+| `led_drive.highlight_tolerance_stops` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0.0 to 4.0 (stops) | 0.33 |  | Dynamic Drive page > Dynamic Drive card > Highlight protection | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | How far VP's gain may compress highlights before the projector's CNTR is used instead | not tiered |
+| `led_drive.knee` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0.0 to 0.5 | 0.08 |  | Dynamic Drive page > Advanced LED card > Highlight knee | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The highlight knee of the compensation gain | not tiered |
+| `led_drive.led_btb_passthrough` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Contrast and cuts card > Below-black pass-through | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Restore switch: below-black leaves the LED compensation shader exactly as it came in (no boost, lift or gain); off = boosted and gained with the picture (sign-preserving) | not tiered |
+| `led_drive.led_ceiling` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 1 to 255 (must be at or above led_floor) | 255 |  | Dynamic Drive page > Advanced LED card > Highest LED level | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The highest LED level sent | not tiered |
+| `led_drive.led_floor` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 255 (floor_black <= floor <= ceiling) | 100 |  | Dynamic Drive page > Dynamic Drive card > Lowest LED level | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Lowest LED level when the look-ahead covers the LED's response time; for the script copy the bottom band continues its curve down to it | not tiered |
+| `led_drive.led_floor_black` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 255 (at or below led_floor) | 60 |  | Dynamic Drive page > Dynamic Drive card > Lowest level in fades to black | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Lowest LED level in fades to black / black pictures | not tiered |
+| `led_drive.led_floor_reactive` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 255 | 100 |  | Dynamic Drive page > Dynamic Drive card > Lowest LED level without look-ahead | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Lowest LED level when the look-ahead does not cover the LED's response time (reactive mode cannot see a bright scene coming); the higher of led_floor and this applies | not tiered |
+| `led_drive.led_highlight_grain_suppress` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Contrast and cuts card > Ignore film grain in the highlight measure | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Where the grain map exists, grainy blocks enter the highlight percentile as the mean of the 3x3 blocks around them; APL and the script's block maximum are unchanged; off = the plain statistics | not tiered |
+| `led_drive.led_idle_restore_s` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 600 (s; 0 = off) | 10 |  | Dynamic Drive page > Experimental card > Restore after idle | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | After this many seconds with no video frame the LED returns to led_ceiling and CNTR to 50 (LDMM 0 when the custom dim is configured or engaged) and internal_script stops acting on stale statistics; 0 = the projector stays where it was | not tiered |
+| `led_drive.led_landing_ms` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Contrast and cuts card > landing time option | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Fix under test: each LPW1/CNTR lands led_latency_ms/cntr_latency_ms after the driver wrote it, at the nearest frame; off = credited to the frame it was written in and lands that latency later in whole frames | not tiered |
+| `led_drive.led_lookahead_ms` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 2000 (ms; 0 = every queued frame) | 0 |  | Dynamic Drive page > Contrast and cuts card > LED look-ahead cap | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Caps how far ahead the LED looks, in time at the measured source rate (never past what is queued); 0 = every frame the active queue profile has queued | not tiered |
+| `led_drive.led_peak_full_coverage` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Dynamic Drive card > Look at the whole picture | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Restore switch (script highlight test): the peak is the largest area mean over boxes tiling the whole measured picture so every pixel counts; off = the brightest 3x3 block of the sparse grid | not tiered |
+| `led_drive.led_picture_only` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Dynamic Drive card > Ignore subtitles | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Restore switch: the detected subtitle box is left out of every LED statistic (peak, APL, histogram, cut cells); off = subtitles count | not tiered |
+| `led_drive.led_wtw_passthrough` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Contrast and cuts card > Above-white pass-through | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Restore switch: under a boost (gain above 1) whiter-than-white keeps its own value in the LED compensation shader; off = rolled under white with the boosted picture | not tiered |
+| `led_drive.lookahead` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Dynamic Drive card > Look-ahead | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Compensate: aims each command at the queued frame it lands on through every frame the active queue profile holds; off = reactive (the script copy has its own script_lookahead) | not tiered |
+| `led_drive.max_cut_dip` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0.0 to 1.0 | 0.5 |  | Dynamic Drive page > Contrast and cuts card > Darkest start of a fade-up | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The darkest start of a fade-up after a bright cut accepted; sets a scene floor (the higher of it and led_floor applies); 0 = no floor from it | not tiered |
+| `led_drive.mode` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | enum | compensate, script, log_only, picture_only, listen (retired: runs script) | log_only (command_source, when named, overrides it) |  | Dynamic Drive page > Dynamic Drive card > Command source (written by Config) | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Older spelling of the command source: compensate, script, log_only (dry run) or picture_only (statistics and picture terms, port never opened) | not tiered |
+| `led_drive.preposition_black_only` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Contrast and cuts card > pre-position only on true black | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Fix under test: the exit-from-black CNTR hold and LED pre-lift apply only while the frame the LED lands on is truly black; off = while black or very dark | not tiered |
+| `led_drive.profile_file` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | string | a path (relative to the configuration file, or absolute) | unset (built-in values) |  | Dynamic Drive page > LED profile card | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | An LED profile file with an [led_drive.Default] section of tuning keys; a missing or invalid profile is left out and the built-in values plus the main settings are used | not tiered |
+| `led_drive.rate_down` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 1 to 10000 (levels per second) | 120 |  | not exposed in Config (cfg only) | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Compensate fixed downward LED rate; used only when rate_gain_down or rate_max_down is 0 (rate law off) | not tiered |
+| `led_drive.rate_gain_down` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0 to 100 | 0.15 |  | Dynamic Drive page > LED speeds card > Down gain | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Rate law: a downward ramp runs at clamp(gain x distance, rate_min_down, rate_max_down); 0 = the fixed rate_down. rate_preset compensated sets 1.2 | not tiered |
+| `led_drive.rate_gain_up` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0 to 100 | 0.25 |  | Dynamic Drive page > LED speeds card > Up gain | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Rate law: an upward ramp runs at clamp(gain x distance, rate_min_up, rate_max_up); 0 = the fixed rate_up. rate_preset compensated sets 4.0 | not tiered |
+| `led_drive.rate_max_down` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0 to 10000 (levels per second; at or above rate_min_down) | 12.5 |  | Dynamic Drive page > LED speeds card > Down maximum | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Fastest downward ramp; defaults match the script's step tables; 0 = rate_down. rate_preset compensated sets 120 | not tiered |
+| `led_drive.rate_max_up` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0 to 10000 (levels per second; at or above rate_min_up) | 17.5 |  | Dynamic Drive page > LED speeds card > Up maximum | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Fastest upward ramp; defaults match the script's step tables; 0 = rate_up. rate_preset compensated sets 400 | not tiered |
+| `led_drive.rate_min_down` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0 to 10000 (levels per second) | 2.5 |  | Dynamic Drive page > LED speeds card > Down minimum | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Slowest downward ramp as it settles. rate_preset compensated sets 10 | not tiered |
+| `led_drive.rate_min_up` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0 to 10000 (levels per second) | 2.5 |  | Dynamic Drive page > LED speeds card > Up minimum | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Slowest upward ramp as it settles. rate_preset compensated sets 20 | not tiered |
+| `led_drive.rate_preset` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | enum | script, compensated | script |  | Dynamic Drive page > LED speeds card > LED speeds | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | script = speeds matching the script's step tables; compensated = the faster set (400/120 levels per second at large distances) to try by eye; individual rate_* and recovery_rate_* keys override it | not tiered |
+| `led_drive.rate_up` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 1 to 10000 (levels per second) | 400 |  | not exposed in Config (cfg only) | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Compensate fixed upward LED rate; used only when rate_gain_up or rate_max_up is 0 (rate law off) | not tiered |
+| `led_drive.recovery_bias_pct` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0 to 20 (%) | 3.0 |  | Dynamic Drive page > Contrast and cuts card > Fade-up bias | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | A partial dump's residual CNTR descends paired, biased this much to the bright side (VP's gain trims the excess) | not tiered |
+| `led_drive.recovery_rate_gain` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0 to 100 | 4.0 |  | Dynamic Drive page > LED speeds card > Fade-up gain | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Fade-up after a bright cut: displayed-light ramp gain for the shortfall LED x CNTR x gain cannot yet reach | not tiered |
+| `led_drive.recovery_rate_max` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 1 to 10000 | 400 |  | Dynamic Drive page > LED speeds card > Fade-up maximum | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Fade-up after a bright cut: fastest displayed-light ramp | not tiered |
+| `led_drive.recovery_rate_min` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0 to 10000 | 20 |  | Dynamic Drive page > LED speeds card > Fade-up minimum | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Fade-up after a bright cut: slowest displayed-light ramp | not tiered |
+| `led_drive.script_echo_ms` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 1000 (ms) | 30 |  | Dynamic Drive page > Dynamic Drive card > Script's command time | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Script pacing: the time each command costs (its cmd echo; an LPW1 two); applies with script_pacing script | not tiered |
+| `led_drive.script_highlight_code` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 16 to 255 | 215 |  | Dynamic Drive page > Advanced LED card > Script highlight code | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | VP's copy of the script: a frame whose maximum reaches this code has a highlight (the script used 215) | not tiered |
+| `led_drive.script_lookahead` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Dynamic Drive card > Look-ahead for the script | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The internal script copy decides from the queued frame that will be on screen when its command lands, with the script's own bands, steps, CNTR logic and rhythm; off = the frame on screen and led_floor. No queued frames (Low Latency): the frame on screen | not tiered |
+| `led_drive.script_measure_ms` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 2000 (ms) | 150 |  | Dynamic Drive page > Dynamic Drive card > Script's measuring time | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Script pacing: each loop takes this long (the script's screenshot) before it acts; applies with script_pacing script | not tiered |
+| `led_drive.script_pacing` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | enum | tick, script | script |  | Dynamic Drive page > Dynamic Drive card > Script pacing | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | script = the internal script copy keeps the script's own rhythm (measure and echo times, no loop floor); tick = a tick_ms loop | not tiered |
+| `led_drive.script_resend_failed_writes` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Dynamic Drive card > Resend failed writes | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Restore switch: internal_script re-sends a failed LPW1/CNTR write at the next tick (only a command that tick does not send itself); off = the pure script stream, a failed write is not repeated | not tiered |
+| `led_drive.script_smoothing` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | off (command_source sets it from adaptive_gamma) |  | not exposed in Config (cfg only) | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Script mode: VP's gain also bridges each whole CNTR step (never brighter than the projector's own value) so contrast changes look continuous; off = the script's LPW1/CNTR sent exactly | not tiered |
+| `led_drive.shadow_lift_ansi` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0.0 to 1.0 | 0 (off) |  | Dynamic Drive page > Dynamic Drive card > Shadow lift next to highlights | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | ANSI shadow lift: a scene-adaptive lift of the darks, this strength x the veil estimate (highlight level x area through the ramp); needs adaptive_gamma; 0 = off | not tiered |
+| `led_drive.shadow_lift_ansi_ramp_hi` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0.0 to 1.0 | 0.10 |  | Dynamic Drive page > Dynamic Drive card > Lift full at highlight amount | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Highlight amount at which the shadow lift is at full strength | not tiered |
+| `led_drive.shadow_lift_ansi_ramp_lo` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0.0 to 1.0 | 0.01 |  | Dynamic Drive page > Dynamic Drive card > Lift starts at highlight amount | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Highlight amount at which the shadow lift starts | not tiered |
+| `led_drive.shadow_lift_ansi_rate` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | float | 0.1 to 10 (full range per second) | 1.0 |  | Dynamic Drive page > Dynamic Drive card > Lift follows within (per second) | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | How fast the lift follows a change in the highlights (a cut resets at once) | not tiered |
+| `led_drive.shaped_recovery` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Contrast and cuts card > Smooth fade-up after a bright cut | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The fade-up after a bright cut follows the rate law in displayed light under the LED's climb; off = full compensation at once, the knee containing the rest | not tiered |
+| `led_drive.software_first` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | on |  | Dynamic Drive page > Contrast and cuts card > Software first | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | VP's gain takes the compensation first and CNTR only the remainder; off = CNTR first | not tiered |
+| `led_drive.steps_down` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | string | descending distance:step pairs ending at 0, each step 1 or more | 100:5, 50:3, 25:2, 10:1, 0:1 |  | Dynamic Drive page > Advanced LED card > Dimming steps | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The script's downward step table | not tiered |
+| `led_drive.steps_up_bright` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | string | descending distance:step pairs ending at 0, each step 1 or more | 100:7, 50:4, 25:2, 10:1, 0:1 |  | Dynamic Drive page > Advanced LED card > Dimming steps | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The script's upward step table for bright scenes | not tiered |
+| `led_drive.steps_up_dark` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | string | descending distance:step pairs ending at 0, each step 1 or more | 100:7, 50:5, 25:4, 10:1, 0:1 |  | Dynamic Drive page > Advanced LED card > Dimming steps | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The script's upward step table for dark scenes | not tiered |
+| `led_drive.steps_up_split_apl` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 255 (APL) | 40 |  | Dynamic Drive page > Advanced LED card > Dark / bright split (APL) | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | The APL separating the dark and bright upward step tables | not tiered |
+| `led_drive.tick_ms` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 50 to 5000 (ms) | 400 |  | Dynamic Drive page > Advanced LED card > Fixed loop interval | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Script mode with script_pacing tick: the loop interval; compensate runs per output frame | not tiered |
+| `projector.ack_timeout_ms` | `drive.projector_control` | [projector] ([projector.default]) | int | 20 to 5000 (ms) | 300 |  | Dynamic Drive page > Advanced projector card > Reply timeout | n/a (VP-only) | How long a reply to a command is waited for (read_back on) | not tiered |
+| `projector.baud` | `drive.projector_control` | [projector] ([projector.default]) | int | 1200 to 921600 | 19200 |  | Dynamic Drive page > Advanced projector card > Baud rate | n/a (VP-only) | Serial speed of the projector's RS-232 port | not tiered |
+| `projector.burst_commands` | `drive.projector_control` | [projector] ([projector.default]) | int | 0 to 1000 | 0 (no pause) |  | Dynamic Drive page > Advanced projector card > Burst commands | n/a (VP-only) | Pause after every this many commands (Barco documents 5 s after 20); 0 = never pause | not tiered |
+| `projector.burst_pause_ms` | `drive.projector_control` | [projector] ([projector.default]) | int | 0 to 60000 (ms) | 5000 |  | Dynamic Drive page > Advanced projector card > Burst pause | n/a (VP-only) | Length of the pause after burst_commands commands | not tiered |
+| `projector.cntr_latency_ms` | `drive.projector_control` | [projector] ([projector.default]) | int | 0 to 2000 (ms) | 80 |  | Dynamic Drive page > Projector connection card > Contrast latency | n/a (VP-only) | Dead time before a CNTR command takes effect; script smoothing times VP's gain with it and compensate models CNTR with it | not tiered |
+| `projector.cntr_max_usable` | `drive.projector_control` | [projector] ([projector.default]) | int | 50 to 100 | 74 |  | Dynamic Drive page > Projector response card > Highest useful contrast | n/a (VP-only) | Highest CNTR that still adds light (light-meter step); the most the CNTR assist may use | not tiered |
+| `projector.cntr_settle_ms` | `drive.projector_control` | [projector] ([projector.default]) | int | 0 to 5000 (ms) | 0 (dead time only) |  | Dynamic Drive page > Projector response card > CNTR settle | n/a (VP-only) | Time constant of CNTR's settling towards a new level after the dead time; 0 = dead time only | not tiered |
+| `projector.dmd_clip_cntr` | `drive.projector_control` | [projector] ([projector.default]) | int | -1 (= cntr_max_usable) or 50 to 100 | 59 |  | Dynamic Drive page > Projector response card > White clips at contrast | n/a (VP-only) | The CNTR at which code 235 reaches the DMD's maximum at full LED; above it more CNTR adds no highlight light (the highlight floor, the assist and the fade-up ceiling stop there); 59 until measured | not tiered |
+| `projector.echo` | `drive.projector_control` | [projector] ([projector.default]) | bool | on, off | on |  | Dynamic Drive page > Advanced projector card > Echo | n/a (VP-only) | Asks the projector to echo commands (ECHO 1) while detecting the line framing and when re-arming after script sends | not tiered |
+| `projector.flux_table` | `drive.projector_control` | [projector] ([projector.default]) | string | lpw:relative_flux pairs, lpw ascending 0-255, flux rising, above 0 and at most 10, e.g. 60:0.55, 80:0.78, 100:1.00 | empty (flux proportional to lpw) |  | Dynamic Drive page > Advanced projector card > Flux table | n/a (VP-only) | The LED's measured relative flux per LPW1 level; the model inverts it to a level | not tiered |
+| `projector.led_latency_ms` | `drive.projector_control` | [projector] ([projector.default]) | int | 0 to 2000 (ms) | 80 |  | Dynamic Drive page > Projector connection card > LED latency | n/a (VP-only) | Command transmission plus projector response as pure dead time: the LED reaches a commanded level this long after the command (measured once with a camera) | not tiered |
+| `projector.led_settle_ms` | `drive.projector_control` | [projector] ([projector.default]) | int | 0 to 5000 (ms) | 300 |  | Dynamic Drive page > Projector response card > LED settle | n/a (VP-only) | After the dead time the LED settles towards the new level as a first-order lag with this time constant (63% after it); 0 = dead time only; fast-biased until measured | not tiered |
+| `projector.light_max` | `drive.projector_control` | [projector] ([projector.default]) | string | auto, or a level 0 to 255 | auto (query the projector, ?M) |  | Dynamic Drive page > Advanced projector card > Highest light level | n/a (VP-only) | Highest LPW1 level the projector accepts; auto asks the projector | not tiered |
+| `projector.light_min` | `drive.projector_control` | [projector] ([projector.default]) | string | auto, or a level 0 to 255 | auto (query the projector, ?N) |  | Dynamic Drive page > Advanced projector card > Lowest light level | n/a (VP-only) | Lowest LPW1 level the projector accepts; auto asks the projector | not tiered |
+| `projector.max_levels_per_command` | `drive.projector_control` | [projector] ([projector.default]) | int | 0 to 255 (0 = no limit) | 12 |  | Dynamic Drive page > Advanced projector card > Largest drop per command | n/a (VP-only) | Largest LPW1 drop in one command so the black floor never falls in big steps; later commands continue the ramp | not tiered |
+| `projector.min_command_gap_ms` | `drive.projector_control` | [projector] ([projector.default]) | int | 0 to 5000 (ms) | 200 |  | Dynamic Drive page > Advanced projector card > Command gap | n/a (VP-only) | Never two commands closer than this (Barco documents at least 500 ms; the old script ran 200 ms gaps) | not tiered |
+| `projector.port` | `drive.projector_control` | [projector] ([projector.default]) | string | COM1 to COM256 | COM1 |  | Dynamic Drive page > Projector connection card > Port | n/a (VP-only) | The projector's RS-232 serial port; the optional light sensor (ambient.port) must use another port | not tiered |
+| `projector.protocol` | `drive.projector_control` | [projector] ([projector.default]) | enum | barco_ascii, none | none |  | Dynamic Drive page > Projector connection card > Protocol | n/a (VP-only) | The projector protocol; none = the dry-run driver, nothing is sent (Config sets barco_ascii when a command source other than none is chosen) | not tiered |
+| `projector.read_back` | `drive.projector_control` | [projector] ([projector.default]) | bool | on, off | off |  | Dynamic Drive page > Projector connection card > Read back | n/a (VP-only) | On: wait for each reply, query the range and state; off: send only, never wait for or ask the projector anything (the old script's way) | not tiered |
+| `projector.terminator` | `drive.projector_control` | [projector] ([projector.default]) | enum | auto, cr, literal_cr, script | auto |  | Dynamic Drive page > Advanced projector card > Line ending | n/a (VP-only) | Command framing: cr, literal cr+CR, or the old script's exact bytes; auto probes cr then literal cr and falls back to the script's bytes without waiting for replies | not tiered |
 
 ## Output
 
@@ -177,7 +303,42 @@ Modules: `output.calibration_lut`, `output.dither`, `output.presentation`.
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
-| (none documented yet) | | | | | | | | | | |
+| `calibration.argyll_path` | `output.calibration_lut` | [calibration] | string | folder of the ArgyllCMS tools, or empty | empty |  | Config > Calibration page > Meter > ArgyllCMS folder (Detect button finds it) | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Where spotread is looked for; empty = search PATH and the usual install folders. | not tiered |
+| `calibration.background_percent` | `output.calibration_lut` | [calibration] | float | 0 to 100 | 0 |  | Config > Calibration page > Display and patches > Window surround | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Grey level (percent of signal) of the surround around a windowed patch. | not tiered |
+| `calibration.display_kind` | `output.calibration_lut` | [calibration] | enum | projector, lcd, oled, other | projector |  | Config > Calibration page > Display and patches > Display | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Display kind; sets the patch window and settle time while those are left on automatic (projector 100 percent window, lcd 18, oled 10, other 18). | not tiered |
+| `calibration.display_name` | `output.calibration_lut` | [calibration] | string | free text | empty (the output monitor's name) |  | Config > Calibration page > Display and patches > Display name | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Names the run folder of the saved calibration. | not tiered |
+| `calibration.display_type` | `output.calibration_lut` | [calibration] | string | empty, or up to 8 letters/digits (spotread -y selector) | empty |  | Config > Calibration page > Meter > Display type | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Meter display-type selector; empty = the model's default. | not tiered |
+| `calibration.drift_interval` | `output.calibration_lut` | [calibration] | int | 0 to 1000 | 50 |  | Config > Calibration page > Display and patches > Drift check every | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | A white reference is re-read every this many patches and slow drift corrected; 0 = only the opening reference. | not tiered |
+| `calibration.hdr_verify_source_peak` | `output.calibration_lut` | [calibration] | float | 100 to 10000 | 1000 |  | Config > Calibration page > Dynamic Drive, room light and HDR runs > HDR source peak (model) | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Source peak in nits assumed by the BT.2390 target model when VP's own curve is unknown; the stream's own peak is used when known. | not tiered |
+| `calibration.hdr_verify_tone_curve` | `output.calibration_lut` | [calibration] | enum | vp, bt2390, none | vp |  | Config > Calibration page > Dynamic Drive, room light and HDR runs > HDR verify target | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Target for each PQ patch of the HDR verify run: VP's own tone curve (bt2390 when unavailable), the BT.2390 model, or PQ as sent. | not tiered |
+| `calibration.led_cntr_dwell_ms` | `output.calibration_lut` | [calibration] | int | 200 to 20000 | 1500 |  | Config > Calibration page > Dynamic Drive, room light and HDR runs > CNTR dwell | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Wait after each CNTR change. | not tiered |
+| `calibration.led_cntr_sweep_max` | `output.calibration_lut` | [calibration] | int | 50 to 100 | 74 |  | Config > Calibration page > Dynamic Drive, room light and HDR runs > CNTR sweep up to | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Highest CNTR the characterisation sets (clamped to the projector profile). | not tiered |
+| `calibration.led_dwell_ms` | `output.calibration_lut` | [calibration] | int | 500 to 20000 | 3000 |  | Config > Calibration page > Dynamic Drive, room light and HDR runs > LED dwell | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Wait after each LPW1 change before the meter reads. | not tiered |
+| `calibration.led_flux_step` | `output.calibration_lut` | [calibration] | int | 1 to 50 | 5 |  | Config > Calibration page > Dynamic Drive, room light and HDR runs > Flux sweep step | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | LPW1 step of the Dynamic Drive characterisation's flux sweep, in both directions. | not tiered |
+| `calibration.led_reads_per_level` | `output.calibration_lut` | [calibration] | int | 1 to 8 | 2 |  | Config > Calibration page > Dynamic Drive, room light and HDR runs > Readings per level | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | White readings taken at each LPW1 level. | not tiered |
+| `calibration.led_sensor_baud` | `output.calibration_lut` | [calibration] | int | 1200 to 2000000 | 115200 |  | Config > Calibration page > Dynamic Drive, room light and HDR runs > Fast sensor speed | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Serial speed of the fast light sensor. | not tiered |
+| `calibration.led_sensor_port` | `output.calibration_lut` | [calibration] | string | empty, none, or COM1 to COM256 | empty (latency not measured) |  | Config > Calibration page > Dynamic Drive, room light and HDR runs > Fast light sensor port | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Port of a fast light sensor used to measure LED latency and settle time; empty or none = not measured. | not tiered |
+| `calibration.led_step_repeats` | `output.calibration_lut` | [calibration] | int | 1 to 10 | 3 |  | Config > Calibration page > Dynamic Drive, room light and HDR runs > Steps per direction | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Step responses measured per direction for the latency / settle test. | not tiered |
+| `calibration.lut_size` | `output.calibration_lut` | [calibration] | enum | 17, 33, 65 | 33 |  | Config > Calibration page > Target and LUT > LUT size | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Edge size of the 3D LUT written (17^3, 33^3 recommended, 65^3). | not tiered |
+| `calibration.meter_model` | `output.calibration_lut` | [calibration] | enum | auto, i1d3, i1d2, spyder4, spyder5, spyderx, spyderx2, colormunki_display, i1pro, i1pro2, i1pro3, colormunki_photo, jeti, klein_k10, dtp94, other, simulated | auto |  | Config > Calibration page > Meter > Meter | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Meter model that tunes VP's handling of the reads; auto takes it from spotread's instrument list; simulated = dry run with real patches and no meter. | not tiered |
+| `calibration.meter_port` | `output.calibration_lut` | [calibration] | int | 0 to 64 | 0 |  | Config > Calibration page > Meter > Meter number | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | spotread -c instrument number; 0 = the first instrument found. | not tiered |
+| `calibration.near_black_max_reads` | `output.calibration_lut` | [calibration] | int | 1 to 16 | 4 |  | Config > Calibration page > Display and patches > Near-black readings | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Most readings averaged for a near-black patch (stops early when two agree); patches below the meter's floor are marked. | not tiered |
+| `calibration.patch_window_percent` | `output.calibration_lut` | [calibration] | float | 0 to 100 | 0 (automatic from display_kind) |  | Config > Calibration page > Display and patches > Patch window | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Patch size as a share of the screen area; 0 = from display_kind. | not tiered |
+| `calibration.plan` | `output.calibration_lut` | [calibration] | enum | quick, cube5, standard, cube13, thorough | standard |  | Config > Calibration page > Target and LUT > Measurements | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Measurement plan: quick = greyscale plus primaries/secondaries, cube5 = 5^3, standard = 9^3, cube13 = 13^3, thorough = 17^3 patches. | not tiered |
+| `calibration.read_timeout_s` | `output.calibration_lut` | [calibration] | int | 5 to 600 | 60 |  | Config > Calibration page > Meter > Reading time limit | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Seconds allowed for one meter reading before it is treated as failed. | not tiered |
+| `calibration.record_transcripts` | `output.calibration_lut` | [calibration] | bool | true, false | false |  | Config > Calibration page > Dynamic Drive, room light and HDR runs > Record real meter transcripts | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Saves every spotread session as a test-data script. | not tiered |
+| `calibration.refresh_mode` | `output.calibration_lut` | [calibration] | enum | auto, refresh, non_refresh | auto |  | Config > Calibration page > Meter > Refresh mode | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | spotread -Y r / -Y n; auto lets the meter measure the display's refresh itself. | not tiered |
+| `calibration.repeat_tolerance_percent` | `output.calibration_lut` | [calibration] | float | 0.1 to 20 | 1.0 |  | Config > Calibration page > Display and patches > Agreement | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | How closely two readings must agree to count as repeated. | not tiered |
+| `calibration.settle_ms` | `output.calibration_lut` | [calibration] | int | 0 to 30000 | 0 (automatic) |  | Config > Calibration page > Display and patches > Settle time | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Wait after each patch change before reading; 0 = from the display kind (0.5 s projector, 0.8 s OLED, 1 s LCD) plus the measured latency and extra after a large drop to dark. | not tiered |
+| `calibration.spectral_correction` | `output.calibration_lut` | [calibration] | string | path to a .ccss or .ccmx file, or empty / none | empty (none) |  | Config > Calibration page > Meter > Spectral correction | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Spectral sample set or correction matrix passed to the meter; empty or none = no correction. | not tiered |
+| `calibration.target_gamma` | `output.calibration_lut` | [calibration] | float | 1.6 to 3.0 | 2.4 |  | Config > Calibration page > Target and LUT > Gamma | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Exponent used when target_transfer is gamma. | not tiered |
+| `calibration.target_transfer` | `output.calibration_lut` | [calibration] | enum | bt1886, gamma | bt1886 |  | Config > Calibration page > Target and LUT > Target response | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Target tone response: BT.1886 using the measured black, or a pure gamma. | not tiered |
+| `calibration.target_white_percent` | `output.calibration_lut` | [calibration] | float | 25 to 100 | 100 |  | Config > Calibration page > Target and LUT > White level | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Target white as a percent of the display's brightest D65 white. | not tiered |
+| `calibration.transcript_folder` | `output.calibration_lut` | [calibration] | string | folder path, or empty | empty (<vp>\luts\calibration\transcripts) |  | Config > Calibration page > Dynamic Drive, room light and HDR runs > Transcript folder | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Where transcripts are saved when record_transcripts is on. | not tiered |
+| `calibration.verify_after` | `output.calibration_lut` | [calibration] | bool | true, false | true |  | Config > Calibration page > Target and LUT > Verify through the new LUT | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Measures about 60 patches through the new LUT after building it. | not tiered |
+| `calibration.warmup_minutes` | `output.calibration_lut` | [calibration] | int | 0 to 180 | 30 |  | Config > Calibration page > Display and patches > Warm-up | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Display warm-up before measuring; the wizard can skip it; 0 = none. | not tiered |
+| `dither_need` | `output.dither` | profile (draft, header-only) | enum | off, auto (case-insensitive; other values give an error and off) | off |  | none yet (cfg only) | n/a (VP-only) | declared (draft, DitherNeed::Parse only, not read by the host): auto adds extra sigma-delta amplitude only where the grain does not dither the link and one link step is visible; off = today's amplitude. | not tiered |
+| `shaders.cinema_only` | `output.dither` | [shaders] | bool | true, false | false |  | Config > Shaders page (a [shaders] custom hook entry) | Bill's custom hook entries; cinema_only is VP's addition | libplacebo custom GLSL hook entries only: true skips the hook in the Low_Latency queue; a value that is not true/false marks the rule invalid. | not tiered |
 
 ## Control
 
@@ -185,6 +346,15 @@ Modules: `control.net_runtime`, `control.diagnostics`, `control.config`, `contro
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
+| `file_av_offset_ms` | `control.config` | general (startup) | int | -2000 to 2000 | 0 |  | Config > General page > File playback (VP Renderer filter) > Picture offset (A/V) | n/a (VP-only) | Moves the picture against the sound for files played through the VP Renderer filter: positive shows the picture later; capture is not affected. | not tiered |
+| `file_led_holdover_ms` | `control.config` | general (startup) | int | 0 to 30000 | 3000 |  | Config > General page > File playback (VP Renderer filter) > Dynamic Drive hold between files | n/a (VP-only) | The filter keeps Dynamic Drive running this long between files so the next file continues from the current LED level; 0 = restore full light at once. (Owning module may be drive.led_compensation.) | not tiered |
+| `global_hotkeys` | `control.config` | shortcuts (startup) | bool | true, false | false |  | Config > VP-V page > Keyboard > Every shortcut works while another application has focus | n/a (VP-only) | off: shortcuts act only while VP has focus, except the actions in global_actions; on: every shortcut also acts while another application has focus. | not tiered |
+| `logging.auto_report` | `control.diagnostics` | [logging] | bool | true, false | false |  | Config > VP-V page > Problem reports > Save a problem report automatically | n/a (VP-only) | VP saves a problem report itself on renderer recovery resets and render stalls, at most one per 10 minutes and five per run. | not tiered |
+| `logging.report_thumbnail` | `control.diagnostics` | [logging] | bool | true, false | false |  | Config > VP-V page > Problem reports > Include a small picture in problem reports | n/a (VP-only) | Adds a 480-pixel-wide copy of the next rendered frame (VP Renderer only) to each report; off = no pictures in reports. | not tiered |
+| `renderer_failure_keep_fullscreen` | `control.config` | general (startup) | bool | true, false | true |  | Config > General page > General behavior > Stay fullscreen and retry after a renderer failure | off = the earlier behaviour | on: after a renderer failure VP stays fullscreen and retries (after 2 s, 5 s, 10 s, then every 30 s, at most 10 times, then Restart Renderer); off: fullscreen is left and the renderer waits for a manual restart. | not tiered |
+| `shortcuts.global_actions` | `control.config` | [shortcuts] | string | comma-separated [shortcuts] action names (an unknown name is refused) | empty (none) |  | Config > VP-V page > Keyboard > Global actions | n/a (VP-only) | Actions that act while another application has focus even with global_hotkeys off, e.g. config_editor, toggle_noui. | not tiered |
+| `shortcuts.state_report` | `control.diagnostics` | [shortcuts] | string | a key chord (Ctrl, Alt, Shift plus one key); empty = no shortcut | Ctrl+Alt+D |  | Config > Shortcuts page > Save problem report | n/a (VP-only) | Chord that saves a problem report; a value that does not parse is reported and binds nothing. | not tiered |
+| `stats_overlay` | `control.diagnostics` | general (startup) | bool | true, false | false |  | Config > General page > General behavior > Show statistics overlay | n/a (VP-only) | Shows the statistics overlay at start; the statistics key toggles it until restart. | not tiered |
 | `vpv.skeleton.analysis_lane` | `control.skeleton` | [vpv.skeleton] | enum | off, shadow, on | off |  | not in Config (cfg-only until the M2 Config page) | off (nothing built) | `analysis_lane` (reduced / forced live / at minimum), `skeleton_lane` (waiting for `resync_event=on` or `frame_analysis_store=on`), `skeleton_gpu_shadow` ("shadow: GPU products skipped"), `skeleton_gpu_device` ("GPU products: no render device"), Ctrl+I line, Ctrl+Alt+D | the lane plans its tiers by video memory (VramGovernor); shadow = CPU lane only, no GPU dispatcher; on + a render device = CPU and GPU products (see the shed order under Status and fallbacks) |
 | `vpv.skeleton.analysis_lane_chunk_us` | `control.skeleton` | [vpv.skeleton] | int | 0..4000000 (0 = derived from the frame period) | 0 |  | not in Config (cfg-only until the M2 Config page) | n/a (VP-only) | invalid value: `skeleton_settings`, default kept | same on all |
 | `vpv.skeleton.analysis_lane_deterministic` | `control.skeleton` | [vpv.skeleton] | enum | auto, on, off | auto |  | not in Config (cfg-only until the M2 Config page) | n/a (VP-only) | `analysis_lane_determinism` when frames miss the bounded wait | same on all |
@@ -258,13 +428,6 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `adaptive_upscale_superres_scale` | scaling.output |  |  | VpvSchemaKeys.h |
 | `adaptive_upscale_w_base` | scaling.output |  |  | VpvSchemaKeys.h |
 | `adaptive_w_base` | scaling.output | 1.0 |  | VpvSchemaKeys.h |
-| `ambient.baud` | unassigned |  |  | AmbientConfig.h |
-| `ambient.hold_s` | unassigned |  |  | AmbientConfig.h |
-| `ambient.lux_dark` | unassigned |  |  | AmbientConfig.h |
-| `ambient.lux_lit` | unassigned |  |  | AmbientConfig.h |
-| `ambient.mode` | unassigned |  |  | AmbientConfig.h |
-| `ambient.port` | unassigned |  |  | AmbientConfig.h |
-| `ambient.room` | unassigned |  |  | AmbientConfig.h |
 | `ambient_adapt` | unassigned | off | VP-V > Colour > Room-light adaptation (experimental) | VpvSchemaKeys.h |
 | `ambient_adapt_strength` | unassigned | 1 |  | VpvSchemaKeys.h |
 | `ambient_max_black_nits` | unassigned | 1 |  | VpvSchemaKeys.h |
@@ -276,42 +439,7 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `blank_right` | unassigned |  |  | VpvSchemaKeys.h |
 | `blank_top` | unassigned |  |  | VpvSchemaKeys.h |
 | `cadence_class_fixes` | input.queue_timing, motion.consumers | on |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, RendererProfileConfig.h |
-| `calibration.argyll_path` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.background_percent` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.display_kind` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.display_name` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.display_type` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.drift_interval` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.hdr_verify_source_peak` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.hdr_verify_tone_curve` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.led_cntr_dwell_ms` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.led_cntr_sweep_max` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.led_dwell_ms` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.led_flux_step` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.led_reads_per_level` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.led_sensor_baud` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.led_sensor_port` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.led_step_repeats` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.lut_size` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.meter_model` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.meter_port` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.near_black_max_reads` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.patch_window_percent` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.plan` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.read_timeout_s` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.record_transcripts` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.refresh_mode` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.repeat_tolerance_percent` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.settle_ms` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.spectral_correction` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.target_gamma` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.target_transfer` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.target_white_percent` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.transcript_folder` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.verify_after` | unassigned |  |  | CalibrationConfig.h |
-| `calibration.warmup_minutes` | unassigned |  |  | CalibrationConfig.h |
 | `calibration_lut_stage` | output.calibration_lut |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
-| `capture_display_fixes` | unassigned |  |  | VpvStartupSchema.h |
 | `capture_path` | input.capture | gpu | VP-V > Input > Capture unpack on the GPU | VpvSchemaKeys.h |
 | `capture_upload` | input.capture | auto | VP-V > Input > Upload frames as they arrive | VpvSchemaKeys.h |
 | `cnn_residual_stabilise` | scaling.output | on | VP-V > Scaling > Steady the upscaler's added detail along motion | VpvSchemaKeys.h |
@@ -349,7 +477,6 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `detail_pulse_fast` | repair.texture_restore | on | VP-V > Repair > Detail pulse: fast path | VpvSchemaKeys.h |
 | `detail_pulse_stabilise` | repair.texture_restore | on |  | VpvSchemaKeys.h |
 | `dither_grain_tolerance_scale` | output.dither | 3 |  | VpvSchemaKeys.h |
-| `dither_need` | output.dither |  |  | DitherNeed.h |
 | `dither_vectors` | motion.consumers, output.dither | auto | VP-V > Motion > Dither reuses the de-judder's motion | VpvSchemaKeys.h |
 | `downscale_light` | scaling.output |  |  | VpvSchemaKeys.h |
 | `dv_compare_capture_folder` | input.signal |  |  | VpvSchemaKeys.h |
@@ -357,15 +484,11 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `dv_trims` | colour.sdr_tone_shape | 1 | VP-V > Colour > Dolby Vision trims for your display | VpvSchemaKeys.h |
 | `dv_tunnel_fixes` | input.signal | on |  | VpvSchemaKeys.h |
 | `dv_tunnel_gpu_unpack` | input.signal | 1 | VP-V > Input > Dolby Vision tunnel: GPU unpack | VpvSchemaKeys.h |
-| `dv_tunnel_handoff` | input.signal |  |  | VpvStartupSchema.h |
 | `efficiency_fixes` | unassigned | on |  | VpvSchemaKeys.h |
 | `entrance_gpu_drain` | scaling.rebase | off |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `fbo_float32` | scaling.output | -1 | VP-V > Colour > Full precision for every tier (32-bit float intermediates) | VpvSchemaKeys.h |
-| `file_av_offset_ms` | unassigned |  |  | VpvStartupSchema.h |
-| `file_led_holdover_ms` | unassigned |  |  | VpvStartupSchema.h |
 | `frame_analysis_store` | input.source_analysis |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `general_rate_fixes` | input.queue_timing, motion.estimation, motion.vector_delivery, motion.consumers | on |  | VpvSchemaKeys.h |
-| `global_hotkeys` | unassigned |  |  | VpvStartupSchema.h |
 | `hdr_inference` | input.signal | vp |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, HdrInferenceChoice.h |
 | `intent_black` | drive.led_compensation | off |  | VpvSchemaKeys.h |
 | `intent_content` | unassigned | off | VP-V > Input > Content labels for profile rules (film / video / sports) | VpvRendererSettings.cpp, VpvSchemaKeys.h, RendererProfileConfig.h |
@@ -380,106 +503,9 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `interpolation_fallback` | motion.consumers | hold | VP-V > Motion > Where motion is not trusted: hold or blend | VpvSchemaKeys.h |
 | `interpolation_fill_gaps` | motion.consumers | on | VP-V > Motion > Fill dropped frames (hiccup repair) | VpvSchemaKeys.h |
 | `interpolation_grain` | motion.consumers | preserve |  | VpvSchemaKeys.h |
-| `led_drive.adaptive_gamma` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.anti_pump_band` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.apl_persist_ms` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.apl_weights` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.black_prelift_max` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.bright_cut_dump` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.cntr_assist` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.cntr_assist_max` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.cntr_pair_predict` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.command_source` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.compensation_eotf` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.correction_weight_by_time` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.curve` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.cut_cntr_dump` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.cut_cntr_level` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.cut_jump` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.cut_lead` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.cut_threshold` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.deadband` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.early_ramp` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.enabled` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.fade_frames` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.fade_min_slope` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.fade_min_step` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.fade_ms` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.ftb_black_ms` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.ftb_custom_dim` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.ftb_custom_floor` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.ftb_custom_start` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.ftb_step_ms` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.ftb_turn_step` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.gamma_boost` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.gamma_boost_knee` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.gamma_boost_knee_width` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.highlight_area_large` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.highlight_area_small` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.highlight_percentile` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.highlight_persist_ms` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.highlight_release_ms` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.highlight_tolerance_stops` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.knee` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.led_btb_passthrough` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.led_ceiling` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.led_floor` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.led_floor_black` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.led_floor_reactive` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.led_highlight_grain_suppress` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.led_idle_restore_s` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.led_landing_ms` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.led_lookahead_ms` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.led_peak_full_coverage` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.led_picture_only` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.led_wtw_passthrough` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.lookahead` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.max_cut_dip` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.mode` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.preposition_black_only` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.profile_file` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.rate_down` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.rate_gain_down` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.rate_gain_up` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.rate_max_down` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.rate_max_up` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.rate_min_down` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.rate_min_up` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.rate_preset` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.rate_up` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.recovery_bias_pct` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.recovery_rate_gain` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.recovery_rate_max` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.recovery_rate_min` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.script_echo_ms` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.script_highlight_code` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.script_lookahead` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.script_measure_ms` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.script_pacing` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.script_resend_failed_writes` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.script_smoothing` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.shadow_lift_ansi` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.shadow_lift_ansi_ramp_hi` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.shadow_lift_ansi_ramp_lo` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.shadow_lift_ansi_rate` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.shaped_recovery` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.software_first` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.steps_down` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.steps_up_bright` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.steps_up_dark` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.steps_up_split_apl` | unassigned |  |  | LedDriveConfig.h |
-| `led_drive.tick_ms` | unassigned |  |  | LedDriveConfig.h |
-| `light_level_ambient_nits` | input.light_level |  |  | LightLevelSettings.h |
-| `light_level_display_black_nits` | input.light_level |  |  | LightLevelSettings.h |
-| `light_level_display_white_nits` | input.light_level |  |  | LightLevelSettings.h |
-| `light_level_weber` | input.light_level |  |  | LightLevelSettings.h |
-| `logging.auto_report` | unassigned |  |  | StateReportSettings.h |
-| `logging.report_thumbnail` | unassigned |  |  | StateReportSettings.h |
 | `low_bitrate_handling` | repair.deband | auto | VP-V > Repair > Deband reacts to compression | VpvSchemaKeys.h |
 | `low_latency_path` | input.queue_timing |  |  | VpvSchemaKeys.h, VpvStartupSchema.h |
-| `magewell_recover_faults` | unassigned |  |  | VpvStartupSchema.h |
 | `native_rgb_ingest` | input.capture | 1 | VP-V > Input > Native 10/12-bit RGB capture | VpvSchemaKeys.h |
-| `newlldv_sdr_veto` | input.signal |  |  | VpvStartupSchema.h |
 | `nls_sampling` | scaling.geometry | catmull |  | VpvSchemaKeys.h |
 | `occlusion_mask` | motion.vector_delivery, motion.consumers | 0 | VP-V > Output > Dither: no smear where new picture appears | VpvSchemaKeys.h |
 | `output_segments_merged` | output.dither |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
@@ -487,34 +513,12 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `pipeline_order` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `pipeline_original_pathway` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, SkeletonSettings.h, HdrInferenceChoice.h |
 | `pipeline_slots_off` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
-| `projector.ack_timeout_ms` | unassigned |  |  | LedDriveConfig.h |
-| `projector.baud` | unassigned |  |  | LedDriveConfig.h |
-| `projector.burst_commands` | unassigned |  |  | LedDriveConfig.h |
-| `projector.burst_pause_ms` | unassigned |  |  | LedDriveConfig.h |
-| `projector.cntr_latency_ms` | unassigned |  |  | LedDriveConfig.h |
-| `projector.cntr_max_usable` | unassigned |  |  | LedDriveConfig.h |
-| `projector.cntr_settle_ms` | unassigned |  |  | LedDriveConfig.h |
-| `projector.dmd_clip_cntr` | unassigned |  |  | LedDriveConfig.h |
-| `projector.echo` | unassigned |  |  | LedDriveConfig.h |
-| `projector.flux_table` | unassigned |  |  | LedDriveConfig.h |
-| `projector.led_latency_ms` | unassigned |  |  | LedDriveConfig.h |
-| `projector.led_settle_ms` | unassigned |  |  | LedDriveConfig.h |
-| `projector.light_max` | unassigned |  |  | LedDriveConfig.h |
-| `projector.light_min` | unassigned |  |  | LedDriveConfig.h |
-| `projector.max_levels_per_command` | unassigned |  |  | LedDriveConfig.h |
-| `projector.min_command_gap_ms` | unassigned |  |  | LedDriveConfig.h |
-| `projector.port` | unassigned |  |  | AmbientConfig.h, LedDriveConfig.h |
-| `projector.protocol` | unassigned |  |  | LedDriveConfig.h |
-| `projector.read_back` | unassigned |  |  | LedDriveConfig.h |
-| `projector.terminator` | unassigned |  |  | LedDriveConfig.h |
 | `pulldown_fixes` | input.queue_timing | on |  | VpvSchemaKeys.h |
-| `queue_auto_reset` | input.queue_timing |  |  | VpvStartupSchema.h |
 | `queue_timing_fixes` | input.queue_timing | on |  | VpvSchemaKeys.h |
 | `rebase_kernel_match` | scaling.rebase | off | VP-V > Scaling > Re-base: undo the player's upscaler | VpvSchemaKeys.h |
 | `render_ahead` | output.presentation | off | VP-V > Motion > De-judder: render ahead (under test) | VpvSchemaKeys.h |
 | `render_ahead_queue_credit` | output.presentation | off |  | VpvSchemaKeys.h |
 | `render_ahead_utilisation` | output.presentation | 0.85 |  | VpvSchemaKeys.h |
-| `renderer_failure_keep_fullscreen` | unassigned |  |  | VpvStartupSchema.h |
 | `repeat_render_reuse` | output.presentation |  |  | VpvSchemaKeys.h |
 | `residual_stabilise_grain_guard` | scaling.output | on |  | VpvSchemaKeys.h |
 | `resync_event` | input.signal |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
@@ -528,9 +532,6 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `sdr_knee_strength` | input.light_level, colour.sdr_tone_shape | 0.5 |  | VpvSchemaKeys.h |
 | `sdr_tone_shape` | input.light_level, colour.sdr_tone_shape | off | VP-V > Colour > SDR tone shape | VpvSchemaKeys.h |
 | `sdr_white_headroom` | input.light_level, colour.sdr_tone_shape |  |  | VpvSchemaKeys.h |
-| `shaders.cinema_only` | unassigned |  |  | MadVRShaderLoader.cpp |
-| `shortcuts.global_actions` | unassigned |  |  | VpvStartupSchema.h |
-| `shortcuts.state_report` | unassigned |  |  | StateReportSettings.h |
 | `source_class` | motion.consumers | legacy |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, RendererProfileConfig.h |
 | `source_coding_fixes` | input.source_analysis | on |  | VpvSchemaKeys.h |
 | `source_range` | unassigned | auto | VP-V > Input > Source range (when the source mislabels it) | VpvSchemaKeys.h |
@@ -548,15 +549,12 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `ssim_bitrate_aware` | scaling.output | on | VP-V > Scaling > Gentler sharpening on poor streams | VpvSchemaKeys.h |
 | `ssim_bitrate_floor` | scaling.output | 0.4 |  | VpvSchemaKeys.h |
 | `ssim_residual_stabilise` | scaling.output | on | VP-V > Scaling > Steady the downscaler's added detail along motion | VpvSchemaKeys.h |
-| `stats_overlay` | unassigned |  |  | VpvStartupSchema.h |
 | `target_latency_ms` | input.queue_timing |  |  | VpvSchemaKeys.h, VpvStartupSchema.h |
 | `temporal_dither` | output.dither | auto |  | VpvSchemaKeys.h |
 | `texture_restore` | repair.texture_restore | off |  | VpvSchemaKeys.h |
 | `texture_restore_cap` | repair.texture_restore | 1.5 |  | VpvSchemaKeys.h |
 | `timing_continuity_fixes` | input.queue_timing, motion.vector_delivery | on |  | VpvSchemaKeys.h |
 | `upscale_light` | scaling.output | linear |  | VpvSchemaKeys.h |
-| `use_frame_queue` | input.queue_timing |  |  | VpvStartupSchema.h |
-| `ycbcr_12bit_capture` | unassigned |  |  | VpvStartupSchema.h |
 
 ## Appendix B: documented keys with no entry in code
 
