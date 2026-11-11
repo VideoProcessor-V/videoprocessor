@@ -4142,6 +4142,10 @@ void RunBetaMotionCorpus()
 // fit warm-up; a pan that would leave the canvas is skipped and listed), VP_TEST_CAMERA_ACCURACY_ORDER=reverse (scenes and variants in reverse
 // order: the timing control), VP_TEST_CAMERA_ACCURACY_SIZE=1080 (the same scenes box-filtered to 1920x1080, so the picture fraction per frame is
 // the same; default 2160) and a comma list in _SCENES. The summary adds the per-instance GPU timing and the per-frame cost the camera adds.
+// d = 0 A/B (refs 93-prep-cam-d0, VP_TEST_CAMERA_ACCURACY_D0=1, implies _AHEAD=1): model_global_d0 / all_switches_d0 guide pair p from
+// camera(p), the AHEAD fit of pair p itself (records[p], fitted BEFORE the matcher of p, regridded onto the 16-px consumer grid as
+// CameraFitWorker does, prevField null as in production). This is the runtime rule. The d = 2 rows (model_global, all_switches and
+// their _ahead twins) are a HISTORICAL reference only, not a runtime path. Scoring pools the same pairs (d .. last) in every variant.
 namespace CameraAccuracy
 {
 	using Corpus::Obj;
@@ -4212,7 +4216,14 @@ namespace CameraAccuracy
 
 	std::vector<CamScene> Scenes(double rateScale, std::vector<std::string>& skipped)
 	{
-		static const Rate rates[2] = { { "24p", 24000, 1001 }, { "59.94p", 60000, 1001 } };
+		// 29.97p rows are added for the d = 0 A/B only (VP_TEST_CAMERA_ACCURACY_D0=1, the owner's 24/30/60p rows); every other run keeps
+		// its 24p + 59.94p scene list unchanged.
+		std::vector<Rate> rates = { { "24p", 24000, 1001 }, { "59.94p", 60000, 1001 } };
+		{
+			const char* d0 = std::getenv("VP_TEST_CAMERA_ACCURACY_D0");
+			if (d0 && std::string(d0) == "1")
+				rates.push_back({ "29.97p", 30000, 1001 });
+		}
 		static const double speeds[3] = { 120.0, 480.0, 1440.0 };
 		std::vector<CamScene> list;
 		// A scene is kept when its pan stays on the canvas over all frames (the frame's place on the canvas is moved right at t = 0 as far as it takes,
@@ -4580,7 +4591,8 @@ namespace CameraAccuracy
 	struct SceneResult
 	{
 		CamScene scene;
-		VariantResult variants[5];   // off, model_global, all_switches; + model_global_ahead, all_switches_ahead with VP_TEST_CAMERA_ACCURACY_AHEAD=1
+		VariantResult variants[7];   // off, model_global, all_switches; + model_global_ahead, all_switches_ahead with VP_TEST_CAMERA_ACCURACY_AHEAD=1;
+		                             // + model_global_d0, all_switches_d0 (the runtime d = 0 rule) with VP_TEST_CAMERA_ACCURACY_D0=1
 		// AHEAD FIT (VP_TEST_CAMERA_ACCURACY_AHEAD=1): the real producer's NVOF pair's costs per pair (index = pair) and its conversion time.
 		std::vector<CameraAccuracyAhead::PairTiming> aheadTiming;
 		std::vector<double> aheadConvertMs;   // camera WORKER: AheadToSourceGrid (native field + trust) + FlowGlobal (audit F3)
@@ -5035,6 +5047,76 @@ namespace CameraAccuracy
 		md << line;
 	}
 
+	// d = 0 A/B (refs 93-prep-cam-d0 section 4; owner rule: guided TOTAL time (camera fit + plan + guided matcher) no slower than the
+	// unguided matcher AND more accurate than the matcher alone, on EVERY row). EPE_expected(L) = share(L) x EPE_d0 + (1 - share(L)) x
+	// EPE_off, share(L) from the FIFO on-time model of this run (AheadModel, the d0 variant's own fit costs).
+	void WriteD0Summary(std::ofstream& md, const std::vector<SceneResult>& all)
+	{
+		bool any = false;
+		for (const SceneResult& s : all)
+			any = any || !s.variants[5].name.empty();
+		if (!any)
+			return;
+		char line[1600];
+		md << "\n## d = 0 A/B (the runtime rule; owner acceptance)\n\n";
+		md << "model_global_d0 / all_switches_d0: pair p guided by camera(p), the ahead fit of pair p itself, fitted before its matcher, regridded "
+			"onto the 16-px consumer grid, no previous field. EPE = trusted blocks, scored pairs " << kGuideLag << "-" << (Frames() - 2) << " (the same pool "
+			"as off). Time = steady medians (pairs >= 1): off = matcher GPU ms; guided total = guided matcher GPU ms + camera fit ms + plan ms (the fit "
+			"runs on the camera worker, counted anyway per the owner rule). PASS = EPE_d0 <= EPE_off (all blocks, and mover blocks where the scene has a "
+			"mover) AND guided total <= off. EPE_expected(L) uses the on-time share at lead L.\n\n";
+		md << "| scene | variant | EPE off | EPE d0 | mover EPE off / d0 | matcher ms off | matcher ms d0 | fit ms p50 / p95 | plan ms p50 | total d0 | "
+			"guided (all pairs) | on time L=1..4 | EPE_expected L=1..4 | verdict |\n";
+		md << "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n";
+		for (const SceneResult& s : all)
+		{
+			const VariantResult& off = s.variants[0];
+			for (int vi = 5; vi <= 6; ++vi)
+			{
+				const VariantResult& d0 = s.variants[vi];
+				if (d0.name.empty())
+					continue;
+				double share[5] = {};
+				const double periodMs = 1000.0 / s.scene.fps;
+				if (!s.aheadTiming.empty() && s.aheadProblem.empty())
+				{
+					const AheadLatency lat = AheadModel(s, d0);
+					int n = 0;
+					for (size_t p = 1; p < lat.latencyMs.size(); ++p, ++n)
+						for (int L = 1; L <= 4; ++L)
+							share[L] += lat.latencyMs[p] <= L * periodMs ? 1.0 : 0.0;
+					for (int L = 1; L <= 4; ++L)
+						share[L] = n ? share[L] / n : 0.0;
+				}
+				const double eOff = off.stats[0].Mean(), eD0 = d0.stats[0].Mean();
+				const bool mover = off.stats[2].eval > 0 && d0.stats[2].eval > 0;
+				const double mOff = off.stats[2].Mean(), mD0 = d0.stats[2].Mean();
+				const double tOff = off.Quantile(&PairLog::gpuMs, 1, false, false, 0.5);
+				const double tD0 = d0.Quantile(&PairLog::gpuMs, 1, false, false, 0.5);
+				const double fit50 = d0.Quantile(&PairLog::fitMs, 1, false, false, 0.5), fit95 = d0.Quantile(&PairLog::fitMs, 1, false, false, 0.95);
+				const double plan50 = d0.Quantile(&PairLog::planMs, 1, true, false, 0.5);
+				const double total = tD0 + fit50 + plan50;
+				const bool accurate = eD0 <= eOff && (!mover || mD0 <= mOff);
+				const bool fast = total <= tOff;
+				char moverText[64] = "-";
+				if (mover)
+					std::snprintf(moverText, sizeof(moverText), "%.4f / %.4f", mOff, mD0);
+				double expected[5] = {};
+				for (int L = 1; L <= 4; ++L)
+					expected[L] = share[L] * eD0 + (1.0 - share[L]) * eOff;
+				std::snprintf(line, sizeof(line), "| %s | %s | %.4f | %.4f | %s | %.3f | %.3f | %.3f / %.3f | %.3f | %.3f | %d of %d | %.0f / %.0f / %.0f / %.0f%% | "
+					"%.4f / %.4f / %.4f / %.4f | %s%s%s |\n",
+					s.scene.name.c_str(), d0.name.c_str(), eOff, eD0,
+					moverText,
+					tOff, tD0, fit50, fit95, plan50, total, d0.Count(&PairLog::guided, false), Frames() - 1,
+					100.0 * share[1], 100.0 * share[2], 100.0 * share[3], 100.0 * share[4], expected[1], expected[2], expected[3], expected[4],
+					accurate && fast ? "PASS" : "DEFECT", accurate ? "" : " (accuracy)", fast ? "" : " (time)");
+				md << line;
+			}
+		}
+		md << "\nPlausibility: a d0 row's guided count should be " << (Frames() - 1) << " (no warm-up at d = 0) unless the ahead pair or the gate "
+			"refused a pair (camera-accuracy-pairs.csv, column refusal).\n";
+	}
+
 	void WriteSummary(const std::string& dir, const std::vector<SceneResult>& all, bool hardware, const std::string& device,
 		double rateScale, bool engineGlobal, const std::vector<std::string>& skipped, bool reverse)
 	{
@@ -5254,7 +5336,8 @@ namespace CameraAccuracy
 		md << "\n## What is and is not the same as K4 live\n\n";
 		md << "- Same: the fit, plan and guide units (AssemblePair, Fitter, BuildGuide, MakeGuidanceFrame), the default Config / MeasurementConfig, "
 			"the matcher's SetCameraGuidance path and the optical flow seed mode. The matcher's response to a given guide is therefore what live gets.\n";
-		md << "- Different (a live run can differ by these): the lag d is fixed at " << kGuideLag << " here, live uses the measured lag (>= 2); the fit reads the "
+		md << "- Different (a live run can differ by these): the lag d is fixed at " << kGuideLag << " in the historical rows; live uses d = 0 (camera(N) on "
+			"time or unguided: the *_d0 rows, section 'd = 0 A/B' below); the fit reads the "
 			"estimator's optical-flow seed (MotionWarp::LastSeed, F2) through the live readback's own CPU conversion (SeedToSourceGrid), here downloaded "
 			"synchronously; the fade flag and gain come from the scene's truth, live "
 			"from P4's detector; the guidance governor, the lane-versus-live race, a late record and a slip refusal are not modelled (a refused pair is today's "
@@ -5262,6 +5345,7 @@ namespace CameraAccuracy
 			"PairFacts.haveEngineGlobal is not set (the fit's engine-agreement signal stays neutral; live sets it when the engine's global is used); "
 			"all_switches understates guidedCandidate and tinyMoverRoi (the CPU plan only: the GPU matcher does not apply them yet).\n";
 		WriteAheadSummary(md, all);
+		WriteD0Summary(md, all);
 	}
 }
 
@@ -5321,18 +5405,25 @@ void RunBetaCameraAccuracy()
 		Check(lumaT[f] && chromaT[f], "camera accuracy: cannot create the frame planes");
 	}
 	const int blocksX = (srcW + 15) / 16, blocksY = (srcH + 15) / 16;   // one texel per 16x16 source block (240x135 at 4K, 120x68 at 1080)
-	struct Spec { const char* name; bool on; CameraModel::MeasurementSwitches sw; bool ahead; };
+	struct Spec { const char* name; bool on; CameraModel::MeasurementSwitches sw; bool ahead; int lag; };
 	std::vector<Spec> specs;
-	specs.push_back(Spec{ "off", false, CameraModel::MeasurementSwitches(), false });
-	specs.push_back(Spec{ "model_global", true, ModelGlobalOnly(), false });
-	specs.push_back(Spec{ "all_switches", true, AllSwitches(), false });
+	specs.push_back(Spec{ "off", false, CameraModel::MeasurementSwitches(), false, kGuideLag });
+	specs.push_back(Spec{ "model_global", true, ModelGlobalOnly(), false, kGuideLag });   // d = 2: historical reference, not a runtime path
+	specs.push_back(Spec{ "all_switches", true, AllSwitches(), false, kGuideLag });
 	// AHEAD FIT A/B (VP_TEST_CAMERA_ACCURACY_AHEAD=1): the same two camera variants with the fit fed from the AHEAD NVOF pair (the producer's
 	// pair, from the real producer: ProducerPairs.h) through the production CopyAhead -> AheadToSourceGrid, instead of the F2 seed.
-	const bool aheadRun = EnvText("VP_TEST_CAMERA_ACCURACY_AHEAD") == "1";
+	const bool d0Run = EnvText("VP_TEST_CAMERA_ACCURACY_D0") == "1";
+	const bool aheadRun = EnvText("VP_TEST_CAMERA_ACCURACY_AHEAD") == "1" || d0Run;   // the d = 0 rows need the ahead pairs and the on-time model
 	if (aheadRun)
 	{
-		specs.push_back(Spec{ "model_global_ahead", true, ModelGlobalOnly(), true });
-		specs.push_back(Spec{ "all_switches_ahead", true, AllSwitches(), true });
+		specs.push_back(Spec{ "model_global_ahead", true, ModelGlobalOnly(), true, kGuideLag });
+		specs.push_back(Spec{ "all_switches_ahead", true, AllSwitches(), true, kGuideLag });
+	}
+	if (d0Run)
+	{
+		// d = 0 (the runtime rule): pair p is guided by camera(p), the ahead fit of the same pair, fitted before its matcher.
+		specs.push_back(Spec{ "model_global_d0", true, ModelGlobalOnly(), true, 0 });
+		specs.push_back(Spec{ "all_switches_d0", true, AllSwitches(), true, 0 });
 	}
 	std::vector<std::string> skipped;
 	const std::vector<CamScene> scenes = Scenes(rateScale, skipped);
@@ -5376,7 +5467,7 @@ void RunBetaCameraAccuracy()
 		int seenHalvings = -1;          // the matcher's search halvings and consistency limit, from any variant's seed of this scene
 		float seenConsistency = 0.0f;
 		std::vector<std::vector<int8_t>> classes(Frames() - 1);   // the block classes of each scored pair, shared by the variants
-		for (int p = kGuideLag; p + 1 < Frames(); ++p)
+		for (int p = kGuideLag; p + 1 < Frames(); ++p)   // the scored pairs (the same pool in every variant, d = 0 included)
 			classes[p] = ClassifyAll(cs.scene, p, lumas[p], blocksX, blocksY);
 		for (size_t vk = 0; vk < specs.size(); ++vk)
 		{
@@ -5401,22 +5492,68 @@ void RunBetaCameraAccuracy()
 			std::vector<CameraLink::FieldCopy> fields(Frames() - 1);
 			const CameraModel::MeasurementConfig measurementConfig;
 			Dejudder::Planes lastA;
+			const bool preFit = spec.on && spec.lag == 0;   // d = 0: camera(p) exists before the matcher of p (the ahead pair is made ahead)
+			// The fit of pair p from its field copy (as the camera worker: an ahead record's per-block outputs regridded onto the 16-px
+			// consumer grid, CameraFitWorker.cpp ProcessJob -> RegridToConsumerGrid).
+			auto fitPair = [&](int p, const CameraLink::FieldCopy& fc, PairLog& log)
+			{
+				const auto fitStart = std::chrono::steady_clock::now();
+				CameraLink::PairFacts facts;
+				facts.pairSeconds = 1.0 / cs.fps;
+				facts.fade = cs.fade;
+				facts.fadeGain = cs.FadeGain(p);
+				CameraModel::PairInput input;
+				const CameraLink::AssembleStatus status = CameraLink::AssemblePair(fc, facts, VpIndicator::Stamp(), input);
+				Check(status == CameraLink::AssembleStatus::Ready, std::string("camera accuracy: pair not assembled: ") + CameraLink::Text(status));
+				records[p] = fitter.Fit(input);
+				if (spec.ahead)
+				{
+					const std::shared_ptr<const CameraModel::CameraMotion> regridded = CameraLink::RegridToConsumerGrid(
+						std::make_shared<const CameraModel::CameraMotion>(records[p]), blocksX, blocksY,
+						static_cast<double>(CameraLink::FieldCopy::kSourceBlockPx));
+					Check(regridded != nullptr, "camera accuracy: the ahead record could not be regridded onto the consumer grid");
+					records[p] = *regridded;
+				}
+				log.finalRefineCells = records[p].finalRefineCells;
+				log.fitMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fitStart).count();
+				log.fitReason = CameraModel::ReasonTextOf(records[p].reason, records[p].verdictFlags);
+				log.fitConf = records[p].confidence;
+				CameraModel::Displacement(records[p].params, 0.0, 0.0, &log.fitTx, &log.fitTy);
+			};
 			for (int p = 0; p + 1 < Frames(); ++p)
 			{
 				PairLog log;
 				log.pair = p;
-				log.eligible = p >= kGuideLag;
-				log.refusal = !spec.on ? "camera off" : (log.eligible ? "" : "no record yet (pair < d)");
+				log.eligible = p >= kGuideLag;   // scored (the same pool in every variant)
+				const bool guideable = p >= spec.lag;
+				log.refusal = !spec.on ? "camera off" : (guideable ? "" : "no record yet (pair < d)");
+				if (preFit)
+				{
+					// camera(p): the ahead pair of p, converted by the production units, fitted now (before the matcher of p).
+					CameraLink::FieldCopy& fc0 = fields[p];
+					fc0 = CameraLink::FieldCopy();
+					if (sr.aheadHave.size() > static_cast<size_t>(p) && sr.aheadHave[static_cast<size_t>(p)] != 0)
+					{
+						fc0 = aheadFields[static_cast<size_t>(p)];
+						log.seedBlockPx = 16;
+						fitPair(p, fc0, log);
+					}
+					else
+					{
+						records[p] = CameraModel::CameraMotion();
+						log.fitReason = "no ahead pair";
+					}
+				}
 				CameraTruth(cs.scene, static_cast<float>(p), log.truthTx, log.truthTy);
 				log.truthTx /= SizeDiv();
 				log.truthTy /= SizeDiv();   // source px
 				std::shared_ptr<const CameraModel::GuidanceFrame> frame;
-				if (spec.on && log.eligible)
+				if (spec.on && guideable)
 				{
 					const auto planStart = std::chrono::steady_clock::now();
 					CameraLink::GuideInputs in;
-					in.record = &records[p - kGuideLag];
-					in.prevField = &fields[p - kGuideLag];
+					in.record = &records[p - spec.lag];
+					in.prevField = preFit ? nullptr : &fields[p - spec.lag];   // d = 0: no previous field (production: the grid differs)
 					in.ctx.nextPairSeconds = 1.0 / cs.fps;
 					in.ctx.fade = cs.fade;
 					in.ctx.fadeGain = cs.FadeGain(p);
@@ -5480,7 +5617,8 @@ void RunBetaCameraAccuracy()
 				// F2 (as production): the fit reads the optical-flow SEED of this pair (MotionWarp::LastSeed, the searching
 				// instance's ofSearch), converted onto the 16-px source grid by the live readback's own CPU step
 				// (CameraLink::SeedToSourceGrid). No seed (WARP: no engine) = no fit, as live (camera_fit fallback).
-				CameraLink::FieldCopy& fc = fields[p];
+				CameraLink::FieldCopy scratch;   // d = 0: fields[p] is camera(p)'s copy already; the seed read below is not fitted
+				CameraLink::FieldCopy& fc = preFit ? scratch : fields[p];
 				fc = CameraLink::FieldCopy();
 				fc.seq = static_cast<uint64_t>(p);
 				fc.pairFrom = static_cast<uint64_t>(p);
@@ -5542,7 +5680,9 @@ void RunBetaCameraAccuracy()
 						sr.seedRaw[static_cast<size_t>(p)] = RawVsTruth(fc, log.truthTx, log.truthTy);
 					}
 				}
-				if (spec.on && !haveSeed)
+				if (preFit)
+					log.cpuMs = log.planMs + log.fitMs;
+				else if (spec.on && !haveSeed)
 				{
 					records[p] = CameraModel::CameraMotion();
 					log.fitReason = spec.ahead ? "no ahead pair" :
@@ -5551,20 +5691,7 @@ void RunBetaCameraAccuracy()
 				else if (spec.on)
 				{
 					// The fit of this pair, in order, whether or not anything uses it yet (as the camera worker does).
-					const auto fitStart = std::chrono::steady_clock::now();
-					CameraLink::PairFacts facts;
-					facts.pairSeconds = 1.0 / cs.fps;
-					facts.fade = cs.fade;
-					facts.fadeGain = cs.FadeGain(p);
-					CameraModel::PairInput input;
-					const CameraLink::AssembleStatus status = CameraLink::AssemblePair(fc, facts, VpIndicator::Stamp(), input);
-					Check(status == CameraLink::AssembleStatus::Ready, std::string("camera accuracy: pair not assembled: ") + CameraLink::Text(status));
-					records[p] = fitter.Fit(input);
-					log.finalRefineCells = records[p].finalRefineCells;
-					log.fitMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fitStart).count();
-					log.fitReason = CameraModel::ReasonTextOf(records[p].reason, records[p].verdictFlags);
-					log.fitConf = records[p].confidence;
-					CameraModel::Displacement(records[p].params, 0.0, 0.0, &log.fitTx, &log.fitTy);
+					fitPair(p, fc, log);
 					log.cpuMs = log.planMs + log.fitMs;
 				}
 				if (log.eligible)
