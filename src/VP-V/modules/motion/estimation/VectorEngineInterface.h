@@ -22,8 +22,8 @@ namespace VpMotion
 	// engine is per renderer, so the consumer asks the directory for its host's engine (M2 P5a).
 	constexpr const char* kVectorEngineQueryId = "vpv.vector_engine.v1";
 
-	// Required texture capabilities: fwd, bwd and the counts texture must be SAMPLEABLE rgba32f (the camera readback copy pass
-	// reads them with texelFetch); they need not be host readable. Threading (M2 P5a-5): BeforeEstimate / AfterEstimate are
+	// Required texture capabilities: fwd, bwd and the counts texture must be SAMPLEABLE float textures (rgba16F today, see
+	// VerifiedField; the camera readback copy pass reads them with texelFetch); they need not be host readable. Threading (M2 P5a-5): BeforeEstimate / AfterEstimate are
 	// called for BOTH ahead == false (the in-render estimate) and ahead == true (the de-judder's estimate ahead), and today
 	// both run on the render thread with renderMutex held, so GuidanceScheduler::Guide may be called from either. A future
 	// estimate on an off-render lane thread must NOT call Guide from the hook (PublishLane covers that path from the camera
@@ -33,7 +33,9 @@ namespace VpMotion
 	struct VerifiedField
 	{
 		uint64_t seq = 0, pairFrom = 0, pairTo = 0;
-		pl_tex fwd = nullptr;        // rgba32f (vx, vy, trust, unused) per block, MATCHER px (scaled by scaleToSourcePx)
+		// Declaration truth E2 (doc 97): rgba16F (vx, vy, trust, w = match error) per 16x16 source block; FieldOf answers source px
+		// (scaleToSourcePx = 1). A consumer still multiplies by scaleToSourcePx so a future matcher-px field stays correct.
+		pl_tex fwd = nullptr;
 		pl_tex bwd = nullptr;        // same layout, may be null (inverse signal then neutral)
 		pl_tex trust = nullptr;      // optional separate trust plane, may be null
 		int gridW = 0, gridH = 0, blockSize = 0;   // blockSize in source px
