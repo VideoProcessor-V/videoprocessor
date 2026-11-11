@@ -9,7 +9,7 @@
 // Run with --match CalibrationPageTests.
 
 #include "ConfigEditorWindow.h"
-#include <VP-V/config/VpvConfigProviders.h>
+#include <VP-V/modules/control/config/config_pages/VpvConfigProviders.h>
 
 #include <QAbstractButton>
 #include <QCoreApplication>

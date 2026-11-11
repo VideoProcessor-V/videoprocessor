@@ -718,10 +718,10 @@ so verification is against the batch base.
 ### WP-18 VP settings readers (LAST, with control.config)
 
 - **Goal:** VP keys read by per-module key tables (key, default, range, reader) in
-  `src/VP-V/config/`, driven by `slots.json`; `ReadRendererSettings` calls them. Fixes key-list drift.
+  `src/VP-V/modules/control/config/config_pages/`, driven by `slots.json`; `ReadRendererSettings` calls them. Fixes key-list drift.
 - **Inputs:** central §4 b2, §7.5; module findings (slots.json/manifest key lists wrong, item 4);
   settings-preview's `VpvOrganisation.h`; M2 step 19 (the schema move is M2, NOT here).
-- **Files:** VP: `src/VP-V/config/*Keys*`. Host cluster 2 (M): `ReadPipelineSettings`,
+- **Files:** VP: `src/VP-V/modules/control/config/config_pages/*Keys*`. Host cluster 2 (M): `ReadPipelineSettings`,
   `DejudderMatcherSettings`, `ApplyOriginalPathwaySettings` (V parts) move out; Bill's keys and
   `ApplyDisplayRule` stay. `RendererProfileConfig.h`, `MainConfigSchema.h`: call lines/table hooks
   only.

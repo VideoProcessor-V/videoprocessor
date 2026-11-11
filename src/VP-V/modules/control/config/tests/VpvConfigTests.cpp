@@ -3,10 +3,10 @@
 // Registered from ConfigEditorWindowTests.cpp's main with one line: RunVpvConfigTests().
 
 #include "ConfigEditorWindow.h"
-#include <VP-V/config/VpvSection.h>
-#include <VP-V/config/VpvTierTable.generated.h>
-#include <VP-V/config/VpvOrganisation.h>
-#include <VP-V/config/VpvSetBy.h>
+#include <VP-V/modules/control/config/config_pages/VpvSection.h>
+#include <VP-V/modules/control/config/config_pages/VpvTierTable.generated.h>
+#include <VP-V/modules/control/config/config_pages/VpvOrganisation.h>
+#include <VP-V/modules/control/config/config_pages/VpvSetBy.h>
 
 #include <ConfigFile.h>
 #include <VP-V/core/DelayBudgetLadder.h>

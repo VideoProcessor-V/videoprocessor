@@ -16,6 +16,7 @@
     "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
     "src/VP-V/modules/control/config/tests/ConfigIdentityDump.cpp",
     "src/VP-V/modules/control/config/tests/VpvProfileQueueAdviceTests.cpp",
+    "src/VP-V/modules/control/config/tests/VpvConfigTests.cpp",
     "src/VideoProcessor-Lib/ConfigFile.cpp",
     "src/VideoProcessor-Lib/ConfigSchema.h",
     "src/VideoProcessor-Lib/MainConfigSchema.h",
@@ -33,7 +34,33 @@
     "src/VP-V/modules/control/config/VpvStartupSchema.h",
     "src/VP-V/modules/control/config/VpvSchemaKeys.h",
     "src/VP-V/modules/control/config/VpvProfileQueueAdvice.h",
-    "src/VideoProcessor-Lib/RendererProfileConfig.h"
+    "src/VideoProcessor-Lib/RendererProfileConfig.h",
+    "src/VP-V/modules/control/config/config_pages/VpvBothPathwayCards.h",
+    "src/VP-V/modules/control/config/config_pages/VpvConfigFormApi.h",
+    "src/VP-V/modules/control/config/config_pages/VpvConfigPages.h",
+    "src/VP-V/modules/control/config/config_pages/VpvConfigProviders.h",
+    "src/VP-V/modules/control/config/config_pages/VpvDitherChoiceSet.h",
+    "src/VP-V/modules/control/config/config_pages/VpvDitherChoices.h",
+    "src/VP-V/modules/control/config/config_pages/VpvFormLayout.h",
+    "src/VP-V/modules/control/config/config_pages/VpvOrganisation.h",
+    "src/VP-V/modules/control/config/config_pages/VpvProfileUseRows.h",
+    "src/VP-V/modules/control/config/config_pages/VpvQueueRows.h",
+    "src/VP-V/modules/control/config/config_pages/VpvRenderingDefaults.h",
+    "src/VP-V/modules/control/config/config_pages/VpvScalingRows.h",
+    "src/VP-V/modules/control/config/config_pages/VpvSection.cpp",
+    "src/VP-V/modules/control/config/config_pages/VpvSection.h",
+    "src/VP-V/modules/control/config/config_pages/VpvSetBy.h",
+    "src/VP-V/modules/control/config/config_pages/VpvTierModel.h",
+    "src/VP-V/modules/control/config/config_pages/VpvTierTable.generated.h"
+  ],
+  "forwarding_headers": [
+    "src/VP-V/config/VpvConfigFormApi.h",
+    "src/VP-V/config/VpvConfigPages.h",
+    "src/VP-V/config/VpvConfigProviders.h",
+    "src/VP-V/config/VpvDitherChoiceSet.h",
+    "src/VP-V/config/VpvFormLayout.h",
+    "src/VP-V/config/VpvRenderingDefaults.h",
+    "src/VP-V/config/VpvSection.h"
   ],
   "components": {
     "files": {

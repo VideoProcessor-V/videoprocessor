@@ -17,6 +17,13 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/vprenderer/ExtendedRange.h` | `src/VP-V/modules/colour/extended_range/ExtendedRange.h` | 4a7a73c0e | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h` | `src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h` | d58d0b4c0 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/SdrToneShape.h` | `src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h` | d58d0b4c0 | fwd |
+| `src/VP-V/config/VpvConfigFormApi.h` | `src/VP-V/modules/control/config/config_pages/VpvConfigFormApi.h` | 0c522dbd7 | fwd |
+| `src/VP-V/config/VpvConfigPages.h` | `src/VP-V/modules/control/config/config_pages/VpvConfigPages.h` | 0c522dbd7 | fwd |
+| `src/VP-V/config/VpvConfigProviders.h` | `src/VP-V/modules/control/config/config_pages/VpvConfigProviders.h` | 0c522dbd7 | fwd |
+| `src/VP-V/config/VpvDitherChoiceSet.h` | `src/VP-V/modules/control/config/config_pages/VpvDitherChoiceSet.h` | 0c522dbd7 | fwd |
+| `src/VP-V/config/VpvFormLayout.h` | `src/VP-V/modules/control/config/config_pages/VpvFormLayout.h` | 0c522dbd7 | fwd |
+| `src/VP-V/config/VpvRenderingDefaults.h` | `src/VP-V/modules/control/config/config_pages/VpvRenderingDefaults.h` | 0c522dbd7 | fwd |
+| `src/VP-V/config/VpvSection.h` | `src/VP-V/modules/control/config/config_pages/VpvSection.h` | 0c522dbd7 | fwd |
 | `src/VideoProcessor-Lib/CrashState.cpp` | `src/VP-V/modules/control/diagnostics/CrashState.cpp` | 259cfa50e |  |
 | `src/VideoProcessor-Lib/CrashState.h` | `src/VP-V/modules/control/diagnostics/CrashState.h` | 259cfa50e |  |
 | `src/VideoProcessor-Lib/DiagnosticHistory.h` | `src/VP-V/modules/control/diagnostics/DiagnosticHistory.h` | 270a593e5 | fwd |

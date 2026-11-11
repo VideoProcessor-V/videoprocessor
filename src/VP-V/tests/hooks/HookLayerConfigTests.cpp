@@ -10,7 +10,7 @@
 
 #include "ConfigEditorWindow.h"
 #include "ConfigPageHost.h"
-#include <VP-V/config/VpvConfigProviders.h>
+#include <VP-V/modules/control/config/config_pages/VpvConfigProviders.h>
 
 #include <QFile>
 #include <QLabel>
