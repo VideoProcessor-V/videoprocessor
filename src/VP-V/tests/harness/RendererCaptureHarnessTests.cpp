@@ -7020,16 +7020,18 @@ namespace Tests
 			Assert::IsTrue(r.Logged("vectors delivered (forward"), (L"forward vectors delivered\n" + r.Tail()).c_str());
 		}
 
-		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineCompetitiveDepthZeroPublishesBackwardPairs)
+		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineCompetitiveDepthZeroStaysMotionFree)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
-		TEST_METHOD(VectorEngineCompetitiveDepthZeroPublishesBackwardPairs)
+		TEST_METHOD(VectorEngineCompetitiveDepthZeroStaysMotionFree)
 		{
 			const HarnessScope harnessScope;
-			// A competitive queue (target_frames 1) has no frame ahead: the backward pairs are published
-			// and the consumer that needs a frame ahead (the debander hold) is named as without vectors.
-			if (!RequireHardwareOrSkip("VectorEngineCompetitiveDepthZeroPublishesBackwardPairs")) return;
-			if (VectorTestSkip("VectorEngineCompetitiveDepthZeroPublishesBackwardPairs")) return;
+			// A competitive queue (target_frames 1) has no frame ahead and is motion-free (doc 91 C): the reuse-only debander hold
+			// may not start the engine (owner 2026-11-10 (2)), so no engine is created, no look-ahead gets a depth, and the hold is
+			// named as without vectors. WAIVER-C1-08 (coordinator 2026-11-11 15:36): the former expectations (backward pairs
+			// delivered; "needs a frame ahead") are obsolete under those rules; the no-look-ahead check is kept.
+			if (!RequireHardwareOrSkip("VectorEngineCompetitiveDepthZeroStaysMotionFree")) return;
+			if (VectorTestSkip("VectorEngineCompetitiveDepthZeroStaysMotionFree")) return;
 			g_harnessApplySnapshot = true;
 			g_harnessQueueTarget = 1;   // the harness overrides the snapshot's target_frames after it applies
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
@@ -7038,14 +7040,15 @@ namespace Tests
 			g_harnessQueueTarget = 0;
 			Logger::WriteMessage(VectorTestLines(r).c_str());
 			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
-			Assert::IsTrue(r.Logged("vectors delivered (backward"), (L"backward pairs delivered\n" + r.Tail()).c_str());
-			// The status lists the unserved consumers together: "...; deband hold, detail pulse, ... without vectors (needs a frame ahead)".
+			// The status lists the unserved consumers together: "Vector engine: ...; deband hold, ... without vectors (...)".
 			bool named = false;
 			for (const std::string& line : r.log)
-				if (line.find("Vector engine: backward pairs") != std::string::npos && line.find("deband hold") != std::string::npos &&
-					line.find("without vectors (needs a frame ahead)") != std::string::npos)
+				if (line.find("Vector engine: ") != std::string::npos && line.find("deband hold") != std::string::npos &&
+					line.find("without vectors") != std::string::npos)
 					named = true;
 			Assert::IsTrue(named, (L"the status names the deband hold as without vectors\n" + r.Tail()).c_str());
+			Assert::AreEqual(0, CountLogged(r, "Motion engine: created"), (L"competitive is motion-free: no engine\n" + r.Tail()).c_str());
+			Assert::AreEqual(0, MotionAheadDepthLines(r), (L"no look-ahead depth at depth zero\n" + r.Tail()).c_str());
 			Assert::IsFalse(r.Logged("Motion ahead: engaged"), (L"no look-ahead at depth zero\n" + r.Tail()).c_str());
 		}
 
