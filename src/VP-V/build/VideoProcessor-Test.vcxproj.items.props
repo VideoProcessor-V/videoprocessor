@@ -483,6 +483,7 @@
     <ClCompile Include="..\VP-V\tests\suite\CrashStateTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\DiagnosticHistoryTests.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\tests\DiagnosticsAdapterTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\control\config\tests\VpvProfileQueueAdviceTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\StateReportTests.cpp" />
     <ClCompile Include="..\VP-V\tests\harness\RendererCaptureHarnessTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\VpScaleRenderMotionTests.cpp" />

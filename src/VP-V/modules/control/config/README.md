@@ -21,6 +21,7 @@ The VP-V members of the renderer settings live here, not in `LibplaceboVideoRend
   `[vpv]` known keys and its section check. The host header `ProfileSchemaHooks.h` includes it inside
   `namespace RendererProfileConfig` when the build defines `PROFILE_SCHEMA_EXTENSION_HEADER`; the host validators
   (`ValidateProfileSetting`, `ValidateBaseSetting`) ask it only about a key they rejected or do not know.
+- `VpvProfileQueueAdvice.h` (P14, header-only C++14): the VP-V part of `UnifiedProfileRuntime`'s snapshot builder: `Compute(setting, sourceHz)` returns the look-ahead queue depth (optical_flow, motion_ahead_frames, dejudder_strength(_even), interpolation, via `MotionAhead::DepthAt/QueueFramesFor`) and `general_rate_fixes`. No new keys, no classifier, no motion work (one motion source, rule 21); the host keeps the profile resolution.
 - `VpvStartupSchema.h`: the VP-V startup sections and keys (`[ambient]`, `[led_drive*]`, `[calibration*]`, VP-V keys of
   `[general]`, `[queue]`, `[decklink]`, `[logging]`, `[shortcuts]`, the file-filter constants, the shortcut
   `global_actions` check). `MainSchemaHooks.h` includes it when `MAIN_SCHEMA_EXTENSION_HEADER` is defined. The host's
