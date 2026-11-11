@@ -26759,7 +26759,7 @@ void LibplaceboVideoRenderer::EnqueueFrame(VideoFrame& videoFrame,
 			queuedFrame.gapFrames = gapFrames;
 			queuedFrame.filmHz = filmHz;
 			queuedFrame.filmUpdate = filmUpdate;
-			if (!file) { queuedFrame.cadenceFacts = m_pulldownFrameFacts; m_pulldownFrameFacts = Vpv::Ingress::CadenceFacts{}; }   // VPV-HOOK C7b: taken once per captured frame (IngressPolicy.inl sets it)
+			if (!file) { queuedFrame.cadenceFacts = m_pulldownFrameFacts; m_pulldownFrameFacts = Vpv::Ingress::CadenceFacts{}; }   // C7b: taken once per captured frame (IngressPolicy.inl sets it) // VPV-HOOK
 			if (file)
 			{
 				queuedFrame.fileFrame = true;
@@ -30764,9 +30764,9 @@ void LibplaceboVideoRenderer::ConversionLoop()
 					const auto prepared = Impl::PrepareFrameAnalysis(analysed.frame, analysedState, analysed.converted,
 						analysed.analysis, AnalysisSourceProfile::QueuedCapture,
 						analysed.activePictureIdentity.sourceFormatGeneration, false, analysedState.dolbyVisionTunnel);
-					const FrameAnalysis::Cadence cadenceRecord = Vpv::Ingress::ToRecord(analysed.cadenceFacts);   // VPV-HOOK C7b: only built while the store is on (analyse)
+					const FrameAnalysis::Cadence cadenceRecord = Vpv::Ingress::ToRecord(analysed.cadenceFacts);   // C7b: only built while the store is on (analyse) // VPV-HOOK
 					m_impl->frameAnalysis.OnArrival(analysed.sourceSequence, prepared.source, FrameAnalysis::Rect{},
-						analysed.arrivalQpc, analysed.cadenceRepeat, analysed.cadenceFacts.valid ? &cadenceRecord : nullptr);
+						analysed.arrivalQpc, analysed.cadenceRepeat, analysed.cadenceFacts.valid ? &cadenceRecord : nullptr); // VPV-HOOK
 				}
 			}
 			catch (const std::exception& e)

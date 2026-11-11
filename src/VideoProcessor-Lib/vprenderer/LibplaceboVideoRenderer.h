@@ -306,7 +306,7 @@ private:
 		// drawn by the source): the same film frame updated - shown at once,
 		// at that film frame's time, never paired for motion.
 		bool filmUpdate = false;
-		Vpv::Ingress::CadenceFacts cadenceFacts;   // VPV-HOOK C7b: the ingress policy's pulldown facts for the store's cadence group (CadenceFeed.h)
+		Vpv::Ingress::CadenceFacts cadenceFacts;   // C7b: the ingress policy's pulldown facts for the store's cadence group (CadenceFeed.h) // VPV-HOOK
 		// ABI 37: a file frame (OnTimedVideoFrame). It leaves the queue at its
 		// due time (filePresentationQpc less the presentation lead) instead of
 		// on queue depth; filmHz / arrivalQpc above are its film clock.
