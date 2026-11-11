@@ -679,6 +679,51 @@ namespace
 
 namespace
 {
+	// P8-3 (2026-11-11): the placement table is ONE table (Organisation()). A key sits on one card only and a
+	// Section id on one card only; the Motion unit's de-judder slider rows, estimation rows and intent rows
+	// are on Motion cards. tools/check_config_placement.py holds the module README tables to the same table.
+	void testPlacementTable()
+	{
+		std::map<std::string, std::string> keyCard, sectionCard;
+		for (const Vpv::Card& card : Vpv::Organisation())
+		{
+			const std::string where = std::string(card.unit) + "/" + card.id;
+			for (const Vpv::CardItem& item : card.items)
+			{
+				if (item.kind == Vpv::ItemKind::Row || item.kind == Vpv::ItemKind::Toggle)
+				{
+					const auto inserted = keyCard.emplace(item.id, where);
+					require(inserted.second, ("a key is on one card only: " + std::string(item.id) + " (" + inserted.first->second + " and " + where + ")").c_str());
+				}
+				else if (item.kind == Vpv::ItemKind::Section)
+				{
+					const auto inserted = sectionCard.emplace(item.id, where);
+					require(inserted.second, ("a section is on one card only: " + std::string(item.id)).c_str());
+				}
+			}
+		}
+		const char* const kMotionKeys[] = { "intent_motion", "intent_motion_policy", "intent_motion_min", "intent_motion_min_shot_s",
+			"intent_ease_s", "dejudder_strength", "dejudder_strength_even", "dejudder_even_rates", "dejudder_object_strength",
+			"dejudder_motion_rolloff", "dejudder_roll_floor", "dejudder_roll_lo", "dejudder_roll_hi", "optical_flow",
+			"motion_ahead_frames", "dejudder_est_split", "dejudder_est_qpel", "dejudder_estimate_ahead", "vector_demand" };
+		for (const char* key : kMotionKeys)
+		{
+			const auto found = keyCard.find(key);
+			require(found != keyCard.end() && found->second.compare(0, 7, "motion/") == 0,
+				(std::string("a motion key is on a Motion card: ") + key).c_str());
+		}
+		const char* const kMotionSections[] = { "dejudder", "dejudderEstimation" };
+		for (const char* section : kMotionSections)
+		{
+			const auto found = sectionCard.find(section);
+			require(found != sectionCard.end() && found->second.compare(0, 7, "motion/") == 0,
+				(std::string("a motion section is on a Motion card: ") + section).c_str());
+		}
+	}
+}
+
+namespace
+{
 	// Organisation pass 2 (2026-10-24): masters and the settings they set; one control per unit; the
 	// VP-V page fits the default window; the Dynamic Drive Advanced LED card under its two masters.
 	void testMastersAndFit()
@@ -1636,6 +1681,7 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: expert pipeline keys validated and stored", testExpertPipelineKeys);
 	failures += run("VP-V: coverage audit toggles, pointers and retirement marks", testCoverageAuditAdditions);
 	failures += run("VP-V: organisation cards, raw group, picker and reload", testOrganisation);
+	failures += run("VP-V: placement table is one table (Motion keys on Motion cards)", testPlacementTable);
 	failures += run("VP-V: masters, derived settings, one control per key, fits the window", testMastersAndFit);
 	failures += run("VP-V: logic audit fixes", testLogicAuditFixes);
 	failures += run("VP-V: Set by wording and order", testSetByWording);
