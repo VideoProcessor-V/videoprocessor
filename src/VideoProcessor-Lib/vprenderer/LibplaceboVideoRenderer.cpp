@@ -5850,7 +5850,7 @@ struct LibplaceboVideoRenderer::Impl
 		const Dejudder::Settings matcher = RenderedWarpSettings(h);
 		pl_tex next = nullptr;
 		const VpMotion::P3FieldSet live = vectorEstimate.Live();   // P5c: R0   // VPV-HOOK
-		if (dejudderNextVectorField->Run(live.field, live.frameTrust, dejudder->GetSettings().minTrustedShare, 0.0f,   // VPV-HOOK
+		if (dejudderNextVectorField->Run(live.field, live.frameTrust, vectorEstimate.MinTrustedShare(), 0.0f,   // VPV-HOOK
 				dejudderGeometry, w, h, next, live.subField, &matcher, live.camera, true) && next)   // VPV-HOOK
 		{
 			dejudderNextVectors = next;
