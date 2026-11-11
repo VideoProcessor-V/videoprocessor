@@ -218,6 +218,7 @@ Every key the estimation side reads (the host parses them per profile and hands 
 | `dejudder_fade_floor` | profile (`vprenderer.<profile>`, input group) | float | 0.0 .. 1.0 | 0.25 | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own | same on all |
 | `dejudder_verify` | profile (`vprenderer.<profile>`, input group) | bool | on, off | off | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own (retirement candidate D) | same on all |
 | `dejudder_verify_share` | profile (`vprenderer.<profile>`, input group) | float | 0.02 .. 1.0 | 0.2 | VP-V > Advanced | not forced; unused while the Original pathway runs no VP motion estimate | none of its own (retirement candidate D) | same on all |
+| `dejudder_est_still_zero` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | VP-V > Motion > Advanced > Motion estimator (measured, leave alone); also VP Renderer > Rendering > De-judder: motion estimation (measured - leave alone) | Original pathway sets `off` (ADR-0019) | Identical blocks get exactly the zero vector (bug hunt 2026-10-25) | same on all (not tiered) |
 
 - Existing keys: see "Config keys actually read" above (`optical_flow*`, `motion_ahead_frames`, `motion_history_fixes`, `motion_engine`, `general_rate_fixes`, `dejudder_estimate_ahead`, `dejudder_search_range`, `dejudder_low_res` and the `dejudder_est_*` / search keys). `dejudder_est` is not a key.
 - Planned keys: `motion_ahead_ms`
