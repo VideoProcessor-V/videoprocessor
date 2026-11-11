@@ -34,6 +34,15 @@
 // positions independent. The first use of each mode runs one untimed warm-up estimate (its wall ms is written as cold_estimate_ms).
 // The GPU is drained (pl_gpu_finish) before the clock starts and again before it stops, so estimate_ms is the GPU wall time, not the CPU
 // submit time. The order of the two modes alternates from group to group, so neither always pays the first-use costs.
+// Notes on reading the rows:
+//   - estimate_ms includes the re-creation of the fade / strength state textures that ForgetHistory() destroys (EnsureTextures builds
+//     them again inside the timed Estimate): a small constant in every row, not part of a steady-state estimate.
+//   - cold_estimate_ms is written only under kind "shift", on the first group, once per mode. The first mode of the run pays the shader
+//     compilation; the second mode's figure is shader-warm (pipelines are shared inside the process), so it is NOT a compile cost.
+//   - Rows whose meaning changed against mvbench\COMPARE.txt (older runs): estimate_ms (BeforeAfter, was "estimate wall") is now the
+//     warmed GPU wall time, so it is NOT comparable with the old 340 ms pair / 1600 ms nopair; in the steady csv render_ms_mean /
+//     render_ms_p95 are steady-state with ONE warp per mode, render_estimates is n - 1 (the first estimate is excluded), render_first_ms
+//     is new (that first estimate, shader compile and texture allocation included) and vram_render_mb is the persistent warp's footprint.
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
@@ -545,6 +554,7 @@ namespace VideoProcessorTest
 							// Untimed warm-up of this mode (the pair / no-pair branch compiles its pipelines on first use); the cold figure is kept.
 							if (mode == 1) warp.SetExternalFlow(pairFlow);
 							const double cold = MvTimedEstimate(gpu, warp, pa.planes, pb.planes, ok);
+							Assert::IsTrue(ok, L"the untimed warm-up estimate must succeed (otherwise the warm figures are not warm)");
 							row(kind, name, n, "cold_estimate_ms", cold);
 							warp.SetExternalFlow(nullptr);
 							warmed[mode] = true;
