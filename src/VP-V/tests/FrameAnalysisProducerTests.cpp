@@ -437,6 +437,47 @@ namespace FrameAnalysisProducerTestsNs
 			Assert::IsTrue(other.source.sharedLuma == nullptr);
 		}
 
+		// C7b cadence feed: the host publishes the ingress policy's facts into the record it begins; nothing happens while the store is off.
+		TEST_METHOD(HostPublishesTheCadenceFactsAndANoopWhileOff)
+		{
+			VpFrameAnalysis::Host host;
+			Frame frame = Make(Kind::V210, 1);
+			FrameAnalysis::Cadence cadence;
+			cadence.filmHz = 23.976;
+			cadence.phase = 1;
+			FrameAnalysis::Record record;
+			// Off: no record, no cadence, no counters moved.
+			host.OnArrival(1, frame.source, FrameAnalysis::Rect{}, 0, false, &cadence);
+			Assert::IsTrue(host.Store().Read(1, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kCadence, record) ==
+				FrameAnalysis::ReadStatus::Disabled);
+			Assert::AreEqual(uint64_t(0), host.Store().Snapshot().begun);
+			host.Configure(true, true, true);
+			host.SetRingDepth(4, 4);
+			host.Worker().Stop();   // deterministic: process on this thread
+			host.OnArrival(1, frame.source, FrameAnalysis::Rect{}, 10, false, &cadence);
+			Assert::IsTrue(host.Store().Read(1, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kCadence, record) ==
+				FrameAnalysis::ReadStatus::Ok);
+			Assert::AreEqual(23.976, record.cadence.filmHz);
+			Assert::AreEqual(1, record.cadence.phase);
+			Assert::IsFalse(record.cadence.repeatOfPrevious);
+			host.Worker().Drain();   // the measured groups arrive later and leave the cadence alone
+			Assert::IsTrue(host.Store().Read(1, FrameAnalysis::Use::Temporal, FrameAnalysis::kLuma | FrameAnalysis::kCadence, record) ==
+				FrameAnalysis::ReadStatus::Ok);
+			Assert::AreEqual(1, record.cadence.phase);
+			// No facts (detection off): the group is never marked valid.
+			host.OnArrival(2, frame.source, FrameAnalysis::Rect{}, 11, false);
+			Assert::IsTrue(host.Store().Read(2, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kCadence, record) !=
+				FrameAnalysis::ReadStatus::Ok);
+			host.Worker().Drain();   // the original (frame 2) is measured before its repeat arrives
+			// A captured repeat keeps the phase and film rate beside repeatOf.
+			host.OnArrival(3, frame.source, FrameAnalysis::Rect{}, 12, true, &cadence);
+			Assert::IsTrue(host.Store().Read(3, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kCadence, record) ==
+				FrameAnalysis::ReadStatus::Ok);
+			Assert::IsTrue(record.cadence.repeatOfPrevious);
+			Assert::AreEqual(23.976, record.cadence.filmHz);
+			Assert::AreEqual(1, record.cadence.phase);
+		}
+
 		TEST_METHOD(CapturedRepeatReusesTheOriginalRecord)
 		{
 			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));

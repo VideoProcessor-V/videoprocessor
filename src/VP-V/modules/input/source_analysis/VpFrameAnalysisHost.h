@@ -136,8 +136,13 @@ namespace VpFrameAnalysis
 		// A converted frame entered the queue (the conversion thread). picture: Bill's active-picture
 		// decision when known (read only), else empty = the full raster. A captured repeat points at
 		// the last unique frame (no re-measure). Never waits for the worker.
+		// cadence (C7b): the ingress policy's pulldown facts for this frame (queue_timing/CadenceFeed.h), or
+		// null (detection off / not a captured frame). It is published HERE because the record exists only
+		// once this call has begun it (the ingress decision runs before the frame has a record); it is written
+		// before MarkRepeat so a captured repeat keeps its phase and film rate beside repeatOf. Nothing runs
+		// for it while the store is off (the early return below).
 		void OnArrival(uint64_t seq, const AnalysisLumaSource& source, const FrameAnalysis::Rect& picture,
-			int64_t captureQpc, bool captureRepeat)
+			int64_t captureQpc, bool captureRepeat, const FrameAnalysis::Cadence* cadence = nullptr)
 		{
 			uint64_t original = 0;
 			bool repeat = false;
@@ -172,6 +177,8 @@ namespace VpFrameAnalysis
 			if (repeat)
 			{
 				m_store.Begin(identity, measure ? FrameAnalysis::kMeasuredGroups : 0u);
+				if (cadence)
+					m_store.PublishCadence(seq, *cadence);
 				if (measure && m_store.MarkRepeat(seq, original))
 					return;   // the original's record serves the repeat
 			}
@@ -182,6 +189,8 @@ namespace VpFrameAnalysis
 			job.measure = measure;
 			job.owner = tapWants ? owner : nullptr;
 			m_producer.Submit(std::move(job));
+			if (cadence)
+				m_store.PublishCadence(seq, *cadence);   // Submit began the record (false only when the store went off meanwhile)
 		}
 
 		// MotionValidity::Cause (as its integer value): the ONE discontinuity epoch, shared with the
