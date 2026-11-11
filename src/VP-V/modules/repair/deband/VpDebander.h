@@ -1,6 +1,6 @@
 #pragma once
 
-#include <VP-V/modules/repair/stack/RepairStackOrder.h>
+#include <VP-V/modules/repair/RepairStackOrder.h>
 #include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
 
 #include <libplacebo/renderer.h>

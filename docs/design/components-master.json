@@ -924,7 +924,7 @@
       "code_location": "legacy",
       "live_files": [
         "src/VideoProcessor-Lib/NlsGeometryPolicy.cpp",
-        "src/VP-V/modules/scaling/geometry/NlsMaskMapping.h",
+        "src/VP-V/modules/scaling/output/NlsMaskMapping.h",
         "src/VP-V/modules/scaling/geometry/SourceGeometrySet.h",
         "src/VideoProcessor-Lib/vprenderer/NlsHookRecovery.h",
         "src/VideoProcessor-Lib/vprenderer/AnamorphicPresentation.h",
@@ -973,7 +973,8 @@
         "shaders/SSimDownscaler.glsl",
         "shaders/SSimSuperRes.glsl",
         "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.h",
-        "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp"
+        "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp",
+        "src/VP-V/modules/scaling/output/NlsMaskMapping.h"
       ],
       "components": {
         "files": {

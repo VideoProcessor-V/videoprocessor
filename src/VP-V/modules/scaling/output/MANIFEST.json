@@ -12,11 +12,13 @@
     "shaders/SSimDownscaler.glsl",
     "shaders/SSimSuperRes.glsl",
     "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.h",
-    "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp"
+    "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp",
+    "src/VP-V/modules/scaling/output/NlsMaskMapping.h"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h",
-    "src/VideoProcessor-Lib/vprenderer/DownscaleLight.h"
+    "src/VideoProcessor-Lib/vprenderer/DownscaleLight.h",
+    "src/VideoProcessor-Lib/vprenderer/NlsMaskMapping.h"
   ],
   "components": {
     "files": {

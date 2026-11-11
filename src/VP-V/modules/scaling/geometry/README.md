@@ -143,10 +143,10 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy** in the manifest, mixed in practice: `NlsMaskMapping.h` is VP-owned and lives in this folder; the other files are Bill-owned and stay in place. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **legacy** in the manifest, mixed in practice: `NlsMaskMapping.h` is VP-owned and now lives in `scaling/output/` (folded there, R2 M-e; it is the geometry slot's VP-side mask mapping, read by the output scaler, motion consumers and Dynamic Drive); the other files are Bill-owned and stay in place. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
 - `src/VideoProcessor-Lib/NlsGeometryPolicy.cpp`
-- `src/VP-V/modules/scaling/geometry/NlsMaskMapping.h` (moved here at M2 step 9; the old path is a forwarding header for Bill-owned includers)
+- `src/VP-V/modules/scaling/output/NlsMaskMapping.h` (moved to `scaling/geometry/` at M2 step 9, folded into `scaling/output/` at R2 M-e; the old `vprenderer/` path is a forwarding header for Bill-owned includers)
 - `src/VideoProcessor-Lib/vprenderer/NlsHookRecovery.h`
 - `src/VideoProcessor-Lib/vprenderer/AnamorphicPresentation.h`
 - `src/VideoProcessor-Lib/vprenderer/AlphaSourceCropPolicy.cpp`

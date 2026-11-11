@@ -17,7 +17,7 @@
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/GpuAllocator.h>
-#include <VP-V/modules/control/gpu_memory/GpuProductTexBackend.h>
+#include <VP-V/modules/control/skeleton/GpuProductTexBackend.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuJobs.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>

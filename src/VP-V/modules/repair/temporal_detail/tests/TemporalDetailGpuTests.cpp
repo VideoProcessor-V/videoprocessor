@@ -11,7 +11,7 @@
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/ScratchArena.h>
-#include <VP-V/modules/control/gpu_memory/PlTexBackend.h>
+#include <VP-V/modules/control/skeleton/PlTexBackend.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>

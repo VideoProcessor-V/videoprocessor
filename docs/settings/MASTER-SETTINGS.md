@@ -11,7 +11,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 
 | Count | Value |
 |---|---|
-| Modules | 45 |
+| Modules | 43 |
 | Documented rows | 70 |
 | VP-V keys in code (outside Bill's schema lists) | 386 |
 | of which documented | 65 |
@@ -43,7 +43,6 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Repair | `repair.texture_restore` | built | [README](../../src/VP-V/modules/repair/texture_restore/README.md) | 0 | 5 | 0/5 |
 | Repair | `repair.temporal_detail.products` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/products/README.md) | 1 | 0 | 0/0 |
 | Repair | `repair.temporal_detail.shared` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/shared/README.md) | 0 | 0 | 0/0 |
-| Repair | `repair.stack` | draft | [README](../../src/VP-V/modules/repair/stack/README.md) | 0 | 0 | 0/0 |
 | Scaling | `scaling.rebase` | built | [README](../../src/VP-V/modules/scaling/rebase/README.md) | 0 | 4 | 0/4 |
 | Scaling | `scaling.route_4k` | placeholder | [README](../../src/VP-V/modules/scaling/route_4k/README.md) | 0 | 1 | 0/1 |
 | Scaling | `scaling.refine` | placeholder | [README](../../src/VP-V/modules/scaling/refine/README.md) | 0 | 1 | 0/1 |
@@ -65,7 +64,6 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Control | `control.net_runtime` | placeholder | [README](../../src/VP-V/modules/control/net_runtime/README.md) | 0 | 1 | 0/1 |
 | Control | `control.diagnostics` | partial | [README](../../src/VP-V/modules/control/diagnostics/README.md) | 0 | 4 | 0/4 |
 | Control | `control.config` | partial | [README](../../src/VP-V/modules/control/config/README.md) | 0 | 0 | 0/0 |
-| Control | `control.gpu_memory` | draft | [README](../../src/VP-V/modules/control/gpu_memory/README.md) | 0 | 0 | 0/0 |
 | Control | `control.skeleton` | draft | [README](../../src/VP-V/modules/control/skeleton/README.md) | 8 | 7 | 7/7 |
 
 ## Input
@@ -136,7 +134,7 @@ Modules: `motion.estimation`, `motion.vector_delivery`, `motion.consumers`.
 
 ## Repair
 
-Modules: `repair.encoding`, `repair.deband`, `repair.grain_split`, `repair.grain_split.shared.band_from_base`, `repair.temporal_detail`, `repair.texture_restore`, `repair.temporal_detail.products`, `repair.temporal_detail.shared`, `repair.stack`.
+Modules: `repair.encoding`, `repair.deband`, `repair.grain_split`, `repair.grain_split.shared.band_from_base`, `repair.temporal_detail`, `repair.texture_restore`, `repair.temporal_detail.products`, `repair.temporal_detail.shared`.
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -183,7 +181,7 @@ Modules: `output.calibration_lut`, `output.dither`, `output.presentation`.
 
 ## Control
 
-Modules: `control.net_runtime`, `control.diagnostics`, `control.config`, `control.gpu_memory`, `control.skeleton`.
+Modules: `control.net_runtime`, `control.diagnostics`, `control.config`, `control.skeleton`.
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|

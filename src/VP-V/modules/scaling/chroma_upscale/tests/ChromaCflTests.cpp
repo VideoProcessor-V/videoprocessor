@@ -10,7 +10,7 @@
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/ScratchArena.h>
-#include <VP-V/modules/control/gpu_memory/PlTexBackend.h>
+#include <VP-V/modules/control/skeleton/PlTexBackend.h>
 #include <VP-V/modules/scaling/chroma_upscale/ChromaCfl.h>
 #include <VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.h>
 
