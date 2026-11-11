@@ -5,6 +5,9 @@
 // ChainEvidence (SID-C1 unit 4): turns verifier results into calibrated evidence, per axis. It is an
 // ACCUMULATOR with reason bits; the per-axis reading (confident vs UNSURE, ChainReading.h) reads its summaries. There is no latch
 // state machine anywhere (doc 78 section 5: parked).
+// SID r2 (default off, EvidenceSettings::conventionOnly / pairPrior): R2 a candidate whose ratio is no published conventional geometry
+// (SourceGeometrySet.h) earns no evidence; R3 the two-axis prior is whether the ratio PAIR is one listed geometry. The latch lives in
+// ChainLatch.h, above the readers.
 //
 // floorCodes (AxisObservation) is the dof-NORMALISED sigma of the rounding/dither noise (1.155 for an 8-bit output,
 // 0.289 for 10-bit), the same unit as the verifier's line baselines; the verifier's CandidateResult.floorCodes is
@@ -54,6 +57,8 @@
 #include "ChainNullTables.h"
 #include "DescaleVerifier.h"
 
+#include <VP-V/modules/scaling/geometry/SourceGeometrySet.h>
+
 namespace SourceIdentity
 {
 	namespace Chain
@@ -72,6 +77,9 @@ namespace SourceIdentity
 			double shotCapFraction = 0.5;
 			double agreementBonus = 2.0;
 			double agreementTolerance = 0.015;   // relative difference of n/N counted as agreeing
+			// SID E0 safety rules (owner 2026-11-07). Both OFF by default (EstimatorSettings::safetyRules turns them on).
+			bool conventionOnly = false;         // R2: only candidate sizes whose ratio is a published conventional geometry (SourceGeometrySet.h) earn evidence
+			bool pairPrior = false;              // R3: the two-axis prior is the convention PAIR (the ratio pair is one listed geometry), replacing the ratio agreement
 			double lineGateFactor = 1.5;        // detail baseline must reach this x the rounding/dither floor (a cliff: tune with care)
 			double minGateFraction = 0.25;       // 8 of 32
 			int minGateLinesFloor = 3;
@@ -134,6 +142,7 @@ namespace SourceIdentity
 			int linesGated = 0;
 			int linesMasked = 0;
 			bool gatedOk = false;         // enough informative lines
+			bool nonConventional = false; // R2: judged informative but not a published conventional ratio: no evidence (conventionOnly)
 			bool mixed = false;           // line or segment disagreement beyond the mask limit
 			bool clustered = false;       // dropped: a neighbour within +-1 px has more evidence
 			double median = 0.0;          // median line value of the informative lines (the top hypothesis has the lowest)
@@ -241,7 +250,15 @@ namespace SourceIdentity
 					if (!cr.valid || !cr.exactDone || cr.lineCount < 1)
 						continue;
 					anyUsable = true;
-					Judge(cr, obs.axisLen, floorC, out.cand[out.candidateCount++]);
+					Judge(cr, obs.axisLen, floorC, out.cand[out.candidateCount]);
+					CandidateEvidence& ce = out.cand[out.candidateCount++];
+					// R2 (E0): a size that is not a conventional ratio of the measured axis is UNSURE material, never evidence.
+					if (s_.conventionOnly && ce.informative && !Scaling::GeometrySet::ConventionalAxis(ce.n, obs.axisLen, axis == 0 ? 0 : 1))
+					{
+						ce.informative = false;
+						ce.nonConventional = true;
+						ce.reason |= kReasonNonConventional;
+					}
 				}
 				// The top hypothesis (informative lines, lowest median line value; ties: smaller n) decides HOLD.
 				int top = -1;
@@ -358,6 +375,24 @@ namespace SourceIdentity
 				return true;
 			}
 
+			// R5 support: the evidence of the size n on one axis (the slot within +-1 px), shot-capped, WITHOUT the two-axis prior; -1e9 = none.
+			double LlrAtN(int axis, int n) const
+			{
+				const AxisState& st = ax_[axis == 0 ? 0 : 1];
+				const double cap = s_.shotCapFraction * thr_.c1;
+				double best = -1e9;
+				for (size_t i = 0; i < st.slots.size(); ++i)
+				{
+					const int d = st.slots[i].n > n ? st.slots[i].n - n : n - st.slots[i].n;
+					if (d > 1)
+						continue;
+					const double v = Total(st.slots[i], cap);
+					if (v > best)
+						best = v;
+				}
+				return best;
+			}
+
 			// The recent window of an axis in seconds (N3): derived from the measured evaluation rate; 0 = the rate is not measured yet (no window).
 			double WindowSeconds(int axis) const { return WindowUs(ax_[axis == 0 ? 0 : 1]) / 1e6; }
 
@@ -369,8 +404,18 @@ namespace SourceIdentity
 				r.otherAxisAbstains = o.informativeEvals == 0 || !o.hasBest || o.llr <= 0.0;
 				if (r.hasBest && r.llr > 0.0 && o.hasBest && o.llr > 0.0)
 				{
-					const double d = std::abs(r.ratio - o.ratio);
-					r.prior = (d <= s_.agreementTolerance * r.ratio) ? s_.agreementBonus : -s_.agreementBonus;
+					if (s_.pairPrior)
+					{
+						// R3: the ratio PAIR (x first) must be one listed geometry; a non-square listed pair agrees too, an unlisted pair does not.
+						const int nx = a == 0 ? r.n : o.n, ny = a == 0 ? o.n : r.n;
+						const int Nx = ax_[0].axisLen, Ny = ax_[1].axisLen;
+						r.prior = Scaling::GeometrySet::ConventionalPair(nx, Nx, ny, Ny) != nullptr ? s_.agreementBonus : -s_.agreementBonus;
+					}
+					else
+					{
+						const double d = std::abs(r.ratio - o.ratio);
+						r.prior = (d <= s_.agreementTolerance * r.ratio) ? s_.agreementBonus : -s_.agreementBonus;
+					}
 				}
 				r.llrWithPrior = r.llr + r.prior;
 				r.aboveC1 = r.hasBest && r.llrWithPrior >= thr_.c1;

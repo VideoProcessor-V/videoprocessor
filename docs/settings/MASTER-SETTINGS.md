@@ -512,7 +512,7 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `pulldown_fixes` | input.queue_timing | on |  | VpvSchemaKeys.h |
 | `queue_auto_reset` | input.queue_timing |  |  | VpvStartupSchema.h |
 | `queue_timing_fixes` | input.queue_timing | on |  | VpvSchemaKeys.h |
-| `rebase_kernel_match` | scaling.rebase | on | VP-V > Scaling > Re-base: undo the player's upscaler | VpvSchemaKeys.h |
+| `rebase_kernel_match` | scaling.rebase | off | VP-V > Scaling > Re-base: undo the player's upscaler | VpvSchemaKeys.h |
 | `render_ahead` | output.presentation | off | VP-V > Motion > De-judder: render ahead (under test) | VpvSchemaKeys.h |
 | `render_ahead_queue_credit` | output.presentation | off |  | VpvSchemaKeys.h |
 | `render_ahead_utilisation` | output.presentation | 0.85 |  | VpvSchemaKeys.h |

@@ -206,6 +206,13 @@ UI (relayed 2026-11-07). Each row: the test, what his UI does now, and the failu
 | WAIVER-MV-03 | `src/VP-V/modules/motion/consumers/tests/DejudderHookTests.cpp` `RolloffFollowsTheTruePanSpeedAt4K` | OLD intent: the roll-off strength follows the true pan speed at 4K from the search and from the engine. NEW asserts: the engine half runs on a synthetic pair of the true pan at the low-resolution search size (dx / 4 of the engine grid), same 0.05 bound; skip is `RequireOrSkip` | Same reason | coordinator-approved 2026-11-08 (consequence of the owner-approved NVOF dedup, doc 83 decision 1); SK-MV test commit d4aad96a6 |
 | WAIVER-MV-04 | `src/VP-V/tests/beta_gpu/BetaGpuTests.cpp` optical-flow corpus variants and timing line | OLD intent: corpus + timing of the render-time engine presets against the matcher. NEW: the variants are named as running the matcher (no producer pair in that host) and the timing line reports `NoPairAhead`; OPEN: producer-path corpus variants need a producer in the beta host project (not done); the end-to-end evidence is `MotionUnificationBenchTests` | The render-time engine and its presets are gone | coordinator-approved 2026-11-08 (consequence of the owner-approved NVOF dedup, doc 83 decision 1); SK-MV test commit d4aad96a6 |
 
+## SID r2 safety rules (branch r2/sid-rules)
+
+| Id | Area | Divergence | Original / off | Kind |
+|---|---|---|---|---|
+| SID-R2-REBASE-KM | `rebase_kernel_match` default | Default changed from on to OFF (owner decision 2026-11-07: kernel matching / kernel-inverse PARKED, neutral downscale). Regenerated: VpvTierTable.generated.h, MASTER-SETTINGS.md, control/config/README.md, VP-settings-reference.md, cpu-defaults.golden.txt (waiver, see the hand-back). | the key still exists; On restores the kernel-matched re-base | default change |
+| SID-R2-SINGLE-AXIS | `SourceResolutionMonitor::AutoFactors` (consensus per-axis path only) | Exactly one axis re-based below native is detected and logged ("source_id: single-axis re-base held"), not applied, unless `SetSingleAxisRebase(true)` (re-base only two-axis-confirmed conventional pairs). The classical path is untouched. | `SetSingleAxisRebase(true)` | default change (VP-V consensus path, not Bill's) |
+
 ## Open (not yet a row)
 
 (e2) and (e3) items are in the sweep note, section 5: `D:\codex\videoprocessor\skeleton-notes\divergence-sweep-firstpass.md`. They become rows only after the owner decides revert, gate, or register.

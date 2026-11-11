@@ -10,7 +10,9 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
 #include <deque>
+#include <fstream>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -82,6 +84,8 @@ namespace SourceIdentity
 			bool reqOriginal = false;
 			std::string reqFolder;
 			EvidenceLevel reqLevel = EvidenceLevel::Off;
+			bool reqSafety = false;    // SID r2: requested safety rules / ABR trigger (taken at the next clean start)
+			bool reqAbr = false;
 			uint64_t runEpoch = 0;     // bumped at every not-running -> running transition (a clean start)
 			uint64_t gen = 0;          // bumped at every discontinuity (jobs of an older era are dropped)
 			std::string formatInfo;
@@ -102,6 +106,7 @@ namespace SourceIdentity
 			std::atomic<bool> wantFrames{ false };
 			std::atomic<bool> latchedPower{ false };
 			std::atomic<bool> paused{ false };
+			std::atomic<bool> safetyA{ false };   // SID r2: events MenuHold / AbrStep are taken only while the rules are requested
 			EvaluationObserver observer;   // set before the estimator runs
 			std::atomic<double> nextDueMs{ 0.0 };
 			std::atomic<double> intervalMs{ 1000.0 };
@@ -115,6 +120,8 @@ namespace SourceIdentity
 			std::atomic<bool> haveKeyA{ false };
 			std::atomic<uint64_t> cEvaluations{ 0 }, cDelivered{ 0 }, cDropped{ 0 }, cRepeats{ 0 }, cNoClock{ 0 }, cUnusable{ 0 },
 				cStale{ 0 }, cDiscontinuities{ 0 }, cWindowClears{ 0 };
+			std::atomic<uint64_t> cLatchEntries{ 0 }, cLatchMoves{ 0 }, cLatchReleases{ 0 }, cLatchRelBound{ 0 }, cLatchRelNative{ 0 }, cLatchRelMenu{ 0 },
+				cLatchRelAbr{ 0 }, cLatchRelReset{ 0 }, cLatchHeldBack{ 0 }, cLatchNonConv{ 0 };
 
 			// ---- the worker's own state (procMutex: one processing thread at a time) ---------------------------------------
 			mutable std::mutex procMutex;
@@ -126,6 +133,22 @@ namespace SourceIdentity
 			Governor gov;
 			EvidenceLog log;
 			Geometry::HeldState held;
+			UpscaleLatch latch;                       // SID r2 R5 / R7 (inert unless safetyOn)
+			bool safetyOn = false;                    // applied at the clean start
+			Geometry::AxisGeom heldApplied[2];        // the applied geometry the latch carries (updated by every confident reading of the latched size)
+			Geometry::AxisGeom lastFiltered[2];       // the last published applied geometry (for appliedChanged)
+			LatchCounters latchBase;                  // counters of the latch already folded into the atomics
+			std::string dumpPath;                     // R4: VP_SID_R4_DUMP_PATH (empty = off)
+			std::unique_ptr<DescaleVerifier> dumpVerifier;
+			uint64_t dumpRows = 0;
+			UpscaleLatch latch;                       // SID r2 R5 / R7 (inert unless safetyOn)
+			bool safetyOn = false;                    // applied at the clean start
+			Geometry::AxisGeom heldApplied[2];        // the applied geometry the latch carries
+			Geometry::AxisGeom lastFiltered[2];       // the last published applied geometry (for appliedChanged)
+			LatchCounters latchBase;                  // counters of the latch already folded into the atomics
+			std::string dumpPath;                     // R4: VP_SID_R4_DUMP_PATH (empty = off)
+			std::unique_ptr<DescaleVerifier> dumpVerifier;
+			uint64_t dumpRows = 0;
 			bool appliedRunning = false;
 			uint64_t appliedEpoch = 0;
 			bool haveArea = false;
@@ -158,6 +181,9 @@ namespace SourceIdentity
 			{
 				cfg.queueDepth = ClampInt(cfg.queueDepth, 1, 2);
 				cfg.clockRing = ClampInt(cfg.clockRing, 4, 4096);
+				reqSafety = cfg.safetyRules;
+				reqAbr = cfg.latch.abrStepTrigger;
+				safetyA.store(reqSafety, std::memory_order_release);
 				for (int a = 0; a < 2; ++a)
 				{
 					reader[a] = AxisReader(cfg.reading, levels);
@@ -259,6 +285,33 @@ namespace SourceIdentity
 					RecomputeRunningLocked();
 				}
 				UpdateTap();
+				Wake();
+			}
+
+			void SetSafety(bool on)
+			{
+				{
+					std::lock_guard<std::mutex> lk(m);
+					if (reqSafety == on)
+						return;
+					reqSafety = on;
+					safetyA.store(on, std::memory_order_release);
+					cfgDirty = true;
+					++runEpoch;   // the rules change the reading: a clean start
+				}
+				Wake();
+			}
+
+			void SetAbr(bool on)
+			{
+				{
+					std::lock_guard<std::mutex> lk(m);
+					if (reqAbr == on)
+						return;
+					reqAbr = on;
+					cfgDirty = true;
+					++runEpoch;
+				}
 				Wake();
 			}
 
@@ -372,6 +425,8 @@ namespace SourceIdentity
 			{
 				if (!running.load(std::memory_order_acquire))
 					return;
+				if ((kind == EstimatorEvent::MenuHold || kind == EstimatorEvent::AbrStep) && !safetyA.load(std::memory_order_acquire))
+					return;   // SID r2 events: inert while the rules are off (byte identical)
 				EventRec e;
 				e.seq = seq;
 				e.kind = static_cast<int>(kind);
@@ -631,6 +686,10 @@ namespace SourceIdentity
 							}
 							else if (events[i].kind == static_cast<int>(EstimatorEvent::ClearWindow))
 								flags |= kEvClearWindow;   // the evidence window is cleared before this evaluation (Process)
+							else if (events[i].kind == static_cast<int>(EstimatorEvent::MenuHold))
+								flags |= kEvMenuHold;
+							else if (events[i].kind == static_cast<int>(EstimatorEvent::AbrStep))
+								flags |= kEvAbrStep;
 							else
 								flags |= events[i].kind == static_cast<int>(EstimatorEvent::Blank) ? kEvBlank : kEvFade;
 							events.erase(events.begin() + static_cast<std::ptrdiff_t>(i));
@@ -811,6 +870,27 @@ namespace SourceIdentity
 					proposer[a].Reset();
 					lastAxisLen[a] = 0;
 				}
+				{
+					bool safe = false, abr = false;
+					{
+						std::lock_guard<std::mutex> lk(m);
+						safe = reqSafety;
+						abr = reqAbr;
+					}
+					safetyOn = safe;
+					cfg.evidence.conventionOnly = safe;   // R2
+					cfg.evidence.pairPrior = safe;        // R3
+					cfg.latch.enabled = safe;             // R5 / R7
+					cfg.latch.abrStepTrigger = abr;
+					latch = UpscaleLatch(cfg.latch);
+					latchBase = LatchCounters();
+					for (int a = 0; a < 2; ++a)
+					{
+						heldApplied[a] = Geometry::AxisGeom();
+						lastFiltered[a] = Geometry::AxisGeom();
+					}
+					ConfigureR4Dump();
+				}
 				evidence = ChainEvidence(cfg.evidence);
 				verifier->ClearCache();
 				probeVerifier->ClearCache();
@@ -903,6 +983,16 @@ namespace SourceIdentity
 					proposer[a].Reset();
 				}
 				evidence.Reset();
+				if (safetyOn)
+				{
+					latch.Reset();
+					FoldLatchCounters();
+					for (int a = 0; a < 2; ++a)
+					{
+						heldApplied[a] = Geometry::AxisGeom();
+						lastFiltered[a] = Geometry::AxisGeom();
+					}
+				}
 				haveArea = false;
 				latchedPower.store(false, std::memory_order_release);
 				if (out[0].measuredChanged || out[1].measuredChanged)
@@ -999,6 +1089,181 @@ namespace SourceIdentity
 			}
 
 			// One evaluation of both axes (the worker, or the calling thread in synchronous mode).
+			// ---- SID r2: R4 enabler (opt-in diagnostic dump, no decision change) ------------------------------------------
+			// VP_SID_R4_DUMP_PATH = an absolute scratch file: every Process appends, per axis, the exact-stage statistic of EVERY conventional
+			// size (scaling.geometry SourceGeometrySet.h) on all the sampled lines, by a verifier of its own (nothing the decision reads is
+			// touched). Columns: seq,timeUs,axis,N,n,valid,stat,kernel,lines. Cleared by unsetting the variable.
+			void ConfigureR4Dump()
+			{
+				dumpPath.clear();
+				dumpVerifier.reset();
+				dumpRows = 0;
+#ifdef _MSC_VER
+				char* v = nullptr;
+				size_t len = 0;
+				if (_dupenv_s(&v, &len, "VP_SID_R4_DUMP_PATH") == 0 && v != nullptr)
+				{
+					dumpPath = v;
+					std::free(v);
+				}
+#else
+				const char* v = std::getenv("VP_SID_R4_DUMP_PATH");
+				if (v != nullptr)
+					dumpPath = v;
+#endif
+				if (dumpPath.empty())
+					return;
+				VerifierSettings vs = cfg.verifier;
+				vs.nowMs = &State::VerifierClock;
+				vs.clockCtx = this;
+				vs.cacheBytes = vs.cacheBytes / 8;
+				dumpVerifier.reset(new DescaleVerifier(vs));
+				log.PostNotice("Source identity: R4 diagnostic dump on (" + dumpPath + ")");
+			}
+
+			void DumpR4(const AxisRun run[2], uint64_t seq, int64_t timeUs)
+			{
+				if (!dumpVerifier)
+					return;
+				std::ofstream f(dumpPath.c_str(), std::ios::app);
+				if (!f)
+					return;
+				if (dumpRows == 0)
+					f << "seq,timeUs,axis,N,n,valid,stat,kernel,lines\n";
+				std::size_t count = 0;
+				const Scaling::GeometrySet::Pair* pairs = Scaling::GeometrySet::Pairs(count);
+				for (int a = 0; a < 2; ++a)
+				{
+					if (!run[a].have)
+						continue;
+					const int N = run[a].ls.axisLen;
+					int cands[32];
+					int cc = 0;
+					for (std::size_t i = 0; i < count && cc < 32; ++i)
+					{
+						const double r = a == 0 ? pairs[i].rx : pairs[i].ry;
+						const int n = RoundToInt(static_cast<double>(N) * r);
+						if (n < 16 || n >= N)
+							continue;
+						bool dup = false;
+						for (int k = 0; k < cc; ++k)
+							dup = dup || cands[k] == n;
+						if (!dup)
+							cands[cc++] = n;
+					}
+					if (cc == 0)
+						continue;
+					VerifyOptions opt;
+					opt.exactOnly = true;
+					VerifyResult vr;
+					dumpVerifier->Evaluate(run[a].ls, cands, cc, opt, vr);
+					for (size_t i = 0; i < vr.candidates.size(); ++i)
+					{
+						const CandidateResult& cr = vr.candidates[i];
+						f << seq << ',' << timeUs << ',' << a << ',' << N << ',' << cr.nProposed << ',' << (cr.valid ? 1 : 0) << ',' << cr.stat << ','
+							<< cr.kernel << ',' << cr.lineCount << '\n';
+						++dumpRows;
+					}
+				}
+			}
+
+			// ---- SID r2: the asymmetric latch over the readers outputs (R5, R7) ----------------------------------------------
+			static Geometry::AxisGeom UnsureLike(const Geometry::AxisGeom& g, uint32_t bits)
+			{
+				Geometry::AxisGeom u;
+				u.state = Geometry::LatchState::Unknown;
+				u.N = g.N;
+				u.reasonBits = g.reasonBits | bits;
+				return u;
+			}
+
+			void FoldLatchCounters()
+			{
+				const LatchCounters& c = latch.Counters();
+				cLatchEntries.fetch_add(c.entries - latchBase.entries, std::memory_order_relaxed);
+				cLatchMoves.fetch_add(c.moves - latchBase.moves, std::memory_order_relaxed);
+				cLatchReleases.fetch_add(c.releases - latchBase.releases, std::memory_order_relaxed);
+				cLatchRelBound.fetch_add(c.releasesBound - latchBase.releasesBound, std::memory_order_relaxed);
+				cLatchRelNative.fetch_add(c.releasesNative - latchBase.releasesNative, std::memory_order_relaxed);
+				cLatchRelMenu.fetch_add(c.releasesMenu - latchBase.releasesMenu, std::memory_order_relaxed);
+				cLatchRelAbr.fetch_add(c.releasesAbr - latchBase.releasesAbr, std::memory_order_relaxed);
+				cLatchRelReset.fetch_add(c.releasesReset - latchBase.releasesReset, std::memory_order_relaxed);
+				cLatchHeldBack.fetch_add(c.heldBack - latchBase.heldBack, std::memory_order_relaxed);
+				cLatchNonConv.fetch_add(c.nonConventional - latchBase.nonConventional, std::memory_order_relaxed);
+				latchBase = c;
+			}
+
+			void NoteLatchEvent(const LatchOutput& lo, int64_t timeUs)
+			{
+				// Every release is visible: a one-time notice (the counters are in the status).
+				if (LatchEventIsRelease(lo.event))
+					log.PostNotice(std::string("Source identity: upscale latch ") + LatchEventText(lo.event) + " at " + std::to_string(timeUs / 1000000) + " s");
+			}
+
+			// TODO(SID r2 R1): the ABR carry-over rule (a quality step carries the latched size across a rendition change) is NOT implemented.
+			// E0 (doc 91 section E, E0-results.md) showed a harmful ABR carry-over case; revisit only with a new experiment.
+			// Filters the readers applied geometry through the latch: a confident UPSCALED reading is published only while the latch holds it
+			// (the bar met, a published conventional pair); a latched one is carried through evaluations that lose confidence until the latch
+			// releases. Native readings pass unchanged. Not called while the rules are off.
+			void ApplyLatch(ReadingOutput out[2], const AxisRun run[2], uint32_t flags, int64_t timeUs)
+			{
+				bool conf[2], nat[2];
+				for (int a = 0; a < 2; ++a)
+				{
+					conf[a] = out[a].applied.state == Geometry::LatchState::Latched;
+					nat[a] = conf[a] && out[a].applied.n >= out[a].applied.N;
+				}
+				LatchInput in;
+				in.timeUs = timeUs;
+				in.c1 = thr.c1;
+				in.informative = (run[0].have && run[0].up.informative) || (run[1].have && run[1].up.informative);
+				in.menuHold = (flags & (kEvMenuHold | kEvClearWindow)) != 0u || (run[0].have && run[0].up.hold) || (run[1].have && run[1].up.hold);
+				in.abrStep = (flags & kEvAbrStep) != 0u;
+				in.nativeBoth = nat[0] && nat[1];
+				in.havePair = conf[0] && conf[1] && !(nat[0] && nat[1]);
+				if (in.havePair)
+				{
+					in.nx = out[0].applied.n;
+					in.Nx = out[0].applied.N;
+					in.ny = out[1].applied.n;
+					in.Ny = out[1].applied.N;
+					in.llrX = out[0].applied.llr;
+					in.llrY = out[1].applied.llr;
+				}
+				if (latch.Latched())
+				{
+					in.latchedLlrX = evidence.LlrAtN(0, latch.LatchedNx());
+					in.latchedLlrY = evidence.LlrAtN(1, latch.LatchedNy());
+				}
+				const LatchOutput lo = latch.Step(in);
+				FoldLatchCounters();
+				NoteLatchEvent(lo, timeUs);
+				for (int a = 0; a < 2; ++a)
+				{
+					const bool confUp = conf[a] && !nat[a];
+					Geometry::AxisGeom g = out[a].applied;
+					if (lo.latched)
+					{
+						if (confUp && in.havePair)
+							heldApplied[a] = out[a].applied;   // a confident reading of the latched (or moved) size
+						else if (!nat[a] && heldApplied[a].state == Geometry::LatchState::Latched)
+							g = heldApplied[a];                // carried through an evaluation that lost confidence
+					}
+					else
+					{
+						heldApplied[a] = Geometry::AxisGeom();
+						if (confUp)
+							g = UnsureLike(out[a].applied, lo.reasonBits | kReasonLatchBar);
+						else if (lo.reasonBits != 0u && !conf[a])
+							g.reasonBits |= lo.reasonBits;
+					}
+					const bool changed = g.state != lastFiltered[a].state || g.n != lastFiltered[a].n || g.kernelIndex != lastFiltered[a].kernelIndex;
+					out[a].applied = g;
+					out[a].appliedChanged = changed;
+					lastFiltered[a] = g;
+				}
+			}
+
 			void Process(const Job& job)
 			{
 				const LineSnapshot& s = *job.snap;
@@ -1191,6 +1456,19 @@ namespace SourceIdentity
 					++discontinuities;
 					cDiscontinuities.fetch_add(1, std::memory_order_relaxed);
 				}
+				if (safetyOn)
+				{
+					if (anyReset || areaChanged)
+					{
+						latch.Reset();   // a discontinuity / active-area change: the latch goes (counted), the bar restarts
+						FoldLatchCounters();
+						heldApplied[0] = Geometry::AxisGeom();
+						heldApplied[1] = Geometry::AxisGeom();
+					}
+					ApplyLatch(out, run, flags, s.timeUs);
+				}
+				if (!dumpPath.empty())
+					DumpR4(run, s.seq, s.timeUs);
 				if (out[0].measuredChanged || out[1].measuredChanged)
 					++geometryGen;
 				if (out[0].appliedChanged || out[1].appliedChanged)
@@ -1207,7 +1485,8 @@ namespace SourceIdentity
 				// N2 (S1 bound): while the monitor keeps leaving native-looking frames out on the strength of this very reading (a note since
 				// the last evaluation), the long cadence does not apply: the reading is re-tested at the acquiring cadence, so a source that
 				// genuinely became native flips it quickly (and the window of ChainEvidence follows the measured, shorter interval).
-				const bool bothConfident = AxisConfident(reader[0]) && AxisConfident(reader[1]);
+				const bool bothConfident = safetyOn ? (out[0].applied.state == Geometry::LatchState::Latched && out[1].applied.state == Geometry::LatchState::Latched)
+					: (AxisConfident(reader[0]) && AxisConfident(reader[1]));
 				const bool nativeHeld = nativeHeldMask.exchange(0u, std::memory_order_acq_rel) != 0u;
 				const bool latchedWithPower = bothConfident && !nativeHeld;
 				latchedPower.store(latchedWithPower, std::memory_order_release);
@@ -1323,6 +1602,16 @@ namespace SourceIdentity
 				c.stale = cStale.load(std::memory_order_relaxed);
 				c.discontinuities = cDiscontinuities.load(std::memory_order_relaxed);
 				c.windowClears = cWindowClears.load(std::memory_order_relaxed);
+				c.latch.entries = cLatchEntries.load(std::memory_order_relaxed);
+				c.latch.moves = cLatchMoves.load(std::memory_order_relaxed);
+				c.latch.releases = cLatchReleases.load(std::memory_order_relaxed);
+				c.latch.releasesBound = cLatchRelBound.load(std::memory_order_relaxed);
+				c.latch.releasesNative = cLatchRelNative.load(std::memory_order_relaxed);
+				c.latch.releasesMenu = cLatchRelMenu.load(std::memory_order_relaxed);
+				c.latch.releasesAbr = cLatchRelAbr.load(std::memory_order_relaxed);
+				c.latch.releasesReset = cLatchRelReset.load(std::memory_order_relaxed);
+				c.latch.heldBack = cLatchHeldBack.load(std::memory_order_relaxed);
+				c.latch.nonConventional = cLatchNonConv.load(std::memory_order_relaxed);
 				return c;
 			}
 
@@ -1394,6 +1683,9 @@ namespace SourceIdentity
 		std::string ChainEstimator::StatusLine() const { return ChainStatusLine(st_->StatusInput()); }
 		std::string ChainEstimator::DetailText() const { return ChainDetailText(st_->StatusInput()); }
 		std::string ChainEstimator::EvidenceStatusText() const { return st_->log.StatusText(); }
+		void ChainEstimator::SetSafetyRules(bool on) { st_->SetSafety(on); }
+		bool ChainEstimator::SafetyRules() const { return st_->safetyA.load(std::memory_order_acquire); }
+		void ChainEstimator::SetLatchAbrStepTrigger(bool on) { st_->SetAbr(on); }
 		EstimatorCounters ChainEstimator::GetCounters() const { return st_->Counters(); }
 		GovernorPlan ChainEstimator::GetGovernorPlan() const
 		{

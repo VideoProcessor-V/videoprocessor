@@ -103,6 +103,42 @@ The estimator publishes a record after EVERY evaluation (abstain, hold and repea
 - Gate clock: the chain records are stamped in the frame's RAW source seconds (as the estimator and P14 do); `AutoFactors` hands the chain gate those raw seconds, not the never-backwards decision clock, so a backwards seek no longer makes every record read stale for the session.
 - Open items (not fixed in this package): (1) the evidence ring crosses discontinuities: `OnDiscontinuity` keeps the ring and `kEvDiscontinuity` is never written into a snapshot, so a dumped ring reproduces the live record bytes only when it begins at a reset or a clean start (a ring of 30 evaluations that starts mid-era cannot rebuild the evidence accumulation); (2) `SkeletonModule` uses `Wants(host)` as "my sink is registered" (true while only the chain sink wants) and `VpFrameAnalysisHost::AttachIfEnabled` attaches a plane to every prepared source whenever any sink exists, even when the chain is not due; (3) a frame dump (`SerializeFrame`, 4 x 16 MB at 4K) blocks the worker for about 1 s inside its processing lock: in the acquiring mode (maxAge 2 s) the record can read stale for that second (visible, not silent); (4) some tests assume a pristine process-wide tap registry (`Tap::AnyWants()`, `StoreOwners().size()`) and an `Assert` on the reader thread of the threading test ends the process instead of failing.
 
+## SID r2 safety rules (E0-validated, default OFF; `ChainLatch.h`, `SourceGeometrySet.h`, `ChainEvidence.h`, `ChainEstimator.cpp::ApplyLatch`)
+
+Doc 91 section E (decisions in force, copied verbatim):
+
+```
+## E. Source identity
+- Acceptance order: native 4K basically NEVER wrongly called upscaled > equal-axis HD detected most of the time > single-axis most of the time.
+- Fundamental-harmonic rule (integer-ratio family, lowest member confirmed by spectral roll-off) + candidates only from a CONVENTION / REPAIRABLE-GEOMETRY set published by the scaling module + CONVENTION-PAIR prior across axes (replaces ratio agreement) + convention-driven proposals. Test offline first (E0).
+- Re-base ONLY two-axis-confirmed conventional pairs; single-axis re-base PARKED (off; shadow logging). Kernel matching / kernel-inverse PARKED (neutral downscale).
+- Latch: ASYMMETRIC - native sticky (leaving needs a material change or overwhelming evidence that grows with stream stability); an upscaled latch must be re-confirmed and RELEASES to native when evidence fades (no lock-without-release); between upscaled sizes = high bar. ABR-step trigger = switch, default OFF. 3 s shot dwell (E2).
+- Looking harder (multi-frame / MC averaging / new statistics) must not add false calls: trusted vectors only, separate native null, re-prove the budget.
+- Proof of the native rate comes from shadow nights + deploy records, not the bench alone. Default OFF until then.
+- Second resolution measure + targeted literature search on failure modes (8-bit robustness, harmonics, multi-frame SNR) after E0.
+
+## F. Scaling
+- Detection + motion on the unedited picture. Re-based HD: re-base to the encoded grid -> grid-dependent repairs -> HYBRID upscale (both axes) at the re-base stage -> rest at 4K. Native 1080p input (re-base off) with 4K+ output: hybrid upscale at the END. Native 4K: no re-base, no upscale.
+- Hybrid down- and upscale exist (verify Day 0). Motion-adapted blend (adaptive_motion) exists both directions, OFF, untuned -> sweep after P5c, then defaults via the loop grid. Neural repair nets parked.
+```
+
+What is built (all behind one switch, `ChainEstimator::SetSafetyRules` / `Monitor::SetSourceIdSafetyRules`; applied at the estimator's next clean start; OFF = byte-identical, the readers and their tests are untouched):
+
+- R2 conventional geometry: a candidate whose ratio n / N is no listed geometry (`scaling/geometry/SourceGeometrySet.h`, tolerance 0.006) earns no evidence (reason bit `kReasonNonConventional`) so the axis stays UNSURE, visibly; the latch layer counts and flags such a pair (`heldBack`).
+- R3 convention-pair prior: the two-axis prior is +/- agreementBonus by whether the ratio PAIR is one listed geometry (non-square listed pairs such as 720x576 agree; two individually listed ratios of different geometries do not). Replaces the ratio-agreement bonus while on.
+- R5 asymmetric latch (`UpscaleLatch`, pure): native is sticky. Entering or moving needs both axes above the bar c1 x (1 + clamp((stable - 30 s) / 120 s, 0, 1)). A latch is kept while the latched size's evidence reaches 0.25 c1 on both axes; otherwise a release clock runs (60 s bound; 1/4 speed through evaluations that earned no evidence; HARD bound 120 s since the last confirmation). Native evidence on both axes releases at once. The ABR-step trigger is a separate switch, default OFF (`SetLatchAbrStepTrigger`). Every release publishes UNSURE with `kReasonLatchRelease`, posts a one-time notice and is counted (`EstimatorCounters::latch`).
+- R7 menu / overlay: the latch is not carried into a menu: HOLD evaluations, the window-clear event and the monitor's COUNTED mixed-episode feed (`EstimatorEvent::MenuHold`, from `ChainWindowPolicy::CountedEpisodeActive()`) release it and nothing latches during one.
+- R4 enabler (diagnostic only, no decision change): environment variable `VP_SID_R4_DUMP_PATH` (a file path) makes the worker append, per evaluation and axis, every conventional size evaluated at the EXACT stage as CSV (seq,timeUs,axis,N,n,valid,stat,kernel,lines).
+- R1 (harmonic rule) is NOT implemented: E0 showed a harmful ABR carry-over case. A TODO marks the place in `ChainEstimator.cpp` (before `ApplyLatch`).
+- Two-axis-only re-base: the monitor's consensus per-axis path with exactly one axis below native logs "source_id: single-axis re-base held" and re-bases nothing unless `Monitor::SetSingleAxisRebase(true)`. `rebase_kernel_match` now defaults to off (parked, neutral downscale).
+
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `source_id_safety_rules` | input group (plumbing pending, SID-5: Monitor setter only) | bool | on, off | off | not in Config yet (SID-5) | forced off | plumbing pending (SID-5); every latch release is a visible notice and a counter | same on all |
+| `source_id_latch_abr_trigger` | input group (plumbing pending, SID-5: Monitor setter only) | bool | on, off | off | not in Config yet (SID-5) | forced off | plumbing pending (SID-5); only with `source_id_safety_rules` on | same on all |
+| `source_id_single_axis_rebase` | input group (plumbing pending, SID-5: Monitor setter only) | bool | on, off | off | not in Config yet (SID-5) | forced off | plumbing pending (SID-5); the detection is still logged ("single-axis re-base held") | same on all |
+| `VP_SID_R4_DUMP_PATH` (environment) | diagnostics | path | absolute file path | unset (off) | none | n/a | dump only; builds a third verifier | test / debug |
+
 ## Tests
 
 `identity/tests/ChainEvalRegistrationTests.cpp` (`ChainEvalRegistrationTests`): registers the estimator with the harness seam (synchronous, source-time clock, stand-in cut / black and letterbox detectors, `ChainRow` / `ChainEvent` output, the calibration dump) and a unit test through the seam with synthetic frames. Focused run with the harness: add `FullyQualifiedName~SourceIdChainEvalTests` (it skips unless `VP_SOURCE_ID_REELS` is set).
@@ -236,6 +272,7 @@ Every tunable is a member of a settings struct with its default in the header (h
 | `ChainEvidence.h` | 4 | `ChainEvidence`: line gate, spatial agreement, LLR increments, clustering, per-shot cap, recent window in seconds, two-axis prior, threshold c1 |
 | `ChainReading.h` | train r2 | `AxisReader` (one per axis: confident vs UNSURE), `ReadingSettings`, `ReadingLevels` (c1), `FieldEvidence` + `MakeFieldEvidence` (kernel class), `EvalContext`, `ReadingOutput`, `ReadingReason`, `ConfFromLlr`, `ConfidenceOfLlr`, `KernelConfidence` |
 | `ChainWindowPolicy.h` | revert window | `WindowClearPolicy`: when the monitor asks the estimator to clear the evidence window (the end of a mixed episode, the first cut after one) |
+| `ChainLatch.h` | r2 | `UpscaleLatch`: the asymmetric latch (R5 / R7), pure, header-only |
 | `ChainLines.h` | C2b | `LineSnapshot` (the sampled lines as integer codes + the consumed event flags + source time; `eventTimeUs` reserved), `CaptureLines`, `ToLineSet`, `DetectStepCodes`, `SnapshotHash` |
 | `ChainGovernor.h` | C2b | `Governor`: interval = max(nominal, cost / share), warm / cold cost memory, due logic |
 | `ChainStatus.h` | C2b | `ChainStatusInput`, `ChainStatusLine`, `ChainDetailText` |

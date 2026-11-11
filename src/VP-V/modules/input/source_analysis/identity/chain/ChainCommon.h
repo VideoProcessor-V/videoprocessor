@@ -41,6 +41,12 @@ namespace SourceIdentity
 		constexpr uint32_t kReasonBadInput = 1u << 10;
 		constexpr uint32_t kReasonNoReference = 1u << 11;  // fewer than two valid baseline sizes around a candidate
 		constexpr uint32_t kReasonCoarseOnly = 1u << 12;   // candidate ranked by the coarse scan only (not verified at full lines)
+		// SID r2 safety rules (E0, owner 2026-11-07; all off unless EstimatorSettings::safetyRules):
+		constexpr uint32_t kReasonNonConventional = 1u << 13;   // R2: a candidate size outside the published conventional geometries (scaling.geometry SourceGeometrySet.h) earned nothing
+		constexpr uint32_t kReasonLatchBar = 1u << 14;          // R5: a confident upscaled pair is held back (the entry bar is not met, or the pair is not conventional)
+		constexpr uint32_t kReasonLatchRelease = 1u << 15;      // R5: an upscaled latch was released to native (not re-confirmed within the bound)
+		constexpr uint32_t kReasonMenuHold = 1u << 16;          // R7: a menu / overlay episode: the latch is dropped, not carried into the menu
+		constexpr uint32_t kReasonAbrStep = 1u << 17;           // R5 (switch): an ABR rendition step dropped the latch
 
 		// One axis worth of sampled lines in 10-bit code units (8-bit planes are scaled by 4 by the caller).
 		struct LineSet

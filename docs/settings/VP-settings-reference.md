@@ -280,7 +280,7 @@ projector with the hybrid SSIM scaler.*
 | Key | What it does | Why it exists | Default |
 |---|---|---|---|
 | `source_resolution` | Many 4K streams are 1080p underneath, upscaled by the player. VP shrinks the picture back to its real size and then upscales it with its own path. *Auto* detects it; *native* = as captured; a size forces it. | Fewer halos and cleaner edges than scaling the player's upscale. | auto |
-| `rebase_kernel_match` | Identifies the player's upscale filter and undoes it exactly, rather than with a generic downscale. | +8 to +15 dB closer to the decoded picture on real Apple TV output. | on |
+| `rebase_kernel_match` | Identifies the player's upscale filter and undoes it exactly, rather than with a generic downscale. | +8 to +15 dB closer to the decoded picture on real Apple TV output. | off |
 | `source_resolution_auto_min_confidence`, `_evidence_seconds`, `_evidence_shots` | How sure Auto must be (score, seconds, separate shots) before it re-bases. | One soft shot of real 4K must never decide alone. | 0.8 / 10 s / 3 |
 | `source_resolution_engage_max_wait_s`, `_crossfade_s`, `_release_fade_s` | When Auto is sure, it switches at the next cut or dark moment, else crossfades; the return to native is quick. | The change must never be visible. | 20 s / 1.5 s / 0.25 s |
 | `source_resolution_text_guard` | Ignores the player's own sharp 4K subtitles when judging. | Text would block or fake the detection. | on |

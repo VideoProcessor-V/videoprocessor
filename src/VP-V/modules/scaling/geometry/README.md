@@ -182,3 +182,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
 <!-- vpv-settings-tests:end -->
+
+## Published conventional source geometries (`SourceGeometrySet.h`, SID r2)
+
+The scaling unit publishes the list of source sizes a player's upscale may have started from, as ratios to the raster: 2560x1440, 1920x1080, 1280x720, 960x540, DCI 2K 2048 and DCI flat 1998 (equal ratios on both axes), the non-square pairs 720x576 and 720x480, and 1440x1080 anamorphic (listed, PARKED: it would need a single-axis re-base). Tolerance 0.006 relative. Source identity (`identity/chain`) uses it for R2 (only conventional candidates) and R3 (the convention-pair prior). Header-only, no settings.

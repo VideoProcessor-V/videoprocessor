@@ -1523,6 +1523,10 @@ if (tile < int(tiles) && g.y < ts) {
 			// measured, never a frame count); a one-frame blip clears nothing and arms nothing, a flickering menu is one episode.
 			if (chainWindowPolicy.Frame(mixedNow, chainCut, j.seconds, chainEst->AcquiringIntervalSec()).clear)
 				chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::ClearWindow, rowSequence);
+			// SID r2 R7: while a counted menu / overlay episode is under way the estimator's upscale latch is not carried (the estimator ignores
+			// this event unless its safety rules are on). The same episode feed as the revert window: nothing new is measured here.
+			if (chainWindowPolicy.CountedEpisodeActive())
+				chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::MenuHold, rowSequence);
 			chainEst->SetClassical(snapshot.reading, snapshot.axisRatioX < 1.0 ? snapshot.axisRatioX : snapshot.declaredRatio,
 				snapshot.axisRatioY < 1.0 ? snapshot.axisRatioY : snapshot.declaredRatio);
 		}
@@ -1555,7 +1559,11 @@ if (tile < int(tiles) && g.y < ts) {
 			const unsigned long long eventsBefore = sourceId.Events();
 			sourceId.Push(in);
 			if (sourceId.Events() != eventsBefore)
+			{
 				sourceIdEvents.fetch_add(sourceId.Events() - eventsBefore, std::memory_order_relaxed);
+				if (chainEnabled.load(std::memory_order_acquire))
+					chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::AbrStep, rowSequence);   // SID r2 R5 switch (inert unless on)
+			}
 			snapshot.frameQuality = sourceId.LastFrameQuality();
 			snapshot.frameNoise = sourceId.LastNoise();
 			// SHADOW: what the consensus would have changed, one line per field; the classical decision stands.
@@ -1839,6 +1847,18 @@ if (tile < int(tiles) && g.y < ts) {
 			{
 				ratios[0] = gate.latchedH ? gate.ratioH : 1.0;
 				ratios[1] = gate.latchedV ? gate.ratioV : 1.0;
+				// SID r2: two-axis-only re-base. Exactly one axis below native is detected and LOGGED, not applied, unless the switch is on.
+				if ((ratios[0] < 1.0) != (ratios[1] < 1.0) && !singleAxisRebase.load(std::memory_order_acquire))
+				{
+					if (!singleAxisHeldLogged)
+					{
+						DebugLog::Log("source_id: single-axis re-base held (axis %s ratio %.4f; two axes are required)", ratios[0] < 1.0 ? "H" : "V", ratios[0] < 1.0 ? ratios[0] : ratios[1]);
+						singleAxisHeldLogged = true;
+					}
+					ratios[0] = ratios[1] = 1.0;
+				}
+				else if (ratios[0] >= 1.0 && ratios[1] >= 1.0)
+					singleAxisHeldLogged = false;
 			}
 			else
 			{

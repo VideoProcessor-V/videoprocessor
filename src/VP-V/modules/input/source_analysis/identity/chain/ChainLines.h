@@ -27,6 +27,8 @@ namespace SourceIdentity
 		constexpr uint32_t kEvDiscontinuity = 1u << 3;
 		constexpr uint32_t kEvAreaChanged = 1u << 4;
 		constexpr uint32_t kEvClearWindow = 1u << 5;   // a ClearWindow event was consumed: the evidence window was cleared before this evaluation
+		constexpr uint32_t kEvMenuHold = 1u << 6;      // SID r2 R7 (safety rules on): a menu / overlay episode began; the upscaled latch is not carried into it
+		constexpr uint32_t kEvAbrStep = 1u << 7;       // SID r2 R5 (safety rules on, switch): an ABR rendition step event
 
 		struct LineSnapshot
 		{

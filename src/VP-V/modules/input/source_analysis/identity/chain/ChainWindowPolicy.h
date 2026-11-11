@@ -31,6 +31,7 @@ namespace SourceIdentity
 				bool clear = false;            // ask the estimator to clear the window now
 				bool episodeEnded = false;     // cause: the first non-mixed frame after a counted episode
 				bool cutAfterEpisode = false;  // cause: the first cut after a counted episode
+				bool episodeCounted = false;   // SID r2 R7: this frame is the one on which the episode first counts (a menu / overlay began)
 			};
 
 			Result Frame(bool mixed, bool cut, double seconds, double minSec)
@@ -48,6 +49,8 @@ namespace SourceIdentity
 					lastMixed_ = seconds;
 					if (lastMixed_ - start_ >= minSec)
 					{
+						if (!counted_)
+							r.episodeCounted = true;
 						counted_ = true;         // it has lasted one acquiring interval: a menu / overlay, not a blip
 						cutArmed_ = true;
 					}
@@ -82,6 +85,8 @@ namespace SourceIdentity
 			}
 
 			bool InEpisode() const { return wasMixed_; }
+			// SID r2 R7: a COUNTED mixed episode is under way (the previous frame was mixed and the episode has spanned minSec): a menu / overlay.
+			bool CountedEpisodeActive() const { return wasMixed_ && active_ && counted_; }
 			bool CutArmed() const { return cutArmed_; }
 
 		private:
