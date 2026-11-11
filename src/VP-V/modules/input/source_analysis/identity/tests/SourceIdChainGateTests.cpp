@@ -18,6 +18,7 @@
 #include <VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -497,6 +498,219 @@ namespace Tests
 			Assert::IsTrue(on.find("single-axis re-base held") == std::string::npos, L"the switch on: nothing is held, nothing shown");
 			Assert::AreEqual(0.5, fx, 1e-9, L"the switch on: the single-axis re-base is applied");
 			Assert::AreEqual(1.0, fy, 1e-9);
+		}
+	};
+
+	// SID r2 (owner 2026-11-11): source_resolution auto re-bases ONLY a two-axis conventional pair (one listed, non-parked
+	// Scaling::GeometrySet geometry on the delivered raster, tolerance 0.6 %), on the classical path (consensus off or no fresh record)
+	// and through the consensus alike. A single-axis reading (unless the single-axis switch is on) or a size outside the list is held:
+	// logged and shown (Snapshot::conventionNote -> Describe -> Ctrl+I and the Config status line), never applied. Listed two-axis
+	// sizes, natives and the Original pathway: exactly as before (the same trace as with the restriction switched off).
+	namespace SidConv
+	{
+		typedef SourceResolutionMonitor::Monitor Mon;
+		typedef SourceResolutionMonitor::Snapshot Snap;
+		constexpr int W = 1920, H = 1080;   // the delivered raster (test fixture)
+
+		inline Snap Uniform(double r)
+		{
+			Snap s;
+			s.reading = true;
+			s.nativeWidth = W;
+			s.nativeHeight = H;
+			s.declaredRatio = s.liveRatio = s.frameRatio = r;
+			s.confidence = r < 1.0 ? 0.9 : 0.0;
+			s.frames = 1;
+			return s;
+		}
+
+		inline Snap PerAxis(double rx, double ry)
+		{
+			Snap s = Uniform(1.0);
+			s.axisRatioX = rx;
+			s.axisRatioY = ry;
+			s.axisConfidence = 0.9;
+			return s;
+		}
+
+		struct Run
+		{
+			double fx = 1.0, fy = 1.0;
+			std::string trace, note, shown, hidden;
+		};
+
+		// The classical path on the frame-bound source clock: one scripted reading, then 8 decisions 62.5 ms apart (a 50 ms wait:
+		// a re-base that is applied engages on the second). The trace is every factor, fade and reason a viewer could see.
+		inline Run Drive(Mon& m, const Snap& s)
+		{
+			m.SetEngageTiming(0.05, 0.125, 0.05);
+			m.SetFrameBound(true, 0);
+			m.InjectResultForTest(s, 1);
+			Run r;
+			for (uint64_t seq = 1; seq <= 8; ++seq)
+			{
+				std::string why;
+				double fx = 1.0, fy = 1.0;
+				const double t = 100.0 + 0.0625 * static_cast<double>(seq - 1);
+				m.AutoFactors(W, H, 0.5, why, fx, fy, t, seq);
+				const Mon::Transition tr = m.AutoTransition(t);
+				char line[400];
+				std::snprintf(line, sizeof(line), "%llu f=%.6f,%.6f tr=%.6f,%.6f>%.6f,%.6f w=%.6f why=%s\n", static_cast<unsigned long long>(seq),
+					fx, fy, tr.fromX, tr.fromY, tr.toX, tr.toY, tr.weight, why.c_str());
+				r.trace += line;
+				r.fx = fx;
+				r.fy = fy;
+			}
+			const Snap now = m.Read();
+			r.note = now.conventionNote;
+			r.shown = SourceResolutionMonitor::Describe(now, m.AutoRatio(), true);
+			r.hidden = SourceResolutionMonitor::Describe(now, m.AutoRatio(), false);
+			return r;
+		}
+
+		inline Run DriveFresh(const Snap& s, bool conventionOnly, bool singleAxis = false, bool original = false)
+		{
+			Mon m;
+			m.SetRebaseConventionOnly(conventionOnly);
+			m.SetSingleAxisRebase(singleAxis);
+			m.SetOriginalPathway(original);
+			return Drive(m, s);
+		}
+
+		inline bool Has(const std::string& s, const char* what) { return s.find(what) != std::string::npos; }
+		inline std::wstring W16(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+	}
+
+	TEST_CLASS(SourceResolutionConventionTests)
+	{
+	public:
+		TEST_METHOD(AListedTwoAxisSizeIsReBasedExactlyAsBefore)
+		{
+			// 960x540 on 1080p (uniform 1/2) and 720x480 at 16:9 on 1080p (0.375 x 0.4444, the classical per-axis reading).
+			const SidConv::Run u = SidConv::DriveFresh(SidConv::Uniform(0.5), true);
+			const SidConv::Run u0 = SidConv::DriveFresh(SidConv::Uniform(0.5), false);
+			Assert::AreEqual(0.5, u.fx, 1e-9, SidConv::W16(u.trace).c_str());
+			Assert::AreEqual(0.5, u.fy, 1e-9);
+			Assert::AreEqual(u0.trace, u.trace, L"byte-identical with the restriction switched off");
+			Assert::IsTrue(u.note.empty() && !SidConv::Has(u.shown, "re-base held"), L"nothing is held, nothing shown");
+			const SidConv::Run p = SidConv::DriveFresh(SidConv::PerAxis(720.0 / 1920.0, 480.0 / 1080.0), true);
+			const SidConv::Run p0 = SidConv::DriveFresh(SidConv::PerAxis(720.0 / 1920.0, 480.0 / 1080.0), false);
+			Assert::AreEqual(0.375, p.fx, 1e-9, SidConv::W16(p.trace).c_str());
+			Assert::AreEqual(480.0 / 1080.0, p.fy, 1e-9);
+			Assert::AreEqual(p0.trace, p.trace, L"byte-identical with the restriction switched off");
+			Assert::IsTrue(p.note.empty());
+		}
+
+		TEST_METHOD(ANonStandardUniformSizeIsHeldAndShownNeverApplied)
+		{
+			// 0.7 on 1080p = 1344x756: no listed size (1280x720 is 2/3, outside the 0.6 % tolerance).
+			const SidConv::Run r = SidConv::DriveFresh(SidConv::Uniform(0.7), true);
+			Assert::AreEqual(1.0, r.fx, 1e-9, SidConv::W16(r.trace).c_str());
+			Assert::AreEqual(1.0, r.fy, 1e-9);
+			Assert::IsTrue(SidConv::Has(r.note, "re-base held (non-standard size H 0.7000 x V 0.7000"), SidConv::W16(r.note).c_str());
+			Assert::IsTrue(SidConv::Has(r.shown, r.note.c_str()), L"shown on the auto status (Ctrl+I and the Config status line)");
+			Assert::IsFalse(SidConv::Has(r.hidden, "re-base held"), L"not shown while auto is not selected");
+			const SidConv::Run off = SidConv::DriveFresh(SidConv::Uniform(0.7), false);
+			Assert::AreEqual(756.0 / 1080.0, off.fx, 1e-9, L"fixture: the restriction off applies it (the earlier behaviour)");
+			Assert::IsTrue(off.note.empty());
+		}
+
+		TEST_METHOD(AClassicalSingleAxisReadingIsHeldUnlessTheSwitchIsOn)
+		{
+			const SidConv::Run r = SidConv::DriveFresh(SidConv::PerAxis(0.75, 1.0), true);
+			Assert::AreEqual(1.0, r.fx, 1e-9, SidConv::W16(r.trace).c_str());
+			Assert::AreEqual(1.0, r.fy, 1e-9);
+			Assert::IsTrue(SidConv::Has(r.note, "single-axis re-base held (H 0.7500; two axes are required)"), SidConv::W16(r.note).c_str());
+			Assert::IsTrue(SidConv::Has(r.shown, r.note.c_str()));
+			const SidConv::Run v = SidConv::DriveFresh(SidConv::PerAxis(1.0, 0.75), true);
+			Assert::AreEqual(1.0, v.fy, 1e-9);
+			Assert::IsTrue(SidConv::Has(v.note, "single-axis re-base held (V 0.7500"), SidConv::W16(v.note).c_str());
+			const SidConv::Run on = SidConv::DriveFresh(SidConv::PerAxis(0.75, 1.0), true, true);
+			Assert::AreEqual(0.75, on.fx, 1e-9, SidConv::W16(on.trace).c_str());
+			Assert::AreEqual(1.0, on.fy, 1e-9);
+			Assert::IsTrue(on.note.empty(), L"the single-axis switch on: applied, nothing held");
+		}
+
+		TEST_METHOD(ANonStandardPerAxisPairIsHeld)
+		{
+			const SidConv::Run r = SidConv::DriveFresh(SidConv::PerAxis(0.7, 0.6), true);
+			Assert::AreEqual(1.0, r.fx, 1e-9, SidConv::W16(r.trace).c_str());
+			Assert::AreEqual(1.0, r.fy, 1e-9);
+			Assert::IsTrue(SidConv::Has(r.note, "non-standard size H 0.7000 x V 0.6000"), SidConv::W16(r.note).c_str());
+			const SidConv::Run off = SidConv::DriveFresh(SidConv::PerAxis(0.7, 0.6), false);
+			Assert::IsTrue(off.fx < 1.0 && off.fy < 1.0, L"fixture: the restriction off applies it");
+		}
+
+		TEST_METHOD(TheOriginalPathwayAndNativesAreUntouched)
+		{
+			const SidConv::Run o = SidConv::DriveFresh(SidConv::Uniform(0.7), true, false, true);
+			const SidConv::Run o0 = SidConv::DriveFresh(SidConv::Uniform(0.7), false, false, true);
+			Assert::AreEqual(o0.trace, o.trace, L"the Original pathway: no convention check (byte-identical)");
+			Assert::AreEqual(756.0 / 1080.0, o.fx, 1e-9, SidConv::W16(o.trace).c_str());
+			Assert::IsTrue(o.note.empty());
+			const SidConv::Run op = SidConv::DriveFresh(SidConv::PerAxis(0.75, 1.0), true, false, true);
+			const SidConv::Run op0 = SidConv::DriveFresh(SidConv::PerAxis(0.75, 1.0), false, false, true);
+			Assert::AreEqual(op0.trace, op.trace, L"the Original pathway: the single-axis reading as before");
+			Assert::IsTrue(op.note.empty());
+			const SidConv::Run n = SidConv::DriveFresh(SidConv::Uniform(1.0), true);
+			const SidConv::Run n0 = SidConv::DriveFresh(SidConv::Uniform(1.0), false);
+			Assert::AreEqual(n0.trace, n.trace, L"natives: byte-identical");
+			Assert::AreEqual(1.0, n.fx, 1e-9);
+			Assert::IsTrue(n.note.empty() && !SidConv::Has(n.shown, "re-base held"));
+		}
+
+		// The consensus On with a fresh record: the same restriction on its latched pair (the uniform wish and the per-axis path).
+		TEST_METHOD(TheConsensusPathHasTheSameRestriction)
+		{
+			struct Out { SidGate::Outcome o; std::string note; bool latched = false; };
+			auto run = [](int nx, int ny, bool conventionOnly) {
+				Out out;
+				SidGate::Mon m;
+				GeoFx::G::HeldState geo;
+				m.SetGeometrySource(&geo);
+				m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+				m.SetRebaseConventionOnly(conventionOnly);
+				uint64_t seq = 2;
+				for (int i = 0; i < 13; ++i)
+				{
+					const double t = 10.0 + 0.5 * i;
+					if (i % 2 == 0)
+						geo.Publish(GeoFx::MakeRecord(seq, SidGate::Us(t - 0.1), GeoFx::AppliedAxis(nx, 3840, 5), GeoFx::AppliedAxis(ny, 2160, 5)));
+					SidGate::Analyse(m, t, seq++);
+				}
+				std::string why;
+				m.InjectResultForTest(SidGate::CleanSnapshot(1, false), seq - 1);
+				m.AutoFactors(3840, 2160, 0.8, why, out.o.fx, out.o.fy, 16.1, seq);
+				out.o.why1 = why;
+				why.clear();
+				m.InjectResultForTest(SidGate::CleanSnapshot(2, true), seq);
+				m.AutoFactors(3840, 2160, 0.8, why, out.o.fx, out.o.fy, 16.6, seq + 1);
+				out.o.why2 = why;
+				out.note = m.Read().conventionNote;
+				SourceIdentity::Record rec;
+				out.latched = m.SourceIdRecord(rec) && rec.ratioH < 1.0f && rec.ratioV < 1.0f;
+				return out;
+			};
+			// 2560x1440 (2/3) is listed: engaged exactly as with the restriction off.
+			const Out c = run(2560, 1440, true), c0 = run(2560, 1440, false);
+			Assert::IsTrue(c.latched, L"fixture: the consensus latched the listed pair");
+			Assert::AreEqual(1440.0 / 2160.0, c.o.fx, 1e-9, SidConv::W16(c.o.why1 + " | " + c.o.why2).c_str());
+			Assert::AreEqual(1440.0 / 2160.0, c.o.fy, 1e-9);
+			Assert::AreEqual(c0.o.fx, c.o.fx, 0.0);
+			Assert::AreEqual(c0.o.why2, c.o.why2, L"the same reasons as with the restriction off");
+			Assert::IsTrue(c.note.empty());
+			// 2700x1512 (0.703 x 0.700) is not listed: held, shown, never applied, whether the consensus latched it or refused it upstream.
+			const Out n = run(2700, 1512, true), n0 = run(2700, 1512, false);
+			Assert::AreEqual(1.0, n.o.fx, 1e-9, SidConv::W16(n.o.why1 + " | " + n.o.why2).c_str());
+			Assert::AreEqual(1.0, n.o.fy, 1e-9);
+			if (n.latched)
+			{
+				Logger::WriteMessage("the consensus latched the non-listed pair; the Monitor held it\n");
+				Assert::IsTrue(SidConv::Has(n.note, "re-base held (non-standard size"), SidConv::W16(n.note).c_str());
+				Assert::IsTrue(n0.o.fx < 1.0, L"fixture: the restriction off applies the latched pair");
+			}
+			else
+				Logger::WriteMessage("the consensus did not latch the non-listed pair (refused upstream); nothing applied\n");
 		}
 	};
 }
