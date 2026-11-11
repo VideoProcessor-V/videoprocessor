@@ -399,6 +399,8 @@
         "src/VP-V/modules/motion/estimation/VectorEngine.cpp",
         "src/VP-V/modules/motion/estimation/VectorEngineHost.h",
         "src/VP-V/modules/motion/estimation/tests/ProducerPlanTests.cpp",
+        "src/VP-V/modules/motion/estimation/LaneAheadPolicy.h",
+        "src/VP-V/modules/motion/estimation/tests/LaneAheadPolicyTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/VectorEngineTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/LookAheadWalkTests.cpp",
         "src/VP-V/modules/motion/estimation/EstimateState.h",
