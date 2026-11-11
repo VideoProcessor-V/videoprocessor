@@ -68,16 +68,28 @@ namespace SourceIdentity
 				gen_.fetch_add(1, std::memory_order_acq_rel);
 			}
 			uint64_t Gen() const { return gen_.load(std::memory_order_acquire); }
-			std::string Get() const
+			// The tag and its generation, read together (a Set racing in between cannot split them).
+			uint64_t Get(std::string& tag) const
 			{
 				std::lock_guard<std::mutex> g(m_);
-				return tag_;
+				tag = tag_;
+				return gen_.load(std::memory_order_acquire);
+			}
+			// One instance number per OWNER (all its files share it): the untagged file name live<k>.
+			int Instance() const
+			{
+				int cur = instance_.load(std::memory_order_acquire);
+				if (cur >= 0)
+					return cur;
+				const int mine = NextInstance();
+				return instance_.compare_exchange_strong(cur, mine, std::memory_order_acq_rel) ? mine : cur;
 			}
 
 		private:
 			mutable std::mutex m_;
 			std::string tag_;
 			std::atomic<uint64_t> gen_{ 0 };
+			mutable std::atomic<int> instance_{ -1 };
 		};
 
 		// One CSV file of one kind. Writer thread only.
@@ -93,22 +105,17 @@ namespace SourceIdentity
 			// when the tag's generation moved (or on the first call).
 			bool Ready(const Tag& tag, const char* kind, const char* header)
 			{
-				const uint64_t g = tag.Gen();
-				if (checked_ && g == seenGen_)
+				if (!Pending(tag))
 					return open_;
+				std::string t;
 				checked_ = true;
-				seenGen_ = g;
+				seenGen_ = tag.Get(t);
 				Close();
 				const std::string dir = DumpDirV4();
 				if (dir.empty())
 					return false;
-				std::string t = tag.Get();
 				if (t.empty())
-				{
-					if (instance_ < 0)
-						instance_ = NextInstance();
-					t = "live" + std::to_string(instance_);
-				}
+					t = "live" + std::to_string(tag.Instance());
 				for (char& c : t)
 					if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
 						c = '_';
@@ -120,6 +127,11 @@ namespace SourceIdentity
 					f_ << header << '\n';
 				return open_;
 			}
+
+			// True when the next Ready() re-checks (first call, or the tag moved), i.e. when a row MAY be wanted; otherwise Ready() returns
+			// the cached state. Lets a caller build a row's text (under its own lock) and write it later, outside the lock.
+			bool Pending(const Tag& tag) const { return !checked_ || tag.Gen() != seenGen_; }
+			bool MaybeOn(const Tag& tag) const { return open_ || Pending(tag); }
 
 			std::ofstream& Out() { return f_; }
 
@@ -149,7 +161,6 @@ namespace SourceIdentity
 			bool checked_ = false;
 			uint64_t seenGen_ = 0;
 			uint64_t rows_ = 0;
-			int instance_ = -1;
 		};
 
 		// Column headers (the contract; identity/README.md "Dump v4" explains every column).

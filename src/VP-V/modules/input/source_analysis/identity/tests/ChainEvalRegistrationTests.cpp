@@ -874,13 +874,19 @@ namespace Tests
 			return rows;
 		}
 
-		// A 2x (640x360 -> 1280x720) linear upscale of a fixture plane: conventional sizes exist on this raster.
+		// Clears the variable when a test ends, also on a failed assertion.
+		struct EnvGuard
+		{
+			~EnvGuard() { _putenv_s("VP_SID_DUMP_V4_DIR", ""); }
+		};
+
+		// A 2x (960x540 -> 1920x1080, a CONVENTIONAL pair) linear upscale of a fixture plane.
 		inline ChainFx::Plane Upscaled(uint32_t seed, int step)
 		{
-			const ChainFx::Plane lowRes = ChainFx::MakePlane(640, 360, seed, 1);
+			const ChainFx::Plane lowRes = ChainFx::MakePlane(960, 540, seed, 1);
 			ChainFx::Plane p;
-			p.w = 1280;
-			p.h = 720;
+			p.w = 1920;
+			p.h = 1080;
 			p.luma.assign(static_cast<size_t>(p.w) * p.h, 0);
 			for (int y = 0; y < p.h; ++y)
 				for (int x = 0; x < p.w; ++x)
@@ -909,7 +915,7 @@ namespace Tests
 			return s;
 		}
 
-		// Everything the chain estimator publishes over 14 s (a cut at 7 s), as one text: per frame the packed record and the status line,
+		// Everything the chain estimator publishes over 21 s (cuts at 7 s and 14 s), as one text: per frame the packed record and the status line,
 		// per evaluation the observer detail, at the end the counters.
 		inline std::string RunEstimator(bool rules, const std::string& tag)
 		{
@@ -928,15 +934,15 @@ namespace Tests
 							<< c.linesGated << ',' << c.informative << ',' << c.evJudged << ',' << Num(c.evStat) << '\n';
 			});
 			est.SetMode(C::EstimatorMode::Shadow);
-			const ChainFx::Plane a = Upscaled(7, 1), b = Upscaled(11, 1);
-			for (int i = 0; i < 56; ++i)
+			const ChainFx::Plane shots[3] = { Upscaled(7, 1), Upscaled(11, 1), Upscaled(13, 1) };
+			for (int i = 0; i < 84; ++i)
 			{
 				const double t = 0.25 * i;
 				clock.Set(t * 1000.0);
 				const uint64_t seq = static_cast<uint64_t>(i) + 1;
-				if (i == 28)
+				if (i == 28 || i == 56)
 					est.NoteEvent(C::EstimatorEvent::Cut, seq);
-				ChainFx::Feed(est, i < 28 ? a : b, seq, t);
+				ChainFx::Feed(est, shots[i / 28], seq, t);
 				G::Record rec;
 				if (est.Held().ReadLatest(0, rec))
 					o << "R" << seq << ',' << Hex(G::Pack(rec)) << '\n';
@@ -1000,6 +1006,7 @@ namespace Tests
 	public:
 		TEST_METHOD(DumpV4IsOffByDefaultAndWritesNothing)
 		{
+			SidDumpV4::EnvGuard guard;
 			_putenv_s("VP_SID_DUMP_V4_DIR", "");
 			Assert::IsTrue(SourceIdentity::Diag::DumpDirV4().empty(), L"unset / empty = off");
 			const std::string dir = SidDumpV4::TempDir("sid_dump_v4_off");
@@ -1016,6 +1023,7 @@ namespace Tests
 
 		TEST_METHOD(DumpV4ChainEstimatorOutputIsIdenticalAndRowsFollowTheContract)
 		{
+			SidDumpV4::EnvGuard guard;
 			_putenv_s("VP_SID_DUMP_V4_DIR", "");
 			const std::string off0 = SidDumpV4::RunEstimator(false, "est_rules_off");
 			const std::string off1 = SidDumpV4::RunEstimator(true, "est_rules_on");
@@ -1025,15 +1033,40 @@ namespace Tests
 			const std::string on0 = SidDumpV4::RunEstimator(false, "est_rules_off");
 			const std::string on1 = SidDumpV4::RunEstimator(true, "est_rules_on");
 			_putenv_s("VP_SID_DUMP_V4_DIR", "");
-			Assert::IsTrue(off0.find("E") != std::string::npos, L"the estimator evaluated");
+			Assert::IsTrue(off0.find("\nE") != std::string::npos || off0.compare(0, 1, "E") == 0, L"the estimator evaluated");
 			Assert::IsTrue(off0 == on0, L"rules off: every record, status line, detail and counter identical with the dump on");
 			Assert::IsTrue(off1 == on1, L"rules on: identical with the dump on");
 			for (const char* t : { "est_rules_off", "est_rules_on" })
 			{
 				const int evals = SidDumpV4::CheckFile(dir + "\\" + t + ".b_evals.csv", SourceIdentity::Diag::EvalsHeaderV4());
 				const int sizes = SidDumpV4::CheckFile(dir + "\\" + t + ".b_sizes.csv", SourceIdentity::Diag::SizesHeaderV4());
-				Assert::IsTrue(evals > 0, L"one b_evals row per evaluation");
-				Assert::IsTrue(sizes >= evals, L"b_sizes: every conventional size of the 1280x720 raster, per axis and evaluation");
+				Assert::IsTrue(evals >= 10, L"one b_evals row per evaluation");
+				Assert::IsTrue(sizes >= 4 * evals, L"b_sizes: every conventional size of the 1920x1080 raster (>= 2 per axis), per axis and evaluation");
+				// The rows carry real numbers: exact statistics, and evidence accrued at the true size 960 / 540 (an open shot or a credit).
+				std::ifstream in(dir + "\\" + t + ".b_sizes.csv");
+				std::string h, line;
+				std::getline(in, h);
+				const std::vector<std::string> hc = SidDumpV4::Split(h);
+				size_t iValid = 0, iStat = 0, iN = 0, iOpen = 0, iCredit = 0;
+				for (size_t i = 0; i < hc.size(); ++i)
+				{
+					if (hc[i] == "valid") iValid = i;
+					if (hc[i] == "stat") iStat = i;
+					if (hc[i] == "n") iN = i;
+					if (hc[i] == "shot_open") iOpen = i;
+					if (hc[i] == "credit_now") iCredit = i;
+				}
+				int valid = 0, truthEvidence = 0;
+				while (std::getline(in, line))
+				{
+					const std::vector<std::string> f = SidDumpV4::Split(line);
+					if (f[iValid] == "1" && !f[iStat].empty())
+						++valid;
+					if ((f[iN] == "960" || f[iN] == "540") && ((!f[iOpen].empty() && f[iOpen] != "0") || f[iCredit] != "0"))
+						++truthEvidence;
+				}
+				Assert::IsTrue(valid > 0, L"exact statistics of the conventional sizes are written");
+				Assert::IsTrue(truthEvidence > 0, L"the true size's shot / credit columns move");
 			}
 			// The depth hint lands in its own columns (coded 8, output 10), apart from the measured output step.
 			std::ifstream in(dir + "\\est_rules_on.b_evals.csv");
@@ -1054,6 +1087,7 @@ namespace Tests
 
 		TEST_METHOD(DumpV4MonitorOutputIsIdenticalAndWritesOneRowPerAnalysedFrame)
 		{
+			SidDumpV4::EnvGuard guard;
 			_putenv_s("VP_SID_DUMP_V4_DIR", "");
 			const std::string off = SidDumpV4::RunMonitor("mon");
 			const std::string dir = SidDumpV4::TempDir("sid_dump_v4_mon");

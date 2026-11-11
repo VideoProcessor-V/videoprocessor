@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <sstream>
 
 namespace SourceResolutionMonitor
 {
@@ -1467,7 +1468,10 @@ if (tile < int(tiles) && g.y < ts) {
 		snapshot.declaredRatio = SourceResolution::SnapRatio(tracker.Ratio(), j.nativeHeight, T);
 		snapshot.confidence = tracker.Ratio() < 1.0 ? evidence * clarity : 0.0;
 		// Dump v4 (VP_SID_DUMP_V4_DIR; identity/SidDiagDump.h): decided once per analysed frame; the rows below only read.
-		const bool diagOn = diagFrames.Ready(diagTag, "a_frames", SourceIdentity::Diag::FramesHeaderV4());
+		// The rows are only TEXT here; the files are opened and written at the end of Analyse with `mutex` released (audit M3).
+		const bool diagOn = diagFrames.MaybeOn(diagTag);
+		std::string diagFrameRow, diagAbrRows;
+		bool diagAbrWanted = false;
 		double diagConfH = 0.0, diagConfV = 0.0;
 		// Per axis, only while the both-axes reading is native: each declared axis's
 		// evidence (the stricter standard) times how clearly that axis was resampled.
@@ -1586,28 +1590,26 @@ if (tile < int(tiles) && g.y < ts) {
 					chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::AbrStep, rowSequence);   // SID r2 R5 switch (inert unless on)
 			}
 			// Dump v4: every emitted ABR step event (boundary and report time) and every cut-confounded step the detector withheld.
-			if (diagAbr.Ready(diagTag, "a_abr", SourceIdentity::Diag::AbrHeaderV4()))
+			if (diagAbr.MaybeOn(diagTag))
 			{
 				using SourceIdentity::Diag::Num;
 				const SourceIdentity::AbrStepDetector& det = sourceId.Detector();
 				const std::string period = Num(static_cast<double>(det.MeasuredPeriodUs()) / 1e6);
-				std::ofstream& f = diagAbr.Out();
+				std::ostringstream f;
 				if (sourceId.Events() != eventsBefore)
 				{
 					const SourceIdentity::AbrEvent& e = sourceId.LastEvent();
 					f << "event," << rowSequence << ',' << Num(j.seconds) << ',' << e.seq << ',' << Num(static_cast<double>(e.timeUs) / 1e6) << ','
 						<< (e.direction == SourceIdentity::AbrDirection::Drop ? "drop" : "rise") << ',' << Num(e.magnitude) << ',' << Num(e.ratioStep) << ','
 						<< Num(e.confidence) << ',' << (e.onGrid ? 1 : 0) << ',' << (e.cutConfound ? 1 : 0) << ',' << period << '\n';
-					diagAbr.EndRow();
 				}
 				const uint64_t confounded = det.Confounded();
 				if (confounded < diagConfounded)
 					diagConfounded = 0;   // the detector was reset (a new source)
 				for (; diagConfounded < confounded; ++diagConfounded)
-				{
 					f << "confounded," << rowSequence << ',' << Num(j.seconds) << ",,,,,,,,1," << period << '\n';
-					diagAbr.EndRow();
-				}
+				diagAbrRows = f.str();
+				diagAbrWanted = true;
 			}
 			snapshot.frameQuality = sourceId.LastFrameQuality();
 			snapshot.frameNoise = sourceId.LastNoise();
@@ -1623,7 +1625,7 @@ if (tile < int(tiles) && g.y < ts) {
 		if (diagOn)
 		{
 			using SourceIdentity::Diag::Num;
-			std::ofstream& f = diagFrames.Out();
+			std::ostringstream f;
 			f << rowSequence << ',' << Num(j.seconds) << ',' << (idMode == SourceIdMode::On ? "on" : idMode == SourceIdMode::Shadow ? "shadow" : "off") << ','
 				<< diagCodedBits.load(std::memory_order_acquire) << ',' << diagOutputBits.load(std::memory_order_acquire) << ','
 				<< (frame.informative() ? 1 : 0) << ',' << frame.informativeTiles << ',' << frame.tiles << ',' << (frame.mixed ? 1 : 0) << ','
@@ -1637,7 +1639,7 @@ if (tile < int(tiles) && g.y < ts) {
 				<< chainHoldMask << ',' << (idOn ? Num(snapshot.frameQuality) : std::string()) << ',' << (idOn ? Num(snapshot.frameNoise) : std::string())
 				<< ',' << Num(frame.mean) << ',' << sourceId.Events() << ',' << sourceId.Detector().Confounded() << ','
 				<< Num(snapshot.evidenceSeconds) << '\n';
-			diagFrames.EndRow();
+			diagFrameRow = f.str();
 		}
 		char row[256];
 		snprintf(row, sizeof(row), "reading,%.4f,%.3f,%.3f,%.4f,%.4f,%.2f,%.2f,%.1f,%llu,%d/%d,%.4f,%.1f ms",
@@ -1670,6 +1672,21 @@ if (tile < int(tiles) && g.y < ts) {
 			PushHeld(j, workerReset);
 			analysedThrough.store(j.sequence, std::memory_order_release);
 			FinishSequence(j.sequence);
+		}
+		// Dump v4: the rows built above, written with `mutex` released (the render thread's Read / AutoFactors never wait on the file).
+		if (!diagFrameRow.empty() || diagAbrWanted)
+		{
+			lock.unlock();
+			if (!diagFrameRow.empty() && diagFrames.Ready(diagTag, "a_frames", SourceIdentity::Diag::FramesHeaderV4()))
+			{
+				diagFrames.Out() << diagFrameRow;
+				diagFrames.EndRow();
+			}
+			if (diagAbrWanted && diagAbr.Ready(diagTag, "a_abr", SourceIdentity::Diag::AbrHeaderV4()) && !diagAbrRows.empty())
+			{
+				diagAbr.Out() << diagAbrRows;
+				diagAbr.EndRow();
+			}
 		}
 	}
 

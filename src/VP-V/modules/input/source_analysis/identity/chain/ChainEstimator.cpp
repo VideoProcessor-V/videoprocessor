@@ -1658,9 +1658,6 @@ namespace SourceIdentity
 				// M3: the R4 dump runs AFTER the cost is measured, so its verifier and file I/O never feed the governor (decision neutral).
 				if (!dumpPath.empty())
 					DumpR4(run, s.seq, s.timeUs, rasterW, rasterH);
-				// Dump v4 (VP_SID_DUMP_V4_DIR): after the cost too; reads only (its verifier and its files are its own).
-				if (diagEvals.Ready(diagTag, "b_evals", Diag::EvalsHeaderV4()))
-					DumpV4(run, out, flags, windowCleared, s.seq, s.timeUs, rasterW, rasterH, step, floorCodes, classicalOk, classical, cost);
 				// Both axes CONFIDENT: the long cadence (5 s, 2% share); anything else evaluates at the acquiring cadence. maxAgeUs follows
 				// the PLANNED interval, not the nominal one.
 				// N2 (S1 bound): while the monitor keeps leaving native-looking frames out on the strength of this very reading (a note since
@@ -1715,6 +1712,10 @@ namespace SourceIdentity
 					haveStatusEval = true;
 					statusPlan = plan;
 				}
+				// Dump v4 (VP_SID_DUMP_V4_DIR): LAST, after the cost, the schedule, the published record and the status (audit M2: its I/O and
+				// verifier delay nothing the decision or its timing reads); reads only (its verifier and its files are its own).
+				if (diagEvals.Ready(diagTag, "b_evals", Diag::EvalsHeaderV4()))
+					DumpV4(run, out, flags, windowCleared, s.seq, s.timeUs, rasterW, rasterH, step, floorCodes, classicalOk, classical, cost);
 			}
 
 			// ---- status ---------------------------------------------------------------------------------------------------
