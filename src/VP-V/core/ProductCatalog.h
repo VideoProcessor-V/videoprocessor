@@ -586,6 +586,27 @@ inline const std::vector<ConsumerFlag>& ConsumerFlags()
         { uint16_t(kCatalogConsumerIdBase + 1), kP10GrainSplit, FlagKind::NotRead, "C10", "private bands (TextureRestore.h)" },
         { uint16_t(kCatalogConsumerIdBase + 1), kP11RegionBlockStats, FlagKind::NotRead, "C10", "private 16-px tiles" },
         { uint16_t(kCatalogConsumerIdBase + 1), kP4SourceStats, FlagKind::NotRead, "C7", "private cut / fade logic" },
+        // B3-Z Z-DECL (lead 2026-11-11, no declaration change): the render-time readers of the matcher field. The synthesis consumers and the
+        // detail pulse / texture restore / adaptive downscale rows read the LIVE matcher field (dejudder->Field()) at render and do not
+        // declare P3; the lane P3 declarations land with the matcher-ahead ring (B3-Z Z1-Z3) and lane-time refinement (C9b).
+        { uint16_t(VectorDemand::kConsumerIdBase + int(VectorDemand::Consumer::DejudderExtras)), kP3AnalysisField, FlagKind::ExternalView, "C9b",
+          "read at render: live matcher field (LibplaceboVideoRenderer.cpp warpField, de-judder extras loop)" },
+        { uint16_t(VectorDemand::kConsumerIdBase + int(VectorDemand::Consumer::Interpolator)), kP3AnalysisField, FlagKind::ExternalView, "C9b",
+          "read at render: live matcher field (Interpolator::Motion.field = warpField)" },
+        { uint16_t(VectorDemand::kConsumerIdBase + int(VectorDemand::Consumer::HiccupRepair)), kP3AnalysisField, FlagKind::ExternalView, "C9b",
+          "read at render: live matcher field (gap pairs through the interpolator)" },
+        { uint16_t(VectorDemand::kConsumerIdBase + int(VectorDemand::Consumer::OcclusionMask)), kP3AnalysisField, FlagKind::ExternalView, "C9b",
+          "read at render: the matcher's occlusion slots (dejudder->Occlusion(slot)) of its live estimate" },
+        { uint16_t(kCatalogConsumerIdBase + 0), kP3AnalysisField, FlagKind::ExternalView, "C9b",
+          "read at render: live matcher field (DetailPulse::Params.field = dejudder->Field())" },
+        { uint16_t(kCatalogConsumerIdBase + 1), kP3AnalysisField, FlagKind::ExternalView, "C9b",
+          "read at render: live matcher field (TextureRestore::Params.field, one-period field only)" },
+        { uint16_t(kCatalogConsumerIdBase + 3), kP3AnalysisField, FlagKind::ExternalView, "C9b",
+          "read at render: live matcher field (AdaptiveDownscaleStage::MotionSource.field)" },
+        // The camera fit declares P3 and reads the matcher field through IVectorEngine::SeedFieldOf, not the lane slot; the real
+        // declaration lands with C2-cam.
+        { uint16_t(VectorDemand::kConsumerIdBase + int(VectorDemand::Consumer::CameraFit)), kP3AnalysisField, FlagKind::ViewIsActual, "C2-cam",
+          "actual input = IVectorEngine::SeedFieldOf (global_model/link/CameraExtension.cpp, CameraLinkCore.cpp), not the lane slot" },
     };
     return flags;
 }
@@ -609,10 +630,18 @@ inline std::string ActualReads(const ConsumerRow& c, const Registry& reg)
         if (f && f->kind == FlagKind::NotRead)
             unread += (unread.empty() ? "" : "; ") + name + " (" + f->note + ", " + f->item + ")";
         else
-            reads += (reads.empty() ? "" : ", ") + name + (c.decl.consumes[k].lag ? "@lag" + std::to_string(unsigned(c.decl.consumes[k].lag)) : "");
+            reads += (reads.empty() ? "" : ", ") + name + (c.decl.consumes[k].lag ? "@lag" + std::to_string(unsigned(c.decl.consumes[k].lag)) : "")
+                     + (f && f->kind == FlagKind::ViewIsActual ? std::string(" (view, ") + f->item + ")" : std::string());
     }
+    // Reads the code does through an external accessor that the row does NOT declare (shown, not declared).
+    std::string external;
+    for (const ConsumerFlag& f : ConsumerFlags())
+        if (f.consumerId == c.decl.id && f.kind == FlagKind::ExternalView)
+            external += (external.empty() ? "" : "; ") + std::string(reg.Has(f.input) ? reg.Get(f.input).token : "?") + " (" + f.item + ")";
     if (!unread.empty())
         reads += std::string(reads.empty() ? "" : "; ") + "not read: " + unread;
+    if (!external.empty())
+        reads += std::string(reads.empty() ? "" : "; ") + "external view: " + external;
     return reads;
 }
 
