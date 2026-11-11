@@ -76,8 +76,14 @@ namespace VpMotion
 	// The render loop's backlog flush that restarts the timing (BacklogFlush; the queue lock is held by the caller).
 	// Not QueueEvent::Flush: that is BeginQueueGeneration's generation arm (ResyncExtension), which the steering
 	// already follows through the generation compare.
-	void DejudderExtension::OnQueue(const RE::QueueFacts& f)
+	// PHASE 1 (refs/107 s2.4 item 1; owner E3 2026-11-11): both callbacks do NOTHING in the Original pathway (the hub's
+	// per-host fact, `// VPV-GATED`): Bill's backlog flush steers no VP timeline, and his frame is drawn with his own output
+	// list (not planned: the host keeps its list; the Impl's NoteTimelinePlanned is gated too, and the settings seam
+	// released the timeline when the pathway was entered: CoreSegments.inl UpdatePipelineSlots).
+	void DejudderExtension::OnQueue(const RE::QueueFacts& f)   // VPV-GATED
 	{
+		const bool originalPathway = Vpv::Hub::ExtensionHub::Instance().OriginalPathway(f.host);
+		if (originalPathway) return;
 		if (f.kind != RE::QueueEvent::BacklogFlush)
 			return;
 		const std::shared_ptr<Entry> e = Slots().Find(f.host);
@@ -86,8 +92,10 @@ namespace VpMotion
 	}
 
 	// Render loop, renderMutex held: the registered renderer's timeline plan.
-	bool DejudderExtension::OnPlanOutputs(RE::FrameContext& c, RE::OutputPlan& plan)
+	bool DejudderExtension::OnPlanOutputs(RE::FrameContext& c, RE::OutputPlan& plan)   // VPV-GATED
 	{
+		const bool originalPathway = Vpv::Hub::ExtensionHub::Instance().OriginalPathway(c.host);
+		if (originalPathway) return false;
 		const std::shared_ptr<Entry> e = Slots().Find(c.host);
 		return e && e->spec.planOutputs ? e->spec.planOutputs(e->spec.self, plan) : false;
 	}

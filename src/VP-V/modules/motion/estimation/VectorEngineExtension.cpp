@@ -25,8 +25,11 @@ namespace VpMotion
 	// Any thread (the event's own: UI for Reset / LiveQueueReset, the render loop's dequeue for the others), in the
 	// order the host raises them. Flush and Drop are not motion invalidations here (the drift drop still requests its
 	// own directly; the flush comes with a Reset / LiveQueueReset that already did).
-	void VectorEngineExtension::OnQueue(const RE::QueueFacts& f)
+	void VectorEngineExtension::OnQueue(const RE::QueueFacts& f)   // VPV-GATED
 	{
+		// PHASE 1 (refs/107 s2.4 item 1; owner E3): Bill's queue events are not motion invalidations in his pathway.
+		const bool originalPathway = Vpv::Hub::ExtensionHub::Instance().OriginalPathway(f.host);
+		if (originalPathway) return;
 		MotionValidity::Cause cause = MotionValidity::Cause::Resync;
 		switch (f.kind)
 		{
@@ -48,6 +51,11 @@ namespace VpMotion
 	{
 		if (f.kind == RE::Lifecycle::GpuReleased)
 			VectorEngine::ReleaseProducerFor(f.host);
+		// PHASE 1: the settings leave the Original pathway (f.code 0 = VP-V; the hub still answers the PREVIOUS fact during
+		// this call): the queue events of the Original stretch were ignored, so one Resync invalidation retires every pair
+		// and history from before it. Entering Original needs nothing (Bill's pathway reads no motion state).
+		if (f.kind == RE::Lifecycle::SettingsApplied && f.code == 0 && Vpv::Hub::ExtensionHub::Instance().OriginalPathway(f.host))
+			VectorEngine::RequestInvalidationFor(f.host, MotionValidity::Cause::Resync, nullptr);
 	}
 
 	void RegisterVectorEngineExtension()

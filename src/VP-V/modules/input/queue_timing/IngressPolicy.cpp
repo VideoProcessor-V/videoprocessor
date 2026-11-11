@@ -25,6 +25,7 @@ namespace Vpv
 				FaultFn fault = nullptr;
 				void* self = nullptr;
 				std::atomic<uint64_t> faults{ 0 };   // this renderer's contained throws (slice 4 F4: per renderer)
+				std::atomic<bool> originalPathway{ false };   // PHASE 1: the renderer's active pathway (NoteOriginalPathway)
 			};
 			Hub::HostSlots<Entry>& Slots()
 			{
@@ -116,6 +117,18 @@ namespace Vpv
 			const std::shared_ptr<Entry> entry = Slots().Find(host);
 			if (entry && entry->queueTarget)
 				entry->queueTarget(entry->self, qc);
+		}
+
+		void NoteOriginalPathway(const void* host, bool original)
+		{
+			if (const std::shared_ptr<Entry> entry = Slots().Find(host))
+				entry->originalPathway.store(original, std::memory_order_release);
+		}
+
+		bool OriginalPathwayOf(const void* host)
+		{
+			const std::shared_ptr<Entry> entry = Slots().Find(host);
+			return entry && entry->originalPathway.load(std::memory_order_acquire);
 		}
 
 		size_t BoundHosts() { return Slots().States(); }

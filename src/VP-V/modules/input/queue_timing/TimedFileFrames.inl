@@ -29,6 +29,9 @@ void LibplaceboVideoRenderer::OnTimedVideoFrame(VideoFrame& videoFrame,
 	const Vpv::Ingress::CallbackGate::Use ingressUse(m_ingressGate); if (!ingressUse) return;   // P10-8 (fix C F2): the Impl outlives this callback
 	if (m_state.load(std::memory_order_acquire) != RendererState::RENDERSTATE_RENDERING)
 		return;
+	// PHASE 1 (IngressState.h FixSwitches): as IngressHardwareArrival for a file frame (EnqueueFrame reads the switches).
+	if (m_impl && SyncIngressSwitches(FixSwitchesOf(m_impl->activeSettings), m_queueTimingFixes, m_motionHistoryFixes))
+		Vpv::Ingress::NoteOriginalPathway(this, m_originalPathway.load(std::memory_order_relaxed));
 	if (!FileFrameClock::TimingUsable(timing))
 	{
 		const uint64_t total = m_timedFile.rejected.fetch_add(1, std::memory_order_relaxed) + 1;

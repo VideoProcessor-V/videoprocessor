@@ -8,6 +8,13 @@ hook layer (`src/VideoProcessor-Lib/vprenderer/RendererExtension.h`). It fans ev
 - Registration: `HubBootstrap.cpp`, kept by `/INCLUDE:VpvHubBootstrapAnchor` in
   `src/VP-V/build/VideoProcessor-VPRenderer*.items.props`. No line in the host files.
 - Modules are added at start-up only (`AddModule`); the list is read-only afterwards and dispatch is lock-free.
+- PHASE 1 of the host seams plan (refs/107 s2.4 item 1; owner E3 2026-11-11): the hub keeps ONE pathway fact per host
+  (`OriginalPathway(host)`, lock-free `HostSlots`), recorded at `SettingsApplied` (`code != 0` = Original) AFTER the
+  modules saw that call (a module's own handler compares the previous fact with `f.code`) and dropped with the host.
+  Modules whose callbacks must do nothing in the Original pathway read it first (`// VPV-GATED` early return, verified by
+  `tools/check_hook_gating.py`): `VectorEngineExtension::OnQueue`, `DejudderExtension::OnQueue` / `OnPlanOutputs`. The
+  ingress host key is the renderer, not the Impl, so `input.queue_timing` keeps its own fact on its binding. No fact =
+  VP-V (as before). Tests: `OriginalPathwayGateTests`.
 - Not a module folder: no `MANIFEST.json` (core/ has none); the module checker does not scan it.
 - Later packages add modules (resync/seal first, vector engine, entrance, motion, presentation, capture, camera/LED).
 - M2 P10: `input.capture` (`modules/input/capture/CaptureExtension`), registered right after resync; it reaches its

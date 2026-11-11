@@ -3,7 +3,10 @@
 
 #include "ExtensionHub.h"
 
+#include <DebugLog.h>
+
 #include <utility>
+#include <vector>
 
 namespace Vpv
 {
@@ -58,8 +61,39 @@ namespace Vpv
 		void ExtensionHub::ResetModulesForTesting()
 		{
 			modules_.clear();
-			std::lock_guard<std::mutex> lock(hostsMutex_);
-			hosts_.clear();
+			{
+				std::lock_guard<std::mutex> lock(hostsMutex_);
+				hosts_.clear();
+			}
+			std::vector<const void*> keys;
+			pathway_.ForEach([&](const void* key, const std::shared_ptr<PathwayFact>&) { keys.push_back(key); });
+			for (const void* key : keys)
+				pathway_.Remove(key, true);
+		}
+
+		bool ExtensionHub::OriginalPathway(const void* host) const
+		{
+			const std::shared_ptr<PathwayFact> fact = pathway_.Find(host);
+			return fact && fact->original.load(std::memory_order_acquire);
+		}
+
+		bool ExtensionHub::NoteOriginalPathway(const void* host, bool original)
+		{
+			if (!host)
+				return false;
+			if (const std::shared_ptr<PathwayFact> fact = pathway_.Find(host))
+			{
+				fact->original.store(original, std::memory_order_release);
+				return true;
+			}
+			std::shared_ptr<PathwayFact> fact = std::make_shared<PathwayFact>();
+			fact->host = host;
+			fact->original.store(original, std::memory_order_release);
+			if (pathway_.Put(host, fact))
+				return true;
+			// Visible, never silent (owner rule): without the fact the host's modules run their VP-V form in Original.
+			DebugLog::Log("Skeleton hub: pathway fact of host %p not recorded (slot table full); its modules run as VP-V", host);
+			return false;
 		}
 
 		size_t ExtensionHub::LiveHostCount() const
@@ -85,11 +119,18 @@ namespace Vpv
 				state.gpuLive = true;
 			}
 			for (auto& m : modules_) { try { m->OnLifecycle(f); } catch (...) { Contain(f, m->Name()); } }
+			// PHASE 1: the pathway fact, after the fan-out (a module's SettingsApplied handler compares the old fact
+			// with the new f.code).
+			if (f.kind == RE::Lifecycle::SettingsApplied && f.host)
+				NoteOriginalPathway(f.host, f.code != 0);
 			// Released only for this host: a replacement renderer's state is untouched.
 			if ((f.kind == RE::Lifecycle::GpuReleased || f.kind == RE::Lifecycle::Shutdown) && f.host)
 			{
-				std::lock_guard<std::mutex> lock(hostsMutex_);
-				hosts_.erase(f.host);
+				{
+					std::lock_guard<std::mutex> lock(hostsMutex_);
+					hosts_.erase(f.host);
+				}
+				pathway_.Remove(f.host, true);
 			}
 		}
 

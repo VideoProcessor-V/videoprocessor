@@ -391,6 +391,7 @@
     <ClCompile Include="..\VP-V\tests\suite\MotionValidityTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\InterpolationPolicyTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\RenderAheadPolicyTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\OriginalPathwayGateTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\GrainPreservationTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\DetailPulseTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\CrossfadeMixTests.cpp" />

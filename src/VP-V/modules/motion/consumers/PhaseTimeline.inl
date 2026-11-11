@@ -337,9 +337,14 @@ void LibplaceboVideoRenderer::Impl::ReleaseDejudder()
 // Item g (RenderLocked, before the target is acquired): Stage B's frame that no refresh shows (true: RenderLocked
 // returns true, as before) and the phase picture of this draw. phaseUploadable = !nativeRgbUpload && !rgbRawUpload,
 // fullRange = image.repr.levels == PL_COLOR_LEVELS_FULL (evaluated by the caller; both pure).
-bool LibplaceboVideoRenderer::Impl::VpStageBFrame(uint64_t sourceSequence, uint64_t nextSourceSequence, bool phaseUploadable,
+// PHASE 1 (refs/107 s2.4 item 1; owner E3): the five Impl bodies of this file that a Bill call site reaches (VpStageBFrame,
+// DrawVpPhasePicture, PlanVpOutputs, RegisterDejudderCacheFrame, NoteTimelinePlanned) return at once in the Original
+// pathway (`// VPV-GATED`; the settings seam, CoreSegments.inl UpdatePipelineSlots, released the timeline and the phase
+// picture when the pathway was entered), so each call site does nothing there whatever its own guard says.
+bool LibplaceboVideoRenderer::Impl::VpStageBFrame(uint64_t sourceSequence, uint64_t nextSourceSequence, bool phaseUploadable,   // VPV-GATED
 	bool lossless422Upload, bool fullRange)
 {
+	if (pipelineSlots.OriginalPathway()) return false;
 	vpPhasePlanesValid = false;
 	if (vpTimelineActive)
 	{
@@ -373,9 +378,10 @@ bool LibplaceboVideoRenderer::Impl::VpStageBFrame(uint64_t sourceSequence, uint6
 // renderer's own draws; the picture at this refresh's phase in place of A's planes (a composed picture keeps A:
 // hold), or B3's processed picture. entranceOnceDone / bAlreadyA / bAsADone are the callback's (P4).
 template<class AsADone>
-bool LibplaceboVideoRenderer::Impl::DrawVpPhasePicture(const pl_frame& source, const pl_frame& image, pl_frame& frame,
+bool LibplaceboVideoRenderer::Impl::DrawVpPhasePicture(const pl_frame& source, const pl_frame& image, pl_frame& frame,   // VPV-GATED
 	uint64_t sourceSequence, uint64_t nextSourceSequence, bool& entranceOnceDone, bool& bAlreadyA, const AsADone& bAsADone)
 {
+    if (pipelineSlots.OriginalPathway()) return false;
     bool phasePicture = vpPhasePlanesValid && source.num_planes == 2 &&
         source.planes[0].texture == textures[0] && source.planes[1].texture == textures[1];
     if (phasePicture && vpPhaseDeferred)
@@ -462,8 +468,9 @@ namespace
 // log (moved from just before the render loop's motionOutputs copy), then VP's per-vsync timeline (exclusive
 // with smooth motion, never in low latency): this frame's refreshes, each at its true phase between A and B.
 // Render loop, renderMutex held. True: handled (the plan is the timeline's, or the host's list left as it was).
-bool LibplaceboVideoRenderer::Impl::PlanVpOutputs(RendererExtension::OutputPlan& plan)
+bool LibplaceboVideoRenderer::Impl::PlanVpOutputs(RendererExtension::OutputPlan& plan)   // VPV-GATED
 {
+	if (pipelineSlots.OriginalPathway()) return false;   // PHASE 1: not planned, Bill's list is drawn
 	if(temporalRenderer.Mixing()!=smoothMotionMixingLogged) {
 	    RequestMotionInvalidate(MotionValidity::Cause::SmoothMotionMix);
 	    smoothMotionMixingLogged=temporalRenderer.Mixing();
@@ -479,10 +486,11 @@ bool LibplaceboVideoRenderer::Impl::PlanVpOutputs(RendererExtension::OutputPlan&
 // after the hook list is built, at today's position: the registration order inside the frame's hooks is unchanged).
 // Owner change: stays IN PLACE as this one call; retired when P4 moves the hook block (CollectHooks). The old
 // statements; nlsSubmitted = (submittedNls != nullptr), evaluated by the caller.
-void LibplaceboVideoRenderer::Impl::RegisterDejudderCacheFrame(const pl_frame& target, const pl_frame& renderImage,
+void LibplaceboVideoRenderer::Impl::RegisterDejudderCacheFrame(const pl_frame& target, const pl_frame& renderImage,   // VPV-GATED
 	const SubtitleCutPasteGeometry& relocatedSubtitle, bool subtitleCompositionSucceeded, bool nlsSubmitted, bool cadenceRepeat,
 	uint64_t sourceSequence)
 {
+    if (pipelineSlots.OriginalPathway()) return;   // PHASE 1: no cache stage, no geometry (Bill's hooks only)
     dejudderSubtitleComposed = subtitleCompositionSucceeded;
     {
         const pl_tex framebuffer = target.planes[0].texture;
@@ -508,8 +516,9 @@ void LibplaceboVideoRenderer::Impl::RegisterDejudderCacheFrame(const pl_frame& t
 }
 // M2 P5b-5 (audit F1): after the R10 call. Not planned (no binding / hub, or the plan threw): no stale timeline
 // flags, Bill's draw of the host's list, and the visible "timeline" fallback; planned: released.
-void LibplaceboVideoRenderer::Impl::NoteTimelinePlanned(bool planned)
+void LibplaceboVideoRenderer::Impl::NoteTimelinePlanned(bool planned)   // VPV-GATED
 {
+	if (pipelineSlots.OriginalPathway()) return;   // PHASE 1: no timeline, no "timeline" fallback line (released at the seam)
 	if (VpMotion::TimelineNotPlanned(dejudderPolicy, planned))
 		EngageFallback("timeline", "de-judder module did not plan");
 	else

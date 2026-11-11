@@ -37,6 +37,45 @@ namespace Vpv
 	// cadence_class_fixes (Hunt 2, 2026-10-17): refreshed by the render loop.
 	std::atomic<bool> m_cadenceClassFixes{true};
 	bool m_cadenceClassFixesApplied = true;   // capture thread
+	// PHASE 1 of the host seams plan (refs/107 s2.4 item 3; owner 2026-11-11: FIX): the "fix" switches above (and the
+	// renderer's m_queueTimingFixes / m_motionHistoryFixes, declared in Bill's header) start TRUE and were refreshed only
+	// by the render loop, so the frames that arrived before its first pass ran the VP fix paths in the Original pathway.
+	// Now every arrival syncs them from the ACTIVE settings first (IngressHardwareArrival / OnTimedVideoFrame, inside the
+	// callback gate, before any reader), so the first frame already runs with the pathway's switches: Original = all
+	// five off (OriginalPathway.h rows queue_timing_fixes, pulldown_fixes, timing_continuity_fixes, cadence_class_fixes,
+	// motion_history_fixes), and the ingress binding learns the pathway for R15 / R19 (IngressPolicy.h). The render
+	// loop's own refresh stays (same values, same atomics). Capture / file thread; the settings read is the same
+	// `m_impl->activeSettings` field read IngressPulldown already makes on that thread.
+	struct FixSwitches
+	{
+		bool pulldownFixes = true, timingContinuityFixes = true, cadenceClassFixes = true;
+		bool queueTimingFixes = true, motionHistoryFixes = true;
+		bool originalPathway = false;
+	};
+	template<class Settings>
+	static FixSwitches FixSwitchesOf(const Settings& s)
+	{
+		FixSwitches f;
+		f.pulldownFixes = s.pulldownFixes;
+		f.timingContinuityFixes = s.timingContinuityFixes;
+		f.cadenceClassFixes = s.cadenceClassFixes;
+		f.queueTimingFixes = s.queueTimingFixes;
+		f.motionHistoryFixes = s.motionHistoryFixes;
+		f.originalPathway = s.pipelineOriginalPathway;
+		return f;
+	}
+	std::atomic<bool> m_originalPathway{false};   // the pathway the active settings selected at the last arrival
+	// Stores the switches (the renderer's two are passed in). Returns true when the pathway fact CHANGED (the caller
+	// tells the ingress binding: Vpv::Ingress::NoteOriginalPathway).
+	bool SyncIngressSwitches(const FixSwitches& f, std::atomic<bool>& queueTimingFixes, std::atomic<bool>& motionHistoryFixes)
+	{
+		m_pulldownFixes.store(f.pulldownFixes, std::memory_order_relaxed);
+		m_timingContinuityFixes.store(f.timingContinuityFixes, std::memory_order_relaxed);
+		m_cadenceClassFixes.store(f.cadenceClassFixes, std::memory_order_relaxed);
+		queueTimingFixes.store(f.queueTimingFixes, std::memory_order_relaxed);
+		motionHistoryFixes.store(f.motionHistoryFixes, std::memory_order_relaxed);
+		return m_originalPathway.exchange(f.originalPathway, std::memory_order_acq_rel) != f.originalPathway;
+	}
 	bool m_pulldownForceGap = false;          // capture thread: a toggle restarted the film clock (06-interp L1)
 	// Q1 (queue stress 2026-10-18, queue_timing_fixes): stale-frame arrivals and their
 	// delivery gap (capture thread).

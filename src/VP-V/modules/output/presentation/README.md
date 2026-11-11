@@ -69,6 +69,10 @@ The renderer host and Bill's files do the rest: they create the swapchain, prese
 - `queue_timing_fixes` is read here but owned by `input.queue_timing`. It selects the whole-Hz-last order and turns on the DWM grid refinement.
 - The refresh switch keys (`[general] switch_refresh_rate` and the `[display_refresh_rate_override]` section) are read by the GUI (VideoProcessorDlg.cpp), not by this module's files.
 
+### Original pathway (PHASE 1 of the host seams plan, refs/107 s2.4 item 1; owner E3 2026-11-11)
+
+- `RenderAhead::Presenter` carries the pathway fact (`originalPathway`, set by the host's settings seam `UpdatePipelineSlots` through `SetOriginalPathway(on, now)`): in the Original pathway `Break`, `ResetGate`, `UpdateGate` and `TakeMainInterval` return at once (`// VPV-GATED`; Bill's present path has no render-ahead: SyncInterval 1, no gate, no credit). Entering Original hands over ONCE (chain broken, credit returned, gate epoch reset), so no VP-V plan outlives the switch. Tests: `OriginalPathwayGateTests`, `PresenterApiTests`.
+
 ### What the user sees (fallbacks)
 
 - Visible under "Fallbacks engaged", with a one-time notice: `render-ahead (off: its <lead> ms lead does not fit the <budget> ms delay budget; <reason>)`. It is released when the lead fits again or `render_ahead` is turned off.
