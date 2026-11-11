@@ -30,6 +30,15 @@ size_t LibplaceboVideoRenderer::QueueTargetVp() const
 	// never exceeds `desired`, so a delay budget's hold target wins (audit B2).
 	context.renderAheadCreditFrames = m_impl ? m_impl->renderAheadCreditFrames.load(std::memory_order_acquire) : 0;
 	context.lookaheadFloor = m_queueTargetFloor.load(std::memory_order_relaxed);
+	// P6 rest S1 through the S2 seam (refs/107 R19): the Presenter's analysis floor and queue capacity
+	// (RenderAhead::Presenter::FitBudget), published in the VP queue target's own body (0 renderer lines).
+	// No analysis product declares a lead yet, so the floor is the look-ahead floor above.
+	if (m_impl)
+	{
+		m_impl->renderAheadPresenter.analysisFloor.store(VpQueueRules::AnalysisFloorFrames(context.lookaheadFloor, 0),
+			std::memory_order_release);
+		m_impl->renderAheadPresenter.queueCapacity.store(m_frameQueueMaxSize, std::memory_order_release);
+	}
 	return QueuePolicy().QueueTarget(context);
 }
 

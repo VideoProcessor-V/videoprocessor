@@ -36,7 +36,7 @@ pathway = off), on the render thread. An invalid value keeps the default and is 
 Controls without a settings key (P6 rest audit S2): `SkeletonModule::SetRegulatorGate` - no settings key; default `Observe` (the
 host-measured render-only span is recorded and shown, the regulator is not fed); set by the TD/owner wiring (no production caller yet).
 `VpFixedBudgetPolicy::SetRaiseQueueForAnalysis` - no settings key; default off; set by the TD/owner wiring together with the presentation
-module's `Presenter::floorPolicy = RaiseQueue` (see output/presentation/README.md). No host feeds the analysis floor on this branch (it is 0).
+module's `Presenter::floorPolicy = RaiseQueue` (see output/presentation/README.md). The VP queue target (`QueueTargetVp`, S2 seam R19) publishes the floor to the Presenter; no product declares a lead yet.
 
 Host footprint (P6 rest audit S5): none on this branch (r2/p6-core). The host-measured render-only span and its fan-out come with the
 seam rework (refs/107); until then `NoteRenderOnlyMs` has no production caller and the regulator is not fed.
