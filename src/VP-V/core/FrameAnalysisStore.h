@@ -417,6 +417,18 @@ namespace FrameAnalysis
 			return true;
 		}
 
+		// The scene group of `seq` when it was written (no counters, no copy of the whole record): the skeleton's compute-once check and its
+		// SceneOf reader. False when there is no record, the store is off, or the scene was not published yet.
+		bool PeekScene(uint64_t seq, Scene& out) const
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			if (!m_enabled) return false;
+			const Slot* slot = FindLocked(seq);
+			if (!slot || (slot->record.valid & kScene) == 0) return false;
+			out = slot->record.scene;
+			return true;
+		}
+
 		bool PublishLabels(uint64_t seq, const Labels& labels)
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);

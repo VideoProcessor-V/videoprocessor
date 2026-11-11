@@ -141,6 +141,13 @@ namespace Vpv
 			void RetryEngineFeedForTesting(const void* host);
 			// The scene of frame `seq` against `seq - 1` from the two P4 records (render thread, after the seal of `seq`). False when a record is not readable.
 			bool SceneFactsOf(const void* host, uint64_t seq, SceneFacts& out) const;
+			// The SCENE PRODUCT (W1-C7): cut / fade of frame `seq` against `seq - 1`, the one reader every consumer uses (the camera extension's
+			// ReadScene reads the same store group). Order: the frame-analysis store's scene group (published by this module at the seal of
+			// `seq`); else classified from the two P4 records now (SceneFactsOf), written into the store when it holds the frame's record. The
+			// answer is identical with frame_analysis_store off (nothing to read, always live). RENDER THREAD for the live path (it reads the
+			// lane's slots); the store path is any thread. known = false when neither answers.
+			SceneAnswer SceneOf(const void* host, uint64_t seq) const;
+			SceneCounters SceneCountersOf(const void* host) const;
 
 			// The queue the lane graph is sized for: the terms the record histories are derived from (render-ahead R, lane lead L,
 			// look-ahead walk frames; VpSkeleton::QueueFramesFor). `wired` says which of the three a feed has delivered (kRenderAhead |
@@ -244,6 +251,9 @@ namespace Vpv
 			void Refresh(HostState& st);
 			void OnCollectAhead(HostState& st, const RE::QueueView& view);
 			void FeedEngine(HostState& st, bool retryOnly);
+			// The scene product's one fill (W1-C7): classifies `seq` from the two P4 records and writes the store's scene group when the store holds
+			// the frame's record. False when the pair is not readable. `answer` (optional) gets the classification.
+			bool FillScene(HostState& st, uint64_t seq, SceneAnswer* answer) const;
 			bool PublishEngineSlots(HostState& st, Bundle& b, EngineFieldFacts& facts, unsigned& doneMask);
 			bool CollectExternal(const void* host, std::vector<VpSkeleton::ConsumerDecl>& consumers, std::vector<VpSkeleton::ProductId>& products,
 				bool& wantsCameraFit, size_t& duplicates) const;

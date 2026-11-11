@@ -224,6 +224,48 @@ namespace FrameAnalysisStoreTestsNs
 			Assert::IsTrue(store.Summary().find("served 1, late 1, missing 1") != std::string::npos);
 		}
 
+		// W1-C7: the scene group has a production publisher (the skeleton's seal) and a reader; the cadence group's publisher is MarkRepeat
+		// and PublishCadence (no production publisher beyond MarkRepeat yet: see the W1-C7 hand-back).
+		TEST_METHOD(ASceneRoundTripsAndPeekSeesOnlyAPublishedScene)
+		{
+			Store store(RingDepth(4, 4));
+			store.Begin(Id(5), kScene);
+			Scene seen;
+			Assert::IsFalse(store.PeekScene(5, seen), L"begun, not published");
+			Assert::IsFalse(store.PeekScene(6, seen), L"no record");
+			Record rec;
+			Assert::IsTrue(store.Read(5, Use::SingleFrame, kScene, rec) == ReadStatus::Late, L"asked of the producer, not written yet");
+			Scene scene;
+			scene.cut = true;
+			scene.fade = false;
+			scene.origin = SceneOrigin::Vp;
+			Assert::IsTrue(store.PublishScene(5, scene));
+			Assert::IsTrue(store.PeekScene(5, seen));
+			Assert::IsTrue(seen.cut);
+			Assert::IsFalse(seen.fade);
+			Assert::IsTrue(seen.origin == SceneOrigin::Vp);
+			Assert::IsTrue(store.Read(5, Use::SingleFrame, kScene, rec) == ReadStatus::Ok);
+			Assert::IsTrue(rec.scene.cut);
+			Assert::IsFalse(store.PublishScene(6, scene), L"no record to write into");
+			store.SetEnabled(false);
+			Assert::IsFalse(store.PeekScene(5, seen), L"a disabled store answers nothing");
+		}
+
+		TEST_METHOD(ACadenceRoundTripsThroughItsGroup)
+		{
+			Store store(RingDepth(4, 4));
+			store.Begin(Id(7), kCadence);
+			Cadence cadence;
+			cadence.phase = 2;
+			cadence.filmHz = 23.976;
+			Assert::IsTrue(store.PublishCadence(7, cadence));
+			Record rec;
+			Assert::IsTrue(store.Read(7, Use::SingleFrame, kCadence, rec) == ReadStatus::Ok);
+			Assert::AreEqual(2, rec.cadence.phase);
+			Assert::AreEqual(23.976, rec.cadence.filmHz, 1e-9);
+			Assert::IsFalse(store.PublishCadence(8, cadence), L"no record to write into");
+		}
+
 		TEST_METHOD(ReadersAndWriterOnSeparateThreads)
 		{
 			// The arrival thread begins, the worker publishes, two readers read: every served record

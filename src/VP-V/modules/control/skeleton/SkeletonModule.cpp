@@ -12,6 +12,7 @@
 #include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
+#include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
@@ -350,6 +351,8 @@ namespace Vpv
 			bool fitWantedPushed = false;        // IVectorEngine::SetCameraFitWanted(true) was sent
 			VpMotion::IVectorEngine* engine = nullptr;   // this renderer's engine; dropped at Teardown (valid until the renderer goes)
 			FeedCounters feed;
+			// The scene product's counters (W1-C7): written by the render thread (seal) and by any SceneOf caller, so atomic and relaxed.
+			std::atomic<uint64_t> scenePublished{ 0 }, sceneAlready{ 0 }, sceneNotReady{ 0 }, sceneStoreReads{ 0 }, sceneLiveFills{ 0 }, sceneUnknown{ 0 };
 			uint64_t feedEra = 0;
 			bool feedHadEra = false;
 			uint64_t feedLastEngineSeq = 0;      // the last field seq handled (published, slipped or given up)
@@ -885,7 +888,8 @@ namespace Vpv
 				FeedEngine(*st, true);
 		}
 
-		// The scene of `seq` against `seq - 1`: the two P4 records, classified by the shared unit (never stored).
+		// The scene of `seq` against `seq - 1`: the two P4 records, classified by the shared unit. This is the classification only; the SCENE PRODUCT
+		// (SceneOf / FillScene below) stores its cut / fade in the frame-analysis store's scene group once per frame and serves readers from there.
 		bool SkeletonModule::SceneFactsOf(const void* host, uint64_t seq, SceneFacts& out) const
 		{
 			out = SceneFacts();
@@ -919,6 +923,75 @@ namespace Vpv
 			out.rectX1 = c.rectX1;
 			out.rectY1 = c.rectY1;
 			return true;
+		}
+
+		// The scene product's one fill: classify from the two P4 records (SceneFactsOf), write the store's scene group when the store holds the
+		// frame's record. The same body serves the seal (Begin) and a reader that arrives before the seal / with no record.
+		bool SkeletonModule::FillScene(HostState& st, uint64_t seq, SceneAnswer* answer) const
+		{
+			SceneFacts f;
+			if (!SceneFactsOf(st.host, seq, f) || !f.valid)
+				return false;
+			if (answer)
+			{
+				answer->known = true;
+				answer->cut = f.cut;
+				answer->fade = f.fade;
+			}
+			if (FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(st.host))
+			{
+				FrameAnalysis::Scene scene;
+				scene.cut = f.cut;
+				scene.fade = f.fade;
+				scene.origin = FrameAnalysis::SceneOrigin::Vp;
+				if (store->PublishScene(seq, scene))
+					st.scenePublished.fetch_add(1, std::memory_order_relaxed);
+			}
+			return true;
+		}
+
+		SceneAnswer SkeletonModule::SceneOf(const void* host, uint64_t seq) const
+		{
+			SceneAnswer a;
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			if (!st)
+				return a;
+			if (FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(host))
+			{
+				FrameAnalysis::Scene scene;
+				if (store->PeekScene(seq, scene))
+				{
+					a.known = true;
+					a.cut = scene.cut;
+					a.fade = scene.fade;
+					a.from = SceneAnswer::From::Store;
+					st->sceneStoreReads.fetch_add(1, std::memory_order_relaxed);
+					return a;
+				}
+			}
+			if (FillScene(*st, seq, &a))
+			{
+				a.from = SceneAnswer::From::Live;
+				st->sceneLiveFills.fetch_add(1, std::memory_order_relaxed);
+				return a;
+			}
+			st->sceneUnknown.fetch_add(1, std::memory_order_relaxed);
+			return a;
+		}
+
+		SceneCounters SkeletonModule::SceneCountersOf(const void* host) const
+		{
+			SceneCounters c;
+			if (const std::shared_ptr<HostState> st = hosts_.Find(host))
+			{
+				c.published = st->scenePublished.load(std::memory_order_relaxed);
+				c.alreadyPresent = st->sceneAlready.load(std::memory_order_relaxed);
+				c.notReady = st->sceneNotReady.load(std::memory_order_relaxed);
+				c.storeReads = st->sceneStoreReads.load(std::memory_order_relaxed);
+				c.liveFills = st->sceneLiveFills.load(std::memory_order_relaxed);
+				c.unknown = st->sceneUnknown.load(std::memory_order_relaxed);
+			}
+			return c;
 		}
 
 		// Render thread. AfterRender (retryOnly = false): takes the engine's newest verified field and publishes its slots; Begin and AfterRender
@@ -1438,6 +1511,17 @@ namespace Vpv
 			for (int guard = 0; guard < 64 && (wait = b->lane.DeterministicWaitUs(seq, 0)) > 0; ++guard)
 				std::this_thread::sleep_for(std::chrono::microseconds(wait));   // N1: only a deterministic run or an explicit test wait
 			b->lane.OnRenderStart(seq, 0);
+			// The SCENE record of this frame, at its seal (W1-C7): once per frame, skipped when already written, and no work at all while the
+			// frame-analysis store is off (no store registered for the renderer). Published here, not at the P4 slot, because only a sealed P4
+			// slot is readable (ReadOf); the camera describes its pairs after the seal of their frame.
+			if (FrameAnalysis::Store* sceneStore = VpFrameAnalysis::SourceFrameTap::StoreFor(st.host))
+			{
+				FrameAnalysis::Scene already;
+				if (sceneStore->PeekScene(seq, already))
+					st.sceneAlready.fetch_add(1, std::memory_order_relaxed);
+				else if (!FillScene(st, seq, nullptr))
+					st.sceneNotReady.fetch_add(1, std::memory_order_relaxed);
+			}
 			st.renderBeginSeq = seqIn;   // the render-only clock starts here (after the deterministic wait and the seal, which are not render work)
 			st.renderBeginUs = nowUs_();
 			Refresh(st);
