@@ -362,10 +362,40 @@ namespace VpMotion
 			// requests counted by RequestPair; each awaited one lands once in served / fromSlot / late / unavailable / noBudget
 			// (AwaitPair). gated is a breakdown of unavailable (the C1 state gate said no).
 			double lastWaitMs = 0.0, waitMsSum = 0.0;   // AwaitPair's wait (served ones in the sum)
+			// Commit 4 (the dequeue hook + the estimate's fill): issued by the hook; unclaimed = issued, never awaited (a newer
+			// issue or a different pair replaced it: abandoned, no GPU work if not started); aheadCovered = the pair was found
+			// computed ahead when the estimate came (the request abandoned); gapServed = a hiccup gap pair served on demand (no
+			// gap seed needed); idleSkips = not issued because no estimate read a pair within kConsumerIdleCycles hook calls.
+			unsigned long long issued = 0, unclaimed = 0, aheadCovered = 0, gapServed = 0, idleSkips = 0;
+			double budgetMs = 0.0, renderMs = 0.0;   // the last budget issued with; the measured render time (EWMA)
 		};
 		OnDemandCounters OnDemandReads() const;
 		// The C1 state gate: the single call site (lane C1). Until r2/c1 lands the state is On.
 		static bool OnDemandStateOn() { return true; }
+		// ---- W2-C5b commit 4: the dequeue issues, the estimate fills (OnDemandIssue.h; VectorEngineEstimate.inl) -----------
+		enum : unsigned { kConsumerIdleCycles = 4 };   // enum constant: ODR-safe in C++14
+		// The dequeue hook, once per accepted pair: the render-time sample (OnDemand::RenderSample) and the consumer clock.
+		void NoteOnDemandCycle(double sourceHz, double dequeueWaitMs);
+		// The deadline for a request issued now: OnDemand::RenderBudget at the pair's source rate.
+		double OnDemandBudgetMs(double sourceHz) const;
+		// True while an estimate read (or asked for) a pair within the last kConsumerIdleCycles hook calls, or before the first
+		// kConsumerIdleCycles calls: no consumer = no request (no GPU work for a pair nobody reads).
+		bool OnDemandConsumerActive();
+		// The hook's setting each cycle; PlanProducer reads it (`on` = ProducerPlan onDemandWanted).
+		void SetOnDemandSetting(OnDemand::Setting s) { onDemandSetting_.store(static_cast<unsigned char>(s), std::memory_order_release); }
+		OnDemand::Setting OnDemandSettingNow() const { return static_cast<OnDemand::Setting>(onDemandSetting_.load(std::memory_order_acquire)); }
+		// Issues ONE request for the dequeue's selected pair (through RequestPair); an older one not yet claimed is abandoned.
+		void IssueOnDemand(OnDemand::PairRequest request);
+		// The estimate's fill: `ahead` (the pair found computed ahead) is returned as is; else the pending request for exactly
+		// (from, to) is awaited within what is left of its budget. `allowed` false (the vectors-valid state refuses this
+		// adjacent pair) abandons it unread. cause: None (served, or nothing was asked) or the OnDemand* miss; a late answer is
+		// logged (the first, then every 10th). Marks the consumer active.
+		MotionAhead::FlowPtr OnDemandFill(MotionAhead::FlowPtr ahead, uint64_t from, uint64_t to, bool allowed,
+			FallbackCatalog::NoPairCause& cause);
+		// The last fill: did it serve exactly (from, to)? Its cause (None when it served or asked nothing).
+		bool OnDemandServed(uint64_t from, uint64_t to) const;
+		FallbackCatalog::NoPairCause OnDemandLastCause() const;
+		void NoteOnDemandGapServed();
 
 	private:
 		void NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence, uint64_t epochAtChoice);
@@ -413,5 +443,22 @@ namespace VpMotion
 		FallbackCatalog::LookAheadFailures hookFailures_ = FallbackCatalog::PreEstimateHookFailures();
 		mutable std::mutex onDemandMutex_;          // W2-C5b
 		OnDemandCounters onDemand_;                  // under onDemandMutex_
+		// Commit 4, all under onDemandMutex_: the one pending request the dequeue issued, the render-time budget, the cycle clock.
+		struct OnDemandPendingRequest
+		{
+			bool active = false;
+			uint64_t from = 0, to = 0;
+			OnDemand::PairFuture future;
+			OnDemand::Clock::time_point issued;
+			double budgetMs = 0.0;
+		};
+		OnDemandPendingRequest onDemandPending_;
+		std::atomic<unsigned char> onDemandSetting_{ static_cast<unsigned char>(OnDemand::Setting::Auto) };   // not under the mutex
+		OnDemand::RenderBudget onDemandBudget_;
+		OnDemand::Clock::time_point onDemandLastCycle_;
+		bool onDemandCycleKnown_ = false;
+		double onDemandCycleWaitMs_ = 0.0;           // this cycle's on-demand wait (excluded from the render sample)
+		unsigned long long onDemandCycles_ = 0, onDemandConsumerCycle_ = 0;
+		struct { uint64_t from = 0, to = 0; bool served = false; FallbackCatalog::NoPairCause cause = FallbackCatalog::NoPairCause::None; } onDemandLast_;
 	};
 }

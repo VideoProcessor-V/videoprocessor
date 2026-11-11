@@ -25,6 +25,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <utility>
 
 namespace VpMotion
@@ -38,6 +39,9 @@ namespace VpMotion
 		// backingOwner keeps them alive while the request waits). chainOk: no break the sequence does not show lies between
 		// the producer's last frame and `from` (false = never pair against the producer's held frame). budgetMs: how long
 		// the asker can wait from now (derived per frame by the caller; <= 0 = no budget: the request is not issued).
+		// Generations only move forward: a request older than the producer's current generation is answered Late (counted
+		// staleGeneration) even when render-ahead still holds frames of the old one - the stream moved on; the matcher
+		// covers those frames visibly (re-check S2, accepted as intended).
 		struct PairRequest
 		{
 			uint64_t from = 0, to = 0, generation = 0;
@@ -249,5 +253,77 @@ namespace VpMotion
 		{
 			return std::chrono::duration<double, std::milli>(b - a).count();
 		}
+
+		// ---- W2-C5b commit 4: the frame budget and the setting -------------------------------------------------------------
+		// One render-time sample from the dequeue hook (OnDemandIssue.h), called once per accepted pair: the time since the last
+		// call is the last render cycle plus this dequeue's wait for a frame; minus that wait and minus the time the last cycle
+		// spent waiting for an on-demand answer, it is the render loop's own work for one frame. False (no sample) when the source
+		// rate is unknown or the interval spans more than two source periods (a stall, a cycle that paired nothing).
+		inline bool RenderSample(double intervalMs, double dequeueWaitMs, double onDemandWaitMs, double sourceHz, double& renderMs)
+		{
+			if (!(sourceHz > 0.0) || !(intervalMs > 0.0))
+				return false;
+			if (intervalMs > 2.0 * 1000.0 / sourceHz)
+				return false;
+			const double r = intervalMs - (dequeueWaitMs > 0.0 ? dequeueWaitMs : 0.0) - (onDemandWaitMs > 0.0 ? onDemandWaitMs : 0.0);
+			renderMs = r > 0.0 ? r : 0.0;
+			return true;
+		}
+
+		// The budget a request may wait (the deadline): the source period minus the MEASURED render time (an EWMA, 1/8 per
+		// sample, of RenderSample's values) minus a tenth of the period as a margin; never below 0. Never a fixed number of
+		// milliseconds: until the first sample it is half the period; an unknown rate gives 0 (no budget: not issued).
+		class RenderBudget
+		{
+		public:
+			void Note(double renderMs)
+			{
+				if (!(renderMs >= 0.0))
+					return;   // NaN or negative: ignored
+				ewmaMs_ = measured_ ? ewmaMs_ + (renderMs - ewmaMs_) / 8.0 : renderMs;
+				measured_ = true;
+			}
+			bool Measured() const { return measured_; }
+			double RenderMs() const { return ewmaMs_; }
+			double BudgetMs(double sourceHz) const
+			{
+				if (!(sourceHz > 0.0))
+					return 0.0;
+				const double period = 1000.0 / sourceHz;
+				if (!measured_)
+					return period * 0.5;
+				const double b = period - ewmaMs_ - period * 0.1;
+				return b > 0.0 ? b : 0.0;
+			}
+			void Reset() { ewmaMs_ = 0.0; measured_ = false; }
+
+		private:
+			double ewmaMs_ = 0.0;
+			bool measured_ = false;
+		};
+
+		// optical_flow_on_demand (profile key; README Settings): auto | on | off, default auto.
+		//   auto (DEFAULT) = today's behaviour on the low-latency path: the on-demand path is OFF there (no producer is started
+		//        for it) until the owner decides from the W2-C5b measurement table (latency impact and benefit per fed feature,
+		//        owner answer 4). While the look-ahead producer runs (standard mode) it serves that producer's misses and the
+		//        hiccup gap pairs it never computes, on its existing session, while idle.
+		//   on   = also on the low-latency path (ProducerPlan onDemandWanted starts the producer for it; depth stays 0).
+		//   off  = never asked: the matcher covers every miss, exactly as before W2-C5b.
+		enum class Setting : unsigned char { Off, Auto, On };
+		inline Setting SettingOf(const std::string& value)
+		{
+			return value == "on" ? Setting::On : value == "off" ? Setting::Off : Setting::Auto;
+		}
+		inline const char* SettingName(Setting s)
+		{
+			return s == Setting::On ? "on" : s == Setting::Off ? "off" : "auto";
+		}
+		inline bool Wanted(Setting s, bool lowLatency)
+		{
+			return s == Setting::On || (s == Setting::Auto && !lowLatency);
+		}
 	}
 }
+
+// The dequeue hook (W2-C5b commit 4): a template on the host types, reached through VectorEngine.h.
+#include <VP-V/modules/motion/estimation/OnDemandIssue.h>

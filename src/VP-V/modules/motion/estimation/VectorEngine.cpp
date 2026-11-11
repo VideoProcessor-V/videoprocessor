@@ -97,6 +97,7 @@ namespace VpMotion
 		life.backoffActive = motionProducerStartRetry.Recovering() && nowMs < motionProducerStartRetry.RetryAtMs();
 		const bool startFailureInjected = !producerStartFailureForTesting_.empty();   // C1-4 test seam: empty in the product
 		life.gpuAvailable = in.gpu != nullptr || startFailureInjected;
+		life.onDemandWanted = OnDemandSettingNow() == OnDemand::Setting::On;   // W2-C5b: `on` only (auto starts nothing)
 		const ProducerPlan::LifecycleOutput act = ProducerPlan::Lifecycle(life);
 		if (act.action == ProducerPlan::Action::Start)
 		{
@@ -1036,6 +1037,140 @@ namespace VpMotion
 	VectorEngine::OnDemandCounters VectorEngine::OnDemandReads() const
 	{
 		std::lock_guard<std::mutex> lock(onDemandMutex_);
-		return onDemand_;
+		OnDemandCounters out = onDemand_;
+		out.renderMs = onDemandBudget_.RenderMs();
+		return out;
+	}
+
+	// ---- W2-C5b commit 4: the dequeue issues, the estimate fills ------------------------------------------------------
+
+	void VectorEngine::NoteOnDemandCycle(double sourceHz, double dequeueWaitMs)
+	{
+		const auto now = OnDemand::Clock::now();
+		std::lock_guard<std::mutex> lock(onDemandMutex_);
+		++onDemandCycles_;
+		double renderMs = 0.0;
+		if (onDemandCycleKnown_ && OnDemand::RenderSample(OnDemand::MsBetween(onDemandLastCycle_, now), dequeueWaitMs,
+			onDemandCycleWaitMs_, sourceHz, renderMs))
+			onDemandBudget_.Note(renderMs);
+		onDemandLastCycle_ = now;
+		onDemandCycleKnown_ = true;
+		onDemandCycleWaitMs_ = 0.0;
+	}
+
+	double VectorEngine::OnDemandBudgetMs(double sourceHz) const
+	{
+		std::lock_guard<std::mutex> lock(onDemandMutex_);
+		return onDemandBudget_.BudgetMs(sourceHz);
+	}
+
+	bool VectorEngine::OnDemandConsumerActive()
+	{
+		std::lock_guard<std::mutex> lock(onDemandMutex_);
+		const bool active = onDemandCycles_ - onDemandConsumerCycle_ <= kConsumerIdleCycles;
+		if (!active)
+			++onDemand_.idleSkips;
+		return active;
+	}
+
+	void VectorEngine::IssueOnDemand(OnDemand::PairRequest request)
+	{
+		OnDemand::PairFuture replaced;
+		const uint64_t from = request.from, to = request.to;
+		const double budgetMs = request.budgetMs;
+		{
+			std::lock_guard<std::mutex> lock(onDemandMutex_);
+			if (onDemandPending_.active)
+			{
+				replaced = onDemandPending_.future;
+				++onDemand_.unclaimed;
+			}
+			onDemandPending_ = OnDemandPendingRequest();
+			++onDemand_.issued;
+			onDemand_.budgetMs = budgetMs;
+		}
+		if (replaced.Valid())
+			replaced.Abandon();   // the worker skips it before any GPU work when it has not taken it yet
+		const auto issued = OnDemand::Clock::now();
+		OnDemand::PairFuture future = RequestPair(std::move(request));   // outside onDemandMutex_ (RequestPair takes it)
+		std::lock_guard<std::mutex> lock(onDemandMutex_);
+		onDemandPending_.active = true;
+		onDemandPending_.from = from;
+		onDemandPending_.to = to;
+		onDemandPending_.future = std::move(future);
+		onDemandPending_.issued = issued;
+		onDemandPending_.budgetMs = budgetMs;
+	}
+
+	MotionAhead::FlowPtr VectorEngine::OnDemandFill(MotionAhead::FlowPtr ahead, uint64_t from, uint64_t to, bool allowed,
+		FallbackCatalog::NoPairCause& cause)
+	{
+		using FallbackCatalog::NoPairCause;
+		cause = NoPairCause::None;
+		OnDemand::PairFuture future;
+		bool match = false;
+		double leftMs = 0.0;
+		{
+			std::lock_guard<std::mutex> lock(onDemandMutex_);
+			onDemandConsumerCycle_ = onDemandCycles_;
+			onDemandLast_.from = from;
+			onDemandLast_.to = to;
+			onDemandLast_.served = false;
+			onDemandLast_.cause = NoPairCause::None;
+			if (onDemandPending_.active)
+			{
+				match = onDemandPending_.from == from && onDemandPending_.to == to;
+				if (match || onDemandPending_.to <= to)   // this pair's request, or one for an older pair: claimed / dropped now
+				{
+					future = onDemandPending_.future;
+					leftMs = onDemandPending_.budgetMs - OnDemand::MsBetween(onDemandPending_.issued, OnDemand::Clock::now());
+					if (!match || ahead || !allowed)
+						++(match && ahead ? onDemand_.aheadCovered : onDemand_.unclaimed);
+					onDemandPending_ = OnDemandPendingRequest();
+				}
+				// else: a request for a LATER pair (the dequeue ran ahead of this estimate) stays pending
+			}
+		}
+		if (ahead || !match || !allowed)
+		{
+			if (future.Valid())
+				future.Abandon();
+			return ahead;
+		}
+		const auto start = OnDemand::Clock::now();
+		MotionAhead::FlowPtr flow = AwaitPair(future, leftMs, cause);
+		const double waited = OnDemand::MsBetween(start, OnDemand::Clock::now());
+		unsigned long long late = 0;
+		{
+			std::lock_guard<std::mutex> lock(onDemandMutex_);
+			onDemandCycleWaitMs_ += waited;
+			onDemandLast_.served = flow != nullptr;
+			onDemandLast_.cause = cause;
+			late = onDemand_.late;
+		}
+		// Visible, never silent: the matcher stands in (the no-pair cause reaches Ctrl+I / Config status); the log names it.
+		if (cause == NoPairCause::OnDemandLate && (late == 1 || late % 10 == 0))
+			DebugLog::Log("Motion on demand: pair %llu -> %llu not ready within the frame budget (%.2f ms left of the deadline); "
+				"the block searches ran; %llu late", static_cast<unsigned long long>(from), static_cast<unsigned long long>(to),
+				leftMs, late);
+		return flow;
+	}
+
+	bool VectorEngine::OnDemandServed(uint64_t from, uint64_t to) const
+	{
+		std::lock_guard<std::mutex> lock(onDemandMutex_);
+		return onDemandLast_.served && onDemandLast_.from == from && onDemandLast_.to == to;
+	}
+
+	FallbackCatalog::NoPairCause VectorEngine::OnDemandLastCause() const
+	{
+		std::lock_guard<std::mutex> lock(onDemandMutex_);
+		return onDemandLast_.cause;
+	}
+
+	void VectorEngine::NoteOnDemandGapServed()
+	{
+		std::lock_guard<std::mutex> lock(onDemandMutex_);
+		++onDemand_.gapServed;
 	}
 }

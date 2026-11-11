@@ -35,6 +35,7 @@
 //                                dejudder_verify_share general_rate_fixes motion_ahead_frames motion_engine
 //                                motion_history_fixes optical_flow optical_flow_cost_trust
 //                                optical_flow_fb_check optical_flow_global optical_flow_global_fallback
+//                                optical_flow_on_demand
 //                                vector_demand dejudder_even_rates dejudder_strength dejudder_strength_even
 //                                occlusion_mask timing_continuity_fixes
 //   rebase    kSettingsRebase    modules/scaling/rebase: source_resolution rebase_kernel_match
@@ -86,7 +87,7 @@ public:
             "dejudder_search_range", "dejudder_texture_tolerance", "dejudder_vector_smooth", "dejudder_verify",
             "dejudder_verify_share", "general_rate_fixes", "motion_ahead_frames", "motion_engine",
             "motion_history_fixes", "optical_flow", "optical_flow_cost_trust", "optical_flow_fb_check",
-            "optical_flow_global", "optical_flow_global_fallback", "vector_demand", "dejudder_even_rates",
+            "optical_flow_global", "optical_flow_global_fallback", "optical_flow_on_demand", "vector_demand", "dejudder_even_rates",
             "dejudder_strength", "dejudder_strength_even", "occlusion_mask", "timing_continuity_fixes" };
         static const char* const rebase[] = { "source_resolution", "rebase_kernel_match", "entrance_gpu_drain" };
         static const char* const analysis[] = {

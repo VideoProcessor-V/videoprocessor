@@ -323,6 +323,15 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			VpMotion::MotionRecord::EstimatePair(vectorEngine, vectorDemand, aSequence, bSequence, flow ? flow->global[0] : nullptr,
 				searchHalvings, pictureHeight, statisticsHost);
 		}
+		// W2-C5b: a pair not computed ahead is filled from the request the dequeue issued (OnDemandIssue.h), within the frame
+		// budget; adjacent pairs only where the vectors-valid state accepts them, gap pairs only across a plain gap.
+		{
+			const bool onDemandAllowed = bSequence > aSequence + 1 ? motionValidity.LastCause() == MotionValidity::Cause::Gap :
+				motionValidity.PairValid(aSequence, bSequence, motionValidity.EpochOfLastKept(), motionValidity.Epoch()) &&
+				motionValidity.PairValidAt(aSequence, bSequence);
+			FallbackCatalog::NoPairCause onDemandCause = FallbackCatalog::NoPairCause::None;
+			flow = vectorEngine.OnDemandFill(std::move(flow), aSequence, bSequence, onDemandAllowed, onDemandCause);
+		}
 		if (flow)
 		{
 			// Hiccup gap seed: remember this shared pair's whole-frame motion (a copy of 8 floats, no standing cost).
@@ -336,7 +345,9 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		vectorEngine.P2().Prune(aSequence);
 	}
 	bool gapSeedHanded = false;   // a valid seed was given to the matcher: counted "seeded" only if its D1 actually started from it (SearchSeedUsed)
-	if (!motionEngineWarming && bSequence > aSequence + 1)
+	if (!motionEngineWarming && bSequence > aSequence + 1 && vectorEngine.OnDemandServed(aSequence, bSequence))
+		vectorEngine.NoteOnDemandGapServed();   // W2-C5b: the gap pair itself was computed on demand (no seed needed)
+	else if (!motionEngineWarming && bSequence > aSequence + 1)
 	{
 		// A fill pair across a gap (hiccup repair): start D1 from the last valid shared pair when the state moved only for this gap; else the
 		// estimate runs unseeded exactly as before (GapSeed::Make says why).
@@ -459,6 +470,8 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			}
 			else if (dejudder->PairSizeMismatch())
 				noPairCause = FallbackCatalog::NoPairCause::SizeMismatch;
+			else if (vectorEngine.OnDemandLastCause() != FallbackCatalog::NoPairCause::None)
+				noPairCause = vectorEngine.OnDemandLastCause();   // W2-C5b: asked on demand; late / unavailable / no budget
 			else
 				noPairCause = FallbackCatalog::NoPairCause::Missing;
 		}

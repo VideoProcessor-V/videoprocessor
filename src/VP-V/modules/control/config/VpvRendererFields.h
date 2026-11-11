@@ -181,6 +181,7 @@ namespace VpvRenderer
 		// corpus 2026-10-17: no measured benefit on real clips (cost trust identical; fb check trades removal for damage) - off by default, owner gate
 		bool opticalFlowCostTrust = false;
 		bool opticalFlowFbCheck = false;
+		std::string opticalFlowOnDemand = "auto";   // optical_flow_on_demand (W2-C5b): auto | on | off
 		// VP's 50/60p frame interpolation (docs/VP-interpolator-50-60-plan.md; owner
 		// defaults 2026-10-16, open for confirmation): off | auto (a non-integer
 		// source/display ratio only) | always (smooth-motion parity for video-class

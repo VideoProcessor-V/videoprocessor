@@ -210,6 +210,7 @@ inline void VpvDumpRendererSettings(const RendererSettings& s, std::ostream& o)
 	Put(o, "opticalFlowGlobalFallback", s.opticalFlowGlobalFallback);
 	Put(o, "opticalFlowCostTrust", s.opticalFlowCostTrust);
 	Put(o, "opticalFlowFbCheck", s.opticalFlowFbCheck);
+	Put(o, "opticalFlowOnDemand", s.opticalFlowOnDemand);
 	Put(o, "interpolation", s.interpolation);
 	Put(o, "interpolationFallback", s.interpolationFallback);
 	Put(o, "interpolationFillGaps", s.interpolationFillGaps);

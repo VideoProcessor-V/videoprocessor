@@ -21,6 +21,7 @@
 #include <string>
 
 #include <atomic>
+#include <limits>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -105,6 +106,49 @@ namespace VideoProcessorTest
 				return !(failRequests && failRequests->load());
 			};
 			return seam;
+		}
+
+		// Commit 4: a fake host for the dequeue hook (MotionAhead::IssueOnDemandAtDequeue).
+		struct FakeSource
+		{
+			bool valid = true;
+			bool IsValid() const { return valid; }
+			operator AnalysisLumaSource() const { return AnalysisLumaSource(); }
+		};
+		struct FakePrepared { FakeSource source; };
+		struct FakeState { bool dolbyVisionTunnel = false; };
+		struct FakeIdentity { uint64_t sourceFormatGeneration = 0; };
+		struct FakeQueued
+		{
+			int frame = 0;
+			std::shared_ptr<FakeState> state = std::make_shared<FakeState>();
+			int converted = 0, analysis = 0;
+			FakeIdentity activePictureIdentity;
+			uint64_t sourceSequence = 0;
+		};
+		struct FakeSettings { std::string opticalFlowOnDemand = "auto"; };
+		struct FakeHost
+		{
+			VpMotion::VectorEngine vectorEngine;
+			std::shared_ptr<MotionAhead::Producer>& motionProducer = vectorEngine.motionProducer;
+			MotionValidity::State& motionValidity = vectorEngine.motionValidity;
+			FakeSettings activeSettings;
+			std::atomic<bool> lowLatencyQueueActive{ false };
+			static bool prepareValid;
+			static FakePrepared PrepareFrameAnalysis(int, const FakeState&, int, int, int, uint64_t, bool, bool)
+			{
+				FakePrepared p;
+				p.source.valid = prepareValid;
+				return p;
+			}
+		};
+		bool FakeHost::prepareValid = true;
+		void Dequeue(FakeHost& host, uint64_t from, uint64_t to)
+		{
+			FakeQueued next;
+			next.sourceSequence = to;
+			const std::shared_ptr<FakeState> state = std::make_shared<FakeState>();
+			MotionAhead::IssueOnDemandAtDequeue(&host, 0, state, 0, 0, 0, uint64_t(0), from, next, 1.0, 1.0);   // 1 Hz: a deadline of ~0.9 s (no timing flake)
 		}
 
 		// Waits until the worker has run `n` seam calls (bounded).
@@ -443,7 +487,7 @@ namespace VideoProcessorTest
 		// Audit MUST 2: at most kMaxRequestStreak requests in a row while a job waits; dropped jobs are counted.
 		TEST_METHOD(AStreakOfRequestsLetsAWaitingLookAheadJobRun)
 		{
-			Assert::AreEqual(2, MotionAhead::Producer::kMaxRequestStreak, L"the order below assumes a streak of two");
+			Assert::AreEqual(2, static_cast<int>(MotionAhead::Producer::kMaxRequestStreak), L"the order below assumes a streak of two");
 			MotionAhead::Producer producer;
 			Trace trace;
 			Gate gate;
@@ -495,6 +539,45 @@ namespace VideoProcessorTest
 			producer.Stop();
 			Assert::AreEqual(1ull, producer.GetStats().dropped);
 			Assert::AreEqual(1ull, producer.GetRequestStats().droppedBehindRequests);
+		}
+
+		// Re-check S1: a late job of an older generation never wipes a pair a no-walk request published under a newer one.
+		TEST_METHOD(AnOlderGenerationJobAfterARequestStartedANewOneIsSkipped)
+		{
+			MotionAhead::Producer producer;
+			Trace trace;
+			Assert::IsTrue(producer.StartForTest(Seam(trace)));
+			PairFuture f = producer.Request(Pair(5, 6, 3));
+			Assert::IsTrue(f.WaitFor(5000.0) && f.Get().status == Status::Ready);
+			AnalysisLumaSource luma;
+			producer.Submit(2, 2, luma);   // a job of generation 2 arriving late
+			producer.Submit(7, 3, luma);   // the stream's generation 3 continues
+			Assert::IsTrue(WaitCalls(trace, 2));
+			producer.Stop();
+			const std::vector<long long> order = trace.Order();
+			Assert::AreEqual(size_t(2), order.size(), L"the older job did no work");
+			Assert::AreEqual(7ll, order[1]);
+			Assert::IsTrue(producer.Take(5, 6) != nullptr, L"the request's pair survives");
+			Assert::AreEqual(1ull, producer.GetRequestStats().staleJobs);
+		}
+
+		// Re-check S3: drops after a request finished (the worker idle in between) are not counted as behind requests.
+		TEST_METHOD(DropsAfterAServedRequestAreNotCountedAsBehindRequests)
+		{
+			MotionAhead::Producer producer;
+			Trace trace;
+			Gate gate;
+			Assert::IsTrue(producer.StartForTest(Seam(trace, &gate, 1)));
+			PairFuture f = producer.Request(Pair(10, 11));
+			Assert::IsTrue(f.WaitFor(5000.0) && f.Get().status == Status::Ready);
+			AnalysisLumaSource luma;
+			producer.Submit(1, 1, luma);
+			Assert::IsTrue(gate.WaitEntered());
+			for (uint64_t s = 2; s <= 8; ++s) producer.Submit(s, 1, luma);   // one more than the default bound of 6
+			gate.Open();
+			producer.Stop();
+			Assert::AreEqual(1ull, producer.GetStats().dropped);
+			Assert::AreEqual(0ull, producer.GetRequestStats().droppedBehindRequests);
 		}
 
 		// Audit SHOULD 4: a walk pair lost because an Adopt moved the chain past the walk is counted.
@@ -618,6 +701,117 @@ namespace VideoProcessorTest
 		// W2-C5b commit 2 (hardware, NVIDIA): a request's Flow is byte-equal to the look-ahead job's for the same pair - Adopt, Chain
 		// and OffChain alike - and all of it runs on the ONE engine session (NvOpticalFlow::Sessions: one Engine, no violation). The
 		// off-chain textures are declared (VramUsers) only once an off-chain request was served.
+		// Commit 4: the deadline is the source period minus the MEASURED render time (never a fixed number of ms).
+		TEST_METHOD(TheBudgetIsTheSourcePeriodMinusTheMeasuredRenderTime)
+		{
+			RenderBudget b;
+			Assert::AreEqual(0.0, b.BudgetMs(0.0), L"an unknown rate gives no budget");
+			Assert::AreEqual(500.0 / 60.0, b.BudgetMs(60.0), 1e-9, L"half the period until measured");
+			b.Note(-1.0);
+			b.Note(std::numeric_limits<double>::quiet_NaN());
+			Assert::IsFalse(b.Measured(), L"negative and NaN samples are ignored");
+			b.Note(10.0);
+			Assert::AreEqual(1000.0 / 60.0 - 10.0 - 100.0 / 60.0, b.BudgetMs(60.0), 1e-9);
+			b.Note(20.0);
+			Assert::AreEqual(11.25, b.RenderMs(), 1e-9, L"an EWMA of one eighth per sample");
+			Assert::AreEqual(1000.0 / 30.0 - 11.25 - 100.0 / 30.0, b.BudgetMs(30.0), 1e-9, L"the period of the pair's rate");
+			for (int i = 0; i < 100; ++i) b.Note(40.0);
+			Assert::AreEqual(0.0, b.BudgetMs(60.0), L"never below zero: no budget, not issued");
+			b.Reset();
+			Assert::IsFalse(b.Measured());
+			double r = -1.0;
+			Assert::IsTrue(RenderSample(16.0, 2.0, 3.0, 60.0, r));
+			Assert::AreEqual(11.0, r, 1e-9, L"the interval minus the dequeue wait and the on-demand wait");
+			Assert::IsTrue(RenderSample(5.0, 4.0, 3.0, 60.0, r));
+			Assert::AreEqual(0.0, r, L"clamped at zero");
+			Assert::IsFalse(RenderSample(34.0, 0.0, 0.0, 60.0, r), L"more than two periods: a stall, no sample");
+			Assert::IsFalse(RenderSample(16.0, 0.0, 0.0, 0.0, r), L"an unknown rate");
+			Assert::IsFalse(RenderSample(0.0, 0.0, 0.0, 60.0, r));
+		}
+
+		// Commit 4: the DEFAULT keeps today's behaviour on the low-latency path (owner decision pending, answer 4).
+		TEST_METHOD(TheSettingDefaultsToAutoWhichIsOffInLowLatency)
+		{
+			Assert::IsTrue(SettingOf("auto") == Setting::Auto);
+			Assert::IsTrue(SettingOf("bogus") == Setting::Auto);
+			Assert::IsTrue(SettingOf("on") == Setting::On);
+			Assert::IsTrue(SettingOf("off") == Setting::Off);
+			Assert::IsTrue(Wanted(Setting::Auto, false));
+			Assert::IsFalse(Wanted(Setting::Auto, true), L"auto: not on the low-latency path");
+			Assert::IsTrue(Wanted(Setting::On, true));
+			Assert::IsFalse(Wanted(Setting::Off, false));
+			Assert::AreEqual(std::string("auto"), std::string(SettingName(Setting::Auto)));
+		}
+
+		// Commit 4: the estimate's fill claims only its own pair; others are abandoned (counted) or kept (a later pair).
+		TEST_METHOD(TheFillClaimsOnlyItsOwnPairAndCountsTheRest)
+		{
+			using FallbackCatalog::NoPairCause;
+			VpMotion::VectorEngine engine;   // no producer: every request answers Unavailable at once
+			NoPairCause cause = NoPairCause::None;
+			engine.IssueOnDemand(Pair(5, 6));
+			Assert::IsTrue(engine.OnDemandFill(nullptr, 5, 6, true, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::OnDemandUnavailable);
+			Assert::IsTrue(engine.OnDemandLastCause() == NoPairCause::OnDemandUnavailable, L"reaches the no-pair cause");
+			Assert::IsFalse(engine.OnDemandServed(5, 6));
+			engine.IssueOnDemand(Pair(7, 8));
+			Assert::IsTrue(engine.OnDemandFill(nullptr, 6, 7, true, cause) == nullptr);
+			Assert::IsTrue(cause == NoPairCause::None, L"nothing asked for 6 -> 7");
+			MotionAhead::FlowPtr ahead = std::make_shared<MotionAhead::Flow>();
+			Assert::IsTrue(engine.OnDemandFill(ahead, 7, 8, true, cause) == ahead, L"the later request was kept; computed ahead wins");
+			engine.IssueOnDemand(Pair(9, 10));
+			engine.IssueOnDemand(Pair(10, 11));   // replaces 9 -> 10 unclaimed
+			Assert::IsTrue(engine.OnDemandFill(nullptr, 10, 11, false, cause) == nullptr, L"refused by the vectors-valid state");
+			Assert::IsTrue(cause == NoPairCause::None);
+			const VpMotion::VectorEngine::OnDemandCounters c = engine.OnDemandReads();
+			Assert::AreEqual(4ull, c.issued);
+			Assert::AreEqual(1ull, c.aheadCovered);
+			Assert::AreEqual(2ull, c.unclaimed);
+			Assert::AreEqual(1ull, c.unavailable, L"only the claimed one was awaited");
+		}
+
+		// Commit 4: the dequeue hook issues the selected pair through the producer, and the fill serves it.
+		TEST_METHOD(TheDequeueHookIssuesTheSelectedPairAndTheFillServesIt)
+		{
+			using FallbackCatalog::NoPairCause;
+			FakeHost host;
+			FakeHost::prepareValid = true;
+			Dequeue(host, 5, 6);   // no producer: the cycle counts, nothing is issued
+			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued);
+			Trace trace;
+			auto producer = std::make_shared<MotionAhead::Producer>();
+			Assert::IsTrue(producer->StartForTest(Seam(trace)));
+			host.vectorEngine.PublishProducer(producer);
+			host.lowLatencyQueueActive = true;
+			Dequeue(host, 5, 6);
+			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued, L"auto: off in low latency (the default)");
+			host.activeSettings.opticalFlowOnDemand = "off";
+			host.lowLatencyQueueActive = false;
+			Dequeue(host, 5, 6);
+			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued, L"off: never asked");
+			host.activeSettings.opticalFlowOnDemand = "auto";
+			FakeHost::prepareValid = false;
+			Dequeue(host, 5, 6);
+			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued, L"a frame not ready yet");
+			FakeHost::prepareValid = true;
+			Dequeue(host, 6, 6);
+			Assert::AreEqual(0ull, host.vectorEngine.OnDemandReads().issued, L"not a pair");
+			Dequeue(host, 5, 7);   // a gap pair the walk never computes
+			Assert::AreEqual(1ull, host.vectorEngine.OnDemandReads().issued);
+			NoPairCause cause = NoPairCause::OnDemandLate;
+			MotionAhead::FlowPtr flow = host.vectorEngine.OnDemandFill(nullptr, 5, 7, true, cause);
+			Assert::IsTrue(flow != nullptr && flow->halfW == 7, L"served on the producer's session");
+			Assert::IsTrue(cause == NoPairCause::None);
+			Assert::IsTrue(host.vectorEngine.OnDemandServed(5, 7));
+			for (int i = 0; i < 6; ++i) host.vectorEngine.NoteOnDemandCycle(60.0, 0.0);   // no estimate reads a pair
+			Dequeue(host, 8, 10);
+			const VpMotion::VectorEngine::OnDemandCounters c = host.vectorEngine.OnDemandReads();
+			Assert::AreEqual(1ull, c.issued, L"no consumer: no request");
+			Assert::AreEqual(1ull, c.idleSkips);
+			Assert::AreEqual(1ull, c.served);
+			producer->Stop();
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(RequestFlowsMatchTheLookAheadFlowsOnTheOneSession)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()

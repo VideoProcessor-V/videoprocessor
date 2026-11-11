@@ -35,6 +35,7 @@ namespace VpMotion
 			bool retryDue = false;                 // ... unless its back-off is due (W2-C1; false = the old decision)
 			bool backoffActive = false;            // W2-C1: a failed start's back-off still runs: no start, latch or not (false = the old decision)
 			bool gpuAvailable = false;             // the device the engine needs exists
+			bool onDemandWanted = false;           // W2-C5b: optical_flow_on_demand=on (render-time pairs; depth stays 0 in low latency)
 		};
 
 		struct LifecycleOutput
@@ -51,7 +52,8 @@ namespace VpMotion
 			LifecycleOutput out;
 			const bool vectorProducer = in.vectorProducer && in.opticalFlow && in.motionAheadFrames > 0 &&
 				(!in.lowLatency || in.vectorLowLatencyAllowed);
-			out.wanted = (in.dejudderPresent && in.opticalFlow && in.motionAheadFrames > 0 && !in.lowLatency) || vectorProducer;
+			out.wanted = (in.dejudderPresent && in.opticalFlow && in.motionAheadFrames > 0 && !in.lowLatency) || vectorProducer ||
+				(in.onDemandWanted && in.dejudderPresent && in.opticalFlow);
 			if (out.wanted && !in.producerExists && (!in.startFailedLatched || in.retryDue) && !in.backoffActive && in.gpuAvailable)
 				out.action = Action::Start;
 			else if (!out.wanted)

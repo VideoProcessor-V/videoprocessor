@@ -211,6 +211,7 @@ namespace MotionAhead
 		sizeW = sizeH = 0;
 		consecutiveFailures = 0;
 		requestStreak = 0;           // W2-C5b
+		requestRunning = requestOwnsGeneration = false;
 		lastJobMs = 0;
 		adoptOverWalk = requestResetHints = false;
 		recovery = ProducerRecovery();
@@ -331,7 +332,7 @@ namespace MotionAhead
 			{
 				jobs.pop_front();
 				++stats.dropped;
-				if (!requests.Empty() || requestStreak > 0)   // W2-C5b: dropped while requests were served - never silent
+				if (!requests.Empty() || requestRunning)   // W2-C5b: dropped while requests were served - never silent
 				{
 					const unsigned long long n = ++requestStats.droppedBehindRequests;
 					if (n == 1 || n % 10 == 0)
@@ -360,6 +361,7 @@ namespace MotionAhead
 				{
 					isRequest = requests.Pop(request);
 					++requestStreak;
+					requestRunning = isRequest;
 				}
 				if (!isRequest)
 				{
@@ -383,6 +385,7 @@ namespace MotionAhead
 				Answer(request, failed);
 			}
 			std::unique_lock<std::mutex> lock(mutex);
+			requestRunning = false;
 			if (ok)
 			{
 				if (engineRan)
@@ -492,6 +495,14 @@ namespace MotionAhead
 		if (!EnsureSize(halfW, halfH)) return false;
 		ReleaseStaleRequestTextures(halfW, halfH);   // W2-C5b
 		// A new continuity generation clears the P2 slot and the chain.
+		// Re-check S1: never back below a generation a no-walk request already started (it would wipe the request's pair).
+		if (requestOwnsGeneration && job.generation < slot->Generation())
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			++requestStats.staleJobs;
+			return true;
+		}
+		requestOwnsGeneration = false;
 		if (slot->Generation() != job.generation)
 		{
 			slot->SetGeneration(job.generation);
@@ -799,6 +810,7 @@ namespace MotionAhead
 		{
 			slot->SetGeneration(rq.generation);
 			havePrevious = false;
+			requestOwnsGeneration = true;
 		}
 		OnDemand::ChainState chain;
 		chain.havePrevious = havePrevious;
@@ -946,6 +958,7 @@ namespace MotionAhead
 		sizeW = sizeH = 0;
 		consecutiveFailures = 0;
 		requestStreak = 0;
+		requestRunning = requestOwnsGeneration = false;
 		lastJobMs = 0;
 		adoptOverWalk = requestResetHints = false;
 		recovery = ProducerRecovery();
@@ -960,6 +973,14 @@ namespace MotionAhead
 	bool Producer::ProcessJobForTest(const Job& job)
 	{
 		// Process's chain bookkeeping without a device (the seam's engine stands in for the GPU work).
+		// Re-check S1: never back below a generation a no-walk request already started (it would wipe the request's pair).
+		if (requestOwnsGeneration && job.generation < slot->Generation())
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			++requestStats.staleJobs;
+			return true;
+		}
+		requestOwnsGeneration = false;
 		if (slot->Generation() != job.generation)
 		{
 			slot->SetGeneration(job.generation);
