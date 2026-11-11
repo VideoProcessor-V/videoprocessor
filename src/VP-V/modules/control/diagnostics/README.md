@@ -4,7 +4,7 @@ Unit: **control** | side: control | order: 920 | status: **partial** | hook poin
 
 ## Purpose / why
 
-One "Fallbacks engaged: (list)" heading in the Ctrl+I overlay, the Config status and the problem report (Ctrl+Alt+D); the crash state ring (a rolling state file, kept as "crash state (N)" after an unclean exit, at most 10); the report-a-problem bundle. Logging itself (`DebugLog`) stays in src/VideoProcessor-Lib.
+One "Fallbacks engaged: (list)" heading in the Ctrl+I overlay, the Config status and the problem report (Ctrl+Alt+D), read through ONE status reader (`StatusExtension`, W1-C14); the crash state ring (a rolling state file, kept as "crash state (N)" after an unclean exit, at most 10); the report-a-problem bundle. Logging itself (`DebugLog`) stays in src/VideoProcessor-Lib.
 
 ## Contract
 
@@ -66,6 +66,19 @@ One adapter (namespace `VpDiagnostics`, header-only, C++14) so the host files (B
 
 Every row, line and sidecar fragment is byte-identical to the host code it replaced (`DiagnosticsAdapterTests`). Stays in the host for now: the `Render-ahead:` line (`LogRenderAhead`, ~30 render-ahead state fields; it moves with the render-ahead state in WP-7) and the one-line `RecordDecision` calls. Stays Bill's: the rendered-output capture itself, the subtitle capture (`VP_SUBTITLE_CAPTURE_PATH`), the analysis/local-boundary/crop/black-level traces (`VP_*_TRACE*`, `VP_LOCAL_BOUNDARY_TRACE`, ...).
 
+### Status reader (W1-C14: `StatusExtension.h/.cpp`)
+
+The ONE reader of VP's status lines for the GUI, the Config status heading, Ctrl+I, the crash-state keys and the Ctrl+Alt+D bundle (namespace `StatusExtension`, pure C++14, `wchar_t` text as the renderer's `vp` module publishes it; no Windows, no MFC). It applies the `VpStatusText` builders (src/VP-V/core/StatusText.h) and owns no wording of its own, so every row, key and value is byte-identical to what the adapter composed before.
+
+- `Read(rendererPresent, answered, moduleText)` -> `Snapshot` (the parsed `RendererLines`; every line unknown without a renderer or an answer).
+- `FallbacksHeading(snapshot, narrow)`: the heading for the one-time notices and the Config status ("" = unknown).
+- `CtrlIRows(snapshot, DialogTexts, isAlphaRenderer)`: VP's rows for the overlay's two extension points.
+- `CrashState(snapshot, HostLines, DialogTexts, narrow)` and `Bundle(snapshot, HostLines, narrow)`: the (key, value) pairs in the old order.
+
+`src/VP-V/gui/VpStatusAdapter.h` is a thin client: it polls the renderer and the dialog's getters, converts `CString` <-> `std::wstring`, and calls this reader; its public functions and the dialog's call sites are unchanged. Not moved yet (Bill's files, zero hunks in C14): the Config shell heading and the dialog heading, which move onto this reader with their own packages (P9 f, P12 j), and the overlay's own text drawing. Follow-on: P11a (source-identity lines) reads through the same `Snapshot`.
+
+Cost: the reader runs once per stats refresh, as the adapter did (one parse of the module text, a handful of string copies); engine off = nothing extra.
+
 ### Fallbacks engaged (live elsewhere: `src/VP-V/core/FallbackStatus.h`)
 
 Header-only, pure. `FallbackStatus::Registry` (thread-safe: `Engage`, `Release`, `Engaged`, `Entries`, `Heading`, `Clear`); `Format` gives "Fallbacks engaged: a (why); b (why)" or "Fallbacks engaged: none"; `Ids` parses a heading; `Notices::Take` returns the ids not yet announced this session. The renderer publishes `Heading()` through `IVideoRenderer::GetFallbacksStatus`. The GUI polls it with the crash-state lines (`UpdateFallbacksStatus`), shows it in the Ctrl+I overlay (StatsOverlayWindow.cpp), re-publishes the Config status, adds it to the report's live settings, and shows one transient notice per new id (or a status line "Fallback engaged: <id>" when the overlay is switched off).
@@ -101,7 +114,7 @@ This slot has no fallback of its own. It owns the heading format and the once-pe
 
 ### Test it standalone
 
-Classes in VideoProcessor-Test.dll: `DiagnosticsAdapterTests` (this folder's tests/: byte identity of every adapter row, line and sidecar fragment against copies of the old host code; report-run gates), `DiagnosticHistoryTests`, `DvRawCorpusTests` (raw capture record/replay), `CrashStateTests`, `StateReportTests`, `StateReportSettingsTests`, `StoreZipWriterTests`, `FallbacksEngagedTests` (R6BaselineTests.cpp), `BugHunt3ShutdownTests` (`CrashStateFilesArePerInstance`, `SessionEndRestoresTheLightTopologyAndCrashState`), `ShortcutDefaultsTests` (the `state_report` default). None needs a GPU; they write only to `%TEMP%`. Run single-threaded:
+Classes in VideoProcessor-Test.dll: `StatusExtensionTests` (this folder's tests/: the status reader against the `VpStatusText` builders; the byte-identity gate for the adapter is `VpStatusAdapterTests` + `StatusTextTests`), `DiagnosticsAdapterTests` (this folder's tests/: byte identity of every adapter row, line and sidecar fragment against copies of the old host code; report-run gates), `DiagnosticHistoryTests`, `DvRawCorpusTests` (raw capture record/replay), `CrashStateTests`, `StateReportTests`, `StateReportSettingsTests`, `StoreZipWriterTests`, `FallbacksEngagedTests` (R6BaselineTests.cpp), `BugHunt3ShutdownTests` (`CrashStateFilesArePerInstance`, `SessionEndRestoresTheLightTopologyAndCrashState`), `ShortcutDefaultsTests` (the `state_report` default). None needs a GPU; they write only to `%TEMP%`. Run single-threaded:
 
 `vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~DiagnosticsAdapterTests|FullyQualifiedName~DiagnosticHistoryTests|FullyQualifiedName~DvRawCorpusTests|FullyQualifiedName~CrashStateTests|FullyQualifiedName~StateReport|FullyQualifiedName~StoreZipWriterTests|FullyQualifiedName~FallbacksEngagedTests" /Logger:"trx;LogFileName=diagnostics.trx"`
 
@@ -129,6 +142,7 @@ Cost when off: the crash state has no switch, so item 1 always runs. The report 
 ## Settings
 
 - Existing keys: `[shortcuts] state_report`, `[shortcuts] raw_capture`, `[logging] auto_report`, `[logging] report_thumbnail` (slots.json `settings_keys`, manifest `config_keys`: corrected in WP-17; they were empty)
+- The status reader (W1-C14) adds no key and has no switch: it only reads the lines the renderer already publishes
 - Planned keys: (none)
 - Tiers: n/a
 
@@ -150,7 +164,7 @@ Placeholder tests:
 - (none yet)
 
 Isolation tests:
-- `DiagnosticsAdapterTests`, `DiagnosticHistoryTests`, `DvRawCorpusTests`, `FallbacksEngagedTests` (FallbackStatus), `CrashStateTests`, `StateReportTests`, `StateReportSettingsTests`, `StoreZipWriterTests`
+- `StatusExtensionTests`, `DiagnosticsAdapterTests`, `DiagnosticHistoryTests`, `DvRawCorpusTests`, `FallbacksEngagedTests` (FallbackStatus), `CrashStateTests`, `StateReportTests`, `StateReportSettingsTests`, `StoreZipWriterTests`
 
 Contract tests:
 - every slot's fallback entry reaches the overlay, Config status and Ctrl+Alt+D (planned; no test yet)
@@ -187,6 +201,8 @@ Forwarding headers (WP-17; removed in M2 step 0 with their includers): `src/Vide
 - `src/VP-V/modules/control/diagnostics/RawCaptureCorpus.h`
 - `src/VP-V/modules/control/diagnostics/DiagnosticsAdapter.h`
 - `src/VP-V/modules/control/diagnostics/DiagnosticsReportRun.h`
+- `src/VP-V/modules/control/diagnostics/StatusExtension.h`
+- `src/VP-V/modules/control/diagnostics/StatusExtension.cpp`
 - `src/VP-V/core/SlotTiming.h`
 - `src/VP-V/core/FallbackStatus.h`
 - `src/VideoProcessor-GUI/StatsOverlayWindow.cpp`

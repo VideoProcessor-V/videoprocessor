@@ -702,6 +702,9 @@
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\control\diagnostics\tests\VpEventLineTests.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\tests\FrameStampTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\control\diagnostics\tests\StatusExtensionTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\tests\FallbackPlainTextTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

@@ -5,6 +5,11 @@
 // site; the wording and order live in src/VP-V/core/StatusText.h (CPU-tested), the renderer's VP
 // lines arrive through the vpv.modules.v1 extension interface (Status, module "vp"; src/VP-V/abi).
 //
+// W1-C14: this file is a THIN CLIENT of the one status reader,
+// src/VP-V/modules/control/diagnostics/StatusExtension.h. It only polls the renderer and the
+// dialog's getters and converts CString <-> std::wstring; reading and composing the lines
+// (fallbacks heading, Ctrl+I rows, crash-state keys, bundle lines) happens in the extension.
+//
 // Windows/MFC side (CString, IVideoRenderer); header-only so it needs no project registration
 // beyond the includer. Every function reproduces the old dialog code's text byte for byte
 // (src/VP-V/tests/VpStatusAdapterTests.cpp compares it with verbatim copies of that code).
@@ -12,6 +17,7 @@
 #include <IRenderer.h>
 #include <IntentInterpreterSupport.h>
 #include <VP-V/modules/control/diagnostics/RawCaptureRecorder.h>
+#include <VP-V/modules/control/diagnostics/StatusExtension.h>
 #include <VP-V/abi/VpvHostCalls.h>
 #include <VP-V/core/StatusText.h>
 #include <VP-V/gui/VpShortcuts.h>
@@ -31,27 +37,20 @@ namespace VpvGui
 	inline std::string Narrow(const std::wstring& text) { return std::string(CStringA(text.c_str()).GetString()); }
 
 	// One poll of the renderer's VP module: what the old GetDejudderStatus / GetFallbacksStatus /
-	// GetLedDriveStatus / GetSourceResolutionStatus calls returned.
-	struct Snapshot
-	{
-		bool rendererPresent = false;
-		VpStatusText::RendererLines<wchar_t> vp;
-	};
+	// GetLedDriveStatus / GetSourceResolutionStatus calls returned (StatusExtension::Snapshot).
+	using Snapshot = StatusExtension::Snapshot;
 
 	inline Snapshot Poll(IVideoRenderer* renderer)
 	{
-		Snapshot snapshot;
-		snapshot.rendererPresent = renderer != nullptr;
 		CString text;
-		if (renderer && VpvCalls::GetModuleStatus(renderer, VpStatusText::kRendererModule, text))
-			snapshot.vp = VpStatusText::ReadRendererModule(Wide(text));
-		return snapshot;
+		const bool answered = renderer && VpvCalls::GetModuleStatus(renderer, VpStatusText::kRendererModule, text);
+		return StatusExtension::Read(renderer != nullptr, answered, answered ? Wide(text) : std::wstring());
 	}
 
 	// The "Fallbacks engaged" heading for the one-time notices and the Config status ("" = none).
 	inline std::string FallbacksHeading(const Snapshot& snapshot)
 	{
-		return snapshot.vp.fallbacks.known ? Narrow(snapshot.vp.fallbacks.text) : std::string();
+		return StatusExtension::FallbacksHeading(snapshot, Narrow);
 	}
 
 	// The dialog's own VP lines (its state, not the renderer's).
@@ -63,14 +62,18 @@ namespace VpvGui
 		IntentStatus intent;    // m_intentStatus
 	};
 
-	inline VpStatusText::CtrlILines<wchar_t> IntentLines(const IntentStatus& intent)
+	// The dialog's wide texts for the extension (intent lines from the interpreter, as before).
+	inline StatusExtension::DialogTexts DialogTextsOf(const DialogLines& dialog)
 	{
-		VpStatusText::CtrlILines<wchar_t> lines;
-		lines.motionIntent = Wide(CString(IntentInterpreter::MotionIntentLine(intent.motion).c_str()));
-		lines.ambientIntent = Wide(CString(IntentInterpreter::AmbientIntentLine(intent.ambient).c_str()));
-		lines.blackIntent = Wide(CString(IntentInterpreter::BlackIntentLine(intent.black).c_str()));
-		lines.displayIntent = Wide(CString(IntentInterpreter::DisplayIntentLine(intent.display).c_str()));
-		return lines;
+		StatusExtension::DialogTexts texts;
+		texts.motionIntent = Wide(CString(IntentInterpreter::MotionIntentLine(dialog.intent.motion).c_str()));
+		texts.ambientIntent = Wide(CString(IntentInterpreter::AmbientIntentLine(dialog.intent.ambient).c_str()));
+		texts.blackIntent = Wide(CString(IntentInterpreter::BlackIntentLine(dialog.intent.black).c_str()));
+		texts.displayIntent = Wide(CString(IntentInterpreter::DisplayIntentLine(dialog.intent.display).c_str()));
+		texts.keyOverrides = Wide(dialog.keyOverrides);
+		texts.room = Wide(dialog.room);
+		texts.content = Wide(dialog.content);
+		return texts;
 	}
 
 	// Ctrl+I: VP's rows for the overlay's two extension points. RowVec is the overlay's row vector
@@ -80,15 +83,8 @@ namespace VpvGui
 	void FillCtrlIRows(RowVec& afterShaderRule, RowVec& afterShaders, const Snapshot& snapshot,
 		const DialogLines& dialog, bool isAlphaRenderer)
 	{
-		VpStatusText::CtrlILines<wchar_t> lines = IntentLines(dialog.intent);
-		lines.keyOverrides = Wide(dialog.keyOverrides);
-		lines.room = Wide(dialog.room);
-		lines.content = Wide(dialog.content);
-		if (isAlphaRenderer)
-			lines.dejudder = snapshot.vp.dejudder.text;
-		lines.resync = snapshot.vp.resync.text;
-		lines.fallbacks = snapshot.vp.fallbacks.text;
-		const VpStatusText::CtrlIRows<wchar_t> rows = VpStatusText::BuildCtrlIRows(lines);
+		const VpStatusText::CtrlIRows<wchar_t> rows =
+			StatusExtension::CtrlIRows(snapshot, DialogTextsOf(dialog), isAlphaRenderer);
 		afterShaderRule.clear();
 		afterShaders.clear();
 		for (const auto& row : rows.afterShaderRule)
@@ -104,26 +100,21 @@ namespace VpvGui
 	void RecordCrashState(Recorder& recorder, IVideoRenderer* renderer, const Snapshot& snapshot,
 		const CString& content, const IntentStatus& intent)
 	{
-		VpStatusText::CrashStateInputs<wchar_t> in;
+		StatusExtension::HostLines host;
+		StatusExtension::DialogTexts texts;
 		if (renderer)
 		{
-			in.dejudder = snapshot.vp.dejudder;
-			in.fallbacks = snapshot.vp.fallbacks;
-			in.ledDrive = snapshot.vp.ledDrive;
-			in.sourceResolution = snapshot.vp.sourceResolution;
 			CString text;
 			const bool presentation = renderer->GetPresentationTimingStatus(text);
-			in.presentation.Set(presentation, Wide(text));
+			host.presentation.Set(presentation, Wide(text));
 			const bool stall = renderer->GetRenderStallStatus(text);
-			in.renderStall.Set(stall, Wide(text));
-			const VpStatusText::CtrlILines<wchar_t> intentLines = IntentLines(intent);
-			in.content = Wide(content);
-			in.motionIntent = intentLines.motionIntent;
-			in.ambientIntent = intentLines.ambientIntent;
-			in.blackIntent = intentLines.blackIntent;
-			in.displayIntent = intentLines.displayIntent;
+			host.renderStall.Set(stall, Wide(text));
+			DialogLines dialog;
+			dialog.intent = intent;
+			texts = DialogTextsOf(dialog);
+			texts.content = Wide(content);
 		}
-		for (const auto& line : VpStatusText::CrashStateRendererLines(renderer != nullptr, in, Narrow))
+		for (const auto& line : StatusExtension::CrashState(snapshot, host, texts, Narrow))
 			recorder.SetValue(line.first, line.second);
 	}
 
@@ -134,19 +125,15 @@ namespace VpvGui
 		if (!renderer)
 			return;
 		const Snapshot snapshot = Poll(renderer);
-		VpStatusText::BundleInputs<wchar_t> in;
+		StatusExtension::HostLines host;
 		CString text;
 		const bool presentation = renderer->GetPresentationTimingStatus(text);
-		in.presentation.Set(presentation, Wide(text));
-		in.dejudder = snapshot.vp.dejudder;
-		in.fallbacks = snapshot.vp.fallbacks;
+		host.presentation.Set(presentation, Wide(text));
 		const bool stall = renderer->GetRenderStallStatus(text);
-		in.renderStall.Set(stall, Wide(text));
+		host.renderStall.Set(stall, Wide(text));
 		const bool output = renderer->GetOutputModeInfo(text);
-		in.outputMode.Set(output, Wide(text));
-		in.resync = snapshot.vp.resync;
-		in.resyncEvents = snapshot.vp.resyncEvents;
-		for (const auto& item : VpStatusText::BundleRendererSettings(in, Narrow))
+		host.outputMode.Set(output, Wide(text));
+		for (const auto& item : StatusExtension::Bundle(snapshot, host, Narrow))
 			settings.emplace_back(item.first, item.second);
 	}
 

@@ -69,6 +69,7 @@
     <ClInclude Include="..\VP-V\modules\control\diagnostics\RendererDiagnosticCodes.h" />
     <ClInclude Include="..\VP-V\modules\control\diagnostics\StateReport.h" />
     <ClInclude Include="..\VP-V\modules\control\diagnostics\StateReportSettings.h" />
+    <ClInclude Include="..\VP-V\modules\control\diagnostics\StatusExtension.h" />
     <ClInclude Include="..\VP-V\modules\control\diagnostics\StoreZipWriter.h" />
     <ClInclude Include="VpBuildIdentity.h" />
     <ClInclude Include="CaptureDisplayFixes.h" />
@@ -134,6 +135,7 @@
   <ItemGroup>
     <ClCompile Include="..\VP-V\modules\control\diagnostics\CrashState.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\StateReport.cpp" />
+    <ClCompile Include="..\VP-V\modules\control\diagnostics\StatusExtension.cpp" />
     <ClCompile Include="VpBuildIdentity.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\projector_control\SerialPort.cpp" />
     <ClCompile Include="AmbientSensor.cpp" />
