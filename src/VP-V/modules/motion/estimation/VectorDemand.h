@@ -110,6 +110,11 @@ namespace VectorDemand
 		// W2-C1: a starter runs the engine this frame (set by the host from the de-judder standing class, the hiccup warm and the
 		// camera want). Reuse-only consumers are served only while it is true; a served CameraFit want engages it by itself.
 		bool starterEngaged = false;
+		// W2-C1 (coordinator 2026-11-11): the motion engine exists while no starter runs it this frame (kept loaded and idle for hiccup
+		// repair, or held until its release). Wording only: the status never says "idle (no starter)" while an engine exists, it names
+		// why the engine is loaded. Serving is unchanged (an idle engine makes no vectors).
+		bool engineLoaded = false;
+		bool engineLoadedForHiccupRepair = false;
 	};
 
 	struct Decision
@@ -129,6 +134,9 @@ namespace VectorDemand
 		// unserved because no starter ran (each is a refused start: MotionEngineWork::refusedStarts).
 		unsigned starters = 0;
 		unsigned refused = 0;
+		// W2-C1: copied from Input (wording of the NoStarter status only).
+		bool engineLoaded = false;
+		bool engineLoadedForHiccupRepair = false;
 		bool Serves(Consumer c) const { return (served & (1u << static_cast<int>(c))) != 0; }
 	};
 
@@ -137,6 +145,8 @@ namespace VectorDemand
 	inline Decision DecideWith(const Input& in, bool analysisUnderSmoothMotion)
 	{
 		Decision d;
+		d.engineLoaded = in.engineLoaded;
+		d.engineLoadedForHiccupRepair = in.engineLoaded && in.engineLoadedForHiccupRepair;
 		if (!in.enabled)
 			return d;
 		if (!in.slotsRun)
@@ -332,7 +342,12 @@ namespace VectorDemand
 				"Vector engine: idle (no consumer)";
 		std::string s = "Vector engine: ";
 		if (d.reason == Reason::NoStarter)
-			return s + "idle (no starter); " + UnservedText(d);
+		{
+			// W2-C1 (coordinator 2026-11-11): an engine that exists is named with the reason it is loaded, never "idle (no starter)".
+			const char* state = d.engineLoadedForHiccupRepair ? "loaded idle for hiccup repair (no starter runs it); " :
+				d.engineLoaded ? "loaded, not running (no starter runs it); " : "idle (no starter); ";
+			return s + state + UnservedText(d);
+		}
 		if (d.mode == Mode::Forward)
 			s += "on (forward)";
 		else if (d.mode == Mode::Backward)

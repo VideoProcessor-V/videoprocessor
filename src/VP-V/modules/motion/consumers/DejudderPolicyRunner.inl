@@ -137,6 +137,11 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	const bool dejudderStanding = dejudder && (activeSettings.dejudderStrength > 0.0 || activeSettings.dejudderStrengthEven > 0.0) &&
 		DejudderPolicy::CanEngageOrAcquiring(dejudderReason, pulldownAcquiring);
 	vectorInput.starterEngaged = dejudderStanding || interpolating || vpGapFillStandalone;
+	// W2-C1 (coordinator 2026-11-11): an engine that exists without a starter is named in the status (kept idle for hiccup repair:
+	// fill_gaps on outside the low-latency queue, where the keeper keeps it; otherwise held until its release).
+	vectorInput.engineLoaded = dejudder && !vectorInput.starterEngaged;
+	vectorInput.engineLoadedForHiccupRepair = vectorInput.engineLoaded && activeSettings.interpolationFillGaps &&
+		!lowLatencyQueueActive.load(std::memory_order_acquire);
 	// The governor's release is a state of this frame: a held matcher is not released (the keeper's latch alone would stay set).
 	vectorEngine.NoteVramRelease(motionEngineIdle.Pressured() && !dejudder);
 	vectorEngine.UpdateVectorEngine(vectorInput, vectorFacts, vectorHost);

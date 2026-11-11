@@ -425,9 +425,9 @@ namespace DejudderDecisionLegacy
 				reason == DejudderPolicy::Reason::SmoothMotion ||
 				(reason == DejudderPolicy::Reason::UnknownRates && activeSettings.interpolationFillGaps)))   // W2-C1 (H3Idle)
 			{
-				const bool repairPossible = reason == DejudderPolicy::Reason::Off ||
+				const bool repairPossible = !in.lowLatency && (reason == DejudderPolicy::Reason::Off ||   // W2-C1 (competitive motion-free)
 					reason == DejudderPolicy::Reason::VideoRateMaskOnly || reason == DejudderPolicy::Reason::IneligibleCadence ||
-					reason == DejudderPolicy::Reason::UnknownRates;   // W2-C1
+					reason == DejudderPolicy::Reason::UnknownRates);   // W2-C1
 				const bool held = dejudder || dejudderNextTexture0;   // COPY
 				if ((held || motionEngineIdle.Pressured()) && activeSettings.interpolationFillGaps && repairPossible)   // W2-C1
 					PollMotionEngineBudget(width, height, held);

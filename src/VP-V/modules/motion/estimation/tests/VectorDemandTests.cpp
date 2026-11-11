@@ -331,6 +331,40 @@ namespace VectorDemandTest
 			Assert::AreEqual(8, static_cast<int>(Reason::NoStarter), L"NoStarter appended, no index moved");
 		}
 
+		// W2-C1 (coordinator 2026-11-11): the status never says "idle (no starter)" while a motion engine exists; it names why the
+		// engine is loaded (kept idle for hiccup repair, or loaded but not running). Serving is unchanged: still refused, nothing starts.
+		TEST_METHOD(LoadedEngineWithoutAStarterIsNamedNotIdle)
+		{
+			const Consumer cases[] = { Consumer::SourceMonitorPan, Consumer::DetailPulse, Consumer::OcclusionMask };
+			for (Consumer c : cases)
+			{
+				Input in = Make({ c });
+				in.starterEngaged = false;
+				in.engineLoaded = true;
+				in.engineLoadedForHiccupRepair = true;
+				const Decision d = Decide(in);
+				Assert::IsTrue(d.reason == Reason::NoStarter, L"still a refused start");
+				Assert::AreEqual(0u, d.served, L"an idle engine serves nothing");
+				Assert::AreEqual(1u << static_cast<int>(c), d.refused, L"refused");
+				Assert::IsFalse(d.estimate || d.producer, L"nothing starts");
+				const std::string hiccup = StatusLine(d);
+				Assert::IsTrue(hiccup.find("idle (no starter)") == std::string::npos, L"not called idle while loaded");
+				Assert::IsTrue(hiccup.find("loaded idle for hiccup repair (no starter runs it)") != std::string::npos, L"names the hiccup keep");
+				Assert::IsTrue(hiccup.find("no starter runs the motion engine") != std::string::npos, L"still says why it is unserved");
+
+				in.engineLoadedForHiccupRepair = false;
+				const std::string held = StatusLine(Decide(in));
+				Assert::IsTrue(held.find("idle (no starter)") == std::string::npos, L"not called idle while held");
+				Assert::IsTrue(held.find("loaded, not running (no starter runs it)") != std::string::npos, L"names a held engine");
+
+				in.engineLoaded = false;
+				in.engineLoadedForHiccupRepair = true;   // without an engine the hiccup flag says nothing
+				const std::string none = StatusLine(Decide(in));
+				Assert::IsTrue(none.find("idle (no starter)") != std::string::npos, L"no engine: idle (no starter)");
+				Assert::IsTrue(none.find("loaded") == std::string::npos, L"no engine: never called loaded");
+			}
+		}
+
 		TEST_METHOD(ReuseOnlyConsumersWithoutAStarterAreRefusedVisibly)
 		{
 			for (Consumer c : kNonSynthesis)

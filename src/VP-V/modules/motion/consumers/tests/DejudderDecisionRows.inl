@@ -647,6 +647,23 @@ ROW("idle-held-lowlat-release", { DJ24 s.dejudder=true; s.lowLatency=true; },
 	"De-judder: low-latency queue (strength 0.50, extras on, occlusion mask off, source 23.976 Hz, display 60.000 Hz, match tolerance 4.5)\n",
 	100000ull, 0ull,
 	"dejudder-mode low-latency queue a=2 b=0 x=23.975999999999999 y=60\n" })
+// W2-C1 (coordinator 2026-11-11, competitive low latency motion-free): de-judder off with hiccup repair on under the low-latency
+// queue: the gap repair cannot run there, so the idle engine is not warmed at the source's start (cf. off-warm-pending-fillgaps)
+// and a held idle engine is released (cf. idle-held-fillgaps-keep; same outcome as idle-held-no-fillgaps-release).
+ROW("lowlat-off-warm-pending-not-warmed", { s.motionEngineWarmPending=true; s.lowLatency=true; s.sourceHz=23.976; s.measuredDisplayHz=60.0; },
+	{ R::Off, false, 0.0f, 0, false, I::Off, 2.5025025025025025, false, false, 1.0f, 2.5025025025025025, false, O::SettledOff, false, false, false, false, 1, true,
+	"",
+	"",
+	"",
+	0ull, 0ull,
+	"" })
+ROW("lowlat-off-held-idle-released", { s.dejudder=true; s.lowLatency=true; s.sourceHz=50.0; s.measuredDisplayHz=60.0; },
+	{ R::Off, false, 0.0f, 0, false, I::Off, 1.2, false, false, 1.0f, 1.2, false, O::ReleaseBranch, false, false, false, true, 2, false,
+	"",
+	"",
+	"",
+	0ull, 0ull,
+	"" })
 ROW("prior-active-now-off", { s.dejudderReason=DejudderPolicy::Reason::Active; s.dejudder=true; s.sourceHz=23.976; s.measuredDisplayHz=60.0; },
 	{ R::Off, false, 0.0f, 0, false, I::Off, 2.5025025025025025, false, false, 1.0f, 2.5025025025025025, false, O::ReleaseBranch, false, true, false, false, 2, false,
 	"",

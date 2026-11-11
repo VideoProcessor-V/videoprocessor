@@ -261,9 +261,12 @@ namespace VpMotion
 			// no create at a hiccup, no release after it, nothing run per frame. Low video memory
 			// (an allocation failed, or DXGI reports budget pressure) releases it; the next gap
 			// pair recreates it once the pressure has passed (MotionEngineIdle).
-			const bool repairPossible = reason == DejudderPolicy::Reason::Off ||
+			// W2-C1 (coordinator 2026-11-11, doc 91 C: competitive low latency is motion-free): the standalone gap repair never runs
+			// under the low-latency queue (vpGapFillStandalone above requires !in.lowLatency), so no engine is kept or warmed for it
+			// there; a held idle engine is released when the low-latency queue starts.
+			const bool repairPossible = !in.lowLatency && (reason == DejudderPolicy::Reason::Off ||
 				reason == DejudderPolicy::Reason::VideoRateMaskOnly || reason == DejudderPolicy::Reason::IneligibleCadence ||
-				reason == DejudderPolicy::Reason::UnknownRates;   // W2-C1: reached only with hiccup repair on
+				reason == DejudderPolicy::Reason::UnknownRates);   // W2-C1: reached only with hiccup repair on
 			const bool held = f.dejudderHeld || f.nextTextureHeld;
 			MotionEngineIdle::Keeper& motionEngineIdle = host.IdleKeeper();
 			// W2-C1 (lead 2026-11-11): released under pressure, the budget is still read (once a second, BudgetDue) with the idle
