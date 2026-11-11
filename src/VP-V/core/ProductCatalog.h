@@ -579,13 +579,25 @@ inline const std::vector<ConsumerFlag>& ConsumerFlags()
 {
     static const std::vector<ConsumerFlag> flags = {
         // D4: DetailPulse / TextureRestore are catalogued as P10 / P11 / P4 readers but read none (modules/repair/texture_restore/DetailPulse.cpp, TextureRestore.cpp:
-        // private bands / tiles and private cut-fade logic, host scalar params); the declarations stay, the code is made to read them by C10 / C7.
+        // private bands / tiles and private cut-fade logic, host scalar params); the declarations stay, the code is made to read them by C10 / D10
+        // (doc 93 s2 D10 reader switch, rows 6/7; C7 landed without switching them, AUDIT-R2 F1).
         { uint16_t(kCatalogConsumerIdBase + 0), kP10GrainSplit, FlagKind::NotRead, "C10", "private bands (DetailPulse.h)" },
         { uint16_t(kCatalogConsumerIdBase + 0), kP11RegionBlockStats, FlagKind::NotRead, "C10", "private 32-px tiles" },
-        { uint16_t(kCatalogConsumerIdBase + 0), kP4SourceStats, FlagKind::NotRead, "C7", "private cut / fade logic" },
+        { uint16_t(kCatalogConsumerIdBase + 0), kP4SourceStats, FlagKind::NotRead, "D10", "private cut / fade logic" },
         { uint16_t(kCatalogConsumerIdBase + 1), kP10GrainSplit, FlagKind::NotRead, "C10", "private bands (TextureRestore.h)" },
         { uint16_t(kCatalogConsumerIdBase + 1), kP11RegionBlockStats, FlagKind::NotRead, "C10", "private 16-px tiles" },
-        { uint16_t(kCatalogConsumerIdBase + 1), kP4SourceStats, FlagKind::NotRead, "C7", "private cut / fade logic" },
+        { uint16_t(kCatalogConsumerIdBase + 1), kP4SourceStats, FlagKind::NotRead, "D10", "private cut / fade logic" },
+        // AUDIT-R2 F1 (B3-Z Z2): the optical-flow producer, the matcher and source identification print their declared reads as actual
+        // otherwise. The producer and the matcher keep private half-luma copies (the P2 / P2m -> P1 product flags above); the matcher's M3
+        // histogram is the shared unit U6 computed privately in its trust pass, not the P4 product; identification's chain reads the
+        // source-frame tap (the P14g view above), and no P4 read exists in the identity tree.
+        { uint16_t(kCatalogConsumerIdBase + 14), kP1HalfLuma, FlagKind::NotRead, "C9", "own HalfLuma8 copy (MotionAheadProducer.h HalfLuma8)" },
+        { uint16_t(kCatalogConsumerIdBase + 13), kP1HalfLuma, FlagKind::NotRead, "C9", "own Downsample copies" },
+        { uint16_t(kCatalogConsumerIdBase + 13), kP4SourceStats, FlagKind::NotRead, "D8",
+          "M3 histogram computed privately (matcher/DejudderWarp.cpp FrameTrustHeader / FrameTrustBody, SourceStats::CoarseHist*)" },
+        { uint16_t(kCatalogConsumerIdBase + 8), kP5MonitorTiles, FlagKind::ViewIsActual, "C9b",
+          "pixel evidence = the SourceFrameTap view (modules/input/source_analysis/identity/chain/ChainEstimator.cpp UpdateTap)" },
+        { uint16_t(kCatalogConsumerIdBase + 8), kP4SourceStats, FlagKind::NotRead, "D6-D8", "no P4 read in the identity tree" },
         // B3-Z Z-DECL (lead 2026-11-11, no declaration change): the render-time readers of the matcher field. The synthesis consumers and the
         // detail pulse / texture restore / adaptive downscale rows read the LIVE matcher field (dejudder->Field()) at render and do not
         // declare P3; the lane P3 declarations land with the matcher-ahead ring (B3-Z Z1-Z3) and lane-time refinement (C9b).
@@ -619,15 +631,68 @@ inline const ConsumerFlag* ConsumerFlagOf(uint16_t consumerId, ProductId input)
     return nullptr;
 }
 
-// The reads a consumer row actually performs today: its declared reads minus the NotRead flags, as the document prints them.
+// Consumer rows with no renderer call site today (AUDIT-R2 F1; doc 91 G correction): every declared read is "not read" until the
+// row is wired. The temporal-detail family: the module row, its vector-demand and camera rows and the engine / read-path rows.
+struct UnwiredConsumer {
+    uint16_t consumerId;
+    const char* item;
+    const char* note;
+};
+
+inline const std::vector<UnwiredConsumer>& UnwiredConsumers()
+{
+    static const std::vector<UnwiredConsumer> rows = {
+        { uint16_t(kCatalogConsumerIdBase + 10), "TD", "no renderer call site" },
+        { uint16_t(VectorDemand::kConsumerIdBase + int(VectorDemand::Consumer::TemporalDetail)), "TD", "no renderer call site" },
+        { uint16_t(CameraLink::kCameraConsumerIdBase + int(CameraLink::CameraConsumer::TemporalDetail)), "TD", "no renderer call site" },
+        { uint16_t(kCatalogConsumerIdBase + 24), "TD", "no renderer call site (engine reserved)" },
+        { uint16_t(kCatalogConsumerIdBase + 25), "TD", "no renderer call site (engine reserved)" },
+        { uint16_t(kCatalogConsumerIdBase + 26), "TD", "no renderer call site" },
+    };
+    return rows;
+}
+
+inline const UnwiredConsumer* UnwiredConsumerOf(uint16_t consumerId)
+{
+    for (const UnwiredConsumer& u : UnwiredConsumers())
+        if (u.consumerId == consumerId)
+            return &u;
+    return nullptr;
+}
+
+// A product with no producer today: a Reserved product flag, a lane producer marked "reserved", or one of the products whose
+// producer is not built (P13: EU-P13; td.memory: the TD engine). A read of it is never an actual read (AUDIT-R2 F1).
+inline const char* NoProducerReason(ProductId p)
+{
+    for (const ProductFlag& f : ProductFlags())
+        if (f.product == p && f.input == kNoProduct && f.kind == FlagKind::Reserved)
+            return "reserved, no producer";
+    const ProductRow* row = RowOf(p);
+    if (row && std::string(row->laneProducer).find("reserved") == 0)
+        return "reserved, no producer";
+    if (p == kP13SourceRing)
+        return "no producer (EU-P13 not built)";
+    if (p == kTdMemory)
+        return "no producer (TD engine not built)";
+    return nullptr;
+}
+
+// The reads a consumer row actually performs today: its declared reads minus the NotRead flags, the reads of products without a
+// producer and every read of an unwired row, as the document prints them.
 inline std::string ActualReads(const ConsumerRow& c, const Registry& reg)
 {
     std::string reads, unread;
+    const UnwiredConsumer* unwired = UnwiredConsumerOf(c.decl.id);
     for (size_t k = 0; k < c.decl.count; ++k) {
         const ProductId p = c.decl.consumes[k].product;
         const std::string name = std::string(reg.Has(p) ? reg.Get(p).token : "?");
         const ConsumerFlag* f = ConsumerFlagOf(c.decl.id, p);
-        if (f && f->kind == FlagKind::NotRead)
+        const char* noProducer = NoProducerReason(p);
+        if (unwired)
+            unread += (unread.empty() ? "" : "; ") + name + " (" + unwired->note + ", " + unwired->item + ")";
+        else if (noProducer)
+            unread += (unread.empty() ? "" : "; ") + name + " (" + noProducer + ")";
+        else if (f && f->kind == FlagKind::NotRead)
             unread += (unread.empty() ? "" : "; ") + name + " (" + f->note + ", " + f->item + ")";
         else
             reads += (reads.empty() ? "" : ", ") + name + (c.decl.consumes[k].lag ? "@lag" + std::to_string(unsigned(c.decl.consumes[k].lag)) : "")

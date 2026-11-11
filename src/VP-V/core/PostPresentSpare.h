@@ -3,7 +3,7 @@
 #pragma once
 
 // B3-Z Z2 scaffold (TD design 99 s3.3 + s12 item 1; refs 93-prep-B3Z s2): the ONE post-present spare slot of a
-// rendered frame on the render device. Generic: the host passes the slot's budget in (C5b's RenderBudget when it
+// SOURCE frame on the render device (keyed by the source sequence, never the rendered frame: audit C5). Generic: the host passes the slot's budget in (C5b's RenderBudget when it
 // lands; until then whatever the host measures, never a constant here) and gets the used ms back. Works run in a
 // fixed order: class (Unpack P13, Core P3 / P3b / P3r / P16, Slice TD, Fill), then the work's slot position, then
 // its id. First work = the matcher top-up (motion/estimation/LaneAheadPolicy.h); the gap scheduler's second gap
@@ -15,10 +15,17 @@
 //    unsplittable one is DEFERRED (counted, stays first next slot; its consumer computes at render as today);
 //  - a slice work runs inside its Configure-time slice and the remaining budget; fill only in what is left;
 //  - no fixed cost: each work predicts from its own measurement (MeasuredCost); an unmeasured work runs only as
-//    the first work of a slot (so it is measured once without stacking on other work);
-//  - one slot per rendered frame: the first trigger point that fires for a frame key runs it, later ones count
-//    AlreadyRan (the triggers: post-present without extras, after the last extra is queued, the plain path before
-//    the dequeue wait - matched rates included);
+//    the first work of a slot (so it is measured once without stacking on other work); an unmeasured unpack /
+//    core work deferred behind other work goes FIRST in the next slot that runs (once; then it is measured), so
+//    it is never starved by an earlier work that always has work (audit S4);
+//  - the key is consumed by whichever outcome the first trigger of a frame gets (Ran, NoBudget, NothingToDo):
+//    later triggers of the same source frame count AlreadyRan and never retry it (audit S6: one decision per
+//    source frame; the budget a later trigger sees belongs to the same frame);
+//  - one slot per SOURCE frame (doc 101 row 11): the frame key is the source sequence of the last distinct source
+//    frame (a cadence repeat keeps its predecessor's key, SpareSourceKey), so 24-in-60 runs once per film frame,
+//    not per rendered frame; the first trigger point that fires for a key runs it, later ones count AlreadyRan
+//    (the triggers: post-present without extras, after the last extra is queued, the plain path before the
+//    dequeue wait - matched rates included);
 //  - the hook never blocks and starts no thread; the host times each Run (GPU timer or CPU clock).
 // Pure C++14, no host types.
 
@@ -103,7 +110,7 @@ public:
 struct SpareSlotInput {
     bool enabled = false;
     SpareTrigger trigger = SpareTrigger::PostPresentNoExtras;
-    uint64_t frameKey = 0;   // the rendered frame (0 = no once-per-frame check)
+    uint64_t frameKey = 0;   // the SOURCE frame (SpareSourceKey; 0 = no once-per-frame check)
     double budgetMs = 0.0;   // the slot's budget, measured by the host
     double sliceMs = 0.0;    // the Slice class's Configure-time share (<= budget)
 };
@@ -143,7 +150,11 @@ public:
         if (!w) return;
         if (std::find(m_works.begin(), m_works.end(), w) == m_works.end()) m_works.push_back(w);
     }
-    void Unregister(ISpareWork* w) { m_works.erase(std::remove(m_works.begin(), m_works.end(), w), m_works.end()); }
+    void Unregister(ISpareWork* w)
+    {
+        m_works.erase(std::remove(m_works.begin(), m_works.end(), w), m_works.end());
+        if (m_promote == w) m_promote = nullptr;
+    }
     size_t WorkCount() const { return m_works.size(); }
 
     // A new source / resync: the next frame key runs again.
@@ -163,6 +174,14 @@ public:
         for (ISpareWork* w : m_works) if (w->HasWork()) m_order.push_back(w);
         if (m_order.empty()) return Finish(r, SpareOutcome::NothingToDo);
         std::sort(m_order.begin(), m_order.end(), &PostPresentSpare::Before);
+        if (m_promote) {   // S4: a starved unmeasured unpack / core work goes first this slot
+            auto it = std::find(m_order.begin(), m_order.end(), m_promote);
+            if (it != m_order.end() && !(m_promote->PredictMs() > 0.0)) {
+                std::rotate(m_order.begin(), it, it + 1);
+                ++m_promoted;
+            }
+            m_promote = nullptr;
+        }
 
         double sliceLeft = in.sliceMs > 0.0 && std::isfinite(in.sliceMs) ? (std::min)(in.sliceMs, in.budgetMs) : 0.0;
         for (ISpareWork* w : m_order) {
@@ -186,6 +205,7 @@ public:
                 }
             }
             if (!run) {
+                if (core && !(pred > 0.0) && !m_promote) m_promote = w;   // S4: first next slot
                 if (core) ++r.coreDeferred;
                 else if (cls == SpareClass::Slice) ++r.sliceSkipped;
                 else ++r.fillSkipped;
@@ -203,6 +223,7 @@ public:
     unsigned long long Count(SpareOutcome o) const { return m_outcomes[size_t(o)]; }
     unsigned long long Fired(SpareTrigger t) const { return m_triggers[size_t(t)]; }
     unsigned long long CoreDeferred() const { return m_coreDeferred; }
+    unsigned long long Promoted() const { return m_promoted; }   // S4: unmeasured works moved first
     double UsedMsTotal() const { return m_usedTotal; }
 
 private:
@@ -226,10 +247,74 @@ private:
     std::vector<ISpareWork*> m_works;
     std::vector<ISpareWork*> m_order;
     uint64_t m_lastKey = 0;
+    ISpareWork* m_promote = nullptr;
+    unsigned long long m_promoted = 0;
     std::array<unsigned long long, size_t(SpareOutcome::Count)> m_outcomes{};
     std::array<unsigned long long, size_t(SpareTrigger::Count)> m_triggers{};
     unsigned long long m_coreDeferred = 0;
     double m_usedTotal = 0.0;
+};
+
+// The spare slot's frame key: the source sequence of the last distinct source frame. Every captured frame has its
+// own source sequence; a cadence repeat (24-in-60 pulldown) keeps the key of the frame it repeats. 0 = unknown.
+class SpareSourceKey {
+public:
+    uint64_t Key(uint64_t sourceSequence, bool cadenceRepeat)
+    {
+        if (sourceSequence == 0) return m_last;
+        if (!cadenceRepeat || m_last == 0) m_last = sourceSequence;
+        return m_last;
+    }
+    uint64_t Last() const { return m_last; }
+    void Reset() { m_last = 0; }
+
+private:
+    uint64_t m_last = 0;
+};
+
+// The renderer's side (render thread only; LVR VPV-HOOK call sites): one slot, the key of the frame last
+// presented, and the slot budget. The budget is 0 until C5b's RenderBudget lands, so every trigger reports NoBudget
+// (counted, visible) and nothing runs; with no work registered every trigger reports Off. Never blocks.
+class SpareHost {
+public:
+    PostPresentSpare& Slot() { return m_slot; }
+    const PostPresentSpare& Slot() const { return m_slot; }
+    void NotePresented(uint64_t sourceSequence, bool cadenceRepeat) { m_key = m_source.Key(sourceSequence, cadenceRepeat); }
+    void SetBudget(double budgetMs, double sliceMs = 0.0) { m_budgetMs = budgetMs; m_sliceMs = sliceMs; }
+    // A new source / resync: keys start over.
+    void Reset() { m_slot.Reset(); m_source.Reset(); m_key = 0; }
+
+    SpareReport Fire(SpareTrigger trigger)
+    {
+        SpareSlotInput in;
+        in.enabled = m_slot.WorkCount() > 0;
+        in.trigger = trigger;
+        in.frameKey = m_key;
+        in.budgetMs = m_budgetMs;
+        in.sliceMs = m_sliceMs;
+        if (in.enabled && m_key == 0) {   // no presented source frame yet: never run without a key
+            ++m_noKey;
+            SpareReport r;
+            r.trigger = trigger;
+            r.outcome = SpareOutcome::Off;
+            m_last = r;
+            return r;
+        }
+        m_last = m_slot.Run(in);
+        return m_last;
+    }
+    const SpareReport& LastReport() const { return m_last; }
+    uint64_t Key() const { return m_key; }
+    unsigned long long NoKey() const { return m_noKey; }
+
+private:
+    PostPresentSpare m_slot;
+    SpareSourceKey m_source;
+    uint64_t m_key = 0;
+    double m_budgetMs = 0.0;
+    double m_sliceMs = 0.0;
+    SpareReport m_last;
+    unsigned long long m_noKey = 0;
 };
 
 // A work built from functions (the host's adapters and the tests): it keeps its own MeasuredCost from what Run

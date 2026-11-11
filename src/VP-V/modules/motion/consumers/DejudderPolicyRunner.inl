@@ -266,8 +266,9 @@ void LibplaceboVideoRenderer::Impl::LogDejudderAhead()
 	dejudderAheadLogTick = now;
 	using Reason = Dejudder::AheadSchedule::Reason;
 	DebugLog::Log("De-judder estimate ahead: %llu frames ahead, %llu before the frame (%llu estimated ahead for a "
-		"pair that did not come); not ahead: no frame after next %llu, source warp %llu, other %llu; last: %s",
-		dejudderAhead.Hits(), dejudderAhead.Sequential(), dejudderAhead.Misses(),
+		"pair that did not come, %llu of them from an older epoch); not ahead: no frame after next %llu, source "
+		"warp %llu, other %llu; last: %s",
+		dejudderAhead.Hits(), dejudderAhead.Sequential(), dejudderAhead.Misses(), dejudderAhead.EpochMisses(),
 		dejudderAhead.Count(Reason::NoAfter), dejudderAhead.Count(Reason::SourceWarp),
 		dejudderAhead.Count(Reason::AfterNotNew) + dejudderAhead.Count(Reason::NotEstimated) +
 			dejudderAhead.Count(Reason::Layout) + dejudderAhead.Count(Reason::SnapshotFailed) +

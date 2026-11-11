@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+
 // B3-Z Z2 scaffold (refs 93-prep-B3Z s2, s3, s6; TD design 99 s3.3, s3.4, s12 item 2): the matcher top-up in the
 // post-present spare slot (core/PostPresentSpare.h, class Core, order 1) as a pure decision, plus the pair-keyed
 // entry layout Z1 (ring + slots) and Z3 (engine ring + feed) build on. No host types, no GPU, no clock. C++14.
@@ -47,12 +50,33 @@ inline bool KeyOn(SpareKey k) { return k == SpareKey::On; }
 
 constexpr int kDepthTarget = 4;   // TD design point
 constexpr int kDepthMin = 2;      // the ring holds at least two pairs
-constexpr int kDepthMax = 4;
 
-// Ring capacity from a requested depth: within [kDepthMin, kDepthMax].
-inline int RingCapacity(int requested = kDepthTarget)
+// The maximum depth is derived, never a fixed 4 (doc 101 C6; TD 99 s3.4: design lead = 2 + anchor slots; the
+// extended tier may want more). Structural cap = the P2 ring: 16 pairs minus the 3 kept behind = 13. These mirror
+// B1's MotionAhead.h kP2RingPairs / kPairsKeptBehind / kMaxLead (r2/b1 MotionAhead.h:131-134) and switch to
+// MotionAhead::kMaxLead when B3-Z rebases onto B1, with a static_assert drift guard on all three (audit S8).
+constexpr int kP2RingPairs = 16;
+constexpr int kPairsKeptBehind = 3;
+constexpr int kStructuralMaxLead = kP2RingPairs - kPairsKeptBehind;
+constexpr int kAnchorSlotsDefault = 2;
+
+inline int DesignLead(int anchorSlots = kAnchorSlotsDefault)
 {
-    return requested < kDepthMin ? kDepthMin : (requested > kDepthMax ? kDepthMax : requested);
+    return 2 + (anchorSlots > 0 ? anchorSlots : 0);
+}
+
+// Standard tier: the design lead, capped by the P2 ring. Extended tier: the ring cap itself.
+inline int DepthMax(int anchorSlots = kAnchorSlotsDefault, bool extendedTier = false)
+{
+    const int lead = extendedTier ? kStructuralMaxLead : DesignLead(anchorSlots);
+    const int capped = lead > kStructuralMaxLead ? kStructuralMaxLead : lead;
+    return capped < kDepthMin ? kDepthMin : capped;
+}
+
+// Ring capacity from a requested depth: within [kDepthMin, maxDepth] (default: the standard-tier design lead, 4).
+inline int RingCapacity(int requested = kDepthTarget, int maxDepth = DepthMax())
+{
+    return requested < kDepthMin ? kDepthMin : (requested > maxDepth ? maxDepth : requested);
 }
 
 enum class Reason : uint8_t {
@@ -89,7 +113,9 @@ struct Input {
     bool lowLatency = false;
     bool competitive = false;
     bool matcherActive = false;   // Active OR the analysis estimate (93-prep-B3Z s3)
-    int requestedDepth = kDepthTarget;
+    int requestedDepth = kDepthTarget;   // the TD design point; the host passes kDepthMin (2) while Q3 says "depth 2 now"
+    int anchorSlots = kAnchorSlotsDefault;   // TD anchor slots (design lead = 2 + anchorSlots)
+    bool extendedTier = false;               // extended tier: up to the P2 ring cap
     int queuedAfterNext = 0;      // frames queued after the render frame's next (each one pair deeper)
     int laneLead = 0;             // the analysis lane's lead when it is on (usable = lead - 1); 0 = lane off
     int held = 0;                 // pairs already in the ring (chained from the render pair)
@@ -110,7 +136,7 @@ inline Decision Decide(const Input& in)
     if (in.competitive) { d.reason = Reason::Competitive; return d; }
     if (in.lowLatency) { d.reason = Reason::LowLatency; return d; }
     if (!in.matcherActive) { d.reason = Reason::EngineOff; return d; }
-    int depth = RingCapacity(in.requestedDepth);
+    int depth = RingCapacity(in.requestedDepth, DepthMax(in.anchorSlots, in.extendedTier));
     if (in.queuedAfterNext < depth) depth = in.queuedAfterNext > 0 ? in.queuedAfterNext : 0;
     if (in.laneLead > 0 && in.laneLead - 1 < depth) depth = in.laneLead - 1 > 0 ? in.laneLead - 1 : 0;
     d.depth = depth;
@@ -159,7 +185,10 @@ struct EntryExtraGrid {
 };
 
 // Occlusion: Z1 decides whether it is a texture per entry or made inside the P3b pass (93-prep-B3Z Q7; TD 99 s12
-// item 2). Nothing is reserved for it here.
+// item 2; doc 101 row 36: "decide and test with Z1" - Z1 is not built, so the decision and its test land there).
+// Nothing is reserved for it here.
+// Z3 notes (doc 101; not built here): the P3b / P3r rings are levels of kUserMotionMatcher, declared with
+// VramGovernorTests rows in Z3; P5c snapshot consistency is a Z3 acceptance row.
 struct Entry {
     EntryKey key;
     EntryExtraGrid extra[kExtraGridTextures];
@@ -178,6 +207,37 @@ class IAfterEstimate {
 public:
     virtual ~IAfterEstimate() {}
     virtual void AfterEstimate(const AfterEstimateView& view, Entry& entry) = 0;
+};
+
+// The one dispatch both estimate paths use (doc 101 row 9: IAfterEstimate is called exactly once per estimate with
+// both luma planes valid, on the spare path AND the render-time path). An estimate is identified by its serial
+// (the matcher's estimate counter, > 0). A repeat of the last serial, a missing plane or an invalid key is not
+// dispatched and is counted.
+enum class AfterEstimateResult : uint8_t { Called = 0, NoHook, PlanesMissing, BadKey, Repeat, Count };
+
+class AfterEstimateDispatch {
+public:
+    AfterEstimateResult Notify(IAfterEstimate* hook, const AfterEstimateView& view, Entry& entry, uint64_t serial)
+    {
+        AfterEstimateResult r = AfterEstimateResult::Called;
+        if (serial == 0 || serial == m_lastSerial) r = AfterEstimateResult::Repeat;
+        else if (!view.key.Valid() || view.key != entry.key) r = AfterEstimateResult::BadKey;
+        else if (!view.fromLuma || !view.toLuma) r = AfterEstimateResult::PlanesMissing;
+        else if (!hook) r = AfterEstimateResult::NoHook;
+        if (r != AfterEstimateResult::Repeat) m_lastSerial = serial;
+        if (r == AfterEstimateResult::Called) hook->AfterEstimate(view, entry);
+        ++m_counts[static_cast<size_t>(r)];
+        if (r == AfterEstimateResult::Called) ++m_byPath[view.atRender ? 1 : 0];
+        return r;
+    }
+    unsigned long long Count(AfterEstimateResult r) const { return m_counts[static_cast<size_t>(r)]; }
+    unsigned long long CalledAtRender() const { return m_byPath[1]; }
+    unsigned long long CalledInSpare() const { return m_byPath[0]; }
+
+private:
+    uint64_t m_lastSerial = 0;
+    unsigned long long m_counts[static_cast<size_t>(AfterEstimateResult::Count)] = {};
+    unsigned long long m_byPath[2] = {};
 };
 
 }   // namespace LaneAhead
