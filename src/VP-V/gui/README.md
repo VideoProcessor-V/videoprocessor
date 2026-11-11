@@ -5,7 +5,7 @@ VP's parts of the executable's GUI, out of `VideoProcessorDlg.cpp` and `StatsOve
 
 | Header | One job |
 |---|---|
-| `VpStatusAdapter.h` | The one place the dialog gets VP's status lines: one poll of the renderer's VP module (`vpv.modules.v1` Status through `VpvCalls::GetModuleStatus`, module `vp`), the Ctrl+I extension rows, the crash-state keys, the Ctrl+Alt+D bundle lines, the content/room/key-override lines, and the VP shortcut dispatcher. MFC side, header-only |
+| `VpStatusAdapter.h` | The one place the dialog gets VP's status lines (a thin client of the one status reader, `modules/control/diagnostics/StatusExtension`, W1-C14): one poll of the renderer's VP module (`vpv.modules.v1` Status through `VpvCalls::GetModuleStatus`, module `vp`), the Ctrl+I extension rows, the crash-state keys, the Ctrl+Alt+D bundle lines, the content/room/key-override lines, and the VP shortcut dispatcher. MFC side, header-only |
 | `VpShortcuts.h` | VP's command ids (moved out of `Resource.h`, same values), their `[shortcuts]` keys and their place in the binding order (`Merge`). Pure |
 
 The wording and order live in `core/StatusText.h` (pure, CPU-tested). Tests:
