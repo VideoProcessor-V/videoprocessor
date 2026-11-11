@@ -27695,7 +27695,6 @@ void LibplaceboVideoRenderer::Reset()
 		m_impl->sourceMonitor.Discontinuity("resync or source change");
 	}
 	m_pulldownResetRequested.store(true, std::memory_order_release);
-	m_pulldownAcquiring.store(false, std::memory_order_relaxed);   // VPV-HOOK: W2-C1 (lane A4) no stale acquiring cadence across the reset
 	BeginQueueGeneration("renderer reset");
 	if (m_impl)
 	{
@@ -27739,7 +27738,6 @@ void LibplaceboVideoRenderer::ResetLiveQueue()
 		m_impl->sourceMonitor.Discontinuity("live queue reset (seek or skip)");
 	}
 	m_pulldownResetRequested.store(true, std::memory_order_release);
-	m_pulldownAcquiring.store(false, std::memory_order_relaxed);   // VPV-HOOK: W2-C1 (lane A4) no stale acquiring cadence across the reset
 	BeginQueueGeneration("live queue reset");
 	m_sceneDetectorGeneration.fetch_add(1, std::memory_order_acq_rel);
 }

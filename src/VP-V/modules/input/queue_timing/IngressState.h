@@ -124,8 +124,9 @@ namespace Vpv
 
 	// W2-C1 (open item from W1-A4): a contained throw in IngressPulldown (IngressFaultThunk). The detector and the film clock start
 	// over on the next frame through the renderer's reset request, as before; the acquiring flag is cleared now, with the request, as
-	// the renderer's other reset paths do (LibplaceboVideoRenderer.cpp, lane A4 hooks): a faulted frame's verdict is not a demand,
-	// and no further frame may arrive to rewrite it. Capture thread.
+	// ResetPulldown does on the next frame: a faulted frame's verdict is not a demand, and no further frame may arrive to rewrite it.
+	// (The renderer and live-queue reset paths in LibplaceboVideoRenderer.cpp clear it only on that next frame: hook freeze, rule 32.)
+	// Capture thread.
 	void RequestPulldownResetAfterFault()
 	{
 		m_pulldownResetRequested.store(true, std::memory_order_release);
