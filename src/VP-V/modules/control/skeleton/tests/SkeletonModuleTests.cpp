@@ -1693,7 +1693,9 @@ namespace SkeletonModuleTestsNs
 					rig.sk.SetRegulatorGate(SkeletonModule::RegulatorGate::Act);
 				VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
 				Assert::IsTrue(lane != nullptr);
-				Assert::IsTrue(lane->GetRegulator().MaxLevel() > 0, L"something to shed");
+				// REG-1 (doc 96 s3.4 option B): this lane holds only core products (P1, P4; no GPU gap, no device), which are never
+				// ladder steps, so there is nothing to shed (was MaxLevel() > 0); the gates are told apart by the overload pin instead.
+				Assert::AreEqual(0, int(lane->GetRegulator().MaxLevel()), L"REG-1: a core-only lane has no ladder");
 				const uint64_t n = 4 * uint64_t(lane->GetRegulator().WindowFrames());
 				for (uint64_t i = 0; i < n; ++i)
 					Assert::IsTrue(rig.sk.NoteRenderOnlyMs(rig.Host(), 151 + i, 1.0e6), L"a span far above the period");
@@ -1713,19 +1715,23 @@ namespace SkeletonModuleTestsNs
 					Assert::IsFalse(t.measured);
 					Assert::AreEqual(int(lane->GetRegulator().MaxLevel()), int(lane->GetRegulator().Level()), L"observe: nothing shed");
 					Assert::AreEqual(size_t(0), backOffs);
+					Assert::IsFalse(lane->GetRegulator().PinnedAtMinimum(), L"observe: never judged overloaded");
 					Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), "host-measured render-only frame(s) recorded"), L"visible: recorded, not fed");
 					Assert::IsTrue(rig.Command().find("Skeleton regulator gate: observe") != std::string::npos, L"Ctrl+Alt+D");
 				}
 				else
 				{
 					// ORDER-DEPENDENT (audit SHOULD 3): frames 151..170 above carry no host-measured span, so they are UNFED. With S3 (unfed
-					// recovery) the regulator restores its level after one window of unfed frames (WindowFrames(), 48 today); the 20-frame
+					// recovery; P6-rest audit S3: ramps like the fed path, one step per dwell of unfed windows) the regulator starts restoring its
+					// level after one window of unfed frames (WindowFrames(), 48 today); the 20-frame
 					// status refresh must stay shorter than that window or the step-downs asserted here are already undone.
 					Assert::IsTrue(size_t(20) < lane->GetRegulator().WindowFrames(), L"the status refresh is shorter than one regulator window");
 					Assert::AreEqual(n, t.fed, L"act: fed as before");
 					Assert::IsTrue(t.measured);
-					Assert::IsTrue(lane->GetRegulator().Level() < lane->GetRegulator().MaxLevel(), L"act: the regulator sheds as today");
-					Assert::IsTrue(backOffs > 0);
+					// REG-1: was Level() < MaxLevel() and backOffs > 0; with nothing sheddable the fed overload pins at the minimum (the
+					// overload alarm) and the core keeps running.
+					Assert::IsTrue(lane->GetRegulator().PinnedAtMinimum(), L"act: the fed overload raises the alarm");
+					(void)backOffs;
 					Assert::IsTrue(rig.Command().find("Skeleton regulator gate: act") != std::string::npos);
 				}
 			}

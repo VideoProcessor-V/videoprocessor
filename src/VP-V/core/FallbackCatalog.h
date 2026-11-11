@@ -553,7 +553,7 @@ namespace FallbackCatalog
 
 	// ---- skeleton analysis lane -----------------------------------------------------------------
 	// The regulator reduced the lane's work (dropped products, forced live fills, T0 in the render,
-	// pinned at the minimum, the optical-flow input reduced by `ofaStep` steps: 0 = full), or the lane is
+	// pinned at the minimum; REG-1: there is no optical-flow input step-down any more), or the lane is
 	// not available for the source stats. The lists hold plain-language product names (the host maps ids
 	// to names).
 	inline std::string JoinNames(const std::vector<std::string>& names)
@@ -564,9 +564,9 @@ namespace FallbackCatalog
 		return out;
 	}
 	inline Decision AnalysisLane(const std::vector<std::string>& dropped, const std::vector<std::string>& forcedLive,
-		bool pinnedAtMinimum, bool t0InRender, unsigned ofaStep = 0)
+		bool pinnedAtMinimum, bool t0InRender)
 	{
-		if (dropped.empty() && forcedLive.empty() && !pinnedAtMinimum && !t0InRender && ofaStep == 0)
+		if (dropped.empty() && forcedLive.empty() && !pinnedAtMinimum && !t0InRender)
 			return Released("analysis_lane");
 		std::string reason;
 		auto add = [&reason](const std::string& part) { reason += (reason.empty() ? std::string() : "; ") + part; };
@@ -576,8 +576,6 @@ namespace FallbackCatalog
 			add("forced live: " + JoinNames(forcedLive));
 		if (t0InRender)
 			add("core analysis runs in the render");
-		if (ofaStep != 0)
-			add("vector engine input reduced (step " + std::to_string(ofaStep) + ")");
 		if (pinnedAtMinimum)
 			add("analysis at minimum");
 		return Engaged("analysis_lane", reason);

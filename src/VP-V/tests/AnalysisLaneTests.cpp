@@ -61,7 +61,8 @@ namespace AnalysisLaneTestsNs
 	// Fake optical-flow producer: two chunks, then its (immediately passed) fence. No bytes.
 	class FakeOfa : public ILaneProducer {
 	public:
-		ProductId Product() const override { return kP2VectorPair; }
+		explicit FakeOfa(ProductId id = kP2VectorPair) : id_(id) {}
+		ProductId Product() const override { return id_; }
 		bool Begin(const LaneJobContext&) override
 		{
 			chunks_ = 0;
@@ -81,6 +82,7 @@ namespace AnalysisLaneTestsNs
 		void Cancel(const LaneJobContext&) override { completed_ = signal_; }
 
 	private:
+		ProductId id_;
 		uint32_t chunks_ = 0;
 		uint64_t signal_ = 0;
 		uint64_t completed_ = 0;
@@ -106,6 +108,19 @@ namespace AnalysisLaneTestsNs
 		return c;
 	}
 
+	// REG-1: the regulator sheds optional fill only (P5, P6, P9, P10c, P12). The lane tests that exercise shedding use P5
+	// declared like P2 (fake optical-flow engine, reduced variants, inputs P1 lag 0/1) at P5's own tier T1, so the
+	// regulator has one optional-fill step above the T0 floor while the core products P1/P2/P4 are never sheddable.
+	inline Registry FillRegistry()
+	{
+		std::vector<ProductDecl> d = FirstProducts().All();
+		ProductDecl f = d[kP2VectorPair];
+		f.id = kP5MonitorTiles;
+		f.tier = Tier::T1;
+		d[kP5MonitorTiles] = f;
+		return Registry(d);
+	}
+
 	struct Rig {
 		Registry reg = FirstProducts();
 		std::vector<ConsumerDecl> consumers;
@@ -118,8 +133,10 @@ namespace AnalysisLaneTestsNs
 		VpLaneProducts::HalfLumaProducer p1;
 		VpLaneProducts::SourceStatsProducer p4;
 		FakeOfa p2;
+		FakeOfa p5{ kP5MonitorTiles };   // REG-1: the optional-fill product (registered always; ignored when not in the graph)
 		std::vector<uint16_t> store;
 		std::atomic<int> p2Live{ 0 };
+		std::atomic<int> p5Live{ 0 };
 		size_t frames;
 		bool registered = false;
 
@@ -172,6 +189,7 @@ namespace AnalysisLaneTestsNs
 			lane.RegisterProducer(&p1);
 			lane.RegisterProducer(&p2);
 			lane.RegisterProducer(&p4);
+			lane.RegisterProducer(&p5);
 			lane.RegisterCpuLiveCompute(kP1HalfLuma,
 				[](const Node&, const SourceFrameView* v, const std::array<const uint8_t*, kMaxInputs>&, uint8_t* dst, size_t n) {
 					return v != nullptr && VpLaneProducts::ComputeHalfLuma(*v, dst, n);
@@ -180,10 +198,19 @@ namespace AnalysisLaneTestsNs
 				[](const Node&, const SourceFrameView*, const std::array<const uint8_t*, kMaxInputs>& in, uint8_t* dst, size_t n) {
 					return VpLaneProducts::ComputeSourceStats(in[0], Dims{ kW, kH }, dst, n);
 				});
-			lane.SetLiveFill([this](const Node&, uint64_t, int, Header&, uint32_t) {
+			lane.SetLiveFill([this](const Node& n, uint64_t, int, Header&, uint32_t) {
 				p2Live.fetch_add(1);
+				if (n.id == kP5MonitorTiles)
+					p5Live.fetch_add(1);
 				return true;
 			});
+		}
+
+		// REG-1: add the optional-fill product P5 (FillRegistry) with one consumer; call before Configure.
+		void AddFill(bool reduced = true)
+		{
+			reg = FillRegistry();
+			consumers.push_back(Consumer(9, { kP5MonitorTiles }, reduced));
 		}
 
 		LaneSettings Settings(LaneSettings::Mode mode) const
@@ -427,16 +454,20 @@ namespace AnalysisLaneTestsNs
 		}
 
 		// 5. A regulator drop: the product declines (FillDeclined) and analysis_lane is engaged.
+		// REG-1: only optional fill is dropped (here P5); the core P2 (reduced mode) and P4 (none) stay laned, never
+		// dropped or forced live (before REG-1: P2 dropped, P4 forced live).
 		TEST_METHOD(RegulatorDropDeclinesAndEngagesFallback)
 		{
 			Rig r;
 			r.consumers.clear();
 			r.consumers.push_back(Consumer(1, { kP2VectorPair }, true));    // may run reduced
 			r.consumers.push_back(Consumer(2, { kP4SourceStats }, false));  // may not
+			r.AddFill(true);                                                // P5 fill, may run reduced
 			r.Configure(LaneSettings::Mode::On, false);
 			r.lane.OnSourceFrame(r.View(0));
 			for (uint64_t s = 0; s < 3; ++s) {
 				const std::vector<ProductFrameResult> res = r.Begin(s);
+				Assert::IsTrue(Rig::Res(res, kP5MonitorTiles).seal.reason == SealReason::Accepted || s == 0, L"the fill runs at first");
 				Assert::IsTrue(Rig::Res(res, kP2VectorPair).seal.reason == SealReason::Accepted || s == 0, L"P2 runs at first");
 				r.End(s);
 			}
@@ -444,22 +475,25 @@ namespace AnalysisLaneTestsNs
 			for (uint64_t i = 0; i < 100; ++i)
 				r.lane.OnFrameTiming(1000 + i, -5.0, 1.0, true);
 			const Regulator& reg = r.lane.GetRegulator();
-			Assert::IsTrue(reg.StateOf(kP2VectorPair) == ProductState::Dropped, L"P2 dropped (reduced mode, not deterministic)");
-			Assert::IsTrue(reg.StateOf(kP4SourceStats) == ProductState::ForcedLive, L"P4 forced live (no reduced mode)");
+			Assert::IsTrue(reg.StateOf(kP5MonitorTiles) == ProductState::Dropped, L"the fill dropped (reduced mode, not deterministic)");
+			Assert::IsTrue(reg.StateOf(kP2VectorPair) == ProductState::Laned, L"core P2 never dropped");
+			Assert::IsTrue(reg.StateOf(kP4SourceStats) == ProductState::Laned, L"core P4 never forced live");
+			Assert::IsTrue(reg.ForcedLiveIds().empty(), L"nothing forced live");
 			for (uint64_t s = 3; s < 9; ++s) {
 				const std::vector<ProductFrameResult> res = r.Begin(s);
-				const ProductFrameResult& o = Rig::Res(res, kP2VectorPair);
+				const ProductFrameResult& o = Rig::Res(res, kP5MonitorTiles);
 				// Frame 3 was published ahead before the drop and may still be accepted; later ones decline.
 				Assert::IsTrue(s == 3 || (o.final == SealOutcome::Unavailable && o.finalReason == SealReason::FillDeclined),
 					L"dropped product declines, visibly");
-				Assert::IsTrue(Rig::Res(res, kP4SourceStats).seal.reason == SealReason::Accepted, L"a forced-live product stays laned");
+				Assert::IsTrue(Rig::Res(res, kP4SourceStats).seal.reason == SealReason::Accepted, L"core P4 stays laned");
+				Assert::IsTrue(Rig::Res(res, kP2VectorPair).seal.reason == SealReason::Accepted, L"core P2 stays laned");
 				r.End(s);
 			}
 			Assert::IsTrue(r.lane.State()->table->FillDeclines() >= 5, L"declines counted");
-			Assert::IsTrue(r.p2Live.load() == 0, L"the dropped product never reached the live fill");
+			Assert::IsTrue(r.p5Live.load() == 0, L"the dropped product never reached the live fill");
 			const std::vector<FallbackCatalog::Decision> fb = r.lane.Fallbacks();
 			Assert::IsTrue(fb[0].id == "analysis_lane" && fb[0].engaged, L"analysis_lane engaged");
-			Assert::IsTrue(Has(fb[0].reason, "dropped") && Has(fb[0].reason, "forced live"), L"reason names both");
+			Assert::IsTrue(Has(fb[0].reason, "dropped") && !Has(fb[0].reason, "forced live"), L"reason names the drop, no forced live");
 			Assert::IsTrue(AnyLine(r.lane.StatusLines(), "dropped"), L"status shows it");
 			RegTrace tr[32];
 			Assert::IsTrue(r.lane.RegulatorTraces(tr, 32) > 0, L"regulator traces for the diagnostics");
@@ -469,6 +503,7 @@ namespace AnalysisLaneTestsNs
 		TEST_METHOD(FullAdvanceFloorsRegulatorAndRecovers)
 		{
 			Rig r;
+			r.AddFill();   // REG-1: a T1 fill step above the T0 floor (the core products have no ladder step)
 			r.Configure(LaneSettings::Mode::On, false);
 			r.lane.OnSourceFrame(r.View(0));
 			for (uint64_t s = 0; s < 10; ++s) {
@@ -483,7 +518,8 @@ namespace AnalysisLaneTestsNs
 			Assert::IsTrue(Rig::Res(f10, kP1HalfLuma).liveFilled && Rig::Res(f10, kP1HalfLuma).final == SealOutcome::Sealed, L"filled live");
 			Assert::IsTrue(Rig::Res(f10, kP4SourceStats).liveFilled, L"P4 live too");
 			Assert::IsTrue(reg.LaneLevel() == reg.T0StepCount(), L"the regulator floored");
-			Assert::IsTrue(reg.OfaStep() == 0, L"the floor left the OFA variant alone");
+			Assert::IsTrue(reg.StateOf(kP2VectorPair) == ProductState::Laned && reg.StateOf(kP4SourceStats) == ProductState::Laned,
+				L"REG-1: the floor never touches core products");
 			r.End(10);
 			const std::vector<ProductFrameResult> f11 = r.Begin(11);
 			Assert::IsTrue(Rig::Res(f11, kP1HalfLuma).seal.reason == SealReason::Accepted, L"P1 started after the event is accepted");
@@ -936,21 +972,26 @@ namespace AnalysisLaneTestsNs
 			Assert::IsTrue(r.lane.MissedBounds() == 0, L"no bound burnt");
 		}
 
-		// 20. S4: a regulator-dropped P4 makes the lane walk unavailable (Bill's walk + the decision).
-		TEST_METHOD(DroppedP4FallsBackToOriginalWalk)
+		// 20. S4 / REG-1: P4 is core and never sheddable, so overload never drops it and the lane walk stays (before
+		// REG-1 the overload dropped P4 and the walk fell back to Bill's; the fallback decision itself is unchanged and
+		// still covered by FallbackCatalog's source_stats_walk test).
+		TEST_METHOD(OverloadNeverDropsP4SoTheLaneWalkStays)
 		{
 			Rig r;
 			r.consumers.clear();
 			r.consumers.push_back(Consumer(1, { kP4SourceStats, kP2VectorPair }, true));
+			r.AddFill(true);
 			LaneSettings s = r.Settings(LaneSettings::Mode::On);
 			s.walk = VpLaneProducts::WalkSource::Lane;
 			r.Configure(s);
 			Assert::IsTrue(r.lane.EffectiveWalk() == VpLaneProducts::WalkSource::Lane, L"lane walk while P4 runs");
-			for (uint64_t f = 0; f < 1000 && r.lane.GetRegulator().StateOf(kP4SourceStats) != ProductState::Dropped; ++f)
+			for (uint64_t f = 0; f < 1000; ++f)
 				r.lane.OnFrameTiming(f, 0.0, 1.0, false);
-			Assert::IsTrue(r.lane.GetRegulator().StateOf(kP4SourceStats) == ProductState::Dropped, L"P4 dropped by overload");
-			Assert::IsTrue(r.lane.EffectiveWalk() == VpLaneProducts::WalkSource::Original, L"Bill's walk");
-			Assert::IsTrue(r.lane.Fallbacks()[2].engaged, L"the decision is shown");
+			const Regulator& reg = r.lane.GetRegulator();
+			Assert::IsTrue(reg.PinnedAtMinimum() && reg.StateOf(kP5MonitorTiles) == ProductState::Dropped, L"overload shed the fill");
+			Assert::IsTrue(reg.StateOf(kP4SourceStats) == ProductState::Laned, L"P4 never dropped");
+			Assert::IsTrue(r.lane.EffectiveWalk() == VpLaneProducts::WalkSource::Lane, L"the lane walk stays");
+			Assert::IsTrue(!r.lane.Fallbacks()[2].engaged, L"no walk fallback");
 		}
 
 		// 21. S6: frames skipped because their source is gone are shown.
@@ -1143,19 +1184,20 @@ namespace AnalysisLaneTestsNs
 			Assert::IsTrue(r.p2Live.load() > 0, L"P2 was filled live");
 		}
 
-		// 26. Audit-2 SHOULD: an optical-flow step-down is a visible fallback, not only a status note.
-		TEST_METHOD(OfaStepDownEngagesTheFallback)
+		// 26. REG-1 (replaces OfaStepDownEngagesTheFallback): there is no optical-flow input step-down any more; sustained
+		// overload pins the regulator with the core vector pair laned and no "vector engine input reduced" reason.
+		TEST_METHOD(OverloadNeverReducesTheVectorEngineInput)
 		{
 			Rig r;
 			r.Configure(LaneSettings::Mode::On, false);
 			const Regulator& reg = r.lane.GetRegulator();
-			Assert::IsTrue(reg.MaxLevel() > 0 && reg.OfaStep() == 0, L"full at first");
-			Assert::IsTrue(!r.lane.Fallbacks()[0].engaged, L"nothing engaged");
-			for (uint64_t f = 0; f < 20000 && reg.OfaStep() == 0; ++f)
+			Assert::IsTrue(reg.MaxLevel() == 0, L"core only: no ladder step");
+			for (uint64_t f = 0; f < 2000; ++f)
 				r.lane.OnFrameTiming(f, -5.0, 1.0, true);
-			Assert::IsTrue(reg.OfaStep() > 0, L"overload stepped the vector engine input down");
+			Assert::IsTrue(reg.PinnedAtMinimum(), L"overload pinned");
+			Assert::IsTrue(reg.StateOf(kP2VectorPair) == ProductState::Laned, L"the vector pair stays laned");
 			const FallbackCatalog::Decision d = r.lane.Fallbacks()[0];
-			Assert::IsTrue(d.id == "analysis_lane" && d.engaged && Has(d.reason, "vector engine input reduced"), L"engaged with the reason");
+			Assert::IsTrue(!Has(d.reason, "vector engine input reduced"), L"no input reduction");
 		}
 
 		// 27. Audit-2 SHOULD: capNoFit / starved gaps / suppressed step-downs are shown only when nonzero.
@@ -1178,17 +1220,19 @@ namespace AnalysisLaneTestsNs
 			r.consumers.clear();
 			r.consumers.push_back(Consumer(1, { kP2VectorPair }, true));
 			r.consumers.push_back(Consumer(2, { kP4SourceStats }, false));
+			r.AddFill(true);   // REG-1: the fill (P5) is the sheddable product; before REG-1 this test dropped core P2
 			r.Configure(LaneSettings::Mode::On, false);
 			const std::shared_ptr<LaneState> st = r.lane.State();
 			for (uint64_t i = 0; i < 100; ++i)
 				r.lane.OnFrameTiming(1000 + i, -5.0, 1.0, true);
-			Assert::IsTrue(r.lane.GetRegulator().StateOf(kP2VectorPair) == ProductState::Dropped, L"P2 dropped");
-			Assert::IsTrue(!st->runner->Laned(kP2VectorPair), L"and not laned");
+			Assert::IsTrue(r.lane.GetRegulator().StateOf(kP5MonitorTiles) == ProductState::Dropped, L"the fill dropped");
+			Assert::IsTrue(!st->runner->Laned(kP5MonitorTiles), L"and not laned");
+			Assert::IsTrue(r.lane.GetRegulator().StateOf(kP2VectorPair) == ProductState::Laned && st->runner->Laned(kP2VectorPair), L"core P2 laned");
 			Assert::IsTrue(r.Configure(LaneSettings::Mode::On, true) == 0 && r.lane.State() == st, L"the graph is kept");
 			Assert::IsTrue(r.lane.Deterministic(), L"now deterministic");
-			Assert::IsTrue(r.lane.GetRegulator().StateOf(kP2VectorPair) == ProductState::Laned, L"the regulator restarted");
-			Assert::IsTrue(st->runner->Laned(kP2VectorPair)
-			               && st->table->At(size_t(st->IndexOf(kP2VectorPair))).LaneGranted(), L"the runner and the slots follow at once");
+			Assert::IsTrue(r.lane.GetRegulator().StateOf(kP5MonitorTiles) == ProductState::Laned, L"the regulator restarted");
+			Assert::IsTrue(st->runner->Laned(kP5MonitorTiles)
+			               && st->table->At(size_t(st->IndexOf(kP5MonitorTiles))).LaneGranted(), L"the runner and the slots follow at once");
 		}
 	};
 
@@ -1294,6 +1338,7 @@ namespace AnalysisLaneTestsNs
 		TEST_METHOD(StormHoldFloorsTheLaneRegulatorToT0)
 		{
 			Rig r;
+			r.AddFill();   // REG-1: a fill step above T0 (core products have no ladder step)
 			r.Configure(LaneSettings::Mode::On, false, 1);
 			r.lane.SetExternalSeal(true);
 			const std::shared_ptr<Indicator> h = Alias(r.ind);
@@ -1312,7 +1357,19 @@ namespace AnalysisLaneTestsNs
 			Assert::IsTrue(reg.LaneLevel() == reg.T0StepCount(), L"held at T0");
 			RegTrace after[64];
 			const size_t nAfter = r.lane.RegulatorTraces(after, 64);
-			Assert::IsTrue(nAfter == nBefore + 1 && after[nAfter - 1].action == RegAction::ConservativeFloor, L"the engagement is traced once as a conservative floor");
+			// REG-1: the fixture's step above T0 is now a real fill product (P5), so the floor also traces P5's shed; was
+			// nAfter == nBefore + 1 with the floor as the last trace (the old step above T0 left no product trace).
+			size_t floors = 0, fillSheds = 0, others = 0;
+			for (size_t i = nBefore; i < nAfter; ++i)
+			{
+				if (after[i].action == RegAction::ConservativeFloor)
+					++floors;
+				else if (after[i].id == kP5MonitorTiles && (after[i].action == RegAction::Drop || after[i].action == RegAction::MoveToRender))
+					++fillSheds;
+				else
+					++others;
+			}
+			Assert::IsTrue(floors == 1 && fillSheds == 1 && others == 0, L"the engagement is traced once as a conservative floor, plus the fill's shed");
 			Assert::IsTrue(r.lane.StormHoldEngagements() == 1 && r.lane.StormHold(), L"counted");
 			r.lane.SetStormHold(false);
 			Assert::IsTrue(!r.lane.StormHold(), L"released");
@@ -1323,6 +1380,7 @@ namespace AnalysisLaneTestsNs
 		TEST_METHOD(StormHoldFloorSurvivesARebindRebuild)
 		{
 			Rig r;
+			r.AddFill();   // REG-1: a fill step above T0
 			r.Configure(LaneSettings::Mode::On, false, 1);
 			r.lane.SetExternalSeal(true);
 			const std::shared_ptr<Indicator> h = Alias(r.ind);
@@ -2044,6 +2102,7 @@ namespace AnalysisLaneTestsNs
 		TEST_METHOD(AnUnfedFullAdvanceRecoversWithoutAFeed)
 		{
 			Rig r;
+			r.AddFill();   // REG-1: a fill step above the T0 floor (core products have no ladder step)
 			r.Configure(LaneSettings::Mode::On, false);
 			r.lane.OnSourceFrame(r.View(0));
 			for (uint64_t s = 0; s < 10; ++s) {
@@ -2056,12 +2115,18 @@ namespace AnalysisLaneTestsNs
 			r.Begin(10);
 			r.lane.OnFrameRetired(10, 0);
 			Assert::IsTrue(reg.LaneLevel() == reg.T0StepCount(), L"floored without the feed");
+			// P6-rest audit S3: the unfed recovery ramps like the fed path, one step per dwell of 2 windows (was: 1 window).
 			const uint64_t w = reg.WindowFrames();
 			for (uint64_t s = 11; s < 11 + w; ++s) {
 				r.Begin(s);
 				r.lane.OnFrameRetired(s, 0);
 			}
-			Assert::IsTrue(reg.Level() == reg.MaxLevel(), L"restored after a window without the feed");
+			Assert::IsTrue(reg.LaneLevel() == reg.T0StepCount(), L"one unfed window: dwell not reached");
+			for (uint64_t s = 11 + w; s < 11 + 2 * w; ++s) {
+				r.Begin(s);
+				r.lane.OnFrameRetired(s, 0);
+			}
+			Assert::IsTrue(reg.Level() == reg.MaxLevel(), L"restored one step after two windows without the feed");
 			Assert::IsTrue(reg.Notice().empty());
 		}
 	};
