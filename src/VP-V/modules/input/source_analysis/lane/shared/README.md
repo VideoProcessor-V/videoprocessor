@@ -33,6 +33,34 @@ view (R8_UNORM, half or quarter) the NVOF engine takes.
   every twin format, odd half / quarter edges, v210 widths ending mid-group, padded strides, 4K; one case through an
   `EarlyUpload` slot on a second reader device).
 
+## 5b design note (producer switch; not built yet)
+
+- Seam: the EXISTING S1 AfterPublish (LibplaceboVideoRenderer.cpp, the `RendererExtension::AfterPublish` call after
+  the conversion thread's publish, ~line 30721). 0 new Bill lines (rule 32, hook freeze). Its dispatch condition
+  is the VP-V predicate on the line before (`Vpv::Capture::EarlyUploadDue`); 5b relaxes it INSIDE VP-V (a
+  publish is due when an early hand-off exists OR the motion producer has a second reader attached), so the Bill
+  line keeps its text. Original pathway: the settings overlay forces `capture_upload render` and the motion
+  producer is off, so the predicate is false and nothing is dispatched (as today).
+- Hand-off: the hub fans AfterPublish out in registration order. `input.capture` runs first and uploads the raw
+  frame into its `EarlyUpload` slot (the one upload, O3). The motion module, registered after it, reads that
+  slot's `SlotHandle` from the payload extension, `AcquireReader` on its own device, runs
+  `EngineLumaGpu::Kernel::Run` into its engine texture and calls `UsedReader`. It submits to the producer queue;
+  it never uploads a second time.
+- CPU path stays (visible, never log-only): no slot on this publish (capture_upload render, pool full), a format
+  outside O2 (RGB, DV, SDR tunnel, full range), `AcquireReader` / `Run` failure, or a reader detach that timed out
+  (`readerDetachTimeouts`). The frame then goes to the existing CPU `HalfLuma8` path. The reason is counted per
+  cause and shown: the Ctrl+I motion line ("engine luma: CPU (reason)"), a one-time notice on the first fallback
+  per source, the Config status row and the Ctrl+Alt+D dump. A timed-out detach also stops the twin for that
+  source until the next Open (no retry loop).
+- Ordering safety: a reader that dies keeps its slot (`kReaderPending`) until `DetachReader` on producer Stop or
+  GpuReleased, so a slot is never overwritten while the twin reads it. The cost of a dead reader is one slot of
+  the pool (`noFreeReader`), never torn bytes.
+- Tests: the motion module's AfterPublish on WARP equals the CPU product byte for byte. Fallback counters for each
+  cause. Original pathway dispatches nothing. Hook gating and the hook budget unchanged.
+- Expected cost: about 3-4 h agent time, one incremental Test + renderer build (about 40 min), focused WARP run
+  (under 10 min), one GPU-QUIET hardware chunk. GPU: one compute dispatch per frame instead of the CPU half-luma
+  pass plus its upload; the CPU saving is to be measured with ProducerThroughputBench.
+
 # SourceStats (shared unit U6, `VpUnit::SourceStats`)
 
 The one law of the P4 source-stats record (doc 62, section 1.2 U6): `SourceStats.h`, `kUnitVersion = 1` (= the record version and
