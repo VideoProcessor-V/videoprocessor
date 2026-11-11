@@ -163,7 +163,10 @@ namespace Tests
 			Assert::AreEqual(U(1), U(rig.state.DeferredToSeal()));
 			rig.state.Unbind();
 			Assert::IsFalse(rig.state.Driven());
-			Assert::AreEqual(U(e + 1), U(rig.state.Invalidate(MVCause::Resync)));
+			// W1-C2a SHOULD 5: the request deferred to a seal that will not come is applied at the unbind (never lost).
+			Assert::AreEqual(U(e + 1), U(rig.state.Epoch()));
+			Assert::AreEqual(U(1), U(rig.state.UnbindMoves()));
+			Assert::AreEqual(U(e + 2), U(rig.state.Invalidate(MVCause::Resync)), L"unbound: the immediate move");
 			Assert::AreEqual(U(1), U(rig.state.DeferredToSeal()));
 		}
 	};
