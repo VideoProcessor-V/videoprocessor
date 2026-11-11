@@ -19,7 +19,7 @@
 #include <VP-V/modules/motion/estimation/global_model/link/GuidanceScheduler.h>
 #include <VP-V/modules/motion/estimation/global_model/link/PairAssembly.h>
 #include <VP-V/modules/motion/estimation/global_model/link/AheadFlow.h>
-#include "AheadPairReplica.h"
+#include "ProducerPairs.h"
 
 #include <algorithm>
 #include <fstream>
@@ -4581,7 +4581,7 @@ namespace CameraAccuracy
 	{
 		CamScene scene;
 		VariantResult variants[5];   // off, model_global, all_switches; + model_global_ahead, all_switches_ahead with VP_TEST_CAMERA_ACCURACY_AHEAD=1
-		// AHEAD FIT (VP_TEST_CAMERA_ACCURACY_AHEAD=1): the reproduced NVOF pair's costs per pair (index = pair) and its conversion time.
+		// AHEAD FIT (VP_TEST_CAMERA_ACCURACY_AHEAD=1): the real producer's NVOF pair's costs per pair (index = pair) and its conversion time.
 		std::vector<CameraAccuracyAhead::PairTiming> aheadTiming;
 		std::vector<double> aheadConvertMs;   // camera WORKER: AheadToSourceGrid (native field + trust) + FlowGlobal (audit F3)
 		std::vector<double> aheadCopyMs;      // RENDER thread: CopyAhead only (FlowOf's view copied at once)
@@ -4667,14 +4667,18 @@ namespace CameraAccuracy
 		return r;
 	}
 
-	// The producer's NVOF pair of every pair of the scene, reproduced offline (AheadPairReplica.h), converted by the production units
+	// The REAL MotionAhead producer's NVOF pair of every pair of the scene (ProducerPairs.h: the production MotionAhead::Producer, driven by
+	// this host, WAIVER-MV-04), handed to every variant's matcher through SetExternalFlow and converted for the ahead variants by the production units
 	// (CopyAhead over the FlowView FlowOf serves -> AheadToSourceGrid with the matcher's consistency limit). The engine size follows the
 	// matcher's search (half, or a quarter at a lowRes search: the producer makes only those two), read from a seed of this scene (a probe
 	// estimate when no variant ran before, e.g. in reverse order).
-	void MakeAheadPairs(Gpu& gpu, pl_gpu g, bool hardware, const CamScene& cs, const std::vector<std::vector<uint16_t>>& lumas, int srcW, int srcH,
+	void MakeAheadPairs(Gpu& gpu, pl_gpu g, bool hardware, const CamScene& cs, const std::vector<std::vector<uint16_t>>& lumas,
+		const std::vector<std::vector<uint16_t>>& chromas, int srcW, int srcH,
 		int blocksX, int blocksY, bool engineGlobal, int& halvings, float& consistency, const std::function<void(int)>& upload,
-		const std::vector<pl_tex>& lumaT, const std::vector<pl_tex>& chromaT, std::vector<CameraLink::FieldCopy>& fields, SceneResult& sr)
+		const std::vector<pl_tex>& lumaT, const std::vector<pl_tex>& chromaT, std::vector<CameraLink::FieldCopy>& fields,
+		std::vector<MotionAhead::FlowPtr>& flows, SceneResult& sr)
 	{
+		flows.assign(static_cast<size_t>(Frames() - 1), MotionAhead::FlowPtr());
 		const size_t pairs = static_cast<size_t>(Frames() - 1);
 		sr.aheadTiming.assign(pairs, CameraAccuracyAhead::PairTiming());
 		sr.aheadConvertMs.assign(pairs, 0.0);
@@ -4695,12 +4699,11 @@ namespace CameraAccuracy
 			a.luma = lumaT[0]; a.chroma = chromaT[0]; b.luma = lumaT[1]; b.chroma = chromaT[1];
 			a.chromaShiftX = b.chromaShiftX = 1;
 			a.chromaShiftY = b.chromaShiftY = 1;
-			Check(probe.Estimate(a, b), "camera accuracy (ahead): probe estimate: " + probe.LastError());
-			Dejudder::MotionWarp::SeedState sd;
-			if (probe.LastSeed(sd))
+			Check(probe.Estimate(a, b), "camera accuracy (ahead): probe estimate: " + probe.LastError());   // no pair given: the block search
+			halvings = probe.SearchHalvings();   // the size the matcher searches at (the producer's target follows it)
 			{
-				halvings = sd.halvings;
-				consistency = sd.consistencyPx;
+				const Dejudder::Settings st = ProductionSettings(cs.fps, engineGlobal);
+				consistency = static_cast<float>(st.consistencyPixels * GeneralScale::AboveReference(srcH, st.generalRates));   // as MotionWarp::ConsistencyPixels (private)
 			}
 		}
 		if (halvings < 0)
@@ -4708,22 +4711,30 @@ namespace CameraAccuracy
 		if (!(consistency > 0.0f))
 			consistency = 2.0f;   // the dejudder_consistency_px default (as the camera core and the TD source)
 		const bool quarter = halvings >= 1;
-		CameraAccuracyAhead::Replica replica;
+		CameraAccuracyAhead::RealProducer replica;
 		std::string why;
 		if (!replica.Open(g, srcW, srcH, quarter, why))
 		{
-			sr.aheadProblem = "the ahead pair could not be reproduced: " + why;
+			sr.aheadProblem = "the producer could not start: " + why;
+			Check(false, "camera accuracy: " + sr.aheadProblem);
 			return;
 		}
 		sr.aheadQuarter = quarter ? 1 : 0;
 		pl_gpu_finish(g);
 		for (int f = 0; f < Frames(); ++f)
 		{
-			MotionAhead::Flow flow;
+			MotionAhead::FlowPtr flowPtr;
 			CameraAccuracyAhead::PairTiming t;
-			if (!replica.Push(lumas[static_cast<size_t>(f)], flow, t))
+			if (!replica.Push(static_cast<uint64_t>(f), lumas[static_cast<size_t>(f)], chromas[static_cast<size_t>(f)], flowPtr, t, why))
+			{
+				Check(false, "camera accuracy: " + why);
+				break;
+			}
+			if (f == 0)
 				continue;
+			const MotionAhead::Flow& flow = *flowPtr;
 			const size_t p = static_cast<size_t>(f - 1);
+			flows[p] = flowPtr;
 			sr.aheadTiming[p] = t;
 			// Audit F3: the time split as production runs it: the copy on the render thread, the conversion + trust + global on the worker.
 			const auto c0 = std::chrono::steady_clock::now();
@@ -4754,6 +4765,7 @@ namespace CameraAccuracy
 				sr.aheadRaw[p] = RawVsTruth(fc, tx / SizeDiv(), ty / SizeDiv());   // same source-px scale as the seed row (log.truthTx / SizeDiv)
 			}
 		}
+		replica.Stop();
 		pl_gpu_finish(g);
 	}
 
@@ -4829,8 +4841,8 @@ namespace CameraAccuracy
 		char line[1400];
 		md << "\n## Ahead fit (owner decision: the camera fits from the ahead NVOF pair)\n\n";
 		md << "**What ran.** The fit of the `*_ahead` variants reads the producer's NVOF pair of the same frames (VectorEngine's one MotionAhead producer: "
-			"SLOW preset, half-size 8-bit luma, or the quarter at a lowRes search), REPRODUCED OFFLINE (AheadPairReplica.h: the producer's Process() step for "
-			"step on the libplacebo device, synchronously; the Beta host does not link the producer), served as the FlowView FlowOf gives and converted by the "
+			"SLOW preset, half-size 8-bit luma, or the quarter at a lowRes search), made by the REAL production producer (ProducerPairs.h: MotionAheadProducer.cpp linked into this host, "
+			"frames submitted one at a time, each pair waited for; the same pair also feeds every variant's matcher through SetExternalFlow, WAIVER-MV-04), served as the FlowView FlowOf gives and converted by the "
 			"production CopyAhead -> AheadToSourceGrid (trust = OpticalFlowTrust::CellTrust, the matcher's consistency limit). Everything else is the F2 "
 			"variant: the same fitter, d = " << kGuideLag << ", BuildGuide, matcher. The seed variants (model_global, all_switches) are the F2 baseline of the same run.\n\n";
 		md << "**Timing model.** Frame N+1 arrives at (N+1) x T; the producer makes pair N on its own lane (FIFO), the camera worker converts and fits it in "
@@ -5315,7 +5327,7 @@ void RunBetaCameraAccuracy()
 	specs.push_back(Spec{ "model_global", true, ModelGlobalOnly(), false });
 	specs.push_back(Spec{ "all_switches", true, AllSwitches(), false });
 	// AHEAD FIT A/B (VP_TEST_CAMERA_ACCURACY_AHEAD=1): the same two camera variants with the fit fed from the AHEAD NVOF pair (the producer's
-	// pair, reproduced offline: AheadPairReplica.h) through the production CopyAhead -> AheadToSourceGrid, instead of the F2 seed.
+	// pair, from the real producer: ProducerPairs.h) through the production CopyAhead -> AheadToSourceGrid, instead of the F2 seed.
 	const bool aheadRun = EnvText("VP_TEST_CAMERA_ACCURACY_AHEAD") == "1";
 	if (aheadRun)
 	{
@@ -5357,9 +5369,10 @@ void RunBetaCameraAccuracy()
 		std::cout << "Beta camera accuracy: " << cs.name << " (" << cs.pxPerFrameSource << " px per frame, " << cs.fps << " fps), render " << renderSeconds << " s\n" << std::flush;
 		SceneResult sr;
 		sr.scene = cs;
-		// AHEAD FIT: the reproduced pairs of this scene, made once (they do not depend on the guidance) before the first ahead variant.
+		// The real producer's pairs of this scene, made once (they do not depend on the guidance) before the first variant.
 		std::vector<CameraLink::FieldCopy> aheadFields(Frames() - 1);
 		bool aheadMade = false;
+		std::vector<MotionAhead::FlowPtr> producerFlows;   // the real producer's pair of each pair of the scene (null without hardware)
 		int seenHalvings = -1;          // the matcher's search halvings and consistency limit, from any variant's seed of this scene
 		float seenConsistency = 0.0f;
 		std::vector<std::vector<int8_t>> classes(Frames() - 1);   // the block classes of each scored pair, shared by the variants
@@ -5372,11 +5385,12 @@ void RunBetaCameraAccuracy()
 			VariantResult& vr = sr.variants[vi];
 			vr.name = spec.name;
 			vr.instance = instance++;
-			if (spec.ahead && !aheadMade)
+			if (!aheadMade)
 			{
+				// The producer's pairs of this scene, made once before the first variant: every variant's matcher reads them (P2), as live.
 				aheadMade = true;
-				MakeAheadPairs(gpu, g, hardware, cs, lumas, srcW, srcH, blocksX, blocksY, engineGlobal, seenHalvings, seenConsistency, uploadFrame,
-					lumaT, chromaT, aheadFields, sr);
+				MakeAheadPairs(gpu, g, hardware, cs, lumas, chromas, srcW, srcH, blocksX, blocksY, engineGlobal, seenHalvings, seenConsistency,
+					uploadFrame, lumaT, chromaT, aheadFields, producerFlows, sr);
 			}
 			Dejudder::MotionWarp warp(gpu.Log(), g, ProductionSettings(cs.fps, engineGlobal));
 			warp.SetPassTiming(true, false);   // GPU timers per pass, the GPU kept busy
@@ -5428,6 +5442,7 @@ void RunBetaCameraAccuracy()
 				a.chromaShiftX = b.chromaShiftX = 1;
 				a.chromaShiftY = b.chromaShiftY = 1;
 				pl_gpu_finish(g);
+				warp.SetExternalFlow(static_cast<size_t>(p) < producerFlows.size() ? producerFlows[static_cast<size_t>(p)] : MotionAhead::FlowPtr());
 				const auto estimateStart = std::chrono::steady_clock::now();
 				Check(warp.Estimate(a, b), "camera accuracy: estimate: " + warp.LastError());
 				warp.FlushPassTimers();   // drains the GPU and collects the pass timers of this pair
@@ -5443,7 +5458,7 @@ void RunBetaCameraAccuracy()
 					}
 				}
 				log.nvof = warp.OpticalFlowUsed();
-				Check(!hardware || log.nvof, "camera accuracy: the optical flow engine did not run on a hardware GPU: " + warp.OpticalFlowError());
+				Check(!hardware || log.nvof, "camera accuracy: the producer's pair was not used by the matcher on a hardware GPU: " + warp.OpticalFlowError());
 				const Dejudder::MotionWarp::CameraGuidanceUse u = warp.CameraGuidanceUsed();
 				auto flag = [&](bool on, const char* name)
 				{

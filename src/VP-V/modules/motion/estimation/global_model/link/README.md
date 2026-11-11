@@ -265,9 +265,7 @@ lagged seal does not. Test: `DeterministicModeTakesTheBridgePathOnly` (the ahead
 ### Measurement (prepared, not run)
 
 `VP_TEST_CAMERA_ACCURACY_AHEAD=1` adds `model_global_ahead` and `all_switches_ahead` to the camera accuracy report (BetaGpuTests
-`RunBetaCameraAccuracy`). The producer's NVOF pair is REPRODUCED OFFLINE (`tests/beta_gpu/AheadPairReplica.h`: the producer's `Process()` step
-for step, SLOW preset, half / quarter luma by the shared half-luma unit, ping-pong hints, the same readback and extras; the Beta host does not
-link the producer), served as the FlowView FlowOf gives and converted by the production `CopyAhead -> AheadToSourceGrid`. Outputs:
+`RunBetaCameraAccuracy`). The producer's NVOF pair comes from the REAL `MotionAhead::Producer` (the Beta host links MotionAheadProducer.cpp; `tests/beta_gpu/ProducerPairs.h` submits each frame as P010 and takes the pair from the P2 slot, WAIVER-MV-04), served as the FlowView FlowOf gives and converted by the production `CopyAhead -> AheadToSourceGrid`. Outputs:
 `summary.md` sections "Ahead fit" (timing vs the lead: pair / readback / convert / fit / latency, on-time share at leads 1-4 from a FIFO
 two-lane model of the measured costs) and "Accuracy A/B: ahead fit minus F2 seed fit", plus `camera-accuracy-ahead.csv`. Script:
 `D:\codex\videoprocessor\r1cam-ahead-run.ps1` (4 chunks: 24p / 59.94p x 1080 / 4K, FRAMES=120, GPU-QUIET protocol).

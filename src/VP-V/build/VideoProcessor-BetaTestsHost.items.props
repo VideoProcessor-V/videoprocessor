@@ -1,10 +1,10 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
   Copyright(C) 2026 VP-V contributors
   SPDX-License-Identifier: GPL-3.0-only
   VP-V items for VideoProcessor-BetaTestsHost (imported by the VPV-HOOK line of that project). R1-CAMACC: the camera units
   the camera accuracy report (BetaGpuTests.cpp, VP_TEST_CAMERA_ACCURACY) drives directly: the fitter, the measurement plan
-  and BuildGuide. Test code only; no runtime project lists these through this file.
+  and BuildGuide. WAIVER-MV-04: the REAL MotionAhead producer (MotionAheadProducer.cpp) the report drives for its optical-flow pairs. Test code only; no runtime project lists these through this file.
 -->
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
@@ -17,5 +17,8 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelSearchHints.cpp"/>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelMeasurement.cpp"/>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\GuidanceScheduler.cpp"/>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\MotionAheadProducer.cpp"/>
+    <!-- AnalysisLumaSource.cpp includes the Lib pch (MFC, DirectShow): not compilable here; the test stub implements what the producer calls. -->
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\beta_gpu\AnalysisLumaSourceTestStub.cpp"/>
   </ItemGroup>
 </Project>
