@@ -121,6 +121,16 @@ namespace VpMotion
 		// whose engine is untouched. The producer is unpublished under the directory lock and stopped outside it. False =
 		// no engine for `host` or no producer.
 		static bool ReleaseProducerFor(const void* host);
+		// W1-C2a A1 (doc 88 gap 1): the resync coordinator's "motion" FrameSeal provider for `host` (render thread, inside the
+		// seal, before the new era's first Observe). Binds this engine's motionValidity to `indicator` and registers the
+		// motion-history and vector-producer readers on it (VpMotion::Resync RegisterOn, the shared_ptr form); a null
+		// Indicator unbinds and registers nothing. Under the directory lock. False = no engine for `host`.
+		static bool RegisterResyncFor(const void* host, const std::shared_ptr<VpIndicator::Indicator>& indicator);
+		// The bind half alone (no readers): resync_event turned off unbinds (null), turned on again over the SAME Indicator
+		// (FrameSeal runs providers only on a new era) rebinds; the readers registered at that era still fire.
+		static bool BindResyncFor(const void* host, const std::shared_ptr<VpIndicator::Indicator>& indicator);
+		// The Indicator this engine's validity is bound to (null = unbound: resync_event off). Tests and status.
+		static bool ResyncBoundFor(const void* host);
 
 		// What the producer plan reads from the renderer, as plain values. The two atomics are read
 		// at the points the old inline block read them (low latency first, the queue depth after the

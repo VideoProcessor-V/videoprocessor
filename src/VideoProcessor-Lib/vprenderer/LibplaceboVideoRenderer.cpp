@@ -12285,6 +12285,9 @@ struct LibplaceboVideoRenderer::Impl
 		const bool epochMoved = vectorEngine.TakeInvalidation(pending);   // VPV-HOOK
 		if (!VpMotion::TakeDejudderHistoryAction(resync.Driving(), epochMoved, pending, dejudderPolicy.motionHistory))   // VPV-HOOK M2 P5b-7 (Q4 reader action; off/shadow = today)
 			return;
+		if (dejudder)   // VPV-HOOK W1-C2a A2: the snapshot lease ends with the epoch (both branches)
+			dejudder->InvalidateSnapshot();   // VPV-HOOK
+		vectorEstimate.ResetSnapshot();   // VPV-HOOK
 		if (pending.release)
 		{
 			ReleaseDejudder();

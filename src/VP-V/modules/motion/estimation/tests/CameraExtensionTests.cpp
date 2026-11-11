@@ -139,7 +139,7 @@ namespace CameraExtensionTestsNs
 			Assert::AreEqual<size_t>(0, rig.ext.HostStates());
 			Assert::IsTrue(rig.Lines(RE::StatusKind::Lines).empty());
 			Assert::IsTrue(rig.Lines(RE::StatusKind::Fallbacks).empty());
-			Assert::AreEqual<size_t>(2, ResyncExtension::SealFor(rig.Host())->ProviderCount(), L"no reader provider was added");
+			Assert::AreEqual<size_t>(3, ResyncExtension::SealFor(rig.Host())->ProviderCount(), L"no reader provider was added (drive, DV, motion)");
 		}
 
 		TEST_METHOD(ReportShowsOneLineAndAllocatesNothing)
@@ -158,7 +158,7 @@ namespace CameraExtensionTestsNs
 			const std::vector<std::string> lines = rig.Lines(RE::StatusKind::Lines);
 			Assert::IsTrue(Has(lines, "camera=report mode; fit idle (no vector engine yet, P5a pending); guided matching (K4) off"));
 			Assert::IsTrue(rig.Lines(RE::StatusKind::Fallbacks).empty(), L"report mode with a store is not a downgrade");
-			Assert::AreEqual<size_t>(3, ResyncExtension::SealFor(rig.Host())->ProviderCount(), L"the camera reader provider");
+			Assert::AreEqual<size_t>(4, ResyncExtension::SealFor(rig.Host())->ProviderCount(), L"the camera reader provider");
 			Assert::IsNull(rig.ext.Query("vpv.camera.v1"), L"no consumer is fed");
 			RE::Context c; c.host = rig.Host();
 			std::string reply;

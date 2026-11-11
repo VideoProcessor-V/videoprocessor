@@ -84,7 +84,8 @@ namespace TemporalDetail
 			if (seq == 0)
 				return Absent(m_stats.absent, "no previous frame");
 			const uint64_t from = seq - 1, to = seq;
-			if (m_validity && !m_validity->PairValid(from, to, m_validity->EpochOfLastKept(), m_validity->Epoch()))
+			if (m_validity && (!m_validity->PairValid(from, to, m_validity->EpochOfLastKept(), m_validity->Epoch()) ||
+				!m_validity->PairValidAt(from, to)))   // W1-C2a A1: the stamped generations too (Adjacent while unbound)
 				return Absent(m_stats.stale, "the vectors-valid state moved (a resync, a gap or a settings change)");
 			const MotionAhead::FlowPtr flow = m_view.Find(from, to);
 			if (!flow)

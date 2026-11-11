@@ -313,7 +313,8 @@ namespace VpMotion
 			from = sequence;
 			to = nextSequence;
 			if (nextSequence == sequence + 1 &&
-				motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
+				motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()) &&
+				motionValidity.PairValidAt(from, to))   // W1-C2a A1: the stamped generations too (Adjacent while unbound)
 				flow = P2().Find(from, to);
 			NoteGlobalPair(flow != nullptr);
 		}
@@ -322,7 +323,8 @@ namespace VpMotion
 			{
 				from = sequence - 1 - age;
 				to = sequence - age;
-				if (motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
+				if (motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()) &&
+					motionValidity.PairValidAt(from, to))   // W1-C2a A1
 					flow = P2().Find(from, to);
 			}
 		// SK-MV row 24: the frame-analysis record carries the shared engine's global, or "absent" (never a stale value). The store is
@@ -345,7 +347,8 @@ namespace VpMotion
 			flow->global[0][2], flow->global[0][3], facts.pictureHeight);
 		if (recordStore)
 			MotionRecord::Publish(recordStore, to, MotionRecord::SummaryOf(
-				motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()), from, to, flow->global[0], halvings));
+				motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()) &&
+				motionValidity.PairValidAt(from, to), from, to, flow->global[0], halvings));   // W1-C2a A1
 		if (g.usable && vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan))
 			host.NoteSourceMonitorMotion(g.sourcePixels, to);
 		if (vectorDemand.Serves(VectorDemand::Consumer::MotionIntent) && host.IntentActive())
@@ -507,6 +510,35 @@ namespace VpMotion
 			else
 				engine.motionValidity.Invalidate(cause);
 		});
+	}
+
+	bool VectorEngine::RegisterResyncFor(const void* host, const std::shared_ptr<VpIndicator::Indicator>& indicator)
+	{
+		if (!host)
+			return false;
+		return Engines().WithEngine(host, [&](VectorEngine& engine) {
+			VpMotionResync::RegisterOn(indicator, engine.motionValidity, engine.motionResyncReaders);
+		});
+	}
+
+	bool VectorEngine::BindResyncFor(const void* host, const std::shared_ptr<VpIndicator::Indicator>& indicator)
+	{
+		if (!host)
+			return false;
+		return Engines().WithEngine(host, [&](VectorEngine& engine) {
+			if (indicator)
+				engine.motionValidity.Bind(indicator);
+			else
+				engine.motionValidity.Unbind();
+		});
+	}
+
+	bool VectorEngine::ResyncBoundFor(const void* host)
+	{
+		bool bound = false;
+		if (host)
+			Engines().WithEngine(host, [&](VectorEngine& engine) { bound = engine.motionValidity.Driven(); });
+		return bound;
 	}
 
 	bool VectorEngine::ReleaseProducerFor(const void* host)

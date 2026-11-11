@@ -418,8 +418,8 @@ namespace SkeletonModuleTestsNs
 			Assert::IsNull(rig.sk.LaneOf(rig.Host()));
 			Assert::IsTrue(rig.Lines(RE::StatusKind::Lines).empty());
 			Assert::IsTrue(rig.Lines(RE::StatusKind::Fallbacks).empty());
-			// The seal carries only the resync providers: nothing of ours was added.
-			Assert::AreEqual<size_t>(2, ResyncExtension::SealFor(rig.Host())->ProviderCount());
+			// The seal carries only the resync providers (drive, DV, motion: W1-C2a A1): nothing of ours was added.
+			Assert::AreEqual<size_t>(3, ResyncExtension::SealFor(rig.Host())->ProviderCount());
 			Assert::AreEqual<size_t>(2, ResyncExtension::SealFor(rig.Host())->SubscriberCount(), L"drive and metrics, nothing of ours");
 			RE::Context c; c.host = rig.Host();
 			std::string reply;

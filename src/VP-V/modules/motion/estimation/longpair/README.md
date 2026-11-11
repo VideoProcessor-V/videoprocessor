@@ -28,6 +28,10 @@ None. The service returns a `Result` per ticket (`TryTake`, or `RunNow` for test
 * Hint: `HintField` (TD's composed trail, half-luma px, any block grid; non-finite cell = 0) is resampled bilinearly between cell centres to the 4 px grid and converted to S10.5 (clamped to +-1023 px). The backward direction gets no hint buffer from the engine; the CPU search uses `-hint`.
 * The hinted-NVOF capability is checked with `NV_OF_CAPS_SUPPORT_HINT_WITH_OF_MODE`; the supported-grid-size capability is not queried (an init failure carries the driver text and takes the fallback).
 
+## Resync contract (W1-C2a A7, doc 88 gap 6)
+
+The service is unwired (`IVectorEngine::SubmitLongPair` returns `Unavailable`). Whoever wires it MUST, before the first submit, bind the engine's one vectors-valid state with `Service::SetEpochSource(&engine.motionValidity)`. Each submit records that state's epoch; `TryTake` refuses a finished result whose epoch has moved since (a resync / seek / gap / format or settings change between the previous I and the new I), counts it in `Stats::staleEpoch` and returns false, so an I-to-I pair spanning a discontinuity is never served. With resync_event on the epoch moves at the seal of the frame that carries the FULL (MotionValidity bound to the Indicator), so the same rule covers both modes. Submits made while unbound still run (tests, the bench dump) and are counted in `Stats::withoutEpochSource`, which must stay 0 once wired. Guard: `LongPairTests::EpochSourceRefusesAPairAcrossAnEpochMove` plus the `Unavailable` assertions in `VectorEngineTests` / `VectorEngineHookTests` (wiring without the bind fails review against this paragraph).
+
 ## Status and fallbacks
 
 * Fallback = matcher seeded search: the CPU reference (`SeededSearch.h`, law identical to `tools/eval/motion_bench/longpair_bench.py`) or the matcher backend P5a binds through `ISeededBackend`. It runs whenever the hinted session cannot (no driver / no engine / busy, hints unsupported, init or execute failure, 3 execute failures in a row latch, `useNvof = false`).

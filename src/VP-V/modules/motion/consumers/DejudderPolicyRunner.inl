@@ -174,8 +174,8 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 		nextSourceSequence > sourceSequence &&
 		nextSourceSequence - sourceSequence <= static_cast<uint64_t>((std::max)(vpFillMaxSpan, 1)) &&
 		motionValidity.Current(motionValidity.EpochOfLastKept());
-	if (!fillPair && !motionValidity.PairValid(sourceSequence, nextSourceSequence, motionValidity.EpochOfLastKept(),
-		motionValidity.Epoch()))
+	if (!fillPair && (!motionValidity.PairValid(sourceSequence, nextSourceSequence, motionValidity.EpochOfLastKept(),
+		motionValidity.Epoch()) || !motionValidity.PairValidAt(sourceSequence, nextSourceSequence)))   // W1-C2a A1
 		return;
 	// Stage B: a frame no refresh shows (a source faster than the display) needs no
 	// pair (the producer still computes its pairs ahead).

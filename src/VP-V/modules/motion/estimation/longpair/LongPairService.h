@@ -29,6 +29,7 @@
 #include <vector>
 
 struct IDXGIAdapter;
+namespace MotionValidity { class State; }
 
 namespace VpLongPair
 {
@@ -50,6 +51,7 @@ namespace VpLongPair
 		Field field;
 		std::string error;       // set when !ok (no path could produce a field)
 		double ms = 0.0;
+		uint64_t epoch = 0;      // W1-C2a A7: the epoch source's epoch at submit (0 = no epoch source bound)
 	};
 
 	struct Config
@@ -66,6 +68,8 @@ namespace VpLongPair
 		uint64_t submitted = 0, refused = 0, done = 0, nvofHinted = 0, nvofUnhinted = 0, seeded = 0, failed = 0;
 		uint64_t stored = 0;    // results published by the worker (async tickets)
 		uint64_t evicted = 0;   // untaken results dropped because more than Config::maxResults were waiting (each counted once)
+		uint64_t staleEpoch = 0;          // W1-C2a A7: finished results refused by TryTake because the epoch moved after submit
+		uint64_t withoutEpochSource = 0;  // submits accepted while no epoch source was bound (must stay 0 once wired)
 	};
 
 	class Service
@@ -81,6 +85,14 @@ namespace VpLongPair
 		// ("SetAdapter was not called ..."); there is no default-adapter guess. A different adapter replaces the device and
 		// clears the latch. Call before the first submit (it waits for a pair running on the GPU).
 		void SetAdapter(IDXGIAdapter* adapter);
+
+		// W1-C2a A7 (doc 88 gap 6) RESYNC CONTRACT: the owner that wires this service to IVectorEngine MUST bind the engine's
+		// vectors-valid state here BEFORE the first submit. Each submit records that state's epoch; TryTake refuses (counts
+		// Stats::staleEpoch, returns false) a result whose epoch moved since (a resync, seek, gap, format or settings change:
+		// the I-to-I pair spans the discontinuity). Null unbinds. `validity` must outlive the service or be unbound first.
+		// Unbound submits still run (tests, bench) and are counted in Stats::withoutEpochSource.
+		void SetEpochSource(const MotionValidity::State* validity);
+		bool EpochSourceBound() const;
 
 		// Async: copies the planes and the hint, returns a ticket (> 0), or 0 when refused (bad size / queue full).
 		uint64_t SubmitLongPair(const uint8_t* lumaA, const uint8_t* lumaB, int w, int h, const HintField* hint);

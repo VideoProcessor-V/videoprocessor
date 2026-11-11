@@ -295,7 +295,8 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		// MotionValidity step 1 D: a stored pair only for adjacent frames of the current
 		// epoch (otherwise the matcher runs).
 		MotionAhead::FlowPtr flow = motionValidity.PairValid(aSequence, bSequence, motionValidity.EpochOfLastKept(),
-			motionValidity.Epoch()) ? vectorEngine.P2().Find(aSequence, bSequence) : nullptr;   // SK-MV: P2 read through the view
+			motionValidity.Epoch()) && motionValidity.PairValidAt(aSequence, bSequence)   // W1-C2a A1
+			? vectorEngine.P2().Find(aSequence, bSequence) : nullptr;   // SK-MV: P2 read through the view
 		if (flow) ++motionAheadHits; else ++motionAheadMisses;
 		// Latch review 2026-10-17: the engine's whole-frame motion (z < 0.9 usable) for
 		// source_resolution auto's fast-pan switch. Bug hunt 3 F1: one cell is 8 source px

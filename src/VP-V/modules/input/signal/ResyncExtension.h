@@ -73,6 +73,11 @@ namespace Vpv
 			int motionAheadFrames = 0;
 			uint64_t lastSealedSeq = 0;
 			uint64_t lastInjectSeq = 0;
+			// W1-C2a A1: the "motion" provider. motionReadersOn = the era the motion readers were registered on (the vector engine's
+			// own readers); motionBound = the engine's validity is bound to it now (off unbinds; on again over the same era rebinds).
+			std::weak_ptr<VpIndicator::Indicator> motionReadersOn;
+			bool motionBound = false;
+			unsigned long long motionNoEngine = 0;   // eras that started with no vector engine for this host (motion stays unbound: immediate epochs)
 
 			// Capture thread only (the pulldown runs in OnVideoFrame before the frame is queued).
 			VpResync::Drive::Cursor pulldownCursor;
