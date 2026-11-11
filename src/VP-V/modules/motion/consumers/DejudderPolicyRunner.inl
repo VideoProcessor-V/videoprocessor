@@ -43,9 +43,9 @@ namespace
 			const auto& current = call.current;
 			const auto& contract = call.contract;
 			return next && current &&
-				next->Bytes() == current->Bytes() && next->Raw() == current->Raw() &&
-				(!next->Raw() || next->rawEncoding == current->rawEncoding) &&
-				next->dvTunnelRaw == current->dvTunnelRaw &&
+				Vpv::Capture::BytesOf(*next) == Vpv::Capture::BytesOf(*current) && Vpv::Capture::IsRaw(*next) == Vpv::Capture::IsRaw(*current) &&
+				(!Vpv::Capture::IsRaw(*next) || Vpv::Capture::RawEncodingOf(*next) == Vpv::Capture::RawEncodingOf(*current)) &&
+				Vpv::Capture::DvTunnelRawOf(*next) == Vpv::Capture::DvTunnelRawOf(*current) &&
 				next->contract.sampleRange == contract.sampleRange &&
 				next->contract.colorDepth == contract.colorDepth &&
 				next->contract.bitShift == contract.bitShift &&
@@ -187,10 +187,10 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	dejudderLayout.height = height;
 	dejudderLayout.chromaHeight = chromaHeight;
 	dejudderLayout.rowBytes = rowBytes;
-	dejudderLayout.pixelBytes = next->Bytes();
-	dejudderLayout.raw = next->Raw();
-	dejudderLayout.rawEncoding = next->Raw() ? next->rawEncoding : VideoFrameEncoding::UNKNOWN;
-	dejudderLayout.dvTunnelRaw = next->dvTunnelRaw;
+	dejudderLayout.pixelBytes = Vpv::Capture::BytesOf(*next);
+	dejudderLayout.raw = Vpv::Capture::IsRaw(*next);
+	dejudderLayout.rawEncoding = Vpv::Capture::IsRaw(*next) ? Vpv::Capture::RawEncodingOf(*next) : VideoFrameEncoding::UNKNOWN;
+	dejudderLayout.dvTunnelRaw = Vpv::Capture::DvTunnelRawOf(*next);
 	dejudderLayout.rgb = dejudderRgbLuma != nullptr;
 	dejudderLayout.bt2020 = dejudderRgbBt2020;
 	dejudderLayout.lossless422 = lossless422;

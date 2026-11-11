@@ -207,7 +207,7 @@ namespace VideoProcessorTest
 			Assert::IsNull(Vpv::Capture::EarlyUploadDue(slot), L"no hand-off: skipped");
 			e->earlyHandoff = std::make_shared<EarlyUploadHandoff>();
 			Assert::IsNull(Vpv::Capture::EarlyUploadDue(slot), L"no frame: skipped");
-			e->earlyFrame = std::make_shared<VideoFrame>();
+			e->rawFrame = std::make_shared<VideoFrame>();
 			Assert::IsTrue(Vpv::Capture::EarlyUploadDue(slot) == e.get(), L"both: due");
 		}
 	};

@@ -60,8 +60,10 @@ void LibplaceboVideoRenderer::Impl::CaptureReleaseGpu()
 //   against a copy of the old rgbRaw / dvRaw / if-else chain over every combination);
 // - `m_impl->` dropped (these are Impl members now); the renderer's own members through `host`
 //   (m_videoConversionOverride, AcquireConversionPayload); the loop's locals through the context;
-// - makeRaw keeps the early hand-off in the payload's R18 slot (Vpv::Capture::PayloadExtension) instead of the loop's
-//   four locals (earlyHandoff, earlyFrame, earlyRowBytes, earlyHeight), for CaptureAfterPublish;
+// - makeRaw keeps the raw frame, its layout, the early hand-off and the DV tunnel flags in the payload's R18 slot
+//   (Vpv::Capture::PayloadExtension; r2/p10: the former payload members rawFrame, rawRowBytes, rawBytes, rawEncoding,
+//   early, earlyHandoff, dvTunnelRaw, dvTunnelHighAligned) instead of the loop's four locals (earlyHandoff,
+//   earlyFrame, earlyRowBytes, earlyHeight), for CaptureAfterPublish;
 // - a throw inside a route is caught here and its text handed back through *cc.error (the hub contains throws, and
 //   a contained throw would otherwise fall back to the host formatter): the loop rethrows it, so the frame fails with
 //   the same text exactly as before.
@@ -109,9 +111,12 @@ bool LibplaceboVideoRenderer::Impl::CaptureConvert(RendererExtension::ConvertCon
 			const bool rgbRaw = route == Vpv::Capture::ConvertRoute::RawRgb;
 			// The raw frame held for the render's GPU unpack (capture_path gpu,
 			// native_rgb_ingest, dv_tunnel_gpu_unpack).
-			auto makeRaw = [&]()
+			// The capture data goes in the payload's R18 slot: the caller assigns `capture` to raw->extension before the payload is
+			// published (and never after).
+			auto makeRaw = [&](std::shared_ptr<Vpv::Capture::PayloadExtension>& capture)
 			{
 				auto raw = std::make_shared<QueuedFrame::ConvertedPayload>();
+				capture = std::make_shared<Vpv::Capture::PayloadExtension>();
 				frame.SourceBufferAddRef();   // released with the payload
 				// Capture buffers held by raw payloads (owner 2026-10-15): the most
 				// at once is logged when it rises, to check against the card's pool.
@@ -123,27 +128,22 @@ bool LibplaceboVideoRenderer::Impl::CaptureConvert(RendererExtension::ConvertCon
 				if (held > peak)
 					DebugLog::Log("Capture raw route: up to %d capture buffers held at once (queue, next / ahead frames)", held);
 				std::shared_ptr<std::atomic<int>> heldCounter = rawBuffersHeld;
-				raw->rawFrame = std::shared_ptr<VideoFrame>(new VideoFrame(frame), [heldCounter](VideoFrame* f)
+				capture->rawFrame = std::shared_ptr<VideoFrame>(new VideoFrame(frame), [heldCounter](VideoFrame* f)
 				{
 					f->SourceBufferRelease();
 					delete f;
 					--*heldCounter;
 				});
-				raw->rawRowBytes = static_cast<size_t>(state->BytesPerRow());
-				raw->rawBytes = static_cast<size_t>(state->BytesPerFrame());
-				raw->rawEncoding = state->videoFrameEncoding;
+				capture->rawRowBytes = static_cast<size_t>(state->BytesPerRow());
+				capture->rawBytes = static_cast<size_t>(state->BytesPerFrame());
+				capture->rawEncoding = state->videoFrameEncoding;
 				// capture_upload: early - the upload runs after the payload is
 				// published (EarlyUploadHandoff::RunUpload, CaptureAfterPublish); the frame is
 				// held here so the upload can read it.
 				if (EarlyActive() && earlyUpload->IsOpen() && state->displayMode)
 				{
-					raw->earlyHandoff = std::make_shared<EarlyUploadHandoff>();
-					auto early = std::make_shared<Vpv::Capture::PayloadExtension>();
-					early->earlyHandoff = raw->earlyHandoff;
-					early->earlyFrame = raw->rawFrame;
-					early->earlyRowBytes = raw->rawRowBytes;
-					early->earlyHeight = static_cast<int>(state->displayMode->FrameHeight());
-					raw->extension = std::move(early);
+					capture->earlyHandoff = std::make_shared<EarlyUploadHandoff>();
+					capture->earlyHeight = static_cast<int>(state->displayMode->FrameHeight());
 				}
 				return raw;
 			};
@@ -156,7 +156,9 @@ bool LibplaceboVideoRenderer::Impl::CaptureConvert(RendererExtension::ConvertCon
 			}
 			else if (route == Vpv::Capture::ConvertRoute::RawRgb || route == Vpv::Capture::ConvertRoute::RawCapture)
 			{
-				auto raw = makeRaw();
+				std::shared_ptr<Vpv::Capture::PayloadExtension> capture;
+				auto raw = makeRaw(capture);
+				raw->extension = std::move(capture);
 				if (rgbRaw)
 				{
 					raw->contract.sampleRange = GpuRgbUnpack::FullRange(state->videoFrameEncoding) ?
@@ -198,9 +200,11 @@ bool LibplaceboVideoRenderer::Impl::CaptureConvert(RendererExtension::ConvertCon
 				}
 				if (result == CRGBDolbyVisionTunnelFormatter::FrameResult::PICTURE)
 				{
-					auto raw = makeRaw();
-					raw->dvTunnelRaw = true;
-					raw->dvTunnelHighAligned = highAligned;
+					std::shared_ptr<Vpv::Capture::PayloadExtension> capture;
+					auto raw = makeRaw(capture);
+					capture->dvTunnelRaw = true;
+					capture->dvTunnelHighAligned = highAligned;
+					raw->extension = std::move(capture);
 					converted = raw;
 				}
 				else
@@ -234,8 +238,8 @@ void LibplaceboVideoRenderer::Impl::CaptureAfterPublish(RendererExtension::Publi
 	if (!published)
 		return;
 	const std::shared_ptr<EarlyUploadHandoff>& earlyHandoff = published->earlyHandoff;
-	const std::shared_ptr<VideoFrame>& earlyFrame = published->earlyFrame;
-	const size_t earlyRowBytes = published->earlyRowBytes;
+	const std::shared_ptr<VideoFrame>& earlyFrame = published->rawFrame;   // the held raw frame is the early frame
+	const size_t earlyRowBytes = published->rawRowBytes;
 	const int earlyHeight = published->earlyHeight;
 		earlyHandoff->RunUpload([&] { return EarlyActive() && earlyUpload->IsOpen() ?
 			std::shared_ptr<void>(earlyUpload->Upload(earlyFrame->GetData(), earlyRowBytes, earlyHeight)) : std::shared_ptr<void>(); });
@@ -338,12 +342,13 @@ void LibplaceboVideoRenderer::Impl::SyncEarlyUpload(size_t frameBytes)
 
 pl_tex LibplaceboVideoRenderer::Impl::EarlyTexture(const QueuedFrame::ConvertedPayload& payload, EarlyUpload::Slot*& slot, EarlyTake* take)
 {
-	std::shared_ptr<void> handle = payload.early;
+	const Vpv::Capture::PayloadExtension* const capture = Vpv::Capture::CaptureOf(payload);
+	std::shared_ptr<void> handle = capture ? capture->early : std::shared_ptr<void>();
 	EarlyUploadHandoff::Outcome outcome = EarlyUploadHandoff::Outcome::NoSlot;
 	bool first = false;
 	const double takeStart = PassTimerHook::Hook::NowMs();
-	if (!handle && payload.earlyHandoff)
-		handle = payload.earlyHandoff->Take(&outcome, &first);   // the slot stays alive through the handoff the payload holds
+	if (!handle && capture && capture->earlyHandoff)
+	handle = capture->earlyHandoff->Take(&outcome, &first);   // the slot stays alive through the handoff the payload holds
 	const bool waited = outcome == EarlyUploadHandoff::Outcome::WaitedThenEarly || outcome == EarlyUploadHandoff::Outcome::WaitedThenNone;
 	slot = handle ? static_cast<EarlyUpload::Slot*>(handle.get()) : nullptr;
 	pl_tex tex = slot && earlyUpload->IsOpen() ? earlyUpload->Acquire(*slot) : nullptr;
@@ -374,27 +379,28 @@ void LibplaceboVideoRenderer::Impl::BookUploadTimers(pl_tex early, const EarlyTa
 
 bool LibplaceboVideoRenderer::Impl::UnpackRgbPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, bool bt2020, pl_tex& rgb, pl_tex& luma)
 {
-	if (!payload.Raw() || !d3d11)
-		return false;
+	const Vpv::Capture::PayloadExtension* const raw = Vpv::Capture::RawOf(payload);
+	if (!raw || !d3d11)
+	return false;
 	if (!rgbUnpack)
 		rgbUnpack = std::make_unique<GpuRgbUnpack>(log, d3d11->gpu);
-	SyncEarlyUpload(payload.rawBytes);
+	SyncEarlyUpload(raw->rawBytes);
 	EarlyUpload::Slot* slot = nullptr;
 	const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
 	EarlyTake take;
 	const pl_tex early = EarlyTexture(payload, slot, &take);
-	bool unpacked = rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
+	bool unpacked = rgbUnpack->Unpack(raw->rawEncoding, bt2020, raw->rawFrame->GetData(), raw->rawRowBytes, width, height,
 		rgb, luma, false, early);
 	if (slot)
 		earlyUpload->Used(*slot);
 	BookUploadTimers(early, take, uploadCpuStart);
 	if (!unpacked && early)
-		unpacked = rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, rgb, luma);
+		unpacked = rgbUnpack->Unpack(raw->rawEncoding, bt2020, raw->rawFrame->GetData(), raw->rawRowBytes, width, height, rgb, luma);
 	if (unpacked)
 	{
 		if (!rgbGpuLogged)
 		{
-			const VideoFrameEncoding e = payload.rawEncoding;
+			const VideoFrameEncoding e = raw->rawEncoding;
 			DebugLog::Log("Native RGB ingest: %s unpacked on the GPU to RGB 4:4:4 (%dx%d, no CPU conversion)",
 				e == VideoFrameEncoding::R210 ? "r210" : e == VideoFrameEncoding::R12B ? "R12B" :
 				e == VideoFrameEncoding::R12L ? "R12L" : e == VideoFrameEncoding::R10b ? "R10b" :
@@ -414,20 +420,21 @@ bool LibplaceboVideoRenderer::Impl::UnpackRgbPayload(const QueuedFrame::Converte
 
 bool LibplaceboVideoRenderer::Impl::UnpackDolbyVisionOnCpu(const QueuedFrame::ConvertedPayload& payload, int width, int height, std::vector<BYTE>& pixels)
 {
-	if (!payload.Raw() || !payload.dvTunnelRaw || width <= 0 || height <= 0 ||
-		payload.rawRowBytes < static_cast<size_t>(width) * 4 ||
-		payload.rawBytes < payload.rawRowBytes * static_cast<size_t>(height))
+	const Vpv::Capture::PayloadExtension* const raw = Vpv::Capture::RawOf(payload);
+	if (!raw || !raw->dvTunnelRaw || width <= 0 || height <= 0 ||
+		raw->rawRowBytes < static_cast<size_t>(width) * 4 ||
+		raw->rawBytes < raw->rawRowBytes * static_cast<size_t>(height))
 		return false;
 	std::lock_guard<std::mutex> formatterGuard(formatterMutex);
 	auto* dv = dynamic_cast<CRGBDolbyVisionTunnelFormatter*>(formatter.get());
 	const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
 	if (!dv || !formatterState || !formatterState->displayMode ||
-		formatterState->videoFrameEncoding != payload.rawEncoding ||
+		formatterState->videoFrameEncoding != raw->rawEncoding ||
 		static_cast<size_t>(dv->GetOutFrameSize()) != bytes ||
-		static_cast<size_t>(formatterState->BytesPerRow()) != payload.rawRowBytes)
+		static_cast<size_t>(formatterState->BytesPerRow()) != raw->rawRowBytes)
 		return false;
 	pixels.resize(bytes);
-	return dv->UnpackPicture(payload.rawFrame->GetData(), pixels.data(), payload.dvTunnelHighAligned);
+	return dv->UnpackPicture(raw->rawFrame->GetData(), pixels.data(), raw->dvTunnelHighAligned);
 }
 
 bool LibplaceboVideoRenderer::Impl::UnpackDolbyVisionPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],
@@ -437,51 +444,55 @@ bool LibplaceboVideoRenderer::Impl::UnpackDolbyVisionPayload(const QueuedFrame::
 	// to the CPU fallback (no GPU retry per frame, no burst of late frames).
 	if (dvGpuFailed.load(std::memory_order_acquire))
 		return false;
+	const Vpv::Capture::PayloadExtension* const raw = Vpv::Capture::RawOf(payload);   // the callers pass a raw DV payload
+	if (!raw)
+	return false;
 	GpuDolbyVisionTunnelUnpack& unpack = dvUnpack.Unpacker(log, d3d11->gpu);
-	SyncEarlyUpload(payload.rawBytes);
+	SyncEarlyUpload(raw->rawBytes);
 	EarlyUpload::Slot* slot = nullptr;
 	const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
 	EarlyTake take;
 	const pl_tex early = EarlyTexture(payload, slot, &take);
-	bool unpacked = unpack.Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
-		payload.dvTunnelHighAligned, planes, early);
+	bool unpacked = unpack.Unpack(raw->rawEncoding, raw->rawFrame->GetData(), raw->rawRowBytes, width, height,
+		raw->dvTunnelHighAligned, planes, early);
 	if (slot)
 		earlyUpload->Used(*slot);
 	BookUploadTimers(early, take, uploadCpuStart);
 	if (!unpacked && early)   // the early texture refused: the frame itself
-		unpacked = unpack.Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
-			payload.dvTunnelHighAligned, planes);
-	return dvUnpack.Finish(unpacked, width, height, payload.dvTunnelHighAligned, sessionFallback, dvGpuFailed,
+		unpacked = unpack.Unpack(raw->rawEncoding, raw->rawFrame->GetData(), raw->rawRowBytes, width, height,
+			raw->dvTunnelHighAligned, planes);
+	return dvUnpack.Finish(unpacked, width, height, raw->dvTunnelHighAligned, sessionFallback, dvGpuFailed,
 		[this](const char* id, const std::string& reason) { EngageFallback(id, reason); });
 }
 
 bool LibplaceboVideoRenderer::Impl::UnpackRawPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],
 	bool sessionFallback)
 {
-	if (!payload.Raw() || !d3d11)
-		return false;
-	if (payload.dvTunnelRaw)
+	const Vpv::Capture::PayloadExtension* const raw = Vpv::Capture::RawOf(payload);
+	if (!raw || !d3d11)
+	return false;
+	if (raw->dvTunnelRaw)
 		return UnpackDolbyVisionPayload(payload, width, height, planes, sessionFallback);
 	if (!captureUnpack)
 		captureUnpack = std::make_unique<GpuCaptureUnpack>(log, d3d11->gpu);
-	SyncEarlyUpload(payload.rawBytes);
+	SyncEarlyUpload(raw->rawBytes);
 	EarlyUpload::Slot* slot = nullptr;
 	const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
 	EarlyTake take;
 	const pl_tex early = EarlyTexture(payload, slot, &take);
-	bool unpacked = captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
+	bool unpacked = captureUnpack->Unpack(raw->rawEncoding, raw->rawFrame->GetData(), raw->rawRowBytes, width, height,
 		planes, early);
 	if (slot)
 		earlyUpload->Used(*slot);
 	BookUploadTimers(early, take, uploadCpuStart);
 	if (!unpacked && early)   // the early texture refused: the frame itself
-		unpacked = captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, planes);
+		unpacked = captureUnpack->Unpack(raw->rawEncoding, raw->rawFrame->GetData(), raw->rawRowBytes, width, height, planes);
 	if (unpacked)
 	{
 		if (!captureGpuLogged)
 		{
 			DebugLog::Log("Capture path gpu: %s unpacked on the GPU (%dx%d, no CPU conversion)",
-				payload.rawEncoding == VideoFrameEncoding::V210 ? "V210" : "UYVY/HDYC", width, height);
+				raw->rawEncoding == VideoFrameEncoding::V210 ? "V210" : "UYVY/HDYC", width, height);
 			captureGpuLogged = true;
 		}
 		return true;

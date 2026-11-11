@@ -10,8 +10,11 @@
 // vpv.timed_file_frames.v1 (src/VP-V/abi: RendererAbiBridge forwards to these members; VPRendererFilter calls through
 // VpvHostCalls). Threads as before: the file thread (OnTimedVideoFrame, WaitForFileFrameSlot), any thread
 // (CancelFileFrameWait), the render loop under m_queueMutex (FileFrameSlotFreeLocked, FileHeadTicksUntilDueLocked).
-// The state (m_fileSlotGate, the file fields of QueuedFrame) stays in the renderer's header until the LVRH step
-// (R20: IQueueAdmission).
+// R20 (r2/p10): the file thread's own state is Vpv::QueueTiming::TimedFileState (TimedFileState.h, one renderer member
+// m_timedFile) and the per-frame timing handed to EnqueueFrame is the generic RendererExtension::ExternalTiming (it
+// replaces the renderer's FileQueueFields). m_fileSlotGate (FileFrameSlotGate: the render loop and the retire paths
+// Notify / Cancel it) and the file fields of QueuedFrame (read in the render loop) stay in the renderer's header until
+// the LVRH step (IQueueAdmission).
 // ABI 37 (VP Renderer DirectShow filter): a file frame. Capture timing is not
 // used (no UpdateFrameRateAndPPM, no pulldown detection or cadence): the film
 // clock is filled from the frame's own timing - the source rate (exact
@@ -28,7 +31,7 @@ void LibplaceboVideoRenderer::OnTimedVideoFrame(VideoFrame& videoFrame,
 		return;
 	if (!FileFrameClock::TimingUsable(timing))
 	{
-		const uint64_t total = m_fileTimingRejected.fetch_add(1, std::memory_order_relaxed) + 1;
+		const uint64_t total = m_timedFile.rejected.fetch_add(1, std::memory_order_relaxed) + 1;
 		m_droppedFrames.fetch_add(1, std::memory_order_relaxed);
 		if ((total & (total - 1)) == 0)
 			DebugLog::Log("File frame refused: timing block of %u bytes, this renderer needs %u (total %llu)",
@@ -69,11 +72,11 @@ void LibplaceboVideoRenderer::OnTimedVideoFrame(VideoFrame& videoFrame,
 
 	const double filmHz = FileFrameClock::FilmHz(timing);
 	const bool motionOff = !FileFrameClock::MotionAllowed(timing);
-	if (filmHz != m_fileLoggedFilmHz || motionOff != m_fileLoggedMotionOff)
+	if (filmHz != m_timedFile.loggedFilmHz || motionOff != m_timedFile.loggedMotionOff)
 	{
 		// On a change only (a seek, a rate change, pause / run).
-		m_fileLoggedFilmHz = filmHz;
-		m_fileLoggedMotionOff = motionOff;
+		m_timedFile.loggedFilmHz = filmHz;
+		m_timedFile.loggedMotionOff = motionOff;
 		DebugLog::Log("File frames: film clock %.6f Hz (source %u/%u = %.6f Hz, measured %.6f Hz, playback rate %.3f)%s, motion %s%s",
 			filmHz, timing.sourceRateNumerator, timing.sourceRateDenominator,
 			FileFrameClock::SourceRateHz(timing), timing.sourceRateHz, timing.playbackRate,
@@ -82,7 +85,8 @@ void LibplaceboVideoRenderer::OnTimedVideoFrame(VideoFrame& videoFrame,
 			timing.paused ? " (paused: shown and held)" : "");
 	}
 
-	FileQueueFields file;
+	RendererExtension::ExternalTiming file;   // R20: the generic per-frame timing
+	file.filmHz = filmHz;
 	file.presentationQpc = timing.presentationQpc;
 	file.paused = timing.paused;
 	file.motionOff = motionOff;

@@ -138,6 +138,7 @@ Moved code (renderer member definitions, each included ONCE by LibplaceboVideoRe
 |---|---|---|---|
 | `IngressPolicy.inl` | j | OnVideoFrame's three VP ingress blocks: the hardware arrival, the missed / break counters around Bill's UpdateFrameRateAndPPM, and R15 (pulldown detection, film clock, stale-delivery gap); the fault thunk | after EnqueueFrame |
 | `TimedFileFrames.inl` | l | OnTimedVideoFrame, the file slot gate, FileHeadTicksUntilDueLocked | after the IngressPolicy.inl include |
+| `TimedFileState.h` | R20 (r2/p10) | the file thread's own state (reject counter, logged film clock), ONE renderer member `m_timedFile`; the per-frame timing given to `EnqueueFrame` is the generic `RendererExtension::ExternalTiming` (the renderer's `FileQueueFields` is gone). `m_fileSlotGate` and the `QueuedFrame` file fields stay in the renderer header (render-loop readers) until the LVRH step |
 | `QueueDelayHold.inl` | m | SetQueueDelayBudget, CurrentQueueHold, QueuePolicy, UpdateQueueDelayHold, HoldTicksUntilDueLocked, WaitForDequeueLocked | after TimedFileFrames.inl, before Bill's UpdateFrameRateAndPPM |
 | `QueueTarget.inl` | q, m | QueueTargetVp (R19) and LockedFilmQueueTarget | after PrefillTargetLocked |
 

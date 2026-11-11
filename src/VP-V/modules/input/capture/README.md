@@ -125,7 +125,7 @@ Doc 59 section 5. The capture code leaves the renderer's file; the renderer keep
 | `CaptureImpl.inl` | the moved code, as out-of-line members of the renderer's Impl (the P5a pattern): `CaptureApplySettings` (item f), `CaptureReleaseGpu` (d), `CaptureConvert` (h), `CaptureAfterPublish` (i), the early upload and the unpackers (a functions, b). Included ONCE by the renderer after its Impl |
 | `CaptureRouteFacts.h` | `FactsOf`: the route's facts from the state, the override and the switches (pinned on real states) |
 | `CaptureRoutes.h` | `ChooseRoute`: the conversion route as a pure decision (pinned by `CaptureRouteTableTests`, 32768 rows against a copy of the old expressions) |
-| `CapturePayload.h` | the R18 slot's content (`PayloadExtension`; P10-3: the early hand-off) |
+| `CapturePayload.h` | the R18 slot's content (`PayloadExtension`: the raw frame and its layout, the early hand-off, the DV tunnel flags; r2/p10) and the free readers (`RawOf`, `IsRaw`, `BytesOf`, `RawEncodingOf`, `DvTunnelRawOf`, `RawFrameOf`, `HasEarlyUpload`, `EarlyUploadDue`) |
 
 Threads and locks (unchanged from before the move):
 
@@ -144,7 +144,24 @@ Bill's path: with the routes off (Original: capture_path standard, capture_uploa
 dv_tunnel_gpu_unpack off) `ChooseRoute` returns the host formatter, except libplacebo's native RGB upload (ARGB /
 BGRA), which the renderer took before P10 too. Bill's formatter block and log text in `ConversionLoop` are unchanged.
 
-Not done yet (P10 open items): the R18 header fields (DEFERRED until SK-W releases Z3, then one pass: D-8 open; readers at LVR 15747-15749 / 15964-15967, 11674-11675, 25098 / 25106), the upload branches via R17 `TryUpload`
+R18 (r2/p10, zone CAP): ALL capture data of the converted payload is one generic extension, `Vpv::Capture::PayloadExtension` in
+`QueuedFrame::ConvertedPayload::extension` (the one `// VPV-HOOK` slot): `rawFrame`, `rawRowBytes`, `rawBytes`,
+`rawEncoding`, `early`, `earlyHandoff`, `earlyHeight`, `dvTunnelRaw`, `dvTunnelHighAligned`. Bill's struct keeps his members
+(pixels, contract, dolby, conversionCpuMs, completedQpc) and VP's `captureEncoding` (set on EVERY payload, incl. the CPU
+formatter's, so it stays a member: moving it would cost one extension allocation per CPU frame). `Raw()` / `Bytes()` are
+the free readers `IsRaw` / `BytesOf`. The extension is built on the conversion thread before the publish and never reassigned
+after; a payload with no slot (CPU formatter, native-upload marker) answers as the former defaults. The earlier
+`earlyFrame` / `earlyRowBytes` are the same shared frame and row bytes as `rawFrame` / `rawRowBytes` (one pointer, not two).
+`AfterPublish` now fires for every raw payload (the slot is non-null for each); `EarlyUploadDue` still returns null unless
+the slot carries a hand-off and its frame, so nothing more runs.
+
+Design note (C9, doc 93, no code here): the payload's raw luma is the DECODE POINT that C9 will share. The raw frame the
+slot holds is unpacked once, on the GPU, by `UnpackRawPayload` / `UnpackRgbPayload` / the DV unpack; a later consumer of the
+picture's luma (source analysis) reads that unpack's luma output through the same slot and must not decode the capture frame
+a second time (compute once / skip if present). The slot is input.capture's; a consumer that needs more payload data of its
+own gets an interface, not a field here.
+
+Not done yet (P10 open items): the upload branches via R17 `TryUpload`
 (item g, DEFERRED until after P5b by the M2 lead: R17 stays unwired and `UploadContext` is not widened;
 the branches are interleaved with Bill's plane upload and the de-judder's `UpdateDejudderEstimate` / `TakeNextPlanes`,
 P5b's; `UploadContext` lacks the frame facts they read), the data members of item a, the init log (e), and the queue

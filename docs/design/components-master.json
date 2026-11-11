@@ -142,6 +142,7 @@
         "src/VP-V/modules/input/queue_timing/IngressState.h",
         "src/VP-V/modules/input/queue_timing/QueueDelayHold.inl",
         "src/VP-V/modules/input/queue_timing/TimedFileFrames.inl",
+        "src/VP-V/modules/input/queue_timing/TimedFileState.h",
         "src/VP-V/modules/input/queue_timing/WindowedRate.h",
         "src/VP-V/core/DelayBudget.h",
         "src/VP-V/modules/input/queue_timing/QueueLatency.h",
