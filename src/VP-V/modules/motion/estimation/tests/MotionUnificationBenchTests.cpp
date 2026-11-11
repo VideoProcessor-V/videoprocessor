@@ -16,13 +16,24 @@
 //   VP_MV_BENCH_PAIRS   number of frame positions (default 16), VP_MV_BENCH_START the first frame (default 0), VP_MV_BENCH_STEP the
 //                       spacing of the positions in frames (default 12)
 //
-// Per position n of the clip, two measurements:
-//   shift   frame n as A, B = A moved by a known (dx, dy) (real texture, exact ground truth): the trusted blocks' vector error
-//           (source px) and the trusted share.
+// Per position n of the clip, these measurements (kind column of the csv; tools/eval/motion_bench/mv_compare.py reads shift and interp
+// and ignores kinds it does not know, so the extra kinds below do not disturb its table):
+//   shift   frame n as A, B = A moved by a known INTEGER (dx, dy) (real texture, exact by construction: the error is ~0 and the trust 1
+//           for any decent matcher, so it does not discriminate quality; kept for the comparison with the older runs): the trusted
+//           blocks' vector error (source px) and the trusted share.
+//   subpx   the same with a FRACTIONAL global shift (bilinear resampling, ground truth = the shift).
+//   nonrigid  B = A under a smooth displacement field (translation + zoom + shear + a small wave), the ground truth vector of each block
+//           taken at its centre (fixed-point inverse of the field): the vector error here is a real figure of merit.
+//           Both extra kinds also write epe_p95_px (the 95th percentile of the trusted blocks' error).
 //   interp  frames n and n + 2 as A and B, the picture halfway (Warp at 0.5) against the real frame n + 1: luma PSNR and SSIM
 //           (60p material), plus the same for holding A (the floor the warp must beat).
 // Each in the two modes. Cost columns: the producer's pair time (lastPairMs, the NVOF ms of the pair mode) and the wall time of
 // the Estimate call (mode nopair before = includes the render-time engine run).
+// Measurement hygiene (doc 93 W2-C5a): ONE MotionWarp is built once and reused for every mode and position (a fresh warp per mode
+// charged shader compilation / texture allocation to whichever mode ran on it first); ForgetHistory() before each estimate keeps the
+// positions independent. The first use of each mode runs one untimed warm-up estimate (its wall ms is written as cold_estimate_ms).
+// The GPU is drained (pl_gpu_finish) before the clock starts and again before it stops, so estimate_ms is the GPU wall time, not the CPU
+// submit time. The order of the two modes alternates from group to group, so neither always pays the first-use costs.
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
@@ -146,6 +157,93 @@ namespace
 				const int sx = (std::min)((std::max)(x - dx, 0), width - 1), sy = (std::min)((std::max)(y - dy, 0), height - 1);
 				b[static_cast<size_t>(y) * width + x] = a[static_cast<size_t>(sy) * width + sx];
 			}
+	}
+
+	// A smooth displacement model for the ground-truth cases: B(x, y) = A(x - dx, y - dy), (dx, dy) = At(x, y), in source px.
+	// Pure translation when zoom = shear = wave = 0 (the fractional "subpx" case); otherwise the "nonrigid" case.
+	struct MvDisplacement
+	{
+		double tx = 0.0, ty = 0.0;      // translation
+		double zoom = 0.0;              // displacement at the picture edge from a zoom about the centre
+		double shear = 0.0;             // displacement at the edge from a shear
+		double wave = 0.0, period = 256.0;   // a sinusoidal ripple (amplitude, period in px)
+		int width = 1, height = 1;
+		void At(double x, double y, double& dx, double& dy) const
+		{
+			const double u = (x - 0.5 * width) / (0.5 * width), v = (y - 0.5 * height) / (0.5 * height);
+			const double twoPi = 6.283185307179586;
+			dx = tx + zoom * u + shear * v + wave * std::sin(twoPi * y / period);
+			dy = ty + zoom * v - 0.5 * shear * u + wave * std::sin(twoPi * x / period);
+		}
+		// The motion of A's content at (x, y): the vector v with v = d(position + v) (B(p + v) = A(p)); eight fixed-point steps (converged well below 1e-6 px).
+		void VectorAt(double x, double y, double& vx, double& vy) const
+		{
+			At(x, y, vx, vy);
+			for (int i = 0; i < 8; ++i)
+			{
+				double nx = 0.0, ny = 0.0;
+				At(x + vx, y + vy, nx, ny);
+				vx = nx;
+				vy = ny;
+			}
+		}
+	};
+
+	// B(x, y) = A(x - dx, y - dy) by bilinear sampling, edges clamped.
+	void MvWarpBilinear(const std::vector<uint8_t>& a, int width, int height, const MvDisplacement& d, std::vector<uint8_t>& b)
+	{
+		b.resize(a.size());
+		for (int y = 0; y < height; ++y)
+			for (int x = 0; x < width; ++x)
+			{
+				double dx = 0.0, dy = 0.0;
+				d.At(x, y, dx, dy);
+				const double sx = (std::min)((std::max)(x - dx, 0.0), width - 1.0), sy = (std::min)((std::max)(y - dy, 0.0), height - 1.0);
+				const int x0 = static_cast<int>(sx), y0 = static_cast<int>(sy);
+				const int x1 = (std::min)(x0 + 1, width - 1), y1 = (std::min)(y0 + 1, height - 1);
+				const double fx = sx - x0, fy = sy - y0;
+				const double top = a[static_cast<size_t>(y0) * width + x0] * (1.0 - fx) + a[static_cast<size_t>(y0) * width + x1] * fx;
+				const double bottom = a[static_cast<size_t>(y1) * width + x0] * (1.0 - fx) + a[static_cast<size_t>(y1) * width + x1] * fx;
+				b[static_cast<size_t>(y) * width + x] = static_cast<uint8_t>(top * (1.0 - fy) + bottom * fy + 0.5);
+			}
+	}
+
+	// Like MvFieldError, but the ground truth is the displacement model at each block's centre (16 source px blocks), and the
+	// 95th percentile of the trusted blocks' error is returned as well. -1 when no block is trusted.
+	double MvFieldErrorVsModel(const DejudderField& field, const MvDisplacement& model, long& trusted, long& total, double& p95)
+	{
+		std::vector<double> errors;
+		double sum = 0.0;
+		trusted = total = 0;
+		p95 = -1.0;
+		for (int by = 2; by < field.blocksY - 2; ++by)
+			for (int bx = 2; bx < field.blocksX - 2; ++bx)
+			{
+				++total;
+				if (!field.trusted(bx, by)) continue;
+				double gx = 0.0, gy = 0.0;
+				model.VectorAt(bx * 16.0 + 8.0, by * 16.0 + 8.0, gx, gy);
+				const double e = std::hypot(field.vx(bx, by) - gx, field.vy(bx, by) - gy);
+				sum += e;
+				errors.push_back(e);
+				++trusted;
+			}
+		if (!trusted) return -1.0;
+		std::sort(errors.begin(), errors.end());
+		p95 = errors[static_cast<size_t>(0.95 * (errors.size() - 1))];
+		return sum / trusted;
+	}
+
+	// One Estimate on a warmed matcher, timed with the GPU drained on both sides (pl_gpu_finish), history forgotten first so
+	// that every call is an independent pair.
+	double MvTimedEstimate(pl_gpu gpu, Dejudder::MotionWarp& warp, const Dejudder::Planes& a, const Dejudder::Planes& b, bool& ok)
+	{
+		warp.ForgetHistory();
+		pl_gpu_finish(gpu);
+		const auto t0 = std::chrono::steady_clock::now();
+		ok = warp.Estimate(a, b);
+		pl_gpu_finish(gpu);
+		return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 	}
 
 	// Luma PSNR (dB, peak 219: limited range) and the mean SSIM of 8 x 8 windows over the interior (a 16 px border excluded).
@@ -280,6 +378,58 @@ namespace VideoProcessorTest
 			Assert::AreEqual<long>(15, trusted, L"an untrusted block is not scored");
 		}
 
+		// The ground-truth model and its scorer (CPU): bilinear warping at an integer shift equals the integer shift, the block-centre
+		// ground truth of the non-rigid field inverts the displacement (a field built from it scores ~0), a biased field scores the bias,
+		// an untrusted block is not counted.
+		TEST_METHOD(GroundTruthModelAndScorer)
+		{
+			const int width = 96, height = 64;
+			std::vector<uint8_t> a(static_cast<size_t>(width) * height), viaShift, viaBilinear;
+			for (size_t i = 0; i < a.size(); ++i)
+				a[i] = static_cast<uint8_t>((i * 37u + (i / width) * 11u) & 255u);
+			MvDisplacement integer;
+			integer.tx = 5.0; integer.ty = 2.0; integer.width = width; integer.height = height;
+			MvShift(a, width, height, 5, 2, viaShift);
+			MvWarpBilinear(a, width, height, integer, viaBilinear);
+			Assert::IsTrue(viaShift == viaBilinear, L"bilinear warping at an integer shift is the integer shift");
+
+			MvDisplacement model;
+			model.tx = 4.3; model.ty = 1.2; model.zoom = 3.0; model.shear = 1.5; model.wave = 1.5; model.period = 320.0;
+			model.width = 1920; model.height = 1080;
+			double vx = 0.0, vy = 0.0, dx = 0.0, dy = 0.0;
+			model.VectorAt(968.0, 548.0, vx, vy);
+			model.At(968.0 + vx, 548.0 + vy, dx, dy);
+			Assert::AreEqual(vx, dx, 1e-6, L"the ground-truth vector satisfies v = d(p + v) (x)");
+			Assert::AreEqual(vy, dy, 1e-6, L"the ground-truth vector satisfies v = d(p + v) (y)");
+			Assert::IsTrue(std::fabs(vx - 4.3) < 6.0 && std::fabs(vy - 1.2) < 6.0, L"the field stays in the stated magnitude");
+
+			DejudderField f;
+			f.blocksX = 12; f.blocksY = 8;
+			f.texels.assign(static_cast<size_t>(f.blocksX) * f.blocksY * 4, 0.0f);
+			for (int by = 0; by < f.blocksY; ++by)
+				for (int bx = 0; bx < f.blocksX; ++bx)
+				{
+					double gx = 0.0, gy = 0.0;
+					model.VectorAt(bx * 16.0 + 8.0, by * 16.0 + 8.0, gx, gy);
+					const size_t i = (static_cast<size_t>(by) * f.blocksX + bx) * 4;
+					f.texels[i] = static_cast<float>(gx);
+					f.texels[i + 1] = static_cast<float>(gy);
+					f.texels[i + 2] = 1.0f;
+				}
+			long trusted = 0, total = 0;
+			double p95 = 0.0;
+			Assert::AreEqual(0.0, MvFieldErrorVsModel(f, model, trusted, total, p95), 1e-4, L"a field built from the ground truth scores ~0");
+			Assert::AreEqual<long>(32, total, L"the interior 8 x 4 blocks");
+			Assert::AreEqual<long>(32, trusted);
+			for (int i = 0; i < f.blocksX * f.blocksY; ++i)
+				f.texels[static_cast<size_t>(i) * 4] += 0.5f;   // a 0.5 px bias on x
+			Assert::AreEqual(0.5, MvFieldErrorVsModel(f, model, trusted, total, p95), 1e-3, L"a 0.5 px bias scores 0.5");
+			Assert::AreEqual(0.5, p95, 1e-3);
+			f.texels[(2 * f.blocksX + 2) * 4 + 2] = 0.0f;
+			MvFieldErrorVsModel(f, model, trusted, total, p95);
+			Assert::AreEqual<long>(31, trusted, L"an untrusted block is not scored");
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(BeforeAfterSingleNvofSource)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
@@ -361,6 +511,10 @@ namespace VideoProcessorTest
 				return settings;
 			};
 
+			// ONE matcher for every mode, kind and position (see the header): shaders compiled and textures allocated once.
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, settingsFor());
+			bool warmed[2] = { false, false };
+			int rotation = 0;   // alternates the order of the two modes from group to group
 			std::vector<uint8_t> lumaA, lumaB, lumaMid, lumaNext;
 			int ran = 0;
 			for (int p = 0; p < pairs; ++p)
@@ -370,76 +524,107 @@ namespace VideoProcessorTest
 				++ran;
 				DejudderFrame frameA, frameB, frameNext;
 				MvFrame(lumaA, width, height, frameA);
-				// ---- shift: exact ground truth on the real texture
+
+				// One group of the two modes on frame A against frame B (the producer pair is made from the same two pictures).
+				// ground != null: score the field against that displacement model; else against the constant (constX, constY).
+				// interpolate: score the halfway picture against `reference` instead of the field.
+				auto runGroup = [&](const char* kind, const DejudderFrame& frameB2, const MotionAhead::FlowPtr& pairFlow, double pairMs, const MvDisplacement* ground,
+									double constX, double constY, bool interpolate, const std::vector<uint8_t>& reference, double holdPsnr, double holdSsim) {
+					const int first = (rotation++) & 1;
+					for (int k = 0; k < 2; ++k)
+					{
+						const int mode = k == 0 ? first : 1 - first;
+						const char* name = mode == 0 ? "nopair" : "pair";
+						if (mode == 1 && !pairFlow) { row(kind, name, n, "no_pair", 1.0); continue; }
+						DejudderGpuPlanes pa, pb;
+						UploadDejudderFrame(gpu, frameA, pa);
+						UploadDejudderFrame(gpu, frameB2, pb);
+						bool ok = false;
+						if (!warmed[mode])
+						{
+							// Untimed warm-up of this mode (the pair / no-pair branch compiles its pipelines on first use); the cold figure is kept.
+							if (mode == 1) warp.SetExternalFlow(pairFlow);
+							const double cold = MvTimedEstimate(gpu, warp, pa.planes, pb.planes, ok);
+							row(kind, name, n, "cold_estimate_ms", cold);
+							warp.SetExternalFlow(nullptr);
+							warmed[mode] = true;
+						}
+						if (mode == 1)
+							warp.SetExternalFlow(pairFlow);
+						const double ms = MvTimedEstimate(gpu, warp, pa.planes, pb.planes, ok);
+						Dejudder::Planes out;
+						if (!ok || (interpolate && !warp.Warp(pa.planes, 0.5f, out))) { row(kind, name, n, "estimate_failed", 1.0); continue; }
+						if (mode == 1)
+							Assert::IsTrue(warp.ExternalFlowUsed(), L"the pair estimate must have taken the pair ahead (size or device mismatch otherwise)");
+						if (interpolate)
+						{
+							const std::vector<uint8_t> mid = MvLuma8(DownloadPlane(gpu, out.luma));
+							double psnr = 0.0, ssim = 0.0;
+							MvQuality(mid, reference, width, height, psnr, ssim);
+							row(kind, name, n, "psnr_db", psnr);
+							row(kind, name, n, "ssim", ssim);
+							row(kind, name, n, "hold_psnr_db", holdPsnr);
+							row(kind, name, n, "hold_ssim", holdSsim);
+						}
+						else
+						{
+							const DejudderField field = DownloadField(gpu, warp);
+							long trusted = 0, total = 0;
+							double p95 = -1.0;
+							MvDisplacement constant;
+							constant.tx = constX; constant.ty = constY; constant.width = width; constant.height = height;
+							const double epe = MvFieldErrorVsModel(field, ground ? *ground : constant, trusted, total, p95);   // Field() is in source px
+							row(kind, name, n, "epe_px", epe);
+							row(kind, name, n, "trusted_share", total ? static_cast<double>(trusted) / total : 0.0);
+							if (ground) row(kind, name, n, "epe_p95_px", p95);
+						}
+						row(kind, name, n, "estimate_ms", ms);
+						row(kind, name, n, "used_optical_flow_pair", warp.ExternalFlowUsed() ? 1.0 : 0.0);
+						row(kind, name, n, "engine_used", warp.OpticalFlowUsed() ? 1.0 : 0.0);   // OpticalFlowUsed: the pair was the optical-flow input
+						row(kind, name, n, "no_pair_ahead", MvNoPairAhead(warp, 0));
+						if (mode == 1) row(kind, name, n, "pair_ms", pairMs);
+					}
+				};
+
+				// ---- shift: exact ground truth (integer, real texture) - kept as the older runs had it
 				static const int shifts[3][2] = { { 8, 2 }, { 16, 4 }, { 32, 8 } };
 				const int* sh = shifts[p % 3];
 				MvShift(lumaA, width, height, sh[0], sh[1], lumaB);
 				MvFrame(lumaB, width, height, frameB);
 				double pairMs = 0.0;
-				const MotionAhead::FlowPtr shiftPair = producerPair(lumaA, lumaB, pairMs);
-				const double shiftPairMs = pairMs;
-				for (int mode = 0; mode < 2; ++mode)
 				{
-					const char* name = mode == 0 ? "nopair" : "pair";
-					if (mode == 1 && !shiftPair) { row("shift", name, n, "no_pair", 1.0); continue; }
-					DejudderGpuPlanes pa, pb;
-					UploadDejudderFrame(gpu, frameA, pa);
-					UploadDejudderFrame(gpu, frameB, pb);
-					Dejudder::MotionWarp warp(fixture.Log(), gpu, settingsFor());
-					if (mode == 1)
-						warp.SetExternalFlow(shiftPair);
-					const auto t0 = std::chrono::steady_clock::now();
-					const bool ok = warp.Estimate(pa.planes, pb.planes);
-					const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-					if (!ok) { row("shift", name, n, "estimate_failed", 1.0); continue; }
-					if (mode == 1)
-						Assert::IsTrue(warp.ExternalFlowUsed(), L"the pair estimate must have taken the pair ahead (size or device mismatch otherwise)");
-					const DejudderField field = DownloadField(gpu, warp);
-					long trusted = 0, total = 0;
-					const double epe = MvFieldError(field, sh[0], sh[1], trusted, total);   // Field() is in source px
-					row("shift", name, n, "epe_px", epe);
-					row("shift", name, n, "trusted_share", total ? static_cast<double>(trusted) / total : 0.0);
-					row("shift", name, n, "estimate_ms", ms);
-					row("shift", name, n, "used_optical_flow_pair", warp.ExternalFlowUsed() ? 1.0 : 0.0);
-					row("shift", name, n, "engine_used", warp.OpticalFlowUsed() ? 1.0 : 0.0);   // OpticalFlowUsed: the pair was the optical-flow input
-					row("shift", name, n, "no_pair_ahead", MvNoPairAhead(warp, 0));
-					if (mode == 1) row("shift", name, n, "pair_ms", shiftPairMs);
+					const MotionAhead::FlowPtr pair = producerPair(lumaA, lumaB, pairMs);
+					runGroup("shift", frameB, pair, pairMs, nullptr, sh[0], sh[1], false, lumaMid, 0.0, 0.0);
+				}
+				// ---- subpx: a fractional global shift
+				{
+					static const double fractional[3][2] = { { 3.5, 1.25 }, { 9.25, 2.5 }, { 17.75, -3.25 } };
+					MvDisplacement d;
+					d.tx = fractional[p % 3][0]; d.ty = fractional[p % 3][1]; d.width = width; d.height = height;
+					MvWarpBilinear(lumaA, width, height, d, lumaB);
+					MvFrame(lumaB, width, height, frameB);
+					const MotionAhead::FlowPtr pair = producerPair(lumaA, lumaB, pairMs);
+					runGroup("subpx", frameB, pair, pairMs, &d, 0.0, 0.0, false, lumaMid, 0.0, 0.0);
+				}
+				// ---- nonrigid: a smooth displacement field (translation, zoom, shear, ripple)
+				{
+					static const double params[3][6] = {   // tx, ty, zoom, shear, wave, period
+						{ 4.3, 1.2, 3.0, 1.5, 1.5, 320.0 }, { 9.6, -2.4, -5.0, 2.5, 2.5, 256.0 }, { 1.7, 0.6, 8.0, -4.0, 3.0, 384.0 } };
+					MvDisplacement d;
+					d.tx = params[p % 3][0]; d.ty = params[p % 3][1]; d.zoom = params[p % 3][2]; d.shear = params[p % 3][3];
+					d.wave = params[p % 3][4]; d.period = params[p % 3][5]; d.width = width; d.height = height;
+					MvWarpBilinear(lumaA, width, height, d, lumaB);
+					MvFrame(lumaB, width, height, frameB);
+					const MotionAhead::FlowPtr pair = producerPair(lumaA, lumaB, pairMs);
+					runGroup("nonrigid", frameB, pair, pairMs, &d, 0.0, 0.0, false, lumaMid, 0.0, 0.0);
 				}
 				// ---- interp: frame n+1 reconstructed from n and n+2
 				MvFrame(lumaNext, width, height, frameNext);
-				const MotionAhead::FlowPtr interpPair = producerPair(lumaA, lumaNext, pairMs);
-				const double interpPairMs = pairMs;
-				double holdPsnr = 0.0, holdSsim = 0.0;
-				MvQuality(lumaA, lumaMid, width, height, holdPsnr, holdSsim);
-				for (int mode = 0; mode < 2; ++mode)
 				{
-					const char* name = mode == 0 ? "nopair" : "pair";
-					if (mode == 1 && !interpPair) { row("interp", name, n, "no_pair", 1.0); continue; }
-					DejudderGpuPlanes pa, pb;
-					UploadDejudderFrame(gpu, frameA, pa);
-					UploadDejudderFrame(gpu, frameNext, pb);
-					Dejudder::MotionWarp warp(fixture.Log(), gpu, settingsFor());
-					if (mode == 1)
-						warp.SetExternalFlow(interpPair);
-					const auto t0 = std::chrono::steady_clock::now();
-					const bool ok = warp.Estimate(pa.planes, pb.planes);
-					const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-					Dejudder::Planes out;
-					if (!ok || !warp.Warp(pa.planes, 0.5f, out)) { row("interp", name, n, "estimate_failed", 1.0); continue; }
-					if (mode == 1)
-						Assert::IsTrue(warp.ExternalFlowUsed(), L"the pair estimate must have taken the pair ahead (size or device mismatch otherwise)");
-					const std::vector<uint8_t> mid = MvLuma8(DownloadPlane(gpu, out.luma));
-					double psnr = 0.0, ssim = 0.0;
-					MvQuality(mid, lumaMid, width, height, psnr, ssim);
-					row("interp", name, n, "psnr_db", psnr);
-					row("interp", name, n, "ssim", ssim);
-					row("interp", name, n, "hold_psnr_db", holdPsnr);
-					row("interp", name, n, "hold_ssim", holdSsim);
-					row("interp", name, n, "estimate_ms", ms);
-					row("interp", name, n, "used_optical_flow_pair", warp.ExternalFlowUsed() ? 1.0 : 0.0);
-					row("interp", name, n, "engine_used", warp.OpticalFlowUsed() ? 1.0 : 0.0);
-					row("interp", name, n, "no_pair_ahead", MvNoPairAhead(warp, 0));
-					if (mode == 1) row("interp", name, n, "pair_ms", interpPairMs);
+					const MotionAhead::FlowPtr pair = producerPair(lumaA, lumaNext, pairMs);
+					double holdPsnr = 0.0, holdSsim = 0.0;
+					MvQuality(lumaA, lumaMid, width, height, holdPsnr, holdSsim);
+					runGroup("interp", frameNext, pair, pairMs, nullptr, 0.0, 0.0, true, lumaMid, holdPsnr, holdSsim);
 				}
 			}
 			csv.close();
@@ -523,6 +708,11 @@ namespace VideoProcessorTest
 				Assert::IsTrue(producer.Start(device, NvOpticalFlow::Preset::Slow), L"producer started");
 				std::vector<double> renderMs, pairMs, latencyMs;
 				std::vector<uint8_t> older, prev, cur;
+				// ONE matcher per mode (doc 93 W2-C5a): a fresh warp per frame measured shader compilation and texture allocation on every
+				// frame, not the steady cost. Its first estimate is the cold figure (render_first_ms) and is not in the mean / p95.
+				std::unique_ptr<Dejudder::MotionWarp> steadyWarp;
+				double firstRenderMs = 0.0;
+				bool firstRenderDone = false;
 				double vramProducer = -1.0, vramRender = -1.0;
 				unsigned long long pairsSeen = 0;
 				const auto wallStart = std::chrono::steady_clock::now();
@@ -549,16 +739,20 @@ namespace VideoProcessorTest
 						DejudderGpuPlanes pa, pb;
 						UploadDejudderFrame(gpu, fa, pa);
 						UploadDejudderFrame(gpu, fb, pb);
-						Dejudder::Settings settings = DejudderTestSettings();
-						settings.opticalFlow = true;
-						settings.opticalFlowCandidate = true;
-						settings.opticalFlowSeed = true;
-						settings.globalPrior = true;
-						settings.estCandidates = true;
-						settings.globalTwo = true;
-						settings.opticalFlowGlobal = true;
-						settings.hostReadable = false;
-						Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+						if (!steadyWarp)
+						{
+							Dejudder::Settings settings = DejudderTestSettings();
+							settings.opticalFlow = true;
+							settings.opticalFlowCandidate = true;
+							settings.opticalFlowSeed = true;
+							settings.globalPrior = true;
+							settings.estCandidates = true;
+							settings.globalTwo = true;
+							settings.opticalFlowGlobal = true;
+							settings.hostReadable = false;
+							steadyWarp.reset(new Dejudder::MotionWarp(fixture.Log(), gpu, settings));
+						}
+						Dejudder::MotionWarp& warp = *steadyWarp;
 						MotionAhead::FlowPtr flow;
 						if (mode.renderWithPair)
 						{
@@ -569,11 +763,17 @@ namespace VideoProcessorTest
 							}
 							if (flow) warp.SetExternalFlow(flow);
 						}
+						pl_gpu_finish(gpu);   // drained before the clock starts: the upload's queued work is not this estimate's
 						const auto t0 = std::chrono::steady_clock::now();
 						const bool ok = warp.Estimate(pa.planes, pb.planes);
 						pl_gpu_finish(gpu);
 						const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-						if (ok && (!mode.renderWithPair || warp.ExternalFlowUsed()))
+						if (!firstRenderDone)
+						{
+							firstRenderDone = true;
+							firstRenderMs = ms;
+						}
+						else if (ok && (!mode.renderWithPair || warp.ExternalFlowUsed()))
 							renderMs.push_back(ms);
 						vramRender = vramMb();
 					}
@@ -602,6 +802,7 @@ namespace VideoProcessorTest
 				row(mode.name, "render_ms_mean", avg(renderMs));
 				row(mode.name, "render_ms_p95", p95(renderMs));
 				row(mode.name, "render_estimates", static_cast<double>(renderMs.size()));
+				row(mode.name, "render_first_ms", firstRenderMs);
 				row(mode.name, "lane_pair_ms_mean", avg(pairMs));
 				row(mode.name, "lane_pairs", static_cast<double>(pairMs.size()));
 				row(mode.name, "nvof_occupancy", wallMs > 0.0 ? pairSum / wallMs : 0.0);
