@@ -1365,8 +1365,32 @@ namespace RenderAhead
 
 		// ---- P6 rest S1: the delay budget and the activation ----
 
-		// render_ahead on and inside the delay budget.
-		bool Active(bool renderAheadOn) const { return renderAheadOn && !budgetVeto; }
+		// Retro gate F2 (conflict 14): the Presenter runs when render_ahead OR temporal detail
+		// is on. tdOn has no settings key; default off; set by the TD wiring through
+		// SetTemporalDetailOn. With it off every answer below is today's render_ahead rule.
+		bool tdOn = false;
+		bool On(bool renderAheadOn) const { return renderAheadOn || tdOn; }
+
+		// The Presenter on and inside the delay budget.
+		bool Active(bool renderAheadOn) const { return On(renderAheadOn) && !budgetVeto; }
+
+		// A settings apply from renderAheadBefore to renderAheadNow: true when the Presenter
+		// switches on (the gate's epoch is invalidated, bug hunt 05 H3). TD on already: no change.
+		bool ActivatesOn(bool renderAheadBefore, bool renderAheadNow)
+		{
+			const bool on = !On(renderAheadBefore) && On(renderAheadNow);
+			if (on)
+				epoch.Invalidate();
+			return on;
+		}
+
+		// The TD wiring's switch: on while the Presenter was off starts the gate again.
+		void SetTemporalDetailOn(bool on, bool renderAheadOn)
+		{
+			if (on && !On(renderAheadOn))
+				epoch.Invalidate();
+			tdOn = on;
+		}
 
 		// render_ahead off: no veto, no credit (the caller releases its fallback).
 		void ClearBudget()

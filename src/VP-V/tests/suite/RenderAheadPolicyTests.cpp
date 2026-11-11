@@ -2696,5 +2696,45 @@ namespace RenderAheadPolicyTest
 			p.spareSlotMs.store(1.5);
 			Assert::AreEqual(1.5, p.UpdateGate(2.0, f).input.costs.spareSlotMs, L"the Presenter's input reaches the gate");
 		}
+
+		// Retro gate F2: the Presenter and its epoch key on render_ahead OR TD; TD off is today's rule.
+		TEST_METHOD(ThePresenterAndItsEpochKeyOnRenderAheadOrTemporalDetail)
+		{
+			// TD off: Active and the epoch follow render_ahead alone, as before.
+			for (int before = 0; before < 2; ++before)
+				for (int now = 0; now < 2; ++now)
+				{
+					Presenter p;
+					Assert::IsTrue(p.epoch.Changed(1, 2.5), L"the first call starts the epoch");
+					Assert::IsFalse(p.epoch.Changed(1, 2.5), L"settled epoch");
+					const bool on = p.ActivatesOn(before != 0, now != 0);
+					Assert::AreEqual(before == 0 && now != 0, on, L"TD off: today's render_ahead switched-on rule");
+					Assert::AreEqual(on, p.epoch.Changed(1, 2.5), L"the epoch restarts exactly when the Presenter switches on");
+					Assert::AreEqual(now != 0, p.Active(now != 0), L"TD off: Active is render_ahead");
+				}
+
+			// TD on with render_ahead off: active, and switching TD on starts the gate again.
+			Presenter p;
+			p.epoch.Changed(7, 2.5);
+			p.SetTemporalDetailOn(true, false);
+			Assert::IsTrue(p.Active(false), L"TD on: the Presenter runs without render_ahead");
+			Assert::IsTrue(p.epoch.Changed(7, 2.5), L"TD switched on: a new epoch");
+			Assert::IsFalse(p.epoch.Changed(7, 2.5));
+			// render_ahead switched on while TD is on: the Presenter was already on, the epoch stands.
+			Assert::IsFalse(p.ActivatesOn(false, true));
+			Assert::IsFalse(p.epoch.Changed(7, 2.5), L"already active: no reset");
+			// TD switched on while render_ahead is on: no reset either.
+			Presenter q;
+			q.epoch.Changed(3, 2.0);
+			q.SetTemporalDetailOn(true, true);
+			Assert::IsFalse(q.epoch.Changed(3, 2.0), L"render_ahead on already: no reset");
+			// TD off again: back to render_ahead alone; the budget veto still wins.
+			q.SetTemporalDetailOn(false, true);
+			Assert::IsFalse(q.Active(false));
+			q.budgetVeto = true;
+			Assert::IsFalse(q.Active(true), L"the budget veto applies to both switches");
+			q.SetTemporalDetailOn(true, false);
+			Assert::IsFalse(q.Active(false), L"the budget veto applies with TD on");
+		}
 	};
 }
