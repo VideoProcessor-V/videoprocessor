@@ -370,5 +370,139 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1ull, producer.GetStats().failures);
 			Assert::AreEqual(1ull, producer.GetRequestStats().failed);
 		}
+
+		// W2-C5b commit 2 (hardware, NVIDIA): a request's Flow is byte-equal to the look-ahead job's for the same pair - Adopt, Chain
+		// and OffChain alike - and all of it runs on the ONE engine session (NvOpticalFlow::Sessions: one Engine, no violation). The
+		// off-chain textures are declared (VramUsers) only once an off-chain request was served.
+		BEGIN_TEST_METHOD_ATTRIBUTE(RequestFlowsMatchTheLookAheadFlowsOnTheOneSession)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(RequestFlowsMatchTheLookAheadFlowsOnTheOneSession)
+		{
+			// Real engine work only when asked for (VP_TEST_GPU=hardware: the GPU-QUIET protocol), never in a CPU run.
+			char gpuMode[32] = {};
+			size_t gpuModeLength = 0;
+			const bool hardware = getenv_s(&gpuModeLength, gpuMode, sizeof(gpuMode), "VP_TEST_GPU") == 0 && std::string(gpuMode) == "hardware";
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "RequestFlowsMatchTheLookAheadFlowsOnTheOneSession",
+					hardware, "VP_TEST_GPU=hardware is not set"))
+				return;
+			CComPtr<IDXGIFactory1> factory;
+			CComPtr<IDXGIAdapter1> nvidia;
+			if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
+				for (UINT i = 0;; ++i)
+				{
+					CComPtr<IDXGIAdapter1> adapter;
+					if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+					DXGI_ADAPTER_DESC1 desc{};
+					adapter->GetDesc1(&desc);
+					if (desc.VendorId == 0x10DE) nvidia = adapter;
+				}
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "RequestFlowsMatchTheLookAheadFlowsOnTheOneSession",
+					nvidia != nullptr, "no NVIDIA adapter"))
+				return;
+			CComPtr<ID3D11Device> device;
+			Assert::IsTrue(SUCCEEDED(D3D11CreateDevice(nvidia, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr)));
+
+			const int W = 1280, H = 720, dx = 6, dy = 2, BW = W + 96, BH = H + 96;
+			std::vector<uint8_t> base(static_cast<size_t>(BW) * BH);
+			uint32_t seed = 7u;
+			for (uint8_t& v : base) { seed = seed * 1664525u + 1013904223u; v = static_cast<uint8_t>(seed >> 24); }
+			auto source = [&](uint64_t index) {
+				auto buffer = std::make_shared<std::vector<uint16_t>>(static_cast<size_t>(W) * H * 3 / 2, static_cast<uint16_t>(512 << 6));
+				for (int y = 0; y < H; ++y)
+					for (int x = 0; x < W; ++x)
+					{
+						int sx = x - static_cast<int>(index) * dx + 48, sy = y - static_cast<int>(index) * dy + 48;
+						sx = sx < 0 ? 0 : sx >= BW ? BW - 1 : sx;
+						sy = sy < 0 ? 0 : sy >= BH ? BH - 1 : sy;
+						(*buffer)[static_cast<size_t>(y) * W + x] = static_cast<uint16_t>((64 + base[static_cast<size_t>(sy) * BW + sx] * 3) << 6);
+					}
+				AnalysisLumaSource s;
+				s.data = reinterpret_cast<const uint8_t*>(buffer->data());
+				s.dataBytes = buffer->size() * 2;
+				s.width = W;
+				s.height = H;
+				s.rowBytes = static_cast<size_t>(W) * 2;
+				s.chromaRowBytes = static_cast<size_t>(W) * 2;
+				s.format = AnalysisLumaFormat::P010;
+				s.backingOwner = buffer;
+				return s;
+			};
+			auto same = [](const MotionAhead::Flow& a, const MotionAhead::Flow& b) {
+				return a.halfW == b.halfW && a.halfH == b.halfH && a.gridW == b.gridW && a.gridH == b.gridH && a.forward == b.forward &&
+					a.backward == b.backward && a.forwardCost == b.forwardCost && a.backwardCost == b.backwardCost;
+			};
+			auto waitPairs = [](MotionAhead::Producer& p, unsigned long long n) {
+				for (int i = 0; i < 1000 && p.GetStats().pairs < n; ++i)
+					std::this_thread::sleep_for(std::chrono::milliseconds(5));
+				return p.GetStats().pairs >= n;
+			};
+			NvOpticalFlow::Sessions::ResetForTest();
+			VpSkeleton::VramUsers::Instance().ResetForTesting();
+			const uint64_t generation = 3;
+
+			// The reference: the look-ahead jobs (the Submit path) for (1,2) (2,3) (3,4).
+			std::vector<MotionAhead::FlowPtr> reference(5);
+			{
+				MotionAhead::Producer walk;
+				Assert::IsTrue(walk.Start(device, NvOpticalFlow::Preset::Medium), L"the producer starts");
+				for (uint64_t s = 1; s <= 4; ++s) walk.Submit(s, generation, source(s));
+				if (!waitPairs(walk, 3))
+				{
+					HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, "RequestFlowsMatchTheLookAheadFlowsOnTheOneSession", false,
+						"the look-ahead producer made no pairs: " + walk.Error());
+					return;
+				}
+				for (uint64_t s = 1; s <= 3; ++s)
+				{
+					reference[s] = walk.Take(s, s + 1);
+					Assert::IsTrue(reference[s] != nullptr);
+				}
+				walk.Stop();
+			}
+
+			MotionAhead::Producer producer;
+			Assert::IsTrue(producer.Start(device, NvOpticalFlow::Preset::Medium));
+			auto ask = [&](uint64_t from, uint64_t to) {
+				PairRequest rq = Pair(from, to, generation, 2000.0);
+				rq.lumaFrom = source(from);
+				rq.lumaTo = source(to);
+				PairFuture f = producer.Request(rq);
+				Assert::IsTrue(f.WaitFor(5000.0), L"answered");
+				return f.Get();
+			};
+			// Requests only (low latency: no look-ahead jobs): (1,2) adopts the empty chain, (2,3) and (3,4) run on it.
+			for (uint64_t s = 1; s <= 3; ++s)
+			{
+				const PairResult r = ask(s, s + 1);
+				Assert::IsTrue(r.status == Status::Ready, L"the request was served");
+				Assert::IsTrue(r.flow && same(*r.flow, *reference[s]), L"byte-equal to the look-ahead job's pair");
+				Assert::IsTrue(producer.Take(s, s + 1) != nullptr, L"published into P2");
+			}
+			Assert::IsTrue(ask(2, 3).status == Status::FromSlot, L"compute once");
+			// The first pair again, off the chain (the chain holds 4): the same bytes, from the request textures.
+			const VpSkeleton::VramUsers::Snapshot before = VpSkeleton::VramUsers::Instance().Take();
+			producer.Prune(3);   // (1,2) leaves the slot
+			Assert::IsTrue(producer.Take(1, 2) == nullptr);
+			const PairResult off = ask(1, 2);
+			Assert::IsTrue(off.status == Status::Ready && off.flow && same(*off.flow, *reference[1]), L"off-chain: byte-equal too");
+			const VpSkeleton::VramUsers::Snapshot after = VpSkeleton::VramUsers::Instance().Take();
+			Assert::IsTrue(after.heldBytes > before.heldBytes, L"the request textures are declared once used");
+			// And the chain was not disturbed: the next adjacent pair is still a chain run.
+			const PairResult next = ask(4, 5);
+			Assert::IsTrue(next.status == Status::Ready);
+			const MotionAhead::Producer::RequestStats s = producer.GetRequestStats();
+			Assert::AreEqual(1ull, s.adoptRuns);
+			Assert::AreEqual(3ull, s.chainRuns);
+			Assert::AreEqual(1ull, s.offChainRuns);
+			producer.Stop();
+			Assert::AreEqual(1, NvOpticalFlow::Sessions::Peak(NvOpticalFlow::SessionKind::Engine, 0), L"one engine session at a time (the peak: the walk stopped before the request producer started)");
+			Assert::AreEqual<unsigned long long>(0, NvOpticalFlow::Sessions::Violations(), L"never a second session");
+			char line[200];
+			sprintf_s(line, "on-demand: %llu requests, run %.2f ms mean, queued %.2f ms last\n", s.requests,
+				s.ready ? s.runMsSum / static_cast<double>(s.ready) : 0.0, s.lastQueuedMs);
+			Logger::WriteMessage(line);
+			VpSkeleton::VramUsers::Instance().ResetForTesting();
+		}
 	};
 }
