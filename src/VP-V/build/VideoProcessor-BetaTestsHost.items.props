@@ -20,5 +20,7 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\MotionAheadProducer.cpp"/>
     <!-- AnalysisLumaSource.cpp includes the Lib pch (MFC, DirectShow): not compilable here; the test stub implements what the producer calls. -->
     <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\beta_gpu\AnalysisLumaSourceTestStub.cpp"/>
+    <!-- refs/105 phase 0 (PT-A): the producer throughput bench (VP_PT_BENCH=1; drives the real producer only). -->
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\beta_gpu\ProducerThroughputBench.cpp"/>
   </ItemGroup>
 </Project>

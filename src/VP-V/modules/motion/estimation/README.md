@@ -79,6 +79,7 @@ None of this module's downgrades engages a "Fallbacks engaged" entry today; all 
 
 - CPU: `VectorStoreTests`, `MotionAheadTests`, `MotionAheadSwitchTests`, `MotionAheadLumaTests`, `MotionAheadRgbLumaTests`, `OpticalFlowTrustTests` (all in `VectorStoreTests.cpp`), `MotionAheadMatrix` (`GeneralRateMatrixTests.cpp`), `MotionAheadBreakTests`, `MotionValidityTests`, `Hunt2MotionHistoryTests`, `H3TimingTests` (the idle keeper); `FallbackCatalogTests` (VP-V tests).
 - GPU (NVIDIA, `VP_TEST_GPU=hardware`; otherwise they report and pass; run only when GPU tests are allowed): `NvOpticalFlowTests` (self-check, producer, extras); estimator regressions in `LibplaceboLutParserTests` and `BetaGpuTests`.
+- Throughput bench (refs/105 phase 0, Beta test host, NVIDIA, GPU-QUIET only): `ProducerThroughputBench` (`src/VP-V/tests/beta_gpu/ProducerThroughputBench.cpp`) drives the real producer with synthetic P010 pans in real time (4K quarter/half, 1080p; depth 4/8/13) and writes service, submit -> publish, interval, drops and foreign-CPU rows plus a serial-vs-serial P2 hash A/A. Gated by `VP_PT_BENCH=1`; `VP_PT_BENCH_OUT` (output dir), `VP_PT_BENCH_PART` (A/B/ALL), `VP_PT_BENCH_SECONDS`. Run: `vstest.console.exe x64\Release\vprenderer-beta\VideoProcessorBetaTestsHost.dll /Platform:x64 /Tests:ProducerThroughputBefore /Logger:trx`.
 
 Run single-threaded:
 
