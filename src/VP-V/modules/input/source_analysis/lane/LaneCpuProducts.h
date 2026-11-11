@@ -108,6 +108,7 @@ inline bool ComputeHalfLuma(const SourceFrameView& v, uint8_t* out, size_t outBy
 // C9 commit A (doc 93 C9P s2a): the optical-flow engine's 8-bit views of P1, one law for every reader.
 // Engine8Half: the engine half (hw x hh, tightly packed) from the finished P1 half plane. Exact for a 10-bit source view
 // (msbShift 6, every lane tap view): byte-identical to the producer's own half (FinishEngine8 on the same codes).
+// ONLY for msbShift 6: another shift gives other P1 codes and the >> 8 is then not FinishEngine8 (LiveEngine8 refuses it).
 inline void Engine8Half(const uint16_t* half, uint32_t hw, uint32_t hh, uint8_t* out)
 {
     const size_t n = size_t(hw) * hh;

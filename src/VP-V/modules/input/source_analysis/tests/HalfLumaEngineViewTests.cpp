@@ -384,9 +384,14 @@ namespace HalfLumaEngineViewTestsNs
 			for (int k = 0; k < static_cast<int>(Kind::Count); ++k)
 			{
 				const Kind kind = static_cast<Kind>(k);
-				for (int c = 0; c < 2; ++c)
+				for (int c = 0; c < 3; ++c)
 				{
-					const int w = c ? kWidth - 8 : kWidth, h = c ? kHeight - 2 : kHeight;   // the crop stays a valid source (even, R12 x8); odd half height
+					// c 1: 376x214 (odd half height); c 2: 382x214 (odd half width and height; not R12, whose width is a multiple
+					// of 8). An odd SOURCE width is not a valid source for any lane format (AnalysisLumaSource::IsValid: even
+					// width for 4:2:x / RGB tunnels), so odd half dims are the only odd case the reader meets.
+					if (c == 2 && (kind == Kind::R12L || kind == Kind::R12B))
+						continue;
+					const int w = c == 0 ? kWidth : (c == 1 ? kWidth - 8 : kWidth - 2), h = c ? kHeight - 2 : kHeight;
 					const Frame f = Cropped(kind, 3, w, h);
 					std::vector<uint8_t> a, b;
 					int wa = 0, ha = 0, wb = 0, hb = 0;
@@ -403,9 +408,14 @@ namespace HalfLumaEngineViewTestsNs
 			for (int k = 0; k < static_cast<int>(Kind::Count); ++k)
 			{
 				const Kind kind = static_cast<Kind>(k);
-				for (int c = 0; c < 2; ++c)
+				for (int c = 0; c < 3; ++c)
 				{
-					const int w = c ? kWidth - 8 : kWidth, h = c ? kHeight - 2 : kHeight;   // the crop stays a valid source (even, R12 x8); odd half height
+					// c 1: 376x214 (odd half height); c 2: 382x214 (odd half width and height; not R12, whose width is a multiple
+					// of 8). An odd SOURCE width is not a valid source for any lane format (AnalysisLumaSource::IsValid: even
+					// width for 4:2:x / RGB tunnels), so odd half dims are the only odd case the reader meets.
+					if (c == 2 && (kind == Kind::R12L || kind == Kind::R12B))
+						continue;
+					const int w = c == 0 ? kWidth : (c == 1 ? kWidth - 8 : kWidth - 2), h = c ? kHeight - 2 : kHeight;
 					const uint64_t seq = 1;   // inside the ring's first claim window
 					const Frame plain = Cropped(kind, 3, w, h);
 					std::vector<uint8_t> want;
@@ -462,6 +472,32 @@ namespace HalfLumaEngineViewTestsNs
 				}
 			}
 			Logger::WriteMessage(summary.c_str());
+		}
+
+		TEST_METHOD(NamedExceptionPredicateMatchesTheFormats)
+		{
+			// The one predicate commit B branches on: true exactly for the formats whose producer codes are its own.
+			for (int k = 0; k < static_cast<int>(Kind::Count); ++k)
+			{
+				const Kind kind = static_cast<Kind>(k);
+				const Frame f = Make(kind, 3);
+				Assert::AreEqual<bool>(!IdenticalKind(kind), VpFrameAnalysis::P1EngineViewDiffersFromProducer(f.source),
+					Where(kind, kWidth, kHeight, L"named-exception predicate").c_str());
+			}
+			// Pinned beyond the synthetic kinds: P210 and UYVY at full range are exceptions too (raw words in the producer).
+			for (int which = 0; which < 2; ++which)
+			{
+				Frame f = Make(which ? Kind::Uyvy : Kind::P210, 3);
+				f.source.fullRangeYuv = true;
+				const wchar_t* name = which ? L"UyvyFull" : L"P210Full";
+				Assert::IsTrue(VpFrameAnalysis::P1EngineViewDiffersFromProducer(f.source), name);
+				std::vector<uint8_t> want, got;
+				int ww = 0, wh = 0, gw = 0, gh = 0;
+				Assert::IsTrue(FrozenHalfLuma8(f.source, want, ww, wh), name);
+				Assert::IsTrue(VpFrameAnalysis::LiveEngine8(f.source, got, gw, gh), name);
+				Assert::IsTrue(gw == ww && gh == wh, name);
+				Assert::IsTrue(Differing(got, want) > 0u, name);
+			}
 		}
 
 		TEST_METHOD(SeqlockRecycledUnderTheCopyIsNeverReturned)

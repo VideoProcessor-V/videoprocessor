@@ -434,6 +434,10 @@ struct LaneState {
 // must still name the same ring slot for the same frame (Published / Sealed) under the same lane-header claim generation.
 // Otherwise the lane (or the render's release) reused the slot during the pass: Recycled, and whatever `pass` produced is
 // discarded by the caller. A result is a pure function of the frame, so an unchanged word means unchanged bytes. Any thread.
+// Memory order: the read side relies on the writer's claim CAS (an acq_rel / seq_cst RMW on the slot word) being ordered before its
+// plain ring writes - true on x86 (TSO: stores are not reordered with an earlier locked RMW). On a weakly ordered CPU (ARM)
+// that is not enough: the writer needs a release fence after the claim (and the reader's acquire fence stays), else a pass
+// could see new bytes under the old word. VP builds x64 only today; revisit before any ARM build.
 template <class Pass>
 inline PublishedRead ReadPublishedBytes(const SlotSet& set, const CpuBuffers& bufs, uint64_t seq, Pass&& pass)
 {
