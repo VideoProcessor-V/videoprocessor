@@ -190,6 +190,9 @@ public:
         if (++unfedFrames_ < windowFrames_)
             return;
         unfedFrames_ = 0;
+        // Audit SHOULD 1: the once-per-window step-down latch is otherwise cleared only by EndWindow (fed); an unfed window
+        // that elapsed is a window too, or every unfed step-down after the first is suppressed forever.
+        stepDownThisWindow_ = false;
         if (lane_ < laneSteps_)
             SetLane(uint16_t(laneSteps_), RegAction::Grow, false);
     }

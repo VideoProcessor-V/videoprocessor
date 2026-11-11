@@ -535,6 +535,29 @@ namespace SkeletonRegulatorTestsNs
 			Assert::AreEqual(size_t(1), CountAction(r, RegAction::Restore));
 		}
 
+		// Audit SHOULD 1: the once-per-window step-down latch also clears when an unfed window elapses, so a second cut one window
+		// after the first steps down again (before: suppressed forever without the feed); within one window it is still suppressed.
+		TEST_METHOD(AnUnfedCutAWindowLaterStepsDownAgain)
+		{
+			Regulator r;
+			r.Configure(Products(), kPeriod, true);
+			const uint16_t full = r.LaneLevel();
+			Assert::AreEqual(uint16_t(3), full);
+			r.OnCut();
+			Assert::AreEqual(uint16_t(full - 1), r.LaneLevel(), L"the first cut steps down");
+			r.OnCut();
+			Assert::AreEqual(uint16_t(full - 1), r.LaneLevel(), L"a second cut in the same window is suppressed");
+			for (size_t i = 0; i < r.WindowFrames(); ++i)
+				r.OnUnfedFrame(false);
+			Assert::AreEqual(full, r.LaneLevel(), L"restored after the unfed window");
+			r.OnCut();
+			Assert::AreEqual(uint16_t(full - 1), r.LaneLevel(), L"a cut one window later steps down again");
+			for (size_t i = 0; i < r.WindowFrames(); ++i)
+				r.OnUnfedFrame(false);
+			r.OnCut();
+			Assert::AreEqual(uint16_t(full - 1), r.LaneLevel(), L"and again a window after that");
+		}
+
 		TEST_METHOD(AFedRegulatorIsNeverRestoredByTheUnfedPath)
 		{
 			using namespace VpIndicator;
