@@ -84,12 +84,17 @@ namespace VpMotion
 
 	// W1-C3 (doc 93 D3/D5): the per-cell engine trust of a served pair, memoized per pair by the engine's FlowOf lease (computed once
 	// per pair and tolerance, whoever asks). Implemented by the engine; a FlowView without one (a fake, an older engine) answers null.
+	// The API for later FlowOf consumers (dither, scaling); the camera ahead fit computes its CellTrust once per pair on its own worker
+	// from the copied extras by design (its tolerance lives there), and TD reads the P2 view directly.
+	// Lifetime / thread: render thread only (FlowOf's contract), never from the camera worker; a returned pointer stays valid until the
+	// next FlowOf call, also when another tolerance is asked in between (one stable plane per tolerance). Tolerances compare by bit value
+	// (1.5f matches only 1.5f; -0 and +0 are two entries; a repeated NaN is one entry, never an unbounded list).
 	class IFlowTrustMemo
 	{
 	public:
 		virtual ~IFlowTrustMemo() = default;
 		// OpticalFlowTrust::CellTrust of the pair's forward direction (gridW x gridH) with the matcher's consistency limit in engine px;
-		// null when the pair has no backward vectors or no forward costs (never guessed). Valid as long as the view.
+		// null when the pair has no backward vectors or no forward costs (never guessed). Valid until the next FlowOf.
 		virtual const float* CellTrust(float toleranceEnginePx) const = 0;
 	};
 

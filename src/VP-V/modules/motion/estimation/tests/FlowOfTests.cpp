@@ -186,10 +186,23 @@ namespace VideoProcessorTest
 				someBelowOne = someBelowOne || first[i] < 1.0f;
 			}
 			Assert::IsTrue(someBelowOne, L"the inputs exercise the weighting (not all trust 1)");
-			// Another tolerance is a new computation (counted); the pair is not converted again.
+			// Another tolerance is a new computation (counted); the pair is not converted again. The FIRST pointer stays valid and
+			// unchanged (one stable plane per tolerance), and asking the first tolerance again is still the memo.
+			const std::vector<float> firstCopy(first, first + ref.size());
 			VpMotion::FlowView again;
 			Assert::IsTrue(rig.engine.FlowOf(12, again));
-			Assert::IsNotNull(again.CellTrust(3.0f));
+			const float* third = again.CellTrust(3.0f);
+			Assert::IsNotNull(third);
+			Assert::IsTrue(third != first);
+			for (size_t i = 0; i < ref.size(); ++i)
+				Assert::AreEqual(firstCopy[i], first[i], 0.0f, L"the first tolerance's plane is untouched by the second");
+			std::vector<float> ref3;
+			Assert::IsTrue(OpticalFlowTrust::CellTrust(full->costWeight, full->blocksX, full->blocksY, full->fbError, full->gridW, full->gridH,
+				NvOpticalFlow::Engine::Grid, MotionAhead::Flow::kBlockPx, 3.0f, ref3));
+			for (size_t i = 0; i < ref3.size(); ++i)
+				Assert::AreEqual(ref3[i], third[i], 0.0f);
+			Assert::IsTrue(again.CellTrust(1.5f) == first, L"back to the first tolerance: the memo");
+			Assert::IsTrue(again.CellTrust(3.0f) == third);
 			reads = rig.engine.FlowReads();
 			Assert::AreEqual(2ull, reads.trustComputes);
 			Assert::AreEqual(1ull, reads.conversions);

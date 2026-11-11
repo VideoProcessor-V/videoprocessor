@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -766,12 +767,14 @@ namespace VpMotion
 	const float* VectorEngine::FlowLease::CellTrust(float toleranceEnginePx) const
 	{
 		std::lock_guard<std::mutex> lock(trustMutex);
-		if (trustDone && trustTolerance == toleranceEnginePx)
-			return trustOk ? trust.data() : nullptr;
-		trustDone = true;
-		trustTolerance = toleranceEnginePx;
-		trustOk = false;
-		trust.clear();
+		for (const TrustEntry& e : trusts)
+			if (std::memcmp(&e.tolerance, &toleranceEnginePx, sizeof(float)) == 0)   // bit-exact: one entry per value, a NaN included (the list stays bounded)
+				return e.ok ? e.trust.data() : nullptr;
+		trusts.emplace_back();
+		TrustEntry& entry = trusts.back();
+		entry.tolerance = toleranceEnginePx;
+		std::vector<float>& trust = entry.trust;
+		bool& trustOk = entry.ok;
 		if (computes)
 			computes->fetch_add(1, std::memory_order_relaxed);
 		if (!flow)

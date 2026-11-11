@@ -29,6 +29,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -330,12 +331,17 @@ namespace VpMotion
 			uint64_t from = 0, to = 0;
 			double scale = 0;
 			std::vector<float> x, y;
-			// W1-C3: the cell trust memo (one pair, one tolerance; a different tolerance recomputes and is counted).
+			// W1-C3: the cell trust memo, one entry per tolerance asked for this pair (each computed once and counted). A std::list so a
+			// pointer handed out stays valid when another tolerance is added (a vector of entries would move them).
+			struct TrustEntry
+			{
+				float tolerance = 0.0f;
+				bool ok = false;
+				std::vector<float> trust;
+			};
 			std::atomic<unsigned long long>* computes = nullptr;
 			mutable std::mutex trustMutex;
-			mutable bool trustDone = false, trustOk = false;
-			mutable float trustTolerance = 0.0f;
-			mutable std::vector<float> trust;
+			mutable std::list<TrustEntry> trusts;
 			const float* CellTrust(float toleranceEnginePx) const override;
 		};
 		mutable std::mutex flowMutex_;
