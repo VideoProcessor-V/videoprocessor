@@ -6,7 +6,10 @@
 // no matcher, no lease); the VP-V pathway ends the lease on the source side (the matcher side is the GPU test
 // FieldSourceShimTests, which exercises InvalidateSnapshot on a real warp). CPU, table-driven over both pathways.
 #include "pch.h"
+#include "CppUnitTest.h"
 #include <VP-V/modules/motion/estimation/EstimateState.h>
+
+using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace VideoProcessorTest
 {
