@@ -75,6 +75,8 @@
     "src/VP-V/core/FrameAnalysisValidity.h",
     "src/VP-V/modules/motion/estimation/VectorEngineInterface.h",
     "src/VP-V/modules/motion/estimation/ProducerPlan.h",
+    "src/VP-V/modules/motion/estimation/OnDemandEstimate.h",
+    "src/VP-V/modules/motion/estimation/tests/OnDemandEstimateTests.cpp",
     "src/VP-V/modules/motion/estimation/VectorEngineState.h",
     "src/VP-V/modules/motion/estimation/VectorEngine.h",
     "src/VP-V/modules/motion/estimation/VectorEngine.cpp",

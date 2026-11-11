@@ -204,6 +204,8 @@ namespace MotionAhead
 		context.Release();
 		stopping = false;
 		jobs.clear();
+		requests.FailAll(OnDemand::Status::Unavailable);   // W2-C5b (Stop answered them already; never a broken promise)
+		testEngine.reset();
 		havePrevious = false;
 		engineReady = false;
 		sizeW = sizeH = 0;
@@ -259,6 +261,7 @@ namespace MotionAhead
 		{
 			lumaTex[i].Release(); flowTex[i].Release(); costTex[i].Release(); flowRead[i].Release(); costRead[i].Release();
 		}
+		ReleaseRequestTextures();   // W2-C5b
 		sizeW = sizeH = 0;
 		havePrevious = false;
 		hintSequence = UINT64_MAX;
@@ -288,6 +291,7 @@ namespace MotionAhead
 			std::lock_guard<std::mutex> lock(mutex);
 			stopping = true;
 			jobs.clear();
+			requestStats.unavailable += requests.FailAll(OnDemand::Status::Unavailable);   // W2-C5b: every waiting request answered
 		}
 		wake.notify_all();
 		if (worker.joinable()) worker.join();
@@ -335,18 +339,30 @@ namespace MotionAhead
 		for (;;)
 		{
 			Job job;
+			OnDemand::Pending request;   // W2-C5b: an on-demand request is taken before the look-ahead jobs
+			bool isRequest = false;
 			{
 				std::unique_lock<std::mutex> lock(mutex);
-				wake.wait(lock, [this] { return stopping || !jobs.empty(); });
+				wake.wait(lock, [this] { return stopping || !requests.Empty() || !jobs.empty(); });
 				if (stopping) return;
-				job = std::move(jobs.front());
-				jobs.pop_front();
+				isRequest = requests.Pop(request);
+				if (!isRequest)
+				{
+					job = std::move(jobs.front());
+					jobs.pop_front();
+				}
 			}
 			// An exception escaping the worker would end the process: counted as a failure instead.
 			// Three failures IN A ROW stop the producer (audit 2026-10-16: three over a whole session did).
 			bool ok = false;
-			try { ok = Process(job); }
+			try { ok = isRequest ? ProcessRequest(request) : testEngine ? ProcessJobForTest(job) : Process(job); }
 			catch (...) { ok = false; }
+			if (isRequest && request.state && !request.state->fulfilled.load(std::memory_order_acquire))
+			{
+				OnDemand::PairResult failed;   // an exception before the answer: never a broken promise
+				failed.status = OnDemand::Status::Failed;
+				Answer(request, failed);
+			}
 			std::unique_lock<std::mutex> lock(mutex);
 			if (ok)
 			{
@@ -361,6 +377,7 @@ namespace MotionAhead
 			running = false;
 			engineReady = false;
 			jobs.clear();
+			requestStats.unavailable += requests.FailAll(OnDemand::Status::Unavailable);   // W2-C5b
 			stopError = error.empty() ? std::string("three failed jobs in a row") : error;
 			for (;;)
 			{
@@ -388,6 +405,7 @@ namespace MotionAhead
 				stopError = why;   // no device yet: another stop, a longer wait
 			}
 			jobs.clear();
+			requestStats.unavailable += requests.FailAll(OnDemand::Status::Unavailable);   // W2-C5b
 			consecutiveFailures = 0;
 			recovery.OnRestarted(NowMs());
 			error.clear();   // the next stop names its own failure
@@ -448,29 +466,8 @@ namespace MotionAhead
 	{
 		const auto started = std::chrono::steady_clock::now();
 		int halfW = 0, halfH = 0;
-		if (!HalfLuma8(job.luma, lumaBuffer, halfW, halfH))
-			return true;   // not a readable frame: nothing to do, not a failure
-		// The de-judder's engine size: the half size, or half again (its inner matcher).
-		const int tw = targetW.load(std::memory_order_acquire), th = targetH.load(std::memory_order_acquire);
-		if (tw > 0 && th > 0 && !(tw == halfW && th == halfH))
-		{
-			if (tw != (halfW + 1) / 2 || th != (halfH + 1) / 2)
-				return true;   // a size this producer does not make: nothing published (the consumer takes the matcher path, shown as a fallback)
-			quarterBuffer.resize(static_cast<size_t>(tw) * th);
-			for (int y = 0; y < th; ++y)
-			{
-				const uint8_t* r0 = &lumaBuffer[static_cast<size_t>((std::min)(2 * y, halfH - 1)) * halfW];
-				const uint8_t* r1 = &lumaBuffer[static_cast<size_t>((std::min)(2 * y + 1, halfH - 1)) * halfW];
-				for (int x = 0; x < tw; ++x)
-				{
-					const int x0 = (std::min)(2 * x, halfW - 1), x1 = (std::min)(2 * x + 1, halfW - 1);
-					quarterBuffer[static_cast<size_t>(y) * tw + x] = static_cast<uint8_t>((r0[x0] + r0[x1] + r1[x0] + r1[x1] + 2) / 4);
-				}
-			}
-			lumaBuffer.swap(quarterBuffer);
-			halfW = tw;
-			halfH = th;
-		}
+		if (!LumaAtTarget(job.luma, lumaBuffer, halfW, halfH))
+			return true;   // not a readable frame, or a size this producer does not make: nothing published (the consumer takes the matcher path, shown as a fallback)
 		const double lumaMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 		if (!EnsureSize(halfW, halfH)) return false;
 		// A new continuity generation clears the P2 slot and the chain.
@@ -492,66 +489,24 @@ namespace MotionAhead
 			// (audit 2026-10-16: they carried across seeks, dropped jobs and size skips).
 			const bool continuous = hintSequence == previousSequence && hintGeneration == job.generation;
 			hintSequence = UINT64_MAX;
-			// MV7: 1 pair in N is timed (the GPU idle first, then the engine's completion, on this worker's own device) and posted to the
-			// pass-timer inbox the render thread drains; the other pairs run untimed exactly as before.
-			NvOpticalFlow::Result timing;
-			const bool timed = PassTimers::Sampler().Take(job.sequence);
-			if (!engine->Run(lumaTex[prev], lumaTex[texIndex], flowTex[0], flowTex[1], costTex[0], costTex[1], timed ? &timing : nullptr, continuous))
+			bool ran = false;
+			std::shared_ptr<Flow> flow;
+			double extrasMs = 0.0;
+			ok = RunPair(lumaTex[prev], lumaTex[texIndex], halfW, halfH, continuous, job.sequence, ran, flow, extrasMs);
+			if (ran)
 			{
-				std::lock_guard<std::mutex> lock(mutex);
-				error = engine->LastError();
-				ok = false;
-			}
-			else
-			{
-				if (timed && timing.gpuMs > 0.0)
-					PassTimers::Inbox::Motion().Post(PassTimers::Kind::GpuGroup, "motion: NVOF producer engine (idle to completion)", timing.gpuMs);
 				hintSequence = job.sequence;
 				hintGeneration = job.generation;
-				for (int i = 0; i < 2; ++i)
-				{
-					context->CopyResource(flowRead[i], flowTex[i]);
-					context->CopyResource(costRead[i], costTex[i]);
-				}
-				auto flow = std::make_shared<Flow>();
-				flow->halfW = halfW; flow->halfH = halfH;
-				flow->gridW = (halfW + 3) / 4; flow->gridH = (halfH + 3) / 4;
-				const size_t cells = static_cast<size_t>(flow->gridW) * flow->gridH;
-				for (int i = 0; i < 2 && ok; ++i)
-				{
-					std::vector<int16_t>& vectors = i == 0 ? flow->forward : flow->backward;
-					std::vector<uint8_t>& costs = i == 0 ? flow->forwardCost : flow->backwardCost;
-					vectors.resize(cells * 2);
-					costs.resize(cells);
-					D3D11_MAPPED_SUBRESOURCE map{};
-					if (FAILED(context->Map(flowRead[i], 0, D3D11_MAP_READ, 0, &map))) { ok = false; break; }
-					for (int y = 0; y < flow->gridH; ++y)
-						std::memcpy(&vectors[static_cast<size_t>(y) * flow->gridW * 2], static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch,
-							static_cast<size_t>(flow->gridW) * 4);
-					context->Unmap(flowRead[i], 0);
-					if (FAILED(context->Map(costRead[i], 0, D3D11_MAP_READ, 0, &map))) { ok = false; break; }
-					for (int y = 0; y < flow->gridH; ++y)
-						std::memcpy(&costs[static_cast<size_t>(y) * flow->gridW], static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch,
-							static_cast<size_t>(flow->gridW));
-					context->Unmap(costRead[i], 0);
-				}
-				if (ok)
-				{
-					// Planner Q1: the whole frame's motion, here on the worker (no render cost).
-					const auto extrasStart = std::chrono::steady_clock::now();
-					const bool general = generalRates.load(std::memory_order_acquire);   // fixed-constant batch B4 2026-10-18
-					FlowGlobals(*flow, general);   // both directions, flagged for the FlowOf view (W1-C3)
-					// The cost and the engine's own forward/backward consistency as trust inputs.
-					FlowExtras(*flow);
-					const double extrasMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - extrasStart).count();
-					slot->Publish(previousSequence, job.sequence, job.generation, flow);   // P2: the pair, for the readers' P2View
-					engineReady = true;
-					std::lock_guard<std::mutex> lock(mutex);
-					++stats.pairs;
-					stats.extrasMs = extrasMs;
-					stats.lastPairMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-					stats.pairMsSum += stats.lastPairMs;
-				}
+			}
+			if (ok && flow)
+			{
+				slot->Publish(previousSequence, job.sequence, job.generation, flow);   // P2: the pair, for the readers' P2View
+				engineReady = true;
+				std::lock_guard<std::mutex> lock(mutex);
+				++stats.pairs;
+				stats.extrasMs = extrasMs;
+				stats.lastPairMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+				stats.pairMsSum += stats.lastPairMs;
 			}
 		}
 		{
@@ -563,6 +518,386 @@ namespace MotionAhead
 		havePrevious = true;
 		previousSequence = job.sequence;
 		previousGeneration = job.generation;
+		return ok;
+	}
+	bool Producer::LumaAtTarget(const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, int& halfW, int& halfH)
+	{
+		if (!HalfLuma8(luma, buffer, halfW, halfH))
+			return false;   // not a readable frame: nothing to do, not a failure
+		// The de-judder's engine size: the half size, or half again (its inner matcher).
+		const int tw = targetW.load(std::memory_order_acquire), th = targetH.load(std::memory_order_acquire);
+		if (tw > 0 && th > 0 && !(tw == halfW && th == halfH))
+		{
+			if (tw != (halfW + 1) / 2 || th != (halfH + 1) / 2)
+				return false;   // a size this producer does not make: nothing published (the consumer takes the matcher path, shown as a fallback)
+			quarterBuffer.resize(static_cast<size_t>(tw) * th);
+			for (int y = 0; y < th; ++y)
+			{
+				const uint8_t* r0 = &buffer[static_cast<size_t>((std::min)(2 * y, halfH - 1)) * halfW];
+				const uint8_t* r1 = &buffer[static_cast<size_t>((std::min)(2 * y + 1, halfH - 1)) * halfW];
+				for (int x = 0; x < tw; ++x)
+				{
+					const int x0 = (std::min)(2 * x, halfW - 1), x1 = (std::min)(2 * x + 1, halfW - 1);
+					quarterBuffer[static_cast<size_t>(y) * tw + x] = static_cast<uint8_t>((r0[x0] + r0[x1] + r1[x0] + r1[x1] + 2) / 4);
+				}
+			}
+			buffer.swap(quarterBuffer);
+			halfW = tw;
+			halfH = th;
+		}
+		return true;
+	}
+
+	bool Producer::RunPair(ID3D11Texture2D* a, ID3D11Texture2D* b, int halfW, int halfH, bool continuous, uint64_t timedSequence, bool& ran,
+		std::shared_ptr<Flow>& flowOut, double& extrasMs)
+	{
+		ran = false;
+		flowOut.reset();
+		extrasMs = 0.0;
+		// MV7: 1 pair in N is timed (the GPU idle first, then the engine's completion, on this worker's own device) and posted to the
+		// pass-timer inbox the render thread drains; the other pairs run untimed exactly as before.
+		NvOpticalFlow::Result timing;
+		const bool timed = PassTimers::Sampler().Take(timedSequence);
+		if (!engine->Run(a, b, flowTex[0], flowTex[1], costTex[0], costTex[1], timed ? &timing : nullptr, continuous))
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			error = engine->LastError();
+			return false;
+		}
+		ran = true;
+		if (timed && timing.gpuMs > 0.0)
+			PassTimers::Inbox::Motion().Post(PassTimers::Kind::GpuGroup, "motion: NVOF producer engine (idle to completion)", timing.gpuMs);
+		for (int i = 0; i < 2; ++i)
+		{
+			context->CopyResource(flowRead[i], flowTex[i]);
+			context->CopyResource(costRead[i], costTex[i]);
+		}
+		auto flow = std::make_shared<Flow>();
+		flow->halfW = halfW; flow->halfH = halfH;
+		flow->gridW = (halfW + 3) / 4; flow->gridH = (halfH + 3) / 4;
+		const size_t cells = static_cast<size_t>(flow->gridW) * flow->gridH;
+		for (int i = 0; i < 2; ++i)
+		{
+			std::vector<int16_t>& vectors = i == 0 ? flow->forward : flow->backward;
+			std::vector<uint8_t>& costs = i == 0 ? flow->forwardCost : flow->backwardCost;
+			vectors.resize(cells * 2);
+			costs.resize(cells);
+			D3D11_MAPPED_SUBRESOURCE map{};
+			if (FAILED(context->Map(flowRead[i], 0, D3D11_MAP_READ, 0, &map))) return false;
+			for (int y = 0; y < flow->gridH; ++y)
+				std::memcpy(&vectors[static_cast<size_t>(y) * flow->gridW * 2], static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch,
+					static_cast<size_t>(flow->gridW) * 4);
+			context->Unmap(flowRead[i], 0);
+			if (FAILED(context->Map(costRead[i], 0, D3D11_MAP_READ, 0, &map))) return false;
+			for (int y = 0; y < flow->gridH; ++y)
+				std::memcpy(&costs[static_cast<size_t>(y) * flow->gridW], static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch,
+					static_cast<size_t>(flow->gridW));
+			context->Unmap(costRead[i], 0);
+		}
+		// Planner Q1: the whole frame's motion, here on the worker (no render cost).
+		const auto extrasStart = std::chrono::steady_clock::now();
+		const bool general = generalRates.load(std::memory_order_acquire);   // fixed-constant batch B4 2026-10-18
+		FlowGlobals(*flow, general);   // both directions, flagged for the FlowOf view (W1-C3)
+		// The cost and the engine's own forward/backward consistency as trust inputs.
+		FlowExtras(*flow);
+		extrasMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - extrasStart).count();
+		flowOut = std::move(flow);
+		return true;
+	}
+
+	// ---- W2-C5b: on-demand requests (OnDemandEstimate.h) ---------------------------------------------------------------
+
+	bool Producer::EnsureRequestTextures(int w, int h)
+	{
+		if (requestTex[0] && requestTex[1] && requestTexW == w && requestTexH == h) return true;
+		ReleaseRequestTextures();
+		D3D11_TEXTURE2D_DESC desc{};
+		desc.Width = static_cast<UINT>(w); desc.Height = static_cast<UINT>(h);
+		desc.MipLevels = 1; desc.ArraySize = 1; desc.Format = NvOpticalFlow::Engine::InputFormat(); desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;   // as the chain's luma textures
+		for (int i = 0; i < 2; ++i)
+			if (FAILED(device->CreateTexture2D(&desc, nullptr, &requestTex[i])))
+			{
+				ReleaseRequestTextures();
+				std::lock_guard<std::mutex> lock(mutex);
+				error = "cannot create its request textures";
+				return false;
+			}
+		requestTexW = w;
+		requestTexH = h;
+		// Their own declaration (owner key: the pair's address), beside the ring's; made on the first off-chain request only,
+		// so a producer that never serves one declares nothing more.
+		VpSkeleton::VramUsers::Instance().DeclareFixed(&requestTex[0], VpSkeleton::kUserNvofProducer,
+			2ull * static_cast<uint64_t>(w) * static_cast<uint64_t>(h));
+		return true;
+	}
+
+	void Producer::ReleaseRequestTextures()
+	{
+		if (requestTex[0] || requestTex[1])
+			VpSkeleton::VramUsers::Instance().Withdraw(&requestTex[0], VpSkeleton::kUserNvofProducer);
+		requestTex[0].Release();
+		requestTex[1].Release();
+		requestTexW = requestTexH = 0;
+	}
+
+	OnDemand::PairFuture Producer::Request(OnDemand::PairRequest request)
+	{
+		using OnDemand::Status;
+		OnDemand::PairFuture future;
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			++requestStats.requests;
+			if (!running.load(std::memory_order_acquire) || stopping || recovery.Recovering())
+			{
+				++requestStats.unavailable;
+				return OnDemand::PairFuture::Answered(Status::Unavailable);
+			}
+			if (request.budgetMs <= 0.0)
+			{
+				++requestStats.noBudget;
+				return OnDemand::PairFuture::Answered(Status::NoBudget);
+			}
+			if (request.to <= request.from)
+			{
+				++requestStats.refused;
+				return OnDemand::PairFuture::Answered(Status::Refused);
+			}
+			// Compute once: the pair is already in the slot (the walk made it, or an earlier request).
+			if (slot->Generation() == request.generation && slot->Has(request.from, request.to))
+				if (MotionAhead::FlowPtr flow = slot->Find(request.from, request.to))
+				{
+					++requestStats.fromSlot;
+					return OnDemand::PairFuture::Answered(Status::FromSlot, std::move(flow));
+				}
+			future = requests.Push(std::move(request), OnDemand::Clock::now(), &requestStats.refused);
+		}
+		wake.notify_all();
+		return future;
+	}
+
+	Producer::RequestStats Producer::GetRequestStats() const
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		return requestStats;
+	}
+
+	void Producer::Answer(OnDemand::Pending& pending, OnDemand::PairResult result)
+	{
+		using OnDemand::Status;
+		const Status status = result.status;
+		const double queuedMs = result.queuedMs, runMs = result.runMs;
+		if (!OnDemand::Fulfil(*pending.state, std::move(result)))
+			return;
+		std::lock_guard<std::mutex> lock(mutex);
+		switch (status)
+		{
+		case Status::Ready: ++requestStats.ready; break;
+		case Status::FromSlot: ++requestStats.fromSlot; break;
+		case Status::Late: ++requestStats.late; break;
+		case Status::Refused: ++requestStats.refused; break;
+		case Status::Failed: ++requestStats.failed; break;
+		case Status::Unavailable: ++requestStats.unavailable; break;
+		case Status::NoBudget: ++requestStats.noBudget; break;
+		default: break;
+		}
+		requestStats.lastQueuedMs = queuedMs;
+		if (status == Status::Ready)
+		{
+			requestStats.lastRunMs = runMs;
+			requestStats.runMsSum += runMs;
+		}
+	}
+
+	bool Producer::ProcessRequest(OnDemand::Pending& pending)
+	{
+		using OnDemand::Status;
+		using OnDemand::Mode;
+		const auto taken = OnDemand::Clock::now();
+		const OnDemand::PairRequest& rq = pending.request;
+		OnDemand::PairResult result;
+		result.queuedMs = OnDemand::MsBetween(pending.state->issued, taken);
+		auto answer = [&](Status status) {
+			result.status = status;
+			result.runMs = OnDemand::MsBetween(taken, OnDemand::Clock::now());
+			Answer(pending, std::move(result));
+		};
+		// The asker gave up, or the deadline passed while it waited: no GPU work.
+		if (pending.state->abandoned.load(std::memory_order_acquire) || taken > pending.state->deadline)
+		{
+			answer(Status::Late);
+			return true;
+		}
+		// The walk may have made it meanwhile (compute once).
+		if (slot->Generation() == rq.generation && slot->Has(rq.from, rq.to))
+			if ((result.flow = slot->Find(rq.from, rq.to)) != nullptr)
+			{
+				answer(Status::FromSlot);
+				return true;
+			}
+		int w = 0, h = 0;
+		if (!testEngine)
+		{
+			if (!LumaAtTarget(rq.lumaTo, lumaBuffer, w, h))
+			{
+				answer(Status::Failed);   // not a readable frame / a size not made: nothing to run, not an engine failure
+				return true;
+			}
+			if (!EnsureSize(w, h))
+			{
+				answer(Status::Failed);
+				return false;
+			}
+		}
+		// A new continuity generation clears the P2 slot and the chain, exactly as for a job.
+		if (slot->Generation() != rq.generation)
+		{
+			slot->SetGeneration(rq.generation);
+			havePrevious = false;
+		}
+		OnDemand::ChainState chain;
+		chain.havePrevious = havePrevious;
+		chain.previousSequence = previousSequence;
+		chain.previousGeneration = previousGeneration;
+		chain.slotGeneration = slot->Generation();
+		const Mode mode = OnDemand::ChooseMode(chain, rq);
+		bool ok = true;
+		std::shared_ptr<Flow> flow;
+		double extrasMs = 0.0;
+		bool ran = false;
+		if (testEngine)
+		{
+			flow = std::make_shared<Flow>();
+			ok = testEngine->request ? testEngine->request(rq, mode, *flow) : true;
+			ran = ok;
+			if (!ok) flow.reset();
+		}
+		else
+		{
+			if (mode != Mode::Chain)
+			{
+				int fw = 0, fh = 0;
+				if (!LumaAtTarget(rq.lumaFrom, requestLumaBuffer, fw, fh) || fw != w || fh != h)
+				{
+					answer(Status::Failed);   // the two frames are not one size: no pair
+					return true;
+				}
+			}
+			ID3D11Texture2D* texFrom = nullptr;
+			ID3D11Texture2D* texTo = nullptr;
+			int toIndex = current;
+			if (mode == Mode::Chain)
+			{
+				toIndex = 1 - current;
+				context->UpdateSubresource(lumaTex[toIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(w), 0);
+				texFrom = lumaTex[current];
+				texTo = lumaTex[toIndex];
+			}
+			else if (mode == Mode::Adopt)
+			{
+				toIndex = 1 - current;
+				context->UpdateSubresource(lumaTex[current], 0, nullptr, requestLumaBuffer.data(), static_cast<UINT>(w), 0);
+				context->UpdateSubresource(lumaTex[toIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(w), 0);
+				texFrom = lumaTex[current];
+				texTo = lumaTex[toIndex];
+			}
+			else
+			{
+				if (!EnsureRequestTextures(w, h))
+				{
+					answer(Status::Failed);
+					return false;
+				}
+				context->UpdateSubresource(requestTex[0], 0, nullptr, requestLumaBuffer.data(), static_cast<UINT>(w), 0);
+				context->UpdateSubresource(requestTex[1], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(w), 0);
+				texFrom = requestTex[0];
+				texTo = requestTex[1];
+			}
+			// The temporal hints only for an adjacent Chain pair right after the engine's last pair ended at `from`.
+			const bool continuous = mode == Mode::Chain && rq.Adjacent() && hintSequence == rq.from && hintGeneration == rq.generation;
+			hintSequence = UINT64_MAX;   // any run here moves the engine's internal hint state
+			ok = RunPair(texFrom, texTo, w, h, continuous, rq.to, ran, flow, extrasMs);
+			if (ran && mode != Mode::OffChain && rq.Adjacent())
+			{
+				hintSequence = rq.to;
+				hintGeneration = rq.generation;
+			}
+			if (mode != Mode::OffChain)
+				current = toIndex;
+		}
+		// The chain now holds `to` (Chain / Adopt); an off-chain run leaves it for the walk.
+		if (mode != Mode::OffChain)
+		{
+			havePrevious = true;
+			previousSequence = rq.to;
+			previousGeneration = rq.generation;
+		}
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			if (mode == Mode::Chain) ++requestStats.chainRuns;
+			else if (mode == Mode::Adopt) ++requestStats.adoptRuns;
+			else ++requestStats.offChainRuns;
+		}
+		if (!ok || !flow)
+		{
+			answer(Status::Failed);
+			return false;   // counted like a failed job (three in a row stop and restart the producer)
+		}
+		// Adjacent pairs into P2 as well (any later reader hits); gap pairs are returned only (P2 stays adjacency-only).
+		if (rq.Adjacent())
+			slot->Publish(rq.from, rq.to, rq.generation, flow);
+		engineReady = true;
+		result.flow = flow;
+		answer(Status::Ready);
+		return true;
+	}
+
+	bool Producer::StartForTest(std::shared_ptr<TestEngine> seam)
+	{
+		Stop();
+		std::lock_guard<std::mutex> lock(mutex);
+		error.clear();
+		stopping = false;
+		jobs.clear();
+		requests.FailAll(OnDemand::Status::Unavailable);
+		testEngine = seam ? std::move(seam) : std::make_shared<TestEngine>();
+		havePrevious = false;
+		engineReady = false;
+		sizeW = sizeH = 0;
+		consecutiveFailures = 0;
+		recovery = ProducerRecovery();
+		stopError.clear();
+		slot->Clear();
+		requestStats = RequestStats();
+		running = true;
+		worker = std::thread([this] { Worker(); });
+		return true;
+	}
+
+	bool Producer::ProcessJobForTest(const Job& job)
+	{
+		// Process's chain bookkeeping without a device (the seam's engine stands in for the GPU work).
+		if (slot->Generation() != job.generation)
+		{
+			slot->SetGeneration(job.generation);
+			havePrevious = false;
+		}
+		if (job.breakBefore)
+			havePrevious = false;
+		const bool pairs = havePrevious && previousGeneration == job.generation && previousSequence + 1 == job.sequence;
+		const bool ok = testEngine->job ? testEngine->job(job.sequence, job.generation) : true;
+		if (ok && pairs)
+			slot->Publish(previousSequence, job.sequence, job.generation, std::make_shared<Flow>());
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			++stats.frames;
+			if (ok && pairs) ++stats.pairs;
+		}
+		havePrevious = true;
+		previousSequence = job.sequence;
+		previousGeneration = job.generation;
+		hintSequence = UINT64_MAX;
 		return ok;
 	}
 }
