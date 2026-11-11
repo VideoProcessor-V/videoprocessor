@@ -129,7 +129,8 @@ namespace VpMotion
 		// The bind half alone (no readers): resync_event turned off unbinds (null), turned on again over the SAME Indicator
 		// (FrameSeal runs providers only on a new era) rebinds; the readers registered at that era still fire.
 		static bool BindResyncFor(const void* host, const std::shared_ptr<VpIndicator::Indicator>& indicator);
-		// The Indicator this engine's validity is bound to (null = unbound: resync_event off). Tests and status.
+		// Whether this engine's validity is bound to an Indicator (false = unbound: resync_event off, or no engine for `host`).
+		// Tests and status. Unbinding applies a request still deferred to a seal (MotionValidity::State::Unbind).
 		static bool ResyncBoundFor(const void* host);
 
 		// What the producer plan reads from the renderer, as plain values. The two atomics are read

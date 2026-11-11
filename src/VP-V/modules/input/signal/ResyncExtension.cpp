@@ -93,7 +93,7 @@ namespace Vpv
 			// W1-C2a A1 (doc 88 gap 1): motion joins the coordinator. The engine's MotionValidity::State is bound to this era's
 			// Indicator and its motion readers registered (RegisterOn, shared_ptr form): pairs spanning a FULL are refused by
 			// PairValidAt and the deferred causes move the epoch at the seal. Runs only inside Seal, i.e. only while `on`.
-			// SetVectorsRequired stays false: no vector consumer reports OnVectorsValid yet (open item).
+			// SetVectorsRequired stays false: no vector consumer reports OnVectorsValid yet.
 			seal.AddProvider("motion", [this](const std::shared_ptr<VpIndicator::Indicator>& ind)
 				{
 					motionBound = VpMotion::VectorEngine::RegisterResyncFor(host, ind) && ind != nullptr;
@@ -102,8 +102,9 @@ namespace Vpv
 					else
 					{
 						motionReadersOn.reset();
-						++motionNoEngine;
+						motionNoEngine.fetch_add(1, std::memory_order_relaxed);
 					}
+					motionNoEngineNow.store(!motionBound, std::memory_order_relaxed);
 				});
 			seal.Subscribe("resync-drive", [this](const std::shared_ptr<VpIndicator::Indicator>& ind, uint64_t seq, VpIndicator::CounterMask changed)
 				{ drive.OnObserved(ind, seq, changed); });
@@ -452,6 +453,9 @@ namespace Vpv
 						if (!h->driveStatus.empty())
 							events += " | " + h->driveStatus;
 					}
+					const unsigned long long noEngine = h->motionNoEngine.load(std::memory_order_relaxed);
+					if (h->shadow.Driving() && noEngine != 0)
+						events += " | motion: " + std::to_string(noEngine) + " era(s) with no vector engine";
 					const std::string inject = h->inject.StatusText();
 					if (!inject.empty())
 					{
@@ -473,6 +477,10 @@ namespace Vpv
 					h->sealLateProviders.load(std::memory_order_relaxed), h->sealRejectedReaders.load(std::memory_order_relaxed));
 				if (sealFallback.engaged)
 					lines.push_back(sealFallback.id + ": " + sealFallback.reason);
+				// W1-C2a A1: an era with no vector engine leaves motion out of the coordinator (no silent fallbacks). One FallbackStatus id.
+				if (h->motionNoEngineNow.load(std::memory_order_relaxed))
+					lines.push_back("resync_motion: no vector engine for this renderer at the era start; motion epochs immediate until the next era (" +
+						std::to_string(h->motionNoEngine.load(std::memory_order_relaxed)) + " era(s) so far)");
 			}
 		}
 

@@ -749,6 +749,7 @@
     </ClCompile>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\signal\tests\ResyncInjectionTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\skeleton\SkeletonModule.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>

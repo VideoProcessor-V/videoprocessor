@@ -238,6 +238,7 @@ namespace MotionValidity
 			case Cause::Seek:
 			case Cause::SourceFormatChange:
 				deferred.fetch_add(1, std::memory_order_relaxed);
+				unsealed.store(static_cast<int>(cause), std::memory_order_release);   // W1-C2a: Unbind applies it if no seal does
 				return epoch.load(std::memory_order_acquire);
 			case Cause::SettingsChange:
 			case Cause::MotionSourceChange:
@@ -247,6 +248,7 @@ namespace MotionValidity
 					indicator->Advance(VpIndicator::kSettingsMotion, VpResync::Cause::SettingsApply,
 						indicator->HasSealed() ? indicator->LastSealed() + 1 : 0);
 					settingsAdvances.fetch_add(1, std::memory_order_relaxed);
+					unsealed.store(static_cast<int>(cause), std::memory_order_release);
 					return epoch.load(std::memory_order_acquire);
 				}
 				catch (...)
@@ -270,6 +272,7 @@ namespace MotionValidity
 		{
 			SealedResult r;
 			auto apply = [&](Cause cause) {
+				unsealed.store(-1, std::memory_order_release);   // the seal applied the deferred move
 				InvalidateNow(cause);
 				r.moved = true;
 				r.cause = cause;
@@ -295,11 +298,20 @@ namespace MotionValidity
 			std::atomic_store(&ind, std::move(indicator));
 			bound.store(on, std::memory_order_release);
 		}
+		// W1-C2a: a request deferred to a seal that will not come (resync_event off, or the renderer unbinds, before the carrying
+		// frame is sealed) is applied here as the immediate move it would have been unbound: never lost. Counted in UnbindMoves().
 		void Unbind()
 		{
 			bound.store(false, std::memory_order_release);
 			std::atomic_store(&ind, std::shared_ptr<VpIndicator::Indicator>());
+			const int pending = unsealed.exchange(-1, std::memory_order_acq_rel);
+			if (pending >= 0)
+			{
+				unbindMoves.fetch_add(1, std::memory_order_relaxed);
+				InvalidateNow(static_cast<Cause>(pending));
+			}
 		}
+		uint64_t UnbindMoves() const noexcept { return unbindMoves.load(std::memory_order_relaxed); }
 		bool Driven() const { return bound.load(std::memory_order_acquire); }
 
 		// Status text (Ctrl+Alt+D / Config status): empty when unbound; bound shows the deferred
@@ -519,6 +531,8 @@ namespace MotionValidity
 		std::atomic<bool> bound{ false };   // mirrors ind != nullptr: the hot-path guard
 		std::atomic<uint64_t> deferred{ 0 };
 		std::atomic<uint64_t> settingsAdvances{ 0 };
+		std::atomic<int> unsealed{ -1 };   // the last deferred cause no seal has applied yet (-1 = none)
+		std::atomic<uint64_t> unbindMoves{ 0 };
 
 		mutable std::mutex keptMutex;
 		uint64_t lastKept = 0, previousKept = 0, keptEpoch = 0;

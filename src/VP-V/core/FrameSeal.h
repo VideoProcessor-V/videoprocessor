@@ -88,6 +88,14 @@ public:
     uint32_t LateProviders() const { return m_lateProviders; }
     uint64_t LastSeq() const { return m_lastSeq; }
     size_t ProviderCount() const { return m_providers.size(); }
+    // Whether a provider of this name was added (tests and diagnostics name the providers they expect).
+    bool HasProvider(const char* name) const
+    {
+        for (const Provider& p : m_providers)
+            if (name && p.name == name)
+                return true;
+        return false;
+    }
     size_t SubscriberCount() const { return m_subscribers.size(); }
 
     // The visible fallback for a wiring fault (no silent fallbacks): a provider added after the first
