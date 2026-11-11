@@ -1656,6 +1656,10 @@ if (tile < int(tiles) && g.y < ts) {
 		const Snapshot s = Read();
 		const double before = autoApplied;
 		const bool fixes = LatchFixes();
+		// SID r2 N1: a chain latch release by its no-cut CEILING not shown yet (the counter only moves while the safety rules are on).
+		latchCeilingCount = chainEst->LatchCeilingReleases();
+		latchCeilingPending = latchCeilingCount != latchCeilingSeen;
+		latchCeilingGateClear = false;
 		// The source frame interval, measured (the pan speed's time base).
 		if (renderSequence > clockSequence && clockSequence != 0)
 		{
@@ -1681,6 +1685,7 @@ if (tile < int(tiles) && g.y < ts) {
 			const IdGate gate = SourceIdGate(now);
 			if (gate.fresh)
 			{
+				latchCeilingGateClear = gate.ratioH >= 0.99 && gate.ratioV >= 0.99;   // native on both axes (latched native, or not latched)
 				const double tol = 0.03;
 				const bool uniform = gate.latchedH && gate.latchedV && std::fabs(gate.ratioH - gate.ratioV) <= tol * (std::max)(gate.ratioH, gate.ratioV);
 				wanted = uniform && gate.ratioH < 1.0 ? 0.5 * (gate.ratioH + gate.ratioV) : 1.0;
@@ -1699,7 +1704,19 @@ if (tile < int(tiles) && g.y < ts) {
 			// is the harmful direction: at once. Only the confidence fell: at the next cut,
 			// at most kDisengageWaitSeconds later, so the scaler does not change mid-scene.
 			const bool detailAbove = !s.reading || s.declaredRatio > autoApplied + tolerance;
-			if (detailAbove)
+			// SID r2 N1: the consensus went native because the chain latch was released by its no-cut ceiling (no cut, black or fade came
+			// within 60 s of its bound): at once, shown through the engage crossfade (source_resolution_crossfade_s), not the release fade.
+			const bool ceiling = latchCeilingPending && latchCeilingGateClear && wanted >= 1.0;
+			if (ceiling)
+			{
+				autoApplied = autoPending = wanted;
+				disengagePending = false;
+				nextFadeSeconds = fixes ? CrossfadeSeconds() : 0.0;
+				latchCeilingSeen = latchCeilingCount;
+				latchCeilingPending = false;
+				why = "native by a crossfade (the upscale latch's no-cut ceiling)";
+			}
+			else if (detailAbove)
 			{
 				autoApplied = autoPending = wanted;
 				disengagePending = false;
@@ -1905,8 +1922,15 @@ if (tile < int(tiles) && g.y < ts) {
 			if (wanted[1] >= 1.0) axisApplied[1] = 1.0;
 			axisPending[0] = axisApplied[0];
 			axisPending[1] = axisApplied[1];
-			axisWhy = "per axis: back towards native at once";
-			nextFadeSeconds = LatchFixes() ? ReleaseFade() : 0.0;
+			// SID r2 N1: after a no-cut ceiling release of the chain latch, the engage crossfade (as the uniform path).
+			const bool ceiling = latchCeilingPending && gate.fresh && gate.ratioH >= 0.99 && gate.ratioV >= 0.99;
+			axisWhy = ceiling ? "per axis: native by a crossfade (the upscale latch's no-cut ceiling)" : "per axis: back towards native at once";
+			nextFadeSeconds = LatchFixes() ? (ceiling ? CrossfadeSeconds() : ReleaseFade()) : 0.0;
+			if (ceiling)
+			{
+				latchCeilingSeen = latchCeilingCount;
+				latchCeilingPending = false;
+			}
 		}
 		else if (wanted[0] < axisApplied[0] - tolerance || wanted[1] < axisApplied[1] - tolerance)
 		{
@@ -1951,6 +1975,12 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 		factorX = axisApplied[0];
 		factorY = axisApplied[1];
+		// SID r2 N1: a pending ceiling release with nothing engaged any more (the gate clear, both paths native) has nothing to fade.
+		if (latchCeilingPending && latchCeilingGateClear && autoApplied >= 1.0 && axisApplied[0] >= 1.0 && axisApplied[1] >= 1.0)
+		{
+			latchCeilingSeen = latchCeilingCount;
+			latchCeilingPending = false;
+		}
 		Transit(factorX, factorY, now);
 	}
 

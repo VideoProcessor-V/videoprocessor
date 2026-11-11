@@ -15,6 +15,7 @@
 #include "GeometryFixtures.h"
 
 #include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
+#include <VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h>
 
 #include <cstdint>
 #include <string>
@@ -189,6 +190,35 @@ namespace Tests
 			Assert::AreEqual(1.0, fx, 1e-9);
 			Assert::AreEqual(1.0, fy, 1e-9);
 			Assert::IsTrue(why.find("at once") != std::string::npos, L"the original revert path: the tracker reads native, so it is immediate");
+		}
+
+		// SID r2 N1: the chain latch released by its no-cut CEILING (no cut, black or fade within 60 s of its starvation bound): the native
+		// switch the consensus then asks for is at once but shown through the engage CROSSFADE (1.5 s), not the 0.25 s release fade; the
+		// cue is used once.
+		TEST_METHOD(ANoCutCeilingReleaseOfTheLatchRevertsThroughTheCrossfade)
+		{
+			SidGate::Mon m;
+			GeoFx::G::HeldState geo;
+			m.SetGeometrySource(&geo);
+			m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+			const SidGate::Outcome o = SidGate::Script(m, geo, 10.0);
+			Assert::AreEqual(0.5, o.fx, 1e-9);
+			Assert::AreEqual<uint64_t>(0, m.ChainEstimatorRef().LatchCeilingReleases(), L"fixture: no ceiling release yet");
+			m.ChainEstimatorRef().NoteLatchCeilingForTest();   // the latch's ReleasedCeiling, as FoldLatchCounters counts it
+			uint64_t seq = SidGate::Feed(m, geo, 16.7, 32, o.nextSeq, false);
+			SourceIdentity::Record p14;
+			Assert::IsTrue(m.SourceIdRecord(p14) && p14.ratioH == 1.0f && p14.ratioV == 1.0f, L"fixture: the consensus adopted native");
+			m.InjectResultForTest(SidGate::CleanSnapshot(3, false), seq - 1);
+			std::string why;
+			double fx = o.fx, fy = o.fy;
+			m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 33.0, seq);
+			Assert::AreEqual(1.0, fx, 1e-9, L"native at once");
+			Assert::AreEqual(1.0, fy, 1e-9);
+			Assert::IsTrue(why.find("crossfade") != std::string::npos && why.find("ceiling") != std::string::npos, (L"named as the ceiling's crossfade: " + std::wstring(why.begin(), why.end())).c_str());
+			const SidGate::Mon::Transition tr = m.AutoTransition(33.0);
+			Assert::AreEqual(1.5, tr.duration, 1e-9, L"the engage crossfade (source_resolution_crossfade_s), not the release fade");
+			Assert::AreEqual(0.5, tr.fromX, 1e-9, L"faded from the upscaled path");
+			Assert::AreEqual(1.0, tr.toX, 1e-9);
 		}
 
 		TEST_METHOD(ShadowIsByteIdenticalToOffAndOnEngagesOnTheSameScript)

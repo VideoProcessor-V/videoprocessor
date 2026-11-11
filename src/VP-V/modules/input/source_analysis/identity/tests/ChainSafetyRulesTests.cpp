@@ -144,7 +144,8 @@ namespace Tests
 				vy.candidates.push_back(Cand(ny, -1.2, 5.0));
 			}
 
-			LatchOutput Step(int64_t tSec, uint32_t shot)
+			// `boundary`: a cut / black / fade was consumed with this evaluation (as ApplyLatch sets it from the snapshot's event flags).
+			LatchOutput Step(int64_t tSec, uint32_t shot, bool boundary = false)
 			{
 				const int64_t t = tSec * 1000000;
 				ev.ClearCredits();
@@ -157,6 +158,7 @@ namespace Tests
 				in.informative = ux.informative || uy.informative;
 				in.rasterW = kRasterW;
 				in.rasterH = kRasterH;
+				in.shotBoundary = boundary;
 				const AxisSummary sx = ev.Summary(0), sy = ev.Summary(1);
 				in.havePair = sx.aboveC1 && sy.aboveC1;
 				if (in.havePair)
@@ -329,7 +331,8 @@ namespace Tests
 			Assert::IsTrue(o.nonConventional, L"held back visibly");
 		}
 
-		// R5: an injected confident-wrong burst on a native stream releases within the bound; native evidence releases at once.
+		// R5: an injected confident-wrong burst on a native stream reaches the bound within 60 s; N1: its release waits for the next
+		// cut / black / fade and happens at the end of the new shot's 3 s dwell (no re-confirmation); native evidence releases at once.
 		TEST_METHOD(AConfidentWrongBurstOnNativeReleasesWithinTheBound)
 		{
 			using namespace SafetyFx;
@@ -337,16 +340,38 @@ namespace Tests
 			Assert::IsFalse(latch.Step(Quiet(0, 0.0, true)).latched, L"native is sticky");
 			LatchOutput o = latch.Step(Pair1080(1, 40.0, 40.0));   // the burst
 			Assert::IsTrue(o.latched && o.event == LatchEvent::Entered);
-			int64_t releasedAt = -1;
-			for (int64_t t = 2; t < 200 && releasedAt < 0; ++t)
+			int64_t deferredAt = -1;
+			for (int64_t t = 2; t < 200 && deferredAt < 0; ++t)
 			{
 				o = latch.Step(Quiet(t, 0.0, true));   // the burst ends: no new evidence of the latched size, evaluations are informative
+				Assert::IsTrue(o.latched, L"N1: the bound never changes the picture by itself");
+				if (o.deferredNow)
+					deferredAt = t;
+			}
+			Assert::IsTrue(deferredAt > 0 && deferredAt <= 63, L"the 60 s bound is reached (and counted) within the bound");
+			Assert::IsTrue(o.deferred && latch.Deferred() && o.event == LatchEvent::None);
+			Assert::AreEqual(static_cast<uint64_t>(1), latch.Counters().releasesBound, L"the bound reached is counted at once");
+			Assert::AreEqual(static_cast<uint64_t>(1), latch.Counters().deferred);
+			Assert::AreEqual(static_cast<uint64_t>(0), latch.Counters().releases);
+			for (int64_t t = deferredAt + 1; t < deferredAt + 7; ++t)
+				Assert::IsTrue(latch.Step(Quiet(t, 0.0, true)).latched, L"held until a shot boundary");
+			LatchInput cut = Quiet(deferredAt + 7, 0.0, true);
+			cut.shotBoundary = true;
+			o = latch.Step(cut);
+			Assert::IsTrue(o.latched && latch.Dwelling(), L"the cut opens the new shot's dwell");
+			int64_t releasedAt = -1;
+			for (int64_t t = deferredAt + 8; t < deferredAt + 20 && releasedAt < 0; ++t)
+			{
+				o = latch.Step(Quiet(t, 0.0, true));
 				if (!o.latched)
 					releasedAt = t;
 			}
-			Assert::IsTrue(releasedAt > 0 && releasedAt <= 63, L"released within the 60 s bound");
-			Assert::IsTrue(o.event == LatchEvent::Released);
-			Assert::AreEqual(static_cast<uint64_t>(1), latch.Counters().releasesBound);
+			Assert::IsTrue(releasedAt == deferredAt + 10, L"released at the end of the 3 s dwell (no re-confirmation)");
+			Assert::IsTrue(o.event == LatchEvent::Released && (o.reasonBits & kReasonLatchRelease) != 0);
+			Assert::AreEqual(static_cast<uint64_t>(1), latch.Counters().releasesAtCut);
+			Assert::AreEqual(static_cast<uint64_t>(1), latch.Counters().releases);
+			Assert::AreEqual(static_cast<uint64_t>(1), latch.Counters().releasesBound, L"the release itself is not counted a second time");
+			Assert::IsFalse(latch.Deferred());
 
 			UpscaleLatch fast(On());
 			fast.Step(Pair1080(0, 40.0, 40.0));
@@ -417,7 +442,7 @@ namespace Tests
 				for (int e = 0; e < 3; ++e, ++t)
 					entered = el.Step(t, shot).latched || entered;
 			Assert::IsTrue(entered && el.latch.Latched(), L"fixture: six shots enter the latch");
-			int64_t lastConfirmAt = -1, releasedAt = -1;
+			int64_t lastConfirmAt = -1, releasedAt = -1, deferredAt = -1;
 			LatchOutput o;
 			bool checkedMid = false;
 			for (; t < 18 + 400 && releasedAt < 0; ++t)
@@ -425,6 +450,8 @@ namespace Tests
 				o = el.Step(t, 7u);   // one shot of 400 s
 				if (o.confirmed)
 					lastConfirmAt = t;
+				if (o.deferredNow)
+					deferredAt = t;
 				if (!o.latched)
 					releasedAt = t;
 				if (t == 118)   // 100 s into the long shot
@@ -437,11 +464,152 @@ namespace Tests
 			}
 			Assert::IsTrue(checkedMid);
 			Assert::IsTrue(lastConfirmAt >= 18 && lastConfirmAt <= 30, L"the new shot confirmed once its dwell passed, then never again");
-			Assert::IsTrue(releasedAt > 0, L"the latch is released (no lock without release)");
-			Assert::IsTrue(o.event == LatchEvent::ReleasedHardBound, L"by the hard bound");
-			Assert::IsTrue(releasedAt - lastConfirmAt >= 115 && releasedAt - lastConfirmAt <= 125, L"about 120 s after the newest new evidence");
+			Assert::IsTrue(deferredAt - lastConfirmAt >= 115 && deferredAt - lastConfirmAt <= 125, L"the hard bound is reached ~120 s after the newest new evidence");
 			Assert::AreEqual(static_cast<uint64_t>(1), el.latch.Counters().releasesHardBound);
-			Assert::AreEqual(static_cast<uint64_t>(0), el.latch.Counters().releasesBound, L"the slow clock did not release first");
+			Assert::AreEqual(static_cast<uint64_t>(0), el.latch.Counters().releasesBound, L"the slow clock did not reach its bound first");
+			// N1: no cut follows inside the shot, so the no-cut ceiling releases 60 s later (still: no lock without release).
+			Assert::IsTrue(releasedAt > 0, L"the latch is released (no lock without release)");
+			Assert::IsTrue(o.event == LatchEvent::ReleasedCeiling, L"by the no-cut ceiling");
+			Assert::IsTrue(releasedAt - deferredAt == 60, L"60 s after the bound");
+			Assert::IsTrue(releasedAt - lastConfirmAt <= 185, L"at most ~180 s after the newest new evidence");
+			Assert::AreEqual(static_cast<uint64_t>(1), el.latch.Counters().releasesCeiling);
+			Assert::AreEqual(static_cast<uint64_t>(1), el.latch.Counters().releases);
+		}
+
+		// N1 over a real ChainEvidence: a TRUE upscale in one very long capped shot reaches the hard bound; the next cut opens the new
+		// shot's dwell, the new shot's evidence (credited once ChainEvidence's 3 s shot dwell passed) re-confirms it, and the deferred
+		// release is CANCELLED: the picture never changes. Without deferral (the pre-N1 rule) it would have been released mid-shot.
+		TEST_METHOD(ATrueUpscaleReconfirmsInTheNewShotAndTheDeferredReleaseIsCancelled)
+		{
+			using namespace SafetyFx;
+			EvidenceSettings s;
+			s.conventionOnly = true;
+			s.pairPrior = true;
+			EvidenceLatch el(s, 1920, 1080);
+			int64_t t = 0;
+			for (uint32_t shot = 1; shot <= 6; ++shot)
+				for (int e = 0; e < 3; ++e, ++t)
+					el.Step(t, shot, e == 0);
+			Assert::IsTrue(el.latch.Latched(), L"fixture: six shots enter the latch");
+			int64_t deferredAt = -1;
+			for (; t < 18 + 300 && deferredAt < 0; ++t)
+			{
+				const LatchOutput o = el.Step(t, 7u, t == 18);
+				Assert::IsTrue(o.latched, L"never released mid-shot");
+				if (o.deferredNow)
+					deferredAt = t;
+			}
+			Assert::IsTrue(deferredAt > 0 && el.latch.Deferred(), L"the hard bound is reached inside the long shot");
+			for (int64_t k = 0; k < 20; ++k, ++t)
+				Assert::IsTrue(el.Step(t, 7u).latched, L"the long shot goes on: held, deferred");
+			bool cancelled = false;
+			for (int64_t k = 0; k < 30; ++k, ++t)
+			{
+				const LatchOutput o = el.Step(t, 8u, k == 0);   // a cut: shot 8 (the same true upscale)
+				Assert::IsTrue(o.latched, L"a true upscale never changes the picture");
+				cancelled = o.deferCancelled || cancelled;
+			}
+			Assert::IsTrue(cancelled && !el.latch.Deferred(), L"re-confirmed in the new shot's dwell: the deferred release is cancelled");
+			Assert::AreEqual(static_cast<uint64_t>(1), el.latch.Counters().deferCancelled);
+			Assert::AreEqual(static_cast<uint64_t>(0), el.latch.Counters().releases);
+			Assert::AreEqual(static_cast<uint64_t>(1), el.latch.Counters().releasesHardBound, L"the bound reached stays counted");
+		}
+
+		// N1: native, menu, ABR-step and reset releases stay immediate while a starvation release is deferred (and end the deferral);
+		// deferStarvation = false is the pre-N1 rule (released at the bound).
+		TEST_METHOD(TheOtherReleasesStayImmediateWhileDeferredAndDeferralCanBeOff)
+		{
+			using namespace SafetyFx;
+			auto deferredLatch = [](UpscaleLatch& l) {
+				l.Step(Pair1080(0, 40.0, 40.0));
+				for (int64_t t = 1; t <= 70 && !l.Deferred(); ++t)
+					l.Step(Quiet(t, 0.0, true));
+				return l.Deferred();
+			};
+			{
+				UpscaleLatch l(On());
+				Assert::IsTrue(deferredLatch(l));
+				LatchInput nat = Quiet(80, 0.0, true);
+				nat.nativeBoth = true;
+				const LatchOutput o = l.Step(nat);
+				Assert::IsTrue(!o.latched && o.event == LatchEvent::ReleasedNative && !l.Deferred(), L"native: at once");
+				Assert::AreEqual(static_cast<uint64_t>(1), l.Counters().releasesNative);
+			}
+			{
+				UpscaleLatch l(On());
+				Assert::IsTrue(deferredLatch(l));
+				LatchInput menu = Quiet(80, 0.0, true);
+				menu.menuHold = true;
+				const LatchOutput o = l.Step(menu);
+				Assert::IsTrue(!o.latched && o.event == LatchEvent::ReleasedMenu && !l.Deferred(), L"menu: at once");
+			}
+			{
+				LatchSettings s = On();
+				s.abrStepTrigger = true;
+				UpscaleLatch l(s);
+				Assert::IsTrue(deferredLatch(l));
+				LatchInput abr = Quiet(80, 0.0, true);
+				abr.abrStep = true;
+				const LatchOutput o = l.Step(abr);
+				Assert::IsTrue(!o.latched && o.event == LatchEvent::ReleasedAbr && !l.Deferred(), L"ABR step: at once");
+			}
+			{
+				UpscaleLatch l(On());
+				Assert::IsTrue(deferredLatch(l));
+				const LatchOutput o = l.Reset();
+				Assert::IsTrue(!o.latched && o.event == LatchEvent::ReleasedReset && !l.Deferred(), L"reset: at once");
+			}
+			{
+				LatchSettings s = On();
+				s.deferStarvation = false;
+				UpscaleLatch l(s);
+				l.Step(Pair1080(0, 40.0, 40.0));
+				int64_t at = -1;
+				LatchOutput o;
+				for (int64_t t = 1; t <= 70 && at < 0; ++t)
+				{
+					o = l.Step(Quiet(t, 0.0, true));
+					Assert::IsFalse(o.deferredNow);
+					if (!o.latched)
+						at = t;
+				}
+				Assert::IsTrue(at > 0 && at <= 63 && o.event == LatchEvent::Released, L"deferral off: released at the bound");
+				Assert::AreEqual(static_cast<uint64_t>(1), l.Counters().releasesBound);
+				Assert::AreEqual(static_cast<uint64_t>(0), l.Counters().deferred);
+			}
+			Assert::IsTrue(LatchSettings().deferStarvation, L"deferral is the default of the rules");
+			Assert::AreEqual(3.0, LatchSettings().deferDwellSec, 1e-12);
+			Assert::AreEqual(60.0, LatchSettings().deferCeilingSec, 1e-12);
+		}
+
+		// N1: a boundary consumed with the very evaluation that reaches the bound opens the dwell at once; a re-confirmation BEFORE any
+		// boundary also cancels the deferral (new evidence is new evidence).
+		TEST_METHOD(ABoundaryOnTheBoundEvaluationOpensTheDwellAndAnEarlyConfirmCancels)
+		{
+			using namespace SafetyFx;
+			UpscaleLatch a(On());
+			a.Step(Pair1080(0, 40.0, 40.0));
+			int64_t t = 1;
+			for (; t <= 70 && !a.Deferred(); ++t)
+			{
+				LatchInput in = Quiet(t, 0.0, true);
+				in.shotBoundary = true;   // every evaluation carries a cut
+				a.Step(in);
+			}
+			Assert::IsTrue(a.Deferred() && a.Dwelling(), L"the bound's own boundary opens the dwell");
+			const int64_t at = t - 1;
+			Assert::IsTrue(a.Step(Quiet(at + 2, 0.0, true)).latched);
+			Assert::IsFalse(a.Step(Quiet(at + 3, 0.0, true)).latched, L"released 3 s after the bound evaluation");
+			Assert::AreEqual(static_cast<uint64_t>(1), a.Counters().releasesAtCut);
+
+			UpscaleLatch b(On());
+			b.Step(Pair1080(0, 40.0, 40.0));
+			for (t = 1; t <= 70 && !b.Deferred(); ++t)
+				b.Step(Quiet(t, 0.0, true));
+			Assert::IsTrue(b.Deferred() && !b.Dwelling());
+			const LatchOutput o = b.Step(Quiet(t + 5, 10.0, true));   // new evidence of the latched size, no boundary yet
+			Assert::IsTrue(o.latched && o.confirmed && o.deferCancelled && !b.Deferred());
+			Assert::AreEqual(static_cast<uint64_t>(1), b.Counters().deferCancelled);
 		}
 
 		// R5b: through no-evidence stretches the release clock runs at 1/4 speed, but 120 s without confirmation always releases.
@@ -461,10 +629,18 @@ namespace Tests
 				if (!o.latched)
 					at = t;
 			}
-			Assert::IsTrue(at == 121, L"the hard bound releases one second past 120 s");
-			Assert::IsTrue(o.event == LatchEvent::ReleasedHardBound, L"counted as a hard-bound release");
-			Assert::AreEqual(static_cast<uint64_t>(1), latch.Counters().releasesHardBound);
+			Assert::IsTrue(at < 0 && latch.Deferred(), L"N1: the hard bound is reached but deferred (no cut)");
+			Assert::AreEqual(static_cast<uint64_t>(1), latch.Counters().releasesHardBound, L"reached one second past 120 s, counted as the hard bound");
 			Assert::AreEqual(static_cast<uint64_t>(0), latch.Counters().releasesBound, L"not as a clock release");
+			for (int64_t t = 141; t <= 200 && at < 0; ++t)
+			{
+				o = latch.Step(Quiet(t, 0.0, false));
+				if (!o.latched)
+					at = t;
+			}
+			Assert::IsTrue(at == 181, L"the no-cut ceiling releases 60 s after the hard bound (121 + 60)");
+			Assert::IsTrue(o.event == LatchEvent::ReleasedCeiling);
+			Assert::AreEqual(static_cast<uint64_t>(1), latch.Counters().releasesCeiling);
 			Assert::AreEqual(static_cast<uint64_t>(1), latch.Counters().releases);
 		}
 
@@ -480,14 +656,18 @@ namespace Tests
 			Assert::AreEqual(15.0 * (1.0 + 30.0 / 120.0), latch.Bar(65000000, 15.0), 1e-9);
 			LatchOutput o;
 			int64_t at = -1;
-			for (int64_t t = 6; t <= 140 && at < 0; ++t)
+			int64_t boundAt = -1;
+			for (int64_t t = 6; t <= 220 && at < 0; ++t)
 			{
 				o = latch.Step(Quiet(t, 0.0, false));
+				if (o.deferredNow)
+					boundAt = t;
 				if (!o.latched)
 					at = t;
 			}
-			Assert::IsTrue(at == 126, L"the hard bound runs from the re-anchored time");
-			Assert::IsTrue(o.event == LatchEvent::ReleasedHardBound);
+			Assert::IsTrue(boundAt == 126, L"the hard bound runs from the re-anchored time");
+			Assert::AreEqual(static_cast<uint64_t>(1), latch.Counters().releasesHardBound);
+			Assert::IsTrue(at == 186 && o.event == LatchEvent::ReleasedCeiling, L"N1: no cut, so the ceiling 60 s later");
 		}
 
 		// Moves between upscaled sizes: the same bar, a listed non-parked pair; anything else keeps the latched size.

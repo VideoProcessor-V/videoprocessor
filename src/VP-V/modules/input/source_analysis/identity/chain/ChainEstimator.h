@@ -212,6 +212,9 @@ namespace SourceIdentity
 			bool SafetyRules() const;
 			// R5 switch, default OFF: an ABR rendition step (NoteEvent AbrStep) drops an upscaled latch (E0: helps only after a rendition change).
 			void SetLatchAbrStepTrigger(bool on);
+			// N1: the count of latch releases by the no-cut CEILING (LatchEvent::ReleasedCeiling; zero while the rules are off). The monitor shows
+			// the native switch that follows one through its engage crossfade instead of the release fade. Any thread.
+			uint64_t LatchCeilingReleases() const;
 
 			// ---- evidence log (setter only; the key `source_id_evidence` is plumbed with P3) -----------------------------
 			void SetEvidence(const std::string& folder, EvidenceLevel level);
@@ -249,6 +252,8 @@ namespace SourceIdentity
 			// Sets the "both axes confident" power flag (the long cadence, the event pull-forward) without a real reading; the next evaluation recomputes it.
 			void ForceLatchedPowerForTest(bool on);
 			bool LatchedPowerForTest() const;
+			// Counts one ceiling release (LatchCeilingReleases) without running the latch: the monitor's crossfade cue in isolation.
+			void NoteLatchCeilingForTest();
 			// Sets the due time (wall ms of the estimator's clock) and the interval it implies, as a confident evaluation would have left them.
 			void ForceNextDueForTest(double ms);
 			// The replay entry: feeds a (dumped) snapshot to the worker as if it had been delivered - its flags, source time and active

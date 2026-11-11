@@ -25,6 +25,17 @@
 //                   native menu), OR (a switch, default OFF) an ABR rendition step, OR Reset (a discontinuity). Every release is visible
 //                   (the output, the status counters, the one-time notice) and counted; after one the bar restarts. A release for lack of
 //                   new evidence also discredits the recent window (the estimator clears it), so stale evidence cannot re-enter at once.
+//   N1 (r2 re-check, coordinator 2026-11-11): the two EVIDENCE-STARVATION releases (the release clock and the hard bound) do not change the
+//                 picture mid-shot. Reaching either bound is counted at once (releasesBound / releasesHardBound, and `deferred`) and the
+//                 release is DEFERRED to the next shot boundary (a cut, black or fade of the evaluation: LatchInput::shotBoundary); the latch
+//                 stays held and published meanwhile, visibly (Deferred(), the status). From the first evaluation after the boundary the new
+//                 shot has ONE dwell of deferDwellSec (3 s: ChainEvidence's minimum shot dwell, so the new shot's evidence is credited by
+//                 then) to re-confirm: a re-confirmation (new evidence on both axes, the rule above; at any time while deferred) CANCELS
+//                 the release (counted: deferCancelled), so a true upscale never changes the picture; otherwise it releases at the dwell's
+//                 end (releasesAtCut). With no boundary at all the release happens deferCeilingSec (60 s) after the bound (so at most
+//                 hardBoundSec + 60 = 180 s after the newest confirming evidence) as LatchEvent::ReleasedCeiling, which the monitor shows
+//                 through its engage crossfade instead of the release fade. Native, menu, ABR-step and reset releases stay immediate (also
+//                 while deferred). The bounds are NOT scaled with the shot length.
 //   A backward source-time step without a reset (L5) re-anchors the stable and confirmation times to the new time (the hard bound keeps running).
 // It reuses the existing inputs only (rules 24 / 25): ChainEvidence's per-axis evidence and credits, the HOLD evaluations and the monitor's
 // mixed-episode events (WindowClearPolicy), the AbrStepDetector's events. It adds no private measurement. Pure, no clock of its own, header-only,
@@ -53,6 +64,10 @@ namespace SourceIdentity
 			double growMax = 1.0;               // the bar at most doubles
 			bool abrStepTrigger = false;        // a switch, OFF: an ABR rendition step drops the latch (E0: only helps after a rendition change)
 			double movedTolerance = 0.004;      // relative change of a ratio that is a move to another size
+			// N1: the evidence-starvation releases wait for the next shot boundary (true), or release at the bound (false: the pre-N1 rule).
+			bool deferStarvation = true;
+			double deferDwellSec = 3.0;         // N1: the new shot's one dwell to re-confirm (= ChainEvidence kMinShotDwellSec)
+			double deferCeilingSec = 60.0;      // N1: no boundary within this long after the bound: released (crossfade) anyway
 		};
 
 		enum class LatchEvent : int
@@ -65,7 +80,8 @@ namespace SourceIdentity
 			ReleasedMenu,     // a menu / overlay HOLD
 			ReleasedAbr,      // an ABR step (switch)
 			ReleasedReset,    // a discontinuity / active-area change
-			ReleasedHardBound // no new confirming evidence for hardBoundSec (R5b)
+			ReleasedHardBound, // no new confirming evidence for hardBoundSec (R5b)
+			ReleasedCeiling   // N1: a deferred starvation release with no shot boundary within deferCeilingSec (shown by a crossfade)
 		};
 
 		inline const char* LatchEventText(LatchEvent e)
@@ -80,6 +96,7 @@ namespace SourceIdentity
 			case LatchEvent::ReleasedAbr: return "released to native (rendition step)";
 			case LatchEvent::ReleasedReset: return "released to native (reset)";
 			case LatchEvent::ReleasedHardBound: return "released to native (no new evidence within the hard bound)";
+			case LatchEvent::ReleasedCeiling: return "released to native (no new evidence and no cut within the ceiling; crossfade)";
 			default: return "";
 			}
 		}
@@ -87,7 +104,10 @@ namespace SourceIdentity
 		inline bool LatchEventIsRelease(LatchEvent e) { return e >= LatchEvent::Released; }
 
 		// A release for lack of new evidence: the window it was built on is discredited (the estimator clears the evidence).
-		inline bool LatchEventIsEvidenceRelease(LatchEvent e) { return e == LatchEvent::Released || e == LatchEvent::ReleasedHardBound; }
+		inline bool LatchEventIsEvidenceRelease(LatchEvent e)
+		{
+			return e == LatchEvent::Released || e == LatchEvent::ReleasedHardBound || e == LatchEvent::ReleasedCeiling;
+		}
 
 		struct LatchInput
 		{
@@ -97,6 +117,7 @@ namespace SourceIdentity
 			bool menuHold = false;        // HOLD evaluation on an axis, or a menu / overlay episode event: R7
 			bool abrStep = false;         // an ABR step event (used only with abrStepTrigger)
 			bool nativeBoth = false;      // both axis readers are confident NATIVE
+			bool shotBoundary = false;    // N1: a cut, black or fade was consumed with this evaluation (a deferred release's moment)
 			// The confident UPSCALED pair of this evaluation (both axes), with each axis' evidence incl. the two-axis prior.
 			bool havePair = false;
 			int nx = 0, Nx = 0, ny = 0, Ny = 0;
@@ -117,6 +138,9 @@ namespace SourceIdentity
 			int nx = 0, ny = 0, Nx = 0, Ny = 0;   // the latched sizes (valid while latched)
 			LatchEvent event = LatchEvent::None;
 			bool confirmed = false;       // the latch was re-confirmed by new evidence this evaluation
+			bool deferredNow = false;     // N1: a starvation bound was reached this evaluation and its release deferred to the next boundary
+			bool deferCancelled = false;  // N1: a deferred release was cancelled by a re-confirmation this evaluation
+			bool deferred = false;        // N1: a deferred release is pending after this evaluation (the latch is still held)
 			bool heldBack = false;        // a confident upscaled pair was NOT latched (bar not met, or not conventional)
 			bool nonConventional = false; // ... because the pair is not one published geometry
 			uint32_t reasonBits = 0;      // Chain::kReason* for the status / log
@@ -129,6 +153,11 @@ namespace SourceIdentity
 			uint64_t releases = 0;                   // all releases (any cause)
 			uint64_t releasesBound = 0, releasesNative = 0, releasesMenu = 0, releasesAbr = 0, releasesReset = 0;
 			uint64_t releasesHardBound = 0;          // R5b hard bound (no new evidence for hardBoundSec); not in releasesBound
+			// N1: releasesBound / releasesHardBound count the bound being REACHED; with deferral the release itself follows (or not):
+			uint64_t deferred = 0;                   // bounds reached whose release was deferred to the next shot boundary
+			uint64_t deferCancelled = 0;             // ... cancelled by a re-confirmation (no release)
+			uint64_t releasesAtCut = 0;              // ... released at the end of the new shot's dwell (in releases)
+			uint64_t releasesCeiling = 0;            // ... released by the no-boundary ceiling (in releases; the monitor crossfades)
 			uint64_t heldBack = 0;                   // evaluations where a confident upscaled pair was held back by the bar
 			uint64_t nonConventional = 0;            // evaluations where the pair was not a published geometry
 		};
@@ -145,6 +174,8 @@ namespace SourceIdentity
 			int LatchedNx() const { return lnx_; }
 			int LatchedNy() const { return lny_; }
 			double ReleaseClockSec() const { return clock_; }
+			bool Deferred() const { return deferred_; }
+			bool Dwelling() const { return deferred_ && dwelling_; }   // N1: the new shot's re-confirm dwell is open
 
 			// The bar for entering / moving at source time t: c1 x (1 + growth over the stable time).
 			double Bar(int64_t timeUs, double c1) const
@@ -190,6 +221,11 @@ namespace SourceIdentity
 					if (latched_)
 						lastConfUs_ = t;
 					newestX_ = newestY_ = -1;
+					if (deferred_)
+					{
+						deferUs_ = t;   // N1: the ceiling and the dwell run from the re-anchored time too
+						dwellStartUs_ = t;
+					}
 				}
 				const double dt = havePrev_ && t > prevUs_ ? static_cast<double>(t - prevUs_) / 1e6 : 0.0;
 				prevUs_ = t;
@@ -273,6 +309,13 @@ namespace SourceIdentity
 						clock_ = 0.0;
 						++c_.confirms;
 						o.confirmed = true;
+						if (deferred_)
+						{
+							// N1: re-confirmed while a starvation release waited: cancelled (the picture never changed).
+							ClearDeferral();
+							++c_.deferCancelled;
+							o.deferCancelled = true;
+						}
 					}
 					else
 					{
@@ -290,23 +333,73 @@ namespace SourceIdentity
 						++c_.moves;
 						stableSinceUs_ = t;
 						Anchor(t);
+						ClearDeferral();   // a move is a new latch on fresh evidence above the bar
 					}
+					else if (deferred_)
+						StepDeferred(in, t, o);
 					else if (static_cast<double>(t - lastConfUs_) / 1e6 > s_.hardBoundSec)
-					{
-						o.event = Release(LatchEvent::ReleasedHardBound);
-						o.reasonBits |= kReasonLatchRelease;
-					}
+						Starved(LatchEvent::ReleasedHardBound, in, t, o);
 					else if (clock_ > s_.releaseBoundSec)
-					{
-						o.event = Release(LatchEvent::Released);
-						o.reasonBits |= kReasonLatchRelease;
-					}
+						Starved(LatchEvent::Released, in, t, o);
 				}
 				Fill(o);
 				return o;
 			}
 
 		private:
+			// A starvation bound reached: counted at once; released at once (pre-N1 rule) or deferred to the next shot boundary (N1).
+			void Starved(LatchEvent cause, const LatchInput& in, int64_t t, LatchOutput& o)
+			{
+				if (cause == LatchEvent::ReleasedHardBound)
+					++c_.releasesHardBound;
+				else
+					++c_.releasesBound;
+				if (!s_.deferStarvation)
+				{
+					o.event = Release(cause, false);
+					o.reasonBits |= kReasonLatchRelease;
+					return;
+				}
+				deferred_ = true;
+				deferCause_ = cause;
+				deferUs_ = t;
+				dwelling_ = false;
+				++c_.deferred;
+				o.deferredNow = true;
+				StepDeferred(in, t, o);   // a boundary consumed with this very evaluation opens the dwell now
+			}
+
+			void StepDeferred(const LatchInput& in, int64_t t, LatchOutput& o)
+			{
+				if (!dwelling_ && in.shotBoundary)
+				{
+					// The first evaluation of the new shot (the same reference ChainEvidence's shot dwell starts from).
+					dwelling_ = true;
+					dwellStartUs_ = t;
+				}
+				if (dwelling_)
+				{
+					if (static_cast<double>(t - dwellStartUs_) / 1e6 >= s_.deferDwellSec)
+					{
+						++c_.releasesAtCut;
+						o.event = Release(deferCause_, false);
+						o.reasonBits |= kReasonLatchRelease;
+					}
+				}
+				else if (static_cast<double>(t - deferUs_) / 1e6 >= s_.deferCeilingSec)
+				{
+					++c_.releasesCeiling;
+					o.event = Release(LatchEvent::ReleasedCeiling, false);
+					o.reasonBits |= kReasonLatchRelease;
+				}
+			}
+
+			void ClearDeferral()
+			{
+				deferred_ = false;
+				dwelling_ = false;
+			}
+
 			void Latch(const LatchInput& in)
 			{
 				latched_ = true;
@@ -324,17 +417,17 @@ namespace SourceIdentity
 				newestX_ = newestY_ = -1;
 			}
 
-			LatchEvent Release(LatchEvent cause)
+			// `countCause` false: a starvation release whose bound was already counted when it was reached (Starved).
+			LatchEvent Release(LatchEvent cause, bool countCause = true)
 			{
 				latched_ = false;
 				clock_ = 0.0;
 				accX_ = accY_ = 0.0;
 				newestX_ = newestY_ = -1;
+				ClearDeferral();   // N1: a native / menu / ABR / reset release while deferred is immediate and ends the deferral
 				++c_.releases;
-				switch (cause)
+				switch (countCause ? cause : LatchEvent::None)
 				{
-				case LatchEvent::Released: ++c_.releasesBound; break;
-				case LatchEvent::ReleasedHardBound: ++c_.releasesHardBound; break;
 				case LatchEvent::ReleasedNative: ++c_.releasesNative; break;
 				case LatchEvent::ReleasedMenu: ++c_.releasesMenu; break;
 				case LatchEvent::ReleasedAbr: ++c_.releasesAbr; break;
@@ -352,6 +445,7 @@ namespace SourceIdentity
 				o.ny = lny_;
 				o.Nx = lNx_;
 				o.Ny = lNy_;
+				o.deferred = deferred_;
 			}
 
 			LatchSettings s_;
@@ -364,6 +458,9 @@ namespace SourceIdentity
 			double clock_ = 0.0;
 			double accX_ = 0.0, accY_ = 0.0;          // M1: net new evidence of the latched size since the last confirmation
 			int64_t newestX_ = -1, newestY_ = -1;     // M1: source time of the newest positive credit since then
+			bool deferred_ = false, dwelling_ = false;   // N1: a starvation release waits for a boundary / the new shot's dwell is open
+			LatchEvent deferCause_ = LatchEvent::None;
+			int64_t deferUs_ = 0, dwellStartUs_ = 0;
 		};
 	}
 }

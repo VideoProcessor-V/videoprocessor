@@ -680,6 +680,10 @@ namespace SourceResolutionMonitor
 		double autoPendingSince = 0.0, axisPendingSince = 0.0;
 		unsigned long long cutsNotUsable = ~0ull;   // a cut whose moment is not known (a lost copy): not switched on
 		double nextFadeSeconds = 0.0;
+		// SID r2 N1 (render thread): chain latch releases by the no-cut ceiling (ChainEstimator::LatchCeilingReleases) already shown; a
+		// pending one makes the native switch it causes a crossfade. GateClear: this call's fresh record reads native on both axes.
+		uint64_t latchCeilingSeen = 0, latchCeilingCount = 0;
+		bool latchCeilingPending = false, latchCeilingGateClear = false;
 		double fadeFromX = 1.0, fadeFromY = 1.0, lastFactorX = 1.0, lastFactorY = 1.0, fadeStart = 0.0, fadeDuration = 0.0;
 		uint64_t clockSequence = 0, panSequence = 0;
 		double clockSeconds = 0.0, secondsPerFrame = 0.0, panPixelsPerFrame = 0.0;
