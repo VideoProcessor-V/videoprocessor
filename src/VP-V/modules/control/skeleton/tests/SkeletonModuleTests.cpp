@@ -1288,7 +1288,284 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(rig.Command().find("1 slipped") != std::string::npos);
 		}
 
-		TEST_METHOD(ASceneIsDerivedFromTwoP4RecordsNeverStored)
+		// W1-C7: the scene is a skeleton product. The classification is still the shared unit's; the module now also writes it once per frame
+		// into the frame-analysis store's scene group (at the seal) and every reader asks SceneOf.
+		static FrameAnalysis::Identity SceneTestId(uint64_t seq)
+		{
+			FrameAnalysis::Identity id;
+			id.seq = seq;
+			return id;
+		}
+
+		// Takes the store off the tap registry again however the test ends (the registry keeps the raw pointer by renderer address).
+		struct SceneStoreGuard
+		{
+			const void* host;
+			explicit SceneStoreGuard(const void* h) : host(h) {}
+			~SceneStoreGuard() { Tap::SetStore(host, nullptr); }
+		};
+
+		TEST_METHOD(ASceneIsPublishedOnceAtTheSealAndServedFromTheStore)
+		{
+			Rig rig(Lane("on"));
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			rig.Ingress(4);
+			rig.Deliver(5);
+			store.Begin(SceneTestId(4), FrameAnalysis::kScene);   // the record the source tap opens at arrival
+			const Vpv::Skeleton::SceneCounters before = rig.sk.SceneCountersOf(rig.Host());
+			rig.Begin(4);
+			const Vpv::Skeleton::SceneCounters afterSeal = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(before.published + 1, afterSeal.published, L"the seal wrote the scene group once");
+			FrameAnalysis::Record rec;
+			Assert::IsTrue(store.Read(4, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kScene, rec) == FrameAnalysis::ReadStatus::Ok);
+			Assert::IsTrue(rec.scene.origin == FrameAnalysis::SceneOrigin::Vp);
+			Vpv::Skeleton::SceneFacts f;
+			Assert::IsTrue(rig.sk.SceneFactsOf(rig.Host(), 4, f));
+			Assert::AreEqual(f.cut, rec.scene.cut, L"the stored value is the classification");
+			Assert::AreEqual(f.fade, rec.scene.fade);
+			// The reader: from the store, nothing recomputed (no second write, no live fill).
+			const Vpv::Skeleton::SceneAnswer a = rig.sk.SceneOf(rig.Host(), 4);
+			Assert::IsTrue(a.known);
+			Assert::IsTrue(a.from == Vpv::Skeleton::SceneAnswer::From::Store);
+			Assert::AreEqual(f.cut, a.cut);
+			Assert::AreEqual(f.fade, a.fade);
+			const Vpv::Skeleton::SceneCounters done = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(afterSeal.published, done.published);
+			Assert::AreEqual(afterSeal.liveFills, done.liveFills);
+			Assert::AreEqual(afterSeal.storeReads + 1, done.storeReads);
+			rig.After(4);
+		}
+
+		TEST_METHOD(ASceneAlreadyInTheStoreIsNotComputedAgain)
+		{
+			Rig rig(Lane("on"));
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			rig.Ingress(4);
+			rig.Deliver(5);
+			store.Begin(SceneTestId(4), FrameAnalysis::kScene);
+			FrameAnalysis::Scene given;   // a value another producer wrote first (labelled): the skeleton must not overwrite it
+			given.cut = true;
+			given.origin = FrameAnalysis::SceneOrigin::BillCopied;
+			Assert::IsTrue(store.PublishScene(4, given));
+			const Vpv::Skeleton::SceneCounters before = rig.sk.SceneCountersOf(rig.Host());
+			rig.Begin(4);
+			const Vpv::Skeleton::SceneCounters after = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(before.alreadyPresent + 1, after.alreadyPresent);
+			Assert::AreEqual(before.published, after.published, L"compute once / skip if present");
+			FrameAnalysis::Scene kept;
+			Assert::IsTrue(store.PeekScene(4, kept));
+			Assert::IsTrue(kept.origin == FrameAnalysis::SceneOrigin::BillCopied);
+			Assert::IsTrue(kept.cut);
+			rig.After(4);
+		}
+
+		TEST_METHOD(ASceneOfGivesTheSameAnswerWithTheStoreOffAndFillsALateRecord)
+		{
+			// Store off: every answer is the live fill, same cut / fade as the stored product.
+			Rig off(Lane("on"));
+			off.ResyncApply("on");
+			off.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				off.Frame(s);
+			off.Ingress(4);
+			off.Deliver(5);
+			off.Begin(4);
+			const Vpv::Skeleton::SceneAnswer live = off.sk.SceneOf(off.Host(), 4);
+			Assert::IsTrue(live.known);
+			Assert::IsTrue(live.from == Vpv::Skeleton::SceneAnswer::From::Live);
+			Vpv::Skeleton::SceneFacts f;
+			Assert::IsTrue(off.sk.SceneFactsOf(off.Host(), 4, f));
+			Assert::AreEqual(f.cut, live.cut);
+			Assert::AreEqual(f.fade, live.fade);
+			const Vpv::Skeleton::SceneCounters c = off.sk.SceneCountersOf(off.Host());
+			Assert::AreEqual(uint64_t(0), c.published, L"no store: nothing written, no work at the seal");
+			Assert::AreEqual(uint64_t(0), c.notReady);
+			Assert::AreEqual(uint64_t(1), c.liveFills);
+			Assert::IsFalse(off.sk.SceneOf(off.Host(), 1).known, L"there is no frame before 1");
+			Assert::AreEqual(uint64_t(1), off.sk.SceneCountersOf(off.Host()).unknown);
+			off.After(4);
+
+			// Store on, but the frame's record opens AFTER the seal: the seal found no record to write (nothing stored), the reader fills it
+			// live (same answer) and the next reader is served from the store.
+			Rig on(Lane("on"));
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(on.Host(), &store);
+			SceneStoreGuard guard(on.Host());
+			on.ResyncApply("on");
+			on.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				on.Frame(s);
+			on.Ingress(4);
+			on.Deliver(5);
+			on.Begin(4);
+			store.Begin(SceneTestId(4), FrameAnalysis::kScene);
+			const Vpv::Skeleton::SceneAnswer first = on.sk.SceneOf(on.Host(), 4);
+			Assert::IsTrue(first.known);
+			Assert::IsTrue(first.from == Vpv::Skeleton::SceneAnswer::From::Live);
+			const Vpv::Skeleton::SceneAnswer second = on.sk.SceneOf(on.Host(), 4);
+			Assert::IsTrue(second.from == Vpv::Skeleton::SceneAnswer::From::Store);
+			Assert::AreEqual(first.cut, second.cut);
+			Assert::AreEqual(first.fade, second.fade);
+			Assert::AreEqual(live.cut, first.cut, L"the same answer with the store on and off");
+			Assert::AreEqual(live.fade, first.fade);
+			on.After(4);
+		}
+
+		// Frame 3 is FLAT and dark, frame 4 is bright texture: a picture change with a spread jump (a cut, not a flash). The random-noise
+		// frames the rig starts with never cut (every pair is alike), so the cut equivalence needs frames made on purpose. Call before any frame
+		// is delivered.
+		static void ShapeACutAtFrame4(Rig& rig)
+		{
+			uint32_t x = 4242u;
+			for (uint32_t i = 0; i < kW * kH; ++i)
+			{
+				rig.store[size_t(3 % rig.count) * kW * kH + i] = 100;
+				x = x * 1664525u + 1013904223u;
+				rig.store[size_t(4 % rig.count) * kW * kH + i] = uint16_t(600u + ((x >> 12) % 400u));
+			}
+		}
+
+		static void RunToTheSealOfFrame4(Rig& rig)
+		{
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 3; ++s)
+				rig.Frame(s);
+			rig.Ingress(4);
+			rig.Deliver(5);
+		}
+
+		TEST_METHOD(ARealCutGivesTheSameAnswerFromTheStoreTheLiveFillAndWithTheStoreOff)
+		{
+			// 1. Store on, the record open at the seal: published, then served from the store.
+			Rig stored(Lane("on"));
+			ShapeACutAtFrame4(stored);
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(stored.Host(), &store);
+			SceneStoreGuard g1(stored.Host());
+			RunToTheSealOfFrame4(stored);
+			store.Begin(SceneTestId(4), FrameAnalysis::kScene);
+			stored.Begin(4);
+			const Vpv::Skeleton::SceneAnswer fromStore = stored.sk.SceneOf(stored.Host(), 4);
+			Assert::IsTrue(fromStore.known);
+			Assert::IsTrue(fromStore.from == Vpv::Skeleton::SceneAnswer::From::Store);
+			Assert::IsTrue(fromStore.cut, L"flat then bright texture is a cut");
+			FrameAnalysis::Scene inStore;
+			Assert::IsTrue(store.PeekScene(4, inStore));
+			Assert::IsTrue(inStore.cut, L"what the seal wrote is a cut too");
+			stored.After(4);
+
+			// 2. Store on, the record opens AFTER the seal: the reader classifies live (same answer).
+			Rig late(Lane("on"));
+			ShapeACutAtFrame4(late);
+			FrameAnalysis::Store lateStore(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(late.Host(), &lateStore);
+			SceneStoreGuard g2(late.Host());
+			RunToTheSealOfFrame4(late);
+			late.Begin(4);
+			lateStore.Begin(SceneTestId(4), FrameAnalysis::kScene);
+			const Vpv::Skeleton::SceneAnswer fromLive = late.sk.SceneOf(late.Host(), 4);
+			Assert::IsTrue(fromLive.known);
+			Assert::IsTrue(fromLive.from == Vpv::Skeleton::SceneAnswer::From::Live);
+			Assert::IsTrue(fromLive.cut);
+			late.After(4);
+
+			// 3. No store at all.
+			Rig off(Lane("on"));
+			ShapeACutAtFrame4(off);
+			RunToTheSealOfFrame4(off);
+			off.Begin(4);
+			const Vpv::Skeleton::SceneAnswer storeOff = off.sk.SceneOf(off.Host(), 4);
+			Assert::IsTrue(storeOff.known);
+			Assert::IsTrue(storeOff.from == Vpv::Skeleton::SceneAnswer::From::Live);
+			Assert::IsTrue(storeOff.cut);
+			Assert::AreEqual(fromStore.fade, fromLive.fade);
+			Assert::AreEqual(fromLive.fade, storeOff.fade);
+
+			// 4. A store that is registered but DISABLED (what frame_analysis_store=false leaves): the same answer again.
+			Rig disabled(Lane("on"));
+			ShapeACutAtFrame4(disabled);
+			FrameAnalysis::Store offStore(FrameAnalysis::RingDepth(4, 4));
+			offStore.SetEnabled(false);
+			Tap::SetStore(disabled.Host(), &offStore);
+			SceneStoreGuard g4(disabled.Host());
+			RunToTheSealOfFrame4(disabled);
+			disabled.Begin(4);
+			const Vpv::Skeleton::SceneAnswer fromDisabled = disabled.sk.SceneOf(disabled.Host(), 4);
+			Assert::IsTrue(fromDisabled.known);
+			Assert::IsTrue(fromDisabled.cut);
+			Assert::AreEqual(fromLive.fade, fromDisabled.fade);
+			disabled.After(4);
+
+		}
+
+		TEST_METHOD(ARegisteredButDisabledStoreCostsNothingAtTheSeal)
+		{
+			Rig rig(Lane("on"));
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			store.SetEnabled(false);   // the Host registers its store even with frame_analysis_store=false, then disabled
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			RunToTheSealOfFrame4(rig);
+			rig.Begin(4);
+			const Vpv::Skeleton::SceneCounters c = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(uint64_t(0), c.liveFills, L"no classification at the seal");
+			Assert::AreEqual(uint64_t(0), c.published);
+			Assert::AreEqual(uint64_t(0), c.notReady);
+			Assert::AreEqual(uint64_t(0), c.alreadyPresent);
+			Assert::AreEqual(uint64_t(0), c.cacheHits);
+			// A reader still gets the live answer, classified once for the frame.
+			const Vpv::Skeleton::SceneAnswer a = rig.sk.SceneOf(rig.Host(), 4);
+			Assert::IsTrue(a.known);
+			Assert::IsTrue(a.from == Vpv::Skeleton::SceneAnswer::From::Live);
+			const Vpv::Skeleton::SceneAnswer b = rig.sk.SceneOf(rig.Host(), 4);
+			Assert::AreEqual(a.cut, b.cut);
+			const Vpv::Skeleton::SceneCounters d = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(uint64_t(1), d.liveFills, L"classified once");
+			Assert::AreEqual(uint64_t(1), d.cacheHits, L"the second call used the frame's classification");
+			Assert::AreEqual(uint64_t(0), d.published, L"nothing written into a disabled store");
+			FrameAnalysis::Scene scene;
+			Assert::IsFalse(store.PeekScene(4, scene));
+			rig.After(4);
+		}
+
+		TEST_METHOD(ASealWithNoRecordToWriteIntoCountsItAndClassifiesNothing)
+		{
+			Rig rig(Lane("on"));
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));   // enabled, but the frame's record never opens
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard guard(rig.Host());
+			RunToTheSealOfFrame4(rig);
+			const uint64_t notReadyBefore = rig.sk.SceneCountersOf(rig.Host()).notReady;
+			rig.Begin(4);
+			const Vpv::Skeleton::SceneCounters c = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(notReadyBefore + 1, c.notReady, L"counted once at the seal");
+			Assert::AreEqual(uint64_t(0), c.liveFills, L"and not classified for nothing");
+			Assert::AreEqual(uint64_t(0), c.published);
+			// Readers: classified once, then the frame's answer is reused (no re-classification per call).
+			Assert::IsTrue(rig.sk.SceneOf(rig.Host(), 4).known);
+			Assert::IsTrue(rig.sk.SceneOf(rig.Host(), 4).known);
+			Assert::IsTrue(rig.sk.SceneOf(rig.Host(), 4).known);
+			const Vpv::Skeleton::SceneCounters d = rig.sk.SceneCountersOf(rig.Host());
+			Assert::AreEqual(uint64_t(1), d.liveFills);
+			Assert::AreEqual(uint64_t(2), d.cacheHits);
+			Assert::AreEqual(c.notReady, d.notReady, L"the seal's count does not grow with the readers");
+			rig.After(4);
+		}
+
+		TEST_METHOD(ASceneIsDerivedFromTwoP4Records)
 		{
 			Rig rig(Lane("on"));
 			rig.ResyncApply("on");
@@ -1302,7 +1579,7 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(rig.sk.SceneFactsOf(rig.Host(), 4, f));
 			Assert::IsTrue(f.valid);
 			Assert::IsFalse(f.fullBetween, L"no resync event between the frames");
-			// The same classification the shared unit gives for those two records (U7): nothing is stored, the module derives it.
+			// The same classification the shared unit gives for those two records (U7): SceneFactsOf derives it.
 			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
 			const VpSkeleton::AnalysisLane::ProductRead cur = lane->ReadOf(VpSkeleton::kP4SourceStats, 4);
 			const VpSkeleton::AnalysisLane::ProductRead prev = lane->ReadOf(VpSkeleton::kP4SourceStats, 3);

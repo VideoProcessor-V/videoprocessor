@@ -37,7 +37,7 @@ namespace Vpv
 		};
 
 		// The scene of frame `seq` against the previous frame, derived from the two P4 records exactly as every consumer does
-		// (VpUnit::CutFadeJudge::ClassifyEvents; cut / fade / flash are never stored). The raw record values are given so a reader can
+		// (VpUnit::CutFadeJudge::ClassifyEvents; the classification is derived, the cut / fade verdict is also stored once per frame by SceneOf's publisher). The raw record values are given so a reader can
 		// run the fade fit (CutFadeJudge::FadeFit) with its own scaling. Codes are the 16-bit half-plane sample codes of the P4 record.
 		struct SceneFacts
 		{
@@ -50,6 +50,30 @@ namespace Vpv
 			uint32_t prevSpread = 0, curSpread = 0;   // p99 - p01
 			bool rectFound = false;           // Bill's active-picture rectangle of the CURRENT frame (half-plane px)
 			uint32_t rectX0 = 0, rectY0 = 0, rectX1 = 0, rectY1 = 0;
+		};
+
+		// SCENE as a skeleton product (W1-C7): what a reader of "cut / fade of frame `seq`" gets from SkeletonModule::SceneOf. The product is
+		// sealed per frame: the module publishes it into the frame-analysis store at the frame's seal (once; skipped when present). `from`
+		// says where this answer came from: Store = the record's scene group; Live = filled from the two P4 records now (the store is off, has
+		// no record for the frame, or the frame is not sealed yet). Both give the same cut / fade (one classification, ClassifyEvents).
+		struct SceneAnswer
+		{
+			enum class From : uint8_t { None, Store, Live };
+			bool known = false;               // cut / fade are answered (false: the frame has no sealed pair of P4 records yet)
+			bool cut = false, fade = false;
+			From from = From::None;
+		};
+
+		// What the scene product did (any thread; relaxed counters copied out).
+		struct SceneCounters
+		{
+			uint64_t published = 0;       // records written at a seal
+			uint64_t alreadyPresent = 0;  // seal found the scene already there (compute-once: nothing recomputed)
+			uint64_t notReady = 0;        // seal could not classify or had no record to write into (counted once, not re-tried every call)
+			uint64_t storeReads = 0;      // SceneOf answered from the store
+			uint64_t liveFills = 0;       // SceneOf answered by classifying the P4 records now (and filled the store when it holds the record)
+			uint64_t cacheHits = 0;       // SceneOf answered from this frame's live classification (no second classification)
+			uint64_t unknown = 0;         // SceneOf could not answer
 		};
 
 		// What the engine feed did (render thread): shown on the status lines, read by tests.

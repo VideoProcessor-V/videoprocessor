@@ -239,6 +239,33 @@ namespace CameraExtensionTestsNs
 			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), "camera_link: no frame analysis store"));
 		}
 
+		// W1-C7: a STORE-CONTRACT pin only. The camera and the skeleton hold ONE store (Tap::StoreFor), and the scene group a record gets
+		// through PublishScene is visible through the identity read the camera's ReadScene starts with (Present without facts before, cut /
+		// fade after). This test publishes the group itself: it does NOT show the skeleton's seal writing it or the camera consuming it (the
+		// seal's end-to-end behaviour is SkeletonModuleTests; the camera switching to SceneOf is a lane C3 follow-up). The camera_scene counter has
+		// no test: it is only driven by a pair description from the engine (DescribePair / DescribeAhead / hooks.p4), which the live wiring owns.
+		TEST_METHOD(TheCameraAndTheSkeletonShareOneStoreForTheSceneGroup)
+		{
+			Rig rig("[vpv.skeleton]\ncamera_link=report\n");
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			Assert::IsTrue(rig.ext.StoreOf(rig.Host()) == Tap::StoreFor(rig.Host()), L"one store for the camera and the skeleton");
+			FrameAnalysis::Identity id;
+			id.seq = 9;
+			rig.r.store.Begin(id, FrameAnalysis::kScene);
+			FrameAnalysis::Record rec;
+			Assert::IsTrue(rig.r.store.Read(9, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kIdentity, rec) == FrameAnalysis::ReadStatus::Ok);
+			Assert::IsTrue((rec.valid & FrameAnalysis::kScene) == 0, L"present, no scene facts yet");
+			FrameAnalysis::Scene scene;
+			scene.cut = true;
+			scene.origin = FrameAnalysis::SceneOrigin::Vp;
+			Assert::IsTrue(rig.r.store.PublishScene(9, scene));
+			Assert::IsTrue(rig.r.store.Read(9, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kIdentity, rec) == FrameAnalysis::ReadStatus::Ok);
+			Assert::IsTrue((rec.valid & FrameAnalysis::kScene) != 0);
+			Assert::IsTrue(rec.scene.cut);
+			Assert::IsFalse(rec.scene.fade);
+		}
+
 		TEST_METHOD(TeardownIsPerHost)
 		{
 			Rig a("[vpv.skeleton]\ncamera_link=report\n");
