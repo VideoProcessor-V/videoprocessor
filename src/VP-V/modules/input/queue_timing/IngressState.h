@@ -66,6 +66,35 @@ namespace Vpv
 	// M2 P10-8 (fix C F2): the capture / file callbacks run inside a Use of this gate; the renderer closes and drains
 	// it before it resets its Impl (Retire, FinalizeRetirementForShutdown, Build, the destructor).
 	CallbackGate m_ingressGate;
+
+	// W1-A4 (88 resync/flush audit, PARTIAL: pulldownAcquiring sticks true): a fresh start of the pulldown detector, the film
+	// clock and the signature (the resync reset), and the warm-engine flag with them: the flag is the detector's own
+	// verdict, so a detector with no history has nothing to be acquiring. Capture thread.
+	void ResetPulldown()
+	{
+		m_pulldown.Reset();
+		m_pulldownClock.Reset();
+		m_pulldownSignature = 0;
+		m_pulldownFilmQpc = 0;
+		m_pulldownAcquiring.store(false, std::memory_order_relaxed);
+	}
+
+	// W1-A4: a frame arrives while pulldown detection is off, or without a display mode (the signal's mode lost). Nothing runs the
+	// detector then, so its last verdict (the cadence lock, and the acquiring flag the motion engine's standing demand reads)
+	// would otherwise outlive the cause. Clears both, and the detector's stale history with them. Returns true when a LOCK /
+	// cadence was in use (the caller marks the "pulldown off" gap, as before); an acquiring-only state held no film timing, so
+	// it needs none. Capture thread.
+	bool ClearPulldownWhenOff()
+	{
+		const bool wasAcquiring = m_pulldownAcquiring.exchange(false, std::memory_order_relaxed);
+		const bool wasLocked = m_pulldownCadence.load(std::memory_order_relaxed) != 0 || m_pulldown.Locked();
+		if (wasLocked || wasAcquiring)
+		{
+			ResetPulldown();
+			m_pulldownCadence.store(0, std::memory_order_relaxed);
+		}
+		return wasLocked;
+	}
 		};
 	}
 }

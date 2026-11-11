@@ -150,12 +150,7 @@ bool LibplaceboVideoRenderer::IngressPulldown(RendererExtension::IngressContext&
 		const Vpv::Resync::PulldownStep pulldownResync = Vpv::Resync::PulldownResyncStep(m_impl.get(), m_pulldownResetRequested.exchange(false, std::memory_order_acq_rel)); // VPV-HOOK: resync cursor (on: FULL resets, timing re-latches)
 		m_pulldown.SetTimingRelatch(pulldownResync.driving); // VPV-HOOK
 		if (pulldownResync.reset) // VPV-HOOK
-		{
-			m_pulldown.Reset();
-			m_pulldownClock.Reset();
-			m_pulldownSignature = 0;
-			m_pulldownFilmQpc = 0;
-		}
+			ResetPulldown();   // W1-A4: also clears the acquiring flag (Next below sets it again from the fresh history)
 		const uint64_t signature = Pulldown::Signature(videoFrame.GetData(),
 			static_cast<size_t>(frameState->BytesPerRow()),
 			static_cast<size_t>(frameState->displayMode->FrameHeight()));
@@ -311,14 +306,8 @@ bool LibplaceboVideoRenderer::IngressPulldown(RendererExtension::IngressContext&
 		else
 			m_pulldownFilmQpc = 0;
 	}
-	else if (m_pulldownCadence.load(std::memory_order_relaxed) != 0 || m_pulldown.Locked())
+	else if (ClearPulldownWhenOff())   // W1-A4: also clears a stuck acquiring flag (no lock held, detector idle); the gap only for a lock
 	{
-		m_pulldown.Reset();
-		m_pulldownClock.Reset();
-		m_pulldownSignature = 0;
-		m_pulldownFilmQpc = 0;
-		m_pulldownCadence.store(0, std::memory_order_relaxed);
-		m_pulldownAcquiring.store(false, std::memory_order_relaxed);
 		if (!gapBefore)
 			gapCause = "pulldown off";
 		gapBefore = true;
