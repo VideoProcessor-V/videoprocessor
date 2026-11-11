@@ -1,3 +1,5 @@
+STALE (2026-11-11, W0-3 M-d): does not apply cleanly to the current tree (slots.json, components-master.json, settings reference hunks have drifted). Its VP-V config paths were retargeted to modules/control/config/config_pages and .../tests. Regenerate before use.
+
 diff --git a/docs/design/components-master.json b/docs/design/components-master.json
 index 0b9ac3f1..b100ee2e 100644
 --- a/docs/design/components-master.json
@@ -47,10 +49,10 @@ index 587607b5..e59b6c54 100644
  | **Proposed retirement** | The section-12 candidates below, by group, with where each control is and the value in use. The same note is added to each control's tooltip. Nothing is removed until you approve. Each unit tab also ends with "More settings of this unit", naming the pages that hold the rest (coverage audit: `docs/settings/coverage-audit.md`). |
  
  **One control per key.** Every VP setting has exactly one live control. VP's own settings that used
-diff --git a/src/VP-V/config/VpvSection.cpp b/src/VP-V/config/VpvSection.cpp
+diff --git a/src/VP-V/modules/control/config/config_pages/VpvSection.cpp b/src/VP-V/modules/control/config/config_pages/VpvSection.cpp
 index df28258a..aabdc50b 100644
---- a/src/VP-V/config/VpvSection.cpp
-+++ b/src/VP-V/config/VpvSection.cpp
+--- a/src/VP-V/modules/control/config/config_pages/VpvSection.cpp
++++ b/src/VP-V/modules/control/config/config_pages/VpvSection.cpp
 @@ -1068,6 +1068,19 @@ namespace Vpv
  
  			// pipeline_entrance_once (B3, ADR-0024) is a hidden diagnostic/test key with no Config control (skeleton b76571c1).
@@ -91,10 +93,10 @@ index df28258a..aabdc50b 100644
  				if (!order->hasFocus()) order->setText(get("pipeline_order"));
  				if (!slotsOff->hasFocus()) slotsOff->setText(get("pipeline_slots_off"));
  			});
-diff --git a/src/VP-V/config/tests/VpvConfigTests.cpp b/src/VP-V/config/tests/VpvConfigTests.cpp
+diff --git a/src/VP-V/modules/control/config/tests/VpvConfigTests.cpp b/src/VP-V/modules/control/config/tests/VpvConfigTests.cpp
 index a62f3bb8..d399f97d 100644
---- a/src/VP-V/config/tests/VpvConfigTests.cpp
-+++ b/src/VP-V/config/tests/VpvConfigTests.cpp
+--- a/src/VP-V/modules/control/config/tests/VpvConfigTests.cpp
++++ b/src/VP-V/modules/control/config/tests/VpvConfigTests.cpp
 @@ -364,6 +364,10 @@ namespace
  			QMetaObject::invokeMethod(off, "editingFinished", Qt::DirectConnection);
  			auto* lut = control<QComboBox>(window, Vpv::ObjectName("expert.calibration_lut_stage"));

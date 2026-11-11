@@ -1,3 +1,5 @@
+STALE (2026-11-11, W0-3 M-d): does not apply cleanly to the current tree (slots.json, components-master.json, settings reference hunks have drifted). Its VP-V config paths were retargeted to modules/control/config/config_pages and .../tests. Regenerate before use.
+
 diff --git a/docs/design/slots.json b/docs/design/slots.json
 index ef0c7f3e..b07fb51f 100644
 --- a/docs/design/slots.json
@@ -34,10 +36,10 @@ index e55abf29..ed6e3bf1 100644
    it never touches `[vpv]`.
  - The renderer reads `[vpv]` first. The same keys in `[vprenderer]`, where the skeleton first
    put them, still work.
-diff --git a/src/VP-V/config/VpvSection.cpp b/src/VP-V/config/VpvSection.cpp
+diff --git a/src/VP-V/modules/control/config/config_pages/VpvSection.cpp b/src/VP-V/modules/control/config/config_pages/VpvSection.cpp
 index df28258a..1f640003 100644
---- a/src/VP-V/config/VpvSection.cpp
-+++ b/src/VP-V/config/VpvSection.cpp
+--- a/src/VP-V/modules/control/config/config_pages/VpvSection.cpp
++++ b/src/VP-V/modules/control/config/config_pages/VpvSection.cpp
 @@ -1066,6 +1066,21 @@ namespace Vpv
  				state->host.setValue(section, QStringLiteral("calibration_lut_stage"), lutStage->itemData(i).toString());
  			});
@@ -79,10 +81,10 @@ index df28258a..1f640003 100644
  				if (!order->hasFocus()) order->setText(get("pipeline_order"));
  				if (!slotsOff->hasFocus()) slotsOff->setText(get("pipeline_slots_off"));
  			});
-diff --git a/src/VP-V/config/tests/VpvConfigTests.cpp b/src/VP-V/config/tests/VpvConfigTests.cpp
+diff --git a/src/VP-V/modules/control/config/tests/VpvConfigTests.cpp b/src/VP-V/modules/control/config/tests/VpvConfigTests.cpp
 index a62f3bb8..c6d550e7 100644
---- a/src/VP-V/config/tests/VpvConfigTests.cpp
-+++ b/src/VP-V/config/tests/VpvConfigTests.cpp
+--- a/src/VP-V/modules/control/config/tests/VpvConfigTests.cpp
++++ b/src/VP-V/modules/control/config/tests/VpvConfigTests.cpp
 @@ -364,6 +364,9 @@ namespace
  			QMetaObject::invokeMethod(off, "editingFinished", Qt::DirectConnection);
  			auto* lut = control<QComboBox>(window, Vpv::ObjectName("expert.calibration_lut_stage"));
