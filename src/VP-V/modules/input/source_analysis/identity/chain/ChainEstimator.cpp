@@ -121,7 +121,9 @@ namespace SourceIdentity
 			std::atomic<uint64_t> cEvaluations{ 0 }, cDelivered{ 0 }, cDropped{ 0 }, cRepeats{ 0 }, cNoClock{ 0 }, cUnusable{ 0 },
 				cStale{ 0 }, cDiscontinuities{ 0 }, cWindowClears{ 0 };
 			std::atomic<uint64_t> cLatchEntries{ 0 }, cLatchMoves{ 0 }, cLatchReleases{ 0 }, cLatchRelBound{ 0 }, cLatchRelNative{ 0 }, cLatchRelMenu{ 0 },
-				cLatchRelAbr{ 0 }, cLatchRelReset{ 0 }, cLatchHeldBack{ 0 }, cLatchNonConv{ 0 };
+				cLatchRelAbr{ 0 }, cLatchRelReset{ 0 }, cLatchHeldBack{ 0 }, cLatchNonConv{ 0 }, cLatchConfirms{ 0 }, cLatchRelHard{ 0 };
+			std::atomic<bool> safetyLiveA{ false };      // SID r2: the rules applied at the clean start (status)
+			std::atomic<int> latchNxA{ 0 }, latchNyA{ 0 };   // SID r2: the latched size (0 = no latch; status)
 
 			// ---- the worker's own state (procMutex: one processing thread at a time) ---------------------------------------
 			mutable std::mutex procMutex;
@@ -424,6 +426,15 @@ namespace SourceIdentity
 				e.kind = static_cast<int>(kind);
 				{
 					std::lock_guard<std::mutex> lk(m);
+					if (kind == EstimatorEvent::MenuHold)
+					{
+						// r2 fix M2: the monitor reports a counted menu / overlay episode on every frame; at most ONE MenuHold waits at a time
+						// (the next evaluation consumes it), so a menu never evicts pending Cut / Blank / Fade / ClearWindow events from the
+						// capped queue. Each evaluation during the episode still sees the menu (R7: nothing enters during one).
+						for (size_t i = 0; i < events.size(); ++i)
+							if (events[i].kind == static_cast<int>(EstimatorEvent::MenuHold))
+								return;
+					}
 					events.push_back(e);
 					while (static_cast<int>(events.size()) > cfg.eventCap)
 						events.erase(events.begin());
@@ -647,6 +658,8 @@ namespace SourceIdentity
 					unusableReason.clear();   // lines were taken: an earlier "area too small" no longer applies
 				}
 				snap->seq = v.seq;
+				snap->rasterW = static_cast<int32_t>(v.width);    // SID r2 L3: the delivered raster (R2 / R3 ratios)
+				snap->rasterH = static_cast<int32_t>(v.height);
 				snap->timeUs = static_cast<int64_t>(std::llround(seconds * 1e6));
 				snap->streamKey = key;
 				Job job;
@@ -727,11 +740,15 @@ namespace SourceIdentity
 					job.gen = gen;
 					// A pending ClearWindow event of a frame at or before this snapshot's sequence is consumed here as Deliver would (the clear is
 					// idempotent, so a dumped flag and a pending event cannot double count); cuts / blanks / fades are NOT merged: the replay carries its own.
+					// SID r2 (M2 test path): a pending MenuHold is the monitor's episode state like ClearWindow (no picture event), consumed the same
+					// way (only queued while the safety rules are on, so off stays byte identical).
 					for (size_t i = 0; i < events.size();)
 					{
-						if (events[i].kind == static_cast<int>(EstimatorEvent::ClearWindow) && events[i].seq <= snap.seq)
+						const bool clear = events[i].kind == static_cast<int>(EstimatorEvent::ClearWindow);
+						const bool menu = events[i].kind == static_cast<int>(EstimatorEvent::MenuHold);
+						if ((clear || menu) && events[i].seq <= snap.seq)
 						{
-							copy->flags |= kEvClearWindow;
+							copy->flags |= clear ? kEvClearWindow : kEvMenuHold;
 							events.erase(events.begin() + static_cast<std::ptrdiff_t>(i));
 						}
 						else
@@ -869,7 +886,17 @@ namespace SourceIdentity
 						safe = reqSafety;
 						abr = reqAbr;
 					}
+					if (safetyOn)
+					{
+						// M4: a latch held across a clean start is released visibly (counted, noticed) before the layer is rebuilt.
+						const LatchOutput lo = latch.Reset();
+						FoldLatchCounters();
+						NoteLatchEvent(lo, lastTimeUs);
+					}
 					safetyOn = safe;
+					safetyLiveA.store(safe, std::memory_order_release);
+					latchNxA.store(0, std::memory_order_release);
+					latchNyA.store(0, std::memory_order_release);
 					cfg.evidence.conventionOnly = safe;   // R2
 					cfg.evidence.pairPrior = safe;        // R3
 					cfg.latch.enabled = safe;             // R5 / R7
@@ -977,8 +1004,11 @@ namespace SourceIdentity
 				evidence.Reset();
 				if (safetyOn)
 				{
-					latch.Reset();
+					const LatchOutput lo = latch.Reset();   // M4: counted AND noticed
 					FoldLatchCounters();
+					NoteLatchEvent(lo, lastTimeUs);
+					latchNxA.store(0, std::memory_order_release);
+					latchNyA.store(0, std::memory_order_release);
 					for (int a = 0; a < 2; ++a)
 					{
 						heldApplied[a] = Geometry::AxisGeom();
@@ -1113,7 +1143,7 @@ namespace SourceIdentity
 				log.PostNotice("Source identity: R4 diagnostic dump on (" + dumpPath + ")");
 			}
 
-			void DumpR4(const AxisRun run[2], uint64_t seq, int64_t timeUs)
+			void DumpR4(const AxisRun run[2], uint64_t seq, int64_t timeUs, int rasterW, int rasterH)
 			{
 				if (!dumpVerifier)
 					return;
@@ -1123,7 +1153,7 @@ namespace SourceIdentity
 				if (dumpRows == 0)
 					f << "seq,timeUs,axis,N,n,valid,stat,kernel,lines\n";
 				std::size_t count = 0;
-				const Scaling::GeometrySet::Pair* pairs = Scaling::GeometrySet::Pairs(count);
+				const Scaling::GeometrySet::Geometry* geoms = Scaling::GeometrySet::Geometries(count);
 				for (int a = 0; a < 2; ++a)
 				{
 					if (!run[a].have)
@@ -1133,7 +1163,10 @@ namespace SourceIdentity
 					int cc = 0;
 					for (std::size_t i = 0; i < count && cc < 32; ++i)
 					{
-						const double r = a == 0 ? pairs[i].rx : pairs[i].ry;
+						double rx = 0.0, ry = 0.0;   // L3: from the delivered raster (every listed size, parked ones too: a diagnostic)
+						if (!Scaling::GeometrySet::RatiosFor(geoms[i], rasterW, rasterH, rx, ry))
+							continue;
+						const double r = a == 0 ? rx : ry;
 						const int n = RoundToInt(static_cast<double>(N) * r);
 						if (n < 16 || n >= N)
 							continue;
@@ -1182,6 +1215,8 @@ namespace SourceIdentity
 				cLatchRelReset.fetch_add(c.releasesReset - latchBase.releasesReset, std::memory_order_relaxed);
 				cLatchHeldBack.fetch_add(c.heldBack - latchBase.heldBack, std::memory_order_relaxed);
 				cLatchNonConv.fetch_add(c.nonConventional - latchBase.nonConventional, std::memory_order_relaxed);
+				cLatchConfirms.fetch_add(c.confirms - latchBase.confirms, std::memory_order_relaxed);
+				cLatchRelHard.fetch_add(c.releasesHardBound - latchBase.releasesHardBound, std::memory_order_relaxed);
 				latchBase = c;
 			}
 
@@ -1192,12 +1227,14 @@ namespace SourceIdentity
 					log.PostNotice(std::string("Source identity: upscale latch ") + LatchEventText(lo.event) + " at " + std::to_string(timeUs / 1000000) + " s");
 			}
 
-			// TODO(SID r2 R1): the ABR carry-over rule (a quality step carries the latched size across a rendition change) is NOT implemented.
-			// E0 (doc 91 section E, E0-results.md) showed a harmful ABR carry-over case; revisit only with a new experiment.
+			// TODO(SID r2 R1): R1 = the fundamental-harmonic rule (integer-ratio family, the lowest member confirmed by spectral roll-off) is NOT
+			// implemented. The harmful case in E0 (doc 91 section E, E0-results.md section 3, dark60_meridian) was its use of WINDOW CARRY-OVER;
+			// the roll-off confirmation must use current-shot / stream evidence only.
 			// Filters the readers applied geometry through the latch: a confident UPSCALED reading is published only while the latch holds it
-			// (the bar met, a published conventional pair); a latched one is carried through evaluations that lose confidence until the latch
-			// releases. Native readings pass unchanged. Not called while the rules are off.
-			void ApplyLatch(ReadingOutput out[2], const AxisRun run[2], uint32_t flags, int64_t timeUs)
+			// (the bar met, a published conventional pair). While latched (r2 fix H1) only a reading of the LATCHED size (+-1 px per axis, after
+			// Step, so a Move has updated it) is published; any other reading, a lost confidence, or one axis reading native (L6: no single-axis
+			// geometry while latched) publishes the held latch. Native-both releases in the latch. Not called while the rules are off.
+			void ApplyLatch(ReadingOutput out[2], const AxisRun run[2], uint32_t flags, int64_t timeUs, int rasterW, int rasterH)
 			{
 				bool conf[2], nat[2];
 				for (int a = 0; a < 2; ++a)
@@ -1222,24 +1259,35 @@ namespace SourceIdentity
 					in.llrX = out[0].applied.llr;
 					in.llrY = out[1].applied.llr;
 				}
+				in.rasterW = rasterW;
+				in.rasterH = rasterH;
 				if (latch.Latched())
 				{
-					in.latchedLlrX = evidence.LlrAtN(0, latch.LatchedNx());
-					in.latchedLlrY = evidence.LlrAtN(1, latch.LatchedNy());
+					// M1: only the evidence CREDITED by this evaluation re-confirms (never the windowed total).
+					in.gainX = evidence.CreditAtN(0, latch.LatchedNx(), &in.gainTimeX, &in.rawX);
+					in.gainY = evidence.CreditAtN(1, latch.LatchedNy(), &in.gainTimeY, &in.rawY);
 				}
 				const LatchOutput lo = latch.Step(in);
 				FoldLatchCounters();
 				NoteLatchEvent(lo, timeUs);
+				if (LatchEventIsEvidenceRelease(lo.event))
+					evidence.Reset();   // M1: a release for lack of new evidence; the stale window must not re-enter at the next evaluation
+				latchNxA.store(lo.latched ? lo.nx : 0, std::memory_order_release);
+				latchNyA.store(lo.latched ? lo.ny : 0, std::memory_order_release);
 				for (int a = 0; a < 2; ++a)
 				{
 					const bool confUp = conf[a] && !nat[a];
 					Geometry::AxisGeom g = out[a].applied;
 					if (lo.latched)
 					{
-						if (confUp && in.havePair)
-							heldApplied[a] = out[a].applied;   // a confident reading of the latched (or moved) size
-						else if (!nat[a] && heldApplied[a].state == Geometry::LatchState::Latched)
-							g = heldApplied[a];                // carried through an evaluation that lost confidence
+						const int ln = a == 0 ? lo.nx : lo.ny;
+						const int dn = out[a].applied.n > ln ? out[a].applied.n - ln : ln - out[a].applied.n;
+						if (confUp && dn <= 1)
+							heldApplied[a] = out[a].applied;   // H1: a confident reading of the latched (or just moved) size
+						else if (heldApplied[a].state == Geometry::LatchState::Latched)
+							g = heldApplied[a];                // H1 / L6: any other reading publishes the held latch
+						else
+							g = UnsureLike(out[a].applied, kReasonLatchBar);   // nothing held for this axis yet: never another size
 					}
 					else
 					{
@@ -1261,6 +1309,10 @@ namespace SourceIdentity
 				const LineSnapshot& s = *job.snap;
 				const double t0 = nowMs();
 				gov.NoteStart(t0);
+				// SID r2 L3: the delivered raster (a snapshot without one, e.g. a test feed, falls back to its active extent).
+				const int rasterW = s.rasterW > 0 ? static_cast<int>(s.rasterW) : s.active.w;
+				const int rasterH = s.rasterH > 0 ? static_cast<int>(s.rasterH) : s.active.h;
+				evidence.ClearCredits();   // M1: an axis not submitted this evaluation credits nothing
 				lastStartMs.store(t0, std::memory_order_release);
 				std::string fmt;
 				bool classicalOk = false;
@@ -1361,6 +1413,8 @@ namespace SourceIdentity
 					obs.probeReason = run[a].pr.reason;
 					obs.shotId = shotId;
 					obs.timeUs = s.timeUs;   // the recent window (N3) follows the measured evaluation rate in source time
+					obs.rasterW = rasterW;   // R2 / R3 ratios from the delivered raster (L3)
+					obs.rasterH = rasterH;
 					evidence.Submit(a, obs, run[a].up);
 				}
 				if (observer)
@@ -1452,15 +1506,14 @@ namespace SourceIdentity
 				{
 					if (anyReset || areaChanged)
 					{
-						latch.Reset();   // a discontinuity / active-area change: the latch goes (counted), the bar restarts
+						const LatchOutput lo = latch.Reset();   // a discontinuity / active-area change: the latch goes (counted, noticed: M4)
 						FoldLatchCounters();
+						NoteLatchEvent(lo, s.timeUs);
 						heldApplied[0] = Geometry::AxisGeom();
 						heldApplied[1] = Geometry::AxisGeom();
 					}
-					ApplyLatch(out, run, flags, s.timeUs);
+					ApplyLatch(out, run, flags, s.timeUs, rasterW, rasterH);
 				}
-				if (!dumpPath.empty())
-					DumpR4(run, s.seq, s.timeUs);
 				if (out[0].measuredChanged || out[1].measuredChanged)
 					++geometryGen;
 				if (out[0].appliedChanged || out[1].appliedChanged)
@@ -1472,6 +1525,9 @@ namespace SourceIdentity
 						cold = true;
 				const double cost = nowMs() - t0;
 				gov.NoteCost(cost, cold);
+				// M3: the R4 dump runs AFTER the cost is measured, so its verifier and file I/O never feed the governor (decision neutral).
+				if (!dumpPath.empty())
+					DumpR4(run, s.seq, s.timeUs, rasterW, rasterH);
 				// Both axes CONFIDENT: the long cadence (5 s, 2% share); anything else evaluates at the acquiring cadence. maxAgeUs follows
 				// the PLANNED interval, not the nominal one.
 				// N2 (S1 bound): while the monitor keeps leaving native-looking frames out on the strength of this very reading (a note since
@@ -1571,6 +1627,10 @@ namespace SourceIdentity
 				in.unusable = c.unusable;
 				in.stale = c.stale;
 				in.windowClears = c.windowClears;
+				in.safetyRules = safetyLiveA.load(std::memory_order_acquire);
+				in.latchNx = latchNxA.load(std::memory_order_acquire);
+				in.latchNy = latchNyA.load(std::memory_order_acquire);
+				in.latch = c.latch;
 				in.evidence = log.GetStatus();
 				in.evidenceText = log.StatusText();
 				return in;
@@ -1604,6 +1664,8 @@ namespace SourceIdentity
 				c.latch.releasesReset = cLatchRelReset.load(std::memory_order_relaxed);
 				c.latch.heldBack = cLatchHeldBack.load(std::memory_order_relaxed);
 				c.latch.nonConventional = cLatchNonConv.load(std::memory_order_relaxed);
+				c.latch.confirms = cLatchConfirms.load(std::memory_order_relaxed);
+				c.latch.releasesHardBound = cLatchRelHard.load(std::memory_order_relaxed);
 				return c;
 			}
 

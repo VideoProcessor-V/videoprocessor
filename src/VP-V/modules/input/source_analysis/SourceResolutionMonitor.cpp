@@ -533,6 +533,15 @@ if (tile < int(tiles) && g.y < ts) {
 			const Geo::ProvisionalGeometry provisional = Geo::Provisional(haveGeo ? &grec : nullptr, delivered, nowUs,
 				Geo::Consumer::Status, Geo::detail::kAnySeq, haveGeo ? 0u : geoCause);
 			line += " | " + Geo::ChainStatusText(confident, provisional);
+			// SID r2 (L6): a held single-axis re-base is visible here (not only in the debug log) while it lasts.
+			const int heldAxis = singleAxisHeldAxis.load(std::memory_order_acquire);
+			if (heldAxis == 0 || heldAxis == 1)
+			{
+				char buf[96];
+				std::snprintf(buf, sizeof(buf), " | single-axis re-base held (%s %.4f; two axes are required)", heldAxis == 0 ? "H" : "V",
+					singleAxisHeldRatio.load(std::memory_order_acquire));
+				line += buf;
+			}
 		}
 		return line;
 	}
@@ -1528,6 +1537,7 @@ if (tile < int(tiles) && g.y < ts) {
 				chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::ClearWindow, rowSequence);
 			// SID r2 R7: while a counted menu / overlay episode is under way the estimator's upscale latch is not carried (the estimator ignores
 			// this event unless its safety rules are on). The same episode feed as the revert window: nothing new is measured here.
+			// M2: posted while the episode lasts; the estimator keeps at most ONE pending (coalesced), so other events are never evicted.
 			if (chainWindowPolicy.CountedEpisodeActive())
 				chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::MenuHold, rowSequence);
 			chainEst->SetClassical(snapshot.reading, snapshot.axisRatioX < 1.0 ? snapshot.axisRatioX : snapshot.declaredRatio,
@@ -1858,13 +1868,20 @@ if (tile < int(tiles) && g.y < ts) {
 						DebugLog::Log("source_id: single-axis re-base held (axis %s ratio %.4f; two axes are required)", ratios[0] < 1.0 ? "H" : "V", ratios[0] < 1.0 ? ratios[0] : ratios[1]);
 						singleAxisHeldLogged = true;
 					}
+					// L6: visible in the status line while held (SourceIdStatusLine).
+					singleAxisHeldRatio.store(ratios[0] < 1.0 ? ratios[0] : ratios[1], std::memory_order_release);
+					singleAxisHeldAxis.store(ratios[0] < 1.0 ? 0 : 1, std::memory_order_release);
 					ratios[0] = ratios[1] = 1.0;
 				}
-				else if (ratios[0] >= 1.0 && ratios[1] >= 1.0)
-					singleAxisHeldLogged = false;
+				else
+				{
+					singleAxisHeldLogged = false;   // L6: any other state ends the held episode (the next one is logged again)
+					singleAxisHeldAxis.store(-1, std::memory_order_release);
+				}
 			}
 			else
 			{
+				singleAxisHeldAxis.store(-1, std::memory_order_release);   // L6: no consensus re-base, nothing held
 				ratios[0] = s.axisRatioX;
 				ratios[1] = s.axisRatioY;
 			}

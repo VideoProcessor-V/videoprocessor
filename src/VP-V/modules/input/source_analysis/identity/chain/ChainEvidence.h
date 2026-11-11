@@ -6,8 +6,11 @@
 // ACCUMULATOR with reason bits; the per-axis reading (confident vs UNSURE, ChainReading.h) reads its summaries. There is no latch
 // state machine anywhere (doc 78 section 5: parked).
 // SID r2 (default off, EvidenceSettings::conventionOnly / pairPrior): R2 a candidate whose ratio is no published conventional geometry
-// (SourceGeometrySet.h) earns no evidence; R3 the two-axis prior is whether the ratio PAIR is one listed geometry. The latch lives in
-// ChainLatch.h, above the readers.
+// (SourceGeometrySet.h, ratios derived from the delivered raster, AxisObservation::rasterW/H) earns no evidence; R3 the two-axis prior is whether
+// the ratio PAIR is one listed, NON-parked geometry (+agreementBonus) or not (-agreementBonus), and (r2 fix M5) a pair that is not one such
+// geometry is NEVER above c1 on both axes: Summary vetoes both (kReasonNonConventional), so a mismatched pair such as 1920x720 cannot become
+// confident through strong per-axis evidence. The latch lives in ChainLatch.h, above the readers; it confirms only on the evidence CREDITED by
+// the newest evaluation (CreditAtN, r2 fix M1), never on the windowed total, so its hard bound limits the age of the evidence.
 //
 // floorCodes (AxisObservation) is the dof-NORMALISED sigma of the rounding/dither noise (1.155 for an 8-bit output,
 // 0.289 for 10-bit), the same unit as the verifier's line baselines; the verifier's CandidateResult.floorCodes is
@@ -132,6 +135,18 @@ namespace SourceIdentity
 			uint32_t probeReason = 0;     // reason bits of the PowerProbe (flat / dark / soft)
 			uint32_t shotId = 0;          // bumped by the caller at every cut
 			int64_t timeUs = -1;          // source time of the evaluation (non-decreasing); -1 = unknown: the recent window cannot expire anything
+			int rasterW = 0;              // delivered raster (R2/R3 ratios, SourceGeometrySet.h); 0 = unknown: nothing is conventional
+			int rasterH = 0;
+		};
+
+		// R5 support (r2 fix M1): the change of the windowed total of one hypothesis caused by one credit of the newest evaluation (after the
+		// shot cap), with the source time of the evidence (a dwell-held credit keeps its own, older, time).
+		struct EvidenceCredit
+		{
+			int n = 0;
+			double gain = 0.0;            // change of the hypothesis' shot-capped windowed total
+			double raw = 0.0;             // the increment before the cap
+			int64_t timeUs = -1;
 		};
 
 		struct CandidateEvidence
@@ -220,11 +235,71 @@ namespace SourceIdentity
 				a = AxisState();
 			}
 
+			// R5 support (M1): forgets the credits of the newest evaluation on both axes. The estimator calls it at the start of every evaluation,
+			// so an axis that is not submitted this time reports no new credit (Submit clears its own axis too).
+			void ClearCredits()
+			{
+				ax_[0].credits.clear();
+				ax_[1].credits.clear();
+			}
+
+			// R5 support (M1): the evidence for size n (+-1 px) CREDITED by the newest Submit of the axis (the change of the shot-capped windowed
+			// total, summed per slot; the best slot), the sum of the positive raw increments of that slot (before the cap) and the source time of
+			// its newest positive credit (-1: none). 0 when nothing was credited: old evidence that still sits in the window is NOT new evidence.
+			double CreditAtN(int axis, int n, int64_t* newestPositiveUs = nullptr, double* rawPositive = nullptr) const
+			{
+				const AxisState& st = ax_[axis == 0 ? 0 : 1];
+				if (newestPositiveUs != nullptr)
+					*newestPositiveUs = -1;
+				if (rawPositive != nullptr)
+					*rawPositive = 0.0;
+				double bestRaw = 0.0;
+				int64_t bestNewest = -1;
+				double best = 0.0;
+				bool any = false;
+				for (size_t i = 0; i < st.credits.size(); ++i)
+				{
+					const int di = st.credits[i].n > n ? st.credits[i].n - n : n - st.credits[i].n;
+					if (di > 1)
+						continue;
+					bool seen = false;   // this slot was already summed at an earlier credit
+					for (size_t j = 0; j < i && !seen; ++j)
+						seen = st.credits[j].n == st.credits[i].n;
+					if (seen)
+						continue;
+					double sum = 0.0, raw = 0.0;
+					int64_t newest = -1;
+					for (size_t j = i; j < st.credits.size(); ++j)
+					{
+						if (st.credits[j].n != st.credits[i].n)
+							continue;
+						sum += st.credits[j].gain;
+						if (st.credits[j].raw > 0.0)
+							raw += st.credits[j].raw;
+						if (st.credits[j].gain > 0.0 && st.credits[j].timeUs > newest)
+							newest = st.credits[j].timeUs;
+					}
+					if (!any || sum > best)
+					{
+						best = sum;
+						bestRaw = raw;
+						bestNewest = newest;
+					}
+					any = true;
+				}
+				if (newestPositiveUs != nullptr)
+					*newestPositiveUs = bestNewest;
+				if (rawPositive != nullptr)
+					*rawPositive = bestRaw;
+				return any ? best : 0.0;
+			}
+
 			// One evaluation of one axis. Returns false only on unusable input (reason bits in `out`).
 			bool Submit(int axis, const AxisObservation& obs, EvidenceUpdate& out)
 			{
 				out = EvidenceUpdate();
 				AxisState& st = ax_[axis == 0 ? 0 : 1];
+				st.credits.clear();
 				if (obs.verify == nullptr || obs.axisLen < 64)
 				{
 					out.reason = kReasonBadInput;
@@ -236,6 +311,8 @@ namespace SourceIdentity
 				if (st.axisLen != 0 && st.axisLen != obs.axisLen)
 					st = AxisState();   // the axis changed size (active area / zoom): old hypotheses mean nothing
 				st.axisLen = obs.axisLen;
+				st.rasterW = obs.rasterW;
+				st.rasterH = obs.rasterH;
 				NoteTime(st, obs.timeUs);
 				const double cap = s_.shotCapFraction * thr_.c1;
 				const bool dwellOn = s_.minShotDwellSec > 0.0 && obs.timeUs >= 0;   // E2: needs the source time
@@ -253,7 +330,8 @@ namespace SourceIdentity
 					Judge(cr, obs.axisLen, floorC, out.cand[out.candidateCount]);
 					CandidateEvidence& ce = out.cand[out.candidateCount++];
 					// R2 (E0): a size that is not a conventional ratio of the measured axis is UNSURE material, never evidence.
-					if (s_.conventionOnly && ce.informative && !Scaling::GeometrySet::ConventionalAxis(ce.n, obs.axisLen, axis == 0 ? 0 : 1))
+					if (s_.conventionOnly && ce.informative
+						&& !Scaling::GeometrySet::ConventionalAxis(ce.n, obs.axisLen, axis == 0 ? 0 : 1, obs.rasterW, obs.rasterH))
 					{
 						ce.informative = false;
 						ce.nonConventional = true;
@@ -399,6 +477,34 @@ namespace SourceIdentity
 			AxisSummary Summary(int axis) const
 			{
 				const int a = axis == 0 ? 0 : 1;
+				AxisSummary r = WithPrior(a);
+				if (s_.pairPrior && r.aboveC1)
+				{
+					// M5: a pair that is not one listed, non-parked geometry is never confident on BOTH axes (the prior alone, -bonus, does not
+					// guarantee it: strong per-axis evidence can pass c1 + bonus). Both axes are vetoed, the safe direction (native never wrongly
+					// called upscaled; single-axis re-base is parked anyway).
+					const AxisSummary o = WithPrior(1 - a);
+					if (o.aboveC1 && !PairAgrees(a == 0 ? r.n : o.n, a == 0 ? o.n : r.n))
+					{
+						r.aboveC1 = false;
+						r.lastReason |= kReasonNonConventional;
+					}
+				}
+				return r;
+			}
+
+		private:
+			int PairRasterW() const { return ax_[0].rasterW > 0 ? ax_[0].rasterW : ax_[1].rasterW; }
+			int PairRasterH() const { return ax_[0].rasterH > 0 ? ax_[0].rasterH : ax_[1].rasterH; }
+
+			// R3 (L1): the ratio PAIR (x first) is one listed, NON-parked geometry on the delivered raster.
+			bool PairAgrees(int nx, int ny) const
+			{
+				return Scaling::GeometrySet::AgreeingPair(nx, ax_[0].axisLen, ny, ax_[1].axisLen, PairRasterW(), PairRasterH());
+			}
+
+			AxisSummary WithPrior(int a) const
+			{
 				AxisSummary r = Own(ax_[a]);
 				const AxisSummary o = Own(ax_[1 - a]);
 				r.otherAxisAbstains = o.informativeEvals == 0 || !o.hasBest || o.llr <= 0.0;
@@ -406,10 +512,8 @@ namespace SourceIdentity
 				{
 					if (s_.pairPrior)
 					{
-						// R3: the ratio PAIR (x first) must be one listed geometry; a non-square listed pair agrees too, an unlisted pair does not.
-						const int nx = a == 0 ? r.n : o.n, ny = a == 0 ? o.n : r.n;
-						const int Nx = ax_[0].axisLen, Ny = ax_[1].axisLen;
-						r.prior = Scaling::GeometrySet::ConventionalPair(nx, Nx, ny, Ny) != nullptr ? s_.agreementBonus : -s_.agreementBonus;
+						// R3: a non-square listed pair agrees too; an unlisted pair and the PARKED anamorphic pair do not (L1).
+						r.prior = PairAgrees(a == 0 ? r.n : o.n, a == 0 ? o.n : r.n) ? s_.agreementBonus : -s_.agreementBonus;
 					}
 					else
 					{
@@ -422,7 +526,6 @@ namespace SourceIdentity
 				return r;
 			}
 
-		private:
 			struct ClosedShot
 			{
 				int64_t timeUs = -1;     // source time of the shot's newest increment (-1: unknown, never expires)
@@ -465,13 +568,23 @@ namespace SourceIdentity
 				uint32_t lastInformativeShot = 0;
 				uint32_t lastReason = 0;
 				int axisLen = 0;
+				int rasterW = 0;
+				int rasterH = 0;
+				std::vector<EvidenceCredit> credits;   // M1: what the newest Submit credited (cleared by Submit and ClearCredits)
 			};
 
 			void AddCandidate(AxisState& st, int n, double increment, uint32_t shotId, int64_t timeUs, double cap)
 			{
 				Hypothesis& h = FindSlot(st, n);
+				const double before = Total(h, cap);
 				h.n = n;   // the slot follows the latest best exact size
 				Add(h, increment, shotId, timeUs, cap);
+				EvidenceCredit c;
+				c.n = h.n;
+				c.gain = Total(h, cap) - before;
+				c.raw = increment;
+				c.timeUs = timeUs;
+				st.credits.push_back(c);
 			}
 
 			// E2: the held evidence of a shot that has lasted the dwell is credited, in order and with its own shot id and time.

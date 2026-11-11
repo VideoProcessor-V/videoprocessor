@@ -177,6 +177,9 @@ namespace VpNets
 	// VP fills these from what it runs; the defaults are the kit's planned values (round 1/2).
 	struct RebaseHashSettings
 	{
+		// L7 (SID r2): "on" is the KIT's round-1/2 planned value, pinned by the kit hash golden (NetRunnerTests). It is NOT VP's default any
+		// more: rebase_kernel_match defaults OFF since SID r2 (VpvRendererFields.h, divergence SID-R2-REBASE-KM). No production code fills this
+		// struct yet; a filler must take the value from the active settings, never this default.
 		std::string rebaseKernelMatch = "on";
 		std::string latchFixes = "on";              // source_resolution_latch_fixes
 		bool perAxisInverse = true;

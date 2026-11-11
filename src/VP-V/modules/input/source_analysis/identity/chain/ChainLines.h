@@ -38,6 +38,8 @@ namespace SourceIdentity
 			uint32_t flags = 0;               // kEv* consumed with this evaluation
 			int32_t cuts = 0;                 // cuts consumed with this evaluation (each is a shot; kEvCut set means >= 1)
 			int64_t eventTimeUs = -1;         // source time of the newest consumed cut / blank / fade (-1: unknown)
+			int32_t rasterW = 0;              // delivered frame size (SID r2 L3: the geometry set derives its ratios from it); 0 = unknown,
+			int32_t rasterH = 0;              // the estimator then uses the active extent (SubmitLines callers that do not set it)
 			LineRect active;                  // the active rectangle of the frame
 			LineRect inner;                   // active shrunk by the sampler margin (the lines' extent)
 			int rowCount = 0;

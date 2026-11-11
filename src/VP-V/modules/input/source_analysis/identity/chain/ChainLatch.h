@@ -7,18 +7,28 @@
 //   NATIVE is sticky: the stream starts there and nothing but a conventional, doubly confirmed upscaled PAIR leaves it.
 //   An UPSCALED latch must earn its keep:
 //     enter / move  both axes above the BAR = c1 x (1 + clamp((stable - graceSec) / growSec, 0, growMax)): a long stable stream raises the bar
-//                   (a codec-grid fluke at 1/2 gets harder to believe the longer the picture stays put). The pair must be one published
-//                   conventional geometry (scaling.geometry SourceGeometrySet.h, R2): anything else stays UNSURE, visibly (heldBack).
-//                   Moving between upscaled sizes uses the same bar.
-//     keep          re-confirmed: the evidence of the latched size on BOTH axes reaches confirmFraction x c1 (E0: 0.25). While it is not, a release
-//                   clock runs (seconds of source time); it runs at absentClockRate (R5b: 1/4 speed) through evaluations that earned no
-//                   evidence at all (a dark / flat / soft stretch says nothing against the latch), so a true upscale is not flickered off.
-//     release       the clock passes releaseBoundSec, OR hardBoundSec of source time pass since the last confirmation (no lock without release),
-//                   OR native evidence (the readers say native on both axes), OR a menu / overlay HOLD (R7: the latch is not carried into a
-//                   menu: E0 found 4 menu reels latched 1920x1080 through a 7 s native menu), OR (a switch, default OFF) an ABR rendition step.
-//                   Every release is visible (the output, the status counters, the one-time notice) and counted; after one the bar restarts.
-// It reuses the existing inputs only (rules 24 / 25): ChainEvidence's per-axis evidence, the HOLD evaluations and the monitor's mixed-episode
-// events (WindowClearPolicy), the AbrStepDetector's events. It adds no private measurement. Pure, no clock of its own, header-only, C++14.
+//                   (a codec-grid fluke at 1/2 gets harder to believe the longer the picture stays put). The pair must be one published,
+//                   NON-parked conventional geometry on the delivered raster (scaling.geometry SourceGeometrySet.h, R2): anything else stays
+//                   UNSURE, visibly (heldBack). Moving between upscaled sizes uses the same bar; while latched the estimator publishes ONLY
+//                   the latched size (a different confident pair is never published without a Move: r2 fix H1, ChainEstimator ApplyLatch).
+//     keep          re-confirmed by NEW evidence (r2 fix M1): the evidence CREDITED to the latched size since the last confirmation (the change
+//                   of the shot-capped windowed total that each new evaluation causes, ChainEvidence::CreditAtN; net, floored at -need) reaches
+//                   confirmFraction x c1 (E0: 0.25) on BOTH axes. Evidence that merely still sits in the recent window does not re-confirm,
+//                   so the bounds below are bounds on the AGE of the evidence (the window can be about 80 s at the latched 5 s cadence).
+//                   While not re-confirmed a release clock runs (source seconds); it runs at absentClockRate (R5b: 1/4 speed) through
+//                   evaluations that earned no evidence at all (a dark / flat / soft stretch says nothing against the latch) and through
+//                   evaluations whose only evidence was a positive increment of the latched size that the shot cap absorbed (consistent,
+//                   but not independent evidence: a long shot of a true upscale), so a true upscale is not flickered off.
+//     release       the clock passes releaseBoundSec, OR hardBoundSec of source time pass since the newest evidence that confirmed (no lock
+//                   without release; counted apart as hard-bound releases), OR native evidence (the readers say native on both axes), OR a
+//                   menu / overlay HOLD (R7: the latch is not carried into a menu: E0 found 4 menu reels latched 1920x1080 through a 7 s
+//                   native menu), OR (a switch, default OFF) an ABR rendition step, OR Reset (a discontinuity). Every release is visible
+//                   (the output, the status counters, the one-time notice) and counted; after one the bar restarts. A release for lack of
+//                   new evidence also discredits the recent window (the estimator clears it), so stale evidence cannot re-enter at once.
+//   A backward source-time step without a reset (L5) re-anchors the stable and confirmation times to the new time (the hard bound keeps running).
+// It reuses the existing inputs only (rules 24 / 25): ChainEvidence's per-axis evidence and credits, the HOLD evaluations and the monitor's
+// mixed-episode events (WindowClearPolicy), the AbrStepDetector's events. It adds no private measurement. Pure, no clock of its own, header-only,
+// C++14.
 #include "ChainCommon.h"
 
 #include <VP-V/modules/scaling/geometry/SourceGeometrySet.h>
@@ -34,10 +44,10 @@ namespace SourceIdentity
 		struct LatchSettings
 		{
 			bool enabled = false;               // OFF: the layer is inert (the readings pass unchanged)
-			double confirmFraction = 0.25;      // of c1: the latched size's evidence on both axes that re-confirms it (E0)
+			double confirmFraction = 0.25;      // of c1: the NEW evidence of the latched size on both axes that re-confirms it (E0)
 			double releaseBoundSec = 60.0;      // release clock bound (E0: 30 s flickers, 60 s shows no release on true upscales)
-			double absentClockRate = 0.25;      // R5b: the clock's speed through evaluations that earned no evidence
-			double hardBoundSec = 120.0;        // R5b: source seconds since the last confirmation that always release
+			double absentClockRate = 0.25;      // R5b: the clock's speed through evaluations that earned no (independent) evidence
+			double hardBoundSec = 120.0;        // R5b: source seconds since the newest confirming evidence that always release
 			double graceSec = 30.0;             // bar growth starts after this much stable time
 			double growSec = 120.0;             // ... and reaches growMax over this much more
 			double growMax = 1.0;               // the bar at most doubles
@@ -48,13 +58,14 @@ namespace SourceIdentity
 		enum class LatchEvent : int
 		{
 			None = 0,
-			Entered,        // native -> upscaled latch
-			Moved,          // latched size -> another conventional size (same bar)
-			Released,       // not re-confirmed within the bound (to native)
-			ReleasedNative, // the readers see native on both axes
-			ReleasedMenu,   // a menu / overlay HOLD
-			ReleasedAbr,    // an ABR step (switch)
-			ReleasedReset   // a discontinuity / active-area change
+			Entered,          // native -> upscaled latch
+			Moved,            // latched size -> another conventional size (same bar)
+			Released,         // not re-confirmed within the release clock bound (to native)
+			ReleasedNative,   // the readers see native on both axes
+			ReleasedMenu,     // a menu / overlay HOLD
+			ReleasedAbr,      // an ABR step (switch)
+			ReleasedReset,    // a discontinuity / active-area change
+			ReleasedHardBound // no new confirming evidence for hardBoundSec (R5b)
 		};
 
 		inline const char* LatchEventText(LatchEvent e)
@@ -68,15 +79,19 @@ namespace SourceIdentity
 			case LatchEvent::ReleasedMenu: return "released to native (menu / overlay)";
 			case LatchEvent::ReleasedAbr: return "released to native (rendition step)";
 			case LatchEvent::ReleasedReset: return "released to native (reset)";
+			case LatchEvent::ReleasedHardBound: return "released to native (no new evidence within the hard bound)";
 			default: return "";
 			}
 		}
 
 		inline bool LatchEventIsRelease(LatchEvent e) { return e >= LatchEvent::Released; }
 
+		// A release for lack of new evidence: the window it was built on is discredited (the estimator clears the evidence).
+		inline bool LatchEventIsEvidenceRelease(LatchEvent e) { return e == LatchEvent::Released || e == LatchEvent::ReleasedHardBound; }
+
 		struct LatchInput
 		{
-			int64_t timeUs = 0;           // source time of this evaluation, non-decreasing
+			int64_t timeUs = 0;           // source time of this evaluation (a backward step re-anchors, L5)
 			double c1 = 15.0;
 			bool informative = false;     // some axis earned evidence this evaluation (an uninformative one slows the release clock)
 			bool menuHold = false;        // HOLD evaluation on an axis, or a menu / overlay episode event: R7
@@ -86,8 +101,14 @@ namespace SourceIdentity
 			bool havePair = false;
 			int nx = 0, Nx = 0, ny = 0, Ny = 0;
 			double llrX = 0.0, llrY = 0.0;
-			// The evidence of the CURRENTLY latched size on each axis (ChainEvidence::LlrAtN), only read while latched.
-			double latchedLlrX = 0.0, latchedLlrY = 0.0;
+			// The delivered raster (R2 pair check on the raster the ratios belong to); 0 = unknown: no pair is conventional.
+			int rasterW = 0, rasterH = 0;
+			// M1: the evidence of the CURRENTLY latched size CREDITED by this evaluation on each axis (ChainEvidence::CreditAtN: the change of
+			// the shot-capped windowed total), the positive raw increments behind it (before the shot cap: a capped increment still says the
+			// picture agrees) and the source time of the newest positive credit (-1: none). Only read while latched.
+			double gainX = 0.0, gainY = 0.0;
+			double rawX = 0.0, rawY = 0.0;
+			int64_t gainTimeX = -1, gainTimeY = -1;
 		};
 
 		struct LatchOutput
@@ -95,6 +116,7 @@ namespace SourceIdentity
 			bool latched = false;         // an upscaled latch is held after this evaluation
 			int nx = 0, ny = 0, Nx = 0, Ny = 0;   // the latched sizes (valid while latched)
 			LatchEvent event = LatchEvent::None;
+			bool confirmed = false;       // the latch was re-confirmed by new evidence this evaluation
 			bool heldBack = false;        // a confident upscaled pair was NOT latched (bar not met, or not conventional)
 			bool nonConventional = false; // ... because the pair is not one published geometry
 			uint32_t reasonBits = 0;      // Chain::kReason* for the status / log
@@ -103,8 +125,10 @@ namespace SourceIdentity
 		struct LatchCounters
 		{
 			uint64_t entries = 0, moves = 0;
+			uint64_t confirms = 0;                   // re-confirmations by new evidence (M1)
 			uint64_t releases = 0;                   // all releases (any cause)
 			uint64_t releasesBound = 0, releasesNative = 0, releasesMenu = 0, releasesAbr = 0, releasesReset = 0;
+			uint64_t releasesHardBound = 0;          // R5b hard bound (no new evidence for hardBoundSec); not in releasesBound
 			uint64_t heldBack = 0;                   // evaluations where a confident upscaled pair was held back by the bar
 			uint64_t nonConventional = 0;            // evaluations where the pair was not a published geometry
 		};
@@ -158,6 +182,15 @@ namespace SourceIdentity
 					started_ = true;
 					stableSinceUs_ = t;
 				}
+				if (havePrev_ && t < prevUs_)
+				{
+					// L5: a backward source-time step without a reset. Re-anchor, so neither the bar's stable time nor the hard bound freezes
+					// on a negative age; the release clock keeps its value.
+					stableSinceUs_ = t;
+					if (latched_)
+						lastConfUs_ = t;
+					newestX_ = newestY_ = -1;
+				}
 				const double dt = havePrev_ && t > prevUs_ ? static_cast<double>(t - prevUs_) / 1e6 : 0.0;
 				prevUs_ = t;
 				havePrev_ = true;
@@ -186,10 +219,8 @@ namespace SourceIdentity
 					o.reasonBits |= kReasonLatchRelease;
 				}
 
-				bool conventional = false, parked = false;
-				if (in.havePair)
-					conventional = Scaling::GeometrySet::ConventionalPair(in.nx, in.Nx, in.ny, in.Ny, &parked) != nullptr && !parked;
 				// A listed pair that needs a single-axis re-base alone (1440x1080 anamorphic) is parked: listed, never latched here.
+				const bool conventional = in.havePair && Scaling::GeometrySet::AgreeingPair(in.nx, in.Nx, in.ny, in.Ny, in.rasterW, in.rasterH);
 				const double bar = Bar(t, in.c1);
 				const bool barMet = in.havePair && (std::min)(in.llrX, in.llrY) >= bar;
 
@@ -210,8 +241,7 @@ namespace SourceIdentity
 							o.event = LatchEvent::Entered;
 							++c_.entries;
 							stableSinceUs_ = t;
-							lastConfUs_ = t;
-							clock_ = 0.0;
+							Anchor(t);
 						}
 						else
 						{
@@ -224,14 +254,31 @@ namespace SourceIdentity
 				else
 				{
 					const double need = s_.confirmFraction * in.c1;
-					const bool confirmed = in.latchedLlrX >= need && in.latchedLlrY >= need;
-					if (confirmed)
+					// M1: only NEW evidence of the latched size counts, net since the last confirmation (a debt floored at -need).
+					accX_ = (std::max)(-need, accX_ + in.gainX);
+					accY_ = (std::max)(-need, accY_ + in.gainY);
+					if (in.gainX > 0.0 && in.gainTimeX > newestX_)
+						newestX_ = in.gainTimeX;
+					if (in.gainY > 0.0 && in.gainTimeY > newestY_)
+						newestY_ = in.gainTimeY;
+					if (accX_ >= need && accY_ >= need)
 					{
-						lastConfUs_ = t;
+						// The hard bound runs from the OLDER of the two axes' newest confirming evidence (never later than now).
+						int64_t ev = (std::min)(newestX_, newestY_);
+						if (ev < 0 || ev > t)
+							ev = t;
+						lastConfUs_ = (std::max)(lastConfUs_, ev);
+						accX_ = accY_ = 0.0;
+						newestX_ = newestY_ = -1;
 						clock_ = 0.0;
+						++c_.confirms;
+						o.confirmed = true;
 					}
 					else
-						clock_ += dt * (in.informative ? 1.0 : s_.absentClockRate);
+					{
+						const bool consistent = in.rawX > 0.0 || in.rawY > 0.0;   // the latched size was seen again, capped (not independent)
+						clock_ += dt * ((in.informative && !consistent) ? 1.0 : s_.absentClockRate);
+					}
 					const double lrx = static_cast<double>(lnx_) / lNx_, lry = static_cast<double>(lny_) / lNy_;
 					const bool moved = in.havePair && conventional && barMet &&
 						(std::fabs(static_cast<double>(in.nx) / in.Nx - lrx) > s_.movedTolerance * lrx
@@ -242,10 +289,14 @@ namespace SourceIdentity
 						o.event = LatchEvent::Moved;
 						++c_.moves;
 						stableSinceUs_ = t;
-						lastConfUs_ = t;
-						clock_ = 0.0;
+						Anchor(t);
 					}
-					else if (clock_ > s_.releaseBoundSec || static_cast<double>(t - lastConfUs_) / 1e6 > s_.hardBoundSec)
+					else if (static_cast<double>(t - lastConfUs_) / 1e6 > s_.hardBoundSec)
+					{
+						o.event = Release(LatchEvent::ReleasedHardBound);
+						o.reasonBits |= kReasonLatchRelease;
+					}
+					else if (clock_ > s_.releaseBoundSec)
 					{
 						o.event = Release(LatchEvent::Released);
 						o.reasonBits |= kReasonLatchRelease;
@@ -265,14 +316,25 @@ namespace SourceIdentity
 				lNy_ = in.Ny;
 			}
 
+			void Anchor(int64_t t)
+			{
+				lastConfUs_ = t;
+				clock_ = 0.0;
+				accX_ = accY_ = 0.0;
+				newestX_ = newestY_ = -1;
+			}
+
 			LatchEvent Release(LatchEvent cause)
 			{
 				latched_ = false;
 				clock_ = 0.0;
+				accX_ = accY_ = 0.0;
+				newestX_ = newestY_ = -1;
 				++c_.releases;
 				switch (cause)
 				{
 				case LatchEvent::Released: ++c_.releasesBound; break;
+				case LatchEvent::ReleasedHardBound: ++c_.releasesHardBound; break;
 				case LatchEvent::ReleasedNative: ++c_.releasesNative; break;
 				case LatchEvent::ReleasedMenu: ++c_.releasesMenu; break;
 				case LatchEvent::ReleasedAbr: ++c_.releasesAbr; break;
@@ -300,6 +362,8 @@ namespace SourceIdentity
 			int lnx_ = 0, lNx_ = 1, lny_ = 0, lNy_ = 1;
 			int64_t prevUs_ = 0, stableSinceUs_ = 0, lastConfUs_ = 0;
 			double clock_ = 0.0;
+			double accX_ = 0.0, accY_ = 0.0;          // M1: net new evidence of the latched size since the last confirmation
+			int64_t newestX_ = -1, newestY_ = -1;     // M1: source time of the newest positive credit since then
 		};
 	}
 }

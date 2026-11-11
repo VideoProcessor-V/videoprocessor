@@ -16,6 +16,7 @@
 //   shadow: "<line> [shadow: would-be, classical decides]"
 #include "ChainEvidenceLog.h"
 #include "ChainGovernor.h"
+#include "ChainLatch.h"
 #include "KernelBank.h"
 
 #include <VP-V/modules/input/source_analysis/identity/SourceGeometryView.h>
@@ -48,6 +49,11 @@ namespace SourceIdentity
 			double wallMsSinceLastEvaluation = -1.0;   // wall time since the newest evaluation (or the clean start); -1 = not known
 			EvidenceStatus evidence;
 			std::string evidenceText;
+			// SID r2 (M4): the safety rules applied at the clean start, the latched size (0 = none) and the latch counters. Nothing of it is
+			// shown while the rules are off (the lines stay byte identical).
+			bool safetyRules = false;
+			int latchNx = 0, latchNy = 0;
+			LatchCounters latch;
 		};
 
 		namespace StatusDetail
@@ -100,6 +106,19 @@ namespace SourceIdentity
 
 			inline const char* AxisName(int a) { return a == 0 ? "H" : "V"; }
 
+			// SID r2 (M4): the latch reasons of the published (applied) geometry. Only the r2 bits: they are zero while the rules are off.
+			constexpr uint32_t kLatchReasonBits = kReasonNonConventional | kReasonLatchBar | kReasonLatchRelease | kReasonMenuHold | kReasonAbrStep;
+
+			// SID r2 (M4): "; upscale latch 1920x1080" / "; no upscale latch" while the rules are on, "" while off.
+			inline std::string LatchClause(const ChainStatusInput& in)
+			{
+				if (!in.safetyRules)
+					return std::string();
+				if (in.latchNx > 0 && in.latchNy > 0)
+					return "; upscale latch " + std::to_string(in.latchNx) + "x" + std::to_string(in.latchNy);
+				return "; no upscale latch";
+			}
+
 			inline std::string KernelText(int kernelIndex)
 			{
 				return kernelIndex >= 0 ? std::string(Kernel(kernelIndex).name) : std::string("unsure");
@@ -142,7 +161,7 @@ namespace SourceIdentity
 			else if (dec0 || dec1)
 			{
 				const int d = dec0 ? 0 : 1, o = 1 - d;
-				const std::string why = Geometry::ReasonWords(r.measured[o].reasonBits);
+				const std::string why = Geometry::ReasonWords(r.measured[o].reasonBits | (r.applied[o].reasonBits & kLatchReasonBits));
 				body = std::string(AxisName(d)) + " " + AxisWords(r.applied[d]) + ", confident; " +
 					AxisName(o) + (r.measured[o].state == Geometry::LatchState::Hold ? " holding (overlay)" : " unsure") +
 					(why.empty() || r.measured[o].state == Geometry::LatchState::Hold ? std::string() : " (" + why + ")");
@@ -157,7 +176,7 @@ namespace SourceIdentity
 				{
 					if (r.measured[a].state == Geometry::LatchState::Hold)
 						hold = true;
-					bits |= r.measured[a].reasonBits;
+					bits |= r.measured[a].reasonBits | (r.applied[a].reasonBits & kLatchReasonBits);
 					if (r.measured[a].state == Geometry::LatchState::Provisional)
 					{
 						anyAcquiring = true;
@@ -177,7 +196,7 @@ namespace SourceIdentity
 						body = "unsure (no evidence yet)";
 				}
 			}
-			return prefix + body + tail;
+			return prefix + body + LatchClause(in) + tail;
 		}
 
 		// The Ctrl+Alt+D detail: per-axis state, LLR, power, spatial agreement, candidates, the governor and the evidence log.
@@ -224,6 +243,16 @@ namespace SourceIdentity
 				std::to_string(in.dropped) + ", repeats skipped " + std::to_string(in.repeatsSkipped) + ", no clock " + std::to_string(in.noClock) +
 				", no lines " + std::to_string(in.unusable) + (in.unusableReason.empty() ? std::string() : " (" + in.unusableReason + ")") +
 				", stale " + std::to_string(in.stale) + ", window clears " + std::to_string(in.windowClears) + "\n";
+			if (in.safetyRules)
+			{
+				const LatchCounters& c = in.latch;
+				t += "  safety rules on: latch " + (in.latchNx > 0 && in.latchNy > 0 ? std::to_string(in.latchNx) + "x" + std::to_string(in.latchNy) :
+					std::string("none")) + ", entries " + std::to_string(c.entries) + ", moves " + std::to_string(c.moves) + ", confirms " +
+					std::to_string(c.confirms) + ", releases " + std::to_string(c.releases) + " (clock " + std::to_string(c.releasesBound) +
+					", hard bound " + std::to_string(c.releasesHardBound) + ", native " + std::to_string(c.releasesNative) + ", menu " +
+					std::to_string(c.releasesMenu) + ", ABR " + std::to_string(c.releasesAbr) + ", reset " + std::to_string(c.releasesReset) +
+					"), held back " + std::to_string(c.heldBack) + ", not conventional " + std::to_string(c.nonConventional) + "\n";
+			}
 			if (!in.evidenceText.empty())
 				t += "  " + in.evidenceText + "\n";
 			return t;

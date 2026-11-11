@@ -583,6 +583,8 @@ namespace SourceResolutionMonitor
 		std::unique_ptr<SourceIdentity::Chain::ChainEstimator> chainEst;
 		std::atomic<bool> singleAxisRebase{ false };   // SID r2: see SetSingleAxisRebase
 		bool singleAxisHeldLogged = false;             // AutoFactors thread: the held detection was logged for the current episode
+		std::atomic<int> singleAxisHeldAxis{ -1 };      // SID r2 L6: the held single axis (0 H, 1 V; -1 none) for the status line
+		std::atomic<double> singleAxisHeldRatio{ 1.0 };
 		std::atomic<bool> chainEnabled{ false };
 		std::atomic<unsigned long long> nativeHeldByChain{ 0 };
 		std::string chainHistoryFolder;      // SetHistoryFolder's folder (guarded by `mutex`)

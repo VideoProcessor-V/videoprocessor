@@ -252,6 +252,12 @@ namespace SourceGeometry
 		add(SourceIdentity::Chain::kReasonNoPower, "no power");
 		add(SourceIdentity::Chain::kReasonLowDetail, "low detail");
 		add(SourceIdentity::Chain::kReasonMixed, "overlay");
+		// SID r2 (M4): the safety-rule bits (zero while the rules are off).
+		add(SourceIdentity::Chain::kReasonNonConventional, "not a conventional size");
+		add(SourceIdentity::Chain::kReasonLatchBar, "latch bar");
+		add(SourceIdentity::Chain::kReasonLatchRelease, "latch released");
+		add(SourceIdentity::Chain::kReasonMenuHold, "menu");
+		add(SourceIdentity::Chain::kReasonAbrStep, "rendition step");
 		return w;
 	}
 
