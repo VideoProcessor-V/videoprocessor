@@ -475,6 +475,7 @@ inline bool IsVpvOnlyKey(const QString& key)
         "source",
         "source_class",
         "source_coding_fixes",
+        "source_geometry_detect",
         "source_range",
         "source_resolution",
         "source_resolution_auto_min_confidence",
@@ -667,6 +668,7 @@ inline bool IsVpvChoiceKey(const QString& key)
 inline bool VpvRenderingDefault(const QString& key, QString& out)
 {
     if (key == QStringLiteral("saturation")) { out = QStringLiteral("0"); return true; }
+    if (key == QStringLiteral("source_geometry_detect")) { out = QStringLiteral("all"); return true; }   // SID r2: wide recognition
         // The renderer's own defaults (LibplaceboVideoRenderer.cpp's
         // settings, AdaptiveDownscale.h), so an unset choice says what
         // it really is (audit 2026-10-14c: these all showed "Auto").

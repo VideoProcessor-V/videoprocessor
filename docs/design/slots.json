@@ -258,6 +258,7 @@
         "source_resolution_mixed_guard",
         "source_resolution_latch_fixes",
         "source_resolution_cut_fixes",
+        "source_geometry_detect",
         "source_resolution_engage_max_wait_s",
         "source_resolution_crossfade_s",
         "source_resolution_release_fade_s",

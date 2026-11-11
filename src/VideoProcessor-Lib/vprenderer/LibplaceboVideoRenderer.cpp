@@ -23189,6 +23189,7 @@ releaseDriftBaseRetention =
 			sourceMonitor.SetCodingFixes(activeSettings.sourceCodingFixes);
 			sourceMonitor.SetLatchFixes(activeSettings.sourceResolutionLatchFixes);
 			sourceMonitor.SetCutFixes(activeSettings.sourceResolutionCutFixes);
+			sourceMonitor.SetGeometryDetect(activeSettings.sourceGeometryDetect); SyncFallback(sourceMonitor.GeometryDetectFallback());   // SID r2
 			sourceMonitor.SetEngageTiming(activeSettings.sourceResolutionEngageMaxWait, activeSettings.sourceResolutionCrossfade,
 				activeSettings.sourceResolutionReleaseFade);
 			sourceMonitor.SetEvidence(activeSettings.sourceResolutionEvidenceShots, activeSettings.sourceResolutionEvidenceSeconds);

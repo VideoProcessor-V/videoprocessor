@@ -82,6 +82,7 @@ All are validated as `input`-group keys (RendererProfileConfig.h; sections `[vpr
 - `source_resolution`: `native` / `auto` / a height (144..8640) / `WIDTHxHEIGHT`; default `auto`. An unrecognised value is ignored without a log line.
 - `source_resolution_auto_min_confidence` (0..1, default 0.8), `source_resolution_evidence_shots` (1..10, default 3), `source_resolution_evidence_seconds` (2..120, default 10).
 - `source_resolution_text_guard`, `source_resolution_mixed_guard`, `source_coding_fixes`, `source_resolution_latch_fixes`, `source_resolution_cut_fixes`: `on` / `off`, all default `on`.
+- `source_geometry_detect` (SID r2, owner 2026-11-11): the source sizes RECOGNISED and named when a re-base is held: `all` (default, every SourceGeometrySet entry with detect on, the anamorphic HD sizes HDV 1440x1080 and DVCPRO HD 1280x1080 / 960x720 included), `conventional` (the applied entries only) or a list of entry ids. It never changes what is applied; unknown ids are ignored and shown ("source geometry detect"). Per-entry held counts: the log line `held: <name>` and the history row `convention_held`.
 - `source_resolution_engage_max_wait_s` (0..600, default 20), `source_resolution_crossfade_s` (0..10, default 1.5), `source_resolution_release_fade_s` (0..0.25, default 0.25).
 - `rebase_kernel_match` is read by the host for the re-base (scaling.rebase). The monitor fits kernels whatever it says.
 - The Original pathway forces `source_resolution: native`, `rebase_kernel_match: off`, `source_coding_fixes: off`, `source_resolution_latch_fixes: off` and `source_resolution_cut_fixes: off` (OriginalPathway.h).
@@ -338,7 +339,7 @@ Tests: `src/VP-V/tests/LaneProductsTests.cpp`.
 
 ## Settings
 
-- Keys: `source_resolution`, `source_resolution_auto_min_confidence`, `source_resolution_evidence_shots`, `source_resolution_evidence_seconds`, `source_resolution_text_guard`, `source_resolution_mixed_guard`, `source_resolution_latch_fixes`, `source_resolution_cut_fixes`, `source_resolution_engage_max_wait_s`, `source_resolution_crossfade_s`, `source_resolution_release_fade_s`, `subtitle_fit`, `subtitle_reposition`, `subtitle_type`, `source_coding_fixes`, `frame_analysis_store`.
+- Keys: `source_resolution`, `source_resolution_auto_min_confidence`, `source_resolution_evidence_shots`, `source_resolution_evidence_seconds`, `source_resolution_text_guard`, `source_resolution_mixed_guard`, `source_resolution_latch_fixes`, `source_resolution_cut_fixes`, `source_geometry_detect`, `source_resolution_engage_max_wait_s`, `source_resolution_crossfade_s`, `source_resolution_release_fade_s`, `subtitle_fit`, `subtitle_reposition`, `subtitle_type`, `source_coding_fixes`, `frame_analysis_store`.
 - Planned keys (not yet implemented): `label_detector`, `source_id_abr_notice`, `source_id_consensus`.
 - Tiers: not tiered; label-detector net optional.
 - VP-V page, Input tab: not tiered (Always on: capture and timing have no quality steps, only paths (the toggles below).).
