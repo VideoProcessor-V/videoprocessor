@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -1046,4 +1047,154 @@ namespace RenderAhead
 		if (level == 1) return "L1 (de-judder vectors for the sigma-delta)";
 		return "drop " + std::to_string(DropsAt(level)) + " extra(s) per frame";
 	}
+
+	// ---------------------------------------------------------------------
+	// The Presenter API (M2 P6-4, doc 77 decision 4: interface first).
+	//
+	// The render-ahead presentation state - the present chain, the gate and its cost
+	// windows, the epoch, the drift lateness, the queue credit and the chain depth -
+	// and the decisions made on it each frame, in one object the renderer owns
+	// (render-loop thread, except the two atomics). Pure: no clock, no GPU, no
+	// logging; the caller passes `now` and logs from the results, so its log lines and
+	// diagnostics stay where they were. P6 rest moves the present clusters onto this
+	// object; until then the renderer reaches the members through one alias each.
+	// Behaviour is the renderer's before P6-4, line for line.
+
+	// What the gate needs from the renderer for one source period.
+	struct PresenterGateFrame
+	{
+		double sourcePeriod = 0.0;       // P_s (s)
+		double displayPeriod = 0.0;      // P_d (s)
+		double utilisation = 0.85;       // render_ahead_utilisation
+		bool vpOwnedChain = false;       // the VP-owned chain exists: its latency is Q, else 2
+		bool l1Available = false;        // dither_vectors own and the sigma-delta supports vectors
+		double ditherMsOwn = 0.0;        // the sigma-delta's measured ms with its own search
+		double ditherMsExternal = 0.0;   // ... and with the de-judder's vectors
+		bool late = false;               // a late frame (steps the ladder down at once)
+		int maxExtras = 0;               // the most extras a source frame owns at this cadence
+	};
+
+	// The gate's answer, with what the caller logs.
+	struct PresenterGateResult
+	{
+		int level = 0;                   // the ladder's level after the update
+		bool evaluated = false;          // Gate::Update ran (measured, or a late frame)
+		bool probing = false;            // degraded with no extra cost known (one step up probes)
+		GateChange change;               // valid when evaluated
+		GateInput input;                 // the costs and budget the gate saw
+	};
+
+	class Presenter
+	{
+	public:
+		Schedule schedule;
+		Gate gate;
+		CostWindow newFrameCost;
+		// X per vector mode (bug hunt 05 M7): the sigma-delta's own search / the de-judder's
+		// vectors; E, the estimate ahead. Each holds its last p95 for a while when it empties.
+		KnownCost extraCostOwn{ 4 }, extraCostExternal{ 4 }, estimateCost{ 1 };
+		GateEpoch epoch;                 // generation / cadence / render_ahead on (H3)
+		SustainedLateness driftLateness; // open-loop drift corrections (M5)
+		CreditLatch credit;              // render_ahead_queue_credit, latched (M4)
+		ChainDepth chainDepth;           // the VP-owned chain as created (M6)
+		unsigned long long gateResets = 0;
+		bool committed = false;          // this frame's plan was queued
+		bool l1 = false;                 // the ladder's L1: the de-judder's vectors for the sigma-delta
+		int mainInterval = 1;            // SyncInterval of the next main present (holds after the last extra)
+		double targetLeadMs = 0.0;       // A's planned refresh after its Present returned (ms)
+		std::atomic<double> estimatedLeadMs{ 0.0 };   // open loop: the planned lead, an estimate (L3); 0 = none (any thread)
+		std::atomic<size_t> creditFrames{ 0 };        // render_ahead_queue_credit: frames the queue target gives back (any thread)
+		int lastMainInterval = 1;        // the last main present's SyncInterval (diagnostics)
+		unsigned long long intervalPresents = 0;   // main presents made after holds
+
+		// The chain ends (a frame not queued by the plan): the next present is not
+		// predicted. The queue credit is latched (bug hunt 05 M4): a single break keeps
+		// it; it is returned once the chain has stayed broken for CreditLatch::kReleaseSeconds.
+		void Break(double now)
+		{
+			schedule.Break();
+			mainInterval = 1;
+			targetLeadMs = 0.0;
+			creditFrames.store(credit.Break(now), std::memory_order_release);
+			estimatedLeadMs.store(0.0, std::memory_order_relaxed);
+		}
+
+		// A new epoch for the gate (bug hunt 05 H3): the ladder, its cost windows, the
+		// held costs, the drift-lateness count and the queue credit start again.
+		// Returns the level before the reset.
+		int ResetGate()
+		{
+			const int level = gate.Level();
+			gate.Reset();
+			newFrameCost.Reset();
+			extraCostOwn.Reset();
+			extraCostExternal.Reset();
+			estimateCost.Reset();
+			driftLateness.Reset();
+			credit.Reset();
+			creditFrames.store(0, std::memory_order_release);
+			l1 = false;
+			++gateResets;
+			return level;
+		}
+
+		// The gate per source period (dejudder_gate period): p95 costs over 5 s, the
+		// average and single-frame budgets, the ladder one step at a time.
+		PresenterGateResult UpdateGate(double now, const PresenterGateFrame& frame)
+		{
+			newFrameCost.Trim(now);
+			extraCostOwn.Trim(now);
+			extraCostExternal.Trim(now);
+			estimateCost.Trim(now);
+			PresenterGateResult result;
+			GateInput& g = result.input;
+			g.sourcePeriod = frame.sourcePeriod;
+			g.displayPeriod = frame.displayPeriod;
+			g.utilisation = frame.utilisation;
+			// The frame latency the VP-owned chain was made with (bug hunt 05 M6: today's 2
+			// without extras or in low latency).
+			g.queueDepth = frame.vpOwnedChain ? static_cast<int>(chainDepth.latency) : 2;
+			g.l1Available = frame.l1Available;
+			g.costs.newFrameMs = newFrameCost.P95();
+			g.costs.estimateMs = estimateCost.Current();
+			// X per vector mode, each level priced with its own (M7). A degraded level renders
+			// fewer extras (none at hold), so their windows empty: the last p95 measured
+			// stands for them (KnownCost, 30 s), and with none known the ladder probes one
+			// step up with the extra's cost unknown.
+			const double saving = frame.ditherMsOwn > 0.0 && frame.ditherMsExternal > 0.0 ?
+				frame.ditherMsOwn - frame.ditherMsExternal : 0.0;
+			const GateCosts extra = ExtraCosts(extraCostOwn.Current(), extraCostExternal.Current(), saving,
+				g.l1Available);
+			g.costs.extraMs = extra.extraMs;
+			g.costs.extraCheaperMs = extra.extraCheaperMs;
+			const bool degraded = gate.Level() > 0;
+			const bool extraMeasured = extraCostOwn.Measured() || extraCostExternal.Measured();
+			const bool extraKnown = extraCostOwn.Known() || extraCostExternal.Known();
+			result.probing = degraded && !extraKnown;
+			const bool measured = newFrameCost.Count() >= 10 &&
+				(frame.maxExtras == 0 || extraMeasured || degraded);
+			if (measured || frame.late)
+			{
+				if (!measured)
+					g.costs = GateCosts();
+				result.change = gate.Update(now, g, frame.late);
+				result.evaluated = true;
+			}
+			result.level = gate.Level();
+			l1 = g.l1Available && result.level >= 1 && result.level < HoldLevel(frame.maxExtras);
+			return result;
+		}
+
+		// The SyncInterval for the main present now being made: the holds the last plan
+		// left after its last extra (taken at the main present's entry, so every exit
+		// consumes it, bug hunt 05 L2), 1 otherwise; at most kMaxSyncInterval.
+		int TakeMainInterval(int pending)
+		{
+			const int interval = std::max(1, std::min(pending, kMaxSyncInterval));
+			lastMainInterval = interval;
+			if (interval > 1)
+				++intervalPresents;
+			return interval;
+		}
+	};
 }

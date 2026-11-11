@@ -5236,41 +5236,45 @@ struct LibplaceboVideoRenderer::Impl
 	// lands (closed loop on DXGI's statistics, open loop without), the gate budgets per
 	// source period (dejudder_gate period) with the ladder and its hysteresis.
 	// Render-loop thread.
-	RenderAhead::Schedule renderAheadSchedule;
-	RenderAhead::Gate renderAheadGate;
-	RenderAhead::CostWindow renderAheadNewFrameCost;
-	// X per vector mode (bug hunt 05 M7): the sigma-delta's own search / the de-judder's
-	// vectors; E, the estimate ahead. Each holds its last p95 for a while when it empties.
-	RenderAhead::KnownCost renderAheadExtraCostOwn{ 4 }, renderAheadExtraCostExternal{ 4 }, renderAheadEstimateCost{ 1 };
+	// VPV-HOOK M2 P6-4: the state lives in the Presenter (VP-V/modules/output/presentation/   // VPV-HOOK
+	// RenderAheadPolicy.h); one alias per member until P6 rest moves the present clusters.   // VPV-HOOK
+	RenderAhead::Presenter renderAheadPresenter;   // VPV-HOOK
+	RenderAhead::Schedule& renderAheadSchedule = renderAheadPresenter.schedule;   // VPV-HOOK
+	RenderAhead::Gate& renderAheadGate = renderAheadPresenter.gate;   // VPV-HOOK
+	RenderAhead::CostWindow& renderAheadNewFrameCost = renderAheadPresenter.newFrameCost;   // VPV-HOOK
+	RenderAhead::KnownCost& renderAheadExtraCostOwn = renderAheadPresenter.extraCostOwn;   // VPV-HOOK
+	RenderAhead::KnownCost& renderAheadExtraCostExternal = renderAheadPresenter.extraCostExternal;   // VPV-HOOK
+	RenderAhead::KnownCost& renderAheadEstimateCost = renderAheadPresenter.estimateCost;   // VPV-HOOK
 	std::deque<std::pair<unsigned long long, bool>> renderAheadExtraTimerModes;   // timer serial -> de-judder vectors
-	RenderAhead::GateEpoch renderAheadEpoch;                 // generation / cadence / render_ahead on (H3)
-	RenderAhead::SustainedLateness renderAheadDriftLateness; // open-loop drift corrections (M5)
-	RenderAhead::CreditLatch renderAheadCredit;              // render_ahead_queue_credit, latched (M4)
-	RenderAhead::ChainDepth renderAheadChainDepth;           // the VP-owned chain as created (M6)
+	RenderAhead::GateEpoch& renderAheadEpoch = renderAheadPresenter.epoch;   // VPV-HOOK
+	RenderAhead::SustainedLateness& renderAheadDriftLateness = renderAheadPresenter.driftLateness;   // VPV-HOOK
+	RenderAhead::CreditLatch& renderAheadCredit = renderAheadPresenter.credit;   // VPV-HOOK
+	RenderAhead::ChainDepth& renderAheadChainDepth = renderAheadPresenter.chainDepth;   // VPV-HOOK
 	// PresentationOwner (owner decision 2): the swapchain frames the delay budget counts, written where
 	// the device / VP-owned chain latency is set, read by the queue-hold planner (another thread).
 	std::atomic<int> delaySwapchainFrames{ DelayBudget::kSwapchainFrames };
 	double renderAheadChainWantedSince = -1.0;               // another depth wanted since (RenderAheadNow)
-	unsigned long long renderAheadGateResets = 0;
+	unsigned long long& renderAheadGateResets = renderAheadPresenter.gateResets;   // VPV-HOOK
 	AlphaD3D11FrameGpuTimer renderAheadExtraTimer, renderAheadEstimateTimer;   // X and E on the GPU
 	bool renderAheadTimersReady = false;
 	unsigned long long renderAheadTimerOrdinal = 0, renderAheadTimerSerial = 0;
-	bool renderAheadCommitted = false;      // this frame's plan was queued
-	bool renderAheadL1 = false;             // the ladder's L1: the de-judder's vectors for the sigma-delta
-	int renderAheadMainInterval = 1;        // SyncInterval of the next main present (holds after the last extra)
+	bool& renderAheadCommitted = renderAheadPresenter.committed;   // VPV-HOOK
+	bool& renderAheadL1 = renderAheadPresenter.l1;   // VPV-HOOK
+	int& renderAheadMainInterval = renderAheadPresenter.mainInterval;   // VPV-HOOK
 	uint32_t renderAheadExpectedPresent = 0;   // the present id the next main present should get (chain continuity)
 	double renderAheadLead = 0.0;           // the planned lead (s)
-	double renderAheadTargetLeadMs = 0.0;   // A's planned refresh after its Present returned (ms)
-	std::atomic<double> renderAheadEstimatedLeadMs{ 0.0 };   // open loop: the planned lead, an estimate (L3); 0 = none
-	std::atomic<size_t> renderAheadCreditFrames{ 0 };   // render_ahead_queue_credit (frames the queue target gives back)
+	double& renderAheadTargetLeadMs = renderAheadPresenter.targetLeadMs;   // VPV-HOOK
+	std::atomic<double>& renderAheadEstimatedLeadMs = renderAheadPresenter.estimatedLeadMs;   // VPV-HOOK
+	std::atomic<size_t>& renderAheadCreditFrames = renderAheadPresenter.creditFrames;   // VPV-HOOK
 	unsigned long long renderAheadFrames = 0, renderAheadRestarts = 0, renderAheadLate = 0, renderAheadDropped = 0,
-		renderAheadHeld = 0, renderAheadIntervalPresents = 0;
+		renderAheadHeld = 0;   // VPV-HOOK
+	unsigned long long& renderAheadIntervalPresents = renderAheadPresenter.intervalPresents;   // VPV-HOOK
 	ULONGLONG renderAheadLogTick = 0;
 	// Diagnostics (render-ahead follow-up 2026-10-17): each planned present's SyncInterval
 	// and, from the statistics, shown - planned in refreshes per kind (interval 1 or a
 	// present after holds): whether the presentation honours queued holds.
 	std::deque<std::pair<uint32_t, int>> renderAheadPresentIntervals;
-	int renderAheadLastMainInterval = 1;
+	int& renderAheadLastMainInterval = renderAheadPresenter.lastMainInterval;   // VPV-HOOK
 	unsigned long long renderAheadObservedSeen = 0;
 	double renderAheadShownError[2] = { 0.0, 0.0 };
 	unsigned long long renderAheadShownCount[2] = { 0, 0 }, renderAheadShownOnTime[2] = { 0, 0 };
@@ -5299,11 +5303,7 @@ struct LibplaceboVideoRenderer::Impl
 	// it is returned once the chain has stayed broken for CreditLatch::kReleaseSeconds.
 	void RenderAheadBreak()
 	{
-		renderAheadSchedule.Break();
-		renderAheadMainInterval = 1;
-		renderAheadTargetLeadMs = 0.0;
-		renderAheadCreditFrames.store(renderAheadCredit.Break(RenderAheadNow()), std::memory_order_release);
-		renderAheadEstimatedLeadMs.store(0.0, std::memory_order_relaxed);
+		renderAheadPresenter.Break(RenderAheadNow());   // VPV-HOOK
 	}
 
 	// A new epoch for the gate (bug hunt 05 H3): a new queue generation, a new cadence
@@ -5311,17 +5311,7 @@ struct LibplaceboVideoRenderer::Impl
 	// drift-lateness count and the queue credit start again.
 	void ResetRenderAheadGate(const char* why)
 	{
-		const int level = renderAheadGate.Level();
-		renderAheadGate.Reset();
-		renderAheadNewFrameCost.Reset();
-		renderAheadExtraCostOwn.Reset();
-		renderAheadExtraCostExternal.Reset();
-		renderAheadEstimateCost.Reset();
-		renderAheadDriftLateness.Reset();
-		renderAheadCredit.Reset();
-		renderAheadCreditFrames.store(0, std::memory_order_release);
-		renderAheadL1 = false;
-		++renderAheadGateResets;
+		const int level = renderAheadPresenter.ResetGate();   // VPV-HOOK
 		DebugLog::Log("Render-ahead gate: reset (%s; was %s)", why,
 			level == 0 ? "full" : "degraded");
 		DiagnosticHistory::Global().RecordDecision("ra-gate-reset", why, level);
@@ -5492,43 +5482,25 @@ struct LibplaceboVideoRenderer::Impl
 	// average and single-frame budgets, the ladder one step at a time (logged).
 	int UpdateRenderAheadGate(double now, double sourcePeriod, double displayPeriod, bool late, int maxExtras)
 	{
-		renderAheadNewFrameCost.Trim(now);
-		renderAheadExtraCostOwn.Trim(now);
-		renderAheadExtraCostExternal.Trim(now);
-		renderAheadEstimateCost.Trim(now);
-		RenderAhead::GateInput g;
-		g.sourcePeriod = sourcePeriod;
-		g.displayPeriod = displayPeriod;
-		g.utilisation = activeSettings.renderAheadUtilisation;
-		// The frame latency the VP-owned chain was made with (bug hunt 05 M6: today's 2
-		// without extras or in low latency).
-		g.queueDepth = vpOwnedSwapchain ? static_cast<int>(renderAheadChainDepth.latency) : 2;
-		g.l1Available = activeSettings.ditherVectorsOwn && DitherVectorsSupported();
-		g.costs.newFrameMs = renderAheadNewFrameCost.P95();
-		g.costs.estimateMs = renderAheadEstimateCost.Current();
-		// X per vector mode, each level priced with its own (M7). A degraded level renders
-		// fewer extras (none at hold), so their windows empty: the last p95 measured
-		// stands for them (KnownCost, 30 s), and with none known (the ladder went down on
-		// start-up lateness before the first extra) the ladder probes one step up with
-		// the extra's cost unknown (render-ahead follow-up 2026-10-17: before, a hold
-		// reached that way was never left).
-		const double saving = dejudderExtraStats.ditherMsOwn > 0.0 && dejudderExtraStats.ditherMsExternal > 0.0 ?
-			dejudderExtraStats.ditherMsOwn - dejudderExtraStats.ditherMsExternal : 0.0;
-		const RenderAhead::GateCosts extra = RenderAhead::ExtraCosts(renderAheadExtraCostOwn.Current(),
-			renderAheadExtraCostExternal.Current(), saving, g.l1Available);
-		g.costs.extraMs = extra.extraMs;
-		g.costs.extraCheaperMs = extra.extraCheaperMs;
-		const bool degraded = renderAheadGate.Level() > 0;
-		const bool extraMeasured = renderAheadExtraCostOwn.Measured() || renderAheadExtraCostExternal.Measured();
-		const bool extraKnown = renderAheadExtraCostOwn.Known() || renderAheadExtraCostExternal.Known();
-		const bool probing = degraded && !extraKnown;
-		const bool measured = renderAheadNewFrameCost.Count() >= 10 &&
-			(maxExtras == 0 || extraMeasured || degraded);
-		if (measured || late)
-		{
-			if (!measured)
-				g.costs = RenderAhead::GateCosts();
-			const RenderAhead::GateChange change = renderAheadGate.Update(now, g, late);
+		// VPV-HOOK M2 P6-4: the decision is RenderAhead::Presenter::UpdateGate; the log lines stay here.   // VPV-HOOK
+		// (A hold reached on start-up lateness before the first extra probes one step up with the   // VPV-HOOK
+		// extra's cost unknown - render-ahead follow-up 2026-10-17: before, it was never left.)   // VPV-HOOK
+		RenderAhead::PresenterGateFrame frame;   // VPV-HOOK
+		frame.sourcePeriod = sourcePeriod;   // VPV-HOOK
+		frame.displayPeriod = displayPeriod;   // VPV-HOOK
+		frame.utilisation = activeSettings.renderAheadUtilisation;   // VPV-HOOK
+		frame.vpOwnedChain = vpOwnedSwapchain != nullptr;   // VPV-HOOK
+		frame.l1Available = activeSettings.ditherVectorsOwn && DitherVectorsSupported();   // VPV-HOOK
+		frame.ditherMsOwn = dejudderExtraStats.ditherMsOwn;   // VPV-HOOK
+		frame.ditherMsExternal = dejudderExtraStats.ditherMsExternal;   // VPV-HOOK
+		frame.late = late;   // VPV-HOOK
+		frame.maxExtras = maxExtras;   // VPV-HOOK
+		const RenderAhead::PresenterGateResult gate = renderAheadPresenter.UpdateGate(now, frame);   // VPV-HOOK
+		const RenderAhead::GateInput& g = gate.input;   // VPV-HOOK
+		const bool probing = gate.probing;   // VPV-HOOK
+		if (gate.evaluated)   // VPV-HOOK
+		{   // VPV-HOOK
+			const RenderAhead::GateChange& change = gate.change;   // VPV-HOOK
 			if (change.changed)
 				DebugLog::Log("Render-ahead gate: %s -> %s (%s%s; p95 new frame %.2f ms, extra %.2f ms (L1 %.2f), estimate ahead %.2f ms; "
 					"per source frame %.2f ms of %.2f ms at u=%.2f; queue depth %d)",
@@ -5541,9 +5513,7 @@ struct LibplaceboVideoRenderer::Impl
 				DiagnosticHistory::Global().RecordDecision("ra-gate", change.why, change.from, change.to,
 					g.costs.newFrameMs, g.costs.extraMs);
 		}
-		const int level = renderAheadGate.Level();
-		renderAheadL1 = g.l1Available && level >= 1 && level < RenderAhead::HoldLevel(maxExtras);
-		return level;
+		return gate.level;   // VPV-HOOK
 	}
 
 	// One line per 5 s while render-ahead queues extras.
@@ -5582,11 +5552,7 @@ struct LibplaceboVideoRenderer::Impl
 	// it, bug hunt 05 L2), 1 otherwise.
 	UINT TakeRenderAheadMainInterval(int pending)
 	{
-		const int interval = std::max(1, std::min(pending, RenderAhead::kMaxSyncInterval));
-		renderAheadLastMainInterval = interval;
-		if (interval > 1)
-			++renderAheadIntervalPresents;
-		return static_cast<UINT>(interval);
+		return static_cast<UINT>(renderAheadPresenter.TakeMainInterval(pending));   // VPV-HOOK
 	}
 
 	// Number of extra presents with ids in (from, to].

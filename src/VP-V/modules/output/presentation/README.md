@@ -26,6 +26,7 @@ The renderer host and Bill's files do the rest: they create the swapchain, prese
   - the frame planner: `FrameInput` and `PlanFrame` -> `FramePlan` (slots, intervals, drops).
   - the present chain: `Schedule` (anchor L, closed or open loop, `NoteLate`, `Break`).
   - the gate (`dejudder_gate`): `ResolveGate`, `RefreshGateHolds`, `CostWindow`, `KnownCost`, `Gate` (the step-down / step-up ladder), `SustainedLateness`, `GateEpoch` and `LevelName`.
+  - the Presenter API (M2 P6-4, interface first): `Presenter` owns the render-ahead state (chain, gate and its cost windows, epoch, drift lateness, credit latch, chain depth) with `Break`, `ResetGate`, `UpdateGate(now, PresenterGateFrame)` -> `PresenterGateResult` and `TakeMainInterval`. The renderer keeps one reference alias per former member and logs from the results; P6 rest moves the present clusters onto it.
 - `OpenLoopDisplayRate` (OpenLoopDisplayRate.h):
   - `Select(Candidates, renderAhead, wholeHzLast)` -> `Choice`. The statistics' rate always wins. Without it, and only when render-ahead is on, the order is: the monitor's exact mode, then DWM (only if within 2 % of the mode), then the application's rate, then the vblank cadence, then the whole-hertz mode.
   - `VBlankCadence`: the median of `WaitForVBlank` intervals.
@@ -90,7 +91,7 @@ Build x64 Release (the AGENTS.md command). Run tests single-threaded and read th
 
 `vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /Tests:<Class> /Logger:"trx;LogFileName=x.trx"`
 
-- Render-ahead (src/VideoProcessor-Test/RenderAheadPolicyTests.cpp): `RenderAheadPlannerTests`, `RenderAheadJitterSimulationTests`, `RenderAheadScheduleTests`, `RenderAheadGateTests`, `RenderAheadSchedulerSimulationTests`, `RenderAheadLookaheadWalkTests`, `RenderAheadGapFillTests`, `RenderAheadLedTests`, `RenderAheadOpenLoopRateTests`, `RenderAheadGateFixTests`.
+- Render-ahead (src/VideoProcessor-Test/RenderAheadPolicyTests.cpp): `RenderAheadPlannerTests`, `RenderAheadJitterSimulationTests`, `RenderAheadScheduleTests`, `RenderAheadGateTests`, `RenderAheadSchedulerSimulationTests`, `RenderAheadLookaheadWalkTests`, `RenderAheadGapFillTests`, `RenderAheadLedTests`, `RenderAheadOpenLoopRateTests`, `RenderAheadGateFixTests`, `PresenterApiTests` (the Presenter against the pre-P6-4 renderer bodies).
 - Budget: `RenderAheadDelayBudgetTests` (R6BaselineTests.cpp) and `DelayGate`.
 - Bill's side: `AlphaPresentationTelemetryTests`, `DisplayRefreshRatePolicyTests`, `DisplayRefreshRateEstimatorTests`, `DisplayRefreshRateWindowTests` and `DisplayRateHoldTests`.
 - `FallbackCatalogTests` (src/VP-V/tests/FallbackCatalogTests.cpp) checks the entry wording, but it is not in VideoProcessor-Test.vcxproj yet.
