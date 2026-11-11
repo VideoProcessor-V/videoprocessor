@@ -72,7 +72,8 @@ if (-not $NoSettingsChecks) {
     $root = Join-Path $PSScriptRoot ".."
     foreach ($check in @(@("tools/gen_vpv_tiers.py", "--check"), @("tools/vpv_tests/slot_matrix.py", "--check"),
                          @("tools/vpv_tests/dimensions.py", "--check"), @("tools/vpv_tests/pairwise.py", "--verify", "tests/vpv/pairwise.txt"),
-                         @("tools/vpv_tests/seed_module_readmes.py", "--check"), @("tools/check_module_manifests.py"))) {
+                         @("tools/vpv_tests/seed_module_readmes.py", "--check"), @("tools/check_module_manifests.py"),
+                         @("tools/check_hook_gating.py"))) {
         Push-Location $root
         try { & python -I @check | ForEach-Object { "$_" } } finally { Pop-Location }
         if ($LASTEXITCODE -ne 0) { throw "VP-V data check failed: $($check -join ' ')" }

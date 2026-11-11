@@ -378,6 +378,7 @@
         "src/VP-V/modules/motion/estimation/tests/MotionUnificationBenchTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/NvofOneEngineGuardTests.cpp",
         "src/VP-V/modules/motion/estimation/tests/FieldSourceShimTests.cpp",
+        "src/VP-V/modules/motion/estimation/tests/SnapshotLeaseGateTests.cpp",
         "src/VP-V/modules/motion/estimation/VectorDemand.h",
         "src/VP-V/modules/motion/estimation/tests/VectorDemandTests.cpp",
         "src/VP-V/modules/motion/estimation/VectorDemandProducts.h",
