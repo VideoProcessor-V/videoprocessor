@@ -4962,24 +4962,6 @@ chroma_upscale_vp: zzz_invalid
 [vpv]
 chroma_upscale_vp: zzz_invalid
 
-### chroma_upscaler=on
-[general]
-persist_profile_selection: false
-[vprenderer.Default]
-quality: high
-chroma_upscaler: on
-[vpv]
-chroma_upscaler: on
-
-### chroma_upscaler=off
-[general]
-persist_profile_selection: false
-[vprenderer.Default]
-quality: high
-chroma_upscaler: off
-[vpv]
-chroma_upscaler: off
-
 ### chroma_upscaler=auto
 [general]
 persist_profile_selection: false
@@ -4989,50 +4971,68 @@ chroma_upscaler: auto
 [vpv]
 chroma_upscaler: auto
 
-### chroma_upscaler=1
+### chroma_upscaler=upscaler
 [general]
 persist_profile_selection: false
 [vprenderer.Default]
 quality: high
-chroma_upscaler: 1
+chroma_upscaler: upscaler
 [vpv]
-chroma_upscaler: 1
+chroma_upscaler: upscaler
 
-### chroma_upscaler=0
+### chroma_upscaler=ewa_lanczossharp
 [general]
 persist_profile_selection: false
 [vprenderer.Default]
 quality: high
-chroma_upscaler: 0
+chroma_upscaler: ewa_lanczossharp
 [vpv]
-chroma_upscaler: 0
+chroma_upscaler: ewa_lanczossharp
 
-### chroma_upscaler=2.5
+### chroma_upscaler=ewa_lanczos
 [general]
 persist_profile_selection: false
 [vprenderer.Default]
 quality: high
-chroma_upscaler: 2.5
+chroma_upscaler: ewa_lanczos
 [vpv]
-chroma_upscaler: 2.5
+chroma_upscaler: ewa_lanczos
 
-### chroma_upscaler=10
+### chroma_upscaler=lanczos
 [general]
 persist_profile_selection: false
 [vprenderer.Default]
 quality: high
-chroma_upscaler: 10
+chroma_upscaler: lanczos
 [vpv]
-chroma_upscaler: 10
+chroma_upscaler: lanczos
 
-### chroma_upscaler=100
+### chroma_upscaler=catmull_rom
 [general]
 persist_profile_selection: false
 [vprenderer.Default]
 quality: high
-chroma_upscaler: 100
+chroma_upscaler: catmull_rom
 [vpv]
-chroma_upscaler: 100
+chroma_upscaler: catmull_rom
+
+### chroma_upscaler=bicubic
+[general]
+persist_profile_selection: false
+[vprenderer.Default]
+quality: high
+chroma_upscaler: bicubic
+[vpv]
+chroma_upscaler: bicubic
+
+### chroma_upscaler=bilinear
+[general]
+persist_profile_selection: false
+[vprenderer.Default]
+quality: high
+chroma_upscaler: bilinear
+[vpv]
+chroma_upscaler: bilinear
 
 ### chroma_upscaler=zzz_invalid
 [general]
@@ -17045,7 +17045,7 @@ calibration_lut_stage: libplacebo
 capture_path: standard
 capture_upload: auto
 chroma_upscale_vp: off
-chroma_upscaler: on
+chroma_upscaler: auto
 cleanup_fill: mirror
 cnn_residual_stabilise: on
 container_colorspace: auto
@@ -17234,6 +17234,7 @@ sdr_white_headroom: on
 sigmoid: auto
 source_class: on
 source_coding_fixes: on
+source_geometry_detect: on
 source_geometry_detect: on
 source_range: auto
 source_resolution: native
@@ -17314,7 +17315,7 @@ calibration_lut_stage: libplacebo
 capture_path: standard
 capture_upload: auto
 chroma_upscale_vp: off
-chroma_upscaler: on
+chroma_upscaler: auto
 cleanup_fill: mirror
 cnn_residual_stabilise: on
 container_colorspace: auto
@@ -17503,7 +17504,6 @@ sdr_white_headroom: on
 sigmoid: auto
 source_class: on
 source_coding_fixes: on
-source_geometry_detect: on
 source_range: auto
 source_resolution: native
 source_resolution_auto_min_confidence: on
@@ -17588,7 +17588,7 @@ calibration_lut_stage: vp
 capture_path: gpu
 capture_upload: render
 chroma_upscale_vp: cfl
-chroma_upscaler: off
+chroma_upscaler: upscaler
 cleanup_fill: stretch
 cnn_residual_stabilise: off
 container_colorspace: follow_input
@@ -17777,6 +17777,7 @@ sdr_white_headroom: off
 sigmoid: on
 source_class: off
 source_coding_fixes: off
+source_geometry_detect: off
 source_geometry_detect: off
 source_range: full
 source_resolution: auto
@@ -17857,7 +17858,7 @@ calibration_lut_stage: vp
 capture_path: gpu
 capture_upload: render
 chroma_upscale_vp: cfl
-chroma_upscaler: off
+chroma_upscaler: upscaler
 cleanup_fill: stretch
 cnn_residual_stabilise: off
 container_colorspace: follow_input
@@ -18046,7 +18047,6 @@ sdr_white_headroom: off
 sigmoid: on
 source_class: off
 source_coding_fixes: off
-source_geometry_detect: off
 source_range: full
 source_resolution: auto
 source_resolution_auto_min_confidence: off
@@ -18131,7 +18131,7 @@ calibration_lut_stage: vp
 capture_path: gpu
 capture_upload: early
 chroma_upscale_vp: cfl
-chroma_upscaler: auto
+chroma_upscaler: ewa_lanczossharp
 cleanup_fill: temporal
 cnn_residual_stabilise: off
 container_colorspace: bt2020
@@ -18320,6 +18320,7 @@ sdr_white_headroom: auto
 sigmoid: off
 source_class: auto
 source_coding_fixes: off
+source_geometry_detect: auto
 source_geometry_detect: auto
 source_range: limited
 source_resolution: auto
@@ -18400,7 +18401,7 @@ calibration_lut_stage: vp
 capture_path: gpu
 capture_upload: early
 chroma_upscale_vp: cfl
-chroma_upscaler: auto
+chroma_upscaler: ewa_lanczossharp
 cleanup_fill: temporal
 cnn_residual_stabilise: off
 container_colorspace: bt2020
@@ -18589,7 +18590,6 @@ sdr_white_headroom: auto
 sigmoid: off
 source_class: auto
 source_coding_fixes: off
-source_geometry_detect: auto
 source_range: limited
 source_resolution: auto
 source_resolution_auto_min_confidence: auto
@@ -18674,7 +18674,7 @@ calibration_lut_stage: vp
 capture_path: gpu
 capture_upload: early
 chroma_upscale_vp: cfl
-chroma_upscaler: 1
+chroma_upscaler: ewa_lanczos
 cleanup_fill: surround
 cnn_residual_stabilise: off
 container_colorspace: p3_d65
@@ -18863,6 +18863,7 @@ sdr_white_headroom: 1
 sigmoid: off
 source_class: 1
 source_coding_fixes: off
+source_geometry_detect: 1
 source_geometry_detect: 1
 source_range: limited
 source_resolution: auto
@@ -18943,7 +18944,7 @@ calibration_lut_stage: vp
 capture_path: gpu
 capture_upload: early
 chroma_upscale_vp: cfl
-chroma_upscaler: 1
+chroma_upscaler: ewa_lanczos
 cleanup_fill: surround
 cnn_residual_stabilise: off
 container_colorspace: p3_d65
@@ -19132,7 +19133,6 @@ sdr_white_headroom: 1
 sigmoid: off
 source_class: 1
 source_coding_fixes: off
-source_geometry_detect: 1
 source_range: limited
 source_resolution: auto
 source_resolution_auto_min_confidence: 1

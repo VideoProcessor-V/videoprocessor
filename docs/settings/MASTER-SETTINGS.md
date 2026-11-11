@@ -12,9 +12,9 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Count | Value |
 |---|---|
 | Modules | 43 |
-| Documented rows | 391 |
-| VP-V keys in code (outside Bill's schema lists) | 386 |
-| of which documented | 386 |
+| Documented rows | 392 |
+| VP-V keys in code (outside Bill's schema lists) | 387 |
+| of which documented | 387 |
 | of which undocumented (appendix A) | 0 |
 | Documented keys with no code entry (appendix B) | 0 |
 
@@ -25,7 +25,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Input | `input.capture` | built | [README](../../src/VP-V/modules/input/capture/README.md) | 7 | 3 | 3/3 |
 | Input | `input.signal` | built | [README](../../src/VP-V/modules/input/signal/README.md) | 8 | 8 | 7/8 |
 | Input | `input.queue_timing` | built | [README](../../src/VP-V/modules/input/queue_timing/README.md) | 10 | 15 | 9/15 |
-| Input | `input.source_analysis` | partial | [README](../../src/VP-V/modules/input/source_analysis/README.md) | 16 | 19 | 13/19 |
+| Input | `input.source_analysis` | partial | [README](../../src/VP-V/modules/input/source_analysis/README.md) | 17 | 20 | 14/20 |
 | Input | `input.light_level` | draft | [README](../../src/VP-V/modules/input/source_analysis/light_level/README.md) | 4 | 33 | 4/33 |
 | Input | `input.source_analysis.identity.chain` | draft | [README](../../src/VP-V/modules/input/source_analysis/identity/chain/README.md) | 1 | 0 | 0/0 |
 | Input | `input.source_analysis.lane.shared.half_luma` | draft | [README](../../src/VP-V/modules/input/source_analysis/lane/shared/README.md) | 1 | 0 | 0/0 |
@@ -101,6 +101,7 @@ Modules: `input.capture`, `input.signal`, `input.queue_timing`, `input.source_an
 | `queue_timing_fixes` | `input.queue_timing` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Proposed retirement > Proven fixes (all on by default) | Original pathway sets `off` (ADR-0019) | Backlog flush measures staleness beyond the queue target, timeline steering in seconds, QPC cadence correction, overflow drop keeps the gap, credit-reduced target keeps look-ahead frames, open loop ranks the whole-hertz mode below the vblank cadence; off = the earlier behaviour. proposed for retirement (group A) | same on all (not tiered) |
 | `resync_event` | `input.signal` | [vpv] (global; also read from the profile) | enum | off, shadow, on | off |  | VP-V > Pipeline (expert) (stored in [vpv]) | Original pathway sets `off` (ADR-0019) | Central resync / discontinuity event: shadow detects events for the status line and problem report only (picture unchanged); on (expert) drives the timing-family readers, the libplacebo flush and the re-base decision (R3, L1, R4a) | same on all (not tiered) |
 | `source_coding_fixes` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Proposed retirement > Proven fixes (all on by default) | Original pathway sets `off` (ADR-0019) | Coding readings (effective bits, blocking, banding) made robust to upscales, dither and noise; off = the fixed 8/16-px grid and one-pixel occupancy. proposed for retirement (group A) | same on all (not tiered) |
+| `source_geometry_detect` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | string | `all`, `conventional` or a list of SourceGeometrySet ids (hdv_1440x1080, dvcprohd_1280x1080, dvcprohd_960x720, 2560x1440, 1920x1080, 1280x720, 960x540, dci_2048x1080, dci_1998x1080, sd_720x576, sd_720x480) | `all` | all | VP-V > Scaling > Re-base (row) | n/a (VP-only; the Original pathway recognises nothing) | `source geometry detect`: unknown ids ignored and shown; named holds: `held: <name>` note, log line and `convention_held` history row | not tiered |
 | `source_id_evidence` | `input.source_analysis.identity.chain` | profile (VP-owned key lists, plumbing with P3) | enum | off, log, log+lines, log+lines+frames | log+lines (only active in shadow / on; until P3 the setter default is off) |  | VP-V > Input > Source identity | forced off | planned (setter only until P3: `ChainEstimator::SetEvidence` / `Monitor::SetChainEvidence`); Config status row "evidence: <level>, <size> in sid-evidence (cap 2048 MB), <n> dumps"; one-time notice "Source identity: evidence logging on (shadow)"; a failing disk is a visible notice once per episode; a level with no history folder reads "evidence: <level> requested, no folder (set the history folder)" plus one notice (never silently off); a refused hotkey press is a notice | storage-budgeted (2 GB FIFO cap), never GPU-dependent |
 | `source_range` | `input.signal` | profile ([vprenderer.Default] and matching profiles) | enum | auto, full, limited | auto | auto | VP-V > Input > Main > Signal and content; also VP Renderer > Rendering > Fixes under test (upstream copy greyed while VP-V is on) | Original pathway sets `auto` (ADR-0019) | The captured signal's range: auto = from the capture format (YCbCr and 10-bit RGB limited, 8- and 12-bit RGB full); full / limited override it for a source that sends otherwise. The picture and the LED drive follow it. status line: Dolby Vision GPU unpack: CPU unpack for the session: <error> | same on all (not tiered) |
 | `source_resolution` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | string | native, auto, a height in lines 144 - 8640, or WIDTHxHEIGHT (width 144 - 17280, height 144 - 8640) | auto | auto | VP-V > Scaling > Advanced > Set by the Scaling tier | Original pathway sets `native` (ADR-0019) | Re-base: many 4K streams are lower resolution underneath, upscaled by the player. auto detects it, native = as captured, a height (or WIDTHxHEIGHT, a source upscaled per axis) forces it; VP shrinks the picture back to its real size and upscales with its own path | Scaling Classic=native; Scaling Low=auto; Scaling Mid=auto |

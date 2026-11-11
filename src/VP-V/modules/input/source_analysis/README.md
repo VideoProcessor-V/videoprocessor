@@ -341,6 +341,11 @@ Tests: `src/VP-V/tests/LaneProductsTests.cpp`.
 
 - Keys: `source_resolution`, `source_resolution_auto_min_confidence`, `source_resolution_evidence_shots`, `source_resolution_evidence_seconds`, `source_resolution_text_guard`, `source_resolution_mixed_guard`, `source_resolution_latch_fixes`, `source_resolution_cut_fixes`, `source_geometry_detect`, `source_resolution_engage_max_wait_s`, `source_resolution_crossfade_s`, `source_resolution_release_fade_s`, `subtitle_fit`, `subtitle_reposition`, `subtitle_type`, `source_coding_fixes`, `frame_analysis_store`.
 - Planned keys (not yet implemented): `label_detector`, `source_id_abr_notice`, `source_id_consensus`.
+
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `source_geometry_detect` | profile ([vprenderer.Default] and matching profiles) | string | `all`, `conventional` or a list of SourceGeometrySet ids (hdv_1440x1080, dvcprohd_1280x1080, dvcprohd_960x720, 2560x1440, 1920x1080, 1280x720, 960x540, dci_2048x1080, dci_1998x1080, sd_720x576, sd_720x480) | `all` | VP-V > Scaling > Re-base (row) | n/a (VP-only; the Original pathway recognises nothing) | `source geometry detect`: unknown ids ignored and shown; named holds: `held: <name>` note, log line and `convention_held` history row | not tiered |
+
 - Tiers: not tiered; label-detector net optional.
 - VP-V page, Input tab: not tiered (Always on: capture and timing have no quality steps, only paths (the toggles below).).
 - Listed under the tier: `intent_content`.
