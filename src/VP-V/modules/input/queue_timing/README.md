@@ -157,6 +157,7 @@ Open items:
   11674-11675, 25098 / 25106.
 - R20 `IQueueAdmission`: the file boundary is P2's vpv.timed_file_frames.v1; the admission view has no user yet.
 - Fix C F1 (StopLedDriveForShutdown) and F3 (the GUI status getters) read m_impl on other threads, in other zones.
+- Pulldown acquiring flag (`m_pulldownAcquiring`, the motion engine's standing demand): `IngressState::ClearPulldownWhenOff` / `ResetPulldown` clear it when detection stops, the mode is lost or a resync reset runs (W1-A4). A signal loss with no frames arriving leaves the flag until the next frame (the engine stays warm; no wrong output): the renderer's reset functions (LibplaceboVideoRenderer.cpp, `m_pulldownResetRequested` stores) do not clear it directly.
 - ResyncExtension.cpp's "resync_fault: ..." fallback line contains a top-level "; " (FallbackStatus::Ids splits it).
 
 ## Known issues / open items

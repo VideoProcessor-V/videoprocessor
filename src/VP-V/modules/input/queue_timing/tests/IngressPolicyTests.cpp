@@ -275,6 +275,29 @@ namespace VideoProcessorTest
 			Assert::AreEqual<int64_t>(0, st.m_pulldownFilmQpc);
 		}
 
+		// W1-A4 audit S2: a LOCK case through the reset. A resync reset on a locked detector clears the acquiring flag and the
+		// detector at once, but leaves the published cadence for Next to rewrite; a frame that then arrives with detection off still
+		// reports the lock that was held (the caller's "pulldown off" gap) and clears the cadence.
+		TEST_METHOD(ALockCaseAfterAResetClearsAcquiringAndStillReportsThePulldownOffGap)
+		{
+			Vpv::Ingress::IngressState st;
+			const char* cycle = "NRRNR";
+			Pulldown::Decision d;
+			for (int frames = 0; frames < 600 && !d.locked; ++frames)
+				d = st.m_pulldown.Next(cycle[frames % 5] == 'R', false, 60.0);
+			Assert::IsTrue(d.locked, L"locked");
+			st.m_pulldownCadence.store((d.cycle << 16) | d.unique);
+			st.m_pulldownAcquiring.store(true);   // a stale flag on top of the lock
+			st.ResetPulldown();
+			Assert::IsFalse(st.m_pulldownAcquiring.load(), L"the reset clears acquiring");
+			Assert::IsFalse(st.m_pulldown.Locked(), L"and the detector");
+			Assert::AreNotEqual(0, st.m_pulldownCadence.load(), L"the published cadence waits for Next");
+			Assert::IsTrue(st.ClearPulldownWhenOff(), L"the held cadence is reported: the caller marks the 'pulldown off' gap");
+			Assert::AreEqual(0, st.m_pulldownCadence.load());
+			Assert::IsFalse(st.m_pulldownAcquiring.load());
+			Assert::IsFalse(st.ClearPulldownWhenOff(), L"nothing left: no second gap");
+		}
+
 		TEST_METHOD(AFullTableIsVisibleUnderFallbacks)
 		{
 			std::vector<std::unique_ptr<FakeRenderer>> renderers;
