@@ -16,6 +16,9 @@
 // than the source frames actually queued after the current one - a shallower
 // queue means fewer pairs ahead, never waiting or added latency. Whatever is
 // not computed ahead is computed by the matcher as today.
+// B1 (2026-11-10): the frames really computed ahead are the LEAD (LeadFor below): every frame
+// queued ahead, at least the depth, at most kMaxLead. motion_ahead_frames is now the minimum
+// (queue floor + engage threshold; 0 = off); it no longer bounds the lead.
 namespace MotionAhead
 {
 	constexpr int kMaxDepth = 4;
@@ -114,9 +117,39 @@ namespace MotionAhead
 		return "?";
 	}
 
+	// B1 (owner 2026-11-10; doc 91 C "Precompute lane runs the FULL queue depth, tied dynamically"): the LEAD, the frames the walk
+	// actually hands the producer ahead of the render, is every frame queued after the current one, whatever made the queue that deep
+	// (queue mode By frames or By time; the queue target is not changed here). The measurement is the render loop's one count of the
+	// non-repeat frames queued after the current one (window.availableFutureFrames -> queuedFutureFrames, the same count Decide's
+	// `available` reads); no second measurement. `depth` (Decide, DepthAt of motion_ahead_frames) keeps its meaning and every reader
+	// of it (the queue floor m_queueTargetFloor / LockedFilmQueueTarget, the engage threshold, the no-pair tracker) is unchanged: it is
+	// the MINIMUM the queue is kept deep enough for, never the source of the lead. Reading the lead there instead would feed the queue
+	// size back into its own floor (a ratchet: the queue could never shrink).
+	// The one cap is structural, not a setting: the P2 slot ring holds kP2RingPairs pairs (VectorEngineState::p2Slot and the
+	// standalone Producer::slot are built with it) and keeps kPairsKeptBehind of them for frames already at the render (the current pair (N-1, N)
+	// and the two Prune keeps behind it: VectorEngine.cpp P2().Prune(sequence - 2)); a lead above the rest would evict the pairs of the
+	// next frames to show before they are read (NVOF work thrown away, a matcher run instead). 13 = 217 ms at 60p, 542 ms at 24p.
+	constexpr int kP2RingPairs = 16;
+	constexpr int kPairsKeptBehind = 3;
+	constexpr int kMaxLead = kP2RingPairs - kPairsKeptBehind;
+	// The lead for a frame: 0 while the look-ahead is not running (depth 0: off, low latency, no engine, nothing queued; backward pairs
+	// keep their own current-frame-only rule in the walk), else the queued frames ahead, never below the depth, and never above kMaxLead
+	// (also when the depth is larger: 240p's time-based depth 16 is held to 13, else the pairs of the next frames would be evicted from
+	// the ring before they are read). Where the queue held exactly the depth (60p with 4 queued ahead) the lead is the depth: the old
+	// behaviour.
+	inline int LeadFor(int depth, size_t queuedAhead)
+	{
+		if (depth <= 0)
+			return 0;
+		const int queued = static_cast<int>((std::min)(queuedAhead, static_cast<size_t>(kMaxLead)));
+		return (std::min)(kMaxLead, (std::max)(depth, queued));
+	}
+
 	// The queue (current frame plus the frames after it) that holds `depth` ahead.
 	inline size_t QueueFramesFor(int depth) { return static_cast<size_t>((std::max)(0, depth)) + 1; }
 	// The producer's pending submissions before the oldest is dropped: 6 at the default depth
-	// (unchanged), the depth plus the current frame plus one above it.
+	// (unchanged), the depth plus the current frame plus one above it. B1: the producer sizes it for
+	// the larger of the depth and the lead (Producer::SetDepth / SetLead), so a walk that hands it the
+	// whole queue at an engage (up to lead + 1 frames in one pass) drops nothing.
 	inline size_t PendingJobsFor(int depth) { return (std::max)(size_t{ 6 }, QueueFramesFor(depth) + 1); }
 }

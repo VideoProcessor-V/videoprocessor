@@ -235,7 +235,14 @@ namespace MotionAhead
 		uint64_t LastSubmitted() const { return lastSubmitted.load(std::memory_order_acquire); }
 		// Fixed-constant batch B3 (2026-10-18): the pending submissions follow the depth in use
 		// (MotionAhead::PendingJobsFor: 6 at the default depth, as before).
-		void SetDepth(int depth) { maxPendingJobs.store(PendingJobsFor(depth), std::memory_order_release); }
+		// B1 (2026-11-10): the walk hands over the LEAD (MotionAhead::LeadFor: every frame queued ahead, at least the depth) each pass;
+		// the capacity is sized for the larger of the two. Call chain, one thread (the render loop): SetDepth from
+		// VectorEngine::PlanProducer (VectorEngine.cpp, `motionProducer->SetDepth(ahead.configured)`; LibplaceboVideoRenderer.cpp
+		// :23172), SetLead from MotionAhead::CollectQueueAhead (MotionAheadWalk.h; renderer :31169, under m_queueMutex) every pass,
+		// before RunQueueWalk (renderer :31352) submits that pass's frames: the capacity always covers the frames handed over.
+		void SetDepth(int depth) { pendingDepth.store(depth, std::memory_order_release); UpdatePendingCapacity(); }
+		void SetLead(int lead) { pendingLead.store(lead, std::memory_order_release); UpdatePendingCapacity(); }
+		size_t PendingCapacity() const { return maxPendingJobs.load(std::memory_order_acquire); }
 		// general_rate_fixes for the engine's global vote range (FlowVoteRange).
 		void SetGeneralRates(bool on) { generalRates.store(on, std::memory_order_release); }
 
@@ -279,6 +286,12 @@ namespace MotionAhead
 		std::atomic<bool> running{ false }, engineReady{ false };
 		std::atomic<uint64_t> lastSubmitted{ 0 };
 		std::atomic<size_t> maxPendingJobs{ 6 };
+		std::atomic<int> pendingDepth{ 0 }, pendingLead{ 0 };   // B1: the inputs of maxPendingJobs
+		void UpdatePendingCapacity()
+		{
+			const int d = pendingDepth.load(std::memory_order_acquire), l = pendingLead.load(std::memory_order_acquire);
+			maxPendingJobs.store(PendingJobsFor(d > l ? d : l), std::memory_order_release);
+		}
 		std::atomic<bool> generalRates{ true };
 		std::atomic<int> targetW{ 0 }, targetH{ 0 };
 		std::vector<uint8_t> quarterBuffer;
@@ -302,6 +315,6 @@ namespace MotionAhead
 		uint64_t previousSequence = 0, previousGeneration = 0;
 		uint64_t hintSequence = UINT64_MAX, hintGeneration = 0;   // the "to" frame of the engine's last pair
 		std::vector<uint8_t> lumaBuffer;
-		std::shared_ptr<VpMotion::P2Slot> slot{ std::make_shared<VpMotion::P2Slot>(16) };   // published into (SetSlot injects the engine's)
+		std::shared_ptr<VpMotion::P2Slot> slot{ std::make_shared<VpMotion::P2Slot>(MotionAhead::kP2RingPairs) };   // published into (SetSlot injects the engine's)
 	};
 }

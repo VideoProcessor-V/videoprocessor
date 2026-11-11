@@ -179,7 +179,7 @@ repeat or resync all of them fall back together.*
 | Key | What it does | Why | Default | Cost |
 |---|---|---|---|---|
 | `optical_flow` | NVIDIA's optical-flow hardware computes the vectors. Off = VP's own matcher only. | The hardware engine is fast and runs off the render thread; the matcher takes over whenever the engine has no vectors. | on | low (engine) |
-| `motion_ahead_frames` | Vectors are computed ahead of the picture, off the render path. Since the r6 fixes the depth is a TIME (about 67 ms: 2 frames at 24p, 4 at 60p), so it no longer forces a longer queue. | The picture never waits for its motion. | 4 (on) | none on the render thread |
+| `motion_ahead_frames` | Vectors are computed ahead of the picture, off the render path. Since B1 (owner 2026-11-10, doc 91 C) the look-ahead runs every frame queued ahead (up to 13); the value is the MINIMUM, a TIME (about 67 ms: 2 frames at 24p, 4 at 60p) that the queue floor keeps, so it no longer forces a longer queue. | The picture never waits for its motion. | 4 (on) | none on the render thread |
 | `dejudder_est_split` | A poorly matched block is searched again as four quarter blocks. | It gives small objects on moving backgrounds their own motion. | off (Upper tier: on) | low-medium |
 | `dejudder_estimate_ahead` | With the frame after next queued, the next frame's motion is worked out in spare time. | It evens out the render thread's load. | on | none |
 | `optical_flow_global`, `optical_flow_global_fallback` | Camera pan/tilt is read from the engine's vectors; the search is used when the engine is unclear. | It saves about 0.4 ms. | on / on | saves time |

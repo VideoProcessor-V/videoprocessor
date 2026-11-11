@@ -9462,16 +9462,20 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "takes over whenever the engine has no vectors."));
         auto* motionAhead = addChoice(QStringLiteral("Motion vectors computed ahead"), QStringLiteral("motion_ahead_frames"),
             { QStringLiteral("4"), QStringLiteral("0") });
-        motionAhead->setItemText(motionAhead->findData(QStringLiteral("4")), QStringLiteral("On (about 67 ms ahead)"));
+        // VPV-HOOK
+        // B1 (owner 2026-11-10, doc 91 C): the value is the minimum; the look-ahead runs every frame queued ahead.
+        motionAhead->setItemText(motionAhead->findData(QStringLiteral("4")), QStringLiteral("On (looks ahead across the queued frames)"));
         motionAhead->setItemText(motionAhead->findData(QStringLiteral("0")), QStringLiteral("Off"));
         // Settings guide audit 2026-10-24: the forced 5-frame queue minimum is gone (r6 fix 2) and the
         // look-ahead is a time (r6 fix 3), so the old "holds at least 5" text was wrong.
         motionAhead->setToolTip(QStringLiteral(
             "NVIDIA GPUs: the optical-flow engine computes the motion ahead of the picture on its own hardware, off "
-            "the render path, from frames already in the queue: about 67 ms ahead (2 frames at 24p, 4 at 50/60p). It "
-            "never lengthens the queue or the delay; on a short queue it looks less far ahead, and with no frames "
-            "ahead the de-judder estimates at render time or holds. The low-latency queue switches it off. Off, or "
-            "other GPUs: VP's matcher at render time."));
+            "the render path. On: the look-ahead runs every frame queued ahead of render (up to 13 frames); the value "
+            "is the minimum the queue keeps for it (about 67 ms: 2 frames at 24p, 4 at 50/60p). It never lengthens "
+            "the queue beyond that minimum; on a short queue it looks less far ahead, and with no frames ahead the "
+            "de-judder estimates at render time or holds. The low-latency queue switches it off. Off, or other GPUs: "
+            "VP's matcher at render time."));
+        // VPV-HOOK-END
         {
             // The engine as mutually exclusive buttons (owner 2026-10-16); the drop-down holds the value.
             auto* sourceButtons = new QWidget;

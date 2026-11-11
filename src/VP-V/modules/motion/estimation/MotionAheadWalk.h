@@ -31,6 +31,7 @@
 #include <AnalysisFrame.h>
 #include <DebugLog.h>
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <vprenderer/RendererExtension.h>
@@ -52,7 +53,7 @@ namespace MotionAhead
 	// "Optical flow ahead" block; `m_impl->` -> `impl->`, `m_frameQueue` -> `queue`). Render-loop thread, the
 	// caller holds m_queueMutex (as before): the frames to submit are copied (and AddRef'd) into the loop's own
 	// list, which RunQueueWalk then submits and the loop releases. Templated like RunQueueWalk (a direct call,
-	// not the R5 CollectAhead hook: its QueueView is opaque). The producer is read through one std::atomic_load
+	// not the R5 CollectAhead hook: its QueueView is opaque; the lane-lead feed below raises that phase with the count only). The producer is read through one std::atomic_load
 	// copy (the same object the renderer's vectorEngine.LoopProducer() returns).
 	template <class Impl, class Queue, class Frames>
 	void CollectQueueAhead(Impl* impl, const Queue& queue, Frames& motionAheadFrames)
@@ -60,11 +61,36 @@ namespace MotionAhead
 		// Optical flow ahead (docs/VP-nvof-ahead.md): the current frame and up to the
 		// depth after it, each once (only frames already queued: an empty or short
 		// queue gives fewer).
-		const auto aheadProducer = impl ? std::atomic_load(&impl->motionProducer) : nullptr;
-		if (aheadProducer && (impl->motionAheadDepth.load(std::memory_order_acquire) > 0 ||
-			impl->motionAheadBackward.load(std::memory_order_acquire)))
+		if (!impl)
+			return;
+		// The lane-lead feed (doc 91 C tail, refs/93-td-readiness-audit.md section 3 + (a)1): the SAME count the lead below reads
+		// (queuedFutureFrames, no second measurement) goes to the R5 CollectAhead phase as QueueView::size, so the skeleton lane's
+		// QueueShape.laneLead is the frames actually queued ahead (SkeletonModule::PublishLaneLead via OnCollectAhead; the lane caps it to its
+		// ring-slot budget and shows the cap). Fed every pass, before the producer check: the lane lead does not depend on the motion
+		// producer. The phase is first-wins and the skeleton never takes it over; inert without extensions. Host = the Impl, as at Begin.
+		const size_t queuedAhead = impl->queuedFutureFrames.load(std::memory_order_acquire);
 		{
-			const size_t depth = static_cast<size_t>(impl->motionAheadDepth.load(std::memory_order_acquire));
+			RendererExtension::QueueView laneView;
+			laneView.size = queuedAhead;
+			RendererExtension::FrameContext laneContext;
+			laneContext.host = impl;
+			laneContext.phase = RendererExtension::FramePhase::CollectAhead;
+			laneContext.phaseData = &laneView;
+			RendererExtension::Frame(laneContext);
+		}
+		const auto aheadProducer = std::atomic_load(&impl->motionProducer);
+		if (!aheadProducer)
+			return;
+		// B1 (owner 2026-11-10, doc 91 C): the frames taken are the LEAD, every frame queued ahead (the render loop's one count,
+		// queuedFutureFrames, stored by the same pass just before this call), never below the depth, at most MotionAhead::kMaxLead;
+		// 0 while the depth is 0. Backward pairs (depth 0) keep the current frame only. The producer's pending capacity follows the
+		// lead (SetLead, every pass, so a stopped look-ahead hands its capacity back to the depth's).
+		const int aheadDepth = impl->motionAheadDepth.load(std::memory_order_acquire);
+		const int lead = MotionAhead::LeadFor(aheadDepth, queuedAhead);
+		aheadProducer->SetLead(lead);
+		if (aheadDepth > 0 || impl->motionAheadBackward.load(std::memory_order_acquire))
+		{
+			const size_t depth = static_cast<size_t>(lead);
 			const uint64_t last = aheadProducer->LastSubmitted();
 			size_t taken = 0;
 			for (size_t index = 0; index < queue.size() && taken <= depth; ++index)
@@ -111,7 +137,8 @@ namespace MotionAhead
 			{
 				impl.motionAheadEngaged = true;
 				impl.motionAheadEngagedGeneration = generation;
-				DebugLog::Log("Motion ahead: engaged (%zu frames queued ahead%s)", queuedAhead,
+				DebugLog::Log("Motion ahead: engaged (%zu frames queued ahead, lead %d%s)", queuedAhead,
+					MotionAhead::LeadFor(impl.motionAheadDepth.load(std::memory_order_acquire), queuedAhead),
 					impl.vectorDemand.lowLatencyAllowed ? "; vector engine: shallow queue" : "");
 			}
 			const bool framesAhead = impl.motionAheadEngaged || backwardPairs;

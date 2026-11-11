@@ -176,8 +176,9 @@ namespace VpMotion
 		if (plan.disengage)
 			motionAheadEngaged = false;   // no frames collected below: no stale engagement (audit 2026-10-16)
 		char text[200];
-		std::snprintf(text, sizeof(text), "Motion ahead: configured %d, queued ahead %d, depth %d (%s)",
-			ahead.configured, (std::min)(ahead.available, 99), ahead.depth, MotionAhead::Describe(ahead.reason));
+		std::snprintf(text, sizeof(text), "Motion ahead: configured %d, queued ahead %d, depth %d, lead %d (%s)",
+			ahead.configured, (std::min)(ahead.available, 99), ahead.depth, MotionAhead::LeadFor(ahead.depth, static_cast<size_t>((std::max)(0, ahead.available))),
+			MotionAhead::Describe(ahead.reason));
 		// Log the reason and depth, not every change of the queued count.
 		char key[96];
 		std::snprintf(key, sizeof(key), "%d|%d|%d", ahead.configured, ahead.depth, static_cast<int>(ahead.reason));

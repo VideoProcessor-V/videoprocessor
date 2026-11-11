@@ -154,7 +154,8 @@ namespace Vpv
 			// kLaneLead | kLookAhead); an undelivered term keeps its default (0 / 1 / 0), so the histories stay at their floors, and the
 			// Fallbacks list says so ("record history: queue not yet wired (...); floors in use"). Delivered today: the look-ahead walk,
 			// from the host's SettingsApplied call (the motion look-ahead depth). Not delivered: the render-ahead depth (the renderer's
-			// runtime gate; the cfg key render_ahead is only on/off) and the lane lead (not a setting). A change reconfigures the graph at
+			// runtime gate; the cfg key render_ahead is only on/off). The lane lead (not a setting) is delivered by the host's look-ahead copy
+			// (MotionAhead::CollectQueueAhead raises CollectAhead with queuedFutureFrames every render-loop pass; B1 amend, 93-td-readiness-audit 3). A change reconfigures the graph at
 			// the next frame, like a moved source period.
 			struct QueueShape
 			{
