@@ -451,5 +451,95 @@ namespace VectorEngineTest
 			const FrameAnalysis::MotionSummary none = MotionRecord::SummaryOf(true, MotionRecord::SampleOf(10, 11, nullptr, 1, 0));
 			Assert::IsFalse(none.vectorsValid, L"no engine pair: absent");
 		}
+
+		// W1-C4 audit MUST 1: the render-time estimate samples the engine global ONCE per pair (the record and the feed read that
+		// one sample); the engine's CPU record equals the old two-sample record, and with the demand not deciding (vector_demand
+		// off) the feed's call sequence equals the old ungated estimate feed.
+		TEST_METHOD(TheEstimatePathSamplesEachPairOnce)
+		{
+			VectorDemand::Decision off;   // vector_demand off: Reason::Disabled, served 0
+			Assert::IsTrue(off.reason == VectorDemand::Reason::Disabled, L"premise: the default decision is the demand off");
+			size_t pairs = 0;
+			ForEachPairInput([&](uint64_t from, uint64_t to, const float* global, int halvings, int pictureHeight)
+			{
+				for (int active = 0; active < 2; ++active)
+				{
+					VectorEngine oldEngine, newEngine;
+					RecordingHost before, after;
+					before.intentActive = after.intentActive = active != 0;
+					oldEngine.NoteEngineGlobal(from, to, global, halvings);
+					BeforeEstimate(from, to, global, halvings, pictureHeight, before);
+					const uint64_t samplesBefore = MotionRecord::SamplesTaken().load();
+					MotionRecord::EstimatePair(newEngine, off, from, to, global, halvings, pictureHeight, after);
+					Assert::AreEqual<uint64_t>(1, MotionRecord::SamplesTaken().load() - samplesBefore, L"one sample per pair");
+					Assert::IsTrue(before.calls == after.calls, L"demand off: the old ungated estimate feed, call for call");
+					GlobalVec a, b;
+					const bool oldServed = oldEngine.EngineGlobal(to, a), newServed = newEngine.EngineGlobal(to, b);
+					Assert::IsTrue(oldServed == newServed && a.valid == b.valid && a.x == b.x && a.y == b.y,
+						L"the engine's CPU record equals the old record");
+					++pairs;
+				}
+			});
+			Assert::IsTrue(pairs > 0, L"the grid ran");
+			VectorEngine engine;
+			RecordingHost host;
+			host.intentActive = true;
+			const uint64_t samplesBefore = MotionRecord::SamplesTaken().load();
+			MotionRecord::EstimatePair(engine, off, 10, 11, nullptr, 1, 1080, host);
+			Assert::AreEqual<uint64_t>(0, MotionRecord::SamplesTaken().load() - samplesBefore, L"no engine pair: nothing sampled");
+			Assert::IsTrue(host.calls.empty(), L"no engine pair: no call, as before");
+			GlobalVec none;
+			Assert::IsFalse(engine.EngineGlobal(11, none), L"no engine pair: the record says so");
+		}
+
+		// W1-C4 audit MUST 2 (WAIVER-C4-01): while the demand decides, the render-time estimate's feed is gated by its Serves,
+		// exactly as the statistics feed: for each served combination the sequence equals the old statistics feed with those gates;
+		// serving both (the default: source_resolution auto, intent active) equals the old ungated estimate feed call for call.
+		TEST_METHOD(TheEstimateFeedFollowsTheDemandWhileItDecides)
+		{
+			using C = VectorDemand::Consumer;
+			size_t differing = 0;
+			ForEachPairInput([&](uint64_t from, uint64_t to, const float* global, int halvings, int pictureHeight)
+			{
+				for (int gates = 0; gates < 4; ++gates)
+					for (int active = 0; active < 2; ++active)
+					{
+						const bool servesMonitor = (gates & 1) != 0, servesIntent = (gates & 2) != 0;
+						VectorDemand::Decision on;
+						on.reason = VectorDemand::Reason::Forward;
+						on.served = (servesMonitor ? 1u << static_cast<int>(C::SourceMonitorPan) : 0u) |
+							(servesIntent ? 1u << static_cast<int>(C::MotionIntent) : 0u);
+						VectorEngine engine;
+						RecordingHost gated, statistics, ungated;
+						gated.intentActive = statistics.intentActive = ungated.intentActive = active != 0;
+						MotionRecord::EstimatePair(engine, on, from, to, global, halvings, pictureHeight, gated);
+						BeforeServeStatistics(from, to, global, halvings, pictureHeight, servesMonitor, servesIntent, statistics);
+						BeforeEstimate(from, to, global, halvings, pictureHeight, ungated);
+						Assert::IsTrue(gated.calls == statistics.calls, L"demand on: the statistics feed's gates and sequence");
+						if (servesMonitor && servesIntent)
+							Assert::IsTrue(gated.calls == ungated.calls, L"both served: the old estimate feed, call for call");
+						else if (gated.calls != ungated.calls)
+							++differing;
+					}
+			});
+			Assert::IsTrue(differing > 0, L"a consumer the demand does not serve is no longer fed on the estimate path");
+			// The real decision with both consumers wanted (the default settings: vector_demand on, source_resolution auto) serves both.
+			VectorDemand::Input in = OneConsumer(C::SourceMonitorPan);
+			in.wants[static_cast<int>(C::MotionIntent)] = true;
+			in.wants[static_cast<int>(C::DejudderExtras)] = true;
+			const VectorDemand::Decision decided = VectorDemand::Decide(in);
+			Assert::IsTrue(MotionRecord::EstimateGate(decided, C::SourceMonitorPan) && MotionRecord::EstimateGate(decided, C::MotionIntent),
+				L"defaults: both gates open, the estimate feed is unchanged");
+			VectorDemand::Input interlaced = in;
+			interlaced.interlaced = true;
+			const VectorDemand::Decision unserved = VectorDemand::Decide(interlaced);
+			Assert::IsFalse(MotionRecord::EstimateGate(unserved, C::SourceMonitorPan) || MotionRecord::EstimateGate(unserved, C::MotionIntent),
+				L"interlaced: the demand serves neither, the estimate path feeds neither");
+			VectorDemand::Input disabled = in;
+			disabled.enabled = false;
+			const VectorDemand::Decision legacy = VectorDemand::Decide(disabled);
+			Assert::IsTrue(MotionRecord::EstimateGate(legacy, C::SourceMonitorPan) && MotionRecord::EstimateGate(legacy, C::MotionIntent),
+				L"vector_demand off: the legacy ungated feed");
+		}
 	};
 }

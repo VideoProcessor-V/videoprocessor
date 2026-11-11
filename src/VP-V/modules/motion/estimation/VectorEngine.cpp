@@ -576,6 +576,13 @@ namespace VpMotion
 
 	void VectorEngine::NoteEngineGlobal(uint64_t from, uint64_t to, const float* global, int searchHalvings)
 	{
+		// A caller without the pair's sample: sampled here (usable does not depend on the picture height).
+		NoteEngineGlobal(from, to, global, searchHalvings, global && from != 0 && to > from &&
+			MotionRecord::SampleOf(from, to, global, searchHalvings, 0).global.usable);
+	}
+
+	void VectorEngine::NoteEngineGlobal(uint64_t from, uint64_t to, const float* global, int searchHalvings, bool usable)
+	{
 		if (from == 0 || to <= from)
 			return;
 		GlobalRecord& r = global_[to % kGlobalRing];
@@ -586,8 +593,8 @@ namespace VpMotion
 			return;
 		const double cell = DejudderPolicy::EngineCellSourcePixels(searchHalvings);
 		r.epoch = motionValidity.Epoch();
-		// Usable as the statistics consumers use it (W1-C4: the same pair sample, MotionRecord::SampleOf: ambiguity z < 0.9).
-		r.valid = MotionRecord::SampleOf(from, to, global, searchHalvings, 0).global.usable;
+		// Usable as the statistics consumers use it (W1-C4: the pair's one sample, MotionRecord::SampleOf: ambiguity z < 0.9).
+		r.valid = usable;
 		r.x = cell * static_cast<double>(global[0]);
 		r.y = cell * static_cast<double>(global[1]);
 	}

@@ -21,7 +21,7 @@
 // W1-C4: ONE engine-global sample per pair (SampleOf: the only VectorDemand::SampleGlobal of a pair on the statistics and the
 // estimate paths), read by the record (SummaryOf) and by the ONE feed of the source-statistics consumers (Feed: source monitor
 // fast-pan, motion intent). The two paths that reach Feed are exclusive on a frame (ServeStatistics requires !vectorDemand.estimate
-// and no legacy estimate consumer); each passes its own gates, unchanged from before (see Feed).
+// and no legacy estimate consumer); both gate with the demand's Serves while vector_demand is on (EstimateGate, WAIVER-C4-01).
 //
 // Pure CPU, header only, C++14.
 #pragma once
@@ -31,6 +31,7 @@
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 
+#include <atomic>
 #include <cstdint>
 
 namespace VpMotion
@@ -56,6 +57,14 @@ namespace VpMotion
 			VectorDemand::GlobalSample global;
 		};
 
+		// W1-C4 (audit MUST 1): how many engine globals were sampled (VectorDemand::SampleGlobal runs) since the start, any thread
+		// (relaxed). Read by the tests to pin ONE sample per pair; one relaxed add per pair, no other cost.
+		inline std::atomic<uint64_t>& SamplesTaken()
+		{
+			static std::atomic<uint64_t> taken(0);
+			return taken;
+		}
+
 		inline PairSample SampleOf(uint64_t from, uint64_t to, const float* global, int halvings, int pictureHeight)
 		{
 			PairSample s;
@@ -64,6 +73,7 @@ namespace VpMotion
 			s.halvings = halvings;
 			if (!global)
 				return s;
+			SamplesTaken().fetch_add(1, std::memory_order_relaxed);
 			s.present = true;
 			s.gx = global[0];
 			s.gy = global[1];
@@ -98,7 +108,7 @@ namespace VpMotion
 		// W1-C4: the ONE feed of the source-statistics consumers from a pair's sample, in the order both paths always used: the
 		// source monitor's fast-pan motion (a usable global), then the intent's vectors (the intent active). The gates are the
 		// caller's: ServeStatistics passes VectorDemand::Serves(SourceMonitorPan) / Serves(MotionIntent); the render-time estimate
-		// passes true / true (it fed both ungated before W1-C4 - kept, so the call sequence is unchanged in both modes).
+		// passes EstimateGate (the same Serves while the demand decides; true / true, its old ungated feed, with vector_demand off).
 		inline void Feed(const PairSample& s, bool monitorGate, bool intentGate, IVectorEngineHost& host)
 		{
 			if (!s.present)
@@ -114,6 +124,26 @@ namespace VpMotion
 				vectors.heightsPerFrame = s.global.heightsPerFrame;
 				host.NoteIntentVectors(vectors);
 			}
+		}
+
+		// W1-C4 (audit MUST 2, WAIVER-C4-01): the render-time estimate's gate of one source-statistics consumer. While the demand
+		// decides (vector_demand on) the gate is its Serves, as ServeStatistics passes; with vector_demand off the demand decides
+		// nothing (Reason::Disabled, served 0) and the legacy estimate's ungated feed is kept, so that mode is unchanged.
+		inline bool EstimateGate(const VectorDemand::Decision& demand, VectorDemand::Consumer c)
+		{
+			return demand.reason == VectorDemand::Reason::Disabled || demand.Serves(c);
+		}
+
+		// W1-C4 (audit MUST 1 / 2): the render-time estimate's whole engine-global step for the pair (from, to): ONE sample, read by the
+		// engine's CPU record (VectorEngine::NoteEngineGlobal, usable from the sample) and by the one feed with the demand's gates.
+		// global null = no producer pair: the record says so and nothing is fed (as before).
+		inline void EstimatePair(VectorEngine& engine, const VectorDemand::Decision& demand, uint64_t from, uint64_t to,
+			const float* global, int halvings, int pictureHeight, IVectorEngineHost& host)
+		{
+			const PairSample s = SampleOf(from, to, global, halvings, pictureHeight);
+			engine.NoteEngineGlobal(from, to, global, halvings, s.present && s.global.usable);
+			Feed(s, EstimateGate(demand, VectorDemand::Consumer::SourceMonitorPan), EstimateGate(demand, VectorDemand::Consumer::MotionIntent),
+				host);
 		}
 
 		// False = nothing was written (no store, or the record is gone / from an older epoch).
