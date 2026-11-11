@@ -145,6 +145,7 @@ bool LibplaceboVideoRenderer::IngressPulldown(RendererExtension::IngressContext&
 	// queued; the unique frames get the film rate and an even film clock.
 	filmHz = 0.0;
 	filmUpdate = false;
+	m_pulldownFrameFacts = Vpv::Ingress::CadenceFacts{};   // C7b: invalid unless the detector decides this frame
 	if (m_pulldownDetection.load(std::memory_order_relaxed) && frameState->displayMode)
 	{
 		const Vpv::Resync::PulldownStep pulldownResync = Vpv::Resync::PulldownResyncStep(m_impl.get(), m_pulldownResetRequested.exchange(false, std::memory_order_acq_rel)); // VPV-HOOK: resync cursor (on: FULL resets, timing re-latches)
@@ -233,6 +234,7 @@ bool LibplaceboVideoRenderer::IngressPulldown(RendererExtension::IngressContext&
 			DebugLog::Log("Pulldown: %s (was %s)", lockText.c_str(), before.c_str());
 		}
 		const int cadence = decision.locked ? (decision.cycle << 16) | decision.unique : 0;
+		m_pulldownFrameFacts = Vpv::Ingress::FactsOf(decision);   // C7b: the cadence group of this frame's store record (CadenceFeed.h)
 		m_pulldownAcquiring.store(!decision.locked && m_pulldown.Acquiring(), std::memory_order_relaxed);   // SK-MV warm engine
 		// Hunt 2 (06-interp M3): the queue target follows the lock (PrefillTargetLocked): wake
 		// the waiters when it changes.

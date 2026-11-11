@@ -136,6 +136,7 @@
       "live_files": [
         "src/VP-V/modules/input/queue_timing/QueueTarget.inl",
         "src/VP-V/modules/input/queue_timing/CallbackGate.h",
+        "src/VP-V/modules/input/queue_timing/CadenceFeed.h",
         "src/VP-V/modules/input/queue_timing/IngressPolicy.cpp",
         "src/VP-V/modules/input/queue_timing/IngressPolicy.h",
         "src/VP-V/modules/input/queue_timing/IngressPolicy.inl",

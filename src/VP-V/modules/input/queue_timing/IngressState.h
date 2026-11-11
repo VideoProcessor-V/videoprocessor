@@ -12,6 +12,7 @@
 // read by the render loop (cadence, skipped count) and written by its settings refresh. C++14.
 
 #include <vprenderer/CaptureTimestampGap.h>   // CaptureArrival::Tracker
+#include <VP-V/modules/input/queue_timing/CadenceFeed.h>
 #include <VP-V/modules/input/queue_timing/CallbackGate.h>
 #include <VP-V/modules/input/queue_timing/PulldownDetector.h>
 
@@ -50,6 +51,9 @@ namespace Vpv
 	std::atomic<int> m_pulldownCadence{0};   // (cycle << 16) | new frames per cycle; 0 = not locked
 	std::atomic<bool> m_pulldownAcquiring{false};   // SK-MV: a film cadence is being acquired (Detector::Acquiring), not yet locked
 	std::atomic<uint64_t> m_pulldownSkipped{0};
+	// C7b: this frame's pulldown facts (invalid when detection is off); set by IngressPulldown and taken by EnqueueFrame onto the
+	// queued frame (capture thread, callbacks are serial); published to the store's cadence group at arrival (CadenceFeed.h).
+	CadenceFacts m_pulldownFrameFacts;
 	Pulldown::Detector m_pulldown;
 	Pulldown::FilmClock m_pulldownClock;
 	uint64_t m_pulldownSignature = 0;

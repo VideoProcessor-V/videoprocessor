@@ -8,6 +8,7 @@
 #include "CppUnitTest.h"
 #include <VP-V/modules/input/queue_timing/IngressPolicy.h>
 #include <VP-V/modules/input/queue_timing/IngressState.h>
+#include <VP-V/core/FrameAnalysisStore.h>
 
 #include <memory>
 #include <stdexcept>
@@ -296,6 +297,90 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0, st.m_pulldownCadence.load());
 			Assert::IsFalse(st.m_pulldownAcquiring.load());
 			Assert::IsFalse(st.ClearPulldownWhenOff(), L"nothing left: no second gap");
+		}
+
+		// C7b cadence feed: the record carries exactly the detector's facts for the frame (CadenceFeed.h), through the real store.
+		TEST_METHOD(TheCadenceRecordEqualsTheLockFacts)
+		{
+			Vpv::Ingress::IngressState st;
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			store.SetEnabled(true);
+			const char* cycle = "NRRNR";
+			Pulldown::Decision d;
+			uint64_t seq = 0;
+			for (int frames = 0; frames < 600 && !d.locked; ++frames)
+				d = st.m_pulldown.Next(cycle[frames % 5] == 'R', false, 60.0);
+			Assert::IsTrue(d.locked, L"3:2 at 60 Hz locks");
+			for (int k = 0; k < 10; ++k)   // ten more frames at the lock
+			{
+				const bool repeat = cycle[k % 5] == 'R';
+				d = st.m_pulldown.Next(repeat, false, 60.0);
+				if (d.drop)
+					continue;   // a dropped repeat is never queued: no record
+				const Vpv::Ingress::CadenceFacts facts = Vpv::Ingress::FactsOf(d);
+				Assert::IsTrue(facts.valid && facts.locked);
+				FrameAnalysis::Identity id;
+				id.seq = ++seq;
+				Assert::IsTrue(store.Begin(id, 0u) != 0);
+				const FrameAnalysis::Cadence record = Vpv::Ingress::ToRecord(facts);
+				Assert::IsTrue(store.PublishCadence(id.seq, record));
+				FrameAnalysis::Record out;
+				Assert::IsTrue(store.Read(id.seq, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kCadence, out) == FrameAnalysis::ReadStatus::Ok);
+				Assert::AreEqual(d.filmHz, out.cadence.filmHz, L"the film rate of the lock");
+				Assert::IsTrue(out.cadence.filmHz > 23.9 && out.cadence.filmHz < 24.1, L"24p film in 60 Hz");
+				Assert::AreEqual(static_cast<int>(d.filmIndex % static_cast<uint64_t>(d.unique)), out.cadence.phase);
+				Assert::AreEqual(2, d.unique);
+				Assert::AreEqual(5, d.cycle);
+				Assert::IsFalse(out.cadence.repeatOfPrevious, L"a queued frame is never a cadence repeat");
+			}
+			Assert::IsTrue(seq > 0, L"some frames were kept");
+		}
+
+		// C7b: an unlocked or acquiring frame, an uncertain phase and a frame the detector never saw are all "unknown".
+		TEST_METHOD(AnUnlockedAcquiringOrUncertainFrameIsRecordedAsUnknown)
+		{
+			Vpv::Ingress::IngressState st;
+			Assert::IsFalse(st.m_pulldownFrameFacts.valid, L"no detector decision: nothing to publish");
+			const char* cycle = "NRRNR";
+			Pulldown::Decision d;
+			for (int i = 0; i < 20; ++i)
+				d = st.m_pulldown.Next(cycle[i % 5] == 'R', false, 60.0);
+			Assert::IsFalse(d.locked);
+			Assert::IsTrue(st.m_pulldown.Acquiring(), L"acquiring, not locked");
+			const FrameAnalysis::Cadence acquiring = Vpv::Ingress::ToRecord(Vpv::Ingress::FactsOf(d));
+			Assert::AreEqual(-1, acquiring.phase);
+			Assert::AreEqual(0.0, acquiring.filmHz, L"the signal's rate");
+			Assert::IsFalse(acquiring.repeatOfPrevious);
+			Vpv::Ingress::CadenceFacts uncertain;
+			uncertain.valid = uncertain.locked = uncertain.phaseUncertain = true;
+			uncertain.filmHz = 23.976;
+			uncertain.cycle = 5;
+			uncertain.unique = 2;
+			uncertain.filmIndex = 7;
+			const FrameAnalysis::Cadence record = Vpv::Ingress::ToRecord(uncertain);
+			Assert::AreEqual(-1, record.phase, L"a re-phase is being tracked: the slot is unknown");
+			Assert::AreEqual(23.976, record.filmHz, L"the lock's rate stands");
+		}
+
+		// C7b: Take hands the slot's facts over once and clears the slot, so the next frame never inherits them.
+		TEST_METHOD(TheCadenceFactsAreTakenOnceAndTheSlotIsCleared)
+		{
+			Vpv::Ingress::CadenceFacts slot;
+			slot.valid = slot.locked = true;
+			slot.filmHz = 23.976;
+			slot.cycle = 5;
+			slot.unique = 2;
+			slot.filmIndex = 9;
+			const Vpv::Ingress::CadenceFacts first = Vpv::Ingress::Take(slot);
+			Assert::IsTrue(first.valid && first.locked);
+			Assert::AreEqual(23.976, first.filmHz);
+			Assert::AreEqual(5, first.cycle);
+			Assert::AreEqual(static_cast<uint64_t>(9), first.filmIndex);
+			Assert::IsFalse(slot.valid, L"the slot is cleared");
+			Assert::AreEqual(0.0, slot.filmHz);
+			const Vpv::Ingress::CadenceFacts second = Vpv::Ingress::Take(slot);
+			Assert::IsFalse(second.valid, L"a second take yields nothing");
+			Assert::IsFalse(second.locked);
 		}
 
 		TEST_METHOD(AFullTableIsVisibleUnderFallbacks)
