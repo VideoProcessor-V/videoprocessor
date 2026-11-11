@@ -270,15 +270,27 @@ namespace Vpv
 				CameraLink::TimingFacts t;
 				if (resync)
 					t.measuredSourceHz = resync->measuredRateHz.load(std::memory_order_relaxed);
+				bool cadenceRead = false;
 				if (store && seq > 1)
 				{
 					FrameAnalysis::Record rec;
-					if (store->Read(seq - 1, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kCadence, rec) == FrameAnalysis::ReadStatus::Ok &&
-						rec.cadence.filmHz > 0.0)
+					if (store->Read(seq - 1, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kCadence, rec) == FrameAnalysis::ReadStatus::Ok)
 					{
-						t.filmHz = rec.cadence.filmHz;
-						t.cadenceLocked = true;
+						cadenceRead = true;
+						if (rec.cadence.filmHz > 0.0)
+						{
+							t.filmHz = rec.cadence.filmHz;
+							t.cadenceLocked = true;
+						}
 					}
+				}
+				// C7b: a seq-1 record that cannot be read (not written yet, evicted) is no evidence that the cadence unlocked; holding
+				// the latched film timing avoids a one-frame relatch (and the fit's timing reset) on a single missed read. Only the
+				// measured source rate is refreshed then.
+				if (!cadenceRead && st.haveTiming)
+				{
+					t.filmHz = st.timing.filmHz;
+					t.cadenceLocked = st.timing.cadenceLocked;
 				}
 				auto moved = [](double a, double b) { return (a > 0.0) != (b > 0.0) || (a > 0.0 && std::fabs(a - b) > 0.01 * b); };
 				if (st.haveTiming && st.timing.cadenceLocked == t.cadenceLocked && !moved(st.timing.measuredSourceHz, t.measuredSourceHz) &&
@@ -940,6 +952,8 @@ namespace Vpv
 				{
 					lines.push_back(std::string("camera: ") + kGuidanceLockedText);
 					fb.push_back(std::string("camera_guidance: ") + kGuidanceLockedText);
+					if (!st.aheadWanted)
+						lines.push_back(std::string("camera: ") + kGuidanceNeedsAheadText);
 				}
 				if (st.guideWanted)
 				{
