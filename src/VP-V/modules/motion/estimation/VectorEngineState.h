@@ -91,6 +91,20 @@ namespace VpMotion
 		// stop and restart; a started producer clears it.
 		std::shared_ptr<VpMotion::P2Slot> p2Slot = std::make_shared<VpMotion::P2Slot>(MotionAhead::kP2RingPairs);
 		VpMotion::P2View P2() const { return VpMotion::P2View(p2Slot); }
+		// C2a-F 2 (every P2 reader of the engine): the stored pair (from, to) only when it was published under the current stream
+		// generation (MotionValidity::State::PairGenerationCurrent). The slot keeps a pair computed before a resync / seek / queue
+		// reset / format change until the producer's asynchronous SetGeneration re-keys it, and once a frame is kept in the new epoch
+		// the epoch form of PairServes no longer refuses it (resync_event off; and on, after the seal). `stale` is set when a pair
+		// was found and refused.
+		MotionAhead::FlowPtr FindCurrent(uint64_t from, uint64_t to, bool* stale = nullptr) const
+		{
+			uint64_t pairGeneration = 0;
+			MotionAhead::FlowPtr flow = P2().Find(from, to, pairGeneration);
+			const bool refused = flow && !motionValidity.PairGenerationCurrent(pairGeneration);
+			if (stale)
+				*stale = refused;
+			return refused ? MotionAhead::FlowPtr() : flow;
+		}
 		// SK-MV (MV2): estimates (optical flow wanted) that found no pair computed ahead and took the matcher path; sustained runs or a
 		// sustained partial miss ratio make the visible "motion" fallback entry (NoPairTracker, VectorProducts.h). Render thread.
 		VpMotion::NoPairTracker motionNoPair;

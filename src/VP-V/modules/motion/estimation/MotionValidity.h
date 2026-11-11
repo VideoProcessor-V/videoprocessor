@@ -438,6 +438,13 @@ namespace MotionValidity
 			return kInitialEpoch + Count(Cause::Resync) + Count(Cause::QueueReset) + Count(Cause::Seek) +
 				Count(Cause::SourceFormatChange);
 		}
+		// C2a-F 2: whether a stored pair keyed with `pairGeneration` (P2Slot::Find) belongs to the current stream generation. The
+		// producer keys its pairs with StreamGeneration() in both modes (MotionAheadWalk); a slot never keyed by a producer
+		// (generation 0) belongs to the initial stream generation. Every P2 reader refuses a pair for which this is false.
+		bool PairGenerationCurrent(uint64_t pairGeneration) const noexcept
+		{
+			return (pairGeneration != 0 ? pairGeneration : kInitialEpoch) == StreamGeneration();
+		}
 		bool Current(uint64_t madeInEpoch) const noexcept { return madeInEpoch != 0 && madeInEpoch == Epoch(); }
 
 		uint64_t Count(Cause cause) const noexcept

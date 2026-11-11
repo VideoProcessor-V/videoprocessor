@@ -297,6 +297,34 @@ namespace VideoProcessorTest
 			}
 		}
 
+		// C2a-F 2: once a frame is kept in the new epoch the epoch form of the gate no longer refuses the old pair; the pair's stream
+		// generation does (resync_event off: the validity is unbound).
+		TEST_METHOD(APairOfAnOlderStreamGenerationIsStaleAfterTheNextKeptFrame)
+		{
+			auto slot = std::make_shared<VpMotion::P2Slot>(16);
+			MotionValidity::State validity;
+			slot->SetGeneration(validity.StreamGeneration());
+			validity.NoteKept(1);
+			validity.NoteKept(2);
+			Assert::IsTrue(slot->Publish(1, 2, slot->Generation(), MakeFlow(96, 48)));
+			TemporalDetail::SharedMotionSource source(VpMotion::P2View(slot), &validity);
+			source.SetSourceSize(192, 96);
+			TemporalDetail::MotionPair out;
+			Assert::IsTrue(source.Forward(2, out), L"control: served in its own stream generation");
+			validity.Invalidate(MotionValidity::Cause::Seek);
+			validity.NoteKept(3);
+			Assert::IsTrue(validity.PairServes(1, 2, validity.EpochOfLastKept(), validity.Epoch()),
+				L"premise: the epoch form alone no longer refuses the pair");
+			const uint64_t staleBefore = source.GetStats().stale;
+			Assert::IsFalse(source.Forward(2, out), L"the pair of the older stream generation is refused");
+			Assert::IsFalse(source.Backward(2, out), L"in both directions");
+			Assert::AreEqual<uint64_t>(staleBefore + 2, source.GetStats().stale, L"counted stale");
+			// Once the producer re-keys the slot and publishes again, the new pair is served.
+			slot->SetGeneration(validity.StreamGeneration());
+			Assert::IsTrue(slot->Publish(1, 2, slot->Generation(), MakeFlow(96, 48)));
+			Assert::IsTrue(source.Forward(2, out), L"a pair of the current stream generation is served");
+		}
+
 		TEST_METHOD(AMissingStaleOrUnfitPairIsAbsentCountedAndVisible)
 		{
 			auto slot = std::make_shared<VpMotion::P2Slot>(16);

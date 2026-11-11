@@ -153,6 +153,7 @@ namespace Tests
 					std::to_wstring(rig.engine.motionValidity.EpochOfLastKept());
 				Assert::Fail(m.c_str());
 			}
+			Assert::IsTrue(rig.engine.FindCurrent(4, 5) != nullptr, L"before the event the shared P2 reader serves (4, 5)");
 			const uint64_t era = rig.engine.FieldEra();
 			const unsigned acts = rig.engine.motionResyncReaders.HistoryActs();
 
@@ -169,6 +170,23 @@ namespace Tests
 			// generation by design (the ahead pairs after it are kept; the producer's breakBefore makes no pair across it).
 			if (kind != Kind::Gap)
 				Assert::IsFalse(rig.Flow(5), L"the pair published before the event is refused after the next kept frame (generation)");
+			// C2a-F 2: the shared reader of ServeStatistics (both directions) and the de-judder estimate (VectorEngineEstimate.inl),
+			// VectorEngineState::FindCurrent, refuses the same pair; the slot itself still holds it (control).
+			{
+				bool stale = false;
+				Assert::IsTrue(rig.engine.P2().Find(4, 5) != nullptr, L"control: the slot still holds (4, 5)");
+				const bool served = rig.engine.FindCurrent(4, 5, &stale) != nullptr;
+				if (kind != Kind::Gap)
+				{
+					Assert::IsFalse(served, L"the shared P2 reader refuses a pair of the older stream generation");
+					Assert::IsTrue(stale, L"and says it was found and refused");
+				}
+				else
+				{
+					Assert::IsTrue(served, L"a gap moves no stream generation: the epoch / stamp gate decides, not the generation");
+					Assert::IsFalse(stale);
+				}
+			}
 			if (deferred)
 			{
 				Assert::IsFalse(rig.Flow(5), L"the FULL stamp refuses the spanning pair after the seal too");
