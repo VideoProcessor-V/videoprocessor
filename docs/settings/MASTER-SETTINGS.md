@@ -12,10 +12,10 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Count | Value |
 |---|---|
 | Modules | 43 |
-| Documented rows | 367 |
+| Documented rows | 391 |
 | VP-V keys in code (outside Bill's schema lists) | 386 |
-| of which documented | 362 |
-| of which undocumented (appendix A) | 24 |
+| of which documented | 386 |
+| of which undocumented (appendix A) | 0 |
 | Documented keys with no code entry (appendix B) | 0 |
 
 ## Modules index
@@ -50,21 +50,21 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Scaling | `scaling.chroma_upscale.basic` | draft | [README](../../src/VP-V/modules/scaling/chroma_upscale/basic/README.md) | 1 | 0 | 0/0 |
 | Scaling | `scaling.geometry` | built | [README](../../src/VP-V/modules/scaling/geometry/README.md) | 5 | 8 | 1/8 |
 | Scaling | `scaling.output` | partial | [README](../../src/VP-V/modules/scaling/output/README.md) | 29 | 30 | 29/30 |
-| Colour | `colour.tone_gamut` | built | [README](../../src/VP-V/modules/colour/tone_gamut/README.md) | 0 | 5 | 0/5 |
+| Colour | `colour.tone_gamut` | built | [README](../../src/VP-V/modules/colour/tone_gamut/README.md) | 1 | 5 | 0/5 |
 | Colour | `colour.extended_range` | built | [README](../../src/VP-V/modules/colour/extended_range/README.md) | 2 | 2 | 2/2 |
-| Colour | `colour.sdr_tone_shape` | built | [README](../../src/VP-V/modules/colour/sdr_tone_shape/README.md) | 0 | 7 | 0/7 |
-| Colour | `colour.appearance` | placeholder | [README](../../src/VP-V/modules/colour/appearance/README.md) | 7 | 6 | 0/6 |
+| Colour | `colour.sdr_tone_shape` | built | [README](../../src/VP-V/modules/colour/sdr_tone_shape/README.md) | 7 | 7 | 7/7 |
+| Colour | `colour.appearance` | placeholder | [README](../../src/VP-V/modules/colour/appearance/README.md) | 13 | 6 | 0/6 |
 | Dynamic drive | `drive.led_measure` | built | [README](../../src/VP-V/modules/drive/led_measure/README.md) | 0 | 14 | 0/14 |
-| Dynamic drive | `drive.led_compensation` | built | [README](../../src/VP-V/modules/drive/led_compensation/README.md) | 89 | 5 | 0/5 |
+| Dynamic drive | `drive.led_compensation` | built | [README](../../src/VP-V/modules/drive/led_compensation/README.md) | 90 | 5 | 1/5 |
 | Dynamic drive | `drive.black_level` | placeholder | [README](../../src/VP-V/modules/drive/black_level/README.md) | 0 | 1 | 0/1 |
 | Dynamic drive | `drive.projector_control` | built | [README](../../src/VP-V/modules/drive/projector_control/README.md) | 20 | 1 | 0/1 |
 | Output | `output.calibration_lut` | partial | [README](../../src/VP-V/modules/output/calibration_lut/README.md) | 35 | 7 | 1/7 |
 | Output | `output.dither` | built | [README](../../src/VP-V/modules/output/dither/README.md) | 7 | 6 | 5/6 |
 | Output | `output.presentation` | built | [README](../../src/VP-V/modules/output/presentation/README.md) | 5 | 5 | 5/5 |
 | Control | `control.net_runtime` | placeholder | [README](../../src/VP-V/modules/control/net_runtime/README.md) | 0 | 1 | 0/1 |
-| Control | `control.diagnostics` | partial | [README](../../src/VP-V/modules/control/diagnostics/README.md) | 4 | 4 | 0/4 |
-| Control | `control.config` | partial | [README](../../src/VP-V/modules/control/config/README.md) | 5 | 0 | 0/0 |
-| Control | `control.skeleton` | draft | [README](../../src/VP-V/modules/control/skeleton/README.md) | 8 | 7 | 7/7 |
+| Control | `control.diagnostics` | partial | [README](../../src/VP-V/modules/control/diagnostics/README.md) | 5 | 4 | 0/4 |
+| Control | `control.config` | partial | [README](../../src/VP-V/modules/control/config/README.md) | 9 | 0 | 0/0 |
+| Control | `control.skeleton` | draft | [README](../../src/VP-V/modules/control/skeleton/README.md) | 12 | 7 | 7/7 |
 
 ## Input
 
@@ -292,8 +292,22 @@ Modules: `colour.tone_gamut`, `colour.extended_range`, `colour.sdr_tone_shape`, 
 | `ambient.mode` | `colour.appearance` | [ambient] | enum | off, manual, sensor | off |  | Config > General page > Room lights card > Room lights | n/a (VP-only) | off: rules see no room state; manual: the room set by room; sensor: a serial light sensor decides, falling back to room without readings. | not tiered |
 | `ambient.port` | `colour.appearance` | [ambient] | string | COM1 to COM256 (sensor mode) | empty |  | Config > General page > Room lights card > Sensor port | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | The light sensor's own serial port; refused when equal to the projector's port. | not tiered |
 | `ambient.room` | `colour.appearance` | [ambient] | enum | dark, lit | dark |  | Config > General page > Room lights card > Room | n/a (VP-only); feeds the profile rules' ambient variable, not a renderer setting | The room in manual mode and the fallback when the sensor is not reporting. | not tiered |
+| `ambient_adapt` | `colour.appearance` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | off | VP-V > Colour > Main > Room-light adaptation (experimental); also VP Renderer > Rendering > Experimental content-adaptive settings | Original pathway sets `off` (ADR-0019) | Experimental ambient adaptation: renders to the black the room light leaves visible (screen reflection of the room light adds to the display's black), using the [ambient] light sensor (or manual lux_lit), applied at cuts with slow time constants; never moves code 0 or below-black. status line: Appearance: off (shader failed) | same on all (not tiered) |
+| `ambient_adapt_strength` | `colour.appearance` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 1 | 1 | VP-V > Colour > Advanced > Room-light adaptation: values; also VP Renderer > Rendering > Experimental content-adaptive settings | n/a (VP-only): unchanged by the Original pathway | How much of the room light's veil is rendered into the black (0 changes nothing) | same on all (not tiered) |
+| `ambient_max_black_nits` | `colour.appearance` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 10.0 | 1 | 1 | VP-V > Colour > Advanced > Room-light adaptation: values; also VP Renderer > Rendering > Experimental content-adaptive settings | n/a (VP-only): unchanged by the Original pathway | The black level (nits) the adaptation never exceeds | same on all (not tiered) |
+| `ambient_screen_reflect` | `colour.appearance` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 0.01 | 0.01 | VP-V > Colour > Advanced > Room-light adaptation: values; also VP Renderer > Rendering > Experimental content-adaptive settings | n/a (VP-only): unchanged by the Original pathway | Light the screen reflects back, cd/m2 per lux of room light; effective black = display black + strength x lux x this | same on all (not tiered) |
+| `ambient_tau_down_s` | `colour.appearance` | profile ([vprenderer.Default] and matching profiles) | float | 1.0 - 1800.0 | 90 | 90 | VP-V > Colour > Advanced > Room-light adaptation: values; also VP Renderer > Rendering > Experimental content-adaptive settings | n/a (VP-only): unchanged by the Original pathway | Seconds the target takes to follow a falling room light | same on all (not tiered) |
+| `ambient_tau_up_s` | `colour.appearance` | profile ([vprenderer.Default] and matching profiles) | float | 1.0 - 600.0 | 15 | 15 | VP-V > Colour > Advanced > Room-light adaptation: values; also VP Renderer > Rendering > Experimental content-adaptive settings | n/a (VP-only): unchanged by the Original pathway | Seconds the target takes to follow a rising room light | same on all (not tiered) |
+| `dv_tone_mapping` | `colour.sdr_tone_shape` | profile ([vprenderer.Default] and matching profiles) | enum | libplacebo, dolby_style | libplacebo | libplacebo | VP-V > Colour > Main > Dolby Vision; also VP Renderer > Rendering > Fixes under test | Original pathway sets `libplacebo` (ADR-0019) | Dolby Vision tone mapping: libplacebo's curve, or dolby_style (approximate: a Dolby-style curve from the scene metadata with the trims in ICtCp; not certified) | same on all (not tiered) |
+| `dv_trims` | `colour.sdr_tone_shape` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | 1 | VP-V > Colour > Main > Dolby Vision; also VP Renderer > Rendering > Fixes under test | Original pathway sets `off` (ADR-0019) | VP applies the Dolby Vision L2 trims for the display's peak after libplacebo's tone mapping (shaders\DV trims.glsl; a non-certified reimplementation). status line: DV tone mapping: <why>: bt2390[ + trims] | same on all (not tiered) |
 | `extended_range_more_cases` | `colour.extended_range` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | `on` |  | VP Renderer > Rendering > Processing > Below-black / above-white: also BT.1886, sRGB, wide-gamut SDR, LUT, HDR (VP-V > Proposed retirement, group A) | n/a (VP-only) | fix under test, proposed for retirement (group A); `off` = the Stage 10 eligibility; the Original pathway sets it `off` | same on all (not tiered) |
 | `preserve_extended_range` | `colour.extended_range` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | `on` | on | VP-V > Colour > Keep below-black and above-white (SDR); also VP Renderer > Rendering > Processing | n/a (VP-only): libplacebo's standard path clips below-black and above-white | `BTB/WTW: clipped (<reason>)` (FallbackCatalog::BtbWtw); the Original pathway sets it `off` | same on all (not tiered) |
+| `saturation` | `colour.tone_gamut` | profile ([vprenderer.Default] and matching profiles) | int | -100 - 100 | 0 |  | VP Renderer > Rendering > Tone mapping: Saturation (-100 to +100) | n/a (VP-only): unchanged by the Original pathway | Profile saturation adjustment in percent (0 = none) | same on all (not tiered) |
+| `sdr_contrast_recovery` | `colour.sdr_tone_shape` | profile ([vprenderer.Default] and matching profiles) | string | auto, off, or a number 0.0 - 2.0 | auto |  | VP-V > Colour > Advanced > SDR tone shape: values; also VP Renderer > Rendering > SDR highlights | n/a (VP-only): unchanged by the Original pathway | Contrast recovery used with the SDR tone shape: auto follows the profile's (libplacebo's) value | same on all (not tiered) |
+| `sdr_knee_start` | `colour.sdr_tone_shape` | profile ([vprenderer.Default] and matching profiles) | float | 0.5 - 0.99 | 0.80 | 0.8 | VP-V > Colour > Advanced > SDR tone shape: values; also VP Renderer > Rendering > SDR highlights | n/a (VP-only): unchanged by the Original pathway | Where the highlight knee starts (share of the encoded range) | same on all (not tiered) |
+| `sdr_knee_strength` | `colour.sdr_tone_shape` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 0.5 | 0.5 | VP-V > Colour > Advanced > SDR tone shape: values; also VP Renderer > Rendering > SDR highlights | n/a (VP-only): unchanged by the Original pathway | How strong the knee is | same on all (not tiered) |
+| `sdr_tone_shape` | `colour.sdr_tone_shape` | profile ([vprenderer.Default] and matching profiles) | enum | off, knee | off | off | VP-V > Colour > Main > SDR tone shape; also VP Renderer > Rendering > SDR highlights | Original pathway sets `off` (ADR-0019) | SDR tone shape: a soft highlight knee for SDR sources on a projector (the shape tone-mapped HDR has); creates nothing above the master's white. status line: DV tone mapping: <why>: bt2390[ + trims] | same on all (not tiered) |
+| `sdr_white_headroom` | `colour.sdr_tone_shape` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 0.5 | 0 |  | VP-V > Colour > Advanced > SDR tone shape: values; also VP Renderer > Rendering > SDR highlights | n/a (VP-only): unchanged by the Original pathway | Where reference white sits below peak (share of the range left as headroom) | same on all (not tiered) |
 
 ## Dynamic drive
 
@@ -301,6 +315,7 @@ Modules: `drive.led_measure`, `drive.led_compensation`, `drive.black_level`, `dr
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
+| `intent_black` | `drive.led_compensation` | profile ([vprenderer.Default] and matching profiles) | enum | off, report, led_protect | off | off | VP-V > Input > Advanced > Readouts (diagnostics); also VP Renderer > Rendering > Experimental content-adaptive settings | Original pathway sets `off` (ADR-0019) | Black protection (experimental): report = shadow steps lost below the display's black are measured and shown in the stats overlay and log; led_protect = also limits how far the LED dimming may go so the shadows stay; never moves code 0 or below-black | same on all (not tiered) |
 | `led_drive.adaptive_gamma` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | bool | on, off | off when the file names neither command_source nor mode; on when only an older `mode` is named (with command_source it is on only if set on) |  | Dynamic Drive page > Dynamic Drive card > Adaptive gamma | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | VP's picture adapts to the LED: the gain across each step (script smoothing for the script sources, the compensation gain for compensate) and the ANSI shadow lift; off = the LED is driven without picture compensation | not tiered |
 | `led_drive.anti_pump_band` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 50 (levels) | 3 |  | Dynamic Drive page > Advanced LED card > Anti-pump band | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Script/compensate: a level change smaller than this band is not sent, to stop the LED pumping | not tiered |
 | `led_drive.apl_persist_ms` | `drive.led_compensation` | [led_drive] (alias [dynamic_drive]; [led_drive.default]) | int | 0 to 10000 (ms) | 100 |  | Dynamic Drive page > Advanced LED card > APL hold | n/a (VP-only): Dynamic Drive is not a renderer profile key; the Original pathway does not change it | Compensate: window of the sustained APL the LED is aimed at (flash rejection); a cut uses the new scene's APL at once | not tiered |
@@ -474,9 +489,18 @@ Modules: `control.net_runtime`, `control.diagnostics`, `control.config`, `contro
 | `file_av_offset_ms` | `control.config` | general (startup) | int | -2000 to 2000 | 0 |  | Config > General page > File playback (VP Renderer filter) > Picture offset (A/V) | n/a (VP-only) | Moves the picture against the sound for files played through the VP Renderer filter: positive shows the picture later; capture is not affected. | not tiered |
 | `file_led_holdover_ms` | `control.config` | general (startup) | int | 0 to 30000 | 3000 |  | Config > General page > File playback (VP Renderer filter) > Dynamic Drive hold between files | n/a (VP-only) | The filter keeps Dynamic Drive running this long between files so the next file continues from the current LED level; 0 = restore full light at once. (Owning module may be drive.led_compensation.) | not tiered |
 | `global_hotkeys` | `control.config` | shortcuts (startup) | bool | true, false | false |  | Config > VP-V page > Keyboard > Every shortcut works while another application has focus | n/a (VP-only) | off: shortcuts act only while VP has focus, except the actions in global_actions; on: every shortcut also acts while another application has focus. | not tiered |
+| `intent_display` | `control.diagnostics` | profile ([vprenderer.Default] and matching profiles) | enum | off, report | off | off | VP-V > Input > Advanced > Readouts (diagnostics); also VP Renderer > Rendering > Experimental content-adaptive settings | Original pathway sets `off` (ADR-0019) | Display mapping readout (experimental): shows the scene-to-display compression and the trim in use on the stats overlay and log; changes nothing in the picture | same on all (not tiered) |
 | `logging.auto_report` | `control.diagnostics` | [logging] | bool | true, false | false |  | Config > VP-V page > Problem reports > Save a problem report automatically | n/a (VP-only) | VP saves a problem report itself on renderer recovery resets and render stalls, at most one per 10 minutes and five per run. | not tiered |
 | `logging.report_thumbnail` | `control.diagnostics` | [logging] | bool | true, false | false |  | Config > VP-V page > Problem reports > Include a small picture in problem reports | n/a (VP-only) | Adds a 480-pixel-wide copy of the next rendered frame (VP Renderer only) to each report; off = no pictures in reports. | not tiered |
+| `pipeline_entrance_once` | `control.skeleton` | [vpv] (global; also read from the profile) | bool | on, off | on |  | VP-V > Pipeline (expert) (a test key; stored in [vpv]) | Original pathway sets `off` (ADR-0019) | B3 (ADR-0024): the motion consumers warp or blend the processed A and B (the entrance stages run once per source frame) instead of re-running the stages for every picture; off = per-picture stages (a diagnostic) | same on all (not tiered) |
+| `pipeline_order` | `control.skeleton` | [vpv] (global; also read from the profile) | string | slot names in the registry's syntax (letters, digits, _ . , ; > and space); validated by the renderer, an invalid order never runs | empty (the designed order) |  | VP-V > Pipeline (expert) (stored in [vpv]) | Original pathway clears it (the designed order, ADR-0019) | Moves slots within their zone (ADR-0021) | same on all (not tiered) |
+| `pipeline_original_pathway` | `control.skeleton` | [vpv] (global; also read from the profile) | bool | on, off | off |  | VP-V > Pathway (stored in [vpv] as vpv.pathway) | n/a (VP-only): unchanged by the Original pathway | The Original pathway baseline (ADR-0019): every VP addition is switched off and every slot that exists upstream runs in its upstream form, reproducing Bill's original pathway | same on all (not tiered) |
+| `pipeline_slots_off` | `control.skeleton` | [vpv] (global; also read from the profile) | string | slot names in the registry's syntax (as pipeline_order) | empty |  | VP-V > Pipeline (expert) (stored in [vpv]) | n/a (VP-only): unchanged by the Original pathway | Slots switched off at slot level; motion and queue/timing slots switched off run in their upstream form | same on all (not tiered) |
 | `renderer_failure_keep_fullscreen` | `control.config` | general (startup) | bool | true, false | true |  | Config > General page > General behavior > Stay fullscreen and retry after a renderer failure | off = the earlier behaviour | on: after a renderer failure VP stays fullscreen and retries (after 2 s, 5 s, 10 s, then every 30 s, at most 10 times, then Restart Renderer); off: fullscreen is left and the renderer waits for a manual restart. | not tiered |
+| `retirement_a` | `control.config` | [vpv] (global; also read from the profile) | enum | approve, keep | unset (not decided) |  | VP-V > Proposed retirement tab, group A decision | n/a (VP-only): unchanged by the Original pathway | The owner's Approve / Keep decision for retirement group A, recorded by the VP-V page's Proposed retirement tab. UI-only record: nothing in the renderer reads it and nothing is hidden or removed by it | same on all (not tiered) |
+| `retirement_b` | `control.config` | [vpv] (global; also read from the profile) | enum | approve, keep | unset (not decided) |  | VP-V > Proposed retirement tab, group B decision | n/a (VP-only): unchanged by the Original pathway | The owner's Approve / Keep decision for retirement group B, recorded by the VP-V page's Proposed retirement tab. UI-only record: nothing in the renderer reads it and nothing is hidden or removed by it | same on all (not tiered) |
+| `retirement_c` | `control.config` | [vpv] (global; also read from the profile) | enum | approve, keep | unset (not decided) |  | VP-V > Proposed retirement tab, group C decision | n/a (VP-only): unchanged by the Original pathway | The owner's Approve / Keep decision for retirement group C, recorded by the VP-V page's Proposed retirement tab. UI-only record: nothing in the renderer reads it and nothing is hidden or removed by it | same on all (not tiered) |
+| `retirement_d` | `control.config` | [vpv] (global; also read from the profile) | enum | approve, keep | unset (not decided) |  | VP-V > Proposed retirement tab, group D decision | n/a (VP-only): unchanged by the Original pathway | The owner's Approve / Keep decision for retirement group D, recorded by the VP-V page's Proposed retirement tab. UI-only record: nothing in the renderer reads it and nothing is hidden or removed by it | same on all (not tiered) |
 | `shortcuts.global_actions` | `control.config` | [shortcuts] | string | comma-separated [shortcuts] action names (an unknown name is refused) | empty (none) |  | Config > VP-V page > Keyboard > Global actions | n/a (VP-only) | Actions that act while another application has focus even with global_hotkeys off, e.g. config_editor, toggle_noui. | not tiered |
 | `shortcuts.state_report` | `control.diagnostics` | [shortcuts] | string | a key chord (Ctrl, Alt, Shift plus one key); empty = no shortcut | Ctrl+Alt+D |  | Config > Shortcuts page > Save problem report | n/a (VP-only) | Chord that saves a problem report; a value that does not parse is reported and binds nothing. | not tiered |
 | `stats_overlay` | `control.diagnostics` | general (startup) | bool | true, false | false |  | Config > General page > General behavior > Show statistics overlay | n/a (VP-only) | Shows the statistics overlay at start; the statistics key toggles it until restart. | not tiered |
@@ -531,30 +555,7 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 
 | Key | Module hint (manifest) | Golden default | VpvSection hint | Found in |
 |---|---|---|---|---|
-| `ambient_adapt` | unassigned | off | VP-V > Colour > Room-light adaptation (experimental) | VpvSchemaKeys.h |
-| `ambient_adapt_strength` | unassigned | 1 |  | VpvSchemaKeys.h |
-| `ambient_max_black_nits` | unassigned | 1 |  | VpvSchemaKeys.h |
-| `ambient_screen_reflect` | unassigned | 0.01 |  | VpvSchemaKeys.h |
-| `ambient_tau_down_s` | unassigned | 90 |  | VpvSchemaKeys.h |
-| `ambient_tau_up_s` | unassigned | 15 |  | VpvSchemaKeys.h |
-| `dv_tone_mapping` | colour.sdr_tone_shape | libplacebo |  | VpvSchemaKeys.h |
-| `dv_trims` | colour.sdr_tone_shape | 1 | VP-V > Colour > Dolby Vision trims for your display | VpvSchemaKeys.h |
-| `intent_black` | drive.led_compensation | off |  | VpvSchemaKeys.h |
-| `intent_display` | unassigned | off |  | VpvSchemaKeys.h |
-| `pipeline_entrance_once` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
-| `pipeline_order` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
-| `pipeline_original_pathway` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, SkeletonSettings.h, HdrInferenceChoice.h |
-| `pipeline_slots_off` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
-| `retirement_a` | unassigned |  |  | VpvSchemaKeys.h |
-| `retirement_b` | unassigned |  |  | VpvSchemaKeys.h |
-| `retirement_c` | unassigned |  |  | VpvSchemaKeys.h |
-| `retirement_d` | unassigned |  |  | VpvSchemaKeys.h |
-| `saturation` | unassigned |  |  | VpvSchemaKeys.h |
-| `sdr_contrast_recovery` | colour.sdr_tone_shape |  |  | VpvSchemaKeys.h |
-| `sdr_knee_start` | input.light_level, colour.sdr_tone_shape | 0.8 |  | VpvSchemaKeys.h |
-| `sdr_knee_strength` | input.light_level, colour.sdr_tone_shape | 0.5 |  | VpvSchemaKeys.h |
-| `sdr_tone_shape` | input.light_level, colour.sdr_tone_shape | off | VP-V > Colour > SDR tone shape | VpvSchemaKeys.h |
-| `sdr_white_headroom` | input.light_level, colour.sdr_tone_shape |  |  | VpvSchemaKeys.h |
+| (none) | | | | |
 
 ## Appendix B: documented keys with no entry in code
 

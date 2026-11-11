@@ -2,37 +2,12 @@
  "counts": {
   "default_mismatch": 0,
   "stale": 0,
-  "undocumented": 24
+  "undocumented": 0
  },
  "gaps": {
   "default_mismatch": [],
   "stale": [],
-  "undocumented": [
-   "ambient_adapt",
-   "ambient_adapt_strength",
-   "ambient_max_black_nits",
-   "ambient_screen_reflect",
-   "ambient_tau_down_s",
-   "ambient_tau_up_s",
-   "dv_tone_mapping",
-   "dv_trims",
-   "intent_black",
-   "intent_display",
-   "pipeline_entrance_once",
-   "pipeline_order",
-   "pipeline_original_pathway",
-   "pipeline_slots_off",
-   "retirement_a",
-   "retirement_b",
-   "retirement_c",
-   "retirement_d",
-   "saturation",
-   "sdr_contrast_recovery",
-   "sdr_knee_start",
-   "sdr_knee_strength",
-   "sdr_tone_shape",
-   "sdr_white_headroom"
-  ]
+  "undocumented": []
  },
  "note": "Ratchet for tools/check_master_settings.py: gaps may only be removed, never added.",
  "schema": 1
