@@ -75,6 +75,8 @@ The ONE reader of VP's status lines for the GUI, the Config status heading, Ctrl
 - `CtrlIRows(snapshot, DialogTexts, isAlphaRenderer)`: VP's rows for the overlay's two extension points.
 - `CrashState(snapshot, HostLines, DialogTexts, narrow)` and `Bundle(snapshot, HostLines, narrow)`: the (key, value) pairs in the old order.
 
+`NarrowFn` is a raw function pointer (`std::string (*)(const std::wstring&)`), not a `std::function`: it must be a plain function or a captureless lambda, so a client that needs state (P11a, source-identity lines) passes a free function or converts before calling. The adapter's `Narrow` (CStringA, ANSI) is what the old call sites used; `StatusExtensionTests::NonAsciiValuesGoThroughTheCallersNarrowFunction` marks non-ASCII values through a tagging function so a bypass of the caller's conversion would show.
+
 `src/VP-V/gui/VpStatusAdapter.h` is a thin client: it polls the renderer and the dialog's getters, converts `CString` <-> `std::wstring`, and calls this reader; its public functions and the dialog's call sites are unchanged. Not moved yet (Bill's files, zero hunks in C14): the Config shell heading and the dialog heading, which move onto this reader with their own packages (P9 f, P12 j), and the overlay's own text drawing. Follow-on: P11a (source-identity lines) reads through the same `Snapshot`.
 
 Cost: the reader runs once per stats refresh, as the adapter did (one parse of the module text, a handful of string copies); engine off = nothing extra.

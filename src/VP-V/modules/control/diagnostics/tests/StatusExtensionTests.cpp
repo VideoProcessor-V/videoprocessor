@@ -30,6 +30,30 @@ namespace StatusExtensionTest
 			return out;
 		}
 
+		// Marks every non-ASCII code unit as <uXXXX>, so a value that reaches the caller's text
+		// conversion is visible in the result; a pass-through that bypasses it would not be.
+		std::string TaggedNarrow(const std::wstring& text)
+		{
+			static const char* const hex = "0123456789ABCDEF";
+			std::string out;
+			for (wchar_t c : text)
+			{
+				const unsigned v = static_cast<unsigned>(c);
+				if (v < 0x80)
+				{
+					out += static_cast<char>(v);
+					continue;
+				}
+				out += "<u";
+				out += hex[(v >> 12) & 0xF];
+				out += hex[(v >> 8) & 0xF];
+				out += hex[(v >> 4) & 0xF];
+				out += hex[v & 0xF];
+				out += ">";
+			}
+			return out;
+		}
+
 		std::wstring Module()
 		{
 			VpStatusText::RendererLines<wchar_t> lines;
@@ -133,6 +157,32 @@ namespace StatusExtensionTest
 			Assert::AreEqual(size_t(11), dead.size());
 			for (const auto& pair : dead)
 				Assert::AreEqual(std::string("-"), pair.second);
+		}
+
+		TEST_METHOD(NonAsciiValuesGoThroughTheCallersNarrowFunction)
+		{
+			// Escaped, ASCII source: U+00E9 (e acute) and U+2014 (em dash).
+			VpStatusText::RendererLines<wchar_t> lines;
+			lines.dejudder.Set(true, L"café");
+			lines.fallbacks.Set(true, L"Fallbacks engaged: a — b");
+			lines.resyncEvents.Set(true, L"evé");
+			const auto snapshot = StatusExtension::Read(true, true, VpStatusText::ComposeRendererModule(lines));
+			Assert::AreEqual(std::string("Fallbacks engaged: a <u2014> b"), StatusExtension::FallbacksHeading(snapshot, TaggedNarrow));
+
+			StatusExtension::HostLines host;
+			host.presentation.Set(true, L"pé");
+			StatusExtension::DialogTexts dialog = Dialog();
+			dialog.content = L"film — inferred";
+			const auto crash = StatusExtension::CrashState(snapshot, host, dialog, TaggedNarrow);
+			Assert::AreEqual(std::string("caf<u00E9>"), crash[0].second);
+			Assert::AreEqual(std::string("Fallbacks engaged: a <u2014> b"), crash[1].second);
+			Assert::AreEqual(std::string("p<u00E9>"), crash[2].second);
+			Assert::AreEqual(std::string("film <u2014> inferred"), crash[6].second);
+
+			const auto bundle = StatusExtension::Bundle(snapshot, host, TaggedNarrow);
+			Assert::AreEqual(std::string("p<u00E9>"), bundle[0].second);
+			Assert::AreEqual(std::string("caf<u00E9>"), bundle[1].second);
+			Assert::AreEqual(std::string("ev<u00E9>"), bundle[bundle.size() - 1].second);
 		}
 
 		TEST_METHOD(BundleListsKnownLinesInTheOldOrder)
