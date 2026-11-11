@@ -12,10 +12,10 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Count | Value |
 |---|---|
 | Modules | 43 |
-| Documented rows | 242 |
+| Documented rows | 278 |
 | VP-V keys in code (outside Bill's schema lists) | 386 |
-| of which documented | 237 |
-| of which undocumented (appendix A) | 149 |
+| of which documented | 273 |
+| of which undocumented (appendix A) | 113 |
 | Documented keys with no code entry (appendix B) | 0 |
 
 ## Modules index
@@ -43,13 +43,13 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Repair | `repair.texture_restore` | built | [README](../../src/VP-V/modules/repair/texture_restore/README.md) | 0 | 5 | 0/5 |
 | Repair | `repair.temporal_detail.products` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/products/README.md) | 1 | 0 | 0/0 |
 | Repair | `repair.temporal_detail.shared` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/shared/README.md) | 0 | 0 | 0/0 |
-| Scaling | `scaling.rebase` | built | [README](../../src/VP-V/modules/scaling/rebase/README.md) | 0 | 4 | 0/4 |
+| Scaling | `scaling.rebase` | built | [README](../../src/VP-V/modules/scaling/rebase/README.md) | 2 | 4 | 2/4 |
 | Scaling | `scaling.route_4k` | placeholder | [README](../../src/VP-V/modules/scaling/route_4k/README.md) | 0 | 1 | 0/1 |
 | Scaling | `scaling.refine` | placeholder | [README](../../src/VP-V/modules/scaling/refine/README.md) | 0 | 1 | 0/1 |
 | Scaling | `scaling.chroma_upscale` | placeholder | [README](../../src/VP-V/modules/scaling/chroma_upscale/README.md) | 1 | 2 | 1/2 |
 | Scaling | `scaling.chroma_upscale.basic` | draft | [README](../../src/VP-V/modules/scaling/chroma_upscale/basic/README.md) | 1 | 0 | 0/0 |
-| Scaling | `scaling.geometry` | built | [README](../../src/VP-V/modules/scaling/geometry/README.md) | 0 | 8 | 0/8 |
-| Scaling | `scaling.output` | partial | [README](../../src/VP-V/modules/scaling/output/README.md) | 0 | 30 | 0/30 |
+| Scaling | `scaling.geometry` | built | [README](../../src/VP-V/modules/scaling/geometry/README.md) | 5 | 8 | 1/8 |
+| Scaling | `scaling.output` | partial | [README](../../src/VP-V/modules/scaling/output/README.md) | 29 | 30 | 29/30 |
 | Colour | `colour.tone_gamut` | built | [README](../../src/VP-V/modules/colour/tone_gamut/README.md) | 0 | 5 | 0/5 |
 | Colour | `colour.extended_range` | built | [README](../../src/VP-V/modules/colour/extended_range/README.md) | 2 | 2 | 2/2 |
 | Colour | `colour.sdr_tone_shape` | built | [README](../../src/VP-V/modules/colour/sdr_tone_shape/README.md) | 0 | 7 | 0/7 |
@@ -162,8 +162,44 @@ Modules: `scaling.rebase`, `scaling.route_4k`, `scaling.refine`, `scaling.chroma
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
+| `adaptive_chroma_ssim` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off |  | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive downscale | n/a (VP-only): unchanged by the Original pathway | Apply the SSIM branch to R, G and B fully (chroma too) instead of luma only; can fringe colour | same on all (not tiered) |
+| `adaptive_downscale` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | 0 | VP-V > Scaling > Advanced > Set by the Scaling tier; also VP Renderer > Rendering > Adaptive downscale | Original pathway sets `off` (ADR-0019) | Adaptive downscale: per pixel, blends a faithful downscale with the SSIM downscaler (luma only): w = w_base x (1 - edge) x grain_scale. Hard edges and grain lean faithful, texture keeps SSIM. Runs only when the frame downscales vertically and the SSimDownscaler shader is in the chain | Scaling Classic=off; Scaling Low=off; Scaling Mid=on |
+| `adaptive_edge_hi` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | float | 0 - 255 | 40 |  | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive downscale | n/a (VP-only): unchanged by the Original pathway | Upper end (8-bit gradient codes) of the edge ramp: at and above it the blend is fully faithful. Measured threshold, leave alone | same on all (not tiered) |
+| `adaptive_edge_lo` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | float | 0 - 255 | 8 |  | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive downscale | n/a (VP-only): unchanged by the Original pathway | Lower end (8-bit gradient codes, Sobel on luma) of the soft edge ramp: below it an area is not an edge and keeps the SSIM weight. Measured threshold, leave alone | same on all (not tiered) |
+| `adaptive_faithful` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | enum | auto, ortho, polar (polar is retired and runs as auto) | auto | auto | VP-V > Scaling > Main > Grain-aware downscale; also VP Renderer > Rendering > Adaptive downscale | n/a (VP-only): unchanged by the Original pathway | The faithful branch of the adaptive downscale: auto = polar ewa_lanczossharp where both axes shrink alike, the separable (1D) filter when they differ by more than 10 %; ortho = two separable Lanczos passes always (about a quarter of polar's cost, keeps the character of grain). status line: output scaling: libplacebo downscaler (SSimDownscaler not in the shader list) | same on all (not tiered) |
+| `adaptive_grain_floor` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 0.4 |  | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive downscale | n/a (VP-only): unchanged by the Original pathway | Lowest grain scale: the grain term ramps from this (at adaptive_grain_lo) to 1 (at adaptive_grain_hi) and lowers the SSIM weight on grainy pictures. Measured, leave alone | same on all (not tiered) |
+| `adaptive_grain_hi` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | float | 0 - 64 | 8 |  | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive downscale | n/a (VP-only): unchanged by the Original pathway | Laplacian-energy code (8-bit units) at which the grain term reaches its full effect. Measured, leave alone | same on all (not tiered) |
+| `adaptive_grain_lo` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | float | 0 - 64 | 2 |  | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive downscale | n/a (VP-only): unchanged by the Original pathway | Laplacian-energy code (8-bit units) at which the grain term starts to lower the SSIM weight. Measured, leave alone | same on all (not tiered) |
+| `adaptive_grain_map` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Scaling > Main > Grain-aware downscale; also VP Renderer > Rendering > Adaptive downscale | n/a (VP-only): unchanged by the Original pathway | Measures grain per 16x16 source block from the de-judder's vectors instead of one number per frame; untrusted blocks and frames without a vector field take the per-frame term. Grainy areas lean faithful. status line: output scaling: libplacebo downscaler (SSimDownscaler not in the shader list) | same on all (not tiered) |
+| `adaptive_grain_map_smooth_ms` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | float | 0 - 10000 | 500 |  | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive downscale | n/a (VP-only): unchanged by the Original pathway | Per-block smoothing time (ms) of the grain map, following the content along the block's vector; a cut resets it | same on all (not tiered) |
+| `adaptive_grain_shadow_bias` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 0.5 |  | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive downscale | n/a (VP-only): unchanged by the Original pathway | How strongly shadows are weighted in the grain measurement of the adaptive blend. Measured, leave alone | same on all (not tiered) |
+| `adaptive_grain_smooth_ms` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | float | 0 - 10000 | 1000 |  | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive downscale | n/a (VP-only): unchanged by the Original pathway | One-pole smoothing time (ms) of the per-frame grain term; it snaps on a cut (mean luma jumping by more than 20 codes) | same on all (not tiered) |
+| `adaptive_motion` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | off | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive downscale | Original pathway sets `off` (ADR-0019) | Motion-adapted blend (candidate): per 16x16 block of the de-judder's field the sharper branch's weight (SSIM on a downscale, CNN on an upscale) is kept on steady, confidently tracked areas and lowered towards the faithful branch on fast or untrusted motion; no vectors (or NLS): factor 1, shown in status | same on all (not tiered) |
+| `adaptive_motion_floor` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 0 | 0 | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive downscale | n/a (VP-only): unchanged by the Original pathway | Factor applied on fast or untrusted motion; 0 = the faithful branch only (adaptive_motion) | same on all (not tiered) |
+| `adaptive_motion_smooth_ms` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | float | 0 - 10000 | 250 | 250 | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive downscale | n/a (VP-only): unchanged by the Original pathway | One-pole smoothing time (ms) that follows each block's vector so the motion factor does not flicker at motion boundaries | same on all (not tiered) |
+| `adaptive_motion_speed_hi` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 10.0 | 0.4 | 0.4 | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive downscale | n/a (VP-only): unchanged by the Original pathway | Motion speed (picture heights per second) above which the weight falls to adaptive_motion_floor | same on all (not tiered) |
+| `adaptive_motion_speed_lo` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 10.0 | 0.1 | 0.1 | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive downscale | n/a (VP-only): unchanged by the Original pathway | Motion speed (picture heights per second) below which the sharper branch keeps its full weight (adaptive_motion) | same on all (not tiered) |
+| `adaptive_upscale` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | 0 | VP-V > Scaling > Main > Grain-aware upscale; also VP Renderer > Rendering > Adaptive upscale | Original pathway sets `off` (ADR-0019) | Adaptive upscale for sources smaller than the output: blends the CNN upscale with a faithful upscale by the grain term (CNN upscalers sharpen grain). status line: output scaling: libplacebo downscaler (SSimDownscaler not in the shader list) | same on all (not tiered) |
+| `adaptive_upscale_superres_scale` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on |  | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive upscale | n/a (VP-only): unchanged by the Original pathway | Scales SSimSuperRes's strength by the grain term in the adaptive upscale | same on all (not tiered) |
+| `adaptive_upscale_w_base` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 1.0 |  | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive upscale | n/a (VP-only): unchanged by the Original pathway | Base weight of the CNN branch in the adaptive upscale | same on all (not tiered) |
+| `adaptive_w_base` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 1.0 | 1.0 | VP-V > Scaling > Advanced > Set by the Scaling tier | n/a (VP-only): unchanged by the Original pathway | Base weight of the SSIM branch in the adaptive downscale where nothing argues against it (design value 0.2; the Scaling tier Mid writes it) | Scaling Mid=0.2 |
+| `blank_bottom` | `scaling.geometry` | profile ([vprenderer.Default] and matching profiles; viewport group) | int | 0 - 4000 | 0 |  | VP Renderer > Screen: Blank bottom edge | n/a (VP-only): unchanged by the Original pathway | Output pixels at the panel's bottom edge that are always black: the picture is laid out inside what remains and the strip stays part of the black matte (insets that would leave less than half of either axis are ignored) | same on all (not tiered) |
+| `blank_left` | `scaling.geometry` | profile ([vprenderer.Default] and matching profiles; viewport group) | int | 0 - 4000 | 0 |  | VP Renderer > Screen: Blank left edge | n/a (VP-only): unchanged by the Original pathway | Output pixels at the panel's left edge that are always black: the picture is laid out inside what remains and the strip stays part of the black matte (insets that would leave less than half of either axis are ignored) | same on all (not tiered) |
+| `blank_right` | `scaling.geometry` | profile ([vprenderer.Default] and matching profiles; viewport group) | int | 0 - 4000 | 0 |  | VP Renderer > Screen: Blank right edge | n/a (VP-only): unchanged by the Original pathway | Output pixels at the panel's right edge that are always black: the picture is laid out inside what remains and the strip stays part of the black matte (insets that would leave less than half of either axis are ignored) | same on all (not tiered) |
+| `blank_top` | `scaling.geometry` | profile ([vprenderer.Default] and matching profiles; viewport group) | int | 0 - 4000 | 0 |  | VP Renderer > Screen: Blank top edge | n/a (VP-only): unchanged by the Original pathway | Output pixels at the panel's top edge that are always black: the picture is laid out inside what remains and the strip stays part of the black matte (insets that would leave less than half of either axis are ignored) | same on all (not tiered) |
 | `chroma_upscale_basic` | `scaling.chroma_upscale.basic` | deferred (profile; added when the SCHEMA lock is free) | enum | off, lanczos | off |  | deferred: VP-V > Scaling > Chroma upscale | libplacebo's chroma upscaler (either/or: Original = libplacebo chroma) | Declared (deferred key): "Chroma upscale: libplacebo (<reason>)" | same on all (one pass, ~36 texel fetches per output pixel and plane pair) |
 | `chroma_upscale_vp` | `scaling.chroma_upscale` | profile | enum | off, cfl | off |  | VP-V > Scaling > Chroma and downscale light > VP chroma upscale (candidate) (edits the Scaling profile selected on VP Renderer > Scaling) | libplacebo's own chroma upscaler (`chroma_upscaler`) | "Chroma upscale: libplacebo (<reason>)"; `Status()`; "grain split (chroma-from-luma)" while an own split runs | budget-governed: the VRAM governor drops the scratch-arena temporaries (T1) before the T0 ones; the module then fails visibly for the frame and libplacebo's chroma upscaler runs; nothing is fixed to a GPU model |
+| `cnn_residual_stabilise` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Scaling > Advanced > Scaler steadiness (expert); also VP Renderer > Rendering > Fixes under test | Original pathway sets `off` (ADR-0019) | The same hold for the CNN upscaler's added detail. status line: output scaling: libplacebo downscaler (SSimDownscaler not in the shader list) | same on all (not tiered) |
+| `downscale_light` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | enum | linear, gamma | linear |  | VP Renderer > Scaling page (downscale light) | Original pathway sets `linear` (ADR-0019) | Light domain of downscaling frames (Stage 8-1); gamma matches madVR's SSIM | same on all (not tiered) |
+| `entrance_gpu_drain` | `scaling.rebase` | [vpv] (global; also read from the profile) | enum | off, flush, finish | off | off | VP-V > Pipeline (expert) (stored in [vpv]) | Original pathway sets `off` (ADR-0019) | Expert workaround: after the entrance stages ran on a draw, flush submits the GPU queue and finish waits for it before libplacebo renders, so pictures between frames match plain draws byte for byte (without it libplacebo's scaling passes vary by +-1 of 16 bits on scattered textured pixels). Root cause open | same on all (not tiered) |
+| `fbo_float32` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | enum | auto, on, off | auto (on, everywhere) | -1 | VP-V > Colour > Advanced > SDR tone shape: values; also VP Renderer > Rendering > SDR highlights | Original pathway sets `off` (ADR-0019) | Every libplacebo intermediate texture in 32-bit float (exact highlights, more bandwidth; half-float rounds values above white). auto = on; the output pass is rgba32f regardless. status line: Tone map: libplacebo (combined LUT missing) | same on all (not tiered) |
+| `nls_sampling` | `scaling.geometry` | profile ([vprenderer.Default] and matching profiles) | enum | catmull, bilinear | catmull | catmull | VP-V > Proposed retirement > Experiments that lost, and superseded switches; also VP Renderer > Rendering > Fixes under test | Original pathway sets `bilinear` (ADR-0019) | How the NLS / NLS+ stretch samples the source: catmull = separable Catmull-Rom widened by the map's local minification (a low-pass at the centre); bilinear = the hooked texture's bilinear sampler (the earlier output). proposed for retirement (group B) | same on all (not tiered) |
+| `rebase_kernel_match` | `scaling.rebase` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | off | VP-V > Scaling > Main > Re-base (your picture slider); also VP Renderer > Rendering > Fixes under test | Original pathway sets `off` (ADR-0019) | Kernel-matched re-base: identifies the player's upscale filter and undoes it exactly for an exact 2:1 luma re-base; off = the generic faithful re-base runs when no kernel is identified (opt-in since SID r2). status line: re-base precision: <the re-base's float-intermediate note> | same on all (not tiered) |
+| `residual_stabilise_grain_guard` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Proposed retirement > Proven fixes (all on by default); also VP Renderer > Rendering > Fixes under test | Original pathway sets `off` (ADR-0019) | Limits the residual hold to the coding-artefact band: blocks the grain term marks as grain pass this frame's residual, the held change is clamped to the expected coding-noise RMS; off = the 2026-10-15 one-pole, byte for byte. proposed for retirement (group A) | same on all (not tiered) |
+| `ssim_bitrate_aware` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Scaling > Main > Grain-aware downscale; also VP Renderer > Rendering > Fixes under test | Original pathway sets `off` (ADR-0019) | Lowers the SSIM weight (and the CNN's) at a low bitrate-quality reading, down to ssim_bitrate_floor: gentler sharpening on poor streams (SSIM would sharpen blocking). status line: output scaling: libplacebo downscaler (SSimDownscaler not in the shader list) | same on all (not tiered) |
+| `ssim_bitrate_floor` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 0.4 | 0.4 | VP Renderer > Rendering > Fixes under test | n/a (VP-only): unchanged by the Original pathway | The lowest factor ssim_bitrate_aware lowers the SSIM weight to | same on all (not tiered) |
+| `ssim_residual_stabilise` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Scaling > Advanced > Scaler steadiness (expert); also VP Renderer > Rendering > Fixes under test | Original pathway sets `off` (ADR-0019) | Holds the SSIM downscaler's added detail along the de-judder's trusted vectors (a one-pole over about 3 frames) so it does not shimmer; untrusted blocks, no vectors or NLS: this frame's residual. status line: output scaling: libplacebo downscaler (SSimDownscaler not in the shader list) | same on all (not tiered) |
+| `upscale_light` | `scaling.output` | profile ([vprenderer.Default] and matching profiles) | enum | linear, gamma | linear | linear | VP-V > Scaling > Advanced > Grain-aware scaler thresholds (measured, leave alone); also VP Renderer > Rendering > Adaptive upscale | Original pathway sets `linear` (ADR-0019) | Light domain of upscaling frames (Stage 8b) | same on all (not tiered) |
 
 ## Colour
 
@@ -407,42 +443,16 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | Key | Module hint (manifest) | Golden default | VpvSection hint | Found in |
 |---|---|---|---|---|
 | `active_picture_startup_hold` | unassigned | on |  | VpvSchemaKeys.h |
-| `adaptive_chroma_ssim` | scaling.output |  |  | VpvSchemaKeys.h |
-| `adaptive_downscale` | scaling.output | 0 |  | VpvSchemaKeys.h |
-| `adaptive_edge_hi` | scaling.output |  |  | VpvSchemaKeys.h |
-| `adaptive_edge_lo` | scaling.output |  |  | VpvSchemaKeys.h |
-| `adaptive_faithful` | scaling.output | auto | VP-V > Scaling > Grain-true downscale filter | VpvSchemaKeys.h |
-| `adaptive_grain_floor` | scaling.output |  |  | VpvSchemaKeys.h |
-| `adaptive_grain_hi` | scaling.output |  |  | VpvSchemaKeys.h |
-| `adaptive_grain_lo` | scaling.output |  |  | VpvSchemaKeys.h |
-| `adaptive_grain_map` | scaling.output | on | VP-V > Scaling > Grain map steers the downscale | VpvSchemaKeys.h |
-| `adaptive_grain_map_smooth_ms` | scaling.output |  |  | VpvSchemaKeys.h |
-| `adaptive_grain_shadow_bias` | scaling.output |  |  | VpvSchemaKeys.h |
-| `adaptive_grain_smooth_ms` | scaling.output |  |  | VpvSchemaKeys.h |
-| `adaptive_motion` | scaling.output | off |  | VpvSchemaKeys.h |
-| `adaptive_motion_floor` | scaling.output | 0 |  | VpvSchemaKeys.h |
-| `adaptive_motion_smooth_ms` | scaling.output | 250 |  | VpvSchemaKeys.h |
-| `adaptive_motion_speed_hi` | scaling.output | 0.4 |  | VpvSchemaKeys.h |
-| `adaptive_motion_speed_lo` | scaling.output | 0.1 |  | VpvSchemaKeys.h |
-| `adaptive_upscale` | scaling.output | 0 | VP-V > Scaling > Grain-aware upscale for small sources | VpvSchemaKeys.h |
-| `adaptive_upscale_superres_scale` | scaling.output |  |  | VpvSchemaKeys.h |
-| `adaptive_upscale_w_base` | scaling.output |  |  | VpvSchemaKeys.h |
-| `adaptive_w_base` | scaling.output | 1.0 |  | VpvSchemaKeys.h |
 | `ambient_adapt` | unassigned | off | VP-V > Colour > Room-light adaptation (experimental) | VpvSchemaKeys.h |
 | `ambient_adapt_strength` | unassigned | 1 |  | VpvSchemaKeys.h |
 | `ambient_max_black_nits` | unassigned | 1 |  | VpvSchemaKeys.h |
 | `ambient_screen_reflect` | unassigned | 0.01 |  | VpvSchemaKeys.h |
 | `ambient_tau_down_s` | unassigned | 90 |  | VpvSchemaKeys.h |
 | `ambient_tau_up_s` | unassigned | 15 |  | VpvSchemaKeys.h |
-| `blank_bottom` | unassigned |  |  | VpvSchemaKeys.h |
-| `blank_left` | unassigned |  |  | VpvSchemaKeys.h |
-| `blank_right` | unassigned |  |  | VpvSchemaKeys.h |
-| `blank_top` | unassigned |  |  | VpvSchemaKeys.h |
 | `cadence_class_fixes` | input.queue_timing, motion.consumers | on |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, RendererProfileConfig.h |
 | `calibration_lut_stage` | output.calibration_lut |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `capture_path` | input.capture | gpu | VP-V > Input > Capture unpack on the GPU | VpvSchemaKeys.h |
 | `capture_upload` | input.capture | auto | VP-V > Input > Upload frames as they arrive | VpvSchemaKeys.h |
-| `cnn_residual_stabilise` | scaling.output | on | VP-V > Scaling > Steady the upscaler's added detail along motion | VpvSchemaKeys.h |
 | `deband_grain` | repair.deband | off |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `deband_vp` | repair.deband | off |  | VpvSchemaKeys.h |
 | `deband_vp_exclusive` | repair.deband | on | VP-V > Repair > VP deband replaces libplacebo's | VpvSchemaKeys.h |
@@ -478,15 +488,12 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `detail_pulse_stabilise` | repair.texture_restore | on |  | VpvSchemaKeys.h |
 | `dither_grain_tolerance_scale` | output.dither | 3 |  | VpvSchemaKeys.h |
 | `dither_vectors` | motion.consumers, output.dither | auto | VP-V > Motion > Dither reuses the de-judder's motion | VpvSchemaKeys.h |
-| `downscale_light` | scaling.output |  |  | VpvSchemaKeys.h |
 | `dv_compare_capture_folder` | input.signal |  |  | VpvSchemaKeys.h |
 | `dv_tone_mapping` | colour.sdr_tone_shape | libplacebo |  | VpvSchemaKeys.h |
 | `dv_trims` | colour.sdr_tone_shape | 1 | VP-V > Colour > Dolby Vision trims for your display | VpvSchemaKeys.h |
 | `dv_tunnel_fixes` | input.signal | on |  | VpvSchemaKeys.h |
 | `dv_tunnel_gpu_unpack` | input.signal | 1 | VP-V > Input > Dolby Vision tunnel: GPU unpack | VpvSchemaKeys.h |
 | `efficiency_fixes` | unassigned | on |  | VpvSchemaKeys.h |
-| `entrance_gpu_drain` | scaling.rebase | off |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
-| `fbo_float32` | scaling.output | -1 | VP-V > Colour > Full precision for every tier (32-bit float intermediates) | VpvSchemaKeys.h |
 | `frame_analysis_store` | input.source_analysis |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `general_rate_fixes` | input.queue_timing, motion.estimation, motion.vector_delivery, motion.consumers | on |  | VpvSchemaKeys.h |
 | `hdr_inference` | input.signal | vp |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, HdrInferenceChoice.h |
@@ -506,7 +513,6 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `low_bitrate_handling` | repair.deband | auto | VP-V > Repair > Deband reacts to compression | VpvSchemaKeys.h |
 | `low_latency_path` | input.queue_timing |  |  | VpvSchemaKeys.h, VpvStartupSchema.h |
 | `native_rgb_ingest` | input.capture | 1 | VP-V > Input > Native 10/12-bit RGB capture | VpvSchemaKeys.h |
-| `nls_sampling` | scaling.geometry | catmull |  | VpvSchemaKeys.h |
 | `occlusion_mask` | motion.vector_delivery, motion.consumers | 0 | VP-V > Output > Dither: no smear where new picture appears | VpvSchemaKeys.h |
 | `output_segments_merged` | output.dither |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `pipeline_entrance_once` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
@@ -515,12 +521,10 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `pipeline_slots_off` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `pulldown_fixes` | input.queue_timing | on |  | VpvSchemaKeys.h |
 | `queue_timing_fixes` | input.queue_timing | on |  | VpvSchemaKeys.h |
-| `rebase_kernel_match` | scaling.rebase | off | VP-V > Scaling > Re-base: undo the player's upscaler | VpvSchemaKeys.h |
 | `render_ahead` | output.presentation | off | VP-V > Motion > De-judder: render ahead (under test) | VpvSchemaKeys.h |
 | `render_ahead_queue_credit` | output.presentation | off |  | VpvSchemaKeys.h |
 | `render_ahead_utilisation` | output.presentation | 0.85 |  | VpvSchemaKeys.h |
 | `repeat_render_reuse` | output.presentation |  |  | VpvSchemaKeys.h |
-| `residual_stabilise_grain_guard` | scaling.output | on |  | VpvSchemaKeys.h |
 | `resync_event` | input.signal |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `retirement_a` | unassigned |  |  | VpvSchemaKeys.h |
 | `retirement_b` | unassigned |  |  | VpvSchemaKeys.h |
@@ -546,15 +550,11 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `source_resolution_mixed_guard` | input.source_analysis | on | VP-V > Scaling > Never re-base a mixed screen (menu, picture-in-picture) | VpvSchemaKeys.h |
 | `source_resolution_release_fade_s` | input.source_analysis | 0.25 |  | VpvSchemaKeys.h |
 | `source_resolution_text_guard` | input.source_analysis | on | VP-V > Scaling > Re-base ignores the player's own subtitles | VpvSchemaKeys.h |
-| `ssim_bitrate_aware` | scaling.output | on | VP-V > Scaling > Gentler sharpening on poor streams | VpvSchemaKeys.h |
-| `ssim_bitrate_floor` | scaling.output | 0.4 |  | VpvSchemaKeys.h |
-| `ssim_residual_stabilise` | scaling.output | on | VP-V > Scaling > Steady the downscaler's added detail along motion | VpvSchemaKeys.h |
 | `target_latency_ms` | input.queue_timing |  |  | VpvSchemaKeys.h, VpvStartupSchema.h |
 | `temporal_dither` | output.dither | auto |  | VpvSchemaKeys.h |
 | `texture_restore` | repair.texture_restore | off |  | VpvSchemaKeys.h |
 | `texture_restore_cap` | repair.texture_restore | 1.5 |  | VpvSchemaKeys.h |
 | `timing_continuity_fixes` | input.queue_timing, motion.vector_delivery | on |  | VpvSchemaKeys.h |
-| `upscale_light` | scaling.output | linear |  | VpvSchemaKeys.h |
 
 ## Appendix B: documented keys with no entry in code
 

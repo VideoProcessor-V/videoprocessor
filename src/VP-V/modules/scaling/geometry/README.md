@@ -106,6 +106,15 @@ Cost when off: with NLS not selected, the crop stage still runs one `EvaluateNls
 
 ## Settings
 
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `blank_bottom` | profile ([vprenderer.Default] and matching profiles; viewport group) | int | 0 - 4000 | 0 | VP Renderer > Screen: Blank bottom edge | n/a (VP-only): unchanged by the Original pathway | Output pixels at the panel's bottom edge that are always black: the picture is laid out inside what remains and the strip stays part of the black matte (insets that would leave less than half of either axis are ignored) | same on all (not tiered) |
+| `blank_left` | profile ([vprenderer.Default] and matching profiles; viewport group) | int | 0 - 4000 | 0 | VP Renderer > Screen: Blank left edge | n/a (VP-only): unchanged by the Original pathway | Output pixels at the panel's left edge that are always black: the picture is laid out inside what remains and the strip stays part of the black matte (insets that would leave less than half of either axis are ignored) | same on all (not tiered) |
+| `blank_right` | profile ([vprenderer.Default] and matching profiles; viewport group) | int | 0 - 4000 | 0 | VP Renderer > Screen: Blank right edge | n/a (VP-only): unchanged by the Original pathway | Output pixels at the panel's right edge that are always black: the picture is laid out inside what remains and the strip stays part of the black matte (insets that would leave less than half of either axis are ignored) | same on all (not tiered) |
+| `blank_top` | profile ([vprenderer.Default] and matching profiles; viewport group) | int | 0 - 4000 | 0 | VP Renderer > Screen: Blank top edge | n/a (VP-only): unchanged by the Original pathway | Output pixels at the panel's top edge that are always black: the picture is laid out inside what remains and the strip stays part of the black matte (insets that would leave less than half of either axis are ignored) | same on all (not tiered) |
+| `nls_sampling` | profile ([vprenderer.Default] and matching profiles) | enum | catmull, bilinear | catmull | VP-V > Proposed retirement > Experiments that lost, and superseded switches; also VP Renderer > Rendering > Fixes under test | Original pathway sets `bilinear` (ADR-0019) | How the NLS / NLS+ stretch samples the source: catmull = separable Catmull-Rom widened by the map's local minification (a low-pass at the centre); bilinear = the hooked texture's bilinear sampler (the earlier output). proposed for retirement (group B) | same on all (not tiered) |
+
+
 - Existing keys: the `nls` selection group (`[shader.nls.<name>]` profiles; keys above) and `nls_sampling`. The listed `nls_active`, `nls_curve`, `nls_geometry`, `nls_protect`, `nls_scale` do not exist.
 - Planned keys: (none)
 - Tiers: not tiered
