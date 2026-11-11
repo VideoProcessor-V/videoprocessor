@@ -5190,13 +5190,8 @@ struct LibplaceboVideoRenderer::Impl
 	// VPV-HOOK-END
 	unsigned long long motionEngineIdleReleasesLogged = 0;
 	// Whether the matcher's live outputs (field, trust, grain error) are this source
-	// frame's (sequence, sequence + 1) pair of the current motion epoch.
-	bool DejudderLiveFieldFor(uint64_t sequence) const
-	{
-		return dejudder && sequence != 0 && dejudderEstimatedSequence == sequence &&
-			motionValidity.Current(dejudderEstimatedEpoch) &&
-			(!activeSettings.motionHistoryFixes || dejudderLiveFieldFrom == sequence);
-	}
+	// frame's (sequence, sequence + 1) pair of the current motion epoch (rule R1 of the P3 field view, EstimateState).
+	bool DejudderLiveFieldFor(uint64_t sequence) const { return vectorEstimate.LiveValidFor(sequence, activeSettings.motionHistoryFixes); }
 	unsigned long long dejudderEstimates = 0;
 	unsigned long long dejudderFailures = 0;
 	// 6b-2 extra presents: phase state, the vsync output and the counters.

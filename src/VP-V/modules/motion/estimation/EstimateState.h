@@ -36,6 +36,32 @@
 
 namespace VpMotion
 {
+	// P3 field view (M2 P5c): one pair's matcher outputs as the renderer reads them. valid = the accessor's validity rule held and a
+	// matcher exists (a field may still be null: the matcher has not estimated, or a feature's output is off).
+	struct P3FieldSet
+	{
+		bool valid = false;
+		pl_tex field = nullptr, frameTrust = nullptr, subField = nullptr, grainError = nullptr;
+		pl_tex camera = nullptr, pixelMask = nullptr, vectorOk = nullptr;
+		bool Usable() const { return field != nullptr && frameTrust != nullptr; }
+	};
+	// The renderer's validity rules for the matcher's live outputs, as pure functions (render-thread state passed in; CPU-testable).
+	struct P3Rules
+	{
+		// R1 (DejudderLiveFieldFor): the matcher's live outputs are this source frame's (sequence, sequence + 1) pair of the current
+		// motion epoch; with motion_history_fixes also the live-field sequence (an ahead estimate moved the live outputs to B).
+		static bool LiveFor(bool matcher, uint64_t sequence, uint64_t estimatedSequence, bool epochCurrent, bool motionHistoryFixes,
+			uint64_t liveFieldFrom)
+		{
+			return matcher && sequence != 0 && estimatedSequence == sequence && epochCurrent && (!motionHistoryFixes || liveFieldFrom == sequence);
+		}
+		// R2 (the entrance segment's FieldOf): the live outputs are the pair that starts at `sequence`, current epoch.
+		static bool LiveFrom(bool matcher, uint64_t sequence, uint64_t liveFieldFrom, bool epochCurrent)
+		{
+			return matcher && liveFieldFrom == sequence && epochCurrent;
+		}
+	};
+
 	template<class Payload>
 	struct EstimateState : IMatcherView, Dejudder::IFieldSource
 	{
@@ -154,41 +180,64 @@ namespace VpMotion
 		// The captured snapshot's pair id (0, 0 = none captured), for the status line and the tests.
 		void SnapshotPair(uint64_t& from, uint64_t& to) const { from = snapshotSet_.from; to = snapshotSet_.to; }
 
-		// ---- SK-MV (MV1): the VP-side view of the matcher's field set ------------------------------------------
-		// One place that reads today's dejudder-> accessors (Field / FrameTrust / SubField / Camera, and the Snap* copies the extras and
-		// the entrance snapshot read while the next pair is estimated), so a renderer reader asks the view and not the matcher. The
-		// renderer's reads are NOT switched to it here: M2 P5b publishes no field interface and P5c owns the warp, the interpolator and
-		// the live-field bookkeeping, so the reader switch rides P5c (README, doc 83); each future switch is a one-line, byte-identical
-		// call-site change. The same field set is published at every estimate through the motion segment (MotionShadowField).
-		struct FieldSetView
+		// ---- P3 field view (M2 P5c, MV1 reader switch): the ONLY place outside motion\estimation that reads the matcher's outputs ----
+		// The renderer and its segments ask this view, never `dejudder->`. Each accessor carries ONE of the renderer's validity rules
+		// (P3Rules below, kept exactly as the inlined conditions they replace). The answers are the matcher's accessors, which (until the
+		// shim removal, P5c-4) read the motion segment's published pair through the IFieldSource pass-through above: the same pl_tex pointers
+		// as the direct reads they replace, so every consumer's input is byte-identical. The one allowed direct producer read is the idle
+		// engine keeper's warm-up (EngineKeeper.inl, a dummy A -> A estimate with the live field retracted: the view would answer "none").
+		// R0 Live(): unconditional (the extras while the de-judder is active; the sigma-delta behind its own R1 gate).
+		// R1 LiveFor(seq, motionHistoryFixes): this source frame's live field of the current motion epoch (DejudderLiveFieldFor).
+		// R2 LiveFrom(seq): the live outputs are the pair that starts at seq, current epoch (the entrance segment's FieldOf).
+		// R4 Snapshot(): the (A, B) copies taken before an estimate ahead; the host keeps its own snapFor / epoch test.
+		P3FieldSet Live() const
 		{
-			pl_tex field = nullptr, frameTrust = nullptr, subField = nullptr, camera = nullptr;
-			bool Usable() const { return field != nullptr && frameTrust != nullptr; }
+			P3FieldSet s;
+			if (!dejudder)
+				return s;
+			s.valid = true;
+			s.field = dejudder->Field();
+			s.frameTrust = dejudder->FrameTrust();
+			s.subField = dejudder->SubField();
+			s.grainError = dejudder->GrainError();
+			s.camera = dejudder->Camera();
+			s.pixelMask = dejudder->PixelMask();
+			s.vectorOk = dejudder->VectorOk();
+			return s;
+		}
+		bool LiveValidFor(uint64_t sequence, bool motionHistoryFixes) const
+		{
+			return P3Rules::LiveFor(dejudder != nullptr, sequence, dejudderEstimatedSequence, engine_.motionValidity.Current(dejudderEstimatedEpoch),
+				motionHistoryFixes, dejudderLiveFieldFrom);
+		}
+		P3FieldSet LiveFor(uint64_t sequence, bool motionHistoryFixes) const
+		{
+			return LiveValidFor(sequence, motionHistoryFixes) ? Live() : P3FieldSet();
+		}
+		P3FieldSet LiveFrom(uint64_t sequence) const
+		{
+			return P3Rules::LiveFrom(dejudder != nullptr, sequence, dejudderLiveFieldFrom, engine_.motionValidity.Current(dejudderEstimatedEpoch)) ?
+				Live() : P3FieldSet();
+		}
+		// The snapshot is read per accessor (lazily, in the caller's order): each Snap* read is one lease check, and a lost lease is
+		// counted per read (FallbackCatalog::MotionSnapshotLease), so the count stays what it was with the direct reads.
+		struct P3Snapshot
+		{
+			const Dejudder::MotionWarp* matcher = nullptr;
+			pl_tex Field() const { return matcher ? matcher->SnapField() : nullptr; }
+			pl_tex FrameTrust() const { return matcher ? matcher->SnapFrameTrust() : nullptr; }
+			pl_tex SubField() const { return matcher ? matcher->SnapSubField() : nullptr; }
+			pl_tex Camera() const { return matcher ? matcher->SnapCamera() : nullptr; }
+			pl_tex PixelMask() const { return matcher ? matcher->SnapPixelMask() : nullptr; }
+			pl_tex VectorOk() const { return matcher ? matcher->SnapVectorOk() : nullptr; }
+			bool Usable() const { return Field() && FrameTrust(); }
 		};
-		FieldSetView LiveFields() const
-		{
-			FieldSetView v;
-			if (dejudder)
-			{
-				v.field = dejudder->Field();
-				v.frameTrust = dejudder->FrameTrust();
-				v.subField = dejudder->SubField();
-				v.camera = dejudder->Camera();
-			}
-			return v;
-		}
-		FieldSetView SnapshotFields() const
-		{
-			FieldSetView v;
-			if (dejudder)
-			{
-				v.field = dejudder->SnapField();
-				v.frameTrust = dejudder->SnapFrameTrust();
-				v.subField = dejudder->SnapSubField();
-				v.camera = dejudder->SnapCamera();
-			}
-			return v;
-		}
+		P3Snapshot Snapshot() const { P3Snapshot s; s.matcher = dejudder.get(); return s; }
+		// Planner Q7: the snapshot trust rolled off toward the next pair's (dispatches; render thread).
+		pl_tex LookAheadTrust() { return dejudder ? dejudder->LookAheadTrust() : nullptr; }
+		// B's occlusion mask in a slot; the caller keeps its own slot / sequence / epoch test.
+		pl_tex Occlusion(int slot) const { return dejudder ? dejudder->Occlusion(slot) : nullptr; }
+		float MinTrustedShare() const { return dejudder ? dejudder->GetSettings().minTrustedShare : 0.0f; }
 
 		// ---- moved members (verbatim, with their comments) ----------------------------------------------------
 		// Stage 6 de-judder: B's planes (the next source frame) and the matcher.
