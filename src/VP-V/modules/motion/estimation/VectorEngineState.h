@@ -89,7 +89,7 @@ namespace VpMotion
 		// SK-MV (MV3): the P2 slot, the ONE store of the NVOF pairs. The producer PUBLISHES into it (PlanProducer injects it with
 		// SetSlot); every consumer reads through P2() (a read-only view), never from the producer. It outlives a producer's
 		// stop and restart; a started producer clears it.
-		std::shared_ptr<VpMotion::P2Slot> p2Slot = std::make_shared<VpMotion::P2Slot>(16);
+		std::shared_ptr<VpMotion::P2Slot> p2Slot = std::make_shared<VpMotion::P2Slot>(MotionAhead::kP2RingPairs);
 		VpMotion::P2View P2() const { return VpMotion::P2View(p2Slot); }
 		// SK-MV (MV2): estimates (optical flow wanted) that found no pair computed ahead and took the matcher path; sustained runs or a
 		// sustained partial miss ratio make the visible "motion" fallback entry (NoPairTracker, VectorProducts.h). Render thread.

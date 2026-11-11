@@ -126,7 +126,7 @@ namespace MotionAhead
 	// the MINIMUM the queue is kept deep enough for, never the source of the lead. Reading the lead there instead would feed the queue
 	// size back into its own floor (a ratchet: the queue could never shrink).
 	// The one cap is structural, not a setting: the P2 slot ring holds kP2RingPairs pairs (VectorEngineState::p2Slot and the
-	// standalone Producer::slot, both 16) and keeps kPairsKeptBehind of them for frames already at the render (the current pair (N-1, N)
+	// standalone Producer::slot are built with it) and keeps kPairsKeptBehind of them for frames already at the render (the current pair (N-1, N)
 	// and the two Prune keeps behind it: VectorEngine.cpp P2().Prune(sequence - 2)); a lead above the rest would evict the pairs of the
 	// next frames to show before they are read (NVOF work thrown away, a matcher run instead). 13 = 217 ms at 60p, 542 ms at 24p.
 	constexpr int kP2RingPairs = 16;

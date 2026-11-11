@@ -313,6 +313,6 @@ namespace MotionAhead
 		uint64_t previousSequence = 0, previousGeneration = 0;
 		uint64_t hintSequence = UINT64_MAX, hintGeneration = 0;   // the "to" frame of the engine's last pair
 		std::vector<uint8_t> lumaBuffer;
-		std::shared_ptr<VpMotion::P2Slot> slot{ std::make_shared<VpMotion::P2Slot>(16) };   // published into (SetSlot injects the engine's)
+		std::shared_ptr<VpMotion::P2Slot> slot{ std::make_shared<VpMotion::P2Slot>(MotionAhead::kP2RingPairs) };   // published into (SetSlot injects the engine's)
 	};
 }
