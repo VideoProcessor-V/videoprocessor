@@ -19,6 +19,7 @@
 #include <vprenderer/PulldownDetector.h>
 #include <vprenderer/CaptureTimestampGap.h>
 #include <vprenderer/FileFrameSlotGate.h>
+#include <VP-V/modules/input/queue_timing/TimedFileState.h>   // VPV-HOOK
 #include <vprenderer/QueueTimingPolicy.h>
 #include <VP-V/modules/input/queue_timing/VpFixedBudgetPolicy.h>
 #include <VP-V/modules/input/queue_timing/IngressState.h> // VPV-HOOK
@@ -206,38 +207,15 @@ private:
 			DolbyVisionTunnelFrameMetadata dolby;
 			double conversionCpuMs = 0.0;
 			int64_t completedQpc = 0;
-			// capture_path: gpu (owner 2026-10-13): the raw DeckLink frame
-			// itself (kept alive here), unpacked on the GPU (GpuCaptureUnpack);
-			// pixels stays empty. contract = the planes the unpack writes.
-			std::shared_ptr<VideoFrame> rawFrame;
-			size_t rawRowBytes = 0;
-			size_t rawBytes = 0;
-			VideoFrameEncoding rawEncoding = VideoFrameEncoding::UNKNOWN;
 			// The capture encoding of the frame (state->videoFrameEncoding), set on
 			// every payload by ConversionLoop: raw, CPU-formatted and SDR fallback
 			// alike (post-merge audit 2026-10-17: the DV pair rule needs r210 for
 			// non-raw SDR fallback payloads).
 			VideoFrameEncoding captureEncoding = VideoFrameEncoding::UNKNOWN;
-			// capture_upload: early (legacy, always null now): the conversion
-			// thread never sets it (it publishes earlyHandoff below and uploads
-			// after the publish); the render still reads it first, so a slot
-			// placed here before publication would be used as before.
-			std::shared_ptr<void> early;
-			// capture_upload: early - the hand-off of the slot the conversion
-			// thread uploads AFTER it has published this payload. Set on the
-			// conversion thread BEFORE the payload is published, never
-			// reassigned after (the render reads it without a lock; the
-			// handoff's own mutex guards its state). Null: the render uploads.
-			std::shared_ptr<EarlyUploadHandoff> earlyHandoff;
-			// dv_tunnel_gpu_unpack: the raw frame is a Dolby Vision tunnel
-			// picture (dolby holds its checked DM); the render unpacks it with
-			// GpuDolbyVisionTunnelUnpack, RGB8 in the high (true) or low eight
-			// bits of the r210 channels.
-			bool dvTunnelRaw = false;
-			bool dvTunnelHighAligned = false;
+			// P10 R18: the capture routes' data (the raw frame for the GPU unpack, the early upload's hand-off,
+			// the Dolby Vision tunnel route): input.capture's Vpv::Capture::PayloadExtension (CapturePayload.h).
+			// Set on the conversion thread before the payload is published, never reassigned after. Null: none.
 			std::shared_ptr<void> extension; // VPV-HOOK
-			bool Raw() const { return rawFrame != nullptr; }
-			size_t Bytes() const { return Raw() ? rawBytes : pixels.size(); }
 		};
         struct LookaheadMeasurement {
             AnalysisLumaSource source;
@@ -369,18 +347,11 @@ private:
 	bool IngressPulldown(RendererExtension::IngressContext& ic);   // VPV-HOOK
 	static bool IngressDecideThunk(void* self, RendererExtension::IngressContext& ic);   // VPV-HOOK
 	// The queue admission shared by OnVideoFrame and OnTimedVideoFrame (the
-	// former's code, moved unchanged; file fields only set file frames).
-	struct FileQueueFields
-	{
-		int64_t presentationQpc = 0;
-		bool paused = false;
-		bool motionOff = false;
-		bool discontinuity = false;
-	};
+	// former's code, moved unchanged; the external timing only sets file frames: R20, RendererExtension::ExternalTiming).
 	void EnqueueFrame(VideoFrame& videoFrame, const VideoStateComPtr& frameState,
 		uint64_t enqueueGeneration, int64_t callbackQpc, int64_t arrivalQpc,
 		bool gapBefore, const char* gapCause, uint32_t gapFrames, double filmHz,
-		bool filmUpdate, const FileQueueFields* file);
+		bool filmUpdate, const RendererExtension::ExternalTiming* file);
 	// ABI 37: QPC ticks until the queue's head (a file frame) is due; 0 when
 	// due, or when the head is not a file frame (capture: unchanged).
 	int64_t FileHeadTicksUntilDueLocked() const;
@@ -425,10 +396,7 @@ private:
 	// ABI 37: WaitForFileFrameSlot / CancelFileFrameWait (own mutex; never
 	// held with m_queueMutex across a wait).
 	FileFrameSlotGate m_fileSlotGate;
-	std::atomic<uint64_t> m_fileTimingRejected{0};
-	// The file film clock as last logged (the filter's streaming thread only).
-	double m_fileLoggedFilmHz = -1.0;
-	bool m_fileLoggedMotionOff = false;
+	Vpv::QueueTiming::TimedFileState m_timedFile;   // VPV-HOOK R20: the file thread's reject counter and logged film clock (TimedFileFrames.inl)
 	std::deque<QueuedFrame> m_frameQueue;
 	ActivePictureDecisionTimeline m_activePictureTimeline;
 	size_t m_frameQueueDesiredDepth = 1;

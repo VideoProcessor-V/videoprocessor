@@ -28,7 +28,7 @@ bool LibplaceboVideoRenderer::Impl::UploadDejudderPlanes(const std::shared_ptr<c
 		return false;
 	const QueuedFrame::ConvertedPayload& payload = *payloadPtr;
 	const DejudderUploadLayout& l = dejudderLayout;
-	if (!l.valid || payload.Bytes() != l.pixelBytes)
+	if (!l.valid || Vpv::Capture::BytesOf(payload) != l.pixelBytes)
 		return false;
 	auto record = [&](bool raw, const pl_plane* planes)
 	{
@@ -53,20 +53,21 @@ bool LibplaceboVideoRenderer::Impl::UploadDejudderPlanes(const std::shared_ptr<c
 	};
 	// native_rgb_ingest: an RGB raw frame gives the matcher its luma only
 	// (dst[0]; dst[1] untouched), unpacked as the frame A was.
-	if (payload.Raw() && !payload.dvTunnelRaw && GpuRgbUnpack::Supports(payload.rawEncoding))
+	const Vpv::Capture::PayloadExtension* const cap = Vpv::Capture::RawOf(payload);   // the raw capture frame's slot
+	if (cap && !cap->dvTunnelRaw && GpuRgbUnpack::Supports(cap->rawEncoding))
 	{
-		if (!l.raw || !l.rgb || payload.rawEncoding != l.rawEncoding || !d3d11)
+		if (!l.raw || !l.rgb || cap->rawEncoding != l.rawEncoding || !d3d11)
 			return false;
 		if (!rgbUnpack)
 			rgbUnpack = std::make_unique<GpuRgbUnpack>(log, d3d11->gpu);
 		EarlyUpload::Slot* slot = nullptr;
 		const pl_tex early = EarlyTexture(payload, slot);
-		bool unpacked = rgbUnpack->Unpack(payload.rawEncoding, l.bt2020, payload.rawFrame->GetData(), payload.rawRowBytes,
+		bool unpacked = rgbUnpack->Unpack(cap->rawEncoding, l.bt2020, cap->rawFrame->GetData(), cap->rawRowBytes,
 			l.width, l.height, dejudderRgbScratch, dst[0], true, early);
 		if (slot)
 			earlyUpload->Used(*slot);
 		if (!unpacked && early)
-			unpacked = rgbUnpack->Unpack(payload.rawEncoding, l.bt2020, payload.rawFrame->GetData(), payload.rawRowBytes,
+			unpacked = rgbUnpack->Unpack(cap->rawEncoding, l.bt2020, cap->rawFrame->GetData(), cap->rawRowBytes,
 				l.width, l.height, dejudderRgbScratch, dst[0], true);
 		if (unpacked)
 			return true;
@@ -74,10 +75,10 @@ bool LibplaceboVideoRenderer::Impl::UploadDejudderPlanes(const std::shared_ptr<c
 			rgbUnpack->Error().c_str());
 		return false;
 	}
-	if (payload.Raw())
+	if (cap)
 	{
 		// capture_path: gpu; the route and format must be B's (A's layout).
-		if (!l.raw || payload.rawEncoding != l.rawEncoding || payload.dvTunnelRaw != l.dvTunnelRaw)
+		if (!l.raw || cap->rawEncoding != l.rawEncoding || cap->dvTunnelRaw != l.dvTunnelRaw)
 			return false;
 		if (!UnpackRawPayload(payload, l.width, l.height, dst, false))
 			return false;
@@ -133,7 +134,7 @@ bool LibplaceboVideoRenderer::Impl::TakeNextPlanes(const std::shared_ptr<const Q
 	request.height = height;
 	request.chromaHeight = chromaHeight;
 	request.rowBytes = rowBytes;
-	request.raw = payload->Raw();
+	request.raw = Vpv::Capture::IsRaw(*payload);
 	request.texturesPresent = dejudderNextTextures[0] && dejudderNextTextures[1];
 	request.uploadedSequenceMatches = sourceSequence != 0 && dejudderNextUploadedSequence == sourceSequence;
 	if (!UploadReuse::CanReuse(record, request))
@@ -548,10 +549,10 @@ bool LibplaceboVideoRenderer::Impl::EstimateAhead(uint64_t sourceSequence, uint6
 	c.after = dejudderAheadPayload ? dejudderAheadPayloadSequence : 0;
 	c.estimated = dejudderEstimatedSequence;
 	c.layoutMatches = dejudderAheadPayload && dejudderLayout.valid &&
-		dejudderAheadPayload->Bytes() == dejudderLayout.pixelBytes &&
-		dejudderAheadPayload->Raw() == dejudderLayout.raw &&
-		(!dejudderLayout.raw || dejudderAheadPayload->rawEncoding == dejudderLayout.rawEncoding) &&
-		dejudderAheadPayload->dvTunnelRaw == dejudderLayout.dvTunnelRaw &&
+		Vpv::Capture::BytesOf(*dejudderAheadPayload) == dejudderLayout.pixelBytes &&
+		Vpv::Capture::IsRaw(*dejudderAheadPayload) == dejudderLayout.raw &&
+		(!dejudderLayout.raw || Vpv::Capture::RawEncodingOf(*dejudderAheadPayload) == dejudderLayout.rawEncoding) &&
+		Vpv::Capture::DvTunnelRawOf(*dejudderAheadPayload) == dejudderLayout.dvTunnelRaw &&
 		dejudderAheadPayload->contract.sampleRange == dejudderLayout.contract.sampleRange &&
 		dejudderAheadPayload->contract.colorDepth == dejudderLayout.contract.colorDepth &&
 		dejudderAheadPayload->contract.bitShift == dejudderLayout.contract.bitShift;

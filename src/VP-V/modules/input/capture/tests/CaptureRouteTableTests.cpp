@@ -207,8 +207,68 @@ namespace VideoProcessorTest
 			Assert::IsNull(Vpv::Capture::EarlyUploadDue(slot), L"no hand-off: skipped");
 			e->earlyHandoff = std::make_shared<EarlyUploadHandoff>();
 			Assert::IsNull(Vpv::Capture::EarlyUploadDue(slot), L"no frame: skipped");
-			e->earlyFrame = std::make_shared<VideoFrame>();
+			e->rawFrame = std::make_shared<VideoFrame>();
 			Assert::IsTrue(Vpv::Capture::EarlyUploadDue(slot) == e.get(), L"both: due");
+		}
+
+		// R18 (r2/p10): the free readers on a fake payload ({pixels, extension}) answer as the former members did.
+		struct FakePayload
+		{
+			std::vector<uint8_t> pixels;
+			std::shared_ptr<void> extension;
+		};
+
+		TEST_METHOD(PayloadReadersAreNullSafeWithoutASlot)
+		{
+			FakePayload p;
+			p.pixels.resize(37);
+			Assert::IsFalse(Vpv::Capture::IsRaw(p));
+			Assert::AreEqual(static_cast<size_t>(37), Vpv::Capture::BytesOf(p), L"Bytes = the formatted pixels");
+			Assert::IsTrue(Vpv::Capture::RawEncodingOf(p) == VideoFrameEncoding::UNKNOWN);
+			Assert::IsFalse(Vpv::Capture::DvTunnelRawOf(p));
+			Assert::IsFalse(Vpv::Capture::DvTunnelHighAlignedOf(p));
+			Assert::IsNull(Vpv::Capture::RawFrameOf(p));
+			Assert::IsFalse(Vpv::Capture::HasEarlyUpload(p));
+			Assert::IsNull(Vpv::Capture::RawOf(p));
+			Assert::IsNull(Vpv::Capture::CaptureOf(p));
+		}
+
+		TEST_METHOD(PayloadReadersSeeARawFrameSlot)
+		{
+			FakePayload p;
+			p.pixels.resize(5);
+			auto e = std::make_shared<Vpv::Capture::PayloadExtension>();
+			e->rawFrame = std::make_shared<VideoFrame>();
+			e->rawBytes = 4096;
+			e->rawEncoding = VideoFrameEncoding::V210;
+			p.extension = e;
+			Assert::IsTrue(Vpv::Capture::IsRaw(p));
+			Assert::AreEqual(static_cast<size_t>(4096), Vpv::Capture::BytesOf(p), L"Bytes = the raw frame's size");
+			Assert::IsTrue(Vpv::Capture::RawEncodingOf(p) == VideoFrameEncoding::V210);
+			Assert::IsTrue(Vpv::Capture::RawFrameOf(p) == e->rawFrame.get());
+			Assert::IsFalse(Vpv::Capture::DvTunnelRawOf(p), L"not the tunnel");
+			Assert::IsFalse(Vpv::Capture::DvTunnelHighAlignedOf(p));
+			Assert::IsFalse(Vpv::Capture::HasEarlyUpload(p), L"no early slot or hand-off");
+			e->dvTunnelRaw = true;
+			e->dvTunnelHighAligned = true;
+			Assert::IsTrue(Vpv::Capture::DvTunnelRawOf(p));
+			Assert::IsTrue(Vpv::Capture::DvTunnelHighAlignedOf(p));
+			e->dvTunnelHighAligned = false;
+			Assert::IsFalse(Vpv::Capture::DvTunnelHighAlignedOf(p));
+		}
+
+		TEST_METHOD(PayloadReadersSeeAHandoffOnlySlot)
+		{
+			FakePayload p;
+			p.pixels.resize(5);
+			auto e = std::make_shared<Vpv::Capture::PayloadExtension>();
+			e->earlyHandoff = std::make_shared<EarlyUploadHandoff>();
+			p.extension = e;
+			Assert::IsTrue(Vpv::Capture::HasEarlyUpload(p));
+			Assert::IsFalse(Vpv::Capture::IsRaw(p), L"a hand-off without a raw frame is not raw");
+			Assert::AreEqual(static_cast<size_t>(5), Vpv::Capture::BytesOf(p));
+			Assert::IsNull(Vpv::Capture::RawFrameOf(p));
+			Assert::IsNotNull(Vpv::Capture::CaptureOf(p));
 		}
 	};
 }
