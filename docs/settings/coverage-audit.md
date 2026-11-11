@@ -349,7 +349,7 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `cnn_residual_stabilise` | vprenderer | VP-V > Advanced | Advanced | - | On | s5 | DUAL (managed) |
 | `downscale_light` | vprenderer | VP-V > Main | - | - | Use default | s5 |  |
 | `nls_sampling` | vprenderer | VP-V > Proposed retirement | - | - | catmull | s5 | retire B |
-| `rebase_kernel_match` | vprenderer | Tone Mapping > Profile details | Main | - | On | s5 | DUAL (managed) |
+| `rebase_kernel_match` | vprenderer | Tone Mapping > Profile details | Main | - | Off (SID r2; was On) | s5 | DUAL (managed) |
 | `residual_stabilise_grain_guard` | vprenderer | VP-V > Proposed retirement | - | - | On | s5 | retire A |
 | `source_resolution` | vprenderer | VP-V > Advanced | - | Classic=native, Low=auto, Mid=auto | Auto (detected) | s2 | DUAL (managed) |
 | `source_resolution_auto_min_confidence` | vprenderer | VP-V > Advanced | - | - | 0.8 | s5 |  |
@@ -903,6 +903,7 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `intent_motion_policy` | vprenderer | VP-V > Advanced | - | - | display | - |  |
 | `motion_history_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
 | `report_thumbnail` | logging | VP-V > Problem reports | - | - | unchecked | - | ORPHAN? |
+| `source_geometry_detect` | vprenderer | VP-V page > Scaling | - | - | all | - |  |
 | `source_resolution_crossfade_s` | vprenderer | VP-V > Advanced | - | - | 1.5 | - |  |
 | `source_resolution_cut_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
 | `source_resolution_evidence_seconds` | vprenderer | VP-V > Advanced | - | - | 10 | - |  |
