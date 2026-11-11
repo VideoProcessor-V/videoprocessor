@@ -5036,9 +5036,9 @@ struct LibplaceboVideoRenderer::Impl
 		Field FieldOf(uint64_t sequence) const override
 		{
 			Field f;
-			const VpMotion::P3FieldSet live = r.vectorEstimate.LiveFrom(sequence);   // P5c: rule R2 of the P3 field view
-			f.field = live.field;
-			f.grainError = live.grainError;
+			const VpMotion::P3FieldSet live = r.vectorEstimate.LiveFrom(sequence);   // P5c: rule R2 of the P3 field view   // VPV-HOOK
+			f.field = live.field;   // VPV-HOOK
+			f.grainError = live.grainError;   // VPV-HOOK
 			return f;
 		}
 		NextUpload Next() const override
@@ -5101,7 +5101,7 @@ struct LibplaceboVideoRenderer::Impl
 	bool EntranceOnceSnapshotFor(uint64_t aSequence) const
 	{
 		return dejudder && aSequence != 0 && entranceOnceSnapFor == aSequence && motionValidity.Current(entranceOnceSnapEpoch) &&
-			vectorEstimate.Snapshot().Usable();   // P5c: R4, the host keeps snapFor / epoch
+			vectorEstimate.Snapshot().Usable();   // P5c: R4, the host keeps snapFor / epoch   // VPV-HOOK
 	}
 	bool EntranceOnceFieldAhead(uint64_t aSequence, uint64_t bSequence, std::string& why);   // VPV-HOOK P4-5: defined in VP-V/segments/EntranceHostMembers.inl
 
@@ -5188,8 +5188,8 @@ struct LibplaceboVideoRenderer::Impl
 	// VPV-HOOK-END
 	unsigned long long motionEngineIdleReleasesLogged = 0;
 	// Whether the matcher's live outputs (field, trust, grain error) are this source
-	// frame's (sequence, sequence + 1) pair of the current motion epoch (rule R1 of the P3 field view, EstimateState).
-	bool DejudderLiveFieldFor(uint64_t sequence) const { return vectorEstimate.LiveValidFor(sequence, activeSettings.motionHistoryFixes); }
+	// frame's (sequence, sequence + 1) pair of the current motion epoch (rule R1 of the P3 field view, EstimateState).   // VPV-HOOK
+	bool DejudderLiveFieldFor(uint64_t sequence) const { return vectorEstimate.LiveValidFor(sequence, activeSettings.motionHistoryFixes); }   // VPV-HOOK
 	unsigned long long dejudderEstimates = 0;
 	unsigned long long dejudderFailures = 0;
 	// 6b-2 extra presents: phase state, the vsync output and the counters.
@@ -5849,9 +5849,9 @@ struct LibplaceboVideoRenderer::Impl
 			dejudderNextVectorField = std::make_unique<DejudderRendered::VectorField>(log, d3d11->gpu);
 		const Dejudder::Settings matcher = RenderedWarpSettings(h);
 		pl_tex next = nullptr;
-		const VpMotion::P3FieldSet live = vectorEstimate.Live();   // P5c: R0
-		if (dejudderNextVectorField->Run(live.field, live.frameTrust, dejudder->GetSettings().minTrustedShare, 0.0f,
-				dejudderGeometry, w, h, next, live.subField, &matcher, live.camera, true) && next)
+		const VpMotion::P3FieldSet live = vectorEstimate.Live();   // P5c: R0   // VPV-HOOK
+		if (dejudderNextVectorField->Run(live.field, live.frameTrust, dejudder->GetSettings().minTrustedShare, 0.0f,   // VPV-HOOK
+				dejudderGeometry, w, h, next, live.subField, &matcher, live.camera, true) && next)   // VPV-HOOK
 		{
 			dejudderNextVectors = next;
 			dejudderNextVectorsSequence = nextSourceSequence;
@@ -15571,11 +15571,11 @@ struct LibplaceboVideoRenderer::Impl
 		int extras = 0;
 		// What the warps read: the matcher's own until (B, C) is estimated
 		// ahead, then the copy of (A, B)'s.
-		const VpMotion::P3FieldSet liveSet = vectorEstimate.Live();   // P5c: R0 (the P3 field view)
-		pl_tex warpField = liveSet.field, warpTrust = liveSet.frameTrust, warpSub = liveSet.subField;
-		pl_tex warpCamera = liveSet.camera;   // delta 14 R-B
-		pl_tex warpMask = liveSet.pixelMask;   // M6 (nullptr: the block decision)
-		pl_tex warpVectorOk = liveSet.vectorOk;
+		const VpMotion::P3FieldSet liveSet = vectorEstimate.Live();   // P5c: R0 (the P3 field view)   // VPV-HOOK
+		pl_tex warpField = liveSet.field, warpTrust = liveSet.frameTrust, warpSub = liveSet.subField;   // VPV-HOOK
+		pl_tex warpCamera = liveSet.camera;   // delta 14 R-B   // VPV-HOOK
+		pl_tex warpMask = liveSet.pixelMask;   // M6 (nullptr: the block decision)   // VPV-HOOK
+		pl_tex warpVectorOk = liveSet.vectorOk;   // VPV-HOOK
 		bool aheadTried = false;
 		float previousShift = 0.0f;   // A, shown at shift 0 (delta 8 R1)
 		DejudderPolicy::Stop stop = DejudderPolicy::Stop::None;
@@ -15756,13 +15756,13 @@ struct LibplaceboVideoRenderer::Impl
 						// B3 (i) estimated (B, C) ahead: this and the remaining extras read (A, B)'s snapshot,
 						// as after the rendered warp's own estimate ahead.
 						aheadTried = true;
-						const auto snapSet = vectorEstimate.Snapshot();   // P5c: R4 (lazy: same lease reads, same order)
-						warpField = snapSet.Field();
-						warpTrust = vectorEstimate.LookAheadTrust();
-						warpSub = snapSet.SubField();
-						if (warpCamera) warpCamera = snapSet.Camera();
-						if (warpMask) warpMask = snapSet.PixelMask();
-						if (warpVectorOk) warpVectorOk = snapSet.VectorOk();
+						const auto snapSet = vectorEstimate.Snapshot();   // P5c: R4 (lazy: same lease reads, same order)   // VPV-HOOK
+						warpField = snapSet.Field();   // VPV-HOOK
+						warpTrust = vectorEstimate.LookAheadTrust();   // VPV-HOOK
+						warpSub = snapSet.SubField();   // VPV-HOOK
+						if (warpCamera) warpCamera = snapSet.Camera();   // VPV-HOOK
+						if (warpMask) warpMask = snapSet.PixelMask();   // VPV-HOOK
+						if (warpVectorOk) warpVectorOk = snapSet.VectorOk();   // VPV-HOOK
 					}
 				}
 				if (interpolating)
@@ -15781,7 +15781,7 @@ struct LibplaceboVideoRenderer::Impl
 					for (int slot = 0; slot < 2; ++slot)
 						if (dejudderMaskSequence[slot] == f.nextSourceSequence && f.nextSourceSequence != 0 &&
 							motionValidity.Current(dejudderMaskEpoch[slot]))
-							motion.occlusionB = vectorEstimate.Occlusion(slot);
+							motion.occlusionB = vectorEstimate.Occlusion(slot);   // VPV-HOOK
 					if (!frameInterpolator)
 						frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
 					frameInterpolator->SetGrain(activeSettings.interpolationGrain);
@@ -16116,15 +16116,15 @@ struct LibplaceboVideoRenderer::Impl
 						std::chrono::duration<double, std::milli>(SteadyClock::now() - estimateStart).count());
 				if (estimatedAhead)
 				{
-					const auto snapSet = vectorEstimate.Snapshot();   // P5c: R4 (lazy: same lease reads, same order)
-					warpField = snapSet.Field();
+					const auto snapSet = vectorEstimate.Snapshot();   // P5c: R4 (lazy: same lease reads, same order)   // VPV-HOOK
+					warpField = snapSet.Field();   // VPV-HOOK
 					// Planner Q7: with R-A, the roll-off starts on a fast pan's
 					// first frame (the next pair's strength, rate-limited).
-					warpTrust = vectorEstimate.LookAheadTrust();
-					warpSub = snapSet.SubField();
-					if (warpCamera) warpCamera = snapSet.Camera();
-					if (warpMask) warpMask = snapSet.PixelMask();
-					if (warpVectorOk) warpVectorOk = snapSet.VectorOk();
+					warpTrust = vectorEstimate.LookAheadTrust();   // VPV-HOOK
+					warpSub = snapSet.SubField();   // VPV-HOOK
+					if (warpCamera) warpCamera = snapSet.Camera();   // VPV-HOOK
+					if (warpMask) warpMask = snapSet.PixelMask();   // VPV-HOOK
+					if (warpVectorOk) warpVectorOk = snapSet.VectorOk();   // VPV-HOOK
 				}
 			}
 		}
@@ -23369,11 +23369,11 @@ releaseDriftBaseRetention =
 				// per-frame weight keeps its time constant above 60 Hz (unchanged at and below).
 				vpDebandParams.holdAlpha = GeneralRate::PerFrameWeight(vpDebandParams.holdAlpha, dejudderSourceHz,
 					activeSettings.generalRateFixes);
-				const VpMotion::P3FieldSet debandLive = vectorEstimate.LiveFor(sourceSequence, activeSettings.motionHistoryFixes);   // P5c: R1
-				if (debandLive.valid)
+				const VpMotion::P3FieldSet debandLive = vectorEstimate.LiveFor(sourceSequence, activeSettings.motionHistoryFixes);   // P5c: R1   // VPV-HOOK
+				if (debandLive.valid)   // VPV-HOOK
 				{
-					vpDebandParams.field = debandLive.field;
-					vpDebandParams.grainError = debandLive.grainError;
+					vpDebandParams.field = debandLive.field;   // VPV-HOOK
+					vpDebandParams.grainError = debandLive.grainError;   // VPV-HOOK
 				}
 				vpDebandParams.fieldScale = rebaseFactor > 0.0 ? 1.0 / rebaseFactor : 1.0;
 				vpDebandParams.fieldScaleX = rebaseFactorX > 0.0 ? 1.0 / rebaseFactorX : 1.0;
@@ -23417,8 +23417,8 @@ releaseDriftBaseRetention =
 					if (!std::isfinite(contentHz) || contentHz <= 0.0) contentHz = 0.0;
 					// The de-judder's vectors only under the debander's validity condition: this source frame's
 					// live field (DejudderLiveFieldFor: the current motion epoch, and with motion_history_fixes the live-field sequence).
-					// P5c W1-G: R1 (the gate lacked the motion_history_fixes clause; unchanged with it off).
-					pl_tex field = vectorEstimate.LiveFor(sourceSequence, activeSettings.motionHistoryFixes).field;
+					// P5c W1-G: R1 (the gate lacked the motion_history_fixes clause; unchanged with it off).   // VPV-HOOK
+					pl_tex field = vectorEstimate.LiveFor(sourceSequence, activeSettings.motionHistoryFixes).field;   // VPV-HOOK
 					const double fieldScale = rebaseFactor > 0.0 ? 1.0 / rebaseFactor : 1.0;
 					const double fieldScaleX = rebaseFactorX > 0.0 ? 1.0 / rebaseFactorX : 1.0;
 					const double quality = snap.reading ? snap.bitrateQuality : 1.0;
@@ -24167,14 +24167,14 @@ releaseDriftBaseRetention =
             adaptiveHost.ssimInChain = [&]() { return customHooks.SubmitsFile("SSimDownscaler.glsl", lowLatencyQueue); };
             adaptiveHost.motion = [&]() {
                 AdaptiveDownscaleStage::MotionSource m;
-                const VpMotion::P3FieldSet live = vectorEstimate.LiveFor(sourceSequence, activeSettings.motionHistoryFixes);   // P5c: R1
-                m.live = live.valid && !VpPhaseDrawn(renderImage);
+                const VpMotion::P3FieldSet live = vectorEstimate.LiveFor(sourceSequence, activeSettings.motionHistoryFixes);   // P5c: R1   // VPV-HOOK
+                m.live = live.valid && !VpPhaseDrawn(renderImage);   // VPV-HOOK
                 if (m.live)
                 {
-                    m.field = live.field;
-                    m.frameTrust = live.frameTrust;
-                    m.grainError = live.grainError;
-                    m.minTrustedShare = vectorEstimate.MinTrustedShare();
+                    m.field = live.field;   // VPV-HOOK
+                    m.frameTrust = live.frameTrust;   // VPV-HOOK
+                    m.grainError = live.grainError;   // VPV-HOOK
+                    m.minTrustedShare = vectorEstimate.MinTrustedShare();   // VPV-HOOK
                 }
                 return m;
             };
@@ -24268,7 +24268,7 @@ releaseDriftBaseRetention =
             // native frame's; a factor change does not touch them).
             // (A picture between frames is not A: A's mask would sit t * v off.)
             bool install = activeSettings.occlusionMask && maskSlot >= 0 && dejudder && !cadenceRepeat && !VpPhaseDrawn(renderImage) &&
-                vectorEstimate.Occlusion(maskSlot);
+                vectorEstimate.Occlusion(maskSlot);   // VPV-HOOK
             bool grainInstall = grainMap != nullptr;
             // 6c-2: with NLS the mask follows the NLS shader's own map. Only
             // the bundled NLS / NLS+ maps are known; any other NLS shader, or
@@ -24310,7 +24310,7 @@ releaseDriftBaseRetention =
             dejudderMaskParamSet = install;
             if (install || grainInstall)
             {
-                occlusionMaskHook.SetFrame(install ? vectorEstimate.Occlusion(maskSlot) : nullptr, renderImage.crop, target.crop);
+                occlusionMaskHook.SetFrame(install ? vectorEstimate.Occlusion(maskSlot) : nullptr, renderImage.crop, target.crop);   // VPV-HOOK
                 occlusionMaskHook.SetGrain(grainInstall ? grainMap : nullptr,
                     static_cast<float>(activeSettings.adaptive.grainFloor));
                 // NLS's coordinates span the source crop (measured: the
