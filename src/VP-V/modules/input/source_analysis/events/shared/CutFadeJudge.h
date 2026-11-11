@@ -14,7 +14,7 @@
 //   fade fit     the matcher's M4 law on two frames' mean / spread: gain = clamp(sa / sb, 0.5, 2), offset = ma - gain * mb,
 //                active only inside the per-frame code window; keeps its switch in Params (FadeFit, the CPU twin of the
 //                matcher's GPU fade test; FadeKernelHeader / FadeKernelBody are that kernel, moved byte-for-byte from
-//                motion/consumers/DejudderWarp.cpp)
+//                motion/estimation/matcher/DejudderWarp.cpp)
 //   trust cut    the matcher's frame-trust cut: the share of trusted blocks below the minimum share, confirmed by the coarse
 //                luma histogram distance (SourceStats::CoarseL1) above the cut threshold, or the share below 0.05 alone
 //                (TrustCut; GLSL TrustCutRegionalLine / TrustCutPlainLine)
