@@ -1737,40 +1737,6 @@ namespace SkeletonModuleTestsNs
 			}
 		}
 
-		// B4 host call site (audit SHOULD 4): the host's one RenderTiming line (PassTimers' render-only span) reaches NoteRenderOnlyMs. The
-		// default gate only records it; a null payload or a frame without a sequence records nothing.
-		TEST_METHOD(TheHostRenderTimingPhaseIsRecordedAndNotFedByDefault)
-		{
-			Assert::AreEqual(16, static_cast<int>(RE::FramePhase::RenderTiming), L"appended: earlier phase numbers unchanged");
-			Assert::IsTrue(RE::PhaseFansOut(RE::FramePhase::RenderTiming), L"an observer phase fans out");
-			Rig rig(Lane("on"));
-			rig.ResyncApply("on");
-			rig.Life(RE::Lifecycle::GpuCreated);
-			for (int64_t s = 1; s <= 150; ++s)
-			{
-				rig.Ingress(s);
-				if (s == 1)
-					rig.Deliver(1);
-				rig.Deliver(uint64_t(s) + 1);
-				rig.Begin(s);
-				rig.After(s);
-			}
-			RE::RenderTimingFacts facts;
-			facts.renderOnlyMs = 3.5;
-			RE::FrameContext c;
-			c.host = rig.Host(); c.phase = RE::FramePhase::RenderTiming; c.seq = 151; c.phaseData = nullptr;
-			Assert::IsFalse(rig.sk.OnFrame(c), L"never a take-over");
-			c.seq = 0; c.phaseData = &facts;
-			Assert::IsFalse(rig.sk.OnFrame(c));
-			Assert::AreEqual(uint64_t(0), rig.sk.TimingFeedOf(rig.Host()).noted, L"no payload / no sequence: nothing recorded");
-			c.seq = 151;
-			Assert::IsFalse(rig.sk.OnFrame(c));
-			const SkeletonModule::TimingFeed t = rig.sk.TimingFeedOf(rig.Host());
-			Assert::AreEqual(uint64_t(1), t.noted, L"recorded");
-			Assert::AreEqual(3.5, t.lastNotedMs);
-			Assert::AreEqual(uint64_t(0), t.fed, L"observe (the default): the regulator is not fed");
-		}
-
 		TEST_METHOD(TheRenderAheadTermIsNeverLeftWiredWithAnOldValue)
 		{
 			// Fix 2: the host calls QueueDepth only while a render-ahead plan runs. No value (a negative one: no source period) unwires at once; a plan that

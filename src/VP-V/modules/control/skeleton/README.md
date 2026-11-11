@@ -36,14 +36,10 @@ pathway = off), on the render thread. An invalid value keeps the default and is 
 Controls without a settings key (P6 rest audit S2): `SkeletonModule::SetRegulatorGate` - no settings key; default `Observe` (the
 host-measured render-only span is recorded and shown, the regulator is not fed); set by the TD/owner wiring (no production caller yet).
 `VpFixedBudgetPolicy::SetRaiseQueueForAnalysis` - no settings key; default off; set by the TD/owner wiring together with the presentation
-module's `Presenter::floorPolicy = RaiseQueue` (see output/presentation/README.md). The declared analysis lead the host feeds the analysis
-floor is 0 today.
+module's `Presenter::floorPolicy = RaiseQueue` (see output/presentation/README.md). No host feeds the analysis floor on this branch (it is 0).
 
-Host footprint with the lane or render_ahead off (P6 rest audit S5; not zero): the render-only span runs from `PassTimerHook::CpuBegin`
-(LibplaceboVideoRenderer.cpp, the render pass's CPU begin) to the render mark, so it is CPU time, not GPU time. Every refresh costs one
-extra QPC read for that span and one `RendererExtension::NotifyRenderTiming` fan-out to the registered extensions, even when
-`analysis_lane = off` and `render_ahead = off`; the module's handler then does one host lookup and returns (no lane bundle). The ledger
-line lists it as a per-refresh cost, not zero footprint; a timed measurement is still open.
+Host footprint (P6 rest audit S5): none on this branch (r2/p6-core). The host-measured render-only span and its fan-out come with the
+seam rework (refs/107); until then `NoteRenderOnlyMs` has no production caller and the regulator is not fed.
 
 ## Environment and diagnostics
 
