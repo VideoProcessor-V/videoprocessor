@@ -765,6 +765,8 @@ inline void AppendGrainSplitProducts(std::vector<ProductDecl>& decls, bool compa
     p10.refRenderMs = 1.2f;
     decls.push_back(p10);
 
+    // RESERVED, NO PRODUCER (C17): declared for the chroma band split but no lane job is registered (SkeletonModule.cpp registers P10/P11/P12
+    // only) and nothing live-fills it; C10 builds it. The declaration is kept unchanged; ProductCatalog.h flags it (ProductFlags).
     ProductDecl c = Make(kP10cGrainSplitChroma, "grain.split.chroma", "grain split (chroma planes)", Backend::GpuCompute,
                          1, Tier::T1, content, Bit(kSettingsAnalysis));
     c.sourceFrame = true;

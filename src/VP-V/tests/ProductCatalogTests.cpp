@@ -620,6 +620,118 @@ namespace ProductCatalogTestsNs
 			Assert::IsTrue(GraphHistoryCapNote(g, p24).find("(the configured queue asks for 301 frames)") != std::string::npos);
 		}
 
+		// C17 (doc 93 W0-4, the seed of the conformance checker): every declared input is either READ as declared or carries an explicit flag.
+		// Declarations stay as they are (graph order, live-fill owner unchanged); the flags say where the code differs today.
+		TEST_METHOD(EveryDeclaredInputIsReadOrCarriesAFlag)
+		{
+			const Registry reg = SkeletonProducts();
+
+			// 1. Product-level flags: each names a real product; NotYetConsumed / ViewIsActual name an input the product DECLARES (a flag on
+			// a declaration that is gone is stale); ExternalView names an input it does NOT declare (else it is just a declaration).
+			size_t notYet = 0, views = 0, ext = 0, reserved = 0;
+			for (const ProductFlag& f : ProductFlags()) {
+				Assert::IsTrue(reg.Has(f.product), L"a product flag names a registry product");
+				Assert::IsTrue(f.item != nullptr && f.item[0] == 'C', L"a flag names the consolidation item that makes it true (C<n>)");
+				Assert::IsTrue(f.note != nullptr && f.note[0] != '\0');
+				bool declared = false;
+				if (f.input != kNoProduct) {
+					Assert::IsTrue(reg.Has(f.input));
+					const ProductDecl& d = reg.Get(f.product);
+					for (size_t i = 0; i < d.inputCount; ++i)
+						declared = declared || d.inputs[i].product == f.input;
+				}
+				switch (f.kind) {
+				case FlagKind::NotYetConsumed:
+					++notYet;
+					Assert::IsTrue(declared, L"declared, not yet consumed: the input is declared");
+					Assert::AreEqual(std::string("declared, not yet consumed"), std::string(Token(f.kind)));
+					break;
+				case FlagKind::ViewIsActual:
+					++views;
+					Assert::IsTrue(declared, L"view flag: the declared input exists");
+					break;
+				case FlagKind::ExternalView:
+					++ext;
+					Assert::IsFalse(declared, L"external view: the input is NOT a declaration");
+					break;
+				case FlagKind::Reserved:
+					++reserved;
+					Assert::IsTrue(f.input == kNoProduct, L"reserved applies to the whole product");
+					break;
+				case FlagKind::NotRead:
+					Assert::Fail(L"NotRead is a consumer-row flag");
+					break;
+				}
+			}
+			// The exact set (a new unread declaration must add its flag here AND in ProductFlags()).
+			Assert::AreEqual(size_t(3), notYet, L"P2, P2m, P3 declare P1 and read private copies (C9)");
+			Assert::AreEqual(size_t(2), views, L"P10 -> tap view, P14g -> source-frame tap view");
+			Assert::AreEqual(size_t(1), ext, L"P7 reads P2 via FlowOf");
+			Assert::AreEqual(size_t(1), reserved, L"P10c has no producer");
+
+			// 2. The P2 / P2m / P3 declarations of P1 are KEPT (graph order unchanged), flagged rather than deleted.
+			for (ProductId p : { kP2VectorPair, kP2mMatcherPair, kP3AnalysisField }) {
+				bool flagged = false;
+				for (const ProductFlag& f : ProductFlags())
+					flagged = flagged || (f.product == p && f.input == kP1HalfLuma && f.kind == FlagKind::NotYetConsumed);
+				const ProductDecl& d = reg.Get(p);
+				bool declaresP1 = false;
+				for (size_t i = 0; i < d.inputCount; ++i)
+					declaresP1 = declaresP1 || d.inputs[i].product == kP1HalfLuma;
+				Assert::IsTrue(declaresP1, L"the P1 declaration is kept");
+				Assert::IsTrue(flagged, L"and carries the not-yet-consumed (C9) flag");
+			}
+
+			// 3. P10c: reserved, no producer: its catalog row says so and no consumer row other than chroma-from-luma reads it.
+			const ProductRow* c = RowOf(kP10cGrainSplitChroma);
+			Assert::IsNotNull(c);
+			Assert::IsTrue(std::string(c->laneProducer).find("reserved") == 0, L"P10c is marked reserved / no producer in the product row");
+
+			// 4. Consumer-level flags: each names a declared read of that consumer row.
+			for (const ConsumerFlag& f : ConsumerFlags()) {
+				const ConsumerRow* row = nullptr;
+				for (const ConsumerRow& r : ConsumerRows())
+					if (r.decl.id == f.consumerId)
+						row = &r;
+				Assert::IsNotNull(row, L"a consumer flag names a catalog consumer row");
+				bool declared = false;
+				for (size_t k = 0; k < row->decl.count; ++k)
+					declared = declared || row->decl.consumes[k].product == f.input;
+				Assert::IsTrue(declared, L"the flagged read is a declared read of the row");
+				Assert::IsTrue(f.kind == FlagKind::NotRead);
+				Assert::IsTrue(f.item != nullptr && f.item[0] == 'C');
+			}
+			// Detail pulse (id 0) and texture restore (id 1): all three declared reads (P10, P11, P4) are flagged, the held identity read is not.
+			size_t dpTr = 0;
+			for (const ConsumerFlag& f : ConsumerFlags())
+				if (f.consumerId == kCatalogConsumerIdBase + 0 || f.consumerId == kCatalogConsumerIdBase + 1)
+					++dpTr;
+			Assert::AreEqual(size_t(6), dpTr, L"DP and TR each: P10, P11, P4 not read today");
+			Assert::IsTrue(ConsumerFlags().size() == dpTr);
+
+			// 5. The flags carry teeth: the NotRead claim is checked against the sources. If DetailPulse / TextureRestore start to reference a
+			// skeleton product (any product alias, the product header, the analysis store or the lane producers), the flag is stale and must be
+			// removed (C10 / C7 made it true). The other flags (P2 / P2m / P3 -> P1 not yet consumed, P10 -> P13 view, P14g -> P5 view, P7 -> P2
+			// external view) stay human-pinned: they are counted and cross-checked against the registry above, but no scan proves them.
+			namespace fs = std::filesystem;
+			const std::string dir = SettingsTestSupport::RepoRoot() + "src\\VP-V\\modules\\repair\\texture_restore\\";
+			const std::regex reads("\\bk(P10|P11|P4)\\w*|\\bGrainSplit::|RegionEvidence|SourceStats\\.h|LaneGpuProducts|LaneCpuProducts|LaneProducts|Products\\.h|FrameAnalysisStore|\\bProductId\\b");
+			for (const char* name : { "DetailPulse.h", "DetailPulse.cpp", "TextureRestore.h", "TextureRestore.cpp" }) {
+				const std::string path = dir + name;
+				Assert::IsTrue(fs::exists(path), L"the DetailPulse / TextureRestore sources exist where the flag says");
+				const std::string text = SettingsTestSupport::ReadFile(path);
+				Assert::IsFalse(std::regex_search(text, reads), L"stale NotRead flag: the file now reads a skeleton product (remove the flag)");
+			}
+
+			// 6. The document prints the flags and the actual reads.
+			const std::string doc = RenderDoc();
+			Assert::IsTrue(doc.find("reads (actual today)") != std::string::npos);
+			Assert::IsTrue(doc.find("declared, not yet consumed") != std::string::npos);
+			Assert::IsTrue(doc.find("reserved, no producer") != std::string::npos);
+			Assert::IsTrue(doc.find("external view (not declared)") != std::string::npos);
+			Assert::IsTrue(doc.find("not read: ") != std::string::npos);
+		}
+
 		TEST_METHOD(GeneratedDocRegionMatchesTheCatalog)
 		{
 			const std::string path = SettingsTestSupport::RepoRoot() + "docs\\design\\product-graph.md";
