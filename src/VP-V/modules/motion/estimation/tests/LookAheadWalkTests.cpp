@@ -449,6 +449,7 @@ namespace LookAheadWalkTest
 				std::unique_ptr<FakeProducer> motionProducer;
 				VectorDemand::MotionEngineStatus status;   // W2-C1: the engine state the "motion engine" entry is synced from
 				VectorDemand::MotionEngineStatus State() const { return status; }
+				FallbackCatalog::MotionEngineEntry motionEngineEntry;   // W2-C1: Sync's cached entry
 			} host;
 			host.vectorDemand.producer = true;
 			VectorEngineFallbackSync::Sync(host, host);

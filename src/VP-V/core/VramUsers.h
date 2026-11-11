@@ -43,6 +43,7 @@ inline const char* VramUserName(uint16_t id)
     case kUserEnhancers: return "texture restore / detail pulse / debander";
     case kUserBasicChroma: return "basic chroma upscale output";
     case kUserLongPair: return "long-pair optical flow";
+    case kUserMotionMatcher: return "motion engine matcher";
     default: break;
     }
     return "";
@@ -52,7 +53,7 @@ inline const char* VramUserName(uint16_t id)
 inline const uint16_t* DeclarableVramUsers(size_t* count)
 {
     static const uint16_t kIds[] = { kUserNvofProducer, kUserTemporalDetail, kUserCameraModel, kUserInterpolator, kUserEnhancers,
-                                     kUserBasicChroma, kUserLongPair };
+                                     kUserBasicChroma, kUserLongPair, kUserMotionMatcher };
     if (count)
         *count = sizeof(kIds) / sizeof(kIds[0]);
     return kIds;
@@ -73,7 +74,7 @@ inline uint64_t TexBytesOf(const Tex* tex)
 // visible gap, not a guess of their size); a module leaves this list when it calls Declare. Static text.
 inline const char* KnownUndeclaredVramUsers()
 {
-    return "temporal detail, texture restore / detail pulse / debander, the de-judder's pair flow textures (a few hundred KB), camera guidance textures";
+    return "temporal detail, texture restore / detail pulse / debander, camera guidance textures";
 }
 
 class VramUsers {
@@ -123,6 +124,12 @@ public:
     // A user that can step down to nothing (two levels: `bytes`, then 0): the module's call site reads the grant and frees its memory.
     void DeclareSheddable(const void* owner, uint16_t id, uint64_t bytes, Tier tier)
     {
+        DeclareStepped(owner, id, bytes, tier, "not available (the seeded search runs)");
+    }
+
+    // W2-C1: the same two levels with the module's own zero-level wording (`zeroText`: static storage).
+    void DeclareStepped(const void* owner, uint16_t id, uint64_t bytes, Tier tier, const char* zeroText)
+    {
         VramUser u;
         u.id = id;
         u.name = VramUserName(id);
@@ -131,8 +138,15 @@ public:
         u.levels.push_back(bytes);
         u.levels.push_back(0);
         u.levelText.push_back(nullptr);
-        u.levelText.push_back("not available (the seeded search runs)");
+        u.levelText.push_back(zeroText);
         Declare(owner, u, bytes);
+    }
+
+    // W2-C1: the module released its memory and is no longer active (Withdraw + MarkActive false).
+    void Release(const void* owner, uint16_t id)
+    {
+        Withdraw(owner, id);
+        MarkActive(owner, id, false);
     }
 
     void Withdraw(const void* owner, uint16_t id)
@@ -291,6 +305,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         entries_.clear();
         active_.clear();
+        budgetValid_ = false;
         version_.fetch_add(1, std::memory_order_relaxed);
     }
 

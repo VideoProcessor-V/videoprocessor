@@ -92,7 +92,7 @@ void LibplaceboVideoRenderer::Impl::PollMotionEngineBudget(int width, int height
 	SyncFallback(FallbackCatalog::MotionEnginePressure(motionEngineIdle.Pressured()));   // SK-MV: dropping the standing demand is visible
 	// W2-C1 (B9): the release is a hard engine state (VramRelease), and the one reading is shared with the skeleton's tier plan
 	// (QueryCard reads it while fresh instead of querying DXGI again).
-	vectorEngine.NoteVramRelease(motionEngineIdle.Pressured());
+	vectorEngine.NoteVramRelease(motionEngineIdle.Pressured() && !engineHeld);   // a held matcher is not released
 	DXGI_ADAPTER_DESC desc{};
 	if (reported && motionEngineBudgetAdapter && SUCCEEDED(motionEngineBudgetAdapter->GetDesc(&desc)))
 		VpSkeleton::VramUsers::Instance().NoteBudget((static_cast<uint64_t>(static_cast<uint32_t>(desc.AdapterLuid.HighPart)) << 32) |

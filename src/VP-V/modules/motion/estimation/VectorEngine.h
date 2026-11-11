@@ -164,6 +164,7 @@ namespace VpMotion
 			bool vectorDemandSetting = false;   // the vector_demand setting
 			bool sigmaDeltaRanLast = false;     // the sigma-delta quantiser ran in the last frame's output pass
 			bool ditherVectorsOwn = false;      // the dither_vectors_own setting
+			bool opticalFlow = true;            // W2-C1: the optical_flow setting (the camera fit's gate, this frame)
 		};
 		// Decides for this source frame (from the renderer's facts, VectorDemand::Input), then keeps the engine's state
 		// visible: fallback entry, status line, Ctrl+Alt+D record and the logs (on change, once per mode, every 5 s

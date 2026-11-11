@@ -269,6 +269,7 @@ namespace DejudderDecisionLegacy
 			in.strengthEven = activeSettings.dejudderStrengthEven;
 			in.evenIncludes1001 = activeSettings.dejudderEvenIncludes1001;
 			in.occlusionMask = activeSettings.occlusionMask;
+			in.occlusionMaskServed = (vectorDemand.refused & (1u << static_cast<int>(VectorDemand::Consumer::OcclusionMask))) == 0;   // W2-C1: reuse-only
 			in.grainMap = adaptiveGrainMapWanted;
 			in.lowLatency = lowLatency;   // COPY
 			in.sourceHz = sourceHz;

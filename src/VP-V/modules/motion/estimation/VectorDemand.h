@@ -482,7 +482,9 @@ namespace VectorDemand
 				degraded = true;   // a starter runs the matcher while the producer has not started yet (its first frame)
 		}
 		st.reasons = r;
-		st.affected = d.unserved | (degraded ? d.served : 0u);
+		// A hard off (VRAM release, low latency without vectors ...) leaves the decision's served consumers without motion too: affected,
+		// so the "motion engine" entry names them (never a silent fallback).
+		st.affected = d.unserved | ((degraded || hardOff) ? d.served : 0u);
 		st.state = (hardOff || !f.starterEngaged) ? MotionEngineState::Off : degraded ? MotionEngineState::Degraded : MotionEngineState::On;
 		for (int i = 0; i < kMotionEngineReasonCount; ++i)
 			if ((r & (1u << i)) != 0)

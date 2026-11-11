@@ -160,6 +160,17 @@ is caught; an exception of the estimate itself is rethrown after `AfterEstimate(
 failure is counted, logged (first 20, then every 100th) and raised as the fallback entry `vector_engine_hook`
 ("camera guidance skipped for some pairs", released after 8 clean hooked estimates, or at once when the hook is gone).
 
+## 8a. W2-C1 (B9) call sites and hook lines
+
+| Where | Line(s) | What |
+|---|---|---|
+| `consumers/DejudderPolicyRunner.inl` (VP-V module, existing VPV-HOOK block; not in the renderer's `VectorDemandInput`) | the `UpdateVectorEngine` call | `vectorFacts.opticalFlow`, `vectorInput.starterEngaged = dejudderStanding \|\| interpolating \|\| vpGapFillStandalone`, `NoteVramRelease(keeper pressured && !dejudder)`; `analysisEstimate` counted after `RunDejudderEstimate` |
+| `consumers/DejudderPolicyRunner.h`, `tests/DejudderDecisionLegacyCopy.h` | the policy input | `occlusionMaskServed` from `vectorDemand.refused` |
+| `estimation/EngineKeeper.inl` | the keeper | `NoteVramRelease(Pressured() && !engineHeld)` |
+| `estimation/VectorEngineEstimate.inl` | matcher create site; after `vectorEngine.Estimate` | `++matcherCreates`, `NoteVramRelease(false)`, `DeclareStepped(kUserMotionMatcher)` + `MarkActive`; `++matcherEstimates` (not warm-ups) |
+| `consumers/PhaseTimeline.inl` `ReleaseDejudder` (outside the C1 region, noted in Z3) | after `dejudder.reset()` | `VramUsers::Release(this, kUserMotionMatcher)` |
+| `LibplaceboVideoRenderer.cpp` Reset / ResetLiveQueue (VPV-HOOK, lane A4 one-liner) | next to `m_pulldownResetRequested.store(true ...)` | `m_pulldownAcquiring.store(false, relaxed)`: no stale acquiring cadence keeps the de-judder standing across a reset |
+
 ## 8. Open items (audit of bff1c35e..d8605823, not fixed by decision)
 
 - F7: only the LATEST field is served (`FieldOf` answers the last estimated pair only; the matcher keeps no ring). A

@@ -18,6 +18,7 @@
 #include <VP-V/modules/motion/estimation/MotionValidity.h>
 #include <VP-V/modules/motion/estimation/MotionResyncReaders.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <VP-V/modules/motion/estimation/MotionSegment.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
@@ -79,6 +80,7 @@ namespace VpMotion
 		bool motionCameraGated = false;                   // the camera fit wanted the engine but optical flow is off or did not start
 		uint64_t motionStatusEpoch = 0;                   // the validity epoch last seen by the status (resync window)
 		ULONGLONG motionStatusEpochAtMs = 0;              // ... and when it moved
+		FallbackCatalog::MotionEngineEntry motionEngineEntry;   // the "motion engine" entry, rebuilt only on a change
 
 		// ---- item c: producer, look-ahead and validity members -------------------------------------------------
 		// Owner 2026-10-16: the look-ahead engages with N frames queued ahead and disengages when the queue holds

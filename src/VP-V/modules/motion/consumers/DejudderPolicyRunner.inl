@@ -128,7 +128,18 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	VpMotion::VectorEngine::UpdateFacts vectorFacts;
 	vectorFacts.vectorDemandSetting = activeSettings.vectorDemand; vectorFacts.sigmaDeltaRanLast = sigmaDeltaRanLast;
 	vectorFacts.ditherVectorsOwn = activeSettings.ditherVectorsOwn;
-	vectorEngine.UpdateVectorEngine(VectorDemandInput(interlaced), vectorFacts, vectorHost);
+	vectorFacts.opticalFlow = activeSettings.opticalFlow;   // W2-C1: the camera fit's gate (this frame)
+	// W2-C1 (B9): a starter runs the engine - the de-judder in its standing class (its extras configured, matcher held, a reason
+	// that can act now or at the next transient, or a cadence being acquired), the interpolator, or hiccup repair filling a gap.
+	// Reuse-only consumers (sigma-delta, detail pulse, deband hold, source monitor, the occlusion mask, ...) are served only then
+	// (previous-frame state, like the wants). The mask's own matcher never counts: it would keep itself served.
+	VectorDemand::Input vectorInput = VectorDemandInput(interlaced);
+	const bool dejudderStanding = dejudder && (activeSettings.dejudderStrength > 0.0 || activeSettings.dejudderStrengthEven > 0.0) &&
+		DejudderPolicy::CanEngageOrAcquiring(dejudderReason, pulldownAcquiring);
+	vectorInput.starterEngaged = dejudderStanding || interpolating || vpGapFillStandalone;
+	// The governor's release is a state of this frame: a held matcher is not released (the keeper's latch alone would stay set).
+	vectorEngine.NoteVramRelease(motionEngineIdle.Pressured() && !dejudder);
+	vectorEngine.UpdateVectorEngine(vectorInput, vectorFacts, vectorHost);
 	if (vectorDemand.mode != VectorDemand::Mode::Off && !cadenceRepeat)
 	{
 		VpMotion::VectorEngine::ServeFacts serve;
@@ -144,6 +155,7 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	// VPV-HOOK-END
 	// The decision (DejudderPolicyRunner.h): the policy, the interpolation decision, the gap repair, the status and
 	// reason logs, the idle engine keeper; then today's returns.
+	bool analysisEstimate = false;   // W2-C1: the estimate runs for an analysis consumer, not the de-judder (MotionEngineWork)
 	{
 		VpMotion::DecisionFacts facts;
 		facts.sourceHz = sourceHz;
@@ -162,7 +174,7 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 		facts.dejudderEstimatedSequence = dejudderEstimatedSequence;
 		facts.vectorDemand = &vectorDemand;
 		ImplDecisionHost<Impl, DejudderEstimateCall> host{ *this, call };
-		if (VpMotion::RunDejudderDecision(activeSettings, dejudderPolicy, facts, host) != VpMotion::DecisionOutcome::PairCheck)
+		if (VpMotion::RunDejudderDecision(activeSettings, dejudderPolicy, facts, host, &analysisEstimate) != VpMotion::DecisionOutcome::PairCheck)
 			return;
 	}
 	// MotionValidity step 1 D: (A, B) only as adjacent frames of the current epoch
@@ -238,6 +250,8 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	const uint64_t estimateEpoch = motionValidity.Epoch();
 	if (RunDejudderEstimate(a, b, sourceSequence, nextSourceSequence))
 	{
+		if (analysisEstimate)
+			++vectorEngine.WorkCounters().analysisEstimates;
 		dejudderEstimatedSequence = sourceSequence;
 		dejudderEstimatedEpoch = estimateEpoch;
 		// Bug hunt 3 F10: a gap pair's field spans the missed periods too.

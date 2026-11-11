@@ -333,6 +333,28 @@ namespace VramGovernorTestsNs
 	TEST_CLASS(VramUsersTests)
 	{
 	public:
+		// W2-C1: the shared budget reading is used only for the same adapter and while fresh.
+		TEST_METHOD(TheSharedBudgetReadingIsUsedOnlyForTheSameAdapterWhileFresh)
+		{
+			VramUsers& r = VramUsers::Instance();
+			r.ResetForTesting();
+			uint64_t usage = 7, budget = 9;
+			Assert::IsFalse(r.LastBudget(5, usage, budget, 10.0), L"no reading yet");
+			Assert::AreEqual(uint64_t(7), usage, L"untouched when refused");
+			r.NoteBudget(5, 300 * kMB, 4000 * kMB, 10.0);
+			Assert::IsTrue(r.LastBudget(5, usage, budget, 10.5));
+			Assert::AreEqual(300 * kMB, usage);
+			Assert::AreEqual(4000 * kMB, budget);
+			Assert::IsTrue(r.LastBudget(5, usage, budget, 11.0), L"exactly maxAge old: still used");
+			Assert::IsFalse(r.LastBudget(5, usage, budget, 11.01), L"stale: query DXGI");
+			Assert::IsTrue(r.LastBudget(5, usage, budget, 12.0, 3.0), L"a longer maxAge accepts it");
+			Assert::IsFalse(r.LastBudget(6, usage, budget, 10.5), L"another adapter's reading is never used");
+			Assert::IsFalse(r.LastBudget(5, usage, budget, 9.0), L"a reading from the future (clock reset) is refused");
+			r.NoteBudget(5, 300 * kMB, 0, 20.0);
+			Assert::IsFalse(r.LastBudget(5, usage, budget, 20.0), L"a zero budget is no reading");
+			r.ResetForTesting();
+		}
+
 		TEST_METHOD(ADeclaredUserReachesThePlanAndItsMemoryIsNotCountedTwice)
 		{
 			VramUsers::Instance().ResetForTesting();
@@ -391,8 +413,9 @@ namespace VramGovernorTestsNs
 			size_t n = 0;
 			const uint16_t* ids = DeclarableVramUsers(&n);
 			// coordinator-approved 2026-11-08 (long-pair T2 user): kUserLongPair is the 7th declarable user (6 -> 7).
-			Assert::AreEqual(size_t(7), n, L"the five motion / repair users, BasicChroma and the long-pair T2 user");
-			const uint16_t expected[] = { kUserNvofProducer, kUserTemporalDetail, kUserCameraModel, kUserInterpolator, kUserEnhancers, kUserBasicChroma, kUserLongPair };
+			// WAIVER candidate (W2-C1 C1-3, brief-directed): kUserMotionMatcher is the 8th (7 -> 8), declared at the matcher's create site.
+			Assert::AreEqual(size_t(8), n, L"the five motion / repair users, BasicChroma, the long-pair T2 user and the motion engine matcher");
+			const uint16_t expected[] = { kUserNvofProducer, kUserTemporalDetail, kUserCameraModel, kUserInterpolator, kUserEnhancers, kUserBasicChroma, kUserLongPair, kUserMotionMatcher };
 			for (size_t i = 0; i < n; ++i)
 				Assert::AreEqual(int(expected[i]), int(ids[i]));
 			VramUsers& r = VramUsers::Instance();

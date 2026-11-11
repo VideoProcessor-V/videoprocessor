@@ -258,9 +258,40 @@ namespace FallbackCatalog
 				why += std::string(", ") + VectorDemand::ReasonWords(r);
 		}
 		const bool off = st.state == VectorDemand::MotionEngineState::Off;
+		// Degraded: what the served consumers get instead. Without optical-flow pairs (the producer did not start or recovers) they
+		// read the matcher's block searches; in low latency (ForwardShallow) only the frames already queued; in a resync window
+		// nothing until the next valid pair.
+		const char* instead = off ? " take their non-motion path"
+			: (st.Has(R::NvofUnavailable) || st.Has(R::ProducerRecovering)) ? " use the block searches without optical-flow pairs"
+			: st.Has(R::LowLatency) ? " use only the frames already queued (low latency)"
+			: st.Has(R::Resync) ? " take their non-motion path until the next valid pair"
+			: " use the block searches without optical-flow pairs";
 		return Engaged("motion engine", std::string("motion engine ") + VectorDemand::StateWord(st.state) + ": " + why + "; " +
-			VectorDemand::NamesOf(st.affected) + (off ? " take their non-motion path" : " use the block searches without optical-flow pairs"));
+			VectorDemand::NamesOf(st.affected) + instead);
 	}
+
+	// W2-C1: the entry synced every frame, rebuilt only when what it says changes (state, reasons, leading reason, affected).
+	struct MotionEngineEntry
+	{
+		const Decision& For(const VectorDemand::MotionEngineStatus& st)
+		{
+			if (!valid || st.state != state || st.reason != reason || st.reasons != reasons || st.affected != affected)
+			{
+				decision = MotionEngine(st);
+				state = st.state;
+				reason = st.reason;
+				reasons = st.reasons;
+				affected = st.affected;
+				valid = true;
+			}
+			return decision;
+		}
+		Decision decision;
+		VectorDemand::MotionEngineState state = VectorDemand::MotionEngineState::Off;
+		VectorDemand::MotionEngineReason reason = VectorDemand::MotionEngineReason::None;
+		unsigned reasons = 0, affected = 0;
+		bool valid = false;
+	};
 
 	// SK-MV pass-through (TEMPORARY until P5c): the renderer read the matcher's snapshot (SnapField / SnapFrameTrust / SnapSubField) after
 	// the shared view's snapshot lease was lost (the matcher replaced or invalidated its copies since the view captured them). The read is

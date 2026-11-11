@@ -267,7 +267,6 @@ namespace VectorEngineTest
 			facts.vectorDemandSetting = true;
 			engine.UpdateVectorEngine(OneConsumer(VectorDemand::Consumer::GrainMap), facts, host);
 			host.fallbackIds.clear();
-			host.fallbackEngaged.clear(); // W2-C1: the first call engages "motion engine" (GrainMap, no starter: a real Off)
 			facts.vectorDemandSetting = false;
 			engine.UpdateVectorEngine(OneConsumer(VectorDemand::Consumer::GrainMap), facts, host);
 			Assert::AreEqual<size_t>(5, host.fallbackIds.size());
@@ -391,6 +390,81 @@ namespace VectorEngineTest
 			Assert::IsTrue(std::string(kLongPairFallbackText).find("matcher") != std::string::npos,
 				L"the fallback wording names the matcher");
 			Assert::AreEqual(std::string("refined_field"), std::string(kRefinedFieldProduct));
+		}
+
+		// W2-C1 MUST 1: the first refresh seeds the epoch; it opens no resync window.
+		TEST_METHOD(TheFirstRefreshIsNoResync)
+		{
+			VectorEngine engine;
+			FakeHost host;
+			VectorEngine::UpdateFacts facts;
+			facts.vectorDemandSetting = true;
+			engine.UpdateVectorEngine(OneConsumer(VectorDemand::Consumer::GrainMap), facts, host);
+			Assert::IsFalse(engine.State().Has(VectorDemand::MotionEngineReason::Resync), L"first refresh: no resync");
+			engine.UpdateVectorEngine(OneConsumer(VectorDemand::Consumer::GrainMap), facts, host);
+			Assert::IsFalse(engine.State().Has(VectorDemand::MotionEngineReason::Resync), L"same epoch: no resync");
+		}
+
+		// W2-C1 MUST 5: an invalidation (a new epoch) opens the resync window (1 s); the engine is degraded meanwhile.
+		TEST_METHOD(AnInvalidationOpensTheResyncWindow)
+		{
+			VectorEngine engine;
+			FakeHost host;
+			VectorEngine::UpdateFacts facts;
+			facts.vectorDemandSetting = true;
+			const VectorDemand::Input in = OneConsumer(VectorDemand::Consumer::GrainMap);
+			engine.UpdateVectorEngine(in, facts, host);
+			engine.motionValidity.Invalidate(MotionValidity::Cause::Resync);
+			engine.UpdateVectorEngine(in, facts, host);
+			const VectorDemand::MotionEngineStatus st = engine.State();
+			Assert::IsTrue(st.Has(VectorDemand::MotionEngineReason::Resync), L"the new epoch: resync");
+			Assert::IsTrue(st.state == VectorDemand::MotionEngineState::Degraded, L"degraded, not off");
+			Assert::IsTrue(engine.motionStatusEpochAtMs != 0, L"the window start is recorded");
+			engine.motionStatusEpochAtMs = GetTickCount64() - 1001;   // the window's clock: 1 s later (no sleep)
+			engine.UpdateVectorEngine(in, facts, host);
+			Assert::IsFalse(engine.State().Has(VectorDemand::MotionEngineReason::Resync), L"the window closed after 1 s");
+		}
+
+		// W2-C1 MUST 5: the VRAM release is a hard off, fed each decision (NoteVramRelease).
+		TEST_METHOD(TheVramReleaseTurnsTheEngineOff)
+		{
+			VectorEngine engine;
+			FakeHost host;
+			VectorEngine::UpdateFacts facts;
+			facts.vectorDemandSetting = true;
+			const VectorDemand::Input in = OneConsumer(VectorDemand::Consumer::GrainMap);
+			engine.NoteVramRelease(true);
+			engine.UpdateVectorEngine(in, facts, host);
+			VectorDemand::MotionEngineStatus st = engine.State();
+			Assert::IsTrue(st.state == VectorDemand::MotionEngineState::Off && st.Has(VectorDemand::MotionEngineReason::VramRelease));
+			Assert::IsTrue(host.fallbackEngaged.back(), L"the motion engine entry names the release");
+			engine.NoteVramRelease(false);
+			engine.UpdateVectorEngine(in, facts, host);
+			st = engine.State();
+			Assert::IsFalse(st.Has(VectorDemand::MotionEngineReason::VramRelease), L"released latch cleared the next decision");
+		}
+
+		// W2-C1 MUST 5: the camera fit reads only the optical-flow seed: with optical flow off it does not start the engine.
+		TEST_METHOD(TheCameraFitDoesNotStartTheEngineWithOpticalFlowOff)
+		{
+			VectorEngine engine;
+			FakeHost host;
+			VectorEngine::UpdateFacts facts;
+			facts.vectorDemandSetting = true;
+			facts.opticalFlow = false;
+			VectorDemand::Input none;
+			none.enabled = true;
+			none.slotsRun = true;
+			none.queueAheadCapacity = 4;
+			engine.SetCameraFitWanted(true);
+			engine.UpdateVectorEngine(none, facts, host);
+			Assert::IsTrue(engine.vectorDemand.mode == VectorDemand::Mode::Off, L"gated: idle");
+			Assert::IsFalse(engine.vectorDemand.Serves(VectorDemand::Consumer::CameraFit));
+			Assert::IsTrue((engine.State().affected & (1u << static_cast<int>(VectorDemand::Consumer::CameraFit))) != 0, L"the camera fit is named affected");
+			facts.opticalFlow = true;
+			engine.UpdateVectorEngine(none, facts, host);
+			Assert::IsTrue(engine.vectorDemand.Serves(VectorDemand::Consumer::CameraFit), L"optical flow on: the camera fit starts it");
+			Assert::IsFalse(engine.motionCameraGated, L"no longer gated (still affected while the producer has not started: degraded)");
 		}
 
 		TEST_METHOD(TheAtomicEngagedFlagKeepsTheOldValues)

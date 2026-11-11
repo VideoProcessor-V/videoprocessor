@@ -367,6 +367,23 @@ namespace VectorDemandTest
 			Assert::AreEqual(1u << static_cast<int>(Consumer::CameraFit), d.starters);
 		}
 
+		// W2-C1 MUST 3: with the de-judder running (the starter engaged), the reuse-only consumers are SERVED, not refused.
+		TEST_METHOD(WithTheDejudderRunningTheReuseOnlyConsumersAreServed)
+		{
+			Input in = Make({ Consumer::DejudderExtras, Consumer::SigmaDelta, Consumer::DetailPulse, Consumer::DebandHold, Consumer::SourceMonitorPan });
+			in.starterEngaged = true;
+			const Decision d = Decide(in);
+			Assert::AreEqual(0u, d.refused, L"nothing refused while a starter runs");
+			Assert::IsTrue(d.reason != Reason::NoStarter);
+			for (Consumer c : { Consumer::SigmaDelta, Consumer::DetailPulse, Consumer::DebandHold, Consumer::SourceMonitorPan })
+				Assert::IsTrue(d.Serves(c), L"served");
+			in.starterEngaged = false;
+			const Decision off = Decide(in);
+			const unsigned reuse = (1u << static_cast<int>(Consumer::SigmaDelta)) | (1u << static_cast<int>(Consumer::DetailPulse)) |
+				(1u << static_cast<int>(Consumer::DebandHold)) | (1u << static_cast<int>(Consumer::SourceMonitorPan));
+			Assert::AreEqual(reuse, off.refused & reuse, L"the de-judder not running: the same consumers are refused");
+		}
+
 		TEST_METHOD(SynthesisStartersAreRecordedButNeverServedHere)
 		{
 			Input in = Make({ Consumer::DejudderExtras, Consumer::HiccupRepair, Consumer::GrainMap });

@@ -317,6 +317,7 @@ void LibplaceboVideoRenderer::Impl::ReleaseDejudder()
 	dejudderMaskSequence[0] = dejudderMaskSequence[1] = 0;
 	frameInterpolator.reset();
 	dejudder.reset();
+	VpSkeleton::VramUsers::Instance().Release(this, VpSkeleton::kUserMotionMatcher);   // W2-C1 C1-3: the matcher's memory is freed
 	dejudderLiveFieldFrom = 0;
 	motionSegment.Retract(VpMotion::Direction::Forward);
 	dejudderMotionSourceKey = -1;

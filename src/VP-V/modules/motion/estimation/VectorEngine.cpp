@@ -39,10 +39,12 @@ namespace VpMotion
 			f.lowLatencyNoVectors = e.motionLowLatencyNoVectors;
 			f.producerRunning = e.motionProducer && e.motionProducer->Running();
 			f.producerRecovering = e.motionProducer && e.motionProducer->GetHealth().recovering;
-			f.nvofStartError = e.motionProducerStartRetry.Recovering();   // a start failed and none has succeeded since
+			f.nvofStartError = e.motionProducerStartFailed;   // the last start failed (latched until one succeeds or the want ends)
 			f.vramRelease = e.motionVramRelease;
 			const uint64_t epoch = e.motionValidity.Epoch();
-			if (epoch != e.motionStatusEpoch)
+			if (e.motionStatusEpoch == 0)
+				e.motionStatusEpoch = epoch;   // the first refresh seeds the epoch (MotionValidity::kInitialEpoch): no resync window
+			else if (epoch != e.motionStatusEpoch)
 			{
 				e.motionStatusEpoch = epoch;
 				e.motionStatusEpochAtMs = nowMs;
@@ -91,6 +93,8 @@ namespace VpMotion
 		const ULONGLONG nowMs = GetTickCount64();
 		// W2-C1: a failed start is retried on the recovery back-off (5 s, then 60 s), not every frame and not only on a settings change.
 		life.retryDue = motionProducerStartFailed && motionProducerStartRetry.Recovering() && nowMs >= motionProducerStartRetry.RetryAtMs();
+		// ... and a latch cleared by an unwanted frame does not skip the back-off (a want flip never restarts it early).
+		life.backoffActive = motionProducerStartRetry.Recovering() && nowMs < motionProducerStartRetry.RetryAtMs();
 		life.gpuAvailable = in.gpu != nullptr;
 		const ProducerPlan::LifecycleOutput act = ProducerPlan::Lifecycle(life);
 		if (act.action == ProducerPlan::Action::Start)
@@ -261,6 +265,7 @@ namespace VpMotion
 		// failed start waits for its back-off, the matcher alone would give it nothing, so it does not start the engine (its own
 		// "camera fit needs the optical-flow seed" status shows; the "motion engine" entry names it).
 		const bool cameraWanted = cameraFitWanted_.load(std::memory_order_acquire) || input.wants[cameraFit];
+		motionOpticalFlow = facts.opticalFlow;   // this frame's setting (PlanProducer refreshes it too)
 		motionCameraGated = cameraWanted && (!motionOpticalFlow ||
 			(motionProducerStartRetry.Recovering() && now < motionProducerStartRetry.RetryAtMs()));
 		if ((cameraWanted && !input.wants[cameraFit]) || (motionCameraGated && input.wants[cameraFit]))
