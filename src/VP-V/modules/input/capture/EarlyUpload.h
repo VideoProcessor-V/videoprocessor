@@ -62,11 +62,39 @@ public:
 	pl_tex Acquire(Slot& slot);
 	void Used(Slot& slot);
 
+	// refs/105 phase 5a (owner O3: one decode = one upload + one recipe per device): a SECOND reader of the same
+	// slots on another D3D11 device of the same adapter (the optical-flow producer's own device). A slot is reused
+	// only when the render side AND the second reader have released it on the GPU (SlotReusable); a reader that
+	// acquired a slot and never released it (stopped, dead) holds that slot until DetachReader.
+	// Attach / Detach: any thread, but not while the reader device's thread is inside AcquireReader / UsedReader
+	// (call Detach from that thread, or after it stopped - Stop). Close detaches.
+	bool AttachReader(ID3D11Device* readerDevice);
+	// Signals a final release on the reader device after all its queued work, waits for it (bounded, ~100 ms), then
+	// releases every slot the reader still held and the reader's objects.
+	void DetachReader();
+	bool HasReader() const;
+	// Reader device's thread: the slot's texture opened on the reader device (R8G8B8A8_UNORM, rowBytes / 4 x height)
+	// with a GPU wait for its upload queued first on the reader's immediate context; nullptr on failure. From here the
+	// slot is held for the reader until UsedReader (call it after queuing the GPU work that reads it).
+	ID3D11Texture2D* AcquireReader(Slot& slot);
+	void UsedReader(Slot& slot);
+	// The reuse law (unit-tested): free of payloads, the render side's last release complete, and - with a reader
+	// attached - the reader's last release complete (kReaderPending: acquired, not yet released).
+	static constexpr uint64_t kReaderPending = ~uint64_t(0);
+	static bool SlotReusable(bool busy, uint64_t released, uint64_t releaseValue, bool reader, uint64_t readerReleased,
+		uint64_t readerReleaseValue)
+	{
+		return !busy && released >= releaseValue && (!reader || readerReleaseValue == 0 ||
+			(readerReleaseValue != kReaderPending && readerReleased >= readerReleaseValue));
+	}
+
 	// noFreeHeld / noFreeGpu: at each no-free-slot, the slots still held by a
 	// payload and those free but waiting for their GPU release.
 	// copyCpuMs*: the conversion thread's copy + signal per upload (efficiency timers T4).
 	struct Stats { uint64_t uploads = 0, noFreeSlot = 0, failures = 0, noFreeHeld = 0, noFreeGpu = 0; int slotsMade = 0;
 		uint64_t capDeferred = 0;   // bug hunt 38 M3: a new texture refused because live bytes + the frame exceed the cap
+		uint64_t noFreeReader = 0;  // refs/105 5a: at each no-free-slot, slots free for the render side but held by the reader
+		uint64_t readerDetachTimeouts = 0;   // DetachReader's bounded wait ran out (the reader's GPU work had not completed)
 		double copyCpuMsTotal = 0.0, copyCpuMsMax = 0.0; };
 	Stats GetStats() const;
 	const std::string& LastError() const { return error; }
@@ -93,7 +121,11 @@ private:
 		uint64_t wrappedGeneration = 0;
 		uint64_t releaseValue = 0;             // the last use's "released" value
 		bool busy = false;                     // held by a payload
+		CComPtr<ID3D11Texture2D> readerTex;    // refs/105 5a: opened on the second reader's device
+		uint64_t readerGeneration = 0;
+		uint64_t readerReleaseValue = 0;       // the reader's last "released" value (kReaderPending while it holds it)
 	};
+	void DetachReaderLocked();               // lifecycle and lock held
 	void Return(int index);
 	bool MakeTexture(Entry& e, size_t rowBytes, int height);
 
@@ -106,6 +138,12 @@ private:
 	CComPtr<ID3D11Fence> uploadedFenceR, releasedFenceR;             // opened on the render device
 	uint64_t nextUploadValue = 0;                                    // conversion thread
 	uint64_t nextReleaseValue = 0;                                   // render thread
+	// refs/105 5a second reader (guarded by `lock`).
+	CComPtr<ID3D11Device1> readerDevice;
+	CComPtr<ID3D11DeviceContext4> readerContext;
+	CComPtr<ID3D11Fence> readerReleasedFence;                        // upload device side (read by Upload)
+	CComPtr<ID3D11Fence> readerReleasedFenceR, readerUploadedFenceR; // opened on the reader device
+	uint64_t nextReaderValue = 0;
 	mutable std::mutex lock;
 	// Held by Upload while it uses the upload device, and by Close: the pool
 	// cannot go while the conversion thread is mid-upload.

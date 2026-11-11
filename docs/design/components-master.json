@@ -264,6 +264,7 @@
         "src/VP-V/modules/input/source_analysis/lane/tests/LaneGpuRegionKernelWarpTests.cpp",
         "src/VP-V/modules/input/source_analysis/lane/tests/LaneGpuLightKernelWarpTests.cpp",
         "src/VP-V/modules/input/source_analysis/tests/HalfLumaEngineViewTests.cpp",
+        "src/VP-V/modules/input/source_analysis/lane/tests/EngineLumaGpuTwinTests.cpp",
         "src/VP-V/tests/AnalysisLaneGpuHookTests.cpp",
         "src/VP-V/modules/input/source_analysis/lane/LaneReadback.h",
         "src/VP-V/tests/suite/SourceResolutionFrameBoundTests.cpp",

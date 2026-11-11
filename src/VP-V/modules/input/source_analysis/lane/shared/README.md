@@ -16,6 +16,23 @@ and the interpolator's LOW_HALF_BODY (`FrameInterpolator.cpp`); recorded as resi
 
 Determinism: integer arithmetic, fixed tap order. Any change of the grid, tap order, rounding or GLSL entry names bumps `kUnitVersion`.
 
+# EngineLumaGpu (the GPU twin of the optical-flow engine luma, `VpUnit::EngineLumaGpu`)
+
+refs/105 phase 5a (owner O2 / O3). `EngineLumaGpu.h` / `.cpp` / `.hlsl`, `kUnitVersion = 1`: a cs_5_0 compute shader
+(compiled at run time; the `.hlsl` is included into the `.cpp` as one raw string) that reads ONE uploaded raw frame (an
+`EarlyUpload` slot opened on the producer's own D3D11 device, `EarlyUpload::AcquireReader`) and writes the 8-bit engine
+view (R8_UNORM, half or quarter) the NVOF engine takes.
+
+- Law: the CPU path's, integer only - the 10-bit code (P010 / P210 luma plane `word >> 6`, v210 Y field, UYVY / HDYC
+  `byte << 2`), the U3 taps and `FinishEngine8` for the half view, the producer's `(a + b + c + d + 2) / 4` quarter step.
+- Formats (O2): limited-range P010 / P210 / v210 / UYVY / HDYC. RGB, decoded / packed DV, the SDR tunnel and full-range
+  YUV stay on the CPU path (the caller counts and shows it).
+- `Kernel`: `Open(device)`, `Run(context, raw, packing, width, height, quarter, out)`, `Close`, `LastError`; per device.
+- Phase 5a ships the kernel and its proof only; the producer switches to it in 5b.
+- Tests: `lane/tests/EngineLumaGpuTwinTests.cpp` (byte identity against `MotionAhead::HalfLuma8` + the quarter step for
+  every twin format, odd half / quarter edges, v210 widths ending mid-group, padded strides, 4K; one case through an
+  `EarlyUpload` slot on a second reader device).
+
 # SourceStats (shared unit U6, `VpUnit::SourceStats`)
 
 The one law of the P4 source-stats record (doc 62, section 1.2 U6): `SourceStats.h`, `kUnitVersion = 1` (= the record version and

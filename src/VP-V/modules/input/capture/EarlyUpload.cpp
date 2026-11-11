@@ -117,6 +117,7 @@ void EarlyUpload::Close()
 	}
 	control = std::make_shared<Control>();
 	std::lock_guard<std::mutex> guard(lock);
+	DetachReaderLocked();
 	for (Entry& e : entries)
 	{
 		if (e.wrapped && gpu)
@@ -188,6 +189,9 @@ EarlyUpload::SlotHandle EarlyUpload::Upload(const void* data, size_t rowBytes, i
 		const size_t allowed = capBytes / std::max<size_t>(frameBytes, 1);
 		// A free slot whose every GPU use has been released.
 		const uint64_t released = releasedFence->GetCompletedValue();
+		// refs/105 5a: the second reader's releases too (a slot it still reads is not free).
+		const bool reader = readerReleasedFence != nullptr;
+		const uint64_t readerReleased = reader ? readerReleasedFence->GetCompletedValue() : 0;
 		// audit 2026-10-16: after a frame size change, free the textures the
 		// new size will not reuse (beyond the slots the cap allows, or of the
 		// old size), so the pool stays within its byte cap. Slots still held
@@ -207,7 +211,7 @@ EarlyUpload::SlotHandle EarlyUpload::Upload(const void* data, size_t rowBytes, i
 				Entry& e = entries[i];
 				if (!e.uploadTex || (i < allowed && e.rowBytes == rowBytes && e.height == height))
 					continue;
-				if (e.busy || released < e.releaseValue)
+				if (!SlotReusable(e.busy, released, e.releaseValue, reader, readerReleased, e.readerReleaseValue))
 				{
 					trimPending = true;
 					continue;
@@ -226,7 +230,7 @@ EarlyUpload::SlotHandle EarlyUpload::Upload(const void* data, size_t rowBytes, i
 		for (size_t i = 0; i < entries.size() && i < allowed; ++i)
 		{
 			Entry& e = entries[i];
-			if (!e.busy && released >= e.releaseValue)
+			if (SlotReusable(e.busy, released, e.releaseValue, reader, readerReleased, e.readerReleaseValue))
 			{
 				index = static_cast<int>(i);
 				e.busy = true;
@@ -237,7 +241,15 @@ EarlyUpload::SlotHandle EarlyUpload::Upload(const void* data, size_t rowBytes, i
 		{
 			++stats.noFreeSlot;
 			for (size_t i = 0; i < entries.size() && i < allowed; ++i)
-				++(entries[i].busy ? stats.noFreeHeld : stats.noFreeGpu);
+			{
+				const Entry& held = entries[i];
+				if (held.busy)
+					++stats.noFreeHeld;
+				else if (released < held.releaseValue)
+					++stats.noFreeGpu;
+				else
+					++stats.noFreeReader;
+			}
 			return nullptr;
 		}
 		{
@@ -362,6 +374,142 @@ void EarlyUpload::Used(Slot& slot)
 	renderContext->Signal(releasedFenceR, value);
 	std::lock_guard<std::mutex> guard(lock);
 	entries[static_cast<size_t>(slot.index)].releaseValue = value;
+}
+
+bool EarlyUpload::AttachReader(ID3D11Device* readerDeviceIn)
+{
+	std::lock_guard<std::mutex> life(lifecycle);
+	std::lock_guard<std::mutex> guard(lock);
+	DetachReaderLocked();
+	if (!ready.load(std::memory_order_acquire) || !readerDeviceIn)
+	{
+		error = "no pool or no reader device";
+		return false;
+	}
+	CComPtr<ID3D11Device5> reader5;
+	CComPtr<ID3D11DeviceContext> immediate;
+	readerDeviceIn->GetImmediateContext(&immediate);
+	if (FAILED(readerDeviceIn->QueryInterface(IID_PPV_ARGS(&reader5))) || !immediate ||
+		FAILED(immediate->QueryInterface(IID_PPV_ARGS(&readerContext))) ||
+		FAILED(readerDeviceIn->QueryInterface(IID_PPV_ARGS(&readerDevice))))
+	{
+		DetachReaderLocked();
+		error = "the reader device has no fences (D3D11.4)";
+		return false;
+	}
+	// The "uploaded" fence opened again on the reader device, and the reader's own "released" fence (made on the
+	// upload device, as the render side's is, and opened on the reader device).
+	HANDLE uploadedHandle = nullptr, releasedHandle = nullptr;
+	const bool ok = SUCCEEDED(uploadedFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &uploadedHandle)) &&
+		SUCCEEDED(reader5->OpenSharedFence(uploadedHandle, IID_PPV_ARGS(&readerUploadedFenceR))) &&
+		SUCCEEDED(uploadDevice->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&readerReleasedFence))) &&
+		SUCCEEDED(readerReleasedFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &releasedHandle)) &&
+		SUCCEEDED(reader5->OpenSharedFence(releasedHandle, IID_PPV_ARGS(&readerReleasedFenceR)));
+	if (uploadedHandle)
+		CloseHandle(uploadedHandle);
+	if (releasedHandle)
+		CloseHandle(releasedHandle);
+	if (!ok)
+	{
+		DetachReaderLocked();
+		error = "cannot share fences with the reader device";
+		return false;
+	}
+	nextReaderValue = 0;
+	for (Entry& e : entries)
+		e.readerReleaseValue = 0;
+	return true;
+}
+
+void EarlyUpload::DetachReader()
+{
+	std::lock_guard<std::mutex> life(lifecycle);
+	std::lock_guard<std::mutex> guard(lock);
+	DetachReaderLocked();
+}
+
+void EarlyUpload::DetachReaderLocked()
+{
+	if (readerContext && readerReleasedFenceR && readerReleasedFence)
+	{
+		// A final release after everything the reader queued (a dead reader's acquired slots included), then a
+		// bounded wait for it: no slot goes back while the reader's GPU may still read it, unless the wait runs out
+		// (counted: readerDetachTimeouts).
+		const uint64_t value = ++nextReaderValue;
+		readerContext->Signal(readerReleasedFenceR, value);
+		readerContext->Flush();
+		if (readerReleasedFence->GetCompletedValue() < value)
+		{
+			HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+			if (done && SUCCEEDED(readerReleasedFence->SetEventOnCompletion(value, done)))
+				WaitForSingleObject(done, 100);
+			if (done)
+				CloseHandle(done);
+			if (readerReleasedFence->GetCompletedValue() < value)
+				++stats.readerDetachTimeouts;
+		}
+	}
+	for (Entry& e : entries)
+	{
+		e.readerTex.Release();
+		e.readerGeneration = 0;
+		e.readerReleaseValue = 0;
+	}
+	readerUploadedFenceR.Release();
+	readerReleasedFenceR.Release();
+	readerReleasedFence.Release();
+	readerContext.Release();
+	readerDevice.Release();
+	nextReaderValue = 0;
+}
+
+bool EarlyUpload::HasReader() const
+{
+	std::lock_guard<std::mutex> guard(lock);
+	return readerDevice != nullptr;
+}
+
+ID3D11Texture2D* EarlyUpload::AcquireReader(Slot& slot)
+{
+	if (!ready.load(std::memory_order_acquire) || slot.owner != this || slot.pool != poolId || slot.index < 0)
+		return nullptr;
+	std::lock_guard<std::mutex> guard(lock);
+	if (!readerDevice || static_cast<size_t>(slot.index) >= entries.size())
+		return nullptr;
+	// The reader's opened copies of freed slots go (they keep the shared memory alive), as in Acquire.
+	for (Entry& stale : entries)
+		if (!stale.uploadTex && !stale.busy && stale.readerTex)
+			stale.readerTex.Release();
+	Entry& e = entries[static_cast<size_t>(slot.index)];
+	if (!e.uploadTex || !e.shared)
+		return nullptr;
+	if (!e.readerTex || e.readerGeneration != e.generation)
+	{
+		e.readerTex.Release();
+		if (FAILED(readerDevice->OpenSharedResource1(e.shared, IID_PPV_ARGS(&e.readerTex))))
+		{
+			error = "cannot open the shared texture on the reader device";
+			return nullptr;
+		}
+		e.readerGeneration = e.generation;
+	}
+	// Held for the reader from here until UsedReader (or DetachReader).
+	e.readerReleaseValue = kReaderPending;
+	readerContext->Wait(readerUploadedFenceR, slot.uploadValue);
+	return e.readerTex;
+}
+
+void EarlyUpload::UsedReader(Slot& slot)
+{
+	if (!ready.load(std::memory_order_acquire) || slot.owner != this || slot.pool != poolId || slot.index < 0)
+		return;
+	std::lock_guard<std::mutex> guard(lock);
+	if (!readerContext || static_cast<size_t>(slot.index) >= entries.size())
+		return;
+	const uint64_t value = ++nextReaderValue;
+	readerContext->Signal(readerReleasedFenceR, value);
+	readerContext->Flush();
+	entries[static_cast<size_t>(slot.index)].readerReleaseValue = value;
 }
 
 EarlyUpload::Stats EarlyUpload::GetStats() const
