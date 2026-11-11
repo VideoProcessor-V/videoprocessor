@@ -362,6 +362,27 @@ namespace VideoProcessorTest
 			Assert::AreEqual(23.976, record.filmHz, L"the lock's rate stands");
 		}
 
+		// C7b: Take hands the slot's facts over once and clears the slot, so the next frame never inherits them.
+		TEST_METHOD(TheCadenceFactsAreTakenOnceAndTheSlotIsCleared)
+		{
+			Vpv::Ingress::CadenceFacts slot;
+			slot.valid = slot.locked = true;
+			slot.filmHz = 23.976;
+			slot.cycle = 5;
+			slot.unique = 2;
+			slot.filmIndex = 9;
+			const Vpv::Ingress::CadenceFacts first = Vpv::Ingress::Take(slot);
+			Assert::IsTrue(first.valid && first.locked);
+			Assert::AreEqual(23.976, first.filmHz);
+			Assert::AreEqual(5, first.cycle);
+			Assert::AreEqual(static_cast<uint64_t>(9), first.filmIndex);
+			Assert::IsFalse(slot.valid, L"the slot is cleared");
+			Assert::AreEqual(0.0, slot.filmHz);
+			const Vpv::Ingress::CadenceFacts second = Vpv::Ingress::Take(slot);
+			Assert::IsFalse(second.valid, L"a second take yields nothing");
+			Assert::IsFalse(second.locked);
+		}
+
 		TEST_METHOD(AFullTableIsVisibleUnderFallbacks)
 		{
 			std::vector<std::unique_ptr<FakeRenderer>> renderers;

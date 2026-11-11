@@ -35,6 +35,10 @@ Checked against the code at M2 step 18a (2026-10-25). Two forms exist on this br
 6. Pulldown: with `dejudder_pulldown` on, the capture path feeds `Pulldown::Detector`. Exact repeats are not queued, and kept frames get `FilmClock` times and `filmHz`. A lock change leaves a discontinuity that the renderer consumes on the next kept frame.
 7. With the patch: steps 2-5 become `QueuePolicy().PlanHold / QueueTarget / TicksUntilDue / EvaluateBacklog`, with the same decisions in the same order (the test compares a frozen copy of the host). The host keeps the status, logs and drops. `QueuePolicy()` always returns the VP policy for now. `queue_policy = upstream` and the hand-over of the Original pathway to `BillQueuePolicy` are a later commit.
 
+### Products
+
+- Frame-analysis store, cadence group (`FrameAnalysis::kCadence`, `FrameAnalysis::Cadence`: `repeatOfPrevious`, `repeatOf`, `phase`, `filmHz`): written once per frame by `VpFrameAnalysis::Host::OnArrival` from the facts the ingress policy decided for that frame (`CadenceFeed.h`: `FactsOf` the `Pulldown::Decision`, `Take` the per-frame slot, `ToRecord`). The facts ride on the queued frame because the record does not exist at the ingress decision. Read by the camera extension's `UpdateTiming` (the previous frame's record: `filmHz > 0` means a held cadence). Record: locked gives `filmHz` = the film rate and `phase` = `filmIndex % unique` (counted from the lock); unlocked, acquiring or an uncertain phase gives `phase` -1 and, unless locked, `filmHz` 0. Acquiring has no field in the record (it stays in `m_pulldownAcquiring`). Store off = no work: nothing is built and the host returns first.
+
 ### Threading
 
 - GUI thread: profile apply, `SetQueueDelayBudget` (atomic `m_queueDelayBudgetMs`, then `m_queueChanged.notify_all`), `SetQueueFramePolicy` / `SetFrameQueueMaxSize` (under `m_queueMutex`).
@@ -85,6 +89,7 @@ Build x64 Release (the AGENTS.md command). Run tests single-threaded and read th
 - Delay budget: `DelayGate` (src/VP-V/tests/DelayGateTests.cpp: 4/3/2 x 8 rates, same total, harness queue), `RenderAheadDelayBudgetTests` (R6BaselineTests.cpp).
 - Queue rules and harness: `QueueTimingFixesTests`, `QueueStressTests`, `QueueStressRepros`, `QueueStressLaneTests`, `QueueLatencyMatrix` (GeneralRateMatrixTests.cpp), `QueueLookaheadTests` (IntentInterpreterTests.cpp), `H3TimingTests`.
 - Pulldown and film clock: `PulldownReliabilityTests`, `PulldownCorpusTests`, `PulldownLockChangeAdjacencyTests`, `Hunt2CadenceClassPulldownTests`, `Hunt2CadenceClassFilmClockTests`, `FilmClockRebaseTests`, `FilmClockToggleTests`.
+- Cadence feed (C7b): `IngressPolicyTests` (`TheCadenceRecordEqualsTheLockFacts`, `AnUnlockedAcquiringOrUncertainFrameIsRecordedAsUnknown`, `TheCadenceFactsAreTakenOnceAndTheSlotIsCleared`), `FrameAnalysisProducerTests` (`HostPublishesTheCadenceFactsAndANoopWhileOff`).
 - Policy interface: `QueueTimingPolicy` (src/VP-V/tests/QueueTimingPolicyTests.cpp: frozen-host equality, ladder, held shed, upstream equality, one walk). It runs only after the call-site patch has registered it in the test project.
 
 ## Contract
@@ -182,6 +187,7 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 - `src/VideoProcessor-Lib/UnifiedProfileRuntime.cpp`
 - `src/VP-V/modules/input/queue_timing/PulldownDetector.h`
 - `src/VP-V/modules/input/queue_timing/PulldownResync.h`
+- `src/VP-V/modules/input/queue_timing/CadenceFeed.h`
 - `src/VideoProcessor-Lib/vprenderer/AlphaQueuePolicy.h`
 - `src/VideoProcessor-GUI/VideoProcessorDlg.cpp`
 - `src/VP-V/modules/input/queue_timing/VpQueueRules.h`

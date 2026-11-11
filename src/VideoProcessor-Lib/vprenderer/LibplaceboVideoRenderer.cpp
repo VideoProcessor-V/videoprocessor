@@ -26759,7 +26759,7 @@ void LibplaceboVideoRenderer::EnqueueFrame(VideoFrame& videoFrame,
 			queuedFrame.gapFrames = gapFrames;
 			queuedFrame.filmHz = filmHz;
 			queuedFrame.filmUpdate = filmUpdate;
-			if (!file) { queuedFrame.cadenceFacts = m_pulldownFrameFacts; m_pulldownFrameFacts = Vpv::Ingress::CadenceFacts{}; }   // C7b: taken once per captured frame (IngressPolicy.inl sets it) // VPV-HOOK
+			if (!file) queuedFrame.cadenceFacts = Vpv::Ingress::Take(m_pulldownFrameFacts);   // C7b: taken once per captured frame (IngressPolicy.inl sets it) // VPV-HOOK
 			if (file)
 			{
 				queuedFrame.fileFrame = true;

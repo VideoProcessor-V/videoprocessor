@@ -57,6 +57,15 @@ namespace Vpv
 			return facts;
 		}
 
+		// Take-once: hands the slot's facts to the caller and clears the slot, so a frame never publishes the previous
+		// frame's facts (EnqueueFrame calls this once per captured frame).
+		inline CadenceFacts Take(CadenceFacts& slot)
+		{
+			const CadenceFacts taken = slot;
+			slot = CadenceFacts{};
+			return taken;
+		}
+
 		inline FrameAnalysis::Cadence ToRecord(const CadenceFacts& facts)
 		{
 			FrameAnalysis::Cadence cadence;
