@@ -33,6 +33,8 @@
 #include "ChainEvalSeam.h"
 
 #include <VP-V/tests/support/RealClipLibrary.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
+#include <VP-V/modules/input/source_analysis/identity/SidDiagDump.h>
 
 #include <chrono>
 #include <cmath>
@@ -58,6 +60,7 @@ namespace Tests
 		struct SegTruth
 		{
 			int idx = 0, start = 0, frames = 0, bits = 10, srcA = 0;
+			int codedBits = 0;          // reels.json `coded_bits` (dump v4 hint; 0 = unknown)
 			int truthN[2] = { 0, 0 };   // raster-referenced original size per axis
 			int n1[2] = { 0, 0 };       // raster-referenced intermediate size of a double-scaled segment (0 = none)
 			std::string kernel;         // "" = native / none
@@ -137,6 +140,7 @@ namespace Tests
 						s.start = g.Int("out_start_frame");
 						s.frames = g.Int("out_frames");
 						s.bits = g.Int("bits", 10);
+						s.codedBits = g.Int("coded_bits", 0);
 						s.srcA = g.Int("src_a");
 						const RealClip::Json* tn = g.Find("truth_n");
 						if (tn)
@@ -284,6 +288,10 @@ namespace Tests
 		// VP_SOURCE_ID_LEVER = none | step3 (16 exact lines on a confident axis) | coarse1 (one coarse window) | coarse2 (coarse step 2 + refine).
 		inline void ApplyLever(C::EstimatorSettings& s)
 		{
+			// SID-5 item 3 (doc 100 s4 P0): VP_SOURCE_ID_SAFETY_RULES=1 runs the chain lane with the r2 safety rules (R2 + R3 + R5 + R7 + N1);
+			// unset = the default (off), byte for byte.
+			if (RealClip::Env("VP_SOURCE_ID_SAFETY_RULES") == "1")
+				s.safetyRules = true;
 			const std::string lever = RealClip::Env("VP_SOURCE_ID_LEVER");
 			if (lever == "step3")
 				s.confidentAxisExactLines = 16;
@@ -328,6 +336,7 @@ namespace Tests
 			ApplyLever(settings);
 			r.est.reset(new C::ChainEstimator(settings, r.clock.Fn()));
 			r.est->SetSynchronous(true);
+			r.est->SetDiagnosticTag(reelId + ".chain");   // dump v4 (VP_SID_DUMP_V4_DIR): <dir>\<reel>.chain.b_*.csv
 			r.est->SetEvaluationObserver([](const C::EvaluationDetail& d) { WriteCalibrationRows(R(), d); WriteCostRow(R(), d); });
 			r.est->SetMode(C::EstimatorMode::Shadow);
 			if (r.cal.is_open())
@@ -489,6 +498,12 @@ namespace Tests
 			{
 				r.candidate = found;
 				r.candidateFrames = 1;
+			}
+			if (r.haveTruth)
+			{
+				const SegTruth* sg = r.cur.SegAt(static_cast<int>(seq) - 1);
+				if (sg)
+					r.est->SetDiagnosticDepths(sg->codedBits, sg->bits);   // dump v4 hint only
 			}
 			r.est->NoteFrame(seq, t, r.active.x, r.active.y, r.active.w, r.active.h);
 			VpSkeleton::SourceFrameView v;
@@ -763,6 +778,327 @@ namespace Tests
 			Assert::IsTrue(rows > 0, L"one row per evaluation x axis x tested candidate");
 			(void)judged;
 			DeleteFileA(file.c_str());
+			RemoveDirectoryA(dir.c_str());
+		}
+	};
+
+	// Dump v4 (identity/SidDiagDump.h, doc 100 s4 P0): OFF by default (nothing written), and DECISION NEUTRAL: with it on every published
+	// record, status line, counter, evaluation detail and monitor snapshot / factor is byte-identical to a run with it off. Plus the column
+	// contract of the four files (headers = the SidDiagDump.h headers, every row has all columns).
+	namespace SidDumpV4
+	{
+		namespace C = SourceIdentity::Chain;
+		namespace G = SourceIdentity::Geometry;
+		namespace D = SourceIdentity::Diag;
+
+		inline std::string Num(double v)   // full precision: the identity comparison must see every bit
+		{
+			char b[48];
+			std::snprintf(b, sizeof(b), "%.17g", v);
+			return b;
+		}
+
+		inline std::vector<std::string> Split(const std::string& l)
+		{
+			std::vector<std::string> out;
+			std::string cur;
+			bool quoted = false;
+			for (size_t i = 0; i < l.size(); ++i)
+			{
+				const char ch = l[i];
+				if (quoted)
+				{
+					if (ch == '"')
+					{
+						if (i + 1 < l.size() && l[i + 1] == '"') { cur += '"'; ++i; }
+						else quoted = false;
+					}
+					else cur += ch;
+				}
+				else if (ch == '"') quoted = true;
+				else if (ch == ',') { out.push_back(cur); cur.clear(); }
+				else cur += ch;
+			}
+			out.push_back(cur);
+			return out;
+		}
+
+		inline std::string TempDir(const char* name)
+		{
+			char temp[MAX_PATH] = {};
+			GetTempPathA(MAX_PATH, temp);
+			const std::string dir = std::string(temp) + name;
+			CreateDirectoryA(dir.c_str(), nullptr);
+			return dir;
+		}
+
+		inline int CountCsv(const std::string& dir)
+		{
+			WIN32_FIND_DATAA fd;
+			HANDLE h = FindFirstFileA((dir + "\\*.csv").c_str(), &fd);
+			if (h == INVALID_HANDLE_VALUE)
+				return 0;
+			int n = 0;
+			do { ++n; } while (FindNextFileA(h, &fd));
+			FindClose(h);
+			return n;
+		}
+
+		inline void ClearCsv(const std::string& dir)
+		{
+			WIN32_FIND_DATAA fd;
+			HANDLE h = FindFirstFileA((dir + "\\*.csv").c_str(), &fd);
+			if (h == INVALID_HANDLE_VALUE)
+				return;
+			do { DeleteFileA((dir + "\\" + fd.cFileName).c_str()); } while (FindNextFileA(h, &fd));
+			FindClose(h);
+		}
+
+		// Rows of a dump file (header checked against `header`, every row with all columns). -1 = the file is missing.
+		inline int CheckFile(const std::string& path, const char* header)
+		{
+			std::ifstream in(path);
+			if (!in.good())
+				return -1;
+			std::string h, line;
+			std::getline(in, h);
+			Assert::AreEqual(std::string(header), h, L"dump v4 header = the SidDiagDump.h contract");
+			const size_t cols = Split(h).size();
+			int rows = 0;
+			while (std::getline(in, line))
+				if (!line.empty())
+				{
+					++rows;
+					Assert::AreEqual(cols, Split(line).size(), L"every dump v4 row has all columns");
+				}
+			return rows;
+		}
+
+		// Clears the variable when a test ends, also on a failed assertion.
+		struct EnvGuard
+		{
+			~EnvGuard() { _putenv_s("VP_SID_DUMP_V4_DIR", ""); }
+		};
+
+		// A 2x (960x540 -> 1920x1080, a CONVENTIONAL pair) linear upscale of a fixture plane.
+		inline ChainFx::Plane Upscaled(uint32_t seed, int step)
+		{
+			const ChainFx::Plane lowRes = ChainFx::MakePlane(960, 540, seed, 1);
+			ChainFx::Plane p;
+			p.w = 1920;
+			p.h = 1080;
+			p.luma.assign(static_cast<size_t>(p.w) * p.h, 0);
+			for (int y = 0; y < p.h; ++y)
+				for (int x = 0; x < p.w; ++x)
+				{
+					const double sx = (x + 0.5) / 2.0 - 0.5, sy = (y + 0.5) / 2.0 - 0.5;
+					const int ix = (std::max)(0, (std::min)(lowRes.w - 2, static_cast<int>(std::floor(sx))));
+					const int iy = (std::max)(0, (std::min)(lowRes.h - 2, static_cast<int>(std::floor(sy))));
+					const double ax = (std::min)(1.0, (std::max)(0.0, sx - ix)), ay = (std::min)(1.0, (std::max)(0.0, sy - iy));
+					auto at = [&](int xx, int yy) { return static_cast<double>(lowRes.luma[static_cast<size_t>(yy) * lowRes.w + xx]); };
+					double v = (at(ix, iy) * (1 - ax) + at(ix + 1, iy) * ax) * (1 - ay) + (at(ix, iy + 1) * (1 - ax) + at(ix + 1, iy + 1) * ax) * ay;
+					v = std::floor(v / step + 0.5) * step;
+					p.luma[static_cast<size_t>(y) * p.w + x] = static_cast<uint16_t>(v);
+				}
+			return p;
+		}
+
+		inline std::string Hex(const G::Packed& p)
+		{
+			static const char* const k = "0123456789abcdef";
+			std::string s;
+			for (size_t i = 0; i < G::kRecordBytesMax; ++i)
+			{
+				s += k[p.bytes[i] >> 4];
+				s += k[p.bytes[i] & 15];
+			}
+			return s;
+		}
+
+		// Everything the chain estimator publishes over 21 s (cuts at 7 s and 14 s), as one text: per frame the packed record and the status line,
+		// per evaluation the observer detail, at the end the counters.
+		inline std::string RunEstimator(bool rules, const std::string& tag)
+		{
+			ChainFx::ManualClock clock;
+			C::ChainEstimator est(C::EstimatorSettings(), clock.Fn());
+			est.SetSynchronous(true);
+			est.SetSafetyRules(rules);
+			est.SetDiagnosticTag(tag);
+			est.SetDiagnosticDepths(8, 10);
+			std::ostringstream o;
+			est.SetEvaluationObserver([&o](const C::EvaluationDetail& d) {
+				o << "E" << d.seq << ',' << d.timeUs << ',' << d.shotId << ',' << d.stepCodes << '\n';
+				for (int a = 0; a < 2; ++a)
+					for (const C::CandidateDetail& c : d.axis[a].cands)
+						o << a << ',' << c.n << ',' << c.exact << ',' << Num(c.stat) << ',' << Num(c.coarseStat) << ',' << c.kernel << ','
+							<< c.linesGated << ',' << c.informative << ',' << c.evJudged << ',' << Num(c.evStat) << '\n';
+			});
+			est.SetMode(C::EstimatorMode::Shadow);
+			const ChainFx::Plane shots[3] = { Upscaled(7, 1), Upscaled(11, 1), Upscaled(13, 1) };
+			for (int i = 0; i < 84; ++i)
+			{
+				const double t = 0.25 * i;
+				clock.Set(t * 1000.0);
+				const uint64_t seq = static_cast<uint64_t>(i) + 1;
+				if (i == 28 || i == 56)
+					est.NoteEvent(C::EstimatorEvent::Cut, seq);
+				ChainFx::Feed(est, shots[i / 28], seq, t);
+				G::Record rec;
+				if (est.Held().ReadLatest(0, rec))
+					o << "R" << seq << ',' << Hex(G::Pack(rec)) << '\n';
+				o << "S" << est.StatusLine() << '\n';
+			}
+			const C::EstimatorCounters c = est.GetCounters();
+			o << "C" << c.evaluations << ',' << c.delivered << ',' << c.dropped << ',' << c.windowClears << ',' << c.latch.entries << ','
+				<< c.latch.releases << '\n';
+			est.Stop();
+			return o.str();
+		}
+
+		// One analysed frame of 8 tiles: random texture (native-looking) or the same texture pixel-doubled (a 2x upscale).
+		inline void AnalyseFrame(SourceResolutionMonitor::Monitor& m, double seconds, uint64_t seq, bool upscaled)
+		{
+			const int T = 128, kTiles = 8;
+			std::vector<float> data(static_cast<size_t>(T) * T * kTiles);
+			uint32_t x = 12345u + static_cast<uint32_t>(seq);
+			for (int t = 0; t < kTiles; ++t)
+				for (int yy = 0; yy < T; ++yy)
+					for (int xx = 0; xx < T; ++xx)
+					{
+						const int key = upscaled ? ((yy / 2) * T + xx / 2) : (yy * T + xx);
+						uint32_t h = x ^ (static_cast<uint32_t>(t) * 2654435761u) ^ (static_cast<uint32_t>(key) * 40503u);
+						h = h * 1664525u + 1013904223u;
+						h ^= h >> 13;
+						data[(static_cast<size_t>(t) * T + yy) * T + xx] = static_cast<float>(0.3 + 0.4 * (static_cast<double>(h & 0xFFFFFF) / 16777216.0));
+					}
+			const std::vector<float> none;
+			m.AnalyseTilesForTest(data, kTiles, seconds, 3840, 2160, none, none, kTiles, T, 64.0 / 1023.0, seq);
+		}
+
+		inline std::string RunMonitor(const std::string& tag)
+		{
+			SourceResolutionMonitor::Monitor m;
+			m.SetSourceIdConsensus(true);
+			m.SetDiagnosticTag(tag);
+			m.SetDiagnosticDepths(8, 10);
+			std::ostringstream o;
+			for (int i = 0; i < 48; ++i)
+			{
+				const double t = 0.5 * i;
+				const uint64_t seq = static_cast<uint64_t>(i) + 1;
+				AnalyseFrame(m, t, seq, i >= 16 && i < 40);
+				const SourceResolutionMonitor::Snapshot s = m.Read();
+				o << s.frames << ',' << s.cuts << ',' << s.shots << ',' << Num(s.frameRatio) << ',' << Num(s.liveRatio) << ',' << Num(s.declaredRatio) << ','
+					<< Num(s.confidence) << ',' << Num(s.axisRatioX) << ',' << Num(s.axisRatioY) << ',' << Num(s.axisConfidence) << ','
+					<< Num(s.frameQuality) << ',' << Num(s.frameNoise) << ',' << Num(s.coherenceH) << ',' << Num(s.coherenceV) << ',' << s.kernel << ','
+					<< Num(s.evidenceSeconds) << '\n';
+				std::string why;
+				double fx = 1.0, fy = 1.0;
+				m.AutoFactors(3840, 2160, 0.8, why, fx, fy, t + 0.1, seq);
+				o << Num(fx) << ',' << Num(fy) << ',' << why << '\n';
+			}
+			return o.str();
+		}
+	}
+
+	TEST_CLASS(SidDiagDumpV4Tests)
+	{
+	public:
+		TEST_METHOD(DumpV4IsOffByDefaultAndWritesNothing)
+		{
+			SidDumpV4::EnvGuard guard;
+			_putenv_s("VP_SID_DUMP_V4_DIR", "");
+			Assert::IsTrue(SourceIdentity::Diag::DumpDirV4().empty(), L"unset / empty = off");
+			const std::string dir = SidDumpV4::TempDir("sid_dump_v4_off");
+			SidDumpV4::ClearCsv(dir);
+			SourceIdentity::Diag::Tag tag;
+			tag.Set("x");
+			SourceIdentity::Diag::File f;
+			Assert::IsFalse(f.Ready(tag, "a_frames", SourceIdentity::Diag::FramesHeaderV4()), L"no directory: the file is never opened");
+			(void)SidDumpV4::RunEstimator(true, "off_est");
+			(void)SidDumpV4::RunMonitor("off_mon");
+			Assert::AreEqual(0, SidDumpV4::CountCsv(dir), L"nothing was written");
+			RemoveDirectoryA(dir.c_str());
+		}
+
+		TEST_METHOD(DumpV4ChainEstimatorOutputIsIdenticalAndRowsFollowTheContract)
+		{
+			SidDumpV4::EnvGuard guard;
+			_putenv_s("VP_SID_DUMP_V4_DIR", "");
+			const std::string off0 = SidDumpV4::RunEstimator(false, "est_rules_off");
+			const std::string off1 = SidDumpV4::RunEstimator(true, "est_rules_on");
+			const std::string dir = SidDumpV4::TempDir("sid_dump_v4_est");
+			SidDumpV4::ClearCsv(dir);
+			_putenv_s("VP_SID_DUMP_V4_DIR", dir.c_str());
+			const std::string on0 = SidDumpV4::RunEstimator(false, "est_rules_off");
+			const std::string on1 = SidDumpV4::RunEstimator(true, "est_rules_on");
+			_putenv_s("VP_SID_DUMP_V4_DIR", "");
+			Assert::IsTrue(off0.find("\nE") != std::string::npos || off0.compare(0, 1, "E") == 0, L"the estimator evaluated");
+			Assert::IsTrue(off0 == on0, L"rules off: every record, status line, detail and counter identical with the dump on");
+			Assert::IsTrue(off1 == on1, L"rules on: identical with the dump on");
+			for (const char* t : { "est_rules_off", "est_rules_on" })
+			{
+				const int evals = SidDumpV4::CheckFile(dir + "\\" + t + ".b_evals.csv", SourceIdentity::Diag::EvalsHeaderV4());
+				const int sizes = SidDumpV4::CheckFile(dir + "\\" + t + ".b_sizes.csv", SourceIdentity::Diag::SizesHeaderV4());
+				Assert::IsTrue(evals >= 10, L"one b_evals row per evaluation");
+				Assert::IsTrue(sizes >= 4 * evals, L"b_sizes: every conventional size of the 1920x1080 raster (>= 2 per axis), per axis and evaluation");
+				// The rows carry real numbers: exact statistics, and evidence accrued at the true size 960 / 540 (an open shot or a credit).
+				std::ifstream in(dir + "\\" + t + ".b_sizes.csv");
+				std::string h, line;
+				std::getline(in, h);
+				const std::vector<std::string> hc = SidDumpV4::Split(h);
+				size_t iValid = 0, iStat = 0, iN = 0, iOpen = 0, iCredit = 0;
+				for (size_t i = 0; i < hc.size(); ++i)
+				{
+					if (hc[i] == "valid") iValid = i;
+					if (hc[i] == "stat") iStat = i;
+					if (hc[i] == "n") iN = i;
+					if (hc[i] == "shot_open") iOpen = i;
+					if (hc[i] == "credit_now") iCredit = i;
+				}
+				int valid = 0, truthEvidence = 0;
+				while (std::getline(in, line))
+				{
+					const std::vector<std::string> f = SidDumpV4::Split(line);
+					if (f[iValid] == "1" && !f[iStat].empty())
+						++valid;
+					if ((f[iN] == "960" || f[iN] == "540") && ((!f[iOpen].empty() && f[iOpen] != "0") || f[iCredit] != "0"))
+						++truthEvidence;
+				}
+				Assert::IsTrue(valid > 0, L"exact statistics of the conventional sizes are written");
+				Assert::IsTrue(truthEvidence > 0, L"the true size's shot / credit columns move");
+			}
+			// The depth hint lands in its own columns (coded 8, output 10), apart from the measured output step.
+			std::ifstream in(dir + "\\est_rules_on.b_evals.csv");
+			std::string h, row;
+			std::getline(in, h);
+			std::getline(in, row);
+			const std::vector<std::string> hc = SidDumpV4::Split(h), rc = SidDumpV4::Split(row);
+			for (size_t i = 0; i < hc.size(); ++i)
+			{
+				if (hc[i] == "coded_bits") Assert::AreEqual(std::string("8"), rc[i]);
+				if (hc[i] == "output_bits") Assert::AreEqual(std::string("10"), rc[i]);
+				if (hc[i] == "safety") Assert::AreEqual(std::string("1"), rc[i]);
+			}
+			in.close();
+			SidDumpV4::ClearCsv(dir);
+			RemoveDirectoryA(dir.c_str());
+		}
+
+		TEST_METHOD(DumpV4MonitorOutputIsIdenticalAndWritesOneRowPerAnalysedFrame)
+		{
+			SidDumpV4::EnvGuard guard;
+			_putenv_s("VP_SID_DUMP_V4_DIR", "");
+			const std::string off = SidDumpV4::RunMonitor("mon");
+			const std::string dir = SidDumpV4::TempDir("sid_dump_v4_mon");
+			SidDumpV4::ClearCsv(dir);
+			_putenv_s("VP_SID_DUMP_V4_DIR", dir.c_str());
+			const std::string on = SidDumpV4::RunMonitor("mon");
+			_putenv_s("VP_SID_DUMP_V4_DIR", "");
+			Assert::IsTrue(off == on, L"every snapshot field and factor decision identical with the dump on");
+			Assert::AreEqual(48, SidDumpV4::CheckFile(dir + "\\mon.a_frames.csv", SourceIdentity::Diag::FramesHeaderV4()), L"one row per analysed frame");
+			Assert::IsTrue(SidDumpV4::CheckFile(dir + "\\mon.a_abr.csv", SourceIdentity::Diag::AbrHeaderV4()) >= 0, L"the ABR file exists (consensus on)");
+			SidDumpV4::ClearCsv(dir);
 			RemoveDirectoryA(dir.c_str());
 		}
 	};

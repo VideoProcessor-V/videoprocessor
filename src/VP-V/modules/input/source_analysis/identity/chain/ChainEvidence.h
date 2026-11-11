@@ -471,6 +471,63 @@ namespace SourceIdentity
 				return best;
 			}
 
+			// Dump v4 (SidDiagDump.h; read only, decision neutral): the shot accounting of size n (+-1 px; the slot FindSlot would pick) on one
+			// axis. `open` = the open shot's sum (UNCAPPED; the current-shot credit), `closed*` = the capped closed shots still in the window,
+			// `pending` = increments of n held by the E2 dwell (not yet credited), and the axis's dwell state (shot key, start, met).
+			struct ShotDiag
+			{
+				bool haveSlot = false;
+				double open = 0.0;
+				uint32_t openShotId = 0;
+				int64_t openNewestUs = -1;
+				int closedShots = 0;
+				double closedSum = 0.0;
+				double pending = 0.0;
+				uint32_t shotKey = 0;
+				int64_t shotStartUs = 0;
+				bool haveShot = false;
+				bool shotMet = false;
+			};
+			ShotDiag ShotDiagAtN(int axis, int n) const
+			{
+				const AxisState& st = ax_[axis == 0 ? 0 : 1];
+				ShotDiag o;
+				o.shotKey = st.shotKey;
+				o.shotStartUs = st.shotStartUs;
+				o.haveShot = st.haveShot;
+				o.shotMet = st.shotMet;
+				int nearIdx = -1, nearD = 0;
+				for (size_t i = 0; i < st.slots.size(); ++i)
+				{
+					const int d = st.slots[i].n > n ? st.slots[i].n - n : n - st.slots[i].n;
+					if (d > 1)
+						continue;
+					if (nearIdx < 0 || d < nearD || (d == nearD && st.slots[i].n < st.slots[static_cast<size_t>(nearIdx)].n))
+					{
+						nearIdx = static_cast<int>(i);
+						nearD = d;
+					}
+				}
+				if (nearIdx >= 0)
+				{
+					const Hypothesis& h = st.slots[static_cast<size_t>(nearIdx)];
+					o.haveSlot = true;
+					o.open = h.shots > 0 ? h.shotSum : 0.0;
+					o.openShotId = h.shotId;
+					o.openNewestUs = h.shotTimeUs;
+					o.closedShots = static_cast<int>(h.closed.size());
+					for (size_t i = 0; i < h.closed.size(); ++i)
+						o.closedSum += h.closed[i].value;
+				}
+				for (size_t i = 0; i < st.pending.size(); ++i)
+				{
+					const int d = st.pending[i].n > n ? st.pending[i].n - n : n - st.pending[i].n;
+					if (d <= 1)
+						o.pending += st.pending[i].increment;
+				}
+				return o;
+			}
+
 			// The recent window of an axis in seconds (N3): derived from the measured evaluation rate; 0 = the rate is not measured yet (no window).
 			double WindowSeconds(int axis) const { return WindowUs(ax_[axis == 0 ? 0 : 1]) / 1e6; }
 

@@ -4,6 +4,7 @@
 #include "ChainEstimator.h"
 
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/input/source_analysis/identity/SidDiagDump.h>
 
 #include <algorithm>
 #include <atomic>
@@ -145,6 +146,13 @@ namespace SourceIdentity
 			std::string dumpPath;                     // R4: VP_SID_R4_DUMP_PATH (empty = off)
 			std::unique_ptr<DescaleVerifier> dumpVerifier;
 			uint64_t dumpRows = 0;
+			// Dump v4 (SidDiagDump.h, VP_SID_DUMP_V4_DIR; decision neutral): files, the tag, its own verifier, this evaluation's latch output.
+			Diag::Tag diagTag;
+			Diag::File diagEvals, diagSizes;
+			std::unique_ptr<DescaleVerifier> v4Verifier;
+			LatchOutput diagLo;                       // the latch output of the newest evaluation (ApplyLatch; none while the rules are off)
+			LatchEvent diagResetEvent = LatchEvent::None;   // ... or of the reset branch of Process
+			std::atomic<int> diagCodedBits{ 0 }, diagOutputBits{ 0 };   // the caller's depth hint (0 = unknown)
 			bool appliedRunning = false;
 			uint64_t appliedEpoch = 0;
 			bool haveArea = false;
@@ -1196,6 +1204,109 @@ namespace SourceIdentity
 				}
 			}
 
+			// ---- Dump v4 (doc 100 s4 P0; contract identity/README.md "Dump v4"): one b_evals row per evaluation, one b_sizes row per
+			// evaluation x axis x conventional size of the published set (scaling.geometry SourceGeometrySet.h; parked sizes too). Reads the
+			// decision state through const accessors only; the exact statistic of every size comes from a verifier of its own.
+			void DumpV4(const AxisRun run[2], const ReadingOutput out[2], uint32_t flags, bool windowCleared, uint64_t seq, int64_t timeUs,
+				int rasterW, int rasterH, int step, double floorCodes, bool classicalOk, const double classical[2], double costMs)
+			{
+				std::ofstream& f = diagEvals.Out();
+				const int coded = diagCodedBits.load(std::memory_order_acquire), outBits = diagOutputBits.load(std::memory_order_acquire);
+				const LatchEvent ev = diagLo.event != LatchEvent::None ? diagLo.event : diagResetEvent;
+				const std::string t = Diag::Num(static_cast<double>(timeUs) / 1e6);
+				f << seq << ',' << t << ',' << shotId << ',' << flags << ',' << ((flags & kEvCut) ? 1 : 0) << ',' << ((flags & kEvBlank) ? 1 : 0) << ','
+					<< ((flags & kEvFade) ? 1 : 0) << ',' << ((flags & kEvClearWindow) ? 1 : 0) << ',' << ((flags & kEvMenuHold) ? 1 : 0) << ','
+					<< ((flags & kEvAbrStep) ? 1 : 0) << ',' << ((flags & kEvAreaChanged) ? 1 : 0) << ',' << (windowCleared ? 1 : 0) << ','
+					<< step << ',' << Diag::Num(floorCodes) << ',' << coded << ',' << outBits << ',' << (classicalOk ? 1 : 0) << ','
+					<< Diag::Num(classical[0]) << ',' << Diag::Num(classical[1]) << ',' << (safetyOn ? 1 : 0);
+				for (int a = 0; a < 2; ++a) f << ',' << static_cast<int>(out[a].measured.state);
+				for (int a = 0; a < 2; ++a) f << ',' << out[a].measured.n;
+				for (int a = 0; a < 2; ++a) f << ',' << static_cast<int>(out[a].applied.state);
+				for (int a = 0; a < 2; ++a) f << ',' << out[a].applied.n;
+				for (int a = 0; a < 2; ++a) f << ',' << (run[a].have ? run[a].ls.axisLen : 0);
+				for (int a = 0; a < 2; ++a) f << ',' << Diag::Num(out[a].measured.llr);
+				for (int a = 0; a < 2; ++a) f << ',' << ((run[a].have && run[a].up.informative) ? 1 : 0);
+				for (int a = 0; a < 2; ++a) f << ',' << ((run[a].have && run[a].up.hold) ? 1 : 0);
+				for (int a = 0; a < 2; ++a) f << ',' << ((run[a].have && run[a].pr.seen) ? 1 : 0);
+				f << ',' << (latch.Latched() ? 1 : 0) << ',' << latch.LatchedNx() << ',' << latch.LatchedNy() << ',' << static_cast<int>(ev) << ','
+					<< (diagLo.confirmed ? 1 : 0) << ',' << (diagLo.deferredNow ? 1 : 0) << ',' << (diagLo.deferCancelled ? 1 : 0) << ','
+					<< (diagLo.heldBack ? 1 : 0) << ',' << Diag::Num(latch.ReleaseClockSec()) << ',' << (latch.Deferred() ? 1 : 0) << ','
+					<< (latch.Dwelling() ? 1 : 0) << ',' << static_cast<int>(latch.DeferCause()) << ','
+					<< Diag::Num(static_cast<double>(latch.DeferSinceUs()) / 1e6) << ','
+					<< Diag::Num(static_cast<double>(latch.LastConfirmUs()) / 1e6) << ','
+					<< Diag::Num(static_cast<double>(latch.NewestCreditUs(0)) / 1e6) << ','
+					<< Diag::Num(static_cast<double>(latch.NewestCreditUs(1)) / 1e6) << ',' << Diag::Num(latch.AccumulatedCredit(0)) << ','
+					<< Diag::Num(latch.AccumulatedCredit(1)) << ',' << Diag::Num(latch.Bar(timeUs, thr.c1)) << ',' << Diag::Num(thr.c1) << ','
+					<< Diag::Num(costMs) << '\n';
+				diagEvals.EndRow();
+				if (!diagSizes.Ready(diagTag, "b_sizes", Diag::SizesHeaderV4()))
+					return;
+				if (!v4Verifier)
+				{
+					VerifierSettings vs = cfg.verifier;
+					vs.nowMs = &State::VerifierClock;
+					vs.clockCtx = this;
+					vs.cacheBytes = vs.cacheBytes / 8;
+					v4Verifier.reset(new DescaleVerifier(vs));
+				}
+				std::ofstream& g = diagSizes.Out();
+				std::size_t count = 0;
+				const Scaling::GeometrySet::Geometry* geoms = Scaling::GeometrySet::Geometries(count);
+				for (int a = 0; a < 2; ++a)
+				{
+					if (!run[a].have)
+						continue;
+					const int N = run[a].ls.axisLen;
+					int cands[32];
+					int gi[32];
+					int cc = 0;
+					for (std::size_t i = 0; i < count && cc < 32; ++i)
+					{
+						double rx = 0.0, ry = 0.0;
+						if (!Scaling::GeometrySet::RatiosFor(geoms[i], rasterW, rasterH, rx, ry))
+							continue;
+						const int n = RoundToInt(static_cast<double>(N) * (a == 0 ? rx : ry));
+						if (n < 16 || n >= N)
+							continue;
+						bool dup = false;
+						for (int k = 0; k < cc; ++k)
+							dup = dup || cands[k] == n;
+						if (dup)
+							continue;
+						gi[cc] = static_cast<int>(i);
+						cands[cc++] = n;
+					}
+					if (cc == 0)
+						continue;
+					VerifyOptions opt;
+					opt.exactOnly = true;
+					VerifyResult vr;
+					v4Verifier->Evaluate(run[a].ls, cands, cc, opt, vr);
+					for (int k = 0; k < cc; ++k)
+					{
+						const CandidateResult* cr = nullptr;
+						for (size_t i = 0; i < vr.candidates.size() && cr == nullptr; ++i)
+							if (vr.candidates[i].nProposed == cands[k])
+								cr = &vr.candidates[i];
+						int64_t newest = -1;
+						double raw = 0.0;
+						const double credit = evidence.CreditAtN(a, cands[k], &newest, &raw);
+						const double llr = evidence.LlrAtN(a, cands[k]);
+						const ChainEvidence::ShotDiag sd = evidence.ShotDiagAtN(a, cands[k]);
+						const Scaling::GeometrySet::Geometry& geo = geoms[gi[k]];
+						g << seq << ',' << t << ',' << shotId << ',' << (a == 0 ? 'x' : 'y') << ',' << N << ',' << cands[k] << ",\"" << geo.name << "\","
+							<< (geo.singleAxisParked ? 1 : 0) << ',' << ((cr && cr->valid) ? 1 : 0) << ',' << (cr ? Diag::Num(cr->stat) : std::string()) << ','
+							<< (cr ? cr->kernel : -1) << ',' << (cr ? cr->lineCount : 0) << ',' << Diag::Num(credit) << ',' << Diag::Num(raw) << ','
+							<< Diag::Num(static_cast<double>(newest) / 1e6) << ',' << (llr <= -1e8 ? std::string() : Diag::Num(llr)) << ','
+							<< (sd.haveSlot ? Diag::Num(sd.open) : std::string()) << ',' << sd.openShotId << ','
+							<< Diag::Num(static_cast<double>(sd.openNewestUs) / 1e6) << ',' << sd.closedShots << ',' << Diag::Num(sd.closedSum) << ','
+							<< Diag::Num(sd.pending) << ',' << sd.shotKey << ',' << Diag::Num(static_cast<double>(sd.shotStartUs) / 1e6) << ','
+							<< (sd.shotMet ? 1 : 0) << '\n';
+						diagSizes.EndRow();
+					}
+				}
+			}
+
 			// ---- SID r2: the asymmetric latch over the readers outputs (R5, R7) ----------------------------------------------
 			static Geometry::AxisGeom UnsureLike(const Geometry::AxisGeom& g, uint32_t bits)
 			{
@@ -1283,6 +1394,7 @@ namespace SourceIdentity
 					in.gainY = evidence.CreditAtN(1, latch.LatchedNy(), &in.gainTimeY, &in.rawY);
 				}
 				const LatchOutput lo = latch.Step(in);
+				diagLo = lo;   // dump v4 (a copy, read only)
 				FoldLatchCounters();
 				NoteLatchEvent(lo, timeUs);
 				if (LatchEventIsEvidenceRelease(lo.event))
@@ -1328,6 +1440,8 @@ namespace SourceIdentity
 				const int rasterW = s.rasterW > 0 ? static_cast<int>(s.rasterW) : s.active.w;
 				const int rasterH = s.rasterH > 0 ? static_cast<int>(s.rasterH) : s.active.h;
 				evidence.ClearCredits();   // M1: an axis not submitted this evaluation credits nothing
+				diagLo = LatchOutput();    // dump v4: this evaluation's latch output (none until ApplyLatch runs)
+				diagResetEvent = LatchEvent::None;
 				lastStartMs.store(t0, std::memory_order_release);
 				std::string fmt;
 				bool classicalOk = false;
@@ -1522,6 +1636,7 @@ namespace SourceIdentity
 					if (anyReset || areaChanged)
 					{
 						const LatchOutput lo = latch.Reset();   // a discontinuity / active-area change: the latch goes (counted, noticed: M4)
+						diagResetEvent = lo.event;   // dump v4 (read only)
 						FoldLatchCounters();
 						NoteLatchEvent(lo, s.timeUs);
 						heldApplied[0] = Geometry::AxisGeom();
@@ -1597,6 +1712,10 @@ namespace SourceIdentity
 					haveStatusEval = true;
 					statusPlan = plan;
 				}
+				// Dump v4 (VP_SID_DUMP_V4_DIR): LAST, after the cost, the schedule, the published record and the status (audit M2: its I/O and
+				// verifier delay nothing the decision or its timing reads); reads only (its verifier and its files are its own).
+				if (diagEvals.Ready(diagTag, "b_evals", Diag::EvalsHeaderV4()))
+					DumpV4(run, out, flags, windowCleared, s.seq, s.timeUs, rasterW, rasterH, step, floorCodes, classicalOk, classical, cost);
 			}
 
 			// ---- status ---------------------------------------------------------------------------------------------------
@@ -1763,6 +1882,12 @@ namespace SourceIdentity
 		void ChainEstimator::SetSafetyRules(bool on) { st_->SetSafety(on); }
 		bool ChainEstimator::SafetyRules() const { return st_->safetyA.load(std::memory_order_acquire); }
 		void ChainEstimator::SetLatchAbrStepTrigger(bool on) { st_->SetAbr(on); }
+		void ChainEstimator::SetDiagnosticTag(const std::string& tag) { st_->diagTag.Set(tag); }
+		void ChainEstimator::SetDiagnosticDepths(int codedBits, int outputBits)
+		{
+			st_->diagCodedBits.store(codedBits, std::memory_order_release);
+			st_->diagOutputBits.store(outputBits, std::memory_order_release);
+		}
 		uint64_t ChainEstimator::LatchCeilingReleases() const { return st_->cLatchRelCeiling.load(std::memory_order_acquire); }
 		void ChainEstimator::NoteLatchCeilingForTest() { st_->cLatchRelCeiling.fetch_add(1, std::memory_order_acq_rel); }
 		EstimatorCounters ChainEstimator::GetCounters() const { return st_->Counters(); }

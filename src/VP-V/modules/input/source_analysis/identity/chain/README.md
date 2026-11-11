@@ -148,6 +148,7 @@ Fix round (audit r2-sid-rules-audit.md, 2026-11-11):
 | `source_id_latch_abr_trigger` | input group (plumbing pending, SID-5: Monitor setter only) | bool | on, off | off | not in Config yet (SID-5) | forced off | plumbing pending (SID-5); only with `source_id_safety_rules` on | same on all |
 | `source_id_single_axis_rebase` | input group (plumbing pending, SID-5: Monitor setter only) | bool | on, off | off | not in Config yet (SID-5) | forced off | plumbing pending (SID-5); the detection is still logged ("single-axis re-base held") | same on all |
 | `VP_SID_R4_DUMP_PATH` (environment) | diagnostics | path | absolute file path | unset (off) | none | n/a | dump only; builds a third verifier | test / debug |
+| `VP_SID_DUMP_V4_DIR` (environment) | diagnostics | path | absolute directory | unset (off) | none | n/a | dump only (identity/README.md "Dump v4"); builds a verifier of its own | test / debug |
 
 ## Tests
 

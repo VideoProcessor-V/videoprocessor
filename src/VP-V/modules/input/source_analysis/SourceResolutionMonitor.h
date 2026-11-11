@@ -6,6 +6,7 @@
 #include <VP-V/modules/input/source_analysis/identity/SourceGeometryView.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdPipeline.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceQualityView.h>
+#include <VP-V/modules/input/source_analysis/identity/SidDiagDump.h>
 
 #include <libplacebo/renderer.h>
 
@@ -280,6 +281,12 @@ namespace SourceResolutionMonitor
 		SourceIdentity::Chain::ChainEstimator& ChainEstimatorRef() { return *chainEst; }
 		// Tests: replaces the (inert) estimator with one built with an injected clock / settings. Before SetChainEnabled(true) only.
 		void SetChainEstimatorForTest(std::unique_ptr<SourceIdentity::Chain::ChainEstimator> estimator);
+		// Dump v4 (identity/SidDiagDump.h; written only while VP_SID_DUMP_V4_DIR is set, decision neutral): the file-name tag of the
+		// classical rows (<tag>.a_frames.csv: one row per analysed frame; <tag>.a_abr.csv: every ABR step event and every cut-confounded
+		// step) and of the monitor's own estimator (<tag>.monchain.b_*.csv); a new tag re-reads the variable at the next analysed frame.
+		// The depth hint (coded = decoded stream, output = delivered plane; 0 = unknown) is recorded on every row. Any thread.
+		void SetDiagnosticTag(const std::string& tag);
+		void SetDiagnosticDepths(int codedBits, int outputBits);
 		// Tests: reads every analysed frame as a mixed screen (a menu / overlay episode) for the chain window policy ONLY; the trackers and the
 		// classical decision are not affected. Off in every ordinary run.
 		void SetMixedForTest(bool mixed) { mixedForTest.store(mixed, std::memory_order_release); }
@@ -566,6 +573,11 @@ namespace SourceResolutionMonitor
 		std::atomic<bool> sourceIdResetPending{ false };
 		std::atomic<unsigned long long> sourceIdEvents{ 0 };
 		unsigned long long sourceIdLastCuts = 0;
+		// Dump v4 (worker only, except the tag and the depth hint)
+		SourceIdentity::Diag::Tag diagTag;
+		SourceIdentity::Diag::File diagFrames, diagAbr;
+		std::atomic<int> diagCodedBits{ 0 }, diagOutputBits{ 0 };
+		uint64_t diagConfounded = 0;   // the detector's confounded count already written
 		SourceIdentity::RebaseApplier sourceIdRebase;   // render thread
 		mutable std::mutex gateMutex;
 		FallbackCatalog::Decision gateDecision;         // written by AutoFactor(s), read for the status
