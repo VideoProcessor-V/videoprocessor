@@ -245,8 +245,8 @@ namespace SourceResolutionMonitor
 		// SID r2 safety rules (E0 validated; default OFF, nothing changes while off): R2 conventional geometry only, R3 convention-pair prior,
 		// R5 asymmetric latch, R7 no latch into a menu. Takes effect at the estimator's next clean start. Setters only: the key is plumbed
 		// with SID-5 (README Settings rows, plumbing pending).
-		void SetSourceIdSafetyRules(bool on) { chainEst->SetSafetyRules(on); }
-		void SetSourceIdLatchAbrTrigger(bool on) { chainEst->SetLatchAbrStepTrigger(on); }
+		void SetSourceIdSafetyRules(bool on);
+		void SetSourceIdLatchAbrTrigger(bool on);
 		// SID r2: the single-axis re-base (exactly one axis wanted below native by the consensus) is OFF by default: the re-base needs
 		// BOTH axes (a single-axis reading is a codec-grid fluke far more often than a real anamorphic source). The detection is still
 		// logged ("single-axis re-base held"). On restores the earlier behaviour. Only the consensus per-axis path is gated.

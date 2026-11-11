@@ -141,14 +141,6 @@ namespace SourceIdentity
 			std::string dumpPath;                     // R4: VP_SID_R4_DUMP_PATH (empty = off)
 			std::unique_ptr<DescaleVerifier> dumpVerifier;
 			uint64_t dumpRows = 0;
-			UpscaleLatch latch;                       // SID r2 R5 / R7 (inert unless safetyOn)
-			bool safetyOn = false;                    // applied at the clean start
-			Geometry::AxisGeom heldApplied[2];        // the applied geometry the latch carries
-			Geometry::AxisGeom lastFiltered[2];       // the last published applied geometry (for appliedChanged)
-			LatchCounters latchBase;                  // counters of the latch already folded into the atomics
-			std::string dumpPath;                     // R4: VP_SID_R4_DUMP_PATH (empty = off)
-			std::unique_ptr<DescaleVerifier> dumpVerifier;
-			uint64_t dumpRows = 0;
 			bool appliedRunning = false;
 			uint64_t appliedEpoch = 0;
 			bool haveArea = false;

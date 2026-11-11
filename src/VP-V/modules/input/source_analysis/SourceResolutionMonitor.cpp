@@ -562,6 +562,9 @@ if (tile < int(tiles) && g.y < ts) {
 		if (chainEnabled.load(std::memory_order_acquire)) chainEst->SetStreamKey(key);
 	}
 
+	void Monitor::SetSourceIdSafetyRules(bool on) { chainEst->SetSafetyRules(on); }
+	void Monitor::SetSourceIdLatchAbrTrigger(bool on) { chainEst->SetLatchAbrStepTrigger(on); }
+
 	void Monitor::SetChainEnabled(bool on)
 	{
 		namespace Chain = SourceIdentity::Chain;
