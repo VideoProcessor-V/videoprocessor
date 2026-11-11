@@ -232,6 +232,15 @@ namespace ProducerPlanTest
 			Assert::IsTrue(Lifecycle(l).action == Action::Start);
 			l.startFailedLatched = true;
 			Assert::IsTrue(Lifecycle(l).action == Action::None, L"a failed start is not retried while wanted");
+			l.retryDue = true;   // W2-C1: ... until its back-off is due
+			Assert::IsTrue(Lifecycle(l).action == Action::Start, L"a due retry starts it again");
+			l.gpuAvailable = false;
+			Assert::IsTrue(Lifecycle(l).action == Action::None, L"never without the device");
+			l.gpuAvailable = true;
+			l.producerExists = true;
+			Assert::IsTrue(Lifecycle(l).action == Action::None, L"never a second producer");
+			l.producerExists = false;
+			l.retryDue = false;
 			l.startFailedLatched = false;
 			l.lowLatency = true;
 			Assert::IsFalse(Lifecycle(l).wanted, L"the matcher's de-judder does not want it in low latency");

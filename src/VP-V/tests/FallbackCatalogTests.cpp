@@ -140,6 +140,39 @@ namespace FallbackCatalogTest
 			Assert::IsFalse(MotionEnginePressure(false).engaged);
 			Assert::IsTrue(Has(MotionEnginePressure(true), "standing optical-flow demand is dropped"), L"dropping the standing demand is visible");
 			{
+				// W2-C1 (B9): the one motion-engine entry, from the engine state.
+				using VectorDemand::MotionEngineReason;
+				using VectorDemand::MotionEngineState;
+				VectorDemand::MotionEngineStatus st;
+				Assert::IsFalse(MotionEngine(st).engaged, L"off with nothing affected: released");
+				Assert::AreEqual(std::string("motion engine"), MotionEngine(st).id);
+				st.reason = MotionEngineReason::NoStarter;
+				st.reasons = 1u << static_cast<int>(MotionEngineReason::NoStarter);
+				st.affected = (1u << static_cast<int>(VectorDemand::Consumer::DetailPulse)) |
+					(1u << static_cast<int>(VectorDemand::Consumer::SourceMonitorPan));
+				const Decision off = MotionEngine(st);
+				Assert::IsTrue(off.engaged && off.id == "motion engine");
+				Assert::IsTrue(Has(off, "motion engine off: no starter"), L"state and leading reason");
+				Assert::IsTrue(Has(off, "take their non-motion path"), L"what runs instead");
+				Assert::IsTrue(Has(off, VectorDemand::Name(VectorDemand::Consumer::DetailPulse)), L"the consumers are named");
+				st.reasons |= 1u << static_cast<int>(MotionEngineReason::VramRelease);
+				Assert::IsTrue(Has(MotionEngine(st), "video memory pressure"), L"every reason is listed");
+				st.state = MotionEngineState::Degraded;
+				st.reason = MotionEngineReason::OpticalFlowOff;
+				st.reasons = 1u << static_cast<int>(MotionEngineReason::OpticalFlowOff);
+				Assert::IsFalse(MotionEngine(st).engaged, L"optical_flow off is a deliberate setting: no fallback");
+				st.reason = MotionEngineReason::NvofUnavailable;
+				st.reasons |= 1u << static_cast<int>(MotionEngineReason::NvofUnavailable);
+				Assert::IsTrue(Has(MotionEngine(st), "motion engine degraded: NVIDIA optical flow is not available"));
+				Assert::IsTrue(Has(MotionEngine(st), "block searches without optical-flow pairs"));
+				st.reason = MotionEngineReason::None;
+				st.reasons = 0;
+				Assert::IsFalse(MotionEngine(st).engaged, L"the producer's first frames: no fallback");
+				st.state = MotionEngineState::On;
+				st.reasons = 1u << static_cast<int>(MotionEngineReason::Resync);
+				Assert::IsFalse(MotionEngine(st).engaged, L"on: released");
+			}
+			{
 				SnapshotLeaseNotes notes;
 				Assert::IsFalse(notes.Note(1000, 0).engaged, L"no lost read: released");
 				Assert::IsTrue(Has(notes.Note(2000, 3), "replaced or invalidated"), L"a lost snapshot lease is visible with its count");

@@ -447,6 +447,8 @@ namespace LookAheadWalkTest
 				VectorDemand::Decision vectorDemand;
 				bool vectorProducerSkipSustained = false, vectorGlobalMissSustained = false;
 				std::unique_ptr<FakeProducer> motionProducer;
+				VectorDemand::MotionEngineStatus status;   // W2-C1: the engine state the "motion engine" entry is synced from
+				VectorDemand::MotionEngineStatus State() const { return status; }
 			} host;
 			host.vectorDemand.producer = true;
 			VectorEngineFallbackSync::Sync(host, host);
@@ -472,9 +474,17 @@ namespace LookAheadWalkTest
 			host.vectorDemand.producer = true;
 			VectorEngineFallbackSync::Sync(host, host);
 			Assert::IsTrue(host.fallbacks.Engaged("vector producer"));
+			Assert::IsFalse(host.fallbacks.Engaged("motion engine"), L"default status: nothing affected");
+			host.status.state = VectorDemand::MotionEngineState::Off;
+			host.status.reason = VectorDemand::MotionEngineReason::NoStarter;
+			host.status.reasons = 1u << static_cast<int>(VectorDemand::MotionEngineReason::NoStarter);
+			host.status.affected = 1u << static_cast<int>(VectorDemand::Consumer::DetailPulse);
+			VectorEngineFallbackSync::Sync(host, host);
+			Assert::IsTrue(host.fallbacks.Engaged("motion engine"), L"W2-C1: the engine state is synced with the group");
 			VectorEngineFallbackSync::Release(host);
 			Assert::IsFalse(host.fallbacks.Engaged("vector producer"));
 			Assert::IsFalse(host.fallbacks.Engaged("vector_engine_producer"));
+			Assert::IsFalse(host.fallbacks.Engaged("motion engine"), L"released with the group");
 		}
 	};
 }

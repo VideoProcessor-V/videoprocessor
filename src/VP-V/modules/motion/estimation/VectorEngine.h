@@ -116,7 +116,7 @@ namespace VpMotion
 		static bool RequestInvalidationFor(const void* host, MotionValidity::Cause cause, const char* gapDetail);
 		// P5a-rest (item l; doc 30 F4 "fix C"): the GPU release of `host` (RendererExtension GpuReleased, from
 		// RetireOutput before the device goes) stops and drops that engine's optical-flow producer (its worker, its own
-		// D3D11 device and VRAM) instead of keeping it until the Impl is destroyed, and clears motionEngineReady. Keyed by
+		// D3D11 device and VRAM) instead of keeping it until the Impl is destroyed, and clears the start latches and back-off (W2-C1). Keyed by
 		// host: the release can run on the retirement worker after a replacement renderer has started (70b section 7),
 		// whose engine is untouched. The producer is unpublished under the directory lock and stopped outside it. False =
 		// no engine for `host` or no producer.
@@ -169,6 +169,16 @@ namespace VpMotion
 		// visible: fallback entry, status line, Ctrl+Alt+D record and the logs (on change, once per mode, every 5 s
 		// while on). Render thread.
 		void UpdateVectorEngine(const VectorDemand::Input& input, const UpdateFacts& facts, IVectorEngineHost& host);
+
+		// ---- W2-C1 (B9): the one engine state and its work counters ---------------------------------------------------
+		// State: derived at the end of UpdateVectorEngine and PlanProducer (render thread; VectorEngineState.h, the one-frame lag).
+		VectorDemand::MotionEngineStatus State() const override { return motionEngineStatus; }
+		// Work: the counters, with the producer's pairs (stopped producers' pairs kept in motionEnginePairsBase).
+		VectorDemand::MotionEngineWork Work() const override;
+		// The VRAM governor's release of the motion engine (the de-judder's keeper feeds it; render thread).
+		void NoteVramRelease(bool released) { motionVramRelease = released; }
+		// The keeper's counters (warm-ups, analysis estimates, matcher creates); render thread.
+		VectorDemand::MotionEngineWork& WorkCounters() { return motionEngineWork; }
 
 		struct ServeFacts
 		{

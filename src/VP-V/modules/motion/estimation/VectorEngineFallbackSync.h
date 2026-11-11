@@ -28,6 +28,7 @@ namespace VectorEngineFallbackSync
 		if (state.motionProducer)
 			health = state.motionProducer->GetHealth();
 		host.SyncFallback(FallbackCatalog::VectorProducer(state.vectorDemand.producer, health.recovering, health.stops, health.error));
+		host.SyncFallback(FallbackCatalog::MotionEngine(state.State()));   // W2-C1: the one engine state (State: a State() accessor)
 	}
 
 	// vector_demand off: every entry of the group is released.
@@ -38,5 +39,6 @@ namespace VectorEngineFallbackSync
 		host.SyncFallback(FallbackCatalog::Released("vector_engine_producer"));
 		host.SyncFallback(FallbackCatalog::Released("vector_engine_global"));
 		host.SyncFallback(FallbackCatalog::Released("vector producer"));
+		host.SyncFallback(FallbackCatalog::Released("motion engine"));
 	}
 }

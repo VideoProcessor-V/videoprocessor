@@ -42,6 +42,7 @@ namespace FallbackPlainText
 			{ "vector_engine_global", "Global motion detection is not keeping up and is off" },
 			{ "vector_engine_hook", "Camera-guided motion matching was skipped after an error" },
 			{ "vector producer", "The motion look-ahead stopped and is restarting" },
+			{ "motion engine", "The motion engine is off or reduced, so steps that reuse its motion use their simpler path" },
 			{ "motion look-ahead", "Some frames went without optical-flow look-ahead" },
 			{ "source resolution look-ahead", "Some frames had their source resolution judged on arrival only" },
 		};

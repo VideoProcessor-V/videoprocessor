@@ -238,6 +238,30 @@ namespace FallbackCatalog
 			"optical-flow demand is dropped (the block searches run) until the pressure eases");
 	}
 
+	// W2-C1 (B9): the motion engine's one state (VectorDemand::MotionEngineStatus, VectorEngine::State()). Engaged while a consumer
+	// that wants vectors is without full motion: the engine is off (no starter runs it, or a hard absence) or degraded (a starter
+	// runs the block searches without optical-flow pairs). Released when on, when nothing wants vectors, and when the only cause
+	// is a deliberate setting (optical_flow off) or the producer's own first frames (reason None; the "motion" entry covers a
+	// producer that never runs). It absorbs the reason part of "motion engine pressure" (that id stays one release as an alias).
+	inline Decision MotionEngine(const VectorDemand::MotionEngineStatus& st)
+	{
+		using R = VectorDemand::MotionEngineReason;
+		const unsigned deliberate = 1u << static_cast<int>(R::OpticalFlowOff);
+		if (st.state == VectorDemand::MotionEngineState::On || st.affected == 0 ||
+			(st.state == VectorDemand::MotionEngineState::Degraded && (st.reasons & ~deliberate) == 0))
+			return Released("motion engine");
+		std::string why = VectorDemand::ReasonWords(st.reason);
+		for (int i = 0; i < VectorDemand::kMotionEngineReasonCount; ++i)
+		{
+			const R r = static_cast<R>(i);
+			if (r != st.reason && st.Has(r) && r != R::None)
+				why += std::string(", ") + VectorDemand::ReasonWords(r);
+		}
+		const bool off = st.state == VectorDemand::MotionEngineState::Off;
+		return Engaged("motion engine", std::string("motion engine ") + VectorDemand::StateWord(st.state) + ": " + why + "; " +
+			VectorDemand::NamesOf(st.affected) + (off ? " take their non-motion path" : " use the block searches without optical-flow pairs"));
+	}
+
 	// SK-MV pass-through (TEMPORARY until P5c): the renderer read the matcher's snapshot (SnapField / SnapFrameTrust / SnapSubField) after
 	// the shared view's snapshot lease was lost (the matcher replaced or invalidated its copies since the view captured them). The read is
 	// answered by the matcher's own copy exactly as before, but it may not be the pair the view captured: never silent. `reads` is the

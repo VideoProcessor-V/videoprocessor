@@ -21,6 +21,7 @@
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <VP-V/modules/motion/estimation/MotionSegment.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/ProducerRecovery.h>
 #include <VP-V/modules/motion/estimation/VectorProducts.h>
 
 #include <libplacebo/gpu.h>
@@ -61,6 +62,24 @@ namespace VpMotion
 		uint64_t vectorProducerFirstSubmit = 0;
 		bool vectorProducerSkipSustained = false;
 
+		// ---- W2-C1 (B9): the one motion-engine state (VectorDemand::MotionEngineStatus; IVectorEngine::State / Work) ----------
+		// Derived in UpdateVectorEngine from this frame's decision and re-derived at the end of PlanProducer, so the published state
+		// (FallbackStatus, Ctrl+I) is same-frame. ONE-FRAME LAG (documented, kept on purpose): the decision at frame N is made from
+		// the previous frame's facts (the producer running / recovering / its start error as PlanProducer(N-1) left them); a
+		// producer started at frame N cannot serve N. So a producer stop shows in State() at the latest at the next decision, and
+		// already after PlanProducer(N) through the refresh. Render thread.
+		VectorDemand::MotionEngineStatus motionEngineStatus;
+		VectorDemand::MotionEngineWork motionEngineWork;
+		VectorDemand::EngineFacts motionEngineFacts;      // the facts the status was last derived from (PlanProducer refreshes them)
+		uint64_t motionEngineFrame = 0;                   // decisions made (the status's frame)
+		unsigned long long motionEnginePairsBase = 0;     // producer pairs of producers already stopped (Work().producerPairs)
+		bool motionOpticalFlow = true;                    // the optical_flow setting as PlanProducer last saw it
+		bool motionLowLatency = false;                    // the low-latency path as PlanProducer last saw it
+		bool motionVramRelease = false;                   // the idle keeper is pressured (set by the keeper, NoteVramRelease)
+		bool motionCameraGated = false;                   // the camera fit wanted the engine but optical flow is off or did not start
+		uint64_t motionStatusEpoch = 0;                   // the validity epoch last seen by the status (resync window)
+		ULONGLONG motionStatusEpochAtMs = 0;              // ... and when it moved
+
 		// ---- item c: producer, look-ahead and validity members -------------------------------------------------
 		// Owner 2026-10-16: the look-ahead engages with N frames queued ahead and disengages when the queue holds
 		// none or the sequence breaks (a skip, seek or reset: a new motion generation); it re-engages only once N
@@ -73,8 +92,6 @@ namespace VpMotion
 		bool motionAheadPrevKnown = false;
 		uint64_t motionAheadPrevGeneration = 0;
 		DejudderPolicy::MotionAheadFrame motionAheadPrev;
-		// Set when the optical-flow producer's engine has produced a pair (docs/VP-nvof-ahead.md). Any thread.
-		std::atomic<bool> motionEngineReady{ false };
 		// The producer computing the pairs ahead (render thread starts / stops it; the render loop submits frames;
 		// the de-judder takes its pairs). It stores them under motionValidity.StreamGeneration().
 		// Hardening (P5a-rest; audit correction): RenderLocked runs only inside RenderLoop, so the "render thread"
@@ -112,6 +129,8 @@ namespace VpMotion
 		// setting, the low-latency path and the producer's real start error.
 		int motionAheadSetting = -1;           // -1 = not planned yet
 		bool motionLowLatencyNoVectors = false;
+		// W2-C1 (H3Idle): the idle warm-up's last logged transient skip reason (logged once per change; cleared after a warm-up runs).
+		const char* motionWarmSkipLogged = nullptr;
 		std::string motionProducerStartError;
 		// SK-MV: the standing cost status line ("motion engine standing for de-judder: N pairs/s, M ms/pair"; empty when not standing)
 		// for Ctrl+I, refreshed every 5 s by PlanProducer. Render thread.
@@ -159,7 +178,13 @@ namespace VpMotion
 		// r6 fix 3: the time-based depth at this source rate (MotionAhead::DepthAt): the look-ahead engages once
 		// that many are queued ahead.
 		std::atomic<int> motionAheadConfigured{ MotionAhead::kDefaultDepth };
-		bool motionProducerFailedLogged = false;
+		// W2-C1: the old single latch (motionProducerFailedLogged) split in two. startFailed = the last start failed: not retried every
+		// frame, only when the back-off (motionProducerStartRetry, ProducerRecovery's waits) is due or the producer is wanted anew.
+		// stopLogged = a running producer stopped and was logged once (log-once only; cleared when a producer runs again). A GPU
+		// release (ReleaseProducerFor) clears both: it is a recovery event, so the producer may start again on the new device.
+		bool motionProducerStartFailed = false;
+		bool motionProducerStopLogged = false;
+		MotionAhead::ProducerRecovery motionProducerStartRetry;
 		unsigned long long motionAheadHits = 0, motionAheadMisses = 0;
 		// The render loop's hand-off of frames to the producer (render loop thread writes).
 		std::atomic<double> motionHandoffMaxMs{ 0.0 }, motionHandoffTotalMs{ 0.0 };
