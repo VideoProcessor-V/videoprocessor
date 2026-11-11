@@ -1575,6 +1575,7 @@
         "src/VP-V/tests/PipelineSkeletonTests.cpp",
         "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
         "src/VP-V/modules/control/config/tests/ConfigIdentityDump.cpp",
+        "src/VP-V/modules/control/config/tests/VpvProfileQueueAdviceTests.cpp",
         "src/VideoProcessor-Lib/ConfigFile.cpp",
         "src/VideoProcessor-Lib/ConfigSchema.h",
         "src/VideoProcessor-Lib/MainConfigSchema.h",
@@ -1591,6 +1592,7 @@
         "src/VideoProcessor-Lib/ProfileSchemaHooks.h",
         "src/VP-V/modules/control/config/VpvStartupSchema.h",
         "src/VP-V/modules/control/config/VpvSchemaKeys.h",
+        "src/VP-V/modules/control/config/VpvProfileQueueAdvice.h",
         "src/VideoProcessor-Lib/RendererProfileConfig.h"
       ],
       "components": {
