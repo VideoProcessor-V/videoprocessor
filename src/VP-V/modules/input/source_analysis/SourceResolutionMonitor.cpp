@@ -542,9 +542,13 @@ if (tile < int(tiles) && g.y < ts) {
 			const int heldAxis = singleAxisHeldAxis.load(std::memory_order_acquire);
 			if (heldAxis == 0 || heldAxis == 1)
 			{
-				char buf[96];
-				std::snprintf(buf, sizeof(buf), " | single-axis re-base held (%s %.4f; two axes are required)", heldAxis == 0 ? "H" : "V",
-					singleAxisHeldRatio.load(std::memory_order_acquire));
+				char buf[160];
+				const double r = singleAxisHeldRatio.load(std::memory_order_acquire);
+				const char* named = const_cast<Monitor*>(this)->NamedHold(heldAxis == 0 ? r : 1.0, heldAxis == 0 ? 1.0 : r, false);
+				if (named != nullptr)   // a named parked entry (owner 2026-11-11)
+					std::snprintf(buf, sizeof(buf), " | held: %s (single-axis re-base parked; %s %.4f)", named, heldAxis == 0 ? "H" : "V", r);
+				else
+					std::snprintf(buf, sizeof(buf), " | single-axis re-base held (%s %.4f; two axes are required)", heldAxis == 0 ? "H" : "V", r);
 				line += buf;
 			}
 		}
@@ -570,6 +574,54 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 	}
 
+	const char* Monitor::NamedHold(double rH, double rV, bool count)
+	{
+		namespace G = Scaling::GeometrySet;
+		const G::Geometry* e = G::RecogniseParked(rH, rV, conventionRasterW.load(std::memory_order_acquire),
+			conventionRasterH.load(std::memory_order_acquire), geometryDetectMask.load(std::memory_order_acquire));
+		if (e == nullptr)
+			return nullptr;
+		const int i = G::IndexOf(e);
+		if (count && !OriginalPathway() && i >= 0 && i < 32)
+		{
+			const unsigned n = namedHoldCounts[i].fetch_add(1u, std::memory_order_acq_rel) + 1u;
+			DebugLog::Log("source_resolution: held: %s (re-base parked; H %.4f x V %.4f; episode %u of this entry)", e->name, rH, rV, n);
+			char field[200];
+			std::snprintf(field, sizeof(field), "held %s (%s) H %.4f x V %.4f episode %u", e->name, e->id, rH, rV, n);
+			std::lock_guard<std::mutex> lock(mutex);
+			Record("convention_held" + std::string(12, ',') + SourceHistory::Field(field));
+		}
+		return e->name;
+	}
+
+	unsigned Monitor::NamedHoldCount(const char* id) const
+	{
+		std::size_t count = 0;
+		const Scaling::GeometrySet::Geometry* g = Scaling::GeometrySet::Geometries(count);
+		for (std::size_t i = 0; i < count && i < 32; ++i)
+			if (id != nullptr && std::string(id) == g[i].id)
+				return namedHoldCounts[i].load(std::memory_order_acquire);
+		return 0u;
+	}
+
+	void Monitor::SetGeometryDetect(const std::string& value)
+	{
+		Scaling::GeometrySet::DetectMask mask = 0u;
+		std::string unknown;
+		Scaling::GeometrySet::ParseDetect(value, mask, unknown);
+		geometryDetectMask.store(mask, std::memory_order_release);
+		std::lock_guard<std::mutex> lock(geometryDetectMutex);
+		if (unknown != geometryDetectUnknown && !unknown.empty())
+			DebugLog::Log("source_geometry_detect: unknown entries ignored: %s", unknown.c_str());
+		geometryDetectUnknown = unknown;
+	}
+
+	FallbackCatalog::Decision Monitor::GeometryDetectFallback() const
+	{
+		std::lock_guard<std::mutex> lock(geometryDetectMutex);
+		return FallbackCatalog::GeometryDetectUnknown(geometryDetectUnknown);
+	}
+
 	std::string Monitor::ConventionNote() const
 	{
 		if (OriginalPathway())
@@ -577,6 +629,13 @@ if (tile < int(tiles) && g.y < ts) {
 		const int kind = conventionHeldKind.load(std::memory_order_acquire);
 		const double h = conventionHeldH.load(std::memory_order_acquire), v = conventionHeldV.load(std::memory_order_acquire);
 		char buf[160];
+		// A held reading that is one named parked (detect-only) entry is shown by its name (owner 2026-11-11).
+		const char* named = kind == 1 || kind == 2 ? const_cast<Monitor*>(this)->NamedHold(h, v, false) : nullptr;
+		if (named != nullptr)
+		{
+			std::snprintf(buf, sizeof(buf), "held: %s (%s re-base parked; H %.4f x V %.4f)", named, kind == 1 ? "single-axis" : "anamorphic", h, v);
+			return buf;
+		}
 		if (kind == 1)
 		{
 			std::snprintf(buf, sizeof(buf), "single-axis re-base held (%s %.4f; two axes are required)", h < 1.0 ? "H" : "V", h < 1.0 ? h : v);
@@ -591,6 +650,13 @@ if (tile < int(tiles) && g.y < ts) {
 		const int axis = singleAxisHeldAxis.load(std::memory_order_acquire);
 		if (axis == 0 || axis == 1)
 		{
+			const double r = singleAxisHeldRatio.load(std::memory_order_acquire);
+			const char* l6 = const_cast<Monitor*>(this)->NamedHold(axis == 0 ? r : 1.0, axis == 0 ? 1.0 : r, false);
+			if (l6 != nullptr)
+			{
+				std::snprintf(buf, sizeof(buf), "held: %s (single-axis re-base parked; %s %.4f)", l6, axis == 0 ? "H" : "V", r);
+				return buf;
+			}
 			std::snprintf(buf, sizeof(buf), "single-axis re-base held (%s %.4f; two axes are required)", axis == 0 ? "H" : "V",
 				singleAxisHeldRatio.load(std::memory_order_acquire));
 			return buf;
@@ -2011,6 +2077,8 @@ if (tile < int(tiles) && g.y < ts) {
 		double& factorX, double& factorY, double seconds, uint64_t renderSequence)
 	{
 		autoRasterWidth = nativeWidth;   // SID r2 (owner 2026-11-11): AutoFactor's convention check needs the raster width
+		conventionRasterW.store(nativeWidth, std::memory_order_release);
+		conventionRasterH.store(nativeHeight, std::memory_order_release);
 		autoConventionCheck = true;
 		const double uniform = AutoFactor(nativeHeight, minimumConfidence, why, seconds, renderSequence);
 		autoConventionCheck = false;
@@ -2021,7 +2089,7 @@ if (tile < int(tiles) && g.y < ts) {
 			const int was = conventionHeldKind.exchange(kind, std::memory_order_acq_rel);
 			conventionHeldH.store(h, std::memory_order_release);
 			conventionHeldV.store(v, std::memory_order_release);
-			if (kind != 0 && kind != was)
+			if (kind != 0 && kind != was && NamedHold(h, v, true) == nullptr)   // a named parked entry: its own line and counter
 				DebugLog::Log("source_resolution: %s re-base held (H %.4f x V %.4f; only two-axis listed sizes are re-based)",
 					kind == 1 ? "single-axis" : "non-standard size", h, v);
 		};
@@ -2090,6 +2158,7 @@ if (tile < int(tiles) && g.y < ts) {
 				{
 					if (!singleAxisHeldLogged)
 					{
+						if (NamedHold(ratios[0] < 1.0 ? ratios[0] : 1.0, ratios[0] < 1.0 ? 1.0 : ratios[1], true) == nullptr)   // named: its own line
 						DebugLog::Log("source_id: single-axis re-base held (axis %s ratio %.4f; two axes are required)", ratios[0] < 1.0 ? "H" : "V", ratios[0] < 1.0 ? ratios[0] : ratios[1]);
 						singleAxisHeldLogged = true;
 					}

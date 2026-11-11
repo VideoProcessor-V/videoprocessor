@@ -57,6 +57,15 @@ namespace FallbackCatalog
 		return Engaged("source resolution held", note + "; the native size is rendered");
 	}
 
+	// ---- input.source_analysis: source_geometry_detect named unknown entries (SID r2) -----------
+	// The unknown ids are ignored (the known ones and the default still detect); shown, never silent.
+	inline Decision GeometryDetectUnknown(const std::string& unknownIds)
+	{
+		if (unknownIds.empty())
+			return Released("source geometry detect");
+		return Engaged("source geometry detect", "source_geometry_detect: unknown entries ignored (" + unknownIds + ")");
+	}
+
 	// ---- output.dither: dither need (dither_need = auto) ----------------------------------------
 	// The per-region extra dither amplitude was asked for but an input is missing (grain split, region
 	// precursors, light-level LUT, supported domain): the sigma-delta runs at its base amplitude.
