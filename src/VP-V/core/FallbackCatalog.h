@@ -732,6 +732,14 @@ namespace FallbackCatalog
 	{
 		return note.empty() ? Released("skeleton_lead_chain") : Engaged("skeleton_lead_chain", note);
 	}
+	// B3 X1: lagged-seal products run at seal lag 0 in this mode (competitive low latency, no lane lead): sealed at N only.
+	inline Decision AnalysisSealLagZero(const std::vector<std::string>& products)
+	{
+		if (products.empty())
+			return Released("analysis_seal_lag_zero");
+		return Engaged("analysis_seal_lag_zero", JoinNames(products) +
+			" run at seal lag 0 in this mode (competitive low latency or no lane lead): sealed on time or absent, no final seal");
+	}
 	// A [vpv.skeleton] key that could not be read (kept at its default).
 	inline Decision SkeletonKeys(const std::string& problems)
 	{

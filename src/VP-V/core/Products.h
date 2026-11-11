@@ -267,8 +267,9 @@ struct ProductDecl {
     bool heldState = false;
     // SEAL LAG (B3 X1): frame N of the product gets its FINAL seal at render start of N + sealLag (0 = today: sealed at N).
     // Each frame is one of: AHEAD (its lane result was accepted on time, at N), LIVE-FILLED (made by the render's live fill at
-    // the final seal), LATE (a lane result published after N, accepted at the final seal N + sealLag) or ABSENT (none of
-    // these: unavailable, or a resync after N made the late result invalid). Between N and the final seal the frame is
+    // the final seal), LATE (a lane result accepted at the final seal N + sealLag: published after N, or published by N but not
+    // acceptable then because a lead ancestor N + k was not sealed yet; a product with sealLag >= a lead is never AHEAD) or
+    // ABSENT (none of these: unavailable, or a resync after N made the late result invalid). Between N and the final seal the frame is
     // PENDING (SealOutcome::Pending): absent for every reader at N.
     // ON-TIME-OR-ABSENT: a product reading a lagged input gets it on time (accepted at its own seal) or absent (its declared
     // missing-input form, or unavailable); the lag is NEVER inherited (BuildGraph keeps every reader's own sealLag).

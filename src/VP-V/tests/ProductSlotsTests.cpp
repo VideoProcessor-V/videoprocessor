@@ -1052,6 +1052,25 @@ namespace ProductSlotsTestsNs
 			Assert::AreEqual(uint64_t(0), h.Set(kB).Counters().sealAhead.load());
 		}
 
+		TEST_METHOD(ASkippedFinalSealIsCountedUnfinalisedWhenTheSlotIsReused)
+		{
+			LagHarness h(2);
+			const uint64_t ring = h.Set(kB).Ring();
+			const uint64_t last = 2u + ring + 1u;
+			for (uint64_t s = 0; s <= last; ++s) {
+				Assert::IsTrue(h.Lane(kA, s));
+				Assert::IsTrue(h.Resolve(s)[h.IndexOf(kB)].pending, L"b has no lane result: pending at N");
+				if (s != 4u)
+					h.FinalSeal(s);   // render start 4 skipped: the final seal of b(2) never runs
+				h.Retire(s);
+			}
+			const SlotCounters& k = h.Set(kB).Counters();
+			Assert::AreEqual(uint64_t(1), k.sealUnfinalised.load(), L"b(2) found unfinalised when its slot was reused");
+			const uint64_t inFlight = 2u;   // b(last - 1), b(last): their final seals are still ahead
+			Assert::AreEqual(k.sealPending.load(), k.sealLiveFilled.load() + k.sealLate.load() + k.sealAbsent.load()
+				+ k.sealUnfinalised.load() + inFlight, L"every pending frame is in exactly one class");
+		}
+
 		TEST_METHOD(CompetitiveLowLatencyRunsASealLagAtZero)
 		{
 			for (int m = 0; m < 2; ++m) {

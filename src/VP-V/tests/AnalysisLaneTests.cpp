@@ -71,6 +71,8 @@ namespace AnalysisLaneTestsNs
 		}
 		ChunkResult RunChunk(const LaneJobContext&, uint32_t) override
 		{
+			if (hold)
+				return ChunkResult::More;   // B3 X1 tests: the job stays Writing until released
 			if (++chunks_ < 2)
 				return ChunkResult::More;
 			completed_ = signal_;
@@ -79,6 +81,7 @@ namespace AnalysisLaneTestsNs
 		uint64_t ProducerSignal() const override { return signal_; }
 		uint64_t ProducerCompleted() const override { return completed_; }
 		void Cancel(const LaneJobContext&) override { completed_ = signal_; }
+		bool hold = false;
 
 	private:
 		uint32_t chunks_ = 0;
@@ -551,6 +554,112 @@ namespace AnalysisLaneTestsNs
 				n.lane.OnSourceFrame(n.View(0));
 				Assert::IsTrue(n.lane.DeterministicWaitUs(0, 4000) == 0, L"non-deterministic: seal now");
 			}
+		}
+
+		// B3 X1 (audit MUST 1): the first products with P2 declaring seal lag 2.
+		static Registry LaggedP2(uint8_t lag)
+		{
+			std::vector<ProductDecl> d = FirstProducts().All();
+			d[kP2VectorPair].sealLag = lag;
+			return Registry(std::move(d));
+		}
+
+		// Frames 0..2 of a deterministic run over a lagged P2 with its OFA job held (Writing): P2 is pending at every N; render
+		// start 2 finalises P2(0) (no previous frame: absent). Then the held job of P2(1) starts; frame 4 arrives.
+		static void LaggedRunToFrameThree(Rig& r)
+		{
+			r.reg = LaggedP2(2);
+			r.p2.hold = true;
+			r.Configure(LaneSettings::Mode::On, true);
+			Assert::IsTrue(r.lane.Active() && r.lane.Deterministic());
+			const Node* n = r.lane.State()->table->NodeOf(kP2VectorPair);
+			Assert::IsTrue(n != nullptr && n->sealLag == 2u, L"P2 runs at seal lag 2");
+			r.lane.OnSourceFrame(r.View(0));
+			for (uint64_t s = 0; s < 3; ++s) {
+				r.lane.OnSourceFrame(r.View(s + 1));
+				for (int i = 0; i < 100 && r.lane.StepWorker(Backend::Cpu, 1000); ++i) {}
+				if (s < 2)
+					Assert::IsTrue(r.lane.DeterministicWaitUs(s, 4000) == 0, L"no wait at N for a lagged product");
+				Assert::IsTrue(Rig::Res(r.lane.OnRenderStart(s, 4000), kP2VectorPair).pending, L"P2 pending at N");
+				r.End(s);
+				for (int i = 0; i < 4; ++i)
+					r.lane.StepWorker(Backend::Ofa, 1000);
+			}
+			r.lane.OnSourceFrame(r.View(4));
+			for (int i = 0; i < 100 && r.lane.StepWorker(Backend::Cpu, 1000); ++i) {}
+			const SlotSet& set = r.lane.State()->table->At(size_t(r.lane.State()->IndexOf(kP2VectorPair)));
+			Assert::IsTrue(set.StateOf(1) == SlotState::Writing, L"the held lane job of P2(1) runs past its frame's seal");
+		}
+
+		// B3 X1 (audit MUST 1): a deterministic run waits (bounded, counted) for a lagged product's frame N at its FINAL seal
+		// N + sealLag, so whether the frame is late (lane result) or live-filled never depends on the wall clock.
+		TEST_METHOD(DeterministicRunWaitsForALaggedProductAtItsFinalSeal)
+		{
+			// The OFA job finishes while the host waits at render start 3: P2(1) is accepted at its final seal (LATE).
+			{
+				Rig r;
+				LaggedRunToFrameThree(r);
+				uint32_t w = 0;
+				int calls = 0;
+				while ((w = r.lane.DeterministicWaitUs(3, 4000)) > 0) {
+					Assert::IsTrue(w <= 500u, L"each wait is short");
+					Assert::IsTrue(++calls < 20, L"bounded");
+					r.p2.hold = false;
+					r.lane.StepWorker(Backend::Ofa, 1000);
+				}
+				Assert::IsTrue(calls >= 1, L"waited for P2(1) at its final seal");
+				Assert::IsTrue(r.lane.MissedBounds() == 0, L"no bound missed");
+				const SlotSet& set = r.lane.State()->table->At(size_t(r.lane.State()->IndexOf(kP2VectorPair)));
+				Assert::IsTrue(set.StateOf(1) == SlotState::Published, L"P2(1) published after its frame was sealed (pending)");
+				const int live = r.p2Live.load();
+				r.lane.OnRenderStart(3, 4000);
+				Assert::AreEqual(uint64_t(1), set.Counters().sealLate.load(), L"P2(1) late: the lane result");
+				Assert::AreEqual(uint64_t(0), set.Counters().sealLiveFilled.load());
+				Assert::AreEqual(live, r.p2Live.load(), L"not live-filled");
+				Assert::IsTrue(!r.lane.Fallbacks()[1].engaged, L"no determinism fallback");
+			}
+			// The OFA job never finishes: the bound runs out once (counted, visible) and P2(1) is live-filled at its final seal.
+			{
+				Rig r;
+				LaggedRunToFrameThree(r);
+				uint32_t total = 0;
+				int calls = 0;
+				uint32_t w = 0;
+				while ((w = r.lane.DeterministicWaitUs(3, 4000)) > 0) {
+					total += w;
+					Assert::IsTrue(++calls < 50, L"bounded");
+				}
+				Assert::IsTrue(total == 3200u, L"the same bound as an on-time product: slack minus the guard");
+				Assert::IsTrue(r.lane.MissedBounds() == 1, L"one missed bound");
+				const SlotSet& set = r.lane.State()->table->At(size_t(r.lane.State()->IndexOf(kP2VectorPair)));
+				const int live = r.p2Live.load();
+				r.lane.OnRenderStart(3, 4000);
+				Assert::AreEqual(uint64_t(1), set.Counters().sealLiveFilled.load(), L"P2(1) live-filled at its final seal");
+				Assert::AreEqual(live + 1, r.p2Live.load());
+				Assert::AreEqual(uint64_t(0), set.Counters().sealLate.load());
+				Assert::IsTrue(r.lane.Fallbacks()[1].id == "analysis_lane_determinism" && r.lane.Fallbacks()[1].engaged);
+			}
+		}
+
+		// B3 X1 (audit SHOULD 3): a declared seal lag forced to 0 by the mode is a Fallbacks entry (Ctrl+I / Config / Ctrl+Alt+D),
+		// appended only while engaged.
+		TEST_METHOD(ASealLagForcedToZeroIsAFallbacksEntry)
+		{
+			Rig r;
+			r.reg = LaggedP2(2);
+			r.gs.queueMode = QueueMode::Competitive;
+			r.Configure(LaneSettings::Mode::On);
+			Assert::IsTrue(r.lane.Active());
+			Assert::IsTrue(r.lane.State()->graph.sealLagForcedZero);
+			bool entry = false;
+			for (const FallbackCatalog::Decision& d : r.lane.Fallbacks())
+				entry = entry || (d.id == "analysis_seal_lag_zero" && d.engaged && Has(d.reason, "vector"));
+			Assert::IsTrue(entry, L"engaged, naming the product");
+			Assert::IsTrue(AnyLine(r.lane.StatusLines(), "run at seal lag 0"), L"status line too");
+			Rig plain;
+			plain.Configure(LaneSettings::Mode::On);
+			for (const FallbackCatalog::Decision& d : plain.lane.Fallbacks())
+				Assert::IsFalse(d.id == "analysis_seal_lag_zero", L"no entry without a declared lag: the list keeps its shape");
 		}
 
 		// 8. The explicit test wait works without a deterministic run and replaces the slack bound.

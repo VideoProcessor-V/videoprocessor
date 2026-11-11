@@ -244,9 +244,14 @@ struct SlotCounters {
     // B3 X1 seal lag (products with Node::sealLag > 0 only; all stay 0 otherwise). Every final frame is exactly one of the four classes.
     std::atomic<uint64_t> sealAhead{ 0 };         // accepted on time (at N)
     std::atomic<uint64_t> sealLiveFilled{ 0 };    // made by the live fill at the final seal (N + sealLag)
-    std::atomic<uint64_t> sealLate{ 0 };          // a lane result accepted at the final seal
+    std::atomic<uint64_t> sealLate{ 0 };          // a lane result accepted at the final seal: published after N, or published by N but
+                                                  // not acceptable then (a lead ancestor N + k not sealed yet: a product with
+                                                  // sealLag >= a lead is never AHEAD, every lane result of it counts here)
     std::atomic<uint64_t> sealAbsent{ 0 };        // none of these at the final seal (unavailable, or rejected by a resync after N)
-    std::atomic<uint64_t> sealPending{ 0 };       // frames not accepted on time (Pending at N; each ends in one of the classes above)
+    std::atomic<uint64_t> sealPending{ 0 };       // frames not accepted on time (Pending at N; each ends in one of the classes above,
+                                                  // or in sealUnfinalised)
+    std::atomic<uint64_t> sealUnfinalised{ 0 };   // Pending frames whose final seal never ran (render start N + sealLag skipped): found
+                                                  // when the slot is reused, so pending = live-filled + late + absent + unfinalised + in flight
     std::atomic<uint64_t> lateResyncRejected{ 0 };// of sealAbsent: the stamp moved between N and the final seal (a resync after N)
     std::atomic<uint64_t> onTimeAbsent{ 0 };      // reader frames (at their own seal) that found this lagged product's frame absent
 };
@@ -1178,6 +1183,11 @@ public:
                 out.sealLag = n.sealLag;
                 pendingLead_.clear();
                 pendingChain_ = false;
+                uint64_t& stale = pendingMark_[i][size_t(set.SlotOf(seq))];
+                if (stale != 0u && stale != seq + 1u) {
+                    set.MutableCounters().sealUnfinalised.fetch_add(1, std::memory_order_relaxed);   // its N + sealLag never resolved
+                    stale = 0;
+                }
                 if (!deterministic_ && set.AcceptOnTime(seq, [&](const Header& h) { return Check(n, seq, stampN, h); })) {
                     for (ProductId p : pendingLead_)
                         if (SlotSet* src = Find(p))

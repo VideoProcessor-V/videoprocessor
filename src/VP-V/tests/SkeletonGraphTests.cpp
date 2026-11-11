@@ -1598,6 +1598,9 @@ namespace SkeletonGraphTestsNs
 			Assert::AreEqual(uint64_t(3), c.sealLiveFilled.load());
 			Assert::AreEqual(uint64_t(0), c.sealAhead.load() + c.sealAbsent.load());
 			Assert::AreEqual(uint64_t(0), r.Set(kBase).Counters().leadAccepted.load(), L"no K1 residual: the ancestor was sealed");
+			// Spec row "the ancestor is not released before N + k": no reader frame lost its lead ancestor.
+			Assert::AreEqual(uint64_t(0), c.ancestorGone.load(), L"the lead ancestor N + 2 was held until the final seal");
+			Assert::AreEqual(uint64_t(0), r.Set(kBase).Counters().ancestorGone.load() + r.Set(kBase).Counters().leadLaterRejected.load());
 		}
 
 		TEST_METHOD(LeadReadOfAnOrderedChainAtLaneLead3) { LeadReadOfAnOrderedChainAt(3); }

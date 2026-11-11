@@ -862,12 +862,18 @@ public:
             const Node& n = st->table->NodeAt(i);
             if (n.backend == Backend::RenderOnly || !st->runner->Laned(n.id) || !st->runner->HasProducer(n.id))
                 continue;   // no producer: nothing to wait for (the seal fills it live), no bound burnt
-            if (n.sealLag > 0)
-                continue;   // B3 X1: a lagged-seal product is sealed at its final seal only in a deterministic run (no wait at N)
+            // B3 X1: a lagged-seal product is sealed at its final seal only in a deterministic run: no wait at N; the wait (same
+            // bound, same missed-bound count) is for its frame N = seq - sealLag, finalised at this render start (ResolveLagged).
+            uint64_t waitSeq = seq;
+            if (n.sealLag > 0) {
+                if (seq < n.sealLag || seq - n.sealLag < st->firstSeq)
+                    continue;   // no frame of this graph to finalise yet
+                waitSeq = seq - n.sealLag;
+            }
             uint32_t m = 0;
             const Variants v = st->info[i].identical ? Variants::Identical : Variants::NonIdentical;
             const SlotSet& set = st->table->At(i);
-            const WaitDecision d = DecideWait(v, set.LaneGranted(), set.StateOf(seq), p, waitedUs_, &m);
+            const WaitDecision d = DecideWait(v, set.LaneGranted(), set.StateOf(waitSeq), p, waitedUs_, &m);
             if (d == WaitDecision::Wait)
                 more = std::max(more, m);
             else if (d == WaitDecision::BoundMissed)
@@ -1093,7 +1099,7 @@ public:
         }
         regulator_.OnFrame(seq, slackMs, renderOnlyMs, missed);
         if (lateNow > 0)
-            st->runner->SetSkipBefore(seq + 1u);   // a late lane skips to the next frame now
+            st->runner->SetLateSkipBefore(seq + 1u);   // a late lane skips to the next frame now (lowered by sealLag, B3 X1)
         ApplyRegulator(*st);
     }
 
@@ -1236,8 +1242,16 @@ public:
                                    std::to_string(c.sealAbsent.load(std::memory_order_relaxed)) + " absent";
                 const uint64_t rej = c.lateResyncRejected.load(std::memory_order_relaxed);
                 const uint64_t ota = c.onTimeAbsent.load(std::memory_order_relaxed);
+                const uint64_t unf = c.sealUnfinalised.load(std::memory_order_relaxed);
                 if (rej > 0)
                     line += " (" + std::to_string(rej) + " rejected by a resync)";
+                if (unf > 0)
+                    line += "; " + std::to_string(unf) + " never finalised (a render frame was skipped)";
+                bool sealedLead = false;
+                for (size_t k = 0; k < n.inputCount; ++k)
+                    sealedLead = sealedLead || (n.inputs[k].lead > 0 && n.sealLag >= n.inputs[k].lead);
+                if (sealedLead)
+                    line += "; never ahead (it reads a lead frame sealed at its final seal: late = accepted at the final seal)";
                 if (ota > 0)
                     line += "; readers found it absent on time x" + std::to_string(ota);
                 if (det_)
@@ -1349,6 +1363,15 @@ public:
                                                          unsigned(regulator_.OfaStep())));
             if (!st->graph.leadChainWarning.empty())   // appended only when engaged (a WARNING, not a reject): the list keeps its shape otherwise
                 out.push_back(FallbackCatalog::SkeletonLeadChain(st->graph.leadChainWarning));
+            if (st->graph.sealLagForcedZero) {   // B3 X1: appended only when engaged (no product of the catalog declares a lag today)
+                std::vector<std::string> zeroed;
+                for (size_t i = 0; i < st->table->Count(); ++i) {
+                    const Node& n = st->table->NodeAt(i);
+                    if (n.declaredSealLag > 0 && n.sealLag == 0)
+                        zeroed.push_back(NameOf(*st, n.id));
+                }
+                out.push_back(FallbackCatalog::AnalysisSealLagZero(zeroed));
+            }
         }
         out.push_back(FallbackCatalog::AnalysisLaneDeterminism(st && det_ ? missedBounds_ : 0u));
         out.push_back(FallbackCatalog::SourceStatsWalk(settings_.walk == VpLaneProducts::WalkSource::Lane,
