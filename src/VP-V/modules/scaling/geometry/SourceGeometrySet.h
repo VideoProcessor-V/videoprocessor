@@ -19,6 +19,15 @@
 // listed and recognised by name, never applied alone, never admitted by the per-axis rule, and the pair prior treats them as not agreeing). Known gap: 4:3 SD (pillarboxed 720x576 / 720x480 at 4:3) is not
 // listed. Note (L2): horizontally 3/16 (720 of 3840) stays admitted per axis because the SD entries are conventional; 3/8 (1440 of 3840) is
 // admitted per axis ONLY through a conventional (non-parked) entry, i.e. not at all today. Tolerance: 0.6 % of the ratio.
+// CROP-AWARE (coordinator design call 2026-11-11, R2 extension): a delivered raster WIDER than an entry's display aspect is also read as
+// that entry cropped to the raster's aspect (a scope 2.39/2.40 or flat 1.85 film coded as its active area, e.g. 1920x800, 1920x804,
+// 1920x1038): the entry fills the raster WIDTH (dispW = Rx, dispH = Rx / dar), so the horizontal ratio maps to the entry's coded width and
+// the vertical ratio follows from the entry's own shape (equal to the horizontal one for square-pixel entries: uniform two-axis; the SD
+// entries keep their listed per-axis pair). Chosen over listing cropped heights per width (800/804/1038/1040/...) because the crop height
+// varies per title and per encoder rounding, while the ratio form needs no new entries and no new law: it is the same table, the same
+// flags (parked entries stay parked: recognised, never applied) and the same 0.6 % tolerance. A letterboxed picture in a full 16:9 raster
+// already matched by the fit above (n and N are measured in the active area); the crop form only adds rasters wider than the entry.
+// Non-uniform crops (H and V ratios that no single entry gives) stay held; APPLY stays two-axis only.
 //
 // Pure, header-only, no state, C++14, no Windows macros.
 #include <cmath>
@@ -163,6 +172,41 @@ namespace Scaling
 			return true;
 		}
 
+		// The crop-aware form (see the header): only when the raster is wider than the entry's display aspect (beyond the tolerance), the
+		// entry is width-fitted (cropped vertically to the raster's aspect). Same validity rules as RatiosFor. False otherwise.
+		inline bool CroppedRatiosFor(const Geometry& g, int rasterW, int rasterH, double& rx, double& ry)
+		{
+			rx = 0.0;
+			ry = 0.0;
+			if (rasterW <= 0 || rasterH <= 0 || g.w <= 0 || g.h <= 0 || g.dar <= 0.0)
+				return false;
+			if (static_cast<double>(rasterW) <= static_cast<double>(rasterH) * g.dar * (1.0 + kConventionTolerance))
+				return false;
+			const double dispW = static_cast<double>(rasterW);
+			const double dispH = dispW / g.dar;
+			rx = static_cast<double>(g.w) / dispW;
+			ry = static_cast<double>(g.h) / dispH;
+			const double hi = 1.0 + kConventionTolerance;
+			const double lo = 1.0 - kConventionTolerance;
+			if (rx > hi || ry > hi)
+				return false;
+			if (rx >= lo && ry >= lo)
+				return false;
+			return true;
+		}
+
+		// Every expected ratio pair of `g` on this raster: the fit (RatiosFor) and, on a raster wider than the entry, the crop-aware form.
+		// Returns how many (0..2) were written to rx[] / ry[].
+		inline int RatioForms(const Geometry& g, int rasterW, int rasterH, double rx[2], double ry[2])
+		{
+			int n = 0;
+			if (RatiosFor(g, rasterW, rasterH, rx[n], ry[n]))
+				++n;
+			if (CroppedRatiosFor(g, rasterW, rasterH, rx[n], ry[n]))
+				++n;
+			return n;
+		}
+
 		// One axis alone (axis 0 = horizontal, 1 = vertical): is n / N the ratio of some listed geometry on that axis, on this raster? Parked
 		// entries are not admitted unless `allowParked` (L2: single-axis re-base is parked, so its codec-grid ratios are not evidence).
 		inline bool ConventionalAxis(int n, int N, int axis, int rasterW, int rasterH, bool allowParked = false)
@@ -176,11 +220,11 @@ namespace Scaling
 			{
 				if (!g[i].apply && !allowParked)
 					continue;
-				double rx = 0.0, ry = 0.0;
-				if (!RatiosFor(g[i], rasterW, rasterH, rx, ry))
-					continue;
-				if (Near(r, axis == 0 ? rx : ry))
-					return true;
+				double rx[2], ry[2];
+				const int forms = RatioForms(g[i], rasterW, rasterH, rx, ry);
+				for (int f = 0; f < forms; ++f)
+					if (Near(r, axis == 0 ? rx[f] : ry[f]))
+						return true;
 			}
 			return false;
 		}
@@ -202,15 +246,15 @@ namespace Scaling
 				{
 					if (g[i].apply == (pass == 1))
 						continue;
-					double rx = 0.0, ry = 0.0;
-					if (!RatiosFor(g[i], rasterW, rasterH, rx, ry))
-						continue;
-					if (Near(qx, rx) && Near(qy, ry))
-					{
-						if (parked != nullptr)
-							*parked = !g[i].apply;
-						return g[i].name;
-					}
+					double rx[2], ry[2];
+					const int forms = RatioForms(g[i], rasterW, rasterH, rx, ry);
+					for (int f = 0; f < forms; ++f)
+						if (Near(qx, rx[f]) && Near(qy, ry[f]))
+						{
+							if (parked != nullptr)
+								*parked = !g[i].apply;
+							return g[i].name;
+						}
 				}
 			return nullptr;
 		}
@@ -227,11 +271,11 @@ namespace Scaling
 			{
 				if (g[i].apply || (mask & (1u << i)) == 0u)
 					continue;
-				double rx = 0.0, ry = 0.0;
-				if (!RatiosFor(g[i], rasterW, rasterH, rx, ry))
-					continue;
-				if (Near(rH, rx) && Near(rV, ry))
-					return &g[i];
+				double rx[2], ry[2];
+				const int forms = RatioForms(g[i], rasterW, rasterH, rx, ry);
+				for (int f = 0; f < forms; ++f)
+					if (Near(rH, rx[f]) && Near(rV, ry[f]))
+						return &g[i];
 			}
 			return nullptr;
 		}

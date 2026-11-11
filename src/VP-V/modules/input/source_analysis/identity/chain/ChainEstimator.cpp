@@ -1183,18 +1183,20 @@ namespace SourceIdentity
 					int cc = 0;
 					for (std::size_t i = 0; i < count && cc < 32; ++i)
 					{
-						double rx = 0.0, ry = 0.0;   // L3: from the delivered raster (every listed size, parked ones too: a diagnostic)
-						if (!Scaling::GeometrySet::RatiosFor(geoms[i], rasterW, rasterH, rx, ry))
-							continue;
-						const double r = a == 0 ? rx : ry;
-						const int n = RoundToInt(static_cast<double>(N) * r);
-						if (n < 16 || n >= N)
-							continue;
-						bool dup = false;
-						for (int k = 0; k < cc; ++k)
-							dup = dup || cands[k] == n;
-						if (!dup)
-							cands[cc++] = n;
+						double rx[2], ry[2];   // L3: from the delivered raster (every listed size, parked ones too: a diagnostic; both forms)
+						const int forms = Scaling::GeometrySet::RatioForms(geoms[i], rasterW, rasterH, rx, ry);
+						for (int f = 0; f < forms && cc < 32; ++f)
+						{
+							const double r = a == 0 ? rx[f] : ry[f];
+							const int n = RoundToInt(static_cast<double>(N) * r);
+							if (n < 16 || n >= N)
+								continue;
+							bool dup = false;
+							for (int k = 0; k < cc; ++k)
+								dup = dup || cands[k] == n;
+							if (!dup)
+								cands[cc++] = n;
+						}
 					}
 					if (cc == 0)
 						continue;
