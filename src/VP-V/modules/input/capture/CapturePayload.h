@@ -104,6 +104,14 @@ namespace Vpv
 			return e && e->dvTunnelRaw;
 		}
 
+		// The tunnel's RGB8 placement (false: not the tunnel's raw route; true: high eight bits of the r210 channels).
+		template <typename Payload>
+		inline bool DvTunnelHighAlignedOf(const Payload& p)
+		{
+			const PayloadExtension* e = ExtensionOf(p.extension);
+			return e && e->dvTunnelRaw && e->dvTunnelHighAligned;
+		}
+
 		// The raw frame (null: not raw).
 		template <typename Payload>
 		inline VideoFrame* RawFrameOf(const Payload& p)

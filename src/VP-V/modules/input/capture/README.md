@@ -152,8 +152,9 @@ formatter's, so it stays a member: moving it would cost one extension allocation
 the free readers `IsRaw` / `BytesOf`. The extension is built on the conversion thread before the publish and never reassigned
 after; a payload with no slot (CPU formatter, native-upload marker) answers as the former defaults. The earlier
 `earlyFrame` / `earlyRowBytes` are the same shared frame and row bytes as `rawFrame` / `rawRowBytes` (one pointer, not two).
-`AfterPublish` now fires for every raw payload (the slot is non-null for each); `EarlyUploadDue` still returns null unless
-the slot carries a hand-off and its frame, so nothing more runs.
+The host hands the slot to the R16 `AfterPublish` dispatch only when `EarlyUploadDue` says it carries a hand-off and its
+frame (`LibplaceboVideoRenderer.cpp`, the `publishedExtension` line), so the per-frame cost is as before the move: a raw
+payload without an early hand-off adds the slot's one `make_shared` on the conversion thread and no hub dispatch.
 
 Design note (C9, doc 93, no code here): the payload's raw luma is the DECODE POINT that C9 will share. The raw frame the
 slot holds is unpacked once, on the GPU, by `UnpackRawPayload` / `UnpackRgbPayload` / the DV unpack; a later consumer of the

@@ -11071,8 +11071,8 @@ struct LibplaceboVideoRenderer::Impl
             input.dolby = converted->dolby;
             // dv_tunnel_gpu_unpack: the planes are on the GPU; the analysis
             // samples the raw frame with the planes' RGB8 placement.
-            if (Vpv::Capture::DvTunnelRawOf(*converted))
-                input.dolbyTunnelPackedAlignment = Vpv::Capture::RawOf(*converted)->dvTunnelHighAligned ? 1 : 2;
+            if (Vpv::Capture::DvTunnelRawOf(*converted))   // VPV-HOOK R18
+                input.dolbyTunnelPackedAlignment = Vpv::Capture::DvTunnelHighAlignedOf(*converted) ? 1 : 2;   // VPV-HOOK R18
         }
         auto prepared = PrepareAnalysisFrame(input);
         if (!prepared.IsValid()) return {}; // Pending conversion is never cached as evidence.
@@ -16542,8 +16542,8 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		// native_rgb_ingest: an R12B / R12L / r210 frame handed on raw, unpacked
 		// here to native RGB (rgba16) on the GPU (never on the Dolby Vision tunnel).
-		const bool rgbRawFrame = !state.dolbyVisionTunnel && convertedPayload && Vpv::Capture::IsRaw(*convertedPayload) &&
-			GpuRgbUnpack::Supports(Vpv::Capture::RawEncodingOf(*convertedPayload));
+		const bool rgbRawFrame = !state.dolbyVisionTunnel && convertedPayload && Vpv::Capture::IsRaw(*convertedPayload) &&   // VPV-HOOK R18
+			GpuRgbUnpack::Supports(Vpv::Capture::RawEncodingOf(*convertedPayload));   // VPV-HOOK R18
 		// test/dv-synthetic 2026-10-24: libplacebo cannot endian-swap packed 10-bit words (its swap
 		// needs 16- or 32-bit components; r210 failed every SDR passthrough picture with "Failed
 		// swapping endianness", so nothing was shown after EOS / before lock). The tunnel's SDR
@@ -16586,7 +16586,7 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		else if (!nativeRgbUpload)
 		{
-			if (!convertedPayload || (convertedPayload->pixels.empty() && !Vpv::Capture::IsRaw(*convertedPayload)))
+			if (!convertedPayload || (convertedPayload->pixels.empty() && !Vpv::Capture::IsRaw(*convertedPayload)))   // VPV-HOOK R18
 				return false;
 			formattedContract = convertedPayload->contract;
 
@@ -16610,7 +16610,7 @@ struct LibplaceboVideoRenderer::Impl
 				formatterContractLogged = true;
 				lastRenderedFormatterColorspace = state.colorspace;
 			}
-			if (!Vpv::Capture::IsRaw(*convertedPayload))
+			if (!Vpv::Capture::IsRaw(*convertedPayload))   // VPV-HOOK R18
 			{
 				yPixels = convertedPayload->pixels.data();
 				uvPixels = yPixels + p010RowBytes * static_cast<size_t>(height);
@@ -16746,12 +16746,12 @@ struct LibplaceboVideoRenderer::Impl
 			// The raw route (GPU unpack, early upload or not): the CPU analysis
 			// reads the captured frame itself (owner 2026-10-15: shown once per
 			// signal).
-			if (convertedPayload && Vpv::Capture::IsRaw(*convertedPayload) && rawAnalysisLoggedGeneration != frameGeneration)
+			if (convertedPayload && Vpv::Capture::IsRaw(*convertedPayload) && rawAnalysisLoggedGeneration != frameGeneration)   // VPV-HOOK R18
 			{
 				rawAnalysisLoggedGeneration = frameGeneration;
 				DebugLog::Log("Alpha raw-frame analysis: the CPU reads the captured frame (format=%d path=%s %dx%d, upload %s, generation=%llu)",
 					static_cast<int>(state.videoFrameEncoding), AnalysisLumaFormatName(analysisSource), width, height,
-					Vpv::Capture::HasEarlyUpload(*convertedPayload) ? "early" : "by the render", static_cast<unsigned long long>(frameGeneration));
+					Vpv::Capture::HasEarlyUpload(*convertedPayload) ? "early" : "by the render", static_cast<unsigned long long>(frameGeneration));   // VPV-HOOK R18
 			}
 			if (nativeRgbUpload &&
 				(nativeRgbAnalysisLoggedGeneration != frameGeneration ||
@@ -17642,7 +17642,7 @@ struct LibplaceboVideoRenderer::Impl
 				false, state.invertedVertical, sourceSequence, cadenceRepeat, !activeSettings.dejudderWarpRendered,
 				state.displayMode && state.displayMode->IsInterlaced(),
 				SourceRateHz(state), nextSourceSequence);
-			const VideoFrameEncoding e = Vpv::Capture::RawEncodingOf(*convertedPayload);
+			const VideoFrameEncoding e = Vpv::Capture::RawEncodingOf(*convertedPayload);   // VPV-HOOK R18
 			setIngressStatus(std::string(e == VideoFrameEncoding::R210 ? "Native r210 -> RGB 4:4:4" :
 				e == VideoFrameEncoding::R12B ? "Native R12B -> RGB 4:4:4" : e == VideoFrameEncoding::R12L ?
 				"Native R12L -> RGB 4:4:4" : e == VideoFrameEncoding::R10b ? "Native R10b -> RGB 4:4:4" :
@@ -17690,8 +17690,8 @@ struct LibplaceboVideoRenderer::Impl
 			// efficiency_fixes: this frame was the last frame's B, uploaded for its motion estimate.
 			// Merge 2026-10-31: Bill's native P010/P210 capture upload has no converted payload
 			// (convertedPayload null): VP's raw / DV-raw checks below must not dereference it.
-			const bool payloadRaw = convertedPayload && Vpv::Capture::IsRaw(*convertedPayload);
-			const bool payloadDvRaw = convertedPayload && Vpv::Capture::DvTunnelRawOf(*convertedPayload);
+			const bool payloadRaw = convertedPayload && Vpv::Capture::IsRaw(*convertedPayload);   // VPV-HOOK R18
+			const bool payloadDvRaw = convertedPayload && Vpv::Capture::DvTunnelRawOf(*convertedPayload);   // VPV-HOOK R18
 			const bool reuseNext = !reuseUpload && TakeNextPlanes(convertedPayload, sourceSequence, width, height,
 				chromaHeight, p010RowBytes, state.invertedVertical, image.planes);
 			if (reuseUpload)
@@ -17709,7 +17709,7 @@ struct LibplaceboVideoRenderer::Impl
 				// capture_path: gpu: the raw frame up as it is, unpacked into
 				// the same two planes.
 				sourceUploaded = UnpackRawPayload(*convertedPayload, width, height, textures);
-				if (!sourceUploaded && Vpv::Capture::DvTunnelRawOf(*convertedPayload) &&
+				if (!sourceUploaded && Vpv::Capture::DvTunnelRawOf(*convertedPayload) &&   // VPV-HOOK R18
 					UnpackDolbyVisionOnCpu(*convertedPayload, width, height, dvFallbackPixels))
 				{
 					planes[0].pixels = dvFallbackPixels.data();
@@ -17784,7 +17784,7 @@ struct LibplaceboVideoRenderer::Impl
 				case VideoFrameEncoding::R210:
 				case VideoFrameEncoding::R10b:
 				case VideoFrameEncoding::R10l:
-					setIngressStatus(std::string(Vpv::Capture::DvTunnelRawOf(*convertedPayload) ? "Dolby Vision RGB tunnel (12-bit 4:2:2, GPU unpack)" :
+					setIngressStatus(std::string(Vpv::Capture::DvTunnelRawOf(*convertedPayload) ? "Dolby Vision RGB tunnel (12-bit 4:2:2, GPU unpack)" :   // VPV-HOOK R18
 						"Dolby Vision RGB tunnel (12-bit 4:2:2)") + dvStage.IngressSuffix(convertedPayload->dolby));
 					break;
 				case VideoFrameEncoding::P210:
@@ -17847,7 +17847,7 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			// GpuRgbUnpack's rgba16: R12 = the 12-bit value << 4, full range;
 			// r210 = 16-bit limited levels (4096-60160).
-			const VideoFrameEncoding e = Vpv::Capture::RawEncodingOf(*convertedPayload);
+			const VideoFrameEncoding e = Vpv::Capture::RawEncodingOf(*convertedPayload);   // VPV-HOOK R18
 			image.repr.sys = PL_COLOR_SYSTEM_RGB;
 			image.repr.levels = GpuRgbUnpack::FullRange(e) ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
 			image.repr.bits.sample_depth = 16;
@@ -24095,7 +24095,7 @@ releaseDriftBaseRetention =
         dvStage.PrepareToneAndTrims({ activeSettings.dvToneMapping, activeSettings.dvTrims, activeSettings.toneMapping,
             activeSettings.dvCompareCaptureFolder, pipelineSlots.Runs(PipelineSlots::Id::ColourSdrToneShape), renderImage, target,
             convertedPayload ? &convertedPayload->dolby : nullptr, LedDisplayGamma(target.color.transfer), state,
-            convertedPayload ? Vpv::Capture::RawFrameOf(*convertedPayload) : nullptr, videoFrame.GetCounter() },
+            convertedPayload ? Vpv::Capture::RawFrameOf(*convertedPayload) : nullptr, videoFrame.GetCounter() },   // VPV-HOOK R18
             colorMapParams, hookTemplates, colourFrame.dvTrims, colourFrame.dv);
         // Rendered-frame captures (DV comparison capture; the WP-17 diagnostics adapter is the one
         // caller). The context is built only while one is on (it consumes the trim selection).
@@ -24103,7 +24103,7 @@ releaseDriftBaseRetention =
         if (captures.AnyEnabled())
         {
             const DvTrimSelection::Selection* trimsSelection = dvStage.TakeTrimsSelection();
-            captures.OnFrameRendered({ &state, convertedPayload ? Vpv::Capture::RawFrameOf(*convertedPayload) : nullptr, videoFrame.GetCounter(),
+            captures.OnFrameRendered({ &state, convertedPayload ? Vpv::Capture::RawFrameOf(*convertedPayload) : nullptr, videoFrame.GetCounter(),   // VPV-HOOK R18
                 convertedPayload && state.dolbyVisionTunnel ? &convertedPayload->dolby : nullptr, activeSettings.dvTrims,
                 trimsSelection, dvStage.TrimsTargetNits() });
         }
@@ -26613,7 +26613,7 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 void LibplaceboVideoRenderer::EnqueueFrame(VideoFrame& videoFrame,
 	const VideoStateComPtr& frameState, uint64_t enqueueGeneration,
 	int64_t callbackQpc, int64_t arrivalQpc, bool gapBefore, const char* gapCause,
-	uint32_t gapFrames, double filmHz, bool filmUpdate, const RendererExtension::ExternalTiming* file)
+	uint32_t gapFrames, double filmHz, bool filmUpdate, const RendererExtension::ExternalTiming* file)   // VPV-HOOK R20
 {
 	{
 		std::lock_guard<std::mutex> guard(m_queueMutex);
@@ -30703,7 +30703,7 @@ void LibplaceboVideoRenderer::ConversionLoop()
 		frame.SourceBufferRelease();
 		const double conversionUs = converted ?
 			converted->conversionCpuMs * 1000.0 : 0.0;
-		std::shared_ptr<void> publishedExtension = converted ? converted->extension : nullptr;   // P10: capture_upload early (R18 slot)   // VPV-HOOK
+		std::shared_ptr<void> publishedExtension = converted && Vpv::Capture::EarlyUploadDue(converted->extension) ? converted->extension : nullptr;   // P10: capture_upload early (R18 slot): dispatched only with an early hand-off, as before the slot held the raw data   // VPV-HOOK
 		bool published = false;
 		QueuedFrame analysed;   // WP-23: the frame for the analysis producer (on arrival)
 		bool analyse = false;

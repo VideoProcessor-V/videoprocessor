@@ -348,7 +348,7 @@ pl_tex LibplaceboVideoRenderer::Impl::EarlyTexture(const QueuedFrame::ConvertedP
 	bool first = false;
 	const double takeStart = PassTimerHook::Hook::NowMs();
 	if (!handle && capture && capture->earlyHandoff)
-	handle = capture->earlyHandoff->Take(&outcome, &first);   // the slot stays alive through the handoff the payload holds
+		handle = capture->earlyHandoff->Take(&outcome, &first);   // the slot stays alive through the handoff the payload holds
 	const bool waited = outcome == EarlyUploadHandoff::Outcome::WaitedThenEarly || outcome == EarlyUploadHandoff::Outcome::WaitedThenNone;
 	slot = handle ? static_cast<EarlyUpload::Slot*>(handle.get()) : nullptr;
 	pl_tex tex = slot && earlyUpload->IsOpen() ? earlyUpload->Acquire(*slot) : nullptr;
@@ -381,7 +381,7 @@ bool LibplaceboVideoRenderer::Impl::UnpackRgbPayload(const QueuedFrame::Converte
 {
 	const Vpv::Capture::PayloadExtension* const raw = Vpv::Capture::RawOf(payload);
 	if (!raw || !d3d11)
-	return false;
+		return false;
 	if (!rgbUnpack)
 		rgbUnpack = std::make_unique<GpuRgbUnpack>(log, d3d11->gpu);
 	SyncEarlyUpload(raw->rawBytes);
@@ -446,7 +446,7 @@ bool LibplaceboVideoRenderer::Impl::UnpackDolbyVisionPayload(const QueuedFrame::
 		return false;
 	const Vpv::Capture::PayloadExtension* const raw = Vpv::Capture::RawOf(payload);   // the callers pass a raw DV payload
 	if (!raw)
-	return false;
+		return false;
 	GpuDolbyVisionTunnelUnpack& unpack = dvUnpack.Unpacker(log, d3d11->gpu);
 	SyncEarlyUpload(raw->rawBytes);
 	EarlyUpload::Slot* slot = nullptr;
@@ -470,7 +470,7 @@ bool LibplaceboVideoRenderer::Impl::UnpackRawPayload(const QueuedFrame::Converte
 {
 	const Vpv::Capture::PayloadExtension* const raw = Vpv::Capture::RawOf(payload);
 	if (!raw || !d3d11)
-	return false;
+		return false;
 	if (raw->dvTunnelRaw)
 		return UnpackDolbyVisionPayload(payload, width, height, planes, sessionFallback);
 	if (!captureUnpack)
