@@ -2726,6 +2726,10 @@ namespace VideoProcessorTest
 						SourceResolutionMonitor::Monitor m;
 						m.SetLatchFixes(fixes);
 						m.SetMixedGuard(false);   // as above: the synthetic tiles' spread, not the rate under test
+						// SID r2 (owner 2026-11-11): the latch's PRECISION for every rendition, the listed and the unlisted sizes and the
+						// single-axis ones alike: the two-axis-conventional restriction is off here (its held / applied split is covered by
+						// SourceResolutionConventionTests; the assertions below are unchanged).
+						m.SetRebaseConventionOnly(false);
 						const bool production = tile == m.TileFor(r.ph());
 						std::vector<float> values(static_cast<size_t>(count) * tile * tile);
 						double t = 0.0, fx = 1.0, fy = 1.0, engagedAt = -1.0;

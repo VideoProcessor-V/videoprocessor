@@ -91,6 +91,9 @@ namespace SourceResolutionMonitor
 		// The chain estimator's status line (+ evidence status, + a recent one-time notice) when `SetChainEnabled(true)`; "" otherwise.
 		// Describe() appends it to the stats line the renderer already shows.
 		std::string chainNote;
+		// SID r2 (owner 2026-11-11): a re-base reading HELD because it is not a two-axis conventional pair (single-axis, or a size outside
+		// Scaling::GeometrySet), "" when nothing is held. Describe() appends it (Ctrl+I and the Config status line).
+		std::string conventionNote;
 		// Frame-bound mode (SetFrameBound; all zero / false when off): shown by Describe().
 		bool frameBound = false;
 		unsigned frameLead = 0;               // D
@@ -253,6 +256,14 @@ namespace SourceResolutionMonitor
 		// logged ("single-axis re-base held"). On restores the earlier behaviour. Only the consensus per-axis path is gated.
 		void SetSingleAxisRebase(bool on) { singleAxisRebase.store(on, std::memory_order_release); }
 		bool SingleAxisRebase() const { return singleAxisRebase.load(std::memory_order_acquire); }
+		// SID r2 (owner 2026-11-11): the CLASSICAL path (consensus Off, or no fresh record) and the consensus's uniform gate re-base ONLY
+		// two-axis conventional pairs: both axes below native and the pair one listed, non-parked Scaling::GeometrySet geometry on the
+		// delivered raster (AgreeingPair, tolerance 0.6 %). A single-axis reading (unless SetSingleAxisRebase) or a size outside the list
+		// is logged once per episode and shown (Snapshot::conventionNote), never applied. The Original pathway is untouched. Needs the
+		// raster width, so only AutoFactors (the host's entry) applies it; AutoFactor called alone keeps the earlier law. Default ON;
+		// Off restores the earlier behaviour (a setter only: no Config key, SID-5 plumbing pending).
+		void SetRebaseConventionOnly(bool on) { rebaseConventionOnly.store(on, std::memory_order_release); }
+		bool RebaseConventionOnly() const { return rebaseConventionOnly.load(std::memory_order_acquire); }
 		bool ChainEnabled() const { return chainEnabled.load(std::memory_order_acquire); }
 		// The renderer identity (the owner key of VpFrameAnalysis::Host::Owner) whose source frames the estimator reads; nullptr
 		// detaches. Idempotent: a lost registration is made again. OPTIONAL: while no owner was given, Frame() finds it itself (once a
@@ -599,6 +610,14 @@ namespace SourceResolutionMonitor
 		bool singleAxisHeldLogged = false;             // AutoFactors thread: the held detection was logged for the current episode
 		std::atomic<int> singleAxisHeldAxis{ -1 };      // SID r2 L6: the held single axis (0 H, 1 V; -1 none) for the status line
 		std::atomic<double> singleAxisHeldRatio{ 1.0 };
+		std::atomic<bool> rebaseConventionOnly{ true };  // see SetRebaseConventionOnly
+		bool ConventionApplies() const;                  // the restriction is on and the Original pathway is not selected
+		int autoRasterWidth = 0;                         // render thread: AutoFactors' raster width for AutoFactor (0 = unknown: no check)
+		bool uniformConventionHeld = false;              // render thread: AutoFactor held its uniform wish (non-standard size)
+		double uniformHeldH = 1.0, uniformHeldV = 1.0;
+		std::atomic<int> conventionHeldKind{ 0 };        // published by AutoFactors: 0 nothing held, 1 single-axis, 2 non-standard size
+		std::atomic<double> conventionHeldH{ 1.0 }, conventionHeldV{ 1.0 };
+		std::string ConventionNote() const;              // the Snapshot::conventionNote text ("" = nothing held)
 		std::atomic<bool> chainEnabled{ false };
 		std::atomic<unsigned long long> nativeHeldByChain{ 0 };
 		std::string chainHistoryFolder;      // SetHistoryFolder's folder (guarded by `mutex`)
