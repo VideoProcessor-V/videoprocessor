@@ -552,6 +552,11 @@ namespace Vpv
 			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
 			if (!b || !(st->periodMs > 0.0) || !(renderOnlyMs >= 0.0))
 				return false;
+			++st->timing.noted;   // B4 S2: recorded in both gates
+			st->timing.notedMsSum += renderOnlyMs;
+			st->timing.lastNotedMs = renderOnlyMs;
+			if (GetRegulatorGate() != RegulatorGate::Act)
+				return true;   // observe only: the regulator is not fed, nothing is shed
 			b->lane.OnFrameTiming(seq, st->periodMs - renderOnlyMs, renderOnlyMs, renderOnlyMs > st->periodMs);
 			++st->timing.fed;
 			st->timing.measured = true;
@@ -1667,7 +1672,7 @@ namespace Vpv
 				if (st.queueFed.wired & QueueShape::kLaneLead)
 					addDecision(FallbackCatalog::SkeletonQueueStarve(st.queueUsed.laneLead, st.leadPeak, st.starveReduced, st.starveEvents));
 				// S5: until the host delivers presentation facts the regulator's slack is derived from the render time.
-				addDecision(FallbackCatalog::SkeletonRegulatorInput(hasBundle && !st.timing.measured));
+				addDecision(FallbackCatalog::SkeletonRegulatorInput(hasBundle && !st.timing.measured, st.timing.noted, st.timing.lastNotedMs));
 addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleton::KnownUndeclaredVramUsers()) : std::string()));   // MV7 standing gap
 				addDecision(FallbackCatalog::SkeletonEngineFeed(st.feedNeeded && st.engine == nullptr));   // SK-W stage D: P2m / P3 cannot be published
 				// MV7 guard: a module that holds video memory is active but declared none of it: visible, never silent.
@@ -1778,6 +1783,12 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 					st.timing.lastRenderOnlyMs, static_cast<unsigned long long>(st.timing.missed), static_cast<unsigned long long>(st.timing.fed),
 					st.timing.measured ? "" : " (none: shedding off)");
 				full.push_back(regLine);
+				char gateLine[256] = {};   // B4 S2
+				std::snprintf(gateLine, sizeof(gateLine), "Skeleton regulator gate: %s; %llu host-measured render-only frame(s) noted, last %.2f ms, mean %.2f ms",
+					GetRegulatorGate() == RegulatorGate::Act ? "act (the regulator sheds)" : "observe (recorded, not fed: nothing is shed)",
+					static_cast<unsigned long long>(st.timing.noted), st.timing.lastNotedMs,
+					st.timing.noted > 0 ? st.timing.notedMsSum / static_cast<double>(st.timing.noted) : 0.0);
+				full.push_back(gateLine);
 				if (st.feedNeeded || st.externalConsumers != 0)
 				{
 					char feedLine[640] = {};

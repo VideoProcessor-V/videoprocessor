@@ -699,10 +699,17 @@ namespace FallbackCatalog
 	// Begin..AfterRender (which includes lock waits and pacing sleeps), so it records the derived slack and shows it but does NOT feed
 	// the regulator with it (nothing is shed on that number). The regulator acts only on a span the host measured
 	// (SkeletonModule::NoteRenderOnlyMs). Engaged while observing.
-	inline Decision SkeletonRegulatorInput(bool derived)
+	// B4 S2: `noted` host-measured spans recorded under the observe gate (not fed) are shown with the last one.
+	inline Decision SkeletonRegulatorInput(bool derived, uint64_t noted = 0, double lastNotedMs = 0.0)
 	{
-		return derived ? Engaged("skeleton_regulator", "regulator input: observe only, slack derived from the Begin..AfterRender span (includes waits); render-only time not measured, shedding off")
-		               : Released("skeleton_regulator");
+		if (!derived)
+			return Released("skeleton_regulator");
+		if (noted == 0)
+			return Engaged("skeleton_regulator", "regulator input: observe only, slack derived from the Begin..AfterRender span (includes waits); render-only time not measured, shedding off");
+		char text[200];
+		std::snprintf(text, sizeof(text), "regulator input: observe only (gate): %llu host-measured render-only frame(s) recorded, last %.2f ms; not fed, shedding off",
+			static_cast<unsigned long long>(noted), lastNotedMs);
+		return Engaged("skeleton_regulator", text);
 	}
 	// MV7: a module that holds video memory is active but declared none of it to the VRAM governor (VramUsers.h), so its memory is
 	// invisible to the budget and the lane products may be granted memory it already holds. `names` lists the modules (empty = none).

@@ -94,11 +94,21 @@ namespace Vpv
 				double lastSlackMs = 0.0, lastRenderOnlyMs = 0.0, lastPeriodMs = 0.0;
 				bool lastMissed = false;
 				bool derived = true;        // the figures above are the observed span, not a measured render-only time
+				// B4 S2: every host-measured render-only span given to NoteRenderOnlyMs, fed or not (additive).
+				uint64_t noted = 0;
+				double notedMsSum = 0.0, lastNotedMs = 0.0;
 			};
+			// B4 S2 (doc 96 section 4): whether a host-measured render-only span reaches the regulator. Observe (default) records it
+			// (TimingFeed noted / notedMsSum / lastNotedMs, the status line and Ctrl+Alt+D) and never feeds the regulator, so nothing is shed; Act
+			// feeds it as before (AnalysisLane::OnFrameTiming: the regulator sheds). The owner decides the regulator's role; until then Observe.
+			enum class RegulatorGate { Observe, Act };
+			void SetRegulatorGate(RegulatorGate gate) { regulatorGate_.store(gate == RegulatorGate::Act, std::memory_order_relaxed); }
+			RegulatorGate GetRegulatorGate() const { return regulatorGate_.load(std::memory_order_relaxed) ? RegulatorGate::Act : RegulatorGate::Observe; }
 			TimingFeed TimingFeedOf(const void* host) const;
 			// The regulator's input (render thread, once per frame, any time before the next Begin): the render-only time of frame `seq` that the HOST
 			// measured (the PassTimers render span, not the module's Begin..AfterRender clock). Slack = the measured source period - renderOnlyMs,
-			// missed = renderOnlyMs > period; it goes to AnalysisLane::OnFrameTiming, so the regulator acts (sheds) on it. Until a measured span arrives the
+			// missed = renderOnlyMs > period; with RegulatorGate::Act it goes to AnalysisLane::OnFrameTiming, so the regulator acts (sheds) on it; with
+			// Observe (the default) it is only recorded (TimingFeed::noted). Until a measured span arrives the
 			// regulator is NOT fed: the module's own span includes lock waits and pacing sleeps, and shedding on that would act on waits. False when
 			// there is no lane or no measured period.
 			bool NoteRenderOnlyMs(const void* host, uint64_t seq, double renderOnlyMs);
@@ -244,6 +254,7 @@ namespace Vpv
 			static unsigned long long ContainedFaults();
 
 		private:
+			std::atomic<bool> regulatorGate_{ false };   // B4 S2: false = RegulatorGate::Observe (default)
 			void Reconcile(const void* host, int originalFlag);
 			void Teardown(const std::shared_ptr<HostState>& st, bool releaseSlot, bool gpuAlive = true);
 			size_t EraseExternal(const void* host);   // every external-demand entry of `host` (returns how many)

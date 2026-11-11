@@ -1652,18 +1652,79 @@ namespace SkeletonModuleTestsNs
 			}
 			Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_regulator"), L"visible: observe only, shedding off");
 			Assert::IsTrue(rig.Command().find("(none: shedding off)") != std::string::npos);
-			// A span the HOST measured is what the regulator takes: counted, and the observe-only entry releases at the next status refresh.
+			// A span the HOST measured is what the regulator takes once the gate is set to act (B4 S2: the default observes): counted, and the
+			// observe-only entry releases at the next status refresh.
 			Assert::IsFalse(rig.sk.NoteRenderOnlyMs(rig.Host(), 150, -1.0), L"a negative time is no measurement");
 			int other = 0;
 			Assert::IsFalse(rig.sk.NoteRenderOnlyMs(&other, 150, 5.0), L"no lane for that host");
+			rig.sk.SetRegulatorGate(SkeletonModule::RegulatorGate::Act);
 			for (int i = 0; i < 3; ++i)
 				Assert::IsTrue(rig.sk.NoteRenderOnlyMs(rig.Host(), uint64_t(150 + i), 5.0));
 			t = rig.sk.TimingFeedOf(rig.Host());
 			Assert::AreEqual(uint64_t(3), t.fed);
+			Assert::AreEqual(uint64_t(3), t.noted);
 			Assert::IsTrue(t.measured);
 			for (int64_t s = 151; s <= 170; ++s)
 				frame(s, 1000);
 			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_regulator"), L"a measured span is in use");
+		}
+
+		// B4 S2 (doc 96 section 4): calling NoteRenderOnlyMs used to switch shedding on. With the default gate (observe) a host-measured span far
+		// above the period is recorded and shown but the regulator is never fed and sheds nothing; the act gate sheds as before.
+		TEST_METHOD(TheObserveGateRecordsTheMeasuredSpanAndNeverSheds)
+		{
+			for (int act = 0; act < 2; ++act)
+			{
+				Rig rig(Lane("on"));
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				auto frame = [&rig](int64_t s) {
+					rig.Ingress(s);
+					if (s == 1)
+						rig.Deliver(1);
+					rig.Deliver(uint64_t(s) + 1);
+					rig.Begin(s);
+					rig.After(s);
+				};
+				for (int64_t s = 1; s <= 150; ++s)
+					frame(s);
+				Assert::IsTrue(rig.sk.GetRegulatorGate() == SkeletonModule::RegulatorGate::Observe, L"the default observes");
+				if (act)
+					rig.sk.SetRegulatorGate(SkeletonModule::RegulatorGate::Act);
+				VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+				Assert::IsTrue(lane != nullptr);
+				Assert::IsTrue(lane->GetRegulator().MaxLevel() > 0, L"something to shed");
+				const uint64_t n = 4 * uint64_t(lane->GetRegulator().WindowFrames());
+				for (uint64_t i = 0; i < n; ++i)
+					Assert::IsTrue(rig.sk.NoteRenderOnlyMs(rig.Host(), 151 + i, 1.0e6), L"a span far above the period");
+				for (int64_t s = 151; s <= 170; ++s)
+					frame(s);   // the next status refresh
+				const SkeletonModule::TimingFeed t = rig.sk.TimingFeedOf(rig.Host());
+				Assert::AreEqual(n, t.noted, L"the counter moves in both gates");
+				Assert::AreEqual(1.0e6, t.lastNotedMs);
+				VpSkeleton::RegTrace traces[256];
+				const size_t k = lane->RegulatorTraces(traces, 256);
+				size_t backOffs = 0;
+				for (size_t i = 0; i < k; ++i)
+					backOffs += traces[i].action == VpSkeleton::RegAction::BackOff ? 1u : 0u;
+				if (!act)
+				{
+					Assert::AreEqual(uint64_t(0), t.fed, L"observe: the regulator is not fed");
+					Assert::IsFalse(t.measured);
+					Assert::AreEqual(int(lane->GetRegulator().MaxLevel()), int(lane->GetRegulator().Level()), L"observe: nothing shed");
+					Assert::AreEqual(size_t(0), backOffs);
+					Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), "host-measured render-only frame(s) recorded"), L"visible: recorded, not fed");
+					Assert::IsTrue(rig.Command().find("Skeleton regulator gate: observe") != std::string::npos, L"Ctrl+Alt+D");
+				}
+				else
+				{
+					Assert::AreEqual(n, t.fed, L"act: fed as before");
+					Assert::IsTrue(t.measured);
+					Assert::IsTrue(lane->GetRegulator().Level() < lane->GetRegulator().MaxLevel(), L"act: the regulator sheds as today");
+					Assert::IsTrue(backOffs > 0);
+					Assert::IsTrue(rig.Command().find("Skeleton regulator gate: act") != std::string::npos);
+				}
+			}
 		}
 
 		TEST_METHOD(TheRenderAheadTermIsNeverLeftWiredWithAnOldValue)
