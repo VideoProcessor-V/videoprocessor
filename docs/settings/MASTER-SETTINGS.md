@@ -12,10 +12,10 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Count | Value |
 |---|---|
 | Modules | 43 |
-| Documented rows | 312 |
+| Documented rows | 333 |
 | VP-V keys in code (outside Bill's schema lists) | 386 |
-| of which documented | 307 |
-| of which undocumented (appendix A) | 79 |
+| of which documented | 328 |
+| of which undocumented (appendix A) | 58 |
 | Documented keys with no code entry (appendix B) | 0 |
 
 ## Modules index
@@ -36,11 +36,11 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Motion | `motion.vector_delivery` | partial | [README](../../src/VP-V/modules/motion/vector_delivery/README.md) | 0 | 9 | 0/9 |
 | Motion | `motion.consumers` | built | [README](../../src/VP-V/modules/motion/consumers/README.md) | 33 | 35 | 28/35 |
 | Repair | `repair.encoding` | placeholder | [README](../../src/VP-V/modules/repair/encoding/README.md) | 0 | 1 | 0/1 |
-| Repair | `repair.deband` | built | [README](../../src/VP-V/modules/repair/deband/README.md) | 0 | 7 | 0/7 |
+| Repair | `repair.deband` | built | [README](../../src/VP-V/modules/repair/deband/README.md) | 5 | 7 | 5/7 |
 | Repair | `repair.grain_split` | draft | [README](../../src/VP-V/modules/repair/grain_split/README.md) | 0 | 0 | 0/0 |
 | Repair | `repair.grain_split.shared.band_from_base` | draft | [README](../../src/VP-V/modules/repair/grain_split/shared/README.md) | 0 | 0 | 0/0 |
 | Repair | `repair.temporal_detail` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/README.md) | 5 | 5 | 5/5 |
-| Repair | `repair.texture_restore` | built | [README](../../src/VP-V/modules/repair/texture_restore/README.md) | 0 | 5 | 0/5 |
+| Repair | `repair.texture_restore` | built | [README](../../src/VP-V/modules/repair/texture_restore/README.md) | 5 | 5 | 5/5 |
 | Repair | `repair.temporal_detail.products` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/products/README.md) | 1 | 0 | 0/0 |
 | Repair | `repair.temporal_detail.shared` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/shared/README.md) | 0 | 0 | 0/0 |
 | Scaling | `scaling.rebase` | built | [README](../../src/VP-V/modules/scaling/rebase/README.md) | 2 | 4 | 2/4 |
@@ -58,9 +58,9 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Dynamic drive | `drive.led_compensation` | built | [README](../../src/VP-V/modules/drive/led_compensation/README.md) | 89 | 5 | 0/5 |
 | Dynamic drive | `drive.black_level` | placeholder | [README](../../src/VP-V/modules/drive/black_level/README.md) | 0 | 1 | 0/1 |
 | Dynamic drive | `drive.projector_control` | built | [README](../../src/VP-V/modules/drive/projector_control/README.md) | 20 | 1 | 0/1 |
-| Output | `output.calibration_lut` | partial | [README](../../src/VP-V/modules/output/calibration_lut/README.md) | 34 | 7 | 0/7 |
-| Output | `output.dither` | built | [README](../../src/VP-V/modules/output/dither/README.md) | 2 | 6 | 1/6 |
-| Output | `output.presentation` | built | [README](../../src/VP-V/modules/output/presentation/README.md) | 0 | 5 | 0/5 |
+| Output | `output.calibration_lut` | partial | [README](../../src/VP-V/modules/output/calibration_lut/README.md) | 35 | 7 | 1/7 |
+| Output | `output.dither` | built | [README](../../src/VP-V/modules/output/dither/README.md) | 7 | 6 | 5/6 |
+| Output | `output.presentation` | built | [README](../../src/VP-V/modules/output/presentation/README.md) | 5 | 5 | 5/5 |
 | Control | `control.net_runtime` | placeholder | [README](../../src/VP-V/modules/control/net_runtime/README.md) | 0 | 1 | 0/1 |
 | Control | `control.diagnostics` | partial | [README](../../src/VP-V/modules/control/diagnostics/README.md) | 4 | 4 | 0/4 |
 | Control | `control.config` | partial | [README](../../src/VP-V/modules/control/config/README.md) | 5 | 0 | 0/0 |
@@ -183,12 +183,22 @@ Modules: `repair.encoding`, `repair.deband`, `repair.grain_split`, `repair.grain
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|
+| `deband_grain` | `repair.deband` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | off | VP-V > Proposed retirement > Experiments that lost, and superseded switches; also VP Renderer > Rendering > Processing | Original pathway sets `on` (ADR-0019) | Whether libplacebo's debander adds synthetic grain (off: none; VP's dither does that job). proposed for retirement (group B) | same on all (not tiered) |
+| `deband_vp` | `repair.deband` | profile ([vprenderer.Default] and matching profiles) | enum | off, auto, on | off | off | VP-V > Repair > Advanced > Set by the Repair tier; also VP Renderer > Rendering > Fixes under test | Original pathway sets `off` (ADR-0019) | VP's own debander, before any scaling: safe on HDR and leaves texture and grain alone; auto = only as strong as the source needs | Repair Classic=off; Repair Low=off; Repair Mid=on; Repair Upper=on |
+| `deband_vp_exclusive` | `repair.deband` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Repair > Main > Deband; also VP Renderer > Rendering > Fixes under test | Original pathway sets `off` (ADR-0019) | While VP's debander runs with its grain guard, libplacebo's automatic deband (deband_strength auto) is off; an explicit strength (light / default) is kept; off = both run. status line: deband: libplacebo deband (VP debander failed: <error>) | same on all (not tiered) |
+| `deband_vp_grain_guard` | `repair.deband` | profile ([vprenderer.Default] and matching profiles) | enum | on, veto, off | on | on | VP-V > Repair > Main > Deband; also VP Renderer > Rendering > Fixes under test | n/a (VP-only): unchanged by the Original pathway | on = splits the picture into a smooth layer and grain and debands only the smooth layer; veto = skips grainy areas entirely (2026-10-17 spatial-share veto); off = no guard. status line: deband: libplacebo deband (VP debander failed: <error>) | same on all (not tiered) |
+| `detail_pulse_cap` | `repair.texture_restore` | profile ([vprenderer.Default] and matching profiles) | float | 1.0 - 1.5 | 1.35 | 1.35 | VP-V > Repair > Advanced > Texture restore and detail pulse: limits; also VP Renderer > Rendering > Experimental content-adaptive settings | n/a (VP-only): unchanged by the Original pathway | The most a frame's detail is raised (safety limit) | same on all (not tiered) |
+| `detail_pulse_fast` | `repair.texture_restore` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP Renderer > Rendering > Experimental content-adaptive settings | n/a (VP-only): unchanged by the Original pathway | The same pulse in about half the GPU time (fewer passes); off = the original passes, for A/B. proposed for retirement (group C); status line: Texture restore: inactive (<reason>) | same on all (not tiered) |
+| `detail_pulse_stabilise` | `repair.texture_restore` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Repair > Advanced > Set by the Repair tier; also VP Renderer > Rendering > Experimental content-adaptive settings | Original pathway sets `off` (ADR-0019) | Fine detail and grain "breathe" with the encoder's group of pictures: scales each frame's own detail towards its best-coded recent neighbour (never beyond it, capped by detail_pulse_cap); runs after VP's debander before scaling | Repair Classic=off; Repair Low=on; Repair Mid=on; Repair Upper=on |
+| `low_bitrate_handling` | `repair.deband` | profile ([vprenderer.Default] and matching profiles) | enum | auto, off, on | auto | auto | VP-V > Repair > Main > Deband; also VP Renderer > Rendering > Fixes under test | Original pathway sets `off` (ADR-0019) | How strongly VP's debander reacts to compression: by the measured bitrate (auto), bit depth only (off), or always (on). status line: deband: libplacebo deband (VP debander failed: <error>) | same on all (not tiered) |
 | `temporal_detail` | `repair.temporal_detail` | profile | enum | off, steady, auto | off |  | not in Config (module not wired) | n/a (VP-only) | declared: "Temporal detail: inactive (<reason>)"; `Status()` line | budget-governed: the VRAM governor keeps fewer reference slots first (5 down to 1, `Params::slots`), then drops the scratch-arena temporaries (T1), then the module; nothing is fixed to a GPU model |
 | `temporal_detail_boost` | `repair.temporal_detail` | profile | bool | on, off (the fallback boost) | off |  | not in Config (module not wired) | n/a (VP-only) | declared: off unless re-validated on real encodes (owner 2026-10-31) | same as `temporal_detail` |
 | `temporal_detail_boost_max` | `repair.temporal_detail` | profile | float | 0.0 .. 0.3 | 0.15 |  | not in Config (module not wired) | n/a (VP-only) | declared; used when the boost is on | same as `temporal_detail` |
 | `temporal_detail_engine` | `repair.temporal_detail.products` | deferred (profile; SCHEMA lock held by W1-P3, reset 2 adds it) | enum | off, auto | off (`TdProducts::kEngineRequestedToday = false`) |  | deferred: VP-V > Repair > Temporal detail | n/a (VP-only) | Declared (deferred key; reset 2 adds it): `product.adaptive_downscale`, `product.dither_need`, `product.sigma_delta`, `product.chroma_cfl`, `product.debander`, `product.td_engine`; status lines "<consumer>: classical form (temporal-detail products: <reason>)" | budget-governed: the VRAM / ms governor decides which stage of each governed buffer fits (see Products) |
 | `temporal_detail_max_age` | `repair.temporal_detail` | profile | float | 0.25 .. 4.0 (seconds) | 2.0 |  | not in Config (module not wired) | n/a (VP-only) | declared | same as `temporal_detail` |
 | `temporal_detail_strength` | `repair.temporal_detail` | profile | float | 0.0 .. 1.0 | 1.0 |  | not in Config (module not wired) | n/a (VP-only) | declared | same as `temporal_detail` |
+| `texture_restore` | `repair.texture_restore` | profile ([vprenderer.Default] and matching profiles) | enum | off, statistical | off | off | VP-V > Repair > Advanced > Set by the Repair tier; also VP Renderer > Rendering > Experimental content-adaptive settings | Original pathway sets `off` (ADR-0019) | Experimental: separates grain from scene texture per area and raises both towards the best-coded reference along the motion (about 2 s memory); high GPU cost | Repair Classic=off; Repair Low=off; Repair Mid=off; Repair Upper=statistical |
+| `texture_restore_cap` | `repair.texture_restore` | profile ([vprenderer.Default] and matching profiles) | float | 1.0 - 2.0 | 1.5 | 1.5 | VP-V > Repair > Advanced > Texture restore and detail pulse: limits; also VP Renderer > Rendering > Experimental content-adaptive settings | n/a (VP-only): unchanged by the Original pathway | The most texture is raised (safety limit) | same on all (not tiered) |
 
 ## Scaling
 
@@ -407,8 +417,19 @@ Modules: `output.calibration_lut`, `output.dither`, `output.presentation`.
 | `calibration.transcript_folder` | `output.calibration_lut` | [calibration] | string | folder path, or empty | empty (<vp>\luts\calibration\transcripts) |  | Config > Calibration page > Dynamic Drive, room light and HDR runs > Transcript folder | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Where transcripts are saved when record_transcripts is on. | not tiered |
 | `calibration.verify_after` | `output.calibration_lut` | [calibration] | bool | true, false | true |  | Config > Calibration page > Target and LUT > Verify through the new LUT | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Measures about 60 patches through the new LUT after building it. | not tiered |
 | `calibration.warmup_minutes` | `output.calibration_lut` | [calibration] | int | 0 to 180 | 30 |  | Config > Calibration page > Display and patches > Warm-up | n/a (VP-only); a plain application section, not a renderer setting, so the Original pathway does not change it | Display warm-up before measuring; the wizard can skip it; 0 = none. | not tiered |
+| `calibration_lut_stage` | `output.calibration_lut` | [vpv] (global; also read from the profile) | enum | libplacebo, vp | libplacebo |  | VP-V > Pipeline (expert) (stored in [vpv]) | Original pathway sets `libplacebo` (ADR-0019) | Where the calibration LUT runs: libplacebo = its target LUT, before VP's output hooks; vp = VP's last colour hook, after Dynamic Drive (R1) | same on all (not tiered) |
+| `dejudder_gate` | `output.presentation` | profile ([vprenderer.Default] and matching profiles) | enum | auto, period, refresh | auto | auto | VP-V > Motion > Advanced > Render ahead: tuning; also VP Renderer > Rendering > Fixes under test | n/a (VP-only): unchanged by the Original pathway | Which time the de-judder's GPU budget gate counts per frame: auto = per source period with render_ahead, else per display refresh | same on all (not tiered) |
+| `dither_grain_tolerance_scale` | `output.dither` | profile ([vprenderer.Default] and matching profiles) | float | 1.0 - 8.0 | 3 | 3 | VP-V > Output > Advanced > Temporal dither: tuning; also VP Renderer > Rendering > Temporal dither | n/a (VP-only): unchanged by the Original pathway | The sigma-delta's motion-match tolerance is multiplied by this on grain (1 = off), keeping the averaging alive on grain | same on all (not tiered) |
 | `dither_need` | `output.dither` | profile (draft, header-only) | enum | off, auto (case-insensitive; other values give an error and off) | off |  | none yet (cfg only) | n/a (VP-only) | declared (draft, DitherNeed::Parse only, not read by the host): auto adds extra sigma-delta amplitude only where the grain does not dither the link and one link step is visible; off = today's amplitude. | not tiered |
+| `dither_vectors` | `output.dither` | profile ([vprenderer.Default] and matching profiles) | enum | auto, own | auto | auto | VP Renderer > Rendering > Temporal dither | n/a (VP-only): unchanged by the Original pathway | auto = the dither takes the de-judder's motion on in-between pictures; own = it always searches itself. proposed for retirement (group C); status line: motion consumers: <warp failed | same on all (not tiered) |
+| `occlusion_mask` | `output.dither` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | 0 | VP-V > Output > Main > Temporal dither; also VP Renderer > Rendering > Temporal dither | Original pathway sets `off` (ADR-0019) | Tells the sigma-delta where new picture appears so it carries no residual into it (no smears at moving edges); works with dejudder_strength 0 (mask-only mode). status line: dither: libplacebo dither | same on all (not tiered) |
+| `output_segments_merged` | `output.dither` | [vpv] (global; also read from the profile) | bool | on, off | off |  | VP-V > Pipeline (expert) (stored in [vpv]) | Original pathway sets `off` (ADR-0019) | Draft: the S2/S3 output chain as one PRE_OUTPUT and one OUTPUT hook; off until its GPU tolerance gate passes | same on all (not tiered) |
+| `render_ahead` | `output.presentation` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | off | VP-V > Motion > Main > Render ahead (under test); also VP Renderer > Rendering > Fixes under test | Original pathway sets `off` (ADR-0019) | Render-ahead (under test): the de-judder's extras are queued straight after their frame (no vblank waits) so the next frame starts rendering while they are shown; runs only inside the delay budget; owns presentation, either/or with Bill's present-every-vsync. status line: presentation: open loop: no display statistics, estimated rate | same on all (not tiered) |
+| `render_ahead_queue_credit` | `output.presentation` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | off | VP-V > Motion > Advanced > Render ahead: tuning; also VP Renderer > Rendering > Fixes under test | n/a (VP-only): unchanged by the Original pathway | The queue target gives back the planned render-ahead lead so the total delay stays the same (lip sync) | same on all (not tiered) |
+| `render_ahead_utilisation` | `output.presentation` | profile ([vprenderer.Default] and matching profiles) | float | 0.5 - 1.0 | 0.85 | 0.85 | VP-V > Motion > Advanced > Render ahead: tuning; also VP Renderer > Rendering > Fixes under test | n/a (VP-only): unchanged by the Original pathway | The GPU share of a source period the render-ahead gate budgets | same on all (not tiered) |
+| `repeat_render_reuse` | `output.presentation` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off |  | VP Renderer > Rendering > Temporal dither | Original pathway sets `off` (ADR-0019) | Draft (WP-24): a captured repeat (24p in 30, 30p in 60) is drawn from the rendered-picture cache with only the output stage; anything that changes the picture refuses it | same on all (not tiered) |
 | `shaders.cinema_only` | `output.dither` | [shaders] | bool | true, false | false |  | Config > Shaders page (a [shaders] custom hook entry) | Bill's custom hook entries; cinema_only is VP's addition | libplacebo custom GLSL hook entries only: true skips the hook in the Low_Latency queue; a value that is not true/false marks the rule invalid. | not tiered |
+| `temporal_dither` | `output.dither` | profile ([vprenderer.Default] and matching profiles) | enum | auto, off, libplacebo, sigma_delta | auto | auto | VP-V > Output > Advanced > Set by the Output tier; also VP Renderer > Rendering > Temporal dither | Original pathway sets `libplacebo` (ADR-0019) | The dither as one choice per profile: off, libplacebo's, or VP's temporal sigma-delta (loaded by the renderer itself); auto = the shader list and the dithering setting decide. Spreads steps finer than the output depth over time along the motion (keeps 10-bit smoothness through an 8-bit link) | Output Classic=libplacebo; Output Low=auto; Output Mid=sigma_delta |
 
 ## Control
 
@@ -484,20 +505,9 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `ambient_tau_down_s` | unassigned | 90 |  | VpvSchemaKeys.h |
 | `ambient_tau_up_s` | unassigned | 15 |  | VpvSchemaKeys.h |
 | `cadence_class_fixes` | input.queue_timing, motion.consumers | on |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, RendererProfileConfig.h |
-| `calibration_lut_stage` | output.calibration_lut |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `capture_path` | input.capture | gpu | VP-V > Input > Capture unpack on the GPU | VpvSchemaKeys.h |
 | `capture_upload` | input.capture | auto | VP-V > Input > Upload frames as they arrive | VpvSchemaKeys.h |
-| `deband_grain` | repair.deband | off |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
-| `deband_vp` | repair.deband | off |  | VpvSchemaKeys.h |
-| `deband_vp_exclusive` | repair.deband | on | VP-V > Repair > VP deband replaces libplacebo's | VpvSchemaKeys.h |
-| `deband_vp_grain_guard` | repair.deband | on | VP-V > Repair > VP deband leaves grain alone | VpvSchemaKeys.h |
-| `dejudder_gate` | output.presentation | auto |  | VpvSchemaKeys.h |
 | `dejudder_pulldown` | unassigned | 0 |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, RendererProfileConfig.h |
-| `detail_pulse_cap` | repair.texture_restore | 1.35 |  | VpvSchemaKeys.h |
-| `detail_pulse_fast` | repair.texture_restore | on | VP-V > Repair > Detail pulse: fast path | VpvSchemaKeys.h |
-| `detail_pulse_stabilise` | repair.texture_restore | on |  | VpvSchemaKeys.h |
-| `dither_grain_tolerance_scale` | output.dither | 3 |  | VpvSchemaKeys.h |
-| `dither_vectors` | motion.consumers, output.dither | auto | VP-V > Motion > Dither reuses the de-judder's motion | VpvSchemaKeys.h |
 | `dv_compare_capture_folder` | input.signal |  |  | VpvSchemaKeys.h |
 | `dv_tone_mapping` | colour.sdr_tone_shape | libplacebo |  | VpvSchemaKeys.h |
 | `dv_trims` | colour.sdr_tone_shape | 1 | VP-V > Colour > Dolby Vision trims for your display | VpvSchemaKeys.h |
@@ -511,21 +521,14 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `intent_content` | unassigned | off | VP-V > Input > Content labels for profile rules (film / video / sports) | VpvRendererSettings.cpp, VpvSchemaKeys.h, RendererProfileConfig.h |
 | `intent_content_hold_seconds` | unassigned | 5 |  | VpvSchemaKeys.h |
 | `intent_display` | unassigned | off |  | VpvSchemaKeys.h |
-| `low_bitrate_handling` | repair.deband | auto | VP-V > Repair > Deband reacts to compression | VpvSchemaKeys.h |
 | `low_latency_path` | input.queue_timing |  |  | VpvSchemaKeys.h, VpvStartupSchema.h |
 | `native_rgb_ingest` | input.capture | 1 | VP-V > Input > Native 10/12-bit RGB capture | VpvSchemaKeys.h |
-| `occlusion_mask` | motion.vector_delivery, motion.consumers | 0 | VP-V > Output > Dither: no smear where new picture appears | VpvSchemaKeys.h |
-| `output_segments_merged` | output.dither |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `pipeline_entrance_once` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `pipeline_order` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `pipeline_original_pathway` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h, SkeletonSettings.h, HdrInferenceChoice.h |
 | `pipeline_slots_off` | unassigned |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `pulldown_fixes` | input.queue_timing | on |  | VpvSchemaKeys.h |
 | `queue_timing_fixes` | input.queue_timing | on |  | VpvSchemaKeys.h |
-| `render_ahead` | output.presentation | off | VP-V > Motion > De-judder: render ahead (under test) | VpvSchemaKeys.h |
-| `render_ahead_queue_credit` | output.presentation | off |  | VpvSchemaKeys.h |
-| `render_ahead_utilisation` | output.presentation | 0.85 |  | VpvSchemaKeys.h |
-| `repeat_render_reuse` | output.presentation |  |  | VpvSchemaKeys.h |
 | `resync_event` | input.signal |  |  | VpvRendererSettings.cpp, VpvSchemaKeys.h |
 | `retirement_a` | unassigned |  |  | VpvSchemaKeys.h |
 | `retirement_b` | unassigned |  |  | VpvSchemaKeys.h |
@@ -551,9 +554,6 @@ the defaults golden and `vpv-tiers.json`; they are not documentation.
 | `source_resolution_release_fade_s` | input.source_analysis | 0.25 |  | VpvSchemaKeys.h |
 | `source_resolution_text_guard` | input.source_analysis | on | VP-V > Scaling > Re-base ignores the player's own subtitles | VpvSchemaKeys.h |
 | `target_latency_ms` | input.queue_timing |  |  | VpvSchemaKeys.h, VpvStartupSchema.h |
-| `temporal_dither` | output.dither | auto |  | VpvSchemaKeys.h |
-| `texture_restore` | repair.texture_restore | off |  | VpvSchemaKeys.h |
-| `texture_restore_cap` | repair.texture_restore | 1.5 |  | VpvSchemaKeys.h |
 | `timing_continuity_fixes` | input.queue_timing, motion.vector_delivery | on |  | VpvSchemaKeys.h |
 
 ## Appendix B: documented keys with no entry in code

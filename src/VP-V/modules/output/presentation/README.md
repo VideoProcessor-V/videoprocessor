@@ -106,6 +106,15 @@ Build x64 Release (the AGENTS.md command). Run tests single-threaded and read th
 
 ## Settings
 
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `dejudder_gate` | profile ([vprenderer.Default] and matching profiles) | enum | auto, period, refresh | auto | VP-V > Motion > Advanced > Render ahead: tuning; also VP Renderer > Rendering > Fixes under test | n/a (VP-only): unchanged by the Original pathway | Which time the de-judder's GPU budget gate counts per frame: auto = per source period with render_ahead, else per display refresh | same on all (not tiered) |
+| `render_ahead` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | VP-V > Motion > Main > Render ahead (under test); also VP Renderer > Rendering > Fixes under test | Original pathway sets `off` (ADR-0019) | Render-ahead (under test): the de-judder's extras are queued straight after their frame (no vblank waits) so the next frame starts rendering while they are shown; runs only inside the delay budget; owns presentation, either/or with Bill's present-every-vsync. status line: presentation: open loop: no display statistics, estimated rate | same on all (not tiered) |
+| `render_ahead_queue_credit` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | VP-V > Motion > Advanced > Render ahead: tuning; also VP Renderer > Rendering > Fixes under test | n/a (VP-only): unchanged by the Original pathway | The queue target gives back the planned render-ahead lead so the total delay stays the same (lip sync) | same on all (not tiered) |
+| `render_ahead_utilisation` | profile ([vprenderer.Default] and matching profiles) | float | 0.5 - 1.0 | 0.85 | VP-V > Motion > Advanced > Render ahead: tuning; also VP Renderer > Rendering > Fixes under test | n/a (VP-only): unchanged by the Original pathway | The GPU share of a source period the render-ahead gate budgets | same on all (not tiered) |
+| `repeat_render_reuse` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | off | VP Renderer > Rendering > Temporal dither | Original pathway sets `off` (ADR-0019) | Draft (WP-24): a captured repeat (24p in 30, 30p in 60) is drawn from the rendered-picture cache with only the output stage; anything that changes the picture refuses it | same on all (not tiered) |
+
+
 - Existing keys (checked 2026-10-25): `render_ahead`, `render_ahead_queue_credit`, `render_ahead_utilisation`, `dejudder_gate` (the render-ahead gate; was owned by no slot)
 - Planned keys: (none)
 - Tiers: not tiered
