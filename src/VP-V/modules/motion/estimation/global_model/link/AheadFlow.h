@@ -83,6 +83,14 @@ namespace CameraLink
 		// (MotionAhead::FlowGlobal); a fit prior like the render-time EngineGlobal. Not filled: no prior.
 		bool globalValid = false;
 		double globalX = 0, globalY = 0;
+		// W1-C3 (doc 93 D3/D5): the producer's extras as FlowOf served them (worked out once on the producer's worker), copied with the
+		// pair so the worker reads them instead of recomputing. Empty / false when the view carried none, or carried them for other
+		// arithmetic (cell size, units, trust block): then AheadGlobal / AheadCellTrust compute them as before (same functions).
+		bool haveProducerGlobal = false;     // producerGlobal = MotionAhead::FlowGlobal(forward, forwardCost, ..., general = true)
+		float producerGlobal[4] = {};
+		int extrasBlocksX = 0, extrasBlocksY = 0;
+		std::vector<float> costWeight;       // OpticalFlowTrust::CostWeights of forwardCost, extrasBlocksX x extrasBlocksY
+		std::vector<float> fbError;          // OpticalFlowTrust::FbError(forward, backward), gridW x gridH
 		size_t Cells() const { return static_cast<size_t>(gridW > 0 ? gridW : 0) * static_cast<size_t>(gridH > 0 ? gridH : 0); }
 		double CellSourcePx() const { return cellEnginePx * enginePxToSource; }
 	};
@@ -113,6 +121,25 @@ namespace CameraLink
 		out.forward.assign(v.rawForward, v.rawForward + cells * 2);
 		out.backward.assign(v.rawBackward, v.rawBackward + cells * 2);
 		out.forwardCost.assign(v.forwardCost, v.forwardCost + cells);
+		// W1-C3: the producer's extras, taken only when they were computed with exactly the arithmetic the camera would use (the
+		// camera's whole-frame vote runs with general_rate_fixes on; trust on S10.5 units, cellEnginePx cells, kEngineTrustBlockPx blocks).
+		if (v.haveGlobal && v.globalGeneral)
+		{
+			out.haveProducerGlobal = true;
+			for (int k = 0; k < 4; ++k)
+				out.producerGlobal[k] = v.global[0][k];
+		}
+		const bool sameTrustMaths = v.extrasCellPx == v.cellEnginePx && v.extrasUnitsPerEnginePx == 32.0 && v.rawUnitsPerEnginePx == 32.0 &&
+			v.extrasBlockPx == kEngineTrustBlockPx;
+		const int blocksX = (v.engineW + kEngineTrustBlockPx - 1) / kEngineTrustBlockPx;
+		const int blocksY = (v.engineH + kEngineTrustBlockPx - 1) / kEngineTrustBlockPx;
+		if (sameTrustMaths && v.costWeight && v.fbError && v.blocksX == blocksX && v.blocksY == blocksY)
+		{
+			out.extrasBlocksX = blocksX;
+			out.extrasBlocksY = blocksY;
+			out.costWeight.assign(v.costWeight, v.costWeight + static_cast<size_t>(blocksX) * static_cast<size_t>(blocksY));
+			out.fbError.assign(v.fbError, v.fbError + cells);
+		}
 		return AheadRefusal::None;
 	}
 
@@ -123,6 +150,11 @@ namespace CameraLink
 		out.clear();
 		const int blocksX = (a.engineW + kEngineTrustBlockPx - 1) / kEngineTrustBlockPx;
 		const int blocksY = (a.engineH + kEngineTrustBlockPx - 1) / kEngineTrustBlockPx;
+		// W1-C3: the producer's extras when the copy carries them (CopyAhead checked the arithmetic): the same CellTrust on the same inputs.
+		if (a.extrasBlocksX == blocksX && a.extrasBlocksY == blocksY && a.costWeight.size() == static_cast<size_t>(blocksX) * static_cast<size_t>(blocksY) &&
+			a.fbError.size() == a.Cells() && a.Cells() > 0)
+			return OpticalFlowTrust::CellTrust(a.costWeight, blocksX, blocksY, a.fbError, a.gridW, a.gridH, a.cellEnginePx, kEngineTrustBlockPx,
+				consistencyEnginePx, out);
 		std::vector<float> blockCost, cellError;
 		if (!OpticalFlowTrust::CostWeights(a.forwardCost, a.gridW, a.gridH, a.cellEnginePx, kEngineTrustBlockPx, blocksX, blocksY, blockCost))
 			return false;

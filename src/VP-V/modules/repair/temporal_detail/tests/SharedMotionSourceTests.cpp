@@ -9,6 +9,8 @@
 
 #include <VP-V/modules/repair/temporal_detail/SharedMotionSource.h>
 
+#include <chrono>
+#include <cstdio>
 #include <memory>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -225,6 +227,74 @@ namespace VideoProcessorTest
 			Assert::IsFalse(deep.CurrentDecision().engaged, L"a refill of a deep queue is not yet a sustained loss");
 			deep.Forward(2, out);
 			Assert::IsTrue(deep.CurrentDecision().engaged, L"20 in a row shows");
+		}
+
+		// W1-C3: the forward direction reads the producer's Flow::fbError (worked out once on its worker) instead of recomputing it; the
+		// trust is bit-equal to the recompute path (same FbError on the same fields). The backward direction has no producer extra and
+		// still computes (counted).
+		TEST_METHOD(TheForwardTrustReadsTheProducersErrorAndIsBitEqualToTheRecompute)
+		{
+			auto slot = std::make_shared<VpMotion::P2Slot>(16);
+			slot->SetGeneration(1);
+			auto withExtras = MakeFlow(96, 48);
+			MotionAhead::FlowExtras(*withExtras);
+			Assert::IsFalse(withExtras->fbError.empty());
+			auto recompute = std::make_shared<MotionAhead::Flow>(*withExtras);
+			recompute->fbError.clear();   // the same pair without the producer's error: Take works it out
+			Assert::IsTrue(slot->Publish(4, 5, 1, withExtras));
+			Assert::IsTrue(slot->Publish(5, 6, 1, recompute));
+			MotionValidity::State validity;
+			validity.NoteKept(4);
+			validity.NoteKept(5);
+			validity.NoteKept(6);
+			TemporalDetail::SharedMotionSource source(VpMotion::P2View(slot), &validity);
+			source.SetSourceSize(192, 96);
+			TemporalDetail::MotionPair a, b, back;
+			Assert::IsTrue(source.Forward(5, a));
+			Assert::AreEqual<uint64_t>(0, source.GetStats().fbErrorComputed, L"forward: the producer's error, not recomputed");
+			Assert::IsTrue(source.Forward(6, b));
+			Assert::AreEqual<uint64_t>(1, source.GetStats().fbErrorComputed, L"no producer error: computed here");
+			Assert::AreEqual(a.trust.size(), b.trust.size());
+			for (size_t i = 0; i < a.trust.size(); ++i)
+				Assert::AreEqual(b.trust[i], a.trust[i], 0.0f, L"bit-equal to the recompute path");
+			Assert::IsTrue(a.vx == b.vx && a.vy == b.vy);
+			Assert::IsTrue(source.Backward(5, back));
+			Assert::AreEqual<uint64_t>(2, source.GetStats().fbErrorComputed, L"backward: no producer extra, computed");
+		}
+
+		// W1-C3 cost line: TD's per-pair forward Take with the error recomputed (before) and read from the producer (after), at the engine
+		// grids of a 1080p and a 2160p source. Logged, never gated (timing).
+		TEST_METHOD(CostLineForwardTakeBeforeAndAfter)
+		{
+			const int sizes[2][2] = { { 960, 540 }, { 1920, 1080 } };
+			for (int s = 0; s < 2; ++s)
+			{
+				auto slot = std::make_shared<VpMotion::P2Slot>(16);
+				slot->SetGeneration(1);
+				auto withExtras = MakeFlow(sizes[s][0], sizes[s][1]);
+				MotionAhead::FlowExtras(*withExtras);
+				auto recompute = std::make_shared<MotionAhead::Flow>(*withExtras);
+				recompute->fbError.clear();
+				Assert::IsTrue(slot->Publish(4, 5, 1, recompute));
+				Assert::IsTrue(slot->Publish(5, 6, 1, withExtras));
+				TemporalDetail::SharedMotionSource source(VpMotion::P2View(slot), nullptr);
+				source.SetSourceSize(sizes[s][0] * 2, sizes[s][1] * 2);
+				const int reps = 20;
+				TemporalDetail::MotionPair out;
+				double sink = 0;
+				const auto t0 = std::chrono::steady_clock::now();
+				for (int r = 0; r < reps; ++r) { source.Forward(5, out); sink += out.trust.empty() ? 0.0 : out.trust[0]; }
+				const auto t1 = std::chrono::steady_clock::now();
+				for (int r = 0; r < reps; ++r) { source.Forward(6, out); sink += out.trust.empty() ? 0.0 : out.trust[0]; }
+				const auto t2 = std::chrono::steady_clock::now();
+				const double before = std::chrono::duration<double, std::milli>(t1 - t0).count() / reps;
+				const double after = std::chrono::duration<double, std::milli>(t2 - t1).count() / reps;
+				char line[256];
+				std::snprintf(line, sizeof(line), "W1C3_COST td forward Take grid=%dx%d before_ms=%.3f after_ms=%.3f (sink %.1f)",
+					withExtras->gridW, withExtras->gridH, before, after, sink);
+				Logger::WriteMessage(line);
+				Assert::AreEqual<uint64_t>(static_cast<uint64_t>(reps), source.GetStats().fbErrorComputed, L"only the recompute pair computed");
+			}
 		}
 
 		TEST_METHOD(AMissingStaleOrUnfitPairIsAbsentCountedAndVisible)

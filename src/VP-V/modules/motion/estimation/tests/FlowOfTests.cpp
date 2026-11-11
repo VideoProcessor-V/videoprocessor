@@ -7,6 +7,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 
 #include <cstring>
@@ -117,6 +118,108 @@ namespace VideoProcessorTest
 			Assert::IsTrue(plain.rawForward == rig.flow->forward.data());
 			Assert::IsNull(plain.rawBackward);
 			Assert::IsNull(plain.forwardCost);
+		}
+
+		// W1-C3: the producer's extras ride on the view as the producer worked them out (not recomputed), and the pair's cell trust is
+		// computed ONCE per pair id however often FlowOf serves it (the lease memo), equal to OpticalFlowTrust::CellTrust on the same inputs.
+		TEST_METHOD(TheProducerExtrasRideOnTheViewAndTheCellTrustIsComputedOncePerPair)
+		{
+			Rig rig;
+			auto full = std::make_shared<MotionAhead::Flow>(*rig.flow);
+			full->backward = full->forward;
+			for (size_t i = 0; i < full->backward.size(); ++i)
+				full->backward[i] = static_cast<int16_t>(-full->backward[i] + (i % 3 == 0 ? 40 : 0));   // some cells inconsistent
+			full->forwardCost.clear();
+			for (int i = 0; i < 8; ++i) full->forwardCost.push_back(static_cast<uint8_t>(5 + 9 * i));
+			full->backwardCost.assign(8, 9);
+			MotionAhead::FlowGlobals(*full, true);
+			MotionAhead::FlowExtras(*full);
+			Assert::IsTrue(full->globalSet);
+			Assert::AreEqual(full->gridW * full->gridH, static_cast<int>(full->fbError.size()));
+			Assert::AreEqual(full->blocksX * full->blocksY, static_cast<int>(full->costWeight.size()));
+			rig.engine.p2Slot->Publish(11, 12, rig.engine.p2Slot->Generation(), full);
+			rig.engine.motionValidity.NoteKept(12);
+			const int calls = 6;
+			const float* first = nullptr;
+			for (int n = 0; n < calls; ++n)
+			{
+				VpMotion::FlowView view;
+				Assert::IsTrue(rig.engine.FlowOf(12, view));
+				Assert::IsTrue(view.haveGlobal && view.globalGeneral);
+				for (int d = 0; d < 2; ++d)
+					for (int k = 0; k < 4; ++k)
+					{
+						Assert::AreEqual(full->global[d][k], view.global[d][k], 0.0f, L"the producer's vote, bit for bit");
+						Assert::AreEqual(full->second[d][k], view.second[d][k], 0.0f);
+					}
+				Assert::IsTrue(view.costWeight == full->costWeight.data(), L"the producer's plane, not a copy");
+				Assert::IsTrue(view.fbError == full->fbError.data());
+				Assert::AreEqual(full->blocksX, view.blocksX);
+				Assert::AreEqual(full->blocksY, view.blocksY);
+				Assert::AreEqual(MotionAhead::Flow::kBlockPx, view.extrasBlockPx);
+				Assert::AreEqual(NvOpticalFlow::Engine::Grid, view.extrasCellPx);
+				Assert::AreEqual(32.0, view.extrasUnitsPerEnginePx, 0.0);
+				const float* t = view.CellTrust(1.5f);
+				Assert::IsNotNull(t);
+				if (!first) first = t;
+				Assert::IsTrue(t == first, L"the memo, not a new computation");
+			}
+			auto reads = rig.engine.FlowReads();
+			Assert::AreEqual(static_cast<unsigned long long>(calls), reads.served);
+			Assert::AreEqual(1ull, reads.conversions, L"one conversion for N FlowOf calls of the pair");
+			Assert::AreEqual(1ull, reads.trustComputes, L"one cell-trust computation for N FlowOf calls of the pair");
+			// Equal to the ONE engine trust on the same inputs: the producer's planes, and the same maths from the raw fields.
+			std::vector<float> ref, cost, err, fromRaw;
+			Assert::IsTrue(OpticalFlowTrust::CellTrust(full->costWeight, full->blocksX, full->blocksY, full->fbError, full->gridW, full->gridH,
+				NvOpticalFlow::Engine::Grid, MotionAhead::Flow::kBlockPx, 1.5f, ref));
+			Assert::IsTrue(OpticalFlowTrust::CostWeights(full->forwardCost, full->gridW, full->gridH, NvOpticalFlow::Engine::Grid,
+				MotionAhead::Flow::kBlockPx, full->blocksX, full->blocksY, cost));
+			Assert::IsTrue(OpticalFlowTrust::FbError(full->forward, full->backward, full->gridW, full->gridH, NvOpticalFlow::Engine::Grid, err));
+			Assert::IsTrue(OpticalFlowTrust::CellTrust(cost, full->blocksX, full->blocksY, err, full->gridW, full->gridH,
+				NvOpticalFlow::Engine::Grid, MotionAhead::Flow::kBlockPx, 1.5f, fromRaw));
+			Assert::AreEqual(ref.size(), fromRaw.size());
+			bool someBelowOne = false;
+			for (size_t i = 0; i < ref.size(); ++i)
+			{
+				Assert::AreEqual(ref[i], first[i], 0.0f, L"bit-equal to OpticalFlowTrust::CellTrust");
+				Assert::AreEqual(fromRaw[i], first[i], 0.0f);
+				someBelowOne = someBelowOne || first[i] < 1.0f;
+			}
+			Assert::IsTrue(someBelowOne, L"the inputs exercise the weighting (not all trust 1)");
+			// Another tolerance is a new computation (counted); the pair is not converted again. The FIRST pointer stays valid and
+			// unchanged (one stable plane per tolerance), and asking the first tolerance again is still the memo.
+			const std::vector<float> firstCopy(first, first + ref.size());
+			VpMotion::FlowView again;
+			Assert::IsTrue(rig.engine.FlowOf(12, again));
+			const float* third = again.CellTrust(3.0f);
+			Assert::IsNotNull(third);
+			Assert::IsTrue(third != first);
+			for (size_t i = 0; i < ref.size(); ++i)
+				Assert::AreEqual(firstCopy[i], first[i], 0.0f, L"the first tolerance's plane is untouched by the second");
+			std::vector<float> ref3;
+			Assert::IsTrue(OpticalFlowTrust::CellTrust(full->costWeight, full->blocksX, full->blocksY, full->fbError, full->gridW, full->gridH,
+				NvOpticalFlow::Engine::Grid, MotionAhead::Flow::kBlockPx, 3.0f, ref3));
+			for (size_t i = 0; i < ref3.size(); ++i)
+				Assert::AreEqual(ref3[i], third[i], 0.0f);
+			Assert::IsTrue(again.CellTrust(1.5f) == first, L"back to the first tolerance: the memo");
+			Assert::IsTrue(again.CellTrust(3.0f) == third);
+			reads = rig.engine.FlowReads();
+			Assert::AreEqual(2ull, reads.trustComputes);
+			Assert::AreEqual(1ull, reads.conversions);
+			// A pair without extras (no costs, no backward, no vote): nothing on the view, the trust cannot be formed (null), counted once.
+			VpMotion::FlowView plain;
+			Assert::IsTrue(rig.engine.FlowOf(11, plain));
+			Assert::IsFalse(plain.haveGlobal);
+			Assert::IsNull(plain.costWeight);
+			Assert::IsNull(plain.fbError);
+			Assert::IsNull(plain.CellTrust(1.5f));
+			Assert::IsNull(plain.CellTrust(1.5f));
+			reads = rig.engine.FlowReads();
+			Assert::AreEqual(2ull, reads.conversions);
+			Assert::AreEqual(3ull, reads.trustComputes, L"a failed formation is memoised too");
+			// A default view (no FlowOf) has no memo.
+			VpMotion::FlowView none;
+			Assert::IsNull(none.CellTrust(1.5f));
 		}
 
 		TEST_METHOD(AfterAResyncTheAnswerIsFalseAndCounted)

@@ -29,6 +29,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -303,6 +304,10 @@ namespace VpMotion
 			unsigned long long noPair = 0;         // the producer has no such pair (not computed yet, pruned, older generation)
 			unsigned long long invalidated = 0;    // the vectors-valid state does not hold the pair (resync, gap, format change)
 			unsigned long long unscaled = 0;       // the source size the engine size derives from is not known yet
+			// W1-C3: the per-pair work (computed once per pair id, whatever the number of FlowOf calls): the lease builds (source-px
+			// conversion of the pair) and the cell-trust computations (FlowView::CellTrust, once per pair and tolerance).
+			unsigned long long conversions = 0;
+			unsigned long long trustComputes = 0;
 		};
 		FlowReadCounters FlowReads() const;
 		// Contract: set AND clear on the render thread or under renderMutex (an estimate reads the pointer once and
@@ -320,16 +325,29 @@ namespace VpMotion
 		const void* host_ = nullptr;
 		// FlowOf's lease: the shared pair and the converted planes the last returned view points into (render thread; the mutex only
 		// makes a stray second reader safe, it does not extend a view's validity).
-		struct FlowLease
+		struct FlowLease : IFlowTrustMemo
 		{
 			MotionAhead::FlowPtr flow;
 			uint64_t from = 0, to = 0;
 			double scale = 0;
 			std::vector<float> x, y;
+			// W1-C3: the cell trust memo, one entry per tolerance asked for this pair (each computed once and counted). A std::list so a
+			// pointer handed out stays valid when another tolerance is added (a vector of entries would move them).
+			struct TrustEntry
+			{
+				float tolerance = 0.0f;
+				bool ok = false;
+				std::vector<float> trust;
+			};
+			std::atomic<unsigned long long>* computes = nullptr;
+			mutable std::mutex trustMutex;
+			mutable std::list<TrustEntry> trusts;
+			const float* CellTrust(float toleranceEnginePx) const override;
 		};
 		mutable std::mutex flowMutex_;
 		mutable std::shared_ptr<FlowLease> flowLease_;
 		mutable FlowReadCounters flowReads_;
+		mutable std::atomic<unsigned long long> flowTrustComputes_{ 0 };   // W1-C3: FlowLease::CellTrust computations (FlowReads().trustComputes)
 		std::atomic<int> flowSourceWidth_{ 0 };   // the source width the engine size was last made for (ServeStatistics)
 		InvalidateSink invalidateSink_ = nullptr;
 		const IMatcherView* matcher_ = nullptr;

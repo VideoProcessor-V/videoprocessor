@@ -540,8 +540,7 @@ namespace MotionAhead
 					// Planner Q1: the whole frame's motion, here on the worker (no render cost).
 					const auto extrasStart = std::chrono::steady_clock::now();
 					const bool general = generalRates.load(std::memory_order_acquire);   // fixed-constant batch B4 2026-10-18
-					FlowGlobal(flow->forward, flow->forwardCost, flow->gridW, flow->gridH, flow->global[0], flow->second[0], general);
-					FlowGlobal(flow->backward, flow->backwardCost, flow->gridW, flow->gridH, flow->global[1], flow->second[1], general);
+					FlowGlobals(*flow, general);   // both directions, flagged for the FlowOf view (W1-C3)
 					// The cost and the engine's own forward/backward consistency as trust inputs.
 					FlowExtras(*flow);
 					const double extrasMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - extrasStart).count();

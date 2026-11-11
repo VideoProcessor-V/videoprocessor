@@ -20,6 +20,7 @@
 #include <VP-V/modules/motion/estimation/global_model/link/CameraSettings.h>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -103,6 +104,57 @@ namespace CameraAheadFitTestsNs
 			t[i] = blockCost[block] * OpticalFlowTrust::FallOff(consistencyPx, 2.0f * consistencyPx, cellError[i]);
 		}
 		return t;
+	}
+
+	// W1-C3: the producer's flow for a synthetic pair (its worker's FlowGlobals + FlowExtras) and the view FlowOf serves for it (the
+	// engine fills the extras exactly so: VectorEngine.cpp FlowOf).
+	MotionAhead::Flow FlowOfPair(const Pair& p, bool general)
+	{
+		MotionAhead::Flow f;
+		f.halfW = p.engineW;
+		f.halfH = p.engineH;
+		f.gridW = p.gridW;
+		f.gridH = p.gridH;
+		f.forward = p.fwd;
+		f.backward = p.bwd;
+		f.forwardCost = p.cost;
+		f.backwardCost = p.cost;
+		MotionAhead::FlowGlobals(f, general);
+		MotionAhead::FlowExtras(f);
+		return f;
+	}
+	VpMotion::FlowView ViewWithExtras(const Pair& p, const MotionAhead::Flow& f, uint64_t seq)
+	{
+		VpMotion::FlowView v = p.View(seq);
+		v.haveGlobal = f.globalSet;
+		v.globalGeneral = f.globalGeneral;
+		for (int d = 0; d < 2; ++d)
+			for (int k = 0; k < 4; ++k)
+			{
+				v.global[d][k] = f.global[d][k];
+				v.second[d][k] = f.second[d][k];
+			}
+		v.costWeight = f.costWeight.data();
+		v.blocksX = f.blocksX;
+		v.blocksY = f.blocksY;
+		v.fbError = f.fbError.data();
+		v.extrasBlockPx = MotionAhead::Flow::kBlockPx;
+		v.extrasCellPx = NvOpticalFlow::Engine::Grid;
+		v.extrasUnitsPerEnginePx = 32.0;
+		return v;
+	}
+	void Randomise(Pair& p, uint32_t seed)
+	{
+		uint32_t r = seed;
+		auto rnd = [&r]() { r = r * 1664525u + 1013904223u; return r >> 8; };
+		for (size_t i = 0; i < p.cost.size(); ++i)
+		{
+			p.fwd[i * 2] = static_cast<int16_t>(static_cast<int>(rnd() % 200) - 100 + 150);
+			p.fwd[i * 2 + 1] = static_cast<int16_t>(static_cast<int>(rnd() % 200) - 100 - 60);
+			p.bwd[i * 2] = static_cast<int16_t>(-p.fwd[i * 2] + static_cast<int>(rnd() % 64) - 32);
+			p.bwd[i * 2 + 1] = static_cast<int16_t>(-p.fwd[i * 2 + 1] + static_cast<int>(rnd() % 64) - 32);
+			p.cost[i] = static_cast<uint8_t>(rnd() % 60);
+		}
 	}
 
 	// A second rig whose P7 is sealed AT its frame (the on-time target: what the skeleton lane would be).
@@ -272,6 +324,111 @@ namespace VideoProcessorTest
 			CameraLink::FieldCopy f;
 			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 1.5f, 40, 23, f));
 			Assert::IsTrue(f.fwdTrust == t, L"one trust per native cell");
+		}
+
+		// W1-C3 (doc 93 D3/D5): the camera reads the producer's extras (whole-frame vote, cost weight, forward/backward error) instead of
+		// recomputing them; byte identity: the same OpticalFlowTrust / FlowGlobal functions on the same inputs, so the trust and the prior
+		// are bit-equal to the recompute path. Extras made with other arithmetic (general_rate_fixes off, another cell / block / unit) are
+		// not taken.
+		TEST_METHOD(TheProducerExtrasGiveBitEqualTrustAndGlobalAndOtherArithmeticIsNotTaken)
+		{
+			Pair p(320, 180, 2.0);
+			Randomise(p, 777u);
+			const MotionAhead::Flow f = FlowOfPair(p, true);
+			CameraLink::AheadCopy withExtras, without;
+			Assert::IsTrue(CameraLink::CopyAhead(ViewWithExtras(p, f, 3), 3, withExtras) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(CameraLink::CopyAhead(p.View(3), 3, without) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(withExtras.haveProducerGlobal);
+			Assert::IsFalse(without.haveProducerGlobal);
+			Assert::AreEqual(withExtras.Cells(), withExtras.fbError.size());
+			Assert::IsTrue(without.fbError.empty() && without.costWeight.empty());
+			std::vector<float> t1, t0;
+			Assert::IsTrue(CameraLink::AheadCellTrust(withExtras, 1.5f, t1));
+			Assert::IsTrue(CameraLink::AheadCellTrust(without, 1.5f, t0));
+			const std::vector<float> ref = Mv5Trust(without, 1.5f);
+			Assert::AreEqual(t0.size(), t1.size());
+			bool someBelowOne = false;
+			for (size_t i = 0; i < t0.size(); ++i)
+			{
+				Assert::AreEqual(t0[i], t1[i], 0.0f, L"the extras path is bit-equal to the recompute path");
+				Assert::AreEqual(ref[i], t1[i], 0.0f);
+				someBelowOne = someBelowOne || t1[i] < 1.0f;
+			}
+			Assert::IsTrue(someBelowOne, L"the inputs exercise the weighting");
+			// The prior: the producer's vote equals the camera's own FlowGlobal (general on) on the copied fields, bit for bit.
+			float g[4] = {}, second[4] = {};
+			MotionAhead::FlowGlobal(without.forward, without.forwardCost, without.gridW, without.gridH, g, second);
+			for (int k = 0; k < 4; ++k)
+				Assert::AreEqual(g[k], withExtras.producerGlobal[k], 0.0f, L"the producer's whole-frame vote = the camera's");
+			// The fields on the source grid are unchanged by the extras.
+			CameraLink::FieldCopy a1, a0;
+			Assert::IsTrue(CameraLink::AheadToSourceGrid(withExtras, 1.5f, 40, 23, a1));
+			Assert::IsTrue(CameraLink::AheadToSourceGrid(without, 1.5f, 40, 23, a0));
+			Assert::IsTrue(a1.fwdTrust == a0.fwdTrust && a1.fwdX == a0.fwdX && a1.fwdY == a0.fwdY);
+			// general_rate_fixes off on the producer: its vote is other arithmetic, the camera votes itself.
+			const MotionAhead::Flow off = FlowOfPair(p, false);
+			CameraLink::AheadCopy offCopy;
+			Assert::IsTrue(CameraLink::CopyAhead(ViewWithExtras(p, off, 3), 3, offCopy) == CameraLink::AheadRefusal::None);
+			Assert::IsFalse(offCopy.haveProducerGlobal, L"a vote made with general off is not taken");
+			// Another trust block / cell size / unit, or one plane missing: the planes are not taken, the trust is computed (still equal).
+			for (int c = 0; c < 4; ++c)
+			{
+				VpMotion::FlowView other = ViewWithExtras(p, f, 3);
+				if (c == 0) other.extrasBlockPx = 16;
+				if (c == 1) other.extrasCellPx = 8;
+				if (c == 2) other.extrasUnitsPerEnginePx = 16.0;
+				if (c == 3) other.fbError = nullptr;
+				CameraLink::AheadCopy otherCopy;
+				Assert::IsTrue(CameraLink::CopyAhead(other, 3, otherCopy) == CameraLink::AheadRefusal::None);
+				Assert::IsTrue(otherCopy.costWeight.empty() && otherCopy.fbError.empty(), L"other arithmetic: both planes or neither");
+				std::vector<float> t2;
+				Assert::IsTrue(CameraLink::AheadCellTrust(otherCopy, 1.5f, t2));
+				Assert::IsTrue(t2 == t0);
+			}
+		}
+
+		// W1-C3 cost line: the camera worker's per-pair trust + prior, recomputed (before) and read from the producer's extras (after),
+		// at the engine grids of a 1080p source (240 x 135 cells) and a 2160p source (480 x 270). Logged, never gated (timing).
+		TEST_METHOD(CostLineCameraTrustAndPriorBeforeAndAfter)
+		{
+			const int sizes[2][2] = { { 960, 540 }, { 1920, 1080 } };
+			for (int s = 0; s < 2; ++s)
+			{
+				Pair p(sizes[s][0], sizes[s][1], 2.0);
+				Randomise(p, 4242u + static_cast<uint32_t>(s));
+				const MotionAhead::Flow f = FlowOfPair(p, true);
+				const VpMotion::FlowView plainView = p.View(3), extrasView = ViewWithExtras(p, f, 3);
+				const int reps = 20;
+				std::vector<float> t;
+				float g[4] = {}, second[4] = {};
+				double sink = 0;
+				const auto t0 = std::chrono::steady_clock::now();
+				for (int r = 0; r < reps; ++r)
+				{
+					CameraLink::AheadCopy a;
+					CameraLink::CopyAhead(plainView, 3, a);
+					MotionAhead::FlowGlobal(a.forward, a.forwardCost, a.gridW, a.gridH, g, second);
+					CameraLink::AheadCellTrust(a, 1.5f, t);
+					sink += t.empty() ? 0.0 : t[0] + g[0];
+				}
+				const auto t1 = std::chrono::steady_clock::now();
+				for (int r = 0; r < reps; ++r)
+				{
+					CameraLink::AheadCopy a;
+					CameraLink::CopyAhead(extrasView, 3, a);
+					for (int k = 0; k < 4; ++k) g[k] = a.producerGlobal[k];
+					CameraLink::AheadCellTrust(a, 1.5f, t);
+					sink += t.empty() ? 0.0 : t[0] + g[0];
+				}
+				const auto t2 = std::chrono::steady_clock::now();
+				const double before = std::chrono::duration<double, std::milli>(t1 - t0).count() / reps;
+				const double after = std::chrono::duration<double, std::milli>(t2 - t1).count() / reps;
+				char line[256];
+				std::snprintf(line, sizeof(line), "W1C3_COST camera grid=%dx%d copy+global+trust before_ms=%.3f after_ms=%.3f (sink %.1f)",
+					p.gridW, p.gridH, before, after, sink);
+				Logger::WriteMessage(line);
+				Assert::IsTrue(before > 0.0 && after > 0.0);
+			}
 		}
 
 		TEST_METHOD(TheRecordOutputsAreReGriddedToTheConsumerGridAndTheParamsKept)

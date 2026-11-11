@@ -252,7 +252,11 @@ namespace Vpv
 			void AheadGlobal(CameraLink::AheadCopy& out)
 			{
 				float g[4] = {}, second[4] = {};
-				MotionAhead::FlowGlobal(out.forward, out.forwardCost, out.gridW, out.gridH, g, second);
+				if (out.haveProducerGlobal)   // W1-C3: the producer voted it once (same FlowGlobal, same inputs, general on): read, not recomputed
+					for (int k = 0; k < 4; ++k)
+						g[k] = out.producerGlobal[k];
+				else
+					MotionAhead::FlowGlobal(out.forward, out.forwardCost, out.gridW, out.gridH, g, second);
 				out.globalValid = g[3] > 0.5f && g[2] < 0.9f;
 				out.globalX = out.CellSourcePx() * static_cast<double>(g[0]);
 				out.globalY = out.CellSourcePx() * static_cast<double>(g[1]);

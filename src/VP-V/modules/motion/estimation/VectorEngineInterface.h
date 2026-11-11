@@ -82,6 +82,22 @@ namespace VpMotion
 		double x = 0, y = 0;         // source px over the pair
 	};
 
+	// W1-C3 (doc 93 D3/D5): the per-cell engine trust of a served pair, memoized per pair by the engine's FlowOf lease (computed once
+	// per pair and tolerance, whoever asks). Implemented by the engine; a FlowView without one (a fake, an older engine) answers null.
+	// The API for later FlowOf consumers (dither, scaling); the camera ahead fit computes its CellTrust once per pair on its own worker
+	// from the copied extras by design (its tolerance lives there), and TD reads the P2 view directly.
+	// Lifetime / thread: render thread only (FlowOf's contract), never from the camera worker; a returned pointer stays valid until the
+	// next FlowOf call, also when another tolerance is asked in between (one stable plane per tolerance). Tolerances compare by bit value
+	// (1.5f matches only 1.5f; -0 and +0 are two entries; a repeated NaN is one entry, never an unbounded list).
+	class IFlowTrustMemo
+	{
+	public:
+		virtual ~IFlowTrustMemo() = default;
+		// OpticalFlowTrust::CellTrust of the pair's forward direction (gridW x gridH) with the matcher's consistency limit in engine px;
+		// null when the pair has no backward vectors or no forward costs (never guessed). Valid until the next FlowOf.
+		virtual const float* CellTrust(float toleranceEnginePx) const = 0;
+	};
+
 	// A CPU-resident flow view (for temporalSeed); null planes when the flow is GPU-only.
 	struct FlowView
 	{
@@ -104,6 +120,27 @@ namespace VpMotion
 		double enginePxToSource = 0;      // source px per engine px (source width / engine width)
 		int cellEnginePx = 0;             // 4
 		int engineW = 0, engineH = 0;     // the engine-size luma the flow is for
+		// W1-C3 (doc 93 D3/D5): the producer's EXTRAS, worked out ONCE on its worker (MotionAhead::FlowGlobals / FlowExtras) and
+		// served as they are (the same memory as the P2 slot; lease lifetime as above). Consumers read these instead of recomputing.
+		//  * global / second: MotionAhead::FlowGlobal of the forward [0] and backward [1] fields (D1 format: x, y in engine cells,
+		//    ambiguity, valid). Meaningful only when haveGlobal; globalGeneral = the general_rate_fixes flag it was voted with.
+		//  * costWeight: OpticalFlowTrust::CostWeights of the forward costs per trust block (extrasBlockPx engine px, blocksX x blocksY).
+		//  * fbError: OpticalFlowTrust::FbError(forward, backward) per cell (gridW x gridH, engine px).
+		//  extrasCellPx / extrasUnitsPerEnginePx: the cell size and fixed-point units the extras were computed for; a consumer whose
+		//  arithmetic differs recomputes. Null / 0 when the pair carries none (then the consumer computes them itself, as before).
+		bool haveGlobal = false;
+		bool globalGeneral = true;
+		float global[2][4] = {}, second[2][4] = {};
+		const float* costWeight = nullptr;
+		int blocksX = 0, blocksY = 0;
+		int extrasBlockPx = 0;
+		const float* fbError = nullptr;
+		int extrasCellPx = 0;
+		double extrasUnitsPerEnginePx = 0;
+		// The engine's per-cell trust (OpticalFlowTrust::CellTrust), computed once per pair id and tolerance by the lease; null when
+		// the view has no memo or the pair has no backward vectors / forward costs.
+		const IFlowTrustMemo* trustMemo = nullptr;
+		const float* CellTrust(float toleranceEnginePx) const { return trustMemo ? trustMemo->CellTrust(toleranceEnginePx) : nullptr; }
 	};
 
 	class IPreEstimateHook;
