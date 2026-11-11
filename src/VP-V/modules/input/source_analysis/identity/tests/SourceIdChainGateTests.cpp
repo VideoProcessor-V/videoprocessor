@@ -1089,8 +1089,10 @@ namespace Tests
 				const SidConv::Snap s = uniform ? SidCrop::UniformOn(c.rH, c.w, c.h) : SidNamed::PerAxisOn(c.rH, c.rV, c.w, c.h);
 				const SidConv::Run r = SidCrop::DriveOn(s, c.w, c.h, true);
 				const SidConv::Run r0 = SidCrop::DriveOn(s, c.w, c.h, false);
-				Assert::AreEqual(c.rH, r.fx, 1e-9, (std::wstring(c.what) + L": " + SidConv::W16(r.trace)).c_str());
-				Assert::AreEqual(c.rV, r.fy, 1e-9, c.what);
+				// Engaged at the reading (the monitor applies whole source lines: within two lines of the raster).
+				Assert::AreEqual(c.rH, r.fx, 2.0 / c.h, (std::wstring(c.what) + L": " + SidConv::W16(r.trace)).c_str());
+				Assert::AreEqual(c.rV, r.fy, 2.0 / c.h, c.what);
+				Assert::IsTrue(r.fx < 1.0 && r.fy < 1.0, c.what);
 				Assert::AreEqual(r0.trace, r.trace, (std::wstring(c.what) + L": byte-identical with the restriction switched off").c_str());
 				Assert::IsTrue(r.note.empty() && !SidConv::Has(r.shown, "re-base held"), c.what);
 			}
@@ -1102,10 +1104,12 @@ namespace Tests
 
 		TEST_METHOD(ANonUniformCropStaysHeld)
 		{
-			const SidConv::Snap s = SidNamed::PerAxisOn(0.5, 2.0 / 3.0, 1920, 800);
-			const SidConv::Run r = SidCrop::DriveOn(s, 1920, 800, true);
+			const SidConv::Run r = SidCrop::DriveOn(SidNamed::PerAxisOn(0.5, 0.6, 1920, 800), 1920, 800, true);
 			Assert::IsTrue(SidNamed::AllNative(r.trace), SidConv::W16(r.trace).c_str());
-			Assert::IsTrue(SidConv::Has(r.note, "non-standard size H 0.5000 x V 0.6667"), SidConv::W16(r.note).c_str());
+			Assert::IsTrue(SidConv::Has(r.note, "non-standard size H 0.5000 x V 0.6000"), SidConv::W16(r.note).c_str());
+			const SidConv::Run parked = SidCrop::DriveOn(SidNamed::PerAxisOn(0.5, 2.0 / 3.0, 1920, 800), 1920, 800, true);
+			Assert::IsTrue(SidNamed::AllNative(parked.trace), L"a parked entry in the crop form is never applied");
+			Assert::IsTrue(SidConv::Has(parked.note, "held: anamorphic DVCPRO HD 960x720"), SidConv::W16(parked.note).c_str());
 			const SidConv::Run single = SidCrop::DriveOn(SidNamed::PerAxisOn(0.5, 1.0, 1920, 800), 1920, 800, true);
 			Assert::IsTrue(SidNamed::AllNative(single.trace), L"single-axis stays held on a cropped raster");
 			Assert::IsFalse(single.note.empty());
@@ -1144,7 +1148,11 @@ namespace Tests
 			Assert::AreEqual(std::string("960x540"), std::string(G::ConventionalPair(960, 1920, 519, 1038, 1920, 1038)));
 			Assert::AreEqual(std::string("1280x720"), std::string(G::ConventionalPair(1280, 1920, 536, 800, 1920, 800)));
 			Assert::IsTrue(G::AgreeingPair(960, 1920, 402, 804, 1920, 804));
-			Assert::IsNull(G::ConventionalPair(960, 1920, 533, 800, 1920, 800), L"non-uniform: no entry");
+			Assert::IsNull(G::ConventionalPair(960, 1920, 480, 800, 1920, 800), L"non-uniform: no entry");
+			bool dvParked = false;
+			Assert::IsNotNull(G::ConventionalPair(960, 1920, 533, 800, 1920, 800, &dvParked), L"DVCPRO HD 960x720 cropped: recognised");
+			Assert::IsTrue(dvParked, L"... and parked");
+			Assert::IsFalse(G::AgreeingPair(960, 1920, 533, 800, 1920, 800), L"... never a latch");
 			bool parked = false;
 			const char* hdv = G::ConventionalPair(1440, 1920, 600, 800, 1920, 800, &parked);
 			Assert::IsTrue(hdv == nullptr || parked, L"anamorphic entries stay parked in the crop form too");
