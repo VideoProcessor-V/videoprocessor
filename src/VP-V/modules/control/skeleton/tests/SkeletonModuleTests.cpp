@@ -25,6 +25,7 @@
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
+#include <VP-V/modules/motion/estimation/MotionAheadWalk.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 
@@ -1921,6 +1922,106 @@ namespace SkeletonModuleTestsNs
 			Assert::IsFalse(FC::SkeletonGpuShed("").engaged);
 			const FC::Decision shed = FC::SkeletonGpuShed("light level (T1)");
 			Assert::IsTrue(shed.engaged && shed.reason.find("VRAM shed: light level (T1)") == 0);
+		}
+	};
+
+	// B1 amend (doc 91 C tail; refs/93-td-readiness-audit.md section 3 + (a)1): the host's look-ahead copy (MotionAhead::CollectQueueAhead,
+	// the render loop's call site) raises the CollectAhead phase with the SAME count the motion lead reads (queuedFutureFrames), so the
+	// skeleton lane's lead is the frames queued ahead. A forwarding extension maps the walk's host (the fake Impl) to the rig's renderer.
+	TEST_CLASS(SkeletonLaneLeadFeedTests)
+	{
+		struct FeedFrame { void SourceBufferAddRef() {} };
+		struct FeedQueued { FeedFrame frame; std::shared_ptr<int> state = std::make_shared<int>(1); bool cadenceRepeat = false; unsigned long long sourceSequence = 0; };
+		struct FeedProducer
+		{
+			int lead = -1;
+			unsigned long long LastSubmitted() const { return 0; }
+			void SetLead(int l) { lead = l; }
+		};
+		struct FeedImpl
+		{
+			std::atomic<size_t> queuedFutureFrames{ 0 };
+			std::atomic<int> motionAheadDepth{ 0 };
+			std::atomic<bool> motionAheadBackward{ false };
+			std::shared_ptr<FeedProducer> motionProducer = std::make_shared<FeedProducer>();
+		};
+		struct Forward : RE::IRendererExtension
+		{
+			const void* from; const void* to; SkeletonModule* sk; int calls = 0;
+			Forward(const void* f, const void* t, SkeletonModule* s) : from(f), to(t), sk(s) {}
+			bool OnFrame(RE::FrameContext& c) override
+			{
+				if (c.phase != RE::FramePhase::CollectAhead || c.host != from) return false;
+				++calls;
+				RE::FrameContext mapped = c;
+				mapped.host = to;
+				return sk->OnFrame(mapped);
+			}
+		};
+
+		// `passes` render-loop passes (40 ms apart on the rig's clock, so the 0.5 s lane-lead window ages out) of a queue holding the
+		// current frame plus `queued` ahead, at motion depth `depth`; then one frame so the lane rebuilds with the fed queue.
+		static SkeletonModule::QueueInUse Feed(Rig& rig, FeedImpl& impl, int depth, size_t queued, int64_t& seq, int passes = 30)
+		{
+			std::vector<FeedQueued> queue(queued + 1);
+			for (size_t i = 0; i < queue.size(); ++i)
+				queue[i].sourceSequence = static_cast<unsigned long long>(i + 1);
+			impl.queuedFutureFrames.store(queued);
+			impl.motionAheadDepth.store(depth);
+			std::vector<FeedQueued> taken;
+			for (int i = 0; i < passes; ++i)
+			{
+				rig.base += 40000;
+				taken.clear();
+				MotionAhead::CollectQueueAhead(&impl, queue, taken);
+			}
+			rig.Frame(seq++);
+			return rig.sk.QueueInUseOf(rig.Host());
+		}
+
+		TEST_METHOD(TheLaneLeadIsTheSameQueuedCountTheMotionLeadReads)
+		{
+			struct RegistryGuard { RegistryGuard() { RE::ResetForTesting(); } ~RegistryGuard() { RE::ResetForTesting(); } } guard;   // the extension never outlives the rig
+			{
+				Rig rig(Lane("on"));
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				int64_t seq = 1;
+				for (; seq <= 3; ++seq)
+					rig.Frame(seq);
+				FeedImpl impl;
+				Forward* fwd = new Forward(&impl, rig.Host(), &rig.sk);
+				RE::Register(std::unique_ptr<RE::IRendererExtension>(fwd));
+				Assert::AreEqual(0, int(rig.sk.CurrentQueue().wired & SkeletonModule::QueueShape::kLaneLead), L"nothing fed before the walk runs");
+
+				// Depth 4, 6 queued ahead: the motion lead is 6 and the lane lead is the same 6.
+				SkeletonModule::QueueInUse u = Feed(rig, impl, 4, 6, seq);
+				Assert::IsTrue(fwd->calls > 0, L"the walk raised CollectAhead");
+				Assert::IsTrue((u.fed.wired & SkeletonModule::QueueShape::kLaneLead) != 0, L"the lane lead is wired");
+				Assert::AreEqual(6, impl.motionProducer->lead);
+				Assert::AreEqual(6, int(u.fed.laneLead));
+				Assert::AreEqual(impl.motionProducer->lead, int(u.used.laneLead), L"lane lead == motion lead");
+				Assert::AreEqual(6, int(rig.sk.LaneOf(rig.Host())->State()->graph.settings.laneLead));
+
+				// Depth 0 (look-ahead off): the motion lead is 0, the lane lead still follows the queue (never forced to 0 by the depth).
+				u = Feed(rig, impl, 0, 5, seq);
+				Assert::AreEqual(0, impl.motionProducer->lead);
+				Assert::AreEqual(5, int(u.used.laneLead));
+				Assert::IsTrue(u.used.laneLead >= 1);
+
+				// 20 queued ahead: the motion lead stops at kMaxLead (13, its pair ring); the lane is fed the real 20 and caps only to
+				// its own ring-slot budget (shown by the skeleton when it binds).
+				u = Feed(rig, impl, 4, 20, seq);
+				Assert::AreEqual(MotionAhead::kMaxLead, impl.motionProducer->lead);
+				Assert::AreEqual(20, int(u.fed.laneLead));
+				Assert::AreEqual(int((std::min)(20u, SkeletonModule::LaneLeadCap(0))), int(u.used.laneLead));
+
+				// No producer (motion off): the feed still runs.
+				impl.motionProducer.reset();
+				u = Feed(rig, impl, 4, 3, seq);
+				Assert::AreEqual(3, int(u.used.laneLead), L"the lane lead does not depend on the motion producer");
+				RE::ResetForTesting();
+			}
 		}
 	};
 }
