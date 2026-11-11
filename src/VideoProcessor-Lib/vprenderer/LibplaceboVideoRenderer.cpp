@@ -23350,7 +23350,7 @@ releaseDriftBaseRetention =
 			// skip (or list) while the repair.deband slot is off (modularity sweep).
 			const bool dvVpDebandSkipped = dvStage.SkipVpDeband(renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION,
 				activeSettings.debandVp != "off" && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband), debandState);
-			if (activeSettings.debandVp != "off" && luma && !dvVpDebandSkipped)
+			if (!pipelineSlots.OriginalPathway() && activeSettings.debandVp != "off" && luma && !dvVpDebandSkipped)   // VPV-HOOK P5c rule 32: the P3 view reads below are VP-V only
 			{
 				const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
 				const int depth = renderImage.repr.bits.color_depth > 0 ? renderImage.repr.bits.color_depth : 10;
@@ -23407,7 +23407,7 @@ releaseDriftBaseRetention =
 				detailPulseParams = DetailPulse::Params();
 				textureRestoreParams = TextureRestore::Params();
 				std::string pulseState, restoreState;
-				if ((activeSettings.detailPulseStabilise || activeSettings.textureRestore) && luma && !temporal)
+				if (!pipelineSlots.OriginalPathway() && (activeSettings.detailPulseStabilise || activeSettings.textureRestore) && luma && !temporal)   // VPV-HOOK P5c rule 32: the P3 view reads below are VP-V only
 				{
 					const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
 					const int depth = renderImage.repr.bits.color_depth > 0 ? renderImage.repr.bits.color_depth : 10;
@@ -24267,7 +24267,7 @@ releaseDriftBaseRetention =
             // position, so they hold at any re-base size (the vectors are the
             // native frame's; a factor change does not touch them).
             // (A picture between frames is not A: A's mask would sit t * v off.)
-            bool install = activeSettings.occlusionMask && maskSlot >= 0 && dejudder && !cadenceRepeat && !VpPhaseDrawn(renderImage) &&
+            bool install = !pipelineSlots.OriginalPathway() && activeSettings.occlusionMask && maskSlot >= 0 && dejudder && !cadenceRepeat && !VpPhaseDrawn(renderImage) &&   // VPV-HOOK P5c rule 32: the P3 view reads below are VP-V only
                 vectorEstimate.Occlusion(maskSlot);   // VPV-HOOK
             bool grainInstall = grainMap != nullptr;
             // 6c-2: with NLS the mask follows the NLS shader's own map. Only
@@ -24308,7 +24308,7 @@ releaseDriftBaseRetention =
                 dejudderMaskState.clear();   // NLS is off again (audit 6c-2)
             // Set only when the parameter was really written as 1 (audit 6b-2b).
             dejudderMaskParamSet = install;
-            if (install || grainInstall)
+            if (!pipelineSlots.OriginalPathway() && (install || grainInstall))   // VPV-HOOK P5c rule 32: the P3 view reads below are VP-V only
             {
                 occlusionMaskHook.SetFrame(install ? vectorEstimate.Occlusion(maskSlot) : nullptr, renderImage.crop, target.crop);   // VPV-HOOK
                 occlusionMaskHook.SetGrain(grainInstall ? grainMap : nullptr,
