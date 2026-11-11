@@ -158,6 +158,18 @@ Contract tests:
 Chain tests:
 - delay gate (`DelayGate`)
 
+### What the Presenter serves for temporal detail (doc 91 C line 67; 67v2 s5.6, s10)
+
+Checked before the API is frozen; the API stays unfrozen until the TD design lead's milestones.
+
+- Planner floor = the analysis frames needed: `Presenter::analysisFloor` (frames; from `VpQueueRules::AnalysisFloorFrames`, the declared lead + 2) goes into `FitBudget`, so the delay budget keeps the frames the precompute lane needs (67v2 s5.6: lane lead 3; s10: the anchor pass needs 3-4 frames).
+- Who gives way when the floor and the render-ahead credit compete: `floorPolicy` is selectable (`CreditWins` default, `FloorWins`, `RaiseQueue` = the TD-on choice that lifts the queue above the desired frames, capped by `queueCapacity`); the competition is always visible (`FloorReport`, "queue analysis floor" fallback). The default is owner decision 1.
+- 4-ahead design point: `RaiseQueue` with `queueCapacity` lets the queue hold the declared lead + 2 when the capacity allows; nothing in the Presenter caps the floor at 3.
+- Spare GPU work for TD (the precompute / anchor-pass slot): `spareSlotMs` adds the declared spare-slot ms per source frame to the gate's average check only (extras are not shed first for it); no correction slot in v1.
+- TD without render_ahead: `On` / `Active` / `ActivatesOn` / `SetTemporalDetailOn` run the Presenter and restart its epoch when render_ahead OR TD switches on (retro gate F2); TD off is today's rule.
+- Verify-and-correct rounds and held-out next-frame checks: they run in the lane and the render, not in the Presenter. The Presenter neither renders nor presents (it decides and supplies the SyncInterval), so render and submit stay separable and a check of frame N+1 before its present is not foreclosed.
+- Release timing (matched rates, retro gate F1 / P6 rest S4): NOT YET BUILT. At 24/24, 50/50 and 60/60 the plain path breaks the chain each frame, so there is no planned vsync. The planned change is a maxExtras-0 plan with the release of N+1 at the planned first vsync minus one display period plus a margin; it defines the B3-Z post-present slot size. It comes after the present-vs-vsync histogram. Nothing in the API forecloses it: `Schedule` holds the anchor and the planned refreshes.
+
 ## Known issues / open items
 - WP-24 captured-repeat render reuse (`repeat_render_reuse`, draft default off; Original pathway off): RepeatReuseGlue.h / RepeatReusePolicy.h / RepeatReuseAdapter.h / TemporalShaders.h / RepeatReuseRegistryKey.h here. It depends on motion.consumers' rendered-picture cache (DejudderRendered::Cache, RenderedWarp.h). Host call sites: docs/design/repeat-reuse-callsites.patch.
 
