@@ -1,6 +1,6 @@
 """Generate the VP-V Config data table from docs/design/vpv-tiers.json + docs/design/slots.json.
 
-    python -I tools/gen_vpv_tiers.py           # writes src/VP-V/config/VpvTierTable.generated.h
+    python -I tools/gen_vpv_tiers.py           # writes src/VP-V/modules/control/config/config_pages/VpvTierTable.generated.h
     python -I tools/gen_vpv_tiers.py --check   # exit 1 when the header is stale or a reference is wrong
 
 Checks: every unit slot exists in slots.json; every slot in the pixel path (order < 900) and the
@@ -16,7 +16,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TIERS = ROOT / "docs" / "design" / "vpv-tiers.json"
 SLOTS = ROOT / "docs" / "design" / "slots.json"
-OUT = ROOT / "src" / "VP-V" / "config" / "VpvTierTable.generated.h"
+OUT = ROOT / "src" / "VP-V" / "modules" / "control" / "config" / "config_pages" / "VpvTierTable.generated.h"
 
 
 def c(s):

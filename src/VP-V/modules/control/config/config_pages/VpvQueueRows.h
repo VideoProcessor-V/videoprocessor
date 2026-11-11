@@ -34,8 +34,8 @@
 #include <QWidget>
 #include <ConfigFile.h>
 #include <QueueLookahead.h>
-#include <VP-V/config/VpvProfileUseRows.h>
-#include <VP-V/config/VpvSection.h>
+#include <VP-V/modules/control/config/config_pages/VpvProfileUseRows.h>
+#include <VP-V/modules/control/config/config_pages/VpvSection.h>
 #include <algorithm>
 #include <functional>
 #include <string>

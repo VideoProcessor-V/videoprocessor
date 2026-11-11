@@ -603,7 +603,7 @@ a few clearly commented `#include <VP-V/...>` hooks. Read `src/VP-V/README.md` f
    - BTB/WTW in the VP stage go through the LUT's edge slope, as in libplacebo mode (bug hunt
      2026-10-31 F2; slope 1 only for a LUT that cannot be carried, counted as a fallback).
 5. **Config UI** for the tiers, slot switches and order list: the settings agent, from
-   `slots.json` (`src/VP-V/config/`).
+   `slots.json` (`src/VP-V/modules/control/config/config_pages/`).
    - Fallbacks report through `core/FallbackStatus.h`.
    - The Original pathway also needs the LED drive off. The LED module is owned by the host,
      not the renderer, so this is listed as an exception for the golden test.

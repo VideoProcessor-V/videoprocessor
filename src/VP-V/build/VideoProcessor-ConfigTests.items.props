@@ -8,14 +8,14 @@
 -->
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="..\VP-V\config\VpvSection.cpp" />
+    <ClCompile Include="..\VP-V\modules\control\config\config_pages\VpvSection.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\config_ui\CalibrationPage.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\config_ui\LedDrivePage.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\projector_control\config_ui\DriveConfigBase.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\projector_control\config_ui\ProjectorCards.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\config_ui\tests\CalibrationPageTests.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\config_ui\tests\LedDrivePageTests.cpp" />
-    <ClCompile Include="..\VP-V\config\tests\VpvConfigTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\control\config\tests\VpvConfigTests.cpp" />
     <ClCompile Include="..\VP-V\modules\control\config\tests\ConfigIdentityDump.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\projector_control\SerialPort.cpp">
       <ObjectFileName>$(IntDir)LedSerialPortStandalone.obj</ObjectFileName>

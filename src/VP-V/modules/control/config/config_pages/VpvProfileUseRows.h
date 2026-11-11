@@ -27,7 +27,7 @@
 #include <QString>
 #include <QVBoxLayout>
 #include <QWidget>
-#include <VP-V/config/VpvSection.h>
+#include <VP-V/modules/control/config/config_pages/VpvSection.h>
 #include <functional>
 #include <vector>
 

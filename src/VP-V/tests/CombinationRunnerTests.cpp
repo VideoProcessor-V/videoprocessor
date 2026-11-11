@@ -23,7 +23,7 @@
 #include <VP-V/core/DelayBudgetLadder.h>
 #include <RendererProfileConfig.h>
 
-#include <VP-V/config/VpvTierTable.generated.h>
+#include <VP-V/modules/control/config/config_pages/VpvTierTable.generated.h>
 #include <VP-V/tests/support/QueueStressHarness.h>
 
 #include <cstdio>

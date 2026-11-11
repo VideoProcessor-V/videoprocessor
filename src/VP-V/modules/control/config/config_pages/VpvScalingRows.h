@@ -29,8 +29,8 @@
 #include <QString>
 #include <QVariant>
 #include <QWidget>
-#include <VP-V/config/VpvDitherChoiceSet.h>
-#include <VP-V/config/VpvSection.h>
+#include <VP-V/modules/control/config/config_pages/VpvDitherChoiceSet.h>
+#include <VP-V/modules/control/config/config_pages/VpvSection.h>
 #include <functional>
 #include <vector>
 

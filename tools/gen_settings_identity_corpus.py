@@ -113,7 +113,7 @@ def collect():
     for key in list(keys):
         if not keys[key]:
             keys[key] = ["on", "off", "auto", "1", "0", "2.5", "10", "100"]
-    tier = ROOT / "src" / "VP-V" / "config" / "VpvTierTable.generated.h"
+    tier = ROOT / "src" / "VP-V" / "modules" / "control" / "config" / "config_pages" / "VpvTierTable.generated.h"
     if tier.exists():
         for key in set(re.findall(r'\{"([a-z0-9_]+)",\s*"', tier.read_text(encoding="utf-8", errors="replace"))):
             keys.setdefault(key, ["on", "off", "auto", "1", "0"])

@@ -10,7 +10,7 @@
 #include "CalibrationPage.h"
 
 #include <ConfigurationRpcClient.h>
-#include <VP-V/config/VpvFormLayout.h>
+#include <VP-V/modules/control/config/config_pages/VpvFormLayout.h>
 #include <VideoProcessor-Config/FlowLayout.h>
 
 #include <QCheckBox>

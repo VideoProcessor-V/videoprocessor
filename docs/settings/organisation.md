@@ -105,6 +105,6 @@ home on VP-V), so it is not shown.
 - The LED fix switches stay in their cards on the Dynamic Drive page (greyed by their master in the
   Advanced LED card) rather than moving to the Proposed retirement tab, so their context stays.
 
-Source: `src/VP-V/config/VpvOrganisation.h` (the table: cards, masters, locks, LED groups),
-`src/VP-V/config/VpvSection.cpp` (cards, moves, locks, the raw group, the Dynamic Drive regrouping,
+Source: `src/VP-V/modules/control/config/config_pages/VpvOrganisation.h` (the table: cards, masters, locks, LED groups),
+`src/VP-V/modules/control/config/config_pages/VpvSection.cpp` (cards, moves, locks, the raw group, the Dynamic Drive regrouping,
 the fit), one lookup change in `ConfigEditorWindow.cpp` (commented).
