@@ -133,15 +133,16 @@ namespace MotionAhead
 	constexpr int kPairsKeptBehind = 3;
 	constexpr int kMaxLead = kP2RingPairs - kPairsKeptBehind;
 	// The lead for a frame: 0 while the look-ahead is not running (depth 0: off, low latency, no engine, nothing queued; backward pairs
-	// keep their own current-frame-only rule in the walk), else the queued frames ahead up to kMaxLead and never below the depth (a
-	// rate above 60 Hz keeps its time-based depth, e.g. 16 at 240p). Where the queue held exactly the depth (60p with 4 queued ahead)
-	// the lead is the depth: the old behaviour.
+	// keep their own current-frame-only rule in the walk), else the queued frames ahead, never below the depth, and never above kMaxLead
+	// (also when the depth is larger: 240p's time-based depth 16 is held to 13, else the pairs of the next frames would be evicted from
+	// the ring before they are read). Where the queue held exactly the depth (60p with 4 queued ahead) the lead is the depth: the old
+	// behaviour.
 	inline int LeadFor(int depth, size_t queuedAhead)
 	{
 		if (depth <= 0)
 			return 0;
 		const int queued = static_cast<int>((std::min)(queuedAhead, static_cast<size_t>(kMaxLead)));
-		return (std::max)(depth, queued);
+		return (std::min)(kMaxLead, (std::max)(depth, queued));
 	}
 
 	// The queue (current frame plus the frames after it) that holds `depth` ahead.

@@ -236,8 +236,10 @@ namespace MotionAhead
 		// Fixed-constant batch B3 (2026-10-18): the pending submissions follow the depth in use
 		// (MotionAhead::PendingJobsFor: 6 at the default depth, as before).
 		// B1 (2026-11-10): the walk hands over the LEAD (MotionAhead::LeadFor: every frame queued ahead, at least the depth) each pass;
-		// the capacity is sized for the larger of the two. Both setters run on the render loop thread; a race between them can only
-		// leave the capacity of the other value for one pass.
+		// the capacity is sized for the larger of the two. Call chain, one thread (the render loop): SetDepth from
+		// VectorEngine::PlanProducer (VectorEngine.cpp, `motionProducer->SetDepth(ahead.configured)`; LibplaceboVideoRenderer.cpp
+		// :23172), SetLead from MotionAhead::CollectQueueAhead (MotionAheadWalk.h; renderer :31169, under m_queueMutex) every pass,
+		// before RunQueueWalk (renderer :31352) submits that pass's frames: the capacity always covers the frames handed over.
 		void SetDepth(int depth) { pendingDepth.store(depth, std::memory_order_release); UpdatePendingCapacity(); }
 		void SetLead(int lead) { pendingLead.store(lead, std::memory_order_release); UpdatePendingCapacity(); }
 		size_t PendingCapacity() const { return maxPendingJobs.load(std::memory_order_acquire); }
