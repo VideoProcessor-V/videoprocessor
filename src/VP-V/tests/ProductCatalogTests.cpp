@@ -687,7 +687,9 @@ namespace ProductCatalogTestsNs
 			Assert::IsNotNull(c);
 			Assert::IsTrue(std::string(c->laneProducer).find("reserved") == 0, L"P10c is marked reserved / no producer in the product row");
 
-			// 4. Consumer-level flags: each names a declared read of that consumer row.
+			// 4. Consumer-level flags: each names a catalog consumer row; NotRead / ViewIsActual name a DECLARED read of the row,
+			// ExternalView names a read the row does NOT declare (B3-Z Z-DECL, lead 2026-11-11).
+			size_t cNotRead = 0, cViews = 0, cExt = 0;
 			for (const ConsumerFlag& f : ConsumerFlags()) {
 				const ConsumerRow* row = nullptr;
 				for (const ConsumerRow& r : ConsumerRows())
@@ -697,17 +699,43 @@ namespace ProductCatalogTestsNs
 				bool declared = false;
 				for (size_t k = 0; k < row->decl.count; ++k)
 					declared = declared || row->decl.consumes[k].product == f.input;
-				Assert::IsTrue(declared, L"the flagged read is a declared read of the row");
-				Assert::IsTrue(f.kind == FlagKind::NotRead);
 				Assert::IsTrue(f.item != nullptr && f.item[0] == 'C');
+				Assert::IsTrue(f.note != nullptr && f.note[0] != '\0');
+				switch (f.kind) {
+				case FlagKind::NotRead:
+					++cNotRead;
+					Assert::IsTrue(declared, L"the flagged read is a declared read of the row");
+					break;
+				case FlagKind::ViewIsActual:
+					++cViews;
+					Assert::IsTrue(declared, L"view flag: the declared read exists");
+					break;
+				case FlagKind::ExternalView:
+					++cExt;
+					Assert::IsFalse(declared, L"external view: the read is NOT a declaration of the row");
+					break;
+				default:
+					Assert::Fail(L"NotYetConsumed / Reserved are product flags");
+				}
 			}
 			// Detail pulse (id 0) and texture restore (id 1): all three declared reads (P10, P11, P4) are flagged, the held identity read is not.
 			size_t dpTr = 0;
 			for (const ConsumerFlag& f : ConsumerFlags())
-				if (f.consumerId == kCatalogConsumerIdBase + 0 || f.consumerId == kCatalogConsumerIdBase + 1)
+				if ((f.consumerId == kCatalogConsumerIdBase + 0 || f.consumerId == kCatalogConsumerIdBase + 1) && f.kind == FlagKind::NotRead)
 					++dpTr;
 			Assert::AreEqual(size_t(6), dpTr, L"DP and TR each: P10, P11, P4 not read today");
-			Assert::IsTrue(ConsumerFlags().size() == dpTr);
+			Assert::AreEqual(dpTr, cNotRead, L"the only NotRead flags are DP / TR's");
+			// The exact P3 set: 4 synthesis consumers + DP, TR, adaptive downscale read the live matcher field at render (external view);
+			// the camera fit reads P3 through SeedFieldOf (view). 6 + 7 + 1 = 14.
+			Assert::AreEqual(size_t(7), cExt, L"synthesis x4 + DP + TR + adaptive downscale: P3 read at render");
+			Assert::AreEqual(size_t(1), cViews, L"camera fit: P3 via SeedFieldOf");
+			Assert::AreEqual(size_t(14), ConsumerFlags().size());
+			for (const ConsumerFlag& f : ConsumerFlags())
+				if (f.kind != FlagKind::NotRead)
+					Assert::IsTrue(f.input == kP3AnalysisField, L"the view / external-view consumer flags are the P3 render-time reads");
+			const ConsumerFlag* cam = ConsumerFlagOf(uint16_t(VectorDemand::kConsumerIdBase + int(VectorDemand::Consumer::CameraFit)), kP3AnalysisField);
+			Assert::IsNotNull(cam);
+			Assert::IsTrue(cam->kind == FlagKind::ViewIsActual && std::string(cam->note).find("SeedFieldOf") != std::string::npos);
 
 			// 5. The flags carry teeth: the NotRead claim is checked against the sources. If DetailPulse / TextureRestore start to reference a
 			// skeleton product (any product alias, the product header, the analysis store or the lane producers), the flag is stale and must be
@@ -730,6 +758,7 @@ namespace ProductCatalogTestsNs
 			Assert::IsTrue(doc.find("reserved, no producer") != std::string::npos);
 			Assert::IsTrue(doc.find("external view (not declared)") != std::string::npos);
 			Assert::IsTrue(doc.find("not read: ") != std::string::npos);
+			Assert::IsTrue(doc.find("external view: ") != std::string::npos, L"the consumer table prints the undeclared render-time reads");
 		}
 
 		TEST_METHOD(GeneratedDocRegionMatchesTheCatalog)
