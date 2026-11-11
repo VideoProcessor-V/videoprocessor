@@ -132,6 +132,17 @@ namespace VpMotion
 			snapshotGeneration_ = 0;
 			snapshotLeaseLost_ = false;
 		}
+		// W1-C2a A2 (owner E3, 2026-11-11): the snapshot lease ends with every epoch move, on both sides (the matcher's
+		// copies and this source's set), in every resync mode. The renderer's apply point (ApplyMotionInvalidate) calls it
+		// as a VPV-HOOK; the ORIGINAL pathway never runs it (Bill's pathway has no matcher and no lease: byte-identical),
+		// which tools/check_hook_gating.py verifies through the early return below. Returns true when the lease was ended.
+		bool EndSnapshotLease(bool originalPathway)   // VPV-GATED
+		{
+			if (originalPathway) return false;
+			if (dejudder) dejudder->InvalidateSnapshot();
+			ResetSnapshot();
+			return true;
+		}
 		// The loss is visible (FallbackCatalog::MotionSnapshotLease): latched until the next complete snapshot; the count is reads.
 		bool SnapshotLeaseLost() const { return snapshotLeaseLost_; }
 		unsigned long long SnapshotLeaseLostReads() const { return snapshotLeaseLostReads_; }
