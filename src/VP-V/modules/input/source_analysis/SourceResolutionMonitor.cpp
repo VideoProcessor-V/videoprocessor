@@ -751,6 +751,8 @@ if (tile < int(tiles) && g.y < ts) {
 		g.latchedV = rec.Latched(SourceIdentity::Field::AxisV);
 		g.ratioH = g.latchedH ? rec.ratioH : 1.0;
 		g.ratioV = g.latchedV ? rec.ratioV : 1.0;
+		g.seq = rec.seq;
+		g.timeUs = rec.timeUs;
 		return g;
 	}
 
@@ -1741,6 +1743,14 @@ if (tile < int(tiles) && g.y < ts) {
 		latchCeilingCount = chainEst->LatchCeilingReleases();
 		latchCeilingPending = latchCeilingCount != latchCeilingSeen;
 		latchCeilingGateClear = false;
+		if (latchCeilingPending && latchCeilingFloorFor != latchCeilingCount)
+		{
+			// N2: the cue just appeared: the newest gate record seen so far is from before it.
+			latchCeilingFloorFor = latchCeilingCount;
+			latchCeilingFloorValid = gateLastValid;
+			latchCeilingFloorSeq = gateLastSeq;
+			latchCeilingFloorTimeUs = gateLastTimeUs;
+		}
 		// The source frame interval, measured (the pan speed's time base).
 		if (renderSequence > clockSequence && clockSequence != 0)
 		{
@@ -1764,9 +1774,25 @@ if (tile < int(tiles) && g.y < ts) {
 		// Off = the original, byte for byte; Shadow = the original decides (SourceIdGate is not 'on').
 		{
 			const IdGate gate = SourceIdGate(now);
+			if (latchCeilingPending)
+			{
+				// N2: the cue is used only through a fresh gate with the safety rules on (Shadow / Off / a stale record / rules off: dropped),
+				// and only by the first fresh record after it: native on both axes (latched native, or not latched) uses it below; any
+				// other reading drops it, so a later unrelated native switch takes its own path (cut-wait / release fade).
+				const bool gateNative = gate.ratioH >= 0.99 && gate.ratioV >= 0.99;
+				const bool afterCue = !latchCeilingFloorValid || gate.seq != latchCeilingFloorSeq || gate.timeUs != latchCeilingFloorTimeUs;
+				if (!gate.on || !gate.fresh || !chainEst->SafetyRules())
+					DropLatchCeilingCue();
+				else if (gateNative)
+					latchCeilingGateClear = true;
+				else if (afterCue)
+					DropLatchCeilingCue();
+			}
 			if (gate.fresh)
 			{
-				latchCeilingGateClear = gate.ratioH >= 0.99 && gate.ratioV >= 0.99;   // native on both axes (latched native, or not latched)
+				gateLastValid = true;
+				gateLastSeq = gate.seq;
+				gateLastTimeUs = gate.timeUs;
 				const double tol = 0.03;
 				const bool uniform = gate.latchedH && gate.latchedV && std::fabs(gate.ratioH - gate.ratioV) <= tol * (std::max)(gate.ratioH, gate.ratioV);
 				wanted = uniform && gate.ratioH < 1.0 ? 0.5 * (gate.ratioH + gate.ratioV) : 1.0;
@@ -2004,7 +2030,7 @@ if (tile < int(tiles) && g.y < ts) {
 			axisPending[0] = axisApplied[0];
 			axisPending[1] = axisApplied[1];
 			// SID r2 N1: after a no-cut ceiling release of the chain latch, the engage crossfade (as the uniform path).
-			const bool ceiling = latchCeilingPending && gate.fresh && gate.ratioH >= 0.99 && gate.ratioV >= 0.99;
+			const bool ceiling = latchCeilingPending && gate.fresh && gate.ratioH >= 0.99 && gate.ratioV >= 0.99 && chainEst->SafetyRules();
 			axisWhy = ceiling ? "per axis: native by a crossfade (the upscale latch's no-cut ceiling)" : "per axis: back towards native at once";
 			nextFadeSeconds = LatchFixes() ? (ceiling ? CrossfadeSeconds() : ReleaseFade()) : 0.0;
 			if (ceiling)

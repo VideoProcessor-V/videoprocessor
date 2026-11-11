@@ -279,6 +279,8 @@ namespace SourceResolutionMonitor
 		GeometryViews GeometryView(double seconds = -1.0) const;
 		// The estimator itself (diagnostics, tests). Never null.
 		SourceIdentity::Chain::ChainEstimator& ChainEstimatorRef() { return *chainEst; }
+		// SID r2 N2: the no-cut ceiling's crossfade cue is still pending (as of the last AutoFactor(s) call; AutoFactors thread).
+		bool LatchCeilingCuePendingForTest() const { return latchCeilingPending; }
 		// Tests: replaces the (inert) estimator with one built with an injected clock / settings. Before SetChainEnabled(true) only.
 		void SetChainEstimatorForTest(std::unique_ptr<SourceIdentity::Chain::ChainEstimator> estimator);
 		// Dump v4 (identity/SidDiagDump.h; written only while VP_SID_DUMP_V4_DIR is set, decision neutral): the file-name tag of the
@@ -582,7 +584,7 @@ namespace SourceResolutionMonitor
 		mutable std::mutex gateMutex;
 		FallbackCatalog::Decision gateDecision;         // written by AutoFactor(s), read for the status
 		// The gate's view of the record at `now` (render thread): fresh = usable; ratios are the latched axes (1 = native).
-		struct IdGate { bool on = false, fresh = false; double ratioH = 1.0, ratioV = 1.0; bool latchedH = false, latchedV = false; };
+		struct IdGate { bool on = false, fresh = false; double ratioH = 1.0, ratioV = 1.0; bool latchedH = false, latchedV = false; uint64_t seq = 0; int64_t timeUs = 0; };
 		IdGate SourceIdGate(double now);
 		// The newest P14g record the monitor may use: decodable, not from before the last discontinuity. `cause` = kCause* when none.
 		// `seq` != 0: the latest sealed record with evalSeq <= seq (the P14g contract: a frame-bound consumer never reads the future);
@@ -696,6 +698,11 @@ namespace SourceResolutionMonitor
 		// pending one makes the native switch it causes a crossfade. GateClear: this call's fresh record reads native on both axes.
 		uint64_t latchCeilingSeen = 0, latchCeilingCount = 0;
 		bool latchCeilingPending = false, latchCeilingGateClear = false;
+		// SID r2 N2: the cue is decided by the first fresh gate record AFTER it (a record other than the newest one seen when it appeared).
+		uint64_t latchCeilingFloorFor = 0, latchCeilingFloorSeq = 0, gateLastSeq = 0;
+		int64_t latchCeilingFloorTimeUs = 0, gateLastTimeUs = 0;
+		bool latchCeilingFloorValid = false, gateLastValid = false;
+		void DropLatchCeilingCue() { latchCeilingSeen = latchCeilingCount; latchCeilingPending = false; latchCeilingGateClear = false; }
 		double fadeFromX = 1.0, fadeFromY = 1.0, lastFactorX = 1.0, lastFactorY = 1.0, fadeStart = 0.0, fadeDuration = 0.0;
 		uint64_t clockSequence = 0, panSequence = 0;
 		double clockSeconds = 0.0, secondsPerFrame = 0.0, panPixelsPerFrame = 0.0;

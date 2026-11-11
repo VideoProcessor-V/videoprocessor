@@ -201,6 +201,7 @@ namespace Tests
 			GeoFx::G::HeldState geo;
 			m.SetGeometrySource(&geo);
 			m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+			m.ChainEstimatorRef().SetSafetyRules(true);   // N2: the cue is used only while the rules are on (it only exists then)
 			const SidGate::Outcome o = SidGate::Script(m, geo, 10.0);
 			Assert::AreEqual(0.5, o.fx, 1e-9);
 			Assert::AreEqual<uint64_t>(0, m.ChainEstimatorRef().LatchCeilingReleases(), L"fixture: no ceiling release yet");
@@ -219,6 +220,70 @@ namespace Tests
 			Assert::AreEqual(1.5, tr.duration, 1e-9, L"the engage crossfade (source_resolution_crossfade_s), not the release fade");
 			Assert::AreEqual(0.5, tr.fromX, 1e-9, L"faded from the upscaled path");
 			Assert::AreEqual(1.0, tr.toX, 1e-9);
+			Assert::IsFalse(m.LatchCeilingCuePendingForTest(), L"the cue is used once");
+		}
+
+		// SID r2 N2: the ceiling's crossfade cue never lingers. It is decided by the FIRST fresh gate record after it: a record that still
+		// reads the upscale drops it (a later unrelated native switch takes its own path, not the crossfade); and it is dropped at once
+		// when no fresh gate is in use (Shadow) or the safety rules are off. Re-reading the record seen before the cue keeps it.
+		TEST_METHOD(TheCeilingCueIsDroppedByTheFirstFreshRecordAfterItOrWithoutAFreshGate)
+		{
+			{
+				SidGate::Mon m;
+				GeoFx::G::HeldState geo;
+				m.SetGeometrySource(&geo);
+				m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+				m.ChainEstimatorRef().SetSafetyRules(true);
+				const SidGate::Outcome o = SidGate::Script(m, geo, 10.0);
+				Assert::AreEqual(0.5, o.fx, 1e-9);
+				m.ChainEstimatorRef().NoteLatchCeilingForTest();
+				std::string why;
+				double fx = o.fx, fy = o.fy;
+				m.InjectResultForTest(SidGate::CleanSnapshot(3, false), o.nextSeq - 1);
+				m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 16.7, o.nextSeq);
+				Assert::IsTrue(m.LatchCeilingCuePendingForTest(), L"the record seen before the cue does not decide it");
+				Assert::AreEqual(0.5, fx, 1e-9);
+				// New evaluations still reading the upscale: the first fresh record after the cue drops it.
+				uint64_t seq = SidGate::Feed(m, geo, 16.8, 4, o.nextSeq, true);
+				m.InjectResultForTest(SidGate::CleanSnapshot(4, false), seq - 1);
+				why.clear();
+				m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 18.4, seq);
+				Assert::IsFalse(m.LatchCeilingCuePendingForTest(), L"dropped by the first fresh record after it (still upscaled)");
+				Assert::AreEqual(0.5, fx, 1e-9, L"nothing else changed");
+				// A later, unrelated native switch: the original revert path, not the ceiling's crossfade.
+				seq = SidGate::Feed(m, geo, 18.5, 32, seq, false);
+				SourceIdentity::Record p14;
+				Assert::IsTrue(m.SourceIdRecord(p14) && p14.ratioH == 1.0f && p14.ratioV == 1.0f, L"fixture: the consensus adopted native");
+				m.InjectResultForTest(SidGate::CleanSnapshot(5, false), seq - 1);
+				why.clear();
+				m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 35.0, seq);
+				Assert::AreEqual(1.0, fx, 1e-9);
+				Assert::IsTrue(why.find("ceiling") == std::string::npos && why.find("at once") != std::string::npos,
+					(L"the ordinary revert, not the stale cue's crossfade: " + std::wstring(why.begin(), why.end())).c_str());
+				Assert::IsTrue(m.AutoTransition(35.0).duration < 1.5, L"not the engage crossfade");
+			}
+			for (int variant = 0; variant < 2; ++variant)
+			{
+				// 0: Shadow (no fresh gate in use); 1: the safety rules turned off.
+				SidGate::Mon m;
+				GeoFx::G::HeldState geo;
+				m.SetGeometrySource(&geo);
+				m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+				m.ChainEstimatorRef().SetSafetyRules(true);
+				const SidGate::Outcome o = SidGate::Script(m, geo, 10.0);
+				Assert::AreEqual(0.5, o.fx, 1e-9);
+				m.ChainEstimatorRef().NoteLatchCeilingForTest();
+				if (variant == 0)
+					m.SetSourceIdMode(SidGate::Mon::SourceIdMode::Shadow);
+				else
+					m.ChainEstimatorRef().SetSafetyRules(false);
+				std::string why;
+				double fx = o.fx, fy = o.fy;
+				m.InjectResultForTest(SidGate::CleanSnapshot(3, false), o.nextSeq - 1);
+				m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 16.7, o.nextSeq);
+				Assert::IsFalse(m.LatchCeilingCuePendingForTest(), variant == 0 ? L"Shadow: dropped at once" : L"rules off: dropped at once");
+				Assert::IsTrue(why.find("ceiling") == std::string::npos, L"and never used");
+			}
 		}
 
 		TEST_METHOD(ShadowIsByteIdenticalToOffAndOnEngagesOnTheSameScript)
