@@ -11,6 +11,8 @@
 //   taps       source index 2x and 2x+1, the second clamped to the last sample (odd edges replicate)
 //   P1 finish  (a + b + c + d + 2) >> 2 on 16-bit-scaled samples (half and quarter)
 //   engine 8   min(255, (a + b + c + d) >> 4) on 10-bit codes (the mean code / 4), the NVOF input
+//   engine views of P1 (C9, additive): half = the top byte of the P1 half sample of a 10-bit source (exact, see
+//              Engine8FromP1); quarter = (a + b + c + d + 2) / 4 on the 8-bit HALF view (the producer's own law)
 // Determinism: integer arithmetic only, fixed tap order a, b, c, d = (x0,y0) (x1,y0) (x0,y1) (x1,y1).
 //
 // Header-only, C++14, no Windows or GPU headers.
@@ -48,6 +50,19 @@ namespace HalfLuma
 	inline uint16_t FinishP1(uint32_t sum) { return uint16_t((sum + 2u) >> 2); }
 	// Engine view finishing: 10-bit codes to the 8-bit mean code / 4.
 	inline uint8_t FinishEngine8(uint32_t sum) { return static_cast<uint8_t>((std::min)(255u, sum >> 4)); }
+
+	// Engine views of P1 (C9 commit A, doc 93 C9P s2a). Additive: the grid, the taps and the rounding above are unchanged,
+	// so kUnitVersion stays. For a 10-bit source (codes << 6, msbShift 6: every lane tap view) the P1 half sample is
+	// FinishP1(64 * S) = 16 * S exactly (S = a + b + c + d of the codes, 0..4092), so its top byte is S >> 4 =
+	// FinishEngine8(S): the engine half comes from P1 with no second rounding.
+	inline uint8_t Engine8FromP1(uint16_t p1) { return static_cast<uint8_t>(p1 >> 8); }
+	// The engine quarter: the rounded mean of four 8-bit engine HALF samples, fixed order (moved from the optical-flow
+	// producer's de-judder size). It is NOT the top byte of the P1 quarter: half sums S = (16, 16, 0, 0) give engine half
+	// (1, 1, 0, 0) and quarter (1 + 1 + 0 + 0 + 2) / 4 = 1, while the P1 quarter is (256 + 256 + 2) >> 2 = 128, top byte 0.
+	inline uint8_t QuarterEngine8(uint32_t a, uint32_t b, uint32_t c, uint32_t d)
+	{
+		return static_cast<uint8_t>((a + b + c + d + 2u) / 4u);
+	}
 
 	// GLSL accessors (the contract; not wired into a pass yet). Both read an R-channel luma texture with texelFetch,
 	// q in output coordinates, second taps clamped to the texture edge. vpu_quarter_luma takes the HALF texture.
