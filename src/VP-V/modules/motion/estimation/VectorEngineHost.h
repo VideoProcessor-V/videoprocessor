@@ -9,6 +9,7 @@
 
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/motion/estimation/EstimateState.h>   // P5a-5: the estimate state the renderer holds (item a)
+#include <VP-V/modules/motion/estimation/MotionRecordPublish.h>   // W1-C4: the pair sample + the one statistics feed (estimate path)
 
 namespace VpMotion
 {

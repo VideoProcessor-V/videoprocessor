@@ -13,7 +13,9 @@
 
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
+#include <VP-V/modules/motion/estimation/MotionRecordPublish.h>
 
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -44,6 +46,120 @@ namespace VectorEngineTest
 			bool IntentActive() const override { return intentActive; }
 			void NoteIntentVectors(const IntentInterpreter::VectorSample&) override { ++intentVectors; }
 		};
+
+		// W1-C4: a host that records every source-statistics call, in order, with its exact arguments.
+		struct RecordingHost : IVectorEngineHost
+		{
+			std::vector<std::string> calls;
+			bool intentActive = false;
+			void SyncFallback(const FallbackCatalog::Decision&) override {}
+			void PublishStatus(bool) override {}
+			bool DitherVectorsSupported() const override { return false; }
+			void NoteSourceMonitorMotion(double sourcePixelsPerFrame, uint64_t sequence) override
+			{
+				char text[96];
+				std::snprintf(text, sizeof(text), "monitor %.17g %llu", sourcePixelsPerFrame, static_cast<unsigned long long>(sequence));
+				calls.push_back(text);
+			}
+			bool IntentActive() const override
+			{
+				const_cast<RecordingHost*>(this)->calls.push_back(intentActive ? "intent? yes" : "intent? no");
+				return intentActive;
+			}
+			void NoteIntentVectors(const IntentInterpreter::VectorSample& s) override
+			{
+				char text[128];
+				std::snprintf(text, sizeof(text), "intent %llu %llu %d %.17g", static_cast<unsigned long long>(s.from),
+					static_cast<unsigned long long>(s.to), s.valid ? 1 : 0, s.heightsPerFrame);
+				calls.push_back(text);
+			}
+		};
+
+		// The two feeds BEFORE W1-C4, copied from VectorEngine.cpp ServeStatistics (estimate off) and
+		// VectorEngineEstimate.inl RunDejudderEstimate (estimate on), written against the host.
+		void BeforeServeStatistics(uint64_t from, uint64_t to, const float* global, int halvings, int pictureHeight,
+			bool servesMonitor, bool servesIntent, IVectorEngineHost& host)
+		{
+			const VectorDemand::GlobalSample g = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
+				static_cast<double>(global[0]), static_cast<double>(global[1]), halvings), global[2], global[3], pictureHeight);
+			if (g.usable && servesMonitor)
+				host.NoteSourceMonitorMotion(g.sourcePixels, to);
+			if (servesIntent && host.IntentActive())
+			{
+				IntentInterpreter::VectorSample vectors;
+				vectors.from = from;
+				vectors.to = to;
+				vectors.valid = g.intentValid;
+				vectors.heightsPerFrame = g.heightsPerFrame;
+				host.NoteIntentVectors(vectors);
+			}
+		}
+
+		void BeforeEstimate(uint64_t aSequence, uint64_t bSequence, const float* global, int searchHalvings, int pictureHeight,
+			IVectorEngineHost& host)
+		{
+			if (global)
+			{
+				const VectorDemand::GlobalSample sample = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
+					static_cast<double>(global[0]), static_cast<double>(global[1]), searchHalvings), global[2], global[3], 0);
+				if (sample.usable)
+					host.NoteSourceMonitorMotion(sample.sourcePixels, bSequence);
+			}
+			if (global && host.IntentActive())
+			{
+				IntentInterpreter::VectorSample vectors;
+				vectors.from = aSequence;
+				vectors.to = bSequence;
+				const VectorDemand::GlobalSample sample = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
+					static_cast<double>(global[0]), static_cast<double>(global[1]), searchHalvings), global[2], global[3], pictureHeight);
+				vectors.valid = sample.intentValid;
+				vectors.heightsPerFrame = sample.heightsPerFrame;
+				host.NoteIntentVectors(vectors);
+			}
+		}
+
+		// The record's motion group BEFORE W1-C4 (the MotionRecordPublish.h SummaryOf body).
+		FrameAnalysis::MotionSummary BeforeSummary(bool pairValid, uint64_t from, uint64_t to, const float* global, int halvings)
+		{
+			if (!pairValid || !global || from == 0 || to <= from)
+				return FrameAnalysis::MotionSummary();
+			const VectorDemand::GlobalSample sample = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
+				static_cast<double>(global[0]), static_cast<double>(global[1]), halvings), global[2], global[3], 0);
+			if (!sample.usable)
+				return FrameAnalysis::MotionSummary();
+			const double cell = DejudderPolicy::EngineCellSourcePixels(halvings);
+			const double periods = static_cast<double>(to - from);
+			FrameAnalysis::MotionSummary m;
+			m.vectorsValid = true;
+			m.pairFrom = from;
+			m.globalX = cell * static_cast<double>(global[0]) / periods;
+			m.globalY = cell * static_cast<double>(global[1]) / periods;
+			m.source = FrameAnalysis::VectorSource::EngineAhead;
+			return m;
+		}
+
+		// The input grid both modes run over: ambiguity / validity on both sides of the thresholds, signed globals,
+		// halvings, picture heights (0 = none), adjacent and spanning pairs.
+		template<class Fn>
+		void ForEachPairInput(Fn fn)
+		{
+			const float zs[] = { 0.0f, 0.2f, 0.89f, 0.9f, 1.5f };
+			const float ws[] = { 0.0f, 0.5f, 0.51f, 1.0f };
+			const float gs[][2] = { { 0.0f, 0.0f }, { 3.5f, -2.0f }, { -40.0f, 12.25f } };
+			const int halvingsSet[] = { 0, 1, 2 };
+			const int heights[] = { 0, 800, 1080 };
+			const uint64_t pairs[][2] = { { 10, 11 }, { 10, 12 } };
+			for (float z : zs)
+				for (float w : ws)
+					for (const auto& g : gs)
+						for (int h : halvingsSet)
+							for (int ph : heights)
+								for (const auto& p : pairs)
+								{
+									const float global[4] = { g[0], g[1], z, w };
+									fn(p[0], p[1], global, h, ph);
+								}
+		}
 
 		VectorDemand::Input OneConsumer(VectorDemand::Consumer c)
 		{
@@ -256,6 +372,84 @@ namespace VectorEngineTest
 			Assert::IsTrue(engine.motionAheadEngaged);
 			engine.motionAheadEngaged = false;
 			Assert::IsFalse(engine.motionAheadEngaged);
+		}
+
+		// W1-C4: estimate OFF (the ServeStatistics feed): the one sample + Feed with the demand's Serves gates makes the
+		// byte-identical SetMotion / intent call sequence of the old feed, for every gate and intent combination.
+		TEST_METHOD(OneFeedMatchesTheStatisticsFeedCallSequence)
+		{
+			size_t cases = 0, calls = 0;
+			ForEachPairInput([&](uint64_t from, uint64_t to, const float* global, int halvings, int pictureHeight)
+			{
+				for (int gates = 0; gates < 4; ++gates)
+					for (int active = 0; active < 2; ++active)
+					{
+						const bool servesMonitor = (gates & 1) != 0, servesIntent = (gates & 2) != 0;
+						RecordingHost before, after;
+						before.intentActive = after.intentActive = active != 0;
+						BeforeServeStatistics(from, to, global, halvings, pictureHeight, servesMonitor, servesIntent, before);
+						MotionRecord::Feed(MotionRecord::SampleOf(from, to, global, halvings, pictureHeight), servesMonitor,
+							servesIntent, after);
+						Assert::IsTrue(before.calls == after.calls, L"estimate off: the call sequence is unchanged");
+						++cases;
+						calls += after.calls.size();
+					}
+			});
+			Assert::IsTrue(cases > 0 && calls > cases, L"the grid made calls (monitor and intent both seen)");
+		}
+
+		// W1-C4: estimate ON (the render-time estimate feed): the one sample + Feed with gates true / true makes the
+		// byte-identical call sequence of the old two-sample ungated feed, including no pair (no call at all).
+		TEST_METHOD(OneFeedMatchesTheEstimateFeedCallSequence)
+		{
+			size_t monitorCalls = 0, intentCalls = 0;
+			ForEachPairInput([&](uint64_t from, uint64_t to, const float* global, int halvings, int pictureHeight)
+			{
+				for (int active = 0; active < 2; ++active)
+				{
+					RecordingHost before, after;
+					before.intentActive = after.intentActive = active != 0;
+					BeforeEstimate(from, to, global, halvings, pictureHeight, before);
+					MotionRecord::Feed(MotionRecord::SampleOf(from, to, global, halvings, pictureHeight), true, true, after);
+					Assert::IsTrue(before.calls == after.calls, L"estimate on: the call sequence is unchanged");
+					for (const std::string& c : after.calls)
+					{
+						if (c.compare(0, 8, "monitor ") == 0) ++monitorCalls;
+						if (c.compare(0, 7, "intent ") == 0) ++intentCalls;
+					}
+				}
+			});
+			Assert::IsTrue(monitorCalls > 0 && intentCalls > 0, L"both consumers were fed on the grid");
+			for (int active = 0; active < 2; ++active)
+			{
+				RecordingHost before, after;
+				before.intentActive = after.intentActive = active != 0;
+				BeforeEstimate(10, 11, nullptr, 1, 1080, before);
+				MotionRecord::Feed(MotionRecord::SampleOf(10, 11, nullptr, 1, 1080), true, true, after);
+				Assert::IsTrue(before.calls == after.calls && after.calls.empty(), L"no engine pair: no call, as before");
+			}
+		}
+
+		// W1-C4: the record's motion group from the pair's one sample equals the old SummaryOf, field for field.
+		TEST_METHOD(RecordFromTheOneSampleMatchesTheOldSummary)
+		{
+			ForEachPairInput([&](uint64_t from, uint64_t to, const float* global, int halvings, int pictureHeight)
+			{
+				for (int valid = 0; valid < 2; ++valid)
+				{
+					const FrameAnalysis::MotionSummary a = BeforeSummary(valid != 0, from, to, global, halvings);
+					const FrameAnalysis::MotionSummary b = MotionRecord::SummaryOf(valid != 0,
+						MotionRecord::SampleOf(from, to, global, halvings, pictureHeight));
+					const FrameAnalysis::MotionSummary c = MotionRecord::SummaryOf(valid != 0, from, to, global, halvings);
+					Assert::IsTrue(a.vectorsValid == b.vectorsValid && a.pairFrom == b.pairFrom && a.globalX == b.globalX &&
+						a.globalY == b.globalY && a.source == b.source && a.magnitudeP50 == b.magnitudeP50 &&
+						a.magnitudeP95 == b.magnitudeP95, L"the sample's record equals the old record");
+					Assert::IsTrue(c.vectorsValid == a.vectorsValid && c.globalX == a.globalX && c.globalY == a.globalY &&
+						c.pairFrom == a.pairFrom && c.source == a.source, L"the old entry point is unchanged");
+				}
+			});
+			const FrameAnalysis::MotionSummary none = MotionRecord::SummaryOf(true, MotionRecord::SampleOf(10, 11, nullptr, 1, 0));
+			Assert::IsFalse(none.vectorsValid, L"no engine pair: absent");
 		}
 	};
 }
