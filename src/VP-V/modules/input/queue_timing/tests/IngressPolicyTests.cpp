@@ -276,6 +276,24 @@ namespace VideoProcessorTest
 			Assert::AreEqual<int64_t>(0, st.m_pulldownFilmQpc);
 		}
 
+		// W2-C1: a contained throw in the decision (IngressFaultThunk) asks for the reset and clears the acquiring flag at once; the
+		// detector itself starts over on the next frame (the request), as before.
+		TEST_METHOD(AFaultClearsTheAcquiringFlagAndRequestsTheReset)
+		{
+			Vpv::Ingress::IngressState st;
+			const char* cycle = "NRRNR";
+			Pulldown::Decision d;
+			for (int i = 0; i < 20; ++i)
+				d = st.m_pulldown.Next(cycle[i % 5] == 'R', false, 60.0);
+			st.m_pulldownAcquiring.store(!d.locked && st.m_pulldown.Acquiring());
+			Assert::IsTrue(st.m_pulldownAcquiring.load(), L"acquiring before the fault");
+			Assert::IsFalse(st.m_pulldownResetRequested.load());
+			st.RequestPulldownResetAfterFault();
+			Assert::IsFalse(st.m_pulldownAcquiring.load(), L"the faulted frame's verdict is not a standing demand");
+			Assert::IsTrue(st.m_pulldownResetRequested.load(), L"the next frame starts the detector over");
+			Assert::IsTrue(st.m_pulldown.Acquiring(), L"the detector itself waits for the request (unchanged)");
+		}
+
 		// W1-A4 audit S2: a LOCK case through the reset. A resync reset on a locked detector clears the acquiring flag and the
 		// detector at once, but leaves the published cadence for Next to rewrite; a frame that then arrives with detection off still
 		// reports the lock that was held (the caller's "pulldown off" gap) and clears the cadence.

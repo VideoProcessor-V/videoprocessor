@@ -122,6 +122,16 @@ namespace Vpv
 		m_pulldownAcquiring.store(false, std::memory_order_relaxed);
 	}
 
+	// W2-C1 (open item from W1-A4): a contained throw in IngressPulldown (IngressFaultThunk). The detector and the film clock start
+	// over on the next frame through the renderer's reset request, as before; the acquiring flag is cleared now, with the request, as
+	// the renderer's other reset paths do (LibplaceboVideoRenderer.cpp, lane A4 hooks): a faulted frame's verdict is not a demand,
+	// and no further frame may arrive to rewrite it. Capture thread.
+	void RequestPulldownResetAfterFault()
+	{
+		m_pulldownResetRequested.store(true, std::memory_order_release);
+		m_pulldownAcquiring.store(false, std::memory_order_relaxed);
+	}
+
 	// W1-A4: a frame arrives while pulldown detection is off, or without a display mode (the signal's mode lost). Nothing runs the
 	// detector then, so its last verdict (the cadence lock, and the acquiring flag the motion engine's standing demand reads)
 	// would otherwise outlive the cause. Clears both, and the detector's stale history with them. Returns true when a LOCK /
