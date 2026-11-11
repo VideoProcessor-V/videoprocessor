@@ -133,7 +133,9 @@ inline const std::vector<ProductRow>& ProductRows()
         { kP8CameraLabels, "motion/estimation/global_model", kExpectedCameraUnit, "camera label pass" },
         { kP9CameraSmoothed, "motion/estimation/global_model", kExpectedCameraUnit, "camera smoothing (CPU)" },
         { kP10GrainSplit, "repair/grain_split", kExpectedGrainSplitUnit, "grain split pass" },
-        { kP10cGrainSplitChroma, "repair/grain_split", kExpectedGrainSplitUnit, "grain split chroma pass" },
+        // P10c: RESERVED, NO PRODUCER (C17, doc 93 section 2 D4): declared, never registered as a lane job (SkeletonModule.cpp registers P10/P11/P12
+        // only) and never live-filled; made real by C10. A reader of P10c finds it absent and takes its classical form (visible).
+        { kP10cGrainSplitChroma, "repair/grain_split", kExpectedGrainSplitUnit, "reserved (no producer: built with C10)" },
         { kP11RegionBlockStats, "input/source_analysis/regions", kExpectedRegionUnit, "region block statistics pass" },
         { kP12LightLevel, "input/source_analysis/light_level", kExpectedLightLevelUnit, "light level pass" },
         { kP13SourceRing, "input/capture (queue + early upload)", 0, "" },
@@ -509,6 +511,111 @@ inline TierBytes VramByTier(const Graph& g)
     return t;
 }
 
+// ---- declared vs actually read (C17, doc 93 W0-4 / section 2) -------------------------------------------------
+//
+// A declaration (ProductDecl::AddInput, ConsumerRow reads) says what a product / consumer is WIRED to read; it is not a proof that the
+// code reads it today. The flags below are ADDITIVE: they do not change a declaration, the graph order, the live-fill owner or a slot.
+// They say, per declared input, where the declaration and the code differ today, so the conformance checker and the lane graph can be
+// trusted. An input without a flag is read as declared. A test pins the exact flag set: a new unread declaration needs a flag here.
+//   NotYetConsumed : declared, kept, and not yet read (the code takes a private copy); made true by the named work item
+//   NotRead        : a consumer row declares the read, the code reads none of it today (private implementation); made true by the item
+//   ViewIsActual   : the declared input is read through another VIEW of the data (named in the note), not the declared product itself
+//   ExternalView   : a read the code does today through an external accessor and the declaration does NOT carry (shown, not declared)
+//   Reserved       : the product is declared and has no producer (no lane job, no live fill); every reader finds it absent (visible)
+enum class FlagKind : uint8_t { NotYetConsumed, NotRead, ViewIsActual, ExternalView, Reserved };
+
+inline const char* Token(FlagKind k)
+{
+    switch (k) {
+    case FlagKind::NotYetConsumed: return "declared, not yet consumed";
+    case FlagKind::NotRead: return "declared, not read";
+    case FlagKind::ViewIsActual: return "actual input is a view";
+    case FlagKind::ExternalView: return "external view (not declared)";
+    case FlagKind::Reserved: return "reserved, no producer";
+    }
+    return "?";
+}
+
+// A flag on a PRODUCT's declaration (Registry): `input` = the declared input it concerns (kNoProduct = the whole product).
+struct ProductFlag {
+    ProductId product;
+    ProductId input;
+    FlagKind kind;
+    const char* item;   // the work item that makes the declaration true / the register row (doc 93)
+    const char* note;
+};
+
+// A flag on a CONSUMER row's declared read (the module row's id = kCatalogConsumerIdBase + index).
+struct ConsumerFlag {
+    uint16_t consumerId;
+    ProductId input;
+    FlagKind kind;
+    const char* item;
+    const char* note;
+};
+
+inline const std::vector<ProductFlag>& ProductFlags()
+{
+    static const std::vector<ProductFlag> flags = {
+        // D1: P2 / P2m / P3 keep their P1 declaration; they read their own half-luma copies until C9 makes it true (doc 93 section 2 D1).
+        { kP2VectorPair, kP1HalfLuma, FlagKind::NotYetConsumed, "C9", "reads its own half-luma copy (producer HalfLuma8); Products.h P2 declaration kept" },
+        { kP2mMatcherPair, kP1HalfLuma, FlagKind::NotYetConsumed, "C9", "reads the matcher's own Downsample copies; Products.h P2m declaration kept" },
+        { kP3AnalysisField, kP1HalfLuma, FlagKind::NotYetConsumed, "C9", "reads the matcher's own inner pyramids; Products.h P3 declaration kept" },
+        // D2: P10 declares P13 and reads the lane's extended TAP (the one GPU luma of the frame), not the ring planes.
+        { kP10GrainSplit, kP13SourceRing, FlagKind::ViewIsActual, "C9b",
+          "actual input = the lane tap view (LaneGpuProducts.cpp UploadTapRows: SourceFrameView luma uploaded to the tap texture)" },
+        // D4: P10c has no producer.
+        { kP10cGrainSplitChroma, kNoProduct, FlagKind::Reserved, "C10", "no lane job (SkeletonModule.cpp registers P10/P11/P12 only), no live fill" },
+        // P14g: its producing evaluation takes its pixels from the source-frame tap sink, P5 is the monitor snapshot it declares.
+        { kSourceGeometry, kP5MonitorTiles, FlagKind::ViewIsActual, "C9b",
+          "pixel evidence = the SourceFrameTap view (identity/chain/ChainEstimator.cpp UpdateTap); P5 stays the declared monitor snapshot" },
+        // D3: P7 reads P2 through IVectorEngine::FlowOf (pair id recorded) and declares only P4 (by design).
+        { kP7CameraFit, kP2VectorPair, FlagKind::ExternalView, "C3", "external view: P2 via FlowOf (CameraExtension.cpp ahead fit); pair id recorded, not a declared input" },
+    };
+    return flags;
+}
+
+inline const std::vector<ConsumerFlag>& ConsumerFlags()
+{
+    static const std::vector<ConsumerFlag> flags = {
+        // D4: DetailPulse / TextureRestore are catalogued as P10 / P11 / P4 readers but read none (DetailPulse.cpp, TextureRestore.cpp:
+        // private bands / tiles and private cut-fade logic, host scalar params); the declarations stay, the code is made to read them by C10 / C7.
+        { uint16_t(kCatalogConsumerIdBase + 0), kP10GrainSplit, FlagKind::NotRead, "C10", "private bands (DetailPulse.h)" },
+        { uint16_t(kCatalogConsumerIdBase + 0), kP11RegionBlockStats, FlagKind::NotRead, "C10", "private 32-px tiles" },
+        { uint16_t(kCatalogConsumerIdBase + 0), kP4SourceStats, FlagKind::NotRead, "C7", "private cut / fade logic" },
+        { uint16_t(kCatalogConsumerIdBase + 1), kP10GrainSplit, FlagKind::NotRead, "C10", "private bands (TextureRestore.h)" },
+        { uint16_t(kCatalogConsumerIdBase + 1), kP11RegionBlockStats, FlagKind::NotRead, "C10", "private 16-px tiles" },
+        { uint16_t(kCatalogConsumerIdBase + 1), kP4SourceStats, FlagKind::NotRead, "C7", "private cut / fade logic" },
+    };
+    return flags;
+}
+
+inline const ConsumerFlag* ConsumerFlagOf(uint16_t consumerId, ProductId input)
+{
+    for (const ConsumerFlag& f : ConsumerFlags())
+        if (f.consumerId == consumerId && f.input == input)
+            return &f;
+    return nullptr;
+}
+
+// The reads a consumer row actually performs today: its declared reads minus the NotRead flags, as the document prints them.
+inline std::string ActualReads(const ConsumerRow& c, const Registry& reg)
+{
+    std::string reads, unread;
+    for (size_t k = 0; k < c.decl.count; ++k) {
+        const ProductId p = c.decl.consumes[k].product;
+        const std::string name = std::string(reg.Has(p) ? reg.Get(p).token : "?");
+        const ConsumerFlag* f = ConsumerFlagOf(c.decl.id, p);
+        if (f && f->kind == FlagKind::NotRead)
+            unread += (unread.empty() ? "" : "; ") + name + " (" + f->note + ", " + f->item + ")";
+        else
+            reads += (reads.empty() ? "" : ", ") + name + (c.decl.consumes[k].lag ? "@lag" + std::to_string(unsigned(c.decl.consumes[k].lag)) : "");
+    }
+    if (!unread.empty())
+        reads += std::string(reads.empty() ? "" : "; ") + "not read: " + unread;
+    return reads;
+}
+
 // "" when no consumer row dropped a read, else the first row's name and why (Release-visible; a test pins it empty).
 inline std::string ValidateConsumerRows()
 {
@@ -574,7 +681,7 @@ inline std::string RenderDoc()
         s += " |\n";
     }
     s += "\n### Consumers\n\n";
-    s += "| id | consumer | module | pathway | reads | fallback kind | fallback id |\n|---|---|---|---|---|---|---|\n";
+    s += "| id | consumer | module | pathway | reads (declared) | reads (actual today) | fallback kind | fallback id |\n|---|---|---|---|---|---|---|---|\n";
     std::vector<const ConsumerRow*> sorted;
     for (const ConsumerRow& c : ConsumerRows())
         sorted.push_back(&c);
@@ -589,8 +696,25 @@ inline std::string RenderDoc()
                      + (c->decl.consumes[k].lag ? "@lag" + std::to_string(unsigned(c->decl.consumes[k].lag)) : "");
         }
         s += "| " + std::to_string(unsigned(c->decl.id)) + " | " + c->decl.name + " | " + c->module + " | "
-             + Token(c->unit) + " " + std::to_string(unsigned(c->order)) + " | " + reads + " | " + Token(c->kind) + " | "
-             + c->fallbackId + " |\n";
+             + Token(c->unit) + " " + std::to_string(unsigned(c->order)) + " | " + reads + " | " + ActualReads(*c, reg) + " | "
+             + Token(c->kind) + " | " + c->fallbackId + " |\n";
+    }
+    s += "\n### Declared vs actually read (additive flags)\n\n";
+    s += "A declaration is what a product or consumer is wired to read, not proof the code reads it today. These flags do not change a "
+         "declaration, the graph order or a slot; the exact set is pinned by `ProductCatalogTests`. An input without a flag is read as declared. "
+         "The duplicate register is section 2 of the consolidation plan (doc 93); this table is its code side.\n\n";
+    s += "| subject | input | flag | item | note |\n|---|---|---|---|---|\n";
+    for (const ProductFlag& f : ProductFlags())
+        s += "| product " + std::string(reg.Has(f.product) ? reg.Get(f.product).token : "?") + " | "
+             + (f.input == kNoProduct ? std::string("(whole product)") : std::string(reg.Has(f.input) ? reg.Get(f.input).token : "?")) + " | "
+             + Token(f.kind) + " | " + f.item + " | " + f.note + " |\n";
+    for (const ConsumerFlag& f : ConsumerFlags()) {
+        std::string who = "consumer " + std::to_string(unsigned(f.consumerId));
+        for (const ConsumerRow& c : ConsumerRows())
+            if (c.decl.id == f.consumerId)
+                who = std::string("consumer ") + c.decl.name;
+        s += "| " + who + " | " + std::string(reg.Has(f.input) ? reg.Get(f.input).token : "?") + " | " + Token(f.kind) + " | " + f.item + " | "
+             + f.note + " |\n";
     }
     s += "\n### VRAM per tier (all consumers active, laneLead 3, render-ahead 0, optical-flow engine present)\n\n";
     s += "Ring buffers + live pools of every node, by tier (decimal MB).\n\n";
