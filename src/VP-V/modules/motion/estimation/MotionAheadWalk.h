@@ -31,6 +31,7 @@
 #include <AnalysisFrame.h>
 #include <DebugLog.h>
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <vprenderer/RendererExtension.h>
@@ -61,10 +62,18 @@ namespace MotionAhead
 		// depth after it, each once (only frames already queued: an empty or short
 		// queue gives fewer).
 		const auto aheadProducer = impl ? std::atomic_load(&impl->motionProducer) : nullptr;
-		if (aheadProducer && (impl->motionAheadDepth.load(std::memory_order_acquire) > 0 ||
-			impl->motionAheadBackward.load(std::memory_order_acquire)))
+		if (!aheadProducer)
+			return;
+		// B1 (owner 2026-11-10, doc 91 C): the frames taken are the LEAD, every frame queued ahead (the render loop's one count,
+		// queuedFutureFrames, stored by the same pass just before this call), never below the depth, at most MotionAhead::kMaxLead;
+		// 0 while the depth is 0. Backward pairs (depth 0) keep the current frame only. The producer's pending capacity follows the
+		// lead (SetLead, every pass, so a stopped look-ahead hands its capacity back to the depth's).
+		const int aheadDepth = impl->motionAheadDepth.load(std::memory_order_acquire);
+		const int lead = MotionAhead::LeadFor(aheadDepth, impl->queuedFutureFrames.load(std::memory_order_acquire));
+		aheadProducer->SetLead(lead);
+		if (aheadDepth > 0 || impl->motionAheadBackward.load(std::memory_order_acquire))
 		{
-			const size_t depth = static_cast<size_t>(impl->motionAheadDepth.load(std::memory_order_acquire));
+			const size_t depth = static_cast<size_t>(lead);
 			const uint64_t last = aheadProducer->LastSubmitted();
 			size_t taken = 0;
 			for (size_t index = 0; index < queue.size() && taken <= depth; ++index)

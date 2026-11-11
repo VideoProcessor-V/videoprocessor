@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
@@ -76,7 +77,9 @@ namespace LookAheadWalkTest
 			std::atomic<unsigned long long> submitted{ 0 };
 			unsigned long long last = 0;
 			MotionAhead::Producer::Health GetHealth() const { return health; }
+			int lead = -1;   // B1: the last lead the walk handed over (SetLead), -1 = never
 			unsigned long long LastSubmitted() const { return last; }
+			void SetLead(int l) { lead = l; }
 			void Submit(unsigned long long, unsigned long long, const AnalysisLumaSource&, bool) { submitted.fetch_add(1, std::memory_order_relaxed); }
 		};
 		struct FakeMonitor
@@ -178,6 +181,99 @@ namespace LookAheadWalkTest
 			MotionAhead::CollectQueueAhead(&impl, queue, out);
 			Assert::AreEqual<size_t>(1, out.size());
 			Assert::AreEqual<unsigned long long>(1, out[0].sourceSequence);
+		}
+	};
+
+	// B1 (owner 2026-11-10, doc 91 C): the walk's lead is every frame queued ahead, in both queue modes and at every rate; the
+	// configured depth (DepthAt of motion_ahead_frames 4) is only its minimum; the P2 ring bounds it (kMaxLead).
+	TEST_CLASS(MotionAheadLeadTests)
+	{
+		// A queue of the current frame plus `ahead` frames, the render loop's count stored as it does, then the copy.
+		static size_t Collect(FakeImpl& impl, size_t ahead, int depth, std::vector<FakeQueued>& queue)
+		{
+			queue.clear();
+			for (size_t i = 0; i <= ahead; ++i)
+			{
+				queue.push_back(OneFrame());
+				queue.back().sourceSequence = static_cast<unsigned long long>(i + 1);
+			}
+			impl.queuedFutureFrames.store(ahead);
+			impl.motionAheadDepth.store(depth);
+			std::vector<FakeQueued> out;
+			MotionAhead::CollectQueueAhead(&impl, queue, out);
+			return out.size();
+		}
+
+	public:
+		TEST_METHOD(LeadEqualsTheQueuedFramesByFramesAndByTimeAt24_30_60)
+		{
+			const double rates[] = { 24.0, 30.0, 60.0 };
+			for (double hz : rates)
+			{
+				const int depth = MotionAhead::DepthAt(4, hz);
+				// By time: a 200 ms queue holds ceil(200 ms / period) frames ahead (24p 5, 30p 6, 60p 12).
+				const size_t byTime = static_cast<size_t>(std::ceil(200.0 * hz / 1000.0 - 1e-9));
+				// By frames: a 6-frame queue, the current frame plus 5 ahead, at every rate.
+				const size_t byFrames = 5;
+				const size_t modes[] = { byTime, byFrames };
+				for (size_t queued : modes)
+				{
+					FakeImpl impl;
+					impl.motionProducer = std::make_shared<FakeProducer>();
+					std::vector<FakeQueued> queue;
+					const size_t copied = Collect(impl, queued, depth, queue);
+					Assert::AreEqual(static_cast<int>(queued), impl.motionProducer->lead, L"lead == the queued frames ahead");
+					Assert::AreEqual(queued + 1, copied, L"the current frame plus every frame ahead");
+				}
+			}
+			const size_t expected[] = { 5, 6, 12 };
+			for (int i = 0; i < 3; ++i)
+				Assert::AreEqual(expected[i], static_cast<size_t>(std::ceil(200.0 * rates[i] / 1000.0 - 1e-9)));
+		}
+
+		TEST_METHOD(SixtyHzWithTheDepthQueuedIsUnchanged)
+		{
+			// 60p, 4 queued ahead (the old fixed depth): lead 4, 5 frames copied, the producer capacity 6 as before.
+			FakeImpl impl;
+			impl.motionProducer = std::make_shared<FakeProducer>();
+			std::vector<FakeQueued> queue;
+			Assert::AreEqual(4, MotionAhead::DepthAt(4, 60.0));
+			Assert::AreEqual<size_t>(5, Collect(impl, 4, 4, queue));
+			Assert::AreEqual(4, impl.motionProducer->lead);
+			MotionAhead::Producer producer;
+			producer.SetDepth(4);
+			producer.SetLead(4);
+			Assert::AreEqual<size_t>(6, producer.PendingCapacity());
+		}
+
+		TEST_METHOD(LeadNeverBelowTheDepthAndCappedByTheRing)
+		{
+			Assert::AreEqual(13, MotionAhead::kMaxLead);
+			Assert::AreEqual(0, MotionAhead::LeadFor(0, 12), L"look-ahead off: no lead");
+			Assert::AreEqual(2, MotionAhead::LeadFor(2, 1), L"a shallow queue keeps the depth (Decide bounds it before)");
+			Assert::AreEqual(12, MotionAhead::LeadFor(4, 12));
+			Assert::AreEqual(13, MotionAhead::LeadFor(2, 40), L"the P2 ring cap");
+			Assert::AreEqual(16, MotionAhead::LeadFor(MotionAhead::DepthAt(4, 240.0), 20), L"240p keeps its 66.7 ms depth");
+			FakeImpl impl;
+			impl.motionProducer = std::make_shared<FakeProducer>();
+			std::vector<FakeQueued> queue;
+			Assert::AreEqual<size_t>(14, Collect(impl, 30, 2, queue), L"current + kMaxLead");
+			Assert::AreEqual(13, impl.motionProducer->lead);
+			// Depth 0 (off, low latency): the lead is handed back as 0 and nothing is copied.
+			Assert::AreEqual<size_t>(0, Collect(impl, 30, 0, queue));
+			Assert::AreEqual(0, impl.motionProducer->lead);
+		}
+
+		TEST_METHOD(ProducerCapacityFollowsTheLargerOfDepthAndLead)
+		{
+			MotionAhead::Producer producer;
+			producer.SetDepth(2);
+			Assert::AreEqual<size_t>(6, producer.PendingCapacity());
+			producer.SetLead(12);   // 60p, 200 ms By time: 13 frames in one engage pass
+			Assert::AreEqual<size_t>(MotionAhead::PendingJobsFor(12), producer.PendingCapacity());
+			Assert::AreEqual<size_t>(14, producer.PendingCapacity());
+			producer.SetLead(0);    // the look-ahead stopped: back to the depth's
+			Assert::AreEqual<size_t>(6, producer.PendingCapacity());
 		}
 	};
 
