@@ -9461,13 +9461,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "On: the engine's forward and backward vectors must agree for a vector to be fully trusted "
             "(occlusions and failed matches show as disagreement): about 6% less damage for about 1-2% less "
             "judder removed on real clips. Off (default): not checked."));
-        auto* opticalFlowOnDemand = addChoice(QStringLiteral("Engine pairs on demand"),
-            QStringLiteral("optical_flow_on_demand"), { QStringLiteral("auto"), QStringLiteral("on"), QStringLiteral("off") });
-        opticalFlowOnDemand->setToolTip(QStringLiteral(
-            "When a pair was not computed ahead (a missed one, or a pair across a dropped frame), ask the optical-flow "
-            "engine for it while it is idle, within the time left in the frame; the block searches cover it when the "
-            "answer is late. Auto (default): only outside low latency (unchanged there until measured). On: also in "
-            "low latency (keeps the engine running there). Off: never asked."));
+        addChoice(QStringLiteral("Engine pairs on demand"), QStringLiteral("optical_flow_on_demand"), { QStringLiteral("auto"), QStringLiteral("on"), QStringLiteral("off") })->setToolTip(QStringLiteral("When a pair was not computed ahead (a missed one, or a pair across a dropped frame), ask the optical-flow engine for it while it is idle, within the time left in the frame; the block searches cover it when the answer is late. Auto (default): only outside low latency (unchanged there until measured). On: also in low latency (keeps the engine running there). Off: never asked."));   // VPV-HOOK W2-C5b
         auto* opticalFlow = addChoice(QStringLiteral("Optical-flow engine (NVIDIA)"), QStringLiteral("optical_flow"),
             { QStringLiteral("on"), QStringLiteral("off") });
         opticalFlow->setToolTip(QStringLiteral(
