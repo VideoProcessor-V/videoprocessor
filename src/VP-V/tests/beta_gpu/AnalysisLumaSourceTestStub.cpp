@@ -28,3 +28,6 @@ bool AnalysisLumaSource::IsValid() const
 }
 
 bool AnalysisLumaSource::Sample(int, int, AnalysisLumaSample&) const { return false; }
+
+// No shared luma plane is ever published for the report's frames: production returns null in that case too.
+const uint16_t* AnalysisLumaSource::SharedLumaRow(int) const { return nullptr; }
