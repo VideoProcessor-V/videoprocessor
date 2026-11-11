@@ -215,6 +215,12 @@ namespace SourceIdentity
 			// N1: the count of latch releases by the no-cut CEILING (LatchEvent::ReleasedCeiling; zero while the rules are off). The monitor shows
 			// the native switch that follows one through its engage crossfade instead of the release fade. Any thread.
 			uint64_t LatchCeilingReleases() const;
+			// Dump v4 (identity/SidDiagDump.h; written only while VP_SID_DUMP_V4_DIR is set, decision neutral): the file-name tag of this
+			// estimator's b_evals / b_sizes files (a new tag re-reads the variable and reopens the files at the next evaluation), and the
+			// caller's depth hint recorded on each row (coded = the decoded stream's bit depth, output = the delivered plane's; 0 = unknown).
+			// Any thread.
+			void SetDiagnosticTag(const std::string& tag);
+			void SetDiagnosticDepths(int codedBits, int outputBits);
 
 			// ---- evidence log (setter only; the key `source_id_evidence` is plumbed with P3) -----------------------------
 			void SetEvidence(const std::string& folder, EvidenceLevel level);

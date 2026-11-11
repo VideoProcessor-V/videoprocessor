@@ -56,7 +56,7 @@ namespace Tests
 {
 	namespace SidChain
 	{
-		struct SegInfo { int start = 0, frames = 0, bits = 10; std::string regime; };
+		struct SegInfo { int start = 0, frames = 0, bits = 10, codedBits = 0; std::string regime; };   // codedBits: dump v4 hint (0 = unknown)
 		struct ReelSpec
 		{
 			std::string id;
@@ -157,6 +157,7 @@ namespace Tests
 						si.start = g.Int("out_start_frame");
 						si.frames = g.Int("out_frames");
 						si.bits = g.Int("bits", 10);
+						si.codedBits = g.Int("coded_bits", 0);
 						si.regime = g.Str("regime");
 						s.segs.push_back(si);
 					}
@@ -408,6 +409,9 @@ namespace Tests
 				on.name = "on";
 				on.consensus = true;
 				on.monitor.SetSourceIdConsensus(true);
+				// Dump v4 (VP_SID_DUMP_V4_DIR set: <dir>\<reel>.<lane>.a_*.csv; unset: nothing is written, nothing changes)
+				off.monitor.SetDiagnosticTag(reel.id + ".off");
+				on.monitor.SetDiagnosticTag(reel.id + ".on");
 				Lane* lanes[2] = { &off, &on };
 				const int W = reel.width, H = reel.height;
 				const double black = 64.0 / 1023.0;
@@ -438,6 +442,9 @@ namespace Tests
 					{
 						lastSubmit = t;
 						double ms[2] = { 0.0, 0.0 };
+						const int codedBits = reel.segs.empty() ? 0 : reel.segs[seg].codedBits;
+						for (int li = 0; li < 2; ++li)
+							lanes[li]->monitor.SetDiagnosticDepths(codedBits, bits);
 						for (int li = 0; li < 2; ++li)
 						{
 							Lane* l = lanes[li];

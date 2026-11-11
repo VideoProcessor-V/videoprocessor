@@ -176,6 +176,12 @@ namespace SourceIdentity
 			double ReleaseClockSec() const { return clock_; }
 			bool Deferred() const { return deferred_; }
 			bool Dwelling() const { return deferred_ && dwelling_; }   // N1: the new shot's re-confirm dwell is open
+			// Dump v4 (read only): the clocks behind the bounds.
+			int64_t LastConfirmUs() const { return lastConfUs_; }      // the newest confirmation (hard-bound anchor)
+			int64_t NewestCreditUs(int axis) const { return axis == 0 ? newestX_ : newestY_; }   // newest positive credit since then (-1: none)
+			double AccumulatedCredit(int axis) const { return axis == 0 ? accX_ : accY_; }       // net new evidence since the last confirmation
+			LatchEvent DeferCause() const { return deferCause_; }
+			int64_t DeferSinceUs() const { return deferUs_; }
 
 			// The bar for entering / moving at source time t: c1 x (1 + growth over the stable time).
 			double Bar(int64_t timeUs, double c1) const
