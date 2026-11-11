@@ -7,6 +7,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 #include <VP-V/modules/input/queue_timing/IngressPolicy.h>
+#include <VP-V/modules/input/queue_timing/IngressState.h>
 
 #include <memory>
 #include <stdexcept>
@@ -205,6 +206,96 @@ namespace VideoProcessorTest
 				Assert::AreEqual(before + 1, Vpv::Ingress::IngressFaults());
 			}
 			Assert::AreEqual(before, Vpv::Ingress::IngressFaults(), L"a new renderer starts clean");
+		}
+
+		// W1-A4 (88 resync/flush audit, pulldownAcquiring sticks true): the capture thread's pulldown state around the renderer's
+		// IngressPulldown (IngressState is the renderer's base; the .inl calls these two members). 24p in 60 Hz, a 3:2 cycle
+		// (N R R N R); repeat flags as the signature compare would give them.
+		TEST_METHOD(AcquiringClearsWhenDetectionStopsOrTheSignalIsLost)
+		{
+			Vpv::Ingress::IngressState st;
+			const char* cycle = "NRRNR";
+			int i = 0;
+			Pulldown::Decision d;
+			for (; i < 20; ++i)   // four cycles: acquiring (three periodic cycles), far short of the two-second lock
+				d = st.m_pulldown.Next(cycle[i % 5] == 'R', false, 60.0);
+			Assert::IsFalse(d.locked, L"not yet locked");
+			st.m_pulldownAcquiring.store(!d.locked && st.m_pulldown.Acquiring());   // as IngressPulldown does per frame
+			Assert::IsTrue(st.m_pulldownAcquiring.load(), L"the cadence is being acquired: the standing engine's demand");
+			// Detection switched off (or the mode lost) while acquiring: no lock, cadence 0 - the old else-if skipped it.
+			Assert::IsFalse(st.ClearPulldownWhenOff(), L"no lock was held: no 'pulldown off' gap");
+			Assert::IsFalse(st.m_pulldownAcquiring.load(), L"the acquiring flag is cleared");
+			Assert::IsFalse(st.m_pulldown.Acquiring(), L"the detector's stale history is gone: it does not re-assert acquiring on re-enable");
+			Assert::AreEqual(0, st.m_pulldownCadence.load());
+			Assert::IsFalse(st.ClearPulldownWhenOff(), L"idempotent: a second off frame changes nothing");
+			Assert::IsFalse(st.m_pulldownAcquiring.load());
+		}
+
+		TEST_METHOD(AnIdleOrAcquiringDetectorKeepsNoStateWhenOffAndALockStillGapsAsBefore)
+		{
+			Vpv::Ingress::IngressState idle;
+			Assert::IsFalse(idle.ClearPulldownWhenOff(), L"nothing engaged: nothing to clear, no gap");
+			Assert::IsFalse(idle.m_pulldownAcquiring.load());
+			Assert::AreEqual(0, idle.m_pulldownCadence.load());
+			// The control (unchanged behaviour): a held lock is dropped with its cadence, clock and signature, and reports the gap.
+			Vpv::Ingress::IngressState st;
+			const char* cycle = "NRRNR";
+			Pulldown::Decision d;
+			int frames = 0;
+			for (; frames < 600 && !d.locked; ++frames)
+				d = st.m_pulldown.Next(cycle[frames % 5] == 'R', false, 60.0);
+			Assert::IsTrue(d.locked, L"3:2 at 60 Hz locks within 600 frames");
+			Assert::IsTrue(frames >= 120, L"after the two-second wait (plausibility: 120 frames at 60 Hz)");
+			st.m_pulldownCadence.store((d.cycle << 16) | d.unique);
+			st.m_pulldownSignature = 77;
+			st.m_pulldownFilmQpc = 88;
+			st.m_pulldownAcquiring.store(true);   // locked and flagged: the lock branch clears both
+			Assert::IsTrue(st.ClearPulldownWhenOff(), L"a lock was held: the caller marks the gap");
+			Assert::IsFalse(st.m_pulldown.Locked());
+			Assert::AreEqual(0, st.m_pulldownCadence.load());
+			Assert::IsFalse(st.m_pulldownAcquiring.load());
+			Assert::AreEqual<uint64_t>(0, st.m_pulldownSignature);
+			Assert::AreEqual<int64_t>(0, st.m_pulldownFilmQpc);
+		}
+
+		// W1-A4: the resync reset (PulldownResyncStep.reset) starts the detector over and clears the flag with it.
+		TEST_METHOD(AResetClearsTheAcquiringFlagWithTheDetector)
+		{
+			Vpv::Ingress::IngressState st;
+			const char* cycle = "NRRNR";
+			for (int i = 0; i < 20; ++i)
+				st.m_pulldown.Next(cycle[i % 5] == 'R', false, 60.0);
+			st.m_pulldownAcquiring.store(true);
+			st.m_pulldownSignature = 5;
+			st.m_pulldownFilmQpc = 6;
+			st.ResetPulldown();
+			Assert::IsFalse(st.m_pulldownAcquiring.load());
+			Assert::IsFalse(st.m_pulldown.Acquiring());
+			Assert::AreEqual<uint64_t>(0, st.m_pulldownSignature);
+			Assert::AreEqual<int64_t>(0, st.m_pulldownFilmQpc);
+		}
+
+		// W1-A4 audit S2: a LOCK case through the reset. A resync reset on a locked detector clears the acquiring flag and the
+		// detector at once, but leaves the published cadence for Next to rewrite; a frame that then arrives with detection off still
+		// reports the lock that was held (the caller's "pulldown off" gap) and clears the cadence.
+		TEST_METHOD(ALockCaseAfterAResetClearsAcquiringAndStillReportsThePulldownOffGap)
+		{
+			Vpv::Ingress::IngressState st;
+			const char* cycle = "NRRNR";
+			Pulldown::Decision d;
+			for (int frames = 0; frames < 600 && !d.locked; ++frames)
+				d = st.m_pulldown.Next(cycle[frames % 5] == 'R', false, 60.0);
+			Assert::IsTrue(d.locked, L"locked");
+			st.m_pulldownCadence.store((d.cycle << 16) | d.unique);
+			st.m_pulldownAcquiring.store(true);   // a stale flag on top of the lock
+			st.ResetPulldown();
+			Assert::IsFalse(st.m_pulldownAcquiring.load(), L"the reset clears acquiring");
+			Assert::IsFalse(st.m_pulldown.Locked(), L"and the detector");
+			Assert::AreNotEqual(0, st.m_pulldownCadence.load(), L"the published cadence waits for Next");
+			Assert::IsTrue(st.ClearPulldownWhenOff(), L"the held cadence is reported: the caller marks the 'pulldown off' gap");
+			Assert::AreEqual(0, st.m_pulldownCadence.load());
+			Assert::IsFalse(st.m_pulldownAcquiring.load());
+			Assert::IsFalse(st.ClearPulldownWhenOff(), L"nothing left: no second gap");
 		}
 
 		TEST_METHOD(AFullTableIsVisibleUnderFallbacks)
