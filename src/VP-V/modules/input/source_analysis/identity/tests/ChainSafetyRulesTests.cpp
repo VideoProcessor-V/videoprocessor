@@ -32,7 +32,7 @@ namespace Tests
 			c.n = n;
 			c.valid = true;
 			c.exactDone = true;
-			c.kernel = kLanczos3;
+			c.kernel = 5;   // Lanczos3 in the kernel bank (ChainUnitTests.cpp names it the same way)
 			c.family = static_cast<int>(Family::Lanczos);
 			c.stat = lineStat;
 			c.lineCount = 32;
