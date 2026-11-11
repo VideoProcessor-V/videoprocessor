@@ -541,7 +541,7 @@ namespace Tests
 
 		// The classical path on the frame-bound source clock: one scripted reading, then 8 decisions 62.5 ms apart (a 50 ms wait:
 		// a re-base that is applied engages on the second). The trace is every factor, fade and reason a viewer could see.
-		inline Run Drive(Mon& m, const Snap& s, int rasterW = W)
+		inline Run Drive(Mon& m, const Snap& s, int rasterW = W, int rasterH = H)
 		{
 			m.SetEngageTiming(0.05, 0.125, 0.05);
 			m.SetFrameBound(true, 0);
@@ -552,7 +552,7 @@ namespace Tests
 				std::string why;
 				double fx = 1.0, fy = 1.0;
 				const double t = 100.0 + 0.0625 * static_cast<double>(seq - 1);
-				m.AutoFactors(rasterW, H, 0.5, why, fx, fy, t, seq);
+				m.AutoFactors(rasterW, rasterH, 0.5, why, fx, fy, t, seq);
 				const Mon::Transition tr = m.AutoTransition(t);
 				char line[400];
 				std::snprintf(line, sizeof(line), "%llu f=%.6f,%.6f tr=%.6f,%.6f>%.6f,%.6f w=%.6f why=%s\n", static_cast<unsigned long long>(seq),
@@ -620,7 +620,8 @@ namespace Tests
 			const SidConv::Run r = SidConv::DriveFresh(SidConv::PerAxis(0.75, 1.0), true);
 			Assert::AreEqual(1.0, r.fx, 1e-9, SidConv::W16(r.trace).c_str());
 			Assert::AreEqual(1.0, r.fy, 1e-9);
-			Assert::IsTrue(SidConv::Has(r.note, "single-axis re-base held (H 0.7500; two axes are required)"), SidConv::W16(r.note).c_str());
+			// Owner 2026-11-11: H 0.75 on a 1080p raster is the named parked HDV entry, held by its name (was the generic single-axis text).
+			Assert::IsTrue(SidConv::Has(r.note, "held: anamorphic HDV 1440x1080 (single-axis re-base parked; H 0.7500"), SidConv::W16(r.note).c_str());
 			Assert::IsTrue(SidConv::Has(r.shown, r.note.c_str()));
 			const SidConv::Run v = SidConv::DriveFresh(SidConv::PerAxis(1.0, 0.75), true);
 			Assert::AreEqual(1.0, v.fy, 1e-9);
@@ -770,7 +771,7 @@ namespace Tests
 			const FallbackCatalog::Decision d = m.ConventionHoldFallback();
 			Assert::AreEqual(std::string("source resolution held"), d.id);
 			Assert::IsTrue(d.engaged);
-			Assert::IsTrue(SidConv::Has(d.reason, "single-axis re-base held (H 0.7500"), SidConv::W16(d.reason).c_str());
+			Assert::IsTrue(SidConv::Has(d.reason, "held: anamorphic HDV 1440x1080 (single-axis re-base parked; H 0.7500"), SidConv::W16(d.reason).c_str());   // named (owner 2026-11-11)
 			SidConv::Mon n;
 			SidConv::Drive(n, SidConv::Uniform(0.5));
 			Assert::IsFalse(n.ConventionHoldFallback().engaged, L"a listed size: nothing held, no notice");
@@ -828,6 +829,223 @@ namespace Tests
 			}
 			else
 				Logger::WriteMessage("the consensus did not latch the non-listed pair (refused upstream); nothing applied\n");
+		}
+	};
+
+	// SID r2 (owner 2026-11-11 ~10:20 / ~10:25): named anamorphic HD entries, parked (detect on, apply off), and the detection setting
+	// source_geometry_detect. Recognition names and counts a hold; it never changes what is applied.
+	namespace SidNamed
+	{
+		namespace G = Scaling::GeometrySet;
+
+		inline SidConv::Snap PerAxisOn(double rx, double ry, int w, int h)
+		{
+			SidConv::Snap s = SidConv::PerAxis(rx, ry);
+			s.nativeWidth = w;
+			s.nativeHeight = h;
+			return s;
+		}
+
+		// The factor part of a trace (the reasons may carry the note text): what a viewer gets applied.
+		inline std::string Factors(const std::string& trace)
+		{
+			std::string out, line;
+			for (char ch : trace)
+			{
+				if (ch != '\n') { line += ch; continue; }
+				const std::size_t w = line.find(" why=");
+				out += line.substr(0, w) + "\n";
+				line.clear();
+			}
+			return out;
+		}
+
+		inline bool AllNative(const std::string& trace)
+		{
+			std::size_t pos = 0, lines = 0;
+			while ((pos = trace.find(" f=", pos)) != std::string::npos)
+			{
+				if (trace.compare(pos, 21, " f=1.000000,1.000000 ") != 0)
+					return false;
+				++pos;
+				++lines;
+			}
+			return lines == 8;
+		}
+
+		inline const G::Geometry* Entry(const char* id)
+		{
+			std::size_t count = 0;
+			const G::Geometry* g = G::Geometries(count);
+			for (std::size_t i = 0; i < count; ++i)
+				if (std::string(id) == g[i].id)
+					return &g[i];
+			return nullptr;
+		}
+
+		inline SidConv::Run DriveDetect(const SidConv::Snap& s, int w, int h, const char* detect, SidConv::Mon& m)
+		{
+			m.SetRebaseConventionOnly(true);
+			if (detect != nullptr)
+				m.SetGeometryDetect(detect);
+			return SidConv::Drive(m, s, w, h);
+		}
+	}
+
+	TEST_CLASS(SourceGeometryNamedHoldTests)
+	{
+	public:
+		TEST_METHOD(EachNamedAnamorphicEntryIsRecognisedAndHeldByItsName)
+		{
+			const char* ids[] = { "hdv_1440x1080", "dvcprohd_1280x1080", "dvcprohd_960x720" };
+			const int rasters[][2] = { { 1920, 1080 }, { 3840, 2160 } };
+			for (const char* id : ids)
+				for (const auto& ra : rasters)
+				{
+					const Scaling::GeometrySet::Geometry* e = SidNamed::Entry(id);
+					Assert::IsNotNull(e, L"the entry is in the table");
+					Assert::IsTrue(e->detect && !e->apply, L"parked: detect on, apply off");
+					double rx = 0.0, ry = 0.0;
+					Assert::IsTrue(Scaling::GeometrySet::RatiosFor(*e, ra[0], ra[1], rx, ry), L"placed on the delivered raster");
+					SidConv::Mon m;
+					const SidConv::Run r = SidNamed::DriveDetect(SidNamed::PerAxisOn(rx, ry, ra[0], ra[1]), ra[0], ra[1], nullptr, m);
+					char msg[400];
+					std::snprintf(msg, sizeof(msg), "%s on %dx%d (H %.4f x V %.4f): note '%s'\n", id, ra[0], ra[1], rx, ry, r.note.c_str());
+					Logger::WriteMessage(msg);
+					const std::wstring w = SidConv::W16(msg);
+					Assert::IsTrue(SidNamed::AllNative(r.trace), (w + SidConv::W16(r.trace)).c_str());
+					Assert::IsTrue(SidConv::Has(r.note, (std::string("held: ") + e->name + " (").c_str()) && SidConv::Has(r.note, "re-base parked"), w.c_str());
+					Assert::IsTrue(SidConv::Has(r.shown, r.note.c_str()), L"shown on the auto status");
+					Assert::AreEqual(1u, m.NamedHoldCount(id), (L"one episode counted once: " + w).c_str());
+					Assert::IsTrue(m.ConventionHoldFallback().engaged && SidConv::Has(m.ConventionHoldFallback().reason, e->name), w.c_str());
+					// The same reading with recognition narrowed to the conventional entries: the same factors, a generic hold, no count.
+					SidConv::Mon n;
+					const SidConv::Run g = SidNamed::DriveDetect(SidNamed::PerAxisOn(rx, ry, ra[0], ra[1]), ra[0], ra[1], "conventional", n);
+					Assert::AreEqual(SidNamed::Factors(r.trace), SidNamed::Factors(g.trace), (L"apply byte-identical: " + w).c_str());
+					Assert::IsFalse(SidConv::Has(g.note, "held: "), SidConv::W16(g.note).c_str());
+					Assert::IsTrue(SidConv::Has(g.note, "re-base held"), SidConv::W16(g.note).c_str());
+					Assert::AreEqual(0u, n.NamedHoldCount(id));
+				}
+		}
+
+		TEST_METHOD(ANearMissStaysAGenericHold)
+		{
+			SidConv::Mon m;
+			const SidConv::Run r = SidNamed::DriveDetect(SidNamed::PerAxisOn(0.72, 1.0, 1920, 1080), 1920, 1080, "all", m);
+			Assert::IsTrue(SidNamed::AllNative(r.trace), SidConv::W16(r.trace).c_str());
+			Assert::IsTrue(SidConv::Has(r.note, "single-axis re-base held (H 0.7200"), SidConv::W16(r.note).c_str());
+			Assert::IsFalse(SidConv::Has(r.note, "held: "), SidConv::W16(r.note).c_str());
+			for (const char* id : { "hdv_1440x1080", "dvcprohd_1280x1080", "dvcprohd_960x720" })
+				Assert::AreEqual(0u, m.NamedHoldCount(id));
+		}
+
+		TEST_METHOD(NativesAndListedSizesAreUnaffected)
+		{
+			for (const char* detect : { "all", "conventional", "hdv_1440x1080 dvcprohd_1280x1080 dvcprohd_960x720" })
+			{
+				SidConv::Mon m, m0;
+				const SidConv::Run n = SidNamed::DriveDetect(SidConv::Uniform(1.0), 1920, 1080, detect, m);
+				Assert::IsTrue(SidNamed::AllNative(n.trace) && n.note.empty(), SidConv::W16(n.trace).c_str());
+				const SidConv::Run p = SidNamed::DriveDetect(SidConv::PerAxis(1.0, 1.0), 1920, 1080, detect, m0);
+				Assert::IsTrue(SidNamed::AllNative(p.trace) && p.note.empty(), SidConv::W16(p.trace).c_str());
+				SidConv::Mon l, l0;
+				const SidConv::Run u = SidNamed::DriveDetect(SidConv::Uniform(0.5), 1920, 1080, detect, l);
+				const SidConv::Run u0 = SidConv::DriveFresh(SidConv::Uniform(0.5), true);
+				Assert::AreEqual(u0.trace, u.trace, L"a listed size: byte-identical whatever the detection set");
+				Assert::IsTrue(u.note.empty());
+				for (const char* id : { "hdv_1440x1080", "dvcprohd_1280x1080", "dvcprohd_960x720" })
+					Assert::AreEqual(0u, m.NamedHoldCount(id) + m0.NamedHoldCount(id) + l.NamedHoldCount(id));
+			}
+		}
+
+		TEST_METHOD(TheOriginalPathwayIsUntouched)
+		{
+			const SidConv::Snap s = SidNamed::PerAxisOn(0.75, 1.0, 1920, 1080);
+			SidConv::Mon a, b;
+			a.SetOriginalPathway(true);
+			b.SetOriginalPathway(true);
+			const SidConv::Run ra = SidNamed::DriveDetect(s, 1920, 1080, "all", a);
+			const SidConv::Run rb = SidNamed::DriveDetect(s, 1920, 1080, "conventional", b);
+			const SidConv::Run r0 = SidConv::DriveFresh(s, true, false, true);
+			Assert::AreEqual(r0.trace, ra.trace, L"the Original pathway: the detection setting changes nothing");
+			Assert::AreEqual(r0.trace, rb.trace);
+			Assert::IsTrue(ra.note.empty() && rb.note.empty(), SidConv::W16(ra.note).c_str());
+			Assert::AreEqual(0u, a.NamedHoldCount("hdv_1440x1080"), L"nothing counted on the Original pathway");
+		}
+
+		TEST_METHOD(NarrowingTheSettingRemovesTheEntryFromRecognition)
+		{
+			const SidConv::Snap hdv = SidNamed::PerAxisOn(0.75, 1.0, 1920, 1080);
+			SidConv::Mon only960;
+			const SidConv::Run r = SidNamed::DriveDetect(hdv, 1920, 1080, "dvcprohd_960x720", only960);
+			Assert::IsFalse(SidConv::Has(r.note, "held: "), SidConv::W16(r.note).c_str());
+			Assert::IsTrue(SidConv::Has(r.note, "single-axis re-base held (H 0.7500"), SidConv::W16(r.note).c_str());
+			Assert::AreEqual(0u, only960.NamedHoldCount("hdv_1440x1080"));
+			SidConv::Mon listed;
+			const SidConv::Run l = SidNamed::DriveDetect(hdv, 1920, 1080, "HDV_1440x1080", listed);
+			Assert::IsTrue(SidConv::Has(l.note, "held: anamorphic HDV 1440x1080"), L"ids are case-insensitive");
+			Assert::AreEqual(SidNamed::Factors(r.trace), SidNamed::Factors(l.trace), L"apply byte-identical");
+		}
+
+		TEST_METHOD(UnknownDetectNamesAreVisibleNeverSilent)
+		{
+			namespace G = Scaling::GeometrySet;
+			G::DetectMask mask = 0u;
+			std::string unknown;
+			Assert::IsTrue(G::ParseDetect("", mask, unknown) && mask == G::DefaultDetectMask());
+			Assert::IsTrue(G::ParseDetect(" ALL ", mask, unknown) && mask == G::DefaultDetectMask());
+			Assert::IsTrue(G::ParseDetect("conventional", mask, unknown));
+			std::size_t count = 0;
+			const G::Geometry* g = G::Geometries(count);
+			for (std::size_t i = 0; i < count; ++i)
+				Assert::AreEqual(g[i].apply, (mask & (1u << i)) != 0u, L"conventional = the apply entries");
+			Assert::IsFalse(G::ParseDetect("hdv_1440x1080, bogus;dvcprohd_960x720", mask, unknown));
+			Assert::AreEqual(std::string("bogus"), unknown);
+			SidConv::Mon m;
+			const SidConv::Run r = SidNamed::DriveDetect(SidNamed::PerAxisOn(0.75, 1.0, 1920, 1080), 1920, 1080, "hdv_1440x1080, bogus", m);
+			const FallbackCatalog::Decision d = m.GeometryDetectFallback();
+			Assert::AreEqual(std::string("source geometry detect"), d.id);
+			Assert::IsTrue(d.engaged && SidConv::Has(d.reason, "bogus"), SidConv::W16(d.reason).c_str());
+			Assert::IsTrue(SidConv::Has(r.note, "held: anamorphic HDV 1440x1080"), L"the known ids still detect");
+			m.SetGeometryDetect("all");
+			Assert::IsFalse(m.GeometryDetectFallback().engaged, L"released when every id is known");
+		}
+
+		// Doc 91 E: widening DETECT never latches a native. A native chain stream, every entry detect on (default, and listed by id).
+		TEST_METHOD(ANativeChainStreamWithEveryEntryDetectingNeverLatches)
+		{
+			for (const char* detect : { "all", "2560x1440 1920x1080 1280x720 960x540 dci_2048x1080 dci_1998x1080 hdv_1440x1080 sd_720x576 sd_720x480 dvcprohd_1280x1080 dvcprohd_960x720" })
+			{
+				SidGate::Mon m;
+				GeoFx::G::HeldState geo;
+				m.SetGeometrySource(&geo);
+				m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+				m.SetRebaseConventionOnly(true);
+				m.SetGeometryDetect(detect);
+				Assert::IsFalse(m.GeometryDetectFallback().engaged, L"every id is known");
+				uint64_t seq = 2;
+				for (int i = 0; i < 13; ++i)
+				{
+					const double t = 10.0 + 0.5 * i;
+					if (i % 2 == 0)
+						geo.Publish(GeoFx::MakeRecord(seq, SidGate::Us(t - 0.1), GeoFx::AppliedAxis(3840, 3840, 5), GeoFx::AppliedAxis(2160, 2160, 5)));
+					SidGate::Analyse(m, t, seq++);
+				}
+				std::string why;
+				double fx = 1.0, fy = 1.0;
+				m.InjectResultForTest(SidGate::CleanSnapshot(1, false), seq - 1);
+				m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 16.1, seq);
+				m.InjectResultForTest(SidGate::CleanSnapshot(2, true), seq);
+				m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 16.6, seq + 1);
+				SourceIdentity::Record rec;
+				const bool latched = m.SourceIdRecord(rec) && (rec.ratioH < 1.0f || rec.ratioV < 1.0f);
+				Assert::IsFalse(latched, L"0 latches on a native stream");
+				Assert::AreEqual(1.0, fx, 1e-9, SidConv::W16(why).c_str());
+				Assert::AreEqual(1.0, fy, 1e-9);
+				Assert::IsTrue(m.Read().conventionNote.empty(), SidConv::W16(m.Read().conventionNote).c_str());
+				for (const char* id : { "hdv_1440x1080", "dvcprohd_1280x1080", "dvcprohd_960x720" })
+					Assert::AreEqual(0u, m.NamedHoldCount(id));
+			}
 		}
 	};
 }

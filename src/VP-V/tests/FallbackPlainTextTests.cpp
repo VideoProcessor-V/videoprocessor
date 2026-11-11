@@ -27,7 +27,7 @@ namespace FallbackPlainTextTest
 				"output request", "geometry", "subtitle detection", "SDR tone shape", "output scaling", "early upload",
 				"early upload frames", "capture extension", "vector_engine", "vector_engine_producer", "vector_engine_global",
 				"vector producer", "motion look-ahead", "source resolution look-ahead", "timeline",
-				"source resolution held" };
+				"source resolution held", "source geometry detect" };
 			const std::string unknownPrefix = "A processing step was switched off";
 			for (const char* id : ids)
 			{

@@ -7,6 +7,7 @@
 #include <VP-V/modules/input/source_analysis/identity/SourceIdPipeline.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceQualityView.h>
 #include <VP-V/modules/input/source_analysis/identity/SidDiagDump.h>
+#include <VP-V/modules/scaling/geometry/SourceGeometrySet.h>
 
 #include <libplacebo/renderer.h>
 
@@ -236,6 +237,15 @@ namespace SourceResolutionMonitor
 		// SID r2: engaged ("source resolution held") while a single-axis or non-standard re-base is held (ConventionNote); the
 		// one-time notice keys on it. Released in the Original pathway and while nothing is held.
 		FallbackCatalog::Decision ConventionHoldFallback() const;
+		// SID r2 (owner 2026-11-11 ~10:25): the geometries active for DETECTION (recognition and naming of a held reading;
+		// Scaling::GeometrySet's detect flag). [vprenderer] source_geometry_detect = all (default, wide) | conventional | a list of
+		// entry ids. It never changes what is applied (the table's apply flag and the two-axis rule decide that). Unknown ids are
+		// ignored and shown (GeometryDetectFallback, "source geometry detect").
+		void SetGeometryDetect(const std::string& value);
+		FallbackCatalog::Decision GeometryDetectFallback() const;
+		// Held episodes recognised as one named parked (detect-only) entry, per entry id (the shadow nights' counter; also in the log
+		// line and the history row "convention_held"). 0 for an unknown id.
+		unsigned NamedHoldCount(const char* id) const;
 		// SID train r2: the chain estimator's P14g holder (nullptr = none; the holder must outlive the monitor's worker). It feeds the
 		// chain voter of the pipeline: the CONSENSUS (chain + classical voters) is then what AutoFactor(s) ask in place of the tracker's
 		// declared value (N1, with source_id_consensus On; Off = the original, Shadow = the original decides and the would-be is logged).
@@ -623,6 +633,13 @@ namespace SourceResolutionMonitor
 		double uniformHeldH = 1.0, uniformHeldV = 1.0;
 		std::atomic<int> conventionHeldKind{ 0 };        // published by AutoFactors: 0 nothing held, 1 single-axis, 2 non-standard size
 		std::atomic<double> conventionHeldH{ 1.0 }, conventionHeldV{ 1.0 };
+		std::atomic<int> conventionRasterW{ 0 }, conventionRasterH{ 0 };   // AutoFactors' delivered raster (named recognition)
+		std::atomic<unsigned> geometryDetectMask{ Scaling::GeometrySet::DefaultDetectMask() };   // the default: wide
+		mutable std::mutex geometryDetectMutex;
+		std::string geometryDetectUnknown;               // unknown source_geometry_detect ids (geometryDetectMutex)
+		std::atomic<unsigned> namedHoldCounts[32] = {};   // per GeometrySet index: named held episodes
+		// The parked entry a held reading rH x rV is (nullptr = a generic hold); counts and logs a new episode when `count`.
+		const char* NamedHold(double rH, double rV, bool count);
 		std::string ConventionNote() const;              // the Snapshot::conventionNote text ("" = nothing held)
 		std::atomic<bool> chainEnabled{ false };
 		std::atomic<unsigned long long> nativeHeldByChain{ 0 };

@@ -2856,8 +2856,8 @@ namespace VideoProcessorTest
 				}
 				else if (std::string(r.name) == "1440x1080 anamorphic in 1080")
 				{
-					if (fxSeen != 1.0 || fySeen != 1.0 || snap.conventionNote.find("single-axis re-base held (H") == std::string::npos)
-						failures += L"1440x1080 not held as single-axis: " + message;
+					if (fxSeen != 1.0 || fySeen != 1.0 || snap.conventionNote.find("held: anamorphic HDV 1440x1080 (single-axis re-base parked") == std::string::npos)
+						failures += L"1440x1080 not held by its name (single-axis, parked): " + message;
 				}
 				else
 				{
