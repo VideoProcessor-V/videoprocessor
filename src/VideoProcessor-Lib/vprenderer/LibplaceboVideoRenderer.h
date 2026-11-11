@@ -19,7 +19,7 @@
 #include <vprenderer/PulldownDetector.h>
 #include <vprenderer/CaptureTimestampGap.h>
 #include <vprenderer/FileFrameSlotGate.h>
-#include <VP-V/modules/input/queue_timing/TimedFileState.h>   // VPV-HOOK R20
+#include <VP-V/modules/input/queue_timing/TimedFileState.h>   // VPV-HOOK
 #include <vprenderer/QueueTimingPolicy.h>
 #include <VP-V/modules/input/queue_timing/VpFixedBudgetPolicy.h>
 #include <VP-V/modules/input/queue_timing/IngressState.h> // VPV-HOOK
