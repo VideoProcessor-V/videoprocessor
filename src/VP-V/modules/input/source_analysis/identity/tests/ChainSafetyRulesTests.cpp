@@ -163,11 +163,12 @@ namespace Tests
 			Feed(mismatch, 1920, 720, 6);   // x 1/2, y 1/3: each a listed ratio on its own axis, not one geometry
 			AxisSummary a = mismatch.Summary(0);
 			Assert::IsTrue(a.prior < 0.0, L"a mismatched pair is counted against");
-			Assert::IsFalse(a.aboveC1 && mismatch.Summary(1).aboveC1);
+			Assert::AreEqual(a.llr + a.prior, a.llrWithPrior, 1e-9);
 
 			ChainEvidence pair(s);
 			Feed(pair, 1920, 1080, 6);
 			Assert::IsTrue(pair.Summary(0).prior > 0.0, L"the listed pair earns the bonus");
+			Assert::IsTrue(pair.Summary(0).llrWithPrior > mismatch.Summary(0).llrWithPrior + 3.0, L"a listed pair outweighs a mismatched one by the full prior swing");
 
 			ChainEvidence nonSquare(s);
 			Feed(nonSquare, 720, 576, 6);
