@@ -266,6 +266,7 @@ namespace EngineAbsentPipelineTest
 		}
 
 		// (2) with the de-judder on: the producer's start fails (the seam), the matcher runs; the entry names the block searches.
+		// One failed start: the retry back-off is 5 s of real time (GetTickCount64) and the 600 frames run in well under that.
 		TEST_METHOD(DejudderOnNvofUnavailableIsDegradedAndVisible)
 		{
 			const Result r = RunScenario(Scenario::NvofUnavailable, true);
