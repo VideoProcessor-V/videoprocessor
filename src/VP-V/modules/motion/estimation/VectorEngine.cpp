@@ -956,4 +956,78 @@ namespace VpMotion
 				return true;
 		return false;
 	}
+	// ---- W2-C5b: the on-demand estimate entry -------------------------------------------------------------------------
+
+	OnDemand::PairFuture VectorEngine::RequestPair(OnDemand::PairRequest request)
+	{
+		using OnDemand::Status;
+		{
+			std::lock_guard<std::mutex> lock(onDemandMutex_);
+			++onDemand_.requests;
+			if (!OnDemandStateOn())
+			{
+				++onDemand_.gated;
+				return OnDemand::PairFuture::Answered(Status::Unavailable);
+			}
+			if (request.budgetMs <= 0.0)
+			{
+				++onDemand_.noBudget;
+				return OnDemand::PairFuture::Answered(Status::NoBudget);
+			}
+		}
+		const std::shared_ptr<MotionAhead::Producer> producer = LoopProducer();
+		if (!producer || !producer->Running())
+			return OnDemand::PairFuture::Answered(Status::Unavailable);   // counted by AwaitPair
+		return producer->Request(std::move(request));
+	}
+
+	MotionAhead::FlowPtr VectorEngine::AwaitPair(const OnDemand::PairFuture& future, double waitMs, FallbackCatalog::NoPairCause& cause)
+	{
+		using OnDemand::Status;
+		using FallbackCatalog::NoPairCause;
+		const auto start = OnDemand::Clock::now();
+		const bool answered = future.WaitFor(waitMs);
+		const double waited = OnDemand::MsBetween(start, OnDemand::Clock::now());
+		std::lock_guard<std::mutex> lock(onDemandMutex_);
+		onDemand_.lastWaitMs = waited;
+		if (!answered)
+		{
+			future.Abandon();   // the worker skips it before any GPU work
+			++onDemand_.late;
+			cause = future.Valid() ? NoPairCause::OnDemandLate : NoPairCause::OnDemandUnavailable;
+			return nullptr;
+		}
+		OnDemand::PairResult result = future.Get();
+		switch (result.status)
+		{
+		case Status::Ready:
+		case Status::FromSlot:
+			if (result.flow)
+			{
+				++(result.status == Status::Ready ? onDemand_.served : onDemand_.fromSlot);
+				onDemand_.waitMsSum += waited;
+				cause = NoPairCause::None;
+				return result.flow;
+			}
+			break;
+		case Status::Late:
+			++onDemand_.late;
+			cause = NoPairCause::OnDemandLate;
+			return nullptr;
+		case Status::NoBudget:
+			cause = NoPairCause::OnDemandNoBudget;   // counted by RequestPair
+			return nullptr;
+		default:
+			break;
+		}
+		++onDemand_.unavailable;
+		cause = NoPairCause::OnDemandUnavailable;
+		return nullptr;
+	}
+
+	VectorEngine::OnDemandCounters VectorEngine::OnDemandReads() const
+	{
+		std::lock_guard<std::mutex> lock(onDemandMutex_);
+		return onDemand_;
+	}
 }

@@ -133,6 +133,10 @@ namespace FallbackCatalogTest
 			Assert::IsTrue(Has(Motion(true, false, false, "nvofapi64.dll not found", NoPairCause::ProducerNotRunning), "nvofapi64.dll not found"));
 			Assert::IsTrue(Has(Motion(true, false, false, "", NoPairCause::SizeMismatch), "does not fit"));
 			Assert::IsTrue(Has(Motion(true, false, false, "", NoPairCause::Missing), "no optical-flow pair"));
+			// W2-C5b: the on-demand request causes are engaged fallbacks, each in its own words.
+			Assert::IsTrue(Has(Motion(true, false, false, "", NoPairCause::OnDemandLate), "not ready within the frame budget"));
+			Assert::IsTrue(Has(Motion(true, false, false, "", NoPairCause::OnDemandUnavailable), "could not be made"));
+			Assert::IsTrue(Has(Motion(true, false, false, "", NoPairCause::OnDemandNoBudget), "no time left in the frame"));
 			Assert::IsFalse(Motion(false, false, false, "", NoPairCause::Missing).engaged, L"optical flow not requested");
 			Assert::IsTrue(Has(Motion(true, true, false, "NvOFExecute", NoPairCause::Missing), "optical flow failed"), L"a real failure wins");
 			Assert::IsFalse(TdMotionSource(false, "x").engaged);

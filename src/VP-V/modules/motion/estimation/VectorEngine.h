@@ -17,6 +17,7 @@
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/GapSeed.h>
+#include <VP-V/modules/motion/estimation/OnDemandEstimate.h>
 #include <VP-V/modules/motion/estimation/ProducerPlan.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 #include <VP-V/modules/motion/estimation/VectorEngineState.h>
@@ -345,6 +346,25 @@ namespace VpMotion
 		void FailProducerStartsForTesting(const std::string& reason) { producerStartFailureForTesting_ = reason; }
 		// Reservations (RefinedFieldOf, SubmitLongPair ...): IVectorEngine's "absent" defaults.
 
+		// ---- W2-C5b: the ON-DEMAND estimate entry (OnDemandEstimate.h; refs\93-prep-C5b.md); render thread --------------------
+		// A render-time consumer with no pair computed ahead asks the look-ahead producer's ONE session for (from, to) now. Never starts
+		// the producer and never opens a second session: no producer (low latency without it, optical flow off, stopped) answers
+		// Unavailable at once; budgetMs <= 0 answers NoBudget; a pair already in the P2 slot answers FromSlot (zero work). The C1 state
+		// gate (OnDemandStateOn) is the one call site of the lane C1 state (stubbed On until r2/c1 lands).
+		OnDemand::PairFuture RequestPair(OnDemand::PairRequest request);
+		// Waits up to waitMs (<= 0: no wait) for the answer. The pair (cause None), or null with the cause the miss counts as
+		// (OnDemandLate: not answered in time - the request is abandoned, so the worker skips it before any GPU work;
+		// OnDemandNoBudget; OnDemandUnavailable: no producer, stopping, refused or failed).
+		MotionAhead::FlowPtr AwaitPair(const OnDemand::PairFuture& future, double waitMs, FallbackCatalog::NoPairCause& cause);
+		struct OnDemandCounters
+		{
+			unsigned long long requests = 0, served = 0, fromSlot = 0, late = 0, unavailable = 0, noBudget = 0, gated = 0;
+			double lastWaitMs = 0.0, waitMsSum = 0.0;   // AwaitPair's wait (served ones in the sum)
+		};
+		OnDemandCounters OnDemandReads() const;
+		// The C1 state gate: the single call site (lane C1). Until r2/c1 lands the state is On.
+		static bool OnDemandStateOn() { return true; }
+
 	private:
 		void NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence, uint64_t epochAtChoice);
 		FallbackCatalog::Decision NoteHookOutcome(bool failed, const std::string& what);   // counts and logs a failure
@@ -389,5 +409,7 @@ namespace VpMotion
 		static constexpr size_t kGlobalRing = 16;   // the link may ask about a pair a frame or so after it was taken
 		GlobalRecord global_[kGlobalRing];          // slot = to % kGlobalRing
 		FallbackCatalog::LookAheadFailures hookFailures_ = FallbackCatalog::PreEstimateHookFailures();
+		mutable std::mutex onDemandMutex_;          // W2-C5b
+		OnDemandCounters onDemand_;                  // under onDemandMutex_
 	};
 }

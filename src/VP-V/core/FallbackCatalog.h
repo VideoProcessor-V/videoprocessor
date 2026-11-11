@@ -195,6 +195,10 @@ namespace FallbackCatalog
 		ProducerNotRunning,    // wanted but not started / stopped: `error` carries the producer's real reason
 		SizeMismatch,          // a pair was computed but not at the matcher's search size
 		Missing,               // the producer runs but had no pair for these frames (short queue, a gap, a resync)
+		// W2-C5b: the on-demand request (VectorEngine::RequestPair / AwaitPair; OnDemandEstimate.h) did not deliver a pair in time.
+		OnDemandLate,          // asked, but not answered within the frame budget (or the asker gave up): the matcher ran instead
+		OnDemandUnavailable,   // asked, but the producer was not running / stopping / restarting, or the request was refused or failed
+		OnDemandNoBudget,      // not asked: no time left in this frame for an engine run
 	};
 	inline const char* NoPairNote(NoPairCause cause)
 	{
@@ -204,6 +208,9 @@ namespace FallbackCatalog
 		case NoPairCause::ProducerNotRunning: return "matcher only (the optical-flow look-ahead producer is not running";
 		case NoPairCause::SizeMismatch: return "matcher only (the pair computed ahead does not fit the matcher's search size";
 		case NoPairCause::Missing: return "matcher only (no optical-flow pair computed ahead for these frames";
+		case NoPairCause::OnDemandLate: return "matcher only (the on-demand optical-flow pair was not ready within the frame budget";
+		case NoPairCause::OnDemandUnavailable: return "matcher only (the on-demand optical-flow pair could not be made";
+		case NoPairCause::OnDemandNoBudget: return "matcher only (no time left in the frame for an on-demand optical-flow pair";
 		default: return "";
 		}
 	}
