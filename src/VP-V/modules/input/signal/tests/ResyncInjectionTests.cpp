@@ -501,7 +501,7 @@ namespace Tests
 			Assert::AreEqual(uint64_t(0), rec.motion.pairFrom);
 		}
 
-		// ---- (e) A3: the guidance adapter forgets its pass at every FieldEra change --------------------------------------------
+		// ---- (e) A3: the guidance adapter forgets its pass at every FieldEra change (resync on only, S4) ------------------------
 		struct CamRenderer
 		{
 			VpResync::Shadow resync;
@@ -703,7 +703,8 @@ namespace Tests
 		TEST_METHOD(MotionRecordAbsentSeekOn) { RecordRun(Kind::Seek, true); }
 		TEST_METHOD(MotionRecordAbsentGapOn) { RecordRun(Kind::Gap, true); }
 
-		// MUST 1 (e): A3, the guidance adapter's OnDiscontinuity at every FieldEra change (FULL at the seal, gap at once).
+		// MUST 1 (e): A3, the guidance adapter's OnDiscontinuity at every FieldEra change (FULL at the seal, gap at once); resync on
+		// only (S4): DriveFrame does not run the camera lane while resync is not Driving.
 		TEST_METHOD(GuidanceAdapterForgetsAtEveryEraChange)
 		{
 			CamRig rig;
@@ -765,6 +766,25 @@ namespace Tests
 				rig.Render(5);
 				Assert::AreEqual(era + 1, rig.engine.FieldEra(), L"once");
 				Assert::IsFalse(rig.Flow(5), L"the pair spanning the event stays refused");
+			}
+		}
+
+		// W1-C2a MUST 1: the gap-fill pair (no adjacency, DejudderPolicyRunner fillPair) never spans a FULL when on; a loss
+		// (continuity) is what it bridges. Off: the stamps are not consulted (today's behaviour).
+		TEST_METHOD(AGapFillPairNeverSpansAFull)
+		{
+			for (int on = 0; on < 2; ++on)
+			{
+				Rig rig(on != 0 ? "on" : "off");
+				for (int64_t s = 1; s <= 8; ++s) rig.Ingress(s);
+				for (int64_t s = 1; s <= 4; ++s) rig.Render(s);
+				const std::shared_ptr<VpIndicator::Indicator> ind = rig.r.resync.GetIndicator();
+				if (on != 0 && ind)
+					ind->Advance(VpIndicator::kContinuity, VpResync::Cause::MissedFrames, 5, 1);
+				Assert::IsTrue(rig.engine.motionValidity.StampsAgree(4, 6, true), L"a loss alone: the fill stands");
+				rig.Inject(Kind::Full, 7);
+				Assert::AreEqual(on == 0, rig.engine.motionValidity.StampsAgree(6, 8, true), L"across the queued FULL: refused when on");
+				Assert::IsTrue(rig.engine.motionValidity.StampsAgree(4, 6, true), L"before the FULL: unchanged");
 			}
 		}
 	};

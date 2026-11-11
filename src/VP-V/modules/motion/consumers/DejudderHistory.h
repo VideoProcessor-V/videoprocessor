@@ -11,8 +11,9 @@
 // pending is left exactly as consumed. On with the reader registered: the reader's pending (taken here, once
 // per apply point) also acts - its release adds to the pending's, and a rebase-axis change alone (no epoch
 // move) forgets as an epoch move would (conservative: the de-judder holds no re-based-plane-only state that
-// could be kept). The reader is registered on the seal by the R2 activation (FrameSeal provider in the resync
-// module; not in this package: module README open item), so in this build every path is today's.
+// could be kept). W1-C2a MUST 2: the readers taken here are VectorEngineState::motionResyncReaders, the ones the
+// resync "motion" provider registers on each era's Indicator (VectorEngine::RegisterResyncFor); with resync_event on the
+// reader drives (an on-mode-only behaviour change: its release and rebase-only forget now act); off / shadow = today.
 // Render thread. Header-only, C++14.
 
 #include <VP-V/modules/motion/estimation/MotionResyncReaders.h>

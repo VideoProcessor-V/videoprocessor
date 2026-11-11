@@ -169,6 +169,87 @@ namespace Tests
 			Assert::AreEqual(U(e + 2), U(rig.state.Invalidate(MVCause::Resync)), L"unbound: the immediate move");
 			Assert::AreEqual(U(1), U(rig.state.DeferredToSeal()));
 		}
+
+		// W1-C2a S1 / WAIVER-C2A-02: a seal of an earlier frame (continuity at 3) does not cover a later deferred request
+		// (FULL queued at 5): it stays pending and the Unbind moves once. Sealed through 5, the request is covered.
+		TEST_METHOD(ALaterDeferredRequestSurvivesAnEarlierSeal)
+		{
+			for (int sealed = 0; sealed < 2; ++sealed)
+			{
+				Rig rig;
+				rig.Frames(1, 2);
+				const uint64_t e = rig.state.Epoch();
+				rig.ind->Advance(VpIndicator::kContinuity, RCause::DriftDrop, 3, 1);
+				rig.ind->Advance(VpIndicator::kFull, RCause::LiveQueueReset, 5);
+				rig.state.Invalidate(MVCause::QueueReset);
+				Assert::AreEqual(U(e), U(rig.state.Epoch()), L"deferred");
+				rig.Frames(3, sealed != 0 ? 5 : 3);
+				const uint64_t atSeal = rig.state.Epoch();
+				Assert::AreEqual(U(sealed != 0 ? e + 2 : e + 1), U(atSeal), L"one move per carrying seal");
+				rig.state.Unbind();
+				Assert::AreEqual(U(sealed != 0 ? 0 : 1), U(rig.state.UnbindMoves()));
+				Assert::AreEqual(U(sealed != 0 ? atSeal : atSeal + 1), U(rig.state.Epoch()));
+				if (sealed == 0)
+					Assert::IsTrue(rig.state.LastCause() == MVCause::QueueReset, L"the request's cause");
+			}
+		}
+
+		// W1-C2a S1: several pending requests move once at the Unbind; a FULL on a never-sealed frame with no request moves once.
+		TEST_METHOD(UnbindMovesOnceForPendingRequestsOrAnUnsealedChange)
+		{
+			{
+				Rig rig;
+				rig.Frames(1, 2);
+				const uint64_t e = rig.state.Epoch();
+				rig.state.Invalidate(MVCause::Seek);
+				rig.state.Invalidate(MVCause::Resync);
+				rig.state.Invalidate(MVCause::SettingsChange);
+				rig.state.Unbind();
+				Assert::AreEqual(U(1), U(rig.state.UnbindMoves()));
+				Assert::AreEqual(U(e + 1), U(rig.state.Epoch()));
+				Assert::IsTrue(rig.state.LastCause() == MVCause::SettingsChange);
+			}
+			{
+				Rig rig;
+				rig.Frames(1, 2);
+				const uint64_t e = rig.state.Epoch();
+				rig.ind->Advance(VpIndicator::kFull, RCause::LiveQueueReset, 4);
+				rig.state.Unbind();
+				Assert::AreEqual(U(1), U(rig.state.UnbindMoves()));
+				Assert::AreEqual(U(e + 1), U(rig.state.Epoch()));
+				Assert::IsTrue(rig.state.LastCause() == MVCause::Resync);
+			}
+			{
+				Rig rig;
+				rig.Frames(1, 4);
+				rig.state.Unbind();
+				Assert::AreEqual(U(0), U(rig.state.UnbindMoves()), L"nothing pending: no move");
+			}
+		}
+
+		// W1-C2a MUST 1: StampsAgree has no adjacency test (the gap-fill pair); bound, a FULL between the frames refuses
+		// it; unbound, true. PairServes = PairValid && PairValidAt.
+		TEST_METHOD(StampsAgreeRefusesAPairSpanningAFullWithoutAdjacency)
+		{
+			Rig rig;
+			rig.Frames(1, 2);
+			rig.ind->Advance(VpIndicator::kFull, RCause::LiveQueueReset, 4);
+			Assert::IsTrue(rig.state.StampsAgree(1, 3), L"same stamps, not adjacent");
+			Assert::IsFalse(rig.state.StampsAgree(3, 5), L"spans the FULL at 4");
+			Assert::IsTrue(rig.state.StampsAgree(4, 6));
+			const uint64_t e = rig.state.Epoch();
+			Assert::IsTrue(rig.state.PairServes(2, 3, e, e));
+			Assert::IsFalse(rig.state.PairServes(3, 4, e, e), L"stamp form");
+			Assert::IsFalse(rig.state.PairServes(2, 4, e, e), L"not adjacent");
+			Assert::IsFalse(rig.state.PairServes(2, 3, e, e, false), L"caller's contiguity");
+			// The gap-fill form (acrossLoss): a continuity event between the frames is the loss it bridges; FULL still refuses.
+			rig.ind->Advance(VpIndicator::kContinuity, RCause::MissedFrames, 8, 1);
+			Assert::IsFalse(rig.state.StampsAgree(7, 9), L"continuity: refused for an ordinary pair");
+			Assert::IsTrue(rig.state.StampsAgree(7, 9, true), L"the gap fill bridges the loss");
+			Assert::IsFalse(rig.state.StampsAgree(3, 9, true), L"never across the FULL");
+			MotionValidity::State unbound;
+			Assert::IsTrue(unbound.StampsAgree(3, 5), L"unbound: true");
+		}
 	};
 
 	TEST_CLASS(MotionValidityResyncReaderTests)

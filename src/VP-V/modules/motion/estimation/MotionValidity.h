@@ -238,7 +238,11 @@ namespace MotionValidity
 			case Cause::Seek:
 			case Cause::SourceFormatChange:
 				deferred.fetch_add(1, std::memory_order_relaxed);
-				unsealed.store(static_cast<int>(cause), std::memory_order_release);   // W1-C2a: Unbind applies it if no seal does
+				NoteRequest(cause);   // W1-C2a: Unbind applies it if no seal does
+				// S1: an Unbind that ran between the bound check and NoteRequest has already looked; move now (at worst one
+				// extra conservative move, never a lost one).
+				if (!bound.load(std::memory_order_acquire))
+					return InvalidateNow(cause);
 				return epoch.load(std::memory_order_acquire);
 			case Cause::SettingsChange:
 			case Cause::MotionSourceChange:
@@ -248,7 +252,9 @@ namespace MotionValidity
 					indicator->Advance(VpIndicator::kSettingsMotion, VpResync::Cause::SettingsApply,
 						indicator->HasSealed() ? indicator->LastSealed() + 1 : 0);
 					settingsAdvances.fetch_add(1, std::memory_order_relaxed);
-					unsealed.store(static_cast<int>(cause), std::memory_order_release);
+					NoteRequest(cause);
+					if (!bound.load(std::memory_order_acquire))
+						return InvalidateNow(cause);   // S1: raced an Unbind
 					return epoch.load(std::memory_order_acquire);
 				}
 				catch (...)
@@ -271,8 +277,12 @@ namespace MotionValidity
 			VpResync::Cause continuityCause = VpResync::Cause::None) noexcept
 		{
 			SealedResult r;
+			// S1: the requests counted before this seal are covered by it only when the Indicator carries no masked change
+			// beyond c.seq (a later request's frame is still queued): otherwise they stay pending for a later seal or Unbind.
+			const uint64_t seen = requests.load(std::memory_order_acquire);
 			auto apply = [&](Cause cause) {
-				unsealed.store(-1, std::memory_order_release);   // the seal applied the deferred move
+				if (!ChangeBeyond(c.seq))
+					covered.store(seen, std::memory_order_release);
 				InvalidateNow(cause);
 				r.moved = true;
 				r.cause = cause;
@@ -300,15 +310,28 @@ namespace MotionValidity
 		}
 		// W1-C2a: a request deferred to a seal that will not come (resync_event off, or the renderer unbinds, before the carrying
 		// frame is sealed) is applied here as the immediate move it would have been unbound: never lost. Counted in UnbindMoves().
+		// S1: one move when a request is not covered by a seal (any number of them), or when the Indicator holds a
+		// masked change beyond its last sealed frame (a FULL / continuity / settings[motion] whose frame was never sealed).
 		void Unbind()
 		{
+			const std::shared_ptr<VpIndicator::Indicator> indicator = VpIndicator::Indicator::Latest(std::atomic_load(&ind));
 			bound.store(false, std::memory_order_release);
 			std::atomic_store(&ind, std::shared_ptr<VpIndicator::Indicator>());
-			const int pending = unsealed.exchange(-1, std::memory_order_acq_rel);
-			if (pending >= 0)
+			const uint64_t made = requests.load(std::memory_order_acquire);
+			const uint64_t was = covered.exchange(made, std::memory_order_acq_rel);
+			Cause cause = static_cast<Cause>(lastRequest.load(std::memory_order_acquire));
+			bool pending = made != was;
+			if (!pending && indicator)
+			{
+				const VpIndicator::CounterMask m = UnsealedChange(*indicator);
+				pending = m != 0;
+				cause = (m & VpIndicator::Bit(VpIndicator::kFull)) != 0 ? Cause::Resync
+					: (m & VpIndicator::Bit(VpIndicator::kContinuity)) != 0 ? Cause::Gap : Cause::SettingsChange;
+			}
+			if (pending)
 			{
 				unbindMoves.fetch_add(1, std::memory_order_relaxed);
-				InvalidateNow(static_cast<Cause>(pending));
+				InvalidateNow(cause);
 			}
 		}
 		uint64_t UnbindMoves() const noexcept { return unbindMoves.load(std::memory_order_relaxed); }
@@ -330,22 +353,34 @@ namespace MotionValidity
 		uint64_t DeferredToSeal() const noexcept { return deferred.load(std::memory_order_relaxed); }
 		uint64_t SettingsAdvances() const noexcept { return settingsAdvances.load(std::memory_order_relaxed); }
 
-		// Adjacent(a, b) and, when bound, the Indicator stamps of a and b agree on FULL,
-		// continuity and settings[motion]: a look-ahead copy queued before a FULL whose pair
-		// spans it is refused whatever the epoch says. Unbound: Adjacent only (the caller keeps
-		// the epoch form of PairValid).
-		bool PairValidAt(uint64_t a, uint64_t b) const
+		// W1-C2a MUST 1: when bound, the Indicator stamps of a and b agree on FULL, continuity and settings[motion]; no
+		// adjacency test. acrossLoss (the gap-fill pair): continuity is left out, because the loss the pair bridges is itself
+		// a continuity event (MissedFrames / OverflowDrop ...); FULL and settings[motion] still refuse it. Unbound, or no
+		// Indicator: true.
+		bool StampsAgree(uint64_t a, uint64_t b, bool acrossLoss = false) const
 		{
-			if (!Adjacent(a, b))
-				return false;
 			if (!bound.load(std::memory_order_acquire))
 				return true;
 			const std::shared_ptr<VpIndicator::Indicator> indicator = VpIndicator::Indicator::Latest(std::atomic_load(&ind));
 			if (!indicator)
 				return true;
 			return VpIndicator::TemporalValid(*indicator, a, b,
-				VpIndicator::Bit(VpIndicator::kFull) | VpIndicator::Bit(VpIndicator::kContinuity) |
-				VpIndicator::Bit(VpIndicator::kSettingsMotion));
+				acrossLoss ? MotionMask() & ~VpIndicator::Bit(VpIndicator::kContinuity) : MotionMask());
+		}
+
+		// W1-C2a S2: the one pair test of the vector consumers: PairValid (epoch form) && PairValidAt (stamp form).
+		bool PairServes(uint64_t from, uint64_t to, uint64_t epochAtFrom, uint64_t epochAtTo, bool contiguous = true) const
+		{
+			return PairValid(from, to, epochAtFrom, epochAtTo, contiguous) && PairValidAt(from, to);
+		}
+
+		// Adjacent(a, b) and, when bound, the Indicator stamps of a and b agree on FULL,
+		// continuity and settings[motion]: a look-ahead copy queued before a FULL whose pair
+		// spans it is refused whatever the epoch says. Unbound: Adjacent only (the caller keeps
+		// the epoch form of PairValid).
+		bool PairValidAt(uint64_t a, uint64_t b) const
+		{
+			return Adjacent(a, b) && StampsAgree(a, b);
 		}
 
 		// Bound: the Indicator's stamp of seq (true). Unbound: false and `out` untouched (M2 P5a-5, IVectorEngine::FieldOf).
@@ -522,6 +557,33 @@ namespace MotionValidity
 			keptEpoch = inEpoch;
 		}
 
+		static VpIndicator::CounterMask MotionMask() noexcept
+		{
+			return VpIndicator::Bit(VpIndicator::kFull) | VpIndicator::Bit(VpIndicator::kContinuity) |
+				VpIndicator::Bit(VpIndicator::kSettingsMotion);
+		}
+		void NoteRequest(Cause cause) noexcept
+		{
+			lastRequest.store(static_cast<int>(cause), std::memory_order_release);
+			requests.fetch_add(1, std::memory_order_acq_rel);
+		}
+		// The masked counters that differ between the stamp of `seq` and every event written (all frames after it).
+		static VpIndicator::CounterMask ChangeAfter(const VpIndicator::Indicator& indicator, uint64_t seq)
+		{
+			return VpIndicator::Changed(indicator.StampOf(seq), indicator.StampOf(~uint64_t(0) - 1)) & MotionMask();
+		}
+		bool ChangeBeyond(uint64_t seq) const
+		{
+			const std::shared_ptr<VpIndicator::Indicator> indicator = VpIndicator::Indicator::Latest(std::atomic_load(&ind));
+			return indicator && ChangeAfter(*indicator, seq) != 0;
+		}
+		// Masked changes on frames never sealed (all of them when nothing is sealed yet and events exist).
+		static VpIndicator::CounterMask UnsealedChange(const VpIndicator::Indicator& indicator)
+		{
+			if (!indicator.HasSealed())
+				return 0;   // nothing sealed: no frame's history exists to be reused across the change
+			return ChangeAfter(indicator, indicator.LastSealed());
+		}
 		std::atomic<uint64_t> epoch{ kInitialEpoch };
 		std::atomic<int> lastCause{ static_cast<int>(Cause::Gap) };
 		std::atomic<bool> releasePending{ false };
@@ -531,7 +593,9 @@ namespace MotionValidity
 		std::atomic<bool> bound{ false };   // mirrors ind != nullptr: the hot-path guard
 		std::atomic<uint64_t> deferred{ 0 };
 		std::atomic<uint64_t> settingsAdvances{ 0 };
-		std::atomic<int> unsealed{ -1 };   // the last deferred cause no seal has applied yet (-1 = none)
+		std::atomic<uint64_t> requests{ 0 };   // deferred + settings[motion] requests made while bound (S1)
+		std::atomic<uint64_t> covered{ 0 };    // requests covered by a seal or by Unbind; requests != covered = pending
+		std::atomic<int> lastRequest{ static_cast<int>(Cause::Resync) };   // the most recent request's cause
 		std::atomic<uint64_t> unbindMoves{ 0 };
 
 		mutable std::mutex keptMutex;

@@ -12283,7 +12283,7 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		MotionValidity::Pending pending;   // VPV-HOOK
 		const bool epochMoved = vectorEngine.TakeInvalidation(pending);   // VPV-HOOK
-		if (!VpMotion::TakeDejudderHistoryAction(resync.Driving(), epochMoved, pending, dejudderPolicy.motionHistory))   // VPV-HOOK M2 P5b-7 (Q4 reader action; off/shadow = today)
+		if (!VpMotion::TakeDejudderHistoryAction(resync.Driving(), epochMoved, pending, vectorEngine.motionResyncReaders))   // VPV-HOOK M2 P5b-7 / W1-C2a MUST 2: the readers the provider registers
 			return;
 		if (dejudder)   // W1-C2a A2: the snapshot lease ends with the epoch (both branches)   // VPV-HOOK
 			dejudder->InvalidateSnapshot();   // VPV-HOOK

@@ -657,8 +657,9 @@ namespace Vpv
 				st.core->OnFrameStart(facts);
 				if (st.adapter)
 				{
-					// W1-C2a A3: the epoch ApplyMotionInvalidate consumes moved (resync, seek, gap, format or settings change):
-					// the guidance lane forgets its pass before this frame's poll (CameraGuidanceAdapter::OnDiscontinuity).
+					// W1-C2a A3 (resync_event on only: DriveFrame returns above while not Driving): the epoch ApplyMotionInvalidate
+					// consumes moved (resync, seek, gap, format or settings change): the guidance lane forgets its pass before this
+					// frame's poll (CameraGuidanceAdapter::OnDiscontinuity). Off: the adapter is not driven here (today's path).
 					const uint64_t era = engine->FieldEra();
 					if (st.adapterEra != 0 && era != st.adapterEra)
 						st.adapter->OnDiscontinuity();
