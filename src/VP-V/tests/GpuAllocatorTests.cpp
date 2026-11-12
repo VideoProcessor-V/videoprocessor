@@ -1033,20 +1033,24 @@ namespace GpuAllocatorTestsNs
 
 		TEST_METHOD(GrainStorageLedgerComparesPeaksIncludingScratch)
 		{
-			// compact 8N + 32 vs full 16N + 16 B/px: compact saves only when ring + live > 2.
+			// v3 (WAIVER-P10V3-01): compact 8N + 4 vs full 16N + 4 B/px (the same half-size scratch for both layouts).
 			const Dims d = MkDims(1920, 1080);
 			const uint64_t px = uint64_t(d.width) * d.height;
 			const uint64_t blocks = CellsAt(d, 4);
 			const std::vector<std::string> two = GrainSplit::StorageLedgerLines(d, 2);
 			const std::vector<std::string> six = GrainSplit::StorageLedgerLines(d, 6);
 			Assert::AreEqual(size_t(2), two.size(), L"two lines");
-			Assert::IsTrue(two[1].find("saves nothing") != std::string::npos, L"N = 2: no saving");
+			// WAIVER-P10V3-01 (v3 scratch, refs/116): old scratch Full 16 / Compact 32 B/px made N = 2 a tie (16*2+16 = 8*2+32);
+			// v3 scratch is 4 B/px for both layouts, so N = 2 gives 16*2+4 = 36 against 8*2+4 = 20 B/px: compact saves.
+			Assert::IsTrue(two[1].find("saves ") != std::string::npos && two[1].find("saves nothing") == std::string::npos, L"N = 2: v3 compact saves");
 			Assert::IsTrue(six[1].find("saves ") != std::string::npos && six[1].find("saves nothing") == std::string::npos, L"N = 6 saves");
-			const uint64_t fullPeak = (px * 16 + blocks * 16) * 6 + px * 16 + blocks * 16;
-			const uint64_t compactPeak = (px * 8 + blocks * 16) * 6 + px * 32 + blocks * 16;
+			// WAIVER-P10V3-01: scratch term px * 16 (Full) / px * 32 (Compact) -> px * 4 for both (two half-size rg32f planes).
+			const uint64_t fullPeak = (px * 16 + blocks * 16) * 6 + px * 4 + blocks * 16;
+			const uint64_t compactPeak = (px * 8 + blocks * 16) * 6 + px * 4 + blocks * 16;
 			Assert::IsTrue(six[0].find(FormatMB(fullPeak)) != std::string::npos, L"full peak line");
 			Assert::IsTrue(six[1].find(FormatMB(compactPeak)) != std::string::npos, L"compact peak line");
-			Assert::IsTrue(six[1].find("8 x 6 + 32 B/px") != std::string::npos, L"compact peak formula");
+			// WAIVER-P10V3-01: the compact formula text "8 x 6 + 32 B/px" -> "8 x 6 + 4 B/px" (v3 scratch, see above).
+			Assert::IsTrue(six[1].find("8 x 6 + 4 B/px") != std::string::npos, L"compact peak formula");
 		}
 	};
 }

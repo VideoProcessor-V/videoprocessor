@@ -382,21 +382,21 @@ namespace GrainSplit
 	}
 
 	// The ledger comparison (Ctrl+Alt+D): the PEAK bytes of the grain split per storage layout, scratch included.
-	// Full: slots at 16 B/px (+ 16 B per block) and a bands scratch of 16 B/px (rows is the product itself).
-	// Compact: slots at 8 B/px (+ 8 B per block) and a rows + bands scratch of 32 B/px. So with N = ring + live slots
-	// compact is 8N + 32 B/px (+ 16 B per block) against full's 16N + 16: it saves only when N > 2.
+	// v3 (refs/116): the scratch is the same for both layouts - two half-size rg32f planes (4 B per plane px) plus the
+	// block grid (16 B per block). Full: slots at 16 B/px (+ 16 B per block); Compact: slots at 8 B/px (+ 16 B per block).
+	// So with N = ring + live slots compact is 8N + 4 B/px against full's 16N + 4: it saves for every N >= 1.
 	inline std::vector<std::string> StorageLedgerLines(VpSkeleton::Dims d, unsigned slotsRingPlusLive, int blockShift = 4)
 	{
 		const uint64_t px = VpSkeleton::CellsAt(d, 0), blocks = VpSkeleton::CellsAt(d, static_cast<uint8_t>(blockShift));
 		const uint64_t fullSlot = px * 16 + blocks * 16, compactSlot = px * 8 + blocks * 16;
-		const uint64_t fullScratch = px * 16 + blocks * 16, compactScratch = px * 32 + blocks * 16;
-		const uint64_t fullPeak = fullSlot * slotsRingPlusLive + fullScratch, compactPeak = compactSlot * slotsRingPlusLive + compactScratch;
+		const uint64_t scratch = px * 4 + blocks * 16;
+		const uint64_t fullPeak = fullSlot * slotsRingPlusLive + scratch, compactPeak = compactSlot * slotsRingPlusLive + scratch;
 		std::vector<std::string> lines;
 		lines.push_back("VRAM grain split full: " + VpSkeleton::FormatMB(fullPeak) + " (16 x " + std::to_string(slotsRingPlusLive) +
-			" + 16 B/px incl. scratch)");
+			" + 4 B/px incl. scratch)");
 		lines.push_back("VRAM grain split compact: " + VpSkeleton::FormatMB(compactPeak) + " (8 x " + std::to_string(slotsRingPlusLive) +
-			" + 32 B/px incl. scratch)" + std::string(compactPeak < fullPeak ? ", saves " + VpSkeleton::FormatMB(fullPeak - compactPeak) :
-			std::string(", saves nothing (ring + live <= 2)")));
+			" + 4 B/px incl. scratch)" + std::string(compactPeak < fullPeak ? ", saves " + VpSkeleton::FormatMB(fullPeak - compactPeak) :
+			std::string(", saves nothing (no slots)")));
 		return lines;
 	}
 

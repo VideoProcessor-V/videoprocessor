@@ -12,7 +12,7 @@
 //                  out = reset || !prev.valid ? target : mix(prev, target, alpha), valid = 1;
 //       untrusted: previous value fetched at the SAME block (c), out = reset ? 1 : prev, valid = 0 (no new measurement).
 //     That untrusted carry-forward at the same cell is what mixes regions on a pan.
-//   * The grain split unit's version is GrainSplit::kUnitVersion (GrainSplit.h, currently 2; the catalog expects it as
+//   * The grain split unit's version is GrainSplit::kUnitVersion (GrainSplit.h, currently 3; the catalog expects it as
 //     kExpectedGrainSplitUnit). This unit does not change the split law, so that version is NOT bumped here; the refinement is
 //     a separate VARIANT stamp (kRefineUnitVersion, VariantStamp) so a reader can tell which variant produced a map.
 //   * Gap order: the P10 lane runs in the gap before the seal; P8 comes from the camera lane (K2). Wiring is K5-2 (waits for

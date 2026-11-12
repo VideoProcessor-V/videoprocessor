@@ -16,10 +16,10 @@
 // (no gain there, no harm); grain read as structure (dense texture) stays in `clean`, which is why
 // readers that MOVE structure between frames still need their own grain budget (temporal_detail does).
 //
-// Cost (GPU plan, per frame): three separable Gaussians (sigma 1, 2.5, 6 x Scale; the 2.5/6 pair at half
-// resolution), one 3 x 3 energy, one per-block reduction of 16 sub-block energies and a 5 x 5 block
-// minimum; outputs base (half res R16F), s1/s2 (RG16F), f (R8) and N (block grid). About 7 B/px of
-// textures at 4K (~58 MB) and well under 1 ms on the 3090 (estimate; not dispatched yet).
+// Cost (v3 GPU form, GrainSplitGpu.h; refs/116): the 2.5 / 6 (x Scale) Gaussians at half resolution, G1 (1 x Scale)
+// at full resolution in shared memory, one 3 x 3 energy, one per-block reduction of the sub-block energies and a 5 x 5
+// block minimum; no full-size intermediates; Compact product 8 B/px. Estimate 1.4-1.9 ms at 4K on the RTX 3050 Ti
+// laptop (target <= 2 ms; GrainSplitV3CostBench measures).
 //
 // CPU reference model: one luma plane in codes (doubles), edges clamped, raster loops, double sums, no
 // threads: deterministic. Header-only, C++14-compatible, no Windows headers.
@@ -31,12 +31,13 @@
 #include <vector>
 
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 
 namespace GrainSplit
 {
 	// Storage layout of the GPU form of the split product (SA2 either/or switch `grain_split_storage`; default
-	// full until the coordinator's grain gate passes). Full: rgba32f split (s1, s2, f, base) + rgba32f blocks
-	// (N, e3, 0, 0). Compact: texture A rg16f (s1, s2 in codes), texture B rg16 unorm (f, base x codeUnit), blocks
+	// compact since v3, decision D2). Full: rgba32f split (s1, s2, f, base) + rgba32f blocks
+	// (N, e3, e1, e2). Compact: texture A rg16f (s1, s2 in codes), texture B rg16 unorm (f, base x codeUnit), blocks
 	// rgba32f (N, e3, e1, e2): 8 B/px + 16 B per block instead of 16 + 16; e1/e2 are the block means of d1^2 / d2^2
 	// (extra modifier fields, version 2). Readers never see the layout: GLSL gs_fetch / gs_blocks / gs_energies / gs_tilt
 	// and the C++ view (GrainSplitGpu.h) are the only read path.
@@ -47,7 +48,8 @@ namespace GrainSplit
 	// layouts. Bump on ANY change of the law, the passes or a layout: a published frame carries it (Gpu::Frame::version),
 	// the GLSL embeds it as a define GS_UNIT_VERSION, and a reader refuses a frame of another version (stale, visible
 	// fallback, automatic recovery once a frame of the current version arrives).
-	constexpr uint32_t kUnitVersion = 2;   // 2: Compact blocks carry the band energies (e1, e2)
+	constexpr uint32_t kUnitVersion = 3;   // 2: Compact blocks carry the band energies (e1, e2); 3: the v3 law (the two low
+	                                       // bands at half resolution, refs/116; WAIVER-P10V3-01 covers the v2 pins)
 
 	struct Plane
 	{
@@ -82,9 +84,94 @@ namespace GrainSplit
 		Plane s1, s2;                  // grain-free structure bands: f D1, f D2
 		Plane clean, grain;            // clean = base + s1 + s2, grain = Y - clean
 		std::vector<double> N;         // block grain level (codes^2 of D)
+		std::vector<double> e1, e2, e3; // block means of d1^2, d2^2, d3^2 (codes^2; raster block order)
 	};
 
 	inline double Clamp01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
+
+	// Block means of d1^2, d2^2, d3^2 over each B x B block (edge blocks partial), raster order, double sums.
+	inline void BlockMeans(Split& a, const Plane& d1, const Plane& d2, const Plane& d3)
+	{
+		const size_t nb = static_cast<size_t>(a.bw) * a.bh;
+		a.e1.assign(nb, 0.0); a.e2.assign(nb, 0.0); a.e3.assign(nb, 0.0);
+		for (int by = 0; by < a.bh; ++by)
+			for (int bx = 0; bx < a.bw; ++bx)
+			{
+				const int x1 = (std::min)(a.w, (bx + 1) * a.B), y1 = (std::min)(a.h, (by + 1) * a.B);
+				double s1 = 0.0, s2 = 0.0, s3 = 0.0;
+				for (int yy = by * a.B; yy < y1; ++yy)
+					for (int xx = bx * a.B; xx < x1; ++xx)
+					{
+						s1 += d1.at(xx, yy) * d1.at(xx, yy);
+						s2 += d2.at(xx, yy) * d2.at(xx, yy);
+						s3 += d3.at(xx, yy) * d3.at(xx, yy);
+					}
+				const double cnt = static_cast<double>((x1 - bx * a.B) * (y1 - by * a.B));
+				const size_t i = static_cast<size_t>(by) * a.bw + bx;
+				a.e1[i] = s1 / cnt; a.e2[i] = s2 / cnt; a.e3[i] = s3 / cnt;
+			}
+	}
+
+	// ---- v3 law helpers (refs/116 s6): the low-band structure of texture_restore (TextureRestore.cpp passes 1-3) ----
+	// Half-resolution sigma and radius of a full-resolution sigma: the shared U2 law (BandFromBase::HalfSigma: the U3 half
+	// step adds a quarter px^2 per axis) with texture_restore's half radius rule (3.5 sigma; TextureRestore.h HalfRadius).
+	inline double V3HalfSigma(double sigma) { return VpUnit::BandFromBase::HalfSigma(sigma); }
+	inline int V3HalfRadius(double sigma) { return VpUnit::BandFromBase::Radius(V3HalfSigma(sigma), 3.5, true, 1e-9); }
+	inline double V3HalfWeight(int k, double sigma) { return VpUnit::BandFromBase::Weight(k, V3HalfSigma(sigma), V3HalfRadius(sigma)); }
+	// The smallest full-resolution low-band sigma the v3 law accepts (HalfSigma needs sigma^2 > 0.25).
+	constexpr double kV3MinLowSigma = 0.55;
+
+	// The half plane by the shared U3 law (VpUnit::HalfLuma: grid HalfDim, taps Tap0 / Tap1, the mean MeanF in the
+	// accessor's tap order), in codes: the CPU twin of the GPU pass's vpu_half_luma.
+	inline Plane V3Half(const Plane& y)
+	{
+		Plane o(static_cast<int>(VpUnit::HalfLuma::HalfDim(static_cast<uint32_t>(y.w))), static_cast<int>(VpUnit::HalfLuma::HalfDim(static_cast<uint32_t>(y.h))));
+		for (int j = 0; j < o.h; ++j)
+			for (int i = 0; i < o.w; ++i)
+			{
+				const int x0 = VpUnit::HalfLuma::Tap0(i, y.w), x1 = VpUnit::HalfLuma::Tap1(i, y.w);
+				const int y0 = VpUnit::HalfLuma::Tap0(j, y.h), y1 = VpUnit::HalfLuma::Tap1(j, y.h);
+				o.at(i, j) = VpUnit::HalfLuma::MeanF(y.at(x0, y0), y.at(x1, y0), y.at(x0, y1), y.at(x1, y1));
+			}
+		return o;
+	}
+
+	// Separable blur of a half-resolution plane at the half law of a full-resolution sigma: across, then down; edges
+	// clamped; taps -r..r in order.
+	inline Plane V3HalfBlur(const Plane& h, double fullSigma)
+	{
+		const int r = V3HalfRadius(fullSigma);
+		std::vector<double> k(static_cast<size_t>(2 * r + 1));
+		for (int i = -r; i <= r; ++i) k[static_cast<size_t>(i + r)] = V3HalfWeight(i, fullSigma);
+		Plane t(h.w, h.h), o(h.w, h.h);
+		for (int y = 0; y < h.h; ++y)
+			for (int x = 0; x < h.w; ++x)
+			{
+				double a = 0.0;
+				for (int i = -r; i <= r; ++i) a += k[static_cast<size_t>(i + r)] * h.get(x + i, y);
+				t.at(x, y) = a;
+			}
+		for (int y = 0; y < h.h; ++y)
+			for (int x = 0; x < h.w; ++x)
+			{
+				double a = 0.0;
+				for (int i = -r; i <= r; ++i) a += k[static_cast<size_t>(i + r)] * t.get(x, y + i);
+				o.at(x, y) = a;
+			}
+		return o;
+	}
+
+	// A half-resolution plane at a full-resolution pixel: bilinear at (p + 0.5) / 2 - 0.5 with clamped indices
+	// (texture_restore low_at); the weights are exactly 0.25 / 0.75 per axis.
+	inline double V3LowAt(const Plane& h, int x, int y)
+	{
+		const double hx = (x + 0.5) * 0.5 - 0.5, hy = (y + 0.5) * 0.5 - 0.5;
+		const int i0 = static_cast<int>(std::floor(hx)), j0 = static_cast<int>(std::floor(hy));
+		const double fx = hx - i0, fy = hy - j0;
+		const double a = h.get(i0, j0), b = h.get(i0 + 1, j0), c = h.get(i0, j0 + 1), d = h.get(i0 + 1, j0 + 1);
+		const double top = a + (b - a) * fx, bot = c + (d - c) * fx;
+		return top + (bot - top) * fy;
+	}
 
 	// Separable Gaussian, edges replicated; fixed summation order (the shared U2 law: VpUnit::BandFromBase).
 	inline Plane Gauss(const Plane& in, double sigma)
@@ -95,8 +182,9 @@ namespace GrainSplit
 		return o;
 	}
 
-	// The split of one luma plane. scale multiplies the sigmas; B is the block edge (px).
-	inline Split Compute(const Plane& y, double scale, int B, const Params& p = Params())
+	// THE V2 LAW (kUnitVersion 2: every Gaussian at full resolution). Kept ONLY as the A/B baseline of the v3 equivalence
+	// tests (refs/116 s5); no production reader. scale multiplies the sigmas; B is the block edge (px).
+	inline Split ComputeV2(const Plane& y, double scale, int B, const Params& p = Params())
 	{
 		Split a;
 		a.w = y.w; a.h = y.h; a.B = B;
@@ -145,6 +233,7 @@ namespace GrainSplit
 						m = (std::min)(m, quiet[static_cast<size_t>((std::max)(0, (std::min)(a.bh - 1, by + j))) * a.bw + (std::max)(0, (std::min)(a.bw - 1, bx + i))]);
 				a.N[static_cast<size_t>(by) * a.bw + bx] = m;
 			}
+		BlockMeans(a, a.d1, a.d2, a.d3);
 		a.f = Plane(y.w, y.h); a.s1 = Plane(y.w, y.h); a.s2 = Plane(y.w, y.h);
 		a.clean = Plane(y.w, y.h); a.grain = Plane(y.w, y.h);
 		for (int yy = 0; yy < y.h; ++yy)
@@ -160,6 +249,87 @@ namespace GrainSplit
 				a.s1.at(xx, yy) = f * a.d1.at(xx, yy);
 				a.s2.at(xx, yy) = f * a.d2.at(xx, yy);
 				a.clean.at(xx, yy) = gb.at(xx, yy) + a.s1.at(xx, yy) + a.s2.at(xx, yy);
+				a.grain.at(xx, yy) = y.at(xx, yy) - a.clean.at(xx, yy);
+			}
+		return a;
+	}
+
+	// THE SPLIT (v3 law, kUnitVersion 3; refs/116 s6). The estimator of v2 unchanged (sub-block grain level, neighbourhood
+	// minimum, Wiener share on D = d1 + d2), with the two LOW bands computed at HALF resolution as texture_restore does:
+	//   Yh = the U3 half plane of Y; Gbh, G6h = half-resolution blurs at HalfSigma(sigmaBase s), HalfSigma(sigmaLow s), read at full
+	//   resolution bilinearly (V3LowAt). G1 (sigmaFine s) stays at full resolution.
+	//   base = Gb(p), d1 = Y - G1, d2 = G1 - base, d3 = base - G6(p), D = d1 + d2 = Y - base.
+	// sigmaBase s and sigmaLow s must be >= kV3MinLowSigma (the GPU form refuses the law otherwise).
+	inline Split Compute(const Plane& y, double scale, int B, const Params& p = Params())
+	{
+		Split a;
+		a.w = y.w; a.h = y.h; a.B = B;
+		a.bw = (y.w + B - 1) / B; a.bh = (y.h + B - 1) / B;
+		const Plane g1 = Gauss(y, p.sigmaFine * scale);
+		const Plane yh = V3Half(y);
+		const Plane gbh = V3HalfBlur(yh, p.sigmaBase * scale), g6h = V3HalfBlur(yh, p.sigmaLow * scale);
+		a.base = Plane(y.w, y.h);
+		a.d1 = Plane(y.w, y.h); a.d2 = Plane(y.w, y.h); a.d3 = Plane(y.w, y.h);
+		Plane d(y.w, y.h);
+		for (int yy = 0; yy < y.h; ++yy)
+			for (int xx = 0; xx < y.w; ++xx)
+			{
+				const double gb = V3LowAt(gbh, xx, yy), g6 = V3LowAt(g6h, xx, yy);
+				a.base.at(xx, yy) = gb;
+				a.d1.at(xx, yy) = y.at(xx, yy) - g1.at(xx, yy);
+				a.d2.at(xx, yy) = g1.at(xx, yy) - gb;
+				a.d3.at(xx, yy) = gb - g6;
+				d.at(xx, yy) = a.d1.at(xx, yy) + a.d2.at(xx, yy);
+			}
+		const size_t nb = static_cast<size_t>(a.bw) * a.bh;
+		std::vector<double> quiet(nb, 0.0);
+		for (int by = 0; by < a.bh; ++by)
+			for (int bx = 0; bx < a.bw; ++bx)
+			{
+				std::vector<double> e;
+				for (int sj = 0; sj < p.subBlocks; ++sj)
+					for (int si = 0; si < p.subBlocks; ++si)
+					{
+						const int x0 = bx * B + si * B / p.subBlocks, x1 = (std::min)(y.w, bx * B + (si + 1) * B / p.subBlocks);
+						const int y0 = by * B + sj * B / p.subBlocks, y1 = (std::min)(y.h, by * B + (sj + 1) * B / p.subBlocks);
+						if (x1 <= x0 || y1 <= y0) continue;
+						double sum = 0.0;
+						for (int yy = y0; yy < y1; ++yy)
+							for (int xx = x0; xx < x1; ++xx) sum += d.at(xx, yy) * d.at(xx, yy);
+						e.push_back(sum / ((x1 - x0) * (y1 - y0)));
+					}
+				std::sort(e.begin(), e.end());
+				const size_t n = (std::min)(e.size(), static_cast<size_t>((std::max)(1, p.quietSubBlocks)));
+				double m = 0.0;
+				for (size_t i = 0; i < n; ++i) m += e[i];
+				quiet[static_cast<size_t>(by) * a.bw + bx] = n ? p.grainCal * m / static_cast<double>(n) : 0.0;
+			}
+		a.N.assign(nb, 0.0);
+		for (int by = 0; by < a.bh; ++by)
+			for (int bx = 0; bx < a.bw; ++bx)
+			{
+				double m = 1e300;
+				for (int j = -p.neighbourhood; j <= p.neighbourhood; ++j)
+					for (int i = -p.neighbourhood; i <= p.neighbourhood; ++i)
+						m = (std::min)(m, quiet[static_cast<size_t>((std::max)(0, (std::min)(a.bh - 1, by + j))) * a.bw + (std::max)(0, (std::min)(a.bw - 1, bx + i))]);
+				a.N[static_cast<size_t>(by) * a.bw + bx] = m;
+			}
+		BlockMeans(a, a.d1, a.d2, a.d3);
+		a.f = Plane(y.w, y.h); a.s1 = Plane(y.w, y.h); a.s2 = Plane(y.w, y.h);
+		a.clean = Plane(y.w, y.h); a.grain = Plane(y.w, y.h);
+		for (int yy = 0; yy < y.h; ++yy)
+			for (int xx = 0; xx < y.w; ++xx)
+			{
+				double e = 0.0;
+				for (int j = -1; j <= 1; ++j)
+					for (int i = -1; i <= 1; ++i) { const double dv = d.get(xx + i, yy + j); e += dv * dv; }
+				e /= 9.0;
+				const double N = a.N[static_cast<size_t>(yy / B) * a.bw + (xx / B)];
+				const double f = Clamp01(1.0 - p.kappa * N / (std::max)(e, p.energyFloor));
+				a.f.at(xx, yy) = f;
+				a.s1.at(xx, yy) = f * a.d1.at(xx, yy);
+				a.s2.at(xx, yy) = f * a.d2.at(xx, yy);
+				a.clean.at(xx, yy) = a.base.at(xx, yy) + a.s1.at(xx, yy) + a.s2.at(xx, yy);
 				a.grain.at(xx, yy) = y.at(xx, yy) - a.clean.at(xx, yy);
 			}
 		return a;

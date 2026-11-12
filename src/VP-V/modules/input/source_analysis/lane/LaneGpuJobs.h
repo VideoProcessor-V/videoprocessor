@@ -71,7 +71,7 @@ inline uint32_t RowsFor(ProductId id, Dims d)
 // construction. The common input is the tap plane (the lane SourceFrameView luma as R16 unorm, code << 6), uploaded
 // in row bands of at most kTapBandBytes each.
 constexpr uint32_t kTapBandBytes = 4u << 20;
-constexpr uint32_t kP10SplitterSteps = 5;   // GH, GV, QUIET, NMIN, F (GrainSplitGpu.h)
+constexpr uint32_t kP10SplitterSteps = 5;   // HALF, DOWN, STATS, NMIN, APPLY (GrainSplitGpu.h, v3)
 
 inline uint32_t TapRowsPerBand(Dims d)
 {

@@ -2,23 +2,24 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // repair.grain_split on the GPU: the shared grain-free picture of one plane, as compute passes that mirror the CPU
-// reference model GrainSplit::Compute (GrainSplit.h) pass by pass (same separable Gaussians and edge replication,
-// same sub-block grain level, neighbourhood minimum and Wiener share). Plane-generic: luma for temporal_detail,
+// reference model GrainSplit::Compute (GrainSplit.h, the v3 law of refs/116: the base and low bands at half
+// resolution, the fine band and the estimator at full resolution). Plane-generic: luma for temporal_detail,
 // luma and each chroma plane for the chroma upscaler's grain guard.
 //
-// Passes (all compute, nothing read back):
-//   1. GH     rows:    Y -> (G1 Y, Gb Y, G6 Y, Y)                       (rgba32f, full size)
-//   2. GV     columns: -> bands (d1, d2, d3, base)                       (rgba32f, full size)
-//   3. QUIET  one thread per block: the 16 sub-block energies of D = d1 + d2, mean of the quietest x cal; the
-//             block mean of d3^2 (the focus band's energy, read by temporal_detail)
-//   4. NMIN   one thread per block: the minimum over (2 n + 1)^2 blocks -> blocks (N, e3)
-//   5. F      per pixel: e3x3 = mean3x3(D^2), f = clamp(1 - kappa N / max(e, floor), 0, 1) -> split (f d1, f d2, f, base)
-// The split texture reuses the rows texture of pass 1. Values are codes of the signal (the plane's value / CodeUnit).
-// clean = base + s1 + s2 and G = Y - clean are formed by the reader (Y = clean + G exactly by construction).
+// Passes (all compute, nothing read back; the structure of texture_restore's HALF / LOWH / LOWV / STATS / GRAIN / APPLY):
+//   1. HALF   the U3 half plane (vpu_half_luma_comp, shared memory), base / low across -> tmp (rg32f, half size)
+//   2. DOWN   the base / low Gaussians down                                           -> low  (Gb, G6; rg32f, half size)
+//   3. STATS  one workgroup per block: G1 in shared memory, D = d1 + d2, the sub-block energies (one thread per
+//             sub-block, fixed order), the quietest x cal, the block means of d3^2, d1^2, d2^2 -> quiet (block grid)
+//   4. NMIN   per block: the minimum over (2 n + 1)^2 blocks                          -> blocks (N, e3, e1, e2)
+//   5. APPLY  16 x 16 px per workgroup: G1 in shared memory, D over a 1 px border, e3x3 = mean3x3(D^2),
+//             f = clamp(1 - kappa N / max(e, floor), 0, 1)                            -> the product (Full or Compact)
+// Values are codes of the signal (the plane's value / CodeUnit). clean = base + s1 + s2 and G = Y - clean are formed by
+// the reader (Y = clean + G exactly by construction).
 //
-// Cost (estimate): about 85 texture reads per pixel; two rgba32f planes (32 B/px: ~265 MB at 3840x2160, ~66 MB at
-// 1080p; a chroma plane of 4:2:0 a quarter of that); well under 1.5 ms at 4K on an RTX 3090, ~4-6 ms on the RTX 3050
-// Ti laptop (estimates; GrainSplitGpuTiming measures). Deterministic: fixed loop orders, no atomics.
+// Cost (refs/116 s3 estimate; the committed bench measures): no full-size intermediates; reads the plane twice; writes
+// the product (Compact 8 B/px) and two half-size rg32f planes. Target <= 2 ms at 3840x2160 on the RTX 3050 Ti laptop.
+// Deterministic: fixed loop orders, no atomics.
 #pragma once
 
 #include <VP-V/core/ScratchArena.h>
@@ -160,14 +161,16 @@ namespace GrainSplit
 			bool Compute(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B,
 				const Params& params, const Options& options);
 			// The five passes of Compute as separate calls (70b lane form: one chunk per pass): Step(0..4) with the SAME arguments
-			// and options on every call records exactly Compute's dispatches in order (rows, columns, grain level, minimum, Wiener
-			// share), so Compute == the step loop byte for byte. Step 0 validates and resolves the outputs and intermediates
+			// and options on every call records exactly Compute's dispatches in order (half, low, grain level, minimum, Wiener
+			// share), so Compute == the step loop byte for byte. sigmaBase and sigmaLow x scale must be >= GrainSplit::kV3MinLowSigma
+			// ("invalid law" otherwise); a device whose shared memory is below the passes' need is refused with the numbers. Step 0 validates and resolves the outputs and intermediates
 			// (private textures survive between steps and gaps; with options.arena the CALLER holds the arena scope kArenaScope
 			// across the five steps); Out() is valid after step 4. A failing or out-of-order step returns false and ends the run.
 			static constexpr uint32_t StepCount() { return 5; }
 			bool Step(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B, const Params& params,
 				const Options& options, uint32_t step);
-			// The scratch-arena requests of one Compute (scope kArenaScope, owner "grain_split", T0): the rgba32f temporaries.
+			// The scratch-arena requests of one Compute (scope kArenaScope, owner "grain_split", T0): two half-size rg32f planes and
+			// the rgba32f block grid (the same for both layouts).
 			static std::vector<VpSkeleton::ArenaRequest> ArenaRequests(pl_gpu gpu, int w, int h, int B, GrainSplit::Storage storage);
 			bool ScratchShort() const { return m_scratchShort; }
 			// "" or why the requested Compact storage was replaced by Full (ChooseStorage); StorageDecision() is the
@@ -193,11 +196,12 @@ namespace GrainSplit
 				bool compact = false;
 				GrainSplit::Storage storage = GrainSplit::Storage::Full;
 				int w = 0, h = 0, bw = 0, bh = 0;
-				pl_tex rows = nullptr, bands = nullptr, quiet = nullptr, blocks = nullptr, outA = nullptr, outB = nullptr;
+				pl_tex tmp = nullptr, low = nullptr, quiet = nullptr, blocks = nullptr, outFull = nullptr, outA = nullptr, outB = nullptr;
 			};
-			bool Begin(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, int B, const Params& params, const Options& options);
+			bool Begin(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, int B, const Params& params, const Options& options,
+				double scale);
 			Run m_run;
-			pl_tex m_rows = nullptr, m_bands = nullptr, m_quiet = nullptr, m_blocks = nullptr, m_outA = nullptr, m_outB = nullptr;
+			pl_tex m_tmp = nullptr, m_low = nullptr, m_quiet = nullptr, m_blocks = nullptr, m_outFull = nullptr, m_outA = nullptr, m_outB = nullptr;
 			Frame m_out;
 			std::string m_error;
 			bool m_scratchShort = false;
@@ -251,9 +255,9 @@ namespace GrainSplit
 			return kTable;
 		}
 
-		// FNV-1a 64 of the Full-mode pass bodies (rows, columns, quiet, minimum, Wiener: carriage returns skipped), in
-		// that order. The Full path must stay byte-identical to the pre-SA2 shaders: a test pins this to the value of
-		// the strings at 160987e5. Any intended change of the law bumps GrainSplit::kUnitVersion AND this pin.
+		// FNV-1a 64 of the pass texts (headers and bodies of half, down, low_s, stats, minimum, apply; carriage returns
+		// skipped), in that order. A test pins it: any intended change of the law bumps GrainSplit::kUnitVersion AND this pin
+		// (v3: WAIVER-P10V3-01 replaced the pre-SA2 v2 pin).
 		uint64_t FullShaderFingerprint();
 	}
 }

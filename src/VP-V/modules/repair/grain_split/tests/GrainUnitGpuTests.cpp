@@ -164,9 +164,11 @@ namespace GrainUnitGpuTestsNs
 
 		TEST_METHOD(GrainUnitPinsTheFullShaderBodies)
 		{
-			// The Full pass bodies hash to the value of the strings at 160987e5 (git show), so the Full path cannot change
+			// The pass texts (v3: half, down, low_s, stats, minimum, apply) hash to the pinned value, so the path cannot change
 			// silently: an intended change bumps kUnitVersion AND this pin.
-			Assert::AreEqual(uint64_t(0x41cef8707edf809dull), GrainSplit::Gpu::FullShaderFingerprint(), L"Full shader bodies are the pre-SA2 text");
+			// WAIVER-P10V3-01 (approved v3 law, refs/116): old pin 0x41cef8707edf809d (v2 pre-SA2 rows/columns/quiet/minimum/Wiener
+			// text) -> new 0x8949becef0aab5c9 = FNV-1a 64 of the ten v3 GLSL literals (carriage returns skipped), recomputed offline.
+			Assert::AreEqual(uint64_t(0x8949becef0aab5c9ull), GrainSplit::Gpu::FullShaderFingerprint(), L"pass shader texts are the v3 text");
 			const std::string full = GrainSplit::Gpu::ViewGlsl(Storage::Full, kCu10in16);
 			const std::string compact = GrainSplit::Gpu::ViewGlsl(Storage::Compact, kCu10in16);
 			const std::string define = "#define GS_UNIT_VERSION " + std::to_string(GrainSplit::kUnitVersion);

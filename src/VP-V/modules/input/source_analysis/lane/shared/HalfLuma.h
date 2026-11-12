@@ -48,6 +48,10 @@ namespace HalfLuma
 	inline uint32_t Box4(uint32_t a, uint32_t b, uint32_t c, uint32_t d) { return a + b + c + d; }
 	// P1 finishing (half and quarter): the rounded mean.
 	inline uint16_t FinishP1(uint32_t sum) { return uint16_t((sum + 2u) >> 2); }
+	// The floating-point form of the same mean, the arithmetic of the GLSL accessor vpu_half_luma ((a + b + c + d) x 1/4,
+	// same tap order). Additive (grain split v3, refs/116): grid, taps and the integer rounding above are unchanged.
+	template <class F>
+	inline F MeanF(F a, F b, F c, F d) { return (a + b + c + d) * F(0.25); }
 	// Engine view finishing: 10-bit codes to the 8-bit mean code / 4.
 	inline uint8_t FinishEngine8(uint32_t sum) { return static_cast<uint8_t>((std::min)(255u, sum >> 4)); }
 
@@ -64,8 +68,9 @@ namespace HalfLuma
 		return static_cast<uint8_t>((a + b + c + d + 2u) / 4u);
 	}
 
-	// GLSL accessors (the contract; not wired into a pass yet). Both read an R-channel luma texture with texelFetch,
-	// q in output coordinates, second taps clamped to the texture edge. vpu_quarter_luma takes the HALF texture.
+	// GLSL accessors (the contract). Both read an R-channel luma texture with texelFetch, q in output coordinates, second
+	// taps clamped to the texture edge. vpu_quarter_luma takes the HALF texture. GlslComponent() adds the same law for any
+	// channel (vpu_half_luma_comp; used by the grain split v3 HALF pass, which serves luma and semi-planar chroma).
 	inline std::string Glsl()
 	{
 		return std::string("#define VPU_HALF_LUMA_VERSION ") + std::to_string(kUnitVersion) + "\n"
@@ -80,6 +85,20 @@ namespace HalfLuma
 			"    return (a + b + c + d) * 0.25;\n}\n"
 			"float vpu_quarter_luma(sampler2D halfSrc, ivec2 q)\n{\n"
 			"    return vpu_half_luma(halfSrc, q);\n}\n";
+	}
+	// Additive (grain split v3, refs/116): the same taps, order and mean on channel `comp` (0..3) of the texture.
+	// The existing entries above are unchanged, so kUnitVersion stays.
+	inline std::string GlslComponent()
+	{
+		return std::string("float vpu_half_luma_comp(sampler2D src, ivec2 q, int comp)\n{\n"
+			"    ivec2 hi = textureSize(src, 0) - ivec2(1);\n"
+			"    ivec2 p0 = min(q * 2, hi);\n"
+			"    ivec2 p1 = min(q * 2 + ivec2(1), hi);\n"
+			"    float a = texelFetch(src, ivec2(p0.x, p0.y), 0)[comp];\n"
+			"    float b = texelFetch(src, ivec2(p1.x, p0.y), 0)[comp];\n"
+			"    float c = texelFetch(src, ivec2(p0.x, p1.y), 0)[comp];\n"
+			"    float d = texelFetch(src, ivec2(p1.x, p1.y), 0)[comp];\n"
+			"    return (a + b + c + d) * 0.25;\n}\n");
 	}
 }
 }

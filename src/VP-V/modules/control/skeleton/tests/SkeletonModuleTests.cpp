@@ -365,7 +365,8 @@ namespace SkeletonModuleTestsNs
 		{
 			const Vpv::Skeleton::Settings d = ParseText("[vpv.skeleton]\nanalysis_lane=on\n");
 			Assert::IsTrue(d.gpuGap == Vpv::Skeleton::GpuGapMode::Off, L"skeleton_gpu_gap defaults to off");
-			Assert::IsTrue(d.grainStorage == Vpv::Skeleton::GrainStorage::Full, L"grain_split_storage defaults to full");
+			// WAIVER-P10V3-03 (decision D2): default Full -> Compact.
+			Assert::IsTrue(d.grainStorage == Vpv::Skeleton::GrainStorage::Compact, L"grain_split_storage defaults to compact");
 			const Vpv::Skeleton::Settings s = ParseText("[vpv.skeleton]\nanalysis_lane=on\nskeleton_gpu_gap=After_Render\ngrain_split_storage=Compact\n");
 			Assert::IsTrue(s.gpuGap == Vpv::Skeleton::GpuGapMode::AfterRender);
 			Assert::IsTrue(s.grainStorage == Vpv::Skeleton::GrainStorage::Compact);
@@ -379,10 +380,10 @@ namespace SkeletonModuleTestsNs
 		{
 			const Vpv::Skeleton::Settings s = ParseText("[vpv.skeleton]\nskeleton_gpu_gap=sometimes\ngrain_split_storage=tiny\n");
 			Assert::IsTrue(s.gpuGap == Vpv::Skeleton::GpuGapMode::Off);
-			Assert::IsTrue(s.grainStorage == Vpv::Skeleton::GrainStorage::Full);
+			Assert::IsTrue(s.grainStorage == Vpv::Skeleton::GrainStorage::Compact);   // WAIVER-P10V3-03: invalid value keeps the (now compact) default
 			Assert::AreEqual<size_t>(2, s.laneProblems.size());
 			Assert::IsTrue(s.laneProblems[0] == "skeleton_gpu_gap 'sometimes' is not valid (off|after_render); kept off");
-			Assert::IsTrue(s.laneProblems[1] == "grain_split_storage 'tiny' is not valid (full|compact); kept full");
+			Assert::IsTrue(s.laneProblems[1] == "grain_split_storage 'tiny' is not valid (full|compact); kept compact");   // WAIVER-P10V3-03 (D2)
 		}
 
 		TEST_METHOD(OriginalPathwayForcesBothOff)

@@ -772,6 +772,8 @@ inline void AppendCameraProducts(std::vector<ProductDecl>& decls)
 }
 
 // P10/P10c (the SA2 declaration, adopted by SA0): the grain split of one plane-component and of the chroma planes.
+// v3 (unit 3): the GPU form keeps no full-size intermediate (two half-size rg32f planes + a block grid, arena scratch, same for
+// both layouts); the default storage is compact (D2). The declared product sizes below are unchanged by v3.
 // `compact` / `compactChroma` are the GRANTED SA2 storage layouts of P10 (luma) and P10c (the chroma planes may be granted
 // another storage than luma); `full` is today's (rgba32f split plane 16 B/px + rgba32f per block). Today's full form is
 // recorded as kGrainSplitFullBytesPerPixel for the VRAM story (doc 51: 32 B/px with the two planes the GPU port stores;
