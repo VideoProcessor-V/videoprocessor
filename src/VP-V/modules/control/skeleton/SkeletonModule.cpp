@@ -238,7 +238,28 @@ namespace Vpv
 				// B1 (refs/126 s1.2): the one GET-OR-COMPUTE-AND-PUBLISH path, on the lane's slots and its CPU live computes (one law). Without a
 				// dispatcher a GPU form is Unavailable(no GPU dispatcher), counted and on the status lines (never a consumer's private path).
 				memo.SetNames(&registry);
-				VpSkeleton::BindLaneToMemo(lane, memo);
+				VpSkeleton::LaneGpuHandleOf gpuHandleOf;
+				if (SkeletonGpuDispatcher* disp = wiring.dispatcher)
+				{
+					// A GPU lane product reused through Acquire names the dispatcher's texture of that slot (term 0) and the fence to wait on.
+					gpuHandleOf = [disp](VpSkeleton::ProductId id, bool ring, int index, uint64_t fence, VpSkeleton::GpuMemoHandle* out) {
+						const VpLaneProducts::GpuProductTextures* set = disp->TexturesOf(id);
+						if (set == nullptr || index < 0)
+							return false;
+						const pl_tex tex = ring ? set->Ring(size_t(index), 0) : set->Live(size_t(index), 0);
+						if (tex == nullptr)
+							return false;
+						out->resource = const_cast<void*>(static_cast<const void*>(tex));
+						out->textureSet = set;
+						out->index = index;
+						out->ringSlot = ring;
+						out->fence = fence;
+						out->width = uint32_t(tex->params.w);
+						out->height = uint32_t(tex->params.h);
+						return true;
+					};
+				}
+				VpSkeleton::BindLaneToMemo(lane, memo, gpuHandleOf);
 			}
 
 			// The registry for a wiring, the measured source period and the queue frames (0 = the unmeasured defaults). Re-made at each
@@ -1531,6 +1552,20 @@ namespace Vpv
 				b->lane.Configure(st.settings.lane, b->registry, consumers, gs, card, tier, seq, false);
 				b->lane.SetExternalProducts(outside);
 				{
+					// B1: the memo's GPU spots are budgeted against the VRAM ledger: the scratch-arena grant (T0 + extra) of this plan.
+					// No grant = GPU memo fills decline visibly (NoLedgerGrant), nothing is allocated outside the ledger.
+					bool memoGranted = false;
+					uint64_t memoBudget = 0;
+					if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
+						for (const uint16_t uid : { uint16_t(VpSkeleton::kUserScratchArena), uint16_t(VpSkeleton::kUserScratchArenaExtra) })
+							if (const VpSkeleton::UserGrant* g = ls->plan.governor.Find(uid))
+							{
+								memoGranted = memoGranted || g->bytes > 0;
+								memoBudget += g->bytes;
+							}
+					b->memo.SetGpuBudget(memoGranted, memoBudget);
+				}
+				{
 					// What the declared users still hold above their grant: planned as transient at the next Configure (once).
 					uint64_t shortfall = 0;
 					if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
@@ -1757,6 +1792,8 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				const AnalysisLane& lane = b->lane;
 				for (const FallbackCatalog::Decision& d : lane.Fallbacks())
 					addDecision(d);
+				for (const FallbackCatalog::Decision& d : b->memo.Decisions())
+					addDecision(d);   // B1 G5: "skeleton acquire <product>" (cause, frame) while a product is not served
 				addDecision(FallbackCatalog::SkeletonGpuMemory(st.gpuMemoryNote));
 				if (gd != nullptr && st.gpuMemoryNote.empty())
 				{
