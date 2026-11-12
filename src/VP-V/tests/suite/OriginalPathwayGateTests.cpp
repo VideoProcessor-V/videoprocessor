@@ -257,7 +257,7 @@ namespace VideoProcessorTest
 		}
 
 		// T-AR3-N4 (AUDIT-R 1fa78cdb9 N4): a SettingsApplied pathway fact the hub cannot record (slot table full) is counted
-		// and reported as a WorkerFault status line, not ignored.
+		// and a WorkerFault status line is emitted (the visible display is the host's "ingress switches" fallback), not ignored.
 		TEST_METHOD(AnUnrecordablePathwayFactIsCountedAndReportedVisibly)
 		{
 			HubScope scope;

@@ -59,7 +59,7 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 	// T-AR3-N2 (AUDIT-R 1fa78cdb9 N2): the ingress fix switches of THESE settings, published once here for the capture and
 	// file threads (IngressHardwareArrival / OnTimedVideoFrame), instead of their reading activeSettings across threads.
 	if (!Vpv::Hub::ExtensionHub::Instance().NoteFixSwitches(this, Vpv::Ingress::IngressState::FixSwitchBitsOf(Vpv::Ingress::IngressState::FixSwitchesOf(settings))))
-		EngageFallback("ingress switches", "not published (host table full): capture-thread fix switches keep their built values");   // counted: ExtensionHub::PathwayRefusals
+		EngageFallback("ingress switches", "not published (host table full): capture-thread fix switches keep their built values and the Original-pathway gate was not recorded");   // counted: ExtensionHub::PathwayRefusals
 	else
 		ReleaseFallback("ingress switches");
 	// PHASE 1 of the host seams plan (refs/107 s2.4 item 1; owner E3 2026-11-11): the ONE settings seam hands the VP-V

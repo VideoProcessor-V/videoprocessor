@@ -106,7 +106,7 @@ namespace Vpv
 			// CoreSegments.inl UpdatePipelineSlots) AFTER the modules saw that call, so a module's own SettingsApplied
 			// handler reads the PREVIOUS pathway here and the new one in f.code (VectorEngineExtension uses the pair);
 			// dropped with the host (GpuReleased / Shutdown). No fact (before the first settings apply, an unknown host,
-			// a full table: counted in PathwayRefusals() and reported as a WorkerFault status line) = VP-V, i.e. the module runs as before. Any thread: one slot scan.
+			// a full table: counted in PathwayRefusals(); the host shows it as the "ingress switches" fallback) = VP-V, i.e. the module runs as before. Any thread: one slot scan.
 			bool OriginalPathway(const void* host) const;
 			// The recorder (the hub's SettingsApplied bookkeeping; tests). False = not recorded (null host / table full).
 			bool NoteOriginalPathway(const void* host, bool original);
@@ -116,7 +116,9 @@ namespace Vpv
 			bool NoteFixSwitches(const void* host, uint32_t bits);
 			bool FixSwitchBits(const void* host, uint32_t& bits) const;
 			// T-AR3-N4 (AUDIT-R 1fa78cdb9 N4): pathway facts and fix-switch words the hub could not record (slot table full).
-			// Each one is also reported as a WorkerFault status line ("hub" / "pathway table full"), never log-only.
+			// Each one is counted; the visible display is the host's "ingress switches" fallback (CoreSegments.inl UpdatePipelineSlots).
+			// The hub's WorkerFault status line ("hub" / "pathway table full") reaches only modules that handle status (none handles
+			// worker "hub" yet), so it is not the display.
 			uint32_t PathwayRefusals() const { return pathwayRefusals_.load(std::memory_order_relaxed); }
 
 			void OnLifecycle(RE::LifecycleFacts&) override;
