@@ -1015,6 +1015,11 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\output\dither\tests\DitherNeedSeamTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraPhaseInterpTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <LanguageStandard>stdcpp17</LanguageStandard>
