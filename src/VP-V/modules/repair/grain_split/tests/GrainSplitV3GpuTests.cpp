@@ -114,6 +114,20 @@ namespace GrainSplitV3GpuTestsNs
 		return pl_tex_create(gpu, &p);
 	}
 
+	// RG16 unorm texture: channel 0 = noise (a deterministic pattern unrelated to the plane), channel 1 = the plane.
+	pl_tex UploadLumaInChannel1(pl_gpu gpu, const Plane& y)
+	{
+		std::vector<uint16_t> data(y.v.size() * 2);
+		for (size_t i = 0; i < y.v.size(); ++i)
+		{
+			data[i * 2] = static_cast<uint16_t>((i * 2654435761u) >> 16);
+			data[i * 2 + 1] = static_cast<uint16_t>((std::min)(65535L, (std::max)(0L, std::lround(y.v[i] * 64.0))));
+		}
+		pl_tex_params p{};
+		p.w = y.w; p.h = y.h; p.format = pl_find_named_fmt(gpu, "rg16"); p.sampleable = true; p.initial_data = data.data();
+		return pl_tex_create(gpu, &p);
+	}
+
 	// Any sampleable texture as four floats per texel (unorm and half textures come back normalised / widened): a compute pass
 	// copies it into a host-readable rgba32f storage texture.
 	std::vector<float> DownloadRGBA(pl_gpu gpu, pl_dispatch dispatch, pl_tex tex)
@@ -148,7 +162,7 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 	};
 
 	// One run on the device: Splitter::Compute, or (stepLoop) the five Step calls with the same arguments.
-	Product Run(GpuDevice& dev, pl_tex tex, int B, double scale, Storage storage, bool stepLoop = false)
+	Product Run(GpuDevice& dev, pl_tex tex, int B, double scale, Storage storage, bool stepLoop = false, uint32_t component = 0)
 	{
 		Product r;
 		pl_gpu gpu = dev.Gpu();
@@ -159,10 +173,10 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 		if (stepLoop)
 		{
 			for (uint32_t s = 0; s < GrainSplit::Gpu::Splitter::StepCount() && ok; ++s)
-				ok = splitter.Step(gpu, dev.dispatch, tex, 0, kCodeUnit, scale, B, GrainSplit::Params(), o, s);
+				ok = splitter.Step(gpu, dev.dispatch, tex, component, kCodeUnit, scale, B, GrainSplit::Params(), o, s);
 		}
 		else
-			ok = splitter.Compute(gpu, dev.dispatch, tex, 0, kCodeUnit, scale, B, GrainSplit::Params(), o);
+			ok = splitter.Compute(gpu, dev.dispatch, tex, component, kCodeUnit, scale, B, GrainSplit::Params(), o);
 		r.ok = ok;
 		r.error = splitter.LastError();
 		if (ok)
@@ -273,14 +287,14 @@ public:
 		GpuDevice dev;
 		Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 		pl_gpu gpu = dev.Gpu();
-		const int sizes[2][2] = { { 257, 143 }, { 320, 180 } };
-		const int edges[3] = { 8, 16, 32 };
-		for (int si = 0; si < 2; ++si)
-			for (int bi = 0; bi < 3; ++bi)
+		const int sizes[3][2] = { { 257, 143 }, { 320, 180 }, { 251, 139 } };
+		const int edges[5] = { 8, 9, 16, 17, 32 };
+		for (int si = 0; si < 3; ++si)
+			for (int bi = 0; bi < 5; ++bi)
 			{
 				const int w = sizes[si][0], h = sizes[si][1], B = edges[bi];
 				const double scale = B / 16.0;
-				const Plane y = MakePlane(w, h, 101u + static_cast<uint32_t>(si * 3 + bi));
+				const Plane y = MakePlane(w, h, 101u + static_cast<uint32_t>(si * 5 + bi));
 				const GrainSplit::Split ref = GrainSplit::Compute(y, scale, B);
 				pl_tex tex = UploadLuma(gpu, y);
 				Assert::IsNotNull(tex, L"upload");
@@ -332,6 +346,39 @@ public:
 				}
 				pl_tex_destroy(gpu, &tex);
 			}
+	}
+
+	// (a2) component 1 of an RG16 texture (plane in channel 1, noise in channel 0) equals component 0 of an R16 texture of the plane.
+	TEST_METHOD(V3ComponentOneEqualsComponentZero)
+	{
+		using namespace GrainSplitV3GpuTestsNs;
+		GpuDevice dev;
+		Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+		pl_gpu gpu = dev.Gpu();
+		const int cases[3][3] = { { 320, 180, 16 }, { 251, 139, 9 }, { 257, 143, 32 } };
+		for (const auto& cs : cases)
+		{
+			const int w = cs[0], h = cs[1], B = cs[2];
+			const Plane y = MakePlane(w, h, 401u + static_cast<uint32_t>(B));
+			pl_tex rg = UploadLumaInChannel1(gpu, y);
+			pl_tex r = UploadLuma(gpu, y);
+			Assert::IsNotNull(rg, L"rg16 upload");
+			Assert::IsNotNull(r, L"r16 upload");
+			for (int st = 0; st < 2; ++st)
+			{
+				const Storage storage = st == 0 ? Storage::Full : Storage::Compact;
+				const Product a = Run(dev, rg, B, B / 16.0, storage, false, 1);
+				const Product b = Run(dev, r, B, B / 16.0, storage, false, 0);
+				Assert::IsTrue(a.ok, Wide(a.error).c_str());
+				Assert::IsTrue(b.ok, Wide(b.error).c_str());
+				Assert::IsTrue(!a.a.empty() && !a.blocks.empty(), L"downloaded");
+				const bool same = SameBits(a.a, b.a) && SameBits(a.b, b.b) && SameBits(a.blocks, b.blocks);
+				LogF("v3 component 1 (RG16) vs component 0 (R16) %.0fx%.0f B %.0f: %.0f (0 = bit-identical)", w, h, B, same ? 0.0 : 1.0);
+				Assert::IsTrue(same, L"component 1 of RG16 is bit-identical to component 0 of R16 (split and blocks)");
+			}
+			pl_tex_destroy(gpu, &rg);
+			pl_tex_destroy(gpu, &r);
+		}
 	}
 
 	// (b) two runs on the same plane give a bit-identical product and blocks.

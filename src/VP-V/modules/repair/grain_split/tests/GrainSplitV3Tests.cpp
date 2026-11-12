@@ -298,8 +298,10 @@ namespace GrainSplitV3TestsNs
 			}
 		}
 
-		TEST_METHOD(GrainSplitV3ReAddIsExact)
+		TEST_METHOD(GrainSplitV3GrainLawIdentity)
 		{
+			// The law identity grain == (1 - f) * (Y - base) per pixel (both laws). Independent of how clean is summed:
+			// clean = base + f (D1 + D2) and D1 + D2 = Y - base, so grain = Y - clean = (1 - f) (Y - base).
 			const Cls cls[] = { Cls::Flat, Cls::Gradient, Cls::DarkFlat, Cls::Texture, Cls::Edges };
 			for (int si = 0; si < 2; ++si)
 			{
@@ -314,13 +316,32 @@ namespace GrainSplitV3TestsNs
 						const GrainSplit::Split a = Law(law == 1, y, g);
 						double worst = 0.0;
 						for (size_t i = 0; i < y.v.size(); ++i)
-							worst = (std::max)(worst, std::fabs(y.v[i] - (a.clean.v[i] + a.grain.v[i])));
+							worst = (std::max)(worst, std::fabs(a.grain.v[i] - (1.0 - a.f.v[i]) * (y.v[i] - a.base.v[i])));
 						char buf[160];
-						std::snprintf(buf, sizeof(buf), "scale%d %-8s %s: max |Y - (clean + G)| = %.3e", si + 1, ClsName(c), law == 1 ? "v3" : "v2", worst);
+						std::snprintf(buf, sizeof(buf), "scale%d %-8s %s: max |grain - (1 - f)(Y - base)| = %.3e", si + 1, ClsName(c), law == 1 ? "v3" : "v2", worst);
 						Log(buf);
-						Require(worst <= 1e-9, std::string("Y == clean + G to 1e-9: ") + buf);
+						Require(worst <= 1e-9, std::string("grain == (1 - f)(Y - base) to 1e-9: ") + buf);
 					}
 				}
+			}
+		}
+
+		TEST_METHOD(GrainSplitV3KeepsGrainInTextureAt4kLaw)
+		{
+			// The 4K lane law (scale 2, B 32): texture keep >= 0.90 and film-like flat keep >= 0.95, white and film, rms 1 and 3.
+			// The scale-1 texture and film rows stay 'D4 pending' (GrainSplitV3ReportsOpenRows): log only.
+			for (Spec sp : { Spec::White, Spec::Film })
+				for (double rms : { 1.0, 3.0 })
+				{
+					const Row t = RunRow(Cls::Texture, sp, 1, rms);
+					Log(RowText(t));
+					Require(t.v3.keep >= 0.90, std::string("v3 texture keep >= 0.90 at scale 2: ") + RowText(t));
+				}
+			for (double rms : { 1.0, 3.0 })
+			{
+				const Row f = RunRow(Cls::Flat, Spec::Film, 1, rms);
+				Log(RowText(f));
+				Require(f.v3.keep >= 0.95, std::string("v3 film-like flat keep >= 0.95 at scale 2: ") + RowText(f));
 			}
 		}
 
