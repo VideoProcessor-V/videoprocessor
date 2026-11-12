@@ -264,6 +264,8 @@ Lifecycle and frame phases: render thread. The tap sink: the frame-analysis work
 drains). Status: a cache rebuilt on the render thread. Per-host state is found through `core/hub/HostSlots.h` (lock-free lookup); the seal hooks hold weak
 references, so a released renderer's state can never be touched. All dispatcher calls are render thread.
 
+* Look-ahead slot owner role (P11a-0, declaration only, no code; refs/110 s2.1; the S8 state anchor is `core/hub/HostState.h`): with TD on, P10 (+P11/P16) for frames in TD's window run in the S5 spare slot (lane == live bytes); with TD off today's AfterRender gap is unchanged; owner: P11a lane; trigger: TD on.
+
 ## Stale state and drops (audit notes)
 
 * A renderer whose device creation throws never gets `GpuReleased`; a new renderer may then reuse its address. The tap keeps a generation per owner (bumped when

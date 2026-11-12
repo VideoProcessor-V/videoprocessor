@@ -93,6 +93,7 @@
 #include <VP-V/modules/motion/estimation/VectorEngineHost.h>   // P5a: the vector engine: state, logic and the host adapter   // VPV-HOOK
 #include <VP-V/modules/input/capture/CaptureHost.h>   // P10: the capture extension's binding and host adapter   // VPV-HOOK
 #include <VP-V/modules/input/capture/CapturePayload.h>   // P10 R18: the payload's capture slot readers   // VPV-HOOK
+#include <VP-V/core/hub/HostState.h>   // P11a-0: the S8 state anchor type (Vpv::HostState)   // VPV-HOOK
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>   // R4a: the re-base decision product P0
 #include <VP-V/modules/scaling/rebase/RebaseWarmupJob.h>   // FX-RB re-base shader warm-up // VPV-HOOK
 #include <vprenderer/DejudderPolicy.h>
@@ -25284,6 +25285,7 @@ releaseDriftBaseRetention =
 		[](void* self) { static_cast<Impl*>(self)->vpQueueErrorReset.store(true, std::memory_order_release); }, this } };
 	// VPV-HOOK-END
 	Vpv::Capture::HostBinding captureBinding{ this, Vpv::Capture::MakeCaptureHost(*this) };   // P10: last member (registered last, removed first)   // VPV-HOOK
+	Vpv::HostState vpv;   // P11a-0: the S8 state anchor (data only, no binding; core/hub/HostState.h)   // VPV-HOOK
 };
 #include <VP-V/modules/motion/estimation/VectorEngineEstimate.inl>   // VPV-HOOK P5a-5: the estimate and the engine keeper (Impl members)
 #include <VP-V/modules/motion/consumers/DejudderPolicyRunner.inl>   // VPV-HOOK M2 P5b-3: the de-judder policy (Impl members)
