@@ -470,6 +470,39 @@ class CheckHookGatingTest(unittest.TestCase):
         self.assertIn("unguarded 2", classes)
         self.assertEqual((gate, final), (1, 1))
 
+    # --- a pending temporary ceiling ratchets against its base (Lead 4 ruling 2026-11-11, option a) ---
+
+    def test_pending_temporary_with_headroom_is_informational(self):
+        self._transitional(None, {"re-graft": {"landed": None}})
+        _w(self.root, chg.BUDGET_PATH, json.dumps({"files": {BILL: 2}, "temporary": {BILL: {"limit": 3, "reverts_to": 2, "until": ["re-graft"]}}}))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("  temporary headroom %s 2 < 3 (pending re-graft)" % BILL, out)
+        self.assertNotIn("ratchet the ceiling down", out)
+        self.assertIn("; temporary Renderer.cpp 2 <= 3 (reverts to 2)", out)
+
+    def test_pending_temporary_below_its_base_still_ratchets_against_the_base(self):
+        self._transitional(None, {"re-graft": {"landed": None}})
+        _w(self.root, chg.BUDGET_PATH, json.dumps({"files": {BILL: 3}, "temporary": {BILL: {"limit": 4, "reverts_to": 3, "until": ["re-graft"]}}}))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("%s 2 sites < budget 3 (ratchet the ceiling down)" % BILL, out)
+        self.assertNotIn("temporary headroom", out)
+
+    def test_without_a_temporary_the_ratchet_is_unchanged(self):
+        self._transitional(None, {"re-graft": {"landed": None}})
+        _w(self.root, chg.BUDGET_PATH, json.dumps({"files": {BILL: 3}}))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("%s 2 sites < budget 3 (ratchet the ceiling down)" % BILL, out)
+        self.assertNotIn("temporary headroom", out)
+        _w(self.root, chg.BUDGET_PATH, json.dumps({"files": {BILL: 2}, "temporary": {BILL: {"limit": 3, "reverts_to": 2, "until": ["re-graft"]}}}))
+        _w(self.root, chg.TRIGGERS_PATH, json.dumps({"re-graft": {"landed": "abc123"}}))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("temporary headroom", out, "a landed temporary behaves as today: the base budget applies")
+        self.assertNotIn("ratchet the ceiling down", out)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -866,7 +866,7 @@ def site_checks(tree, per_file, root=None, rev=None, no_git=True):
     res = {"sites": len(sites), "new": [], "approved": [], "removed": [], "over": [], "ratchet": [],
            "manifest": "none" if manifest is None else MANIFEST_PATH, "budget": "none" if budget is None else BUDGET_PATH,
            "approvals_used": [], "expired": [], "unknown": [], "temporary": [], "trigger_errors": [],
-           "approval_missing": [], "budget_errors": []}
+           "approval_missing": [], "budget_errors": [], "headroom": []}
     ts = trigger_scan(tree, root, rev, no_git)
     known_t, landed_t = ts["known"], ts["landed"]
     res["trigger_errors"] = ts["errors"]
@@ -930,7 +930,7 @@ def site_checks(tree, per_file, root=None, rev=None, no_git=True):
                 res["temporary"].append({"file": f, "limit": int(tmp["limit"]), "reverts_to": int(tmp["reverts_to"]), "pending": pending})
             else:
                 limits[f] = int(tmp["reverts_to"])
-        temp_files = {x["file"] for x in res["temporary"]}
+        temp_files = {x["file"]: x for x in res["temporary"]}
         counts = {}
         for s in sites:
             if s["file"] in prod:
@@ -940,7 +940,15 @@ def site_checks(tree, per_file, root=None, rev=None, no_git=True):
             if n > lim:
                 res["over"].append("%s %d sites > %sbudget %d" % (f, n, "temporary " if f in temp_files else "", lim))
             elif n < lim:
-                res["ratchet"].append("%s %d sites < budget %d (ratchet the ceiling down)" % (f, n, lim))
+                tx = temp_files.get(f)
+                if tx is None:
+                    res["ratchet"].append("%s %d sites < budget %d (ratchet the ceiling down)" % (f, n, lim))
+                elif n < tx["reverts_to"]:
+                    # a pending temporary ceiling: the ratchet reference is the base budget it reverts to
+                    res["ratchet"].append("%s %d sites < budget %d (ratchet the ceiling down)" % (f, n, tx["reverts_to"]))
+                else:
+                    # base <= count < temporary limit: the allowance is not yet used here (informational, exit unchanged)
+                    res["headroom"].append("temporary headroom %s %d < %d (pending %s)" % (f, n, lim, ", ".join(tx["pending"])))
     for x in res["temporary"]:
         x["count"] = counts.get(x["file"], 0) if budget is not None else 0
     return res
@@ -1149,6 +1157,8 @@ def render(res):
     for line in sc["over"]:
         out.append("  OVER BUDGET " + line)
     for line in sc["ratchet"]:
+        out.append("  " + line)
+    for line in sc.get("headroom", []):
         out.append("  " + line)
     for line in sc["expired"]:
         out.append("  " + line)
