@@ -236,6 +236,16 @@ namespace VectorDemand
 				if ((served & (1u << i)) != 0 && DomainOf(ConsumerAt(i)) == Domain::SourceStatistics)
 					stats |= 1u << i;
 			d.unserved |= served & ~stats;
+			// W2-C1 (B9): the backward pair serves only the statistics consumers, which are reuse-only. When the starter that engaged
+			// them was a served field consumer (the camera fit), it needs a frame ahead and is dropped here, so no starter runs the
+			// engine: the statistics are refused visibly (NoStarter), never served from a pair nobody produces.
+			if (stats != 0 && !in.starterEngaged && (stats & StarterMask()) == 0)
+			{
+				d.refused |= stats | synthesisReuse;
+				d.unserved |= d.refused;
+				d.reason = Reason::NoStarter;
+				return d;
+			}
 			d.served = stats;
 			d.mode = Mode::Backward;
 			d.reason = Reason::BackwardDepth0;
