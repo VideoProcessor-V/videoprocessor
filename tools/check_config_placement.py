@@ -69,6 +69,7 @@ CROSS_UNIT_OWNER = {
     "source_resolution_mixed_guard": "input.source_analysis",
     "source_resolution_release_fade_s": "input.source_analysis",
     "source_resolution_text_guard": "input.source_analysis",
+    "source_geometry_detect": "input.source_analysis",   # SID r2 text row on the Scaling > Re-base card; read and owned by source_analysis
     "fbo_float32": "scaling.output",               # card: Colour > Range and precision (named there; control on Bill's Processing page)
     "intent_display": "control.diagnostics",        # card: Input > Source intent; the display-intent report
     "intent_black": "drive.led_compensation",      # card: Input > Source intent; read by the LED compensation
@@ -84,7 +85,7 @@ MANIFEST_EXEMPT = ("dejudder_pulldown",)
 UPSTREAM_NO_ROW = ("peak_detection",)
 # Elsewhere: a key of the card's unit that the card only names (the control stays on Bill's page); it is placed
 # on that card for the placement text and the owner checks.
-KEY_ITEMS = ("Row", "Toggle", "Elsewhere")
+KEY_ITEMS = ("Row", "Toggle", "Text", "Elsewhere")
 # P8-4: the "Fixes under test" container on Bill's Rendering page (section id fixesUnderTest) holds VP keys.
 # Every VP key built inside it is on an Organisation() card (a Row item, so the row moves to its unit's card),
 # except these, which have no card yet and stay in the container (their placement text says so):
