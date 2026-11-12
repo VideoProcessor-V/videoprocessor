@@ -18,7 +18,7 @@ namespace VpLaneProducts
 	class GrainSplitKernel : public IProductKernel
 	{
 	public:
-		// `requested`: the either/or setting grain_split_storage. Full until the grain gate has passed for Compact.
+		// `requested`: the either/or setting grain_split_storage (default compact since v3, refs/116 D2).
 		explicit GrainSplitKernel(GrainSplit::Storage requested = GrainSplit::Storage::Full) : m_requested(requested) {}
 
 		VpSkeleton::ProductId Product() const override { return VpSkeleton::kP10GrainSplit; }
@@ -29,8 +29,8 @@ namespace VpLaneProducts
 		bool Step(KernelContext& c, uint32_t step) override;
 		void Release(pl_gpu gpu) override;
 		std::string LastError() const override { return m_error; }
-		// Working set of one Splitter (rgba32f temporaries, the arena-free layout of GrainSplitGpu): Compact = rows + bands
-		// (two full-size planes), Full = bands (rows is the product), plus the block grid; two Splitters (lane + live).
+		// Working set of one Splitter (the arena-free layout of GrainSplitGpu v3): two half-size rg32f planes plus the block
+		// grid, the same for both layouts; two Splitters (lane + live).
 		uint64_t PrivateBytes(VpSkeleton::Dims dims, bool laneForm) const override;
 		std::vector<FallbackCatalog::Decision> Fallbacks() const override;
 

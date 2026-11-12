@@ -1,7 +1,9 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// repair.grain_split GPU passes (GrainSplitGpu.h). Mirrors GrainSplit::Compute (GrainSplit.h).
+// repair.grain_split GPU passes (GrainSplitGpu.h). Mirrors GrainSplit::Compute (GrainSplit.h), the v3 law (refs/116 s6):
+// the two low bands at half resolution and the full-resolution work in shared-memory tiles, the pass structure of
+// texture_restore (TextureRestore.cpp: HALF / LOWH / LOWV / STATS / GRAIN / APPLY). No full-resolution intermediates.
 #include <pch.h>
 
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
@@ -18,55 +20,167 @@ namespace GrainSplit
 	{
 		namespace
 		{
-			// Rows: the three Gaussians across, edges replicated; the summation order of GrainSplit::Gauss.
-			const char* const GH_BODY = R"GLSL(
-ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-if (p.x < GS_W && p.y < GS_H) {
-    float a1 = 0.0, ab = 0.0, a6 = 0.0;
-    for (int k = -R1; k <= R1; k++) a1 += w1(k) * gs_y(clamp(p.x + k, 0, GS_W - 1), p.y);
-    for (int k = -RB; k <= RB; k++) ab += wb(k) * gs_y(clamp(p.x + k, 0, GS_W - 1), p.y);
-    for (int k = -R6; k <= R6; k++) a6 += w6(k) * gs_y(clamp(p.x + k, 0, GS_W - 1), p.y);
-    imageStore(rows_out, p, vec4(a1, ab, a6, gs_y(p.x, p.y)));
+			// Geometry shared by the passes (defines): GS_W/GS_H plane, GS_HW/GS_HH half plane, GS_B block, GS_BW/GS_BH grid.
+			// Weights: w1/R1 full-resolution fine band (sigmaFine s), wb/RB and w6/R6 the half-resolution base and low bands
+			// (V3HalfWeight of sigmaBase s and sigmaLow s), RL = max(RB, R6).
+
+			// 1. HALF + ACROSS: the 2x2 box of the plane (clamped positions, GrainSplit::V3Half) into shared memory, then the
+			// base and low Gaussians across (half-resolution edges clamped). Tile TW x TH half px per workgroup (64 x 4).
+			const char* const HALF_HEADER = R"GLSL(
+#define TW 64
+#define TH 4
+#define SW (TW + 2 * RL)
+shared float s_r[TH * SW];
+)GLSL";
+			const char* const HALF_BODY = R"GLSL(
+uint li = gl_LocalInvocationIndex;
+ivec2 lid = ivec2(gl_LocalInvocationID.xy);
+ivec2 org = ivec2(gl_WorkGroupID.xy) * ivec2(TW, TH);
+for (uint i = li; i < uint(TH * SW); i += uint(TW * TH)) {
+    int r = int(i / uint(SW)), c = int(i % uint(SW));
+    ivec2 q = ivec2(clamp(org.x - RL + c, 0, GS_HW - 1), clamp(org.y + r, 0, GS_HH - 1));
+    int x0 = min(2 * q.x, GS_W - 1), x1 = min(2 * q.x + 1, GS_W - 1);
+    int y0 = min(2 * q.y, GS_H - 1), y1 = min(2 * q.y + 1, GS_H - 1);
+    float a = gs_y(x0, y0) + gs_y(x1, y0);
+    float b = gs_y(x0, y1) + gs_y(x1, y1);
+    s_r[i] = 0.25 * (a + b);
+}
+barrier();
+ivec2 q = org + lid;
+if (q.x < GS_HW && q.y < GS_HH) {
+    int c0 = lid.y * SW + lid.x + RL;
+    float ab = 0.0, a6 = 0.0;
+    for (int k = -RB; k <= RB; k++) ab += wb(k) * s_r[c0 + k];
+    for (int k = -R6; k <= R6; k++) a6 += w6(k) * s_r[c0 + k];
+    imageStore(tmp_out, q, vec4(ab, a6, 0.0, 0.0));
 }
 )GLSL";
 
-			// Columns: -> d1 = Y - G1, d2 = G1 - Gb, d3 = Gb - G6, base = Gb.
-			const char* const GV_BODY = R"GLSL(
-ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-if (p.x < GS_W && p.y < GS_H) {
-    float g1 = 0.0, gb = 0.0, g6 = 0.0;
-    for (int k = -R1; k <= R1; k++) g1 += w1(k) * texelFetch(rows, ivec2(p.x, clamp(p.y + k, 0, GS_H - 1)), 0).x;
-    for (int k = -RB; k <= RB; k++) gb += wb(k) * texelFetch(rows, ivec2(p.x, clamp(p.y + k, 0, GS_H - 1)), 0).y;
-    for (int k = -R6; k <= R6; k++) g6 += w6(k) * texelFetch(rows, ivec2(p.x, clamp(p.y + k, 0, GS_H - 1)), 0).z;
-    float y = texelFetch(rows, p, 0).w;
-    imageStore(bands_out, p, vec4(y - g1, g1 - gb, gb - g6, gb));
+			// 2. DOWN: the base and low Gaussians down (half resolution) -> low = (Gb, G6). Tile TC x TR half px (16 x 64).
+			const char* const DOWN_HEADER = R"GLSL(
+#define TC 16
+#define TR 64
+#define SH (TR + 2 * RL)
+shared vec2 s_c[SH * TC];
+)GLSL";
+			const char* const DOWN_BODY = R"GLSL(
+uint li = gl_LocalInvocationIndex;
+ivec2 lid = ivec2(gl_LocalInvocationID.xy);
+ivec2 org = ivec2(gl_WorkGroupID.xy) * ivec2(TC, TR);
+for (uint i = li; i < uint(SH * TC); i += 256u) {
+    int r = int(i / uint(TC)), c = int(i % uint(TC));
+    ivec2 q = ivec2(clamp(org.x + c, 0, GS_HW - 1), clamp(org.y - RL + r, 0, GS_HH - 1));
+    s_c[i] = texelFetch(tmp, q, 0).xy;
+}
+barrier();
+for (int s = 0; s < TR / 16; s++) {
+    int ry = lid.y + 16 * s;
+    ivec2 q = org + ivec2(lid.x, ry);
+    if (q.x < GS_HW && q.y < GS_HH) {
+        float ab = 0.0, a6 = 0.0;
+        for (int k = -RB; k <= RB; k++) ab += wb(k) * s_c[(ry + RL + k) * TC + lid.x].x;
+        for (int k = -R6; k <= R6; k++) a6 += w6(k) * s_c[(ry + RL + k) * TC + lid.x].y;
+        imageStore(low_out, q, vec4(ab, a6, 0.0, 0.0));
+    }
 }
 )GLSL";
 
-			// One thread per block: sub-block energies of D (sub-block (si, sj) spans [b B + si B / SUB, b B + (si + 1) B / SUB)),
-			// sorted, the quietest QUIET averaged x CAL; and the block mean of d3^2 (raster order).
-			const char* const QUIET_BODY = R"GLSL(
-ivec2 b = ivec2(gl_GlobalInvocationID.xy);
-if (b.x < GS_BW && b.y < GS_BH) {
-    float e[GS_SUB * GS_SUB];
-    int n = 0;
-    for (int sj = 0; sj < GS_SUB; sj++)
-        for (int si = 0; si < GS_SUB; si++) {
-            int x0 = b.x * GS_B + (si * GS_B) / GS_SUB, x1 = min(GS_W, b.x * GS_B + ((si + 1) * GS_B) / GS_SUB);
-            int y0 = b.y * GS_B + (sj * GS_B) / GS_SUB, y1 = min(GS_H, b.y * GS_B + ((sj + 1) * GS_B) / GS_SUB);
-            if (x1 > x0 && y1 > y0) {
-                float sum = 0.0;
-                for (int yy = y0; yy < y1; yy++)
-                    for (int xx = x0; xx < x1; xx++) {
-                        vec4 c = texelFetch(bands, ivec2(xx, yy), 0);
-                        float d = c.x + c.y;
-                        sum += d * d;
-                    }
-                e[n] = sum / float((x1 - x0) * (y1 - y0));
-                n++;
-            }
+			// The half-resolution bands at a full-resolution pixel from the shared tile s_l (half indices lo .. lo + LA - 1,
+			// loaded clamped): bilinear at (p + 0.5) / 2 - 0.5, the arithmetic of GrainSplit::V3LowAt.
+			const char* const LOW_S_GLSL = R"GLSL(
+vec2 low_s(ivec2 p, ivec2 lo)
+{
+    vec2 h = (vec2(p) + vec2(0.5)) * 0.5 - vec2(0.5);
+    ivec2 i0 = ivec2(floor(h));
+    vec2 f = h - vec2(i0);
+    ivec2 a = i0 - lo;
+    vec2 v00 = s_l[a.y * LA + a.x], v10 = s_l[a.y * LA + a.x + 1];
+    vec2 v01 = s_l[(a.y + 1) * LA + a.x], v11 = s_l[(a.y + 1) * LA + a.x + 1];
+    vec2 top = v00 + (v10 - v00) * f.x, bot = v01 + (v11 - v01) * f.x;
+    return top + (bot - top) * f.y;
+}
+)GLSL";
+
+			// 3. STATS: one workgroup per block, in chunks of CH x CH px (CH = min(B, 16)): the chunk and its R1 apron in
+			// shared memory, G1 separably, the bands per pixel; per sub-block (one thread each, fixed order) the sums of
+			// (D^2, d1^2, d2^2, d3^2) and the pixel count. Then one thread: the quietest sub-block energies (sorted) x CAL and
+			// the block means -> quiet = (quiet, e3, e1, e2). Deterministic: no atomics.
+			const char* const STATS_HEADER = R"GLSL(
+#define AP (CH + 2 * R1)
+#define LA (CH / 2 + 2)
+#define NSUB (GS_SUB * GS_SUB)
+shared float s_y[AP * AP];
+shared float s_hh[AP * CH];
+shared vec2 s_l[LA * LA];
+shared vec4 s_px[CH * CH];
+shared vec4 s_sum[NSUB];
+shared float s_cnt[NSUB];
+)GLSL";
+			const char* const STATS_BODY = R"GLSL(
+uint li = gl_LocalInvocationIndex;
+ivec2 lid = ivec2(gl_LocalInvocationID.xy);
+ivec2 blk = ivec2(gl_WorkGroupID.xy);
+ivec2 borg = blk * GS_B;
+if (li < uint(NSUB)) { s_sum[li] = vec4(0.0); s_cnt[li] = 0.0; }
+for (int cy = 0; cy < GS_B; cy += CH) {
+    for (int cx = 0; cx < GS_B; cx += CH) {
+        ivec2 org = borg + ivec2(cx, cy);
+        ivec2 lo = org / 2 - ivec2(1);
+        barrier();
+        for (uint i = li; i < uint(AP * AP); i += 256u) {
+            int r = int(i / uint(AP)), c = int(i % uint(AP));
+            s_y[i] = gs_y(clamp(org.x - R1 + c, 0, GS_W - 1), clamp(org.y - R1 + r, 0, GS_H - 1));
         }
-    // insertion sort, ascending
+        for (uint i = li; i < uint(LA * LA); i += 256u) {
+            int r = int(i / uint(LA)), c = int(i % uint(LA));
+            s_l[i] = texelFetch(low, clamp(lo + ivec2(c, r), ivec2(0), ivec2(GS_HW - 1, GS_HH - 1)), 0).xy;
+        }
+        barrier();
+        for (uint i = li; i < uint(AP * CH); i += 256u) {
+            int r = int(i / uint(CH)), c = int(i % uint(CH));
+            float acc = 0.0;
+            for (int k = -R1; k <= R1; k++) acc += w1(k) * s_y[r * AP + c + R1 + k];
+            s_hh[i] = acc;
+        }
+        barrier();
+        if (lid.x < CH && lid.y < CH) {
+            ivec2 p = org + lid;
+            float g1 = 0.0;
+            for (int k = -R1; k <= R1; k++) g1 += w1(k) * s_hh[(lid.y + R1 + k) * CH + lid.x];
+            float y = s_y[(lid.y + R1) * AP + lid.x + R1];
+            vec2 l = low_s(p, lo);
+            float d1 = y - g1, d2 = g1 - l.x, d3 = l.x - l.y, dd = d1 + d2;
+            bool inside = p.x < GS_W && p.y < GS_H;
+            s_px[lid.y * CH + lid.x] = inside ? vec4(dd * dd, d1 * d1, d2 * d2, d3 * d3) : vec4(-1.0);
+        }
+        barrier();
+        if (li < uint(NSUB)) {
+            int si = int(li) % GS_SUB, sj = int(li) / GS_SUB;
+            int x0 = max((si * GS_B) / GS_SUB, cx), x1 = min(((si + 1) * GS_B) / GS_SUB, cx + CH);
+            int y0 = max((sj * GS_B) / GS_SUB, cy), y1 = min(((sj + 1) * GS_B) / GS_SUB, cy + CH);
+            vec4 acc = s_sum[li];
+            float n = s_cnt[li];
+            for (int yy = y0; yy < y1; yy++)
+                for (int xx = x0; xx < x1; xx++) {
+                    vec4 v = s_px[(yy - cy) * CH + (xx - cx)];
+                    if (v.x >= 0.0) { acc += v; n += 1.0; }
+                }
+            s_sum[li] = acc;
+            s_cnt[li] = n;
+        }
+    }
+}
+barrier();
+if (li == 0u) {
+    float e[NSUB];
+    int n = 0;
+    vec4 tot = vec4(0.0);
+    float cnt = 0.0;
+    for (int i = 0; i < NSUB; i++) {
+        if (s_cnt[i] > 0.0) { e[n] = s_sum[i].x / s_cnt[i]; n++; }
+        tot += s_sum[i];
+        cnt += s_cnt[i];
+    }
     for (int i = 1; i < n; i++) {
         float v = e[i];
         int j = i - 1;
@@ -77,66 +191,13 @@ if (b.x < GS_BW && b.y < GS_BH) {
     float m = 0.0;
     for (int i = 0; i < nq; i++) m += e[i];
     float quiet = n > 0 ? GS_CAL * m / float(nq) : 0.0;
-    float s3 = 0.0;
-    int y1b = min(GS_H, (b.y + 1) * GS_B), x1b = min(GS_W, (b.x + 1) * GS_B);
-    for (int yy = b.y * GS_B; yy < y1b; yy++)
-        for (int xx = b.x * GS_B; xx < x1b; xx++) {
-            float d3 = texelFetch(bands, ivec2(xx, yy), 0).z;
-            s3 += d3 * d3;
-        }
-    float cnt = float((x1b - b.x * GS_B) * (y1b - b.y * GS_B));
-    imageStore(quiet_out, b, vec4(quiet, s3 / cnt, 0.0, 0.0));
+    float c = max(cnt, 1.0);
+    imageStore(quiet_out, blk, vec4(quiet, tot.w / c, tot.y / c, tot.z / c));
 }
 )GLSL";
 
-			// COMPACT block passes: the same N and e3 as the Full ones, plus the block means of d1^2 and d2^2 (the fine and
-			// mid band energies, raster order, no atomics) as two more modifier channels: quiet = (quiet, e3, e1, e2).
-			const char* const QUIET_BODY_COMPACT = R"GLSL(
-ivec2 b = ivec2(gl_GlobalInvocationID.xy);
-if (b.x < GS_BW && b.y < GS_BH) {
-    float e[GS_SUB * GS_SUB];
-    int n = 0;
-    for (int sj = 0; sj < GS_SUB; sj++)
-        for (int si = 0; si < GS_SUB; si++) {
-            int x0 = b.x * GS_B + (si * GS_B) / GS_SUB, x1 = min(GS_W, b.x * GS_B + ((si + 1) * GS_B) / GS_SUB);
-            int y0 = b.y * GS_B + (sj * GS_B) / GS_SUB, y1 = min(GS_H, b.y * GS_B + ((sj + 1) * GS_B) / GS_SUB);
-            if (x1 > x0 && y1 > y0) {
-                float sum = 0.0;
-                for (int yy = y0; yy < y1; yy++)
-                    for (int xx = x0; xx < x1; xx++) {
-                        vec4 c = texelFetch(bands, ivec2(xx, yy), 0);
-                        float d = c.x + c.y;
-                        sum += d * d;
-                    }
-                e[n] = sum / float((x1 - x0) * (y1 - y0));
-                n++;
-            }
-        }
-    for (int i = 1; i < n; i++) {
-        float v = e[i];
-        int j = i - 1;
-        while (j >= 0 && e[j] > v) { e[j + 1] = e[j]; j--; }
-        e[j + 1] = v;
-    }
-    int nq = min(n, max(1, GS_QUIET));
-    float m = 0.0;
-    for (int i = 0; i < nq; i++) m += e[i];
-    float quiet = n > 0 ? GS_CAL * m / float(nq) : 0.0;
-    float s1q = 0.0, s2q = 0.0, s3 = 0.0;
-    int y1b = min(GS_H, (b.y + 1) * GS_B), x1b = min(GS_W, (b.x + 1) * GS_B);
-    for (int yy = b.y * GS_B; yy < y1b; yy++)
-        for (int xx = b.x * GS_B; xx < x1b; xx++) {
-            vec4 c = texelFetch(bands, ivec2(xx, yy), 0);
-            s1q += c.x * c.x;
-            s2q += c.y * c.y;
-            s3 += c.z * c.z;
-        }
-    float cnt = float((x1b - b.x * GS_B) * (y1b - b.y * GS_B));
-    imageStore(quiet_out, b, vec4(quiet, s3 / cnt, s1q / cnt, s2q / cnt));
-}
-)GLSL";
-
-			const char* const NMIN_BODY_COMPACT = R"GLSL(
+			// 4. NMIN: per block, the minimum of quiet over (2 n + 1)^2 blocks -> blocks = (N, e3, e1, e2).
+			const char* const NMIN_BODY = R"GLSL(
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 if (b.x < GS_BW && b.y < GS_BH) {
     float m = 1e30;
@@ -148,56 +209,75 @@ if (b.x < GS_BW && b.y < GS_BH) {
 }
 )GLSL";
 
-			const char* const NMIN_BODY = R"GLSL(
-ivec2 b = ivec2(gl_GlobalInvocationID.xy);
-if (b.x < GS_BW && b.y < GS_BH) {
-    float m = 1e30;
-    for (int j = -GS_NG; j <= GS_NG; j++)
-        for (int i = -GS_NG; i <= GS_NG; i++)
-            m = min(m, texelFetch(quiet, ivec2(clamp(b.x + i, 0, GS_BW - 1), clamp(b.y + j, 0, GS_BH - 1)), 0).x);
-    imageStore(blocks_out, b, vec4(m, texelFetch(quiet, b, 0).y, 0.0, 0.0));
-}
+			// 5. APPLY: 16 x 16 output px per workgroup; the plane with a 1 px border and the R1 apron in shared memory,
+			// G1 for the 16 x 16 centre, D = Y - Gb over the 18 x 18 (positions clamped, as GrainSplit's d.get), the 3 x 3
+			// energy, f = clamp(1 - kappa N / max(e, floor), 0, 1) -> the product (Full: split rgba32f; Compact: A, B).
+			const char* const APPLY_HEADER = R"GLSL(
+#define AC 16
+#define AW (AC + 2)
+#define AA (AW + 2 * R1)
+#define LA (AC / 2 + 2)
+shared float s_y[AA * AA];
+shared float s_hh[AA * AC];
+shared vec2 s_l[LA * LA];
+shared float s_d[AW * AW];
 )GLSL";
-
-			const char* const F_BODY = R"GLSL(
-ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+			const char* const APPLY_BODY = R"GLSL(
+uint li = gl_LocalInvocationIndex;
+ivec2 lid = ivec2(gl_LocalInvocationID.xy);
+ivec2 org = ivec2(gl_WorkGroupID.xy) * AC;
+ivec2 so = org - ivec2(1 + R1);
+ivec2 lo = org / 2 - ivec2(1);
+for (uint i = li; i < uint(AA * AA); i += 256u) {
+    int r = int(i / uint(AA)), c = int(i % uint(AA));
+    s_y[i] = gs_y(clamp(so.x + c, 0, GS_W - 1), clamp(so.y + r, 0, GS_H - 1));
+}
+for (uint i = li; i < uint(LA * LA); i += 256u) {
+    int r = int(i / uint(LA)), c = int(i % uint(LA));
+    s_l[i] = texelFetch(low, clamp(lo + ivec2(c, r), ivec2(0), ivec2(GS_HW - 1, GS_HH - 1)), 0).xy;
+}
+barrier();
+for (uint i = li; i < uint(AA * AC); i += 256u) {
+    int r = int(i / uint(AC)), c = int(i % uint(AC));
+    float acc = 0.0;
+    for (int k = -R1; k <= R1; k++) acc += w1(k) * s_y[r * AA + c + 1 + R1 + k];
+    s_hh[i] = acc;
+}
+for (uint i = li; i < uint(AW * AW); i += 256u) {
+    int r = int(i / uint(AW)), c = int(i % uint(AW));
+    ivec2 q = clamp(org - ivec2(1) + ivec2(c, r), ivec2(0), ivec2(GS_W - 1, GS_H - 1));
+    ivec2 sq = q - so;
+    s_d[i] = s_y[sq.y * AA + sq.x] - low_s(q, lo).x;
+}
+barrier();
+ivec2 p = org + lid;
 if (p.x < GS_W && p.y < GS_H) {
+    float g1 = 0.0;
+    for (int k = -R1; k <= R1; k++) g1 += w1(k) * s_hh[(lid.y + 1 + R1 + k) * AC + lid.x];
+    int ci = (lid.y + 1) * AW + lid.x + 1;
     float e = 0.0;
     for (int j = -1; j <= 1; j++)
         for (int i = -1; i <= 1; i++) {
-            vec4 c = texelFetch(bands, ivec2(clamp(p.x + i, 0, GS_W - 1), clamp(p.y + j, 0, GS_H - 1)), 0);
-            float dv = c.x + c.y;
-            e += dv * dv;
+            float v = s_d[ci + j * AW + i];
+            e += v * v;
         }
     e /= 9.0;
-    float N = texelFetch(blocks, ivec2(p.x / GS_B, p.y / GS_B), 0).x;
-    float f = clamp(1.0 - GS_KAPPA * N / max(e, GS_FLOOR), 0.0, 1.0);
-    vec4 c = texelFetch(bands, p, 0);
-    imageStore(split_out, p, vec4(f * c.x, f * c.y, f, c.w));
-}
-)GLSL";
-
-			// The Compact last pass: the same arithmetic as F_BODY; A = (s1, s2) in codes, B = (f, base x code unit).
-			const char* const F_BODY_COMPACT = R"GLSL(
-ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-if (p.x < GS_W && p.y < GS_H) {
-    float e = 0.0;
-    for (int j = -1; j <= 1; j++)
-        for (int i = -1; i <= 1; i++) {
-            vec4 c = texelFetch(bands, ivec2(clamp(p.x + i, 0, GS_W - 1), clamp(p.y + j, 0, GS_H - 1)), 0);
-            float dv = c.x + c.y;
-            e += dv * dv;
-        }
-    e /= 9.0;
-    float N = texelFetch(blocks, ivec2(p.x / GS_B, p.y / GS_B), 0).x;
-    float f = clamp(1.0 - GS_KAPPA * N / max(e, GS_FLOOR), 0.0, 1.0);
-    vec4 c = texelFetch(bands, p, 0);
-    imageStore(split_a, p, vec4(f * c.x, f * c.y, 0.0, 0.0));
-    imageStore(split_b, p, vec4(f, c.w * GS_CU, 0.0, 0.0));
+    float y = s_y[(lid.y + 1 + R1) * AA + lid.x + 1 + R1];
+    float gb = low_s(p, lo).x;
+    float d1 = y - g1, d2 = g1 - gb;
+    float nn = texelFetch(blocks, p / GS_B, 0).x;
+    float f = clamp(1.0 - GS_KAPPA * nn / max(e, GS_FLOOR), 0.0, 1.0);
+#ifdef GS_COMPACT
+    imageStore(split_a, p, vec4(f * d1, f * d2, 0.0, 0.0));
+    imageStore(split_b, p, vec4(f, gb * GS_CU, 0.0, 0.0));
+#else
+    imageStore(split_out, p, vec4(f * d1, f * d2, f, gb));
+#endif
 }
 )GLSL";
 
 			constexpr const char* kArenaOwner = "grain_split";
+			constexpr int kHalfTw = 64, kHalfTh = 4, kDownTc = 16, kDownTr = 64, kApplyTile = 16;
 
 			// Opens the arena scope of one Compute and closes it on every exit.
 			struct ScopeGuard
@@ -210,12 +290,16 @@ if (p.x < GS_W && p.y < GS_H) {
 				ScopeGuard& operator=(const ScopeGuard&) = delete;
 			};
 
-			std::string WeightsGlsl(const char* name, const char* radiusName, double sigma)
+			// float NAME(int k), k in -R..R, with the weights `weight(k)` and radius r.
+			template <typename F>
+			std::string WeightsGlsl(const char* name, const char* radiusName, int r, F weight)
 			{
-				const int r = GaussRadius(sigma);
 				return VpvGpu::DefineInt(radiusName, r) + "float " + name + "(int k)\n{\n    " +
-					VpvGpu::ConstArray("w", 2 * r + 1, [&](int i) { return GaussWeight(i - r, sigma); }) + "    return w[k + " + radiusName + "];\n}\n";
+					VpvGpu::ConstArray("w", 2 * r + 1, [&](int i) { return weight(i - r); }) + "    return w[k + " + radiusName + "];\n}\n";
 			}
+
+			int HalfOf(int v) { return (v + 1) / 2; }
+			int ChunkOf(int B) { return (std::min)(B, 16); }
 		}
 
 		int GaussRadius(double sigma) { return VpUnit::BandFromBase::Radius(sigma, 3.0, true, 0.0); }
@@ -228,7 +312,7 @@ if (p.x < GS_W && p.y < GS_H) {
 		void Splitter::Release(pl_gpu gpu)
 		{
 			if (gpu)
-				for (pl_tex* t : { &m_rows, &m_bands, &m_quiet, &m_blocks, &m_outA, &m_outB })
+				for (pl_tex* t : { &m_tmp, &m_low, &m_quiet, &m_blocks, &m_outFull, &m_outA, &m_outB })
 					if (*t) pl_tex_destroy(gpu, t);
 			m_out = Frame();
 		}
@@ -251,7 +335,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			if (storage != GrainSplit::Storage::Compact)
 				return "vec4 gs_fetch(ivec2 p) { return texelFetch(split, p, 0); }\n"
 					"vec2 gs_blocks(ivec2 b) { return texelFetch(gblocks, b, 0).xy; }\n"
-					"#define GS_HAS_ENERGIES 0\n"   // Full carries no band energies: a defined 'unavailable' value, readers derive their own
+					"#define GS_HAS_ENERGIES 0\n"   // Full is read as before: no band energies through the view
 					"vec2 gs_energies(ivec2 b) { return vec2(-1.0); }\n"
 					"float gs_tilt(ivec2 b) { return 0.0; }\n";
 			return "const float gs_cu = " + VpvGpu::Num(codeUnit) + ";\n"
@@ -267,7 +351,7 @@ if (p.x < GS_W && p.y < GS_H) {
 		uint64_t FullShaderFingerprint()
 		{
 			uint64_t h = 14695981039346656037ull;
-			for (const char* body : { GH_BODY, GV_BODY, QUIET_BODY, NMIN_BODY, F_BODY })
+			for (const char* body : { HALF_HEADER, HALF_BODY, DOWN_HEADER, DOWN_BODY, LOW_S_GLSL, STATS_HEADER, STATS_BODY, NMIN_BODY, APPLY_HEADER, APPLY_BODY })
 				for (const char* c = body; *c; ++c)
 					if (*c != '\r')
 					{
@@ -291,19 +375,22 @@ if (p.x < GS_W && p.y < GS_H) {
 
 		std::vector<VpSkeleton::ArenaRequest> Splitter::ArenaRequests(pl_gpu gpu, int w, int h, int B, GrainSplit::Storage storage)
 		{
+			(void)storage;   // v3: the same intermediates for both layouts
 			std::vector<VpSkeleton::ArenaRequest> r;
-			VpSkeleton::TexFormat tf = VpSkeleton::TexFormat::RGBA32F;
-			if (!gpu || w < 1 || h < 1 || B < 1 || !VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 4), &tf)) return r;
+			VpSkeleton::TexFormat t2 = VpSkeleton::TexFormat::RG32F, t4 = VpSkeleton::TexFormat::RGBA32F;
+			if (!gpu || w < 1 || h < 1 || B < 1 || !VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 2), &t2) ||
+				!VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 4), &t4))
+				return r;
 			const int bw = (w + B - 1) / B, bh = (h + B - 1) / B;
 			VpSkeleton::ArenaRequest a;
 			a.scope = kArenaScope;
 			a.owner = kArenaOwner;
 			a.tier = VpSkeleton::Tier::T0;
-			a.shape.w = static_cast<uint32_t>(w); a.shape.h = static_cast<uint32_t>(h); a.shape.fmt = tf;
-			a.count = storage == GrainSplit::Storage::Compact ? 2 : 1;   // Compact: rows + bands; Full: bands (rows is the product)
+			a.shape.w = static_cast<uint32_t>(HalfOf(w)); a.shape.h = static_cast<uint32_t>(HalfOf(h)); a.shape.fmt = t2;
+			a.count = 2;   // tmp (across) + low (Gb, G6) at half resolution
 			r.push_back(a);
-			a.shape.w = static_cast<uint32_t>(bw); a.shape.h = static_cast<uint32_t>(bh);
-			a.count = 1;
+			a.shape.w = static_cast<uint32_t>(bw); a.shape.h = static_cast<uint32_t>(bh); a.shape.fmt = t4;
+			a.count = 1;   // quiet = (quiet, e3, e1, e2) per block
 			r.push_back(a);
 			return r;
 		}
@@ -328,17 +415,24 @@ if (p.x < GS_W && p.y < GS_H) {
 		{
 			struct PassText
 			{
-				std::string geo, weights, yread;
+				std::string geo, w1, wlow, yread;
+				int r1 = 1, rb = 1, r6 = 1;
 			};
 			PassText MakePassText(int w, int h, int B, int bw, int bh, int component, double codeUnit, double scale, const Params& params)
 			{
 				using namespace VpvGpu;
 				static const char* const kComp[4] = { "x", "y", "z", "w" };
 				PassText t;
-				t.geo = DefineInt("GS_W", w) + DefineInt("GS_H", h) + DefineInt("GS_B", B) + DefineInt("GS_BW", bw) + DefineInt("GS_BH", bh) +
-					DefineInt("GS_UNIT_VERSION", GrainSplit::kUnitVersion);
-				t.weights = WeightsGlsl("w1", "R1", params.sigmaFine * scale) + WeightsGlsl("wb", "RB", params.sigmaBase * scale) +
-					WeightsGlsl("w6", "R6", params.sigmaLow * scale);
+				t.geo = DefineInt("GS_W", w) + DefineInt("GS_H", h) + DefineInt("GS_HW", HalfOf(w)) + DefineInt("GS_HH", HalfOf(h)) +
+					DefineInt("GS_B", B) + DefineInt("GS_BW", bw) + DefineInt("GS_BH", bh) + DefineInt("GS_UNIT_VERSION", GrainSplit::kUnitVersion);
+				const double s1 = params.sigmaFine * scale, sb = params.sigmaBase * scale, s6 = params.sigmaLow * scale;
+				t.r1 = GaussRadius(s1);
+				t.rb = GrainSplit::V3HalfRadius(sb);
+				t.r6 = GrainSplit::V3HalfRadius(s6);
+				t.w1 = WeightsGlsl("w1", "R1", t.r1, [&](int k) { return GaussWeight(k, s1); });
+				t.wlow = WeightsGlsl("wb", "RB", t.rb, [&](int k) { return GrainSplit::V3HalfWeight(k, sb); }) +
+					WeightsGlsl("w6", "R6", t.r6, [&](int k) { return GrainSplit::V3HalfWeight(k, s6); }) +
+					DefineInt("RL", (std::max)(t.rb, t.r6));
 				t.yread = "float gs_y(int x, int y) { return texelFetch(src, ivec2(x, y), 0)." + std::string(kComp[component]) + " * " +
 					Num(1.0 / codeUnit) + "; }\n";
 				return t;
@@ -358,7 +452,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			if (step == 0)
 			{
 				m_run = Run();
-				if (!Begin(gpu, dispatch, plane, component, codeUnit, B, params, options))
+				if (!Begin(gpu, dispatch, plane, component, codeUnit, B, params, options, scale))
 					return false;
 			}
 			else if (!m_run.active || m_run.next != step)
@@ -369,10 +463,10 @@ if (p.x < GS_W && p.y < GS_H) {
 				return false;
 			}
 			const Run r = m_run;
-			const int w = r.w, h = r.h, bw = r.bw, bh = r.bh;
+			const int w = r.w, h = r.h, bw = r.bw, bh = r.bh, hw = HalfOf(w), hh = HalfOf(h);
 			const bool compact = r.compact;
 			const PassText txt = MakePassText(w, h, B, bw, bh, component, codeUnit, scale, params);
-			const int gx = (w + 15) / 16, gy = (h + 15) / 16, bgx = (bw + 15) / 16, bgy = (bh + 15) / 16;
+			const int rl = (std::max)(txt.rb, txt.r6);
 			auto fail = [&](const char* why) {
 				m_error = why;
 				m_run = Run();
@@ -383,51 +477,65 @@ if (p.x < GS_W && p.y < GS_H) {
 			{
 			case 0:
 			{
-				const pl_shader_desc d[2] = { Sampled("src", plane), VpvGpu::Storage("rows_out", r.rows) };
-				if (!Pass(dispatch, "VideoProcessor grain split: rows", txt.geo + txt.weights + txt.yread, GH_BODY, d, 2, nullptr, 0, gx, gy, 0, 16, 16, options.timer))
-					return fail("grain split: rows pass failed");
+				const pl_shader_desc d[2] = { Sampled("src", plane), VpvGpu::Storage("tmp_out", r.tmp) };
+				const size_t shmem = sizeof(float) * size_t(kHalfTh) * size_t(kHalfTw + 2 * rl);
+				if (!Pass(dispatch, "VideoProcessor grain split: half + across", txt.geo + txt.wlow + txt.yread + HALF_HEADER, HALF_BODY, d, 2, nullptr, 0,
+					(hw + kHalfTw - 1) / kHalfTw, (hh + kHalfTh - 1) / kHalfTh, shmem, kHalfTw, kHalfTh, options.timer))
+					return fail("grain split: half pass failed");
 				break;
 			}
 			case 1:
 			{
-				const pl_shader_desc d[2] = { Sampled("rows", r.rows), VpvGpu::Storage("bands_out", r.bands) };
-				if (!Pass(dispatch, "VideoProcessor grain split: columns", txt.geo + txt.weights, GV_BODY, d, 2, nullptr, 0, gx, gy, 0, 16, 16, options.timer))
-					return fail("grain split: columns pass failed");
+				const pl_shader_desc d[2] = { Sampled("tmp", r.tmp), VpvGpu::Storage("low_out", r.low) };
+				const size_t shmem = 2 * sizeof(float) * size_t(kDownTc) * size_t(kDownTr + 2 * rl);
+				if (!Pass(dispatch, "VideoProcessor grain split: low bands down", txt.geo + txt.wlow + DOWN_HEADER, DOWN_BODY, d, 2, nullptr, 0,
+					(hw + kDownTc - 1) / kDownTc, (hh + kDownTr - 1) / kDownTr, shmem, 16, 16, options.timer))
+					return fail("grain split: low pass failed");
 				break;
 			}
 			case 2:
 			{
-				const std::string hdr = txt.geo + DefineInt("GS_SUB", params.subBlocks) + DefineInt("GS_QUIET", params.quietSubBlocks) + Define("GS_CAL", params.grainCal);
-				const pl_shader_desc d[2] = { Sampled("bands", r.bands), VpvGpu::Storage("quiet_out", r.quiet) };
-				if (!Pass(dispatch, "VideoProcessor grain split: grain level", hdr, compact ? QUIET_BODY_COMPACT : QUIET_BODY, d, 2, nullptr, 0, bgx, bgy, 0, 16, 16, options.timer))
+				const int ch = ChunkOf(B), ap = ch + 2 * txt.r1, la = ch / 2 + 2, nsub = params.subBlocks * params.subBlocks;
+				const std::string hdr = txt.geo + txt.w1 + txt.yread + DefineInt("CH", ch) + DefineInt("GS_SUB", params.subBlocks) +
+					DefineInt("GS_QUIET", params.quietSubBlocks) + Define("GS_CAL", params.grainCal) + STATS_HEADER + LOW_S_GLSL;
+				const size_t shmem = sizeof(float) * (size_t(ap) * ap + size_t(ap) * ch + 2u * size_t(la) * la + 4u * size_t(ch) * ch + 5u * size_t(nsub));
+				const pl_shader_desc d[3] = { Sampled("src", plane), Sampled("low", r.low), VpvGpu::Storage("quiet_out", r.quiet) };
+				if (!Pass(dispatch, "VideoProcessor grain split: grain level", hdr, STATS_BODY, d, 3, nullptr, 0, bw, bh, shmem, 16, 16, options.timer))
 					return fail("grain split: grain level pass failed");
 				break;
 			}
 			case 3:
 			{
 				const pl_shader_desc d[2] = { Sampled("quiet", r.quiet), VpvGpu::Storage("blocks_out", r.blocks) };
-				if (!Pass(dispatch, "VideoProcessor grain split: neighbourhood minimum", txt.geo + DefineInt("GS_NG", params.neighbourhood), compact ? NMIN_BODY_COMPACT : NMIN_BODY, d, 2, nullptr, 0, bgx, bgy, 0, 16, 16, options.timer))
+				if (!Pass(dispatch, "VideoProcessor grain split: neighbourhood minimum", txt.geo + DefineInt("GS_NG", params.neighbourhood), NMIN_BODY, d, 2, nullptr, 0,
+					(bw + 15) / 16, (bh + 15) / 16, 0, 16, 16, options.timer))
 					return fail("grain split: minimum pass failed");
 				break;
 			}
 			default:
 			{
+				const int aw = kApplyTile + 2, aa = aw + 2 * txt.r1, la = kApplyTile / 2 + 2;
+				const size_t shmem = sizeof(float) * (size_t(aa) * aa + size_t(aa) * kApplyTile + 2u * size_t(la) * la + size_t(aw) * aw);
+				std::string hdr = txt.geo + txt.w1 + txt.yread + Define("GS_KAPPA", params.kappa) + Define("GS_FLOOR", params.energyFloor) +
+					APPLY_HEADER + LOW_S_GLSL;
+				const int gx = (w + kApplyTile - 1) / kApplyTile, gy = (h + kApplyTile - 1) / kApplyTile;
 				if (compact)
 				{
-					const std::string hdr = txt.geo + Define("GS_KAPPA", params.kappa) + Define("GS_FLOOR", params.energyFloor) + DefineInt("GS_COMPACT", 1) + Define("GS_CU", codeUnit);
-					const pl_shader_desc d[4] = { Sampled("bands", r.bands), Sampled("blocks", r.blocks), VpvGpu::Storage("split_a", r.outA), VpvGpu::Storage("split_b", r.outB) };
-					if (!Pass(dispatch, "VideoProcessor grain split: Wiener share (compact)", hdr, F_BODY_COMPACT, d, 4, nullptr, 0, gx, gy, 0, 16, 16, options.timer))
+					hdr = DefineInt("GS_COMPACT", 1) + Define("GS_CU", codeUnit) + hdr;
+					const pl_shader_desc d[5] = { Sampled("src", plane), Sampled("low", r.low), Sampled("blocks", r.blocks),
+						VpvGpu::Storage("split_a", r.outA), VpvGpu::Storage("split_b", r.outB) };
+					if (!Pass(dispatch, "VideoProcessor grain split: Wiener share (compact)", hdr, APPLY_BODY, d, 5, nullptr, 0, gx, gy, shmem, 16, 16, options.timer))
 						return fail("grain split: Wiener pass failed");
 					m_out.split = r.outA;
 					m_out.splitB = r.outB;
 				}
 				else
 				{
-					const std::string hdr = txt.geo + Define("GS_KAPPA", params.kappa) + Define("GS_FLOOR", params.energyFloor);
-					const pl_shader_desc d[3] = { Sampled("bands", r.bands), Sampled("blocks", r.blocks), VpvGpu::Storage("split_out", r.rows) };
-					if (!Pass(dispatch, "VideoProcessor grain split: Wiener share", hdr, F_BODY, d, 3, nullptr, 0, gx, gy, 0, 16, 16, options.timer))
+					const pl_shader_desc d[4] = { Sampled("src", plane), Sampled("low", r.low), Sampled("blocks", r.blocks),
+						VpvGpu::Storage("split_out", r.outFull) };
+					if (!Pass(dispatch, "VideoProcessor grain split: Wiener share", hdr, APPLY_BODY, d, 4, nullptr, 0, gx, gy, shmem, 16, 16, options.timer))
 						return fail("grain split: Wiener pass failed");
-					m_out.split = r.rows;
+					m_out.split = r.outFull;
 					m_out.splitB = nullptr;
 				}
 				m_out.blocks = r.blocks;
@@ -446,18 +554,19 @@ if (p.x < GS_W && p.y < GS_H) {
 		}
 
 		bool Splitter::Begin(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, int B, const Params& params,
-			const Options& options)
+			const Options& options, double scale)
 		{
 			using namespace VpvGpu;
 			m_error.clear();
 			m_scratchShort = false;
 			m_out = Frame();   // a failed Compute never leaves the previous frame's product looking valid
-			if (!gpu || !dispatch || !plane || !plane->params.sampleable || component < 0 || component > 3 || !(codeUnit > 0.0) || B < 1)
+			if (!gpu || !dispatch || !plane || !plane->params.sampleable || component < 0 || component > 3 || !(codeUnit > 0.0) || B < 2 || (B % 2) != 0)
 			{
 				m_error = "grain split: invalid input";
 				return false;
 			}
-			if (!(params.sigmaFine > 0.0) || !(params.sigmaBase > 0.0) || !(params.sigmaLow > 0.0) || params.subBlocks < 1)
+			if (!(params.sigmaFine > 0.0) || !(params.sigmaBase * scale >= GrainSplit::kV3MinLowSigma) || !(params.sigmaLow * scale >= GrainSplit::kV3MinLowSigma) ||
+				params.subBlocks < 1 || params.subBlocks > 16)
 			{
 				m_error = "grain split: invalid law";
 				return false;
@@ -472,8 +581,8 @@ if (p.x < GS_W && p.y < GS_H) {
 				return false;
 			}
 			const int w = plane->params.w, h = plane->params.h;
-			const int bw = (w + B - 1) / B, bh = (h + B - 1) / B;
-			const pl_fmt f4 = FloatFormat(gpu, 4);
+			const int bw = (w + B - 1) / B, bh = (h + B - 1) / B, hw = HalfOf(w), hh = HalfOf(h);
+			const pl_fmt f4 = FloatFormat(gpu, 4), f2 = FloatFormat(gpu, 2);
 			pl_fmt fA = nullptr, fB = nullptr, fBlocks = f4;
 			if (compact)
 			{
@@ -485,9 +594,9 @@ if (p.x < GS_W && p.y < GS_H) {
 					return false;
 				}
 			}
-			if (!f4)
+			if (!f4 || !f2)
 			{
-				m_error = "grain split: no rgba32f storage texture";
+				m_error = "grain split: no rgba32f / rg32f storage texture";
 				return false;
 			}
 			auto usable = [&](pl_tex t, int tw, int th, pl_fmt fmt) { return t && t->params.w == tw && t->params.h == th && t->params.format == fmt && t->params.sampleable && t->params.storable; };
@@ -498,47 +607,46 @@ if (p.x < GS_W && p.y < GS_H) {
 				return false;
 			}
 
-			// Intermediates: from the arena (fixed order rows, bands, quiet; scope closed on every exit), else private.
-			pl_tex rows = nullptr, bands = nullptr, quiet = nullptr;
-						if (options.arena)
+			// Intermediates (half-resolution tmp + low, block-grid quiet): from the arena (scope closed on every exit), else private.
+			pl_tex tmp = nullptr, low = nullptr, quiet = nullptr;
+			if (options.arena)
 			{
 				// The private temporaries of the non-arena path are not used any more: free them.
-				for (pl_tex* t : { &m_bands, &m_quiet })
+				for (pl_tex* t : { &m_tmp, &m_low, &m_quiet })
 					if (*t) pl_tex_destroy(gpu, t);
-				if (compact && m_rows) pl_tex_destroy(gpu, &m_rows);
-				VpSkeleton::TexFormat tf = VpSkeleton::TexFormat::RGBA32F;
-				if (!VpSkeleton::PlTexBackend::FormatOf(f4, &tf))
+				VpSkeleton::TexFormat t2 = VpSkeleton::TexFormat::RG32F, t4 = VpSkeleton::TexFormat::RGBA32F;
+				if (!VpSkeleton::PlTexBackend::FormatOf(f2, &t2) || !VpSkeleton::PlTexBackend::FormatOf(f4, &t4))
 				{
-					m_error = "grain split: rgba32f is not an arena format";
+					m_error = "grain split: rg32f / rgba32f is not an arena format";
 					return false;
 				}
-				VpSkeleton::TexShape full, qshape;
-				full.w = static_cast<uint32_t>(w); full.h = static_cast<uint32_t>(h); full.fmt = tf;
-				qshape.w = static_cast<uint32_t>(bw); qshape.h = static_cast<uint32_t>(bh); qshape.fmt = tf;
-				if (compact) rows = options.arena->Acquire(kArenaOwner, full);
-				bands = options.arena->Acquire(kArenaOwner, full);
+				VpSkeleton::TexShape half, qshape;
+				half.w = static_cast<uint32_t>(hw); half.h = static_cast<uint32_t>(hh); half.fmt = t2;
+				qshape.w = static_cast<uint32_t>(bw); qshape.h = static_cast<uint32_t>(bh); qshape.fmt = t4;
+				tmp = options.arena->Acquire(kArenaOwner, half);
+				low = options.arena->Acquire(kArenaOwner, half);
 				quiet = options.arena->Acquire(kArenaOwner, qshape);
-				if ((compact && !rows) || !bands || !quiet)
+				if (!tmp || !low || !quiet)
 				{
 					m_scratchShort = true;
-					m_error = std::string("scratch memory short (grain split): ") + ((compact && !rows) ? "rows " : "") + (!bands ? "bands " : "") +
+					m_error = std::string("scratch memory short (grain split): ") + (!tmp ? "tmp " : "") + (!low ? "low " : "") +
 						(!quiet ? "quiet " : "") + "unavailable";
 					return false;
 				}
 			}
 			else
 			{
-				if (!Ensure(gpu, m_bands, w, h, f4) || !Ensure(gpu, m_quiet, bw, bh, f4) || (compact && !Ensure(gpu, m_rows, w, h, f4)))
+				if (!Ensure(gpu, m_tmp, hw, hh, f2) || !Ensure(gpu, m_low, hw, hh, f2) || !Ensure(gpu, m_quiet, bw, bh, f4))
 				{
-					m_error = "grain split: no rgba32f storage texture";
+					m_error = "grain split: no rg32f / rgba32f storage texture";
 					return false;
 				}
-				bands = m_bands;
+				tmp = m_tmp;
+				low = m_low;
 				quiet = m_quiet;
-				if (compact) rows = m_rows;
 			}
 			// Outputs: the caller's targets, else the Splitter's own.
-			pl_tex outA = nullptr, outB = nullptr, blocksTex = tg.blocks;
+			pl_tex outA = nullptr, outB = nullptr, outFull = nullptr, blocksTex = tg.blocks;
 			if (compact)
 			{
 				outA = tg.split;
@@ -553,14 +661,13 @@ if (p.x < GS_W && p.y < GS_H) {
 			}
 			else
 			{
-				// Full: the final pass writes the split into the rows texture, which therefore outlives the call.
-				rows = tg.split;
-				if (!rows && !Ensure(gpu, m_rows, w, h, f4))
+				outFull = tg.split;
+				if (!outFull && !Ensure(gpu, m_outFull, w, h, f4))
 				{
 					m_error = "grain split: no rgba32f storage texture";
 					return false;
 				}
-				if (!rows) rows = m_rows;
+				if (!outFull) outFull = m_outFull;
 			}
 			if (!blocksTex)
 			{
@@ -576,8 +683,8 @@ if (p.x < GS_W && p.y < GS_H) {
 			m_run.compact = compact;
 			m_run.storage = choice.storage;
 			m_run.w = w; m_run.h = h; m_run.bw = bw; m_run.bh = bh;
-			m_run.rows = rows; m_run.bands = bands; m_run.quiet = quiet; m_run.blocks = blocksTex;
-			m_run.outA = outA; m_run.outB = outB;
+			m_run.tmp = tmp; m_run.low = low; m_run.quiet = quiet; m_run.blocks = blocksTex;
+			m_run.outFull = outFull; m_run.outA = outA; m_run.outB = outB;
 			return true;
 		}
 	}

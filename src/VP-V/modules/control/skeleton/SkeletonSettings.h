@@ -13,7 +13,7 @@
 //   skeleton_gpu_gap             off | after_render     (default off)   70b G5: lane GPU work (P10/P11/P12) in the
 //                                                       AfterRender gap, ahead of the present (visible); off = the GPU
 //                                                       products get no lane (the CPU products' gap is unchanged)
-//   grain_split_storage          full | compact         (default full)  P10 storage, an either/or (Compact is also
+//   grain_split_storage          full | compact         (default compact, refs/116 D2)  P10 storage, an either/or (Compact is also
 //                                                       the governor's visible budget step)
 //
 // The analysis_lane* keys are VpSkeleton::LaneSettings::Parse (one parser); skeleton_gpu_gap and grain_split_storage
@@ -45,7 +45,7 @@ namespace Vpv
 			VpSkeleton::LaneSettings lane;                 // mode Off by default
 			CameraLinkMode camera = CameraLinkMode::Off;
 			GpuGapMode gpuGap = GpuGapMode::Off;           // skeleton_gpu_gap
-			GrainStorage grainStorage = GrainStorage::Full;   // grain_split_storage
+			GrainStorage grainStorage = GrainStorage::Compact;   // grain_split_storage (default compact: refs/116 D2)
 			bool originalPathway = false;                  // [vpv] pipeline_original_pathway = on
 			std::vector<std::string> laneProblems;         // invalid analysis_lane* values (kept at the default)
 			std::vector<std::string> cameraProblems;       // invalid camera_link value (kept off)
@@ -101,7 +101,7 @@ namespace Vpv
 				else if (value == "compact")
 					s.grainStorage = GrainStorage::Compact;
 				else
-					s.laneProblems.push_back("grain_split_storage '" + raw + "' is not valid (full|compact); kept full");
+					s.laneProblems.push_back("grain_split_storage '" + raw + "' is not valid (full|compact); kept compact");
 			}
 			std::string camera;
 			if (config.TryGetString(kSection, "camera_link", camera))
