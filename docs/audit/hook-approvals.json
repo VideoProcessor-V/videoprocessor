@@ -1,4 +1,45 @@
 {
- "_note": "Coordinator-approved NEW hook sites in Bill-owned files (INTEGRATOR-RULES rule 32; refs/107-host-seams-plan.md s5.2 rule 2). tools/check_hook_gating.py accepts a site that is not in docs/audit/hook-sites.json only when an entry here names its file and a whitespace-insensitive fragment of its text. Every entry: id HOOK-APPROVAL-<n>, file, text_contains, seam (S1..S8), who, when, expiry (the item that removes the site, or null). No verbal approvals.",
- "approvals": []
+ "_note": "Coordinator-approved NEW hook sites in Bill-owned files (INTEGRATOR-RULES rule 32; refs/107-host-seams-plan.md s5.2 rule 2). tools/check_hook_gating.py accepts a site that is not in docs/audit/hook-sites.json only when an entry here names its file and a whitespace-insensitive fragment of its text. Every entry: id, file, text_contains, seam (S1..S8), approver, when, expiry (the item that removes the site, or null = canonical seam), note. No verbal approvals.",
+ "approvals": [
+  {
+   "id": "HA-R11-PlanPresent",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "RendererExtension::PlanPresent(",
+   "seam": "S4",
+   "approver": "coordinator",
+   "when": "2026-11-11",
+   "expiry": null,
+   "note": "Phase 3 present-side seams, refs/108; the R11 helper RendererExtension::PlanPresent (RendererExtension.h:530), one call per present kind"
+  },
+  {
+   "id": "HA-R12-AfterPresent",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "RendererExtension::AfterPresent(",
+   "seam": "S5",
+   "approver": "coordinator",
+   "when": "2026-11-11",
+   "expiry": null,
+   "note": "Phase 3 present-side seams, refs/108; the R12 helper RendererExtension::AfterPresent (RendererExtension.h:535), the one post-present spare slot"
+  },
+  {
+   "id": "HA-R13-PresentSample",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "RendererExtension::AdjustPresentationSample(",
+   "seam": "S4",
+   "approver": "coordinator",
+   "when": "2026-11-11",
+   "expiry": null,
+   "note": "Phase 3 present-side seams, refs/108; the R13 helper RendererExtension::AdjustPresentationSample (RendererExtension.h:540) on the statistics path"
+  },
+  {
+   "id": "HA-R14-ResolveTime",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "RendererExtension::ResolveTime(",
+   "seam": "S4",
+   "approver": "coordinator",
+   "when": "2026-11-11",
+   "expiry": null,
+   "note": "Phase 3 present-side seams, refs/108; the R14 helper RendererExtension::ResolveTime (RendererExtension.h:546) on the statistics path"
+  }
+ ]
 }
