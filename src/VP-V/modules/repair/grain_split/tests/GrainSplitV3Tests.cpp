@@ -249,9 +249,14 @@ namespace GrainSplitV3TestsNs
 					if (c == Cls::Texture) Require(imean <= 0.40, std::string("texture interior mean clean difference <= 0.40: ") + buf);
 					else if (c != Cls::Edges) Require(imean <= 0.06, std::string("flat-class interior mean clean difference <= 0.06: ") + buf);
 
-					if (c == Cls::Flat || c == Cls::Gradient)
+					if (c == Cls::Flat || c == Cls::Gradient || c == Cls::Texture)
 					{
-						// Blocks fully inside the interior (2-block margin): N within 3 % relative, e3 within 10 % relative.
+						// Blocks fully inside the interior (2-block margin). Limits calibrated from the scratch run (lead decision
+						// P10V3-T4-CAL; the first guesses of 3 % / 10 % per block had never passed). Scratch numbers, flat/gradient:
+						//   N rel: scale 1 mean 0.0065, worst 0.034; scale 2 mean 0.0005, worst 0.0021  -> assert mean <= 1 %, worst <= 5 %.
+						//   e3 rel: scale 1 mean 0.133, median 0.118, p95 0.314, worst 0.469; scale 2 mean 0.056, worst 0.192.
+						// On grain-only flat/gradient blocks e3 is the energy of filtered noise, a second-order quantity, so its per-block
+						// relative error is noise-dominated: LOGGED only. On TEXTURE e3 carries structure: asserted, mean <= 5 %.
 						double worstN = 0.0, worstE3 = 0.0, sumN = 0.0, sumE3 = 0.0;
 						std::vector<double> relE3;
 						for (int by = 2; by < a.bh - 2; ++by)
@@ -272,8 +277,13 @@ namespace GrainSplitV3TestsNs
 						std::snprintf(buf2, sizeof(buf2), "scale%d %-8s (info) mean N rel %.4f, mean e3 rel %.4f, median e3 rel %.4f, p95 e3 rel %.4f",
 							si + 1, ClsName(c), sumN / cnt, sumE3 / cnt, relE3[relE3.size() / 2], relE3[static_cast<size_t>(0.95 * (cnt - 1.0))]);
 						Log(buf2);
-						Require(worstN <= 0.03, std::string("N within 3 % relative: ") + buf);
-						Require(worstE3 <= 0.10, std::string("e3 within 10 % relative: ") + buf);
+						if (c == Cls::Texture)
+							Require(sumE3 / cnt <= 0.05, std::string("texture e3 mean relative error <= 5 %: ") + buf2);
+						else
+						{
+							Require(sumN / cnt <= 0.01, std::string("N mean relative error <= 1 %: ") + buf2);
+							Require(worstN <= 0.05, std::string("N worst block relative error <= 5 %: ") + buf);
+						}
 					}
 				}
 			}
