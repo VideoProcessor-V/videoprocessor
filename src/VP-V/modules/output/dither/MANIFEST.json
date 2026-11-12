@@ -18,7 +18,10 @@
     "src/VP-V/modules/output/dither/DitherSlot.h",
     "src/VP-V/modules/output/dither/DitherNeed.h",
     "src/VP-V/modules/output/dither/DitherNeedGlsl.h",
-    "src/VP-V/modules/output/dither/DitherNeedGpu.h"
+    "src/VP-V/modules/output/dither/DitherNeedGpu.h",
+    "src/VP-V/modules/output/dither/DitherNeedSeam.h",
+    "src/VP-V/modules/output/dither/tests/DitherNeedSeamTests.cpp",
+    "src/VP-V/modules/output/dither/VpShaderInclude.h"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/CustomHookChain.h",

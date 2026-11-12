@@ -670,7 +670,10 @@ namespace VideoProcessorTest
 			{
 				if (dir.empty()) return LoadBundledShader(file);
 				std::ifstream input(dir + "\\" + file, std::ios::binary);
-				return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+				std::string text{ std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>() };
+				std::string reason;
+				CustomHookChain::ExpandVpIncludes(text, reason);   // W2-C8: as the hook chain
+				return text;
 			};
 			const double significant = 0.02;
 			std::string report = "sigma-delta flat-field bias (shaders: " + (dir.empty() ? std::string("bundled") : dir) + ")\n";

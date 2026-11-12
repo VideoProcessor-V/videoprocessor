@@ -148,6 +148,10 @@ namespace FallbackCatalogTest
 			Assert::IsTrue(Has(Motion(true, false, false, "nvofapi64.dll not found", NoPairCause::ProducerNotRunning), "nvofapi64.dll not found"));
 			Assert::IsTrue(Has(Motion(true, false, false, "", NoPairCause::SizeMismatch), "does not fit"));
 			Assert::IsTrue(Has(Motion(true, false, false, "", NoPairCause::Missing), "no optical-flow pair"));
+			// W2-C5b: the on-demand request causes are engaged fallbacks, each in its own words.
+			Assert::IsTrue(Has(Motion(true, false, false, "", NoPairCause::OnDemandLate), "not ready within the frame budget"));
+			Assert::IsTrue(Has(Motion(true, false, false, "", NoPairCause::OnDemandUnavailable), "could not be made"));
+			Assert::IsTrue(Has(Motion(true, false, false, "", NoPairCause::OnDemandNoBudget), "no time left in the frame"));
 			Assert::IsFalse(Motion(false, false, false, "", NoPairCause::Missing).engaged, L"optical flow not requested");
 			Assert::IsTrue(Has(Motion(true, true, false, "NvOFExecute", NoPairCause::Missing), "optical flow failed"), L"a real failure wins");
 			Assert::IsFalse(TdMotionSource(false, "x").engaged);
@@ -432,6 +436,50 @@ namespace FallbackCatalogTest
 			Assert::IsTrue(d.engaged);
 			Assert::IsTrue(f.Current(10000).engaged);
 			Assert::IsFalse(f.Current(14000).engaged);
+		}
+
+		// Owner 2026-11-11 22:39 (doc 91:108): the motion compensation fallback row.
+		TEST_METHOD(DitherMotionCompensationRowHasAStableIdAndText)
+		{
+			const Decision on = DitherMotionCompensationOff(true, "a dropped frame");
+			Assert::AreEqual(std::string("dither motion compensation"), on.id);
+			Assert::IsTrue(on.engaged);
+			Assert::IsTrue(on.reason.find("dither: motion compensation off: a dropped frame") != std::string::npos);
+			Assert::IsTrue(DitherMotionCompensationOff(true, "").engaged && !DitherMotionCompensationOff(true, "").reason.empty());
+			const Decision off = DitherMotionCompensationOff(false, "x");
+			Assert::AreEqual(std::string("dither motion compensation"), off.id);
+			Assert::IsFalse(off.engaged);
+		}
+
+		TEST_METHOD(DitherVectorRowsHaveStableIdsAndTexts)
+		{
+			// W2-C8: the four automatic steps down of the sigma-delta's vector chain (motion.estimation DitherVectorSource.h).
+			const Decision matcher = DitherVectorsMatcherField(true);
+			const Decision onDemand = DitherVectorsOnDemand(true);
+			const Decision own = DitherVectorsOwnSearch(true, "no field for this pair");
+			const Decision unvalidated = DitherVectorsUnvalidated(true);
+			Assert::AreEqual(std::string("dither vectors matcher"), matcher.id);
+			Assert::AreEqual(std::string("dither vectors on demand"), onDemand.id);
+			Assert::AreEqual(std::string("dither vectors own search"), own.id);
+			Assert::AreEqual(std::string("dither vectors unvalidated"), unvalidated.id);
+			Assert::IsTrue(matcher.engaged && onDemand.engaged && own.engaged && unvalidated.engaged);
+			Assert::IsFalse(matcher.reason.empty());
+			Assert::IsFalse(onDemand.reason.empty());
+			Assert::IsFalse(own.reason.empty());
+			Assert::IsFalse(unvalidated.reason.empty());
+			// The own-search entry carries the reason it was passed.
+			Assert::IsTrue(own.reason.find("no field for this pair") != std::string::npos);
+
+			// Released: same ids, not engaged.
+			const Decision released[4] = { DitherVectorsMatcherField(false), DitherVectorsOnDemand(false),
+				DitherVectorsOwnSearch(false, "ignored"), DitherVectorsUnvalidated(false) };
+			const char* ids[4] = { "dither vectors matcher", "dither vectors on demand", "dither vectors own search",
+				"dither vectors unvalidated" };
+			for (int i = 0; i < 4; ++i)
+			{
+				Assert::AreEqual(std::string(ids[i]), released[i].id);
+				Assert::IsFalse(released[i].engaged);
+			}
 		}
 	};
 }

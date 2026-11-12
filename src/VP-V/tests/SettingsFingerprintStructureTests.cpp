@@ -115,6 +115,7 @@ namespace SettingsFingerprintStructure
 			{ "dejudder_est_still_zero", "UNDOCUMENTED", "GAP: not in docs/settings/VP-settings-reference.md (documentation gap)" },
 			{ "dejudder_source_warp_filter", "UNDOCUMENTED", "GAP: not in docs/settings/VP-settings-reference.md (documentation gap)" },
 			{ "entrance_gpu_drain", "UNDOCUMENTED", "GAP: expert [vpv] workaround not in docs/settings/VP-settings-reference.md (documentation gap)" },
+			{ "dither_need", "UNDOCUMENTED", "GAP: [vpv] dither_need documented in MASTER-SETTINGS.md and the dither README, not yet in docs/settings/VP-settings-reference.md" },
 			{ "pipeline_entrance_once", "UNDOCUMENTED", "GAP: B3 [vpv] switch not in docs/settings/VP-settings-reference.md (documentation gap)" },
 			// ALLOWLIST-DOCS-END
 		};
@@ -292,7 +293,7 @@ namespace SettingsFingerprintStructureTest
 			// Guard for the GPU harness: IsVpvSectionKey() in RendererCaptureHarnessTests.cpp duplicates this list.
 			const std::set<std::string> expected = { "pipeline_original_pathway", "pipeline_order", "pipeline_slots_off",
 				"calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged", "frame_analysis_store",
-				"resync_event", "entrance_gpu_drain", "hdr_inference" };
+				"resync_event", "entrance_gpu_drain", "dither_need", "hdr_inference" };
 			Assert::IsTrue(std::set<std::string>(vpv.begin(), vpv.end()) == expected,
 				L"the [vpv] keys in VpvSchemaKeys.h changed: update IsVpvSectionKey() in RendererCaptureHarnessTests.cpp and this list");
 		}
@@ -462,6 +463,28 @@ namespace SlotOverrideLayoutTest
 			Logger::WriteMessage(("slots: " + std::to_string(slots) + ", override values checked: " + std::to_string(checked) + "\n").c_str());
 			Assert::IsTrue(slots > 5, L"the switchable slots were found");
 			Assert::IsTrue(problems.empty(), std::wstring(problems.begin(), problems.end()).c_str());
+		}
+
+		// dither_need ([vpv], default off): parse and fingerprint. auto is a different configuration from off (case-insensitive), an
+		// invalid value falls back to off, and on the Original pathway "auto" is the same configuration as off (the overlay).
+		TEST_METHOD(DitherNeedParsesAndTheOriginalOverlayForcesItOff)
+		{
+			Renderer renderer;
+			Assert::IsTrue(renderer.Ready(), L"the renderer DLL and its settings exports");
+			auto with = [&](const std::string& vpv) { return renderer.Evaluate(Base() + "[vpv]\n" + vpv); };
+			const Evaluation none = with("");
+			const Evaluation off = with("dither_need: off\n");
+			const Evaluation on = with("dither_need: auto\n");
+			const Evaluation upper = with("dither_need: AUTO\n");
+			const Evaluation bad = with("dither_need: zzz_invalid\n");
+			Assert::IsTrue(none.ok && off.ok && on.ok && upper.ok, L"off and auto load");
+			Assert::IsTrue(none.fingerprint == off.fingerprint, L"absent is the same as off (the default)");
+			Assert::IsTrue(on.fingerprint != off.fingerprint, L"auto changes the fingerprint");
+			Assert::IsTrue(upper.fingerprint == on.fingerprint, L"the value is case-insensitive");
+			Assert::IsTrue(bad.fingerprint == off.fingerprint, L"an invalid value gives off");
+			const Evaluation originalOff = with("pipeline_original_pathway: on\n");
+			const Evaluation originalAuto = with("pipeline_original_pathway: on\ndither_need: auto\n");
+			Assert::IsTrue(originalAuto.fingerprint == originalOff.fingerprint, L"on the Original pathway auto is forced off");
 		}
 	};
 }

@@ -35,6 +35,7 @@
 //                                dejudder_verify_share general_rate_fixes motion_ahead_frames motion_engine
 //                                motion_history_fixes optical_flow optical_flow_cost_trust
 //                                optical_flow_fb_check optical_flow_global optical_flow_global_fallback
+//                                optical_flow_on_demand
 //                                vector_demand dejudder_even_rates dejudder_strength dejudder_strength_even
 //                                occlusion_mask timing_continuity_fixes
 //   rebase    kSettingsRebase    modules/scaling/rebase: source_resolution rebase_kernel_match
@@ -61,7 +62,7 @@
 //                                downscale_light upscale_light ssim_bitrate_aware ssim_bitrate_floor
 //                                cnn_residual_stabilise ssim_residual_stabilise residual_stabilise_grain_guard
 //                                fbo_float32 adaptive_motion adaptive_motion_speed_lo adaptive_motion_speed_hi
-//                                adaptive_motion_floor adaptive_motion_smooth_ms
+//                                adaptive_motion_floor adaptive_motion_smooth_ms dither_need
 namespace VpResync {
 
 class SettingsStamp {
@@ -86,7 +87,7 @@ public:
             "dejudder_search_range", "dejudder_texture_tolerance", "dejudder_vector_smooth", "dejudder_verify",
             "dejudder_verify_share", "general_rate_fixes", "motion_ahead_frames", "motion_engine",
             "motion_history_fixes", "optical_flow", "optical_flow_cost_trust", "optical_flow_fb_check",
-            "optical_flow_global", "optical_flow_global_fallback", "vector_demand", "dejudder_even_rates",
+            "optical_flow_global", "optical_flow_global_fallback", "optical_flow_on_demand", "vector_demand", "dejudder_even_rates",
             "dejudder_strength", "dejudder_strength_even", "occlusion_mask", "timing_continuity_fixes" };
         static const char* const rebase[] = { "source_resolution", "rebase_kernel_match", "entrance_gpu_drain" };
         static const char* const analysis[] = {
@@ -108,7 +109,7 @@ public:
             "upscale_light", "ssim_bitrate_aware", "ssim_bitrate_floor", "cnn_residual_stabilise",
             "ssim_residual_stabilise", "residual_stabilise_grain_guard", "fbo_float32", "adaptive_motion",
             "adaptive_motion_speed_lo", "adaptive_motion_speed_hi", "adaptive_motion_floor",
-            "adaptive_motion_smooth_ms" };
+            "adaptive_motion_smooth_ms", "dither_need" };
         SetDomainKeys(Domain::Motion, std::vector<std::string>(std::begin(motion), std::end(motion)));
         SetDomainKeys(Domain::Rebase, std::vector<std::string>(std::begin(rebase), std::end(rebase)));
         SetDomainKeys(Domain::Analysis, std::vector<std::string>(std::begin(analysis), std::end(analysis)));

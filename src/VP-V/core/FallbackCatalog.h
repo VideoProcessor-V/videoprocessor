@@ -97,6 +97,47 @@ namespace FallbackCatalog
 			(detail.empty() ? std::string() : ": " + detail));
 	}
 
+	// ---- output.dither: where the sigma-delta's block vectors come from (W2-C8) -----------------------
+	// The chain of motion.estimation DitherVectorSource.h (shared pair -> matcher field -> on-demand pair -> own search -> static).
+	// The shared pair is the intended path and has no entry; each automatic step down has one, held while recent (the Tracker).
+	// Step 5 (static: the rule's motion_compensation 0) is a configuration - the shipped default - so it is a status line only.
+	inline Decision DitherVectorsMatcherField(bool recent)
+	{
+		if (!recent)
+			return Released("dither vectors matcher");
+		return Engaged("dither vectors matcher", "sigma-delta vectors from the matcher's field of this frame (no verified shared pair)");
+	}
+	inline Decision DitherVectorsOnDemand(bool recent)
+	{
+		if (!recent)
+			return Released("dither vectors on demand");
+		return Engaged("dither vectors on demand", "sigma-delta vectors from an on-demand optical-flow pair (none computed ahead)");
+	}
+	inline Decision DitherVectorsOwnSearch(bool recent, const std::string& why)
+	{
+		if (!recent)
+			return Released("dither vectors own search");
+		return Engaged("dither vectors own search", "sigma-delta searched the presented picture itself" +
+			(why.empty() ? std::string() : " (" + why + ")"));
+	}
+	// Coordinator 2026-11-11 (C8 Q1): a reuse whose span the Indicator could not stamp (resync_event off: the epoch form only).
+	inline Decision DitherVectorsUnvalidated(bool recent)
+	{
+		if (!recent)
+			return Released("dither vectors unvalidated");
+		return Engaged("dither vectors unvalidated", "sigma-delta vectors reused on the epoch check only (no resync stamps: resync_event off)");
+	}
+
+	// Owner 2026-11-11 22:39 (doc 91:108): the sigma-delta's motion compensation (default on) is off for a frame whose pair is not
+	// valid (discontinuity, drop, refused stamps) or while the motion engine is off; held while recent (the Tracker).
+	inline Decision DitherMotionCompensationOff(bool recent, const std::string& why)
+	{
+		if (!recent)
+			return Released("dither motion compensation");
+		return Engaged("dither motion compensation", "dither: motion compensation off: " + (why.empty() ? std::string("vectors not valid") : why) +
+			" (the plain motion gate carries the residual)");
+	}
+
 	// ---- colour.extended_range (ADR-0002) -------------------------------------------------------
 	enum class BtbWtwClip
 	{
@@ -214,6 +255,11 @@ namespace FallbackCatalog
 		ProducerNotRunning,    // wanted but not started / stopped: `error` carries the producer's real reason
 		SizeMismatch,          // a pair was computed but not at the matcher's search size
 		Missing,               // the producer runs but had no pair for these frames (short queue, a gap, a resync)
+		// W2-C5b: the on-demand request (VectorEngine::RequestPair / AwaitPair; OnDemandEstimate.h) did not deliver a pair in time.
+		OnDemandLate,          // asked, but not answered within the frame budget (or the asker gave up): the matcher ran instead
+		OnDemandUnavailable,   // asked, but the producer was not running / stopping / restarting, or the request was refused or failed
+		OnDemandNoBudget,      // not asked: no time left in this frame for an engine run
+		OnDemandUncached,      // not asked: a frame's luma analysis was not cached at the dequeue (the hook never decodes; low latency)
 	};
 	inline const char* NoPairNote(NoPairCause cause)
 	{
@@ -223,6 +269,10 @@ namespace FallbackCatalog
 		case NoPairCause::ProducerNotRunning: return "matcher only (the optical-flow look-ahead producer is not running";
 		case NoPairCause::SizeMismatch: return "matcher only (the pair computed ahead does not fit the matcher's search size";
 		case NoPairCause::Missing: return "matcher only (no optical-flow pair computed ahead for these frames";
+		case NoPairCause::OnDemandLate: return "matcher only (the on-demand optical-flow pair was not ready within the frame budget";
+		case NoPairCause::OnDemandUnavailable: return "matcher only (the on-demand optical-flow pair could not be made";
+		case NoPairCause::OnDemandNoBudget: return "matcher only (no time left in the frame for an on-demand optical-flow pair";
+		case NoPairCause::OnDemandUncached: return "matcher only (the frames were not analysed yet when the on-demand optical-flow pair would have been asked";
 		default: return "";
 		}
 	}

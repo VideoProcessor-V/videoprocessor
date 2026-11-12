@@ -448,6 +448,30 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
             !quantiserProblem.empty() ? FallbackCatalog::DitherDrop::DisabledByLibplacebo : FallbackCatalog::DitherDrop::None,
             sigmaDomainDropped ? std::string(domain.full ? "full" : "limited") + " range, " +
                 std::to_string(domain.sample) + "-bit swapchain, colour depth " + std::to_string(domain.color) : std::string()));
+        // dither_need (output.dither, default off; VP-V-owned segment, no Bill hook): the decision runs only on "auto" and never
+        // on the Original pathway; the feed is empty until the live fill (G6), so "auto" is the named, counted fallback today.
+        {
+            const DitherNeedSeam::Outcome need = outputFinish.EvaluateDitherNeed(
+                activeSettings.ditherNeed == "auto" && any, pipelineSlots.OriginalPathway());
+            SyncFallback(need.fallback);
+            // auto asked for but the sigma-delta is not running by choice: a one-time visible line, not a silent no-op
+            // (a dropped sigma-delta is already the "dither" fallback).
+            if (activeSettings.ditherNeed == "auto" && !any && !pipelineSlots.OriginalPathway())
+            {
+                const std::string why = std::string("dither need: inactive (") + (!ditherPrep.found ?
+                    "the sigma-delta dither is not selected (temporal_dither)" : "output.dither is switched off in pipeline_slots_off") + ")";
+                if (outputFinish.DitherNeedStatusChanged(why))
+                    DebugLog::Log("%s", why.c_str());
+            }
+            else if (outputFinish.DitherNeedStatusChanged(need.status) && !need.status.empty())
+            {
+                const DitherNeedSeam::Counters& n = outputFinish.DitherNeedCounters();
+                DebugLog::Log("%s (frames so far: on %llu, not needed %llu, unavailable %llu, stale %llu, classical quality %llu)",
+                    need.status.c_str(), static_cast<unsigned long long>(n.framesOn), static_cast<unsigned long long>(n.framesNotNeeded),
+                    static_cast<unsigned long long>(n.framesUnavailable), static_cast<unsigned long long>(n.framesStale),
+                    static_cast<unsigned long long>(n.framesClassicalQuality));
+            }
+        }
     }
     // The dither is the last processing of every picture: if a configured
     // shader would run after the sigma-delta at the OUTPUT stage, the

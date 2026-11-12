@@ -4,6 +4,7 @@
 #include <VP-V/core/PipelineSlots.h>
 #include <VP-V/core/SegmentRunner.h>
 #include <VP-V/core/SlotRegistry.h>
+#include <VP-V/modules/output/dither/DitherNeedSeam.h>
 
 #include <libplacebo/renderer.h>
 #include <libplacebo/shaders/custom.h>
@@ -137,6 +138,22 @@ namespace OutputSegments
 		//    output.dither off in the registry removes it the same way.
 		DitherPrep PrepareDither(std::vector<const pl_hook*>& hooks, const SigmaDeltaDomain::Domain& domain, bool outputFloat32,
 			const PipelineSlots::Registry& registry);
+		// 1b. dither_need (default off): the per-frame decision on the shared products (DitherNeedSeam.h). Off and the
+		//     Original pathway return at once, touching nothing. The feed is empty until the live fill of P11/P12 (deferred
+		//     live fill G6, via the Entrance seam): "auto" then shows the named, counted fallback and changes nothing.
+		DitherNeedSeam::Outcome EvaluateDitherNeed(bool requested, bool originalPathway,
+			const DitherNeedSeam::Feed& feed = DitherNeedSeam::Feed())
+		{
+			return ditherNeed.Evaluate(requested, originalPathway, feed, RegionEvidence::Grid());
+		}
+		const DitherNeedSeam::Counters& DitherNeedCounters() const { return ditherNeed.Count(); }
+		// True when the dither-need status line differs from the last one logged (log on change only).
+		bool DitherNeedStatusChanged(const std::string& status)
+		{
+			if (status == ditherNeedLogged) return false;
+			ditherNeedLogged = status;
+			return true;
+		}
 		// 2. The dither runs last at OUTPUT (24572-24593). Returns true when it was moved.
 		bool KeepDitherLast(std::vector<const pl_hook*>& hooks, bool levelsFull);
 		// 3. The mask parameters (24637-24644): returns the dither's index (hooks.size() = none).
@@ -157,5 +174,7 @@ namespace OutputSegments
 		OcclusionMask::Hook& mask;
 		std::vector<const pl_hook*> members;
 		SegmentRunner::Segment segment;
+		DitherNeedSeam::Stage ditherNeed;
+		std::string ditherNeedLogged;
 	};
 }

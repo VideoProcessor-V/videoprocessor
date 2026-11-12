@@ -361,6 +361,7 @@ inline bool IsVpvOnlyKey(const QString& key)
         "optical_flow_fb_check",
         "optical_flow_global",
         "optical_flow_global_fallback",
+        "optical_flow_on_demand",
         "optical_flow_refresh",
         "optimized",
         "optional",
@@ -637,6 +638,7 @@ inline bool IsVpvChoiceKey(const QString& key)
         "optical_flow_fb_check",
         "optical_flow_global",
         "optical_flow_global_fallback",
+        "optical_flow_on_demand",
         "preserve_extended_range",
         "pulldown_fixes",
         "queue_timing_fixes",
@@ -696,6 +698,7 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
             { "render_ahead", "off" }, { "dejudder_gate", "auto" }, { "render_ahead_queue_credit", "off" },
             // 2026-10-17: the engine's extras, the grain switches, the DV tunnel restore switch.
             { "optical_flow_global_fallback", "on" }, { "optical_flow_cost_trust", "off" }, { "optical_flow_fb_check", "off" },
+            { "optical_flow_on_demand", "auto" },
             { "interpolation_grain", "preserve" }, { "dejudder_source_warp_filter", "catmull" },
             { "residual_stabilise_grain_guard", "on" }, { "deband_vp_grain_guard", "on" }, { "deband_grain", "off" }, { "deband_vp_exclusive", "on" },
             { "dv_tunnel_fixes", "on" },

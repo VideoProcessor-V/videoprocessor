@@ -1522,6 +1522,22 @@ namespace Vpv
 				state->host.setValue(section, QStringLiteral("entrance_gpu_drain"), drain->itemData(i).toString());
 			});
 
+			// dither_need (output.dither, default off): extra sigma-delta amplitude only in banding-prone blocks where a
+			// link step is visible, decided from the shared products (light level, region stats, source quality).
+			auto* ditherNeed = new QComboBox;
+			ditherNeed->setObjectName(ObjectName(QStringLiteral("expert.dither_need")));
+			ditherNeed->addItem(QStringLiteral("Off (default)"), QString());
+			ditherNeed->addItem(QStringLiteral("Auto (extra dither only where banding would show)"), QStringLiteral("auto"));
+			ditherNeed->setToolTip(QStringLiteral("Key dither_need. Adds sigma-delta amplitude only in blocks where a link step "
+				"would be visible, from the source quality and the light level; judged by its own link-noise limit. A missing or "
+				"stale input is shown under 'engaged' and the amplitude stays as today. Off = today's picture exactly."));
+			form->addRow(QStringLiteral("Dither where needed"), ditherNeed);
+			QObject::connect(ditherNeed, qOverload<int>(&QComboBox::currentIndexChanged), ditherNeed, [state, ditherNeed, section](int i)
+			{
+				if (state->refreshing || i < 0 || !state->host.setValue) return;
+				state->host.setValue(section, QStringLiteral("dither_need"), ditherNeed->itemData(i).toString());
+			});
+
 			// frame_analysis_store (WP-23): VP's per-source-frame analysis record and the one shared luma
 			// decode its readers use; off until the big test; disabled in the Original pathway.
 			auto* analysis = new QCheckBox(QStringLiteral("On (one luma decode per frame for every analyser)"));
@@ -1608,7 +1624,7 @@ namespace Vpv
 			layout->addLayout(form);
 			layout->addStretch();
 
-			state->refreshers.push_back([state, lutStage, entranceOnce, merged, drain, analysis, resync, hdrInference, order, slotsOff, section]()
+			state->refreshers.push_back([state, lutStage, entranceOnce, merged, drain, ditherNeed, analysis, resync, hdrInference, order, slotsOff, section]()
 			{
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
 				{
@@ -1637,6 +1653,13 @@ namespace Vpv
 					const QSignalBlocker blocker(drain);
 					const QString value = get("entrance_gpu_drain").toLower();
 					drain->setCurrentIndex(value == QStringLiteral("finish") ? 2 : value == QStringLiteral("flush") ? 1 : 0);
+				}
+				{
+					const QSignalBlocker blocker(ditherNeed);
+					ditherNeed->setCurrentIndex(get("dither_need").compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0 ? 1 : 0);
+					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
+					ditherNeed->setEnabled(!original);
+					SetGreyReason(ditherNeed, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());
 				}
 				{
 					const QSignalBlocker blocker(resync);

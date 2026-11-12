@@ -181,6 +181,7 @@ namespace VpvRenderer
 		// corpus 2026-10-17: no measured benefit on real clips (cost trust identical; fb check trades removal for damage) - off by default, owner gate
 		bool opticalFlowCostTrust = false;
 		bool opticalFlowFbCheck = false;
+		std::string opticalFlowOnDemand = "auto";   // optical_flow_on_demand (W2-C5b): auto | on | off
 		// VP's 50/60p frame interpolation (docs/VP-interpolator-50-60-plan.md; owner
 		// defaults 2026-10-16, open for confirmation): off | auto (a non-integer
 		// source/display ratio only) | always (smooth-motion parity for video-class
@@ -284,6 +285,10 @@ namespace VpvRenderer
 		// scaling passes vary by +-1 of 16 bits on scattered textured pixels with the GPU's timing).
 		// off = today's path (the default until it is costed on the 3090); Original pathway: off.
 		std::string entranceGpuDrain = "off";
+		// dither_need (output.dither; default off): the per-block extra amplitude of the sigma-delta, decided from the shared
+		// products (P12 light level, P11 region stats, P14 source quality) only where a link step is visible. off = byte-identical;
+		// "auto" = on. A missing or stale product is a visible fallback (Ctrl+I, Config status). Original pathway: not run.
+		std::string ditherNeed = "off";
 		std::string pipelineSettingsProblems;   // refused values, shown under "Fallbacks engaged" (audit item 4)
 		// Kernel-matched re-base (docs/VP-stage12-build-plan.md; owner 2026-10-16: optimise
 		// 1080p): the identified player kernel's inverse for an exact 2:1 luma re-base.

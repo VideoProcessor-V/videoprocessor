@@ -17,6 +17,7 @@
 #include <vprenderer/NativeStatsOverlayPlacement.h>
 #include <vprenderer/NlsHookRecovery.h>
 #include <vprenderer/CustomHookChain.h>
+#include <VP-V/modules/output/dither/VpShaderInclude.h>
 #include <vprenderer/DejudderWarp.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <vprenderer/FrameInterpolator.h>
@@ -276,8 +277,12 @@ namespace
 		path += "\\shaders\\";
 		path += fileName;
 		std::ifstream input(path, std::ios::binary);
-		return std::string(std::istreambuf_iterator<char>(input),
-			std::istreambuf_iterator<char>());
+		std::string source{ std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>() };
+		// W2-C8: the passes a shader names with `// VP_INCLUDE <id>` (the sigma-delta's search: motion module), as
+		// the renderer's custom hook chain expands them. An unknown id leaves the line (the parse then fails loudly).
+		std::string reason;
+		CustomHookChain::ExpandVpIncludes(source, reason);
+		return source;
 	}
 
 	void ReplaceShaderToken(std::string& source, const std::string& name,

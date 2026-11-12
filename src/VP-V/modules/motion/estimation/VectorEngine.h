@@ -17,6 +17,7 @@
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/GapSeed.h>
+#include <VP-V/modules/motion/estimation/OnDemandEstimate.h>
 #include <VP-V/modules/motion/estimation/ProducerPlan.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 #include <VP-V/modules/motion/estimation/VectorEngineState.h>
@@ -27,6 +28,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <functional>
 #include <cstdint>
 #include <exception>
 #include <list>
@@ -151,6 +153,10 @@ namespace VpMotion
 			bool dejudderCanEngage = false;
 			double sourceHz = 0.0;              // the measured content rate (0 = unmeasured)
 			pl_gpu gpu = nullptr;               // the device the engine needs; null = none
+			// W2-C5b: optical_flow_on_demand for a host that does not note it (tests). The renderer notes it every frame through
+			// NoteHostOnDemandSetting (rule 32: no hook line of its own), which then wins; PlanProducer publishes the result
+			// (OnDemandSettingNow) for the walk's stage.
+			OnDemand::Setting onDemand = OnDemand::Setting::Auto;
 		};
 
 		// Render thread, renderMutex held, once per rendered source frame: starts, keeps or stops the
@@ -345,6 +351,94 @@ namespace VpMotion
 		void FailProducerStartsForTesting(const std::string& reason) { producerStartFailureForTesting_ = reason; }
 		// Reservations (RefinedFieldOf, SubmitLongPair ...): IVectorEngine's "absent" defaults.
 
+		// ---- W2-C5b: the ON-DEMAND estimate entry (OnDemandEstimate.h; refs\93-prep-C5b.md); render thread --------------------
+		// A render-time consumer with no pair computed ahead asks the look-ahead producer's ONE session for (from, to) now. Never starts
+		// the producer and never opens a second session: no producer (low latency without it, optical flow off, stopped) answers
+		// Unavailable at once; budgetMs <= 0 answers NoBudget; a pair already in the P2 slot answers FromSlot (zero work). The C1 state
+		// gate (OnDemandStateOn): while the engine's one state (State(), W2-C1) is Off, a request answers Unavailable with zero work
+		// (counted `gated`; doc 91 D: the global engine state is honoured by every consumer).
+		OnDemand::PairFuture RequestPair(OnDemand::PairRequest request);
+		// Waits up to waitMs (<= 0: no wait) for the answer. The pair (cause None), or null with the cause the miss counts as
+		// (OnDemandLate: not answered in time - the request is abandoned, so the worker skips it before any GPU work;
+		// OnDemandNoBudget; OnDemandUnavailable: no producer, stopping, refused or failed).
+		MotionAhead::FlowPtr AwaitPair(const OnDemand::PairFuture& future, double waitMs, FallbackCatalog::NoPairCause& cause);
+		struct OnDemandCounters
+		{
+			unsigned long long requests = 0, served = 0, fromSlot = 0, late = 0, unavailable = 0, noBudget = 0, gated = 0;
+			// requests counted by RequestPair; each awaited one lands once in served / fromSlot / late / unavailable / noBudget
+			// (AwaitPair). gated is a breakdown of unavailable (the C1 state gate said no).
+			double lastWaitMs = 0.0, waitMsSum = 0.0;   // AwaitPair's wait (served ones in the sum)
+			// Commit 4 (the dequeue hook + the estimate's fill): issued by the hook; unclaimed = issued, never awaited (a newer
+			// issue or a different pair replaced it: abandoned, no GPU work if not started); aheadCovered = the pair was found
+			// computed ahead when the estimate came (the request abandoned); gapServed = a hiccup gap pair served on demand (no
+			// gap seed needed); idleSkips = not issued because no estimate read a pair within kConsumerIdleCycles hook calls.
+			unsigned long long issued = 0, unclaimed = 0, aheadCovered = 0, gapServed = 0, idleSkips = 0;
+			// uncached = not issued because a frame's luma analysis was not cached yet at the dequeue (the hook never decodes under
+			// the queue mutex; at depth 0 nothing walks ahead, so this is the share the path cannot serve there).
+			unsigned long long uncached = 0;
+			double budgetMs = 0.0, renderMs = 0.0;   // the last budget issued with; the measured render time (EWMA)
+		};
+		OnDemandCounters OnDemandReads() const;
+		// The C1 state gate (C5b opus gate MUST 2): no request work while the engine's one state is Off (vector_demand off, no starter,
+		// interlaced, smooth motion, VRAM release, ...). Render thread (State() is derived there, with its one-frame lag).
+		bool OnDemandStateOn() const { return motionEngineStatus.state != VectorDemand::MotionEngineState::Off; }
+		// ---- W2-C5b commit 4: the dequeue issues, the estimate fills (OnDemandIssue.h; VectorEngineEstimate.inl) -----------
+		enum : unsigned { kConsumerIdleCycles = 4 };   // enum constant: ODR-safe in C++14
+		// The post (OnDemandIssue.h), once per staged pair (once per new A): the render-time sample (OnDemand::RenderSample) and the consumer clock.
+		void NoteOnDemandCycle(double sourceHz, double dequeueWaitMs);
+		// The deadline for a request issued now: OnDemand::RenderBudget at the pair's source rate.
+		double OnDemandBudgetMs(double sourceHz) const;
+		// True while an estimate read (or asked for) a pair within the last kConsumerIdleCycles hook calls, or before the first
+		// kConsumerIdleCycles calls: no consumer = no request (no GPU work for a pair nobody reads).
+		bool OnDemandConsumerActive();
+		// Rule 32: the renderer notes optical_flow_on_demand every frame from Impl::ResolveMotionEngine (PhaseTimeline.inl, render
+		// thread, before RenderLocked); once noted it replaces ProducerInputs::onDemand in PlanProducer. Render thread only.
+		void NoteHostOnDemandSetting(OnDemand::Setting s) { hostOnDemand_ = s; hostOnDemandKnown_ = true; }
+		// The setting PlanProducer published (the host's noted value, else ProducerInputs::onDemand); the walk's stage reads it.
+		void SetOnDemandSetting(OnDemand::Setting s) { onDemandSetting_.store(static_cast<unsigned char>(s), std::memory_order_release); }
+		OnDemand::Setting OnDemandSettingNow() const { return static_cast<OnDemand::Setting>(onDemandSetting_.load(std::memory_order_acquire)); }
+		// Stall fix (W2-C5b re-check, MUST 3): the walk's stage only STAGES the predicted pair under the renderer's queue mutex
+		// (plain copies: the two frames' analysis caches as a peek closure, sequences, rate, wait); PostStagedOnDemand
+		// (OnDemandIssue.h), after the queue block, takes it and does every lock and the issue (cache peeks, P2 lookup, the
+		// producer's mutex and wake) outside the queue mutex. Render thread; the small mutex only makes a stray caller safe.
+		struct OnDemandStaged
+		{
+			bool active = false;
+			uint64_t from = 0, to = 0;
+			double pairRateHz = 0.0, dequeueWaitMs = 0.0;
+			std::function<bool(AnalysisLumaSource& lumaFrom, AnalysisLumaSource& lumaTo)> peek;   // false: a frame not cached yet
+		};
+		void StageOnDemand(OnDemandStaged staged);       // replaces one not posted yet
+		// Rule 32 (no new hook lines): the walk stages (StageOnDemandAtWalk, OnDemandIssue.h). True once per new A (the frame
+		// the dequeue takes next); false when the walk sees the same A again (the dequeue held it): no second request and no
+		// second cycle sample for it. Render thread only.
+		bool NoteOnDemandWalkFrame(uint64_t from)
+		{
+			if (onDemandWalkFromKnown_ && onDemandWalkFrom_ == from)
+				return false;
+			onDemandWalkFrom_ = from;
+			onDemandWalkFromKnown_ = true;
+			return true;
+		}
+		bool TakeStagedOnDemand(OnDemandStaged& out);    // false: nothing staged since the last take
+		// Issues ONE request for the dequeue's selected pair (through RequestPair); an older one not yet claimed is abandoned.
+		void IssueOnDemand(OnDemand::PairRequest request);
+		// The estimate's fill: `ahead` (the pair found computed ahead) is returned as is; else the pending request for exactly
+		// (from, to) is awaited within what is left of its budget. `allowed` false (the vectors-valid state refuses this
+		// adjacent pair) abandons it unread. cause: None (served, or nothing was asked) or the OnDemand* miss; a late answer is
+		// logged (the first, then every 10th). Marks the consumer active.
+		MotionAhead::FlowPtr OnDemandFill(MotionAhead::FlowPtr ahead, uint64_t from, uint64_t to, bool allowed,
+			FallbackCatalog::NoPairCause& cause);
+		// The last fill: did it serve exactly (from, to)? Its cause (None when it served or asked nothing).
+		bool OnDemandServed(uint64_t from, uint64_t to) const;
+		FallbackCatalog::NoPairCause OnDemandLastCause() const;
+		void NoteOnDemandGapServed();
+		// Counts the pair and remembers it, so the fill of that pair reports NoPairCause::OnDemandUncached (not plain Missing).
+		void NoteOnDemandUncached(uint64_t from, uint64_t to);
+		// The Ctrl+I segment (the de-judder's stats line): "on demand: issued N, served N, late N, no budget N, uncached N";
+		// empty while nothing was issued or skipped (off / auto: nothing shown, nothing changed).
+		std::string OnDemandStatusSegment() const;
+
 	private:
 		void NoteEstimated(bool done, uint64_t aSequence, uint64_t bSequence, uint64_t epochAtChoice);
 		FallbackCatalog::Decision NoteHookOutcome(bool failed, const std::string& what);   // counts and logs a failure
@@ -389,5 +483,31 @@ namespace VpMotion
 		static constexpr size_t kGlobalRing = 16;   // the link may ask about a pair a frame or so after it was taken
 		GlobalRecord global_[kGlobalRing];          // slot = to % kGlobalRing
 		FallbackCatalog::LookAheadFailures hookFailures_ = FallbackCatalog::PreEstimateHookFailures();
+		mutable std::mutex onDemandMutex_;          // W2-C5b
+		OnDemandCounters onDemand_;                  // under onDemandMutex_
+		// Commit 4, all under onDemandMutex_: the one pending request the dequeue issued, the render-time budget, the cycle clock.
+		struct OnDemandPendingRequest
+		{
+			bool active = false;
+			uint64_t from = 0, to = 0;
+			OnDemand::PairFuture future;
+			OnDemand::Clock::time_point issued;
+			double budgetMs = 0.0;
+		};
+		OnDemandPendingRequest onDemandPending_;
+		std::mutex onDemandStagedMutex_;            // the stall fix's staged pair (never held with onDemandMutex_)
+		OnDemandStaged onDemandStaged_;
+		uint64_t onDemandWalkFrom_ = 0;             // the last A the walk staged (render thread only)
+		bool onDemandWalkFromKnown_ = false;
+		OnDemand::Setting hostOnDemand_ = OnDemand::Setting::Auto;   // NoteHostOnDemandSetting (render thread)
+		bool hostOnDemandKnown_ = false;
+		std::atomic<unsigned char> onDemandSetting_{ static_cast<unsigned char>(OnDemand::Setting::Auto) };   // not under the mutex
+		OnDemand::RenderBudget onDemandBudget_;
+		OnDemand::Clock::time_point onDemandLastCycle_;
+		bool onDemandCycleKnown_ = false;
+		double onDemandCycleWaitMs_ = 0.0;           // this cycle's on-demand wait (excluded from the render sample)
+		unsigned long long onDemandCycles_ = 0, onDemandConsumerCycle_ = 0;
+		struct { uint64_t from = 0, to = 0; bool served = false; FallbackCatalog::NoPairCause cause = FallbackCatalog::NoPairCause::None; } onDemandLast_;
+		struct { uint64_t from = 0, to = 0; bool active = false; } onDemandUncachedPair_;   // the last pair not asked for: uncached (onDemandMutex_)
 	};
 }

@@ -2445,6 +2445,61 @@ namespace Tests
 					(L"no fingerprint change for: " + std::wstring(change, change + strlen(change))).c_str());
 		}
 
+		// W2-C5b: optical_flow_on_demand parses on / off, keeps the default (auto) for an invalid value, and on / off change the
+		// live-apply fingerprint (an Apply reaches the renderer's PlanProducer block).
+		TEST_METHOD(OnDemandSettingParsesOnOffAndKeepsAutoForAnInvalidValue)
+		{
+			const HarnessScope harnessScope;
+			const std::string folder = Here();
+			HMODULE dll = LoadLibraryExA((folder + "vprenderer\\VideoProcessorVPRenderer.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+			Assert::IsNotNull(dll, L"the renderer DLL");
+			using Export = int(__cdecl*)(const char*, char*, int);
+			const auto fingerprintOf = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboSettingsFingerprintForTest"));
+			const auto describe = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboDescribeSettingsForTest"));
+			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf), L"the fingerprint export");
+			Assert::IsNotNull(reinterpret_cast<void*>(describe), L"the describe export");
+			static std::atomic<int> freshConfig{ 0 };
+			auto call = [&](Export function, const std::string& text) {
+				const std::string path = folder + "vp-on-demand-key-test-" + std::to_string(freshConfig++) + ".cfg";
+				{
+					std::ofstream config(path, std::ios::trunc | std::ios::binary);
+					config << text;
+				}
+				std::vector<char> buffer(1 << 20);
+				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+				DeleteFileA(path.c_str());
+				Assert::IsTrue(length > 0, L"the export ran");
+				return std::string(buffer.data());
+			};
+			// the fingerprint starts with the content identity and the (fresh) config path, which differ on every call:
+			// compare only the settings part after identity|path|, as EveryProfileKeyChangesTheLiveSettingsFingerprint does
+			auto settingsPart = [](const std::string& full) {
+				const size_t identityEnd = full.find('|');
+				const size_t pathEnd = identityEnd == std::string::npos ? std::string::npos : full.find('|', identityEnd + 1);
+				Assert::IsTrue(pathEnd != std::string::npos, L"fingerprint starts with identity|path|");
+				return full.substr(pathEnd + 1);
+			};
+			auto value = [](const std::string& dump) {
+				const std::string key = "\noptical_flow_on_demand=";
+				const size_t at = dump.find(key);
+				if (at == std::string::npos) return std::string("(missing)");
+				const size_t start = at + key.size();
+				return dump.substr(start, dump.find('\n', start) - start);
+			};
+			const std::string head = "[general]\npersist_profile_selection: false\n[vprenderer.Default]\nquality: high\n";
+			const std::string baseFingerprint = settingsPart(call(fingerprintOf, head));
+			Assert::AreEqual(std::string("auto"), value(call(describe, head)), L"the default");
+			Assert::AreEqual(std::string("on"), value(call(describe, head + "optical_flow_on_demand: on\n")));
+			Assert::AreEqual(std::string("off"), value(call(describe, head + "optical_flow_on_demand: off\n")));
+			Assert::AreEqual(std::string("on"), value(call(describe, head + "optical_flow_on_demand: ON\n")), L"names are normalised");
+			Assert::AreEqual(std::string("auto"), value(call(describe, head + "optical_flow_on_demand: sometimes\n")),
+				L"an invalid value keeps the default");
+			// (the invalid value is checked through the parsed value above, as the other key tests do; on / off must
+			// change the settings part of the fingerprint)
+			Assert::AreNotEqual(baseFingerprint, settingsPart(call(fingerprintOf, head + "optical_flow_on_demand: on\n")), L"on reaches the renderer");
+			Assert::AreNotEqual(baseFingerprint, settingsPart(call(fingerprintOf, head + "optical_flow_on_demand: off\n")), L"off reaches the renderer");
+		}
+
 		// Integration 2026-10-17: the keys the merge brought (the engine's extras, the
 		// grain switches, dv_tunnel_fixes) are parsed, dumped and change the live and the
 		// rebuild-independent settings; at profile defaults the interpolator keeps grain
@@ -3431,6 +3486,196 @@ namespace Tests
 			Assert::IsTrue(logged(removed, "Temporal dither: libplacebo"), (L"libplacebo logged\n" + removed.Tail()).c_str());
 			Assert::IsFalse(logged(removed, "custom hook"), (L"libplacebo: the listed sigma-delta left out\n" + removed.Tail()).c_str());
 			Assert::IsTrue(logged(listed, "custom hook"), (L"auto: the listed sigma-delta loads as before\n" + listed.Tail()).c_str());
+		}
+
+		// W2-C8 (sigma-delta with motion compensation through the real renderer): the shader list rule of the C8 runs.
+		static std::string C8SigmaRule(const char* ditherVectors)
+		{
+			return std::string("temporal_dither: auto\ndither_vectors: ") + ditherVectors + "\n"
+				"[shader.standard]\ntype: multi\nlabel: Off\n"
+				"[shader.standard.sigma_delta]\nshader_type: custom\nlabel: Temporal sigma-delta\nstage: post_resize\norder: 90\n"
+				"glsl_file: Temporal sigma-delta.glsl\nparam_motion_compensation: 1\n";
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(C8OwnSearchSplitShaderMatchesTheOriginalFile)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(C8OwnSearchSplitShaderMatchesTheOriginalFile)
+		{
+			const HarnessScope harnessScope;
+			// W2-C8 step 1, GPU form: dither_vectors own (the moved output-domain search) renders the same codes from the split
+			// shader (this build's shaders folder: `// VP_INCLUDE motion.output_domain_search`) and from the b5ae6eda5 file (a
+			// folder VP_C8_ORIG_SHADER_DIR holding the unsplit file). A run twice on the split file first: with the sigma-delta
+			// on the capture is temporal, so equality is asserted only where the same build is deterministic (REPORT otherwise).
+			if (!RequireHardwareOrSkip("C8OwnSearchSplitShaderMatchesTheOriginalFile")) return;
+			const std::string original = HarnessEnvText("VP_C8_ORIG_SHADER_DIR");
+			if (original.empty())
+			{
+				Logger::WriteMessage("SKIP-NO-ORIGINAL C8OwnSearchSplitShaderMatchesTheOriginalFile (set VP_C8_ORIG_SHADER_DIR)\n");
+				return;
+			}
+			const std::string here = Here();
+			const std::vector<std::string> saved = g_harnessShaderProfiles;
+			g_harnessShaderProfiles = { "standard.sigma_delta" };
+			const ScratchCaptureFolder shots(L"vp-c8-own");
+			struct Case { const char* name; VideoFrameEncoding encoding; const char* path; bool film; bool moving; };
+			const Case cases[] = { { "v210 gpu 23.976 still", VideoFrameEncoding::V210, "gpu", true, false },
+				{ "v210 standard 59.94 still", VideoFrameEncoding::V210, "standard", false, false },
+				{ "v210 gpu 23.976 moving", VideoFrameEncoding::V210, "gpu", true, true } };
+			std::string failures, report;
+			for (const Case& c : cases)
+			{
+				FramePlan plan;
+				plan.captureAtSeconds = 2.5;
+				plan.retryRefusedCapture = true;
+				const bool moving = c.moving;
+				plan.step = [moving](int n) { FrameStep f; f.content = moving ? n : 0; return f; };
+				auto hashWith = [&](const std::string& dir) {
+					SetEnvironmentVariableA("VP_TEST_SHADER_DIR", dir.c_str());
+					return CaptureHash(Run(c.encoding, c.path, 4.0, c.film, C8SigmaRule("own"), false, &plan));
+				};
+				const std::string split = here.substr(0, here.size() - 1);
+				const std::string a = hashWith(split), a2 = hashWith(split), b = hashWith(original);
+				const bool deterministic = !a.empty() && a == a2;
+				report += std::string("== ") + c.name + ": split " + a + ", split again " + a2 + ", original " + b +
+					(deterministic ? " (deterministic)" : " (NOT deterministic: REPORT only)") + "\n";
+				if (a.empty() || b.empty())
+					failures += std::string(c.name) + ": a capture is missing; ";
+				else if (deterministic && a != b)
+					failures += std::string(c.name) + ": the split shader's output differs from the original file's; ";
+			}
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
+			g_harnessShaderProfiles = saved;
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(failures.empty(), WideOf(failures + "\n" + report).c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(C8MotionCompensationDefaultBeforeAfter)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(C8MotionCompensationDefaultBeforeAfter)
+		{
+			const HarnessScope harnessScope;
+			// Owner 2026-11-11 22:39 (doc 91:108): the sigma-delta's motion compensation defaults ON. BEFORE = the rule set to 0 (the
+			// shader default, the behaviour before the decision), AFTER = the rule without the parameter (the new default). REPORT:
+			// each case's capture hash before / after (+ a repeat of AFTER for determinism) and the compensation status segment.
+			// Asserted: both captures exist, AFTER shows "dither motion compensation:", BEFORE says "rule".
+			if (!RequireHardwareOrSkip("C8MotionCompensationDefaultBeforeAfter")) return;
+			const std::string here = Here();
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
+			const std::vector<std::string> saved = g_harnessShaderProfiles;
+			g_harnessShaderProfiles = { "standard.sigma_delta" };
+			const ScratchCaptureFolder shots(L"vp-c8-mc");
+			auto rule = [](bool before) {
+				return std::string("temporal_dither: auto\n"
+					"[shader.standard]\ntype: multi\nlabel: Off\n"
+					"[shader.standard.sigma_delta]\nshader_type: custom\nlabel: Temporal sigma-delta\nstage: post_resize\norder: 90\n"
+					"glsl_file: Temporal sigma-delta.glsl\n") + (before ? "param_motion_compensation: 0\n" : "");
+			};
+			struct Case { const char* name; const char* path; bool film; bool moving; };
+			const Case cases[] = { { "v210 gpu 23.976 still", "gpu", true, false }, { "v210 standard 59.94 still", "standard", false, false },
+				{ "v210 gpu 23.976 moving", "gpu", true, true } };
+			std::string failures, report;
+			for (const Case& c : cases)
+			{
+				FramePlan plan;
+				plan.captureAtSeconds = 2.5;
+				plan.retryRefusedCapture = true;
+				const bool moving = c.moving;
+				plan.step = [moving](int n) { FrameStep f; f.content = moving ? n : 0; return f; };
+				const RunResult before = Run(VideoFrameEncoding::V210, c.path, 4.0, c.film, rule(true), false, &plan);
+				const RunResult after = Run(VideoFrameEncoding::V210, c.path, 4.0, c.film, rule(false), false, &plan);
+				const RunResult after2 = Run(VideoFrameEncoding::V210, c.path, 4.0, c.film, rule(false), false, &plan);
+				const std::string b = CaptureHash(before), a = CaptureHash(after), a2 = CaptureHash(after2);
+				auto segmentOf = [](const RunResult& r) {
+					const size_t at = r.dejudderStatus.find("dither motion compensation:");
+					return at == std::string::npos ? std::string() : r.dejudderStatus.substr(at);
+				};
+				report += std::string("== ") + c.name + ": before (rule 0) " + b + ", after (default) " + a + ", after again " + a2 +
+					(a == b ? " (UNCHANGED)" : " (CHANGED)") + (a == a2 ? "" : " (after not deterministic)") +
+					"\n  before: " + segmentOf(before) + "\n  after: " + segmentOf(after) + "\n  fallbacks after: " + after.fallbacksStatus + "\n";
+				if (b.empty() || a.empty())
+					failures += std::string(c.name) + ": a capture is missing; ";
+				if (segmentOf(after).empty())
+					failures += std::string(c.name) + ": no motion compensation status after; ";
+				if (segmentOf(before).find("rule") == std::string::npos)
+					failures += std::string(c.name) + ": before does not say the rule set 0; ";
+			}
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
+			g_harnessShaderProfiles = saved;
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(failures.empty(), WideOf(failures + "\n" + report).c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(C8DitherVectorsAutoVersusOwn)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(C8DitherVectorsAutoVersusOwn)
+		{
+			const HarnessScope harnessScope;
+			// W2-C8 step 7 (the owner's default decision, doc 93 :280): the sigma-delta with motion compensation, the moving
+			// pattern, dither_vectors auto vs own, at VP_C8_W x VP_C8_H and VP_C8_FPS (1080p60 / 4K30 by the run script). REPORT
+			// only: the chain's step shares (status segment), the sigma-delta pass GPU times (the pass-timer readout lines) and
+			// the "Fallbacks engaged" line. Assertions: both runs present, own never reuses, the status line exists.
+			if (!RequireHardwareOrSkip("C8DitherVectorsAutoVersusOwn")) return;
+			const int w = std::atoi(HarnessEnvText("VP_C8_W").c_str()), h = std::atoi(HarnessEnvText("VP_C8_H").c_str());
+			const int fps = std::atoi(HarnessEnvText("VP_C8_FPS").c_str());
+			const double seconds = std::max(8.0, std::atof(HarnessEnvText("VP_C8_SECONDS").c_str()));
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
+			if (w > 0 && h > 0) { g_harnessWidth = w; g_harnessHeight = h; }
+			const std::string here = Here();
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
+			const std::vector<std::string> saved = g_harnessShaderProfiles;
+			g_harnessShaderProfiles = { "standard.sigma_delta" };
+			FramePlan plan;
+			plan.rateNumerator = (fps > 0 ? fps : 60) * 1000;
+			plan.rateDenominator = 1001;
+			plan.step = [](int n) { FrameStep f; f.content = n; return f; };
+			std::string report = "C8 A/B " + std::to_string(g_harnessWidth) + "x" + std::to_string(g_harnessHeight) + " @" +
+				std::to_string(fps > 0 ? fps : 60) + "000/1001, " + std::to_string(seconds) + " s\n";
+			std::string failures;
+			for (const char* mode : { "auto", "own" })
+			{
+				// A starter (the de-judder's standing demand) runs the engine: the sigma-delta is a reuse-only consumer (doc 91 D
+				// 2026-11-11 06:30), so without one the chain is never asked (it searches itself, "not served").
+				const std::string starter = HarnessEnvText("VP_C8_NO_STARTER") == "1" ? std::string() : std::string("dejudder_strength: 0.25\n");
+				// VPVEC can be bound only on the Beta flavour (libplacebo with the fork's set-texture call; the default flavour
+				// searches itself: "no fork patch 0004"), as VectorEngineSmoothMotionKeepsAnalysis. A 24p source on the ~60 Hz
+				// harness display is cadence-eligible, so the de-judder's standing demand starts the engine.
+				const bool beta = HarnessEnvText("VP_C8_BETA") == "1";
+				if (beta)
+					_putenv_s("VP_TEST_HARNESS_BETA", "1");
+				const bool film = fps > 0 && fps < 30;
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", seconds, film, starter + C8SigmaRule(mode), false, &plan);
+				if (beta)
+					_putenv_s("VP_TEST_HARNESS_BETA", "");
+				if (!r.presented)
+					failures += std::string(mode) + ": nothing presented; ";
+				std::string chain, passes;
+				for (const std::string& line : r.log)
+				{
+					if (line.find("Sigma-delta vectors") != std::string::npos)
+						chain = line;
+					if (line.find("sigma-delta") != std::string::npos && line.find(" ms") != std::string::npos &&
+						line.find("Sigma-delta vectors") == std::string::npos)
+						passes += "    " + line + "\n";
+				}
+				const size_t at = r.dejudderStatus.find("dither vectors:");
+				const std::string segment = at == std::string::npos ? std::string() : r.dejudderStatus.substr(at);
+				report += std::string("-- ") + mode + "\n  status: " + segment + "\n  last chain log: " + chain +
+					"\n  fallbacks: " + r.fallbacksStatus + "\n  sigma-delta pass lines:\n" + passes;
+				if (segment.empty())
+					failures += std::string(mode) + ": no \"dither vectors:\" status segment; ";
+				else if (std::string(mode) == "own" && (segment.find("shared 0,") == std::string::npos ||
+					segment.find("matcher 0,") == std::string::npos || segment.find("on-demand 0,") == std::string::npos))
+					failures += "own: the chain reused vectors; ";
+			}
+			g_harnessShaderProfiles = saved;
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
+			g_harnessWidth = savedW;
+			g_harnessHeight = savedH;
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(failures.empty(), WideOf(failures + "\n" + report).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(MotionAheadEngagesAtFourQueuedAheadAndFollowsTheQueue)
@@ -7282,8 +7527,13 @@ namespace Tests
 			_putenv_s("VP_TEST_HARNESS_BETA", "1");
 			// Control: the same run without smooth motion. The sigma-delta must run in this harness and be
 			// served (so the smooth-motion run's output-dither fallback means something).
+			// T-TH-SM-01 (approved 2026-11-12 09:17): since W2-C1 the engine runs only for a STARTER (de-judder standing demand,
+			// hiccup repair, camera fit); the sigma-delta is a reuse-only consumer, so without one the control's premise ("the
+			// sigma-delta is served") cannot hold ("Vector engine: idle (no starter)"). The control gets the de-judder's standing
+			// demand (dejudder_strength; this plan's source rate is cadence-eligible), which restores the premise. Rule 28: the
+			// assertions are unchanged; the smooth-motion run below is unchanged (smooth motion is the engine there).
 			const RunResult control = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
-				"deband_vp: on\ntemporal_dither: sigma_delta\n", false, &plan);
+				"deband_vp: on\ntemporal_dither: sigma_delta\ndejudder_strength: 0.25\n", false, &plan);
 			Logger::WriteMessage(("control (no smooth motion):\n" + ditherLines(control)).c_str());
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
 				"deband_vp: on\ntemporal_dither: sigma_delta\n[vprenderer.motion]\nmotion_engine: smooth_motion\nsmooth_motion: always\n", false, &plan);
