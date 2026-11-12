@@ -9,7 +9,7 @@
 // (LaneGpuProducts.h) and the deferred releases (old textures of a size change are destroyed at the next GPU-legal
 // phase, FlushReleases). No readback: every consumer is a GPU reader. Render thread only.
 //
-// Lane form (Dispatch, one chunk per call): P10 = [tap band 0..n-1] [extend] [kernel step 0..4] (StepsFor); P11 / P12 =
+// Lane form (Dispatch, one chunk per call): P10 = [tap band 0..n-1] [extend] [kernel steps 0..5] (StepsFor); P11 / P12 =
 // their one kernel step (the frame's tap and extend are made inline first when P11 needs them and P10 did not make
 // them). Live form (DispatchLive): the same steps in the same order, at once. Off / Original: never constructed.
 

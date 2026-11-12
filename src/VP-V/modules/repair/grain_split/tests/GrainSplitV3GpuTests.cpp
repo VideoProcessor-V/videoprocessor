@@ -6,7 +6,7 @@
 // GrainSplit::Compute (the v3 law in doubles): odd and even plane sizes, block edges 8 / 16 / 32 with the lane law's scale B / 16.
 //   V3GpuMatchesCpuReference  max |s1|, |s2|, |base| <= 0.05 code, f <= 1/255, N and e3 / e1 / e2 relative <= 1e-3.
 //   V3GpuIsDeterministic      two runs: bit-identical product and blocks.
-//   V3StepLoopEqualsCompute   Step(0..4) is bit-identical to Compute.
+//   V3StepLoopEqualsCompute   Step(0..5) is bit-identical to Compute.
 //   V3P11RegionFlagsAgree     consumer level: the P11 region classification from the v3 split against the v2 split (CPU).
 // Every measured worst value is written to the test log. No assertion is loosened to fit a result (rule 28): a miss is reported
 // with its numbers.
@@ -161,7 +161,7 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 		std::vector<float> a, b, blocks;
 	};
 
-	// One run on the device: Splitter::Compute, or (stepLoop) the five Step calls with the same arguments.
+	// One run on the device: Splitter::Compute, or (stepLoop) the six Step calls with the same arguments.
 	Product Run(GpuDevice& dev, pl_tex tex, int B, double scale, Storage storage, bool stepLoop = false, uint32_t component = 0)
 	{
 		Product r;
@@ -416,7 +416,7 @@ public:
 		}
 	}
 
-	// (c) Step(0..4) with the same arguments records exactly Compute's dispatches: bit-identical output.
+	// (c) Step(0..5) with the same arguments records exactly Compute's dispatches: bit-identical output.
 	TEST_METHOD(V3StepLoopEqualsCompute)
 	{
 		using namespace GrainSplitV3GpuTestsNs;
@@ -441,7 +441,7 @@ public:
 				Assert::IsTrue(!whole.a.empty() && !whole.blocks.empty(), L"downloaded");
 				const bool same = SameBits(whole.a, steps.a) && SameBits(whole.b, steps.b) && SameBits(whole.blocks, steps.blocks);
 				LogF("v3 step loop %.0fx%.0f B %.0f: %.0f (0 = bit-identical to Compute)", w, h, B, same ? 0.0 : 1.0);
-				Assert::IsTrue(same, L"Step(0..4) is bit-identical to Compute");
+				Assert::IsTrue(same, L"Step(0..5) is bit-identical to Compute");
 			}
 			pl_tex_destroy(gpu, &tex);
 		}

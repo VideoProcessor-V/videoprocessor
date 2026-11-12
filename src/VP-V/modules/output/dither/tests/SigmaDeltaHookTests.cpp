@@ -1313,7 +1313,7 @@ namespace VideoProcessorTest
 		}
 
 		// The python block inputs are a vectorised port of GrainSplit / StatsBlock / DeriveBlock; the C++ RegionEvidence chain on the
-		// same luma must agree. Measured on the three golden frames: N relative 2.3e-16, meanY exact, banding 2.4e-8 (Sample holds it as
+		// same luma must agree. Measured on the three golden frames: N relative 1.4e-16 (v3 law + NLF cap mirror), meanY exact, banding 2.4e-8 (Sample holds it as
 		// float); the tolerances below are those rounded up.
 		TEST_METHOD(GoldenRegionEvidenceInputsAgreeWithThePythonMirror)
 		{
