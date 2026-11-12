@@ -15,6 +15,11 @@
 // hardwareQpc and hardwareAgeKnown; now the per-frame ingress members (capture callbacks are serial).
 void LibplaceboVideoRenderer::IngressHardwareArrival(VideoFrame& videoFrame)
 {
+	// PHASE 1 (IngressState.h FixSwitches): the capture thread's switches follow the active settings from THIS arrival on
+	// (before the render loop's first refresh and before any reader below or in EnqueueFrame), and the ingress binding
+	// learns the pathway for R15 / R19 when it changes. Inside the callback gate: the Impl outlives this callback.
+	if (m_impl && SyncIngressSwitches(FixSwitchesOf(m_impl->activeSettings), m_queueTimingFixes, m_motionHistoryFixes))
+		Vpv::Ingress::NoteOriginalPathway(this, m_originalPathway.load(std::memory_order_relaxed));
 	int64_t& arrivalQpc = m_ingressArrivalQpc;
 	int64_t& hardwareQpc = m_ingressHardwareQpc;
 	bool& hardwareAgeKnown = m_ingressHardwareAgeKnown;

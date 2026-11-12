@@ -59,6 +59,26 @@ namespace VpMotion
 		return true;
 	}
 
+	// PHASE 1 of the host seams plan (refs/107 s2.4 item 1): the host's settings select the Original pathway
+	// (CoreSegments.inl UpdatePipelineSlots, the one settings seam): the timeline is released HERE, once, with the
+	// statements of PlanVpTimeline's "not wanted" branch, because the gated plan (DejudderExtension::OnPlanOutputs,
+	// Impl::PlanVpOutputs) never runs again to release it. Idempotent; `log` takes the "released" line.
+	template<class Log>
+	inline void ReleaseVpTimeline(DejudderPolicyState& st, Log&& log)
+	{
+		if (st.vpTimeline.Initialized())
+		{
+			st.vpTimeline.Reset();
+			st.vpQueueSteering.Reset();
+		}
+		TimelineNotPlanned(st, false);
+		if (st.vpTimelineLogged)
+		{
+			st.vpTimelineLogged = false;
+			log("released");
+		}
+	}
+
 	// The per-vsync timeline plan of one dequeued frame (statements as before; see the file comment).
 	template<class Settings, class Plan, class Host>
 	void PlanVpTimeline(const Settings& activeSettings, DejudderPolicyState& st, Plan& plan, Host& host)

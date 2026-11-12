@@ -56,6 +56,18 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 	next.SetEntranceOnce(settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway);   // B3: consumers after the entrance
 	(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
 	pipelineSlots = next;
+	// PHASE 1 of the host seams plan (refs/107 s2.4 item 1; owner E3 2026-11-11): the ONE settings seam hands the VP-V
+	// state over when the Original pathway is selected, so the gated module calls (RenderAhead::Presenter reporting, the
+	// de-judder timeline plan: `// VPV-GATED`) can do nothing afterwards without a VP-V plan outliving the switch: the
+	// render-ahead chain is broken and its gate reset once (Presenter::SetOriginalPathway), the per-vsync timeline is
+	// released with its fallback line, the phase picture dropped. Idempotent; a VP-V apply only clears the fact.
+	renderAheadPresenter.SetOriginalPathway(settings.pipelineOriginalPathway, RenderAheadNow());
+	if (settings.pipelineOriginalPathway)
+	{
+		VpMotion::ReleaseVpTimeline(dejudderPolicy, [this](const char* what) { LogVpTimeline(what); });
+		ReleaseFallback("timeline");
+		vpPhasePlanesValid = false;
+	}
 	VpFrameAnalysis::Host::SetLimitedDomain(settings.sourceCodingFixes);   // DIV-AN-01 either/or (Original: off = Bill's codes)
 	frameAnalysis.Owner(this).Configure(settings.frameAnalysisStore && !settings.pipelineOriginalPathway,   // WP-23
 		VpFrameAnalysis::Host::FullLumaReaders(pipelineSlots, settings.opticalFlow, settings.motionAheadFrames,

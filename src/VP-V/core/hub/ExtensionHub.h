@@ -17,7 +17,9 @@
 // released only for that host.
 
 #include <vprenderer/RendererExtension.h>
+#include <VP-V/core/hub/HostSlots.h>
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -73,6 +75,14 @@ namespace Vpv
 			bool gpuLive = false;
 		};
 
+		// PHASE 1 of the host seams plan (refs/107 s2.4 item 1; owner E3 2026-11-11: a VP-V call site in a Bill file does
+		// NOTHING in the Original pathway): the pathway the host's settings select, one fact per host, lock-free (HostSlots).
+		struct PathwayFact
+		{
+			const void* host = nullptr;
+			std::atomic<bool> original{ false };
+		};
+
 		class ExtensionHub : public RE::IRendererExtension
 		{
 		public:
@@ -85,6 +95,16 @@ namespace Vpv
 			// Host bookkeeping (diagnostics and tests).
 			size_t LiveHostCount() const;
 			bool HasHost(const void* host) const;
+
+			// PHASE 1 (refs/107 s2.4 item 1): true while `host` (the renderer's Impl, the key of its SettingsApplied, queue
+			// and PlanOutputs calls) runs the Original pathway. Recorded at SettingsApplied (LifecycleFacts::code != 0,
+			// CoreSegments.inl UpdatePipelineSlots) AFTER the modules saw that call, so a module's own SettingsApplied
+			// handler reads the PREVIOUS pathway here and the new one in f.code (VectorEngineExtension uses the pair);
+			// dropped with the host (GpuReleased / Shutdown). No fact (before the first settings apply, an unknown host,
+			// a full table: logged once per host) = VP-V, i.e. the module runs as before. Any thread: one slot scan.
+			bool OriginalPathway(const void* host) const;
+			// The recorder (the hub's SettingsApplied bookkeeping; tests). False = not recorded (null host / table full).
+			bool NoteOriginalPathway(const void* host, bool original);
 
 			void OnLifecycle(RE::LifecycleFacts&) override;
 			void OnSettingsLoad(RE::SettingsLoadContext&) override;
@@ -100,6 +120,7 @@ namespace Vpv
 			std::vector<std::unique_ptr<ISkeletonModule>> modules_;
 			mutable std::mutex hostsMutex_;
 			std::map<const void*, HostState> hosts_;
+			HostSlots<PathwayFact> pathway_;   // PHASE 1: the per-host Original fact (lock-free readers on the frame paths)
 		};
 
 		// Registers the hub with the hook layer exactly once (idempotent). Called by the

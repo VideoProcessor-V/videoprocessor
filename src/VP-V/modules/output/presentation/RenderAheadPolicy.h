@@ -1107,11 +1107,31 @@ namespace RenderAhead
 		int lastMainInterval = 1;        // the last main present's SyncInterval (diagnostics)
 		unsigned long long intervalPresents = 0;   // main presents made after holds
 
+		// PHASE 1 of the host seams plan (refs/107 s2.4 item 1; owner E3 2026-11-11): Bill's present path has no
+		// render-ahead, so in the Original pathway every report below returns at once (`// VPV-GATED`, verified by
+		// tools/check_hook_gating.py). The fact comes from the host's settings seam (CoreSegments.inl
+		// UpdatePipelineSlots); ENTERING Original breaks the chain and resets the gate once, ungated, so no plan,
+		// credit or ladder level outlives the switch. Render thread, as the reports. Returns true when entered.
+		bool originalPathway = false;
+		bool SetOriginalPathway(bool on, double now)
+		{
+			const bool entering = on && !originalPathway;
+			originalPathway = false;   // the hand-over runs ungated
+			if (entering)
+			{
+				Break(now);
+				ResetGate();
+			}
+			originalPathway = on;
+			return entering;
+		}
+
 		// The chain ends (a frame not queued by the plan): the next present is not
 		// predicted. The queue credit is latched (bug hunt 05 M4): a single break keeps
 		// it; it is returned once the chain has stayed broken for CreditLatch::kReleaseSeconds.
-		void Break(double now)
+		void Break(double now)   // VPV-GATED
 		{
+			if (originalPathway) return;
 			schedule.Break();
 			mainInterval = 1;
 			targetLeadMs = 0.0;
@@ -1121,9 +1141,10 @@ namespace RenderAhead
 
 		// A new epoch for the gate (bug hunt 05 H3): the ladder, its cost windows, the
 		// held costs, the drift-lateness count and the queue credit start again.
-		// Returns the level before the reset.
-		int ResetGate()
+		// Returns the level before the reset (0 in the Original pathway: nothing to reset).
+		int ResetGate()   // VPV-GATED
 		{
+			if (originalPathway) return 0;
 			const int level = gate.Level();
 			gate.Reset();
 			newFrameCost.Reset();
@@ -1140,8 +1161,9 @@ namespace RenderAhead
 
 		// The gate per source period (dejudder_gate period): p95 costs over 5 s, the
 		// average and single-frame budgets, the ladder one step at a time.
-		PresenterGateResult UpdateGate(double now, const PresenterGateFrame& frame)
+		PresenterGateResult UpdateGate(double now, const PresenterGateFrame& frame)   // VPV-GATED
 		{
+			if (originalPathway) return PresenterGateResult();   // not evaluated, level 0
 			newFrameCost.Trim(now);
 			extraCostOwn.Trim(now);
 			extraCostExternal.Trim(now);
@@ -1188,8 +1210,9 @@ namespace RenderAhead
 		// The SyncInterval for the main present now being made: the holds the last plan
 		// left after its last extra (taken at the main present's entry, so every exit
 		// consumes it, bug hunt 05 L2), 1 otherwise; at most kMaxSyncInterval.
-		int TakeMainInterval(int pending)
+		int TakeMainInterval(int pending)   // VPV-GATED
 		{
+			if (originalPathway) return 1;   // Bill presents every main frame at SyncInterval 1
 			const int interval = std::max(1, std::min(pending, kMaxSyncInterval));
 			lastMainInterval = interval;
 			if (interval > 1)

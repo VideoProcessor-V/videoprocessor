@@ -55,8 +55,8 @@ namespace VpMotion
 		static constexpr const char* kName = "motion.dejudder";
 		const char* Name() const override { return kName; }
 		void* Query(const char* iid) override;
-		void OnQueue(const RE::QueueFacts& f) override;
-		bool OnPlanOutputs(RE::FrameContext& c, RE::OutputPlan& plan) override;
+		void OnQueue(const RE::QueueFacts& f) override;                             // VPV-GATED (body in the .cpp)
+		bool OnPlanOutputs(RE::FrameContext& c, RE::OutputPlan& plan) override;   // VPV-GATED (body in the .cpp)
 	};
 
 	// Adds DejudderExtension to the hub. Start-up only; idempotent.
