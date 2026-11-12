@@ -515,9 +515,9 @@ namespace FallbackCatalog
 	// fence polls the staging copy with a non-waiting map instead (the readiness is less exact), and a copy
 	// issued by a LATER frame's flush than its own (the host's post-frame flush did not run) arrives a frame
 	// late. Both are named; neither is log-only.
-	inline Decision NativeReadback(unsigned liveWithoutFence, unsigned long long copiesIssuedLate)
+	inline Decision NativeReadback(unsigned liveWithoutFence, unsigned long long copiesIssuedLate, unsigned long long signalsRefused = 0)
 	{
-		if (liveWithoutFence == 0 && copiesIssuedLate == 0)
+		if (liveWithoutFence == 0 && copiesIssuedLate == 0 && signalsRefused == 0)
 			return Released("native readback");
 		std::string reason;
 		if (liveWithoutFence > 0)
@@ -525,6 +525,9 @@ namespace FallbackCatalog
 		if (copiesIssuedLate > 0)
 			reason += std::string(reason.empty() ? "" : " and ") + std::to_string(copiesIssuedLate) +
 				" readback copy(ies) were issued a frame late (the post-frame flush did not run)";
+		if (signalsRefused > 0)
+			reason += std::string(reason.empty() ? "" : " and ") + "the driver refused " + std::to_string(signalsRefused) +
+				" fence signal(s), so those readbacks poll a non-waiting map instead";
 		return Engaged("native readback", reason);
 	}
 	inline Decision EarlyUpload(bool requested, bool open, const std::string& error)

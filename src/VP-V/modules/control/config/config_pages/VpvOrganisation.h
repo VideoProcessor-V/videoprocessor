@@ -142,7 +142,7 @@ namespace Vpv
 				"Finds a picture that was upscaled before VP (a 1080p film sent at 4K) and works from its real size. The tier "
 				"turns re-base on (Low and above); the slider sets how much evidence it needs.", false, false, {
 				{ K::Row, "picture_preset_box" }, { K::Toggle, "rebase_kernel_match" }, { K::Toggle, "source_resolution_text_guard" },
-				{ K::Toggle, "source_resolution_mixed_guard" } },
+				{ K::Toggle, "source_resolution_mixed_guard" }, { K::Row, "source_resolution_frame_bound" } },
 				{ L::Feature, "re-base (the Scaling tier, Low or above)", "source_resolution", nullptr, "!auto", "auto" } },
 			{ "scaling", "grain", "Grain-aware downscale", "VP's downscale blend that keeps film grain true.", false, false, {
 				{ K::Toggle, "adaptive_faithful" }, { K::Toggle, "adaptive_grain_map" }, { K::Toggle, "ssim_bitrate_aware" } },

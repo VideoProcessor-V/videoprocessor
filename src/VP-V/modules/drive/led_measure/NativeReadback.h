@@ -86,6 +86,23 @@ namespace LedDrive
 		return live;
 	}
 
+	// Fence signals the driver refused (audit fix 1): the slot then polls the Map probe alone (signalValue 0), and the count
+	// is shown through FallbackCatalog::NativeReadback; never a slot stuck waiting for a value that was not signalled.
+	inline std::atomic<unsigned long long>& SignalFailures()
+	{
+		static std::atomic<unsigned long long> failed{ 0 };
+		return failed;
+	}
+	// The rule for one ID3D11DeviceContext4::Signal result (pure, no D3D; CPU-tested): a failed signal zeroes the slot's
+	// signal value (no fence wait is ever attempted on it) and is counted. Returns true when the signal was accepted.
+	inline bool AcceptSignal(long hr, uint64_t& signalValue)
+	{
+		if (hr >= 0) return true;
+		signalValue = 0;
+		SignalFailures().fetch_add(1, std::memory_order_relaxed);
+		return false;
+	}
+
 	// Native copies recorded inside a frame and issued after it (pure bookkeeping, no D3D: the entries
 	// carry the issue function). Per render thread. Arm() once per rendered frame BEFORE its hooks run;
 	// Flush() after the frame's submit issues every recorded copy in order and disarms. Copies recorded
@@ -122,7 +139,8 @@ namespace LedDrive
 			return true;
 		}
 
-		// Issues the recorded copies (FIFO) and disarms. Returns how many were issued.
+		// Issues the recorded copies (FIFO) and disarms. Returns how many native copies were issued (a recorded after-submit
+		// task with slot < 0, such as the LED readback collection, runs in order and is not counted).
 		size_t Flush()
 		{
 			std::vector<Entry> work;
@@ -134,7 +152,7 @@ namespace LedDrive
 				if (e.alive.expired()) continue;
 				if (e.epoch != epoch) ++lateIssued;
 				e.fn(e.owner, e.slot);
-				++issued;
+				if (e.slot >= 0) ++issued;   // a slot < 0 is an after-submit task (no native copy): it does not count as VP GPU work
 			}
 			return issued;
 		}
@@ -378,7 +396,7 @@ namespace LedDrive
 			if (FenceAvailable())
 			{
 				s.signalValue = ++fenceValue;
-				context4->Signal(fence, s.signalValue);
+				AcceptSignal(static_cast<long>(context4->Signal(fence, s.signalValue)), s.signalValue);
 			}
 			s.issued = true;
 			s.deferred = false;

@@ -181,6 +181,7 @@ namespace ProfileSchemaHooks
 			// Latch review 2026-10-17: the latch fixes and the switch timing (seconds).
 			if (key == "source_resolution_latch_fixes") return V(IsChoice(value, { "on", "off" }));
 			if (key == "source_resolution_cut_fixes") return V(IsChoice(value, { "on", "off" }));
+			if (key == "source_resolution_frame_bound") return V(IsChoice(value, { "on", "off" }));
 			if (key == "active_picture_startup_hold") return V(IsChoice(value, { "on", "off" }));
 			if (key == "source_resolution_engage_max_wait_s") return V(IsNumberInRange(value, 0.0, 600.0));
 			if (key == "source_resolution_crossfade_s") return V(IsNumberInRange(value, 0.0, 10.0));

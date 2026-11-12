@@ -123,7 +123,8 @@ namespace LedDrive
 		CustomHookChain::Chain& Compensation() { return compensation; }
 		// libplacebo's disabled hooks after the render (pl_renderer_get_errors).
 		void OnHookErrors(const uint64_t* disabledSignatures, int count);
-		// Stats out: finished measurements (a few frames old; never waits).
+		// Stats out: finished measurements (a few frames old; never waits). Audit fix 4 (fx/dv-frame-quiet): while the frame is
+		// armed (DeferredCopies) the readback Map is recorded and runs after the frame's submit, not inside libplacebo's frame.
 		void CollectMeasurements();
 		// The measurement pass (the de-judder extras leave it out).
 		const pl_hook* MeasurementHookPointer() const { return measurement.Hook(); }
@@ -150,6 +151,9 @@ namespace LedDrive
 		static std::string RejectionReason(const std::string& validationError);
 
 	private:
+		void CollectMeasurementsNow();
+		static void CollectDeferredThunk(void* self, int);
+		std::shared_ptr<int> collectAlive = std::make_shared<int>(0);   // the deferred collection is skipped if this object is gone
 		void Engage(const char* id, const std::string& reason);
 		void ReleaseFallback(const char* id);
 		void MergeModuleFallbacks(const std::shared_ptr<LedDriveModule>& led);

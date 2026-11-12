@@ -124,6 +124,25 @@ namespace SourceIdentity
 			std::atomic<uint64_t> cLatchEntries{ 0 }, cLatchMoves{ 0 }, cLatchReleases{ 0 }, cLatchRelBound{ 0 }, cLatchRelNative{ 0 }, cLatchRelMenu{ 0 },
 				cLatchRelAbr{ 0 }, cLatchRelReset{ 0 }, cLatchHeldBack{ 0 }, cLatchNonConv{ 0 }, cLatchConfirms{ 0 }, cLatchRelHard{ 0 },
 				cLatchDeferred{ 0 }, cLatchDeferCancelled{ 0 }, cLatchRelAtCut{ 0 }, cLatchRelCeiling{ 0 };
+			// fx/dv-frame-quiet: each ceiling release is stamped with the newest source frame the estimator had seen, so the frame-bound
+			// monitor counts only the releases up to the frame it is allowed to see (LatchCeilingReleasesThrough), not the live counter.
+			std::atomic<uint64_t> newestSeqA{ 0 };
+			mutable std::mutex ceilLogMutex;
+			std::deque<std::pair<uint64_t, uint64_t>> ceilLog;   // (frame stamp, cumulative releases), oldest first, bounded
+			uint64_t ceilLogTrimmed = 0;                         // the cumulative count of the entries trimmed off the front
+			void LogCeilingRelease(uint64_t cumulative)
+			{
+				std::lock_guard<std::mutex> lk(ceilLogMutex);
+				ceilLog.push_back(std::make_pair(newestSeqA.load(std::memory_order_acquire), cumulative));
+				while (ceilLog.size() > 64) { ceilLogTrimmed = ceilLog.front().second; ceilLog.pop_front(); }
+			}
+			uint64_t CeilingReleasesThrough(uint64_t seq) const
+			{
+				std::lock_guard<std::mutex> lk(ceilLogMutex);
+				uint64_t n = ceilLogTrimmed;
+				for (const auto& e : ceilLog) { if (e.first <= seq) n = e.second; else break; }
+				return n;
+			}
 			std::atomic<bool> latchDeferredA{ false };   // SID r2 N1: a starvation release waits for the next cut / black / fade (status)
 			std::atomic<bool> safetyLiveA{ false };      // SID r2: the rules applied at the clean start (status)
 			std::atomic<int> latchNxA{ 0 }, latchNyA{ 0 };   // SID r2: the latched size (0 = no latch; status)
@@ -412,6 +431,7 @@ namespace SourceIdentity
 			{
 				if (!running.load(std::memory_order_acquire))
 					return;
+				newestSeqA.store(seq, std::memory_order_release);
 				ClockEntry c;
 				c.seq = seq;
 				c.seconds = seconds;
@@ -1335,7 +1355,9 @@ namespace SourceIdentity
 				cLatchDeferred.fetch_add(c.deferred - latchBase.deferred, std::memory_order_relaxed);
 				cLatchDeferCancelled.fetch_add(c.deferCancelled - latchBase.deferCancelled, std::memory_order_relaxed);
 				cLatchRelAtCut.fetch_add(c.releasesAtCut - latchBase.releasesAtCut, std::memory_order_relaxed);
-				cLatchRelCeiling.fetch_add(c.releasesCeiling - latchBase.releasesCeiling, std::memory_order_relaxed);   // the monitor's crossfade cue
+				const uint64_t ceilingNow = c.releasesCeiling - latchBase.releasesCeiling;
+				cLatchRelCeiling.fetch_add(ceilingNow, std::memory_order_relaxed);   // the monitor's crossfade cue
+				if (ceilingNow != 0) LogCeilingRelease(cLatchRelCeiling.load(std::memory_order_relaxed));
 				latchDeferredA.store(latch.Deferred(), std::memory_order_release);
 				latchBase = c;
 			}
@@ -1889,7 +1911,12 @@ namespace SourceIdentity
 			st_->diagOutputBits.store(outputBits, std::memory_order_release);
 		}
 		uint64_t ChainEstimator::LatchCeilingReleases() const { return st_->cLatchRelCeiling.load(std::memory_order_acquire); }
-		void ChainEstimator::NoteLatchCeilingForTest() { st_->cLatchRelCeiling.fetch_add(1, std::memory_order_acq_rel); }
+		uint64_t ChainEstimator::LatchCeilingReleasesThrough(uint64_t sourceSequence) const { return st_->CeilingReleasesThrough(sourceSequence); }
+		void ChainEstimator::NoteLatchCeilingForTest()
+		{
+			const uint64_t cumulative = st_->cLatchRelCeiling.fetch_add(1, std::memory_order_acq_rel) + 1;
+			st_->LogCeilingRelease(cumulative);
+		}
 		EstimatorCounters ChainEstimator::GetCounters() const { return st_->Counters(); }
 		GovernorPlan ChainEstimator::GetGovernorPlan() const
 		{

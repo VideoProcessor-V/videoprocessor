@@ -231,5 +231,48 @@ namespace VideoProcessorTest
 			Assert::AreEqual<unsigned long long>(1, deferred.MissedEnds());
 			deferred.EndFrame();
 		}
+
+		// Audit 1: a refused fence signal never leaves a slot waiting for a value that was not signalled; it is counted and named.
+		TEST_METHOD(ARefusedFenceSignalZeroesTheValueIsCountedAndEngagesTheStatus)
+		{
+			const unsigned long long before = LedDrive::SignalFailures().load();
+			uint64_t value = 7;
+			Assert::IsTrue(LedDrive::AcceptSignal(0, value));
+			Assert::AreEqual<uint64_t>(7, value, L"an accepted signal keeps its value");
+			Assert::IsFalse(LedDrive::AcceptSignal(static_cast<long>(0x80004005), value));
+			Assert::AreEqual<uint64_t>(0, value, L"a refused signal is never waited on");
+			Assert::AreEqual<unsigned long long>(before + 1, LedDrive::SignalFailures().load());
+			const FallbackCatalog::Decision d = FallbackCatalog::NativeReadback(0, 0, 1);
+			Assert::AreEqual(std::string("native readback"), d.id);
+			Assert::IsTrue(d.engaged, L"engaged");
+			Assert::IsTrue(d.reason.find("refused 1 fence signal") != std::string::npos, L"named");
+		}
+
+		// Audit 8: a transient (a refused signal) shows for a window of frames, then the status clears on its own.
+		TEST_METHOD(ATransientEngagesTheStatusForAWindowOfFramesThenClears)
+		{
+			FrameQuiet::Deferred deferred;
+			deferred.Arm(nullptr);
+			deferred.EndFrame();
+			Assert::IsFalse(deferred.TakeDecision().engaged, L"quiet at the start");
+			uint64_t v = 1;
+			LedDrive::AcceptSignal(static_cast<long>(0x80004005), v);   // one refusal
+			deferred.Arm(nullptr);
+			deferred.EndFrame();
+			Assert::IsTrue(deferred.TakeDecision().engaged, L"engaged when it happens");
+			for (int i = 0; i < 598; ++i) { deferred.Arm(nullptr); deferred.EndFrame(); }
+			Assert::IsTrue(deferred.TakeDecision().engaged, L"still shown inside the window");
+			for (int i = 0; i < 3; ++i) { deferred.Arm(nullptr); deferred.EndFrame(); }
+			Assert::IsFalse(deferred.TakeDecision().engaged, L"clear after the window, nothing new");
+		}
+
+		// Original pathway: PlanEntrance is never called, so nothing arms and nothing flushes.
+		TEST_METHOD(AFrameThatWasNeverArmedFlushesNothingAndAddsNoDecision)
+		{
+			FrameQuiet::Deferred deferred;
+			deferred.EndFrame();
+			Assert::AreEqual<unsigned long long>(0, deferred.Flushes());
+			Assert::AreEqual<unsigned long long>(0, deferred.MissedEnds());
+		}
 	};
 }

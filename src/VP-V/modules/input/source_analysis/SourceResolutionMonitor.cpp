@@ -1812,7 +1812,9 @@ if (tile < int(tiles) && g.y < ts) {
 		const double before = autoApplied;
 		const bool fixes = LatchFixes();
 		// SID r2 N1: a chain latch release by its no-cut CEILING not shown yet (the counter only moves while the safety rules are on).
-		latchCeilingCount = chainEst->LatchCeilingReleases();
+		// fx/dv-frame-quiet: frame-bound reads the releases stamped up to the frame the monitor may see (render sequence - D), not the live counter.
+		latchCeilingCount = bound ? chainEst->LatchCeilingReleasesThrough(renderSequence > frameLead.load(std::memory_order_acquire) ?
+			renderSequence - frameLead.load(std::memory_order_acquire) : 0) : chainEst->LatchCeilingReleases();
 		latchCeilingPending = latchCeilingCount != latchCeilingSeen;
 		latchCeilingGateClear = false;
 		// The source frame interval, measured (the pan speed's time base).

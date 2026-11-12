@@ -475,6 +475,14 @@ namespace VpvRendererSettings
 				DebugLog::Log("profile '%s': invalid source_resolution_latch_fixes '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.sourceResolutionLatchFixes ? "on" : "off");
 		}
+		if (tryChoice("source_resolution_frame_bound", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.sourceResolutionFrameBound = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid source_resolution_frame_bound '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.sourceResolutionFrameBound ? "on" : "off");
+		}
 		if (tryChoice("active_picture_startup_hold", raw))
 		{
 			if (raw == "on" || raw == "off")
@@ -1014,6 +1022,7 @@ namespace VpvRendererSettings
 		settings.sourceCodingFixes = false;                // key=source_coding_fixes
 		settings.sourceResolutionLatchFixes = false;       // key=source_resolution_latch_fixes
 		settings.sourceResolutionCutFixes = false;         // key=source_resolution_cut_fixes
+		settings.sourceResolutionFrameBound = false;       // key=source_resolution_frame_bound
 		settings.debandVp = "off";                         // key=deband_vp
 		settings.debandVpExclusive = false;                // key=deband_vp_exclusive
 		settings.debandGrain = true;                       // key=deband_grain
@@ -1205,6 +1214,7 @@ namespace VpvRendererSettings
 			<< settings.sourceResolutionMixedGuard << '|'
 			<< settings.sourceResolutionLatchFixes << '|'
 			<< settings.sourceResolutionCutFixes << '|'
+			<< settings.sourceResolutionFrameBound << '|'
 			<< settings.activePictureStartupHold << '|'
 			<< settings.sourceResolutionEngageMaxWait << '|'
 			<< settings.sourceResolutionCrossfade << '|'
@@ -1400,6 +1410,7 @@ namespace VpvRendererSettings
 		changed(current.sourceResolutionMixedGuard != next.sourceResolutionMixedGuard, "source_resolution_mixed_guard");
 		changed(current.sourceResolutionLatchFixes != next.sourceResolutionLatchFixes, "source_resolution_latch_fixes");
 		changed(current.sourceResolutionCutFixes != next.sourceResolutionCutFixes, "source_resolution_cut_fixes");
+		changed(current.sourceResolutionFrameBound != next.sourceResolutionFrameBound, "source_resolution_frame_bound");
 		changed(current.activePictureStartupHold != next.activePictureStartupHold, "active_picture_startup_hold");
 		changed(current.sourceResolutionEngageMaxWait != next.sourceResolutionEngageMaxWait ||
 			current.sourceResolutionCrossfade != next.sourceResolutionCrossfade ||
@@ -1553,6 +1564,7 @@ namespace VpvRendererSettings
 		<< "source_resolution_mixed_guard=" << (s.sourceResolutionMixedGuard ? "on" : "off") << "\n"
 		<< "source_resolution_latch_fixes=" << (s.sourceResolutionLatchFixes ? "on" : "off") << "\n"
 		<< "source_resolution_cut_fixes=" << (s.sourceResolutionCutFixes ? "on" : "off") << "\n"
+		<< "source_resolution_frame_bound=" << (s.sourceResolutionFrameBound ? "on" : "off") << "\n"
 		<< "active_picture_startup_hold=" << (s.activePictureStartupHold ? "on" : "off") << "\n"
 		<< "source_resolution_engage_max_wait_s=" << s.sourceResolutionEngageMaxWait << "\n"
 		<< "source_resolution_crossfade_s=" << s.sourceResolutionCrossfade << "\n"

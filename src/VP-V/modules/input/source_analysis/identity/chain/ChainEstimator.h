@@ -215,6 +215,10 @@ namespace SourceIdentity
 			// N1: the count of latch releases by the no-cut CEILING (LatchEvent::ReleasedCeiling; zero while the rules are off). The monitor shows
 			// the native switch that follows one through its engage crossfade instead of the release fade. Any thread.
 			uint64_t LatchCeilingReleases() const;
+			// fx/dv-frame-quiet: the same count restricted to the releases the estimator stamped at or before `sourceSequence` (the newest
+			// source frame it had seen when the latch released). The frame-bound monitor passes renderSequence - D so the cue does not
+			// depend on when the estimator's thread happened to run. Any thread.
+			uint64_t LatchCeilingReleasesThrough(uint64_t sourceSequence) const;
 			// Dump v4 (identity/SidDiagDump.h; written only while VP_SID_DUMP_V4_DIR is set, decision neutral): the file-name tag of this
 			// estimator's b_evals / b_sizes files (a new tag re-reads the variable and reopens the files at the next evaluation), and the
 			// caller's depth hint recorded on each row (coded = the decoded stream's bit depth, output = the delivered plane's; 0 = unknown).

@@ -221,6 +221,26 @@ namespace Tests
 			Assert::AreEqual(1.0, tr.toX, 1e-9);
 		}
 
+		// fx/dv-frame-quiet (audit, semantic check against the SID latch commits): a frame-bound monitor reads the ceiling releases only up to
+		// the frame it is allowed to see; a release the estimator logged for a later frame is not visible yet.
+		TEST_METHOD(CeilingReleasesAreReadThroughTheFrameStampNotTheLiveCounter)
+		{
+			SidGate::Mon m;
+			GeoFx::G::HeldState geo;
+			m.SetGeometrySource(&geo);
+			m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+			const SidGate::Outcome o = SidGate::Script(m, geo, 10.0);
+			auto& est = m.ChainEstimatorRef();
+			Assert::AreEqual<uint64_t>(0, est.LatchCeilingReleasesThrough(~0ull), L"no release yet");
+			est.NoteLatchCeilingForTest();   // stamped with the newest frame the estimator has seen
+			const uint64_t seq = SidGate::Feed(m, geo, 16.7, 32, o.nextSeq, false);
+			est.NoteLatchCeilingForTest();   // stamped with a later frame
+			Assert::AreEqual<uint64_t>(2, est.LatchCeilingReleases());
+			Assert::AreEqual<uint64_t>(2, est.LatchCeilingReleasesThrough(seq), L"both visible once the monitor may see the later frame");
+			Assert::AreEqual<uint64_t>(1, est.LatchCeilingReleasesThrough(o.nextSeq - 1), L"the later release is not visible at the earlier frame");
+			Assert::AreEqual<uint64_t>(0, est.LatchCeilingReleasesThrough(0), L"nothing is visible before the first stamp");
+		}
+
 		TEST_METHOD(ShadowIsByteIdenticalToOffAndOnEngagesOnTheSameScript)
 		{
 			SidGate::Mon off, shadow, on;

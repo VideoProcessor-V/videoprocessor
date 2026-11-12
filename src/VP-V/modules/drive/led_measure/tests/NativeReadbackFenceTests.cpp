@@ -35,6 +35,12 @@ namespace VideoProcessorTest
 			static void Issue(void* self, int slot) { static_cast<Fake*>(self)->issued.push_back(slot); }
 		};
 
+		// Audit 7: the thread-local deferral never stays armed past a test (a failed assertion must not leak into the next test).
+		struct DisarmGuard
+		{
+			~DisarmGuard() { DeferredCopies::ForThisThread().Flush(); }
+		};
+
 		std::vector<float> Known(int w, int h, int salt)
 		{
 			std::vector<float> v(static_cast<size_t>(w) * static_cast<size_t>(h));
@@ -167,6 +173,7 @@ namespace VideoProcessorTest
 			const std::vector<float> a = Known(w, h, 1);
 			ctx->UpdateSubresource(rb.Texture(0), 0, nullptr, a.data(), static_cast<UINT>(w * sizeof(float)), 0);
 			DeferredCopies& deferred = DeferredCopies::ForThisThread();
+			DisarmGuard guard;
 			deferred.Arm();
 			rb.QueueDeferred(0);
 			Assert::AreEqual<size_t>(1, deferred.Pending());
@@ -218,6 +225,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
 			pl_gpu gpu = fixture.Gpu();
 			DeferredCopies& deferred = DeferredCopies::ForThisThread();
+			DisarmGuard guard;
 			{
 				LedDrive::NativeTexReadback rb;
 				Assert::IsTrue(rb.Create(gpu, 1, 4, 4, DXGI_FORMAT_R32_FLOAT));

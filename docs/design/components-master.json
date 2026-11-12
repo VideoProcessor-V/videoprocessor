@@ -309,6 +309,7 @@
           "source_resolution_engage_max_wait_s",
           "source_resolution_evidence_seconds",
           "source_resolution_evidence_shots",
+          "source_resolution_frame_bound",
           "source_resolution_latch_fixes",
           "source_resolution_mixed_guard",
           "source_resolution_release_fade_s",

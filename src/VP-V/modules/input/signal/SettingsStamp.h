@@ -43,7 +43,8 @@
 //                                source_resolution_auto_min_confidence source_resolution_evidence_shots
 //                                source_resolution_evidence_seconds source_resolution_text_guard
 //                                source_resolution_mixed_guard source_resolution_latch_fixes
-//                                source_resolution_cut_fixes source_resolution_engage_max_wait_s
+//                                source_resolution_cut_fixes source_resolution_frame_bound
+//                                source_resolution_engage_max_wait_s
 //                                source_resolution_crossfade_s source_resolution_release_fade_s subtitle_fit
 //                                subtitle_reposition subtitle_type source_coding_fixes frame_analysis_store
 //                                (source_resolution is read by both rebase and analysis: it moves both.)
@@ -92,7 +93,8 @@ public:
         static const char* const analysis[] = {
             "source_resolution", "source_resolution_auto_min_confidence", "source_resolution_evidence_shots",
             "source_resolution_evidence_seconds", "source_resolution_text_guard", "source_resolution_mixed_guard",
-            "source_resolution_latch_fixes", "source_resolution_cut_fixes", "source_resolution_engage_max_wait_s",
+            "source_resolution_latch_fixes", "source_resolution_cut_fixes", "source_resolution_frame_bound",
+            "source_resolution_engage_max_wait_s",
             "source_resolution_crossfade_s", "source_resolution_release_fade_s", "subtitle_fit",
             "subtitle_reposition", "subtitle_type", "source_coding_fixes", "frame_analysis_store" };
         static const char* const output[] = {

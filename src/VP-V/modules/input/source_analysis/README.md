@@ -87,10 +87,10 @@ All are validated as `input`-group keys (RendererProfileConfig.h; sections `[vpr
 
 - `source_resolution`: `native` / `auto` / a height (144..8640) / `WIDTHxHEIGHT`; default `auto`. An unrecognised value is ignored without a log line.
 - `source_resolution_auto_min_confidence` (0..1, default 0.8), `source_resolution_evidence_shots` (1..10, default 3), `source_resolution_evidence_seconds` (2..120, default 10).
-- `source_resolution_text_guard`, `source_resolution_mixed_guard`, `source_coding_fixes`, `source_resolution_latch_fixes`, `source_resolution_cut_fixes`: `on` / `off`, all default `on`.
+- `source_resolution_text_guard`, `source_resolution_mixed_guard`, `source_coding_fixes`, `source_resolution_latch_fixes`, `source_resolution_cut_fixes`, `source_resolution_frame_bound`: `on` / `off`, all default `on`.
 - `source_resolution_engage_max_wait_s` (0..600, default 20), `source_resolution_crossfade_s` (0..10, default 1.5), `source_resolution_release_fade_s` (0..0.25, default 0.25).
 - `rebase_kernel_match` is read by the host for the re-base (scaling.rebase). The monitor fits kernels whatever it says.
-- The Original pathway forces `source_resolution: native`, `rebase_kernel_match: off`, `source_coding_fixes: off`, `source_resolution_latch_fixes: off` and `source_resolution_cut_fixes: off` (OriginalPathway.h).
+- The Original pathway forces `source_resolution: native`, `rebase_kernel_match: off`, `source_coding_fixes: off`, `source_resolution_latch_fixes: off`, `source_resolution_cut_fixes: off` and `source_resolution_frame_bound: off` (OriginalPathway.h; Original never runs the monitor at all).
 - `label_detector` is not read anywhere (planned).
 - Test only: the environment variable `VP_TEST_SOURCE_MONITOR_DIGEST=1` logs a digest of each tile readback.
 
@@ -250,6 +250,7 @@ Code defaults of the history CSV that are not config keys (each fixed in code):
 | `source_resolution_engage_max_wait_s` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 600.0 | 20 | VP-V > Scaling > Advanced > Re-base timing | n/a (VP-only): unchanged by the Original pathway | The longest wait (s) for a switching moment (a cut, real black, fast pan or low-detail moment) before auto crossfades into the re-base | same on all (not tiered) |
 | `source_resolution_evidence_seconds` | profile ([vprenderer.Default] and matching profiles) | float | 2.0 - 120.0 | 10 | VP-V > Scaling > Advanced > Re-base evidence | n/a (VP-only): unchanged by the Original pathway | Seconds of agreeing evidence auto needs before it declares a lower source (Picture slider; Standard 10) | same on all (not tiered) |
 | `source_resolution_evidence_shots` | profile ([vprenderer.Default] and matching profiles) | int | 1 - 10 | 3 | VP-V > Scaling > Advanced > Re-base evidence | n/a (VP-only): unchanged by the Original pathway | Separate shots of agreeing evidence auto needs before it declares a lower source (Picture slider; Standard 3) | same on all (not tiered) |
+| `source_resolution_frame_bound` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | VP-V > Scaling > Re-base | Original pathway sets `off` (it never runs the monitor) | The monitor decides on a fixed frame count (D = 8, source time) and its GPU work runs after the submit (FrameQuiet.h), so the picture does not depend on readback timing; the re-base switch still lands on the next detected cut. Off: the earlier timing-dependent mode. fx/dv-frame-quiet, refs/121 | same on all (not tiered) |
 | `source_resolution_latch_fixes` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | VP-V > Proposed retirement > Proven fixes (all on by default) | Original pathway sets `off` (ADR-0019) | Latch fixes for source_resolution auto: re-engage on the standard after native evidence, level-aware native readings, per-tile floor test, shape cuts, the switch at a cut / real black / fast pan / low-detail moment or a crossfade, a short release fade; off = the earlier behaviour and no fades. proposed for retirement (group A) | same on all (not tiered) |
 | `source_resolution_mixed_guard` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | VP-V > Scaling > Main > Re-base (your picture slider); also VP Renderer > Rendering > Fixes under test (upstream copy greyed while VP-V is on) | n/a (VP-only): unchanged by the Original pathway | A mixed screen (a native UI with a lower-resolution video in it, a 4K overlay, picture-in-picture) is read as native: no whole-frame re-base. status line: re-base precision: <the re-base's float-intermediate note> | same on all (not tiered) |
 | `source_resolution_release_fade_s` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 0.25 | 0.25 | VP-V > Scaling > Advanced > Re-base timing | n/a (VP-only): unchanged by the Original pathway | Length (s) of the fade back to native when evidence of native resolution returns (at most 0.25 s) | same on all (not tiered) |
@@ -340,6 +341,12 @@ Header-only producers for the analysis lane (`src/VP-V/core/AnalysisLane.h`), of
 - `LaneReadback.h`: `ReadbackRing`, non-blocking P5 readback (staging copy, device QueryDone, Map with DO_NOT_WAIT).
 
 Tests: `src/VP-V/tests/LaneProductsTests.cpp`.
+
+## No native D3D11 call inside the frame (fx/dv-frame-quiet, refs/121)
+
+Rule: no native D3D11 call (Wait, Signal, Copy, query, Map) between `pl_swapchain_start_frame` and the AfterPresent seam. The monitor's CPU part runs at `FrameBegin` (before the render; no GPU call), its GPU part (the tile pass and its copy) at `FrameSubmit` after the submit, driven by `FrameQuiet::Deferred` (`PlanEntrance` arms and begins, `SkeletonModule::OnAfterPresent` ends). With `source_resolution_frame_bound` on (default; off on the Original pathway, which never runs the monitor) the decision for source frame N reads only the results of frames up to N - 8, and the chain estimator's ceiling releases are read through their frame stamp (`LatchCeilingReleasesThrough`), so the same clip gives the same picture every time.
+
+Any later source-frame tap (the D5 DV tap) must be issued outside the frame, as described in `input/capture/README.md`.
 
 <!-- vpv-settings-tests:begin (generated by tools/vpv_tests/seed_module_readmes.py) -->
 

@@ -12,9 +12,9 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Count | Value |
 |---|---|
 | Modules | 43 |
-| Documented rows | 391 |
-| VP-V keys in code (outside Bill's schema lists) | 386 |
-| of which documented | 386 |
+| Documented rows | 392 |
+| VP-V keys in code (outside Bill's schema lists) | 387 |
+| of which documented | 387 |
 | of which undocumented (appendix A) | 0 |
 | Documented keys with no code entry (appendix B) | 0 |
 
@@ -25,7 +25,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Input | `input.capture` | built | [README](../../src/VP-V/modules/input/capture/README.md) | 7 | 3 | 3/3 |
 | Input | `input.signal` | built | [README](../../src/VP-V/modules/input/signal/README.md) | 8 | 8 | 7/8 |
 | Input | `input.queue_timing` | built | [README](../../src/VP-V/modules/input/queue_timing/README.md) | 10 | 15 | 9/15 |
-| Input | `input.source_analysis` | partial | [README](../../src/VP-V/modules/input/source_analysis/README.md) | 16 | 19 | 13/19 |
+| Input | `input.source_analysis` | partial | [README](../../src/VP-V/modules/input/source_analysis/README.md) | 17 | 20 | 14/20 |
 | Input | `input.light_level` | draft | [README](../../src/VP-V/modules/input/source_analysis/light_level/README.md) | 4 | 33 | 4/33 |
 | Input | `input.source_analysis.identity.chain` | draft | [README](../../src/VP-V/modules/input/source_analysis/identity/chain/README.md) | 1 | 0 | 0/0 |
 | Input | `input.source_analysis.lane.shared.half_luma` | draft | [README](../../src/VP-V/modules/input/source_analysis/lane/shared/README.md) | 1 | 0 | 0/0 |
@@ -110,6 +110,7 @@ Modules: `input.capture`, `input.signal`, `input.queue_timing`, `input.source_an
 | `source_resolution_engage_max_wait_s` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 600.0 | 20 | 20 | VP-V > Scaling > Advanced > Re-base timing | n/a (VP-only): unchanged by the Original pathway | The longest wait (s) for a switching moment (a cut, real black, fast pan or low-detail moment) before auto crossfades into the re-base | same on all (not tiered) |
 | `source_resolution_evidence_seconds` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | float | 2.0 - 120.0 | 10 | 10 | VP-V > Scaling > Advanced > Re-base evidence | n/a (VP-only): unchanged by the Original pathway | Seconds of agreeing evidence auto needs before it declares a lower source (Picture slider; Standard 10) | same on all (not tiered) |
 | `source_resolution_evidence_shots` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | int | 1 - 10 | 3 | 3 | VP-V > Scaling > Advanced > Re-base evidence | n/a (VP-only): unchanged by the Original pathway | Separate shots of agreeing evidence auto needs before it declares a lower source (Picture slider; Standard 3) | same on all (not tiered) |
+| `source_resolution_frame_bound` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on |  | VP-V > Scaling > Re-base | Original pathway sets `off` (it never runs the monitor) | The monitor decides on a fixed frame count (D = 8, source time) and its GPU work runs after the submit (FrameQuiet.h), so the picture does not depend on readback timing; the re-base switch still lands on the next detected cut. Off: the earlier timing-dependent mode. fx/dv-frame-quiet, refs/121 | same on all (not tiered) |
 | `source_resolution_latch_fixes` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Proposed retirement > Proven fixes (all on by default) | Original pathway sets `off` (ADR-0019) | Latch fixes for source_resolution auto: re-engage on the standard after native evidence, level-aware native readings, per-tile floor test, shape cuts, the switch at a cut / real black / fast pan / low-detail moment or a crossfade, a short release fade; off = the earlier behaviour and no fades. proposed for retirement (group A) | same on all (not tiered) |
 | `source_resolution_mixed_guard` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | on | VP-V > Scaling > Main > Re-base (your picture slider); also VP Renderer > Rendering > Fixes under test (upstream copy greyed while VP-V is on) | n/a (VP-only): unchanged by the Original pathway | A mixed screen (a native UI with a lower-resolution video in it, a 4K overlay, picture-in-picture) is read as native: no whole-frame re-base. status line: re-base precision: <the re-base's float-intermediate note> | same on all (not tiered) |
 | `source_resolution_release_fade_s` | `input.source_analysis` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 0.25 | 0.25 | 0.25 | VP-V > Scaling > Advanced > Re-base timing | n/a (VP-only): unchanged by the Original pathway | Length (s) of the fade back to native when evidence of native resolution returns (at most 0.25 s) | same on all (not tiered) |

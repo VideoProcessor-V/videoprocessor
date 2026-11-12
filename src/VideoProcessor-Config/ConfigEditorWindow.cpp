@@ -9418,6 +9418,15 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "cuts between two similar shots at the same brightness are found. A lower source is also declared only "
             "after part of the evidence time, so a burst of fast cuts on native footage never declares one. Off: the "
             "latch fixes' cut judge."));
+        // fx/dv-frame-quiet (refs/121): the monitor decides on a fixed frame count, so the picture does not depend on GPU timing.
+        auto* frameBound = addChoice(QStringLiteral("Source resolution: decide on a fixed frame delay"), QStringLiteral("source_resolution_frame_bound"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        frameBound->setToolTip(QStringLiteral(
+            "Default on (VP-V path only; the Original pathway never runs the source-resolution monitor). The source "
+            "resolution reading is decided a fixed 8 frames behind the picture (about a third of a second at 24p) and "
+            "its GPU work runs after the frame is submitted, so the same clip gives the same picture every time and "
+            "the work cannot disturb the frame in flight. The switch still lands on the next cut. Off: the earlier "
+            "mode, where the decision arrives whenever the GPU finishes."));
         // h3-latch 2026-10-18 (K3, fix under test, default on).
         auto* startupHold = addChoice(QStringLiteral("Black bars: hold the start-up picture until cropped"), QStringLiteral("active_picture_startup_hold"),
             { QStringLiteral("on"), QStringLiteral("off") });

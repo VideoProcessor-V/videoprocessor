@@ -163,8 +163,16 @@ namespace FrameQuiet
 				++flushes;
 			}
 			armedGpu = nullptr;
+			// Audit fix 8: a late copy / missed End / refused signal keeps the status engaged for a window of frames, not for ever.
+			++endCount;
+			const unsigned long long lateTotal = deferred.LateIssued() + missedEnds;
+			const unsigned long long refusedTotal = LedDrive::SignalFailures().load(std::memory_order_relaxed);
+			if (lateTotal != lateSeen || refusedTotal != refusedSeen) lastEventEnd = endCount;
+			lateSeen = lateTotal;
+			refusedSeen = refusedTotal;
+			const bool recent = lastEventEnd != 0 && endCount - lastEventEnd < kRecentFrames;
 			decision = FallbackCatalog::NativeReadback(LedDrive::FenceUnavailableReadbacks().load(std::memory_order_relaxed),
-				deferred.LateIssued() + missedEnds);
+				recent ? lateTotal : 0, recent ? refusedTotal : 0);
 		}
 
 	private:
@@ -176,6 +184,8 @@ namespace FrameQuiet
 		pl_gpu armedGpu = nullptr;
 		FallbackCatalog::Decision decision;
 		unsigned long long missedEnds = 0, flushes = 0;
+		static constexpr unsigned long long kRecentFrames = 600;   // about 25 s at 24p: a transient shows, then clears
+		unsigned long long endCount = 0, lastEventEnd = 0, lateSeen = 0, refusedSeen = 0;
 		bool pending = false, armed = false, boundNow = false;
 	};
 }
