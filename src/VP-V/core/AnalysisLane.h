@@ -1702,8 +1702,10 @@ private:
                 return false;
             uint8_t* dst = st.bufs[size_t(idx)]->Live(size_t(live));
             const size_t bytes = st.bufs[size_t(idx)]->Bytes();
-            if (publishedLookup_ && publishedLookup_(n.id, seq, dst, bytes)) {
-                ++sealReusedPublished_;   // B1: an Acquire reader published it already (the same law): reused, not recomputed
+            // B1: an Acquire reader published it already (the same law, all inputs): reused, not recomputed. Only when no input is
+            // missing at the seal: a missing-input form is a different result and is computed by the law itself.
+            if (missing == 0 && publishedLookup_ && publishedLookup_(n.id, seq, dst, bytes)) {
+                ++sealReusedPublished_;
                 ok = true;
             } else {
                 ok = RunCpuLive(st, n, seq, missing, dst, bytes, InputResolver());

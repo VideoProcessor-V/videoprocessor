@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-#include "FallbackStatus.h"
+#include "FallbackCatalog.h"
+#include "ProductCatalog.h"
 #include "Products.h"
 
 #include <condition_variable>
@@ -19,37 +20,37 @@
 
 // B1 (refs/126 s1.2; owner rule 2026-11-12): GET-OR-COMPUTE-AND-PUBLISH, the one access path to a shared skeleton
 // product. Owner: control/skeleton. Header-only, pure C++14, no Windows, no GPU API (a GPU form is an opaque handle the
-// owning unit's fill creates through the skeleton's GPU dispatcher).
+// owning unit's fill creates through the skeleton's GPU dispatcher). Contract: modules/control/skeleton/README.md "Acquire".
 //
 //   G1 every consumer ASKS: Acquire(id, seq, form, variant)
-//   G2 the product exists for that frame (the lane's sealed slot, or a memo an earlier reader caused) -> reused
-//   G3 absent -> the ONE fill registered by the OWNING unit (RegisterOwnerFill) computes it once and PUBLISHES it into the
-//      per-frame memo spot under (id, seq, form, variant); every later reader of that frame reuses it. Concurrent readers of
-//      the same key wait for the one fill (never a second computation).
+//   G2 the product exists for that frame (the lane's sealed / live-filled slot, or a memo an earlier reader caused) -> reused
+//   G3 absent -> the ONE fill registered for (product, form) by the OWNING unit (the catalog's unit, ProductRows) computes it
+//      once and PUBLISHES it into the per-frame memo spot under (id, seq, form, canonical variant); every later reader of
+//      that frame reuses it. Concurrent readers of one key wait for the one fill (never a second computation).
 //   G4 a variant ("my own split when the shared one does not fit") is never computed privately: the owner declares its
-//      variant axes and publishes the variant under its key; an undeclared variant is refused, visibly.
-//   G5 a fill that cannot run (no owner fill, no GPU dispatcher, owner declined, regulator dropped, frame released, over
-//      budget, owner conflict) is AcquireStatus::Unavailable with a cause: counted per product and cause, on the
-//      status lines and engaged in the Fallbacks heading (never log-only).
+//      variant axes and publishes the variant under its key; an undeclared axis is refused, visibly.
+//   G5 a fill that cannot run is AcquireStatus::Unavailable with a cause: counted per product and cause, on the status lines
+//      and engaged as the Fallbacks entry "skeleton acquire <product token>" (Decisions(): the Ctrl+I / Config status /
+//      Ctrl+Alt+D path), released when the product is served again. Never log-only.
 //
 // Lifetime: memo spots live for their frame. OnSeal(seq) releases every memo of frames older than seq - keepFrames
 // (keepFrames 0 = discarded when the next frame seals: the owner's per-frame memo, owner-decisions 2026-11-12 17:31).
-// A request for a released frame is refused (FrameReleased), never silently recomputed. Bytes are budgeted
-// (SetBudgetBytes: the VRAM ledger's grant to the memo arena user).
+// A request for a released frame is refused (FrameReleased), never silently recomputed. A result carries a PIN: the bytes /
+// handle stay valid while the reader holds it, even past OnSeal. A GPU spot whose recorded read fence (NoteGpuRead) is not
+// complete yet (SetFenceCompleted) is retired only when it completes: its keep-alive is not dropped under a GPU read.
+// GPU bytes are budgeted against the VRAM ledger grant (SetGpuBudget; reserved BEFORE the fill); CPU bytes are counted.
 //
-// The lane's existing seal-time live fill is the same path: SkeletonAcquireLane.h binds the lane's slots as step G2's
-// first source, registers the lane's CPU live computes as the owner fills of their products (one law,
-// AnalysisLane::RunCpuLive) and lets the seal reuse a frame an Acquire reader published before it.
-//
-// Threads: the memo itself is thread-safe; a lane-bound memo (SkeletonAcquireLane.h) reads the lane's slots, which is a
-// render-thread operation, so Acquire of a LANE product is render thread. Pointers returned stay valid until the frame's
-// memo is released (OnSeal / Clear), which the render thread does.
+// Threads: the memo is thread-safe and fills run outside its lock. A lane-bound memo (SkeletonAcquireLane.h) reads the lane's
+// slots, a render-thread operation, so Acquire of a LANE product is render thread.
 namespace VpSkeleton {
 
 enum class AcquireForm : uint8_t { Cpu, Gpu };
 
+inline const char* Token(AcquireForm f) { return f == AcquireForm::Cpu ? "cpu" : "gpu"; }
+
 // The variant axes (refs/126 s1.2). A zero field is "the product's default"; VariantKey{} is the default variant (the
-// lane's form). An owner declares which axes it serves (DeclareVariantAxes); a key using another axis is refused.
+// lane's form). Keys are CANONICAL before use (Canonical(): a field equal to the owner's declared default is 0, a size with
+// one zero side is no size), so two spellings of one variant share one spot.
 struct VariantKey {
     uint8_t plane = 0;         // 0 = default plane (luma); 1.. = plane index + 1
     uint32_t width = 0;        // 0 = the product's own size
@@ -59,28 +60,6 @@ struct VariantKey {
     uint32_t sigmaMilli = 0;   // band sigma x 1000, 0 = default
     uint8_t precision = 0;     // storage precision (e.g. 16 = fp16, 32 = fp32), 0 = default
 
-    bool IsDefault() const { return Axes() == 0u; }
-    uint32_t Axes() const
-    {
-        return (plane ? uint32_t(kAxisPlane) : 0u) | (width || height ? uint32_t(kAxisSize) : 0u) | (scale ? uint32_t(kAxisScale) : 0u)
-               | (codeUnit ? uint32_t(kAxisCodeUnit) : 0u) | (sigmaMilli ? uint32_t(kAxisSigma) : 0u)
-               | (precision ? uint32_t(kAxisPrecision) : 0u);
-    }
-    std::string Text() const
-    {
-        if (IsDefault())
-            return "default";
-        std::string t;
-        auto add = [&t](const char* k, uint64_t v) { t += (t.empty() ? "" : ",") + std::string(k) + "=" + std::to_string(v); };
-        if (plane) add("plane", plane);
-        if (width || height) add("w", width), add("h", height);
-        if (scale) add("scale", scale);
-        if (codeUnit) add("code", codeUnit);
-        if (sigmaMilli) add("sigma_milli", sigmaMilli);
-        if (precision) add("precision", precision);
-        return t;
-    }
-
     enum : uint32_t {
         kAxisPlane = 1u << 0,
         kAxisSize = 1u << 1,
@@ -89,6 +68,41 @@ struct VariantKey {
         kAxisSigma = 1u << 4,
         kAxisPrecision = 1u << 5
     };
+
+    bool IsDefault() const { return Axes() == 0u; }
+    uint32_t Axes() const
+    {
+        return (plane ? uint32_t(kAxisPlane) : 0u) | (width && height ? uint32_t(kAxisSize) : 0u) | (scale ? uint32_t(kAxisScale) : 0u)
+               | (codeUnit ? uint32_t(kAxisCodeUnit) : 0u) | (sigmaMilli ? uint32_t(kAxisSigma) : 0u)
+               | (precision ? uint32_t(kAxisPrecision) : 0u);
+    }
+    // `defaults`: the owner's own form (its plane / size / scale ...); a field equal to it means "the default".
+    VariantKey Canonical(const VariantKey& defaults = VariantKey()) const
+    {
+        VariantKey k = *this;
+        if (k.width == 0 || k.height == 0 || (k.width == defaults.width && k.height == defaults.height))
+            k.width = k.height = 0;
+        if (k.plane == defaults.plane) k.plane = 0;
+        if (k.scale == defaults.scale) k.scale = 0;
+        if (k.codeUnit == defaults.codeUnit) k.codeUnit = 0;
+        if (k.sigmaMilli == defaults.sigmaMilli) k.sigmaMilli = 0;
+        if (k.precision == defaults.precision) k.precision = 0;
+        return k;
+    }
+    std::string Text() const
+    {
+        if (IsDefault())
+            return "default";
+        std::string t;
+        auto add = [&t](const char* k, uint64_t v) { t += (t.empty() ? "" : ",") + std::string(k) + "=" + std::to_string(v); };
+        if (plane) add("plane", plane);
+        if (width && height) { add("w", width); add("h", height); }
+        if (scale) add("scale", scale);
+        if (codeUnit) add("code", codeUnit);
+        if (sigmaMilli) add("sigma_milli", sigmaMilli);
+        if (precision) add("precision", precision);
+        return t;
+    }
 };
 
 inline bool operator==(const VariantKey& a, const VariantKey& b)
@@ -103,17 +117,22 @@ inline bool operator<(const VariantKey& a, const VariantKey& b)
            < std::make_tuple(b.plane, b.width, b.height, b.scale, b.codeUnit, b.sigmaMilli, b.precision);
 }
 
-// A GPU form: an opaque resource of the skeleton's GPU dispatcher (texture / buffer / view), the fence value after which
-// it is readable, and a keep-alive the memo holds until the frame is released (the resource goes back to the arena then).
+// A GPU form: an opaque resource of the skeleton's GPU dispatcher (texture / buffer / view), the fence value after which it
+// is readable, and a keep-alive the memo holds until the frame is released AND its last recorded read fence completed.
+// A lane GPU product's handle names the lane slot (textureSet + ring/live + index) of the dispatcher's product textures.
 struct GpuMemoHandle {
     void* resource = nullptr;
     void* view = nullptr;
-    uint64_t fence = 0;
+    const void* textureSet = nullptr;   // lane products: the dispatcher's texture set of the product
+    int32_t index = -1;                 // lane products: ring slot or live buffer
+    bool ringSlot = false;
+    uint64_t fence = 0;                 // readable after this producer fence value
     uint32_t format = 0;
     uint32_t width = 0;
     uint32_t height = 0;
-    uint64_t bytes = 0;                  // budgeted against the memo grant
+    uint64_t bytes = 0;                 // budgeted against the ledger grant
     std::shared_ptr<void> keepAlive;
+    bool Valid() const { return resource != nullptr || view != nullptr; }
 };
 
 enum class AcquireStatus : uint8_t {
@@ -126,13 +145,16 @@ enum class AcquireCause : uint8_t {
     None,
     NoOwnerFill,         // nobody owns a fill for (product, form)
     NoGpuDispatcher,     // a GPU form with no skeleton GPU dispatcher (the SkeletonModule no-dispatcher wiring)
-    OwnerDeclined,       // the owner's fill returned false (input missing, VRAM refused ...)
+    OwnerDeclined,       // the owner's fill returned false or threw (input missing, VRAM refused ...)
     RegulatorDropped,    // the regulator shed the product (optional fill)
     FrameReleased,       // the frame's memo was already released (lifetime = frame): never recomputed
     VariantUndeclared,   // the owner does not serve that variant axis (G4)
-    OverBudget,          // the memo grant cannot hold the result
+    OverBudget,          // the ledger grant cannot hold the result
+    NoLedgerGrant,       // a GPU spot with no VRAM ledger grant for the memo (nothing may be allocated outside the ledger)
     LanePending,         // the lane's GPU live fill is recorded but not run yet (deferred to Entrance)
     LaneFailed,          // the lane's deferred GPU live fill failed
+    NoGpuHandle,         // the lane holds the GPU product but its texture is not reachable (dispatcher not configured)
+    Reentrant,           // an owner fill asked for its own key (would wait for itself)
     CauseCount
 };
 
@@ -156,9 +178,12 @@ inline const char* Token(AcquireCause c)
     case AcquireCause::RegulatorDropped: return "dropped by the regulator";
     case AcquireCause::FrameReleased: return "frame released";
     case AcquireCause::VariantUndeclared: return "variant not served by the owner";
-    case AcquireCause::OverBudget: return "memo budget";
+    case AcquireCause::OverBudget: return "VRAM ledger grant exceeded";
+    case AcquireCause::NoLedgerGrant: return "no VRAM ledger grant";
     case AcquireCause::LanePending: return "lane live fill pending";
     case AcquireCause::LaneFailed: return "lane live fill failed";
+    case AcquireCause::NoGpuHandle: return "lane GPU texture not reachable";
+    case AcquireCause::Reentrant: return "owner fill asked for its own product";
     case AcquireCause::CauseCount: break;
     }
     return "?";
@@ -170,9 +195,10 @@ struct AcquireResult {
     AcquireStatus status = AcquireStatus::Unavailable;
     AcquireCause cause = AcquireCause::None;
     AcquireSource source = AcquireSource::None;
-    const uint8_t* cpu = nullptr;           // CPU form (valid until the frame's memo is released / the lane slot reused)
+    const uint8_t* cpu = nullptr;           // CPU form: valid while `pin` is held
     size_t cpuBytes = 0;
-    const GpuMemoHandle* gpu = nullptr;     // GPU form
+    GpuMemoHandle gpu;                      // GPU form (gpu.Valid())
+    std::shared_ptr<const void> pin;        // the memo spot or the lane state: what keeps `cpu` / `gpu` alive
     bool Ok() const { return status != AcquireStatus::Unavailable; }
 };
 
@@ -181,26 +207,34 @@ struct OwnerFillRequest {
     ProductId id = kNoProduct;
     uint64_t seq = 0;
     AcquireForm form = AcquireForm::Cpu;
-    VariantKey variant;
+    VariantKey variant;   // canonical
+};
+// What it produces: the CPU form (`bytes`) or the GPU form (`gpu`).
+struct OwnerFillOutput {
+    std::vector<uint8_t> bytes;
+    GpuMemoHandle gpu;
 };
 
-// The owning unit's fill. `cpu` writes the CPU form into `out` (sized by the fill); `gpu` creates the GPU form through
-// the skeleton's dispatcher. `acquireInput` lets a fill get-or-compute its own inputs through the same path. A fill
-// returns false to decline (visible as OwnerDeclined).
+// The owning unit's fill of ONE (product, form). `memo` lets a fill get-or-compute its inputs through the same path.
+// False (or an exception) = declined (visible as OwnerDeclined).
 class SkeletonMemo;
 struct OwnerFill {
-    std::string owner;   // the owning unit (folder token, e.g. "control/skeleton", "input/source_analysis"); N1 checks the call site
-    std::function<bool(const OwnerFillRequest&, SkeletonMemo&, std::vector<uint8_t>& out)> cpu;
-    std::function<bool(const OwnerFillRequest&, SkeletonMemo&, GpuMemoHandle& out)> gpu;
-    uint32_t variantAxes = 0;   // the VariantKey axes this owner serves (0 = the default variant only)
+    std::function<bool(const OwnerFillRequest&, SkeletonMemo&, OwnerFillOutput&)> fill;
+    uint32_t variantAxes = 0;    // the VariantKey axes this owner serves (0 = the default variant only)
+    VariantKey defaults;         // the owner's own form (canonicalisation)
+    uint64_t reserveBytes = 0;   // GPU: bytes reserved against the ledger grant BEFORE the fill (a larger result re-checks)
 };
 
 // The lane's slots as the first G2 source (SkeletonAcquireLane.h binds it). Default variant only.
 struct LaneSlotSource {
-    enum class State : uint8_t { NotLaneProduct, Absent, Present, Pending, Failed };
-    // (id, seq, form) -> state; Present fills cpu/cpuBytes for a CPU product. A GPU lane product that is Present is Reused
-    // with no handle (gpu null): its texture is the lane's slot, read through the dispatcher's existing view of it.
-    std::function<State(ProductId, uint64_t, AcquireForm, const uint8_t**, size_t*)> read;
+    enum class State : uint8_t { NotLaneProduct, Absent, Present, Pending, Failed, NoHandle };
+    struct Read {
+        const uint8_t* cpu = nullptr;
+        size_t cpuBytes = 0;
+        GpuMemoHandle gpu;
+        std::shared_ptr<const void> pin;
+    };
+    std::function<State(ProductId, uint64_t, AcquireForm, Read*)> read;
     std::function<bool(ProductId)> dropped;   // regulator-dropped products
 };
 
@@ -208,7 +242,7 @@ struct AcquireCounters {
     uint64_t reusedLane = 0;
     uint64_t reusedMemo = 0;
     uint64_t filledAtRead = 0;
-    uint64_t ownerFillCalls = 0;   // == filledAtRead + declined fills: proves "computed once"
+    uint64_t ownerFillCalls = 0;   // == filledAtRead + declined / over-budget fills: proves "computed once"
     uint64_t released = 0;
     uint64_t unavailable[size_t(AcquireCause::CauseCount)] = {};
     uint64_t Unavailable() const
@@ -224,39 +258,60 @@ class SkeletonMemo {
 public:
     static constexpr const char* kFallbackPrefix = "skeleton acquire ";
 
+    // The owning unit of a product: the catalog's unit folder (ProductRows). "" = not in the catalog (no owner can register).
+    static std::string OwnerUnitOf(ProductId id)
+    {
+        const Catalog::ProductRow* r = Catalog::RowOf(id);
+        return r != nullptr && r->unit != nullptr ? std::string(r->unit) : std::string();
+    }
+
+    SkeletonMemo() = default;
+    SkeletonMemo(const SkeletonMemo&) = delete;
+    SkeletonMemo& operator=(const SkeletonMemo&) = delete;
+    ~SkeletonMemo()
+    {
+        std::vector<std::shared_ptr<Entry>> drop;
+        {
+            std::lock_guard<std::mutex> g(mutex_);
+            for (auto& kv : memo_)
+                drop.push_back(kv.second);
+            memo_.clear();
+            for (auto& e : retired_)
+                drop.push_back(e);
+            retired_.clear();
+        }
+    }
+
     // ---- setup ----
 
-    // G3: the ONE owner fill of product `id`. A second owner for the same product is refused (false) and counted
-    // (OwnerConflicts, on the status lines); the same owner re-registering replaces its fill (graph rebuild).
-    bool RegisterOwnerFill(ProductId id, OwnerFill fill)
+    enum class Registration : uint8_t { Registered, Replaced, NotOwner, NotInCatalog, AlreadyRegistered };
+    // G3: the ONE fill of (product, form). `unit` must be the catalog's owning unit (OwnerUnitOf); anything else is refused
+    // and counted (Refusals, on the status lines). A second registration of a registered (product, form) is refused too:
+    // a replacement (graph rebuild) is explicit, ReplaceOwnerFill.
+    Registration RegisterOwnerFill(ProductId id, AcquireForm form, const std::string& unit, OwnerFill fill)
     {
-        std::lock_guard<std::mutex> g(mutex_);
-        const auto it = owners_.find(id);
-        if (it != owners_.end() && it->second.owner != fill.owner) {
-            ++ownerConflicts_;
-            conflictText_ = NameOfLocked(id) + ": owned by " + it->second.owner + ", refused " + fill.owner;
-            return false;
-        }
-        owners_[id] = std::move(fill);
-        return true;
+        return Register(id, form, unit, std::move(fill), false);
     }
-    bool HasOwnerFill(ProductId id) const
+    Registration ReplaceOwnerFill(ProductId id, AcquireForm form, const std::string& unit, OwnerFill fill)
     {
-        std::lock_guard<std::mutex> g(mutex_);
-        return owners_.count(id) != 0;
+        return Register(id, form, unit, std::move(fill), true);
     }
-    std::string OwnerOf(ProductId id) const
+    bool HasOwnerFill(ProductId id, AcquireForm form) const
     {
         std::lock_guard<std::mutex> g(mutex_);
-        const auto it = owners_.find(id);
-        return it == owners_.end() ? std::string() : it->second.owner;
+        return owners_.count(OwnerKey(id, form)) != 0;
+    }
+    uint64_t Refusals() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return refusals_;
     }
     void SetLaneSource(LaneSlotSource src)
     {
         std::lock_guard<std::mutex> g(mutex_);
         lane_ = std::move(src);
     }
-    // The skeleton GPU dispatcher exists (SkeletonModule wiring). Without it every GPU form declines: NoGpuDispatcher.
+    // The skeleton GPU dispatcher exists (SkeletonModule wiring). Without it every GPU fill declines: NoGpuDispatcher.
     void SetGpuDispatcherPresent(bool present)
     {
         std::lock_guard<std::mutex> g(mutex_);
@@ -267,11 +322,30 @@ public:
         std::lock_guard<std::mutex> g(mutex_);
         keepFrames_ = frames;
     }
-    // 0 = unbounded (tests); the host passes the VRAM ledger's memo grant.
-    void SetBudgetBytes(uint64_t bytes)
+    // The VRAM ledger's grant for the memo's GPU spots (SkeletonModule: the scratch-arena grant of the lane plan). Not granted
+    // = every GPU fill declines (NoLedgerGrant); granted = GPU bytes are reserved against `bytes`.
+    void SetGpuBudget(bool granted, uint64_t bytes)
     {
         std::lock_guard<std::mutex> g(mutex_);
-        budgetBytes_ = bytes;
+        gpuGranted_ = granted;
+        gpuBudget_ = bytes;
+    }
+    bool GpuGranted() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return gpuGranted_;
+    }
+    uint64_t GpuBudget() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return gpuBudget_;
+    }
+    // The producer fence completion (GPU retire): a released GPU spot whose recorded read fence is beyond it is kept. Without a
+    // source, a spot with a noted read is held until teardown (shown on the status lines), never dropped under a GPU read.
+    void SetFenceCompleted(std::function<uint64_t()> f)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        fenceCompleted_ = std::move(f);
     }
     // Product names for the status / Fallbacks text (the registry's tokens).
     void SetNames(const Registry* reg)
@@ -283,117 +357,154 @@ public:
                 if (d.token != nullptr && d.token[0] != 0)
                     names_[d.id] = d.token;
     }
-    // Unavailable results also engage `<kFallbackPrefix><product>` in this registry (the component's Fallbacks heading);
-    // a later success of the same product releases it.
-    void SetFallbackSink(FallbackStatus::Registry* sink)
-    {
-        std::lock_guard<std::mutex> g(mutex_);
-        sink_ = sink;
-    }
 
     // ---- G1-G5 ----
 
-    AcquireResult Acquire(ProductId id, uint64_t seq, AcquireForm form, const VariantKey& v = VariantKey())
+    AcquireResult Acquire(ProductId id, uint64_t seq, AcquireForm form, const VariantKey& vIn = VariantKey())
     {
-        const Key key{ id, seq, uint8_t(form), v };
         std::unique_lock<std::mutex> lk(mutex_);
         AcquireCounters& c = counters_[id];
+        const auto ow = owners_.find(OwnerKey(id, form));
+        const VariantKey v = vIn.Canonical(ow != owners_.end() ? ow->second.defaults : VariantKey());
+        const Key key{ id, seq, uint8_t(form), v };
+
+        // Re-entrancy: an owner fill on this thread asking for the key it is filling would wait for itself.
+        for (const Key& k : FillingOnThisThread())
+            if (!(k < key) && !(key < k))
+                return Fail(c, id, seq, AcquireCause::Reentrant);
 
         // G2 (a): the lane's slot (default variant).
         if (v.IsDefault() && lane_.read) {
-            const uint8_t* p = nullptr;
-            size_t n = 0;
-            const LaneSlotSource::State s = lane_.read(id, seq, form, &p, &n);
+            LaneSlotSource::Read rd;
+            const LaneSlotSource::State s = lane_.read(id, seq, form, &rd);
             if (s == LaneSlotSource::State::Present) {
                 ++c.reusedLane;
                 AcquireResult r;
                 r.status = AcquireStatus::Reused;
                 r.source = AcquireSource::LaneSlot;
-                r.cpu = p;
-                r.cpuBytes = n;
-                ReleaseFallbackLocked(lk, id);
+                r.cpu = rd.cpu;
+                r.cpuBytes = rd.cpuBytes;
+                r.gpu = rd.gpu;
+                r.pin = rd.pin;
+                Served(id);
                 return r;
             }
             if (s == LaneSlotSource::State::Pending)
-                return Fail(lk, c, id, seq, AcquireCause::LanePending);
+                return Fail(c, id, seq, AcquireCause::LanePending);
             if (s == LaneSlotSource::State::Failed)
-                return Fail(lk, c, id, seq, AcquireCause::LaneFailed);
+                return Fail(c, id, seq, AcquireCause::LaneFailed);
+            if (s == LaneSlotSource::State::NoHandle)
+                return Fail(c, id, seq, AcquireCause::NoGpuHandle);
         }
 
         // A frame whose memo was released is never recomputed (its lane slots, above, stay readable while the lane holds them).
         if (haveReleased_ && seq <= releasedThrough_)
-            return Fail(lk, c, id, seq, AcquireCause::FrameReleased);
+            return Fail(c, id, seq, AcquireCause::FrameReleased);
 
-        // G2 (b): the memo spot (wait for a fill in flight: computed once).
-        for (;;) {
-            const auto it = memo_.find(key);
-            if (it == memo_.end())
-                break;
-            if (it->second->state == Entry::Filling) {
-                cv_.wait(lk);
-                continue;
-            }
-            if (it->second->state == Entry::Ready) {
+        // G2 (b): the memo spot; a fill in flight is waited for (computed once).
+        const auto it = memo_.find(key);
+        if (it != memo_.end()) {
+            const std::shared_ptr<Entry> e = it->second;
+            cv_.wait(lk, [&e]() { return e->state != Entry::Filling; });
+            if (e->state == Entry::Ready) {
                 ++c.reusedMemo;
-                return ResultOf(*it->second, AcquireStatus::Reused);
+                return ResultOf(e, AcquireStatus::Reused);
             }
-            // Declined for this frame: the same cause again (the owner is not asked twice for one frame).
-            return Fail(lk, c, id, seq, it->second->cause);
+            // Declined for this frame: the same cause, the owner is not asked twice for one frame.
+            return Fail(c, id, seq, e->cause == AcquireCause::None ? AcquireCause::OwnerDeclined : e->cause);
         }
 
         if (lane_.dropped && lane_.dropped(id))
-            return Fail(lk, c, id, seq, AcquireCause::RegulatorDropped);
-        const auto ow = owners_.find(id);
-        if (ow == owners_.end() || (form == AcquireForm::Cpu ? !ow->second.cpu : !ow->second.gpu))
-            return Fail(lk, c, id, seq, AcquireCause::NoOwnerFill);
+            return Fail(c, id, seq, AcquireCause::RegulatorDropped);
+        if (ow == owners_.end() || !ow->second.fill)
+            return Fail(c, id, seq, AcquireCause::NoOwnerFill);
         if ((v.Axes() & ~ow->second.variantAxes) != 0u)
-            return Fail(lk, c, id, seq, AcquireCause::VariantUndeclared);
-        if (form == AcquireForm::Gpu && !gpuPresent_)
-            return Fail(lk, c, id, seq, AcquireCause::NoGpuDispatcher);
+            return Fail(c, id, seq, AcquireCause::VariantUndeclared);
+        uint64_t reserve = 0;
+        if (form == AcquireForm::Gpu) {
+            if (!gpuPresent_)
+                return Fail(c, id, seq, AcquireCause::NoGpuDispatcher);
+            if (!gpuGranted_)
+                return Fail(c, id, seq, AcquireCause::NoLedgerGrant);
+            reserve = ow->second.reserveBytes;
+            if (gpuBytes_ + reserve > gpuBudget_)
+                return Fail(c, id, seq, AcquireCause::OverBudget);
+        }
 
-        // G3: the owner fills it once, outside the lock (other keys proceed; readers of this key wait).
-        std::shared_ptr<Entry> e = std::make_shared<Entry>();
+        // G3: the owner fills it once, outside the lock (other keys proceed; readers of this key wait on the entry).
+        const std::shared_ptr<Entry> e = std::make_shared<Entry>();
         e->state = Entry::Filling;
         e->seq = seq;
+        e->id = id;
+        e->gpuForm = form == AcquireForm::Gpu;
+        e->reserved = reserve;
+        gpuBytes_ += reserve;
         memo_[key] = e;
         ++c.ownerFillCalls;
-        const OwnerFill fill = ow->second;   // a copy: a re-registration during the fill does not invalidate it
+        const OwnerFill fill = ow->second;   // a copy: a replacement during the fill does not invalidate it
         lk.unlock();
         OwnerFillRequest req;
         req.id = id;
         req.seq = seq;
         req.form = form;
         req.variant = v;
+        OwnerFillOutput out;
         bool ok = false;
-        std::vector<uint8_t> bytes;
-        GpuMemoHandle gpu;
-        if (form == AcquireForm::Cpu)
-            ok = fill.cpu(req, *this, bytes);
-        else
-            ok = fill.gpu(req, *this, gpu);
+        FillingOnThisThread().push_back(key);
+        try {
+            ok = fill.fill(req, *this, out);
+        } catch (...) {
+            ok = false;   // a throwing fill is a decline (counted, visible), never a stuck Filling entry
+        }
+        FillingOnThisThread().pop_back();
+        if (ok && form == AcquireForm::Cpu && out.bytes.empty())
+            ok = false;
+        if (ok && form == AcquireForm::Gpu && !out.gpu.Valid())
+            ok = false;
         lk.lock();
         AcquireCounters& c2 = counters_[id];
-        const uint64_t need = form == AcquireForm::Cpu ? uint64_t(bytes.size()) : gpu.bytes;
-        AcquireCause cause = AcquireCause::None;
-        if (!ok)
-            cause = AcquireCause::OwnerDeclined;
-        else if (budgetBytes_ != 0 && liveBytes_ + need > budgetBytes_)
+        AcquireCause cause = ok ? AcquireCause::None : AcquireCause::OwnerDeclined;
+        if (ok && form == AcquireForm::Gpu && !e->orphaned && out.gpu.bytes > e->reserved
+            && gpuBytes_ - e->reserved + out.gpu.bytes > gpuBudget_)
             cause = AcquireCause::OverBudget;
+        if (!e->orphaned) {
+            gpuBytes_ -= e->reserved;
+            e->reserved = 0;
+        }
         if (cause != AcquireCause::None) {
             e->state = Entry::Declined;
             e->cause = cause;
             cv_.notify_all();
-            return Fail(lk, c2, id, seq, cause);
+            lk.unlock();
+            out = OwnerFillOutput();   // released outside the lock
+            lk.lock();
+            return Fail(counters_[id], id, seq, cause);
         }
-        e->bytes = std::move(bytes);
-        e->gpu = std::move(gpu);
-        e->budgeted = need;
-        liveBytes_ += need;
+        e->bytes = std::move(out.bytes);
+        e->gpu = std::move(out.gpu);
+        if (!e->orphaned) {
+            if (e->gpuForm) {
+                e->reserved = e->gpu.bytes;
+                gpuBytes_ += e->gpu.bytes;
+            }
+            cpuBytes_ += e->bytes.size();
+        }
         e->state = Entry::Ready;
         ++c2.filledAtRead;
         cv_.notify_all();
-        ReleaseFallbackLocked(lk, id);
-        return ResultOf(*e, AcquireStatus::FilledAtRead);
+        Served(id);
+        return ResultOf(e, AcquireStatus::FilledAtRead);
+    }
+
+    // A GPU reader recorded work that reads `r`'s texture up to `fence`: the spot is not retired before it completes.
+    void NoteGpuRead(const AcquireResult& r, uint64_t fence)
+    {
+        if (r.source != AcquireSource::Memo || !r.pin)
+            return;
+        std::lock_guard<std::mutex> g(mutex_);
+        Entry* e = const_cast<Entry*>(static_cast<const Entry*>(r.pin.get()));
+        if (fence > e->readFence)
+            e->readFence = fence;
     }
 
     // The seal's question (SkeletonAcquireLane.h): did a reader publish the default CPU form of (id, seq)? Copies it.
@@ -407,38 +518,45 @@ public:
         return true;
     }
 
-    // Lifetime: frame `seq` is sealed; memos of frames <= seq - 1 - keepFrames are released (their bytes / GPU keep-alives
-    // go back to the arena). Render thread.
+    // Lifetime: frame `seq` is sealed; memos of frames <= seq - 1 - keepFrames are released (pinned results stay valid; GPU spots
+    // under a read fence are retired when it completes). Frame numbers going back (a new epoch) release everything first,
+    // Filling entries included (orphaned: their filler finishes, nothing is counted). Entries are destroyed after the lock.
     void OnSeal(uint64_t seq)
     {
-        std::lock_guard<std::mutex> g(mutex_);
-        if (haveSealed_ && seq < lastSeal_)
-            ClearLocked();   // the frame numbers went back (a new epoch): nothing of the old numbering is kept or refused
-        haveSealed_ = true;
-        lastSeal_ = seq;
-        if (seq < 1u + keepFrames_)
-            return;
-        const uint64_t through = seq - 1u - keepFrames_;
-        for (auto it = memo_.begin(); it != memo_.end();) {
-            if (it->second->state != Entry::Filling && it->second->seq <= through) {
-                liveBytes_ -= it->second->budgeted;
-                if (it->second->state == Entry::Ready)
-                    ++counters_[it->first.id].released;
-                it = memo_.erase(it);
-            } else {
-                ++it;
+        std::vector<std::shared_ptr<Entry>> drop;
+        {
+            std::lock_guard<std::mutex> g(mutex_);
+            if (haveSealed_ && seq < lastSeal_) {
+                ReleaseIfLocked([](const Entry&) { return true; }, drop);   // the old numbering: nothing kept, nothing refused
+                haveReleased_ = false;
+                releasedThrough_ = 0;
             }
+            haveSealed_ = true;
+            lastSeal_ = seq;
+            if (seq >= 1u + keepFrames_) {
+                const uint64_t through = seq - 1u - keepFrames_;
+                ReleaseIfLocked([through](const Entry& e) { return e.seq <= through; }, drop);
+                if (!haveReleased_ || through > releasedThrough_)
+                    releasedThrough_ = through;
+                haveReleased_ = true;
+            }
+            RetireCompletedLocked(drop);
         }
-        if (!haveReleased_ || through > releasedThrough_)
-            releasedThrough_ = through;
-        haveReleased_ = true;
+        drop.clear();
     }
     // A discontinuity (graph rebuild, resync): every memo released; frames are accepted again from any seq.
     void Clear()
     {
-        std::lock_guard<std::mutex> g(mutex_);
-        ClearLocked();
-        haveSealed_ = false;
+        std::vector<std::shared_ptr<Entry>> drop;
+        {
+            std::lock_guard<std::mutex> g(mutex_);
+            ReleaseIfLocked([](const Entry&) { return true; }, drop);
+            RetireCompletedLocked(drop);
+            haveReleased_ = false;
+            releasedThrough_ = 0;
+            haveSealed_ = false;
+        }
+        drop.clear();
     }
 
     // ---- diagnostics ----
@@ -454,15 +572,20 @@ public:
         std::lock_guard<std::mutex> g(mutex_);
         return memo_.size();
     }
-    uint64_t MemoBytes() const
+    size_t RetiredPending() const
     {
         std::lock_guard<std::mutex> g(mutex_);
-        return liveBytes_;
+        return retired_.size();
     }
-    uint64_t OwnerConflicts() const
+    uint64_t GpuBytes() const
     {
         std::lock_guard<std::mutex> g(mutex_);
-        return ownerConflicts_;
+        return gpuBytes_;
+    }
+    uint64_t CpuBytes() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return cpuBytes_;
     }
     // One line per product asked: "skeleton acquire: p1_half_luma 12 reused (lane 10, memo 2), 1 filled at read, 0 unavailable".
     std::vector<std::string> StatusLines() const
@@ -480,11 +603,29 @@ public:
                     l += std::string("; ") + Token(AcquireCause(k)) + " " + std::to_string(c.unavailable[k]);
             lines.push_back(l);
         }
-        if (ownerConflicts_ != 0)
-            lines.push_back("skeleton acquire: owner conflicts " + std::to_string(ownerConflicts_) + " (" + conflictText_ + ")");
+        if (!retired_.empty())
+            lines.push_back("skeleton acquire: " + std::to_string(retired_.size()) + " released GPU spot(s) held for a pending read fence"
+                            + (fenceCompleted_ ? "" : " (no fence completion source: held until teardown)"));
+        if (refusals_ != 0)
+            lines.push_back("skeleton acquire: owner registrations refused " + std::to_string(refusals_) + " (" + refusalText_ + ")");
         return lines;
     }
-    // The last Unavailable cause text per product (what the Fallbacks heading shows).
+    // G5: one engaged Fallbacks entry per product whose last Acquire was Unavailable ("skeleton acquire <token>": cause, frame);
+    // released when it is served again. The skeleton adds them to its Fallbacks list (Ctrl+I, Config status, Ctrl+Alt+D).
+    std::vector<FallbackCatalog::Decision> Decisions() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        std::vector<FallbackCatalog::Decision> out;
+        for (const auto& kv : lastCause_) {
+            FallbackCatalog::Decision d;
+            d.id = kFallbackPrefix + NameOfLocked(kv.first);
+            d.engaged = true;
+            d.reason = kv.second;
+            out.push_back(d);
+        }
+        return out;
+    }
+    // The current Unavailable cause text of a product ("" = served / never asked).
     std::string LastCause(ProductId id) const
     {
         std::lock_guard<std::mutex> g(mutex_);
@@ -509,37 +650,61 @@ private:
     struct Entry {
         enum State : uint8_t { Filling, Ready, Declined } state = Filling;
         AcquireCause cause = AcquireCause::None;
+        ProductId id = kNoProduct;
         uint64_t seq = 0;
+        bool gpuForm = false;
+        bool orphaned = false;     // released from the memo (while filling or after): its bytes are no longer counted
+        uint64_t reserved = 0;     // GPU bytes counted in gpuBytes_
+        uint64_t readFence = 0;    // NoteGpuRead
         std::vector<uint8_t> bytes;
         GpuMemoHandle gpu;
-        uint64_t budgeted = 0;
     };
 
-    void ClearLocked()
+    static uint32_t OwnerKey(ProductId id, AcquireForm f) { return (uint32_t(id) << 1) | (f == AcquireForm::Gpu ? 1u : 0u); }
+
+    static std::vector<Key>& FillingOnThisThread()
     {
-        for (auto it = memo_.begin(); it != memo_.end();) {
-            if (it->second->state == Entry::Filling) {
-                ++it;
-                continue;
-            }
-            liveBytes_ -= it->second->budgeted;
-            it = memo_.erase(it);
-        }
-        haveReleased_ = false;
-        releasedThrough_ = 0;
+        static thread_local std::vector<Key> keys;
+        return keys;
     }
 
-    static AcquireResult ResultOf(const Entry& e, AcquireStatus st)
+    Registration Register(ProductId id, AcquireForm form, const std::string& unit, OwnerFill fill, bool replace)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        const std::string owner = OwnerUnitOf(id);
+        const std::string what = NameOfLocked(id) + " (" + Token(form) + ") by " + unit;
+        if (owner.empty()) {
+            ++refusals_;
+            refusalText_ = what + ": not in the product catalog";
+            return Registration::NotInCatalog;
+        }
+        if (unit != owner) {
+            ++refusals_;
+            refusalText_ = what + ": owned by " + owner;
+            return Registration::NotOwner;
+        }
+        const uint32_t k = OwnerKey(id, form);
+        const bool had = owners_.count(k) != 0;
+        if (had && !replace) {
+            ++refusals_;
+            refusalText_ = what + ": already registered (replace explicitly)";
+            return Registration::AlreadyRegistered;
+        }
+        owners_[k] = std::move(fill);
+        return had ? Registration::Replaced : Registration::Registered;
+    }
+
+    static AcquireResult ResultOf(const std::shared_ptr<Entry>& e, AcquireStatus st)
     {
         AcquireResult r;
         r.status = st;
         r.source = AcquireSource::Memo;
-        if (!e.bytes.empty()) {
-            r.cpu = e.bytes.data();
-            r.cpuBytes = e.bytes.size();
+        if (!e->bytes.empty()) {
+            r.cpu = e->bytes.data();
+            r.cpuBytes = e->bytes.size();
         }
-        if (e.gpu.resource != nullptr || e.gpu.view != nullptr)
-            r.gpu = &e.gpu;
+        r.gpu = e->gpu;
+        r.pin = std::shared_ptr<const void>(e, e.get());
         return r;
     }
 
@@ -549,54 +714,73 @@ private:
         return it != names_.end() ? it->second : "product " + std::to_string(id);
     }
 
-    AcquireResult Fail(std::unique_lock<std::mutex>& lk, AcquireCounters& c, ProductId id, uint64_t seq, AcquireCause cause)
+    AcquireResult Fail(AcquireCounters& c, ProductId id, uint64_t seq, AcquireCause cause)
     {
         ++c.unavailable[size_t(cause)];
-        const std::string reason = std::string(Token(cause)) + ", frame " + std::to_string(seq);
-        lastCause_[id] = reason;
-        FallbackStatus::Registry* sink = sink_;
-        const std::string fid = kFallbackPrefix + NameOfLocked(id);
-        lk.unlock();
-        if (sink != nullptr)
-            sink->Engage(fid, Token(cause));   // the cause (not the frame) so the heading does not churn per frame
-        lk.lock();
-        if (sink != nullptr)
-            engaged_[id] = true;
+        lastCause_[id] = std::string(Token(cause)) + ", frame " + std::to_string(seq);
         AcquireResult r;
         r.status = AcquireStatus::Unavailable;
         r.cause = cause;
         return r;
     }
+    void Served(ProductId id) { lastCause_.erase(id); }
 
-    void ReleaseFallbackLocked(std::unique_lock<std::mutex>& lk, ProductId id)
+    // Release the entries `pred` names. GPU spots under an incomplete read fence go to retired_; the rest to `drop`.
+    template <class Pred>
+    void ReleaseIfLocked(Pred pred, std::vector<std::shared_ptr<Entry>>& drop)
     {
-        const auto it = engaged_.find(id);
-        if (sink_ == nullptr || it == engaged_.end())
-            return;
-        engaged_.erase(it);
-        FallbackStatus::Registry* sink = sink_;
-        const std::string fid = kFallbackPrefix + NameOfLocked(id);
-        lk.unlock();
-        sink->Release(fid);
-        lk.lock();
+        for (auto it = memo_.begin(); it != memo_.end();) {
+            Entry& e = *it->second;
+            if (!pred(e)) {
+                ++it;
+                continue;
+            }
+            if (e.state == Entry::Ready)
+                ++counters_[e.id].released;
+            if (e.gpuForm)
+                gpuBytes_ -= e.reserved;
+            else
+                cpuBytes_ -= e.bytes.size();
+            e.reserved = 0;
+            e.orphaned = true;
+            if (e.gpuForm && e.state == Entry::Ready && e.readFence > (fenceCompleted_ ? fenceCompleted_() : 0u))
+                retired_.push_back(it->second);
+            else
+                drop.push_back(it->second);
+            it = memo_.erase(it);
+        }
+    }
+    void RetireCompletedLocked(std::vector<std::shared_ptr<Entry>>& drop)
+    {
+        const uint64_t done = fenceCompleted_ ? fenceCompleted_() : 0u;   // no completion source: a noted read is never assumed done
+        for (auto it = retired_.begin(); it != retired_.end();) {
+            if ((*it)->readFence <= done) {
+                drop.push_back(*it);
+                it = retired_.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;
-    std::map<ProductId, OwnerFill> owners_;
+    std::map<uint32_t, OwnerFill> owners_;
     std::map<Key, std::shared_ptr<Entry>> memo_;
+    std::vector<std::shared_ptr<Entry>> retired_;
     std::map<ProductId, AcquireCounters> counters_;
     std::map<ProductId, std::string> names_;
     std::map<ProductId, std::string> lastCause_;
-    std::map<ProductId, bool> engaged_;   // products whose Fallbacks entry is engaged in sink_
     LaneSlotSource lane_;
-    FallbackStatus::Registry* sink_ = nullptr;
+    std::function<uint64_t()> fenceCompleted_;
     bool gpuPresent_ = false;
+    bool gpuGranted_ = false;
+    uint64_t gpuBudget_ = 0;
+    uint64_t gpuBytes_ = 0;
+    uint64_t cpuBytes_ = 0;
     uint32_t keepFrames_ = 0;
-    uint64_t budgetBytes_ = 0;
-    uint64_t liveBytes_ = 0;
-    uint64_t ownerConflicts_ = 0;
-    std::string conflictText_;
+    uint64_t refusals_ = 0;
+    std::string refusalText_;
     bool haveReleased_ = false;
     uint64_t releasedThrough_ = 0;
     bool haveSealed_ = false;
