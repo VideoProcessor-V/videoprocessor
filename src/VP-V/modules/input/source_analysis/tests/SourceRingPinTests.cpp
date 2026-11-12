@@ -78,7 +78,7 @@ namespace SourceRingPinTestsNs
 
 		TEST_METHOD(EveryQueueFactInvalidatesEveryPin)
 		{
-			const Invalidation facts[] = { Invalidation::Flush, Invalidation::Discontinuity, Invalidation::FormatChange, Invalidation::Reset };
+			const Invalidation facts[] = { Invalidation::Flush, Invalidation::Discontinuity, Invalidation::FormatChange };
 			uint32_t epoch = 0;
 			for (Invalidation f : facts) {
 				FramePinBook b;

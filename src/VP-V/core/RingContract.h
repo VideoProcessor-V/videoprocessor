@@ -18,7 +18,7 @@
 //           Neither number appears in this file. RingWindowFrames() only adds them.
 //   pins    a consumer may PIN up to maxPins frames by key; a pin keeps a frame that was addressable when it was taken
 //           after the window has moved past it. maxPins is a PIN COUNT (A3 item 2: "up to 3 frames"), not a depth.
-//   facts   every S7 queue fact that drops or re-labels frames (Flush, Discontinuity, FormatChange, Reset) invalidates
+//   facts   every S7 queue fact that drops or re-labels frames (Flush, Discontinuity, FormatChange; refs/110 :33-43, 99c A3 item 5) invalidates
 //           every pin (A3 item 5): see modules/input/source_analysis/SourceRingPin.h.
 //
 // How a seq-keyed window meets the SlotTable's `slot = seq mod ring` (core/ProductSlots.h, comment there): the SlotTable
@@ -30,6 +30,8 @@
 // reserve extra ring slots (history + pins) at BuildGraph; this header only fixes the contract and the figure.
 namespace VpSkeleton {
 
+// Reserve sizing (core/ReserveRows.h): the REDUCED tier's "4 frames + 3 pins, luma only" is a lane choice and a sizing CEILING, not a depth
+// constant; confirmed by the TD round-3 measurement (99c A3 item 2). A producer that resets the ring reports it as Discontinuity.
 constexpr uint8_t kMaxRingPins = 3;   // A3 item 2: "a consumer may pin up to 3 frames by key beyond the window"
 
 struct KeyedRingContract {
