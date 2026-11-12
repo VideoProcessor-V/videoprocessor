@@ -217,6 +217,7 @@ namespace VectorEngineHookTest
 			Assert::AreEqual(std::string("bind"), calls[0]);
 			Assert::AreEqual(std::string("estimate"), calls[1]);
 			Assert::AreEqual<uint64_t>(12, hook.ctx.pairSeq, L"pairSeq = the pair's later frame");
+			Assert::AreEqual<uint64_t>(10, hook.ctx.fromSeq, L"fromSeq = the pair's earlier frame");
 			Assert::IsTrue(hook.ctx.ahead);
 			Assert::AreEqual(2.0 / 24.0, hook.ctx.nextPairSeconds, 1e-12, L"two source periods at 24 Hz");
 			Assert::IsTrue(hook.afterUsed);

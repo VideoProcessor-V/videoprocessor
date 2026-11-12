@@ -250,6 +250,7 @@ namespace VpMotion
 			}
 			EstimateContext ctx;
 			ctx.pairSeq = bSequence;
+			ctx.fromSeq = aSequence;
 			ctx.ahead = ahead;
 			ctx.nextPairSeconds = sourceHz > 0 && bSequence > aSequence ? static_cast<double>(bSequence - aSequence) / sourceHz : 0.0;
 			MatcherGuidanceSink<Matcher> sink(matcher);

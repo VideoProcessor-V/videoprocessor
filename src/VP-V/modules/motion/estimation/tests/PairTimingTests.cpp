@@ -93,5 +93,42 @@ namespace VideoProcessorTest
 			t.Latch(l);
 			Assert::IsTrue(t.Basis() == CameraLink::TimingBasis::Measured);
 		}
+
+		// C7b: a missed read of the previous frame's cadence (not written yet / evicted) holds the latched film timing; only an Ok read
+		// decides; a refused read (stale epoch, invalid group, store off) and no read unlock. The measured rate is never touched.
+		TEST_METHOD(AMissedCadenceReadHoldsTheLatchAndOnlyAnOkReadDecides)
+		{
+			const double film = 24000.0 / 1001.0;
+			CameraLink::TimingFacts latched;
+			latched.filmHz = film;
+			latched.cadenceLocked = true;
+			latched.measuredSourceHz = 30.0;
+			auto apply = [&latched](CameraLink::CadenceRead read, double filmHz, bool haveLatched) {
+				CameraLink::TimingFacts t;
+				t.measuredSourceHz = 29.97;
+				CameraLink::ApplyCadenceRead(t, read, filmHz, haveLatched, latched);
+				Assert::AreEqual(29.97, t.measuredSourceHz, L"the measured rate is the host's");
+				return t;
+			};
+			CameraLink::TimingFacts t = apply(CameraLink::CadenceRead::NotYet, 0.0, true);
+			Assert::IsTrue(t.cadenceLocked, L"a missed read holds the lock");
+			Assert::AreEqual(film, t.filmHz);
+			t = apply(CameraLink::CadenceRead::NotYet, 0.0, false);
+			Assert::IsFalse(t.cadenceLocked, L"nothing latched: nothing to hold");
+			t = apply(CameraLink::CadenceRead::Ok, 0.0, true);
+			Assert::IsFalse(t.cadenceLocked, L"an Ok read without a film rate unlocks");
+			Assert::AreEqual(0.0, t.filmHz);
+			t = apply(CameraLink::CadenceRead::Ok, 25.0, true);
+			Assert::IsTrue(t.cadenceLocked, L"an Ok read decides the new film rate");
+			Assert::AreEqual(25.0, t.filmHz);
+			t = apply(CameraLink::CadenceRead::Refused, 0.0, true);
+			Assert::IsFalse(t.cadenceLocked, L"a refused read (stale epoch / invalid group / store off) unlocks");
+			t = apply(CameraLink::CadenceRead::None, 0.0, true);
+			Assert::IsFalse(t.cadenceLocked, L"no read (the first frame) unlocks");
+			latched.cadenceLocked = false;
+			latched.filmHz = 0.0;
+			t = apply(CameraLink::CadenceRead::NotYet, 0.0, true);
+			Assert::IsFalse(t.cadenceLocked, L"an unlocked latch is held unlocked");
+		}
 	};
 }

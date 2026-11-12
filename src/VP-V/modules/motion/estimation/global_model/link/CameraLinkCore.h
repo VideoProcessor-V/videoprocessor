@@ -18,7 +18,6 @@
 #include "CameraFitWorker.h"
 #include "CameraLink.h"
 #include "FieldReadbackRing.h"
-#include "GuidanceLag.h"
 #include "GuidanceTimers.h"
 #include "PairAssembly.h"
 
@@ -190,8 +189,8 @@ namespace CameraLink
 		// ---- ICameraLink ----
 		std::shared_ptr<const CameraModel::CameraMotion> SealedRecord(uint64_t seq) const override;
 		std::shared_ptr<const CameraModel::CameraMotion> CausalRecord(uint64_t seq) const override;
-		bool PreviousRecordSeq(uint64_t seq, unsigned back, uint64_t& out) const override;
-		uint64_t LatestRecordSeq() const override;
+		std::shared_ptr<const CameraModel::CameraMotion> OnTimeRecord(uint64_t seq, OnTimeCheck check, OnTimeMiss& why) const override;
+		SealVerdict OnTimeSealVerdict(uint64_t seq) const override;
 		std::shared_ptr<const FieldCopy> FieldOf(uint64_t seq) const override;
 		bool LabelsFor(uint64_t seq, CameraConsumer c, CameraLabelsView& out) override;
 		std::shared_ptr<const CameraModel::GuidanceFrame> GuideFor(uint64_t seq) override;
@@ -200,11 +199,9 @@ namespace CameraLink
 		// once its pool entry is committed (publish happened before). Set at setup; a copy is taken per call under a mutex.
 		// LOCK RULE: the observer runs under m_observerMutex on the camera worker, and SetFitDoneObserver (the adapter's Detach / Reconcile, render
 		// thread, renderMutex held) takes the same mutex, so it waits for a call in flight. Therefore nothing the observer reaches (the guide
-		// lane job: the host's p4 reader, the nextPair hint, the context provider) may ever take renderMutex or wait for the render thread.
+		// lane job: the host's p4 reader, the context provider) may ever take renderMutex or wait for the render thread.
 		// Debug builds assert that SetFitDoneObserver is not called from the observer's own thread (a self-deadlock).
 		void SetFitDoneObserver(std::function<void(uint64_t fitSeq)> f);
-		// K4: the measured fit cost (p95) and the readback latency the guide lag d is derived from (GuidanceLag.h).
-		GuideLagMeter& LagMeter() { return m_lagMeter; }
 		// Costs (camera-live step 2): the fit time (CPU work, on the camera worker) and the readback latency (a WAIT, request -> ready) are
 		// posted to the motion pass-timer inbox (PassTimers::Inbox::Motion().PostCameraFit / PostCameraReadback: rows camera.fit and
 		// camera.readback). The host drains it into the pass-timer readout (LibplaceboVideoRenderer, SK-W); the skeleton shows the totals.
@@ -249,9 +246,6 @@ namespace CameraLink
 		std::atomic<uint32_t> m_events{ 0 };   // bits set by any thread, consumed by OnFrameStart
 		uint64_t m_seenQueueFull = 0;
 		std::vector<uint64_t> m_sealedMark;   // seq accepted at the seal, indexed seq mod size
-		GuideLagMeter m_lagMeter;
-		mutable std::mutex m_chainMutex;
-		std::vector<uint64_t> m_chain;   // requested record seqs, ascending (bounded); cleared on a new field era / teardown
 		std::map<uint64_t, std::chrono::steady_clock::time_point> m_requestedAt;   // render thread: field copy requests in flight
 		std::mutex m_observerMutex;
 		std::atomic<std::thread::id> m_observerThread{ std::thread::id() };   // the thread inside the observer right now (debug check)
@@ -289,6 +283,9 @@ namespace CameraLink
 		std::vector<uint64_t> m_seedPending; // frames the seed fallback is fetching while the ahead fit is on (ahead submissions wait)
 		enum { kAheadMarks = 256 };
 		std::unique_ptr<std::atomic<uint64_t>[]> m_onTimeMark{ new std::atomic<uint64_t>[kAheadMarks] };   // seq + 1 at seq % size: published on time (the worker writes)
+		std::unique_ptr<std::atomic<uint64_t>[]> m_aheadAsked{ new std::atomic<uint64_t>[kAheadMarks] };   // seq + 1: the ahead copy of seq was submitted (render thread writes)
+		std::unique_ptr<std::atomic<uint64_t>[]> m_sealVerdict{ new std::atomic<uint64_t>[kAheadMarks] };  // (seq + 1) * 2 + rejected: the on-time seal ran (render thread)
+		void ClearAheadMarks();
 		std::vector<uint64_t> m_retired;     // seq + 1 at seq % size: sealed (or rejected) by the on-time seal: the bridge seal skips it
 	};
 }

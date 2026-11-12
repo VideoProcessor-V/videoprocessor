@@ -33,6 +33,34 @@ namespace CameraLink
 		double nominalHz = 0;          // the container / signal nominal rate; 0 = unknown
 	};
 
+	// What the frame-analysis read of the previous frame's cadence said (C7b).
+	enum class CadenceRead : uint8_t
+	{
+		None,       // no read (no store, the first frame): nothing to hold, no film lock
+		Ok,         // read: filmHz > 0 is a film lock, 0 is no lock
+		NotYet,     // Missing / Late: not written yet or evicted - no evidence that the cadence unlocked
+		Refused,    // a stale epoch (discontinuity), an invalid group, the store off: the film lock is dropped
+	};
+
+	// C7b: the cadence part of the facts for this frame. Only an Ok read decides locked / unlocked; a NotYet read holds the latched
+	// film timing (a single missed read would otherwise relatch for one frame and reset the fit's timing basis). Every other outcome
+	// unlocks. The measured source rate in t is never touched.
+	inline void ApplyCadenceRead(TimingFacts& t, CadenceRead read, double filmHz, bool haveLatched, const TimingFacts& latched)
+	{
+		t.filmHz = 0;
+		t.cadenceLocked = false;
+		if (read == CadenceRead::Ok && filmHz > 0.0)
+		{
+			t.filmHz = filmHz;
+			t.cadenceLocked = true;
+		}
+		else if (read == CadenceRead::NotYet && haveLatched)
+		{
+			t.filmHz = latched.filmHz;
+			t.cadenceLocked = latched.cadenceLocked;
+		}
+	}
+
 	class PairTiming
 	{
 	public:

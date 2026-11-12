@@ -5,7 +5,7 @@
 #endif
 #include "CppUnitTest.h"
 
-// Camera link K4 wiring (prepared before P5a): the one refusal gate, the measured guide lag, the guide lane job (lane == live),
+// Camera link K4 wiring (prepared before P5a): the one refusal gate, the d = 0 on-time rule, the guide lane job (lane == live),
 // the PairContext provider and the flow resampler, the skeleton-visible status (FallbackCatalog decisions) and the PassTimers
 // rows. CPU only; every piece is driven through fakes of the engine and the link. No test name carries the word for the device.
 #include "CameraLinkTestSupport.h"
@@ -14,7 +14,6 @@
 #include <VP-V/modules/motion/estimation/global_model/link/GuidanceAdapter.h>
 #include <VP-V/modules/motion/estimation/global_model/link/GuidanceContext.h>
 #include <VP-V/modules/motion/estimation/global_model/link/GuidanceGate.h>
-#include <VP-V/modules/motion/estimation/global_model/link/GuidanceLag.h>
 #include <VP-V/modules/motion/estimation/global_model/link/GuidanceScheduler.h>
 #include <VP-V/modules/motion/estimation/global_model/link/GuidanceStatus.h>
 #include <VP-V/modules/motion/estimation/global_model/link/GuidanceTimers.h>
@@ -43,21 +42,23 @@ namespace VideoProcessorTest
 		{
 			std::map<uint64_t, std::shared_ptr<const CameraModel::CameraMotion>> records;
 			std::map<uint64_t, std::shared_ptr<const CameraLink::FieldCopy>> fields;
-			bool chain = false;                    // true: PreviousRecordSeq walks the requested chain (the real link's rule)
-			std::vector<uint64_t> chainSeqs;       // requested record seqs, ascending (AddPan appends; tests may append unfitted ones)
-			bool PreviousRecordSeq(uint64_t seq, unsigned back, uint64_t& out) const override
+			std::map<uint64_t, CameraLink::OnTimeMiss> late;       // camera(seq) published but NOT on time, with this cause
+			std::map<uint64_t, CameraLink::SealVerdict> seals;     // the on-time seal's verdict (absent: Pending)
+			std::shared_ptr<const CameraModel::CameraMotion> OnTimeRecord(uint64_t s, CameraLink::OnTimeCheck check, CameraLink::OnTimeMiss& why) const override
 			{
-				if (!chain)
-					return CameraLink::ICameraLink::PreviousRecordSeq(seq, back, out);
-				if (back == 0)
-					return false;
-				const size_t k = static_cast<size_t>(std::lower_bound(chainSeqs.begin(), chainSeqs.end(), seq) - chainSeqs.begin());
-				if (k < back)
-					return false;
-				out = chainSeqs[k - back];
-				return true;
+				auto it = late.find(s);
+				if (it != late.end())
+				{
+					why = it->second;
+					return nullptr;
+				}
+				return CameraLink::ICameraLink::OnTimeRecord(s, check, why);
 			}
-			uint64_t LatestRecordSeq() const override { return chainSeqs.empty() ? 0 : chainSeqs.back(); }
+			CameraLink::SealVerdict OnTimeSealVerdict(uint64_t s) const override
+			{
+				auto it = seals.find(s);
+				return it == seals.end() ? CameraLink::SealVerdict::Pending : it->second;
+			}
 			std::shared_ptr<const CameraModel::CameraMotion> SealedRecord(uint64_t s) const override { return CausalRecord(s); }
 			std::shared_ptr<const CameraModel::CameraMotion> CausalRecord(uint64_t s) const override
 			{
@@ -82,14 +83,19 @@ namespace VideoProcessorTest
 				CameraModel::Fitter fitter;
 				records[seq] = std::make_shared<const CameraModel::CameraMotion>(fitter.Fit(in));
 				fields[seq] = copy;
-				if (chainSeqs.empty() || seq > chainSeqs.back())
-					chainSeqs.push_back(seq);
+			}
+
+			// camera(seq) measured its pair over `seconds` (SameCameraPair compares it with the matcher's pair duration).
+			void Retime(uint64_t seq, double seconds)
+			{
+				auto r = std::make_shared<CameraModel::CameraMotion>(*records[seq]);
+				r->pairSeconds = seconds;
+				records[seq] = r;
 			}
 		};
 
-		void ChainOf(WireLink& l, std::initializer_list<uint64_t> seqs)
+		void PansAt(WireLink& l, std::initializer_list<uint64_t> seqs)
 		{
-			l.chain = true;
 			for (uint64_t q : seqs)
 				l.AddPan(q);
 		}
@@ -176,7 +182,7 @@ namespace VideoProcessorTest
 			const CameraModel::CameraMotion good = Record(0.9);
 			Assert::IsTrue(GuidanceRefusal(off, cfg, &good, false, false) == Refusal::AllOff);
 			Assert::IsTrue(GuidanceRefusal(off, cfg, nullptr, true, true) == Refusal::AllOff, L"all off is judged first");
-			Assert::IsTrue(GuidanceRefusal(on, cfg, nullptr, false, false) == Refusal::NoRecord, L"record late");
+			Assert::IsTrue(GuidanceRefusal(on, cfg, nullptr, false, false) == Refusal::NotOnTime, L"camera(N) not ready in time");
 			Assert::IsTrue(GuidanceRefusal(on, cfg, &good, true, false) == Refusal::Slip);
 			Assert::IsTrue(GuidanceRefusal(on, cfg, &good, false, true) == Refusal::Slip, L"an ancient stamp counts as a slip");
 			const CameraModel::CameraMotion amb = Record(0.9, CameraModel::Reason::Ambiguous);
@@ -241,137 +247,165 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.6, r.confidence, 1e-12);
 		}
 
-		// ---- K4-1: the measured guide lag -------------------------------------------------------------------------------
-
-		TEST_METHOD(TheSampleWindowIgnoresNonPositiveSamplesAndUsesNearestRank)
-		{
-			CameraLink::SampleWindow w(128);
-			w.Add(0);
-			w.Add(-1);
-			Assert::AreEqual(size_t(0), w.Count());
-			Assert::AreEqual(0.0, w.P95(), 0.0, L"empty: nothing measured");
-			for (int i = 1; i <= 20; ++i)
-				w.Add(i);
-			Assert::AreEqual(19.0, w.P95(), 0.0, L"nearest rank: ceil(0.95 * 20) = 19");
-			Assert::AreEqual(20.0, w.Quantile(1.0), 0.0);
-			Assert::AreEqual(1.0, w.Quantile(0.0), 0.0);
-			CameraLink::SampleWindow window4(4);
-			for (int i = 1; i <= 6; ++i)
-				window4.Add(i);
-			Assert::AreEqual(size_t(4), window4.Count(), L"a sliding window: the oldest samples left");
-			Assert::AreEqual(3.0, window4.Quantile(0.0), 0.0);
-			Assert::AreEqual(6.0, window4.Quantile(1.0), 0.0);
-		}
-
-		TEST_METHOD(TheLagFollowsMeasuredFitAndReadbackCostsOverTheMeasuredSourcePeriod)
-		{
-			CameraLink::GuideLagMeter m;
-			Assert::AreEqual(2, int(m.Lag(1.0 / 24, false)), L"nothing measured: the structural floor");
-			for (int i = 1; i <= 100; ++i)
-				m.AddFitSeconds(i * 0.001);   // p95 = 95 ms
-			for (int i = 0; i < 10; ++i)
-				m.AddReadbackSeconds(0.010);
-			Assert::AreEqual(0.095, m.P95FitSeconds(), 1.5e-3);
-			Assert::AreEqual(0.010, m.P95ReadbackSeconds(), 1e-12);
-			// 105 ms of work: 2.5 source periods at 24 fps -> ceil 3 -> d = 4; 6.3 at 60 fps -> 7 -> d = 8; 5.25 at 50 fps -> 6 -> d = 7.
-			Assert::AreEqual(4, int(m.Lag(1.0 / 24, false)));
-			Assert::AreEqual(8, int(m.Lag(1.0 / 60, false)));
-			Assert::AreEqual(7, int(m.Lag(1.0 / 50, false)));
-			Assert::AreEqual(2, int(m.Lag(0.0, false)), L"unknown source period: the floor");
-			Assert::AreEqual(2, int(m.Lag(1.0 / 24, true)), L"a deterministic run keeps the floor: d must not depend on timing");
-			m.Clear();
-			Assert::AreEqual(2, int(m.Lag(1.0 / 24, false)));
-		}
-
-		TEST_METHOD(TheLagIsNeverAboveTheMaximumWhateverTheCosts)
-		{
-			CameraLink::GuideLagMeter m;
-			m.AddFitSeconds(60.0);
-			Assert::AreEqual(int(CameraLink::kMaxGuideLag), int(m.Lag(1.0 / 60, false)));
-		}
-
 		// ---- K4-2: the guide lane job ---------------------------------------------------------------------------------
 
-		TEST_METHOD(TheNextPairAfterTheNewestRecordIsWantedAndStaysWantedUntilP4Arrives)
+		TEST_METHOD(TheFittedPairIsWantedAndStaysWantedUntilP4Arrives)
 		{
 			WireLink link;
-			ChainOf(link, { 1, 2 });
+			PansAt(link, { 1, 2 });
 			CameraLink::GuidanceScheduler sched(link, GuideOn());
-			sched.SetLag(2);
 			bool p4Published = false;
 			sched.SetContextProvider([&p4Published](uint64_t, CameraLink::PairContext&) { return p4Published; });
 			CameraLink::GuideLaneJob job(sched, link);
 			job.OnFitDone(2);
-			Assert::AreEqual(size_t(1), job.Pending(), L"the pair after record 2 is wanted");
-			Assert::AreEqual(size_t(0), job.Pump(), L"P4(3) is not published yet");
+			Assert::AreEqual(size_t(1), job.Pending(), L"d = 0: the pair the camera just fitted is wanted");
+			Assert::AreEqual(size_t(0), job.Pump(), L"P4(2) is not published yet");
 			Assert::AreEqual(size_t(1), job.Pending(), L"still wanted");
 			Assert::AreEqual(uint64_t(1), job.GetStats().retried);
 			p4Published = true;
 			Assert::AreEqual(size_t(1), job.Pump());
 			Assert::AreEqual(size_t(0), job.Pending());
 			Assert::AreEqual(uint64_t(1), sched.Counters().lanePublished);
-			Assert::IsTrue(sched.Guide(3).fromLane, L"the render used the lane's result");
+			Assert::IsTrue(sched.Guide(2).fromLane, L"the render used the lane's result");
 			job.OnFitDone(2);
 			Assert::AreEqual(size_t(0), job.Pending(), L"a judged pair is not wanted again");
 		}
 
-		TEST_METHOD(TheNextPairComesFromTheHostHintWhenOneIsSet)
+		TEST_METHOD(AFitThatIsNotOnTimeWantsNothingAndThePairRunsUnguidedWithItsCause)
 		{
 			WireLink link;
-			ChainOf(link, { 1, 2 });
+			PansAt(link, { 1, 2 });
+			link.late[2] = CameraLink::OnTimeMiss::Bridged;
 			CameraLink::GuidanceScheduler sched(link, GuideOn());
-			sched.SetLag(2);
 			CameraLink::GuideLaneJob job(sched, link);
-			uint64_t asked = 0;
-			job.SetNextPairHint([&asked](uint64_t after, uint64_t& next) { asked = after; next = after + 2; return true; });   // 24p in 30: a repeat in between
 			job.OnFitDone(2);
-			Assert::AreEqual(uint64_t(2), asked, L"asked after the newest requested record");
-			Assert::AreEqual(size_t(1), job.Pending());
-			Assert::AreEqual(size_t(1), job.Pump());
-			Assert::IsTrue(sched.Guide(4).fromLane);
-			job.SetNextPairHint([](uint64_t, uint64_t&) { return false; });
-			link.chainSeqs.push_back(4);
-			job.OnFitDone(4);
-			Assert::AreEqual(size_t(0), job.Pending(), L"no next pair published yet: nothing wanted");
+			Assert::AreEqual(size_t(0), job.Pending(), L"camera(2) was not on time: no lane work");
+			Assert::AreEqual(uint64_t(0), job.GetStats().wanted);
+			const CameraLink::GuideResult r = sched.Guide(2, 1.0 / 24);
+			Assert::IsTrue(r.frame == nullptr && r.refusal == CameraLink::Refusal::NotOnTime && r.miss == CameraLink::OnTimeMiss::Bridged);
+			Assert::IsTrue(sched.Guide(1, 1.0 / 24).frame != nullptr, L"camera(1) guides pair 1 only");
+			const CameraLink::GuidanceCounters& c = sched.Counters();
+			Assert::AreEqual(uint64_t(1), c.notOnTime[size_t(CameraLink::OnTimeMiss::Bridged)]);
+			Assert::AreEqual(uint64_t(1), c.guided);
 		}
 
-		TEST_METHOD(AGuideReadsTheDthPreviousRecordWhenTheNumberingHasGaps)
+		TEST_METHOD(EveryNotOnTimeCauseIsCountedSeparatelyAndNamedInTheStatusLine)
+		{
+			using CameraLink::OnTimeMiss;
+			WireLink link;
+			PansAt(link, { 1, 2, 3, 4, 5, 6 });
+			link.late[1] = OnTimeMiss::NoAheadPair;
+			link.late[2] = OnTimeMiss::NotPublished;
+			link.late[3] = OnTimeMiss::Bridged;
+			link.late[4] = OnTimeMiss::Stale;
+			CameraLink::GuidanceScheduler sched(link, GuideOn());
+			for (uint64_t q = 1; q <= 4; ++q)
+				Assert::IsTrue(sched.Guide(q, 1.0 / 24).miss == link.late[q], L"causes a to d");
+			Assert::IsTrue(sched.Guide(5, 2.0 / 24).miss == OnTimeMiss::NotThePair, L"cause e: a fill pair over two camera pairs");
+			Assert::IsTrue(sched.Guide(6, 1.0 / 24).frame != nullptr);
+			const CameraLink::GuidanceCounters& c = sched.Counters();
+			for (size_t m = size_t(OnTimeMiss::NoAheadPair); m <= size_t(OnTimeMiss::NotThePair); ++m)
+				Assert::AreEqual(uint64_t(1), c.notOnTime[m]);
+			Assert::AreEqual(uint64_t(5), c.refusals[size_t(CameraLink::Refusal::NotOnTime)]);
+			bool line = false;
+			for (const std::string& l : sched.StatusLines())
+			{
+				line = line || l == "camera guidance (d=0): 1 guided on time (17% of pairs), 5 unguided: 5 camera(N) not ready "
+					"(a 1, b 1, c 1, d 1, e 1), 0 refused; R 0 guided then rejected at the seal";
+				Assert::IsTrue(l.find("refused: camera(N)") == std::string::npos, L"not ready in time is not listed as a refusal");
+			}
+			Assert::IsTrue(line, L"the NotOnTime counter is visible, per cause");
+			Assert::IsFalse(IsEngaged(sched.CollectDecisions(), CameraLink::kIdGuidanceRefused), L"expected at d = 0: no held refusal entry");
+		}
+
+		// MUST 3: where camera(N) can never be on time the Fallbacks list names the structural cause once (CameraExtension's Refresh
+		// prints "camera_guidance: unguided - " + this); an on-time-capable setup names nothing.
+		TEST_METHOD(TheStructuralUnguidedCauseIsNamedOnlyWhereOnTimeIsImpossible)
+		{
+			using CameraLink::GuidanceStructuralCause;
+			Assert::AreEqual(std::string("camera_ahead_fit is off"), std::string(GuidanceStructuralCause(false, false, true, true)));
+			Assert::AreEqual(std::string("deterministic run"), std::string(GuidanceStructuralCause(false, true, true, true)));
+			Assert::AreEqual(std::string("deterministic run"), std::string(GuidanceStructuralCause(false, true, false, false)),
+				L"no ahead fit outranks the lane");
+			Assert::AreEqual(std::string("no on-time target (analysis_lane off)"), std::string(GuidanceStructuralCause(true, false, true, false)));
+			Assert::IsNull(GuidanceStructuralCause(true, false, true, true), L"ahead fit + on-time target: nothing structural");
+			Assert::IsNull(GuidanceStructuralCause(true, false, false, false), L"live parts not built yet: not claimed structural");
+		}
+
+		TEST_METHOD(WithGapsInTheNumberingPairNStillReadsCameraNOnlyAndLaneEqualsLive)
 		{
 			WireLink link;
-			ChainOf(link, { 1, 2, 3, 5, 6 });   // 4 was a repeat (24p in 30): no field, no record
-			uint64_t rec = 0;
-			Assert::IsTrue(link.PreviousRecordSeq(7, 3, rec));
-			Assert::AreEqual(uint64_t(3), rec, L"the 3rd previous record of pair 7, not 7 - 3 = 4");
+			PansAt(link, { 1, 2, 3, 5, 6 });   // 4 was a repeat (24p in 30): no field, no record
 			CameraLink::GuidanceScheduler live(link, GuideOn());
 			CameraLink::GuidanceScheduler lane(link, GuideOn());
-			live.SetLag(3);
-			lane.SetLag(3);
-			const CameraLink::GuideResult b = live.Guide(7);
-			Assert::IsTrue(b.frame != nullptr && b.refusal == CameraLink::Refusal::None, L"7 - 3 = 4 has no record: only the chain finds it");
+			const CameraLink::GuideResult b = live.Guide(6);
+			Assert::IsTrue(b.frame != nullptr && b.refusal == CameraLink::Refusal::None);
 			CameraLink::GuideLaneJob job(lane, link);
 			job.OnFitDone(6);
 			Assert::AreEqual(size_t(1), job.Pump());
-			const CameraLink::GuideResult a = lane.Guide(7);
+			const CameraLink::GuideResult a = lane.Guide(6);
 			Assert::IsTrue(a.fromLane && a.frame != nullptr);
-			Assert::IsTrue(CameraLink::SameGuide(*a.frame, *b.frame), L"lane == live with the gap");
-			// A record that is late (requested, fit not done) is "record late", never replaced by an older one.
-			CameraLink::GuidanceScheduler late(link, GuideOn());
-			late.SetLag(2);
-			link.chainSeqs.push_back(8);   // requested, not fitted
-			link.chainSeqs.push_back(9);   // requested, not fitted
-			Assert::IsTrue(link.PreviousRecordSeq(10, 2, rec));
-			Assert::AreEqual(uint64_t(8), rec, L"the chain counts the requested fields");
-			Assert::IsTrue(late.Guide(10).refusal == CameraLink::Refusal::NoRecord, L"record 8 is late: not replaced by the older 6");
+			Assert::IsTrue(CameraLink::SameGuide(*a.frame, *b.frame), L"lane == live");
+			// No record is ever replaced by another: the gap and a not-yet-fitted pair are both "not ready in time".
+			Assert::IsTrue(live.Guide(4).refusal == CameraLink::Refusal::NotOnTime, L"no camera(4): not replaced by 3 or 5");
+			Assert::IsTrue(live.Guide(7).refusal == CameraLink::Refusal::NotOnTime, L"camera(7) not fitted: not replaced by 6");
+		}
+
+		TEST_METHOD(AStoredLaneResultIsUsedOnlyForTheVeryRecordTheRenderReads)
+		{
+			WireLink link;
+			PansAt(link, { 1, 2 });
+			CameraLink::GuidanceScheduler sched(link, GuideOn());
+			CameraLink::GuideLaneJob job(sched, link);
+			job.OnFitDone(2);
+			Assert::AreEqual(size_t(1), job.Pump());
+			link.records[2] = std::make_shared<const CameraModel::CameraMotion>(*link.records[2]);   // camera(2) re-published: another record
+			const CameraLink::GuideResult r = sched.Guide(2);
+			Assert::IsFalse(r.fromLane, L"another record: the render computes live");
+			Assert::IsTrue(r.frame != nullptr);
+			Assert::AreEqual(uint64_t(0), sched.Counters().fromLane);
+		}
+
+		TEST_METHOD(AGuidedPairRejectedAtItsSealAfterwardsIsCountedAsRAndShownAsUnguided)
+		{
+			WireLink link;
+			PansAt(link, { 3, 4 });
+			CameraLink::GuidanceScheduler sched(link, GuideOn());
+			Assert::IsTrue(sched.Guide(3, 1.0 / 24).frame != nullptr);
+			Assert::IsTrue(sched.Guide(4, 1.0 / 24).frame != nullptr);
+			sched.PollSeals();
+			Assert::AreEqual(uint64_t(0), sched.Counters().rejectedAtSeal, L"both seals pending");
+			Assert::IsFalse(IsEngaged(sched.CollectDecisions(), CameraLink::kIdGuidanceUnguided));
+			link.seals[3] = CameraLink::SealVerdict::Accepted;
+			link.seals[4] = CameraLink::SealVerdict::Rejected;
+			sched.PollSeals();
+			sched.PollSeals();
+			Assert::AreEqual(uint64_t(1), sched.Counters().rejectedAtSeal, L"counted once");
+			const std::vector<FallbackCatalog::Decision> d = sched.CollectDecisions();
+			Assert::IsTrue(IsEngaged(d, CameraLink::kIdGuidanceUnguided));
+			for (const FallbackCatalog::Decision& x : d)
+				if (x.id == CameraLink::kIdGuidanceUnguided)
+					Assert::AreEqual(std::string("camera_guidance: unguided - guided pairs rejected at the seal"), x.reason);
+			bool line = false;
+			for (const std::string& l : sched.StatusLines())
+				line = line || l.find("R 1 guided then rejected at the seal") != std::string::npos;
+			Assert::IsTrue(line);
+			sched.ResetForDiscontinuity();
+			link.seals.clear();
+			Assert::IsTrue(sched.Guide(3, 1.0 / 24).frame != nullptr);
+			sched.ResetForDiscontinuity();
+			link.seals[3] = CameraLink::SealVerdict::Rejected;
+			sched.PollSeals();
+			Assert::AreEqual(uint64_t(1), sched.Counters().rejectedAtSeal, L"a discontinuity forgets the pairs awaiting their seal");
 		}
 
 		TEST_METHOD(ALaneResultAfterTheRenderAskedIsDiscardedAndCounted)
 		{
 			WireLink link;
-			ChainOf(link, { 1, 2 });
+			PansAt(link, { 1, 2 });
 			CameraLink::GuidanceScheduler sched(link, GuideOn());
-			sched.SetLag(2);
 			CameraLink::GuideLaneJob job(sched, link);
-			const CameraLink::GuideResult live = sched.Guide(3);
+			const CameraLink::GuideResult live = sched.Guide(2);
 			Assert::IsTrue(live.frame != nullptr && !live.fromLane);
 			job.OnFitDone(2);
 			Assert::AreEqual(size_t(0), job.Pump());
@@ -383,9 +417,8 @@ namespace VideoProcessorTest
 		TEST_METHOD(WithAllSwitchesOffTheLaneJobWantsNothingAndStoresNothing)
 		{
 			WireLink link;
-			ChainOf(link, { 1, 2 });
+			PansAt(link, { 1, 2 });
 			CameraLink::GuidanceScheduler sched(link, CameraLink::GuidanceSettings());
-			sched.SetLag(2);
 			CameraLink::GuideLaneJob job(sched, link);
 			Assert::IsFalse(sched.LaneWanted());
 			job.OnFitDone(2);
@@ -398,18 +431,16 @@ namespace VideoProcessorTest
 		TEST_METHOD(TheWantedSetIsBoundedDuplicatesAreIgnoredAndAResetForgets)
 		{
 			WireLink link;
-			link.chain = true;
 			CameraLink::GuidanceScheduler sched(link, GuideOn());
-			sched.SetLag(2);
 			sched.SetContextProvider([](uint64_t, CameraLink::PairContext&) { return false; });
 			CameraLink::GuideLaneJob job(sched, link, 2);
-			link.chainSeqs.push_back(1);
+			link.AddPan(1);
 			job.OnFitDone(1);
 			job.OnFitDone(1);
 			Assert::AreEqual(size_t(1), job.Pending(), L"the same pair is wanted once");
-			link.chainSeqs.push_back(2);
+			link.AddPan(2);
 			job.OnFitDone(2);
-			link.chainSeqs.push_back(3);
+			link.AddPan(3);
 			job.OnFitDone(3);
 			Assert::AreEqual(size_t(2), job.Pending(), L"bounded");
 			Assert::AreEqual(uint64_t(1), job.GetStats().dropped, L"the oldest was dropped and counted");
@@ -422,46 +453,41 @@ namespace VideoProcessorTest
 		TEST_METHOD(AStoredLaneResultIsDroppedWhenTheSettingsChange)
 		{
 			WireLink link;
-			ChainOf(link, { 1, 2 });
+			PansAt(link, { 1, 2 });
 			CameraLink::GuidanceScheduler sched(link, GuideOn());
-			sched.SetLag(2);
 			CameraLink::GuideLaneJob job(sched, link);
 			job.OnFitDone(2);
 			Assert::AreEqual(size_t(1), job.Pump());
 			CameraLink::GuidanceSettings s = GuideOn();
-			s.config.narrowRadiusSigmas = 6.0;   // a threshold only: the switches and the lag are unchanged
+			s.config.narrowRadiusSigmas = 6.0;   // a threshold only: the switches are unchanged
 			sched.SetSettings(s);
-			sched.SetLag(2);
-			Assert::IsFalse(sched.Guide(3).fromLane, L"a plan built under the old thresholds is never used");
+			Assert::IsFalse(sched.Guide(2).fromLane, L"a plan built under the old thresholds is never used");
 			// The same holds when the thresholds change without SetSettings clearing the store (the key itself differs).
 			job.Reset();
-			link.chainSeqs.push_back(3);
 			link.AddPan(3);
 			job.OnFitDone(3);
 			Assert::AreEqual(size_t(1), job.Pump());
-			Assert::IsTrue(sched.Guide(4).fromLane);
+			Assert::IsTrue(sched.Guide(3).fromLane);
 		}
 
 		TEST_METHOD(TheThresholdKeyAloneRejectsAStoredLaneResultBuiltUnderOtherThresholds)
 		{
 			WireLink link;
-			ChainOf(link, { 1, 2 });
+			PansAt(link, { 1, 2 });
 			CameraLink::GuidanceSettings s = GuideOn();
 			CameraLink::GuidanceScheduler sched(link, s);
-			sched.SetLag(2);
-			// A real guide for pair 3 (the same function the lane runs), stored WITHOUT SetSettings: nothing clears the store.
+			// A real guide for pair 2 (the same function the lane runs), stored WITHOUT SetSettings: nothing clears the store.
 			CameraLink::GuidanceScheduler maker(link, s);
-			maker.SetLag(2);
-			const CameraLink::GuideResult made = maker.Guide(3);
+			const CameraLink::GuideResult made = maker.Guide(2);
 			Assert::IsTrue(made.frame != nullptr);
 			// Control: stored as built under the scheduler's own thresholds, it is used.
-			sched.StoreLaneForTest(3, made, s.config);
-			Assert::IsTrue(sched.Guide(3).fromLane, L"same thresholds: the stored result is consumed");
-			// Same switches, same lag, same record, same pair: only one threshold differs in what it was built under.
+			sched.StoreLaneForTest(2, made, s.config);
+			Assert::IsTrue(sched.Guide(2).fromLane, L"same thresholds: the stored result is consumed");
+			// Same switches, same record, same pair: only one threshold differs in what it was built under.
 			CameraModel::MeasurementConfig other = s.config;
 			other.narrowRadiusSigmas += 1.0;
-			sched.StoreLaneForTest(3, made, other);
-			const CameraLink::GuideResult r = sched.Guide(3);
+			sched.StoreLaneForTest(2, made, other);
+			const CameraLink::GuideResult r = sched.Guide(2);
 			Assert::IsFalse(r.fromLane, L"the threshold key alone rejects it: the render computes live");
 			Assert::IsTrue(r.frame != nullptr);
 			Assert::AreEqual(uint64_t(1), sched.Counters().fromLane, L"only the control was consumed from the lane");
@@ -470,18 +496,17 @@ namespace VideoProcessorTest
 		TEST_METHOD(ASlipThatAppearsAfterTheLaneStoredItIsSeenAtConsumption)
 		{
 			WireLink link;
-			ChainOf(link, { 1, 2 });
+			PansAt(link, { 1, 2 });
 			CameraLink::GuidanceScheduler sched(link, GuideOn());
-			sched.SetLag(2);
 			CameraLink::GuideLaneJob job(sched, link);
 			job.OnFitDone(2);
 			Assert::AreEqual(size_t(1), job.Pump());
 			uint64_t from = 0, to = 0;
 			sched.SetSlipCheck([&](uint64_t recordSeq, uint64_t pairSeq) { from = recordSeq; to = pairSeq; return true; });
-			const CameraLink::GuideResult r = sched.Guide(3);
+			const CameraLink::GuideResult r = sched.Guide(2);
 			Assert::IsTrue(r.frame == nullptr && r.refusal == CameraLink::Refusal::Slip);
-			Assert::AreEqual(uint64_t(1), from, L"the record the guide read");
-			Assert::AreEqual(uint64_t(3), to);
+			Assert::AreEqual(link.records[2]->pairFrom, from, L"camera(2)'s own pair start");
+			Assert::AreEqual(uint64_t(2), to);
 			Assert::AreEqual(uint64_t(1), sched.Counters().refusals[size_t(CameraLink::Refusal::Slip)]);
 		}
 
@@ -490,7 +515,7 @@ namespace VideoProcessorTest
 		static void LaneMidComputeThen(const std::function<void(CameraLink::GuidanceScheduler&)>& whileLaneIsInside, bool expectDiscardedCounter)
 		{
 			WireLink link;
-			ChainOf(link, { 1, 2 });
+			PansAt(link, { 1, 2 });
 			CameraLink::GuidanceScheduler sched(link, GuideOn());
 			std::atomic<int> calls(0);
 			std::promise<void> inside, release;
@@ -504,9 +529,8 @@ namespace VideoProcessorTest
 				}
 				return true;
 			});
-			sched.SetLag(2);
 			std::atomic<int> outcome(-1);
-			std::thread lane([&]() { outcome = static_cast<int>(sched.TryPublishLane(3)); });
+			std::thread lane([&]() { outcome = static_cast<int>(sched.TryPublishLane(2)); });
 			const bool entered = inside.get_future().wait_for(std::chrono::seconds(20)) == std::future_status::ready;
 			if (!entered)
 				release.set_value();
@@ -520,7 +544,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(outcome.load() == static_cast<int>(CameraLink::GuidanceScheduler::LaneOutcome::Discarded), L"the lane result was discarded");
 			Assert::AreEqual(uint64_t(0), sched.Counters().lanePublished, L"nothing was stored");
 			Assert::AreEqual(expectDiscardedCounter ? uint64_t(1) : uint64_t(0), sched.Counters().laneDiscarded);
-			const CameraLink::GuideResult r = sched.Guide(3);
+			const CameraLink::GuideResult r = sched.Guide(2);
 			Assert::IsFalse(r.fromLane, L"the render computes live");
 			Assert::IsTrue(r.frame != nullptr);
 		}
@@ -529,7 +553,7 @@ namespace VideoProcessorTest
 		{
 			LaneMidComputeThen([](CameraLink::GuidanceScheduler& sched)
 			{
-				const CameraLink::GuideResult live = sched.Guide(3);   // the render asks now (the provider's later calls pass straight through)
+				const CameraLink::GuideResult live = sched.Guide(2);   // the render asks now (the provider's later calls pass straight through)
 				Assert::IsTrue(live.frame != nullptr && !live.fromLane);
 			}, true);
 		}
@@ -539,7 +563,7 @@ namespace VideoProcessorTest
 			LaneMidComputeThen([](CameraLink::GuidanceScheduler& sched) { sched.ResetForDiscontinuity(); }, false);
 		}
 
-		TEST_METHOD(TheCoreCallsTheFitObserverAfterThePublishAndKeepsTheLagMeterAndTimersHonest)
+		TEST_METHOD(TheCoreCallsTheFitObserverAfterThePublishAndKeepsTheTimersHonest)
 		{
 			CameraLinkTest::Rig rig;
 			FrameAnalysis::Store store;
@@ -556,7 +580,6 @@ namespace VideoProcessorTest
 			core.SetTimingFacts(tf);
 			core.Producer()->NoteTiming();
 			CameraLink::GuidanceScheduler sched(*core.Link(), GuideOn());
-			sched.SetLag(2);
 			CameraLink::GuideLaneJob job(sched, *core.Link());
 			std::vector<uint64_t> seen;
 			bool recordWasThere = false;
@@ -579,8 +602,6 @@ namespace VideoProcessorTest
 			Assert::AreEqual(size_t(1), seen.size());
 			Assert::AreEqual(uint64_t(1), seen[0]);
 			Assert::IsTrue(recordWasThere, L"the observer runs after the publish");
-			Assert::AreEqual(size_t(1), core.LagMeter().FitSamples(), L"the record's own fit cost reached the lag meter");
-			Assert::AreEqual(0.003, core.LagMeter().P95FitSeconds(), 1e-9);
 			// camera-live step 2: the fit cost goes to the motion pass-timer inbox (the camera-private timer queue is gone). The inbox is
 			// process-wide, so the test drains it before the fit (in the rig setup above nothing fitted yet) and reads what this fit posted.
 			PassTimers::Accumulator acc;
@@ -592,9 +613,6 @@ namespace VideoProcessorTest
 			PassTimers::Accumulator again;
 			PassTimers::Inbox::Motion().DrainInto(again);
 			Assert::IsNull(again.Find(CameraLink::kTimerFit), L"drained");
-			// A graph rebuild starts a fresh measuring window.
-			core.AttachGraph(rig.table.get(), rig.bytes.get(), rig.indicator.get());
-			Assert::AreEqual(size_t(0), core.LagMeter().FitSamples());
 			// Clearing the observer returns only when no call is in flight; afterwards a fit calls nothing.
 			core.SetFitDoneObserver(nullptr);
 			Assert::AreEqual(size_t(1), seen.size());
@@ -647,6 +665,12 @@ namespace VideoProcessorTest
 			engine.slip = true;
 			Assert::IsTrue(provider(10, ctx));
 			Assert::IsTrue(ctx.spansSlip);
+			// d = 0: the slip is judged over camera(N)'s own pair, from its pairFrom.
+			link.AddPan(10);
+			ctx.recordSeq = 10;
+			Assert::IsTrue(provider(10, ctx));
+			Assert::AreEqual(link.records[10]->pairFrom, engine.askedFrom);
+			Assert::AreEqual(uint64_t(10), engine.askedTo);
 		}
 
 		TEST_METHOD(OnTheCameraWorkerTheEngineIsNeverAskedAndAMaybeResidentFlowMakesThePairNotReady)
@@ -762,13 +786,11 @@ namespace VideoProcessorTest
 		TEST_METHOD(LaneAndLiveAgreeThroughTheProviderIncludingACutSkip)
 		{
 			WireLink link;
-			ChainOf(link, { 1, 2 });
+			PansAt(link, { 1, 2 });
 			WireEngine engine;
 			CameraLink::GuidanceSettings s = GuideOn();
 			s.switches.cutSkip = true;
 			CameraLink::GuidanceScheduler lane(link, s), live(link, s);
-			lane.SetLag(2);
-			live.SetLag(2);
 			bool render = false;
 			for (CameraLink::GuidanceScheduler* g : { &lane, &live })
 				g->SetContextProvider(CameraLink::MakeContextProvider(&engine, link,
@@ -778,7 +800,7 @@ namespace VideoProcessorTest
 			job.OnFitDone(2);
 			Assert::AreEqual(size_t(1), job.Pump(), L"the lane (worker side: no engine facts) stored it");
 			render = true;
-			const CameraLink::GuideResult a = lane.Guide(3, 1.0 / 24), b = live.Guide(3, 1.0 / 24);
+			const CameraLink::GuideResult a = lane.Guide(2, 1.0 / 24), b = live.Guide(2, 1.0 / 24);
 			Assert::IsTrue(a.fromLane && !b.fromLane);
 			Assert::IsTrue(a.frame != nullptr && b.frame != nullptr);
 			Assert::IsTrue(a.frame->skipMatcher && b.frame->skipMatcher, L"the cut flag of P4(N) reached both");
@@ -834,7 +856,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(engine.hook == nullptr, L"the destructor detaches: the engine never keeps a dead hook");
 		}
 
-		TEST_METHOD(AdapterDrivesGuidedEstimatesThroughTheEnginesHookAndTheLagComesFromTheMeter)
+		TEST_METHOD(AdapterDrivesGuidedEstimatesThroughTheEnginesHookAndCountsANotReadyCamera)
 		{
 			FrameAnalysis::Store store;
 			CameraLink::CameraLinkCore core(store);
@@ -845,27 +867,28 @@ namespace VideoProcessorTest
 			CameraLink::CameraGuidanceAdapter adapter(core, GuideOn(), hooks);
 			WireCounts* counts = new WireCounts();
 			adapter.Attach(&engine, std::unique_ptr<CameraLink::IGuidanceCountsSource>(counts));
-			// No measurements yet: the floor.
-			Assert::AreEqual(2, int(adapter.RebuildGraph(1.0 / 24, false)));
-			for (int i = 1; i <= 100; ++i)
-				core.LagMeter().AddFitSeconds(i * 0.001);
-			Assert::AreEqual(4, int(adapter.RebuildGraph(1.0 / 24, false)), L"d from the measured p95 fit over the measured source period");
-			Assert::AreEqual(4, int(adapter.Scheduler().Lag()));
-			Assert::AreEqual(2, int(adapter.RebuildGraph(1.0 / 24, true)), L"deterministic: the floor");
 			// The engine calls the hook as VectorEngine::Estimate does.
 			WireSink sink;
 			VpMotion::EstimateContext ec;
 			ec.pairSeq = 9;
 			ec.nextPairSeconds = 1.0 / 24;
 			engine.hook->BeforeEstimate(ec, sink);
-			Assert::IsTrue(sink.last == nullptr, L"no record for pair 9 (the chain is empty): refused, an explicit null is bound");
+			Assert::IsTrue(sink.last == nullptr, L"camera(9) not ready in time: unguided, an explicit null is bound");
 			engine.hook->AfterEstimate(9, VpMotion::EstimateOutcome());
-			Assert::AreEqual(uint64_t(1), adapter.Scheduler().Counters().refusals[size_t(CameraLink::Refusal::NoRecord)]);
+			const CameraLink::GuidanceCounters& c = adapter.Scheduler().Counters();
+			Assert::AreEqual(uint64_t(1), c.refusals[size_t(CameraLink::Refusal::NotOnTime)]);
+			uint64_t causes = 0;
+			for (size_t m = 0; m < size_t(CameraLink::OnTimeMiss::Count); ++m)
+				causes += c.notOnTime[m];
+			Assert::AreEqual(uint64_t(1), causes, L"the miss is counted under exactly one cause");
 			std::vector<FallbackCatalog::Decision> d = adapter.CollectDecisions();
-			Assert::IsTrue(IsEngaged(d, CameraLink::kIdGuidanceRefused), L"the refusal is visible through the skeleton's catalog");
+			Assert::IsFalse(IsEngaged(d, CameraLink::kIdGuidanceRefused), L"expected at d = 0: counted, no held refusal entry");
 			std::vector<std::string> lines;
 			adapter.CollectStatus(lines);
-			Assert::IsFalse(lines.empty());
+			bool d0 = false;
+			for (const std::string& l : lines)
+				d0 = d0 || l.find("camera guidance (d=0): 0 guided on time") != std::string::npos;
+			Assert::IsTrue(d0, L"the NotOnTime counter is visible through the adapter");
 			adapter.OnDiscontinuity();
 			adapter.OnFrame();
 		}
@@ -876,34 +899,39 @@ namespace VideoProcessorTest
 		{
 			WireLink link;
 			CameraLink::GuidanceScheduler sched(link, CameraLink::GuidanceSettings());
-			sched.SetLag(2);
 			for (uint64_t p = 3; p < 20; ++p)
 				sched.Guide(p, 1.0 / 24);
 			const std::vector<FallbackCatalog::Decision> d = sched.CollectDecisions();
-			Assert::AreEqual(size_t(3), d.size(), L"every id is always listed so a Sync releases it");
+			Assert::AreEqual(size_t(4), d.size(), L"every id is always listed so a Sync releases it");
 			Assert::IsFalse(IsEngaged(d, CameraLink::kIdGuidanceRefused));
 			Assert::IsFalse(IsEngaged(d, CameraLink::kIdGuidanceEscalations));
 			Assert::IsFalse(IsEngaged(d, CameraLink::kIdGuidanceNarrowIdle));
+			Assert::IsFalse(IsEngaged(d, CameraLink::kIdGuidanceUnguided));
 		}
 
 		static void RefusalShowsForHalfAMeasuredSecond(const std::vector<double>& dts)
 		{
 			WireLink link;
+			link.AddPan(3);
+			const std::shared_ptr<const CameraModel::CameraMotion> good = link.records[3];
+			auto low = std::make_shared<CameraModel::CameraMotion>(*good);
+			low->confidence = 0.6;
+			link.records[3] = low;
+			const uint64_t from = good->pairFrom;   // the matcher's A: the same pair whatever the measured duration
 			CameraLink::GuidanceScheduler sched(link, GuideOn());
-			sched.SetLag(2);
-			sched.Guide(3, dts[0]);   // no record: refused
+			Assert::IsTrue(sched.Guide(3, dts[0], from).refusal == CameraLink::Refusal::LowConfidence);
 			std::vector<FallbackCatalog::Decision> d = sched.CollectDecisions();
 			Assert::IsTrue(IsEngaged(d, CameraLink::kIdGuidanceRefused));
 			for (const FallbackCatalog::Decision& x : d)
 				if (x.id == CameraLink::kIdGuidanceRefused)
-					Assert::IsTrue(x.reason.find("camera record late") != std::string::npos, L"the reason is named");
-			link.AddPan(1);
+					Assert::IsTrue(x.reason.find("camera confidence too low") != std::string::npos, L"the reason is named");
+			link.records[3] = good;
 			double elapsed = 0, last = 0;
 			size_t n = 0;
 			while (IsEngaged(sched.CollectDecisions(), CameraLink::kIdGuidanceRefused) && n < 400)
 			{
 				last = dts[n % dts.size()];
-				Assert::IsTrue(sched.Guide(3, last).frame != nullptr);
+				Assert::IsTrue(sched.Guide(3, last, from).frame != nullptr);
 				elapsed += last;
 				++n;
 			}
@@ -932,6 +960,8 @@ namespace VideoProcessorTest
 			Assert::IsFalse(hold.Engaged(), L"the feature being off is not a fallback");
 			hold.Observe(CameraLink::Refusal::Governor, 0.01);
 			Assert::IsFalse(hold.Engaged(), L"the governor has its own entry");
+			hold.Observe(CameraLink::Refusal::NotOnTime, 0.01);
+			Assert::IsFalse(hold.Engaged(), L"d = 0: not ready in time is expected per pair, counted per cause, not held");
 		}
 
 		TEST_METHOD(ATrippedGovernorShowsTheEscalationsEntryAndItReleasesOnRecovery)
@@ -942,7 +972,6 @@ namespace VideoProcessorTest
 			CameraLink::GuidanceSettings s;
 			s.switches.narrowWindow = true;
 			CameraLink::GuidanceScheduler sched(link, s);
-			sched.SetLag(2);
 			uint64_t pair = 3;
 			sched.Guide(pair, 1.0 / 24);
 			const float bad[4] = { 1.0f, 1.0f, -1.0f, -1.0f };
@@ -965,9 +994,8 @@ namespace VideoProcessorTest
 		TEST_METHOD(TheCountsAreOnlyReadWhenAPassThatWritesThemRan)
 		{
 			WireLink link;
-			link.AddPan(1);
+			link.AddPan(3);
 			CameraLink::GuidanceScheduler sched(link, GuideOn());
-			sched.SetLag(2);
 			WireCounts counts;
 			CameraLink::CameraGuidanceHook hook(sched, &counts, link);
 			WireSink sink;
@@ -993,9 +1021,9 @@ namespace VideoProcessorTest
 		TEST_METHOD(NarrowIdleUnderTheEngineIsShownForHalfAMeasuredSecondAndNoSeedIsDropped)
 		{
 			WireLink link;
-			link.AddPan(1);
+			link.AddPan(3);
+			link.Retime(3, 1.0 / 50);   // camera(3) measured the 50p pair the matcher is asked about
 			CameraLink::GuidanceScheduler sched(link, GuideOn());
-			sched.SetLag(2);
 			CameraLink::CameraGuidanceHook hook(sched, nullptr, link);
 			WireSink sink;
 			VpMotion::EstimateContext c;
@@ -1039,11 +1067,10 @@ namespace VideoProcessorTest
 			const std::filesystem::path p = std::filesystem::temp_directory_path() / "camera-k4prep-bench-test.csv";
 			{
 				WireLink link;
-				link.AddPan(1);
+				link.AddPan(3);
 				CameraLink::MotionBenchWriter bench;
 				bench.Open(p.string().c_str());
 				CameraLink::GuidanceScheduler sched(link, GuideOn());
-				sched.SetLag(2);
 				sched.SetBench(&bench);
 				Assert::IsTrue(sched.Guide(3, 1.0 / 24).frame != nullptr);
 				sched.NoteGpuMs(3, 1.5);

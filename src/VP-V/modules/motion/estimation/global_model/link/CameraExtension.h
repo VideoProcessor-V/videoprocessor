@@ -89,7 +89,8 @@ namespace Vpv
 			// camera of frame N guides only N's matcher and only when ready before it) is built next reset; a late camera never guides.
 			// The switches parse and are shown ("camera guidance waits for the on-time rule"); no adapter, no hook. Tests of the wiring the
 			// next reset unlocks call SetGuidanceLockForTesting(false) BEFORE the first lifecycle call.
-			static constexpr const char* kGuidanceLockedText = "camera guidance waits for the on-time rule (next reset): the camera_meas_* switches are off";
+			static constexpr const char* kGuidanceLockedText = "camera guidance locked: the d=0 rule is built, waiting for the owner's A/B decision (the camera_meas_* switches are off)";
+			static constexpr const char* kGuidanceNeedsAheadText = "camera guidance (d=0) needs camera_ahead_fit: without it camera(N) is never on time";
 			void SetGuidanceLockForTesting(bool locked) { guidanceLocked_ = locked; }
 			bool GuidanceLocked() const { return guidanceLocked_; }
 

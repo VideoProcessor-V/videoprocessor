@@ -298,9 +298,9 @@ namespace VideoProcessorTest
 			Assert::IsTrue(rig.engine.hook == nullptr, L"no pre-estimate hook registered");
 			bool line = false, entry = false;
 			for (const std::string& l : rig.Lines(RE::StatusKind::Lines))
-				line = line || l.find("camera guidance waits for the on-time rule") != std::string::npos;
+				line = line || l.find("camera guidance locked: the d=0 rule is built") != std::string::npos;
 			for (const std::string& l : rig.Lines(RE::StatusKind::Fallbacks))
-				entry = entry || l.find("camera_guidance: camera guidance waits for the on-time rule") != std::string::npos;
+				entry = entry || l.find("camera_guidance: camera guidance locked: the d=0 rule is built") != std::string::npos;
 			Assert::IsTrue(line && entry, L"shown in Ctrl+I / Config status and Fallbacks");
 		}
 

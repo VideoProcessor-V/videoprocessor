@@ -997,6 +997,128 @@ namespace VideoProcessorTest
 			Assert::IsTrue(core.Pool()->Ring() < 32, L"the pool is not enlarged (only the ahead fit needs the longer record life)");
 		}
 
+		// MUST 1 (audit): the d = 0 rule on the REAL CameraLinkCore::OnTimeRecord / OnTimeSealVerdict. Cause a (never asked), the record
+		// before its seal, cause d (a resync after the publish: Full refuses, PublishOnly still returns it; after the rejecting seal the
+		// verdict is Rejected = R), and the accepted verdict.
+		TEST_METHOD(OnTheRealCoreTheOnTimeRecordIsNOnlyBeforeItsSealAndTheSealVerdictIsRead)
+		{
+			using CameraLink::OnTimeCheck;
+			using CameraLink::OnTimeMiss;
+			using CameraLink::SealVerdict;
+			CameraLinkTest::Rig bridge, onTime;
+			FrameAnalysis::Store store;
+			for (uint64_t seq = 1; seq <= 3; ++seq)
+			{
+				FrameAnalysis::Identity id;
+				id.seq = seq;
+				id.width = 64;
+				id.height = 36;
+				store.Begin(id, FrameAnalysis::kCamera);
+			}
+			CameraLink::CameraLinkCore core(store);
+			CameraLink::CameraLinkSettings s;
+			s.p7Wanted = true;
+			s.aheadFit = true;
+			core.OnSettings(s);
+			core.SetAheadSource([](uint64_t, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
+			core.AttachOnTime(SourceOf(onTime), "test lane");
+			core.AttachGraph(bridge.table.get(), bridge.bytes.get(), bridge.indicator.get());
+			CameraLink::FramePhaseFacts f;
+			f.seq = f.renderSeq = 1;
+			core.OnFrameStart(f);
+			OnTimeMiss why = OnTimeMiss::None;
+			Assert::IsTrue(core.OnTimeRecord(2, OnTimeCheck::Full, why) == nullptr && why == OnTimeMiss::NoAheadPair, L"a: never asked");
+			onTime.PublishInputs(1);
+			onTime.Retire(1);
+			onTime.PublishInputs(2);
+			Assert::IsTrue(core.SubmitAheadField(AheadField(2, 4.0)));
+			core.Worker()->WaitIdle();
+			Assert::IsTrue(core.OnTimeRecord(2, OnTimeCheck::Full, why) != nullptr && why == OnTimeMiss::None, L"camera(2) on time, before its seal");
+			Assert::IsTrue(core.OnTimeSealVerdict(2) == SealVerdict::Pending);
+			SealAt(onTime, 2);
+			f.seq = f.renderSeq = 2;
+			core.OnFrameStart(f);
+			core.Worker()->WaitIdle();
+			Assert::IsTrue(core.OnTimeSealVerdict(2) == SealVerdict::Accepted);
+			// Frame 3: on time, then a resync reaches it before its seal.
+			onTime.PublishInputs(3);
+			Assert::IsTrue(core.SubmitAheadField(AheadField(3, 4.0)));
+			core.Worker()->WaitIdle();
+			Assert::IsTrue(core.OnTimeRecord(3, OnTimeCheck::Full, why) != nullptr);
+			onTime.indicator->Advance(VpIndicator::kContinuity, VpResync::Cause::MissedFrames, 3);
+			Assert::IsTrue(core.OnTimeRecord(3, OnTimeCheck::Full, why) == nullptr && why == OnTimeMiss::Stale, L"d: the stamp moved after the publish");
+			Assert::IsTrue(core.OnTimeRecord(3, OnTimeCheck::PublishOnly, why) != nullptr, L"the lane's publish-only read keeps it");
+			SealAt(onTime, 3);
+			CameraLink::FramePhaseFacts f3;
+			f3.seq = f3.renderSeq = 3;
+			core.OnFrameStart(f3);
+			Assert::IsTrue(core.OnTimeSealVerdict(3) == SealVerdict::Rejected, L"R: a guide that used camera(3) is counted");
+			Assert::IsTrue(core.OnTimeRecord(3, OnTimeCheck::Full, why) == nullptr && why == OnTimeMiss::Stale, L"d: erased by the rejecting seal");
+			Assert::IsTrue(core.OnTimeSealVerdict(4) == SealVerdict::Pending, L"another frame's verdict is not read");
+		}
+
+		// MUST 1: cause b on the real core - the ahead copy of N was asked for (the poll submitted it) but nothing was published on time
+		// (the target has no inputs for it yet: parked); the first frame the source has no pair for is cause a.
+		TEST_METHOD(OnTheRealCoreAnAskedButUnpublishedPairIsNotPublishedAndAnUnaskedOneIsNoAheadPair)
+		{
+			using CameraLink::OnTimeCheck;
+			using CameraLink::OnTimeMiss;
+			CameraLinkTest::Rig bridge, onTime;
+			FrameAnalysis::Store store;
+			CameraLink::CameraLinkCore core(store);
+			CameraLink::CameraLinkSettings s;
+			s.p7Wanted = true;
+			s.aheadFit = true;
+			core.OnSettings(s);
+			Pair p(960, 540, 2.0);
+			p.Uniform(2.0, 0.0);
+			core.SetAheadSource([&p](uint64_t seq, CameraLink::AheadCopy& out) {
+				return seq <= 10 ? CameraLink::CopyAhead(p.View(seq), seq, out) : CameraLink::AheadRefusal::NoPair;
+			}, CameraLink::PairFactsProvider());
+			core.SetAheadGrid(120, 68);
+			core.AttachOnTime(SourceOf(onTime), "test lane");
+			core.AttachGraph(bridge.table.get(), bridge.bytes.get(), bridge.indicator.get());
+			CameraLink::FramePhaseFacts f;
+			f.seq = f.renderSeq = 9;
+			core.OnFrameStart(f);
+			core.Worker()->WaitIdle();
+			Assert::AreEqual(uint64_t(1), core.Counters().aheadSubmitted.load(), L"10 asked and submitted");
+			OnTimeMiss why = OnTimeMiss::None;
+			Assert::IsTrue(core.OnTimeRecord(10, OnTimeCheck::Full, why) == nullptr && why == OnTimeMiss::NotPublished,
+				L"b: asked, not published on time");
+			Assert::IsTrue(core.OnTimeRecord(11, OnTimeCheck::Full, why) == nullptr && why == OnTimeMiss::NoAheadPair, L"a: no ahead pair");
+		}
+
+		// MUST 1: cause c on the real core - without an on-time target the ahead fit goes through the lag bridge: committed, not on time.
+		TEST_METHOD(OnTheRealCoreABridgedAheadFitIsBridged)
+		{
+			using CameraLink::OnTimeCheck;
+			using CameraLink::OnTimeMiss;
+			CameraLinkTest::Rig bridge;
+			FrameAnalysis::Store store;
+			CameraLink::CameraLinkCore core(store);
+			CameraLink::CameraLinkSettings s;
+			s.p7Wanted = true;
+			s.aheadFit = true;
+			core.OnSettings(s);
+			core.SetAheadSource([](uint64_t, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
+			core.AttachGraph(bridge.table.get(), bridge.bytes.get(), bridge.indicator.get());
+			CameraLink::FramePhaseFacts f;
+			f.seq = f.renderSeq = 1;
+			core.OnFrameStart(f);
+			Assert::IsTrue(core.SubmitAheadField(AheadField(2, 4.0)));
+			core.Worker()->WaitIdle();
+			bridge.PublishInputs(1);
+			bridge.Retire(1);
+			bridge.PublishInputs(2);
+			f.seq = f.renderSeq = 2;
+			core.OnFrameStart(f);
+			core.Worker()->WaitIdle();
+			Assert::AreEqual(uint64_t(1), core.Counters().aheadBridged.load(), L"published through the bridge");
+			OnTimeMiss why = OnTimeMiss::None;
+			Assert::IsTrue(core.OnTimeRecord(2, OnTimeCheck::Full, why) == nullptr && why == OnTimeMiss::Bridged, L"c: bridged");
+		}
+
 		TEST_METHOD(TheAheadKeyNeedsTheModelAndTheOriginalPathwayForcesItOff)
 		{
 			char dir[MAX_PATH] = {};
