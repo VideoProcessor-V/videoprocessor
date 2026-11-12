@@ -3,7 +3,9 @@
 import contextlib
 import importlib.util
 import io
+import json
 import os
+import subprocess
 import tempfile
 import unittest
 
@@ -227,6 +229,101 @@ class CheckHookGatingTest(unittest.TestCase):
         self.assertIn(" 0 new (0 approved), 0 removed, 0 over budget; manifest docs/audit/hook-sites.json, budget docs/audit/hook-budget.json", out)
         self.assertNotIn("ratchet the ceiling down", out, "regenerate docs/audit/hook-budget.json with --write-budget")
         self.assertNotIn("removed sites", out, "regenerate docs/audit/hook-sites.json with --write-manifest")
+
+
+    # --- transitional approvals: expiry triggers and temporary ceilings (refs/107 s5.2; Lead 4 2026-11-11) ---
+
+    SITE = "\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n\t\tif (!pipelineSlots.OriginalPathway()) vectorEngine.PlanAhead(frame);   // VPV-HOOK\n"
+
+    def _transitional(self, expiry, triggers):
+        """Two known sites; the second carries an approval with `expiry`; hook-triggers.json = `triggers`."""
+        self._seed(self.SITE)
+        _w(self.root, chg.APPROVALS_PATH, json.dumps({"approvals": [{"id": "HA-T1", "file": BILL, "text_contains": "vectorEngine.PlanAhead(frame)",
+                                                                     "seam": "S3", "approver": "owner via coordinator", "when": "2026-11-11",
+                                                                     "expiry": expiry}]}))
+        _w(self.root, chg.TRIGGERS_PATH, json.dumps(triggers))
+
+    def test_expiry_not_landed_passes(self):
+        self._transitional("P4-e", {"_note": "x", "P4-e": {"landed": None}})
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("; 0 expired, 0 unknown triggers", out)
+
+    def test_red_expiry_landed_by_json_with_the_site_present_fails(self):
+        self._transitional("P4-e", {"P4-e": {"landed": "abc123"}})
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("EXPIRED HA-T1 (trigger P4-e landed at abc123) still present", out)
+        self.assertIn("; 1 expired, 0 unknown triggers", out)
+
+    def test_expiry_landed_with_the_site_removed_passes(self):
+        self._transitional("P4-e", {"P4-e": {"landed": "abc123"}})
+        _w(self.root, BILL, _bill("\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n"))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("; 0 expired, 0 unknown triggers", out)
+        self.assertIn("1 removed", out)
+
+    def test_red_expiry_naming_an_unknown_trigger_fails(self):
+        self._transitional("P9-nowhere", {"P4-e": {"landed": None}})
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("UNKNOWN TRIGGER approval HA-T1 names trigger P9-nowhere", out)
+        self.assertIn("; 0 expired, 1 unknown triggers", out)
+
+    def test_list_expiry_is_any_of(self):
+        self._transitional(["P5c-extras", "P6-move"], {"P5c-extras": {"landed": None}, "P6-move": {"landed": None}})
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        _w(self.root, chg.TRIGGERS_PATH, json.dumps({"P5c-extras": {"landed": None}, "P6-move": {"landed": "def456"}}))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("EXPIRED HA-T1 (trigger P6-move landed at def456) still present", out)
+        _w(self.root, chg.TRIGGERS_PATH, json.dumps({"P5c-extras": {"landed": "aaa111"}, "P6-move": {"landed": None}}))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("EXPIRED HA-T1 (trigger P5c-extras landed at aaa111) still present", out)
+
+    def test_red_expiry_landed_by_a_commit_trailer_fails(self):
+        self._transitional("P4-e", {"P4-e": {"landed": None}})
+        env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+        for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "base"],
+                     ["commit", "-q", "--allow-empty", "-m", "P4 e lands\n\nHook-Trigger: P4-e"]):
+            subprocess.run(["git", "-C", self.root] + args, check=True, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        known, landed = chg.landed_triggers(chg.Tree(self.root), self.root, "HEAD", no_git=False)
+        self.assertIn("P4-e", landed)
+        self.assertEqual(chg.landed_triggers(chg.Tree(self.root), self.root, "HEAD~1", no_git=False)[1], {}, "not an ancestor of HEAD~1")
+        res = chg.run(self.root, chg.DEFAULT_BASE, [BILL], no_git=True)
+        sc = chg.site_checks(chg.Tree(self.root), res["files"], self.root, "HEAD", no_git=False)
+        self.assertEqual(len(sc["expired"]), 1, sc)
+        self.assertIn("EXPIRED HA-T1 (trigger P4-e landed at %s) still present" % landed["P4-e"], sc["expired"][0])
+        sc = chg.site_checks(chg.Tree(self.root), res["files"], self.root, "HEAD~1", no_git=False)
+        self.assertEqual(sc["expired"], [])
+
+    def test_temporary_budget_holds_until_all_its_triggers_land(self):
+        self._transitional(None, {"P4-e": {"landed": None}, "P4-f": {"landed": None}})
+        budget = {"files": {BILL: 1}, "temporary": {BILL: {"limit": 2, "reverts_to": 1, "until": ["P4-e", "P4-f"]}}}
+        _w(self.root, chg.BUDGET_PATH, json.dumps(budget))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("0 over budget", out)
+        self.assertIn("; temporary Renderer.cpp 2 <= 2 (reverts to 1)", out)
+        self.assertIn("temporary ceiling %s 2 (reverts to 1 when P4-e, P4-f land)" % BILL, out)
+        _w(self.root, chg.TRIGGERS_PATH, json.dumps({"P4-e": {"landed": "abc123"}, "P4-f": {"landed": None}}))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("reverts to 1 when P4-f land", out)
+        _w(self.root, chg.TRIGGERS_PATH, json.dumps({"P4-e": {"landed": "abc123"}, "P4-f": {"landed": "abc124"}}))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("OVER BUDGET %s 2 sites > budget 1" % BILL, out)
+        self.assertNotIn("temporary ceiling", out)
+        budget["temporary"][BILL]["until"] = ["P4-e", "P9-nowhere"]
+        _w(self.root, chg.BUDGET_PATH, json.dumps(budget))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("UNKNOWN TRIGGER temporary budget %s names trigger P9-nowhere" % BILL, out)
 
 
 if __name__ == "__main__":

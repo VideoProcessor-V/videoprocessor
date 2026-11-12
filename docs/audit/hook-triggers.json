@@ -1,0 +1,18 @@
+{
+ "_note": "Trigger ids for transitional hook approvals (docs/audit/hook-approvals.json `expiry`) and temporary ceilings (docs/audit/hook-budget.json `temporary`); tools/check_hook_gating.py. To mark a landing: put the trailer `Hook-Trigger: <id>` on the commit that lands the item (the checker reads it from the ancestors of the checked revision), AND set this row's `landed` to that commit's sha (the fallback for --root exports without history). Once a trigger has landed, every approval naming it fails while its text is still in its file, and a temporary ceiling reverts when all its `until` triggers have landed. An id not listed here fails as UNKNOWN TRIGGER. Rows: refs/107-host-seams-plan.md s4 :192; 102b rows by the lead.",
+ "P4-e": {
+  "landed": null
+ },
+ "P4-f": {
+  "landed": null
+ },
+ "P4-g": {
+  "landed": null
+ },
+ "P6-move": {
+  "landed": null
+ },
+ "P5c-extras": {
+  "landed": null
+ }
+}

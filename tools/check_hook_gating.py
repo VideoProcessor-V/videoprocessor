@@ -47,6 +47,15 @@ a text fragment + seam + expiry). A site whose (file, whitespace-insensitive tex
 fails unless an approval matches it; a production file over its ceiling fails; a count below the ceiling is reported
 as "ratchet down". Second summary line: `hook sites: <n> sites, <new> new (<approved> approved), <removed> removed,
 <over> over budget; manifest <state>`.
+
+EXPIRY (refs/107 s5.2): an approval's `expiry` is null (a canonical seam), a trigger id, or a list of trigger ids
+(any of them). A trigger LANDED at a revision when an ancestor commit carries the trailer `Hook-Trigger: <id>`, or
+docs/audit/hook-triggers.json lists it as {"<id>": {"landed": "<sha>"}} (the fallback for exports without history).
+An approval whose trigger has landed while its text_contains is still in its file fails: `EXPIRED <id> (trigger <t>
+landed at <sha>) still present`. An expiry or a temporary-budget trigger that hook-triggers.json does not list fails
+too (UNKNOWN TRIGGER). hook-budget.json may carry `temporary`: {"<file>": {"limit": n, "reverts_to": m, "until":
+[ids]}}: the ceiling is `limit` until ALL `until` triggers have landed, `reverts_to` from then on; the summary line
+names every temporary ceiling in force.
 """
 import argparse
 import datetime
@@ -170,6 +179,8 @@ HOOK_MARK_RE = re.compile(r"//\s*VPV-HOOK(?![-\w])")
 MANIFEST_PATH = "docs/audit/hook-sites.json"
 BUDGET_PATH = "docs/audit/hook-budget.json"
 APPROVALS_PATH = "docs/audit/hook-approvals.json"
+TRIGGERS_PATH = "docs/audit/hook-triggers.json"
+TRAILER_KEY = "Hook-Trigger"
 SITE_NOTE = ("a site = one maximal run of consecutive VPV-HOOK lines (vp_footprint hook_line_set widened to any line carrying "
              "`// VPV-HOOK`) in a Bill-owned file (present at the base ref, outside src/VP-V/); matched by file + whitespace-"
              "insensitive text; the anchor (enclosing symbol, Bill lines before / after) is for the re-graft script")
@@ -790,8 +801,43 @@ def load_json(tree, rel):
         return None
 
 
-def site_checks(tree, per_file):
-    """Manifest / budget / approvals: returns a dict with the counts and the failures."""
+def landed_triggers(tree, root=None, rev=None, no_git=True):
+    """(known trigger ids, {id: sha} landed): docs/audit/hook-triggers.json, plus `Hook-Trigger: <id>` commit trailers on
+    the ancestors of `rev` (HEAD for the working tree) unless no_git."""
+    doc = load_json(tree, TRIGGERS_PATH) or {}
+    known, landed = set(), {}
+    for k, v in doc.items():
+        if k.startswith("_"):
+            continue
+        known.add(k)
+        if isinstance(v, dict) and v.get("landed"):
+            landed[k] = str(v["landed"])
+    if not no_git and root:
+        try:
+            log = git(["log", rev or "HEAD", "--grep=^%s:" % TRAILER_KEY, "--format=%H%x00%(trailers:key=" + TRAILER_KEY +
+                       ",valueonly)%x1e"], root)
+        except RuntimeError:
+            log = ""
+        for rec in log.split("\x1e"):
+            if "\x00" not in rec:
+                continue
+            sha, vals = rec.strip("\r\n").split("\x00", 1)
+            for v in vals.splitlines():
+                for tid in v.split(","):
+                    tid = tid.strip()
+                    if tid:
+                        landed[tid] = sha[:12]   # git log runs newest first: the oldest landing commit wins
+    return known, landed
+
+
+def _expiry_ids(expiry):
+    if expiry is None:
+        return []
+    return [expiry] if isinstance(expiry, str) else list(expiry)
+
+
+def site_checks(tree, per_file, root=None, rev=None, no_git=True):
+    """Manifest / budget / approvals / expiry: returns a dict with the counts and the failures."""
     sites = [s for r in per_file for s in r.get("sites", [])]
     prod = {r["file"] for r in per_file if r["bucket"] == "production"}
     manifest = load_json(tree, MANIFEST_PATH)
@@ -799,7 +845,24 @@ def site_checks(tree, per_file):
     approvals = load_json(tree, APPROVALS_PATH) or {"approvals": []}
     res = {"sites": len(sites), "new": [], "approved": [], "removed": [], "over": [], "ratchet": [],
            "manifest": "none" if manifest is None else MANIFEST_PATH, "budget": "none" if budget is None else BUDGET_PATH,
-           "approvals_used": []}
+           "approvals_used": [], "expired": [], "unknown": [], "temporary": []}
+    known_t, landed_t = landed_triggers(tree, root, rev, no_git)
+    texts = {}
+    def _file_key(rel):
+        if rel not in texts:
+            try:
+                texts[rel] = _key(tree.read(rel))
+            except (OSError, RuntimeError):
+                texts[rel] = ""
+        return texts[rel]
+    for ap in approvals.get("approvals", []):
+        for tid in _expiry_ids(ap.get("expiry")):
+            if tid not in known_t and tid not in landed_t:
+                res["unknown"].append("approval %s names trigger %s (not in %s)" % (ap.get("id"), tid, TRIGGERS_PATH))
+        for tid in _expiry_ids(ap.get("expiry")):
+            if tid in landed_t and ap.get("text_contains") and _key(ap["text_contains"]) in _file_key(ap.get("file", "")):
+                res["expired"].append("EXPIRED %s (trigger %s landed at %s) still present in %s" % (ap.get("id"), tid, landed_t[tid], ap.get("file")))
+                break
     if manifest is not None:
         known = {}
         for m in manifest.get("sites", []):
@@ -826,7 +889,19 @@ def site_checks(tree, per_file):
             if key not in seen:
                 res["removed"].extend(ids)
     if budget is not None:
-        limits = budget.get("files", {})
+        limits = dict(budget.get("files", {}))
+        for f, tmp in sorted((budget.get("temporary") or {}).items()):
+            until = list(tmp.get("until") or [])
+            for tid in until:
+                if tid not in known_t and tid not in landed_t:
+                    res["unknown"].append("temporary budget %s names trigger %s (not in %s)" % (f, tid, TRIGGERS_PATH))
+            pending = [u for u in until if u not in landed_t]
+            if pending:
+                limits[f] = int(tmp["limit"])
+                res["temporary"].append({"file": f, "limit": int(tmp["limit"]), "reverts_to": int(tmp["reverts_to"]), "pending": pending})
+            else:
+                limits[f] = int(tmp["reverts_to"])
+        temp_files = {x["file"] for x in res["temporary"]}
         counts = {}
         for s in sites:
             if s["file"] in prod:
@@ -834,9 +909,11 @@ def site_checks(tree, per_file):
         for f, n in sorted(counts.items()):
             lim = limits.get(f, 0)
             if n > lim:
-                res["over"].append("%s %d sites > budget %d" % (f, n, lim))
+                res["over"].append("%s %d sites > %sbudget %d" % (f, n, "temporary " if f in temp_files else "", lim))
             elif n < lim:
                 res["ratchet"].append("%s %d sites < budget %d (ratchet the ceiling down)" % (f, n, lim))
+    for x in res["temporary"]:
+        x["count"] = counts.get(x["file"], 0) if budget is not None else 0
     return res
 
 
@@ -982,7 +1059,7 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
             allow_used[("callee", k)] = 0   # reached through an enclosing header
     stale = [("callee", k) for k in range(len(ALLOW_CALLEES)) if ("callee", k) not in allow_used] + \
             [("site", k) for k in range(len(ALLOW_SITES)) if ("site", k) not in allow_used]
-    sc = site_checks(tree, per_file)
+    sc = site_checks(tree, per_file, root, rev, no_git)
     since_added = None
     if since and not no_git:
         try:
@@ -1000,7 +1077,7 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
         untagged = [u for u in untagged if _new(u)]
         sc["new"] = [x for x in sc["new"] if _new_site(x)]
         sc["approved"] = [x for x in sc["approved"] if _new_site(x)]
-    rc = 1 if (hits or unverified or (fail_untagged and untagged) or sc["new"] or sc["over"]) else 0
+    rc = 1 if (hits or unverified or (fail_untagged and untagged) or sc["new"] or sc["over"] or sc["expired"] or sc["unknown"]) else 0
     return {"base_ref": base_ref, "rev": rev, "since": since, "vp_slots": sorted(vp_slots), "site_checks": sc, "gated": {k: list(v) for k, v in gated.items()},
             "files": per_file, "counts": counts, "hits": hits, "unverified": unverified, "untagged": untagged,
             "allowed": allowed, "allow_used": {"%s:%d" % k: v for k, v in allow_used.items()}, "stale_allow": stale, "rc": rc}
@@ -1040,17 +1117,30 @@ def render(res):
         out.append("  OVER BUDGET " + line)
     for line in sc["ratchet"]:
         out.append("  " + line)
+    for line in sc["expired"]:
+        out.append("  " + line)
+    for line in sc["unknown"]:
+        out.append("  UNKNOWN TRIGGER " + line)
+    for x in sc["temporary"]:
+        out.append("  temporary ceiling %s %d (reverts to %d when %s land)" % (x["file"], x["limit"], x["reverts_to"], ", ".join(x["pending"])))
     if sc["removed"]:
         out.append("  removed sites (ids no longer present; regenerate the manifest with --write-manifest): " + ", ".join(sc["removed"][:20]) + (" ..." if len(sc["removed"]) > 20 else ""))
-    out.append("hook sites: %d sites, %d new (%d approved), %d removed, %d over budget; manifest %s, budget %s" % (
-        sc["sites"], len(sc["new"]) + len(sc["approved"]), len(sc["approved"]), len(sc["removed"]), len(sc["over"]), sc["manifest"], sc["budget"]))
+    temp = "".join("; temporary %s %d <= %d (reverts to %d)" % (x["file"].rsplit("/", 1)[-1], x["count"], x["limit"], x["reverts_to"])
+                   if x["count"] <= x["limit"] else "; temporary %s %d > %d" % (x["file"].rsplit("/", 1)[-1], x["count"], x["limit"])
+                   for x in sc["temporary"])
+    out.append("hook sites: %d sites, %d new (%d approved), %d removed, %d over budget; manifest %s, budget %s; %d expired, %d unknown triggers%s" % (
+        sc["sites"], len(sc["new"]) + len(sc["approved"]), len(sc["approved"]), len(sc["removed"]), len(sc["over"]), sc["manifest"], sc["budget"],
+        len(sc["expired"]), len(sc["unknown"]), temp))
     out.append("hook gating: %d hook statements, %d unguarded, %d unverified markers, %d allowed, %d untagged; exit %d" % (
         hook_stmts, len(res["hits"]), len(res["unverified"]), len(res["allowed"]), len(res["untagged"]), res["rc"]))
+    if sc["expired"] or sc["unknown"]:
+        out.append("FAIL (rule 32 expiry): an approved transitional site outlived its trigger, or an expiry names a trigger "
+                   "%s does not list: collapse the site into its seam (refs/107-host-seams-plan.md s4) or fix the id." % TRIGGERS_PATH)
     if sc["new"] or sc["over"]:
         out.append("FAIL (rule 32): a NEW hook site in a Bill file, or a file over its site ceiling: route the feature through an "
                    "existing seam (refs/107-host-seams-plan.md s1), or get a HOOK-APPROVAL id from the coordinator "
                    "(docs/audit/hook-approvals.json); ceilings only go down.")
-    if res["rc"] and not (sc["new"] or sc["over"]) or res["hits"] or res["unverified"]:
+    if res["rc"] and not (sc["new"] or sc["over"] or sc["expired"] or sc["unknown"]) or res["hits"] or res["unverified"]:
         out.append("FAIL: a VP-V hook in a Bill file runs in the Original pathway. Wrap the call site in the canonical guard "
                    "(`if (!pipelineSlots.OriginalPathway())`), or move the logic into its VP-V module behind a `// VPV-GATED` "
                    "function with `if (originalPathway) return;`, or ask the lead for an allow-list entry with a reason.")
