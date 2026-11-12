@@ -738,6 +738,74 @@ def _short_name(rel):
     return "%s.%s" % (initials, ext)
 
 
+# Fields --write-manifest recomputes from the tree; every other field of a matched entry (id, seam, expiry, any
+# hand-added key) is kept as it was.
+_FRESH_FIELDS = ("file", "start", "end", "anchor", "lines", "text", "gate")
+
+
+def merge_manifest_sites(old_sites, new_sites):
+    """Minimal-diff regeneration of the manifest site list.
+
+    A tree site matches an old entry with the same (file, _key(text)).  Identical-text duplicates pair up in order
+    when their count is unchanged; when it changed, the pairs with the same anchor are taken first, then the nearest
+    old start line, then order (a heuristic: two duplicates with equal anchors that both moved can still swap ids).
+    A matched site keeps the old entry's id, hand-filled fields and position; only the recomputed fields are
+    refreshed.  Old entries with no tree site are dropped.  Unmatched tree sites are appended in tree order with
+    their generated id, renumbered past the highest number in use for that prefix (old dropped ids included, so an
+    id is never reused) when the id is already taken."""
+    olds, news = {}, {}
+    for i, m in enumerate(old_sites):
+        olds.setdefault((m.get("file"), _key(m.get("text", ""))), []).append(i)
+    for j, s_ in enumerate(new_sites):
+        news.setdefault((s_["file"], _key(s_["text"])), []).append(j)
+    matched = {}
+    taken = set()
+    for k, js in news.items():
+        is_ = olds.get(k, [])
+        if len(is_) == len(js):
+            pairs = list(zip(is_, js))
+        else:
+            cand = sorted((old_sites[i].get("anchor") != new_sites[j]["anchor"],
+                           abs((old_sites[i].get("start") or 0) - new_sites[j]["start"]), i, j) for i in is_ for j in js)
+            pairs, ui, uj = [], set(), set()
+            for _a, _d, i, j in cand:
+                if i not in ui and j not in uj:
+                    ui.add(i)
+                    uj.add(j)
+                    pairs.append((i, j))
+        for i, j in pairs:
+            matched[i] = new_sites[j]
+            taken.add(j)
+    added = [s_ for j, s_ in enumerate(new_sites) if j not in taken]
+    out = []
+    for i, m in enumerate(old_sites):
+        s_ = matched.get(i)
+        if s_ is None:
+            continue
+        e = dict(m)
+        for f in _FRESH_FIELDS:
+            e[f] = s_[f]
+        for f, v in s_.items():
+            if f not in e:
+                e[f] = v
+        out.append(e)
+    used = set(m.get("id") for m in old_sites if m.get("id"))
+    for s_ in added:
+        sid = s_["id"]
+        if sid in used:
+            prefix = sid.rsplit("-", 1)[0]
+            top = 0
+            for u in used:
+                p, _, n = u.rpartition("-")
+                if p == prefix and n.isdigit():
+                    top = max(top, int(n))
+            sid = "%s-%04d" % (prefix, top + 1)
+            s_ = dict(s_, id=sid)
+        used.add(sid)
+        out.append(s_)
+    return out
+
+
 def extract_sites(rel, text, hook_lines, tree_parse, classes_by_line):
     """One record per maximal run of consecutive hook lines."""
     lines = text.splitlines()
@@ -1220,14 +1288,12 @@ def main(argv=None):
         sites = [s for r in res["files"] for s in r.get("sites", [])]
         if args.write_manifest:
             doc = {"_note": SITE_NOTE + "; seam / expiry are filled by hand from refs/107-host-seams-plan.md s2; regenerate with "
-                            "`python -I tools/check_hook_gating.py --write-manifest` (keeps hand-filled seam / expiry by id)",
+                            "`python -I tools/check_hook_gating.py --write-manifest` (matches sites by file and text, identical-text duplicates by anchor then nearest line then order; keeps their "
+                            "ids, hand-filled seam / expiry and order; never reuses a dropped id)",
                    "base_ref": args.base_ref, "generated_at": datetime.date.today().isoformat(), "sites": sites}
             old = load_json(Tree(args.root), MANIFEST_PATH) or {}
-            keep = {m["id"]: m for m in old.get("sites", [])}
-            for s_ in sites:
-                o = keep.get(s_["id"])
-                if o and o.get("text") == s_["text"]:
-                    s_["seam"], s_["expiry"] = o.get("seam"), o.get("expiry")
+            sites = merge_manifest_sites(old.get("sites", []), sites)
+            doc["sites"] = sites
             os.makedirs(os.path.join(args.root, "docs", "audit"), exist_ok=True)
             with open(os.path.join(args.root, *MANIFEST_PATH.split("/")), "w", encoding="utf-8") as fh:
                 json.dump(doc, fh, indent=1)
