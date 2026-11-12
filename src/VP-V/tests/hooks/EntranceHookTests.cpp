@@ -271,12 +271,17 @@ namespace EntranceHookTest
 			const std::string body = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\CoreSegments.inl");
 			const size_t def = body.find("LibplaceboVideoRenderer::Impl::ReportRenderErrors()");
 			Assert::IsTrue(def != std::string::npos, L"the member definition");
-			Assert::IsTrue(body.find("OriginalPathway", def) == std::string::npos, L"no pathway check inside the moved body");
+			// M2 P4 f: CollectFrameHooks follows in the same file (its own moved body names the pathway), so the check is bounded
+			// to this member: from its signature to its closing brace at column 0 (the first "\n}" after it).
+			const size_t defEnd = body.find("\n}", def);
+			Assert::IsTrue(defEnd != std::string::npos, L"the member's closing brace");
+			const size_t pathway = body.find("OriginalPathway", def);
+			Assert::IsTrue(pathway == std::string::npos || pathway > defEnd, L"no pathway check inside the moved body");
 			const size_t errors = body.find("pl_renderer_get_errors(renderer)", def);
 			const size_t drive = body.find("dynamicDrive.OnHookErrors(", def);
 			const size_t calibration = body.find("calibrationHost.AfterRender(hookErrors)", def);
 			Assert::IsTrue(errors != std::string::npos && drive != std::string::npos && calibration != std::string::npos &&
-				errors < drive && drive < calibration, L"the body keeps its order");
+				errors < drive && drive < calibration && calibration < defEnd, L"the body keeps its order");
 		}
 
 		TEST_METHOD(DrawJobDefaultsAreInert)

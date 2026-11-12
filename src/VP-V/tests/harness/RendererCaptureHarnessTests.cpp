@@ -584,7 +584,7 @@ namespace
 	}
 
 	const wchar_t* const kHarnessEnvironment[] = { L"VP_TEST_SCREENSHOT_DIR", L"VP_TEST_CAPTURE_UNPACK_FAIL", L"VP_TEST_HARNESS_BETA",
-		L"VP_TEST_DV_UNPACK_FAIL", L"VP_TEST_SHADER_DIR" };
+		L"VP_TEST_DV_UNPACK_FAIL", L"VP_TEST_SHADER_DIR", L"VP_HOOK_LIST_TRACE" };
 
 	// Both copies of the environment: the tests set these through the Win32 block
 	// (SetEnvironmentVariable) and through the CRT (_putenv_s).
@@ -3075,6 +3075,56 @@ namespace Tests
 			const bool uniKept = kept("uniform", a2, d2);
 			Assert::IsTrue(oneKept, L"a one-axis re-base keeps the geometry (aspect ratio)");
 			Assert::IsTrue(uniKept, L"a uniform re-base keeps the geometry");
+		}
+
+		// M2 P4 f (refs/110 s1.3, Q3): the frame's hook list - frameParams.hooks, tagged by slot / nls / quantiser / prescaler and in
+		// order - recorded by CollectFrameHooks' test recorder (VP_HOOK_LIST_TRACE) for the default rule set and for NLS on a scope
+		// screen. The lists are pinned: the move is byte-identical (dedent only), so the order the collection produced before the move is
+		// the order it produces now; a change to the collection must show up here.
+		BEGIN_TEST_METHOD_ATTRIBUTE(P4fFrameHookListIsPinned)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(P4fFrameHookListIsPinned)
+		{
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("P4fFrameHookListIsPinned")) return;
+			const std::vector<std::string> savedShaders = g_harnessShaderProfiles;
+			const std::string here = Here();
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
+			SetEnvironmentVariableW(L"VP_HOOK_LIST_TRACE", L"1");
+			auto lists = [](const RunResult& r)
+			{
+				std::vector<std::string> found;
+				for (const std::string& line : r.log)
+				{
+					const size_t at = line.find("VP hook list: ");
+					if (at != std::string::npos) found.push_back(line.substr(at + 14));
+				}
+				return found;
+			};
+			const std::string nlsShader =
+				"[shader.nls.standard]\nshader_type: nls\nlabel: Nonlinear Stretch\nstage: pre_resize\norder: 10\nglsl_file: NLS.glsl\nquality: high\n"
+				"geometry: classic\nstrength: 1.0\ncurve: 2.0\ntolerance_percent: 5\nmax_stretch_ratio: 1.4\naspect_direction: narrower_only\n"
+				"vprenderer_max_crop_percent: 0\nvprenderer_crop_preference: preserve_image\n";
+			g_harnessShaderProfiles.clear();
+			const RunResult plain = Run(VideoFrameEncoding::V210, "gpu", 4.0);
+			g_harnessShaderProfiles = { "nls.standard" };
+			const RunResult nls = Run(VideoFrameEncoding::V210, "gpu", 4.0, false, "[vprenderer.viewport]\nscreen_aspect: 2.35:1\n" + nlsShader);
+			SetEnvironmentVariableW(L"VP_HOOK_LIST_TRACE", nullptr);
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
+			g_harnessShaderProfiles = savedShaders;
+			const std::vector<std::string> plainLists = lists(plain), nlsLists = lists(nls);
+			std::string report = "default rules:\n";
+			for (const std::string& l : plainLists) report += "  " + l + "\n";
+			report += "NLS on a scope screen:\n";
+			for (const std::string& l : nlsLists) report += "  " + l + "\n";
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(plain.presented && nls.presented, (L"frames presented\n" + plain.Tail() + nls.Tail()).c_str());
+			// Pinned from the first GPU run after the move (follow-up commit; empty until then, so the test fails rather than passes).
+			const std::vector<std::string> plainPinned = { };
+			const std::vector<std::string> nlsPinned = { };
+			Assert::IsTrue(plainLists == plainPinned, WideOf("default rules: the hook list differs from the pinned list\n" + report).c_str());
+			Assert::IsTrue(nlsLists == nlsPinned, WideOf("NLS: the hook list differs from the pinned list\n" + report).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(RebaseKeepsTheLayoutWithCropZoomNlsAndBlanking)
