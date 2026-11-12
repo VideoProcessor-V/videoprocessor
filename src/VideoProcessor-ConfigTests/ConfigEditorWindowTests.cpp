@@ -2183,12 +2183,9 @@ void testDetailRestoreControls()
         const QString selected = combo->currentData().toString();
         return selected.isEmpty() ? combo->property("inheritedValue").toString().trimmed().toLower() : selected;
     };
-    // DPTR-OFF: default value only changed on -> off (owner 2026-11-11 19:39; doc 91 :106; decision log
-    // refs\owner-decisions-2026-11-07.md, 11-11 evening). The assertion itself is unchanged.
     require(effectiveChoiceValueForTest(pulse) == QStringLiteral("off"), "detail pulse is not off by default");
     require(effectiveChoiceValueForTest(restore) == QStringLiteral("off"), "texture restore is not off by default");
     require(effectiveChoiceValueForTest(pulseFast) == QStringLiteral("on") && (pulseFast->isEnabled() || pulseFast->property("vpvManaged").toBool()), "the detail pulse fast path is not on by default");
-    // DPTR-OFF (doc 91 :106): both stages default off, so both caps start greyed (was: pulse cap enabled).
     require(!pulseCap->isEnabled() && !restoreCap->isEnabled(), "the caps are not greyed from the effective stage values");
     require(pulseCap->placeholderText() == QStringLiteral("1.35") && restoreCap->placeholderText() == QStringLiteral("1.50"),
         "the cap placeholders are not the defaults");
