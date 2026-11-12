@@ -455,6 +455,77 @@ namespace HookAmendmentTest
 			Assert::AreEqual(3.0, o.targetLeadMs);
 		}
 
+		// Phase 3 (refs/108; audit SHOULD): the R12 present-lead raise. Fakes named like the production modules, added
+		// in HubBootstrap's order (PresenterExtension before SkeletonModule): the Presenter's step runs first, a later
+		// non-raising module never clears the raise (OR), and with no raise the host keeps its own (even negative) lead.
+		struct LeadMod : Hub::ISkeletonModule
+		{
+			std::string n;
+			bool raise = false;
+			double lead = 0, spent = 0;
+			LeadMod(const char* name, bool r, double l, double s) : n(name), raise(r), lead(l), spent(s) {}
+			const char* Name() const override { return n.c_str(); }
+			void OnAfterPresent(RE::FrameContext&, RE::PresentContext& p) override
+			{
+				g_log->push_back(n + ":after_present");
+				p.outcome.extrasRan = true;
+				p.outcome.raiseTargetLead = raise;
+				p.outcome.targetLeadMs = lead;
+				p.outcome.spentSeconds += spent;
+			}
+		};
+		static void AddLead(LeadMod* m) { Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Hub::ISkeletonModule>(m)); }
+
+		// The host's application of the merged outcome (LVR R12 block): only a raise replaces the host's lead.
+		static double HostAppliesLead(double hostLeadMs, const RE::PresentOutcome& o) { return o.raiseTargetLead ? o.targetLeadMs : hostLeadMs; }
+
+		TEST_METHOD(AfterPresentRaiseIsOredAcrossModulesAndThePresenterRunsBeforeTheSkeleton)
+		{
+			Scope s;
+			AddLead(new LeadMod("presenter", true, 7.5, 0.25));
+			AddLead(new LeadMod("skeleton", false, 1.0, 0.5));
+			RegisterHubForwarder();
+			int host = 0;
+			RE::PresentContext pc;
+			const RE::PresentOutcome o = RE::AfterPresent(&host, 3, 1, pc);
+			Assert::IsTrue((std::vector<std::string>{ "presenter:after_present", "skeleton:after_present" }) == s.log);
+			Assert::IsTrue(o.raiseTargetLead);          // the later non-raising skeleton does not clear it
+			Assert::AreEqual(7.5, o.targetLeadMs);      // max: the skeleton's smaller lead does not lower it
+			Assert::AreEqual(0.75, o.spentSeconds);
+			Assert::IsTrue(o.extrasRan);
+			Assert::AreEqual(7.5, HostAppliesLead(2.0, o));
+		}
+
+		TEST_METHOD(AfterPresentRaiseFromALaterModuleIsAlsoKept)
+		{
+			Scope s;
+			AddLead(new LeadMod("presenter", false, 0.0, 0.0));
+			AddLead(new LeadMod("late", true, 4.0, 0.0));
+			RegisterHubForwarder();
+			int host = 0;
+			RE::PresentContext pc;
+			const RE::PresentOutcome o = RE::AfterPresent(&host, 4, 1, pc);
+			Assert::IsTrue(o.raiseTargetLead);
+			Assert::AreEqual(4.0, o.targetLeadMs);
+		}
+
+		TEST_METHOD(AfterPresentWithoutARaiseLeavesANegativeHostLeadAlone)
+		{
+			Scope s;
+			// Target unknown: the Presenter does not raise and leaves the lead at 0; the skeleton does not raise either.
+			AddLead(new LeadMod("presenter", false, 0.0, 0.0));
+			AddLead(new LeadMod("skeleton", false, 0.0, 0.5));
+			RegisterHubForwarder();
+			int host = 0;
+			RE::PresentContext pc;
+			const RE::PresentOutcome o = RE::AfterPresent(&host, 5, 1, pc);
+			Assert::IsTrue(o.extrasRan);
+			Assert::IsFalse(o.raiseTargetLead);
+			Assert::AreEqual(0.0, o.targetLeadMs);
+			// The host's negative lead (target missed) is NOT raised to the merged 0.
+			Assert::AreEqual(-3.0, HostAppliesLead(-3.0, o));
+		}
+
 		TEST_METHOD(AThrowingModuleInAChainedPhaseIsContainedAndTheChainContinues)
 		{
 			Scope s;

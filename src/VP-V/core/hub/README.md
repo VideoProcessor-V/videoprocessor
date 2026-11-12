@@ -47,6 +47,8 @@ note below); every other phase keeps the first-wins rule it had. A module writes
 succeeded: a contained throw leaves what it wrote, except for AfterPresent (R12), where the hub discards a throwing
 module's writes. R12 is experimental in the Bill PR text (doc 59 D-10).
 
+Rule 25 (doc 91 A): the Phase 3 R11 / R12 / R14 handler `PresenterExtension` is not a new module; it is the hub adapter of the existing output/presentation module (see its README, "Host seams"). It is registered in `HubBootstrap.cpp` before the skeleton module, so at R12 the Presenter's step runs before the skeleton's spare. The merged `raiseTargetLead` is an OR: a later non-raising module never clears a raise, and without a raise the host keeps its own lead (also a negative one when the target was missed). Tests: `HookAmendmentTests` (`AfterPresentRaise...`, `AfterPresentWithoutARaiseLeavesANegativeHostLeadAlone`).
+
 Semantics note (deliberate, inert): the phases AfterPublish, QueueTarget, AfterPresent and PresentSample already
 existed in the enum and were first-wins by default. P0b makes them fan-out. Nothing called or handled them before
 this package, so no behaviour changes today; the change is recorded here because it alters the rule of declared
