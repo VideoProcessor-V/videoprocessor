@@ -6529,6 +6529,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         { "balanced", "Balanced", "Uses a moderate queue for ordinary playback.", 16, 3, 2, 75 },
         { "reliable", "Reliable", "Uses a larger queue for the most resilient playback.", 32, 4, 3, 75 },
     };
+    const auto activeQueuePolicies = [this]() -> const QueuePolicy (&)[3] { return originalPathwayOn() ? billQueuePolicies : queuePolicies; };   // VPV-HOOK (HELD-CFG-09)
     auto state = std::make_shared<State>();
     auto fields = std::make_shared<std::vector<Field>>();
     std::function<void()> updateOutputCompatibility = [] {};
@@ -7671,7 +7672,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         queuePolicy->setObjectName(QStringLiteral("config.queue.policy_preset"));
         queuePolicy->setAccessibleName(QStringLiteral("Queue buffering policy"));
         queuePolicy->addItem(QStringLiteral("Custom"), QString());
-        for (const QueuePolicy& policy : (originalPathwayOn() ? billQueuePolicies : queuePolicies))   // VPV-HOOK (HELD-CFG-09)
+        for (const QueuePolicy& policy : activeQueuePolicies())
             queuePolicy->addItem(QString::fromLatin1(policy.label),
                 QString::fromLatin1(policy.id));
         form->addRow(QStringLiteral("Buffering policy"), queuePolicy);
@@ -11756,7 +11757,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     else detailLayout->addWidget(profileFields);
     detailLayout->addStretch();
 
-    const auto updateQueuePolicyPresentation = [this, queuePolicy, queuePolicySummary,
+    const auto updateQueuePolicyPresentation = [this, activeQueuePolicies, queuePolicy, queuePolicySummary,
         profileFields]()
     {
         if (!queuePolicy) return;
@@ -11772,7 +11773,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         }
         else
         {
-            for (const QueuePolicy& policy : (originalPathwayOn() ? billQueuePolicies : queuePolicies))   // VPV-HOOK (HELD-CFG-09)
+            for (const QueuePolicy& policy : activeQueuePolicies())
                 if (selectedId == QString::fromLatin1(policy.id))
                 {
                     queuePolicySummary->setText(QString::fromLatin1(policy.summary));
@@ -11780,7 +11781,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 }
         }
     };
-    const auto updateQueuePolicyFromValues = [this, fields, queuePolicy,
+    const auto updateQueuePolicyFromValues = [this, activeQueuePolicies, fields, queuePolicy,
         updateQueuePolicyPresentation]()
     {
         if (!queuePolicy) return;
@@ -11792,7 +11793,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             return -1;
         };
         QString policyId;
-        for (const QueuePolicy& policy : (originalPathwayOn() ? billQueuePolicies : queuePolicies))   // VPV-HOOK (HELD-CFG-09)
+        for (const QueuePolicy& policy : activeQueuePolicies())
             if (queueValue(QStringLiteral("queue_size")) == policy.capacity &&
                 queueValue(QStringLiteral("lead_frames")) == policy.lead &&
                 queueValue(QStringLiteral("target_frames")) == policy.target &&
@@ -12638,7 +12639,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 advanced->setChecked(true);
         });
         connect(queuePolicy, qOverload<int>(&QComboBox::currentIndexChanged), this,
-            [this, queuePolicy, state, fields, updateQueuePolicyPresentation](int index)
+            [this, activeQueuePolicies, queuePolicy, state, fields, updateQueuePolicyPresentation](int index)
         {
             if (state->loading || state->section.isEmpty() || !document_ || index < 0) return;
             const QString selectedId = queuePolicy->itemData(index).toString();
@@ -12648,7 +12649,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 return;
             }
             const QueuePolicy* selected = nullptr;
-            for (const QueuePolicy& policy : (originalPathwayOn() ? billQueuePolicies : queuePolicies))   // VPV-HOOK (HELD-CFG-09)
+            for (const QueuePolicy& policy : activeQueuePolicies())
                 if (selectedId == QString::fromLatin1(policy.id)) { selected = &policy; break; }
             if (!selected) return;
             const std::string section = state->section.toStdString();
