@@ -21,5 +21,17 @@
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 143,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": 15,
   "src/VideoProcessor-VPRenderer/LibplaceboPluginExports.cpp": 2
+ },
+ "temporary": {
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": {
+   "limit": 156,
+   "reverts_to": 143,
+   "until": [
+    "P4-e",
+    "P4-f",
+    "P4-g"
+   ],
+   "note": "owner 2026-11-11 (via Lead 4): +13 P5c transitional view reads (HA-P5c-*), refs/107-host-seams-plan.md:192 / s5.2 rule 4"
+  }
  }
 }
