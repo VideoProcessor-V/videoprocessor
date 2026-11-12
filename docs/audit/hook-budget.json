@@ -21,8 +21,5 @@
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 143,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": 15,
   "src/VideoProcessor-VPRenderer/LibplaceboPluginExports.cpp": 2
- },
- "_approved_over": {
-  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": "31 + 1 for HA-CFG09-BillPresets only (the activeQueuePolicies accessor); back to 31 at its expiry (re-graft, refs/110 take-over list)"
  }
 }

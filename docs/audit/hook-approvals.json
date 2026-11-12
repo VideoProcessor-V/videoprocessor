@@ -48,8 +48,8 @@
    "seam": "S6",
    "approver": "coordinator",
    "when": "2026-11-11",
-   "expiry": "re-graft (becomes a take-over point or an accepted upstream fix, refs/110 take-over list)",
-   "note": "owner 19:21 allowance of HELD-CFG-09 as a minimal registered branch in Bill's settings code; DIV-CFG-09"
+   "expiry": "re-graft",
+   "note": "owner 19:21 allowance of HELD-CFG-09 as a minimal registered branch in Bill's settings code; DIV-CFG-09. At the re-graft it becomes a take-over point or an accepted upstream fix (refs/110 take-over list)."
   }
  ]
 }
