@@ -508,8 +508,10 @@ Nothing below is needed to work on this module; these are background documents i
 
 `CalibrationStatusState.h` is `Vpv::HostState::Calibration` (`vpv.calibration.x`: status-available, last rendered target
 transfer, LUT-attached) and `CalibrationPresentMethods.inl` holds `Impl::PresentCalibrationPattern`, moved verbatim from the
-renderer. `calibrationHost` stays an Impl member (init order: `outputColour` references it). Follow-on: the PlanPresent
-handler once Phase 3 R11 is on the base.
+renderer. `calibrationHost` stays an Impl member (init order: `outputColour` references it). The planned PlanPresent handler is NOT
+built: R11 (`PlanPresent`, HA-R11) plans the SyncInterval of a rendered video frame at render entry, while the pattern
+present replaces dequeuing in the render loop (R33 `TakeOverPresentation`, one existing call site, `CalibrationLutHost::
+TakeOverPresentation`); there is no frame to plan. Moving the lambda behind a hub phase would add a hook site (rule 32).
 
 ## Settings
 

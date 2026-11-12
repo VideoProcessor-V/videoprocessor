@@ -4,7 +4,7 @@
 // P11a-e (refs/110 s2.5): the calibration pattern present, moved VERBATIM out of LibplaceboVideoRenderer.cpp's Impl.
 // An out-of-line member definition included ONCE by the renderer with the other module .inl files. The adapter it
 // calls (calibrationHost) stays an Impl member: outputColour holds a reference into it (init order), so it cannot
-// move into the last-declared anchor; the PlanPresent handler is a follow-on once Phase 3's R11 is on this base.
+// move into the last-declared anchor; there is no PlanPresent handler: R11 plans a rendered frame's SyncInterval, this present replaces the video in the render loop (R33).
 #pragma once
 
 // Automatic calibration (docs/calibration/AUTO-CALIBRATION.md): one refresh of the current
