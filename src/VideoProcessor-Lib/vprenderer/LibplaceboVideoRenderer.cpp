@@ -10280,14 +10280,16 @@ struct LibplaceboVideoRenderer::Impl
 		deviceParams.max_frame_latency = settings.presentationQueueDepth;   // Bill's setting (owner decision 2); the delay budget reads it (PresentationOwner)
 		deviceParams.no_compute = settings.diagnosticDisableCompute;
 		nlsPreparationNoCompute = deviceParams.no_compute;
+		// VPV-HOOK
 		// Tests: VP_TEST_ADAPTER=<text> picks the GPU whose name contains it
 		// (e.g. Intel, the laptop screen's own GPU, for real display timing);
-		// unset = libplacebo's choice, as always.
+		// unset = libplacebo's choice, as always (both pathways; the harness decides the adapter for both renders).
 		CComPtr<IDXGIAdapter1> testAdapter;
 		VpDiagnostics::TestAdapterFromEnvironment(&testAdapter);
 		if (testAdapter)
 			deviceParams.adapter = testAdapter;
 		if (VpDiagnostics::D3D11DebugFromEnvironment()) deviceParams.debug = true;
+		// VPV-HOOK-END
 		d3d11 = pl_d3d11_create(log, &deviceParams);
 		if (!d3d11)
 			throw std::runtime_error("Failed to create libplacebo D3D11 device");
@@ -12251,9 +12253,7 @@ struct LibplaceboVideoRenderer::Impl
 		const bool epochMoved = vectorEngine.TakeInvalidation(pending);   // VPV-HOOK
 		if (!VpMotion::TakeDejudderHistoryAction(resync.Driving(), epochMoved, pending, vectorEngine.motionResyncReaders))   // VPV-HOOK M2 P5b-7 / W1-C2a MUST 2: the readers the provider registers
 			return;
-		if (dejudder)   // W1-C2a A2: the snapshot lease ends with the epoch (both branches)   // VPV-HOOK
-			dejudder->InvalidateSnapshot();   // VPV-HOOK
-		vectorEstimate.ResetSnapshot();   // VPV-HOOK
+		vectorEstimate.EndSnapshotLease(pipelineSlots.OriginalPathway());   // VPV-HOOK W1-C2a A2 / E3: the lease ends with the epoch (VPV-GATED, never in Original)
 		if (pending.release)
 		{
 			ReleaseDejudder();
@@ -19177,7 +19177,7 @@ struct LibplaceboVideoRenderer::Impl
             subtitlePerf={};subtitlePerfTick=subtitlePerfNow;
         }
 
-		if (VpStageBFrame(sourceSequence, nextSourceSequence, !nativeRgbUpload && !rgbRawUpload, lossless422Upload,   // VPV-HOOK M2 P5b-4
+		if (!pipelineSlots.OriginalPathway() && VpStageBFrame(sourceSequence, nextSourceSequence, !nativeRgbUpload && !rgbRawUpload, lossless422Upload,   // VPV-HOOK M2 P5b-4
 			image.repr.levels == PL_COLOR_LEVELS_FULL))   // Stage B: true = no refresh shows this frame (PhaseTimeline.inl)
 			return true;
 		struct pl_swapchain_frame swapchainFrame{};
@@ -23242,6 +23242,7 @@ releaseDriftBaseRetention =
 			const double previousRebase = rebaseFactor, previousRebaseX = rebaseFactorX;
 			rebaseFactor = wanted < 1.0 && !temporal && !rebasePaused ? wanted : 1.0;
 			rebaseFactorX = wantedX < 1.0 && !temporal && !rebasePaused ? wantedX : 1.0;
+			if (!pipelineSlots.OriginalPathway()) // VPV-HOOK
 			{ // VPV-HOOK
 				// FX-RB: hold a re-base on the current path until a worker has its shaders // VPV-HOOK
 				const VpRebaseWarmup::Context warmContext{ renderImage, target, renderParams, d3d11->device, cache, // VPV-HOOK
@@ -24538,7 +24539,7 @@ releaseDriftBaseRetention =
                 // (Evaluated after the B3 picture: its first call may process B as B's A.)
                 auto bAsADone = [&]() { return EntranceOnce() && entrance.BAsAFor() == sourceSequence; };
                 bool bAlreadyA = bAsADone();
-                const bool phasePicture = DrawVpPhasePicture(source, image, frame, sourceSequence, nextSourceSequence,   // VPV-HOOK M2 P5b-4
+                const bool phasePicture = !pipelineSlots.OriginalPathway() && DrawVpPhasePicture(source, image, frame, sourceSequence, nextSourceSequence,   // VPV-HOOK M2 P5b-4
                     entranceOnceDone, bAlreadyA, bAsADone);   // Stage B's picture at this refresh's phase (PhaseTimeline.inl; in place until P4)
                 // Latch review 2026-10-17: during a crossfade the path being left, drawn with the
                 // other's weight (below); the frame before the entrance stages is kept for it.
@@ -30734,9 +30735,12 @@ void LibplaceboVideoRenderer::ConversionLoop()
 					const auto prepared = Impl::PrepareFrameAnalysis(analysed.frame, analysedState, analysed.converted,
 						analysed.analysis, AnalysisSourceProfile::QueuedCapture,
 						analysed.activePictureIdentity.sourceFormatGeneration, false, analysedState.dolbyVisionTunnel);
-					const FrameAnalysis::Cadence cadenceRecord = Vpv::Ingress::ToRecord(analysed.cadenceFacts);   // C7b: only built while the store is on (analyse) // VPV-HOOK
-					m_impl->frameAnalysis.OnArrival(analysed.sourceSequence, prepared.source, FrameAnalysis::Rect{},
-						analysed.arrivalQpc, analysed.cadenceRepeat, analysed.cadenceFacts.valid ? &cadenceRecord : nullptr); // VPV-HOOK
+					if (!m_impl->pipelineSlots.OriginalPathway())   // VPV-HOOK: the frame-analysis store (WP-23) never runs in Original
+					{   // VPV-HOOK
+						const FrameAnalysis::Cadence cadenceRecord = Vpv::Ingress::ToRecord(analysed.cadenceFacts);   // C7b: only built while the store is on (analyse) // VPV-HOOK
+						m_impl->frameAnalysis.OnArrival(analysed.sourceSequence, prepared.source, FrameAnalysis::Rect{},   // VPV-HOOK
+							analysed.arrivalQpc, analysed.cadenceRepeat, analysed.cadenceFacts.valid ? &cadenceRecord : nullptr); // VPV-HOOK
+					}   // VPV-HOOK
 				}
 			}
 			catch (const std::exception& e)
@@ -31135,7 +31139,8 @@ void LibplaceboVideoRenderer::RenderLoop()
             // the queued frames after the current one (not cadence repeats), up to 4,
             // whatever Bill's active-picture look-ahead is set to. Only frames already
             // queued: no waiting; an empty or short queue simply gives fewer.
-            MotionAhead::CollectQueueAhead(m_impl.get(), m_frameQueue, motionAheadFrames);   // VPV-HOOK: optical flow ahead (MotionAheadWalk.h)
+            if (m_impl && !m_impl->pipelineSlots.OriginalPathway())   // VPV-HOOK: optical flow ahead (MotionAheadWalk.h), never in Original
+                MotionAhead::CollectQueueAhead(m_impl.get(), m_frameQueue, motionAheadFrames);   // VPV-HOOK
             if (m_impl && m_impl->sourceAutoActive.load(std::memory_order_acquire))
                 for (size_t index = 1; index < m_frameQueue.size() && sourceAheadFrames.size() < 4; ++index)
                 {

@@ -1,0 +1,25 @@
+{
+ "_note": "Per-file ceiling on VPV-HOOK SITES in Bill-owned files (tools/check_hook_gating.py; a site = one maximal run of consecutive VPV-HOOK lines (vp_footprint hook_line_set widened to any line carrying `// VPV-HOOK`) in a Bill-owned file (present at the base ref, outside src/VP-V/); matched by file + whitespace-insensitive text; the anchor (enclosing symbol, Bill lines before / after) is for the re-graft script). Ratchet: lower a value when a site is collapsed into a seam; never raise one without a HOOK-APPROVAL id (rule 32). A file not listed has a ceiling of 0.",
+ "base_ref": "a591ad3b5",
+ "generated_at": "2026-11-11",
+ "files": {
+  "src/VideoProcessor-Config/AppMain.cpp": 2,
+  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 31,
+  "src/VideoProcessor-Config/ConfigEditorWindow.h": 5,
+  "src/VideoProcessor-GUI/VideoProcessorApp.cpp": 2,
+  "src/VideoProcessor-GUI/VideoProcessorDlg.cpp": 3,
+  "src/VideoProcessor-Lib/AnalysisLumaSource.cpp": 3,
+  "src/VideoProcessor-Lib/AnalysisLumaSource.h": 1,
+  "src/VideoProcessor-Lib/ConfigSchema.h": 2,
+  "src/VideoProcessor-Lib/DebugLog.h": 4,
+  "src/VideoProcessor-Lib/IRenderer.h": 1,
+  "src/VideoProcessor-Lib/MainConfigSchema.h": 9,
+  "src/VideoProcessor-Lib/RendererProfileConfig.h": 14,
+  "src/VideoProcessor-Lib/UnifiedProfileRuntime.cpp": 1,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp": 3,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.h": 1,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 143,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": 15,
+  "src/VideoProcessor-VPRenderer/LibplaceboPluginExports.cpp": 2
+ }
+}

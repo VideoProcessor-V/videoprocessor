@@ -16,6 +16,23 @@ VP-V unit tests. Each runs on the CPU unless its name says GPU.
   To run them with that check, add `|FullyQualifiedName~HookTests` to its `/TestCaseFilter`
   (Bill's document itself stays unchanged).
 
+## Cheap checks (seconds, CPU, stdlib Python; every package before its queue line, every train)
+
+All run from the repository root with `python -I`; each exits 1 on a hit and prints one machine-readable
+summary line. Their own tests are `tools/test_check_*.py` (`python -I tools/test_check_hook_gating.py`).
+
+| Check | Rule | What fails |
+|---|---|---|
+| `tools/check_shared_units.py --strict` | shared units | a shared-unit law without its registration / tests |
+| `tools/check_master_settings.py --strict --base-ref <merge-base>` | settings docs | a new key without its README Settings row |
+| `tools/check_motion_bypass.py` | rule 21 | a new private motion estimation outside `modules/motion` |
+| `tools/check_module_manifests.py` | manifests | slots.json / MANIFEST / components-master.json drift (`--write` regenerates) |
+| `tools/vp_footprint.py --budget docs/audit/footprint-budget.json --head <tip>` | footprint ratchet | stray (untagged) VP lines in a Bill file above its ceiling |
+| `tools/check_hook_gating.py [--rev <tip>]` | hook gating (owner 2026-11-11) | a `VPV-HOOK` statement in a Bill-owned production file that is not inert in the Original pathway: not inside the canonical guard (`!pipelineSlots.OriginalPathway()`, `Runs(<Vp slot>)`, an early return), not a call to a `// VPV-GATED` function with a verified `if (originalPathway) return;`, and not on its allow-list (callee / site, reason + proof, printed). Untagged VP-namespace lines in Bill files are listed (`--fail-untagged` fails them). `--rev` checks a git tip without a checkout. |
+
+`tools/run_chain_gate.ps1` runs the data checks (tiers, slot matrix, dimensions, pairwise, module READMEs,
+manifests, hook gating) before the GPU chain gate.
+
 ## CPU defaults golden
 
 `SettingsDefaultsGoldenTests` (CPU tier) evaluates fixed configurations with the renderer's own
