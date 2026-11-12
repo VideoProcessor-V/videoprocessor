@@ -211,6 +211,8 @@ struct MotionIntentStatus
     float visibility = 0.0f;                        // J = band(v) x edge term
     float shotSeconds = 0.0f;
     bool vectorsUsed = false;                       // the de-judder's valid vectors fed the pan speed
+    uint32_t sceneRecordPairs = 0;                  // row 2: cut pairs judged from the Scene record
+    uint32_t privateCutPairs = 0;                   // row 2: cut pairs judged by the private rule (no readable record)
     char reason[64] = {};                           // why the scale is what it is
 };
 

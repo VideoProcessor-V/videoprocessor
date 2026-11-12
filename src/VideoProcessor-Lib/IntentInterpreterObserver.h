@@ -391,6 +391,8 @@ namespace IntentInterpreter
             s.visibility = static_cast<float>(m_candidateStats.visibility);
             s.shotSeconds = static_cast<float>(m_candidateStats.seconds);
             s.vectorsUsed = m_candidateStats.vectorPairs > 0;
+            s.sceneRecordPairs = static_cast<uint32_t>(m_sceneUse.fromRecord);
+            s.privateCutPairs = static_cast<uint32_t>(m_sceneUse.privateRule);
             if (!m_haveLast)
                 CopyIntentText(s.reason, "waiting for look-ahead frames");
             else if (m_lastCut.reason && m_lastCut.reason[0])

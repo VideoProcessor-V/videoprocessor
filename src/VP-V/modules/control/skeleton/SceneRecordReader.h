@@ -11,6 +11,11 @@
 // BEFORE the render thread seals them: the normal case for a deep queue). The caller then keeps its previous private judgement and counts
 // the frame as such, so every step down is visible.
 //
+// Epoch: NOT checked. The store keeps its slots across a discontinuity (Invalidate only moves the epoch), and the verdict of a
+// published scene group is a property of that frame pair, not of the epoch. The observers' own rule bounds the use: a pair is read only
+// when it is contiguous and adjacent (previous + 1, no discontinuity flag), so a record of another epoch is not asked for in practice.
+// "Stale" in the README therefore means: no scene group for that sequence (not published yet, or the slot left the ring).
+//
 // Header-only, C++14.
 
 #include <VP-V/core/FrameAnalysisStore.h>

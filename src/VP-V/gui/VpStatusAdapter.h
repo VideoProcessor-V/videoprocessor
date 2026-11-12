@@ -146,6 +146,8 @@ namespace VpvGui
 		facts.reason = status.reason;
 		facts.content = ToString(status.content);
 		facts.source = DisplayName(status.source);
+		facts.sceneRecordPairs = status.sceneRecordPairs;
+		facts.privateCutPairs = status.privateCutPairs;
 		if (status.candidate != ContentClass::Unknown && status.candidate != status.content)
 			facts.pendingCandidate = ToString(status.candidate);
 		CString line;

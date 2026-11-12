@@ -317,7 +317,16 @@ namespace VpStatusText
 		std::string content;              // ToString(content)
 		std::string source;               // DisplayName(source)
 		std::string pendingCandidate;     // ToString(candidate) when known and different; else empty
+		uint32_t sceneRecordPairs = 0;    // row 2: cut pairs judged from the Scene record
+		uint32_t privateCutPairs = 0;     // row 2: cut pairs judged by the classifier's own rule (no readable record)
 	};
+	// ", cut: scene record N / private rule M"; empty until a pair was judged (the old lines are unchanged).
+	inline std::string CutSourceText(uint32_t sceneRecordPairs, uint32_t privateCutPairs)
+	{
+		if (sceneRecordPairs == 0 && privateCutPairs == 0)
+			return std::string();
+		return ", cut: scene record " + std::to_string(sceneRecordPairs) + " / private rule " + std::to_string(privateCutPairs);
+	}
 	inline std::string ContentLine(const ContentFacts& f)
 	{
 		if (!f.enabled)
@@ -325,7 +334,7 @@ namespace VpStatusText
 		std::string line = f.classified ? f.content + " (" + f.source + ")" : "classifying (" + f.reason + ")";
 		if (!f.pendingCandidate.empty())
 			line += ", next " + f.pendingCandidate + " at a cut";
-		return line;
+		return line + CutSourceText(f.sceneRecordPairs, f.privateCutPairs);
 	}
 
 	// Stage 9 room lights: "<room> (key|manual|sensor ...)"; empty while [ambient] mode is off.

@@ -101,7 +101,10 @@ namespace IntentInterpreter
         std::snprintf(text, sizeof(text), "%s x%.2f (%s), shot pan %.3f h/s spread %.3f edge %.2f J %.2f (%s), next x%.2f; %s",
             ToString(m.policy), m.appliedScale, DisplayName(m.source), m.panPictureHeightsPerSecond, m.panSpread,
             m.edgeContrast, m.visibility, m.vectorsUsed ? "vectors" : "cpu", m.candidateScale, m.reason);
-        return text;
+        std::string line = text;
+        if (m.sceneRecordPairs != 0 || m.privateCutPairs != 0)   // row 2: visible cut source (record, or the private-rule step down)
+            line += ", cut: scene record " + std::to_string(m.sceneRecordPairs) + " / private rule " + std::to_string(m.privateCutPairs);
+        return line;
     }
 
     inline std::string AmbientIntentLine(const AmbientIntentStatus& a)

@@ -7,6 +7,8 @@
 #include <ConfigFile.h>
 #include <ContentClassifier.h>
 #include <ContentIntentObserver.h>
+#include <IntentInterpreterSupport.h>
+#include <VP-V/core/StatusText.h>
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <IntentDescriptor.h>
 #include <MainConfigSchema.h>
@@ -396,13 +398,52 @@ namespace Tests
                 Feed(observer, other, sequence, 0, 100, 1, context);
                 return observer.Status();
             };
-            const ContentIntentStatus none = run(0), dry = run(1), dflt = run(2);
+            // The default reader depends on the process-wide registry (other tests may leave a store registered): it is compared only
+            // when exactly no store is registered, so this test does not depend on the order of the suite.
+            const bool defaultIsolated = VpFrameAnalysis::SourceFrameTap::SingleStore() == nullptr;
+            const ContentIntentStatus none = run(0), dry = run(1), dflt = defaultIsolated ? run(2) : run(1);
             Assert::IsTrue(none.content == dry.content && none.content == dflt.content && none.candidate == dry.candidate);
             Assert::AreEqual(none.panPictureHeightsPerSecond, dry.panPictureHeightsPerSecond);
             Assert::AreEqual(0u, none.sceneRecordPairs);
             Assert::AreEqual(0u, dry.sceneRecordPairs);
             Assert::AreEqual(0u, dflt.sceneRecordPairs);
             Assert::IsTrue(none.privateCutPairs > 0 && none.privateCutPairs == dry.privateCutPairs && none.privateCutPairs == dflt.privateCutPairs);
+        }
+
+        TEST_METHOD(CutSourceIsVisibleInTheStatusLines)
+        {
+            // Row 2, no silent fallback: both counts reach the content line and the motion-intent line; nothing is added while no pair
+            // was judged (the old wording is unchanged).
+            VpStatusText::ContentFacts f;
+            f.enabled = true;
+            f.classified = true;
+            f.content = "film";
+            f.source = "inferred";
+            Assert::AreEqual(std::string("film (inferred)"), VpStatusText::ContentLine(f));
+            f.sceneRecordPairs = 12;
+            f.privateCutPairs = 340;
+            Assert::AreEqual(std::string("film (inferred), cut: scene record 12 / private rule 340"), VpStatusText::ContentLine(f));
+            MotionIntentStatus m;
+            m.enabled = true;
+            const std::string plain = IntentInterpreter::MotionIntentLine(m);
+            Assert::IsTrue(plain.find("cut:") == std::string::npos);
+            m.sceneRecordPairs = 5;
+            m.privateCutPairs = 7;
+            Assert::AreEqual(plain + ", cut: scene record 5 / private rule 7", IntentInterpreter::MotionIntentLine(m));
+            // The status feeds are filled from the observers' own counters.
+            Observer observer;
+            observer.Configure(true, 5.0);
+            observer.SetSceneCutSource([](uint64_t, bool&) { return false; });
+            const Canvas canvas(600, 108, 7, 100, 500);
+            uint64_t sequence = 0;
+            Feed(observer, canvas, sequence, 0, 30, 1, Context(50.0, 50.0, SourceClass::Legacy));
+            ContentIntentStatus status = observer.Status();
+            Assert::IsTrue(status.privateCutPairs > 0u && status.sceneRecordPairs == 0u);
+            VpStatusText::ContentFacts g;
+            g.enabled = true;
+            g.sceneRecordPairs = status.sceneRecordPairs;
+            g.privateCutPairs = status.privateCutPairs;
+            Assert::IsTrue(VpStatusText::ContentLine(g).find("private rule " + std::to_string(status.privateCutPairs)) != std::string::npos);
         }
 
         TEST_METHOD(SceneRecordSuppliesTheCutAndTheHoldStaysPrivate)
