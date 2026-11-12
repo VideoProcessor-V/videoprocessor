@@ -438,9 +438,17 @@ namespace DetailRestoreConfigTestsNs
 			const size_t monitorRead = planner.find("sourceMonitor.Frame(d3d11->gpu, rebaseDispatch, renderImage,");
 			const size_t planSite = text.find("PlanEntrance(renderImage, target, image, sourceSequence,");
 			const size_t monitor = monitorRead != std::string::npos && planSite != std::string::npos ? planSite : std::string::npos;
-			const size_t hookEntrance = monitor == std::string::npos ? std::string::npos : text.find("entrance.Run(rq, frame);", monitor);
 			const size_t renderOwned = planSite == std::string::npos ? std::string::npos : text.find("NlsHookRecovery::RenderOwned(", planSite);
 			Assert::IsTrue(renderOwned != std::string::npos, L"the planner call comes before the render call");
+			// M2 P4 g: the draw (the second RenderOwned lambda, where the entrance hook runs) is Impl::DrawFrame in
+			// segments/EntranceHostMembers.inl; the lambda inside the RenderOwned call returns it, so the entrance still runs
+			// after the planner call (and the monitor read in it).
+			const size_t drawCall = text.find("return DrawFrame(source, destination, parameters, image, sourceSequence,", renderOwned);
+			Assert::IsTrue(drawCall != std::string::npos && drawCall - renderOwned < 4000, L"the render call's draw lambda calls DrawFrame");
+			const std::string hostMembers = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntranceHostMembers.inl");
+			Assert::IsFalse(hostMembers.empty(), L"the entrance host members source");
+			const size_t drawFrame = hostMembers.find("bool LibplaceboVideoRenderer::Impl::DrawFrame(");
+			const size_t hookEntrance = monitor == std::string::npos || drawFrame == std::string::npos ? std::string::npos : hostMembers.find("entrance.Run(rq, frame);", drawFrame);
 			const size_t debandStage = segment.find("void Segment::Deband(StageRun& run, pl_frame& frame)");
 			const size_t debander = debandStage == std::string::npos ? std::string::npos : segment.find("debander.Apply(", debandStage);
 			const size_t detailStage = segment.find("void Segment::Detail(StageRun& run, pl_frame& frame)");

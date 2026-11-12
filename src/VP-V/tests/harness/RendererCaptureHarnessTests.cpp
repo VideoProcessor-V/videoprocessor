@@ -3127,6 +3127,54 @@ namespace Tests
 			Assert::IsTrue(nlsLists == nlsPinned, WideOf("NLS: the hook list differs from the pinned list\n" + report).c_str());
 		}
 
+		// M2 P4 g (refs/110 s1.4, Q3): the forced NLS retry - NlsHookRecovery::RenderOwned calls the moved Impl::DrawFrame, and again
+		// after libplacebo disabled the failing NLS hook. NLS.glsl is copied with one undefined call in hook(), so it parses and loads but
+		// its pass fails on the GPU: the frame is redrawn (retry=1) and presented (rendered=1), with the visible safe-fit fallback.
+		BEGIN_TEST_METHOD_ATTRIBUTE(P4gForcedNlsRetryDrawsTwice)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(P4gForcedNlsRetryDrawsTwice)
+		{
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("P4gForcedNlsRetryDrawsTwice")) return;
+			const std::vector<std::string> savedShaders = g_harnessShaderProfiles;
+			std::ifstream in(Here() + "NLS.glsl", std::ios::binary);
+			Assert::IsTrue(in.good(), L"NLS.glsl next to the test binary");
+			std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+			in.close();
+			const size_t entry = text.find("vec4 hook()");
+			const size_t open = entry == std::string::npos ? std::string::npos : text.find('{', entry);
+			Assert::IsTrue(open != std::string::npos, L"NLS.glsl has its hook() entry");
+			text.insert(open + 1, "\n    vp_p4g_forced_compile_failure();\n");
+			char tempPath[MAX_PATH] = {};
+			GetTempPathA(MAX_PATH, tempPath);
+			const std::string dir = std::string(tempPath) + "vp-p4g-nls-retry";
+			CreateDirectoryA(dir.c_str(), nullptr);
+			{
+				std::ofstream out(dir + "\\NLS.glsl", std::ios::binary | std::ios::trunc);
+				out << text;
+			}
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", dir.c_str());
+			g_harnessShaderProfiles = { "nls.standard" };
+			const std::string config = "[vprenderer.Default]\ndithering: off\ndeband: off\n[vprenderer.viewport]\nscreen_aspect: 2.35:1\n"
+				"[shader.nls.standard]\nshader_type: nls\nlabel: Nonlinear Stretch\nstage: pre_resize\norder: 10\nglsl_file: NLS.glsl\nquality: high\n"
+				"geometry: classic\nstrength: 1.0\ncurve: 2.0\ntolerance_percent: 5\nmax_stretch_ratio: 1.4\naspect_direction: narrower_only\n"
+				"vprenderer_max_crop_percent: 0\nvprenderer_crop_preference: preserve_image\n";
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, false, config);
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
+			g_harnessShaderProfiles = savedShaders;
+			DeleteFileA((dir + "\\NLS.glsl").c_str());
+			RemoveDirectoryA(dir.c_str());
+			std::string recovery;
+			for (const std::string& line : r.log)
+				if (line.find("VP anamorphic hook recovery:") != std::string::npos) { recovery = line; break; }
+			Logger::WriteMessage(("NLS selected: " + std::string(g_harnessShadersSelected ? "yes" : "no") + "\nrecovery: " + recovery + "\n").c_str());
+			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
+			Assert::IsTrue(g_harnessShadersSelected, (L"the NLS profile was selected\n" + r.Tail()).c_str());
+			Assert::IsFalse(recovery.empty(), (L"the failing NLS hook was withdrawn and the frame redrawn (DrawFrame twice)\n" + r.Tail()).c_str());
+			Assert::IsTrue(recovery.find(" retry=1 rendered=1 ") != std::string::npos, WideOf("the redraw presented the frame: " + recovery).c_str());
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(RebaseKeepsTheLayoutWithCropZoomNlsAndBlanking)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()

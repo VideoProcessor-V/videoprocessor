@@ -52,36 +52,6 @@
    "note": "Phase 3 present-side seams, refs/108; the R14 helper RendererExtension::ResolveTime (RendererExtension.h:546) on the statistics path"
   },
   {
-   "id": "HA-P5c-5039-EntranceFieldOf",
-   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "text_contains": "r.vectorEstimate.LiveFrom(sequence);",
-   "seam": "S3",
-   "approver": "owner via coordinator",
-   "when": "2026-11-11",
-   "expiry": "P4-g",
-   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :5039-5041 EntranceHost FieldOf, R2 LiveFrom"
-  },
-  {
-   "id": "HA-P5c-5104-EntranceSnapshotUsable",
-   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "text_contains": "vectorEstimate.Snapshot().Usable();",
-   "seam": "S3",
-   "approver": "owner via coordinator",
-   "when": "2026-11-11",
-   "expiry": "P4-g",
-   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :5104 EntranceOnceSnapshotFor, R4 Snapshot().Usable()"
-  },
-  {
-   "id": "HA-P5c-5191-DejudderLiveFieldFor",
-   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "text_contains": "bool DejudderLiveFieldFor(uint64_t sequence) const { return vectorEstimate.LiveValidFor(",
-   "seam": "S3",
-   "approver": "owner via coordinator",
-   "when": "2026-11-11",
-   "expiry": "P4-g",
-   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :5191-5192 DejudderLiveFieldFor, R1 LiveValidFor (Impl member after the de-judder state block :5146-5190, not in P6's Presenter cluster; callers PhaseTimeline.inl:73-79 and sigma-delta LVR:5841)"
-  },
-  {
    "id": "HA-P5c-15574-ExtrasLive",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
    "text_contains": "const VpMotion::P3FieldSet liveSet = vectorEstimate.Live();",
