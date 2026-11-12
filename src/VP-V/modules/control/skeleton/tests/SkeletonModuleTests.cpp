@@ -2161,11 +2161,25 @@ namespace SkeletonModuleTestsNs
 	public:
 		TEST_METHOD(AnchorHoldsOnlyTheMovedFieldsAndTheOthersAreEmptyUntilFieldsLand)
 		{
-			// P11a-f (s2.2) landed the fields of motion.intent and led.intent; the other sub-structs stay empty until
-			// their move (s2.4 led, s2.5 calibration, s2.6 sourceAnalysis; s2.3 status holds no state).
-			Assert::IsTrue(std::is_empty<Vpv::HostState::Calibration>::value);
-			Assert::IsTrue(std::is_empty<Vpv::HostState::SourceAnalysis>::value);
+			// Plain-data pins (P11a-0 pins, tightened to what holds): the anchor as a whole is no longer standard-layout nor
+			// trivially destructible (s2.2 put std::string/std::mutex/shared_ptr in it; s2.6 put SourceResolutionMonitor::Monitor,
+			// whose data members have mixed access, in SourceAnalysis): WAIVER requested from the coordinator. Every sub-struct that
+			// can still be standard-layout stays pinned as such.
+			static_assert(std::is_standard_layout<Vpv::HostState::Motion>::value, "motion is plain data");
+			static_assert(std::is_standard_layout<Vpv::HostState::Led>::value, "led is plain data");
+			static_assert(std::is_standard_layout<Vpv::HostState::Calibration>::value, "calibration is plain data");
+			static_assert(std::is_standard_layout<Vpv::HostState::Status>::value, "status is plain data");
+			static_assert(std::is_trivially_destructible<Vpv::HostState::Calibration>::value, "calibration holds no resources");
+			static_assert(std::is_trivially_destructible<Vpv::HostState::Status>::value, "status holds no resources");
+			// Hidden-member pin (the old 'exactly five bytes' sizeof pin, tightened with the fields): the anchor is exactly its
+			// five sub-structs, so any further member or base changes its size.
+			struct FiveMembers { Vpv::HostState::Motion m; Vpv::HostState::Led l; Vpv::HostState::Calibration c; Vpv::HostState::SourceAnalysis s; Vpv::HostState::Status st; };
+			static_assert(sizeof(Vpv::HostState) == sizeof(FiveMembers), "the anchor holds exactly motion, led, calibration, sourceAnalysis, status");
+			// P11a-f (s2.2), P11a-d (s2.4), P11a-e (s2.5), P11a-f (s2.6) landed fields; status holds no state (s2.3).
 			Assert::IsTrue(std::is_empty<Vpv::HostState::Status>::value);
+			Assert::IsFalse(std::is_empty<Vpv::HostState::Calibration>::value);
+			Assert::IsFalse(std::is_empty<Vpv::HostState::SourceAnalysis>::value);
+			Assert::IsFalse(std::is_empty<Vpv::HostState::Led::SdrLift>::value);
 			Assert::IsFalse(std::is_empty<Vpv::HostState::Motion::Intent>::value);
 			Assert::IsFalse(std::is_empty<Vpv::HostState::Led::Intent>::value);
 			// The moved fields keep their old types.
@@ -2190,6 +2204,17 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::ledIntentLimitsSent), IntentInterpreter::LedIntentLimits>::value);
 			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::blackIntentLogged), int>::value);
 			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::displayIntentLogged), std::string>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::SdrLift::ambientSdrLift), bool>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::SdrLift::ambientSdrContrast), float>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::SdrLift::ambientSdrBrightness), float>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::SdrLift::ambientSdrLogged), std::string>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Calibration::calibrationStatusAvailable), bool>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Calibration::lastRenderedTargetTransfer), LibplaceboOutput::SdrTransfer>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Calibration::calibrationLutAttached), bool>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::SourceAnalysis::sourceMonitor), SourceResolutionMonitor::Monitor>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::SourceAnalysis::sourceMonitorSequence), uint64_t>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::SourceAnalysis::sourceMonitorHistorySet), bool>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::SourceAnalysis::sourceMonitorDvLogged), bool>::value);
 			// The initial values are the old Impl members' (the anchor is constructed with the Impl).
 			Vpv::HostState state;
 			Assert::IsTrue(state.motion.intent.intentInterpreter != nullptr);
@@ -2202,6 +2227,16 @@ namespace SkeletonModuleTestsNs
 			Assert::AreEqual(uint64_t(0), state.led.intent.ambientCutsSeen);
 			Assert::AreEqual(-1, state.led.intent.blackIntentLogged);
 			Assert::IsTrue(state.led.intent.displayIntentLogged.empty());
+			Assert::IsFalse(state.led.sdrLift.ambientSdrLift);
+			Assert::AreEqual(1.0f, state.led.sdrLift.ambientSdrContrast);
+			Assert::AreEqual(0.0f, state.led.sdrLift.ambientSdrBrightness);
+			Assert::IsTrue(state.led.sdrLift.ambientSdrLogged.empty());
+			Assert::IsFalse(state.calibration.calibrationStatusAvailable);
+			Assert::IsTrue(state.calibration.lastRenderedTargetTransfer == LibplaceboOutput::SdrTransfer::UNKNOWN);
+			Assert::IsFalse(state.calibration.calibrationLutAttached);
+			Assert::AreEqual(uint64_t(0), state.sourceAnalysis.sourceMonitorSequence);
+			Assert::IsFalse(state.sourceAnalysis.sourceMonitorHistorySet);
+			Assert::IsFalse(state.sourceAnalysis.sourceMonitorDvLogged);
 		}
 	};
 }
