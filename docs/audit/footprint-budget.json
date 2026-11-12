@@ -1,5 +1,6 @@
 {
  "_note": "Per-file ceiling on stray VP lines in Bill's files (vp_footprint.py --budget). Ratchet: lower a value when a package moves lines out; never raise one without the lead. Files not listed (and any new file) have a ceiling of 0. Measured at the P3 verification candidate against bill a591ad3b.",
+ "_updates": ["2026-11-12 CONFIG lane (C-1 interim, doc 93): ConfigEditorWindow.cpp 4469 -> 4473 (+4: HELD-CFG-09 minimal branch so Original presets write Bill values, one tagged accessor under HA-CFG09-BillPresets, refs/owner-decisions-2026-11-07.md :508 and :530; commits 50976de07, 0334d9db0, 408bb7d2a); ConfigEditorWindowTests.cpp 4032 -> 4184 (+151 for the HELD-CFG-09 Original-match, live Queue-refresh and queue-units tests, measured 4183 at staging/batch1 77fe0397e, plus 1 for the single CoverageAllowList line of WAIVER-SID-CFG-01, refs/owner-decisions-2026-11-07.md :536, which arrives with r2/sid-rules 7543dbe63; the measured count is 4183 until that merge, so the ceiling holds 1 line of known slack). Recorded budget update, not a loosening of the ratchet: the lines were already in the composite."],
  "default": 0,
  "upstream_candidates": {
   "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp": {
@@ -36,7 +37,7 @@
   "src/VideoProcessor-BetaTests/BetaParametersTests.cpp": 153,
   "src/VideoProcessor-BetaTests/VideoProcessor-BetaTests.vcxproj": 2,
   "src/VideoProcessor-Config/AppMain.cpp": 50,
-  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 4469,
+  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 4473,
   "src/VideoProcessor-Config/ConfigEditorWindow.h": 55,
   "src/VideoProcessor-Config/ProfileListController.h": 7,
   "src/VideoProcessor-Config/README.md": 3,
@@ -47,7 +48,7 @@
   "src/VideoProcessor-ConfigCore/ConfigurationRpcClient.cpp": 62,
   "src/VideoProcessor-ConfigCore/ConfigurationRpcClient.h": 19,
   "src/VideoProcessor-ConfigCore/ConfigurationRpcProtocol.h": 18,
-  "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp": 4032,
+  "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp": 4184,
   "src/VideoProcessor-ConfigTests/VideoProcessor-ConfigTests.vcxproj": 11,
   "src/VideoProcessor-GUI/ConfigurationRpcServer.cpp": 3,
   "src/VideoProcessor-GUI/FullscreenVideoWindow.cpp": 8,
