@@ -152,6 +152,20 @@ namespace IntentInterpreter
                 for (Shot& shot : m_shots) shot.shadowSeconds = -1.0;
         }
 
+        // The reader of the Scene record (default: the skeleton's published scene group). An empty function = always the private rule.
+        void SetSceneCutSource(const ContentIntent::SceneCutFn& read)
+        {
+            std::lock_guard<std::mutex> guard(m_mutex);
+            m_sceneCut = read;
+        }
+
+        // How the shot cuts were judged: pairs read from the Scene record / by the private rule (any thread).
+        ContentIntent::SceneUse SceneUseCounts() const
+        {
+            std::lock_guard<std::mutex> guard(m_mutex);
+            return m_sceneUse;
+        }
+
         // The newest source frame observed (0 = none yet): the walk skips frames at or
         // below it before decoding them.
         uint64_t LastObservedSequence() const
@@ -214,8 +228,12 @@ namespace IntentInterpreter
             // cut judged across two frames). Repeats carry their frame's sequence (never here).
             const bool contiguous = m_haveLast && sourceSequence == m_lastSequence + 1 &&
                 !context.discontinuity && !formatChange;
+            // Row 2: the cut comes from the Scene record when it holds this frame's pair (contiguous = the record's own pair); else the
+            // private rule, counted.
+            const ContentIntent::SceneHint hint = m_sceneUse.Ask(m_sceneCut, sourceSequence, contiguous);
             const ContentIntent::FrameMeasure m = ContentIntent::Measure(
-                contiguous ? m_previous : ContentIntent::LumaGrid(), grid);
+                contiguous ? m_previous : ContentIntent::LumaGrid(), grid, hint);
+            m_sceneUse.Note(m);
             const bool cut = m.cut || formatChange || (m_shots.empty());
             // Fades and near black (MotionIntent constants).
             double mean = 0.0;
@@ -373,6 +391,8 @@ namespace IntentInterpreter
             s.visibility = static_cast<float>(m_candidateStats.visibility);
             s.shotSeconds = static_cast<float>(m_candidateStats.seconds);
             s.vectorsUsed = m_candidateStats.vectorPairs > 0;
+            s.sceneRecordPairs = static_cast<uint32_t>(m_sceneUse.fromRecord);
+            s.privateCutPairs = static_cast<uint32_t>(m_sceneUse.privateRule);
             if (!m_haveLast)
                 CopyIntentText(s.reason, "waiting for look-ahead frames");
             else if (m_lastCut.reason && m_lastCut.reason[0])
@@ -528,6 +548,7 @@ namespace IntentInterpreter
             m_framesSinceFade = 1000000;
             m_haveLast = false;
             m_lastSequence = 0;
+            m_sceneUse = ContentIntent::SceneUse();
             m_displayValid = false;
             m_displayCrossed = false;
             m_displaySequence = 0;
@@ -541,6 +562,8 @@ namespace IntentInterpreter
         }
 
         mutable std::mutex m_mutex;
+        ContentIntent::SceneCutFn m_sceneCut = &VpSkeleton::SceneRecordReader::CutOf;
+        ContentIntent::SceneUse m_sceneUse;
         Switches m_switches;
         MotionSettings m_motion;
         FrameContext m_context;

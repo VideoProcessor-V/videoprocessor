@@ -14,6 +14,7 @@
 
 #include <AnalysisLumaSource.h>
 #include <ContentClassifier.h>
+#include <VP-V/modules/control/skeleton/SceneRecordReader.h>
 #include <DebugLog.h>
 #include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
 #include <IntentDescriptor.h>
@@ -111,6 +112,13 @@ namespace ContentIntent
 
         void SetFrameContext(const FrameContext& context) { m_context = context; }
 
+        // The reader of the Scene record (default: the skeleton's published scene group). An empty function = always the private rule.
+        void SetSceneCutSource(const SceneCutFn& read)
+        {
+            std::lock_guard<std::mutex> guard(m_mutex);
+            m_sceneCut = read;
+        }
+
         void BeginWalk(size_t) override {}
 
         // Efficiency round 2026-10-18: ObserveFrame's own early return (off, or seen in an
@@ -155,9 +163,13 @@ namespace ContentIntent
             // Sequence gaps are normal (pulldown repeats are not queued); only a
             // marked discontinuity or a format change breaks the motion pair.
             const bool contiguous = m_haveLast && !context.discontinuity;
+            const uint64_t previousSequence = m_lastSequence;
             m_lastSequence = sourceSequence;
             m_haveLast = true;
-            FrameMeasure m = Measure(contiguous ? m_previous : LumaGrid(), grid);
+            // Row 2: the cut comes from the Scene record when it holds this frame's pair; else the private rule, counted.
+            const SceneHint hint = m_sceneUse.Ask(m_sceneCut, sourceSequence, contiguous && sourceSequence == previousSequence + 1);
+            FrameMeasure m = Measure(contiguous ? m_previous : LumaGrid(), grid, hint);
+            m_sceneUse.Note(m);
             // A discontinuity (a format change, lost frames) is a cut for the hysteresis.
             const bool cut = m.cut || (!contiguous && m_previousValid);
             m_previous = grid;
@@ -190,6 +202,8 @@ namespace ContentIntent
                     DisplayName(now.source), now.reason, in.stats.meanPanHps, in.stats.widePanShare,
                     in.stats.holdShare, in.stats.flatShare, in.stats.seconds, context.contentHz, context.displayHz,
                     context.pulldownLocked ? 1 : 0, context.l11Present ? std::to_string(context.l11ContentType).c_str() : "absent");
+                DebugLog::Log("Content intent: cut source scene-record pairs=%llu private-rule pairs=%llu",
+                    static_cast<unsigned long long>(m_sceneUse.fromRecord), static_cast<unsigned long long>(m_sceneUse.privateRule));
                 // Report-a-problem: a = content class, b = source, x = pan, y = wide-pan share.
                 DiagnosticHistory::Global().RecordDecision("content-intent", ToString(now.content),
                     static_cast<int64_t>(now.content), static_cast<int64_t>(now.source),
@@ -204,6 +218,8 @@ namespace ContentIntent
             m_status.panPictureHeightsPerSecond = static_cast<float>(in.stats.meanPanHps);
             m_status.widePanShare = static_cast<float>(in.stats.widePanShare);
             m_status.windowSeconds = static_cast<float>(in.stats.seconds);
+            m_status.sceneRecordPairs = static_cast<uint32_t>(m_sceneUse.fromRecord);
+            m_status.privateCutPairs = static_cast<uint32_t>(m_sceneUse.privateRule);
             SetReason(m_status, candidate.reason);
             m_descriptor.content = IntentField<ContentClass>::Make(m_status.content,
                 m_status.content == ContentClass::Unknown ? IntentSource::Off : m_status.source);
@@ -238,6 +254,7 @@ namespace ContentIntent
             m_lastSequence = 0;
             m_status = ContentIntentStatus();
             m_descriptor = IntentDescriptor();
+            m_sceneUse = SceneUse();
         }
 
         mutable std::mutex m_mutex;
@@ -252,5 +269,7 @@ namespace ContentIntent
         uint64_t m_lastSequence = 0;
         ContentIntentStatus m_status;
         IntentDescriptor m_descriptor;
+        SceneCutFn m_sceneCut = &VpSkeleton::SceneRecordReader::CutOf;
+        SceneUse m_sceneUse;
     };
 }

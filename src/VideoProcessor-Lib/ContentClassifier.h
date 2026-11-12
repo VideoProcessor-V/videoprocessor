@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <functional>
 #include <vector>
 
 namespace ContentIntent
@@ -111,6 +112,7 @@ namespace ContentIntent
         bool valid = false;        // a previous grid of the same shape existed
         bool cut = false;
         bool held = false;         // a hold of the previous picture
+        bool cutFromScene = false; // `cut` is the Scene record's verdict (row 2), not this file's histogram / mean rule
         double dxHeights = 0.0;    // global shift, picture heights per frame (+ = right)
         double dyHeights = 0.0;    // (+ = down)
         double meanDiffCodes = 0.0;
@@ -201,7 +203,47 @@ namespace ContentIntent
         }
     }
 
-    inline FrameMeasure Measure(const LumaGrid& previous, const LumaGrid& current)
+    // The SCENE record's cut for the frame being measured (FrameAnalysisStore kScene, published by the skeleton from P4 ClassifyEvents via
+    // CutFadeJudge; read by VpSkeleton::SceneRecordReader). known = false (record absent / stale / store off) keeps the private rule below
+    // exactly as it was. The Scene record carries no "held": a hold stays this pass's own judgement (it is the mean absolute difference this
+    // loop already sums for meanDiffCodes, so it costs nothing extra and the record has nothing to replace it with).
+    struct SceneHint
+    {
+        bool known = false;
+        bool cut = false;
+    };
+
+    // The reader of the Scene record for one source sequence (VpSkeleton::SceneRecordReader::CutOf by default; tests inject their own).
+    // False = no usable record (absent, stale, store off, ambiguous owner): the caller keeps the private rule.
+    using SceneCutFn = std::function<bool(uint64_t sequence, bool& cut)>;
+
+    // How the pairs were judged (visible in the content-intent status and its log line): from the Scene record, or by the private rule
+    // (the step down when no record was readable).
+    struct SceneUse
+    {
+        uint64_t fromRecord = 0;
+        uint64_t privateRule = 0;
+        // Asks for frame `sequence`'s cut ONLY when the pair measured is the record's own pair (`sequence - 1` -> `sequence`): a gap in
+        // the sequence (pulldown repeats are not queued) means the record describes a different pair, so it is not used.
+        SceneHint Ask(const SceneCutFn& read, uint64_t sequence, bool adjacentPair) const
+        {
+            SceneHint hint;
+            bool cut = false;
+            if (read && adjacentPair && read(sequence, cut))
+            {
+                hint.known = true;
+                hint.cut = cut;
+            }
+            return hint;
+        }
+        void Note(const FrameMeasure& m)
+        {
+            if (!m.valid) return;
+            if (m.cutFromScene) ++fromRecord; else ++privateRule;
+        }
+    };
+
+    inline FrameMeasure Measure(const LumaGrid& previous, const LumaGrid& current, const SceneHint& scene = SceneHint())
     {
         FrameMeasure m;
         Spatial(current, m.flatShare, m.edgeCodes);
@@ -228,11 +270,19 @@ namespace ContentIntent
             for (double& d : *v) d /= w;
         m.meanDiffCodes = diff / (static_cast<double>(w) * h);
         m.held = m.meanDiffCodes < kHeldCodes;
-        double hp[16], hc[16];
-        Histogram16(previous, hp);
-        Histogram16(current, hc);
-        for (int i = 0; i < 16; ++i) m.histogramDistance += std::abs(hp[i] - hc[i]);
-        m.cut = m.histogramDistance >= kCutHistogramDistance && m.meanDiffCodes >= kCutDiffCodes;
+        if (scene.known)
+        {
+            m.cut = scene.cut;   // the shared judge's verdict (compute-once): no private cut rule, so no histogram pass either
+            m.cutFromScene = true;   // histogramDistance stays 0: it only fed the private rule
+        }
+        else
+        {
+            double hp[16], hc[16];
+            Histogram16(previous, hp);
+            Histogram16(current, hc);
+            for (int i = 0; i < 16; ++i) m.histogramDistance += std::abs(hp[i] - hc[i]);
+            m.cut = m.histogramDistance >= kCutHistogramDistance && m.meanDiffCodes >= kCutDiffCodes;
+        }
         if (!m.held && !m.cut)
         {
             const double sx = BestShift(colPrev, colCur, static_cast<int>(std::ceil(w * kSearchShare)));
