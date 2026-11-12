@@ -117,7 +117,7 @@ namespace DitherVectors
 		bool geometryValid = false;
 		bool engineField = false;          // IVectorEngine::FieldOf(next) returned the pair (seq, next)
 		bool pairServes = false;           // MotionValidity::PairServes(seq, next, field epoch, field epoch)
-		MotionValidity::SpanState span = MotionValidity::SpanState::Unknown;   // SpanStatus(seq, next)
+		MotionValidity::State::SpanState span = MotionValidity::State::SpanState::Unknown;   // SpanStatus(seq, next)
 		bool onDemandServed = false;       // VectorEngine::OnDemandServed(seq, next)
 		FallbackCatalog::NoPairCause onDemandCause = FallbackCatalog::NoPairCause::None;   // VectorEngine::OnDemandLastCause
 		bool matcherLive = false;          // the P3 view's LiveValidFor(seq) (the matcher ran this frame)
@@ -150,7 +150,7 @@ namespace DitherVectors
 	// The chain. Every return names its step; no step is reachable without a status (DitherVectorSourceTests).
 	inline Choice Choose(const Facts& f)
 	{
-		using S = MotionValidity::SpanState;
+		using S = MotionValidity::State::SpanState;
 		if (!f.slotRuns)
 			return Choice();
 		if (!f.motionCompensation)
