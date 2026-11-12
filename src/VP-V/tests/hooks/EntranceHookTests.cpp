@@ -247,7 +247,7 @@ namespace EntranceHookTest
 		// Drive stats), and the moved body in CoreSegments.inl stays a pure move (no pathway check of its own).
 		TEST_METHOD(TheAfterRenderReportsAreGuardedAtTheCallSiteAndTheBodyIsAPureMove)
 		{
-			const std::string text = ReadText(RepositoryRoot() + "\src\VideoProcessor-Lib\vprenderer\LibplaceboVideoRenderer.cpp");
+			const std::string text = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
 			Assert::IsFalse(text.empty(), L"the renderer source");
 			const std::string guard = "if (!pipelineSlots.OriginalPathway()) { ReportRenderErrors(); dynamicDrive.CollectMeasurements(); }";
 			const size_t site = text.find(guard);
@@ -259,7 +259,7 @@ namespace EntranceHookTest
 			Assert::IsTrue(text.find("pl_renderer_get_errors(renderer)", site - 3000) == std::string::npos ||
 				text.find("pl_renderer_get_errors(renderer)", site - 3000) > site, L"the report block left the render function");
 
-			const std::string body = ReadText(RepositoryRoot() + "\src\VP-V\segments\CoreSegments.inl");
+			const std::string body = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\CoreSegments.inl");
 			const size_t def = body.find("LibplaceboVideoRenderer::Impl::ReportRenderErrors()");
 			Assert::IsTrue(def != std::string::npos, L"the member definition");
 			Assert::IsTrue(body.find("OriginalPathway", def) == std::string::npos, L"no pathway check inside the moved body");
