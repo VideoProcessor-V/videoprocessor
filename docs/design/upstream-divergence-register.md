@@ -32,11 +32,20 @@ render-ahead chain, resets its gate and releases the VP timeline once, from the 
 UpdatePipelineSlots), so no VP-V plan outlives the switch. PHASE 2 (refs/113 AUDIT-R F2 + F3, branch r2/fix-r26-ph2):
 (3) ENTERING Original also idles the re-base shader warm-up from the same seam (`VpRebaseWarmup::Controller::
 EnterOriginalPathway`: pending off, its fallback entry released, the factors in force forgotten), because its per-frame
-host call (LVR :23245) is gated in Original and could not clear a warm-up in flight (the "Preparing shaders..." status
-stuck until Stop); (4) the registry's Original fact (`PipelineSlots::Registry::original`) is a `std::atomic<bool>` read
-relaxed, since the conversion loop reads it (LVR :30738) while the render thread replaces the registry at the seam.
-Tests: `OriginalPathwayGateTests`, `OriginalPathwaySiteGateTests`; proof of the pathway itself:
-`OriginalPathwayByteIdenticalToBill`.
+host call (LVR :23242 guard, :23248 Frame) is gated in Original and could not clear a warm-up in flight (the "Preparing
+shaders..." status stuck until Stop); (4) the registry's Original fact (`PipelineSlots::Registry::original`) is a
+relaxed atomic in a copyable wrapper (`PipelineSlots::RelaxedFlag`), since the conversion loop reads it (LVR :30726)
+while the render thread replaces the registry at the seam; the Registry keeps its IMPLICIT copies so every member
+(entranceOnce included: an earlier hand-written copy dropped it, so B3 off and Original lost it) is copied, with
+static_asserts that it stays copy-constructible / copy-assignable. Tests: `OriginalPathwayGateTests`,
+`OriginalPathwaySiteGateTests`; proof of the pathway itself: `OriginalPathwayByteIdenticalToBill`. COVERAGE LIMIT
+(ph2 audit finding 2): the CPU tests cannot reach the host gate lines in LVR (:12250, :19177, :23242, :24530, :30726,
+:31130; the renderer Impl needs a device), so removing one of those host guards fails none of them. What does catch it:
+`tools/check_hook_gating.py` (every VPV-HOOK statement must sit in the canonical Original guard or call a verified
+`// VPV-GATED` function) and the GPU harness `OriginalPathwayByteIdenticalToBill`. Stage B and the phase picture are
+ALSO gated in their module bodies (PhaseTimeline.inl `VpStageBFrame` / `DrawVpPhasePicture`, first statement
+`if (pipelineSlots.OriginalPathway()) return false;`); the CPU source-text test
+`StageBAndThePhasePictureBodiesReturnFirstInTheOriginalPathway` fails if either body gate is removed.
 
 | Id | Area | Divergence | Original / off | Kind |
 |---|---|---|---|---|

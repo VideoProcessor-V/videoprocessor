@@ -21,20 +21,69 @@
 #include <libplacebo/gpu.h>
 #include <libplacebo/renderer.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <fstream>
+#include <iterator>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace VideoProcessorTest
 {
+	namespace
+	{
+		// The repository root with a trailing backslash (the part of this file's path before "\src\").
+		std::string SiteGateRepoRoot()
+		{
+			std::string path = __FILE__;
+			std::replace(path.begin(), path.end(), '/', '\\');
+			path.resize(path.rfind("\\src\\") + 1);
+			return path;
+		}
+		std::string SiteGateReadFile(const std::string& path)
+		{
+			std::ifstream file(path, std::ios::binary);
+			return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+		}
+		// True when the body opened after `signature` starts with `gate` (only whitespace between the brace and it).
+		bool BodyStartsWith(const std::string& text, const std::string& signature, const std::string& gate)
+		{
+			const size_t at = text.find(signature);
+			if (at == std::string::npos)
+				return false;
+			const size_t body = text.find('{', at);
+			if (body == std::string::npos)
+				return false;
+			const size_t first = text.find_first_not_of(" \t\r\n", body + 1);
+			return first != std::string::npos && text.compare(first, gate.size(), gate) == 0;
+		}
+		// Every observable of a registry the settings seam copies (ph2 audit finding 1).
+		void AssertSameRegistry(const PipelineSlots::Registry& expected, const PipelineSlots::Registry& actual, const wchar_t* what)
+		{
+			Assert::AreEqual(expected.OriginalPathway(), actual.OriginalPathway(), what);
+			Assert::AreEqual(expected.EntranceOnce(), actual.EntranceOnce(), what);
+			Assert::AreEqual(expected.IsDefaultOrder(), actual.IsDefaultOrder(), what);
+			for (const PipelineSlots::Info& info : PipelineSlots::Slots())
+			{
+				Assert::AreEqual(expected.Enabled(info.id), actual.Enabled(info.id), what);
+				Assert::AreEqual(expected.Runs(info.id), actual.Runs(info.id), what);
+				Assert::AreEqual(expected.UpstreamForm(info.id), actual.UpstreamForm(info.id), what);
+				Assert::AreEqual(expected.Order(info.id), actual.Order(info.id), what);
+				Assert::AreEqual(expected.UpstreamKey(info.id), actual.UpstreamKey(info.id), what);
+			}
+			Assert::IsTrue(expected.ActiveEntrance() == actual.ActiveEntrance(), what);
+		}
+	}
+
 	TEST_CLASS(OriginalPathwaySiteGateTests)
 	{
 	public:
 		struct Row { bool originalPathway; bool acts; const wchar_t* name; };
 
-		// F3 + the predicate of the five fix-r26 sites (LVR :12256, :19180, :23245, :24542, :30738 / :31142): the registry's
+		// F3 + the predicate of the five fix-r26 sites (LVR :12250, :19177, :23242 / :23248, :24530, :30726 / :31130): the registry's
 		// Original fact survives the wholesale copy / assignment the settings seam does (`pipelineSlots = next;`), and in
 		// Original the re-base slot (origin Vp) does not run, so the warm-up's `applies` term is false there as well.
 		TEST_METHOD(TheRegistryFactSurvivesCopyAndAssignmentAndStopsTheVpSlots)
@@ -55,7 +104,7 @@ namespace VideoProcessorTest
 					Assert::IsFalse(built.Enabled(Id::ScalingRebase), L"Original: scaling.rebase (origin Vp) is disabled");
 					Assert::IsFalse(built.Runs(Id::ScalingRebase), L"Original: the warm-up's `applies` term is false");
 				}
-				// The seam's copy and assignment (an atomic member needs explicit ones).
+				// The seam's copy and assignment (the implicit ones; the atomic fact sits in a copyable wrapper).
 				const PipelineSlots::Registry copied(built);
 				Assert::AreEqual(row.originalPathway, copied.OriginalPathway(), L"copy constructor");
 				Assert::AreEqual(built.Runs(Id::ScalingRebase), copied.Runs(Id::ScalingRebase));
@@ -72,7 +121,82 @@ namespace VideoProcessorTest
 			}
 		}
 
-		// F2: the host's per-frame warm-up call (LVR :23245) is gated in Original, so a warm-up announced on the VP-V pathway
+		// ph2 audit finding 1: the registry's copies are the implicit ones (the atomic Original fact sits in a copyable
+		// wrapper), so the seam's `next.SetEntranceOnce(...); pipelineSlots = next;` (CoreSegments.inl) keeps EVERY member:
+		// B3 off (entranceOnce false) and the Original fact, through copy construction, assignment over the opposite state
+		// and self-assignment. Plausibility: on the VP-V pathway B3 off really changes an observable (the motion consumers
+		// leave the upstream key of a downstream slot), so a dropped member is seen.
+		TEST_METHOD(TheRegistryCopiesKeepEntranceOnceTheOriginalFactAndEveryObservable)
+		{
+			static_assert(std::is_copy_constructible<PipelineSlots::Registry>::value, "copy-constructible");
+			static_assert(std::is_copy_assignable<PipelineSlots::Registry>::value, "copy-assignable");
+			using PipelineSlots::Id;
+			{
+				PipelineSlots::Registry b3On, b3Off;
+				b3Off.SetEntranceOnce(false);
+				Assert::IsTrue(b3On.EntranceOnce(), L"B3 default on");
+				Assert::IsTrue(b3On.UpstreamKey(Id::OutputDither).find("motion.consumers") != std::string::npos,
+					L"plausibility: B3 on, the motion consumers are upstream of output.dither");
+				Assert::IsTrue(b3Off.UpstreamKey(Id::OutputDither).find("motion.consumers") == std::string::npos,
+					L"plausibility: B3 off, the motion consumers leave the key");
+			}
+			struct Case { bool original; bool entranceOnce; const wchar_t* name; };
+			const Case cases[] = {
+				{ false, false, L"VP-V pathway, B3 off" },
+				{ true, false, L"Original pathway, B3 off" },
+				{ false, true, L"VP-V pathway, B3 on" },
+				{ true, true, L"Original pathway, B3 on" },
+			};
+			for (const Case& c : cases)
+			{
+				PipelineSlots::Registry built;
+				if (c.original)
+					built.ApplyOriginalPathway();
+				built.SetEntranceOnce(c.entranceOnce);
+				Assert::AreEqual(c.original, built.OriginalPathway(), c.name);
+				Assert::AreEqual(c.entranceOnce, built.EntranceOnce(), c.name);
+
+				const PipelineSlots::Registry copied(built);
+				AssertSameRegistry(built, copied, L"copy constructor");
+
+				PipelineSlots::Registry assigned;   // the opposite state first, so the assignment is seen to overwrite it
+				if (!c.original)
+					assigned.ApplyOriginalPathway();
+				assigned.SetEntranceOnce(!c.entranceOnce);
+				Assert::AreNotEqual(c.entranceOnce, assigned.EntranceOnce());
+				Assert::AreNotEqual(c.original, assigned.OriginalPathway());
+				assigned = built;
+				AssertSameRegistry(built, assigned, L"copy assignment");
+
+				const PipelineSlots::Registry& self = assigned;
+				assigned = self;
+				AssertSameRegistry(built, assigned, L"self-assignment");
+
+				// The seam's exact sequence: a copy of the live registry, B3 set on the copy, then assigned back.
+				PipelineSlots::Registry live;
+				PipelineSlots::Registry next = built;
+				next.SetEntranceOnce(c.entranceOnce);
+				live = next;
+				Assert::AreEqual(c.entranceOnce, live.EntranceOnce(), L"the seam's assignment keeps B3");
+				Assert::AreEqual(c.original, live.OriginalPathway(), L"the seam's assignment keeps the Original fact");
+			}
+		}
+
+		// ph2 audit finding 2: the host lines of Stage B (LVR :19177) and the phase picture (:24530) cannot be reached from a
+		// CPU test (the renderer Impl needs a device); their MODULE BODIES (PhaseTimeline.inl, `// VPV-GATED`) also return
+		// at once in Original. This source-text test fails when either body gate is removed (the hook checker verifies the
+		// same marker; OriginalPathwayByteIdenticalToBill proves the pathway on the GPU).
+		TEST_METHOD(StageBAndThePhasePictureBodiesReturnFirstInTheOriginalPathway)
+		{
+			const std::string inl = SiteGateReadFile(SiteGateRepoRoot() + "src\\VP-V\\modules\\motion\\consumers\\PhaseTimeline.inl");
+			Assert::IsFalse(inl.empty(), L"PhaseTimeline.inl found");
+			Assert::IsTrue(BodyStartsWith(inl, "bool LibplaceboVideoRenderer::Impl::VpStageBFrame(",
+				"if (pipelineSlots.OriginalPathway()) return false;"), L"VpStageBFrame: the Original gate is its first statement");
+			Assert::IsTrue(BodyStartsWith(inl, "bool LibplaceboVideoRenderer::Impl::DrawVpPhasePicture(",
+				"if (pipelineSlots.OriginalPathway()) return false;"), L"DrawVpPhasePicture: the Original gate is its first statement");
+		}
+
+		// F2: the host's per-frame warm-up call (LVR :23242 / :23248) is gated in Original, so a warm-up announced on the VP-V pathway
 		// would keep `Pending()` (the "Preparing shaders..." status) and its fallback entry until Stop(). The settings seam
 		// entering Original idles it instead: pending off, the entry released once, idempotent; back on the VP-V pathway the
 		// candidate is evaluated afresh and held again (the factors in force were forgotten).
@@ -143,7 +267,7 @@ namespace VideoProcessorTest
 			Assert::IsFalse(warmup.Pending());
 		}
 
-		// The conversion-loop site (LVR :30738, gated on the atomic fact): the store the seam configures for Original
+		// The conversion-loop site (LVR :30726, gated on the atomic fact): the store the seam configures for Original
 		// (`Configure(store && !Original)`) records nothing on an arrival, no job runs and no shared plane is attached.
 		TEST_METHOD(TheFrameAnalysisStoreConfiguredForOriginalRecordsNoArrival)
 		{
@@ -171,7 +295,7 @@ namespace VideoProcessorTest
 			}
 		}
 
-		// Stage B (LVR :19180) and the phase picture (:24542) are gated on the registry fact in the host AND in their module
+		// Stage B (LVR :19177) and the phase picture (:24530) are gated on the registry fact in the host AND in their module
 		// bodies; what they would act on is the per-vsync timeline, which the seam releases when Original is entered: the
 		// view the phase-timeline consumers read says "not active, no skip" afterwards.
 		TEST_METHOD(TheTimelineViewBehindStageBAndThePhasePictureIsClearedAtTheSeam)

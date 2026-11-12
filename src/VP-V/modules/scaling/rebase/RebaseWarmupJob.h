@@ -334,6 +334,7 @@ namespace VpRebaseWarmup
 		{
 			Outcome out;
 			pending.store(false, std::memory_order_release);
+			// Idle() skips the gate when !engaged (ph2 audit 3), safely: every gate wait (pending, announced, epoch, retry) comes with a non-empty status (RebaseWarmup.h:131-194) and any non-empty status engages the entry (Publish, RebaseWarmupJob.h:393-396); empty = the Ready path, which clears announced and the epoch (RebaseWarmup.h:104-118).
 			Idle(out);
 			inForce.Clear();
 			return out;
