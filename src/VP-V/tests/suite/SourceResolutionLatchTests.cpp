@@ -16,6 +16,7 @@
 #include <deque>
 #include <fstream>
 #include <functional>
+#include <initializer_list>
 #include <list>
 #include <map>
 #include <random>
@@ -2726,6 +2727,10 @@ namespace VideoProcessorTest
 						SourceResolutionMonitor::Monitor m;
 						m.SetLatchFixes(fixes);
 						m.SetMixedGuard(false);   // as above: the synthetic tiles' spread, not the rate under test
+						// SID r2 (owner 2026-11-11): the latch's PRECISION for every rendition, the listed and the unlisted sizes and the
+						// single-axis ones alike: the two-axis-conventional restriction is off here (its held / applied split is covered by
+						// SourceResolutionConventionTests; the assertions below are unchanged).
+						m.SetRebaseConventionOnly(false);
 						const bool production = tile == m.TileFor(r.ph());
 						std::vector<float> values(static_cast<size_t>(count) * tile * tile);
 						double t = 0.0, fx = 1.0, fy = 1.0, engagedAt = -1.0;
@@ -2775,6 +2780,99 @@ namespace VideoProcessorTest
 				}
 			}
 			SrcLatch::Budget("RenditionsReBaseToTheirExactSize", started, 240);
+			Assert::IsTrue(failures.empty(), failures.c_str());
+		}
+
+		// SID r2 F2 (owner 2026-11-11): the same renditions through the REAL analysis path under the DEFAULT restriction (two-axis
+		// conventional pairs only), fixes on, the monitor's own tile. Listed sizes engage exactly as with the restriction off (the
+		// sibling above pins those factors to the truth); unlisted sizes and the single-axis 1440x1080 are held (fx = fy = 1) with a
+		// note of the right kind; an SD anamorphic source is applied only as its listed per-axis pair, never as a uniform misread.
+		TEST_METHOD(RenditionsUnderTheDefaultConvention)
+		{
+			const auto started = std::chrono::steady_clock::now();
+			char line[480];
+			std::wstring failures;
+			int index = 0;
+			const auto named = [](const char* name, std::initializer_list<const char*> list) {
+				for (const char* n : list) if (std::string(n) == name) return true;
+				return false;
+			};
+			for (const SrcExact::Rendition& r : SrcExact::Renditions())
+			{
+				++index;
+				SourceResolutionMonitor::Monitor m;
+				Assert::IsTrue(m.RebaseConventionOnly(), L"the restriction is on by default");
+				m.SetLatchFixes(true);
+				m.SetMixedGuard(false);   // as above: the synthetic tiles' spread, not the rate under test
+				const int tile = m.TileFor(r.ph());
+				const int x0 = (r.W - r.pw()) / 2, y0 = (r.H - r.ph()) / 2;
+				int base = 0;
+				const std::vector<SourceResolution::TilePlace> places = SourceResolution::PlaceTiles(x0, y0, r.pw(), r.ph(), tile, false, &base);
+				const int count = static_cast<int>(places.size());
+				std::vector<float> tx, ty;
+				for (const SourceResolution::TilePlace& p : places) { tx.push_back(p.centreX); ty.push_back(p.centreY); }
+				const int shots = 16, framesPerShot = 4;
+				std::vector<float> values(static_cast<size_t>(count) * tile * tile);
+				double t = 0.0, fx = 1.0, fy = 1.0, engagedAt = -1.0, fxSeen = 1.0, fySeen = 1.0;
+				uint64_t sequence = 0;
+				std::string why;
+				for (int s = 0; s < shots && (engagedAt < 0.0 || t < engagedAt + 2.5); ++s)
+				{
+					std::vector<std::vector<double>> tiles;
+					for (int i = 0; i < count; ++i)
+						tiles.push_back(SrcExact::Tile(SrcExact::Scene(10000u * index + 100u * s + static_cast<unsigned>(i)), r.rx(), r.ry(),
+							places[static_cast<size_t>(i)].x0, places[static_cast<size_t>(i)].y0, tile, s % 2 ? 0.55 : 0.30));
+					for (int k = 0; k < framesPerShot; ++k)
+					{
+						for (int i = 0; i < count; ++i)
+							SrcExact::Quantise(tiles[static_cast<size_t>(i)], 0.0008 * k, values.data() + static_cast<size_t>(i) * tile * tile);
+						m.AnalyseTilesForTest(values, count, t, r.W, r.H, tx, ty, base, tile);
+						m.AutoFactors(r.W, r.H, 0.0, why, fx, fy, t, ++sequence);
+						fxSeen = (std::min)(fxSeen, fx);
+						fySeen = (std::min)(fySeen, fy);
+						if (engagedAt < 0.0 && (fx < 1.0 || fy < 1.0)) engagedAt = t;
+						t += 0.5;
+					}
+				}
+				const SourceResolutionMonitor::Snapshot snap = m.Read();
+				snprintf(line, sizeof(line), "CONVENTION %-32s tile %3d: factors %.6f x %.6f (min seen %.6f x %.6f), engaged %.1f s, note: %s\n",
+					r.name, tile, fx, fy, fxSeen, fySeen, engagedAt, snap.conventionNote.c_str());
+				Logger::WriteMessage(line);
+				const std::string text(line);
+				const std::wstring message(text.begin(), text.end());
+				const bool listed = named(r.name, { "540 in 2160", "720 in 2160", "1080 in 2160", "540 in 1080", "720 in 1080",
+					"1080 2.39:1 letterboxed in 2160", "720 2.39:1 letterboxed in 1080", "1080 4:3 pillarboxed in 2160" });
+				const bool unlisted = named(r.name, { "810 in 2160", "900 in 2160", "360 in 1080", "480 in 1080", "576 in 1080" });
+				if (listed)
+				{
+					// Identical to the restriction-off run (RenditionsReBaseToTheirExactSize: exactly the truth on both axes).
+					if (engagedAt < 0.0 || fx != r.expected() || fy != r.expected() || !snap.conventionNote.empty())
+						failures += L"listed size not re-based exactly as with the restriction off: " + message;
+				}
+				else if (unlisted)
+				{
+					if (fxSeen != 1.0 || fySeen != 1.0 || snap.conventionNote.find("re-base held (non-standard size") == std::string::npos)
+						failures += L"unlisted size not held as non-standard: " + message;
+				}
+				else if (std::string(r.name) == "1440x1080 anamorphic in 1080")
+				{
+					if (fxSeen != 1.0 || fySeen != 1.0 || snap.conventionNote.find("held: anamorphic HDV 1440x1080 (single-axis re-base parked") == std::string::npos)
+						failures += L"1440x1080 not held by its name (single-axis, parked): " + message;
+				}
+				else
+				{
+					// SD anamorphic (720x480 / 720x576 shown at 16:9): MED SD - re-based ONLY as the listed per-axis pair
+					// (0.375 x lines/H); the classical uniform misread (the larger axis on both) is held, never applied.
+					const bool pair = fx == 720.0 / r.W && fy == r.ry() && snap.conventionNote.empty();
+					const bool held = fxSeen == 1.0 && fySeen == 1.0 && snap.conventionNote.find("re-base held (non-standard size") != std::string::npos;
+					Logger::WriteMessage(pair ? "SD outcome: the per-axis pair applied\n" : held ? "SD outcome: the uniform misread held\n" : "SD outcome: neither\n");
+					if (!pair && !held)
+						failures += L"SD anamorphic neither its per-axis pair nor held: " + message;
+					if (fxSeen < 1.0 && fxSeen == fySeen)
+						failures += L"SD anamorphic applied as a uniform factor: " + message;
+				}
+			}
+			SrcLatch::Budget("RenditionsUnderTheDefaultConvention", started, 120);
 			Assert::IsTrue(failures.empty(), failures.c_str());
 		}
 	};

@@ -192,6 +192,7 @@ namespace VpvRendererSettings
 		readChoice("capture_upload", settings.captureUpload, { "auto", "render", "early" });
 		readChoice("dv_tone_mapping", settings.dvToneMapping, { "libplacebo", "dolby_style" });   // feat/dv-l8
 		config.TryGetString(rule.section, "dv_compare_capture_folder", settings.dvCompareCaptureFolder);   // feat/dv-l8 WIP
+		config.TryGetString(rule.section, "source_geometry_detect", settings.sourceGeometryDetect);   // SID r2: recognition set
 		readChoice("source_range", settings.sourceRange, { "auto", "full", "limited" });
 		readChoice("deband_vp", settings.debandVp, { "off", "auto", "on" });
 		readChoice("low_bitrate_handling", settings.lowBitrateHandling, { "auto", "off", "on" });
@@ -1205,6 +1206,7 @@ namespace VpvRendererSettings
 			<< settings.sourceResolutionMixedGuard << '|'
 			<< settings.sourceResolutionLatchFixes << '|'
 			<< settings.sourceResolutionCutFixes << '|'
+			<< settings.sourceGeometryDetect << '|'
 			<< settings.activePictureStartupHold << '|'
 			<< settings.sourceResolutionEngageMaxWait << '|'
 			<< settings.sourceResolutionCrossfade << '|'
@@ -1400,6 +1402,7 @@ namespace VpvRendererSettings
 		changed(current.sourceResolutionMixedGuard != next.sourceResolutionMixedGuard, "source_resolution_mixed_guard");
 		changed(current.sourceResolutionLatchFixes != next.sourceResolutionLatchFixes, "source_resolution_latch_fixes");
 		changed(current.sourceResolutionCutFixes != next.sourceResolutionCutFixes, "source_resolution_cut_fixes");
+		changed(current.sourceGeometryDetect != next.sourceGeometryDetect, "source_geometry_detect");
 		changed(current.activePictureStartupHold != next.activePictureStartupHold, "active_picture_startup_hold");
 		changed(current.sourceResolutionEngageMaxWait != next.sourceResolutionEngageMaxWait ||
 			current.sourceResolutionCrossfade != next.sourceResolutionCrossfade ||
@@ -1553,6 +1556,7 @@ namespace VpvRendererSettings
 		<< "source_resolution_mixed_guard=" << (s.sourceResolutionMixedGuard ? "on" : "off") << "\n"
 		<< "source_resolution_latch_fixes=" << (s.sourceResolutionLatchFixes ? "on" : "off") << "\n"
 		<< "source_resolution_cut_fixes=" << (s.sourceResolutionCutFixes ? "on" : "off") << "\n"
+		<< "source_geometry_detect=" << s.sourceGeometryDetect << "\n"
 		<< "active_picture_startup_hold=" << (s.activePictureStartupHold ? "on" : "off") << "\n"
 		<< "source_resolution_engage_max_wait_s=" << s.sourceResolutionEngageMaxWait << "\n"
 		<< "source_resolution_crossfade_s=" << s.sourceResolutionCrossfade << "\n"

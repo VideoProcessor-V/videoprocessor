@@ -15204,6 +15204,87 @@ source_coding_fixes: zzz_invalid
 [vpv]
 source_coding_fixes: zzz_invalid
 
+### source_geometry_detect=on
+[general]
+persist_profile_selection: false
+[vprenderer.Default]
+quality: high
+source_geometry_detect: on
+[vpv]
+source_geometry_detect: on
+
+### source_geometry_detect=off
+[general]
+persist_profile_selection: false
+[vprenderer.Default]
+quality: high
+source_geometry_detect: off
+[vpv]
+source_geometry_detect: off
+
+### source_geometry_detect=auto
+[general]
+persist_profile_selection: false
+[vprenderer.Default]
+quality: high
+source_geometry_detect: auto
+[vpv]
+source_geometry_detect: auto
+
+### source_geometry_detect=1
+[general]
+persist_profile_selection: false
+[vprenderer.Default]
+quality: high
+source_geometry_detect: 1
+[vpv]
+source_geometry_detect: 1
+
+### source_geometry_detect=0
+[general]
+persist_profile_selection: false
+[vprenderer.Default]
+quality: high
+source_geometry_detect: 0
+[vpv]
+source_geometry_detect: 0
+
+### source_geometry_detect=2.5
+[general]
+persist_profile_selection: false
+[vprenderer.Default]
+quality: high
+source_geometry_detect: 2.5
+[vpv]
+source_geometry_detect: 2.5
+
+### source_geometry_detect=10
+[general]
+persist_profile_selection: false
+[vprenderer.Default]
+quality: high
+source_geometry_detect: 10
+[vpv]
+source_geometry_detect: 10
+
+### source_geometry_detect=100
+[general]
+persist_profile_selection: false
+[vprenderer.Default]
+quality: high
+source_geometry_detect: 100
+[vpv]
+source_geometry_detect: 100
+
+### source_geometry_detect=zzz_invalid
+[general]
+persist_profile_selection: false
+[vprenderer.Default]
+quality: high
+source_geometry_detect: zzz_invalid
+[vpv]
+source_geometry_detect: zzz_invalid
+
 ### source_range=auto
 [general]
 persist_profile_selection: false
@@ -17153,6 +17234,8 @@ sdr_white_headroom: on
 sigmoid: auto
 source_class: on
 source_coding_fixes: on
+source_geometry_detect: on
+source_geometry_detect: on
 source_range: auto
 source_resolution: native
 source_resolution_auto_min_confidence: on
@@ -17694,6 +17777,8 @@ sdr_white_headroom: off
 sigmoid: on
 source_class: off
 source_coding_fixes: off
+source_geometry_detect: off
+source_geometry_detect: off
 source_range: full
 source_resolution: auto
 source_resolution_auto_min_confidence: off
@@ -18235,6 +18320,8 @@ sdr_white_headroom: auto
 sigmoid: off
 source_class: auto
 source_coding_fixes: off
+source_geometry_detect: auto
+source_geometry_detect: auto
 source_range: limited
 source_resolution: auto
 source_resolution_auto_min_confidence: auto
@@ -18776,6 +18863,8 @@ sdr_white_headroom: 1
 sigmoid: off
 source_class: 1
 source_coding_fixes: off
+source_geometry_detect: 1
+source_geometry_detect: 1
 source_range: limited
 source_resolution: auto
 source_resolution_auto_min_confidence: 1

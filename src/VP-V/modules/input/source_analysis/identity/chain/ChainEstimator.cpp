@@ -120,7 +120,7 @@ namespace SourceIdentity
 			std::atomic<uint64_t> streamKeyA{ 0 };
 			std::atomic<bool> haveKeyA{ false };
 			std::atomic<uint64_t> cEvaluations{ 0 }, cDelivered{ 0 }, cDropped{ 0 }, cRepeats{ 0 }, cNoClock{ 0 }, cUnusable{ 0 },
-				cStale{ 0 }, cDiscontinuities{ 0 }, cWindowClears{ 0 };
+				cStale{ 0 }, cDiscontinuities{ 0 }, cWindowClears{ 0 }, cFadeShots{ 0 };
 			std::atomic<uint64_t> cLatchEntries{ 0 }, cLatchMoves{ 0 }, cLatchReleases{ 0 }, cLatchRelBound{ 0 }, cLatchRelNative{ 0 }, cLatchRelMenu{ 0 },
 				cLatchRelAbr{ 0 }, cLatchRelReset{ 0 }, cLatchHeldBack{ 0 }, cLatchNonConv{ 0 }, cLatchConfirms{ 0 }, cLatchRelHard{ 0 },
 				cLatchDeferred{ 0 }, cLatchDeferCancelled{ 0 }, cLatchRelAtCut{ 0 }, cLatchRelCeiling{ 0 };
@@ -158,6 +158,11 @@ namespace SourceIdentity
 			bool haveArea = false;
 			LineRect lastActive;
 			uint32_t shotId = 0;
+			// SID r2 N2 (F1): with the safety rules on, a black or fade evaluation without a cut also starts a new evidence shot, at most one
+			// per minimum shot dwell after the previous shot start (a run of black frames never splits one shot into many capped shots).
+			bool haveShotStart = false;
+			int64_t shotStartUs = 0;
+			bool shotStartedNow = false;   // this evaluation started a new evidence shot (a cut, or the F1 black / fade): the latch's boundary
 			uint64_t discontinuities = 0, geometryGen = 0, appliedGen = 0;
 			int64_t lastTimeUs = 0;
 			uint64_t lastSeq = 0;
@@ -926,6 +931,9 @@ namespace SourceIdentity
 				probeVerifier->ClearCache();
 				gov.Reset();
 				shotId = 0;
+				haveShotStart = false;
+				shotStartUs = 0;
+				shotStartedNow = false;
 				discontinuities = 0;
 				geometryGen = 0;
 				appliedGen = 0;
@@ -1175,18 +1183,20 @@ namespace SourceIdentity
 					int cc = 0;
 					for (std::size_t i = 0; i < count && cc < 32; ++i)
 					{
-						double rx = 0.0, ry = 0.0;   // L3: from the delivered raster (every listed size, parked ones too: a diagnostic)
-						if (!Scaling::GeometrySet::RatiosFor(geoms[i], rasterW, rasterH, rx, ry))
-							continue;
-						const double r = a == 0 ? rx : ry;
-						const int n = RoundToInt(static_cast<double>(N) * r);
-						if (n < 16 || n >= N)
-							continue;
-						bool dup = false;
-						for (int k = 0; k < cc; ++k)
-							dup = dup || cands[k] == n;
-						if (!dup)
-							cands[cc++] = n;
+						double rx[2], ry[2];   // L3: from the delivered raster (every listed size, parked ones too: a diagnostic; both forms)
+						const int forms = Scaling::GeometrySet::RatioForms(geoms[i], rasterW, rasterH, rx, ry);
+						for (int f = 0; f < forms && cc < 32; ++f)
+						{
+							const double r = a == 0 ? rx[f] : ry[f];
+							const int n = RoundToInt(static_cast<double>(N) * r);
+							if (n < 16 || n >= N)
+								continue;
+							bool dup = false;
+							for (int k = 0; k < cc; ++k)
+								dup = dup || cands[k] == n;
+							if (!dup)
+								cands[cc++] = n;
+						}
 					}
 					if (cc == 0)
 						continue;
@@ -1295,7 +1305,7 @@ namespace SourceIdentity
 						const ChainEvidence::ShotDiag sd = evidence.ShotDiagAtN(a, cands[k]);
 						const Scaling::GeometrySet::Geometry& geo = geoms[gi[k]];
 						g << seq << ',' << t << ',' << shotId << ',' << (a == 0 ? 'x' : 'y') << ',' << N << ',' << cands[k] << ",\"" << geo.name << "\","
-							<< (geo.singleAxisParked ? 1 : 0) << ',' << ((cr && cr->valid) ? 1 : 0) << ',' << (cr ? Diag::Num(cr->stat) : std::string()) << ','
+							<< (geo.apply ? 0 : 1) << ',' << ((cr && cr->valid) ? 1 : 0) << ',' << (cr ? Diag::Num(cr->stat) : std::string()) << ','
 							<< (cr ? cr->kernel : -1) << ',' << (cr ? cr->lineCount : 0) << ',' << Diag::Num(credit) << ',' << Diag::Num(raw) << ','
 							<< Diag::Num(static_cast<double>(newest) / 1e6) << ',' << (llr <= -1e8 ? std::string() : Diag::Num(llr)) << ','
 							<< (sd.haveSlot ? Diag::Num(sd.open) : std::string()) << ',' << sd.openShotId << ','
@@ -1374,7 +1384,7 @@ namespace SourceIdentity
 				in.menuHold = (flags & (kEvMenuHold | kEvClearWindow)) != 0u || (run[0].have && run[0].up.hold) || (run[1].have && run[1].up.hold);
 				in.abrStep = (flags & kEvAbrStep) != 0u;
 				in.nativeBoth = nat[0] && nat[1];
-				in.shotBoundary = (flags & (kEvCut | kEvBlank | kEvFade)) != 0u;   // N1: a deferred starvation release's moment
+				in.shotBoundary = shotStartedNow;   // N1 / N2: a new evidence shot (a cut, or a rate-limited black / fade, F1) starts the dwell
 				in.havePair = conf[0] && conf[1] && !(nat[0] && nat[1]);
 				if (in.havePair)
 				{
@@ -1468,6 +1478,26 @@ namespace SourceIdentity
 				}
 				const int cutsNow = s.cuts > 0 ? s.cuts : ((flags & kEvCut) != 0u ? 1 : 0);
 				shotId += static_cast<uint32_t>(cutsNow);
+				shotStartedNow = cutsNow > 0;
+				if (!shotStartedNow && safetyOn && (flags & (kEvBlank | kEvFade)) != 0u)
+				{
+					// N2 (F1): a black / fade with no cut is a visible transition: a new evidence shot, so a true upscale can re-confirm in
+					// the scene after it (and a deferred starvation release waits for that shot's dwell, ChainLatch N1). Rate-limited to
+					// one per minimum shot dwell since the previous shot start (a backward time step re-anchors).
+					const double minDwell = cfg.evidence.minShotDwellSec > 0.0 ? cfg.evidence.minShotDwellSec : kMinShotDwellSec;
+					const int64_t since = s.timeUs - shotStartUs;
+					if (!haveShotStart || since < 0 || static_cast<double>(since) / 1e6 >= minDwell)
+					{
+						++shotId;
+						shotStartedNow = true;
+						cFadeShots.fetch_add(1, std::memory_order_relaxed);
+					}
+				}
+				if (shotStartedNow)
+				{
+					haveShotStart = true;
+					shotStartUs = s.timeUs;
+				}
 				// Revert window: the evidence window (both axes, as a resync reset does without the reset record) is cleared BEFORE this evaluation
 				// on a ClearWindow event (the monitor: the end of a menu / mixed episode, the first cut after one) and at the first cut after a HOLD
 				// evaluation of this estimator (ChainEvidence::NoteCut). Black frames and ordinary cuts do not clear. The reading is a pure function
@@ -1808,6 +1838,7 @@ namespace SourceIdentity
 				c.latch.deferCancelled = cLatchDeferCancelled.load(std::memory_order_relaxed);
 				c.latch.releasesAtCut = cLatchRelAtCut.load(std::memory_order_relaxed);
 				c.latch.releasesCeiling = cLatchRelCeiling.load(std::memory_order_relaxed);
+				c.fadeShots = cFadeShots.load(std::memory_order_relaxed);
 				return c;
 			}
 

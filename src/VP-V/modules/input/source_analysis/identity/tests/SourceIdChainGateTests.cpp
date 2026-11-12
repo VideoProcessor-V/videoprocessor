@@ -18,6 +18,7 @@
 #include <VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -201,6 +202,7 @@ namespace Tests
 			GeoFx::G::HeldState geo;
 			m.SetGeometrySource(&geo);
 			m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+			m.ChainEstimatorRef().SetSafetyRules(true);   // N2: the cue is used only while the rules are on (it only exists then)
 			const SidGate::Outcome o = SidGate::Script(m, geo, 10.0);
 			Assert::AreEqual(0.5, o.fx, 1e-9);
 			Assert::AreEqual<uint64_t>(0, m.ChainEstimatorRef().LatchCeilingReleases(), L"fixture: no ceiling release yet");
@@ -219,6 +221,70 @@ namespace Tests
 			Assert::AreEqual(1.5, tr.duration, 1e-9, L"the engage crossfade (source_resolution_crossfade_s), not the release fade");
 			Assert::AreEqual(0.5, tr.fromX, 1e-9, L"faded from the upscaled path");
 			Assert::AreEqual(1.0, tr.toX, 1e-9);
+			Assert::IsFalse(m.LatchCeilingCuePendingForTest(), L"the cue is used once");
+		}
+
+		// SID r2 N2: the ceiling's crossfade cue never lingers. It is decided by the FIRST fresh gate record after it: a record that still
+		// reads the upscale drops it (a later unrelated native switch takes its own path, not the crossfade); and it is dropped at once
+		// when no fresh gate is in use (Shadow) or the safety rules are off. Re-reading the record seen before the cue keeps it.
+		TEST_METHOD(TheCeilingCueIsDroppedByTheFirstFreshRecordAfterItOrWithoutAFreshGate)
+		{
+			{
+				SidGate::Mon m;
+				GeoFx::G::HeldState geo;
+				m.SetGeometrySource(&geo);
+				m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+				m.ChainEstimatorRef().SetSafetyRules(true);
+				const SidGate::Outcome o = SidGate::Script(m, geo, 10.0);
+				Assert::AreEqual(0.5, o.fx, 1e-9);
+				m.ChainEstimatorRef().NoteLatchCeilingForTest();
+				std::string why;
+				double fx = o.fx, fy = o.fy;
+				m.InjectResultForTest(SidGate::CleanSnapshot(3, false), o.nextSeq - 1);
+				m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 16.7, o.nextSeq);
+				Assert::IsTrue(m.LatchCeilingCuePendingForTest(), L"the record seen before the cue does not decide it");
+				Assert::AreEqual(0.5, fx, 1e-9);
+				// New evaluations still reading the upscale: the first fresh record after the cue drops it.
+				uint64_t seq = SidGate::Feed(m, geo, 16.8, 4, o.nextSeq, true);
+				m.InjectResultForTest(SidGate::CleanSnapshot(4, false), seq - 1);
+				why.clear();
+				m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 18.4, seq);
+				Assert::IsFalse(m.LatchCeilingCuePendingForTest(), L"dropped by the first fresh record after it (still upscaled)");
+				Assert::AreEqual(0.5, fx, 1e-9, L"nothing else changed");
+				// A later, unrelated native switch: the original revert path, not the ceiling's crossfade.
+				seq = SidGate::Feed(m, geo, 18.5, 32, seq, false);
+				SourceIdentity::Record p14;
+				Assert::IsTrue(m.SourceIdRecord(p14) && p14.ratioH == 1.0f && p14.ratioV == 1.0f, L"fixture: the consensus adopted native");
+				m.InjectResultForTest(SidGate::CleanSnapshot(5, false), seq - 1);
+				why.clear();
+				m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 35.0, seq);
+				Assert::AreEqual(1.0, fx, 1e-9);
+				Assert::IsTrue(why.find("ceiling") == std::string::npos && why.find("at once") != std::string::npos,
+					(L"the ordinary revert, not the stale cue's crossfade: " + std::wstring(why.begin(), why.end())).c_str());
+				Assert::IsTrue(m.AutoTransition(35.0).duration < 1.5, L"not the engage crossfade");
+			}
+			for (int variant = 0; variant < 2; ++variant)
+			{
+				// 0: Shadow (no fresh gate in use); 1: the safety rules turned off.
+				SidGate::Mon m;
+				GeoFx::G::HeldState geo;
+				m.SetGeometrySource(&geo);
+				m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+				m.ChainEstimatorRef().SetSafetyRules(true);
+				const SidGate::Outcome o = SidGate::Script(m, geo, 10.0);
+				Assert::AreEqual(0.5, o.fx, 1e-9);
+				m.ChainEstimatorRef().NoteLatchCeilingForTest();
+				if (variant == 0)
+					m.SetSourceIdMode(SidGate::Mon::SourceIdMode::Shadow);
+				else
+					m.ChainEstimatorRef().SetSafetyRules(false);
+				std::string why;
+				double fx = o.fx, fy = o.fy;
+				m.InjectResultForTest(SidGate::CleanSnapshot(3, false), o.nextSeq - 1);
+				m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 16.7, o.nextSeq);
+				Assert::IsFalse(m.LatchCeilingCuePendingForTest(), variant == 0 ? L"Shadow: dropped at once" : L"rules off: dropped at once");
+				Assert::IsTrue(why.find("ceiling") == std::string::npos, L"and never used");
+			}
 		}
 
 		TEST_METHOD(ShadowIsByteIdenticalToOffAndOnEngagesOnTheSameScript)
@@ -432,6 +498,705 @@ namespace Tests
 			Assert::IsTrue(on.find("single-axis re-base held") == std::string::npos, L"the switch on: nothing is held, nothing shown");
 			Assert::AreEqual(0.5, fx, 1e-9, L"the switch on: the single-axis re-base is applied");
 			Assert::AreEqual(1.0, fy, 1e-9);
+		}
+	};
+
+	// SID r2 (owner 2026-11-11): source_resolution auto re-bases ONLY a two-axis conventional pair (one listed, non-parked
+	// Scaling::GeometrySet geometry on the delivered raster, tolerance 0.6 %), on the classical path (consensus off or no fresh record)
+	// and through the consensus alike. A single-axis reading (unless the single-axis switch is on) or a size outside the list is held:
+	// logged and shown (Snapshot::conventionNote -> Describe -> Ctrl+I and the Config status line), never applied. Listed two-axis
+	// sizes, natives and the Original pathway: exactly as before (the same trace as with the restriction switched off).
+	namespace SidConv
+	{
+		typedef SourceResolutionMonitor::Monitor Mon;
+		typedef SourceResolutionMonitor::Snapshot Snap;
+		constexpr int W = 1920, H = 1080;   // the delivered raster (test fixture)
+
+		inline Snap Uniform(double r)
+		{
+			Snap s;
+			s.reading = true;
+			s.nativeWidth = W;
+			s.nativeHeight = H;
+			s.declaredRatio = s.liveRatio = s.frameRatio = r;
+			s.confidence = r < 1.0 ? 0.9 : 0.0;
+			s.frames = 1;
+			return s;
+		}
+
+		inline Snap PerAxis(double rx, double ry)
+		{
+			Snap s = Uniform(1.0);
+			s.axisRatioX = rx;
+			s.axisRatioY = ry;
+			s.axisConfidence = 0.9;
+			return s;
+		}
+
+		struct Run
+		{
+			double fx = 1.0, fy = 1.0;
+			std::string trace, note, shown, hidden;
+		};
+
+		// The classical path on the frame-bound source clock: one scripted reading, then 8 decisions 62.5 ms apart (a 50 ms wait:
+		// a re-base that is applied engages on the second). The trace is every factor, fade and reason a viewer could see.
+		inline Run Drive(Mon& m, const Snap& s, int rasterW = W, int rasterH = H)
+		{
+			m.SetEngageTiming(0.05, 0.125, 0.05);
+			m.SetFrameBound(true, 0);
+			m.InjectResultForTest(s, 1);
+			Run r;
+			for (uint64_t seq = 1; seq <= 8; ++seq)
+			{
+				std::string why;
+				double fx = 1.0, fy = 1.0;
+				const double t = 100.0 + 0.0625 * static_cast<double>(seq - 1);
+				m.AutoFactors(rasterW, rasterH, 0.5, why, fx, fy, t, seq);
+				const Mon::Transition tr = m.AutoTransition(t);
+				char line[400];
+				std::snprintf(line, sizeof(line), "%llu f=%.6f,%.6f tr=%.6f,%.6f>%.6f,%.6f w=%.6f why=%s\n", static_cast<unsigned long long>(seq),
+					fx, fy, tr.fromX, tr.fromY, tr.toX, tr.toY, tr.weight, why.c_str());
+				r.trace += line;
+				r.fx = fx;
+				r.fy = fy;
+			}
+			const Snap now = m.Read();
+			r.note = now.conventionNote;
+			r.shown = SourceResolutionMonitor::Describe(now, m.AutoRatio(), true);
+			r.hidden = SourceResolutionMonitor::Describe(now, m.AutoRatio(), false);
+			return r;
+		}
+
+		inline Run DriveFresh(const Snap& s, bool conventionOnly, bool singleAxis = false, bool original = false)
+		{
+			Mon m;
+			m.SetRebaseConventionOnly(conventionOnly);
+			m.SetSingleAxisRebase(singleAxis);
+			m.SetOriginalPathway(original);
+			return Drive(m, s);
+		}
+
+		inline bool Has(const std::string& s, const char* what) { return s.find(what) != std::string::npos; }
+		inline std::wstring W16(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+	}
+
+	TEST_CLASS(SourceResolutionConventionTests)
+	{
+	public:
+		TEST_METHOD(AListedTwoAxisSizeIsReBasedExactlyAsBefore)
+		{
+			// 960x540 on 1080p (uniform 1/2) and 720x480 at 16:9 on 1080p (0.375 x 0.4444, the classical per-axis reading).
+			const SidConv::Run u = SidConv::DriveFresh(SidConv::Uniform(0.5), true);
+			const SidConv::Run u0 = SidConv::DriveFresh(SidConv::Uniform(0.5), false);
+			Assert::AreEqual(0.5, u.fx, 1e-9, SidConv::W16(u.trace).c_str());
+			Assert::AreEqual(0.5, u.fy, 1e-9);
+			Assert::AreEqual(u0.trace, u.trace, L"byte-identical with the restriction switched off");
+			Assert::IsTrue(u.note.empty() && !SidConv::Has(u.shown, "re-base held"), L"nothing is held, nothing shown");
+			const SidConv::Run p = SidConv::DriveFresh(SidConv::PerAxis(720.0 / 1920.0, 480.0 / 1080.0), true);
+			const SidConv::Run p0 = SidConv::DriveFresh(SidConv::PerAxis(720.0 / 1920.0, 480.0 / 1080.0), false);
+			Assert::AreEqual(0.375, p.fx, 1e-9, SidConv::W16(p.trace).c_str());
+			Assert::AreEqual(480.0 / 1080.0, p.fy, 1e-9);
+			Assert::AreEqual(p0.trace, p.trace, L"byte-identical with the restriction switched off");
+			Assert::IsTrue(p.note.empty());
+		}
+
+		TEST_METHOD(ANonStandardUniformSizeIsHeldAndShownNeverApplied)
+		{
+			// 0.7 on 1080p = 1344x756: no listed size (1280x720 is 2/3, outside the 0.6 % tolerance).
+			const SidConv::Run r = SidConv::DriveFresh(SidConv::Uniform(0.7), true);
+			Assert::AreEqual(1.0, r.fx, 1e-9, SidConv::W16(r.trace).c_str());
+			Assert::AreEqual(1.0, r.fy, 1e-9);
+			Assert::IsTrue(SidConv::Has(r.note, "re-base held (non-standard size H 0.7000 x V 0.7000"), SidConv::W16(r.note).c_str());
+			Assert::IsTrue(SidConv::Has(r.shown, r.note.c_str()), L"shown on the auto status (Ctrl+I and the Config status line)");
+			Assert::IsFalse(SidConv::Has(r.hidden, "re-base held"), L"not shown while auto is not selected");
+			const SidConv::Run off = SidConv::DriveFresh(SidConv::Uniform(0.7), false);
+			Assert::AreEqual(756.0 / 1080.0, off.fx, 1e-9, L"fixture: the restriction off applies it (the earlier behaviour)");
+			Assert::IsTrue(off.note.empty());
+		}
+
+		TEST_METHOD(AClassicalSingleAxisReadingIsHeldUnlessTheSwitchIsOn)
+		{
+			const SidConv::Run r = SidConv::DriveFresh(SidConv::PerAxis(0.75, 1.0), true);
+			Assert::AreEqual(1.0, r.fx, 1e-9, SidConv::W16(r.trace).c_str());
+			Assert::AreEqual(1.0, r.fy, 1e-9);
+			// Owner 2026-11-11: H 0.75 on a 1080p raster is the named parked HDV entry, held by its name (was the generic single-axis text).
+			Assert::IsTrue(SidConv::Has(r.note, "held: anamorphic HDV 1440x1080 (single-axis re-base parked; H 0.7500"), SidConv::W16(r.note).c_str());
+			Assert::IsTrue(SidConv::Has(r.shown, r.note.c_str()));
+			const SidConv::Run v = SidConv::DriveFresh(SidConv::PerAxis(1.0, 0.75), true);
+			Assert::AreEqual(1.0, v.fy, 1e-9);
+			Assert::IsTrue(SidConv::Has(v.note, "single-axis re-base held (V 0.7500"), SidConv::W16(v.note).c_str());
+			const SidConv::Run on = SidConv::DriveFresh(SidConv::PerAxis(0.75, 1.0), true, true);
+			Assert::AreEqual(0.75, on.fx, 1e-9, SidConv::W16(on.trace).c_str());
+			Assert::AreEqual(1.0, on.fy, 1e-9);
+			Assert::IsTrue(on.note.empty(), L"the single-axis switch on: applied, nothing held");
+		}
+
+		TEST_METHOD(ANonStandardPerAxisPairIsHeld)
+		{
+			const SidConv::Run r = SidConv::DriveFresh(SidConv::PerAxis(0.7, 0.6), true);
+			Assert::AreEqual(1.0, r.fx, 1e-9, SidConv::W16(r.trace).c_str());
+			Assert::AreEqual(1.0, r.fy, 1e-9);
+			Assert::IsTrue(SidConv::Has(r.note, "non-standard size H 0.7000 x V 0.6000"), SidConv::W16(r.note).c_str());
+			const SidConv::Run off = SidConv::DriveFresh(SidConv::PerAxis(0.7, 0.6), false);
+			Assert::IsTrue(off.fx < 1.0 && off.fy < 1.0, L"fixture: the restriction off applies it");
+		}
+
+		TEST_METHOD(TheOriginalPathwayAndNativesAreUntouched)
+		{
+			const SidConv::Run o = SidConv::DriveFresh(SidConv::Uniform(0.7), true, false, true);
+			const SidConv::Run o0 = SidConv::DriveFresh(SidConv::Uniform(0.7), false, false, true);
+			Assert::AreEqual(o0.trace, o.trace, L"the Original pathway: no convention check (byte-identical)");
+			Assert::AreEqual(756.0 / 1080.0, o.fx, 1e-9, SidConv::W16(o.trace).c_str());
+			Assert::IsTrue(o.note.empty());
+			const SidConv::Run op = SidConv::DriveFresh(SidConv::PerAxis(0.75, 1.0), true, false, true);
+			const SidConv::Run op0 = SidConv::DriveFresh(SidConv::PerAxis(0.75, 1.0), false, false, true);
+			Assert::AreEqual(op0.trace, op.trace, L"the Original pathway: the single-axis reading as before");
+			Assert::IsTrue(op.note.empty());
+			const SidConv::Run n = SidConv::DriveFresh(SidConv::Uniform(1.0), true);
+			const SidConv::Run n0 = SidConv::DriveFresh(SidConv::Uniform(1.0), false);
+			Assert::AreEqual(n0.trace, n.trace, L"natives: byte-identical");
+			Assert::AreEqual(1.0, n.fx, 1e-9);
+			Assert::IsTrue(n.note.empty() && !SidConv::Has(n.shown, "re-base held"));
+		}
+
+		// MED SD (owner 2026-11-11): 720x576 / 720x480 shown at 16:9 on 1080p re-base ONLY through the per-axis reading matching the
+		// listed pair (0.375 x lines/1080). The classical UNIFORM misread (lines/1080 on both axes: 1024x576 / 853x480, not listed) is
+		// held as non-standard and never applied, also when a per-axis reading of another size accompanies it.
+		TEST_METHOD(SdReBasesOnlyAsItsListedPerAxisPair)
+		{
+			for (int lines : { 576, 480 })
+			{
+				const double rv = lines / 1080.0;
+				const SidConv::Run u = SidConv::DriveFresh(SidConv::Uniform(rv), true);
+				Assert::AreEqual(1.0, u.fx, 1e-9, SidConv::W16(u.trace).c_str());
+				Assert::AreEqual(1.0, u.fy, 1e-9);
+				Assert::IsTrue(SidConv::Has(u.note, "re-base held (non-standard size"), SidConv::W16(u.note).c_str());
+				Assert::IsTrue(SidConv::Has(u.trace, "f=1.000000,1.000000") && !SidConv::Has(u.trace, "tr=1.000000,1.000000>0."),
+					L"the uniform misread is never applied, not even for one frame");
+				SidConv::Snap both = SidConv::Uniform(rv);
+				both.axisRatioX = 720.0 / 1920.0;
+				both.axisRatioY = rv;
+				both.axisConfidence = 0.9;
+				const SidConv::Run p = SidConv::DriveFresh(both, true);
+				Assert::AreEqual(0.375, p.fx, 1e-9, SidConv::W16(p.trace).c_str());
+				Assert::AreEqual(rv, p.fy, 1e-9);
+				Assert::IsTrue(p.note.empty(), SidConv::W16(p.note).c_str());
+				SidConv::Snap other = both;
+				other.axisRatioX = 0.45;   // 864 columns: not the SD pair
+				const SidConv::Run o = SidConv::DriveFresh(other, true);
+				Assert::AreEqual(1.0, o.fx, 1e-9, SidConv::W16(o.trace).c_str());
+				Assert::AreEqual(1.0, o.fy, 1e-9);
+				Assert::IsTrue(SidConv::Has(o.note, "re-base held (non-standard size"), SidConv::W16(o.note).c_str());
+			}
+		}
+
+		// F3: the Original pathway shows no held note (also one left from before the switch), and its fallback is released.
+		TEST_METHOD(TheOriginalPathwayShowsNoStaleNote)
+		{
+			SidConv::Mon m;
+			const SidConv::Run r = SidConv::Drive(m, SidConv::Uniform(0.7));
+			Assert::IsFalse(r.note.empty(), L"fixture: held while the convention applies");
+			Assert::IsTrue(m.ConventionHoldFallback().engaged);
+			m.SetOriginalPathway(true);
+			Assert::IsTrue(m.Read().conventionNote.empty(), SidConv::W16(m.Read().conventionNote).c_str());
+			Assert::IsFalse(m.ConventionHoldFallback().engaged);
+		}
+
+		// F3: the consensus's single-axis hold (L6) does not outlive its fresh record, also when no per-axis branch runs.
+		TEST_METHOD(TheSingleAxisHoldEndsWhenTheRecordIsNotFresh)
+		{
+			SidGate::Mon m;
+			GeoFx::G::HeldState geo;
+			m.SetGeometrySource(&geo);
+			m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+			uint64_t seq = 2;
+			for (int i = 0; i < 13; ++i)
+			{
+				const double t = 10.0 + 0.5 * i;
+				if (i % 2 == 0)
+					geo.Publish(GeoFx::MakeRecord(seq, SidGate::Us(t - 0.1), GeoFx::AppliedAxis(720, 3840, 5), GeoFx::AppliedAxis(2160, 2160, -1)));
+				SidGate::Analyse(m, t, seq++);
+			}
+			std::string why;
+			double fx = 1.0, fy = 1.0;
+			m.InjectResultForTest(SidGate::CleanSnapshot(1, false), seq - 1);
+			m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 16.1, seq);
+			const std::string before = m.Read().conventionNote;
+			Logger::WriteMessage(("fresh: " + before + "\n").c_str());
+			// Long after the last record (not fresh) and with no per-axis reading (neither branch runs).
+			SidConv::Snap none = SidGate::CleanSnapshot(2, false);
+			none.reading = false;
+			m.InjectResultForTest(none, seq);
+			m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 200.0, seq + 1);
+			const std::string after = m.Read().conventionNote;
+			Assert::IsFalse(SidConv::Has(after, "single-axis"), SidConv::W16(before + " -> " + after).c_str());
+			if (!SidConv::Has(before, "single-axis"))
+				Logger::WriteMessage("the consensus did not hold a single axis here (the stale clear is exercised without a prior hold)\n");
+		}
+
+		// F4: a raster width <= 0 through AutoFactors holds on the uniform path as on the per-axis path (the list cannot be checked);
+		// AutoFactor called alone keeps the earlier law.
+		TEST_METHOD(AnUnknownRasterWidthHoldsOnBothPaths)
+		{
+			SidConv::Mon mu;
+			const SidConv::Run u = SidConv::Drive(mu, SidConv::Uniform(0.5), 0);
+			Assert::AreEqual(1.0, u.fx, 1e-9, SidConv::W16(u.trace).c_str());
+			Assert::AreEqual(1.0, u.fy, 1e-9);
+			Assert::IsTrue(SidConv::Has(u.note, "re-base held (non-standard size"), SidConv::W16(u.note).c_str());
+			SidConv::Mon mp;
+			const SidConv::Run p = SidConv::Drive(mp, SidConv::PerAxis(720.0 / 1920.0, 480.0 / 1080.0), 0);
+			Assert::AreEqual(1.0, p.fx, 1e-9, SidConv::W16(p.trace).c_str());
+			Assert::AreEqual(1.0, p.fy, 1e-9);
+			Assert::IsTrue(SidConv::Has(p.note, "re-base held (non-standard size"), SidConv::W16(p.note).c_str());
+			// AutoFactor alone (no raster width): the earlier law, the non-standard 0.7 applied.
+			SidConv::Mon m;
+			m.SetEngageTiming(0.05, 0.125, 0.05);
+			m.SetFrameBound(true, 0);
+			m.InjectResultForTest(SidConv::Uniform(0.7), 1);
+			double f = 1.0;
+			for (uint64_t seq = 1; seq <= 8; ++seq)
+			{
+				std::string why;
+				f = m.AutoFactor(SidConv::H, 0.5, why, 100.0 + 0.0625 * static_cast<double>(seq - 1), seq);
+			}
+			Assert::AreEqual(756.0 / 1080.0, f, 1e-9, L"AutoFactor alone keeps the earlier law");
+		}
+
+		// LOW: the held state has a one-time notice (FallbackCatalog "source resolution held"), released when nothing is held.
+		TEST_METHOD(TheHeldStateHasAOneTimeNotice)
+		{
+			SidConv::Mon m;
+			SidConv::Drive(m, SidConv::PerAxis(0.75, 1.0));
+			const FallbackCatalog::Decision d = m.ConventionHoldFallback();
+			Assert::AreEqual(std::string("source resolution held"), d.id);
+			Assert::IsTrue(d.engaged);
+			Assert::IsTrue(SidConv::Has(d.reason, "held: anamorphic HDV 1440x1080 (single-axis re-base parked; H 0.7500"), SidConv::W16(d.reason).c_str());   // named (owner 2026-11-11)
+			SidConv::Mon n;
+			SidConv::Drive(n, SidConv::Uniform(0.5));
+			Assert::IsFalse(n.ConventionHoldFallback().engaged, L"a listed size: nothing held, no notice");
+		}
+
+		// The consensus On with a fresh record: the same restriction on its latched pair (the uniform wish and the per-axis path).
+		TEST_METHOD(TheConsensusPathHasTheSameRestriction)
+		{
+			struct Out { SidGate::Outcome o; std::string note; bool latched = false; };
+			auto run = [](int nx, int ny, bool conventionOnly) {
+				Out out;
+				SidGate::Mon m;
+				GeoFx::G::HeldState geo;
+				m.SetGeometrySource(&geo);
+				m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+				m.SetRebaseConventionOnly(conventionOnly);
+				uint64_t seq = 2;
+				for (int i = 0; i < 13; ++i)
+				{
+					const double t = 10.0 + 0.5 * i;
+					if (i % 2 == 0)
+						geo.Publish(GeoFx::MakeRecord(seq, SidGate::Us(t - 0.1), GeoFx::AppliedAxis(nx, 3840, 5), GeoFx::AppliedAxis(ny, 2160, 5)));
+					SidGate::Analyse(m, t, seq++);
+				}
+				std::string why;
+				m.InjectResultForTest(SidGate::CleanSnapshot(1, false), seq - 1);
+				m.AutoFactors(3840, 2160, 0.8, why, out.o.fx, out.o.fy, 16.1, seq);
+				out.o.why1 = why;
+				why.clear();
+				m.InjectResultForTest(SidGate::CleanSnapshot(2, true), seq);
+				m.AutoFactors(3840, 2160, 0.8, why, out.o.fx, out.o.fy, 16.6, seq + 1);
+				out.o.why2 = why;
+				out.note = m.Read().conventionNote;
+				SourceIdentity::Record rec;
+				out.latched = m.SourceIdRecord(rec) && rec.ratioH < 1.0f && rec.ratioV < 1.0f;
+				return out;
+			};
+			// 2560x1440 (2/3) is listed: engaged exactly as with the restriction off.
+			const Out c = run(2560, 1440, true), c0 = run(2560, 1440, false);
+			Assert::IsTrue(c.latched, L"fixture: the consensus latched the listed pair");
+			Assert::AreEqual(1440.0 / 2160.0, c.o.fx, 1e-9, SidConv::W16(c.o.why1 + " | " + c.o.why2).c_str());
+			Assert::AreEqual(1440.0 / 2160.0, c.o.fy, 1e-9);
+			Assert::AreEqual(c0.o.fx, c.o.fx, 0.0);
+			Assert::AreEqual(c0.o.why2, c.o.why2, L"the same reasons as with the restriction off");
+			Assert::IsTrue(c.note.empty());
+			// 2700x1512 (0.703 x 0.700) is not listed: held, shown, never applied, whether the consensus latched it or refused it upstream.
+			const Out n = run(2700, 1512, true), n0 = run(2700, 1512, false);
+			Assert::AreEqual(1.0, n.o.fx, 1e-9, SidConv::W16(n.o.why1 + " | " + n.o.why2).c_str());
+			Assert::AreEqual(1.0, n.o.fy, 1e-9);
+			if (n.latched)
+			{
+				Logger::WriteMessage("the consensus latched the non-listed pair; the Monitor held it\n");
+				Assert::IsTrue(SidConv::Has(n.note, "re-base held (non-standard size"), SidConv::W16(n.note).c_str());
+				Assert::IsTrue(n0.o.fx < 1.0, L"fixture: the restriction off applies the latched pair");
+			}
+			else
+				Logger::WriteMessage("the consensus did not latch the non-listed pair (refused upstream); nothing applied\n");
+		}
+	};
+
+	// SID r2 (owner 2026-11-11 ~10:20 / ~10:25): named anamorphic HD entries, parked (detect on, apply off), and the detection setting
+	// source_geometry_detect. Recognition names and counts a hold; it never changes what is applied.
+	namespace SidNamed
+	{
+		namespace G = Scaling::GeometrySet;
+
+		inline SidConv::Snap PerAxisOn(double rx, double ry, int w, int h)
+		{
+			SidConv::Snap s = SidConv::PerAxis(rx, ry);
+			s.nativeWidth = w;
+			s.nativeHeight = h;
+			return s;
+		}
+
+		// The factor part of a trace (the reasons may carry the note text): what a viewer gets applied.
+		inline std::string Factors(const std::string& trace)
+		{
+			std::string out, line;
+			for (char ch : trace)
+			{
+				if (ch != '\n') { line += ch; continue; }
+				const std::size_t w = line.find(" why=");
+				out += line.substr(0, w) + "\n";
+				line.clear();
+			}
+			return out;
+		}
+
+		inline bool AllNative(const std::string& trace)
+		{
+			std::size_t pos = 0, lines = 0;
+			while ((pos = trace.find(" f=", pos)) != std::string::npos)
+			{
+				if (trace.compare(pos, 21, " f=1.000000,1.000000 ") != 0)
+					return false;
+				++pos;
+				++lines;
+			}
+			return lines == 8;
+		}
+
+		inline const G::Geometry* Entry(const char* id)
+		{
+			std::size_t count = 0;
+			const G::Geometry* g = G::Geometries(count);
+			for (std::size_t i = 0; i < count; ++i)
+				if (std::string(id) == g[i].id)
+					return &g[i];
+			return nullptr;
+		}
+
+		inline SidConv::Run DriveDetect(const SidConv::Snap& s, int w, int h, const char* detect, SidConv::Mon& m)
+		{
+			m.SetRebaseConventionOnly(true);
+			if (detect != nullptr)
+				m.SetGeometryDetect(detect);
+			return SidConv::Drive(m, s, w, h);
+		}
+	}
+
+	TEST_CLASS(SourceGeometryNamedHoldTests)
+	{
+	public:
+		TEST_METHOD(EachNamedAnamorphicEntryIsRecognisedAndHeldByItsName)
+		{
+			const char* ids[] = { "hdv_1440x1080", "dvcprohd_1280x1080", "dvcprohd_960x720" };
+			const int rasters[][2] = { { 1920, 1080 }, { 3840, 2160 } };
+			for (const char* id : ids)
+				for (const auto& ra : rasters)
+				{
+					const Scaling::GeometrySet::Geometry* e = SidNamed::Entry(id);
+					Assert::IsNotNull(e, L"the entry is in the table");
+					Assert::IsTrue(e->detect && !e->apply, L"parked: detect on, apply off");
+					double rx = 0.0, ry = 0.0;
+					Assert::IsTrue(Scaling::GeometrySet::RatiosFor(*e, ra[0], ra[1], rx, ry), L"placed on the delivered raster");
+					SidConv::Mon m;
+					const SidConv::Run r = SidNamed::DriveDetect(SidNamed::PerAxisOn(rx, ry, ra[0], ra[1]), ra[0], ra[1], nullptr, m);
+					char msg[400];
+					std::snprintf(msg, sizeof(msg), "%s on %dx%d (H %.4f x V %.4f): note '%s'\n", id, ra[0], ra[1], rx, ry, r.note.c_str());
+					Logger::WriteMessage(msg);
+					const std::wstring w = SidConv::W16(msg);
+					Assert::IsTrue(SidNamed::AllNative(r.trace), (w + SidConv::W16(r.trace)).c_str());
+					Assert::IsTrue(SidConv::Has(r.note, (std::string("held: ") + e->name + " (").c_str()) && SidConv::Has(r.note, "re-base parked"), w.c_str());
+					Assert::IsTrue(SidConv::Has(r.shown, r.note.c_str()), L"shown on the auto status");
+					Assert::AreEqual(1u, m.NamedHoldCount(id), (L"one episode counted once: " + w).c_str());
+					Assert::IsTrue(m.ConventionHoldFallback().engaged && SidConv::Has(m.ConventionHoldFallback().reason, e->name), w.c_str());
+					// The same reading with recognition narrowed to the conventional entries: the same factors, a generic hold, no count.
+					SidConv::Mon n;
+					const SidConv::Run g = SidNamed::DriveDetect(SidNamed::PerAxisOn(rx, ry, ra[0], ra[1]), ra[0], ra[1], "conventional", n);
+					Assert::AreEqual(SidNamed::Factors(r.trace), SidNamed::Factors(g.trace), (L"apply byte-identical: " + w).c_str());
+					Assert::IsFalse(SidConv::Has(g.note, "held: "), SidConv::W16(g.note).c_str());
+					Assert::IsTrue(SidConv::Has(g.note, "re-base held"), SidConv::W16(g.note).c_str());
+					Assert::AreEqual(0u, n.NamedHoldCount(id));
+				}
+		}
+
+		TEST_METHOD(ANearMissStaysAGenericHold)
+		{
+			SidConv::Mon m;
+			const SidConv::Run r = SidNamed::DriveDetect(SidNamed::PerAxisOn(0.72, 1.0, 1920, 1080), 1920, 1080, "all", m);
+			Assert::IsTrue(SidNamed::AllNative(r.trace), SidConv::W16(r.trace).c_str());
+			Assert::IsTrue(SidConv::Has(r.note, "single-axis re-base held (H 0.7200"), SidConv::W16(r.note).c_str());
+			Assert::IsFalse(SidConv::Has(r.note, "held: "), SidConv::W16(r.note).c_str());
+			for (const char* id : { "hdv_1440x1080", "dvcprohd_1280x1080", "dvcprohd_960x720" })
+				Assert::AreEqual(0u, m.NamedHoldCount(id));
+		}
+
+		TEST_METHOD(NativesAndListedSizesAreUnaffected)
+		{
+			for (const char* detect : { "all", "conventional", "hdv_1440x1080 dvcprohd_1280x1080 dvcprohd_960x720" })
+			{
+				SidConv::Mon m, m0;
+				const SidConv::Run n = SidNamed::DriveDetect(SidConv::Uniform(1.0), 1920, 1080, detect, m);
+				Assert::IsTrue(SidNamed::AllNative(n.trace) && n.note.empty(), SidConv::W16(n.trace).c_str());
+				const SidConv::Run p = SidNamed::DriveDetect(SidConv::PerAxis(1.0, 1.0), 1920, 1080, detect, m0);
+				Assert::IsTrue(SidNamed::AllNative(p.trace) && p.note.empty(), SidConv::W16(p.trace).c_str());
+				SidConv::Mon l, l0;
+				const SidConv::Run u = SidNamed::DriveDetect(SidConv::Uniform(0.5), 1920, 1080, detect, l);
+				const SidConv::Run u0 = SidConv::DriveFresh(SidConv::Uniform(0.5), true);
+				Assert::AreEqual(u0.trace, u.trace, L"a listed size: byte-identical whatever the detection set");
+				Assert::IsTrue(u.note.empty());
+				for (const char* id : { "hdv_1440x1080", "dvcprohd_1280x1080", "dvcprohd_960x720" })
+					Assert::AreEqual(0u, m.NamedHoldCount(id) + m0.NamedHoldCount(id) + l.NamedHoldCount(id));
+			}
+		}
+
+		TEST_METHOD(TheOriginalPathwayIsUntouched)
+		{
+			const SidConv::Snap s = SidNamed::PerAxisOn(0.75, 1.0, 1920, 1080);
+			SidConv::Mon a, b;
+			a.SetOriginalPathway(true);
+			b.SetOriginalPathway(true);
+			const SidConv::Run ra = SidNamed::DriveDetect(s, 1920, 1080, "all", a);
+			const SidConv::Run rb = SidNamed::DriveDetect(s, 1920, 1080, "conventional", b);
+			const SidConv::Run r0 = SidConv::DriveFresh(s, true, false, true);
+			Assert::AreEqual(r0.trace, ra.trace, L"the Original pathway: the detection setting changes nothing");
+			Assert::AreEqual(r0.trace, rb.trace);
+			Assert::IsTrue(ra.note.empty() && rb.note.empty(), SidConv::W16(ra.note).c_str());
+			Assert::AreEqual(0u, a.NamedHoldCount("hdv_1440x1080"), L"nothing counted on the Original pathway");
+		}
+
+		TEST_METHOD(NarrowingTheSettingRemovesTheEntryFromRecognition)
+		{
+			const SidConv::Snap hdv = SidNamed::PerAxisOn(0.75, 1.0, 1920, 1080);
+			SidConv::Mon only960;
+			const SidConv::Run r = SidNamed::DriveDetect(hdv, 1920, 1080, "dvcprohd_960x720", only960);
+			Assert::IsFalse(SidConv::Has(r.note, "held: "), SidConv::W16(r.note).c_str());
+			Assert::IsTrue(SidConv::Has(r.note, "single-axis re-base held (H 0.7500"), SidConv::W16(r.note).c_str());
+			Assert::AreEqual(0u, only960.NamedHoldCount("hdv_1440x1080"));
+			SidConv::Mon listed;
+			const SidConv::Run l = SidNamed::DriveDetect(hdv, 1920, 1080, "HDV_1440x1080", listed);
+			Assert::IsTrue(SidConv::Has(l.note, "held: anamorphic HDV 1440x1080"), L"ids are case-insensitive");
+			Assert::AreEqual(SidNamed::Factors(r.trace), SidNamed::Factors(l.trace), L"apply byte-identical");
+		}
+
+		TEST_METHOD(UnknownDetectNamesAreVisibleNeverSilent)
+		{
+			namespace G = Scaling::GeometrySet;
+			G::DetectMask mask = 0u;
+			std::string unknown;
+			Assert::IsTrue(G::ParseDetect("", mask, unknown) && mask == G::DefaultDetectMask());
+			Assert::IsTrue(G::ParseDetect(" ALL ", mask, unknown) && mask == G::DefaultDetectMask());
+			Assert::IsTrue(G::ParseDetect("conventional", mask, unknown));
+			std::size_t count = 0;
+			const G::Geometry* g = G::Geometries(count);
+			for (std::size_t i = 0; i < count; ++i)
+				Assert::AreEqual(g[i].apply, (mask & (1u << i)) != 0u, L"conventional = the apply entries");
+			Assert::IsFalse(G::ParseDetect("hdv_1440x1080, bogus;dvcprohd_960x720", mask, unknown));
+			Assert::AreEqual(std::string("bogus"), unknown);
+			SidConv::Mon m;
+			const SidConv::Run r = SidNamed::DriveDetect(SidNamed::PerAxisOn(0.75, 1.0, 1920, 1080), 1920, 1080, "hdv_1440x1080, bogus", m);
+			const FallbackCatalog::Decision d = m.GeometryDetectFallback();
+			Assert::AreEqual(std::string("source geometry detect"), d.id);
+			Assert::IsTrue(d.engaged && SidConv::Has(d.reason, "bogus"), SidConv::W16(d.reason).c_str());
+			Assert::IsTrue(SidConv::Has(r.note, "held: anamorphic HDV 1440x1080"), L"the known ids still detect");
+			m.SetGeometryDetect("all");
+			Assert::IsFalse(m.GeometryDetectFallback().engaged, L"released when every id is known");
+		}
+
+		// Audit LOW-1 (opus gate SHOULD): the settings seam re-parses source_geometry_detect only on a change; an unchanged value
+		// returns false and keeps the parsed state (an unknown id stays shown).
+		TEST_METHOD(SetGeometryDetectReportsOnlyAChangedValue)
+		{
+			SidConv::Mon m;
+			Assert::IsTrue(m.SetGeometryDetect("all"), L"first value is a change");
+			Assert::IsFalse(m.SetGeometryDetect("all"), L"unchanged value is not re-parsed");
+			Assert::IsTrue(m.SetGeometryDetect("hdv_1440x1080, bogus"), L"a new value is a change");
+			Assert::IsFalse(m.SetGeometryDetect("hdv_1440x1080, bogus"));
+			const FallbackCatalog::Decision d = m.GeometryDetectFallback();
+			Assert::IsTrue(d.engaged && SidConv::Has(d.reason, "bogus"), L"the unknown id stays shown across an unchanged call");
+			Assert::IsTrue(m.SetGeometryDetect("all"));
+			Assert::IsFalse(m.GeometryDetectFallback().engaged, L"released on the changed value");
+		}
+
+		// Audit MED-1/LOW-1 (opus gate SHOULD): the frame seam syncs the convention hold only when its inputs change;
+		// ForgetConventionHold (auto switched off) makes the next call report again.
+		TEST_METHOD(ConventionHoldChangedReportsOnceAndAgainAfterForget)
+		{
+			SidConv::Mon m;
+			const SidConv::Run r = SidNamed::DriveDetect(SidNamed::PerAxisOn(0.75, 1.0, 1920, 1080), 1920, 1080, "all", m);
+			Assert::IsTrue(SidConv::Has(r.note, "held: anamorphic HDV 1440x1080"), SidConv::W16(r.note).c_str());
+			FallbackCatalog::Decision first;
+			Assert::IsTrue(m.ConventionHoldChanged(first), L"first call reports the hold");
+			Assert::AreEqual(std::string("source resolution held"), first.id);
+			Assert::IsTrue(first.engaged && SidConv::Has(first.reason, "HDV 1440x1080"), SidConv::W16(first.reason).c_str());
+			FallbackCatalog::Decision again;
+			Assert::IsFalse(m.ConventionHoldChanged(again), L"unchanged inputs: no sync");
+			Assert::IsFalse(m.ConventionHoldChanged(again));
+			m.ForgetConventionHold();
+			FallbackCatalog::Decision after;
+			Assert::IsTrue(m.ConventionHoldChanged(after), L"reported again after ForgetConventionHold");
+			Assert::AreEqual(first.engaged, after.engaged);
+			Assert::AreEqual(first.reason, after.reason);
+			Assert::IsFalse(m.ConventionHoldChanged(again));
+			Assert::IsTrue(m.SetGeometryDetect("conventional"));
+			FallbackCatalog::Decision masked;
+			Assert::IsTrue(m.ConventionHoldChanged(masked), L"a changed detect mask is a changed input");
+		}
+
+		// Doc 91 E: widening DETECT never latches a native. A native chain stream, every entry detect on (default, and listed by id).
+		TEST_METHOD(ANativeChainStreamWithEveryEntryDetectingNeverLatches)
+		{
+			for (const char* detect : { "all", "2560x1440 1920x1080 1280x720 960x540 dci_2048x1080 dci_1998x1080 hdv_1440x1080 sd_720x576 sd_720x480 dvcprohd_1280x1080 dvcprohd_960x720" })
+			{
+				SidGate::Mon m;
+				GeoFx::G::HeldState geo;
+				m.SetGeometrySource(&geo);
+				m.SetSourceIdMode(SidGate::Mon::SourceIdMode::On);
+				m.SetRebaseConventionOnly(true);
+				m.SetGeometryDetect(detect);
+				Assert::IsFalse(m.GeometryDetectFallback().engaged, L"every id is known");
+				uint64_t seq = 2;
+				for (int i = 0; i < 13; ++i)
+				{
+					const double t = 10.0 + 0.5 * i;
+					if (i % 2 == 0)
+						geo.Publish(GeoFx::MakeRecord(seq, SidGate::Us(t - 0.1), GeoFx::AppliedAxis(3840, 3840, 5), GeoFx::AppliedAxis(2160, 2160, 5)));
+					SidGate::Analyse(m, t, seq++);
+				}
+				std::string why;
+				double fx = 1.0, fy = 1.0;
+				m.InjectResultForTest(SidGate::CleanSnapshot(1, false), seq - 1);
+				m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 16.1, seq);
+				m.InjectResultForTest(SidGate::CleanSnapshot(2, true), seq);
+				m.AutoFactors(3840, 2160, 0.8, why, fx, fy, 16.6, seq + 1);
+				SourceIdentity::Record rec;
+				const bool latched = m.SourceIdRecord(rec) && (rec.ratioH < 1.0f || rec.ratioV < 1.0f);
+				Assert::IsFalse(latched, L"0 latches on a native stream");
+				Assert::AreEqual(1.0, fx, 1e-9, SidConv::W16(why).c_str());
+				Assert::AreEqual(1.0, fy, 1e-9);
+				Assert::IsTrue(m.Read().conventionNote.empty(), SidConv::W16(m.Read().conventionNote).c_str());
+				for (const char* id : { "hdv_1440x1080", "dvcprohd_1280x1080", "dvcprohd_960x720" })
+					Assert::AreEqual(0u, m.NamedHoldCount(id));
+			}
+		}
+	};
+
+	// Crop-aware convention (coordinator design call 2026-11-11, Scaling::GeometrySet CroppedRatiosFor): a raster WIDER than an entry's
+	// display aspect (a scope / flat film coded as its active area) is that entry cropped to the raster's aspect, width-fitted. Uniform
+	// two-axis pairs engage; non-uniform crops stay held; 16:9 rasters, natives and the Original pathway are unchanged.
+	namespace SidCrop
+	{
+		inline SidConv::Snap UniformOn(double r, int w, int h)
+		{
+			SidConv::Snap s = SidConv::Uniform(r);
+			s.nativeWidth = w;
+			s.nativeHeight = h;
+			return s;
+		}
+
+		inline SidConv::Run DriveOn(const SidConv::Snap& s, int w, int h, bool conventionOnly, bool original = false)
+		{
+			SidConv::Mon m;
+			m.SetRebaseConventionOnly(conventionOnly);
+			m.SetOriginalPathway(original);
+			return SidConv::Drive(m, s, w, h);
+		}
+	}
+
+	TEST_CLASS(SourceGeometryCropAwareTests)
+	{
+	public:
+		TEST_METHOD(ScopeAndFlatCodedActiveAreasEngage)
+		{
+			struct Case { int w, h; double rH, rV; const wchar_t* what; };
+			const Case cases[] = {
+				{ 1920, 800, 0.5, 0.5, L"scope 2.40 1920x800 from 960x400 (960x540 cropped)" },
+				{ 1920, 804, 0.5, 0.5, L"scope 2.39 1920x804 from 960x402" },
+				{ 1920, 1038, 0.5, 0.5, L"flat 1.85 1920x1038 from 960x519" },
+				{ 1920, 800, 1280.0 / 1920.0, 536.0 / 800.0, L"scope 1280x536 at 2/3 on 1920x800 (1280x720 cropped)" },
+			};
+			for (const Case& c : cases)
+			{
+				const bool uniform = c.rH == c.rV;
+				const SidConv::Snap s = uniform ? SidCrop::UniformOn(c.rH, c.w, c.h) : SidNamed::PerAxisOn(c.rH, c.rV, c.w, c.h);
+				const SidConv::Run r = SidCrop::DriveOn(s, c.w, c.h, true);
+				const SidConv::Run r0 = SidCrop::DriveOn(s, c.w, c.h, false);
+				// Engaged at the reading (the monitor applies whole source lines: within two lines of the raster).
+				Assert::AreEqual(c.rH, r.fx, 2.0 / c.h, (std::wstring(c.what) + L": " + SidConv::W16(r.trace)).c_str());
+				Assert::AreEqual(c.rV, r.fy, 2.0 / c.h, c.what);
+				Assert::IsTrue(r.fx < 1.0 && r.fy < 1.0, c.what);
+				Assert::AreEqual(r0.trace, r.trace, (std::wstring(c.what) + L": byte-identical with the restriction switched off").c_str());
+				Assert::IsTrue(r.note.empty() && !SidConv::Has(r.shown, "re-base held"), c.what);
+			}
+			// The uniform 2/3 reading on the same scope raster (the classical tracker's form) engages too.
+			const SidConv::Run u = SidCrop::DriveOn(SidCrop::UniformOn(2.0 / 3.0, 1920, 800), 1920, 800, true);
+			Assert::AreEqual(2.0 / 3.0, u.fx, 2.0 / 800, SidConv::W16(u.trace).c_str());   // whole source lines (534 of 800)
+			Assert::IsTrue(u.note.empty());
+		}
+
+		TEST_METHOD(ANonUniformCropStaysHeld)
+		{
+			const SidConv::Run r = SidCrop::DriveOn(SidNamed::PerAxisOn(0.5, 0.6, 1920, 800), 1920, 800, true);
+			Assert::IsTrue(SidNamed::AllNative(r.trace), SidConv::W16(r.trace).c_str());
+			Assert::IsTrue(SidConv::Has(r.note, "non-standard size H 0.5000 x V 0.6000"), SidConv::W16(r.note).c_str());
+			const SidConv::Run parked = SidCrop::DriveOn(SidNamed::PerAxisOn(0.5, 2.0 / 3.0, 1920, 800), 1920, 800, true);
+			Assert::IsTrue(SidNamed::AllNative(parked.trace), L"a parked entry in the crop form is never applied");
+			Assert::IsTrue(SidConv::Has(parked.note, "held: anamorphic DVCPRO HD 960x720"), SidConv::W16(parked.note).c_str());
+			const SidConv::Run single = SidCrop::DriveOn(SidNamed::PerAxisOn(0.5, 1.0, 1920, 800), 1920, 800, true);
+			Assert::IsTrue(SidNamed::AllNative(single.trace), L"single-axis stays held on a cropped raster");
+			Assert::IsFalse(single.note.empty());
+			const SidConv::Run odd = SidCrop::DriveOn(SidCrop::UniformOn(0.7, 1920, 800), 1920, 800, true);
+			Assert::IsTrue(SidNamed::AllNative(odd.trace), L"a uniform size outside the list stays held");
+		}
+
+		TEST_METHOD(NativesAndTheOriginalPathwayAreUnaffected)
+		{
+			for (int h : { 800, 804, 1038 })
+			{
+				const SidConv::Run n = SidCrop::DriveOn(SidCrop::UniformOn(1.0, 1920, h), 1920, h, true);
+				Assert::IsTrue(SidNamed::AllNative(n.trace) && n.note.empty(), SidConv::W16(n.trace).c_str());
+				const SidConv::Run p = SidCrop::DriveOn(SidNamed::PerAxisOn(1.0, 1.0, 1920, h), 1920, h, true);
+				Assert::IsTrue(SidNamed::AllNative(p.trace) && p.note.empty(), SidConv::W16(p.trace).c_str());
+			}
+			const SidConv::Snap s = SidCrop::UniformOn(0.7, 1920, 800);
+			const SidConv::Run o = SidCrop::DriveOn(s, 1920, 800, true, true);
+			const SidConv::Run o0 = SidCrop::DriveOn(s, 1920, 800, false, true);
+			Assert::AreEqual(o0.trace, o.trace, L"the Original pathway: no convention check (byte-identical)");
+			Assert::IsTrue(o.note.empty());
+		}
+
+		TEST_METHOD(TheCropFormOnlyAddsRastersWiderThanTheEntry)
+		{
+			namespace G = Scaling::GeometrySet;
+			std::size_t count = 0;
+			const G::Geometry* g = G::Geometries(count);
+			double rx = 0.0, ry = 0.0;
+			for (std::size_t i = 0; i < count; ++i)
+			{
+				Assert::IsFalse(G::CroppedRatiosFor(g[i], 1920, 1080, rx, ry), L"16:9 raster: the fit only (unchanged)");
+				Assert::IsFalse(G::CroppedRatiosFor(g[i], 3840, 2160, rx, ry), L"2160p raster: the fit only (unchanged)");
+			}
+			Assert::AreEqual(std::string("960x540"), std::string(G::ConventionalPair(960, 1920, 400, 800, 1920, 800)));
+			Assert::AreEqual(std::string("960x540"), std::string(G::ConventionalPair(960, 1920, 519, 1038, 1920, 1038)));
+			Assert::AreEqual(std::string("1280x720"), std::string(G::ConventionalPair(1280, 1920, 536, 800, 1920, 800)));
+			Assert::IsTrue(G::AgreeingPair(960, 1920, 402, 804, 1920, 804));
+			Assert::IsNull(G::ConventionalPair(960, 1920, 480, 800, 1920, 800), L"non-uniform: no entry");
+			bool dvParked = false;
+			Assert::IsNotNull(G::ConventionalPair(960, 1920, 533, 800, 1920, 800, &dvParked), L"DVCPRO HD 960x720 cropped: recognised");
+			Assert::IsTrue(dvParked, L"... and parked");
+			Assert::IsFalse(G::AgreeingPair(960, 1920, 533, 800, 1920, 800), L"... never a latch");
+			bool parked = false;
+			const char* hdv = G::ConventionalPair(1440, 1920, 600, 800, 1920, 800, &parked);
+			Assert::IsTrue(hdv == nullptr || parked, L"anamorphic entries stay parked in the crop form too");
+			Assert::IsFalse(G::AgreeingPair(1440, 1920, 600, 800, 1920, 800));
 		}
 	};
 }

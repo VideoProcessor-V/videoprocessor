@@ -306,6 +306,11 @@ namespace VpvRenderer
 		// camera moves, scrolls, dark passes and flashes are not cuts, same-level shot / reverse-shot cuts
 		// are, and shots also need part of the evidence time (SourceResolution::Tracker::Settings::cutFixes).
 		bool sourceResolutionCutFixes = true;
+		// SID r2 (owner 2026-11-11): [vprenderer] source_geometry_detect = all (default: every entry with detect on, wide) |
+		// conventional (the applied entries only) | a list of SourceGeometrySet ids. Narrows RECOGNITION (named holds) only; never
+		// what is applied. Unknown ids are ignored and shown ("source geometry detect"). Unchanged by the Original pathway (which
+		// recognises nothing).
+		std::string sourceGeometryDetect = "all";
 		// h3-latch 2026-10-18 (K3): [vprenderer] active_picture_startup_hold (default on): until the first crop
 		// decision of a queue generation the output is black, or the remembered crop of the same source
 		// (StartupCropHold); presentation only.

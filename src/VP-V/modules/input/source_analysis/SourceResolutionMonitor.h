@@ -7,6 +7,7 @@
 #include <VP-V/modules/input/source_analysis/identity/SourceIdPipeline.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceQualityView.h>
 #include <VP-V/modules/input/source_analysis/identity/SidDiagDump.h>
+#include <VP-V/modules/scaling/geometry/SourceGeometrySet.h>
 
 #include <libplacebo/renderer.h>
 
@@ -91,6 +92,9 @@ namespace SourceResolutionMonitor
 		// The chain estimator's status line (+ evidence status, + a recent one-time notice) when `SetChainEnabled(true)`; "" otherwise.
 		// Describe() appends it to the stats line the renderer already shows.
 		std::string chainNote;
+		// SID r2 (owner 2026-11-11): a re-base reading HELD because it is not a two-axis conventional pair (single-axis, or a size outside
+		// Scaling::GeometrySet), "" when nothing is held. Describe() appends it (Ctrl+I and the Config status line).
+		std::string conventionNote;
 		// Frame-bound mode (SetFrameBound; all zero / false when off): shown by Describe().
 		bool frameBound = false;
 		unsigned frameLead = 0;               // D
@@ -230,6 +234,23 @@ namespace SourceResolutionMonitor
 		std::string SourceIdStatusLine(double seconds = -1.0) const;
 		// The auto-engage gate's own fallback: engaged while consensus is on but the record could not be used.
 		FallbackCatalog::Decision SourceIdGateFallback() const;
+		// SID r2: engaged ("source resolution held") while a single-axis or non-standard re-base is held (ConventionNote); the
+		// one-time notice keys on it. Released in the Original pathway and while nothing is held.
+		FallbackCatalog::Decision ConventionHoldFallback() const;
+		// Render thread (audit MED-1 / LOW-1): the same decision, only when the held state's inputs changed since the last call
+		// (true = `out` is the new decision to sync); ForgetConventionHold makes the next call report (auto switched off and on).
+		bool ConventionHoldChanged(FallbackCatalog::Decision& out);
+		void ForgetConventionHold() { seenHoldValid = false; }
+		// SID r2 (owner 2026-11-11 ~10:25): the geometries active for DETECTION (recognition and naming of a held reading;
+		// Scaling::GeometrySet's detect flag). [vprenderer] source_geometry_detect = all (default, wide) | conventional | a list of
+		// entry ids. It never changes what is applied (the table's apply flag and the two-axis rule decide that). Unknown ids are
+		// ignored and shown (GeometryDetectFallback, "source geometry detect").
+		// Returns true when the value differs from the last one set (it is parsed only then: audit LOW-1).
+		bool SetGeometryDetect(const std::string& value);
+		FallbackCatalog::Decision GeometryDetectFallback() const;
+		// Held episodes recognised as one named parked (detect-only) entry, per entry id (the shadow nights' counter; also in the log
+		// line and the history row "convention_held"). 0 for an unknown id.
+		unsigned NamedHoldCount(const char* id) const;
 		// SID train r2: the chain estimator's P14g holder (nullptr = none; the holder must outlive the monitor's worker). It feeds the
 		// chain voter of the pipeline: the CONSENSUS (chain + classical voters) is then what AutoFactor(s) ask in place of the tracker's
 		// declared value (N1, with source_id_consensus On; Off = the original, Shadow = the original decides and the would-be is logged).
@@ -250,9 +271,19 @@ namespace SourceResolutionMonitor
 		void SetSourceIdLatchAbrTrigger(bool on);
 		// SID r2: the single-axis re-base (exactly one axis wanted below native by the consensus) is OFF by default: the re-base needs
 		// BOTH axes (a single-axis reading is a codec-grid fluke far more often than a real anamorphic source). The detection is still
-		// logged ("single-axis re-base held"). On restores the earlier behaviour. Only the consensus per-axis path is gated.
+		// logged ("single-axis re-base held"). On restores the earlier behaviour. Both per-axis paths are gated: the consensus's and,
+		// with SetRebaseConventionOnly (default on), the classical tracker's per-axis reading too.
 		void SetSingleAxisRebase(bool on) { singleAxisRebase.store(on, std::memory_order_release); }
 		bool SingleAxisRebase() const { return singleAxisRebase.load(std::memory_order_acquire); }
+		// SID r2 (owner 2026-11-11): the CLASSICAL path (consensus Off, or no fresh record) and the consensus's uniform gate re-base ONLY
+		// two-axis conventional pairs: both axes below native and the pair one listed, non-parked Scaling::GeometrySet geometry on the
+		// delivered raster (AgreeingPair, tolerance 0.6 %). A single-axis reading (unless SetSingleAxisRebase) or a size outside the list
+		// is logged once per episode and shown (Snapshot::conventionNote), never applied. The Original pathway is untouched. Needs the
+		// raster width, so only AutoFactors (the host's entry) applies it (a width <= 0 there holds every re-base on both paths: the
+		// list cannot be checked); AutoFactor called alone keeps the earlier law. Default ON;
+		// Off restores the earlier behaviour (a setter only: no Config key, SID-5 plumbing pending).
+		void SetRebaseConventionOnly(bool on) { rebaseConventionOnly.store(on, std::memory_order_release); }
+		bool RebaseConventionOnly() const { return rebaseConventionOnly.load(std::memory_order_acquire); }
 		bool ChainEnabled() const { return chainEnabled.load(std::memory_order_acquire); }
 		// The renderer identity (the owner key of VpFrameAnalysis::Host::Owner) whose source frames the estimator reads; nullptr
 		// detaches. Idempotent: a lost registration is made again. OPTIONAL: while no owner was given, Frame() finds it itself (once a
@@ -279,6 +310,8 @@ namespace SourceResolutionMonitor
 		GeometryViews GeometryView(double seconds = -1.0) const;
 		// The estimator itself (diagnostics, tests). Never null.
 		SourceIdentity::Chain::ChainEstimator& ChainEstimatorRef() { return *chainEst; }
+		// SID r2 N2: the no-cut ceiling's crossfade cue is still pending (as of the last AutoFactor(s) call; AutoFactors thread).
+		bool LatchCeilingCuePendingForTest() const { return latchCeilingPending; }
 		// Tests: replaces the (inert) estimator with one built with an injected clock / settings. Before SetChainEnabled(true) only.
 		void SetChainEstimatorForTest(std::unique_ptr<SourceIdentity::Chain::ChainEstimator> estimator);
 		// Dump v4 (identity/SidDiagDump.h; written only while VP_SID_DUMP_V4_DIR is set, decision neutral): the file-name tag of the
@@ -582,7 +615,7 @@ namespace SourceResolutionMonitor
 		mutable std::mutex gateMutex;
 		FallbackCatalog::Decision gateDecision;         // written by AutoFactor(s), read for the status
 		// The gate's view of the record at `now` (render thread): fresh = usable; ratios are the latched axes (1 = native).
-		struct IdGate { bool on = false, fresh = false; double ratioH = 1.0, ratioV = 1.0; bool latchedH = false, latchedV = false; };
+		struct IdGate { bool on = false, fresh = false; double ratioH = 1.0, ratioV = 1.0; bool latchedH = false, latchedV = false; uint64_t seq = 0; int64_t timeUs = 0; };
 		IdGate SourceIdGate(double now);
 		// The newest P14g record the monitor may use: decodable, not from before the last discontinuity. `cause` = kCause* when none.
 		// `seq` != 0: the latest sealed record with evalSeq <= seq (the P14g contract: a frame-bound consumer never reads the future);
@@ -597,6 +630,35 @@ namespace SourceResolutionMonitor
 		bool singleAxisHeldLogged = false;             // AutoFactors thread: the held detection was logged for the current episode
 		std::atomic<int> singleAxisHeldAxis{ -1 };      // SID r2 L6: the held single axis (0 H, 1 V; -1 none) for the status line
 		std::atomic<double> singleAxisHeldRatio{ 1.0 };
+		std::atomic<bool> rebaseConventionOnly{ true };  // see SetRebaseConventionOnly
+		bool ConventionApplies() const;                  // the restriction is on and the Original pathway is not selected
+		bool autoConventionCheck = false;               // render thread: AutoFactor called by AutoFactors (the convention check runs)
+		int autoRasterWidth = 0;                         // render thread: AutoFactors' raster width for AutoFactor (0 = unknown: no check)
+		bool uniformConventionHeld = false;              // render thread: AutoFactor held its uniform wish (non-standard size)
+		double uniformHeldH = 1.0, uniformHeldV = 1.0;
+		std::atomic<int> conventionHeldKind{ 0 };        // published by AutoFactors: 0 nothing held, 1 single-axis, 2 non-standard size
+		std::atomic<double> conventionHeldH{ 1.0 }, conventionHeldV{ 1.0 };
+		std::atomic<int> conventionRasterW{ 0 }, conventionRasterH{ 0 };   // AutoFactors' delivered raster (named recognition)
+		std::atomic<unsigned> geometryDetectMask{ Scaling::GeometrySet::DefaultDetectMask() };   // the default: wide
+		mutable std::mutex geometryDetectMutex;
+		std::string geometryDetectUnknown;               // unknown source_geometry_detect ids (geometryDetectMutex)
+		std::string geometryDetectValue;                 // the last value set (geometryDetectMutex)
+		bool geometryDetectSet = false;                  // a value was set (geometryDetectMutex)
+		struct HoldKey                                   // ConventionHoldChanged's inputs (render thread)
+		{
+			bool original = false; int kind = 0, axis = -1, rasterW = 0, rasterH = 0; unsigned mask = 0u;
+			double h = 1.0, v = 1.0, ratio = 1.0;
+			bool operator==(const HoldKey& o) const { return original == o.original && kind == o.kind && axis == o.axis &&
+				rasterW == o.rasterW && rasterH == o.rasterH && mask == o.mask && h == o.h && v == o.v && ratio == o.ratio; }
+		};
+		HoldKey seenHold;
+		bool seenHoldValid = false;
+		std::atomic<unsigned> namedHoldCounts[32] = {};   // per GeometrySet index: named held episodes
+		// The parked entry a held reading rH x rV is (nullptr = a generic hold); NamedHold also counts and logs a new episode
+		// when `count` (audit LOW-2: the readers use the const NamedHoldName).
+		const char* NamedHoldName(double rH, double rV) const;
+		const char* NamedHold(double rH, double rV, bool count);
+		std::string ConventionNote() const;              // the Snapshot::conventionNote text ("" = nothing held)
 		std::atomic<bool> chainEnabled{ false };
 		std::atomic<unsigned long long> nativeHeldByChain{ 0 };
 		std::string chainHistoryFolder;      // SetHistoryFolder's folder (guarded by `mutex`)
@@ -696,6 +758,11 @@ namespace SourceResolutionMonitor
 		// pending one makes the native switch it causes a crossfade. GateClear: this call's fresh record reads native on both axes.
 		uint64_t latchCeilingSeen = 0, latchCeilingCount = 0;
 		bool latchCeilingPending = false, latchCeilingGateClear = false;
+		// SID r2 N2: the cue is decided by the first fresh gate record AFTER it (a record other than the newest one seen when it appeared).
+		uint64_t latchCeilingFloorFor = 0, latchCeilingFloorSeq = 0, gateLastSeq = 0;
+		int64_t latchCeilingFloorTimeUs = 0, gateLastTimeUs = 0;
+		bool latchCeilingFloorValid = false, gateLastValid = false;
+		void DropLatchCeilingCue() { latchCeilingSeen = latchCeilingCount; latchCeilingPending = false; latchCeilingGateClear = false; }
 		double fadeFromX = 1.0, fadeFromY = 1.0, lastFactorX = 1.0, lastFactorY = 1.0, fadeStart = 0.0, fadeDuration = 0.0;
 		uint64_t clockSequence = 0, panSequence = 0;
 		double clockSeconds = 0.0, secondsPerFrame = 0.0, panPixelsPerFrame = 0.0;

@@ -3,6 +3,7 @@
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h>
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
+#include <VP-V/modules/scaling/geometry/SourceGeometrySet.h>
 #include <VP-V/modules/input/source_analysis/identity/shared/SourceQuality.h>
 
 #include <DebugLog.h>
@@ -425,17 +426,20 @@ if (tile < int(tiles) && g.y < ts) {
 	Snapshot Monitor::Read() const
 	{
 		const std::string chainText = chainEnabled.load(std::memory_order_acquire) ? ChainStatusCached() : std::string();
+		const std::string heldText = ConventionNote();
 		std::lock_guard<std::mutex> lock(mutex);
 		if (!frameBound.load(std::memory_order_acquire))
 		{
-			if (chainText.empty()) return snapshot;
+			if (chainText.empty() && heldText.empty()) return snapshot;
 			Snapshot plain = snapshot;
 			plain.chainNote = chainText;
+			plain.conventionNote = heldText;
 			return plain;
 		}
 		// Frame-bound: the released analysis; the GPU-side status and the counters are live.
 		Snapshot out = visible;
 		out.chainNote = chainText;
+		out.conventionNote = heldText;
 		out.notRead = snapshot.notRead;
 		out.error = snapshot.error;
 		out.frameBound = true;
@@ -538,13 +542,167 @@ if (tile < int(tiles) && g.y < ts) {
 			const int heldAxis = singleAxisHeldAxis.load(std::memory_order_acquire);
 			if (heldAxis == 0 || heldAxis == 1)
 			{
-				char buf[96];
-				std::snprintf(buf, sizeof(buf), " | single-axis re-base held (%s %.4f; two axes are required)", heldAxis == 0 ? "H" : "V",
-					singleAxisHeldRatio.load(std::memory_order_acquire));
+				char buf[160];
+				const double r = singleAxisHeldRatio.load(std::memory_order_acquire);
+				const char* named = NamedHoldName(heldAxis == 0 ? r : 1.0, heldAxis == 0 ? 1.0 : r);
+				if (named != nullptr)   // a named parked entry (owner 2026-11-11)
+					std::snprintf(buf, sizeof(buf), " | held: %s (single-axis re-base parked; %s %.4f)", named, heldAxis == 0 ? "H" : "V", r);
+				else
+					std::snprintf(buf, sizeof(buf), " | single-axis re-base held (%s %.4f; two axes are required)", heldAxis == 0 ? "H" : "V", r);
 				line += buf;
 			}
 		}
 		return line;
+	}
+
+	bool Monitor::ConventionApplies() const
+	{
+		return rebaseConventionOnly.load(std::memory_order_acquire) && !OriginalPathway();
+	}
+
+	namespace
+	{
+		// SID r2 (owner 2026-11-11): a re-base of rH x rV on the delivered W x H raster is a TWO-AXIS CONVENTIONAL pair: one listed,
+		// non-parked Scaling::GeometrySet geometry (the published list; no geometry law here).
+		bool ConventionalRebase(double rH, double rV, int W, int H)
+		{
+			if (W <= 0 || H <= 0 || !(rH < 1.0) || !(rV < 1.0))
+				return false;
+			const int nx = static_cast<int>(std::lround(rH * W));
+			const int ny = static_cast<int>(std::lround(rV * H));
+			return Scaling::GeometrySet::AgreeingPair(nx, W, ny, H, W, H);
+		}
+	}
+
+	const char* Monitor::NamedHoldName(double rH, double rV) const
+	{
+		const Scaling::GeometrySet::Geometry* e = Scaling::GeometrySet::RecogniseParked(rH, rV,
+			conventionRasterW.load(std::memory_order_acquire), conventionRasterH.load(std::memory_order_acquire),
+			geometryDetectMask.load(std::memory_order_acquire));
+		return e != nullptr ? e->name : nullptr;
+	}
+
+	const char* Monitor::NamedHold(double rH, double rV, bool count)
+	{
+		namespace G = Scaling::GeometrySet;
+		const G::Geometry* e = G::RecogniseParked(rH, rV, conventionRasterW.load(std::memory_order_acquire),
+			conventionRasterH.load(std::memory_order_acquire), geometryDetectMask.load(std::memory_order_acquire));
+		if (e == nullptr)
+			return nullptr;
+		const int i = G::IndexOf(e);
+		if (count && !OriginalPathway() && i >= 0 && i < 32)
+		{
+			const unsigned n = namedHoldCounts[i].fetch_add(1u, std::memory_order_acq_rel) + 1u;
+			DebugLog::Log("source_resolution: held: %s (re-base parked; H %.4f x V %.4f; episode %u of this entry)", e->name, rH, rV, n);
+			char field[200];
+			std::snprintf(field, sizeof(field), "held %s (%s) H %.4f x V %.4f episode %u", e->name, e->id, rH, rV, n);
+			std::lock_guard<std::mutex> lock(mutex);
+			Record("convention_held" + std::string(12, ',') + SourceHistory::Field(field));
+		}
+		return e->name;
+	}
+
+	unsigned Monitor::NamedHoldCount(const char* id) const
+	{
+		std::size_t count = 0;
+		const Scaling::GeometrySet::Geometry* g = Scaling::GeometrySet::Geometries(count);
+		for (std::size_t i = 0; i < count && i < 32; ++i)
+			if (id != nullptr && std::string(id) == g[i].id)
+				return namedHoldCounts[i].load(std::memory_order_acquire);
+		return 0u;
+	}
+
+	bool Monitor::SetGeometryDetect(const std::string& value)
+	{
+		{
+			std::lock_guard<std::mutex> lock(geometryDetectMutex);
+			if (geometryDetectSet && value == geometryDetectValue)
+				return false;   // unchanged: not re-parsed (audit LOW-1)
+			geometryDetectValue = value;
+			geometryDetectSet = true;
+		}
+		Scaling::GeometrySet::DetectMask mask = 0u;
+		std::string unknown;
+		Scaling::GeometrySet::ParseDetect(value, mask, unknown);
+		geometryDetectMask.store(mask, std::memory_order_release);
+		std::lock_guard<std::mutex> lock(geometryDetectMutex);
+		if (unknown != geometryDetectUnknown && !unknown.empty())
+			DebugLog::Log("source_geometry_detect: unknown entries ignored: %s", unknown.c_str());
+		geometryDetectUnknown = unknown;
+		return true;
+	}
+
+	FallbackCatalog::Decision Monitor::GeometryDetectFallback() const
+	{
+		std::lock_guard<std::mutex> lock(geometryDetectMutex);
+		return FallbackCatalog::GeometryDetectUnknown(geometryDetectUnknown);
+	}
+
+	std::string Monitor::ConventionNote() const
+	{
+		if (OriginalPathway())
+			return std::string();   // F3: the Original pathway holds nothing (no stale note)
+		const int kind = conventionHeldKind.load(std::memory_order_acquire);
+		const double h = conventionHeldH.load(std::memory_order_acquire), v = conventionHeldV.load(std::memory_order_acquire);
+		char buf[160];
+		// A held reading that is one named parked (detect-only) entry is shown by its name (owner 2026-11-11).
+		const char* named = kind == 1 || kind == 2 ? NamedHoldName(h, v) : nullptr;
+		if (named != nullptr)
+		{
+			std::snprintf(buf, sizeof(buf), "held: %s (%s re-base parked; H %.4f x V %.4f)", named, kind == 1 ? "single-axis" : "anamorphic", h, v);
+			return buf;
+		}
+		if (kind == 1)
+		{
+			std::snprintf(buf, sizeof(buf), "single-axis re-base held (%s %.4f; two axes are required)", h < 1.0 ? "H" : "V", h < 1.0 ? h : v);
+			return buf;
+		}
+		if (kind == 2)
+		{
+			std::snprintf(buf, sizeof(buf), "re-base held (non-standard size H %.4f x V %.4f; only listed two-axis sizes are re-based)", h, v);
+			return buf;
+		}
+		// The consensus's own single-axis hold (L6; until now on SourceIdStatusLine only).
+		const int axis = singleAxisHeldAxis.load(std::memory_order_acquire);
+		if (axis == 0 || axis == 1)
+		{
+			const double r = singleAxisHeldRatio.load(std::memory_order_acquire);
+			const char* l6 = NamedHoldName(axis == 0 ? r : 1.0, axis == 0 ? 1.0 : r);
+			if (l6 != nullptr)
+			{
+				std::snprintf(buf, sizeof(buf), "held: %s (single-axis re-base parked; %s %.4f)", l6, axis == 0 ? "H" : "V", r);
+				return buf;
+			}
+			std::snprintf(buf, sizeof(buf), "single-axis re-base held (%s %.4f; two axes are required)", axis == 0 ? "H" : "V",
+				singleAxisHeldRatio.load(std::memory_order_acquire));
+			return buf;
+		}
+		return std::string();
+	}
+
+	FallbackCatalog::Decision Monitor::ConventionHoldFallback() const
+	{
+		return FallbackCatalog::SourceResolutionHeld(ConventionNote());
+	}
+
+	bool Monitor::ConventionHoldChanged(FallbackCatalog::Decision& out)
+	{
+		HoldKey k;
+		k.original = OriginalPathway();
+		k.kind = conventionHeldKind.load(std::memory_order_acquire);
+		k.h = conventionHeldH.load(std::memory_order_acquire);
+		k.v = conventionHeldV.load(std::memory_order_acquire);
+		k.axis = singleAxisHeldAxis.load(std::memory_order_acquire);
+		k.ratio = singleAxisHeldRatio.load(std::memory_order_acquire);
+		k.rasterW = conventionRasterW.load(std::memory_order_acquire);
+		k.rasterH = conventionRasterH.load(std::memory_order_acquire);
+		k.mask = geometryDetectMask.load(std::memory_order_acquire);
+		if (seenHoldValid && k == seenHold)
+			return false;   // the note's text is built only on a change (audit LOW-1)
+		seenHold = k;
+		seenHoldValid = true;
+		out = ConventionHoldFallback();
+		return true;
 	}
 
 	FallbackCatalog::Decision Monitor::SourceIdGateFallback() const
@@ -751,6 +909,8 @@ if (tile < int(tiles) && g.y < ts) {
 		g.latchedV = rec.Latched(SourceIdentity::Field::AxisV);
 		g.ratioH = g.latchedH ? rec.ratioH : 1.0;
 		g.ratioV = g.latchedV ? rec.ratioV : 1.0;
+		g.seq = rec.seq;
+		g.timeUs = rec.timeUs;
 		return g;
 	}
 
@@ -1741,6 +1901,14 @@ if (tile < int(tiles) && g.y < ts) {
 		latchCeilingCount = chainEst->LatchCeilingReleases();
 		latchCeilingPending = latchCeilingCount != latchCeilingSeen;
 		latchCeilingGateClear = false;
+		if (latchCeilingPending && latchCeilingFloorFor != latchCeilingCount)
+		{
+			// N2: the cue just appeared: the newest gate record seen so far is from before it.
+			latchCeilingFloorFor = latchCeilingCount;
+			latchCeilingFloorValid = gateLastValid;
+			latchCeilingFloorSeq = gateLastSeq;
+			latchCeilingFloorTimeUs = gateLastTimeUs;
+		}
 		// The source frame interval, measured (the pan speed's time base).
 		if (renderSequence > clockSequence && clockSequence != 0)
 		{
@@ -1762,14 +1930,50 @@ if (tile < int(tiles) && g.y < ts) {
 		// wish, anything else is native. WHEN stays the original latch's: the same engage moments, dwell, crossfade and the same
 		// gentle / immediate revert paths below. A stale or absent record: the classical value above, visibly (SourceIdGateFallback).
 		// Off = the original, byte for byte; Shadow = the original decides (SourceIdGate is not 'on').
+		double gateH = 1.0, gateV = 1.0;
+		bool gateUsed = false;
 		{
 			const IdGate gate = SourceIdGate(now);
+			if (latchCeilingPending)
+			{
+				// N2: the cue is used only through a fresh gate with the safety rules on (Shadow / Off / a stale record / rules off: dropped),
+				// and only by the first fresh record after it: native on both axes (latched native, or not latched) uses it below; any
+				// other reading drops it, so a later unrelated native switch takes its own path (cut-wait / release fade).
+				const bool gateNative = gate.ratioH >= 0.99 && gate.ratioV >= 0.99;
+				const bool afterCue = !latchCeilingFloorValid || gate.seq != latchCeilingFloorSeq || gate.timeUs != latchCeilingFloorTimeUs;
+				if (!gate.on || !gate.fresh || !chainEst->SafetyRules())
+					DropLatchCeilingCue();
+				else if (gateNative)
+					latchCeilingGateClear = true;
+				else if (afterCue)
+					DropLatchCeilingCue();
+			}
 			if (gate.fresh)
 			{
-				latchCeilingGateClear = gate.ratioH >= 0.99 && gate.ratioV >= 0.99;   // native on both axes (latched native, or not latched)
+				gateLastValid = true;
+				gateLastSeq = gate.seq;
+				gateLastTimeUs = gate.timeUs;
 				const double tol = 0.03;
 				const bool uniform = gate.latchedH && gate.latchedV && std::fabs(gate.ratioH - gate.ratioV) <= tol * (std::max)(gate.ratioH, gate.ratioV);
 				wanted = uniform && gate.ratioH < 1.0 ? 0.5 * (gate.ratioH + gate.ratioV) : 1.0;
+				gateUsed = true;
+				gateH = gate.ratioH;
+				gateV = gate.ratioV;
+			}
+		}
+		// SID r2 (owner 2026-11-11): only a TWO-AXIS CONVENTIONAL pair is re-based, the classical tracker's value (uniform: the same
+		// ratio on both axes) and the consensus's uniform wish (its two latched ratios) alike; anything else is held (shown by
+		// AutoFactors, never applied). Only with the raster width (AutoFactors); not in the Original pathway.
+		uniformConventionHeld = false;
+		if (wanted < 1.0 && autoConventionCheck && ConventionApplies())   // F4: width <= 0 holds (ConventionalRebase), as on the per-axis path
+		{
+			const double rH = gateUsed ? gateH : wanted, rV = gateUsed ? gateV : wanted;
+			if (!ConventionalRebase(rH, rV, autoRasterWidth, nativeHeight))
+			{
+				uniformConventionHeld = true;
+				uniformHeldH = rH;
+				uniformHeldV = rV;
+				wanted = 1.0;
 			}
 		}
 		// Lines: an even height derived from the frame's own height (general).
@@ -1908,7 +2112,23 @@ if (tile < int(tiles) && g.y < ts) {
 	void Monitor::AutoFactors(int nativeWidth, int nativeHeight, double minimumConfidence, std::string& why,
 		double& factorX, double& factorY, double seconds, uint64_t renderSequence)
 	{
+		autoRasterWidth = nativeWidth;   // SID r2 (owner 2026-11-11): AutoFactor's convention check needs the raster width
+		conventionRasterW.store(nativeWidth, std::memory_order_release);
+		conventionRasterH.store(nativeHeight, std::memory_order_release);
+		autoConventionCheck = true;
 		const double uniform = AutoFactor(nativeHeight, minimumConfidence, why, seconds, renderSequence);
+		autoConventionCheck = false;
+		autoRasterWidth = 0;
+		// What is held (shown through Snapshot::conventionNote, logged once per episode): 0 nothing, 1 single-axis, 2 non-standard size.
+		const auto publishHeld = [this](int kind, double h, double v)
+		{
+			const int was = conventionHeldKind.exchange(kind, std::memory_order_acq_rel);
+			conventionHeldH.store(h, std::memory_order_release);
+			conventionHeldV.store(v, std::memory_order_release);
+			if (kind != 0 && kind != was && NamedHold(h, v, true) == nullptr)   // a named parked entry: its own line and counter
+				DebugLog::Log("source_resolution: %s re-base held (H %.4f x V %.4f; only two-axis listed sizes are re-based)",
+					kind == 1 ? "single-axis" : "non-standard size", h, v);
+		};
 		const double now = frameBound.load(std::memory_order_acquire) ? DecisionNow(seconds) : seconds >= 0.0 ? seconds :
 			std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 		const Snapshot s = Read();
@@ -1942,6 +2162,9 @@ if (tile < int(tiles) && g.y < ts) {
 		{
 			factorX = factorY = uniform;
 			axisApplied[0] = axisApplied[1] = axisPending[0] = axisPending[1] = 1.0;
+			singleAxisHeldAxis.store(-1, std::memory_order_release);   // F3: a uniform re-base holds no single axis
+			singleAxisHeldLogged = false;
+			if (uniformConventionHeld) publishHeld(2, uniformHeldH, uniformHeldV); else publishHeld(0, 1.0, 1.0);
 			Transit(factorX, factorY, now);
 			return;
 		}
@@ -1950,6 +2173,14 @@ if (tile < int(tiles) && g.y < ts) {
 		// Source identity (N1): with the consensus On and a fresh record the per-axis wish is the CONSENSUS's latched ratio of that axis
 		// (native for an axis it has not latched), in place of the tracker's per-axis reading; otherwise the tracker's.
 		const IdGate gate = SourceIdGate(now);
+		if (!gate.fresh)
+		{
+			// F3: the consensus's single-axis hold lasts only while its record is fresh (also when no per-axis branch runs below).
+			singleAxisHeldAxis.store(-1, std::memory_order_release);
+			singleAxisHeldLogged = false;
+		}
+		int heldKind = 0;
+		double heldH = 1.0, heldV = 1.0;
 		if (gate.fresh || (s.reading && s.axisConfidence >= minimumConfidence))
 		{
 			const int sizes[2] = { nativeWidth, nativeHeight };
@@ -1963,6 +2194,7 @@ if (tile < int(tiles) && g.y < ts) {
 				{
 					if (!singleAxisHeldLogged)
 					{
+						if (NamedHold(ratios[0] < 1.0 ? ratios[0] : 1.0, ratios[0] < 1.0 ? 1.0 : ratios[1], true) == nullptr)   // named: its own line
 						DebugLog::Log("source_id: single-axis re-base held (axis %s ratio %.4f; two axes are required)", ratios[0] < 1.0 ? "H" : "V", ratios[0] < 1.0 ? ratios[0] : ratios[1]);
 						singleAxisHeldLogged = true;
 					}
@@ -1976,12 +2208,33 @@ if (tile < int(tiles) && g.y < ts) {
 					singleAxisHeldLogged = false;   // L6: any other state ends the held episode (the next one is logged again)
 					singleAxisHeldAxis.store(-1, std::memory_order_release);
 				}
+				// SID r2 (owner 2026-11-11): two axes below native re-base only as a listed pair (else the uniform hold above is undone here).
+				if (ratios[0] < 1.0 && ratios[1] < 1.0 && ConventionApplies() && !ConventionalRebase(ratios[0], ratios[1], nativeWidth, nativeHeight))
+				{
+					heldKind = 2;
+					heldH = ratios[0];
+					heldV = ratios[1];
+					ratios[0] = ratios[1] = 1.0;
+				}
 			}
 			else
 			{
 				singleAxisHeldAxis.store(-1, std::memory_order_release);   // L6: no consensus re-base, nothing held
 				ratios[0] = s.axisRatioX;
 				ratios[1] = s.axisRatioY;
+				// SID r2 (owner 2026-11-11): the CLASSICAL per-axis reading re-bases only a two-axis conventional pair. One axis below native
+				// (unless the single-axis switch is on) or a pair outside the list: held, shown, never applied.
+				if (ConventionApplies() && (ratios[0] < 1.0 || ratios[1] < 1.0))
+				{
+					const bool single = (ratios[0] < 1.0) != (ratios[1] < 1.0);
+					if (single ? !singleAxisRebase.load(std::memory_order_acquire) : !ConventionalRebase(ratios[0], ratios[1], nativeWidth, nativeHeight))
+					{
+						heldKind = single ? 1 : 2;
+						heldH = ratios[0];
+						heldV = ratios[1];
+						ratios[0] = ratios[1] = 1.0;
+					}
+				}
 			}
 			for (int a = 0; a < 2; ++a)
 				if (ratios[a] < 1.0 && sizes[a] > 0)
@@ -1990,6 +2243,14 @@ if (tile < int(tiles) && g.y < ts) {
 					wanted[a] = px < sizes[a] ? static_cast<double>(px) / sizes[a] : 1.0;
 				}
 		}
+		// The uniform wish AutoFactor held (non-standard size) is shown while nothing else re-bases.
+		if (heldKind == 0 && uniformConventionHeld && wanted[0] >= 1.0 && wanted[1] >= 1.0)
+		{
+			heldKind = 2;
+			heldH = uniformHeldH;
+			heldV = uniformHeldV;
+		}
+		publishHeld(heldKind, heldH, heldV);
 		const double tolerance = 0.01;
 		std::string axisWhy;
 		const bool up = wanted[0] > axisApplied[0] + tolerance || wanted[1] > axisApplied[1] + tolerance;
@@ -2004,7 +2265,7 @@ if (tile < int(tiles) && g.y < ts) {
 			axisPending[0] = axisApplied[0];
 			axisPending[1] = axisApplied[1];
 			// SID r2 N1: after a no-cut ceiling release of the chain latch, the engage crossfade (as the uniform path).
-			const bool ceiling = latchCeilingPending && gate.fresh && gate.ratioH >= 0.99 && gate.ratioV >= 0.99;
+			const bool ceiling = latchCeilingPending && gate.fresh && gate.ratioH >= 0.99 && gate.ratioV >= 0.99 && chainEst->SafetyRules();
 			axisWhy = ceiling ? "per axis: native by a crossfade (the upscale latch's no-cut ceiling)" : "per axis: back towards native at once";
 			nextFadeSeconds = LatchFixes() ? (ceiling ? CrossfadeSeconds() : ReleaseFade()) : 0.0;
 			if (ceiling)
@@ -2430,6 +2691,7 @@ if (tile < int(tiles) && g.y < ts) {
 		std::string text = DescribeBase(s, autoRatio, autoSelected);
 		if (!s.historyNote.empty()) text += "; " + s.historyNote;
 		if (!s.chainNote.empty()) text += "; " + s.chainNote;
+		if (autoSelected && !s.conventionNote.empty()) text += "; " + s.conventionNote;   // AutoFactors refreshes it only under auto
 		if (!s.frameBound) return text;
 		char bound[200];
 		snprintf(bound, sizeof(bound), "; frame-bound D=%u: held %u, dropped %llu, stale %llu, jobs dropped %llu, copies skipped %llu, waits missed %llu, clock steps back %llu",
