@@ -23,6 +23,14 @@
   "src/VideoProcessor-VPRenderer/LibplaceboPluginExports.cpp": 2
  },
  "temporary": {
+  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": {
+   "limit": 32,
+   "reverts_to": 31,
+   "until": [
+    "re-graft"
+   ],
+   "note": "HA-CFG09-BillPresets: +1 Bill-preset accessor (HELD-CFG-09, owner 19:21 allowance), back to 31 at the re-graft"
+  },
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": {
    "limit": 156,
    "reverts_to": 143,
