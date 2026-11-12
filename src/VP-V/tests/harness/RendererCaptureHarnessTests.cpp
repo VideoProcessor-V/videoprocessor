@@ -3541,7 +3541,16 @@ namespace Tests
 				// A starter (the de-judder's standing demand) runs the engine: the sigma-delta is a reuse-only consumer (doc 91 D
 				// 2026-11-11 06:30), so without one the chain is never asked (it searches itself, "not served").
 				const std::string starter = HarnessEnvText("VP_C8_NO_STARTER") == "1" ? std::string() : std::string("dejudder_strength: 0.25\n");
-				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", seconds, false, starter + C8SigmaRule(mode), false, &plan);
+				// VPVEC can be bound only on the Beta flavour (libplacebo with the fork's set-texture call; the default flavour
+				// searches itself: "no fork patch 0004"), as VectorEngineSmoothMotionKeepsAnalysis. A 24p source on the ~60 Hz
+				// harness display is cadence-eligible, so the de-judder's standing demand starts the engine.
+				const bool beta = HarnessEnvText("VP_C8_BETA") == "1";
+				if (beta)
+					_putenv_s("VP_TEST_HARNESS_BETA", "1");
+				const bool film = fps > 0 && fps < 30;
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", seconds, film, starter + C8SigmaRule(mode), false, &plan);
+				if (beta)
+					_putenv_s("VP_TEST_HARNESS_BETA", "");
 				if (!r.presented)
 					failures += std::string(mode) + ": nothing presented; ";
 				std::string chain, passes;
