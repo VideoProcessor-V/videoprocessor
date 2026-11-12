@@ -592,10 +592,10 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     frameParams = renderParams;
     // Hunt 3 F2: ambient adaptation's SDR black lift, on top of the configured adjustment
     // (saturation): libplacebo's colour decode, before anything else sees the picture.
-    if (ambientSdrLift)
+    if (vpv.led.sdrLift.ambientSdrLift)
     {
         frameColorAdjustment = renderParams.color_adjustment ? *renderParams.color_adjustment : pl_color_adjustment_neutral;
-        LibplaceboRenderParameters::ApplySdrAmbientLift(ambientSdrContrast, ambientSdrBrightness, frameColorAdjustment);
+        LibplaceboRenderParameters::ApplySdrAmbientLift(vpv.led.sdrLift.ambientSdrContrast, vpv.led.sdrLift.ambientSdrBrightness, frameColorAdjustment);
         frameParams.color_adjustment = &frameColorAdjustment;
     }
     // Hunt 2 picture sweep: deband_vp_exclusive yields libplacebo's automatic deband to VP's

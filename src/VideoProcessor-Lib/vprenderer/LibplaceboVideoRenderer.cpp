@@ -4961,12 +4961,8 @@ struct LibplaceboVideoRenderer::Impl
 	// frame mixer only as the fallback.
 	CrossfadeMix::Mixer crossfadeMixer;
 	int crossfadeMixLogged = -1;   // 1 = VP signal mix, 0 = fell back to libplacebo's mixer
-	// Hunt 3 F2: ambient adaptation for SDR input - this frame's BT.1886 black lift (applied
-	// through the frame's colour adjustment; invalid = nothing changes) and the adjustment the
-	// frame's parameters point at (a member: the de-judder extras render with them later).
-	bool ambientSdrLift = false;
-	float ambientSdrContrast = 1.0f, ambientSdrBrightness = 0.0f;
-	std::string ambientSdrLogged;
+	// Hunt 3 F2: the frame's colour adjustment the frame's parameters point at (a member: the de-judder extras
+	// render with them later). The ambient SDR lift state is vpv.led.sdrLift (LedSdrLiftState.h, P11a-d).
 	pl_color_adjustment frameColorAdjustment{};
 	unsigned long long rebaseFailuresSeen = 0;
 	SteadyClock::time_point rebasePausedUntil{};
@@ -6269,24 +6265,6 @@ struct LibplaceboVideoRenderer::Impl
 	VpDiagnostics::RenderedFrameCaptures captures = DvCompareCapture::RendererCaptures();   // rendered-frame captures (WP-17)
 	bool sdrToneShapeConfigured = false;
 	int sdrToneShapeLogged = -1;
-	// The gamma an SDR output transfer encodes for: the gamma boost's base
-	// (delta 4). Pure powers as given; BT.1886 as 2.4 and sRGB as 2.2; anything
-	// else (HDR) keeps 2.2, the value the boost has always used.
-	static double LedDisplayGamma(enum pl_color_transfer transfer)
-	{
-		switch (transfer)
-		{
-		case PL_COLOR_TRC_GAMMA18: return 1.8;
-		case PL_COLOR_TRC_GAMMA20: return 2.0;
-		case PL_COLOR_TRC_GAMMA22: return 2.2;
-		case PL_COLOR_TRC_GAMMA24: return 2.4;
-		case PL_COLOR_TRC_GAMMA26: return 2.6;
-		case PL_COLOR_TRC_GAMMA28: return 2.8;
-		case PL_COLOR_TRC_BT_1886: return 2.4;
-		case PL_COLOR_TRC_SRGB: return 2.2;
-		default: return 2.2;
-		}
-	}
 	std::vector<const pl_hook*> frameHooks;
 	// Pipeline skeleton (R2): which of this frame's hooks belong to a pipeline slot (by pointer,
 	// since plumbing hooks are inserted in front later); OutputHookOrder::OrderSlotsInPlace
@@ -14824,6 +14802,9 @@ struct LibplaceboVideoRenderer::Impl
 	double IntentTargetBlackNits(uint64_t sourceSequence);   // VPV-HOOK P11a-f: defined in LedIntentMethods.inl
 	double EaseBlackShare(double measured, bool haveMeasurement);   // VPV-HOOK P11a-f: defined in IntentMotionMethods.inl
 	void EvaluateIntentBlackDisplay(const SceneDescriptor& scene, const DisplayProfile& display);   // VPV-HOOK P11a-f: defined in LedIntentMethods.inl
+	double IntentFrameBlackNits(uint64_t sourceSequence, bool inputIsSdr, const pl_frame& image);   // VPV-HOOK P11a-d: defined in VP-V/modules/drive/led_compensation/LedSdrLiftMethods.inl
+	void UpdateAmbientSdrLift(double renderBlackNits, bool inputIsSdr, const pl_frame& image);   // VPV-HOOK P11a-d: defined in LedSdrLiftMethods.inl
+	static double LedDisplayGamma(enum pl_color_transfer transfer);   // VPV-HOOK P11a-d: defined in LedSdrLiftMethods.inl
 
 	void WarmIdleMotionEngine(const VideoFrameFormatterOutputContract& contract, bool lossless422, bool nativeRgb);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/EngineKeeper.inl
 
@@ -19087,46 +19068,11 @@ struct LibplaceboVideoRenderer::Impl
 		baseTarget.color.primaries = TargetPlPrimaries();
 		// Ambient adaptation (intent interpreter item 3, 2026-10-17): the black this frame
 		// renders to; exactly sdr_black_nits while ambient_adapt is off or at strength 0.
-		const double renderBlackNits = IntentTargetBlackNits(sourceSequence);
+		const double renderBlackNits = IntentFrameBlackNits(sourceSequence, inputIsSdr, image);
 		calibrationHost.NoteVideoTarget(static_cast<int>(baseTarget.color.transfer));
 		LibplaceboRenderParameters::ApplyTargetLuminance(
 			inputIsSdr, static_cast<float>(sdrTargetNits),
 			static_cast<float>(renderBlackNits), baseTarget.color);
-		// Hunt 3 F2: for SDR input the target black above stays the SDR reference (sdr_black_nits
-		// is not applied to SDR: the signal is display-referred, CONFIGURATION.html), so ambient
-		// adaptation's rise of the black reaches the picture as the BT.1886 black lift it stands
-		// for (LibplaceboRenderParameters::SdrAmbientLift, through the frame's colour adjustment).
-		// Off, strength 0 or a dark room: renderBlackNits is the owner's black exactly and
-		// nothing changes (bit-identical).
-		{
-			float contrast = 1.0f, brightness = 0.0f;
-			ambientSdrLift = inputIsSdr && LibplaceboRenderParameters::SdrAmbientLift(sdrBlackNits, renderBlackNits,
-				sdrTargetNits, image.color.transfer, contrast, brightness);
-			ambientSdrContrast = ambientSdrLift ? contrast : 1.0f;
-			ambientSdrBrightness = ambientSdrLift ? brightness : 0.0f;
-			std::string state;
-			char text[256];
-			if (ambientSdrLift)
-			{
-				snprintf(text, sizeof(text), "Ambient adaptation (SDR input): BT.1886 black lift, contrast %.6f brightness %.6f "
-					"(effective black %.5f nits over the owner's %.5f, white %.1f nits)", ambientSdrContrast, ambientSdrBrightness,
-					renderBlackNits, sdrBlackNits, sdrTargetNits);
-				state = text;
-			}
-			else if (inputIsSdr && renderBlackNits > sdrBlackNits)
-			{
-				snprintf(text, sizeof(text), "Ambient adaptation (SDR input): not applied (source transfer %s is not a power law)",
-					pl_color_transfer_name(image.color.transfer));
-				state = text;
-			}
-			else if (!ambientSdrLogged.empty())
-				state = "Ambient adaptation (SDR input): no lift (the owner's black)";
-			if (!state.empty() && state != ambientSdrLogged)
-			{
-				ambientSdrLogged = state;
-				DebugLog::Log("%s", state.c_str());
-			}
-		}
 		// DV next step (f): display profile from today's target settings, and
 		// the mapping policy's libplacebo parameters compared bit for bit with
 		// the HDR metadata actually given to libplacebo (no behaviour change:
@@ -25090,6 +25036,7 @@ releaseDriftBaseRetention =
 #include <VP-V/segments/EntrancePlanner.inl>   // VPV-HOOK P4 e: the entrance planner (Impl member)
 #include <VP-V/modules/motion/consumers/IntentMotionMethods.inl>   // VPV-HOOK P11a-f: the motion-intent part of intent items 2-5 (Impl members)
 #include <VP-V/modules/drive/led_compensation/LedIntentMethods.inl>   // VPV-HOOK P11a-f: the ambient / black / LED-limit parts of intent items 2-5 (Impl members)
+#include <VP-V/modules/drive/led_compensation/LedSdrLiftMethods.inl>   // VPV-HOOK P11a-d: the ambient SDR lift and LedDisplayGamma (Impl members)
 
 
 namespace

@@ -23,7 +23,9 @@
 // (refs/110 s2.3-2.6) fills exactly one of the rest (the list below is the plan, not the current content):
 //   motion.intent   s2.2 motion-intent part of intent items 2-5 (switches/motion configure, ShotEase)  -> motion\consumers
 //   led.intent      s2.2 ambient, black intent and LED-limit parts of intent items 2-5                 -> drive\led_compensation
-//   led             s2.4 ambient SDR lift, LedDisplayGamma, dynamicDrive, the LED/SDR target-black share -> drive\led_compensation
+//   led.sdrLift     s2.4 (P11a-d, landed) ambient SDR lift state; LedDisplayGamma and the target-black frame call
+//                   move with it (LedSdrLiftMethods.inl). dynamicDrive STAYS an Impl member: see refs/110 follow-ons
+//                   (init order: outputColour holds references into it).
 //   status          s2.3 state behind the public status methods (C14 StatusExtension)                  -> control\diagnostics
 //   calibration     s2.5 calibrationHost and the calibration-pattern state                             -> output\calibration_lut
 //   sourceAnalysis  s2.6 sourceMonitor, startupCropHold, edgeBlanking (srcres latch)                   -> input\source_analysis
@@ -33,6 +35,7 @@
 // C++14 (VideoProcessor-Lib / renderer / Test projects): no inline variables, no if constexpr.
 
 #include <VP-V/modules/drive/led_compensation/LedIntentState.h>
+#include <VP-V/modules/drive/led_compensation/LedSdrLiftState.h>
 #include <VP-V/modules/motion/consumers/IntentMotionState.h>
 
 namespace Vpv
@@ -51,6 +54,8 @@ namespace Vpv
 		{
 			using Intent = LedIntentState;   // P11a-f: s2.2 ambient / black / LED-limit state (LedIntentState.h)
 			Intent intent;
+			using SdrLift = LedSdrLiftState;   // P11a-d: s2.4 the ambient SDR black lift (LedSdrLiftState.h)
+			SdrLift sdrLift;
 		};
 
 		// output\calibration_lut (s2.5)

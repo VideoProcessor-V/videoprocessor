@@ -23,6 +23,8 @@
     "src/VP-V/modules/drive/led_compensation/LedResyncPolicy.h",
     "src/VP-V/modules/drive/led_compensation/LedIntentState.h",
     "src/VP-V/modules/drive/led_compensation/LedIntentMethods.inl",
+    "src/VP-V/modules/drive/led_compensation/LedSdrLiftState.h",
+    "src/VP-V/modules/drive/led_compensation/LedSdrLiftMethods.inl",
     "src/VP-V/modules/drive/led_compensation/config_ui"
   ],
   "forwarding_headers": [

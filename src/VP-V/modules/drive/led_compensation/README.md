@@ -307,4 +307,9 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 (wrapper), `ConfigureIntentAmbient`, `IntentTargetBlackNits`, `EvaluateIntentBlackDisplay`. The motion half
 is in motion/consumers.
 
+`LedSdrLiftState.h` (`Vpv::HostState::Led::SdrLift`, `vpv.led.sdrLift.x`) and `LedSdrLiftMethods.inl` (P11a-d,
+refs/110 s2.4): the ambient SDR black-lift state and its frame update (`IntentFrameBlackNits`,
+`UpdateAmbientSdrLift`), plus `LedDisplayGamma`, moved verbatim. `dynamicDrive` stays an Impl member (init order:
+`outputColour` holds references into it); recorded as a follow-on.
+
 <!-- vpv-settings-tests:end -->
