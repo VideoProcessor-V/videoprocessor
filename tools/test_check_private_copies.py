@@ -48,6 +48,10 @@ class RepoSeeds(unittest.TestCase):
         self.assertTrue(any(h["rule"] == "b" and h["product"] == "kP10GrainSplit" and "texture_restore" in h["file"]
                             for h in self.hits))
 
+    def test_rule_c_flags_td_grain_split_compute(self):
+        self.assertTrue(any(h["rule"] == "c" and h["file"].endswith("temporal_detail/TemporalDetailModel.h") and h["line"] == 141
+                            for h in self.hits))
+
     def test_strict_passes_with_the_baseline(self):
         self.assertEqual(N1.main(["--strict", "--root", REPO]), 0)
 
@@ -86,6 +90,31 @@ class Synthetic(unittest.TestCase):
         root = make_tree({"src/VP-V/core/ProductCatalog.h": cat,
                           M + "repair/texture_restore/T.cpp": "auto* g = params.grain.Gpu(p);"})
         self.assertFalse([h for h in N1.scan(root) if h["rule"] == "b"])
+
+    def test_rule_c_outside_owner_folder_only(self):
+        call = "auto s = GrainSplit::Compute(y, 1, 8);"
+        root = make_tree({M + "repair/temporal_detail/T.h": call, M + "repair/grain_split/G.h": call})
+        cs = [h["file"] for h in N1.scan(root) if h["rule"] == "c"]
+        self.assertEqual(cs, [M + "repair/temporal_detail/T.h"])
+        root = make_tree({M + "repair/temporal_detail/T.h": "auto s = GrainSplit::Compute(y, 1, 8);"+chr(10)+"Publish(s);"})
+        self.assertFalse([h for h in N1.scan(root) if h["rule"] == "c"])
+
+    def test_rule_d_register_only_from_owner_folders(self):
+        root = make_tree({M + "repair/deband/D.cpp": "lane.RegisterOwnerFill(k, f);",
+                          M + "control/skeleton/S.cpp": "lane.RegisterOwnerFill(k, f);"})
+        self.assertEqual([h["file"] for h in N1.scan(root) if h["rule"] == "d"], [M + "repair/deband/D.cpp"])
+
+    def test_moved_copy_is_found_in_a_new_file(self):
+        root = make_tree({M + "repair/temporal_detail/TemporalDetailModel.h": "int ok;",
+                          M + "repair/temporal_detail/Other.h": "double v = m_prevGin;"})
+        self.assertEqual([h["site"] for h in N1.scan(root) if "~moved" in h["site"]], ["D1~moved"])
+
+    def test_update_baseline_refuses_a_new_key(self):
+        root = make_tree({M + "repair/deband/VpDebander.cpp": "SPLIT_TENSOR_BODY;"})
+        os.makedirs(os.path.join(root, "tools"), exist_ok=True)
+        json.dump({"entries": [{"key": "a|X9|f", "rule": "a", "site": "X9", "max_hits": 1, "reason": "r", "refs": "x"}]},
+                  open(os.path.join(root, N1.BASELINE), "w"))
+        self.assertEqual(N1.main(["--update-baseline", "--root", root]), 1)
 
     def test_ratchet_rise_new_and_blind(self):
         h = [{"rule": "a", "site": "D1", "file": "f", "line": 1, "text": "", "product": "p"}] * 2

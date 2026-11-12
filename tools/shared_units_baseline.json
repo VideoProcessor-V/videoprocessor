@@ -480,7 +480,8 @@
      "kind": "false_positive",
      "reason": "carries the frame's mean luma (8-bit codes) read back from the scalar pass as data; the cut rule is CutFadeJudge::MeanStepCut / MeanStepCutLine"
     }
-   ]
+   ],
+   "waiver": "WAIVER-JOB1-U7 (coordinator, job1): 0 -> 6 is a new detection of REAL X2 copies (kCutShare/kFadeStepShare), not a loosened rule; target 0 at B6, expires at B6"
   },
   "U8": {
    "name": "active_picture_rect",
@@ -522,7 +523,7 @@
   "U10": {
    "name": "global_motion",
    "blocking": true,
-   "baseline_duplicates": 13,
+   "baseline_duplicates": 19,
    "known_false_positive": [
     {
      "file": "src/VP-V/core/FallbackPlainText.h",
@@ -565,14 +566,9 @@
      "pattern": "engineGlobal|opticalFlowGlobal",
      "kind": "false_positive",
      "reason": "matcher consumes the engine global / its settings (a read, not an estimate) (refs/126 s3, B0)"
-    },
-    {
-     "file": "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
-     "pattern": "\\(engine\\)|\\(camera model\\)|\\(gap seed\\)|camera model: cu",
-     "kind": "false_positive",
-     "reason": "matcher applies the engine / camera / gap-seed global (consumer dispatch, not a search) (refs/126 s3, B0)"
     }
-   ]
+   ],
+   "waiver": "X1 made fully visible (audit B0): the matcher Dispatch-label lines 4012-4062 are no longer suppressed (13 -> 19); target 0 at refs/126 B6"
   },
   "U11": {
    "name": "camera_fit",
@@ -692,5 +688,5 @@
    "baseline_duplicates": 0
   }
  },
- "note": "refs/126 B0 (2026-11-12): all registered units blocking at the measured true count; baselines only shrink. U10 baseline = the matcher D1 global search (X1, file-level owner scope), 0 at refs/126 B6. U7 6 = DetailPulse/TextureRestore private cut/fade shares (X2). U13 14 = SourceResolutionDetector private blockiness (real). U17 is undefined/reserved."
+ "note": "refs/126 B0 (2026-11-12): all registered units blocking at the measured true count; baselines only shrink. U10 baseline = the matcher D1 global search (X1, file-level owner scope), 0 at refs/126 B6. U7 6 = DetailPulse/TextureRestore private cut/fade shares (X2). U13 14 = SourceResolutionDetector private blockiness (real). U17 is undefined/reserved. U10 = 19 after the audit fix (Dispatch-label lines un-suppressed)."
 }

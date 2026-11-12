@@ -9,8 +9,10 @@ accessor. This tool finds three things, comments stripped, owner scope by FILE (
 global search hides inside the motion owner folder, X1):
 
   a  private copy     a producer / recomputation signature outside the product owner files (sites D1-D6, X1-X7)
-  c  owner no-publish an owner compute call (GrainSplit::Compute, CellTrust) in an owner file with no publish /
-                      Acquire / RegisterOwnerFill / Seal evidence anywhere in that file
+  c  owner no-publish a call of an owner compute (GrainSplit::Compute, BandFromBase::Blur, HalfLuma::*, CellTrust)
+                      OUTSIDE the owning folder, in a file with no publish / Acquire / Seal evidence (refs/126 s1.3)
+  d  register         RegisterOwnerFill / RegisterCpuLiveCompute called outside the owning folders
+  moved               <site>~moved: a seeded copy signature found in a file other than the seeded ones
   b  declared-unread  a ConsumerRow in ProductCatalog.h that declares a product read, while no source file in the
                       row module folder references that product accessor (X8: the declaration is a lie)
 
@@ -37,6 +39,7 @@ SITES = [
     {"id": "D1", "product": "kP10GrainSplit", "refs": "122 s9 D1",
      "what": "TD private grain guard / EMA of the grain",
      "re": r"\bm_prevGin\b|\bdouble\s+guard\b|\bema\[7\]",
+     "wide": r"\bm_prevGin\b",
      "only": [_M + "repair/temporal_detail/TemporalDetailModel.h"]},
     {"id": "D2", "product": "kP2VectorPair", "refs": "122 s9 D2",
      "what": "per-consumer CellTrust (optical-flow trust recomputed outside the engine)",
@@ -53,6 +56,7 @@ SITES = [
     {"id": "D4", "product": "kP8CameraLabels", "refs": "122 s9 D4",
      "what": "camera labels read as a FieldCopy through the link instead of P3",
      "re": r"\bm_link\.FieldOf\s*\(",
+     "wide": r"\bm_link\.FieldOf\s*\(",
      "only": [_M + "motion/estimation/global_model/link/CameraLabelFill.cpp"]},
     {"id": "D5", "product": "kP13SourceRing", "refs": "122 s9 D5",
      "what": "producer CPU luma decode (code >> 6) / GPU row upload shift",
@@ -61,6 +65,7 @@ SITES = [
     {"id": "D6", "product": "kP13SourceRing", "refs": "122 s9 D6 / doc 91 D C9",
      "what": "C9 producer own RGB / full-range luma decode (named exception until EPE is compared)",
      "re": r"\bSamplerCodesAreFullRange\b|\bfullRangeYuv\b|\bCodesFullRange\b",
+     "wide": r"\bSamplerCodesAreFullRange\b",
      "only": [_M + "input/source_analysis/VpFrameAnalysis.cpp"]},
     {"id": "X1", "product": "kP2VectorPair", "refs": "126 s4 X1",
      "what": "matcher D1 global search inside the motion owner folder (file-level scope)",
@@ -69,6 +74,7 @@ SITES = [
     {"id": "X2", "product": "kP4SourceStats", "refs": "126 s4 X2",
      "what": "private cut / fade judge (kCutShare, kFadeStepShare) in DP and TR",
      "re": r"\bkCutShare\b|\bkFadeStepShare\b",
+     "wide": r"\bkCutShare\b|\bkFadeStepShare\b",
      "only": [_M + "repair/texture_restore/DetailPulse.h", _M + "repair/texture_restore/DetailPulse.cpp",
               _M + "repair/texture_restore/TextureRestore.h", _M + "repair/texture_restore/TextureRestore.cpp"]},
     {"id": "X3", "product": "kP11RegionBlockStats", "refs": "126 s4 X3",
@@ -78,6 +84,7 @@ SITES = [
     {"id": "X4", "product": "kP10GrainSplit", "refs": "126 s4 X4",
      "what": "debander own grain split (SPLIT_TENSOR_BODY)",
      "re": r"\bSPLIT_TENSOR_BODY\b",
+     "wide": r"\bSPLIT_TENSOR_BODY\b",
      "only": [_M + "repair/deband/VpDebander.cpp"]},
     {"id": "X5", "product": "kP11RegionBlockStats", "refs": "126 s4 X5",
      "what": "adaptive downscale own Sobel / Laplacian maps",
@@ -90,17 +97,27 @@ SITES = [
     {"id": "X7", "product": "kP10GrainSplit", "refs": "126 s4 X7",
      "what": "TD own grain split when the shared one does not fit (CheckFit fallback)",
      "re": r"\bGrainSplit::Gpu::CheckFit\b|\bown grain split\b", "raw": True,
+     "wide": r"\bown grain split\b",
      "only": [_M + "repair/temporal_detail/TemporalDetailGpu.cpp"]},
 ]
 
-# Rule c: owner compute symbol -> owner files; an owner file calling it must show publish evidence.
+# Rule c (refs/126 s1.3): a call of an owner compute symbol OUTSIDE the owning folder, in a file that shows no
+# publish / Acquire path, computes a shared result privately. Owner scope is the owning FOLDER here; rule a is file-level.
 OWNER_COMPUTE = [
     {"id": "C-grain", "product": "kP10GrainSplit", "sym": r"\bGrainSplit::Compute\s*\(",
-     "owner": [_M + "input/source_analysis/regions/RegionEvidence.h"]},
+     "owner": _M + "repair/grain_split/"},
+    {"id": "C-band", "product": "kP10GrainSplit", "sym": r"\bBandFromBase::Blur\s*\(",
+     "owner": _M + "repair/grain_split/"},
+    {"id": "C-halfluma", "product": "kP1HalfLuma", "sym": r"\bHalfLuma::(Box4|FinishP1|FinishEngine8|MeanF|QuarterEngine8)\b",
+     "owner": _M + "input/source_analysis/lane/"},
     {"id": "C-trust", "product": "kP2VectorPair", "sym": r"\bOpticalFlowTrust::CellTrust\s*\(",
-     "owner": [_M + "motion/estimation/VectorEngine.cpp", _M + "motion/estimation/OpticalFlowTrust.h"]},
+     "owner": _M + "motion/estimation/"},
 ]
 PUBLISH = re.compile(r"\b(Publish\w*|Acquire\s*\(|RegisterOwnerFill|SealProduct|Seal\s*\(|SetProduct\w*|StoreProduct\w*)")
+# Rule d: the live-fill registration is made only from the owning folders (skeleton wiring and the producers).
+REGISTER_SYM = re.compile(r"\b(RegisterOwnerFill|RegisterCpuLiveCompute)\b")
+REGISTER_OWNERS = ("src/VP-V/core/", _M + "control/skeleton/", _M + "input/source_analysis/", _M + "motion/estimation/",
+                   _M + "repair/grain_split/")
 
 # Rule b: product -> accessor regex (a consumer reads the product through one of these).
 ACCESSOR = {
@@ -198,16 +215,35 @@ def scan(root):
                 if rx.search(line):
                     hits.append({"rule": "a", "site": s["id"], "file": rel, "line": ln,
                                  "text": line.strip()[:110], "product": s["product"]})
+    for st in SITES:
+        if not st.get("wide") or not st.get("only"):
+            continue
+        rx = re.compile(st["wide"])
+        for rel in files:
+            if rel in st["only"] or rel in st.get("owner", []):
+                continue
+            for ln, line in enumerate(code(rel).split(chr(10)), 1):
+                if rx.search(line):
+                    hits.append({"rule": "a", "site": st["id"] + "~moved", "file": rel, "line": ln,
+                                 "text": "copy found outside the seeded file: " + line.strip()[:80], "product": st["product"]})
     for o in OWNER_COMPUTE:
         rx = re.compile(o["sym"])
-        for rel in o["owner"]:
-            if rel not in files:
+        for rel in files:
+            if rel.startswith(o["owner"]):
                 continue
-            t = code(rel)
-            if rx.search(t) and not PUBLISH.search(t):
-                ln = next(i for i, l in enumerate(t.split("\n"), 1) if rx.search(l))
-                hits.append({"rule": "c", "site": o["id"], "file": rel, "line": ln,
-                             "text": "owner computes, no publish path", "product": o["product"]})
+            lines = code(rel).split(chr(10))
+            for ln, line in enumerate(lines, 1):
+                if rx.search(line):
+                    if PUBLISH.search(chr(10).join(lines[max(0, ln - 7):ln + 6])):
+                        continue   # the result goes to a publish / Acquire path within the statement window
+                    hits.append({"rule": "c", "site": o["id"], "file": rel, "line": ln,
+                                 "text": "owner compute outside its folder, no publish path: " + line.strip()[:80],
+                                 "product": o["product"]})
+    for rel in files:
+        if REGISTER_SYM.search(code(rel)) and not rel.startswith(REGISTER_OWNERS):
+            ln = next(i for i, l in enumerate(code(rel).split(chr(10)), 1) if REGISTER_SYM.search(l))
+            hits.append({"rule": "d", "site": "REG", "file": rel, "line": ln,
+                         "text": "live-fill registration outside the owning folders", "product": "-"})
     for rid, name, folder, prods in consumer_rows(root):
         fdir = "src/" + folder
         members = [r for r in files if r.startswith(fdir + "/")] or [r for r in files if r.startswith(fdir)]
@@ -282,6 +318,9 @@ def main(argv=None):
                                "refs": info.get(site, {}).get("refs", "126 s4 X8"),
                                "reason": info.get(site, {}).get("what", "declared product read never made, or owner compute without publish"),
                                "seed": site in info}
+            if old and k not in old:
+                print("refusing to add a new key " + k + " (edit the baseline by hand with the coordinator approval)", file=sys.stderr)
+                return 1
             if k in old and n > old[k]["max_hits"]:
                 print("refusing to raise " + k, file=sys.stderr)
                 return 1

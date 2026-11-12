@@ -154,6 +154,24 @@
    "max_hits": 5
   },
   {
+   "key": "a|D6~moved|src/VP-V/modules/input/source_analysis/VpFrameAnalysis.h",
+   "rule": "a",
+   "site": "D6~moved",
+   "refs": "audit B0 (moved-copy detection)",
+   "reason": "the seeded signature also occurs in a sibling file of the same module/producer (declaration or a second module with the same private pattern); counted so it cannot grow",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "a|D6~moved|src/VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h",
+   "rule": "a",
+   "site": "D6~moved",
+   "refs": "audit B0 (moved-copy detection)",
+   "reason": "the seeded signature also occurs in a sibling file of the same module/producer (declaration or a second module with the same private pattern); counted so it cannot grow",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
    "key": "a|X1|src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
    "rule": "a",
    "site": "X1",
@@ -251,6 +269,15 @@
    "reason": "TD own grain split when the shared one does not fit (CheckFit fallback)",
    "seed": true,
    "max_hits": 3
+  },
+  {
+   "key": "a|X7~moved|src/VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.cpp",
+   "rule": "a",
+   "site": "X7~moved",
+   "refs": "audit B0 (moved-copy detection)",
+   "reason": "the seeded signature also occurs in a sibling file of the same module/producer (declaration or a second module with the same private pattern); counted so it cannot grow",
+   "seed": false,
+   "max_hits": 1
   },
   {
    "key": "b|X8|src/VP-V/modules/drive/led_measure#kP4SourceStats",
@@ -418,10 +445,56 @@
    "key": "c|C-grain|src/VP-V/modules/input/source_analysis/regions/RegionEvidence.h",
    "rule": "c",
    "site": "C-grain",
-   "refs": "126 s4 X8",
-   "reason": "declared product read never made, or owner compute without publish",
+   "refs": "126 s1.3 / N1 (c)",
+   "reason": "owner compute called outside its owning folder with no publish/Acquire path in the statement window; goes to 0 when the unit reads the skeleton product (B1+)",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "c|C-grain|src/VP-V/modules/repair/temporal_detail/TemporalDetailModel.h",
+   "rule": "c",
+   "site": "C-grain",
+   "refs": "126 s1.3 / N1 (c)",
+   "reason": "owner compute called outside its owning folder with no publish/Acquire path in the statement window; goes to 0 when the unit reads the skeleton product (B1+)",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "c|C-grain|src/VP-V/modules/scaling/chroma_upscale/ChromaCfl.h",
+   "rule": "c",
+   "site": "C-grain",
+   "refs": "126 s1.3 / N1 (c)",
+   "reason": "owner compute called outside its owning folder with no publish/Acquire path in the statement window; goes to 0 when the unit reads the skeleton product (B1+)",
+   "seed": false,
+   "max_hits": 2
+  },
+  {
+   "key": "c|C-halfluma|src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
+   "rule": "c",
+   "site": "C-halfluma",
+   "refs": "126 s1.3 / N1 (c)",
+   "reason": "owner compute called outside its owning folder with no publish/Acquire path in the statement window; goes to 0 when the unit reads the skeleton product (B1+)",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "c|C-halfluma|src/VP-V/modules/repair/grain_split/GrainSplit.h",
+   "rule": "c",
+   "site": "C-halfluma",
+   "refs": "126 s1.3 / N1 (c)",
+   "reason": "owner compute called outside its owning folder with no publish/Acquire path in the statement window; goes to 0 when the unit reads the skeleton product (B1+)",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "c|C-trust|src/VP-V/modules/repair/temporal_detail/SharedMotionSource.h",
+   "rule": "c",
+   "site": "C-trust",
+   "refs": "126 s1.3 / N1 (c)",
+   "reason": "owner compute called outside its owning folder with no publish/Acquire path in the statement window; goes to 0 when the unit reads the skeleton product (B1+)",
    "seed": false,
    "max_hits": 1
   }
- ]
+ ],
+ "note": "N1 baseline (job1 B0). Counts only shrink; --update-baseline refuses a rise and any new key."
 }

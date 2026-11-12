@@ -343,9 +343,9 @@ class CheckSharedUnitsTest(unittest.TestCase):
 
     # ---- the real repository ------------------------------------------------------------------
     # frozen floor (refs/126 B0, 2026-11-12): blocking units may only shrink from here
-    FLOOR = {"U1": 20, "U2": 11, "U3": 16, "U4": 5, "U5": 1, "U6": 0, "U7": 6, "U10": 13, "U13": 14,
+    FLOOR = {"U1": 20, "U2": 11, "U3": 16, "U4": 5, "U5": 1, "U6": 0, "U7": 6, "U10": 19, "U13": 14,
              "U14": 0, "U16": 0, "U18": 0, "U20": 0}
-    RAISED_BY_B0 = {"U7": 6}   # new X2 signature (kCutShare|kFadeStepShare) found 6 real private cut/fade lines; waived once by refs/126
+    RAISED_BY_B0 = {"U7": 6, "U10": 19}   # WAIVER-JOB1-U7 (X2 real copies, 0 -> 6, target 0 at B6, expires at B6); U10 13 -> 19 = X1 Dispatch lines un-suppressed (audit B0, target 0 at B6)
 
     def _reference_baseline(self):
         for ref in ("integ/batch1",):
