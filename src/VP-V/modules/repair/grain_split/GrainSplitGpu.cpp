@@ -25,9 +25,9 @@ namespace GrainSplit
 			// Weights: w1/R1 full-resolution fine band (sigmaFine s), wb/RB and w6/R6 the half-resolution base and low bands
 			// (V3HalfWeight of sigmaBase s and sigmaLow s), RL = max(RB, R6).
 
-			// 1. HALF + ACROSS: the half plane by the shared U3 accessor vpu_half_luma (VpUnit::HalfLuma::Glsl; R channel, so the
-			// v3 Splitter reads component 0) in codes (GS_INV_CU) into shared memory (GrainSplit::V3Half), then the base and
-			// low Gaussians across (half-resolution edges clamped). Tile TW x TH half px per workgroup (64 x 4).
+			// 1. HALF + ACROSS: the half plane by the shared U3 accessor vpu_half_luma_comp (VpUnit::HalfLuma::GlslComponent,
+			// channel GS_COMP) in codes (GS_INV_CU) into shared memory (GrainSplit::V3Half), then the base and low Gaussians
+			// across (half-resolution edges clamped). Tile TW x TH half px per workgroup (64 x 4).
 			const char* const HALF_HEADER = R"GLSL(
 #define TW 64
 #define TH 4
@@ -41,7 +41,7 @@ ivec2 org = ivec2(gl_WorkGroupID.xy) * ivec2(TW, TH);
 for (uint i = li; i < uint(TH * SW); i += uint(TW * TH)) {
     int r = int(i / uint(SW)), c = int(i % uint(SW));
     ivec2 q = ivec2(clamp(org.x - RL + c, 0, GS_HW - 1), clamp(org.y + r, 0, GS_HH - 1));
-    s_r[i] = vpu_half_luma(src, q) * GS_INV_CU;
+    s_r[i] = vpu_half_luma_comp(src, q, GS_COMP) * GS_INV_CU;
 }
 barrier();
 ivec2 q = org + lid;
@@ -83,8 +83,9 @@ for (int s = 0; s < TR / 16; s++) {
 }
 )GLSL";
 
-			// The half-resolution bands at a full-resolution pixel from the shared tile s_l (half indices lo .. lo + LA - 1,
-			// loaded clamped): bilinear at (p + 0.5) / 2 - 0.5, the arithmetic of GrainSplit::V3LowAt.
+			// The half-resolution bands at a full-resolution pixel from the shared tile s_l (half indices lo .. lo + LA - 1 with
+			// lo = org / 2 - 1, loaded clamped): bilinear at (p + 0.5) / 2 - 0.5, the arithmetic of GrainSplit::V3LowAt. Any
+			// origin parity: for p in [org, org + n - 1] the taps span lo + 1 .. lo + (n + 1) / 2 + 1 <= lo + n / 2 + 2.
 			const char* const LOW_S_GLSL = R"GLSL(
 vec2 low_s(ivec2 p, ivec2 lo)
 {
@@ -105,7 +106,7 @@ vec2 low_s(ivec2 p, ivec2 lo)
 			// the block means -> quiet = (quiet, e3, e1, e2). Deterministic: no atomics.
 			const char* const STATS_HEADER = R"GLSL(
 #define AP (CH + 2 * R1)
-#define LA (CH / 2 + 2)
+#define LA (CH / 2 + 3)
 #define NSUB (GS_SUB * GS_SUB)
 shared float s_y[AP * AP];
 shared float s_hh[AP * CH];
@@ -477,7 +478,8 @@ if (p.x < GS_W && p.y < GS_H) {
 			{
 				const pl_shader_desc d[2] = { Sampled("src", plane), VpvGpu::Storage("tmp_out", r.tmp) };
 				const size_t shmem = sizeof(float) * size_t(kHalfTh) * size_t(kHalfTw + 2 * rl);
-				const std::string hdr = txt.geo + txt.wlow + Define("GS_INV_CU", 1.0 / codeUnit) + VpUnit::HalfLuma::Glsl() + HALF_HEADER;
+				const std::string hdr = txt.geo + txt.wlow + Define("GS_INV_CU", 1.0 / codeUnit) + DefineInt("GS_COMP", component) +
+					VpUnit::HalfLuma::GlslComponent() + HALF_HEADER;
 				if (!Pass(dispatch, "VideoProcessor grain split: half + across", hdr, HALF_BODY, d, 2, nullptr, 0,
 					(hw + kHalfTw - 1) / kHalfTw, (hh + kHalfTh - 1) / kHalfTh, shmem, kHalfTw, kHalfTh, options.timer))
 					return fail("grain split: half pass failed");
@@ -494,7 +496,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			}
 			case 2:
 			{
-				const int ch = ChunkOf(B), ap = ch + 2 * txt.r1, la = ch / 2 + 2, nsub = params.subBlocks * params.subBlocks;
+				const int ch = ChunkOf(B), ap = ch + 2 * txt.r1, la = ch / 2 + 3, nsub = params.subBlocks * params.subBlocks;
 				const std::string hdr = txt.geo + txt.w1 + txt.yread + DefineInt("CH", ch) + DefineInt("GS_SUB", params.subBlocks) +
 					DefineInt("GS_QUIET", params.quietSubBlocks) + Define("GS_CAL", params.grainCal) + STATS_HEADER + LOW_S_GLSL;
 				const size_t shmem = sizeof(float) * (size_t(ap) * ap + size_t(ap) * ch + 2u * size_t(la) * la + 4u * size_t(ch) * ch + 5u * size_t(nsub));
@@ -559,8 +561,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			m_error.clear();
 			m_scratchShort = false;
 			m_out = Frame();   // a failed Compute never leaves the previous frame's product looking valid
-			// v3 reads the plane's R channel through the shared U3 accessor: component 0 only (every caller passes 0).
-			if (!gpu || !dispatch || !plane || !plane->params.sampleable || component != 0 || !(codeUnit > 0.0) || B < 2 || (B % 2) != 0)
+			if (!gpu || !dispatch || !plane || !plane->params.sampleable || component < 0 || component > 3 || !(codeUnit > 0.0) || B < 1)
 			{
 				m_error = "grain split: invalid input";
 				return false;
@@ -570,6 +571,23 @@ if (p.x < GS_W && p.y < GS_H) {
 			{
 				m_error = "grain split: invalid law";
 				return false;
+			}
+			// The passes' shared memory against the device limit (a visible refusal, never a silent fallback).
+			{
+				const double s1 = params.sigmaFine * scale;
+				const int r1 = GaussRadius(s1), rl = (std::max)(GrainSplit::V3HalfRadius(params.sigmaBase * scale), GrainSplit::V3HalfRadius(params.sigmaLow * scale));
+				const int ch = ChunkOf(B), ap = ch + 2 * r1, la = ch / 2 + 3, nsub = params.subBlocks * params.subBlocks;
+				const int aw = kApplyTile + 2, aa = aw + 2 * r1, lapp = kApplyTile / 2 + 2;
+				const size_t need[4] = { sizeof(float) * size_t(kHalfTh) * size_t(kHalfTw + 2 * rl), 2 * sizeof(float) * size_t(kDownTc) * size_t(kDownTr + 2 * rl),
+					sizeof(float) * (size_t(ap) * ap + size_t(ap) * ch + 2u * size_t(la) * la + 4u * size_t(ch) * ch + 5u * size_t(nsub)),
+					sizeof(float) * (size_t(aa) * aa + size_t(aa) * kApplyTile + 2u * size_t(lapp) * lapp + size_t(aw) * aw) };
+				const size_t most = (std::max)((std::max)(need[0], need[1]), (std::max)(need[2], need[3]));
+				if (most > gpu->glsl.max_shmem_size)
+				{
+					m_error = "grain split: the passes need " + std::to_string(most) + " B of shared memory, the device offers " +
+						std::to_string(gpu->glsl.max_shmem_size) + " B";
+					return false;
+				}
 			}
 			const StorageChoice choice = ChooseStorage(options.storage, plane->params.format, codeUnit);
 			m_storageNote = choice.why;

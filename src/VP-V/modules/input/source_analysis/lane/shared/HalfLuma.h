@@ -68,8 +68,9 @@ namespace HalfLuma
 		return static_cast<uint8_t>((a + b + c + d + 2u) / 4u);
 	}
 
-	// GLSL accessors (the contract; not wired into a pass yet). Both read an R-channel luma texture with texelFetch,
-	// q in output coordinates, second taps clamped to the texture edge. vpu_quarter_luma takes the HALF texture.
+	// GLSL accessors (the contract). Both read an R-channel luma texture with texelFetch, q in output coordinates, second
+	// taps clamped to the texture edge. vpu_quarter_luma takes the HALF texture. GlslComponent() adds the same law for any
+	// channel (vpu_half_luma_comp; used by the grain split v3 HALF pass, which serves luma and semi-planar chroma).
 	inline std::string Glsl()
 	{
 		return std::string("#define VPU_HALF_LUMA_VERSION ") + std::to_string(kUnitVersion) + "\n"
@@ -84,6 +85,20 @@ namespace HalfLuma
 			"    return (a + b + c + d) * 0.25;\n}\n"
 			"float vpu_quarter_luma(sampler2D halfSrc, ivec2 q)\n{\n"
 			"    return vpu_half_luma(halfSrc, q);\n}\n";
+	}
+	// Additive (grain split v3, refs/116): the same taps, order and mean on channel `comp` (0..3) of the texture.
+	// The existing entries above are unchanged, so kUnitVersion stays.
+	inline std::string GlslComponent()
+	{
+		return std::string("float vpu_half_luma_comp(sampler2D src, ivec2 q, int comp)\n{\n"
+			"    ivec2 hi = textureSize(src, 0) - ivec2(1);\n"
+			"    ivec2 p0 = min(q * 2, hi);\n"
+			"    ivec2 p1 = min(q * 2 + ivec2(1), hi);\n"
+			"    float a = texelFetch(src, ivec2(p0.x, p0.y), 0)[comp];\n"
+			"    float b = texelFetch(src, ivec2(p1.x, p0.y), 0)[comp];\n"
+			"    float c = texelFetch(src, ivec2(p0.x, p1.y), 0)[comp];\n"
+			"    float d = texelFetch(src, ivec2(p1.x, p1.y), 0)[comp];\n"
+			"    return (a + b + c + d) * 0.25;\n}\n");
 	}
 }
 }

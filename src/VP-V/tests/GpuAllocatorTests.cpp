@@ -1049,7 +1049,8 @@ namespace GpuAllocatorTestsNs
 			const uint64_t compactPeak = (px * 8 + blocks * 16) * 6 + px * 4 + blocks * 16;
 			Assert::IsTrue(six[0].find(FormatMB(fullPeak)) != std::string::npos, L"full peak line");
 			Assert::IsTrue(six[1].find(FormatMB(compactPeak)) != std::string::npos, L"compact peak line");
-			Assert::IsTrue(six[1].find("8 x 6 + 32 B/px") != std::string::npos, L"compact peak formula");
+			// WAIVER-P10V3-01: the compact formula text "8 x 6 + 32 B/px" -> "8 x 6 + 4 B/px" (v3 scratch, see above).
+			Assert::IsTrue(six[1].find("8 x 6 + 4 B/px") != std::string::npos, L"compact peak formula");
 		}
 	};
 }

@@ -7,7 +7,7 @@
 // luma and each chroma plane for the chroma upscaler's grain guard.
 //
 // Passes (all compute, nothing read back; the structure of texture_restore's HALF / LOWH / LOWV / STATS / GRAIN / APPLY):
-//   1. HALF   the U3 half plane (vpu_half_luma, shared memory), base / low Gaussians across -> tmp (rg32f, half size)
+//   1. HALF   the U3 half plane (vpu_half_luma_comp, shared memory), base / low across -> tmp (rg32f, half size)
 //   2. DOWN   the base / low Gaussians down                                           -> low  (Gb, G6; rg32f, half size)
 //   3. STATS  one workgroup per block: G1 in shared memory, D = d1 + d2, the sub-block energies (one thread per
 //             sub-block, fixed order), the quietest x cal, the block means of d3^2, d1^2, d2^2 -> quiet (block grid)
@@ -151,7 +151,7 @@ namespace GrainSplit
 			Splitter(const Splitter&) = delete;
 			Splitter& operator=(const Splitter&) = delete;
 
-			// The split of `plane` (component `component`: 0 in v3, the shared U3 accessor reads the R channel) whose values are codes x codeUnit. scale multiplies
+			// The split of `plane` (component `component`, 0..3) whose values are codes x codeUnit. scale multiplies
 			// the sigmas, B is the block edge in plane pixels. False (with LastError) on any failure.
 			bool Compute(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B,
 				const Params& params = Params());
@@ -162,8 +162,8 @@ namespace GrainSplit
 				const Params& params, const Options& options);
 			// The five passes of Compute as separate calls (70b lane form: one chunk per pass): Step(0..4) with the SAME arguments
 			// and options on every call records exactly Compute's dispatches in order (half, low, grain level, minimum, Wiener
-			// share), so Compute == the step loop byte for byte. B must be even (>= 2); sigmaBase and sigmaLow x scale must be
-			// >= GrainSplit::kV3MinLowSigma ("invalid law" otherwise). Step 0 validates and resolves the outputs and intermediates
+			// share), so Compute == the step loop byte for byte. sigmaBase and sigmaLow x scale must be >= GrainSplit::kV3MinLowSigma
+			// ("invalid law" otherwise); a device whose shared memory is below the passes' need is refused with the numbers. Step 0 validates and resolves the outputs and intermediates
 			// (private textures survive between steps and gaps; with options.arena the CALLER holds the arena scope kArenaScope
 			// across the five steps); Out() is valid after step 4. A failing or out-of-order step returns false and ends the run.
 			static constexpr uint32_t StepCount() { return 5; }
