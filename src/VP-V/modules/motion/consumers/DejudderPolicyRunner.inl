@@ -15,6 +15,7 @@
 #pragma once
 
 #include <VP-V/modules/motion/consumers/DejudderPolicyRunner.h>
+#include <VP-V/modules/motion/estimation/DitherVectorSource.h>
 
 namespace
 {
@@ -118,8 +119,34 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	// MotionValidity step 1 C: the kept run. Cadence repeats and smooth motion's
 	// extra draws carry the same sequence (Repeat: the run continues); a hole
 	// nothing else reported (a drop) invalidates here, before this estimate.
-	motionValidity.NoteKept(sourceSequence, MotionValidity::Cause::DriftDrop);
+	const MotionValidity::Continuity keptContinuity = motionValidity.NoteKept(sourceSequence, MotionValidity::Cause::DriftDrop);
 	ApplyMotionInvalidate();
+	// W2-C8 (owner 2026-11-11 22:39, doc 91:108): the sigma-delta's motion compensation for this frame's renders - on (the
+	// configured default) only while the pair that ends here is valid and the engine runs; else off, visibly (DitherVectorSource.h).
+	{
+		namespace DV = VpMotion::DitherVectors;
+		double configured = 0.0;
+		DV::CompensationFacts cf;
+		cf.configured = customHooks.QuantizerConfigured("motion_compensation", configured) && configured >= 0.5;
+		if (cf.configured)
+		{
+			cf.engineOff = vectorDemand.mode == VectorDemand::Mode::Off;
+			cf.continuity = keptContinuity;
+			cf.keptPairValid = sourceSequence > 1 && motionValidity.KeptPairValid(sourceSequence - 1, sourceSequence);
+			if (sourceSequence > 1)
+				cf.span = motionValidity.SpanStatus(sourceSequence - 1, sourceSequence);
+			cf.invalidations = motionValidity.Total();
+			cf.lastCause = motionValidity.LastCause();
+			const DV::Compensation compensation = DV::DecideCompensation(cf);
+			customHooks.SetQuantizerParameter("motion_compensation", compensation.on ? 1.0 : 0.0);
+			DV::Tracker& tracker = DV::Registry::ForHost(this);
+			const unsigned long long nowMs = GetTickCount64();
+			tracker.NoteCompensation(compensation, nowMs);
+			if (compensation.Automatic())
+				for (const FallbackCatalog::Decision& decision : tracker.Decisions(nowMs))
+					SyncFallback(decision);
+		}
+	}
 	dejudderSourceHz = sourceHz;
 	// Vector engine on demand: what wants vectors this frame (previous-frame state), and backward pairs.
 	// VPV-HOOK

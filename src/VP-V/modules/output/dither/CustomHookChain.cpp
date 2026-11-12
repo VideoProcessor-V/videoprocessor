@@ -446,6 +446,48 @@ namespace CustomHookChain
         return false;
     }
 
+    bool Chain::QuantizerConfigured(const char* name, double& value) const
+    {
+        if (!name) return false;
+        for (const Entry& entry : entries)
+        {
+            if (!entry.quantizer || !entry.hook || entry.runtimeFailed) continue;
+            for (int i = 0; i < entry.hook->num_parameters; ++i)
+            {
+                const pl_hook_par& parameter = entry.hook->parameters[i];
+                if (!parameter.name || std::strcmp(parameter.name, name) != 0) continue;
+                const auto configured = entry.rule.parameters.find(name);
+                if (configured != entry.rule.parameters.end())
+                {
+                    char* end = nullptr;
+                    const double v = std::strtod(configured->second.c_str(), &end);
+                    if (end != configured->second.c_str())
+                    {
+                        value = v;
+                        return true;
+                    }
+                }
+                switch (parameter.type)
+                {
+                case PL_VAR_FLOAT: value = parameter.initial.f; return true;
+                case PL_VAR_SINT: value = parameter.initial.i; return true;
+                case PL_VAR_UINT: value = parameter.initial.u; return true;
+                default: return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool Chain::SetQuantizerParameter(const char* name, double value) const
+    {
+        bool set = false;
+        for (const Entry& entry : entries)
+            if (entry.quantizer && entry.hook && !entry.runtimeFailed)
+                set = SetHookParameter(entry.hook, name, value) || set;
+        return set;
+    }
+
     bool Chain::IsPrescalerHook(const pl_hook* hook) const
     {
         return hook && std::any_of(entries.begin(), entries.end(), [&](const Entry& entry)

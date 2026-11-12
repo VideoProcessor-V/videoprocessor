@@ -200,6 +200,8 @@ Tiers: Classic libplacebo dither; Low .. Upper sigma-delta.
 
 ## VP_INCLUDE and the vector chain (W2-C8)
 
+
+
 - `VpShaderInclude.h`: a whole line `// VP_INCLUDE <id>` in a custom GLSL hook (a plain comment, never a `//!` directive) is replaced, before templates and parsing, by the GLSL the owning module publishes under `<id>`. Known id: `motion.output_domain_search` (`VpMotion::OutputDomainSearch::Glsl`, in motion.estimation). The inserted text takes the including line's line ends, so the expanded file equals the file the passes were cut from. The custom hook chain, the GPU tests' loaders and the Beta host share this one expansion; an unknown id is an error with a reason.
 - `CustomHookChain::Chain::QuantizerParameter(name, value)`: the current value of a `//!PARAM` of the loaded quantiser (the rule's value or the shader default); the renderer reads `motion_compensation` through it for the chain's step 5.
 - `shaders/Temporal sigma-delta.glsl` keeps the sigma-delta plus the VPVEC / VPPIX consumption only; the search passes are the include line. Where the block vectors come from (shared pair, matcher field, on-demand pair, own search, static) is decided in motion.estimation (`DitherVectorSource.h`).

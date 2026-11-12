@@ -5821,7 +5821,7 @@ struct LibplaceboVideoRenderer::Impl
 		want(C::Interpolator, activeSettings.interpolation != InterpolationPolicy::Mode::Off);
 		want(C::HiccupRepair, activeSettings.interpolationFillGaps);
 		want(C::OcclusionMask, activeSettings.occlusionMask);
-		want(C::SigmaDelta, sigmaDeltaRanLast && !activeSettings.ditherVectorsOwn && DitherVectorsSupported());
+		want(C::SigmaDelta, sigmaDeltaRanLast && !activeSettings.ditherVectorsOwn && DitherVectorsSupported() && CustomHookChain::QuantizerOn(customHooks, "motion_compensation"));
 		want(C::GrainMap, adaptiveGrainMapWanted);
 		want(C::DebandHold, activeSettings.debandVp != "off" && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband) && !temporal);
 		want(C::DetailPulse, (activeSettings.detailPulseStabilise || activeSettings.textureRestore) && !temporal);

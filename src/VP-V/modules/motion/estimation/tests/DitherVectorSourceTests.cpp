@@ -292,6 +292,126 @@ namespace VideoProcessorTest
 				}
 		}
 
+		// Owner 2026-11-11 22:39 (doc 91:108): motion compensation default ON, off VISIBLY whenever the pair ending at the frame is
+		// not valid or the engine is off. One case per cause, each with its status text, counter and fallback entry.
+		static DV::CompensationFacts ValidFrame()
+		{
+			DV::CompensationFacts f;
+			f.configured = true;
+			f.engineOff = false;
+			f.continuity = MotionValidity::Continuity::Contiguous;
+			f.keptPairValid = true;
+			f.span = Span::Valid;
+			f.invalidations = 3;
+			f.lastCause = MotionValidity::Cause::Resync;
+			return f;
+		}
+		static void ExpectOff(DV::CompensationFacts f, DV::CompensationWhy why, const char* text, bool entry)
+		{
+			const DV::Compensation c = DV::DecideCompensation(f);
+			Assert::IsFalse(c.on, W(text).c_str());
+			Assert::IsTrue(c.why == why, W(text).c_str());
+			Assert::AreEqual(entry, c.Automatic(), W(text).c_str());
+			DV::Tracker t;
+			t.NoteCompensation(c, 100);
+			Assert::AreEqual(1ull, t.CompensationCount(why), W(text).c_str());
+			const std::string segment = t.StatusSegment();
+			Assert::IsTrue(Contains(segment, "dither motion compensation: off (") && Contains(segment, text), W(segment).c_str());
+			Assert::AreEqual(entry, Engaged(t.Decisions(100), "dither motion compensation"), W(text).c_str());
+			if (entry)
+			{
+				for (const auto& d : t.Decisions(100))
+					if (d.id == std::string("dither motion compensation"))
+						Assert::IsTrue(Contains(d.reason, "dither: motion compensation off: ") && Contains(d.reason, text), W(d.reason).c_str());
+				Assert::IsFalse(Engaged(t.Decisions(100 + DV::Tracker::kHoldMs), "dither motion compensation"), L"ages out");
+			}
+		}
+
+		TEST_METHOD(MotionCompensationIsOnForAValidPair)
+		{
+			const DV::Compensation c = DV::DecideCompensation(ValidFrame());
+			Assert::IsTrue(c.on && c.why == DV::CompensationWhy::None && !c.Automatic());
+			DV::CompensationFacts repeat = ValidFrame();
+			repeat.continuity = MotionValidity::Continuity::Repeat;   // a cadence repeat: zero motion (static_refresh), exact
+			Assert::IsTrue(DV::DecideCompensation(repeat).on, L"a repeat keeps compensation on");
+			DV::CompensationFacts unknown = ValidFrame();
+			unknown.span = Span::Unknown;   // resync_event off: the epoch form decides (Q1)
+			Assert::IsTrue(DV::DecideCompensation(unknown).on);
+			DV::Tracker t;
+			t.NoteCompensation(c, 5);
+			Assert::IsTrue(Contains(t.StatusSegment(), "dither motion compensation: on; on 1"), W(t.StatusSegment()).c_str());
+			Assert::IsFalse(Engaged(t.Decisions(5), "dither motion compensation"));
+		}
+
+		TEST_METHOD(MotionCompensationOffForEachCauseVisibly)
+		{
+			// The engine fully off: the line shows it.
+			DV::CompensationFacts f = ValidFrame();
+			f.engineOff = true;
+			ExpectOff(f, DV::CompensationWhy::EngineOff, "the motion engine is off", true);
+			// A resync / flush / seek / settings change: the epoch moved, the run starts over (First after an invalidation).
+			for (const MotionValidity::Cause cause : { MotionValidity::Cause::Resync, MotionValidity::Cause::QueueReset,
+				MotionValidity::Cause::Seek, MotionValidity::Cause::SettingsChange, MotionValidity::Cause::SourceFormatChange })
+			{
+				f = ValidFrame();
+				f.continuity = MotionValidity::Continuity::First;
+				f.keptPairValid = false;
+				f.lastCause = cause;
+				ExpectOff(f, DV::CompensationWhy::Discontinuity, MotionValidity::Name(cause), true);
+			}
+			// The shared vectors-valid state alone refuses the pair (the epoch is no longer current).
+			f = ValidFrame();
+			f.keptPairValid = false;
+			f.lastCause = MotionValidity::Cause::MotionSourceChange;
+			ExpectOff(f, DV::CompensationWhy::Discontinuity, "motion_source_change", true);
+			// A dropped frame (a hole in the kept run).
+			f = ValidFrame();
+			f.continuity = MotionValidity::Continuity::Break;
+			f.keptPairValid = false;
+			ExpectOff(f, DV::CompensationWhy::Drop, "a dropped frame", true);
+			// The resync stamps refuse the span.
+			f = ValidFrame();
+			f.span = Span::Invalid;
+			ExpectOff(f, DV::CompensationWhy::StampsRefuse, "the resync stamps refuse the pair", true);
+			// Status only: the stream's first frame, a rule that sets 0.
+			f = ValidFrame();
+			f.continuity = MotionValidity::Continuity::First;
+			f.keptPairValid = false;
+			f.invalidations = 0;
+			ExpectOff(f, DV::CompensationWhy::FirstFrame, "first frame", false);
+			f = ValidFrame();
+			f.configured = false;
+			ExpectOff(f, DV::CompensationWhy::NotConfigured, "motion_compensation 0 in the rule", false);
+		}
+
+		// The real MotionValidity state drives the facts: a resync and a drop make the pair ending at the next frame invalid.
+		TEST_METHOD(MotionCompensationFollowsTheRealValidityState)
+		{
+			MotionValidity::State state;
+			auto factsAt = [&](uint64_t seq, MotionValidity::Continuity continuity) {
+				DV::CompensationFacts f;
+				f.configured = true;
+				f.continuity = continuity;
+				f.keptPairValid = seq > 1 && state.KeptPairValid(seq - 1, seq);
+				f.span = state.SpanStatus(seq - 1, seq);
+				f.invalidations = state.Total();
+				f.lastCause = state.LastCause();
+				return DV::DecideCompensation(f);
+			};
+			Assert::IsTrue(factsAt(1, state.NoteKept(1)).why == DV::CompensationWhy::FirstFrame);
+			Assert::IsTrue(factsAt(2, state.NoteKept(2)).on);
+			Assert::IsTrue(factsAt(2, state.NoteKept(2)).on, L"a repeat");
+			Assert::IsTrue(factsAt(3, state.NoteKept(3)).on);
+			state.Invalidate(MotionValidity::Cause::Resync);
+			const DV::Compensation afterResync = factsAt(4, state.NoteKept(4));
+			Assert::IsTrue(!afterResync.on && afterResync.why == DV::CompensationWhy::Discontinuity &&
+				afterResync.cause == MotionValidity::Cause::Resync);
+			Assert::IsTrue(factsAt(5, state.NoteKept(5)).on, L"the next contiguous frame");
+			const DV::Compensation afterDrop = factsAt(7, state.NoteKept(7, MotionValidity::Cause::DriftDrop));
+			Assert::IsTrue(!afterDrop.on && afterDrop.why == DV::CompensationWhy::Drop);
+			Assert::IsTrue(factsAt(8, state.NoteKept(8)).on);
+		}
+
 		TEST_METHOD(RegistryKeepsOneTrackerPerHostAndForgets)
 		{
 			int a = 0, b = 0;

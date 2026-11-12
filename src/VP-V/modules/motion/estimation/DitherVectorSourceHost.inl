@@ -18,8 +18,9 @@ void LibplaceboVideoRenderer::Impl::BuildSigmaDeltaVectorsWithoutExtras(uint64_t
 	namespace DV = VpMotion::DitherVectors;
 	DV::Facts facts;
 	double motionCompensation = 0.0;
-	// No sigma-delta loaded (no quantiser, or one without the parameter): nothing to decide (step None, not "static").
-	const bool quantizer = customHooks.QuantizerParameter("motion_compensation", motionCompensation);
+	// No sigma-delta loaded (no quantiser, or one without the parameter): nothing to decide (step None, not "static"). The
+	// CONFIGURED value (rule / owner default 1), not this frame's validity override (RunDejudderPolicy's gate).
+	const bool quantizer = customHooks.QuantizerConfigured("motion_compensation", motionCompensation);
 	facts.slotRuns = pipelineSlots.Runs(PipelineSlots::Id::OutputDither) && quantizer;
 	facts.patch = SigmaDeltaVectorsSupported();
 	facts.ownSetting = activeSettings.ditherVectorsOwn;

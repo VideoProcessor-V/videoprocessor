@@ -199,6 +199,77 @@ namespace DitherVectors
 		return Own(Why::NoField);
 	}
 
+	// ---- The sigma-delta's MOTION COMPENSATION per source frame (owner 2026-11-11 22:39, doc 91:108): "sigma-delta
+	// motion_compensation default ON (motion-compensated carry); must fall back visibly (FallbackCatalog + Ctrl+I) whenever
+	// vectors are invalid/absent (vector validity rule)". When the pair that ends at this frame is not valid (a resync / flush /
+	// seek / settings change moved the motion epoch, a dropped frame, the stamps refuse the span, the stream's first frame) or
+	// the motion engine is off, the carry runs WITHOUT compensation (the plain motion gate, as before the default), visibly.
+	// A cadence repeat keeps compensation on: the motion is known to be zero (static_refresh, exact), nothing is invalid.
+	enum class CompensationWhy : unsigned char
+	{
+		None,            // on
+		NotConfigured,   // the rule sets motion_compensation 0 (a choice: status only)
+		EngineOff,       // the motion engine is off (vector_demand off): no vector source at all
+		FirstFrame,      // the stream's first frame: no previous picture (status only)
+		Discontinuity,   // the motion epoch moved (resync, queue reset, seek, format / settings / source change): cause named
+		Drop,            // a hole in the kept frames (a dropped / missed frame)
+		StampsRefuse,    // the resync stamps refuse the span (SpanStatus Invalid)
+	};
+	constexpr int kCompensationWhys = 7;
+	inline const char* CompensationWhyName(CompensationWhy w)
+	{
+		switch (w)
+		{
+		case CompensationWhy::None: return "on";
+		case CompensationWhy::NotConfigured: return "motion_compensation 0 in the rule";
+		case CompensationWhy::EngineOff: return "the motion engine is off";
+		case CompensationWhy::FirstFrame: return "first frame";
+		case CompensationWhy::Discontinuity: return "discontinuity";
+		case CompensationWhy::Drop: return "a dropped frame";
+		case CompensationWhy::StampsRefuse: return "the resync stamps refuse the pair";
+		}
+		return "?";
+	}
+	struct CompensationFacts
+	{
+		bool configured = false;           // the quantiser's configured motion_compensation >= 0.5 (rule or default)
+		bool engineOff = false;            // VectorDemand mode Off
+		MotionValidity::Continuity continuity = MotionValidity::Continuity::First;   // MotionValidity NoteKept(this frame)
+		bool keptPairValid = false;        // KeptPairValid(seq - 1, seq)
+		MotionValidity::State::SpanState span = MotionValidity::State::SpanState::Unknown;   // SpanStatus(seq - 1, seq)
+		uint64_t invalidations = 0;        // MotionValidity Total() (0 = nothing invalidated yet: the stream's start)
+		MotionValidity::Cause lastCause = MotionValidity::Cause::Gap;
+	};
+	struct Compensation
+	{
+		bool on = false;
+		CompensationWhy why = CompensationWhy::NotConfigured;
+		MotionValidity::Cause cause = MotionValidity::Cause::Gap;   // Discontinuity only
+		bool Automatic() const   // an entry in "Fallbacks engaged" (not a choice, not the stream's first frame)
+		{
+			return !on && why != CompensationWhy::NotConfigured && why != CompensationWhy::FirstFrame;
+		}
+	};
+	inline Compensation DecideCompensation(const CompensationFacts& f)
+	{
+		using C = MotionValidity::Continuity;
+		Compensation c;
+		c.on = false;
+		if (!f.configured) { c.why = CompensationWhy::NotConfigured; return c; }
+		if (f.engineOff) { c.why = CompensationWhy::EngineOff; return c; }
+		if (f.continuity == C::Break) { c.why = CompensationWhy::Drop; return c; }
+		if (f.continuity == C::First || !f.keptPairValid)
+		{
+			c.why = f.invalidations == 0 ? CompensationWhy::FirstFrame : CompensationWhy::Discontinuity;
+			c.cause = f.lastCause;
+			return c;
+		}
+		if (f.span == MotionValidity::State::SpanState::Invalid) { c.why = CompensationWhy::StampsRefuse; return c; }
+		c.on = true;
+		c.why = CompensationWhy::None;
+		return c;
+	}
+
 	// Automatic downgrades (an entry in "Fallbacks engaged"): not a choice (own, no patch) and not the engine's own entry
 	// (NotServed: "motion engine"), not a plain end of the queue.
 	inline bool Automatic(const Choice& c)
@@ -239,6 +310,29 @@ namespace DitherVectors
 			lastMs_ = nowMs;
 			return c;
 		}
+		// Records one source frame's compensation decision.
+		void NoteCompensation(const Compensation& c, unsigned long long nowMs)
+		{
+			++compensation_[static_cast<int>(c.why)];
+			if (c.Automatic())
+			{
+				lastCompensationOffMs_ = nowMs;
+				lastCompensationOff_ = c;
+			}
+			changed_ = changed_ || c.on != lastCompensation_.on || c.why != lastCompensation_.why;
+			lastCompensation_ = c;
+			haveCompensation_ = true;
+		}
+		const Compensation& LastCompensation() const { return lastCompensation_; }
+		unsigned long long CompensationCount(CompensationWhy w) const { return compensation_[static_cast<int>(w)]; }
+		static std::string CompensationText(const Compensation& c)
+		{
+			std::string t = CompensationWhyName(c.why);
+			if (c.why == CompensationWhy::Discontinuity)
+				t += std::string(" (") + MotionValidity::Name(c.cause) + ")";
+			return t;
+		}
+
 		const Choice& Last() const { return last_; }
 		unsigned long long Count(Step s) const { return counts_[static_cast<int>(s)]; }
 		unsigned long long SpanUnknownUses() const { return spanUnknown_; }
@@ -253,6 +347,28 @@ namespace DitherVectors
 		// "dither vectors: shared pair (shared 120, matcher 0, on-demand 4, own 3, static 0; unvalidated 124)". Empty before the
 		// first decision.
 		std::string StatusSegment() const
+		{
+			const std::string compensation = CompensationSegment();
+			const std::string vectors = VectorsSegment();
+			if (compensation.empty())
+				return vectors;
+			return vectors.empty() ? compensation : vectors + "; " + compensation;
+		}
+		// "dither motion compensation: off (discontinuity (resync)); on 1200, off: engine 0, discontinuity 3, drop 4, ..."
+		std::string CompensationSegment() const
+		{
+			if (!haveCompensation_)
+				return std::string();
+			const std::string state = lastCompensation_.on ? std::string("on") : "off (" + CompensationText(lastCompensation_) + ")";
+			char counts[240];
+			std::snprintf(counts, sizeof(counts), "; on %llu, off: engine %llu, discontinuity %llu, drop %llu, refused %llu, first %llu, rule %llu",
+				CompensationCount(CompensationWhy::None), CompensationCount(CompensationWhy::EngineOff),
+				CompensationCount(CompensationWhy::Discontinuity), CompensationCount(CompensationWhy::Drop),
+				CompensationCount(CompensationWhy::StampsRefuse), CompensationCount(CompensationWhy::FirstFrame),
+				CompensationCount(CompensationWhy::NotConfigured));
+			return "dither motion compensation: " + state + counts;
+		}
+		std::string VectorsSegment() const
 		{
 			if (lastMs_ == 0 && Total() == 0)
 				return std::string();
@@ -274,10 +390,11 @@ namespace DitherVectors
 		static std::vector<FallbackCatalog::Decision> Released()
 		{
 			return { FallbackCatalog::DitherVectorsMatcherField(false), FallbackCatalog::DitherVectorsOnDemand(false),
-				FallbackCatalog::DitherVectorsOwnSearch(false, std::string()), FallbackCatalog::DitherVectorsUnvalidated(false) };
+				FallbackCatalog::DitherVectorsOwnSearch(false, std::string()), FallbackCatalog::DitherVectorsUnvalidated(false),
+				FallbackCatalog::DitherMotionCompensationOff(false, std::string()) };
 		}
 
-		// The four entries, in a fixed order (stable ids: FallbackCatalog DitherVectors*). Step 5 (static) is the configuration
+		// The five entries (four vector steps + motion compensation off), in a fixed order (stable ids: FallbackCatalog DitherVectors*). Step 5 (static) is the configuration
 		// motion_compensation 0 - the shipped default of the sigma-delta rule - so it is in the status segment only.
 		std::vector<FallbackCatalog::Decision> Decisions(unsigned long long nowMs) const
 		{
@@ -287,6 +404,8 @@ namespace DitherVectors
 			out.push_back(FallbackCatalog::DitherVectorsOwnSearch(Recent(Step::OwnSearch, nowMs),
 				std::string(WhyName(lastOwn_.why)) + OnDemandNote(lastOwn_)));
 			out.push_back(FallbackCatalog::DitherVectorsUnvalidated(spanUnknown_ > 0 && nowMs - lastUnknownMs_ < kHoldMs));
+			out.push_back(FallbackCatalog::DitherMotionCompensationOff(lastCompensationOffMs_ != 0 && nowMs - lastCompensationOffMs_ < kHoldMs,
+				CompensationText(lastCompensationOff_)));
 			return out;
 		}
 
@@ -315,6 +434,10 @@ namespace DitherVectors
 		unsigned long long lastAutomaticMs_[kSteps] = {};
 		unsigned long long spanUnknown_ = 0, lastUnknownMs_ = 0, lastMs_ = 0;
 		Choice last_, lastOwn_;
+		unsigned long long compensation_[kCompensationWhys] = {};
+		unsigned long long lastCompensationOffMs_ = 0;
+		Compensation lastCompensation_, lastCompensationOff_;
+		bool haveCompensation_ = false;
 		bool changed_ = false;
 	};
 

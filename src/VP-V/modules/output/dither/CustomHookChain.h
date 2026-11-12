@@ -134,6 +134,11 @@ namespace CustomHookChain
         // W2-C8: the current value of a //!PARAM of the loaded output quantiser (the sigma-delta), as the hook holds it
         // (the rule's parameter or the shader's default). False when no quantiser is loaded or it has no such parameter.
         bool QuantizerParameter(const char* name, double& value) const;
+        // The CONFIGURED value of that parameter: the rule's (incl. the VP rule defaults below) or the shader's declared
+        // initial value - never a per-frame override. False when no quantiser is loaded or it has no such parameter.
+        bool QuantizerConfigured(const char* name, double& value) const;
+        // Sets that parameter on the loaded quantiser for the following renders (a per-frame override; clamped to range).
+        bool SetQuantizerParameter(const char* name, double value) const;
 
         // Stage 8b one-axis: true when `hook` is a loaded LUMA prescaler of this chain
         // (IsLumaPrescaler); the scaling stage drops it from a one-axis upscale's hook list.
@@ -186,4 +191,15 @@ namespace CustomHookChain
         TemplateValues lastValues;
         bool settled = false;
     };
+}
+
+namespace CustomHookChain
+{
+    // W2-C8 (C8-FINDING): true when the loaded quantiser's CONFIGURED parameter is on (>= 0.5): the sigma-delta asks the
+    // vector engine for vectors only when its motion compensation can use them.
+    inline bool QuantizerOn(const Chain& chain, const char* name)
+    {
+        double value = 0.0;
+        return chain.QuantizerConfigured(name, value) && value >= 0.5;
+    }
 }

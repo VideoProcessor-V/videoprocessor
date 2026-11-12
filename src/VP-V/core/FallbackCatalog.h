@@ -109,6 +109,16 @@ namespace FallbackCatalog
 		return Engaged("dither vectors unvalidated", "sigma-delta vectors reused on the epoch check only (no resync stamps: resync_event off)");
 	}
 
+	// Owner 2026-11-11 22:39 (doc 91:108): the sigma-delta's motion compensation (default on) is off for a frame whose pair is not
+	// valid (discontinuity, drop, refused stamps) or while the motion engine is off; held while recent (the Tracker).
+	inline Decision DitherMotionCompensationOff(bool recent, const std::string& why)
+	{
+		if (!recent)
+			return Released("dither motion compensation");
+		return Engaged("dither motion compensation", "dither: motion compensation off: " + (why.empty() ? std::string("vectors not valid") : why) +
+			" (the plain motion gate carries the residual)");
+	}
+
 	// ---- colour.extended_range (ADR-0002) -------------------------------------------------------
 	enum class BtbWtwClip
 	{
