@@ -84,6 +84,7 @@ namespace RenderAhead
 		bool ran = false;                // false in the Original pathway
 		bool broke = false;              // the chain ended (Presenter::Break)
 		bool committed = false;          // this frame's plan was queued
+		bool raised = false;             // the host's presentation target lead is raised to targetLeadMs (Phase 3: PresentOutcome::raiseTargetLead)
 		double targetLeadMs = 0.0;       // > 0: raise the host's presentation target lead to this
 		double estimatedLeadMs = 0.0;    // as published in Presenter::estimatedLeadMs
 		PresentStatistics statistics;    // the read made for the bookkeeping
@@ -113,7 +114,10 @@ namespace RenderAhead
 				r.broke = true;
 			}
 			else if (f.targetTimingKnown && p.targetLeadMs > f.hostTargetLeadMs)
+			{
 				r.targetLeadMs = p.targetLeadMs;
+				r.raised = true;
+			}
 			p.estimatedLeadMs.store(p.committed && !f.targetTimingKnown && f.openLoop ? p.targetLeadMs : 0.0,
 				std::memory_order_relaxed);
 		}

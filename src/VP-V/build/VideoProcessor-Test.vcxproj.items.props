@@ -411,6 +411,7 @@
     <ClCompile Include="..\VP-V\tests\suite\MotionValidityTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\InterpolationPolicyTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\RenderAheadPolicyTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\presentation\tests\PresenterExtensionTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\OriginalPathwayGateTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\OriginalPathwaySiteGateTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\GrainPreservationTests.cpp" />
@@ -535,6 +536,10 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderExtension.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\output\presentation\PresenterExtension.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

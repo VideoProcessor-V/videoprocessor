@@ -60,7 +60,7 @@ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double s
 		context.renderAheadActive = m_impl->RenderAheadActive();
 		if (context.renderAheadActive && context.displayHz > 0.0 && sourceRateHz > 0.0)
 			context.renderAheadLeadSeconds = RenderAhead::PlannedLead(1.0 / sourceRateHz, 1.0 / context.displayHz);
-		context.renderAheadCreditFrames = m_impl->renderAheadCreditFrames.load(std::memory_order_acquire);
+		context.renderAheadCreditFrames = m_impl->renderAheadPresenter.creditFrames.load(std::memory_order_acquire);
 		// Owner decision 2: the swapchain frames of whichever owner presents (Bill's configured
 		// depth unless render-ahead owns presentation), never a fixed 2.
 		context.presentationFrames = m_impl->delaySwapchainFrames.load(std::memory_order_acquire);

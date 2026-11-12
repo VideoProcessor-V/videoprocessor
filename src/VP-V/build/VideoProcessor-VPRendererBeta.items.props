@@ -18,6 +18,7 @@
     <ClCompile Include="..\VP-V\modules\motion\estimation\VectorEngine.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\estimation\VectorEngineExtension.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderExtension.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\presentation\PresenterExtension.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\OcclusionMaskHook.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\extended_range\ExtendedRange.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\extended_range\ExtendedRangeStage.cpp" />

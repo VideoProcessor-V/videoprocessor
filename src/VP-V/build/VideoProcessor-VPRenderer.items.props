@@ -15,6 +15,7 @@
     <ClCompile Include="..\VP-V\modules\motion\estimation\VectorEngine.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\estimation\VectorEngineExtension.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderExtension.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\presentation\PresenterExtension.cpp" />
     <ClCompile Include="..\VP-V\modules\output\dither\OutputEncodingRepair.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
     <ClCompile Include="..\VP-V\abi\RendererAbiBridge.cpp" />

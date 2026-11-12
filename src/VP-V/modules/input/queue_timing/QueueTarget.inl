@@ -28,7 +28,7 @@ size_t LibplaceboVideoRenderer::QueueTargetVp() const
 	// render_ahead_queue_credit (design step 7) and the look-ahead floor (hunt 2 13-timing M3), in
 	// the one rule the stress harness tests too (AlphaQueuePolicy::CombineQueueTarget): the floor
 	// never exceeds `desired`, so a delay budget's hold target wins (audit B2).
-	context.renderAheadCreditFrames = m_impl ? m_impl->renderAheadCreditFrames.load(std::memory_order_acquire) : 0;
+	context.renderAheadCreditFrames = m_impl ? m_impl->renderAheadPresenter.creditFrames.load(std::memory_order_acquire) : 0;
 	context.lookaheadFloor = m_queueTargetFloor.load(std::memory_order_relaxed);
 	// P6 rest S1 through the S2 seam (refs/107 R19): the Presenter's analysis floor and queue capacity
 	// (RenderAhead::Presenter::FitBudget), published in the VP queue target's own body (0 renderer lines).

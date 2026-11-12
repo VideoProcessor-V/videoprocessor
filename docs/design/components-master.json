@@ -1406,6 +1406,9 @@
       "live_files": [
         "src/VP-V/modules/output/presentation/PresentationOwner.h",
         "src/VP-V/modules/output/presentation/RenderAheadPolicy.h",
+        "src/VP-V/modules/output/presentation/PresenterAfterPresent.h",
+        "src/VP-V/modules/output/presentation/PresenterExtension.h",
+        "src/VP-V/modules/output/presentation/PresenterExtension.cpp",
         "src/VideoProcessor-Lib/vprenderer/AlphaPresentationTelemetry.cpp",
         "src/VP-V/modules/output/presentation/OpenLoopDisplayRate.h",
         "src/VideoProcessor-Lib/DisplayRefreshRatePolicy.cpp",

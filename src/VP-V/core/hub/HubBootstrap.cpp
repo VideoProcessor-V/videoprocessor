@@ -16,6 +16,7 @@
 #include <VP-V/modules/motion/estimation/global_model/link/CameraExtension.h>
 #include <VP-V/modules/motion/estimation/VectorEngineExtension.h>
 #include <VP-V/modules/motion/consumers/DejudderExtension.h>
+#include <VP-V/modules/output/presentation/PresenterExtension.h>
 // Last: DiagnosticOverrides.h includes <windows.h> without NOMINMAX; the headers above use (std::min/max) forms that its macros break.
 #include <VP-V/modules/control/diagnostics/DiagnosticOverridesModule.h>
 
@@ -37,6 +38,10 @@ namespace
 		// The vector engine (M2 P5a): answers vpv.vector_engine.v1, turns the queue events into motion invalidation
 		// requests (OnQueue) and stops the optical-flow producer at GpuReleased; before its consumers.
 		VpMotion::RegisterVectorEngineExtension();
+		// The presentation module (Phase 3, refs/108): the R11 main-present interval, the R12 render-ahead step and
+		// the R14 present end. Before the skeleton module: at R12 the Presenter's step ran before the skeleton's
+		// post-present spare in the host's own order.
+		Vpv::Presentation::RegisterPresenterExtension();
 		// Activation (all off by default, [vpv.skeleton]): the analysis lane, then the camera link (report).
 		Vpv::Skeleton::RegisterSkeletonModule();
 		Vpv::Camera::RegisterCameraExtension();

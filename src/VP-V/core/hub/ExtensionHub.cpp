@@ -148,6 +148,7 @@ namespace Vpv
 			p.outcome.extrasRan = before.extrasRan || own.extrasRan;
 			p.outcome.committed = before.committed || own.committed;
 			if (own.targetLeadMs > before.targetLeadMs) p.outcome.targetLeadMs = own.targetLeadMs;
+			p.outcome.raiseTargetLead = before.raiseTargetLead || own.raiseTargetLead;
 			if (own.estimatedLeadMs > before.estimatedLeadMs) p.outcome.estimatedLeadMs = own.estimatedLeadMs;
 			p.outcome.spentSeconds = before.spentSeconds + own.spentSeconds;
 		}

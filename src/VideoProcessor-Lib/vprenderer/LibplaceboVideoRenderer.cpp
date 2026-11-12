@@ -5241,14 +5241,8 @@ struct LibplaceboVideoRenderer::Impl
 	AlphaD3D11FrameGpuTimer renderAheadExtraTimer, renderAheadEstimateTimer;   // X and E on the GPU
 	bool renderAheadTimersReady = false;
 	unsigned long long renderAheadTimerOrdinal = 0, renderAheadTimerSerial = 0;
-	bool& renderAheadCommitted = renderAheadPresenter.committed;   // VPV-HOOK
-	bool& renderAheadL1 = renderAheadPresenter.l1;   // VPV-HOOK
-	int& renderAheadMainInterval = renderAheadPresenter.mainInterval;   // VPV-HOOK
 	uint32_t renderAheadExpectedPresent = 0;   // the present id the next main present should get (chain continuity)
 	double renderAheadLead = 0.0;           // the planned lead (s)
-	double& renderAheadTargetLeadMs = renderAheadPresenter.targetLeadMs;   // VPV-HOOK
-	std::atomic<double>& renderAheadEstimatedLeadMs = renderAheadPresenter.estimatedLeadMs;   // VPV-HOOK
-	std::atomic<size_t>& renderAheadCreditFrames = renderAheadPresenter.creditFrames;   // VPV-HOOK
 	unsigned long long renderAheadFrames = 0, renderAheadRestarts = 0, renderAheadLate = 0, renderAheadDropped = 0,
 		renderAheadHeld = 0;   // VPV-HOOK
 	unsigned long long& renderAheadIntervalPresents = renderAheadPresenter.intervalPresents;   // VPV-HOOK
@@ -5514,13 +5508,13 @@ struct LibplaceboVideoRenderer::Impl
 			"(%llu, %llu on time), after holds %+.2f (%llu, %llu on time))",
 			holding ? "holding (" : "", holding ? holding : "", holding ? "), " : "", dejudderExtraStats.extras,
 			renderAheadFrames, renderAheadRestarts, renderAheadLate, renderAheadDropped, renderAheadHeld,
-			renderAheadIntervalPresents, renderAheadLead * 1000.0, renderAheadTargetLeadMs,
+			renderAheadIntervalPresents, renderAheadLead * 1000.0, renderAheadPresenter.targetLeadMs,
 			RenderAhead::LevelName(gateLevel, DejudderPolicy::MaxExtras(ratio)).c_str(),
 			RenderAhead::ResolveGate(activeSettings.dejudderGate, RenderAheadActive()) == RenderAhead::GateMode::Period ?
 				"period" : "refresh",
 			dejudderLatencyFloor.Floor() * 1000.0, renderAheadNewFrameCost.P95(), renderAheadExtraCostOwn.P95(),
 			renderAheadExtraCostExternal.P95(), renderAheadEstimateCost.P95(),
-			renderAheadCreditFrames.load(std::memory_order_relaxed), ratio,
+			renderAheadPresenter.creditFrames.load(std::memory_order_relaxed), ratio,
 			renderAheadTimersReady ? "GPU timers" : "CPU timings", dejudderDisplayRate.hz,
 			OpenLoopDisplayRate::Name(dejudderDisplayRate.source), dejudderDisplayRate.openLoop ? "open" : "closed",
 			renderAheadOpenLoopFrames, renderAheadLateByPresent, renderAheadSchedule.EarlyCorrections(),
@@ -5528,14 +5522,6 @@ struct LibplaceboVideoRenderer::Impl
 			renderAheadShownCount[0] ? renderAheadShownError[0] / renderAheadShownCount[0] : 0.0, renderAheadShownCount[0],
 			renderAheadShownOnTime[0], renderAheadShownCount[1] ? renderAheadShownError[1] / renderAheadShownCount[1] : 0.0,
 			renderAheadShownCount[1], renderAheadShownOnTime[1]);
-	}
-
-	// The SyncInterval for the main present now being made: the holds the last plan
-	// left after its last extra (taken at RenderLocked's entry, so every exit consumes
-	// it, bug hunt 05 L2), 1 otherwise.
-	UINT TakeRenderAheadMainInterval(int pending)
-	{
-		return static_cast<UINT>(renderAheadPresenter.TakeMainInterval(pending));   // VPV-HOOK
 	}
 
 	// Number of extra presents with ids in (from, to].
@@ -6446,7 +6432,7 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				RenderAheadBreak();
 				renderAheadCredit.Reset();
-				renderAheadCreditFrames.store(0, std::memory_order_release);
+				renderAheadPresenter.creditFrames.store(0, std::memory_order_release);
 			}
 			else
 				renderAheadEpoch.Invalidate();   // as render_ahead switched on: the gate starts again
@@ -15201,7 +15187,7 @@ struct LibplaceboVideoRenderer::Impl
 			renderAheadNewFrameCost.Add(RenderAheadNow(), f.workMs);   // no GPU timer: the CPU work
 		if (gateMode == RenderAhead::GateMode::Refresh)
 		{
-			renderAheadL1 = false;
+			renderAheadPresenter.l1 = false;
 			// The extras end at the last extra's vblank, and only then does B's
 			// whole pipeline start: it must fit in the refresh that follows.
 			if (RenderAhead::RefreshGateHolds(f.workMs, displayPeriod))
@@ -15459,7 +15445,7 @@ struct LibplaceboVideoRenderer::Impl
 			plannedIds.emplace_back(mainPresentId, plannedFirstVsync);
 			renderAheadPresentIntervals.emplace_back(mainPresentId, renderAheadLastMainInterval);
 			renderAheadLastMainInterval = 1;
-			renderAheadTargetLeadMs = f.swapEndQpc > 0 ?
+			renderAheadPresenter.targetLeadMs = f.swapEndQpc > 0 ?
 				(plannedFirstVsync - static_cast<double>(f.swapEndQpc) / qpc) * 1000.0 : 0.0;
 			++renderAheadFrames;
 			renderAheadDropped += static_cast<unsigned long long>(plan.dropped);
@@ -15476,10 +15462,10 @@ struct LibplaceboVideoRenderer::Impl
 			if (queuedMode && plan.valid && plan.rendered == 0 && RenderAhead::IntervalsFit(plan))
 			{
 				renderAheadSchedule.Commit(plan.nextFirstVsync, plannedIds);
-				renderAheadMainInterval = plan.nextInterval;
+				renderAheadPresenter.mainInterval = plan.nextInterval;
 				UINT lastPresent = 0;
 				renderAheadExpectedPresent = SUCCEEDED(native->GetLastPresentCount(&lastPresent)) ? lastPresent + 1 : 0;
-				renderAheadCommitted = true;
+				renderAheadPresenter.committed = true;
 				LogRenderAhead(ratio, gateLevel);
 			}
 			return false;
@@ -15574,7 +15560,7 @@ struct LibplaceboVideoRenderer::Impl
 		const char* failure = nullptr;
 		// The ladder's L1 (render-ahead gate): the sigma-delta takes the de-judder's vectors
 		// on the extras instead of its own search (dither_vectors own otherwise kept).
-		const bool ditherOwnOnExtras = activeSettings.ditherVectorsOwn && !renderAheadL1;
+		const bool ditherOwnOnExtras = activeSettings.ditherVectorsOwn && !renderAheadPresenter.l1;
 		for (;;)
 		{
 			DejudderPolicy::ExtraDecision decision;
@@ -16178,13 +16164,13 @@ struct LibplaceboVideoRenderer::Impl
 				// The first after a new anchor re-anchors only (bug hunt 05 M2).
 				renderAheadOpenLoopLate = renderAheadSchedule.NoteLate(openLoopLateRefreshes, displayPeriod);
 			}
-			renderAheadMainInterval = plan.nextInterval;
+			renderAheadPresenter.mainInterval = plan.nextInterval;
 			UINT lastPresent = 0;
 			renderAheadExpectedPresent = SUCCEEDED(native->GetLastPresentCount(&lastPresent)) ? lastPresent + 1 : 0;
-			renderAheadCommitted = true;
+			renderAheadPresenter.committed = true;
 			// render_ahead_queue_credit: floor(lead / P_s), latched while the cadence holds
 			// (bug hunt 05 M4).
-			renderAheadCreditFrames.store(activeSettings.renderAheadQueueCredit ?
+			renderAheadPresenter.creditFrames.store(activeSettings.renderAheadQueueCredit ?
 				renderAheadCredit.CommitFrames(renderAheadBudgetCredit, ratio) : 0, std::memory_order_release);   // r6 fix 4
 			LogRenderAhead(ratio, gateLevel);
 		}
@@ -16255,10 +16241,13 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderExtrasSpentTime = false;
 		passTimerHook.BeginFrame();   // efficiency timers: 1 refresh in N timed (no waits)
 		passTimerHook.CpuBegin();
-		// Render-ahead: the last plan's interval for this frame's main present, consumed
-		// here so that no exit (a failed render) leaves it for a later present (bug hunt
-		// 05 L2).
-		const int renderAheadPendingMainInterval = std::exchange(renderAheadMainInterval, 1);
+		// VPV-HOOK HA-R11-PlanPresent: the one R11 seam (refs/108 s1). The main present's SyncInterval = the holds the   // VPV-HOOK
+		// last plan left after its last extra, consumed here so that no exit (a failed render) leaves it for a later   // VPV-HOOK
+		// present (bug hunt 05 L2); the presentation module answers from the Presenter. Original pathway: not called, 1.   // VPV-HOOK
+		RendererExtension::PresentPlan presentPlan;   // VPV-HOOK
+		presentPlan.presenter = &renderAheadPresenter;   // VPV-HOOK
+		if (!pipelineSlots.OriginalPathway())   // VPV-HOOK
+			RendererExtension::PlanPresent(this, presentPlan);   // VPV-HOOK
 		dejudderAheadPayload = aheadConvertedPayload;   // C for this frame's extras (estimate ahead)
 		dejudderAheadPayloadSequence = aheadConvertedPayload ? aheadSourceSequence : 0;
 		const int64_t renderLockedStartQpc = PerformanceCounterNow();
@@ -23790,7 +23779,7 @@ releaseDriftBaseRetention =
 			{
 				// Render-ahead: the holds the last plan left after its last extra keep
 				// that picture up for its refreshes (1 = today's present).
-				const HRESULT presentResult = vpOwnedSwapchain->Present(TakeRenderAheadMainInterval(renderAheadPendingMainInterval), 0);
+				const HRESULT presentResult = vpOwnedSwapchain->Present(presentPlan.interval, 0);
 				submitted = presentResult == S_OK;   // Bill: an occluded/status result is not a submission
 				if (!submitted && vpOwnedPresentFailureLoggedGeneration !=
 					vpOwnedSwapchainGeneration)
@@ -23831,7 +23820,7 @@ releaseDriftBaseRetention =
             }
 			passTimerHook.CpuMark("render: hook assembly + libplacebo render (CPU)", PassTimers::Kind::CpuWork);
             // Render-ahead: the holds the last plan left after its last extra present with its interval.
-            submitted = SubmitLibplaceboFrameChecked(TakeRenderAheadMainInterval(renderAheadPendingMainInterval));
+            submitted = SubmitLibplaceboFrameChecked(presentPlan.interval);
 		}
 		const int64_t swapEndQpc = PerformanceCounterNow();
 		passTimerHook.CpuMark("render: submit + present (may wait for the swap chain)", PassTimers::Kind::CpuWait);
@@ -24603,7 +24592,7 @@ releaseDriftBaseRetention =
 				diag.interpolated = temporalRenderer.Active();
 				diag.renderAhead = RenderAheadActive();
 				diag.openLoop = dejudderDisplayRate.openLoop;
-				diag.mainInterval = renderAheadPendingMainInterval;   // the main present's SyncInterval
+				diag.mainInterval = static_cast<int>(presentPlan.interval);   // the main present's SyncInterval
 				diag.vectorsValid = dejudder && sourceSequence != 0 && dejudderEstimatedSequence == sourceSequence &&
 					motionValidity.Current(dejudderEstimatedEpoch);
 				diag.hdr = pl_color_space_is_hdr(&image.color);
@@ -24920,32 +24909,41 @@ releaseDriftBaseRetention =
 					static_cast<double>(qpcFrequency.QuadPart) : 0.0);
 			extrasFrame.nextFrameArrived = &dejudderNextFrameArrived;
 			extrasFrame.swapEndQpc = swapEndQpc;
-			renderAheadCommitted = false;
 			diagExtrasCounter = videoFrame.GetCounter();   // DejudderHold's frame rows
 			diagExtrasSequence = sourceSequence;
 			dejudderExtrasSpentTime = PresentDejudderExtras(extrasFrame);
-			// Render-ahead: a frame whose plan was not queued ends the chain (B then shows
-			// at its own time, as without render-ahead); a queued one moves A's
-			// presentation target to its planned refresh (audio, design step 7).
-			if (!renderAheadCommitted)
-				RenderAheadBreak();
-			else if (presentationTargetTimingKnown && renderAheadTargetLeadMs > presentationTargetLeadMs)
-				presentationTargetLeadMs = renderAheadTargetLeadMs;
-			// Hunt 2 05-renderahead L3: in open loop the target is not measured (no
-			// statistics), so the planned lead is published as an estimate in the
-			// timing status (the measured figure stays unknown, "---").
-			renderAheadEstimatedLeadMs.store(renderAheadCommitted && !presentationTargetTimingKnown &&
-				dejudderDisplayRate.openLoop ? renderAheadTargetLeadMs : 0.0, std::memory_order_relaxed);
 		}
 		else
 		{
 			dejudderPredictedVsync = 0.0;   // no stale prediction across a skipped frame
-			if (rendered && submitted)
-				RenderAheadBreak();
 			if (rendered && submitted && vectorDemand.mode != VectorDemand::Mode::Off)
 				BuildSigmaDeltaVectorsWithoutExtras(sourceSequence, nextSourceSequence);   // vector engine, no extras
 		}
-		if (!pipelineSlots.OriginalPathway()) { RendererExtension::PresentContext afterPresent; afterPresent.kind = !(rendered && submitted) ? RendererExtension::AfterPresentKind::Plain : dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed ? RendererExtension::AfterPresentKind::AfterLastExtra : RendererExtension::AfterPresentKind::NoExtras; afterPresent.cadenceRepeat = cadenceRepeat; RendererExtension::AfterPresent(this, static_cast<int64_t>(sourceSequence), static_cast<int64_t>(frameGeneration), afterPresent); }   // VPV-HOOK HA-R12-AfterPresent: the one shared R12 AfterPresent seam (refs/107 S5)
+		// VPV-HOOK HA-R12-AfterPresent: the one shared R12 AfterPresent seam (refs/107 S5, refs/108 s1 + s10): the render-ahead   // VPV-HOOK
+		// step of this block (a frame whose plan was not queued ends the chain; a queued one raises A's presentation target to   // VPV-HOOK
+		// its planned refresh; in open loop the planned lead is published as an estimate) is the presentation module's   // VPV-HOOK
+		// handler, the post-present spare is the skeleton's. The extras branch above ran exactly for AfterLastExtra.   // VPV-HOOK
+		if (!pipelineSlots.OriginalPathway())   // VPV-HOOK
+		{   // VPV-HOOK
+			RendererExtension::PresentContext afterPresent;   // VPV-HOOK
+			afterPresent.kind = !(rendered && submitted) ? RendererExtension::AfterPresentKind::Plain :   // VPV-HOOK
+				dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed ?   // VPV-HOOK
+					RendererExtension::AfterPresentKind::AfterLastExtra : RendererExtension::AfterPresentKind::NoExtras;   // VPV-HOOK
+			afterPresent.cadenceRepeat = cadenceRepeat;   // VPV-HOOK
+			afterPresent.presenter = &renderAheadPresenter;   // VPV-HOOK
+			afterPresent.rendered = rendered;   // VPV-HOOK
+			afterPresent.submitted = submitted;   // VPV-HOOK
+			afterPresent.extrasSpentTime = dejudderExtrasSpentTime;   // VPV-HOOK
+			afterPresent.swapEndQpc = swapEndQpc;   // VPV-HOOK
+			afterPresent.targetTimingKnown = presentationTargetTimingKnown;   // VPV-HOOK
+			afterPresent.hostTargetLeadMs = presentationTargetLeadMs;   // VPV-HOOK
+			afterPresent.openLoop = dejudderDisplayRate.openLoop;   // VPV-HOOK
+			afterPresent.now = RenderAheadNow();   // VPV-HOOK
+			const RendererExtension::PresentOutcome outcome = RendererExtension::AfterPresent(this,   // VPV-HOOK
+				static_cast<int64_t>(sourceSequence), static_cast<int64_t>(frameGeneration), afterPresent);   // VPV-HOOK
+			if (outcome.raiseTargetLead)   // VPV-HOOK
+				presentationTargetLeadMs = outcome.targetLeadMs;   // VPV-HOOK
+		}   // VPV-HOOK
         lastRenderPresentationPaused=presentationAttempt.Deferred(rendered,submitted);
 		return rendered && submitted;
 	}
@@ -27800,7 +27798,7 @@ bool LibplaceboVideoRenderer::GetPresentationTimingStatus(CString& status) const
 			break;
 		}
 	}
-	const double estimatedLeadMs = m_impl->renderAheadEstimatedLeadMs.load(std::memory_order_relaxed);
+	const double estimatedLeadMs = m_impl->renderAheadPresenter.estimatedLeadMs.load(std::memory_order_relaxed);
 	if (estimatedLeadMs > 0.0)
 	{
 		// Hunt 2 05-renderahead L3: render-ahead in open loop, the planned lead.
@@ -30763,7 +30761,6 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// render cycle, queue ages and latency read exactly as without extras.
 		bool dejudderExtrasSpentTime = false;
 		SteadyClock::time_point dejudderMainDoneSteady{};
-		int64_t dejudderMainDoneQpc = 0;
 		timingclocktime_t dejudderMainDoneTimingClock{};
 		// The measured capture rate, or (stream robustness, owner 2026-10-14)
 		// the signal's nominal rate until it is measured - after a start, a
@@ -31192,7 +31189,6 @@ void LibplaceboVideoRenderer::RenderLoop()
 					[&]()
 					{
 						dejudderMainDoneSteady = SteadyClock::now();
-						dejudderMainDoneQpc = PerformanceCounterNow();
 						if (m_timingClock)
 							dejudderMainDoneTimingClock = m_timingClock->TimingClockNow();
 					},
@@ -31263,8 +31259,9 @@ void LibplaceboVideoRenderer::RenderLoop()
 						queueBefore = m_frameQueue.size();
 						recoveryTarget = PrefillTargetLocked();
 						LARGE_INTEGER qpcFrequency{};
-						const int64_t nowQpc = dejudderExtrasSpentTime ?
-							dejudderMainDoneQpc : PerformanceCounterNow();
+						int64_t nowQpc = PerformanceCounterNow();
+						if (!m_impl->pipelineSlots.OriginalPathway())   // VPV-HOOK HA-R14-ResolveTime: the one R14 seam (refs/108 s1): after an extras frame the present end is the main present's end   // VPV-HOOK
+							nowQpc = RendererExtension::ResolveTime(m_impl.get(), RendererExtension::TimeKind::FramePresentEnd, nowQpc);   // VPV-HOOK
 						const bool qpcAvailable =
 							nowQpc > 0 && QueryPerformanceFrequency(&qpcFrequency) &&
 							qpcFrequency.QuadPart > 0;

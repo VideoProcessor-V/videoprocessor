@@ -2990,60 +2990,10 @@
    "expiry": null
   },
   {
-   "id": "LVR.cpp-0031",
-   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5244,
-   "end": 5246,
-   "anchor": {
-    "symbol": "",
-    "before": [
-     "bool renderAheadTimersReady = false;",
-     "unsigned long long renderAheadTimerOrdinal = 0, renderAheadTimerSerial = 0;"
-    ],
-    "after": [
-     "uint32_t renderAheadExpectedPresent = 0; // the present id the next main present should get (chain continuity)"
-    ]
-   },
-   "lines": [
-    "\tbool& renderAheadCommitted = renderAheadPresenter.committed;   // VPV-HOOK",
-    "\tbool& renderAheadL1 = renderAheadPresenter.l1;   // VPV-HOOK",
-    "\tint& renderAheadMainInterval = renderAheadPresenter.mainInterval;   // VPV-HOOK"
-   ],
-   "text": "bool& renderAheadCommitted = renderAheadPresenter.committed; bool& renderAheadL1 = renderAheadPresenter.l1; int& renderAheadMainInterval = renderAheadPresenter.mainInterval;",
-   "gate": "declaration",
-   "seam": null,
-   "expiry": null
-  },
-  {
-   "id": "LVR.cpp-0032",
-   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5249,
-   "end": 5251,
-   "anchor": {
-    "symbol": "",
-    "before": [
-     "uint32_t renderAheadExpectedPresent = 0; // the present id the next main present should get (chain continuity)",
-     "double renderAheadLead = 0.0; // the planned lead (s)"
-    ],
-    "after": [
-     "unsigned long long renderAheadFrames = 0, renderAheadRestarts = 0, renderAheadLate = 0, renderAheadDropped = 0,"
-    ]
-   },
-   "lines": [
-    "\tdouble& renderAheadTargetLeadMs = renderAheadPresenter.targetLeadMs;   // VPV-HOOK",
-    "\tstd::atomic<double>& renderAheadEstimatedLeadMs = renderAheadPresenter.estimatedLeadMs;   // VPV-HOOK",
-    "\tstd::atomic<size_t>& renderAheadCreditFrames = renderAheadPresenter.creditFrames;   // VPV-HOOK"
-   ],
-   "text": "double& renderAheadTargetLeadMs = renderAheadPresenter.targetLeadMs; std::atomic<double>& renderAheadEstimatedLeadMs = renderAheadPresenter.estimatedLeadMs; std::atomic<size_t>& renderAheadCreditFrames = renderAheadPresenter.creditFrames;",
-   "gate": "declaration",
-   "seam": null,
-   "expiry": null
-  },
-  {
    "id": "LVR.cpp-0033",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5253,
-   "end": 5254,
+   "start": 5247,
+   "end": 5248,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3066,8 +3016,8 @@
   {
    "id": "LVR.cpp-0034",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5260,
-   "end": 5260,
+   "start": 5254,
+   "end": 5254,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3089,8 +3039,8 @@
   {
    "id": "LVR.cpp-0035",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5289,
-   "end": 5289,
+   "start": 5283,
+   "end": 5283,
    "anchor": {
     "symbol": "RenderAheadBreak",
     "before": [
@@ -3112,8 +3062,8 @@
   {
    "id": "LVR.cpp-0036",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5297,
-   "end": 5297,
+   "start": 5291,
+   "end": 5291,
    "anchor": {
     "symbol": "ResetRenderAheadGate",
     "before": [
@@ -3135,8 +3085,8 @@
   {
    "id": "LVR.cpp-0037",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5468,
-   "end": 5486,
+   "start": 5462,
+   "end": 5480,
    "anchor": {
     "symbol": "UpdateRenderAheadGate",
     "before": [
@@ -3176,8 +3126,8 @@
   {
    "id": "LVR.cpp-0038",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5499,
-   "end": 5499,
+   "start": 5493,
+   "end": 5493,
    "anchor": {
     "symbol": "UpdateRenderAheadGate",
     "before": [
@@ -3197,33 +3147,10 @@
    "expiry": null
   },
   {
-   "id": "LVR.cpp-0039",
-   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5538,
-   "end": 5538,
-   "anchor": {
-    "symbol": "TakeRenderAheadMainInterval",
-    "before": [
-     "UINT TakeRenderAheadMainInterval(int pending)",
-     "{"
-    ],
-    "after": [
-     "}"
-    ]
-   },
-   "lines": [
-    "\t\treturn static_cast<UINT>(renderAheadPresenter.TakeMainInterval(pending));   // VPV-HOOK"
-   ],
-   "text": "return static_cast<UINT>(renderAheadPresenter.TakeMainInterval(pending));",
-   "gate": "gated",
-   "seam": null,
-   "expiry": null
-  },
-  {
    "id": "LVR.cpp-0040",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5583,
-   "end": 5583,
+   "start": 5569,
+   "end": 5569,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3245,8 +3172,8 @@
   {
    "id": "LVR.cpp-0041",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5623,
-   "end": 5623,
+   "start": 5609,
+   "end": 5609,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3268,8 +3195,8 @@
   {
    "id": "LVR.cpp-0042",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5626,
-   "end": 5626,
+   "start": 5612,
+   "end": 5612,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3291,8 +3218,8 @@
   {
    "id": "LVR.cpp-0043",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5631,
-   "end": 5631,
+   "start": 5617,
+   "end": 5617,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3314,8 +3241,8 @@
   {
    "id": "LVR.cpp-0044",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5633,
-   "end": 5633,
+   "start": 5619,
+   "end": 5619,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3337,8 +3264,8 @@
   {
    "id": "LVR.cpp-0045",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5635,
-   "end": 5639,
+   "start": 5621,
+   "end": 5625,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3364,8 +3291,8 @@
   {
    "id": "LVR.cpp-0046",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5644,
-   "end": 5645,
+   "start": 5630,
+   "end": 5631,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3388,8 +3315,8 @@
   {
    "id": "LVR.cpp-0047",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5748,
-   "end": 5792,
+   "start": 5734,
+   "end": 5778,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3455,8 +3382,8 @@
   {
    "id": "LVR.cpp-0048",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5870,
-   "end": 5871,
+   "start": 5856,
+   "end": 5857,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3479,8 +3406,8 @@
   {
    "id": "LVR.cpp-0050",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 6367,
-   "end": 6367,
+   "start": 6353,
+   "end": 6353,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3502,8 +3429,8 @@
   {
    "id": "LVR.cpp-0051",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 6414,
-   "end": 6414,
+   "start": 6400,
+   "end": 6400,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3525,8 +3452,8 @@
   {
    "id": "LVR.cpp-0052",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 7219,
-   "end": 7219,
+   "start": 7205,
+   "end": 7205,
    "anchor": {
     "symbol": "RetireOutput",
     "before": [
@@ -3548,8 +3475,8 @@
   {
    "id": "LVR.cpp-0053",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 7291,
-   "end": 7291,
+   "start": 7277,
+   "end": 7277,
    "anchor": {
     "symbol": "RetireOutput",
     "before": [
@@ -3571,8 +3498,8 @@
   {
    "id": "LVR.cpp-0054",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 10269,
-   "end": 10278,
+   "start": 10255,
+   "end": 10264,
    "anchor": {
     "symbol": "Initialize",
     "before": [
@@ -3603,8 +3530,8 @@
   {
    "id": "LVR.cpp-0055",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 10282,
-   "end": 10282,
+   "start": 10268,
+   "end": 10268,
    "anchor": {
     "symbol": "Initialize",
     "before": [
@@ -3626,8 +3553,8 @@
   {
    "id": "LVR.cpp-0056",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 10779,
-   "end": 10779,
+   "start": 10765,
+   "end": 10765,
    "anchor": {
     "symbol": "LiveProfileSettingsCompatible",
     "before": [
@@ -3649,8 +3576,8 @@
   {
    "id": "LVR.cpp-0057",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 11028,
-   "end": 11029,
+   "start": 11014,
+   "end": 11015,
    "anchor": {
     "symbol": "PrepareFrameAnalysis",
     "before": [
@@ -3673,8 +3600,8 @@
   {
    "id": "LVR.cpp-0058",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 11197,
-   "end": 11197,
+   "start": 11183,
+   "end": 11183,
    "anchor": {
     "symbol": "ClassifyProfileSettingsLiveUpdate",
     "before": [
@@ -3696,8 +3623,8 @@
   {
    "id": "LVR.cpp-0059",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 11401,
-   "end": 11401,
+   "start": 11387,
+   "end": 11387,
    "anchor": {
     "symbol": "GetRenderStallStatus",
     "before": [
@@ -3719,8 +3646,8 @@
   {
    "id": "LVR.cpp-0060",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 12238,
-   "end": 12240,
+   "start": 12224,
+   "end": 12226,
    "anchor": {
     "symbol": "ApplyMotionInvalidate",
     "before": [
@@ -3744,8 +3671,8 @@
   {
    "id": "LVR.cpp-0061",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 12242,
-   "end": 12242,
+   "start": 12228,
+   "end": 12228,
    "anchor": {
     "symbol": "ApplyMotionInvalidate",
     "before": [
@@ -3767,8 +3694,8 @@
   {
    "id": "LVR.cpp-0062",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 12266,
-   "end": 12267,
+   "start": 12252,
+   "end": 12253,
    "anchor": {
     "symbol": "ApplyMotionInvalidate",
     "before": [
@@ -3791,8 +3718,8 @@
   {
    "id": "LVR.cpp-0063",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15042,
-   "end": 15042,
+   "start": 15028,
+   "end": 15028,
    "anchor": {
     "symbol": "UpdateDejudderEstimate",
     "before": [
@@ -3814,8 +3741,8 @@
   {
    "id": "LVR.cpp-0064",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15044,
-   "end": 15045,
+   "start": 15030,
+   "end": 15031,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3838,8 +3765,8 @@
   {
    "id": "LVR.cpp-0065",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15047,
-   "end": 15047,
+   "start": 15033,
+   "end": 15033,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3861,8 +3788,8 @@
   {
    "id": "LVR.cpp-0066",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15049,
-   "end": 15050,
+   "start": 15035,
+   "end": 15036,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3885,8 +3812,8 @@
   {
    "id": "LVR.cpp-0067",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15054,
-   "end": 15054,
+   "start": 15040,
+   "end": 15040,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3908,8 +3835,8 @@
   {
    "id": "LVR.cpp-0068",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15058,
-   "end": 15058,
+   "start": 15044,
+   "end": 15044,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3931,8 +3858,8 @@
   {
    "id": "LVR.cpp-0069",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15060,
-   "end": 15060,
+   "start": 15046,
+   "end": 15046,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3954,8 +3881,8 @@
   {
    "id": "LVR.cpp-0070",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15062,
-   "end": 15062,
+   "start": 15048,
+   "end": 15048,
    "anchor": {
     "symbol": "",
     "before": [
@@ -3977,8 +3904,8 @@
   {
    "id": "LVR.cpp-0071",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15064,
-   "end": 15064,
+   "start": 15050,
+   "end": 15050,
    "anchor": {
     "symbol": "",
     "before": [
@@ -4000,8 +3927,8 @@
   {
    "id": "LVR.cpp-0072",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15066,
-   "end": 15066,
+   "start": 15052,
+   "end": 15052,
    "anchor": {
     "symbol": "",
     "before": [
@@ -4023,8 +3950,8 @@
   {
    "id": "LVR.cpp-0073",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15101,
-   "end": 15101,
+   "start": 15087,
+   "end": 15087,
    "anchor": {
     "symbol": "",
     "before": [
@@ -4046,8 +3973,8 @@
   {
    "id": "LVR.cpp-0074",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15104,
-   "end": 15104,
+   "start": 15090,
+   "end": 15090,
    "anchor": {
     "symbol": "",
     "before": [
@@ -4069,8 +3996,8 @@
   {
    "id": "LVR.cpp-0075",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15413,
-   "end": 15413,
+   "start": 15399,
+   "end": 15399,
    "anchor": {
     "symbol": "PresentDejudderExtras",
     "before": [
@@ -4092,8 +4019,8 @@
   {
    "id": "LVR.cpp-0076",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 16503,
-   "end": 16504,
+   "start": 16492,
+   "end": 16493,
    "anchor": {
     "symbol": "RenderLocked",
     "before": [
@@ -4116,8 +4043,8 @@
   {
    "id": "LVR.cpp-0077",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 16547,
-   "end": 16547,
+   "start": 16536,
+   "end": 16536,
    "anchor": {
     "symbol": "RenderLocked",
     "before": [
@@ -4139,8 +4066,8 @@
   {
    "id": "LVR.cpp-0078",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 16571,
-   "end": 16571,
+   "start": 16560,
+   "end": 16560,
    "anchor": {
     "symbol": "RenderLocked",
     "before": [
@@ -4162,8 +4089,8 @@
   {
    "id": "LVR.cpp-0079",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 16707,
-   "end": 16707,
+   "start": 16696,
+   "end": 16696,
    "anchor": {
     "symbol": "RenderLocked",
     "before": [
@@ -4185,8 +4112,8 @@
   {
    "id": "LVR.cpp-0080",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 16712,
-   "end": 16712,
+   "start": 16701,
+   "end": 16701,
    "anchor": {
     "symbol": "RenderLocked",
     "before": [
@@ -4208,8 +4135,8 @@
   {
    "id": "LVR.cpp-0081",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 17603,
-   "end": 17603,
+   "start": 17592,
+   "end": 17592,
    "anchor": {
     "symbol": "RenderLocked",
     "before": [
@@ -4231,8 +4158,8 @@
   {
    "id": "LVR.cpp-0082",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 17651,
-   "end": 17652,
+   "start": 17640,
+   "end": 17641,
    "anchor": {
     "symbol": "RenderLocked",
     "before": [
@@ -4255,8 +4182,8 @@
   {
    "id": "LVR.cpp-0083",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 17670,
-   "end": 17670,
+   "start": 17659,
+   "end": 17659,
    "anchor": {
     "symbol": "RenderLocked",
     "before": [
@@ -4278,8 +4205,8 @@
   {
    "id": "LVR.cpp-0084",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 17745,
-   "end": 17745,
+   "start": 17734,
+   "end": 17734,
    "anchor": {
     "symbol": "RenderLocked",
     "before": [
@@ -4301,8 +4228,8 @@
   {
    "id": "LVR.cpp-0085",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 17808,
-   "end": 17808,
+   "start": 17797,
+   "end": 17797,
    "anchor": {
     "symbol": "RenderLocked",
     "before": [
@@ -4324,8 +4251,8 @@
   {
    "id": "LVR.cpp-0086",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 19169,
-   "end": 19169,
+   "start": 19158,
+   "end": 19158,
    "anchor": {
     "symbol": "RenderLocked",
     "before": [
@@ -4347,8 +4274,8 @@
   {
    "id": "LVR.cpp-0087",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 23119,
-   "end": 23129,
+   "start": 23108,
+   "end": 23118,
    "anchor": {
     "symbol": "RenderLocked",
     "before": [
@@ -4380,8 +4307,8 @@
   {
    "id": "LVR.cpp-0094",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 23684,
-   "end": 23685,
+   "start": 23672,
+   "end": 23673,
    "anchor": {
     "symbol": "RenderLocked",
     "before": [
@@ -4404,8 +4331,8 @@
   {
    "id": "LVR.cpp-0095",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 23841,
-   "end": 23841,
+   "start": 23829,
+   "end": 23829,
    "anchor": {
     "symbol": "RenderLocked",
     "before": [
@@ -4427,8 +4354,8 @@
   {
    "id": "LVR.cpp-0096",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25281,
-   "end": 25281,
+   "start": 25278,
+   "end": 25278,
    "anchor": {
     "symbol": "",
     "before": [
@@ -4450,8 +4377,8 @@
   {
    "id": "LVR.cpp-0097",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25288,
-   "end": 25289,
+   "start": 25285,
+   "end": 25286,
    "anchor": {
     "symbol": "",
     "before": [
@@ -4474,8 +4401,8 @@
   {
    "id": "LVR.cpp-0099",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25346,
-   "end": 25346,
+   "start": 25343,
+   "end": 25343,
    "anchor": {
     "symbol": "m_frameQueueMaxSize",
     "before": [
@@ -4497,8 +4424,8 @@
   {
    "id": "LVR.cpp-0100",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25367,
-   "end": 25367,
+   "start": 25364,
+   "end": 25364,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::~LibplaceboVideoRenderer",
     "before": [
@@ -4520,8 +4447,8 @@
   {
    "id": "LVR.cpp-0101",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25385,
-   "end": 25385,
+   "start": 25382,
+   "end": 25382,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::~LibplaceboVideoRenderer",
     "before": [
@@ -4543,8 +4470,8 @@
   {
    "id": "LVR.cpp-0102",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25391,
-   "end": 25391,
+   "start": 25388,
+   "end": 25388,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::OnVideoState",
     "before": [
@@ -4566,8 +4493,8 @@
   {
    "id": "LVR.cpp-0103",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25438,
-   "end": 25438,
+   "start": 25435,
+   "end": 25435,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::OnVideoState",
     "before": [
@@ -4589,8 +4516,8 @@
   {
    "id": "LVR.cpp-0104",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25449,
-   "end": 25449,
+   "start": 25446,
+   "end": 25446,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::OnVideoState",
     "before": [
@@ -4612,8 +4539,8 @@
   {
    "id": "LVR.cpp-0105",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25490,
-   "end": 25490,
+   "start": 25487,
+   "end": 25487,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::OnVideoState",
     "before": [
@@ -4635,8 +4562,8 @@
   {
    "id": "LVR.cpp-0106",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25513,
-   "end": 25513,
+   "start": 25510,
+   "end": 25510,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::OnVideoState",
     "before": [
@@ -4658,8 +4585,8 @@
   {
    "id": "LVR.cpp-0107",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25544,
-   "end": 25544,
+   "start": 25541,
+   "end": 25541,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::OnVideoFrame",
     "before": [
@@ -4681,8 +4608,8 @@
   {
    "id": "LVR.cpp-0108",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25555,
-   "end": 25555,
+   "start": 25552,
+   "end": 25552,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::OnVideoFrame",
     "before": [
@@ -4704,8 +4631,8 @@
   {
    "id": "LVR.cpp-0109",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25566,
-   "end": 25566,
+   "start": 25563,
+   "end": 25563,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::OnVideoFrame",
     "before": [
@@ -4727,8 +4654,8 @@
   {
    "id": "LVR.cpp-0110",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25568,
-   "end": 25568,
+   "start": 25565,
+   "end": 25565,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::OnVideoFrame",
     "before": [
@@ -4750,8 +4677,8 @@
   {
    "id": "LVR.cpp-0111",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25606,
-   "end": 25607,
+   "start": 25603,
+   "end": 25604,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::OnVideoFrame",
     "before": [
@@ -4774,8 +4701,8 @@
   {
    "id": "LVR.cpp-0112",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25617,
-   "end": 25617,
+   "start": 25614,
+   "end": 25614,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::EnqueueFrame",
     "before": [
@@ -4797,8 +4724,8 @@
   {
    "id": "LVR.cpp-0113",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25764,
-   "end": 25764,
+   "start": 25761,
+   "end": 25761,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::EnqueueFrame",
     "before": [
@@ -4820,8 +4747,8 @@
   {
    "id": "LVR.cpp-0114",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25777,
-   "end": 25781,
+   "start": 25774,
+   "end": 25778,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::EnqueueFrame",
     "before": [
@@ -4847,8 +4774,8 @@
   {
    "id": "LVR.cpp-0115",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25803,
-   "end": 25804,
+   "start": 25800,
+   "end": 25801,
    "anchor": {
     "symbol": "",
     "before": [
@@ -4871,8 +4798,8 @@
   {
    "id": "LVR.cpp-0116",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25807,
-   "end": 25807,
+   "start": 25804,
+   "end": 25804,
    "anchor": {
     "symbol": "",
     "before": [
@@ -4894,8 +4821,8 @@
   {
    "id": "LVR.cpp-0117",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25976,
-   "end": 25979,
+   "start": 25973,
+   "end": 25976,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::Build",
     "before": [
@@ -4920,8 +4847,8 @@
   {
    "id": "LVR.cpp-0118",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 26642,
-   "end": 26642,
+   "start": 26639,
+   "end": 26639,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::Retire",
     "before": [
@@ -4943,8 +4870,8 @@
   {
    "id": "LVR.cpp-0119",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 26681,
-   "end": 26681,
+   "start": 26678,
+   "end": 26678,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::FinalizeRetirementForShutdown",
     "before": [
@@ -4966,8 +4893,8 @@
   {
    "id": "LVR.cpp-0120",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 26735,
-   "end": 26735,
+   "start": 26732,
+   "end": 26732,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::Reset",
     "before": [
@@ -4989,8 +4916,8 @@
   {
    "id": "LVR.cpp-0121",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 26778,
-   "end": 26778,
+   "start": 26775,
+   "end": 26775,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::ResetLiveQueue",
     "before": [
@@ -5012,8 +4939,8 @@
   {
    "id": "LVR.cpp-0122",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 27005,
-   "end": 27005,
+   "start": 27002,
+   "end": 27002,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::OnDisplayChange",
     "before": [
@@ -5035,8 +4962,8 @@
   {
    "id": "LVR.cpp-0123",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 27700,
-   "end": 27700,
+   "start": 27697,
+   "end": 27697,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::GetFallbacksStatus",
     "before": [
@@ -5058,8 +4985,8 @@
   {
    "id": "LVR.cpp-0124",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 27718,
-   "end": 27719,
+   "start": 27715,
+   "end": 27716,
    "anchor": {
     "symbol": "const bool answered = VpStatusText::RendererModuleStatus<wch",
     "before": [
@@ -5082,8 +5009,8 @@
   {
    "id": "LVR.cpp-0125",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 27725,
-   "end": 27728,
+   "start": 27722,
+   "end": 27725,
    "anchor": {
     "symbol": "",
     "before": [
@@ -5108,8 +5035,8 @@
   {
    "id": "LVR.cpp-0126",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 29665,
-   "end": 29666,
+   "start": 29662,
+   "end": 29663,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::ConversionLoop",
     "before": [
@@ -5132,8 +5059,8 @@
   {
    "id": "LVR.cpp-0127",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 29708,
-   "end": 29708,
+   "start": 29705,
+   "end": 29705,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::ConversionLoop",
     "before": [
@@ -5155,8 +5082,8 @@
   {
    "id": "LVR.cpp-0128",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 29756,
-   "end": 29757,
+   "start": 29753,
+   "end": 29754,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::ConversionLoop",
     "before": [
@@ -5179,8 +5106,8 @@
   {
    "id": "LVR.cpp-0129",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 29769,
-   "end": 29774,
+   "start": 29766,
+   "end": 29771,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::ConversionLoop",
     "before": [
@@ -5207,8 +5134,8 @@
   {
    "id": "LVR.cpp-0130",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 30173,
-   "end": 30174,
+   "start": 30170,
+   "end": 30171,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::RenderLoop",
     "before": [
@@ -5231,8 +5158,8 @@
   {
    "id": "LVR.cpp-0131",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 30485,
-   "end": 30485,
+   "start": 30482,
+   "end": 30482,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::RenderLoop",
     "before": [
@@ -5254,8 +5181,8 @@
   {
    "id": "LVR.cpp-0132",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 30511,
-   "end": 30511,
+   "start": 30508,
+   "end": 30508,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::RenderLoop",
     "before": [
@@ -5277,8 +5204,8 @@
   {
    "id": "LVR.cpp-0133",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 30517,
-   "end": 30517,
+   "start": 30514,
+   "end": 30514,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::RenderLoop",
     "before": [
@@ -5300,8 +5227,8 @@
   {
    "id": "LVR.cpp-0134",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 30526,
-   "end": 30526,
+   "start": 30523,
+   "end": 30523,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::RenderLoop",
     "before": [
@@ -5323,8 +5250,8 @@
   {
    "id": "LVR.cpp-0135",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 31020,
-   "end": 31020,
+   "start": 31016,
+   "end": 31016,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::RenderLoop",
     "before": [
@@ -5346,8 +5273,8 @@
   {
    "id": "LVR.cpp-0136",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 31041,
-   "end": 31041,
+   "start": 31037,
+   "end": 31037,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::RenderLoop",
     "before": [
@@ -5369,8 +5296,8 @@
   {
    "id": "LVR.cpp-0137",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 31052,
-   "end": 31057,
+   "start": 31048,
+   "end": 31053,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::RenderLoop",
     "before": [
@@ -5397,8 +5324,8 @@
   {
    "id": "LVR.cpp-0138",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 31337,
-   "end": 31337,
+   "start": 31333,
+   "end": 31333,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::RenderLoop",
     "before": [
@@ -5420,8 +5347,8 @@
   {
    "id": "LVR.cpp-0139",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 31342,
-   "end": 31342,
+   "start": 31338,
+   "end": 31338,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::RenderLoop",
     "before": [
@@ -5443,8 +5370,8 @@
   {
    "id": "LVR.cpp-0140",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 31673,
-   "end": 31673,
+   "start": 31669,
+   "end": 31669,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::RenderLoop",
     "before": [
@@ -5466,8 +5393,8 @@
   {
    "id": "LVR.cpp-0141",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 31877,
-   "end": 31877,
+   "start": 31873,
+   "end": 31873,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::BeginQueueGeneration",
     "before": [
@@ -5489,8 +5416,8 @@
   {
    "id": "LVR.cpp-0142",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 31953,
-   "end": 31954,
+   "start": 31949,
+   "end": 31950,
    "anchor": {
     "symbol": "LibplaceboVideoRenderer::PrefillTargetLocked",
     "before": [
@@ -5513,8 +5440,8 @@
   {
    "id": "LVR.cpp-0143",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 31960,
-   "end": 31960,
+   "start": 31956,
+   "end": 31956,
    "anchor": {
     "symbol": "",
     "before": [
@@ -5531,29 +5458,6 @@
    "text": "#include <VP-V/modules/input/queue_timing/QueueTarget.inl>",
    "gate": "declaration",
    "seam": null,
-   "expiry": null
-  },
-  {
-   "id": "LVR.cpp-0144",
-   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 24949,
-   "end": 24949,
-   "anchor": {
-    "symbol": "RenderLocked",
-    "before": [
-     "BuildSigmaDeltaVectorsWithoutExtras(sourceSequence, nextSourceSequence); // vector engine, no extras",
-     "}"
-    ],
-    "after": [
-     "lastRenderPresentationPaused=presentationAttempt.Deferred(rendered,submitted);"
-    ]
-   },
-   "lines": [
-    "\t\tif (!pipelineSlots.OriginalPathway()) { RendererExtension::PresentContext afterPresent; afterPresent.kind = !(rendered && submitted) ? RendererExtension::AfterPresentKind::Plain : dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed ? RendererExtension::AfterPresentKind::AfterLastExtra : RendererExtension::AfterPresentKind::NoExtras; afterPresent.cadenceRepeat = cadenceRepeat; RendererExtension::AfterPresent(this, static_cast<int64_t>(sourceSequence), static_cast<int64_t>(frameGeneration), afterPresent); }   // VPV-HOOK HA-R12-AfterPresent: the one shared R12 AfterPresent seam (refs/107 S5)"
-   ],
-   "text": "if (!pipelineSlots.OriginalPathway()) { RendererExtension::PresentContext afterPresent; afterPresent.kind = !(rendered && submitted) ? RendererExtension::AfterPresentKind::Plain : dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed ? RendererExtension::AfterPresentKind::AfterLastExtra : RendererExtension::AfterPresentKind::NoExtras; afterPresent.cadenceRepeat = cadenceRepeat; RendererExtension::AfterPresent(this, static_cast<int64_t>(sourceSequence), static_cast<int64_t>(frameGeneration), afterPresent); }",
-   "gate": "inert",
-   "seam": "S5",
    "expiry": null
   },
   {
@@ -6076,8 +5980,8 @@
   {
    "id": "P5c-5852",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 5842,
-   "end": 5844,
+   "start": 5828,
+   "end": 5830,
    "anchor": {
     "symbol": "BuildSigmaDeltaVectorsWithoutExtras",
     "before": [
@@ -6101,8 +6005,8 @@
   {
    "id": "P5c-15574",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15566,
-   "end": 15570,
+   "start": 15552,
+   "end": 15556,
    "anchor": {
     "symbol": "PresentDejudderExtras",
     "before": [
@@ -6131,8 +6035,8 @@
   {
    "id": "P5c-15759",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15751,
-   "end": 15757,
+   "start": 15737,
+   "end": 15743,
    "anchor": {
     "symbol": "PresentDejudderExtras",
     "before": [
@@ -6163,8 +6067,8 @@
   {
    "id": "P5c-15784",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 15776,
-   "end": 15776,
+   "start": 15762,
+   "end": 15762,
    "anchor": {
     "symbol": "PresentDejudderExtras",
     "before": [
@@ -6189,8 +6093,8 @@
   {
    "id": "P5c-16121",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 16113,
-   "end": 16119,
+   "start": 16099,
+   "end": 16105,
    "anchor": {
     "symbol": "PresentDejudderExtras",
     "before": [
@@ -6221,8 +6125,8 @@
   {
    "id": "LVR.cpp-0146",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 23132,
-   "end": 23133,
+   "start": 23121,
+   "end": 23122,
    "anchor": {
     "symbol": "RenderLocked",
     "before": [
@@ -6245,8 +6149,8 @@
   {
    "id": "LVR.cpp-0147",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 25291,
-   "end": 25297,
+   "start": 25288,
+   "end": 25294,
    "anchor": {
     "symbol": "",
     "before": [
@@ -6274,8 +6178,8 @@
   {
    "id": "LVR.cpp-0148",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 6339,
-   "end": 6341,
+   "start": 6325,
+   "end": 6327,
    "anchor": {
     "symbol": "",
     "before": [
@@ -6344,6 +6248,155 @@
    ],
    "text": "bool EntranceOnceSnapshotFor(uint64_t aSequence) const; bool EntranceOnceFieldAhead(uint64_t aSequence, uint64_t bSequence, std::string& why); bool DejudderLiveFieldFor(uint64_t sequence) const;",
    "gate": "declaration",
+   "seam": null,
+   "expiry": null
+  },
+  {
+   "id": "LVR.cpp-0019",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 5039,
+   "end": 5039,
+   "anchor": {
+    "symbol": "",
+    "before": [
+     "void ReleaseFallback(const std::string& id) override { r.ReleaseFallback(id.c_str()); }",
+     "bool FieldAhead(uint64_t a, uint64_t b, std::string& why) override { return r.EntranceOnceFieldAhead(a, b, why); }"
+    ],
+    "after": [
+     "NextUpload Next() const override"
+    ]
+   },
+   "lines": [
+    "\t\tField FieldOf(uint64_t sequence) const override;   // VPV-HOOK P4 g (HA-P4g-S3): defined in VP-V/segments/EntranceHostMembers.inl"
+   ],
+   "text": "Field FieldOf(uint64_t sequence) const override;",
+   "gate": "declaration",
+   "seam": null,
+   "expiry": null
+  },
+  {
+   "id": "LVR.cpp-0150",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 16244,
+   "end": 16250,
+   "anchor": {
+    "symbol": "RenderLocked",
+    "before": [
+     "passTimerHook.BeginFrame(); // efficiency timers: 1 refresh in N timed (no waits)",
+     "passTimerHook.CpuBegin();"
+    ],
+    "after": [
+     "dejudderAheadPayload = aheadConvertedPayload; // C for this frame's extras (estimate ahead)"
+    ]
+   },
+   "lines": [
+    "\t\t// VPV-HOOK HA-R11-PlanPresent: the one R11 seam (refs/108 s1). The main present's SyncInterval = the holds the   // VPV-HOOK",
+    "\t\t// last plan left after its last extra, consumed here so that no exit (a failed render) leaves it for a later   // VPV-HOOK",
+    "\t\t// present (bug hunt 05 L2); the presentation module answers from the Presenter. Original pathway: not called, 1.   // VPV-HOOK",
+    "\t\tRendererExtension::PresentPlan presentPlan;   // VPV-HOOK",
+    "\t\tpresentPlan.presenter = &renderAheadPresenter;   // VPV-HOOK",
+    "\t\tif (!pipelineSlots.OriginalPathway())   // VPV-HOOK",
+    "\t\t\tRendererExtension::PlanPresent(this, presentPlan);   // VPV-HOOK"
+   ],
+   "text": "RendererExtension::PresentPlan presentPlan; presentPlan.presenter = &renderAheadPresenter; if (!pipelineSlots.OriginalPathway()) RendererExtension::PlanPresent(this, presentPlan);",
+   "gate": "guarded",
+   "seam": null,
+   "expiry": null
+  },
+  {
+   "id": "LVR.cpp-0093",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 23633,
+   "end": 23636,
+   "anchor": {
+    "symbol": "RenderLocked",
+    "before": [
+     "pl_render_errors renderErrors{};",
+     "pl_render_params frameParams{};"
+    ],
+    "after": [
+     "const auto hookRender = NlsHookRecovery::RenderOwned(temporalRenderer.ProcessingRenderer(renderer), d3d11->gpu, // Bill: the processing renderer keeps source peak-detection history"
+    ]
+   },
+   "lines": [
+    "        SigmaDeltaVectors::NextVectorGuard nextVectorGuard;   // VPV-HOOK P4 f (HA-P4f-S3): restores the sigma-delta's own vectors after this render",
+    "        TemporalHistoryPolicy::Decision temporalEntrance;   // VPV-HOOK P4 f (HA-P4f-S3)",
+    "        CollectFrameHooks(baseTarget, renderImage, target, width, height, cadenceRepeat, frameGeneration, sourceSequence, captureRateHz, nominalSourceRateHz, state, videoFrame, convertedPayload, hdrTrustedPicture, relocatedSubtitle, safeSubtitlePadding, subtitleCompositionSucceeded, submittedNls, lowLatencyQueue, hookTemplates, nextVectorGuard, frameParams, renderErrors, extendedRangeRelabelled, temporalEntrance);   // VPV-HOOK P4 f (HA-P4f-S3): the frame's hook list, render parameters and errors (CoreSegments.inl)",
+    "        const auto drawFrame = [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) { return DrawFrame(source, destination, parameters, image, sourceSequence, nextSourceSequence, cadenceRepeat, renderErrors, temporalEntrance, extendedRangeRelabelled); };   // VPV-HOOK P4 g (HA-P4g-S3): the draw (EntranceHostMembers.inl); runs twice on an NLS retry"
+   ],
+   "text": "SigmaDeltaVectors::NextVectorGuard nextVectorGuard; TemporalHistoryPolicy::Decision temporalEntrance; CollectFrameHooks(baseTarget, renderImage, target, width, height, cadenceRepeat, frameGeneration, sourceSequence, captureRateHz, nominalSourceRateHz, state, videoFrame, convertedPayload, hdrTrustedPicture, relocatedSubtitle, safeSubtitlePadding, subtitleCompositionSucceeded, submittedNls, lowLatencyQueue, hookTemplates, nextVectorGuard, frameParams, renderErrors, extendedRangeRelabelled, temporalEntrance); const auto drawFrame = [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) { return DrawFrame(source, destination, parameters, image, sourceSequence, nextSourceSequence, cadenceRepeat, renderErrors, temporalEntrance, extendedRangeRelabelled); };",
+   "gate": "allowed",
+   "seam": null,
+   "expiry": null
+  },
+  {
+   "id": "LVR.cpp-0151",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 24922,
+   "end": 24946,
+   "anchor": {
+    "symbol": "RenderLocked",
+    "before": [
+     "BuildSigmaDeltaVectorsWithoutExtras(sourceSequence, nextSourceSequence); // vector engine, no extras",
+     "}"
+    ],
+    "after": [
+     "lastRenderPresentationPaused=presentationAttempt.Deferred(rendered,submitted);"
+    ]
+   },
+   "lines": [
+    "\t\t// VPV-HOOK HA-R12-AfterPresent: the one shared R12 AfterPresent seam (refs/107 S5, refs/108 s1 + s10): the render-ahead   // VPV-HOOK",
+    "\t\t// step of this block (a frame whose plan was not queued ends the chain; a queued one raises A's presentation target to   // VPV-HOOK",
+    "\t\t// its planned refresh; in open loop the planned lead is published as an estimate) is the presentation module's   // VPV-HOOK",
+    "\t\t// handler, the post-present spare is the skeleton's. The extras branch above ran exactly for AfterLastExtra.   // VPV-HOOK",
+    "\t\tif (!pipelineSlots.OriginalPathway())   // VPV-HOOK",
+    "\t\t{   // VPV-HOOK",
+    "\t\t\tRendererExtension::PresentContext afterPresent;   // VPV-HOOK",
+    "\t\t\tafterPresent.kind = !(rendered && submitted) ? RendererExtension::AfterPresentKind::Plain :   // VPV-HOOK",
+    "\t\t\t\tdejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed ?   // VPV-HOOK",
+    "\t\t\t\t\tRendererExtension::AfterPresentKind::AfterLastExtra : RendererExtension::AfterPresentKind::NoExtras;   // VPV-HOOK",
+    "\t\t\tafterPresent.cadenceRepeat = cadenceRepeat;   // VPV-HOOK",
+    "\t\t\tafterPresent.presenter = &renderAheadPresenter;   // VPV-HOOK",
+    "\t\t\tafterPresent.rendered = rendered;   // VPV-HOOK",
+    "\t\t\tafterPresent.submitted = submitted;   // VPV-HOOK",
+    "\t\t\tafterPresent.extrasSpentTime = dejudderExtrasSpentTime;   // VPV-HOOK",
+    "\t\t\tafterPresent.swapEndQpc = swapEndQpc;   // VPV-HOOK",
+    "\t\t\tafterPresent.targetTimingKnown = presentationTargetTimingKnown;   // VPV-HOOK",
+    "\t\t\tafterPresent.hostTargetLeadMs = presentationTargetLeadMs;   // VPV-HOOK",
+    "\t\t\tafterPresent.openLoop = dejudderDisplayRate.openLoop;   // VPV-HOOK",
+    "\t\t\tafterPresent.now = RenderAheadNow();   // VPV-HOOK",
+    "\t\t\tconst RendererExtension::PresentOutcome outcome = RendererExtension::AfterPresent(this,   // VPV-HOOK",
+    "\t\t\t\tstatic_cast<int64_t>(sourceSequence), static_cast<int64_t>(frameGeneration), afterPresent);   // VPV-HOOK",
+    "\t\t\tif (outcome.raiseTargetLead)   // VPV-HOOK",
+    "\t\t\t\tpresentationTargetLeadMs = outcome.targetLeadMs;   // VPV-HOOK",
+    "\t\t}   // VPV-HOOK"
+   ],
+   "text": "if (!pipelineSlots.OriginalPathway()) { RendererExtension::PresentContext afterPresent; afterPresent.kind = !(rendered && submitted) ? RendererExtension::AfterPresentKind::Plain : dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed ? RendererExtension::AfterPresentKind::AfterLastExtra : RendererExtension::AfterPresentKind::NoExtras; afterPresent.cadenceRepeat = cadenceRepeat; afterPresent.presenter = &renderAheadPresenter; afterPresent.rendered = rendered; afterPresent.submitted = submitted; afterPresent.extrasSpentTime = dejudderExtrasSpentTime; afterPresent.swapEndQpc = swapEndQpc; afterPresent.targetTimingKnown = presentationTargetTimingKnown; afterPresent.hostTargetLeadMs = presentationTargetLeadMs; afterPresent.openLoop = dejudderDisplayRate.openLoop; afterPresent.now = RenderAheadNow(); const RendererExtension::PresentOutcome outcome = RendererExtension::AfterPresent(this, static_cast<int64_t>(sourceSequence), static_cast<int64_t>(frameGeneration), afterPresent); if (outcome.raiseTargetLead) presentationTargetLeadMs = outcome.targetLeadMs; }",
+   "gate": "guarded",
+   "seam": null,
+   "expiry": null
+  },
+  {
+   "id": "LVR.cpp-0152",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 31263,
+   "end": 31264,
+   "anchor": {
+    "symbol": "LibplaceboVideoRenderer::RenderLoop",
+    "before": [
+     "LARGE_INTEGER qpcFrequency{};",
+     "int64_t nowQpc = PerformanceCounterNow();"
+    ],
+    "after": [
+     "const bool qpcAvailable ="
+    ]
+   },
+   "lines": [
+    "\t\t\t\t\t\tif (!m_impl->pipelineSlots.OriginalPathway())   // VPV-HOOK HA-R14-ResolveTime: the one R14 seam (refs/108 s1): after an extras frame the present end is the main present's end   // VPV-HOOK",
+    "\t\t\t\t\t\t\tnowQpc = RendererExtension::ResolveTime(m_impl.get(), RendererExtension::TimeKind::FramePresentEnd, nowQpc);   // VPV-HOOK"
+   ],
+   "text": "if (!m_impl->pipelineSlots.OriginalPathway()) nowQpc = RendererExtension::ResolveTime(m_impl.get(), RendererExtension::TimeKind::FramePresentEnd, nowQpc);",
+   "gate": "guarded",
    "seam": null,
    "expiry": null
   }

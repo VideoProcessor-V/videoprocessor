@@ -48,6 +48,7 @@ struct IDXGISwapChain;
 class ConfigFile;
 class VideoFrame;                    // host types the M2 phase payloads carry by pointer or reference
 struct AlphaDxgiPresentationSample;
+namespace RenderAhead { class Presenter; }   // Phase 3 (refs/108): the per-renderer presentation state the R11 / R12 payloads anchor (S8 transitional)
 
 namespace RendererExtension
 {
@@ -181,6 +182,10 @@ namespace RendererExtension
 	};
 
 	// R11 PlanPresent (take-over; render thread, renderMutex). Default interval 1 = the host's Present(1, 0).
+	// Phase 3 (refs/108 s1, HA-R11-PlanPresent): called ONCE at the entry of the host's render (so a failed render consumes
+	// the held interval too, bug hunt 05 L2); the presentation module answers the main present's SyncInterval from the
+	// Presenter it is handed (`presenter`: the host's per-renderer presentation state, an S8 anchor until Phase 4 keys it
+	// by host) and starts the Presenter's frame. In the Original pathway the host does not call it (interval 1 = Bill).
 	enum class PresentKind { Main, Repeat };
 	struct PresentPlan
 	{
@@ -189,6 +194,7 @@ namespace RendererExtension
 		bool vpOwned = false;
 		uint32_t interval = 1;
 		uint32_t flags = 0;
+		RenderAhead::Presenter* presenter = nullptr;   // in: the host's presentation state (Phase 3)
 	};
 
 	// R12 AfterPresent (fan-out; render thread, renderMutex, after the main present). Each module writes only its own
@@ -200,6 +206,7 @@ namespace RendererExtension
 		double targetLeadMs = 0;      // raise-only: the host takes the larger of its own and this
 		double estimatedLeadMs = 0;
 		double spentSeconds = 0;
+		bool raiseTargetLead = false; // Phase 3: a handler raises the host's presentation target lead to targetLeadMs (merged OR)
 	};
 	// The present-block kind: R12 is called ONCE per frame at the end of the present block (refs/107 S5) - after the last
 	// extra present, after a main present without extras, or Plain = nothing was presented this frame.
@@ -214,6 +221,18 @@ namespace RendererExtension
 		PresentOutcome outcome;                                // out
 		AfterPresentKind kind = AfterPresentKind::Plain;
 		bool cadenceRepeat = false;                            // the source frame is a cadence repeat (keeps its film frame's key)
+		// Phase 3 (refs/108 s1 + s10): the facts the render-ahead step of the present block read from the host, now
+		// handed to the presentation module (PresenterAfterPresent): the Presenter (S8 anchor, as in PresentPlan), whether
+		// the frame rendered / submitted, whether the extras path ran and spent time, the host's measured presentation
+		// target (known + lead before this step), the extras' display loop and the render-ahead clock. The handler
+		// answers through `outcome` (committed, raise-only targetLeadMs, estimatedLeadMs); the host applies the raise.
+		RenderAhead::Presenter* presenter = nullptr;
+		bool rendered = false, submitted = false;
+		bool extrasSpentTime = false;                          // the extras path presented and spent time (PresentDejudderExtras)
+		bool targetTimingKnown = false;                        // the host's presentationTargetTimingKnown
+		double hostTargetLeadMs = 0.0;                         // the host's presentationTargetLeadMs before this step
+		bool openLoop = false;                                 // the extras' display rate runs open loop
+		double now = 0.0;                                      // the render-ahead steady clock (s)
 	};
 
 	// R13 PresentSample (fan-out, chained: each handler sees the previous adjustment; render thread, in the

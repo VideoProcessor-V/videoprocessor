@@ -30,10 +30,10 @@ method, every helper returns the host's own value (or `false` = "the host's code
 | # | Helper (RendererExtension::) | Phase | Rule | Default | Call site by |
 |---|---|---|---|---|---|
 | R10 | `PlanOutputs(host, OutputPlan&)` | PlanOutputs | take-over | host's output list untouched | P5b |
-| R11 | `PlanPresent(host, PresentPlan&)` | PlanPresent | take-over | `interval == 1` | P6 |
-| R12 | `AfterPresent(host, seq, gen, PresentContext&)` | AfterPresent | fan-out, outcome only added to | nothing ran | P5c |
+| R11 | `PlanPresent(host, PresentPlan&)` | PlanPresent | take-over | `interval == 1` | Phase 3: `PresenterExtension` (output/presentation), HA-R11 |
+| R12 | `AfterPresent(host, seq, gen, PresentContext&)` | AfterPresent | fan-out, outcome only added to (`raiseTargetLead` OR) | nothing ran | Phase 3: `PresenterExtension` + the skeleton's spare (B3-Z), HA-R12 |
 | R13 | `AdjustPresentationSample(host, sample, native)` | PresentSample | fan-out, chained | sample unchanged | P6 |
-| R14 | `ResolveTime(host, TimeKind, billQpc)` | ResolveTime | fan-out, chained | `billQpc` | P5c |
+| R14 | `ResolveTime(host, TimeKind, billQpc)` | ResolveTime | fan-out, chained | `billQpc` | Phase 3: `PresenterExtension` (FramePresentEnd), HA-R14 |
 | R15 | `DecideIngress(IngressContext&)` | DecideIngress | take-over | host's values stand | P10 |
 | R16 | `OnConvertedFrame(host, ConvertContext&)`, `AfterPublish(host, PublishView&)` | Convert, AfterPublish | take-over, fan-out | `false` (host's formatter) | P10 (P13 uses it) |
 | R17 | `TryUpload(host, UploadContext&)` | Upload | take-over | `false` (host's upload) | P10 |
