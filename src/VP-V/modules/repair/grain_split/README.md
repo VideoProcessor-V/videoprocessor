@@ -130,7 +130,7 @@ Full-mode identity is pinned, not assumed: `Gpu::FullShaderFingerprint()` (FNV-1
 
 ### Compact storage rules
 
-Compact is refused (Full instead, status + FallbackCatalog "grain split storage") when 1 / codeUnit > 4096 (more than 12 bits of codes: the fp16 s1/s2 would lose precision) and when the plane format is not UNORM/UINT (a float plane can hold blacker-than-black and whiter-than-white that the unorm base would clamp). `Gpu::ChooseStorage`, tests at 12 bit (compact), 16 bit (full) and on a float plane with values < 0 and > 1. Peak bytes incl. the arena scratch (v2 figures; v3 scratch is 4 B/px for both layouts, see the VRAM section; the ledger formula is stale): compact 8 (ring + live) + 32 B/px against full 16 (ring + live) + 16: compact saves only when ring + live > 2 (`GrainSplit::StorageLedgerLines`).
+Compact is refused (Full instead, status + FallbackCatalog "grain split storage") when 1 / codeUnit > 4096 (more than 12 bits of codes: the fp16 s1/s2 would lose precision) and when the plane format is not UNORM/UINT (a float plane can hold blacker-than-black and whiter-than-white that the unorm base would clamp). `Gpu::ChooseStorage`, tests at 12 bit (compact), 16 bit (full) and on a float plane with values < 0 and > 1. Peak bytes incl. the arena scratch (v3: two half-size rg32f planes = 4 B/px for both layouts, plus 16 B per block): compact 8 (ring + live) + 4 B/px against full 16 (ring + live) + 4: compact saves for every ring + live >= 1 (`GrainSplit::StorageLedgerLines`).
 
 ### Private grain estimators outside the unit (not reachable in SA2)
 

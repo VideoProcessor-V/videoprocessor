@@ -16,10 +16,10 @@
 // (no gain there, no harm); grain read as structure (dense texture) stays in `clean`, which is why
 // readers that MOVE structure between frames still need their own grain budget (temporal_detail does).
 //
-// Cost (GPU plan, per frame): three separable Gaussians (sigma 1, 2.5, 6 x Scale; the 2.5/6 pair at half
-// resolution), one 3 x 3 energy, one per-block reduction of 16 sub-block energies and a 5 x 5 block
-// minimum; outputs base (half res R16F), s1/s2 (RG16F), f (R8) and N (block grid). About 7 B/px of
-// textures at 4K (~58 MB) and well under 1 ms on the 3090 (estimate; not dispatched yet).
+// Cost (v3 GPU form, GrainSplitGpu.h; refs/116): the 2.5 / 6 (x Scale) Gaussians at half resolution, G1 (1 x Scale)
+// at full resolution in shared memory, one 3 x 3 energy, one per-block reduction of the sub-block energies and a 5 x 5
+// block minimum; no full-size intermediates; Compact product 8 B/px. Estimate 1.4-1.9 ms at 4K on the RTX 3050 Ti
+// laptop (target <= 2 ms; GrainSplitV3CostBench measures).
 //
 // CPU reference model: one luma plane in codes (doubles), edges clamped, raster loops, double sums, no
 // threads: deterministic. Header-only, C++14-compatible, no Windows headers.

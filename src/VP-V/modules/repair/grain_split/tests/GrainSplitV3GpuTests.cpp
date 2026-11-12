@@ -306,13 +306,18 @@ public:
 					Assert::IsTrue(!p.a.empty() && !p.blocks.empty() && (storage == Storage::Full || !p.b.empty()), L"downloaded");
 					Assert::AreEqual(ref.bw, p.bw, L"block grid width");
 					Assert::AreEqual(ref.bh, p.bh, L"block grid height");
-					double worstS = 0, worstBase = 0, worstF = 0;
+					double worstS = 0, worstSrel = 0, worstBase = 0, worstF = 0;
 					for (int py = 0; py < h; ++py)
 						for (int px = 0; px < w; ++px)
 						{
 							const size_t i = static_cast<size_t>(py) * w + px;
 							const Texel t = Decode(p, i);
-							worstS = (std::max)(worstS, (std::max)(std::fabs(t.s1 - ref.s1.at(px, py)), std::fabs(t.s2 - ref.s2.at(px, py))));
+							// fp16 keeps 11 significant bits (Compact): absolute up to |s| = 64 codes, relative above (the bound of
+							// GrainSplitCompactGpuTests; opus gate SHOULD 1 - an absolute 0.05 fails from 128 codes on).
+							const double r1 = ref.s1.at(px, py), r2 = ref.s2.at(px, py);
+							const double e1 = std::fabs(t.s1 - r1), e2 = std::fabs(t.s2 - r2);
+							if (std::fabs(r1) <= 64.0) worstS = (std::max)(worstS, e1); else worstSrel = (std::max)(worstSrel, e1 / std::fabs(r1));
+							if (std::fabs(r2) <= 64.0) worstS = (std::max)(worstS, e2); else worstSrel = (std::max)(worstSrel, e2 / std::fabs(r2));
 							worstBase = (std::max)(worstBase, std::fabs(t.base - ref.base.at(px, py)));
 							worstF = (std::max)(worstF, std::fabs(t.f - ref.f.at(px, py)));
 						}
@@ -330,10 +335,11 @@ public:
 					char head[160];
 					std::snprintf(head, sizeof head, "v3 GPU %s vs CPU %dx%d B %d scale %.3f", GrainSplit::Token(storage), w, h, B, scale);
 					Logger::WriteMessage(head);
-					LogF("  max |s1,s2| err %.5f codes, |base| err %.5f codes, |f| err %.6f", worstS, worstBase, worstF);
+					LogF("  max |s1,s2| err %.5f codes (|s| <= 64), rel %.2e (|s| > 64), |base| err %.5f codes, |f| err %.6f", worstS, worstSrel, worstBase, worstF);
 					LogF("  block rel err: N %.2e, e3 %.2e, e1 %.2e, e2 %.2e (floor %.0e codes^2)", worstN, worstE3, worstE1, worstE2, kRelFloor);
 					const std::wstring tag = Wide(head);
-					Assert::IsTrue(worstS <= 0.05, (tag + L": max |s1|,|s2| error within 0.05 code").c_str());
+					Assert::IsTrue(worstS <= 0.05, (tag + L": |s1|,|s2| error within 0.05 code for |s| <= 64").c_str());
+					Assert::IsTrue(worstSrel <= 1.0 / 1024.0, (tag + L": |s1|,|s2| relative error within 2^-10 above 64 codes").c_str());
 					Assert::IsTrue(worstBase <= 0.05, (tag + L": max |base| error within 0.05 code").c_str());
 					Assert::IsTrue(worstF <= 1.0 / 255.0, (tag + L": max |f| error within 1/255").c_str());
 					Assert::IsTrue(worstN <= 1e-3, (tag + L": N relative error within 1e-3").c_str());

@@ -4,7 +4,7 @@
 
 // 70b G2: the GPU kernel of lane product P10 (grain split) for the skeleton's render-thread dispatcher
 // (SkeletonGpuDispatcher). The dispatcher puts the tap bands and the extend pass in front (StepsFor); this kernel's five
-// steps are GrainSplit::Gpu::Splitter::Step(0..4) (rows, columns, grain level, neighbourhood minimum, Wiener share) on the
+// steps are GrainSplit::Gpu::Splitter::Step(0..4) (v3: half, low down, grain level, neighbourhood minimum, Wiener share) on the
 // EXTENDED tap plane: component 0, codeUnit 64 / 65535 (a texel is code * 64 / 65535), B = RegionEvidence::BlockSizeFor(h),
 // scale B / 16 (the law of RegionEvidence.h). The same steps run for the lane form (one per chunk) and the live form (all
 // at once), so lane == live by construction. Two Splitters (lane, live): their private intermediates survive across the
@@ -19,6 +19,7 @@ namespace VpLaneProducts
 	{
 	public:
 		// `requested`: the either/or setting grain_split_storage (default compact since v3, refs/116 D2).
+		// The no-argument form stays Full (tests lay out Full slots); production passes the setting (SkeletonModule).
 		explicit GrainSplitKernel(GrainSplit::Storage requested = GrainSplit::Storage::Full) : m_requested(requested) {}
 
 		VpSkeleton::ProductId Product() const override { return VpSkeleton::kP10GrainSplit; }
