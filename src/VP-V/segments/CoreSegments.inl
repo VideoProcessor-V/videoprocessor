@@ -437,14 +437,16 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
             const DitherNeedSeam::Outcome need = outputFinish.EvaluateDitherNeed(
                 activeSettings.ditherNeed == "auto" && any, pipelineSlots.OriginalPathway());
             SyncFallback(need.fallback);
-            // auto asked for but the sigma-delta is not running by choice: a one-time visible line, not a silent no-op
-            // (a dropped sigma-delta is already the "dither" fallback).
+            // auto asked for but the sigma-delta is not running by choice: the counted visible fallback (Ctrl+I, Config status)
+            // stays engaged while the condition holds, and the reason is logged once on change (a dropped sigma-delta is
+            // already the "dither" fallback).
             if (activeSettings.ditherNeed == "auto" && !any && !pipelineSlots.OriginalPathway())
             {
-                const std::string why = std::string("dither need: inactive (") + (!ditherPrep.found ?
-                    "the sigma-delta dither is not selected (temporal_dither)" : "output.dither is switched off in pipeline_slots_off") + ")";
-                if (outputFinish.DitherNeedStatusChanged(why))
-                    DebugLog::Log("%s", why.c_str());
+                const std::string why = ditherPrep.slotOff ? "output.dither is switched off in pipeline_slots_off" :
+                    "the sigma-delta dither is not selected (temporal_dither)";
+                SyncFallback(FallbackCatalog::DitherNeed(true, why));
+                if (outputFinish.DitherNeedStatusChanged("dither need: inactive (" + why + ")"))
+                    DebugLog::Log("dither need: inactive (%s)", why.c_str());
             }
             else if (outputFinish.DitherNeedStatusChanged(need.status) && !need.status.empty())
             {
