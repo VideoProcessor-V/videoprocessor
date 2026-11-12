@@ -2163,7 +2163,8 @@ namespace SkeletonModuleTestsNs
 		{
 			// Plain-data pins (P11a-0 pins, tightened to what holds): the anchor as a whole is no longer standard-layout nor
 			// trivially destructible (s2.2 put std::string/std::mutex/shared_ptr in it; s2.6 put SourceResolutionMonitor::Monitor,
-			// whose data members have mixed access, in SourceAnalysis): WAIVER requested from the coordinator. Every sub-struct that
+			// whose data members have mixed access, in SourceAnalysis): WAIVER-P11-ANCHOR-PINS (coordinator D3):
+			// whole-anchor is_standard_layout and is_trivially_destructible dropped, sizeof and per-sub-struct pins stay. Every sub-struct that
 			// can still be standard-layout stays pinned as such.
 			static_assert(std::is_standard_layout<Vpv::HostState::Motion>::value, "motion is plain data");
 			static_assert(std::is_standard_layout<Vpv::HostState::Led>::value, "led is plain data");
