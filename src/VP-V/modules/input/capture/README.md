@@ -75,7 +75,12 @@ formatters are Bill's and are used as they are.
 - `EarlyUpload` - `capture_upload: early` (and `auto`: every mode, VRAM-guarded; low-latency path only with `efficiency_fixes` off): each raw frame
   uploaded on the conversion thread by a second D3D11 device into a ring of shared textures,
   with "uploaded" / "released" fences; `Open`, `Close`, `Upload` (conversion thread), `Acquire` /
-  `Used` (render thread), counters, `CapBytes`.
+  `Used` (render thread), counters, `CapBytes`. refs/105 5a (owner O3): an optional second reader on another
+  device of the same adapter (the optical-flow producer's) - `AttachReader` / `DetachReader` / `HasReader`,
+  `AcquireReader` / `UsedReader` with its own "released" fence; a slot is reused only when the payload, the render
+  side and the reader have all released it (`SlotReusable`); a reader that never released (stopped, dead) holds
+  its slot until `DetachReader` (bounded ~100 ms GPU wait, `readerDetachTimeouts`); `noFreeReader` counts the slots
+  it held at a no-free-slot. Not wired to the producer yet (5b).
 - `EarlyUploadHandoff` - the slot hand-off for `EarlyUpload`: the conversion thread publishes the
   payload first, then `RunUpload` (Pending -> Uploading -> Attached / None); the render's `Take`
   returns the slot, waits only while an upload is running, or marks a not-started upload Abandoned
@@ -180,7 +185,7 @@ P5b's; `UploadContext` lacks the frame facts they read), the data members of ite
 / cadence / file-frame items (j-q, P10-5..P10-8).
 
 Tests: `CaptureRouteTableTests` (the recorded route table), `CaptureExtensionTests` (routing per host, a retired
-renderer, lookups during binding churn), plus the existing EarlyUpload*, CaptureUnpackHookTests, DvTunnelUnpackHookTests,
+renderer, lookups during binding churn), plus the existing EarlyUpload* (with `EarlyUploadSecondReaderTests`, refs/105 5a), CaptureUnpackHookTests, DvTunnelUnpackHookTests,
 HookAmendmentTests and the renderer capture harness.
 
 ## Known issues / open items

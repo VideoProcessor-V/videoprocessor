@@ -16,6 +16,64 @@ and the interpolator's LOW_HALF_BODY (`FrameInterpolator.cpp`); recorded as resi
 
 Determinism: integer arithmetic, fixed tap order. Any change of the grid, tap order, rounding or GLSL entry names bumps `kUnitVersion`.
 
+# EngineLumaGpu (the GPU twin of the optical-flow engine luma, `VpUnit::EngineLumaGpu`)
+
+refs/105 phase 5a (owner O2 / O3). `EngineLumaGpu.h` / `.cpp` / `.hlsl`, `kUnitVersion = 1`: a cs_5_0 compute shader
+(compiled at run time; the `.hlsl` is included into the `.cpp` as one raw string) that reads ONE uploaded raw frame (an
+`EarlyUpload` slot opened on the producer's own D3D11 device, `EarlyUpload::AcquireReader`) and writes the 8-bit engine
+view (R8_UNORM, half or quarter) the NVOF engine takes.
+
+- Law: the CPU path's, integer only - the 10-bit code (P010 / P210 luma plane `word >> 6`, v210 Y field, UYVY / HDYC
+  `byte << 2`), the U3 taps and `FinishEngine8` for the half view, the producer's `(a + b + c + d + 2) / 4` quarter step.
+- Formats (O2): limited-range P010 / P210 / v210 / UYVY / HDYC. RGB, decoded / packed DV, the SDR tunnel and full-range
+  YUV stay on the CPU path (the caller counts and shows it).
+- `Kernel`: `Open(device)`, `Run(context, raw, packing, width, height, quarter, out)`, `Close`, `LastError`; per device.
+- Phase 5a ships the kernel and its proof only; the producer switches to it in 5b.
+- Tests: `lane/tests/EngineLumaGpuTwinTests.cpp` (byte identity against `MotionAhead::HalfLuma8` + the quarter step for
+  every twin format, odd half / quarter edges, v210 widths ending mid-group, padded strides, 4K; one case through an
+  `EarlyUpload` slot on a second reader device).
+
+## 5b design note (producer switch; not built yet)
+
+- Seam: the EXISTING S1 AfterPublish (LibplaceboVideoRenderer.cpp, the `RendererExtension::AfterPublish` call after
+  the conversion thread's publish, ~line 30721). 0 new Bill lines (rule 32, hook freeze). Its dispatch condition
+  is the VP-V predicate on the line before (`Vpv::Capture::EarlyUploadDue`); 5b relaxes it INSIDE VP-V (a
+  publish is due when an early hand-off exists OR the motion producer has a second reader attached), so the Bill
+  line keeps its text. Original pathway: the settings overlay forces `capture_upload render` and the motion
+  producer is off, so the predicate is false and nothing is dispatched (as today).
+- Hand-off: the hub fans AfterPublish out in registration order. `input.capture` runs first and uploads the raw
+  frame into its `EarlyUpload` slot (the one upload, O3). The motion module, registered after it, reads that
+  slot's `SlotHandle` from the payload extension, `AcquireReader` on its own device, runs
+  `EngineLumaGpu::Kernel::Run` into its engine texture and calls `UsedReader`. It submits to the producer queue;
+  it never uploads a second time.
+- CPU path stays (visible, never log-only): no slot on this publish (capture_upload render, pool full), a format
+  outside O2 (RGB, DV, SDR tunnel, full range), `AcquireReader` / `Run` failure, or a reader detach that timed out
+  (`readerDetachTimeouts`). The frame then goes to the existing CPU `HalfLuma8` path. The reason is counted per
+  cause and shown: the Ctrl+I motion line ("engine luma: CPU (reason)"), a one-time notice on the first fallback
+  per source, the Config status row and the Ctrl+Alt+D dump. A timed-out detach also stops the twin for that
+  source until the next Open (no retry loop).
+- Ordering safety: a reader that dies keeps its slot (`kReaderPending`) until `DetachReader` on producer Stop or
+  GpuReleased, so a slot is never overwritten while the twin reads it. The cost of a dead reader is one slot of
+  the pool (`noFreeReader`), never torn bytes.
+- Tests: the motion module's AfterPublish on WARP equals the CPU product byte for byte. Fallback counters for each
+  cause. Original pathway dispatches nothing. Hook gating and the hook budget unchanged.
+- Expected cost: about 3-4 h agent time, one incremental Test + renderer build (about 40 min), focused WARP run
+  (under 10 min), one GPU-QUIET hardware chunk. GPU: one compute dispatch per frame instead of the CPU half-luma
+  pass plus its upload; the CPU saving is to be measured with ProducerThroughputBench.
+- 5b CONDITIONS (audit S3-S6; the format rule and the causes are already in the unit: `FormatCause` / `Supports`,
+  `Cause`, `FallbackCounters`, `CauseName`):
+  - S3: every failure is a named `Cause` with the visible CPU fallback: Kernel::Open compile / create
+    (`KernelOpenFailed`), AttachReader (`ReaderAttachFailed`), shared-texture open (`SharedOpenFailed`), `Run`
+    (`RunFailed`) and device removal (`DeviceRemoved`, checked before every Run).
+  - S4: thread. AfterPublish runs on the conversion thread; the kernel runs only on the thread that owns the producer
+    device's immediate context, so the hook marshals (slot handle + frame id) to the producer worker. `UsedReader` is
+    called on every acquired slot, also when `Run` fails.
+  - S5: `DetachReaderLocked` waits up to 100 ms holding `lock` + lifecycle: Detach is shutdown-only (producer Stop /
+    GpuReleased), never per frame. After a timeout the in-flight reader frame is discarded, the twin stops for that
+    source (`DetachTimeout`), and the timeout shows on Ctrl+I and Ctrl+Alt+D, not only as a counter.
+  - S6: the relaxed predicate still requires an extension with `earlyHandoff && rawFrame`; a test proves
+    `capture_upload render` dispatches nothing new.
+
 # SourceStats (shared unit U6, `VpUnit::SourceStats`)
 
 The one law of the P4 source-stats record (doc 62, section 1.2 U6): `SourceStats.h`, `kUnitVersion = 1` (= the record version and
