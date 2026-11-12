@@ -10,7 +10,7 @@ against the v2 law (`GrainSplit::ComputeV2`, A/B baseline only). Grain-keep metr
 (flat, gradient, dark-flat, texture, edges; scales 1 and 2; white and film-like grain; 1 and 3 code RMS): keep, leak, v3 not worse than v2,
 clean/N/e3 closeness, the law identity grain == (1 - f)(Y - base) to 1e-9 (both laws), the 4K lane law (scale 2) keeping grain in texture (>= 0.90) and film-like flat (>= 0.95), and the half-resolution law pieces. Open owner decision D4 rows are logged as 'D4 pending', not asserted.
 
-`tests/GrainSplitV3GpuTests.cpp` (GPU on WARP, refs/116 s5): the v3 five-pass kernel in Full and Compact against `GrainSplit::Compute`
+`tests/GrainSplitV3GpuTests.cpp` (GPU on WARP, refs/116 s5): the unit-4 six-pass kernel in Full and Compact against `GrainSplit::Compute`
 (odd and even planes, B 8 / 9 / 16 / 17 / 32, scale B / 16): |s1|, |s2|, |base| <= 0.05 code, f <= 1/255, N and e3 / e1 / e2 relative <= 1e-3;
 determinism; `Step(0..4)` bit-identical to `Compute`; component 1 of an RG16 texture bit-identical to component 0 of an R16 texture
 (`V3ComponentOneEqualsComponentZero`); and the consumer-level check (`V3P11RegionFlagsAgree`, CPU-only: the approved form of

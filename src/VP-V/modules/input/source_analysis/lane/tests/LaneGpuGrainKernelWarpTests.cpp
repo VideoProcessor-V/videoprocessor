@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // 70b G2: the P10 grain-split kernel (GrainSplitKernel) on the libplacebo WARP device (TargetLutGpuFixture; WARP unless
-// VP_TEST_GPU=hardware): the five kernel steps equal Splitter::Compute byte for byte (Full and Compact), the lane form
+// VP_TEST_GPU=hardware): the six kernel steps equal Splitter::Compute byte for byte (Full and Compact), the lane form
 // through the SkeletonGpuDispatcher equals the live form, the produced Frame passes / fails CheckFit as it must, and the
 // Full pass text is pinned by its FNV-1a fingerprint.
 #include "pch.h"
@@ -125,7 +125,7 @@ namespace VideoProcessorTest
 	TEST_CLASS(LaneGpuGrainKernelWarpTests)
 	{
 	public:
-		// The kernel's five steps record Splitter::Compute's dispatches: every output term is byte-identical, in the Full
+		// The kernel's six steps record Splitter::Compute's dispatches: every output term is byte-identical, in the Full
 		// layout and in the Compact one.
 		BEGIN_TEST_METHOD_ATTRIBUTE(KernelStepLoopEqualsSplitterCompute)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
@@ -202,7 +202,7 @@ namespace VideoProcessorTest
 			pl_dispatch_destroy(&dispatch);
 		}
 
-		// The lane form (tap bands, extend, five kernel steps, one Dispatch each) equals the live form (DispatchLive), every
+		// The lane form (tap bands, extend, six kernel steps, one Dispatch each) equals the live form (DispatchLive), every
 		// term byte for byte; the Frame the kernel produced fits its plane and is refused when it does not.
 		BEGIN_TEST_METHOD_ATTRIBUTE(LaneFormEqualsLiveFormAndFrameFits)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
