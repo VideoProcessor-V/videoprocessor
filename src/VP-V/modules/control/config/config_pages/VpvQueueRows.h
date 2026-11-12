@@ -380,6 +380,6 @@ namespace Vpv
 				(namedLowLatency ? path->findData(QStringLiteral("off")) : 0);
 			if (index >= 0 && path->currentIndex() != index) path->setCurrentIndex(index);
 		}
-		RefreshQueueRows(fields);
+		RefreshQueueRows(originalPathway, fields);
 	}
 }
