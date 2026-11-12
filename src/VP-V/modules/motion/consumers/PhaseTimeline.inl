@@ -443,6 +443,10 @@ MotionConfig::Settings LibplaceboVideoRenderer::Impl::ResolveMotionEngine(bool c
 {
 	// W2-C5b, rule 32: the on-demand pair the walk staged (CollectQueueAhead) is posted here, at this existing call: after the
 	// queue block (queue mutex not held) and before RenderLocked's estimate claims it (OnDemandIssue.h). No stage: zero work.
+	// CR-M1 (c8 gate MUST 3): HostsOnDemand detects vectorEngine.NoteOnDemandWalkFrame, dejudderSourceHz and interpolating on the host; if a refactor drops or
+	// renames one, on-demand would become a silent no-op. Fail the build instead.
+	static_assert(MotionAhead::detail::HostsOnDemand<std::remove_pointer_t<decltype(this)>>::value,
+		"Impl must keep vectorEngine.NoteOnDemandWalkFrame, dejudderSourceHz and interpolating, or on-demand silently does nothing");
 	MotionAhead::PostOnDemandIfHosted(this);
 	// ... and optical_flow_on_demand for this frame (cold start and Apply alike), before RenderLocked's PlanProducer reads it.
 	vectorEngine.NoteHostOnDemandSetting(VpMotion::OnDemand::SettingOf(activeSettings.opticalFlowOnDemand));
