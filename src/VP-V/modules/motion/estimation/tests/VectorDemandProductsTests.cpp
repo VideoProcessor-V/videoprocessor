@@ -105,6 +105,8 @@ namespace VectorDemandProductsTestsNs
 			in.wants[int(Consumer::MotionIntent)] = true;
 			in.wants[int(Consumer::GrainMap)] = true;
 			in.wants[int(Consumer::DejudderExtras)] = true;   // synthesis: never declared
+			// WAIVER-C1-09 (W2-C1 B9): input precondition only - the de-judder runs (a starter), so the reuse-only consumers are served.
+			in.starterEngaged = true;
 			const Decision d = Decide(in);
 			std::vector<ConsumerDecl> cs;
 			DeclareConsumers(d, cs);
