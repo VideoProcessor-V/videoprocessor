@@ -1552,6 +1552,7 @@
         "src/VP-V/modules/control/diagnostics/DiagnosticsReportRun.h",
         "src/VP-V/modules/control/diagnostics/StatusExtension.h",
         "src/VP-V/modules/control/diagnostics/StatusExtension.cpp",
+        "src/VP-V/modules/control/diagnostics/StatusMethods.inl",
         "src/VP-V/modules/control/diagnostics/VpEventLine.h",
         "src/VP-V/modules/control/diagnostics/FrameStamp.h",
         "src/VP-V/modules/control/diagnostics/FrameStampShader.h",
