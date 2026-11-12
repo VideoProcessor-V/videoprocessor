@@ -130,6 +130,7 @@ No `VP_*` variable changes the module's behaviour.
   RAM and are not in the VRAM ledger; the ledger prints MiB. A stepped user that the plan sheds but that still holds its texture is planned as transient
   until its module frees it (`VramPendingFreeOf`). `skeleton_vram_known` names the users that hold video memory and declare none yet. Ctrl+Alt+D shows
   how many cost rows were posted and dropped ("Skeleton cost rows").
+* **GPU product cost (measured, status line):** `SkeletonGpuDispatcher::CostOf(id)` (`gpu/GpuProductCost.h`) adds every timed pass of every frame of P10 / P11 / P12 (pl_timer, device ns) and counts the frames the lane job or the live fill completed. Ctrl+I / Ctrl+Alt+D shows `GPU cost P10 grain split: mean X ms/frame over N frames, worst pass Y ms, worst frame Z ms`. It is read-only (nothing branches on it). `MeasuredMs()` and the lane job's `costUs` keep the last single pass only, so for the five-pass P10 they read about one fifth of its frame cost; the planner still uses them unchanged (a behaviour change is a separate decision). Cost of the timer: one extra integer add per timer result, no extra GPU work.
 * **Capped record history (visible):** the depths are bounded so every ring fits 255 slots (223 frames). When the rate asks for more,
   `skeleton_history: quality pattern history capped at 223 frames (source rate above 111.5 fps)` appears in Fallbacks; when the queue asks for
   more, `... (the configured queue asks for N frames)`. A graph whose slot counts still overflow is rejected (analysis lane unavailable, with

@@ -22,6 +22,7 @@
     "src/VP-V/tests/ReserveRowsTests.cpp",
     "src/VP-V/tests/GpuAllocatorTests.cpp",
     "src/VP-V/tests/PrivateTextureScanTests.cpp",
+    "src/VP-V/modules/control/skeleton/gpu/GpuProductCost.h",
     "src/VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h",
     "src/VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
     "src/VP-V/modules/control/skeleton/README.md",

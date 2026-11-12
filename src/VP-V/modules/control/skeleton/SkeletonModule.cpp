@@ -1784,6 +1784,19 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 						if (g.id < VpSkeleton::kUserProductBase)
 							full.push_back(std::string("VRAM ") + VpSkeleton::Token(g.tier) + " " + g.name + ": " + VpSkeleton::FormatMB(g.bytes) + " level " +
 								std::to_string(g.level) + (g.shed ? " (off)" : g.reduced ? " (reduced)" : ""));
+				if (gd != nullptr)
+				{
+					// The measured device cost of the GPU products (every pass of a frame; P10 is five passes), written by the dispatcher
+					// as the lane job runs; read-only, no behaviour depends on it.
+					const VpSkeleton::ProductId costIds[] = { VpSkeleton::kP10GrainSplit, VpSkeleton::kP11RegionBlockStats, VpSkeleton::kP12LightLevel };
+					const char* costNames[] = { "P10 grain split", "P11 region block stats", "P12 light level" };
+					for (size_t i = 0; i < 3; ++i)
+					{
+						const std::string costLine = FormatCostLine(costNames[i], gd->CostOf(costIds[i]));
+						if (!costLine.empty())
+							full.push_back(costLine);
+					}
+				}
 				line = std::string("analysis lane ") + mode + " " + Dimensions(b->dims) + ", " + std::to_string(st.frames) +
 					" frames, ahead " + std::to_string(lane.TotalAhead()) + " in-render " + std::to_string(lane.TotalInRender()) +
 					" declined " + std::to_string(lane.TotalDeclined());
