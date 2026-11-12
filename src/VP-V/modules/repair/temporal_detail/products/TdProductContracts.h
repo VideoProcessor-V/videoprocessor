@@ -123,9 +123,10 @@ namespace TdProducts
 			  "temporal detail runs the same pure function", "quality_pattern.causal when the effective lead < 2 (visible \"frame pattern: provisional\")",
 			  "CPU POD ~64 B per unique source frame, history = kQualityPatternHistorySeconds of the measured source rate (system RAM); NOT part of P14's held state",
 			  { { kCodingEvidence, 0, 0 }, { kCodingEvidence, 0, 1 }, { kCodingEvidence, 0, 2 }, { kQualityPattern, 1, 0 },
+			    { kP5MonitorTiles, 0, 0 }, { kSourceIdentity, 1, 0 },   // P15-DECL: FrameQuality view via the P5 tiles, P14 via SourceQualityView (held, lag 1)
 			    { kSourceGeometry, 1, 0 } }, {} },   // P14g source_geometry (wave S2, provisional): held state, lag 1
 			{ kQualityPatternCausal, "quality_pattern.causal", "input/source_analysis/identity/quality_pattern", kQualityPatternUnit, "same unit, causal (no lead)",
-			  "same", "n/a (it is the reduced form)", "same POD as quality_pattern", { { kCodingEvidence, 0, 0 }, { kQualityPatternCausal, 1, 0 } }, {} },
+			  "same", "n/a (it is the reduced form)", "same POD as quality_pattern", { { kCodingEvidence, 0, 0 }, { kQualityPatternCausal, 1, 0 }, { kP5MonitorTiles, 0, 0 }, { kSourceIdentity, 1, 0 } }, {} },
 			{ kRefinedField, "refined_field", "motion/estimation/refine", kFieldRefineUnit, "field refine pass right after P3; never starts the matcher",
 			  "temporal detail runs the same unit", "the unrefined P3 (visible \"motion: refinement late\")",
 			  "per 8x8 block 8 B (vector RG16F, confidence u8, flags u8); history 1. NO per-pixel offsets are stored (derived on the fly)",

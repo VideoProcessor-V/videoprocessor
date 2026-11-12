@@ -58,6 +58,9 @@ namespace Tests
 		}
 
 		constexpr size_t kDeclaredInputsToday = 4;   // the registry's declared input prefix (the contract table has the full lists)
+		// P15-DECL (WAIVER-P15DECL-01): quality_pattern declares SIX inputs (the four it had + the P5 monitor tiles at lag 0 + P14 source_identity at lag 1,
+		// i.e. the first six of its seven intended reads; source_geometry stays the recorded seventh). Every other product keeps the prefix of 4.
+		inline size_t DeclaredInputsOf(VpSkeleton::ProductId id) { return id == VpSkeleton::kQualityPattern ? 6u : kDeclaredInputsToday; }
 
 		const Consumer kAllConsumers[] = { Consumer::AdaptiveScaler, Consumer::DitherNeed, Consumer::SigmaDelta, Consumer::ChromaStage, Consumer::Deband };
 
@@ -104,11 +107,26 @@ namespace Tests
 				bool lead1 = false, lead2 = false;
 				for (size_t k = 0; k < qp.inputCount; ++k)
 				{
-					Assert::IsTrue(qp.inputs[k].product != kSourceIdentity, L"quality_pattern does not read P14");
 					lead1 = lead1 || qp.inputs[k].lead == 1;
 					lead2 = lead2 || qp.inputs[k].lead == 2;
 				}
 				Assert::IsTrue(lead1 && lead2, L"role at lead 2 from coding_evidence(N+1), (N+2)");
+				// P15-DECL (WAIVER-P15DECL-01, replaces the old "does not read P14"): the frame-role detector reads P14 source_identity (the held
+				// SourceQualityView state) EXACTLY ONCE at lag 1 / lead 0 and the P5 monitor tiles (the FrameQuality view) EXACTLY ONCE at lag 0, on both P15 and P15c.
+				for (VpSkeleton::ProductId pid : { kQualityPattern, kQualityPatternCausal })
+				{
+					int p14 = 0, p5 = 0;
+					const ProductDecl& d = reg.Get(pid);
+					for (size_t k = 0; k < d.inputCount; ++k)
+					{
+						if (d.inputs[k].product == kSourceIdentity) { ++p14; Assert::IsTrue(d.inputs[k].lag == 1 && d.inputs[k].lead == 0); }
+						if (d.inputs[k].product == kP5MonitorTiles) { ++p5; Assert::IsTrue(d.inputs[k].lag == 0 && d.inputs[k].lead == 0); }
+					}
+					Assert::AreEqual(1, p14);
+					Assert::AreEqual(1, p5);
+				}
+				Assert::AreEqual(6, int(qp.inputCount));
+				Assert::AreEqual(4, int(reg.Get(kQualityPatternCausal).inputCount));
 				Assert::AreEqual(int(kRecordHistoryMax), int(qp.history), L"unmeasured rate: the field maximum, never a hard-coded rate");
 				for (size_t k = 0; k < reg.Get(kQualityPatternCausal).inputCount; ++k)
 					Assert::IsTrue(reg.Get(kQualityPatternCausal).inputs[k].lead == 0 && reg.Get(kQualityPatternCausal).inputs[k].product != kQualityPattern);
@@ -162,7 +180,8 @@ namespace Tests
 					// The registry never silently drops an input: it declares the first kDeclaredInputsToday of the intended list, in order.
 					// W1-SKG raised the framework limit to kMaxInputs = 16, but the declarations have NOT caught up yet (open item of the
 					// hand-back: the lead / short-queue edges of the longer lists need their own decisions); the first four are declared.
-					const size_t want = c.intended.size() < kDeclaredInputsToday ? c.intended.size() : kDeclaredInputsToday;
+					const size_t prefix = DeclaredInputsOf(c.id);
+					const size_t want = c.intended.size() < prefix ? c.intended.size() : prefix;
 					Assert::AreEqual(want, size_t(d.inputCount), (std::wstring(L"declared inputs of ") + std::wstring(c.token, c.token + std::strlen(c.token))).c_str());
 					for (size_t k = 0; k < want; ++k)
 					{
