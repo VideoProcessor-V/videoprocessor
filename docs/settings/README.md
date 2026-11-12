@@ -57,3 +57,13 @@ compares them with the README rows.
 - Tests: `python -I tools/test_check_master_settings.py` (hermetic fixture trees). The repository's own gate is the
   train command `python -I tools/check_master_settings.py --strict --base-ref <merge-base>`; the same check as a
   unit test runs with `VP_MS_REAL=1`.
+
+## One placement table (P8-3, 2026-11-11)
+
+`VpvOrganisation.h` `Organisation()` is the only Config placement table. `python -I tools/check_config_placement.py`
+holds the module README tables' `Config placement` column to it: the canonical text is
+`VP-V > <Unit> > <Main|Advanced> > <card title>` (a second place may follow after `;`); a key sits on one card only; a
+Motion card's key has one owner row, in a motion module (intent rows: `motion.consumers`). Motion is enforced (errors);
+other units are advisory until `--all`. `--write` rewrites the placement cells of the enforced units; `--list` prints the
+table. Tests: `python -I tools/test_check_config_placement.py` and the Config test `testPlacementTable`
+(`VpvConfigTests.cpp`). No default or key changes.

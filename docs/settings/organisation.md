@@ -105,6 +105,10 @@ home on VP-V), so it is not shown.
 - The LED fix switches stay in their cards on the Dynamic Drive page (greyed by their master in the
   Advanced LED card) rather than moving to the Proposed retirement tab, so their context stays.
 
+One table (P8-3): the module README `Config placement` cells for the Motion unit are derived from this table and checked by
+`tools/check_config_placement.py` (see `docs/settings/README.md`). The retirement tab's `dejudderExperiments` section stays
+where it is (moving it would change the page, not just the docs).
+
 Source: `src/VP-V/modules/control/config/config_pages/VpvOrganisation.h` (the table: cards, masters, locks, LED groups),
 `src/VP-V/modules/control/config/config_pages/VpvSection.cpp` (cards, moves, locks, the raw group, the Dynamic Drive regrouping,
 the fit), one lookup change in `ConfigEditorWindow.cpp` (commented).
