@@ -341,24 +341,13 @@ namespace VpMotion
 		if (backward) ++vectorBackwardPairs;
 		++vectorPairs;
 		NoteVectorsDelivered(backward, backward ? "engine" : "engine ahead");
-		const VectorDemand::GlobalSample g = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
-			static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1]), halvings),
-			flow->global[0][2], flow->global[0][3], facts.pictureHeight);
+		// W1-C4: the pair's ONE sample, read by the record and by the one feed (MotionRecordPublish.h).
+		const MotionRecord::PairSample sample = MotionRecord::SampleOf(from, to, flow->global[0], halvings, facts.pictureHeight);
 		if (recordStore)
 			MotionRecord::Publish(recordStore, to, MotionRecord::SummaryOf(
-				motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()), from, to,
-				flow->global[0], halvings));   // W1-C2a A1 / S2
-		if (g.usable && vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan))
-			host.NoteSourceMonitorMotion(g.sourcePixels, to);
-		if (vectorDemand.Serves(VectorDemand::Consumer::MotionIntent) && host.IntentActive())
-		{
-			IntentInterpreter::VectorSample vectors;
-			vectors.from = from;
-			vectors.to = to;
-			vectors.valid = g.intentValid;
-			vectors.heightsPerFrame = g.heightsPerFrame;
-			host.NoteIntentVectors(vectors);
-		}
+				motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()), sample));   // W1-C2a A1 / S2
+		MotionRecord::Feed(sample, vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan),
+			vectorDemand.Serves(VectorDemand::Consumer::MotionIntent), host);
 		if (backward && facts.vectorDeliveryRuns)
 			motionSegment.Publish(VpMotion::Direction::Backward, from, to, MotionShadowField{ from, to },
 				VpMotion::Source::EngineAhead, motionValidity.Epoch(), 0, false);
@@ -587,6 +576,13 @@ namespace VpMotion
 
 	void VectorEngine::NoteEngineGlobal(uint64_t from, uint64_t to, const float* global, int searchHalvings)
 	{
+		// A caller without the pair's sample: sampled here (usable does not depend on the picture height).
+		NoteEngineGlobal(from, to, global, searchHalvings, global && from != 0 && to > from &&
+			MotionRecord::SampleOf(from, to, global, searchHalvings, 0).global.usable);
+	}
+
+	void VectorEngine::NoteEngineGlobal(uint64_t from, uint64_t to, const float* global, int searchHalvings, bool usable)
+	{
 		if (from == 0 || to <= from)
 			return;
 		GlobalRecord& r = global_[to % kGlobalRing];
@@ -597,9 +593,8 @@ namespace VpMotion
 			return;
 		const double cell = DejudderPolicy::EngineCellSourcePixels(searchHalvings);
 		r.epoch = motionValidity.Epoch();
-		// Usable as the statistics consumers use it (VectorDemand::SampleGlobal: ambiguity z < 0.9).
-		r.valid = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(static_cast<double>(global[0]),
-			static_cast<double>(global[1]), searchHalvings), global[2], global[3], 0).usable;
+		// Usable as the statistics consumers use it (W1-C4: the pair's one sample, MotionRecord::SampleOf: ambiguity z < 0.9).
+		r.valid = usable;
 		r.x = cell * static_cast<double>(global[0]);
 		r.y = cell * static_cast<double>(global[1]);
 	}

@@ -303,30 +303,17 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		// per halving of the search input (4K 16, 8K 32), not 8 at every size.
 		const int searchHalvings = dejudder->SearchHalvings();
 		vectorEngine.NoteGlobalPair(flow != nullptr);   // VPV-HOOK
-		vectorEngine.NoteEngineGlobal(aSequence, bSequence, flow ? flow->global[0] : nullptr, searchHalvings);   // K4: IVectorEngine::EngineGlobal (CPU record only)
-		if (flow)
-		{
-			const VectorDemand::GlobalSample sample = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
-				static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1]), searchHalvings),
-				flow->global[0][2], flow->global[0][3], 0);
-			if (sample.usable)
-				sourceMonitor.SetMotion(sample.sourcePixels, bSequence);
-		}
-		// Motion intent (2026-10-17): the same whole-frame motion for this valid pair (the
-		// vectors-valid state accepted it above), in picture heights per frame; read-only.
-		if (flow && intentInterpreter->Active())
+		// W1-C4: the pair's ONE sample (MotionRecord::EstimatePair, audit MUST 1) is read by the engine's CPU record (K4:
+		// IVectorEngine::EngineGlobal) and feeds the source monitor's fast-pan motion and the motion intent (the same whole-frame
+		// motion for this valid pair, in picture heights per frame; read-only) through the one feed (MotionRecord::Feed). This path
+		// never runs on a frame ServeStatistics fed (that requires !vectorDemand.estimate and no legacy estimate consumer); its gates
+		// are the demand's Serves while vector_demand is on (MotionRecord::EstimateGate, audit MUST 2, WAIVER-C4-01).
 		{
 			const int pictureHeight = dejudderPicture.available && dejudderPicture.rasterHeight == height &&
 				dejudderPicture.bottom > dejudderPicture.top ? dejudderPicture.bottom - dejudderPicture.top : height;
-			IntentInterpreter::VectorSample vectors;
-			vectors.from = aSequence;
-			vectors.to = bSequence;
-			const VectorDemand::GlobalSample sample = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
-				static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1]), searchHalvings),
-				flow->global[0][2], flow->global[0][3], pictureHeight);
-			vectors.valid = sample.intentValid;
-			vectors.heightsPerFrame = sample.heightsPerFrame;
-			intentInterpreter->NoteVectors(vectors);
+			auto statisticsHost = VpMotion::MakeVectorEngineHost(*this);
+			VpMotion::MotionRecord::EstimatePair(vectorEngine, vectorDemand, aSequence, bSequence, flow ? flow->global[0] : nullptr,
+				searchHalvings, pictureHeight, statisticsHost);
 		}
 		if (flow)
 		{

@@ -278,6 +278,8 @@ namespace VpMotion
 		// The optical-flow engine's whole-frame motion of the pair the matcher took ahead (flow->global[0], D1 format:
 		// 1/8-size texels, z ambiguity, w written); null = no producer pair. CPU record for EngineGlobal only.
 		void NoteEngineGlobal(uint64_t from, uint64_t to, const float* global, int searchHalvings);
+		// W1-C4 (audit MUST 1): the same record with `usable` from the pair's one sample (MotionRecord::EstimatePair; no second sample).
+		void NoteEngineGlobal(uint64_t from, uint64_t to, const float* global, int searchHalvings, bool usable);
 
 		// ---- IVectorEngine (vpv.vector_engine.v1), from today's state; render thread -----------------------------
 		// The verified field = the matcher's live block field (rgba32f: vx, vy in source px, trust, match error; one
