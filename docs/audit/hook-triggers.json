@@ -1,0 +1,21 @@
+{
+ "_note": "Trigger ids for transitional hook approvals (docs/audit/hook-approvals.json `expiry`) and temporary ceilings (docs/audit/hook-budget.json `temporary`); tools/check_hook_gating.py. To mark a landing: put the trailer `Hook-Trigger: <id>` on the commit that lands the item (the checker reads it from the ancestors of the checked revision), AND set this row's `landed` to that commit's sha (the fallback for --root exports without history). Once a trigger has landed, every approval naming it fails while its text is still in its file, and a temporary ceiling reverts when all its `until` triggers have landed. An id not listed here fails as UNKNOWN TRIGGER. Rows: refs/107-host-seams-plan.md s4 :192; owner decision via coordinator 2026-11-11, registered as D:/codex/vp-handover/refs/102b-deferred-register.md rows HOOK-EXPIRY P4-e, HOOK-EXPIRY P4-f, HOOK-EXPIRY P4-g and HOOK-EXPIRY P6-move / P5c-extras (:251-254). The trailer key and its values match in any case; a trailer value not listed here fails as UNKNOWN LANDED TRIGGER, and unreadable git history fails as TRIGGER SOURCE FAILED (use --no-git for a history-less export: the summary then says `trigger source: json only`). re-graft = the post-M2 re-graft (refs/110-regraft-plan.md); HA-CFG09-BillPresets (coordinator 2026-11-11).",
+ "P4-e": {
+  "landed": null
+ },
+ "P4-f": {
+  "landed": null
+ },
+ "P4-g": {
+  "landed": null
+ },
+ "P6-move": {
+  "landed": null
+ },
+ "P5c-extras": {
+  "landed": null
+ },
+ "re-graft": {
+  "landed": null
+ }
+}

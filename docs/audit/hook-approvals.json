@@ -40,6 +40,148 @@
    "when": "2026-11-11",
    "expiry": null,
    "note": "Phase 3 present-side seams, refs/108; the R14 helper RendererExtension::ResolveTime (RendererExtension.h:546) on the statistics path"
+  },
+  {
+   "id": "HA-P5c-5039-EntranceFieldOf",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "r.vectorEstimate.LiveFrom(sequence);",
+   "seam": "S3",
+   "approver": "owner via coordinator",
+   "when": "2026-11-11",
+   "expiry": "P4-g",
+   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :5039-5041 EntranceHost FieldOf, R2 LiveFrom"
+  },
+  {
+   "id": "HA-P5c-5104-EntranceSnapshotUsable",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "vectorEstimate.Snapshot().Usable();",
+   "seam": "S3",
+   "approver": "owner via coordinator",
+   "when": "2026-11-11",
+   "expiry": "P4-g",
+   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :5104 EntranceOnceSnapshotFor, R4 Snapshot().Usable()"
+  },
+  {
+   "id": "HA-P5c-5191-DejudderLiveFieldFor",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "bool DejudderLiveFieldFor(uint64_t sequence) const { return vectorEstimate.LiveValidFor(",
+   "seam": "S3",
+   "approver": "owner via coordinator",
+   "when": "2026-11-11",
+   "expiry": "P4-g",
+   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :5191-5192 DejudderLiveFieldFor, R1 LiveValidFor (Impl member after the de-judder state block :5146-5190, not in P6's Presenter cluster; callers PhaseTimeline.inl:73-79 and sigma-delta LVR:5841)"
+  },
+  {
+   "id": "HA-P5c-5852-SigmaDeltaLive",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "dejudderNextVectorField->Run(live.field, live.frameTrust, vectorEstimate.MinTrustedShare(),",
+   "seam": "S3",
+   "approver": "owner via coordinator",
+   "when": "2026-11-11",
+   "expiry": "P4-f",
+   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :5852-5854 sigma-delta next-vector field, R0 Live()"
+  },
+  {
+   "id": "HA-P5c-15574-ExtrasLive",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "const VpMotion::P3FieldSet liveSet = vectorEstimate.Live();",
+   "seam": "S3",
+   "approver": "owner via coordinator",
+   "when": "2026-11-11",
+   "expiry": [
+    "P5c-extras",
+    "P6-move"
+   ],
+   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :15574-15578 extras rendered warp, R0 Live()"
+  },
+  {
+   "id": "HA-P5c-15759-ExtrasSnapshot",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "const auto snapSet = vectorEstimate.Snapshot();",
+   "seam": "S3",
+   "approver": "owner via coordinator",
+   "when": "2026-11-11",
+   "expiry": [
+    "P5c-extras",
+    "P6-move"
+   ],
+   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :15759-15765 extras snapshot warp, R4 Snapshot(); the same text as :16121-16127, so the checker resolves both sites to this id (match is file + text)"
+  },
+  {
+   "id": "HA-P5c-15784-ExtrasOcclusion",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "motion.occlusionB = vectorEstimate.Occlusion(slot);",
+   "seam": "S3",
+   "approver": "owner via coordinator",
+   "when": "2026-11-11",
+   "expiry": [
+    "P5c-extras",
+    "P6-move"
+   ],
+   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :15784 extras interpolator occlusion mask, Occlusion(slot)"
+  },
+  {
+   "id": "HA-P5c-16121-ExtrasSnapshot",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "const auto snapSet = vectorEstimate.Snapshot();",
+   "seam": "S3",
+   "approver": "owner via coordinator",
+   "when": "2026-11-11",
+   "expiry": [
+    "P5c-extras",
+    "P6-move"
+   ],
+   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :16121-16127 extras snapshot warp (second present path), R4 Snapshot(); text identical to :15759, matched by HA-P5c-15759-ExtrasSnapshot; same text as HA-P5c-15759 (LVR ~16121 and ~15759 are identical lines); the checker matches both sites through 15759; same expiry"
+  },
+  {
+   "id": "HA-P5c-23372-Deband",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "vectorEstimate.LiveFieldInto(pipelineSlots.OriginalPathway(),",
+   "seam": "S3",
+   "approver": "owner via coordinator",
+   "when": "2026-11-11",
+   "expiry": "P4-e",
+   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :23372-23373 deband params, R1 via VPV-GATED LiveFieldInto"
+  },
+  {
+   "id": "HA-P5c-23416-DetailRestore",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "pl_tex field = vectorEstimate.LiveFieldOnVp(pipelineSlots.OriginalPathway(),",
+   "seam": "S3",
+   "approver": "owner via coordinator",
+   "when": "2026-11-11",
+   "expiry": "P4-e",
+   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :23416-23417 DetailPulse / TextureRestore params, R1 via VPV-GATED LiveFieldOnVp (W1-G)"
+  },
+  {
+   "id": "HA-P5c-24166-Adaptive",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "m.live = live.valid && !VpPhaseDrawn(renderImage);",
+   "seam": "S3",
+   "approver": "owner via coordinator",
+   "when": "2026-11-11",
+   "expiry": "P4-f",
+   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :24166-24168 adaptive downscale motion, R1 LiveFor"
+  },
+  {
+   "id": "HA-P5c-24303-OcclusionSetFrame",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "occlusionMaskHook.SetFrame(install ? vectorEstimate.OcclusionOnVp(",
+   "seam": "S3",
+   "approver": "owner via coordinator",
+   "when": "2026-11-11",
+   "expiry": "P4-f",
+   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :24303 occlusion mask hook SetFrame, VPV-GATED OcclusionOnVp (listed before :24261: its site text contains the :24261 fragment)"
+  },
+  {
+   "id": "HA-P5c-24261-OcclusionInstall",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "vectorEstimate.OcclusionOnVp(pipelineSlots.OriginalPathway(), maskSlot);",
+   "seam": "S3",
+   "approver": "owner via coordinator",
+   "when": "2026-11-11",
+   "expiry": "P4-f",
+   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :24261 occlusion mask install, VPV-GATED OcclusionOnVp"
   }
  ]
 }

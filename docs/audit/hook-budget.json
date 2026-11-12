@@ -21,5 +21,25 @@
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 143,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": 15,
   "src/VideoProcessor-VPRenderer/LibplaceboPluginExports.cpp": 2
+ },
+ "temporary": {
+  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": {
+   "limit": 32,
+   "reverts_to": 31,
+   "until": [
+    "re-graft"
+   ],
+   "note": "HA-CFG09-BillPresets: +1 Bill-preset accessor (HELD-CFG-09, owner 19:21 allowance), back to 31 at the re-graft"
+  },
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": {
+   "limit": 156,
+   "reverts_to": 143,
+   "until": [
+    "P4-e",
+    "P4-f",
+    "P4-g"
+   ],
+   "note": "owner 2026-11-11 (via Lead 4): +13 P5c transitional view reads (HA-P5c-*), refs/107-host-seams-plan.md:192 / s5.2 rule 4"
+  }
  }
 }
