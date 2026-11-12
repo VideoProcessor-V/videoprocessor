@@ -525,6 +525,18 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Lines), "skeleton=analysis lane on: waiting"));
 		}
 
+		// P13-DECL: the reserve rows come from the planning size, so a status refresh with no bundle and no lane still prints them.
+		TEST_METHOD(TheReserveLinesAreShownWithoutABundleOrALane)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("shadow");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			Assert::IsNull(rig.sk.LaneOf(rig.Host()), L"no lane");
+			const std::string text = rig.Command();
+			Assert::IsTrue(text.find("Skeleton reserve, full-budget tier (reserved, not allocated") != std::string::npos);
+			Assert::IsTrue(text.find("Skeleton reserve, reduced-budget tier (reserved, not allocated") != std::string::npos);
+		}
+
 		TEST_METHOD(WithoutSourceFramesTheLaneSaysSo)
 		{
 			Rig rig(Lane("on"));

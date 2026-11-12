@@ -1808,9 +1808,9 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 					", lane lead " + term((fq.wired & QueueShape::kLaneLead) != 0, fq.laneLead, uq.laneLead) + ", look-ahead walk " +
 					term((fq.wired & QueueShape::kLookAhead) != 0, fq.lookAheadWalk, uq.lookAheadWalk) + "; queued ahead of output " +
 					std::to_string(unsigned(uq.renderAhead) + unsigned(uq.laneLead)) + " frame(s); " + std::to_string(st.starveEvents) + " lead fall(s)");
-					// P13-DECL: the VRAM reserve declared for the source ring and the temporal-detail store, per budget tier (shown, none taken).
-					for (const std::string& rl : VpSkeleton::ReserveStatusLines(b ? b->dims : VpSkeleton::Dims()))
-						full.push_back(rl);
+				// P13-DECL: the VRAM reserve declared for the source ring and the temporal-detail store, per budget tier (shown, none taken).
+				for (const std::string& rl : VpSkeleton::ReserveStatusLines(b ? b->dims : VpSkeleton::Dims()))
+					full.push_back(rl);
 				char regLine[512] = {};   // the fixed text alone is 237 characters: 240 cut off the " (none: shedding off)" suffix
 				std::snprintf(regLine, sizeof(regLine), "Skeleton regulator input: derived from render time (observe only: the Begin..AfterRender span includes waits), %llu frame(s) observed (%llu skipped), last slack %.2f ms, span %.2f ms, %llu over the period; %llu measured frame(s) fed to the regulator%s",
 					static_cast<unsigned long long>(st.timing.frames), static_cast<unsigned long long>(st.timing.skipped), st.timing.lastSlackMs,
