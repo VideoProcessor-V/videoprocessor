@@ -232,11 +232,11 @@ namespace VpvRenderer
 		// detail_pulse_stabilise / texture_restore (docs/VP-detail-restore.md, 2026-10-17):
 		// run after the VP debander on the plane libplacebo scales from, before every scaling
 		// step; both read the source-resolution monitor's original frame never. detail_pulse_stabilise
-		// on (default) scales each frame's own detail towards its best-coded recent neighbour
+		// on (explicit choice only; default off) scales each frame's own detail towards its best-coded recent neighbour
 		// (cap detail_pulse_cap); texture_restore statistical (off by default, experimental)
 		// repairs grain and in-focus texture towards the reference (cap texture_restore_cap).
 		// Off = the stage is not called at all.
-		bool detailPulseStabilise = true;
+		bool detailPulseStabilise = false;   // default off (owner 2026-11-11 19:39, doc 91 :106): TD precursor
 		double detailPulseCap = DetailPulse::kDefaultCap;
 		// detail_pulse_fast (2026-10-18, default on): the same pulse in fewer GPU passes' work
 		// (docs/agent-reports/detail-pulse-perf.md); off = the original passes, for A/B.

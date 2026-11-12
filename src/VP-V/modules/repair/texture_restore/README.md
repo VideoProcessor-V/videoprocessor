@@ -58,10 +58,10 @@ Render thread only. There are no locks in either module. Detail pulse's pass tim
 
 From the renderer profile sections that apply (`[vprenderer.Default]`, `[vprenderer.<name>]`, `[vprenderer.input.<name>]`; `ApplyDisplayRuleOverrides`), all validated in RendererProfileConfig.h. An invalid value is logged and the previous value kept.
 
-- `detail_pulse_stabilise`: `on` (default) / `off`.
+- `detail_pulse_stabilise`: `on` / `off` (default). Off by default in every profile and Repair tier (owner 2026-11-11 19:39: a temporal-detail precursor, on only by explicit choice; docs: D:\codexp-handover\91-design-decisions-by-area.md line 106; log refs\owner-decisions-2026-11-07.md, 11-11 evening).
 - `detail_pulse_cap`: 1.0 .. 1.5, default 1.35.
 - `detail_pulse_fast`: `on` (default) / `off` (the original passes).
-- `texture_restore`: `off` (default) / `statistical`.
+- `texture_restore`: `off` (default) / `statistical`. Off in every profile and Repair tier, including Upper (same decision; on only by explicit choice).
 - `texture_restore_cap`: 1.0 .. 2.0, default 1.5.
 
 The Original pathway sets `detail_pulse_stabilise` and `texture_restore` to `off`. Smooth motion or deinterlacing (motion keys) stops both.
@@ -169,7 +169,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 ## Settings
 
 - Keys: `texture_restore`, `texture_restore_cap`, `detail_pulse_stabilise`, `detail_pulse_cap`, `detail_pulse_fast`.
-- Tiers: Upper only (after the efficiency pass).
+- Tiers: none. Both stages are off in every Repair tier (Classic, Low, Mid, Upper) from 2026-11-11 (owner decision, doc 91 line 106); on only by explicit choice of the key.
 - VP-V page, Repair tab: tiers Classic / Low / Mid / Upper; tier keys `deband_vp`, `detail_pulse_stabilise`, `texture_restore`.
 - Listed under the tier: `detail_pulse_fast`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#4-repair](../../../../../docs/settings/VP-settings-reference.md#4-repair).

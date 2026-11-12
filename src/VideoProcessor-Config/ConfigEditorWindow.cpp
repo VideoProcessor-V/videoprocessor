@@ -10227,10 +10227,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             // default (named in its tip); the caps are greyed while their stage is off.
             auto* detailPulse = addChoice(QStringLiteral("Detail pulse stabilise"), QStringLiteral("detail_pulse_stabilise"),
                 { QStringLiteral("on"), QStringLiteral("off") });
-            detailPulse->setItemText(detailPulse->findData(QStringLiteral("on")), QStringLiteral("On (default)"));
-            detailPulse->setItemText(detailPulse->findData(QStringLiteral("off")), QStringLiteral("Off"));
+            detailPulse->setItemText(detailPulse->findData(QStringLiteral("on")), QStringLiteral("On"));
+            detailPulse->setItemText(detailPulse->findData(QStringLiteral("off")), QStringLiteral("Off (default)"));
             detailPulse->setToolTip(QStringLiteral(
-                "On (default): a starved stream codes some frames finely and others coarsely, so the fine detail and "
+                "On (explicit choice; default is off): a starved stream codes some frames finely and others coarsely, so the fine detail and "
                 "the grain \"breathe\" with the group of pictures. This scales each frame's own fine detail up "
                 "towards the level of its best-coded recent neighbour (never beyond the cap below; a picture with "
                 "steady detail is left exactly as it is). Nothing is copied or averaged between frames: every frame "

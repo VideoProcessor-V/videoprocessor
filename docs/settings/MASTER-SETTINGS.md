@@ -531,8 +531,8 @@ From `docs/design/vpv-tiers.json`: the keys each tier sets (blank = tier leaves 
 | Key | Classic | Low | Mid | Upper |
 |---|---|---|---|---|
 | `deband_vp` | off | off | on | on |
-| `detail_pulse_stabilise` | off | on | on | on |
-| `texture_restore` | off | off | off | statistical |
+| `detail_pulse_stabilise` | off | off | off | off |
+| `texture_restore` | off | off | off | off |
 
 ### Scaling
 
