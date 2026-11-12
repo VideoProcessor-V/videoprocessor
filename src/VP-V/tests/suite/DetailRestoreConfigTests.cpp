@@ -14,6 +14,7 @@
 #include <VP-V/tests/support/TextureRestoreModel.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -429,8 +430,17 @@ namespace DetailRestoreConfigTestsNs
 			// restore.
 			const std::string segment = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntranceSegment.cpp");
 			Assert::IsFalse(segment.empty(), L"the entrance segment source");
-			const size_t monitor = text.find("sourceMonitor.Frame(d3d11->gpu, rebaseDispatch, renderImage,");
+			// M2 P4 e-i: the monitor read, the re-base and the stage parameters live in Impl::PlanEntrance
+			// (segments/EntrancePlanner.inl), called ONCE from the renderer right after NotifyEntrance and
+			// before the entrance hook, so the monitor read still precedes entrance.Run.
+			const std::string planner = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntrancePlanner.inl");
+			Assert::IsFalse(planner.empty(), L"the entrance planner source");
+			const size_t monitorRead = planner.find("sourceMonitor.Frame(d3d11->gpu, rebaseDispatch, renderImage,");
+			const size_t planSite = text.find("PlanEntrance(renderImage, target, image, sourceSequence,");
+			const size_t monitor = monitorRead != std::string::npos && planSite != std::string::npos ? planSite : std::string::npos;
 			const size_t hookEntrance = monitor == std::string::npos ? std::string::npos : text.find("entrance.Run(rq, frame);", monitor);
+			const size_t renderOwned = planSite == std::string::npos ? std::string::npos : text.find("NlsHookRecovery::RenderOwned(", planSite);
+			Assert::IsTrue(renderOwned != std::string::npos, L"the planner call comes before the render call");
 			const size_t debandStage = segment.find("void Segment::Deband(StageRun& run, pl_frame& frame)");
 			const size_t debander = debandStage == std::string::npos ? std::string::npos : segment.find("debander.Apply(", debandStage);
 			const size_t detailStage = segment.find("void Segment::Detail(StageRun& run, pl_frame& frame)");
@@ -456,6 +466,91 @@ namespace DetailRestoreConfigTestsNs
 			Assert::AreEqual(7, calls, L"three Apply calls per stage and one MeasureAhead");
 		}
 
+		// M2 P4 e-i (prep 93 s3 SA5): the detail pulse / texture restore parameters are filled ONLY by the entrance planner
+		// (segments/EntrancePlanner.inl). The one other writer is ProcessBAsA, which saves them, overrides the field and the
+		// sequence for a B picture and restores them (allowed by name). Any other write to either parameter block, or a
+		// non-const reference to it, in the renderer or the segments fails here. The planner also names the reserved TdApply slot.
+		TEST_METHOD(DetailRestoreParamsFilledOnlyByThePlanner)
+		{
+			std::vector<std::string> files;
+			files.push_back(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
+			const std::string folder = RepositoryRoot() + "\\src\\VP-V\\segments";
+			WIN32_FIND_DATAA found{};
+			const HANDLE search = FindFirstFileA((folder + "\\*").c_str(), &found);
+			if (search != INVALID_HANDLE_VALUE)
+			{
+				do
+				{
+					const std::string name = found.cFileName;
+					const size_t dot = name.find_last_of('.');
+					const std::string ext = dot == std::string::npos ? std::string() : name.substr(dot);
+					if (ext == ".cpp" || ext == ".h" || ext == ".inl")
+						files.push_back(folder + "\\" + name);
+				} while (FindNextFileA(search, &found) != 0);
+				FindClose(search);
+			}
+			Assert::IsTrue(files.size() > 3, L"the segment sources were found");
+			int plannerWrites = 0;
+			for (const std::string& file : files)
+			{
+				std::string text = ReadText(file);
+				Assert::IsFalse(text.empty(), Wide("readable: " + file).c_str());
+				text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+				const bool isPlanner = file.size() >= 19 && file.compare(file.size() - 19, 19, "EntrancePlanner.inl") == 0;
+				// ProcessBAsA's body (the save / override / restore of the parameters) is allowed by name.
+				size_t allowBegin = std::string::npos, allowEnd = std::string::npos;
+				const size_t processBAsA = text.find("Segment::ProcessBAsA(const pl_frame& rawB");
+				if (processBAsA != std::string::npos)
+				{
+					allowBegin = processBAsA;
+					allowEnd = text.find("\n	}\n", processBAsA);
+					Assert::IsTrue(allowEnd != std::string::npos, L"ProcessBAsA's end");
+				}
+				for (const char* name : { "detailPulseParams", "textureRestoreParams" })
+				{
+					const size_t length = std::strlen(name);
+					for (size_t at = text.find(name); at != std::string::npos; at = text.find(name, at + 1))
+					{
+						if (at > 0 && (std::isalnum(static_cast<unsigned char>(text[at - 1])) != 0 || text[at - 1] == '_'))
+							continue;
+						if (at > 0 && (text[at - 1] == '.' || text[at - 1] == '>') && text.compare(at + length, 4, " = &") == 0)
+							continue;   // b.detailPulseParams = &x binds the pointer, not a write
+						const size_t newline = text.rfind('\n', at);
+						const size_t lineStart = newline == std::string::npos ? 0 : newline + 1;
+						const std::string before = text.substr(lineStart, at - lineStart);
+						if (before.find("//") != std::string::npos)
+							continue;   // in a comment
+						size_t end = at + length;
+						const bool declaration = before.find("Params&") != std::string::npos || before.find("Params*") != std::string::npos;
+						bool writes = false;
+						if (declaration)
+							writes = before.find("Params&") != std::string::npos && before.find("const ") == std::string::npos;   // a non-const reference is a write handle (a pointer member is not)
+						else
+						{
+							while (end < text.size() && (text[end] == '.' || (text[end] == '-' && end + 1 < text.size() && text[end + 1] == '>')))
+							{
+								end += text[end] == '.' ? 1 : 2;
+								while (end < text.size() && (std::isalnum(static_cast<unsigned char>(text[end])) != 0 || text[end] == '_')) ++end;
+							}
+							while (end < text.size() && text[end] == ' ') ++end;
+							writes = end + 1 < text.size() && text[end] == '=' && text[end + 1] != '=';
+						}
+						if (!writes)
+							continue;
+						if (isPlanner) { ++plannerWrites; continue; }
+						const bool inProcessBAsA = allowBegin != std::string::npos && at > allowBegin && at < allowEnd;
+						Assert::IsTrue(inProcessBAsA, Wide(std::string("the stage parameters are filled only by the planner: ") + name + " in " + file).c_str());
+					}
+				}
+			}
+			Assert::IsTrue(plannerWrites >= 4, L"the planner fills both parameter blocks");
+			const std::string planner = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntrancePlanner.inl");
+			Assert::IsTrue(planner.find("TdApply") != std::string::npos && planner.find("td.delta") != std::string::npos,
+				L"the planner names the reserved TdApply position");
+			const std::string core = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\CoreSegments.inl");
+			Assert::IsTrue(core.find("ResetEntrancePlan();") != std::string::npos, L"the Original switch resets the planner outputs");
+		}
+
 		// P5c W1-G: the detail pulse / texture restore read the de-judder's live field under rule R1 (DejudderLiveFieldFor), the
 		// debander's condition. Before, the gate lacked the motion_history_fixes clause: with it on, an estimate ahead had moved the
 		// live outputs to the next pair while this frame still showed, and the stages read that pair's field. With it off the rule is
@@ -478,8 +573,8 @@ namespace DetailRestoreConfigTestsNs
 				Assert::AreEqual(oldGate, R::LiveFor(matcher, sequence, estimated, epoch, false, from), L"fixes off = the old gate");
 			}
 			// The renderer's block reads the view under R1 and no longer carries the old condition.
-			const std::string text = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
-			Assert::IsFalse(text.empty(), L"the renderer source");
+			const std::string text = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntrancePlanner.inl");   // P4 e-i: the block moved into Impl::PlanEntrance
+			Assert::IsFalse(text.empty(), L"the entrance planner source");
 			Assert::IsTrue(text.find("pl_tex field = vectorEstimate.LiveFieldOnVp(pipelineSlots.OriginalPathway(), sourceSequence, activeSettings.motionHistoryFixes);") != std::string::npos,
 				L"the detail-restore field gate is R1");
 			// W-P5C-01: the gated helper the renderer calls is R1 off the Original pathway (LiveFor with the motion_history_fixes clause).

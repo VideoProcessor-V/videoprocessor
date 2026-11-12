@@ -230,15 +230,24 @@ namespace EntranceHookTest
 			const size_t site = text.find("RendererExtension::NotifyEntrance(");
 			Assert::IsTrue(site != std::string::npos, L"the Entrance site");
 			Assert::IsTrue(text.find("RendererExtension::NotifyEntrance(", site + 1) == std::string::npos, L"exactly one site");
-			const size_t stepA = text.find("// Stage 12 step A: the re-base factor for this frame", site);
+			// M2 P4 e-i: the entrance-decision block (Stage 12 step A, the source monitor feed) is Impl::PlanEntrance in
+			// segments/EntrancePlanner.inl; the renderer keeps ONE call to it directly after the Entrance site.
+			const std::string planner = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntrancePlanner.inl");
+			Assert::IsFalse(planner.empty(), L"the entrance planner source");
+			Assert::IsTrue(planner.find("// Stage 12 step A: the re-base factor for this frame") != std::string::npos &&
+				planner.find("sourceMonitor.Frame(") != std::string::npos, L"the planner holds the entrance decisions and the monitor feed");
+			const size_t stepA = text.find("PlanEntrance(renderImage, target, image, sourceSequence,", site);
 			Assert::IsTrue(stepA != std::string::npos && stepA - site < 700, L"right before the entrance-decision block");
-			const size_t monitor = text.find("sourceMonitor.Frame(", site);
+			Assert::IsTrue(text.find("PlanEntrance(renderImage, target, image, sourceSequence,", stepA + 1) == std::string::npos, L"exactly one planner call");
+			Assert::IsTrue(text.find("if (!pipelineSlots.OriginalPathway()) { PlanEntrance(renderImage, target, image, sourceSequence,") == stepA - 40,
+				L"the planner call is guarded off in the Original pathway (owner E3; the body is a pure move)");
+			const size_t monitor = stepA;
 			const size_t hooks = text.find("customHooks.Ensure(hookTemplates)", site);
 			const size_t render = text.find("NlsHookRecovery::RenderOwned(", site);
 			const size_t after = text.find("RendererExtension::NotifyAfterRender(", site);
 			Assert::IsTrue(monitor != std::string::npos && hooks != std::string::npos && render != std::string::npos &&
 				after != std::string::npos, L"the later calls exist");
-			Assert::IsTrue(site < stepA && stepA < monitor && monitor < hooks && hooks < render && render < after,
+			Assert::IsTrue(site < stepA && stepA < hooks && hooks < render && render < after,
 				L"Entrance, then the entrance decisions, the hook list, the render call, AfterRender");
 		}
 

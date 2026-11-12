@@ -144,26 +144,6 @@
    "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :16121-16127 extras snapshot warp (second present path), R4 Snapshot(); text identical to :15759, matched by HA-P5c-15759-ExtrasSnapshot; same text as HA-P5c-15759 (LVR ~16121 and ~15759 are identical lines); the checker matches both sites through 15759; same expiry"
   },
   {
-   "id": "HA-P5c-23372-Deband",
-   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "text_contains": "vectorEstimate.LiveFieldInto(pipelineSlots.OriginalPathway(),",
-   "seam": "S3",
-   "approver": "owner via coordinator",
-   "when": "2026-11-11",
-   "expiry": "P4-e",
-   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :23372-23373 deband params, R1 via VPV-GATED LiveFieldInto"
-  },
-  {
-   "id": "HA-P5c-23416-DetailRestore",
-   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "text_contains": "pl_tex field = vectorEstimate.LiveFieldOnVp(pipelineSlots.OriginalPathway(),",
-   "seam": "S3",
-   "approver": "owner via coordinator",
-   "when": "2026-11-11",
-   "expiry": "P4-e",
-   "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :23416-23417 DetailPulse / TextureRestore params, R1 via VPV-GATED LiveFieldOnVp (W1-G)"
-  },
-  {
    "id": "HA-P5c-24166-Adaptive",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
    "text_contains": "m.live = live.valid && !VpPhaseDrawn(renderImage);",

@@ -14,3 +14,13 @@ is added; default arguments stay on the declaration in `Impl`). Render thread, `
 |---|---|---|
 | `CoreSegments.inl` | `UpdatePipelineSlots`, `OrderFrameSlotHooks` | P4-2 |
 | `EntranceHostMembers.inl` | `DrainEntranceBeforeRender`, `EntranceOnceFieldAhead`, `EntranceOncePhasePicture`, `EntranceOnceExtra`, `RenderCrossfadeMix` | P4-5 |
+| `EntrancePlanner.inl` | `PlanEntrance` (re-base factor, VP deband parameters, detail pulse / texture restore parameters; called once after `NotifyEntrance`) | P4-e..i |
+
+## Entrance stage order and the TD slot
+
+`PlanEntrance` decides the per-frame entrance parameters in a fixed order: re-base, then the repair stack (VP deband, detail pulse
+stabilise, texture restore), then the reserved `TdApply` position. Every temporal-detail (TD) method writes `td.delta` (catalog rows
+`td.delta` / `td.maps`, `core/Products.h` `kTdDelta` / `kTdMaps`); the `TdApply` slot applies it, and the slot never moves. It is a
+declared position only: no TD behaviour exists yet. The detail pulse / texture restore parameter blocks are filled only here
+(`DetailRestoreParamsFilledOnlyByThePlanner` pins it; `ProcessBAsA` saves, overrides and restores them for a B picture).
+

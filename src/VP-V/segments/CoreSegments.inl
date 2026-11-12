@@ -71,6 +71,7 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 		// gated in Original and would otherwise never clear a warm-up in flight (the "Preparing shaders..." status).
 		const VpRebaseWarmup::Controller::Outcome warm = rebaseWarmup.EnterOriginalPathway();
 		if (warm.fallbackChanged) SyncFallback(warm.fallback);
+		ResetEntrancePlan();   // P4 e-i: the planner is not called in Original; its last outputs go back to native
 	}
 	VpFrameAnalysis::Host::SetLimitedDomain(settings.sourceCodingFixes);   // DIV-AN-01 either/or (Original: off = Bill's codes)
 	frameAnalysis.Owner(this).Configure(settings.frameAnalysisStore && !settings.pipelineOriginalPathway,   // WP-23
