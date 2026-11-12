@@ -43,6 +43,12 @@
     <ClCompile Include="..\VP-V\modules\drive\led_measure\tests\LedMeasureHookTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\drive\led_measure\tests\NativeReadbackWarpTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\drive\led_measure\tests\NativeReadbackFenceTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\capture\tests\CaptureUnpackHookTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
@@ -840,6 +846,9 @@
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\MotionValidityResyncTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SourceResolutionFrameBoundTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\SourceResolutionFrameQuietTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncShadowQ0Tests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\queue_timing\tests\PulldownResyncTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\queue_timing\tests\QueueTargetNeverExceedsDesiredTests.cpp" />

@@ -4,8 +4,8 @@
 // Camera link (K1-4, finding on D3D11): libplacebo's D3D11 backend has NO buffer transfers (limits.buf_transfer is false:
 // pl_tex_download into a pl_buf is refused), its pl_tex_download is a blocking Map, and pl_buf_poll always says "ready"
 // (see drive/led_measure/NativeReadback.h). So the non-blocking GPU -> CPU readback on D3D11 is the existing shared
-// LedDrive::NativeTexReadback: a VP-owned texture a shader writes (imageStore), a native copy into a staging texture and an
-// event query; read with Map(DO_NOT_WAIT). This class adds the copy pass: it copies one or two sampled rgba32f textures
+// LedDrive::NativeTexReadback: a VP-owned texture a shader writes (imageStore), a native copy into a staging texture, read
+// with Map(DO_NOT_WAIT) (that map is the readiness probe; no event query). This class adds the copy pass: it copies one or two sampled rgba32f textures
 // (the P3 forward / backward field, or the 1x1 guidance counts) into a slot, stacked vertically (second plane below the first),
 // and reads it back without ever waiting. Not D3D11 -> Create returns false and the caller keeps the pl_buf path.
 // Render thread only.
@@ -44,9 +44,13 @@ namespace CameraLink
 
 		// Dispatches the copy of a (and b when planes == 2) into slot i and queues the native copy. False: dispatch failed.
 		bool Start(int slot, pl_tex a, pl_tex b);
-		bool Ready(int slot) const { return m_native && m_native->Ready(slot); }
-		// dst: w * h * planes * 4 floats. False while the GPU still holds the slot.
-		bool Read(int slot, float* dst) const;
+		// Never blocks. Pending: the GPU still holds the copy. Ready: mapped, Read returns it. Failed: an error
+		// HRESULT (LastError), not "still drawing": release the slot and show the failure.
+		LedDrive::ReadState Poll(int slot) { return m_native ? m_native->Poll(slot) : LedDrive::ReadState::Pending; }
+		bool Ready(int slot) { return Poll(slot) == LedDrive::ReadState::Ready; }
+		HRESULT LastError() const { return m_native ? m_native->LastError() : S_OK; }
+		// dst: w * h * planes * 4 floats. False while the GPU still holds the slot, and on an error.
+		bool Read(int slot, float* dst);
 		void Release();
 
 	private:

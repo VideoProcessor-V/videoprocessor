@@ -16,9 +16,19 @@
 // kTdDelta / kTdMaps): every TD method writes td.delta, this slot applies it, and the slot never moves.
 #pragma once
 
+#include <VP-V/modules/input/source_analysis/FrameQuiet.h>   // fx/dv-frame-quiet
+
 void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame& target, const pl_frame& image, uint64_t sourceSequence,
 	double captureRateHz, double nominalSourceRateHz, const VideoState& state)
 {
+	// fx/dv-frame-quiet (refs/121): VP issues no native D3D11 work inside libplacebo's frame. Arm here; the R12 AfterPresent
+	// seam ends the frame (the monitor's tile pass + copy, the hooks' deferred copies, one flush only if that work ran).
+	FrameQuiet::Deferred& frameQuiet = FrameQuiet::Deferred::ForThisThread();
+	frameQuiet.Arm(d3d11 ? d3d11->gpu : nullptr);
+	{
+		const FallbackCatalog::Decision quietDecision = frameQuiet.TakeDecision();
+		if (!quietDecision.id.empty()) SyncFallback(quietDecision);   // visible: native readback without fences / late copies
+	}
 // Stage 12 step A: the re-base factor for this frame. Geometry above
 // stays in native pixels; the factor applies where libplacebo samples
 // the source (the render call, the de-judder's source-warp extras) and
@@ -54,7 +64,8 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 		}
 		else if (vpv.sourceAnalysis.sourceMonitor.StreamKey() != 0)
 			vpv.sourceAnalysis.sourceMonitor.SetStreamKey(0);
-		vpv.sourceAnalysis.sourceMonitor.Frame(d3d11->gpu, rebaseDispatch, renderImage, sourceSequence, now);
+		frameQuiet.Begin(vpv.sourceAnalysis.sourceMonitor, rebaseDispatch, renderImage, sourceSequence,
+			SourceRateHz(state) > 0.0 ? SourceRateHz(state) : captureRateHz, activeSettings.sourceResolutionFrameBound, now);
 		if (renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && !vpv.sourceAnalysis.sourceMonitorDvLogged)
 		{
 			// 2026-10-17: no longer skipped as a packed signal.
@@ -80,7 +91,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 		// Per axis (owner 2026-10-16): the uniform factor when engaged, else the width
 		// and height factors of a source upscaled in one direction.
 		vpv.sourceAnalysis.sourceMonitor.AutoFactors(luma ? luma->params.w : 0, nativeHeight, activeSettings.sourceResolutionAutoMinConfidence,
-			why, wantedX, wanted, -1.0, sourceSequence);
+			why, wantedX, wanted, frameQuiet.Seconds(), sourceSequence);
 		if (!why.empty())
 		{
 			const SourceResolutionMonitor::Snapshot snap = vpv.sourceAnalysis.sourceMonitor.Read();
@@ -146,7 +157,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 	rebaseFade = 1.0;
 	if (activeSettings.sourceResolution == "auto" && activeSettings.sourceResolutionLatchFixes && !temporal && !rebasePaused)
 	{
-		const SourceResolutionMonitor::Monitor::Transition tr = vpv.sourceAnalysis.sourceMonitor.AutoTransition();
+		const SourceResolutionMonitor::Monitor::Transition tr = vpv.sourceAnalysis.sourceMonitor.AutoTransition(frameQuiet.Seconds());
 		if (tr.Active() && std::fabs(tr.toX - rebaseFactorX) < 1e-9 && std::fabs(tr.toY - rebaseFactor) < 1e-9)
 		{
 			rebaseFade = tr.weight;
@@ -168,7 +179,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 		double fadeUs = 0.0;
 		if (fadeAllowed)
 		{
-			const SourceResolutionMonitor::Monitor::Transition tr = vpv.sourceAnalysis.sourceMonitor.AutoTransition();
+			const SourceResolutionMonitor::Monitor::Transition tr = vpv.sourceAnalysis.sourceMonitor.AutoTransition(frameQuiet.Seconds());
 			if (tr.Active() && std::fabs(tr.toX - rebaseFactorX) < 1e-9 && std::fabs(tr.toY - rebaseFactor) < 1e-9)
 				fadeUs = tr.duration * 1.0e6;   // the length the monitor asks for; its clock is not used
 		}

@@ -116,6 +116,18 @@ namespace SourceResolutionMonitor
 		// copies for the worker. `seconds`: a monotonic clock (frame-bound: the frame's source
 		// seconds; a backward step is clamped and counted).
 		void Frame(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, uint64_t sourceSequence, double seconds);
+		// The same work in two calls, for a host that must keep native D3D11 work out of libplacebo's frame
+		// (fx/dv-frame-quiet). FrameBegin runs BEFORE the frame's render, CPU only (no GPU call): the
+		// frame-bound source clock and release, then what the source is (a format change is a discontinuity).
+		// The decision calls (AutoFactor(s), AutoTransition) follow it, as they followed Frame().
+		// FrameSubmit runs AFTER the frame's submit with the same source and sequence: it collects the finished
+		// copies and issues the tile pass and its copy. A FrameBegin whose FrameSubmit never came (the frame
+		// failed before its end) is replaced by the next FrameBegin and counted (NoteCopySkipped).
+		void FrameBegin(const pl_frame& source, uint64_t sourceSequence, double seconds);
+		bool FrameSubmit(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, uint64_t sourceSequence);
+		// A frame whose tile copy could not be made for a reason outside the monitor (no GPU work was done
+		// for it): counted with the skipped copies (frame-bound: the run is then not reproducible).
+		void NoteCopySkipped() { submitSkipped.fetch_add(1, std::memory_order_relaxed); }
 		// Why a source cannot be measured ("" = it can). Dolby Vision (2026-10-17):
 		// measured on its decoded intensity (I) plane, planes[0] (12-bit IPT-PQ,
 		// the tunnel's luma-like channel), as any YCbCr luma.
@@ -501,6 +513,14 @@ namespace SourceResolutionMonitor
 		double DecisionPeek(double seconds) const;          // AutoTransition
 		bool ReleaseHeldFor(uint64_t sequence);             // true: a reset to apply
 		double BeginBoundFrame(uint64_t sourceSequence, double seconds);   // Frame()'s frame-bound front part
+		// Frame()'s parts (see FrameBegin / FrameSubmit).
+		void PrepareGpu(pl_gpu g);
+		void CollectFinished(double seconds, bool bound);
+		std::string NoteSource(const pl_frame& source, uint64_t sourceSequence, double raw);   // returns NotReadReason
+		void SubmitTiles(pl_dispatch dispatch, const pl_frame& source, uint64_t sourceSequence, double raw, double seconds,
+			bool bound, const std::string& notRead);
+		struct FrameCarry { bool valid = false, bound = false; uint64_t sequence = 0; double raw = 0.0, seconds = 0.0; };
+		FrameCarry carry;   // FrameBegin -> FrameSubmit (render thread)
 		void PushHeld(const Job& j, bool reset);            // with `mutex` held
 		void ResetVisible();                                // with `mutex` held
 		void NoteSubmitted(uint64_t sequence);
@@ -521,6 +541,7 @@ namespace SourceResolutionMonitor
 		std::atomic<uint64_t> epoch{ 0 };
 		std::atomic<const char*> lastRenderCause{ nullptr };
 		std::atomic<uint64_t> analysedThrough{ 0 };
+		std::atomic<uint64_t> releasedThrough{ 0 };   // the last release point (s - D) of ReleaseHeldFor; a result at or before it is late
 		std::atomic<unsigned long long> waitsMissed{ 0 }, heldDropped{ 0 }, heldStale{ 0 }, jobsDropped{ 0 }, clockStepsBack{ 0 }, submitSkipped{ 0 };
 		std::atomic<bool> denseGridApplied{ false };
 		Held held[kHeldCap];            // ring, guarded by `mutex`

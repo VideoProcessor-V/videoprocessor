@@ -157,7 +157,7 @@ namespace VideoProcessorTest
 				{
 					const auto p0 = clock::now();
 					ring.Poll(ready);
-					(void)p0;   // Poll is non-blocking by construction (event query DONOTFLUSH + Map DO_NOT_WAIT); WARP defers its work to Map, so no timing bound is asserted here
+					(void)p0;   // Poll is non-blocking by construction (Map DO_NOT_WAIT, which is also the readiness probe: NativeTexReadback::Poll); WARP defers its work to Map, so no timing bound is asserted here
 					std::this_thread::sleep_for(std::chrono::milliseconds(1));
 				}
 				Assert::AreEqual(static_cast<size_t>(3), ready.size());

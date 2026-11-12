@@ -511,6 +511,22 @@ namespace FallbackCatalog
 			"libplacebo downscaler (SSimDownscaler not in the shader list)" :
 			"plain SSIM (adaptive downscale failed on the GPU)");
 	}
+	// Native GPU readbacks (drive/led_measure/NativeReadback.h, fx/dv-frame-quiet): a device without a D3D11
+	// fence polls the staging copy with a non-waiting map instead (the readiness is less exact), and a copy
+	// issued by a LATER frame's flush than its own (the host's post-frame flush did not run) arrives a frame
+	// late. Both are named; neither is log-only.
+	inline Decision NativeReadback(unsigned liveWithoutFence, unsigned long long copiesIssuedLate)
+	{
+		if (liveWithoutFence == 0 && copiesIssuedLate == 0)
+			return Released("native readback");
+		std::string reason;
+		if (liveWithoutFence > 0)
+			reason = "no D3D11 fence on this device, " + std::to_string(liveWithoutFence) + " readback(s) poll a non-waiting map instead";
+		if (copiesIssuedLate > 0)
+			reason += std::string(reason.empty() ? "" : " and ") + std::to_string(copiesIssuedLate) +
+				" readback copy(ies) were issued a frame late (the post-frame flush did not run)";
+		return Engaged("native readback", reason);
+	}
 	inline Decision EarlyUpload(bool requested, bool open, const std::string& error)
 	{
 		return requested && !open ? Engaged("early upload", "the render upload" +

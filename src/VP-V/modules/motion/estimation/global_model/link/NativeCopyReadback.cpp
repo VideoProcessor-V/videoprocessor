@@ -106,7 +106,7 @@ if (p.x < d.x && p.y < d.y) {
 		return true;
 	}
 
-	bool NativeCopyReadback::Read(int slot, float* dst) const
+	bool NativeCopyReadback::Read(int slot, float* dst)
 	{
 		return Active() && m_native->Read(slot, dst, static_cast<size_t>(m_w) * 16u, m_h * m_planes);
 	}

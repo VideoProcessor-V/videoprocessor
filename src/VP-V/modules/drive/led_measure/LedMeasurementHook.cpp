@@ -2,6 +2,7 @@
 #include "LedMeasurementHook.h"
 
 #include <DebugLog.h>
+#include <VP-V/modules/drive/led_measure/NativeReadback.h>
 
 #include <libplacebo/dispatch.h>
 
@@ -448,45 +449,18 @@ if (i < READBACK_WORDS) {
 		const pl_d3d11 d3d = gpu ? pl_d3d11_get(gpu) : nullptr;
 		if (!d3d || !d3d->device)
 			return false;   // not D3D11: pl_buf_poll / pl_buf_read do not block there
-		d3d->device->GetImmediateContext(&immediate);
-		D3D11_TEXTURE2D_DESC desc{};
-		desc.Width = static_cast<UINT>(READBACK_WORDS);
-		desc.Height = 1;
-		desc.MipLevels = 1;
-		desc.ArraySize = 1;
-		desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;   // one 32-bit word per texel (see COPY_BODY)
-		desc.SampleDesc.Count = 1;
-		desc.Usage = D3D11_USAGE_DEFAULT;
-		desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
-		D3D11_TEXTURE2D_DESC staging = desc;
-		staging.Usage = D3D11_USAGE_STAGING;
-		staging.BindFlags = 0;
-		staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-		D3D11_QUERY_DESC query{};
-		query.Query = D3D11_QUERY_EVENT;
-		bool ok = immediate != nullptr;
-		for (int i = 0; ok && i < RING; ++i)
-		{
-			ok = SUCCEEDED(d3d->device->CreateTexture2D(&desc, nullptr, &readbackTex[i])) &&
-				SUCCEEDED(d3d->device->CreateTexture2D(&staging, nullptr, &stagingTex[i])) &&
-				SUCCEEDED(d3d->device->CreateQuery(&query, &copyDone[i]));
-			if (ok)
-			{
-				struct pl_d3d11_wrap_params wrap{};
-				wrap.tex = readbackTex[i];
-				readbackWrapped[i] = pl_d3d11_wrap(gpu, &wrap);
-				ok = readbackWrapped[i] && readbackWrapped[i]->params.storable;
-			}
-		}
-		if (!ok)
+		// One RGBA8 texel per 32-bit word (see COPY_BODY), one row; RING slots.
+		std::unique_ptr<NativeTexReadback> created(new NativeTexReadback());
+		if (!created->Create(gpu, RING, READBACK_WORDS, 1, DXGI_FORMAT_R8G8B8A8_UNORM))
 		{
 			DebugLog::Log("Dynamic Drive: the non-blocking measurement readback is unavailable; libplacebo's readback");
-			ReleaseNative();
 			nativeTried = true;
 			return false;
 		}
+		native = std::move(created);
 		nativeReadback = true;
-		DebugLog::Log("Dynamic Drive: measurement read back without waiting (D3D11 staging ring of %d)", RING);
+		DebugLog::Log("Dynamic Drive: measurement read back without waiting (D3D11 staging ring of %d, readiness by %s)", RING,
+			native->FenceAvailable() ? "a D3D11 fence" : "a non-waiting map (no fence on this device)");
 		return true;
 	}
 
@@ -505,7 +479,7 @@ if (i < READBACK_WORDS) {
 		descriptors[1].desc.name = "readback_img";
 		descriptors[1].desc.type = PL_DESC_STORAGE_IMG;
 		descriptors[1].desc.access = PL_DESC_ACCESS_WRITEONLY;
-		descriptors[1].binding.object = readbackWrapped[slot];
+		descriptors[1].binding.object = native->Target(slot);
 		static const std::string header = "#define READBACK_WORDS " + std::to_string(READBACK_WORDS) + "\n";
 		pl_custom_shader copy{};
 		copy.description = "VideoProcessor Dynamic Drive measurement readback copy";
@@ -531,40 +505,19 @@ if (i < READBACK_WORDS) {
 		compute.dispatch_size[2] = 1;
 		if (!pl_dispatch_compute(params->dispatch, &compute))
 			return false;
-		// libplacebo issues its D3D11 work on the immediate context as it goes, so these follow
-		// the copy pass on the GPU timeline; the query marks when the staging copy is done.
-		immediate->CopyResource(stagingTex[slot], readbackTex[slot]);
-		immediate->End(copyDone[slot]);
-		return true;
-	}
-
-	bool MeasurementHook::NativeReady(int slot)
-	{
-		return immediate && copyDone[slot] &&
-			immediate->GetData(copyDone[slot], nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK;
-	}
-
-	bool MeasurementHook::NativeRead(int slot, RawMeasurement& raw)
-	{
-		D3D11_MAPPED_SUBRESOURCE mapped{};
-		if (FAILED(immediate->Map(stagingTex[slot], 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped)))
-			return false;   // DXGI_ERROR_WAS_STILL_DRAWING: try again at the next Collect
-		std::memcpy(&raw, mapped.pData, sizeof(raw));
-		immediate->Unmap(stagingTex[slot], 0);
+		// This pass ran inside libplacebo's frame: the native copy and its fence signal are issued after
+		// the frame's submit (or at once when the host has not armed the deferral, as in the tests).
+		native->QueueDeferred(slot);
 		return true;
 	}
 
 	void MeasurementHook::ReleaseNative()
 	{
-		for (int i = 0; i < RING; ++i)
+		if (native)
 		{
-			if (gpu && readbackWrapped[i]) pl_tex_destroy(gpu, &readbackWrapped[i]);
-			readbackWrapped[i] = nullptr;
-			if (readbackTex[i]) { readbackTex[i]->Release(); readbackTex[i] = nullptr; }
-			if (stagingTex[i]) { stagingTex[i]->Release(); stagingTex[i] = nullptr; }
-			if (copyDone[i]) { copyDone[i]->Release(); copyDone[i] = nullptr; }
+			native->Release(gpu);
+			native.reset();
 		}
-		if (immediate) { immediate->Release(); immediate = nullptr; }
 		nativeReadback = false;
 		nativeTried = false;
 	}
@@ -576,18 +529,32 @@ if (i < READBACK_WORDS) {
 		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(waitMs);
 		while (gpu && schedule.Pending() > 0)
 		{
-			// Never waits: a slot is read only when its copy is done (D3D11: the event query;
-			// elsewhere libplacebo's poll), oldest first.
+			// Never waits: a slot is read only when its copy is done (D3D11: the fence reports it complete
+			// and the DO_NOT_WAIT map succeeds; elsewhere libplacebo's poll), oldest first. A slot whose
+			// copy reports an error is handed out too: it downgrades to libplacebo's readback for the
+			// session, visibly (NativeReadbackFailed), and is read from the pass's own buffer.
 			const std::vector<int> slots = schedule.Collect(frames, [this](int slot)
 			{
-				return nativeReadback ? NativeReady(slot) : !pl_buf_poll(gpu, ring[slot], 0);
+				return nativeReadback ? native->Poll(slot) != ReadState::Pending : !pl_buf_poll(gpu, ring[slot], 0);
 			});
 			for (int slot : slots)
 			{
 				RawMeasurement raw{};
-				const bool read = nativeReadback ? NativeRead(slot, raw) : pl_buf_read(gpu, ring[slot], 0, &raw, sizeof(raw));
-				if (!read && nativeReadback)
-					break;   // still drawing after all: the next Collect takes it
+				bool read = false;
+				if (nativeReadback)
+				{
+					read = native->Read(slot, &raw, sizeof(raw), 1);
+					if (!read)
+					{
+						DebugLog::Log("Dynamic Drive: the non-blocking measurement readback reported an error (HRESULT 0x%08lx); libplacebo's readback for the session",
+							static_cast<unsigned long>(native->LastError()));
+						ReleaseNative();
+						nativeTried = true;
+						nativeFailed = true;
+					}
+				}
+				if (!read)
+					read = pl_buf_read(gpu, ring[slot], 0, &raw, sizeof(raw));
 				if (read)
 				{
 					out.push_back(raw);
@@ -598,6 +565,7 @@ if (i < READBACK_WORDS) {
 			}
 			if (schedule.Pending() == 0 || waitMs <= 0 || std::chrono::steady_clock::now() >= deadline)
 				break;
+			DeferredCopies::ForThisThread().Flush();   // tests only (waitMs > 0): a host that armed the deferral flushes itself
 			pl_gpu_flush(gpu);   // tests only (waitMs > 0)
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		}

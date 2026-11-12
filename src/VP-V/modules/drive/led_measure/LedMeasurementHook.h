@@ -7,12 +7,9 @@
 #include <libplacebo/shaders/custom.h>
 
 #include <deque>
+#include <memory>
 #include <string>
 #include <vector>
-
-struct ID3D11DeviceContext;
-struct ID3D11Query;
-struct ID3D11Texture2D;
 
 // Layer 1 of the LED drive module, GPU side: a native libplacebo hook at
 // PL_HOOK_PRE_OUTPUT (after tone mapping, gamut mapping and the normalized
@@ -27,11 +24,14 @@ struct ID3D11Texture2D;
 // so the old Collect made the render thread wait for the whole GPU frame. On
 // D3D11 the results are now copied, right after the measurement pass, into a
 // VP-owned RGBA8 texture per slot (a small copy pass: one word per texel), then natively into a
-// staging texture with an event query; Collect reads a slot only once its
-// query reports done and maps it with DO_NOT_WAIT (ReadbackRing schedules).
-// Other backends keep pl_buf_poll / pl_buf_read, which do not block there.
+// staging texture (LedDrive::NativeTexReadback: the copy and its D3D11 fence signal are issued
+// AFTER the frame's submit, never between libplacebo's passes; fx/dv-frame-quiet, no event query).
+// Collect reads a slot only once the fence reports the copy complete and maps it with DO_NOT_WAIT
+// (ReadbackRing schedules). Other backends keep pl_buf_poll / pl_buf_read, which do not block there.
 namespace LedDrive
 {
+	class NativeTexReadback;
+
 	class MeasurementHook
 	{
 	public:
@@ -109,12 +109,11 @@ namespace LedDrive
 	private:
 		static pl_hook_res Run(void* priv, const struct pl_hook_params* params);
 		pl_hook_res Measure(const struct pl_hook_params* params);
-		// D3D11: create the per-slot readback textures and queries (once per GPU).
+		// D3D11: create the per-slot readback textures and the fence (once per GPU).
 		bool EnsureNativeReadback();
-		// D3D11: the copy pass into the slot's texture, then the native copy + query.
+		// D3D11: the copy pass into the slot's texture; the native copy + fence signal are recorded for
+		// the host's post-frame flush (NativeTexReadback::QueueDeferred).
 		bool QueueNativeCopy(const struct pl_hook_params* params, int slot);
-		bool NativeReady(int slot);
-		bool NativeRead(int slot, RawMeasurement& raw);
 		void ReleaseNative();
 
 		pl_hook hook{};
@@ -139,10 +138,6 @@ namespace LedDrive
 		bool nativeTried = false;
 		bool nativeReadback = false;
 		bool nativeFailed = false;
-		ID3D11DeviceContext* immediate = nullptr;
-		ID3D11Texture2D* readbackTex[RING] = {};
-		ID3D11Texture2D* stagingTex[RING] = {};
-		ID3D11Query* copyDone[RING] = {};
-		pl_tex readbackWrapped[RING] = {};
+		std::unique_ptr<NativeTexReadback> native;
 	};
 }

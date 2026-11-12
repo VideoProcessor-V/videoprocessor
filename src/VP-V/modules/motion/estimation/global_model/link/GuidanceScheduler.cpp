@@ -465,6 +465,13 @@ namespace CameraLink
 		}
 		if (!m_gpuNotAppliedText.empty())
 			lines.push_back("camera guidance: " + m_gpuNotAppliedText);
+		if (m_counters.countsFailed > 0)
+		{
+			char b[160];
+			std::snprintf(b, sizeof(b), "camera guidance: %llu counts readbacks failed (those pairs judged without counts)",
+				(unsigned long long)m_counters.countsFailed);
+			lines.push_back(b);
+		}
 		for (size_t i = 1; i < size_t(Refusal::Count); ++i)
 			if (m_counters.refusals[i] > 0)
 			{
@@ -529,7 +536,9 @@ namespace CameraLink
 			for (const auto& w : m_waiting)
 				if (w.first == d.pairSeq)
 					secs = w.second;
-			m_sched.OnCounts(d.pairSeq, d.v, secs);
+			if (d.failed)
+				m_sched.NoteCountsFailed();
+			m_sched.OnCounts(d.pairSeq, d.v, secs);   // a failed readback arrives as v = -1: judged without counts
 		}
 	}
 }

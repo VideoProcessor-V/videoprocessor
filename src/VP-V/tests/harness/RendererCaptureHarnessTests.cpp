@@ -4037,6 +4037,9 @@ namespace Tests
 			still.rateNumerator = 24000;
 			still.captureAtSeconds = 2.5;
 			still.step = [](int) { return FrameStep{ true, 0, 0 }; };
+			// The first render can stall for seconds while shaders compile (another process on
+			// the GPU, a cold cache): the capture is asked again until the renderer accepts it.
+			still.retryRefusedCapture = true;
 			auto hashOf = [&](const std::string& extra, const wchar_t* name, RunResult& r) {
 				r = Run(VideoFrameEncoding::R210, "standard", 3.5, true, extra + settings, false, &still);
 				Assert::IsTrue(r.presented, (std::wstring(name) + L": frames presented\n" + r.Tail()).c_str());
@@ -4072,16 +4075,33 @@ namespace Tests
 			Assert::AreEqual(cpuHash, fallbackHash, L"the CPU fallback presents the same codes");
 			// DM loss in every mode: black while the header is untrusted, the
 			// picture back after it (never the packed pixels or a stale picture).
+			// The damaged window is counted from the first picture the renderer analysed with a
+			// CRC-valid header (the DV lock), not from the first frame sent: while the first render
+			// stalls (shader compile, a busy GPU) the renderer's queue drops the early frames, and
+			// a window counted from the start fell before any lock (no DV lock: SDR passthrough, no
+			// black; or the whole run before the first presented frame). The run is long enough
+			// for a 5 s start-up stall plus the window and the restore.
 			FramePlan loss;
 			loss.rateNumerator = 24000;
-			loss.step = [](int n) { return FrameStep{ true, n >= 36 && n < 60 ? 1 : 0, 0 }; };
+			loss.step = [lockN = -1](int n) mutable {
+				if (n == 0)
+					lockN = -1;   // one plan serves the three modes: each run counts from its own lock
+				if (lockN < 0)
+				{
+					std::lock_guard<std::mutex> guard(g_logMutex);
+					for (const std::string& line : g_log)
+						if (line.find("Dolby Vision RGB tunnel: CRC-validated") != std::string::npos) { lockN = n; break; }
+				}
+				const int m = lockN < 0 ? 0 : n - lockN;
+				return FrameStep{ true, lockN >= 0 && m >= 36 && m < 60 ? 1 : 0, 0 }; };
 			for (int mode = 0; mode < 3; ++mode)
 			{
 				SetEnvironmentVariableW(L"VP_TEST_DV_UNPACK_FAIL", mode == 2 ? L"1" : nullptr);
 				const wchar_t* name = mode == 0 ? L"loss, CPU" : mode == 1 ? L"loss, GPU" : L"loss, GPU failing";
-				const RunResult r = Run(VideoFrameEncoding::R210, "standard", 4.0, true,
+				const RunResult r = Run(VideoFrameEncoding::R210, "standard", 12.0, true,
 					std::string(mode == 0 ? "dv_tunnel_gpu_unpack: off\n" : "dv_tunnel_gpu_unpack: on\n") + settings, false, &loss);
 				Assert::IsTrue(r.presented, (std::wstring(name) + L": frames presented\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Dolby Vision RGB tunnel: CRC-validated"), (std::wstring(name) + L": the DV lock before the loss window\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.Logged("Dolby Vision transition: presenting black"), (std::wstring(name) + L": black on DM loss\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.Logged("Dolby Vision transition: trusted DV picture restored"), (std::wstring(name) + L": picture restored\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("Alpha conversion failed"), (std::wstring(name) + L": no conversion failure\n" + r.Tail()).c_str());

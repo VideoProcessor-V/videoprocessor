@@ -125,7 +125,8 @@ public:
 };
 
 // Asynchronous readback of a GPU product into system memory (host hook, render thread only): copy
-// into a staging buffer, then poll an event query. Never a blocking Map on the render context.
+// into a staging buffer, then poll QueryDone (non-blocking; a D3D11 host may answer it with a DO_NOT_WAIT
+// Map of the staging copy, see drive/led_measure/NativeReadback.h). Never a blocking Map on the render context.
 class IReadbackDevice {
 public:
     virtual ~IReadbackDevice() {}

@@ -92,6 +92,7 @@ namespace CameraLink
 		std::array<uint64_t, size_t(Refusal::Count)> refusals{};
 		uint64_t guided = 0, fromLane = 0, fromLive = 0, laneDiscarded = 0, lanePublished = 0, pairsJudged = 0;
 		uint64_t narrowIdleEngine = 0, rejectedByMatcher = 0;   // from EstimateOutcome (narrow idle under the engine / per-block guidance refused)
+		uint64_t countsFailed = 0;   // counts readbacks that failed (the pair is judged without counts; shown in StatusLines)
 	};
 
 	// What the host read from the matcher after Estimate (MotionWarp::CameraGuidanceUsed / CameraGuidanceCounts / the pass timers).
@@ -114,7 +115,8 @@ namespace CameraLink
 	public:
 		virtual ~IGuidanceCountsSource() {}
 		virtual bool Request(uint64_t pairSeq, pl_tex counts) = 0;
-		struct Done { uint64_t pairSeq = 0; float v[4] = { -1, -1, -1, -1 }; };
+		// v all -1 = no counts. failed: the readback reported an error (v stays -1): the pair is still judged, without counts.
+		struct Done { uint64_t pairSeq = 0; float v[4] = { -1, -1, -1, -1 }; bool failed = false; };
 		virtual size_t Poll(std::vector<Done>& out) = 0;
 	};
 
@@ -150,6 +152,8 @@ namespace CameraLink
 
 		// The counts of a finished guided pair (from the readback): diagnostics + governor.
 		void OnCounts(uint64_t pairSeq, const float counts[4], double pairSeconds);
+		// A counts readback failed (render thread): counted and shown in StatusLines; OnCounts(kNone) judges the pair.
+		void NoteCountsFailed() { ++m_counters.countsFailed; }
 
 		// A snapshot: the render thread's counters plus the lane counters the camera worker writes (atomics). Render thread.
 		GuidanceCounters Counters() const

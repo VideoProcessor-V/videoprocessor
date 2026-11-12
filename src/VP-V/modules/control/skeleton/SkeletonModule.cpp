@@ -15,6 +15,7 @@
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/input/source_analysis/FrameQuiet.h>
 #include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuGrainKernel.h>
@@ -1291,6 +1292,9 @@ namespace Vpv
 		// to the outcome) without an active lane for this host or with no sequence. Render thread.
 		void SkeletonModule::OnAfterPresent(RE::FrameContext& c, RE::PresentContext& p)
 		{
+			// fx/dv-frame-quiet (refs/121): the frame's native GPU work VP deferred (the monitor's tile pass + copy, the hooks' copies)
+			// is issued here, after the submit and outside libplacebo's frame, for every host and before any early return below.
+			FrameQuiet::Deferred::EndThisFrame();
 			const std::shared_ptr<HostState> st = hosts_.Find(c.host);
 			if (!st || !st->active.load(std::memory_order_acquire) || c.seq <= 0)
 				return;

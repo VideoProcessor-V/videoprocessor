@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "GuidanceCountsRing.h"
 
+#include <DebugLog.h>
+
 #include <algorithm>
 #include <cstring>
 
@@ -87,6 +89,21 @@ namespace CameraLink
 		return true;
 	}
 
+	void GuidanceCountsRing::Fail(Done& d, Entry* e, unsigned long hr)
+	{
+		for (float& x : d.v)
+			x = -1.0f;
+		d.failed = true;
+		e->busy = false;
+		++m_failed;
+		if (!m_failureLogged)
+		{
+			m_failureLogged = true;
+			DebugLog::Log("Camera guidance: a counts readback failed (%s 0x%08lx); those pairs are judged without counts",
+				e->native ? "HRESULT" : "pl_buf_read", hr);
+		}
+	}
+
 	size_t GuidanceCountsRing::Poll(std::vector<Done>& out)
 	{
 		size_t n = 0;
@@ -103,8 +120,18 @@ namespace CameraLink
 			if (e->native)
 			{
 				const int idx = static_cast<int>(e - m_entries.data());
-				if (!m_native || !m_native->Ready(idx) || !m_native->Read(idx, d.v))
-					continue;   // not done: never wait
+				const LedDrive::ReadState state = m_native ? m_native->Poll(idx) : LedDrive::ReadState::Pending;
+				if (state == LedDrive::ReadState::Pending)
+					continue;   // DXGI_ERROR_WAS_STILL_DRAWING: not done: never wait
+				if (state == LedDrive::ReadState::Failed || !m_native->Read(idx, d.v))
+				{
+					// An error HRESULT, not "still drawing": deliver "no counts" so the pair is judged without them and the
+					// failure is counted and shown by the scheduler.
+					Fail(d, e, static_cast<unsigned long>(m_native->LastError()));
+					out.push_back(d);
+					++n;
+					continue;
+				}
 			}
 			else if (pl_buf_poll(m_gpu, e->buf, 0))
 				continue;   // still in flight
@@ -112,7 +139,9 @@ namespace CameraLink
 				std::memcpy(d.v, e->buf->data, sizeof(d.v));
 			else if (!pl_buf_read(m_gpu, e->buf, 0, d.v, sizeof(d.v)))
 			{
-				e->busy = false;   // unreadable: drop (the pair is judged without counts)
+				Fail(d, e, 0);   // unreadable: the same visible "no counts" result
+				out.push_back(d);
+				++n;
 				continue;
 			}
 			out.push_back(d);

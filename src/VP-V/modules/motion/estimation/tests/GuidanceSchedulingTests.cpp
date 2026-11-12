@@ -230,6 +230,37 @@ namespace VideoProcessorTest
 			Assert::IsTrue(sched.Diagnostics().escalated > 0, L"escalated = planned - accepted");
 		}
 
+		TEST_METHOD(AFailedCountsReadbackIsJudgedWithoutCountsAndShownInTheStatus)
+		{
+			FakeLink link;
+			link.AddPan(1);
+			CameraLink::GuidanceSettings s = On();
+			CameraLink::GuidanceScheduler sched(link, s);
+			sched.SetLag(2);
+			FakeCounts counts;
+			CameraLink::CameraGuidanceHook hook(sched, &counts, link);
+			FakeSink sink;
+			VpMotion::EstimateContext c;
+			c.pairSeq = 3;
+			c.nextPairSeconds = 1.0 / 24;
+			hook.BeforeEstimate(c, sink);
+			hook.AfterEstimate(3, true, reinterpret_cast<pl_tex>(static_cast<uintptr_t>(0x10)));
+			Assert::AreEqual(uint64_t(0), sched.Counters().pairsJudged);
+			CameraLink::IGuidanceCountsSource::Done d;   // what GuidanceCountsRing delivers for an errored readback
+			d.pairSeq = 3;
+			d.failed = true;
+			counts.ready.push_back(d);
+			hook.Poll();
+			Assert::AreEqual(uint64_t(1), sched.Counters().pairsJudged, L"the pair is judged, not left waiting");
+			Assert::AreEqual(uint64_t(1), sched.Counters().countsFailed);
+			Assert::AreEqual(uint64_t(1), sched.Diagnostics().frames);
+			Assert::AreEqual(uint64_t(0), sched.Diagnostics().escalated, L"no counts: nothing escalated is claimed");
+			bool shown = false;
+			for (const std::string& line : sched.StatusLines())
+				shown = shown || line.find("counts readbacks failed") != std::string::npos;
+			Assert::IsTrue(shown, L"the failure is visible in the status lines");
+		}
+
 		TEST_METHOD(ParseCountsComputesEscalatedAsPlannedMinusAccepted)
 		{
 			const float c1[4] = { 90.0f, 80.0f, -1.0f, -1.0f };

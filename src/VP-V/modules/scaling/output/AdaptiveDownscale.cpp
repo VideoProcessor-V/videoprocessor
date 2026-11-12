@@ -690,13 +690,21 @@ float rs_slope(float y)
 		};
 		if (NativeStatsReadback())
 		{
-			// Never waits: a slot is read only once its copy's query reports done, oldest first.
-			const std::vector<int> slots = statsSchedule.Collect(statsFrames, [this](int slot) { return statsNative->Ready(slot); });
+			// Never waits: a slot is read only once the fence reports its copy complete and the staging copy
+			// maps (DO_NOT_WAIT), oldest first.
+			// A slot whose copy reports an error is handed out too: released and counted as a failure
+			// (the "output scaling" fallback), never kept busy forever.
+			const std::vector<int> slots = statsSchedule.Collect(statsFrames, [this](int slot) {
+				return statsNative->Poll(slot) != LedDrive::ReadState::Pending; });
 			for (int slot : slots)
 			{
 				float values[4] = {};
 				if (!statsNative->Read(slot, values, sizeof(values), 1))
-					break;   // still drawing after all: the next frame takes it
+				{
+					++failures;   // shown by the "output scaling" fallback (the HRESULT is statsNative->LastError())
+					statsSchedule.Release(slot);
+					continue;
+				}
 				take(values);
 				statsSchedule.Release(slot);
 			}
@@ -965,7 +973,7 @@ float rs_slope(float y)
 				return unchanged;
 			}
 			if (statsSlot >= 0)
-				statsNative->Queue(statsSlot);
+				statsNative->QueueDeferred(statsSlot);   // this pass runs inside libplacebo's frame: the native copy follows the frame (NativeReadback.h)
 			if (advance > 0.5f)
 			{
 				advancedSequence = sequence;
