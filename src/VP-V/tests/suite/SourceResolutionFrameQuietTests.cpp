@@ -183,47 +183,53 @@ namespace VideoProcessorTest
 			Assert::IsTrue(FallbackCatalog::NativeReadback(0, 1).engaged);
 		}
 
-		// The host's call sites (70b: call sites only, each a tagged one-liner), in the order the contract needs: the
-		// deferral is armed before the render, the monitor's CPU part is before the render, the decisions take the source
-		// time, and End (the monitor's tile pass + copy, the recorded hook copies) is after the frame's submit - never
-		// before pl_render_image - and no direct monitor Frame() call is left.
-		TEST_METHOD(TheRendererCallSitesKeepTheMonitorsDeviceWorkAfterTheFrame)
+		// Re-placed (refs/121): the renderer host (Bill's file) has NO frame-quiet call site; Arm + Begin are in the planner
+		// segment (VP-V/segments/EntrancePlanner.inl, reached only outside the Original pathway) and the end of the frame is
+		// the R12 AfterPresent seam handler (SkeletonModule::OnAfterPresent). The monitor's GPU work is never issued by the
+		// planner, the decisions take source time, and the end comes before the handler's early return.
+		TEST_METHOD(TheFrameQuietCallsSitInThePlannerAndTheAfterPresentSeamNotInTheRenderer)
 		{
-			const std::string text = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
-			Assert::IsFalse(text.empty(), L"the renderer source");
-			Assert::AreEqual<size_t>(0, CountOf(text, "sourceMonitor.Frame("), L"the monitor's GPU work is not issued before the render");
-			Assert::AreEqual<size_t>(1, CountOf(text, "frameQuiet.Arm();"));
-			Assert::AreEqual<size_t>(1, CountOf(text, "frameQuiet.Begin("));
-			Assert::AreEqual<size_t>(1, CountOf(text, "frameQuiet.End("));
-			Assert::AreEqual<size_t>(0, CountOf(text, "-1.0, sourceSequence);"), L"AutoFactors takes source time, not the steady clock");
-			Assert::AreEqual<size_t>(0, CountOf(text, "sourceMonitor.AutoTransition();"), L"AutoTransition takes source time");
-			const size_t arm = text.find("frameQuiet.Arm();");
-			const size_t begin = text.find("frameQuiet.Begin(");
-			const size_t render = text.find("NlsHookRecovery::RenderOwned(", begin);
-			const size_t submit = text.find("SubmitLibplaceboFrameChecked(", render);
-			const size_t end = text.find("frameQuiet.End(");
-			Assert::IsTrue(arm < begin && begin < render && render < submit && submit < end,
-				L"Arm, Begin, the render call, the frame's submit, End");
-			// Each is a tagged one-liner (the footprint tool counts a line ending in // VPV-HOOK as a hook, not a stray).
-			for (const char* call : { "frameQuiet.Arm();", "frameQuiet.Begin(", "frameQuiet.End(" })
-			{
-				const size_t at = text.find(call);
-				const size_t eol = text.find('\n', at);
-				Assert::IsTrue(text.compare(text.rfind("// VPV-HOOK", eol), 11, "// VPV-HOOK") == 0 && text.rfind("// VPV-HOOK", eol) > at,
-					L"a tagged one-line call site");
-			}
+			const std::string renderer = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
+			const std::string planner = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntrancePlanner.inl");
+			const std::string skeleton = ReadText(RepositoryRoot() + "\\src\\VP-V\\modules\\control\\skeleton\\SkeletonModule.cpp");
+			Assert::IsFalse(renderer.empty() || planner.empty() || skeleton.empty(), L"the sources");
+			Assert::AreEqual<size_t>(0, CountOf(renderer, "frameQuiet"), L"no frame-quiet line in the Bill-owned renderer");
+			Assert::AreEqual<size_t>(0, CountOf(planner, "sourceMonitor.Frame("), L"the monitor's GPU work is not issued before the render");
+			Assert::AreEqual<size_t>(1, CountOf(planner, "frameQuiet.Arm("));
+			Assert::AreEqual<size_t>(1, CountOf(planner, "frameQuiet.Begin("));
+			Assert::AreEqual<size_t>(0, CountOf(planner, "-1.0, sourceSequence);"), L"AutoFactors takes source time, not the steady clock");
+			Assert::AreEqual<size_t>(0, CountOf(planner, "AutoTransition();"), L"AutoTransition takes source time");
+			Assert::AreEqual<size_t>(1, CountOf(skeleton, "FrameQuiet::Deferred::EndThisFrame();"));
+			const size_t handler = skeleton.find("void SkeletonModule::OnAfterPresent(");
+			const size_t end = skeleton.find("FrameQuiet::Deferred::EndThisFrame();");
+			const size_t early = skeleton.find("return;", handler);
+			Assert::IsTrue(handler != std::string::npos && handler < end && end < early, L"End runs before the handler's early return");
+			const size_t arm = planner.find("frameQuiet.Arm(");
+			const size_t begin = planner.find("frameQuiet.Begin(");
+			Assert::IsTrue(arm < begin, L"Arm before Begin");
 		}
 
-		TEST_METHOD(DeferredEndWithoutABeginOnlyFlushesTheRecordedCopies)
+		TEST_METHOD(DeferredEndWithoutABeginFlushesNothingWhenNoVpWorkRan)
 		{
-			Monitor m;
 			FrameQuiet::Deferred deferred;
-			deferred.Arm();
+			deferred.Arm(nullptr);
 			Assert::IsTrue(LedDrive::DeferredCopies::ForThisThread().Armed());
-			const FallbackCatalog::Decision d = deferred.End(m, nullptr, nullptr);
+			deferred.EndFrame();
 			Assert::IsFalse(LedDrive::DeferredCopies::ForThisThread().Armed(), L"End disarms for the next frame");
+			Assert::AreEqual<unsigned long long>(0, deferred.Flushes(), L"no VP GPU work ran, so no pl_gpu_flush");
+			const FallbackCatalog::Decision d = deferred.TakeDecision();
 			Assert::AreEqual(std::string("native readback"), d.id);
-			Assert::AreEqual<unsigned long long>(0, m.SubmitSkipped(), L"no Begin, so no frame was lost");
+			deferred.EndFrame();   // a second End is a no-op
+			Assert::AreEqual<unsigned long long>(0, deferred.MissedEnds());
+		}
+
+		TEST_METHOD(AnArmWithoutAnEndIsMadeUpAndCounted)
+		{
+			FrameQuiet::Deferred deferred;
+			deferred.Arm(nullptr);
+			deferred.Arm(nullptr);   // the seam was not reached: the stale frame is ended now, visibly
+			Assert::AreEqual<unsigned long long>(1, deferred.MissedEnds());
+			deferred.EndFrame();
 		}
 	};
 }
