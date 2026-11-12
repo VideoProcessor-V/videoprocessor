@@ -451,9 +451,7 @@ namespace SkeletonModuleTestsNs
 		// AlreadyRan); a renderer without an active lane (Off / Original) has no slot and the seam writes nothing.
 		TEST_METHOD(AfterPresentSeamDrivesTheSpareSlotOncePerSourceFrame)
 		{
-			Rig off("[general]
-x=1
-");
+			Rig off("[general]\nx=1\n");
 			off.Life(RE::Lifecycle::GpuCreated);
 			off.Life(RE::Lifecycle::SettingsApplied);
 			Assert::IsNull(off.sk.SpareOf(off.Host()), L"no lane, no slot");
