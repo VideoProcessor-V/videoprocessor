@@ -24,6 +24,7 @@
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/hub/HostSlots.h>
+#include <VP-V/modules/input/capture/SourceRing.h>
 #include <vprenderer/RendererExtension.h>
 
 #include <memory>
@@ -77,6 +78,9 @@ namespace Vpv
 		{
 			const void* host = nullptr;
 			std::unique_ptr<ICaptureHost> view;
+			// P10 D5 (refs/118): the P13 source ring of this renderer's queued frames. Inert until a reader (the skeleton) declares
+			// itself with SetWanted; fed from CaptureExtension::OnFrame (CollectAhead), released at Begin.
+			SourceRing sourceRing;
 		};
 
 		class HostBinding

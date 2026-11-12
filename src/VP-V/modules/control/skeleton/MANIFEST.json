@@ -45,7 +45,8 @@
       "vpv.skeleton.analysis_lane_test_wait_ms",
       "vpv.skeleton.camera_link",
       "vpv.skeleton.skeleton_gpu_gap",
-      "vpv.skeleton.grain_split_storage"
+      "vpv.skeleton.grain_split_storage",
+      "vpv.skeleton.lane_tap_source"
     ],
     "upstream_modules": ["input.signal (resync_event = on: the one shared seal)", "input.source_analysis (frame_analysis_store = on: the source frames)"]
   },

@@ -159,7 +159,23 @@ namespace RendererExtension
 		const pl_render_params* params = nullptr;         // Draw: this frame's parameters
 		DrawResult result = DrawResult::Continue;         // Draw: out
 	};
-	struct QueueView { const void* queue = nullptr; size_t size = 0; };
+	// P10 D5 (refs/118 s3): one queued frame as the CollectAhead phase hands it to a module that reads the early-upload slot of a
+	// frame still in the queue (the P13 source ring, input.capture). Plain data, no allocation: `earlyHandoff` is the capture
+	// module's hand-off object, opaque here (the copy only counts a reference; the queue's own payload keeps the other). Empty
+	// handoff + rawEncoding 0 = the frame carries no raw payload (a CPU-formatted frame). Valid for the call only (the array is
+	// the caller's); a module that keeps an entry keeps its own copy of the reference.
+	struct AheadSlot
+	{
+		uint64_t seq = 0;                       // the frame's source sequence
+		uint64_t generation = 0;                // the queued frame's generation (resync / seek / format change)
+		std::shared_ptr<void> earlyHandoff;     // opaque: EarlyUploadHandoff (input.capture); null = no early upload
+		int32_t rawEncoding = 0;                // VideoFrameEncoding of the raw frame (0 = UNKNOWN: not raw)
+		uint32_t rawRowBytes = 0;               // the raw frame's row pitch in bytes
+		int32_t height = 0;                     // the frame height the slot holds (EarlyUpload rows)
+	};
+	// `ahead` / `aheadCount`: the queued frames from the front of the queue up to the lane lead (non-repeat frames), only when a
+	// module asked for them (SourceRing::AnyWanted); null / 0 otherwise. Appended fields: every existing reader sees `size` as before.
+	struct QueueView { const void* queue = nullptr; size_t size = 0; const AheadSlot* ahead = nullptr; size_t aheadCount = 0; };
 
 	// R10 PlanOutputs (take-over; render loop, after the host's own timeline Begin, WITH renderMutex held: the loop's
 	// unique_lock, released only between draws (M2 P5b-1)). In: the facts.

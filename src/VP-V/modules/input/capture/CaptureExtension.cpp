@@ -76,6 +76,24 @@ namespace Vpv
 			return entry && entry->view && entry->view->Convert(cc);
 		}
 
+		bool CaptureExtension::OnFrame(RE::FrameContext& c)
+		{
+			if (c.phase != RE::FramePhase::CollectAhead && c.phase != RE::FramePhase::Begin)
+				return false;
+			const std::shared_ptr<HostEntry> entry = Find(c.host);
+			if (!entry)
+				return false;
+			if (c.phase == RE::FramePhase::Begin)
+			{
+				entry->sourceRing.ReleaseGraveyard();
+				return false;
+			}
+			const RE::QueueView* view = RE::PayloadOf<RE::QueueView>(c);
+			if (view)   // an empty list is an update too: the frames that left the queue go to the graveyard
+				entry->sourceRing.Update(view->ahead, view->aheadCount);
+			return false;
+		}
+
 		void CaptureExtension::OnAfterPublish(RE::FrameContext& c, RE::PublishView& pv)
 		{
 			const std::shared_ptr<HostEntry> entry = Find(c.host);

@@ -35,9 +35,49 @@
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <vprenderer/RendererExtension.h>
+#include <VP-V/modules/input/capture/CapturePayload.h>
+#include <VP-V/modules/input/capture/EarlyUploadHandoff.h>
+#include <VP-V/modules/input/capture/SourceRing.h>
 
 namespace MotionAhead
 {
+	// P10 D5 phase A (refs/118 s3): fills one AheadSlot from a queued frame. The walk is templated over fake hosts whose
+	// queued frame may lack `generation` or `converted->extension`; these C++14 detectors accept both shapes (absent: 0 / empty).
+	namespace AheadSlotDetail
+	{
+		template <class Q>
+		auto GenerationOf(const Q& q, int) -> decltype(static_cast<uint64_t>(q.generation)) { return static_cast<uint64_t>(q.generation); }
+		template <class Q>
+		uint64_t GenerationOf(const Q&, long) { return 0; }
+
+		template <class Q>
+		auto ExtensionSlot(const Q& q, int) -> decltype(static_cast<const std::shared_ptr<void>&>(q.converted->extension))
+		{
+			static const std::shared_ptr<void> none;
+			return q.converted ? static_cast<const std::shared_ptr<void>&>(q.converted->extension) : none;
+		}
+		template <class Q>
+		const std::shared_ptr<void>& ExtensionSlot(const Q&, long) { static const std::shared_ptr<void> none; return none; }
+
+		template <class Q>
+		void Fill(const Q& q, RendererExtension::AheadSlot& slot)
+		{
+			slot.seq = static_cast<uint64_t>(q.sourceSequence);
+			slot.generation = GenerationOf(q, 0);
+			slot.earlyHandoff.reset();
+			slot.rawEncoding = 0;
+			slot.rawRowBytes = 0;
+			slot.height = 0;
+			const Vpv::Capture::PayloadExtension* e = Vpv::Capture::ExtensionOf(ExtensionSlot(q, 0));
+			if (!e)
+				return;
+			slot.earlyHandoff = std::static_pointer_cast<void>(e->earlyHandoff);
+			slot.rawEncoding = static_cast<int32_t>(e->rawEncoding);
+			slot.rawRowBytes = static_cast<uint32_t>(e->rawRowBytes);
+			slot.height = e->earlyHeight;
+		}
+	}
+
 	// The references the walk needs besides the Impl: the frames the render loop selected (the walk
 	// does not release them), the timing clock (null when none) and the measured source rate.
 	template <class Impl, class Queued, class Clock>
@@ -72,6 +112,21 @@ namespace MotionAhead
 		{
 			RendererExtension::QueueView laneView;
 			laneView.size = queuedAhead;
+			// P10 D5: the queue's frames up to the lane lead, only when a reader wants them (SourceRing::AnyWanted, one load).
+			RendererExtension::AheadSlot aheadSlots[Vpv::Capture::SourceRing::kMaxPerPass];
+			if (Vpv::Capture::SourceRing::AnyWanted())
+			{
+				size_t n = 0;
+				for (size_t index = 0; index < queue.size() && n < Vpv::Capture::SourceRing::kMaxPerPass && n <= queuedAhead; ++index)
+				{
+					const auto& q = queue[index];
+					if (q.cadenceRepeat || !q.state) continue;
+					AheadSlotDetail::Fill(q, aheadSlots[n]);
+					++n;
+				}
+				laneView.ahead = aheadSlots;
+				laneView.aheadCount = n;
+			}
 			RendererExtension::FrameContext laneContext;
 			laneContext.host = impl;
 			laneContext.phase = RendererExtension::FramePhase::CollectAhead;

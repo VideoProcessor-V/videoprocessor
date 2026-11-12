@@ -729,6 +729,12 @@ namespace FallbackCatalog
 	{
 		return declined ? Engaged("skeleton_gpu_chroma", "P10c declined: chroma needs the source ring (M2 P10)") : Released("skeleton_gpu_chroma");
 	}
+	// P10 D5 (refs/118): the lane tap read the CPU tap for some frames although lane_tap_source = auto asked for the GPU source
+	// (cause counts in `note`, from Vpv::TapSource::Describe); released while every frame took the GPU source or none fell back.
+	inline Decision SkeletonTapSource(const std::string& note)
+	{
+		return note.empty() ? Released("skeleton_tap_source") : Engaged("skeleton_tap_source", note);
+	}
 	// A record history (quality pattern, td trail summary) the measured source rate asked deeper than the slot counts allow; the note
 	// is VpSkeleton::RecordHistoryCapNote (plain text with the cap and the rate where it starts). Never capped silently.
 	inline Decision SkeletonHistoryCapped(const std::string& note)

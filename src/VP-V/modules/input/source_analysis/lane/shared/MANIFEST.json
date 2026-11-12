@@ -15,6 +15,7 @@
     "src/VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h",
     "src/VP-V/modules/input/source_analysis/lane/shared/SourceStats.h",
     "src/VP-V/modules/input/source_analysis/lane/shared/EngineLumaGpu.h",
+    "src/VP-V/modules/input/source_analysis/lane/shared/TapSource.h",
     "src/VP-V/modules/input/source_analysis/lane/shared/EngineLumaGpu.cpp",
     "src/VP-V/modules/input/source_analysis/lane/shared/EngineLumaGpu.hlsl",
     "src/VP-V/modules/input/source_analysis/lane/shared/README.md"

@@ -395,6 +395,27 @@ namespace SkeletonModuleTestsNs
 			Assert::IsFalse(s.LaneWanted() || s.CameraWanted());
 		}
 
+		TEST_METHOD(LaneTapSourceParsesDefaultsToAutoAndTheOriginalPathwayForcesCpu)
+		{
+			// P10 D5 (refs/118): auto | cpu, default auto; invalid keeps auto and is listed; Original reads cpu and feeds no ring.
+			const Vpv::Skeleton::Settings d = ParseText("[vpv.skeleton]\nanalysis_lane=on\n");
+			Assert::IsTrue(d.tapSource == Vpv::Skeleton::TapSourceMode::Auto);
+			Assert::IsTrue(d.TapRingWanted(), L"lane on + auto: the source ring is wanted");
+			const Vpv::Skeleton::Settings c = ParseText("[vpv.skeleton]\nanalysis_lane=on\nlane_tap_source=CPU\n");
+			Assert::IsTrue(c.tapSource == Vpv::Skeleton::TapSourceMode::Cpu);
+			Assert::IsFalse(c.TapRingWanted());
+			Assert::IsTrue(c.laneProblems.empty());
+			const Vpv::Skeleton::Settings bad = ParseText("[vpv.skeleton]\nanalysis_lane=on\nlane_tap_source=gpu\n");
+			Assert::IsTrue(bad.tapSource == Vpv::Skeleton::TapSourceMode::Auto);
+			Assert::AreEqual<size_t>(1, bad.laneProblems.size());
+			Assert::IsTrue(bad.laneProblems[0] == "lane_tap_source 'gpu' is not valid (auto|cpu); kept auto");
+			const Vpv::Skeleton::Settings o = ParseText("[vpv]\npipeline_original_pathway=on\n[vpv.skeleton]\nanalysis_lane=on\nlane_tap_source=auto\n");
+			Assert::IsTrue(o.EffectiveTapSource() == Vpv::Skeleton::TapSourceMode::Cpu);
+			Assert::IsFalse(o.TapRingWanted());
+			const Vpv::Skeleton::Settings off = ParseText("[vpv.skeleton]\nlane_tap_source=auto\n");
+			Assert::IsFalse(off.TapRingWanted(), L"lane off: no ring");
+		}
+
 		TEST_METHOD(AnUnreadableFileMeansDefaults)
 		{
 			const Vpv::Skeleton::Settings s = Vpv::Skeleton::Load([](ConfigFile&) { return false; });

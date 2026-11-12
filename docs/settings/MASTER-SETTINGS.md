@@ -12,9 +12,9 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Count | Value |
 |---|---|
 | Modules | 43 |
-| Documented rows | 391 |
-| VP-V keys in code (outside Bill's schema lists) | 386 |
-| of which documented | 386 |
+| Documented rows | 392 |
+| VP-V keys in code (outside Bill's schema lists) | 387 |
+| of which documented | 387 |
 | of which undocumented (appendix A) | 0 |
 | Documented keys with no code entry (appendix B) | 0 |
 
@@ -64,7 +64,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Control | `control.net_runtime` | placeholder | [README](../../src/VP-V/modules/control/net_runtime/README.md) | 0 | 1 | 0/1 |
 | Control | `control.diagnostics` | partial | [README](../../src/VP-V/modules/control/diagnostics/README.md) | 5 | 4 | 0/4 |
 | Control | `control.config` | partial | [README](../../src/VP-V/modules/control/config/README.md) | 9 | 0 | 0/0 |
-| Control | `control.skeleton` | draft | [README](../../src/VP-V/modules/control/skeleton/README.md) | 12 | 7 | 7/7 |
+| Control | `control.skeleton` | draft | [README](../../src/VP-V/modules/control/skeleton/README.md) | 13 | 8 | 8/8 |
 
 ## Input
 
@@ -510,6 +510,7 @@ Modules: `control.net_runtime`, `control.diagnostics`, `control.config`, `contro
 | `vpv.skeleton.analysis_lane_test_wait_ms` | `control.skeleton` | [vpv.skeleton] | int | 0..4000000 | 0 |  | not in Config (cfg-only until the M2 Config page; test only) | n/a (VP-only) | invalid value: `skeleton_settings` | same on all |
 | `vpv.skeleton.camera_link` | `control.skeleton` | [vpv.skeleton] | enum | off, report | off |  | not in Config (cfg-only until the M2 Config page) | off (no state, no line) | `camera_link` when asked to report but unable (no store, no seal); status line when on | same on all |
 | `vpv.skeleton.grain_split_storage` | `control.skeleton` | [vpv.skeleton] | enum | full, compact | compact |  | not in Config (cfg-only until the M2 Config page) | n/a (VP-only) | `grain_split_storage` entry of the kernel (Compact refused for the plane -> Full, with the reason; Compact granted -> Released); invalid value: `skeleton_settings` | P10 storage either/or; Compact is also the governor's visible budget step (Compact -> Full / Full -> Compact is shown by the kernel's decision, never silent) |
+| `vpv.skeleton.lane_tap_source` | `control.skeleton` | [vpv.skeleton] | enum | auto, cpu | auto |  | not in Config (cfg-only until the M2 Config page) | n/a (VP-only) | `skeleton_tap_source` entry (per-frame CPU-tap fallbacks of an auto setting, with cause counts: upload pending, no early slot, rgb, dolby vision, full range, size mismatch, not in source ring ...); Ctrl+I line; Ctrl+Alt+D `tap source` line; invalid value: `skeleton_settings` | P10 D5 (refs/118): the lane tap reads the queued frame's early-upload slot on the GPU (auto) or always the CPU tap (cpu); the Original pathway forces cpu. Phase A feeds the source ring only; the GPU reader lands in phase C (counters stay 0 until then) |
 | `vpv.skeleton.skeleton_gpu_gap` | `control.skeleton` | [vpv.skeleton] | enum | off, after_render | off |  | not in Config (cfg-only until the M2 Config page) | n/a (VP-only; off in the Original pathway) | after_render: `skeleton_gpu_gap` ("GPU lane work runs ahead of the present"); off with a dispatcher: `skeleton_gpu_gap_off`; invalid value: `skeleton_settings` | off: the GPU products get no lane producer (in-render-only, live form deferred); after_render: P10/P11/P12 lane jobs run in the AfterRender gap, chunked by the gap budget (one chunk per pass); the CPU products' gap is unchanged either way |
 | `vpv.skeleton.source_stats_walk` | `control.skeleton` | [vpv.skeleton] | enum | original, lane | original |  | not in Config (cfg-only until the M2 Config page) | Bill's active-picture walk | planned: the cfg key is not read from the file yet (a lane key set by tests and tooling); `source_stats_walk` entry when the lane's source stats are unavailable | same on all |
 

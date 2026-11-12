@@ -15,6 +15,9 @@
 //                                                       products get no lane (the CPU products' gap is unchanged)
 //   grain_split_storage          full | compact         (default compact, refs/116 D2)  P10 storage, an either/or (Compact is also
 //                                                       the governor's visible budget step)
+//   lane_tap_source              auto | cpu             (default auto, refs/118 P10 D5)  the lane tap reads the queued frame's
+//                                                       early-upload slot on the GPU (auto) or always the CPU tap (cpu; the
+//                                                       Original pathway forces cpu); every per-frame fallback is a visible cause
 //
 // The analysis_lane* keys are VpSkeleton::LaneSettings::Parse (one parser); skeleton_gpu_gap and grain_split_storage
 // are parsed here in the same style (kLaneKeys handling: an invalid value is listed in laneProblems). An invalid value keeps the default and
@@ -39,6 +42,7 @@ namespace Vpv
 		enum class CameraLinkMode { Off, Report };
 		enum class GpuGapMode { Off, AfterRender };
 		enum class GrainStorage { Full, Compact };
+		enum class TapSourceMode { Auto, Cpu };
 
 		struct Settings
 		{
@@ -46,11 +50,16 @@ namespace Vpv
 			CameraLinkMode camera = CameraLinkMode::Off;
 			GpuGapMode gpuGap = GpuGapMode::Off;           // skeleton_gpu_gap
 			GrainStorage grainStorage = GrainStorage::Compact;   // grain_split_storage (default compact: refs/116 D2)
+			TapSourceMode tapSource = TapSourceMode::Auto;   // lane_tap_source (default auto)
 			bool originalPathway = false;                  // [vpv] pipeline_original_pathway = on
 			std::vector<std::string> laneProblems;         // invalid analysis_lane* values (kept at the default)
 			std::vector<std::string> cameraProblems;       // invalid camera_link value (kept off)
 
 			bool LaneWanted() const { return !originalPathway && lane.mode != VpSkeleton::LaneSettings::Mode::Off; }
+			// The mode in force: the Original pathway always reads the CPU tap.
+			TapSourceMode EffectiveTapSource() const { return originalPathway ? TapSourceMode::Cpu : tapSource; }
+			// The source ring is fed only when the lane runs and the GPU source is asked for.
+			bool TapRingWanted() const { return LaneWanted() && EffectiveTapSource() == TapSourceMode::Auto; }
 			bool CameraWanted() const { return !originalPathway && camera == CameraLinkMode::Report; }
 		};
 
@@ -102,6 +111,16 @@ namespace Vpv
 					s.grainStorage = GrainStorage::Compact;
 				else
 					s.laneProblems.push_back("grain_split_storage '" + raw + "' is not valid (full|compact); kept compact");
+			}
+			if (config.TryGetString(kSection, "lane_tap_source", raw))
+			{
+				const std::string value = ConfigFile::NormalizeName(raw);
+				if (value == "auto")
+					s.tapSource = TapSourceMode::Auto;
+				else if (value == "cpu")
+					s.tapSource = TapSourceMode::Cpu;
+				else
+					s.laneProblems.push_back("lane_tap_source '" + raw + "' is not valid (auto|cpu); kept auto");
 			}
 			std::string camera;
 			if (config.TryGetString(kSection, "camera_link", camera))

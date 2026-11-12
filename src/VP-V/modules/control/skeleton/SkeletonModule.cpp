@@ -13,6 +13,8 @@
 #include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
+#include <VP-V/modules/input/capture/CaptureHost.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/TapSource.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
@@ -292,6 +294,7 @@ namespace Vpv
 
 			// Written by the lifecycle thread (the render thread), read there.
 			Settings settings;
+			Vpv::TapSource::Counters tapCounters;   // P10 D5: per-frame GPU-source / CPU-tap causes (the phase C reader counts into it)
 			std::atomic<bool> active{ false };
 			std::atomic<bool> reporting{ false };   // off, but an invalid key is being shown
 			std::atomic<uint32_t> settingsGen{ 1 };
@@ -706,6 +709,9 @@ namespace Vpv
 				}
 			}
 			st->settings = s;
+			// P10 D5: the source ring is fed only while the lane runs with lane_tap_source = auto (Original: cpu, never fed).
+			if (const std::shared_ptr<Vpv::Capture::HostEntry> capture = Vpv::Capture::Find(host))
+				capture->sourceRing.SetWanted(s.TapRingWanted());
 			st->gpu = static_cast<pl_gpu>(gpuSlots_.Aux(host));   // const pl_gpu_t*
 			UpdateDispatcher(*st);
 			st->settingsGen.fetch_add(1, std::memory_order_relaxed);
@@ -756,6 +762,8 @@ namespace Vpv
 			const void* host = st->host;
 			st->active.store(false, std::memory_order_release);
 			st->reporting.store(false, std::memory_order_release);
+			if (const std::shared_ptr<Vpv::Capture::HostEntry> capture = Vpv::Capture::Find(host))
+				capture->sourceRing.SetWanted(false);   // no reader: the ring clears (its references drop at the next Begin)
 			if (st->tapOn)
 			{
 				VpFrameAnalysis::SourceFrameTap::Unregister(host);
@@ -1744,6 +1752,7 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 					addDecision(FallbackCatalog::SkeletonGpuLive(true));   // RunDeferredLive is not called before the Entrance phase
 					addDecision(FallbackCatalog::SkeletonGpuGapAhead(gap));
 					addDecision(FallbackCatalog::SkeletonGpuGapOff(!gap));
+					addDecision(FallbackCatalog::SkeletonTapSource(st.tapCounters.Fallbacks() != 0 ? Vpv::TapSource::Describe(st.tapCounters) : std::string()));
 					addDecision(FallbackCatalog::SkeletonGpuChroma(true));   // P10c is not made before the source ring exists
 					addDecision(FallbackCatalog::SkeletonGpuLightPending(b->lightPendingAsNone.load(std::memory_order_relaxed)));   // A2: visible until G6
 					addDecision(FallbackCatalog::SkeletonGpuFailed(gd->Stats().failures, gd->LastError()));
@@ -1841,6 +1850,8 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 					full.push_back("Skeleton cost rows: " + std::to_string(PassTimers::Inbox::Motion().Posted()) + " posted, " +
 						std::to_string(PassTimers::Inbox::Motion().Dropped()) + " dropped (the queue is bounded; with nobody draining it the oldest is dropped)");   // MV7: the producers' posted timings (also drained into the pass-timer readout by the host)
 			}
+			if (st.settings.LaneWanted() || st.tapCounters.Fallbacks() != 0)
+				full.push_back("Skeleton " + Vpv::TapSource::Describe(st.tapCounters) + (st.settings.tapSource == TapSourceMode::Cpu ? " (lane_tap_source cpu)" : ""));
 			full.push_back("Skeleton: " + std::to_string(st.frames) + " frames, " + std::to_string(st.srcFrames.load(std::memory_order_relaxed)) +
 				" source frames tapped, " + std::to_string(st.dropsApplied) + " drops applied, " + std::to_string(st.gapsRun) +
 				" idle gaps run, " + std::to_string(st.gapsSkipped) + " skipped (frame period unknown), " + std::to_string(st.configures) +
