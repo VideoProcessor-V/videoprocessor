@@ -241,6 +241,21 @@ namespace SkeletonGraphTestsNs
 			p.inputCount = 0;
 			detail::AddInput(p, id, 1);
 		}
+		// P15-DECL: quality_pattern(.causal) also declare a held read of P14 source identity at lag 1 (Products.h). A lag-1 read of ANOTHER
+		// product cannot be satisfied at frame 0 (InputSeq: seq < lag, ProductSlots.h LaneAncestors: only the self chain input is optional), so
+		// that lane job first runs at frame 1; this test is about the chain start (reduced predecessor), so, as for the other products'
+		// foreign reads above, the foreign P14 read is stripped here. The P5 tiles read (lag 0) and every other declaration stay as catalogued.
+		const ProductId pictureReaders[] = { kQualityPattern, kQualityPatternCausal };
+		for (ProductId id : pictureReaders) {
+			ProductDecl& p = d[id];
+			size_t kept = 0;
+			for (size_t i = 0; i < p.inputCount; ++i)
+				if (p.inputs[i].product != kSourceIdentity)
+					p.inputs[kept++] = p.inputs[i];
+			for (size_t i = kept; i < p.inputCount; ++i)
+				p.inputs[i] = InputRef();
+			p.inputCount = uint8_t(kept);
+		}
 		return Registry(std::move(d));
 	}
 

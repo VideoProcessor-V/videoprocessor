@@ -36,7 +36,7 @@ namespace Tests
 			const QualityPattern::View v = QualityPattern::Read(nullptr, false);
 			Assert::IsFalse(v.available);
 			Assert::IsTrue(v.role == QualityPattern::FrameRole::Unknown);
-			Assert::IsFalse(v.reason.empty());
+			Assert::AreEqual(std::string("no producer or no record"), v.reason);
 			Assert::IsTrue(v.fallback.engaged && v.fallback.id == "product.quality_pattern");
 			// ProductFallback format = catalog text + ": " + cause (FallbackCatalog.h ProductFallback)
 			Assert::AreEqual(std::string("frame pattern record unavailable, stale or of another unit version: temporal detail and dither need show it as not produced and use their classical forms: no producer or no record"), v.fallback.reason);
