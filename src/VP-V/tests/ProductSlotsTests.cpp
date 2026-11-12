@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -147,6 +148,106 @@ namespace ProductSlotsTestsNs
 				return Buf(p).Live(size_t(ri.index));
 			return nullptr;
 		}
+	};
+
+	// ---- B3 X1 seal lag: 0 a (lag 0), 1 b (reads a(N), seal lag `lagB`), 2 c (lag 0, reads b(N); missing-input form) ----
+	Registry LagRegistry(uint8_t lagB)
+	{
+		using namespace VpIndicator;
+		const CounterMask content = Bit(kFull) | Bit(kContinuity);
+		std::vector<ProductDecl> d;
+		d.push_back(detail::Make(kA, "a", "a", Backend::Cpu, 0, Tier::T0, content, 0));
+		d.push_back(detail::Make(kB, "b", "b", Backend::Cpu, 0, Tier::T0, content, 0));
+		d.push_back(detail::Make(kC, "c", "c", Backend::Cpu, 0, Tier::T0, content, 0));
+		detail::AddInput(d[kB], kA, 0);
+		d[kB].sealLag = lagB;
+		detail::AddInput(d[kC], kB, 0);
+		d[kC].missingInputForm = true;
+		for (ProductDecl& p : d)
+			p.size.fixedBytes = 64;
+		return Registry(std::move(d));
+	}
+
+	GraphSettings LagSettings(QueueMode mode = QueueMode::Normal, uint8_t laneLead = 1)
+	{
+		GraphSettings gs;
+		gs.dims.width = 64;
+		gs.dims.height = 64;
+		gs.renderAhead = 0;
+		gs.laneLead = laneLead;
+		gs.queueMode = mode;
+		return gs;
+	}
+
+	Graph LagGraph(uint8_t lagB, QueueMode mode = QueueMode::Normal, uint8_t laneLead = 1)
+	{
+		ConsumerDecl c;
+		c.id = 1;
+		AddConsume(c, kC);
+		return BuildGraph(LagRegistry(lagB), { c }, LagSettings(mode, laneLead));
+	}
+
+	// The Harness's lane and render over a seal-lag graph; FinalSeal = SlotTable::ResolveLagged with the render stamp (the frame's
+	// render still reads it), Retire = ReleaseAfter (the frame is done); Finalize = both.
+	struct LagHarness {
+		Graph graph;
+		SlotTable table;
+		Indicator ind;
+		std::vector<CpuBuffers> bufs;
+
+		explicit LagHarness(uint8_t lagB, QueueMode mode = QueueMode::Normal, uint8_t laneLead = 1)
+			: graph(LagGraph(lagB, mode, laneLead))
+			, table(graph)
+			, ind(13, 64)
+		{
+			table.SetStampSource([this](uint64_t s) { return ind.StampOf(s); });
+			for (const Node& n : graph.nodes)
+				bufs.emplace_back(n);
+		}
+		size_t IndexOf(ProductId p) const { return size_t(graph.IndexOf(p)); }
+		SlotSet& Set(ProductId p) { return *table.Find(p); }
+		CpuBuffers& Buf(ProductId p) { return bufs[IndexOf(p)]; }
+		bool Lane(ProductId p, uint64_t seq)
+		{
+			SlotSet& s = Set(p);
+			LaneTicket t;
+			if (s.Claim(seq, Provenance::AheadLane, kNoFence, &t) != ClaimResult::Claimed)
+				return false;
+			Header& h = s.LaneHeader(t);
+			LaneInputs pins;
+			if (!table.LaneAncestors(p, seq, h, pins)) {
+				s.Abandon(t);
+				return false;
+			}
+			h.honoured = ind.StampOf(seq);
+			std::memset(Buf(p).Ring(t.slot), Pattern(seq, p, false), Buf(p).Bytes());
+			const PublishResult r = s.Publish(t);
+			pins.Unpin();
+			return r == PublishResult::Published;
+		}
+		bool FillOne(const Node& n, uint64_t s, int live)
+		{
+			std::memset(Buf(n.id).Live(size_t(live)), Pattern(s, n.id, true), Buf(n.id).Bytes());
+			return true;
+		}
+		const std::vector<ProductFrameResult>& Resolve(uint64_t seq)
+		{
+			const Stamp st = ind.Seal(seq);
+			return table.Resolve(seq, st, [this](const Node& n, uint64_t s, int live, Header&, uint32_t) { return FillOne(n, s, live); });
+		}
+		const std::vector<ProductFrameResult>& FinalSeal(uint64_t seq)
+		{
+			const Stamp st = ind.StampOf(seq);
+			return table.ResolveLagged(seq, st, [this](const Node& n, uint64_t s, int live, Header&, uint32_t) { return FillOne(n, s, live); });
+		}
+		void Retire(uint64_t seq) { table.ReleaseAfter(seq); }   // the frame retires after its render (AnalysisLane::OnFrameRetired order)
+		const std::vector<ProductFrameResult>& Finalize(uint64_t seq)
+		{
+			const std::vector<ProductFrameResult>& r = FinalSeal(seq);
+			Retire(seq);
+			return r;
+		}
+		const ProductFrameResult& Result(const std::vector<ProductFrameResult>& r, ProductId p) const { return r[IndexOf(p)]; }
 	};
 
 	TEST_CLASS(ProductSlotsTests)
@@ -851,6 +952,177 @@ namespace ProductSlotsTestsNs
 				+ "; lane input reads " + std::to_string(laneReads.load()) + " pinned live skips "
 				+ std::to_string(a.Counters().pinnedLiveSkips.load()))
 				.c_str());
+		}
+
+		// ---- B3 X1: per-product seal lag ----
+
+		TEST_METHOD(OnTimeOrAbsentReadNeverInheritsLag)
+		{
+			LagHarness h(2);
+			Assert::IsTrue(h.table.Valid());
+			Assert::AreEqual(2, int(h.graph.Find(kB)->sealLag));
+			Assert::AreEqual(0, int(h.graph.Find(kC)->sealLag), L"the reader declares no lag and inherits none");
+			Assert::AreEqual(2, int(h.table.MaxSealLag()));
+			// Frame 0: a and c have lane results, b does not (its lane is behind): b is PENDING at 0.
+			Assert::IsTrue(h.Lane(kA, 0));
+			const auto& res = h.Resolve(0);
+			const ProductFrameResult& b = h.Result(res, kB);
+			Assert::IsTrue(b.pending && b.final == SealOutcome::Pending && b.finalReason == SealReason::AwaitingFinalSeal);
+			Assert::IsTrue(std::string(Token(SealReason::AwaitingFinalSeal)) == "awaiting_final_seal");
+			// c is sealed ON TIME at frame 0 (never Pending): b is ABSENT for it, so c is its declared missing-input form.
+			const ProductFrameResult& c = h.Result(res, kC);
+			Assert::IsFalse(c.pending);
+			Assert::AreEqual(0, int(c.sealLag));
+			Assert::IsTrue(c.liveFilled && c.final == SealOutcome::Sealed && (c.missingInputs & 1u) != 0u);
+			Assert::IsTrue(h.Set(kC).Read(0).header->prov == Provenance::LiveFallback, L"visible reduced form, not a full result");
+			Assert::AreEqual(uint64_t(1), h.Set(kB).Counters().onTimeAbsent.load(), L"counted on the lagged product");
+			Assert::IsTrue(h.Set(kB).Read(0).kind == ReadInfo::None, L"pending is not readable");
+			// The final seal of b(0) at frame 2 does not change c(0).
+			h.Resolve(1);
+			h.Finalize(1);
+			h.Resolve(2);
+			const auto& fin = h.FinalSeal(2);   // read during the render of 2, before it retires
+			const ProductFrameResult& bf = h.Result(fin, kB);
+			Assert::AreEqual(uint64_t(0), bf.seq);
+			Assert::IsTrue(bf.liveFilled && bf.final == SealOutcome::Sealed, L"no lane result: live-filled at the final seal");
+			Assert::IsTrue(h.Set(kC).Read(0).header->prov == Provenance::LiveFallback, L"the reader's frame stays what it was");
+		}
+
+		TEST_METHOD(ALaggedSealCountsAheadLiveFilledLateAndAbsent)
+		{
+			LagHarness h(2);
+			// Frame 0: b on time -> AHEAD.
+			Assert::IsTrue(h.Lane(kA, 0));
+			Assert::IsTrue(h.Lane(kB, 0));
+			const auto& r0 = h.Resolve(0);
+			Assert::IsTrue(h.Result(r0, kB).final == SealOutcome::Sealed && h.Result(r0, kB).seal.reason == SealReason::Accepted);
+			Assert::IsTrue(h.Result(r0, kC).final == SealOutcome::Sealed && h.Result(r0, kC).missingInputs == 0u, L"an ahead frame is read in full");
+			h.Finalize(0);
+			// Frame 1: no b lane result at 1; it publishes after the render of 1 -> LATE at frame 3.
+			Assert::IsTrue(h.Lane(kA, 1));
+			Assert::IsTrue(h.Resolve(1)[h.IndexOf(kB)].pending);
+			Assert::IsTrue(h.Lane(kB, 1), L"a pending frame keeps its slot for the late lane result");
+			h.Finalize(1);
+			// Frame 2: no b lane result at all -> LIVE-FILLED at frame 4.
+			Assert::IsTrue(h.Lane(kA, 2));
+			Assert::IsTrue(h.Resolve(2)[h.IndexOf(kB)].pending);
+			h.Finalize(2);   // b(0) was ahead: nothing to finalise
+			Assert::IsTrue(h.Lane(kA, 3));
+			h.Resolve(3);
+			const auto& f3 = h.FinalSeal(3);
+			const ProductFrameResult& late = h.Result(f3, kB);
+			Assert::IsTrue(late.late && late.seq == 1u && late.final == SealOutcome::Sealed && !late.liveFilled);
+			Assert::IsTrue(h.Set(kB).Read(1).kind == ReadInfo::Ring, L"the late lane result is the frame");
+			h.Retire(3);
+			Assert::IsTrue(h.Lane(kA, 4));
+			h.Resolve(4);
+			const auto& f4 = h.Finalize(4);
+			Assert::IsTrue(h.Result(f4, kB).liveFilled && h.Result(f4, kB).seq == 2u);
+			// Frame 3 (pending, from Resolve(3)): a resync after 3 -> ABSENT, never live-filled from pre-resync state.
+			h.ind.Advance(VpIndicator::kFull, Cause::RendererReset, 5);
+			Assert::IsTrue(h.Lane(kA, 5));
+			h.Resolve(5);
+			const auto& f5 = h.Finalize(5);
+			const ProductFrameResult& rej = h.Result(f5, kB);
+			Assert::IsTrue(rej.seq == 3u && rej.final == SealOutcome::Unavailable && rej.finalReason == SealReason::StampMismatch);
+			Assert::IsFalse(rej.liveFilled);
+			const SlotCounters& k = h.Set(kB).Counters();
+			Assert::AreEqual(uint64_t(1), k.sealAhead.load());
+			Assert::AreEqual(uint64_t(1), k.sealLate.load());
+			Assert::AreEqual(uint64_t(1), k.sealLiveFilled.load());
+			Assert::AreEqual(uint64_t(1), k.sealAbsent.load());
+			Assert::AreEqual(uint64_t(1), k.lateResyncRejected.load());
+			Assert::AreEqual(uint64_t(5), k.sealPending.load(), L"frames 1..5 pending (0 was ahead)");
+			// a and c (sealLag 0) never count a seal class.
+			Assert::AreEqual(uint64_t(0), h.Set(kA).Counters().sealAhead.load() + h.Set(kC).Counters().sealPending.load());
+		}
+
+		TEST_METHOD(ADeterministicRunSealsALaggedProductAtTheFinalSealOnly)
+		{
+			LagHarness h(2);
+			h.table.SetDeterministicSeal(true);
+			Assert::IsTrue(h.Lane(kA, 0));
+			Assert::IsTrue(h.Lane(kB, 0));
+			Assert::IsTrue(h.Resolve(0)[h.IndexOf(kB)].pending, L"never ahead in a deterministic run");
+			h.Resolve(1);
+			h.Finalize(1);
+			h.Resolve(2);
+			const auto& f = h.Finalize(2);
+			Assert::IsTrue(h.Result(f, kB).late && h.Result(f, kB).seq == 0u);
+			Assert::AreEqual(uint64_t(0), h.Set(kB).Counters().sealAhead.load());
+		}
+
+		TEST_METHOD(ASkippedFinalSealIsCountedUnfinalisedWhenTheSlotIsReused)
+		{
+			LagHarness h(2);
+			const uint64_t ring = h.Set(kB).Ring();
+			const uint64_t last = 2u + ring + 1u;
+			for (uint64_t s = 0; s <= last; ++s) {
+				Assert::IsTrue(h.Lane(kA, s));
+				Assert::IsTrue(h.Resolve(s)[h.IndexOf(kB)].pending, L"b has no lane result: pending at N");
+				if (s != 4u)
+					h.FinalSeal(s);   // render start 4 skipped: the final seal of b(2) never runs
+				h.Retire(s);
+			}
+			const SlotCounters& k = h.Set(kB).Counters();
+			Assert::AreEqual(uint64_t(1), k.sealUnfinalised.load(), L"b(2) found unfinalised when its slot was reused");
+			const uint64_t inFlight = 2u;   // b(last - 1), b(last): their final seals are still ahead
+			Assert::AreEqual(k.sealPending.load(), k.sealLiveFilled.load() + k.sealLate.load() + k.sealAbsent.load()
+				+ k.sealUnfinalised.load() + inFlight, L"every pending frame is in exactly one class");
+		}
+
+		TEST_METHOD(CompetitiveLowLatencyRunsASealLagAtZero)
+		{
+			for (int m = 0; m < 2; ++m) {
+				const Graph g = m == 0 ? LagGraph(2, QueueMode::Competitive) : LagGraph(2, QueueMode::Normal, 0);
+				Assert::IsTrue(g.valid);
+				Assert::AreEqual(0, int(g.Find(kB)->sealLag));
+				Assert::AreEqual(2, int(g.Find(kB)->declaredSealLag));
+				Assert::AreEqual(0, int(g.maxSealLag));
+				Assert::IsTrue(g.sealLagForcedZero);
+				SlotTable t(g);
+				Assert::AreEqual(0, int(t.MaxSealLag()));
+			}
+			// Lag 0 (and the forced-0 graph): the same sizes as a graph that never declared a seal lag.
+			const Graph none = LagGraph(0);
+			const Graph forced = LagGraph(2, QueueMode::Competitive);
+			const Graph lagged = LagGraph(2);
+			Assert::IsFalse(none.sealLagForcedZero);
+			for (size_t i = 0; i < none.nodes.size(); ++i) {
+				Assert::AreEqual(int(none.nodes[i].ring), int(forced.nodes[i].ring));
+				Assert::AreEqual(int(none.nodes[i].ring) + 2, int(lagged.nodes[i].ring), L"graph K = 2: every ring + 2");
+			}
+			Assert::AreEqual(none.framesInFlight + 2u, lagged.framesInFlight);
+		}
+
+		TEST_METHOD(TheRegistryRejectsAnInvalidSealLag)
+		{
+			const char* why = "";
+			Assert::IsTrue(LagRegistry(kMaxSealLag).Validate(&why));
+			Assert::IsFalse(LagRegistry(uint8_t(kMaxSealLag + 1)).Validate(&why));
+			Assert::IsTrue(std::string(why).find("seal lag deeper") != std::string::npos);
+			std::vector<ProductDecl> d = LagRegistry(2).All();
+			d[kB].backend = Backend::RenderOnly;
+			Assert::IsFalse(Registry(d).Validate(&why));
+			d = LagRegistry(2).All();
+			d[kA].singletonStore = true;
+			Assert::IsFalse(Registry(d).Validate(&why));
+		}
+
+		TEST_METHOD(ReleaseRunsTheGraphSealLagLater)
+		{
+			LagHarness h(2);
+			const uint64_t hist = h.graph.Find(kB)->history;
+			// b(0) is finalised at frame 2; with K = 2 it is released only when frame history + 2 retires (today: frame history).
+			for (uint64_t s = 0; s <= hist + 2u; ++s) {
+				Assert::IsTrue(h.Lane(kA, s));
+				h.Resolve(s);
+				h.FinalSeal(s);
+				if (s >= 2u)
+					Assert::IsTrue(h.Set(kB).Read(0).kind != ReadInfo::None, L"kept until its final seal and history");
+				h.Retire(s);
+			}
+			Assert::IsTrue(h.Set(kB).Read(0).kind == ReadInfo::None, L"released K frames after today's release point");
 		}
 	};
 }

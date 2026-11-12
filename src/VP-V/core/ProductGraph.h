@@ -95,6 +95,8 @@ struct Node {
     bool shortQueue = false;          // stands in for a look-ahead product the queue cannot feed
     ProductId reducedFrom = kNoProduct;   // that look-ahead product (declared id) when shortQueue
     bool laneVisible = false;         // ProductDecl::laneVisible (a view the lane can read: never demotes a lane reader)
+    uint8_t sealLag = 0;              // the final seal runs at N + sealLag (B3 X1; 0 = today; Competitive forces 0)
+    uint8_t declaredSealLag = 0;      // ProductDecl::sealLag (differs from sealLag when Competitive forced 0)
     uint64_t bufferBytes = 0;
     uint64_t ringBytes = 0;   // lane ring buffers (0 for render-only)
     uint64_t liveBytes = 0;   // live pool, separate memory
@@ -221,6 +223,11 @@ struct Graph {
     // (Products.h kLeadChainWarning). Empty text = none. Shown on the analysis status lines and the Fallbacks list.
     std::vector<LeadChainRead> leadChainReads;
     std::string leadChainWarning;
+    // B3 X1 seal lag: the deepest node sealLag. When above 0 every ring and live pool (single-store / held-state pools excepted) holds
+    // maxSealLag more frames and releases run maxSealLag frames later (SlotTable::ReleaseAfter, AnalysisLane::OnFrameRetired), so a
+    // frame and its ancestors stay until the final seal. 0 = today's sizes, byte for byte.
+    uint8_t maxSealLag = 0;
+    bool sealLagForcedZero = false;   // a product declares a seal lag and the mode (Competitive / lane lead 0) runs it at 0
 
     int IndexOf(ProductId id) const
     {
@@ -303,6 +310,15 @@ inline uint8_t EffectiveLead(const ProductDecl& d, const GraphSettings& gs)
     return m < avail ? m : avail;
 }
 
+// The seal lag `d` runs with (B3 X1): its declared sealLag, 0 under Competitive / lane lead 0 (low latency is lag 0 only) and for a
+// render-only product (no lane result to wait for).
+inline uint8_t SealLagOf(const ProductDecl& d, const GraphSettings& gs)
+{
+    if (d.sealLag == 0 || d.backend == Backend::RenderOnly || gs.laneLead == 0 || gs.queueMode == QueueMode::Competitive)
+        return 0;
+    return d.sealLag;
+}
+
 // Resolve with the queue: the no-engine substitute first, then the short-queue substitute for a
 // look-ahead product that cannot get any lead. *shortQueue is set when the latter applied.
 inline ProductId Resolve(const Registry& reg, ProductId id, const GraphSettings& gs, bool* shortQueue = nullptr)
@@ -313,7 +329,11 @@ inline ProductId Resolve(const Registry& reg, ProductId id, const GraphSettings&
     if (p == kNoProduct)
         return p;
     const ProductDecl& d = reg.Get(p);
-    if (MaxDeclaredLead(d) > 0 && EffectiveLead(d, gs) == 0 && d.shortQueueSubstitute != kNoProduct) {
+    const uint8_t declaredLead = MaxDeclaredLead(d);
+    const uint8_t eff = EffectiveLead(d, gs);
+    // B3 X1: a lagged-seal lead reader runs its full declared lead or its substitute (the mode follows the declared lead, no partial lead).
+    const bool partialLagged = SealLagOf(d, gs) > 0 && eff > 0 && eff < declaredLead;   // B3 X1: mode per declared lead
+    if (declaredLead > 0 && (eff == 0 || partialLagged) && d.shortQueueSubstitute != kNoProduct) {
         if (shortQueue)
             *shortQueue = true;
         return Resolve(reg, d.shortQueueSubstitute, gs.ofaPresent);
@@ -457,6 +477,16 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
     const unsigned R = gs.renderAhead;
     size_t maxHistory = 0;
     unsigned maxLead = 0;
+    // B3 X1: the deepest seal lag of the closure; every ring / live pool holds K more frames (0 = today).
+    unsigned K = 0;
+    for (ProductId p : order) {
+        const uint8_t lag = SealLagOf(reg.Get(p), gs);
+        if (lag > K)
+            K = lag;
+        if (reg.Get(p).sealLag > 0 && lag == 0)
+            g.sealLagForcedZero = true;
+    }
+    g.maxSealLag = uint8_t(K);
     for (ProductId p : order) {
         const ProductDecl& d = reg.Get(p);
         Node node;
@@ -489,6 +519,8 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         node.leadRead = maxLeadRead[p];
         node.reducedFrom = reducedFrom[p];
         node.shortQueue = reducedFrom[p] != kNoProduct;
+        node.sealLag = SealLagOf(d, gs);
+        node.declaredSealLag = d.sealLag;
         if (d.singletonStore && (maxLag[p] > 1 || maxLeadRead[p] > 0)) {
             // The store is a two-buffer ping-pong: a reader deeper than lag 1 (or a look-ahead) would read a buffer the producer already rewrote.
             g.error = "a single-store product is read at lag 0 or 1 only (a consumer or product reads it deeper); the analysis graph was not built";
@@ -500,7 +532,7 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
             return g;
         }
         const unsigned ring = d.singletonStore ? kSingletonStoreBuffers
-                              : unsigned(node.history) + 1u + R + L + q + (node.holdsSpan ? 1u : 0u) + unsigned(node.leadRead);
+                              : unsigned(node.history) + 1u + R + L + q + (node.holdsSpan ? 1u : 0u) + unsigned(node.leadRead) + K;
         if (ring > kSlotCountMax) {
             // Never clamped: a ring smaller than history + 1 would starve the lane with no sign of it. Same visible reject as an overflowing read list.
             g.error = "a product needs more than 255 ring slots (history, render-ahead and lane lead together); the analysis graph was not built";
@@ -514,7 +546,7 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         node.ring = uint8_t(ring);
         const unsigned live = (d.singletonStore || d.heldState) ? 0u
                               : unsigned(node.history) + 1u + R + (node.holdsSpan ? 1u : 0u)
-                                    + laneReadRefs[p] * unsigned(gs.laneJobsInFlight == 0 ? 1u : gs.laneJobsInFlight);
+                                    + laneReadRefs[p] * unsigned(gs.laneJobsInFlight == 0 ? 1u : gs.laneJobsInFlight) + K;
         if (live > kSlotCountMax) {
             g.error = "a product needs more than 255 live-pool buffers (history, render-ahead and lane readers together); the analysis graph was not built";
             g.errorProduct = p;
@@ -553,6 +585,8 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         for (size_t k = 0; k < nd.inputCount; ++k) {
             if (nd.inputs[k].lead == 0 || !reg.Get(nd.inputs[k].product).orderedChain)
                 continue;
+            if (nd.sealLag >= nd.inputs[k].lead)
+                continue;   // B3 X1: the final seal reads the chain frame sealed (render-valid): not a warning
             bool known = false;
             for (LeadChainRead& r : g.leadChainReads)
                 if (r.reader == nd.id && r.chain == nd.inputs[k].product) {
@@ -570,7 +604,7 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         }
     g.leadChainWarning = reg.LeadChainWarningText(g.leadChainReads);
     g.framesInFlight = size_t(gs.queueDepth) + gs.lookAheadWalk + maxHistory + R + gs.laneLead + 1u
-                       + maxLead;
+                       + maxLead + K;
     g.valid = true;
     return g;
 }

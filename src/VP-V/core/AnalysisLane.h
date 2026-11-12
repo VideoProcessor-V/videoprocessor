@@ -794,12 +794,13 @@ public:
 
         const VpIndicator::Stamp stamp = ind_->StampOf(seq);
         LaneState* sp = st.get();
-        const std::vector<ProductFrameResult>& res = st->table->Resolve(
-            seq, stamp, [this, sp](const Node& n, uint64_t s, int live, Header& hdr, uint32_t missing) {
-                if (regulator_.StateOf(n.id) == ProductState::Dropped)
-                    return false;   // dropped by the regulator: declined, visible
-                return LiveFillOf(*sp, n, s, live, hdr, missing);
-            });
+        auto fill = [this, sp](const Node& n, uint64_t s, int live, Header& hdr, uint32_t missing) {
+            if (regulator_.StateOf(n.id) == ProductState::Dropped)
+                return false;   // dropped by the regulator: declined, visible
+            return LiveFillOf(*sp, n, s, live, hdr, missing);
+        };
+        st->table->SetDeterministicSeal(det_);   // B3 X1: a deterministic run seals lagged-seal products at the final seal only
+        const std::vector<ProductFrameResult>& res = st->table->Resolve(seq, stamp, fill);
         lastAhead_ = lastInRender_ = lastDeclined_ = 0;
         for (const ProductFrameResult& r : res) {
             if (r.seal.outcome == SealOutcome::Sealed && r.seal.reason == SealReason::Accepted)
@@ -808,6 +809,17 @@ public:
                 ++lastInRender_;
             if (r.final == SealOutcome::Unavailable && r.finalReason == SealReason::FillDeclined)
                 ++lastDeclined_;
+        }
+        if (st->graph.maxSealLag > 0) {
+            // B3 X1: the final seal of lagged-seal frames N = seq - sealLag (after this frame's seal, so a lead ancestor is
+            // sealed). Their classes are counted on the product's set (ahead / live-filled / late / absent, StatusLines).
+            const std::vector<ProductFrameResult>& lag = st->table->ResolveLagged(seq, stamp, fill);
+            for (const ProductFrameResult& r : lag) {
+                if (r.liveFilled)
+                    ++lastInRender_;
+                if (r.final == SealOutcome::Unavailable && r.finalReason == SealReason::FillDeclined)
+                    ++lastDeclined_;
+            }
         }
         totalAhead_ += lastAhead_;
         totalInRender_ += lastInRender_;
@@ -850,10 +862,18 @@ public:
             const Node& n = st->table->NodeAt(i);
             if (n.backend == Backend::RenderOnly || !st->runner->Laned(n.id) || !st->runner->HasProducer(n.id))
                 continue;   // no producer: nothing to wait for (the seal fills it live), no bound burnt
+            // B3 X1: a lagged-seal product is sealed at its final seal only in a deterministic run: no wait at N; the wait (same
+            // bound, same missed-bound count) is for its frame N = seq - sealLag, finalised at this render start (ResolveLagged).
+            uint64_t waitSeq = seq;
+            if (n.sealLag > 0) {
+                if (seq < n.sealLag || seq - n.sealLag < st->firstSeq)
+                    continue;   // no frame of this graph to finalise yet
+                waitSeq = seq - n.sealLag;
+            }
             uint32_t m = 0;
             const Variants v = st->info[i].identical ? Variants::Identical : Variants::NonIdentical;
             const SlotSet& set = st->table->At(i);
-            const WaitDecision d = DecideWait(v, set.LaneGranted(), set.StateOf(seq), p, waitedUs_, &m);
+            const WaitDecision d = DecideWait(v, set.LaneGranted(), set.StateOf(waitSeq), p, waitedUs_, &m);
             if (d == WaitDecision::Wait)
                 more = std::max(more, m);
             else if (d == WaitDecision::BoundMissed)
@@ -1019,13 +1039,17 @@ public:
         const std::shared_ptr<LaneState> st = std::atomic_load(&state_);
         if (!st)
             return;
+        // B3 X1: with a lagged-seal product (graph K = maxSealLag > 0) every release and the source drop run K frames later: a
+        // frame and its ancestors stay until the final seal at N + K (the rings were sized + K). K = 0: today.
+        const uint64_t K = st->graph.maxSealLag;
         for (size_t i = 0; i < st->table->Count(); ++i) {
-            const uint64_t h = st->table->NodeAt(i).history;
+            const uint64_t h = uint64_t(st->table->NodeAt(i).history) + K;
             // A frame that left its history before this graph's first frame was never in this table.
             if (seq >= h && seq - h >= st->firstSeq)
                 st->table->At(i).Release(seq - h, releaseFenceValue);
         }
-        st->ring->Drop(seq);   // the ring's copy (and its host plane hold) ends with the frame; a running job keeps its own
+        if (seq >= K)
+            st->ring->Drop(seq - K);   // the ring's copy (and its host plane hold) ends with the frame; a running job keeps its own
         NotifyWake();
     }
 
@@ -1075,7 +1099,7 @@ public:
         }
         regulator_.OnFrame(seq, slackMs, renderOnlyMs, missed);
         if (lateNow > 0)
-            st->runner->SetSkipBefore(seq + 1u);   // a late lane skips to the next frame now
+            st->runner->SetLateSkipBefore(seq + 1u);   // a late lane skips to the next frame now (lowered by sealLag, B3 X1)
         ApplyRegulator(*st);
     }
 
@@ -1204,6 +1228,39 @@ public:
             out.push_back("Analysis: " + std::to_string(totalDeclined_) +
                           " product frames unavailable (no producer result and no live fill; the consumer uses its own fallback)");
         out.push_back(std::string("Analysis lead: ") + LeadText(lead_));
+        if (st->graph.maxSealLag > 0) {
+            // B3 X1 (CHAR GAP-2): per lagged-seal product, how each frame ended; never log-only.
+            for (size_t i = 0; i < st->table->Count(); ++i) {
+                const Node& n = st->table->NodeAt(i);
+                if (n.sealLag == 0)
+                    continue;
+                const SlotCounters& c = st->table->At(i).Counters();
+                std::string line = "Analysis seal " + NameOf(*st, n.id) + " (seal lag " + std::to_string(unsigned(n.sealLag)) + "): " +
+                                   std::to_string(c.sealAhead.load(std::memory_order_relaxed)) + " ahead, " +
+                                   std::to_string(c.sealLiveFilled.load(std::memory_order_relaxed)) + " live-filled, " +
+                                   std::to_string(c.sealLate.load(std::memory_order_relaxed)) + " late, " +
+                                   std::to_string(c.sealAbsent.load(std::memory_order_relaxed)) + " absent";
+                const uint64_t rej = c.lateResyncRejected.load(std::memory_order_relaxed);
+                const uint64_t ota = c.onTimeAbsent.load(std::memory_order_relaxed);
+                const uint64_t unf = c.sealUnfinalised.load(std::memory_order_relaxed);
+                if (rej > 0)
+                    line += " (" + std::to_string(rej) + " rejected by a resync)";
+                if (unf > 0)
+                    line += "; " + std::to_string(unf) + " never finalised (a render frame was skipped)";
+                bool sealedLead = false;
+                for (size_t k = 0; k < n.inputCount; ++k)
+                    sealedLead = sealedLead || (n.inputs[k].lead > 0 && n.sealLag >= n.inputs[k].lead);
+                if (sealedLead)
+                    line += "; never ahead (it reads a lead frame sealed at its final seal: late = accepted at the final seal)";
+                if (ota > 0)
+                    line += "; readers found it absent on time x" + std::to_string(ota);
+                if (det_)
+                    line += "; deterministic: final seal only";
+                out.push_back(line);
+            }
+        }
+        if (st->graph.sealLagForcedZero)
+            out.push_back("Analysis seal: lagged-seal products run at seal lag 0 in this mode (competitive low latency or no lane lead)");
         if (!externalIds_.empty()) {
             std::string names;
             for (ProductId id : externalIds_)
@@ -1306,6 +1363,15 @@ public:
                                                          unsigned(regulator_.OfaStep())));
             if (!st->graph.leadChainWarning.empty())   // appended only when engaged (a WARNING, not a reject): the list keeps its shape otherwise
                 out.push_back(FallbackCatalog::SkeletonLeadChain(st->graph.leadChainWarning));
+            if (st->graph.sealLagForcedZero) {   // B3 X1: appended only when engaged (no product of the catalog declares a lag today)
+                std::vector<std::string> zeroed;
+                for (size_t i = 0; i < st->table->Count(); ++i) {
+                    const Node& n = st->table->NodeAt(i);
+                    if (n.declaredSealLag > 0 && n.sealLag == 0)
+                        zeroed.push_back(NameOf(*st, n.id));
+                }
+                out.push_back(FallbackCatalog::AnalysisSealLagZero(zeroed));
+            }
         }
         out.push_back(FallbackCatalog::AnalysisLaneDeterminism(st && det_ ? missedBounds_ : 0u));
         out.push_back(FallbackCatalog::SourceStatsWalk(settings_.walk == VpLaneProducts::WalkSource::Lane,

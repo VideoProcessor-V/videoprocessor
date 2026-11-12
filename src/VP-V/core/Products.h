@@ -196,6 +196,7 @@ struct InputRef {
 // 384 B per slot header pair; nothing per frame beyond the header copy of a live fill.
 constexpr size_t kMaxInputs = 16;
 constexpr uint8_t kHistoryFixed = 0xFF;   // ProductDecl::historyFloor: the history is not governed
+constexpr uint8_t kMaxSealLag = 8;        // ProductDecl::sealLag: the deepest final seal (frames behind the render)
 
 struct ProductDecl {
     ProductId id = kNoProduct;
@@ -264,6 +265,20 @@ struct ProductDecl {
     // BuildGraph the same in a consumer's reads (visible reason). Set on P14 source identity and P14g source geometry (every reader of both
     // is a lag-1 held read in the catalog; a test pins it).
     bool heldState = false;
+    // SEAL LAG (B3 X1): frame N of the product gets its FINAL seal at render start of N + sealLag (0 = today: sealed at N).
+    // Each frame is one of: AHEAD (its lane result was accepted on time, at N), LIVE-FILLED (made by the render's live fill at
+    // the final seal), LATE (a lane result accepted at the final seal N + sealLag: published after N, or published by N but not
+    // acceptable then because a lead ancestor N + k was not sealed yet; a product with sealLag >= a lead is never AHEAD) or
+    // ABSENT (none of these: unavailable, or a resync after N made the late result invalid). Between N and the final seal the frame is
+    // PENDING (SealOutcome::Pending): absent for every reader at N.
+    // ON-TIME-OR-ABSENT: a product reading a lagged input gets it on time (accepted at its own seal) or absent (its declared
+    // missing-input form, or unavailable); the lag is NEVER inherited (BuildGraph keeps every reader's own sealLag).
+    // Lead read: with sealLag >= a lead, the lead ancestor N+k is SEALED by the final seal (render-valid), so a lead read of
+    // an ordered chain is a normal sealed read (no warning, no K1 residual risk). Such a reader runs with its full declared
+    // lead or its short-queue substitute (no partial lead: the mode follows the declared lead).
+    // Competitive mode (lane lead 0) forces 0; a deterministic run seals only at the final seal (SlotTable::SetDeterministicSeal).
+    // Registry::Validate: <= kMaxSealLag, a lane backend, not an ordered chain / single store / held state, no single-store input.
+    uint8_t sealLag = 0;
     // Set by detail::AddInput/AddLead when a declaration named more than kMaxInputs reads: the extra read was NOT
     // recorded. Registry::Validate rejects the declaration with a plain reason (fail closed, visible; Release has no
     // assert).
@@ -428,6 +443,17 @@ public:
                 if (!d.missingInputForm)
                     return fail("an ordered chain product needs a missing-input form (the chain start and gaps run reduced)");
             }
+            if (d.sealLag > 0) {
+                if (d.sealLag > kMaxSealLag)
+                    return fail("a seal lag deeper than the limit (8 frames)");
+                if (d.backend == Backend::RenderOnly)
+                    return fail("a lagged-seal product needs a lane backend");
+                if (d.orderedChain || d.singletonStore || d.heldState)
+                    return fail("an ordered chain, single-store or held-state product has no seal lag");
+                for (size_t k = 0; k < d.inputCount; ++k)
+                    if (decls_[d.inputs[k].product].singletonStore)
+                        return fail("a lagged-seal product does not read a single-store product (its buffer is rewritten before the final seal)");
+            }
             if (d.historyFloor != kHistoryFixed && d.historyFloor > d.history)
                 return fail("history floor above the full history");
             if (d.heldState && d.backend == Backend::RenderOnly)
@@ -545,6 +571,8 @@ public:
                 const InputRef& in = d.inputs[k];
                 if (in.lead == 0 || !Has(in.product) || !decls_[in.product].orderedChain)
                     continue;
+                if (d.sealLag >= in.lead)
+                    continue;   // a lagged final seal reads the chain frame SEALED: not a warning
                 bool known = false;
                 for (LeadChainRead& r : out)
                     if (r.reader == d.id && r.chain == in.product) {

@@ -130,6 +130,9 @@ public:
         return st && st->laned.load(std::memory_order_acquire);
     }
     void SetSkipBefore(uint64_t seq) { skipBefore_.store(seq, std::memory_order_release); }
+    // B3 X1: a late lane skips to the frame after the late seal. A lagged-seal product's frames stay open until N + sealLag, so
+    // its skip is lowered by its lag, as the sealed floor in StartJob is (sealLag 0 = SetSkipBefore, today).
+    void SetLateSkipBefore(uint64_t seq) { lateSkipBefore_.store(seq, std::memory_order_release); }
 
     const LaneProductCounters& Counters(ProductId id) const
     {
@@ -234,8 +237,19 @@ private:
         const uint64_t skip = skipBefore_.load(std::memory_order_acquire);
         if (skip > seq)
             seq = skip;
-        if (indicator_ && indicator_->HasSealed() && indicator_->LastSealed() + 1u > seq)
-            seq = indicator_->LastSealed() + 1u;
+        const uint64_t lateSkip = lateSkipBefore_.load(std::memory_order_acquire);
+        const uint64_t lateFloor = lateSkip > st.node->sealLag ? lateSkip - st.node->sealLag : 0u;
+        if (lateFloor > seq)
+            seq = lateFloor;
+        if (indicator_ && indicator_->HasSealed()) {
+            // B3 X1: a lagged-seal product's frame stays open until its final seal (N + sealLag): its lane job may still publish
+            // it (LATE). sealLag 0 = today (the frames after the last sealed one). A frame accepted on time claims Stale (skipped).
+            const uint64_t sealedNext = indicator_->LastSealed() + 1u;
+            const uint64_t lag = st.node->sealLag;
+            const uint64_t floorSeq = sealedNext > lag ? sealedNext - lag : 0u;
+            if (floorSeq > seq)
+                seq = floorSeq;
+        }
         if (seq + 1u > arrived_.load(std::memory_order_acquire)) {
             *out = StepOutcome::WaitingSource;
             return false;
@@ -424,6 +438,7 @@ private:
     std::function<uint64_t(ProductId)> releaseCompleted_;
     std::atomic<uint64_t> arrived_{ 0 };
     std::atomic<uint64_t> skipBefore_{ 0 };
+    std::atomic<uint64_t> lateSkipBefore_{ 0 };   // B3 X1: SetLateSkipBefore (lowered by each node's sealLag)
     uint64_t ignoredProducers_ = 0;
     LaneProductCounters none_;
 };

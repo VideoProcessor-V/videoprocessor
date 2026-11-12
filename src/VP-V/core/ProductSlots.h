@@ -143,6 +143,7 @@ enum class SealOutcome : uint8_t {
     Sealed,       // the ahead result is accepted
     NeedsLive,    // rejected or missing: the render fills it live
     Unavailable,  // overrun / order error / no live buffer / the fill declined
+    Pending,      // B3 X1: a lagged-seal product not accepted on time: absent at N, finalised at N + sealLag (SlotTable::ResolveLagged)
 };
 
 enum class SealReason : uint8_t {
@@ -163,6 +164,7 @@ enum class SealReason : uint8_t {
     NoLiveBuffer,
     FillDeclined,
     InputMissing,        // a live fill lacks an input and the product declares no form for that
+    AwaitingFinalSeal,   // B3 X1: a lagged-seal frame not accepted on time (Pending): its final seal comes at N + sealLag
 };
 
 inline const char* Token(SealReason r)
@@ -185,6 +187,7 @@ inline const char* Token(SealReason r)
     case SealReason::NoLiveBuffer: return "no_live_buffer";
     case SealReason::FillDeclined: return "fill_declined";
     case SealReason::InputMissing: return "input_missing";
+    case SealReason::AwaitingFinalSeal: return "awaiting_final_seal";
     }
     return "?";
 }
@@ -238,6 +241,19 @@ struct SlotCounters {
     std::atomic<uint64_t> chainWaitUnsealed{ 0 }; // ordered chain: frames whose job waited because the predecessor was only Published (its seal not done yet; counted once per frame)
     std::atomic<uint64_t> storeWaitRejected{ 0 }; // single store / held state: (reader, product) pairs whose lane job waited on a REJECTED store frame: a store has no live fill, so the reader's lane job does not run for that frame (the render makes the reader in its declared reduced form, or it is unavailable); counted once per reader frame and per store input, on the store's set
     std::atomic<uint64_t> writeWaitPinned{ 0 };   // lane jobs that found their claimed slot still pinned by a late reader of the previous tenant (counted once per job, by the LaneRunner)
+    // B3 X1 seal lag (products with Node::sealLag > 0 only; all stay 0 otherwise). Every final frame is exactly one of the four classes.
+    std::atomic<uint64_t> sealAhead{ 0 };         // accepted on time (at N)
+    std::atomic<uint64_t> sealLiveFilled{ 0 };    // made by the live fill at the final seal (N + sealLag)
+    std::atomic<uint64_t> sealLate{ 0 };          // a lane result accepted at the final seal: published after N, or published by N but
+                                                  // not acceptable then (a lead ancestor N + k not sealed yet: a product with
+                                                  // sealLag >= a lead is never AHEAD, every lane result of it counts here)
+    std::atomic<uint64_t> sealAbsent{ 0 };        // none of these at the final seal (unavailable, or rejected by a resync after N)
+    std::atomic<uint64_t> sealPending{ 0 };       // frames not accepted on time (Pending at N; each ends in one of the classes above,
+                                                  // or in sealUnfinalised)
+    std::atomic<uint64_t> sealUnfinalised{ 0 };   // Pending frames whose final seal never ran (render start N + sealLag skipped): found
+                                                  // when the slot is reused, so pending = live-filled + late + absent + unfinalised + in flight
+    std::atomic<uint64_t> lateResyncRejected{ 0 };// of sealAbsent: the stamp moved between N and the final seal (a resync after N)
+    std::atomic<uint64_t> onTimeAbsent{ 0 };      // reader frames (at their own seal) that found this lagged product's frame absent
 };
 
 class SlotSet {
@@ -559,6 +575,32 @@ public:
             res.outcome = SealOutcome::NeedsLive;
             res.reason = reason;
             return res;
+        }
+    }
+
+    // B3 X1, render: the ON-TIME accept of a lagged-seal frame at N. Only a Published result whose check is Accepted is sealed (the
+    // same state change and count as Seal); anything else is left exactly as it is (no reject, no count): the final seal decides at
+    // N + sealLag. True = sealed now (AHEAD).
+    template <class Check>
+    bool AcceptOnTime(uint64_t seq, Check check)
+    {
+        if (seq > kSlotSeqMask - ring_)
+            return false;
+        Slot& s = slots_[SlotOf(seq)];
+        const uint64_t mine = Biased(seq);
+        for (;;) {
+            uint64_t raw = s.word.load(std::memory_order_acquire);
+            const SlotWord w = Unpack(raw);
+            if (w.seq != mine || w.state != SlotState::Published)
+                return false;
+            if (check(static_cast<const Header&>(s.laneHdr)) != SealReason::Accepted)
+                return false;
+            SlotWord next = w;
+            next.state = SlotState::Sealed;
+            if (!s.word.compare_exchange_strong(raw, Pack(next), std::memory_order_acq_rel, std::memory_order_acquire))
+                continue;
+            counters_.sealed.fetch_add(1, std::memory_order_relaxed);
+            return true;
         }
     }
 
@@ -915,6 +957,12 @@ struct ProductFrameResult {
     bool liveFilled = false;
     SealReason finalReason = SealReason::OrderError;
     uint32_t missingInputs = 0;   // bit k: input k had no valid content for the live fill
+    // B3 X1 (Node::sealLag > 0 only): pending = not accepted on time (final == Pending, absent for readers at N); late = a lane result
+    // accepted at the final seal (ResolveLagged results). seq = the frame this result is about (ResolveLagged: seq - sealLag).
+    bool pending = false;
+    bool late = false;
+    uint8_t sealLag = 0;
+    uint64_t seq = 0;
 };
 
 // All products of one graph: preallocated SlotSets in topological order, the frozen sealed stamps
@@ -939,6 +987,15 @@ public:
         sealed_.resize(maxRing + 1);
         results_.resize(nodes_.size());
         leadMark_.resize(nodes_.size());
+        for (const Node& n : nodes_)
+            if (n.sealLag > maxSealLag_)
+                maxSealLag_ = n.sealLag;
+        if (maxSealLag_ > 0) {   // B3 X1: only a graph with a lagged-seal product allocates these
+            lagResults_.resize(nodes_.size());
+            pendingMark_.resize(nodes_.size());
+            for (size_t i = 0; i < nodes_.size(); ++i)
+                pendingMark_[i].assign(size_t(nodes_[i].ring == 0 ? 1 : nodes_[i].ring), 0u);
+        }
         chainWaitSeen_.assign(nodes_.size(), 0u);
         chainWaitUnsealedSeen_.assign(nodes_.size(), 0u);
         storeWaitSeen_.assign(nodes_.size() * kMaxInputs, 0u);
@@ -957,6 +1014,12 @@ public:
     using StampSource = std::function<VpIndicator::Stamp(uint64_t)>;
     // The Indicator StampOf, for the seal of lead ancestors (render thread; set before the first Resolve).
     void SetStampSource(StampSource f) { stampOf_ = std::move(f); }
+    // B3 X1: a deterministic run seals lagged-seal products at the FINAL seal only (no on-time accept: whether the lane was early
+    // never changes the class). No effect on products with sealLag 0.
+    void SetDeterministicSeal(bool on) { deterministic_ = on; }
+    bool DeterministicSeal() const { return deterministic_; }
+    // The deepest Node::sealLag of this table (0 = no lagged-seal product: Resolve is today's, ResolveLagged does nothing).
+    uint8_t MaxSealLag() const { return maxSealLag_; }
     bool Valid() const { return valid_; }
     const char* Error() const { return error_; }
     size_t Count() const { return sets_.size(); }
@@ -1081,7 +1144,9 @@ public:
     void ReleaseAfter(uint64_t seq, uint64_t releaseValue = 0)
     {
         for (size_t i = 0; i < nodes_.size(); ++i) {
-            const uint64_t h = nodes_[i].history;
+            // B3 X1: with a lagged-seal product every release runs maxSealLag frames later (a frame and its ancestors stay until its
+            // final seal; Graph::maxSealLag sized the rings for it). 0 = today.
+            const uint64_t h = uint64_t(nodes_[i].history) + maxSealLag_;
             if (seq >= h)
                 sets_[i]->Release(seq - h, releaseValue);
         }
@@ -1111,121 +1176,219 @@ public:
             ProductFrameResult& out = results_[i];
             out = ProductFrameResult();
             out.id = n.id;
-            pendingLead_.clear();
-            pendingChain_ = false;
-            out.seal = set.Seal(seq, [&](const Header& h) { return Check(n, seq, stampN, h); });
-            if (out.seal.outcome == SealOutcome::Sealed && out.seal.reason == SealReason::Accepted) {
-                // Counted once, after the seal took effect (not per input, not on a CAS retry).
-                for (ProductId p : pendingLead_)
-                    if (SlotSet* src = Find(p))
-                        src->MutableCounters().leadAccepted.fetch_add(1, std::memory_order_relaxed);
-                if (pendingChain_)
-                    set.MutableCounters().chainCarryForward.fetch_add(1, std::memory_order_relaxed);
-                // Remember which frames were accepted as lead ancestors: their own seal comes later.
-                for (size_t k = 0; k < n.inputCount; ++k)
-                    if (n.inputs[k].lead > 0)
-                        MarkLeadAccepted(n.inputs[k], seq);
-            }
-            if (out.seal.outcome == SealOutcome::NeedsLive) {
-                uint64_t& m = leadMark_[i][size_t(set.SlotOf(seq))];
-                if (m == seq + 1u)
-                    set.MutableCounters().leadLaterRejected.fetch_add(1, std::memory_order_relaxed);
-            }
-            out.final = out.seal.outcome;
-            out.finalReason = out.seal.reason;
-            if (out.seal.outcome != SealOutcome::NeedsLive)
-                continue;
-            if (set.LivePool() == 0) {
-                // Lane-only product (a single-store product): no live fill exists. The frame is absent and the reader runs its
-                // own visible fallback (counted by the caller as an unavailable product frame).
-                out.final = SealOutcome::Unavailable;
-                out.finalReason = SealReason::NoLiveBuffer;
-                continue;
-            }
-            const int live = set.BeginLive(seq);
-            if (live < 0) {
-                out.final = SealOutcome::Unavailable;
-                out.finalReason = SealReason::NoLiveBuffer;
-                continue;
-            }
-            Header h;
-            h.reads = n.reads;
-            h.honoured = stampN;
-            h.prov = Provenance::LiveRender;
-            // Ancestors stay positional (index k = input k); a missing input keeps an empty ref
-            // (cgen 0, provenance None).
-            uint32_t missing = 0;
-            uint32_t leadUsed = 0;   // bit k: lead input k was read from a Published / valid lead ancestor
-            for (size_t k = 0; k < n.inputCount; ++k) {
-                const InputRef& in = n.inputs[k];
-                SlotSet* src = Find(in.product);
-                AncestorRef& r = h.ancestors[k];
-                r = AncestorRef();
-                r.productId = in.product;
-                uint64_t aseq = 0;
-                const bool haveSeq = InputSeq(in, seq, &aseq);
-                r.seq = haveSeq ? aseq : 0;
-                bool ok = src != nullptr && haveSeq;
-                VpAncestry::SlotView v;
-                if (ok) {
-                    v = src->ViewAt(src->SlotOf(aseq));
-                    // A lead input is read from the lane published result (its own seal comes later).
-                    ok = v.present && v.seq == aseq && (v.valid || (in.lead > 0 && v.lanePublished));
-                    // K1 also binds the live fill: a lead ancestor whose stamp moved (or is unknown) is a MISSING input
-                    // (declared missing-input form, LiveFallback, visible), never a full result from stale data.
-                    if (ok && in.lead > 0 && LeadStampReason(in.product, aseq) != SealReason::Accepted)
-                        ok = false;
+            out.seq = seq;
+            if (n.sealLag > 0) {
+                // B3 X1: a lagged-seal product. On time (and not a deterministic run): its Published result accepted now is AHEAD.
+                // Anything else is PENDING: absent for every reader at N (on-time-or-absent), finalised by ResolveLagged at N + sealLag.
+                out.sealLag = n.sealLag;
+                pendingLead_.clear();
+                pendingChain_ = false;
+                uint64_t& stale = pendingMark_[i][size_t(set.SlotOf(seq))];
+                if (stale != 0u && stale != seq + 1u) {
+                    set.MutableCounters().sealUnfinalised.fetch_add(1, std::memory_order_relaxed);   // its N + sealLag never resolved
+                    stale = 0;
                 }
-                if (!ok) {
-                    missing |= 1u << k;
+                if (!deterministic_ && set.AcceptOnTime(seq, [&](const Header& h) { return Check(n, seq, stampN, h); })) {
+                    for (ProductId p : pendingLead_)
+                        if (SlotSet* src = Find(p))
+                            src->MutableCounters().leadAccepted.fetch_add(1, std::memory_order_relaxed);
+                    for (size_t k = 0; k < n.inputCount; ++k)
+                        if (n.inputs[k].lead > 0 && n.sealLag < n.inputs[k].lead)
+                            MarkLeadAccepted(n.inputs[k], seq);
+                    set.MutableCounters().sealAhead.fetch_add(1, std::memory_order_relaxed);
+                    out.seal.outcome = SealOutcome::Sealed;
+                    out.seal.reason = SealReason::Accepted;
+                    out.final = SealOutcome::Sealed;
+                    out.finalReason = SealReason::Accepted;
                     continue;
                 }
-                if (in.lead > 0)
-                    leadUsed |= 1u << k;
-                r.slotIndex = src->SlotOf(aseq);
-                r.cgen = v.cgen;
-                r.prov = src->WordFor(aseq).prov;
-            }
-            h.ancestorCount = uint8_t(n.inputCount);
-            out.missingInputs = missing;
-            if (missing != 0 && !n.missingInputForm) {
-                set.CancelLive(seq);
-                set.MutableCounters().inputMissing.fetch_add(1, std::memory_order_relaxed);
-                out.final = SealOutcome::Unavailable;
-                out.finalReason = SealReason::InputMissing;
+                set.MutableCounters().sealPending.fetch_add(1, std::memory_order_relaxed);
+                pendingMark_[i][size_t(set.SlotOf(seq))] = seq + 1u;
+                out.pending = true;
+                out.seal.outcome = SealOutcome::Pending;
+                out.seal.reason = SealReason::AwaitingFinalSeal;
+                out.final = SealOutcome::Pending;
+                out.finalReason = SealReason::AwaitingFinalSeal;
                 continue;
             }
-            if (!fill(n, seq, live, h, missing)) {
-                set.CancelLive(seq);
-                ++fillDeclines_;
-                out.final = SealOutcome::Unavailable;
-                out.finalReason = SealReason::FillDeclined;
-                continue;
-            }
-            if (missing != 0) {
-                // The declared reduced form: visible as a fallback, never as a full live result.
-                h.prov = Provenance::LiveFallback;
-                set.MutableCounters().liveMissingInputs.fetch_add(1, std::memory_order_relaxed);
-            }
-            if (set.CommitLive(seq, h)) {
-                ++liveFills_;
-                out.liveFilled = true;
-                out.final = SealOutcome::Sealed;
-                // A live fill that used a Published lead ancestor is the same residual K1 risk as a sealed reader: that ancestor
-                // gets its own seal later and may be rejected then (leadLaterRejected).
-                for (size_t k = 0; k < n.inputCount; ++k)
-                    if ((leadUsed & (1u << k)) != 0u)
-                        MarkLeadAccepted(n.inputs[k], seq);
-            } else {
-                set.CancelLive(seq);
-                out.final = SealOutcome::Unavailable;
-                out.finalReason = SealReason::OrderError;
-            }
+            SealNode(i, seq, stampN, fill, out);
         }
         return results_;
     }
 
+    // B3 X1, render, at render start of frame `seq` AFTER Resolve(seq) (so a lead ancestor N + k <= seq is already sealed): the FINAL
+    // seal of every lagged-seal product's frame N = seq - sealLag that was Pending, in topological order, with frame N's frozen sealed
+    // stamp. A resync after N (the stamp under the product's reads moved between N and now) rejects the frame: ABSENT, counted
+    // (lateResyncRejected), never live-filled from pre-resync state. Otherwise the ordinary seal and live fill: LATE (a lane result
+    // accepted now), LIVE-FILLED or ABSENT. One result per node (a node with nothing to finalise keeps sealLag 0 and final
+    // Unavailable); an empty vector when no node has a seal lag.
+    template <class Fill>
+    const std::vector<ProductFrameResult>& ResolveLagged(uint64_t seq, const VpIndicator::Stamp& stampNow, Fill fill)
+    {
+        for (size_t i = 0; i < lagResults_.size(); ++i) {
+            const Node& n = nodes_[i];
+            SlotSet& set = *sets_[i];
+            ProductFrameResult& out = lagResults_[i];
+            out = ProductFrameResult();
+            out.id = n.id;
+            if (n.sealLag == 0 || seq < n.sealLag)
+                continue;
+            const uint64_t fseq = seq - n.sealLag;
+            uint64_t& mark = pendingMark_[i][size_t(set.SlotOf(fseq))];
+            if (mark != fseq + 1u)
+                continue;   // accepted on time, or never resolved by this table
+            mark = 0;
+            out.seq = fseq;
+            out.sealLag = n.sealLag;
+            VpIndicator::Stamp frozen;
+            if (!SealedStamp(fseq, &frozen) || !VpIndicator::SameFor(frozen, stampNow, n.reads)) {
+                out.seal = set.Seal(fseq, [](const Header&) { return SealReason::StampMismatch; });
+                out.final = SealOutcome::Unavailable;
+                out.finalReason = SealReason::StampMismatch;
+                set.MutableCounters().lateResyncRejected.fetch_add(1, std::memory_order_relaxed);
+                set.MutableCounters().sealAbsent.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            SealNode(i, fseq, frozen, fill, out);
+            if (out.liveFilled) {
+                set.MutableCounters().sealLiveFilled.fetch_add(1, std::memory_order_relaxed);
+            } else if (out.final == SealOutcome::Sealed && out.seal.reason == SealReason::Accepted) {
+                out.late = true;
+                set.MutableCounters().sealLate.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                set.MutableCounters().sealAbsent.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        return lagResults_;
+    }
+
 private:
+    // The seal and live fill of node i at frame `seq`: Resolve's per-node body (unchanged), also ResolveLagged's final seal.
+    template <class Fill>
+    void SealNode(size_t i, uint64_t seq, const VpIndicator::Stamp& stampN, Fill& fill, ProductFrameResult& out)
+    {
+        const Node& n = nodes_[i];
+        SlotSet& set = *sets_[i];
+        pendingLead_.clear();
+        pendingChain_ = false;
+        out.seal = set.Seal(seq, [&](const Header& h) { return Check(n, seq, stampN, h); });
+        if (out.seal.outcome == SealOutcome::Sealed && out.seal.reason == SealReason::Accepted) {
+            // Counted once, after the seal took effect (not per input, not on a CAS retry).
+            for (ProductId p : pendingLead_)
+                if (SlotSet* src = Find(p))
+                    src->MutableCounters().leadAccepted.fetch_add(1, std::memory_order_relaxed);
+            if (pendingChain_)
+                set.MutableCounters().chainCarryForward.fetch_add(1, std::memory_order_relaxed);
+            // Remember which frames were accepted as lead ancestors: their own seal comes later.
+            for (size_t k = 0; k < n.inputCount; ++k)
+                if (n.inputs[k].lead > 0 && n.sealLag < n.inputs[k].lead)   // B3 X1: a sealed lead ancestor carries no K1 risk
+                    MarkLeadAccepted(n.inputs[k], seq);
+        }
+        if (out.seal.outcome == SealOutcome::NeedsLive) {
+            uint64_t& m = leadMark_[i][size_t(set.SlotOf(seq))];
+            if (m == seq + 1u)
+                set.MutableCounters().leadLaterRejected.fetch_add(1, std::memory_order_relaxed);
+        }
+        out.final = out.seal.outcome;
+        out.finalReason = out.seal.reason;
+        if (out.seal.outcome != SealOutcome::NeedsLive)
+            return;
+        if (set.LivePool() == 0) {
+            // Lane-only product (a single-store product): no live fill exists. The frame is absent and the reader runs its
+            // own visible fallback (counted by the caller as an unavailable product frame).
+            out.final = SealOutcome::Unavailable;
+            out.finalReason = SealReason::NoLiveBuffer;
+            return;
+        }
+        const int live = set.BeginLive(seq);
+        if (live < 0) {
+            out.final = SealOutcome::Unavailable;
+            out.finalReason = SealReason::NoLiveBuffer;
+            return;
+        }
+        Header h;
+        h.reads = n.reads;
+        h.honoured = stampN;
+        h.prov = Provenance::LiveRender;
+        // Ancestors stay positional (index k = input k); a missing input keeps an empty ref
+        // (cgen 0, provenance None).
+        uint32_t missing = 0;
+        uint32_t leadUsed = 0;   // bit k: lead input k was read from a Published / valid lead ancestor
+        for (size_t k = 0; k < n.inputCount; ++k) {
+            const InputRef& in = n.inputs[k];
+            SlotSet* src = Find(in.product);
+            AncestorRef& r = h.ancestors[k];
+            r = AncestorRef();
+            r.productId = in.product;
+            uint64_t aseq = 0;
+            const bool haveSeq = InputSeq(in, seq, &aseq);
+            const bool sealedLead = in.lead > 0 && n.sealLag >= in.lead;   // B3 X1
+            r.seq = haveSeq ? aseq : 0;
+            bool ok = src != nullptr && haveSeq;
+            VpAncestry::SlotView v;
+            if (ok) {
+                v = src->ViewAt(src->SlotOf(aseq));
+                // A lead input is read from the lane published result (its own seal comes later). B3 X1: a reader whose seal lag
+                // covers the lead reads the lead ancestor SEALED (render-valid; it was sealed before this final seal).
+                ok = v.present && v.seq == aseq && (v.valid || (in.lead > 0 && !sealedLead && v.lanePublished));
+                // K1 also binds the live fill: a lead ancestor whose stamp moved (or is unknown) is a MISSING input
+                // (declared missing-input form, LiveFallback, visible), never a full result from stale data.
+                if (ok && in.lead > 0 && !sealedLead && LeadStampReason(in.product, aseq) != SealReason::Accepted)
+                    ok = false;
+            }
+            if (!ok) {
+                missing |= 1u << k;
+                if (maxSealLag_ > 0 && src != nullptr && haveSeq) {
+                    // B3 X1 on-time-or-absent: a lagged-seal input not final at this seal is ABSENT for the reader (never inherited).
+                    const Node* an = NodeOf(in.product);
+                    if (an && an->sealLag > 0)
+                        src->MutableCounters().onTimeAbsent.fetch_add(1, std::memory_order_relaxed);
+                }
+                continue;
+            }
+            if (in.lead > 0 && !sealedLead)
+                leadUsed |= 1u << k;
+            r.slotIndex = src->SlotOf(aseq);
+            r.cgen = v.cgen;
+            r.prov = src->WordFor(aseq).prov;
+        }
+        h.ancestorCount = uint8_t(n.inputCount);
+        out.missingInputs = missing;
+        if (missing != 0 && !n.missingInputForm) {
+            set.CancelLive(seq);
+            set.MutableCounters().inputMissing.fetch_add(1, std::memory_order_relaxed);
+            out.final = SealOutcome::Unavailable;
+            out.finalReason = SealReason::InputMissing;
+            return;
+        }
+        if (!fill(n, seq, live, h, missing)) {
+            set.CancelLive(seq);
+            ++fillDeclines_;
+            out.final = SealOutcome::Unavailable;
+            out.finalReason = SealReason::FillDeclined;
+            return;
+        }
+        if (missing != 0) {
+            // The declared reduced form: visible as a fallback, never as a full live result.
+            h.prov = Provenance::LiveFallback;
+            set.MutableCounters().liveMissingInputs.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (set.CommitLive(seq, h)) {
+            ++liveFills_;
+            out.liveFilled = true;
+            out.final = SealOutcome::Sealed;
+            // A live fill that used a Published lead ancestor is the same residual K1 risk as a sealed reader: that ancestor
+            // gets its own seal later and may be rejected then (leadLaterRejected).
+            for (size_t k = 0; k < n.inputCount; ++k)
+                if ((leadUsed & (1u << k)) != 0u)
+                    MarkLeadAccepted(n.inputs[k], seq);
+        } else {
+            set.CancelLive(seq);
+            out.final = SealOutcome::Unavailable;
+            out.finalReason = SealReason::OrderError;
+        }
+    }
+
     struct SealedRecord {
         bool set = false;
         uint64_t seq = 0;
@@ -1313,6 +1476,13 @@ private:
                 return SealReason::AncestorGone;
             if (v.cgen != ref.cgen)
                 return v.cgen == 0 ? SealReason::AncestorInvalid : SealReason::AncestorReplaced;
+            if (in.lead > 0 && n.sealLag >= in.lead) {
+                // B3 X1: the final seal of a reader whose seal lag covers the lead: the lead ancestor was sealed at its own frame
+                // (before this seal), so it must be render-valid (Sealed / Live); a Published-only one is not accepted.
+                if (!v.valid)
+                    return SealReason::AncestorInvalid;
+                continue;
+            }
             if (in.lead > 0) {
                 // K1: the lead ancestor needs a result (Published is enough) computed under the stamp of ITS frame.
                 if (!v.valid && !v.lanePublished)
@@ -1352,6 +1522,11 @@ private:
     std::vector<SlotSet*> sets_;
     std::vector<SealedRecord> sealed_;
     std::vector<ProductFrameResult> results_;
+    // B3 X1 seal lag (render thread only; sized only when maxSealLag_ > 0).
+    uint8_t maxSealLag_ = 0;
+    bool deterministic_ = false;
+    std::vector<ProductFrameResult> lagResults_;
+    std::vector<std::vector<uint64_t>> pendingMark_;   // per node, per slot: frame + 1 left Pending at its on-time seal
     uint64_t liveFills_ = 0;
     uint64_t fillDeclines_ = 0;
 };
