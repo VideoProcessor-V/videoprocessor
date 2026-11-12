@@ -115,6 +115,7 @@ namespace SettingsFingerprintStructure
 			{ "dejudder_est_still_zero", "UNDOCUMENTED", "GAP: not in docs/settings/VP-settings-reference.md (documentation gap)" },
 			{ "dejudder_source_warp_filter", "UNDOCUMENTED", "GAP: not in docs/settings/VP-settings-reference.md (documentation gap)" },
 			{ "entrance_gpu_drain", "UNDOCUMENTED", "GAP: expert [vpv] workaround not in docs/settings/VP-settings-reference.md (documentation gap)" },
+			{ "dither_need", "UNDOCUMENTED", "GAP: [vpv] dither_need documented in MASTER-SETTINGS.md and the dither README, not yet in docs/settings/VP-settings-reference.md" },
 			{ "pipeline_entrance_once", "UNDOCUMENTED", "GAP: B3 [vpv] switch not in docs/settings/VP-settings-reference.md (documentation gap)" },
 			// ALLOWLIST-DOCS-END
 		};
@@ -292,7 +293,7 @@ namespace SettingsFingerprintStructureTest
 			// Guard for the GPU harness: IsVpvSectionKey() in RendererCaptureHarnessTests.cpp duplicates this list.
 			const std::set<std::string> expected = { "pipeline_original_pathway", "pipeline_order", "pipeline_slots_off",
 				"calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged", "frame_analysis_store",
-				"resync_event", "entrance_gpu_drain", "hdr_inference" };
+				"resync_event", "entrance_gpu_drain", "dither_need", "hdr_inference" };
 			Assert::IsTrue(std::set<std::string>(vpv.begin(), vpv.end()) == expected,
 				L"the [vpv] keys in VpvSchemaKeys.h changed: update IsVpvSectionKey() in RendererCaptureHarnessTests.cpp and this list");
 		}

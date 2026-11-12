@@ -299,6 +299,7 @@ namespace ProfileSchemaHooks
 			if (key == "frame_analysis_store") return V(IsChoice(value, { "on", "off" }));     // WP-23
 			if (key == "resync_event") return V(IsChoice(value, { "off", "shadow", "on" }));   // R1 shadow; R3/L1/R4a on
 			if (key == "entrance_gpu_drain") return V(IsChoice(value, { "off", "flush", "finish" }));   // expert workaround
+			if (key == "dither_need") return V(IsChoice(value, { "off", "auto" }));   // output.dither per-block extra amplitude
 			// Config usability (2026-10-25): the owner's Approve / Keep decision per retirement group (A-D; keys retirement_a .. retirement_d, names are case-insensitive), recorded by the VP-V page's
 			// Proposed retirement tab. A UI-only record: nothing in the renderer reads it and nothing is hidden or removed by it.
 			if (key == "retirement_a" || key == "retirement_b" || key == "retirement_c" || key == "retirement_d")
@@ -357,7 +358,7 @@ namespace ProfileSchemaHooks
 	{
 		if (section != "vpv") return false;
 		static const char* const vpvKeys[] = { "pipeline_original_pathway", "pipeline_order",
-			"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged", "frame_analysis_store", "resync_event", "entrance_gpu_drain", "hdr_inference" };
+			"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged", "frame_analysis_store", "resync_event", "entrance_gpu_drain", "dither_need", "hdr_inference" };
 		bool known = false;
 		for (const char* candidate : vpvKeys) known = known || key == candidate;
 		for (const char* candidate : { "retirement_a", "retirement_b", "retirement_c", "retirement_d" }) known = known || key == candidate;   // UI-only decisions

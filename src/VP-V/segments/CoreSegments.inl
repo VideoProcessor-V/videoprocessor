@@ -431,6 +431,15 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
             !quantiserProblem.empty() ? FallbackCatalog::DitherDrop::DisabledByLibplacebo : FallbackCatalog::DitherDrop::None,
             sigmaDomainDropped ? std::string(domain.full ? "full" : "limited") + " range, " +
                 std::to_string(domain.sample) + "-bit swapchain, colour depth " + std::to_string(domain.color) : std::string()));
+        // dither_need (output.dither, default off; VP-V-owned segment, no Bill hook): the decision runs only on "auto" and never
+        // on the Original pathway; the feed is empty until the live fill (G6), so "auto" is the named, counted fallback today.
+        {
+            const DitherNeedSeam::Outcome need = outputFinish.EvaluateDitherNeed(
+                activeSettings.ditherNeed == "auto" && any, pipelineSlots.OriginalPathway());
+            SyncFallback(need.fallback);
+            if (outputFinish.DitherNeedStatusChanged(need.status) && !need.status.empty())
+                DebugLog::Log("%s", need.status.c_str());
+        }
     }
     // The dither is the last processing of every picture: if a configured
     // shader would run after the sigma-delta at the OUTPUT stage, the

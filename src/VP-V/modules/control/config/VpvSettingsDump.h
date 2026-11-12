@@ -251,6 +251,7 @@ inline void VpvDumpRendererSettings(const RendererSettings& s, std::ostream& o)
 	Put(o, "frameAnalysisStore", s.frameAnalysisStore);
 	Put(o, "resyncEvent", s.resyncEvent);
 	Put(o, "entranceGpuDrain", s.entranceGpuDrain);
+	Put(o, "ditherNeed", s.ditherNeed);
 	Put(o, "pipelineSettingsProblems", s.pipelineSettingsProblems);
 	Put(o, "rebaseKernelMatch", s.rebaseKernelMatch);
 	Put(o, "sourceResolutionTextGuard", s.sourceResolutionTextGuard);

@@ -62,7 +62,7 @@
 //                                downscale_light upscale_light ssim_bitrate_aware ssim_bitrate_floor
 //                                cnn_residual_stabilise ssim_residual_stabilise residual_stabilise_grain_guard
 //                                fbo_float32 adaptive_motion adaptive_motion_speed_lo adaptive_motion_speed_hi
-//                                adaptive_motion_floor adaptive_motion_smooth_ms
+//                                adaptive_motion_floor adaptive_motion_smooth_ms dither_need
 namespace VpResync {
 
 class SettingsStamp {
@@ -109,7 +109,7 @@ public:
             "upscale_light", "ssim_bitrate_aware", "ssim_bitrate_floor", "cnn_residual_stabilise",
             "ssim_residual_stabilise", "residual_stabilise_grain_guard", "fbo_float32", "adaptive_motion",
             "adaptive_motion_speed_lo", "adaptive_motion_speed_hi", "adaptive_motion_floor",
-            "adaptive_motion_smooth_ms" };
+            "adaptive_motion_smooth_ms", "dither_need" };
         SetDomainKeys(Domain::Motion, std::vector<std::string>(std::begin(motion), std::end(motion)));
         SetDomainKeys(Domain::Rebase, std::vector<std::string>(std::begin(rebase), std::end(rebase)));
         SetDomainKeys(Domain::Analysis, std::vector<std::string>(std::begin(analysis), std::end(analysis)));

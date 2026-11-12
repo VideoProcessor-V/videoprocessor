@@ -974,6 +974,14 @@ namespace VpvRendererSettings
 			else
 				settings.pipelineSettingsProblems += "entrance_gpu_drain '" + raw + "' (off|flush|finish); ";
 		}
+		if (TryGetPipelineString(config, "dither_need", raw))
+		{
+			const std::string value = ConfigFile::NormalizeName(raw);
+			if (value == "off" || value == "auto")
+				settings.ditherNeed = value;
+			else
+				settings.pipelineSettingsProblems += "dither_need '" + raw + "' (off|auto); ";
+		}
 	}
 
 	// ---- PostLoad: the Original pathway overlay, the slot switches, the presentation owner ----
@@ -1164,6 +1172,7 @@ namespace VpvRendererSettings
 			<< settings.frameAnalysisStore << '|'
 			<< settings.resyncEvent << '|'
 			<< settings.entranceGpuDrain << '|'
+			<< settings.ditherNeed << '|'
 			<< settings.hdrInference << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|'
 			<< settings.adaptive.ssimResidualStabilise << '|'
@@ -1365,6 +1374,7 @@ namespace VpvRendererSettings
 		changed(current.pipelineEntranceOnce != next.pipelineEntranceOnce, "pipeline_entrance_once");
 		changed(current.outputSegmentsMerged != next.outputSegmentsMerged, "output_segments_merged");
 		changed(current.entranceGpuDrain != next.entranceGpuDrain, "entrance_gpu_drain");
+		changed(current.ditherNeed != next.ditherNeed, "dither_need");
 		changed(current.adaptive.cnnResidualStabilise != next.adaptive.cnnResidualStabilise ||
 			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
 		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");
@@ -1619,6 +1629,7 @@ namespace VpvRendererSettings
 		<< "matcher.estQpel=" << m.estQpel << "\n"
 		<< "dejudder_est_still_zero=" << m.estStillZero << "\n"
 		<< "entrance_gpu_drain=" << s.entranceGpuDrain << "\n"
+		<< "dither_need=" << s.ditherNeed << "\n"
 		<< "matcher.estGate=" << m.estGate << "\n"
 		<< "matcher.estSplit=" << m.estSplit << "\n"
 		<< "matcher.estSplitSad=" << m.estSplitSad << "\n"
