@@ -228,7 +228,7 @@ namespace VideoProcessorTest
 			job.ringSlot = 0;
 			job.source = &view;
 			const uint32_t steps = VpLaneProducts::StepsFor(kP10GrainSplit, d);
-			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 5u, L"bands + extend + 5");
+			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 6u, L"bands + extend + 6");
 			for (uint32_t i = 0; i < steps; ++i)
 				Assert::IsTrue(disp.Dispatch(job, i, steps), L"lane chunk");
 			disp.SetLiveSourceForTesting([&codes, d](uint64_t seq, SourceFrameView* out) {
@@ -274,7 +274,7 @@ namespace VideoProcessorTest
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(PassTextFingerprintIsPinned)
 		{
-			// WAIVER-P10V3-01: old pin 0x41cef8707edf809d (v2 text) -> new 0x8949becef0aab5c9 (v3 pass texts, refs/116).
+			// WAIVER-P10V3-01: 0x41cef8707edf809d (v2) -> 0x8949becef0aab5c9 (v3). WAIVER-P10V4-01 (refs/116b): -> 0x7fe213d86466cc12 (unit 4: LEVEL pass, NLF cap, depth scale).
 			constexpr uint64_t kPinned = 0x7fe213d86466cc12ull;
 			Assert::IsTrue(GrainSplit::Gpu::FullShaderFingerprint() == kPinned, L"Full pass GLSL fingerprint");
 		}

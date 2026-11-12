@@ -49,11 +49,11 @@ Computed once per frame; readers never recompute it.
 
 - `GrainSplit.h`: header-only CPU reference model (`Plane`, `Gauss`, `Params` with texture_restore's values, `Compute`,
   `kProduct`). Deterministic (raster loops, double sums, no threads), C++14-compatible, no Windows headers.
-- `GrainSplitGpu.h/.cpp`: the same split as five libplacebo compute passes on any plane component (v3: half, down, stats, nmin, apply) -> `split` (s1, s2, f, base; rgba32f) and `blocks` (N, e3). v3: the passes are HALF, DOWN, STATS, NMIN, APPLY (see Law v3). Matches the v3 model
+- `GrainSplitGpu.h/.cpp`: the same split as six libplacebo compute passes on any plane component (unit 4: half, down, stats, level, nmin, apply) -> `split` (s1, s2, f, base; rgba32f) and `blocks` (N, e3). v3: the passes are HALF, DOWN, STATS, NMIN, APPLY (see Law v3). Matches the v3 model
   on WARP (`GrainSplitGpuMatchesModel`, `tests/GrainSplitV3Tests.cpp`). Intermediates: two half-size rg32f planes (tmp, low) plus the block grid (quiet); the Full product is its own rgba32f texture.
-- `Splitter::Step(..., step)` / `Splitter::StepCount()` (70b G2, `GrainSplitGpu.h`): the same five passes as separate, resumable steps (0..4);
+- `Splitter::Step(..., step)` / `Splitter::StepCount()` (70b G2, `GrainSplitGpu.h`): the same six passes as separate, resumable steps (0..5);
   `Compute()` is the loop over `Step` (same dispatches, same order, byte-identical). The skeleton's lane form runs one step per gap chunk
-  (`LaneGpuGrainKernel.h`, `kP10SplitterSteps` = 5) and its live form all five at once.
+  (`LaneGpuGrainKernel.h`, `kP10SplitterSteps` = 6) and its live form all six at once.
 - `GpuPassUtil.h`: the compute-pass helpers its readers share.
 - Tests: see `tests/README.md`.
 
@@ -196,3 +196,7 @@ Config placement: none; this slot has no key of its own (the split law is fixed)
 Tiers: not tiered.
 
 **Downstream consumers (TEMPORAL DETAIL, docs 71 section Q5 and 72):** per-pair homography (P7/P9), the object layer (per-object motion), P8 per-block membership + confidence, and K4 guided residuals.
+
+### Unit 4 costs and residuals (refs/116b)
+
+The LEVEL pass adds about 0.04-0.1 ms (one 256-thread workgroup over the block grid) and 128 B (the 8x1 rgba32f level table; not yet counted in `PrivateBytes`). With fewer than one valid level bin the cap is absent and N is the local value (no visible indicator yet). Residual classes: dense texture keeps its detail by the owner ruling (texture wins); the GPU LEVEL table equality and 12-bit GPU cases are covered only by `V3GpuMatchesCpuReference` on the composite.

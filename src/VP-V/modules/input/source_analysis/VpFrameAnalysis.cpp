@@ -325,7 +325,7 @@ namespace VpFrameAnalysis
 
 	bool SourceViewOf12(const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view)
 	{
-		if (source.format != AnalysisLumaFormat::PackedDolbyVision422 || source.width < 1 || source.height < 1)
+		if (source.format != AnalysisLumaFormat::PackedDolbyVision422 || !source.IsValid())
 			return false;
 		auto codes = std::make_shared<std::vector<uint16_t>>(static_cast<size_t>(source.width) * static_cast<size_t>(source.height));
 		for (int y = 0; y < source.height; ++y)

@@ -160,12 +160,12 @@ namespace GrainSplit
 			// short (grain split)..." (no private temporaries are made instead; the caller falls back visibly).
 			bool Compute(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B,
 				const Params& params, const Options& options);
-			// The five passes of Compute as separate calls (70b lane form: one chunk per pass): Step(0..4) with the SAME arguments
+			// The six passes of Compute as separate calls (70b lane form: one chunk per pass): Step(0..5) with the SAME arguments
 			// and options on every call records exactly Compute's dispatches in order (half, low, grain level, minimum, Wiener
 			// share), so Compute == the step loop byte for byte. sigmaBase and sigmaLow x scale must be >= GrainSplit::kV3MinLowSigma
 			// ("invalid law" otherwise); a device whose shared memory is below the passes' need is refused with the numbers. Step 0 validates and resolves the outputs and intermediates
 			// (private textures survive between steps and gaps; with options.arena the CALLER holds the arena scope kArenaScope
-			// across the five steps); Out() is valid after step 4. A failing or out-of-order step returns false and ends the run.
+			// across the six steps); Out() is valid after step 5. A failing or out-of-order step returns false and ends the run.
 			static constexpr uint32_t StepCount() { return 6; }
 			bool Step(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B, const Params& params,
 				const Options& options, uint32_t step);

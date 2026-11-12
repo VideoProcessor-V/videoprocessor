@@ -111,7 +111,7 @@ namespace DvTunnelTapLaw
 	inline bool SourceTap12(const SourceT& source, int x, int y, uint16_t& tap12)
 	{
 		if (!source.data || x < 0 || y < 0 || x >= source.width || y >= source.height ||
-			!Supports(source.encoding, source.rgbBitAlignment, source.width & ~1))
+			!Supports(source.encoding, source.rgbBitAlignment, source.width))
 			return false;
 		const uint8_t* row = source.data + static_cast<size_t>(y) * source.rowBytes;
 		tap12 = TapCode(row + static_cast<size_t>(x) * 4, source.encoding, source.rgbBitAlignment, source.fullRangeYuv);

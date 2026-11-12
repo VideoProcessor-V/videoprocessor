@@ -326,7 +326,7 @@ namespace VideoProcessorTest
 			job.ringSlot = 0;
 			job.source = &view;
 			const uint32_t steps = VpLaneProducts::StepsFor(kP10GrainSplit, d);
-			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 5u && VpLaneProducts::TapBands(d) == 2u, L"2 bands + extend + 5");
+			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 6u && VpLaneProducts::TapBands(d) == 2u, L"2 bands + extend + 6");
 			for (uint32_t i = 0; i < steps; ++i)
 				Assert::IsTrue(disp.Dispatch(job, i, steps), L"lane chunk");
 			Assert::IsTrue(kernel->steps == 6 && disp.Stats().tapBands == 2 && disp.Stats().extends == 1, L"lane passes");
@@ -340,7 +340,7 @@ namespace VideoProcessorTest
 				return true;
 			});
 			Assert::IsTrue(disp.DispatchLive(n, 8, 0, Header(), 0u), L"live fill");
-			Assert::IsTrue(kernel->steps == 10 && disp.Stats().tapBands == 4 && disp.Stats().extends == 2, L"same passes, live");
+			Assert::IsTrue(kernel->steps == 12 && disp.Stats().tapBands == 4 && disp.Stats().extends == 2, L"same passes, live");
 
 			const VpLaneProducts::GpuProductTextures* tex = disp.TexturesOf(kP10GrainSplit);
 			const std::vector<float> lane = Download<float>(gpu, tex->Ring(0, 0), 4);
