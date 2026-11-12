@@ -437,7 +437,16 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
             const DitherNeedSeam::Outcome need = outputFinish.EvaluateDitherNeed(
                 activeSettings.ditherNeed == "auto" && any, pipelineSlots.OriginalPathway());
             SyncFallback(need.fallback);
-            if (outputFinish.DitherNeedStatusChanged(need.status) && !need.status.empty())
+            // auto asked for but the sigma-delta is not running by choice: a one-time visible line, not a silent no-op
+            // (a dropped sigma-delta is already the "dither" fallback).
+            if (activeSettings.ditherNeed == "auto" && !any && !pipelineSlots.OriginalPathway())
+            {
+                const std::string why = std::string("dither need: inactive (") + (!ditherPrep.found ?
+                    "the sigma-delta dither is not selected (temporal_dither)" : "output.dither is switched off in pipeline_slots_off") + ")";
+                if (outputFinish.DitherNeedStatusChanged(why))
+                    DebugLog::Log("%s", why.c_str());
+            }
+            else if (outputFinish.DitherNeedStatusChanged(need.status) && !need.status.empty())
             {
                 const DitherNeedSeam::Counters& n = outputFinish.DitherNeedCounters();
                 DebugLog::Log("%s (frames so far: on %llu, not needed %llu, unavailable %llu, stale %llu, classical quality %llu)",
