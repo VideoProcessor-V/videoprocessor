@@ -480,8 +480,18 @@ namespace DetailRestoreConfigTestsNs
 			// The renderer's block reads the view under R1 and no longer carries the old condition.
 			const std::string text = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
 			Assert::IsFalse(text.empty(), L"the renderer source");
-			Assert::IsTrue(text.find("pl_tex field = vectorEstimate.LiveFor(sourceSequence, activeSettings.motionHistoryFixes).field;") != std::string::npos,
+			Assert::IsTrue(text.find("pl_tex field = vectorEstimate.LiveFieldOnVp(pipelineSlots.OriginalPathway(), sourceSequence, activeSettings.motionHistoryFixes);") != std::string::npos,
 				L"the detail-restore field gate is R1");
+			// W-P5C-01: the gated helper the renderer calls is R1 off the Original pathway (LiveFor with the motion_history_fixes clause).
+			const std::string state = ReadText(RepositoryRoot() + "\\src\\VP-V\\modules\\motion\\estimation\\EstimateState.h");
+			const size_t helper = state.find("pl_tex LiveFieldOnVp(bool originalPathway, uint64_t sequence, bool motionHistoryFixes) const");
+			Assert::IsTrue(helper != std::string::npos, L"the gated detail-restore field helper");
+			const size_t bodyEnd = state.find('}', helper);
+			Assert::IsTrue(bodyEnd != std::string::npos, L"the helper body");
+			const std::string body = state.substr(helper, bodyEnd - helper);
+			Assert::IsTrue(body.find("if (originalPathway) return nullptr;") != std::string::npos, L"the Original pathway reads no field");
+			Assert::IsTrue(body.find("return LiveFor(sequence, motionHistoryFixes).field;") != std::string::npos,
+				L"off the Original pathway the helper is R1 with the motion_history_fixes clause");
 			Assert::IsTrue(text.find("motionValidity.Current(dejudderEstimatedEpoch) && sourceSequence != 0)") == std::string::npos,
 				L"the old gate is gone");
 		}
