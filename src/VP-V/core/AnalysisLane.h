@@ -621,6 +621,61 @@ public:
     void SetGpuDispatcher(IGpuDispatcher* d) { dispatcher_ = d; }
     void SetLiveFill(LiveFill fill) { liveFill_ = std::move(fill); }
     void RegisterCpuLiveCompute(ProductId id, CpuLiveCompute fn) { cpuLive_[id] = std::move(fn); }
+
+    // ---- B1 GET-OR-COMPUTE-AND-PUBLISH (refs/126 s1.2; SkeletonAcquire.h / SkeletonAcquireLane.h) ----
+    // The registered CPU live computes ARE the owning units' fills of their lane products: Acquire runs them through
+    // ComputeCpuOwnerForm (the same RunCpuLive law as the seal's live fill, never a second law). A product a reader
+    // already published for frame N before its seal (an Acquire memo of the default variant) is COPIED into the slot's
+    // live buffer by the seal instead of being computed twice (`PublishedLookup`, counted SealReusedPublished()).
+    // Render thread.
+    using PublishedLookup = std::function<bool(ProductId, uint64_t, uint8_t*, size_t)>;
+    using InputResolver = std::function<const uint8_t*(ProductId, uint64_t, size_t)>;
+    void SetPublishedLookup(PublishedLookup f) { publishedLookup_ = std::move(f); }
+    uint64_t SealReusedPublished() const { return sealReusedPublished_; }
+    std::vector<ProductId> CpuLiveProducts() const
+    {
+        std::vector<ProductId> ids;
+        for (const auto& kv : cpuLive_)
+            ids.push_back(kv.first);
+        return ids;
+    }
+    bool HasGpuDispatcher() const { return dispatcher_ != nullptr; }
+    // The product is a node of the current graph (render thread); `backend` receives its backend.
+    bool IsNode(ProductId id, Backend* backend = nullptr) const
+    {
+        const LaneState* st = renderState_.get();
+        if (st == nullptr)
+            return false;
+        const int idx = st->IndexOf(id);
+        if (idx < 0)
+            return false;
+        if (backend != nullptr)
+            *backend = st->graph.nodes[size_t(idx)].backend;
+        return true;
+    }
+    bool RegulatorDropped(ProductId id) const { return regulator_.StateOf(id) == ProductState::Dropped; }
+    // Bytes of a CPU product's frame buffer in the current graph (0 = not a CPU node / no graph).
+    size_t CpuBytesOf(ProductId id) const
+    {
+        const LaneState* st = renderState_.get();
+        if (st == nullptr)
+            return 0;
+        const int idx = st->IndexOf(id);
+        return idx < 0 || !st->bufs[size_t(idx)] ? size_t(0) : st->bufs[size_t(idx)]->Bytes();
+    }
+    // The owning unit's CPU form of product `id` for frame `seq` into `dst` (n bytes): the registered live compute with
+    // the inputs read from the slots exactly like the seal's live fill; an input the slots do not hold is asked of
+    // `inputOf` (the Acquire chain: get-or-compute of the input). False = no node / no registered compute / declined.
+    bool ComputeCpuOwnerForm(ProductId id, uint64_t seq, uint8_t* dst, size_t n, const InputResolver& inputOf = InputResolver())
+    {
+        const LaneState* st = renderState_.get();
+        if (st == nullptr || dst == nullptr)
+            return false;
+        const int idx = st->IndexOf(id);
+        if (idx < 0 || !st->bufs[size_t(idx)] || n != st->bufs[size_t(idx)]->Bytes())
+            return false;
+        return RunCpuLive(*st, st->graph.nodes[size_t(idx)], seq, 0u, dst, n, inputOf);
+    }
     // SK-W stage D: products whose frames are PUBLISHED by a producer outside the lane (the vector engine feed for P2m / P3, the camera
     // fit worker for P7 ...): the lane never makes them, so the seal's live fill declines them (counted, shown) instead of recording a GPU
     // fill nothing can run. A frame the outside producer published in time is sealed like any lane result. Render thread.
@@ -1599,6 +1654,36 @@ private:
         }
     }
 
+    // The ONE CPU live law (seal live fill and Acquire's owner fill): the registered compute of node `n` for frame `seq` with its
+    // inputs read from the slots (a lead reads the published result); an input bit set in `missing` stays null, an input the
+    // slots do not hold is asked of `inputOf` when given (Acquire chain). Render thread.
+    bool RunCpuLive(const LaneState& st, const Node& n, uint64_t seq, uint32_t missing, uint8_t* dst, size_t bytes,
+                    const InputResolver& inputOf) const
+    {
+        const auto it = cpuLive_.find(n.id);
+        if (it == cpuLive_.end())
+            return false;
+        std::array<const uint8_t*, kMaxInputs> in{};
+        for (size_t k = 0; k < n.inputCount && k < in.size(); ++k) {
+            if (((missing >> k) & 1u) != 0)
+                continue;
+            const int j = st.IndexOf(n.inputs[k].product);
+            uint64_t aseq = 0;
+            if (j < 0 || !st.bufs[size_t(j)] || !InputSeq(n.inputs[k], seq, &aseq))
+                continue;
+            const ReadInfo ri = st.table->At(size_t(j)).Read(aseq, n.inputs[k].lead > 0);   // a lead reads the published result
+            if (ri.kind == ReadInfo::Ring)
+                in[k] = st.bufs[size_t(j)]->Ring(size_t(ri.index));
+            else if (ri.kind == ReadInfo::Live)
+                in[k] = st.bufs[size_t(j)]->Live(size_t(ri.index));
+            else if (inputOf)
+                in[k] = inputOf(n.inputs[k].product, aseq, st.bufs[size_t(j)]->Bytes());
+        }
+        SourceFrameView view;
+        const bool haveView = st.ring->TryGet(seq, &view);   // lock-free, no keepAlive copy: the render holds the frame
+        return it->second(n, haveView ? &view : nullptr, in, dst, bytes);
+    }
+
     // The live (in-render) form of a product.
     bool LiveFillOf(LaneState& st, const Node& n, uint64_t seq, int live, Header& hdr, uint32_t missing)
     {
@@ -1613,27 +1698,16 @@ private:
         const uint64_t t0 = nowUs_ ? nowUs_() : 0u;
         bool ok = false;
         if (n.backend == Backend::Cpu) {
-            const auto it = cpuLive_.find(n.id);
-            if (it == cpuLive_.end() || !st.bufs[size_t(idx)])
+            if (cpuLive_.find(n.id) == cpuLive_.end() || !st.bufs[size_t(idx)])
                 return false;
-            std::array<const uint8_t*, kMaxInputs> in{};
-            for (size_t k = 0; k < n.inputCount && k < in.size(); ++k) {
-                if (((missing >> k) & 1u) != 0)
-                    continue;
-                const int j = st.IndexOf(n.inputs[k].product);
-                uint64_t aseq = 0;
-                if (j < 0 || !st.bufs[size_t(j)] || !InputSeq(n.inputs[k], seq, &aseq))
-                    continue;
-                const ReadInfo ri = st.table->At(size_t(j)).Read(aseq, n.inputs[k].lead > 0);   // a lead reads the published result
-                if (ri.kind == ReadInfo::Ring)
-                    in[k] = st.bufs[size_t(j)]->Ring(size_t(ri.index));
-                else if (ri.kind == ReadInfo::Live)
-                    in[k] = st.bufs[size_t(j)]->Live(size_t(ri.index));
+            uint8_t* dst = st.bufs[size_t(idx)]->Live(size_t(live));
+            const size_t bytes = st.bufs[size_t(idx)]->Bytes();
+            if (publishedLookup_ && publishedLookup_(n.id, seq, dst, bytes)) {
+                ++sealReusedPublished_;   // B1: an Acquire reader published it already (the same law): reused, not recomputed
+                ok = true;
+            } else {
+                ok = RunCpuLive(st, n, seq, missing, dst, bytes, InputResolver());
             }
-            SourceFrameView view;
-            const bool haveView = st.ring->TryGet(seq, &view);   // lock-free, no keepAlive copy: the render holds the frame
-            ok = it->second(n, haveView ? &view : nullptr, in, st.bufs[size_t(idx)]->Live(size_t(live)),
-                            st.bufs[size_t(idx)]->Bytes());
         } else if (liveFill_) {
             ok = liveFill_(n, seq, live, hdr, missing);
         } else if (dispatcher_ != nullptr && n.backend == Backend::GpuCompute) {
@@ -1755,6 +1829,8 @@ private:
     std::vector<std::pair<ProductId, uint64_t>> failed_;
     DeferredReport deferredTotals_;
     std::map<ProductId, CpuLiveCompute> cpuLive_;
+    PublishedLookup publishedLookup_;      // B1: the seal copies an Acquire-published default-variant CPU form (render thread)
+    uint64_t sealReusedPublished_ = 0;     // seal live fills served from that publication (never computed twice)
     std::vector<ProductId> externalIds_;   // products published outside the lane (SetExternalProducts)
     uint64_t externalDeclined_ = 0;        // seal-time live fills of those products that were declined (nothing published in time)
     std::function<uint64_t(ProductId)> releaseCompleted_;
