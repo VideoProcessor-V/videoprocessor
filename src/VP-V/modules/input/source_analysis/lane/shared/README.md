@@ -60,6 +60,19 @@ view (R8_UNORM, half or quarter) the NVOF engine takes.
 - Expected cost: about 3-4 h agent time, one incremental Test + renderer build (about 40 min), focused WARP run
   (under 10 min), one GPU-QUIET hardware chunk. GPU: one compute dispatch per frame instead of the CPU half-luma
   pass plus its upload; the CPU saving is to be measured with ProducerThroughputBench.
+- 5b CONDITIONS (audit S3-S6; the format rule and the causes are already in the unit: `FormatCause` / `Supports`,
+  `Cause`, `FallbackCounters`, `CauseName`):
+  - S3: every failure is a named `Cause` with the visible CPU fallback: Kernel::Open compile / create
+    (`KernelOpenFailed`), AttachReader (`ReaderAttachFailed`), shared-texture open (`SharedOpenFailed`), `Run`
+    (`RunFailed`) and device removal (`DeviceRemoved`, checked before every Run).
+  - S4: thread. AfterPublish runs on the conversion thread; the kernel runs only on the thread that owns the producer
+    device's immediate context, so the hook marshals (slot handle + frame id) to the producer worker. `UsedReader` is
+    called on every acquired slot, also when `Run` fails.
+  - S5: `DetachReaderLocked` waits up to 100 ms holding `lock` + lifecycle: Detach is shutdown-only (producer Stop /
+    GpuReleased), never per frame. After a timeout the in-flight reader frame is discarded, the twin stops for that
+    source (`DetachTimeout`), and the timeout shows on Ctrl+I and Ctrl+Alt+D, not only as a counter.
+  - S6: the relaxed predicate still requires an extension with `earlyHandoff && rawFrame`; a test proves
+    `capture_upload render` dispatches nothing new.
 
 # SourceStats (shared unit U6, `VpUnit::SourceStats`)
 

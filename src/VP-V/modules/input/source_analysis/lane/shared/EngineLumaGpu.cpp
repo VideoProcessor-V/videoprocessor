@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // refs/105 phase 5a: the GPU twin of the producer's engine luma (EngineLumaGpu.h).
+#ifndef NOMINMAX
+#define NOMINMAX   // AnalysisLumaSource.h -> AnalysisLumaDomain.h uses std::min / std::max (no pch here)
+#endif
+#include <AnalysisLumaSource.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/EngineLumaGpu.h>
 
 #include <d3dcompiler.h>
@@ -30,30 +34,98 @@ namespace EngineLumaGpu
 
 	const char* Source() { return kSource; }
 
+	const char* CauseName(Cause c)
+	{
+		switch (c)
+		{
+		case Cause::None: return "gpu";
+		case Cause::FormatRgb: return "rgb";
+		case Cause::FormatDolbyVision: return "dolby vision";
+		case Cause::FormatSdrTunnel: return "sdr tunnel";
+		case Cause::FullRange: return "full range";
+		case Cause::FormatOther: return "format";
+		case Cause::KernelOpenFailed: return "kernel failed";
+		case Cause::ReaderAttachFailed: return "reader attach failed";
+		case Cause::NoSlot: return "no early upload";
+		case Cause::SharedOpenFailed: return "shared open failed";
+		case Cause::RunFailed: return "run failed";
+		case Cause::DeviceRemoved: return "device removed";
+		case Cause::DetachTimeout: return "detach timeout";
+		default: return "unknown";
+		}
+	}
+
+	Cause FormatCause(VideoFrameEncoding encoding, bool fullRange, Packing* packing)
+	{
+		Packing p = Packing::Planar16;
+		switch (encoding)
+		{
+		case VideoFrameEncoding::P010:
+		case VideoFrameEncoding::P210: p = Packing::Planar16; break;
+		case VideoFrameEncoding::V210: p = Packing::V210; break;
+		case VideoFrameEncoding::UYVY:
+		case VideoFrameEncoding::HDYC: p = Packing::Uyvy8; break;
+		case VideoFrameEncoding::ARGB_8BIT:
+		case VideoFrameEncoding::BGRA_8BIT:
+		case VideoFrameEncoding::R210:
+		case VideoFrameEncoding::R10b:
+		case VideoFrameEncoding::R10l:
+		case VideoFrameEncoding::R12B:
+		case VideoFrameEncoding::R12L: return Cause::FormatRgb;
+		default: return Cause::FormatOther;
+		}
+		if (fullRange)
+			return Cause::FullRange;
+		if (packing)
+			*packing = p;
+		return Cause::None;
+	}
+
+	Cause FormatCause(AnalysisLumaFormat format, VideoFrameEncoding encoding, AnalysisLumaRange range, Packing* packing)
+	{
+		const bool fullRange = range == AnalysisLumaRange::Full;
+		switch (format)
+		{
+		case AnalysisLumaFormat::P010: return FormatCause(VideoFrameEncoding::P010, fullRange, packing);
+		case AnalysisLumaFormat::P210: return FormatCause(VideoFrameEncoding::P210, fullRange, packing);
+		case AnalysisLumaFormat::NativeYuv422:
+			if (encoding != VideoFrameEncoding::V210 && encoding != VideoFrameEncoding::UYVY && encoding != VideoFrameEncoding::HDYC)
+				return Cause::FormatOther;
+			return FormatCause(encoding, fullRange, packing);
+		case AnalysisLumaFormat::NativeRgb: return Cause::FormatRgb;
+		case AnalysisLumaFormat::DecodedDolbyVision422:
+		case AnalysisLumaFormat::PackedDolbyVision422: return Cause::FormatDolbyVision;
+		case AnalysisLumaFormat::SdrTunnelRgb: return Cause::FormatSdrTunnel;
+		default: return Cause::FormatOther;
+		}
+	}
+
+	bool Kernel::Fail(Cause c, const char* message)
+	{
+		cause = c;
+		error = message;
+		return false;
+	}
+
 	bool Kernel::Open(ID3D11Device* deviceIn)
 	{
 		Close();
 		error.clear();
+		cause = Cause::None;
 		if (!deviceIn)
-		{
-			error = "no device";
-			return false;
-		}
+			return Fail(Cause::KernelOpenFailed, "no device");
 		CComPtr<ID3DBlob> code, messages;
 		const HRESULT compiled = D3DCompile(kSource, std::strlen(kSource), "EngineLumaGpu.hlsl", nullptr, nullptr, "main",
 			"cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &messages);
 		if (FAILED(compiled) || !code)
 		{
-			error = "engine luma kernel does not compile";
+			Fail(Cause::KernelOpenFailed, "engine luma kernel does not compile");
 			if (messages)
 				error += ": " + std::string(static_cast<const char*>(messages->GetBufferPointer()), messages->GetBufferSize());
 			return false;
 		}
 		if (FAILED(deviceIn->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &shader)))
-		{
-			error = "cannot create the engine luma compute shader";
-			return false;
-		}
+			return Fail(Cause::KernelOpenFailed, "cannot create the engine luma compute shader");
 		D3D11_BUFFER_DESC desc{};
 		desc.ByteWidth = sizeof(Params);
 		desc.Usage = D3D11_USAGE_DEFAULT;
@@ -61,15 +133,53 @@ namespace EngineLumaGpu
 		if (FAILED(deviceIn->CreateBuffer(&desc, nullptr, &params)))
 		{
 			shader.Release();
-			error = "cannot create the engine luma constants";
-			return false;
+			return Fail(Cause::KernelOpenFailed, "cannot create the engine luma constants");
 		}
 		device = deviceIn;
 		return true;
 	}
 
+	void Kernel::ReleaseViews()
+	{
+		for (auto& e : srvs) { e.view.Release(); e.tex.Release(); }
+		for (auto& e : uavs) { e.view.Release(); e.tex.Release(); }
+		nextSrv = nextUav = 0;
+	}
+
+	// A cache entry holds a reference to its texture, so a texture pointer is never reused while its entry lives.
+	ID3D11ShaderResourceView* Kernel::SrvFor(ID3D11Texture2D* tex)
+	{
+		for (auto& e : srvs)
+			if (e.tex == tex && e.view)
+				return e.view;
+		SrvEntry& e = srvs[nextSrv];
+		nextSrv = (nextSrv + 1) % kViewCache;
+		e.view.Release();
+		e.tex.Release();
+		if (FAILED(device->CreateShaderResourceView(tex, nullptr, &e.view)))
+			return nullptr;
+		e.tex = tex;
+		return e.view;
+	}
+
+	ID3D11UnorderedAccessView* Kernel::UavFor(ID3D11Texture2D* tex)
+	{
+		for (auto& e : uavs)
+			if (e.tex == tex && e.view)
+				return e.view;
+		UavEntry& e = uavs[nextUav];
+		nextUav = (nextUav + 1) % kViewCache;
+		e.view.Release();
+		e.tex.Release();
+		if (FAILED(device->CreateUnorderedAccessView(tex, nullptr, &e.view)))
+			return nullptr;
+		e.tex = tex;
+		return e.view;
+	}
+
 	void Kernel::Close()
 	{
+		ReleaseViews();
 		params.Release();
 		shader.Release();
 		device.Release();
@@ -79,39 +189,26 @@ namespace EngineLumaGpu
 		bool quarter, ID3D11Texture2D* out)
 	{
 		if (!shader || !context || !raw || !out || width == 0 || height == 0)
-		{
-			error = "engine luma: not open or no input";
-			return false;
-		}
+			return Fail(Cause::RunFailed, "engine luma: not open or no input");
+		if (device->GetDeviceRemovedReason() != S_OK)
+			return Fail(Cause::DeviceRemoved, "engine luma: the device was removed");
 		if (packing != Packing::Planar16 && packing != Packing::V210 && packing != Packing::Uyvy8)
-		{
-			error = "engine luma: not a twin format";
-			return false;
-		}
+			return Fail(Cause::RunFailed, "engine luma: not a twin format");
 		D3D11_TEXTURE2D_DESC rawDesc{}, outDesc{};
 		raw->GetDesc(&rawDesc);
 		out->GetDesc(&outDesc);
 		const uint32_t outW = OutDim(width, quarter), outH = OutDim(height, quarter);
 		if (rawDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM || (rawDesc.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0 ||
 			size_t(rawDesc.Width) * 4u < MinRowBytes(packing, width) || rawDesc.Height < height)
-		{
-			error = "engine luma: the raw texture does not hold the frame";
-			return false;
-		}
+			return Fail(Cause::RunFailed, "engine luma: the raw texture does not hold the frame");
 		if (outDesc.Format != DXGI_FORMAT_R8_UNORM || (outDesc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) == 0 ||
 			outDesc.Width < outW || outDesc.Height < outH)
-		{
-			error = "engine luma: the output texture is not an R8 UAV of the engine size";
-			return false;
-		}
-		CComPtr<ID3D11ShaderResourceView> srv;
-		CComPtr<ID3D11UnorderedAccessView> uav;
-		if (FAILED(device->CreateShaderResourceView(raw, nullptr, &srv)) ||
-			FAILED(device->CreateUnorderedAccessView(out, nullptr, &uav)))
-		{
-			error = "engine luma: cannot make the views";
-			return false;
-		}
+			return Fail(Cause::RunFailed, "engine luma: the output texture is not an R8 UAV of the engine size");
+		ID3D11ShaderResourceView* srv = SrvFor(raw);
+		ID3D11UnorderedAccessView* uav = srv ? UavFor(out) : nullptr;
+		if (!srv || !uav)
+			return Fail(device->GetDeviceRemovedReason() != S_OK ? Cause::DeviceRemoved : Cause::RunFailed,
+				"engine luma: cannot make the views");
 		Params p{};
 		p.srcW = width;
 		p.srcH = height;
@@ -138,6 +235,7 @@ namespace EngineLumaGpu
 		context->CSSetConstantBuffers(0, 1, noBuffer);
 		context->CSSetShader(nullptr, nullptr, 0);
 		error.clear();
+		cause = Cause::None;
 		return true;
 	}
 }

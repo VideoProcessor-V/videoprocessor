@@ -11,6 +11,7 @@
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/input/capture/EarlyUpload.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/EngineLumaGpu.h>
+#include <AnalysisLumaSource.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 
 #include <d3d11_4.h>
@@ -288,6 +289,69 @@ namespace VideoProcessorTest
 			Assert::IsFalse(kernel.Run(context, out, ELG::Packing::Planar16, 2, 2, false, raw), L"swapped textures: refused");
 			Assert::IsTrue(ELG::OutDim(1918, false) == 959 && ELG::OutDim(1918, true) == 480 && ELG::OutDim(1, true) == 1);
 			Assert::IsTrue(ELG::MinRowBytes(ELG::Packing::V210, 1918) == 320 * 16 && ELG::MinRowBytes(ELG::Packing::Uyvy8, 6) == 12);
+			Assert::IsTrue(kernel.LastCause() == ELG::Cause::RunFailed, L"a refused run names its cause");
+			Assert::IsTrue(kernel.Run(context, raw, ELG::Packing::Planar16, 128, 8, false, out), Wide(kernel.LastError()).c_str());
+			Assert::IsTrue(kernel.LastCause() == ELG::Cause::None, L"a twin run clears the cause");
+			Assert::IsTrue(kernel.Run(context, raw, ELG::Packing::Planar16, 128, 8, true, out), L"cached views, another size");
+			kernel.ReleaseViews();
+			Assert::IsTrue(kernel.Run(context, raw, ELG::Packing::Planar16, 128, 8, false, out), L"views made again after a release");
+			ELG::Kernel unopened;
+			Assert::IsFalse(unopened.Open(nullptr), L"no device: refused");
+			Assert::IsTrue(unopened.LastCause() == ELG::Cause::KernelOpenFailed, L"open failure names its cause");
+		}
+
+		TEST_METHOD(GpuTwinFormatRuleAndFallbackCounters)
+		{
+			// O2 / C9, the rule in the unit: only limited-range P010 / P210 / v210 / UYVY / HDYC; RGB, DV, the SDR
+			// tunnel and full range are refused with their cause.
+			ELG::Packing p = ELG::Packing::Uyvy8;
+			Assert::IsTrue(ELG::FormatCause(VideoFrameEncoding::P010, false, &p) == ELG::Cause::None && p == ELG::Packing::Planar16);
+			Assert::IsTrue(ELG::FormatCause(VideoFrameEncoding::P210, false, &p) == ELG::Cause::None && p == ELG::Packing::Planar16);
+			Assert::IsTrue(ELG::FormatCause(VideoFrameEncoding::V210, false, &p) == ELG::Cause::None && p == ELG::Packing::V210);
+			Assert::IsTrue(ELG::FormatCause(VideoFrameEncoding::UYVY, false, &p) == ELG::Cause::None && p == ELG::Packing::Uyvy8);
+			Assert::IsTrue(ELG::FormatCause(VideoFrameEncoding::HDYC, false, &p) == ELG::Cause::None && p == ELG::Packing::Uyvy8);
+			const VideoFrameEncoding twin[] = { VideoFrameEncoding::P010, VideoFrameEncoding::P210, VideoFrameEncoding::V210,
+				VideoFrameEncoding::UYVY, VideoFrameEncoding::HDYC };
+			for (VideoFrameEncoding e : twin)
+			{
+				Assert::IsTrue(ELG::Supports(e, false), L"limited range twin format: supported");
+				Assert::IsFalse(ELG::Supports(e, true), L"full range: refused");
+				Assert::IsTrue(ELG::FormatCause(e, true) == ELG::Cause::FullRange);
+			}
+			const VideoFrameEncoding rgb[] = { VideoFrameEncoding::ARGB_8BIT, VideoFrameEncoding::BGRA_8BIT, VideoFrameEncoding::R210,
+				VideoFrameEncoding::R10b, VideoFrameEncoding::R10l, VideoFrameEncoding::R12B, VideoFrameEncoding::R12L };
+			for (VideoFrameEncoding e : rgb)
+			{
+				Assert::IsFalse(ELG::Supports(e, false), L"RGB: refused");
+				Assert::IsTrue(ELG::FormatCause(e, false) == ELG::Cause::FormatRgb);
+			}
+			Assert::IsTrue(ELG::FormatCause(VideoFrameEncoding::NV12, false) == ELG::Cause::FormatOther);
+			Assert::IsTrue(ELG::FormatCause(VideoFrameEncoding::UNKNOWN, false) == ELG::Cause::FormatOther);
+			// The lane source's view of the frame.
+			Assert::IsTrue(ELG::FormatCause(AnalysisLumaFormat::P010, VideoFrameEncoding::UNKNOWN, AnalysisLumaRange::Limited, &p) == ELG::Cause::None);
+			Assert::IsTrue(ELG::FormatCause(AnalysisLumaFormat::P010, VideoFrameEncoding::UNKNOWN, AnalysisLumaRange::Unknown) == ELG::Cause::None);
+			Assert::IsTrue(ELG::FormatCause(AnalysisLumaFormat::P210, VideoFrameEncoding::UNKNOWN, AnalysisLumaRange::Full) == ELG::Cause::FullRange);
+			Assert::IsTrue(ELG::FormatCause(AnalysisLumaFormat::NativeYuv422, VideoFrameEncoding::V210, AnalysisLumaRange::Limited, &p) == ELG::Cause::None && p == ELG::Packing::V210);
+			Assert::IsTrue(ELG::FormatCause(AnalysisLumaFormat::NativeYuv422, VideoFrameEncoding::HDYC, AnalysisLumaRange::Full) == ELG::Cause::FullRange);
+			Assert::IsTrue(ELG::FormatCause(AnalysisLumaFormat::NativeRgb, VideoFrameEncoding::R210, AnalysisLumaRange::Limited) == ELG::Cause::FormatRgb);
+			Assert::IsTrue(ELG::FormatCause(AnalysisLumaFormat::DecodedDolbyVision422, VideoFrameEncoding::R210, AnalysisLumaRange::Limited) == ELG::Cause::FormatDolbyVision);
+			Assert::IsTrue(ELG::FormatCause(AnalysisLumaFormat::PackedDolbyVision422, VideoFrameEncoding::R210, AnalysisLumaRange::Limited) == ELG::Cause::FormatDolbyVision);
+			Assert::IsTrue(ELG::FormatCause(AnalysisLumaFormat::SdrTunnelRgb, VideoFrameEncoding::R210, AnalysisLumaRange::Limited) == ELG::Cause::FormatSdrTunnel);
+
+			// The counters: one per cause, None counts twin frames and is never the last fallback.
+			ELG::FallbackCounters counters;
+			Assert::IsTrue(counters.Fallbacks() == 0 && counters.Last() == ELG::Cause::None);
+			counters.Count(ELG::Cause::None);
+			counters.Count(ELG::Cause::FormatRgb);
+			counters.Count(ELG::Cause::FormatRgb);
+			counters.Count(ELG::Cause::DetachTimeout);
+			counters.Count(ELG::Cause::None);
+			counters.Count(ELG::Cause::Count);   // out of range: ignored
+			Assert::IsTrue(counters.Of(ELG::Cause::None) == 2 && counters.Of(ELG::Cause::FormatRgb) == 2 &&
+				counters.Of(ELG::Cause::DetachTimeout) == 1 && counters.Fallbacks() == 3);
+			Assert::IsTrue(counters.Last() == ELG::Cause::DetachTimeout);
+			for (uint32_t i = 0; i < static_cast<uint32_t>(ELG::Cause::Count); ++i)
+				Assert::IsTrue(std::strcmp(ELG::CauseName(static_cast<ELG::Cause>(i)), "unknown") != 0, L"every cause has a name");
 		}
 
 		TEST_METHOD(GpuTwinReadsTheOneEarlyUploadOnTheReaderDevice)
