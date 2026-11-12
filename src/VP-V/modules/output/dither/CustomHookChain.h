@@ -52,6 +52,9 @@ namespace CustomHookChain
     inline int QuarterGrid(int n) { return n > 0 ? (2 * n + 10) / 8 : 0; }
     inline int BlockGrid(int n) { return n > 0 ? (2 * n + 46) / 32 : 0; }
 
+    // W2-C8: `// VP_INCLUDE <id>` lines are expanded right after a rule's file is read (Ensure), before the
+    // quantiser / prescaler checks, templates and parsing: ExpandVpIncludes, VpShaderInclude.h.
+
     bool ApplyTemplates(std::string& source, const TemplateValues& values,
         const std::map<std::string, std::string>& parameters, std::string& reason);
 

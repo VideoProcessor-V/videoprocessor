@@ -3,6 +3,7 @@
 
 #include <DebugLog.h>
 #include <vprenderer/HookInstanceTag.h>
+#include <VP-V/modules/output/dither/VpShaderInclude.h>
 
 #include <algorithm>
 #include <cmath>
@@ -307,7 +308,8 @@ namespace CustomHookChain
             {
                 entry.sourceRead = true;
                 std::string reason;
-                if (!loader.read || !loader.read(entry.rule.filename, entry.source, reason))
+                if (!loader.read || !loader.read(entry.rule.filename, entry.source, reason) ||
+                    !ExpandVpIncludes(entry.source, reason))   // W2-C8: the module passes it names
                 {
                     entry.loadFailed = true;
                     DebugLog::Log("Custom hooks: \"%s\" file=%s not loaded: %s",
