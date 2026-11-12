@@ -218,16 +218,115 @@ def _gauss(a, sigma):
     return sum(k[i + r] * pad[r + i:r + i + h, :] for i in range(-r, r + 1))
 
 
+# --- v3 law helpers (refs/116 s6): GrainSplit::V3Half / V3HalfBlur / V3LowAt; NLF cap (refs/116b s4): GrainLevelTable ---
+LEVEL_KEY_BASE, LEVEL_KEYS = 968, 160
+LEVEL_BINS, LEVEL_PERCENTILE, LEVEL_MIN_BLOCKS = 8, 10, 8
+SIGMA_FINE, SIGMA_BASE, SIGMA_LOW = 1.0, 2.5, 6.0
+
+
+def _v3_half(y):
+    """GrainSplit::V3Half: HalfLuma grid ceil(n/2), taps 2i and min(2i+1, n-1), mean (a+b+c+d)*0.25 in tap order."""
+    h, w = y.shape
+    hh, hw = (h + 1) // 2, (w + 1) // 2
+    xs0 = np.minimum(2 * np.arange(hw), w - 1)
+    xs1 = np.minimum(2 * np.arange(hw) + 1, w - 1)
+    ys0 = np.minimum(2 * np.arange(hh), h - 1)
+    ys1 = np.minimum(2 * np.arange(hh) + 1, h - 1)
+    a, b, c, d = y[np.ix_(ys0, xs0)], y[np.ix_(ys0, xs1)], y[np.ix_(ys1, xs0)], y[np.ix_(ys1, xs1)]
+    return (((a + b) + c) + d) * 0.25
+
+
+def _v3_half_blur(hp, full_sigma):
+    """GrainSplit::V3HalfBlur: half sigma sqrt(s^2 - 0.25)/2, radius max(1, ceil(3.5 hs - 1e-9)), normalised, edges clamped."""
+    hs = math.sqrt(full_sigma * full_sigma - 0.25) / 2.0
+    r = max(1, int(math.ceil(3.5 * hs - 1e-9)))
+    k = np.exp(-0.5 * np.arange(-r, r + 1, dtype=np.float64) ** 2 / (hs * hs))
+    k /= k.sum()
+    h, w = hp.shape
+    pad = np.pad(hp, ((0, 0), (r, r)), mode="edge")
+    t = sum(k[i + r] * pad[:, r + i:r + i + w] for i in range(-r, r + 1))
+    pad = np.pad(t, ((r, r), (0, 0)), mode="edge")
+    return sum(k[i + r] * pad[r + i:r + i + h, :] for i in range(-r, r + 1))
+
+
+def _v3_low_at(hp, x, y):
+    """GrainSplit::V3LowAt over index arrays: bilinear at (p + 0.5)/2 - 0.5 on the half plane, clamped indices."""
+    hh, hw = hp.shape
+    hx = (np.asarray(x) + 0.5) * 0.5 - 0.5
+    hy = (np.asarray(y) + 0.5) * 0.5 - 0.5
+    i0, j0 = np.floor(hx).astype(np.int64), np.floor(hy).astype(np.int64)
+    fx, fy = hx - i0, hy - j0
+    g = lambda j, i: hp[np.clip(j, 0, hh - 1), np.clip(i, 0, hw - 1)]
+    a, b, c, d = g(j0, i0), g(j0, i0 + 1), g(j0 + 1, i0), g(j0 + 1, i0 + 1)
+    top = a + (b - a) * fx
+    bot = c + (d - c) * fx
+    return top + (bot - top) * fy
+
+
+def _level_key(q):
+    """GrainSplit::LevelKey: float32 bits >> 20 of max(q, 1/64), minus the base, clamped to 0..159."""
+    f = np.float32(max(q, 1.0 / 64.0))
+    k = int(f.view(np.uint32)) >> 20
+    return min(max(k - LEVEL_KEY_BASE, 0), LEVEL_KEYS - 1)
+
+
+def _level_of_key(key):
+    u = np.uint32(((key + LEVEL_KEY_BASE) << 20) | (1 << 19))
+    return float(u.view(np.float32))
+
+
+def _apply_level_cap(N, quiet, block_luma):
+    """GrainSplit::ApplyLevelCap at sourceBits 10: per luma bin the 10th percentile of the blocks' integer 1/8-octave
+    class keys (bins with < 8 blocks invalid), piecewise linear over the valid bin centres, N = min(N, cap)."""
+    keys = [[] for _ in range(LEVEL_BINS)]
+    for q, l in zip(quiet.reshape(-1), block_luma.reshape(-1)):
+        j = int(math.floor(l * LEVEL_BINS / 1024.0))
+        keys[min(max(j, 0), LEVEL_BINS - 1)].append(_level_key(q))
+    level, valid = [0.0] * LEVEL_BINS, [False] * LEVEL_BINS
+    for j in range(LEVEL_BINS):
+        n = len(keys[j])
+        valid[j] = n >= LEVEL_MIN_BLOCKS and n > 0
+        if valid[j]:
+            r = (LEVEL_PERCENTILE * n + 99) // 100
+            level[j] = _level_of_key(sorted(keys[j])[max(1, r) - 1])
+    out = N.copy()
+    for idx, l in enumerate(block_luma.reshape(-1)):
+        pos = l * LEVEL_BINS / 1024.0 - 0.5
+        lo = hi = -1
+        for j in range(LEVEL_BINS):
+            if not valid[j]:
+                continue
+            if j <= pos:
+                lo = j
+            if j >= pos and hi < 0:
+                hi = j
+        if lo < 0 and hi < 0:
+            continue
+        if lo < 0:
+            cap = level[hi]
+        elif hi < 0 or hi == lo:
+            cap = level[lo]
+        else:
+            cap = level[lo] + (level[hi] - level[lo]) * ((pos - lo) / float(hi - lo))
+        out.reshape(-1)[idx] = min(out.reshape(-1)[idx], cap)
+    return out
+
+
 def grain_blocks(y, B, sub=4, quiet=4, nb=2, cal=2.2):
-    """GrainSplit::Compute's block outputs on a (picture-extended) luma plane at scale B/16:
-    returns (d1, d2, N) with d1 = y - G(1 s) y, d2 = G(1 s) y - G(2.5 s) y, N the (bh, bw) grain level.
-    Differences to the C++: none in the law. Sub-block energies use the actual pixel spans (clipped at the frame edge,
+    """GrainSplit::Compute's block outputs (the v3 law with the NLF cap, refs/116 s6 + 116b, sourceBits 10) on a
+    (picture-extended) luma plane at scale B/16: returns (d1, d2, N) with d1 = y - G(1 s) y, d2 = G(1 s) y - base, N the
+    (bh, bw) grain level. base = the half-resolution blur at HalfSigma(2.5 s) of the U3 half plane, read bilinearly at full
+    resolution; G(1 s) stays at full resolution; D = d1 + d2 = y - base. N = min(neighbourhood minimum, NLF(block luma)),
+    block luma = base at the block centre. Sub-block energies use the actual pixel spans (clipped at the frame edge,
     empty ones skipped) exactly as the C++; the minimum over blocks clamps at the grid edge (scipy-free); only the
     float64 summation order differs (vectorised)."""
     scale = B / 16.0
     y = np.asarray(y, dtype=np.float64)
     h, w = y.shape
-    g1, gb = _gauss(y, 1.0 * scale), _gauss(y, 2.5 * scale)
+    g1 = _gauss(y, SIGMA_FINE * scale)
+    gbh = _v3_half_blur(_v3_half(y), SIGMA_BASE * scale)
+    yy, xx = np.indices((h, w))
+    gb = _v3_low_at(gbh, xx, yy)
     d1, d2 = y - g1, g1 - gb
     d = d1 + d2
     bh, bw = -(-h // B), -(-w // B)
@@ -249,6 +348,11 @@ def grain_blocks(y, B, sub=4, quiet=4, nb=2, cal=2.2):
     for j in range(-nb, nb + 1):
         for i in range(-nb, nb + 1):
             N = np.minimum(N, pad[nb + j:nb + j + bh, nb + i:nb + i + bw])
+    # NLF cap (refs/116b): block luma = the half-resolution base at the block centre (edge blocks clamp).
+    cy = np.minimum(np.arange(bh) * B + B // 2, h - 1)[:, None]
+    cx = np.minimum(np.arange(bw) * B + B // 2, w - 1)[None, :]
+    block_luma = _v3_low_at(gbh, np.broadcast_to(cx, (bh, bw)), np.broadcast_to(cy, (bh, bw)))
+    N = _apply_level_cap(N, qb, block_luma)
     return d1, d2, N
 
 
