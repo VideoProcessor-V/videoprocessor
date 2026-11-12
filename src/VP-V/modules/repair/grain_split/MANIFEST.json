@@ -19,7 +19,8 @@
     "src/VP-V/modules/repair/grain_split/shared/README.md",
     "src/VP-V/modules/repair/grain_split/shared/MANIFEST.json",
     "src/VP-V/modules/repair/grain_split/README.md",
-    "src/VP-V/modules/repair/grain_split/tests/README.md"
+    "src/VP-V/modules/repair/grain_split/tests/README.md",
+    "src/VP-V/modules/repair/grain_split/tests/GrainSplitV3Tests.cpp"
   ],
   "forwarding_headers": [],
   "components": {

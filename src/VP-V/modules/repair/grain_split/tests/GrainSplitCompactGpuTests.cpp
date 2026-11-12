@@ -139,7 +139,7 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 	}
 
 	// The product of one Compute, read back: Full: a = (s1, s2, f, base) per texel, b empty; Compact: a = (s1, s2, -, -),
-	// b = (f, base x codeUnit, -, -). blocks = (N, e3, ., .) per block (four floats per texel either way).
+	// b = (f, base x codeUnit, -, -). blocks = (N, e3, e1, e2) per block in both layouts (v3; four floats per texel).
 	struct Product
 	{
 		bool ok = false;
@@ -312,9 +312,11 @@ public:
 			const uint64_t before = arena.Acquired();
 			const Product viaArena = Run(dev, tex, B, Storage::Full, &arena);
 			Assert::IsTrue(viaArena.ok, Wide(viaArena.error).c_str());
-			LogF("Full via arena %.0fx%.0f: %.0f acquires (bands, quiet), arena %.1f MB", w, h, static_cast<double>(arena.Acquired() - before),
+			LogF("Full via arena %.0fx%.0f: %.0f acquires (tmp, low, quiet), arena %.1f MB", w, h, static_cast<double>(arena.Acquired() - before),
 				static_cast<double>(arena.ReservedBytes()) / (1024.0 * 1024.0));
-			Assert::AreEqual(static_cast<uint64_t>(2), arena.Acquired() - before, L"Full takes bands and quiet from the arena (rows stays the product)");
+			// WAIVER-P10V3-01 (approved v3 law, refs/116): old 2 (bands, quiet; rows was the product) -> new 3 (tmp, low, quiet; the
+			// Full product is its own rgba32f texture): 2 half-size rg32f planes + 1 block grid = 3 acquires.
+			Assert::AreEqual(static_cast<uint64_t>(3), arena.Acquired() - before, L"Full takes tmp, low and quiet from the arena (the product is its own texture)");
 			Assert::IsTrue(SameBits(today.a, viaArena.a) && SameBits(today.blocks, viaArena.blocks), L"arena intermediates: split and blocks exactly equal");
 			Assert::IsFalse(arena.FrameDecision().engaged, L"no shortage");
 			pl_tex_destroy(gpu, &tex);
@@ -343,7 +345,8 @@ public:
 		const uint64_t before = arena.Acquired();
 		const Product r3 = Run(dev, tex, B, Storage::Compact, &arena);
 		Assert::IsTrue(r3.ok, Wide(r3.error).c_str());
-		Assert::AreEqual(static_cast<uint64_t>(3), arena.Acquired() - before, L"Compact takes rows, bands and quiet from the arena");
+		// v3 (WAIVER-P10V3-01, wording only): the count stays 3 (old rows, bands, quiet; new tmp, low, quiet).
+		Assert::AreEqual(static_cast<uint64_t>(3), arena.Acquired() - before, L"Compact takes tmp, low and quiet from the arena");
 		Assert::IsTrue(SameBits(r1.a, r3.a) && SameBits(r1.b, r3.b) && SameBits(r1.blocks, r3.blocks), L"arena result equals the private result");
 		Logger::WriteMessage("Compact: two private runs and one arena run are bit-identical (A, B, blocks)");
 		pl_tex_destroy(gpu, &tex);
@@ -388,7 +391,7 @@ public:
 		Assert::IsTrue(ok.ok && !ok.scratchShort, Wide("recovery: " + ok.error).c_str());
 		Assert::IsFalse(arena.FrameDecision().engaged, L"the fallback releases itself on the first frame that was not short");
 		Assert::IsTrue(SameBits(reference.a, ok.a) && SameBits(reference.b, ok.b) && SameBits(reference.blocks, ok.blocks), L"recovered result equals the private result exactly");
-		// Full after the Compact plan (same bands/quiet shapes are pooled): still equal to the private Full
+		// Full after the Compact plan (v3: both layouts request the same tmp/low/quiet shapes, pooled): still equal to the private Full
 		Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(GrainSplit::Gpu::Splitter::ArenaRequests(gpu, w, h, B, Storage::Full), VpSkeleton::Tier::T2)), L"Full plan reserves");
 		const Product okFull = Run(dev, tex, B, Storage::Full, &arena);
 		Assert::IsTrue(okFull.ok && SameBits(referenceFull.a, okFull.a) && SameBits(referenceFull.blocks, okFull.blocks), L"Full recovery equals the private Full result");
@@ -543,7 +546,7 @@ if (p.x < TBW && p.y < TBH) imageStore(out_blocks, p, vec4(gs_blocks(p), 0.0, 0.
 	TEST_METHOD(GrainSplitCompactBlockEnergiesMatchTheModel)
 	{
 		// The Compact blocks carry the block mean band energies e1 = mean d1^2 and e2 = mean d2^2 (modifier fields): they match
-		// GrainSplit::Compute's bands, are deterministic, and Full leaves blocks.zw at 0 (gs_energies unavailable there).
+		// GrainSplit::Compute's bands, are deterministic, and (v3) Full's blocks carry the same e1, e2 bit for bit (its VIEW still reports no energies).
 		using namespace GrainSplitCompactGpuTestsNs;
 		GpuDevice dev;
 		Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
@@ -561,7 +564,6 @@ if (p.x < TBW && p.y < TBH) imageStore(out_blocks, p, vec4(gs_blocks(p), 0.0, 0.
 			Assert::IsTrue(SameBits(comp.blocks, again.blocks), L"deterministic: the block texels are bit-identical across runs");
 			const GrainSplit::Split model = GrainSplit::Compute(y, 1.0, B);
 			double worstRel1 = 0, worstRel2 = 0;
-			size_t zwZero = 0, blocksTotal = static_cast<size_t>(comp.bw) * comp.bh;
 			for (int by = 0; by < comp.bh; ++by)
 				for (int bx = 0; bx < comp.bw; ++bx)
 				{
@@ -577,11 +579,12 @@ if (p.x < TBW && p.y < TBH) imageStore(out_blocks, p, vec4(gs_blocks(p), 0.0, 0.
 					const double e1 = comp.blocks[i * 4 + 2], e2 = comp.blocks[i * 4 + 3];
 					worstRel1 = (std::max)(worstRel1, std::fabs(e1 - s1 / cnt) / (std::fabs(s1 / cnt) + 1e-3));
 					worstRel2 = (std::max)(worstRel2, std::fabs(e2 - s2 / cnt) / (std::fabs(s2 / cnt) + 1e-3));
-					zwZero += (full.blocks[i * 4 + 2] == 0.0f && full.blocks[i * 4 + 3] == 0.0f) ? 1u : 0u;
 				}
 			LogF("block energies %.0fx%.0f: worst relative error e1 %.6f, e2 %.6f against the CPU model", w, h, worstRel1, worstRel2);
 			Assert::IsTrue(worstRel1 <= 2e-3 && worstRel2 <= 2e-3, L"e1 and e2 match the model's block means of d1^2 and d2^2");
-			Assert::AreEqual(blocksTotal, zwZero, L"Full leaves blocks.zw at 0");
+			// WAIVER-P10V3-01: old "Full blocks.zw == 0 in every block" (count == blocks total) -> new "Full blocks == Compact blocks bit for
+			// bit": v3 STATS/NMIN write (N, e3, e1, e2) in both layouts from the same inputs, only APPLY differs by layout.
+			Assert::IsTrue(SameBits(full.blocks, comp.blocks), L"Full blocks carry (N, e3, e1, e2) exactly as Compact does");
 			pl_tex_destroy(gpu, &tex);
 		}
 		const std::string full = GrainSplit::Gpu::ViewGlsl(Storage::Full, kCodeUnit), compact = GrainSplit::Gpu::ViewGlsl(Storage::Compact, kCodeUnit);

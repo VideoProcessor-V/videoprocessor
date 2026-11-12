@@ -267,20 +267,21 @@ namespace VideoProcessorTest
 			Assert::IsTrue(kernel->Fallbacks().size() == 1, L"the storage decision is listed");
 		}
 
-		// The Full pass text is the pre-SA2 text: its FNV-1a 64 is pinned (the value already pinned by GrainUnitGpuTests; the
-		// kernel adds no GLSL of its own).
+		// The pass text is the v3 text: its FNV-1a 64 is pinned (the value also pinned by GrainUnitGpuTests; the kernel adds no
+		// GLSL of its own).
 		BEGIN_TEST_METHOD_ATTRIBUTE(PassTextFingerprintIsPinned)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(PassTextFingerprintIsPinned)
 		{
-			constexpr uint64_t kPinned = 0x41cef8707edf809dull;
+			// WAIVER-P10V3-01: old pin 0x41cef8707edf809d (v2 text) -> new 0x0dabcf9788d9bd4b (v3 pass texts, refs/116).
+			constexpr uint64_t kPinned = 0x0dabcf9788d9bd4bull;
 			Assert::IsTrue(GrainSplit::Gpu::FullShaderFingerprint() == kPinned, L"Full pass GLSL fingerprint");
 		}
 	};
 
-	// 70b: the private working memory the governor does not see (CPU only; no device). Compact keeps rows + bands (two
-	// full-size rgba32f planes), Full only the bands; the lane form doubles it (a second Splitter), the live set is always counted.
+	// 70b: the private working memory the governor does not see (CPU only; no device). v3 (refs/116): two half-size rg32f planes
+	// plus the block grid, the same for both layouts; the lane form doubles it (a second Splitter), the live set is always counted.
 	TEST_CLASS(LaneGpuGrainPrivateBytesTests)
 	{
 	public:
@@ -292,10 +293,17 @@ namespace VideoProcessorTest
 			const uint64_t blocks = ((d.width + B - 1) / B) * ((d.height + B - 1) / B);
 			VpLaneProducts::GrainSplitKernel full(GrainSplit::Storage::Full);
 			VpLaneProducts::GrainSplitKernel compact(GrainSplit::Storage::Compact);
-			Assert::IsTrue(full.PrivateBytes(d, false) == px * 16u + blocks * 16u, L"Full live set: bands + block grid");
+			// WAIVER-P10V3-01 (working-set formula of the approved law change). Old: Full = px*16 + blocks*16, Compact = 2*px*16 +
+			// blocks*16. New (both layouts): 2 half-size rg32f planes (8 B per half px) + the rgba32f block grid (16 B per block).
+			// At 3840x2160: halfPx = 1920*1080 = 2,073,600; B = 32 -> 120*68 = 8,160 blocks;
+			// 2*2,073,600*8 + 8,160*16 = 33,177,600 + 130,560 = 33,308,160 B (old Full 132,710,400 + 130,560).
+			const uint64_t halfPx = ((uint64_t(d.width) + 1u) / 2u) * ((uint64_t(d.height) + 1u) / 2u);
+			const uint64_t one = 2u * halfPx * 8u + blocks * 16u;
+			(void)px;
+			Assert::IsTrue(full.PrivateBytes(d, false) == one, L"Full live set: two half-size rg32f planes + block grid");
 			Assert::IsTrue(full.PrivateBytes(d, true) == 2u * full.PrivateBytes(d, false), L"lane form = a second Splitter");
 			if (compact.Granted() == GrainSplit::Storage::Compact)
-				Assert::IsTrue(compact.PrivateBytes(d, false) == 2u * px * 16u + blocks * 16u, L"Compact live set: rows + bands + grid");
+				Assert::IsTrue(compact.PrivateBytes(d, false) == one, L"Compact live set: the same two half-size planes + grid");
 		}
 	};
 }

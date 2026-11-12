@@ -707,11 +707,15 @@ namespace BandFromBaseTestsNs
 
 		TEST_METHOD(CpuSplitComputeIsUnchanged)
 		{
-			// Compute() uses Gauss three times: base = G(2.5) Y and d1 = Y - G(1) Y equal the frozen-Gauss composition.
+			// ComputeV2() (the v2 law) uses Gauss three times: base = G(2.5) Y and d1 = Y - G(1) Y equal the frozen-Gauss composition.
+			// d1 is the full-resolution fine band in v3 too. WAIVER-P10V3-01 (approved v3 law, refs/116): the v3 base is the
+			// half-resolution blur read bilinearly, so "Compute().base == frozen G(2.5) Y" (old) is now asserted on ComputeV2()
+			// (the retained v2 law, same arithmetic as before) and v3's d1 stays checked against the frozen G(1).
 			const GrainSplit::Plane y = TestPlane(48, 40, 99);
 			const GrainSplit::Split a = GrainSplit::Compute(y, 1.0, 16);
+			const GrainSplit::Split a2 = GrainSplit::ComputeV2(y, 1.0, 16);
 			const GrainSplit::Plane g1 = Frozen::Gauss(y, 1.0), gb = Frozen::Gauss(y, 2.5);
-			Assert::IsTrue(std::memcmp(a.base.v.data(), gb.v.data(), gb.v.size() * sizeof(double)) == 0, L"base bits");
+			Assert::IsTrue(std::memcmp(a2.base.v.data(), gb.v.data(), gb.v.size() * sizeof(double)) == 0, L"v2 base bits");
 			for (size_t i = 0; i < y.v.size(); ++i)
 				Assert::IsTrue(BitEqual(a.d1.v[i], y.v[i] - g1.v[i]), L"d1 bits");
 		}
