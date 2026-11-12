@@ -1305,7 +1305,7 @@ namespace SourceIdentity
 						const ChainEvidence::ShotDiag sd = evidence.ShotDiagAtN(a, cands[k]);
 						const Scaling::GeometrySet::Geometry& geo = geoms[gi[k]];
 						g << seq << ',' << t << ',' << shotId << ',' << (a == 0 ? 'x' : 'y') << ',' << N << ',' << cands[k] << ",\"" << geo.name << "\","
-							<< (geo.singleAxisParked ? 1 : 0) << ',' << ((cr && cr->valid) ? 1 : 0) << ',' << (cr ? Diag::Num(cr->stat) : std::string()) << ','
+							<< (geo.apply ? 0 : 1) << ',' << ((cr && cr->valid) ? 1 : 0) << ',' << (cr ? Diag::Num(cr->stat) : std::string()) << ','
 							<< (cr ? cr->kernel : -1) << ',' << (cr ? cr->lineCount : 0) << ',' << Diag::Num(credit) << ',' << Diag::Num(raw) << ','
 							<< Diag::Num(static_cast<double>(newest) / 1e6) << ',' << (llr <= -1e8 ? std::string() : Diag::Num(llr)) << ','
 							<< (sd.haveSlot ? Diag::Num(sd.open) : std::string()) << ',' << sd.openShotId << ','
