@@ -8,15 +8,19 @@
 // `Vpv::HostState` is the S8 state anchor: ONE member of the renderer's Impl (`Vpv::HostState vpv;`,
 // declared directly after `captureBinding`, in the same VPV-HOOK run). The VP-V members that P11a moves
 // out of Bill's class become FIELDS of the sub-struct of their owning module and are reached from the
-// VP .inl bodies as `vpv.led.x`, `vpv.calibration.x`, ... The anchor holds data only: no behaviour, no
+// VP .inl bodies as `vpv.led.x`, `vpv.calibration.x`, ... The anchor holds state only: no behaviour, no
 // registration, no hub entry. It exists in both pathways; behaviour stays gated where it is today.
+// Motion and Led now hold state (P11a-f: the intent state); the anchor is therefore NOT trivially
+// destructible, by design (Led::Intent holds a mutex, Motion::Intent a shared_ptr) and is destroyed
+// before captureBinding.
 //
 // Not the hub's internal per-host map entry `Vpv::Hub::HostState` (ExtensionHub.h) and not the skeleton
 // module's `Vpv::Skeleton::HostState` (SkeletonModule.h / .cpp): those are nested-namespace types, so an
 // unqualified `HostState` inside Vpv::Hub / Vpv::Skeleton still names their own type (no `using namespace
 // Vpv...` directive exists in src at b6bdfc9fb).
 //
-// P11a-0 declares the sub-structs EMPTY; each later move (refs/110 s2.2-2.6) fills exactly one of them:
+// P11a-0 declared the sub-structs EMPTY; P11a-f filled motion.intent and led.intent, and each later move
+// (refs/110 s2.3-2.6) fills exactly one of the rest (the list below is the plan, not the current content):
 //   motion.intent   s2.2 motion-intent part of intent items 2-5 (switches/motion configure, ShotEase)  -> motion\consumers
 //   led.intent      s2.2 ambient, black intent and LED-limit parts of intent items 2-5                 -> drive\led_compensation
 //   led             s2.4 ambient SDR lift, LedDisplayGamma, dynamicDrive, the LED/SDR target-black share -> drive\led_compensation
