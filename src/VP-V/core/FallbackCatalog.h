@@ -58,6 +58,15 @@ namespace FallbackCatalog
 		return Engaged("dither need", "Dither need: unavailable (" + missing + "); sigma-delta at its base amplitude");
 	}
 
+	// dither_need = auto but the sigma-delta is not running by configuration (not selected, or output.dither switched
+	// off): the setting has no effect. Same id as DitherNeed, so one decision per frame is synced.
+	inline Decision DitherNeedInactive(bool requested, const std::string& reason)
+	{
+		if (!requested || reason.empty())
+			return Released("dither need");
+		return Engaged("dither need", "Dither need: inactive (" + reason + "); no extra dither is added");
+	}
+
 	// ---- output.dither --------------------------------------------------------------------------
 	// The sigma-delta was asked for (temporal_dither = sigma_delta, or the shader is in the list)
 	// but does not run: libplacebo's own dither quantises the output instead.
