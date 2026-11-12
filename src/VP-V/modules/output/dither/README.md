@@ -197,3 +197,10 @@ Config placement: master VP-V page, Output sub-page (`temporal_dither` is the Ou
 Tiers: Classic libplacebo dither; Low .. Upper sigma-delta.
 
 **Downstream consumers (TEMPORAL DETAIL, docs 71 section Q5 and 72):** per-pair homography (P7/P9), the object layer (per-object motion), P8 per-block membership + confidence, and K4 guided residuals.
+
+## VP_INCLUDE and the vector chain (W2-C8)
+
+- `VpShaderInclude.h`: a whole line `// VP_INCLUDE <id>` in a custom GLSL hook (a plain comment, never a `//!` directive) is replaced, before templates and parsing, by the GLSL the owning module publishes under `<id>`. Known id: `motion.output_domain_search` (`VpMotion::OutputDomainSearch::Glsl`, in motion.estimation). The inserted text takes the including line's line ends, so the expanded file equals the file the passes were cut from. The custom hook chain, the GPU tests' loaders and the Beta host share this one expansion; an unknown id is an error with a reason.
+- `CustomHookChain::Chain::QuantizerParameter(name, value)`: the current value of a `//!PARAM` of the loaded quantiser (the rule's value or the shader default); the renderer reads `motion_compensation` through it for the chain's step 5.
+- `shaders/Temporal sigma-delta.glsl` keeps the sigma-delta plus the VPVEC / VPPIX consumption only; the search passes are the include line. Where the block vectors come from (shared pair, matcher field, on-demand pair, own search, static) is decided in motion.estimation (`DitherVectorSource.h`).
+- Settings rows are unchanged: `dither_vectors` is still `auto | own`; no new key. `own` = the module's search directly.

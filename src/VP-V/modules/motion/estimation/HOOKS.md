@@ -178,3 +178,12 @@ failure is counted, logged (first 20, then every 100th) and raised as the fallba
   ring (with a missed-field counter on the status) belongs to the P3 verified-field store, not to the live matcher.
 - F8: the engine global's validity uses the statistics consumers' rule (`SampleGlobal(...).usable`: z < 0.9) and ignores
   the `w > 0.5` written flag that the intent interpreter checks; left as is (same rule as the fast-pan input).
+
+## 9. Output-domain search + dither vector chain (W2-C8)
+
+Call sites: 0 new lines in Bill-owned files (rule 32). `BuildSigmaDeltaVectorsWithoutExtras` keeps its declaration in `LibplaceboVideoRenderer.cpp`; its body moved to `estimation/DitherVectorSourceHost.inl`, included by `consumers/PhaseTimeline.inl` (VP-V module). The chain (shared pair -> matcher field -> on-demand -> own search -> static), its four fallback entries (`dither vectors matcher | on demand | own search | unvalidated`) and the status segment are described in README.md "Output-domain search + dither vector chain (W2-C8)".
+
+- Q1: reuse gate `SpanStatus != Invalid`; `Unknown` reuses visibly (counter, segment, "dither vectors unvalidated").
+- Step 5 = `motion_compensation 0` (shader default): status only, no vectors mapped. Engine absent / not serving = step 4, the module's own search (previous behaviour).
+- DEVIATION (lead 4): the search is included INTO the one sigma-delta hook by `// VP_INCLUDE motion.output_domain_search` (`output/dither/VpShaderInclude.h`), not a second hook: libplacebo keeps SAVEd and `//!TEXTURE` storage per parsed shader (`custom_mpv.c` `struct hook_priv` :920-940; `pl_mpv_user_shader_set_texture` :1737 swaps only SAMPLED textures).
+- The pass text is `fallback/OutputDomainSearchGlsl.h`; `tools/check_motion_bypass.py` no longer allow-lists the shader (the allowed `motion/` path holds the passes).
