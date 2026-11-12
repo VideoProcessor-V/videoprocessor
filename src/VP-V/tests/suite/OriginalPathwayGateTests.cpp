@@ -222,7 +222,7 @@ namespace VideoProcessorTest
 			Hub().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new VpMotion::VectorEngineExtension()));
 			int host = 0;
 			VpMotion::VectorEngine engine(&host);
-			VpMotion::MotionValidity::Pending pending;
+			MotionValidity::Pending pending;
 			for (const Row& row : kRows)
 			{
 				Hub().NoteOriginalPathway(&host, row.originalPathway);
@@ -240,7 +240,7 @@ namespace VideoProcessorTest
 			SettingsApplied(&host, false);
 			Assert::IsTrue(engine.motionValidity.Epoch() != before, L"leaving Original moves the epoch once");
 			Assert::IsTrue(engine.TakeInvalidation(pending));
-			Assert::IsTrue(pending.cause == VpMotion::MotionValidity::Cause::Resync);
+			Assert::IsTrue(pending.cause == MotionValidity::Cause::Resync);
 			Assert::IsFalse(Hub().OriginalPathway(&host));
 			// VP-V -> VP-V and VP-V -> Original: nothing.
 			before = engine.motionValidity.Epoch();

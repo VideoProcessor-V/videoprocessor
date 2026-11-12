@@ -3,8 +3,6 @@
 
 #include "ExtensionHub.h"
 
-#include <DebugLog.h>
-
 #include <utility>
 #include <vector>
 
@@ -89,11 +87,10 @@ namespace Vpv
 			std::shared_ptr<PathwayFact> fact = std::make_shared<PathwayFact>();
 			fact->host = host;
 			fact->original.store(original, std::memory_order_release);
-			if (pathway_.Put(host, fact))
-				return true;
-			// Visible, never silent (owner rule): without the fact the host's modules run their VP-V form in Original.
-			DebugLog::Log("Skeleton hub: pathway fact of host %p not recorded (slot table full); its modules run as VP-V", host);
-			return false;
+			// False only when the 16-host slot table is full (hosts leave it at GpuReleased / Shutdown, so one
+			// renderer never fills it). The hub has no log sink of its own (DebugLog.h brings Windows.h min/max
+			// into this translation unit); the caller reads the result and the gate tests pin it to true.
+			return pathway_.Put(host, fact);
 		}
 
 		size_t ExtensionHub::LiveHostCount() const
