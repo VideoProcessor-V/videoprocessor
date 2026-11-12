@@ -237,11 +237,16 @@ namespace SourceResolutionMonitor
 		// SID r2: engaged ("source resolution held") while a single-axis or non-standard re-base is held (ConventionNote); the
 		// one-time notice keys on it. Released in the Original pathway and while nothing is held.
 		FallbackCatalog::Decision ConventionHoldFallback() const;
+		// Render thread (audit MED-1 / LOW-1): the same decision, only when the held state's inputs changed since the last call
+		// (true = `out` is the new decision to sync); ForgetConventionHold makes the next call report (auto switched off and on).
+		bool ConventionHoldChanged(FallbackCatalog::Decision& out);
+		void ForgetConventionHold() { seenHoldValid = false; }
 		// SID r2 (owner 2026-11-11 ~10:25): the geometries active for DETECTION (recognition and naming of a held reading;
 		// Scaling::GeometrySet's detect flag). [vprenderer] source_geometry_detect = all (default, wide) | conventional | a list of
 		// entry ids. It never changes what is applied (the table's apply flag and the two-axis rule decide that). Unknown ids are
 		// ignored and shown (GeometryDetectFallback, "source geometry detect").
-		void SetGeometryDetect(const std::string& value);
+		// Returns true when the value differs from the last one set (it is parsed only then: audit LOW-1).
+		bool SetGeometryDetect(const std::string& value);
 		FallbackCatalog::Decision GeometryDetectFallback() const;
 		// Held episodes recognised as one named parked (detect-only) entry, per entry id (the shadow nights' counter; also in the log
 		// line and the history row "convention_held"). 0 for an unknown id.
@@ -637,8 +642,21 @@ namespace SourceResolutionMonitor
 		std::atomic<unsigned> geometryDetectMask{ Scaling::GeometrySet::DefaultDetectMask() };   // the default: wide
 		mutable std::mutex geometryDetectMutex;
 		std::string geometryDetectUnknown;               // unknown source_geometry_detect ids (geometryDetectMutex)
+		std::string geometryDetectValue;                 // the last value set (geometryDetectMutex)
+		bool geometryDetectSet = false;                  // a value was set (geometryDetectMutex)
+		struct HoldKey                                   // ConventionHoldChanged's inputs (render thread)
+		{
+			bool original = false; int kind = 0, axis = -1, rasterW = 0, rasterH = 0; unsigned mask = 0u;
+			double h = 1.0, v = 1.0, ratio = 1.0;
+			bool operator==(const HoldKey& o) const { return original == o.original && kind == o.kind && axis == o.axis &&
+				rasterW == o.rasterW && rasterH == o.rasterH && mask == o.mask && h == o.h && v == o.v && ratio == o.ratio; }
+		};
+		HoldKey seenHold;
+		bool seenHoldValid = false;
 		std::atomic<unsigned> namedHoldCounts[32] = {};   // per GeometrySet index: named held episodes
-		// The parked entry a held reading rH x rV is (nullptr = a generic hold); counts and logs a new episode when `count`.
+		// The parked entry a held reading rH x rV is (nullptr = a generic hold); NamedHold also counts and logs a new episode
+		// when `count` (audit LOW-2: the readers use the const NamedHoldName).
+		const char* NamedHoldName(double rH, double rV) const;
 		const char* NamedHold(double rH, double rV, bool count);
 		std::string ConventionNote() const;              // the Snapshot::conventionNote text ("" = nothing held)
 		std::atomic<bool> chainEnabled{ false };

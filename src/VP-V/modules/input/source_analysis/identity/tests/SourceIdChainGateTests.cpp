@@ -1011,6 +1011,46 @@ namespace Tests
 			Assert::IsFalse(m.GeometryDetectFallback().engaged, L"released when every id is known");
 		}
 
+		// Audit LOW-1 (opus gate SHOULD): the settings seam re-parses source_geometry_detect only on a change; an unchanged value
+		// returns false and keeps the parsed state (an unknown id stays shown).
+		TEST_METHOD(SetGeometryDetectReportsOnlyAChangedValue)
+		{
+			SidConv::Mon m;
+			Assert::IsTrue(m.SetGeometryDetect("all"), L"first value is a change");
+			Assert::IsFalse(m.SetGeometryDetect("all"), L"unchanged value is not re-parsed");
+			Assert::IsTrue(m.SetGeometryDetect("hdv_1440x1080, bogus"), L"a new value is a change");
+			Assert::IsFalse(m.SetGeometryDetect("hdv_1440x1080, bogus"));
+			const FallbackCatalog::Decision d = m.GeometryDetectFallback();
+			Assert::IsTrue(d.engaged && SidConv::Has(d.reason, "bogus"), L"the unknown id stays shown across an unchanged call");
+			Assert::IsTrue(m.SetGeometryDetect("all"));
+			Assert::IsFalse(m.GeometryDetectFallback().engaged, L"released on the changed value");
+		}
+
+		// Audit MED-1/LOW-1 (opus gate SHOULD): the frame seam syncs the convention hold only when its inputs change;
+		// ForgetConventionHold (auto switched off) makes the next call report again.
+		TEST_METHOD(ConventionHoldChangedReportsOnceAndAgainAfterForget)
+		{
+			SidConv::Mon m;
+			const SidConv::Run r = SidNamed::DriveDetect(SidNamed::PerAxisOn(0.75, 1.0, 1920, 1080), 1920, 1080, "all", m);
+			Assert::IsTrue(SidConv::Has(r.note, "held: anamorphic HDV 1440x1080"), SidConv::W16(r.note).c_str());
+			FallbackCatalog::Decision first;
+			Assert::IsTrue(m.ConventionHoldChanged(first), L"first call reports the hold");
+			Assert::AreEqual(std::string("source resolution held"), first.id);
+			Assert::IsTrue(first.engaged && SidConv::Has(first.reason, "HDV 1440x1080"), SidConv::W16(first.reason).c_str());
+			FallbackCatalog::Decision again;
+			Assert::IsFalse(m.ConventionHoldChanged(again), L"unchanged inputs: no sync");
+			Assert::IsFalse(m.ConventionHoldChanged(again));
+			m.ForgetConventionHold();
+			FallbackCatalog::Decision after;
+			Assert::IsTrue(m.ConventionHoldChanged(after), L"reported again after ForgetConventionHold");
+			Assert::AreEqual(first.engaged, after.engaged);
+			Assert::AreEqual(first.reason, after.reason);
+			Assert::IsFalse(m.ConventionHoldChanged(again));
+			Assert::IsTrue(m.SetGeometryDetect("conventional"));
+			FallbackCatalog::Decision masked;
+			Assert::IsTrue(m.ConventionHoldChanged(masked), L"a changed detect mask is a changed input");
+		}
+
 		// Doc 91 E: widening DETECT never latches a native. A native chain stream, every entry detect on (default, and listed by id).
 		TEST_METHOD(ANativeChainStreamWithEveryEntryDetectingNeverLatches)
 		{
