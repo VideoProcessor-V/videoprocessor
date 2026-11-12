@@ -2972,7 +2972,8 @@ namespace RenderAheadPolicyTest
 				L"the sweep reached every branch");
 		}
 
-		// Original pathway: the handler leaves the Presenter and the swapchain untouched.
+		// Original pathway, from the host's facts or the Presenter's own fact: the handler leaves the
+		// Presenter and the swapchain untouched.
 		TEST_METHOD(TheOriginalPathwayDoesNothing)
 		{
 			Presenter p;
@@ -2995,6 +2996,38 @@ namespace RenderAheadPolicyTest
 			Assert::AreEqual(3, p.mainInterval);
 			Assert::AreEqual(12.0, p.targetLeadMs);
 			Assert::IsTrue(p.mainRefresh.empty());
+			// The Presenter's own fact (PHASE1 SetOriginalPathway), with the host's facts not saying so.
+			Presenter q;
+			q.Commit(c, {});
+			Assert::IsTrue(q.SetOriginalPathway(true, 2.0));
+			q.targetLeadMs = 12.0;
+			q.estimatedLeadMs.store(5.0);
+			q.NoteMainRefresh(6, 20);
+			const bool active = q.schedule.Active();
+			const int interval = q.mainInterval;
+			FakeStatisticsSwapchain other;
+			other.presentCount = 7;
+			other.presentRefreshCount = 21;
+			const AfterPresentKind kinds[] = { AfterPresentKind::AfterLastExtra, AfterPresentKind::NoExtras, AfterPresentKind::Plain };
+			for (AfterPresentKind kind : kinds)
+			{
+				AfterPresentFacts g;
+				g.kind = kind;
+				g.rendered = g.submitted = true;
+				g.targetTimingKnown = true;
+				g.openLoop = true;
+				const AfterPresentResult s = PresenterAfterPresent(q, g, &other);
+				Assert::IsFalse(s.ran);
+				Assert::IsFalse(s.broke);
+				Assert::IsFalse(s.statistics.read);
+			}
+			Assert::AreEqual(0, other.reads, L"no statistics read");
+			Assert::AreEqual(active, q.schedule.Active(), L"the schedule unchanged");
+			Assert::AreEqual(interval, q.mainInterval);
+			Assert::AreEqual(12.0, q.targetLeadMs);
+			Assert::AreEqual(5.0, q.estimatedLeadMs.load());
+			Assert::AreEqual<size_t>(1, q.mainRefresh.size(), L"no bookkeeping");
+			Assert::IsTrue(q.idsSwapchain == nullptr);
 		}
 
 		// refs/108 addendum proof (refs/112:24 ESTIMATE): the statistics the AfterPresent handler

@@ -36,7 +36,7 @@ namespace RenderAhead
 	struct AfterPresentFacts
 	{
 		AfterPresentKind kind = AfterPresentKind::Plain;
-		bool originalPathway = false;    // Bill's pathway: the handler does nothing
+		bool originalPathway = false;    // Bill's pathway: the handler does nothing (as with Presenter::originalPathway)
 		bool rendered = false, submitted = false;
 		bool targetTimingKnown = false;  // the host's presentationTargetTimingKnown
 		double hostTargetLeadMs = 0.0;   // the host's presentationTargetLeadMs before this step
@@ -102,7 +102,7 @@ namespace RenderAhead
 	inline AfterPresentResult PresenterAfterPresent(Presenter& p, const AfterPresentFacts& f, IDXGISwapChain* native)
 	{
 		AfterPresentResult r;
-		if (f.originalPathway)
+		if (f.originalPathway || p.originalPathway)   // the host's fact or the Presenter's (PHASE1 SetOriginalPathway)
 			return r;
 		r.ran = true;
 		if (f.kind != AfterPresentKind::Plain)
