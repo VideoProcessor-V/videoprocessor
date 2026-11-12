@@ -37,7 +37,9 @@ namespace Tests
 			Assert::IsFalse(v.available);
 			Assert::IsTrue(v.role == QualityPattern::FrameRole::Unknown);
 			Assert::IsFalse(v.reason.empty());
-			Assert::IsTrue(v.fallback.engaged && v.fallback.id == "product.quality_pattern" && v.fallback.reason == v.reason);
+			Assert::IsTrue(v.fallback.engaged && v.fallback.id == "product.quality_pattern");
+			// ProductFallback format = catalog text + ": " + cause (FallbackCatalog.h ProductFallback)
+			Assert::AreEqual(std::string("frame pattern record unavailable, stale or of another unit version: temporal detail and dither need show it as not produced and use their classical forms: no producer or no record"), v.fallback.reason);
 			Assert::AreEqual(std::string("frame pattern: not produced"), QualityPattern::StatusText(v));
 			Assert::IsNotNull(FallbackCatalog::FindProductEntry("product.quality_pattern"));
 			// the causal reader sees the same absent state
