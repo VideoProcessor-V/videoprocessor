@@ -459,15 +459,17 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
         {
             const DitherNeedSeam::Outcome need = outputFinish.EvaluateDitherNeed(
                 activeSettings.ditherNeed == "auto" && any, pipelineSlots.OriginalPathway());
-            SyncFallback(need.fallback);
-            // auto asked for but the sigma-delta is not running by choice: a one-time visible line, not a silent no-op
-            // (a dropped sigma-delta is already the "dither" fallback).
-            if (activeSettings.ditherNeed == "auto" && !any && !pipelineSlots.OriginalPathway())
+            // auto asked for but the sigma-delta is not running by choice: the visible fallback stays engaged while the
+            // condition holds (ONE decision per frame, one SyncFallback), and the reason is logged once on change (a dropped
+            // sigma-delta is already the "dither" fallback).
+            const bool inactive = activeSettings.ditherNeed == "auto" && !any && !pipelineSlots.OriginalPathway();
+            const std::string why = !inactive ? std::string() : ditherPrep.slotOff ? "output.dither is switched off in pipeline_slots_off" :
+                "the sigma-delta dither is not selected (temporal_dither)";
+            SyncFallback(inactive ? FallbackCatalog::DitherNeedInactive(true, why) : need.fallback);
+            if (inactive)
             {
-                const std::string why = std::string("dither need: inactive (") + (!ditherPrep.found ?
-                    "the sigma-delta dither is not selected (temporal_dither)" : "output.dither is switched off in pipeline_slots_off") + ")";
-                if (outputFinish.DitherNeedStatusChanged(why))
-                    DebugLog::Log("%s", why.c_str());
+                if (outputFinish.DitherNeedStatusChanged("dither need: inactive (" + why + ")"))
+                    DebugLog::Log("dither need: inactive (%s)", why.c_str());
             }
             else if (outputFinish.DitherNeedStatusChanged(need.status) && !need.status.empty())
             {

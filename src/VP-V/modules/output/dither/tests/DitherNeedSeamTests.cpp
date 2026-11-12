@@ -65,6 +65,21 @@ namespace DitherNeedSeamTestsNs
 	{
 	public:
 
+		// dither_need = auto with the sigma-delta not running by configuration: ONE engaged decision with its own wording
+		// (same id as the product-missing one, so the registry holds it steadily), released when the condition clears.
+		TEST_METHOD(InactiveDecisionIsSteadyNamedAndReleases)
+		{
+			const FallbackCatalog::Decision a = FallbackCatalog::DitherNeedInactive(true, "output.dither is switched off in pipeline_slots_off");
+			const FallbackCatalog::Decision b = FallbackCatalog::DitherNeedInactive(true, "output.dither is switched off in pipeline_slots_off");
+			Assert::IsTrue(a.engaged && b.engaged, L"engaged while the condition holds");
+			Assert::IsTrue(a.id == b.id && a.reason == b.reason, L"the same decision every frame");
+			Assert::IsTrue(a.id == FallbackCatalog::DitherNeed(true, "x").id, L"one id with the product-missing decision");
+			Assert::IsTrue(a.reason.find("pipeline_slots_off") != std::string::npos, L"the reason is named");
+			Assert::IsTrue(a.reason.find("base amplitude") == std::string::npos, L"does not claim the sigma-delta runs");
+			Assert::IsFalse(FallbackCatalog::DitherNeedInactive(false, "x").engaged, L"released when not requested");
+			Assert::IsFalse(FallbackCatalog::DitherNeedInactive(true, "").engaged, L"released when the reason clears");
+		}
+
 		TEST_METHOD(OffAndOriginalDoNothingAndReportNothing)
 		{
 			Products p;
