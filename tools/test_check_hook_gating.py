@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -623,7 +624,7 @@ class UntaggedVpReferenceTest(unittest.TestCase):
     GIT_ENV = CheckHookGatingTest.GIT_ENV
     VPV_HEADER = "src/VP-V/modules/feature/Feature.h"
     HEADER = ("#pragma once\nnamespace FeatureCatalog\n{\n\tstruct Decision {};\n\tDecision HeldNotice(int why);\n}\n"
-              "struct FeatureMonitor\n{\n\tvoid SetNovelMode(int mode);\n\tint size() const;\n\tint frame;\n};\n")
+              "struct FeatureMonitor\n{\n\tvoid SetNovelMode(int mode);\n\tint size() const;\n\tint frame;\n\tfloat detailPulse;\n};\n")
     # Bill's baseline already names `size` and `frame`: declared in VP-V too, but they are Bill's own names.
     BASE = ("struct Impl\n{\n\tFeatureMonitor mon;\n\tvoid Render(int frame)\n\t{\n\t\tdoBill(frame);\n\t\tint n = list.size();\n\t}\n};\n")
 
@@ -658,6 +659,38 @@ class UntaggedVpReferenceTest(unittest.TestCase):
         self._git("add", "-A")
         self._git("commit", "-q", "-m", "branch")
         return self._cli("--rev", "HEAD", "--since", self.base)
+
+    def test_granted_name_collision_site_is_honoured_and_only_for_its_symbol(self):
+        entry = {"file": BILL, "pattern": r"\bdetailPulse\b", "symbol": "detailPulse",
+                 "reason": "name collision granted by the coordinator; a local shares the spelling of a VP-V member. Proof: this test."}
+        rc, out = self._added("float detailPulse = 1.f;")
+        self.assertEqual(rc, 1, out)                      # no grant: flagged
+        self.assertIn("detailPulse", out)
+        old = chg.ALLOW_SITES
+        chg.ALLOW_SITES = old + [entry]
+        try:
+            rc, out = self._cli("--rev", "HEAD", "--since", self.base)
+            self.assertEqual(rc, 0, out)
+            self.assertIn("0 new untagged VP-V references", out)
+            self.tearDown()
+            self.setUp()
+            rc, out = self._added("float detailPulse = mon.SetNovelMode(1);")   # another VP-V name on the line still fails
+            self.assertEqual(rc, 1, out)
+            self.assertIn("[SetNovelMode]", out)
+        finally:
+            chg.ALLOW_SITES = old
+
+    def test_p4_relocated_host_members_collect_frame_hooks_and_draw_frame_are_allowed_callees(self):
+        rx = [e["callee"] for e in chg.ALLOW_CALLEES if "OrderFrameSlotHooks" in e["callee"]]
+        self.assertEqual(len(rx), 1)
+        for name in ("CollectFrameHooks", "DrawFrame", "m_impl->DrawFrame"):
+            self.assertTrue(re.search(r"\b(?:" + rx[0] + r")\s*\(", "x = " + name + "(a);"), name)
+        self.assertFalse(re.search(r"\b(?:" + rx[0] + r")\s*\(", "DrawFrameNow(a);"))
+
+    def test_trailer_walk_back_stops_after_the_last_two_key_value_paragraphs(self):
+        co = "Co-Authored-By: t <t@e.invalid>"
+        self.assertEqual(chg.trailer_values("s\n\nb\n\nHook-Trigger: P4-e\n\n" + co), ["P4-e"])
+        self.assertEqual(chg.trailer_values("s\n\nHook-Trigger: P4-e\n\nX-A: 1\n\n" + co), [])
 
     def test_red_an_added_untagged_vp_call_is_flagged_with_file_and_line(self):
         rc, out = self._added("mon.SetNovelMode(2); SyncFallback(FeatureCatalog::HeldNotice(1));")

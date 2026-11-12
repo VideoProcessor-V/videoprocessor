@@ -132,9 +132,9 @@ ALLOW_CALLEES = [
                "pipeline_original_pathway and applies OriginalPathway::Overrides()); it must run in Original. Proof: "
                "SettingsDefaultsGoldenTests (Original case), RendererSettingsIdentityTests."},
     {"callee": r"(?:m_impl->)?(IngressHardwareArrival|IngressCountersBefore|IngressAfterRate|QueueTargetVp|ResolveMotionEngine|NoteTimelinePlanned|"
-               r"CurrentQueueHoldFraction|RegisterDejudderCacheFrame|UpdatePipelineSlots|OrderFrameSlotHooks)",
+               r"CurrentQueueHoldFraction|RegisterDejudderCacheFrame|UpdatePipelineSlots|OrderFrameSlotHooks|CollectFrameHooks|DrawFrame)",
      "reason": "M2-relocated host members (input\\queue_timing IngressPolicy.inl / QueueTarget.inl, motion\\consumers "
-               "PhaseTimeline.inl, segments\\CoreSegments.inl): Bill's own pulldown / film clock / queue-target / slot-order "
+               "PhaseTimeline.inl, segments\\CoreSegments.inl, segments\\EntranceHostMembers.inl): Bill's own pulldown / film clock / queue-target / slot-order / frame hook list / draw "
                "logic moved out of the host (host = call sites only); VP options inside are either/or on settings the Original "
                "table forces off; UpdatePipelineSlots is what applies ApplyOriginalPathway. Proof: IngressPolicyTests, "
                "QueueTimingPolicy, PipelineSkeletonTests (Original pathway), OriginalPathwayByteIdenticalToBill."},
@@ -184,6 +184,11 @@ ALLOW_SITES = [
     {"file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp", "pattern": r"deviceParams\.adapter = testAdapter",
      "reason": "the VP_TEST_ADAPTER result applied to Bill's device parameters: set only when the test environment names an "
                "adapter (unset in production and by the capture harness for both renders); see the VpDiagnostics callee entry."},
+    {"file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp", "pattern": r"\bdetailPulse\b", "symbol": "detailPulse",
+     "reason": "name collision, not a VP-V reference: a ConfigEditorWindow.cpp LOCAL named detailPulse (lines 10230-10231) shares its "
+               "spelling with the EntranceSegment.h:114 member (DPTR-OFF, r2/dptr-off). Granted by the coordinator, "
+               "refs/owner-decisions-2026-11-07.md (2026-11-12 11:30 ruling 5: CEW:10230-10231 detailPulse ALLOW_SITES name "
+               "collision GRANTED). Honoured by the --since VP-V symbol report only; proof: UntaggedVpReferenceTest."},
 ]
 
 
@@ -899,7 +904,7 @@ def trailer_values(message):
     if cur:
         paras.append(cur)
     vals = []
-    for para in reversed(paras[1:]):
+    for para in reversed(paras[1:][-2:]):   # at most the last two Key: value-only paragraphs
         if not all(TRAILER_LINE_RE.match(l) or (k > 0 and l[:1] in " \t") for k, l in enumerate(para)):
             break
         for l in para:
@@ -1223,7 +1228,7 @@ def bill_identifiers(root, base_ref, candidates):
     return seen
 
 
-def untagged_vp_references(tree, per_file, since_added, root, base_ref):
+def untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_used=None):
     """Added lines (since_added: file -> line numbers) of Bill-owned PRODUCTION files that are not hook lines and
     name a VP-V symbol (vp_symbols minus bill_identifiers). Returns [{file, line, text, symbols}]."""
     wanted = [(r["file"], since_added.get(r["file"])) for r in per_file
@@ -1242,6 +1247,11 @@ def untagged_vp_references(tree, per_file, since_added, root, base_ref):
             if n in hooks or n > len(code):
                 continue
             hit = sorted(syms.intersection(IDENT_RE.findall(code[n - 1])))
+            for k, e in enumerate(ALLOW_SITES):   # granted name collisions: drop the named symbol (entry key "symbol")
+                if e.get("symbol") in hit and e["file"] == rel and re.search(e["pattern"], code[n - 1]):
+                    hit.remove(e["symbol"])
+                    if allow_used is not None:
+                        allow_used[("site", k)] = allow_used.get(("site", k), 0) + 1
             if hit:
                 out.append({"file": rel, "line": n, "text": lines[n - 1].strip()[:120], "symbols": hit[:6]})
     return out
@@ -1294,6 +1304,8 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
             allow_used[("callee", k)] = 0   # reached through an enclosing header
     stale = [("callee", k) for k in range(len(ALLOW_CALLEES)) if ("callee", k) not in allow_used] + \
             [("site", k) for k in range(len(ALLOW_SITES)) if ("site", k) not in allow_used]
+    if not (since and not no_git):   # symbol-keyed entries are used only by the --since symbol report
+        stale = [x for x in stale if not (x[0] == "site" and ALLOW_SITES[x[1]].get("symbol"))]
     sc = site_checks(tree, per_file, root, rev, no_git)
     since_added = None
     untagged_vpv = []
@@ -1314,7 +1326,8 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
         hits = [h for h in hits if _new(h)]
         unverified = [u for u in unverified if u["file"] in since_added and _new(u)]
         untagged = [u for u in untagged if _new(u)]
-        untagged_vpv = untagged_vp_references(tree, per_file, since_added, root, base_ref)
+        untagged_vpv = untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_used)
+        stale = [x for x in stale if x not in allow_used]
         sc["new"] = [x for x in sc["new"] if _new_site(x)]
         sc["approved"] = [x for x in sc["approved"] if _new_site(x)]
     rc = 1 if (hits or unverified or (fail_untagged and untagged) or sc["new"] or sc["over"] or sc["expired"] or sc["unknown"] or
