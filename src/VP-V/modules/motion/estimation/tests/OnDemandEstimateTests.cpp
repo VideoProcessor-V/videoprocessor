@@ -955,7 +955,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(flow != nullptr && flow->halfW == 6, L"served on the producer's session");
 			Assert::IsTrue(cause == NoPairCause::None);
 			queue.erase(queue.begin());   // the dequeue took 5: A = 6
-			queue.emplace_back();
+			queue.resize(3);   // [6, 7 (the film update), 8]: back() is the third entry
 			queue.back().sourceSequence = 8;
 			queue.back().analysis->queued.source.valid = true;
 			queue[1].sourceSequence = 7;
