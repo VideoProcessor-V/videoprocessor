@@ -151,7 +151,7 @@ namespace GrainSplit
 			Splitter(const Splitter&) = delete;
 			Splitter& operator=(const Splitter&) = delete;
 
-			// The split of `plane` (component `component`, 0..3) whose values are codes x codeUnit. scale multiplies
+			// The split of `plane` (component `component`: 0 in v3, the shared U3 accessor reads the R channel) whose values are codes x codeUnit. scale multiplies
 			// the sigmas, B is the block edge in plane pixels. False (with LastError) on any failure.
 			bool Compute(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B,
 				const Params& params = Params());
