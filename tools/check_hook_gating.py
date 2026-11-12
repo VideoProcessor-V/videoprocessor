@@ -120,9 +120,10 @@ ALLOW_CALLEES = [
                "pipeline_original_pathway and applies OriginalPathway::Overrides()); it must run in Original. Proof: "
                "SettingsDefaultsGoldenTests (Original case), RendererSettingsIdentityTests."},
     {"callee": r"(?:m_impl->)?(IngressHardwareArrival|IngressCountersBefore|IngressAfterRate|QueueTargetVp|ResolveMotionEngine|NoteTimelinePlanned|"
-               r"CurrentQueueHoldFraction|RegisterDejudderCacheFrame|UpdatePipelineSlots|OrderFrameSlotHooks)",
+               r"CurrentQueueHoldFraction|RegisterDejudderCacheFrame|UpdatePipelineSlots|OrderFrameSlotHooks|CollectFrameHooks|DrawFrame)",
      "reason": "M2-relocated host members (input\\queue_timing IngressPolicy.inl / QueueTarget.inl, motion\\consumers "
-               "PhaseTimeline.inl, segments\\CoreSegments.inl): Bill's own pulldown / film clock / queue-target / slot-order "
+               "PhaseTimeline.inl, segments\\CoreSegments.inl, segments\\EntranceHostMembers.inl): Bill's own pulldown / film clock / "
+               "queue-target / slot-order / frame hook list / draw "
                "logic moved out of the host (host = call sites only); VP options inside are either/or on settings the Original "
                "table forces off; UpdatePipelineSlots is what applies ApplyOriginalPathway. Proof: IngressPolicyTests, "
                "QueueTimingPolicy, PipelineSkeletonTests (Original pathway), OriginalPathwayByteIdenticalToBill."},

@@ -5036,7 +5036,7 @@ struct LibplaceboVideoRenderer::Impl
 		void EngageFallback(const std::string& id, const std::string& text) override { r.EngageFallback(id.c_str(), text); }
 		void ReleaseFallback(const std::string& id) override { r.ReleaseFallback(id.c_str()); }
 		bool FieldAhead(uint64_t a, uint64_t b, std::string& why) override { return r.EntranceOnceFieldAhead(a, b, why); }
-		Field FieldOf(uint64_t sequence) const override;   // P4 g: defined in VP-V/segments/EntranceHostMembers.inl
+		Field FieldOf(uint64_t sequence) const override;   // VPV-HOOK P4 g (HA-P4g-S3): defined in VP-V/segments/EntranceHostMembers.inl
 		NextUpload Next() const override
 		{
 			return { r.dejudderNextUploadedSequence, r.dejudderNextTextures[0], r.dejudderNextTextures[1], r.dejudderRgbLuma != nullptr };
@@ -23641,9 +23641,10 @@ releaseDriftBaseRetention =
         bool extendedRangeRelabelled = false;
         pl_render_errors renderErrors{};
         pl_render_params frameParams{};
-        SigmaDeltaVectors::NextVectorGuard nextVectorGuard;   // restores the sigma-delta's own vectors after this render
-        TemporalHistoryPolicy::Decision temporalEntrance;
-        CollectFrameHooks(baseTarget, renderImage, target, width, height, cadenceRepeat, frameGeneration, sourceSequence, captureRateHz, nominalSourceRateHz, state, videoFrame, convertedPayload, hdrTrustedPicture, relocatedSubtitle, safeSubtitlePadding, subtitleCompositionSucceeded, submittedNls, lowLatencyQueue, hookTemplates, nextVectorGuard, frameParams, renderErrors, extendedRangeRelabelled, temporalEntrance);   // the frame's hook list, render parameters and errors (CoreSegments.inl)
+        SigmaDeltaVectors::NextVectorGuard nextVectorGuard;   // VPV-HOOK P4 f (HA-P4f-S3): restores the sigma-delta's own vectors after this render
+        TemporalHistoryPolicy::Decision temporalEntrance;   // VPV-HOOK P4 f (HA-P4f-S3)
+        CollectFrameHooks(baseTarget, renderImage, target, width, height, cadenceRepeat, frameGeneration, sourceSequence, captureRateHz, nominalSourceRateHz, state, videoFrame, convertedPayload, hdrTrustedPicture, relocatedSubtitle, safeSubtitlePadding, subtitleCompositionSucceeded, submittedNls, lowLatencyQueue, hookTemplates, nextVectorGuard, frameParams, renderErrors, extendedRangeRelabelled, temporalEntrance);   // VPV-HOOK P4 f (HA-P4f-S3): the frame's hook list, render parameters and errors (CoreSegments.inl)
+        const auto drawFrame = [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) { return DrawFrame(source, destination, parameters, image, sourceSequence, nextSourceSequence, cadenceRepeat, renderErrors, temporalEntrance, extendedRangeRelabelled); };   // VPV-HOOK P4 g (HA-P4g-S3): the draw (EntranceHostMembers.inl); runs twice on an NLS retry
         const auto hookRender = NlsHookRecovery::RenderOwned(temporalRenderer.ProcessingRenderer(renderer), d3d11->gpu,   // Bill: the processing renderer keeps source peak-detection history
             renderImage, target, baseTarget, frameParams, frameHooks, submittedNls, [&]()
             {
@@ -23668,9 +23669,7 @@ releaseDriftBaseRetention =
                 dejudderNlsRetrySequence = sourceSequence;
                 occlusionMaskHook.SetFrame(nullptr, renderImage.crop, linearFallbackCrop);
                 assembleOverlays();
-            }, [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) {
-                return DrawFrame(source, destination, parameters, image, sourceSequence, nextSourceSequence, cadenceRepeat, renderErrors, temporalEntrance, extendedRangeRelabelled);   // the draw (EntranceHostMembers.inl); runs twice on an NLS retry
-            });
+            }, drawFrame);
         bool rendered = hookRender.rendered;
         repeatReuse.NoteRendered(repeatReuse.Key(), rendered && !hookRender.retried);   // WP-24 call 3 of 3
         // Bug hunt 2026-10-17: B's carried vectors are for this present only;

@@ -102,6 +102,26 @@
     "P6-move"
    ],
    "note": "P5c transitional S3 view read (refs/107-host-seams-plan.md:192; owner decision relayed by Lead 4 2026-11-11 20:31): :16121-16127 extras snapshot warp (second present path), R4 Snapshot(); text identical to :15759, matched by HA-P5c-15759-ExtrasSnapshot; same text as HA-P5c-15759 (LVR ~16121 and ~15759 are identical lines); the checker matches both sites through 15759; same expiry"
+  },
+  {
+   "id": "HA-P4f-S3",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "CollectFrameHooks(baseTarget, renderImage, target,",
+   "seam": "S3",
+   "approver": "owner via coordinator",
+   "when": "2026-11-11",
+   "expiry": "P11b",
+   "note": "P4 f: the frame call site in Impl::Render - nextVectorGuard and temporalEntrance declarations, the CollectFrameHooks call (segments/CoreSegments.inl) and the named draw lambda (P4 g) form one site; transitional S3 (refs/110 addendum 2026-11-11 19:40, P4 Q1; coordinator ruling relayed by Lead 5 2026-11-12); expiry = the DECL-to-module follow-on (refs/117 row 20: P11b)"
+  },
+  {
+   "id": "HA-P4g-S3",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "text_contains": "Field FieldOf(uint64_t sequence) const override;",
+   "seam": "S3",
+   "approver": "owner via coordinator",
+   "when": "2026-11-11",
+   "expiry": "P11b",
+   "note": "P4 g: EntranceHost::FieldOf declaration (defined in segments/EntranceHostMembers.inl); the DrawFrame lambda sits in the HA-P4f-S3 site; transitional S3 (refs/110 addendum 2026-11-11 19:40, P4 Q1; coordinator ruling relayed by Lead 5 2026-11-12); expiry = the DECL-to-module follow-on (refs/117 row 20: P11b)"
   }
  ]
 }
