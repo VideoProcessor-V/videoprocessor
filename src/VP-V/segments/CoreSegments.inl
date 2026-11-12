@@ -131,3 +131,35 @@ void LibplaceboVideoRenderer::Impl::OrderFrameSlotHooks()
 	frameHooks = OutputHookOrder::OrderSlotsInPlace(tagged,
 		[this](PipelineSlots::Id id) { return pipelineSlots.Order(id); });
 }
+
+// M2 P4-4 (doc 52 section 4.1 item h): the reports after the render call - the merged output segments, the custom-hook failures,
+// Dynamic Drive, extended range and the calibration LUT revert - moved VERBATIM out of RenderLocked (the block used no local of it:
+// every name is an Impl member). Render thread, renderMutex held, immediately after the render call, as before.
+void LibplaceboVideoRenderer::Impl::ReportRenderErrors()
+{
+    pl_render_errors hookErrors = pl_renderer_get_errors(renderer);
+    // output_segments_merged (audit M4): a stage that failed inside a merged hook takes the
+    // same path as a hook libplacebo disabled; a disabled merged hook falls back visibly.
+    const std::vector<uint64_t> mergedFailed = outputMerger->Report(&hookErrors);
+    if (outputMerger->FallbacksChanged())
+        DebugLog::Log("%s", fallbacks.Heading().c_str());
+    std::vector<uint64_t> allDisabled;
+    if (!mergedFailed.empty())
+    {
+        allDisabled.assign(hookErrors.disabled_hooks, hookErrors.disabled_hooks + hookErrors.num_disabled_hooks);
+        allDisabled.insert(allDisabled.end(), mergedFailed.begin(), mergedFailed.end());
+        hookErrors.disabled_hooks = allDisabled.data();
+        hookErrors.num_disabled_hooks = static_cast<int>(allDisabled.size());
+    }
+    if (customHooks.MarkRuntimeFailures(hookErrors.disabled_hooks,
+        hookErrors.num_disabled_hooks))
+        PublishCustomShaderStatus();
+    dynamicDrive.OnHookErrors(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
+    extendedRange.NoteDisabledHooks(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
+    // output.calibration_lut (VP stage, R1): a disabled or failing hook reverts to libplacebo's
+    // target LUT for the rest of the session, visibly (skeleton audit item 5).
+    {
+        const FallbackCatalog::Decision calibration = calibrationHost.AfterRender(hookErrors);
+        if (calibration.engaged) EngageFallback(calibration.id.c_str(), calibration.reason);
+    }
+}

@@ -6347,6 +6347,7 @@ struct LibplaceboVideoRenderer::Impl
 			frameSlotHooks.emplace_back(frameHooks[i], slot);
 	}
 	void OrderFrameSlotHooks();   // VPV-HOOK P4-2: defined in VP-V/segments/CoreSegments.inl
+	void ReportRenderErrors();   // VPV-HOOK P4-4: defined in VP-V/segments/CoreSegments.inl
 	// WP-12: VP's calibration glue (output.calibration_lut VP stage, patterns, calibration getters).
 	CalibrationLutHost::Adapter calibrationHost;
 	std::vector<const pl_hook*> userFrameHooks;   // the S2 edge: the user's shaders this frame
@@ -24612,35 +24613,9 @@ releaseDriftBaseRetention =
             renderParams.hooks = nullptr;
             renderParams.num_hooks = 0;
         }
-        {
-            pl_render_errors hookErrors = pl_renderer_get_errors(renderer);
-            // output_segments_merged (audit M4): a stage that failed inside a merged hook takes the
-            // same path as a hook libplacebo disabled; a disabled merged hook falls back visibly.
-            const std::vector<uint64_t> mergedFailed = outputMerger->Report(&hookErrors);
-            if (outputMerger->FallbacksChanged())
-                DebugLog::Log("%s", fallbacks.Heading().c_str());
-            std::vector<uint64_t> allDisabled;
-            if (!mergedFailed.empty())
-            {
-                allDisabled.assign(hookErrors.disabled_hooks, hookErrors.disabled_hooks + hookErrors.num_disabled_hooks);
-                allDisabled.insert(allDisabled.end(), mergedFailed.begin(), mergedFailed.end());
-                hookErrors.disabled_hooks = allDisabled.data();
-                hookErrors.num_disabled_hooks = static_cast<int>(allDisabled.size());
-            }
-            if (customHooks.MarkRuntimeFailures(hookErrors.disabled_hooks,
-                hookErrors.num_disabled_hooks))
-                PublishCustomShaderStatus();
-            dynamicDrive.OnHookErrors(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
-            extendedRange.NoteDisabledHooks(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
-            // output.calibration_lut (VP stage, R1): a disabled or failing hook reverts to libplacebo's
-            // target LUT for the rest of the session, visibly (skeleton audit item 5).
-            {
-                const FallbackCatalog::Decision calibration = calibrationHost.AfterRender(hookErrors);
-                if (calibration.engaged) EngageFallback(calibration.id.c_str(), calibration.reason);
-            }
-        }
+        ReportRenderErrors();   // VPV-HOOK P4-4: defined in VP-V/segments/CoreSegments.inl
         // Dynamic Drive, stats out: finished measurements (a few frames old; never waits).
-        dynamicDrive.CollectMeasurements();
+        dynamicDrive.CollectMeasurements();   // VPV-HOOK P4-4: Dynamic Drive measurements, in the same run as the report call
         RendererExtension::NotifyAfterRender(this, sourceSequence, frameGeneration, static_cast<int>(hookRender.errors), hookRender.retried ? 1 : 0, rendered); // VPV-HOOK
         if (hookRender.retried)
             DebugLog::Log("VP anamorphic hook recovery: schema=1 sequence=%llu generation=%llu hook=%llu errors=0x%x retry=1 rendered=%d lens=%.6f latch=until_shader_selection_change",
