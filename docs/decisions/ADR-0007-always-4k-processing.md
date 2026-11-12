@@ -1,6 +1,6 @@
 # ADR-0007: Processing resolution: always 4K (or the output size if larger); 8K placeholder
 
-- Status: Accepted
+- Status: Accepted; superseded in part by doc 91 F (2026-11-12): native 1080p input with re-base off and 4K+ output upscales (hybrid) at the END, and native 4K does no re-base or upscale, so "always 4K" no longer holds for 1080->1080 or for those paths. Body kept as written.
 - Date: 2026-10-19 (owner decision; recorded 2026-10-24)
 - Slots: scaling.route_4k, scaling.rebase
 

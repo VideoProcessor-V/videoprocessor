@@ -328,8 +328,8 @@ QWidget* ProjectorCards::BuildAdvanced()
     advancedForm->setContentsMargins(0, 0, 0, 0);
     advancedForm->setVerticalSpacing(8);
     advancedForm->addRow(QString(), helpLabel(QStringLiteral(
-        "Only for a projector other than the FL35, or when the projector's replies say something is wrong. "
-        "The defaults match the FL35.")));
+        "Only for a projector that needs different serial settings, or when the projector's replies say something is wrong. "
+        "The defaults suit the projector.")));
     advancedForm->addRow(QStringLiteral("Baud rate"),
         numberControl(projector, QStringLiteral("baud"), 1200, 921600, 0, 1, 19200, QString()));
     advancedForm->addRow(QStringLiteral("Lowest LED level the projector accepts"),

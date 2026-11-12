@@ -64,7 +64,7 @@ What `Apply` does per plane:
 Validated as `input`-group keys (RendererProfileConfig.h; sections `[vprenderer.input.<Name>]`, flattened into the renderer profile) and read per active profile in `ApplyDisplayRuleOverrides` (LibplaceboVideoRenderer.cpp):
 
 - `source_resolution`: `native` / `auto` / a height / `WIDTHxHEIGHT`; default `auto`. An unrecognised value is ignored without a log line.
-- `rebase_kernel_match`: `on` / `off`; default `on`. An invalid value is logged and the previous value kept.
+- `rebase_kernel_match`: `on` / `off`; default `off` (VpvRendererFields.h:290, SID r2; was `on`; the generic faithful re-base runs when no kernel is identified). An invalid value is logged and the previous value kept.
 - In `auto`, the timing and evidence keys `source_resolution_auto_min_confidence`, `source_resolution_evidence_*`, `source_resolution_latch_fixes`, `source_resolution_engage_max_wait_s`, `source_resolution_crossfade_s`, `source_resolution_release_fade_s` decide when the factor changes (input.source_analysis).
 - `entrance_rebase` is not read anywhere (planned).
 - The Original pathway sets `source_resolution: native` and `rebase_kernel_match: off`.
