@@ -288,6 +288,23 @@ namespace VideoProcessorTest
 			Assert::AreEqual<size_t>(1, probe->faults.size());
 		}
 
+		// T-AR3-N2 audit SHOULD 1: an unpublishable fix-switch word (table full) is a counted refusal the caller can surface.
+		TEST_METHOD(AnUnpublishableFixSwitchWordIsRefusedAndCounted)
+		{
+			HubScope scope;
+			std::vector<int> hosts(64);
+			size_t filled = 0;
+			while (filled < hosts.size() && Hub().NoteFixSwitches(&hosts[filled], 1))
+				++filled;
+			Assert::IsTrue(filled > 0 && filled < hosts.size(), L"the per-host table is bounded");
+			Assert::AreEqual<uint32_t>(1, Hub().PathwayRefusals(), L"the refused publish is counted");
+			uint32_t bits = 0;
+			Assert::IsFalse(Hub().FixSwitchBits(&hosts[filled], bits), L"nothing published for the refused host");
+			Assert::IsTrue(Hub().FixSwitchBits(&hosts[0], bits) && bits == 1, L"the recorded hosts keep their word");
+			Assert::IsTrue(Hub().NoteFixSwitches(&hosts[0], 3), L"a recorded host still updates");
+			Assert::AreEqual<uint32_t>(1, Hub().PathwayRefusals());
+		}
+
 		// The renderer's queue events are not motion invalidations in Bill's pathway; leaving Original at SettingsApplied
 		// requests ONE Resync invalidation (the events of the Original stretch were ignored); other applies request none.
 		TEST_METHOD(QueueEventsDoNothingInTheOriginalPathwayAndLeavingItInvalidatesOnce)

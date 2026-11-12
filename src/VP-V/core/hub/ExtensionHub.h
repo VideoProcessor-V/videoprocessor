@@ -115,7 +115,7 @@ namespace Vpv
 			// yet (or the host is gone): the caller leaves its switches as they are. Note false = null host / table full.
 			bool NoteFixSwitches(const void* host, uint32_t bits);
 			bool FixSwitchBits(const void* host, uint32_t& bits) const;
-			// T-AR3-N4 (AUDIT-R 1fa78cdb9 N4): SettingsApplied pathway facts the hub could not record (slot table full).
+			// T-AR3-N4 (AUDIT-R 1fa78cdb9 N4): pathway facts and fix-switch words the hub could not record (slot table full).
 			// Each one is also reported as a WorkerFault status line ("hub" / "pathway table full"), never log-only.
 			uint32_t PathwayRefusals() const { return pathwayRefusals_.load(std::memory_order_relaxed); }
 

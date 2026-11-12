@@ -115,8 +115,14 @@ namespace Vpv
 			{
 				fact = std::make_shared<PathwayFact>();
 				fact->host = host;
+				// False = the 16-host slot table is full. Writers are the render thread only (UpdatePipelineSlots and the
+				// SettingsApplied fan-out, serialised), so there is no racing Put. Counted (PathwayRefusals) and surfaced by the
+				// caller (CoreSegments.inl EngageFallback); the capture / file threads then keep their switches as built.
 				if (!pathway_.Put(host, fact))
-					return false;   // table full (or a racing Put: re-find below)
+				{
+					pathwayRefusals_.fetch_add(1, std::memory_order_relaxed);
+					return false;
+				}
 			}
 			fact->fixBits.store(bits, std::memory_order_relaxed);
 			fact->fixPublished.store(true, std::memory_order_release);
