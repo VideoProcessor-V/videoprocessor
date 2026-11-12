@@ -27,6 +27,10 @@ Unit: repair (root: `RepairStackOrder.h`, test `RepairStackOrderTests.cpp` besid
 |---|---|---|---|---|---|---|---|---|
 | (none) | | | | | | | | |
 
+### Tier read-back note (DPTR-OFF, 2026-11-11)
+
+Since detail_pulse_stabilise and texture_restore are off in every tier (doc 91 :106, decision log 11-11 evening), the Repair presets collapse: Classic == Low and Mid == Upper (identical key sets). Tier read-back is computed from the saved values and reports the lowest match, so the Config shows Classic and Mid; the global Upper still reads Upper (MatchGlobal treats identical presets as equal). Waiver DPTR-W1/W2. Trigger to restore a distinct key: Upper regains a distinct key when TD lands.
+
 ### Environment and diagnostics
 
 | Name | Purpose | Default | Scope (test/debug/runtime) |

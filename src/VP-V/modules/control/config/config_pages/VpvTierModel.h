@@ -221,14 +221,41 @@ namespace Vpv
 		return chosen;
 	}
 
-	// The global tier when every tiered unit sits exactly on it, else -1 (Custom per unit).
+	// True when two presets of a unit write the same keys to the same values (a tier that cannot be told
+	// apart from its neighbour by the saved values; e.g. Repair Classic/Low and Mid/Upper from DPTR-OFF,
+	// owner 2026-11-11 19:39, doc 91 line 106: detail pulse and texture restore are off in every tier).
+	inline bool SamePresetValues(const Preset& a, const Preset& b)
+	{
+		if (a.set.size() != b.set.size()) return false;
+		for (const KeyValue& kv : a.set)
+		{
+			bool found = false;
+			for (const KeyValue& other : b.set)
+				if (std::string(kv.key) == other.key) { found = SameValue(kv.value, other.value); break; }
+			if (!found) return false;
+		}
+		return true;
+	}
+
+	// The global tier when every tiered unit sits exactly on it, else -1 (Custom per unit). A unit whose
+	// matched tier writes the same values as the wanted one counts as sitting on it (MatchTier reports the
+	// lowest of such tiers, so the unit's own label stays honest while the global tier stays reachable).
 	inline int MatchGlobal(const Table& table, const Getter& get)
 	{
 		for (int g = static_cast<int>(table.tiers.size()) - 1; g >= 0; --g)
 		{
 			bool all = true;
 			for (const Unit& u : table.units)
-				if (u.Tiered() && MatchTier(table, u, get) != GlobalToUnit(table, u, g)) { all = false; break; }
+			{
+				if (!u.Tiered()) continue;
+				const int matched = MatchTier(table, u, get);
+				const int wanted = GlobalToUnit(table, u, g);
+				if (matched == wanted) continue;
+				if (matched >= 0 && wanted >= 0 &&
+					SamePresetValues(u.presets[static_cast<size_t>(matched)], u.presets[static_cast<size_t>(wanted)])) continue;
+				all = false;
+				break;
+			}
 			if (all) return g;
 		}
 		return -1;

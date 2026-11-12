@@ -136,7 +136,11 @@ namespace
 		const Vpv::Table& t = Vpv::TierTable();
 		Profile p;   // nothing set: VP's built-in defaults
 		require(UnitTier(p, "motion") == 2, "defaults are motion Mid (NVOF + matcher, 4 ahead)");
-		require(UnitTier(p, "repair") == 1, "defaults are repair Low (libplacebo deband + breathing reduction)");
+// WAIVER DPTR-W1 (rule 9, option B approved by the coordinator via lead 4, 2026-11-11; decision doc 91 :106 + decision log
+		// refs\owner-decisions-2026-11-07.md 11-11 evening): Repair keys {deband_vp, detail_pulse_stabilise, texture_restore}.
+		// Before: defaults {off,on,off} = Low {off,on,off}, Classic {off,off,off} differed. After: defaults {off,off,off} = Classic = Low
+		// (identical key sets); MatchTier reports the lowest match, so the default Repair tier is Classic (0), not Low (1).
+		require(UnitTier(p, "repair") == 0, "defaults are repair Classic (== Low since DPTR-OFF: libplacebo deband only)");
 		// Logic audit 2026-10-24 (HIGH 1): the shipped values are a tier of every unit.
 		require(UnitTier(p, "scaling") == 1, "defaults are scaling Low (re-base auto, no SSIM blend)");
 		require(UnitTier(p, "output") == 1, "defaults are output Low (temporal dither as shipped)");
@@ -145,7 +149,21 @@ namespace
 		ApplyGlobal(p, 3);
 		require(Vpv::MatchGlobal(t, p.Get()) == 3, "global Upper reads back as Upper");
 		require(UnitTier(p, "scaling") == 2 && UnitTier(p, "output") == 2, "units without Upper use their nearest lower tier");
-		require(p.values["texture_restore"] == "statistical" && p.values["dejudder_est_split"] == "on", "Upper presets written");
+		// WAIVER DPTR-W1: Upper's texture_restore moved statistical -> off, the same as the default, so ApplyTier (which writes only
+		// keys whose effective value changes) no longer writes it: Upper presets now show as deband_vp=on (the Repair change)
+		// plus dejudder_est_split=on, and texture_restore is NOT statistical.
+		require(p.values["deband_vp"] == "on" && p.values["texture_restore"] != "statistical" && p.values["dejudder_est_split"] == "on", "Upper presets written");
+		// DPTR-OFF: a saved Low reads back Classic (identical keys), a saved Upper reads back Mid for Repair (lowest match);
+		// the global Upper stays reachable (MatchGlobal treats identical presets as equal).
+		require(UnitTier(p, "repair") == 2, "saved Repair Upper keys read back as Mid (lowest identical tier)");
+		{
+			Profile low;
+			low.Apply(Vpv::ApplyTier(t, *t.FindUnit("repair"), 1, low.Get()));
+			require(UnitTier(low, "repair") == 0, "saved Repair Low keys read back as Classic (lowest identical tier)");
+			Profile valuesOnly;   // only values, no stored tier: the lowest match
+			valuesOnly.values["deband_vp"] = "on";
+			require(UnitTier(valuesOnly, "repair") == 2, "a cfg with only values reads back the lowest match (Mid)");
+		}
 
 		ApplyGlobal(p, 0);
 		require(Vpv::MatchGlobal(t, p.Get()) == 0, "global Classic reads back as Classic");
@@ -247,7 +265,7 @@ namespace
 		require(config.Load(path.toStdString()), "reload");
 		const std::string main = DefaultProfile(path);
 		// Only keys that differ from VP's built-in value are written (optical_flow is on by default).
-		for (const auto& kv : std::map<std::string, std::string>{ { "optical_flow", "on" }, { "texture_restore", "statistical" },
+		for (const auto& kv : std::map<std::string, std::string>{ { "optical_flow", "on" }, { "texture_restore", "off" /* DPTR-OFF: was statistical (Upper), doc 91 :106 */ },
 			{ "deband_vp", "on" }, { "source_resolution", "auto" }, { "adaptive_downscale", "on" }, { "temporal_dither", "sigma_delta" },
 			{ "dejudder_est_split", "on" }, { "adaptive_w_base", "0.2" } })
 		{
@@ -266,7 +284,9 @@ namespace
 			auto* profile = control<QComboBox>(window, Vpv::ObjectName("profile"));
 			profile->setCurrentIndex(profile->findData(QStringLiteral("vprenderer.Cinema")));
 			QCoreApplication::processEvents();
-			require(control<QLabel>(window, Vpv::ObjectName("repair.tier.name"))->text().startsWith(QStringLiteral("Upper")),
+			// WAIVER DPTR-W2 (rule 9, as DPTR-W1): Repair Upper and Mid now write identical keys, so the label is the lowest
+			// match, "Mid" (was "Upper"); the global tier above still reads Upper.
+			require(control<QLabel>(window, Vpv::ObjectName("repair.tier.name"))->text().startsWith(QStringLiteral("Mid")),
 				"a named profile inherits the default profile's tier");
 			control<QSlider>(window, Vpv::ObjectName("repair.tier"))->setValue(0);
 			save(window);
