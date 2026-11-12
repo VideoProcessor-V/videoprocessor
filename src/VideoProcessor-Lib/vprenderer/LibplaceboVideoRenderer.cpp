@@ -25878,6 +25878,7 @@ releaseDriftBaseRetention =
 			if (rendered && submitted && vectorDemand.mode != VectorDemand::Mode::Off)
 				BuildSigmaDeltaVectorsWithoutExtras(sourceSequence, nextSourceSequence);   // vector engine, no extras
 		}
+		if (!pipelineSlots.OriginalPathway()) { RendererExtension::PresentContext afterPresent; afterPresent.kind = !(rendered && submitted) ? RendererExtension::AfterPresentKind::Plain : dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed ? RendererExtension::AfterPresentKind::AfterLastExtra : RendererExtension::AfterPresentKind::NoExtras; afterPresent.cadenceRepeat = cadenceRepeat; RendererExtension::AfterPresent(this, static_cast<int64_t>(sourceSequence), static_cast<int64_t>(frameGeneration), afterPresent); }   // VPV-HOOK HA-R12-AfterPresent: the one shared R12 AfterPresent seam (refs/107 S5)
         lastRenderPresentationPaused=presentationAttempt.Deferred(rendered,submitted);
 		return rendered && submitted;
 	}

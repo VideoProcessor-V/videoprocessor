@@ -35,6 +35,7 @@
 #include <vector>
 
 namespace VpMotion { class IVectorEngine; }   // modules/motion/estimation/VectorEngineInterface.h (the P5a engine)
+namespace VpSkeleton { class SpareHost; }   // core/PostPresentSpare.h (B3-Z Z2: the post-present spare slot)
 
 namespace Vpv
 {
@@ -68,6 +69,8 @@ namespace Vpv
 			void OnLifecycle(RE::LifecycleFacts&) override;
 			void OnQueue(const RE::QueueFacts&) override;
 			bool OnFrame(RE::FrameContext&) override;
+			// R12 AfterPresent (refs/107 S5): the one post-present seam drives this renderer's spare slot (B3-Z Z2). Inert without an active lane.
+			void OnAfterPresent(RE::FrameContext&, RE::PresentContext&) override;
 			void OnStatus(const RE::Context&, RE::StatusKind, std::vector<std::string>&, const char*, const char*) override;
 			bool OnCommand(const RE::Context&, const char*, const char*, std::string&) override;
 			// Query(kExternalDemandQueryId) = this module's IExternalDemand (the camera extension declares its consumers through it).
@@ -79,6 +82,8 @@ namespace Vpv
 			size_t HostStates() const;
 			// The renderer's lane (null while there is none). Render thread / single-threaded tests only.
 			VpSkeleton::AnalysisLane* LaneOf(const void* host) const;
+			// The renderer's post-present spare slot (null without host state). Render thread / single-threaded tests only.
+			VpSkeleton::SpareHost* SpareOf(const void* host) const;
 			// Dimensions of the current lane graph (0 x 0 without one).
 			VpSkeleton::Dims DimsOf(const void* host) const;
 			bool WorkersRunning(const void* host) const;

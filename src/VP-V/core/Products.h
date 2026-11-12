@@ -646,7 +646,10 @@ inline Registry FirstProducts()
                           Bit(kSettingsMotion));
     AddInput(p2, kP1HalfLuma, 0);
     AddInput(p2, kP1HalfLuma, 1);
-    AddTerm(p2, 3, 10);   // per 8x8 source cell: two directions x (2 x int16 flow + cost byte)
+    // Per 8x8 source cell: two directions x (2 x int16 flow + cost byte). Declaration truth E3 (doc 97): the 8 px cell holds only without
+    // search halvings; at 4K with dejudder_low_res the engine input is quarter size and a cell covers 16 source px
+    // (MotionAheadProducer.cpp, DejudderPolicy.h), so this term over-states that case 4x (sizing unchanged, B3-Z Z-DECL note).
+    AddTerm(p2, 3, 10);
     p2.size.fixedBytes = 64;
     p2.spanMask = content;
     p2.variants = Variants::NonIdentical;   // render-time fallback is the medium preset
@@ -665,7 +668,10 @@ inline Registry FirstProducts()
     p2m.refRenderMs = 6.0f;
     d.push_back(p2m);
 
-    // P3: analysis motion field (+ grain error, occlusion) per 8x8 source block.
+    // P3: analysis motion field (+ grain error, occlusion). Declaration truth E1 (doc 97): the field is ONE texel per 16x16 source block
+    // (matcher/DejudderWarp.cpp blocksX = half / 8, VectorEngine.cpp FieldOf blockSize 16); only the SubField is 8x8 and it is off by
+    // default. The term below sizes 8x8 cells, so the VRAM declaration over-states P3 by 4x; the sizing (shift 4) changes with the
+    // lane P3 entries (B3-Z Z1/Z3), not in this flags-only step. Texels are rgba16F in source px (E2, VectorEngineInterface.h).
     ProductDecl p3 = Make(kP3AnalysisField, "p3_analysis_field", "analysis motion field", Backend::GpuCompute, 1,
                           Tier::T0, content, Bit(kSettingsMotion) | Bit(kSettingsAnalysis));
     AddInput(p3, kP1HalfLuma, 0);

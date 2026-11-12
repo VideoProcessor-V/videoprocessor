@@ -687,7 +687,11 @@ namespace ProductCatalogTestsNs
 			Assert::IsNotNull(c);
 			Assert::IsTrue(std::string(c->laneProducer).find("reserved") == 0, L"P10c is marked reserved / no producer in the product row");
 
-			// 4. Consumer-level flags: each names a declared read of that consumer row.
+			// 4. Consumer-level flags: each names a catalog consumer row; NotRead / ViewIsActual name a DECLARED read of the row,
+			// ExternalView names a read the row does NOT declare (B3-Z Z-DECL, lead 2026-11-11; expectation change = WAIVER-B3Z-01, coordinator approved 2026-11-12).
+			// AUDIT-R2 F1 (B3-Z Z2): +4 NotRead (782 P1, 781 P1 / P4, 776 P4), +1 view (776 P5), DP/TR P4 item C7 -> D10
+			// (expectation change = WAIVER-B3Z-02 (coordinator approved 2026-11-12)).
+			size_t cNotRead = 0, cViews = 0, cExt = 0;
 			for (const ConsumerFlag& f : ConsumerFlags()) {
 				const ConsumerRow* row = nullptr;
 				for (const ConsumerRow& r : ConsumerRows())
@@ -697,21 +701,103 @@ namespace ProductCatalogTestsNs
 				bool declared = false;
 				for (size_t k = 0; k < row->decl.count; ++k)
 					declared = declared || row->decl.consumes[k].product == f.input;
-				Assert::IsTrue(declared, L"the flagged read is a declared read of the row");
-				Assert::IsTrue(f.kind == FlagKind::NotRead);
-				Assert::IsTrue(f.item != nullptr && f.item[0] == 'C');
+				Assert::IsTrue(f.item != nullptr);
+				// WAIVER-B3Z-02 (coordinator approved 2026-11-12, condition: exact item set, not a C/D prefix): every consumer flag names one of these register items.
+				{
+					const std::string item(f.item);
+					Assert::IsTrue(item == "C9" || item == "C9b" || item == "C10" || item == "C2-cam" || item == "D6-D8" || item == "D8" || item == "D10",
+						L"consumer flag item is in the exact register set {C9, C9b, C10, C2-cam, D6-D8, D8, D10}");
+				}
+				Assert::IsTrue(f.note != nullptr && f.note[0] != '\0');
+				switch (f.kind) {
+				case FlagKind::NotRead:
+					++cNotRead;
+					Assert::IsTrue(declared, L"the flagged read is a declared read of the row");
+					break;
+				case FlagKind::ViewIsActual:
+					++cViews;
+					Assert::IsTrue(declared, L"view flag: the declared read exists");
+					break;
+				case FlagKind::ExternalView:
+					++cExt;
+					Assert::IsFalse(declared, L"external view: the read is NOT a declaration of the row");
+					break;
+				default:
+					Assert::Fail(L"NotYetConsumed / Reserved are product flags");
+				}
 			}
 			// Detail pulse (id 0) and texture restore (id 1): all three declared reads (P10, P11, P4) are flagged, the held identity read is not.
 			size_t dpTr = 0;
 			for (const ConsumerFlag& f : ConsumerFlags())
-				if (f.consumerId == kCatalogConsumerIdBase + 0 || f.consumerId == kCatalogConsumerIdBase + 1)
+				if ((f.consumerId == kCatalogConsumerIdBase + 0 || f.consumerId == kCatalogConsumerIdBase + 1) && f.kind == FlagKind::NotRead)
 					++dpTr;
 			Assert::AreEqual(size_t(6), dpTr, L"DP and TR each: P10, P11, P4 not read today");
-			Assert::IsTrue(ConsumerFlags().size() == dpTr);
+			// WAIVER-B3Z-02 (coordinator approved 2026-11-12): NotRead = DP / TR 6 + producer P1 + matcher P1, P4 + identification P4 = 10.
+			Assert::AreEqual(size_t(10), cNotRead, L"DP / TR's six + the F1 rows (782 P1, 781 P1 / P4, 776 P4)");
+			const uint16_t idProducer = uint16_t(kCatalogConsumerIdBase + 14), idMatcher = uint16_t(kCatalogConsumerIdBase + 13),
+				idIdentity = uint16_t(kCatalogConsumerIdBase + 8);
+			for (const ProductId p : { kP1HalfLuma })
+				Assert::IsTrue(ConsumerFlagOf(idProducer, p) && ConsumerFlagOf(idProducer, p)->kind == FlagKind::NotRead, L"782 P1 not read");
+			for (const ProductId p : { kP1HalfLuma, kP4SourceStats })
+				Assert::IsTrue(ConsumerFlagOf(idMatcher, p) && ConsumerFlagOf(idMatcher, p)->kind == FlagKind::NotRead, L"781 P1 / P4 not read");
+			Assert::IsTrue(ConsumerFlagOf(idIdentity, kP4SourceStats) && ConsumerFlagOf(idIdentity, kP4SourceStats)->kind == FlagKind::NotRead);
+			Assert::AreEqual(std::string("D6-D8"), std::string(ConsumerFlagOf(idIdentity, kP4SourceStats)->item), L"776 P4: register item D6-D8");
+			Assert::AreEqual(std::string("D8"), std::string(ConsumerFlagOf(idMatcher, kP4SourceStats)->item), L"781 P4: register item D8");
+			Assert::IsTrue(ConsumerFlagOf(idIdentity, kP5MonitorTiles) && ConsumerFlagOf(idIdentity, kP5MonitorTiles)->kind == FlagKind::ViewIsActual);
+			for (const ConsumerFlag& f : ConsumerFlags())
+				if (f.input == kP4SourceStats && (f.consumerId == kCatalogConsumerIdBase + 0 || f.consumerId == kCatalogConsumerIdBase + 1))
+					Assert::AreEqual(std::string("D10"), std::string(f.item), L"DP / TR P4: the D10 reader switch (C7 landed without it)");
+			// The exact P3 set: 4 synthesis consumers + DP, TR, adaptive downscale read the live matcher field at render (external view);
+			// the camera fit reads P3 through SeedFieldOf (view); identification reads P5 through the tap (view). 10 + 7 + 2 = 19.
+			Assert::AreEqual(size_t(7), cExt, L"synthesis x4 + DP + TR + adaptive downscale: P3 read at render");
+			Assert::AreEqual(size_t(2), cViews, L"camera fit: P3 via SeedFieldOf; identification: P5 via the tap");   // WAIVER-B3Z-02 (coordinator approved 2026-11-12)
+			Assert::AreEqual(size_t(19), ConsumerFlags().size());   // WAIVER-B3Z-02 (coordinator approved 2026-11-12)
+			for (const ConsumerFlag& f : ConsumerFlags())
+				if (f.kind != FlagKind::NotRead && !(f.consumerId == idIdentity && f.input == kP5MonitorTiles))
+					Assert::IsTrue(f.input == kP3AnalysisField, L"the view / external-view consumer flags are the P3 render-time reads (and 776 P5)");
+
+			// 4b. AUDIT-R2 F1 rule: a read of a product without a producer is never actual, and an unwired row reads nothing.
+			const Registry regF1 = SkeletonProducts();
+			Assert::IsNotNull(NoProducerReason(kP10cGrainSplitChroma), L"P10c: reserved");
+			Assert::IsNotNull(NoProducerReason(kP13SourceRing), L"P13: no producer");
+			Assert::IsNotNull(NoProducerReason(kTdMemory), L"td.memory: no producer");
+			Assert::IsNull(NoProducerReason(kP1HalfLuma), L"P1 has a producer");
+			Assert::IsNull(NoProducerReason(kSourceIdentity), L"held state is produced");
+			for (const ConsumerRow& r : ConsumerRows()) {
+				const std::string actual = ActualReads(r, regF1);
+				const size_t notRead = actual.find("not read: ");
+				const std::string readPart = actual.substr(0, notRead == std::string::npos ? actual.size() : notRead);
+				for (size_t k = 0; k < r.decl.count; ++k) {
+					const ProductId p = r.decl.consumes[k].product;
+					if (!NoProducerReason(p) && !UnwiredConsumerOf(r.decl.id))
+						continue;
+					const std::string token = regF1.Get(p).token;
+					bool listedAsRead = false;
+					for (size_t at = readPart.find(token); at != std::string::npos; at = readPart.find(token, at + 1)) {
+						const size_t end = at + token.size();
+						const bool boundL = at == 0 || readPart[at - 1] == ' ';
+						const bool boundR = end == readPart.size() || readPart[end] == ',' || readPart[end] == ';' || readPart[end] == '@' || readPart[end] == ' ';
+						listedAsRead = listedAsRead || (boundL && boundR);
+					}
+					Assert::IsFalse(listedAsRead, L"a read of a producer-less product / of an unwired row is never actual");
+				}
+			}
+			size_t unwiredFound = 0;
+			for (const UnwiredConsumer& u : UnwiredConsumers())
+				for (const ConsumerRow& r : ConsumerRows())
+					if (r.decl.id == u.consumerId) {
+						++unwiredFound;
+						Assert::IsTrue(r.family != nullptr && std::string(r.family).find("temporal detail") != std::string::npos,
+							L"the unwired rows are the temporal-detail family");
+					}
+			Assert::AreEqual(UnwiredConsumers().size(), unwiredFound, L"every unwired id names a catalog row");
+			const ConsumerFlag* cam = ConsumerFlagOf(uint16_t(VectorDemand::kConsumerIdBase + int(VectorDemand::Consumer::CameraFit)), kP3AnalysisField);
+			Assert::IsNotNull(cam);
+			Assert::IsTrue(cam->kind == FlagKind::ViewIsActual && std::string(cam->note).find("SeedFieldOf") != std::string::npos);
 
 			// 5. The flags carry teeth: the NotRead claim is checked against the sources. If DetailPulse / TextureRestore start to reference a
 			// skeleton product (any product alias, the product header, the analysis store or the lane producers), the flag is stale and must be
-			// removed (C10 / C7 made it true). The other flags (P2 / P2m / P3 -> P1 not yet consumed, P10 -> P13 view, P14g -> P5 view, P7 -> P2
+			// removed (C10 / D10 made it true). The other flags (P2 / P2m / P3 -> P1 not yet consumed, P10 -> P13 view, P14g -> P5 view, P7 -> P2
 			// external view) stay human-pinned: they are counted and cross-checked against the registry above, but no scan proves them.
 			namespace fs = std::filesystem;
 			const std::string dir = SettingsTestSupport::RepoRoot() + "src\\VP-V\\modules\\repair\\texture_restore\\";
@@ -730,6 +816,7 @@ namespace ProductCatalogTestsNs
 			Assert::IsTrue(doc.find("reserved, no producer") != std::string::npos);
 			Assert::IsTrue(doc.find("external view (not declared)") != std::string::npos);
 			Assert::IsTrue(doc.find("not read: ") != std::string::npos);
+			Assert::IsTrue(doc.find("external view: ") != std::string::npos, L"the consumer table prints the undeclared render-time reads");
 		}
 
 		TEST_METHOD(GeneratedDocRegionMatchesTheCatalog)

@@ -201,6 +201,9 @@ namespace RendererExtension
 		double estimatedLeadMs = 0;
 		double spentSeconds = 0;
 	};
+	// The present-block kind: R12 is called ONCE per frame at the end of the present block (refs/107 S5) - after the last
+	// extra present, after a main present without extras, or Plain = nothing was presented this frame.
+	enum class AfterPresentKind { Plain, NoExtras, AfterLastExtra };
 	struct PresentContext
 	{
 		int64_t callbackQpc = 0, arrivalQpc = 0, mainCallQpc = 0, swapEndQpc = 0;
@@ -209,6 +212,8 @@ namespace RendererExtension
 		IDXGISwapChain* native = nullptr;
 		const std::atomic<bool>* nextFrameArrived = nullptr;   // the host's flag: a newer source frame has arrived
 		PresentOutcome outcome;                                // out
+		AfterPresentKind kind = AfterPresentKind::Plain;
+		bool cadenceRepeat = false;                            // the source frame is a cadence repeat (keeps its film frame's key)
 	};
 
 	// R13 PresentSample (fan-out, chained: each handler sees the previous adjustment; render thread, in the

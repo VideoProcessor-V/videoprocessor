@@ -186,7 +186,7 @@ add it to the decision, so declaring P7 starts the producer and the render-time 
 
 ## Settings
 
-Every key the estimation side reads (the host parses them per profile and hands them over as plain values; P5a added or changed none). Defaults from the defaults golden; type, range, placement and Original from the generated table in [control/config/README.md](../../control/config/README.md). `general_rate_fixes` is read here too but is documented with its general owner (it is not motion-only); `motion_ahead_ms` is planned and read nowhere.
+Every key the estimation side reads (the host parses them per profile and hands them over as plain values; P5a added or changed none). Defaults from the defaults golden; type, range, placement and Original from the generated table in [control/config/README.md](../../control/config/README.md). `general_rate_fixes` is read here too but is documented with its general owner (it is not motion-only); `motion_ahead_ms` is planned and read nowhere. `motion_estimate_ahead_spare` (auto | on | off, auto = off; `LaneAheadPolicy.h` `ParseKey`) is NOT wired until a later B3-Z stage: no profile parser, Config control or host reads it yet, so it has no row here.
 
 | Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|
@@ -309,6 +309,8 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 - `src/VP-V/modules/motion/estimation/VectorEngine.h` / `VectorEngine.cpp`, `VectorEngineState.h`, `ProducerPlan.h`, `VectorEngineHost.h`, `VectorEngineInterface.h`
 - `src/VP-V/modules/motion/estimation/EstimateState.h`, `EngineKeeper.inl`, `VectorEngineEstimate.inl` (P5a-5; the two `.inl` are compiled only inside the renderer's translation unit)
 - `src/VP-V/modules/motion/estimation/VectorEngineExtension.h` / `VectorEngineExtension.cpp` (hub module: `vpv.vector_engine.v1`)
+- `src/VP-V/modules/motion/estimation/LaneAheadPolicy.h` (B3-Z Z2: the matcher top-up in the post-present spare slot as a pure decision (`Decide`, derived `DepthMax` / `DesignLead`, capped by the P2 ring), the pair-keyed entry layout for Z1 / Z3, and `AfterEstimateDispatch` (IAfterEstimate once per estimate on both paths); no host types; not called by the renderer yet)
+  - Input scan (rule 25, B3-Z Z2): `Decide` reads only its `Input` (the key value, latency mode, matcher active, requested depth, anchor slots, tier, frames queued after next, lane lead, pairs held, producer running, P2 ready); no config key, product or clock. `AfterEstimateDispatch` reads the estimate serial, the pair key and two opaque plane handles. Validity: Z1 entries take pair validity from `MotionValidity::State::PairValidAt` / `StampAt` and the resync coordinator, never a private check. Z1 maps `Entry` onto `Dejudder::AheadSchedule` (`consumers/DejudderAhead.h`), not a second ring. `motion_estimate_ahead_spare` gets its settings row (doc 70 s3) with the stage-2b plumbing that reads it.
 
 Forwarding headers (old paths kept for Bill's files, the renderer host and RendererCaptureHarnessTests.cpp; removed at M2 step 0):
 

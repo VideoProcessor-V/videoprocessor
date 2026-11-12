@@ -5780,6 +5780,29 @@
    "expiry": null
   },
   {
+   "id": "LVR.cpp-0144",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 25908,
+   "end": 25908,
+   "anchor": {
+    "symbol": "RenderLocked",
+    "before": [
+     "BuildSigmaDeltaVectorsWithoutExtras(sourceSequence, nextSourceSequence); // vector engine, no extras",
+     "}"
+    ],
+    "after": [
+     "lastRenderPresentationPaused=presentationAttempt.Deferred(rendered,submitted);"
+    ]
+   },
+   "lines": [
+    "\t\tif (!pipelineSlots.OriginalPathway()) { RendererExtension::PresentContext afterPresent; afterPresent.kind = !(rendered && submitted) ? RendererExtension::AfterPresentKind::Plain : dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed ? RendererExtension::AfterPresentKind::AfterLastExtra : RendererExtension::AfterPresentKind::NoExtras; afterPresent.cadenceRepeat = cadenceRepeat; RendererExtension::AfterPresent(this, static_cast<int64_t>(sourceSequence), static_cast<int64_t>(frameGeneration), afterPresent); }   // VPV-HOOK HA-R12-AfterPresent: the one shared R12 AfterPresent seam (refs/107 S5)"
+   ],
+   "text": "if (!pipelineSlots.OriginalPathway()) { RendererExtension::PresentContext afterPresent; afterPresent.kind = !(rendered && submitted) ? RendererExtension::AfterPresentKind::Plain : dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed ? RendererExtension::AfterPresentKind::AfterLastExtra : RendererExtension::AfterPresentKind::NoExtras; afterPresent.cadenceRepeat = cadenceRepeat; RendererExtension::AfterPresent(this, static_cast<int64_t>(sourceSequence), static_cast<int64_t>(frameGeneration), afterPresent); }",
+   "gate": "inert",
+   "seam": "S5",
+   "expiry": null
+  },
+  {
    "id": "LVR.h-0001",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h",
    "start": 6,
