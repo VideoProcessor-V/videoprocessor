@@ -881,6 +881,34 @@ def load_json(tree, rel):
         return None
 
 
+TRAILER_LINE_RE = re.compile(r"^[A-Za-z][\w-]*[ \t]*:[ \t]*\S")
+
+
+def trailer_values(message):
+    """Values of the `Hook-Trigger:` lines in a commit message's TRAILER REGION (key matches in any case). The region is
+    the last paragraph(s) made only of `Key: value` lines (a continuation line starts with whitespace): a standard git
+    trailer block, and the blank-line variant where `Hook-Trigger:` sits in its own paragraph before `Co-Authored-By:`
+    (commit 867594f19). The subject (first paragraph) never counts; a `Hook-Trigger:` line in ordinary body text does not."""
+    paras, cur = [], []
+    for ln in message.replace("\r\n", "\n").split("\n"):
+        if ln.strip():
+            cur.append(ln)
+        elif cur:
+            paras.append(cur)
+            cur = []
+    if cur:
+        paras.append(cur)
+    vals = []
+    for para in reversed(paras[1:]):
+        if not all(TRAILER_LINE_RE.match(l) or (k > 0 and l[:1] in " \t") for k, l in enumerate(para)):
+            break
+        for l in para:
+            m = re.match(r"^%s[ \t]*:[ \t]*(.*)$" % re.escape(TRAILER_KEY), l, re.I)
+            if m:
+                vals.append(m.group(1))
+    return vals
+
+
 def trigger_scan(tree, root=None, rev=None, no_git=True):
     """Where the landed triggers come from, and every way that source can be wrong. Returns a dict:
     known (ids in docs/audit/hook-triggers.json), landed ({id: sha}), errors (each one fails the run), source (summary text).
@@ -900,8 +928,7 @@ def trigger_scan(tree, root=None, rev=None, no_git=True):
     if no_git or not root:
         return {"known": known, "landed": landed, "errors": errors, "source": "json only"}
     try:
-        log = git(["log", rev or "HEAD", "-i", "--grep=^%s:" % TRAILER_KEY, "--format=%H%x00%(trailers:key=" + TRAILER_KEY +
-                   ",valueonly)%x1e"], root)
+        log = git(["log", rev or "HEAD", "-i", "--grep=^%s:" % TRAILER_KEY, "--format=%H%x00%B%x1e"], root)
     except RuntimeError as e:
         errors.append("TRIGGER SOURCE FAILED: git history of %s is unavailable, so landed triggers cannot be read (%s); rerun in a "
                       "git checkout, or use --no-git to check docs/audit/hook-triggers.json alone" % (rev or "HEAD", " ".join(str(e).split())[:160]))
@@ -909,8 +936,8 @@ def trigger_scan(tree, root=None, rev=None, no_git=True):
     for rec in log.split("\x1e"):
         if "\x00" not in rec:
             continue
-        sha, vals = rec.strip("\r\n").split("\x00", 1)
-        for v in vals.splitlines():
+        sha, body = rec.strip("\r\n").split("\x00", 1)
+        for v in trailer_values(body):
             for raw in v.split(","):
                 tid = raw.strip()
                 if not tid:
@@ -1275,8 +1302,11 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
             d = vp_footprint.parse_diff(git(["diff"] + vp_footprint.DIFF_ARGS + ["-U0", since] + ([rev] if rev else []) +
                                             ["--", "src", ":(exclude)src/VP-V"], root))
             since_added = {k: set(v["added_lines"]) for k, v in d.items()}
-        except RuntimeError:
-            since_added = {}
+        except RuntimeError as e:
+            # fail CLOSED: an unreadable --since (typo, unfetched sha) must never report "0 new" and exit 0
+            print("check_hook_gating: --since %s cannot be read in %s (%s); no verdict" % (
+                since, root, " ".join(str(e).split())[:160]), file=sys.stderr)
+            raise SystemExit(2)
         def _new(s):
             return s["line"] in since_added.get(s["file"], set())
         def _new_site(s):

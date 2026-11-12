@@ -453,6 +453,21 @@ class CheckHookGatingTest(unittest.TestCase):
         self.assertEqual(t["landed"], {"P4-e": sha, "P4-f": sha}, t)
         self.assertEqual(t["errors"], [], t)
 
+    def test_trailer_in_both_layouts_standard_block_and_own_paragraph_before_coauthored_by(self):
+        co = "Co-Authored-By: t <t@example.invalid>"
+        for name, msg in (("standard block", "P4 e lands\n\nbody\n\nHook-Trigger: P4-e\n" + co),
+                          ("own paragraph (867594f19)", "P4 e lands\n\nbody\n\nHook-Trigger: P4-e\n\n" + co)):
+            with self.subTest(name):
+                t = self._repo_with(msg)
+                sha = self._git("rev-parse", "--short=12", "HEAD")
+                self.assertEqual(t["landed"], {"P4-e": sha}, t)
+                self.assertEqual(t["errors"], [], t)
+            self.tearDown()
+            self.setUp()
+        self.assertEqual(chg.trailer_values("s\n\nb\n\nHook-Trigger: P4-e\n\n" + co), ["P4-e"])
+        self.assertEqual(chg.trailer_values("s\n\nHook-Trigger: P4-e\nmentioned in the body.\n\nMore.\n\n" + co), [])
+        self.assertEqual(chg.trailer_values("Hook-Trigger: P4-e"), [], "the subject never counts")
+
     def test_red_a_landed_trigger_not_in_the_json_fails(self):
         t = self._repo_with("lands\n\nHook-Trigger: P4-e, P9-nowhere")
         sha = self._git("rev-parse", "--short=12", "HEAD")
@@ -651,6 +666,17 @@ class UntaggedVpReferenceTest(unittest.TestCase):
         self.assertIn("[FeatureCatalog, HeldNotice, SetNovelMode]", out)
         self.assertIn("1 new untagged VP-V references in Bill files (lines added since %s)" % self.base, out)
         self.assertIn("FAIL (rule 32): an added line in a Bill-owned production file names a symbol declared under src/VP-V/", out)
+
+    def test_red_an_unreadable_since_ref_fails_closed_with_exit_2(self):
+        _w(self.root, BILL, self.BASE + "// more\n")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "branch")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                chg.main(["--root", self.root, "--base-ref", self.base, "--files", BILL, "--rev", "HEAD", "--since", "deadbeef123"])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("--since deadbeef123 cannot be read", err.getvalue())
 
     def test_green_the_same_line_with_a_hook_tag_is_not_an_untagged_reference(self):
         rc, out = self._added("mon.SetNovelMode(2);   // VPV-HOOK")
