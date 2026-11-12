@@ -17,11 +17,13 @@ void LibplaceboVideoRenderer::Impl::BuildSigmaDeltaVectorsWithoutExtras(uint64_t
 	ditherNextGate.Clear();
 	namespace DV = VpMotion::DitherVectors;
 	DV::Facts facts;
-	facts.slotRuns = pipelineSlots.Runs(PipelineSlots::Id::OutputDither);
+	double motionCompensation = 0.0;
+	// No sigma-delta loaded (no quantiser, or one without the parameter): nothing to decide (step None, not "static").
+	const bool quantizer = customHooks.QuantizerParameter("motion_compensation", motionCompensation);
+	facts.slotRuns = pipelineSlots.Runs(PipelineSlots::Id::OutputDither) && quantizer;
 	facts.patch = SigmaDeltaVectorsSupported();
 	facts.ownSetting = activeSettings.ditherVectorsOwn;
-	double motionCompensation = 0.0;
-	facts.motionCompensation = customHooks.QuantizerParameter("motion_compensation", motionCompensation) && motionCompensation >= 0.5;
+	facts.motionCompensation = motionCompensation >= 0.5;
 	facts.served = vectorDemand.Serves(VectorDemand::Consumer::SigmaDelta);
 	facts.sequences = sourceSequence != 0 && nextSourceSequence != 0;
 	facts.timelineDrew = interpolating || vpTimelineActive;   // the timeline / hiccup repair drew refreshes: A was not at shift 0

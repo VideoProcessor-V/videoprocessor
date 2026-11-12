@@ -5830,7 +5830,7 @@ struct LibplaceboVideoRenderer::Impl
 		want(C::MotionIntent, intentInterpreter && intentInterpreter->Active());
 		return in;
 	}
-	// The sigma-delta's vectors on a frame whose extras do not run (W2-C8: the motion module's dither vector chain).
+	// The sigma-delta's vectors on a frame whose extras do not run (W2-C8): defined in VP-V/modules/motion/estimation/DitherVectorSourceHost.inl.
 	void BuildSigmaDeltaVectorsWithoutExtras(uint64_t sourceSequence, uint64_t nextSourceSequence);
 	// output.dither's vector producers run only while the slot runs (WP-13, DitherSlot.h).
 	bool DitherVectorsSupported() const

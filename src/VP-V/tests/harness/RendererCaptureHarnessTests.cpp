@@ -3497,8 +3497,10 @@ namespace Tests
 				const std::string segment = at == std::string::npos ? std::string() : r.dejudderStatus.substr(at);
 				report += std::string("-- ") + mode + "\n  status: " + segment + "\n  last chain log: " + chain +
 					"\n  fallbacks: " + r.fallbacksStatus + "\n  sigma-delta pass lines:\n" + passes;
-				if (std::string(mode) == "own" && !segment.empty() &&
-					(segment.find("shared ") == std::string::npos || segment.find("shared 0,") == std::string::npos))
+				if (segment.empty())
+					failures += std::string(mode) + ": no \"dither vectors:\" status segment; ";
+				else if (std::string(mode) == "own" && (segment.find("shared 0,") == std::string::npos ||
+					segment.find("matcher 0,") == std::string::npos || segment.find("on-demand 0,") == std::string::npos))
 					failures += "own: the chain reused vectors; ";
 			}
 			g_harnessShaderProfiles = saved;

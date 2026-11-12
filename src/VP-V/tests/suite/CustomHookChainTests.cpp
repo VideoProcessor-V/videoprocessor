@@ -253,6 +253,47 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.25f, shaders.value.f, 1e-6f);
 		}
 
+		// W2-C8: the loaded quantiser's //!PARAM as the hook holds it (the dither vector chain's motion_compensation fact).
+		TEST_METHOD(QuantizerParameterReadsTheLoadedQuantizerOnly)
+		{
+			FakeShaders shaders;
+			shaders.files["chroma.glsl"] = "CHROMA";
+			shaders.files["quant.glsl"] = "OUTPUT VP_OUTPUT_QUANTIZER";
+			CustomHookChain::Chain chain(shaders.Loader());
+			double value = -1.0;
+			Assert::IsFalse(chain.QuantizerParameter("noise_amplitude", value), L"nothing loaded");
+			chain.Configure({ CustomRule("cfl", "chroma.glsl", 10) });
+			chain.Ensure(Output2560x1600());
+			Assert::IsFalse(chain.QuantizerParameter("noise_amplitude", value), L"a non-quantiser hook is never read");
+			ConfiguredShaderRule rule = CustomRule("sigma", "quant.glsl", 90);
+			rule.parameters["noise_amplitude"] = "0.25";
+			chain.Configure({ CustomRule("cfl", "chroma.glsl", 10), rule });
+			chain.Ensure(Output2560x1600());
+			Assert::IsTrue(chain.QuantizerParameter("noise_amplitude", value));
+			Assert::AreEqual(0.25, value, 1e-6);
+			Assert::IsFalse(chain.QuantizerParameter("motion_compensation", value), L"a parameter the hook does not declare");
+			Assert::IsFalse(chain.QuantizerParameter(nullptr, value));
+		}
+
+		// W2-C8: Ensure expands `// VP_INCLUDE <id>` right after the read (the parsed text carries the module's passes)
+		// and an unknown id fails only that load.
+		TEST_METHOD(EnsureExpandsVpIncludesAndFailsAnUnknownId)
+		{
+			FakeShaders shaders;
+			shaders.files["quant.glsl"] = "OUTPUT VP_OUTPUT_QUANTIZER\n// VP_INCLUDE motion.output_domain_search\nEND";
+			shaders.files["bad.glsl"] = "CHROMA\n// VP_INCLUDE motion.nothing\n";
+			CustomHookChain::Chain chain(shaders.Loader());
+			chain.Configure({ CustomRule("sigma", "quant.glsl", 90), CustomRule("bad", "bad.glsl", 10) });
+			chain.Ensure(Output2560x1600());
+			bool expanded = false;
+			for (const std::string& text : shaders.parsed)
+				expanded = expanded || (text.find("//!SAVE MV") != std::string::npos && text.find("VP_INCLUDE") == std::string::npos);
+			Assert::IsTrue(expanded, L"the parsed quantiser text carries the module's search passes");
+			const std::vector<std::string> failures = chain.LoadFailures();
+			Assert::AreEqual(size_t{ 1 }, failures.size());
+			Assert::AreEqual(std::string("bad"), failures[0]);
+		}
+
 		TEST_METHOD(LoadFailuresDropOnlyTheFailingHook)
 		{
 			FakeShaders shaders;

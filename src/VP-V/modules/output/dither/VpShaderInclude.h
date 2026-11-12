@@ -11,6 +11,7 @@
 
 #include <VP-V/modules/motion/estimation/fallback/OutputDomainSearchGlsl.h>
 
+#include <algorithm>
 #include <string>
 
 namespace CustomHookChain
@@ -21,6 +22,9 @@ namespace CustomHookChain
         if (id == VpMotion::OutputDomainSearch::kIncludeId)
         {
             text = VpMotion::OutputDomainSearch::Glsl();
+            // LF by contract (a raw string literal of a CRLF checkout may carry CRs on some compilers): normalise first, so the
+            // including line's own line ends decide.
+            text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
             return true;
         }
         return false;

@@ -220,6 +220,8 @@ namespace DitherVectors
 		// Records one decision; mapped = steps 1-3 produced the vectors (false turns the decision into step 4 MapFailed).
 		Choice Note(Choice c, bool mapped, unsigned long long nowMs)
 		{
+			if (c.step == Step::None)   // no sigma-delta (slot off / quantiser not loaded): nothing decided, nothing counted
+				return c;
 			if (c.Reuses() && !mapped)
 				c = Own(Why::MapFailed);
 			++counts_[static_cast<int>(c.step)];
@@ -230,6 +232,8 @@ namespace DitherVectors
 			}
 			if (Automatic(c))
 				lastAutomaticMs_[static_cast<int>(c.step)] = nowMs;
+			if (c.step == Step::OwnSearch && Automatic(c))
+				lastOwn_ = c;   // the held "own search" entry keeps naming its reason after the step moved on
 			changed_ = changed_ || c.step != last_.step || c.why != last_.why || c.spanUnknown != last_.spanUnknown;
 			last_ = c;
 			lastMs_ = nowMs;
@@ -281,7 +285,7 @@ namespace DitherVectors
 			out.push_back(FallbackCatalog::DitherVectorsMatcherField(Recent(Step::MatcherField, nowMs)));
 			out.push_back(FallbackCatalog::DitherVectorsOnDemand(Recent(Step::OnDemand, nowMs)));
 			out.push_back(FallbackCatalog::DitherVectorsOwnSearch(Recent(Step::OwnSearch, nowMs),
-				last_.step == Step::OwnSearch ? std::string(WhyName(last_.why)) + OnDemandNote(last_) : std::string()));
+				std::string(WhyName(lastOwn_.why)) + OnDemandNote(lastOwn_)));
 			out.push_back(FallbackCatalog::DitherVectorsUnvalidated(spanUnknown_ > 0 && nowMs - lastUnknownMs_ < kHoldMs));
 			return out;
 		}
@@ -310,7 +314,7 @@ namespace DitherVectors
 		unsigned long long counts_[kSteps] = {};
 		unsigned long long lastAutomaticMs_[kSteps] = {};
 		unsigned long long spanUnknown_ = 0, lastUnknownMs_ = 0, lastMs_ = 0;
-		Choice last_;
+		Choice last_, lastOwn_;
 		bool changed_ = false;
 	};
 
