@@ -12474,7 +12474,10 @@ const FontGatedTest fontGatedTests[] = {
     { "responsive workspaces preserve edits and fit", true },
     { "left docks restore manual choices and drawer editing", true },
     { "two-column cards share row height", true },
-    { "Tone slider wheel scrolls panel without editing", true } };
+    { "Tone slider wheel scrolls panel without editing", true },
+    // T-R25-3 (WAIVER-P8-07): the unit label sits beside its input only with real text metrics; off screen without fonts
+    // Qt measures placeholder boxes. Same rule as the tests above: run in the runner's font pass (QT_QPA_FONTDIR).
+    { "queue units and LUT controls use consistent rows", true } };
 
 int run(const char* name, const std::function<void()>& test)
 {
