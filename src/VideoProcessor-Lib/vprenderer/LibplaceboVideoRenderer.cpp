@@ -16116,10 +16116,10 @@ struct LibplaceboVideoRenderer::Impl
 						std::chrono::duration<double, std::milli>(SteadyClock::now() - estimateStart).count());
 				if (estimatedAhead)
 				{
-					const auto snapSet = vectorEstimate.Snapshot();   // P5c: R4 (lazy: same lease reads, same order)   // VPV-HOOK
-					warpField = snapSet.Field();   // VPV-HOOK
 					// Planner Q7: with R-A, the roll-off starts on a fast pan's
 					// first frame (the next pair's strength, rate-limited).
+					const auto snapSet = vectorEstimate.Snapshot();   // P5c: R4 (lazy: same lease reads, same order)   // VPV-HOOK
+					warpField = snapSet.Field();   // VPV-HOOK
 					warpTrust = vectorEstimate.LookAheadTrust();   // VPV-HOOK
 					warpSub = snapSet.SubField();   // VPV-HOOK
 					if (warpCamera) warpCamera = snapSet.Camera();   // VPV-HOOK
@@ -23350,7 +23350,7 @@ releaseDriftBaseRetention =
 			// skip (or list) while the repair.deband slot is off (modularity sweep).
 			const bool dvVpDebandSkipped = dvStage.SkipVpDeband(renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION,
 				activeSettings.debandVp != "off" && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband), debandState);
-			if (!pipelineSlots.OriginalPathway() && activeSettings.debandVp != "off" && luma && !dvVpDebandSkipped)   // VPV-HOOK P5c rule 32: the P3 view reads below are VP-V only
+			if (activeSettings.debandVp != "off" && luma && !dvVpDebandSkipped)
 			{
 				const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
 				const int depth = renderImage.repr.bits.color_depth > 0 ? renderImage.repr.bits.color_depth : 10;
@@ -23369,12 +23369,8 @@ releaseDriftBaseRetention =
 				// per-frame weight keeps its time constant above 60 Hz (unchanged at and below).
 				vpDebandParams.holdAlpha = GeneralRate::PerFrameWeight(vpDebandParams.holdAlpha, dejudderSourceHz,
 					activeSettings.generalRateFixes);
-				const VpMotion::P3FieldSet debandLive = vectorEstimate.LiveFor(sourceSequence, activeSettings.motionHistoryFixes);   // P5c: R1   // VPV-HOOK
-				if (debandLive.valid)   // VPV-HOOK
-				{
-					vpDebandParams.field = debandLive.field;   // VPV-HOOK
-					vpDebandParams.grainError = debandLive.grainError;   // VPV-HOOK
-				}
+				vectorEstimate.LiveFieldInto(pipelineSlots.OriginalPathway(), sourceSequence, activeSettings.motionHistoryFixes,   // VPV-HOOK P5c: R1 (VPV-GATED)
+					vpDebandParams.field, vpDebandParams.grainError);   // VPV-HOOK
 				vpDebandParams.fieldScale = rebaseFactor > 0.0 ? 1.0 / rebaseFactor : 1.0;
 				vpDebandParams.fieldScaleX = rebaseFactorX > 0.0 ? 1.0 / rebaseFactorX : 1.0;
 				vpDebandParams.sequence = sourceSequence;
@@ -23407,7 +23403,7 @@ releaseDriftBaseRetention =
 				detailPulseParams = DetailPulse::Params();
 				textureRestoreParams = TextureRestore::Params();
 				std::string pulseState, restoreState;
-				if (!pipelineSlots.OriginalPathway() && (activeSettings.detailPulseStabilise || activeSettings.textureRestore) && luma && !temporal)   // VPV-HOOK P5c rule 32: the P3 view reads below are VP-V only
+				if ((activeSettings.detailPulseStabilise || activeSettings.textureRestore) && luma && !temporal)
 				{
 					const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
 					const int depth = renderImage.repr.bits.color_depth > 0 ? renderImage.repr.bits.color_depth : 10;
@@ -23418,7 +23414,7 @@ releaseDriftBaseRetention =
 					// The de-judder's vectors only under the debander's validity condition: this source frame's
 					// live field (DejudderLiveFieldFor: the current motion epoch, and with motion_history_fixes the live-field sequence).
 					// P5c W1-G: R1 (the gate lacked the motion_history_fixes clause; unchanged with it off).   // VPV-HOOK
-					pl_tex field = vectorEstimate.LiveFor(sourceSequence, activeSettings.motionHistoryFixes).field;   // VPV-HOOK
+					pl_tex field = vectorEstimate.LiveFieldOnVp(pipelineSlots.OriginalPathway(), sourceSequence, activeSettings.motionHistoryFixes);   // VPV-HOOK (VPV-GATED)
 					const double fieldScale = rebaseFactor > 0.0 ? 1.0 / rebaseFactor : 1.0;
 					const double fieldScaleX = rebaseFactorX > 0.0 ? 1.0 / rebaseFactorX : 1.0;
 					const double quality = snap.reading ? snap.bitrateQuality : 1.0;
@@ -24169,13 +24165,7 @@ releaseDriftBaseRetention =
                 AdaptiveDownscaleStage::MotionSource m;
                 const VpMotion::P3FieldSet live = vectorEstimate.LiveFor(sourceSequence, activeSettings.motionHistoryFixes);   // P5c: R1   // VPV-HOOK
                 m.live = live.valid && !VpPhaseDrawn(renderImage);   // VPV-HOOK
-                if (m.live)
-                {
-                    m.field = live.field;   // VPV-HOOK
-                    m.frameTrust = live.frameTrust;   // VPV-HOOK
-                    m.grainError = live.grainError;   // VPV-HOOK
-                    m.minTrustedShare = vectorEstimate.MinTrustedShare();   // VPV-HOOK
-                }
+                if (m.live) { m.field = live.field; m.frameTrust = live.frameTrust; m.grainError = live.grainError; m.minTrustedShare = vectorEstimate.MinTrustedShare(); }   // VPV-HOOK
                 return m;
             };
             adaptiveHost.publishStatus = [this]() { PublishCustomShaderStatus(); };
@@ -24267,8 +24257,8 @@ releaseDriftBaseRetention =
             // position, so they hold at any re-base size (the vectors are the
             // native frame's; a factor change does not touch them).
             // (A picture between frames is not A: A's mask would sit t * v off.)
-            bool install = !pipelineSlots.OriginalPathway() && activeSettings.occlusionMask && maskSlot >= 0 && dejudder && !cadenceRepeat && !VpPhaseDrawn(renderImage) &&   // VPV-HOOK P5c rule 32: the P3 view reads below are VP-V only
-                vectorEstimate.Occlusion(maskSlot);   // VPV-HOOK
+            bool install = activeSettings.occlusionMask && maskSlot >= 0 && dejudder && !cadenceRepeat && !VpPhaseDrawn(renderImage) &&
+                vectorEstimate.OcclusionOnVp(pipelineSlots.OriginalPathway(), maskSlot);   // VPV-HOOK (VPV-GATED)
             bool grainInstall = grainMap != nullptr;
             // 6c-2: with NLS the mask follows the NLS shader's own map. Only
             // the bundled NLS / NLS+ maps are known; any other NLS shader, or
@@ -24308,9 +24298,9 @@ releaseDriftBaseRetention =
                 dejudderMaskState.clear();   // NLS is off again (audit 6c-2)
             // Set only when the parameter was really written as 1 (audit 6b-2b).
             dejudderMaskParamSet = install;
-            if (!pipelineSlots.OriginalPathway() && (install || grainInstall))   // VPV-HOOK P5c rule 32: the P3 view reads below are VP-V only
+            if (install || grainInstall)
             {
-                occlusionMaskHook.SetFrame(install ? vectorEstimate.Occlusion(maskSlot) : nullptr, renderImage.crop, target.crop);   // VPV-HOOK
+                occlusionMaskHook.SetFrame(install ? vectorEstimate.OcclusionOnVp(pipelineSlots.OriginalPathway(), maskSlot) : nullptr, renderImage.crop, target.crop);   // VPV-HOOK (VPV-GATED)
                 occlusionMaskHook.SetGrain(grainInstall ? grainMap : nullptr,
                     static_cast<float>(activeSettings.adaptive.grainFloor));
                 // NLS's coordinates span the source crop (measured: the

@@ -238,6 +238,31 @@ namespace VpMotion
 		// B's occlusion mask in a slot; the caller keeps its own slot / sequence / epoch test.
 		pl_tex Occlusion(int slot) const { return dejudder ? dejudder->Occlusion(slot) : nullptr; }
 		float MinTrustedShare() const { return dejudder ? dejudder->GetSettings().minTrustedShare : 0.0f; }
+		// P5c rule 32 (HOOK FREEZE): the renderer's stage reads of the view as ONE gated call each. The ORIGINAL pathway never
+		// reads the view here (Bill's pathway has no matcher: byte-identical), which tools/check_hook_gating.py verifies through
+		// the early returns. VP-V: exactly LiveFor / Occlusion above.
+		// R1 into a stage's params: writes field and grain error only when the live field is this source frame's (else untouched).
+		bool LiveFieldInto(bool originalPathway, uint64_t sequence, bool motionHistoryFixes, pl_tex& field, pl_tex& grainError) const   // VPV-GATED
+		{
+			if (originalPathway) return false;
+			const P3FieldSet live = LiveFor(sequence, motionHistoryFixes);
+			if (!live.valid) return false;
+			field = live.field;
+			grainError = live.grainError;
+			return true;
+		}
+		// R1, the field alone (nullptr when not this source frame's).
+		pl_tex LiveFieldOnVp(bool originalPathway, uint64_t sequence, bool motionHistoryFixes) const   // VPV-GATED
+		{
+			if (originalPathway) return nullptr;
+			return LiveFor(sequence, motionHistoryFixes).field;
+		}
+		// B's occlusion mask for the renderer's mask hook; the caller keeps its own slot / sequence / epoch test.
+		pl_tex OcclusionOnVp(bool originalPathway, int slot) const   // VPV-GATED
+		{
+			if (originalPathway) return nullptr;
+			return Occlusion(slot);
+		}
 
 		// ---- moved members (verbatim, with their comments) ----------------------------------------------------
 		// Stage 6 de-judder: B's planes (the next source frame) and the matcher.
