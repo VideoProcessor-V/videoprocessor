@@ -326,5 +326,150 @@ class CheckHookGatingTest(unittest.TestCase):
         self.assertIn("UNKNOWN TRIGGER temporary budget %s names trigger P9-nowhere" % BILL, out)
 
 
+    # --- a missed trigger never passes silently (Lead 4 opus gate 2026-11-11; no-silent-fallbacks) ---
+
+    GIT_ENV = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+
+    def _git(self, *args):
+        return subprocess.run(["git", "-C", self.root] + list(args), check=True, env=self.GIT_ENV,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode("utf-8", "replace").strip()
+
+    def _repo_with(self, message):
+        """A repo with the transitional fixture as its base commit, then an empty commit with `message`."""
+        self._transitional("P4-e", {"P4-e": {"landed": None}, "P4-f": {"landed": None}})
+        self._git("init", "-q")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "base")
+        self._git("commit", "-q", "--allow-empty", "-m", message)
+        return chg.trigger_scan(chg.Tree(self.root), self.root, "HEAD", no_git=False)
+
+    def test_hook_trigger_in_the_body_text_is_not_a_landing(self):
+        t = self._repo_with("P4 e work\n\nHook-Trigger: P4-e\nis mentioned here, in the body.\n\nMore body text.\n\n"
+                            "Co-Authored-By: t <t@example.invalid>")
+        self.assertEqual(t["landed"], {}, t)
+        self.assertEqual(t["errors"], [], t)
+
+    def test_trailer_key_and_value_match_in_any_case(self):
+        t = self._repo_with("P4 e lands\n\nhook-trigger:  p4-E ,P4-F")
+        sha = self._git("rev-parse", "--short=12", "HEAD")
+        self.assertEqual(t["landed"], {"P4-e": sha, "P4-f": sha}, t)
+        self.assertEqual(t["errors"], [], t)
+
+    def test_red_a_landed_trigger_not_in_the_json_fails(self):
+        t = self._repo_with("lands\n\nHook-Trigger: P4-e, P9-nowhere")
+        sha = self._git("rev-parse", "--short=12", "HEAD")
+        self.assertEqual(t["errors"], ["UNKNOWN LANDED TRIGGER P9-nowhere at %s" % sha], t)
+        self.assertEqual(t["landed"], {"P4-e": sha})
+        res = chg.run(self.root, chg.DEFAULT_BASE, [BILL], no_git=True)
+        sc = chg.site_checks(chg.Tree(self.root), res["files"], self.root, "HEAD", no_git=False)
+        self.assertIn("UNKNOWN LANDED TRIGGER P9-nowhere at %s" % sha, sc["trigger_errors"])
+
+    def test_red_git_history_unavailable_fails_and_no_git_says_json_only(self):
+        self._repo_with("nothing lands")
+        t = chg.trigger_scan(chg.Tree(self.root), self.root, "no-such-rev-r2p5c", no_git=False)
+        self.assertEqual(len(t["errors"]), 1, t)
+        self.assertTrue(t["errors"][0].startswith("TRIGGER SOURCE FAILED: git history of no-such-rev-r2p5c is unavailable"), t)
+        self.assertEqual(t["source"], "json + trailers FAILED")
+        res = chg.run(self.root, chg.DEFAULT_BASE, [BILL], no_git=True)
+        res["site_checks"] = chg.site_checks(chg.Tree(self.root), res["files"], self.root, "no-such-rev-r2p5c", no_git=False)
+        res["rc"] = 1 if res["site_checks"]["trigger_errors"] else res["rc"]
+        out = chg.render(res)
+        self.assertIn("  TRIGGER SOURCE FAILED: git history of no-such-rev-r2p5c", out)
+        self.assertIn("1 trigger errors", out)
+        self.assertIn("FAIL (rule 32 expiry inputs)", out)
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("; trigger source: json only", out)
+
+    def test_red_an_approval_whose_file_is_missing_fails(self):
+        self._transitional("P4-e", {"P4-e": {"landed": "abc123"}})
+        _w(self.root, chg.APPROVALS_PATH, json.dumps({"approvals": [{"id": "HA-T1", "file": "src/VideoProcessor-Lib/vprenderer/Moved.cpp",
+                                                                     "text_contains": "vectorEngine.PlanAhead(frame)", "seam": "S3",
+                                                                     "approver": "owner via coordinator", "when": "2026-11-11", "expiry": "P4-e"}]}))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("  APPROVAL FILE MISSING HA-T1 src/VideoProcessor-Lib/vprenderer/Moved.cpp", out)
+        self.assertIn("1 approval files missing", out)
+        self.assertIn("FAIL (rule 32 expiry inputs)", out)
+
+    def test_red_two_identical_sites_with_one_removed_still_expire(self):
+        twin = "\t\tif (!pipelineSlots.OriginalPathway()) vectorEngine.PlanAhead(frame);   // VPV-HOOK\n"
+        self._seed(twin + "\t\tdoBill();\n" + twin)
+        _w(self.root, chg.APPROVALS_PATH, json.dumps({"approvals": [{"id": "HA-T1", "file": BILL, "text_contains": "vectorEngine.PlanAhead(frame)",
+                                                                     "seam": "S3", "approver": "owner via coordinator", "when": "2026-11-11",
+                                                                     "expiry": "P4-e"}]}))
+        _w(self.root, chg.TRIGGERS_PATH, json.dumps({"P4-e": {"landed": "abc123"}}))
+        _w(self.root, BILL, _bill("\t\tdoBill();\n" + twin))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("EXPIRED HA-T1 (trigger P4-e landed at abc123) still present", out)
+        _w(self.root, BILL, _bill("\t\tdoBill();\n"))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("; 0 expired, 0 unknown triggers", out)
+
+    def test_end_to_end_cli_with_rev_and_a_real_trailer_commit(self):
+        _w(self.root, BILL, _bill("\t\tdoBill();\n"))
+        self._git("init", "-q")
+        self._git("add", BILL)
+        self._git("commit", "-q", "-m", "bill")
+        base = self._git("rev-parse", "HEAD")
+        self._transitional("P4-e", {"P4-e": {"landed": None}})
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "vp")
+        self._git("commit", "-q", "--allow-empty", "-m", "P4 e lands\n\nHook-Trigger: P4-e")
+        sha = self._git("rev-parse", "--short=12", "HEAD")
+        def cli(rev):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = chg.main(["--root", self.root, "--base-ref", base, "--rev", rev, "--files", BILL])
+            return rc, buf.getvalue()
+        rc, out = cli("HEAD")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("EXPIRED HA-T1 (trigger P4-e landed at %s) still present" % sha, out)
+        self.assertIn("; trigger source: json + trailers of HEAD", out)
+        rc, out = cli("HEAD~1")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("; 0 expired, 0 unknown triggers, 0 trigger errors, 0 approval files missing, 0 budget errors", out)
+        self.assertIn("; trigger source: json + trailers of HEAD~1", out)
+
+    def test_red_temporary_reverts_to_above_the_files_ceiling_fails(self):
+        self._transitional(None, {"P4-e": {"landed": None}})
+        _w(self.root, chg.BUDGET_PATH, json.dumps({"files": {BILL: 1}, "temporary": {BILL: {"limit": 2, "reverts_to": 2, "until": ["P4-e"]}}}))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("  BUDGET INCONSISTENT temporary %s reverts_to 2 > files 1" % BILL, out)
+        self.assertIn("1 budget errors", out)
+        _w(self.root, chg.BUDGET_PATH, json.dumps({"files": {BILL: 1}, "temporary": {BILL: {"limit": 2, "reverts_to": 1, "until": ["P4-e"]}}}))
+        rc, out = _run(self.root)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("0 budget errors", out)
+
+    def _gate_numbers(self, out):
+        import re
+        classes = re.search(r"^  classes \(every bucket incl\. tests, whole files, before the --since filter; not the gate\): (.*)$", out, re.M)
+        gate = re.search(r"^  gate: (\d+) unguarded \(production files", out, re.M)
+        final = re.search(r"^hook gating: \d+ hook statements, (\d+) unguarded,", out, re.M)
+        self.assertTrue(classes and gate and final, out)
+        return classes.group(1), int(gate.group(1)), int(final.group(1))
+
+    def test_the_breakdown_and_the_final_line_report_one_gate_count(self):
+        tests_file = "src/VideoProcessor-Test/SomeTests.cpp"
+        _w(self.root, BILL, _bill("\t\tif (!pipelineSlots.OriginalPathway()) vectorEngine.PlanAhead(frame);   // VPV-HOOK\n"))
+        _w(self.root, tests_file, "void T()\n{\n\tvectorEngine.PlanAhead(frame);   // VPV-HOOK\n}\n")
+        rc, out = _run(self.root, files=(BILL, tests_file))
+        self.assertEqual(rc, 0, out)
+        classes, gate, final = self._gate_numbers(out)
+        self.assertIn("unguarded 1", classes, "the breakdown counts the tests file too, and says so")
+        self.assertEqual((gate, final), (0, 0))
+        _w(self.root, BILL, _bill("\t\tvectorEngine.PlanAhead(frame);   // VPV-HOOK\n"))
+        rc, out = _run(self.root, files=(BILL, tests_file))
+        self.assertEqual(rc, 1, out)
+        classes, gate, final = self._gate_numbers(out)
+        self.assertIn("unguarded 2", classes)
+        self.assertEqual((gate, final), (1, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

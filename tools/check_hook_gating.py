@@ -801,33 +801,53 @@ def load_json(tree, rel):
         return None
 
 
-def landed_triggers(tree, root=None, rev=None, no_git=True):
-    """(known trigger ids, {id: sha} landed): docs/audit/hook-triggers.json, plus `Hook-Trigger: <id>` commit trailers on
-    the ancestors of `rev` (HEAD for the working tree) unless no_git."""
+def trigger_scan(tree, root=None, rev=None, no_git=True):
+    """Where the landed triggers come from, and every way that source can be wrong. Returns a dict:
+    known (ids in docs/audit/hook-triggers.json), landed ({id: sha}), errors (each one fails the run), source (summary text).
+    Trailers: `Hook-Trigger: <id>[, <id>]` on the ancestors of `rev` (HEAD for the working tree); the key matches in any case
+    (git's trailer parser plus `-i` on the pre-filter grep), a value matches a known id stripped and in any case, and a value
+    that names no known id is an UNKNOWN LANDED TRIGGER. Only real trailers count (git's own trailer parser): `Hook-Trigger:`
+    in the body text is not a landing. A git failure in git mode is an error, never an empty history."""
     doc = load_json(tree, TRIGGERS_PATH) or {}
-    known, landed = set(), {}
+    known, landed, errors = set(), {}, []
     for k, v in doc.items():
         if k.startswith("_"):
             continue
         known.add(k)
         if isinstance(v, dict) and v.get("landed"):
             landed[k] = str(v["landed"])
-    if not no_git and root:
-        try:
-            log = git(["log", rev or "HEAD", "--grep=^%s:" % TRAILER_KEY, "--format=%H%x00%(trailers:key=" + TRAILER_KEY +
-                       ",valueonly)%x1e"], root)
-        except RuntimeError:
-            log = ""
-        for rec in log.split("\x1e"):
-            if "\x00" not in rec:
-                continue
-            sha, vals = rec.strip("\r\n").split("\x00", 1)
-            for v in vals.splitlines():
-                for tid in v.split(","):
-                    tid = tid.strip()
-                    if tid:
-                        landed[tid] = sha[:12]   # git log runs newest first: the oldest landing commit wins
-    return known, landed
+    by_norm = {k.strip().lower(): k for k in known}
+    if no_git or not root:
+        return {"known": known, "landed": landed, "errors": errors, "source": "json only"}
+    try:
+        log = git(["log", rev or "HEAD", "-i", "--grep=^%s:" % TRAILER_KEY, "--format=%H%x00%(trailers:key=" + TRAILER_KEY +
+                   ",valueonly)%x1e"], root)
+    except RuntimeError as e:
+        errors.append("TRIGGER SOURCE FAILED: git history of %s is unavailable, so landed triggers cannot be read (%s); rerun in a "
+                      "git checkout, or use --no-git to check docs/audit/hook-triggers.json alone" % (rev or "HEAD", " ".join(str(e).split())[:160]))
+        return {"known": known, "landed": landed, "errors": errors, "source": "json + trailers FAILED"}
+    for rec in log.split("\x1e"):
+        if "\x00" not in rec:
+            continue
+        sha, vals = rec.strip("\r\n").split("\x00", 1)
+        for v in vals.splitlines():
+            for raw in v.split(","):
+                tid = raw.strip()
+                if not tid:
+                    continue
+                kid = by_norm.get(tid.lower())
+                if kid is None:
+                    errors.append("UNKNOWN LANDED TRIGGER %s at %s" % (tid, sha[:12]))
+                    continue
+                landed[kid] = sha[:12]   # git log runs newest first: the oldest landing commit wins
+    return {"known": known, "landed": landed, "errors": errors, "source": "json + trailers of %s" % (rev or "HEAD")}
+
+
+def landed_triggers(tree, root=None, rev=None, no_git=True):
+    """(known trigger ids, {id: sha} landed): docs/audit/hook-triggers.json, plus `Hook-Trigger: <id>` commit trailers on
+    the ancestors of `rev` (HEAD for the working tree) unless no_git. The errors are in trigger_scan()."""
+    t = trigger_scan(tree, root, rev, no_git)
+    return t["known"], t["landed"]
 
 
 def _expiry_ids(expiry):
@@ -845,22 +865,28 @@ def site_checks(tree, per_file, root=None, rev=None, no_git=True):
     approvals = load_json(tree, APPROVALS_PATH) or {"approvals": []}
     res = {"sites": len(sites), "new": [], "approved": [], "removed": [], "over": [], "ratchet": [],
            "manifest": "none" if manifest is None else MANIFEST_PATH, "budget": "none" if budget is None else BUDGET_PATH,
-           "approvals_used": [], "expired": [], "unknown": [], "temporary": []}
-    known_t, landed_t = landed_triggers(tree, root, rev, no_git)
+           "approvals_used": [], "expired": [], "unknown": [], "temporary": [], "trigger_errors": [],
+           "approval_missing": [], "budget_errors": []}
+    ts = trigger_scan(tree, root, rev, no_git)
+    known_t, landed_t = ts["known"], ts["landed"]
+    res["trigger_errors"] = ts["errors"]
+    res["trigger_source"] = ts["source"]
     texts = {}
     def _file_key(rel):
         if rel not in texts:
             try:
                 texts[rel] = _key(tree.read(rel))
             except (OSError, RuntimeError):
-                texts[rel] = ""
+                texts[rel] = None   # unreadable: reported as APPROVAL FILE MISSING, never matched as empty text
         return texts[rel]
     for ap in approvals.get("approvals", []):
+        if _file_key(ap.get("file") or "") is None:
+            res["approval_missing"].append("APPROVAL FILE MISSING %s %s" % (ap.get("id"), ap.get("file")))
         for tid in _expiry_ids(ap.get("expiry")):
             if tid not in known_t and tid not in landed_t:
                 res["unknown"].append("approval %s names trigger %s (not in %s)" % (ap.get("id"), tid, TRIGGERS_PATH))
         for tid in _expiry_ids(ap.get("expiry")):
-            if tid in landed_t and ap.get("text_contains") and _key(ap["text_contains"]) in _file_key(ap.get("file", "")):
+            if tid in landed_t and ap.get("text_contains") and _key(ap["text_contains"]) in (_file_key(ap.get("file") or "") or ""):
                 res["expired"].append("EXPIRED %s (trigger %s landed at %s) still present in %s" % (ap.get("id"), tid, landed_t[tid], ap.get("file")))
                 break
     if manifest is not None:
@@ -891,6 +917,9 @@ def site_checks(tree, per_file, root=None, rev=None, no_git=True):
     if budget is not None:
         limits = dict(budget.get("files", {}))
         for f, tmp in sorted((budget.get("temporary") or {}).items()):
+            if int(tmp["reverts_to"]) > int(limits.get(f, 0)):
+                res["budget_errors"].append("BUDGET INCONSISTENT temporary %s reverts_to %d > files %d (the files ceiling is the "
+                                            "one source of truth: reverts_to may not exceed it)" % (f, int(tmp["reverts_to"]), int(limits.get(f, 0))))
             until = list(tmp.get("until") or [])
             for tid in until:
                 if tid not in known_t and tid not in landed_t:
@@ -1077,7 +1106,8 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
         untagged = [u for u in untagged if _new(u)]
         sc["new"] = [x for x in sc["new"] if _new_site(x)]
         sc["approved"] = [x for x in sc["approved"] if _new_site(x)]
-    rc = 1 if (hits or unverified or (fail_untagged and untagged) or sc["new"] or sc["over"] or sc["expired"] or sc["unknown"]) else 0
+    rc = 1 if (hits or unverified or (fail_untagged and untagged) or sc["new"] or sc["over"] or sc["expired"] or sc["unknown"] or
+                 sc["trigger_errors"] or sc["approval_missing"] or sc["budget_errors"]) else 0
     return {"base_ref": base_ref, "rev": rev, "since": since, "vp_slots": sorted(vp_slots), "site_checks": sc, "gated": {k: list(v) for k, v in gated.items()},
             "files": per_file, "counts": counts, "hits": hits, "unverified": unverified, "untagged": untagged,
             "allowed": allowed, "allow_used": {"%s:%d" % k: v for k, v in allow_used.items()}, "stale_allow": stale, "rc": rc}
@@ -1107,7 +1137,10 @@ def render(res):
         out.append("  stale allow-list entry (no site uses it, may be deleted): %s %d" % (kind, k))
     for name, (rel, line, verified) in sorted(res["gated"].items()):
         out.append("  VPV-GATED %s (%s:%d) %s" % (name, rel, line, "verified" if verified else "NOT VERIFIED"))
-    out.append("  classes: " + ", ".join("%s %d" % (k, v) for k, v in sorted(c.items())))
+    out.append("  classes (every bucket incl. tests, whole files, before the --since filter; not the gate): " +
+               ", ".join("%s %d" % (k, v) for k, v in sorted(c.items())))
+    out.append("  gate: %d unguarded (production files%s, incl. unverified-marker call sites), %d unverified markers" % (
+        len(res["hits"]), (", lines added since %s" % res["since"]) if res.get("since") else "", len(res["unverified"])))
     sc = res["site_checks"]
     for s in sc["new"]:
         out.append("  NEW SITE (not in %s, no HOOK-APPROVAL) %s:%d-%d [%s] %s" % (MANIFEST_PATH, s["file"], s["start"], s["end"], s["gate"], s["text"][:100]))
@@ -1121,6 +1154,8 @@ def render(res):
         out.append("  " + line)
     for line in sc["unknown"]:
         out.append("  UNKNOWN TRIGGER " + line)
+    for line in sc["trigger_errors"] + sc["approval_missing"] + sc["budget_errors"]:
+        out.append("  " + line)
     for x in sc["temporary"]:
         out.append("  temporary ceiling %s %d (reverts to %d when %s land)" % (x["file"], x["limit"], x["reverts_to"], ", ".join(x["pending"])))
     if sc["removed"]:
@@ -1128,19 +1163,25 @@ def render(res):
     temp = "".join("; temporary %s %d <= %d (reverts to %d)" % (x["file"].rsplit("/", 1)[-1], x["count"], x["limit"], x["reverts_to"])
                    if x["count"] <= x["limit"] else "; temporary %s %d > %d" % (x["file"].rsplit("/", 1)[-1], x["count"], x["limit"])
                    for x in sc["temporary"])
-    out.append("hook sites: %d sites, %d new (%d approved), %d removed, %d over budget; manifest %s, budget %s; %d expired, %d unknown triggers%s" % (
+    out.append("hook sites: %d sites, %d new (%d approved), %d removed, %d over budget; manifest %s, budget %s; %d expired, %d unknown triggers, "
+               "%d trigger errors, %d approval files missing, %d budget errors%s; trigger source: %s" % (
         sc["sites"], len(sc["new"]) + len(sc["approved"]), len(sc["approved"]), len(sc["removed"]), len(sc["over"]), sc["manifest"], sc["budget"],
-        len(sc["expired"]), len(sc["unknown"]), temp))
+        len(sc["expired"]), len(sc["unknown"]), len(sc["trigger_errors"]), len(sc["approval_missing"]), len(sc["budget_errors"]), temp,
+        sc.get("trigger_source", "json only")))
     out.append("hook gating: %d hook statements, %d unguarded, %d unverified markers, %d allowed, %d untagged; exit %d" % (
         hook_stmts, len(res["hits"]), len(res["unverified"]), len(res["allowed"]), len(res["untagged"]), res["rc"]))
     if sc["expired"] or sc["unknown"]:
         out.append("FAIL (rule 32 expiry): an approved transitional site outlived its trigger, or an expiry names a trigger "
                    "%s does not list: collapse the site into its seam (refs/107-host-seams-plan.md s4) or fix the id." % TRIGGERS_PATH)
+    if sc["trigger_errors"] or sc["approval_missing"] or sc["budget_errors"]:
+        out.append("FAIL (rule 32 expiry inputs): the trigger source, an approval's file or the budget cannot be trusted; a missed "
+                   "trigger never passes silently. Fix the trailer/id, the approval's file (renamed or moved?), or the budget.")
     if sc["new"] or sc["over"]:
         out.append("FAIL (rule 32): a NEW hook site in a Bill file, or a file over its site ceiling: route the feature through an "
                    "existing seam (refs/107-host-seams-plan.md s1), or get a HOOK-APPROVAL id from the coordinator "
                    "(docs/audit/hook-approvals.json); ceilings only go down.")
-    if res["rc"] and not (sc["new"] or sc["over"] or sc["expired"] or sc["unknown"]) or res["hits"] or res["unverified"]:
+    if res["rc"] and not (sc["new"] or sc["over"] or sc["expired"] or sc["unknown"] or sc["trigger_errors"] or sc["approval_missing"] or
+                          sc["budget_errors"]) or res["hits"] or res["unverified"]:
         out.append("FAIL: a VP-V hook in a Bill file runs in the Original pathway. Wrap the call site in the canonical guard "
                    "(`if (!pipelineSlots.OriginalPathway())`), or move the logic into its VP-V module behind a `// VPV-GATED` "
                    "function with `if (originalPathway) return;`, or ask the lead for an allow-list entry with a reason.")
