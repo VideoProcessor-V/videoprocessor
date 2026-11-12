@@ -903,7 +903,7 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `intent_motion_policy` | vprenderer | VP-V > Advanced | - | - | display | - |  |
 | `motion_history_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
 | `report_thumbnail` | logging | VP-V > Problem reports | - | - | unchecked | - | ORPHAN? |
-| `source_geometry_detect` | vprenderer | VP-V page > Scaling | - | - | all | - |  |
+| `source_geometry_detect` | vprenderer | VP-V > Scaling > Re-base | - | - | all | - |  |
 | `source_resolution_crossfade_s` | vprenderer | VP-V > Advanced | - | - | 1.5 | - |  |
 | `source_resolution_cut_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
 | `source_resolution_evidence_seconds` | vprenderer | VP-V > Advanced | - | - | 10 | - |  |

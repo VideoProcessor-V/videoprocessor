@@ -544,7 +544,7 @@ if (tile < int(tiles) && g.y < ts) {
 			{
 				char buf[160];
 				const double r = singleAxisHeldRatio.load(std::memory_order_acquire);
-				const char* named = const_cast<Monitor*>(this)->NamedHold(heldAxis == 0 ? r : 1.0, heldAxis == 0 ? 1.0 : r, false);
+				const char* named = NamedHoldName(heldAxis == 0 ? r : 1.0, heldAxis == 0 ? 1.0 : r);
 				if (named != nullptr)   // a named parked entry (owner 2026-11-11)
 					std::snprintf(buf, sizeof(buf), " | held: %s (single-axis re-base parked; %s %.4f)", named, heldAxis == 0 ? "H" : "V", r);
 				else
@@ -572,6 +572,14 @@ if (tile < int(tiles) && g.y < ts) {
 			const int ny = static_cast<int>(std::lround(rV * H));
 			return Scaling::GeometrySet::AgreeingPair(nx, W, ny, H, W, H);
 		}
+	}
+
+	const char* Monitor::NamedHoldName(double rH, double rV) const
+	{
+		const Scaling::GeometrySet::Geometry* e = Scaling::GeometrySet::RecogniseParked(rH, rV,
+			conventionRasterW.load(std::memory_order_acquire), conventionRasterH.load(std::memory_order_acquire),
+			geometryDetectMask.load(std::memory_order_acquire));
+		return e != nullptr ? e->name : nullptr;
 	}
 
 	const char* Monitor::NamedHold(double rH, double rV, bool count)
@@ -604,8 +612,15 @@ if (tile < int(tiles) && g.y < ts) {
 		return 0u;
 	}
 
-	void Monitor::SetGeometryDetect(const std::string& value)
+	bool Monitor::SetGeometryDetect(const std::string& value)
 	{
+		{
+			std::lock_guard<std::mutex> lock(geometryDetectMutex);
+			if (geometryDetectSet && value == geometryDetectValue)
+				return false;   // unchanged: not re-parsed (audit LOW-1)
+			geometryDetectValue = value;
+			geometryDetectSet = true;
+		}
 		Scaling::GeometrySet::DetectMask mask = 0u;
 		std::string unknown;
 		Scaling::GeometrySet::ParseDetect(value, mask, unknown);
@@ -614,6 +629,7 @@ if (tile < int(tiles) && g.y < ts) {
 		if (unknown != geometryDetectUnknown && !unknown.empty())
 			DebugLog::Log("source_geometry_detect: unknown entries ignored: %s", unknown.c_str());
 		geometryDetectUnknown = unknown;
+		return true;
 	}
 
 	FallbackCatalog::Decision Monitor::GeometryDetectFallback() const
@@ -630,7 +646,7 @@ if (tile < int(tiles) && g.y < ts) {
 		const double h = conventionHeldH.load(std::memory_order_acquire), v = conventionHeldV.load(std::memory_order_acquire);
 		char buf[160];
 		// A held reading that is one named parked (detect-only) entry is shown by its name (owner 2026-11-11).
-		const char* named = kind == 1 || kind == 2 ? const_cast<Monitor*>(this)->NamedHold(h, v, false) : nullptr;
+		const char* named = kind == 1 || kind == 2 ? NamedHoldName(h, v) : nullptr;
 		if (named != nullptr)
 		{
 			std::snprintf(buf, sizeof(buf), "held: %s (%s re-base parked; H %.4f x V %.4f)", named, kind == 1 ? "single-axis" : "anamorphic", h, v);
@@ -651,7 +667,7 @@ if (tile < int(tiles) && g.y < ts) {
 		if (axis == 0 || axis == 1)
 		{
 			const double r = singleAxisHeldRatio.load(std::memory_order_acquire);
-			const char* l6 = const_cast<Monitor*>(this)->NamedHold(axis == 0 ? r : 1.0, axis == 0 ? 1.0 : r, false);
+			const char* l6 = NamedHoldName(axis == 0 ? r : 1.0, axis == 0 ? 1.0 : r);
 			if (l6 != nullptr)
 			{
 				std::snprintf(buf, sizeof(buf), "held: %s (single-axis re-base parked; %s %.4f)", l6, axis == 0 ? "H" : "V", r);
@@ -667,6 +683,26 @@ if (tile < int(tiles) && g.y < ts) {
 	FallbackCatalog::Decision Monitor::ConventionHoldFallback() const
 	{
 		return FallbackCatalog::SourceResolutionHeld(ConventionNote());
+	}
+
+	bool Monitor::ConventionHoldChanged(FallbackCatalog::Decision& out)
+	{
+		HoldKey k;
+		k.original = OriginalPathway();
+		k.kind = conventionHeldKind.load(std::memory_order_acquire);
+		k.h = conventionHeldH.load(std::memory_order_acquire);
+		k.v = conventionHeldV.load(std::memory_order_acquire);
+		k.axis = singleAxisHeldAxis.load(std::memory_order_acquire);
+		k.ratio = singleAxisHeldRatio.load(std::memory_order_acquire);
+		k.rasterW = conventionRasterW.load(std::memory_order_acquire);
+		k.rasterH = conventionRasterH.load(std::memory_order_acquire);
+		k.mask = geometryDetectMask.load(std::memory_order_acquire);
+		if (seenHoldValid && k == seenHold)
+			return false;   // the note's text is built only on a change (audit LOW-1)
+		seenHold = k;
+		seenHoldValid = true;
+		out = ConventionHoldFallback();
+		return true;
 	}
 
 	FallbackCatalog::Decision Monitor::SourceIdGateFallback() const
