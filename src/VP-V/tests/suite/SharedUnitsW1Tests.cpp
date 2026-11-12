@@ -18,7 +18,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
@@ -709,7 +711,17 @@ namespace SharedUnitsW1TestsNs2
 				std::ifstream in(root + f, std::ios::binary);
 				Assert::IsTrue(in.good());
 				const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-				Assert::IsTrue(text.find(".bitrateQuality") == std::string::npos);
+				// Reads only: every ".bitrateQuality" must be a plain assignment (WRITE) to a consumer Params struct
+				// ("p.bitrateQuality = quality;" hands the shared view's value to DetailPulse/TextureRestore); any other use is a read of the snapshot field.
+				for (size_t at = text.find(".bitrateQuality"); at != std::string::npos; at = text.find(".bitrateQuality", at + 1))
+				{
+					const bool paramsReceiver = at >= 1 && text[at - 1] == 'p' && (at < 2 || !(std::isalnum(static_cast<unsigned char>(text[at - 2])) || text[at - 2] == '_'));
+					size_t after = at + std::strlen(".bitrateQuality");
+					while (after < text.size() && (text[after] == ' ' || text[after] == '\t'))
+						++after;
+					const bool plainAssignment = after + 1 < text.size() && text[after] == '=' && text[after + 1] != '=';
+					Assert::IsTrue(paramsReceiver && plainAssignment, L"a direct READ of the snapshot quality field (only writes to a Params struct are allowed)");
+				}
 				for (size_t at = text.find("sourceMonitor.SharedQuality("); at != std::string::npos; at = text.find("sourceMonitor.SharedQuality(", at + 1))
 					++sharedReads;
 			}
