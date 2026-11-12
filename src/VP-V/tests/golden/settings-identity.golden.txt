@@ -14157,6 +14157,54 @@ fp live=g3 restart=g3
 + deband=0
 + sigmoid=0
 + profileValues=
+### optical_flow_on_demand=auto
+fp live=g3 restart=g3
++ rule=
++ peakDetection=0
++ hasContrastRecovery=0
++ contrastRecovery=0
++ upscaler=auto
++ downscaler=auto
++ debandStrength=auto
++ deband=0
++ sigmoid=0
++ profileValues=
+### optical_flow_on_demand=on
+fp live=g3 restart=g3
++ rule=
++ peakDetection=0
++ hasContrastRecovery=0
++ contrastRecovery=0
++ upscaler=auto
++ downscaler=auto
++ debandStrength=auto
++ deband=0
++ sigmoid=0
++ profileValues=
+### optical_flow_on_demand=off
+fp live=g3 restart=g3
++ rule=
++ peakDetection=0
++ hasContrastRecovery=0
++ contrastRecovery=0
++ upscaler=auto
++ downscaler=auto
++ debandStrength=auto
++ deband=0
++ sigmoid=0
++ profileValues=
+### optical_flow_on_demand=zzz_invalid
+fp live=g3 restart=g3
++ rule=
++ peakDetection=0
++ hasContrastRecovery=0
++ contrastRecovery=0
++ upscaler=auto
++ downscaler=auto
++ debandStrength=auto
++ deband=0
++ sigmoid=0
++ profileValues=
 ### output_diagnostics=on
 fp live=g3 restart=g3
 + rule=

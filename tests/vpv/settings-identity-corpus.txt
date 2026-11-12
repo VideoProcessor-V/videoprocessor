@@ -12468,6 +12468,42 @@ optical_flow_global_fallback: zzz_invalid
 [vpv]
 optical_flow_global_fallback: zzz_invalid
 
+### optical_flow_on_demand=auto
+[general]
+persist_profile_selection: false
+[vprenderer.Default]
+quality: high
+optical_flow_on_demand: auto
+[vpv]
+optical_flow_on_demand: auto
+
+### optical_flow_on_demand=on
+[general]
+persist_profile_selection: false
+[vprenderer.Default]
+quality: high
+optical_flow_on_demand: on
+[vpv]
+optical_flow_on_demand: on
+
+### optical_flow_on_demand=off
+[general]
+persist_profile_selection: false
+[vprenderer.Default]
+quality: high
+optical_flow_on_demand: off
+[vpv]
+optical_flow_on_demand: off
+
+### optical_flow_on_demand=zzz_invalid
+[general]
+persist_profile_selection: false
+[vprenderer.Default]
+quality: high
+optical_flow_on_demand: zzz_invalid
+[vpv]
+optical_flow_on_demand: zzz_invalid
+
 ### output_diagnostics=on
 [general]
 persist_profile_selection: false
