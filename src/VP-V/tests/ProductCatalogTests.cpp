@@ -661,6 +661,9 @@ namespace ProductCatalogTestsNs
 				case FlagKind::NotRead:
 					Assert::Fail(L"NotRead is a consumer-row flag");
 					break;
+				case FlagKind::DeclaredNotAllocated:
+					Assert::Fail(L"DeclaredNotAllocated is a reserve-row flag (core/ReserveRows.h), not a product flag");
+					break;
 				}
 			}
 			// The exact set (a new unread declaration must add its flag here AND in ProductFlags()).

@@ -355,3 +355,5 @@ Tests: `src/VP-V/tests/LaneProductsTests.cpp`.
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
 <!-- vpv-settings-tests:end -->
+
+`SourceRingPin.h` (P13-DECL, C++14, header only): the PIN interface (`IFramePin`), the no-op host that refuses visibly ("source ring not bound"), and `FramePinBook`, the bookkeeping of at most 3 pinned source sequences inside the derived window [N - back, N + lead] (`back`/`lead` are passed in, never constants). The S7 queue facts Flush / Discontinuity / FormatChange / Reset invalidate every pin. Declaration only: nothing in the renderer calls it and it holds no frames (contract: `core/RingContract.h`; tests: `SourceRingPinTests.cpp`).

@@ -41,6 +41,13 @@
 //                    lane polls it before reuse; CPU products pass 0: the state is the flag, N4).
 //   Ack      lane    a lane-owned Rejected/Live/Released slot returns at Publish failure or Abandon.
 //
+// Keyed windows (P13-DECL, core/RingContract.h; COMMENT ONLY, no code here changes): the slot of frame `seq` is seq mod ring, and ring is
+// whatever BuildGraph derived (history from the readers' lag, L from the sealed laneLead). A keyed ring whose window is BACK + 1 + LEAD with
+// BACK and LEAD derived therefore needs no second addressing scheme: the window is the (history, L) pair BuildGraph already sizes the ring
+// for, and a key maps to its slot by the same modulus. A key OUTSIDE the window shares its slot with a newer frame (seq + ring), so the
+// slot's own seq stamp (not the modulus) says whether the frame is still there. A PIN beyond the window needs extra slots the modulus
+// cannot provide; that is the TD round's BuildGraph work, declared (not built) by RingContract.h.
+//
 // Threading: one lane producer thread per product (the lane side), one render thread (the render
 // side). Lane jobs reading another product pin that slot (PinRef): its own lane cannot write the
 // reclaimed slot (Writable) and the render does not reuse its live buffer under the reader.
