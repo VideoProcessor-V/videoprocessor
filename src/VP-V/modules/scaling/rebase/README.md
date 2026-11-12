@@ -233,6 +233,7 @@ A re-base to a new plane size uses shader variants libplacebo has never compiled
 - `Job` and `Submit` (GPU worker body and its submission, on the generic `NlsPipelinePreparation` worker): a CPU snapshot of the live source and target frames and render parameters; the worker owns a private D3D11 device, runs `SourceRebase::Module::Apply` (main and crossfade slots) with the live plane sizes, the candidate factors and the identified kernel, then renders the re-based planes to the live target. Only libplacebo's thread-safe `pl_cache` is shared, so the renderer's first real use hits the cache.
 - The candidate plane sizes are derived from the source (`SourceRebase::Scaled` of the live textures and the factors); nothing is hard-coded.
 - With source_resolution off or native, a paused or temporal re-base, or the Original pathway, the gate is not consulted: behaviour is unchanged.
+- Original pathway (refs/113 F2, PHASE 2): the host's per-frame call is gated in Original, so a warm-up announced on the VP-V pathway would otherwise keep "Preparing shaders..." and its fallback entry until Stop. The settings seam entering Original calls `Controller::EnterOriginalPathway()` (CoreSegments.inl UpdatePipelineSlots): pending off, the entry released once, the factors in force forgotten; back on the VP-V pathway the candidate is evaluated afresh. CPU test: `tests/suite/OriginalPathwaySiteGateTests.cpp`.
 
 ### Settings (doc 70 section 3 table; the warm-up has no key)
 

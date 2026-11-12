@@ -6,8 +6,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 // The ONE slot registry the renderer consults (barrier R2): which slots run (slot-level switches
@@ -37,6 +39,19 @@ namespace PipelineSlots
 			return false;
 		}
 	}
+
+	// A bool fact readable from any thread (relaxed atomic) that stays copyable, so a class holding it keeps its
+	// implicit copies (refs/113 F3; ph2 audit finding 1). Copy = relaxed load + relaxed store; self-assignment is harmless.
+	struct RelaxedFlag
+	{
+		RelaxedFlag() = default;
+		RelaxedFlag(const RelaxedFlag& other) : value(other.Load()) {}
+		RelaxedFlag& operator=(const RelaxedFlag& other) { Store(other.Load()); return *this; }
+		bool Load() const { return value.load(std::memory_order_relaxed); }
+		void Store(bool on) { value.store(on, std::memory_order_relaxed); }
+	private:
+		std::atomic<bool> value{ false };
+	};
 
 	// Slot-level enable/disable, which slots have a component, the order, and the Original
 	// pathway mode. Defaults: every slot with a component is enabled (its own settings still
@@ -82,9 +97,10 @@ namespace PipelineSlots
 				upstreamForm[i] = info.origin != Origin::Vp;
 			}
 			ResetOrder();
-			original = true;
+			original.Store(true);
 		}
-		bool OriginalPathway() const { return original; }
+		// Any thread (relaxed; see `original`): the Original gates in the host and the modules read this.
+		bool OriginalPathway() const { return original.Load(); }
 		bool UpstreamForm(Id id) const { return upstreamForm[static_cast<size_t>(id)]; }
 
 		// ---- the order (ADR-0021) ----
@@ -247,8 +263,17 @@ namespace PipelineSlots
 		std::array<bool, kCount> upstreamForm{};
 		std::array<int, kCount> rank{};
 		std::vector<Id> order;
-		bool original = false;
+		// refs/113 F3: `original` is read OFF the render thread (the conversion loop gates the frame-analysis arrival on
+		// OriginalPathway()) while the render thread replaces the whole registry at the settings seam (`pipelineSlots =
+		// next;`), so that one fact is a relaxed atomic (nothing is published through it; C++14). The copyable wrapper keeps
+		// the Registry's IMPLICIT copy constructor / assignment, so every member is copied, now and in future (ph2 audit
+		// finding 1: hand-written copies had dropped entranceOnce). Every other field is read on the render thread only.
+		RelaxedFlag original;
 		mutable std::vector<Id> entrance;
 		mutable bool entranceDirty = true;
 	};
+
+	// ph2 audit finding 1: the seam copies the registry wholesale (`pipelineSlots = next;`); the implicit copies must exist.
+	static_assert(std::is_copy_constructible<Registry>::value, "PipelineSlots::Registry must stay copy-constructible");
+	static_assert(std::is_copy_assignable<Registry>::value, "PipelineSlots::Registry must stay copy-assignable");
 }

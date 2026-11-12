@@ -324,6 +324,22 @@ namespace VpRebaseWarmup
 		// Joins the worker; before the shared cache or this DLL goes away.
 		void Stop() { worker.Stop(); }
 
+		// The settings seam ENTERING the Original pathway (refs/113 F2; owner E3: the host's per-frame call is gated in
+		// Original, so a warm-up in flight at the switch would otherwise keep `pending`, the "Preparing shaders..." status
+		// and the fallback entry until Stop()). Ends the announcement like an idle frame (pending off, the gate told the
+		// re-base is no longer wanted, the fallback entry released when it was engaged) and forgets the factors in force:
+		// once the VP-V pathway resumes, the next Frame evaluates its candidate afresh (a job the worker already took is
+		// kept; a later Ready still wins). Render thread (renderMutex held), like Frame. Idempotent.
+		Outcome EnterOriginalPathway()
+		{
+			Outcome out;
+			pending.store(false, std::memory_order_release);
+			// Idle() skips the gate when !engaged (ph2 audit 3), safely: every gate wait (pending, announced, epoch, retry) comes with a non-empty status (RebaseWarmup.h:131-194) and any non-empty status engages the entry (Publish, RebaseWarmupJob.h:393-396); empty = the Ready path, which clears announced and the epoch (RebaseWarmup.h:104-118).
+			Idle(out);
+			inForce.Clear();
+			return out;
+		}
+
 	private:
 		struct KeyInfo
 		{
