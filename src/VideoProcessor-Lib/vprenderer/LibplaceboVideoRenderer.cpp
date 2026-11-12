@@ -24613,8 +24613,7 @@ releaseDriftBaseRetention =
             renderParams.hooks = nullptr;
             renderParams.num_hooks = 0;
         }
-        ReportRenderErrors();   // VPV-HOOK P4-4: defined in VP-V/segments/CoreSegments.inl
-        dynamicDrive.CollectMeasurements();   // VPV-HOOK P4-4: Dynamic Drive, stats out: finished measurements (a few frames old; never waits)
+        if (!pipelineSlots.OriginalPathway()) { ReportRenderErrors(); dynamicDrive.CollectMeasurements(); }   // VPV-HOOK P4-4: after-render reports (CoreSegments.inl), then Dynamic Drive stats out (finished measurements, a few frames old; never waits); nothing in Original
         RendererExtension::NotifyAfterRender(this, sourceSequence, frameGeneration, static_cast<int>(hookRender.errors), hookRender.retried ? 1 : 0, rendered); // VPV-HOOK
         if (hookRender.retried)
             DebugLog::Log("VP anamorphic hook recovery: schema=1 sequence=%llu generation=%llu hook=%llu errors=0x%x retry=1 rendered=%d lens=%.6f latch=until_shader_selection_change",
