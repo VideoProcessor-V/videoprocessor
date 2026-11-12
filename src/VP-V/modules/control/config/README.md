@@ -453,6 +453,10 @@ Bill's editor file only gets call sites; the logic is here (header-only):
   `runLoadMigrations` (Bill's calls plus the VPV-HOOK line) stays in the .cpp; `testLoadMigrationsMoved` (`tests/VpvConfigTests.cpp`) covers the moved steps.
 - `editor/ApplyEffects.h` (P9 row d): `setRemoteApplyBusy`, moved byte for byte. Both headers are included by
   `ConfigEditorWindow.cpp` only (through `VpvRenderingDefaults.h`); the definitions are not inline.
+  Single-TU contract (`editor/Helpers.h`, `Migrations.h`, `ApplyEffects.h`): they hold non-inline member and
+  function definitions, so a second translation unit that includes them (directly or through
+  `VpvRenderingDefaults.h`) fails to link with duplicate definitions (LNK2005). Tests drive the editor through
+  the public class, not by including these headers.
 - Page lookups are by name (`ConfigEditorWindow::pageIndex`, `selectPage(QString)`): Bill's pages
   keep his order and numbers (0-22); Dynamic Drive, Calibration and VP-V follow them (23-25).
   In the navigation list the VP-V leaf closes Bill's list and has child leaves (Dynamic Drive,

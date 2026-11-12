@@ -1730,6 +1730,32 @@ namespace
 		require(inputAt >= 0 && saved.indexOf("video_conversion: auto") > inputAt,
 			(std::string("the input policy key did not move to [vprenderer.input_processing]: ") + saved.toStdString()).c_str());
 	}
+
+	// migrateRefreshKeys (moved to editor/Migrations.h) rewrites a saved integer refresh key that stands for a 1000/1001
+	// rate (59 -> 59.94, 23 -> 23.976) in [ppm_correction] and [display_refresh_rate_override], leaves a whole rate
+	// (60) alone, and drops the old key when its migrated spelling is already there (the explicit entry wins).
+	void testRefreshKeyMigrationMoved()
+	{
+		QTemporaryDir dir;
+		const char* text = "[general]\nrenderer: VP Renderer\n[ppm_correction]\n59: 12\n60: 3\n"
+			"[display_refresh_rate_override]\n23: 24\n29: 30\n29.97: 31\n";
+		const QString path = WriteFixture(dir, text);
+		{
+			ConfigEditorWindow window(path, 0, true);
+			save(window);
+		}
+		QFile file(path);
+		require(file.open(QIODevice::ReadOnly), "cannot read the migrated file");
+		const QByteArray saved = file.readAll().replace("\r\n", "\n");
+		const std::string shown = std::string(": ") + saved.toStdString();
+		require(saved.contains("59.94: 12") && !saved.contains("\n59: "),
+			("the ppm_correction key 59 was not rewritten as 59.94" + shown).c_str());
+		require(saved.contains("\n60: 3"), ("the whole-rate key 60 was changed" + shown).c_str());
+		require(saved.contains("23.976: 24") && !saved.contains("\n23: "),
+			("the override key 23 was not rewritten as 23.976" + shown).c_str());
+		require(saved.contains("29.97: 31") && !saved.contains("\n29: "),
+			("the old key 29 was not dropped in favour of the explicit 29.97" + shown).c_str());
+	}
 }
 
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -1763,5 +1789,6 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: Profile use card and the sync directions", testProfileUseAndSyncDirections);
 	failures += run("VP-V: queue rows on the VP-V card, look-ahead Auto kept", testQueueRowsOnTheVpvCard);
 	failures += run("VP-V: the moved load-time migrations still apply", testLoadMigrationsMoved);
+	failures += run("VP-V: the moved refresh-key migration rewrites the NTSC band keys", testRefreshKeyMigrationMoved);
 	return failures;
 }
