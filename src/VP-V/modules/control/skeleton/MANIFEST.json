@@ -12,6 +12,7 @@
     "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
     "src/VP-V/modules/control/skeleton/SkeletonSettings.h",
     "src/VP-V/modules/control/skeleton/SkeletonFacts.h",
+    "src/VP-V/modules/control/skeleton/SceneRecordReader.h",
     "src/VP-V/modules/control/skeleton/PlTexBackend.h",
     "src/VP-V/modules/control/skeleton/GpuProductTexBackend.h",
     "src/VP-V/core/GpuAllocator.h",

@@ -305,5 +305,13 @@ namespace VpFrameAnalysis
 			const auto it = r.stores.find(owner);
 			return it == r.stores.end() ? nullptr : it->second;
 		}
+		// The store of the ONE registered owner, for a reader that has no renderer key (the content-intent observers, which the walk
+		// calls with a source sequence only). Null when none or more than one owner is registered: an ambiguous key is never guessed.
+		inline FrameAnalysis::Store* SingleStore()
+		{
+			Registry& r = Reg();
+			std::lock_guard<std::mutex> lock(r.mutex);
+			return r.stores.size() == 1 ? r.stores.begin()->second : nullptr;
+		}
 	}
 }

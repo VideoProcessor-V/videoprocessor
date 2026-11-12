@@ -290,6 +290,9 @@ struct ContentIntentStatus
     float panPictureHeightsPerSecond = 0.0f;    // mean pan speed over the window
     float widePanShare = 0.0f;                  // share of moving frames with a wide pan
     float windowSeconds = 0.0f;                 // seconds of statistics behind the candidate
+    // Cut source (row 2): pairs judged from the Scene record / by the private rule (the visible step down when no record was readable).
+    uint32_t sceneRecordPairs = 0;
+    uint32_t privateCutPairs = 0;
     char reason[64] = {};                       // the rule that gave the candidate
 };
 

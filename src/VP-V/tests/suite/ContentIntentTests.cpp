@@ -7,6 +7,7 @@
 #include <ConfigFile.h>
 #include <ContentClassifier.h>
 #include <ContentIntentObserver.h>
+#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <IntentDescriptor.h>
 #include <MainConfigSchema.h>
 #include <RendererProfileConfig.h>
@@ -342,6 +343,164 @@ namespace Tests
             Assert::AreEqual(108, built.height);
             Assert::AreEqual(3840.0 / 1880.0, built.pictureAspect, 1e-9);
             Assert::IsFalse(BuildGrid([](int, int, uint16_t&) { return true; }, 0, 0, 4, 4, built));
+        }
+
+        // ---- row 2: the cut comes from the Scene record; record absent = the previous behaviour ----------------------------
+
+        // The shared judge's verdict for a pair of grids (what the skeleton publishes in the Scene record): the same P4 record
+        // the lane builds (SourceStats::ComputeRecord over the 16-bit half plane) through CutFadeJudge::ClassifyEvents.
+        static bool JudgeCut(const LumaGrid& a, const LumaGrid& b)
+        {
+            auto record = [](const LumaGrid& g)
+            {
+                std::vector<uint16_t> plane(g.luma.size());
+                for (size_t i = 0; i < plane.size(); ++i) plane[i] = static_cast<uint16_t>(g.luma[i] << 6);
+                std::vector<uint8_t> bytes(VpUnit::SourceStats::kRecordBytes, 0);
+                VpUnit::SourceStats::Record r;
+                Assert::IsTrue(VpUnit::SourceStats::ComputeRecord(plane.data(), static_cast<uint32_t>(g.width),
+                    static_cast<uint32_t>(g.height), bytes.data(), bytes.size()));
+                Assert::IsTrue(VpUnit::SourceStats::ReadRecord(bytes.data(), bytes.size(), &r));
+                return r;
+            };
+            return VpUnit::CutFadeJudge::ClassifyEvents(record(a), record(b), false, false).cut;
+        }
+
+        TEST_METHOD(SceneRecordAbsentKeepsThePreviousBehaviour)
+        {
+            const Canvas canvas(600, 108, 7, 100, 500);
+            const Canvas other(600, 108, 99, 600, 900);
+            const LumaGrid a = canvas.Window(100);
+            // Measure: an unknown hint (the default) is the private rule, byte for byte.
+            const LumaGrid pairs[] = { canvas.Window(98), other.Window(100), a, canvas.Window(400) };
+            for (const LumaGrid& b : pairs)
+            {
+                const FrameMeasure before = Measure(a, b);
+                const FrameMeasure after = Measure(a, b, SceneHint());
+                Assert::IsTrue(before.valid == after.valid && before.cut == after.cut && before.held == after.held);
+                Assert::AreEqual(before.histogramDistance, after.histogramDistance, 0.0);
+                Assert::AreEqual(before.meanDiffCodes, after.meanDiffCodes, 0.0);
+                Assert::AreEqual(before.dxHeights, after.dxHeights, 0.0);
+                Assert::IsFalse(after.cutFromScene);
+            }
+            // The observer: no source / a source with no record / the default reader with no store registered all give the
+            // same status as each other, and every pair is counted as the private rule.
+            auto run = [&](int mode)
+            {
+                Observer observer;
+                observer.Configure(true, 5.0);
+                if (mode == 0) observer.SetSceneCutSource(SceneCutFn());
+                if (mode == 1) observer.SetSceneCutSource([](uint64_t, bool&) { return false; });
+                const FrameContext context = Context(50.0, 50.0, SourceClass::Legacy);
+                uint64_t sequence = 0;
+                Feed(observer, canvas, sequence, 0, 400, 1, context);
+                Feed(observer, other, sequence, 0, 100, 1, context);
+                return observer.Status();
+            };
+            const ContentIntentStatus none = run(0), dry = run(1), dflt = run(2);
+            Assert::IsTrue(none.content == dry.content && none.content == dflt.content && none.candidate == dry.candidate);
+            Assert::AreEqual(none.panPictureHeightsPerSecond, dry.panPictureHeightsPerSecond);
+            Assert::AreEqual(0u, none.sceneRecordPairs);
+            Assert::AreEqual(0u, dry.sceneRecordPairs);
+            Assert::AreEqual(0u, dflt.sceneRecordPairs);
+            Assert::IsTrue(none.privateCutPairs > 0 && none.privateCutPairs == dry.privateCutPairs && none.privateCutPairs == dflt.privateCutPairs);
+        }
+
+        TEST_METHOD(SceneRecordSuppliesTheCutAndTheHoldStaysPrivate)
+        {
+            const Canvas canvas(600, 108, 7, 100, 500);
+            const Canvas other(600, 108, 99, 600, 900);
+            const LumaGrid a = canvas.Window(100);
+            SceneHint yes, no;
+            yes.known = yes.cut = true;
+            no.known = true;
+            // The record says cut on a pair the private rule calls a pan; the record says no cut on a real cut.
+            FrameMeasure m = Measure(a, canvas.Window(98), yes);
+            Assert::IsTrue(m.cut && m.cutFromScene && m.valid);
+            Assert::AreEqual(0.0, m.histogramDistance, 0.0, L"the histogram pass is skipped (compute once)");
+            m = Measure(a, other.Window(100), no);
+            Assert::IsTrue(!m.cut && m.cutFromScene);
+            // A hold is still this pass's own judgement (the record has no "held").
+            m = Measure(a, a, no);
+            Assert::IsTrue(m.held && !m.cut && m.cutFromScene);
+            // SceneUse asks only for the record's own pair, and counts both sources.
+            SceneUse use;
+            bool asked = false;
+            const SceneCutFn read = [&asked](uint64_t, bool& cut) { asked = true; cut = true; return true; };
+            Assert::IsFalse(use.Ask(read, 10, false).known, L"a sequence gap is not the record's pair");
+            Assert::IsFalse(asked);
+            Assert::IsTrue(use.Ask(read, 10, true).known && asked);
+            use.Note(Measure(a, canvas.Window(98), yes));
+            use.Note(Measure(a, canvas.Window(98)));
+            use.Note(Measure(LumaGrid(), a));   // no pair: not counted
+            Assert::AreEqual(uint64_t(1), use.fromRecord);
+            Assert::AreEqual(uint64_t(1), use.privateRule);
+            // The observer end to end: the reader decides the cut (a cut on every 20th frame), counted as from the record.
+            Observer observer;
+            observer.Configure(true, 5.0);
+            observer.SetSceneCutSource([](uint64_t seq, bool& cut) { cut = (seq % 20) == 0; return true; });
+            const FrameContext context = Context(50.0, 50.0, SourceClass::Legacy);
+            uint64_t sequence = 0;
+            Feed(observer, canvas, sequence, 0, 100, 1, context);
+            const ContentIntentStatus status = observer.Status();
+            Assert::IsTrue(status.sceneRecordPairs >= 98u && status.privateCutPairs == 0u);
+            Assert::IsTrue(observer.Descriptor().shotSequence >= 80u, L"the record's cuts reach the descriptor's shots");
+        }
+
+        TEST_METHOD(SceneRecordAgreesWithThePrivateRuleOnTheClipSet)
+        {
+            // Before/after: the private rule (before) against the shared judge's verdict (after, the Scene record) on synthetic
+            // scenarios; the unambiguous ones must agree, the rest are listed in the test output.
+            const Canvas canvas(600, 108, 7, 100, 500);
+            const Canvas other(600, 108, 99, 600, 900);
+            const LumaGrid a = canvas.Window(100);
+            auto blend = [](const LumaGrid& x, const LumaGrid& y, int percent)
+            {
+                LumaGrid g = x;
+                for (size_t i = 0; i < g.luma.size(); ++i)
+                    g.luma[i] = static_cast<uint16_t>((x.luma[i] * (100 - percent) + y.luma[i] * percent) / 100);
+                return g;
+            };
+            auto brighter = [](const LumaGrid& x, int codes)
+            {
+                LumaGrid g = x;
+                for (uint16_t& v : g.luma) v = static_cast<uint16_t>(v + codes > 1023 ? 1023 : v + codes);
+                return g;
+            };
+            struct Scenario { const wchar_t* name; LumaGrid next; bool mustAgree; };
+            const Scenario scenarios[] = {
+                { L"hard cut", other.Window(100), true },
+                { L"pan 1 cell", canvas.Window(99), true },
+                { L"pan 8 cells", canvas.Window(92), true },
+                { L"hold", a, true },
+                { L"same picture, other part", canvas.Window(400), true },
+                { L"dissolve 25%", blend(a, other.Window(100), 25), false },
+                { L"dissolve 50%", blend(a, other.Window(100), 50), false },
+                { L"dissolve 75%", blend(a, other.Window(100), 75), false },
+                { L"flash +300 codes", brighter(a, 300), false },
+                { L"fade step +30 codes", brighter(a, 30), false } };
+            int agree = 0, differ = 0;
+            std::wstring listing;
+            for (const Scenario& s : scenarios)
+            {
+                const bool before = Measure(a, s.next).cut;
+                const bool after = JudgeCut(a, s.next);
+                if (before == after) ++agree;
+                else
+                {
+                    ++differ;
+                    listing += std::wstring(L"  differs: ") + s.name + L" private=" + (before ? L"cut" : L"no") +
+                        L" record=" + (after ? L"cut" : L"no") + L"\n";
+                }
+                if (s.mustAgree)
+                    Assert::IsTrue(before == after, (std::wstring(L"unambiguous scenario disagrees: ") + s.name).c_str());
+            }
+            Logger::WriteMessage((L"row 2 before/after cut decisions: agree=" + std::to_wstring(agree) + L" differ=" +
+                std::to_wstring(differ) + L"\n" + listing).c_str());
+            // Cost: the record path skips the 16-bin histogram pass of both grids.
+            SceneHint hint;
+            hint.known = true;
+            Assert::AreEqual(0.0, Measure(a, other.Window(100), hint).histogramDistance, 0.0);
+            Assert::IsTrue(Measure(a, other.Window(100)).histogramDistance > 0.0);
         }
 
         TEST_METHOD(ObserverClassifiesPansByTheMeasuredClassNotTheRate)
