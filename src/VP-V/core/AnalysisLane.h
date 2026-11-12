@@ -613,6 +613,9 @@ public:
             ApplyRegulator(*st);
         }
     }
+    // Registered producers (tests / diagnostics): how many, and whether this exact object is one of them. Read-only; no behaviour reads them.
+    size_t ProducerCount() const { return producers_.size(); }
+    bool HasProducer(const ILaneProducer* p) const { return std::find(producers_.begin(), producers_.end(), p) != producers_.end(); }
     // LaneWorkerThreads tells the lane whether its threads run (setup-order assertion only).
     void SetWorkersRunning(bool running) { workersRunning_.store(running ? 1 : 0, std::memory_order_release); }
     void SetGpuDispatcher(IGpuDispatcher* d) { dispatcher_ = d; }

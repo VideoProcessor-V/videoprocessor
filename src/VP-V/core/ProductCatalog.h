@@ -524,7 +524,8 @@ inline TierBytes VramByTier(const Graph& g)
 //   ViewIsActual   : the declared input is read through another VIEW of the data (named in the note), not the declared product itself
 //   ExternalView   : a read the code does today through an external accessor and the declaration does NOT carry (shown, not declared)
 //   Reserved       : the product is declared and has no producer (no lane job, no live fill); every reader finds it absent (visible)
-enum class FlagKind : uint8_t { NotYetConsumed, NotRead, ViewIsActual, ExternalView, Reserved };
+//   DeclaredNotAllocated : P13-DECL (core/ReserveRows.h): a VRAM reservation row; bytes are shown, none are taken (TD round allocates)
+enum class FlagKind : uint8_t { NotYetConsumed, NotRead, ViewIsActual, ExternalView, Reserved, DeclaredNotAllocated };
 
 inline const char* Token(FlagKind k)
 {
@@ -534,6 +535,7 @@ inline const char* Token(FlagKind k)
     case FlagKind::ViewIsActual: return "actual input is a view";
     case FlagKind::ExternalView: return "external view (not declared)";
     case FlagKind::Reserved: return "reserved, no producer";
+    case FlagKind::DeclaredNotAllocated: return "reserved, not allocated";
     }
     return "?";
 }
@@ -571,6 +573,11 @@ inline const std::vector<ProductFlag>& ProductFlags()
         // P14g: its producing evaluation takes its pixels from the source-frame tap sink, P5 is the monitor snapshot it declares.
         { kSourceGeometry, kP5MonitorTiles, FlagKind::ViewIsActual, "C9b",
           "pixel evidence = the SourceFrameTap view (modules/input/source_analysis/identity/chain/ChainEstimator.cpp UpdateTap); P5 stays the declared monitor snapshot" },
+        // P15 / P15c (P15-DECL): FrameQuality is read as a VIEW of the P5 monitor tiles (identity/FrameQuality.h), P5 stays the declared snapshot.
+        { kQualityPattern, kP5MonitorTiles, FlagKind::ViewIsActual, "C9b",
+          "actual input = the FrameQuality view of the P5 monitor tiles (modules/input/source_analysis/identity/FrameQuality.h); P5 stays the declared monitor snapshot" },
+        { kQualityPatternCausal, kP5MonitorTiles, FlagKind::ViewIsActual, "C9b",
+          "actual input = the FrameQuality view of the P5 monitor tiles (modules/input/source_analysis/identity/FrameQuality.h); P5 stays the declared monitor snapshot" },
         // D3: P7 reads P2 through IVectorEngine::FlowOf (pair id recorded) and declares only P4 (by design).
         { kP7CameraFit, kP2VectorPair, FlagKind::ExternalView, "C3", "external view: P2 via FlowOf (modules/motion/estimation/global_model/link/CameraExtension.cpp ahead fit); pair id recorded, not a declared input" },
     };

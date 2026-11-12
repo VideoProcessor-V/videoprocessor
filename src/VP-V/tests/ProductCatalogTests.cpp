@@ -661,11 +661,20 @@ namespace ProductCatalogTestsNs
 				case FlagKind::NotRead:
 					Assert::Fail(L"NotRead is a consumer-row flag");
 					break;
+				case FlagKind::DeclaredNotAllocated:
+					Assert::Fail(L"DeclaredNotAllocated is a reserve-row flag (core/ReserveRows.h), not a product flag");
+					break;
 				}
 			}
 			// The exact set (a new unread declaration must add its flag here AND in ProductFlags()).
 			Assert::AreEqual(size_t(3), notYet, L"P2, P2m, P3 declare P1 and read private copies (C9)");
-			Assert::AreEqual(size_t(2), views, L"P10 -> tap view, P14g -> source-frame tap view");
+			Assert::AreEqual(size_t(4), views, L"P10 -> tap view, P14g -> source-frame tap view, P15 / P15c -> FrameQuality view of the P5 tiles (WAIVER-P15DECL-01: 2 + 2)");
+			for (ProductId p : { kQualityPattern, kQualityPatternCausal }) {
+				bool flagged = false;
+				for (const ProductFlag& f : ProductFlags())
+					flagged = flagged || (f.product == p && f.input == kP5MonitorTiles && f.kind == FlagKind::ViewIsActual && std::string(f.note).find("identity/FrameQuality.h") != std::string::npos);
+				Assert::IsTrue(flagged, L"P15 / P15c carry the ViewIsActual flag that names identity/FrameQuality.h");
+			}
 			Assert::AreEqual(size_t(1), ext, L"P7 reads P2 via FlowOf");
 			Assert::AreEqual(size_t(1), reserved, L"P10c has no producer");
 

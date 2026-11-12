@@ -372,3 +372,5 @@ The P15/P15c layout reserve is declared by QualityPatternRecord.h (r2/p15-decl-b
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
 <!-- vpv-settings-tests:end -->
+
+`SourceRingPin.h` (P13-DECL, C++14, header only): the PIN interface (`IFramePin`), the no-op host that refuses visibly ("source ring not bound"), and `FramePinBook`, the bookkeeping of at most 3 pinned source sequences inside the derived window [N - back, N + lead] (`back`/`lead` are passed in, never constants). The S7 queue facts Flush / Discontinuity / FormatChange invalidate every pin (a reset is reported by its producer as Discontinuity; refs/110 :33-43, 99c A3 item 5). The reduced tier's "4 frames + 3 pins, luma only" reserve (`core/ReserveRows.h`) is a lane choice and a sizing ceiling, not a depth constant; confirmed by the TD round-3 measurement (99c A3 item 2). Declaration only: nothing in the renderer calls it and it holds no frames (contract: `core/RingContract.h`; tests: `SourceRingPinTests.cpp`).

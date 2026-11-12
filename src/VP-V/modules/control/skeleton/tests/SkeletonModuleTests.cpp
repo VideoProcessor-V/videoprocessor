@@ -527,6 +527,18 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Lines), "skeleton=analysis lane on: waiting"));
 		}
 
+		// P13-DECL: the reserve rows come from the planning size, so a status refresh with no bundle and no lane still prints them.
+		TEST_METHOD(TheReserveLinesAreShownWithoutABundleOrALane)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("shadow");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			Assert::IsNull(rig.sk.LaneOf(rig.Host()), L"no lane");
+			const std::string text = rig.Command();
+			Assert::IsTrue(text.find("Skeleton reserve, full-budget tier (reserved, not allocated") != std::string::npos);
+			Assert::IsTrue(text.find("Skeleton reserve, reduced-budget tier (reserved, not allocated") != std::string::npos);
+		}
+
 		TEST_METHOD(WithoutSourceFramesTheLaneSaysSo)
 		{
 			Rig rig(Lane("on"));
@@ -607,6 +619,52 @@ namespace SkeletonModuleTestsNs
 			Assert::AreEqual<size_t>(1, lines.size());
 			Assert::IsTrue(lines[0].find("skeleton=analysis lane on 64x48") == 0);
 			Assert::IsTrue(rig.Command().find("graph configure") != std::string::npos);
+		}
+
+		// P15-DECL: a test frame-role producer (never selected by a graph without a consumer; it only has to be a registered object).
+		struct QpTestProducer : VpSkeleton::ILaneProducer
+		{
+			VpSkeleton::ProductId id;
+			explicit QpTestProducer(VpSkeleton::ProductId p) : id(p) {}
+			VpSkeleton::ProductId Product() const override { return id; }
+			bool Begin(const VpSkeleton::LaneJobContext&) override { return false; }
+			VpSkeleton::ChunkResult RunChunk(const VpSkeleton::LaneJobContext&, uint32_t) override { return VpSkeleton::ChunkResult::Failed; }
+		};
+
+		TEST_METHOD(TheFrameRolePluginSlotIsInertWithoutAProducer)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 4; ++s)
+				rig.Frame(s);
+			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+			Assert::IsNotNull(lane);
+			// no producer set: the lane holds exactly the producers it always had (P1 and P4 here; the GPU jobs need a device), byte-identical
+			Assert::AreEqual<size_t>(2, lane->ProducerCount());
+			Assert::IsTrue(rig.sk.WorkersRunning(rig.Host()));
+		}
+
+		TEST_METHOD(AFrameRoleProducerIsRegisteredOncePerLaneBeforeTheThreadsStart)
+		{
+			QpTestProducer p15(VpSkeleton::kQualityPattern), p15c(VpSkeleton::kQualityPatternCausal);
+			Rig rig(Lane("on"));
+			rig.sk.SetQualityPatternProducers(&p15, &p15c);
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 4; ++s)
+				rig.Frame(s);
+			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+			Assert::IsNotNull(lane);
+			Assert::AreEqual<size_t>(4, lane->ProducerCount(), L"p1, p4 and the two frame-role producers, each exactly once");
+			Assert::IsTrue(lane->HasProducer(&p15) && lane->HasProducer(&p15c));
+			Assert::IsTrue(rig.sk.WorkersRunning(rig.Host()), L"the threads started after the registration (RegisterProducer asserts otherwise)");
+			// more frames and a reconfigure do not register them again
+			for (int64_t s = 5; s <= 8; ++s)
+				rig.Frame(s);
+			Assert::AreEqual<size_t>(4, rig.sk.LaneOf(rig.Host())->ProducerCount());
+			// a null second slot is allowed
+			rig.sk.SetQualityPatternProducers(nullptr, nullptr);
 		}
 
 		TEST_METHOD(AnAheadResultIsTheSameBytesAsTheLiveForm)
@@ -993,6 +1051,9 @@ namespace SkeletonModuleTestsNs
 			rig.Frame(4);
 			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue"), L"all three delivered: nothing unwired to show");
 			Assert::IsTrue(rig.Command().find("render-ahead 3, lane lead 6, look-ahead walk 4; queued ahead of output 9 frame(s)") != std::string::npos);
+			// P13-DECL: the VRAM reserve is shown per budget tier as "reserved, not allocated" (shown, none taken).
+			Assert::IsTrue(rig.Command().find("Skeleton reserve, full-budget tier (reserved, not allocated") != std::string::npos);
+			Assert::IsTrue(rig.Command().find("Skeleton reserve, reduced-budget tier (reserved, not allocated") != std::string::npos);
 			const VpSkeleton::GraphSettings gs = rig.sk.LaneOf(rig.Host())->State()->graph.settings;
 			Assert::AreEqual(3, int(gs.renderAhead));
 			Assert::AreEqual(6, int(gs.laneLead));
