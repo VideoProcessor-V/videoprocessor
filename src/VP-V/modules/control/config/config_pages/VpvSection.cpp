@@ -2204,7 +2204,7 @@ namespace Vpv
 			// and the reply reading go to Advanced (with their own help lines).
 			CardBox linkTiming = MakeCard(ObjectName(QStringLiteral("drive.card.link_timing")), QStringLiteral("Projector link: timing and replies"),
 				QStringLiteral("How long the projector takes to answer a command, and whether VP reads its replies. "
-					"The defaults match the FL35."), false);
+					"The defaults suit the projector."), false);
 			QFormLayout* timingForm = linkTiming.Form();
 			{
 				QString projectorPrefix = prefix;

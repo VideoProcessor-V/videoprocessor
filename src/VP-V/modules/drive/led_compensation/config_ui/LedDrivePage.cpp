@@ -413,7 +413,7 @@ QWidget* LedDriveBuilder::createLedDrivePage()
     driveForm->addRow(QStringLiteral("Projector gamma"), projectorGamma);
     driveForm->addRow(QString(), helpLabel(QStringLiteral(
         "Projector gamma is how the projector turns the final signal into light; Compensate needs it to keep the "
-        "picture's brightness exact while the LED dims. 2.41 is the FL35's light-meter measurement; change it "
+        "picture's brightness exact while the LED dims. 2.41 is a light-meter measurement of the projector; change it "
         "only if a new measurement says otherwise. It does not change the gamma boost.\n"
         "The gamma boost applies even with Dynamic Drive off. Switching Dynamic Drive on or off returns the "
         "projector to full light; other changes carry on from the current level.")));
@@ -1073,7 +1073,7 @@ QWidget* LedDriveBuilder::createLedDrivePage()
     kit_.addCard(cards, speedsBox);
     QWidget* advancedHolder = projectorCards_.WrapAdvanced(advancedProjector);
     QWidget* advancedBox = createCard(QStringLiteral("Advanced projector"),
-        QStringLiteral("Serial details for other projectors; the defaults match the FL35."), advancedHolder);
+        QStringLiteral("Serial details for other projectors; the defaults suit the projector."), advancedHolder);
     kit_.addCard(cards, advancedBox);
     QWidget* advancedLedBox = createCard(QStringLiteral("Advanced LED"),
         QStringLiteral("The script's tables and the remaining LED details; the defaults are your script's."), advancedLedHolder);
