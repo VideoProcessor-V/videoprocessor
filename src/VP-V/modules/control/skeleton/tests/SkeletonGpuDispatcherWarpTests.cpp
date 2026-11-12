@@ -8,12 +8,14 @@
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/core/ProductGraph.h>
+#include <VP-V/modules/control/skeleton/gpu/GpuProductCost.h>
 #include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuProducts.h>
 
 #include <libplacebo/dispatch.h>
 #include <libplacebo/shaders/custom.h>
 
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -330,6 +332,7 @@ namespace VideoProcessorTest
 			for (uint32_t i = 0; i < steps; ++i)
 				Assert::IsTrue(disp.Dispatch(job, i, steps), L"lane chunk");
 			Assert::IsTrue(kernel->steps == 5 && disp.Stats().tapBands == 2 && disp.Stats().extends == 1, L"lane passes");
+			Assert::IsTrue(disp.CostOf(kP10GrainSplit).frames == 1, L"the cost counter records one completed lane frame (last chunk only)");
 			Assert::IsFalse(disp.Dispatch(job, 0, steps + 1), L"a plan that does not match the passes is refused");
 
 			// The live form of another frame (8) with the same content: its own tap upload (all bands) and extend.
@@ -341,6 +344,8 @@ namespace VideoProcessorTest
 			});
 			Assert::IsTrue(disp.DispatchLive(n, 8, 0, Header(), 0u), L"live fill");
 			Assert::IsTrue(kernel->steps == 10 && disp.Stats().tapBands == 4 && disp.Stats().extends == 2, L"same passes, live");
+			Assert::IsTrue(disp.CostOf(kP10GrainSplit).frames == 2, L"the cost counter records the live frame too");
+			Assert::IsTrue(disp.CostOf(kP11RegionBlockStats).frames == 0, L"a product without a kernel has an empty cost");
 
 			const VpLaneProducts::GpuProductTextures* tex = disp.TexturesOf(kP10GrainSplit);
 			const std::vector<float> lane = Download<float>(gpu, tex->Ring(0, 0), 4);
@@ -349,6 +354,30 @@ namespace VideoProcessorTest
 				L"lane == live, bit for bit");
 			for (size_t i = 0; i < codes.size(); ++i)
 				Assert::IsTrue(lane[i * 4] == float(codes[i]), L"lane output = the codes (full picture: extend is identity)");
+		}
+
+		// CPU only: the cost record adds every pass of a frame (P10 = five passes), keeps the worst pass and the worst frame, and the
+		// status text is empty until a frame has been timed.
+		TEST_METHOD(ProductCostAddsEveryPassOfAFrame)
+		{
+			Vpv::Skeleton::GpuProductCost cost;
+			Assert::IsTrue(Vpv::Skeleton::FormatCostLine("P10 grain split", cost).empty(), L"no line before the first timed frame");
+			for (int f = 0; f < 4; ++f)
+			{
+				cost.NoteFrameDone();
+				// five passes of 1.0, 0.5, 0.5, 0.5 and 0.5 ms (one of them 2.0 ms in frame 2)
+				cost.NoteResult(f == 2 ? 2000000u : 1000000u);
+				for (int p = 0; p < 4; ++p)
+					cost.NoteResult(500000u);
+				cost.NotePoll();
+			}
+			Assert::IsTrue(cost.frames == 4 && cost.timedFrames == 4 && cost.results == 20, L"counts written");
+			Assert::IsTrue(cost.totalNs == 3u * 3000000u + 4000000u, L"sums every pass, not the last one");
+			Assert::IsTrue(cost.maxPassNs == 2000000u, L"worst single pass");
+			Assert::IsTrue(std::fabs(cost.MeanFrameMs() - 13.0 / 4.0) < 1.0e-9, L"mean ms per frame over all passes");
+			Assert::IsTrue(std::fabs(cost.MaxPassMs() - 2.0) < 1.0e-9, L"worst pass ms");
+			const std::string line = Vpv::Skeleton::FormatCostLine("P10 grain split", cost);
+			Assert::IsTrue(line.find("P10 grain split") != std::string::npos && line.find("3.25 ms/frame") != std::string::npos, L"status text");
 		}
 	};
 }

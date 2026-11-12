@@ -396,7 +396,11 @@ namespace Vpv
 			if (!ps.timer)
 				return;
 			for (uint64_t ns; (ns = pl_timer_query(m_gpu, ps.timer)) != 0;)
+			{
 				ps.lastNs = ns;
+				ps.cost.NoteResult(ns);
+			}
+			ps.cost.NotePoll();
 		}
 
 		bool SkeletonGpuDispatcher::BuildContext(KernelContext& c, const Node& node, uint64_t seq, bool live,
@@ -541,6 +545,8 @@ namespace Vpv
 				c.picture = picture;
 			if (!k->Step(c, chunk - prefix))
 				return Fail(c.error.empty() ? k->LastError() : c.error);
+			if (chunk + 1u == chunkCount)
+				ps.cost.NoteFrameDone();
 			return true;
 		}
 
@@ -585,7 +591,14 @@ namespace Vpv
 				if (!k->Step(c, i))
 					return Fail(c.error.empty() ? k->LastError() : c.error);
 			++m_counters.liveFills;
+			m_products[node.id].cost.NoteFrameDone();
 			return true;
+		}
+
+		GpuProductCost SkeletonGpuDispatcher::CostOf(VpSkeleton::ProductId id) const
+		{
+			const auto it = m_products.find(id);
+			return it == m_products.end() ? GpuProductCost() : it->second.cost;
 		}
 
 		double SkeletonGpuDispatcher::MeasuredMs(VpSkeleton::ProductId id) const

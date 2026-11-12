@@ -14,6 +14,7 @@
 // them). Live form (DispatchLive): the same steps in the same order, at once. Off / Original: never constructed.
 
 #include <VP-V/core/AnalysisLane.h>
+#include <VP-V/modules/control/skeleton/gpu/GpuProductCost.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuProducts.h>
 
 #include <libplacebo/dispatch.h>
@@ -96,6 +97,9 @@ namespace Vpv
 			// G5: the last measured device time of a product's pass(es) in ms (pl_timer), 0 = not measured yet. The lane job's
 			// predictedMs reads it (a conservative derived default is used until then).
 			double MeasuredMs(VpSkeleton::ProductId id) const;
+			// Cost of ALL timed passes of a product's frames (mean ms per frame, worst pass, worst frame); zero struct when unknown.
+			// MeasuredMs() above is the last single pass only, so for the five-pass P10 it under-reports by about 5x.
+			GpuProductCost CostOf(VpSkeleton::ProductId id) const;
 			const Counters& Stats() const { return m_counters; }
 			size_t PendingReleases() const { return m_graveyard.size(); }
 			const std::string& LastError() const { return m_error; }
@@ -119,6 +123,7 @@ namespace Vpv
 				std::string refusal;
 				pl_timer timer = nullptr;
 				uint64_t lastNs = 0;
+				GpuProductCost cost;       // every pass of every frame (lastNs is the last single pass only)
 			};
 
 			Tap* TapFor(uint64_t seq, bool create);   // null: m_tapError says why (not there, no format, the GPU refused)
