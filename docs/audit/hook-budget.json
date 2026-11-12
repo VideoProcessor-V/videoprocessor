@@ -4,7 +4,7 @@
  "generated_at": "2026-11-11",
  "files": {
   "src/VideoProcessor-Config/AppMain.cpp": 2,
-  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 32,
+  "src/VideoProcessor-Config/ConfigEditorWindow.cpp": 31,
   "src/VideoProcessor-Config/ConfigEditorWindow.h": 5,
   "src/VideoProcessor-GUI/VideoProcessorApp.cpp": 2,
   "src/VideoProcessor-GUI/VideoProcessorDlg.cpp": 3,
