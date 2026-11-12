@@ -571,6 +571,11 @@ inline const std::vector<ProductFlag>& ProductFlags()
         // P14g: its producing evaluation takes its pixels from the source-frame tap sink, P5 is the monitor snapshot it declares.
         { kSourceGeometry, kP5MonitorTiles, FlagKind::ViewIsActual, "C9b",
           "pixel evidence = the SourceFrameTap view (modules/input/source_analysis/identity/chain/ChainEstimator.cpp UpdateTap); P5 stays the declared monitor snapshot" },
+        // P15 / P15c (P15-DECL): FrameQuality is read as a VIEW of the P5 monitor tiles (identity/FrameQuality.h), P5 stays the declared snapshot.
+        { kQualityPattern, kP5MonitorTiles, FlagKind::ViewIsActual, "C9b",
+          "actual input = the FrameQuality view of the P5 monitor tiles (modules/input/source_analysis/identity/FrameQuality.h); P5 stays the declared monitor snapshot" },
+        { kQualityPatternCausal, kP5MonitorTiles, FlagKind::ViewIsActual, "C9b",
+          "actual input = the FrameQuality view of the P5 monitor tiles (modules/input/source_analysis/identity/FrameQuality.h); P5 stays the declared monitor snapshot" },
         // D3: P7 reads P2 through IVectorEngine::FlowOf (pair id recorded) and declares only P4 (by design).
         { kP7CameraFit, kP2VectorPair, FlagKind::ExternalView, "C3", "external view: P2 via FlowOf (modules/motion/estimation/global_model/link/CameraExtension.cpp ahead fit); pair id recorded, not a declared input" },
     };

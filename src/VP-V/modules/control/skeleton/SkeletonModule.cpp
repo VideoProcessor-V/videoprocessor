@@ -172,7 +172,8 @@ namespace Vpv
 		// lane and its worker threads. Replaced as a whole when the source size or the GPU wiring changes.
 		struct Bundle
 		{
-			Bundle(Dims d, uint64_t seq, const std::function<uint64_t()>& clock, const GpuWiring& gpuWiring)
+			Bundle(Dims d, uint64_t seq, const std::function<uint64_t()>& clock, const GpuWiring& gpuWiring,
+				VpSkeleton::ILaneProducer* qualityP15 = nullptr, VpSkeleton::ILaneProducer* qualityP15c = nullptr)
 				: dims(d), createdSeq(seq), wiring(gpuWiring),
 				  // Without a GPU the registry is exactly the one the lane always used; with one, the tap form (P10 / P11 read
 				  // the tap plane, not the P13 ring that is RenderOnly and never filled: without this P10 is InputMissing).
@@ -182,6 +183,10 @@ namespace Vpv
 				lane.SetExternalSeal(true);   // FrameSeal owns the one seal
 				lane.RegisterProducer(&p1);
 				lane.RegisterProducer(&p4);
+				// The P15 / P15c frame-role detector slot (P15-DECL): inert with null providers (nothing is registered); registered here, before the
+				// worker threads start, exactly like p1 / p4.
+				if (qualityP15 != nullptr) lane.RegisterProducer(qualityP15);
+				if (qualityP15c != nullptr) lane.RegisterProducer(qualityP15c);
 				lane.RegisterCpuLiveCompute(VpSkeleton::kP1HalfLuma,
 					[](const VpSkeleton::Node&, const SourceFrameView* v, const std::array<const uint8_t*, VpSkeleton::kMaxInputs>&,
 						uint8_t* dst, size_t n) { return v != nullptr && VpLaneProducts::ComputeHalfLuma(*v, dst, n); });
@@ -1386,7 +1391,8 @@ namespace Vpv
 			std::shared_ptr<Bundle> b = current;
 			if (rebuild)
 			{
-				b = std::make_shared<Bundle>(dims, seq, nowUs_, wiring);
+				b = std::make_shared<Bundle>(dims, seq, nowUs_, wiring,
+					qualityP15_.load(std::memory_order_acquire), qualityP15c_.load(std::memory_order_acquire));
 				st.leadPeak = 0;   // a new lane: the best lead is measured again
 				st.leadPeakAtUs = now;
 				st.lastUsedLead = 0;

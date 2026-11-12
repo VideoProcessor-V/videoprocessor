@@ -1155,6 +1155,13 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
     AddLead(qp, kCodingEvidence, 1);
     AddLead(qp, kCodingEvidence, 2);
     AddInput(qp, kQualityPattern, 1);
+    // P15-DECL (coordinator ruling, doc 91 frame-role line): the detector's picture inputs are DECLARED here, next to coding_evidence.
+    // FrameQuality (identity/FrameQuality.h: min(resolution term, relative noise term) over the monitor tiles) is read as a VIEW of the P5
+    // monitor tiles (lag 0; flagged ViewIsActual in ProductCatalog.h), and P14 source identity (SourceQualityView.h, the ONE read API
+    // of the held-state record) is a held read at lag 1 (a held-state product is never read at lag 0). No producer exists yet: both
+    // reads are inert declarations and the graph states what the detector will read.
+    AddInput(qp, kP5MonitorTiles, 0);
+    AddInput(qp, kSourceIdentity, 1);
     qp.size.fixedBytes = kQualityPatternBytes;
     qp.residency = Residency::SystemRam;
     qp.variants = Variants::NonIdentical;
@@ -1169,6 +1176,8 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
                           qualityPatternHistory, Tier::T0, content, Bit(kSettingsAnalysis));
     AddInput(qc, kCodingEvidence, 0);
     AddInput(qc, kQualityPatternCausal, 1);
+    AddInput(qc, kP5MonitorTiles, 0);    // P15-DECL: the same two picture inputs as P15 (see there); P15c reads no lead and not P15
+    AddInput(qc, kSourceIdentity, 1);
     qc.size.fixedBytes = kQualityPatternBytes;
     qc.residency = Residency::SystemRam;
     qc.spanMask = content;
