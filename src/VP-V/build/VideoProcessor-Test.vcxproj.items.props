@@ -853,6 +853,7 @@
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncInjectScheduleTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncEventMetricsTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvResyncReaderTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelTapLawTests.cpp" />
     <ClCompile Include="..\VP-V\tests\GpuAllocatorTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
