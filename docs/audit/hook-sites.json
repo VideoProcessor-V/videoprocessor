@@ -6270,6 +6270,342 @@
    "gate": "declaration",
    "seam": null,
    "expiry": null
+  },
+  {
+   "id": "P5c-5039",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 5039,
+   "end": 5041,
+   "anchor": {
+    "symbol": "",
+    "before": [
+     "{",
+     "Field f;"
+    ],
+    "after": [
+     "return f;"
+    ]
+   },
+   "lines": [
+    "\t\t\tconst VpMotion::P3FieldSet live = r.vectorEstimate.LiveFrom(sequence);   // P5c: rule R2 of the P3 field view   // VPV-HOOK",
+    "\t\t\tf.field = live.field;   // VPV-HOOK",
+    "\t\t\tf.grainError = live.grainError;   // VPV-HOOK"
+   ],
+   "text": "const VpMotion::P3FieldSet live = r.vectorEstimate.LiveFrom(sequence); f.field = live.field; f.grainError = live.grainError;",
+   "gate": "declaration",
+   "seam": "S3",
+   "expiry": "P4-g"
+  },
+  {
+   "id": "P5c-5104",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 5104,
+   "end": 5104,
+   "anchor": {
+    "symbol": "EntranceOnceSnapshotFor",
+    "before": [
+     "{",
+     "return dejudder && aSequence != 0 && entranceOnceSnapFor == aSequence && motionValidity.Current(entranceOnceSnapEpoch) &&"
+    ],
+    "after": [
+     "}"
+    ]
+   },
+   "lines": [
+    "\t\t\tvectorEstimate.Snapshot().Usable();   // P5c: R4, the host keeps snapFor / epoch   // VPV-HOOK"
+   ],
+   "text": "vectorEstimate.Snapshot().Usable();",
+   "gate": "declaration",
+   "seam": "S3",
+   "expiry": "P4-g"
+  },
+  {
+   "id": "P5c-5191",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 5191,
+   "end": 5192,
+   "anchor": {
+    "symbol": "",
+    "before": [
+     "unsigned long long motionEngineIdleReleasesLogged = 0;",
+     "// Whether the matcher's live outputs (field, trust, grain error) are this source"
+    ],
+    "after": [
+     "unsigned long long dejudderEstimates = 0;"
+    ]
+   },
+   "lines": [
+    "\t// frame's (sequence, sequence + 1) pair of the current motion epoch (rule R1 of the P3 field view, EstimateState).   // VPV-HOOK",
+    "\tbool DejudderLiveFieldFor(uint64_t sequence) const { return vectorEstimate.LiveValidFor(sequence, activeSettings.motionHistoryFixes); }   // VPV-HOOK"
+   ],
+   "text": "bool DejudderLiveFieldFor(uint64_t sequence) const { return vectorEstimate.LiveValidFor(sequence, activeSettings.motionHistoryFixes); }",
+   "gate": "declaration",
+   "seam": "S3",
+   "expiry": "P4-g"
+  },
+  {
+   "id": "P5c-5852",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 5852,
+   "end": 5854,
+   "anchor": {
+    "symbol": "BuildSigmaDeltaVectorsWithoutExtras",
+    "before": [
+     "const Dejudder::Settings matcher = RenderedWarpSettings(h);",
+     "pl_tex next = nullptr;"
+    ],
+    "after": [
+     "{"
+    ]
+   },
+   "lines": [
+    "\t\tconst VpMotion::P3FieldSet live = vectorEstimate.Live();   // P5c: R0   // VPV-HOOK",
+    "\t\tif (dejudderNextVectorField->Run(live.field, live.frameTrust, vectorEstimate.MinTrustedShare(), 0.0f,   // VPV-HOOK",
+    "\t\t\t\tdejudderGeometry, w, h, next, live.subField, &matcher, live.camera, true) && next)   // VPV-HOOK"
+   ],
+   "text": "const VpMotion::P3FieldSet live = vectorEstimate.Live(); if (dejudderNextVectorField->Run(live.field, live.frameTrust, vectorEstimate.MinTrustedShare(), 0.0f, dejudderGeometry, w, h, next, live.subField, &matcher, live.camera, true) && next)",
+   "gate": "vp-function",
+   "seam": "S3",
+   "expiry": "P4-f"
+  },
+  {
+   "id": "P5c-15574",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 15574,
+   "end": 15578,
+   "anchor": {
+    "symbol": "PresentDejudderExtras",
+    "before": [
+     "// What the warps read: the matcher's own until (B, C) is estimated",
+     "// ahead, then the copy of (A, B)'s."
+    ],
+    "after": [
+     "bool aheadTried = false;"
+    ]
+   },
+   "lines": [
+    "\t\tconst VpMotion::P3FieldSet liveSet = vectorEstimate.Live();   // P5c: R0 (the P3 field view)   // VPV-HOOK",
+    "\t\tpl_tex warpField = liveSet.field, warpTrust = liveSet.frameTrust, warpSub = liveSet.subField;   // VPV-HOOK",
+    "\t\tpl_tex warpCamera = liveSet.camera;   // delta 14 R-B   // VPV-HOOK",
+    "\t\tpl_tex warpMask = liveSet.pixelMask;   // M6 (nullptr: the block decision)   // VPV-HOOK",
+    "\t\tpl_tex warpVectorOk = liveSet.vectorOk;   // VPV-HOOK"
+   ],
+   "text": "const VpMotion::P3FieldSet liveSet = vectorEstimate.Live(); pl_tex warpField = liveSet.field, warpTrust = liveSet.frameTrust, warpSub = liveSet.subField; pl_tex warpCamera = liveSet.camera; pl_tex warpMask = liveSet.pixelMask; pl_tex warpVectorOk = liveSet.vectorOk;",
+   "gate": "vp-function",
+   "seam": "S3",
+   "expiry": [
+    "P5c-extras",
+    "P6-move"
+   ]
+  },
+  {
+   "id": "P5c-15759",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 15759,
+   "end": 15765,
+   "anchor": {
+    "symbol": "PresentDejudderExtras",
+    "before": [
+     "// as after the rendered warp's own estimate ahead.",
+     "aheadTried = true;"
+    ],
+    "after": [
+     "}"
+    ]
+   },
+   "lines": [
+    "\t\t\t\t\t\tconst auto snapSet = vectorEstimate.Snapshot();   // P5c: R4 (lazy: same lease reads, same order)   // VPV-HOOK",
+    "\t\t\t\t\t\twarpField = snapSet.Field();   // VPV-HOOK",
+    "\t\t\t\t\t\twarpTrust = vectorEstimate.LookAheadTrust();   // VPV-HOOK",
+    "\t\t\t\t\t\twarpSub = snapSet.SubField();   // VPV-HOOK",
+    "\t\t\t\t\t\tif (warpCamera) warpCamera = snapSet.Camera();   // VPV-HOOK",
+    "\t\t\t\t\t\tif (warpMask) warpMask = snapSet.PixelMask();   // VPV-HOOK",
+    "\t\t\t\t\t\tif (warpVectorOk) warpVectorOk = snapSet.VectorOk();   // VPV-HOOK"
+   ],
+   "text": "const auto snapSet = vectorEstimate.Snapshot(); warpField = snapSet.Field(); warpTrust = vectorEstimate.LookAheadTrust(); warpSub = snapSet.SubField(); if (warpCamera) warpCamera = snapSet.Camera(); if (warpMask) warpMask = snapSet.PixelMask(); if (warpVectorOk) warpVectorOk = snapSet.VectorOk();",
+   "gate": "vp-function",
+   "seam": "S3",
+   "expiry": [
+    "P5c-extras",
+    "P6-move"
+   ]
+  },
+  {
+   "id": "P5c-15784",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 15784,
+   "end": 15784,
+   "anchor": {
+    "symbol": "PresentDejudderExtras",
+    "before": [
+     "if (dejudderMaskSequence[slot] == f.nextSourceSequence && f.nextSourceSequence != 0 &&",
+     "motionValidity.Current(dejudderMaskEpoch[slot]))"
+    ],
+    "after": [
+     "if (!frameInterpolator)"
+    ]
+   },
+   "lines": [
+    "\t\t\t\t\t\t\tmotion.occlusionB = vectorEstimate.Occlusion(slot);   // VPV-HOOK"
+   ],
+   "text": "motion.occlusionB = vectorEstimate.Occlusion(slot);",
+   "gate": "declaration",
+   "seam": "S3",
+   "expiry": [
+    "P5c-extras",
+    "P6-move"
+   ]
+  },
+  {
+   "id": "P5c-16121",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 16121,
+   "end": 16127,
+   "anchor": {
+    "symbol": "PresentDejudderExtras",
+    "before": [
+     "// Planner Q7: with R-A, the roll-off starts on a fast pan's",
+     "// first frame (the next pair's strength, rate-limited)."
+    ],
+    "after": [
+     "}"
+    ]
+   },
+   "lines": [
+    "\t\t\t\t\tconst auto snapSet = vectorEstimate.Snapshot();   // P5c: R4 (lazy: same lease reads, same order)   // VPV-HOOK",
+    "\t\t\t\t\twarpField = snapSet.Field();   // VPV-HOOK",
+    "\t\t\t\t\twarpTrust = vectorEstimate.LookAheadTrust();   // VPV-HOOK",
+    "\t\t\t\t\twarpSub = snapSet.SubField();   // VPV-HOOK",
+    "\t\t\t\t\tif (warpCamera) warpCamera = snapSet.Camera();   // VPV-HOOK",
+    "\t\t\t\t\tif (warpMask) warpMask = snapSet.PixelMask();   // VPV-HOOK",
+    "\t\t\t\t\tif (warpVectorOk) warpVectorOk = snapSet.VectorOk();   // VPV-HOOK"
+   ],
+   "text": "const auto snapSet = vectorEstimate.Snapshot(); warpField = snapSet.Field(); warpTrust = vectorEstimate.LookAheadTrust(); warpSub = snapSet.SubField(); if (warpCamera) warpCamera = snapSet.Camera(); if (warpMask) warpMask = snapSet.PixelMask(); if (warpVectorOk) warpVectorOk = snapSet.VectorOk();",
+   "gate": "vp-function",
+   "seam": "S3",
+   "expiry": [
+    "P5c-extras",
+    "P6-move"
+   ]
+  },
+  {
+   "id": "P5c-23372",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 23372,
+   "end": 23373,
+   "anchor": {
+    "symbol": "RenderLocked",
+    "before": [
+     "vpDebandParams.holdAlpha = GeneralRate::PerFrameWeight(vpDebandParams.holdAlpha, dejudderSourceHz,",
+     "activeSettings.generalRateFixes);"
+    ],
+    "after": [
+     "vpDebandParams.fieldScale = rebaseFactor > 0.0 ? 1.0 / rebaseFactor : 1.0;"
+    ]
+   },
+   "lines": [
+    "\t\t\t\tvectorEstimate.LiveFieldInto(pipelineSlots.OriginalPathway(), sourceSequence, activeSettings.motionHistoryFixes,   // VPV-HOOK P5c: R1 (VPV-GATED)",
+    "\t\t\t\t\tvpDebandParams.field, vpDebandParams.grainError);   // VPV-HOOK"
+   ],
+   "text": "vectorEstimate.LiveFieldInto(pipelineSlots.OriginalPathway(), sourceSequence, activeSettings.motionHistoryFixes, vpDebandParams.field, vpDebandParams.grainError);",
+   "gate": "gated",
+   "seam": "S3",
+   "expiry": "P4-e"
+  },
+  {
+   "id": "P5c-23416",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 23416,
+   "end": 23417,
+   "anchor": {
+    "symbol": "RenderLocked",
+    "before": [
+     "// The de-judder's vectors only under the debander's validity condition: this source frame's",
+     "// live field (DejudderLiveFieldFor: the current motion epoch, and with motion_history_fixes the live-field sequence)."
+    ],
+    "after": [
+     "const double fieldScale = rebaseFactor > 0.0 ? 1.0 / rebaseFactor : 1.0;"
+    ]
+   },
+   "lines": [
+    "\t\t\t\t\t// P5c W1-G: R1 (the gate lacked the motion_history_fixes clause; unchanged with it off).   // VPV-HOOK",
+    "\t\t\t\t\tpl_tex field = vectorEstimate.LiveFieldOnVp(pipelineSlots.OriginalPathway(), sourceSequence, activeSettings.motionHistoryFixes);   // VPV-HOOK (VPV-GATED)"
+   ],
+   "text": "pl_tex field = vectorEstimate.LiveFieldOnVp(pipelineSlots.OriginalPathway(), sourceSequence, activeSettings.motionHistoryFixes);",
+   "gate": "gated",
+   "seam": "S3",
+   "expiry": "P4-e"
+  },
+  {
+   "id": "P5c-24166",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 24166,
+   "end": 24168,
+   "anchor": {
+    "symbol": "adaptiveHost.motion = [&]()",
+    "before": [
+     "adaptiveHost.motion = [&]() {",
+     "AdaptiveDownscaleStage::MotionSource m;"
+    ],
+    "after": [
+     "return m;"
+    ]
+   },
+   "lines": [
+    "                const VpMotion::P3FieldSet live = vectorEstimate.LiveFor(sourceSequence, activeSettings.motionHistoryFixes);   // P5c: R1   // VPV-HOOK",
+    "                m.live = live.valid && !VpPhaseDrawn(renderImage);   // VPV-HOOK",
+    "                if (m.live) { m.field = live.field; m.frameTrust = live.frameTrust; m.grainError = live.grainError; m.minTrustedShare = vectorEstimate.MinTrustedShare(); }   // VPV-HOOK"
+   ],
+   "text": "const VpMotion::P3FieldSet live = vectorEstimate.LiveFor(sourceSequence, activeSettings.motionHistoryFixes); m.live = live.valid && !VpPhaseDrawn(renderImage); if (m.live) { m.field = live.field; m.frameTrust = live.frameTrust; m.grainError = live.grainError; m.minTrustedShare = vectorEstimate.MinTrustedShare(); }",
+   "gate": "vp-function",
+   "seam": "S3",
+   "expiry": "P4-f"
+  },
+  {
+   "id": "P5c-24261",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 24261,
+   "end": 24261,
+   "anchor": {
+    "symbol": "RenderLocked",
+    "before": [
+     "// (A picture between frames is not A: A's mask would sit t * v off.)",
+     "bool install = activeSettings.occlusionMask && maskSlot >= 0 && dejudder && !cadenceRepeat && !VpPhaseDrawn(renderImage) &&"
+    ],
+    "after": [
+     "bool grainInstall = grainMap != nullptr;"
+    ]
+   },
+   "lines": [
+    "                vectorEstimate.OcclusionOnVp(pipelineSlots.OriginalPathway(), maskSlot);   // VPV-HOOK (VPV-GATED)"
+   ],
+   "text": "vectorEstimate.OcclusionOnVp(pipelineSlots.OriginalPathway(), maskSlot);",
+   "gate": "declaration",
+   "seam": "S3",
+   "expiry": "P4-f"
+  },
+  {
+   "id": "P5c-24303",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 24303,
+   "end": 24303,
+   "anchor": {
+    "symbol": "RenderLocked",
+    "before": [
+     "if (install || grainInstall)",
+     "{"
+    ],
+    "after": [
+     "occlusionMaskHook.SetGrain(grainInstall ? grainMap : nullptr,"
+    ]
+   },
+   "lines": [
+    "                occlusionMaskHook.SetFrame(install ? vectorEstimate.OcclusionOnVp(pipelineSlots.OriginalPathway(), maskSlot) : nullptr, renderImage.crop, target.crop);   // VPV-HOOK (VPV-GATED)"
+   ],
+   "text": "occlusionMaskHook.SetFrame(install ? vectorEstimate.OcclusionOnVp(pipelineSlots.OriginalPathway(), maskSlot) : nullptr, renderImage.crop, target.crop);",
+   "gate": "gated",
+   "seam": "S3",
+   "expiry": "P4-f"
   }
  ]
 }
