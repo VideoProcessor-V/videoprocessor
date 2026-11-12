@@ -559,6 +559,49 @@ namespace DetailRestoreConfigTestsNs
 			Assert::IsTrue(core.find("ResetEntrancePlan();") != std::string::npos, L"the Original switch resets the planner outputs");
 		}
 
+		// P4 opus gate MUST-1 (owner E3): the planner is not called in the Original pathway, so a LIVE switch VP-V -> Original must
+		// leave no VP-V work and no stale VP-V state behind. ResetEntrancePlan (called once by the settings seam when Original is
+		// selected) reproduces the side effects the pre-P4 Original planner pass had: no source look-ahead walk (sourceAutoActive
+		// false: the render loop's AddRef of queued frames and RunAheadWalk read it), the monitor's selection native and its P0 status
+		// cleared (no stale "auto" status line), the re-base pause fallback released, the detail pulse / texture restore histories
+		// forgotten. CPU pin of the reset's body and of its call on the Original branch; the GPU live-switch run is on tonight's list.
+		TEST_METHOD(OriginalLiveSwitchResetsTheEntrancePlanSideEffects)
+		{
+			const std::string planner = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntrancePlanner.inl");
+			const size_t begin = planner.find("void LibplaceboVideoRenderer::Impl::ResetEntrancePlan()");
+			Assert::IsTrue(begin != std::string::npos, L"ResetEntrancePlan is defined in the planner file");
+			const size_t open = planner.find('{', begin);
+			const size_t close = planner.find("\n}", open);
+			Assert::IsTrue(open != std::string::npos && close != std::string::npos, L"the reset's body is found");
+			const std::string body = planner.substr(open, close - open);
+			const char* const required[] = {
+				"rebaseFactor = rebaseFactorX = 1.0;",
+				"rebaseFade = 1.0;",
+				"detailPulseRuns = textureRestoreRuns = false;",
+				"sourceAutoActive.store(false, std::memory_order_release);",
+				"sourceMonitor.SetSelection(\"native\");",
+				"rebaseP0Status.Clear();",
+				"SyncFallback(FallbackCatalog::RebasePaused(false,",
+				"detailPulse.Forget();",
+				"textureRestore.Forget();",
+				"detailPulseAheadSequence = 0;",
+				"detailPulseInactive.clear();",
+				"textureRestoreInactive.clear();",
+			};
+			for (const char* r : required)
+				Assert::IsTrue(body.find(r) != std::string::npos, Wide(std::string("the Original reset does: ") + r).c_str());
+			// The look-ahead consumers read the same flag the reset clears.
+			const std::string lvr = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
+			Assert::IsTrue(lvr.find("sourceAutoActive.load(") != std::string::npos, L"the render loop's look-ahead reads sourceAutoActive");
+			// Called on the Original branch of the settings seam, after the pathway fact is set.
+			const std::string core = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\CoreSegments.inl");
+			const size_t call = core.find("ResetEntrancePlan();");
+			Assert::IsTrue(call != std::string::npos, L"the settings seam calls the reset");
+			const size_t branch = core.rfind("if (settings.pipelineOriginalPathway)", call);
+			Assert::IsTrue(branch != std::string::npos, L"the reset runs on the Original branch");
+			Assert::IsTrue(core.find("\n\t{", branch) < call && core.find("\n\t}", branch) > call, L"the reset is inside the Original branch's block");
+		}
+
 		// P5c W1-G: the detail pulse / texture restore read the de-judder's live field under rule R1 (DejudderLiveFieldFor), the
 		// debander's condition. Before, the gate lacked the motion_history_fixes clause: with it on, an estimate ahead had moved the
 		// live outputs to the next pair while this frame still showed, and the stages read that pair's field. With it off the rule is

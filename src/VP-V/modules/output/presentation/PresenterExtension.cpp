@@ -34,11 +34,11 @@ namespace Vpv
 		// consumes it (bug hunt 05 L2); clamped by TakeMainInterval. The Presenter's frame starts (no plan queued yet).
 		bool PresenterExtension::OnPlanPresent(RE::FrameContext& c, RE::PresentPlan& plan)
 		{
+			if (const std::shared_ptr<PresentEnd> end = ends_.Find(c.host))
+				end->valid.store(false, std::memory_order_release);   // a new frame: its present end is not known yet (also on the way into Original: no stale end outlives a switch)
 			RenderAhead::Presenter* p = plan.presenter;
 			if (!p || p->originalPathway)
 				return false;   // nothing in the Original pathway: the host presents at interval 1 (Bill)
-			if (const std::shared_ptr<PresentEnd> end = ends_.Find(c.host))
-				end->valid.store(false, std::memory_order_release);   // a new frame: its present end is not known yet
 			p->BeginFrame();
 			const int pending = std::exchange(p->mainInterval, 1);
 			plan.interval = static_cast<uint32_t>(p->TakeMainInterval(pending));

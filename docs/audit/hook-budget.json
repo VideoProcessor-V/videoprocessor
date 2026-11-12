@@ -32,15 +32,12 @@
    "note": "HA-CFG09-BillPresets: +1 Bill-preset accessor (HELD-CFG-09, owner 19:21 allowance), back to 31 at the re-graft"
   },
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": {
-   "limit": 153,
+   "limit": 145,
    "reverts_to": 143,
    "until": [
-    "P4-e",
-    "P4-f",
-    "P4-g",
-    "Phase3"
+    "P11b"
    ],
-   "note": "owner 2026-11-11 (via Lead 4): +13 P5c transitional view reads (HA-P5c-*), refs/107-host-seams-plan.md:192 / s5.2 rule 4; coordinator 2026-11-12 (via Lead 4): +1 HA-R12-AfterPresent (B3-Z, the one shared R12 seam line), until Phase 3 replaces the per-feature present sites with the canonical seams (<= 143 then); Phase 3 (refs/108 s10, r2/phase3): R11 + R14 wired (+2 approved), B3-Z's R12 line became the one R12 block (same site), the TakeMainInterval helper body and the two alias runs it absorbed removed (-3): 157 -> 156 (ratchet); the Phase3 trigger stays open for the present-cluster move (Phase 4 / re-graft); P4 e-i (rebased on C-1 2026-11-12): -3 transitional view reads leave LVR with PlanEntrance; combined on r2/phase3-on-p4: 157 -3 (P4 e-i) -1 (Phase 3) = 153 (P4 f/g HA-P4f-S3 / HA-P4g-S3 counted within it)"
+   "note": "coordinator re-ruling 2026-11-12 (via Lead 6, P4 opus gate MUST-2 + Phase 3 gate SHOULD-2): ONE temporary LVR ceiling of 145 until P11b, replacing the stacked P5c / R12 / Phase3 / P4 allowances; P11b brings LVR to <= 143 and removes this entry in the same commit. Count on r2/phase3-on-p4 = 145 (P4 e-i -3 transitional reads; Phase 3 R11 + R14 + the one R12 block; HA-P4f-S3 / HA-P4g-S3). p4-fg alone counts 146 and lands only stacked with Phase 3."
   }
  }
 }

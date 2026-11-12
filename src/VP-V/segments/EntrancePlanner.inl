@@ -381,6 +381,10 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 // in the members the renderer's other consumers read (the repeat-reuse extension, the adaptive frame, the crossfade branches).
 // The settings seam (UpdatePipelineSlots) calls this once when Original is selected: native factors, no crossfade, no debander or
 // detail-restore parameters. Idempotent; all values are the members' initial values.
+// P4 opus gate MUST-1: it also reproduces the side effects the Original-mode planner pass had before P4 (owner E3: no VP-V
+// work and no stale VP-V state in Original): the source look-ahead walk is stopped (sourceAutoActive), the monitor's selection
+// is native and its P0 status cleared, an engaged re-base pause fallback is released, and the detail pulse / texture restore
+// histories are forgotten ("a stage that stopped running starts over" on the return to VP-V).
 void LibplaceboVideoRenderer::Impl::ResetEntrancePlan()
 {
 	rebaseFactor = rebaseFactorX = 1.0;
@@ -390,4 +394,13 @@ void LibplaceboVideoRenderer::Impl::ResetEntrancePlan()
 	detailPulseRuns = textureRestoreRuns = false;
 	detailPulseParams = DetailPulse::Params();
 	textureRestoreParams = TextureRestore::Params();
+	sourceAutoActive.store(false, std::memory_order_release);
+	sourceMonitor.SetSelection("native");
+	rebaseP0Status.Clear();
+	SyncFallback(FallbackCatalog::RebasePaused(false, rebasePauseSeconds, sourceRebase.LastError()));
+	detailPulse.Forget();
+	textureRestore.Forget();
+	detailPulseAheadSequence = 0;
+	detailPulseInactive.clear();
+	textureRestoreInactive.clear();
 }
