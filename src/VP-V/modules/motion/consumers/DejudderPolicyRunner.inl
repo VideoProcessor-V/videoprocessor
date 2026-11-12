@@ -87,7 +87,7 @@ namespace
 			}
 		}
 		void PollMotionEngineBudget(int width, int height, bool held) { impl.PollMotionEngineBudget(width, height, held); }
-		MotionEngineIdle::Keeper& IdleKeeper() { return impl.motionEngineIdle; }
+		MotionEngineIdle::Keeper& IdleKeeper() { return impl.vectorEstimate.motionEngineIdle; }
 		unsigned long long& IdleReleasesLogged() { return impl.motionEngineIdleReleasesLogged; }
 		void WarmIdleMotionEngine() { impl.WarmIdleMotionEngine(call.contract, call.lossless422, call.nativeRgb); }
 		void ReleaseDejudder() { impl.ReleaseDejudder(); }
@@ -143,7 +143,7 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	vectorInput.engineLoadedForHiccupRepair = vectorInput.engineLoaded && activeSettings.interpolationFillGaps &&
 		!lowLatencyQueueActive.load(std::memory_order_acquire);
 	// The governor's release is a state of this frame: a held matcher is not released (the keeper's latch alone would stay set).
-	vectorEngine.NoteVramRelease(motionEngineIdle.Pressured() && !dejudder);
+	vectorEngine.NoteVramRelease(vectorEstimate.motionEngineIdle.Pressured() && !dejudder);
 	vectorEngine.UpdateVectorEngine(vectorInput, vectorFacts, vectorHost);
 	if (vectorDemand.mode != VectorDemand::Mode::Off && !cadenceRepeat)
 	{
@@ -228,7 +228,7 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 		dejudderEstimatedSequence = sourceSequence;
 		dejudderEstimatedEpoch = dejudderAhead.ConsumedEpoch();
 		dejudderAhead.NoteEpoch(dejudderEstimatedEpoch);   // E12: the next entry is made in this field's epoch
-		dejudderEstimatedPeriods = 1;   // estimated ahead: an adjacent pair
+		vectorEstimate.dejudderEstimatedPeriods = 1;   // estimated ahead: an adjacent pair
 		LogDejudderAhead();
 		return;
 	}
@@ -237,7 +237,7 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	dejudderNextUploadedSequence = 0;
 	if (!UploadDejudderPlanes(next, dejudderNextTextures, &dejudderNextUpload, nextSourceSequence))
 	{
-		motionEngineIdle.NoteAllocationFailure(static_cast<double>(GetTickCount64()) / 1000.0);   // Bug hunt 3 F4
+		vectorEstimate.motionEngineIdle.NoteAllocationFailure(static_cast<double>(GetTickCount64()) / 1000.0);   // Bug hunt 3 F4
 		if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
 			DebugLog::Log("De-judder: uploading the next frame failed; off for this frame (%llu failures)",
 				dejudderFailures);
@@ -263,7 +263,7 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 		dejudderEstimatedEpoch = estimateEpoch;
 		dejudderAhead.NoteEpoch(estimateEpoch);   // E12: an entry made ahead of this field keeps its epoch
 		// Bug hunt 3 F10: a gap pair's field spans the missed periods too.
-		dejudderEstimatedPeriods = InterpolationTimeline::FieldPeriods(fillPair && vpFillGapFrames > 0, vpFillGapFrames);
+		vectorEstimate.dejudderEstimatedPeriods = InterpolationTimeline::FieldPeriods(fillPair && vpFillGapFrames > 0, vpFillGapFrames);
 	}
 }
 
@@ -280,9 +280,9 @@ void LibplaceboVideoRenderer::Impl::LogDejudderAhead()
 	if (!activeSettings.dejudderEstimateAhead)
 		return;
 	const ULONGLONG now = GetTickCount64();
-	if (dejudderAheadLogTick != 0 && now - dejudderAheadLogTick < 5000)
+	if (dejudderPolicy.dejudderAheadLogTick != 0 && now - dejudderPolicy.dejudderAheadLogTick < 5000)
 		return;
-	dejudderAheadLogTick = now;
+	dejudderPolicy.dejudderAheadLogTick = now;
 	using Reason = Dejudder::AheadSchedule::Reason;
 	DebugLog::Log("De-judder estimate ahead: %llu frames ahead, %llu before the frame (%llu estimated ahead for a "
 		"pair that did not come, %llu of them from an older epoch); not ahead: no frame after next %llu, source "
@@ -307,7 +307,7 @@ void LibplaceboVideoRenderer::Impl::DejudderHold(const char* why)
 	dejudderHoldLog.OnHold(why, dejudderExtraStats.holds);
 	// Render-ahead: every hold also shows on the "Render-ahead:" line with the gate's level.
 	if (RenderAheadActive())
-		LogRenderAhead(dejudderExtraStats.cadenceRatio, renderAheadGate.Level(), why);
+		LogRenderAhead(dejudderExtraStats.cadenceRatio, renderAheadPresenter.gate.Level(), why);
 }
 
 // The last hold lines at teardown, so the last holds are never lost.

@@ -41,7 +41,7 @@ bool LibplaceboVideoRenderer::Impl::VpTimelineWanted() const
 {
 	// A queue momentarily without B keeps the schedule (A is held, never waited for), so a
 	// shallow queue does not restart the phases.
-	const bool keep = interpolationDecision.reason == InterpolationPolicy::Reason::NoNextFrame && vpTimeline.Initialized();
+	const bool keep = dejudderPolicy.interpolationDecision.reason == InterpolationPolicy::Reason::NoNextFrame && dejudderPolicy.vpTimeline.Initialized();
 	if (vpGapFillStandalone && !lowLatencyQueueActive.load(std::memory_order_acquire))
 		return true;   // hiccup repair: this gap pair only
 	return activeSettings.interpolation != InterpolationPolicy::Mode::Off && (interpolating || keep) &&
@@ -179,7 +179,7 @@ void LibplaceboVideoRenderer::Impl::PrepareVpPhasePicture(uint64_t sourceSequenc
 	vpPhaseA = a;
 	vpPhaseB = b;
 	vpPhaseMotion = motion;
-	vpPhaseT = static_cast<float>(vpOutputPhase) * (vpGapFillStandalone ? vpGapPhaseScale : 1.0f);
+	vpPhaseT = static_cast<float>(vpOutputPhase) * (vpGapFillStandalone ? dejudderPolicy.vpGapPhaseScale : 1.0f);
 	// B3: made in the draw from the processed planes (the same inputs).
 	vpPhaseDeferred = EntranceOnce();
 	if (!vpPhaseDeferred && !RunVpPhaseInterpolation())
@@ -206,9 +206,9 @@ void LibplaceboVideoRenderer::Impl::LogVpTimeline(const char* what)
 	counters.phasePictures = vpPhasePictures;
 	counters.heldPictures = vpHeldPictures;
 	counters.skippedFrames = vpSkippedFrames;
-	counters.filmUpdates = vpFilmUpdates;
+	counters.filmUpdates = dejudderPolicy.vpFilmUpdates;
 	counters.gapPairs = vpGapPairs;
-	DebugLog::Log("%s", VpMotion::VpTimelineLine(what, vpOutputPhase, counters, vpTimeline).c_str());
+	DebugLog::Log("%s", VpMotion::VpTimelineLine(what, vpOutputPhase, counters, dejudderPolicy.vpTimeline).c_str());
 }
 
 void LibplaceboVideoRenderer::Impl::PublishDejudderStatus(bool force)
@@ -232,13 +232,13 @@ void LibplaceboVideoRenderer::Impl::PublishDejudderStatus(bool force)
 				st.ditherLastExternal ? "de-judder vectors" : "own search");
 		if (activeSettings.interpolation != InterpolationPolicy::Mode::Off && !interpolating &&
 			dejudderReason != DejudderPolicy::Reason::Active)
-			std::snprintf(line, sizeof(line), "interpolation: %s", InterpolationPolicy::Name(interpolationDecision.reason));
+			std::snprintf(line, sizeof(line), "interpolation: %s", InterpolationPolicy::Name(dejudderPolicy.interpolationDecision.reason));
 		else if (dejudderReason != DejudderPolicy::Reason::Active)
 			std::snprintf(line, sizeof(line), "%s", DejudderPolicy::Name(dejudderReason));
 		else if (interpolating && vpTimelineActive)
 			std::snprintf(line, sizeof(line), "interpolating per refresh (%s), ratio %.3f, %llu pictures, %llu held, %llu frames skipped, "
 				"%llu gap pairs, %llu restarts", InterpolationPolicy::Name(activeSettings.interpolationFallback),
-				interpolationDecision.ratio, vpPhasePictures, vpHeldPictures, vpSkippedFrames, vpGapPairs, vpTimeline.Restarts());
+				dejudderPolicy.interpolationDecision.ratio, vpPhasePictures, vpHeldPictures, vpSkippedFrames, vpGapPairs, dejudderPolicy.vpTimeline.Restarts());
 		else if (interpolating)
 			std::snprintf(line, sizeof(line), "interpolating (%s), ratio %.3f, +%d pictures %.1f ms, late %llu, full %llu, held %llu%s",
 				InterpolationPolicy::Name(activeSettings.interpolationFallback), st.cadenceRatio, st.lastExtrasPerFrame,
@@ -267,7 +267,7 @@ void LibplaceboVideoRenderer::Impl::PublishDejudderStatus(bool force)
 		{
 			char ahead[160];
 			std::snprintf(ahead, sizeof(ahead), ", render-ahead lead %.1f ms, late %llu, dropped %llu, gate level %d",
-				renderAheadLead * 1000.0, renderAheadLate, renderAheadDropped, renderAheadGate.Level());
+				renderAheadLead * 1000.0, renderAheadLate, renderAheadDropped, renderAheadPresenter.gate.Level());
 			text += ahead;
 		}
 		// Efficiency: new frames whose sigma-delta took the de-judder's
@@ -320,7 +320,7 @@ void LibplaceboVideoRenderer::Impl::ReleaseDejudder()
 	VpSkeleton::VramUsers::Instance().Release(this, VpSkeleton::kUserMotionMatcher);   // W2-C1 C1-3: the matcher's memory is freed
 	dejudderLiveFieldFrom = 0;
 	motionSegment.Retract(VpMotion::Direction::Forward);
-	dejudderMotionSourceKey = -1;
+	vectorEstimate.dejudderMotionSourceKey = -1;
 	// 6d: the cache and the rendered warp hold textures (and a dispatch)
 	// of this device (audit stage10-6d blocker 1).
 	dejudderCache.Release();
@@ -371,9 +371,9 @@ bool LibplaceboVideoRenderer::Impl::VpStageBFrame(uint64_t sourceSequence, uint6
 			debander.CarryHold(sourceSequence);
 			// Hunt 2 (06-interp L4): a pulldown film update (the same film time) is shown with
 			// the next film frame; counted apart from the frames a faster source skips.
-			if (vpSkipIsUpdate)
+			if (dejudderPolicy.vpSkipIsUpdate)
 			{
-				if (++vpFilmUpdates == 1)
+				if (++dejudderPolicy.vpFilmUpdates == 1)
 					LogVpTimeline("first pulldown film update (shown with the next film frame)");
 			}
 			else if (++vpSkippedFrames == 1)
@@ -431,11 +431,11 @@ MotionConfig::Settings LibplaceboVideoRenderer::Impl::ResolveMotionEngine(bool c
 	        motionSettings.smoothMotion!="off");
 	    const bool smooth=engine==DejudderPolicy::MotionEngine::SmoothMotion;
 	    if(!smooth)motionSettings.smoothMotion="off";
-	    if(smooth!=smoothMotionEngine||!motionEngineLogged) {
+	    if(smooth!=smoothMotionEngine||!dejudderPolicy.motionEngineLogged) {
 	        if(smooth!=smoothMotionEngine)
 	            RequestMotionInvalidate(MotionValidity::Cause::SmoothMotionMix);
 	        smoothMotionEngine=smooth;
-	        motionEngineLogged=true;
+	        dejudderPolicy.motionEngineLogged=true;
 	        DebugLog::Log("Motion engine: %s (motion_engine=%s)",smooth?"libplacebo smooth motion; VP's de-judder off":
 	            "VP (de-judder); smooth motion off",motionSettings.engine.c_str());
 	        DiagnosticHistory::Global().RecordDecision("motion-engine",
@@ -484,10 +484,10 @@ namespace
 bool LibplaceboVideoRenderer::Impl::PlanVpOutputs(RendererExtension::OutputPlan& plan)   // VPV-GATED
 {
 	if (pipelineSlots.OriginalPathway()) return false;   // PHASE 1: not planned, Bill's list is drawn
-	if(temporalRenderer.Mixing()!=smoothMotionMixingLogged) {
+	if(temporalRenderer.Mixing()!=dejudderPolicy.smoothMotionMixingLogged) {
 	    RequestMotionInvalidate(MotionValidity::Cause::SmoothMotionMix);
-	    smoothMotionMixingLogged=temporalRenderer.Mixing();
-	    DebugLog::Log("Motion: smooth motion mixing %s (%s)",smoothMotionMixingLogged?"on":"off",
+	    dejudderPolicy.smoothMotionMixingLogged=temporalRenderer.Mixing();
+	    DebugLog::Log("Motion: smooth motion mixing %s (%s)",dejudderPolicy.smoothMotionMixingLogged?"on":"off",
 	        temporalRenderer.status.c_str());
 	}
 	ImplTimelineHost<Impl> host{ *this };

@@ -290,7 +290,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 			const int depth = renderImage.repr.bits.color_depth > 0 ? renderImage.repr.bits.color_depth : 10;
 			// The content rate the de-judder and the interpolator schedule with: the pulldown
 			// film rate, else the measured capture rate, else the nominal rate; 0 = unknown.
-			double contentHz = pulldownFilmHz > 0.0 ? pulldownFilmHz : vpCaptureRateHz > 0.0 ? vpCaptureRateHz : nominalSourceRateHz;
+			double contentHz = pulldownFilmHz > 0.0 ? pulldownFilmHz : dejudderPolicy.vpCaptureRateHz > 0.0 ? dejudderPolicy.vpCaptureRateHz : nominalSourceRateHz;
 			if (!std::isfinite(contentHz) || contentHz <= 0.0) contentHz = 0.0;
 			// The de-judder's vectors only under the debander's validity condition: this source frame's
 			// live field (DejudderLiveFieldFor: the current motion epoch, and with motion_history_fixes the live-field sequence).
@@ -334,7 +334,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 				p.planeLines = lines;
 				p.sourceHz = contentHz;
 				p.bitrateQuality = quality;
-				p.field = InterpolationTimeline::OnePeriodField(dejudderEstimatedPeriods) ? field : nullptr;   // Bug hunt 3 F10
+				p.field = InterpolationTimeline::OnePeriodField(vectorEstimate.dejudderEstimatedPeriods) ? field : nullptr;   // Bug hunt 3 F10
 				p.fieldScale = fieldScale;
 				p.fieldScaleX = fieldScaleX;
 				p.sequence = sourceSequence;

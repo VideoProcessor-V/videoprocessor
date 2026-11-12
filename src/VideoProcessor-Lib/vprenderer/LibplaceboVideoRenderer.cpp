@@ -5130,25 +5130,14 @@ struct LibplaceboVideoRenderer::Impl
 	// VPV-HOOK M2 P5b-2: the de-judder policy and per-vsync timeline state (VP-V/modules/motion/consumers/DejudderState.h);
 	// one alias per moved member, deleted with its last reader outside the module (module README, alias table).
 	VpMotion::DejudderPolicyState dejudderPolicy;
-	ULONGLONG& dejudderAheadLogTick = dejudderPolicy.dejudderAheadLogTick;
 	DejudderPolicy::Reason& dejudderReason = dejudderPolicy.dejudderReason;
-	ULONGLONG& dejudderReasonLogTick = dejudderPolicy.dejudderReasonLogTick;
 	unsigned long long& dejudderReasonChangesNotLogged = dejudderPolicy.dejudderReasonChangesNotLogged;
-	ULONGLONG& diagDejudderModeTick = dejudderPolicy.diagDejudderModeTick;
-	unsigned long long& diagDejudderModeSkipped = dejudderPolicy.diagDejudderModeSkipped;
 	uint32_t& diagLastHoldCode = dejudderPolicy.diagLastHoldCode;
 	bool& dejudderExtrasAllowed = dejudderPolicy.dejudderExtrasAllowed;
-	InterpolationPolicy::Decision& interpolationDecision = dejudderPolicy.interpolationDecision;
 	bool& interpolating = dejudderPolicy.interpolating;
-	int& interpolationReasonLogged = dejudderPolicy.interpolationReasonLogged;
-	ULONGLONG& interpolationLogTick = dejudderPolicy.interpolationLogTick;
-	unsigned& interpolationLogCount = dejudderPolicy.interpolationLogCount;
 	float& dejudderEffectiveStrength = dejudderPolicy.dejudderEffectiveStrength;
 	int& dejudderEvenCycle = dejudderPolicy.dejudderEvenCycle;
 	bool& smoothMotionEngine = dejudderPolicy.smoothMotionEngine;
-	bool& motionEngineLogged = dejudderPolicy.motionEngineLogged;
-	bool& smoothMotionMixingLogged = dejudderPolicy.smoothMotionMixingLogged;
-	bool& dejudderMaskRateLogged = dejudderPolicy.dejudderMaskRateLogged;
 	double& dejudderSourceHz = dejudderPolicy.dejudderSourceHz;
 	DejudderPolicy::LatencyFloor& dejudderLatencyFloor = dejudderPolicy.dejudderLatencyFloor;
 	double& dejudderCallLatency = dejudderPolicy.dejudderCallLatency;
@@ -5158,17 +5147,9 @@ struct LibplaceboVideoRenderer::Impl
 	double& dejudderPredictedVsync = dejudderPolicy.dejudderPredictedVsync;
 	uint64_t& dejudderPredictedGeneration = dejudderPolicy.dejudderPredictedGeneration;
 	uint64_t& dejudderPredictedSequence = dejudderPolicy.dejudderPredictedSequence;
-	InterpolationTimeline::Timeline& vpTimeline = dejudderPolicy.vpTimeline;
 	bool& vpTimelineActive = dejudderPolicy.vpTimelineActive;
 	bool& vpSkipOutput = dejudderPolicy.vpSkipOutput;
-	bool& vpSkipIsUpdate = dejudderPolicy.vpSkipIsUpdate;
-	unsigned long long& vpFilmUpdates = dejudderPolicy.vpFilmUpdates;
 	double& vpOutputPhase = dejudderPolicy.vpOutputPhase;
-	bool& vpTimelineLogged = dejudderPolicy.vpTimelineLogged;
-	double& vpCaptureRateHz = dejudderPolicy.vpCaptureRateHz;
-	float& vpGapPhaseScale = dejudderPolicy.vpGapPhaseScale;
-	AlphaQueuePolicy::TimelineQueueSteering& vpQueueSteering = dejudderPolicy.vpQueueSteering;
-	uint64_t& vpQueueGeneration = dejudderPolicy.vpQueueGeneration;
 	std::atomic<bool>& vpQueueErrorReset = dejudderPolicy.vpQueueErrorReset;
 	DisplayRateHold& timelineDisplayRateHold = dejudderPolicy.timelineDisplayRateHold;
 	// VPV-HOOK-END
@@ -5216,7 +5197,6 @@ struct LibplaceboVideoRenderer::Impl
 	// RenderAheadPolicy.h); one alias per member until P6 rest moves the present clusters.   // VPV-HOOK
 	RenderAhead::Presenter renderAheadPresenter;   // VPV-HOOK
 	RenderAhead::Schedule& renderAheadSchedule = renderAheadPresenter.schedule;   // VPV-HOOK
-	RenderAhead::Gate& renderAheadGate = renderAheadPresenter.gate;   // VPV-HOOK
 	RenderAhead::CostWindow& renderAheadNewFrameCost = renderAheadPresenter.newFrameCost;   // VPV-HOOK
 	RenderAhead::KnownCost& renderAheadExtraCostOwn = renderAheadPresenter.extraCostOwn;   // VPV-HOOK
 	RenderAhead::KnownCost& renderAheadExtraCostExternal = renderAheadPresenter.extraCostExternal;   // VPV-HOOK
@@ -5230,7 +5210,6 @@ struct LibplaceboVideoRenderer::Impl
 	// the device / VP-owned chain latency is set, read by the queue-hold planner (another thread).
 	std::atomic<int> delaySwapchainFrames{ DelayBudget::kSwapchainFrames };
 	double renderAheadChainWantedSince = -1.0;               // another depth wanted since (RenderAheadNow)
-	unsigned long long& renderAheadGateResets = renderAheadPresenter.gateResets;   // VPV-HOOK
 	AlphaD3D11FrameGpuTimer renderAheadExtraTimer, renderAheadEstimateTimer;   // X and E on the GPU
 	bool renderAheadTimersReady = false;
 	unsigned long long renderAheadTimerOrdinal = 0, renderAheadTimerSerial = 0;
@@ -5729,7 +5708,6 @@ struct LibplaceboVideoRenderer::Impl
 	VectorDemand::Decision& vectorDemand = vectorEngine.vectorDemand;
 	std::atomic<int>& queueAheadCapacity = vectorEngine.queueAheadCapacity;
 	std::atomic<bool>& motionAheadBackward = vectorEngine.motionAheadBackward;
-	unsigned long long& vectorPairs = vectorEngine.vectorPairs;
 	std::atomic<bool>& motionAheadEngaged = vectorEngine.motionAheadEngaged;
 	uint64_t& motionAheadEngagedGeneration = vectorEngine.motionAheadEngagedGeneration;
 	bool& motionAheadPrevKnown = vectorEngine.motionAheadPrevKnown;
@@ -5741,13 +5719,10 @@ struct LibplaceboVideoRenderer::Impl
 	VpMotion::MotionSegment<MotionShadowField>& motionSegment = vectorEngine.motionSegment;
 	std::atomic<int>& motionAheadDepth = vectorEngine.motionAheadDepth;
 	std::atomic<int>& motionAheadConfigured = vectorEngine.motionAheadConfigured;
-	unsigned long long& motionAheadHits = vectorEngine.motionAheadHits;
-	unsigned long long& motionAheadMisses = vectorEngine.motionAheadMisses;
 	std::atomic<double>& motionHandoffMaxMs = vectorEngine.motionHandoffMaxMs;
 	std::atomic<double>& motionHandoffTotalMs = vectorEngine.motionHandoffTotalMs;
 	std::atomic<unsigned long long>& motionHandoffCount = vectorEngine.motionHandoffCount;
 	uint64_t& motionInvalidations = vectorEngine.motionInvalidations;
-	bool& motionRecoveryLogPending = vectorEngine.motionRecoveryLogPending;
 	// P5a-5: the estimate state (item a; VP-V/modules/motion/estimation/EstimateState.h).
 	VpMotion::EstimateState<QueuedFrame::ConvertedPayload> vectorEstimate{ vectorEngine };
 	pl_tex (&dejudderNextTextures)[2] = vectorEstimate.dejudderNextTextures;
@@ -5760,14 +5735,9 @@ struct LibplaceboVideoRenderer::Impl
 	std::unique_ptr<Dejudder::MotionWarp>& dejudder = vectorEstimate.dejudder;
 	uint64_t& dejudderEstimatedSequence = vectorEstimate.dejudderEstimatedSequence;
 	uint64_t& dejudderEstimatedEpoch = vectorEstimate.dejudderEstimatedEpoch;
-	int& dejudderEstimatedPeriods = vectorEstimate.dejudderEstimatedPeriods;
-	MotionEngineIdle::Keeper& motionEngineIdle = vectorEstimate.motionEngineIdle;
 	CComPtr<IDXGIAdapter3>& motionEngineBudgetAdapter = vectorEstimate.motionEngineBudgetAdapter;
-	unsigned long long& dejudderCreates = vectorEstimate.dejudderCreates;
 	bool& motionEngineWarmPending = vectorEstimate.motionEngineWarmPending;
 	uint64_t& dejudderLiveFieldFrom = vectorEstimate.dejudderLiveFieldFrom;
-	int& dejudderMotionSourceKey = vectorEstimate.dejudderMotionSourceKey;
-	bool& motionEngineWarming = vectorEstimate.motionEngineWarming;
 	// VPV-HOOK-END
 	bool sigmaDeltaRanLast = false;                   // the sigma-delta quantiser ran in the last frame's output pass
 	// C10: the debug switches are read once, not per frame.

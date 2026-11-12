@@ -214,9 +214,9 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 			"released (recreated when needed)");
 		VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserMotionMatcher, true);
 		// Bug hunt 3 F4: logged, so a test sees that a second hiccup does not recreate it.
-		if (++dejudderCreates <= 20 || dejudderCreates % 100 == 0)
+		if (++vectorEstimate.dejudderCreates <= 20 || vectorEstimate.dejudderCreates % 100 == 0)
 			DebugLog::Log("Motion engine: created (%llu times this renderer; hiccup repair %s)",
-				dejudderCreates, activeSettings.interpolationFillGaps ? "on: kept loaded and idle between gaps" : "off");
+				vectorEstimate.dejudderCreates, activeSettings.interpolationFillGaps ? "on: kept loaded and idle between gaps" : "off");
 	}
 	else
 	{
@@ -269,12 +269,12 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	// off, the producer ahead wanted or not) changed while the matcher kept its history.
 	{
 		const int sourceKey = !activeSettings.opticalFlow ? 0 : activeSettings.motionAheadFrames > 0 ? 2 : 1;
-		if (activeSettings.motionHistoryFixes && dejudderMotionSourceKey >= 0 && sourceKey != dejudderMotionSourceKey)
+		if (activeSettings.motionHistoryFixes && vectorEstimate.dejudderMotionSourceKey >= 0 && sourceKey != vectorEstimate.dejudderMotionSourceKey)
 		{
 			RequestMotionInvalidate(MotionValidity::Cause::MotionSourceChange);
 			dejudder->ForgetHistory();
 		}
-		dejudderMotionSourceKey = sourceKey;
+		vectorEstimate.dejudderMotionSourceKey = sourceKey;
 	}
 	// 6c: B's occlusion mask into the slot not holding the mask for the
 	// frame A (now showing, or B itself ahead), so A's survives until it
@@ -295,7 +295,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	Dejudder::Planes sa = a, sb = b;
 	sa.sequence = aSequence;
 	sb.sequence = bSequence;
-	if (motionProducer && motionProducer->Running() && !motionEngineWarming)
+	if (motionProducer && motionProducer->Running() && !vectorEstimate.motionEngineWarming)
 	{
 		int engineW = 0, engineH = 0;
 		if (dejudder->EngineInputSize(engineW, engineH))
@@ -305,7 +305,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		MotionAhead::FlowPtr flow = motionValidity.PairServes(aSequence, bSequence, motionValidity.EpochOfLastKept(),
 			motionValidity.Epoch())   // W1-C2a A1 / S2
 			? vectorEngine.FindCurrent(aSequence, bSequence) : nullptr;   // SK-MV: P2 read through the view; C2a-F 2: current stream generation only
-		if (flow) ++motionAheadHits; else ++motionAheadMisses;
+		if (flow) ++vectorEngine.motionAheadHits; else ++vectorEngine.motionAheadMisses;
 		// Latch review 2026-10-17: the engine's whole-frame motion (z < 0.9 usable) for
 		// source_resolution auto's fast-pan switch. Bug hunt 3 F1: one cell is 8 source px
 		// per halving of the search input (4K 16, 8K 32), not 8 at every size.
@@ -336,7 +336,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		vectorEngine.P2().Prune(aSequence);
 	}
 	bool gapSeedHanded = false;   // a valid seed was given to the matcher: counted "seeded" only if its D1 actually started from it (SearchSeedUsed)
-	if (!motionEngineWarming && bSequence > aSequence + 1)
+	if (!vectorEstimate.motionEngineWarming && bSequence > aSequence + 1)
 	{
 		// A fill pair across a gap (hiccup repair): start D1 from the last valid shared pair when the state moved only for this gap; else the
 		// estimate runs unseeded exactly as before (GapSeed::Make says why).
@@ -360,9 +360,9 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	// and reads what it did right after. No hook registered (camera guidance off) = the matcher's Estimate only, as
 	// before: nothing bound, no extra GPU work. Never for the warm-up's dummy A -> A estimate.
 	const bool motionEstimated = vectorEngine.Estimate(aSequence, bSequence, ahead, dejudderSourceHz, motionShadowEpoch,
-		!motionEngineWarming, *dejudder, [&]() { return dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted); },
+		!vectorEstimate.motionEngineWarming, *dejudder, [&]() { return dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted); },
 		[this](const FallbackCatalog::Decision& decision) { SyncFallback(decision); });
-	if (motionEstimated && !motionEngineWarming)
+	if (motionEstimated && !vectorEstimate.motionEngineWarming)
 		++vectorEngine.WorkCounters().matcherEstimates;   // W2-C1 (B9): the warm-up's dummy estimate is counted as a warm-up
 	dejudder->ClearSearchSeed();
 	if (gapSeedHanded)
@@ -385,7 +385,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	{
 		// Bug hunt 3 F4: a texture the engine could not create (low video memory).
 		if (dejudder->LastError().find("cannot create") != std::string::npos)
-			motionEngineIdle.NoteAllocationFailure(static_cast<double>(GetTickCount64()) / 1000.0);
+			vectorEstimate.motionEngineIdle.NoteAllocationFailure(static_cast<double>(GetTickCount64()) / 1000.0);
 		if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
 			DebugLog::Log("De-judder: motion estimate failed (%s; %llu failures)",
 				dejudder->LastError().c_str(), dejudderFailures);
@@ -397,17 +397,17 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		MotionShadowField{ aSequence, bSequence, dejudder->Field(), dejudder->FrameTrust(), dejudder->SubField(), dejudder->Camera(), dejudder->GrainError() },   // SK-MV: P3 (+P2/P2m by the source) published with its textures
 		dejudder->ExternalFlowUsed() ? VpMotion::Source::EngineAhead : VpMotion::Source::Matcher,   // SK-MV: no render-time engine (EngineAtRender is unreachable)
 		motionShadowEpoch, 0, bSequence != aSequence + 1);
-	if (motionEngineWarming)
+	if (vectorEstimate.motionEngineWarming)
 		return true;   // r6 fix 1: warm-up only; nothing counted, logged or handed on
 	if (maskSlot >= 0)
 	{
 		dejudderMaskSequence[maskSlot] = bSequence;
 		dejudderMaskEpoch[maskSlot] = motionValidity.Epoch();
 	}
-	if (motionRecoveryLogPending)
+	if (vectorEngine.motionRecoveryLogPending)
 	{
 		DebugLog::Log("De-judder: estimating again on a fresh contiguous pair");
-		motionRecoveryLogPending = false;
+		vectorEngine.motionRecoveryLogPending = false;
 	}
 	// The motion source: the optical-flow engine, or the block searches (logged on change).
 	{
@@ -492,7 +492,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	}
 	if (vectorDemand.estimate)
 	{
-		++vectorPairs;
+		++vectorEngine.vectorPairs;
 		vectorEngine.NoteVectorsDelivered(false, dejudder->ExternalFlowUsed() ? "engine ahead" : dejudder->OpticalFlowUsed() ? "engine" : "matcher");   // VPV-HOOK
 	}
 	static GeneralRate::LogInterval motionAheadStatsLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
@@ -508,7 +508,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		const auto ps = motionProducer->GetStats();
 		const unsigned long long handoffs = motionHandoffCount.load(std::memory_order_relaxed);
 		DebugLog::Log("Motion ahead: %llu frames, %llu pairs (last %.1f ms, luma %.1f ms, on the worker), %llu dropped; pairs taken %llu, missed %llu; render-loop hand-off mean %.3f ms, max %.3f ms",
-			ps.frames, ps.pairs, ps.lastPairMs, ps.lumaMs, ps.dropped, motionAheadHits, motionAheadMisses,
+			ps.frames, ps.pairs, ps.lastPairMs, ps.lumaMs, ps.dropped, vectorEngine.motionAheadHits, vectorEngine.motionAheadMisses,
 			handoffs ? motionHandoffTotalMs.load(std::memory_order_relaxed) / handoffs : 0.0, motionHandoffMaxMs.load(std::memory_order_relaxed));
 		DebugLog::Log("Motion ahead extras: %.2f ms per pair on the worker; engine trust weights %s; camera from the search when unclear %llu times",
 			ps.extrasMs, dejudder->EngineWeightsUsed() ? "applied" : "not applied", dejudder->GlobalFallbacks());

@@ -47,9 +47,9 @@ void LibplaceboVideoRenderer::Impl::WarmIdleMotionEngine(const VideoFrameFormatt
 	a.chromaShiftY = lossless422 ? 0 : 1;
 	a.fullRange = contract.sampleRange == VideoFrameSampleRange::FULL;
 	const auto started = std::chrono::steady_clock::now();
-	motionEngineWarming = true;
+	vectorEstimate.motionEngineWarming = true;
 	const bool estimated = RunDejudderEstimate(a, a, 0, 0);
-	motionEngineWarming = false;
+	vectorEstimate.motionEngineWarming = false;
 	dejudderLiveFieldFrom = 0;
 	motionSegment.Retract(VpMotion::Direction::Forward);
 	bool pictured = false;
@@ -81,18 +81,18 @@ void LibplaceboVideoRenderer::Impl::WarmIdleMotionEngine(const VideoFrameFormatt
 void LibplaceboVideoRenderer::Impl::PollMotionEngineBudget(int width, int height, bool engineHeld)
 {
 	const double now = static_cast<double>(GetTickCount64()) / 1000.0;
-	motionEngineIdle.NoteTime(now);
-	if (!motionEngineIdle.BudgetDue(now))
+	vectorEstimate.motionEngineIdle.NoteTime(now);
+	if (!vectorEstimate.motionEngineIdle.BudgetDue(now))
 		return;
 	uint64_t usage = 0, budget = 0;
 	const bool reported = QueryMotionEngineBudget(usage, budget);
-	motionEngineIdle.NoteBudgetReported(reported);
-	motionEngineIdle.NoteBudget(reported ? usage : 0, reported ? budget : 0,
+	vectorEstimate.motionEngineIdle.NoteBudgetReported(reported);
+	vectorEstimate.motionEngineIdle.NoteBudget(reported ? usage : 0, reported ? budget : 0,
 		engineHeld ? 0 : MotionEngineIdle::IdleBytes(width, height), now);
-	SyncFallback(FallbackCatalog::MotionEnginePressure(motionEngineIdle.Pressured()));   // SK-MV: dropping the standing demand is visible
+	SyncFallback(FallbackCatalog::MotionEnginePressure(vectorEstimate.motionEngineIdle.Pressured()));   // SK-MV: dropping the standing demand is visible
 	// W2-C1 (B9): the release is a hard engine state (VramRelease), and the one reading is shared with the skeleton's tier plan
 	// (QueryCard reads it while fresh instead of querying DXGI again).
-	vectorEngine.NoteVramRelease(motionEngineIdle.Pressured() && !engineHeld);   // a held matcher is not released
+	vectorEngine.NoteVramRelease(vectorEstimate.motionEngineIdle.Pressured() && !engineHeld);   // a held matcher is not released
 	DXGI_ADAPTER_DESC desc{};
 	if (reported && motionEngineBudgetAdapter && SUCCEEDED(motionEngineBudgetAdapter->GetDesc(&desc)))
 		VpSkeleton::VramUsers::Instance().NoteBudget((static_cast<uint64_t>(static_cast<uint32_t>(desc.AdapterLuid.HighPart)) << 32) |
