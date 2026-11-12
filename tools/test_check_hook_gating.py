@@ -680,6 +680,36 @@ class UntaggedVpReferenceTest(unittest.TestCase):
         finally:
             chg.ALLOW_SITES = old
 
+    def test_waived_untagged_line_is_keyed_by_text_and_must_match_exactly_one_added_line(self):
+        def entry(pat):
+            return {"file": BILL, "pattern": pat, "reason": "WAIVER-TEST granted for this test. Proof: this test."}
+        old = chg.ALLOW_UNTAGGED_REFS
+        try:
+            chg.ALLOW_UNTAGGED_REFS = [entry(r"mon\.SetNovelMode\(2\);")]
+            rc, out = self._added("mon.SetNovelMode(2);", "SyncFallback(FeatureCatalog::HeldNotice(1));")
+            self.assertEqual(rc, 1, out)                  # the waiver covers only the SetNovelMode line
+            self.assertIn("1 new untagged VP-V references", out)
+            self.assertIn("allow-list untagged ref [1]", out)
+            self.tearDown()
+            self.setUp()
+            chg.ALLOW_UNTAGGED_REFS = [entry(r"mon\.SetNovelMode\(2\);")]
+            rc, out = self._added("mon.SetNovelMode(2);")   # different position: still honoured (not a line number)
+            self.assertEqual(rc, 0, out)
+            self.tearDown()
+            self.setUp()
+            chg.ALLOW_UNTAGGED_REFS = [entry(r"mon\.SetNovelMode\(2\);")]
+            rc, out = self._added("mon.SetNovelMode(2);", "mon.SetNovelMode(2);")   # two matches: ambiguous, nothing honoured
+            self.assertEqual(rc, 1, out)
+            self.assertIn("2 new untagged VP-V references", out)
+        finally:
+            chg.ALLOW_UNTAGGED_REFS = old
+
+    def test_waiver_entries_name_the_waiver_and_expiry(self):
+        for e in chg.ALLOW_UNTAGGED_REFS:
+            self.assertIn("WAIVER-", e["reason"], e["pattern"])
+            self.assertIn("Expires", e["reason"], e["pattern"])
+            self.assertTrue(os.path.isfile(os.path.join(ROOT, *e["file"].split("/"))), e["file"])
+
     def test_p4_relocated_host_members_collect_frame_hooks_and_draw_frame_are_allowed_callees(self):
         rx = [e["callee"] for e in chg.ALLOW_CALLEES if "OrderFrameSlotHooks" in e["callee"]]
         self.assertEqual(len(rx), 1)

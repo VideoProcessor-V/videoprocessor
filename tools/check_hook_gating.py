@@ -191,6 +191,25 @@ ALLOW_SITES = [
                "collision GRANTED). Honoured by the --since VP-V symbol report only; proof: UntaggedVpReferenceTest."},
 ]
 
+# Waived added lines for the --since VP-V symbol report. Keyed by the code of the added line (a regex on the line with
+# comments and strings stripped, NOT a line number, so the entry survives a rebase). An entry is honoured only when it
+# matches EXACTLY ONE added line of its file in the run (zero = not reached, more than one = ambiguous: nothing honoured,
+# the lines are flagged). Every entry names its waiver and expiry.
+_P3_WAIVER = ("WAIVER-P3-ALIAS-REPOINT (coordinator 2026-11-12 11:30 ruling 2, conditional; condition met: the Phase 3 opus "
+              "gate r2-phase3-opus-gate.md confirmed 8/8 lines are re-points of an existing alias read, no new site). "
+              "Expires at the re-graft. Proof: UntaggedVpReferenceTest, r2-phase3-opus-gate.md.")
+_LVR = "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
+ALLOW_UNTAGGED_REFS = [
+    {"file": _LVR, "pattern": r"^\t{3}renderAheadPresenter\.creditFrames\.load\(std::memory_order_relaxed\), ratio,\s*$", "reason": _P3_WAIVER},
+    {"file": _LVR, "pattern": r"^\t{4}renderAheadPresenter\.creditFrames\.store\(0, std::memory_order_release\);\s*$", "reason": _P3_WAIVER},
+    {"file": _LVR, "pattern": r"^\t{4}renderAheadPresenter\.mainInterval = plan\.nextInterval;\s*$", "reason": _P3_WAIVER},
+    {"file": _LVR, "pattern": r"const bool ditherOwnOnExtras = activeSettings\.ditherVectorsOwn && !renderAheadPresenter\.l1;", "reason": _P3_WAIVER},
+    {"file": _LVR, "pattern": r"^\t{3}renderAheadPresenter\.mainInterval = plan\.nextInterval;\s*$", "reason": _P3_WAIVER},
+    {"file": _LVR, "pattern": r"renderAheadPresenter\.creditFrames\.store\(activeSettings\.renderAheadQueueCredit \?", "reason": _P3_WAIVER},
+    {"file": _LVR, "pattern": r"diag\.mainInterval = static_cast<int>\(presentPlan\.interval\);", "reason": _P3_WAIVER},
+    {"file": _LVR, "pattern": r"m_impl->renderAheadPresenter\.estimatedLeadMs\.load\(std::memory_order_relaxed\);", "reason": _P3_WAIVER},
+]
+
 
 HOOK_MARK_RE = re.compile(r"//\s*VPV-HOOK(?![-\w])")
 MANIFEST_PATH = "docs/audit/hook-sites.json"
@@ -1243,8 +1262,17 @@ def untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_us
         hooks = hook_line_set(text)
         lines = text.splitlines()
         code = strip_code(text).splitlines()
-        for n in sorted(added):
-            if n in hooks or n > len(code):
+        cand = [n for n in sorted(added) if n not in hooks and n <= len(code)]
+        waived = {}   # line -> ALLOW_UNTAGGED_REFS index; an entry counts only when it matches exactly one added line
+        for k, e in enumerate(ALLOW_UNTAGGED_REFS):
+            if e["file"] == rel:
+                m = [n for n in cand if re.search(e["pattern"], code[n - 1])]
+                if len(m) == 1:
+                    waived[m[0]] = k
+        for n in cand:
+            if n in waived:
+                if allow_used is not None:
+                    allow_used[("untag", waived[n])] = allow_used.get(("untag", waived[n]), 0) + 1
                 continue
             hit = sorted(syms.intersection(IDENT_RE.findall(code[n - 1])))
             for k, e in enumerate(ALLOW_SITES):   # granted name collisions: drop the named symbol (entry key "symbol")
@@ -1357,6 +1385,9 @@ def render(res):
     for k, e in enumerate(ALLOW_SITES):
         n = res["allow_used"].get("site:%d" % k, 0)
         out.append("  allow-list site [%d] %s /%s/: %s" % (n, e["file"], e["pattern"], e["reason"]))
+    if res.get("since"):
+        for k, e in enumerate(ALLOW_UNTAGGED_REFS):
+            out.append("  allow-list untagged ref [%d] %s /%s/: %s" % (res["allow_used"].get("untag:%d" % k, 0), e["file"], e["pattern"], e["reason"]))
     for kind, k in res["stale_allow"]:
         out.append("  stale allow-list entry (no site uses it, may be deleted): %s %d" % (kind, k))
     for name, (rel, line, verified) in sorted(res["gated"].items()):
