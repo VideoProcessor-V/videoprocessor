@@ -239,6 +239,7 @@ UI (relayed 2026-11-07). Each row: the test, what his UI does now, and the failu
 |---|---|---|---|---|
 | SID-R2-REBASE-KM | `rebase_kernel_match` default | Default changed from on to OFF (owner decision 2026-11-07: kernel matching / kernel-inverse PARKED, neutral downscale). Regenerated: VpvTierTable.generated.h, MASTER-SETTINGS.md, control/config/README.md, VP-settings-reference.md, cpu-defaults.golden.txt (waiver, see the hand-back). | the key still exists; On restores the kernel-matched re-base | default change |
 | SID-R2-SINGLE-AXIS | `SourceResolutionMonitor::AutoFactors` (consensus per-axis path only) | Exactly one axis re-based below native is detected and logged ("source_id: single-axis re-base held"), not applied, unless `SetSingleAxisRebase(true)` (re-base only two-axis-confirmed conventional pairs). The classical path is untouched. | `SetSingleAxisRebase(true)` | default change (VP-V consensus path, not Bill's) |
+| U12-SQ-CONSENSUS | `source_quality` readers (r2/u12-sq 83f9dfeea) | With the non-default diagnostic env `VP_SOURCE_ID_CONSENSUS=on`, deband / detail pulse / adaptive scaling read min(classical, consensus record level) through the one P14 view (identity/README.md:127/:185). | Env unset: bit-identical to before | VP-V internal, no Bill behaviour change (registered as a fix by the coordinator) |
 
 ## Open (not yet a row)
 
