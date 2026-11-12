@@ -1098,7 +1098,7 @@ namespace Tests
 			}
 			// The uniform 2/3 reading on the same scope raster (the classical tracker's form) engages too.
 			const SidConv::Run u = SidCrop::DriveOn(SidCrop::UniformOn(2.0 / 3.0, 1920, 800), 1920, 800, true);
-			Assert::AreEqual(2.0 / 3.0, u.fx, 1e-9, SidConv::W16(u.trace).c_str());
+			Assert::AreEqual(2.0 / 3.0, u.fx, 2.0 / 800, SidConv::W16(u.trace).c_str());   // whole source lines (534 of 800)
 			Assert::IsTrue(u.note.empty());
 		}
 
