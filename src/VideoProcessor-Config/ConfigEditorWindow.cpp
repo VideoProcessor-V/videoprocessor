@@ -6523,6 +6523,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         { "balanced", "Balanced", "Uses a moderate queue for ordinary playback.", 16, 3, 2, 75 },
         { "reliable", "Reliable", "Uses a larger queue for the most resilient playback; holds 4 frames ahead for the motion vectors.", 32, 4, 5, 75 },
     };
+    // HELD-CFG-09 (DIV-CFG-09): the Original pathway is Bill's preset values exactly (origin v1.4.02-beta).
+    static constexpr QueuePolicy billQueuePolicies[] = {
+        { "low_latency", "Low latency", "Keeps at most two VP queue frames; targets one frame.", 2, 0, 1, 75 },
+        { "balanced", "Balanced", "Uses a moderate queue for ordinary playback.", 16, 3, 2, 75 },
+        { "reliable", "Reliable", "Uses a larger queue for the most resilient playback.", 32, 4, 3, 75 },
+    };
+    const auto activeQueuePolicies = [this]() -> const QueuePolicy (&)[3] { return originalPathwayOn() ? billQueuePolicies : queuePolicies; };   // VPV-HOOK (HELD-CFG-09)
     auto state = std::make_shared<State>();
     auto fields = std::make_shared<std::vector<Field>>();
     std::function<void()> updateOutputCompatibility = [] {};
@@ -7080,7 +7087,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             [this, state, key](int selected)
         {
             if (state->loading || state->section.isEmpty() || !document_) return;
-            if (Vpv::QueueIntegerEdited(this, key, selected)) { document_->RemoveKnown(state->section.toStdString(), key.toStdString().c_str()); markDirty(); return; }   // VPV-HOOK (VP-V look-ahead: Auto = an absent key; the explicit-0 notice)
+            if (Vpv::QueueIntegerEdited(originalPathwayOn(), this, key, selected)) { document_->RemoveKnown(state->section.toStdString(), key.toStdString().c_str()); markDirty(); return; }   // VPV-HOOK (VP-V look-ahead: Auto = an absent key; the explicit-0 notice)
             document_->SetKnown(state->section.toStdString(),
                 key.toStdString().c_str(), std::to_string(selected));
             markDirty();
@@ -7665,7 +7672,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         queuePolicy->setObjectName(QStringLiteral("config.queue.policy_preset"));
         queuePolicy->setAccessibleName(QStringLiteral("Queue buffering policy"));
         queuePolicy->addItem(QStringLiteral("Custom"), QString());
-        for (const QueuePolicy& policy : queuePolicies)
+        for (const QueuePolicy& policy : activeQueuePolicies())
             queuePolicy->addItem(QString::fromLatin1(policy.label),
                 QString::fromLatin1(policy.id));
         form->addRow(QStringLiteral("Buffering policy"), queuePolicy);
@@ -11750,7 +11757,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     else detailLayout->addWidget(profileFields);
     detailLayout->addStretch();
 
-    const auto updateQueuePolicyPresentation = [queuePolicy, queuePolicySummary,
+    const auto updateQueuePolicyPresentation = [this, activeQueuePolicies, queuePolicy, queuePolicySummary,
         profileFields]()
     {
         if (!queuePolicy) return;
@@ -11766,7 +11773,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         }
         else
         {
-            for (const QueuePolicy& policy : queuePolicies)
+            for (const QueuePolicy& policy : activeQueuePolicies())
                 if (selectedId == QString::fromLatin1(policy.id))
                 {
                     queuePolicySummary->setText(QString::fromLatin1(policy.summary));
@@ -11774,7 +11781,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 }
         }
     };
-    const auto updateQueuePolicyFromValues = [fields, queuePolicy,
+    const auto updateQueuePolicyFromValues = [this, activeQueuePolicies, fields, queuePolicy,
         updateQueuePolicyPresentation]()
     {
         if (!queuePolicy) return;
@@ -11786,11 +11793,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             return -1;
         };
         QString policyId;
-        for (const QueuePolicy& policy : queuePolicies)
+        for (const QueuePolicy& policy : activeQueuePolicies())
             if (queueValue(QStringLiteral("queue_size")) == policy.capacity &&
                 queueValue(QStringLiteral("lead_frames")) == policy.lead &&
                 queueValue(QStringLiteral("target_frames")) == policy.target &&
-                queueValue(QStringLiteral("target_latency_ms")) <= 0 &&
+                (originalPathwayOn() || queueValue(QStringLiteral("target_latency_ms")) <= 0) &&
                 queueValue(QStringLiteral("startup_preroll_frames")) == 0 &&
                 queueValue(QStringLiteral("active_picture_lookahead_frames")) == 0 &&
                 queueValue(QStringLiteral("reset_after_render_restart_seconds")) == 5 &&
@@ -11940,7 +11947,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             }
             if (sectionPrefix == QStringLiteral("queue"))
             {
-                { const QString vpv = Vpv::QueueFallback(key); if (!vpv.isEmpty()) return vpv; }   // VPV-HOOK (target_latency_ms 0, look-ahead auto)
+                { const QString vpv = Vpv::QueueFallback(originalPathwayOn(), key); if (!vpv.isEmpty()) return vpv; }   // VPV-HOOK (target_latency_ms 0, look-ahead auto)
                 if (key == QStringLiteral("queue_size")) return QStringLiteral("32");
                 if (key == QStringLiteral("lead_frames")) return QStringLiteral("1");
                 if (key == QStringLiteral("target_frames")) return QStringLiteral("4");
@@ -12118,11 +12125,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                  field.key == QStringLiteral("diagnostic_disable_shader_cache"));
             const bool defaultOnlyField = defaultOnlyRendererField;
             QString configured = raw;
-            const bool ownOnlyQueueField = Vpv::QueueOwnOnlyField(sectionPrefix, field.key);   // VPV-HOOK (low_latency_path is never inherited)
+            const bool ownOnlyQueueField = Vpv::QueueOwnOnlyField(originalPathwayOn(), sectionPrefix, field.key);   // VPV-HOOK (low_latency_path is never inherited)
 			if (!requiresExplicitValue && !ownOnlyQueueField && configured.isEmpty() && list->count() > 0)
                 configured = defaultProfile ? fallback(field.key) :
                     profileValue(list->item(0)->data(Qt::UserRole).toString(), field.key);
-			if (Vpv::QueueDelayShowsOff(sectionPrefix, defaultProfile, raw, field.key, [&] { return !value(section, QStringLiteral("target_frames")).isEmpty() || !value(section, QStringLiteral("steady_reserve_frames")).isEmpty(); })) configured = QStringLiteral("0");   // VPV-HOOK (own Target frames: the delay shows Off)
+			if (Vpv::QueueDelayShowsOff(originalPathwayOn(), sectionPrefix, defaultProfile, raw, field.key, [&] { return !value(section, QStringLiteral("target_frames")).isEmpty() || !value(section, QStringLiteral("steady_reserve_frames")).isEmpty(); })) configured = QStringLiteral("0");   // VPV-HOOK (own Target frames: the delay shows Off)
 			if (!requiresExplicitValue && configured.isEmpty())
 				configured = fallback(field.key);
             const auto concreteChoice = [&](QString choice) {
@@ -12228,7 +12235,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 else qobject_cast<QLineEdit*>(field.widget)->setText(displayed);
             }
             else if (field.kind == Field::Integer)
-                qobject_cast<QSpinBox*>(field.widget)->setValue(Vpv::QueueLoadedInteger(field.widget, configured));   // VPV-HOOK (VP-V look-ahead: absent/auto = Auto; explicit-0 notice)
+                qobject_cast<QSpinBox*>(field.widget)->setValue(Vpv::QueueLoadedInteger(originalPathwayOn(), field.widget, configured));   // VPV-HOOK (VP-V look-ahead: absent/auto = Auto; explicit-0 notice)
             else if (field.kind == Field::SdrGamma)
             {
                 const QString mode = configured.toLower();
@@ -12345,7 +12352,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 }
                 if (hasUnspecifiedChoice && scalingAutoChoice && !defaultProfile)
                     combo->setItemText(0, QStringLiteral("Inherit from default profile"));
-                if (hasUnspecifiedChoice && ownOnlyQueueField && raw.isEmpty()) combo->setItemText(0, Vpv::QueueLowLatencyUnsetText(section));   // VPV-HOOK
+                if (hasUnspecifiedChoice && ownOnlyQueueField && raw.isEmpty()) combo->setItemText(0, Vpv::QueueLowLatencyUnsetText(originalPathwayOn(), section));   // VPV-HOOK
                 const int effectiveIndex = combo->findData(configured, Qt::UserRole, Qt::MatchFixedString);
                 int index = raw.isEmpty() ?
                     (hideUnspecifiedChoice || !hasUnspecifiedChoice ? effectiveIndex : 0) :
@@ -12454,7 +12461,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 }
             }
         state->loading = false;
-		if (sectionPrefix == QStringLiteral("queue")) Vpv::RefreshQueueRows(*fields);   // VPV-HOOK (VP-V's queue target follows the loaded fields)
+		if (sectionPrefix == QStringLiteral("queue")) Vpv::RefreshQueueRows(originalPathwayOn(), *fields);   // VPV-HOOK (VP-V's queue target follows the loaded fields)
 		// VP-V organisation pass (2026-10-24, src/VP-V/config/VpvOrganisation.h): the VP-V page moves some
 		// of this profile's sections and rows onto its unit tabs (still bound to this profile), so a
 		// lookup that misses profileFields also searches the whole editor (the names are unique there).
@@ -12632,7 +12639,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 advanced->setChecked(true);
         });
         connect(queuePolicy, qOverload<int>(&QComboBox::currentIndexChanged), this,
-            [this, queuePolicy, state, fields, updateQueuePolicyPresentation](int index)
+            [this, activeQueuePolicies, queuePolicy, state, fields, updateQueuePolicyPresentation](int index)
         {
             if (state->loading || state->section.isEmpty() || !document_ || index < 0) return;
             const QString selectedId = queuePolicy->itemData(index).toString();
@@ -12642,7 +12649,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 return;
             }
             const QueuePolicy* selected = nullptr;
-            for (const QueuePolicy& policy : queuePolicies)
+            for (const QueuePolicy& policy : activeQueuePolicies())
                 if (selectedId == QString::fromLatin1(policy.id)) { selected = &policy; break; }
             if (!selected) return;
             const std::string section = state->section.toStdString();
@@ -12655,7 +12662,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             setValue("startup_preroll_frames", 0);
             setValue("target_frames", selected->target);
             setValue("active_picture_lookahead_frames", 0);
-            Vpv::QueuePresetWrites(*document_, section);   // VPV-HOOK (VP-V: the preset switches the delay off and keeps the look-ahead Auto)
+            Vpv::QueuePresetWrites(originalPathwayOn(), *document_, section);   // VPV-HOOK (VP-V: the preset switches the delay off and keeps the look-ahead Auto)
             setValue("reset_after_render_restart_seconds", 5);
             setValue("reset_queue_too_large_percent", selected->resetPercent);
             for (const Field& field : *fields)
@@ -12667,11 +12674,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     else if (field.key == QStringLiteral("target_frames")) value = selected->target;
                     else if (field.key == QStringLiteral("reset_after_render_restart_seconds")) value = 5;
                     else if (field.key == QStringLiteral("reset_queue_too_large_percent")) value = selected->resetPercent;
-                    else if (field.key == QStringLiteral("active_picture_lookahead_frames")) value = -1;   // VPV-HOOK (VP-V's control: Auto; Bill's 0..8 shows 0)
+                    else if (field.key == QStringLiteral("active_picture_lookahead_frames") && !originalPathwayOn()) value = -1;   // VPV-HOOK (VP-V's control: Auto; Bill's 0..8 shows 0)
                     QSignalBlocker blocker(field.widget);
                     qobject_cast<QSpinBox*>(field.widget)->setValue(value);
                 }
-            Vpv::QueuePresetApplied(*fields, state->section, selectedId);   // VPV-HOOK (low-latency path, queue target and its note)
+            Vpv::QueuePresetApplied(originalPathwayOn(), *fields, state->section, selectedId);   // VPV-HOOK (low-latency path, queue target and its note)
             markDirty();
             updateQueuePolicyPresentation();
         });
@@ -12805,7 +12812,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     auto* profileList = new ProfileListController(this, this, list, add,
         remove, up, down, std::move(listPolicy));
     profileList->setCurrentChanged(loadDetails);
-    if (sectionPrefix == QStringLiteral("vprenderer.scaling"))
+    if (sectionPrefix == QStringLiteral("vprenderer.scaling") || sectionPrefix == QStringLiteral("queue"))
         pathwayRefreshers_.add([list, loadDetails] { loadDetails(list->currentItem()); });   // VPV-HOOK
     std::function<void(const QString&)> refresh = [profileList](const QString& wanted)
         { profileList->refresh(wanted); };

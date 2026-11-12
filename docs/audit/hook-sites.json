@@ -505,10 +505,10 @@
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0015",
+   "id": "CEW.cpp-0016",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 6622,
-   "end": 6622,
+   "start": 6629,
+   "end": 6629,
    "anchor": {
     "symbol": "Vpv::AddVpvProfileUseRows(sectionPrefix, title, list, rule, ",
     "before": [
@@ -528,10 +528,10 @@
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0016",
+   "id": "CEW.cpp-0017",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 7083,
-   "end": 7083,
+   "start": 7090,
+   "end": 7090,
    "anchor": {
     "symbol": "connect(spin, qOverload<int>(&QSpinBox::valueChanged), this,",
     "before": [
@@ -543,18 +543,18 @@
     ]
    },
    "lines": [
-    "            if (Vpv::QueueIntegerEdited(this, key, selected)) { document_->RemoveKnown(state->section.toStdString(), key.toStdString().c_str()); markDirty(); return; }   // VPV-HOOK (VP-V look-ahead: Auto = an absent key; the explicit-0 notice)"
+    "            if (Vpv::QueueIntegerEdited(originalPathwayOn(), this, key, selected)) { document_->RemoveKnown(state->section.toStdString(), key.toStdString().c_str()); markDirty(); return; }   // VPV-HOOK (VP-V look-ahead: Auto = an absent key; the explicit-0 notice)"
    ],
-   "text": "if (Vpv::QueueIntegerEdited(this, key, selected)) { document_->RemoveKnown(state->section.toStdString(), key.toStdString().c_str()); markDirty(); return; }",
-   "gate": "inert",
+   "text": "if (Vpv::QueueIntegerEdited(originalPathwayOn(), this, key, selected)) { document_->RemoveKnown(state->section.toStdString(), key.toStdString().c_str()); markDirty(); return; }",
+   "gate": "gated-enclosing",
    "seam": null,
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0017",
+   "id": "CEW.cpp-0018",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 7693,
-   "end": 7693,
+   "start": 7700,
+   "end": 7700,
    "anchor": {
     "symbol": ", QueueLatency::MaxTargetLatencyMs, [](const QString& text)",
     "before": [
@@ -574,10 +574,10 @@
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0018",
+   "id": "CEW.cpp-0019",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 9465,
-   "end": 9478,
+   "start": 9472,
+   "end": 9485,
    "anchor": {
     "symbol": "ConfigEditorWindow::createProfilePage",
     "before": [
@@ -610,10 +610,10 @@
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0019",
+   "id": "CEW.cpp-0020",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11258,
-   "end": 11258,
+   "start": 11265,
+   "end": 11265,
    "anchor": {
     "symbol": "Vpv::AddVpvScalingRows(form, addChoice, addRendererAutoStatu",
     "before": [
@@ -633,10 +633,10 @@
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0020",
+   "id": "CEW.cpp-0021",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 11943,
-   "end": 11943,
+   "start": 11950,
+   "end": 11950,
    "anchor": {
     "symbol": "auto fallback = [this, sectionPrefix, section, preservePrese",
     "before": [
@@ -648,18 +648,18 @@
     ]
    },
    "lines": [
-    "                { const QString vpv = Vpv::QueueFallback(key); if (!vpv.isEmpty()) return vpv; }   // VPV-HOOK (target_latency_ms 0, look-ahead auto)"
+    "                { const QString vpv = Vpv::QueueFallback(originalPathwayOn(), key); if (!vpv.isEmpty()) return vpv; }   // VPV-HOOK (target_latency_ms 0, look-ahead auto)"
    ],
-   "text": "{ const QString vpv = Vpv::QueueFallback(key); if (!vpv.isEmpty()) return vpv; }",
+   "text": "{ const QString vpv = Vpv::QueueFallback(originalPathwayOn(), key); if (!vpv.isEmpty()) return vpv; }",
    "gate": "inert",
    "seam": null,
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0021",
+   "id": "CEW.cpp-0022",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12121,
-   "end": 12121,
+   "start": 12128,
+   "end": 12128,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -671,18 +671,18 @@
     ]
    },
    "lines": [
-    "            const bool ownOnlyQueueField = Vpv::QueueOwnOnlyField(sectionPrefix, field.key);   // VPV-HOOK (low_latency_path is never inherited)"
+    "            const bool ownOnlyQueueField = Vpv::QueueOwnOnlyField(originalPathwayOn(), sectionPrefix, field.key);   // VPV-HOOK (low_latency_path is never inherited)"
    ],
-   "text": "const bool ownOnlyQueueField = Vpv::QueueOwnOnlyField(sectionPrefix, field.key);",
-   "gate": "non-pathway",
+   "text": "const bool ownOnlyQueueField = Vpv::QueueOwnOnlyField(originalPathwayOn(), sectionPrefix, field.key);",
+   "gate": "gated",
    "seam": null,
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0022",
+   "id": "CEW.cpp-0023",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12125,
-   "end": 12125,
+   "start": 12132,
+   "end": 12132,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -694,18 +694,18 @@
     ]
    },
    "lines": [
-    "\t\t\tif (Vpv::QueueDelayShowsOff(sectionPrefix, defaultProfile, raw, field.key, [&] { return !value(section, QStringLiteral(\"target_frames\")).isEmpty() || !value(section, QStringLiteral(\"steady_reserve_frames\")).isEmpty(); })) configured = QStringLiteral(\"0\");   // VPV-HOOK (own Target frames: the delay shows Off)"
+    "\t\t\tif (Vpv::QueueDelayShowsOff(originalPathwayOn(), sectionPrefix, defaultProfile, raw, field.key, [&] { return !value(section, QStringLiteral(\"target_frames\")).isEmpty() || !value(section, QStringLiteral(\"steady_reserve_frames\")).isEmpty(); })) configured = QStringLiteral(\"0\");   // VPV-HOOK (own Target frames: the delay shows Off)"
    ],
-   "text": "if (Vpv::QueueDelayShowsOff(sectionPrefix, defaultProfile, raw, field.key, [&] { return !value(section, QStringLiteral(\"target_frames\")).isEmpty() || !value(section, QStringLiteral(\"steady_reserve_frames\")).isEmpty(); })) configured = QStringLiteral(\"0\");",
-   "gate": "inert",
+   "text": "if (Vpv::QueueDelayShowsOff(originalPathwayOn(), sectionPrefix, defaultProfile, raw, field.key, [&] { return !value(section, QStringLiteral(\"target_frames\")).isEmpty() || !value(section, QStringLiteral(\"steady_reserve_frames\")).isEmpty(); })) configured = QStringLiteral(\"0\");",
+   "gate": "gated-enclosing",
    "seam": null,
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0023",
+   "id": "CEW.cpp-0024",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12131,
-   "end": 12131,
+   "start": 12138,
+   "end": 12138,
    "anchor": {
     "symbol": "const auto concreteChoice = [&](QString choice)",
     "before": [
@@ -725,10 +725,10 @@
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0024",
+   "id": "CEW.cpp-0025",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12213,
-   "end": 12213,
+   "start": 12220,
+   "end": 12220,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -748,10 +748,10 @@
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0025",
+   "id": "CEW.cpp-0026",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12231,
-   "end": 12231,
+   "start": 12238,
+   "end": 12238,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -763,18 +763,18 @@
     ]
    },
    "lines": [
-    "                qobject_cast<QSpinBox*>(field.widget)->setValue(Vpv::QueueLoadedInteger(field.widget, configured));   // VPV-HOOK (VP-V look-ahead: absent/auto = Auto; explicit-0 notice)"
+    "                qobject_cast<QSpinBox*>(field.widget)->setValue(Vpv::QueueLoadedInteger(originalPathwayOn(), field.widget, configured));   // VPV-HOOK (VP-V look-ahead: absent/auto = Auto; explicit-0 notice)"
    ],
-   "text": "qobject_cast<QSpinBox*>(field.widget)->setValue(Vpv::QueueLoadedInteger(field.widget, configured));",
+   "text": "qobject_cast<QSpinBox*>(field.widget)->setValue(Vpv::QueueLoadedInteger(originalPathwayOn(), field.widget, configured));",
    "gate": "declaration",
    "seam": null,
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0026",
+   "id": "CEW.cpp-0027",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12348,
-   "end": 12348,
+   "start": 12355,
+   "end": 12355,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -786,18 +786,18 @@
     ]
    },
    "lines": [
-    "                if (hasUnspecifiedChoice && ownOnlyQueueField && raw.isEmpty()) combo->setItemText(0, Vpv::QueueLowLatencyUnsetText(section));   // VPV-HOOK"
+    "                if (hasUnspecifiedChoice && ownOnlyQueueField && raw.isEmpty()) combo->setItemText(0, Vpv::QueueLowLatencyUnsetText(originalPathwayOn(), section));   // VPV-HOOK"
    ],
-   "text": "if (hasUnspecifiedChoice && ownOnlyQueueField && raw.isEmpty()) combo->setItemText(0, Vpv::QueueLowLatencyUnsetText(section));",
-   "gate": "non-pathway",
+   "text": "if (hasUnspecifiedChoice && ownOnlyQueueField && raw.isEmpty()) combo->setItemText(0, Vpv::QueueLowLatencyUnsetText(originalPathwayOn(), section));",
+   "gate": "gated",
    "seam": null,
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0027",
+   "id": "CEW.cpp-0028",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12457,
-   "end": 12457,
+   "start": 12464,
+   "end": 12464,
    "anchor": {
     "symbol": "auto loadDetails = [this, state, fields, legacyPresetCompati",
     "before": [
@@ -809,18 +809,18 @@
     ]
    },
    "lines": [
-    "\t\tif (sectionPrefix == QStringLiteral(\"queue\")) Vpv::RefreshQueueRows(*fields);   // VPV-HOOK (VP-V's queue target follows the loaded fields)"
+    "\t\tif (sectionPrefix == QStringLiteral(\"queue\")) Vpv::RefreshQueueRows(originalPathwayOn(), *fields);   // VPV-HOOK (VP-V's queue target follows the loaded fields)"
    ],
-   "text": "if (sectionPrefix == QStringLiteral(\"queue\")) Vpv::RefreshQueueRows(*fields);",
-   "gate": "non-pathway",
+   "text": "if (sectionPrefix == QStringLiteral(\"queue\")) Vpv::RefreshQueueRows(originalPathwayOn(), *fields);",
+   "gate": "gated",
    "seam": null,
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0028",
+   "id": "CEW.cpp-0029",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12658,
-   "end": 12658,
+   "start": 12665,
+   "end": 12665,
    "anchor": {
     "symbol": "connect(queuePolicy, qOverload<int>(&QComboBox::currentIndex",
     "before": [
@@ -832,18 +832,18 @@
     ]
    },
    "lines": [
-    "            Vpv::QueuePresetWrites(*document_, section);   // VPV-HOOK (VP-V: the preset switches the delay off and keeps the look-ahead Auto)"
+    "            Vpv::QueuePresetWrites(originalPathwayOn(), *document_, section);   // VPV-HOOK (VP-V: the preset switches the delay off and keeps the look-ahead Auto)"
    ],
-   "text": "Vpv::QueuePresetWrites(*document_, section);",
-   "gate": "non-pathway",
+   "text": "Vpv::QueuePresetWrites(originalPathwayOn(), *document_, section);",
+   "gate": "gated",
    "seam": null,
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0029",
+   "id": "CEW.cpp-0030",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12670,
-   "end": 12670,
+   "start": 12677,
+   "end": 12677,
    "anchor": {
     "symbol": "connect(queuePolicy, qOverload<int>(&QComboBox::currentIndex",
     "before": [
@@ -855,18 +855,18 @@
     ]
    },
    "lines": [
-    "                    else if (field.key == QStringLiteral(\"active_picture_lookahead_frames\")) value = -1;   // VPV-HOOK (VP-V's control: Auto; Bill's 0..8 shows 0)"
+    "                    else if (field.key == QStringLiteral(\"active_picture_lookahead_frames\") && !originalPathwayOn()) value = -1;   // VPV-HOOK (VP-V's control: Auto; Bill's 0..8 shows 0)"
    ],
-   "text": "else if (field.key == QStringLiteral(\"active_picture_lookahead_frames\")) value = -1;",
-   "gate": "non-pathway",
+   "text": "else if (field.key == QStringLiteral(\"active_picture_lookahead_frames\") && !originalPathwayOn()) value = -1;",
+   "gate": "guarded",
    "seam": null,
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0030",
+   "id": "CEW.cpp-0031",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12674,
-   "end": 12674,
+   "start": 12681,
+   "end": 12681,
    "anchor": {
     "symbol": "connect(queuePolicy, qOverload<int>(&QComboBox::currentIndex",
     "before": [
@@ -878,23 +878,23 @@
     ]
    },
    "lines": [
-    "            Vpv::QueuePresetApplied(*fields, state->section, selectedId);   // VPV-HOOK (low-latency path, queue target and its note)"
+    "            Vpv::QueuePresetApplied(originalPathwayOn(), *fields, state->section, selectedId);   // VPV-HOOK (low-latency path, queue target and its note)"
    ],
-   "text": "Vpv::QueuePresetApplied(*fields, state->section, selectedId);",
-   "gate": "non-pathway",
+   "text": "Vpv::QueuePresetApplied(originalPathwayOn(), *fields, state->section, selectedId);",
+   "gate": "gated",
    "seam": null,
    "expiry": null
   },
   {
-   "id": "CEW.cpp-0031",
+   "id": "CEW.cpp-0032",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "start": 12809,
-   "end": 12809,
+   "start": 12816,
+   "end": 12816,
    "anchor": {
     "symbol": "ConfigEditorWindow::createProfilePage",
     "before": [
      "profileList->setCurrentChanged(loadDetails);",
-     "if (sectionPrefix == QStringLiteral(\"vprenderer.scaling\"))"
+     "if (sectionPrefix == QStringLiteral(\"vprenderer.scaling\") || sectionPrefix == QStringLiteral(\"queue\"))"
     ],
     "after": [
      "std::function<void(const QString&)> refresh = [profileList](const QString& wanted)"
@@ -1101,8 +1101,8 @@
   {
    "id": "CEWT.cpp-0004",
    "file": "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp",
-   "start": 12444,
-   "end": 12444,
+   "start": 12589,
+   "end": 12589,
    "anchor": {
     "symbol": "main",
     "before": [
@@ -1124,8 +1124,8 @@
   {
    "id": "CEWT.cpp-0005",
    "file": "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp",
-   "start": 12460,
-   "end": 12460,
+   "start": 12605,
+   "end": 12605,
    "anchor": {
     "symbol": "main",
     "before": [
@@ -1147,8 +1147,8 @@
   {
    "id": "CEWT.cpp-0006",
    "file": "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp",
-   "start": 12732,
-   "end": 12734,
+   "start": 12880,
+   "end": 12882,
    "anchor": {
     "symbol": "main",
     "before": [

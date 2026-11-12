@@ -278,8 +278,9 @@ namespace Vpv
 
 	// VP-V's built-in values of its queue keys (before Bill's queue fallbacks): no delay, look-ahead Auto.
 	// Empty = not VP-V's (Bill's fallback applies). Bill's own look-ahead control reads "auto" as 0.
-	inline QString QueueFallback(const QString& key)
+	inline QString QueueFallback(bool originalPathway, const QString& key)   // VPV-GATED
 	{
+		if (originalPathway) return QString();   // Original: Bill's own fallbacks (his look-ahead shows 0)
 		if (key == QStringLiteral("target_latency_ms")) return QStringLiteral("0");
 		if (key == QueueRowsDetail::LookaheadKey()) return QStringLiteral("auto");
 		return QString();
@@ -287,25 +288,28 @@ namespace Vpv
 
 	// VP never inherits low_latency_path from the default queue (RendererProfileConfig: unset = on only for
 	// the name Low_Latency); second pass, audit 2026-10-16.
-	inline bool QueueOwnOnlyField(const QString& sectionPrefix, const QString& key)
+	inline bool QueueOwnOnlyField(bool originalPathway, const QString& sectionPrefix, const QString& key)   // VPV-GATED
 	{
+		if (originalPathway) return false;
 		return sectionPrefix == QStringLiteral("queue") && key == QStringLiteral("low_latency_path");
 	}
 
 	// Stage 5, as VP reads it: a queue's own Target frames switches off a delay it would inherit, so
 	// Target delay shows Off rather than the default's. `ownFrames`: the profile sets target_frames (or its
 	// legacy alias steady_reserve_frames).
-	inline bool QueueDelayShowsOff(const QString& sectionPrefix, bool defaultProfile, const QString& raw,
-		const QString& key, const std::function<bool()>& ownFrames)
+	inline bool QueueDelayShowsOff(bool originalPathway, const QString& sectionPrefix, bool defaultProfile, const QString& raw,
+		const QString& key, const std::function<bool()>& ownFrames)   // VPV-GATED
 	{
+		if (originalPathway) return false;
 		return sectionPrefix == QStringLiteral("queue") && !defaultProfile && raw.isEmpty() &&
 			key == QStringLiteral("target_latency_ms") && ownFrames && ownFrames();
 	}
 
 	// The value an Integer field shows: Bill's toInt; VP-V's look-ahead shows absent / "auto" as Auto (-1)
 	// and its explicit-0 notice (Bug hunt 3 F8: a saved explicit 0, own or inherited).
-	inline int QueueLoadedInteger(QWidget* widget, const QString& configured)
+	inline int QueueLoadedInteger(bool originalPathway, QWidget* widget, const QString& configured)   // VPV-GATED
 	{
+		if (originalPathway) return configured.toInt();   // Original: Bill's toInt, no notice
 		bool numeric = false;
 		const int number = configured.toInt(&numeric);
 		if (!QueueRowsDetail::IsVpvLookahead(widget)) return configured.toInt();
@@ -317,8 +321,9 @@ namespace Vpv
 	// An Integer field was edited (state not loading): the explicit-0 notice follows an edit of either
 	// look-ahead control; true = VP-V's Auto was chosen, the caller removes the key (an absent key, never a
 	// written number).
-	inline bool QueueIntegerEdited(QWidget* window, const QString& key, int selected)
+	inline bool QueueIntegerEdited(bool originalPathway, QWidget* window, const QString& key, int selected)   // VPV-GATED
 	{
+		if (originalPathway) return false;   // Original: Bill's own save of the value
 		if (key != QueueRowsDetail::LookaheadKey()) return false;
 		if (QLabel* notice = window ? window->findChild<QLabel*>(QueueRowsDetail::NoticeName()) : nullptr)
 			notice->setVisible(selected == 0);
@@ -327,8 +332,9 @@ namespace Vpv
 
 	// The "Not set" text of an unset low-latency path (audit 2026-10-16), as VP decides it: on only when the
 	// profile's name normalises to low_latency.
-	inline QString QueueLowLatencyUnsetText(const QString& section)
+	inline QString QueueLowLatencyUnsetText(bool originalPathway, const QString& section)   // VPV-GATED
 	{
+		if (originalPathway) return QStringLiteral("Not set");
 		const QString queueName = section.startsWith(QStringLiteral("queue."), Qt::CaseInsensitive) ? section.mid(6) : QString();
 		const bool namedLowLatency = !queueName.isEmpty() && ConfigFile::NormalizeName(queueName.toStdString()) == "low_latency";
 		return namedLowLatency ? QStringLiteral("Not set: on (the Low Latency queue)") :
@@ -337,8 +343,9 @@ namespace Vpv
 
 	// After a profile load: the queue target's mode, row and note follow the loaded Target delay.
 	template <class Fields>
-	void RefreshQueueRows(const Fields& fields)
+	void RefreshQueueRows(bool originalPathway, const Fields& fields)   // VPV-GATED
 	{
+		if (originalPathway) return;
 		for (const auto& field : fields)
 			if (field.widget)
 				if (auto* refresh = qobject_cast<QAction*>(field.widget->property(QueueRowsDetail::kRefreshProperty).value<QObject*>()))
@@ -350,8 +357,9 @@ namespace Vpv
 	// look-ahead automatic (follows the queue): the explicit value is removed (Bug hunt 3 F8 / owner
 	// decision 2026-10-17). The document ends exactly as before row c.
 	template <class Document>
-	void QueuePresetWrites(Document& document, const std::string& section)
+	void QueuePresetWrites(bool originalPathway, Document& document, const std::string& section)   // VPV-GATED
 	{
+		if (originalPathway) return;   // Original: Bill's preset writes Bill's keys only (look-ahead 0)
 		document.SetKnown(section, "target_latency_ms", "0");
 		document.RemoveKnown(section, "active_picture_lookahead_frames");
 	}
@@ -362,8 +370,9 @@ namespace Vpv
 	// Not set (the Low_Latency name rule), so a deep queue never stays on it - on a profile named
 	// Low_Latency "Not set" means on, so the other presets write off there. Then the queue target follows.
 	template <class Fields>
-	void QueuePresetApplied(const Fields& fields, const QString& section, const QString& presetId)
+	void QueuePresetApplied(bool originalPathway, const Fields& fields, const QString& section, const QString& presetId)   // VPV-GATED
 	{
+		if (originalPathway) return;
 		if (auto* path = qobject_cast<QComboBox*>(QueueRowsDetail::FieldWidget(fields, QueueRowsDetail::LowLatencyPathName())))
 		{
 			const bool namedLowLatency = section.compare(QStringLiteral("queue.low_latency"), Qt::CaseInsensitive) == 0;
@@ -371,6 +380,6 @@ namespace Vpv
 				(namedLowLatency ? path->findData(QStringLiteral("off")) : 0);
 			if (index >= 0 && path->currentIndex() != index) path->setCurrentIndex(index);
 		}
-		RefreshQueueRows(fields);
+		RefreshQueueRows(originalPathway, fields);
 	}
 }
