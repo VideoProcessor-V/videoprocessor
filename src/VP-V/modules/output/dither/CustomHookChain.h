@@ -139,6 +139,9 @@ namespace CustomHookChain
         bool QuantizerConfigured(const char* name, double& value) const;
         // Sets that parameter on the loaded quantiser for the following renders (a per-frame override; clamped to range).
         bool SetQuantizerParameter(const char* name, double value) const;
+        // Owner 2026-11-11 22:39 (doc 91:108): the sigma-delta rule's motion compensation defaults ON. A rule that sets
+        // param_motion_compensation keeps its value; applied to a quantiser that declares the parameter.
+        static const char* SigmaDeltaCompensationDefault() { return "1"; }
 
         // Stage 8b one-axis: true when `hook` is a loaded LUMA prescaler of this chain
         // (IsLumaPrescaler); the scaling stage drops it from a one-axis upscale's hook list.

@@ -3452,6 +3452,63 @@ namespace Tests
 			Assert::IsTrue(failures.empty(), WideOf(failures + "\n" + report).c_str());
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(C8MotionCompensationDefaultBeforeAfter)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(C8MotionCompensationDefaultBeforeAfter)
+		{
+			const HarnessScope harnessScope;
+			// Owner 2026-11-11 22:39 (doc 91:108): the sigma-delta's motion compensation defaults ON. BEFORE = the rule set to 0 (the
+			// shader default, the behaviour before the decision), AFTER = the rule without the parameter (the new default). REPORT:
+			// each case's capture hash before / after (+ a repeat of AFTER for determinism) and the compensation status segment.
+			// Asserted: both captures exist, AFTER shows "dither motion compensation:", BEFORE says "rule".
+			if (!RequireHardwareOrSkip("C8MotionCompensationDefaultBeforeAfter")) return;
+			const std::string here = Here();
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
+			const std::vector<std::string> saved = g_harnessShaderProfiles;
+			g_harnessShaderProfiles = { "standard.sigma_delta" };
+			const ScratchCaptureFolder shots(L"vp-c8-mc");
+			auto rule = [](bool before) {
+				return std::string("temporal_dither: auto\n"
+					"[shader.standard]\ntype: multi\nlabel: Off\n"
+					"[shader.standard.sigma_delta]\nshader_type: custom\nlabel: Temporal sigma-delta\nstage: post_resize\norder: 90\n"
+					"glsl_file: Temporal sigma-delta.glsl\n") + (before ? "param_motion_compensation: 0\n" : "");
+			};
+			struct Case { const char* name; const char* path; bool film; bool moving; };
+			const Case cases[] = { { "v210 gpu 23.976 still", "gpu", true, false }, { "v210 standard 59.94 still", "standard", false, false },
+				{ "v210 gpu 23.976 moving", "gpu", true, true } };
+			std::string failures, report;
+			for (const Case& c : cases)
+			{
+				FramePlan plan;
+				plan.captureAtSeconds = 2.5;
+				plan.retryRefusedCapture = true;
+				const bool moving = c.moving;
+				plan.step = [moving](int n) { FrameStep f; f.content = moving ? n : 0; return f; };
+				const RunResult before = Run(VideoFrameEncoding::V210, c.path, 4.0, c.film, rule(true), false, &plan);
+				const RunResult after = Run(VideoFrameEncoding::V210, c.path, 4.0, c.film, rule(false), false, &plan);
+				const RunResult after2 = Run(VideoFrameEncoding::V210, c.path, 4.0, c.film, rule(false), false, &plan);
+				const std::string b = CaptureHash(before), a = CaptureHash(after), a2 = CaptureHash(after2);
+				auto segmentOf = [](const RunResult& r) {
+					const size_t at = r.dejudderStatus.find("dither motion compensation:");
+					return at == std::string::npos ? std::string() : r.dejudderStatus.substr(at);
+				};
+				report += std::string("== ") + c.name + ": before (rule 0) " + b + ", after (default) " + a + ", after again " + a2 +
+					(a == b ? " (UNCHANGED)" : " (CHANGED)") + (a == a2 ? "" : " (after not deterministic)") +
+					"\n  before: " + segmentOf(before) + "\n  after: " + segmentOf(after) + "\n  fallbacks after: " + after.fallbacksStatus + "\n";
+				if (b.empty() || a.empty())
+					failures += std::string(c.name) + ": a capture is missing; ";
+				if (segmentOf(after).empty())
+					failures += std::string(c.name) + ": no motion compensation status after; ";
+				if (segmentOf(before).find("rule") == std::string::npos)
+					failures += std::string(c.name) + ": before does not say the rule set 0; ";
+			}
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
+			g_harnessShaderProfiles = saved;
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(failures.empty(), WideOf(failures + "\n" + report).c_str());
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(C8DitherVectorsAutoVersusOwn)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()

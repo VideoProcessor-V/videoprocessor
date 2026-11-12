@@ -317,6 +317,9 @@ namespace CustomHookChain
                     continue;
                 }
                 entry.quantizer = IsOutputQuantizer(entry.rule.filename, entry.source);
+                // Owner 2026-11-11 22:39 (doc 91:108): the sigma-delta's motion compensation defaults ON (rule value kept).
+                if (entry.quantizer && entry.source.find("//!PARAM motion_compensation") != std::string::npos)
+                    entry.rule.parameters.emplace("motion_compensation", SigmaDeltaCompensationDefault());
                 entry.prescaler = IsLumaPrescaler(entry.source);
                 if (builtIns.empty()) builtIns = BuiltIns(values);
                 entry.usedBuiltIns = UsedBuiltInMask(entry.source, builtIns);
