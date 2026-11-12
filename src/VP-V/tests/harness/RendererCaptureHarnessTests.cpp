@@ -3390,6 +3390,125 @@ namespace Tests
 			Assert::IsTrue(logged(listed, "custom hook"), (L"auto: the listed sigma-delta loads as before\n" + listed.Tail()).c_str());
 		}
 
+		// W2-C8 (sigma-delta with motion compensation through the real renderer): the shader list rule of the C8 runs.
+		static std::string C8SigmaRule(const char* ditherVectors)
+		{
+			return std::string("temporal_dither: auto\ndither_vectors: ") + ditherVectors + "\n"
+				"[shader.standard]\ntype: multi\nlabel: Off\n"
+				"[shader.standard.sigma_delta]\nshader_type: custom\nlabel: Temporal sigma-delta\nstage: post_resize\norder: 90\n"
+				"glsl_file: Temporal sigma-delta.glsl\nparam_motion_compensation: 1\n";
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(C8OwnSearchSplitShaderMatchesTheOriginalFile)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(C8OwnSearchSplitShaderMatchesTheOriginalFile)
+		{
+			const HarnessScope harnessScope;
+			// W2-C8 step 1, GPU form: dither_vectors own (the moved output-domain search) renders the same codes from the split
+			// shader (this build's shaders folder: `// VP_INCLUDE motion.output_domain_search`) and from the b5ae6eda5 file (a
+			// folder VP_C8_ORIG_SHADER_DIR holding the unsplit file). A run twice on the split file first: with the sigma-delta
+			// on the capture is temporal, so equality is asserted only where the same build is deterministic (REPORT otherwise).
+			if (!RequireHardwareOrSkip("C8OwnSearchSplitShaderMatchesTheOriginalFile")) return;
+			const std::string original = HarnessEnvText("VP_C8_ORIG_SHADER_DIR");
+			if (original.empty())
+			{
+				Logger::WriteMessage("SKIP-NO-ORIGINAL C8OwnSearchSplitShaderMatchesTheOriginalFile (set VP_C8_ORIG_SHADER_DIR)\n");
+				return;
+			}
+			const std::string here = Here();
+			const std::vector<std::string> saved = g_harnessShaderProfiles;
+			g_harnessShaderProfiles = { "standard.sigma_delta" };
+			const ScratchCaptureFolder shots(L"vp-c8-own");
+			struct Case { const char* name; VideoFrameEncoding encoding; const char* path; bool film; bool moving; };
+			const Case cases[] = { { "v210 gpu 23.976 still", VideoFrameEncoding::V210, "gpu", true, false },
+				{ "v210 standard 59.94 still", VideoFrameEncoding::V210, "standard", false, false },
+				{ "v210 gpu 23.976 moving", VideoFrameEncoding::V210, "gpu", true, true } };
+			std::string failures, report;
+			for (const Case& c : cases)
+			{
+				FramePlan plan;
+				plan.captureAtSeconds = 2.5;
+				plan.retryRefusedCapture = true;
+				const bool moving = c.moving;
+				plan.step = [moving](int n) { FrameStep f; f.content = moving ? n : 0; return f; };
+				auto hashWith = [&](const std::string& dir) {
+					SetEnvironmentVariableA("VP_TEST_SHADER_DIR", dir.c_str());
+					return CaptureHash(Run(c.encoding, c.path, 4.0, c.film, C8SigmaRule("own"), false, &plan));
+				};
+				const std::string split = here.substr(0, here.size() - 1);
+				const std::string a = hashWith(split), a2 = hashWith(split), b = hashWith(original);
+				const bool deterministic = !a.empty() && a == a2;
+				report += std::string("== ") + c.name + ": split " + a + ", split again " + a2 + ", original " + b +
+					(deterministic ? " (deterministic)" : " (NOT deterministic: REPORT only)") + "\n";
+				if (a.empty() || b.empty())
+					failures += std::string(c.name) + ": a capture is missing; ";
+				else if (deterministic && a != b)
+					failures += std::string(c.name) + ": the split shader's output differs from the original file's; ";
+			}
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
+			g_harnessShaderProfiles = saved;
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(failures.empty(), WideOf(failures + "\n" + report).c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(C8DitherVectorsAutoVersusOwn)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(C8DitherVectorsAutoVersusOwn)
+		{
+			const HarnessScope harnessScope;
+			// W2-C8 step 7 (the owner's default decision, doc 93 :280): the sigma-delta with motion compensation, the moving
+			// pattern, dither_vectors auto vs own, at VP_C8_W x VP_C8_H and VP_C8_FPS (1080p60 / 4K30 by the run script). REPORT
+			// only: the chain's step shares (status segment), the sigma-delta pass GPU times (the pass-timer readout lines) and
+			// the "Fallbacks engaged" line. Assertions: both runs present, own never reuses, the status line exists.
+			if (!RequireHardwareOrSkip("C8DitherVectorsAutoVersusOwn")) return;
+			const int w = std::atoi(HarnessEnvText("VP_C8_W").c_str()), h = std::atoi(HarnessEnvText("VP_C8_H").c_str());
+			const int fps = std::atoi(HarnessEnvText("VP_C8_FPS").c_str());
+			const double seconds = std::max(8.0, std::atof(HarnessEnvText("VP_C8_SECONDS").c_str()));
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
+			if (w > 0 && h > 0) { g_harnessWidth = w; g_harnessHeight = h; }
+			const std::string here = Here();
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
+			const std::vector<std::string> saved = g_harnessShaderProfiles;
+			g_harnessShaderProfiles = { "standard.sigma_delta" };
+			FramePlan plan;
+			plan.rateNumerator = (fps > 0 ? fps : 60) * 1000;
+			plan.rateDenominator = 1001;
+			plan.step = [](int n) { FrameStep f; f.content = n; return f; };
+			std::string report = "C8 A/B " + std::to_string(g_harnessWidth) + "x" + std::to_string(g_harnessHeight) + " @" +
+				std::to_string(fps > 0 ? fps : 60) + "000/1001, " + std::to_string(seconds) + " s\n";
+			std::string failures;
+			for (const char* mode : { "auto", "own" })
+			{
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", seconds, false, C8SigmaRule(mode), false, &plan);
+				if (!r.presented)
+					failures += std::string(mode) + ": nothing presented; ";
+				std::string chain, passes;
+				for (const std::string& line : r.log)
+				{
+					if (line.find("Sigma-delta vectors") != std::string::npos)
+						chain = line;
+					if (line.find("sigma-delta") != std::string::npos && line.find(" ms") != std::string::npos &&
+						line.find("Sigma-delta vectors") == std::string::npos)
+						passes += "    " + line + "\n";
+				}
+				const size_t at = r.dejudderStatus.find("dither vectors:");
+				const std::string segment = at == std::string::npos ? std::string() : r.dejudderStatus.substr(at);
+				report += std::string("-- ") + mode + "\n  status: " + segment + "\n  last chain log: " + chain +
+					"\n  fallbacks: " + r.fallbacksStatus + "\n  sigma-delta pass lines:\n" + passes;
+				if (std::string(mode) == "own" && !segment.empty() &&
+					(segment.find("shared ") == std::string::npos || segment.find("shared 0,") == std::string::npos))
+					failures += "own: the chain reused vectors; ";
+			}
+			g_harnessShaderProfiles = saved;
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
+			g_harnessWidth = savedW;
+			g_harnessHeight = savedH;
+			Logger::WriteMessage(report.c_str());
+			Assert::IsTrue(failures.empty(), WideOf(failures + "\n" + report).c_str());
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(MotionAheadEngagesAtFourQueuedAheadAndFollowsTheQueue)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
