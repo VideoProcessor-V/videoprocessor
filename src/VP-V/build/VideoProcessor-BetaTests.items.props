@@ -25,5 +25,8 @@
     <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelSearchHints.cpp"/>
     <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelMeasurement.cpp"/>
     <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\GuidanceScheduler.cpp"/>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\MotionAheadProducer.cpp"/>
+    <!-- AnalysisLumaSource.cpp includes the Lib pch (MFC, DirectShow): not compilable here; the test stub implements what the producer calls. -->
+    <ClCompile Include="..\VP-V\tests\beta_gpu\AnalysisLumaSourceTestStub.cpp"/>
   </ItemGroup>
 </Project>
