@@ -11,6 +11,7 @@
 #pragma once
 
 #include <VP-V/modules/motion/consumers/TimelinePlanner.h>
+#include <VP-V/modules/motion/estimation/DitherVectorSource.h>
 
 bool LibplaceboVideoRenderer::Impl::RunVpPhaseInterpolation()
 {
@@ -299,12 +300,25 @@ void LibplaceboVideoRenderer::Impl::PublishDejudderStatus(bool force)
 		// Turing or later, driver 528+; without it the block searches, as before).
 		if (!motionSourceLogged.empty())
 			text += ", motion: " + motionSourceLogged;
+		// W2-C5b: the on-demand path's counters while it runs (empty with off / auto: nothing issued).
+		const std::string onDemandSegment = vectorEngine.OnDemandStatusSegment();
+		if (!onDemandSegment.empty())
+			text += ", " + onDemandSegment;
 	}
 	if (activeSettings.vectorDemand)
 	{
 		const std::string vectorLine = VectorDemand::StatusLine(vectorDemand);
 		if (!vectorLine.empty())
 			text += (text.empty() ? std::string() : std::string("; ")) + vectorLine;
+	}
+	// W2-C8: where the sigma-delta's vectors came from (DitherVectorSource.h); the held entries age out here too.
+	if (VpMotion::DitherVectors::Tracker* ditherVectors = VpMotion::DitherVectors::Registry::Find(this))
+	{
+		const std::string segment = ditherVectors->StatusSegment();
+		if (!segment.empty())
+			text += (text.empty() ? std::string() : std::string("; ")) + segment;
+		for (const FallbackCatalog::Decision& decision : ditherVectors->Decisions(now))
+			SyncFallback(decision);
 	}
 	std::lock_guard<std::mutex> guard(dejudderStatusMutex);
 	if (repeatReuse.Active())
@@ -333,6 +347,9 @@ void LibplaceboVideoRenderer::Impl::ReleaseDejudder()
 	dejudderNextVectors = nullptr;
 	dejudderNextVectorsSequence = 0;
 	ditherNextGate.Clear();
+	VpMotion::DitherVectors::Registry::Forget(this);   // W2-C8: the chain's counters and entries go with the device
+	for (const FallbackCatalog::Decision& decision : VpMotion::DitherVectors::Tracker::Released())
+		SyncFallback(decision);
 	for (pl_tex& tex : dejudderNextTextures)
 		if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
 	dejudderNextUploadedSequence = 0;
@@ -424,6 +441,11 @@ bool LibplaceboVideoRenderer::Impl::DrawVpPhasePicture(const pl_frame& source, c
 // TemporalRenderer::WillMix / Begin then read the returned settings as before. Render loop, renderMutex held.
 MotionConfig::Settings LibplaceboVideoRenderer::Impl::ResolveMotionEngine(bool currentFileMotionOff)
 {
+	// W2-C5b, rule 32: the on-demand pair the walk staged (CollectQueueAhead) is posted here, at this existing call: after the
+	// queue block (queue mutex not held) and before RenderLocked's estimate claims it (OnDemandIssue.h). No stage: zero work.
+	MotionAhead::PostOnDemandIfHosted(this);
+	// ... and optical_flow_on_demand for this frame (cold start and Apply alike), before RenderLocked's PlanProducer reads it.
+	vectorEngine.NoteHostOnDemandSetting(VpMotion::OnDemand::SettingOf(activeSettings.opticalFlowOnDemand));
 	MotionConfig::Settings motionSettings=activeSettings.motion;
 	{
 	    const auto engine=DejudderPolicy::ResolveEngine(motionSettings.engine,
@@ -544,3 +566,6 @@ double LibplaceboVideoRenderer::CurrentQueueHoldFraction() const
 	std::lock_guard<std::mutex> guard(m_queueHoldMutex);
 	return m_queueHold.fraction;
 }
+
+// W2-C8: BuildSigmaDeltaVectorsWithoutExtras (the dither vector chain, renderer side).
+#include <VP-V/modules/motion/estimation/DitherVectorSourceHost.inl>

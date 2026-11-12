@@ -52,6 +52,9 @@ namespace CustomHookChain
     inline int QuarterGrid(int n) { return n > 0 ? (2 * n + 10) / 8 : 0; }
     inline int BlockGrid(int n) { return n > 0 ? (2 * n + 46) / 32 : 0; }
 
+    // W2-C8: `// VP_INCLUDE <id>` lines are expanded right after a rule's file is read (Ensure), before the
+    // quantiser / prescaler checks, templates and parsing: ExpandVpIncludes, VpShaderInclude.h.
+
     bool ApplyTemplates(std::string& source, const TemplateValues& values,
         const std::map<std::string, std::string>& parameters, std::string& reason);
 
@@ -128,6 +131,18 @@ namespace CustomHookChain
         // hook list (it drops the sigma-delta on an unsupported code domain).
         bool IsQuantizerHook(const pl_hook* hook) const;
 
+        // W2-C8: the current value of a //!PARAM of the loaded output quantiser (the sigma-delta), as the hook holds it
+        // (the rule's parameter or the shader's default). False when no quantiser is loaded or it has no such parameter.
+        bool QuantizerParameter(const char* name, double& value) const;
+        // The CONFIGURED value of that parameter: the rule's (incl. the VP rule defaults below) or the shader's declared
+        // initial value - never a per-frame override. False when no quantiser is loaded or it has no such parameter.
+        bool QuantizerConfigured(const char* name, double& value) const;
+        // Sets that parameter on the loaded quantiser for the following renders (a per-frame override; clamped to range).
+        bool SetQuantizerParameter(const char* name, double value) const;
+        // Owner 2026-11-11 22:39 (doc 91:108): the sigma-delta rule's motion compensation defaults ON. A rule that sets
+        // param_motion_compensation keeps its value; applied to a quantiser that declares the parameter.
+        static const char* SigmaDeltaCompensationDefault() { return "1"; }
+
         // Stage 8b one-axis: true when `hook` is a loaded LUMA prescaler of this chain
         // (IsLumaPrescaler); the scaling stage drops it from a one-axis upscale's hook list.
         bool IsPrescalerHook(const pl_hook* hook) const;
@@ -179,4 +194,15 @@ namespace CustomHookChain
         TemplateValues lastValues;
         bool settled = false;
     };
+}
+
+namespace CustomHookChain
+{
+    // W2-C8 (C8-FINDING): true when the loaded quantiser's CONFIGURED parameter is on (>= 0.5): the sigma-delta asks the
+    // vector engine for vectors only when its motion compensation can use them.
+    inline bool QuantizerOn(const Chain& chain, const char* name)
+    {
+        double value = 0.0;
+        return chain.QuantizerConfigured(name, value) && value >= 0.5;
+    }
 }

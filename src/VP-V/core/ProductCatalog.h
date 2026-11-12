@@ -330,6 +330,8 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
                             own, "product.led_lookahead"));
         r.push_back(MakeRow(17, "dither need (source quality)", "VP-V/modules/output/dither", PathwayUnit::Output, 15,
                             {}, own, "product.dither_need", false, { kSourceIdentity }));
+        // W2-C8: this P3 read is TRUE (no NotRead / NotYetConsumed flag): the sigma-delta takes its block vectors from the shared pair /
+        // matcher field through motion.estimation DitherVectorSource.h (chain: shared pair -> matcher field -> on-demand -> own search).
         r.push_back(MakeRow(4, "sigma-delta (analysis field mapped)", "VP-V/modules/output/dither", PathwayUnit::Output, 10,
                             { kP3AnalysisField }, own, "product.sigma_delta", true));
         // Camera guidance (doc 56 / doc 72 item 1): reads p7g (registered now); the first reader of the guide in the motion unit.

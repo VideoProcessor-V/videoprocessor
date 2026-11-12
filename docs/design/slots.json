@@ -366,6 +366,7 @@
         "optical_flow_fb_check",
         "optical_flow_global",
         "optical_flow_global_fallback",
+        "optical_flow_on_demand",
         "vector_demand"
       ],
       "planned_keys": [

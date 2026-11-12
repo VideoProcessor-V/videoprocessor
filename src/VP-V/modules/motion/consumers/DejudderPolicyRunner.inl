@@ -15,6 +15,7 @@
 #pragma once
 
 #include <VP-V/modules/motion/consumers/DejudderPolicyRunner.h>
+#include <VP-V/modules/motion/estimation/DitherVectorSource.h>
 
 namespace
 {
@@ -118,8 +119,51 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	// MotionValidity step 1 C: the kept run. Cadence repeats and smooth motion's
 	// extra draws carry the same sequence (Repeat: the run continues); a hole
 	// nothing else reported (a drop) invalidates here, before this estimate.
-	motionValidity.NoteKept(sourceSequence, MotionValidity::Cause::DriftDrop);
+	const MotionValidity::Continuity keptContinuity = motionValidity.NoteKept(sourceSequence, MotionValidity::Cause::DriftDrop);
 	ApplyMotionInvalidate();
+	// W2-C8 (owner 2026-11-11 22:39, doc 91:108): the sigma-delta's motion compensation for this frame's renders - on (the
+	// configured default) only while the pair that ends here is valid and the engine runs; else off, visibly (DitherVectorSource.h).
+	{
+		namespace DV = VpMotion::DitherVectors;
+		double configured = 0.0;
+		DV::CompensationFacts cf;
+		// A loaded sigma-delta always notes the decision (a rule set to 0 shows as "rule", status only); only a configured one is
+		// switched per frame. Invariant: a hook reload (Ensure, on a template change) re-applies the rule value 1 until the next
+		// frame's gate - the same moment the shader's instance_tag resets its carry, so no stale compensation crosses it.
+		if (customHooks.QuantizerConfigured("motion_compensation", configured))
+		{
+			cf.configured = configured >= 0.5;
+			cf.engineOff = DV::EngineFullyOff(activeSettings.vectorDemand, MotionVectorsRun());
+			cf.continuity = keptContinuity;
+			cf.keptPairValid = sourceSequence > 1 && motionValidity.KeptPairValid(sourceSequence - 1, sourceSequence);
+			if (sourceSequence > 1)
+				cf.span = motionValidity.SpanStatus(sourceSequence - 1, sourceSequence);
+			cf.invalidations = motionValidity.Total();
+			cf.lastCause = motionValidity.LastCause();
+			const DV::Compensation compensation = DV::DecideCompensation(cf);
+			if (cf.configured)
+				customHooks.SetQuantizerParameter("motion_compensation", compensation.on ? 1.0 : 0.0);
+			DV::Tracker& tracker = DV::Registry::ForHost(this);
+			const unsigned long long nowMs = GetTickCount64();
+			tracker.NoteCompensation(compensation, nowMs);
+			// The vector chain (BuildSigmaDeltaVectorsWithoutExtras) is asked only while the engine runs (its call site's
+			// vectorDemand.mode != Off). With the engine off the sigma-delta searches itself (step 4, "not served"): say so per
+			// frame here, so that state is never without a status line (GPU A/B 2026-11-12: no segment in that case).
+			if (vectorDemand.mode == VectorDemand::Mode::Off)
+			{
+				DV::Facts vf;
+				vf.slotRuns = pipelineSlots.Runs(PipelineSlots::Id::OutputDither);
+				vf.patch = SigmaDeltaVectorsSupported();
+				vf.ownSetting = activeSettings.ditherVectorsOwn;
+				vf.motionCompensation = cf.configured;
+				vf.served = false;
+				tracker.Note(DV::Choose(vf), false, nowMs);
+			}
+			if (compensation.Automatic())
+				for (const FallbackCatalog::Decision& decision : tracker.Decisions(nowMs))
+					SyncFallback(decision);
+		}
+	}
 	dejudderSourceHz = sourceHz;
 	// Vector engine on demand: what wants vectors this frame (previous-frame state), and backward pairs.
 	// VPV-HOOK
@@ -134,6 +178,11 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	// Reuse-only consumers (sigma-delta, detail pulse, deband hold, source monitor, the occlusion mask, ...) are served only then
 	// (previous-frame state, like the wants). The mask's own matcher never counts: it would keep itself served.
 	VectorDemand::Input vectorInput = VectorDemandInput(interlaced);
+	// W2-C8 (C8-FINDING): the sigma-delta asks the engine for vectors only when its motion compensation can use them (the
+	// configured motion_compensation of the loaded quantiser; DitherVectorSource.h). A VP-V predicate here, not in Bill's file.
+	vectorInput.wants[static_cast<int>(VectorDemand::Consumer::SigmaDelta)] =
+		VpMotion::DitherVectors::SigmaDeltaWantsVectors(vectorInput.wants[static_cast<int>(VectorDemand::Consumer::SigmaDelta)],
+			CustomHookChain::QuantizerOn(customHooks, "motion_compensation"));
 	const bool dejudderStanding = dejudder && (activeSettings.dejudderStrength > 0.0 || activeSettings.dejudderStrengthEven > 0.0) &&
 		DejudderPolicy::CanEngageOrAcquiring(dejudderReason, pulldownAcquiring);
 	vectorInput.starterEngaged = dejudderStanding || interpolating || vpGapFillStandalone;

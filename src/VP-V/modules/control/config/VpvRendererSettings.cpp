@@ -722,6 +722,15 @@ namespace VpvRendererSettings
 				DebugLog::Log("profile '%s': invalid optical_flow '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.opticalFlow ? "on" : "off");
 		}
+		if (config.TryGetString(rule.section, "optical_flow_on_demand", raw))
+		{
+			const std::string v = ConfigFile::NormalizeName(raw);
+			if (v == "auto" || v == "on" || v == "off")
+				settings.opticalFlowOnDemand = v;
+			else
+				DebugLog::Log("profile '%s': invalid optical_flow_on_demand '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.opticalFlowOnDemand.c_str());
+		}
 		if (config.TryGetString(rule.section, "temporal_dither", raw))
 		{
 			const std::string v = ConfigFile::NormalizeName(raw);
@@ -1166,6 +1175,7 @@ namespace VpvRendererSettings
 			<< settings.opticalFlowGlobalFallback << '|'
 			<< settings.opticalFlowCostTrust << '|'
 			<< settings.opticalFlowFbCheck << '|'
+			<< settings.opticalFlowOnDemand << '|'
 			<< static_cast<int>(settings.interpolationGrain) << '|'
 			<< settings.dejudderSourceWarpCatmull << '|'
 			<< settings.nlsSamplingCatmull << '|'
@@ -1364,6 +1374,7 @@ namespace VpvRendererSettings
 		changed(current.opticalFlowGlobalFallback != next.opticalFlowGlobalFallback, "optical_flow_global_fallback");
 		changed(current.opticalFlowCostTrust != next.opticalFlowCostTrust, "optical_flow_cost_trust");
 		changed(current.opticalFlowFbCheck != next.opticalFlowFbCheck, "optical_flow_fb_check");
+		changed(current.opticalFlowOnDemand != next.opticalFlowOnDemand, "optical_flow_on_demand");
 		changed(current.interpolationGrain != next.interpolationGrain, "interpolation_grain");
 		changed(current.dejudderSourceWarpCatmull != next.dejudderSourceWarpCatmull, "dejudder_source_warp_filter");
 		changed(current.nlsSamplingCatmull != next.nlsSamplingCatmull, "nls_sampling");
@@ -1509,6 +1520,7 @@ namespace VpvRendererSettings
 		<< "optical_flow_global_fallback=" << (s.opticalFlowGlobalFallback ? "on" : "off") << "\n"
 		<< "optical_flow_cost_trust=" << (s.opticalFlowCostTrust ? "on" : "off") << "\n"
 		<< "optical_flow_fb_check=" << (s.opticalFlowFbCheck ? "on" : "off") << "\n"
+		<< "optical_flow_on_demand=" << s.opticalFlowOnDemand << "\n"
 		<< "motion=" << motionFingerprint << "\n"
 		<< "interpolation_grain=" << InterpolationPolicy::Name(s.interpolationGrain) << "\n"
 		<< "dejudder_source_warp_filter=" << (s.dejudderSourceWarpCatmull ? "catmull" : "bilinear") << "\n"

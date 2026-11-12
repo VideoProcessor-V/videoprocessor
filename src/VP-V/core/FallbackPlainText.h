@@ -15,6 +15,11 @@ namespace FallbackPlainText
 		struct Entry { const char* id; const char* text; };
 		static const Entry table[] = {
 			{ "dither", "The smooth-gradient dither was replaced by the standard one" },
+			{ "dither vectors matcher", "The smooth-gradient dither is following motion from this frame's own estimate" },
+			{ "dither vectors on demand", "The smooth-gradient dither is following motion estimated at the last moment" },
+			{ "dither vectors own search", "The smooth-gradient dither is finding the motion in the picture itself" },
+			{ "dither motion compensation", "The smooth-gradient dither is not following motion for now (the motion is not known)" },
+			{ "dither vectors unvalidated", "The smooth-gradient dither reuses motion that could not be fully checked" },
 			{ "BTB/WTW", "Blacker-than-black and whiter-than-white detail is being clipped" },
 			{ "re-base", "Picture scaling is using the native frame for now" },
 			{ "re-base warm-up", "A resolution change is waiting for its shaders; the picture stays as it was" },

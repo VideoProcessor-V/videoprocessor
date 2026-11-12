@@ -49,10 +49,6 @@ ALLOW = [
      "reason": "BestShift / Measure: CPU global pan for the content classifier (luma projections, MAD +-12.5%); the engine "
                "global overrides it later (VectorEngine ServeStatistics -> MotionIntent). Planned: skip when a P2 pair is ahead, "
                "no-pair path stays as a visible fallback (next reset)."},
-    {"file": "shaders/Temporal sigma-delta.glsl", "patterns": ["sad"], "max_hits": 9, "row": 5,
-     "reason": "Temporal sigma-delta private GPU hierarchical block match (coarse +-64 px, quarter-pixel refine, 16x16 SAD); "
-               "vector_source=1 already takes the dejudder vectors on extras. Owner decision pending for feeding it the P3 field "
-               "(bit-sensitive, needs a measured reason and Original byte-identity)."},
 ]
 
 

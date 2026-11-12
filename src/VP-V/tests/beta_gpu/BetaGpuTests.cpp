@@ -8,6 +8,7 @@
 //    repair restores it. If a libplacebo update fixes the bug, the repair
 //    would encode twice and must be switched off for the Beta.
 #include <VP-V/modules/output/dither/OutputEncodingRepair.h>
+#include <VP-V/modules/output/dither/VpShaderInclude.h>
 #include <VP-V/modules/motion/estimation/matcher/DejudderWarp.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/motion/consumers/RenderedWarp.h>
@@ -268,7 +269,10 @@ namespace
 		std::string path = __FILE__;
 		for (int level = 0; level < 5; ++level) path.resize(path.find_last_of("\\/"));
 		std::ifstream input(path + "\\shaders\\" + fileName, std::ios::binary);
-		return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+		std::string source{ std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>() };
+		std::string reason;
+		CustomHookChain::ExpandVpIncludes(source, reason);   // W2-C8: as the renderer's custom hook chain
+		return source;
 	}
 
 	// A //!PARAM by name (what CustomHookChain::SetHookParameter does).

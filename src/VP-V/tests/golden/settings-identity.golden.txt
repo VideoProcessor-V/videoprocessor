@@ -176,6 +176,7 @@ opticalFlowGlobal=1
 opticalFlowGlobalFallback=1
 opticalFlowCostTrust=0
 opticalFlowFbCheck=0
+opticalFlowOnDemand=auto
 interpolation=0
 interpolationFallback=0
 interpolationFillGaps=1

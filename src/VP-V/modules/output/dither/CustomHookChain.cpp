@@ -3,6 +3,7 @@
 
 #include <DebugLog.h>
 #include <vprenderer/HookInstanceTag.h>
+#include <VP-V/modules/output/dither/VpShaderInclude.h>
 
 #include <algorithm>
 #include <cmath>
@@ -307,7 +308,8 @@ namespace CustomHookChain
             {
                 entry.sourceRead = true;
                 std::string reason;
-                if (!loader.read || !loader.read(entry.rule.filename, entry.source, reason))
+                if (!loader.read || !loader.read(entry.rule.filename, entry.source, reason) ||
+                    !ExpandVpIncludes(entry.source, reason))   // W2-C8: the module passes it names
                 {
                     entry.loadFailed = true;
                     DebugLog::Log("Custom hooks: \"%s\" file=%s not loaded: %s",
@@ -315,6 +317,9 @@ namespace CustomHookChain
                     continue;
                 }
                 entry.quantizer = IsOutputQuantizer(entry.rule.filename, entry.source);
+                // Owner 2026-11-11 22:39 (doc 91:108): the sigma-delta's motion compensation defaults ON (rule value kept).
+                if (entry.quantizer && entry.source.find("//!PARAM motion_compensation") != std::string::npos)
+                    entry.rule.parameters.emplace("motion_compensation", SigmaDeltaCompensationDefault());
                 entry.prescaler = IsLumaPrescaler(entry.source);
                 if (builtIns.empty()) builtIns = BuiltIns(values);
                 entry.usedBuiltIns = UsedBuiltInMask(entry.source, builtIns);
@@ -420,6 +425,70 @@ namespace CustomHookChain
             {
                 return entry.hook == hook && entry.quantizer && HooksOutput(entry.hook);
             });
+    }
+
+    bool Chain::QuantizerParameter(const char* name, double& value) const
+    {
+        if (!name) return false;
+        for (const Entry& entry : entries)
+        {
+            if (!entry.quantizer || !entry.hook || entry.runtimeFailed) continue;
+            for (int i = 0; i < entry.hook->num_parameters; ++i)
+            {
+                const pl_hook_par& parameter = entry.hook->parameters[i];
+                if (!parameter.name || !parameter.data || std::strcmp(parameter.name, name) != 0) continue;
+                switch (parameter.type)
+                {
+                case PL_VAR_FLOAT: value = parameter.data->f; return true;
+                case PL_VAR_SINT: value = parameter.data->i; return true;
+                case PL_VAR_UINT: value = parameter.data->u; return true;
+                default: return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool Chain::QuantizerConfigured(const char* name, double& value) const
+    {
+        if (!name) return false;
+        for (const Entry& entry : entries)
+        {
+            if (!entry.quantizer || !entry.hook || entry.runtimeFailed) continue;
+            for (int i = 0; i < entry.hook->num_parameters; ++i)
+            {
+                const pl_hook_par& parameter = entry.hook->parameters[i];
+                if (!parameter.name || std::strcmp(parameter.name, name) != 0) continue;
+                const auto configured = entry.rule.parameters.find(name);
+                if (configured != entry.rule.parameters.end())
+                {
+                    char* end = nullptr;
+                    const double v = std::strtod(configured->second.c_str(), &end);
+                    if (end != configured->second.c_str())
+                    {
+                        value = v;
+                        return true;
+                    }
+                }
+                switch (parameter.type)
+                {
+                case PL_VAR_FLOAT: value = parameter.initial.f; return true;
+                case PL_VAR_SINT: value = parameter.initial.i; return true;
+                case PL_VAR_UINT: value = parameter.initial.u; return true;
+                default: return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool Chain::SetQuantizerParameter(const char* name, double value) const
+    {
+        bool set = false;
+        for (const Entry& entry : entries)
+            if (entry.quantizer && entry.hook && !entry.runtimeFailed)
+                set = SetHookParameter(entry.hook, name, value) || set;
+        return set;
     }
 
     bool Chain::IsPrescalerHook(const pl_hook* hook) const

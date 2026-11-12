@@ -112,7 +112,7 @@ class CheckMotionBypassTest(unittest.TestCase):
         self.assertIn("over the allowed ceiling", out)
 
     def test_allow_list_entries_are_documented_and_the_not_motion_rows_never_hit(self):
-        self.assertEqual(len(cmb.ALLOW), 2)
+        self.assertEqual(len(cmb.ALLOW), 1)
         for e in cmb.ALLOW:
             for key in ("file", "patterns", "max_hits", "row", "reason"):
                 self.assertTrue(e.get(key), (e, key))

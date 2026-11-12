@@ -133,6 +133,8 @@ namespace ProfileSchemaHooks
 			// The engine's extras (2026-10-17): D1's fallback to the search, cost and forward/backward trust.
 			if (key == "optical_flow_global_fallback" || key == "optical_flow_cost_trust" || key == "optical_flow_fb_check")
 				return V(IsChoice(value, { "on", "off" }));
+			// W2-C5b: render-time pairs on the producer's session while idle (auto = not on the low-latency path).
+			if (key == "optical_flow_on_demand") return V(IsChoice(value, { "auto", "on", "off" }));
 			// VP's 50/60p frame interpolation (docs/VP-interpolator-50-60-plan.md): off by default.
 			if (key == "interpolation") return V(IsChoice(value, { "off", "auto", "always" }));
 			if (key == "interpolation_fallback") return V(IsChoice(value, { "hold", "blend" }));

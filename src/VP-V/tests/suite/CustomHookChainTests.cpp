@@ -253,6 +253,95 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.25f, shaders.value.f, 1e-6f);
 		}
 
+		// W2-C8: the loaded quantiser's //!PARAM as the hook holds it (the dither vector chain's motion_compensation fact).
+		TEST_METHOD(QuantizerParameterReadsTheLoadedQuantizerOnly)
+		{
+			FakeShaders shaders;
+			shaders.files["chroma.glsl"] = "CHROMA";
+			shaders.files["quant.glsl"] = "OUTPUT VP_OUTPUT_QUANTIZER";
+			CustomHookChain::Chain chain(shaders.Loader());
+			double value = -1.0;
+			Assert::IsFalse(chain.QuantizerParameter("noise_amplitude", value), L"nothing loaded");
+			chain.Configure({ CustomRule("cfl", "chroma.glsl", 10) });
+			chain.Ensure(Output2560x1600());
+			Assert::IsFalse(chain.QuantizerParameter("noise_amplitude", value), L"a non-quantiser hook is never read");
+			ConfiguredShaderRule rule = CustomRule("sigma", "quant.glsl", 90);
+			rule.parameters["noise_amplitude"] = "0.25";
+			chain.Configure({ CustomRule("cfl", "chroma.glsl", 10), rule });
+			chain.Ensure(Output2560x1600());
+			Assert::IsTrue(chain.QuantizerParameter("noise_amplitude", value));
+			Assert::AreEqual(0.25, value, 1e-6);
+			Assert::IsFalse(chain.QuantizerParameter("motion_compensation", value), L"a parameter the hook does not declare");
+			Assert::IsFalse(chain.QuantizerParameter(nullptr, value));
+		}
+
+		// W2-C8: Ensure expands `// VP_INCLUDE <id>` right after the read (the parsed text carries the module's passes)
+		// and an unknown id fails only that load.
+		TEST_METHOD(EnsureExpandsVpIncludesAndFailsAnUnknownId)
+		{
+			FakeShaders shaders;
+			shaders.files["quant.glsl"] = "OUTPUT VP_OUTPUT_QUANTIZER\n// VP_INCLUDE motion.output_domain_search\nEND";
+			shaders.files["bad.glsl"] = "CHROMA\n// VP_INCLUDE motion.nothing\n";
+			CustomHookChain::Chain chain(shaders.Loader());
+			chain.Configure({ CustomRule("sigma", "quant.glsl", 90), CustomRule("bad", "bad.glsl", 10) });
+			chain.Ensure(Output2560x1600());
+			bool expanded = false;
+			for (const std::string& text : shaders.parsed)
+				expanded = expanded || (text.find("//!SAVE MV") != std::string::npos && text.find("VP_INCLUDE") == std::string::npos);
+			Assert::IsTrue(expanded, L"the parsed quantiser text carries the module's search passes");
+			const std::vector<std::string> failures = chain.LoadFailures();
+			Assert::AreEqual(size_t{ 1 }, failures.size());
+			Assert::AreEqual(std::string("bad"), failures[0]);
+		}
+
+		// Owner 2026-11-11 22:39 (doc 91:108): the sigma-delta rule's motion compensation defaults ON; a rule's own value is kept;
+		// the per-frame override never changes the configured value.
+		TEST_METHOD(SigmaDeltaMotionCompensationDefaultsOnAndTheOverrideKeepsTheConfiguredValue)
+		{
+			FakeShaders shaders;
+			pl_var_data mc{};
+			pl_hook_par params[2]{};
+			params[0] = shaders.parameter;
+			params[1].name = "motion_compensation";
+			params[1].type = PL_VAR_FLOAT;
+			params[1].data = &mc;
+			params[1].minimum.f = 0.0f;
+			params[1].maximum.f = 1.0f;
+			params[1].initial.f = 0.0f;   // the shader's own //!PARAM default stays 0.0
+			auto loader = shaders.Loader();
+			auto parse = loader.parse;
+			loader.parse = [&](const std::string& source) -> const pl_hook*
+			{
+				const pl_hook* hook = parse(source);
+				if (hook) { const_cast<pl_hook*>(hook)->parameters = params; const_cast<pl_hook*>(hook)->num_parameters = 2; }
+				return hook;
+			};
+			shaders.files["sigma.glsl"] = "OUTPUT VP_OUTPUT_QUANTIZER\n//!PARAM motion_compensation\n";
+			{
+				CustomHookChain::Chain chain(loader);
+				chain.Configure({ CustomRule("sigma", "sigma.glsl", 90) });
+				chain.Ensure(Output2560x1600());
+				double value = -1.0;
+				Assert::IsTrue(chain.QuantizerConfigured("motion_compensation", value));
+				Assert::AreEqual(1.0, value, 1e-9, L"default on (owner 2026-11-11 22:39, doc 91:108)");
+				Assert::AreEqual(1.0f, mc.f, 1e-6f, L"applied to the hook");
+				Assert::IsTrue(CustomHookChain::QuantizerOn(chain, "motion_compensation"));
+				Assert::IsTrue(chain.SetQuantizerParameter("motion_compensation", 0.0));
+				Assert::AreEqual(0.0f, mc.f, 1e-6f, L"the per-frame override reaches the hook");
+				Assert::IsTrue(chain.QuantizerConfigured("motion_compensation", value) && value == 1.0, L"configured unchanged");
+			}
+			{
+				CustomHookChain::Chain chain(loader);
+				ConfiguredShaderRule rule = CustomRule("sigma", "sigma.glsl", 90);
+				rule.parameters["motion_compensation"] = "0";   // param_motion_compensation: 0 keeps the plain gate
+				chain.Configure({ rule });
+				chain.Ensure(Output2560x1600());
+				double value = -1.0;
+				Assert::IsTrue(chain.QuantizerConfigured("motion_compensation", value) && value == 0.0);
+				Assert::IsFalse(CustomHookChain::QuantizerOn(chain, "motion_compensation"));
+			}
+		}
+
 		TEST_METHOD(LoadFailuresDropOnlyTheFailingHook)
 		{
 			FakeShaders shaders;
