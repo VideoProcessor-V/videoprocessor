@@ -184,6 +184,11 @@ ALLOW_SITES = [
     {"file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp", "pattern": r"deviceParams\.adapter = testAdapter",
      "reason": "the VP_TEST_ADAPTER result applied to Bill's device parameters: set only when the test environment names an "
                "adapter (unset in production and by the capture harness for both renders); see the VpDiagnostics callee entry."},
+    {"file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp", "pattern": r"\bPlanEntrance\(renderImage\b",
+     "reason": "owner REVERT 2026-11-12 (r2/p4-original-srcres-feed): the P4 e-i move stopped feeding the source-resolution monitor in "
+               "Original; pre-P4 (77fe0397e) that feed ran in Original. In Original the body feeds and configures the monitor and "
+               "returns before any VP-V stage (EntrancePlanner.inl). Proof: EntranceHookTests "
+               "TheEntranceSiteSitsBeforeTheEntranceDecisionsAndOutsideTheDrawCallback. Needs coordinator confirmation (rule 9)."},
     {"file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp", "pattern": r"\bdetailPulse\b", "symbol": "detailPulse",
      "reason": "name collision, not a VP-V reference: a ConfigEditorWindow.cpp LOCAL named detailPulse (lines 10230-10231) shares its "
                "spelling with the EntranceSegment.h:114 member (DPTR-OFF, r2/dptr-off). Granted by the coordinator, "

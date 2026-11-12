@@ -5833,30 +5833,6 @@
    ]
   },
   {
-   "id": "LVR.cpp-0146",
-   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
-   "start": 22784,
-   "end": 22785,
-   "anchor": {
-    "symbol": "RenderLocked",
-    "before": [
-     "{",
-     "}"
-    ],
-    "after": [
-     "const HdrPeakAnalysisCrop::Decision hdrPeakAnalysisDecision ="
-    ]
-   },
-   "lines": [
-    "\t\tRendererExtension::NotifyEntrance(this, static_cast<int64_t>(sourceSequence), static_cast<int64_t>(nextSourceSequence), static_cast<int64_t>(frameGeneration), &renderImage, &target, width, height, cadenceRepeat, captureRateHz);   // VPV-HOOK: the Entrance phase (GPU work, entrance planning; fan-out, observers only)",
-    "\t\tif (!pipelineSlots.OriginalPathway()) { PlanEntrance(renderImage, target, image, sourceSequence, captureRateHz, nominalSourceRateHz, state); }   // VPV-HOOK P4 e: the entrance planner (EntrancePlanner.inl): re-base factor, deband and detail-restore parameters; nothing in Original"
-   ],
-   "text": "RendererExtension::NotifyEntrance(this, static_cast<int64_t>(sourceSequence), static_cast<int64_t>(nextSourceSequence), static_cast<int64_t>(frameGeneration), &renderImage, &target, width, height, cadenceRepeat, captureRateHz); if (!pipelineSlots.OriginalPathway()) { PlanEntrance(renderImage, target, image, sourceSequence, captureRateHz, nominalSourceRateHz, state); }",
-   "gate": "allowed",
-   "seam": null,
-   "expiry": null
-  },
-  {
    "id": "LVR.cpp-0148",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
    "start": 6212,
@@ -6309,6 +6285,30 @@
    ],
    "text": "#include <VP-V/modules/input/queue_timing/QueueTarget.inl> #include <VP-V/modules/control/diagnostics/StatusMethods.inl>",
    "gate": "declaration",
+   "seam": null,
+   "expiry": null
+  },
+  {
+   "id": "LVR.cpp-0090",
+   "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
+   "start": 22784,
+   "end": 22785,
+   "anchor": {
+    "symbol": "RenderLocked",
+    "before": [
+     "{",
+     "}"
+    ],
+    "after": [
+     "const HdrPeakAnalysisCrop::Decision hdrPeakAnalysisDecision ="
+    ]
+   },
+   "lines": [
+    "\t\tRendererExtension::NotifyEntrance(this, static_cast<int64_t>(sourceSequence), static_cast<int64_t>(nextSourceSequence), static_cast<int64_t>(frameGeneration), &renderImage, &target, width, height, cadenceRepeat, captureRateHz);   // VPV-HOOK: the Entrance phase (GPU work, entrance planning; fan-out, observers only)",
+    "\t\tPlanEntrance(renderImage, target, image, sourceSequence, captureRateHz, nominalSourceRateHz, state);   // VPV-HOOK P4 e: the entrance planner (EntrancePlanner.inl): re-base factor, deband and detail-restore parameters; owner REVERT 2026-11-12: called in Original too (feeds the source-resolution monitor as before P4, 77fe0397e); the body stops before the VP-V stages there"
+   ],
+   "text": "RendererExtension::NotifyEntrance(this, static_cast<int64_t>(sourceSequence), static_cast<int64_t>(nextSourceSequence), static_cast<int64_t>(frameGeneration), &renderImage, &target, width, height, cadenceRepeat, captureRateHz); PlanEntrance(renderImage, target, image, sourceSequence, captureRateHz, nominalSourceRateHz, state);",
+   "gate": "allowed",
    "seam": null,
    "expiry": null
   }

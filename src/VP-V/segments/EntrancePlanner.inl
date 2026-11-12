@@ -73,6 +73,11 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 	vpv.sourceAnalysis.sourceMonitor.SetEngageTiming(activeSettings.sourceResolutionEngageMaxWait, activeSettings.sourceResolutionCrossfade,
 		activeSettings.sourceResolutionReleaseFade);
 	vpv.sourceAnalysis.sourceMonitor.SetEvidence(activeSettings.sourceResolutionEvidenceShots, activeSettings.sourceResolutionEvidenceSeconds);
+	// Owner REVERT 2026-11-12: P4 e-i (c2f9ce55d) stopped feeding the monitor in Original. Before it (77fe0397e) the monitor read above and
+	// these settings ran in Original too; they do again. Everything below (re-base, deband, detail pulse, texture restore) stays VP-V work
+	// that does nothing in Original (owner E3); ResetEntrancePlan keeps the outputs native.
+	if (pipelineSlots.OriginalPathway())
+		return;
 	sourceAutoActive.store(activeSettings.sourceResolution == "auto", std::memory_order_release);
 	if (activeSettings.sourceResolution == "auto")
 	{

@@ -239,8 +239,15 @@ namespace EntranceHookTest
 			const size_t stepA = text.find("PlanEntrance(renderImage, target, image, sourceSequence,", site);
 			Assert::IsTrue(stepA != std::string::npos && stepA - site < 700, L"right before the entrance-decision block");
 			Assert::IsTrue(text.find("PlanEntrance(renderImage, target, image, sourceSequence,", stepA + 1) == std::string::npos, L"exactly one planner call");
-			Assert::IsTrue(text.find("if (!pipelineSlots.OriginalPathway()) { PlanEntrance(renderImage, target, image, sourceSequence,") == stepA - 40,
-				L"the planner call is guarded off in the Original pathway (owner E3; the body is a pure move)");
+			// Owner REVERT 2026-11-12 (the P4 e-i move had stopped the source-resolution monitor feed in Original): the call is NOT guarded;
+			// the body feeds and configures the monitor in Original as before P4 (77fe0397e) and returns before any VP-V stage (owner E3).
+			Assert::IsTrue(text.find("\t\tPlanEntrance(renderImage, target, image, sourceSequence,") == stepA - 2,
+				L"the planner call is unguarded: the Original pathway still feeds the source-resolution monitor (owner REVERT)");
+			const size_t evidence = planner.find("sourceMonitor.SetEvidence(");
+			const size_t originalStop = planner.find("if (pipelineSlots.OriginalPathway())", evidence == std::string::npos ? 0 : evidence);
+			const size_t firstStage = planner.find("sourceAutoActive.store(", evidence == std::string::npos ? 0 : evidence);
+			Assert::IsTrue(planner.find("sourceMonitor.Frame(") < evidence && evidence < originalStop && originalStop < firstStage,
+				L"in Original the planner feeds and configures the monitor, then returns before the re-base / repair stages");
 			const size_t monitor = stepA;
 			const size_t hooks = text.find("customHooks.Ensure(hookTemplates)", site);
 			const size_t render = text.find("NlsHookRecovery::RenderOwned(", site);
