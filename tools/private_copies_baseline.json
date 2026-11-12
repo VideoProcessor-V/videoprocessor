@@ -1,0 +1,427 @@
+{
+ "entries": [
+  {
+   "key": "a|D1|src/VP-V/modules/repair/temporal_detail/TemporalDetailModel.h",
+   "rule": "a",
+   "site": "D1",
+   "refs": "122 s9 D1",
+   "reason": "TD private grain guard / EMA of the grain",
+   "seed": true,
+   "max_hits": 7
+  },
+  {
+   "key": "a|D2|src/VP-V/modules/motion/estimation/VectorEngine.h",
+   "rule": "a",
+   "site": "D2",
+   "refs": "122 s9 D2",
+   "reason": "per-consumer CellTrust (optical-flow trust recomputed outside the engine)",
+   "seed": true,
+   "max_hits": 1
+  },
+  {
+   "key": "a|D2|src/VP-V/modules/motion/estimation/global_model/link/AheadFlow.h",
+   "rule": "a",
+   "site": "D2",
+   "refs": "122 s9 D2",
+   "reason": "per-consumer CellTrust (optical-flow trust recomputed outside the engine)",
+   "seed": true,
+   "max_hits": 2
+  },
+  {
+   "key": "a|D2|src/VP-V/modules/repair/temporal_detail/SharedMotionSource.h",
+   "rule": "a",
+   "site": "D2",
+   "refs": "122 s9 D2",
+   "reason": "per-consumer CellTrust (optical-flow trust recomputed outside the engine)",
+   "seed": true,
+   "max_hits": 1
+  },
+  {
+   "key": "a|D3s|shaders/Temporal sigma-delta.glsl",
+   "rule": "a",
+   "site": "D3s",
+   "refs": "122 s9 D3",
+   "reason": "sigma-delta shader own block search pass",
+   "seed": true,
+   "max_hits": 2
+  },
+  {
+   "key": "a|D3|src/VP-V/modules/control/config/VpvRendererFields.h",
+   "rule": "a",
+   "site": "D3",
+   "refs": "122 s9 D3",
+   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
+   "seed": true,
+   "max_hits": 1
+  },
+  {
+   "key": "a|D3|src/VP-V/modules/control/config/VpvRendererSettings.cpp",
+   "rule": "a",
+   "site": "D3",
+   "refs": "122 s9 D3",
+   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
+   "seed": true,
+   "max_hits": 6
+  },
+  {
+   "key": "a|D3|src/VP-V/modules/control/config/VpvSettingsDump.h",
+   "rule": "a",
+   "site": "D3",
+   "refs": "122 s9 D3",
+   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
+   "seed": true,
+   "max_hits": 1
+  },
+  {
+   "key": "a|D3|src/VP-V/modules/motion/consumers/DejudderPolicyRunner.inl",
+   "rule": "a",
+   "site": "D3",
+   "refs": "122 s9 D3",
+   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
+   "seed": true,
+   "max_hits": 2
+  },
+  {
+   "key": "a|D3|src/VP-V/modules/motion/estimation/DitherVectorSourceHost.inl",
+   "rule": "a",
+   "site": "D3",
+   "refs": "122 s9 D3",
+   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
+   "seed": true,
+   "max_hits": 1
+  },
+  {
+   "key": "a|D3|src/VP-V/modules/motion/estimation/VectorEngine.cpp",
+   "rule": "a",
+   "site": "D3",
+   "refs": "122 s9 D3",
+   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
+   "seed": true,
+   "max_hits": 1
+  },
+  {
+   "key": "a|D3|src/VP-V/modules/motion/estimation/VectorEngine.h",
+   "rule": "a",
+   "site": "D3",
+   "refs": "122 s9 D3",
+   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
+   "seed": true,
+   "max_hits": 1
+  },
+  {
+   "key": "a|D3|src/VP-V/modules/output/presentation/RenderAheadPolicy.h",
+   "rule": "a",
+   "site": "D3",
+   "refs": "122 s9 D3",
+   "reason": "sigma-delta own vector search (ditherVectorsOwn / l1Available)",
+   "seed": true,
+   "max_hits": 15
+  },
+  {
+   "key": "a|D4|src/VP-V/modules/motion/estimation/global_model/link/CameraLabelFill.cpp",
+   "rule": "a",
+   "site": "D4",
+   "refs": "122 s9 D4",
+   "reason": "camera labels read as a FieldCopy through the link instead of P3",
+   "seed": true,
+   "max_hits": 2
+  },
+  {
+   "key": "a|D5|src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp",
+   "rule": "a",
+   "site": "D5",
+   "refs": "122 s9 D5",
+   "reason": "producer CPU luma decode (code >> 6) / GPU row upload shift",
+   "seed": true,
+   "max_hits": 1
+  },
+  {
+   "key": "a|D5|src/VP-V/modules/input/source_analysis/lane/LaneGpuProducts.cpp",
+   "rule": "a",
+   "site": "D5",
+   "refs": "122 s9 D5",
+   "reason": "producer CPU luma decode (code >> 6) / GPU row upload shift",
+   "seed": true,
+   "max_hits": 1
+  },
+  {
+   "key": "a|D6|src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp",
+   "rule": "a",
+   "site": "D6",
+   "refs": "122 s9 D6 / doc 91 D C9",
+   "reason": "C9 producer own RGB / full-range luma decode (named exception until EPE is compared)",
+   "seed": true,
+   "max_hits": 5
+  },
+  {
+   "key": "a|X1|src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
+   "rule": "a",
+   "site": "X1",
+   "refs": "126 s4 X1",
+   "reason": "matcher D1 global search inside the motion owner folder (file-level scope)",
+   "seed": true,
+   "max_hits": 22
+  },
+  {
+   "key": "a|X1|src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h",
+   "rule": "a",
+   "site": "X1",
+   "refs": "126 s4 X1",
+   "reason": "matcher D1 global search inside the motion owner folder (file-level scope)",
+   "seed": true,
+   "max_hits": 1
+  },
+  {
+   "key": "a|X2|src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
+   "rule": "a",
+   "site": "X2",
+   "refs": "126 s4 X2",
+   "reason": "private cut / fade judge (kCutShare, kFadeStepShare) in DP and TR",
+   "seed": true,
+   "max_hits": 1
+  },
+  {
+   "key": "a|X2|src/VP-V/modules/repair/texture_restore/DetailPulse.h",
+   "rule": "a",
+   "site": "X2",
+   "refs": "126 s4 X2",
+   "reason": "private cut / fade judge (kCutShare, kFadeStepShare) in DP and TR",
+   "seed": true,
+   "max_hits": 1
+  },
+  {
+   "key": "a|X2|src/VP-V/modules/repair/texture_restore/TextureRestore.cpp",
+   "rule": "a",
+   "site": "X2",
+   "refs": "126 s4 X2",
+   "reason": "private cut / fade judge (kCutShare, kFadeStepShare) in DP and TR",
+   "seed": true,
+   "max_hits": 2
+  },
+  {
+   "key": "a|X2|src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+   "rule": "a",
+   "site": "X2",
+   "refs": "126 s4 X2",
+   "reason": "private cut / fade judge (kCutShare, kFadeStepShare) in DP and TR",
+   "seed": true,
+   "max_hits": 2
+  },
+  {
+   "key": "a|X3|src/VP-V/modules/repair/texture_restore/TextureRestore.cpp",
+   "rule": "a",
+   "site": "X3",
+   "refs": "126 s4 X3",
+   "reason": "TR STATS pass / DP tile energies recomputed (private block statistics)",
+   "seed": true,
+   "max_hits": 4
+  },
+  {
+   "key": "a|X4|src/VP-V/modules/repair/deband/VpDebander.cpp",
+   "rule": "a",
+   "site": "X4",
+   "refs": "126 s4 X4",
+   "reason": "debander own grain split (SPLIT_TENSOR_BODY)",
+   "seed": true,
+   "max_hits": 2
+  },
+  {
+   "key": "a|X5|src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
+   "rule": "a",
+   "site": "X5",
+   "refs": "126 s4 X5",
+   "reason": "adaptive downscale own Sobel / Laplacian maps",
+   "seed": true,
+   "max_hits": 4
+  },
+  {
+   "key": "a|X6|src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp",
+   "rule": "a",
+   "site": "X6",
+   "refs": "126 s4 X6",
+   "reason": "source-resolution detector own flat-block test",
+   "seed": true,
+   "max_hits": 5
+  },
+  {
+   "key": "a|X7|src/VP-V/modules/repair/temporal_detail/TemporalDetailGpu.cpp",
+   "rule": "a",
+   "site": "X7",
+   "refs": "126 s4 X7",
+   "reason": "TD own grain split when the shared one does not fit (CheckFit fallback)",
+   "seed": true,
+   "max_hits": 3
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/drive/led_measure#kP4SourceStats",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/input/source_analysis/SourceResolutionMonitor#kP4SourceStats",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/input/source_analysis/identity#kP4SourceStats",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/motion/consumers#kP10GrainSplit",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/motion/consumers#kP3AnalysisField",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/motion/estimation/MotionAheadProducer#kP2VectorPair",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/motion/estimation/matcher/DejudderWarp#kP1HalfLuma",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/motion/estimation/matcher/DejudderWarp#kP2VectorPair",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/output/dither#kP3AnalysisField",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/repair/deband#kP11RegionBlockStats",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/repair/deband#kP12LightLevel",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/repair/deband#kP3AnalysisField",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/repair/detail_pulse#-",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/repair/texture_restore#kP10GrainSplit",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/repair/texture_restore#kP11RegionBlockStats",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/repair/texture_restore#kP4SourceStats",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/scaling/adaptive_downscale#-",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "b|X8|src/VP-V/modules/scaling/chroma_upscale#kP13SourceRing",
+   "rule": "b",
+   "site": "X8",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  },
+  {
+   "key": "c|C-grain|src/VP-V/modules/input/source_analysis/regions/RegionEvidence.h",
+   "rule": "c",
+   "site": "C-grain",
+   "refs": "126 s4 X8",
+   "reason": "declared product read never made, or owner compute without publish",
+   "seed": false,
+   "max_hits": 1
+  }
+ ]
+}
