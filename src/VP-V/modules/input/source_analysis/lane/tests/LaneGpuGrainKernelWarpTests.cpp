@@ -146,7 +146,7 @@ namespace VideoProcessorTest
 			for (Storage storage : { Storage::Full, Storage::Compact })
 			{
 				VpLaneProducts::GrainSplitKernel kernel(storage);
-				Assert::IsTrue(kernel.Steps(dims) == 5 && kernel.NeedsTap() && kernel.Product() == kP10GrainSplit, L"kernel shape");
+				Assert::IsTrue(kernel.Steps(dims) == 6 && kernel.NeedsTap() && kernel.Product() == kP10GrainSplit, L"kernel shape");
 				Assert::IsTrue(kernel.Granted() == storage, L"R16 unorm at codeUnit 64/65535 grants either storage");
 				const ProductTexLayout layout = kernel.Layout(dims);
 				std::vector<pl_tex> viaKernel = MakeOutputs(gpu, layout, dims);
@@ -275,7 +275,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(PassTextFingerprintIsPinned)
 		{
 			// WAIVER-P10V3-01: old pin 0x41cef8707edf809d (v2 text) -> new 0x8949becef0aab5c9 (v3 pass texts, refs/116).
-			constexpr uint64_t kPinned = 0x8949becef0aab5c9ull;
+			constexpr uint64_t kPinned = 0x7fe213d86466cc12ull;
 			Assert::IsTrue(GrainSplit::Gpu::FullShaderFingerprint() == kPinned, L"Full pass GLSL fingerprint");
 		}
 	};

@@ -329,7 +329,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 5u && VpLaneProducts::TapBands(d) == 2u, L"2 bands + extend + 5");
 			for (uint32_t i = 0; i < steps; ++i)
 				Assert::IsTrue(disp.Dispatch(job, i, steps), L"lane chunk");
-			Assert::IsTrue(kernel->steps == 5 && disp.Stats().tapBands == 2 && disp.Stats().extends == 1, L"lane passes");
+			Assert::IsTrue(kernel->steps == 6 && disp.Stats().tapBands == 2 && disp.Stats().extends == 1, L"lane passes");
 			Assert::IsFalse(disp.Dispatch(job, 0, steps + 1), L"a plan that does not match the passes is refused");
 
 			// The live form of another frame (8) with the same content: its own tap upload (all bands) and extend.

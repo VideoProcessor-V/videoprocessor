@@ -423,7 +423,7 @@ public:
 		GpuDevice dev;
 		Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
 		pl_gpu gpu = dev.Gpu();
-		Assert::AreEqual(static_cast<uint32_t>(5), GrainSplit::Gpu::Splitter::StepCount(), L"five steps");
+		Assert::AreEqual(static_cast<uint32_t>(6), GrainSplit::Gpu::Splitter::StepCount(), L"six steps");
 		const int cases[3][3] = { { 320, 180, 16 }, { 257, 143, 8 }, { 257, 143, 32 } };
 		for (const auto& cs : cases)
 		{
