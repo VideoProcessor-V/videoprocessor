@@ -73,10 +73,10 @@ namespace DitherNeedSeamTestsNs
 			{
 				// Original pathway with the setting on, and the setting off (the default) with every product present or
 				// absent: no status, no fallback, no count, no extra
-				const DitherNeedSeam::Outcome originalOn = stage.Evaluate(true, original != 0, original != 0 ? p.Feed() : DitherNeedSeam::Feed(), p.grid);
+				const DitherNeedSeam::Outcome originalOn = original != 0 ? stage.Evaluate(true, true, p.Feed(), p.grid) : DitherNeedSeam::Outcome();
 				const DitherNeedSeam::Outcome offAbsent = stage.Evaluate(false, original != 0, DitherNeedSeam::Feed(), p.grid);
 				const DitherNeedSeam::Outcome offPresent = stage.Evaluate(false, original != 0, p.Feed(), p.grid);
-				if (original == 0) continue;   // the first pass only exercises "off"; the Original on-case is original == 1
+				// "off" (absent and present) is asserted on both passes; the Original on-case only when original == 1
 				for (const DitherNeedSeam::Outcome* o : { &originalOn, &offAbsent, &offPresent })
 				{
 					Assert::IsFalse(o->active, L"inactive");

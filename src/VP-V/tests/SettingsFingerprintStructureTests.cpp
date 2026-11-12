@@ -464,5 +464,27 @@ namespace SlotOverrideLayoutTest
 			Assert::IsTrue(slots > 5, L"the switchable slots were found");
 			Assert::IsTrue(problems.empty(), std::wstring(problems.begin(), problems.end()).c_str());
 		}
+
+		// dither_need ([vpv], default off): parse and fingerprint. auto is a different configuration from off (case-insensitive), an
+		// invalid value falls back to off, and on the Original pathway "auto" is the same configuration as off (the overlay).
+		TEST_METHOD(DitherNeedParsesAndTheOriginalOverlayForcesItOff)
+		{
+			Renderer renderer;
+			Assert::IsTrue(renderer.Ready(), L"the renderer DLL and its settings exports");
+			auto with = [&](const std::string& vpv) { return renderer.Evaluate(Base() + "[vpv]\n" + vpv); };
+			const Evaluation none = with("");
+			const Evaluation off = with("dither_need: off\n");
+			const Evaluation on = with("dither_need: auto\n");
+			const Evaluation upper = with("dither_need: AUTO\n");
+			const Evaluation bad = with("dither_need: zzz_invalid\n");
+			Assert::IsTrue(none.ok && off.ok && on.ok && upper.ok, L"off and auto load");
+			Assert::IsTrue(none.fingerprint == off.fingerprint, L"absent is the same as off (the default)");
+			Assert::IsTrue(on.fingerprint != off.fingerprint, L"auto changes the fingerprint");
+			Assert::IsTrue(upper.fingerprint == on.fingerprint, L"the value is case-insensitive");
+			Assert::IsTrue(bad.fingerprint == off.fingerprint, L"an invalid value gives off");
+			const Evaluation originalOff = with("pipeline_original_pathway: on\n");
+			const Evaluation originalAuto = with("pipeline_original_pathway: on\ndither_need: auto\n");
+			Assert::IsTrue(originalAuto.fingerprint == originalOff.fingerprint, L"on the Original pathway auto is forced off");
+		}
 	};
 }

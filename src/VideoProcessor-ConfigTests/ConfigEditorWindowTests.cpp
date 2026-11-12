@@ -11275,6 +11275,7 @@ static const std::map<std::string, const char*>& CoverageAllowList()
         { "renderer:output_segments_merged", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.output_segments_merged); also read from [vprenderer]" },
         { "renderer:pipeline_entrance_once", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.pipeline_entrance_once, a test key: B3 is the default); also read from [vprenderer]" },
         { "renderer:entrance_gpu_drain", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.entrance_gpu_drain); also read from [vprenderer]" },
+        { "renderer:dither_need", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.dither_need); also read from [vprenderer]" },
         { "renderer:frame_analysis_store", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.frame_analysis_store); also read from [vprenderer]" },
         { "renderer:resync_event", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.resync_event); also read from [vprenderer]" },
         { "renderer:hdr_inference", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.hdr_inference); also read from [vprenderer]" },

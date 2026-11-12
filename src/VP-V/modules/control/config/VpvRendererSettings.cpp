@@ -1083,6 +1083,7 @@ namespace VpvRendererSettings
 		settings.frameAnalysisStore = false;               // key=frame_analysis_store (WP-23: upstream's own decodes only)
 		settings.resyncEvent = "off";                      // key=resync_event
 		settings.entranceGpuDrain = "off";                 // key=entrance_gpu_drain
+		settings.ditherNeed = "off";                       // key=dither_need
 	}
 
 	// deband_vp_exclusive: see LibplaceboDebandYieldsToVp in the host (settings = the host's settings struct).

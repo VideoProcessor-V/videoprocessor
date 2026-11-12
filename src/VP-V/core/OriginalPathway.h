@@ -25,9 +25,9 @@ namespace OriginalPathway
 		const char* slot;   // the slot whose VP additions it removes (slots.json id)
 	};
 
-	inline const std::array<Override, 69>& Overrides()
+	inline const std::array<Override, 70>& Overrides()
 	{
-		static const std::array<Override, 69> table = { {
+		static const std::array<Override, 70> table = { {
 			{ "capture_path", "standard", "input.capture" },
 			{ "capture_upload", "render", "input.capture" },
 			{ "native_rgb_ingest", "off", "input.capture" },
@@ -87,6 +87,7 @@ namespace OriginalPathway
 			{ "ambient_adapt", "off", "control.config" },
 			{ "temporal_dither", "libplacebo", "output.dither" },
 			{ "output_segments_merged", "off", "output.dither" },   // VP's merged output hooks: never in Bill's pathway
+			{ "dither_need", "off", "output.dither" },   // per-block extra dither amplitude: VP addition, not in Bill's pathway
 			{ "render_ahead", "off", "output.presentation" },
 			{ "calibration_lut_stage", "libplacebo", "output.calibration_lut" },
 			// Settings audit 2026-10-24: VP additions the first table missed (absent from Bill's v1.4.02-beta).

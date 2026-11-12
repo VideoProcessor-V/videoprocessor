@@ -1,3 +1,5 @@
+> STATUS 2026-11-12 (STALE below, rule 22): call sites 1-2 and the FallbackCatalog part of 3 are APPLIED in VP-V-owned files on r2/dither-need (setting `dither_need` in [vpv], VpvSection combo, OutputFinishSegment::EvaluateDitherNeed called from CoreSegments.inl, DitherNeedSeam.h). The GPU block pass, HookGuard binding and live P11/P12 fill (G6) are still NOT applied; the host passes an empty Feed.
+
 # Dither need: call sites NOT applied (Bill files)
 
 Status: `dither_need` (output.dither) is implemented in VP-V files only. The lines below are what a later package adds to Bill's files, through the M2 hook layer, as generic inert hooks. Nothing here is applied on feat/dither-need-map.

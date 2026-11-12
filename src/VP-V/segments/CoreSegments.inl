@@ -438,7 +438,13 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
                 activeSettings.ditherNeed == "auto" && any, pipelineSlots.OriginalPathway());
             SyncFallback(need.fallback);
             if (outputFinish.DitherNeedStatusChanged(need.status) && !need.status.empty())
-                DebugLog::Log("%s", need.status.c_str());
+            {
+                const DitherNeedSeam::Counters& n = outputFinish.DitherNeedCounters();
+                DebugLog::Log("%s (frames so far: on %llu, not needed %llu, unavailable %llu, stale %llu, classical quality %llu)",
+                    need.status.c_str(), static_cast<unsigned long long>(n.framesOn), static_cast<unsigned long long>(n.framesNotNeeded),
+                    static_cast<unsigned long long>(n.framesUnavailable), static_cast<unsigned long long>(n.framesStale),
+                    static_cast<unsigned long long>(n.framesClassicalQuality));
+            }
         }
     }
     // The dither is the last processing of every picture: if a configured

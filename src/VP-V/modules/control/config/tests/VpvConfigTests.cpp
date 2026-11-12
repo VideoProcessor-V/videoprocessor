@@ -378,6 +378,9 @@ namespace
 			require(merged->toolTip().contains(QStringLiteral("off until its GPU check passes")), "the merged output chain says why it is off");
 			merged->setChecked(true);
 			control<QComboBox>(window, Vpv::ObjectName("expert.entrance_gpu_drain"))->setCurrentIndex(2);
+			auto* ditherNeed = control<QComboBox>(window, Vpv::ObjectName("expert.dither_need"));
+			require(ditherNeed->currentIndex() == 0, "dither_need is off by default");
+			ditherNeed->setCurrentIndex(1);
 			auto* analysis = control<QCheckBox>(window, Vpv::ObjectName("expert.frame_analysis_store"));
 			require(!analysis->isChecked(), "the frame analysis store is off by default");
 			analysis->setChecked(true);
@@ -399,6 +402,7 @@ namespace
 		require(config.TryGetString("vpv", "calibration_lut_stage", v) && v == "vp", "the LUT stage is stored in [vpv]");
 		require(config.TryGetString("vpv", "output_segments_merged", v) && v == "on", "the merged output chain is stored in [vpv]");
 		require(config.TryGetString("vpv", "entrance_gpu_drain", v) && v == "finish", "the entrance GPU drain is stored in [vpv]");
+		require(config.TryGetString("vpv", "dither_need", v) && v == "auto", "dither_need is stored in [vpv]");
 		require(config.TryGetString("vpv", "frame_analysis_store", v) && v == "on", "the frame analysis store is stored in [vpv]");
 		require(config.TryGetString("vpv", "resync_event", v) && v == "shadow", "the resync event shadow is stored in [vpv]");
 		require(config.TryGetString("vpv", "hdr_inference", v) && v == "original", "the HDR inference choice is stored in [vpv]");
