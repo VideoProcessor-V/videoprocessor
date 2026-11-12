@@ -8,9 +8,12 @@
 // lease once per accessor read, exactly as the direct reads did.
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <VP-V/core/Indicator.h>
+#include <VP-V/modules/input/signal/ResyncDrive.h>
 #include <VP-V/modules/motion/estimation/EstimateState.h>
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 
+#include <memory>
 #include <vector>
 
 namespace VideoProcessorTest
@@ -42,6 +45,40 @@ namespace VideoProcessorTest
 			Assert::IsFalse(R::LiveFrom(true, 7, 8, true), L"the live outputs are another pair");
 			Assert::IsFalse(R::LiveFrom(true, 8, 8, false), L"a stale motion epoch");
 			Assert::IsTrue(R::LiveFrom(true, 0, 0, true), L"(kept exactly: the rule has no sequence-0 test; FieldOf is never asked for 0)");
+		}
+
+		// T-AR3-N1 (AUDIT-R 1fa78cdb9 N1; doc 91 D "PairValidAt everywhere"): the view's pair gate is MotionValidity::PairServes (epoch
+		// form AND stamp form), not the epoch-only Current(). Unbound (resync_event off) the stamps refuse nothing, so the answer is the
+		// old epoch one; bound, a pair that spans a FULL / continuity stamp is refused although its epoch is still current.
+		TEST_METHOD(ThePairGateIsPairServesAndKeepsTheEpochFormUnbound)
+		{
+			VpMotion::VectorEngine engine;
+			VpMotion::EstimateState<int> state(engine);
+			const uint64_t e = engine.motionValidity.Epoch();
+			Assert::IsTrue(e != 0, L"a motion epoch exists");
+			// Unbound: exactly Current(epoch) for every pair shape (adjacent, default B, gap pair, no pair).
+			Assert::IsTrue(state.PairStillServes(3, 4, e));
+			Assert::IsTrue(state.PairStillServes(3, 0, e), L"B 0 = the adjacent pair");
+			Assert::IsTrue(state.PairStillServes(3, 6, e), L"a gap pair, no stamps: the epoch form");
+			Assert::IsTrue(state.PairStillServes(0, 0, e), L"no pair: the old epoch form, untouched");
+			Assert::IsFalse(state.PairStillServes(3, 4, e + 1), L"a stale epoch");
+			Assert::IsFalse(state.PairStillServes(3, 4, 0), L"epoch 0 is never current");
+
+			// Bound to an Indicator: a FULL at sequence 4 (the stamps of the existing PairServes test).
+			std::shared_ptr<VpIndicator::Indicator> ind = std::make_shared<VpIndicator::Indicator>(VpIndicator::NextEra(), 64);
+			engine.motionValidity.Bind(ind);
+			ind->SealAndObserve(1);
+			ind->SealAndObserve(2);
+			ind->Advance(VpIndicator::kFull, VpResync::Cause::LiveQueueReset, 4);
+			const uint64_t eb = engine.motionValidity.Epoch();
+			Assert::IsTrue(engine.motionValidity.Current(eb), L"plausibility: the epoch form alone still accepts every pair below");
+			Assert::IsTrue(state.PairStillServes(2, 3, eb), L"before the FULL");
+			Assert::IsFalse(state.PairStillServes(3, 4, eb), L"spans the FULL at 4: the stamp form refuses, the epoch form would not");
+			Assert::IsFalse(state.PairStillServes(3, 0, eb), L"the default adjacent pair is the same pair");
+			Assert::IsTrue(state.PairStillServes(4, 5, eb), L"after it");
+			Assert::IsTrue(state.PairStillServes(1, 3, eb), L"a gap pair clear of the FULL");
+			Assert::IsFalse(state.PairStillServes(3, 6, eb), L"a gap pair across the FULL is refused (never across a FULL)");
+			Assert::IsFalse(state.PairStillServes(2, 3, eb + 1), L"the stale epoch still refuses first");
 		}
 
 		// No matcher (engine off, de-judder never created): every answer is empty, the side-effecting reads do nothing.

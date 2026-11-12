@@ -205,9 +205,29 @@ namespace VpMotion
 			s.vectorOk = dejudder->VectorOk();
 			return s;
 		}
+		// T-AR3-N1 (AUDIT-R 1fa78cdb9 N1; doc 91 D "PairValidAt everywhere"): the P3 view's validity is the pair form the other
+		// vector consumers use (MotionValidity::PairServes = PairValid && PairValidAt, already at DejudderPolicyRunner.inl's
+		// pair gate and VectorEngine.cpp), not the epoch-only Current(): a copy made in the current epoch whose pair spans a FULL /
+		// settings[motion] stamp is refused. A gap pair (B != A + 1) takes the gap-fill gate's own form (epoch + SpanStatus across
+		// the loss != Invalid; DejudderPolicyRunner.inl fillPair), because Adjacent() is false for it by construction. Unbound
+		// (resync_event off) the stamps are Unknown and refuse nothing: the answer is the old epoch-only one. No pair (from 0): the
+		// old epoch form, so the rules' own sequence-0 behaviour is untouched. `to` 0 = the adjacent pair (the default estimate).
+		bool PairStillServes(uint64_t from, uint64_t to, uint64_t madeInEpoch) const
+		{
+			const ::MotionValidity::State& mv = engine_.motionValidity;
+			if (from == 0)
+				return mv.Current(madeInEpoch);
+			if (to == 0)
+				to = from + 1;
+			if (to == from + 1)
+				return mv.PairServes(from, to, madeInEpoch, mv.Epoch());
+			return mv.Current(madeInEpoch) && to > from &&
+				mv.SpanStatus(from, to, true) != ::MotionValidity::State::SpanState::Invalid;
+		}
 		bool LiveValidFor(uint64_t sequence, bool motionHistoryFixes) const
 		{
-			return P3Rules::LiveFor(dejudder != nullptr, sequence, dejudderEstimatedSequence, engine_.motionValidity.Current(dejudderEstimatedEpoch),
+			return P3Rules::LiveFor(dejudder != nullptr, sequence, dejudderEstimatedSequence,
+				PairStillServes(dejudderEstimatedSequence, dejudderEstimatedNextSequence, dejudderEstimatedEpoch),
 				motionHistoryFixes, dejudderLiveFieldFrom);
 		}
 		P3FieldSet LiveFor(uint64_t sequence, bool motionHistoryFixes) const
@@ -216,7 +236,8 @@ namespace VpMotion
 		}
 		P3FieldSet LiveFrom(uint64_t sequence) const
 		{
-			return P3Rules::LiveFrom(dejudder != nullptr, sequence, dejudderLiveFieldFrom, engine_.motionValidity.Current(dejudderEstimatedEpoch)) ?
+			return P3Rules::LiveFrom(dejudder != nullptr, sequence, dejudderLiveFieldFrom,
+				PairStillServes(dejudderLiveFieldFrom, dejudderLiveFieldTo, dejudderEstimatedEpoch)) ?
 				Live() : P3FieldSet();
 		}
 		// The snapshot is read per accessor (lazily, in the caller's order): each Snap* read is one lease check, and a lost lease is
@@ -291,6 +312,7 @@ namespace VpMotion
 		std::unique_ptr<Dejudder::MotionWarp> dejudder;
 		uint64_t dejudderEstimatedSequence = 0;
 		uint64_t dejudderEstimatedEpoch = 0;   // the motion epoch the estimate was made in (MotionValidity)
+		uint64_t dejudderEstimatedNextSequence = 0;   // T-AR3-N1: the B of that pair (0 = A + 1, the adjacent pair); PairStillServes
 		// Bug hunt 3 F10: the source periods the estimated pair's field spans (a gap pair: k + 1).
 		int dejudderEstimatedPeriods = 1;
 		// Bug hunt 3 F4: the idle motion engine kept for hiccup repair, and its low-memory fallback.
@@ -306,6 +328,7 @@ namespace VpMotion
 		// After an ahead estimate it is B while A is still showing, so A's repeat draws must not
 		// read the live field as A's (the extras read their snapshot).
 		uint64_t dejudderLiveFieldFrom = 0;
+		uint64_t dejudderLiveFieldTo = 0;   // T-AR3-N1: the B of the pair the live outputs hold (0 = A + 1); meaningful while From != 0
 		// Hunt 2 04 L3: the motion source last estimated with (0 matcher only, 1 render-time
 		// engine, 2 engine with the producer ahead); -1 = none yet.
 		int dejudderMotionSourceKey = -1;

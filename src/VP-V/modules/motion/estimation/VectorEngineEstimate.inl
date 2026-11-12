@@ -406,6 +406,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	// W2-C5b: an engine pair served on demand (the dequeue's request, computed at render time) is told apart from one computed
 	// ahead everywhere it is shown: the segment's source, the motion-source line and the vector-delivery note (visible truth).
 	const bool onDemandPair = dejudder->ExternalFlowUsed() && vectorEngine.OnDemandServed(aSequence, bSequence);
+	vectorEstimate.dejudderLiveFieldTo = bSequence;   // T-AR3-N1: the pair the live outputs hold, for the P3 view's pair gate
 	if (pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery))
 		motionSegment.Publish(VpMotion::Direction::Forward, aSequence, bSequence,
 		MotionShadowField{ aSequence, bSequence, dejudder->Field(), dejudder->FrameTrust(), dejudder->SubField(), dejudder->Camera(), dejudder->GrainError() },   // SK-MV: P3 (+P2/P2m by the source) published with its textures

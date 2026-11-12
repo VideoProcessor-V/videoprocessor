@@ -44,8 +44,9 @@ namespace Vpv
 	// callback gate, before any reader), so the first frame already runs with the pathway's switches: Original = all
 	// five off (OriginalPathway.h rows queue_timing_fixes, pulldown_fixes, timing_continuity_fixes, cadence_class_fixes,
 	// motion_history_fixes), and the ingress binding learns the pathway for R15 / R19 (IngressPolicy.h). The render
-	// loop's own refresh stays (same values, same atomics). Capture / file thread; the settings read is the same
-	// `m_impl->activeSettings` field read IngressPulldown already makes on that thread.
+	// loop's own refresh stays (same values, same atomics). Capture / file thread. T-AR3-N2: the values are NOT read
+	// from `m_impl->activeSettings` (a cross-thread read of a struct the render thread rewrites): UpdatePipelineSlots
+	// publishes them (FixSwitchBitsOf) into the hub's per-host fact, and the arrival reads that word.
 	struct FixSwitches
 	{
 		bool pulldownFixes = true, timingContinuityFixes = true, cadenceClassFixes = true;
@@ -62,6 +63,24 @@ namespace Vpv
 		f.queueTimingFixes = s.queueTimingFixes;
 		f.motionHistoryFixes = s.motionHistoryFixes;
 		f.originalPathway = s.pipelineOriginalPathway;
+		return f;
+	}
+	// T-AR3-N2: the six switches as one word, published by the settings seam (UpdatePipelineSlots) into the hub's per-host
+	// fact and read lock-free by the capture / file threads (they never read the Impl's activeSettings).
+	static uint32_t FixSwitchBitsOf(const FixSwitches& f)
+	{
+		return (f.pulldownFixes ? 1u : 0u) | (f.timingContinuityFixes ? 2u : 0u) | (f.cadenceClassFixes ? 4u : 0u) |
+			(f.queueTimingFixes ? 8u : 0u) | (f.motionHistoryFixes ? 16u : 0u) | (f.originalPathway ? 32u : 0u);
+	}
+	static FixSwitches FixSwitchesFromBits(uint32_t b)
+	{
+		FixSwitches f;
+		f.pulldownFixes = (b & 1u) != 0;
+		f.timingContinuityFixes = (b & 2u) != 0;
+		f.cadenceClassFixes = (b & 4u) != 0;
+		f.queueTimingFixes = (b & 8u) != 0;
+		f.motionHistoryFixes = (b & 16u) != 0;
+		f.originalPathway = (b & 32u) != 0;
 		return f;
 	}
 	std::atomic<bool> m_originalPathway{false};   // the pathway the active settings selected at the last arrival

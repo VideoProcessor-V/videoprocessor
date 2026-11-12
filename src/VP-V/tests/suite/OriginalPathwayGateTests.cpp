@@ -214,6 +214,97 @@ namespace VideoProcessorTest
 			Assert::IsFalse(st.m_originalPathway.load());
 		}
 
+		// T-AR3-N2 (AUDIT-R 1fa78cdb9 N2): the capture / file threads read the six switches from a word the settings seam
+		// published into the hub's per-host fact, never from the Impl's activeSettings. Round trip, per-host, dropped with
+		// the host, unpublished = the caller leaves its switches alone.
+		TEST_METHOD(IngressFixSwitchesArePublishedPerHostAndReadAsOneWord)
+		{
+			HubScope scope;
+			using Vpv::Ingress::IngressState;
+			struct Settings
+			{
+				bool pulldownFixes, timingContinuityFixes, cadenceClassFixes, queueTimingFixes, motionHistoryFixes, pipelineOriginalPathway;
+			};
+			const Settings original = { false, false, false, false, false, true };
+			const Settings vpv = { true, true, true, true, true, false };
+			const Settings mixed = { true, false, true, false, true, false };
+			int host = 0, other = 0;
+			uint32_t bits = 123;
+			Assert::IsFalse(Hub().FixSwitchBits(&host, bits), L"nothing published yet");
+			Assert::AreEqual<uint32_t>(123, bits, L"an unpublished read leaves the caller's word alone");
+			Assert::IsTrue(Hub().NoteFixSwitches(&host, IngressState::FixSwitchBitsOf(IngressState::FixSwitchesOf(original))));
+			Assert::IsTrue(Hub().FixSwitchBits(&host, bits));
+			IngressState::FixSwitches f = IngressState::FixSwitchesFromBits(bits);
+			Assert::IsTrue(f.originalPathway && !f.pulldownFixes && !f.timingContinuityFixes && !f.cadenceClassFixes &&
+				!f.queueTimingFixes && !f.motionHistoryFixes, L"Original: all five off, pathway set");
+			Assert::IsFalse(Hub().FixSwitchBits(&other, bits), L"another host has no word");
+			Assert::IsTrue(Hub().NoteFixSwitches(&host, IngressState::FixSwitchBitsOf(IngressState::FixSwitchesOf(mixed))));
+			Assert::IsTrue(Hub().FixSwitchBits(&host, bits));
+			f = IngressState::FixSwitchesFromBits(bits);
+			Assert::IsTrue(f.pulldownFixes && !f.timingContinuityFixes && f.cadenceClassFixes && !f.queueTimingFixes &&
+				f.motionHistoryFixes && !f.originalPathway, L"each of the six bits is its own switch");
+			Assert::IsFalse(Hub().OriginalPathway(&host), L"publishing the switches does not record the pathway fact");
+			SettingsApplied(&host, true);
+			Assert::IsTrue(Hub().OriginalPathway(&host));
+			Assert::IsTrue(Hub().FixSwitchBits(&host, bits), L"the SettingsApplied fact keeps the published word");
+			Assert::AreEqual<uint32_t>(IngressState::FixSwitchBitsOf(IngressState::FixSwitchesOf(mixed)), bits);
+			Assert::IsTrue(Hub().NoteFixSwitches(&host, IngressState::FixSwitchBitsOf(IngressState::FixSwitchesOf(vpv))));
+			Assert::IsTrue(Hub().FixSwitchBits(&host, bits));
+			Assert::IsTrue(IngressState::FixSwitchBitsOf(IngressState::FixSwitchesOf(vpv)) == bits);
+			Assert::IsFalse(Hub().NoteFixSwitches(nullptr, 1), L"no host, no word");
+			RE::NotifyLifecycle(RE::Lifecycle::GpuReleased, &host);
+			Assert::IsFalse(Hub().FixSwitchBits(&host, bits), L"dropped with the host");
+		}
+
+		// T-AR3-N4 (AUDIT-R 1fa78cdb9 N4): a SettingsApplied pathway fact the hub cannot record (slot table full) is counted
+		// and a WorkerFault status line is emitted (the visible display is the host's "ingress switches" fallback), not ignored.
+		TEST_METHOD(AnUnrecordablePathwayFactIsCountedAndReportedVisibly)
+		{
+			HubScope scope;
+			struct Probe : Vpv::Hub::ISkeletonModule
+			{
+				std::vector<std::string> faults;
+				const char* Name() const override { return "probe"; }
+				void OnStatus(const RE::Context&, RE::StatusKind k, std::vector<std::string>&, const char* worker, const char* what) override
+				{
+					if (k == RE::StatusKind::WorkerFault)
+						faults.push_back(std::string(worker ? worker : "") + "|" + (what ? what : ""));
+				}
+			};
+			Probe* probe = new Probe();
+			Hub().AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(probe));
+			std::vector<int> hosts(64);
+			size_t filled = 0;
+			while (filled < hosts.size() && Hub().NoteOriginalPathway(&hosts[filled], false))
+				++filled;
+			Assert::IsTrue(filled > 0 && filled < hosts.size(), L"the per-host table is bounded");
+			Assert::AreEqual<uint32_t>(0, Hub().PathwayRefusals());
+			SettingsApplied(&hosts[filled], true);
+			Assert::AreEqual<uint32_t>(1, Hub().PathwayRefusals(), L"counted");
+			Assert::AreEqual<size_t>(1, probe->faults.size(), L"and reported, once");
+			Assert::IsTrue(probe->faults[0].find("hub|pathway table full") == 0, L"with the worker and the reason");
+			SettingsApplied(&hosts[0], true);   // a recorded host: no refusal
+			Assert::AreEqual<uint32_t>(1, Hub().PathwayRefusals());
+			Assert::AreEqual<size_t>(1, probe->faults.size());
+		}
+
+		// T-AR3-N2 audit SHOULD 1: an unpublishable fix-switch word (table full) is a counted refusal the caller can surface.
+		TEST_METHOD(AnUnpublishableFixSwitchWordIsRefusedAndCounted)
+		{
+			HubScope scope;
+			std::vector<int> hosts(64);
+			size_t filled = 0;
+			while (filled < hosts.size() && Hub().NoteFixSwitches(&hosts[filled], 1))
+				++filled;
+			Assert::IsTrue(filled > 0 && filled < hosts.size(), L"the per-host table is bounded");
+			Assert::AreEqual<uint32_t>(1, Hub().PathwayRefusals(), L"the refused publish is counted");
+			uint32_t bits = 0;
+			Assert::IsFalse(Hub().FixSwitchBits(&hosts[filled], bits), L"nothing published for the refused host");
+			Assert::IsTrue(Hub().FixSwitchBits(&hosts[0], bits) && bits == 1, L"the recorded hosts keep their word");
+			Assert::IsTrue(Hub().NoteFixSwitches(&hosts[0], 3), L"a recorded host still updates");
+			Assert::AreEqual<uint32_t>(1, Hub().PathwayRefusals());
+		}
+
 		// The renderer's queue events are not motion invalidations in Bill's pathway; leaving Original at SettingsApplied
 		// requests ONE Resync invalidation (the events of the Original stretch were ignored); other applies request none.
 		TEST_METHOD(QueueEventsDoNothingInTheOriginalPathwayAndLeavingItInvalidatesOnce)

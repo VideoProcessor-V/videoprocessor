@@ -277,6 +277,7 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 		dejudderEstimatedSequence = sourceSequence;
 		dejudderEstimatedEpoch = dejudderAhead.ConsumedEpoch();
 		dejudderAhead.NoteEpoch(dejudderEstimatedEpoch);   // E12: the next entry is made in this field's epoch
+		vectorEstimate.dejudderEstimatedNextSequence = nextSourceSequence;   // T-AR3-N1: the P3 view's pair gate
 		vectorEstimate.dejudderEstimatedPeriods = 1;   // estimated ahead: an adjacent pair
 		LogDejudderAhead();
 		return;
@@ -311,6 +312,7 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 		dejudderEstimatedSequence = sourceSequence;
 		dejudderEstimatedEpoch = estimateEpoch;
 		dejudderAhead.NoteEpoch(estimateEpoch);   // E12: an entry made ahead of this field keeps its epoch
+		vectorEstimate.dejudderEstimatedNextSequence = nextSourceSequence;   // T-AR3-N1 (a gap pair: B != A + 1)
 		// Bug hunt 3 F10: a gap pair's field spans the missed periods too.
 		vectorEstimate.dejudderEstimatedPeriods = InterpolationTimeline::FieldPeriods(fillPair && vpFillGapFrames > 0, vpFillGapFrames);
 	}

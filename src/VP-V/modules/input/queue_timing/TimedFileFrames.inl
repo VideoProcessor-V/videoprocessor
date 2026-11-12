@@ -30,7 +30,10 @@ void LibplaceboVideoRenderer::OnTimedVideoFrame(VideoFrame& videoFrame,
 	if (m_state.load(std::memory_order_acquire) != RendererState::RENDERSTATE_RENDERING)
 		return;
 	// PHASE 1 (IngressState.h FixSwitches): as IngressHardwareArrival for a file frame (EnqueueFrame reads the switches).
-	if (m_impl && SyncIngressSwitches(FixSwitchesOf(m_impl->activeSettings), m_queueTimingFixes, m_motionHistoryFixes))
+	// T-AR3-N2: the switches come from the hub fact the settings seam published (no activeSettings read on this thread).
+	uint32_t fixBits = 0;
+	if (m_impl && Vpv::Hub::ExtensionHub::Instance().FixSwitchBits(m_impl.get(), fixBits) &&
+		SyncIngressSwitches(FixSwitchesFromBits(fixBits), m_queueTimingFixes, m_motionHistoryFixes))
 		Vpv::Ingress::NoteOriginalPathway(this, m_originalPathway.load(std::memory_order_relaxed));
 	if (!FileFrameClock::TimingUsable(timing))
 	{
