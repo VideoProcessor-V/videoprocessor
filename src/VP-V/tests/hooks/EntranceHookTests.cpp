@@ -242,6 +242,34 @@ namespace EntranceHookTest
 				L"Entrance, then the entrance decisions, the hook list, the render call, AfterRender");
 		}
 
+		// M2 P4 h (owner E3, lead ruling 2026-11-11): the after-render reports run through ONE call-site line that is guarded
+		// off in the Original pathway, sits right before NotifyAfterRender, keeps the statement order (reports, then the Dynamic
+		// Drive stats), and the moved body in CoreSegments.inl stays a pure move (no pathway check of its own).
+		TEST_METHOD(TheAfterRenderReportsAreGuardedAtTheCallSiteAndTheBodyIsAPureMove)
+		{
+			const std::string text = ReadText(RepositoryRoot() + "\src\VideoProcessor-Lib\vprenderer\LibplaceboVideoRenderer.cpp");
+			Assert::IsFalse(text.empty(), L"the renderer source");
+			const std::string guard = "if (!pipelineSlots.OriginalPathway()) { ReportRenderErrors(); dynamicDrive.CollectMeasurements(); }";
+			const size_t site = text.find(guard);
+			Assert::IsTrue(site != std::string::npos, L"the guarded call-site line");
+			Assert::IsTrue(text.find(guard, site + 1) == std::string::npos, L"exactly one call site");
+			const size_t after = text.find("RendererExtension::NotifyAfterRender(", site);
+			Assert::IsTrue(after != std::string::npos && after - site < 600, L"right before AfterRender");
+			Assert::IsTrue(text.find("void ReportRenderErrors();") != std::string::npos, L"the declaration stays in Impl");
+			Assert::IsTrue(text.find("pl_renderer_get_errors(renderer)", site - 3000) == std::string::npos ||
+				text.find("pl_renderer_get_errors(renderer)", site - 3000) > site, L"the report block left the render function");
+
+			const std::string body = ReadText(RepositoryRoot() + "\src\VP-V\segments\CoreSegments.inl");
+			const size_t def = body.find("LibplaceboVideoRenderer::Impl::ReportRenderErrors()");
+			Assert::IsTrue(def != std::string::npos, L"the member definition");
+			Assert::IsTrue(body.find("OriginalPathway", def) == std::string::npos, L"no pathway check inside the moved body");
+			const size_t errors = body.find("pl_renderer_get_errors(renderer)", def);
+			const size_t drive = body.find("dynamicDrive.OnHookErrors(", def);
+			const size_t calibration = body.find("calibrationHost.AfterRender(hookErrors)", def);
+			Assert::IsTrue(errors != std::string::npos && drive != std::string::npos && calibration != std::string::npos &&
+				errors < drive && drive < calibration, L"the body keeps its order");
+		}
+
 		TEST_METHOD(DrawJobDefaultsAreInert)
 		{
 			RE::DrawJob job;
