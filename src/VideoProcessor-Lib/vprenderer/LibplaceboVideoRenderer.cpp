@@ -5830,37 +5830,8 @@ struct LibplaceboVideoRenderer::Impl
 		want(C::MotionIntent, intentInterpreter && intentInterpreter->Active());
 		return in;
 	}
-	// The sigma-delta's vectors on a frame whose extras do not run: B's first present takes the pair's field
-	// at the full vector (previousShift 0), exactly as the extras path builds them (payback of the 4.2 ms own search).
-	void BuildSigmaDeltaVectorsWithoutExtras(uint64_t sourceSequence, uint64_t nextSourceSequence)
-	{
-		dejudderNextVectorsSequence = 0;
-		ditherNextGate.Clear();
-		if (!vectorDemand.Serves(VectorDemand::Consumer::SigmaDelta) || !dejudder || sourceSequence == 0 || nextSourceSequence == 0 ||
-			interpolating || vpTimelineActive ||   // the timeline / hiccup repair drew refreshes: A was not at shift 0
-			!DejudderLiveFieldFor(sourceSequence) || !dejudderGeometryValid || activeSettings.ditherVectorsOwn ||
-			!DitherVectorsSupported() || !d3d11 || !d3d11->gpu)
-			return;
-		const int w = static_cast<int>(std::lround(std::fabs(dejudderGeometry.targetCrop.x1 - dejudderGeometry.targetCrop.x0)));
-		const int h = static_cast<int>(std::lround(std::fabs(dejudderGeometry.targetCrop.y1 - dejudderGeometry.targetCrop.y0)));
-		if (w <= 0 || h <= 0)
-			return;
-		if (!dejudderNextVectorField)
-			dejudderNextVectorField = std::make_unique<DejudderRendered::VectorField>(log, d3d11->gpu);
-		const Dejudder::Settings matcher = RenderedWarpSettings(h);
-		pl_tex next = nullptr;
-		const VpMotion::P3FieldSet live = vectorEstimate.Live();   // P5c: R0   // VPV-HOOK
-		if (dejudderNextVectorField->Run(live.field, live.frameTrust, vectorEstimate.MinTrustedShare(), 0.0f,   // VPV-HOOK
-				dejudderGeometry, w, h, next, live.subField, &matcher, live.camera, true) && next)   // VPV-HOOK
-		{
-			dejudderNextVectors = next;
-			dejudderNextVectorsSequence = nextSourceSequence;
-			ditherNextGate.Bind(sourceSequence, nextSourceSequence, dejudderEstimatedEpoch);
-			dejudderNextVectorsGeometry = dejudderGeometry;
-			dejudderNextVectorsW = w;
-			dejudderNextVectorsH = h;
-		}
-	}
+	// The sigma-delta's vectors on a frame whose extras do not run (W2-C8: the motion module's dither vector chain).
+	void BuildSigmaDeltaVectorsWithoutExtras(uint64_t sourceSequence, uint64_t nextSourceSequence);
 	// output.dither's vector producers run only while the slot runs (WP-13, DitherSlot.h).
 	bool DitherVectorsSupported() const
 	{

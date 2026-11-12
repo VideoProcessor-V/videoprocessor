@@ -11,6 +11,7 @@
 #pragma once
 
 #include <VP-V/modules/motion/consumers/TimelinePlanner.h>
+#include <VP-V/modules/motion/estimation/DitherVectorSource.h>
 
 bool LibplaceboVideoRenderer::Impl::RunVpPhaseInterpolation()
 {
@@ -310,6 +311,15 @@ void LibplaceboVideoRenderer::Impl::PublishDejudderStatus(bool force)
 		if (!vectorLine.empty())
 			text += (text.empty() ? std::string() : std::string("; ")) + vectorLine;
 	}
+	// W2-C8: where the sigma-delta's vectors came from (DitherVectorSource.h); the held entries age out here too.
+	if (VpMotion::DitherVectors::Tracker* ditherVectors = VpMotion::DitherVectors::Registry::Find(this))
+	{
+		const std::string segment = ditherVectors->StatusSegment();
+		if (!segment.empty())
+			text += (text.empty() ? std::string() : std::string("; ")) + segment;
+		for (const FallbackCatalog::Decision& decision : ditherVectors->Decisions(now))
+			SyncFallback(decision);
+	}
 	std::lock_guard<std::mutex> guard(dejudderStatusMutex);
 	if (repeatReuse.Active())
 		text += (text.empty() ? std::string() : std::string("; ")) + repeatReuse.StatusLine();
@@ -337,6 +347,9 @@ void LibplaceboVideoRenderer::Impl::ReleaseDejudder()
 	dejudderNextVectors = nullptr;
 	dejudderNextVectorsSequence = 0;
 	ditherNextGate.Clear();
+	VpMotion::DitherVectors::Registry::Forget(this);   // W2-C8: the chain's counters and entries go with the device
+	for (const FallbackCatalog::Decision& decision : VpMotion::DitherVectors::Tracker::Released())
+		SyncFallback(decision);
 	for (pl_tex& tex : dejudderNextTextures)
 		if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
 	dejudderNextUploadedSequence = 0;
@@ -553,3 +566,6 @@ double LibplaceboVideoRenderer::CurrentQueueHoldFraction() const
 	std::lock_guard<std::mutex> guard(m_queueHoldMutex);
 	return m_queueHold.fraction;
 }
+
+// W2-C8: BuildSigmaDeltaVectorsWithoutExtras (the dither vector chain, renderer side).
+#include <VP-V/modules/motion/estimation/DitherVectorSourceHost.inl>

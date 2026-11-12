@@ -131,6 +131,10 @@ namespace CustomHookChain
         // hook list (it drops the sigma-delta on an unsupported code domain).
         bool IsQuantizerHook(const pl_hook* hook) const;
 
+        // W2-C8: the current value of a //!PARAM of the loaded output quantiser (the sigma-delta), as the hook holds it
+        // (the rule's parameter or the shader's default). False when no quantiser is loaded or it has no such parameter.
+        bool QuantizerParameter(const char* name, double& value) const;
+
         // Stage 8b one-axis: true when `hook` is a loaded LUMA prescaler of this chain
         // (IsLumaPrescaler); the scaling stage drops it from a one-axis upscale's hook list.
         bool IsPrescalerHook(const pl_hook* hook) const;

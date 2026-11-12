@@ -424,6 +424,28 @@ namespace CustomHookChain
             });
     }
 
+    bool Chain::QuantizerParameter(const char* name, double& value) const
+    {
+        if (!name) return false;
+        for (const Entry& entry : entries)
+        {
+            if (!entry.quantizer || !entry.hook || entry.runtimeFailed) continue;
+            for (int i = 0; i < entry.hook->num_parameters; ++i)
+            {
+                const pl_hook_par& parameter = entry.hook->parameters[i];
+                if (!parameter.name || !parameter.data || std::strcmp(parameter.name, name) != 0) continue;
+                switch (parameter.type)
+                {
+                case PL_VAR_FLOAT: value = parameter.data->f; return true;
+                case PL_VAR_SINT: value = parameter.data->i; return true;
+                case PL_VAR_UINT: value = parameter.data->u; return true;
+                default: return false;
+                }
+            }
+        }
+        return false;
+    }
+
     bool Chain::IsPrescalerHook(const pl_hook* hook) const
     {
         return hook && std::any_of(entries.begin(), entries.end(), [&](const Entry& entry)

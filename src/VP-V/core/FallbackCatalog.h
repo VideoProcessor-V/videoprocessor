@@ -78,6 +78,37 @@ namespace FallbackCatalog
 			(detail.empty() ? std::string() : ": " + detail));
 	}
 
+	// ---- output.dither: where the sigma-delta's block vectors come from (W2-C8) -----------------------
+	// The chain of motion.estimation DitherVectorSource.h (shared pair -> matcher field -> on-demand pair -> own search -> static).
+	// The shared pair is the intended path and has no entry; each automatic step down has one, held while recent (the Tracker).
+	// Step 5 (static: the rule's motion_compensation 0) is a configuration - the shipped default - so it is a status line only.
+	inline Decision DitherVectorsMatcherField(bool recent)
+	{
+		if (!recent)
+			return Released("dither vectors matcher");
+		return Engaged("dither vectors matcher", "sigma-delta vectors from the matcher's field of this frame (no verified shared pair)");
+	}
+	inline Decision DitherVectorsOnDemand(bool recent)
+	{
+		if (!recent)
+			return Released("dither vectors on demand");
+		return Engaged("dither vectors on demand", "sigma-delta vectors from an on-demand optical-flow pair (none computed ahead)");
+	}
+	inline Decision DitherVectorsOwnSearch(bool recent, const std::string& why)
+	{
+		if (!recent)
+			return Released("dither vectors own search");
+		return Engaged("dither vectors own search", "sigma-delta searched the presented picture itself" +
+			(why.empty() ? std::string() : " (" + why + ")"));
+	}
+	// Coordinator 2026-11-11 (C8 Q1): a reuse whose span the Indicator could not stamp (resync_event off: the epoch form only).
+	inline Decision DitherVectorsUnvalidated(bool recent)
+	{
+		if (!recent)
+			return Released("dither vectors unvalidated");
+		return Engaged("dither vectors unvalidated", "sigma-delta vectors reused on the epoch check only (no resync stamps: resync_event off)");
+	}
+
 	// ---- colour.extended_range (ADR-0002) -------------------------------------------------------
 	enum class BtbWtwClip
 	{
