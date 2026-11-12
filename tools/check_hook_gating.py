@@ -194,10 +194,13 @@ ALLOW_SITES = [
 # Waived added lines for the --since VP-V symbol report. Keyed by the code of the added line (a regex on the line with
 # comments and strings stripped, NOT a line number, so the entry survives a rebase). An entry is honoured only when it
 # matches EXACTLY ONE added line of its file in the run (zero = not reached, more than one = ambiguous: nothing honoured,
-# the lines are flagged). Every entry names its waiver and expiry.
+# the lines are flagged). The pattern sees the code with strings/comments stripped, or the raw line when the entry
+# has "raw": True (needed when lines differ only by a string literal). Every entry names its waiver and expiry.
 _P3_WAIVER = ("WAIVER-P3-ALIAS-REPOINT (coordinator 2026-11-12 11:30 ruling 2, conditional; condition met: the Phase 3 opus "
               "gate r2-phase3-opus-gate.md confirmed 8/8 lines are re-points of an existing alias read, no new site). "
               "Expires at the re-graft. Proof: UntaggedVpReferenceTest, r2-phase3-opus-gate.md.")
+_P11_WAIVER = ("WAIVER-P11-REQUALIFY (coordinator-delegated; the P11 opus gate r2-p11-opus-gate.md confirmed 11/11 lines). "
+               "Expires at the re-graft. Proof: UntaggedVpReferenceTest, r2-p11-opus-gate.md.")
 _LVR = "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
 ALLOW_UNTAGGED_REFS = [
     {"file": _LVR, "pattern": r"^\t{3}renderAheadPresenter\.creditFrames\.load\(std::memory_order_relaxed\), ratio,\s*$", "reason": _P3_WAIVER},
@@ -208,6 +211,18 @@ ALLOW_UNTAGGED_REFS = [
     {"file": _LVR, "pattern": r"renderAheadPresenter\.creditFrames\.store\(activeSettings\.renderAheadQueueCredit \?", "reason": _P3_WAIVER},
     {"file": _LVR, "pattern": r"diag\.mainInterval = static_cast<int>\(presentPlan\.interval\);", "reason": _P3_WAIVER},
     {"file": _LVR, "pattern": r"m_impl->renderAheadPresenter\.estimatedLeadMs\.load\(std::memory_order_relaxed\);", "reason": _P3_WAIVER},
+    # P11 re-qualified lines (r2/p11-stack): vpv.* member reads / writes through the existing Impl aliases.
+    {"file": _LVR, "pattern": r"want\(C::MotionIntent, vpv\.motion\.intent\.intentInterpreter && ", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"vpv\.sourceAnalysis\.sourceMonitor\.Release\(d3d11->gpu\);", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"SourceResolutionMonitor::Describe\(vpv\.sourceAnalysis\.sourceMonitor\.Read\(\)", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"activeSettings\.ambientAdapt \|\| vpv\.led\.intent\.ledIntentLimitsSent\.shadowMinimumShare != 0\.0", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"^\t{3}vpv\.led\.intent\.ledIntentLimitsSent\.ambientBlackNits != 0\.0\)", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"vpv\.calibration\.calibrationLutAttached = calibrationHost\.LutAttached\(rendered, targetLutApplied\);", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"sourceMonitor\.Discontinuity\(\"resync or source change\"\);", "raw": True, "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"sourceMonitor\.Discontinuity\(\"live queue reset \(seek or skip\)\"\);", "raw": True, "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"m_impl \? m_impl->vpv\.motion\.intent\.intentInterpreter : std::shared_ptr<IntentInterpreter::Observer>\(\);", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"const bool intentWalkActive = m_impl && m_impl->vpv\.motion\.intent\.intentInterpreter->Active\(\);", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"sourceMonitor\.Discontinuity\(\"file discontinuity \(seek, step or rate change\)\"\);", "raw": True, "reason": _P11_WAIVER},
 ]
 
 
@@ -1266,7 +1281,7 @@ def untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_us
         waived = {}   # line -> ALLOW_UNTAGGED_REFS index; an entry counts only when it matches exactly one added line
         for k, e in enumerate(ALLOW_UNTAGGED_REFS):
             if e["file"] == rel:
-                m = [n for n in cand if re.search(e["pattern"], code[n - 1])]
+                m = [n for n in cand if re.search(e["pattern"], (lines if e.get("raw") else code)[n - 1])]
                 if len(m) == 1:
                     waived[m[0]] = k
         for n in cand:

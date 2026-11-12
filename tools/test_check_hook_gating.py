@@ -704,6 +704,18 @@ class UntaggedVpReferenceTest(unittest.TestCase):
         finally:
             chg.ALLOW_UNTAGGED_REFS = old
 
+    def test_raw_waiver_tells_apart_lines_that_differ_only_by_a_string_literal(self):
+        old = chg.ALLOW_UNTAGGED_REFS
+        try:
+            chg.ALLOW_UNTAGGED_REFS = [{"file": BILL, "pattern": r'SetNovelMode\("a"\);', "raw": True,
+                                        "reason": "WAIVER-TEST for this test. Expires at the re-graft."}]
+            rc, out = self._added('mon.SetNovelMode("a");', 'mon.SetNovelMode("b");')
+            self.assertEqual(rc, 1, out)
+            self.assertIn("1 new untagged VP-V references", out)
+            self.assertIn('SetNovelMode("b")', out)
+        finally:
+            chg.ALLOW_UNTAGGED_REFS = old
+
     def test_waiver_entries_name_the_waiver_and_expiry(self):
         for e in chg.ALLOW_UNTAGGED_REFS:
             self.assertIn("WAIVER-", e["reason"], e["pattern"])
