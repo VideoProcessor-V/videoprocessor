@@ -181,6 +181,74 @@ class CheckHookGatingTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("2 sites, 0 new (0 approved), 0 removed, 0 over budget", out)
 
+    def _regen_manifest(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = chg.main(["--root", self.root, "--no-git", "--files", BILL, "--write-manifest"])
+        self.assertEqual(rc, 0, buf.getvalue())
+        with open(os.path.join(self.root, *chg.MANIFEST_PATH.split("/")), encoding="utf-8") as fh:
+            return fh.read()
+
+    def _hand_edit_manifest(self):
+        """Seed three sites (two with identical text), then edit the manifest the way a person does: rename one id,
+        fill seam / expiry and a hand-added key, reorder the entries, back-date generated_at."""
+        self._seed("\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n"
+                   "\t\tint other = 1;   // VPV-HOOK\n")
+        p = os.path.join(self.root, *chg.MANIFEST_PATH.split("/"))
+        with open(p, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        self.assertEqual([s["id"] for s in doc["sites"]], ["R.cpp-0001", "R.cpp-0002", "R.cpp-0003"])
+        doc["generated_at"] = "2000-01-01"
+        doc["sites"][2]["id"] = "P5c-77"
+        doc["sites"][2]["seam"], doc["sites"][2]["expiry"] = "S3", "re-graft"
+        doc["sites"][1]["seam"], doc["sites"][1]["owner_note"] = "S1", "kept by hand"
+        doc["sites"] = [doc["sites"][2], doc["sites"][0], doc["sites"][1]]
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=1)
+            fh.write("\n")
+        with open(p, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_regenerating_an_unchanged_tree_is_a_no_op_apart_from_generated_at(self):
+        before = self._hand_edit_manifest()
+        after = self._regen_manifest()
+        changed = [(a, b) for a, b in zip(before.splitlines(), after.splitlines()) if a != b]
+        self.assertEqual(len(before.splitlines()), len(after.splitlines()))
+        self.assertEqual(len(changed), 1, changed)
+        self.assertIn('"generated_at": "2000-01-01"', changed[0][0])
+        self.assertNotIn("2000-01-01", changed[0][1])
+        doc = json.loads(after)
+        self.assertEqual([s["id"] for s in doc["sites"]], ["P5c-77", "R.cpp-0001", "R.cpp-0002"])
+        self.assertEqual((doc["sites"][0]["seam"], doc["sites"][0]["expiry"]), ("S3", "re-graft"))
+        self.assertEqual(doc["sites"][2]["owner_note"], "kept by hand")
+        self.assertEqual(self._regen_manifest(), after, "a second regeneration changes nothing")
+
+    def test_a_single_added_site_gives_a_single_added_entry(self):
+        old = json.loads(self._hand_edit_manifest())["sites"]
+        # appended after the existing sites: no line moves, so every old entry is identical except the Bill lines
+        # after the last old site (its anchor), which now end at the new site
+        _w(self.root, BILL, _bill("\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n"
+                                  "\t\tint other = 1;   // VPV-HOOK\n\t\tdoBill();\n\t\tint added = 2;   // VPV-HOOK\n"))
+        mid = json.loads(self._regen_manifest())["sites"]
+        self.assertEqual(mid[1:3], old[1:3])
+        self.assertEqual({k: v for k, v in mid[0].items() if k != "anchor"}, {k: v for k, v in old[0].items() if k != "anchor"})
+        self.assertEqual(mid[0]["id"], "P5c-77")
+        self.assertEqual(len(mid), 4)
+        self.assertEqual((mid[3]["id"], mid[3]["text"], mid[3]["seam"]), ("R.cpp-0004", "int added = 2;", None))
+        # inserted before them: the old entries keep id, order and hand fields and only move; the new site's
+        # positional id (R.cpp-0001) is taken, so it is renumbered past the highest in use
+        _w(self.root, BILL, _bill("\t\tint first = 3;   // VPV-HOOK\n\t\tdoBill();\n\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n"
+                                  "\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n\t\tint other = 1;   // VPV-HOOK\n\t\tdoBill();\n"
+                                  "\t\tint added = 2;   // VPV-HOOK\n"))
+        new = json.loads(self._regen_manifest())["sites"]
+        self.assertEqual(len(new), 5)
+        for a, b in zip(mid, new):
+            self.assertEqual({k: v for k, v in a.items() if k not in ("start", "end", "anchor")},
+                             {k: v for k, v in b.items() if k not in ("start", "end", "anchor")})
+            self.assertEqual((b["start"], b["end"]), (a["start"] + 2, a["end"] + 2))
+        self.assertEqual((new[4]["id"], new[4]["text"]), ("R.cpp-0005", "int first = 3;"))
+        self.assertEqual(len(set(s["id"] for s in new)), 5)
+
     def test_red_a_new_site_fails_until_a_hook_approval_names_it(self):
         self._seed("\t\tint keep = 0;   // VPV-HOOK\n")
         _w(self.root, BILL, _bill("\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n\t\tif (!pipelineSlots.OriginalPathway()) vectorEngine.PlanAhead(frame);   // VPV-HOOK\n"))
