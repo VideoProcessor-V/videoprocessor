@@ -27,8 +27,8 @@ section, not listed one by one) are resolved from the section's source span ther
 inside the section's span and on no card of its own takes the section's card.
 
 Hard errors (exit 1) are the units in ENFORCED_UNITS: Motion (P8-3), then Input, Colour, Repair, Scaling and
-Proposed retirement (P8-4). The same differences in the other units are advisory counts (--all makes them errors);
-P8-5 turns Output on.
+Proposed retirement (P8-4), and Output (P8-5). The same differences in any other unit are advisory counts (--all
+makes them errors).
   5. (P8-4) every VP key built inside the "Fixes under test" container (section id fixesUnderTest of Bill's page)
      is on a card or listed in FIXES_CONTAINER_STAYS; a stale list entry is an error.
 --write rewrites the Config placement cell of every documented key whose card is known.
@@ -47,7 +47,7 @@ ORG_REL = "src/VP-V/modules/control/config/config_pages/VpvOrganisation.h"
 CE_REL = "src/VideoProcessor-Config/ConfigEditorWindow.cpp"
 RETIREMENT_UNIT = "retirement"
 RETIREMENT_NAME = "Proposed retirement"
-ENFORCED_UNITS = ("motion", "input", "colour", "repair", "scaling", RETIREMENT_UNIT)
+ENFORCED_UNITS = ("motion", "input", "colour", "repair", "scaling", "output", RETIREMENT_UNIT)
 # A card may sit in another unit's tab than the module that owns the key (the viewer finds the
 # control where it is used; the module that reads it owns it). Every such case is listed here, with
 # the owner's slot; the owner's MANIFEST.json config_keys must list the key.
@@ -73,6 +73,9 @@ CROSS_UNIT_OWNER = {
     "intent_display": "control.diagnostics",        # card: Input > Source intent; the display-intent report
     "intent_black": "drive.led_compensation",      # card: Input > Source intent; read by the LED compensation
 }
+# A second row for a cross-unit key, documented where the control is presented (the card's own unit), is accepted
+# (P8-5: occlusion_mask, owned by motion.consumers, is presented on the Output > Temporal dither card).
+PRESENTATION_ROWS = {"occlusion_mask": ("output.dither",)}
 # Keys whose owner row r2/docs put in a module whose MANIFEST does not list them ("read here, owned elsewhere"):
 # the row location is accepted as is; the manifest-lists-the-key rule is not applied to them.
 MANIFEST_EXEMPT = ("dejudder_pulldown", "intent_display")
@@ -240,7 +243,7 @@ def analyse(root):
                  "%s: %s is on card %s/%s: placement should read '%s', not '%s'" % (
                      where, r["key"], card["unit"], card["id"], card["text"], r["placement"]))
         if r["key"] in CROSS_UNIT_OWNER:
-            if r["slot"] != CROSS_UNIT_OWNER[r["key"]]:
+            if r["slot"] != CROSS_UNIT_OWNER[r["key"]] and r["slot"] not in PRESENTATION_ROWS.get(r["key"], ()):
                 flag((r["unit"], card["unit"]), "%s: %s is owned by %s (CROSS_UNIT_OWNER), its row is in %s" % (
                     where, r["key"], CROSS_UNIT_OWNER[r["key"]], r["slot"]))
         elif card["unit"] != RETIREMENT_UNIT and r["unit"] != card["unit"]:

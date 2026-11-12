@@ -213,10 +213,10 @@ class CheckTests(Fixture):
         self.assertEqual(_run(["--root", self.root, "--write"])[0], 0)
 
     def test_units_not_yet_enforced_stay_advisory_until_all(self):
-        # an Output card (P8-5 turns the unit on): a wrong placement is advisory until --all
-        _w(self.root, chk.ORG_REL, ORG.replace('{ "repair", "deband"', '{ "output", "deband"'))
-        _w(self.root, C.TIERS_REL, json.dumps({"units": [{"id": "motion", "name": "Motion"}, {"id": "output", "name": "Output"}]}))
-        self.mod("output", "deband", ["repair_key"], row("repair_key", "VP-V > Advanced"))
+        # a Drive card (no Drive card exists in the repository: the unit is not enforced): a wrong placement is advisory until --all
+        _w(self.root, chk.ORG_REL, ORG.replace('{ "repair", "deband"', '{ "drive", "deband"'))
+        _w(self.root, C.TIERS_REL, json.dumps({"units": [{"id": "motion", "name": "Motion"}, {"id": "drive", "name": "Drive"}]}))
+        self.mod("drive", "deband", ["repair_key"], row("repair_key", "VP-V > Advanced"))
         _w(self.root, "src/VP-V/modules/repair/deband/MANIFEST.json", "{}")
         os.remove(os.path.join(self.root, "src", "VP-V", "modules", "repair", "deband", "README.md"))
         rc, out = _run(["--root", self.root])
@@ -268,6 +268,20 @@ class RepositoryTests(unittest.TestCase):
     def test_repository_motion_unit_is_one_table(self):
         rc, out = _run(["--root", ROOT])
         self.assertEqual(rc, 0, out)
+
+    def test_repository_p8_5_output_enforced_and_adaptive_motion_rows_are_scaling_owned(self):
+        self.assertIn("output", chk.ENFORCED_UNITS)
+        an, cards, placement, issues = chk.analyse(ROOT)
+        self.assertEqual(issues["error"] + issues["advisory"], [])
+        owners = {}
+        for r in an["rows"]:
+            owners.setdefault(r["key"], []).append(r["slot"])
+        for key in ("adaptive_motion", "adaptive_motion_floor", "adaptive_motion_smooth_ms",
+                    "adaptive_motion_speed_hi", "adaptive_motion_speed_lo"):
+            self.assertEqual(owners.get(key), ["scaling.output"], key)
+            self.assertEqual(placement[key]["unit"], "scaling", key)
+        self.assertIn("output.dither", owners["occlusion_mask"])
+        self.assertEqual(placement["occlusion_mask"]["unit"], "output")
 
     def test_repository_enforces_the_p8_4_units_and_the_fixes_container(self):
         for unit in ("motion", "input", "colour", "repair", "scaling", "retirement"):

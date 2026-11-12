@@ -735,6 +735,25 @@ namespace
 			"optical_flow_global_fallback", "source_class", "ssim_bitrate_floor" };
 		for (const char* key : kFixesContainerStays)
 			require(keyCard.find(key) == keyCard.end(), (std::string("a Fixes under test key that stays in the container is on no card: ") + key).c_str());
+		// P8-5 (2026-11-11): the dither, grain-split and adaptive scaler rows are on their own units' cards. The adaptive_*
+		// keys (adaptive_motion* among them, built by the adaptive sections of Bill's page since 81c38abe0) resolve
+		// through the two adaptive Sections, which sit on a Scaling card.
+		const char* const kAdaptiveSections[] = { "adaptiveDownscale", "adaptiveUpscale" };
+		for (const char* section : kAdaptiveSections)
+		{
+			const auto found = sectionCard.find(section);
+			require(found != sectionCard.end() && found->second.compare(0, 8, "scaling/") == 0,
+				(std::string("an adaptive scaler section is on a Scaling card: ") + section).c_str());
+		}
+		const char* const kOutputKeys[] = { "temporal_dither", "dither_grain_tolerance_scale" };
+		for (const char* key : kOutputKeys)
+		{
+			const auto found = keyCard.find(key);
+			require(found != keyCard.end() && found->second.compare(0, 7, "output/") == 0,
+				(std::string("a dither key is on an Output card: ") + key).c_str());
+		}
+		const auto grainGuard = keyCard.find("deband_vp_grain_guard");
+		require(grainGuard != keyCard.end() && grainGuard->second.compare(0, 7, "repair/") == 0, "the deband grain guard is on a Repair card");
 	}
 }
 
