@@ -33,7 +33,7 @@ namespace Vpv
             t.defaults.push_back({ "deband_vp_grain_guard", "on" });
             t.defaults.push_back({ "deband_vp_exclusive", "on" });
             t.defaults.push_back({ "texture_restore", "off" });
-            t.defaults.push_back({ "detail_pulse_stabilise", "on" });
+            t.defaults.push_back({ "detail_pulse_stabilise", "off" });
             t.defaults.push_back({ "detail_pulse_fast", "on" });
             t.defaults.push_back({ "source_resolution", "auto" });
             t.defaults.push_back({ "rebase_kernel_match", "off" });
@@ -179,24 +179,24 @@ namespace Vpv
                     u.presets.push_back(p);
                 }
                 {
-                    Preset p; p.tier = "Low"; p.description = "libplacebo deband plus the breathing reduction (detail pulse stabilise): today's defaults."; p.cost = "low";
+                    Preset p; p.tier = "Low"; p.description = "libplacebo deband only: today's defaults (detail pulse stabilise and texture restore are temporal-detail precursors, off in every tier unless chosen explicitly)."; p.cost = "low";
                     p.set.push_back({ "deband_vp", "off" });
-                    p.set.push_back({ "detail_pulse_stabilise", "on" });
+                    p.set.push_back({ "detail_pulse_stabilise", "off" });
                     p.set.push_back({ "texture_restore", "off" });
                     u.presets.push_back(p);
                 }
                 {
-                    Preset p; p.tier = "Mid"; p.description = "VP's grain-safe debander replaces libplacebo's, plus the breathing reduction."; p.cost = "low-medium";
+                    Preset p; p.tier = "Mid"; p.description = "VP's grain-safe debander replaces libplacebo's. Detail pulse stabilise and texture restore stay off (explicit choice only)."; p.cost = "low-medium";
                     p.set.push_back({ "deband_vp", "on" });
-                    p.set.push_back({ "detail_pulse_stabilise", "on" });
+                    p.set.push_back({ "detail_pulse_stabilise", "off" });
                     p.set.push_back({ "texture_restore", "off" });
                     u.presets.push_back(p);
                 }
                 {
-                    Preset p; p.tier = "Upper"; p.description = "As Mid, plus texture restore (fine texture the stream smeared, held along the motion). Expensive until its efficiency pass."; p.cost = "high";
+                    Preset p; p.tier = "Upper"; p.description = "As Mid (same Repair keys): detail pulse stabilise and texture restore stay off in every tier (explicit choice only)."; p.cost = "high";
                     p.set.push_back({ "deband_vp", "on" });
-                    p.set.push_back({ "detail_pulse_stabilise", "on" });
-                    p.set.push_back({ "texture_restore", "statistical" });
+                    p.set.push_back({ "detail_pulse_stabilise", "off" });
+                    p.set.push_back({ "texture_restore", "off" });
                     u.presets.push_back(p);
                 }
                 u.toggles.push_back({ "deband_vp_grain_guard", "VP deband leaves grain alone", { "on", "veto", "off" }, "repair.deband" });

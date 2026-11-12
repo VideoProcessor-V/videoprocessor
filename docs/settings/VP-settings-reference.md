@@ -83,7 +83,7 @@ have their controls on the Proposed retirement tab.
 | Unit | Classic | Low | Mid | Upper |
 |---|---|---|---|---|
 | Motion | VP's basic matcher (whole-pixel, nothing ahead) | VP's matcher at quarter-pixel | NVIDIA engine + matcher, 4 ahead (shipped) | + split poorly matched blocks |
-| Repair | libplacebo deband only | + breathing reduction (today's default) | VP's grain-safe debander | + texture restore |
+| Repair | libplacebo deband only | libplacebo deband only (today's default; breathing reduction and texture restore are off in every tier) | VP's grain-safe debander | as Mid (same Repair keys) |
 | Scaling | no re-base, plain scaling | re-base, plain scaling (shipped) | re-base + hybrid SSIM downscale (w 0.2) | *planned - uses Mid for now (refine net / D not built)* |
 | Output | libplacebo dither | as shipped: the shader list decides (the cinema list loads the sigma-delta) | always VP's sigma-delta | *planned - uses Mid for now (no extra output step yet)* |
 | Input, Colour, Dynamic Drive | not tiered (paths and set-up, not quality steps) | | | |
@@ -263,10 +263,10 @@ then breathing reduction and texture restore. Grain is never removed or averaged
 ### 4.3 Breathing reduction and texture restore (tier)
 | Key | What it does | Why it exists | Default | Cost |
 |---|---|---|---|---|
-| `detail_pulse_stabilise` | Fine detail and grain "breathe" with the encoder's group of pictures. This raises each frame's own detail toward its best-coded neighbour (never beyond it). | Starved streams pulse visibly. | on | low |
+| `detail_pulse_stabilise` | Fine detail and grain "breathe" with the encoder's group of pictures. This raises each frame's own detail toward its best-coded neighbour (never beyond it). | Starved streams pulse visibly. | off (on only by explicit choice) | low |
 | `detail_pulse_cap` | The most a frame's detail is raised (x1.00-1.50). | A safety limit. | 1.35 | none |
 | `detail_pulse_fast` | The same picture in about half the GPU time. | Efficiency. | on | saves time |
-| `texture_restore` | Separates grain from scene texture per area, and raises both toward the best-coded reference along the motion (about 2 s memory). | Recovers texture that the stream smeared. | off (Upper tier) | **high** (9.8 ms at 4K on the laptop until its efficiency pass) |
+| `texture_restore` | Separates grain from scene texture per area, and raises both toward the best-coded reference along the motion (about 2 s memory). | Recovers texture that the stream smeared. | off (on only by explicit choice; no tier turns it on) | **high** (9.8 ms at 4K on the laptop until its efficiency pass) |
 | `texture_restore_cap` | The most texture is raised (x1.00-2.00). | A safety limit. | 1.50 | none |
 
 ---
@@ -440,9 +440,9 @@ These belong to the upstream program and keep their own pages. VP-V does not ref
 **`detail_pulse_stabilise` vs `texture_restore`**
 - Both raise a frame's detail toward a better-coded neighbour, but at different scales.
 - **Detail pulse stabilise** fixes the short **breathing** (frame to frame, within a group of
-  pictures). It is cheap and on by default.
+  pictures). It is cheap and off by default (a temporal-detail precursor; on only by explicit choice).
 - **Texture restore** separates grain from texture and rebuilds smeared texture over about
-  **2 seconds** along the motion. It is expensive and belongs to the Upper tier.
+  **2 seconds** along the motion. It is expensive and off in every tier (on only by explicit choice).
 - Neither invents detail the stream never had.
 
 **`source_resolution` vs re-base vs `rebase_kernel_match`**

@@ -2141,7 +2141,7 @@ void testContentAdaptiveGroup()
 
 void testDetailRestoreControls()
 {
-    // docs/VP-detail-restore.md (2026-10-17): detail_pulse_stabilise (default on), detail_pulse_cap,
+    // docs/VP-detail-restore.md (2026-10-17): detail_pulse_stabilise (default off since 2026-11-11), detail_pulse_cap,
     // texture_restore (default off) and texture_restore_cap sit in the "Experimental content-adaptive
     // settings" group, each with a tooltip; the caps are greyed while their stage is off and snap to
     // steps of 0.05 within their range; choices and caps round-trip to the cfg.
@@ -2183,10 +2183,10 @@ void testDetailRestoreControls()
         const QString selected = combo->currentData().toString();
         return selected.isEmpty() ? combo->property("inheritedValue").toString().trimmed().toLower() : selected;
     };
-    require(effectiveChoiceValueForTest(pulse) == QStringLiteral("on"), "detail pulse is not on by default");
+    require(effectiveChoiceValueForTest(pulse) == QStringLiteral("off"), "detail pulse is not off by default");
     require(effectiveChoiceValueForTest(restore) == QStringLiteral("off"), "texture restore is not off by default");
     require(effectiveChoiceValueForTest(pulseFast) == QStringLiteral("on") && (pulseFast->isEnabled() || pulseFast->property("vpvManaged").toBool()), "the detail pulse fast path is not on by default");
-    require(pulseCap->isEnabled() && !restoreCap->isEnabled(), "the caps are not greyed from the effective stage values");
+    require(!pulseCap->isEnabled() && !restoreCap->isEnabled(), "the caps are not greyed from the effective stage values");
     require(pulseCap->placeholderText() == QStringLiteral("1.35") && restoreCap->placeholderText() == QStringLiteral("1.50"),
         "the cap placeholders are not the defaults");
     // A named profile shows its own values.

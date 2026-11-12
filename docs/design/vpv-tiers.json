@@ -55,7 +55,7 @@
     "deband_vp_grain_guard": "on",
     "deband_vp_exclusive": "on",
     "texture_restore": "off",
-    "detail_pulse_stabilise": "on",
+    "detail_pulse_stabilise": "off",
     "detail_pulse_fast": "on",
     "source_resolution": "auto",
     "rebase_kernel_match": "off",
@@ -337,30 +337,30 @@
           }
         },
         "Low": {
-          "description": "libplacebo deband plus the breathing reduction (detail pulse stabilise): today's defaults.",
+          "description": "libplacebo deband only: today's defaults (detail pulse stabilise and texture restore are temporal-detail precursors, off in every tier unless chosen explicitly).",
           "cost": "low",
           "set": {
             "deband_vp": "off",
-            "detail_pulse_stabilise": "on",
+            "detail_pulse_stabilise": "off",
             "texture_restore": "off"
           }
         },
         "Mid": {
-          "description": "VP's grain-safe debander replaces libplacebo's, plus the breathing reduction.",
+          "description": "VP's grain-safe debander replaces libplacebo's. Detail pulse stabilise and texture restore stay off (explicit choice only).",
           "cost": "low-medium",
           "set": {
             "deband_vp": "on",
-            "detail_pulse_stabilise": "on",
+            "detail_pulse_stabilise": "off",
             "texture_restore": "off"
           }
         },
         "Upper": {
-          "description": "As Mid, plus texture restore (fine texture the stream smeared, held along the motion). Expensive until its efficiency pass.",
+          "description": "As Mid (same Repair keys): detail pulse stabilise and texture restore stay off in every tier (explicit choice only).",
           "cost": "high",
           "set": {
             "deband_vp": "on",
-            "detail_pulse_stabilise": "on",
-            "texture_restore": "statistical"
+            "detail_pulse_stabilise": "off",
+            "texture_restore": "off"
           }
         }
       },

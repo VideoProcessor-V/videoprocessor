@@ -160,8 +160,8 @@ grain guard. Classic uses libplacebo's deband. Fallback: libplacebo deband on te
 (queue item 1).
 
 **repair.texture_restore (90), built, prepass.** The long-memory add-on on A's output: texture
-restore (~2 s peak-hold along vectors) + breathing reduction (`detail_pulse_stabilise`). Upper
-tier, after an **efficiency rebuild** (9.8 ms at 4K on the 3050 Ti vs a 1.2-1.4 ms estimate).
+restore (~2 s peak-hold along vectors) + breathing reduction (`detail_pulse_stabilise`). Both
+off by default in every tier since 2026-11-11 (doc 91 :106; explicit choice only), after an **efficiency rebuild** (9.8 ms at 4K on the 3050 Ti vs a 1.2-1.4 ms estimate).
 It is never folded into A (net dependency rule).
 
 **scaling.route_4k (100), placeholder, prepass.** Processing resolution =

@@ -118,10 +118,10 @@ Constants in TextureRestore.h (shared with the CPU model).
 
 | Key | Values | Default |
 |---|---|---|
-| `detail_pulse_stabilise` | off, on | on (3090 cost small; see the agent report) |
+| `detail_pulse_stabilise` | off, on | off (owner 2026-11-11: a temporal-detail precursor, on only by explicit choice; was on) |
 | `detail_pulse_cap` | 1.00-1.50 | 1.35 |
 | `detail_pulse_fast` | on, off | on (same picture in about half the GPU time; off = the original passes, for A/B; docs/agent-reports/detail-pulse-perf.md) |
-| `texture_restore` | off, statistical | off (experimental) |
+| `texture_restore` | off, statistical | off (experimental; off in every tier, incl. Upper, from 2026-11-11) |
 | `texture_restore_cap` | 1.00-2.00 | 1.50 |
 
 Off is byte-identical to the frame without the stage.

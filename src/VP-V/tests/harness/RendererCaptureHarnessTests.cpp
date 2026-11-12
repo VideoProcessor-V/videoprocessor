@@ -2665,13 +2665,15 @@ namespace Tests
 			const std::string baseDump = call(describe, head);
 			const std::string baseFingerprint = call(fingerprintOf, head);
 			const std::pair<const char*, const char*> defaults[] = {
-				{ "detail_pulse_stabilise", "on" }, { "detail_pulse_cap", "1.35" }, { "texture_restore", "off" }, { "texture_restore_cap", "1.5" },
+				// DPTR-OFF: detail_pulse_stabilise default on -> off (owner 2026-11-11 19:39; doc 91 :106; decision log 11-11 evening).
+				{ "detail_pulse_stabilise", "off" }, { "detail_pulse_cap", "1.35" }, { "texture_restore", "off" }, { "texture_restore_cap", "1.5" },
 				{ "detail_pulse_fast", "on" } };
 			for (const auto& entry : defaults)
 				Assert::AreEqual(std::string(entry.second), line(baseDump, entry.first),
 					(L"default of " + std::wstring(entry.first, entry.first + strlen(entry.first))).c_str());
 			const std::pair<const char*, const char*> flips[] = {
-				{ "detail_pulse_stabilise", "off" }, { "detail_pulse_cap", "1.2" }, { "texture_restore", "statistical" }, { "texture_restore_cap", "1.8" },
+				// DPTR-OFF: the flip must differ from the (new) default, so it is now "on" (same decision).
+				{ "detail_pulse_stabilise", "on" }, { "detail_pulse_cap", "1.2" }, { "texture_restore", "statistical" }, { "texture_restore_cap", "1.8" },
 				{ "detail_pulse_fast", "off" } };
 			for (const auto& flip : flips)
 			{
