@@ -20,7 +20,7 @@ def norm(l):
     if not l or l.startswith('//') or l in ('{', '}', '};') or re.match(r'^struct\s+\w+$', l):
         return None
     l = re.sub(r'\s*//.*$', '', l)
-    l = re.sub(r'struct \{ struct \{ (.*?;) \} sourceAnalysis; \} vpv;', r'', l)   # test fake re-pointed to vpv.sourceAnalysis
+    l = re.sub(r'struct \{ struct \{ (.*?;) \} sourceAnalysis; \} vpv;', lambda m: m.group(1), l)   # test fake re-pointed to vpv.sourceAnalysis
     l = PFX.sub('', l)
     l = re.sub(r'\b\w+::Impl::', '', l)
     l = re.sub(r'^static\s+', '', l)
