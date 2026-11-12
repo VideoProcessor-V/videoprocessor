@@ -10,7 +10,7 @@ Advanced sub-page, card title) every Rendering-page row, whole section or VP-V t
 This tool derives, from that table alone, the placement every key must be documented with in a
 module README (the doc-70 `## Settings` tables, template: docs/settings/README.md) and checks:
 
-  1. a key (Row / Toggle item) sits on one card only, a Section id on one card only;
+  1. a key (Row / Toggle / Text item) sits on one card only, a Section id on one card only;
   2. a documented key that sits on a card carries that card's placement text:
          VP-V > <Unit> > <Main|Advanced> > <card title>
      (the Proposed retirement tab has no sub-page: VP-V > Proposed retirement > <card title>).
@@ -60,7 +60,7 @@ CROSS_UNIT_OWNER = {
 # Keys whose owner row r2/docs put in a module whose MANIFEST does not list them ("read here, owned elsewhere"):
 # the row location is accepted as is; the manifest-lists-the-key rule is not applied to them.
 MANIFEST_EXEMPT = ("dejudder_pulldown",)
-KEY_ITEMS = ("Row", "Toggle")
+KEY_ITEMS = ("Row", "Toggle", "Text")
 
 
 def read(root, rel):
@@ -80,7 +80,7 @@ def parse_organisation(text):
         chunk = body[s:e]
         flags = re.search(r',\s*(true|false)\s*,\s*(true|false)\s*,\s*\{', chunk)
         items = [(m.group(1), m.group(2))
-                 for m in re.finditer(r'\{\s*K::(Row|Toggle|Section|Elsewhere)\s*,\s*"([^"]+)"', chunk)]
+                 for m in re.finditer(r'\{\s*K::(Row|Toggle|Text|Section|Elsewhere)\s*,\s*"([^"]+)"', chunk)]
         cards.append({"unit": unit, "id": cid, "title": title,
                       "advanced": bool(flags and flags.group(1) == "true"), "items": items})
     return cards

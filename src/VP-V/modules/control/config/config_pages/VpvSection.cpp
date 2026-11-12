@@ -528,6 +528,52 @@ namespace Vpv
 			});
 		}
 
+		// VP-V's text rows (ItemKind::Text): renderer-profile keys with a free value, built here (never on Bill's pages).
+		struct TextRowSpec { const char* key; const char* label; const char* shownDefault; const char* tip; };
+		const TextRowSpec* FindTextRow(const char* key)
+		{
+			static const TextRowSpec kRows[] = {
+				// SID r2 (owner 2026-11-11): the source sizes re-base RECOGNISES and names when it holds (never what it applies).
+				{ "source_geometry_detect", "Source resolution: sizes recognised (all | conventional | ids)", "all",
+					"Default all: every listed source size, including the anamorphic HD sizes (HDV 1440x1080, DVCPRO HD 1280x1080 "
+					"and 960x720) that are recognised and named in the hold note and log but never re-based. conventional: only the "
+					"sizes re-base may apply. Or a list of ids (hdv_1440x1080, dvcprohd_1280x1080, dvcprohd_960x720, 1920x1080, ...). "
+					"This changes what is named, never what is applied; unknown ids are ignored and shown as a status line." },
+			};
+			for (const TextRowSpec& r : kRows)
+				if (std::string(r.key) == key) return &r;
+			return nullptr;
+		}
+
+		// A VP-V text row: empty = the key is not set in the profile (its default shows as the placeholder); it writes the
+		// key in the profile the VP-V picker shows, as the toggles do.
+		void AddTextRow(const std::shared_ptr<State>& state, const QString& unitId, const TextRowSpec& spec, QFormLayout* form)
+		{
+			auto* edit = new QLineEdit;
+			const QString key = Q(spec.key);
+			edit->setObjectName(ObjectName(unitId + QLatin1Char('.') + key));
+			edit->setAccessibleName(Q(spec.label));
+			edit->setPlaceholderText(QStringLiteral("Default: %1").arg(Q(spec.shownDefault)));
+			edit->setToolTip(Q(spec.tip) + QStringLiteral("\n\nKey %1 (renderer profile).").arg(key));
+			form->addRow(Q(spec.label), edit);
+			state->own.push_back(edit);
+			QObject::connect(edit, &QLineEdit::editingFinished, edit, [state, edit, key]()
+			{
+				if (state->refreshing || !state->host.setValue) return;
+				const QString text = edit->text().trimmed();
+				if (QString::fromStdString(state->Own(key.toStdString())) == text) return;
+				state->host.setValue(state->profile, key, text);
+				state->ReloadUpstream();
+				state->RefreshAll();
+			});
+			const std::string k = spec.key;
+			state->refreshers.push_back([state, edit, k]()
+			{
+				const QSignalBlocker blocker(edit);
+				edit->setText(QString::fromStdString(state->Own(k)));
+			});
+		}
+
 		const Toggle* FindToggle(const Unit& unit, const char* key)
 		{
 			for (const Toggle& t : unit.toggles)
@@ -904,6 +950,15 @@ namespace Vpv
 				case ItemKind::Elsewhere:
 					placedToggles.insert(item.id);
 					break;
+				case ItemKind::Text:
+				{
+					const TextRowSpec* spec = FindTextRow(item.id);
+					if (!spec) { state->missing << QStringLiteral("text %1 (%2)").arg(id, unitId); break; }
+					AddTextRow(state, unitId, *spec, card.Form());
+					AddFieldNote(state, card.body->findChild<QLineEdit*>(ObjectName(unitId + QLatin1Char('.') + id)), id, lock);
+					lock->keys << id;
+					break;
+				}
 				case ItemKind::Hide:
 					state->hidden << id;
 					break;

@@ -612,6 +612,8 @@ namespace
 					w = window.findChild<QWidget*>(QStringLiteral("rendererSection.") + QString::fromLatin1(item.id));
 				else if (item.kind == Vpv::ItemKind::Toggle && !Vpv::TierTable().FindRetirement(item.id, "vprenderer"))
 					w = window.findChild<QWidget*>(Vpv::ObjectName(QString::fromLatin1(card.unit) + QLatin1Char('.') + QString::fromLatin1(item.id)));
+				else if (item.kind == Vpv::ItemKind::Text)
+					w = window.findChild<QLineEdit*>(Vpv::ObjectName(QString::fromLatin1(card.unit) + QLatin1Char('.') + QString::fromLatin1(item.id)));
 				else
 					continue;
 				require(w && body->isAncestorOf(w), (std::string("in its card: ") + card.unit + "/" + card.id + " " + item.id).c_str());
@@ -690,7 +692,7 @@ namespace
 			const std::string where = std::string(card.unit) + "/" + card.id;
 			for (const Vpv::CardItem& item : card.items)
 			{
-				if (item.kind == Vpv::ItemKind::Row || item.kind == Vpv::ItemKind::Toggle)
+				if (item.kind == Vpv::ItemKind::Row || item.kind == Vpv::ItemKind::Toggle || item.kind == Vpv::ItemKind::Text)
 				{
 					const auto inserted = keyCard.emplace(item.id, where);
 					require(inserted.second, ("a key is on one card only: " + std::string(item.id) + " (" + inserted.first->second + " and " + where + ")").c_str());
@@ -1559,6 +1561,56 @@ namespace
 	// so Apply refuses such a file before and after row c; Auto is saved as an absent key.) Opening and saving
 	// untouched keeps every stored value (Bill's displayed 0 is never written back); the two controls follow each
 	// other both ways; an explicit 0 shows the notice.
+	// SID r2: source_geometry_detect is a VP-V text row on the Scaling > Re-base card (built by the VP-V page, rule 32: no
+	// row on Bill's pages). It shows the picked profile's own value, writes that profile's key, and empty removes it.
+	void testSourceGeometryDetectRowOnRebaseCard()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir, "[vprenderer]\nsdr_target_nits: 100\n"
+			"[vprenderer.Main]\nsource_geometry_detect: conventional\n"
+			"[vprenderer.Cinema]\nquality: high\n");
+		const QString name = Vpv::ObjectName(QStringLiteral("scaling.source_geometry_detect"));
+		{
+			ConfigEditorWindow window(path, 0, true);
+			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("scaling.card.rebase.body")));
+			auto* edit = control<QLineEdit>(window, name);
+			require(window.findChildren<QLineEdit*>(name).size() == 1, "the source_geometry_detect row is not there exactly once");
+			require(card->isAncestorOf(edit), "the source_geometry_detect row is not on the VP-V Re-base card");
+			require(window.findChild<QWidget*>(QStringLiteral("config.vprenderer.source_geometry_detect")) == nullptr,
+				"a source_geometry_detect row is on Bill's Rendering page");
+			require(edit->placeholderText() == QStringLiteral("Default: all"), "the row does not show its default");
+			auto* profile = control<QComboBox>(window, Vpv::ObjectName("profile"));
+			profile->setCurrentIndex(profile->findData(QStringLiteral("vprenderer.Main")));
+			QCoreApplication::processEvents();
+			require(edit->text() == QStringLiteral("conventional"), "the row does not load the profile's value");
+			profile->setCurrentIndex(profile->findData(QStringLiteral("vprenderer.Cinema")));
+			QCoreApplication::processEvents();
+			require(edit->text().isEmpty(), "the row does not show the picked profile's own (unset) value");
+			edit->setText(QStringLiteral("hdv_1440x1080, 1920x1080"));
+			emit edit->editingFinished();
+			profile->setCurrentIndex(profile->findData(QStringLiteral("vprenderer.Main")));
+			QCoreApplication::processEvents();
+			edit->setText(QString());
+			emit edit->editingFinished();
+			save(window);
+		}
+		ConfigFile config;
+		require(config.Load(path.toStdString()), "reload");
+		std::string v;
+		require(config.TryGetString("vprenderer.cinema", "source_geometry_detect", v) && v == "hdv_1440x1080, 1920x1080",
+			("the row does not save the picked profile's key\n" + FileText(path)).c_str());
+		require(!config.TryGetString("vprenderer.main", "source_geometry_detect", v), "clearing the row does not remove the key");
+		require(!config.TryGetString("vprenderer", "source_geometry_detect", v), "the row wrote the base section");
+		requireVpReads(path);
+		{
+			ConfigEditorWindow window(path, 0, true);
+			auto* profile = control<QComboBox>(window, Vpv::ObjectName("profile"));
+			profile->setCurrentIndex(profile->findData(QStringLiteral("vprenderer.Cinema")));
+			QCoreApplication::processEvents();
+			require(control<QLineEdit>(window, name)->text() == QStringLiteral("hdv_1440x1080, 1920x1080"), "the saved value does not reopen");
+		}
+	}
+
 	void testQueueRowsOnTheVpvCard()
 	{
 		const auto readFile = [](const QString& path) { QFile file(path); return file.open(QIODevice::ReadOnly) ? file.readAll().replace("\r\n", "\n") : QByteArray(); };
@@ -1695,6 +1747,7 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: Bill's Chroma upscaler and VP-V's list", testChromaBillsControlAndVpvList);
 	failures += run("VP-V: Bill's Dithering stays his, VP-V's list shows the value", testBillsDitheringStaysHis);
 	failures += run("VP-V: Profile use card and the sync directions", testProfileUseAndSyncDirections);
+	failures += run("VP-V: source_geometry_detect row on the Re-base card", testSourceGeometryDetectRowOnRebaseCard);
 	failures += run("VP-V: queue rows on the VP-V card, look-ahead Auto kept", testQueueRowsOnTheVpvCard);
 	return failures;
 }
