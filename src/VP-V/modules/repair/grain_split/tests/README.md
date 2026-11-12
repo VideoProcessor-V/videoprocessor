@@ -9,3 +9,11 @@ The GPU passes: `src/VP-V/modules/repair/temporal_detail/tests/TemporalDetailGpu
 against the v2 law (`GrainSplit::ComputeV2`, A/B baseline only). Grain-keep metric on paired frames S and S + Gt per region class
 (flat, gradient, dark-flat, texture, edges; scales 1 and 2; white and film-like grain; 1 and 3 code RMS): keep, leak, v3 not worse than v2,
 clean/N/e3 closeness, exact re-add, and the half-resolution law pieces. Open owner decision D4 rows are logged as 'D4 pending', not asserted.
+
+`tests/GrainSplitV3GpuTests.cpp` (GPU on WARP, refs/116 s5): the v3 five-pass kernel in Full and Compact against `GrainSplit::Compute`
+(odd and even planes, B 8 / 16 / 32, scale B / 16): |s1|, |s2|, |base| <= 0.05 code, f <= 1/255, N and e3 / e1 / e2 relative <= 1e-3;
+determinism; `Step(0..4)` bit-identical to `Compute`; and the consumer-level check (CPU, `V3P11RegionFlagsAgree`): the P11 region
+classification from the v3 split against the v2 split agrees on >= 99.5 % of blocks (WAIVER-P10V3-02: band d3 has one live reader (P11);
+TD will read the split later; re-check at the TD build).
+`tests/GrainSplitV3CostBench.cpp` (category GpuHardware, logs only): per-pass pl_timer mean / p95 and total mean / p95 / max of the lane
+kernel at 1080p and 2160p (Compact and Full, 20 warm-up + 120 timed frames) plus the dispatcher's live-form wall time.
