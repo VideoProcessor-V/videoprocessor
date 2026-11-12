@@ -137,6 +137,15 @@ namespace Vpv
 				if (SUCCEEDED(adapter->GetDesc(&desc)))
 					card.key.luid = (static_cast<uint64_t>(static_cast<uint32_t>(desc.AdapterLuid.HighPart)) << 32) |
 						static_cast<uint64_t>(desc.AdapterLuid.LowPart);
+				// W2-C1 (B9): the motion engine's reading of the same adapter, when at most a second old (one DXGI reading a second).
+				uint64_t sharedUsage = 0, sharedBudget = 0;
+				if (card.key.luid != 0 && VpSkeleton::VramUsers::Instance().LastBudget(card.key.luid, sharedUsage, sharedBudget,
+					static_cast<double>(GetTickCount64()) / 1000.0))
+				{
+					card.vramBudgetBytes = sharedBudget;
+					card.vramUsageBytes = sharedUsage;
+					return true;
+				}
 				DXGI_QUERY_VIDEO_MEMORY_INFO info = {};
 				if (FAILED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
 				{

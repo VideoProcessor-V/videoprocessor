@@ -43,6 +43,7 @@ inline const char* VramUserName(uint16_t id)
     case kUserEnhancers: return "texture restore / detail pulse / debander";
     case kUserBasicChroma: return "basic chroma upscale output";
     case kUserLongPair: return "long-pair optical flow";
+    case kUserMotionMatcher: return "motion engine matcher";
     default: break;
     }
     return "";
@@ -52,7 +53,7 @@ inline const char* VramUserName(uint16_t id)
 inline const uint16_t* DeclarableVramUsers(size_t* count)
 {
     static const uint16_t kIds[] = { kUserNvofProducer, kUserTemporalDetail, kUserCameraModel, kUserInterpolator, kUserEnhancers,
-                                     kUserBasicChroma, kUserLongPair };
+                                     kUserBasicChroma, kUserLongPair, kUserMotionMatcher };
     if (count)
         *count = sizeof(kIds) / sizeof(kIds[0]);
     return kIds;
@@ -73,7 +74,7 @@ inline uint64_t TexBytesOf(const Tex* tex)
 // visible gap, not a guess of their size); a module leaves this list when it calls Declare. Static text.
 inline const char* KnownUndeclaredVramUsers()
 {
-    return "temporal detail, texture restore / detail pulse / debander, the de-judder's pair flow textures (a few hundred KB), camera guidance textures";
+    return "temporal detail, texture restore / detail pulse / debander, camera guidance textures";
 }
 
 class VramUsers {
@@ -123,6 +124,12 @@ public:
     // A user that can step down to nothing (two levels: `bytes`, then 0): the module's call site reads the grant and frees its memory.
     void DeclareSheddable(const void* owner, uint16_t id, uint64_t bytes, Tier tier)
     {
+        DeclareStepped(owner, id, bytes, tier, "not available (the seeded search runs)");
+    }
+
+    // W2-C1: the same two levels with the module's own zero-level wording (`zeroText`: static storage).
+    void DeclareStepped(const void* owner, uint16_t id, uint64_t bytes, Tier tier, const char* zeroText)
+    {
         VramUser u;
         u.id = id;
         u.name = VramUserName(id);
@@ -131,8 +138,15 @@ public:
         u.levels.push_back(bytes);
         u.levels.push_back(0);
         u.levelText.push_back(nullptr);
-        u.levelText.push_back("not available (the seeded search runs)");
+        u.levelText.push_back(zeroText);
         Declare(owner, u, bytes);
+    }
+
+    // W2-C1: the module released its memory and is no longer active (Withdraw + MarkActive false).
+    void Release(const void* owner, uint16_t id)
+    {
+        Withdraw(owner, id);
+        MarkActive(owner, id, false);
     }
 
     void Withdraw(const void* owner, uint16_t id)
@@ -188,6 +202,29 @@ public:
 
     // Changes whenever the set or the size of a declaration changes (the skeleton re-plans when it moved).
     uint64_t Version() const { return version_.load(std::memory_order_relaxed); }
+
+    // W2-C1 (B9): the last DXGI budget reading of an adapter (by LUID), so the motion engine's once-a-second reading also serves
+    // the skeleton's tier plan. nowSec: GetTickCount64 seconds. Not a declaration: Version() does not move.
+    void NoteBudget(uint64_t luid, uint64_t usage, uint64_t budget, double nowSec)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        budgetLuid_ = luid;
+        budgetUsage_ = usage;
+        budgetBytes_ = budget;
+        budgetAtSec_ = nowSec;
+        budgetValid_ = budget != 0;
+    }
+
+    // The reading of that adapter when it is at most maxAge seconds old (false: query DXGI).
+    bool LastBudget(uint64_t luid, uint64_t& usage, uint64_t& budget, double nowSec, double maxAge = 1.0) const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!budgetValid_ || budgetLuid_ != luid || nowSec < budgetAtSec_ || nowSec - budgetAtSec_ > maxAge)
+            return false;
+        usage = budgetUsage_;
+        budget = budgetBytes_;
+        return true;
+    }
 
     struct Snapshot {
         std::vector<VramUser> users;        // one per id (declarations of one id are summed level by level)
@@ -268,6 +305,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         entries_.clear();
         active_.clear();
+        budgetValid_ = false;
         version_.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -286,6 +324,11 @@ private:
     std::vector<Entry> entries_;
     std::vector<Mark> active_;
     std::atomic<uint64_t> version_{ 0 };
+    uint64_t budgetLuid_ = 0;      // W2-C1: the shared budget reading (NoteBudget / LastBudget)
+    uint64_t budgetUsage_ = 0;
+    uint64_t budgetBytes_ = 0;
+    double budgetAtSec_ = 0.0;
+    bool budgetValid_ = false;
 };
 
 // "optical-flow engines, camera model" for the Fallbacks line; empty when nothing is unpopulated.

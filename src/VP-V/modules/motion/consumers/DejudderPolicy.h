@@ -66,6 +66,9 @@ namespace DejudderPolicy
 		double strengthEven = 0.0;
 		bool evenIncludes1001 = false;
 		bool occlusionMask = false;   // 6c: the estimate also runs for the mask alone
+		// W2-C1 (B9): the mask is reuse-only; it starts the estimate alone only while the vector engine serves it (a starter
+		// runs). false = the engine refused it this frame (VectorDemand::Decision::refused): no matcher for the mask alone.
+		bool occlusionMaskServed = true;
 		// 8-3: the adaptive downscale wants the grain map. It never starts the
 		// estimate on its own (owner 2026-10-14: vector users take the motion
 		// when it is there and fall back otherwise); kept for the reason text.
@@ -210,7 +213,7 @@ namespace DejudderPolicy
 	// extras).
 	inline Reason Decide(const Input& in)
 	{
-		const bool alone = in.occlusionMask;   // the grain map never starts it alone
+		const bool alone = in.occlusionMask && in.occlusionMaskServed;   // the grain map never starts it alone; the mask only when served
 		if (!(in.strength > 0.0) && !(in.strengthEven > 0.0) && !alone) return Reason::Off;
 		if (in.smoothMotion) return Reason::SmoothMotion;
 		if (in.lowLatency) return Reason::LowLatency;

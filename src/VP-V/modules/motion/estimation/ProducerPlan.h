@@ -31,7 +31,9 @@ namespace VpMotion
 			bool dejudderPresent = false;          // the de-judder's matcher exists
 			bool producerExists = false;           // a producer object is held
 			bool producerRunning = false;          // ... and its worker runs (meaningful with producerExists)
-			bool startFailedLatched = false;       // an earlier start failed (or the producer died): not retried
+			bool startFailedLatched = false;       // an earlier start failed: not retried ...
+			bool retryDue = false;                 // ... unless its back-off is due (W2-C1; false = the old decision)
+			bool backoffActive = false;            // W2-C1: a failed start's back-off still runs: no start, latch or not (false = the old decision)
 			bool gpuAvailable = false;             // the device the engine needs exists
 		};
 
@@ -50,7 +52,7 @@ namespace VpMotion
 			const bool vectorProducer = in.vectorProducer && in.opticalFlow && in.motionAheadFrames > 0 &&
 				(!in.lowLatency || in.vectorLowLatencyAllowed);
 			out.wanted = (in.dejudderPresent && in.opticalFlow && in.motionAheadFrames > 0 && !in.lowLatency) || vectorProducer;
-			if (out.wanted && !in.producerExists && !in.startFailedLatched && in.gpuAvailable)
+			if (out.wanted && !in.producerExists && (!in.startFailedLatched || in.retryDue) && !in.backoffActive && in.gpuAvailable)
 				out.action = Action::Start;
 			else if (!out.wanted)
 			{

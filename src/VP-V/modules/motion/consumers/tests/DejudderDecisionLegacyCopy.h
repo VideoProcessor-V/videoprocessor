@@ -269,6 +269,7 @@ namespace DejudderDecisionLegacy
 			in.strengthEven = activeSettings.dejudderStrengthEven;
 			in.evenIncludes1001 = activeSettings.dejudderEvenIncludes1001;
 			in.occlusionMask = activeSettings.occlusionMask;
+			in.occlusionMaskServed = (vectorDemand.refused & (1u << static_cast<int>(VectorDemand::Consumer::OcclusionMask))) == 0;   // W2-C1: reuse-only
 			in.grainMap = adaptiveGrainMapWanted;
 			in.lowLatency = lowLatency;   // COPY
 			in.sourceHz = sourceHz;
@@ -421,13 +422,15 @@ namespace DejudderDecisionLegacy
 			if (!analysisEstimate && (reason == DejudderPolicy::Reason::Off || reason == DejudderPolicy::Reason::LowLatency ||
 				reason == DejudderPolicy::Reason::Interlaced || reason == DejudderPolicy::Reason::VideoRateMaskOnly ||
 				reason == DejudderPolicy::Reason::IneligibleCadence || reason == DejudderPolicy::Reason::NativeRgb ||
-				reason == DejudderPolicy::Reason::SmoothMotion))
+				reason == DejudderPolicy::Reason::SmoothMotion ||
+				(reason == DejudderPolicy::Reason::UnknownRates && activeSettings.interpolationFillGaps)))   // W2-C1 (H3Idle)
 			{
-				const bool repairPossible = reason == DejudderPolicy::Reason::Off ||
-					reason == DejudderPolicy::Reason::VideoRateMaskOnly || reason == DejudderPolicy::Reason::IneligibleCadence;
+				const bool repairPossible = !in.lowLatency && (reason == DejudderPolicy::Reason::Off ||   // W2-C1 (competitive motion-free)
+					reason == DejudderPolicy::Reason::VideoRateMaskOnly || reason == DejudderPolicy::Reason::IneligibleCadence ||
+					reason == DejudderPolicy::Reason::UnknownRates);   // W2-C1
 				const bool held = dejudder || dejudderNextTexture0;   // COPY
-				if (held && activeSettings.interpolationFillGaps && repairPossible)
-					PollMotionEngineBudget(width, height, true);
+				if ((held || motionEngineIdle.Pressured()) && activeSettings.interpolationFillGaps && repairPossible)   // W2-C1
+					PollMotionEngineBudget(width, height, held);
 				const bool keepForGaps = motionEngineIdle.Keep(activeSettings.interpolationFillGaps, repairPossible);
 				// H3 F4 follow-up: loaded and idle from the source's start, not at its first hiccup.
 				if (!held && keepForGaps && motionEngineWarmPending)

@@ -24,6 +24,46 @@
 
 namespace VpMotion
 {
+	namespace
+	{
+		// W2-C1: a validity epoch that moved this recently is a resync window (vectors invalid until the next pair); a time constant
+		// of a recovery, not a rate.
+		constexpr ULONGLONG kResyncWindowMs = 1000;
+
+		// W2-C1: the producer part of the engine facts (as PlanProducer leaves it), then the state. Render thread.
+		void RefreshEngineStatus(VectorEngine& e, ULONGLONG nowMs)
+		{
+			VectorDemand::EngineFacts& f = e.motionEngineFacts;
+			f.opticalFlow = e.motionOpticalFlow;
+			f.lowLatency = e.motionLowLatency;
+			f.lowLatencyNoVectors = e.motionLowLatencyNoVectors;
+			f.producerRunning = e.motionProducer && e.motionProducer->Running();
+			f.producerRecovering = e.motionProducer && e.motionProducer->GetHealth().recovering;
+			f.nvofStartError = e.motionProducerStartFailed;   // the last start failed (latched until one succeeds or the want ends)
+			f.vramRelease = e.motionVramRelease;
+			const uint64_t epoch = e.motionValidity.Epoch();
+			if (e.motionStatusEpoch == 0)
+				e.motionStatusEpoch = epoch;   // the first refresh seeds the epoch (MotionValidity::kInitialEpoch): no resync window
+			else if (epoch != e.motionStatusEpoch)
+			{
+				e.motionStatusEpoch = epoch;
+				e.motionStatusEpochAtMs = nowMs;
+			}
+			f.resyncWindow = e.motionStatusEpochAtMs != 0 && nowMs - e.motionStatusEpochAtMs < kResyncWindowMs;
+			e.motionEngineStatus = VectorDemand::DeriveEngineStatus(f);
+			if (e.motionCameraGated)
+				e.motionEngineStatus.affected |= 1u << static_cast<int>(VectorDemand::Consumer::CameraFit);
+		}
+	}
+
+	VectorDemand::MotionEngineWork VectorEngine::Work() const
+	{
+		VectorDemand::MotionEngineWork w = motionEngineWork;
+		const std::shared_ptr<MotionAhead::Producer> producer = LoopProducer();
+		w.producerPairs = motionEnginePairsBase + (producer ? producer->GetStats().pairs : 0ull);
+		return w;
+	}
+
 	// docs/VP-nvof-ahead.md (owner 2026-10-16): the optical-flow depth for this frame - the configured
 	// depth, off in low latency or without the engine, never more than the frames queued. Logged when
 	// it changes (the matcher covers the rest). The expressions are the renderer's old inline block
@@ -44,52 +84,76 @@ namespace VpMotion
 		life.vectorProducer = vectorDemand.producer;
 		life.vectorLowLatencyAllowed = vectorDemand.lowLatencyAllowed;
 		motionLowLatencyNoVectors = life.lowLatency && !vectorDemand.lowLatencyAllowed;
+		motionOpticalFlow = in.opticalFlow;
+		motionLowLatency = life.lowLatency;
 		life.dejudderPresent = in.dejudderPresent;
 		life.producerExists = motionProducer != nullptr;
 		life.producerRunning = motionProducer && motionProducer->Running();
-		life.startFailedLatched = motionProducerFailedLogged;
-		life.gpuAvailable = in.gpu != nullptr;
+		life.startFailedLatched = motionProducerStartFailed;
+		const ULONGLONG nowMs = GetTickCount64();
+		// W2-C1: a failed start is retried on the recovery back-off (5 s, then 60 s), not every frame and not only on a settings change.
+		life.retryDue = motionProducerStartFailed && motionProducerStartRetry.Recovering() && nowMs >= motionProducerStartRetry.RetryAtMs();
+		// ... and a latch cleared by an unwanted frame does not skip the back-off (a want flip never restarts it early).
+		life.backoffActive = motionProducerStartRetry.Recovering() && nowMs < motionProducerStartRetry.RetryAtMs();
+		const bool startFailureInjected = !producerStartFailureForTesting_.empty();   // C1-4 test seam: empty in the product
+		life.gpuAvailable = in.gpu != nullptr || startFailureInjected;
 		const ProducerPlan::LifecycleOutput act = ProducerPlan::Lifecycle(life);
 		if (act.action == ProducerPlan::Action::Start)
 		{
-			pl_d3d11 d3d = pl_d3d11_get(in.gpu);
+			pl_d3d11 d3d = startFailureInjected ? nullptr : pl_d3d11_get(in.gpu);
 			auto producer = std::make_unique<MotionAhead::Producer>();
 			// The slow (best) preset: off the render path, and on the 7 real clips the seed with it removed
 			// 41.9% of the judder vs the matcher's 41.3% (damage 0.35 vs 0.40; medium 41.2%, 0.37). The
 			// render-time fallback keeps the matcher's preset (medium).
 			const NvOpticalFlow::Preset preset = NvOpticalFlow::Preset::Slow;
 			producer->SetSlot(p2Slot);   // SK-MV: the producer publishes P2 into the engine's slot (it owns no store)
-			if (d3d && d3d->device && producer->Start(d3d->device, preset))
+			if (!startFailureInjected && d3d && d3d->device && producer->Start(d3d->device, preset))
 			{
 				motionProducerStartError.clear();
+				motionProducerStartFailed = false;
+				motionProducerStopLogged = false;
+				if (motionProducerStartRetry.Recovering())
+					motionProducerStartRetry.OnRestarted(nowMs);
+				++motionEngineWork.producerStarts;
 				PublishProducer(std::shared_ptr<MotionAhead::Producer>(std::move(producer)));   // hardening: atomic publish (HOOKS.md section 2)
 			}
 			else
 			{
-				motionProducerFailedLogged = true;
-				motionProducerStartError = producer->Error().empty() ? std::string("no render device") : producer->Error();   // SK-MV: the real reason, shown
-				DebugLog::Log("Motion ahead: the producer did not start (%s); the de-judder takes the block searches (no optical-flow pair)",
-					producer->Error().c_str());
+				const std::string startError = startFailureInjected ? producerStartFailureForTesting_ :
+					producer->Error().empty() ? std::string("no render device") : producer->Error();
+				// W2-C1 (lead 2026-11-11): logged once per failure episode (and when the reason changes), not at every retry.
+				const bool logIt = !motionProducerStartFailed || startError != motionProducerStartError;
+				motionProducerStartFailed = true;
+				motionProducerStartError = startError;   // SK-MV: the real reason, shown
+				const uint64_t retryMs = motionProducerStartRetry.OnStopped(nowMs);
+				if (logIt)
+					DebugLog::Log("Motion ahead: the producer did not start (%s); the de-judder takes the block searches (no optical-flow pair); retried in %llu s",
+					startError.c_str(), static_cast<unsigned long long>(retryMs / 1000));
 			}
 		}
 		else if (act.action == ProducerPlan::Action::Stop)
 		{
 			// Owner: the producer stays alive once wanted - kept while the settings still want it (a resync
 			// or format change can take longer than any timer); stopped when they change.
+			motionEnginePairsBase += motionProducer->GetStats().pairs;   // W2-C1: Work().producerPairs keeps them
 			motionProducer->Stop();
 			PublishProducer(nullptr);   // hardening: a loop copy keeps the stopped producer alive until its use ends
-			motionEngineReady.store(false, std::memory_order_release);
 		}
 		// Audit 2026-10-16: a failure is retried once the producer is wanted again (optical flow off and on,
 		// low latency and back), and the look-ahead re-engages only after the refill - never on a stale
 		// engagement.
 		if (act.clearStartFailed)
-			motionProducerFailedLogged = false;
+		{
+			motionProducerStartFailed = false;   // W2-C1: the back-off (motionProducerStartRetry) is kept: it ends only on a start
+			motionProducerStopLogged = false;
+		}
 		if (act.disengage)
 			motionAheadEngaged = false;
-		if (motionProducer && !motionProducer->Running() && !motionProducerFailedLogged)
+		if (motionProducer && motionProducer->Running())
+			motionProducerStopLogged = false;   // W2-C1: running again (its own restart): a later stop is logged again
+		else if (motionProducer && !motionProducerStopLogged)
 		{
-			motionProducerFailedLogged = true;
+			motionProducerStopLogged = true;
 			DebugLog::Log("Motion ahead: the producer stopped (%s); the de-judder estimates at render time",
 				motionProducer->Error().c_str());
 		}
@@ -101,7 +165,6 @@ namespace VpMotion
 			DebugLog::Log("NVOF guard: a second NvOpticalFlow::Engine session was opened on one GPU (%llu in total) - the vector engine's producer is the only one allowed",
 				nvofViolations);
 		}
-		motionEngineReady.store(motionProducer && motionProducer->Running() && motionProducer->EngineReady(), std::memory_order_release);
 		// SK-MV: the standing cost is visible. While the de-judder keeps the engine warm (it is a consumer by the estimating reasons or
 		// the standing demand) the producer's pairs per second and ms per pair are a status line, every 5 s, and the accessor for Ctrl+I.
 		{
@@ -186,32 +249,57 @@ namespace VpMotion
 		// flip is logged at most every 5 s (audit 2026-10-16: up to once per frame).
 		const bool levelOnly = ahead.reason == MotionAhead::Reason::Active || ahead.reason == MotionAhead::Reason::ShallowQueue;
 		const auto now = std::chrono::steady_clock::now();
+		// refs/109 F1: the lead's cap is noted every frame (the log key above leaves the lead out; the status line shows it).
+		motionLeadCap.Note(MotionAhead::LeadCapped(ahead.depth, static_cast<size_t>((std::max)(0, ahead.available))));
 		if (motionAheadLogged != key && (!levelOnly || now - motionAheadLoggedAt >= std::chrono::seconds(5)))
 		{
 			motionAheadLogged = key;
 			motionAheadLoggedAt = now;
 			DebugLog::Log("%s", text);
 		}
+		RefreshEngineStatus(*this, nowMs);   // W2-C1: the published state is same-frame (VectorEngineState.h, the one-frame lag)
 	}
 
 	// ---- P5a-4 -------------------------------------------------------------------------------------------------
 	void VectorEngine::UpdateVectorEngine(const VectorDemand::Input& input, const UpdateFacts& facts, IVectorEngineHost& host)
 	{
-		if (cameraFitWanted_.load(std::memory_order_acquire) && !input.wants[static_cast<int>(VectorDemand::Consumer::CameraFit)])
+		const int cameraFit = static_cast<int>(VectorDemand::Consumer::CameraFit);
+		const ULONGLONG now = GetTickCount64();
+		// W2-C1: the camera fit (a starter) reads only the optical-flow seed (SeedFieldOf): with optical flow off, or while the producer's
+		// failed start waits for its back-off, the matcher alone would give it nothing, so it does not start the engine (its own
+		// "camera fit needs the optical-flow seed" status shows; the "motion engine" entry names it).
+		const bool cameraWanted = cameraFitWanted_.load(std::memory_order_acquire) || input.wants[cameraFit];
+		motionOpticalFlow = facts.opticalFlow;   // this frame's setting (PlanProducer refreshes it too)
+		motionCameraGated = cameraWanted && (!motionOpticalFlow ||
+			(motionProducerStartRetry.Recovering() && now < motionProducerStartRetry.RetryAtMs()));
+		if ((cameraWanted && !input.wants[cameraFit]) || (motionCameraGated && input.wants[cameraFit]))
 		{
 			VectorDemand::Input merged = input;   // the camera fit asked for the field: one more consumer of the same decision
-			merged.wants[static_cast<int>(VectorDemand::Consumer::CameraFit)] = true;
+			merged.wants[cameraFit] = !motionCameraGated;
 			vectorDemand = VectorDemand::Decide(merged);
 		}
 		else
 			vectorDemand = VectorDemand::Decide(input);
-		const ULONGLONG now = GetTickCount64();
+		// W2-C1: refused starts are counted, and the engine state is derived from this decision.
+		for (int i = 0; i < VectorDemand::kConsumerCount; ++i)
+			if ((vectorDemand.refused & (1u << i)) != 0)
+				++motionEngineWork.refusedStarts[i];
+		motionEngineFacts.vectorDemand = facts.vectorDemandSetting;
+		motionEngineFacts.decision = vectorDemand;
+		motionEngineFacts.starterEngaged = input.starterEngaged || (vectorDemand.served & VectorDemand::StarterMask()) != 0;
+		motionEngineFacts.frame = ++motionEngineFrame;
+		RefreshEngineStatus(*this, now);
 		if (!facts.vectorDemandSetting)
 		{
 			if (!vectorEngineLogged.empty())
 			{
 				vectorEngineLogged.clear();
 				VectorEngineFallbackSync::Release(host);
+			}
+			if (motionLeadCapShown)   // refs/109 F1: an engaged cap entry never outlives vector_demand
+			{
+				motionLeadCapShown = false;
+				host.SyncFallback(FallbackCatalog::MotionLookaheadCapped(false, MotionAhead::kMaxLead));
 			}
 			return;
 		}
@@ -226,7 +314,15 @@ namespace VpMotion
 					(ditherKey & 1) ? "yes" : "no", (ditherKey & 2) ? "yes" : "no", (ditherKey & 4) ? "yes" : "no");
 			}
 		}
-		const std::string line = VectorDemand::StatusLine(vectorDemand);
+		// refs/109 F1: the cap is shown while the forward look-ahead runs and it binds sustained. Synced only when it changes, outside
+		// VectorEngineFallbackSync (VectorEngineTests pins that group's exact per-frame sync counts, WAIVER-T1-01).
+		const bool leadCapShown = motionLeadCap.sustained && vectorDemand.mode == VectorDemand::Mode::Forward;
+		if (leadCapShown != motionLeadCapShown)
+		{
+			motionLeadCapShown = leadCapShown;
+			host.SyncFallback(FallbackCatalog::MotionLookaheadCapped(leadCapShown, MotionAhead::kMaxLead));
+		}
+		const std::string line = VectorDemand::StatusLine(vectorDemand, leadCapShown ? MotionAhead::kMaxLead : 0);
 		if (line != vectorEngineLogged)
 		{
 			vectorEngineLogged = line;
@@ -535,7 +631,13 @@ namespace VpMotion
 		if (host)
 			Engines().WithEngine(host, [&](VectorEngine& engine) {
 				producer = std::atomic_exchange(&engine.motionProducer, std::shared_ptr<MotionAhead::Producer>());
-				engine.motionEngineReady.store(false, std::memory_order_release);
+				// W2-C1: a GPU release is a recovery event: both latches and the start back-off are cleared, so the producer starts
+				// again on the new device once wanted (the old single latch could block it until a settings change).
+				engine.motionProducerStartFailed = false;
+				engine.motionProducerStopLogged = false;
+				engine.motionProducerStartRetry = MotionAhead::ProducerRecovery();
+				if (producer)
+					engine.motionEnginePairsBase += producer->GetStats().pairs;
 			});
 		if (!producer)
 			return false;

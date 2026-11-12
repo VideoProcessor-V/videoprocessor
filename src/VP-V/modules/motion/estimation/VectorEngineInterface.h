@@ -9,6 +9,7 @@
 #pragma once
 
 #include <VP-V/core/Indicator.h>
+#include <VP-V/modules/motion/estimation/VectorDemand.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h>
 
 #include <libplacebo/gpu.h>
@@ -227,6 +228,12 @@ namespace VpMotion
 		}
 		virtual bool PollLongPair(uint64_t /*ticket*/, VerifiedField& /*out*/) { return false; }
 		virtual void CancelLongPair(uint64_t /*ticket*/) {}
+
+		// W2-C1 (B9): the ONE global motion-engine state (On / Degraded / Off + reasons + engaged starters) and the work counters.
+		// Render thread / renderMutex (refreshed by the engine's decision and at the end of PlanProducer). Reuse-only consumers read
+		// State() and take their non-motion path when it is not On / Degraded. Defaults: Off / None and zero work (existing fakes).
+		virtual VectorDemand::MotionEngineStatus State() const { return VectorDemand::MotionEngineStatus(); }
+		virtual VectorDemand::MotionEngineWork Work() const { return VectorDemand::MotionEngineWork(); }
 	};
 
 	// What Query(kVectorEngineQueryId) returns. EngineFor(host) = the engine of that renderer (host = the pointer the

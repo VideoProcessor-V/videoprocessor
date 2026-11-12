@@ -53,6 +53,7 @@ enum VramUserId : uint16_t {
     kUserScratchArenaExtra,    // SA1: the arena's T1/T2 temporaries (the increment over the T0 plan)
     kUserBasicChroma,          // MV7: BasicChroma's output texture (luma-size rg16, kept across frames; VramUsers.h)
     kUserLongPair,             // SK-MV MV4: the long-pair service's NVOF rings (T2, sheddable: optional, goes first; NOT the producer's protected user)
+    kUserMotionMatcher,        // W2-C1 C1-3: the motion engine's matcher (the de-judder's block searches and pair flow textures; T1, stepped)
     kUserProductBase = 0x100,  // + ProductId: skeleton lane products
 };
 

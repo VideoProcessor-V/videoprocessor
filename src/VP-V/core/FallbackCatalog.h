@@ -238,6 +238,61 @@ namespace FallbackCatalog
 			"optical-flow demand is dropped (the block searches run) until the pressure eases");
 	}
 
+	// W2-C1 (B9): the motion engine's one state (VectorDemand::MotionEngineStatus, VectorEngine::State()). Engaged while a consumer
+	// that wants vectors is without full motion: the engine is off (no starter runs it, or a hard absence) or degraded (a starter
+	// runs the block searches without optical-flow pairs). Released when on, when nothing wants vectors, and when the only cause
+	// is a deliberate setting (optical_flow off) or the producer's own first frames (reason None; the "motion" entry covers a
+	// producer that never runs). It absorbs the reason part of "motion engine pressure" (that id stays one release as an alias).
+	inline Decision MotionEngine(const VectorDemand::MotionEngineStatus& st)
+	{
+		using R = VectorDemand::MotionEngineReason;
+		const unsigned deliberate = 1u << static_cast<int>(R::OpticalFlowOff);
+		if (st.state == VectorDemand::MotionEngineState::On || st.affected == 0 ||
+			(st.state == VectorDemand::MotionEngineState::Degraded && (st.reasons & ~deliberate) == 0))
+			return Released("motion engine");
+		std::string why = VectorDemand::ReasonWords(st.reason);
+		for (int i = 0; i < VectorDemand::kMotionEngineReasonCount; ++i)
+		{
+			const R r = static_cast<R>(i);
+			if (r != st.reason && st.Has(r) && r != R::None)
+				why += std::string(", ") + VectorDemand::ReasonWords(r);
+		}
+		const bool off = st.state == VectorDemand::MotionEngineState::Off;
+		// Degraded: what the served consumers get instead. Without optical-flow pairs (the producer did not start or recovers) they
+		// read the matcher's block searches; in low latency (ForwardShallow) only the frames already queued; in a resync window
+		// nothing until the next valid pair.
+		const char* instead = off ? " take their non-motion path"
+			: (st.Has(R::NvofUnavailable) || st.Has(R::ProducerRecovering)) ? " use the block searches without optical-flow pairs"
+			: st.Has(R::LowLatency) ? " use only the frames already queued (low latency)"
+			: st.Has(R::Resync) ? " take their non-motion path until the next valid pair"
+			: " use the block searches without optical-flow pairs";
+		return Engaged("motion engine", std::string("motion engine ") + VectorDemand::StateWord(st.state) + ": " + why + "; " +
+			VectorDemand::NamesOf(st.affected) + instead);
+	}
+
+	// W2-C1: the entry synced every frame, rebuilt only when what it says changes (state, reasons, leading reason, affected).
+	struct MotionEngineEntry
+	{
+		const Decision& For(const VectorDemand::MotionEngineStatus& st)
+		{
+			if (!valid || st.state != state || st.reason != reason || st.reasons != reasons || st.affected != affected)
+			{
+				decision = MotionEngine(st);
+				state = st.state;
+				reason = st.reason;
+				reasons = st.reasons;
+				affected = st.affected;
+				valid = true;
+			}
+			return decision;
+		}
+		Decision decision;
+		VectorDemand::MotionEngineState state = VectorDemand::MotionEngineState::Off;
+		VectorDemand::MotionEngineReason reason = VectorDemand::MotionEngineReason::None;
+		unsigned reasons = 0, affected = 0;
+		bool valid = false;
+	};
+
 	// SK-MV pass-through (TEMPORARY until P5c): the renderer read the matcher's snapshot (SnapField / SnapFrameTrust / SnapSubField) after
 	// the shared view's snapshot lease was lost (the matcher replaced or invalidated its copies since the view captured them). The read is
 	// answered by the matcher's own copy exactly as before, but it may not be the pair the view captured: never silent. `reads` is the
@@ -274,6 +329,19 @@ namespace FallbackCatalog
 	// The look-ahead producer stopped after three failed jobs in a row and restarts itself with a
 	// back-off (MotionAhead::ProducerRecovery). Engaged while it is wanted and waiting to restart,
 	// for every vector consumer (the "motion" entry above covers only the de-judder's view).
+	// ---- motion.estimation: the look-ahead lead cap (refs/109 F1, AUDIT-R) ---------------------------
+	// The lead (frames computed ahead) is held at MotionAhead::kMaxLead (the 16-pair P2 ring minus the 3 kept behind the render)
+	// while more frames are queued ahead (60p with the standard 250 ms queue) or the depth is larger (240p). Engaged while that
+	// binds sustained; the frames beyond it get their pairs as they come within the lead (no matcher stand-in).
+	inline Decision MotionLookaheadCapped(bool capped, int cap)
+	{
+		if (!capped)
+			return Released("motion_lookahead_capped");
+		return Engaged("motion_lookahead_capped", "optical flow runs " + std::to_string(cap) +
+			" frames ahead, fewer than are queued (the pair ring's limit); later frames get their pairs as they come within " +
+			std::to_string(cap));
+	}
+
 	inline Decision VectorProducer(bool wanted, bool recovering, unsigned stops, const std::string& error = std::string())
 	{
 		if (!wanted || !recovering)

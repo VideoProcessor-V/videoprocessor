@@ -606,8 +606,8 @@ namespace VectorEngineHookTest
 			VectorEngine next(&replacement);
 			engine.PublishProducer(std::make_shared<MotionAhead::Producer>());
 			next.PublishProducer(std::make_shared<MotionAhead::Producer>());
-			engine.motionEngineReady.store(true);
-			next.motionEngineReady.store(true);
+			engine.motionProducerStartFailed = true;   // W2-C1: the release clears the latches and the back-off
+			engine.motionProducerStartRetry.OnStopped(1000);
 			const std::shared_ptr<MotionAhead::Producer> loopCopy = engine.LoopProducer();   // a render-loop copy in flight
 			VectorEngineExtension extension;
 			RendererExtension::LifecycleFacts f;
@@ -618,9 +618,11 @@ namespace VectorEngineHookTest
 			f.kind = RendererExtension::Lifecycle::GpuReleased;
 			extension.OnLifecycle(f);
 			Assert::IsTrue(engine.motionProducer == nullptr);
-			Assert::IsFalse(engine.motionEngineReady.load());
+			Assert::IsFalse(engine.motionProducerStartFailed, L"start latch cleared");
+			Assert::IsFalse(engine.motionProducerStartRetry.Recovering(), L"back-off cleared");
+			Assert::IsTrue(engine.State().state != VectorDemand::MotionEngineState::On, L"not on without a producer");
 			Assert::IsTrue(loopCopy != nullptr && !loopCopy->Running(), L"a copy in flight keeps a stopped producer");
-			Assert::IsTrue(next.motionProducer != nullptr && next.motionEngineReady.load(), L"the replacement is untouched");
+			Assert::IsTrue(next.motionProducer != nullptr, L"the replacement is untouched");
 			extension.OnLifecycle(f);   // a second release: nothing left
 			Assert::IsFalse(VectorEngine::ReleaseProducerFor(&host));
 			Assert::IsTrue(VectorEngine::ReleaseProducerFor(&replacement));

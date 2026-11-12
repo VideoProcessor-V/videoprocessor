@@ -205,6 +205,14 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	if (!dejudder)
 	{
 		dejudder = std::make_unique<Dejudder::MotionWarp>(log, d3d11->gpu, wanted(Dejudder::Settings()));
+		++vectorEngine.WorkCounters().matcherCreates;   // W2-C1 (B9)
+		vectorEngine.NoteVramRelease(false);            // held again: not released
+		// W2-C1 C1-3: the matcher's memory is a governor user (stepped: held, then released and recreated when needed); withdrawn
+		// in ReleaseDejudder. The idle keeper's per-pixel estimate (MotionEngineIdle::IdleBytes) sizes it.
+		VpSkeleton::VramUsers::Instance().DeclareStepped(this, VpSkeleton::kUserMotionMatcher,
+			MotionEngineIdle::IdleBytes(a.luma ? a.luma->params.w : 0, a.luma ? a.luma->params.h : 0), VpSkeleton::Tier::T1,
+			"released (recreated when needed)");
+		VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserMotionMatcher, true);
 		// Bug hunt 3 F4: logged, so a test sees that a second hiccup does not recreate it.
 		if (++dejudderCreates <= 20 || dejudderCreates % 100 == 0)
 			DebugLog::Log("Motion engine: created (%llu times this renderer; hiccup repair %s)",
@@ -354,6 +362,8 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	const bool motionEstimated = vectorEngine.Estimate(aSequence, bSequence, ahead, dejudderSourceHz, motionShadowEpoch,
 		!motionEngineWarming, *dejudder, [&]() { return dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted); },
 		[this](const FallbackCatalog::Decision& decision) { SyncFallback(decision); });
+	if (motionEstimated && !motionEngineWarming)
+		++vectorEngine.WorkCounters().matcherEstimates;   // W2-C1 (B9): the warm-up's dummy estimate is counted as a warm-up
 	dejudder->ClearSearchSeed();
 	if (gapSeedHanded)
 	{

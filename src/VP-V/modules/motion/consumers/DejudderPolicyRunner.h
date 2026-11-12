@@ -95,6 +95,7 @@ namespace VpMotion
 		in.strengthEven = activeSettings.dejudderStrengthEven;
 		in.evenIncludes1001 = activeSettings.dejudderEvenIncludes1001;
 		in.occlusionMask = activeSettings.occlusionMask;
+		in.occlusionMaskServed = (vectorDemand.refused & (1u << static_cast<int>(VectorDemand::Consumer::OcclusionMask))) == 0;   // W2-C1: reuse-only
 		in.grainMap = adaptiveGrainMapWanted;
 		in.lowLatency = host.LowLatency();
 		in.sourceHz = sourceHz;
@@ -248,20 +249,30 @@ namespace VpMotion
 		if (!analysisEstimate && (reason == DejudderPolicy::Reason::Off || reason == DejudderPolicy::Reason::LowLatency ||
 			reason == DejudderPolicy::Reason::Interlaced || reason == DejudderPolicy::Reason::VideoRateMaskOnly ||
 			reason == DejudderPolicy::Reason::IneligibleCadence || reason == DejudderPolicy::Reason::NativeRgb ||
-			reason == DejudderPolicy::Reason::SmoothMotion))
+			reason == DejudderPolicy::Reason::SmoothMotion ||
+			(reason == DejudderPolicy::Reason::UnknownRates && activeSettings.interpolationFillGaps)))
 		{
+			// W2-C1 (H3Idle): rates not known yet (the first frames of a source) is a reason a gap pair can still be repaired
+			// under, so the idle engine is warmed then instead of the warm-up waiting for the rates to settle.
+
 			// Bug hunt 3 F4 (owner 2026-10-18): with hiccup repair on, the motion engine stays
 			// loaded and idle for every reason a gap pair can still be repaired under (the
 			// standalone repair needs no low latency, interlacing, smooth motion or native RGB):
 			// no create at a hiccup, no release after it, nothing run per frame. Low video memory
 			// (an allocation failed, or DXGI reports budget pressure) releases it; the next gap
 			// pair recreates it once the pressure has passed (MotionEngineIdle).
-			const bool repairPossible = reason == DejudderPolicy::Reason::Off ||
-				reason == DejudderPolicy::Reason::VideoRateMaskOnly || reason == DejudderPolicy::Reason::IneligibleCadence;
+			// W2-C1 (coordinator 2026-11-11, doc 91 C: competitive low latency is motion-free): the standalone gap repair never runs
+			// under the low-latency queue (vpGapFillStandalone above requires !in.lowLatency), so no engine is kept or warmed for it
+			// there; a held idle engine is released when the low-latency queue starts.
+			const bool repairPossible = !in.lowLatency && (reason == DejudderPolicy::Reason::Off ||
+				reason == DejudderPolicy::Reason::VideoRateMaskOnly || reason == DejudderPolicy::Reason::IneligibleCadence ||
+				reason == DejudderPolicy::Reason::UnknownRates);   // W2-C1: reached only with hiccup repair on
 			const bool held = f.dejudderHeld || f.nextTextureHeld;
-			if (held && activeSettings.interpolationFillGaps && repairPossible)
-				host.PollMotionEngineBudget(width, height, true);
 			MotionEngineIdle::Keeper& motionEngineIdle = host.IdleKeeper();
+			// W2-C1 (lead 2026-11-11): released under pressure, the budget is still read (once a second, BudgetDue) with the idle
+			// engine's bytes as headroom, so the pressure (and the engine's VramRelease state) clears when the memory comes back.
+			if ((held || motionEngineIdle.Pressured()) && activeSettings.interpolationFillGaps && repairPossible)
+				host.PollMotionEngineBudget(width, height, held);
 			const bool keepForGaps = motionEngineIdle.Keep(activeSettings.interpolationFillGaps, repairPossible);
 			// H3 F4 follow-up: loaded and idle from the source's start, not at its first hiccup.
 			if (!held && keepForGaps && host.WarmPending())

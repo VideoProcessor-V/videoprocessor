@@ -5828,14 +5828,29 @@ namespace Tests
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(H3IdleMotionEngineKeptAcrossHiccups)
 		{
+			RunH3IdleMotionEngineKeptAcrossHiccups("H3IdleMotionEngineKeptAcrossHiccups", "");
+		}
+
+		// W2-C1 (C1-4): the same with detail pulse off (a reuse-only consumer gone): the warm-up and the kept engine come from hiccup
+		// repair, a starter, not from a reuse-only want. Same assertions.
+		BEGIN_TEST_METHOD_ATTRIBUTE(H3IdleMotionEngineKeptAcrossHiccupsDetailPulseOff)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(H3IdleMotionEngineKeptAcrossHiccupsDetailPulseOff)
+		{
+			RunH3IdleMotionEngineKeptAcrossHiccups("H3IdleMotionEngineKeptAcrossHiccupsDetailPulseOff", "detail_pulse_stabilise: off\n");
+		}
+
+		static void RunH3IdleMotionEngineKeptAcrossHiccups(const char* name, const char* extraSettings)
+		{
 			const HarnessScope harnessScope;
-			if (!RequireHardwareOrSkip("H3IdleMotionEngineKeptAcrossHiccups")) return;
+			if (!RequireHardwareOrSkip(name)) return;
 			const double source = HarnessMonitorHz();
 			const int gapA = static_cast<int>(source * 5.0), gapB = static_cast<int>(source * 6.5);
 			FramePlan plan = RatePlan(source);
 			plan.step = [gapA, gapB](int n) { FrameStep f; f.content = n; f.send = !(n == gapA || n == gapB); return f; };
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 8.5, false,
-				"dejudder_strength: 0.5\ninterpolation: off\ninterpolation_fill_gaps: on\n", false, &plan);
+				std::string("dejudder_strength: 0.5\ninterpolation: off\ninterpolation_fill_gaps: on\n") + extraSettings, false, &plan);
 			int creates = 0, pairs = 0, idleReleases = 0, stallsAfterGap = 0;
 			bool loadedBeforeGap = false;
 			for (const std::string& line : r.log)
@@ -7005,16 +7020,18 @@ namespace Tests
 			Assert::IsTrue(r.Logged("vectors delivered (forward"), (L"forward vectors delivered\n" + r.Tail()).c_str());
 		}
 
-		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineCompetitiveDepthZeroPublishesBackwardPairs)
+		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineCompetitiveDepthZeroStaysMotionFree)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
-		TEST_METHOD(VectorEngineCompetitiveDepthZeroPublishesBackwardPairs)
+		TEST_METHOD(VectorEngineCompetitiveDepthZeroStaysMotionFree)
 		{
 			const HarnessScope harnessScope;
-			// A competitive queue (target_frames 1) has no frame ahead: the backward pairs are published
-			// and the consumer that needs a frame ahead (the debander hold) is named as without vectors.
-			if (!RequireHardwareOrSkip("VectorEngineCompetitiveDepthZeroPublishesBackwardPairs")) return;
-			if (VectorTestSkip("VectorEngineCompetitiveDepthZeroPublishesBackwardPairs")) return;
+			// A competitive queue (target_frames 1) has no frame ahead and is motion-free (doc 91 C): the reuse-only debander hold
+			// may not start the engine (owner 2026-11-10 (2)), so no engine is created, no look-ahead gets a depth, and the hold is
+			// named as without vectors. WAIVER-C1-08 (coordinator 2026-11-11 15:36): the former expectations (backward pairs
+			// delivered; "needs a frame ahead") are obsolete under those rules; the no-look-ahead check is kept.
+			if (!RequireHardwareOrSkip("VectorEngineCompetitiveDepthZeroStaysMotionFree")) return;
+			if (VectorTestSkip("VectorEngineCompetitiveDepthZeroStaysMotionFree")) return;
 			g_harnessApplySnapshot = true;
 			g_harnessQueueTarget = 1;   // the harness overrides the snapshot's target_frames after it applies
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
@@ -7023,15 +7040,76 @@ namespace Tests
 			g_harnessQueueTarget = 0;
 			Logger::WriteMessage(VectorTestLines(r).c_str());
 			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
-			Assert::IsTrue(r.Logged("vectors delivered (backward"), (L"backward pairs delivered\n" + r.Tail()).c_str());
-			// The status lists the unserved consumers together: "...; deband hold, detail pulse, ... without vectors (needs a frame ahead)".
+			// The status lists the unserved consumers together: "Vector engine: ...; deband hold, ... without vectors (...)".
 			bool named = false;
 			for (const std::string& line : r.log)
-				if (line.find("Vector engine: backward pairs") != std::string::npos && line.find("deband hold") != std::string::npos &&
-					line.find("without vectors (needs a frame ahead)") != std::string::npos)
+				if (line.find("Vector engine: ") != std::string::npos && line.find("deband hold") != std::string::npos &&
+					line.find("without vectors") != std::string::npos)
 					named = true;
 			Assert::IsTrue(named, (L"the status names the deband hold as without vectors\n" + r.Tail()).c_str());
+			Assert::AreEqual(0, CountLogged(r, "Motion engine: created"), (L"competitive is motion-free: no engine\n" + r.Tail()).c_str());
+			Assert::AreEqual(0, MotionAheadDepthLines(r), (L"no look-ahead depth at depth zero\n" + r.Tail()).c_str());
 			Assert::IsFalse(r.Logged("Motion ahead: engaged"), (L"no look-ahead at depth zero\n" + r.Tail()).c_str());
+		}
+
+		// W2-C1 (C1-4, B9): with no starter the motion engine is absent on the real renderer - reuse-only consumers on (deband hold,
+		// source monitor, detail pulse): (1) optical_flow off, starters off; (4) competitive low latency (target_frames 1, defaults
+		// otherwise: the de-judder is off there and nothing warms the engine). No matcher is created and the look-ahead never gets a
+		// depth. The CPU twin (every scenario, 600 frames, the counters): EngineAbsentPipelineTests.
+		static int MotionAheadDepthLines(const RunResult& r)
+		{
+			int deep = 0;
+			for (const std::string& line : r.log)
+			{
+				const size_t at = line.find("Motion ahead: configured");
+				if (at == std::string::npos)
+					continue;
+				const size_t d = line.find(", depth ", at);
+				if (d != std::string::npos && std::atoi(line.c_str() + d + 8) > 0)
+					++deep;
+			}
+			return deep;
+		}
+		static int CountLogged(const RunResult& r, const char* text)
+		{
+			int n = 0;
+			for (const std::string& line : r.log)
+				if (line.find(text) != std::string::npos)
+					++n;
+			return n;
+		}
+		BEGIN_TEST_METHOD_ATTRIBUTE(EngineAbsentWithoutAStarterOnTheRenderer)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(EngineAbsentWithoutAStarterOnTheRenderer)
+		{
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("EngineAbsentWithoutAStarterOnTheRenderer")) return;
+			const char* reuse = "deband_vp: on\nsource_resolution: auto\ndetail_pulse_stabilise: on\n";
+			const RunResult flowOff = Run(VideoFrameEncoding::V210, "gpu", 5.0, false, std::string(reuse) +
+				"optical_flow: off\ndejudder_strength: 0\ninterpolation: off\ninterpolation_fill_gaps: off\n");
+			g_harnessApplySnapshot = true;
+			g_harnessQueueTarget = 1;   // competitive: no frame ahead
+			const RunResult competitive = Run(VideoFrameEncoding::V210, "gpu", 5.0, false, std::string(reuse) +
+				"[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 1\n");
+			g_harnessApplySnapshot = false;
+			g_harnessQueueTarget = 0;
+			const RunResult* runs[] = { &flowOff, &competitive };
+			const char* names[] = { "optical_flow off, starters off", "competitive low latency" };
+			for (int i = 0; i < 2; ++i)
+			{
+				const RunResult& r = *runs[i];
+				Logger::WriteMessage(VectorTestLines(r).c_str());
+				const int creates = CountLogged(r, "Motion engine: created");
+				const int deep = MotionAheadDepthLines(r);
+				char text[200];
+				snprintf(text, sizeof(text), "C1-4 engine absent (%s): Motion engine created %d, Motion ahead lines with depth > 0: %d\n",
+					names[i], creates, deep);
+				Logger::WriteMessage(text);
+				Assert::IsTrue(r.presented, (L"presented\n" + r.Tail()).c_str());
+				Assert::AreEqual(0, creates, HarnessWide(std::string("no matcher without a starter\n") + text).c_str());
+				Assert::AreEqual(0, deep, HarnessWide(std::string("no look-ahead depth without a starter\n") + text).c_str());
+			}
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineOffIsTodaysPath)

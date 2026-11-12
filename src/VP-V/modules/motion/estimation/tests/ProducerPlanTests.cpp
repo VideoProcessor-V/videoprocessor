@@ -232,6 +232,26 @@ namespace ProducerPlanTest
 			Assert::IsTrue(Lifecycle(l).action == Action::Start);
 			l.startFailedLatched = true;
 			Assert::IsTrue(Lifecycle(l).action == Action::None, L"a failed start is not retried while wanted");
+			l.retryDue = true;   // W2-C1: ... until its back-off is due
+			Assert::IsTrue(Lifecycle(l).action == Action::Start, L"a due retry starts it again");
+			{
+				// W2-C1: the latch was cleared (the want ended and came back) but the back-off still runs: no start until it is due.
+				LifecycleInput b = l;
+				b.startFailedLatched = false;
+				b.retryDue = false;
+				b.backoffActive = true;
+				Assert::IsTrue(Lifecycle(b).action == Action::None, L"no start while the back-off runs, latch or not");
+				Assert::IsTrue(Lifecycle(b).wanted, L"still wanted");
+				b.backoffActive = false;
+				Assert::IsTrue(Lifecycle(b).action == Action::Start, L"the back-off over: it starts");
+			}
+			l.gpuAvailable = false;
+			Assert::IsTrue(Lifecycle(l).action == Action::None, L"never without the device");
+			l.gpuAvailable = true;
+			l.producerExists = true;
+			Assert::IsTrue(Lifecycle(l).action == Action::None, L"never a second producer");
+			l.producerExists = false;
+			l.retryDue = false;
 			l.startFailedLatched = false;
 			l.lowLatency = true;
 			Assert::IsFalse(Lifecycle(l).wanted, L"the matcher's de-judder does not want it in low latency");
@@ -311,6 +331,24 @@ namespace ProducerPlanTest
 		// SK-MV warm engine: the standing class by reason. The coordinator's trigger is "the de-judder setting is on AND the cadence is
 		// eligible": the reasons that act now or become Active at a transient keep the engine warm; the reasons where it can never act stay
 		// idle (an idle matcher kept loaded for hiccup repair runs no NVOF).
+		// W2-C1 MUST 2: the occlusion mask is reuse-only: alone it runs the estimate only while the vector engine serves it.
+		TEST_METHOD(TheOcclusionMaskAloneRunsTheEstimateOnlyWhileServed)
+		{
+			DejudderPolicy::Input in;
+			in.strength = 0.0;
+			in.strengthEven = 0.0;
+			in.occlusionMask = true;
+			in.sourceHz = 23.976;
+			in.displayHz = 60.0;
+			in.haveNext = true;
+			in.nextMatches = true;
+			Assert::IsTrue(DejudderPolicy::Decide(in) == DejudderPolicy::Reason::Active, L"served: the mask runs the estimate");
+			in.occlusionMaskServed = false;
+			Assert::IsTrue(DejudderPolicy::Decide(in) == DejudderPolicy::Reason::Off, L"refused (no starter): no matcher for the mask alone");
+			in.strength = 0.5;
+			Assert::IsTrue(DejudderPolicy::Decide(in) == DejudderPolicy::Reason::Active, L"the de-judder itself is a starter: unaffected");
+		}
+
 		TEST_METHOD(OnlyReasonsThatCanBecomeActiveAreStanding)
 		{
 			using R = DejudderPolicy::Reason;
