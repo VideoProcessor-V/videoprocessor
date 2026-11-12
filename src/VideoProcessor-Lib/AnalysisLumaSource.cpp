@@ -2,6 +2,7 @@
 
 #include "AnalysisLumaSource.h"
 #include <DolbyVisionTunnelInput.h>
+#include "../VP-V/modules/input/signal/DvTunnelTapLaw.h" // VPV-HOOK
 #include "vprenderer/DolbyVisionTunnelUnpackReference.h"
 
 #include <algorithm>
@@ -679,13 +680,16 @@ bool AnalysisLumaSource::SampleUnchecked(int x, int y, AnalysisLumaSample& resul
 			return bigEndian ? ReadBigEndian32(pixel) : ReadLittleEndian32(pixel);
 		};
 		const int pair = x & ~1;
-		result.luma = static_cast<uint16_t>(DolbyVisionTunnelUnpackReference::Intensity(word(x), shift) >> 6);
+		// 12-bit end to end (owner 2026-11-12): the tap keeps the full 12-bit intensity (luma12, the limited-range code of
+		// DvTunnelTapLaw); the ten-bit luma every legacy reader uses is derived from it (Legacy10: exact when limited, at most
+		// one code from the old ten-bit full-range map). // VPV-HOOK
+		result.luma12 = DvTunnelTapLaw::TapCode(row + static_cast<size_t>(x) * 4, encoding, rgbBitAlignment, fullRangeYuv); // VPV-HOOK
+		result.luma = DvTunnelTapLaw::Legacy10(result.luma12); // VPV-HOOK
 		result.chromaU = static_cast<uint16_t>(DolbyVisionTunnelUnpackReference::Chroma(word(pair), shift) >> 6);
 		result.chromaV = static_cast<uint16_t>(DolbyVisionTunnelUnpackReference::Chroma(word(pair + 1), shift) >> 6);
 		if (fullRangeYuv)
 		{
 			// As the decoded planes: full-range DV codes to the limited domain.
-			result.luma = FullLumaToLimited(result.luma, 1);
 			result.chromaU = FullChromaToLimited(static_cast<int>(result.chromaU) - 512, 1);
 			result.chromaV = FullChromaToLimited(static_cast<int>(result.chromaV) - 512, 1);
 		}

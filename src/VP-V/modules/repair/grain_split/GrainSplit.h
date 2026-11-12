@@ -28,6 +28,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <memory>
 #include <vector>
 
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
@@ -48,7 +50,7 @@ namespace GrainSplit
 	// layouts. Bump on ANY change of the law, the passes or a layout: a published frame carries it (Gpu::Frame::version),
 	// the GLSL embeds it as a define GS_UNIT_VERSION, and a reader refuses a frame of another version (stale, visible
 	// fallback, automatic recovery once a frame of the current version arrives).
-	constexpr uint32_t kUnitVersion = 3;   // 2: Compact blocks carry the band energies (e1, e2); 3: the v3 law (the two low
+	constexpr uint32_t kUnitVersion = 4;   // 4: N capped by the frame noise level function (refs/116b); 2: Compact blocks carry the band energies (e1, e2); 3: the v3 law (the two low
 	                                       // bands at half resolution, refs/116; WAIVER-P10V3-01 covers the v2 pins)
 
 	struct Plane
@@ -73,8 +75,19 @@ namespace GrainSplit
 		int neighbourhood = 2;         // minimum over (2 n + 1)^2 blocks
 		double grainCal = 2.2;         // pure grain reads about its own energy (quiet sub-blocks read low)
 		double kappa = 2.0;            // Wiener share f = clamp(1 - kappa N / e3x3, 0, 1)
-		double energyFloor = 1e-3;     // codes^2
+		double energyFloor = 1e-3;     // codes^2 (ten-bit-equivalent units, see sourceBits)
+		// Noise level function cap (refs/116b, kUnitVersion 4): N_block = min(N_local, NLF(block luma)).
+		int levelBins = 8;             // luma bins over the code range
+		int levelPercentile = 10;      // percentile of the blocks' quiet values per bin
+		int levelMinBlocks = 8;        // a bin with fewer blocks has no level (interpolated)
+		bool levelCap = true;          // test-only off switch (ParamsV2 equivalence); NOT a user setting
+		// Source depth of the plane's codes (10 = legacy tap, 12 = the 12-bit tap). Every code-domain limit of the
+		// law (energyFloor, the level key floor, the luma range) is stated in ten-bit-equivalent units and scaled by
+		// the depth: codes x 2^(bits-10), energies x 2^(2 (bits-10)). Never a hard-coded depth.
+		int sourceBits = 10;
 	};
+	// The code scale of a depth relative to ten bits (2^(bits-10)); the energy scale is its square.
+	inline double DepthScale(int bits) { return std::ldexp(1.0, bits - 10); }
 
 	// The product of one frame. Planes are full size; N is on the block grid (bw x bh, block B px).
 	struct Split
@@ -181,6 +194,81 @@ namespace GrainSplit
 		o.v = VpUnit::BandFromBase::Blur(in.v, in.w, in.h, sigma);
 		return o;
 	}
+
+	// ---- NLF cap (refs/116b s4) ----
+	constexpr int kLevelKeyBase = 968;   // (127 - 6) x 8: key 0 = 2^-6 codes^2
+	constexpr int kLevelKeys = 160;      // 1/8-octave classes, 2^-6 .. 2^14 codes^2
+	inline uint32_t LevelFloatBits(float v) { uint32_t u; std::memcpy(&u, &v, sizeof(u)); return u; }
+	inline float LevelBitsFloat(uint32_t u) { float v; std::memcpy(&v, &u, sizeof(v)); return v; }
+	// Integer class key of a quiet value in ten-bit-equivalent codes^2: identical on CPU and GPU.
+	inline int LevelKey(double quiet10)
+	{
+		const float q = static_cast<float>((std::max)(quiet10, 1.0 / 64.0));
+		const int k = static_cast<int>(LevelFloatBits(q) >> 20) - kLevelKeyBase;
+		return k < 0 ? 0 : (k >= kLevelKeys ? kLevelKeys - 1 : k);
+	}
+	// The class midpoint of a key, codes^2 (ten-bit-equivalent).
+	inline double LevelOfKey(int key) { return static_cast<double>(LevelBitsFloat((static_cast<uint32_t>(key + kLevelKeyBase) << 20) | (1u << 19))); }
+	inline int LevelBin(double lumaTen, const Params& p)
+	{
+		const int j = static_cast<int>(std::floor(lumaTen * p.levelBins / 1024.0));
+		return j < 0 ? 0 : (j >= p.levelBins ? p.levelBins - 1 : j);
+	}
+	// The per-bin table: quiet and blockLuma in the plane's own codes; level[] in ten-bit-equivalent codes^2; valid[j]
+	// false for a bin with fewer than levelMinBlocks blocks. level / valid hold at least p.levelBins entries.
+	inline void GrainLevelTable(const std::vector<double>& quiet, const std::vector<double>& blockLuma, const Params& p, double* level, bool* valid)
+	{
+		const double cs = DepthScale(p.sourceBits), es = cs * cs;
+		std::vector<std::vector<int>> keys(static_cast<size_t>(p.levelBins));
+		for (size_t i = 0; i < quiet.size(); ++i)
+			keys[static_cast<size_t>(LevelBin(blockLuma[i] / cs, p))].push_back(LevelKey(quiet[i] / es));
+		for (int j = 0; j < p.levelBins; ++j)
+		{
+			std::vector<int>& k = keys[static_cast<size_t>(j)];
+			const int n = static_cast<int>(k.size());
+			valid[j] = n >= p.levelMinBlocks && n > 0;
+			level[j] = 0.0;
+			if (!valid[j]) continue;
+			std::sort(k.begin(), k.end());
+			const int r = (p.levelPercentile * n + 99) / 100;   // ceil(percentile n / 100), r >= 1
+			level[j] = LevelOfKey(k[static_cast<size_t>((std::max)(1, r) - 1)]);
+		}
+	}
+	// cap(L): piecewise linear over the valid bin centres, constant beyond the first / last valid bin. Returns false (no
+	// cap) when no bin has a level. lumaTen in ten-bit-equivalent codes; the result is ten-bit-equivalent codes^2.
+	inline bool GrainLevelCap(const double* level, const bool* valid, const Params& p, double lumaTen, double& cap)
+	{
+		int lo = -1, hi = -1;
+		const double pos = lumaTen * p.levelBins / 1024.0 - 0.5;   // bin-centre coordinates
+		for (int j = 0; j < p.levelBins; ++j)
+		{
+			if (!valid[j]) continue;
+			if (j <= pos) lo = j;
+			if (j >= pos && hi < 0) hi = j;
+		}
+		if (lo < 0 && hi < 0) return false;
+		if (lo < 0) { cap = level[hi]; return true; }
+		if (hi < 0 || hi == lo) { cap = level[lo]; return true; }
+		const double t = (pos - lo) / static_cast<double>(hi - lo);
+		cap = level[lo] + (level[hi] - level[lo]) * t;
+		return true;
+	}
+	// Apply the cap to N_local (block grid), in place. blockLuma = the half-res base at each block centre.
+	inline void ApplyLevelCap(std::vector<double>& N, const std::vector<double>& quiet, const std::vector<double>& blockLuma, const Params& p)
+	{
+		if (!p.levelCap || p.levelBins <= 0) return;
+		std::vector<double> level(static_cast<size_t>(p.levelBins));
+		std::unique_ptr<bool[]> valid(new bool[static_cast<size_t>(p.levelBins)]);
+		GrainLevelTable(quiet, blockLuma, p, level.data(), valid.get());
+		const double cs = DepthScale(p.sourceBits), es = cs * cs;
+		for (size_t i = 0; i < N.size(); ++i)
+		{
+			double cap = 0.0;
+			if (GrainLevelCap(level.data(), valid.get(), p, blockLuma[i] / cs, cap)) N[i] = (std::min)(N[i], cap * es);
+		}
+	}
+	// V2 parameters for the equivalence tests: the v3 law with the cap off.
+	inline Params ParamsV2() { Params p; p.levelCap = false; return p; }
 
 	// THE V2 LAW (kUnitVersion 2: every Gaussian at full resolution). Kept ONLY as the A/B baseline of the v3 equivalence
 	// tests (refs/116 s5); no production reader. scale multiplies the sigmas; B is the block edge (px).
@@ -314,6 +402,15 @@ namespace GrainSplit
 						m = (std::min)(m, quiet[static_cast<size_t>((std::max)(0, (std::min)(a.bh - 1, by + j))) * a.bw + (std::max)(0, (std::min)(a.bw - 1, bx + i))]);
 				a.N[static_cast<size_t>(by) * a.bw + bx] = m;
 			}
+		{
+			// NLF cap (refs/116b): the block luma is the half-res base at the block centre (V3LowAt, edge blocks clamp).
+			std::vector<double> blockLuma(nb, 0.0);
+			for (int by = 0; by < a.bh; ++by)
+				for (int bx = 0; bx < a.bw; ++bx)
+					blockLuma[static_cast<size_t>(by) * a.bw + bx] = V3LowAt(gbh, (std::min)(bx * B + B / 2, y.w - 1), (std::min)(by * B + B / 2, y.h - 1));
+			ApplyLevelCap(a.N, quiet, blockLuma, p);
+		}
+		const double floorE = p.energyFloor * DepthScale(p.sourceBits) * DepthScale(p.sourceBits);
 		BlockMeans(a, a.d1, a.d2, a.d3);
 		a.f = Plane(y.w, y.h); a.s1 = Plane(y.w, y.h); a.s2 = Plane(y.w, y.h);
 		a.clean = Plane(y.w, y.h); a.grain = Plane(y.w, y.h);
@@ -325,7 +422,7 @@ namespace GrainSplit
 					for (int i = -1; i <= 1; ++i) { const double dv = d.get(xx + i, yy + j); e += dv * dv; }
 				e /= 9.0;
 				const double N = a.N[static_cast<size_t>(yy / B) * a.bw + (xx / B)];
-				const double f = Clamp01(1.0 - p.kappa * N / (std::max)(e, p.energyFloor));
+				const double f = Clamp01(1.0 - p.kappa * N / (std::max)(e, floorE));
 				a.f.at(xx, yy) = f;
 				a.s1.at(xx, yy) = f * a.d1.at(xx, yy);
 				a.s2.at(xx, yy) = f * a.d2.at(xx, yy);
