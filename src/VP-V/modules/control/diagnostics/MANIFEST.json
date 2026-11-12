@@ -49,6 +49,7 @@
     "tools": [],
     "config_keys": [
       "auto_report",
+      "intent_display",
       "raw_capture",
       "report_thumbnail",
       "state_report"

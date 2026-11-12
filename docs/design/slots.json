@@ -1923,7 +1923,8 @@
         "state_report",
         "raw_capture",
         "auto_report",
-        "report_thumbnail"
+        "report_thumbnail",
+        "intent_display"
       ],
       "planned_keys": [],
       "tiers": "n/a",

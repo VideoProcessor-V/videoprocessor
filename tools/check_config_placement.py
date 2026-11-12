@@ -69,7 +69,7 @@ CROSS_UNIT_OWNER = {
     "source_resolution_mixed_guard": "input.source_analysis",
     "source_resolution_release_fade_s": "input.source_analysis",
     "source_resolution_text_guard": "input.source_analysis",
-    "fbo_float32": "scaling.output",               # card: Colour > Range and precision; code: the scaling output stage
+    "fbo_float32": "scaling.output",               # card: Colour > Range and precision (named there; control on Bill's Processing page)
     "intent_display": "control.diagnostics",        # card: Input > Source intent; the display-intent report
     "intent_black": "drive.led_compensation",      # card: Input > Source intent; read by the LED compensation
 }
@@ -78,11 +78,13 @@ CROSS_UNIT_OWNER = {
 PRESENTATION_ROWS = {"occlusion_mask": ("output.dither",)}
 # Keys whose owner row r2/docs put in a module whose MANIFEST does not list them ("read here, owned elsewhere"):
 # the row location is accepted as is; the manifest-lists-the-key rule is not applied to them.
-MANIFEST_EXEMPT = ("dejudder_pulldown", "intent_display")
+MANIFEST_EXEMPT = ("dejudder_pulldown",)
 # Bill's upstream keys that his Section builds on a VP-V card without a doc-70 owner row in this tree
 # (the row for it is Bill's, "Tone Mapping > Profile details"): no owner-row requirement.
 UPSTREAM_NO_ROW = ("peak_detection",)
-KEY_ITEMS = ("Row", "Toggle")
+# Elsewhere: a key of the card's unit that the card only names (the control stays on Bill's page); it is placed
+# on that card for the placement text and the owner checks.
+KEY_ITEMS = ("Row", "Toggle", "Elsewhere")
 # P8-4: the "Fixes under test" container on Bill's Rendering page (section id fixesUnderTest) holds VP keys.
 # Every VP key built inside it is on an Organisation() card (a Row item, so the row moves to its unit's card),
 # except these, which have no card yet and stay in the container (their placement text says so):
@@ -178,7 +180,10 @@ def build_table(root, known_keys):
                 errors.append("%s: section '%s' (card %s/%s) not found in %s" % (ORG_REL, sid, card["unit"], card["id"], CE_REL))
                 continue
             first, last = spans[sid]
-            for ln in lines[first:last]:
+            for n, ln in enumerate(lines[first:last]):
+                # a later `form = <other form>;` hands the rest of the span to another page/section
+                if n and re.match(r'\s*form\s*=\s*(?!addCollapsibleSection)', ln):
+                    break
                 for tok in re.findall(r'"([a-z][a-z0-9_]*)"', ln):
                     if tok in known_keys and "_" in tok and tok not in placement:
                         placement[tok] = card

@@ -248,6 +248,20 @@ class CheckTests(Fixture):
         finally:
             chk.FIXES_CONTAINER_STAYS = saved
 
+    def test_span_ends_at_a_form_reassignment(self):
+        # repair_key is built after `form = processingForm;` inside the dejudder section's text: it is not that section's key
+        _w(self.root, chk.CE_REL, CE.replace('addRow("dejudder_fade_match");', 'addRow("dejudder_fade_match");\nform = processingForm;\naddRow("intent_motion_min");'))
+        rc, out = _run(["--root", self.root, "--list"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("dejudder_fade_match", out)
+        self.assertNotIn("intent_motion_min  ", out)        # not placed by span inference
+
+    def test_elsewhere_item_is_placed_on_its_card_and_checked(self):
+        _w(self.root, chk.ORG_REL, ORG.replace('{ K::Row, "repair_key" }', '{ K::Row, "repair_key" }, { K::Elsewhere, "intent_motion_min" }'))
+        rc, out = _run(["--root", self.root])
+        self.assertEqual(rc, 1, out)                         # its row says "VP-V > Advanced", the card is Repair > Main > Deband
+        self.assertIn("intent_motion_min is on card repair/deband", out)
+
     def test_missing_fixes_container_is_an_error(self):
         _w(self.root, chk.CE_REL, CE.split("form = addCollapsibleSection(QStringLiteral(\"fixesUnderTest\")")[0])
         rc, out = _run(["--root", self.root])
