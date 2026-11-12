@@ -37,6 +37,7 @@
 #include <VP-V/modules/drive/led_compensation/LedIntentState.h>
 #include <VP-V/modules/drive/led_compensation/LedSdrLiftState.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationStatusState.h>
+#include <VP-V/modules/input/source_analysis/SourceAnalysisState.h>
 #include <VP-V/modules/motion/consumers/IntentMotionState.h>
 
 namespace Vpv
@@ -63,9 +64,7 @@ namespace Vpv
 		using Calibration = CalibrationStatusState;   // P11a-e: s2.5 (CalibrationStatusState.h)
 
 		// input\source_analysis (s2.6)
-		struct SourceAnalysis
-		{
-		};
+		using SourceAnalysis = SourceAnalysisState;   // P11a-f: s2.6 the srcres latch monitor (SourceAnalysisState.h)
 
 		// control\diagnostics (s2.3)
 		struct Status

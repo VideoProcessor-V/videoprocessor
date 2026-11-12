@@ -172,8 +172,8 @@ bool LibplaceboVideoRenderer::GetSourceResolutionStatus(CString& status) const
 	status.Empty();
 	if (!m_impl)
 		return false;
-	const std::string selection = m_impl->sourceMonitor.Selection();
-	std::string line = SourceResolutionMonitor::Describe(m_impl->sourceMonitor.Read(), m_impl->sourceMonitor.AutoRatio(), selection == "auto");
+	const std::string selection = m_impl->vpv.sourceAnalysis.sourceMonitor.Selection();
+	std::string line = SourceResolutionMonitor::Describe(m_impl->vpv.sourceAnalysis.sourceMonitor.Read(), m_impl->vpv.sourceAnalysis.sourceMonitor.AutoRatio(), selection == "auto");
 	line += "; source_resolution " + selection;
 	std::string p0Line;   // R4a (resync_event on): the per-axis re-base and its source-time fades
 	if (m_impl->rebaseP0Status.Text(p0Line))

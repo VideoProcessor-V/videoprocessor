@@ -27,10 +27,10 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 	const pl_tex luma = renderImage.num_planes > 0 ? renderImage.planes[0].texture : nullptr;
 	const int nativeHeight = luma ? luma->params.h : 0;
 	// Step B: the native, unwarped, not re-based frame, once per new source frame.
-	if (sourceSequence != sourceMonitorSequence && d3d11 && d3d11->gpu)
+	if (sourceSequence != vpv.sourceAnalysis.sourceMonitorSequence && d3d11 && d3d11->gpu)
 	{
-		sourceMonitorSequence = sourceSequence;
-		if (!sourceMonitorHistorySet)
+		vpv.sourceAnalysis.sourceMonitorSequence = sourceSequence;
+		if (!vpv.sourceAnalysis.sourceMonitorHistorySet)
 		{
 			// The auto history beside the log, one file per session, newest 5 kept (logs\ when the log path is not known here).
 			std::string logPath = DebugLog::GetLogFilePath();
@@ -38,8 +38,8 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 			const size_t slash = logPath.find_last_of("\\/");
 			const std::string folder = slash == std::string::npos ? std::string(".") : logPath.substr(0, slash);
 			CreateDirectoryA(folder.c_str(), nullptr);
-			sourceMonitor.SetHistoryFolder(folder);
-			sourceMonitorHistorySet = true;
+			vpv.sourceAnalysis.sourceMonitor.SetHistoryFolder(folder);
+			vpv.sourceAnalysis.sourceMonitorHistorySet = true;
 		}
 		if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
 		const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -48,44 +48,44 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 		if (resync.Driving())
 		{
 			const std::shared_ptr<VpIndicator::Indicator> indicator = resync.GetIndicator();
-			sourceMonitor.SetStreamKey(indicator ? VpResync::Drive::FullKey(*indicator, sourceSequence) : 0);
+			vpv.sourceAnalysis.sourceMonitor.SetStreamKey(indicator ? VpResync::Drive::FullKey(*indicator, sourceSequence) : 0);
 			if ((resyncDrive.Take(VpResync::Reader::SourceMonitor) & VpIndicator::Bit(VpIndicator::kFull)) != 0)
-				sourceMonitor.Discontinuity("resync (FULL)");
+				vpv.sourceAnalysis.sourceMonitor.Discontinuity("resync (FULL)");
 		}
-		else if (sourceMonitor.StreamKey() != 0)
-			sourceMonitor.SetStreamKey(0);
-		sourceMonitor.Frame(d3d11->gpu, rebaseDispatch, renderImage, sourceSequence, now);
-		if (renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && !sourceMonitorDvLogged)
+		else if (vpv.sourceAnalysis.sourceMonitor.StreamKey() != 0)
+			vpv.sourceAnalysis.sourceMonitor.SetStreamKey(0);
+		vpv.sourceAnalysis.sourceMonitor.Frame(d3d11->gpu, rebaseDispatch, renderImage, sourceSequence, now);
+		if (renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && !vpv.sourceAnalysis.sourceMonitorDvLogged)
 		{
 			// 2026-10-17: no longer skipped as a packed signal.
 			DebugLog::Log("Source resolution on Dolby Vision: measured on the decoded intensity (I) plane; a re-base "
 				"resamples the IPT planes before libplacebo's Dolby Vision decode (as YCbCr planes before their matrix)");
-			sourceMonitorDvLogged = true;
+			vpv.sourceAnalysis.sourceMonitorDvLogged = true;
 		}
 	}
 	double wanted = 1.0, wantedX = 1.0;
-	sourceMonitor.SetSelection(activeSettings.sourceResolution);
-	sourceMonitor.SetTextGuard(activeSettings.sourceResolutionTextGuard);
-	sourceMonitor.SetMixedGuard(activeSettings.sourceResolutionMixedGuard);
-	sourceMonitor.SetCodingFixes(activeSettings.sourceCodingFixes);
-	sourceMonitor.SetLatchFixes(activeSettings.sourceResolutionLatchFixes);
-	sourceMonitor.SetCutFixes(activeSettings.sourceResolutionCutFixes);
-	sourceMonitor.SetEngageTiming(activeSettings.sourceResolutionEngageMaxWait, activeSettings.sourceResolutionCrossfade,
+	vpv.sourceAnalysis.sourceMonitor.SetSelection(activeSettings.sourceResolution);
+	vpv.sourceAnalysis.sourceMonitor.SetTextGuard(activeSettings.sourceResolutionTextGuard);
+	vpv.sourceAnalysis.sourceMonitor.SetMixedGuard(activeSettings.sourceResolutionMixedGuard);
+	vpv.sourceAnalysis.sourceMonitor.SetCodingFixes(activeSettings.sourceCodingFixes);
+	vpv.sourceAnalysis.sourceMonitor.SetLatchFixes(activeSettings.sourceResolutionLatchFixes);
+	vpv.sourceAnalysis.sourceMonitor.SetCutFixes(activeSettings.sourceResolutionCutFixes);
+	vpv.sourceAnalysis.sourceMonitor.SetEngageTiming(activeSettings.sourceResolutionEngageMaxWait, activeSettings.sourceResolutionCrossfade,
 		activeSettings.sourceResolutionReleaseFade);
-	sourceMonitor.SetEvidence(activeSettings.sourceResolutionEvidenceShots, activeSettings.sourceResolutionEvidenceSeconds);
+	vpv.sourceAnalysis.sourceMonitor.SetEvidence(activeSettings.sourceResolutionEvidenceShots, activeSettings.sourceResolutionEvidenceSeconds);
 	sourceAutoActive.store(activeSettings.sourceResolution == "auto", std::memory_order_release);
 	if (activeSettings.sourceResolution == "auto")
 	{
 		std::string why;
 		// Per axis (owner 2026-10-16): the uniform factor when engaged, else the width
 		// and height factors of a source upscaled in one direction.
-		sourceMonitor.AutoFactors(luma ? luma->params.w : 0, nativeHeight, activeSettings.sourceResolutionAutoMinConfidence,
+		vpv.sourceAnalysis.sourceMonitor.AutoFactors(luma ? luma->params.w : 0, nativeHeight, activeSettings.sourceResolutionAutoMinConfidence,
 			why, wantedX, wanted, -1.0, sourceSequence);
 		if (!why.empty())
 		{
-			const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
+			const SourceResolutionMonitor::Snapshot snap = vpv.sourceAnalysis.sourceMonitor.Read();
 			DebugLog::Log("Source resolution auto: %s; %s", why.c_str(),
-				SourceResolutionMonitor::Describe(snap, sourceMonitor.AutoRatio(), true).c_str());
+				SourceResolutionMonitor::Describe(snap, vpv.sourceAnalysis.sourceMonitor.AutoRatio(), true).c_str());
 		}
 	}
 	else
@@ -95,7 +95,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 	}
 	// The identified player kernel for an exact 2:1 luma re-base (logged on change).
 	{
-		const int identified = activeSettings.rebaseKernelMatch ? sourceMonitor.Read().kernel : -1;
+		const int identified = activeSettings.rebaseKernelMatch ? vpv.sourceAnalysis.sourceMonitor.Read().kernel : -1;
 		if (identified != sourceRebase.Kernel())
 		{
 			sourceRebase.SetKernel(identified);
@@ -146,7 +146,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 	rebaseFade = 1.0;
 	if (activeSettings.sourceResolution == "auto" && activeSettings.sourceResolutionLatchFixes && !temporal && !rebasePaused)
 	{
-		const SourceResolutionMonitor::Monitor::Transition tr = sourceMonitor.AutoTransition();
+		const SourceResolutionMonitor::Monitor::Transition tr = vpv.sourceAnalysis.sourceMonitor.AutoTransition();
 		if (tr.Active() && std::fabs(tr.toX - rebaseFactorX) < 1e-9 && std::fabs(tr.toY - rebaseFactor) < 1e-9)
 		{
 			rebaseFade = tr.weight;
@@ -168,7 +168,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 		double fadeUs = 0.0;
 		if (fadeAllowed)
 		{
-			const SourceResolutionMonitor::Monitor::Transition tr = sourceMonitor.AutoTransition();
+			const SourceResolutionMonitor::Monitor::Transition tr = vpv.sourceAnalysis.sourceMonitor.AutoTransition();
 			if (tr.Active() && std::fabs(tr.toX - rebaseFactorX) < 1e-9 && std::fabs(tr.toY - rebaseFactor) < 1e-9)
 				fadeUs = tr.duration * 1.0e6;   // the length the monitor asks for; its clock is not used
 		}
@@ -233,7 +233,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 		activeSettings.debandVp != "off" && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband), debandState);
 	if (activeSettings.debandVp != "off" && luma && !dvVpDebandSkipped)
 	{
-		const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
+		const SourceResolutionMonitor::Snapshot snap = vpv.sourceAnalysis.sourceMonitor.Read();
 		const int depth = renderImage.repr.bits.color_depth > 0 ? renderImage.repr.bits.color_depth : 10;
 		const bool useQuality = activeSettings.lowBitrateHandling != "off";
 		double quality = snap.reading ? snap.bitrateQuality : 1.0;
@@ -286,7 +286,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 		std::string pulseState, restoreState;
 		if ((activeSettings.detailPulseStabilise || activeSettings.textureRestore) && luma && !temporal)
 		{
-			const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
+			const SourceResolutionMonitor::Snapshot snap = vpv.sourceAnalysis.sourceMonitor.Read();
 			const int depth = renderImage.repr.bits.color_depth > 0 ? renderImage.repr.bits.color_depth : 10;
 			// The content rate the de-judder and the interpolator schedule with: the pulldown
 			// film rate, else the measured capture rate, else the nominal rate; 0 = unknown.

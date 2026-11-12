@@ -105,7 +105,7 @@ namespace LookAheadWalkTest
 			bool motionAheadPrevKnown = false;
 			unsigned long long motionAheadPrevGeneration = 0;
 			DejudderPolicy::MotionAheadFrame motionAheadPrev;
-			FakeMonitor sourceMonitor;
+			struct { struct { FakeMonitor sourceMonitor; } sourceAnalysis; } vpv;   // P11a-f: the monitor now lives at vpv.sourceAnalysis
 			// The walks' PrepareFrameAnalysis always throws: reached with one queued frame.
 			template <class... A> static Prepared PrepareFrameAnalysis(A&&...) { throw std::runtime_error("injected prepare"); }
 		};

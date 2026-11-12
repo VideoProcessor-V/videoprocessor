@@ -364,7 +364,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
         AdaptiveDownscaleStage::Host adaptiveHost;
         adaptiveHost.fallbackFramePeriod = [this]() { return AdaptiveFallbackFramePeriod(); };
         adaptiveHost.bitrate = [this](double& quality) {
-            const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
+            const SourceResolutionMonitor::Snapshot snap = vpv.sourceAnalysis.sourceMonitor.Read();
             quality = snap.bitrateQuality;
             return snap.reading;
         };

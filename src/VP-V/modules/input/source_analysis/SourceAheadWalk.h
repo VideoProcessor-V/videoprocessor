@@ -43,7 +43,7 @@ namespace SourceResolution
 					aheadState.dolbyVisionTunnel);
 				const AnalysisLumaSource& luma = prepared.source;
 				if (!luma.IsValid()) continue;
-				impl.sourceMonitor.LookAheadFrame(ahead.sourceSequence, luma.width, luma.height,
+				impl.vpv.sourceAnalysis.sourceMonitor.LookAheadFrame(ahead.sourceSequence, luma.width, luma.height,
 					[&luma](int x, int y) {
 						uint16_t code = 0;   // WP-23: the shared decode when ready
 						return luma.SampleLuma(x, y, code) ? static_cast<int>(code) : 0;

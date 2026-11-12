@@ -23,7 +23,7 @@ namespace VpMotion
 		bool DitherVectorsSupported() const override { return impl_.DitherVectorsSupported(); }
 		void NoteSourceMonitorMotion(double sourcePixelsPerFrame, uint64_t sequence) override
 		{
-			impl_.sourceMonitor.SetMotion(sourcePixelsPerFrame, sequence);
+			impl_.vpv.sourceAnalysis.sourceMonitor.SetMotion(sourcePixelsPerFrame, sequence);
 		}
 		bool IntentActive() const override { return impl_.vpv.motion.intent.intentInterpreter && impl_.vpv.motion.intent.intentInterpreter->Active(); }
 		void NoteIntentVectors(const IntentInterpreter::VectorSample& sample) override { impl_.vpv.motion.intent.intentInterpreter->NoteVectors(sample); }

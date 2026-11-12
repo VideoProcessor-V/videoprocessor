@@ -4972,10 +4972,6 @@ struct LibplaceboVideoRenderer::Impl
 	VpRebaseWarmup::Controller rebaseWarmup;   // FX-RB: holds a re-base until its shaders are warm // VPV-HOOK
 	// Stage 12 step B: effective resolution, bitrate quality and bit depth
 	// of every source, read on the native frame; auto acts on it.
-	SourceResolutionMonitor::Monitor sourceMonitor;
-	uint64_t sourceMonitorSequence = 0;
-	bool sourceMonitorHistorySet = false;
-	bool sourceMonitorDvLogged = false;
 	// Stage 12 §2b/§2d: VP's debander (this frame's parameters; 0 = off).
 	VpDebander::Module debander;
 	VpDebander::Params vpDebandParams;
@@ -7193,7 +7189,7 @@ struct LibplaceboVideoRenderer::Impl
 				motionEngineBudgetAdapter.Release();   // Bug hunt 3 F4: the budget reader's adapter
 				adaptiveDownscale.Release();   // Stage 8-2: its textures, too
 				sourceRebase.Release(d3d11->gpu);   // Stage 12: its textures
-				sourceMonitor.Release(d3d11->gpu);  // and the tile readback
+				vpv.sourceAnalysis.sourceMonitor.Release(d3d11->gpu);  // and the tile readback
 				debander.Release(d3d11->gpu);       // and the debander's planes
 				detailPulse.Release(d3d11->gpu);    // detail pulse stabilisation's history
 				textureRestore.Release(d3d11->gpu); // and texture restore's
@@ -11509,7 +11505,7 @@ struct LibplaceboVideoRenderer::Impl
 		for (const std::string& stageLine : adaptiveStage.StatusLines())
 			descriptions.push_back(stageLine);
 		// Stage 12: the source's effective resolution, bitrate quality and bit depth.
-		descriptions.push_back(SourceResolutionMonitor::Describe(sourceMonitor.Read(), sourceMonitor.AutoRatio(),
+		descriptions.push_back(SourceResolutionMonitor::Describe(vpv.sourceAnalysis.sourceMonitor.Read(), vpv.sourceAnalysis.sourceMonitor.AutoRatio(),
 			activeSettings.sourceResolution == "auto"));
 		if (activeSettings.debandVp != "off" && !debandLogged.empty())
 		{
@@ -26449,7 +26445,7 @@ void LibplaceboVideoRenderer::Reset()
 		RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Reset, m_impl.get()); // VPV-HOOK: motion invalidation (resync)
 		m_impl->motionLastStateReset.store(true, std::memory_order_release);
 		// Stage 12: a resync or source change - the resolution evidence belongs to what came before.
-		m_impl->sourceMonitor.Discontinuity("resync or source change");
+		m_impl->vpv.sourceAnalysis.sourceMonitor.Discontinuity("resync or source change");
 	}
 	m_pulldownResetRequested.store(true, std::memory_order_release);
 	BeginQueueGeneration("renderer reset");
@@ -26492,7 +26488,7 @@ void LibplaceboVideoRenderer::ResetLiveQueue()
 		RendererExtension::NotifyQueue(RendererExtension::QueueEvent::LiveQueueReset, m_impl.get()); // VPV-HOOK: motion invalidation
 		// The last frame's video state is kept: QueueReset does not release, so a format
 		// change across this reset still releases (SourceFormatChange).
-		m_impl->sourceMonitor.Discontinuity("live queue reset (seek or skip)");
+		m_impl->vpv.sourceAnalysis.sourceMonitor.Discontinuity("live queue reset (seek or skip)");
 	}
 	m_pulldownResetRequested.store(true, std::memory_order_release);
 	BeginQueueGeneration("live queue reset");
@@ -30074,7 +30070,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			if (dequeued.fileDiscontinuity && m_impl)
 			{
 				RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Discontinuity, m_impl.get()); // VPV-HOOK: motion invalidation (seek)
-				m_impl->sourceMonitor.Discontinuity("file discontinuity (seek, step or rate change)");
+				m_impl->vpv.sourceAnalysis.sourceMonitor.Discontinuity("file discontinuity (seek, step or rate change)");
 			}
 			// A format change without a reset (normally a Reset comes first: then this is
 			// a harmless second invalidation). Releases the de-judder's resources.
