@@ -86,12 +86,12 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 	// SID r2 (audit MED-1, rule 32; refs/107 s1 S6 CONFIG/STATUS, this settings seam): source_geometry_detect reaches the
 	// source monitor on a settings apply, parsed only when it changed, with its unknown-entry line; with auto off nothing is
 	// held, so the held re-base notice is released here (OrderFrameSlotHooks syncs it per frame while auto runs).
-	if (sourceMonitor.SetGeometryDetect(settings.sourceGeometryDetect))
-		SyncFallback(sourceMonitor.GeometryDetectFallback());
+	if (vpv.sourceAnalysis.sourceMonitor.SetGeometryDetect(settings.sourceGeometryDetect))
+		SyncFallback(vpv.sourceAnalysis.sourceMonitor.GeometryDetectFallback());
 	if (settings.sourceResolution != "auto")
 	{
 		SyncFallback(FallbackCatalog::SourceResolutionHeld(std::string()));
-		sourceMonitor.ForgetConventionHold();
+		vpv.sourceAnalysis.sourceMonitor.ForgetConventionHold();
 	}
 	RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::SettingsApplied, this, nullptr, nullptr, settings.resyncEvent.c_str(), nullptr, settings.pipelineOriginalPathway ? 1 : 0, nullptr, static_cast<double>(settings.motionAheadFrames)); // VPV-HOOK
 	entrance.Invalidate();
@@ -136,7 +136,7 @@ void LibplaceboVideoRenderer::Impl::OrderFrameSlotHooks()
 	// ("source resolution held"), synced only when the monitor's held state changed (audit LOW-1), while auto runs.
 	{
 		FallbackCatalog::Decision held;
-		if (sourceAutoActive.load(std::memory_order_acquire) && sourceMonitor.ConventionHoldChanged(held))
+		if (sourceAutoActive.load(std::memory_order_acquire) && vpv.sourceAnalysis.sourceMonitor.ConventionHoldChanged(held))
 			SyncFallback(held);
 	}
 	if (frameSlotHooks.size() < 2)
