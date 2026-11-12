@@ -2,6 +2,16 @@
  "_note": "Coordinator-approved NEW hook sites in Bill-owned files (INTEGRATOR-RULES rule 32; refs/107-host-seams-plan.md s5.2 rule 2). tools/check_hook_gating.py accepts a site that is not in docs/audit/hook-sites.json only when an entry here names its file and a whitespace-insensitive fragment of its text. Every entry: id, file, text_contains, seam (S1..S8), approver, when, expiry (the item that removes the site, or null = canonical seam), note. No verbal approvals.",
  "approvals": [
   {
+   "id": "HA-CFG09-BillPresets",
+   "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
+   "text_contains": "billQueuePolicies : queuePolicies",
+   "seam": "S6",
+   "approver": "coordinator",
+   "when": "2026-11-11",
+   "expiry": "re-graft",
+   "note": "owner 19:21 allowance of HELD-CFG-09 as a minimal registered branch in Bill's settings code; DIV-CFG-09. At the re-graft it becomes a take-over point or an accepted upstream fix (refs/110 take-over list)."
+  },
+  {
    "id": "HA-R11-PlanPresent",
    "file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp",
    "text_contains": "RendererExtension::PlanPresent(",
@@ -40,16 +50,6 @@
    "when": "2026-11-11",
    "expiry": null,
    "note": "Phase 3 present-side seams, refs/108; the R14 helper RendererExtension::ResolveTime (RendererExtension.h:546) on the statistics path"
-  },
-  {
-   "id": "HA-CFG09-BillPresets",
-   "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
-   "text_contains": "billQueuePolicies : queuePolicies",
-   "seam": "S6",
-   "approver": "coordinator",
-   "when": "2026-11-11",
-   "expiry": "re-graft",
-   "note": "owner 19:21 allowance of HELD-CFG-09 as a minimal registered branch in Bill's settings code; DIV-CFG-09. At the re-graft it becomes a take-over point or an accepted upstream fix (refs/110 take-over list)."
   }
  ]
 }
