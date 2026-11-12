@@ -191,11 +191,11 @@ ALLOW_SITES = [
                "collision GRANTED). Honoured by the --since VP-V symbol report only; proof: UntaggedVpReferenceTest."},
 ]
 
-# Waived added lines for the --since VP-V symbol report. Keyed by the code of the added line (a regex on the line with
-# comments and strings stripped, NOT a line number, so the entry survives a rebase). An entry is honoured only when it
-# matches EXACTLY ONE added line of its file in the run (zero = not reached, more than one = ambiguous: nothing honoured,
-# the lines are flagged). The pattern sees the code with strings/comments stripped, or the raw line when the entry
-# has "raw": True (needed when lines differ only by a string literal). Every entry names its waiver and expiry.
+# Waived added lines for the --since VP-V symbol report. Keyed by the FULL TEXT of the added line (exact match after
+# whitespace normalisation: leading indentation kept, inner runs collapsed, trailing blanks dropped; comments included),
+# NOT a line number, so the entry survives a rebase but a changed or extended line is flagged again. An entry is honoured
+# only when it matches EXACTLY ONE added line of its file in the run (zero = not reached, more than one = ambiguous:
+# nothing honoured, the lines are flagged). Every entry names its waiver and expiry.
 _P3_WAIVER = ("WAIVER-P3-ALIAS-REPOINT (coordinator 2026-11-12 11:30 ruling 2, conditional; condition met: the Phase 3 opus "
               "gate r2-phase3-opus-gate.md confirmed 8/8 lines are re-points of an existing alias read, no new site). "
               "Expires at the re-graft. Proof: UntaggedVpReferenceTest, r2-phase3-opus-gate.md.")
@@ -203,26 +203,25 @@ _P11_WAIVER = ("WAIVER-P11-REQUALIFY (coordinator-delegated; the P11 opus gate r
                "Expires at the re-graft. Proof: UntaggedVpReferenceTest, r2-p11-opus-gate.md.")
 _LVR = "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
 ALLOW_UNTAGGED_REFS = [
-    {"file": _LVR, "pattern": r"^\t{3}renderAheadPresenter\.creditFrames\.load\(std::memory_order_relaxed\), ratio,\s*$", "reason": _P3_WAIVER},
-    {"file": _LVR, "pattern": r"^\t{4}renderAheadPresenter\.creditFrames\.store\(0, std::memory_order_release\);\s*$", "reason": _P3_WAIVER},
-    {"file": _LVR, "pattern": r"^\t{4}renderAheadPresenter\.mainInterval = plan\.nextInterval;\s*$", "reason": _P3_WAIVER},
-    {"file": _LVR, "pattern": r"const bool ditherOwnOnExtras = activeSettings\.ditherVectorsOwn && !renderAheadPresenter\.l1;", "reason": _P3_WAIVER},
-    {"file": _LVR, "pattern": r"^\t{3}renderAheadPresenter\.mainInterval = plan\.nextInterval;\s*$", "reason": _P3_WAIVER},
-    {"file": _LVR, "pattern": r"renderAheadPresenter\.creditFrames\.store\(activeSettings\.renderAheadQueueCredit \?", "reason": _P3_WAIVER},
-    {"file": _LVR, "pattern": r"diag\.mainInterval = static_cast<int>\(presentPlan\.interval\);", "reason": _P3_WAIVER},
-    {"file": _LVR, "pattern": r"m_impl->renderAheadPresenter\.estimatedLeadMs\.load\(std::memory_order_relaxed\);", "reason": _P3_WAIVER},
-    # P11 re-qualified lines (r2/p11-stack): vpv.* member reads / writes through the existing Impl aliases.
-    {"file": _LVR, "pattern": r"want\(C::MotionIntent, vpv\.motion\.intent\.intentInterpreter && ", "reason": _P11_WAIVER},
-    {"file": _LVR, "pattern": r"vpv\.sourceAnalysis\.sourceMonitor\.Release\(d3d11->gpu\);", "reason": _P11_WAIVER},
-    {"file": _LVR, "pattern": r"SourceResolutionMonitor::Describe\(vpv\.sourceAnalysis\.sourceMonitor\.Read\(\)", "reason": _P11_WAIVER},
-    {"file": _LVR, "pattern": r"activeSettings\.ambientAdapt \|\| vpv\.led\.intent\.ledIntentLimitsSent\.shadowMinimumShare != 0\.0", "reason": _P11_WAIVER},
-    {"file": _LVR, "pattern": r"^\t{3}vpv\.led\.intent\.ledIntentLimitsSent\.ambientBlackNits != 0\.0\)", "reason": _P11_WAIVER},
-    {"file": _LVR, "pattern": r"vpv\.calibration\.calibrationLutAttached = calibrationHost\.LutAttached\(rendered, targetLutApplied\);", "reason": _P11_WAIVER},
-    {"file": _LVR, "pattern": r"sourceMonitor\.Discontinuity\(\"resync or source change\"\);", "raw": True, "reason": _P11_WAIVER},
-    {"file": _LVR, "pattern": r"sourceMonitor\.Discontinuity\(\"live queue reset \(seek or skip\)\"\);", "raw": True, "reason": _P11_WAIVER},
-    {"file": _LVR, "pattern": r"m_impl \? m_impl->vpv\.motion\.intent\.intentInterpreter : std::shared_ptr<IntentInterpreter::Observer>\(\);", "reason": _P11_WAIVER},
-    {"file": _LVR, "pattern": r"const bool intentWalkActive = m_impl && m_impl->vpv\.motion\.intent\.intentInterpreter->Active\(\);", "reason": _P11_WAIVER},
-    {"file": _LVR, "pattern": r"sourceMonitor\.Discontinuity\(\"file discontinuity \(seek, step or rate change\)\"\);", "raw": True, "reason": _P11_WAIVER},
+    {"file": _LVR, "text": '\t\t\trenderAheadPresenter.creditFrames.load(std::memory_order_relaxed), ratio,', "reason": _P3_WAIVER},
+    {"file": _LVR, "text": '\t\t\t\trenderAheadPresenter.creditFrames.store(0, std::memory_order_release);', "reason": _P3_WAIVER},
+    {"file": _LVR, "text": '\t\t\t\trenderAheadPresenter.mainInterval = plan.nextInterval;', "reason": _P3_WAIVER},
+    {"file": _LVR, "text": '\t\tconst bool ditherOwnOnExtras = activeSettings.ditherVectorsOwn && !renderAheadPresenter.l1;', "reason": _P3_WAIVER},
+    {"file": _LVR, "text": '\t\t\trenderAheadPresenter.mainInterval = plan.nextInterval;', "reason": _P3_WAIVER},
+    {"file": _LVR, "text": '\t\t\trenderAheadPresenter.creditFrames.store(activeSettings.renderAheadQueueCredit ?', "reason": _P3_WAIVER},
+    {"file": _LVR, "text": "\t\t\t\tdiag.mainInterval = static_cast<int>(presentPlan.interval); // the main present's SyncInterval", "reason": _P3_WAIVER},
+    {"file": _LVR, "text": '\tconst double estimatedLeadMs = m_impl->renderAheadPresenter.estimatedLeadMs.load(std::memory_order_relaxed);', "reason": _P3_WAIVER},
+    {"file": _LVR, "text": '\t\twant(C::MotionIntent, vpv.motion.intent.intentInterpreter && vpv.motion.intent.intentInterpreter->Active());', "reason": _P11_WAIVER},
+    {"file": _LVR, "text": '\t\t\t\tvpv.sourceAnalysis.sourceMonitor.Release(d3d11->gpu); // and the tile readback', "reason": _P11_WAIVER},
+    {"file": _LVR, "text": '\t\tdescriptions.push_back(SourceResolutionMonitor::Describe(vpv.sourceAnalysis.sourceMonitor.Read(), vpv.sourceAnalysis.sourceMonitor.AutoRatio(),', "reason": _P11_WAIVER},
+    {"file": _LVR, "text": '\t\t\tactiveSettings.ambientAdapt || vpv.led.intent.ledIntentLimitsSent.shadowMinimumShare != 0.0 ||', "reason": _P11_WAIVER},
+    {"file": _LVR, "text": '\t\t\tvpv.led.intent.ledIntentLimitsSent.ambientBlackNits != 0.0)', "reason": _P11_WAIVER},
+    {"file": _LVR, "text": '        vpv.calibration.calibrationLutAttached = calibrationHost.LutAttached(rendered, targetLutApplied);', "reason": _P11_WAIVER},
+    {"file": _LVR, "text": '\t\tm_impl->vpv.sourceAnalysis.sourceMonitor.Discontinuity("resync or source change");', "reason": _P11_WAIVER},
+    {"file": _LVR, "text": '\t\tm_impl->vpv.sourceAnalysis.sourceMonitor.Discontinuity("live queue reset (seek or skip)");', "reason": _P11_WAIVER},
+    {"file": _LVR, "text": '        m_impl ? m_impl->vpv.motion.intent.intentInterpreter : std::shared_ptr<IntentInterpreter::Observer>();', "reason": _P11_WAIVER},
+    {"file": _LVR, "text": '\t\tconst bool intentWalkActive = m_impl && m_impl->vpv.motion.intent.intentInterpreter->Active();', "reason": _P11_WAIVER},
+    {"file": _LVR, "text": '\t\t\t\tm_impl->vpv.sourceAnalysis.sourceMonitor.Discontinuity("file discontinuity (seek, step or rate change)");', "reason": _P11_WAIVER},
 ]
 
 
@@ -1130,7 +1129,7 @@ def check_file(tree, rel, vp_slots, gated, allow_used, base_ref=None, no_git=Fal
             results.append({"file": rel, "line": st.start, "class": "declaration", "text": st.text[:120]})
             continue
         for k, e in enumerate(ALLOW_SITES):
-            if e["file"] == rel and re.search(e["pattern"], st.text):
+            if e["file"] == rel and not e.get("symbol") and re.search(e["pattern"], st.text):
                 allow_used[("site", k)] = allow_used.get(("site", k), 0) + 1
                 results.append({"file": rel, "line": st.start, "class": "allowed", "why": "site: " + e["reason"][:60], "text": st.text[:120]})
                 break
@@ -1262,6 +1261,11 @@ def bill_identifiers(root, base_ref, candidates):
     return seen
 
 
+def norm_line(line):
+    """Whitespace-normalised line text for the waiver entries: indentation kept, inner whitespace runs collapsed."""
+    return line[:len(line) - len(line.lstrip(" 	"))] + " ".join(line.split())
+
+
 def untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_used=None):
     """Added lines (since_added: file -> line numbers) of Bill-owned PRODUCTION files that are not hook lines and
     name a VP-V symbol (vp_symbols minus bill_identifiers). Returns [{file, line, text, symbols}]."""
@@ -1281,7 +1285,7 @@ def untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_us
         waived = {}   # line -> ALLOW_UNTAGGED_REFS index; an entry counts only when it matches exactly one added line
         for k, e in enumerate(ALLOW_UNTAGGED_REFS):
             if e["file"] == rel:
-                m = [n for n in cand if re.search(e["pattern"], (lines if e.get("raw") else code)[n - 1])]
+                m = [n for n in cand if norm_line(lines[n - 1]) == e["text"]]
                 if len(m) == 1:
                     waived[m[0]] = k
         for n in cand:
@@ -1402,7 +1406,7 @@ def render(res):
         out.append("  allow-list site [%d] %s /%s/: %s" % (n, e["file"], e["pattern"], e["reason"]))
     if res.get("since"):
         for k, e in enumerate(ALLOW_UNTAGGED_REFS):
-            out.append("  allow-list untagged ref [%d] %s /%s/: %s" % (res["allow_used"].get("untag:%d" % k, 0), e["file"], e["pattern"], e["reason"]))
+            out.append("  allow-list untagged ref [%d] %s <%s>: %s" % (res["allow_used"].get("untag:%d" % k, 0), e["file"], e["text"].strip()[:70], e["reason"]))
     for kind, k in res["stale_allow"]:
         out.append("  stale allow-list entry (no site uses it, may be deleted): %s %d" % (kind, k))
     for name, (rel, line, verified) in sorted(res["gated"].items()):
