@@ -20,13 +20,13 @@
 //   Pin     Pin(key) is accepted only for a frame that is addressable NOW (inside the window) or already pinned, at most
 //           kMaxRingPins at once. A pinned frame stays pinned while the window moves past it. Every refusal says why
 //           (PinResult) and is counted; nothing is silent.
-//   Facts   the S7 queue facts that drop or re-label frames (Flush, Discontinuity, FormatChange, Reset; refs/107 s1 S7 row,
+//   Facts   the S7 queue facts that drop or re-label frames (Flush, Discontinuity, FormatChange; refs/110 :33-43, 99c A3 item 5; a reset is reported by its producer as Discontinuity; refs/107 s1 S7 row,
 //           RendererExtension.h QueueEvent) invalidate EVERY pin: a pinned frame from before the fact is no longer the
 //           frame its key names. The epoch advances, so a holder that still believes it holds a pin sees Pinned() false.
 namespace VpSourceRing {
 
 // The queue facts that invalidate pins (a subset of the S7 queue facts, named as the host seam names them).
-enum class Invalidation : uint8_t { Flush, Discontinuity, FormatChange, Reset };
+enum class Invalidation : uint8_t { Flush, Discontinuity, FormatChange };
 
 inline const char* Token(Invalidation f)
 {
@@ -34,7 +34,6 @@ inline const char* Token(Invalidation f)
     case Invalidation::Flush: return "flush";
     case Invalidation::Discontinuity: return "discontinuity";
     case Invalidation::FormatChange: return "format change";
-    case Invalidation::Reset: return "reset";
     }
     return "?";
 }

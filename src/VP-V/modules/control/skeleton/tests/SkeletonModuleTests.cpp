@@ -936,6 +936,9 @@ namespace SkeletonModuleTestsNs
 			rig.Frame(4);
 			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_queue"), L"all three delivered: nothing unwired to show");
 			Assert::IsTrue(rig.Command().find("render-ahead 3, lane lead 6, look-ahead walk 4; queued ahead of output 9 frame(s)") != std::string::npos);
+			// P13-DECL: the VRAM reserve is shown per budget tier as "reserved, not allocated" (shown, none taken).
+			Assert::IsTrue(rig.Command().find("Skeleton reserve, full-budget tier (reserved, not allocated") != std::string::npos);
+			Assert::IsTrue(rig.Command().find("Skeleton reserve, reduced-budget tier (reserved, not allocated") != std::string::npos);
 			const VpSkeleton::GraphSettings gs = rig.sk.LaneOf(rig.Host())->State()->graph.settings;
 			Assert::AreEqual(3, int(gs.renderAhead));
 			Assert::AreEqual(6, int(gs.laneLead));

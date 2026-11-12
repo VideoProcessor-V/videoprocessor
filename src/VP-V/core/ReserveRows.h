@@ -70,8 +70,9 @@ inline const std::vector<ReserveRow>& ReserveRows()
     // P13, full-budget: 8 frames + 3 pins, luma + chroma. 11 x (19.7 + 8.3) = 308 MB (A3 item 2: "about 320 MB with chroma",
     // "about 220 MB luma": 11 x 19.7 = 216.7).
     // P13, reduced-budget: 4 frames + 3 pins, luma only (the received chroma stays on the coarse grid: plan 99 s4 laptop line).
-    // The reduced figure is a SIZING CHOICE of this declaration (A3 gives none): flagged for the lead in the hand-back.
-    // TD roles: the plan 99 s4 :282 inventory mapped to the six A3 roles; the sum is 439.1 MB, inside the 450 MB reserve.
+    // The reduced figure is a lane choice and a sizing CEILING, not a depth constant; confirmed by the TD round-3 measurement (99c A3 item 2).
+    // TD roles: the plan 99 s4 :282 inventory mapped onto the six A3 roles / kTd* ids (the per-id assignment is a mapping); the sum is
+    // 439.1 MB, inside the 450 MB reserve (99c A3 item 9).
     static const std::vector<ReserveRow> rows = {
         { ReserveTier::FullBudget, kP13SourceRing, "keyed source ring", 8, kMaxRingPins,
           (8u + kMaxRingPins) * (kReserveLumaBytesPerFrame4K + kReserveChromaBytesPerFrame4K), Catalog::FlagKind::DeclaredNotAllocated,
