@@ -177,6 +177,10 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\PhotometricRefineGpu.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\PixelResidualReference.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
@@ -195,6 +199,9 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\PhotometricRefineTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\tests\PhotometricRefineGpuTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraModelGeometryTests.cpp">

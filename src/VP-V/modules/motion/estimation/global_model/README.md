@@ -352,6 +352,22 @@ mean Huber cost before / after on the same pixels and sigma, correction in sourc
   repeat runs are a test.
 - Cost (CPU, laptop, `PhotometricRefineTests::CostLine`, median of 5): see the TRX `cost ...` lines; recorded in the
   commit and the lane hand-back.
+- GPU form (doc 103 s5 R3-GPU stage 1; doc 91 section D and its line 99 apply as stated above, nothing new decided here):
+  `PhotometricRefinerGpu` (`PhotometricRefineGpu.h/.cpp`, kernels in `PhotometricRefineGpuShaders.inl`) runs the same
+  algorithm as D3D11 cs_5_0 compute on the producer worker's own device (`MotionAheadProducer.cpp` CreateDevice): candidate
+  pass + 4096-bin gradient histogram, threshold bin with raster-order ties via a row prefix, then per Gauss-Newton pass the
+  residuals, an exact radix-select median of |r|, the Huber normal equations as a fixed-order tree reduction and a
+  one-thread solve / inverse-compositional update, the verification sums last. All passes are dispatched up front (passes
+  after convergence are no-ops): one submission, ONE readback, collectable later (`Submit` / `Collect(wait = false)`).
+  Doubles use SM 5.0 base ops only (no 11.1 double extensions: division / reciprocal / square root by Newton steps from
+  float); the final status decisions run on the CPU with the reference's own geometry functions. The CPU reference stays
+  the definition: `PhotometricRefineGpuTests` runs every CPU case on both and requires the same status, candidates and
+  pixels, the model within 1e-4 engine px at the corners / centre, gain / offset within 1e-4, and byte-equal GPU repeats
+  (device: `VP_TEST_ADAPTER` substring, else WARP; a named adapter that is absent fails). Input is one interface
+  (`RefineLumaInput`); stage 1 has the CPU-upload path only (`RefineUploadInput`: the `HalfLuma8` / quarter 8-bit buffer,
+  or full-resolution 10-bit codes from `AnalysisLumaSource` as R16, codeScale 255/1023); the twin / fence inputs are a
+  later swap behind it. Limits: luma at most 8191 x 2304 (else `SkippedNoLuma` with `LastError`). Not wired: no setting,
+  no status line. Cost at Q / H / F for 1080 and 4K: `GpuCostLine` (opt-in `VP_R3_GPU_COST=1`, run under GPU-QUIET).
 
 INPUT SCAN (rules 24/25). Read before writing: `PixelResidualReference.h/.cpp` (per-block residual shares from float luma
 under a frozen shader-mirror spec; measures, never refines: extended would disturb that spec, so a new unit), `GlobalModelFit.h`
