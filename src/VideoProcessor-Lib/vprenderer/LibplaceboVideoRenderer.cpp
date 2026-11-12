@@ -6112,9 +6112,6 @@ struct LibplaceboVideoRenderer::Impl
 	std::string displayLutTarget = "none";
     std::string displayLutInputTransfer;
 	bool displayLutParsed = false;
-    bool calibrationStatusAvailable = false;
-    LibplaceboOutput::SdrTransfer lastRenderedTargetTransfer = LibplaceboOutput::SdrTransfer::UNKNOWN;
-    bool calibrationLutAttached = false;
 	bool displayCalibrationContractLogged = false;
 	std::unique_ptr<IVideoFrameFormatter> formatter;
 	std::map<std::string, std::unique_ptr<pl_dovi_metadata>> doviMetadataCache;
@@ -7281,19 +7278,6 @@ struct LibplaceboVideoRenderer::Impl
 	bool externalStateAbandonedForShutdown = false;
 
 	bool dvTransitionBlackActive = false;
-
-	// Automatic calibration (docs/calibration/AUTO-CALIBRATION.md): one refresh of the current
-	// patch, presented by the calibration adapter (the caller holds renderMutex).
-	bool PresentCalibrationPattern()
-	{
-		if (!d3d11 || !d3d11->gpu || !swapchain || outputResourcesRetired)
-			return false;
-		const CalibrationLutHost::PresentResult presented = calibrationHost.Present({ d3d11->gpu, vpOwnedSwapchain,
-			swapchain, negotiatedSwapchainFormat, [this](ID3D11Texture2D* backbuffer, std::vector<uint32_t>& pixels,
-				D3D11_TEXTURE2D_DESC& desc, std::string& error) { return ReadR10Texture(backbuffer, pixels, desc, error); } });
-		if (presented.patchWindow.engaged) EngageFallback(presented.patchWindow.id.c_str(), presented.patchWindow.reason);
-		return presented.presented;
-	}
 
 	bool PresentBlackFrame(bool logPresentation = true)
 	{
@@ -9974,7 +9958,7 @@ struct LibplaceboVideoRenderer::Impl
 		bool preserveSameContractOnFailure = false)
 	{
 		osdTelemetry.InvalidateLut();
-        calibrationStatusAvailable = false;
+        vpv.calibration.calibrationStatusAvailable = false;
 		std::string candidatePath;
 		std::string candidateTarget = "none";
 		const std::string candidateBase =
@@ -10184,7 +10168,7 @@ struct LibplaceboVideoRenderer::Impl
         displayRepeatValid = false;
         displayVsyncClock.Reset();
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
-        calibrationStatusAvailable = false;
+        vpv.calibration.calibrationStatusAvailable = false;
 		PublishSettingsState(settings);
 		outputDiagnostics = settings.outputDiagnostics;
 		shaderCacheEnabled = !settings.diagnosticDisableShaderCache;
@@ -11239,7 +11223,7 @@ struct LibplaceboVideoRenderer::Impl
 				}
 		}
         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
-        calibrationStatusAvailable = false;
+        vpv.calibration.calibrationStatusAvailable = false;
 		sdrTargetNits = settings.sdrTargetNits;
 		sdrBlackNits = settings.sdrBlackNits;
 		sdrInputTransfer = TranslateOutputGamma(settings.sdrInputTransfer);
@@ -14805,6 +14789,7 @@ struct LibplaceboVideoRenderer::Impl
 	double IntentFrameBlackNits(uint64_t sourceSequence, bool inputIsSdr, const pl_frame& image);   // VPV-HOOK P11a-d: defined in VP-V/modules/drive/led_compensation/LedSdrLiftMethods.inl
 	void UpdateAmbientSdrLift(double renderBlackNits, bool inputIsSdr, const pl_frame& image);   // VPV-HOOK P11a-d: defined in LedSdrLiftMethods.inl
 	static double LedDisplayGamma(enum pl_color_transfer transfer);   // VPV-HOOK P11a-d: defined in LedSdrLiftMethods.inl
+	bool PresentCalibrationPattern();   // VPV-HOOK P11a-e: defined in VP-V/modules/output/calibration_lut/CalibrationPresentMethods.inl
 
 	void WarmIdleMotionEngine(const VideoFrameFormatterOutputContract& contract, bool lossless422, bool nativeRgb);   // VPV-HOOK P5a-5: defined in VP-V/modules/motion/estimation/EngineKeeper.inl
 
@@ -23479,9 +23464,9 @@ releaseDriftBaseRetention =
             const FallbackCatalog::Decision dropped = calibrationHost.LutDropped(displayLutPath);
             if (dropped.engaged) EngageFallback(dropped.id.c_str(), dropped.reason);
         }
-        calibrationStatusAvailable = rendered;
-        if (rendered) lastRenderedTargetTransfer = ToSdrTransfer(baseTarget.color.transfer);
-        calibrationLutAttached = calibrationHost.LutAttached(rendered, targetLutApplied);
+        vpv.calibration.calibrationStatusAvailable = rendered;
+        if (rendered) vpv.calibration.lastRenderedTargetTransfer = ToSdrTransfer(baseTarget.color.transfer);
+        vpv.calibration.calibrationLutAttached = calibrationHost.LutAttached(rendered, targetLutApplied);
 		// h3-latch (K3): held black until the first crop decision (the frame was rendered as usual).
 		// Merge 2026-10-31 (geo): the clear was lost, leaving the hold guarding Bill's
 		// CacheDisplayFrame/else below (no repeat cache, a stale displayRepeatValid). The
@@ -25037,6 +25022,7 @@ releaseDriftBaseRetention =
 #include <VP-V/modules/motion/consumers/IntentMotionMethods.inl>   // VPV-HOOK P11a-f: the motion-intent part of intent items 2-5 (Impl members)
 #include <VP-V/modules/drive/led_compensation/LedIntentMethods.inl>   // VPV-HOOK P11a-f: the ambient / black / LED-limit parts of intent items 2-5 (Impl members)
 #include <VP-V/modules/drive/led_compensation/LedSdrLiftMethods.inl>   // VPV-HOOK P11a-d: the ambient SDR lift and LedDisplayGamma (Impl members)
+#include <VP-V/modules/output/calibration_lut/CalibrationPresentMethods.inl>   // VPV-HOOK P11a-e: the calibration pattern present (Impl member)
 
 
 namespace
@@ -27123,8 +27109,8 @@ bool LibplaceboVideoRenderer::GetOutputContractStatus(
 	if (!guard.owns_lock())
 		return false;
     status.available = true;
-    status.calibrationStatusAvailable = m_impl->calibrationStatusAvailable;
-    status.calibrationLutAttached = m_impl->calibrationLutAttached && m_impl->displayLutParsed && m_impl->displayLut;
+    status.calibrationStatusAvailable = m_impl->vpv.calibration.calibrationStatusAvailable;
+    status.calibrationLutAttached = m_impl->vpv.calibration.calibrationLutAttached && m_impl->displayLutParsed && m_impl->displayLut;
     status.calibrationConfigIdentity = m_impl->activeSettings.configurationIdentity;
     status.calibrationConfigPath = m_impl->activeSettings.configurationPath;
 	status.safeToRender = m_impl->actualOutput.safeToRender;
@@ -27203,7 +27189,7 @@ bool LibplaceboVideoRenderer::GetOutputContractStatus(
         << "; presentation " << (status.presentation == Presentation::FLIP ? "Flip model" :
             status.presentation == Presentation::BITBLT ? "Legacy BitBlt" : "Unknown")
         << (status.range == Range::LIMITED ? "\n" + LibplaceboOutput::DescribeLimitedTransfer(
-            m_impl->actualOutput.encoding, m_impl->lastRenderedTargetTransfer,
+            m_impl->actualOutput.encoding, m_impl->vpv.calibration.lastRenderedTargetTransfer,
             status.calibrationStatusAvailable, status.calibrationLutAttached) : "")
         << "\nTarget gamut: " << settings.sdrTargetPrimaries << "; display gamma "
         << LibplaceboOutput::ToString(calibration)

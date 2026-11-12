@@ -7,6 +7,8 @@
   "code_location": "partly migrated",
   "live_files": [
     "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.h",
+    "src/VP-V/modules/output/calibration_lut/CalibrationStatusState.h",
+    "src/VP-V/modules/output/calibration_lut/CalibrationPresentMethods.inl",
     "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.cpp",
     "src/VP-V/modules/output/calibration_lut/CalibrationLutHost.h",
     "src/VP-V/modules/output/calibration_lut/CalibrationLutHost.cpp",

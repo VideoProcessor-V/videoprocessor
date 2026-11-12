@@ -36,6 +36,7 @@
 
 #include <VP-V/modules/drive/led_compensation/LedIntentState.h>
 #include <VP-V/modules/drive/led_compensation/LedSdrLiftState.h>
+#include <VP-V/modules/output/calibration_lut/CalibrationStatusState.h>
 #include <VP-V/modules/motion/consumers/IntentMotionState.h>
 
 namespace Vpv
@@ -59,9 +60,7 @@ namespace Vpv
 		};
 
 		// output\calibration_lut (s2.5)
-		struct Calibration
-		{
-		};
+		using Calibration = CalibrationStatusState;   // P11a-e: s2.5 (CalibrationStatusState.h)
 
 		// input\source_analysis (s2.6)
 		struct SourceAnalysis
