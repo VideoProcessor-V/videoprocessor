@@ -680,46 +680,66 @@ class UntaggedVpReferenceTest(unittest.TestCase):
         finally:
             chg.ALLOW_SITES = old
 
-    def test_waived_untagged_line_is_keyed_by_text_and_must_match_exactly_one_added_line(self):
-        def entry(pat):
-            return {"file": BILL, "pattern": pat, "reason": "WAIVER-TEST granted for this test. Proof: this test."}
+    def test_waived_untagged_line_is_keyed_by_full_text_and_must_match_exactly_one_added_line(self):
+        def entry(text):
+            return {"file": BILL, "text": text, "reason": "WAIVER-TEST granted for this test. Expires at the re-graft."}
+        ok = "\t\tmon.SetNovelMode(2);"
         old = chg.ALLOW_UNTAGGED_REFS
         try:
-            chg.ALLOW_UNTAGGED_REFS = [entry(r"mon\.SetNovelMode\(2\);")]
+            chg.ALLOW_UNTAGGED_REFS = [entry(ok)]
             rc, out = self._added("mon.SetNovelMode(2);", "SyncFallback(FeatureCatalog::HeldNotice(1));")
             self.assertEqual(rc, 1, out)                  # the waiver covers only the SetNovelMode line
             self.assertIn("1 new untagged VP-V references", out)
             self.assertIn("allow-list untagged ref [1]", out)
             self.tearDown()
             self.setUp()
-            chg.ALLOW_UNTAGGED_REFS = [entry(r"mon\.SetNovelMode\(2\);")]
-            rc, out = self._added("mon.SetNovelMode(2);")   # different position: still honoured (not a line number)
+            chg.ALLOW_UNTAGGED_REFS = [entry(ok)]
+            rc, out = self._added("mon.SetNovelMode(2);")
             self.assertEqual(rc, 0, out)
             self.tearDown()
             self.setUp()
-            chg.ALLOW_UNTAGGED_REFS = [entry(r"mon\.SetNovelMode\(2\);")]
+            chg.ALLOW_UNTAGGED_REFS = [entry(ok)]
             rc, out = self._added("mon.SetNovelMode(2);", "mon.SetNovelMode(2);")   # two matches: ambiguous, nothing honoured
             self.assertEqual(rc, 1, out)
             self.assertIn("2 new untagged VP-V references", out)
         finally:
             chg.ALLOW_UNTAGGED_REFS = old
 
-    def test_raw_waiver_tells_apart_lines_that_differ_only_by_a_string_literal(self):
+    def test_red_a_changed_or_extended_waived_line_is_flagged_again(self):
         old = chg.ALLOW_UNTAGGED_REFS
         try:
-            chg.ALLOW_UNTAGGED_REFS = [{"file": BILL, "pattern": r'SetNovelMode\("a"\);', "raw": True,
-                                        "reason": "WAIVER-TEST for this test. Expires at the re-graft."}]
-            rc, out = self._added('mon.SetNovelMode("a");', 'mon.SetNovelMode("b");')
-            self.assertEqual(rc, 1, out)
-            self.assertIn("1 new untagged VP-V references", out)
-            self.assertIn('SetNovelMode("b")', out)
+            for name, line in (("extended with more VP-V code", "mon.SetNovelMode(2); SyncFallback(FeatureCatalog::HeldNotice(1));"),
+                               ("changed argument", "mon.SetNovelMode(3);"),
+                               ("second call appended", "mon.SetNovelMode(2); mon.SetNovelMode(9);")):
+                with self.subTest(name):
+                    chg.ALLOW_UNTAGGED_REFS = [{"file": BILL, "text": "\t\tmon.SetNovelMode(2);",
+                                                "reason": "WAIVER-TEST for this test. Expires at the re-graft."}]
+                    rc, out = self._added(line)
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn("1 new untagged VP-V references", out)
+                self.tearDown()
+                self.setUp()
         finally:
             chg.ALLOW_UNTAGGED_REFS = old
 
+    def test_red_a_symbol_keyed_allow_site_never_approves_a_hook_statement(self):
+        entry = {"file": BILL, "pattern": r"\bdetailPulse\b", "symbol": "detailPulse",
+                 "reason": "name collision granted by the coordinator; applies to the symbol report only. Proof: this test."}
+        old = chg.ALLOW_SITES
+        chg.ALLOW_SITES = old + [entry]
+        try:
+            _w(self.root, BILL, _bill("\t\tvectorEngine.PlanAhead(detailPulse);   // VPV-HOOK\n"))
+            rc, out = _run(self.root)
+            self.assertEqual(rc, 1, out)
+            self.assertIn("UNGUARDED %s:7 " % BILL, out)
+        finally:
+            chg.ALLOW_SITES = old
+
     def test_waiver_entries_name_the_waiver_and_expiry(self):
         for e in chg.ALLOW_UNTAGGED_REFS:
-            self.assertIn("WAIVER-", e["reason"], e["pattern"])
-            self.assertIn("Expires", e["reason"], e["pattern"])
+            self.assertIn("WAIVER-", e["reason"], e["text"])
+            self.assertIn("Expires", e["reason"], e["text"])
+            self.assertEqual(e["text"], chg.norm_line(e["text"]), "the stored text is already normalised")
             self.assertTrue(os.path.isfile(os.path.join(ROOT, *e["file"].split("/"))), e["file"])
 
     def test_p4_relocated_host_members_collect_frame_hooks_and_draw_frame_are_allowed_callees(self):
