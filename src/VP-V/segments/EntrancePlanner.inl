@@ -395,7 +395,7 @@ void LibplaceboVideoRenderer::Impl::ResetEntrancePlan()
 	detailPulseParams = DetailPulse::Params();
 	textureRestoreParams = TextureRestore::Params();
 	sourceAutoActive.store(false, std::memory_order_release);
-	sourceMonitor.SetSelection("native");
+	vpv.sourceAnalysis.sourceMonitor.SetSelection("native");
 	rebaseP0Status.Clear();
 	SyncFallback(FallbackCatalog::RebasePaused(false, rebasePauseSeconds, sourceRebase.LastError()));
 	detailPulse.Forget();
