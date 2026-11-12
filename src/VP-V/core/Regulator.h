@@ -16,12 +16,16 @@
 
 // Skeleton S5: the analysis-lane regulator (design B8, audit 25a 3.8/3.9). Render thread only.
 //
-// It keeps two numbers. The LANE level: how many steps of a fixed LADDER are granted: every sheddable
-// T0 product, then every T1, then every T2 (given order inside a tier). And, on non-deterministic runs
-// with an optical-flow product, the separate OFA level (quarter -> preset -> extras): a non-identical
-// change of the picture, so it is the LAST resort: a floor, a cut, a MINOR change and the lane
-// back-offs never touch it; it steps down (one step per window) only when the lane level is already 0
-// and a window is still low, and growth restores it first, then the lane steps. Level() is their sum.
+// REG-1 (owner 2026-11-11 07:45, doc 91 C; doc 96 s3.1/s3.4 option B): the regulator is ONE overload alarm
+// that can switch off only OPTIONAL FILL (IsOptionalFill below: P5, P6, P9, P10c, P12). The FIXED CORE SET
+// (P1+P2/P2m, camera P7/P8, P3/P3b/P3r, resync/validity, frame quality P15/P16, P4+P11), every td.* product and
+// P10 are never sheddable at any level: they are not steps of the ladder (Sheddable), so no back-off, floor,
+// cut or late window can touch them. There is NO optical-flow quality step-down (the former OFA level is
+// removed: it would change the vectors every consumer is calibrated to, doc 91 D / doc 96 s3.4 item 2).
+// The GapScheduler (ordered lane jobs, transient chunking) is separate and unchanged.
+//
+// It keeps one number, the LANE level: how many steps of the ladder are granted: every sheddable (= optional
+// fill) T0 product, then every T1, then every T2 (given order inside a tier). Level() is that number.
 // A product below its lane step is shed: moved into the render when its
 // fallback is identical (only with accounting), else dropped when it declares a reduced mode and the
 // run is not deterministic, else forced live (it stays laned; the seal live-fills it when late, and
@@ -44,8 +48,6 @@ enum class RegAction : uint8_t {
     Drop,
     Restore,
     ForcedLive,
-    OfaStepDown,
-    OfaStepUp,
     ConservativeFloor,
     StepDownCut,
     StepDownMinor,
@@ -58,7 +60,6 @@ struct RegProduct {
     Tier tier = Tier::T0;
     bool identical = true;      // Variants::Identical: the in-render fallback gives the same content
     bool reducedMode = false;   // every consumer declares a reduced mode (the product may be dropped)
-    bool ofa = false;
     double inRenderMs = 0.0;    // measured in-render cost
 };
 
@@ -70,8 +71,16 @@ struct RegConfig {
     int dwellWindows = 2;
     double backoff = 0.5;
     double emaLongAlpha = 0.1;
-    uint8_t ofaSteps = 3;          // extras, preset, quarter
 };
+
+// REG-1: the optional fill set (doc 91 C 07:45; doc 96 s3.1 row "P5, P6, P9, P10c, P12, long pair" OPTIONAL
+// FILL). Everything else is core, TD or held state and is never shed by the regulator. The long pair is a
+// motion SERVICE (ProductCatalog.h ServiceProductRows, no ProductId), not a regulator product.
+inline bool IsOptionalFill(ProductId id)
+{
+    return id == kP5MonitorTiles || id == kP6EntranceAhead || id == kP9CameraSmoothed ||
+           id == kP10cGrainSplitChroma || id == kP12LightLevel;
+}
 
 struct RegTrace {
     uint64_t seq = 0;
@@ -117,13 +126,8 @@ public:
         stepDownThisWindow_ = false;
         suppressedStepDowns_ = 0;
         laneSteps_ = steps_.size();
-        bool anyOfa = false;
-        for (const Item& it : items_)
-            anyOfa = anyOfa || it.p.ofa;
-        ofaSteps_ = (!det_ && anyOfa) ? size_t(cfg_.ofaSteps) : 0;
-        maxLevel_ = uint16_t(laneSteps_ + ofaSteps_);
+        maxLevel_ = uint16_t(laneSteps_);
         lane_ = uint16_t(laneSteps_);
-        ofaGranted_ = ofaSteps_;
 
         windowFrames_ = size_t(std::max(8.0, std::floor(cfg_.windowSeconds * 1000.0 / periodMs_ + 0.5)));
         slack_.clear();
@@ -142,12 +146,14 @@ public:
         pinned_ = false;
         lastSeq_ = 0;
         traceCount_ = 0;
+        unfedFrames_ = 0;
     }
 
     // ---- per frame ------------------------------------------------------------------------------
     void OnFrame(uint64_t seq, double slackMs, double renderOnlyMs, bool deadlineMissed)
     {
         lastSeq_ = seq;
+        unfedFrames_ = 0;
         if (windowFrames_ == 0)
             return;
         slack_.push_back(deadlineMissed && slackMs > 0.0 ? 0.0 : slackMs);
@@ -172,6 +178,35 @@ public:
 
     void OnCut() { StepDown(RegAction::StepDownCut); }
 
+    // B4 S3 (doc 96 section 1 FINDING): a step-down taken WITHOUT the feed (an indicator change, a cut, a storm
+    // hold) has no window to recover in, since only EndWindow grows and it needs OnFrame. Called once per
+    // rendered frame: a window's worth of frames with no OnFrame and no hold in force counts as one calm window.
+    // P6-rest audit S3 (lead decision 2026-11-11): the unfed recovery ramps EXACTLY like the fed path, one lane
+    // step per cfg_.dwellWindows calm windows (products restored and traced per step), never a jump to full.
+    // A fed regulator resets the count every frame, so its behaviour is unchanged.
+    void OnUnfedFrame(bool held)
+    {
+        if (windowFrames_ == 0)
+            return;
+        if (held) {
+            unfedFrames_ = 0;
+            return;
+        }
+        if (++unfedFrames_ < windowFrames_)
+            return;
+        unfedFrames_ = 0;
+        // Audit SHOULD 1: the once-per-window step-down latch is otherwise cleared only by EndWindow (fed); an unfed window
+        // that elapsed is a window too, or every unfed step-down after the first is suppressed forever.
+        stepDownThisWindow_ = false;
+        pinned_ = false;
+        if (lane_ < laneSteps_ && ++dwell_ >= cfg_.dwellWindows) {
+            dwell_ = 0;
+            SetLane(uint16_t(lane_ + 1), RegAction::Grow, false);
+        }
+    }
+    // Frames since the last OnFrame (B4 S3).
+    uint64_t UnfedFrames() const { return unfedFrames_; }
+
     // Per-window lateness delta of a laned product (from the runner/slot counters).
     void OnLaneLate(ProductId id, uint32_t lateFrames)
     {
@@ -190,14 +225,7 @@ public:
                 return it.state;
         return ProductState::Laned;
     }
-    // 0 = full settings; ofaSteps = the lowest (quarter).
-    uint8_t OfaStep() const
-    {
-        if (ofaSteps_ == 0)
-            return 0;
-        return uint8_t(ofaSteps_ - std::min(ofaGranted_, ofaSteps_));
-    }
-    uint16_t Level() const { return uint16_t(lane_ + ofaGranted_); }
+    uint16_t Level() const { return lane_; }
     uint16_t LaneLevel() const { return lane_; }
     // Cut / MINOR step-downs ignored because one already happened in this window.
     uint64_t SuppressedStepDowns() const { return suppressedStepDowns_; }
@@ -249,9 +277,6 @@ public:
             out += std::string(out.empty() ? "" : "; ") + "forced live: products " + list(forced) +
                    ", charged " + b + " ms";
         }
-        if (OfaStep() != 0)
-            out += std::string(out.empty() ? "" : "; ") + "optical-flow analysis reduced (step " +
-                   std::to_string(unsigned(OfaStep())) + ")";
         if (pinned_)
             out += std::string(out.empty() ? "" : "; ") + "analysis at minimum";
         return out;
@@ -281,9 +306,10 @@ private:
         bool lateShed = false;
     };
 
+    // REG-1: only optional fill may be a ladder step; core, td.* and P10 never are (doc 96 s3.4 option B).
     bool Sheddable(const RegProduct& p) const
     {
-        return p.identical || (p.reducedMode && !det_);
+        return IsOptionalFill(p.id) && (p.identical || (p.reducedMode && !det_));
     }
 
     bool IsShed(const Item& it) const
@@ -325,19 +351,6 @@ private:
         dwell_ = newLane < old ? 0 : dwell_;
         Trace(why, kNoProduct, 0.f);
         Recompute(fresh);
-    }
-
-    // The OFA variant level; it changes no product state, so nothing is recomputed.
-    void SetOfa(size_t granted, RegAction why)
-    {
-        if (granted > ofaSteps_)
-            granted = ofaSteps_;
-        const size_t old = ofaGranted_;
-        ofaGranted_ = granted;
-        if (granted < old)
-            dwell_ = 0;
-        Trace(why, kNoProduct, 0.f);
-        Trace(granted < old ? RegAction::OfaStepDown : RegAction::OfaStepUp, kNoProduct, 0.f);
     }
 
     // A cut or MINOR change: one lane step, at most once per window (frequent slips must not flap drops).
@@ -492,13 +505,6 @@ private:
                 SetLane(uint16_t(std::floor(double(lane_) * cfg_.backoff)), RegAction::BackOff, true);
                 return;
             }
-            if (ofaGranted_ > 0) {   // last resort: the lane is at its minimum and a window is still low
-                pinned_ = false;
-                SetOfa(ofaGranted_ - 1u, RegAction::BackOff);
-                if (lateChanged)
-                    Recompute(false);
-                return;
-            }
             if (!pinned_) {
                 pinned_ = true;
                 Trace(RegAction::PinnedMin, kNoProduct, 0.f);
@@ -509,10 +515,7 @@ private:
             if (slackLow >= m + cfg_.hysteresisFrac * periodMs_) {
                 if (++dwell_ >= cfg_.dwellWindows && Level() < maxLevel_) {
                     dwell_ = 0;
-                    if (ofaGranted_ < ofaSteps_)   // the OFA step comes back first
-                        SetOfa(ofaGranted_ + 1u, RegAction::Grow);
-                    else
-                        SetLane(uint16_t(lane_ + 1), RegAction::Grow, false);
+                    SetLane(uint16_t(lane_ + 1), RegAction::Grow, false);
                     if (lateChanged)
                         Recompute(false);
                     return;
@@ -531,10 +534,8 @@ private:
     std::vector<Item> items_;
     std::vector<size_t> steps_;      // ladder: item index per step, lowest first
     size_t laneSteps_ = 0;
-    size_t ofaSteps_ = 0;
     size_t t0Steps_ = 0;
     uint16_t lane_ = 0;              // granted lane steps
-    size_t ofaGranted_ = 0;          // granted OFA variant steps
     uint16_t maxLevel_ = 0;
     bool stepDownThisWindow_ = false;
     uint64_t suppressedStepDowns_ = 0;
@@ -553,6 +554,7 @@ private:
     uint64_t lastSeq_ = 0;
     std::array<RegTrace, kTraceCapacity> trace_{};
     uint64_t traceCount_ = 0;
+    uint64_t unfedFrames_ = 0;   // rendered frames since the last OnFrame (B4 S3)
 };
 
 } // namespace VpSkeleton

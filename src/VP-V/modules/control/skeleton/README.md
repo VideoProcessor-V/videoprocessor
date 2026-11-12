@@ -33,6 +33,14 @@ pathway = off), on the render thread. An invalid value keeps the default and is 
 `source_stats_walk` is a lane key (`LaneSettings::Parse`) that the module's key loop does not pass from the file yet (tests and tooling set it; the cfg key has no effect today). `skeleton_gpu_gap` and `grain_split_storage` are parsed in `SkeletonSettings.h` with the same problem-reporting style as the lane keys.
 `camera_link = report` only creates the camera link core and its status line; there is no vector engine yet, so it never feeds a consumer.
 
+Controls without a settings key (P6 rest audit S2): `SkeletonModule::SetRegulatorGate` - no settings key; default `Observe` (the
+host-measured render-only span is recorded and shown, the regulator is not fed); set by the TD/owner wiring (no production caller yet).
+`VpFixedBudgetPolicy::SetRaiseQueueForAnalysis` - no settings key; default off; set by the TD/owner wiring together with the presentation
+module's `Presenter::floorPolicy = RaiseQueue` (see output/presentation/README.md). The VP queue target (`QueueTargetVp`, S2 seam R19) publishes the floor to the Presenter; no product declares a lead yet.
+
+Host footprint (P6 rest audit S5): none on this branch (r2/p6-core). The host-measured render-only span and its fan-out come with the
+seam rework (refs/107); until then `NoteRenderOnlyMs` has no production caller and the regulator is not fed.
+
 ## Environment and diagnostics
 
 | Name | Purpose | Default | Scope |
@@ -108,6 +116,12 @@ No `VP_*` variable changes the module's behaviour.
   not in this package). Plausibility: the observed span is the idle-inclusive frame time (a frame that renders in 10 ms in a 40 ms cadence shows about
   30 ms of slack by the observed form too, but so does one that waits 30 ms); with measured spans the figure is the real headroom. Until one arrives
   the line says "(none: shedding off)" and the Fallbacks entry stays.
+  B4 S2 (doc 96 section 4): `NoteRenderOnlyMs` passes the span to the regulator only with `SetRegulatorGate(RegulatorGate::Act)`. The
+  default gate is Observe: the span is recorded (`TimingFeed::noted`, `notedMsSum`, `lastNotedMs`; the `skeleton_regulator` entry says
+  "observe only (gate): N host-measured render-only frame(s) recorded"; Ctrl+Alt+D "Skeleton regulator gate: observe ...") and nothing is shed,
+  until the owner decides the regulator's role. B4 S3: a step-down taken without the feed (indicator change, cut, storm hold) recovers after one
+  regulator window of rendered frames with no feed and no hold (`Regulator::OnUnfedFrame`, called by `AnalysisLane::OnRenderStart`); before, it
+  stayed (a standing "forced live") until a graph rebuild, which a FULL resync does not cause.
 * **Audit fixes (stage A-C).** The lane-lead window is timestamped: every `CollectAhead` call is one sample, the window is the last 0.5 s of REAL time
   whatever the call rate (call contract: any thread, any rate; a host that stops calling leaves the last value, which then ages out through the starve peak).
   The starve peak is the best lead of the last 10 s (it decays to the lead in use; not a permanent high-water mark). The render-ahead term is unwired

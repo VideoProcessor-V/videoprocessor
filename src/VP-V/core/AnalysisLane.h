@@ -777,6 +777,7 @@ public:
             observedOnce_ = true;
             ApplyStorm();
         }
+        regulator_.OnUnfedFrame(stormHold_);   // B4 S3: an unfed step-down recovers (no-op while fed)
         ApplyRegulator(*st);
         if (seq < st->firstSeq)
             return empty_;
@@ -1359,8 +1360,7 @@ public:
             for (ProductId id : regulator_.ForcedLiveIds())
                 forced.push_back(NameOf(*st, id));
             out.push_back(FallbackCatalog::AnalysisLane(dropped, forced, regulator_.PinnedAtMinimum(),
-                                                         regulator_.T0InRender() || st->plan.t0OverBudget,
-                                                         unsigned(regulator_.OfaStep())));
+                                                         regulator_.T0InRender() || st->plan.t0OverBudget));
             if (!st->graph.leadChainWarning.empty())   // appended only when engaged (a WARNING, not a reject): the list keeps its shape otherwise
                 out.push_back(FallbackCatalog::SkeletonLeadChain(st->graph.leadChainWarning));
             if (st->graph.sealLagForcedZero) {   // B3 X1: appended only when engaged (no product of the catalog declares a lag today)
@@ -1572,7 +1572,6 @@ private:
             p.tier = nd.tier;
             p.identical = st.info[i].identical;
             p.reducedMode = reduced[i] != 0;
-            p.ofa = nd.backend == Backend::Ofa;
             p.inRenderMs = RenderMsOf(reg.Get(nd.id), st.graph, card, tier.measured);
             regProducts_.push_back(p);
         }

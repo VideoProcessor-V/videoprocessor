@@ -22,11 +22,11 @@ The renderer host and Bill's files do the rest: they create the swapchain, prese
 - `RenderAhead` (RenderAheadPolicy.h; pure, no clock):
   - chain shape: `SwapchainBuffers`, `MaxExtras` and `ChainDepthFor`. Without extras, or in low latency, the chain keeps 3 buffers and latency 2. Otherwise it has ceil(ratio) + 2 buffers (at most 6) and latency `kQueuedFrameLatency` 3.
   - lead and credit: `PlannedLead`, `CreditFrames`, `QueueCredit` and `CreditLatch`.
-  - the delay-budget fit: `FitDelayBudget` -> `BudgetDecision`.
+  - the delay-budget fit: `FitDelayBudget` -> `BudgetDecision`. The 6-argument form (P6 rest S1) takes the analysis floor (`floorFrames`) and a `FloorPolicy` (default `CreditWins` = today; `FloorWins`; `RaiseQueue`, the TD-on choice where the floor may lift the queue above the desired frames). `BudgetDecision` adds `floorFrames`, `floorCompetes`, `realTotalMs`, `queueFrames` and `raisedQueueFrames`; the 4-argument form is the floor-0 / `CreditWins` call.
   - the frame planner: `FrameInput` and `PlanFrame` -> `FramePlan` (slots, intervals, drops).
   - the present chain: `Schedule` (anchor L, closed or open loop, `NoteLate`, `Break`).
   - the gate (`dejudder_gate`): `ResolveGate`, `RefreshGateHolds`, `CostWindow`, `KnownCost`, `Gate` (the step-down / step-up ladder), `SustainedLateness`, `GateEpoch` and `LevelName`.
-  - the Presenter API (M2 P6-4, interface first): `Presenter` owns the render-ahead state (chain, gate and its cost windows, epoch, drift lateness, credit latch, chain depth) with `Break`, `ResetGate`, `UpdateGate(now, PresenterGateFrame)` -> `PresenterGateResult` and `TakeMainInterval`. The renderer keeps one reference alias per former member and logs from the results; P6 rest moves the present clusters onto it.
+  - the Presenter API (M2 P6-4, interface first): `Presenter` owns the render-ahead state (chain, gate and its cost windows, epoch, drift lateness, credit latch, chain depth) with `Break`, `ResetGate`, `UpdateGate(now, PresenterGateFrame)` -> `PresenterGateResult` and `TakeMainInterval`. The renderer's present clusters do not call the Presenter yet (0 renderer lines, refs/107): they move onto it as one unit with the present-side seams (refs/107 phase 3: PlanPresent R11 / AfterPresent R12), because the chain restarts and commits sit between the planner's own reads; the queue floor inputs are already fed through the S2 seam (below). P6 rest adds (S1) the analysis-floor inputs `analysisFloor` (atomic, frames; 0 = none), `floorPolicy` (default `CreditWins`) and `spareSlotMs` (atomic; the declared spare-slot GPU ms per source frame, `GateCosts::spareSlotMs`, added to the gate's average check only), `FitBudget` (FitDelayBudget with those inputs) and `FloorReport` (the visible line when floor and credit compete, shown as the `queue analysis floor` fallback; empty otherwise), `Active`, `Now`, `ClearBudget` / `UpdateBudget` -> `PresenterBudgetChange` / `ApplyBudgetVeto` and `ResolveTimers` (the GPU timers stay renderer objects passed in) with `TakeExtraTimerMode` / `NoteExtraTimerMode`; (S2) `BeginFrame`, `Commit(PresenterCommit, plannedIds)` for both commit sites and `PublishEstimatedLead`; (S4) `RestartChain` (the schedule's break only, not `Break(now)`); (S3) the present bookkeeping the de-judder extension reads (extra ids, main refreshes, ids swapchain, display rate, expected present, lead, counters, interval / shown-error diagnostics, open-loop counts) with `NoteIdsSwapchain`, `ClearPresentIds`, `NoteExtraPresent`, `NoteMainRefresh`, `NoteStatisticsPresent`, `NotePresentInterval`, `NoteObservation`. P6 rest seam rework (R2-8): `PresenterAfterPresent(Presenter&, AfterPresentFacts, IDXGISwapChain*)` -> `AfterPresentResult` (PresenterAfterPresent.h) is the module-side body of the AfterPresent seam (R12): the present block's render-ahead step (extras path: not queued ends the chain, queued raises the host's target lead - raise-only - and publishes the open-loop estimate; plain path: rendered and submitted ends the chain), then its own DXGI statistics read (`ReadPresentStatistics`, ObservePresent's mapping; refs/108 addendum: PresentSample R13 stays unwired) for the present bookkeeping (idempotent with the extras path's note). It does nothing in the Original pathway, whether the host's facts (`AfterPresentFacts::originalPathway`) or the Presenter's own fact (`Presenter::originalPathway`, PHASE1 `SetOriginalPathway`) says so. It is NOT wired: Phase 3 adds the dispatch; 0 renderer lines here. Retro gate F1 (the matched-rate plan) and F3 (the alias drop and the present-cluster move) stay deferred with the cluster move (refs/108 Q1=A).
 - `OpenLoopDisplayRate` (OpenLoopDisplayRate.h):
   - `Select(Candidates, renderAhead, wholeHzLast)` -> `Choice`. The statistics' rate always wins. Without it, and only when render-ahead is on, the order is: the monitor's exact mode, then DWM (only if within 2 % of the mode), then the application's rate, then the vblank cadence, then the whole-hertz mode.
   - `VBlankCadence`: the median of `WaitForVBlank` intervals.
@@ -68,6 +68,15 @@ The renderer host and Bill's files do the rest: they create the swapchain, prese
   - `dejudder_gate` (auto | period | refresh; `RenderAhead::ResolveGate`).
 - `queue_timing_fixes` is read here but owned by `input.queue_timing`. It selects the whole-Hz-last order and turns on the DWM grid refinement.
 - The refresh switch keys (`[general] switch_refresh_rate` and the `[display_refresh_rate_override]` section) are read by the GUI (VideoProcessorDlg.cpp), not by this module's files.
+- Analysis-floor controls (P6 rest S1; audit S2): no settings key; set by the TD/owner wiring, which has no production caller yet:
+  - `Presenter::floorPolicy` - no settings key; default `CreditWins`; set by the TD/owner wiring `CreditWins` stays the default: it is a policy value and owner decision 1 (refs/101 row 14, contradiction 3) is still open; this package does not change it. `RaiseQueue` must be set together with
+    `VpQueueTiming::VpFixedBudgetPolicy::SetRaiseQueueForAnalysis(true)` (and `Presenter::queueCapacity`); the test
+    `TheTwoRaiseQueueSwitchesAgreeOnTheRaisedQueue` pins that both give the same raised queue, capped at the capacity.
+  - `Presenter::queueCapacity` - no settings key; published with the floor by the VP queue target (`QueueTargetVp`, QueueTarget.inl) from the queue's capacity; 0 = not known: no cap.
+  - `Presenter::spareSlotMs` - no settings key; default 0.0 (no spare-slot GPU work); set by the TD/owner wiring.
+  - `Presenter::analysisFloor` - fed from `VpQueueRules::AnalysisFloorFrames` through the S2 `ResolveQueueTarget` seam (R19): the VP
+    queue target's body (`QueueTargetVp`, QueueTarget.inl) publishes it, 0 renderer lines. No product declares a lead yet, so it is the
+    look-ahead floor; the renderer's budget still calls `FitDelayBudget` without it until the present clusters move (above).
 
 ### Original pathway (PHASE 1 of the host seams plan, refs/107 s2.4 item 1; owner E3 2026-11-11)
 
@@ -95,7 +104,7 @@ Build x64 Release (the AGENTS.md command). Run tests single-threaded and read th
 
 `vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /Tests:<Class> /Logger:"trx;LogFileName=x.trx"`
 
-- Render-ahead (src/VideoProcessor-Test/RenderAheadPolicyTests.cpp): `RenderAheadPlannerTests`, `RenderAheadJitterSimulationTests`, `RenderAheadScheduleTests`, `RenderAheadGateTests`, `RenderAheadSchedulerSimulationTests`, `RenderAheadLookaheadWalkTests`, `RenderAheadGapFillTests`, `RenderAheadLedTests`, `RenderAheadOpenLoopRateTests`, `RenderAheadGateFixTests`, `PresenterApiTests` (the Presenter against the pre-P6-4 renderer bodies).
+- Render-ahead (src/VP-V/tests/suite/RenderAheadPolicyTests.cpp): `RenderAheadPlannerTests`, `RenderAheadJitterSimulationTests`, `RenderAheadScheduleTests`, `RenderAheadGateTests`, `RenderAheadSchedulerSimulationTests`, `RenderAheadLookaheadWalkTests`, `RenderAheadGapFillTests`, `RenderAheadLedTests`, `RenderAheadOpenLoopRateTests`, `RenderAheadGateFixTests`, `PresenterApiTests` (the Presenter against the pre-P6-4 renderer bodies), `PresenterRestApiTests` (the P6 rest methods against the r2/p6-4 renderer bodies), `PresenterFloorTests` (the analysis floor: the three policies, the cap at the desired queue, `FloorReport`, `spareSlotMs`), `PresenterAfterPresentTests` (the AfterPresent handler body against a frozen copy of the renderer's present block, its statistics read against a frozen copy of ObservePresent's mapping, the vsync-between-reads limit, the idempotent bookkeeping, the Original pathway, and the D2 check `ThePresenterServesTemporalDetailNeedsDoc91C67`).
 - Budget: `RenderAheadDelayBudgetTests` (R6BaselineTests.cpp) and `DelayGate`.
 - Bill's side: `AlphaPresentationTelemetryTests`, `DisplayRefreshRatePolicyTests`, `DisplayRefreshRateEstimatorTests`, `DisplayRefreshRateWindowTests` and `DisplayRateHoldTests`.
 - `FallbackCatalogTests` (src/VP-V/tests/FallbackCatalogTests.cpp) checks the entry wording, but it is not in VideoProcessor-Test.vcxproj yet.
@@ -149,6 +158,20 @@ Contract tests:
 
 Chain tests:
 - delay gate (`DelayGate`)
+
+### What the Presenter serves for temporal detail (doc 91 C line 67; 67v2 s5.6, s10)
+
+Checked in one place by `PresenterAfterPresentTests::ThePresenterServesTemporalDetailNeedsDoc91C67` (D2; 102 tab V5(b)).
+
+Checked before the API is frozen; the API stays unfrozen until the TD design lead's milestones.
+
+- Planner floor = the analysis frames needed: `Presenter::analysisFloor` (frames; from `VpQueueRules::AnalysisFloorFrames`, the declared lead + 2) goes into `FitBudget`, so the delay budget keeps the frames the precompute lane needs (67v2 s5.6: lane lead 3; s10: the anchor pass needs 3-4 frames).
+- Who gives way when the floor and the render-ahead credit compete: `floorPolicy` is selectable (`CreditWins` default, `FloorWins`, `RaiseQueue` = the TD-on choice that lifts the queue above the desired frames, capped by `queueCapacity`); the competition is always visible (`FloorReport`, "queue analysis floor" fallback). The default is owner decision 1.
+- 4-ahead design point: `RaiseQueue` with `queueCapacity` lets the queue hold the declared lead + 2 when the capacity allows; nothing in the Presenter caps the floor at 3.
+- Spare GPU work for TD (the precompute / anchor-pass slot): `spareSlotMs` adds the declared spare-slot ms per source frame to the gate's average check only (extras are not shed first for it); no correction slot in v1.
+- TD without render_ahead: `On` / `Active` / `ActivatesOn` / `SetTemporalDetailOn` run the Presenter and restart its epoch when render_ahead OR TD switches on (retro gate F2); TD off is today's rule.
+- Verify-and-correct rounds and held-out next-frame checks: they run in the lane and the render, not in the Presenter. The Presenter neither renders nor presents (it decides and supplies the SyncInterval), so render and submit stay separable and a check of frame N+1 before its present is not foreclosed.
+- Release timing (matched rates, retro gate F1 / P6 rest S4): NOT YET BUILT. At 24/24, 50/50 and 60/60 the plain path breaks the chain each frame, so there is no planned vsync. The planned change is a maxExtras-0 plan with the release of N+1 at the planned first vsync minus one display period plus a margin; it defines the B3-Z post-present slot size. It comes after the present-vs-vsync histogram. Nothing in the API forecloses it: `Schedule` holds the anchor and the planned refreshes.
 
 ## Known issues / open items
 - WP-24 captured-repeat render reuse (`repeat_render_reuse`, draft default off; Original pathway off): RepeatReuseGlue.h / RepeatReusePolicy.h / RepeatReuseAdapter.h / TemporalShaders.h / RepeatReuseRegistryKey.h here. It depends on motion.consumers' rendered-picture cache (DejudderRendered::Cache, RenderedWarp.h). Host call sites: docs/design/repeat-reuse-callsites.patch.

@@ -2,13 +2,17 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "OpenLoopDisplayRate.h"
 
 // Render-ahead (docs/VP-render-ahead-design.md, owner's top priority 2026-10-17):
 // the de-judder's processing cost follows the source frame, as in madVR, not the
@@ -94,6 +98,24 @@ namespace RenderAhead
 	// render_ahead off's; a lead the queue cannot give back keeps render-ahead OFF for the source
 	// (shown under "Fallbacks engaged"). No lead (no extras: 50/60p on 60 Hz) always fits.
 	constexpr size_t kBudgetMinQueued = 3;
+
+	// P6 rest S1 (TD-readiness audit 93 (a)2): which side gives way when the analysis floor
+	// (the frames the queue's look-ahead users keep: the motion depth floor, a declared
+	// analysis lead + 2) and the render-ahead credit compete for the same queued frame. The
+	// policy is the owner's (parked for the TD planning), so it is an input:
+	//  - CreditWins (default, today's decision): the credit is taken as before; the report
+	//    says the floor holds the queue above the credit and gives the real delay.
+	//  - FloorWins: the credit is only what the floor leaves; a lead it no longer covers
+	//    vetoes render-ahead (its fallback says why).
+	//  - RaiseQueue (S1 amendment, TD design (a)4/(b)6; for TD on, default off): the credit is
+	//    taken as before and the floor is NOT capped at the desired queue, so the queue target
+	//    rises above the user's setting (VpQueueRules::CombineQueueTarget, raiseAboveDesired);
+	//    the report gives the raised queue and the real delay.
+	// The queue keeps the floor (CombineQueueTarget; capped at the desired queue except with
+	// RaiseQueue), and the decision is the same as without a floor while the floor is at most
+	// kBudgetMinQueued.
+	enum class FloorPolicy { CreditWins, FloorWins, RaiseQueue };
+
 	struct BudgetDecision
 	{
 		bool fits = true;
@@ -102,27 +124,71 @@ namespace RenderAhead
 		double budgetMs = 0.0;     // render_ahead off's delay: the queue target
 		double totalMs = 0.0;      // with render-ahead: (target - credit) x P_s + lead
 		const char* reason = "no lead";
+		// The analysis floor (P6 rest S1).
+		size_t floorFrames = 0;    // the input
+		bool floorCompetes = false;   // the floor took (FloorWins) or kept (CreditWins) a frame of the credit
+		double realTotalMs = 0.0;  // the delay with the queue held at the floor: max(target - credit, floor) x P_s + lead
+		size_t queueFrames = 0;    // the desired queue (the input)
+		size_t raisedQueueFrames = 0;   // RaiseQueue: the queue the floor takes above the desired one (0 = not raised)
 	};
+	// capacity (P6-rest audit S1): the queue's capacity, 0 = not known (no cap); only RaiseQueue reads it, exactly as
+	// VpQueueRules::CombineQueueTarget(..., raiseAboveDesired, capacity) caps the raised target.
+	inline BudgetDecision FitDelayBudget(double sourcePeriod, double displayPeriod, size_t queueFrames, bool creditOn,
+		size_t floorFrames, FloorPolicy policy, size_t capacity = 0);
 	inline BudgetDecision FitDelayBudget(double sourcePeriod, double displayPeriod, size_t queueFrames, bool creditOn)
 	{
+		return FitDelayBudget(sourcePeriod, displayPeriod, queueFrames, creditOn, 0, FloorPolicy::CreditWins);
+	}
+	inline BudgetDecision FitDelayBudget(double sourcePeriod, double displayPeriod, size_t queueFrames, bool creditOn,
+		size_t floorFrames, FloorPolicy policy, size_t capacity)
+	{
 		BudgetDecision d;
+		d.floorFrames = floorFrames;
+		d.queueFrames = queueFrames;
 		const double lead = PlannedLead(sourcePeriod, displayPeriod);
 		d.leadMs = lead * 1000.0;
 		d.budgetMs = sourcePeriod > 0.0 ? static_cast<double>(queueFrames) * sourcePeriod * 1000.0 : 0.0;
 		d.totalMs = d.budgetMs;
+		d.realTotalMs = d.totalMs;
 		if (!(lead > 0.0) || !(sourcePeriod > 0.0) || !std::isfinite(lead / sourcePeriod))
 			return d;
 		constexpr double kSlackMs = 0.5;   // timestamp rounding
 		const size_t wanted = static_cast<size_t>(std::ceil(lead / sourcePeriod - 1e-9));
 		if (creditOn && queueFrames >= wanted + kBudgetMinQueued)
 		{
-			d.creditFrames = wanted;
-			d.totalMs = (static_cast<double>(queueFrames - wanted) * sourcePeriod + lead) * 1000.0;
+			// The floor the queue keeps (CombineQueueTarget: never above the target, except RaiseQueue, which is never above
+			// the capacity when it is known and never below today's capped floor; audit S1).
+			const size_t cappedFloor = (std::min)(floorFrames, queueFrames);
+			const size_t raisedFloor = capacity > 0 ? (std::min)(floorFrames, capacity) : floorFrames;
+			const size_t floorKept = policy == FloorPolicy::RaiseQueue ? (std::max)(cappedFloor, raisedFloor) : cappedFloor;
+			if (floorKept > queueFrames)
+				d.raisedQueueFrames = floorKept;
+			size_t credit = wanted;
+			if (floorKept > queueFrames - wanted)
+			{
+				d.floorCompetes = true;
+				if (policy == FloorPolicy::FloorWins)
+					credit = queueFrames - (std::max)(floorKept, kBudgetMinQueued);   // what the floor leaves
+			}
+			if (credit < wanted)
+			{
+				// FloorWins: the frames left do not cover the lead.
+				d.creditFrames = 0;
+				d.totalMs = d.budgetMs + d.leadMs;
+				d.realTotalMs = d.totalMs;
+				d.fits = false;
+				d.reason = "the analysis floor keeps the frames the lead needs";
+				return d;
+			}
+			d.creditFrames = credit;
+			d.totalMs = (static_cast<double>(queueFrames - credit) * sourcePeriod + lead) * 1000.0;
+			d.realTotalMs = (static_cast<double>((std::max)(queueFrames - credit, floorKept)) * sourcePeriod + lead) * 1000.0;
 			d.fits = d.totalMs <= d.budgetMs + kSlackMs;
 			d.reason = d.fits ? "the queue gives the lead back" : "the lead exceeds the frames given back";
 			return d;
 		}
 		d.totalMs = d.budgetMs + d.leadMs;
+		d.realTotalMs = d.totalMs;
 		d.fits = false;
 		d.reason = !creditOn ? "the lead would add delay (render_ahead_queue_credit off)" :
 			"the queue is too short to give the lead back";
@@ -823,6 +889,10 @@ namespace RenderAhead
 		double extraMs = 0.0;          // X: one extra (p95), as it runs now
 		double extraCheaperMs = 0.0;   // X at L1 (the de-judder's vectors), 0 = not known
 		double estimateMs = 0.0;       // E: the estimate ahead (p95)
+		// S1 amendment (TD design (b)6): GPU work a look-ahead user runs in the spare slot, per
+		// source frame (ms; 0 = none). ADDITIVE in the average check only: it never shares a
+		// present's refresh, so the single-frame check does not see it.
+		double spareSlotMs = 0.0;
 	};
 
 	// X per vector mode (bug hunt 05 M7): the extras timed with the sigma-delta's own
@@ -866,7 +936,7 @@ namespace RenderAhead
 		const double extras = ExtrasPerFrame(ratio, DropsAt(level));
 		const double x = level >= 1 && in.costs.extraCheaperMs > 0.0 ? std::min(in.costs.extraMs, in.costs.extraCheaperMs) :
 			in.costs.extraMs;
-		return in.costs.newFrameMs + (extras > 0.0 ? in.costs.estimateMs : 0.0) + extras * x;
+		return in.costs.newFrameMs + (extras > 0.0 ? in.costs.estimateMs : 0.0) + extras * x + in.costs.spareSlotMs;
 	}
 
 	// Both checks of the design: the average, sum(N + E + extras * X) + margin <=
@@ -1054,11 +1124,14 @@ namespace RenderAhead
 	// The render-ahead presentation state - the present chain, the gate and its cost
 	// windows, the epoch, the drift lateness, the queue credit and the chain depth -
 	// and the decisions made on it each frame, in one object the renderer owns
-	// (render-loop thread, except the two atomics). Pure: no clock, no GPU, no
-	// logging; the caller passes `now` and logs from the results, so its log lines and
-	// diagnostics stay where they were. P6 rest moves the present clusters onto this
-	// object; until then the renderer reaches the members through one alias each.
-	// Behaviour is the renderer's before P6-4, line for line.
+	// (render-loop thread, except the two atomics). Pure: no GPU, no logging; the
+	// methods take `now` from the caller (Now() is the steady clock the renderer
+	// passes, P6 rest), and the caller logs from the results, so its log lines and
+	// diagnostics stay where they were. The GPU timers stay renderer objects passed in
+	// (ResolveTimers). P6 rest (doc 93 WAVE 3) adds the delay-budget activation, the
+	// commit, the named chain restart and the present bookkeeping the de-judder
+	// extension reads (P5c), so the extras read one object; the renderer keeps one
+	// alias per moved member. Behaviour is the renderer's before P6-4, line for line.
 
 	// What the gate needs from the renderer for one source period.
 	struct PresenterGateFrame
@@ -1084,9 +1157,36 @@ namespace RenderAhead
 		GateInput input;                 // the costs and budget the gate saw
 	};
 
+	// One queued plan, as the renderer commits it (Presenter::Commit).
+	struct PresenterCommit
+	{
+		double nextFirstVsync = 0.0;     // FramePlan::nextFirstVsync: where B lands
+		int nextInterval = 1;            // FramePlan::nextInterval: B's SyncInterval
+		uint32_t expectedPresent = 0;    // the present id B should get (last + 1; 0 = not known)
+		int lateRefreshes = 0;           // open loop: the most an extra was late by its QPC return (0: none)
+		double displayPeriod = 0.0;      // P_d (s), for the open-loop lateness
+		bool storeCredit = false;        // an extras frame: the queue credit is (re)stored
+		bool queueCredit = false;        // render_ahead_queue_credit
+		double cadenceRatio = 0.0;       // refreshes per source frame (the credit latch)
+	};
+
+	// UpdateBudget's answer: whether the veto changes (the caller logs, then
+	// ApplyBudgetVeto) and the new veto.
+	struct PresenterBudgetChange
+	{
+		bool changed = false;
+		bool veto = false;
+	};
+
 	class Presenter
 	{
 	public:
+		// The steady clock in seconds (the renderer's RenderAheadNow).
+		static double Now()
+		{
+			return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		}
+
 		Schedule schedule;
 		Gate gate;
 		CostWindow newFrameCost;
@@ -1125,6 +1225,48 @@ namespace RenderAhead
 			originalPathway = on;
 			return entering;
 		}
+		// r6 fix 4 (P6 rest S1): render-ahead only inside the fixed delay budget
+		// (FitDelayBudget); vetoed, the plain per-refresh path runs as with render_ahead off.
+		bool budgetVeto = false;
+		size_t budgetCredit = 0;         // the frames the budget lets the queue give back
+		// The analysis floor's inputs (S1, TD-readiness 93 (a)2): the frames the queue keeps for
+		// its look-ahead users (any thread; 0 = none) and who gives way when it competes with
+		// the credit (the owner's policy; CreditWins = today).
+		std::atomic<size_t> analysisFloor{ 0 };
+		FloorPolicy floorPolicy = FloorPolicy::CreditWins;
+		// The queue's capacity for RaiseQueue's cap (audit S1; any thread; 0 = not known: no cap). RaiseQueue here must be
+		// set together with VpFixedBudgetPolicy::SetRaiseQueueForAnalysis (the queue target); the coupling test
+		// TheTwoRaiseQueueSwitchesAgreeOnTheRaisedQueue pins that both give the same raised queue.
+		std::atomic<size_t> queueCapacity{ 0 };
+		// The spare-slot GPU ms per source frame a look-ahead user declares (S1 amendment; any
+		// thread; 0 = none): GateCosts::spareSlotMs, added to the gate's average check.
+		std::atomic<double> spareSlotMs{ 0.0 };
+		// The vector mode each extra's GPU timer ran with (timer serial -> de-judder vectors).
+		std::deque<std::pair<unsigned long long, bool>> extraTimerModes;
+
+		// Present bookkeeping (P6 rest S3), read by the de-judder extension (P5c).
+		// Present ids of recent extras and the refresh each main present (A) showed on, so
+		// presentation telemetry sees what it would without extras; ids belong to one
+		// swapchain (identity only, not owned).
+		std::deque<uint32_t> extraIds;
+		std::deque<std::pair<uint32_t, uint32_t>> mainRefresh;
+		const void* idsSwapchain = nullptr;
+		// The display rate the extras plan with (OpenLoopDisplayRate::Choice; DisplayRateSource, doc 46).
+		OpenLoopDisplayRate::Choice displayRate;
+		uint32_t expectedPresent = 0;    // the present id the next main present should get (chain continuity)
+		double lead = 0.0;               // the planned lead (s)
+		unsigned long long frames = 0, restarts = 0, late = 0, dropped = 0, held = 0;
+		// Diagnostics (render-ahead follow-up 2026-10-17): each planned present's SyncInterval
+		// and, from the statistics, shown - planned in refreshes per kind (interval 1 or a
+		// present after holds).
+		std::deque<std::pair<uint32_t, int>> presentIntervals;
+		unsigned long long observedSeen = 0;
+		double shownError[2] = { 0.0, 0.0 };
+		unsigned long long shownCount[2] = { 0, 0 }, shownOnTime[2] = { 0, 0 };
+		// Open loop (no statistics).
+		unsigned long long openLoopFrames = 0, lateByPresent = 0;
+		unsigned long long flushReanchors = 0;   // new anchors after a backlog flush
+		bool openLoopLate = false;       // seen on the last frame's extras: the gate's lateness for this one
 
 		// The chain ends (a frame not queued by the plan): the next present is not
 		// predicted. The queue credit is latched (bug hunt 05 M4): a single break keeps
@@ -1179,6 +1321,7 @@ namespace RenderAhead
 			g.l1Available = frame.l1Available;
 			g.costs.newFrameMs = newFrameCost.P95();
 			g.costs.estimateMs = estimateCost.Current();
+			g.costs.spareSlotMs = spareSlotMs.load(std::memory_order_acquire);
 			// X per vector mode, each level priced with its own (M7). A degraded level renders
 			// fewer extras (none at hold), so their windows empty: the last p95 measured
 			// stands for them (KnownCost, 30 s), and with none known the ladder probes one
@@ -1218,6 +1361,260 @@ namespace RenderAhead
 			if (interval > 1)
 				++intervalPresents;
 			return interval;
+		}
+
+		// ---- P6 rest S1: the delay budget and the activation ----
+
+		// Retro gate F2 (conflict 14): the Presenter runs when render_ahead OR temporal detail
+		// is on. tdOn has no settings key; default off; set by the TD wiring through
+		// SetTemporalDetailOn. With it off every answer below is today's render_ahead rule.
+		bool tdOn = false;
+		bool On(bool renderAheadOn) const { return renderAheadOn || tdOn; }
+
+		// The Presenter on and inside the delay budget.
+		bool Active(bool renderAheadOn) const { return On(renderAheadOn) && !budgetVeto; }
+
+		// A settings apply from renderAheadBefore to renderAheadNow: true when the Presenter
+		// switches on (the gate's epoch is invalidated, bug hunt 05 H3). TD on already: no change.
+		bool ActivatesOn(bool renderAheadBefore, bool renderAheadNow)
+		{
+			const bool on = !On(renderAheadBefore) && On(renderAheadNow);
+			if (on)
+				epoch.Invalidate();
+			return on;
+		}
+
+		// The TD wiring's switch: on while the Presenter was off starts the gate again.
+		void SetTemporalDetailOn(bool on, bool renderAheadOn)
+		{
+			if (on && !On(renderAheadOn))
+				epoch.Invalidate();
+			tdOn = on;
+		}
+
+		// render_ahead off: no veto, no credit (the caller releases its fallback).
+		void ClearBudget()
+		{
+			budgetVeto = false;
+			budgetCredit = 0;
+		}
+
+		// The budget's decision for this source: the credit is stored; the veto is only
+		// reported (the caller logs a change, then calls ApplyBudgetVeto).
+		PresenterBudgetChange UpdateBudget(const BudgetDecision& d)
+		{
+			budgetCredit = d.fits ? d.creditFrames : 0;
+			PresenterBudgetChange change;
+			change.veto = !d.fits;
+			change.changed = change.veto != budgetVeto;
+			return change;
+		}
+
+		// The budget for this source with the Presenter's floor inputs.
+		BudgetDecision FitBudget(double sourcePeriod, double displayPeriod, size_t queueFrames, bool creditOn) const
+		{
+			return FitDelayBudget(sourcePeriod, displayPeriod, queueFrames, creditOn,
+				analysisFloor.load(std::memory_order_acquire), floorPolicy, queueCapacity.load(std::memory_order_acquire));
+		}
+
+		// The visible line when the floor and the credit compete (both policies; empty when
+		// they do not): what was vetoed or kept and why.
+		static std::string FloorReport(const BudgetDecision& d, FloorPolicy policy)
+		{
+			if (!d.floorCompetes)
+				return std::string();
+			char line[240];
+			if (policy == FloorPolicy::FloorWins)
+				snprintf(line, sizeof(line), "the analysis floor (%zu frames) wins: render-ahead's credit is vetoed, "
+					"its %.0f ms lead does not fit", d.floorFrames, d.leadMs);
+			else if (policy == FloorPolicy::RaiseQueue && d.raisedQueueFrames > 0)
+				snprintf(line, sizeof(line), "the analysis floor (%zu frames) raises the queue above the desired %zu frames: "
+					"the real delay is %.0f ms, not %.0f ms (%.0f ms budget)", d.floorFrames, d.queueFrames, d.realTotalMs,
+					d.totalMs, d.budgetMs);
+			else
+				snprintf(line, sizeof(line), "the credit wins over the analysis floor (%zu frames): the queue stays at the "
+					"floor, so the real delay is %.0f ms, not %.0f ms (%.0f ms budget)", d.floorFrames, d.realTotalMs,
+					d.totalMs, d.budgetMs);
+			return line;
+		}
+
+		// A changed veto: off breaks the chain and returns the credit at once; on starts
+		// the gate again (as render_ahead switched on).
+		void ApplyBudgetVeto(bool veto, double now)
+		{
+			if (veto)
+			{
+				Break(now);
+				credit.Reset();
+				creditFrames.store(0, std::memory_order_release);
+			}
+			else
+				epoch.Invalidate();
+			budgetVeto = veto;
+		}
+
+		// The vector mode an extra's GPU timer ran with (true: the de-judder's vectors), by
+		// its submission serial; older entries are dropped. Unknown: `lastExternal` (the
+		// last extra's).
+		bool TakeExtraTimerMode(unsigned long long serial, bool lastExternal)
+		{
+			bool external = lastExternal;
+			while (!extraTimerModes.empty() && extraTimerModes.front().first <= serial)
+			{
+				if (extraTimerModes.front().first == serial)
+					external = extraTimerModes.front().second;
+				extraTimerModes.pop_front();
+			}
+			return external;
+		}
+
+		// A timed extra: its serial's vector mode (the 64 newest kept).
+		void NoteExtraTimerMode(unsigned long long serial, bool external)
+		{
+			extraTimerModes.emplace_back(serial, external);
+			while (extraTimerModes.size() > 64)
+				extraTimerModes.pop_front();
+		}
+
+		// The extras' (X) and the estimate ahead's (E) GPU times, resolved late, never
+		// flushing: up to 8 per timer into the cost windows. The timers and their context
+		// stay the renderer's (AlphaD3D11FrameGpuTimer); the caller checks they exist.
+		template <class Timer, class Context>
+		void ResolveTimers(Timer& extraTimer, Timer& estimateTimer, Context* context, double now, bool lastExternal)
+		{
+			for (int timer = 0; timer < 2; ++timer)
+			{
+				Timer& source = timer == 0 ? extraTimer : estimateTimer;
+				for (int resolved = 0; resolved < 8; ++resolved)
+				{
+					typename Timer::Sample sample;
+					const typename Timer::ResolveResult result = source.TryResolveOldest(context, sample);
+					if (result == Timer::ResolveResult::Resolved)
+					{
+						if (timer == 1)
+							estimateCost.Add(now, sample.milliseconds);
+						else
+							(TakeExtraTimerMode(sample.submissionSerial, lastExternal) ? extraCostExternal :
+								extraCostOwn).Add(now, sample.milliseconds);
+					}
+					else if (result != Timer::ResolveResult::Discarded)
+						break;
+				}
+			}
+		}
+
+		// ---- P6 rest S2: the commit ----
+
+		// A frame starts: its plan is not queued yet.
+		void BeginFrame() { committed = false; }
+
+		// The plan is queued: B lands at the refresh after A's last one, with the holds
+		// after the last extra as its interval. Open-loop lateness moves the chain as a
+		// statistics-observed late present would (the first after a new anchor re-anchors
+		// only, bug hunt 05 M2). An extras frame stores the queue credit, latched while the
+		// cadence holds (M4); a hold-only frame leaves it as it is.
+		void Commit(const PresenterCommit& c, const std::vector<std::pair<uint32_t, double>>& plannedIds)
+		{
+			schedule.Commit(c.nextFirstVsync, plannedIds);
+			if (c.lateRefreshes > 0)
+				openLoopLate = schedule.NoteLate(c.lateRefreshes, c.displayPeriod);
+			mainInterval = c.nextInterval;
+			expectedPresent = c.expectedPresent;
+			committed = true;
+			if (c.storeCredit)
+				creditFrames.store(c.queueCredit ? credit.CommitFrames(budgetCredit, c.cadenceRatio) : 0,
+					std::memory_order_release);
+		}
+
+		// Open loop (hunt 2 05-renderahead L3): the target is not measured, so a queued
+		// frame's planned lead is published as an estimate; 0 otherwise.
+		void PublishEstimatedLead(bool targetTimingKnown)
+		{
+			estimatedLeadMs.store(committed && !targetTimingKnown && displayRate.openLoop ? targetLeadMs : 0.0,
+				std::memory_order_relaxed);
+		}
+
+		// ---- P6 rest S4: the named chain restart ----
+
+		// A new anchor only: the schedule's pending presents no longer apply. NOT Break(now):
+		// the main interval, the target lead, the latched credit and the estimate stay (the
+		// renderer's six direct schedule breaks - a new generation or cadence, a resync, a
+		// present outside the plan, a backlog flush, a restart, a re-anchor - as before P6).
+		void RestartChain() { schedule.Break(); }
+
+		// ---- P6 rest S3: the present bookkeeping ----
+
+		// Present ids belong to one swapchain: another one starts them again.
+		void NoteIdsSwapchain(const void* swapchain)
+		{
+			if (idsSwapchain != swapchain)
+			{
+				extraIds.clear();
+				mainRefresh.clear();
+				idsSwapchain = swapchain;
+			}
+		}
+
+		// Teardown: no ids, no swapchain.
+		void ClearPresentIds()
+		{
+			extraIds.clear();
+			mainRefresh.clear();
+			idsSwapchain = nullptr;
+		}
+
+		// An extra was presented with this id (the 256 newest kept).
+		void NoteExtraPresent(uint32_t presentId)
+		{
+			extraIds.push_back(presentId);
+			if (extraIds.size() > 256)
+				extraIds.pop_front();
+		}
+
+		// The main present `presentId` showed on refresh `refresh` (the 64 newest kept).
+		void NoteMainRefresh(uint32_t presentId, uint32_t refresh)
+		{
+			mainRefresh.emplace_back(presentId, refresh);
+			if (mainRefresh.size() > 64)
+				mainRefresh.pop_front();
+		}
+
+		// The statistics' latest present: kept as a main present's refresh unless it is
+		// an extra or already the newest kept.
+		void NoteStatisticsPresent(uint32_t presentId, uint32_t refresh)
+		{
+			if (std::find(extraIds.begin(), extraIds.end(), presentId) == extraIds.end() &&
+				(mainRefresh.empty() || mainRefresh.back().first != presentId))
+				NoteMainRefresh(presentId, refresh);
+		}
+
+		// A planned present's SyncInterval (diagnostics); `keep` > 0 keeps that many newest.
+		void NotePresentInterval(uint32_t presentId, int interval, size_t keep)
+		{
+			presentIntervals.emplace_back(presentId, interval);
+			if (keep > 0)
+				while (presentIntervals.size() > keep)
+					presentIntervals.pop_front();
+		}
+
+		// A new observation by the schedule: its shown - planned error counted per kind
+		// (interval 1, or a present after holds) when its interval is known.
+		void NoteObservation()
+		{
+			if (schedule.ObservedCount() == observedSeen)
+				return;
+			observedSeen = schedule.ObservedCount();
+			const uint32_t id = schedule.LastObservedId();
+			const auto known = std::find_if(presentIntervals.begin(), presentIntervals.end(),
+				[id](const std::pair<uint32_t, int>& p) { return p.first == id; });
+			if (known != presentIntervals.end())
+			{
+				const int kind = known->second > 1 ? 1 : 0;
+				const double e = schedule.LastObservedError();
+				shownError[kind] += e;
+				++shownCount[kind];
+				if (std::abs(e) <= 0.5) ++shownOnTime[kind];
+			}
 		}
 	};
 }

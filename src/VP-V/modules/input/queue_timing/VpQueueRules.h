@@ -81,6 +81,40 @@ namespace VpQueueRules
 		return (std::max)(target, floor);
 	}
 
+	// P6 rest S1 (TD-readiness audit 93 (a)2): the analysis floor - the frames the queue keeps
+	// for its look-ahead users: the motion look-ahead's (MotionAhead::QueueFramesFor) and an
+	// analysis product's largest DECLARED lead + 2 (A shown, the lead's frames, one arriving;
+	// declared, not measured, so it cannot ratchet). No declared lead: the motion floor alone.
+	inline size_t AnalysisFloorFrames(size_t motionFloor, unsigned declaredLead)
+	{
+		return declaredLead > 0 ? (std::max)(motionFloor, static_cast<size_t>(declaredLead) + 2) : motionFloor;
+	}
+
+	// S1 amendment (TD design (a)4 / (b)6): the floor is capped at the desired queue - a short
+	// queue (200 ms at 24p: 4 frames, 3 ahead) gives the look-ahead what it holds and is never
+	// vetoed by it. raiseAboveDesired (RenderAhead::FloorPolicy::RaiseQueue: TD on, default off)
+	// leaves the floor uncapped so the queue target may rise above the desired setting.
+	// desiredQueue 0 = not known: no cap.
+	inline size_t AnalysisFloorFrames(size_t motionFloor, unsigned declaredLead, size_t desiredQueue, bool raiseAboveDesired)
+	{
+		const size_t floor = AnalysisFloorFrames(motionFloor, declaredLead);
+		return raiseAboveDesired || desiredQueue == 0 ? floor : (std::min)(floor, desiredQueue);
+	}
+
+	// CombineQueueTarget with the RaiseQueue choice: off, exactly CombineQueueTarget (the floor
+	// never above desired); on (queue_timing_fixes only), the floor may take the target above
+	// desired, never above the queue's capacity (0 = not known: no limit).
+	inline size_t CombineQueueTarget(size_t desired, size_t credit, size_t lookaheadFloor, bool queueTimingFixes,
+		bool raiseAboveDesired, size_t capacity)
+	{
+		if (!raiseAboveDesired || !queueTimingFixes)
+			return CombineQueueTarget(desired, credit, lookaheadFloor, queueTimingFixes);
+		// Never below today's rule (a capacity under the desired queue must not undo the capped floor).
+		const size_t today = CombineQueueTarget(desired, credit, lookaheadFloor, queueTimingFixes);
+		const size_t floor = capacity > 0 ? (std::min)(lookaheadFloor, capacity) : lookaheadFloor;
+		return (std::max)(today, floor);
+	}
+
 	// Hunt 2 13-timing H1 (queue_timing_fixes): the front frame of a queue that
 	// holds its target has already waited about target periods; that wait is the
 	// queue doing its job, not staleness. With staleBeyondTarget the age is measured

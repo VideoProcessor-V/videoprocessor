@@ -553,7 +553,7 @@ namespace FallbackCatalog
 
 	// ---- skeleton analysis lane -----------------------------------------------------------------
 	// The regulator reduced the lane's work (dropped products, forced live fills, T0 in the render,
-	// pinned at the minimum, the optical-flow input reduced by `ofaStep` steps: 0 = full), or the lane is
+	// pinned at the minimum; REG-1: there is no optical-flow input step-down any more), or the lane is
 	// not available for the source stats. The lists hold plain-language product names (the host maps ids
 	// to names).
 	inline std::string JoinNames(const std::vector<std::string>& names)
@@ -564,9 +564,9 @@ namespace FallbackCatalog
 		return out;
 	}
 	inline Decision AnalysisLane(const std::vector<std::string>& dropped, const std::vector<std::string>& forcedLive,
-		bool pinnedAtMinimum, bool t0InRender, unsigned ofaStep = 0)
+		bool pinnedAtMinimum, bool t0InRender)
 	{
-		if (dropped.empty() && forcedLive.empty() && !pinnedAtMinimum && !t0InRender && ofaStep == 0)
+		if (dropped.empty() && forcedLive.empty() && !pinnedAtMinimum && !t0InRender)
 			return Released("analysis_lane");
 		std::string reason;
 		auto add = [&reason](const std::string& part) { reason += (reason.empty() ? std::string() : "; ") + part; };
@@ -576,8 +576,6 @@ namespace FallbackCatalog
 			add("forced live: " + JoinNames(forcedLive));
 		if (t0InRender)
 			add("core analysis runs in the render");
-		if (ofaStep != 0)
-			add("vector engine input reduced (step " + std::to_string(ofaStep) + ")");
 		if (pinnedAtMinimum)
 			add("analysis at minimum");
 		return Engaged("analysis_lane", reason);
@@ -699,10 +697,17 @@ namespace FallbackCatalog
 	// Begin..AfterRender (which includes lock waits and pacing sleeps), so it records the derived slack and shows it but does NOT feed
 	// the regulator with it (nothing is shed on that number). The regulator acts only on a span the host measured
 	// (SkeletonModule::NoteRenderOnlyMs). Engaged while observing.
-	inline Decision SkeletonRegulatorInput(bool derived)
+	// B4 S2: `noted` host-measured spans recorded under the observe gate (not fed) are shown with the last one.
+	inline Decision SkeletonRegulatorInput(bool derived, uint64_t noted = 0, double lastNotedMs = 0.0)
 	{
-		return derived ? Engaged("skeleton_regulator", "regulator input: observe only, slack derived from the Begin..AfterRender span (includes waits); render-only time not measured, shedding off")
-		               : Released("skeleton_regulator");
+		if (!derived)
+			return Released("skeleton_regulator");
+		if (noted == 0)
+			return Engaged("skeleton_regulator", "regulator input: observe only, slack derived from the Begin..AfterRender span (includes waits); render-only time not measured, shedding off");
+		char text[200];
+		std::snprintf(text, sizeof(text), "regulator input: observe only (gate): %llu host-measured render-only frame(s) recorded, last %.2f ms; not fed, shedding off",
+			static_cast<unsigned long long>(noted), lastNotedMs);
+		return Engaged("skeleton_regulator", text);
 	}
 	// MV7: a module that holds video memory is active but declared none of it to the VRAM governor (VramUsers.h), so its memory is
 	// invisible to the budget and the lane products may be granted memory it already holds. `names` lists the modules (empty = none).

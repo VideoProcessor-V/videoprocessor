@@ -4,9 +4,12 @@
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 #include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
+#include <VP-V/modules/input/queue_timing/VpFixedBudgetPolicy.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
+#include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/output/presentation/RenderAheadPolicy.h>
+#include <VP-V/modules/output/presentation/PresenterAfterPresent.h>
 #include <VP-V/modules/output/presentation/OpenLoopDisplayRate.h>
 #include <DisplayRefreshRatePolicy.h>
 
@@ -1990,6 +1993,1212 @@ namespace RenderAheadPolicyTest
 			Assert::IsTrue(changes >= 4, L"the gate changed level");
 			Assert::IsTrue(evaluated > 1000, L"the gate was evaluated");
 			Assert::IsTrue((levelsSeen & ~1) != 0, L"a degraded level was reached");
+		}
+	};
+
+	// M2 P6 rest: the Presenter's budget, commit, restart and bookkeeping methods. The
+	// legacy copies are the renderer's bodies at r2/p6-4 7e521b9aa
+	// (LibplaceboVideoRenderer.cpp: UpdateRenderAheadBudget :6434, ResolveRenderAheadTimers
+	// :5440, TakeRenderAheadExtraTimerMode :5468, the commit sites :15488 and :16180, the
+	// estimate :25904, the bookkeeping :15257, :15352-15372, :15652, :16055, :16074),
+	// written against a second Presenter's members, so a drift in either shows here.
+	namespace PresenterRestLegacy
+	{
+		inline void Budget(Presenter& r, const BudgetDecision& d, double now)
+		{
+			r.budgetCredit = d.fits ? d.creditFrames : 0;
+			const bool veto = !d.fits;
+			if (veto != r.budgetVeto)
+			{
+				if (veto)
+				{
+					r.Break(now);
+					r.credit.Reset();
+					r.creditFrames.store(0, std::memory_order_release);
+				}
+				else
+					r.epoch.Invalidate();
+				r.budgetVeto = veto;
+			}
+		}
+
+		inline void CommitHoldOnly(Presenter& r, const FramePlan& plan,
+			const std::vector<std::pair<uint32_t, double>>& plannedIds, uint32_t lastPresent)
+		{
+			r.schedule.Commit(plan.nextFirstVsync, plannedIds);
+			r.mainInterval = plan.nextInterval;
+			r.expectedPresent = lastPresent != 0 ? lastPresent + 1 : 0;
+			r.committed = true;
+		}
+
+		inline void CommitExtras(Presenter& r, const FramePlan& plan,
+			const std::vector<std::pair<uint32_t, double>>& plannedIds, uint32_t lastPresent,
+			int openLoopLateRefreshes, double displayPeriod, bool queueCredit, double ratio)
+		{
+			r.schedule.Commit(plan.nextFirstVsync, plannedIds);
+			if (openLoopLateRefreshes > 0)
+				r.openLoopLate = r.schedule.NoteLate(openLoopLateRefreshes, displayPeriod);
+			r.mainInterval = plan.nextInterval;
+			r.expectedPresent = lastPresent != 0 ? lastPresent + 1 : 0;
+			r.committed = true;
+			r.creditFrames.store(queueCredit ? r.credit.CommitFrames(r.budgetCredit, ratio) : 0,
+				std::memory_order_release);
+		}
+
+		inline bool TakeMode(std::deque<std::pair<unsigned long long, bool>>& modes, unsigned long long serial,
+			bool lastExternal)
+		{
+			bool external = lastExternal;
+			while (!modes.empty() && modes.front().first <= serial)
+			{
+				if (modes.front().first == serial)
+					external = modes.front().second;
+				modes.pop_front();
+			}
+			return external;
+		}
+
+		inline void Observation(Presenter& r)
+		{
+			if (r.schedule.ObservedCount() != r.observedSeen)
+			{
+				r.observedSeen = r.schedule.ObservedCount();
+				const uint32_t id = r.schedule.LastObservedId();
+				const auto known = std::find_if(r.presentIntervals.begin(), r.presentIntervals.end(),
+					[id](const std::pair<uint32_t, int>& p) { return p.first == id; });
+				if (known != r.presentIntervals.end())
+				{
+					const int kind = known->second > 1 ? 1 : 0;
+					const double e = r.schedule.LastObservedError();
+					r.shownError[kind] += e;
+					++r.shownCount[kind];
+					if (std::abs(e) <= 0.5) ++r.shownOnTime[kind];
+				}
+			}
+		}
+
+		// A stand-in for AlphaD3D11FrameGpuTimer: its Sample / ResolveResult shape.
+		struct FakeTimer
+		{
+			struct Sample
+			{
+				uint64_t submissionSerial = 0;
+				double milliseconds = 0.0;
+			};
+			enum class ResolveResult
+			{
+				Empty,
+				NotReady,
+				Discarded,
+				Resolved,
+			};
+			std::deque<std::pair<ResolveResult, Sample>> results;
+			int calls = 0;
+			ResolveResult TryResolveOldest(int* context, Sample& sample)
+			{
+				++calls;
+				if (!context || results.empty())
+					return ResolveResult::Empty;
+				const std::pair<ResolveResult, Sample> r = results.front();
+				results.pop_front();
+				sample = r.second;
+				return r.first;
+			}
+		};
+
+		inline void SameSchedule(Presenter& a, Presenter& b)
+		{
+			Assert::AreEqual(a.schedule.Active(), b.schedule.Active());
+			Assert::AreEqual(a.schedule.Pending(), b.schedule.Pending());
+			Assert::AreEqual(a.schedule.Reanchors(), b.schedule.Reanchors());
+			Assert::AreEqual(a.schedule.TakeLateDrops(), b.schedule.TakeLateDrops());
+		}
+	}
+
+	TEST_CLASS(PresenterRestApiTests)
+	{
+	public:
+		TEST_METHOD(MovedMembersKeepTheRendererDefaults)
+		{
+			Presenter p;
+			Assert::IsFalse(p.budgetVeto);
+			Assert::AreEqual<size_t>(0, p.budgetCredit);
+			Assert::IsTrue(p.extraTimerModes.empty());
+			Assert::IsTrue(p.extraIds.empty());
+			Assert::IsTrue(p.mainRefresh.empty());
+			Assert::IsTrue(p.idsSwapchain == nullptr);
+			Assert::AreEqual(0.0, p.displayRate.hz);
+			Assert::IsTrue(p.displayRate.source == OpenLoopDisplayRate::Source::None);
+			Assert::IsFalse(p.displayRate.openLoop);
+			Assert::AreEqual(0u, p.expectedPresent);
+			Assert::AreEqual(0.0, p.lead);
+			Assert::AreEqual(0ull, p.frames + p.restarts + p.late + p.dropped + p.held);
+			Assert::IsTrue(p.presentIntervals.empty());
+			Assert::AreEqual(0ull, p.observedSeen);
+			Assert::AreEqual(0.0, p.shownError[0] + p.shownError[1]);
+			Assert::AreEqual(0ull, p.shownCount[0] + p.shownCount[1] + p.shownOnTime[0] + p.shownOnTime[1]);
+			Assert::AreEqual(0ull, p.openLoopFrames + p.lateByPresent + p.flushReanchors);
+			Assert::IsFalse(p.openLoopLate);
+			Assert::IsTrue(p.Active(true));
+			Assert::IsFalse(p.Active(false));
+			const double a = Presenter::Now();
+			const double b = Presenter::Now();
+			Assert::IsTrue(a > 0.0 && b >= a, L"the steady clock");
+		}
+
+		// UpdateBudget + ApplyBudgetVeto (the caller logs between them) against the
+		// renderer's body over a seeded run of fits, vetoes and credits.
+		TEST_METHOD(BudgetMatchesTheLegacyBody)
+		{
+			Presenter p, r;
+			std::mt19937 random(6061);
+			std::uniform_int_distribution<int> coin(0, 3), frames(0, 3);
+			int changes = 0;
+			for (int i = 0; i < 400; ++i)
+			{
+				const double now = 1.0 + i * 0.3;
+				if (coin(random) == 0)
+				{
+					// A queued extras frame latches the credit (so a veto has one to return).
+					PresenterCommit c;
+					c.storeCredit = true;
+					c.queueCredit = true;
+					c.cadenceRatio = 2.5;
+					const std::vector<std::pair<uint32_t, double>> none;
+					p.Commit(c, none);
+					FramePlan plan;
+					PresenterRestLegacy::CommitExtras(r, plan, none, 0, 0, 0.0, true, 2.5);
+				}
+				BudgetDecision d;
+				d.fits = coin(random) != 0;
+				d.creditFrames = static_cast<size_t>(frames(random));
+				const PresenterBudgetChange change = p.UpdateBudget(d);
+				if (change.changed)
+				{
+					p.ApplyBudgetVeto(change.veto, now);
+					++changes;
+				}
+				PresenterRestLegacy::Budget(r, d, now);
+				Assert::AreEqual(r.budgetVeto, p.budgetVeto);
+				Assert::AreEqual(r.budgetCredit, p.budgetCredit);
+				Assert::AreEqual(r.creditFrames.load(), p.creditFrames.load());
+				Assert::AreEqual(r.credit.Frames(), p.credit.Frames());
+				Assert::AreEqual(r.Active(true), p.Active(true));
+				Assert::AreEqual(r.mainInterval, p.mainInterval);
+				PresenterRestLegacy::SameSchedule(p, r);
+				Assert::AreEqual(r.epoch.Changed(7, 2.5), p.epoch.Changed(7, 2.5));
+			}
+			Assert::IsTrue(changes > 20, L"the veto changed");
+			p.ClearBudget();
+			Assert::IsFalse(p.budgetVeto);
+			Assert::AreEqual<size_t>(0, p.budgetCredit);
+		}
+
+		// Both commit sites, against their legacy bodies, with open-loop lateness after a
+		// new anchor (re-anchor only) and in a running chain (late).
+		TEST_METHOD(CommitMatchesBothRendererSites)
+		{
+			Presenter p, r;
+			p.budgetCredit = r.budgetCredit = 2;
+			std::mt19937 random(6062);
+			std::uniform_int_distribution<int> kind(0, 5), late(0, 3), interval(1, 4);
+			uint32_t id = 10;
+			for (int i = 0; i < 300; ++i)
+			{
+				FramePlan plan;
+				plan.nextFirstVsync = 2.0 + i / 24.0;
+				plan.nextInterval = interval(random);
+				std::vector<std::pair<uint32_t, double>> planned;
+				planned.emplace_back(++id, plan.nextFirstVsync - 0.01);
+				planned.emplace_back(++id, plan.nextFirstVsync - 0.005);
+				const uint32_t lastPresent = i % 7 == 0 ? 0u : id;
+				const int k = kind(random);
+				p.BeginFrame();
+				r.committed = false;
+				if (k == 0)
+				{
+					p.RestartChain();
+					r.schedule.Break();
+				}
+				PresenterCommit c;
+				c.nextFirstVsync = plan.nextFirstVsync;
+				c.nextInterval = plan.nextInterval;
+				c.expectedPresent = lastPresent != 0 ? lastPresent + 1 : 0;
+				if (k == 1)
+				{
+					p.Commit(c, planned);
+					PresenterRestLegacy::CommitHoldOnly(r, plan, planned, lastPresent);
+				}
+				else if (k > 1)
+				{
+					c.lateRefreshes = late(random);
+					c.displayPeriod = 1.0 / 60.0;
+					c.storeCredit = true;
+					c.queueCredit = k != 2;
+					c.cadenceRatio = 2.5;
+					p.Commit(c, planned);
+					PresenterRestLegacy::CommitExtras(r, plan, planned, lastPresent, c.lateRefreshes, c.displayPeriod,
+						c.queueCredit, 2.5);
+				}
+				Assert::AreEqual(r.committed, p.committed);
+				Assert::AreEqual(r.mainInterval, p.mainInterval);
+				Assert::AreEqual(r.expectedPresent, p.expectedPresent);
+				Assert::AreEqual(r.openLoopLate, p.openLoopLate);
+				Assert::AreEqual(r.creditFrames.load(), p.creditFrames.load());
+				PresenterRestLegacy::SameSchedule(p, r);
+				// The estimate the renderer publishes after the extras.
+				const bool known = i % 3 == 0;
+				p.displayRate.openLoop = r.displayRate.openLoop = i % 2 == 0;
+				p.targetLeadMs = r.targetLeadMs = 5.0 + i;
+				p.PublishEstimatedLead(known);
+				r.estimatedLeadMs.store(r.committed && !known && r.displayRate.openLoop ? r.targetLeadMs : 0.0,
+					std::memory_order_relaxed);
+				Assert::AreEqual(r.estimatedLeadMs.load(), p.estimatedLeadMs.load());
+			}
+			Assert::IsTrue(p.schedule.Reanchors() > 0, L"open-loop lateness after a new anchor re-anchored");
+		}
+
+		// RestartChain is the schedule's break only, unlike Break(now).
+		TEST_METHOD(RestartChainKeepsTheCommitState)
+		{
+			Presenter p;
+			p.budgetCredit = 1;
+			PresenterCommit c;
+			c.nextInterval = 3;
+			c.storeCredit = true;
+			c.queueCredit = true;
+			c.cadenceRatio = 2.5;
+			std::vector<std::pair<uint32_t, double>> planned{ { 5u, 1.0 } };
+			p.Commit(c, planned);
+			p.targetLeadMs = 12.0;
+			p.estimatedLeadMs.store(9.0);
+			Assert::IsTrue(p.schedule.Active());
+			Assert::AreEqual<size_t>(1, p.creditFrames.load());
+			p.RestartChain();
+			Assert::IsFalse(p.schedule.Active());
+			Assert::AreEqual<size_t>(0, p.schedule.Pending());
+			Assert::AreEqual(3, p.mainInterval);
+			Assert::AreEqual(12.0, p.targetLeadMs);
+			Assert::AreEqual(9.0, p.estimatedLeadMs.load());
+			Assert::AreEqual<size_t>(1, p.creditFrames.load());
+			Assert::IsTrue(p.committed);
+			p.Break(100.0);
+			Assert::AreEqual(1, p.mainInterval, L"Break(now) is the other one");
+		}
+
+		// The GPU timers: X by its serial's vector mode, E into its own window, at most 8
+		// per timer, a pending one stops that timer; against the legacy loop.
+		TEST_METHOD(ResolveTimersFeedsTheCostWindows)
+		{
+			using PresenterRestLegacy::FakeTimer;
+			Presenter p;
+			std::deque<std::pair<unsigned long long, bool>> legacyModes;
+			for (unsigned long long serial = 1; serial <= 12; ++serial)
+			{
+				const bool external = serial % 3 == 0;
+				p.NoteExtraTimerMode(serial, external);
+				legacyModes.emplace_back(serial, external);
+			}
+			FakeTimer extra, estimate;
+			double ownExpected = 0.0, externalExpected = 0.0;
+			int own = 0, external = 0;
+			for (unsigned long long serial = 1; serial <= 10; ++serial)
+			{
+				FakeTimer::Sample sample;
+				sample.submissionSerial = serial;
+				sample.milliseconds = static_cast<double>(serial);
+				extra.results.emplace_back(serial == 4 ? FakeTimer::ResolveResult::Discarded :
+					FakeTimer::ResolveResult::Resolved, sample);
+			}
+			FakeTimer::Sample e;
+			e.milliseconds = 2.0;
+			estimate.results.emplace_back(FakeTimer::ResolveResult::Resolved, e);
+			estimate.results.emplace_back(FakeTimer::ResolveResult::NotReady, e);
+			estimate.results.emplace_back(FakeTimer::ResolveResult::Resolved, e);
+			// The legacy loop's choices, by serial (8 per call; serial 4 discarded).
+			for (unsigned long long serial = 1; serial <= 8; ++serial)
+			{
+				if (serial == 4)
+					continue;
+				if (PresenterRestLegacy::TakeMode(legacyModes, serial, false))
+				{
+					externalExpected = static_cast<double>(serial);
+					++external;
+				}
+				else
+				{
+					ownExpected = static_cast<double>(serial);
+					++own;
+				}
+			}
+			int context = 0;
+			p.ResolveTimers(extra, estimate, &context, 5.0, false);
+			Assert::AreEqual(8, extra.calls, L"at most 8 per timer");
+			Assert::AreEqual(2, estimate.calls, L"a pending timer stops");
+			Assert::AreEqual<size_t>(static_cast<size_t>(own), p.extraCostOwn.Count());
+			Assert::AreEqual<size_t>(static_cast<size_t>(external), p.extraCostExternal.Count());
+			Assert::AreEqual<size_t>(1, p.estimateCost.Count());
+			Assert::IsTrue(ownExpected > 0.0 && externalExpected > 0.0);
+			Assert::AreEqual(legacyModes.size(), p.extraTimerModes.size(), L"the same modes consumed");
+			// An unknown serial takes the last extra's mode; the 64 newest are kept.
+			Assert::IsTrue(p.TakeExtraTimerMode(1000, true));
+			Assert::IsTrue(p.extraTimerModes.empty());
+			for (unsigned long long serial = 0; serial < 100; ++serial)
+				p.NoteExtraTimerMode(serial, false);
+			Assert::AreEqual<size_t>(64, p.extraTimerModes.size());
+			Assert::AreEqual(36ull, p.extraTimerModes.front().first);
+		}
+
+		// The bookkeeping the extension reads: one swapchain's ids, the renderer's caps,
+		// a main refresh kept once and never for an extra, the shown-error diagnostics.
+		TEST_METHOD(PresentBookkeepingKeepsTheRendererRules)
+		{
+			Presenter p, r;
+			int chainA = 0, chainB = 0;
+			p.NoteIdsSwapchain(&chainA);
+			for (uint32_t id = 1; id <= 300; ++id)
+				p.NoteExtraPresent(id);
+			Assert::AreEqual<size_t>(256, p.extraIds.size());
+			Assert::AreEqual(45u, p.extraIds.front());
+			for (uint32_t id = 1000; id < 1100; ++id)
+				p.NoteMainRefresh(id, id * 2);
+			Assert::AreEqual<size_t>(64, p.mainRefresh.size());
+			p.NoteIdsSwapchain(&chainA);
+			Assert::AreEqual<size_t>(256, p.extraIds.size(), L"the same swapchain keeps its ids");
+			p.NoteIdsSwapchain(&chainB);
+			Assert::IsTrue(p.extraIds.empty() && p.mainRefresh.empty());
+			Assert::IsTrue(p.idsSwapchain == &chainB);
+			p.NoteExtraPresent(7);
+			p.NoteStatisticsPresent(7, 70);
+			Assert::IsTrue(p.mainRefresh.empty(), L"an extra is not a main present");
+			p.NoteStatisticsPresent(8, 80);
+			p.NoteStatisticsPresent(8, 81);
+			Assert::AreEqual<size_t>(1, p.mainRefresh.size(), L"kept once");
+			Assert::AreEqual(80u, p.mainRefresh.back().second);
+			p.ClearPresentIds();
+			Assert::IsTrue(p.extraIds.empty() && p.mainRefresh.empty() && p.idsSwapchain == nullptr);
+			// Intervals: uncapped at the main present, 128 kept after an extra.
+			for (uint32_t id = 1; id <= 200; ++id)
+				p.NotePresentInterval(id, 1, 0);
+			Assert::AreEqual<size_t>(200, p.presentIntervals.size());
+			p.NotePresentInterval(201, 2, 128);
+			Assert::AreEqual<size_t>(128, p.presentIntervals.size());
+			// Observations, against the legacy diagnostics: planned presents shown late,
+			// on time and early, after holds and not.
+			p.presentIntervals.clear();
+			const double period = 1.0 / 60.0;
+			std::vector<std::pair<uint32_t, double>> planned;
+			for (uint32_t id = 1; id <= 40; ++id)
+			{
+				planned.emplace_back(id, id * period);
+				p.NotePresentInterval(id, id % 4 == 0 ? 2 : 1, 128);
+				r.presentIntervals.emplace_back(id, id % 4 == 0 ? 2 : 1);
+			}
+			p.schedule.Commit(41 * period, planned);
+			r.schedule.Commit(41 * period, planned);
+			for (uint32_t id = 1; id <= 40; ++id)
+			{
+				const double shown = id * period + (id % 5 == 0 ? 0.7 : id % 3 == 0 ? -0.2 : 0.1) * period;
+				p.schedule.Observe(id, shown, period);
+				r.schedule.Observe(id, shown, period);
+				p.NoteObservation();
+				PresenterRestLegacy::Observation(r);
+				p.NoteObservation();   // nothing new: no second count
+				for (int kindIndex = 0; kindIndex < 2; ++kindIndex)
+				{
+					Assert::AreEqual(r.shownError[kindIndex], p.shownError[kindIndex]);
+					Assert::AreEqual(r.shownCount[kindIndex], p.shownCount[kindIndex]);
+					Assert::AreEqual(r.shownOnTime[kindIndex], p.shownOnTime[kindIndex]);
+				}
+				Assert::AreEqual(r.observedSeen, p.observedSeen);
+			}
+			Assert::IsTrue(p.shownCount[0] > 0 && p.shownCount[1] > 0, L"both kinds seen");
+		}
+	};
+	// P6 rest S1 (TD-readiness audit 93 (a)2): the analysis floor is an input of the delay
+	// budget and the floor-vs-credit policy is selectable; with no floor above
+	// kBudgetMinQueued the decision is today's in both policies.
+	TEST_CLASS(PresenterFloorTests)
+	{
+	public:
+		TEST_METHOD(AnalysisFloorTakesTheDeclaredLeadPlusTwo)
+		{
+			Assert::AreEqual(size_t{ 0 }, VpQueueRules::AnalysisFloorFrames(0, 0));
+			Assert::AreEqual(size_t{ 3 }, VpQueueRules::AnalysisFloorFrames(3, 0), L"no declared lead: the motion floor");
+			Assert::AreEqual(size_t{ 4 }, VpQueueRules::AnalysisFloorFrames(3, 2), L"lead 2 + 2 above the motion floor");
+			Assert::AreEqual(size_t{ 5 }, VpQueueRules::AnalysisFloorFrames(5, 2), L"the motion floor above lead + 2");
+			Assert::AreEqual(size_t{ 3 }, VpQueueRules::AnalysisFloorFrames(0, 1));
+		}
+
+		TEST_METHOD(NoFloorAboveTheMinimumKeepsTodaysDecision)
+		{
+			const double sources[] = { 23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0 };
+			const double displays[] = { 48.0, 50.0, 59.94, 60.0, 100.0, 120.0, 144.0 };
+			for (double sh : sources)
+				for (double dh : displays)
+					for (size_t q = 0; q <= 12; ++q)
+						for (int c = 0; c < 2; ++c)
+							for (size_t f = 0; f <= kBudgetMinQueued; ++f)
+								for (int pol = 0; pol < 3; ++pol)
+								{
+									const BudgetDecision a = FitDelayBudget(1.0 / sh, 1.0 / dh, q, c != 0);
+									const BudgetDecision b = FitDelayBudget(1.0 / sh, 1.0 / dh, q, c != 0, f,
+										static_cast<FloorPolicy>(pol));
+									Assert::IsFalse(b.floorCompetes);
+									Assert::AreEqual(size_t(0), b.raisedQueueFrames);
+									const std::wstring n = Name(sh, dh) + L" q " + std::to_wstring(q) + L" f " + std::to_wstring(f);
+									Assert::AreEqual(a.fits, b.fits, n.c_str());
+									Assert::AreEqual(a.creditFrames, b.creditFrames, n.c_str());
+									Assert::AreEqual(a.leadMs, b.leadMs, n.c_str());
+									Assert::AreEqual(a.budgetMs, b.budgetMs, n.c_str());
+									Assert::AreEqual(a.totalMs, b.totalMs, n.c_str());
+									Assert::AreEqual(std::string(a.reason), std::string(b.reason), n.c_str());
+									Assert::IsFalse(b.floorCompetes, n.c_str());
+									Assert::AreEqual(b.totalMs, b.realTotalMs, n.c_str());
+									Assert::IsTrue(Presenter::FloorReport(b, FloorPolicy::CreditWins).empty(), n.c_str());
+								}
+		}
+
+		TEST_METHOD(FloorAboveTheMotionDepthCreditWinsReportsTheRealDelay)
+		{
+			// 24p on 60 Hz: lead 2 extras = 33.3 ms, credit 1 frame; queue 4; motion floor 3,
+			// a declared analysis lead 2 -> floor 4 > 4 - 1.
+			const double ps = 1.0 / 24.0, pd = 1.0 / 60.0;
+			const size_t floorFrames = VpQueueRules::AnalysisFloorFrames(3, 2);
+			const BudgetDecision d = FitDelayBudget(ps, pd, 4, true, floorFrames, FloorPolicy::CreditWins);
+			const BudgetDecision today = FitDelayBudget(ps, pd, 4, true);
+			Assert::IsTrue(d.floorCompetes);
+			Assert::AreEqual(today.fits, d.fits, L"CreditWins keeps today's decision");
+			Assert::AreEqual(today.creditFrames, d.creditFrames);
+			Assert::AreEqual(size_t{ 1 }, d.creditFrames);
+			Assert::AreEqual(today.totalMs, d.totalMs);
+			Assert::AreEqual((4.0 * ps + 2.0 * pd) * 1000.0, d.realTotalMs, 1e-9, L"the queue stays at the floor");
+			Assert::IsTrue(d.realTotalMs > d.budgetMs, L"the real delay exceeds the budget");
+			const std::string report = Presenter::FloorReport(d, FloorPolicy::CreditWins);
+			Assert::IsTrue(report.find("credit wins") != std::string::npos);
+			Assert::IsTrue(report.find("200 ms") != std::string::npos, L"the real delay is shown");
+
+			Presenter p;
+			p.analysisFloor.store(floorFrames);
+			const BudgetDecision viaPresenter = p.FitBudget(ps, pd, 4, true);
+			Assert::AreEqual(d.creditFrames, viaPresenter.creditFrames, L"the default policy is CreditWins");
+			Assert::IsFalse(p.UpdateBudget(viaPresenter).veto);
+			Assert::AreEqual(size_t{ 1 }, p.budgetCredit);
+		}
+
+		TEST_METHOD(FloorAboveTheMotionDepthFloorWinsShrinksTheCreditAndVetoesVisibly)
+		{
+			const double ps = 1.0 / 24.0, pd = 1.0 / 60.0;
+			const size_t floorFrames = VpQueueRules::AnalysisFloorFrames(3, 2);
+			const BudgetDecision d = FitDelayBudget(ps, pd, 4, true, floorFrames, FloorPolicy::FloorWins);
+			Assert::IsTrue(d.floorCompetes);
+			Assert::IsFalse(d.fits, L"the frames the floor leaves do not cover the lead");
+			Assert::AreEqual(size_t{ 0 }, d.creditFrames, L"the credit shrinks to what the floor leaves");
+			Assert::AreEqual(std::string("the analysis floor keeps the frames the lead needs"), std::string(d.reason));
+			Assert::IsTrue(Presenter::FloorReport(d, FloorPolicy::FloorWins).find("vetoed") != std::string::npos);
+
+			Presenter p;
+			p.analysisFloor.store(floorFrames);
+			p.floorPolicy = FloorPolicy::FloorWins;
+			const PresenterBudgetChange change = p.UpdateBudget(p.FitBudget(ps, pd, 4, true));
+			Assert::IsTrue(change.veto && change.changed);
+			Assert::AreEqual(size_t{ 0 }, p.budgetCredit);
+
+			// A queue long enough for both: no competition, the credit as today.
+			const BudgetDecision longer = FitDelayBudget(ps, pd, 6, true, floorFrames, FloorPolicy::FloorWins);
+			Assert::IsFalse(longer.floorCompetes);
+			Assert::IsTrue(longer.fits);
+			Assert::AreEqual(size_t{ 1 }, longer.creditFrames);
+		}
+
+		TEST_METHOD(AvrTier200MsAt24p)
+		{
+			// The 200 ms AVR tier at 24p: the whole frames inside it (4 = 166.7 ms); a TD lead 3
+			// declares floor 5, capped at the queue. Both policies report; FloorWins vetoes.
+			const double ps = 1.0 / 24.0, pd = 1.0 / 60.0;
+			const size_t q = static_cast<size_t>(std::floor(0.200 / ps + 1e-9));
+			Assert::AreEqual(size_t{ 4 }, q);
+			const size_t floorFrames = VpQueueRules::AnalysisFloorFrames(MotionAhead::QueueFramesFor(2), 3);
+			Assert::AreEqual(size_t{ 5 }, floorFrames);
+			const BudgetDecision credit = FitDelayBudget(ps, pd, q, true, floorFrames, FloorPolicy::CreditWins);
+			Assert::IsTrue(credit.fits && credit.floorCompetes);
+			Assert::IsTrue(credit.totalMs <= 200.0 + 0.5, L"the counted delay fits the tier");
+			Assert::AreEqual((4.0 * ps + 2.0 * pd) * 1000.0, credit.realTotalMs, 1e-9);
+			Assert::IsFalse(Presenter::FloorReport(credit, FloorPolicy::CreditWins).empty(), L"visible");
+			const BudgetDecision floorWins = FitDelayBudget(ps, pd, q, true, floorFrames, FloorPolicy::FloorWins);
+			Assert::IsFalse(floorWins.fits);
+			Assert::IsTrue(floorWins.totalMs <= floorWins.budgetMs + floorWins.leadMs + 1e-9);
+			Assert::IsFalse(Presenter::FloorReport(floorWins, FloorPolicy::FloorWins).empty(), L"visible");
+			// The queue rule keeps the floor (capped at the target) in both.
+			Assert::AreEqual(q, VpQueueRules::CombineQueueTarget(q, credit.creditFrames, floorFrames, true));
+			// Audit SHOULD 2 (f445678ad cap, TD design (a)4): the floor the host now passes is capped at the desired queue (5 -> 4).
+			// CreditWins still fits (never a TD veto); FloorWins keeps its definition: credit q - max(4, 3) = 0 < 1 wanted, a veto.
+			const size_t capped = VpQueueRules::AnalysisFloorFrames(MotionAhead::QueueFramesFor(2), 3, q, false);
+			Assert::AreEqual(size_t{ 4 }, capped);
+			const BudgetDecision cappedCredit = FitDelayBudget(ps, pd, q, true, capped, FloorPolicy::CreditWins);
+			Assert::IsTrue(cappedCredit.fits && cappedCredit.floorCompetes);
+			Assert::AreEqual((4.0 * ps + 2.0 * pd) * 1000.0, cappedCredit.realTotalMs, 1e-9);
+			Assert::IsFalse(FitDelayBudget(ps, pd, q, true, capped, FloorPolicy::FloorWins).fits);
+		}
+
+		// S1 amendment (TD design (a)4/(b)6): the floor is capped at the desired queue (200 ms at
+		// 24p = 4 frames, 3 ahead: a TD lead 3 is given what the queue holds, never a veto); the
+		// RaiseQueue choice leaves it uncapped.
+		TEST_METHOD(TheFloorIsCappedAtTheDesiredQueueUnlessRaised)
+		{
+			const double ps = 1.0 / 24.0;
+			const size_t q = static_cast<size_t>(std::floor(0.200 / ps + 1e-9));
+			Assert::AreEqual(size_t(4), q);
+			Assert::AreEqual(size_t(4), VpQueueRules::AnalysisFloorFrames(3, 3, q, false), L"capped at the desired queue");
+			Assert::AreEqual(size_t(5), VpQueueRules::AnalysisFloorFrames(3, 3, q, true), L"RaiseQueue: uncapped");
+			Assert::AreEqual(size_t(5), VpQueueRules::AnalysisFloorFrames(3, 3, 0, false), L"desired not known: no cap");
+			Assert::AreEqual(size_t(3), VpQueueRules::AnalysisFloorFrames(3, 0, q, false), L"the motion floor as today");
+			for (size_t m = 0; m <= 8; ++m)
+				for (unsigned l = 0; l <= 6; ++l)
+					for (size_t d = 0; d <= 10; ++d)
+					{
+						const size_t capped = VpQueueRules::AnalysisFloorFrames(m, l, d, false);
+						const size_t raw = VpQueueRules::AnalysisFloorFrames(m, l);
+						Assert::AreEqual(d == 0 ? raw : (std::min)(raw, d), capped);
+						Assert::AreEqual(raw, VpQueueRules::AnalysisFloorFrames(m, l, d, true));
+					}
+			// The capped floor never vetoes the credit by itself under the default policy.
+			const BudgetDecision dflt = FitDelayBudget(ps, 1.0 / 60.0, q, true, VpQueueRules::AnalysisFloorFrames(3, 3, q, false),
+				FloorPolicy::CreditWins);
+			Assert::IsTrue(dflt.fits);
+			Assert::AreEqual(size_t(0), dflt.raisedQueueFrames);
+		}
+
+		TEST_METHOD(CombineQueueTargetRaiseOffIsTodaysRule)
+		{
+			for (size_t desired = 0; desired <= 12; ++desired)
+				for (size_t credit = 0; credit <= 3; ++credit)
+					for (size_t floor = 0; floor <= 14; ++floor)
+						for (int fixes = 0; fixes < 2; ++fixes)
+						{
+							const size_t caps[] = { 0, 8, 16 };
+							for (size_t cap : caps)
+							{
+								const size_t today = VpQueueRules::CombineQueueTarget(desired, credit, floor, fixes != 0);
+								Assert::AreEqual(today, VpQueueRules::CombineQueueTarget(desired, credit, floor, fixes != 0, false, cap));
+								const size_t raised = VpQueueRules::CombineQueueTarget(desired, credit, floor, fixes != 0, true, cap);
+								Assert::IsTrue(raised >= today);
+								if (!fixes)
+									Assert::AreEqual(today, raised, L"no queue_timing_fixes: no floor, nothing raised");
+								else
+								{
+									const size_t f = cap > 0 ? (std::min)(floor, cap) : floor;
+									Assert::AreEqual((std::max)(today, f), raised);
+									if (cap > 0)
+										Assert::IsTrue(raised <= (std::max)(today, cap), L"never above capacity");
+								}
+							}
+						}
+		}
+
+		TEST_METHOD(RaiseQueueKeepsTheCreditAndReportsTheRaisedQueue)
+		{
+			const double ps = 1.0 / 24.0, pd = 1.0 / 60.0;
+			const size_t floorFrames = VpQueueRules::AnalysisFloorFrames(3, 3, 4, true);
+			Assert::AreEqual(size_t(5), floorFrames);
+			const BudgetDecision today = FitDelayBudget(ps, pd, 4, true);
+			const BudgetDecision d = FitDelayBudget(ps, pd, 4, true, floorFrames, FloorPolicy::RaiseQueue);
+			Assert::AreEqual(today.fits, d.fits);
+			Assert::AreEqual(today.creditFrames, d.creditFrames, L"the credit as today");
+			Assert::AreEqual(today.totalMs, d.totalMs);
+			Assert::IsTrue(d.floorCompetes);
+			Assert::AreEqual(size_t(5), d.raisedQueueFrames);
+			Assert::AreEqual(size_t(4), d.queueFrames);
+			Assert::AreEqual((5.0 * ps + PlannedLead(ps, pd)) * 1000.0, d.realTotalMs, 1e-9);
+			const std::string report = Presenter::FloorReport(d, FloorPolicy::RaiseQueue);
+			Assert::IsTrue(report.find("raises the queue above the desired 4 frames") != std::string::npos);
+			// Not raised (the floor inside the queue): the credit-wins line.
+			const BudgetDecision inside = FitDelayBudget(ps, pd, 4, true, 4, FloorPolicy::RaiseQueue);
+			Assert::AreEqual(size_t(0), inside.raisedQueueFrames);
+			Assert::IsTrue(Presenter::FloorReport(inside, FloorPolicy::RaiseQueue).find("the credit wins") != std::string::npos);
+		}
+
+		// P6-rest audit S1: the two RaiseQueue switches (the queue target's VpFixedBudgetPolicy::SetRaiseQueueForAnalysis and
+		// the budget's Presenter::floorPolicy = RaiseQueue) agree: whenever the budget reports a raised queue the queue
+		// target is that queue, and the reverse; both are capped at the queue's capacity (0 = no cap), and the reported
+		// real delay is the raised queue's.
+		TEST_METHOD(TheTwoRaiseQueueSwitchesAgreeOnTheRaisedQueue)
+		{
+			const double ps = 1.0 / 24.0, pd = 1.0 / 60.0;
+			VpQueueTiming::VpFixedBudgetPolicy policy;
+			policy.SetRaiseQueueForAnalysis(true);
+			Presenter p;
+			p.floorPolicy = FloorPolicy::RaiseQueue;
+			size_t compared = 0, raisedSeen = 0;
+			for (size_t q = 3; q <= 8; ++q)
+				for (size_t floorFrames = 0; floorFrames <= 12; ++floorFrames)
+					for (size_t cap = 0; cap <= 10; ++cap)
+					{
+						if (cap > 0 && cap < q)
+							continue;   // a capacity is never below the desired queue the host clamps to it
+						p.analysisFloor.store(floorFrames);
+						p.queueCapacity.store(cap);
+						const BudgetDecision d = p.FitBudget(ps, pd, q, true);
+						if (d.creditFrames == 0)
+							continue;   // the credit path not taken: no queue decision to compare
+						QueueTimingPolicy::TargetContext c;
+						c.useFrameQueue = true;
+						c.capacity = cap;
+						c.cadenceScaledDepth = q;
+						c.renderAheadCreditFrames = 0;   // the raise compared on the queue the floor holds
+						c.lookaheadFloor = floorFrames;
+						const size_t target = policy.QueueTarget(c);
+						Assert::AreEqual(d.raisedQueueFrames > 0, target > q, L"both raise or neither");
+						if (d.raisedQueueFrames > 0)
+						{
+							Assert::AreEqual(target, d.raisedQueueFrames, L"the same raised queue");
+							Assert::IsTrue(cap == 0 || d.raisedQueueFrames <= cap, L"never above capacity");
+							Assert::AreEqual((double(d.raisedQueueFrames) * ps + PlannedLead(ps, pd)) * 1000.0, d.realTotalMs, 1e-9,
+								L"the real delay is the raised queue's");
+							++raisedSeen;
+						}
+						++compared;
+					}
+			Assert::IsTrue(compared > 100 && raisedSeen > 10, L"the sweep compared raised and unraised cases");
+		}
+
+		// S1 amendment (TD design (b)6): GateCosts' spare-slot GPU ms is additive in the average
+		// check, absent from the single-frame check, 0 = today.
+		TEST_METHOD(TheSpareSlotCostIsAdditiveInTheAverageOnly)
+		{
+			GateInput in;
+			in.sourcePeriod = 1.0 / 24.0;
+			in.displayPeriod = 1.0 / 60.0;
+			in.costs.newFrameMs = 10.0;
+			in.costs.extraMs = 4.0;
+			in.costs.estimateMs = 1.0;
+			const double base = FrameCostMs(in, 0);
+			const bool fitsBase = Fits(in, 0, in.utilisation);
+			Assert::IsTrue(fitsBase);
+			in.costs.spareSlotMs = 0.0;
+			Assert::AreEqual(base, FrameCostMs(in, 0), L"0 = today exactly");
+			in.costs.spareSlotMs = 2.5;
+			Assert::AreEqual(base + 2.5, FrameCostMs(in, 0), 1e-12);
+			in.costs.spareSlotMs = in.utilisation * 1000.0 * in.sourcePeriod;   // the whole average budget
+			Assert::IsFalse(Fits(in, 0, in.utilisation), L"the average check sees it");
+			// The single-frame check alone: an average budget so wide only it can fail.
+			GateInput single = in;
+			single.costs.spareSlotMs = 0.0;
+			single.costs.newFrameMs = 60.0;
+			const bool a = Fits(single, 0, 100.0);
+			single.costs.spareSlotMs = 30.0;
+			Assert::AreEqual(a, Fits(single, 0, 100.0), L"the single-frame check does not see it");
+
+			Presenter p;
+			PresenterGateFrame f;
+			f.sourcePeriod = in.sourcePeriod;
+			f.displayPeriod = in.displayPeriod;
+			Assert::AreEqual(0.0, p.UpdateGate(1.0, f).input.costs.spareSlotMs, L"default none");
+			p.spareSlotMs.store(1.5);
+			Assert::AreEqual(1.5, p.UpdateGate(2.0, f).input.costs.spareSlotMs, L"the Presenter's input reaches the gate");
+		}
+
+		// Retro gate F2: the Presenter and its epoch key on render_ahead OR TD; TD off is today's rule.
+		TEST_METHOD(ThePresenterAndItsEpochKeyOnRenderAheadOrTemporalDetail)
+		{
+			// TD off: Active and the epoch follow render_ahead alone, as before.
+			for (int before = 0; before < 2; ++before)
+				for (int now = 0; now < 2; ++now)
+				{
+					Presenter p;
+					Assert::IsTrue(p.epoch.Changed(1, 2.5), L"the first call starts the epoch");
+					Assert::IsFalse(p.epoch.Changed(1, 2.5), L"settled epoch");
+					const bool on = p.ActivatesOn(before != 0, now != 0);
+					Assert::AreEqual(before == 0 && now != 0, on, L"TD off: today's render_ahead switched-on rule");
+					Assert::AreEqual(on, p.epoch.Changed(1, 2.5), L"the epoch restarts exactly when the Presenter switches on");
+					Assert::AreEqual(now != 0, p.Active(now != 0), L"TD off: Active is render_ahead");
+				}
+
+			// TD on with render_ahead off: active, and switching TD on starts the gate again.
+			Presenter p;
+			p.epoch.Changed(7, 2.5);
+			p.SetTemporalDetailOn(true, false);
+			Assert::IsTrue(p.Active(false), L"TD on: the Presenter runs without render_ahead");
+			Assert::IsTrue(p.epoch.Changed(7, 2.5), L"TD switched on: a new epoch");
+			Assert::IsFalse(p.epoch.Changed(7, 2.5));
+			// render_ahead switched on while TD is on: the Presenter was already on, the epoch stands.
+			Assert::IsFalse(p.ActivatesOn(false, true));
+			Assert::IsFalse(p.epoch.Changed(7, 2.5), L"already active: no reset");
+			// TD switched on while render_ahead is on: no reset either.
+			Presenter q;
+			q.epoch.Changed(3, 2.0);
+			q.SetTemporalDetailOn(true, true);
+			Assert::IsFalse(q.epoch.Changed(3, 2.0), L"render_ahead on already: no reset");
+			// TD off again: back to render_ahead alone; the budget veto still wins.
+			q.SetTemporalDetailOn(false, true);
+			Assert::IsFalse(q.Active(false));
+			q.budgetVeto = true;
+			Assert::IsFalse(q.Active(true), L"the budget veto applies to both switches");
+			q.SetTemporalDetailOn(true, false);
+			Assert::IsFalse(q.Active(false), L"the budget veto applies with TD on");
+		}
+	};
+
+	// P6 rest seam rework: the Presenter's after-present step as the module-side body of the
+	// S5 seam (R12 AfterPresent; wired by Phase 3, refs/108), and its own statistics read
+	// (refs/108 addendum: HA-R13 stays unwired; refs/112:24).
+	namespace
+	{
+		// A swapchain whose frame statistics the test drives. A vsync shows the oldest queued
+		// present; `shown` records which refresh each present id first showed on. With
+		// tickOnRead, one vsync passes before every GetFrameStatistics call after the first.
+		class FakeStatisticsSwapchain final : public IDXGISwapChain
+		{
+		public:
+			HRESULT result = S_OK;
+			UINT presentCount = 0, presentRefreshCount = 0, syncRefreshCount = 0;
+			LONGLONG syncQpc = 0;
+			LONGLONG periodQpc = 166667;
+			bool tickOnRead = false;
+			UINT queuedPresents = 0;
+			std::vector<std::pair<UINT, UINT>> shown;
+			int reads = 0;
+
+			void Vsync()
+			{
+				++syncRefreshCount;
+				syncQpc += periodQpc;
+				if (queuedPresents > 0)
+				{
+					--queuedPresents;
+					++presentCount;
+					presentRefreshCount = syncRefreshCount;
+					shown.emplace_back(presentCount, presentRefreshCount);
+				}
+			}
+			UINT RefreshOf(UINT id) const
+			{
+				for (const auto& s : shown)
+					if (s.first == id)
+						return s.second;
+				return 0;
+			}
+
+			HRESULT STDMETHODCALLTYPE GetFrameStatistics(DXGI_FRAME_STATISTICS* stats) override
+			{
+				++reads;
+				if (tickOnRead && reads > 1)
+					Vsync();
+				if (FAILED(result))
+					return result;
+				stats->PresentCount = presentCount;
+				stats->PresentRefreshCount = presentRefreshCount;
+				stats->SyncRefreshCount = syncRefreshCount;
+				stats->SyncQPCTime.QuadPart = syncQpc;
+				stats->SyncGPUTime.QuadPart = 0;
+				return S_OK;
+			}
+			HRESULT STDMETHODCALLTYPE GetLastPresentCount(UINT* count) override { *count = presentCount + queuedPresents; return S_OK; }
+			HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** out) override { *out = nullptr; return E_NOINTERFACE; }
+			ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+			ULONG STDMETHODCALLTYPE Release() override { return 1; }
+			HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID, UINT, const void*) override { return E_NOTIMPL; }
+			HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID, const IUnknown*) override { return E_NOTIMPL; }
+			HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID, UINT*, void*) override { return E_NOTIMPL; }
+			HRESULT STDMETHODCALLTYPE GetParent(REFIID, void**) override { return E_NOTIMPL; }
+			HRESULT STDMETHODCALLTYPE GetDevice(REFIID, void**) override { return E_NOTIMPL; }
+			HRESULT STDMETHODCALLTYPE Present(UINT, UINT) override { ++queuedPresents; return S_OK; }
+			HRESULT STDMETHODCALLTYPE GetBuffer(UINT, REFIID, void**) override { return E_NOTIMPL; }
+			HRESULT STDMETHODCALLTYPE SetFullscreenState(BOOL, IDXGIOutput*) override { return E_NOTIMPL; }
+			HRESULT STDMETHODCALLTYPE GetFullscreenState(BOOL*, IDXGIOutput**) override { return E_NOTIMPL; }
+			HRESULT STDMETHODCALLTYPE GetDesc(DXGI_SWAP_CHAIN_DESC*) override { return E_NOTIMPL; }
+			HRESULT STDMETHODCALLTYPE ResizeBuffers(UINT, UINT, UINT, DXGI_FORMAT, UINT) override { return E_NOTIMPL; }
+			HRESULT STDMETHODCALLTYPE ResizeTarget(const DXGI_MODE_DESC*) override { return E_NOTIMPL; }
+			HRESULT STDMETHODCALLTYPE GetContainingOutput(IDXGIOutput**) override { return E_NOTIMPL; }
+		};
+
+		// FROZEN COPY of the renderer's ObservePresent statistics mapping
+		// (LibplaceboVideoRenderer.cpp ObservePresent at b6bdfc9fb): the fields the
+		// presentation sample takes from one GetFrameStatistics call.
+		struct LegacySample
+		{
+			bool available = false, disjoint = false;
+			int32_t frameStatisticsResult = 0;
+			uint32_t presentCount = 0, presentRefreshCount = 0, syncRefreshCount = 0;
+			int64_t syncQpc = 0;
+		};
+		LegacySample LegacyObservePresentStatistics(IDXGISwapChain* nativeSwapchain)
+		{
+			LegacySample sample;
+			if (nativeSwapchain)
+			{
+				DXGI_FRAME_STATISTICS statistics{};
+				const HRESULT statisticsResult = nativeSwapchain->GetFrameStatistics(&statistics);
+				if (statisticsResult == DXGI_ERROR_FRAME_STATISTICS_DISJOINT)
+				{
+					sample.frameStatisticsResult = static_cast<int32_t>(statisticsResult);
+					sample.disjoint = true;
+				}
+				else if (SUCCEEDED(statisticsResult))
+				{
+					sample.available = true;
+					sample.presentCount = statistics.PresentCount;
+					sample.presentRefreshCount = statistics.PresentRefreshCount;
+					sample.syncRefreshCount = statistics.SyncRefreshCount;
+					sample.syncQpc = statistics.SyncQPCTime.QuadPart;
+				}
+				else
+					sample.frameStatisticsResult = static_cast<int32_t>(statisticsResult);
+			}
+			return sample;
+		}
+
+		// FROZEN COPY of the renderer's present-block render-ahead step (LibplaceboVideoRenderer.cpp
+		// RenderLocked at b6bdfc9fb :25902-25917; renderAheadCommitted / renderAheadTargetLeadMs /
+		// renderAheadEstimatedLeadMs are aliases into the Presenter, RenderAheadBreak() =
+		// Presenter::Break(RenderAheadNow())).
+		struct LegacyHost
+		{
+			Presenter p;
+			bool presentationTargetTimingKnown = false;
+			double presentationTargetLeadMs = 0.0;
+			bool openLoop = false;
+		};
+		void LegacyPresentBlock(LegacyHost& h, bool extrasPath, bool rendered, bool submitted, double now)
+		{
+			if (extrasPath)
+			{
+				if (!h.p.committed)
+					h.p.Break(now);
+				else if (h.presentationTargetTimingKnown && h.p.targetLeadMs > h.presentationTargetLeadMs)
+					h.presentationTargetLeadMs = h.p.targetLeadMs;
+				h.p.estimatedLeadMs.store(h.p.committed && !h.presentationTargetTimingKnown &&
+					h.openLoop ? h.p.targetLeadMs : 0.0, std::memory_order_relaxed);
+			}
+			else
+			{
+				if (rendered && submitted)
+					h.p.Break(now);
+			}
+		}
+
+		void AssertSamePresenter(const Presenter& a, const Presenter& b, const wchar_t* n)
+		{
+			Assert::AreEqual(a.schedule.Active(), b.schedule.Active(), n);
+			Assert::AreEqual(a.schedule.NextVsync(), b.schedule.NextVsync(), n);
+			Assert::AreEqual(a.committed, b.committed, n);
+			Assert::AreEqual(a.mainInterval, b.mainInterval, n);
+			Assert::AreEqual(a.targetLeadMs, b.targetLeadMs, n);
+			Assert::AreEqual<size_t>(a.creditFrames.load(), b.creditFrames.load(), n);
+			Assert::AreEqual(a.estimatedLeadMs.load(), b.estimatedLeadMs.load(), n);
+			Assert::AreEqual(a.expectedPresent, b.expectedPresent, n);
+		}
+	}
+
+	TEST_CLASS(PresenterAfterPresentTests)
+	{
+	public:
+		// The handler body = the renderer's present-block step, both branches, every input
+		// combination, over seeded frame sequences (commits with and without credit, breaks,
+		// leads above and below the host's, open and closed loop). Retro gate F1, "switch off"
+		// half: the plain branch is byte-identical (it still ends the chain; the matched-rate
+		// plan at maxExtras 0 is S4, not built).
+		TEST_METHOD(TheHandlerMatchesTheRenderersPresentBlock)
+		{
+			std::mt19937 rng(20261112u);
+			std::uniform_int_distribution<int> coin(0, 1), pick(0, 5);
+			std::uniform_real_distribution<double> lead(0.0, 60.0);
+			unsigned long long compared = 0, raised = 0, broke = 0, estimated = 0;
+			for (int run = 0; run < 200; ++run)
+			{
+				LegacyHost legacy;
+				Presenter p;
+				legacy.p.budgetCredit = p.budgetCredit = static_cast<size_t>(pick(rng) % 3);
+				double hostLead = 0.0;
+				double now = 100.0;
+				for (int frame = 0; frame < 120; ++frame)
+				{
+					now += 1.0 / 24.0;
+					const bool known = coin(rng) != 0, open = coin(rng) != 0;
+					const int k = pick(rng) % 3;
+					const AfterPresentKind kind = k == 0 ? AfterPresentKind::AfterLastExtra :
+						k == 1 ? AfterPresentKind::NoExtras : AfterPresentKind::Plain;
+					const bool rendered = pick(rng) != 0, submitted = pick(rng) != 0;
+					// The frame: BeginFrame (renderAheadCommitted = false), then the extras may commit.
+					legacy.p.BeginFrame();
+					p.BeginFrame();
+					if (kind != AfterPresentKind::Plain && pick(rng) >= 2)
+					{
+						PresenterCommit c;
+						c.nextFirstVsync = now + 0.05;
+						c.nextInterval = 1 + pick(rng) % 3;
+						c.expectedPresent = static_cast<uint32_t>(frame + 1);
+						c.storeCredit = coin(rng) != 0;
+						c.queueCredit = coin(rng) != 0;
+						c.cadenceRatio = 2.5;
+						const std::vector<std::pair<uint32_t, double>> ids = { { c.expectedPresent, now + 0.02 } };
+						legacy.p.Commit(c, ids);
+						p.Commit(c, ids);
+						legacy.p.targetLeadMs = p.targetLeadMs = lead(rng);
+					}
+					legacy.presentationTargetTimingKnown = known;
+					legacy.openLoop = open;
+					if (pick(rng) == 0)
+						hostLead = lead(rng);
+					legacy.presentationTargetLeadMs = hostLead;
+
+					AfterPresentFacts f;
+					f.kind = kind;
+					f.rendered = rendered;
+					f.submitted = submitted;
+					f.targetTimingKnown = known;
+					f.hostTargetLeadMs = hostLead;
+					f.openLoop = open;
+					f.now = now;
+					LegacyPresentBlock(legacy, kind != AfterPresentKind::Plain, rendered, submitted, now);
+					const AfterPresentResult r = PresenterAfterPresent(p, f, nullptr);
+					// The host merges the raise-only lead (PresentOutcome: the larger one).
+					const double merged = r.targetLeadMs > hostLead ? r.targetLeadMs : hostLead;
+					const std::wstring n = L"run " + std::to_wstring(run) + L" frame " + std::to_wstring(frame);
+					Assert::IsTrue(r.ran, n.c_str());
+					Assert::AreEqual(legacy.presentationTargetLeadMs, merged, n.c_str());
+					AssertSamePresenter(legacy.p, p, n.c_str());
+					Assert::AreEqual(legacy.p.estimatedLeadMs.load(), r.estimatedLeadMs, n.c_str());
+					Assert::AreEqual(legacy.p.committed, r.committed, n.c_str());
+					Assert::IsFalse(r.statistics.read, L"no swapchain: no read");
+					hostLead = merged;
+					++compared;
+					if (r.targetLeadMs > 0.0) ++raised;
+					if (r.broke) ++broke;
+					if (r.estimatedLeadMs > 0.0) ++estimated;
+				}
+			}
+			Assert::IsTrue(compared == 24000 && raised > 100 && broke > 1000 && estimated > 100,
+				L"the sweep reached every branch");
+		}
+
+		// Original pathway, from the host's facts or the Presenter's own fact: the handler leaves the
+		// Presenter and the swapchain untouched.
+		TEST_METHOD(TheOriginalPathwayDoesNothing)
+		{
+			Presenter p;
+			PresenterCommit c;
+			c.nextFirstVsync = 1.0;
+			c.nextInterval = 3;
+			p.Commit(c, {});
+			p.targetLeadMs = 12.0;
+			FakeStatisticsSwapchain chain;
+			chain.presentCount = 7;
+			AfterPresentFacts f;
+			f.originalPathway = true;
+			f.kind = AfterPresentKind::Plain;
+			f.rendered = f.submitted = true;
+			const AfterPresentResult r = PresenterAfterPresent(p, f, &chain);
+			Assert::IsFalse(r.ran);
+			Assert::IsFalse(r.broke);
+			Assert::AreEqual(0, chain.reads, L"no statistics read");
+			Assert::IsTrue(p.schedule.Active(), L"the chain stands");
+			Assert::AreEqual(3, p.mainInterval);
+			Assert::AreEqual(12.0, p.targetLeadMs);
+			Assert::IsTrue(p.mainRefresh.empty());
+			// The Presenter's own fact (PHASE1 SetOriginalPathway), with the host's facts not saying so.
+			Presenter q;
+			q.Commit(c, {});
+			Assert::IsTrue(q.SetOriginalPathway(true, 2.0));
+			q.targetLeadMs = 12.0;
+			q.estimatedLeadMs.store(5.0);
+			q.NoteMainRefresh(6, 20);
+			const bool active = q.schedule.Active();
+			const int interval = q.mainInterval;
+			FakeStatisticsSwapchain other;
+			other.presentCount = 7;
+			other.presentRefreshCount = 21;
+			const AfterPresentKind kinds[] = { AfterPresentKind::AfterLastExtra, AfterPresentKind::NoExtras, AfterPresentKind::Plain };
+			for (AfterPresentKind kind : kinds)
+			{
+				AfterPresentFacts g;
+				g.kind = kind;
+				g.rendered = g.submitted = true;
+				g.targetTimingKnown = true;
+				g.openLoop = true;
+				const AfterPresentResult s = PresenterAfterPresent(q, g, &other);
+				Assert::IsFalse(s.ran);
+				Assert::IsFalse(s.broke);
+				Assert::IsFalse(s.statistics.read);
+			}
+			Assert::AreEqual(0, other.reads, L"no statistics read");
+			Assert::AreEqual(active, q.schedule.Active(), L"the schedule unchanged");
+			Assert::AreEqual(interval, q.mainInterval);
+			Assert::AreEqual(12.0, q.targetLeadMs);
+			Assert::AreEqual(5.0, q.estimatedLeadMs.load());
+			Assert::AreEqual<size_t>(1, q.mainRefresh.size(), L"no bookkeeping");
+			Assert::IsTrue(q.idsSwapchain == nullptr);
+		}
+
+		// refs/108 addendum proof (refs/112:24 ESTIMATE): the statistics the AfterPresent handler
+		// reads are what the renderer's ObservePresent takes from the same swapchain - same call,
+		// same fields, same success / disjoint / failure split - whenever no vsync passes between
+		// the two reads.
+		TEST_METHOD(TheHandlersStatisticsMatchObservePresent)
+		{
+			const HRESULT results[] = { S_OK, DXGI_ERROR_FRAME_STATISTICS_DISJOINT, DXGI_ERROR_UNSUPPORTED,
+				DXGI_ERROR_INVALID_CALL, E_FAIL };
+			std::mt19937 rng(112u);
+			std::uniform_int_distribution<UINT> n(0, 100000);
+			for (HRESULT hr : results)
+				for (int i = 0; i < 200; ++i)
+				{
+					FakeStatisticsSwapchain chain;
+					chain.result = hr;
+					chain.presentCount = n(rng);
+					chain.presentRefreshCount = n(rng);
+					chain.syncRefreshCount = chain.presentRefreshCount + n(rng) % 5;
+					chain.syncQpc = static_cast<LONGLONG>(n(rng)) * 1000;
+					const LegacySample legacy = LegacyObservePresentStatistics(&chain);
+					Presenter p;
+					AfterPresentFacts f;
+					f.kind = AfterPresentKind::NoExtras;
+					const AfterPresentResult r = PresenterAfterPresent(p, f, &chain);
+					Assert::AreEqual(2, chain.reads, L"one read each");
+					Assert::IsTrue(r.statistics.read);
+					Assert::AreEqual(legacy.available, r.statistics.available);
+					Assert::AreEqual(legacy.disjoint, r.statistics.disjoint);
+					if (!legacy.available)
+						Assert::AreEqual(legacy.frameStatisticsResult, static_cast<int32_t>(r.statistics.result));
+					Assert::AreEqual(legacy.presentCount, r.statistics.presentCount);
+					Assert::AreEqual(legacy.presentRefreshCount, r.statistics.presentRefreshCount);
+					Assert::AreEqual(legacy.syncRefreshCount, r.statistics.syncRefreshCount);
+					Assert::AreEqual(legacy.syncQpc, r.statistics.syncQpc);
+					// Only an available read reaches the bookkeeping.
+					Assert::AreEqual(legacy.available, r.notedMainRefresh);
+					Assert::AreEqual<size_t>(legacy.available ? 1 : 0, p.mainRefresh.size());
+				}
+			// No swapchain: neither reads.
+			Presenter p;
+			const AfterPresentResult r = PresenterAfterPresent(p, AfterPresentFacts(), nullptr);
+			Assert::IsFalse(r.statistics.read);
+			Assert::IsFalse(LegacyObservePresentStatistics(nullptr).available);
+		}
+
+		// The limit of that proof, stated as a test: when a vsync passes between ObservePresent's
+		// read and the handler's (real hardware, the extras' presents in between), the two reads
+		// differ - the handler's is newer, never older, and its (present, refresh) pair is one
+		// the display really showed. So the handler's bookkeeping stays correct; it is NOT a copy
+		// of the sample ObservePresent returned.
+		TEST_METHOD(AVsyncBetweenTheReadsGivesANewerConsistentPair)
+		{
+			std::mt19937 rng(25945u);
+			std::uniform_int_distribution<int> presents(0, 3);
+			unsigned long long differed = 0;
+			for (int i = 0; i < 500; ++i)
+			{
+				FakeStatisticsSwapchain chain;
+				for (int s = 0; s < 1 + i % 7; ++s) { chain.Present(1, 0); chain.Vsync(); }
+				for (int q = presents(rng); q > 0; --q)
+					chain.Present(1, 0);   // the extras, queued after the main present
+				chain.tickOnRead = true;   // one vsync passes before the handler reads
+				const LegacySample legacy = LegacyObservePresentStatistics(&chain);
+				Presenter p;
+				const AfterPresentResult r = PresenterAfterPresent(p, AfterPresentFacts(), &chain);
+				Assert::IsTrue(legacy.available && r.statistics.available);
+				Assert::AreEqual(legacy.syncRefreshCount + 1, r.statistics.syncRefreshCount, L"one vsync later");
+				Assert::IsTrue(r.statistics.syncQpc > legacy.syncQpc);
+				Assert::IsTrue(r.statistics.presentCount >= legacy.presentCount, L"never older");
+				Assert::AreEqual(chain.RefreshOf(r.statistics.presentCount), r.statistics.presentRefreshCount,
+					L"the pair is one the display showed");
+				if (r.statistics.presentCount != legacy.presentCount)
+					++differed;
+				Assert::AreEqual<size_t>(1, p.mainRefresh.size());
+				Assert::AreEqual(r.statistics.presentRefreshCount, p.mainRefresh.back().second);
+			}
+			Assert::IsTrue(differed > 100, L"the newer present was seen");
+		}
+
+		// The bookkeeping is idempotent: the extras path's own note (still in the renderer until
+		// the present clusters move) and the handler's note of the same present keep one entry;
+		// an extra's present id is never kept as a main present's refresh; a new swapchain
+		// starts the ids again.
+		TEST_METHOD(TheBookkeepingIsIdempotentWithTheExtrasPathsNote)
+		{
+			FakeStatisticsSwapchain chain;
+			chain.presentCount = 40;
+			chain.presentRefreshCount = 100;
+			Presenter p;
+			p.NoteIdsSwapchain(static_cast<IDXGISwapChain*>(&chain));
+			p.NoteStatisticsPresent(40, 100);   // the extras path's note (renderer, PresentDejudderExtras)
+			const AfterPresentResult r = PresenterAfterPresent(p, AfterPresentFacts(), &chain);
+			Assert::IsTrue(r.statistics.available);
+			Assert::IsFalse(r.notedMainRefresh);
+			Assert::AreEqual<size_t>(1, p.mainRefresh.size());
+			// An extra's id.
+			p.NoteExtraPresent(41);
+			chain.presentCount = 41;
+			chain.presentRefreshCount = 101;
+			Assert::IsFalse(PresenterAfterPresent(p, AfterPresentFacts(), &chain).notedMainRefresh);
+			Assert::AreEqual<size_t>(1, p.mainRefresh.size());
+			// The next main present.
+			chain.presentCount = 42;
+			chain.presentRefreshCount = 103;
+			Assert::IsTrue(PresenterAfterPresent(p, AfterPresentFacts(), &chain).notedMainRefresh);
+			Assert::AreEqual<size_t>(2, p.mainRefresh.size());
+			Assert::AreEqual(103u, p.mainRefresh.back().second);
+			// Another swapchain: the ids start again.
+			FakeStatisticsSwapchain other;
+			other.presentCount = 1;
+			other.presentRefreshCount = 5;
+			Assert::IsTrue(PresenterAfterPresent(p, AfterPresentFacts(), &other).notedMainRefresh);
+			Assert::AreEqual<size_t>(1, p.mainRefresh.size());
+			Assert::IsTrue(p.extraIds.empty());
+			Assert::IsTrue(p.idsSwapchain == static_cast<const void*>(static_cast<IDXGISwapChain*>(&other)));
+		}
+
+		// D2 (doc 91 C :67; 67v2 s5.6 / s10; 102 tab V5(b)): what TD needs from the Presenter,
+		// checked in one place before the API is frozen - the analysis floor (declared lead + 2)
+		// reaches the delay budget; the 4-ahead design point fits when the queue may be raised
+		// (RaiseQueue), capped by the capacity; spare-slot GPU work is priced additively; the
+		// Presenter runs and restarts its epoch with TD on and render_ahead off; and the
+		// after-present step neither renders nor presents (it only decides and books), so a
+		// check of frame N+1 before its present is not foreclosed.
+		TEST_METHOD(ThePresenterServesTemporalDetailNeedsDoc91C67)
+		{
+			const double ps = 1.0 / 24.0, pd = 1.0 / 60.0;
+			// The 4-ahead point: declared lead 4 -> floor 6 (A shown, 4 ahead, one arriving).
+			const size_t floor = VpQueueRules::AnalysisFloorFrames(3, 4);
+			Assert::AreEqual<size_t>(6, floor);
+			Presenter p;
+			p.analysisFloor.store(floor);
+			// Today's policy: the floor reaches the budget, the queue is not raised.
+			const BudgetDecision kept = p.FitBudget(ps, pd, 5, true);
+			Assert::AreEqual<size_t>(6, kept.floorFrames, L"the floor reaches the budget");
+			Assert::IsTrue(kept.creditFrames > 0, L"the credit branch ran");
+			Assert::AreEqual<size_t>(0, kept.raisedQueueFrames);
+			// RaiseQueue: the 4-ahead floor fits above the desired 5 frames, within the capacity.
+			p.floorPolicy = FloorPolicy::RaiseQueue;
+			p.queueCapacity.store(8);
+			Assert::AreEqual<size_t>(6, p.FitBudget(ps, pd, 5, true).raisedQueueFrames, L"the queue rises to the floor");
+			Assert::AreEqual<size_t>(6, VpQueueRules::CombineQueueTarget(5, 1, floor, true, true, 8));
+			Assert::AreEqual<size_t>(5, VpQueueRules::CombineQueueTarget(5, 1, floor, true, false, 8), L"off: today's cap");
+			Assert::AreEqual<size_t>(5, VpQueueRules::CombineQueueTarget(4, 0, floor, true, true, 5), L"capacity caps the raise");
+			// Spare-slot work: additive in the gate's input.
+			p.spareSlotMs.store(2.0);
+			PresenterGateFrame g;
+			g.sourcePeriod = ps;
+			g.displayPeriod = pd;
+			Assert::AreEqual(2.0, p.UpdateGate(1.0, g).input.costs.spareSlotMs);
+			// TD on, render_ahead off: the Presenter runs, its epoch restarts.
+			Presenter q;
+			Assert::IsFalse(q.Active(false));
+			Assert::IsTrue(q.epoch.Changed(1, 2.5));
+			Assert::IsFalse(q.epoch.Changed(1, 2.5));
+			q.SetTemporalDetailOn(true, false);
+			Assert::IsTrue(q.Active(false));
+			Assert::IsTrue(q.epoch.Changed(1, 2.5), L"a new epoch");
+			// The after-present step presents nothing: with a swapchain it only reads the statistics.
+			FakeStatisticsSwapchain chain;
+			chain.presentCount = 3;
+			chain.presentRefreshCount = 9;
+			AfterPresentFacts f;
+			f.kind = AfterPresentKind::Plain;
+			f.rendered = f.submitted = true;
+			const AfterPresentResult r = PresenterAfterPresent(q, f, &chain);
+			Assert::IsTrue(r.ran);
+			Assert::AreEqual(0u, chain.queuedPresents, L"no present made");
+			Assert::AreEqual(1, chain.reads, L"one statistics read");
 		}
 	};
 }
