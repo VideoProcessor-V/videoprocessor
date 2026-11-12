@@ -19,7 +19,7 @@ Keep below-black and above-white codes through every conversion (owner rule: bot
 | Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|
 | `preserve_extended_range` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | `on` | VP-V > Colour > Main > Range and precision; also VP Renderer > Rendering > Processing (upstream copy greyed while VP-V is on) | n/a (VP-only): libplacebo's standard path clips below-black and above-white | `BTB/WTW: clipped (<reason>)` (FallbackCatalog::BtbWtw); the Original pathway sets it `off` | same on all (not tiered) |
-| `extended_range_more_cases` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | `on` | VP-V > Proposed retirement > Proven fixes (all on by default); also VP Renderer > Rendering > Processing > Below-black / above-white: also BT.1886, sRGB, wide-gamut SDR, LUT, HDR (Bill's page row, not greyed yet) | n/a (VP-only) | fix under test, proposed for retirement (group A); `off` = the Stage 10 eligibility; the Original pathway sets it `off` | same on all (not tiered) |
+| `extended_range_more_cases` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | `on` | VP-V > Proposed retirement > Proven fixes (all on by default); built beside Bill's Processing rows; moved to Proven fixes | n/a (VP-only) | fix under test, proposed for retirement (group A); `off` = the Stage 10 eligibility; the Original pathway sets it `off` | same on all (not tiered) |
 
 ## Fallbacks
 
