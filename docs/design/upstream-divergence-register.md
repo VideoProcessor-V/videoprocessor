@@ -29,7 +29,13 @@ fact its binding is told at the first arrival, where the five fix switches are a
 decisions confirmed by the lead (2026-11-11 18:43), not Bill-behaviour changes: (1) the settings LEAVING Original request
 ONE Resync motion invalidation (the Original stretch's queue events were ignored); (2) ENTERING Original breaks the
 render-ahead chain, resets its gate and releases the VP timeline once, from the settings seam (CoreSegments.inl
-UpdatePipelineSlots), so no VP-V plan outlives the switch. Tests: `OriginalPathwayGateTests`; proof of the pathway itself:
+UpdatePipelineSlots), so no VP-V plan outlives the switch. PHASE 2 (refs/113 AUDIT-R F2 + F3, branch r2/fix-r26-ph2):
+(3) ENTERING Original also idles the re-base shader warm-up from the same seam (`VpRebaseWarmup::Controller::
+EnterOriginalPathway`: pending off, its fallback entry released, the factors in force forgotten), because its per-frame
+host call (LVR :23245) is gated in Original and could not clear a warm-up in flight (the "Preparing shaders..." status
+stuck until Stop); (4) the registry's Original fact (`PipelineSlots::Registry::original`) is a `std::atomic<bool>` read
+relaxed, since the conversion loop reads it (LVR :30738) while the render thread replaces the registry at the seam.
+Tests: `OriginalPathwayGateTests`, `OriginalPathwaySiteGateTests`; proof of the pathway itself:
 `OriginalPathwayByteIdenticalToBill`.
 
 | Id | Area | Divergence | Original / off | Kind |

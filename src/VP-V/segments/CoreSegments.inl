@@ -67,6 +67,10 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 		VpMotion::ReleaseVpTimeline(dejudderPolicy, [this](const char* what) { LogVpTimeline(what); });
 		ReleaseFallback("timeline");
 		vpPhasePlanesValid = false;
+		// PHASE 2 (refs/113 F2): the re-base shader warm-up is idled here too; its per-frame call in the render loop is
+		// gated in Original and would otherwise never clear a warm-up in flight (the "Preparing shaders..." status).
+		const VpRebaseWarmup::Controller::Outcome warm = rebaseWarmup.EnterOriginalPathway();
+		if (warm.fallbackChanged) SyncFallback(warm.fallback);
 	}
 	VpFrameAnalysis::Host::SetLimitedDomain(settings.sourceCodingFixes);   // DIV-AN-01 either/or (Original: off = Bill's codes)
 	frameAnalysis.Owner(this).Configure(settings.frameAnalysisStore && !settings.pipelineOriginalPathway,   // WP-23

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -55,6 +56,32 @@ namespace PipelineSlots
 			ResetOrder();
 		}
 
+		// refs/113 F3: `original` is read OFF the render thread (the conversion loop gates the frame-analysis arrival on
+		// OriginalPathway()) while the render thread replaces the whole registry at the settings seam (`pipelineSlots =
+		// next;`), so that one flag is an atomic (relaxed: a plain fact, nothing is published through it; C++14). An
+		// atomic is not copyable, hence the two explicit copies; every other field is read on the render thread only.
+		Registry(const Registry& other)
+			: enabled(other.enabled), component(other.component), upstreamForm(other.upstreamForm), rank(other.rank),
+			order(other.order), original(other.original.load(std::memory_order_relaxed)), entrance(other.entrance),
+			entranceDirty(other.entranceDirty)
+		{
+		}
+		Registry& operator=(const Registry& other)
+		{
+			if (this != &other)
+			{
+				enabled = other.enabled;
+				component = other.component;
+				upstreamForm = other.upstreamForm;
+				rank = other.rank;
+				order = other.order;
+				original.store(other.original.load(std::memory_order_relaxed), std::memory_order_relaxed);
+				entrance = other.entrance;
+				entranceDirty = other.entranceDirty;
+			}
+			return *this;
+		}
+
 		void SetEnabled(Id id, bool on) { enabled[static_cast<size_t>(id)] = on; entranceDirty = true; }
 		bool Enabled(Id id) const { return enabled[static_cast<size_t>(id)]; }
 
@@ -82,9 +109,10 @@ namespace PipelineSlots
 				upstreamForm[i] = info.origin != Origin::Vp;
 			}
 			ResetOrder();
-			original = true;
+			original.store(true, std::memory_order_relaxed);
 		}
-		bool OriginalPathway() const { return original; }
+		// Any thread (relaxed; see the copy constructor): the Original gates in the host and the modules read this.
+		bool OriginalPathway() const { return original.load(std::memory_order_relaxed); }
 		bool UpstreamForm(Id id) const { return upstreamForm[static_cast<size_t>(id)]; }
 
 		// ---- the order (ADR-0021) ----
@@ -247,7 +275,7 @@ namespace PipelineSlots
 		std::array<bool, kCount> upstreamForm{};
 		std::array<int, kCount> rank{};
 		std::vector<Id> order;
-		bool original = false;
+		std::atomic<bool> original{ false };   // refs/113 F3: read off the render thread (relaxed)
 		mutable std::vector<Id> entrance;
 		mutable bool entranceDirty = true;
 	};
