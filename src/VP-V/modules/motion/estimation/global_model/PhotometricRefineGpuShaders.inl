@@ -100,10 +100,11 @@ double CodeB(int x, int y) { return ToD(tB.Load(int3(x, y, 0))); }
 
 void Keys(double t, out double w0, out double w1, out double w2, out double w3)
 {
-	w0 = ((-0.5L * t + 1.0L) * t - 0.5L) * t;
-	w1 = (1.5L * t - 2.5L) * t * t + 1.0L;
-	w2 = ((-1.5L * t + 2.0L) * t + 0.5L) * t;
-	w3 = (0.5L * t - 0.5L) * t * t;
+	precise double k0 = ((-0.5L * t + 1.0L) * t - 0.5L) * t;
+	precise double k1 = (1.5L * t - 2.5L) * t * t + 1.0L;
+	precise double k2 = ((-1.5L * t + 2.0L) * t + 0.5L) * t;
+	precise double k3 = (0.5L * t - 0.5L) * t * t;
+	w0 = k0; w1 = k1; w2 = k2; w3 = k3;
 }
 
 bool SampleB(double u, double v, out double val)
@@ -115,24 +116,27 @@ bool SampleB(double u, double v, out double val)
 			return false;
 		int x0 = FloorD(u), y0 = FloorD(v);
 		double wx0, wx1, wx2, wx3, wy[4];
-		Keys(u - ToDi(x0), wx0, wx1, wx2, wx3);
-		Keys(v - ToDi(y0), wy[0], wy[1], wy[2], wy[3]);
-		double acc = 0.0L;
+		precise double tx = u - ToDi(x0), ty = v - ToDi(y0);
+		Keys(tx, wx0, wx1, wx2, wx3);
+		Keys(ty, wy[0], wy[1], wy[2], wy[3]);
+		precise double acc = 0.0L;
 		[unroll] for (int r = 0; r < 4; ++r)
 		{
 			int yy = y0 - 1 + r;
 			acc += wy[r] * (wx0 * CodeB(x0 - 1, yy) + wx1 * CodeB(x0, yy) + wx2 * CodeB(x0 + 1, yy) + wx3 * CodeB(x0 + 2, yy));
 		}
-		val = acc * gK;
+		precise double vb = acc * gK;
+		val = vb;
 		return true;
 	}
 	if (!(u >= 0.0L && v >= 0.0L && u < ToD(gW) - 1.0L && v < ToD(gH) - 1.0L))
 		return false;
 	int bx0 = FloorD(u), by0 = FloorD(v);
-	double fx = u - ToDi(bx0), fy = v - ToDi(by0);
-	double a = (1.0L - fx) * CodeB(bx0, by0) + fx * CodeB(bx0 + 1, by0);
-	double b = (1.0L - fx) * CodeB(bx0, by0 + 1) + fx * CodeB(bx0 + 1, by0 + 1);
-	val = ((1.0L - fy) * a + fy * b) * gK;
+	precise double fx = u - ToDi(bx0), fy = v - ToDi(by0);
+	precise double a = (1.0L - fx) * CodeB(bx0, by0) + fx * CodeB(bx0 + 1, by0);
+	precise double b = (1.0L - fx) * CodeB(bx0, by0 + 1) + fx * CodeB(bx0 + 1, by0 + 1);
+	precise double vl = ((1.0L - fy) * a + fy * b) * gK;
+	val = vl;
 	return true;
 }
 
@@ -143,10 +147,11 @@ void LoadP(out double h[9])
 
 void ApplyP(double h[9], double x, double y, out double ox, out double oy)
 {
-	double w = h[6] * x + h[7] * y + h[8];
+	precise double w = h[6] * x + h[7] * y + h[8];
 	double iw = (w != 0.0L) ? RcpD(w) : 0.0L;
-	ox = (h[0] * x + h[1] * y + h[2]) * iw;
-	oy = (h[3] * x + h[4] * y + h[5]) * iw;
+	precise double px = (h[0] * x + h[1] * y + h[2]) * iw;
+	precise double py = (h[3] * x + h[4] * y + h[5]) * iw;
+	ox = px; oy = py;
 }
 
 double Huber(double r, double c)
@@ -159,11 +164,12 @@ double Huber(double r, double c)
 void PointOf(uint packed, out double X, out double Y, out double T, out double GX, out double GY)
 {
 	int i = (int)(packed & 0x1FFFu), j = (int)((packed >> 13) & 0x1FFFu);
-	X = gS * (ToDi(i) + 0.5L) - gCx;
-	Y = gS * (ToDi(j) + 0.5L) - gCy;
-	T = CodeA(i, j) * gK;
-	GX = (CodeA(i + 1, j) * gK - CodeA(i - 1, j) * gK) * gInv2S;
-	GY = (CodeA(i, j + 1) * gK - CodeA(i, j - 1) * gK) * gInv2S;
+	precise double pX = gS * (ToDi(i) + 0.5L) - gCx;
+	precise double pY = gS * (ToDi(j) + 0.5L) - gCy;
+	precise double pT = CodeA(i, j) * gK;
+	precise double pGX = (CodeA(i + 1, j) * gK - CodeA(i - 1, j) * gK) * gInv2S;
+	precise double pGY = (CodeA(i, j + 1) * gK - CodeA(i, j - 1) * gK) * gInv2S;
+	X = pX; Y = pY; T = pT; GX = pGX; GY = pGY;
 }
 
 [numthreads(64, 1, 1)]
@@ -199,7 +205,7 @@ void CSCand(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint gi : SV_G
 					}
 					else
 					{
-						double mag = abs(ToD(r) * gK - ToD(l) * gK) + abs(ToD(d) * gK - ToD(t) * gK);
+						precise double mag = abs(ToD(r) * gK - ToD(l) * gK) + abs(ToD(d) * gK - ToD(t) * gK);
 						if (mag >= gMinGrad) bin = (uint)FloorD(min(4095.0L, mag * 4.0L));
 					}
 					if (bin != 0xFFFFu) InterlockedAdd(gsCandHist[bin], 1u);
@@ -374,10 +380,10 @@ void CSResid(uint3 dt : SV_DispatchThreadID)
 	PointOf(packed, X, Y, T, GX, GY);
 	double qx, qy;
 	ApplyP(h, X, Y, qx, qy);
-	double u = (qx + gCx) * gInvS - 0.5L, v = (qy + gCy) * gInvS - 0.5L;
+	precise double u = (qx + gCx) * gInvS - 0.5L, v = (qy + gCy) * gInvS - 0.5L;
 	double iv;
 	bool ok = SampleB(u, v, iv);
-	double r = ok ? gain * T + offset - iv : 0.0L;
+	precise double r = ok ? gain * T + offset - iv : 0.0L;
 	uint2 rb = SD(r);
 	uint flags = (packed & IDX_MASK) | (ok ? OK_BIT : 0u);
 	if (passIx == 0)
@@ -396,16 +402,17 @@ void CSResid(uint3 dt : SV_DispatchThreadID)
 )HLSL",
 R"HLSL(
 // 7. Robust sigma: exact median (element count / 2 of the sorted |r|, the CPU's nth_element) by a 64-bit radix
-// select of the double bits (6 digits of 11 / 11 / 10 bits per word), one group.
-groupshared uint gsMedHist[2048];
-groupshared uint gsMedScan[1024];
-groupshared uint gsMedSel[8];   // 0 prefix hi, 1 prefix lo, 2 rank, 3 count, 4 mask hi, 5 mask lo
+// select of the double bits (8 digits of 8 bits, high word first; |r| >= 0, so the bit order is the value order), one group.
+// Every digit pass is a separate unrolled block with constant shifts; the selection state lives in groupshared memory.
+groupshared uint gsMedHist[256];
+groupshared uint gsMedScan[256];
+groupshared uint gsMedSel[8];   // 0 prefix hi, 1 prefix lo, 2 rank, 3 count, 4 mask hi, 5 mask lo, 6 digits found
 [numthreads(1024, 1, 1)]
 void CSMedian(uint gi : SV_GroupIndex)
 {
 	bool live = uState[S_STOP].x == 0;
 	uint n = uState[S_COUNTS].y;
-	if (gi == 0) { gsMedSel[0] = 0; gsMedSel[1] = 0; gsMedSel[3] = 0; gsMedSel[4] = 0; gsMedSel[5] = 0; }
+	if (gi == 0) { gsMedSel[0] = 0; gsMedSel[1] = 0; gsMedSel[3] = 0; gsMedSel[4] = 0; gsMedSel[5] = 0; gsMedSel[6] = 0; }
 	GroupMemoryBarrierWithGroupSync();
 	uint cnt = 0;
 	if (live)
@@ -417,14 +424,11 @@ void CSMedian(uint gi : SV_GroupIndex)
 	bool enough = count >= gMinPixels;
 	if (gi == 0) gsMedSel[2] = count / 2;
 	GroupMemoryBarrierWithGroupSync();
-	for (uint d = 0; d < 6; ++d)
+	[unroll] for (uint d = 0; d < 8; ++d)
 	{
-		uint part = d % 3;
-		uint shift = part == 0 ? 21u : (part == 1 ? 10u : 0u);
-		uint width = part == 2 ? 10u : 11u;
-		uint dmask = (1u << width) - 1u;
-		gsMedHist[2 * gi] = 0;
-		gsMedHist[2 * gi + 1] = 0;
+		const bool inHi = d < 4;
+		const uint shift = 24u - 8u * (d & 3u);
+		if (gi < 256) gsMedHist[gi] = 0;
 		GroupMemoryBarrierWithGroupSync();
 		uint pHi = gsMedSel[0], pLo = gsMedSel[1], mHi = gsMedSel[4], mLo = gsMedSel[5];
 		if (live && enough)
@@ -434,36 +438,36 @@ void CSMedian(uint gi : SV_GroupIndex)
 				uint4 rr = uRes[k2];
 				uint hi = rr.y & 0x7FFFFFFFu, lo = rr.x;
 				if ((hi & mHi) != pHi || (lo & mLo) != pLo) continue;
-				uint word = d < 3 ? hi : lo;
-				InterlockedAdd(gsMedHist[(word >> shift) & dmask], 1u);
+				uint word = inHi ? hi : lo;
+				InterlockedAdd(gsMedHist[(word >> shift) & 0xFFu], 1u);
 			}
 		GroupMemoryBarrierWithGroupSync();
-		uint h0 = gsMedHist[2 * gi], h1 = gsMedHist[2 * gi + 1];
-		gsMedScan[gi] = h0 + h1;
+		uint h = gi < 256 ? gsMedHist[gi] : 0u;
+		if (gi < 256) gsMedScan[gi] = h;
 		GroupMemoryBarrierWithGroupSync();
-		for (uint off = 1; off < 1024; off <<= 1)
+		[unroll] for (uint off = 1; off < 256; off <<= 1)
 		{
-			uint v = gsMedScan[gi];
-			if (gi >= off) v += gsMedScan[gi - off];
+			uint sv = 0;
+			if (gi < 256) { sv = gsMedScan[gi]; if (gi >= off) sv += gsMedScan[gi - off]; }
 			GroupMemoryBarrierWithGroupSync();
-			gsMedScan[gi] = v;
+			if (gi < 256) gsMedScan[gi] = sv;
 			GroupMemoryBarrierWithGroupSync();
 		}
-		uint incl = gsMedScan[gi], excl = incl - (h0 + h1);
+		uint incl = gi < 256 ? gsMedScan[gi] : 0u;
+		uint excl = incl - h;
 		uint rank = gsMedSel[2];
 		GroupMemoryBarrierWithGroupSync();
-		if (excl <= rank && rank < incl)
+		if (gi < 256 && h != 0 && excl <= rank && rank < incl)
 		{
-			uint bin = rank < excl + h0 ? 2 * gi : 2 * gi + 1;
-			uint newRank = rank < excl + h0 ? rank - excl : rank - excl - h0;
-			if (d < 3) { gsMedSel[0] = pHi | (bin << shift); gsMedSel[4] = mHi | (dmask << shift); }
-			else { gsMedSel[1] = pLo | (bin << shift); gsMedSel[5] = mLo | (dmask << shift); }
-			gsMedSel[2] = newRank;
+			if (inHi) { gsMedSel[0] = pHi | (gi << shift); gsMedSel[4] = mHi | (0xFFu << shift); }
+			else { gsMedSel[1] = pLo | (gi << shift); gsMedSel[5] = mLo | (0xFFu << shift); }
+			gsMedSel[2] = rank - excl;
+			gsMedSel[6] = gsMedSel[6] + 1u;
 		}
 		GroupMemoryBarrierWithGroupSync();
 	}
 	if (gi != 0 || !live) return;
-	if (!enough)
+	if (!enough || gsMedSel[6] != 8u)
 	{
 		uState[S_FLAGS] = uint2(uState[S_FLAGS].x, 1);
 		uState[S_STOP] = uint2(1, uState[S_STOP].y);

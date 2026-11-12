@@ -54,9 +54,17 @@ namespace VideoProcessorTest
 
 		// One device per test process: VP_TEST_ADAPTER selects an adapter by description substring (case-insensitive);
 		// unset = WARP. A named adapter that is not present is an error (never a silent WARP run).
-		Rig& TheRig()
+		// The rig is released by the class cleanup (ReleaseRig), never by a static destructor: that runs at DLL unload
+		// under the loader lock, where a hardware driver's device teardown waits on its own threads (vstest hung on NVIDIA).
+		std::unique_ptr<Rig>& RigSlot()
 		{
 			static std::unique_ptr<Rig> rig;
+			return rig;
+		}
+
+		Rig& TheRig()
+		{
+			std::unique_ptr<Rig>& rig = RigSlot();
 			if (rig)
 				return *rig;
 			rig.reset(new Rig());
@@ -126,7 +134,7 @@ namespace VideoProcessorTest
 		struct Eq
 		{
 			int calls = 0, gpuCalls = 0;
-			double maxModel = 0, maxGain = 0, maxOffset = 0, maxResRel = 0;
+			double maxModel = 0, maxGain = 0, maxOffset = 0, maxResRel = 0, maxSigmaRel = 0;
 		};
 
 		bool SameBytes(const RefineResult& a, const RefineResult& b)
@@ -168,12 +176,28 @@ namespace VideoProcessorTest
 			const double resRel = std::fabs(r1.residualAfter - rc.residualAfter) / (std::max)(1e-12, std::fabs(rc.residualAfter));
 			if (r1.status != rc.status || dModel > 1e-4 || dGain > 1e-4 || dOffset > 1e-4 || r1.candidates != rc.candidates || r1.pixels != rc.pixels)
 			{
-				char msg[512];
+				// Diagnostics: final sigma and step, and the final translation over s (an integer t/s puts whole sample
+				// columns / rows exactly on the bicubic bound, where a rounding-level model difference flips the valid set).
+				char msg[768];
 				std::snprintf(msg, sizeof(msg), "MISMATCH %s: cpu %s / gpu %s, model %.3g engine px, gain %.3g, offset %.3g, cand %u/%u, px %u/%u, it %d/%d, "
-					"cost %.9g/%.9g -> %.9g/%.9g, error '%s'\n", name, RefineStatusText(rc.status), RefineStatusText(r1.status), dModel, dGain, dOffset,
+					"cost %.9g/%.9g -> %.9g/%.9g, sigma %.12g/%.12g, step %.6g/%.6g, t/s cpu %.15g %.15g gpu %.15g %.15g, error '%s'\n", name,
+					RefineStatusText(rc.status), RefineStatusText(r1.status), dModel, dGain, dOffset,
 					rc.candidates, r1.candidates, rc.pixels, r1.pixels, rc.iterations, r1.iterations, rc.residualBefore, r1.residualBefore, rc.residualAfter,
-					r1.residualAfter, gpu.LastError().c_str());
+					r1.residualAfter, rc.robustSigma, r1.robustSigma, rc.lastStepPx, r1.lastStepPx, rc.model.h[2] / s, rc.model.h[5] / s,
+					r1.model.h[2] / s, r1.model.h[5] / s, gpu.LastError().c_str());
 				GLog(msg);
+				// Conditioning probe: the CPU reference against itself with the start nudged by a rounding-level amount.
+				for (int pk = 0; pk < 2; ++pk)
+				{
+					Params nudged = model;
+					nudged.h[2] += (pk == 0 ? 1e-9 : 1e-7) * s;
+					const RefineResult rn = PhotometricRefine(nudged, view, pic, mask, o);
+					char m2[400];
+					std::snprintf(m2, sizeof(m2), "  cpu self-probe start +%g engine px: model %.3g engine px, gain %.3g, offset %.3g, sigma %.12g, it %d\n",
+						pk == 0 ? 1e-9 : 1e-7, pic.Empty() ? 0.0 : MaxCornerDifference(rn.model, rc.model, pic) * diag / s, std::fabs(rn.gain - rc.gain),
+						std::fabs(rn.offset - rc.offset), rn.robustSigma, rn.iterations);
+					GLog(m2);
+				}
 			}
 			Assert::IsTrue(r1.status == rc.status, L"GPU status differs from the CPU reference");
 			Assert::AreEqual(rc.candidates, r1.candidates, L"candidates differ");
@@ -189,6 +213,7 @@ namespace VideoProcessorTest
 			if (rc.status == RefineStatus::Refined || RefineFellBack(rc.status))
 			{
 				eq.maxResRel = (std::max)(eq.maxResRel, resRel);
+				eq.maxSigmaRel = (std::max)(eq.maxSigmaRel, std::fabs(r1.robustSigma - rc.robustSigma) / (std::max)(1e-12, rc.robustSigma));
 				++eq.gpuCalls;
 			}
 			if (cpuOut)
@@ -198,9 +223,9 @@ namespace VideoProcessorTest
 
 		void Report(const char* name, const Eq& eq)
 		{
-			char msg[320];
-			std::snprintf(msg, sizeof(msg), "gpu eq %s [%s]: %d calls (%d through the kernels), max model diff %.3g engine px, gain %.3g, offset %.3g, cost rel %.3g\n",
-				name, TheRig().adapter.c_str(), eq.calls, eq.gpuCalls, eq.maxModel, eq.maxGain, eq.maxOffset, eq.maxResRel);
+			char msg[400];
+			std::snprintf(msg, sizeof(msg), "gpu eq %s [%s]: %d calls (%d through the kernels), max model diff %.3g engine px, gain %.3g, offset %.3g, cost rel %.3g, sigma rel %.3g\n",
+				name, TheRig().adapter.c_str(), eq.calls, eq.gpuCalls, eq.maxModel, eq.maxGain, eq.maxOffset, eq.maxResRel, eq.maxSigmaRel);
 			GLog(msg);
 		}
 
@@ -244,6 +269,17 @@ namespace VideoProcessorTest
 	TEST_CLASS(PhotometricRefineGpuTests)
 	{
 	public:
+		TEST_CLASS_CLEANUP(ReleaseRig)
+		{
+			std::unique_ptr<Rig>& rig = RigSlot();
+			if (rig && rig->context)
+			{
+				rig->context->ClearState();
+				rig->context->Flush();
+			}
+			rig.reset();
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(GpuPan1080Half)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
 		END_TEST_METHOD_ATTRIBUTE()
@@ -625,6 +661,13 @@ namespace VideoProcessorTest
 				std::sort(ums.begin(), ums.end());
 				const double work = static_cast<double>(w) * h + static_cast<double>(r.pixels) * (r.iterations + 1) * 16.0;
 				const double nsPerUnit = gms[2] * 1e6 / work;
+				// Accuracy per form: final translation against the true shift, GPU and the CPU reference side by side.
+				const RefineResult rc = PhotometricRefine(Translation(tx + 0.4 * s, 0.0), v, Pic(cs.frameW, cs.frameH), InlierMask(), RefineOptions());
+				const double eG = std::fabs(r.model.h[2] - tx), eC = std::fabs(rc.model.h[2] - tx);
+				char acc[320];
+				std::snprintf(acc, sizeof(acc), "gpu accuracy %s [%s] s %d: |t - true| gpu %.6g source px (%.6g engine px), cpu %.6g source px (%.6g engine px), "
+					"ty gpu %.3g cpu %.3g, start error %.3g source px\n", cs.name, g.adapter.c_str(), cs.s, eG, eG / s, eC, eC / s, r.model.h[5], rc.model.h[5], 0.4 * s);
+				GLog(acc);
 				char msg[400];
 				std::snprintf(msg, sizeof(msg), "gpu cost %s [%s] %dx%d s %d, cpu upload%s: wall %.3f ms (min %.3f max %.3f), gpu %.3f ms, upload %.3f ms, "
 					"%u px, %d it, %s, %.4f ns/unit\n", cs.name, g.adapter.c_str(), w, h, cs.s, cs.full10 ? " (10-bit R16)" : " (8-bit)", wall[2], wall[0],
