@@ -9,6 +9,7 @@
 
 #include <VP-V/modules/input/signal/HdrInference.h>
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceQualityView.h>
 #include <VP-V/modules/input/source_analysis/identity/shared/SourceQuality.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
@@ -19,6 +20,8 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <iterator>
 #include <random>
 #include <string>
 #include <vector>
@@ -667,6 +670,50 @@ namespace SharedUnitsW1TestsNs2
 			SourceIdentity::ClassicalReading r;
 			VpUnit::SourceQuality::CopyClassical(r, s);
 			Assert::AreEqual(0.7, r.bitrateQuality);
+		}
+
+		// ---- U12 one producer per frame: the in-pipeline consumers read the ONE shared view (never the snapshot field) -------
+		TEST_METHOD(QualityConsumersReadTheSharedViewOneReadPerConsumerPerFrame)
+		{
+			using SourceResolutionMonitor::Monitor;
+			using SourceIdentity::QualityConsumer;
+			Monitor m;
+			SourceResolutionMonitor::Snapshot snap;
+			snap.reading = true;
+			for (int i = 0; i <= 10; ++i)
+			{
+				snap.bitrateQuality = i / 10.0;
+				// consensus off (default): exactly the classical value, not a fallback, nothing counted
+				Assert::AreEqual(snap.bitrateQuality, m.SharedQuality(snap, QualityConsumer::Deband));
+			}
+			Assert::AreEqual(0ull, m.QualityFallbackReads(QualityConsumer::Deband));
+			// consensus on, nothing published: the classical value, visibly (engaged decision) and COUNTED, per consumer
+			m.SetSourceIdMode(Monitor::SourceIdMode::On);
+			snap.bitrateQuality = 0.55;
+			Assert::AreEqual(0.55, m.SharedQuality(snap, QualityConsumer::AdaptiveScaling));
+			Assert::AreEqual(1ull, m.QualityFallbackReads(QualityConsumer::AdaptiveScaling));
+			Assert::AreEqual(0ull, m.QualityFallbackReads(QualityConsumer::Deband));
+			Assert::AreEqual(0ull, m.QualityFallbackReads(QualityConsumer::DetailPulse));
+			Assert::IsTrue(m.QualityViewOf(snap).fallback.engaged);
+		}
+
+		TEST_METHOD(NoPipelineSegmentReadsTheSnapshotQualityFieldDirectly)
+		{
+			std::string root = __FILE__;
+			std::replace(root.begin(), root.end(), '/', '\\');
+			root.resize(root.rfind("\\src\\VP-V\\tests\\"));
+			size_t sharedReads = 0;
+			const char* files[] = { "\\src\\VP-V\\segments\\CoreSegments.inl", "\\src\\VP-V\\segments\\EntrancePlanner.inl" };
+			for (const char* f : files)
+			{
+				std::ifstream in(root + f, std::ios::binary);
+				Assert::IsTrue(in.good());
+				const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				Assert::IsTrue(text.find(".bitrateQuality") == std::string::npos);
+				for (size_t at = text.find("sourceMonitor.SharedQuality("); at != std::string::npos; at = text.find("sourceMonitor.SharedQuality(", at + 1))
+					++sharedReads;
+			}
+			Assert::AreEqual(static_cast<size_t>(3), sharedReads);   // adaptive scaling, deband, detail pulse: one read each
 		}
 	};
 }

@@ -388,7 +388,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
         adaptiveHost.fallbackFramePeriod = [this]() { return AdaptiveFallbackFramePeriod(); };
         adaptiveHost.bitrate = [this](double& quality) {
             const SourceResolutionMonitor::Snapshot snap = vpv.sourceAnalysis.sourceMonitor.Read();
-            quality = snap.bitrateQuality;
+            quality = vpv.sourceAnalysis.sourceMonitor.SharedQuality(snap, SourceIdentity::QualityConsumer::AdaptiveScaling);   // U12: the shared view (consensus off: the classical value)
             return snap.reading;
         };
         adaptiveHost.nlsMapping = [this]() { return KnownNlsMapping(); };

@@ -230,6 +230,14 @@ namespace SourceResolutionMonitor
 		// < 0 = the steady clock). Consensus off: exactly Snapshot.bitrateQuality. Absent / stale: the classical value with an
 		// engaged fallback decision (SourceIdentity::View).
 		SourceIdentity::QualityView QualityView(double seconds = -1.0) const;
+		// U12: the same view built from a snapshot the caller already holds (so a consumer's other snapshot fields and its quality
+		// come from ONE read), and the counted consumer read every in-pipeline quality consumer uses (never Snapshot.bitrateQuality
+		// directly). Returns the view's quality (consensus off: exactly s.bitrateQuality). A read that had to use the classical value
+		// while consensus is on (record absent / stale / not latched: the engaged "product.source_quality" decision, shown by
+		// SourceIdStatusLine) is COUNTED per consumer (QualityFallbackReads), never silent.
+		SourceIdentity::QualityView QualityViewOf(const Snapshot& s, double seconds = -1.0) const;
+		double SharedQuality(const Snapshot& s, SourceIdentity::QualityConsumer who, double seconds = -1.0) const;
+		unsigned long long QualityFallbackReads(SourceIdentity::QualityConsumer who) const { return qualityFallbackReads[static_cast<size_t>(who)].load(std::memory_order_relaxed); }
 		// The Ctrl+I / Config status line ("Source identity: ...").
 		std::string SourceIdStatusLine(double seconds = -1.0) const;
 		// The auto-engage gate's own fallback: engaged while consensus is on but the record could not be used.
@@ -594,6 +602,7 @@ namespace SourceResolutionMonitor
 		std::atomic<const char*> discontinuityCause{ nullptr };
 		std::atomic<uint64_t> streamKey{ 0 };                       // R3 (SetStreamKey)
 		std::atomic<unsigned long long> staleJobsDropped{ 0 };
+		mutable std::atomic<unsigned long long> qualityFallbackReads[8] = {};   // per SourceIdentity::QualityConsumer (U12 SharedQuality)
 		SourceResolution::Tracker tracker;
 		// Source identity (worker side; Held() is the only part other threads read).
 		SourceIdentity::Pipeline sourceId;

@@ -497,7 +497,19 @@ if (tile < int(tiles) && g.y < ts) {
 
 	SourceIdentity::QualityView Monitor::QualityView(double seconds) const
 	{
-		const Snapshot s = Read();
+		return QualityViewOf(Read(), seconds);
+	}
+
+	double Monitor::SharedQuality(const Snapshot& s, SourceIdentity::QualityConsumer who, double seconds) const
+	{
+		const SourceIdentity::QualityView v = QualityViewOf(s, seconds);
+		if (v.fallback.engaged)
+			qualityFallbackReads[static_cast<size_t>(who)].fetch_add(1, std::memory_order_relaxed);
+		return v.quality;
+	}
+
+	SourceIdentity::QualityView Monitor::QualityViewOf(const Snapshot& s, double seconds) const
+	{
 		SourceIdentity::ClassicalQuality c;
 		c.reading = s.reading;
 		VpUnit::SourceQuality::CopyClassical(c, s);   // U12
