@@ -601,5 +601,95 @@ class CheckHookGatingTest(unittest.TestCase):
         self.assertNotIn("ratchet the ceiling down", out)
 
 
+class UntaggedVpReferenceTest(unittest.TestCase):
+    """T-HOOKGATE-UNTAGGED (coordinator 2026-11-12): under --since an added line of a Bill-owned production file that
+    names a symbol declared under src/VP-V/ (and unknown to Bill's baseline) fails unless it is a tagged hook line."""
+
+    GIT_ENV = CheckHookGatingTest.GIT_ENV
+    VPV_HEADER = "src/VP-V/modules/feature/Feature.h"
+    HEADER = ("#pragma once\nnamespace FeatureCatalog\n{\n\tstruct Decision {};\n\tDecision HeldNotice(int why);\n}\n"
+              "struct FeatureMonitor\n{\n\tvoid SetNovelMode(int mode);\n\tint size() const;\n\tint frame;\n};\n")
+    # Bill's baseline already names `size` and `frame`: declared in VP-V too, but they are Bill's own names.
+    BASE = ("struct Impl\n{\n\tFeatureMonitor mon;\n\tvoid Render(int frame)\n\t{\n\t\tdoBill(frame);\n\t\tint n = list.size();\n\t}\n};\n")
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.root = self.td.name
+        _w(self.root, BILL, self.BASE)
+        self._git("init", "-q")
+        self._git("add", BILL)
+        self._git("commit", "-q", "-m", "bill")     # Bill's baseline: no src/VP-V/ in its tree
+        self.base = self._git("rev-parse", "HEAD")
+        _w(self.root, chg.SLOTS_HEADER, SLOTS)
+        _w(self.root, self.VPV_HEADER, self.HEADER)
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _git(self, *args):
+        return subprocess.run(["git", "-C", self.root] + list(args), check=True, env=self.GIT_ENV,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode("utf-8", "replace").strip()
+
+    def _cli(self, *extra):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = chg.main(["--root", self.root, "--base-ref", self.base, "--files", BILL] + list(extra))
+        return rc, buf.getvalue()
+
+    def _added(self, *lines):
+        """Commit the VP-V header plus a Bill file with `lines` added inside Render() (file lines 8..); --since the Bill commit."""
+        body = "".join("\t\t%s\n" % l for l in lines)
+        _w(self.root, BILL, self.BASE.replace("\t\tint n = list.size();\n", "\t\tint n = list.size();\n" + body))
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "branch")
+        return self._cli("--rev", "HEAD", "--since", self.base)
+
+    def test_red_an_added_untagged_vp_call_is_flagged_with_file_and_line(self):
+        rc, out = self._added("mon.SetNovelMode(2); SyncFallback(FeatureCatalog::HeldNotice(1));")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("untagged VP-V reference %s:8 " % BILL, out)
+        self.assertIn("[FeatureCatalog, HeldNotice, SetNovelMode]", out)
+        self.assertIn("1 new untagged VP-V references in Bill files (lines added since %s)" % self.base, out)
+        self.assertIn("FAIL (rule 32): an added line in a Bill-owned production file names a symbol declared under src/VP-V/", out)
+
+    def test_green_the_same_line_with_a_hook_tag_is_not_an_untagged_reference(self):
+        rc, out = self._added("mon.SetNovelMode(2);   // VPV-HOOK")
+        self.assertIn("0 new untagged VP-V references in Bill files", out)
+        self.assertNotIn("untagged VP-V reference " + BILL, out, "a tagged line is the hook gate's business, not this report's")
+
+    def test_green_an_added_line_without_a_vp_reference_and_bills_own_names_are_not_flagged(self):
+        # `size` and `frame` are declared in VP-V too, but Bill's baseline already uses them; the comment names a VP-V symbol.
+        rc, out = self._added("int m = list.size() + frame;", "doBill(frame);   // FeatureCatalog is only named in this comment")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("0 new untagged VP-V references in Bill files", out)
+
+    def test_pre_existing_vp_references_are_not_flagged_since_only_added_lines_count(self):
+        _w(self.root, BILL, self.BASE.replace("doBill(frame);\n", "doBill(frame);\n\t\tmon.SetNovelMode(1);\n"))
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "older untagged call")
+        older = self._git("rev-parse", "HEAD")
+        _w(self.root, BILL, self.BASE.replace("doBill(frame);\n", "doBill(frame);\n\t\tmon.SetNovelMode(1);\n\t\tint kk = 1;\n"))
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "unrelated edit")
+        rc, out = self._cli("--rev", "HEAD", "--since", older)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("0 new untagged VP-V references in Bill files", out)
+
+    def test_without_since_the_output_and_exit_semantics_are_unchanged(self):
+        _w(self.root, BILL, self.BASE.replace("doBill(frame);\n", "doBill(frame);\n\t\tmon.SetNovelMode(1);\n"))
+        rc, out = self._cli()
+        self.assertNotIn("untagged VP-V reference", out)
+        self.assertNotIn("new untagged VP-V references", out)
+        self.assertEqual(rc, 0, out)
+
+    def test_the_symbol_set_is_derived_from_the_vp_v_headers(self):
+        _w(self.root, "src/VP-V/modules/feature/Other.inl", "void NotAHeaderName(int x);\n")
+        syms = chg.vp_symbols(chg.Tree(self.root))
+        for name in ("FeatureCatalog", "Decision", "HeldNotice", "FeatureMonitor", "SetNovelMode"):
+            self.assertIn(name, syms)
+        self.assertNotIn("NotAHeaderName", syms, "only .h / .hpp under src/VP-V/ declare symbols")
+        self.assertNotIn("return", syms)
+
+
 if __name__ == "__main__":
     unittest.main()
