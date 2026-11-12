@@ -249,6 +249,35 @@ class CheckHookGatingTest(unittest.TestCase):
         self.assertEqual((new[4]["id"], new[4]["text"]), ("R.cpp-0005", "int first = 3;"))
         self.assertEqual(len(set(s["id"] for s in new)), 5)
 
+    def test_a_removed_site_is_dropped_and_its_id_never_reused(self):
+        self._hand_edit_manifest()
+        # the second `keep` (R.cpp-0002) is removed and a new site takes its run index: its positional id
+        # R.cpp-0002 belonged to the dropped entry, so it is renumbered
+        _w(self.root, BILL, _bill("\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n\t\tint added = 2;   // VPV-HOOK\n\t\tdoBill();\n"
+                                  "\t\tint other = 1;   // VPV-HOOK\n"))
+        new = json.loads(self._regen_manifest())["sites"]
+        self.assertEqual([(s["id"], s["text"]) for s in new],
+                         [("P5c-77", "int other = 1;"), ("R.cpp-0001", "int keep = 0;"), ("R.cpp-0003", "int added = 2;")])
+        self.assertEqual(new[1]["seam"], None)
+
+    def test_one_of_two_duplicates_removed_the_survivor_keeps_its_own_id(self):
+        old = {s["id"]: s for s in json.loads(self._hand_edit_manifest())["sites"]}
+        self.assertNotEqual(old["R.cpp-0001"]["anchor"], old["R.cpp-0002"]["anchor"])
+        # the FIRST `keep` is removed (its Bill line stays): pairing in order would hand the survivor R.cpp-0001;
+        # the anchor and the line say it is R.cpp-0002, which carries the hand-filled seam and key
+        _w(self.root, BILL, _bill("\t\tdoBill();\n\t\tdoBill();\n\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n"
+                                  "\t\tint other = 1;   // VPV-HOOK\n"))
+        new = json.loads(self._regen_manifest())["sites"]
+        self.assertEqual([s["id"] for s in new], ["P5c-77", "R.cpp-0002"])
+        self.assertEqual((new[1]["seam"], new[1]["owner_note"]), ("S1", "kept by hand"))
+        # again from a fresh manifest, with the survivor also moved down a line: the anchor still decides
+        os.remove(os.path.join(self.root, *chg.MANIFEST_PATH.split("/")))
+        self._hand_edit_manifest()
+        _w(self.root, BILL, _bill("\t\tbill1();\n\t\tdoBill();\n\t\tdoBill();\n\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n"
+                                  "\t\tint other = 1;   // VPV-HOOK\n"))
+        new = json.loads(self._regen_manifest())["sites"]
+        self.assertEqual([s["id"] for s in new], ["P5c-77", "R.cpp-0002"])
+
     def test_red_a_new_site_fails_until_a_hook_approval_names_it(self):
         self._seed("\t\tint keep = 0;   // VPV-HOOK\n")
         _w(self.root, BILL, _bill("\t\tint keep = 0;   // VPV-HOOK\n\t\tdoBill();\n\t\tif (!pipelineSlots.OriginalPathway()) vectorEngine.PlanAhead(frame);   // VPV-HOOK\n"))

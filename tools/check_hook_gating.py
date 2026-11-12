@@ -746,21 +746,37 @@ _FRESH_FIELDS = ("file", "start", "end", "anchor", "lines", "text", "gate")
 def merge_manifest_sites(old_sites, new_sites):
     """Minimal-diff regeneration of the manifest site list.
 
-    A tree site matches an old entry with the same (file, _key(text)); duplicates pair up in order.  A matched site
-    keeps the old entry's id, hand-filled fields and position; only the recomputed fields are refreshed.  Old
-    entries with no tree site are dropped.  Unmatched tree sites are appended in tree order with their generated
-    id, renumbered past the highest number in use for that prefix when the id is already taken."""
-    queues = {}
+    A tree site matches an old entry with the same (file, _key(text)).  Identical-text duplicates pair up in order
+    when their count is unchanged; when it changed, the pairs with the same anchor are taken first, then the nearest
+    old start line, then order (a heuristic: two duplicates with equal anchors that both moved can still swap ids).
+    A matched site keeps the old entry's id, hand-filled fields and position; only the recomputed fields are
+    refreshed.  Old entries with no tree site are dropped.  Unmatched tree sites are appended in tree order with
+    their generated id, renumbered past the highest number in use for that prefix (old dropped ids included, so an
+    id is never reused) when the id is already taken."""
+    olds, news = {}, {}
     for i, m in enumerate(old_sites):
-        queues.setdefault((m.get("file"), _key(m.get("text", ""))), []).append(i)
+        olds.setdefault((m.get("file"), _key(m.get("text", ""))), []).append(i)
+    for j, s_ in enumerate(new_sites):
+        news.setdefault((s_["file"], _key(s_["text"])), []).append(j)
     matched = {}
-    added = []
-    for s_ in new_sites:
-        q = queues.get((s_["file"], _key(s_["text"])))
-        if q:
-            matched[q.pop(0)] = s_
+    taken = set()
+    for k, js in news.items():
+        is_ = olds.get(k, [])
+        if len(is_) == len(js):
+            pairs = list(zip(is_, js))
         else:
-            added.append(s_)
+            cand = sorted((old_sites[i].get("anchor") != new_sites[j]["anchor"],
+                           abs((old_sites[i].get("start") or 0) - new_sites[j]["start"]), i, j) for i in is_ for j in js)
+            pairs, ui, uj = [], set(), set()
+            for _a, _d, i, j in cand:
+                if i not in ui and j not in uj:
+                    ui.add(i)
+                    uj.add(j)
+                    pairs.append((i, j))
+        for i, j in pairs:
+            matched[i] = new_sites[j]
+            taken.add(j)
+    added = [s_ for j, s_ in enumerate(new_sites) if j not in taken]
     out = []
     for i, m in enumerate(old_sites):
         s_ = matched.get(i)
@@ -773,7 +789,7 @@ def merge_manifest_sites(old_sites, new_sites):
             if f not in e:
                 e[f] = v
         out.append(e)
-    used = set(e["id"] for e in out)
+    used = set(m.get("id") for m in old_sites if m.get("id"))
     for s_ in added:
         sid = s_["id"]
         if sid in used:
@@ -1272,7 +1288,8 @@ def main(argv=None):
         sites = [s for r in res["files"] for s in r.get("sites", [])]
         if args.write_manifest:
             doc = {"_note": SITE_NOTE + "; seam / expiry are filled by hand from refs/107-host-seams-plan.md s2; regenerate with "
-                            "`python -I tools/check_hook_gating.py --write-manifest` (matches sites by file and text; keeps their ids, hand-filled seam / expiry and order)",
+                            "`python -I tools/check_hook_gating.py --write-manifest` (matches sites by file and text, identical-text duplicates by anchor then nearest line then order; keeps their "
+                            "ids, hand-filled seam / expiry and order; never reuses a dropped id)",
                    "base_ref": args.base_ref, "generated_at": datetime.date.today().isoformat(), "sites": sites}
             old = load_json(Tree(args.root), MANIFEST_PATH) or {}
             sites = merge_manifest_sites(old.get("sites", []), sites)
