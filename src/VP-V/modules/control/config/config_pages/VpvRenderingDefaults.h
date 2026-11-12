@@ -12,6 +12,8 @@
 // The editor's other CEW-only helpers (P9: sandbox switch, clamp/snap, GLSL //!PARAM reader, ...) ride on this
 // header, the one VP-V helper include of ConfigEditorWindow.cpp, so that file gains no include line.
 #include <VP-V/modules/control/config/editor/Helpers.h>
+#include <VP-V/modules/control/config/editor/Migrations.h>   // the VP-only load-time migrations (P9 row a)
+#include <VP-V/modules/control/config/editor/ApplyEffects.h>   // the VP-only apply/save effects (P9 row d)
 
 #include <algorithm>
 #include <cstring>

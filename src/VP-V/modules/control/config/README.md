@@ -447,6 +447,12 @@ Bill's editor file only gets call sites; the logic is here (header-only):
   `snapNumberFieldToStep`, `clampNumberFieldOnLeave`, `retiredChoiceTarget`, `addChoiceUnsetButton`,
   `markChoiceButtons` and the GLSL `//!PARAM` reader (`readGlslShaderParameters`). Included by that one file
   only (through `VpvRenderingDefaults.h`, so it gains no include line); its call sites are unchanged.
+- `editor/Migrations.h` (P9 row a): the load-time migrations that exist only in VP-V (`migrateRefreshKeys`,
+  `migrateLegacyQueueOwnership`, `migrateLegacyRendererName`, `migrateProfileValueNormalisations`,
+  `foldLegacyInputPolicy`), moved byte for byte as member definitions; their declarations stay in the class.
+  `runLoadMigrations` (Bill's calls plus the VPV-HOOK line) stays in the .cpp; `testLoadMigrationsMoved` (`tests/VpvConfigTests.cpp`) covers the moved steps.
+- `editor/ApplyEffects.h` (P9 row d): `setRemoteApplyBusy`, moved byte for byte. Both headers are included by
+  `ConfigEditorWindow.cpp` only (through `VpvRenderingDefaults.h`); the definitions are not inline.
 - Page lookups are by name (`ConfigEditorWindow::pageIndex`, `selectPage(QString)`): Bill's pages
   keep his order and numbers (0-22); Dynamic Drive, Calibration and VP-V follow them (23-25).
   In the navigation list the VP-V leaf closes Bill's list and has child leaves (Dynamic Drive,

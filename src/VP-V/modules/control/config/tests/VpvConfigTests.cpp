@@ -1699,6 +1699,37 @@ namespace
 				(std::string("VP-V's Auto did not remove the key, or another profile's value changed: ") + saved.toStdString()).c_str());
 		}
 	}
+
+	// P9 row a: the VP-only load-time migrations (editor/Migrations.h) moved out of ConfigEditorWindow.cpp byte for
+	// byte; runLoadMigrations (Bill's calls, the VPV-HOOK line) keeps their order. This opens one old-style file that
+	// needs four of them and checks the saved result: the old renderer name, queue ownership folded into the first
+	// queue profile, the calibration LUT path separators, and the input policy keys moved to their new section.
+	void testLoadMigrationsMoved()
+	{
+		QTemporaryDir dir;
+		const char* text = "[general]\nrenderer: VideoProcessor Renderer (Alpha)\n[queue_recovery]\nreset_after_render_restart_seconds: 7\n"
+			"[queue.Normal]\nqueue_size: 32\n[vprenderer]\nvideo_conversion: auto\n"
+			"[vprenderer.color.Default]\ncalibration_lut_bt709: C:\\luts\\a.cube\n";
+		const QString path = WriteFixture(dir, text);
+		{
+			ConfigEditorWindow window(path, 0, true);
+			save(window);
+		}
+		QFile file(path);
+		require(file.open(QIODevice::ReadOnly), "cannot read the migrated file");
+		const QByteArray saved = file.readAll().replace("\r\n", "\n");
+		require(!saved.contains("VideoProcessor Renderer (Alpha)") && saved.contains("renderer: VP Renderer\n"),
+			(std::string("the old renderer name was not migrated: ") + saved.toStdString()).c_str());
+		const int queueAt = saved.indexOf("[queue.Normal]");
+		const int movedAt = saved.indexOf("reset_after_render_restart_seconds: 7");
+		require(queueAt >= 0 && movedAt > queueAt && saved.count("reset_after_render_restart_seconds") == 1,
+			(std::string("the legacy queue key did not move into the first queue profile: ") + saved.toStdString()).c_str());
+		require(saved.contains("calibration_lut_bt709: C:/luts/a.cube"),
+			(std::string("the calibration LUT path kept backslashes: ") + saved.toStdString()).c_str());
+		const int inputAt = saved.indexOf("[vprenderer.input_processing]");
+		require(inputAt >= 0 && saved.indexOf("video_conversion: auto") > inputAt,
+			(std::string("the input policy key did not move to [vprenderer.input_processing]: ") + saved.toStdString()).c_str());
+	}
 }
 
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -1731,5 +1762,6 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: Bill's Dithering stays his, VP-V's list shows the value", testBillsDitheringStaysHis);
 	failures += run("VP-V: Profile use card and the sync directions", testProfileUseAndSyncDirections);
 	failures += run("VP-V: queue rows on the VP-V card, look-ahead Auto kept", testQueueRowsOnTheVpvCard);
+	failures += run("VP-V: the moved load-time migrations still apply", testLoadMigrationsMoved);
 	return failures;
 }
