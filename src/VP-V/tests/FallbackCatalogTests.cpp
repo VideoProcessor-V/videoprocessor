@@ -422,5 +422,36 @@ namespace FallbackCatalogTest
 			Assert::IsTrue(f.Current(10000).engaged);
 			Assert::IsFalse(f.Current(14000).engaged);
 		}
+
+		TEST_METHOD(DitherVectorRowsHaveStableIdsAndTexts)
+		{
+			// W2-C8: the four automatic steps down of the sigma-delta's vector chain (motion.estimation DitherVectorSource.h).
+			const Decision matcher = DitherVectorsMatcherField(true);
+			const Decision onDemand = DitherVectorsOnDemand(true);
+			const Decision own = DitherVectorsOwnSearch(true, "no field for this pair");
+			const Decision unvalidated = DitherVectorsUnvalidated(true);
+			Assert::AreEqual(std::string("dither vectors matcher"), matcher.id);
+			Assert::AreEqual(std::string("dither vectors on demand"), onDemand.id);
+			Assert::AreEqual(std::string("dither vectors own search"), own.id);
+			Assert::AreEqual(std::string("dither vectors unvalidated"), unvalidated.id);
+			Assert::IsTrue(matcher.engaged && onDemand.engaged && own.engaged && unvalidated.engaged);
+			Assert::IsFalse(matcher.reason.empty());
+			Assert::IsFalse(onDemand.reason.empty());
+			Assert::IsFalse(own.reason.empty());
+			Assert::IsFalse(unvalidated.reason.empty());
+			// The own-search entry carries the reason it was passed.
+			Assert::IsTrue(own.reason.find("no field for this pair") != std::string::npos);
+
+			// Released: same ids, not engaged.
+			const Decision released[4] = { DitherVectorsMatcherField(false), DitherVectorsOnDemand(false),
+				DitherVectorsOwnSearch(false, "ignored"), DitherVectorsUnvalidated(false) };
+			const char* ids[4] = { "dither vectors matcher", "dither vectors on demand", "dither vectors own search",
+				"dither vectors unvalidated" };
+			for (int i = 0; i < 4; ++i)
+			{
+				Assert::AreEqual(std::string(ids[i]), released[i].id);
+				Assert::IsFalse(released[i].engaged);
+			}
+		}
 	};
 }
