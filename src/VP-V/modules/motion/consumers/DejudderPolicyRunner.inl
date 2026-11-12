@@ -146,6 +146,19 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 			DV::Tracker& tracker = DV::Registry::ForHost(this);
 			const unsigned long long nowMs = GetTickCount64();
 			tracker.NoteCompensation(compensation, nowMs);
+			// The vector chain (BuildSigmaDeltaVectorsWithoutExtras) is asked only while the engine runs (its call site's
+			// vectorDemand.mode != Off). With the engine off the sigma-delta searches itself (step 4, "not served"): say so per
+			// frame here, so that state is never without a status line (GPU A/B 2026-11-12: no segment in that case).
+			if (vectorDemand.mode == VectorDemand::Mode::Off)
+			{
+				DV::Facts vf;
+				vf.slotRuns = pipelineSlots.Runs(PipelineSlots::Id::OutputDither);
+				vf.patch = SigmaDeltaVectorsSupported();
+				vf.ownSetting = activeSettings.ditherVectorsOwn;
+				vf.motionCompensation = cf.configured;
+				vf.served = false;
+				tracker.Note(DV::Choose(vf), false, nowMs);
+			}
 			if (compensation.Automatic())
 				for (const FallbackCatalog::Decision& decision : tracker.Decisions(nowMs))
 					SyncFallback(decision);

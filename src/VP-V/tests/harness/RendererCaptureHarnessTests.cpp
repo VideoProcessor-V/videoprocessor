@@ -3538,7 +3538,10 @@ namespace Tests
 			std::string failures;
 			for (const char* mode : { "auto", "own" })
 			{
-				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", seconds, false, C8SigmaRule(mode), false, &plan);
+				// A starter (the de-judder's standing demand) runs the engine: the sigma-delta is a reuse-only consumer (doc 91 D
+				// 2026-11-11 06:30), so without one the chain is never asked (it searches itself, "not served").
+				const std::string starter = HarnessEnvText("VP_C8_NO_STARTER") == "1" ? std::string() : std::string("dejudder_strength: 0.25\n");
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", seconds, false, starter + C8SigmaRule(mode), false, &plan);
 				if (!r.presented)
 					failures += std::string(mode) + ": nothing presented; ";
 				std::string chain, passes;
