@@ -35,7 +35,7 @@ namespace Vpv
 		bool PresenterExtension::OnPlanPresent(RE::FrameContext& c, RE::PresentPlan& plan)
 		{
 			if (const std::shared_ptr<PresentEnd> end = ends_.Find(c.host))
-				end->valid.store(false, std::memory_order_release);   // a new frame: its present end is not known yet (also on the way into Original: no stale end outlives a switch)
+				end->valid.store(false, std::memory_order_release);   // a new frame: its present end is not known yet (before the Presenter's own Original check, so no stale end outlives a switch back)
 			RenderAhead::Presenter* p = plan.presenter;
 			if (!p || p->originalPathway)
 				return false;   // nothing in the Original pathway: the host presents at interval 1 (Bill)
@@ -79,9 +79,11 @@ namespace Vpv
 			}
 		}
 
-		// R14: the frame's present end. After an extras frame the queue timing measures from the MAIN present's end
-		// (the extras spent time after it), as the host's `dejudderExtrasSpentTime ? mainDone : now` read did; the
-		// main present's end is the swap end the host handed R12. Otherwise the host's value stands.
+		// R14: the frame's present end. After an extras frame the queue timing measures from the moment the main present
+		// was done (the extras spent time after it). Coordinator ruling D1 (2026-11-12): the host keeps Bill's read
+		// `dejudderExtrasSpentTime ? dejudderMainDoneQpc : now` (the stamp of its main-presented callback) and hands it
+		// in as billQpc, so the timing is byte-identical to the base; the module confirms that value after an extras frame
+		// (never the R12 swap end, which is earlier: right after the submit). Otherwise the host's value stands too.
 		void PresenterExtension::OnResolveTime(RE::FrameContext& c, RE::TimeQuery& q)
 		{
 			if (q.kind != RE::TimeKind::FramePresentEnd)
@@ -89,9 +91,7 @@ namespace Vpv
 			const std::shared_ptr<PresentEnd> end = ends_.Find(c.host);
 			if (!end || !end->valid.load(std::memory_order_acquire) || !end->extrasSpentTime.load(std::memory_order_relaxed))
 				return;
-			const int64_t qpc = end->qpc.load(std::memory_order_relaxed);
-			if (qpc > 0)
-				q.qpc = qpc;
+			q.qpc = q.billQpc;   // the host's main-presented stamp (D1), not end->qpc
 		}
 
 		void PresenterExtension::OnLifecycle(RE::LifecycleFacts& f)

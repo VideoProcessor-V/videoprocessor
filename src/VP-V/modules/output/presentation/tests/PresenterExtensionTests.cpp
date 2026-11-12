@@ -3,7 +3,8 @@
 //
 // Phase 3 (refs/108): the presentation module's three seam handlers, called as the hub calls them
 // (no renderer, no hub): R11 PlanPresent answers the main present's interval and starts the frame,
-// R12 AfterPresent runs the Presenter's step and records the present end, R14 ResolveTime serves it,
+// R12 AfterPresent runs the Presenter's step and records the present-end fact, R14 ResolveTime keeps the host's
+// main-presented stamp after an extras frame (coordinator ruling D1: byte-identical to the base timing),
 // and every one of them does nothing in the Original pathway or without a Presenter.
 #include "pch.h"
 #include "CppUnitTest.h"
@@ -243,7 +244,8 @@ namespace VpvTests
 				return q.qpc;
 			};
 			Assert::AreEqual(1000ll, ask(resolve, 1000), L"no frame yet: the host's value");
-			// An extras frame that spent time: the present end is the main present's swap end.
+			// An extras frame that spent time: the present end is the host's main-presented stamp (billQpc, D1), never the
+			// R12 swap end (right after the submit, earlier than Bill's read).
 			RE::PresentContext pc;
 			pc.presenter = &p;
 			pc.kind = RE::AfterPresentKind::AfterLastExtra;
@@ -252,7 +254,9 @@ namespace VpvTests
 			pc.rendered = pc.submitted = true;
 			pc.now = 100.0;
 			ext.OnAfterPresent(after, pc);
-			Assert::AreEqual(777ll, ask(resolve, 1000), L"after the extras: the main present's end");
+			Assert::AreEqual(1000ll, ask(resolve, 1000), L"after the extras: the host's main-presented stamp, not the swap end 777");
+			Assert::AreEqual(1234ll, ask(resolve, 1234), L"after the extras: whatever stamp the host hands in");
+			Assert::IsTrue(ext.PresentEndOf(&host) && ext.PresentEndOf(&host)->extrasSpentTime.load(), L"the extras fact is recorded at R12");
 			RE::FrameContext otherResolve = Frame(&other, RE::FramePhase::ResolveTime);
 			Assert::AreEqual(2000ll, ask(otherResolve, 2000), L"another renderer: its own facts only");
 			RE::TimeQuery otherKind;
@@ -275,7 +279,7 @@ namespace VpvTests
 			pc.extrasSpentTime = true;   // cannot happen (no extras ran), and the Presenter step ignores it
 			pc.swapEndQpc = 999;
 			ext.OnAfterPresent(after, pc);
-			Assert::AreEqual(999ll, ask(resolve, 1000), L"the fact is what the host handed R12");
+			Assert::AreEqual(1000ll, ask(resolve, 1000), L"the host's stamp, not the swap end 999 handed R12");
 			// GpuReleased drops the fact.
 			RE::LifecycleFacts gone;
 			gone.host = &host;

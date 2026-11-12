@@ -30761,6 +30761,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// render cycle, queue ages and latency read exactly as without extras.
 		bool dejudderExtrasSpentTime = false;
 		SteadyClock::time_point dejudderMainDoneSteady{};
+		int64_t dejudderMainDoneQpc = 0;
 		timingclocktime_t dejudderMainDoneTimingClock{};
 		// The measured capture rate, or (stream robustness, owner 2026-10-14)
 		// the signal's nominal rate until it is measured - after a start, a
@@ -31189,6 +31190,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 					[&]()
 					{
 						dejudderMainDoneSteady = SteadyClock::now();
+						dejudderMainDoneQpc = PerformanceCounterNow();
 						if (m_timingClock)
 							dejudderMainDoneTimingClock = m_timingClock->TimingClockNow();
 					},
@@ -31259,7 +31261,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 						queueBefore = m_frameQueue.size();
 						recoveryTarget = PrefillTargetLocked();
 						LARGE_INTEGER qpcFrequency{};
-						int64_t nowQpc = PerformanceCounterNow();
+						int64_t nowQpc = dejudderExtrasSpentTime ?
+							dejudderMainDoneQpc : PerformanceCounterNow();
 						if (!m_impl->pipelineSlots.OriginalPathway())   // VPV-HOOK HA-R14-ResolveTime: the one R14 seam (refs/108 s1): after an extras frame the present end is the main present's end   // VPV-HOOK
 							nowQpc = RendererExtension::ResolveTime(m_impl.get(), RendererExtension::TimeKind::FramePresentEnd, nowQpc);   // VPV-HOOK
 						const bool qpcAvailable =
