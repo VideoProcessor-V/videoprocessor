@@ -512,6 +512,8 @@ renderer. `calibrationHost` stays an Impl member (init order: `outputColour` ref
 built: R11 (`PlanPresent`, HA-R11) plans the SyncInterval of a rendered video frame at render entry, while the pattern
 present replaces dequeuing in the render loop (R33 `TakeOverPresentation`, one existing call site, `CalibrationLutHost::
 TakeOverPresentation`); there is no frame to plan. Moving the lambda behind a hub phase would add a hook site (rule 32).
+Deferred (refs/102b-deferred-register.md, calibration PlanPresent): revisit when a rule-32-approved render-loop presentation seam exists
+(an R33 TakeOverPresentation handler on the hub) so the pattern present can move without a new hook site.
 
 ## Settings
 
