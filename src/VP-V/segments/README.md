@@ -13,7 +13,10 @@ is added; default arguments stay on the declaration in `Impl`). Render thread, `
 | File | Members | Step |
 |---|---|---|
 | `CoreSegments.inl` | `UpdatePipelineSlots`, `OrderFrameSlotHooks` | P4-2 |
+| `CoreSegments.inl` | `ReportRenderErrors` (after-render reports) | P4 h |
+| `CoreSegments.inl` | `CollectFrameHooks` (+ test recorder `TraceFrameHookList`, `VP_HOOK_LIST_TRACE`, not in Original) | P4 f |
 | `EntranceHostMembers.inl` | `DrainEntranceBeforeRender`, `EntranceOnceFieldAhead`, `EntranceOncePhasePicture`, `EntranceOnceExtra`, `RenderCrossfadeMix` | P4-5 |
+| `EntranceHostMembers.inl` | `DrawFrame` (was the RenderLocked draw lambda; called by `NlsHookRecovery::RenderOwned`), `EntranceHost::FieldOf`, `EntranceOnceSnapshotFor`, `DejudderLiveFieldFor` | P4 g |
 | `EntrancePlanner.inl` | `PlanEntrance` (re-base factor, VP deband parameters, detail pulse / texture restore parameters; called once after `NotifyEntrance`) | P4-e..i |
 
 ## Entrance stage order and the TD slot

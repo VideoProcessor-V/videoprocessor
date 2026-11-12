@@ -3138,8 +3138,8 @@ namespace Tests
 			const HarnessScope harnessScope;
 			if (!RequireHardwareOrSkip("P4gForcedNlsRetryDrawsTwice")) return;
 			const std::vector<std::string> savedShaders = g_harnessShaderProfiles;
-			std::ifstream in(Here() + "NLS.glsl", std::ios::binary);
-			Assert::IsTrue(in.good(), L"NLS.glsl next to the test binary");
+			std::ifstream in(Here() + "shaders\\NLS.glsl", std::ios::binary);
+			Assert::IsTrue(in.good(), L"shaders\\NLS.glsl beside the test binary");
 			std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 			in.close();
 			const size_t entry = text.find("vec4 hook()");
@@ -3148,10 +3148,14 @@ namespace Tests
 			text.insert(open + 1, "\n    vp_p4g_forced_compile_failure();\n");
 			char tempPath[MAX_PATH] = {};
 			GetTempPathA(MAX_PATH, tempPath);
-			const std::string dir = std::string(tempPath) + "vp-p4g-nls-retry";
+			// VP_TEST_SHADER_DIR names the folder that holds the shaders folder (ResolveShaderFilename); one folder per process.
+			const std::string dir = std::string(tempPath) + "vp-p4g-nls-retry-" + std::to_string(GetCurrentProcessId());
+			const std::string shaderDir = dir + "\\shaders";
 			CreateDirectoryA(dir.c_str(), nullptr);
+			CreateDirectoryA(shaderDir.c_str(), nullptr);
 			{
-				std::ofstream out(dir + "\\NLS.glsl", std::ios::binary | std::ios::trunc);
+				std::ofstream out(shaderDir + "\\NLS.glsl", std::ios::binary | std::ios::trunc);
+				Assert::IsTrue(out.good(), L"the modified NLS.glsl copy can be written");
 				out << text;
 			}
 			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", dir.c_str());
@@ -3163,7 +3167,8 @@ namespace Tests
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, false, config);
 			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
 			g_harnessShaderProfiles = savedShaders;
-			DeleteFileA((dir + "\\NLS.glsl").c_str());
+			DeleteFileA((shaderDir + "\\NLS.glsl").c_str());
+			RemoveDirectoryA(shaderDir.c_str());
 			RemoveDirectoryA(dir.c_str());
 			std::string recovery;
 			for (const std::string& line : r.log)

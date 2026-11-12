@@ -685,5 +685,6 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
         EngageFallback(TemporalHistoryPolicy::FallbackId(), TemporalHistoryPolicy::PauseText());
     else
         ReleaseFallback(TemporalHistoryPolicy::FallbackId());
-    TraceFrameHookList(this, frameParams, frameSlotHooks, customHooks, submittedNls);   // P4 f test recorder (VP_HOOK_LIST_TRACE), after the moved body
+    if (!pipelineSlots.OriginalPathway())   // Original: no recorder, not even its environment read
+        TraceFrameHookList(this, frameParams, frameSlotHooks, customHooks, submittedNls);   // P4 f test recorder (VP_HOOK_LIST_TRACE), after the moved body
 }
