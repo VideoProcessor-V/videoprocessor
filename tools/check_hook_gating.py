@@ -35,6 +35,18 @@ Untagged VP insertions: a line added since --base-ref (git diff -w -U0, the work
 line and calls a VP-V namespace (Vp*::, Vpv::, RendererExtension::, ...). Reported as "untagged" (counted in the
 summary line); they fail only with --fail-untagged (the footprint ratchet governs stray lines).
 
+UNTAGGED VP-V REFERENCES (T-HOOKGATE-UNTAGGED, only with --since): a line added since <merge-base> in a Bill-owned
+PRODUCTION file (the bill_files set above) that is not a hook line and names a VP-V SYMBOL fails the gate, tag or no
+tag forgotten. VP-V symbol = a name DECLARED in a src/VP-V/**/*.h|.hpp header (namespace / class / struct / enum /
+using alias / #define / function / method / data-member or variable name, >= 3 chars) MINUS every identifier that
+Bill's baseline (--base-ref, files outside src/VP-V) already contains. Comments and string literals are ignored.
+Output: `  untagged VP-V reference <file>:<line> <text>   [<symbols>]` per line, then
+`<N> new untagged VP-V references in Bill files (lines added since <ref>)`; exit 1 when N > 0. Without --since
+nothing changes. False positives: a new Bill-side name that a VP-V header also declares (e.g. a Qt slot or a local
+called `tip`), declarations picked up from inline bodies in headers; list-and-justify, or rename. False negatives:
+a VP-V name Bill's baseline also uses (it is then Bill's own), enumerators, a new #include of a VP-V header,
+names declared only in .inl / .cpp files of src/VP-V, and symbols reached only through `auto` / a pointer member.
+
 Summary line: `hook gating: <hooks> hook statements, <unguarded> unguarded, <unverified> unverified markers,
 <allowed> allowed, <untagged> untagged; exit <n>` (machine-readable like the other cheap checks).
 
@@ -122,8 +134,7 @@ ALLOW_CALLEES = [
     {"callee": r"(?:m_impl->)?(IngressHardwareArrival|IngressCountersBefore|IngressAfterRate|QueueTargetVp|ResolveMotionEngine|NoteTimelinePlanned|"
                r"CurrentQueueHoldFraction|RegisterDejudderCacheFrame|UpdatePipelineSlots|OrderFrameSlotHooks|CollectFrameHooks|DrawFrame)",
      "reason": "M2-relocated host members (input\\queue_timing IngressPolicy.inl / QueueTarget.inl, motion\\consumers "
-               "PhaseTimeline.inl, segments\\CoreSegments.inl, segments\\EntranceHostMembers.inl): Bill's own pulldown / film clock / "
-               "queue-target / slot-order / frame hook list / draw "
+               "PhaseTimeline.inl, segments\\CoreSegments.inl, segments\\EntranceHostMembers.inl): Bill's own pulldown / film clock / queue-target / slot-order / frame hook list / draw "
                "logic moved out of the host (host = call sites only); VP options inside are either/or on settings the Original "
                "table forces off; UpdatePipelineSlots is what applies ApplyOriginalPathway. Proof: IngressPolicyTests, "
                "QueueTimingPolicy, PipelineSkeletonTests (Original pathway), OriginalPathwayByteIdenticalToBill."},
@@ -173,6 +184,45 @@ ALLOW_SITES = [
     {"file": "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp", "pattern": r"deviceParams\.adapter = testAdapter",
      "reason": "the VP_TEST_ADAPTER result applied to Bill's device parameters: set only when the test environment names an "
                "adapter (unset in production and by the capture harness for both renders); see the VpDiagnostics callee entry."},
+    {"file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp", "pattern": r"\bdetailPulse\b", "symbol": "detailPulse",
+     "reason": "name collision, not a VP-V reference: a ConfigEditorWindow.cpp LOCAL named detailPulse (lines 10230-10231) shares its "
+               "spelling with the EntranceSegment.h:114 member (DPTR-OFF, r2/dptr-off). Granted by the coordinator, "
+               "refs/owner-decisions-2026-11-07.md (2026-11-12 11:30 ruling 5: CEW:10230-10231 detailPulse ALLOW_SITES name "
+               "collision GRANTED). Honoured by the --since VP-V symbol report only; proof: UntaggedVpReferenceTest."},
+]
+
+# Waived added lines for the --since VP-V symbol report. Keyed by the code of the added line (a regex on the line with
+# comments and strings stripped, NOT a line number, so the entry survives a rebase). An entry is honoured only when it
+# matches EXACTLY ONE added line of its file in the run (zero = not reached, more than one = ambiguous: nothing honoured,
+# the lines are flagged). The pattern sees the code with strings/comments stripped, or the raw line when the entry
+# has "raw": True (needed when lines differ only by a string literal). Every entry names its waiver and expiry.
+_P3_WAIVER = ("WAIVER-P3-ALIAS-REPOINT (coordinator 2026-11-12 11:30 ruling 2, conditional; condition met: the Phase 3 opus "
+              "gate r2-phase3-opus-gate.md confirmed 8/8 lines are re-points of an existing alias read, no new site). "
+              "Expires at the re-graft. Proof: UntaggedVpReferenceTest, r2-phase3-opus-gate.md.")
+_P11_WAIVER = ("WAIVER-P11-REQUALIFY (coordinator-delegated; the P11 opus gate r2-p11-opus-gate.md confirmed 11/11 lines). "
+               "Expires at the re-graft. Proof: UntaggedVpReferenceTest, r2-p11-opus-gate.md.")
+_LVR = "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
+ALLOW_UNTAGGED_REFS = [
+    {"file": _LVR, "pattern": r"^\t{3}renderAheadPresenter\.creditFrames\.load\(std::memory_order_relaxed\), ratio,\s*$", "reason": _P3_WAIVER},
+    {"file": _LVR, "pattern": r"^\t{4}renderAheadPresenter\.creditFrames\.store\(0, std::memory_order_release\);\s*$", "reason": _P3_WAIVER},
+    {"file": _LVR, "pattern": r"^\t{4}renderAheadPresenter\.mainInterval = plan\.nextInterval;\s*$", "reason": _P3_WAIVER},
+    {"file": _LVR, "pattern": r"const bool ditherOwnOnExtras = activeSettings\.ditherVectorsOwn && !renderAheadPresenter\.l1;", "reason": _P3_WAIVER},
+    {"file": _LVR, "pattern": r"^\t{3}renderAheadPresenter\.mainInterval = plan\.nextInterval;\s*$", "reason": _P3_WAIVER},
+    {"file": _LVR, "pattern": r"renderAheadPresenter\.creditFrames\.store\(activeSettings\.renderAheadQueueCredit \?", "reason": _P3_WAIVER},
+    {"file": _LVR, "pattern": r"diag\.mainInterval = static_cast<int>\(presentPlan\.interval\);", "reason": _P3_WAIVER},
+    {"file": _LVR, "pattern": r"m_impl->renderAheadPresenter\.estimatedLeadMs\.load\(std::memory_order_relaxed\);", "reason": _P3_WAIVER},
+    # P11 re-qualified lines (r2/p11-stack): vpv.* member reads / writes through the existing Impl aliases.
+    {"file": _LVR, "pattern": r"want\(C::MotionIntent, vpv\.motion\.intent\.intentInterpreter && ", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"vpv\.sourceAnalysis\.sourceMonitor\.Release\(d3d11->gpu\);", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"SourceResolutionMonitor::Describe\(vpv\.sourceAnalysis\.sourceMonitor\.Read\(\)", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"activeSettings\.ambientAdapt \|\| vpv\.led\.intent\.ledIntentLimitsSent\.shadowMinimumShare != 0\.0", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"^\t{3}vpv\.led\.intent\.ledIntentLimitsSent\.ambientBlackNits != 0\.0\)", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"vpv\.calibration\.calibrationLutAttached = calibrationHost\.LutAttached\(rendered, targetLutApplied\);", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"sourceMonitor\.Discontinuity\(\"resync or source change\"\);", "raw": True, "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"sourceMonitor\.Discontinuity\(\"live queue reset \(seek or skip\)\"\);", "raw": True, "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"m_impl \? m_impl->vpv\.motion\.intent\.intentInterpreter : std::shared_ptr<IntentInterpreter::Observer>\(\);", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"const bool intentWalkActive = m_impl && m_impl->vpv\.motion\.intent\.intentInterpreter->Active\(\);", "reason": _P11_WAIVER},
+    {"file": _LVR, "pattern": r"sourceMonitor\.Discontinuity\(\"file discontinuity \(seek, step or rate change\)\"\);", "raw": True, "reason": _P11_WAIVER},
 ]
 
 
@@ -870,6 +920,34 @@ def load_json(tree, rel):
         return None
 
 
+TRAILER_LINE_RE = re.compile(r"^[A-Za-z][\w-]*[ \t]*:[ \t]*\S")
+
+
+def trailer_values(message):
+    """Values of the `Hook-Trigger:` lines in a commit message's TRAILER REGION (key matches in any case). The region is
+    the last paragraph(s) made only of `Key: value` lines (a continuation line starts with whitespace): a standard git
+    trailer block, and the blank-line variant where `Hook-Trigger:` sits in its own paragraph before `Co-Authored-By:`
+    (commit 867594f19). The subject (first paragraph) never counts; a `Hook-Trigger:` line in ordinary body text does not."""
+    paras, cur = [], []
+    for ln in message.replace("\r\n", "\n").split("\n"):
+        if ln.strip():
+            cur.append(ln)
+        elif cur:
+            paras.append(cur)
+            cur = []
+    if cur:
+        paras.append(cur)
+    vals = []
+    for para in reversed(paras[1:][-2:]):   # at most the last two Key: value-only paragraphs
+        if not all(TRAILER_LINE_RE.match(l) or (k > 0 and l[:1] in " \t") for k, l in enumerate(para)):
+            break
+        for l in para:
+            m = re.match(r"^%s[ \t]*:[ \t]*(.*)$" % re.escape(TRAILER_KEY), l, re.I)
+            if m:
+                vals.append(m.group(1))
+    return vals
+
+
 def trigger_scan(tree, root=None, rev=None, no_git=True):
     """Where the landed triggers come from, and every way that source can be wrong. Returns a dict:
     known (ids in docs/audit/hook-triggers.json), landed ({id: sha}), errors (each one fails the run), source (summary text).
@@ -889,8 +967,7 @@ def trigger_scan(tree, root=None, rev=None, no_git=True):
     if no_git or not root:
         return {"known": known, "landed": landed, "errors": errors, "source": "json only"}
     try:
-        log = git(["log", rev or "HEAD", "-i", "--grep=^%s:" % TRAILER_KEY, "--format=%H%x00%(trailers:key=" + TRAILER_KEY +
-                   ",valueonly)%x1e"], root)
+        log = git(["log", rev or "HEAD", "-i", "--grep=^%s:" % TRAILER_KEY, "--format=%H%x00%B%x1e"], root)
     except RuntimeError as e:
         errors.append("TRIGGER SOURCE FAILED: git history of %s is unavailable, so landed triggers cannot be read (%s); rerun in a "
                       "git checkout, or use --no-git to check docs/audit/hook-triggers.json alone" % (rev or "HEAD", " ".join(str(e).split())[:160]))
@@ -898,8 +975,8 @@ def trigger_scan(tree, root=None, rev=None, no_git=True):
     for rec in log.split("\x1e"):
         if "\x00" not in rec:
             continue
-        sha, vals = rec.strip("\r\n").split("\x00", 1)
-        for v in vals.splitlines():
+        sha, body = rec.strip("\r\n").split("\x00", 1)
+        for v in trailer_values(body):
             for raw in v.split(","):
                 tid = raw.strip()
                 if not tid:
@@ -1118,6 +1195,111 @@ def bill_tip_check(root, base_ref):
     return "src/VP-V" in names
 
 
+# ---------------------------------------------------------------- untagged VP-V references (--since)
+# T-HOOKGATE-UNTAGGED (coordinator 2026-11-12): the VP_CALL_RE "untagged" report above only knows a fixed list of
+# VP-V namespaces, so an added `sourceMonitor.SetGeometryDetect(..); SyncFallback(FallbackCatalog::X())` slipped
+# through as "0 new". Under --since this check is derived from the VP-V sources instead.
+IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+VPSYM_TYPE_RE = re.compile(r"\b(?:namespace|class|struct|union|enum(?:\s+class|\s+struct)?)\s+([A-Za-z_]\w*)")
+VPSYM_USING_RE = re.compile(r"\busing\s+([A-Za-z_]\w*)\s*=")
+VPSYM_DEFINE_RE = re.compile(r"^\s*#\s*define\s+([A-Za-z_]\w*)", re.M)
+VPSYM_FUNC_RE = re.compile(r"^\s*(?:(?:template\s*<[^>]*>|virtual|static|inline|constexpr|explicit|friend|extern)\s+)*"
+                           r"([\w:<>,*&\s~]*?[\s*&])?(~?[A-Za-z_]\w*)\s*\(", re.M)
+VPSYM_VAR_RE = re.compile(r"^\s*(?:(?:static|const|constexpr|inline|mutable|volatile)\s+)*"
+                          r"[\w:<>,*&\s]*?[\s*&]+([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*(?:=|\{|;)", re.M)
+VPSYM_NOT_DECL = frozenset(("return", "if", "else", "for", "while", "switch", "case", "throw", "delete", "new", "goto",
+                            "using", "namespace", "typedef", "do", "try", "catch", "co_return", "co_await", "sizeof",
+                            "static_assert", "operator", "typename", "template", "public", "private", "protected", "default"))
+VPSYM_MIN_LEN = 3
+VPSYM_HEADER_EXT = (".h", ".hpp")
+
+
+def vp_symbols(tree):
+    """Names DECLARED in the VP-V headers of `tree` (src/VP-V/**/*.h|.hpp): namespace / class / struct / union / enum
+    names, `using X =` aliases, #define macros, function / method names and data-member / variable names. Names only
+    (no qualification), at least VPSYM_MIN_LEN characters, keywords dropped. The caller subtracts every name Bill's
+    baseline already uses (bill_identifiers), so generic names (Get, size, x ...) never count."""
+    names = set()
+    heads = [f for f in tree.code_files() if f.startswith(VPV_PREFIX) and f.lower().endswith(VPSYM_HEADER_EXT)]
+    tree.prefetch(heads)
+    for rel in heads:
+        text = tree.read(rel)
+        names.update(VPSYM_DEFINE_RE.findall(text))
+        code = strip_code(text)
+        names.update(VPSYM_TYPE_RE.findall(code))
+        names.update(VPSYM_USING_RE.findall(code))
+        for m in VPSYM_FUNC_RE.finditer(code):
+            before, name = m.group(1) or "", m.group(2)
+            if re.search(r"[=.+\-(]|->", before):
+                continue
+            first = IDENT_RE.match(before.strip() or name)
+            if first and first.group(0) in VPSYM_NOT_DECL:
+                continue
+            names.add(name.lstrip("~"))
+        for m in VPSYM_VAR_RE.finditer(code):
+            line = m.group(0)
+            first = IDENT_RE.match(line.strip())
+            if first and first.group(0) in VPSYM_NOT_DECL:
+                continue
+            if "(" in line[:m.start(1) - m.start(0)]:
+                continue
+            names.add(m.group(1))
+    return set(n for n in names if len(n) >= VPSYM_MIN_LEN and n not in VPSYM_NOT_DECL)
+
+
+def bill_identifiers(root, base_ref, candidates):
+    """The subset of `candidates` that appears (as an identifier, comments included) anywhere in Bill's baseline
+    code (every src code file at base_ref outside src/VP-V): those names are Bill's own, not VP-V symbols."""
+    base = Tree(root, base_ref)
+    rels = [f for f in git(["ls-tree", "-r", "--name-only", base_ref, "--", "src"], root).splitlines()
+            if f.lower().endswith(CODE_EXT) and not f.startswith(VPV_PREFIX) and "/3rdparty/" not in f and "/x64/" not in f]
+    base.prefetch(rels)
+    seen = set()
+    for rel in rels:
+        text = base.cache.get(rel)
+        if text:
+            seen.update(candidates.intersection(IDENT_RE.findall(text)))
+    return seen
+
+
+def untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_used=None):
+    """Added lines (since_added: file -> line numbers) of Bill-owned PRODUCTION files that are not hook lines and
+    name a VP-V symbol (vp_symbols minus bill_identifiers). Returns [{file, line, text, symbols}]."""
+    wanted = [(r["file"], since_added.get(r["file"])) for r in per_file
+              if r.get("bucket") == "production" and not r.get("hook_file") and since_added.get(r["file"])]
+    if not wanted:
+        return []
+    syms = vp_symbols(tree)
+    syms -= bill_identifiers(root, base_ref, syms)
+    out = []
+    for rel, added in wanted:
+        text = tree.read(rel)
+        hooks = hook_line_set(text)
+        lines = text.splitlines()
+        code = strip_code(text).splitlines()
+        cand = [n for n in sorted(added) if n not in hooks and n <= len(code)]
+        waived = {}   # line -> ALLOW_UNTAGGED_REFS index; an entry counts only when it matches exactly one added line
+        for k, e in enumerate(ALLOW_UNTAGGED_REFS):
+            if e["file"] == rel:
+                m = [n for n in cand if re.search(e["pattern"], (lines if e.get("raw") else code)[n - 1])]
+                if len(m) == 1:
+                    waived[m[0]] = k
+        for n in cand:
+            if n in waived:
+                if allow_used is not None:
+                    allow_used[("untag", waived[n])] = allow_used.get(("untag", waived[n]), 0) + 1
+                continue
+            hit = sorted(syms.intersection(IDENT_RE.findall(code[n - 1])))
+            for k, e in enumerate(ALLOW_SITES):   # granted name collisions: drop the named symbol (entry key "symbol")
+                if e.get("symbol") in hit and e["file"] == rel and re.search(e["pattern"], code[n - 1]):
+                    hit.remove(e["symbol"])
+                    if allow_used is not None:
+                        allow_used[("site", k)] = allow_used.get(("site", k), 0) + 1
+            if hit:
+                out.append({"file": rel, "line": n, "text": lines[n - 1].strip()[:120], "symbols": hit[:6]})
+    return out
+
+
 def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, since=None):
     tree = Tree(root, rev)
     if not no_git and bill_tip_check(root, base_ref):
@@ -1165,15 +1347,21 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
             allow_used[("callee", k)] = 0   # reached through an enclosing header
     stale = [("callee", k) for k in range(len(ALLOW_CALLEES)) if ("callee", k) not in allow_used] + \
             [("site", k) for k in range(len(ALLOW_SITES)) if ("site", k) not in allow_used]
+    if not (since and not no_git):   # symbol-keyed entries are used only by the --since symbol report
+        stale = [x for x in stale if not (x[0] == "site" and ALLOW_SITES[x[1]].get("symbol"))]
     sc = site_checks(tree, per_file, root, rev, no_git)
     since_added = None
+    untagged_vpv = []
     if since and not no_git:
         try:
             d = vp_footprint.parse_diff(git(["diff"] + vp_footprint.DIFF_ARGS + ["-U0", since] + ([rev] if rev else []) +
                                             ["--", "src", ":(exclude)src/VP-V"], root))
             since_added = {k: set(v["added_lines"]) for k, v in d.items()}
-        except RuntimeError:
-            since_added = {}
+        except RuntimeError as e:
+            # fail CLOSED: an unreadable --since (typo, unfetched sha) must never report "0 new" and exit 0
+            print("check_hook_gating: --since %s cannot be read in %s (%s); no verdict" % (
+                since, root, " ".join(str(e).split())[:160]), file=sys.stderr)
+            raise SystemExit(2)
         def _new(s):
             return s["line"] in since_added.get(s["file"], set())
         def _new_site(s):
@@ -1181,12 +1369,14 @@ def run(root, base_ref, only=None, no_git=False, fail_untagged=False, rev=None, 
         hits = [h for h in hits if _new(h)]
         unverified = [u for u in unverified if u["file"] in since_added and _new(u)]
         untagged = [u for u in untagged if _new(u)]
+        untagged_vpv = untagged_vp_references(tree, per_file, since_added, root, base_ref, allow_used)
+        stale = [x for x in stale if x not in allow_used]
         sc["new"] = [x for x in sc["new"] if _new_site(x)]
         sc["approved"] = [x for x in sc["approved"] if _new_site(x)]
     rc = 1 if (hits or unverified or (fail_untagged and untagged) or sc["new"] or sc["over"] or sc["expired"] or sc["unknown"] or
-                 sc["trigger_errors"] or sc["approval_missing"] or sc["budget_errors"]) else 0
+                 sc["trigger_errors"] or sc["approval_missing"] or sc["budget_errors"] or untagged_vpv) else 0
     return {"base_ref": base_ref, "rev": rev, "since": since, "vp_slots": sorted(vp_slots), "site_checks": sc, "gated": {k: list(v) for k, v in gated.items()},
-            "files": per_file, "counts": counts, "hits": hits, "unverified": unverified, "untagged": untagged,
+            "files": per_file, "counts": counts, "hits": hits, "unverified": unverified, "untagged": untagged, "untagged_vpv": untagged_vpv,
             "allowed": allowed, "allow_used": {"%s:%d" % k: v for k, v in allow_used.items()}, "stale_allow": stale, "rc": rc}
 
 
@@ -1210,6 +1400,9 @@ def render(res):
     for k, e in enumerate(ALLOW_SITES):
         n = res["allow_used"].get("site:%d" % k, 0)
         out.append("  allow-list site [%d] %s /%s/: %s" % (n, e["file"], e["pattern"], e["reason"]))
+    if res.get("since"):
+        for k, e in enumerate(ALLOW_UNTAGGED_REFS):
+            out.append("  allow-list untagged ref [%d] %s /%s/: %s" % (res["allow_used"].get("untag:%d" % k, 0), e["file"], e["pattern"], e["reason"]))
     for kind, k in res["stale_allow"]:
         out.append("  stale allow-list entry (no site uses it, may be deleted): %s %d" % (kind, k))
     for name, (rel, line, verified) in sorted(res["gated"].items()):
@@ -1260,10 +1453,19 @@ def render(res):
                    "existing seam (refs/107-host-seams-plan.md s1), or get a HOOK-APPROVAL id from the coordinator "
                    "(docs/audit/hook-approvals.json); ceilings only go down.")
     if res["rc"] and not (sc["new"] or sc["over"] or sc["expired"] or sc["unknown"] or sc["trigger_errors"] or sc["approval_missing"] or
-                          sc["budget_errors"]) or res["hits"] or res["unverified"]:
+                          sc["budget_errors"] or res.get("untagged_vpv")) or res["hits"] or res["unverified"]:
         out.append("FAIL: a VP-V hook in a Bill file runs in the Original pathway. Wrap the call site in the canonical guard "
                    "(`if (!pipelineSlots.OriginalPathway())`), or move the logic into its VP-V module behind a `// VPV-GATED` "
                    "function with `if (originalPathway) return;`, or ask the lead for an allow-list entry with a reason.")
+    if res.get("since"):
+        uv = res.get("untagged_vpv", [])
+        for u in uv:
+            out.append("  untagged VP-V reference %s:%d %s   [%s]" % (u["file"], u["line"], u["text"], ", ".join(u["symbols"])))
+        out.append("%d new untagged VP-V references in Bill files (lines added since %s)" % (len(uv), res["since"]))
+        if uv:
+            out.append("FAIL (rule 32): an added line in a Bill-owned production file names a symbol declared under src/VP-V/ and "
+                       "carries no VPV-HOOK tag: a per-feature call site must not be added (route it through a seam, "
+                       "refs/107-host-seams-plan.md), and an untagged one is never a way around the gate.")
     return "\n".join(out)
 
 
@@ -1277,7 +1479,9 @@ def main(argv=None):
     ap.add_argument("--no-git", action="store_true", help="no git: --files are the Bill-owned files; no untagged report")
     ap.add_argument("--rev", help="check this git revision's tree instead of the working tree (no checkout needed)")
     ap.add_argument("--since", help="report only hits / untagged lines / new sites on lines ADDED since this ref (a merge base); "
-                                    "the budget still applies to the whole file")
+                                    "the budget still applies to the whole file; also fails (exit 1) on added lines in Bill-owned production files that name a "
+                                    "symbol declared in src/VP-V/ headers and unknown to Bill's baseline, tagged or not-yet-tagged: see the module "
+                                    "docstring, UNTAGGED VP-V REFERENCES")
     ap.add_argument("--write-manifest", action="store_true", help="(re)seed docs/audit/hook-sites.json from the tree")
     ap.add_argument("--write-budget", action="store_true", help="(re)seed docs/audit/hook-budget.json from the tree (ceilings = current counts)")
     args = ap.parse_args(argv)

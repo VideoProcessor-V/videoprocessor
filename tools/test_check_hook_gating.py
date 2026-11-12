@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -453,6 +454,21 @@ class CheckHookGatingTest(unittest.TestCase):
         self.assertEqual(t["landed"], {"P4-e": sha, "P4-f": sha}, t)
         self.assertEqual(t["errors"], [], t)
 
+    def test_trailer_in_both_layouts_standard_block_and_own_paragraph_before_coauthored_by(self):
+        co = "Co-Authored-By: t <t@example.invalid>"
+        for name, msg in (("standard block", "P4 e lands\n\nbody\n\nHook-Trigger: P4-e\n" + co),
+                          ("own paragraph (867594f19)", "P4 e lands\n\nbody\n\nHook-Trigger: P4-e\n\n" + co)):
+            with self.subTest(name):
+                t = self._repo_with(msg)
+                sha = self._git("rev-parse", "--short=12", "HEAD")
+                self.assertEqual(t["landed"], {"P4-e": sha}, t)
+                self.assertEqual(t["errors"], [], t)
+            self.tearDown()
+            self.setUp()
+        self.assertEqual(chg.trailer_values("s\n\nb\n\nHook-Trigger: P4-e\n\n" + co), ["P4-e"])
+        self.assertEqual(chg.trailer_values("s\n\nHook-Trigger: P4-e\nmentioned in the body.\n\nMore.\n\n" + co), [])
+        self.assertEqual(chg.trailer_values("Hook-Trigger: P4-e"), [], "the subject never counts")
+
     def test_red_a_landed_trigger_not_in_the_json_fails(self):
         t = self._repo_with("lands\n\nHook-Trigger: P4-e, P9-nowhere")
         sha = self._git("rev-parse", "--short=12", "HEAD")
@@ -599,6 +615,181 @@ class CheckHookGatingTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertNotIn("temporary headroom", out, "a landed temporary behaves as today: the base budget applies")
         self.assertNotIn("ratchet the ceiling down", out)
+
+
+class UntaggedVpReferenceTest(unittest.TestCase):
+    """T-HOOKGATE-UNTAGGED (coordinator 2026-11-12): under --since an added line of a Bill-owned production file that
+    names a symbol declared under src/VP-V/ (and unknown to Bill's baseline) fails unless it is a tagged hook line."""
+
+    GIT_ENV = CheckHookGatingTest.GIT_ENV
+    VPV_HEADER = "src/VP-V/modules/feature/Feature.h"
+    HEADER = ("#pragma once\nnamespace FeatureCatalog\n{\n\tstruct Decision {};\n\tDecision HeldNotice(int why);\n}\n"
+              "struct FeatureMonitor\n{\n\tvoid SetNovelMode(int mode);\n\tint size() const;\n\tint frame;\n\tfloat detailPulse;\n};\n")
+    # Bill's baseline already names `size` and `frame`: declared in VP-V too, but they are Bill's own names.
+    BASE = ("struct Impl\n{\n\tFeatureMonitor mon;\n\tvoid Render(int frame)\n\t{\n\t\tdoBill(frame);\n\t\tint n = list.size();\n\t}\n};\n")
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.root = self.td.name
+        _w(self.root, BILL, self.BASE)
+        self._git("init", "-q")
+        self._git("add", BILL)
+        self._git("commit", "-q", "-m", "bill")     # Bill's baseline: no src/VP-V/ in its tree
+        self.base = self._git("rev-parse", "HEAD")
+        _w(self.root, chg.SLOTS_HEADER, SLOTS)
+        _w(self.root, self.VPV_HEADER, self.HEADER)
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _git(self, *args):
+        return subprocess.run(["git", "-C", self.root] + list(args), check=True, env=self.GIT_ENV,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode("utf-8", "replace").strip()
+
+    def _cli(self, *extra):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = chg.main(["--root", self.root, "--base-ref", self.base, "--files", BILL] + list(extra))
+        return rc, buf.getvalue()
+
+    def _added(self, *lines):
+        """Commit the VP-V header plus a Bill file with `lines` added inside Render() (file lines 8..); --since the Bill commit."""
+        body = "".join("\t\t%s\n" % l for l in lines)
+        _w(self.root, BILL, self.BASE.replace("\t\tint n = list.size();\n", "\t\tint n = list.size();\n" + body))
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "branch")
+        return self._cli("--rev", "HEAD", "--since", self.base)
+
+    def test_granted_name_collision_site_is_honoured_and_only_for_its_symbol(self):
+        entry = {"file": BILL, "pattern": r"\bdetailPulse\b", "symbol": "detailPulse",
+                 "reason": "name collision granted by the coordinator; a local shares the spelling of a VP-V member. Proof: this test."}
+        rc, out = self._added("float detailPulse = 1.f;")
+        self.assertEqual(rc, 1, out)                      # no grant: flagged
+        self.assertIn("detailPulse", out)
+        old = chg.ALLOW_SITES
+        chg.ALLOW_SITES = old + [entry]
+        try:
+            rc, out = self._cli("--rev", "HEAD", "--since", self.base)
+            self.assertEqual(rc, 0, out)
+            self.assertIn("0 new untagged VP-V references", out)
+            self.tearDown()
+            self.setUp()
+            rc, out = self._added("float detailPulse = mon.SetNovelMode(1);")   # another VP-V name on the line still fails
+            self.assertEqual(rc, 1, out)
+            self.assertIn("[SetNovelMode]", out)
+        finally:
+            chg.ALLOW_SITES = old
+
+    def test_waived_untagged_line_is_keyed_by_text_and_must_match_exactly_one_added_line(self):
+        def entry(pat):
+            return {"file": BILL, "pattern": pat, "reason": "WAIVER-TEST granted for this test. Proof: this test."}
+        old = chg.ALLOW_UNTAGGED_REFS
+        try:
+            chg.ALLOW_UNTAGGED_REFS = [entry(r"mon\.SetNovelMode\(2\);")]
+            rc, out = self._added("mon.SetNovelMode(2);", "SyncFallback(FeatureCatalog::HeldNotice(1));")
+            self.assertEqual(rc, 1, out)                  # the waiver covers only the SetNovelMode line
+            self.assertIn("1 new untagged VP-V references", out)
+            self.assertIn("allow-list untagged ref [1]", out)
+            self.tearDown()
+            self.setUp()
+            chg.ALLOW_UNTAGGED_REFS = [entry(r"mon\.SetNovelMode\(2\);")]
+            rc, out = self._added("mon.SetNovelMode(2);")   # different position: still honoured (not a line number)
+            self.assertEqual(rc, 0, out)
+            self.tearDown()
+            self.setUp()
+            chg.ALLOW_UNTAGGED_REFS = [entry(r"mon\.SetNovelMode\(2\);")]
+            rc, out = self._added("mon.SetNovelMode(2);", "mon.SetNovelMode(2);")   # two matches: ambiguous, nothing honoured
+            self.assertEqual(rc, 1, out)
+            self.assertIn("2 new untagged VP-V references", out)
+        finally:
+            chg.ALLOW_UNTAGGED_REFS = old
+
+    def test_raw_waiver_tells_apart_lines_that_differ_only_by_a_string_literal(self):
+        old = chg.ALLOW_UNTAGGED_REFS
+        try:
+            chg.ALLOW_UNTAGGED_REFS = [{"file": BILL, "pattern": r'SetNovelMode\("a"\);', "raw": True,
+                                        "reason": "WAIVER-TEST for this test. Expires at the re-graft."}]
+            rc, out = self._added('mon.SetNovelMode("a");', 'mon.SetNovelMode("b");')
+            self.assertEqual(rc, 1, out)
+            self.assertIn("1 new untagged VP-V references", out)
+            self.assertIn('SetNovelMode("b")', out)
+        finally:
+            chg.ALLOW_UNTAGGED_REFS = old
+
+    def test_waiver_entries_name_the_waiver_and_expiry(self):
+        for e in chg.ALLOW_UNTAGGED_REFS:
+            self.assertIn("WAIVER-", e["reason"], e["pattern"])
+            self.assertIn("Expires", e["reason"], e["pattern"])
+            self.assertTrue(os.path.isfile(os.path.join(ROOT, *e["file"].split("/"))), e["file"])
+
+    def test_p4_relocated_host_members_collect_frame_hooks_and_draw_frame_are_allowed_callees(self):
+        rx = [e["callee"] for e in chg.ALLOW_CALLEES if "OrderFrameSlotHooks" in e["callee"]]
+        self.assertEqual(len(rx), 1)
+        for name in ("CollectFrameHooks", "DrawFrame", "m_impl->DrawFrame"):
+            self.assertTrue(re.search(r"\b(?:" + rx[0] + r")\s*\(", "x = " + name + "(a);"), name)
+        self.assertFalse(re.search(r"\b(?:" + rx[0] + r")\s*\(", "DrawFrameNow(a);"))
+
+    def test_trailer_walk_back_stops_after_the_last_two_key_value_paragraphs(self):
+        co = "Co-Authored-By: t <t@e.invalid>"
+        self.assertEqual(chg.trailer_values("s\n\nb\n\nHook-Trigger: P4-e\n\n" + co), ["P4-e"])
+        self.assertEqual(chg.trailer_values("s\n\nHook-Trigger: P4-e\n\nX-A: 1\n\n" + co), [])
+
+    def test_red_an_added_untagged_vp_call_is_flagged_with_file_and_line(self):
+        rc, out = self._added("mon.SetNovelMode(2); SyncFallback(FeatureCatalog::HeldNotice(1));")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("untagged VP-V reference %s:8 " % BILL, out)
+        self.assertIn("[FeatureCatalog, HeldNotice, SetNovelMode]", out)
+        self.assertIn("1 new untagged VP-V references in Bill files (lines added since %s)" % self.base, out)
+        self.assertIn("FAIL (rule 32): an added line in a Bill-owned production file names a symbol declared under src/VP-V/", out)
+
+    def test_red_an_unreadable_since_ref_fails_closed_with_exit_2(self):
+        _w(self.root, BILL, self.BASE + "// more\n")
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "branch")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                chg.main(["--root", self.root, "--base-ref", self.base, "--files", BILL, "--rev", "HEAD", "--since", "deadbeef123"])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("--since deadbeef123 cannot be read", err.getvalue())
+
+    def test_green_the_same_line_with_a_hook_tag_is_not_an_untagged_reference(self):
+        rc, out = self._added("mon.SetNovelMode(2);   // VPV-HOOK")
+        self.assertIn("0 new untagged VP-V references in Bill files", out)
+        self.assertNotIn("untagged VP-V reference " + BILL, out, "a tagged line is the hook gate's business, not this report's")
+
+    def test_green_an_added_line_without_a_vp_reference_and_bills_own_names_are_not_flagged(self):
+        # `size` and `frame` are declared in VP-V too, but Bill's baseline already uses them; the comment names a VP-V symbol.
+        rc, out = self._added("int m = list.size() + frame;", "doBill(frame);   // FeatureCatalog is only named in this comment")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("0 new untagged VP-V references in Bill files", out)
+
+    def test_pre_existing_vp_references_are_not_flagged_since_only_added_lines_count(self):
+        _w(self.root, BILL, self.BASE.replace("doBill(frame);\n", "doBill(frame);\n\t\tmon.SetNovelMode(1);\n"))
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "older untagged call")
+        older = self._git("rev-parse", "HEAD")
+        _w(self.root, BILL, self.BASE.replace("doBill(frame);\n", "doBill(frame);\n\t\tmon.SetNovelMode(1);\n\t\tint kk = 1;\n"))
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "unrelated edit")
+        rc, out = self._cli("--rev", "HEAD", "--since", older)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("0 new untagged VP-V references in Bill files", out)
+
+    def test_without_since_the_output_and_exit_semantics_are_unchanged(self):
+        _w(self.root, BILL, self.BASE.replace("doBill(frame);\n", "doBill(frame);\n\t\tmon.SetNovelMode(1);\n"))
+        rc, out = self._cli()
+        self.assertNotIn("untagged VP-V reference", out)
+        self.assertNotIn("new untagged VP-V references", out)
+        self.assertEqual(rc, 0, out)
+
+    def test_the_symbol_set_is_derived_from_the_vp_v_headers(self):
+        _w(self.root, "src/VP-V/modules/feature/Other.inl", "void NotAHeaderName(int x);\n")
+        syms = chg.vp_symbols(chg.Tree(self.root))
+        for name in ("FeatureCatalog", "Decision", "HeldNotice", "FeatureMonitor", "SetNovelMode"):
+            self.assertIn(name, syms)
+        self.assertNotIn("NotAHeaderName", syms, "only .h / .hpp under src/VP-V/ declare symbols")
+        self.assertNotIn("return", syms)
 
 
 if __name__ == "__main__":
