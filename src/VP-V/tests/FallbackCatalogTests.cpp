@@ -423,6 +423,19 @@ namespace FallbackCatalogTest
 			Assert::IsFalse(f.Current(14000).engaged);
 		}
 
+		// Owner 2026-11-11 22:39 (doc 91:108): the motion compensation fallback row.
+		TEST_METHOD(DitherMotionCompensationRowHasAStableIdAndText)
+		{
+			const Decision on = DitherMotionCompensationOff(true, "a dropped frame");
+			Assert::AreEqual(std::string("dither motion compensation"), on.id);
+			Assert::IsTrue(on.engaged);
+			Assert::IsTrue(on.reason.find("dither: motion compensation off: a dropped frame") != std::string::npos);
+			Assert::IsTrue(DitherMotionCompensationOff(true, "").engaged && !DitherMotionCompensationOff(true, "").reason.empty());
+			const Decision off = DitherMotionCompensationOff(false, "x");
+			Assert::AreEqual(std::string("dither motion compensation"), off.id);
+			Assert::IsFalse(off.engaged);
+		}
+
 		TEST_METHOD(DitherVectorRowsHaveStableIdsAndTexts)
 		{
 			// W2-C8: the four automatic steps down of the sigma-delta's vector chain (motion.estimation DitherVectorSource.h).

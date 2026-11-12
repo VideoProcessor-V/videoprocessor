@@ -343,6 +343,19 @@ namespace VideoProcessorTest
 			Assert::IsFalse(Engaged(t.Decisions(5), "dither motion compensation"));
 		}
 
+		// Audit round 2 MUST 1: "engine fully off" is the one switch (vector_demand off) or the motion slots off - never a demand state
+		// of a running engine (no starter / no consumer / interlaced / smooth motion / dither_vectors own): the output-domain search
+		// still measures the motion there, so the owner's default stays on.
+		TEST_METHOD(EngineFullyOffIsTheSwitchOrTheSlotsOnly)
+		{
+			Assert::IsFalse(DV::EngineFullyOff(true, true), L"engine on (whatever its demand state)");
+			Assert::IsTrue(DV::EngineFullyOff(false, true), L"vector_demand off");
+			Assert::IsTrue(DV::EngineFullyOff(true, false), L"motion slots off");
+			DV::CompensationFacts f = ValidFrame();
+			f.engineOff = DV::EngineFullyOff(true, true);
+			Assert::IsTrue(DV::DecideCompensation(f).on, L"a running engine with no starter keeps compensation on");
+		}
+
 		TEST_METHOD(MotionCompensationOffForEachCauseVisibly)
 		{
 			// The engine fully off: the line shows it.

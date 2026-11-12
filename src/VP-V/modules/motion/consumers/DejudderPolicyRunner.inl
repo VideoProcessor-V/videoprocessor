@@ -127,10 +127,13 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 		namespace DV = VpMotion::DitherVectors;
 		double configured = 0.0;
 		DV::CompensationFacts cf;
-		cf.configured = customHooks.QuantizerConfigured("motion_compensation", configured) && configured >= 0.5;
-		if (cf.configured)
+		// A loaded sigma-delta always notes the decision (a rule set to 0 shows as "rule", status only); only a configured one is
+		// switched per frame. Invariant: a hook reload (Ensure, on a template change) re-applies the rule value 1 until the next
+		// frame's gate - the same moment the shader's instance_tag resets its carry, so no stale compensation crosses it.
+		if (customHooks.QuantizerConfigured("motion_compensation", configured))
 		{
-			cf.engineOff = vectorDemand.mode == VectorDemand::Mode::Off;
+			cf.configured = configured >= 0.5;
+			cf.engineOff = DV::EngineFullyOff(activeSettings.vectorDemand, MotionVectorsRun());
 			cf.continuity = keptContinuity;
 			cf.keptPairValid = sourceSequence > 1 && motionValidity.KeptPairValid(sourceSequence - 1, sourceSequence);
 			if (sourceSequence > 1)
@@ -138,7 +141,8 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 			cf.invalidations = motionValidity.Total();
 			cf.lastCause = motionValidity.LastCause();
 			const DV::Compensation compensation = DV::DecideCompensation(cf);
-			customHooks.SetQuantizerParameter("motion_compensation", compensation.on ? 1.0 : 0.0);
+			if (cf.configured)
+				customHooks.SetQuantizerParameter("motion_compensation", compensation.on ? 1.0 : 0.0);
 			DV::Tracker& tracker = DV::Registry::ForHost(this);
 			const unsigned long long nowMs = GetTickCount64();
 			tracker.NoteCompensation(compensation, nowMs);

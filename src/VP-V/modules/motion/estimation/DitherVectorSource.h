@@ -17,7 +17,8 @@
 //   4 OwnSearch     the output-domain search (fallback/OutputDomainSearchGlsl.h, the passes moved out of the sigma-delta)
 //                   measures the motion on the presented picture: dither_vectors own (by choice), or every step above absent
 //                   (the reason, incl. an on-demand miss, is named).
-//   5 Static        no motion compensation (the sigma-delta rule's motion_compensation is 0, the shader default: the plain
+//   5 Static        no motion compensation (the sigma-delta rule's motion_compensation is 0 - a rule that sets it; default 1 since
+//                   owner 2026-11-11 22:39, doc 91:108: the plain
 //                   motion gate; no vectors are mapped then - the field mapping would be read by nothing).
 // Pure policy + counters (no renderer, no D3D, no clock): the renderer's Impl fills Facts once per decision
 // (DitherVectorSourceHost.inl) and records the Choice; DitherVectorSourceTests drive it directly. C++14.
@@ -109,7 +110,7 @@ namespace DitherVectors
 		bool slotRuns = false;             // the sigma-delta runs (output.dither slot, DitherSlot::VectorsWanted's first term)
 		bool patch = false;                // VPVEC can be bound (SigmaDeltaVectors::Supported)
 		bool ownSetting = false;           // dither_vectors own
-		bool motionCompensation = false;   // the sigma-delta hook's motion_compensation >= 0.5 (shader default 0.0)
+		bool motionCompensation = false;   // the CONFIGURED motion_compensation >= 0.5 (rule default 1, owner 2026-11-11 22:39)
 		bool served = false;               // VectorDemand::Serves(Consumer::SigmaDelta)
 		bool sequences = false;            // seq != 0 && next != 0
 		bool timelineDrew = false;         // interpolating || the VP timeline drew this frame's refreshes
@@ -233,7 +234,7 @@ namespace DitherVectors
 	struct CompensationFacts
 	{
 		bool configured = false;           // the quantiser's configured motion_compensation >= 0.5 (rule or default)
-		bool engineOff = false;            // VectorDemand mode Off
+		bool engineOff = false;            // EngineFullyOff(...): the motion engine switched off as a whole
 		MotionValidity::Continuity continuity = MotionValidity::Continuity::First;   // MotionValidity NoteKept(this frame)
 		bool keptPairValid = false;        // KeptPairValid(seq - 1, seq)
 		MotionValidity::State::SpanState span = MotionValidity::State::SpanState::Unknown;   // SpanStatus(seq - 1, seq)
@@ -250,6 +251,14 @@ namespace DitherVectors
 			return !on && why != CompensationWhy::NotConfigured && why != CompensationWhy::FirstFrame;
 		}
 	};
+	// The motion engine is off AS A WHOLE (doc 91 D 2026-11-11 06:15: one control): the vector_demand switch off, or the motion
+	// slots off (pipeline_slots_off). NOT the engine's demand states (no starter, no consumer, interlaced, smooth motion): there
+	// the output-domain search (step 4, inside the sigma-delta) still measures the motion, so compensation stays on.
+	inline bool EngineFullyOff(bool vectorDemandEnabled, bool motionSlotsRun)
+	{
+		return !vectorDemandEnabled || !motionSlotsRun;
+	}
+
 	inline Compensation DecideCompensation(const CompensationFacts& f)
 	{
 		using C = MotionValidity::Continuity;
@@ -281,7 +290,7 @@ namespace DitherVectors
 		return c.why != Why::OwnSetting && c.why != Why::NoPatch && c.why != Why::NotServed && c.why != Why::NoFrames;
 	}
 
-	// Counters + the status segment + the four fallback entries of one renderer (render thread; the status reader takes a copy
+	// Counters + the status segment + the five fallback entries of one renderer (render thread; the status reader takes a copy
 	// under the host's own status mutex). Entries are held for holdMs after their last use so a per-frame flip does not flicker.
 	class Tracker
 	{
@@ -394,7 +403,8 @@ namespace DitherVectors
 				FallbackCatalog::DitherMotionCompensationOff(false, std::string()) };
 		}
 
-		// The five entries (four vector steps + motion compensation off), in a fixed order (stable ids: FallbackCatalog DitherVectors*). Step 5 (static) is the configuration
+		// The five entries (four vector steps + motion compensation off), in a fixed order (stable ids: FallbackCatalog DitherVectors* +
+		// DitherMotionCompensationOff). Step 5 (static) is the configuration
 		// motion_compensation 0 - the shipped default of the sigma-delta rule - so it is in the status segment only.
 		std::vector<FallbackCatalog::Decision> Decisions(unsigned long long nowMs) const
 		{
