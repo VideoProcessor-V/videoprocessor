@@ -7,3 +7,4 @@ Records the layout and the read API of the frame-role detector's output; no dete
 - Inputs (declared in `core/Products.h` on both products): coding evidence, the P5 monitor tiles at lag 0 (FrameQuality is read as a VIEW, `identity/FrameQuality.h`; `ProductFlags()` item C9b) and P14 source identity at lag 1 (held state, via `SourceQualityView`).
 - The lane slot: `SkeletonModule::SetQualityPatternProducers(p15, p15c)`, registered on a new lane right after p1 / p4 and before its threads start; null today, so the lane is unchanged.
 - Tests: `identity/tests/QualityPatternRecordTests.cpp`, `QualityPatternViewTests.cpp`.
+- The temporal-detail engine status segment (row 792) is NOT wired here: it arrives with the TD engine. Today only the view API (StatusOnly for both consumers) exists.
