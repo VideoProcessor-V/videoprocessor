@@ -97,11 +97,13 @@ namespace VpMotion
 		life.backoffActive = motionProducerStartRetry.Recovering() && nowMs < motionProducerStartRetry.RetryAtMs();
 		const bool startFailureInjected = !producerStartFailureForTesting_.empty();   // C1-4 test seam: empty in the product
 		life.gpuAvailable = in.gpu != nullptr || startFailureInjected;
-		// W2-C5b: the setting from the host's hook block (every frame: cold start and Apply alike), published for the dequeue hook.
-		// `on` only (auto starts nothing), and in low latency only with a queue ahead (competitive stays motion-free).
-		SetOnDemandSetting(in.onDemand);
+		// W2-C5b: the setting the renderer noted this frame (ResolveMotionEngine; cold start and Apply alike), else the inputs'
+		// (tests), published for the walk's stage. `on` only (auto starts nothing), and in low latency only with a queue ahead
+		// (competitive stays motion-free).
+		const OnDemand::Setting onDemand = hostOnDemandKnown_ ? hostOnDemand_ : in.onDemand;
+		SetOnDemandSetting(onDemand);
 		life.queueAheadCapacity = queueAheadCapacity.load(std::memory_order_acquire);
-		life.onDemandWanted = OnDemand::Wanted(in.onDemand, life.lowLatency, life.queueAheadCapacity);
+		life.onDemandWanted = OnDemand::Wanted(onDemand, life.lowLatency, life.queueAheadCapacity);
 		const ProducerPlan::LifecycleOutput act = ProducerPlan::Lifecycle(life);
 		if (act.action == ProducerPlan::Action::Start)
 		{

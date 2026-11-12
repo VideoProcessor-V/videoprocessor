@@ -153,9 +153,9 @@ namespace VpMotion
 			bool dejudderCanEngage = false;
 			double sourceHz = 0.0;              // the measured content rate (0 = unmeasured)
 			pl_gpu gpu = nullptr;               // the device the engine needs; null = none
-			// W2-C5b: optical_flow_on_demand, parsed from the settings on the render thread (renderMutex held) by the host's hook
-			// block; PlanProducer publishes it (OnDemandSettingNow) for the dequeue hook. Every rendered frame, so a cold start and
-			// an Apply both reach it.
+			// W2-C5b: optical_flow_on_demand for a host that does not note it (tests). The renderer notes it every frame through
+			// NoteHostOnDemandSetting (rule 32: no hook line of its own), which then wins; PlanProducer publishes the result
+			// (OnDemandSettingNow) for the walk's stage.
 			OnDemand::Setting onDemand = OnDemand::Setting::Auto;
 		};
 
@@ -389,7 +389,10 @@ namespace VpMotion
 		// True while an estimate read (or asked for) a pair within the last kConsumerIdleCycles hook calls, or before the first
 		// kConsumerIdleCycles calls: no consumer = no request (no GPU work for a pair nobody reads).
 		bool OnDemandConsumerActive();
-		// The setting PlanProducer published from ProducerInputs::onDemand (render thread); the walk's stage reads it.
+		// Rule 32: the renderer notes optical_flow_on_demand every frame from Impl::ResolveMotionEngine (PhaseTimeline.inl, render
+		// thread, before RenderLocked); once noted it replaces ProducerInputs::onDemand in PlanProducer. Render thread only.
+		void NoteHostOnDemandSetting(OnDemand::Setting s) { hostOnDemand_ = s; hostOnDemandKnown_ = true; }
+		// The setting PlanProducer published (the host's noted value, else ProducerInputs::onDemand); the walk's stage reads it.
 		void SetOnDemandSetting(OnDemand::Setting s) { onDemandSetting_.store(static_cast<unsigned char>(s), std::memory_order_release); }
 		OnDemand::Setting OnDemandSettingNow() const { return static_cast<OnDemand::Setting>(onDemandSetting_.load(std::memory_order_acquire)); }
 		// Stall fix (W2-C5b re-check, MUST 3): the walk's stage only STAGES the predicted pair under the renderer's queue mutex
@@ -494,6 +497,8 @@ namespace VpMotion
 		OnDemandStaged onDemandStaged_;
 		uint64_t onDemandWalkFrom_ = 0;             // the last A the walk staged (render thread only)
 		bool onDemandWalkFromKnown_ = false;
+		OnDemand::Setting hostOnDemand_ = OnDemand::Setting::Auto;   // NoteHostOnDemandSetting (render thread)
+		bool hostOnDemandKnown_ = false;
 		std::atomic<unsigned char> onDemandSetting_{ static_cast<unsigned char>(OnDemand::Setting::Auto) };   // not under the mutex
 		OnDemand::RenderBudget onDemandBudget_;
 		OnDemand::Clock::time_point onDemandLastCycle_;

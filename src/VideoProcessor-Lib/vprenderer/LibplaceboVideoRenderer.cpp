@@ -23134,7 +23134,6 @@ releaseDriftBaseRetention =
 			pin.dejudderEstimating = dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
 				dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers);
 			pin.dejudderCanEngage = dejudder && DejudderPolicy::CanEngageOrAcquiring(dejudderReason, pulldownAcquiring);   // SK-MV: the standing (warm engine) class, also UnknownRates / PlaneFormat
-			pin.onDemand = VpMotion::OnDemand::SettingOf(activeSettings.opticalFlowOnDemand);   // W2-C5b (render thread, renderMutex held)
 			vectorEngine.PlanProducer(pin);
 			// VPV-HOOK-END
 		}

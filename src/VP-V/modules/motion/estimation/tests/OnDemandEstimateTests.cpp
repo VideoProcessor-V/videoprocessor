@@ -976,7 +976,7 @@ namespace VideoProcessorTest
 			producer->Stop();
 		}
 
-		// W2-C5b commit 5: PlanProducer takes the setting from ProducerInputs (the host's hook block, every frame: cold start and
+		// W2-C5b commit 5: PlanProducer takes the setting from ProducerInputs (a host that notes none; the renderer notes it, rule 32) every frame: cold start and
 		// Apply alike) and publishes it for the dequeue hook.
 		TEST_METHOD(PlanProducerPublishesTheSettingFromItsInputs)
 		{
