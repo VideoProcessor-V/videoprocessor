@@ -249,6 +249,8 @@ namespace VpMotion
 		// flip is logged at most every 5 s (audit 2026-10-16: up to once per frame).
 		const bool levelOnly = ahead.reason == MotionAhead::Reason::Active || ahead.reason == MotionAhead::Reason::ShallowQueue;
 		const auto now = std::chrono::steady_clock::now();
+		// refs/109 F1: the lead's cap is noted every frame (the log key above leaves the lead out; the status line shows it).
+		motionLeadCap.Note(MotionAhead::LeadCapped(ahead.depth, static_cast<size_t>((std::max)(0, ahead.available))));
 		if (motionAheadLogged != key && (!levelOnly || now - motionAheadLoggedAt >= std::chrono::seconds(5)))
 		{
 			motionAheadLogged = key;
@@ -294,6 +296,11 @@ namespace VpMotion
 				vectorEngineLogged.clear();
 				VectorEngineFallbackSync::Release(host);
 			}
+			if (motionLeadCapShown)   // refs/109 F1: an engaged cap entry never outlives vector_demand
+			{
+				motionLeadCapShown = false;
+				host.SyncFallback(FallbackCatalog::MotionLookaheadCapped(false, MotionAhead::kMaxLead));
+			}
 			return;
 		}
 		// What decides the output dither's want, logged when it changes (a dither that runs but is not served
@@ -307,7 +314,15 @@ namespace VpMotion
 					(ditherKey & 1) ? "yes" : "no", (ditherKey & 2) ? "yes" : "no", (ditherKey & 4) ? "yes" : "no");
 			}
 		}
-		const std::string line = VectorDemand::StatusLine(vectorDemand);
+		// refs/109 F1: the cap is shown while the forward look-ahead runs and it binds sustained. Synced only when it changes, outside
+		// VectorEngineFallbackSync (VectorEngineTests pins that group's exact per-frame sync counts, WAIVER-T1-01).
+		const bool leadCapShown = motionLeadCap.sustained && vectorDemand.mode == VectorDemand::Mode::Forward;
+		if (leadCapShown != motionLeadCapShown)
+		{
+			motionLeadCapShown = leadCapShown;
+			host.SyncFallback(FallbackCatalog::MotionLookaheadCapped(leadCapShown, MotionAhead::kMaxLead));
+		}
+		const std::string line = VectorDemand::StatusLine(vectorDemand, leadCapShown ? MotionAhead::kMaxLead : 0);
 		if (line != vectorEngineLogged)
 		{
 			vectorEngineLogged = line;

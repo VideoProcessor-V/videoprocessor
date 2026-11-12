@@ -144,6 +144,28 @@ namespace MotionAhead
 		const int queued = static_cast<int>((std::min)(queuedAhead, static_cast<size_t>(kMaxLead)));
 		return (std::min)(kMaxLead, (std::max)(depth, queued));
 	}
+	// refs/109 F1 (AUDIT-R, owner accepted 2026-11-11): the cap BINDS when the look-ahead runs and either the queue holds more frames
+	// ahead than kMaxLead (60p with the standard 250 ms queue: 14-15 ahead, lead 13) or the depth itself is above it (240p's 16).
+	// It was log-only (the "Motion ahead:" line, whose re-log key leaves the lead out); it is now visible (no silent fallbacks):
+	// the vector engine status line and the "motion_lookahead_capped" fallback entry, while it binds SUSTAINED (LeadCapTracker).
+	inline bool LeadCapped(int depth, size_t queuedAhead)
+	{
+		return depth > 0 && (depth > kMaxLead || queuedAhead > static_cast<size_t>(kMaxLead));
+	}
+	// The queue level swings by a frame as frames arrive and are shown: the visible state changes only after kLeadCapRun frames in a
+	// row either way (the same 24-frame run as the global-pair miss, VectorEngine::NoteGlobalPair). Render thread.
+	struct LeadCapTracker
+	{
+		static constexpr unsigned kLeadCapRun = 24;
+		bool sustained = false;
+		unsigned boundRun = 0;
+		unsigned freeRun = 0;
+		void Note(bool binds)
+		{
+			if (binds) { ++boundRun; freeRun = 0; if (boundRun >= kLeadCapRun) sustained = true; }
+			else { ++freeRun; boundRun = 0; if (freeRun >= kLeadCapRun) sustained = false; }
+		}
+	};
 
 	// The queue (current frame plus the frames after it) that holds `depth` ahead.
 	inline size_t QueueFramesFor(int depth) { return static_cast<size_t>((std::max)(0, depth)) + 1; }

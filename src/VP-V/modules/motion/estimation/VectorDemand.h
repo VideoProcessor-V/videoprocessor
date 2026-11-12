@@ -360,6 +360,15 @@ namespace VectorDemand
 			s += "; " + UnservedText(d);
 		return s;
 	}
+	// refs/109 F1: the status line plus the look-ahead cap while it binds. `cappedLead` = MotionAhead::kMaxLead when the lead is held
+	// at it (VectorEngine: sustained, forward look-ahead), else 0 (the line above, unchanged).
+	inline std::string StatusLine(const Decision& d, int cappedLead)
+	{
+		std::string s = StatusLine(d);
+		if (cappedLead > 0 && d.mode == Mode::Forward && !s.empty())
+			s += "; look-ahead lead capped at " + std::to_string(cappedLead) + " frames (more are queued ahead)";
+		return s;
+	}
 	// The whole-frame motion statistics every source-statistics consumer reads (source monitor fast-pan,
 	// motion intent), from one engine pair's global vector. One formula for the forward producer hit,
 	// a render-time sample and the backward pair. `sourcePixels` = the global vector in source pixels

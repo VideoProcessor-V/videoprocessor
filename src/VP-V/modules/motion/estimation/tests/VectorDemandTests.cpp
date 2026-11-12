@@ -296,6 +296,54 @@ namespace VectorDemandTest
 			Assert::IsFalse(FallbackCatalog::VectorEngineGlobal(false).engaged, L"global released");
 		}
 
+		// refs/109 F1 (AUDIT-R): the look-ahead lead cap binds at 60p with the standard 250 ms queue and is visible (status line +
+		// "motion_lookahead_capped"), only sustained; never while the look-ahead does not run.
+		TEST_METHOD(LookAheadLeadCapIsVisibleWhenItBinds)
+		{
+			// 60p, 250 ms queue: 15 frames, 14 queued after the current one; the depth is 4 (66.7 ms at 60 Hz).
+			const int depth60 = MotionAhead::DepthAt(4, 60.0);
+			Assert::AreEqual(4, depth60);
+			Assert::AreEqual(13, MotionAhead::kMaxLead);
+			Assert::AreEqual(13, MotionAhead::LeadFor(depth60, 14), L"14 queued ahead: the lead stops at 13");
+			Assert::IsTrue(MotionAhead::LeadCapped(depth60, 14), L"the cap binds at 60p / 250 ms");
+			Assert::IsTrue(MotionAhead::LeadCapped(depth60, 15));
+			Assert::IsFalse(MotionAhead::LeadCapped(depth60, 13), L"exactly 13 ahead: every queued frame is computed");
+			Assert::IsFalse(MotionAhead::LeadCapped(0, 20), L"no look-ahead (depth 0): nothing is capped");
+			Assert::IsTrue(MotionAhead::LeadCapped(MotionAhead::DepthAt(4, 240.0), 0), L"240p's depth 16 is held to 13");
+
+			MotionAhead::LeadCapTracker t;
+			for (unsigned i = 0; i + 1 < MotionAhead::LeadCapTracker::kLeadCapRun; ++i)
+				t.Note(true);
+			Assert::IsFalse(t.sustained, L"23 frames: not yet shown");
+			t.Note(false);
+			t.Note(true);
+			Assert::IsFalse(t.sustained, L"a free frame restarts the run");
+			for (unsigned i = 0; i < MotionAhead::LeadCapTracker::kLeadCapRun; ++i)
+				t.Note(true);
+			Assert::IsTrue(t.sustained, L"24 in a row: shown");
+			for (unsigned i = 0; i + 1 < MotionAhead::LeadCapTracker::kLeadCapRun; ++i)
+				t.Note(false);
+			Assert::IsTrue(t.sustained, L"held until 24 free frames in a row");
+			t.Note(false);
+			Assert::IsFalse(t.sustained, L"released");
+
+			const Decision forward = Decide(Make({ Consumer::GrainMap }));
+			Assert::IsTrue(forward.mode == Mode::Forward);
+			Assert::AreEqual(StatusLine(forward), StatusLine(forward, 0), L"not capped: the line is unchanged");
+			Assert::AreEqual(StatusLine(forward) + "; look-ahead lead capped at 13 frames (more are queued ahead)",
+				StatusLine(forward, MotionAhead::kMaxLead));
+			const Decision idle = Decide(Make({}));
+			Assert::AreEqual(StatusLine(idle), StatusLine(idle, MotionAhead::kMaxLead), L"no forward look-ahead: no cap text");
+
+			const FallbackCatalog::Decision on = FallbackCatalog::MotionLookaheadCapped(true, MotionAhead::kMaxLead);
+			Assert::IsTrue(on.engaged);
+			Assert::AreEqual(std::string("motion_lookahead_capped"), on.id);
+			Assert::IsTrue(on.reason.find("13 frames ahead") != std::string::npos, L"the reason names the cap");
+			const FallbackCatalog::Decision off = FallbackCatalog::MotionLookaheadCapped(false, MotionAhead::kMaxLead);
+			Assert::IsFalse(off.engaged);
+			Assert::AreEqual(std::string("motion_lookahead_capped"), off.id);
+		}
+
 		TEST_METHOD(StatusLinesAreExact)
 		{
 			Assert::AreEqual(std::string("Vector engine: on (forward) for grain map, deband hold"),

@@ -329,6 +329,19 @@ namespace FallbackCatalog
 	// The look-ahead producer stopped after three failed jobs in a row and restarts itself with a
 	// back-off (MotionAhead::ProducerRecovery). Engaged while it is wanted and waiting to restart,
 	// for every vector consumer (the "motion" entry above covers only the de-judder's view).
+	// ---- motion.estimation: the look-ahead lead cap (refs/109 F1, AUDIT-R) ---------------------------
+	// The lead (frames computed ahead) is held at MotionAhead::kMaxLead (the 16-pair P2 ring minus the 3 kept behind the render)
+	// while more frames are queued ahead (60p with the standard 250 ms queue) or the depth is larger (240p). Engaged while that
+	// binds sustained; the frames beyond it get their pairs as they come within the lead (no matcher stand-in).
+	inline Decision MotionLookaheadCapped(bool capped, int cap)
+	{
+		if (!capped)
+			return Released("motion_lookahead_capped");
+		return Engaged("motion_lookahead_capped", "optical flow runs " + std::to_string(cap) +
+			" frames ahead, fewer than are queued (the pair ring's limit); later frames get their pairs as they come within " +
+			std::to_string(cap));
+	}
+
 	inline Decision VectorProducer(bool wanted, bool recovering, unsigned stops, const std::string& error = std::string())
 	{
 		if (!wanted || !recovering)

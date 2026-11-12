@@ -44,6 +44,7 @@ namespace FallbackPlainText
 			{ "vector producer", "The motion look-ahead stopped and is restarting" },
 			{ "motion engine", "The motion engine is off or reduced, so steps that reuse its motion use their simpler path" },
 			{ "motion look-ahead", "Some frames went without optical-flow look-ahead" },
+			{ "motion_lookahead_capped", "The motion look-ahead covers fewer frames than the queue holds" },
 			{ "source resolution look-ahead", "Some frames had their source resolution judged on arrival only" },
 		};
 		for (const Entry& e : table)
