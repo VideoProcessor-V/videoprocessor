@@ -7239,8 +7239,13 @@ namespace Tests
 			_putenv_s("VP_TEST_HARNESS_BETA", "1");
 			// Control: the same run without smooth motion. The sigma-delta must run in this harness and be
 			// served (so the smooth-motion run's output-dither fallback means something).
+			// T-TH-SM-01 (approved 2026-11-12 09:17): since W2-C1 the engine runs only for a STARTER (de-judder standing demand,
+			// hiccup repair, camera fit); the sigma-delta is a reuse-only consumer, so without one the control's premise ("the
+			// sigma-delta is served") cannot hold ("Vector engine: idle (no starter)"). The control gets the de-judder's standing
+			// demand (dejudder_strength; this plan's source rate is cadence-eligible), which restores the premise. Rule 28: the
+			// assertions are unchanged; the smooth-motion run below is unchanged (smooth motion is the engine there).
 			const RunResult control = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
-				"deband_vp: on\ntemporal_dither: sigma_delta\n", false, &plan);
+				"deband_vp: on\ntemporal_dither: sigma_delta\ndejudder_strength: 0.25\n", false, &plan);
 			Logger::WriteMessage(("control (no smooth motion):\n" + ditherLines(control)).c_str());
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
 				"deband_vp: on\ntemporal_dither: sigma_delta\n[vprenderer.motion]\nmotion_engine: smooth_motion\nsmooth_motion: always\n", false, &plan);
