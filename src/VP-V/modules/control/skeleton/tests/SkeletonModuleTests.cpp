@@ -18,6 +18,7 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/hub/HostState.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/FramesInFlight.h>
 #include <VP-V/core/PostPresentSpare.h>
@@ -37,6 +38,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -2148,6 +2150,28 @@ namespace SkeletonModuleTestsNs
 				Assert::AreEqual(3, int(u.used.laneLead), L"the lane lead does not depend on the motion producer");
 				RE::ResetForTesting();
 			}
+		}
+	};
+
+	// P11a-0 pin (refs/110 s2.1): the S8 state anchor Vpv::HostState is DATA ONLY. Until the P11a moves land
+	// (s2.2-2.6) every sub-struct is empty; each move that adds fields to one MUST replace its is_empty line
+	// below with assertions on the new fields (rule 28: never delete the pin, tighten it).
+	TEST_CLASS(HostStateAnchorPinTests)
+	{
+	public:
+		TEST_METHOD(AnchorIsDataOnlyAndSubStructsAreEmptyUntilFieldsLand)
+		{
+			static_assert(std::is_standard_layout<Vpv::HostState>::value, "the anchor is plain data");
+			static_assert(std::is_trivially_destructible<Vpv::HostState>::value, "the anchor holds no resources");
+			Assert::IsTrue(std::is_empty<Vpv::HostState::Motion::Intent>::value);
+			Assert::IsTrue(std::is_empty<Vpv::HostState::Led::Intent>::value);
+			Assert::IsTrue(std::is_empty<Vpv::HostState::Calibration>::value);
+			Assert::IsTrue(std::is_empty<Vpv::HostState::SourceAnalysis>::value);
+			Assert::IsTrue(std::is_empty<Vpv::HostState::Status>::value);
+			// The anchor itself holds five empty members (Motion, Led, Calibration, SourceAnalysis, Status; each wraps
+			// at most one empty Intent): one byte each, so it is exactly 5 bytes until a field lands. Std::is_empty of the
+			// anchor is false by definition (it has members); this size pin is the equivalent that tightens with fields.
+			Assert::AreEqual(size_t(5), sizeof(Vpv::HostState));
 		}
 	};
 }

@@ -11,7 +11,8 @@
 //
 //   ICaptureHost       what the module calls (one method per hook it serves)
 //   CaptureImplHost<I> the header-only adapter over the renderer's Impl (forwards by name, holds a reference)
-//   HostBinding        ONE Impl member, declared last (destroyed first):
+//   HostBinding        ONE Impl member, declared after the capture-path members (destroyed before them; since P11a-0 the
+//                      S8 anchor `Vpv::HostState vpv;` follows it as the Impl's LAST member, in the same tagged run):
 //                        Vpv::Capture::HostBinding captureBinding{ this, Vpv::Capture::MakeCaptureHost(*this) };
 //                      registers the adapter under `host` (the Impl, the key every hook passes) for the member's
 //                      lifetime, in a fixed lock-free slot table.
