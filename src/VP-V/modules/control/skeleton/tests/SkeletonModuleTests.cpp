@@ -2159,19 +2159,49 @@ namespace SkeletonModuleTestsNs
 	TEST_CLASS(HostStateAnchorPinTests)
 	{
 	public:
-		TEST_METHOD(AnchorIsDataOnlyAndSubStructsAreEmptyUntilFieldsLand)
+		TEST_METHOD(AnchorHoldsOnlyTheMovedFieldsAndTheOthersAreEmptyUntilFieldsLand)
 		{
-			static_assert(std::is_standard_layout<Vpv::HostState>::value, "the anchor is plain data");
-			static_assert(std::is_trivially_destructible<Vpv::HostState>::value, "the anchor holds no resources");
-			Assert::IsTrue(std::is_empty<Vpv::HostState::Motion::Intent>::value);
-			Assert::IsTrue(std::is_empty<Vpv::HostState::Led::Intent>::value);
+			// P11a-f (s2.2) landed the fields of motion.intent and led.intent; the other sub-structs stay empty until
+			// their move (s2.4 led, s2.5 calibration, s2.6 sourceAnalysis; s2.3 status holds no state).
 			Assert::IsTrue(std::is_empty<Vpv::HostState::Calibration>::value);
 			Assert::IsTrue(std::is_empty<Vpv::HostState::SourceAnalysis>::value);
 			Assert::IsTrue(std::is_empty<Vpv::HostState::Status>::value);
-			// The anchor itself holds five empty members (Motion, Led, Calibration, SourceAnalysis, Status; each wraps
-			// at most one empty Intent): one byte each, so it is exactly 5 bytes until a field lands. Std::is_empty of the
-			// anchor is false by definition (it has members); this size pin is the equivalent that tightens with fields.
-			Assert::AreEqual(size_t(5), sizeof(Vpv::HostState));
+			Assert::IsFalse(std::is_empty<Vpv::HostState::Motion::Intent>::value);
+			Assert::IsFalse(std::is_empty<Vpv::HostState::Led::Intent>::value);
+			// The moved fields keep their old types.
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Motion::Intent::intentInterpreter),
+				const std::shared_ptr<IntentInterpreter::Observer>>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Motion::Intent::blackShareEase), MotionIntent::ShotEase>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Motion::Intent::blackShareApplied), double>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Motion::Intent::blackShareShot), uint64_t>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Motion::Intent::blackShareValid), bool>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Motion::Intent::blackShareTime),
+				std::chrono::steady_clock::time_point>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::intentMutex), std::mutex>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::ambientSettings), AmbientAdapt::Settings>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::ambientFilter), AmbientAdapt::Filter>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::ambientAppliedBlackNits), double>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::blackIntentStatus), BlackIntentStatus>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::displayIntentStatus), DisplayIntentStatus>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::intentBlackPublished), BlackIntentMode>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::intentDisplayPublished), bool>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::ambientApply), IntentInterpreter::AmbientApplyState>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::ambientCutsSeen), uint64_t>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::ledIntentLimitsSent), IntentInterpreter::LedIntentLimits>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::blackIntentLogged), int>::value);
+			Assert::IsTrue(std::is_same<decltype(Vpv::HostState::Led::Intent::displayIntentLogged), std::string>::value);
+			// The initial values are the old Impl members' (the anchor is constructed with the Impl).
+			Vpv::HostState state;
+			Assert::IsTrue(state.motion.intent.intentInterpreter != nullptr);
+			Assert::IsFalse(state.motion.intent.blackShareValid);
+			Assert::AreEqual(0.0, state.motion.intent.blackShareApplied);
+			Assert::AreEqual(uint64_t(0), state.motion.intent.blackShareShot);
+			Assert::AreEqual(0.0, state.led.intent.ambientAppliedBlackNits);
+			Assert::IsTrue(state.led.intent.intentBlackPublished == BlackIntentMode::Off);
+			Assert::IsFalse(state.led.intent.intentDisplayPublished);
+			Assert::AreEqual(uint64_t(0), state.led.intent.ambientCutsSeen);
+			Assert::AreEqual(-1, state.led.intent.blackIntentLogged);
+			Assert::IsTrue(state.led.intent.displayIntentLogged.empty());
 		}
 	};
 }

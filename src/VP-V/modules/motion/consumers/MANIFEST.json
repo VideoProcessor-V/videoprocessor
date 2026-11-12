@@ -38,6 +38,8 @@
     "src/VP-V/modules/motion/consumers/PhaseTimeline.inl",
     "src/VP-V/modules/motion/consumers/DejudderPolicyRunner.h",
     "src/VP-V/modules/motion/consumers/DejudderPolicyRunner.inl",
+    "src/VP-V/modules/motion/consumers/IntentMotionState.h",
+    "src/VP-V/modules/motion/consumers/IntentMotionMethods.inl",
     "src/VP-V/modules/motion/consumers/DejudderEstimateCall.h",
     "src/VP-V/modules/motion/consumers/tests/DejudderDecisionRunnerHost.h",
     "src/VP-V/modules/motion/consumers/DejudderState.h",

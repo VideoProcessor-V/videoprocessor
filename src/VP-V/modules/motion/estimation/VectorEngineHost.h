@@ -25,8 +25,8 @@ namespace VpMotion
 		{
 			impl_.sourceMonitor.SetMotion(sourcePixelsPerFrame, sequence);
 		}
-		bool IntentActive() const override { return impl_.intentInterpreter && impl_.intentInterpreter->Active(); }
-		void NoteIntentVectors(const IntentInterpreter::VectorSample& sample) override { impl_.intentInterpreter->NoteVectors(sample); }
+		bool IntentActive() const override { return impl_.vpv.motion.intent.intentInterpreter && impl_.vpv.motion.intent.intentInterpreter->Active(); }
+		void NoteIntentVectors(const IntentInterpreter::VectorSample& sample) override { impl_.vpv.motion.intent.intentInterpreter->NoteVectors(sample); }
 
 	private:
 		Impl& impl_;

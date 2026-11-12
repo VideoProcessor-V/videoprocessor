@@ -487,4 +487,10 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Chain (total delay at the 4/3/2-frame budgets): single-axis re-base + de-judder.
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
+## Intent interpreter, motion part (P11a-f)
+
+`IntentMotionState.h` holds the state (`Vpv::HostState::Motion::Intent`, reached as `vpv.motion.intent.x`: the
+shot observer and led_protect's fade model) and `IntentMotionMethods.inl` the Impl members moved verbatim:
+`ConfigureIntentMotion` (first half of the old `ConfigureIntentInterpreter`) and `EaseBlackShare`.
+
 <!-- vpv-settings-tests:end -->

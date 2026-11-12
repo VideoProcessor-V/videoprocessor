@@ -66,7 +66,7 @@ namespace
 				(usable(impl.textures[0]) && usable(impl.textures[1])));
 		}
 		bool TemporalMixing() const { return impl.temporalRenderer.Mixing(); }
-		double IntentMotionScale(uint64_t sourceSequence) const { return impl.intentInterpreter->AppliedMotionScale(sourceSequence); }
+		double IntentMotionScale(uint64_t sourceSequence) const { return impl.vpv.motion.intent.intentInterpreter->AppliedMotionScale(sourceSequence); }
 		double TimelineDisplayHz() const { return impl.TimelineDisplayHz(); }
 		void LogInterpolationDecision(const InterpolationPolicy::Input& ii) { impl.LogInterpolationDecision(ii); }
 		void SetCadenceRatio(double ratio) { impl.dejudderExtraStats.cadenceRatio = ratio; }

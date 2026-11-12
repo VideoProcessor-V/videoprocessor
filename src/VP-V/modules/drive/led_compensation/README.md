@@ -300,4 +300,11 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Chain (total delay at the 4/3/2-frame budgets): LED + Stage 13 + LUT + black level.
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
+## Intent interpreter, ambient / black / LED limits (P11a-f)
+
+`LedIntentState.h` holds the state (`Vpv::HostState::Led::Intent`, reached as `vpv.led.intent.x`) and
+`LedIntentMethods.inl` the Impl members moved verbatim from the renderer: `ConfigureIntentInterpreter`
+(wrapper), `ConfigureIntentAmbient`, `IntentTargetBlackNits`, `EvaluateIntentBlackDisplay`. The motion half
+is in motion/consumers.
+
 <!-- vpv-settings-tests:end -->

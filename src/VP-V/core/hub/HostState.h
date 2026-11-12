@@ -28,6 +28,9 @@
 //
 // C++14 (VideoProcessor-Lib / renderer / Test projects): no inline variables, no if constexpr.
 
+#include <VP-V/modules/drive/led_compensation/LedIntentState.h>
+#include <VP-V/modules/motion/consumers/IntentMotionState.h>
+
 namespace Vpv
 {
 	struct HostState
@@ -35,18 +38,14 @@ namespace Vpv
 		// motion\consumers (s2.2)
 		struct Motion
 		{
-			struct Intent
-			{
-			};
+			using Intent = MotionIntentState;   // P11a-f: s2.2 motion-intent state (IntentMotionState.h)
 			Intent intent;
 		};
 
 		// drive\led_compensation (s2.2 intent part as `led.intent`; s2.4 LED, ambient, target black)
 		struct Led
 		{
-			struct Intent
-			{
-			};
+			using Intent = LedIntentState;   // P11a-f: s2.2 ambient / black / LED-limit state (LedIntentState.h)
 			Intent intent;
 		};
 

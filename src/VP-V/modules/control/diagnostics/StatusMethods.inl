@@ -198,24 +198,24 @@ bool LibplaceboVideoRenderer::GetIntentStatus(IntentStatus& status) const
 	status = {};
 	if (!m_impl)
 		return false;
-	status.motion = m_impl->intentInterpreter->MotionStatus();
-	std::lock_guard<std::mutex> guard(m_impl->intentMutex);
+	status.motion = m_impl->vpv.motion.intent.intentInterpreter->MotionStatus();
+	std::lock_guard<std::mutex> guard(m_impl->vpv.led.intent.intentMutex);
 	const double ownerBlack = m_impl->sdrBlackNits;
-	AmbientAdapt::FillStatus(m_impl->ambientSettings, m_impl->ambientFilter, ownerBlack,
-		m_impl->ambientAppliedBlackNits > 0.0 ? m_impl->ambientAppliedBlackNits : ownerBlack, status.ambient);
-	status.ambient.enabled = m_impl->ambientSettings.enabled;
+	AmbientAdapt::FillStatus(m_impl->vpv.led.intent.ambientSettings, m_impl->vpv.led.intent.ambientFilter, ownerBlack,
+		m_impl->vpv.led.intent.ambientAppliedBlackNits > 0.0 ? m_impl->vpv.led.intent.ambientAppliedBlackNits : ownerBlack, status.ambient);
+	status.ambient.enabled = m_impl->vpv.led.intent.ambientSettings.enabled;
 	if (status.ambient.enabled && !status.ambient.sensorValid)
 		CopyIntentText(status.ambient.reason, "no room reading (detector off or lost)");
-	else if (status.ambient.enabled && !(m_impl->ambientSettings.strength > 0.0))
+	else if (status.ambient.enabled && !(m_impl->vpv.led.intent.ambientSettings.strength > 0.0))
 		CopyIntentText(status.ambient.reason, "strength 0");
-	if (m_impl->intentBlackPublished != BlackIntentMode::Off)
+	if (m_impl->vpv.led.intent.intentBlackPublished != BlackIntentMode::Off)
 	{
-		status.black = m_impl->blackIntentStatus;
-		status.black.mode = m_impl->intentBlackPublished;
+		status.black = m_impl->vpv.led.intent.blackIntentStatus;
+		status.black.mode = m_impl->vpv.led.intent.intentBlackPublished;
 	}
-	if (m_impl->intentDisplayPublished)
+	if (m_impl->vpv.led.intent.intentDisplayPublished)
 	{
-		status.display = m_impl->displayIntentStatus;
+		status.display = m_impl->vpv.led.intent.displayIntentStatus;
 		status.display.enabled = true;
 	}
 	return status.motion.enabled || status.ambient.enabled || status.black.mode != BlackIntentMode::Off ||
@@ -227,11 +227,11 @@ void LibplaceboVideoRenderer::SetAmbientLux(double lux, bool valid, double nowSe
 {
 	if (!m_impl)
 		return;
-	std::lock_guard<std::mutex> guard(m_impl->intentMutex);
-	if (!m_impl->ambientSettings.enabled)
+	std::lock_guard<std::mutex> guard(m_impl->vpv.led.intent.intentMutex);
+	if (!m_impl->vpv.led.intent.ambientSettings.enabled)
 		return;
 	if (valid && std::isfinite(lux))
-		m_impl->ambientFilter.AddReading(lux < 0.0 ? 0.0 : lux, nowSeconds);
+		m_impl->vpv.led.intent.ambientFilter.AddReading(lux < 0.0 ? 0.0 : lux, nowSeconds);
 	else
-		m_impl->ambientFilter.Tick(nowSeconds);
+		m_impl->vpv.led.intent.ambientFilter.Tick(nowSeconds);
 }
