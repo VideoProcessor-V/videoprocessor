@@ -20,7 +20,7 @@ void LibplaceboVideoRenderer::IngressHardwareArrival(VideoFrame& videoFrame)
 	// learns the pathway for R15 / R19 when it changes. Inside the callback gate: the Impl outlives this callback.
 	// T-AR3-N2: the switches come from the hub fact the settings seam published (no activeSettings read on this thread).
 	uint32_t fixBits = 0;
-	if (m_impl && Vpv::Hub::ExtensionHub::Instance().FixSwitchBits(m_impl, fixBits) &&
+	if (m_impl && Vpv::Hub::ExtensionHub::Instance().FixSwitchBits(m_impl.get(), fixBits) &&
 		SyncIngressSwitches(FixSwitchesFromBits(fixBits), m_queueTimingFixes, m_motionHistoryFixes))
 		Vpv::Ingress::NoteOriginalPathway(this, m_originalPathway.load(std::memory_order_relaxed));
 	int64_t& arrivalQpc = m_ingressArrivalQpc;
