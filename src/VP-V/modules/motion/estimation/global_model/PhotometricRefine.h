@@ -123,6 +123,15 @@ namespace CameraModel
 		}
 	};
 
+	// Gradient magnitude of a candidate pixel, 8-bit-equivalent codes: the INTEGER code-difference sum |r - l| + |d - t| first
+	// (exact), then ONE multiply by the code scale. Every device (CPU reference, GPU CSCand) evaluates exactly this, so a
+	// pixel exactly on the threshold or a bin edge (integer sum a multiple of 257 at k = 255/65535) classifies identically.
+	inline double CandidateGradientCodes(uint32_t l, uint32_t r, uint32_t t, uint32_t d, double codeScale)
+	{
+		const uint32_t sum = (r > l ? r - l : l - r) + (d > t ? d - t : t - d);
+		return static_cast<double>(sum) * codeScale;
+	}
+
 	// Holds the scratch buffers between calls (cost only; never part of the output) and the counters. NOT thread-safe:
 	// one per fit worker, like Fitter.
 	class PhotometricRefiner

@@ -205,7 +205,7 @@ void CSCand(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint gi : SV_G
 					}
 					else
 					{
-						precise double mag = abs(ToD(r) * gK - ToD(l) * gK) + abs(ToD(d) * gK - ToD(t) * gK);
+						precise double mag = ToD((r > l ? r - l : l - r) + (d > t ? d - t : t - d)) * gK;   // integer sum, one multiply (= CandidateGradientCodes)
 						if (mag >= gMinGrad) bin = (uint)FloorD(min(4095.0L, mag * 4.0L));
 					}
 					if (bin != 0xFFFFu) InterlockedAdd(gsCandHist[bin], 1u);

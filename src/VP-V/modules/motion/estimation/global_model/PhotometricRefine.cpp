@@ -24,6 +24,7 @@ namespace CameraModel
 			int w = 0, h = 0, stride = 0;
 			double k = 1;
 			double At(int x, int y) const { return static_cast<double>(d[static_cast<size_t>(y) * stride + x]) * k; }
+			uint32_t Code(int x, int y) const { return static_cast<uint32_t>(d[static_cast<size_t>(y) * stride + x]); }
 		};
 
 		// Keys cubic (a = -0.5) weights of the taps at -1, 0, 1, 2 for a fraction t in [0, 1).
@@ -204,7 +205,7 @@ namespace CameraModel
 						if (mask.label[cell] != static_cast<uint8_t>(Label::Camera) || (mask.excluded && mask.excluded[cell]))
 							continue;
 					}
-					const double mag = std::fabs(A.At(i + 1, j) - A.At(i - 1, j)) + std::fabs(A.At(i, j + 1) - A.At(i, j - 1));
+					const double mag = CandidateGradientCodes(A.Code(i - 1, j), A.Code(i + 1, j), A.Code(i, j - 1), A.Code(i, j + 1), A.k);
 					if (!(mag >= o.minGradientCodes))
 						continue;
 					const int b = static_cast<int>(std::min(static_cast<double>(kBins - 1), mag * 4.0));

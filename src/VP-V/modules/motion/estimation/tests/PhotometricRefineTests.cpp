@@ -342,6 +342,49 @@ namespace VideoProcessorTest
 			}
 		}
 
+		TEST_METHOD(CandidateGradientIntegerFirstAtExactThreshold)
+		{
+			// R16 code scale 255/65535: an integer code-difference sum that is a multiple of 257 is EXACTLY a whole number of
+			// 8-bit-equivalent codes (257 x 255 = 65535), i.e. exactly on the candidate threshold (minGradientCodes) or a
+			// quarter-code bin edge. The magnitude must depend on the integer sum only, never on the code levels or the
+			// evaluation order, so the CPU reference and the GPU (CSCand) classify these pixels identically.
+			const double k = 255.0 / 65535.0;
+			const RefineOptions o;
+			int reorderedDiffers = 0, checked = 0;
+			for (uint32_t m = 1; m <= 16; ++m)
+			{
+				const uint32_t sum = 257u * m;
+				const double ref = CandidateGradientCodes(0u, sum, 0u, 0u, k);
+				Assert::IsTrue(ref == static_cast<double>(sum) * k, L"not one multiply of the integer sum");
+				const bool refCand = ref >= o.minGradientCodes;
+				const int refBin = static_cast<int>((std::min)(4095.0, ref * 4.0));
+				for (uint32_t base = 0; base + sum + 1 < 65536u; base += 997u)
+					for (uint32_t split = 0; split <= sum; split += 37u)
+					{
+						const uint32_t gx = split, gy = sum - split;
+						const uint32_t l = base, r = base + gx, t = 65535u - base - gy, d = 65535u - base;
+						const uint32_t vs[4][4] = { { l, r, t, d }, { r, l, t, d }, { l, r, d, t }, { r, l, d, t } };
+						for (int q = 0; q < 4; ++q)
+						{
+							const double mag = CandidateGradientCodes(vs[q][0], vs[q][1], vs[q][2], vs[q][3], k);
+							Assert::IsTrue(mag == ref, L"magnitude depends on the code levels / order, not only the integer sum");
+							Assert::IsTrue((mag >= o.minGradientCodes) == refCand, L"threshold classification differs");
+							Assert::AreEqual(refBin, static_cast<int>((std::min)(4095.0, mag * 4.0)), L"bin differs");
+							// The former per-code evaluation (|r*k - l*k| + |d*k - t*k|) for the record: it can land either side.
+							const double old = std::fabs(static_cast<double>(vs[q][1]) * k - static_cast<double>(vs[q][0]) * k)
+								+ std::fabs(static_cast<double>(vs[q][3]) * k - static_cast<double>(vs[q][2]) * k);
+							if (old != ref)
+								++reorderedDiffers;
+							++checked;
+						}
+					}
+			}
+			char text[200];
+			std::snprintf(text, sizeof(text), "candidate gradient at exact multiples of 257 (k = 255/65535): %d cases, former per-code evaluation differed in %d\n",
+				checked, reorderedDiffers);
+			Logger::WriteMessage(text);
+		}
+
 		TEST_METHOD(CostLine)
 		{
 			// ms per call (median of 5) at 1080 half luma (960x540, s 2), 4K quarter luma (960x540, s 4) and 4K R16 half
