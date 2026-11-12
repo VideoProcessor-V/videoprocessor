@@ -236,7 +236,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 		const SourceResolutionMonitor::Snapshot snap = vpv.sourceAnalysis.sourceMonitor.Read();
 		const int depth = renderImage.repr.bits.color_depth > 0 ? renderImage.repr.bits.color_depth : 10;
 		const bool useQuality = activeSettings.lowBitrateHandling != "off";
-		double quality = snap.reading ? snap.bitrateQuality : 1.0;
+		double quality = snap.reading ? vpv.sourceAnalysis.sourceMonitor.SharedQuality(snap, SourceIdentity::QualityConsumer::Deband) : 1.0;   // U12
 		if (activeSettings.lowBitrateHandling == "on") quality = (std::min)(quality, 0.4);
 		const double bits = snap.reading ? snap.effectiveBits : 0.0;
 		debandThreshold = VpDebander::Strength(bits, depth, quality, useQuality, activeSettings.sourceCodingFixes);
@@ -298,7 +298,7 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 			pl_tex field = vectorEstimate.LiveFieldOnVp(pipelineSlots.OriginalPathway(), sourceSequence, activeSettings.motionHistoryFixes);   // VPV-HOOK (VPV-GATED)
 			const double fieldScale = rebaseFactor > 0.0 ? 1.0 / rebaseFactor : 1.0;
 			const double fieldScaleX = rebaseFactorX > 0.0 ? 1.0 / rebaseFactorX : 1.0;
-			const double quality = snap.reading ? snap.bitrateQuality : 1.0;
+			const double quality = snap.reading ? vpv.sourceAnalysis.sourceMonitor.SharedQuality(snap, SourceIdentity::QualityConsumer::DetailPulse) : 1.0;   // U12
 			const double lines = nativeHeight * rebaseFactor;
 			if (activeSettings.detailPulseStabilise)
 			{
