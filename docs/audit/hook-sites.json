@@ -505,6 +505,29 @@
    "expiry": null
   },
   {
+   "id": "CEW.cpp-0015",
+   "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
+   "start": 6532,
+   "end": 6532,
+   "anchor": {
+    "symbol": "const auto activeQueuePolicies = [this]() -> const QueuePoli",
+    "before": [
+     "{ \"reliable\", \"Reliable\", \"Uses a larger queue for the most resilient playback.\", 32, 4, 3, 75 },",
+     "};"
+    ],
+    "after": [
+     "auto state = std::make_shared<State>();"
+    ]
+   },
+   "lines": [
+    "    const auto activeQueuePolicies = [this]() -> const QueuePolicy (&)[3] { return originalPathwayOn() ? billQueuePolicies : queuePolicies; };   // VPV-HOOK (HELD-CFG-09)"
+   ],
+   "text": "const auto activeQueuePolicies = [this]() -> const QueuePolicy (&)[3] { return originalPathwayOn() ? billQueuePolicies : queuePolicies; };",
+   "gate": "non-pathway",
+   "seam": null,
+   "expiry": null
+  },
+  {
    "id": "CEW.cpp-0016",
    "file": "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
    "start": 6629,
