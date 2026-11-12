@@ -10,6 +10,7 @@
 
 #include <VP-V/modules/drive/led_compensation/config_ui/LedDrivePage.h>
 #include <VP-V/modules/output/calibration_lut/config_ui/CalibrationPage.h>
+#include <VP-V/modules/control/config/config_pages/VpvQueueBillGrey.h>
 
 namespace Vpv
 {
@@ -20,5 +21,8 @@ namespace Vpv
 			ConfigPageHost::Register(&LedDrivePageInstance());
 		if (!ConfigPageHost::Find<CalibrationPage>())
 			ConfigPageHost::Register(&CalibrationPageInstance());
+		// Bill's Queue page: his controls that VP-V's queue settings override are greyed with a pointer.
+		if (!ConfigPageHost::Find<QueueBillGrey>())
+			ConfigPageHost::Register(&QueueBillGreyInstance());
 	}
 }

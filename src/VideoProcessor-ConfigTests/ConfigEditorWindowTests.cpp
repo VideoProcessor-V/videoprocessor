@@ -2986,6 +2986,107 @@ void testActivePictureLookaheadIsAutomaticWhenAbsent()
     require(readBytes(path).count("active_picture_lookahead_frames") == 1, "the preset wrote or kept the key");
 }
 
+// CONFIG lane 2026-11-11 (owner: Bill's pages stay his; VP-V's overlapping settings live on the VP-V page).
+// Original pathway: Bill's Queue page, his preset values and what they write are exactly Bill's (DIV-CFG-09).
+void testOriginalQueuePageAndPresetsAreBills()
+{
+    QTemporaryDir dir;
+    const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path);
+    require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vpv]\npipeline_original_pathway: on\n[vprenderer.First]\nquality: high\n"
+        "[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    window.selectPage(1);
+    auto* profiles = requireControl<QListWidget>(window, QStringLiteral("config.queue.profiles"));
+    bool found = false;
+    for (int row = 0; row < profiles->count(); ++row)
+        if (profiles->item(row)->data(Qt::UserRole).toString().compare(QStringLiteral("queue.normal"), Qt::CaseInsensitive) == 0)
+        { profiles->setCurrentRow(row); QCoreApplication::processEvents(); found = true; break; }
+    require(found, "Normal missing");
+    auto* policy = requireControl<QComboBox>(window, QStringLiteral("config.queue.policy_preset"));
+    auto* size = requireControl<QSpinBox>(window, QStringLiteral("config.queue.queue_size"));
+    auto* lead = requireControl<QSpinBox>(window, QStringLiteral("config.queue.lead_frames"));
+    auto* target = requireControl<QSpinBox>(window, QStringLiteral("config.queue.target_frames"));
+    auto* billLook = requireControl<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames"));
+    auto* apply = requireControl<QPushButton>(window, QStringLiteral("applyConfiguration"));
+    require(billLook->isEnabled() && target->isEnabled() && !billLook->toolTip().contains("VP-V page"),
+        "Original: Bill's look-ahead or Target frames is greyed");
+    struct Row { const char* id; int capacity, lead, target; };
+    for (const Row& row : { Row{ "low_latency", 2, 0, 1 }, Row{ "balanced", 16, 3, 2 }, Row{ "reliable", 32, 4, 3 } })
+    {
+        policy->setCurrentIndex(policy->findData(QString::fromLatin1(row.id)));
+        QCoreApplication::processEvents();
+        require(size->value() == row.capacity && lead->value() == row.lead && target->value() == row.target,
+            "Original: a preset does not set Bill's values");
+        require(billLook->value() == 0, "Original: a preset does not set Bill's look-ahead to 0");
+        require(policy->currentData().toString() == QString::fromLatin1(row.id), "Original: the preset does not match its own values");
+        apply->click();
+        QCoreApplication::processEvents();
+        const QByteArray saved = readBytes(path);
+        require(saved.contains("reset_queue_too_large_percent: 75") && saved.contains("active_picture_lookahead_frames: 0"),
+            "Original: a preset did not write Bill's reset percent and look-ahead 0");
+        require(!saved.contains("target_latency_ms") && !saved.contains("low_latency_path"),
+            "Original: a preset wrote a VP-V queue key");
+    }
+    require(policy->itemText(policy->findData(QStringLiteral("low_latency"))) == QStringLiteral("Low latency"), "Original preset label");
+}
+
+// VP-V pathway: Bill's look-ahead and Target frames are greyed with a pointer to the VP-V page, and come back
+// when VP-V does not own them (Target delay off, or the Original pathway).
+void testBillQueueControlsAreGreyedWhereVpvOwnsThem()
+{
+    const auto make = [](QTemporaryDir& dir, const char* pathway)
+    {
+        const QString path = dir.filePath("VideoProcessor.cfg");
+        QFile file(path);
+        require(file.open(QIODevice::WriteOnly), "fixture");
+        file.write(pathway);
+        file.write("[vprenderer.First]\nquality: high\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\ntarget_latency_ms: 200\n");
+        file.close();
+        return path;
+    };
+    const auto select = [](ConfigEditorWindow& window)
+    {
+        window.selectPage(1);
+        auto* profiles = requireControl<QListWidget>(window, QStringLiteral("config.queue.profiles"));
+        for (int row = 0; row < profiles->count(); ++row)
+            if (profiles->item(row)->data(Qt::UserRole).toString().compare(QStringLiteral("queue.normal"), Qt::CaseInsensitive) == 0)
+            { profiles->setCurrentRow(row); QCoreApplication::processEvents(); return; }
+        require(false, "Normal missing");
+    };
+    const QString pointer = QStringLiteral("Set on the VP-V page");
+    {
+        QTemporaryDir dir;
+        ConfigEditorWindow window(make(dir, ""), 0, true);
+        select(window);
+        auto* billLook = requireControl<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames"));
+        auto* vpvLook = requireControl<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames.vpv"));
+        auto* target = requireControl<QSpinBox>(window, QStringLiteral("config.queue.target_frames"));
+        auto* delay = requireControl<QSpinBox>(window, QStringLiteral("config.queue.target_latency_ms"));
+        require(!billLook->isEnabled() && billLook->toolTip().contains(pointer), "VP-V: Bill's look-ahead is not greyed with the pointer");
+        require(vpvLook->isEnabled() && delay->isEnabled(), "VP-V: VP-V's own controls are greyed");
+        require(!target->isEnabled() && target->toolTip().contains(pointer), "VP-V: Target frames is not greyed while the delay is on");
+        delay->setValue(0);
+        QCoreApplication::processEvents();
+        require(target->isEnabled() && !target->toolTip().contains(pointer), "VP-V: Target frames stays greyed with the delay off");
+        delay->setValue(150);
+        QCoreApplication::processEvents();
+        require(!target->isEnabled(), "VP-V: Target frames is not greyed again when the delay is set");
+    }
+    {
+        QTemporaryDir dir;
+        ConfigEditorWindow window(make(dir, "[vpv]\npipeline_original_pathway: on\n"), 0, true);
+        select(window);
+        require(requireControl<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames"))->isEnabled() &&
+            requireControl<QSpinBox>(window, QStringLiteral("config.queue.target_frames"))->isEnabled(),
+            "Original: Bill's controls are greyed");
+        require(!requireControl<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames.vpv"))->isEnabled(),
+            "Original: VP-V's look-ahead is not greyed");
+    }
+}
+
 void testShaderSettingsComeFromTheShaderFile()
 {
     QTemporaryDir dir;
@@ -12642,6 +12743,8 @@ int main(int argc, char** argv)
     failures += run("queue frame-rate rule is a plain control", testQueueFrameRateRuleIsAPlainControl);
     failures += run("queue target delay is on the queue page", testQueueTargetDelayIsOnTheQueuePage);
     failures += run("active-picture lookahead automatic when absent", testActivePictureLookaheadIsAutomaticWhenAbsent);
+    failures += run("Original queue page and presets are Bill's", testOriginalQueuePageAndPresetsAreBills);
+    failures += run("Bill queue controls greyed where VP-V owns them", testBillQueueControlsAreGreyedWhereVpvOwnsThem);
     failures += run("clean Apply is inactive without saving or notifying", testCleanApplyIsInactiveWithoutSavingOrNotifying);
     failures += run("remote Apply tracks pending settings", testRemoteApplyTracksPendingSettings);
     failures += run("target dropdown refreshes inline", testTargetDropdownRefreshesInline);

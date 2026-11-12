@@ -428,6 +428,7 @@ Bill's editor file only gets call sites; the logic is here (header-only):
 - `VpvProfileUseRows.h` (P8 step 2): the frame-rate rule and the queue's "Use this queue" choice, on a
   VP-V "Profile use" card (On both pathways) whose picker follows Bill's Queue / Rendering profile list.
   They write Bill's own rule editor and "Use rule" check; his placeholder is his again.
+- `VpvQueueBillGrey.h` (CONFIG lane, 2026-11-11): OnBillField provider for the Queue page. VP-V pathway: greys Bill's Active-picture lookahead and (while Target delay > 0) Target frames with a pointer to the VP-V page; Original: greys VP-V's own queue controls, Bill's page untouched. Uses `derivedSetting`; no Bill line.
 - `VpvQueueRows.h` (row c, RESTORED-CFG-04): VP-V's rows of the Queue profile page (VP's low-latency
   path, Target delay and its note, Queue target By frames / By time, the look-ahead note) and VP-V's
   look-ahead with Auto (`config.queue.active_picture_lookahead_frames.vpv`, explicit-0 notice) on the VP-V
