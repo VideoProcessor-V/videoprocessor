@@ -125,6 +125,16 @@ namespace Vpv
 			// The engine of a renderer (null = none). Default: Query("vpv.vector_engine.v1") -> IVectorEngineDirectory::EngineFor(host). Tests inject a fake.
 			using EngineProvider = std::function<VpMotion::IVectorEngine*(const void* host)>;
 			void SetEngineProviderForTesting(EngineProvider provider) { engineProvider_ = std::move(provider); }
+			// THE lane CPU job slot of the frame-role detector (P15 quality_pattern, P15c quality_pattern.causal; P15-DECL). DECLARATION ONLY:
+			// nothing registers a producer today (both pointers stay null), so the lane is byte-identical. A producer set here is registered on
+			// every NEW lane bundle right after p1 / p4, BEFORE its worker threads start (AnalysisLane::RegisterProducer asserts workers are not
+			// running); it must outlive the module's lanes (the owner of the detector). Set it before the first frame; a lane already running keeps
+			// the producers it was built with. Either pointer may stay null.
+			void SetQualityPatternProducers(VpSkeleton::ILaneProducer* p15, VpSkeleton::ILaneProducer* p15c)
+			{
+				qualityP15_.store(p15, std::memory_order_release);
+				qualityP15c_.store(p15c, std::memory_order_release);
+			}
 			// The ENGINE FEED (render thread): once per frame (AfterRender, retried at Begin) the module publishes the P2m / P3 (and P2) slots of the
 			// frame the engine just made a verified field for (IVectorEngine::LatestVerifiedFieldSeq), with the stamp the field was computed under;
 			// the frame's own seal at Begin accepts or rejects them like any lane result. The slot CONTENT of P3 is the engine's texture (a GPU
@@ -288,6 +298,8 @@ namespace Vpv
 			std::vector<ExternalEntry> external_;
 			std::atomic<uint64_t> externalVersion_{ 0 };
 			EngineProvider engineProvider_;
+			std::atomic<VpSkeleton::ILaneProducer*> qualityP15_{ nullptr };    // see SetQualityPatternProducers (null = none, the lane is unchanged)
+			std::atomic<VpSkeleton::ILaneProducer*> qualityP15c_{ nullptr };
 			VpSkeleton::CardProfile card_;
 			static uint64_t Pack(QueueShape q)
 			{

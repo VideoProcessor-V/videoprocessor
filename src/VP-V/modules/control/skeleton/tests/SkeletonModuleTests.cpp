@@ -552,6 +552,52 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(rig.Command().find("graph configure") != std::string::npos);
 		}
 
+		// P15-DECL: a test frame-role producer (never selected by a graph without a consumer; it only has to be a registered object).
+		struct QpTestProducer : VpSkeleton::ILaneProducer
+		{
+			VpSkeleton::ProductId id;
+			explicit QpTestProducer(VpSkeleton::ProductId p) : id(p) {}
+			VpSkeleton::ProductId Product() const override { return id; }
+			bool Begin(const VpSkeleton::LaneJobContext&) override { return false; }
+			VpSkeleton::ChunkResult RunChunk(const VpSkeleton::LaneJobContext&, uint32_t) override { return VpSkeleton::ChunkResult::Failed; }
+		};
+
+		TEST_METHOD(TheFrameRolePluginSlotIsInertWithoutAProducer)
+		{
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 4; ++s)
+				rig.Frame(s);
+			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+			Assert::IsNotNull(lane);
+			// no producer set: the lane holds exactly the producers it always had (P1 and P4 here; the GPU jobs need a device), byte-identical
+			Assert::AreEqual<size_t>(2, lane->ProducerCount());
+			Assert::IsTrue(rig.sk.WorkersRunning(rig.Host()));
+		}
+
+		TEST_METHOD(AFrameRoleProducerIsRegisteredOncePerLaneBeforeTheThreadsStart)
+		{
+			QpTestProducer p15(VpSkeleton::kQualityPattern), p15c(VpSkeleton::kQualityPatternCausal);
+			Rig rig(Lane("on"));
+			rig.sk.SetQualityPatternProducers(&p15, &p15c);
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			for (int64_t s = 1; s <= 4; ++s)
+				rig.Frame(s);
+			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
+			Assert::IsNotNull(lane);
+			Assert::AreEqual<size_t>(4, lane->ProducerCount(), L"p1, p4 and the two frame-role producers, each exactly once");
+			Assert::IsTrue(lane->HasProducer(&p15) && lane->HasProducer(&p15c));
+			Assert::IsTrue(rig.sk.WorkersRunning(rig.Host()), L"the threads started after the registration (RegisterProducer asserts otherwise)");
+			// more frames and a reconfigure do not register them again
+			for (int64_t s = 5; s <= 8; ++s)
+				rig.Frame(s);
+			Assert::AreEqual<size_t>(4, rig.sk.LaneOf(rig.Host())->ProducerCount());
+			// a null second slot is allowed
+			rig.sk.SetQualityPatternProducers(nullptr, nullptr);
+		}
+
 		TEST_METHOD(AnAheadResultIsTheSameBytesAsTheLiveForm)
 		{
 			// No timing: the worker threads are not started and the test steps the CPU worker itself, so the

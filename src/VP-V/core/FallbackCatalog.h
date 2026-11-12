@@ -785,6 +785,9 @@ namespace FallbackCatalog
 			// Source geometry (P14g, doc 78; input/source_analysis/identity/SourceGeometryProduct.h): the held-state record is absent, stale or of
 			// another unit version, so every reader keeps the delivered raster / its classical form (the grid-free evidence of the frame pattern,
 			// the delivered coded raster of temporal detail, today's scaler and chroma behaviour).
+			// Frame pattern (P15 / P15c, quality_pattern; input/source_analysis/identity/quality_pattern/QualityPatternView.h): no producer is
+			// registered yet (declaration only), so every reader shows "frame pattern: not produced"; no behaviour reads the role.
+			{ "product.quality_pattern", "frame pattern record unavailable, stale or of another unit version: temporal detail and dither need show it as not produced and use their classical forms" },
 			{ "product.source_geometry", "source geometry record unavailable, stale or of another unit version: readers use the delivered raster and their classical forms" },
 		};
 		if (count)
