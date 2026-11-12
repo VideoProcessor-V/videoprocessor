@@ -9418,16 +9418,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "cuts between two similar shots at the same brightness are found. A lower source is also declared only "
             "after part of the evidence time, so a burst of fast cuts on native footage never declares one. Off: the "
             "latch fixes' cut judge."));
-        // VPV-HOOK (SID r2, owner 2026-11-11; VpvOrganisation moves this row to VP-V > Scaling > Re-base): the source sizes
-        // re-base RECOGNISES and names when it holds (never what it applies).
-        auto* geometryDetect = addText(QStringLiteral("Source resolution: sizes recognised (all | conventional | ids)"),
-            QStringLiteral("source_geometry_detect"));
-        geometryDetect->setToolTip(QStringLiteral(
-            "Default all: every listed source size, including the anamorphic HD sizes (HDV 1440x1080, DVCPRO HD 1280x1080 "
-            "and 960x720) that are recognised and named in the hold note and log but never re-based. conventional: only the "
-            "sizes re-base may apply. Or a list of ids (hdv_1440x1080, dvcprohd_1280x1080, dvcprohd_960x720, 1920x1080, ...). "
-            "This changes what is named, never what is applied; unknown ids are ignored and shown as a status line."));
-        // VPV-HOOK-END
         // h3-latch 2026-10-18 (K3, fix under test, default on).
         auto* startupHold = addChoice(QStringLiteral("Black bars: hold the start-up picture until cropped"), QStringLiteral("active_picture_startup_hold"),
             { QStringLiteral("on"), QStringLiteral("off") });
