@@ -68,6 +68,16 @@ namespace VpMotion
 			Store::Entry entry;
 			return store_.Get(from, to, entry) ? entry.payload : nullptr;
 		}
+		// C2a-F 2: the same hit, with the generation the pair was stored under (0 when it is a miss).
+		MotionAhead::FlowPtr Find(uint64_t from, uint64_t to, uint64_t& generation)
+		{
+			Store::Entry entry;
+			generation = 0;
+			if (!store_.Get(from, to, entry))
+				return nullptr;
+			generation = entry.generation;
+			return entry.payload;
+		}
 		bool Has(uint64_t from, uint64_t to) const { return store_.Has(from, to); }
 		// Pairs that end before `oldestNeeded` go (the frame being rendered, or the previous one for the causal consumers).
 		void Prune(uint64_t oldestNeeded) { store_.Prune(oldestNeeded); }
@@ -132,6 +142,11 @@ namespace VpMotion
 		explicit P2View(std::shared_ptr<P2Slot> slot) : slot_(std::move(slot)) {}
 		bool Bound() const { return static_cast<bool>(slot_); }
 		MotionAhead::FlowPtr Find(uint64_t from, uint64_t to) const { return slot_ ? slot_->Find(from, to) : nullptr; }
+		MotionAhead::FlowPtr Find(uint64_t from, uint64_t to, uint64_t& generation) const
+		{
+			generation = 0;
+			return slot_ ? slot_->Find(from, to, generation) : nullptr;
+		}
 		bool Has(uint64_t from, uint64_t to) const { return slot_ && slot_->Has(from, to); }
 		// The consumer's prune of what it no longer needs (a retention, not a write of a product).
 		void Prune(uint64_t oldestNeeded) const { if (slot_) slot_->Prune(oldestNeeded); }

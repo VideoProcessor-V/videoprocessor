@@ -315,7 +315,7 @@ namespace VpMotion
 			to = nextSequence;
 			if (nextSequence == sequence + 1 &&
 				motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))   // W1-C2a A1 / S2
-				flow = P2().Find(from, to);
+				flow = FindCurrent(from, to);   // C2a-F 2: never a pair of another stream generation
 			NoteGlobalPair(flow != nullptr);
 		}
 		else
@@ -324,7 +324,7 @@ namespace VpMotion
 				from = sequence - 1 - age;
 				to = sequence - age;
 				if (motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))   // W1-C2a A1 / S2
-					flow = P2().Find(from, to);
+					flow = FindCurrent(from, to);   // C2a-F 2
 			}
 		// SK-MV row 24: the frame-analysis record carries the shared engine's global, or "absent" (never a stale value). The store is
 		// null while frame_analysis_store is off / the Original pathway runs.
@@ -718,7 +718,11 @@ namespace VpMotion
 		if (!motionValidity.PairServes(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))   // W1-C2a S2
 			return absent(flowReads_.invalidated);
 		// The shared pointer is copied out of the slot before anything can Prune it: from here the pair cannot be freed under us.
-		const MotionAhead::FlowPtr flow = P2().Find(from, to);
+		// C2a-F 2: a pair of another stream generation is refused (FindCurrent, VectorEngineState.h).
+		bool stalePair = false;
+		const MotionAhead::FlowPtr flow = FindCurrent(from, to, &stalePair);
+		if (stalePair)
+			return absent(flowReads_.invalidated);
 		if (!flow || flow->gridW <= 0 || flow->gridH <= 0 || flow->halfW <= 0 ||
 			flow->forward.size() < static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH) * 2)
 			return absent(flowReads_.noPair);

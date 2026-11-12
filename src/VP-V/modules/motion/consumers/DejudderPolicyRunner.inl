@@ -174,7 +174,8 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 		nextSourceSequence > sourceSequence &&
 		nextSourceSequence - sourceSequence <= static_cast<uint64_t>((std::max)(vpFillMaxSpan, 1)) &&
 		motionValidity.Current(motionValidity.EpochOfLastKept()) &&
-		motionValidity.StampsAgree(sourceSequence, nextSourceSequence, true);   // W1-C2a MUST 1: no FULL / settings[motion] across
+		motionValidity.SpanStatus(sourceSequence, nextSourceSequence, true) !=
+			::MotionValidity::State::SpanState::Invalid;   // W1-C2a MUST 1 / C2a-F 1: no FULL / settings[motion] across
 	if (!fillPair && !motionValidity.PairServes(sourceSequence, nextSourceSequence, motionValidity.EpochOfLastKept(),
 		motionValidity.Epoch()))   // W1-C2a A1 / S2
 		return;

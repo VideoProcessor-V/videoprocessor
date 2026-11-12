@@ -139,6 +139,9 @@ namespace Tests
 			for (int64_t s = 1; s <= 4; ++s) rig.Render(s);
 			Assert::AreEqual(on, VpMotion::VectorEngine::ResyncBoundFor(&rig.r), L"the motion provider binds only while resync_event drives");
 			Assert::AreEqual(on, rig.engine.motionValidity.Driven());
+			// The producer keys the slot to the stream generation of its jobs (MotionAheadWalk: StreamGeneration()) before it
+			// publishes (C2a-F 2: FlowOf refuses a pair of another stream generation; binding "on" has already moved it here).
+			rig.engine.p2Slot->SetGeneration(rig.engine.motionValidity.StreamGeneration());
 			rig.engine.p2Slot->Publish(3, 4, rig.engine.p2Slot->Generation(), MakeFlow());
 			rig.engine.p2Slot->Publish(4, 5, rig.engine.p2Slot->Generation(), MakeFlow());
 			if (!rig.Flow(5))
@@ -150,6 +153,7 @@ namespace Tests
 					std::to_wstring(rig.engine.motionValidity.EpochOfLastKept());
 				Assert::Fail(m.c_str());
 			}
+			Assert::IsTrue(rig.engine.FindCurrent(4, 5) != nullptr, L"before the event the shared P2 reader serves (4, 5)");
 			const uint64_t era = rig.engine.FieldEra();
 			const unsigned acts = rig.engine.motionResyncReaders.HistoryActs();
 
@@ -161,7 +165,28 @@ namespace Tests
 			rig.Render(5);
 			Assert::AreEqual(era + 1, rig.engine.FieldEra(), L"one epoch move per event");
 			// After frame 5 is kept in the new epoch the epoch form alone (EpochOfLastKept) no longer refuses (4, 5): when on, the
-			// FULL stamp still does; when off (and for a gap) only the producer's new generation (P2Slot::SetGeneration) drops it in the host: not in this rig (open item).
+			// FULL stamp still does; on AND off, the pair's stream generation does (C2a-F 2: FlowOf refuses a pair stored under an
+			// older StreamGeneration before the producer's asynchronous SetGeneration re-keys the slot). A gap moves no stream
+			// generation by design (the ahead pairs after it are kept; the producer's breakBefore makes no pair across it).
+			if (kind != Kind::Gap)
+				Assert::IsFalse(rig.Flow(5), L"the pair published before the event is refused after the next kept frame (generation)");
+			// C2a-F 2: the shared reader of ServeStatistics (both directions) and the de-judder estimate (VectorEngineEstimate.inl),
+			// VectorEngineState::FindCurrent, refuses the same pair; the slot itself still holds it (control).
+			{
+				bool stale = false;
+				Assert::IsTrue(rig.engine.P2().Find(4, 5) != nullptr, L"control: the slot still holds (4, 5)");
+				const bool served = rig.engine.FindCurrent(4, 5, &stale) != nullptr;
+				if (kind != Kind::Gap)
+				{
+					Assert::IsFalse(served, L"the shared P2 reader refuses a pair of the older stream generation");
+					Assert::IsTrue(stale, L"and says it was found and refused");
+				}
+				else
+				{
+					Assert::IsTrue(served, L"a gap moves no stream generation: the epoch / stamp gate decides, not the generation");
+					Assert::IsFalse(stale);
+				}
+			}
 			if (deferred)
 			{
 				Assert::IsFalse(rig.Flow(5), L"the FULL stamp refuses the spanning pair after the seal too");
@@ -176,6 +201,48 @@ namespace Tests
 				Assert::AreNotEqual(std::string(kMoved), why, L"a pure gap keeps the seed's epoch check");
 			else
 				Assert::AreEqual(std::string(kMoved), why, L"a full / seek refuses the gap seed");
+		}
+
+		// C2a-F S3 / S4: the window after a resync and before the producer's asynchronous SetGeneration re-keys the slot. A pair
+		// finished under the old key (S4: a producer key of the old stream generation; S3: a slot never keyed, generation 0) is
+		// still stored, but every P2 reader refuses it, visibly (FlowReadCounters::invalidated, FindCurrent's stale flag), until
+		// the slot is re-keyed and the pair published again. The pair (5, 6) lies wholly after the event, so only the generation
+		// refuses it.
+		void WindowRun(bool on, bool keyed)
+		{
+			Rig rig(on ? "on" : "off");
+			for (int64_t s = 1; s <= 6; ++s) rig.Ingress(s);
+			for (int64_t s = 1; s <= 4; ++s) rig.Render(s);
+			if (keyed)
+				rig.engine.p2Slot->SetGeneration(rig.engine.motionValidity.StreamGeneration());
+			const uint64_t oldKey = rig.engine.p2Slot->Generation();
+			if (!keyed)
+				Assert::AreEqual<uint64_t>(0, oldKey, L"premise: a slot never keyed by a producer is generation 0");
+			Assert::IsTrue(rig.engine.motionValidity.PairGenerationCurrent(oldKey), L"premise: the slot's key is current before the event");
+			Assert::IsTrue(rig.engine.p2Slot->Publish(4, 5, oldKey, MakeFlow()));
+			Assert::IsTrue(rig.Flow(5), L"control: before the event the pair is served");
+
+			rig.Inject(Kind::Full, 5);
+			rig.Render(5);
+			Assert::IsFalse(rig.engine.motionValidity.PairGenerationCurrent(oldKey), L"the resync moved the stream generation");
+			// The producer has not re-keyed yet: a pair it finishes under the old key is still stored.
+			Assert::IsTrue(rig.engine.p2Slot->Publish(5, 6, oldKey, MakeFlow()), L"control: the slot takes a pair under its old key");
+			rig.Render(6);
+			Assert::IsTrue(rig.engine.P2().Find(5, 6) != nullptr, L"control: the slot holds (5, 6)");
+			const unsigned long long invalidatedBefore = rig.engine.FlowReads().invalidated;
+			Assert::IsFalse(rig.Flow(6), L"FlowOf refuses the pair of the old generation");
+			Assert::AreEqual(invalidatedBefore + 1ull, rig.engine.FlowReads().invalidated, L"counted invalidated");
+			bool stale = false;
+			Assert::IsTrue(rig.engine.FindCurrent(5, 6, &stale) == nullptr, L"FindCurrent refuses it");
+			Assert::IsTrue(stale, L"and says it was found and refused");
+
+			// The producer re-keys the slot (MotionAheadWalk: StreamGeneration()) and publishes again: served.
+			rig.engine.p2Slot->SetGeneration(rig.engine.motionValidity.StreamGeneration());
+			Assert::IsTrue(rig.engine.p2Slot->Publish(5, 6, rig.engine.p2Slot->Generation(), MakeFlow()));
+			Assert::IsTrue(rig.Flow(6), L"after the re-key the pair is served");
+			stale = true;
+			Assert::IsTrue(rig.engine.FindCurrent(5, 6, &stale) != nullptr, L"FindCurrent serves it");
+			Assert::IsFalse(stale);
 		}
 	}
 
@@ -481,7 +548,7 @@ namespace Tests
 			for (int64_t s = 1; s <= 4; ++s) rig.Render(s);
 			const MotionValidity::State& mv = rig.engine.motionValidity;
 			auto gate = [&mv](uint64_t from, uint64_t to) {
-				return mv.PairValid(from, to, mv.EpochOfLastKept(), mv.Epoch()) && mv.PairValidAt(from, to);
+				return mv.PairServes(from, to, mv.EpochOfLastKept(), mv.Epoch());   // C2a-F S1: the production gate itself, not a copy
 			};
 			const float global[4] = { 2.5f, -0.5f, 0.2f, 1.0f };
 			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
@@ -655,6 +722,9 @@ namespace Tests
 		TEST_METHOD(SeekOff) { Run(Kind::Seek, false); }
 		TEST_METHOD(GapOn) { Run(Kind::Gap, true); }
 		TEST_METHOD(GapOff) { Run(Kind::Gap, false); }
+		TEST_METHOD(AnOldGenerationPairIsRefusedUntilTheProducerReKeysOn) { WindowRun(true, true); }   // C2a-F S4
+		TEST_METHOD(AnOldGenerationPairIsRefusedUntilTheProducerReKeysOff) { WindowRun(false, true); }
+		TEST_METHOD(AnUnkeyedGenerationZeroPairIsRefusedAfterAResyncOff) { WindowRun(false, false); }   // C2a-F S3
 
 		TEST_METHOD(OffThenOnRebindsTheSameEngine)
 		{
@@ -687,6 +757,7 @@ namespace Tests
 		TEST_METHOD(CameraStaleP2FullOn) { CameraRun(Kind::Full, true); }
 		TEST_METHOD(CameraStaleP2FullOff) { CameraRun(Kind::Full, false); }
 		TEST_METHOD(CameraStaleP2SeekOn) { CameraRun(Kind::Seek, true); }
+		TEST_METHOD(CameraStaleP2SeekOff) { CameraRun(Kind::Seek, false); }   // C2a-F S2
 		TEST_METHOD(CameraStaleP2GapOn) { CameraRun(Kind::Gap, true); }
 		TEST_METHOD(CameraStaleP2GapOff) { CameraRun(Kind::Gap, false); }
 
@@ -694,6 +765,7 @@ namespace Tests
 		TEST_METHOD(SnapshotLeaseFullOn) { SnapshotRun(Kind::Full, true); }
 		TEST_METHOD(SnapshotLeaseFullOff) { SnapshotRun(Kind::Full, false); }
 		TEST_METHOD(SnapshotLeaseSeekOn) { SnapshotRun(Kind::Seek, true); }
+		TEST_METHOD(SnapshotLeaseSeekOff) { SnapshotRun(Kind::Seek, false); }   // C2a-F S2
 		TEST_METHOD(SnapshotLeaseGapOn) { SnapshotRun(Kind::Gap, true); }
 		TEST_METHOD(SnapshotLeaseGapOff) { SnapshotRun(Kind::Gap, false); }
 
@@ -702,6 +774,8 @@ namespace Tests
 		TEST_METHOD(MotionRecordAbsentFullOff) { RecordRun(Kind::Full, false); }
 		TEST_METHOD(MotionRecordAbsentSeekOn) { RecordRun(Kind::Seek, true); }
 		TEST_METHOD(MotionRecordAbsentGapOn) { RecordRun(Kind::Gap, true); }
+		TEST_METHOD(MotionRecordAbsentSeekOff) { RecordRun(Kind::Seek, false); }   // C2a-F S2
+		TEST_METHOD(MotionRecordAbsentGapOff) { RecordRun(Kind::Gap, false); }    // C2a-F S2
 
 		// MUST 1 (e): A3, the guidance adapter's OnDiscontinuity at every FieldEra change (FULL at the seal, gap at once); resync on
 		// only (S4): DriveFrame does not run the camera lane while resync is not Driving.
@@ -770,7 +844,8 @@ namespace Tests
 		}
 
 		// W1-C2a MUST 1: the gap-fill pair (no adjacency, DejudderPolicyRunner fillPair) never spans a FULL when on; a loss
-		// (continuity) is what it bridges. Off: the stamps are not consulted (today's behaviour).
+		// (continuity) is what it bridges. Off: the stamps are not consulted (today's behaviour): SpanStatus is Unknown, which the
+		// fill gate (SpanStatus != Invalid) does not refuse, and StampsAgree is false (C2a-F 1: never true unbound).
 		TEST_METHOD(AGapFillPairNeverSpansAFull)
 		{
 			for (int on = 0; on < 2; ++on)
@@ -781,10 +856,15 @@ namespace Tests
 				const std::shared_ptr<VpIndicator::Indicator> ind = rig.r.resync.GetIndicator();
 				if (on != 0 && ind)
 					ind->Advance(VpIndicator::kContinuity, VpResync::Cause::MissedFrames, 5, 1);
-				Assert::IsTrue(rig.engine.motionValidity.StampsAgree(4, 6, true), L"a loss alone: the fill stands");
+				using Span = MotionValidity::State::SpanState;
+				const MotionValidity::State& mv = rig.engine.motionValidity;
+				const Span known = on != 0 ? Span::Valid : Span::Unknown;
+				Assert::IsTrue(mv.SpanStatus(4, 6, true) == known, L"a loss alone: the fill stands");
+				Assert::AreEqual(on != 0, mv.StampsAgree(4, 6, true), L"StampsAgree: true only when the stamps vouch (on)");
 				rig.Inject(Kind::Full, 7);
-				Assert::AreEqual(on == 0, rig.engine.motionValidity.StampsAgree(6, 8, true), L"across the queued FULL: refused when on");
-				Assert::IsTrue(rig.engine.motionValidity.StampsAgree(4, 6, true), L"before the FULL: unchanged");
+				Assert::IsTrue(mv.SpanStatus(6, 8, true) == (on != 0 ? Span::Invalid : Span::Unknown), L"across the queued FULL: refused when on");
+				Assert::IsFalse(mv.StampsAgree(6, 8, true), L"across the queued FULL: never true (Invalid on, Unknown off)");
+				Assert::IsTrue(mv.SpanStatus(4, 6, true) == known, L"before the FULL: unchanged");
 			}
 		}
 	};
