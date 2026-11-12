@@ -3076,6 +3076,19 @@ void testBillQueueControlsAreGreyedWhereVpvOwnsThem()
         require(!target->isEnabled(), "VP-V: Target frames is not greyed again when the delay is set");
     }
     {
+        // An inherited delay (set on the default queue, absent here) greys Target frames too.
+        QTemporaryDir dir;
+        const QString path = dir.filePath("VideoProcessor.cfg");
+        QFile file(path);
+        require(file.open(QIODevice::WriteOnly), "fixture");
+        file.write("[vprenderer.First]\nquality: high\n[queue]\ntarget_latency_ms: 200\n[queue.Normal]\nqueue_size: 32\n");
+        file.close();
+        ConfigEditorWindow window(path, 0, true);
+        select(window);
+        require(!requireControl<QSpinBox>(window, QStringLiteral("config.queue.target_frames"))->isEnabled(),
+            "VP-V: Target frames is not greyed for an inherited delay");
+    }
+    {
         QTemporaryDir dir;
         ConfigEditorWindow window(make(dir, "[vpv]\npipeline_original_pathway: on\n"), 0, true);
         select(window);
@@ -3094,19 +3107,9 @@ void testPathwayFlipRefreshesTheQueuePage()
     const QString path = dir.filePath("VideoProcessor.cfg");
     QFile file(path);
     require(file.open(QIODevice::WriteOnly), "fixture");
-    file.write("[vprenderer.First]
-quality: high
-[queue.Normal]
-queue_size: 2
-lead_frames: 0
-target_frames: 1
-"
-        "startup_preroll_frames: 0
-active_picture_lookahead_frames: 0
-reset_after_render_restart_seconds: 5
-"
-        "reset_queue_too_large_percent: 75
-");
+    file.write("[vprenderer.First]\nquality: high\n[queue.Normal]\nqueue_size: 2\nlead_frames: 0\ntarget_frames: 1\n"
+        "startup_preroll_frames: 0\nactive_picture_lookahead_frames: 0\nreset_after_render_restart_seconds: 5\n"
+        "reset_queue_too_large_percent: 75\n");
     file.close();
     ConfigEditorWindow window(path, 0, true);
     window.selectPage(1);

@@ -7671,7 +7671,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         queuePolicy->setObjectName(QStringLiteral("config.queue.policy_preset"));
         queuePolicy->setAccessibleName(QStringLiteral("Queue buffering policy"));
         queuePolicy->addItem(QStringLiteral("Custom"), QString());
-        for (const QueuePolicy& policy : (originalPathwayOn() ? billQueuePolicies : queuePolicies))
+        for (const QueuePolicy& policy : (originalPathwayOn() ? billQueuePolicies : queuePolicies))   // VPV-HOOK (HELD-CFG-09)
             queuePolicy->addItem(QString::fromLatin1(policy.label),
                 QString::fromLatin1(policy.id));
         form->addRow(QStringLiteral("Buffering policy"), queuePolicy);
@@ -11772,7 +11772,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         }
         else
         {
-            for (const QueuePolicy& policy : (originalPathwayOn() ? billQueuePolicies : queuePolicies))
+            for (const QueuePolicy& policy : (originalPathwayOn() ? billQueuePolicies : queuePolicies))   // VPV-HOOK (HELD-CFG-09)
                 if (selectedId == QString::fromLatin1(policy.id))
                 {
                     queuePolicySummary->setText(QString::fromLatin1(policy.summary));
@@ -11792,11 +11792,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             return -1;
         };
         QString policyId;
-        for (const QueuePolicy& policy : (originalPathwayOn() ? billQueuePolicies : queuePolicies))
+        for (const QueuePolicy& policy : (originalPathwayOn() ? billQueuePolicies : queuePolicies))   // VPV-HOOK (HELD-CFG-09)
             if (queueValue(QStringLiteral("queue_size")) == policy.capacity &&
                 queueValue(QStringLiteral("lead_frames")) == policy.lead &&
                 queueValue(QStringLiteral("target_frames")) == policy.target &&
-                queueValue(QStringLiteral("target_latency_ms")) <= 0 &&
+                (originalPathwayOn() || queueValue(QStringLiteral("target_latency_ms")) <= 0) &&
                 queueValue(QStringLiteral("startup_preroll_frames")) == 0 &&
                 queueValue(QStringLiteral("active_picture_lookahead_frames")) == 0 &&
                 queueValue(QStringLiteral("reset_after_render_restart_seconds")) == 5 &&
@@ -12648,7 +12648,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 return;
             }
             const QueuePolicy* selected = nullptr;
-            for (const QueuePolicy& policy : (originalPathwayOn() ? billQueuePolicies : queuePolicies))
+            for (const QueuePolicy& policy : (originalPathwayOn() ? billQueuePolicies : queuePolicies))   // VPV-HOOK (HELD-CFG-09)
                 if (selectedId == QString::fromLatin1(policy.id)) { selected = &policy; break; }
             if (!selected) return;
             const std::string section = state->section.toStdString();
