@@ -12811,7 +12811,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     auto* profileList = new ProfileListController(this, this, list, add,
         remove, up, down, std::move(listPolicy));
     profileList->setCurrentChanged(loadDetails);
-    if (sectionPrefix == QStringLiteral("vprenderer.scaling"))
+    if (sectionPrefix == QStringLiteral("vprenderer.scaling") || sectionPrefix == QStringLiteral("queue"))
         pathwayRefreshers_.add([list, loadDetails] { loadDetails(list->currentItem()); });   // VPV-HOOK
     std::function<void(const QString&)> refresh = [profileList](const QString& wanted)
         { profileList->refresh(wanted); };

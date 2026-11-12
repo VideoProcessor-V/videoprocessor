@@ -3087,6 +3087,47 @@ void testBillQueueControlsAreGreyedWhereVpvOwnsThem()
     }
 }
 
+// A pathway flip re-shows the Queue page live: the grey state and the preset match follow it.
+void testPathwayFlipRefreshesTheQueuePage()
+{
+    QTemporaryDir dir;
+    const QString path = dir.filePath("VideoProcessor.cfg");
+    QFile file(path);
+    require(file.open(QIODevice::WriteOnly), "fixture");
+    file.write("[vprenderer.First]
+quality: high
+[queue.Normal]
+queue_size: 2
+lead_frames: 0
+target_frames: 1
+"
+        "startup_preroll_frames: 0
+active_picture_lookahead_frames: 0
+reset_after_render_restart_seconds: 5
+"
+        "reset_queue_too_large_percent: 75
+");
+    file.close();
+    ConfigEditorWindow window(path, 0, true);
+    window.selectPage(1);
+    auto* profiles = requireControl<QListWidget>(window, QStringLiteral("config.queue.profiles"));
+    for (int row = 0; row < profiles->count(); ++row)
+        if (profiles->item(row)->data(Qt::UserRole).toString().compare(QStringLiteral("queue.normal"), Qt::CaseInsensitive) == 0)
+        { profiles->setCurrentRow(row); QCoreApplication::processEvents(); break; }
+    auto* billLook = requireControl<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames"));
+    auto* vpvLook = requireControl<QSpinBox>(window, QStringLiteral("config.queue.active_picture_lookahead_frames.vpv"));
+    auto* policy = requireControl<QComboBox>(window, QStringLiteral("config.queue.policy_preset"));
+    auto* pathway = requireControl<QComboBox>(window, "vpv.pathway");
+    require(!billLook->isEnabled() && vpvLook->isEnabled() && policy->currentData().toString().isEmpty(),
+        "VP-V start state: Bill's look-ahead greyed, VP-V's on, no preset matches 2/0/1 at 75");
+    pathway->setCurrentIndex(pathway->findData(QStringLiteral("on"))); QCoreApplication::processEvents();
+    require(billLook->isEnabled() && !vpvLook->isEnabled() && policy->currentData().toString() == QStringLiteral("low_latency"),
+        "The flip to Original did not refresh the grey state and the preset match");
+    pathway->setCurrentIndex(pathway->findData(QStringLiteral("off"))); QCoreApplication::processEvents();
+    require(!billLook->isEnabled() && vpvLook->isEnabled() && policy->currentData().toString().isEmpty(),
+        "The flip back to VP-V did not refresh the grey state and the preset match");
+}
+
 void testShaderSettingsComeFromTheShaderFile()
 {
     QTemporaryDir dir;
@@ -12745,6 +12786,7 @@ int main(int argc, char** argv)
     failures += run("active-picture lookahead automatic when absent", testActivePictureLookaheadIsAutomaticWhenAbsent);
     failures += run("Original queue page and presets are Bill's", testOriginalQueuePageAndPresetsAreBills);
     failures += run("Bill queue controls greyed where VP-V owns them", testBillQueueControlsAreGreyedWhereVpvOwnsThem);
+    failures += run("pathway flip refreshes the queue page", testPathwayFlipRefreshesTheQueuePage);
     failures += run("clean Apply is inactive without saving or notifying", testCleanApplyIsInactiveWithoutSavingOrNotifying);
     failures += run("remote Apply tracks pending settings", testRemoteApplyTracksPendingSettings);
     failures += run("target dropdown refreshes inline", testTargetDropdownRefreshesInline);
