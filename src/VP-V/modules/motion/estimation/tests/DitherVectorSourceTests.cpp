@@ -122,6 +122,28 @@ namespace VideoProcessorTest
 			Assert::IsTrue(DV::Choose(f).step == DV::Step::None);
 		}
 
+		// Lead 5 ruling 2026-11-12 (doc 91 D: the global engine state is honoured by every consumer): with the engine's one state Off
+		// the chain never reuses vectors, whatever else is present; it takes the own search and says why (status, counter).
+		TEST_METHOD(EngineStateOffMeansNoVectors)
+		{
+			DV::Facts f = AllPresent();
+			f.engineStateOff = true;
+			const DV::Choice c = DV::Choose(f);
+			Assert::IsTrue(c.step == DV::Step::OwnSearch && c.why == DV::Why::EngineStateOff && !c.Reuses());
+			DV::Tracker t;
+			t.Note(c, true, 7);
+			Assert::IsTrue(Contains(t.StatusSegment(), "own search (the motion engine is off)"), W(t.StatusSegment()).c_str());
+			Assert::AreEqual(1ull, t.Count(DV::Step::OwnSearch));
+			for (const auto& d : t.Decisions(7))
+				Assert::IsFalse(d.engaged, L"the engine's own entries name an Off engine; no duplicate here");
+			f.motionCompensation = false;   // static still wins (nothing would use vectors)
+			Assert::IsTrue(DV::Choose(f).step == DV::Step::Static);
+			// C8-FINDING predicate: no want of engine vectors without motion compensation.
+			Assert::IsTrue(DV::SigmaDeltaWantsVectors(true, true));
+			Assert::IsFalse(DV::SigmaDeltaWantsVectors(true, false));
+			Assert::IsFalse(DV::SigmaDeltaWantsVectors(false, true));
+		}
+
 		TEST_METHOD(OwnSearchNamesEveryMissingInput)
 		{
 			struct Row { void (*knock)(DV::Facts&); DV::Why why; };

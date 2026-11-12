@@ -178,6 +178,11 @@ void LibplaceboVideoRenderer::Impl::RunDejudderPolicy(const DejudderEstimateCall
 	// Reuse-only consumers (sigma-delta, detail pulse, deband hold, source monitor, the occlusion mask, ...) are served only then
 	// (previous-frame state, like the wants). The mask's own matcher never counts: it would keep itself served.
 	VectorDemand::Input vectorInput = VectorDemandInput(interlaced);
+	// W2-C8 (C8-FINDING): the sigma-delta asks the engine for vectors only when its motion compensation can use them (the
+	// configured motion_compensation of the loaded quantiser; DitherVectorSource.h). A VP-V predicate here, not in Bill's file.
+	vectorInput.wants[static_cast<int>(VectorDemand::Consumer::SigmaDelta)] =
+		VpMotion::DitherVectors::SigmaDeltaWantsVectors(vectorInput.wants[static_cast<int>(VectorDemand::Consumer::SigmaDelta)],
+			CustomHookChain::QuantizerOn(customHooks, "motion_compensation"));
 	const bool dejudderStanding = dejudder && (activeSettings.dejudderStrength > 0.0 || activeSettings.dejudderStrengthEven > 0.0) &&
 		DejudderPolicy::CanEngageOrAcquiring(dejudderReason, pulldownAcquiring);
 	vectorInput.starterEngaged = dejudderStanding || interpolating || vpGapFillStandalone;

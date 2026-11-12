@@ -5821,7 +5821,7 @@ struct LibplaceboVideoRenderer::Impl
 		want(C::Interpolator, activeSettings.interpolation != InterpolationPolicy::Mode::Off);
 		want(C::HiccupRepair, activeSettings.interpolationFillGaps);
 		want(C::OcclusionMask, activeSettings.occlusionMask);
-		want(C::SigmaDelta, sigmaDeltaRanLast && !activeSettings.ditherVectorsOwn && DitherVectorsSupported() && CustomHookChain::QuantizerOn(customHooks, "motion_compensation"));
+		want(C::SigmaDelta, sigmaDeltaRanLast && !activeSettings.ditherVectorsOwn && DitherVectorsSupported());
 		want(C::GrainMap, adaptiveGrainMapWanted);
 		want(C::DebandHold, activeSettings.debandVp != "off" && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband) && !temporal);
 		want(C::DetailPulse, (activeSettings.detailPulseStabilise || activeSettings.textureRestore) && !temporal);
@@ -5831,7 +5831,7 @@ struct LibplaceboVideoRenderer::Impl
 		return in;
 	}
 	// The sigma-delta's vectors on a frame whose extras do not run (W2-C8): defined in VP-V/modules/motion/estimation/DitherVectorSourceHost.inl.
-	void BuildSigmaDeltaVectorsWithoutExtras(uint64_t sourceSequence, uint64_t nextSourceSequence);
+	void BuildSigmaDeltaVectorsWithoutExtras(uint64_t, uint64_t);   // (source sequence, next source sequence)
 	// output.dither's vector producers run only while the slot runs (WP-13, DitherSlot.h).
 	bool DitherVectorsSupported() const
 	{

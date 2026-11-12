@@ -59,6 +59,8 @@ namespace DitherVectors
 		NoPatch,           // this libplacebo cannot bind VPVEC (no fork patch 0004): the sigma-delta always searches
 		NotServed,         // the vector engine does not serve the sigma-delta (vector_demand off / not the full engine: the
 		                   // engine's own "motion engine" entry says why)
+		EngineStateOff,    // the engine's one state (W2-C1 State()) is Off: no vectors (doc 91 D; lead 5 ruling 2026-11-12); the
+		                   // "motion engine" / "vector_engine" entries name the reason, this chain names the step
 		NoFrames,          // no next frame known yet (end of the queue)
 		TimelineDrew,      // the timeline / hiccup repair drew refreshes: the last picture was not at shift 0
 		NoMatcher,         // no matcher (the engine holds no field at all)
@@ -91,6 +93,7 @@ namespace DitherVectors
 		case Why::OwnSetting: return "dither_vectors own";
 		case Why::NoPatch: return "this libplacebo cannot bind the vectors (no fork patch 0004)";
 		case Why::NotServed: return "the vector engine does not serve the sigma-delta";
+		case Why::EngineStateOff: return "the motion engine is off";
 		case Why::NoFrames: return "no next frame yet";
 		case Why::TimelineDrew: return "the timeline drew the refreshes";
 		case Why::NoMatcher: return "no motion field";
@@ -112,6 +115,7 @@ namespace DitherVectors
 		bool ownSetting = false;           // dither_vectors own
 		bool motionCompensation = false;   // the CONFIGURED motion_compensation >= 0.5 (rule default 1, owner 2026-11-11 22:39)
 		bool served = false;               // VectorDemand::Serves(Consumer::SigmaDelta)
+		bool engineStateOff = false;       // IVectorEngine::State().state == MotionEngineState::Off (W2-C1)
 		bool sequences = false;            // seq != 0 && next != 0
 		bool timelineDrew = false;         // interpolating || the VP timeline drew this frame's refreshes
 		bool matcher = false;              // a matcher (the engine's field source) exists
@@ -167,6 +171,8 @@ namespace DitherVectors
 			return Own(Why::NoPatch);
 		if (!f.served)
 			return Own(Why::NotServed);
+		if (f.engineStateOff)
+			return Own(Why::EngineStateOff);   // doc 91 D: the global engine state is honoured by every consumer
 		if (!f.sequences)
 			return Own(Why::NoFrames);
 		if (f.timelineDrew)
@@ -279,6 +285,12 @@ namespace DitherVectors
 		return c;
 	}
 
+	// C8-FINDING (W2-C8): the sigma-delta's want of engine vectors holds only while its motion compensation can use them.
+	inline bool SigmaDeltaWantsVectors(bool wanted, bool motionCompensationConfigured)
+	{
+		return wanted && motionCompensationConfigured;
+	}
+
 	// Automatic downgrades (an entry in "Fallbacks engaged"): not a choice (own, no patch) and not the engine's own entry
 	// (NotServed: "motion engine"), not a plain end of the queue.
 	inline bool Automatic(const Choice& c)
@@ -287,7 +299,8 @@ namespace DitherVectors
 			return true;
 		if (c.step != Step::OwnSearch)
 			return false;
-		return c.why != Why::OwnSetting && c.why != Why::NoPatch && c.why != Why::NotServed && c.why != Why::NoFrames;
+		return c.why != Why::OwnSetting && c.why != Why::NoPatch && c.why != Why::NotServed && c.why != Why::NoFrames &&
+			c.why != Why::EngineStateOff;   // the engine's own entries already name an Off engine and its reason
 	}
 
 	// Counters + the status segment + the five fallback entries of one renderer (render thread; the status reader takes a copy

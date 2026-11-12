@@ -26,6 +26,7 @@ void LibplaceboVideoRenderer::Impl::BuildSigmaDeltaVectorsWithoutExtras(uint64_t
 	facts.ownSetting = activeSettings.ditherVectorsOwn;
 	facts.motionCompensation = motionCompensation >= 0.5;
 	facts.served = vectorDemand.Serves(VectorDemand::Consumer::SigmaDelta);
+	facts.engineStateOff = vectorEngine.State().state == VectorDemand::MotionEngineState::Off;   // doc 91 D (lead 5 ruling)
 	facts.sequences = sourceSequence != 0 && nextSourceSequence != 0;
 	facts.timelineDrew = interpolating || vpTimelineActive;   // the timeline / hiccup repair drew refreshes: A was not at shift 0
 	facts.matcher = dejudder != nullptr;
