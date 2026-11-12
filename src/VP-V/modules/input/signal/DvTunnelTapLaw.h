@@ -11,7 +11,7 @@
 // DolbyVisionTunnelUnpackReference (Intensity returns I in the high 12 bits of 16; `>> 4` is the plain
 // 12-bit I); nothing here re-implements it. The legacy ten-bit law stays provable: Legacy10 = code12 >> 2
 // (exact when limited; the full-range map differs by at most one code, as it rounds at another precision).
-// AnalysisLumaSource.cpp (the CPU tap) and P10 are NOT changed by this header.
+// AnalysisLumaSource.cpp (the CPU tap) is NOT changed (rule 32: no hook sites); P10 reads the 12-bit tap through SourceTap12.
 //
 //   code12 = Intensity(word, ContainerShift(container, highAligned)) >> 4
 //   tap12  = fullRange ? FullLumaToLimited12(code12) : code12
@@ -101,5 +101,20 @@ namespace DvTunnelTapLaw
 	{
 		for (int code = 0; code < kLevels; ++code)
 			table[code] = FullLumaToLimited12(code);
+	}
+	// The 12-bit tap of one pixel of a packed DV tunnel analysis source (the side read of the CPU tap: Bill's
+	// AnalysisLumaSource::Sample() keeps its ten-bit luma byte-identical and is NOT edited; P10 reads the same frame
+	// bytes here). SourceT = AnalysisLumaSource (duck-typed so this header does not include it): needs data, rowBytes,
+	// width, height, encoding, rgbBitAlignment, fullRangeYuv. Returns false when the pixel is outside the frame or the
+	// container / alignment is not a tunnel the tap covers. The caller checks format == PackedDolbyVision422.
+	template <typename SourceT>
+	inline bool SourceTap12(const SourceT& source, int x, int y, uint16_t& tap12)
+	{
+		if (!source.data || x < 0 || y < 0 || x >= source.width || y >= source.height ||
+			!Supports(source.encoding, source.rgbBitAlignment, source.width & ~1))
+			return false;
+		const uint8_t* row = source.data + static_cast<size_t>(y) * source.rowBytes;
+		tap12 = TapCode(row + static_cast<size_t>(x) * 4, source.encoding, source.rgbBitAlignment, source.fullRangeYuv);
+		return true;
 	}
 }

@@ -44,7 +44,6 @@ struct AnalysisLumaSample
 	uint16_t luma = 0;
 	uint16_t chromaU = 512;
 	uint16_t chromaV = 512;
-	uint16_t luma12 = 0;   // VPV-HOOK: the 12-bit tap code (DvTunnelTapLaw) of a packed DV tunnel pixel; 0 = not carried (luma is the ten-bit code)
 };
 
 // Optional shared per-frame luma product (WP-23, offered upstream): the
