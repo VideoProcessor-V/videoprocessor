@@ -142,6 +142,8 @@ namespace VideoProcessorTest
 			std::atomic<int>& queueAheadCapacity = vectorEngine.queueAheadCapacity;
 			std::atomic<bool> lowLatencyQueueActive{ false };
 			bool cached = true;   // both frames' luma is in their caches
+			// Setup (C5b opus gate MUST 2): the engine runs (state On), as in a renderer where the walk issues requests.
+			FakeHost() { vectorEngine.motionEngineStatus.state = VectorDemand::MotionEngineState::On; }
 		};
 		// Rule 32: the walk's stage (MotionAhead::StageOnDemandAtWalk, from CollectQueueAhead) reads the queue entries' selection
 		// fields and the host's interpolation flag and measured content rate.
@@ -623,6 +625,7 @@ namespace VideoProcessorTest
 		{
 			using FallbackCatalog::NoPairCause;
 			VpMotion::VectorEngine engine;
+			engine.motionEngineStatus.state = VectorDemand::MotionEngineState::On;   // setup (C5b gate MUST 2): the engine runs
 			NoPairCause cause = NoPairCause::None;
 			Assert::IsTrue(engine.AwaitPair(engine.RequestPair(Pair(1, 2)), 100.0, cause) == nullptr);
 			Assert::IsTrue(cause == NoPairCause::OnDemandUnavailable, L"no producer");
@@ -639,7 +642,43 @@ namespace VideoProcessorTest
 			Assert::AreEqual(2ull, c.unavailable);
 			Assert::AreEqual(2ull, c.noBudget);
 			Assert::AreEqual(0ull, c.gated + c.late + c.served + c.fromSlot);
-			Assert::IsTrue(VpMotion::VectorEngine::OnDemandStateOn(), L"the C1 gate is stubbed On");
+			// Rule 28 / WAIVER-C5B-STUB-01 (requested by lead 5): this line asserted the C1 STUB ("the C1 gate is stubbed On"); the
+			// stub is replaced by the engine's real state (C5b opus gate MUST 2), so it now asserts the gate reads that state.
+			Assert::IsTrue(engine.OnDemandStateOn(), L"the C1 gate reads the engine's state (On, set above)");
+		}
+
+		// C5b opus gate MUST 2 (doc 91 D: the global engine state is honoured by every consumer): while the engine's one state is Off
+		// a request answers Unavailable at once, is counted `gated`, and the producer does NO work for it; On again, it is served.
+		TEST_METHOD(VectorEngineOffMeansNoOnDemandWork)
+		{
+			using FallbackCatalog::NoPairCause;
+			VpMotion::VectorEngine engine;
+			Assert::IsTrue(engine.motionEngineStatus.state == VectorDemand::MotionEngineState::Off, L"a new engine is Off");
+			auto producer = std::make_shared<MotionAhead::Producer>();
+			Trace trace;
+			Assert::IsTrue(producer->StartForTest(Seam(trace)));
+			engine.PublishProducer(producer);
+			NoPairCause cause = NoPairCause::None;
+			for (const auto reason : { VectorDemand::MotionEngineReason::VectorDemandOff, VectorDemand::MotionEngineReason::NoStarter,
+				VectorDemand::MotionEngineReason::VramRelease })
+			{
+				engine.motionEngineStatus.state = VectorDemand::MotionEngineState::Off;
+				engine.motionEngineStatus.reason = reason;
+				Assert::IsFalse(engine.OnDemandStateOn());
+				Assert::IsTrue(engine.AwaitPair(engine.RequestPair(Pair(3, 4)), 1000.0, cause) == nullptr);
+				Assert::IsTrue(cause == NoPairCause::OnDemandUnavailable, L"Off: unavailable");
+			}
+			const VpMotion::VectorEngine::OnDemandCounters off = engine.OnDemandReads();
+			Assert::AreEqual(3ull, off.gated, L"each counted as gated");
+			Assert::AreEqual(3ull, off.unavailable);
+			Assert::AreEqual(0ull, producer->GetRequestStats().requests, L"the producer was never asked");
+			engine.motionEngineStatus.state = VectorDemand::MotionEngineState::Degraded;
+			Assert::IsTrue(engine.OnDemandStateOn(), L"Degraded is not Off");
+			engine.motionEngineStatus.state = VectorDemand::MotionEngineState::On;
+			MotionAhead::FlowPtr served = engine.AwaitPair(engine.RequestPair(Pair(3, 4)), 5000.0, cause);
+			Assert::IsTrue(served != nullptr && cause == NoPairCause::None, L"On: served by the producer");
+			producer->Stop();
+			Assert::AreEqual(3ull, engine.OnDemandReads().gated, L"no gate while On");
 		}
 
 		TEST_METHOD(VectorEngineAwaitPairMapsEveryAnswer)
@@ -682,6 +721,7 @@ namespace VideoProcessorTest
 		{
 			using FallbackCatalog::NoPairCause;
 			VpMotion::VectorEngine engine;
+			engine.motionEngineStatus.state = VectorDemand::MotionEngineState::On;   // setup (C5b gate MUST 2): the engine runs
 			auto producer = std::make_shared<MotionAhead::Producer>();
 			Trace trace;
 			Gate gate;
@@ -769,6 +809,7 @@ namespace VideoProcessorTest
 		{
 			using FallbackCatalog::NoPairCause;
 			VpMotion::VectorEngine engine;   // no producer: every request answers Unavailable at once
+			engine.motionEngineStatus.state = VectorDemand::MotionEngineState::On;   // setup (C5b gate MUST 2): the engine runs
 			NoPairCause cause = NoPairCause::None;
 			engine.IssueOnDemand(Pair(5, 6));
 			Assert::IsTrue(engine.OnDemandFill(nullptr, 5, 6, true, cause) == nullptr);

@@ -355,7 +355,8 @@ namespace VpMotion
 		// A render-time consumer with no pair computed ahead asks the look-ahead producer's ONE session for (from, to) now. Never starts
 		// the producer and never opens a second session: no producer (low latency without it, optical flow off, stopped) answers
 		// Unavailable at once; budgetMs <= 0 answers NoBudget; a pair already in the P2 slot answers FromSlot (zero work). The C1 state
-		// gate (OnDemandStateOn) is the one call site of the lane C1 state (stubbed On until r2/c1 lands).
+		// gate (OnDemandStateOn): while the engine's one state (State(), W2-C1) is Off, a request answers Unavailable with zero work
+		// (counted `gated`; doc 91 D: the global engine state is honoured by every consumer).
 		OnDemand::PairFuture RequestPair(OnDemand::PairRequest request);
 		// Waits up to waitMs (<= 0: no wait) for the answer. The pair (cause None), or null with the cause the miss counts as
 		// (OnDemandLate: not answered in time - the request is abandoned, so the worker skips it before any GPU work;
@@ -378,8 +379,9 @@ namespace VpMotion
 			double budgetMs = 0.0, renderMs = 0.0;   // the last budget issued with; the measured render time (EWMA)
 		};
 		OnDemandCounters OnDemandReads() const;
-		// The C1 state gate: the single call site (lane C1). Until r2/c1 lands the state is On.
-		static bool OnDemandStateOn() { return true; }
+		// The C1 state gate (C5b opus gate MUST 2): no request work while the engine's one state is Off (vector_demand off, no starter,
+		// interlaced, smooth motion, VRAM release, ...). Render thread (State() is derived there, with its one-frame lag).
+		bool OnDemandStateOn() const { return motionEngineStatus.state != VectorDemand::MotionEngineState::Off; }
 		// ---- W2-C5b commit 4: the dequeue issues, the estimate fills (OnDemandIssue.h; VectorEngineEstimate.inl) -----------
 		enum : unsigned { kConsumerIdleCycles = 4 };   // enum constant: ODR-safe in C++14
 		// The post (OnDemandIssue.h), once per staged pair (once per new A): the render-time sample (OnDemand::RenderSample) and the consumer clock.

@@ -964,6 +964,7 @@ namespace VideoProcessorTest
 				using FallbackCatalog::NoPairCause;
 				std::unique_ptr<BenchHost> host(new BenchHost());
 				VpMotion::VectorEngine& engine = host->vectorEngine;
+				engine.motionEngineStatus.state = VectorDemand::MotionEngineState::On;   // setup (C5b gate MUST 2): the engine runs
 				engine.SetOnDemandSetting(mode.setting);
 				host->lowLatencyQueueActive = mode.lowLatency;
 				host->queueAheadCapacity = mode.capacity;
