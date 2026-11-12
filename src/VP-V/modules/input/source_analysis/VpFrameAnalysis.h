@@ -27,6 +27,7 @@
 
 #include <AnalysisLumaSource.h>
 #include <VP-V/core/FrameAnalysisStore.h>
+#include <VP-V/core/LaneInterfaces.h>
 
 #include <array>
 #include <atomic>
@@ -36,6 +37,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace VpFrameAnalysis
@@ -61,6 +63,51 @@ namespace VpFrameAnalysis
 	// Planes are recycled from a small pool once nothing holds them; the store's switch-off empties it.
 	void ReleasePlanePool();
 	size_t PlanePoolSize();
+
+	// ---- C9 commit A: the frame's luma view and the P1 engine reader (doc 93 C9P s2b) ----
+	// The frame's decoded luma as the lane reads it (10-bit sampler codes, msbShift 6, stride = width; keepAlive holds the
+	// plane): the shared plane, or - for a format read in place (P010 / P210 / decoded DV) - a pooled plane decoded here,
+	// never a private decoder. view.seq is left 0 (the caller's key). False when there is no ready plane (the shared plane
+	// not decoded yet or claimed by another thread, an unreadable frame). The source frame tap delivers exactly this view.
+	bool SourceViewOf(const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view);
+
+	// The P1 engine half of a frame through its shared decode (the live fill): DecodeSharedLuma when nobody has (a no-op when
+	// published or claimed), SourceViewOf, the P1 half law (HalfLumaRows), then Engine8Half - the lane's law, one recipe.
+	// out = HalfDim(w) x HalfDim(h) bytes. False when there is no view.
+	bool LiveEngine8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& hw, int& hh);
+
+	// The named exception (doc 105 phase 4b, doc 91 D C9): formats whose producer half (MotionAhead::HalfLuma8) decodes its
+	// own codes, which are not the shared decode's - RGB structure luma (R + 2G + B) / 4 (R12B, R12L, r210, R10b, R10l, 8-bit
+	// BGRA / ARGB) and raw full-range 4:2:x words (P010 / P210 / v210 / UYVY at full range). For these the engine view of P1
+	// is NOT byte-identical to the producer's; commit B keeps the producer's own decode for them unless EPE evidence shows
+	// the shared-decode view is as good. Every other format: the reader's bytes are the producer's.
+	bool P1EngineViewDiffersFromProducer(const AnalysisLumaSource& source);
+
+	// IP1Source: the lane's published P1 under the slot seqlock when `published` has it, else the live fill above (counted:
+	// p1FilledByMotion, target 0 in steady state once the lane covers the full queue depth). A null hook = lane off: live fill
+	// only. Any thread (one reader object per calling worker: the scratch row buffer is the reader's).
+	class P1Reader : public VpSkeleton::IP1Source
+	{
+	public:
+		explicit P1Reader(VpSkeleton::PublishedEngine8Fn published = VpSkeleton::PublishedEngine8Fn()) : m_published(std::move(published)) {}
+		P1Reader(const P1Reader&) = delete;
+		P1Reader& operator=(const P1Reader&) = delete;
+
+		bool ReadEngine8(uint64_t seq, const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& hw, int& hh,
+			VpSkeleton::P1ReadKind& how) override;
+
+		uint64_t LanePublished() const { return m_lanePublished.load(std::memory_order_relaxed); }
+		uint64_t FilledByMotion() const { return m_filledByMotion.load(std::memory_order_relaxed); }   // p1FilledByMotion
+		uint64_t SeqlockRetries() const { return m_seqlockRetries.load(std::memory_order_relaxed); }   // Recycled copies (then live)
+		uint64_t Unread() const { return m_unread.load(std::memory_order_relaxed); }
+
+	private:
+		VpSkeleton::PublishedEngine8Fn m_published;
+		std::atomic<uint64_t> m_lanePublished{ 0 };
+		std::atomic<uint64_t> m_filledByMotion{ 0 };
+		std::atomic<uint64_t> m_seqlockRetries{ 0 };
+		std::atomic<uint64_t> m_unread{ 0 };
+	};
 
 	// Sample().luma for [x0, x0 + count) of row y, in the sampler's domain: the shared plane, the
 	// 16-bit plane read in place, the row decoder, or the per-pixel sampler (in that order).

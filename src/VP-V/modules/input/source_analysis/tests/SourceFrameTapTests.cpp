@@ -327,5 +327,30 @@ namespace SourceFrameTapTestsNs
 			Assert::IsFalse(Tap::Registered(key, "chain"));
 			Assert::IsFalse(Tap::AnyWants());
 		}
+
+		TEST_METHOD(SourceViewOfIsTheTapsViewForEveryFormat)
+		{
+			// C9 commit A: the view the tap delivers, as a function (seq left 0 for the caller). Every format, a plane
+			// decoded by the shared decode, and none while an attached plane is still pending.
+			for (int k = 0; k < static_cast<int>(Kind::Count); ++k)
+			{
+				Frame frame = Make(static_cast<Kind>(k), 2);
+				SourceFrameView view;
+				Assert::IsTrue(VpFrameAnalysis::SourceViewOf(frame.source, view), KindName(static_cast<Kind>(k)));
+				Assert::AreEqual<uint64_t>(0u, view.seq);
+				Assert::IsTrue(view.keepAlive != nullptr);
+				AssertViewMatches(view, frame.source);
+			}
+			Frame pending = Make(Kind::Uyvy, 2);
+			VpFrameAnalysis::AttachSharedLuma(pending.source);
+			Assert::IsTrue(pending.source.sharedLuma != nullptr);
+			SourceFrameView none;
+			Assert::IsFalse(VpFrameAnalysis::SourceViewOf(pending.source, none), L"a pending plane is not a view");
+			Assert::IsTrue(VpFrameAnalysis::DecodeSharedLuma(pending.source));
+			SourceFrameView shared;
+			Assert::IsTrue(VpFrameAnalysis::SourceViewOf(pending.source, shared));
+			Assert::IsTrue(shared.luma == pending.source.SharedLumaRow(0), L"the shared plane itself, no copy");
+			AssertViewMatches(shared, pending.source);
+		}
 	};
 }

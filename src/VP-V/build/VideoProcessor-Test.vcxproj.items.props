@@ -768,6 +768,9 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\tests\SourceFrameTapTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\source_analysis\tests\HalfLumaEngineViewTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\tests\CameraExtensionTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

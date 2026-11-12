@@ -35,6 +35,11 @@ VP owns two file pairs in this folder (moved by `git mv` in M2 step 10): `Source
   - Frame-bound mode (resync Q3, default off; the behaviour with it off is unchanged): `SetFrameBound(on, leadFramesD)`, `FrameBound()`, `FrameLead()`, `ReadyFor(s)`, `AnalysedThrough()`, `NoteWaitMissed()`, and the counters `HeldDropped()`, `WaitsMissed()`, `ClockStepsBack()`, `HeldCount()`. See "Frame-bound mode" below.
   - Tests: `AnalyseTilesForTest` (synchronous, no GPU), `InjectResultForTest` and `NoteSubmittedForTest` (frame-bound tests), `FadeWeight`, `FadeMixTimestamps`, `FadeMixValue`.
   - Free function `Describe(snapshot, autoRatio, autoSelected)`: the status text.
+- `VpFrameAnalysis.h` (C9 commit A, doc 105 phase 4a; the frame's luma view and the P1 engine reader):
+  - `SourceViewOf(source, view)`: the frame's decoded luma as the lane reads it (10-bit sampler codes, msbShift 6, stride = width; `keepAlive` holds the plane): the shared plane, or a pooled plane decoded here for P010 / P210 / decoded DV. False when no plane is ready. The source frame tap delivers exactly this view.
+  - `LiveEngine8(source, out, hw, hh)`: the P1 engine half through the shared decode (the live fill): `DecodeSharedLuma`, `SourceViewOf`, `HalfLumaRows`, `Engine8Half`. False without a 10-bit view (`Engine8Half` is exact for msbShift 6 only).
+  - `P1EngineViewDiffersFromProducer(source)`: the named exception (RGB structure luma; P010 / P210 / v210 / UYVY at full range). Commit B keeps the producer's own decode for these unless EPE evidence shows otherwise (doc 91 D C9).
+  - `P1Reader` (implements `VpSkeleton::IP1Source`, `core/LaneInterfaces.h`): `ReadEngine8(seq, source, out, hw, hh, how)` returns the lane's published P1 under the slot seqlock (`PublishedEngine8Of`, `core/AnalysisLane.h`), else the live fill (`how`: `LanePublished` / `LiveFill`). Counters: `LanePublished`, `FilledByMotion` (p1FilledByMotion), `SeqlockRetries` (recycled copies), `Unread`. One reader per calling worker.
 
 ### Frame-bound mode (resync Q3)
 
@@ -219,6 +224,7 @@ Code defaults of the history CSV that are not config keys (each fixed in code):
 ## Status lines (history CSV)
 
 - Chain estimator (while enabled): `Snapshot::chainNote` is appended to the stats line (`Source identity: ... confident / unsure (<reasons>) ...`).
+- `p1FilledByMotion` (C9, planned for the 4b consumer): `P1Reader::FilledByMotion()` frames the motion producer filled live because the lane had not published P1 for them (target 0 in steady state once the lane covers the full queue depth), with `SeqlockRetries` and `Unread`; shown on Ctrl+I and Config status when 4b wires the reader. Not on any status line yet (commit A has no consumer).
 - A failed history write or dropped rows: `source history CSV: write failed (<reason>)` / `source history CSV: rows dropped: N` (one log line each, and the stats line while it lasts).
 
 ## Settings

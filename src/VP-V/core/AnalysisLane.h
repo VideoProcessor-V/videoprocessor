@@ -32,6 +32,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 // Skeleton S3-S7: the analysis lane facade. THE one object the renderer will hold (null when
@@ -423,6 +424,78 @@ struct LaneState {
 
     int IndexOf(ProductId id) const { return id < indexOfId.size() ? indexOfId[id] : -1; }
 };
+
+// ---------------------------------------------------------------------------------------------
+// C9 commit A: the published read of a CPU product by an OUTSIDE worker (doc 93 C9P s2b).
+// ---------------------------------------------------------------------------------------------
+
+// A seqlock on the slot word, with the public SlotSet calls only (no pin, nothing written): Read(seq, allowPublished)
+// names the ring slot of a Published / Sealed result; `pass(bytes, n)` reads it; then, after an acquire fence, the slot
+// must still name the same ring slot for the same frame (Published / Sealed) under the same lane-header claim generation.
+// Otherwise the lane (or the render's release) reused the slot during the pass: Recycled, and whatever `pass` produced is
+// discarded by the caller. A result is a pure function of the frame, so an unchanged word means unchanged bytes. Any thread.
+// Memory order: the read side relies on the writer's claim CAS (an acq_rel / seq_cst RMW on the slot word) being ordered before its
+// plain ring writes - true on x86 (TSO: stores are not reordered with an earlier locked RMW). On a weakly ordered CPU (ARM)
+// that is not enough: the writer needs a release fence after the claim (and the reader's acquire fence stays), else a pass
+// could see new bytes under the old word. VP builds x64 only today; revisit before any ARM build.
+template <class Pass>
+inline PublishedRead ReadPublishedBytes(const SlotSet& set, const CpuBuffers& bufs, uint64_t seq, Pass&& pass)
+{
+    const ReadInfo before = set.Read(seq, true);
+    if (before.kind != ReadInfo::Ring || before.index < 0)
+        return PublishedRead::Absent;
+    const VpAncestry::SlotView v0 = set.ViewAt(uint16_t(before.index));
+    if (!v0.present || v0.seq != seq || !(v0.valid || v0.lanePublished))
+        return PublishedRead::Absent;
+    pass(bufs.Ring(size_t(before.index)), bufs.Bytes());
+    std::atomic_thread_fence(std::memory_order_acquire);
+    const ReadInfo after = set.Read(seq, true);
+    const VpAncestry::SlotView v1 = set.ViewAt(uint16_t(before.index));
+    const bool same = after.kind == ReadInfo::Ring && after.index == before.index && v1.present && v1.seq == seq
+                      && v1.cgen == v0.cgen;
+    return same ? PublishedRead::Copied : PublishedRead::Recycled;
+}
+
+// The same through a lease (AnalysisLane::Lease / IExternalDemand::LeaseFor of product `id`: the lease holds the state, so
+// the table and the bytes ring live for the call). `needBytes` must equal the product's buffer size (a different source
+// size is Absent, never a partial copy). Any thread.
+template <class Pass>
+inline PublishedRead ReadPublishedBytes(const LaneLease& lease, ProductId id, uint64_t seq, size_t needBytes, Pass&& pass)
+{
+    if (!lease.Valid() || lease.bytes == nullptr || lease.bytes->Bytes() != needBytes)
+        return PublishedRead::Absent;
+    const SlotSet* set = lease.table->Find(id);
+    if (set == nullptr)
+        return PublishedRead::Absent;
+    return ReadPublishedBytes(*set, *lease.bytes, seq, std::forward<Pass>(pass));
+}
+
+// P1's engine half of frame `seq` (source `src`) from a lease of kP1HalfLuma: Engine8Half of the published half plane into
+// `out` (HalfDim(w) x HalfDim(h) bytes). Exact for the lane's 10-bit tap views (msbShift 6). On Absent / Recycled `out`
+// holds nothing usable. Any thread.
+inline PublishedRead ReadPublishedEngine8(const LaneLease& lease, uint64_t seq, Dims src, uint8_t* out)
+{
+    const uint32_t hw = VpLaneProducts::HalfDim(src.width);
+    const uint32_t hh = VpLaneProducts::HalfDim(src.height);
+    if (out == nullptr || hw == 0 || hh == 0)
+        return PublishedRead::Absent;
+    return ReadPublishedBytes(lease, kP1HalfLuma, seq, VpLaneProducts::HalfLumaBytes(src),
+                              [hw, hh, out](const uint8_t* bytes, size_t) {
+                                  VpLaneProducts::Engine8Half(reinterpret_cast<const uint16_t*>(bytes), hw, hh, out);
+                              });
+}
+
+// The published-engine-view hook (LaneInterfaces.h PublishedEngine8Fn) over a lease source: each call takes the CURRENT lease
+// of P1 from `leases` (IExternalDemand::LeaseFor(host, kP1HalfLuma) at the hand-off), so a rebuilt lane is followed.
+inline PublishedEngine8Fn PublishedEngine8Of(LaneLeaseSource leases)
+{
+    return [leases](uint64_t seq, uint32_t width, uint32_t height, uint8_t* out) {
+        if (!leases)
+            return PublishedRead::Absent;
+        const LaneLease lease = leases();
+        return ReadPublishedEngine8(lease, seq, Dims{ width, height }, out);
+    };
+}
 
 // ---------------------------------------------------------------------------------------------
 // The facade.

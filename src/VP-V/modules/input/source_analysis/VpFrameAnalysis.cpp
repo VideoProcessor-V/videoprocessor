@@ -1,6 +1,7 @@
 #include <pch.h>
 #include "VpFrameAnalysis.h"
 #include "SourceFrameTap.h"
+#include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 
 #include <algorithm>
@@ -298,35 +299,105 @@ namespace VpFrameAnalysis
 		return true;
 	}
 
+	bool SourceViewOf(const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view)
+	{
+		std::shared_ptr<AnalysisLumaPlane> plane = source.sharedLuma;
+		if (!plane)
+		{
+			AnalysisLumaSource own = source;
+			own.sharedLuma = AcquirePlane();   // pooled like every plane; the view's keepAlive blocks its recycling
+			DecodeSharedLuma(own);
+			plane = own.sharedLuma;
+		}
+		const size_t samples = static_cast<size_t>((std::max)(0, source.width)) * static_cast<size_t>((std::max)(0, source.height));
+		if (!plane || !plane->Ready() || samples == 0 || plane->codes.size() != samples)
+			return false;
+		view = VpSkeleton::SourceFrameView();
+		view.luma = plane->codes.data();
+		view.width = static_cast<uint32_t>(source.width);
+		view.height = static_cast<uint32_t>(source.height);
+		view.strideSamples = view.width;
+		view.msbShift = 6;   // 10-bit sampler codes in the low bits of 16
+		view.keepAlive = std::shared_ptr<const void>(plane);
+		return true;
+	}
+
+	bool P1EngineViewDiffersFromProducer(const AnalysisLumaSource& source)
+	{
+		// Mirrors MotionAheadProducer.cpp HalfLuma8's planar16 / rgbOwnDecode / full-range 4:2:2 split (the producer's own
+		// codes): planar P010 / P210 at limited range equal the shared decode's codes; at full range they are raw words.
+		const VideoFrameEncoding e = source.encoding;
+		if (source.format == AnalysisLumaFormat::NativeRgb)
+			return e == VideoFrameEncoding::R12B || e == VideoFrameEncoding::R12L || e == VideoFrameEncoding::R210 ||
+				e == VideoFrameEncoding::R10b || e == VideoFrameEncoding::R10l || e == VideoFrameEncoding::BGRA_8BIT ||
+				e == VideoFrameEncoding::ARGB_8BIT;
+		if (source.format == AnalysisLumaFormat::P010 || source.format == AnalysisLumaFormat::P210 ||
+			source.format == AnalysisLumaFormat::NativeYuv422)
+			return source.fullRangeYuv;
+		return false;
+	}
+
+	bool LiveEngine8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& hw, int& hh)
+	{
+		DecodeSharedLuma(source);   // the frame's one shared decode when nobody has done it (no-op when published / claimed / none)
+		VpSkeleton::SourceFrameView view;
+		if (!SourceViewOf(source, view) || view.msbShift != 6)   // Engine8Half is exact for 10-bit views only
+			return false;
+		const uint32_t w = VpLaneProducts::HalfDim(view.width);
+		const uint32_t h = VpLaneProducts::HalfDim(view.height);
+		std::vector<uint16_t> half(static_cast<size_t>(w) * h);
+		VpLaneProducts::HalfLumaRows(view, half.data(), 0, h);
+		out.resize(half.size());
+		VpLaneProducts::Engine8Half(half.data(), w, h, out.data());
+		hw = static_cast<int>(w);
+		hh = static_cast<int>(h);
+		return true;
+	}
+
+	bool P1Reader::ReadEngine8(uint64_t seq, const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& hw, int& hh,
+		VpSkeleton::P1ReadKind& how)
+	{
+		how = VpSkeleton::P1ReadKind::None;
+		if (m_published && source.width > 0 && source.height > 0)
+		{
+			const uint32_t w = VpLaneProducts::HalfDim(static_cast<uint32_t>(source.width));
+			const uint32_t h = VpLaneProducts::HalfDim(static_cast<uint32_t>(source.height));
+			out.resize(static_cast<size_t>(w) * h);
+			const VpSkeleton::PublishedRead r = m_published(seq, static_cast<uint32_t>(source.width), static_cast<uint32_t>(source.height), out.data());
+			if (r == VpSkeleton::PublishedRead::Copied)
+			{
+				hw = static_cast<int>(w);
+				hh = static_cast<int>(h);
+				how = VpSkeleton::P1ReadKind::LanePublished;
+				m_lanePublished.fetch_add(1, std::memory_order_relaxed);
+				return true;
+			}
+			if (r == VpSkeleton::PublishedRead::Recycled)
+				m_seqlockRetries.fetch_add(1, std::memory_order_relaxed);
+		}
+		if (LiveEngine8(source, out, hw, hh))
+		{
+			how = VpSkeleton::P1ReadKind::LiveFill;
+			m_filledByMotion.fetch_add(1, std::memory_order_relaxed);
+			return true;
+		}
+		m_unread.fetch_add(1, std::memory_order_relaxed);
+		return false;
+	}
+
 	namespace
 	{
-		// Hands the decoded luma plane to the skeleton's sink (SourceFrameTap.h). A format that is read in
-		// place (P010 / P210 / decoded DV) has no shared plane: it is decoded into a private one here, only
-		// because a sink asked. The plane is held by the view's keepAlive, so the pool cannot recycle it.
+		// Hands the decoded luma plane to the skeleton's sink (SourceFrameTap.h): SourceViewOf's view (a format read in place
+		// is decoded into a pooled plane here, only because a sink asked; the view's keepAlive blocks its recycling).
 		void DeliverToTap(const Job& job)
 		{
-			std::shared_ptr<AnalysisLumaPlane> plane = job.source.sharedLuma;
-			if (!plane)
-			{
-				AnalysisLumaSource own = job.source;
-				own.sharedLuma = AcquirePlane();   // pooled like every plane; the view's keepAlive blocks its recycling
-				DecodeSharedLuma(own);
-				plane = own.sharedLuma;
-			}
-			const size_t samples = static_cast<size_t>((std::max)(0, job.source.width)) * static_cast<size_t>((std::max)(0, job.source.height));
-			if (!plane || !plane->Ready() || samples == 0 || plane->codes.size() != samples)
+			VpSkeleton::SourceFrameView view;
+			if (!SourceViewOf(job.source, view))
 			{
 				SourceFrameTap::NoteSkipped(job.owner);
 				return;
 			}
-			VpSkeleton::SourceFrameView view;
 			view.seq = job.identity.seq;
-			view.luma = plane->codes.data();
-			view.width = static_cast<uint32_t>(job.source.width);
-			view.height = static_cast<uint32_t>(job.source.height);
-			view.strideSamples = view.width;
-			view.msbShift = 6;   // 10-bit sampler codes in the low bits of 16
-			view.keepAlive = std::shared_ptr<const void>(plane);
 			SourceFrameTap::Deliver(job.owner, view);
 		}
 	}

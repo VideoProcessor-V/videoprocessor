@@ -293,6 +293,21 @@ double b = VpUnit::BandFromBase::Weight(1, 2.0, 3) + std::exp(-0.5 * k * k);
         self.assertEqual(role.get(2), "duplicate")
         self.assertNotIn(1, role)   # line 1 has no private signature left once the accessor is removed (not even a hit)
 
+    def test_u3_lane_api_calls_are_not_duplicates(self):
+        # The owner's lane API (VpLaneProducts::HalfLuma*) and the P1 product id called outside the owner are consumers;
+        # a private box average next to them is still a duplicate.
+        _w(self.root, "src/VP-V/core/Lane.h",
+           "auto n = VpLaneProducts::HalfLumaBytes(src);\n"
+           "VpLaneProducts::HalfLumaRows(view, half, 0, h);\n"
+           "return Read(lease, kP1HalfLuma, seq, VpLaneProducts::HalfLumaBytes(src));\n"
+           "auto m = VpLaneProducts::HalfLumaBytes(src) + ((a + b + c + d + 2) >> 2);\n")
+        r = csu.scan(self.root, baseline={"units": {}})
+        role = {h["line"]: h["role"] for h in _unit(r, "U3")["hits"] if h["file"].endswith("Lane.h")}
+        self.assertEqual(role.get(1), "consumer")
+        self.assertEqual(role.get(2), "consumer")
+        self.assertEqual(role.get(3), "consumer")
+        self.assertEqual(role.get(4), "duplicate")
+
     def test_build_baseline_missing_value_and_unknown_keys(self):
         result = csu.scan(self.root, baseline={"units": {}})
         old = {"schema": 1, "note": "keep me", "units": {"U2": {"blocking": True, "known_false_positive": []}}}
