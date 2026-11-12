@@ -9,6 +9,12 @@
 #include <QByteArray>
 #include <QString>
 
+// The editor's other CEW-only helpers (P9: sandbox switch, clamp/snap, GLSL //!PARAM reader, ...) ride on this
+// header, the one VP-V helper include of ConfigEditorWindow.cpp, so that file gains no include line.
+#include <VP-V/modules/control/config/editor/Helpers.h>
+#include <VP-V/modules/control/config/editor/Migrations.h>   // the VP-only load-time migrations (P9 row a)
+#include <VP-V/modules/control/config/editor/ApplyEffects.h>   // the VP-only apply/save effects (P9 row d)
+
 #include <algorithm>
 #include <cstring>
 #include <iterator>
@@ -475,6 +481,7 @@ inline bool IsVpvOnlyKey(const QString& key)
         "source",
         "source_class",
         "source_coding_fixes",
+        "source_geometry_detect",
         "source_range",
         "source_resolution",
         "source_resolution_auto_min_confidence",
@@ -667,6 +674,7 @@ inline bool IsVpvChoiceKey(const QString& key)
 inline bool VpvRenderingDefault(const QString& key, QString& out)
 {
     if (key == QStringLiteral("saturation")) { out = QStringLiteral("0"); return true; }
+    if (key == QStringLiteral("source_geometry_detect")) { out = QStringLiteral("all"); return true; }   // SID r2: wide recognition
         // The renderer's own defaults (LibplaceboVideoRenderer.cpp's
         // settings, AdaptiveDownscale.h), so an unset choice says what
         // it really is (audit 2026-10-14c: these all showed "Auto").

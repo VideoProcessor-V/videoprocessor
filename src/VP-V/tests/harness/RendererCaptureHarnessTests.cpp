@@ -2580,6 +2580,52 @@ namespace Tests
 			}
 		}
 
+		// SID r2 (owner 2026-11-11): source_geometry_detect round-trips through the profile read and the settings dump,
+		// defaults to all (wide recognition), keeps a list as written, and changes the fingerprint.
+		TEST_METHOD(SourceGeometryDetectReachesTheSettings)
+		{
+			const HarnessScope harnessScope;
+			const std::string folder = Here();
+			HMODULE dll = LoadLibraryExA((folder + "vprenderer\\VideoProcessorVPRenderer.dll").c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+			Assert::IsNotNull(dll, L"the renderer DLL");
+			using Export = int(__cdecl*)(const char*, char*, int);
+			const auto fingerprintOf = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboSettingsFingerprintForTest"));
+			const auto describe = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboDescribeSettingsForTest"));
+			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf), L"the fingerprint export");
+			Assert::IsNotNull(reinterpret_cast<void*>(describe), L"the describe export");
+			static std::atomic<int> freshConfig{ 0 };
+			auto call = [&](Export function, const std::string& text) {
+				const std::string path = folder + "vp-geometry-detect-test-" + std::to_string(freshConfig++) + ".cfg";
+				{
+					std::ofstream config(path, std::ios::trunc | std::ios::binary);
+					config << text;
+				}
+				std::vector<char> buffer(1 << 20);
+				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+				DeleteFileA(path.c_str());
+				Assert::IsTrue(length > 0, L"the export ran");
+				return std::string(buffer.data());
+			};
+			auto line = [](const std::string& dump, const std::string& key) {
+				const size_t at = dump.find("\n" + key + "=");
+				if (at == std::string::npos) return std::string("<missing>");
+				const size_t start = at + key.size() + 2;
+				return dump.substr(start, dump.find('\n', start) - start);
+			};
+			const std::string head = "[general]\npersist_profile_selection: false\n[vprenderer.Default]\nquality: high\n";
+			const std::string baseFingerprint = call(fingerprintOf, head);
+			Assert::AreEqual(std::string("all"), line(call(describe, head), "source_geometry_detect"), L"default: all (wide)");
+			const char* values[] = { "conventional", "hdv_1440x1080, dvcprohd_960x720", "all" };
+			for (const char* v : values)
+			{
+				const std::string text = head + "source_geometry_detect: " + v + "\n";
+				const std::wstring name(v, v + strlen(v));
+				Assert::AreEqual(std::string(v), line(call(describe, text), "source_geometry_detect"), (L"round trip: " + name).c_str());
+				if (std::string(v) != "all")
+					Assert::AreNotEqual(baseFingerprint, call(fingerprintOf, text), (L"fingerprint: " + name).c_str());
+			}
+		}
+
 		// docs/VP-detail-restore.md (2026-10-17): detail_pulse_stabilise / detail_pulse_cap /
 		// texture_restore / texture_restore_cap are parsed, dumped and change the fingerprint
 		// (applied live); the defaults are on / 1.35 / off / 1.5; out-of-range caps keep the default.

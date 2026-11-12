@@ -107,6 +107,7 @@
       "source_coding_fixes",
       "source_id_abr_notice",
       "source_id_consensus",
+      "source_geometry_detect",
       "source_resolution",
       "source_resolution_auto_min_confidence",
       "source_resolution_crossfade_s",

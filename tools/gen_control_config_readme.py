@@ -55,6 +55,8 @@ def describe(expr):
         parts.append("slot list text")
     if "lines(value" in expr:
         parts.append("native, auto, a height 144..8640 or WIDTHxHEIGHT (width up to 17280)")
+    if 'find_first_of("\\"=")' in expr:
+        parts.append("all, conventional or a list of source-size ids (unknown ids: a status line)")
     if "find('\"')" in expr:
         parts.append("a folder path without a double quote (empty = off)")
     return " or ".join(parts) if parts else "custom rule"

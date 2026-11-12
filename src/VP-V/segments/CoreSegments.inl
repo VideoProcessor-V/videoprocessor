@@ -77,6 +77,16 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 	frameAnalysis.Owner(this).Configure(settings.frameAnalysisStore && !settings.pipelineOriginalPathway,   // WP-23
 		VpFrameAnalysis::Host::FullLumaReaders(pipelineSlots, settings.opticalFlow, settings.motionAheadFrames,
 			settings.sourceResolution == "auto"));   // running full-luma readers; record readers: none yet
+	// SID r2 (audit MED-1, rule 32; refs/107 s1 S6 CONFIG/STATUS, this settings seam): source_geometry_detect reaches the
+	// source monitor on a settings apply, parsed only when it changed, with its unknown-entry line; with auto off nothing is
+	// held, so the held re-base notice is released here (OrderFrameSlotHooks syncs it per frame while auto runs).
+	if (sourceMonitor.SetGeometryDetect(settings.sourceGeometryDetect))
+		SyncFallback(sourceMonitor.GeometryDetectFallback());
+	if (settings.sourceResolution != "auto")
+	{
+		SyncFallback(FallbackCatalog::SourceResolutionHeld(std::string()));
+		sourceMonitor.ForgetConventionHold();
+	}
 	RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::SettingsApplied, this, nullptr, nullptr, settings.resyncEvent.c_str(), nullptr, settings.pipelineOriginalPathway ? 1 : 0, nullptr, static_cast<double>(settings.motionAheadFrames)); // VPV-HOOK
 	entrance.Invalidate();
 	std::string state = settings.pipelineOriginalPathway ? "Original pathway (every VP addition off)" :
@@ -116,6 +126,13 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 
 void LibplaceboVideoRenderer::Impl::OrderFrameSlotHooks()
 {
+	// SID r2 (audit MED-1, rule 32; refs/107 s1 S3 RENDER-PASS, the frame's slot-hook assembly): the held re-base's notice
+	// ("source resolution held"), synced only when the monitor's held state changed (audit LOW-1), while auto runs.
+	{
+		FallbackCatalog::Decision held;
+		if (sourceAutoActive.load(std::memory_order_acquire) && sourceMonitor.ConventionHoldChanged(held))
+			SyncFallback(held);
+	}
 	if (frameSlotHooks.size() < 2)
 		return;
 	std::vector<OutputHookOrder::Tagged<const pl_hook*>> tagged;

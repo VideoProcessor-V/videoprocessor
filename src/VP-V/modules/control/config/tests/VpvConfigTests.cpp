@@ -612,6 +612,8 @@ namespace
 					w = window.findChild<QWidget*>(QStringLiteral("rendererSection.") + QString::fromLatin1(item.id));
 				else if (item.kind == Vpv::ItemKind::Toggle && !Vpv::TierTable().FindRetirement(item.id, "vprenderer"))
 					w = window.findChild<QWidget*>(Vpv::ObjectName(QString::fromLatin1(card.unit) + QLatin1Char('.') + QString::fromLatin1(item.id)));
+				else if (item.kind == Vpv::ItemKind::Text)
+					w = window.findChild<QLineEdit*>(Vpv::ObjectName(QString::fromLatin1(card.unit) + QLatin1Char('.') + QString::fromLatin1(item.id)));
 				else
 					continue;
 				require(w && body->isAncestorOf(w), (std::string("in its card: ") + card.unit + "/" + card.id + " " + item.id).c_str());
@@ -690,7 +692,7 @@ namespace
 			const std::string where = std::string(card.unit) + "/" + card.id;
 			for (const Vpv::CardItem& item : card.items)
 			{
-				if (item.kind == Vpv::ItemKind::Row || item.kind == Vpv::ItemKind::Toggle)
+				if (item.kind == Vpv::ItemKind::Row || item.kind == Vpv::ItemKind::Toggle || item.kind == Vpv::ItemKind::Text)
 				{
 					const auto inserted = keyCard.emplace(item.id, where);
 					require(inserted.second, ("a key is on one card only: " + std::string(item.id) + " (" + inserted.first->second + " and " + where + ")").c_str());
@@ -719,6 +721,41 @@ namespace
 			require(found != sectionCard.end() && found->second.compare(0, 7, "motion/") == 0,
 				(std::string("a motion section is on a Motion card: ") + section).c_str());
 		}
+		// P8-4 (2026-11-11): the source-resolution picture-slider keys sit on Scaling cards; the Fixes under test
+		// keys that have no card yet (tools/check_config_placement.py FIXES_CONTAINER_STAYS) are on none.
+		const char* const kSourceResolutionKeys[] = { "source_resolution", "source_resolution_auto_min_confidence",
+			"source_resolution_evidence_seconds", "source_resolution_evidence_shots", "source_resolution_engage_max_wait_s",
+			"source_resolution_crossfade_s", "source_resolution_release_fade_s", "source_resolution_text_guard",
+			"source_resolution_mixed_guard" };
+		for (const char* key : kSourceResolutionKeys)
+		{
+			const auto found = keyCard.find(key);
+			require(found != keyCard.end() && found->second.compare(0, 8, "scaling/") == 0,
+				(std::string("a source-resolution key is on a Scaling card: ") + key).c_str());
+		}
+		const char* const kFixesContainerStays[] = { "optical_flow_fb_check", "optical_flow_global",
+			"optical_flow_global_fallback", "source_class", "ssim_bitrate_floor" };
+		for (const char* key : kFixesContainerStays)
+			require(keyCard.find(key) == keyCard.end(), (std::string("a Fixes under test key that stays in the container is on no card: ") + key).c_str());
+		// P8-5 (2026-11-11): the dither, grain-split and adaptive scaler rows are on their own units' cards. The adaptive_*
+		// keys (adaptive_motion* among them, built by the adaptive sections of Bill's page since 81c38abe0) resolve
+		// through the two adaptive Sections, which sit on a Scaling card.
+		const char* const kAdaptiveSections[] = { "adaptiveDownscale", "adaptiveUpscale" };
+		for (const char* section : kAdaptiveSections)
+		{
+			const auto found = sectionCard.find(section);
+			require(found != sectionCard.end() && found->second.compare(0, 8, "scaling/") == 0,
+				(std::string("an adaptive scaler section is on a Scaling card: ") + section).c_str());
+		}
+		const char* const kOutputKeys[] = { "temporal_dither", "dither_grain_tolerance_scale" };
+		for (const char* key : kOutputKeys)
+		{
+			const auto found = keyCard.find(key);
+			require(found != keyCard.end() && found->second.compare(0, 7, "output/") == 0,
+				(std::string("a dither key is on an Output card: ") + key).c_str());
+		}
+		const auto grainGuard = keyCard.find("deband_vp_grain_guard");
+		require(grainGuard != keyCard.end() && grainGuard->second.compare(0, 7, "repair/") == 0, "the deband grain guard is on a Repair card");
 	}
 }
 
@@ -1559,6 +1596,56 @@ namespace
 	// so Apply refuses such a file before and after row c; Auto is saved as an absent key.) Opening and saving
 	// untouched keeps every stored value (Bill's displayed 0 is never written back); the two controls follow each
 	// other both ways; an explicit 0 shows the notice.
+	// SID r2: source_geometry_detect is a VP-V text row on the Scaling > Re-base card (built by the VP-V page, rule 32: no
+	// row on Bill's pages). It shows the picked profile's own value, writes that profile's key, and empty removes it.
+	void testSourceGeometryDetectRowOnRebaseCard()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir, "[vprenderer]\nsdr_target_nits: 100\n"
+			"[vprenderer.Main]\nsource_geometry_detect: conventional\n"
+			"[vprenderer.Cinema]\nquality: high\n");
+		const QString name = Vpv::ObjectName(QStringLiteral("scaling.source_geometry_detect"));
+		{
+			ConfigEditorWindow window(path, 0, true);
+			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("scaling.card.rebase.body")));
+			auto* edit = control<QLineEdit>(window, name);
+			require(window.findChildren<QLineEdit*>(name).size() == 1, "the source_geometry_detect row is not there exactly once");
+			require(card->isAncestorOf(edit), "the source_geometry_detect row is not on the VP-V Re-base card");
+			require(window.findChild<QWidget*>(QStringLiteral("config.vprenderer.source_geometry_detect")) == nullptr,
+				"a source_geometry_detect row is on Bill's Rendering page");
+			require(edit->placeholderText() == QStringLiteral("Default: all"), "the row does not show its default");
+			auto* profile = control<QComboBox>(window, Vpv::ObjectName("profile"));
+			profile->setCurrentIndex(profile->findData(QStringLiteral("vprenderer.Main")));
+			QCoreApplication::processEvents();
+			require(edit->text() == QStringLiteral("conventional"), "the row does not load the profile's value");
+			profile->setCurrentIndex(profile->findData(QStringLiteral("vprenderer.Cinema")));
+			QCoreApplication::processEvents();
+			require(edit->text().isEmpty(), "the row does not show the picked profile's own (unset) value");
+			edit->setText(QStringLiteral("hdv_1440x1080, 1920x1080"));
+			emit edit->editingFinished();
+			profile->setCurrentIndex(profile->findData(QStringLiteral("vprenderer.Main")));
+			QCoreApplication::processEvents();
+			edit->setText(QString());
+			emit edit->editingFinished();
+			save(window);
+		}
+		ConfigFile config;
+		require(config.Load(path.toStdString()), "reload");
+		std::string v;
+		require(config.TryGetString("vprenderer.cinema", "source_geometry_detect", v) && v == "hdv_1440x1080, 1920x1080",
+			("the row does not save the picked profile's key\n" + FileText(path)).c_str());
+		require(!config.TryGetString("vprenderer.main", "source_geometry_detect", v), "clearing the row does not remove the key");
+		require(!config.TryGetString("vprenderer", "source_geometry_detect", v), "the row wrote the base section");
+		requireVpReads(path);
+		{
+			ConfigEditorWindow window(path, 0, true);
+			auto* profile = control<QComboBox>(window, Vpv::ObjectName("profile"));
+			profile->setCurrentIndex(profile->findData(QStringLiteral("vprenderer.Cinema")));
+			QCoreApplication::processEvents();
+			require(control<QLineEdit>(window, name)->text() == QStringLiteral("hdv_1440x1080, 1920x1080"), "the saved value does not reopen");
+		}
+	}
+
 	void testQueueRowsOnTheVpvCard()
 	{
 		const auto readFile = [](const QString& path) { QFile file(path); return file.open(QIODevice::ReadOnly) ? file.readAll().replace("\r\n", "\n") : QByteArray(); };
@@ -1664,6 +1751,63 @@ namespace
 				(std::string("VP-V's Auto did not remove the key, or another profile's value changed: ") + saved.toStdString()).c_str());
 		}
 	}
+
+	// P9 row a: the VP-only load-time migrations (editor/Migrations.h) moved out of ConfigEditorWindow.cpp byte for
+	// byte; runLoadMigrations (Bill's calls, the VPV-HOOK line) keeps their order. This opens one old-style file that
+	// needs four of them and checks the saved result: the old renderer name, queue ownership folded into the first
+	// queue profile, the calibration LUT path separators, and the input policy keys moved to their new section.
+	void testLoadMigrationsMoved()
+	{
+		QTemporaryDir dir;
+		const char* text = "[general]\nrenderer: VideoProcessor Renderer (Alpha)\n[queue_recovery]\nreset_after_render_restart_seconds: 7\n"
+			"[queue.Normal]\nqueue_size: 32\n[vprenderer]\nvideo_conversion: auto\n"
+			"[vprenderer.color.Default]\ncalibration_lut_bt709: C:\\luts\\a.cube\n";
+		const QString path = WriteFixture(dir, text);
+		{
+			ConfigEditorWindow window(path, 0, true);
+			save(window);
+		}
+		QFile file(path);
+		require(file.open(QIODevice::ReadOnly), "cannot read the migrated file");
+		const QByteArray saved = file.readAll().replace("\r\n", "\n");
+		require(!saved.contains("VideoProcessor Renderer (Alpha)") && saved.contains("renderer: VP Renderer\n"),
+			(std::string("the old renderer name was not migrated: ") + saved.toStdString()).c_str());
+		const int queueAt = saved.indexOf("[queue.Normal]");
+		const int movedAt = saved.indexOf("reset_after_render_restart_seconds: 7");
+		require(queueAt >= 0 && movedAt > queueAt && saved.count("reset_after_render_restart_seconds") == 1,
+			(std::string("the legacy queue key did not move into the first queue profile: ") + saved.toStdString()).c_str());
+		require(saved.contains("calibration_lut_bt709: C:/luts/a.cube"),
+			(std::string("the calibration LUT path kept backslashes: ") + saved.toStdString()).c_str());
+		const int inputAt = saved.indexOf("[vprenderer.input_processing]");
+		require(inputAt >= 0 && saved.indexOf("video_conversion: auto") > inputAt,
+			(std::string("the input policy key did not move to [vprenderer.input_processing]: ") + saved.toStdString()).c_str());
+	}
+
+	// migrateRefreshKeys (moved to editor/Migrations.h) rewrites a saved integer refresh key that stands for a 1000/1001
+	// rate (59 -> 59.94, 23 -> 23.976) in [ppm_correction] and [display_refresh_rate_override], leaves a whole rate
+	// (60) alone, and drops the old key when its migrated spelling is already there (the explicit entry wins).
+	void testRefreshKeyMigrationMoved()
+	{
+		QTemporaryDir dir;
+		const char* text = "[general]\nrenderer: VP Renderer\n[ppm_correction]\n59: 12\n60: 3\n"
+			"[display_refresh_rate_override]\n23: 24\n29: 30\n29.97: 31\n";
+		const QString path = WriteFixture(dir, text);
+		{
+			ConfigEditorWindow window(path, 0, true);
+			save(window);
+		}
+		QFile file(path);
+		require(file.open(QIODevice::ReadOnly), "cannot read the migrated file");
+		const QByteArray saved = file.readAll().replace("\r\n", "\n");
+		const std::string shown = std::string(": ") + saved.toStdString();
+		require(saved.contains("59.94: 12") && !saved.contains("\n59: "),
+			("the ppm_correction key 59 was not rewritten as 59.94" + shown).c_str());
+		require(saved.contains("\n60: 3"), ("the whole-rate key 60 was changed" + shown).c_str());
+		require(saved.contains("23.976: 24") && !saved.contains("\n23: "),
+			("the override key 23 was not rewritten as 23.976" + shown).c_str());
+		require(saved.contains("29.97: 31") && !saved.contains("\n29: "),
+			("the old key 29 was not dropped in favour of the explicit 29.97" + shown).c_str());
+	}
 }
 
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -1695,6 +1839,9 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: Bill's Chroma upscaler and VP-V's list", testChromaBillsControlAndVpvList);
 	failures += run("VP-V: Bill's Dithering stays his, VP-V's list shows the value", testBillsDitheringStaysHis);
 	failures += run("VP-V: Profile use card and the sync directions", testProfileUseAndSyncDirections);
+	failures += run("VP-V: source_geometry_detect row on the Re-base card", testSourceGeometryDetectRowOnRebaseCard);
 	failures += run("VP-V: queue rows on the VP-V card, look-ahead Auto kept", testQueueRowsOnTheVpvCard);
+	failures += run("VP-V: the moved load-time migrations still apply", testLoadMigrationsMoved);
+	failures += run("VP-V: the moved refresh-key migration rewrites the NTSC band keys", testRefreshKeyMigrationMoved);
 	return failures;
 }

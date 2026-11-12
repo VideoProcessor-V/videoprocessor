@@ -63,7 +63,19 @@ compares them with the README rows.
 `VpvOrganisation.h` `Organisation()` is the only Config placement table. `python -I tools/check_config_placement.py`
 holds the module README tables' `Config placement` column to it: the canonical text is
 `VP-V > <Unit> > <Main|Advanced> > <card title>` (a second place may follow after `;`); a key sits on one card only; a
-Motion card's key has one owner row, in a motion module (intent rows: `motion.consumers`). Motion is enforced (errors);
-other units are advisory until `--all`. `--write` rewrites the placement cells of the enforced units; `--list` prints the
+card's key has one owner row, in a module of that unit (intent rows: `motion.consumers`). Motion, Input, Colour, Repair,
+Scaling, Output (P8-5) and Proposed retirement are enforced (errors); other units have no cards. `--write` rewrites the placement cells of the enforced units; `--list` prints the
 table. Tests: `python -I tools/test_check_config_placement.py` and the Config test `testPlacementTable`
 (`VpvConfigTests.cpp`). No default or key changes.
+
+P8-4 (2026-11-11) adds: the "Fixes under test" container of Bill's Rendering page (`fixesUnderTest`) holds VP keys, so every
+VP key built inside it is on an `Organisation()` card, or is one of five that stay in the container
+(`FIXES_CONTAINER_STAYS`: `optical_flow_fb_check`, `optical_flow_global`, `optical_flow_global_fallback`, `source_class`,
+`ssim_bitrate_floor`); a stale entry is an error. A card in another unit's tab than the key's owner module is declared in
+`CROSS_UNIT_OWNER` (the `source_resolution*` picture-slider rows on Scaling cards are owned by `input.source_analysis`).
+No Bill file is edited; no key or default changes.
+
+P8-5 (2026-11-11): Output is enforced too (the dither rows; `occlusion_mask`, owned by `motion.consumers`, also has a
+presentation row in `output.dither`: `PRESENTATION_ROWS`). The `adaptive_motion*` Config controls the plan listed as
+missing already exist (Bill's adaptive scaler sections, since 81c38abe0; on the Scaling > Advanced card) and have owner rows
+in `scaling.output`; the "not added yet" note in that README was stale and is corrected. No key or default changes.

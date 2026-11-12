@@ -3000,6 +3000,93 @@ namespace Tests
 			Assert::IsTrue(lc.releasesNative + lc.releasesCeiling >= 1, W("by native evidence or the ceiling; " + os.str()).c_str());
 			Assert::AreEqual<uint64_t>(lc.releasesCeiling, est.LatchCeilingReleases(), L"the monitor's crossfade cue counts the ceiling releases");
 		}
+
+		// One evaluation carrying the event flags `flags` (no cut count unless kEvCut is among them).
+		static bool SubmitFlagged(SourceIdentity::Chain::ChainEstimator& est, const ChainSynth::Image& img, uint64_t seq, double seconds, uint32_t flags)
+		{
+			using namespace SourceIdentity::Chain;
+			const LinePlan plan = LineSampler::Plan(ChainSynth::MakeRect(0, 0, img.w, img.h), seq);
+			LineSnapshot snap;
+			if (!CaptureLines<double>(plan, img.v.data(), img.w, 1.0, snap))
+				return false;
+			snap.seq = seq;
+			snap.timeUs = static_cast<int64_t>(std::llround(seconds * 1e6));
+			snap.flags = flags;
+			if (flags != 0u)
+				snap.eventTimeUs = snap.timeUs;
+			if ((flags & kEvCut) != 0u)
+				snap.cuts = 1;
+			return est.SubmitLines(snap);
+		}
+
+		// N2 (F1): a FADE with no cut after the deferred starvation bound of a TRUE upscale starts a new evidence shot (one per 3 s however
+		// long the fade lasts): the scene after it re-confirms the latch and the deferred release is cancelled; nothing is released
+		// mid-scene. With the rules off a fade starts no shot (rules-off identity).
+		TEST_METHOD(AFadeWithoutACutStartsANewShotAndATrueUpscaleStaysLatched)
+		{
+			using namespace ChainSynth;
+			namespace C = SourceIdentity::Chain;
+			const Image up = ChainScene(540, 960, kFrameH, kFrameW, kBilinear, 1201u, 8, 0.0, 10.0);
+			Tests::ChainFx::ManualClock clk;
+			C::ChainEstimator est(Safe(), clk.Fn());
+			est.SetSynchronous(true);
+			est.SetMode(C::EstimatorMode::On);
+			double t = 10.0;
+			uint64_t seq = 2;
+			Assert::IsTrue(LatchUp540(est, clk, up, t, seq), L"fixture: latched 960x540");
+			// One long cut-free shot until the starvation bound is reached and the release deferred.
+			for (const double tEnd = t + 200.0; t <= tEnd && !est.StatusInput().latchDeferred; t += 0.5, ++seq)
+			{
+				clk.Set(t * 1000.0);
+				if (!est.Wants())
+					continue;
+				Assert::IsTrue(ChainRevertBoundTests::SubmitEvaluation(est, up, seq, t, false));
+			}
+			Assert::IsTrue(est.StatusInput().latchDeferred, L"fixture: the bound was reached inside the long shot and deferred");
+			Assert::AreEqual<uint64_t>(0, est.GetCounters().fadeShots);
+			// A 2.5 s fade from the next evaluation on (every evaluation in it flagged fade, no cut), then the scene goes on, cut-free.
+			double tFade = -1.0;
+			int fadeEvals = 0;
+			for (const double tEnd = t + 32.0; t <= tEnd; t += 0.5, ++seq)
+			{
+				clk.Set(t * 1000.0);
+				if (!est.Wants())
+					continue;
+				if (tFade < 0.0)
+					tFade = t;
+				const bool fading = t < tFade + 2.5;
+				fadeEvals += fading ? 1 : 0;
+				Assert::IsTrue(SubmitFlagged(est, up, seq, t, fading ? C::kEvFade : 0u));
+				const C::ChainStatusInput si = est.StatusInput();
+				Assert::IsTrue(si.latchNx == 960 && si.latchNy == 540, (L"a true upscale is never released after the fade (t " + std::to_wstring(t) + L")").c_str());
+			}
+			const C::EstimatorCounters c = est.GetCounters();
+			std::ostringstream os;
+			os << "fade evaluations " << fadeEvals << " fade shots " << c.fadeShots << " releases " << c.latch.releases << " deferred " << c.latch.deferred
+			   << " cancelled " << c.latch.deferCancelled << " at a cut " << c.latch.releasesAtCut;
+			Logger::WriteMessage(os.str().c_str());
+			Assert::IsTrue(fadeEvals >= 2, W("fixture: the fade spans several evaluations; " + os.str()).c_str());
+			Assert::AreEqual<uint64_t>(1, c.fadeShots, W("one new shot for the whole 2.5 s fade (rate-limited to one per 3 s); " + os.str()).c_str());
+			Assert::AreEqual<uint64_t>(0, c.latch.releases, W("no release at all; " + os.str()).c_str());
+			Assert::IsTrue(c.latch.deferCancelled >= 1 && !est.StatusInput().latchDeferred, W("the scene after the fade re-confirmed: cancelled; " + os.str()).c_str());
+
+			// Rules off: the same fade flags start no evidence shot.
+			Tests::ChainFx::ManualClock clk2;
+			C::ChainEstimator off(C::EstimatorSettings(), clk2.Fn());
+			off.SetSynchronous(true);
+			off.SetMode(C::EstimatorMode::On);
+			int offEvals = 0;
+			for (double u = 10.0; u <= 30.0; u += 0.5)
+			{
+				clk2.Set(u * 1000.0);
+				if (!off.Wants())
+					continue;
+				Assert::IsTrue(SubmitFlagged(off, up, 2u + static_cast<uint64_t>(offEvals), u, C::kEvFade));
+				++offEvals;
+			}
+			Assert::IsTrue(offEvals >= 4);
+			Assert::AreEqual<uint64_t>(0, off.GetCounters().fadeShots, L"rules off: a fade starts no evidence shot");
+		}
 	};
 
 	TEST_CLASS(ChainWindowPolicyTests)

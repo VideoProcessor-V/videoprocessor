@@ -82,6 +82,9 @@ All are validated as `input`-group keys (RendererProfileConfig.h; sections `[vpr
 - `source_resolution`: `native` / `auto` / a height (144..8640) / `WIDTHxHEIGHT`; default `auto`. An unrecognised value is ignored without a log line.
 - `source_resolution_auto_min_confidence` (0..1, default 0.8), `source_resolution_evidence_shots` (1..10, default 3), `source_resolution_evidence_seconds` (2..120, default 10).
 - `source_resolution_text_guard`, `source_resolution_mixed_guard`, `source_coding_fixes`, `source_resolution_latch_fixes`, `source_resolution_cut_fixes`: `on` / `off`, all default `on`.
+- `source_geometry_detect` (SID r2, owner 2026-11-11): the source sizes RECOGNISED and named when a re-base is held: `all` (default, every SourceGeometrySet entry with detect on, the anamorphic HD sizes HDV 1440x1080 and DVCPRO HD 1280x1080 / 960x720 included), `conventional` (the applied entries only) or a list of entry ids. It never changes what is applied; unknown ids are ignored and shown ("source geometry detect"). Per-entry held counts: the log line `held: <name>` and the history row `convention_held`. A list in which no id is known (every entry unknown) recognises nothing: every held reading stays unnamed (the generic hold note), and the unknown ids are shown ("source geometry detect" in "Fallbacks engaged", Ctrl+I and Config status), so it is never silent.
+- Conventional-only re-base (SID r2, owner 2026-11-11; VP pathway only, the Original pathway is untouched): with the monitor's `RebaseConventionOnly` switch (default ON) the classical path and the consensus's uniform gate re-base only TWO-AXIS conventional pairs: both axes below native and the pair one listed, applied (non-parked) SourceGeometrySet entry on the delivered raster (tolerance 0.6 %). A single-axis reading (unless `SingleAxisRebase`) or a size outside the list is held, logged once per episode and shown ("source resolution held" entry and the status note), never applied. A raster width the host cannot give holds every re-base.
+- Crop-aware convention (coordinator design call 2026-11-11, R2 extension): a delivered raster WIDER than an entry's display aspect is also read as that entry cropped to the raster's aspect (scope or flat film coded as its active area, e.g. 1920x800 or 1920x1038), so letterbox-cropped encodes match their entry without listing every crop height (SourceGeometrySet `CroppedRatiosFor`). Non-uniform crops stay held; apply stays two-axis only.
 - `source_resolution_engage_max_wait_s` (0..600, default 20), `source_resolution_crossfade_s` (0..10, default 1.5), `source_resolution_release_fade_s` (0..0.25, default 0.25).
 - `rebase_kernel_match` is read by the host for the re-base (scaling.rebase). The monitor fits kernels whatever it says.
 - The Original pathway forces `source_resolution: native`, `rebase_kernel_match: off`, `source_coding_fixes: off`, `source_resolution_latch_fixes: off` and `source_resolution_cut_fixes: off` (OriginalPathway.h).
@@ -91,6 +94,7 @@ All are validated as `input`-group keys (RendererProfileConfig.h; sections `[vpr
 ### User-visible fallbacks / notices (VP)
 
 - No "Fallbacks engaged" entry. The planned `Source analysis: labels unknown (<reason>)` is never produced.
+- SID r2 "Fallbacks engaged" entries: "source resolution held" (a single-axis or non-standard re-base held; synced per frame only when the held state changes, while auto runs, released with auto off) and "source geometry detect" (unknown `source_geometry_detect` ids; synced on a settings apply). Both are synced by the renderer's VP-V segment file (src/VP-V/segments/CoreSegments.inl), not by Bill's renderer file.
 - A GPU-side failure of the tile copy (buffer, shader, dispatch, readback) is logged once per cause and retried after 60 s. While nothing is read the status/stats line shows "Source resolution: not read (...)", and `auto` stays native. A source that cannot be sampled shows the same way.
 - The look-ahead's cut judge assumes 24 Hz until the frame interval is measured: log only ("Rate fallback: source-resolution cut judge ...").
 
@@ -252,6 +256,7 @@ Code defaults of the history CSV that are not config keys (each fixed in code):
 - Slot keys (slots.json): `source_resolution`, `rebase_kernel_match`, `subtitle_fit`, `subtitle_reposition`, `subtitle_type`, `source_coding_fixes`
 - As read today: `source_resolution` and `source_coding_fixes` are live, together with the ten `source_resolution_*` keys listed under "How the code works" (added to the slot list in this pass). `rebase_kernel_match` is read for the re-base, not by this slot's code. `subtitle_type` is the key `type` in `[vprenderer.subtitles.<Name>]` (Bill's subtitle code). `subtitle_fit` outside that section is discarded (fit follows `type`). `subtitle_reposition` (main config / command line) is parsed and ignored; repositioning is permanently disabled. Detection keys: see "How the code works".
 - Planned keys: `label_detector`
+- Planned keys, P4 / SID-5 (setter-only switches today; no Config key or row yet, the defaults below are what runs): `RebaseConventionOnly` (SourceResolutionMonitor::SetRebaseConventionOnly, default ON: the conventional-only re-base above), `SingleAxisRebase` (SetSingleAxisRebase, default OFF: a re-base needs both axes) and the chain safety rules (SetSourceIdSafetyRules, default OFF: R2 conventional geometry only, R3 convention-pair prior, R5 asymmetric latch, R7 no latch into a menu; plus SetSourceIdLatchAbrTrigger). All VP pathway only; the Original pathway is untouched.
 - Tiers: not tiered; label-detector net optional
 
 ## Fallbacks
@@ -345,8 +350,13 @@ The P15/P15c layout reserve is declared by QualityPatternRecord.h (r2/p15-decl-b
 
 ## Settings
 
-- Keys: `source_resolution`, `source_resolution_auto_min_confidence`, `source_resolution_evidence_shots`, `source_resolution_evidence_seconds`, `source_resolution_text_guard`, `source_resolution_mixed_guard`, `source_resolution_latch_fixes`, `source_resolution_cut_fixes`, `source_resolution_engage_max_wait_s`, `source_resolution_crossfade_s`, `source_resolution_release_fade_s`, `subtitle_fit`, `subtitle_reposition`, `subtitle_type`, `source_coding_fixes`, `frame_analysis_store`.
+- Keys: `source_resolution`, `source_resolution_auto_min_confidence`, `source_resolution_evidence_shots`, `source_resolution_evidence_seconds`, `source_resolution_text_guard`, `source_resolution_mixed_guard`, `source_resolution_latch_fixes`, `source_resolution_cut_fixes`, `source_geometry_detect`, `source_resolution_engage_max_wait_s`, `source_resolution_crossfade_s`, `source_resolution_release_fade_s`, `subtitle_fit`, `subtitle_reposition`, `subtitle_type`, `source_coding_fixes`, `frame_analysis_store`.
 - Planned keys (not yet implemented): `label_detector`, `source_id_abr_notice`, `source_id_consensus`.
+
+| Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
+|---|---|---|---|---|---|---|---|---|
+| `source_geometry_detect` | profile ([vprenderer.Default] and matching profiles) | string | `all`, `conventional` or a list of SourceGeometrySet ids (hdv_1440x1080, dvcprohd_1280x1080, dvcprohd_960x720, 2560x1440, 1920x1080, 1280x720, 960x540, dci_2048x1080, dci_1998x1080, sd_720x576, sd_720x480) | `all` | VP-V > Scaling > Main > Re-base (your picture slider) | n/a (VP-only; the Original pathway recognises nothing) | `source geometry detect`: unknown ids ignored and shown; named holds: `held: <name>` note, log line and `convention_held` history row | not tiered |
+
 - Tiers: not tiered; label-detector net optional.
 - VP-V page, Input tab: not tiered (Always on: capture and timing have no quality steps, only paths (the toggles below).).
 - Listed under the tier: `intent_content`.

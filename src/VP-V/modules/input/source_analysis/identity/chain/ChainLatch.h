@@ -36,6 +36,10 @@
 //                 hardBoundSec + 60 = 180 s after the newest confirming evidence) as LatchEvent::ReleasedCeiling, which the monitor shows
 //                 through its engage crossfade instead of the release fade. Native, menu, ABR-step and reset releases stay immediate (also
 //                 while deferred). The bounds are NOT scaled with the shot length.
+//   N2 (r2 audit of N1): the boundary is a NEW EVIDENCE SHOT of the estimator (a cut, or a black / fade without a cut, rate-limited to one
+//                 per minimum shot dwell: F1), so the dwell is that shot's own dwell. Every new shot restarts the dwell (until the ceiling
+//                 has passed); the release waits deferDwellExtraEvaluations (1) evaluation(s) past the dwell's end, because the dwell's end
+//                 is the new shot's FIRST credited evaluation and a shot short of the bar there may still re-confirm in the next one.
 //   A backward source-time step without a reset (L5) re-anchors the stable and confirmation times to the new time (the hard bound keeps running).
 // It reuses the existing inputs only (rules 24 / 25): ChainEvidence's per-axis evidence and credits, the HOLD evaluations and the monitor's
 // mixed-episode events (WindowClearPolicy), the AbrStepDetector's events. It adds no private measurement. Pure, no clock of its own, header-only,
@@ -67,6 +71,7 @@ namespace SourceIdentity
 			// N1: the evidence-starvation releases wait for the next shot boundary (true), or release at the bound (false: the pre-N1 rule).
 			bool deferStarvation = true;
 			double deferDwellSec = 3.0;         // N1: the new shot's one dwell to re-confirm (= ChainEvidence kMinShotDwellSec)
+			int deferDwellExtraEvaluations = 1; // N2 (LOW-b): evaluations after the dwell's end before the release (the first credited one is not the last chance)
 			double deferCeilingSec = 60.0;      // N1: no boundary within this long after the bound: released (crossfade) anyway
 		};
 
@@ -231,6 +236,7 @@ namespace SourceIdentity
 					{
 						deferUs_ = t;   // N1: the ceiling and the dwell run from the re-anchored time too
 						dwellStartUs_ = t;
+						dwellExtra_ = 0;
 					}
 				}
 				const double dt = havePrev_ && t > prevUs_ ? static_cast<double>(t - prevUs_) / 1e6 : 0.0;
@@ -377,22 +383,33 @@ namespace SourceIdentity
 
 			void StepDeferred(const LatchInput& in, int64_t t, LatchOutput& o)
 			{
-				if (!dwelling_ && in.shotBoundary)
+				const bool pastCeiling = static_cast<double>(t - deferUs_) / 1e6 >= s_.deferCeilingSec;
+				if (in.shotBoundary && (!dwelling_ || !pastCeiling))
 				{
-					// The first evaluation of the new shot (the same reference ChainEvidence's shot dwell starts from).
+					// The first evaluation of the new shot (the same reference ChainEvidence's shot dwell starts from). N2 (LOW-a): every new
+					// shot restarts the dwell (the release never lands inside the next shot of a run of short shots); restarts stop once the
+					// ceiling has passed, so the open dwell then runs out (at most ceiling + one dwell after the bound).
 					dwelling_ = true;
 					dwellStartUs_ = t;
+					dwellExtra_ = 0;
 				}
 				if (dwelling_)
 				{
 					if (static_cast<double>(t - dwellStartUs_) / 1e6 >= s_.deferDwellSec)
 					{
-						++c_.releasesAtCut;
-						o.event = Release(deferCause_, false);
-						o.reasonBits |= kReasonLatchRelease;
+						// N2 (LOW-b): the dwell's end is the new shot's FIRST credited evaluation (ChainEvidence's minimum shot dwell, the same
+						// source time); deferDwellExtraEvaluations more evaluations of that shot may still re-confirm before the release.
+						if (dwellExtra_ >= s_.deferDwellExtraEvaluations)
+						{
+							++c_.releasesAtCut;
+							o.event = Release(deferCause_, false);
+							o.reasonBits |= kReasonLatchRelease;
+						}
+						else
+							++dwellExtra_;
 					}
 				}
-				else if (static_cast<double>(t - deferUs_) / 1e6 >= s_.deferCeilingSec)
+				else if (pastCeiling)
 				{
 					++c_.releasesCeiling;
 					o.event = Release(LatchEvent::ReleasedCeiling, false);
@@ -404,6 +421,7 @@ namespace SourceIdentity
 			{
 				deferred_ = false;
 				dwelling_ = false;
+				dwellExtra_ = 0;
 			}
 
 			void Latch(const LatchInput& in)
@@ -467,6 +485,7 @@ namespace SourceIdentity
 			bool deferred_ = false, dwelling_ = false;   // N1: a starvation release waits for a boundary / the new shot's dwell is open
 			LatchEvent deferCause_ = LatchEvent::None;
 			int64_t deferUs_ = 0, dwellStartUs_ = 0;
+			int dwellExtra_ = 0;   // N2: evaluations counted past the dwell's end
 		};
 	}
 }
