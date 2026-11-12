@@ -7,7 +7,7 @@
 // luma and each chroma plane for the chroma upscaler's grain guard.
 //
 // Passes (all compute, nothing read back; the structure of texture_restore's HALF / LOWH / LOWV / STATS / GRAIN / APPLY):
-//   1. HALF   the 2x2 box (shared memory) and the base / low Gaussians across        -> tmp  (rg32f, half size)
+//   1. HALF   the U3 half plane (vpu_half_luma, shared memory), base / low Gaussians across -> tmp (rg32f, half size)
 //   2. DOWN   the base / low Gaussians down                                           -> low  (Gb, G6; rg32f, half size)
 //   3. STATS  one workgroup per block: G1 in shared memory, D = d1 + d2, the sub-block energies (one thread per
 //             sub-block, fixed order), the quietest x cal, the block means of d3^2, d1^2, d2^2 -> quiet (block grid)

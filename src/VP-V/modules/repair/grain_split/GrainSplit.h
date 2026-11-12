@@ -31,6 +31,7 @@
 #include <vector>
 
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 
 namespace GrainSplit
 {
@@ -112,24 +113,25 @@ namespace GrainSplit
 	}
 
 	// ---- v3 law helpers (refs/116 s6): the low-band structure of texture_restore (TextureRestore.cpp passes 1-3) ----
-	// Half-resolution sigma and radius of a full-resolution sigma: the shared U2 law (BandFromBase::HalfSigma, the 2x2 box
-	// adds 0.25 px^2 per axis) with texture_restore's half radius rule (3.5 sigma; TextureRestore.h HalfRadius).
+	// Half-resolution sigma and radius of a full-resolution sigma: the shared U2 law (BandFromBase::HalfSigma: the U3 half
+	// step adds a quarter px^2 per axis) with texture_restore's half radius rule (3.5 sigma; TextureRestore.h HalfRadius).
 	inline double V3HalfSigma(double sigma) { return VpUnit::BandFromBase::HalfSigma(sigma); }
 	inline int V3HalfRadius(double sigma) { return VpUnit::BandFromBase::Radius(V3HalfSigma(sigma), 3.5, true, 1e-9); }
 	inline double V3HalfWeight(int k, double sigma) { return VpUnit::BandFromBase::Weight(k, V3HalfSigma(sigma), V3HalfRadius(sigma)); }
 	// The smallest full-resolution low-band sigma the v3 law accepts (HalfSigma needs sigma^2 > 0.25).
 	constexpr double kV3MinLowSigma = 0.55;
 
-	// 2x2 box to half resolution, positions clamped (texture_restore HALF): ceil(w / 2) x ceil(h / 2).
+	// The half plane by the shared U3 law (VpUnit::HalfLuma: grid HalfDim, taps Tap0 / Tap1, the mean MeanF in the
+	// accessor's tap order), in codes: the CPU twin of the GPU pass's vpu_half_luma.
 	inline Plane V3Half(const Plane& y)
 	{
-		Plane o((y.w + 1) / 2, (y.h + 1) / 2);
+		Plane o(static_cast<int>(VpUnit::HalfLuma::HalfDim(static_cast<uint32_t>(y.w))), static_cast<int>(VpUnit::HalfLuma::HalfDim(static_cast<uint32_t>(y.h))));
 		for (int j = 0; j < o.h; ++j)
 			for (int i = 0; i < o.w; ++i)
 			{
-				const double a = y.get(2 * i, 2 * j) + y.get(2 * i + 1, 2 * j);
-				const double b = y.get(2 * i, 2 * j + 1) + y.get(2 * i + 1, 2 * j + 1);
-				o.at(i, j) = 0.25 * (a + b);
+				const int x0 = VpUnit::HalfLuma::Tap0(i, y.w), x1 = VpUnit::HalfLuma::Tap1(i, y.w);
+				const int y0 = VpUnit::HalfLuma::Tap0(j, y.h), y1 = VpUnit::HalfLuma::Tap1(j, y.h);
+				o.at(i, j) = VpUnit::HalfLuma::MeanF(y.at(x0, y0), y.at(x1, y0), y.at(x0, y1), y.at(x1, y1));
 			}
 		return o;
 	}
@@ -254,7 +256,7 @@ namespace GrainSplit
 
 	// THE SPLIT (v3 law, kUnitVersion 3; refs/116 s6). The estimator of v2 unchanged (sub-block grain level, neighbourhood
 	// minimum, Wiener share on D = d1 + d2), with the two LOW bands computed at HALF resolution as texture_restore does:
-	//   Yh = 2x2 box of Y; Gbh, G6h = half-resolution blurs at HalfSigma(sigmaBase s), HalfSigma(sigmaLow s), read at full
+	//   Yh = the U3 half plane of Y; Gbh, G6h = half-resolution blurs at HalfSigma(sigmaBase s), HalfSigma(sigmaLow s), read at full
 	//   resolution bilinearly (V3LowAt). G1 (sigmaFine s) stays at full resolution.
 	//   base = Gb(p), d1 = Y - G1, d2 = G1 - base, d3 = base - G6(p), D = d1 + d2 = Y - base.
 	// sigmaBase s and sigmaLow s must be >= kV3MinLowSigma (the GPU form refuses the law otherwise).

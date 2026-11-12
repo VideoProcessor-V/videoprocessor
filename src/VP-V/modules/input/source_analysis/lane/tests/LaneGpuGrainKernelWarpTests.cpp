@@ -274,8 +274,8 @@ namespace VideoProcessorTest
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(PassTextFingerprintIsPinned)
 		{
-			// WAIVER-P10V3-01: old pin 0x41cef8707edf809d (v2 text) -> new 0x0dabcf9788d9bd4b (v3 pass texts, refs/116).
-			constexpr uint64_t kPinned = 0x0dabcf9788d9bd4bull;
+			// WAIVER-P10V3-01: old pin 0x41cef8707edf809d (v2 text) -> new 0x57d4f774c622f72c (v3 pass texts, refs/116).
+			constexpr uint64_t kPinned = 0x57d4f774c622f72cull;
 			Assert::IsTrue(GrainSplit::Gpu::FullShaderFingerprint() == kPinned, L"Full pass GLSL fingerprint");
 		}
 	};

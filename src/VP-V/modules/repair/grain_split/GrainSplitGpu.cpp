@@ -9,6 +9,7 @@
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 
 #include <algorithm>
 #include <cmath>
@@ -24,8 +25,9 @@ namespace GrainSplit
 			// Weights: w1/R1 full-resolution fine band (sigmaFine s), wb/RB and w6/R6 the half-resolution base and low bands
 			// (V3HalfWeight of sigmaBase s and sigmaLow s), RL = max(RB, R6).
 
-			// 1. HALF + ACROSS: the 2x2 box of the plane (clamped positions, GrainSplit::V3Half) into shared memory, then the
-			// base and low Gaussians across (half-resolution edges clamped). Tile TW x TH half px per workgroup (64 x 4).
+			// 1. HALF + ACROSS: the half plane by the shared U3 accessor vpu_half_luma (VpUnit::HalfLuma::Glsl; R channel, so the
+			// v3 Splitter reads component 0) in codes (GS_INV_CU) into shared memory (GrainSplit::V3Half), then the base and
+			// low Gaussians across (half-resolution edges clamped). Tile TW x TH half px per workgroup (64 x 4).
 			const char* const HALF_HEADER = R"GLSL(
 #define TW 64
 #define TH 4
@@ -39,11 +41,7 @@ ivec2 org = ivec2(gl_WorkGroupID.xy) * ivec2(TW, TH);
 for (uint i = li; i < uint(TH * SW); i += uint(TW * TH)) {
     int r = int(i / uint(SW)), c = int(i % uint(SW));
     ivec2 q = ivec2(clamp(org.x - RL + c, 0, GS_HW - 1), clamp(org.y + r, 0, GS_HH - 1));
-    int x0 = min(2 * q.x, GS_W - 1), x1 = min(2 * q.x + 1, GS_W - 1);
-    int y0 = min(2 * q.y, GS_H - 1), y1 = min(2 * q.y + 1, GS_H - 1);
-    float a = gs_y(x0, y0) + gs_y(x1, y0);
-    float b = gs_y(x0, y1) + gs_y(x1, y1);
-    s_r[i] = 0.25 * (a + b);
+    s_r[i] = vpu_half_luma(src, q) * GS_INV_CU;
 }
 barrier();
 ivec2 q = org + lid;
@@ -479,7 +477,8 @@ if (p.x < GS_W && p.y < GS_H) {
 			{
 				const pl_shader_desc d[2] = { Sampled("src", plane), VpvGpu::Storage("tmp_out", r.tmp) };
 				const size_t shmem = sizeof(float) * size_t(kHalfTh) * size_t(kHalfTw + 2 * rl);
-				if (!Pass(dispatch, "VideoProcessor grain split: half + across", txt.geo + txt.wlow + txt.yread + HALF_HEADER, HALF_BODY, d, 2, nullptr, 0,
+				const std::string hdr = txt.geo + txt.wlow + Define("GS_INV_CU", 1.0 / codeUnit) + VpUnit::HalfLuma::Glsl() + HALF_HEADER;
+				if (!Pass(dispatch, "VideoProcessor grain split: half + across", hdr, HALF_BODY, d, 2, nullptr, 0,
 					(hw + kHalfTw - 1) / kHalfTw, (hh + kHalfTh - 1) / kHalfTh, shmem, kHalfTw, kHalfTh, options.timer))
 					return fail("grain split: half pass failed");
 				break;
@@ -560,7 +559,8 @@ if (p.x < GS_W && p.y < GS_H) {
 			m_error.clear();
 			m_scratchShort = false;
 			m_out = Frame();   // a failed Compute never leaves the previous frame's product looking valid
-			if (!gpu || !dispatch || !plane || !plane->params.sampleable || component < 0 || component > 3 || !(codeUnit > 0.0) || B < 2 || (B % 2) != 0)
+			// v3 reads the plane's R channel through the shared U3 accessor: component 0 only (every caller passes 0).
+			if (!gpu || !dispatch || !plane || !plane->params.sampleable || component != 0 || !(codeUnit > 0.0) || B < 2 || (B % 2) != 0)
 			{
 				m_error = "grain split: invalid input";
 				return false;

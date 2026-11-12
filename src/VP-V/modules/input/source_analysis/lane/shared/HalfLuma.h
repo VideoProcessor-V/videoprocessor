@@ -48,6 +48,10 @@ namespace HalfLuma
 	inline uint32_t Box4(uint32_t a, uint32_t b, uint32_t c, uint32_t d) { return a + b + c + d; }
 	// P1 finishing (half and quarter): the rounded mean.
 	inline uint16_t FinishP1(uint32_t sum) { return uint16_t((sum + 2u) >> 2); }
+	// The floating-point form of the same mean, the arithmetic of the GLSL accessor vpu_half_luma ((a + b + c + d) x 1/4,
+	// same tap order). Additive (grain split v3, refs/116): grid, taps and the integer rounding above are unchanged.
+	template <class F>
+	inline F MeanF(F a, F b, F c, F d) { return (a + b + c + d) * F(0.25); }
 	// Engine view finishing: 10-bit codes to the 8-bit mean code / 4.
 	inline uint8_t FinishEngine8(uint32_t sum) { return static_cast<uint8_t>((std::min)(255u, sum >> 4)); }
 
