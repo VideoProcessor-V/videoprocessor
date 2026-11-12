@@ -67,6 +67,7 @@ namespace Vpv
 			pathway_.ForEach([&](const void* key, const std::shared_ptr<PathwayFact>&) { keys.push_back(key); });
 			for (const void* key : keys)
 				pathway_.Remove(key, true);
+			pathwayRefusals_.store(0, std::memory_order_relaxed);
 		}
 
 		bool ExtensionHub::OriginalPathway(const void* host) const
@@ -105,6 +106,32 @@ namespace Vpv
 			return hosts_.find(host) != hosts_.end();
 		}
 
+		bool ExtensionHub::NoteFixSwitches(const void* host, uint32_t bits)
+		{
+			if (!host)
+				return false;
+			std::shared_ptr<PathwayFact> fact = pathway_.Find(host);
+			if (!fact)
+			{
+				fact = std::make_shared<PathwayFact>();
+				fact->host = host;
+				if (!pathway_.Put(host, fact))
+					return false;   // table full (or a racing Put: re-find below)
+			}
+			fact->fixBits.store(bits, std::memory_order_relaxed);
+			fact->fixPublished.store(true, std::memory_order_release);
+			return true;
+		}
+
+		bool ExtensionHub::FixSwitchBits(const void* host, uint32_t& bits) const
+		{
+			const std::shared_ptr<PathwayFact> fact = pathway_.Find(host);
+			if (!fact || !fact->fixPublished.load(std::memory_order_acquire))
+				return false;
+			bits = fact->fixBits.load(std::memory_order_relaxed);
+			return true;
+		}
+
 		void ExtensionHub::OnLifecycle(RE::LifecycleFacts& f)
 		{
 			if (f.kind == RE::Lifecycle::GpuCreated && f.host)
@@ -118,8 +145,18 @@ namespace Vpv
 			for (auto& m : modules_) { try { m->OnLifecycle(f); } catch (...) { Contain(f, m->Name()); } }
 			// PHASE 1: the pathway fact, after the fan-out (a module's SettingsApplied handler compares the old fact
 			// with the new f.code).
-			if (f.kind == RE::Lifecycle::SettingsApplied && f.host)
-				NoteOriginalPathway(f.host, f.code != 0);
+			if (f.kind == RE::Lifecycle::SettingsApplied && f.host && !NoteOriginalPathway(f.host, f.code != 0))
+			{
+				// T-AR3-N4: an unrecorded fact reads as "VP-V" for every gated call (the safe direction for a missed
+				// Original switch is NOT this one), so it is counted and surfaced, never silent.
+				pathwayRefusals_.fetch_add(1, std::memory_order_relaxed);
+				try
+				{
+					std::vector<std::string> none;
+					OnStatus(f, RE::StatusKind::WorkerFault, none, "hub", "pathway table full: the Original-pathway gate was not recorded for this renderer");
+				}
+				catch (...) {}
+			}
 			// Released only for this host: a replacement renderer's state is untouched.
 			if ((f.kind == RE::Lifecycle::GpuReleased || f.kind == RE::Lifecycle::Shutdown) && f.host)
 			{

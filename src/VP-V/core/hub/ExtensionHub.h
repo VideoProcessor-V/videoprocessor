@@ -81,6 +81,11 @@ namespace Vpv
 		{
 			const void* host = nullptr;
 			std::atomic<bool> original{ false };
+			// T-AR3-N2 (AUDIT-R 1fa78cdb9 N2): the PHASE 1 ingress "fix" switches of the host's ACTIVE settings (IngressState.h
+			// IngressState::FixSwitchBitsOf), published at the settings seam so the capture / file threads never read the Impl's
+			// activeSettings (a std::string-bearing struct the render thread rewrites). 0 / unpublished until the first apply.
+			std::atomic<uint32_t> fixBits{ 0 };
+			std::atomic<bool> fixPublished{ false };
 		};
 
 		class ExtensionHub : public RE::IRendererExtension
@@ -101,10 +106,18 @@ namespace Vpv
 			// CoreSegments.inl UpdatePipelineSlots) AFTER the modules saw that call, so a module's own SettingsApplied
 			// handler reads the PREVIOUS pathway here and the new one in f.code (VectorEngineExtension uses the pair);
 			// dropped with the host (GpuReleased / Shutdown). No fact (before the first settings apply, an unknown host,
-			// a full table: logged once per host) = VP-V, i.e. the module runs as before. Any thread: one slot scan.
+			// a full table: counted in PathwayRefusals() and reported as a WorkerFault status line) = VP-V, i.e. the module runs as before. Any thread: one slot scan.
 			bool OriginalPathway(const void* host) const;
 			// The recorder (the hub's SettingsApplied bookkeeping; tests). False = not recorded (null host / table full).
 			bool NoteOriginalPathway(const void* host, bool original);
+			// T-AR3-N2: the ingress fix switches of `host`'s active settings (render thread, UpdatePipelineSlots, before the
+			// SettingsApplied fan-out) and their lock-free read (capture / file threads). Read false = nothing published
+			// yet (or the host is gone): the caller leaves its switches as they are. Note false = null host / table full.
+			bool NoteFixSwitches(const void* host, uint32_t bits);
+			bool FixSwitchBits(const void* host, uint32_t& bits) const;
+			// T-AR3-N4 (AUDIT-R 1fa78cdb9 N4): SettingsApplied pathway facts the hub could not record (slot table full).
+			// Each one is also reported as a WorkerFault status line ("hub" / "pathway table full"), never log-only.
+			uint32_t PathwayRefusals() const { return pathwayRefusals_.load(std::memory_order_relaxed); }
 
 			void OnLifecycle(RE::LifecycleFacts&) override;
 			void OnSettingsLoad(RE::SettingsLoadContext&) override;
@@ -120,6 +133,7 @@ namespace Vpv
 			std::vector<std::unique_ptr<ISkeletonModule>> modules_;
 			mutable std::mutex hostsMutex_;
 			std::map<const void*, HostState> hosts_;
+			std::atomic<uint32_t> pathwayRefusals_{ 0 };
 			HostSlots<PathwayFact> pathway_;   // PHASE 1: the per-host Original fact (lock-free readers on the frame paths)
 		};
 

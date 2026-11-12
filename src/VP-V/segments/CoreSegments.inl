@@ -56,6 +56,9 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 	next.SetEntranceOnce(settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway);   // B3: consumers after the entrance
 	(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
 	pipelineSlots = next;
+	// T-AR3-N2 (AUDIT-R 1fa78cdb9 N2): the ingress fix switches of THESE settings, published once here for the capture and
+	// file threads (IngressHardwareArrival / OnTimedVideoFrame), instead of their reading activeSettings across threads.
+	Vpv::Hub::ExtensionHub::Instance().NoteFixSwitches(this, Vpv::Ingress::IngressState::FixSwitchBitsOf(Vpv::Ingress::IngressState::FixSwitchesOf(settings)));
 	// PHASE 1 of the host seams plan (refs/107 s2.4 item 1; owner E3 2026-11-11): the ONE settings seam hands the VP-V
 	// state over when the Original pathway is selected, so the gated module calls (RenderAhead::Presenter reporting, the
 	// de-judder timeline plan: `// VPV-GATED`) can do nothing afterwards without a VP-V plan outliving the switch: the

@@ -392,6 +392,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		return false;
 	}
 	dejudderLiveFieldFrom = aSequence;
+	dejudderLiveFieldTo = bSequence;   // T-AR3-N1: the pair the live outputs hold, for the P3 view's pair gate
 	if (pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery))
 		motionSegment.Publish(VpMotion::Direction::Forward, aSequence, bSequence,
 		MotionShadowField{ aSequence, bSequence, dejudder->Field(), dejudder->FrameTrust(), dejudder->SubField(), dejudder->Camera(), dejudder->GrainError() },   // SK-MV: P3 (+P2/P2m by the source) published with its textures
