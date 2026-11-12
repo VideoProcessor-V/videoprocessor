@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Indicator.h"
+#include "RingContract.h"
 
 #include <algorithm>
 #include <array>
@@ -279,6 +280,9 @@ struct ProductDecl {
     // Competitive mode (lane lead 0) forces 0; a deterministic run seals only at the final seal (SlotTable::SetDeterministicSeal).
     // Registry::Validate: <= kMaxSealLag, a lane backend, not an ordered chain / single store / held state, no single-store input.
     uint8_t sealLag = 0;
+    // P13-DECL (TD reserve item 2, core/RingContract.h): a KEYED ring contract. DECLARATION ONLY (the source ring today is views of the
+    // queued frames, 0 bytes; nothing reads this field). Default: not keyed.
+    KeyedRingContract ring;
     // Set by detail::AddInput/AddLead when a declaration named more than kMaxInputs reads: the extra read was NOT
     // recorded. Registry::Validate rejects the declaration with a plain reason (fail closed, visible; Release has no
     // assert).
@@ -868,6 +872,7 @@ inline void AppendSourceRingProduct(std::vector<ProductDecl>& decls)
     p13.sourceFrame = true;
     p13.size.fixedBytes = 0;
     p13.laneVisible = true;   // the lane reads the queued planes through it: P10/P11/TD keep their lanes
+    p13.ring = SourceRingContract();   // P13-DECL: keyed ring {key = source seq, window = BACK + 1 + lead (derived), pins <= 3}; 0 bytes either way
     decls.push_back(p13);
 }
 

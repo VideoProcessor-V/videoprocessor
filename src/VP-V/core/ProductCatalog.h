@@ -522,7 +522,8 @@ inline TierBytes VramByTier(const Graph& g)
 //   ViewIsActual   : the declared input is read through another VIEW of the data (named in the note), not the declared product itself
 //   ExternalView   : a read the code does today through an external accessor and the declaration does NOT carry (shown, not declared)
 //   Reserved       : the product is declared and has no producer (no lane job, no live fill); every reader finds it absent (visible)
-enum class FlagKind : uint8_t { NotYetConsumed, NotRead, ViewIsActual, ExternalView, Reserved };
+//   DeclaredNotAllocated : P13-DECL (core/ReserveRows.h): a VRAM reservation row; bytes are shown, none are taken (TD round allocates)
+enum class FlagKind : uint8_t { NotYetConsumed, NotRead, ViewIsActual, ExternalView, Reserved, DeclaredNotAllocated };
 
 inline const char* Token(FlagKind k)
 {
@@ -532,6 +533,7 @@ inline const char* Token(FlagKind k)
     case FlagKind::ViewIsActual: return "actual input is a view";
     case FlagKind::ExternalView: return "external view (not declared)";
     case FlagKind::Reserved: return "reserved, no producer";
+    case FlagKind::DeclaredNotAllocated: return "reserved, not allocated";
     }
     return "?";
 }
