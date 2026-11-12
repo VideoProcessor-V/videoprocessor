@@ -65,6 +65,8 @@ addRow("dejudder_strength");
 addRow("dejudder_fade_match");
 form = addCollapsibleSection(QStringLiteral("other"), QStringLiteral("Other"), QString(), false);
 addRow("repair_key");
+form = addCollapsibleSection(QStringLiteral("fixesUnderTest"), QStringLiteral("Fixes under test"), QString(), false);
+addRow("intent_motion");
 '''
 
 
@@ -88,6 +90,8 @@ def _run(argv):
 
 class Fixture(unittest.TestCase):
     def setUp(self):
+        self.stays = chk.FIXES_CONTAINER_STAYS
+        chk.FIXES_CONTAINER_STAYS = ()               # the fixture container holds no repository keys
         self.td = tempfile.TemporaryDirectory()
         self.root = self.td.name
         _w(self.root, C.SCHEMA_FILES[0], SCHEMA)
@@ -99,6 +103,7 @@ class Fixture(unittest.TestCase):
         self.readmes()
 
     def tearDown(self):
+        chk.FIXES_CONTAINER_STAYS = self.stays
         self.td.cleanup()
 
     def mod(self, unit, sub, keys, body):
@@ -132,8 +137,9 @@ class OrganisationParseTests(unittest.TestCase):
 
     def test_section_spans(self):
         spans = chk.section_spans(CE.splitlines())
-        self.assertEqual(sorted(spans), ["dejudder", "other"])
+        self.assertEqual(sorted(spans), ["dejudder", "fixesUnderTest", "other"])
         self.assertEqual(spans["dejudder"][1], spans["other"][0])
+        self.assertEqual(spans["other"][1], spans["fixesUnderTest"][0])
 
     def test_own_organisation_parses_to_the_motion_cards(self):
         text = chk.read(ROOT, chk.ORG_REL)
@@ -199,12 +205,54 @@ class CheckTests(Fixture):
         self.assertEqual(rc, 1)
         self.assertIn("intent_motion sits on a motion card but its owner row is in repair", out)
 
-    def test_other_unit_differences_are_advisory_until_all(self):
+    def test_repair_card_differences_are_errors_since_p8_4(self):
         self.readmes(repair=row("repair_key", "VP-V > Advanced"))
+        rc, out = _run(["--root", self.root])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("repair_key is on card repair/deband", out)
+        self.assertEqual(_run(["--root", self.root, "--write"])[0], 0)
+
+    def test_units_not_yet_enforced_stay_advisory_until_all(self):
+        # an Output card (P8-5 turns the unit on): a wrong placement is advisory until --all
+        _w(self.root, chk.ORG_REL, ORG.replace('{ "repair", "deband"', '{ "output", "deband"'))
+        _w(self.root, C.TIERS_REL, json.dumps({"units": [{"id": "motion", "name": "Motion"}, {"id": "output", "name": "Output"}]}))
+        self.mod("output", "deband", ["repair_key"], row("repair_key", "VP-V > Advanced"))
+        _w(self.root, "src/VP-V/modules/repair/deband/MANIFEST.json", "{}")
+        os.remove(os.path.join(self.root, "src", "VP-V", "modules", "repair", "deband", "README.md"))
         rc, out = _run(["--root", self.root])
         self.assertEqual(rc, 0, out)
         self.assertIn("advisory: ", out)
         self.assertEqual(_run(["--root", self.root, "--all"])[0], 1)
+
+    def test_fixes_container_key_off_every_card_is_an_error(self):
+        _w(self.root, chk.CE_REL, CE + 'addRow("intent_motion_min");\n')
+        rc, out = _run(["--root", self.root])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("'intent_motion_min' is built in the Fixes under test container", out)
+
+    def test_fixes_container_stays_list_accepts_and_goes_stale(self):
+        _w(self.root, chk.CE_REL, CE + 'addRow("intent_motion_min");\n')
+        saved = chk.FIXES_CONTAINER_STAYS
+        try:
+            chk.FIXES_CONTAINER_STAYS = ("intent_motion_min",)
+            self.assertEqual(_run(["--root", self.root])[0], 0)
+            chk.FIXES_CONTAINER_STAYS = ("intent_motion_min", "intent_motion")      # placed on a card now
+            rc, out = _run(["--root", self.root])
+            self.assertEqual(rc, 1)
+            self.assertIn("FIXES_CONTAINER_STAYS: intent_motion is now on card", out)
+            _w(self.root, chk.CE_REL, CE)                                      # container no longer builds it
+            chk.FIXES_CONTAINER_STAYS = ("intent_motion_min",)
+            rc, out = _run(["--root", self.root])
+            self.assertEqual(rc, 1)
+            self.assertIn("intent_motion_min is no longer built in the container", out)
+        finally:
+            chk.FIXES_CONTAINER_STAYS = saved
+
+    def test_missing_fixes_container_is_an_error(self):
+        _w(self.root, chk.CE_REL, CE.split("form = addCollapsibleSection(QStringLiteral(\"fixesUnderTest\")")[0])
+        rc, out = _run(["--root", self.root])
+        self.assertEqual(rc, 1)
+        self.assertIn("container 'fixesUnderTest' not found", out)
 
     def test_cross_unit_owner_table_names_modules_that_list_the_key(self):
         for key, slot in chk.CROSS_UNIT_OWNER.items():
@@ -220,6 +268,18 @@ class RepositoryTests(unittest.TestCase):
     def test_repository_motion_unit_is_one_table(self):
         rc, out = _run(["--root", ROOT])
         self.assertEqual(rc, 0, out)
+
+    def test_repository_enforces_the_p8_4_units_and_the_fixes_container(self):
+        for unit in ("motion", "input", "colour", "repair", "scaling", "retirement"):
+            self.assertIn(unit, chk.ENFORCED_UNITS)
+        an, cards, placement, issues = chk.analyse(ROOT)
+        self.assertEqual(issues["error"], [])
+        for key in chk.FIXES_CONTAINER_STAYS:
+            self.assertNotIn(key, placement, key)
+        # the source-resolution rows are owned by input.source_analysis on their Scaling picture-slider cards
+        for key in ("source_resolution", "source_resolution_crossfade_s"):
+            self.assertEqual(chk.CROSS_UNIT_OWNER[key], "input.source_analysis")
+            self.assertEqual(placement[key]["unit"], "scaling", key)
 
     def test_intent_motion_keys_are_owned_by_a_motion_module(self):
         an, cards, placement, issues = chk.analyse(ROOT)

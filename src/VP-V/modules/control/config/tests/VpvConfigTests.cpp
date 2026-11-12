@@ -719,6 +719,22 @@ namespace
 			require(found != sectionCard.end() && found->second.compare(0, 7, "motion/") == 0,
 				(std::string("a motion section is on a Motion card: ") + section).c_str());
 		}
+		// P8-4 (2026-11-11): the source-resolution picture-slider keys sit on Scaling cards; the Fixes under test
+		// keys that have no card yet (tools/check_config_placement.py FIXES_CONTAINER_STAYS) are on none.
+		const char* const kSourceResolutionKeys[] = { "source_resolution", "source_resolution_auto_min_confidence",
+			"source_resolution_evidence_seconds", "source_resolution_evidence_shots", "source_resolution_engage_max_wait_s",
+			"source_resolution_crossfade_s", "source_resolution_release_fade_s", "source_resolution_text_guard",
+			"source_resolution_mixed_guard" };
+		for (const char* key : kSourceResolutionKeys)
+		{
+			const auto found = keyCard.find(key);
+			require(found != keyCard.end() && found->second.compare(0, 8, "scaling/") == 0,
+				(std::string("a source-resolution key is on a Scaling card: ") + key).c_str());
+		}
+		const char* const kFixesContainerStays[] = { "optical_flow_fb_check", "optical_flow_global",
+			"optical_flow_global_fallback", "source_class", "ssim_bitrate_floor" };
+		for (const char* key : kFixesContainerStays)
+			require(keyCard.find(key) == keyCard.end(), (std::string("a Fixes under test key that stays in the container is on no card: ") + key).c_str());
 	}
 }
 

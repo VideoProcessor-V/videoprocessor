@@ -26,9 +26,11 @@ Rows of keys inside a whole Section (the key is built by Bill's ConfigEditorWind
 section, not listed one by one) are resolved from the section's source span there: a key named
 inside the section's span and on no card of its own takes the section's card.
 
-Hard errors (exit 1) are limited to the Motion unit (the unit this check is enforced for first,
-P8-3). The same differences in the other units are reported as advisory counts (--all makes them
-errors); the lanes that move those units (P8-4, P8-5) turn them on.
+Hard errors (exit 1) are the units in ENFORCED_UNITS: Motion (P8-3), then Input, Colour, Repair, Scaling and
+Proposed retirement (P8-4). The same differences in the other units are advisory counts (--all makes them errors);
+P8-5 turns Output on.
+  5. (P8-4) every VP key built inside the "Fixes under test" container (section id fixesUnderTest of Bill's page)
+     is on a card or listed in FIXES_CONTAINER_STAYS; a stale list entry is an error.
 --write rewrites the Config placement cell of every documented key whose card is known.
 --list prints the resolved table. Pure text parsing: no Qt, no build.
 """
@@ -45,7 +47,7 @@ ORG_REL = "src/VP-V/modules/control/config/config_pages/VpvOrganisation.h"
 CE_REL = "src/VideoProcessor-Config/ConfigEditorWindow.cpp"
 RETIREMENT_UNIT = "retirement"
 RETIREMENT_NAME = "Proposed retirement"
-ENFORCED_UNITS = ("motion",)
+ENFORCED_UNITS = ("motion", "input", "colour", "repair", "scaling", RETIREMENT_UNIT)
 # A card may sit in another unit's tab than the module that owns the key (the viewer finds the
 # control where it is used; the module that reads it owns it). Every such case is listed here, with
 # the owner's slot; the owner's MANIFEST.json config_keys must list the key.
@@ -56,11 +58,39 @@ CROSS_UNIT_OWNER = {
     "render_ahead_utilisation": "output.presentation",
     "dejudder_gate": "output.presentation",
     "dejudder_pulldown": "input.queue_timing",     # card: Motion > De-judder shaping; row documented there by r2/docs
+    # P8-4: Scaling picture-slider cards carry the source-resolution controls (the viewer sets them where the
+    # picture is scaled); the source-resolution latch is read and owned by input.source_analysis.
+    "source_resolution": "input.source_analysis",
+    "source_resolution_auto_min_confidence": "input.source_analysis",
+    "source_resolution_crossfade_s": "input.source_analysis",
+    "source_resolution_engage_max_wait_s": "input.source_analysis",
+    "source_resolution_evidence_seconds": "input.source_analysis",
+    "source_resolution_evidence_shots": "input.source_analysis",
+    "source_resolution_mixed_guard": "input.source_analysis",
+    "source_resolution_release_fade_s": "input.source_analysis",
+    "source_resolution_text_guard": "input.source_analysis",
+    "fbo_float32": "scaling.output",               # card: Colour > Range and precision; code: the scaling output stage
+    "intent_display": "control.diagnostics",        # card: Input > Source intent; the display-intent report
+    "intent_black": "drive.led_compensation",      # card: Input > Source intent; read by the LED compensation
 }
 # Keys whose owner row r2/docs put in a module whose MANIFEST does not list them ("read here, owned elsewhere"):
 # the row location is accepted as is; the manifest-lists-the-key rule is not applied to them.
-MANIFEST_EXEMPT = ("dejudder_pulldown",)
+MANIFEST_EXEMPT = ("dejudder_pulldown", "intent_display")
+# Bill's upstream keys that his Section builds on a VP-V card without a doc-70 owner row in this tree
+# (the row for it is Bill's, "Tone Mapping > Profile details"): no owner-row requirement.
+UPSTREAM_NO_ROW = ("peak_detection",)
 KEY_ITEMS = ("Row", "Toggle")
+# P8-4: the "Fixes under test" container on Bill's Rendering page (section id fixesUnderTest) holds VP keys.
+# Every VP key built inside it is on an Organisation() card (a Row item, so the row moves to its unit's card),
+# except these, which have no card yet and stay in the container (their placement text says so):
+FIXES_CONTAINER_ID = "fixesUnderTest"
+FIXES_CONTAINER_STAYS = (
+    "optical_flow_fb_check",
+    "optical_flow_global",
+    "optical_flow_global_fallback",
+    "source_class",
+    "ssim_bitrate_floor",
+)
 
 
 def read(root, rel):
@@ -231,7 +261,9 @@ def analyse(root):
         owner.setdefault(r["key"], []).append(r)
     code = set(an["code"])
     for key, card in sorted(placement.items()):
-        if card["unit"] not in ENFORCED_UNITS or key not in code:
+        if card["unit"] not in ENFORCED_UNITS or card["unit"] == RETIREMENT_UNIT or key not in code:
+            continue
+        if key in UPSTREAM_NO_ROW:
             continue
         rs = owner.get(key, [])
         if key in CROSS_UNIT_OWNER:
@@ -241,6 +273,28 @@ def analyse(root):
         if len(rs) != 1:
             issues["error"].append("%s/%s: %s has %d owner rows (need exactly 1 in a %s module)" % (
                 card["unit"], card["id"], key, len(rs), card["unit"]))
+    # 5. the Fixes under test container: every VP key inside it is placed on a card or listed as staying
+    ce_path = os.path.join(root, *CE_REL.split("/"))
+    if os.path.isfile(ce_path):
+        lines = read(root, CE_REL).splitlines()
+        span = section_spans(lines).get(FIXES_CONTAINER_ID)
+        if span is None:
+            issues["error"].append("%s: container '%s' not found (P8-4 check)" % (CE_REL, FIXES_CONTAINER_ID))
+        else:
+            known = set(code) | {r["key"] for r in rows}
+            inside = set()
+            for ln in lines[span[0]:span[1]]:
+                for tok in re.findall(r'"([a-z][a-z0-9_]*)"', ln):
+                    if tok in known and "_" in tok:
+                        inside.add(tok)
+            for key in sorted(inside):
+                if key not in placement and key not in FIXES_CONTAINER_STAYS:
+                    issues["error"].append("%s: '%s' is built in the Fixes under test container but is on no card and not in FIXES_CONTAINER_STAYS" % (CE_REL, key))
+            for key in FIXES_CONTAINER_STAYS:
+                if key in placement:
+                    issues["error"].append("FIXES_CONTAINER_STAYS: %s is now on card %s/%s: drop it from the list" % (key, placement[key]["unit"], placement[key]["id"]))
+                elif key not in inside:
+                    issues["error"].append("FIXES_CONTAINER_STAYS: %s is no longer built in the container: drop it from the list" % key)
     return an, cards, placement, issues
 
 
