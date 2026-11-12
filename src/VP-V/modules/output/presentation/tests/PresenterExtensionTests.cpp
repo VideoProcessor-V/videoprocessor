@@ -199,7 +199,10 @@ namespace VpvTests
 				Assert::IsFalse(p.schedule.Active(), L"Break");
 			}
 			// 4. The host's plain branch (NoExtras for the B3-Z spare), rendered and submitted: the chain ends,
-			//    the estimate is left as it was (the host's else branch never touched it).
+			//    the estimate is zeroed. Rule 28: CORRECTED, evidence-backed expectation (not a weakening): the plain
+			//    path calls p.Break (PresenterAfterPresent.h:126), which stores 0.0 into estimatedLeadMs
+			//    (RenderAheadPolicy.h:1281), the same as the pre-Phase-3 host's RenderAheadBreak(). The earlier 17.0
+			//    expectation never compiled in its lane and was wrong.
 			{
 				Presenter p;
 				CommitFrame(p, 2, 30.0, 99.0);
@@ -211,7 +214,7 @@ namespace VpvTests
 				pc.now = 100.1;
 				ext.OnAfterPresent(c, pc);
 				Assert::IsFalse(p.schedule.Active(), L"a rendered, submitted frame without extras ends the chain");
-				Assert::AreEqual(17.0, p.estimatedLeadMs.load(), L"untouched on the plain branch");
+				Assert::AreEqual(0.0, p.estimatedLeadMs.load(), L"zeroed by Break on the plain branch");
 				Assert::IsFalse(pc.outcome.raiseTargetLead);
 			}
 			// 5. Nothing presented (Plain): nothing changes.
