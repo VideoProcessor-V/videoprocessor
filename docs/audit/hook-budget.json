@@ -32,14 +32,15 @@
    "note": "HA-CFG09-BillPresets: +1 Bill-preset accessor (HELD-CFG-09, owner 19:21 allowance), back to 31 at the re-graft"
   },
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": {
-   "limit": 156,
+   "limit": 157,
    "reverts_to": 143,
    "until": [
     "P4-e",
     "P4-f",
-    "P4-g"
+    "P4-g",
+    "Phase3"
    ],
-   "note": "owner 2026-11-11 (via Lead 4): +13 P5c transitional view reads (HA-P5c-*), refs/107-host-seams-plan.md:192 / s5.2 rule 4"
+   "note": "owner 2026-11-11 (via Lead 4): +13 P5c transitional view reads (HA-P5c-*), refs/107-host-seams-plan.md:192 / s5.2 rule 4; coordinator 2026-11-12 (via Lead 4): +1 HA-R12-AfterPresent (B3-Z, the one shared R12 seam line), until Phase 3 replaces the per-feature present sites with the canonical seams (<= 143 then)"
   }
  }
 }
