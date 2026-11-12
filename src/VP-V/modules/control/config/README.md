@@ -442,6 +442,11 @@ Bill's editor file only gets call sites; the logic is here (header-only):
 - `VpvRenderingDefaults.h`: what an unset VP-V key shows on a Rendering profile (moved out of
   Bill's file) and `IsVpvChoiceKey`, the VP-V choice keys that keep their "Inherited / not set"
   item and whose explicit `auto` is a live value (Bill's concrete-only rules are for his keys).
+- `editor/Helpers.h` (P9 rows i, h): the VP-only helper functions that sat inside Bill's `ConfigEditorWindow.cpp`,
+  moved byte for byte: the sandbox-preview switch, `queueLatencyNoteText`, `showCanonicalShortcutSpelling`,
+  `snapNumberFieldToStep`, `clampNumberFieldOnLeave`, `retiredChoiceTarget`, `addChoiceUnsetButton`,
+  `markChoiceButtons` and the GLSL `//!PARAM` reader (`readGlslShaderParameters`). Included by that one file
+  only (through `VpvRenderingDefaults.h`, so it gains no include line); its call sites are unchanged.
 - Page lookups are by name (`ConfigEditorWindow::pageIndex`, `selectPage(QString)`): Bill's pages
   keep his order and numbers (0-22); Dynamic Drive, Calibration and VP-V follow them (23-25).
   In the navigation list the VP-V leaf closes Bill's list and has child leaves (Dynamic Drive,

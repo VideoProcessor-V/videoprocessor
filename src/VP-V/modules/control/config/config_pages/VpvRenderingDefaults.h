@@ -9,6 +9,10 @@
 #include <QByteArray>
 #include <QString>
 
+// The editor's other CEW-only helpers (P9: sandbox switch, clamp/snap, GLSL //!PARAM reader, ...) ride on this
+// header, the one VP-V helper include of ConfigEditorWindow.cpp, so that file gains no include line.
+#include <VP-V/modules/control/config/editor/Helpers.h>
+
 #include <algorithm>
 #include <cstring>
 #include <iterator>
