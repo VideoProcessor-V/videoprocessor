@@ -20,6 +20,7 @@
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/FramesInFlight.h>
+#include <VP-V/core/PostPresentSpare.h>
 #include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
@@ -443,6 +444,61 @@ namespace SkeletonModuleTestsNs
 			rig.Life(RE::Lifecycle::SettingsApplied, 1);   // and off again
 			Assert::IsFalse(rig.sk.Active(rig.Host()));
 			Assert::IsFalse(rig.sk.TapRegistered(rig.Host()), L"the tap is unregistered");
+		}
+
+		// B3-Z Z2 under rule 32 (refs/107 S5): the ONE R12 AfterPresent seam drives the renderer's spare slot through this module
+		// (no per-feature host site). Kind -> trigger; one run per SOURCE frame (a repeat call of the frame and a cadence repeat count
+		// AlreadyRan); a renderer without an active lane (Off / Original) has no slot and the seam writes nothing.
+		TEST_METHOD(AfterPresentSeamDrivesTheSpareSlotOncePerSourceFrame)
+		{
+			Rig off("[general]
+x=1
+");
+			off.Life(RE::Lifecycle::GpuCreated);
+			off.Life(RE::Lifecycle::SettingsApplied);
+			Assert::IsNull(off.sk.SpareOf(off.Host()), L"no lane, no slot");
+			{
+				RE::FrameContext c; c.host = off.Host(); c.seq = 1; c.phase = RE::FramePhase::AfterPresent;
+				RE::PresentContext pc; pc.kind = RE::AfterPresentKind::NoExtras;
+				off.sk.OnAfterPresent(c, pc);
+				Assert::IsFalse(pc.outcome.extrasRan || pc.outcome.committed || pc.outcome.spentSeconds != 0.0, L"inert: nothing written");
+			}
+
+			Rig rig(Lane("on"));
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			Assert::IsTrue(rig.sk.Active(rig.Host()));
+			VpSkeleton::SpareHost* spare = rig.sk.SpareOf(rig.Host());
+			Assert::IsNotNull(spare);
+			std::vector<uint64_t> ranKeys;
+			VpSkeleton::FunctionSpareWork work(1, VpSkeleton::SpareClass::Core, 1);
+			work.hasWork = []() { return true; };
+			work.run = [&](uint32_t) -> double { ranKeys.push_back(spare->Key()); return 0.5; };
+			spare->Slot().Register(&work);
+			spare->SetBudget(8.0);
+			const auto present = [&](int64_t seq, RE::AfterPresentKind kind, bool repeat) {
+				RE::FrameContext c; c.host = rig.Host(); c.seq = seq; c.phase = RE::FramePhase::AfterPresent;
+				RE::PresentContext pc; pc.kind = kind; pc.cadenceRepeat = repeat;
+				rig.sk.OnAfterPresent(c, pc);
+				return spare->LastReport();
+			};
+			VpSkeleton::SpareReport r = present(1, RE::AfterPresentKind::NoExtras, false);
+			Assert::IsTrue(r.outcome == VpSkeleton::SpareOutcome::Ran);
+			Assert::IsTrue(r.trigger == VpSkeleton::SpareTrigger::PostPresentNoExtras);
+			r = present(1, RE::AfterPresentKind::Plain, false);
+			Assert::IsTrue(r.outcome == VpSkeleton::SpareOutcome::AlreadyRan, L"a second call of the same source frame");
+			Assert::IsTrue(r.trigger == VpSkeleton::SpareTrigger::BeforeDequeueWait, L"Plain = nothing presented");
+			r = present(2, RE::AfterPresentKind::AfterLastExtra, true);
+			Assert::IsTrue(r.outcome == VpSkeleton::SpareOutcome::AlreadyRan, L"a cadence repeat keeps its film frame's key");
+			Assert::IsTrue(r.trigger == VpSkeleton::SpareTrigger::AfterLastExtra);
+			r = present(3, RE::AfterPresentKind::AfterLastExtra, false);
+			Assert::IsTrue(r.outcome == VpSkeleton::SpareOutcome::Ran);
+			Assert::AreEqual<size_t>(2, ranKeys.size(), L"once per source frame");
+			Assert::AreEqual<uint64_t>(1, ranKeys[0]);
+			Assert::AreEqual<uint64_t>(3, ranKeys[1]);
+			present(0, RE::AfterPresentKind::NoExtras, false);   // no sequence: ignored
+			Assert::AreEqual<size_t>(2, ranKeys.size());
+			spare->Slot().Unregister(&work);
 		}
 
 		TEST_METHOD(AnInvalidKeyIsShownEvenWhileOff)

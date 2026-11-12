@@ -95,7 +95,6 @@
 #include <VP-V/modules/input/capture/CapturePayload.h>   // P10 R18: the payload's capture slot readers   // VPV-HOOK
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>   // R4a: the re-base decision product P0
 #include <VP-V/modules/scaling/rebase/RebaseWarmupJob.h>   // FX-RB re-base shader warm-up // VPV-HOOK
-#include <VP-V/core/PostPresentSpare.h>   // VPV-HOOK B3-Z Z2: the post-present spare slot
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
@@ -4974,7 +4973,6 @@ struct LibplaceboVideoRenderer::Impl
 	double rebaseFactorX = 1.0;         // the width's (per axis; = rebaseFactor when uniform)
 	std::string rebaseLogged;           // the last state logged
 	VpRebaseWarmup::Controller rebaseWarmup;   // FX-RB: holds a re-base until its shaders are warm // VPV-HOOK
-	VpSkeleton::SpareHost postPresentSpare;   // VPV-HOOK B3-Z Z2: the post-present spare slot (render thread only)
 	// Stage 12 step B: effective resolution, bitrate quality and bit depth
 	// of every source, read on the native frame; auto acts on it.
 	SourceResolutionMonitor::Monitor sourceMonitor;
@@ -25898,8 +25896,6 @@ releaseDriftBaseRetention =
 			// timing status (the measured figure stays unknown, "---").
 			renderAheadEstimatedLeadMs.store(renderAheadCommitted && !presentationTargetTimingKnown &&
 				dejudderDisplayRate.openLoop ? renderAheadTargetLeadMs : 0.0, std::memory_order_relaxed);
-			postPresentSpare.NotePresented(sourceSequence, cadenceRepeat);   // VPV-HOOK B3-Z Z2: spare slot after the last extra
-			postPresentSpare.Fire(VpSkeleton::SpareTrigger::AfterLastExtra);   // VPV-HOOK
 		}
 		else
 		{
@@ -25908,11 +25904,8 @@ releaseDriftBaseRetention =
 				RenderAheadBreak();
 			if (rendered && submitted && vectorDemand.mode != VectorDemand::Mode::Off)
 				BuildSigmaDeltaVectorsWithoutExtras(sourceSequence, nextSourceSequence);   // vector engine, no extras
-			if (rendered && submitted) {   // VPV-HOOK B3-Z Z2: spare slot, post-present without extras
-				postPresentSpare.NotePresented(sourceSequence, cadenceRepeat);   // VPV-HOOK
-				postPresentSpare.Fire(VpSkeleton::SpareTrigger::PostPresentNoExtras);   // VPV-HOOK
-			}   // VPV-HOOK
 		}
+		if (!pipelineSlots.OriginalPathway()) { RendererExtension::PresentContext afterPresent; afterPresent.kind = !(rendered && submitted) ? RendererExtension::AfterPresentKind::Plain : dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed ? RendererExtension::AfterPresentKind::AfterLastExtra : RendererExtension::AfterPresentKind::NoExtras; afterPresent.cadenceRepeat = cadenceRepeat; RendererExtension::AfterPresent(this, static_cast<int64_t>(sourceSequence), static_cast<int64_t>(frameGeneration), afterPresent); }   // VPV-HOOK HA-R12-AfterPresent: the one shared R12 AfterPresent seam (refs/107 S5)
         lastRenderPresentationPaused=presentationAttempt.Deferred(rendered,submitted);
 		return rendered && submitted;
 	}
@@ -31343,7 +31336,6 @@ void LibplaceboVideoRenderer::RenderLoop()
 			sourceAheadFrames.clear();
 		}
 
-		m_impl->postPresentSpare.Fire(VpSkeleton::SpareTrigger::BeforeDequeueWait);   // VPV-HOOK B3-Z Z2: spare slot, plain path
 		{
 			const auto waitStarted = SteadyClock::now();
 			std::unique_lock<std::mutex> lock(m_queueMutex);

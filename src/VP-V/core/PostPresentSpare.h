@@ -7,7 +7,8 @@
 // lands; until then whatever the host measures, never a constant here) and gets the used ms back. Works run in a
 // fixed order: class (Unpack P13, Core P3 / P3b / P3r / P16, Slice TD, Fill), then the work's slot position, then
 // its id. First work = the matcher top-up (motion/estimation/LaneAheadPolicy.h); the gap scheduler's second gap
-// call goes behind the same hook later (no new LVR line).
+// call goes behind the same hook later (no new LVR line). Reached ONLY through the R12 AfterPresent seam (refs/107 S5,
+// rule 32): the host makes one AfterPresent call per frame; SkeletonModule::OnAfterPresent owns the SpareHost per renderer.
 //
 // Rules (differ from GapScheduler on purpose):
 //  - core (and unpack) work is NEVER capNoFit-skipped or cost-decayed: a core work whose prediction does not fit
@@ -24,8 +25,9 @@
 //  - one slot per SOURCE frame (doc 101 row 11): the frame key is the source sequence of the last distinct source
 //    frame (a cadence repeat keeps its predecessor's key, SpareSourceKey), so 24-in-60 runs once per film frame,
 //    not per rendered frame; the first trigger point that fires for a key runs it, later ones count AlreadyRan
-//    (the triggers: post-present without extras, after the last extra is queued, the plain path before the
-//    dequeue wait - matched rates included);
+//    (the triggers = the kind of the ONE R12 AfterPresent seam call at the end of the host's present block,
+//    refs/107 S5, handled by SkeletonModule::OnAfterPresent: post-present without extras, after the last extra,
+//    plain = nothing presented this frame - matched rates included);
 //  - the hook never blocks and starts no thread; the host times each Run (GPU timer or CPU clock).
 // Pure C++14, no host types.
 
@@ -42,9 +44,9 @@ namespace VpSkeleton {
 enum class SpareClass : uint8_t { Unpack = 0, Core = 1, Slice = 2, Fill = 3 };
 
 enum class SpareTrigger : uint8_t {
-    PostPresentNoExtras = 0,   // LVR post-present else branch (no extras this frame)
-    AfterLastExtra = 1,        // after the frame's last extra is queued
-    BeforeDequeueWait = 2,     // plain path: before the dequeue wait (matched rates)
+    PostPresentNoExtras = 0,   // R12 kind NoExtras: a main present without extras this frame
+    AfterLastExtra = 1,        // R12 kind AfterLastExtra: after the frame's last extra is queued
+    BeforeDequeueWait = 2,     // R12 kind Plain: nothing presented this frame (the render loop then reaches its dequeue wait)
     Count
 };
 
@@ -272,7 +274,7 @@ private:
     uint64_t m_last = 0;
 };
 
-// The renderer's side (render thread only; LVR VPV-HOOK call sites): one slot, the key of the frame last
+// The renderer's side (render thread only; per-renderer state of SkeletonModule, driven by R12 AfterPresent): one slot, the key of the frame last
 // presented, and the slot budget. The budget is 0 until C5b's RenderBudget lands, so every trigger reports NoBudget
 // (counted, visible) and nothing runs; with no work registered every trigger reports Off. Never blocks.
 class SpareHost {

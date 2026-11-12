@@ -9,6 +9,7 @@
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/GpuAllocator.h>
 #include <VP-V/core/PassTimerInbox.h>
+#include <VP-V/core/PostPresentSpare.h>
 #include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
@@ -328,6 +329,7 @@ namespace Vpv
 			std::string shownWaiting;
 			bool shownBundle = false;
 			uint8_t shownQueueWired = 0xFF;   // the queue-delivery state the cached status text was built for
+			VpSkeleton::SpareHost spare;       // B3-Z Z2: the post-present spare slot, driven by R12 AfterPresent (OnAfterPresent)
 			uint64_t shownQueueKey = ~uint64_t(0);   // the queue-in-use / starve state the cached status text was built for
 
 			// S5 regulator feed (render thread): the module's own clock between its Begin and AfterRender of one frame.
@@ -516,6 +518,11 @@ namespace Vpv
 			const std::shared_ptr<HostState> st = hosts_.Find(host);
 			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
 			return b ? &b->lane : nullptr;
+		}
+		VpSkeleton::SpareHost* SkeletonModule::SpareOf(const void* host) const
+		{
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			return st ? &st->spare : nullptr;
 		}
 		VpSkeleton::LaneLease SkeletonModule::LeaseFor(const void* host, VpSkeleton::ProductId product)
 		{
@@ -1263,6 +1270,20 @@ namespace Vpv
 			else
 				AfterRender(*st, c.seq);
 			return false;   // observation only: never a take-over
+		}
+
+		// R12 AfterPresent: ONE call per frame at the end of the host's present block (refs/107 S5). The kind maps onto the spare slot's trigger;
+		// the slot keys per SOURCE frame (a cadence repeat keeps its film frame's key), so it fires at most once per source frame. Inert (no write
+		// to the outcome) without an active lane for this host or with no sequence. Render thread.
+		void SkeletonModule::OnAfterPresent(RE::FrameContext& c, RE::PresentContext& p)
+		{
+			const std::shared_ptr<HostState> st = hosts_.Find(c.host);
+			if (!st || !st->active.load(std::memory_order_acquire) || c.seq <= 0)
+				return;
+			const VpSkeleton::SpareTrigger trigger = p.kind == RE::AfterPresentKind::AfterLastExtra ? VpSkeleton::SpareTrigger::AfterLastExtra :
+				p.kind == RE::AfterPresentKind::NoExtras ? VpSkeleton::SpareTrigger::PostPresentNoExtras : VpSkeleton::SpareTrigger::BeforeDequeueWait;
+			st->spare.NotePresented(static_cast<uint64_t>(c.seq), p.cadenceRepeat);
+			st->spare.Fire(trigger);
 		}
 
 		// The input-queue term of the lane lead. CALL CONTRACT: any thread, any rate (the host calls it once per frame; calls in bursts or several

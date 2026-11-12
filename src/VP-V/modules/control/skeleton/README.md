@@ -51,7 +51,7 @@ No `VP_*` variable changes the module's behaviour.
 * **The one seal:** `ResyncExtension::SealFor(host)` (a `FrameSeal` provider rebinding the lane to each new-era Indicator and a subscriber calling
   `OnSealed`). Needs `resync_event = on`; otherwise `skeleton_lane: waiting: resync_event=on required`. The hooks are added once per renderer;
   switching the lane on after the first frame counts as a late provider (the lane binds at the next era; shown).
-* **Queue phase:** hub `OnFrame(CollectAhead)` (P5a's call site; `phaseData` = `QueueView`) -> the lane-lead term: `QueueView::size` = frames queued
+* **Queue phase:** hub `OnFrame(CollectAhead)` (raised by the motion look-ahead copy every render-loop pass (MotionAheadWalk.h), B1 amend; `phaseData` = `QueueView`) -> the lane-lead term: `QueueView::size` = frames queued
   ahead of the render. Inert while the lane is off or in the Original pathway.
 * **Render phases:** hub `OnFrame(Begin)` -> `OnRenderStart` (lazy `Configure` once the source size is known / changes; never GPU work here:
   Begin runs before the render lock); `OnFrame(AfterRender)` -> deferred releases + dispatcher `Configure` (GPU-legal) -> post-submit gap (half the
