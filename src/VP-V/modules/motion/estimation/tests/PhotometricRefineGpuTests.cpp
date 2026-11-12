@@ -5,7 +5,8 @@
 // (PhotometricRefineTests.cpp, same scenes) is run on the CPU and on the GPU and compared - model within 1e-4 engine px
 // at the picture corners / centre, identical status, candidates and pixels, gain / offset within 1e-4 - and each GPU
 // call is repeated and must be byte-equal. The device is the DXGI adapter whose description contains VP_TEST_ADAPTER
-// (for example NVIDIA), else WARP. GpuCostLine (VP_R3_GPU_COST=1) logs the cost at Q / H / F for 1080 and 4K.
+// (for example NVIDIA), else WARP. GpuCostLine (VP_R3_GPU_COST=1) logs the cost at Q / H / F for 1080 and 4K and gates
+// each form's accuracy in SOURCE px (<= 0.02 at 1080, <= 0.04 at 4K; at least one form per resolution must pass).
 #include "pch.h"
 #include <VP-V/modules/motion/estimation/global_model/PhotometricRefine.h>
 #include <VP-V/modules/motion/estimation/global_model/PhotometricRefineGpu.h>
@@ -476,7 +477,9 @@ namespace VideoProcessorTest
 			Assert::IsTrue(gpu.Refine(g.context.Get(), start, RefineGpuLuma(), Pic(frameW, frameH), InlierMask()).status == RefineStatus::SkippedNoLuma);
 			Assert::IsTrue(gpu.Refine(g.context.Get(), Params(), ab, Pic(frameW, frameH), InlierMask()).status == RefineStatus::SkippedModel);
 			Assert::IsTrue(gpu.Refine(g.context.Get(), start, ab, Pic(3840, 2160), InlierMask()).status == RefineStatus::SkippedNoLuma);
+			Assert::IsTrue(gpu.LastFailure() == RefineGpuFailure::None, L"an input skip is not a GPU failure");
 			Assert::IsTrue(gpu.Refine(nullptr, start, ab, Pic(frameW, frameH), InlierMask()).status == RefineStatus::SkippedNoLuma);
+			Assert::IsTrue(gpu.LastFailure() == RefineGpuFailure::Unavailable, L"no context must count as a GPU failure (visible fallback)");
 			g.input.Set(View8(A, flat, w, h, s));
 			Assert::IsTrue(g.input.Prepare(g.context.Get(), &af, &why));
 			Assert::IsTrue(RefineFellBack(gpu.Refine(g.context.Get(), start, af, Pic(frameW, frameH), InlierMask()).status));
@@ -485,6 +488,11 @@ namespace VideoProcessorTest
 			Assert::AreEqual(static_cast<uint64_t>(1), c.fellBack);
 			Assert::AreEqual(static_cast<uint64_t>(3), c.skippedNoLuma);
 			Assert::AreEqual(static_cast<uint64_t>(1), c.skippedOther);
+			// GPU-side failures counted apart from SkippedNoLuma: only the null-context call.
+			const RefineGpuFailureCounters& f = gpu.Failures();
+			Assert::AreEqual(static_cast<uint64_t>(1), f.Of(RefineGpuFailure::Unavailable));
+			Assert::AreEqual(static_cast<uint64_t>(0), f.Of(RefineGpuFailure::Limit) + f.Of(RefineGpuFailure::Ensure) + f.Of(RefineGpuFailure::Readback));
+			Assert::AreEqual(static_cast<uint64_t>(0), f.droppedPending);
 			Report("too far / skips", eq);
 		}
 
@@ -616,6 +624,8 @@ namespace VideoProcessorTest
 			struct Case { const char* name; int frameW, frameH; int s; bool full10; };
 			const Case cases[6] = { { "1080 Q", 1920, 1080, 4, false }, { "1080 H", 1920, 1080, 2, false }, { "1080 F", 1920, 1080, 1, true },
 				{ "4K Q", 3840, 2160, 4, false }, { "4K H", 3840, 2160, 2, false }, { "4K F", 3840, 2160, 1, true } };
+			bool formPass[6] = {};
+			double formErr[6] = {}, formGpuMs[6] = {};
 			for (int ci = 0; ci < 6; ++ci)
 			{
 				const Case& cs = cases[ci];
@@ -673,9 +683,34 @@ namespace VideoProcessorTest
 					"%u px, %d it, %s, %.4f ns/unit\n", cs.name, g.adapter.c_str(), w, h, cs.s, cs.full10 ? " (10-bit R16)" : " (8-bit)", wall[2], wall[0],
 					wall[4], gms[2], ums[2], r.pixels, r.iterations, RefineStatusText(r.status), nsPerUnit);
 				GLog(msg);
+				// Per-form accuracy gate in SOURCE px (owner R3 acceptance): <= 0.02 at 1080, <= 0.04 at 4K.
+				const double limit = cs.frameW <= 1920 ? 0.02 : 0.04;
+				formPass[ci] = r.status == RefineStatus::Refined && eG <= limit;
+				formErr[ci] = eG;
+				formGpuMs[ci] = gms[2];
+				char verdict[200];
+				std::snprintf(verdict, sizeof(verdict), "R3 accuracy form %s: %s, |t - true| gpu %.4f source px (limit %.2f), gpu %.3f ms\n", cs.name,
+					formPass[ci] ? "PASS" : "FAIL", eG, limit, gms[2]);
+				GLog(verdict);
 				Assert::IsTrue(r.status == RefineStatus::Refined);
 				Assert::IsTrue(gms[2] > 0, L"no GPU timing");
 				Assert::IsTrue(nsPerUnit > 0.0005 && nsPerUnit < 50.0, L"cost outside the plausible GPU band");
+			}
+			// Cheapest passing form per resolution (lowest median GPU ms among the passing forms); at least one must pass.
+			for (int res = 0; res < 2; ++res)
+			{
+				int best = -1;
+				for (int ci = 3 * res; ci < 3 * res + 3; ++ci)
+					if (formPass[ci] && (best < 0 || formGpuMs[ci] < formGpuMs[best]))
+						best = ci;
+				char line[200];
+				if (best >= 0)
+					std::snprintf(line, sizeof(line), "R3 accuracy %s: cheapest passing form %s (%.4f source px, gpu %.3f ms)\n", res == 0 ? "1080" : "4K",
+						cases[best].name, formErr[best], formGpuMs[best]);
+				else
+					std::snprintf(line, sizeof(line), "R3 accuracy %s: NO form passes\n", res == 0 ? "1080" : "4K");
+				GLog(line);
+				Assert::IsTrue(best >= 0, L"R3 accuracy: no form within the source-px limit at this resolution");
 			}
 		}
 	};

@@ -30,6 +30,28 @@ struct ID3D11ShaderResourceView;
 
 namespace CameraModel
 {
+	// GPU-side failures. Each is also reported as the CPU-equivalent status SkippedNoLuma (the caller falls back exactly as
+	// for a missing pair), but counted apart here so the fallback stays visible (no silent fallbacks): the GPU unavailable
+	// or no context, luma beyond the GPU size limits, resource creation (Ensure), event query / readback.
+	enum class RefineGpuFailure { None = 0, Unavailable, Limit, Ensure, Readback, Count };
+	inline const char* RefineGpuFailureText(RefineGpuFailure f)
+	{
+		switch (f)
+		{
+		case RefineGpuFailure::Unavailable: return "gpu unavailable";
+		case RefineGpuFailure::Limit: return "gpu size limit";
+		case RefineGpuFailure::Ensure: return "gpu resource creation failed";
+		case RefineGpuFailure::Readback: return "gpu readback failed";
+		default: return "none";
+		}
+	}
+	struct RefineGpuFailureCounters
+	{
+		uint64_t byKind[static_cast<int>(RefineGpuFailure::Count)] = {};
+		uint64_t droppedPending = 0;   // Submit while a result was still in flight: that result was discarded uncollected
+		uint64_t Of(RefineGpuFailure f) const { return byKind[static_cast<int>(f)]; }
+	};
+
 	// The pair as two R8_UINT or R16_UINT textures on the refiner's device (codes; same conventions as LumaPairView).
 	struct RefineGpuLuma
 	{
@@ -90,7 +112,8 @@ namespace CameraModel
 		bool Available() const { return m_ready; }
 		const std::string& UnavailableReason() const { return m_why; }
 
-		// Queues one refinement (one submission). False when nothing was queued: the call's result is then final and
+		// Queues one refinement (one submission). A result still in flight from the previous Submit is DISCARDED uncollected
+		// (one call at a time; counted as Failures().droppedPending). False when nothing was queued: the call's result is then final and
 		// returned by Collect at once (Skipped* statuses, exactly as the CPU reference; or the GPU is unavailable,
 		// reported as SkippedNoLuma with the reason in LastError()). picture / mask / model as PhotometricRefiner::Refine.
 		bool Submit(ID3D11DeviceContext* context, const Params& model, const RefineGpuLuma& luma, const Rect& picture, const InlierMask& mask);
@@ -104,7 +127,10 @@ namespace CameraModel
 		const std::string& LastError() const { return m_lastError; }
 		const RefineCounters& Counters() const { return m_counters; }
 		const RefineOptions& Options() const { return m_options; }
-		void ResetCounters() { m_counters = RefineCounters(); }
+		void ResetCounters() { m_counters = RefineCounters(); m_failures = RefineGpuFailureCounters(); }
+		// The last call's GPU-side failure (None when the status came from the algorithm) and the per-kind counts.
+		RefineGpuFailure LastFailure() const { return m_lastFailure; }
+		const RefineGpuFailureCounters& Failures() const { return m_failures; }
 
 	private:
 		PhotometricRefinerGpu(const PhotometricRefinerGpu&);
@@ -117,5 +143,8 @@ namespace CameraModel
 		bool m_timing = false;
 		std::string m_why, m_lastError;
 		RefineGpuTiming m_lastTiming;
+		RefineGpuFailure m_lastFailure = RefineGpuFailure::None;
+		RefineGpuFailureCounters m_failures;
+		void Fail(RefineGpuFailure f) { m_lastFailure = f; ++m_failures.byKind[static_cast<int>(f)]; }
 	};
 }

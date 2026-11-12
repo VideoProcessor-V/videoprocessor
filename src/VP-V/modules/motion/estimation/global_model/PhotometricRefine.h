@@ -7,7 +7,7 @@
 // fit's camera-inlier blocks only (movers / overlays / bars masked), with Huber weights and optional fade
 // gain/offset terms. Verified against the record: when the photometric residual does not fall (or the step
 // leaves the basin, the fade terms go out of range, or the system is degenerate) the ORIGINAL model is returned
-// and the status says why. CPU reference (the GPU version is a later item). Pure C++14, deterministic (fixed
+// and the status says why. CPU reference and the definition (the GPU form is PhotometricRefineGpu.h). Pure C++14, deterministic (fixed
 // evaluation order, double accumulation, single thread, no clocks), no Windows headers. See README.md
 // "Photometric refinement (R3)".
 #pragma once

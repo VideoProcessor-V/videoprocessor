@@ -28,6 +28,7 @@ texture), and to narrow the matcher's search.
 | `GlobalModelObjects.h/.cpp` | 1-3 object models with persistent ids (only when `Config::objects`) |
 | `PixelResidualReference.h/.cpp` | CPU reference / shader-mirror spec of the tiny-mover measure (not on the runtime path yet) |
 | `PhotometricRefine.h/.cpp` | R3 direct photometric refinement of the chosen model on the luma pair (CPU reference; inverse-compositional Gauss-Newton + fade terms, inlier blocks, verified fall-back, counters). Not wired yet |
+| `PhotometricRefineGpu.h/.cpp`, `PhotometricRefineGpuShaders.inl` | R3 GPU form (D3D11 compute, CPU-upload input; matches the CPU reference to rounding); GPU-side failures counted apart (`Failures()`: unavailable / size limit / resource creation / readback, dropped pending results). Cost about 13-25 ms per call wall on the busy laptop; the quiet-machine re-measure (GPU-QUIET) settles it. Not wired yet |
 | `CameraAccessor.h` | per-consumer policy, blend state, `FieldVector` (pure, header-only) |
 | `GlobalModelSearchHints.h/.cpp` | phase-2 matcher hints (data API only, nothing wired) |
 | `GlobalModelMeasurement.h/.cpp` | phase-2 measurement plan: switches, `BuildMeasurementPlan`, verification / escalation, diagnostics, GPU guide texels |
@@ -396,7 +397,6 @@ The fitter's own options are `Config` fields set by the tests and `tools/camera_
 | `Config::staticCfg.rel` | internal | float | 0..1 | 0.05 | none (internal) | not built | none | same on every tier |
 | `Config::staticCfg.requireMotion` | internal | bool | false, true | true | none (internal) | not built | none | same on every tier |
 | `Config::dynTextureCfg` (minShare, minTemporal, minSpatial, agreeRatio, absSigmas, rel, minBlocks, minCompared) | internal | numbers | 0.5 / 0.6 / 0.5 / 0.5 / 3 / 0.05 / 64 / 48 | as listed | none (internal) | not built | none | none |
-
 | `RefineOptions` (R3; internal; no key) | internal | struct | see `PhotometricRefine.h` | as listed there | none (internal) | not built | fall-back returns the input model, status + counters | same on every tier |
 
 Tiers: the fit is cheap CPU work and is not tiered (cost lines `CAMERA_COST`).

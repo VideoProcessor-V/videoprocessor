@@ -385,6 +385,50 @@ namespace VideoProcessorTest
 			Logger::WriteMessage(text);
 		}
 
+		TEST_METHOD(CandidateGradientIntegerFirstAtExactThreshold10Bit)
+		{
+			// The 10-bit R16 case (full-resolution codes, code scale 255/1023 = 85/341): an integer sum that is a multiple of
+			// 341 is EXACTLY 85 x m codes. The magnitude must depend on the integer sum only (same rule as the 16-bit case).
+			const double k = 255.0 / 1023.0;
+			const RefineOptions o;
+			int reorderedDiffers = 0, checked = 0;
+			for (uint32_t m = 1; m <= 3; ++m)
+			{
+				const uint32_t sum = 341u * m;
+				const double ref = CandidateGradientCodes(0u, sum, 0u, 0u, k);
+				Assert::IsTrue(ref == static_cast<double>(sum) * k, L"not one multiply of the integer sum");
+				const bool refCand = ref >= o.minGradientCodes;
+				const int refBin = static_cast<int>((std::min)(4095.0, ref * 4.0));
+				for (uint32_t split = 0; split <= sum; ++split)
+				{
+					const uint32_t gx = split, gy = sum - split;
+					if (gx > 1023u || gy > 1023u)
+						continue;
+					for (uint32_t base = 0; base + (std::max)(gx, gy) <= 1023u; base += 31u)
+					{
+						const uint32_t l = base, r = base + gx, t = 1023u - base - gy, d = 1023u - base;
+						const uint32_t vs[4][4] = { { l, r, t, d }, { r, l, t, d }, { l, r, d, t }, { r, l, d, t } };
+						for (int q = 0; q < 4; ++q)
+						{
+							const double mag = CandidateGradientCodes(vs[q][0], vs[q][1], vs[q][2], vs[q][3], k);
+							Assert::IsTrue(mag == ref, L"magnitude depends on the code levels / order, not only the integer sum");
+							Assert::IsTrue((mag >= o.minGradientCodes) == refCand, L"threshold classification differs");
+							Assert::AreEqual(refBin, static_cast<int>((std::min)(4095.0, mag * 4.0)), L"bin differs");
+							const double old = std::fabs(static_cast<double>(vs[q][1]) * k - static_cast<double>(vs[q][0]) * k)
+								+ std::fabs(static_cast<double>(vs[q][3]) * k - static_cast<double>(vs[q][2]) * k);
+							if (old != ref)
+								++reorderedDiffers;
+							++checked;
+						}
+					}
+				}
+			}
+			char text[200];
+			std::snprintf(text, sizeof(text), "candidate gradient at exact multiples of 341 (k = 255/1023): %d cases, former per-code evaluation differed in %d\n",
+				checked, reorderedDiffers);
+			Logger::WriteMessage(text);
+		}
+
 		TEST_METHOD(CostLine)
 		{
 			// ms per call (median of 5) at 1080 half luma (960x540, s 2), 4K quarter luma (960x540, s 4) and 4K R16 half

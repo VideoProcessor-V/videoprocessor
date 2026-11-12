@@ -382,6 +382,9 @@ namespace CameraModel
 	{
 		Impl& im = *m_impl;
 		const RefineOptions& o = m_options;
+		if (im.pending)
+			++m_failures.droppedPending;
+		m_lastFailure = RefineGpuFailure::None;
 		im.pending = false;
 		im.isFinal = true;
 		im.timed = false;
@@ -401,6 +404,7 @@ namespace CameraModel
 		if (!m_ready || !context)
 		{
 			res.status = RefineStatus::SkippedNoLuma;
+			Fail(RefineGpuFailure::Unavailable);
 			m_lastError = m_ready ? "no device context" : (m_why.empty() ? std::string("not initialised") : m_why);
 			return false;
 		}
@@ -417,6 +421,7 @@ namespace CameraModel
 		if (luma.width > kMaxWidth || luma.height > kMaxHeight)
 		{
 			res.status = RefineStatus::SkippedNoLuma;
+			Fail(RefineGpuFailure::Limit);
 			m_lastError = "luma larger than the GPU limits (8191 x 2304)";
 			return false;
 		}
@@ -482,6 +487,7 @@ namespace CameraModel
 			|| !im.Ensure(im.cell, static_cast<UINT>(cells), 4, false, &e))
 		{
 			res.status = RefineStatus::SkippedNoLuma;
+			Fail(RefineGpuFailure::Ensure);
 			m_lastError = e;
 			return false;
 		}
@@ -655,6 +661,7 @@ namespace CameraModel
 		if (!read)
 		{
 			res.status = RefineStatus::SkippedNoLuma;
+			Fail(RefineGpuFailure::Readback);
 			m_lastError = "readback failed";
 		}
 		else
