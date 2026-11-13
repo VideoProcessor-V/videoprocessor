@@ -3,8 +3,8 @@
 #pragma once
 
 // 70b G2: the GPU kernel of lane product P10 (grain split) for the skeleton's render-thread dispatcher
-// (SkeletonGpuDispatcher). The dispatcher puts the tap bands and the extend pass in front (StepsFor); this kernel's five
-// steps are GrainSplit::Gpu::Splitter::Step(0..4) (v3: half, low down, grain level, neighbourhood minimum, Wiener share) on the
+// (SkeletonGpuDispatcher). The dispatcher puts the tap bands and the extend pass in front (StepsFor); this kernel's six
+// steps are GrainSplit::Gpu::Splitter::Step(0..5) (v3: half, low down, stats, level, neighbourhood minimum, Wiener share) on the
 // EXTENDED tap plane: component 0, codeUnit 64 / 65535 (a texel is code * 64 / 65535), B = RegionEvidence::BlockSizeFor(h),
 // scale B / 16 (the law of RegionEvidence.h). The same steps run for the lane form (one per chunk) and the live form (all
 // at once), so lane == live by construction. Two Splitters (lane, live): their private intermediates survive across the

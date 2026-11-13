@@ -261,3 +261,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - `Indicator::AnyCauseOtherThanIn` backs the pulldown rule: absorb only when EVERY FULL in the interval was a LiveQueueReset (an interval older than the ring resets).
 - Tests: `ResyncAuditTests.cpp` (Indicator query, pulldown mixed interval, cursor reset, storm on source time, motion readers re-arming on a new era), plus the lane/FrameSeal/stress classes in `src/VP-V/tests/AnalysisLaneTests.cpp` (`AnalysisLaneAuditTests`, `ResyncStressTests`).
 - `VP_RESYNC_SCHEDULE=<path>` (read only when `VP_RESYNC_INJECT=1`): the loop test tier hands the stress schedule (`tools/soak/resync_schedule.py` output) to `ResyncInject`, which loads it at construction (`LoadScheduleFile`); a missing or invalid file is shown in `StatusText` ("NOT loaded"), never silent. Unarmed: the variable is not read.
+
+## DvTunnelTapLaw.h (refs/116b)
+
+The 12-bit analysis tap of a packed Dolby Vision tunnel frame, read through `DvTunnelTapLaw::SourceTap12` from the same frame bytes as `AnalysisLumaSource` (whose 10-bit luma is untouched: rule 32, no hook sites). `Code12` is the unpack reference's intensity >> 4; full range maps through `FullLumaToLimited12` (black 256, white 3760); `Legacy10` = tap12 >> 2 (exact when limited, within one code when full range). `BuildRangeTable` is the GPU's table. `VpFrameAnalysis::SourceViewOf12` wraps it as a `SourceFrameView` (msbShift 4). Tests: `DvTunnelTapLawTests`.

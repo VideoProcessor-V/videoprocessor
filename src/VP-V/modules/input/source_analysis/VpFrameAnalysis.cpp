@@ -1,6 +1,7 @@
 #include <pch.h>
 #include "VpFrameAnalysis.h"
 #include "SourceFrameTap.h"
+#include <VP-V/modules/input/signal/DvTunnelTapLaw.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 
@@ -319,6 +320,25 @@ namespace VpFrameAnalysis
 		view.strideSamples = view.width;
 		view.msbShift = 6;   // 10-bit sampler codes in the low bits of 16
 		view.keepAlive = std::shared_ptr<const void>(plane);
+		return true;
+	}
+
+	bool SourceViewOf12(const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view)
+	{
+		if (source.format != AnalysisLumaFormat::PackedDolbyVision422 || !source.IsValid())
+			return false;
+		auto codes = std::make_shared<std::vector<uint16_t>>(static_cast<size_t>(source.width) * static_cast<size_t>(source.height));
+		for (int y = 0; y < source.height; ++y)
+			for (int x = 0; x < source.width; ++x)
+				if (!DvTunnelTapLaw::SourceTap12(source, x, y, (*codes)[static_cast<size_t>(y) * source.width + x]))
+					return false;
+		view = VpSkeleton::SourceFrameView();
+		view.luma = codes->data();
+		view.width = static_cast<uint32_t>(source.width);
+		view.height = static_cast<uint32_t>(source.height);
+		view.strideSamples = view.width;
+		view.msbShift = 4;   // 12-bit tap codes in the low bits of 16
+		view.keepAlive = std::shared_ptr<const void>(codes);
 		return true;
 	}
 

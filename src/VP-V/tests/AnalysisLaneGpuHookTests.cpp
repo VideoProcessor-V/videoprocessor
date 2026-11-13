@@ -257,13 +257,13 @@ namespace AnalysisLaneGpuHookTestsNs
 			Assert::IsTrue(r.disp.calls.empty(), L"nothing dispatched");
 		}
 
-		// StepsFor: P10 = tap bands + extend + 5 splitter passes; P11 / P12 one pass; others not fixed-step.
+		// StepsFor: P10 = tap bands + extend + 6 splitter passes (unit 4: HALF, DOWN, STATS, LEVEL, NMIN, APPLY); P11 / P12 one pass; others not fixed-step.
 		TEST_METHOD(StepsForCountsPasses)
 		{
 			using VpLaneProducts::StepsFor;
 			using VpLaneProducts::TapBands;
-			Assert::IsTrue(TapBands(Dims{ 1920, 1080 }) == 1 && StepsFor(kP10GrainSplit, Dims{ 1920, 1080 }) == 7, L"1080p");
-			Assert::IsTrue(TapBands(Dims{ 3840, 2160 }) == 4 && StepsFor(kP10GrainSplit, Dims{ 3840, 2160 }) == 10, L"4K");
+			Assert::IsTrue(TapBands(Dims{ 1920, 1080 }) == 1 && StepsFor(kP10GrainSplit, Dims{ 1920, 1080 }) == 8, L"1080p");
+			Assert::IsTrue(TapBands(Dims{ 3840, 2160 }) == 4 && StepsFor(kP10GrainSplit, Dims{ 3840, 2160 }) == 11, L"4K");
 			Assert::IsTrue(StepsFor(kP11RegionBlockStats, Dims{ 3840, 2160 }) == 1, L"P11");
 			Assert::IsTrue(StepsFor(kP12LightLevel, Dims{ 3840, 2160 }) == 1, L"P12");
 			Assert::IsTrue(StepsFor(kP3AnalysisField, Dims{ 3840, 2160 }) == 0 && StepsFor(kP10GrainSplit, Dims{ 0, 0 }) == 0,

@@ -195,7 +195,64 @@ if (li == 0u) {
 }
 )GLSL";
 
-			// 4. NMIN: per block, the minimum of quiet over (2 n + 1)^2 blocks -> blocks = (N, e3, e1, e2).
+			// 4a. LEVEL (refs/116b, unit 4): ONE workgroup. Per luma bin the 10th percentile of the blocks' quiet values, by an integer
+			// histogram of 1/8-octave classes (key from the float bits: identical to GrainSplit::LevelKey), -> level_out(bin) =
+			// (class-midpoint level in ten-bit-equivalent codes^2, valid, 0, 0). Integer counts make the table order-independent.
+			const char* const LEVEL_HEADER = R"GLSL(
+#define GS_KEYS 160
+shared uint s_hist[GS_LEVEL_BINS * GS_KEYS];
+shared uint s_n[GS_LEVEL_BINS];
+float gs_block_luma(ivec2 b)
+{
+    ivec2 p = ivec2(min(b.x * GS_B + GS_B / 2, GS_W - 1), min(b.y * GS_B + GS_B / 2, GS_H - 1));
+    vec2 h = (vec2(p) + vec2(0.5)) * 0.5 - vec2(0.5);
+    ivec2 i0 = ivec2(floor(h));
+    vec2 f = h - vec2(i0);
+    ivec2 hm = ivec2(GS_HW - 1, GS_HH - 1);
+    float a = texelFetch(low, clamp(i0, ivec2(0), hm), 0).x, bb = texelFetch(low, clamp(i0 + ivec2(1, 0), ivec2(0), hm), 0).x;
+    float c = texelFetch(low, clamp(i0 + ivec2(0, 1), ivec2(0), hm), 0).x, d = texelFetch(low, clamp(i0 + ivec2(1, 1), ivec2(0), hm), 0).x;
+    float top = a + (bb - a) * f.x, bot = c + (d - c) * f.x;
+    return top + (bot - top) * f.y;
+}
+int gs_level_bin(float lumaTen)
+{
+    return clamp(int(floor(lumaTen * float(GS_LEVEL_BINS) / 1024.0)), 0, GS_LEVEL_BINS - 1);
+}
+)GLSL";
+			const char* const LEVEL_BODY = R"GLSL(
+uint li = gl_LocalInvocationIndex;
+for (uint i = li; i < uint(GS_LEVEL_BINS * GS_KEYS); i += 256u) s_hist[i] = 0u;
+if (li < uint(GS_LEVEL_BINS)) s_n[li] = 0u;
+barrier();
+for (uint i = li; i < uint(GS_BW * GS_BH); i += 256u) {
+    ivec2 b = ivec2(int(i % uint(GS_BW)), int(i / uint(GS_BW)));
+    float q = texelFetch(quiet, b, 0).x / (GS_CODE_SCALE * GS_CODE_SCALE);
+    int key = clamp(int(floatBitsToUint(max(q, 0.015625)) >> 20) - 968, 0, GS_KEYS - 1);
+    int bin = gs_level_bin(gs_block_luma(b) / GS_CODE_SCALE);
+    atomicAdd(s_hist[bin * GS_KEYS + key], 1u);
+    atomicAdd(s_n[bin], 1u);
+}
+barrier();
+if (li < uint(GS_LEVEL_BINS)) {
+    int j = int(li);
+    int n = int(s_n[j]);
+    vec4 o = vec4(0.0);
+    if (n >= GS_LEVEL_MINB && n > 0) {
+        int r = max(1, (GS_LEVEL_PCT * n + 99) / 100);
+        int acc = 0, k = 0;
+        for (; k < GS_KEYS; k++) {
+            acc += int(s_hist[j * GS_KEYS + k]);
+            if (acc >= r) break;
+        }
+        k = min(k, GS_KEYS - 1);
+        o = vec4(uintBitsToFloat((uint(k + 968) << 20) | (1u << 19)), 1.0, 0.0, 0.0);
+    }
+    imageStore(level_out, ivec2(j, 0), o);
+}
+)GLSL";
+
+			// 4b. NMIN: per block, the minimum of quiet over (2 n + 1)^2 blocks, then (unit 4) capped by the frame level function
+			// at the block's luma (piecewise linear over the valid bin centres, constant beyond) -> blocks = (N, e3, e1, e2).
 			const char* const NMIN_BODY = R"GLSL(
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 if (b.x < GS_BW && b.y < GS_BH) {
@@ -203,6 +260,26 @@ if (b.x < GS_BW && b.y < GS_BH) {
     for (int j = -GS_NG; j <= GS_NG; j++)
         for (int i = -GS_NG; i <= GS_NG; i++)
             m = min(m, texelFetch(quiet, ivec2(clamp(b.x + i, 0, GS_BW - 1), clamp(b.y + j, 0, GS_BH - 1)), 0).x);
+#if GS_LEVEL_ON
+    float lumaTen = gs_block_luma(b) / GS_CODE_SCALE;
+    float pos = lumaTen * float(GS_LEVEL_BINS) / 1024.0 - 0.5;
+    int lo = -1, hi = -1;
+    for (int j = 0; j < GS_LEVEL_BINS; j++) {
+        if (texelFetch(level, ivec2(j, 0), 0).y < 0.5) continue;
+        if (float(j) <= pos) lo = j;
+        if (float(j) >= pos && hi < 0) hi = j;
+    }
+    if (lo >= 0 || hi >= 0) {
+        float cap;
+        if (lo < 0) cap = texelFetch(level, ivec2(hi, 0), 0).x;
+        else if (hi < 0 || hi == lo) cap = texelFetch(level, ivec2(lo, 0), 0).x;
+        else {
+            float a = texelFetch(level, ivec2(lo, 0), 0).x, c = texelFetch(level, ivec2(hi, 0), 0).x;
+            cap = a + (c - a) * ((pos - float(lo)) / float(hi - lo));
+        }
+        m = min(m, cap * GS_CODE_SCALE * GS_CODE_SCALE);
+    }
+#endif
     vec4 q = texelFetch(quiet, b, 0);
     imageStore(blocks_out, b, vec4(m, q.y, q.z, q.w));
 }
@@ -311,7 +388,7 @@ if (p.x < GS_W && p.y < GS_H) {
 		void Splitter::Release(pl_gpu gpu)
 		{
 			if (gpu)
-				for (pl_tex* t : { &m_tmp, &m_low, &m_quiet, &m_blocks, &m_outFull, &m_outA, &m_outB })
+				for (pl_tex* t : { &m_tmp, &m_low, &m_quiet, &m_level, &m_blocks, &m_outFull, &m_outA, &m_outB })
 					if (*t) pl_tex_destroy(gpu, t);
 			m_out = Frame();
 		}
@@ -350,7 +427,7 @@ if (p.x < GS_W && p.y < GS_H) {
 		uint64_t FullShaderFingerprint()
 		{
 			uint64_t h = 14695981039346656037ull;
-			for (const char* body : { HALF_HEADER, HALF_BODY, DOWN_HEADER, DOWN_BODY, LOW_S_GLSL, STATS_HEADER, STATS_BODY, NMIN_BODY, APPLY_HEADER, APPLY_BODY })
+			for (const char* body : { HALF_HEADER, HALF_BODY, DOWN_HEADER, DOWN_BODY, LOW_S_GLSL, STATS_HEADER, STATS_BODY, LEVEL_HEADER, LEVEL_BODY, NMIN_BODY, APPLY_HEADER, APPLY_BODY })
 				for (const char* c = body; *c; ++c)
 					if (*c != '\r')
 					{
@@ -402,7 +479,7 @@ if (p.x < GS_W && p.y < GS_H) {
 		bool Splitter::Compute(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B, const Params& params,
 			const Options& options)
 		{
-			// One arena scope across the five steps (they share the arena's temporaries), closed on every exit.
+			// One arena scope across the six steps (they share the arena's temporaries), closed on every exit.
 			ScopeGuard scope(options.arena);
 			for (uint32_t i = 0; i < StepCount(); ++i)
 				if (!Step(gpu, dispatch, plane, component, codeUnit, scale, B, params, options, i))
@@ -423,7 +500,10 @@ if (p.x < GS_W && p.y < GS_H) {
 				static const char* const kComp[4] = { "x", "y", "z", "w" };
 				PassText t;
 				t.geo = DefineInt("GS_W", w) + DefineInt("GS_H", h) + DefineInt("GS_HW", HalfOf(w)) + DefineInt("GS_HH", HalfOf(h)) +
-					DefineInt("GS_B", B) + DefineInt("GS_BW", bw) + DefineInt("GS_BH", bh) + DefineInt("GS_UNIT_VERSION", GrainSplit::kUnitVersion);
+					DefineInt("GS_B", B) + DefineInt("GS_BW", bw) + DefineInt("GS_BH", bh) + DefineInt("GS_UNIT_VERSION", GrainSplit::kUnitVersion) +
+					DefineInt("GS_LEVEL_BINS", params.levelBins) + DefineInt("GS_LEVEL_PCT", params.levelPercentile) +
+					DefineInt("GS_LEVEL_MINB", params.levelMinBlocks) + DefineInt("GS_LEVEL_ON", params.levelCap ? 1 : 0) +
+					Define("GS_CODE_SCALE", GrainSplit::DepthScale(params.sourceBits));
 				const double s1 = params.sigmaFine * scale, sb = params.sigmaBase * scale, s6 = params.sigmaLow * scale;
 				t.r1 = GaussRadius(s1);
 				t.rb = GrainSplit::V3HalfRadius(sb);
@@ -507,9 +587,18 @@ if (p.x < GS_W && p.y < GS_H) {
 			}
 			case 3:
 			{
-				const pl_shader_desc d[2] = { Sampled("quiet", r.quiet), VpvGpu::Storage("blocks_out", r.blocks) };
-				if (!Pass(dispatch, "VideoProcessor grain split: neighbourhood minimum", txt.geo + DefineInt("GS_NG", params.neighbourhood), NMIN_BODY, d, 2, nullptr, 0,
-					(bw + 15) / 16, (bh + 15) / 16, 0, 16, 16, options.timer))
+				const pl_shader_desc d[3] = { Sampled("quiet", r.quiet), Sampled("low", r.low), VpvGpu::Storage("level_out", r.level) };
+				const size_t shmem = sizeof(uint32_t) * (size_t(params.levelBins) * 160u + size_t(params.levelBins));
+				if (!Pass(dispatch, "VideoProcessor grain split: noise level function", txt.geo + LEVEL_HEADER, LEVEL_BODY, d, 3, nullptr, 0, 1, 1, shmem, 16, 16,
+					options.timer))
+					return fail("grain split: noise level pass failed");
+				break;
+			}
+			case 4:
+			{
+				const pl_shader_desc d[4] = { Sampled("quiet", r.quiet), Sampled("low", r.low), Sampled("level", r.level), VpvGpu::Storage("blocks_out", r.blocks) };
+				if (!Pass(dispatch, "VideoProcessor grain split: neighbourhood minimum", txt.geo + DefineInt("GS_NG", params.neighbourhood) + LEVEL_HEADER, NMIN_BODY, d, 4,
+					nullptr, 0, (bw + 15) / 16, (bh + 15) / 16, sizeof(uint32_t) * (size_t(params.levelBins) * 160u + size_t(params.levelBins)), 16, 16, options.timer))
 					return fail("grain split: minimum pass failed");
 				break;
 			}
@@ -517,7 +606,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			{
 				const int aw = kApplyTile + 2, aa = aw + 2 * txt.r1, la = kApplyTile / 2 + 2;
 				const size_t shmem = sizeof(float) * (size_t(aa) * aa + size_t(aa) * kApplyTile + 2u * size_t(la) * la + size_t(aw) * aw);
-				std::string hdr = txt.geo + txt.w1 + txt.yread + Define("GS_KAPPA", params.kappa) + Define("GS_FLOOR", params.energyFloor) +
+				std::string hdr = txt.geo + txt.w1 + txt.yread + Define("GS_KAPPA", params.kappa) + Define("GS_FLOOR", params.energyFloor * GrainSplit::DepthScale(params.sourceBits) * GrainSplit::DepthScale(params.sourceBits)) +
 					APPLY_HEADER + LOW_S_GLSL;
 				const int gx = (w + kApplyTile - 1) / kApplyTile, gy = (h + kApplyTile - 1) / kApplyTile;
 				if (compact)
@@ -567,7 +656,8 @@ if (p.x < GS_W && p.y < GS_H) {
 				return false;
 			}
 			if (!(params.sigmaFine > 0.0) || !(params.sigmaBase * scale >= GrainSplit::kV3MinLowSigma) || !(params.sigmaLow * scale >= GrainSplit::kV3MinLowSigma) ||
-				params.subBlocks < 1 || params.subBlocks > 16)
+				params.subBlocks < 1 || params.subBlocks > 16 || params.levelBins < 1 || params.levelBins > 16 || params.levelPercentile < 1 ||
+				params.levelPercentile > 99 || params.levelMinBlocks < 1 || params.sourceBits < 8 || params.sourceBits > 16)
 			{
 				m_error = "grain split: invalid law";
 				return false;
@@ -578,10 +668,11 @@ if (p.x < GS_W && p.y < GS_H) {
 				const int r1 = GaussRadius(s1), rl = (std::max)(GrainSplit::V3HalfRadius(params.sigmaBase * scale), GrainSplit::V3HalfRadius(params.sigmaLow * scale));
 				const int ch = ChunkOf(B), ap = ch + 2 * r1, la = ch / 2 + 3, nsub = params.subBlocks * params.subBlocks;
 				const int aw = kApplyTile + 2, aa = aw + 2 * r1, lapp = kApplyTile / 2 + 2;
-				const size_t need[4] = { sizeof(float) * size_t(kHalfTh) * size_t(kHalfTw + 2 * rl), 2 * sizeof(float) * size_t(kDownTc) * size_t(kDownTr + 2 * rl),
+				const size_t need[5] = { sizeof(float) * size_t(kHalfTh) * size_t(kHalfTw + 2 * rl), 2 * sizeof(float) * size_t(kDownTc) * size_t(kDownTr + 2 * rl),
 					sizeof(float) * (size_t(ap) * ap + size_t(ap) * ch + 2u * size_t(la) * la + 4u * size_t(ch) * ch + 5u * size_t(nsub)),
-					sizeof(float) * (size_t(aa) * aa + size_t(aa) * kApplyTile + 2u * size_t(lapp) * lapp + size_t(aw) * aw) };
-				const size_t most = (std::max)((std::max)(need[0], need[1]), (std::max)(need[2], need[3]));
+					sizeof(float) * (size_t(aa) * aa + size_t(aa) * kApplyTile + 2u * size_t(lapp) * lapp + size_t(aw) * aw),
+					sizeof(uint32_t) * (size_t(params.levelBins) * 160u + size_t(params.levelBins)) };
+				const size_t most = (std::max)((std::max)(need[0], need[1]), (std::max)((std::max)(need[2], need[3]), need[4]));
 				if (most > gpu->glsl.max_shmem_size)
 				{
 					m_error = "grain split: the passes need " + std::to_string(most) + " B of shared memory, the device offers " +
@@ -626,7 +717,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			}
 
 			// Intermediates (half-resolution tmp + low, block-grid quiet): from the arena (scope closed on every exit), else private.
-			pl_tex tmp = nullptr, low = nullptr, quiet = nullptr;
+			pl_tex tmp = nullptr, low = nullptr, quiet = nullptr, levelTex = nullptr;
 			if (options.arena)
 			{
 				// The private temporaries of the non-arena path are not used any more: free them.
@@ -663,6 +754,12 @@ if (p.x < GS_W && p.y < GS_H) {
 				low = m_low;
 				quiet = m_quiet;
 			}
+			if (!Ensure(gpu, m_level, params.levelBins, 1, f4))
+			{
+				m_error = "grain split: no rgba32f noise level table";
+				return false;
+			}
+			levelTex = m_level;
 			// Outputs: the caller's targets, else the Splitter's own.
 			pl_tex outA = nullptr, outB = nullptr, outFull = nullptr, blocksTex = tg.blocks;
 			if (compact)
@@ -701,7 +798,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			m_run.compact = compact;
 			m_run.storage = choice.storage;
 			m_run.w = w; m_run.h = h; m_run.bw = bw; m_run.bh = bh;
-			m_run.tmp = tmp; m_run.low = low; m_run.quiet = quiet; m_run.blocks = blocksTex;
+			m_run.tmp = tmp; m_run.low = low; m_run.quiet = quiet; m_run.level = levelTex; m_run.blocks = blocksTex;
 			m_run.outFull = outFull; m_run.outA = outA; m_run.outB = outB;
 			return true;
 		}

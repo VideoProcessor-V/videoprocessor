@@ -92,7 +92,7 @@ namespace VideoProcessorTest
 		}
 
 		// A P10 stand-in with the real Full layout (split rgba32f per pixel + blocks rgba32f per 16 px cell) and the
-		// splitter's five steps: step 0 copies the extended plane's codes into the split texture, the others record nothing.
+		// splitter's six steps: step 0 copies the extended plane's codes into the split texture, the others record nothing.
 		class CopyKernel : public VpLaneProducts::IProductKernel
 		{
 		public:
@@ -303,7 +303,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(disp.Stats().releasesDone == 2 && disp.AllocatedBytes() == 0, L"everything released");
 		}
 
-		// Lane (tap bands, extend, five kernel steps, one Dispatch each) == live (DispatchLive), texel for texel.
+		// Lane (tap bands, extend, six kernel steps, one Dispatch each) == live (DispatchLive), texel for texel.
 		BEGIN_TEST_METHOD_ATTRIBUTE(LaneEqualsLive)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
 		END_TEST_METHOD_ATTRIBUTE()
@@ -328,10 +328,10 @@ namespace VideoProcessorTest
 			job.ringSlot = 0;
 			job.source = &view;
 			const uint32_t steps = VpLaneProducts::StepsFor(kP10GrainSplit, d);
-			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 5u && VpLaneProducts::TapBands(d) == 2u, L"2 bands + extend + 5");
+			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 6u && VpLaneProducts::TapBands(d) == 2u, L"2 bands + extend + 6");
 			for (uint32_t i = 0; i < steps; ++i)
 				Assert::IsTrue(disp.Dispatch(job, i, steps), L"lane chunk");
-			Assert::IsTrue(kernel->steps == 5 && disp.Stats().tapBands == 2 && disp.Stats().extends == 1, L"lane passes");
+			Assert::IsTrue(kernel->steps == 6 && disp.Stats().tapBands == 2 && disp.Stats().extends == 1, L"lane passes");
 			Assert::IsTrue(disp.CostOf(kP10GrainSplit).frames == 1, L"the cost counter records one completed lane frame (last chunk only)");
 			Assert::IsFalse(disp.Dispatch(job, 0, steps + 1), L"a plan that does not match the passes is refused");
 
@@ -343,7 +343,7 @@ namespace VideoProcessorTest
 				return true;
 			});
 			Assert::IsTrue(disp.DispatchLive(n, 8, 0, Header(), 0u), L"live fill");
-			Assert::IsTrue(kernel->steps == 10 && disp.Stats().tapBands == 4 && disp.Stats().extends == 2, L"same passes, live");
+			Assert::IsTrue(kernel->steps == 12 && disp.Stats().tapBands == 4 && disp.Stats().extends == 2, L"same passes, live");
 			Assert::IsTrue(disp.CostOf(kP10GrainSplit).frames == 2, L"the cost counter records the live frame too");
 			Assert::IsTrue(disp.CostOf(kP11RegionBlockStats).frames == 0, L"a product without a kernel has an empty cost");
 

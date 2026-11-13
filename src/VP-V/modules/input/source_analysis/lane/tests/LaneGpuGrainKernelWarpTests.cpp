@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // 70b G2: the P10 grain-split kernel (GrainSplitKernel) on the libplacebo WARP device (TargetLutGpuFixture; WARP unless
-// VP_TEST_GPU=hardware): the five kernel steps equal Splitter::Compute byte for byte (Full and Compact), the lane form
+// VP_TEST_GPU=hardware): the six kernel steps equal Splitter::Compute byte for byte (Full and Compact), the lane form
 // through the SkeletonGpuDispatcher equals the live form, the produced Frame passes / fails CheckFit as it must, and the
 // Full pass text is pinned by its FNV-1a fingerprint.
 #include "pch.h"
@@ -125,7 +125,7 @@ namespace VideoProcessorTest
 	TEST_CLASS(LaneGpuGrainKernelWarpTests)
 	{
 	public:
-		// The kernel's five steps record Splitter::Compute's dispatches: every output term is byte-identical, in the Full
+		// The kernel's six steps record Splitter::Compute's dispatches: every output term is byte-identical, in the Full
 		// layout and in the Compact one.
 		BEGIN_TEST_METHOD_ATTRIBUTE(KernelStepLoopEqualsSplitterCompute)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
@@ -146,7 +146,7 @@ namespace VideoProcessorTest
 			for (Storage storage : { Storage::Full, Storage::Compact })
 			{
 				VpLaneProducts::GrainSplitKernel kernel(storage);
-				Assert::IsTrue(kernel.Steps(dims) == 5 && kernel.NeedsTap() && kernel.Product() == kP10GrainSplit, L"kernel shape");
+				Assert::IsTrue(kernel.Steps(dims) == 6 && kernel.NeedsTap() && kernel.Product() == kP10GrainSplit, L"kernel shape");
 				Assert::IsTrue(kernel.Granted() == storage, L"R16 unorm at codeUnit 64/65535 grants either storage");
 				const ProductTexLayout layout = kernel.Layout(dims);
 				std::vector<pl_tex> viaKernel = MakeOutputs(gpu, layout, dims);
@@ -202,7 +202,7 @@ namespace VideoProcessorTest
 			pl_dispatch_destroy(&dispatch);
 		}
 
-		// The lane form (tap bands, extend, five kernel steps, one Dispatch each) equals the live form (DispatchLive), every
+		// The lane form (tap bands, extend, six kernel steps, one Dispatch each) equals the live form (DispatchLive), every
 		// term byte for byte; the Frame the kernel produced fits its plane and is refused when it does not.
 		BEGIN_TEST_METHOD_ATTRIBUTE(LaneFormEqualsLiveFormAndFrameFits)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
@@ -228,7 +228,7 @@ namespace VideoProcessorTest
 			job.ringSlot = 0;
 			job.source = &view;
 			const uint32_t steps = VpLaneProducts::StepsFor(kP10GrainSplit, d);
-			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 5u, L"bands + extend + 5");
+			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 6u, L"bands + extend + 6");
 			for (uint32_t i = 0; i < steps; ++i)
 				Assert::IsTrue(disp.Dispatch(job, i, steps), L"lane chunk");
 			disp.SetLiveSourceForTesting([&codes, d](uint64_t seq, SourceFrameView* out) {
@@ -274,8 +274,8 @@ namespace VideoProcessorTest
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(PassTextFingerprintIsPinned)
 		{
-			// WAIVER-P10V3-01: old pin 0x41cef8707edf809d (v2 text) -> new 0x8949becef0aab5c9 (v3 pass texts, refs/116).
-			constexpr uint64_t kPinned = 0x8949becef0aab5c9ull;
+			// WAIVER-P10V3-01: 0x41cef8707edf809d (v2) -> 0x8949becef0aab5c9 (v3). WAIVER-P10V4-01 (refs/116b): -> 0x7fe213d86466cc12 (unit 4: LEVEL pass, NLF cap, depth scale).
+			constexpr uint64_t kPinned = 0x7fe213d86466cc12ull;
 			Assert::IsTrue(GrainSplit::Gpu::FullShaderFingerprint() == kPinned, L"Full pass GLSL fingerprint");
 		}
 	};

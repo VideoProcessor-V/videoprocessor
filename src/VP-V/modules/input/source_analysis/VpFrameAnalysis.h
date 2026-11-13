@@ -70,6 +70,12 @@ namespace VpFrameAnalysis
 	// never a private decoder. view.seq is left 0 (the caller's key). False when there is no ready plane (the shared plane
 	// not decoded yet or claimed by another thread, an unreadable frame). The source frame tap delivers exactly this view.
 	bool SourceViewOf(const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view);
+	// P10 N fix (refs/116b, owner 2026-11-12: 12-bit end to end): the SAME frame's luma at TWELVE bits (msbShift 4: the
+	// DvTunnelTapLaw 12-bit tap code, limited domain), for a packed DV tunnel source only (false for every other format: those
+	// carry no more than their own ten-bit codes). A VP-V side product of Bill's untouched AnalysisLumaSource (Sample().luma stays
+	// the ten-bit code); the lane's other readers keep SourceViewOf (msbShift 6). A consumer of this view states its source depth
+	// (GrainSplit::Params::sourceBits = 12, codeUnit 16 / 65535).
+	bool SourceViewOf12(const AnalysisLumaSource& source, VpSkeleton::SourceFrameView& view);
 
 	// The P1 engine half of a frame through its shared decode (the live fill): DecodeSharedLuma when nobody has (a no-op when
 	// published or claimed), SourceViewOf, the P1 half law (HalfLumaRows), then Engine8Half - the lane's law, one recipe.

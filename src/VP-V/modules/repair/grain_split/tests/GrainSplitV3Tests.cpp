@@ -227,7 +227,8 @@ namespace GrainSplitV3TestsNs
 					Plane y = s;
 					const Plane gt = Grain(Spec::White, g, 3.0, 7u);
 					for (size_t i = 0; i < y.v.size(); ++i) y.v[i] += gt.v[i];
-					const GrainSplit::Split a = GrainSplit::Compute(y, g.scale, g.B);
+					// refs/116b: the v3 law with the NLF cap OFF (ParamsV2) against the v2 law at the ORIGINAL limits.
+					const GrainSplit::Split a = GrainSplit::Compute(y, g.scale, g.B, GrainSplit::ParamsV2());
 					const GrainSplit::Split b = GrainSplit::ComputeV2(y, g.scale, g.B);
 					double sum = 0.0, mx = 0.0, isum = 0.0;
 					size_t icount = 0;
@@ -335,6 +336,8 @@ namespace GrainSplitV3TestsNs
 				{
 					const Row t = RunRow(Cls::Texture, sp, 1, rms);
 					Log(RowText(t));
+					// Rule 28: the grain-keep band is asserted again (measured 0.991 / 0.964 at the 4K law); the owner ruling
+					// "texture wins" (refs/116b) is asserted by the mixed-scene texture-leak limits of GrainSplitKeepsTextureInClean.
 					Require(t.v3.keep >= 0.90, std::string("v3 texture keep >= 0.90 at scale 2: ") + RowText(t));
 				}
 			for (double rms : { 1.0, 3.0 })
@@ -343,6 +346,171 @@ namespace GrainSplitV3TestsNs
 				Log(RowText(f));
 				Require(f.v3.keep >= 0.95, std::string("v3 film-like flat keep >= 0.95 at scale 2: ") + RowText(f));
 			}
+		}
+
+		// ---- refs/116b: the NLF cap ----
+		struct MixedPlanes { Plane s; Geo g; int tx0, ty0, tx1, ty1; };
+		static MixedPlanes MakeMixed(int scaleIndex, bool clip)
+		{
+			MixedPlanes m;
+			const int w = scaleIndex ? 1536 : 768, h = scaleIndex ? 1024 : 512;
+			m.g = Geo{ w, h, scaleIndex ? 2.0 : 1.0, scaleIndex ? 32 : 16 };
+			m.s = Plane(w, h);
+			m.tx0 = w / 4; m.tx1 = 3 * w / 4; m.ty0 = h / 4; m.ty1 = 3 * h / 4;
+			for (int y = 0; y < h; ++y)
+				for (int x = 0; x < w; ++x)
+				{
+					const bool in = x >= m.tx0 && x < m.tx1 && y >= m.ty0 && y < m.ty1;
+					double v = 400.0 + (in ? 25.0 * std::sin(0.9 * x) * std::sin(0.7 * y) + 15.0 * std::sin(0.31 * x + 0.53 * y) : 0.0);
+					if (clip && !in && y < static_cast<int>(0.3 * h / m.g.B) * m.g.B) v = 64.0;
+					m.s.at(x, y) = std::floor(v * 64.0 + 0.5) / 64.0;   // 1/64 code like the class planes
+				}
+			return m;
+		}
+
+		// rho: the texture core's correlation of the grain plane with the structure; keep: flat-region grain keep.
+		static void MeasureMixed(const MixedPlanes& m, Spec sp, double rms, bool clip, double depthScale, int bits, double& rho, double& keep)
+		{
+			Plane gt = Grain(sp, m.g, rms, 7u);
+			if (clip)
+			{
+				const int clipRows = static_cast<int>(0.3 * m.g.h / m.g.B) * m.g.B;
+				for (int y = 0; y < clipRows; ++y) for (int x = 0; x < m.g.w; ++x) gt.at(x, y) = 0.0;
+			}
+			Plane s = m.s, yg = m.s;
+			for (size_t i = 0; i < yg.v.size(); ++i) { yg.v[i] += gt.v[i]; }
+			if (depthScale != 1.0) for (size_t i = 0; i < s.v.size(); ++i) { s.v[i] *= depthScale; yg.v[i] *= depthScale; gt.v[i] *= depthScale; }
+			GrainSplit::Params p; p.sourceBits = bits;
+			const GrainSplit::Split a = GrainSplit::Compute(s, m.g.scale, m.g.B, p), b = GrainSplit::Compute(yg, m.g.scale, m.g.B, p);
+			const int B = m.g.B;
+			// CORE: the texture rectangle shrunk by 3 B.
+			double sx = 0.0; int n = 0;
+			for (int y = m.ty0 + 3 * B; y < m.ty1 - 3 * B; ++y) for (int x = m.tx0 + 3 * B; x < m.tx1 - 3 * B; ++x) { sx += s.at(x, y); ++n; }
+			const double mean = sx / n;
+			double num = 0.0, den = 0.0;
+			for (int y = m.ty0 + 3 * B; y < m.ty1 - 3 * B; ++y)
+				for (int x = m.tx0 + 3 * B; x < m.tx1 - 3 * B; ++x)
+				{
+					const double sc = s.at(x, y) - mean;
+					num += (yg.at(x, y) - b.clean.at(x, y)) * sc;   // G(S + g)
+					den += sc * sc;
+				}
+			rho = den > 0.0 ? num / den : 0.0;
+			// FLAT: [2B, w-2B) x [2B, h-2B) minus the texture rectangle grown by B (and the clip band + 2 B below it).
+			const int clipEnd = clip ? static_cast<int>(0.3 * m.g.h / B) * B + 2 * B : 0;
+			double kn = 0.0, kd = 0.0;
+			for (int y = 2 * B; y < m.g.h - 2 * B; ++y)
+				for (int x = 2 * B; x < m.g.w - 2 * B; ++x)
+				{
+					if (x >= m.tx0 - B && x < m.tx1 + B && y >= m.ty0 - B && y < m.ty1 + B) continue;
+					if (y < clipEnd) continue;
+					kn += (b.grain.at(x, y) - a.grain.at(x, y)) * gt.at(x, y);
+					kd += gt.at(x, y) * gt.at(x, y);
+				}
+			keep = kd > 0.0 ? kn / kd : 0.0;
+		}
+
+		// MUST-2 (opus gate) + owner rulings 2026-11-12: a texture leak into grain is a defect; detail preservation
+		// outranks grain keep; the keep band applies to flat / gradient / dark. Limits' arithmetic: refs/116b s5.1.
+		TEST_METHOD(GrainSplitKeepsTextureInClean)
+		{
+			for (int si = 0; si < 2; ++si)
+				for (int clip = 0; clip < 2; ++clip)
+				{
+					const MixedPlanes m = MakeMixed(si, clip != 0);
+					for (Spec sp : { Spec::White, Spec::Film })
+						for (double rms : { 0.0, 1.0, 3.0 })
+						{
+							if (rms == 0.0 && sp == Spec::Film) continue;
+							double rho = 0.0, keep = 0.0;
+							MeasureMixed(m, sp, rms, clip != 0, 1.0, 10, rho, keep);
+							char buf[200];
+							std::snprintf(buf, sizeof(buf), "mixed%s scale%d %-5s rms %.0f: texture leak rho %.4f, flat keep %.4f", clip ? "-clip" : "", si + 1, SpecName(sp), rms, rho, keep);
+							Log(buf);
+							const double limit = rms >= 3.0 ? 0.10 : (rms >= 1.0 ? 0.02 : 0.001);
+							Require(rho <= limit, std::string("texture leak <= limit: ") + buf);
+							if (rms > 0.0 && sp == Spec::White) Require(keep >= 0.95, std::string("flat keep (white) >= 0.95: ") + buf);
+							else if (rms > 0.0 && sp == Spec::Film && si == 1) Require(keep >= 0.95, std::string("flat keep (film, 4K law) >= 0.95: ") + buf);
+							// film at the 1080p law: REPORT (the v3 law's own limit, refs/116 D4)
+						}
+				}
+		}
+
+		// Hand-made quiet + luma arrays through the table law.
+		TEST_METHOD(GrainLevelTableLaw)
+		{
+			GrainSplit::Params p;
+			double level[8]; bool valid[8];
+			// (a) n blocks in bin 3 (luma 448..): quiet ramps 1..n; keys / ranks exact.
+			for (int n : { 8, 9, 10, 11, 100 })
+			{
+				std::vector<double> q, l;
+				for (int i = 0; i < n; ++i) { q.push_back(1.0 + i); l.push_back(448.0); }
+				GrainSplit::GrainLevelTable(q, l, p, level, valid);
+				Require(valid[3], "bin 3 has a level at n >= 8");
+				const int r = (10 * n + 99) / 100;
+				const double expect = GrainSplit::LevelOfKey(GrainSplit::LevelKey(static_cast<double>(r)));
+				Require(level[3] == expect, "rank r = ceil(10 n / 100): level = midpoint of the r-th smallest key");
+			}
+			// (b) 7 blocks: no level; neighbours interpolate.
+			{
+				std::vector<double> q, l;
+				for (int i = 0; i < 20; ++i) { q.push_back(4.0); l.push_back(64.0); }     // bin 0
+				for (int i = 0; i < 7; ++i)  { q.push_back(1.0); l.push_back(448.0); }    // bin 3: too few
+				for (int i = 0; i < 20; ++i) { q.push_back(16.0); l.push_back(960.0); }   // bin 7
+				GrainSplit::GrainLevelTable(q, l, p, level, valid);
+				Require(!valid[3] && valid[0] && valid[7], "a bin with 7 blocks has no level");
+				double cap = 0.0;
+				Require(GrainSplit::GrainLevelCap(level, valid, p, 448.0, cap), "cap exists");
+				const double centre0 = 0.5 * 128.0, centre7 = 7.5 * 128.0, t = (448.0 - centre0) / (centre7 - centre0);
+				Require(std::fabs(cap - (level[0] + (level[7] - level[0]) * t)) < 1e-9, "interpolated between the valid bin centres");
+				Require(GrainSplit::GrainLevelCap(level, valid, p, 10.0, cap) && cap == level[0], "constant below the first valid bin");
+				// (e) level for quiet 8.7 within one class
+			}
+			// (c) no valid bin: no cap.
+			{
+				std::vector<double> q(5, 3.0), l(5, 300.0);
+				GrainSplit::GrainLevelTable(q, l, p, level, valid);
+				double cap = 0.0;
+				Require(!GrainSplit::GrainLevelCap(level, valid, p, 300.0, cap), "no valid bin -> no cap (N = N_local)");
+			}
+			// (d) a grain-free bin caps only its own range.
+			{
+				std::vector<double> q, l;
+				for (int i = 0; i < 20; ++i) { q.push_back(0.0); l.push_back(64.0); }
+				for (int i = 0; i < 20; ++i) { q.push_back(9.0); l.push_back(448.0); }
+				GrainSplit::GrainLevelTable(q, l, p, level, valid);
+				Require(level[0] < 0.02 && level[3] > 7.0, "bin 0 level ~ 2^-6, bin 3 level unaffected");
+				double cap = 0.0;
+				GrainSplit::GrainLevelCap(level, valid, p, 448.0, cap);
+				Require(cap == level[3], "at bin 3's centre the cap is bin 3's own level");
+			}
+			// (e) quantisation: level for quiet 8.7 within one 1/8-octave class.
+			{
+				std::vector<double> q(20, 8.7), l(20, 64.0);
+				GrainSplit::GrainLevelTable(q, l, p, level, valid);
+				const double r = std::pow(2.0, 1.0 / 8.0);
+				Require(level[0] >= 8.7 / r && level[0] <= 8.7 * r, "level of quiet 8.7 lies in [8.7 / 2^(1/8), 8.7 x 2^(1/8)]");
+			}
+		}
+
+		// 12-bit input (owner 2026-11-12): the law's limits are in ten-bit-equivalent units scaled by the source depth.
+		// A plane x4 at sourceBits 12 must give the ten-bit result x4 (linear law, class keys of 10-bit-equivalent energies).
+		TEST_METHOD(GrainSplitTwelveBitInputMatchesTenBitScaled)
+		{
+			const MixedPlanes m = MakeMixed(0, false);
+			const Plane gt = Grain(Spec::White, m.g, 3.0, 7u);
+			Plane y10 = m.s, y12 = m.s;
+			for (size_t i = 0; i < y10.v.size(); ++i) { y10.v[i] += gt.v[i]; y12.v[i] = 4.0 * y10.v[i]; }
+			GrainSplit::Params p10, p12; p12.sourceBits = 12;
+			const GrainSplit::Split a = GrainSplit::Compute(y10, m.g.scale, m.g.B, p10), b = GrainSplit::Compute(y12, m.g.scale, m.g.B, p12);
+			double worst = 0.0;
+			for (size_t i = 0; i < a.clean.v.size(); ++i) worst = (std::max)(worst, std::fabs(4.0 * a.clean.v[i] - b.clean.v[i]));
+			char buf[160];
+			std::snprintf(buf, sizeof(buf), "12-bit (x4 plane) vs 10-bit: max |4 clean10 - clean12| = %.3e codes", worst);
+			Log(buf);
+			Require(worst < 1e-6, std::string("12-bit equals 10-bit x4: ") + buf);
+			Require(GrainSplit::DepthScale(12) == 4.0 && GrainSplit::DepthScale(10) == 1.0 && GrainSplit::DepthScale(8) == 0.25, "DepthScale = 2^(bits-10)");
 		}
 
 		TEST_METHOD(GrainSplitV3HalfLawPieces)
