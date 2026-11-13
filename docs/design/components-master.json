@@ -82,6 +82,8 @@
         "src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h",
         "src/VP-V/modules/input/signal/DvGpuUnpackSession.h",
         "src/VP-V/modules/input/signal/DvTunnelMetadataExtension.h",
+        "src/VP-V/modules/input/signal/DvTunnelTapLaw.h",
+        "src/VP-V/modules/input/signal/tests/DvTunnelTapLawTests.cpp",
         "src/VideoProcessor-Lib/video_frame_formatter/DolbyVisionMetadataExtension.h",
         "src/VP-V/modules/input/signal/DvCompareCaptureSink.h",
         "src/VP-V/modules/input/signal/HdrInferenceChoice.h",
