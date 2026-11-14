@@ -82,7 +82,7 @@ Host diff: about -850 / +100 lines in `LibplaceboVideoRenderer.cpp`.
 
 - Compile check (x64 Release, `VideoProcessor-VPRenderer` + `VideoProcessor-Test`, via
   vp-build-slots-run.sh) with the patch applied in the work tree: 0 errors (log
-  `D:\codexideoprocessor\m2-entrance-logsuild3-compile.log`). The first attempt found one error: a
+  `D:\codex\videoprocessor\m2-entrance-logs\build3-compile.log`). The first attempt found one error: a
   local `std::string entrance` in the settings apply shadowed the member (now `this->entrance`).
 - CPU: `EntranceSegmentTests` 5/5 (single-threaded, `m2-entrance-logs	rx\entrance-segment.trx`).
   The filtered CPU suite runs at the verification point (after the independent audit).
