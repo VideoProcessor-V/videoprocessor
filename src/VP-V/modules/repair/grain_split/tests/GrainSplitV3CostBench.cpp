@@ -1,10 +1,10 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// repair.grain_split v3 cost bench (P10 v3, refs/116 s7): the lane kernel's six passes (HALF+across, DOWN, STATS, LEVEL, NMIN, APPLY; unit 4, WAIVER-P10V4-01: the pass count pin 5 -> 6 is an intended change)
+// repair.grain_split v3 cost bench (P10 v3, refs/116 s7): the lane kernel's seven passes (HALF+across, DOWN, STATS, REDUCE, LEVEL, NMIN, APPLY; unit 5, WAIVER-P10V5-01: 6 -> 7; unit 4, WAIVER-P10V4-01: the pass count pin 5 -> 6 is an intended change)
 // timed per pass with one pl_timer per pass on the hardware GPU, on R16 planes of 1080p and 2160p, Compact and Full, with the
 // lane kernel law (B = RegionEvidence::BlockSizeFor(h), scale B / 16): 20 warm-up and 120 timed frames. Also the dispatcher's
-// live form (tap upload + extend + six passes + finish) wall time. LOGS ONLY: no timing assertion (a measurement, not a gate).
+// live form (tap upload + extend + seven passes + finish) wall time. LOGS ONLY: no timing assertion (a measurement, not a gate).
 // Category GpuHardware: without VP_TEST_GPU=hardware it returns at once with a log line.
 #include "pch.h"
 #include "CppUnitTest.h"
@@ -186,14 +186,14 @@ public:
 				}
 				const Stat tt = StatOf(total), ww = StatOf(wall);
 				LogLine(Fmt("V3 cost %.0fx%.0f B %.0f ", w, h, B) + name + Fmt(" TOTAL (%.0f frames): gpu ms mean %.4f p95 %.4f max %.4f", kTimed, tt.mean, tt.p95, tt.peak) +
-					Fmt("; wall ms (6 passes + finish) mean %.4f p95 %.4f max %.4f", ww.mean, ww.p95, ww.peak));
+					Fmt("; wall ms (7 passes + finish) mean %.4f p95 %.4f max %.4f", ww.mean, ww.p95, ww.peak));
 
 				for (int s = 0; s < kPasses; ++s) pl_timer_destroy(gpu, &timers[s]);
 				for (pl_tex& t : outs) pl_tex_destroy(gpu, &t);
 				kernel.Release(gpu);
 			}
 
-			// The dispatcher's live form: tap upload + extend + six passes + finish, wall time per frame (Compact: the default).
+			// The dispatcher's live form: tap upload + extend + seven passes + finish, wall time per frame (Compact: the default).
 			{
 				SkeletonGpuDispatcher disp(gpu, false);
 				disp.AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel>(new VpLaneProducts::GrainSplitKernel(Storage::Compact)));
@@ -229,7 +229,7 @@ public:
 						if (f >= 0) wall.push_back(wms);
 					}
 					const Stat st = StatOf(wall);
-					LogLine(Fmt("V3 cost %.0fx%.0f B %.0f ", w, h, B) + "Compact live form (tap upload + extend + 6 passes + finish): wall ms" +
+					LogLine(Fmt("V3 cost %.0fx%.0f B %.0f ", w, h, B) + "Compact live form (tap upload + extend + 7 passes + finish): wall ms" +
 						Fmt(" mean %.4f p95 %.4f max %.4f; dispatcher MeasuredMs (last pass) %.4f", st.mean, st.p95, st.peak, disp.MeasuredMs(kP10GrainSplit)));
 				}
 				disp.Release();
