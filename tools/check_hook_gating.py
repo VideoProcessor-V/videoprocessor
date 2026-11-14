@@ -146,9 +146,6 @@ ALLOW_CALLEES = [
      "reason": "the ABI attach / extension query (abi\\RendererAbiBridge.h, VpvPluginGuard.h): the plumbing through which the "
                "VP-V settings module (and the Original overlay) reach the renderer at all; no pathway can run without it. "
                "Proof: LibplaceboPluginProxyTests, BillIdenticalSchemaTests."},
-    {"callee": r"VpStatusText::SetExtensionLines",
-     "reason": "status text only (control\\diagnostics): appends the extensions' status lines to the status dialog; writes "
-               "nothing the pipeline reads. Proof: StatusExtensionTests (Original = no extension lines)."},
     {"callee": r"PassTimers::Inbox::Motion\(\)\.DrainInto",
      "reason": "pass-timer telemetry drain (control\\diagnostics PassTimers): a pure observer of timing records; writes nothing "
                "Bill reads. Proof: PassTimersTests."},
@@ -161,10 +158,6 @@ ALLOW_CALLEES = [
      "reason": "teardown of the FX-RB warm-up worker (scaling\\rebase RebaseWarmupJob.h): the worker starts only on the VP-V "
                "pathway (its Frame() call carries !pipelineSlots.OriginalPathway()), but a live switch to Original must still "
                "stop a running worker at GPU release; no worker = no effect. Proof: RebaseWarmupGateTests."},
-    {"callee": r"captures\.OnFrameRendered",
-     "reason": "rendered-output capture requests (control\\diagnostics CaptureRequests): a pure observer of the finished frame "
-               "for screenshots / tests; writes nothing the pipeline reads. OriginalPathwayByteIdenticalToBill itself reads the "
-               "Original picture through it. Proof: RendererCaptureHarnessTests."},
     {"callee": r"VpDiagnostics::(TestAdapterFromEnvironment|D3D11DebugFromEnvironment)",
      "reason": "TEST / DEBUG ENVIRONMENT switches (control\\diagnostics DiagnosticsAdapter.h): VP_TEST_ADAPTER / VP_D3D11_DEBUG are "
                "unset in production, so the call does nothing; the capture harness decides the adapter for BOTH renders (refs/106, "
