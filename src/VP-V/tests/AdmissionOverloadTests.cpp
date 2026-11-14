@@ -199,7 +199,7 @@ namespace AdmissionOverloadTest
 			AdmissionFacts f = Facts(60.0, 6.0, 1.0);
 			f.aheadBytes[kP3AnalysisField] = 100;
 			f.aheadBytes[kP5MonitorTiles] = 50;
-			f.aheadConsumers[0] = AheadConsumer{ "TD", true, 6 };   // OD 11-14: aheadCompute from the declared need (6 = the ceiling itself)
+			f.aheadConsumers[0] = AheadConsumer{ "TD", true, kAheadCeiling };   // OD 11-14: aheadCompute from the declared need (= the ceiling itself)
 			f.queueFrames = 16;
 			f.queueAheadFrames = 15;
 			f.queueBytesPerFrame = 10;
@@ -207,15 +207,15 @@ namespace AdmissionOverloadTest
 			Result r = Admit(f);
 			Assert::IsTrue(r.admitted[kP5MonitorTiles]);
 			Assert::IsTrue(r.aheadAdmitted[kP3AnalysisField] && r.aheadAdmitted[kP5MonitorTiles]);
-			Assert::AreEqual(6, r.aheadFrames);
-			Assert::AreEqual(uint64_t(1060), r.aheadNeedBytes);
+			Assert::AreEqual(kAheadCeiling, r.aheadFrames);
+			Assert::AreEqual(uint64_t(kAheadCeiling) * (100 + 50) + 16 * 10, r.aheadNeedBytes);
 
 			f.vramGrantBytes = 1000;   // 1. the optional product moves to render time
 			r = Admit(f);
 			Assert::AreEqual(1u, r.aheadProductsDropped);
 			Assert::IsFalse(r.aheadAdmitted[kP5MonitorTiles]);
 			Assert::IsTrue(r.aheadAdmitted[kP3AnalysisField]);
-			Assert::AreEqual(6, r.aheadFrames);
+			Assert::AreEqual(kAheadCeiling, r.aheadFrames);
 			Assert::IsTrue(r.aheadLine.find("fewer products early") != std::string::npos);
 
 			f.vramGrantBytes = 500;    // 2. fewer frames ahead
@@ -273,15 +273,15 @@ namespace AdmissionOverloadTest
 			f.mode = LatencyMode::Standard;   // the ahead ceiling binds visibly (G7; OD 11-14 kAheadCeiling replaces kMaxLead 13)
 			f.queueFrames = 16;
 			f.vramGrantBytes = 2000;
-			f.aheadConsumers[0].need = 9;
+			f.aheadConsumers[0].need = kAheadCeiling + 3;
 			r = Admit(f);
 			Assert::AreEqual(kAheadCeiling, r.aheadFrames);
 			Assert::IsTrue(r.aheadBound == AheadBound::Ceiling);
-			Assert::IsTrue(r.aheadComputeLine.find("ceiling 6") != std::string::npos);
+			Assert::IsTrue(r.aheadComputeLine.find("ceiling " + std::to_string(kAheadCeiling)) != std::string::npos);
 		}
 
 		// OD 11-14 (lead10/design-queue-keyed-products.md s10): aheadCompute = min(max over ACTIVE consumers of the declared need,
-		// kAheadCeiling 6, queue frames ahead); 0 with no active consumer; a ceiling, not a target (the budget may plan lower); the binding
+		// kAheadCeiling, queue frames ahead); 0 with no active consumer; a ceiling, not a target (the budget may plan lower); the binding
 		// consumer and the bound (ceiling | budget | queue) are on the Ctrl+Alt+D line, and on Ctrl+I / Config status when ceiling or budget bind.
 		TEST_METHOD(AheadComputeIsTheLargestActiveNeedUnderTheCeiling)
 		{
@@ -299,7 +299,7 @@ namespace AdmissionOverloadTest
 
 			f.aheadConsumers[0] = AheadConsumer{ "motion", true, 4 };
 			f.aheadConsumers[1] = AheadConsumer{ "TD", true, 5 };
-			f.aheadConsumers[2] = AheadConsumer{ "idle", false, 6 };   // inactive: ignored
+			f.aheadConsumers[2] = AheadConsumer{ "idle", false, kAheadCeiling };   // inactive: ignored
 			r = Admit(f);
 			Assert::AreEqual(5, r.aheadFrames, L"the max of the ACTIVE declared needs");
 			Assert::AreEqual(5, r.aheadComputeFrames);
@@ -311,10 +311,10 @@ namespace AdmissionOverloadTest
 			r = Admit(f);
 			Assert::AreEqual(0, r.aheadFrames, L"no ACTIVE consumer gives 0");
 
-			f.aheadConsumers[0] = AheadConsumer{ "TD", true, 9 };
+			f.aheadConsumers[0] = AheadConsumer{ "TD", true, kAheadCeiling + 3 };
 			r = Admit(f);
-			Assert::AreEqual(6, r.aheadFrames, L"a request of 9 gives the ceiling 6");
-			Assert::AreEqual(std::string("ahead compute 6 (by TD; ceiling 6)"), r.aheadComputeLine);
+			Assert::AreEqual(kAheadCeiling, r.aheadFrames, L"a request above the ceiling gives the ceiling");
+			Assert::AreEqual("ahead compute " + std::to_string(kAheadCeiling) + " (by TD; ceiling " + std::to_string(kAheadCeiling) + ")", r.aheadComputeLine);
 			Assert::IsTrue(r.aheadComputeShown);
 
 			f.aheadConsumers[0].need = 4;
@@ -327,7 +327,7 @@ namespace AdmissionOverloadTest
 			f.vramGrantBytes = 100 * 2 + 16 * 10;   // the budget plans lower than the need (S-B): 2 frames
 			r = Admit(f);
 			Assert::AreEqual(4, r.aheadComputeFrames);
-			Assert::AreEqual(2, r.aheadFrames, L"6 / the need is a ceiling, not a target");
+			Assert::AreEqual(2, r.aheadFrames, L"the ceiling / the need is an upper bound, not a target");
 			Assert::AreEqual(std::string("ahead compute 2 (by TD; budget)"), r.aheadComputeLine);
 			Assert::IsTrue(r.aheadComputeShown);
 
