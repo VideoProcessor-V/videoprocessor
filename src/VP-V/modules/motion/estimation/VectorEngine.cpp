@@ -903,15 +903,16 @@ namespace VpMotion
 
 	// W1-C3: the pair's cell trust, computed once per pair and tolerance (the same OpticalFlowTrust functions as every consumer used
 	// to call itself: the producer's CostWeights / FbError when it worked them out, else the same maths on the raw fields).
-	const float* VectorEngine::FlowLease::CellTrust(float toleranceEnginePx) const
+	const float* VectorEngine::FlowLease::Trust(float toleranceEnginePx, bool backward) const
 	{
 		std::lock_guard<std::mutex> lock(trustMutex);
 		for (const TrustEntry& e : trusts)
-			if (std::memcmp(&e.tolerance, &toleranceEnginePx, sizeof(float)) == 0)   // bit-exact: one entry per value, a NaN included (the list stays bounded)
+			if (e.backward == backward && std::memcmp(&e.tolerance, &toleranceEnginePx, sizeof(float)) == 0)   // bit-exact: one entry per value, a NaN included (the list stays bounded)
 				return e.ok ? e.trust.data() : nullptr;
 		trusts.emplace_back();
 		TrustEntry& entry = trusts.back();
 		entry.tolerance = toleranceEnginePx;
+		entry.backward = backward;
 		std::vector<float>& trust = entry.trust;
 		bool& trustOk = entry.ok;
 		if (computes)
@@ -924,17 +925,24 @@ namespace VpMotion
 		const int blockPx = MotionAhead::Flow::kBlockPx;
 		const int blocksX = (f.halfW + blockPx - 1) / blockPx, blocksY = (f.halfH + blockPx - 1) / blockPx;
 		std::vector<float> blockCostLocal, cellErrorLocal;
+		// The forward direction uses the producer's CostWeights / FbError when it worked them out; the backward direction (fields
+		// swapped: the backward costs, FbError(backward, forward)) has no producer extra and is worked out here, once.
+		const std::vector<int16_t>& vec = backward ? f.backward : f.forward;
+		const std::vector<int16_t>& other = backward ? f.forward : f.backward;
+		const std::vector<uint8_t>& cost = backward ? f.backwardCost : f.forwardCost;
+		if (cells == 0 || vec.size() < cells * 2 || other.size() < cells * 2 || cost.size() < cells)
+			return nullptr;
 		const std::vector<float>* blockCost = &f.costWeight;
-		if (!(f.blocksX == blocksX && f.blocksY == blocksY && f.costWeight.size() == static_cast<size_t>(blocksX) * static_cast<size_t>(blocksY)))
+		if (backward || !(f.blocksX == blocksX && f.blocksY == blocksY && f.costWeight.size() == static_cast<size_t>(blocksX) * static_cast<size_t>(blocksY)))
 		{
-			if (!OpticalFlowTrust::CostWeights(f.forwardCost, f.gridW, f.gridH, grid, blockPx, blocksX, blocksY, blockCostLocal))
+			if (!OpticalFlowTrust::CostWeights(cost, f.gridW, f.gridH, grid, blockPx, blocksX, blocksY, blockCostLocal))
 				return nullptr;
 			blockCost = &blockCostLocal;
 		}
 		const std::vector<float>* cellError = &f.fbError;
-		if (cells == 0 || f.fbError.size() != cells)
+		if (backward || f.fbError.size() != cells)
 		{
-			if (!OpticalFlowTrust::FbError(f.forward, f.backward, f.gridW, f.gridH, grid, cellErrorLocal))
+			if (!OpticalFlowTrust::FbError(vec, other, f.gridW, f.gridH, grid, cellErrorLocal))
 				return nullptr;
 			cellError = &cellErrorLocal;
 		}

@@ -300,5 +300,15 @@ inline const char* MeanStepCutLine()
 )GLSL";
 }
 
+// L-B6 (coordinator ruling, doc 124 A1c): the TILE-CHANGE cut / fade judge, a named VARIANT of this unit. DetailPulse and
+// TextureRestore decide a cut or a fade from the share of 16-px tiles that changed (GPU reduce, per frame); that law and its
+// constants have ONE definition, here. Unchanged values (0.5 / 0.5): this is a move, not a behaviour change. Unifying it with the
+// histogram judge above is a separate later decision. The per-frame GPU form (one compute, two readers) is a 102b row.
+namespace TileChange
+{
+constexpr double kCutShare = 0.5;        // share of tiles changed beyond the cut codes: a cut (all references restart)
+constexpr double kFadeStepShare = 0.5;   // frame mean ramp per frame (x the allowance) over two frames: a fade
+} // namespace TileChange
+
 } // namespace CutFadeJudge
 } // namespace VpUnit

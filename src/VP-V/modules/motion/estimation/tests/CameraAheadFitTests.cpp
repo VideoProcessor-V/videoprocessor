@@ -22,6 +22,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstring>
+#include <map>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -39,11 +41,9 @@ namespace CameraAheadFitTestsNs
 	static_assert(!std::is_constructible<CameraLink::AheadCopy, const VpMotion::SeedField&>::value, "ahead from the seed");
 	static_assert(!std::is_base_of<VpMotion::VerifiedField, CameraLink::AheadCopy>::value, "ahead is not a verified field");
 	static_assert(!std::is_assignable<CameraLink::AheadCopy&, const VpMotion::VerifiedField&>::value, "verified field assigns to ahead");
-	// The trust block is the producer's (FlowExtras), not a camera choice.
-	static_assert(CameraLink::kEngineTrustBlockPx == MotionAhead::Flow::kBlockPx, "the engine trust block is the de-judder's");
 
 	// A synthetic engine pair: S10.5 vectors per 4 x 4 cell of an engineW x engineH luma.
-	struct Pair
+	struct Pair : public VpMotion::IFlowTrustMemo
 	{
 		int engineW = 0, engineH = 0, gridW = 0, gridH = 0;
 		double toSource = 2.0;   // source px per engine px
@@ -66,9 +66,31 @@ namespace CameraAheadFitTestsNs
 				bwd[i * 2 + 1] = static_cast<int16_t>(-fwd[i * 2 + 1]);
 			}
 		}
+		// The engine memo's stand-in (FlowView::CellTrust): OpticalFlowTrust::CellTrust of this pair's own arrays, one plane per tolerance
+		// (a real engine's lease does the same; its bit-equality is pinned by FlowOfTests, TheEngineMemoTrustEqualsTheRetiredPrivateRecompute).
+		const float* CellTrust(float tol) const override
+		{
+			uint32_t bits;
+			std::memcpy(&bits, &tol, sizeof(bits));
+			auto it = memo.find(bits);
+			if (it != memo.end())
+				return it->second.empty() ? nullptr : it->second.data();
+			std::vector<float> blockCost, cellError, trust;
+			const int blockPx = MotionAhead::Flow::kBlockPx;
+			const int blocksX = (engineW + blockPx - 1) / blockPx, blocksY = (engineH + blockPx - 1) / blockPx;
+			const bool ok = OpticalFlowTrust::CostWeights(cost, gridW, gridH, NvOpticalFlow::Engine::Grid, blockPx, blocksX, blocksY, blockCost) &&
+				OpticalFlowTrust::FbError(fwd, bwd, gridW, gridH, NvOpticalFlow::Engine::Grid, cellError) &&
+				OpticalFlowTrust::CellTrust(blockCost, blocksX, blocksY, cellError, gridW, gridH, NvOpticalFlow::Engine::Grid, blockPx, tol, trust);
+			auto& slot = memo[bits];
+			if (ok)
+				slot = std::move(trust);
+			return slot.empty() ? nullptr : slot.data();
+		}
+		mutable std::map<uint32_t, std::vector<float>> memo;
 		VpMotion::FlowView View(uint64_t seq) const
 		{
 			VpMotion::FlowView v;
+			v.trustMemo = this;
 			v.from = seq - 1;
 			v.to = seq;
 			v.gridW = gridW;
@@ -201,7 +223,7 @@ namespace VideoProcessorTest
 			Pair p(960, 540, 2.0);
 			p.Uniform(3.0, -1.0);
 			CameraLink::AheadCopy a;
-			Assert::IsTrue(CameraLink::CopyAhead(p.View(7), 7, a) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(CameraLink::CopyAhead(p.View(7), 7, 2.0f, a) == CameraLink::AheadRefusal::None);
 			Assert::AreEqual(240, a.gridW);
 			Assert::AreEqual(135, a.gridH);
 			Assert::AreEqual(8.0, a.CellSourcePx(), 1e-12, L"4 engine px x 2 source px per engine px");
@@ -209,16 +231,16 @@ namespace VideoProcessorTest
 			p.fwd[0] = 999;   // the engine's lease is replaced by the next FlowOf: the copy must not see it
 			Assert::AreEqual(before, a.forward[0], L"copied at once, never pointing into the view");
 			// Never guessed: wrong frame, no backward, inconsistent grid.
-			Assert::IsTrue(CameraLink::CopyAhead(p.View(7), 8, a) == CameraLink::AheadRefusal::NoPair);
+			Assert::IsTrue(CameraLink::CopyAhead(p.View(7), 8, 2.0f, a) == CameraLink::AheadRefusal::NoPair);
 			VpMotion::FlowView v = p.View(7);
 			v.rawBackward = nullptr;
-			Assert::IsTrue(CameraLink::CopyAhead(v, 7, a) == CameraLink::AheadRefusal::Incomplete);
+			Assert::IsTrue(CameraLink::CopyAhead(v, 7, 2.0f, a) == CameraLink::AheadRefusal::Incomplete);
 			v = p.View(7);
 			v.gridW += 1;
-			Assert::IsTrue(CameraLink::CopyAhead(v, 7, a) == CameraLink::AheadRefusal::Layout);
+			Assert::IsTrue(CameraLink::CopyAhead(v, 7, 2.0f, a) == CameraLink::AheadRefusal::Layout);
 			v = p.View(7);
 			v.cellEnginePx = 8;   // the cell size is read, not assumed: an 8-px cell does not fit this grid
-			Assert::IsTrue(CameraLink::CopyAhead(v, 7, a) == CameraLink::AheadRefusal::Layout);
+			Assert::IsTrue(CameraLink::CopyAhead(v, 7, 2.0f, a) == CameraLink::AheadRefusal::Layout);
 		}
 
 		TEST_METHOD(AHalfSizePairIsTheNativeCellGridAtFullSubPelDeterministically)
@@ -227,11 +249,11 @@ namespace VideoProcessorTest
 			Pair p(960, 540, 2.0);
 			p.Uniform(3.25, -0.5);
 			CameraLink::AheadCopy a;
-			Assert::IsTrue(CameraLink::CopyAhead(p.View(5), 5, a) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(CameraLink::CopyAhead(p.View(5), 5, 2.0f, a) == CameraLink::AheadRefusal::None);
 			CameraLink::FieldCopy f1, f2;
 			CameraLink::AheadConvertInfo info;
-			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 2.0f, 120, 68, f1, &info));
-			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 2.0f, 120, 68, f2));
+			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 120, 68, f1, &info));
+			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 120, 68, f2));
 			Assert::IsTrue(f1.origin == CameraLink::FieldOrigin::Ahead);
 			Assert::AreEqual(1, info.maxCellsPerBlock, L"native: one sample per cell, nothing pooled");
 			Assert::AreEqual(8.0, f1.blockSize, L"the native cell: 4 engine px x 2 source px");
@@ -244,7 +266,7 @@ namespace VideoProcessorTest
 			}
 			Assert::IsTrue(f1.fwdX == f2.fwdX && f1.fwdY == f2.fwdY && f1.fwdTrust == f2.fwdTrust, L"deterministic");
 			// A grid the pair does not cover is refused (never stretched).
-			Assert::IsFalse(CameraLink::AheadToSourceGrid(a, 2.0f, 240, 135, f1));
+			Assert::IsFalse(CameraLink::AheadToSourceGrid(a, 240, 135, f1));
 		}
 
 		TEST_METHOD(AQuarterSizePairGivesOneCellPerSourceBlock)
@@ -259,137 +281,110 @@ namespace VideoProcessorTest
 					p.bwd[i * 2] = static_cast<int16_t>(-(cx % 7));
 				}
 			CameraLink::AheadCopy a;
-			Assert::IsTrue(CameraLink::CopyAhead(p.View(5), 5, a) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(CameraLink::CopyAhead(p.View(5), 5, 2.0f, a) == CameraLink::AheadRefusal::None);
 			CameraLink::FieldCopy f;
 			CameraLink::AheadConvertInfo info;
-			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 2.0f, 240, 135, f, &info));
+			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 240, 135, f, &info));
 			Assert::AreEqual(1, info.maxCellsPerBlock);
 			Assert::AreEqual(16.0, f.blockSize);
 			for (int tx = 0; tx < 240; ++tx)
 				Assert::AreEqual(static_cast<float>((tx % 7) / 32.0 * 4.0), f.fwdX[static_cast<size_t>(tx)], 1e-6f, L"cell t, full sub-pel (1/32 engine px)");
 		}
 
-		TEST_METHOD(TheTrustIsTheEngineDefinitionAndIsMonotonic)
+		// L-B6 (WAIVER-B6-CELLTRUST): the camera holds NO trust arithmetic. CopyAhead copies the engine memo's CellTrust (FlowView::CellTrust)
+		// and the field's trust IS that copy, cell for cell; monotonic in inconsistency and in cost (the memo is the engine's definition).
+		TEST_METHOD(TheTrustIsTheEngineMemoCopiedAndIsMonotonic)
 		{
 			Pair p(320, 180, 2.0);
-			uint32_t r = 12345;
-			auto rnd = [&r]() { r = r * 1664525u + 1013904223u; return r >> 8; };
-			for (size_t i = 0; i < p.cost.size(); ++i)
-			{
-				p.fwd[i * 2] = static_cast<int16_t>(static_cast<int>(rnd() % 200) - 100);
-				p.fwd[i * 2 + 1] = static_cast<int16_t>(static_cast<int>(rnd() % 200) - 100);
-				p.bwd[i * 2] = static_cast<int16_t>(-p.fwd[i * 2] + static_cast<int>(rnd() % 64) - 32);
-				p.bwd[i * 2 + 1] = static_cast<int16_t>(-p.fwd[i * 2 + 1] + static_cast<int>(rnd() % 64) - 32);
-				p.cost[i] = static_cast<uint8_t>(rnd() % 60);
-			}
+			Randomise(p, 99u);
 			CameraLink::AheadCopy a;
-			Assert::IsTrue(CameraLink::CopyAhead(p.View(3), 3, a) == CameraLink::AheadRefusal::None);
-			std::vector<float> t;
-			Assert::IsTrue(CameraLink::AheadCellTrust(a, 1.5f, t));
+			Assert::IsTrue(CameraLink::CopyAhead(p.View(3), 3, 1.5f, a) == CameraLink::AheadRefusal::None);
+			Assert::AreEqual(1.5f, a.trustToleranceEnginePx, 0.0f);
+			Assert::AreEqual(a.Cells(), a.trust.size());
+			const float* memo = p.View(3).CellTrust(1.5f);
+			Assert::IsNotNull(memo);
+			for (size_t i = 0; i < a.trust.size(); ++i)
+				Assert::AreEqual(memo[i], a.trust[i], 0.0f, L"the copy is the memo, bit for bit");
 			const std::vector<float> ref = Mv5Trust(a, 1.5f);
-			Assert::AreEqual(ref.size(), t.size());
-			for (size_t i = 0; i < t.size(); ++i)
-				Assert::AreEqual(ref[i], t[i], 0.0f, L"bit-equal to MV5's costWeight x fbError");
-			// Monotonic. (a) Inconsistency: from a consistent pair (backward = -forward), any change of the backward vectors only raises the
-			// cells' forward/backward error, so no cell gains trust and the changed ones lose it.
-			// A uniform motion: every cell's centre lands on a cell with the same exact inverse, so the error starts at 0 everywhere.
-			CameraLink::AheadCopy clean = a;
-			for (size_t i = 0; i < clean.Cells(); ++i)
+			for (size_t i = 0; i < a.trust.size(); ++i)
+				Assert::AreEqual(ref[i], a.trust[i], 0.0f, L"bit-equal to MV5's costWeight x fbError");
+			// A view whose memo cannot form the trust (no memo, as a fake or an older engine): Incomplete, never a guessed trust.
+			VpMotion::FlowView noMemo = p.View(3);
+			noMemo.trustMemo = nullptr;
+			CameraLink::AheadCopy none;
+			Assert::IsTrue(CameraLink::CopyAhead(noMemo, 3, 1.5f, none) == CameraLink::AheadRefusal::Incomplete);
+			// A copy without a trust is not converted (never guessed).
+			CameraLink::AheadCopy blank = a;
+			blank.trust.clear();
+			CameraLink::FieldCopy fNone;
+			Assert::IsFalse(CameraLink::AheadToSourceGrid(blank, 40, 23, fNone));
+			// Monotonic. (a) Inconsistency: from a consistent pair, changing the backward vectors only raises the error.
+			Pair clean(320, 180, 2.0);
+			for (size_t i = 0; i < clean.cost.size(); ++i)
 			{
-				clean.forward[i * 2] = 37;
-				clean.forward[i * 2 + 1] = -21;
-				clean.backward[i * 2] = -37;
-				clean.backward[i * 2 + 1] = 21;
+				clean.fwd[i * 2] = 37;
+				clean.fwd[i * 2 + 1] = -21;
+				clean.bwd[i * 2] = -37;
+				clean.bwd[i * 2 + 1] = 21;
 			}
-			std::vector<float> t0, t1, t2;
-			Assert::IsTrue(CameraLink::AheadCellTrust(clean, 1.5f, t0));
-			CameraLink::AheadCopy inconsistent = clean;
-			for (size_t i = 0; i < inconsistent.backward.size(); i += 5)
-				inconsistent.backward[i] = static_cast<int16_t>(inconsistent.backward[i] + 200);
-			Assert::IsTrue(CameraLink::AheadCellTrust(inconsistent, 1.5f, t1));
+			Pair inconsistent = clean;
+			inconsistent.memo.clear();
+			for (size_t i = 0; i < inconsistent.bwd.size(); i += 5)
+				inconsistent.bwd[i] = static_cast<int16_t>(inconsistent.bwd[i] + 200);
+			CameraLink::AheadCopy c0, c1, c2;
+			Assert::IsTrue(CameraLink::CopyAhead(clean.View(3), 3, 1.5f, c0) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(CameraLink::CopyAhead(inconsistent.View(3), 3, 1.5f, c1) == CameraLink::AheadRefusal::None);
 			size_t lower = 0;
-			for (size_t i = 0; i < t0.size(); ++i)
+			for (size_t i = 0; i < c0.trust.size(); ++i)
 			{
-				Assert::IsTrue(t1[i] <= t0[i] + 1e-6f, L"a higher inconsistency never gives a higher trust");
-				lower += t1[i] < t0[i] ? 1u : 0u;
+				Assert::IsTrue(c1.trust[i] <= c0.trust[i] + 1e-6f, L"a higher inconsistency never gives a higher trust");
+				lower += c1.trust[i] < c0.trust[i] ? 1u : 0u;
 			}
 			Assert::IsTrue(lower > 0, L"the inconsistent cells are trusted less");
 			// (b) Cost: one cell made far less sure: its own trust never rises.
-			CameraLink::AheadCopy costly = clean;
-			const size_t c = costly.Cells() / 2;
-			costly.forwardCost[c] = 255;
-			Assert::IsTrue(CameraLink::AheadCellTrust(costly, 1.5f, t2));
-			Assert::IsTrue(t2[c] <= t0[c] + 1e-6f, L"a higher cost never gives a higher trust");
-			// Native: the field's trust IS the cell trust, cell for cell.
+			Pair costly = clean;
+			costly.memo.clear();
+			const size_t c = costly.cost.size() / 2;
+			costly.cost[c] = 255;
+			Assert::IsTrue(CameraLink::CopyAhead(costly.View(3), 3, 1.5f, c2) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(c2.trust[c] <= c0.trust[c] + 1e-6f, L"a higher cost never gives a higher trust");
+			// Native: the field's trust IS the copied cell trust, cell for cell.
 			CameraLink::FieldCopy f;
-			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 1.5f, 40, 23, f));
-			Assert::IsTrue(f.fwdTrust == t, L"one trust per native cell");
+			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 40, 23, f));
+			Assert::IsTrue(f.fwdTrust == a.trust, L"one trust per native cell");
 		}
 
-		// W1-C3 (doc 93 D3/D5): the camera reads the producer's extras (whole-frame vote, cost weight, forward/backward error) instead of
-		// recomputing them; byte identity: the same OpticalFlowTrust / FlowGlobal functions on the same inputs, so the trust and the prior
-		// are bit-equal to the recompute path. Extras made with other arithmetic (general_rate_fixes off, another cell / block / unit) are
-		// not taken.
-		TEST_METHOD(TheProducerExtrasGiveBitEqualTrustAndGlobalAndOtherArithmeticIsNotTaken)
+		// W1-C3 (doc 93 D3/D5): the camera reads the producer's whole-frame vote instead of recomputing it; the vote equals the camera's
+		// own FlowGlobal (general on) bit for bit. A vote made with other arithmetic (general_rate_fixes off) is not taken.
+		TEST_METHOD(TheProducerVoteIsBitEqualAndOtherArithmeticIsNotTaken)
 		{
 			Pair p(320, 180, 2.0);
 			Randomise(p, 777u);
 			const MotionAhead::Flow f = FlowOfPair(p, true);
 			CameraLink::AheadCopy withExtras, without;
-			Assert::IsTrue(CameraLink::CopyAhead(ViewWithExtras(p, f, 3), 3, withExtras) == CameraLink::AheadRefusal::None);
-			Assert::IsTrue(CameraLink::CopyAhead(p.View(3), 3, without) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(CameraLink::CopyAhead(ViewWithExtras(p, f, 3), 3, 1.5f, withExtras) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(CameraLink::CopyAhead(p.View(3), 3, 1.5f, without) == CameraLink::AheadRefusal::None);
 			Assert::IsTrue(withExtras.haveProducerGlobal);
 			Assert::IsFalse(without.haveProducerGlobal);
-			Assert::AreEqual(withExtras.Cells(), withExtras.fbError.size());
-			Assert::IsTrue(without.fbError.empty() && without.costWeight.empty());
-			std::vector<float> t1, t0;
-			Assert::IsTrue(CameraLink::AheadCellTrust(withExtras, 1.5f, t1));
-			Assert::IsTrue(CameraLink::AheadCellTrust(without, 1.5f, t0));
-			const std::vector<float> ref = Mv5Trust(without, 1.5f);
-			Assert::AreEqual(t0.size(), t1.size());
-			bool someBelowOne = false;
-			for (size_t i = 0; i < t0.size(); ++i)
-			{
-				Assert::AreEqual(t0[i], t1[i], 0.0f, L"the extras path is bit-equal to the recompute path");
-				Assert::AreEqual(ref[i], t1[i], 0.0f);
-				someBelowOne = someBelowOne || t1[i] < 1.0f;
-			}
-			Assert::IsTrue(someBelowOne, L"the inputs exercise the weighting");
-			// The prior: the producer's vote equals the camera's own FlowGlobal (general on) on the copied fields, bit for bit.
+			Assert::IsTrue(withExtras.trust == without.trust, L"the producer's extras do not change the engine trust");
 			float g[4] = {}, second[4] = {};
 			MotionAhead::FlowGlobal(without.forward, without.forwardCost, without.gridW, without.gridH, g, second);
 			for (int k = 0; k < 4; ++k)
 				Assert::AreEqual(g[k], withExtras.producerGlobal[k], 0.0f, L"the producer's whole-frame vote = the camera's");
-			// The fields on the source grid are unchanged by the extras.
 			CameraLink::FieldCopy a1, a0;
-			Assert::IsTrue(CameraLink::AheadToSourceGrid(withExtras, 1.5f, 40, 23, a1));
-			Assert::IsTrue(CameraLink::AheadToSourceGrid(without, 1.5f, 40, 23, a0));
+			Assert::IsTrue(CameraLink::AheadToSourceGrid(withExtras, 40, 23, a1));
+			Assert::IsTrue(CameraLink::AheadToSourceGrid(without, 40, 23, a0));
 			Assert::IsTrue(a1.fwdTrust == a0.fwdTrust && a1.fwdX == a0.fwdX && a1.fwdY == a0.fwdY);
-			// general_rate_fixes off on the producer: its vote is other arithmetic, the camera votes itself.
 			const MotionAhead::Flow off = FlowOfPair(p, false);
 			CameraLink::AheadCopy offCopy;
-			Assert::IsTrue(CameraLink::CopyAhead(ViewWithExtras(p, off, 3), 3, offCopy) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(CameraLink::CopyAhead(ViewWithExtras(p, off, 3), 3, 1.5f, offCopy) == CameraLink::AheadRefusal::None);
 			Assert::IsFalse(offCopy.haveProducerGlobal, L"a vote made with general off is not taken");
-			// Another trust block / cell size / unit, or one plane missing: the planes are not taken, the trust is computed (still equal).
-			for (int c = 0; c < 4; ++c)
-			{
-				VpMotion::FlowView other = ViewWithExtras(p, f, 3);
-				if (c == 0) other.extrasBlockPx = 16;
-				if (c == 1) other.extrasCellPx = 8;
-				if (c == 2) other.extrasUnitsPerEnginePx = 16.0;
-				if (c == 3) other.fbError = nullptr;
-				CameraLink::AheadCopy otherCopy;
-				Assert::IsTrue(CameraLink::CopyAhead(other, 3, otherCopy) == CameraLink::AheadRefusal::None);
-				Assert::IsTrue(otherCopy.costWeight.empty() && otherCopy.fbError.empty(), L"other arithmetic: both planes or neither");
-				std::vector<float> t2;
-				Assert::IsTrue(CameraLink::AheadCellTrust(otherCopy, 1.5f, t2));
-				Assert::IsTrue(t2 == t0);
-			}
 		}
 
-		// W1-C3 cost line: the camera worker's per-pair trust + prior, recomputed (before) and read from the producer's extras (after),
-		// at the engine grids of a 1080p source (240 x 135 cells) and a 2160p source (480 x 270). Logged, never gated (timing).
-		TEST_METHOD(CostLineCameraTrustAndPriorBeforeAndAfter)
+		// W1-C3 cost line: the camera's per-pair copy + prior at the engine grids of a 1080p source (240 x 135 cells) and a 2160p source
+		// (480 x 270): the vote recomputed (before) and read from the producer's extras (after); the trust is a copy of the memo in both.
+		// Logged, never gated (timing).
+		TEST_METHOD(CostLineCameraCopyAndPriorBeforeAndAfter)
 		{
 			const int sizes[2][2] = { { 960, 540 }, { 1920, 1080 } };
 			for (int s = 0; s < 2; ++s)
@@ -399,32 +394,29 @@ namespace VideoProcessorTest
 				const MotionAhead::Flow f = FlowOfPair(p, true);
 				const VpMotion::FlowView plainView = p.View(3), extrasView = ViewWithExtras(p, f, 3);
 				const int reps = 20;
-				std::vector<float> t;
 				float g[4] = {}, second[4] = {};
 				double sink = 0;
 				const auto t0 = std::chrono::steady_clock::now();
 				for (int r = 0; r < reps; ++r)
 				{
 					CameraLink::AheadCopy a;
-					CameraLink::CopyAhead(plainView, 3, a);
+					CameraLink::CopyAhead(plainView, 3, 1.5f, a);
 					MotionAhead::FlowGlobal(a.forward, a.forwardCost, a.gridW, a.gridH, g, second);
-					CameraLink::AheadCellTrust(a, 1.5f, t);
-					sink += t.empty() ? 0.0 : t[0] + g[0];
+					sink += a.trust.empty() ? 0.0 : a.trust[0] + g[0];
 				}
 				const auto t1 = std::chrono::steady_clock::now();
 				for (int r = 0; r < reps; ++r)
 				{
 					CameraLink::AheadCopy a;
-					CameraLink::CopyAhead(extrasView, 3, a);
+					CameraLink::CopyAhead(extrasView, 3, 1.5f, a);
 					for (int k = 0; k < 4; ++k) g[k] = a.producerGlobal[k];
-					CameraLink::AheadCellTrust(a, 1.5f, t);
-					sink += t.empty() ? 0.0 : t[0] + g[0];
+					sink += a.trust.empty() ? 0.0 : a.trust[0] + g[0];
 				}
 				const auto t2 = std::chrono::steady_clock::now();
 				const double before = std::chrono::duration<double, std::milli>(t1 - t0).count() / reps;
 				const double after = std::chrono::duration<double, std::milli>(t2 - t1).count() / reps;
 				char line[256];
-				std::snprintf(line, sizeof(line), "W1C3_COST camera grid=%dx%d copy+global+trust before_ms=%.3f after_ms=%.3f (sink %.1f)",
+				std::snprintf(line, sizeof(line), "W1C3_COST camera grid=%dx%d copy+global before_ms=%.3f after_ms=%.3f (sink %.1f)",
 					p.gridW, p.gridH, before, after, sink);
 				Logger::WriteMessage(line);
 				Assert::IsTrue(before > 0.0 && after > 0.0);
@@ -474,9 +466,9 @@ namespace VideoProcessorTest
 			Pair p(960, 540, 2.0);
 			p.Uniform(2.0, 0.0);
 			CameraLink::AheadCopy a;
-			Assert::IsTrue(CameraLink::CopyAhead(p.View(5), 5, a) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(CameraLink::CopyAhead(p.View(5), 5, 2.0f, a) == CameraLink::AheadRefusal::None);
 			CameraLink::FieldCopy f;
-			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 2.0f, 120, 68, f));
+			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 120, 68, f));
 			CameraLink::PairFacts facts;
 			facts.pairSeconds = 1.0 / 24;
 			CameraModel::PairInput in;
@@ -497,9 +489,9 @@ namespace VideoProcessorTest
 			Pair p(960, 540, 2.0);
 			p.Uniform(3.0, -1.0);
 			CameraLink::AheadCopy a;
-			Assert::IsTrue(CameraLink::CopyAhead(p.View(5), 5, a) == CameraLink::AheadRefusal::None);
+			Assert::IsTrue(CameraLink::CopyAhead(p.View(5), 5, 2.0f, a) == CameraLink::AheadRefusal::None);
 			CameraLink::FieldCopy f;
-			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 2.0f, 120, 68, f));
+			Assert::IsTrue(CameraLink::AheadToSourceGrid(a, 120, 68, f));
 			CameraLink::PairFacts facts;
 			facts.pairSeconds = 1.0 / 24;
 			CameraModel::PairInput in;
@@ -719,7 +711,7 @@ namespace VideoProcessorTest
 			s.p7Wanted = true;
 			s.aheadFit = true;
 			core.OnSettings(s);
-			core.SetAheadSource([](uint64_t, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
+			core.SetAheadSource([](uint64_t, float, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
 			core.AttachOnTime(SourceOf(onTime), "test lane");
 			core.AttachGraph(bridge.table.get(), bridge.bytes.get(), bridge.indicator.get());
 			Assert::IsTrue(core.AheadActive() && core.HasThread());
@@ -801,7 +793,7 @@ namespace VideoProcessorTest
 			s.aheadFit = true;
 			core.OnSettings(s);
 			std::atomic<uint64_t> epoch{ 5 };
-			core.SetAheadSource([](uint64_t, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
+			core.SetAheadSource([](uint64_t, float, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
 			core.SetP2EpochSource([&epoch]() { return epoch.load(); });
 			core.AttachOnTime(SourceOf(onTime), "test lane");
 			core.AttachGraph(bridge.table.get(), bridge.bytes.get(), bridge.indicator.get());
@@ -849,7 +841,7 @@ namespace VideoProcessorTest
 			s.p7Wanted = true;
 			s.aheadFit = true;
 			core.OnSettings(s);
-			core.SetAheadSource([](uint64_t, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::EpochMoved; }, CameraLink::PairFactsProvider());
+			core.SetAheadSource([](uint64_t, float, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::EpochMoved; }, CameraLink::PairFactsProvider());
 			core.SetAheadGrid(120, 68);
 			core.AttachGraph(bridge.table.get(), bridge.bytes.get(), bridge.indicator.get());
 			CameraLink::FramePhaseFacts f;
@@ -878,7 +870,7 @@ namespace VideoProcessorTest
 			s.aheadFit = true;
 			core.OnSettings(s);
 			std::atomic<uint64_t> epoch{ 5 };
-			core.SetAheadSource([](uint64_t, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
+			core.SetAheadSource([](uint64_t, float, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
 			core.SetP2EpochSource([&epoch]() { return epoch.load(); });
 			core.AttachOnTime(SourceOf(onTime), "test lane");
 			core.AttachGraph(bridge.table.get(), bridge.bytes.get(), bridge.indicator.get());
@@ -914,9 +906,9 @@ namespace VideoProcessorTest
 			Pair p(960, 540, 2.0);
 			p.Uniform(2.0, 0.0);
 			std::vector<uint64_t> asked;
-			core.SetAheadSource([&p, &asked](uint64_t seq, CameraLink::AheadCopy& out) {
+			core.SetAheadSource([&p, &asked](uint64_t seq, float tol, CameraLink::AheadCopy& out) {
 				asked.push_back(seq);
-				return seq <= 12 ? CameraLink::CopyAhead(p.View(seq), seq, out) : CameraLink::AheadRefusal::NoPair;
+				return seq <= 12 ? CameraLink::CopyAhead(p.View(seq), seq, tol, out) : CameraLink::AheadRefusal::NoPair;
 			}, CameraLink::PairFactsProvider());
 			core.SetAheadGrid(120, 68);
 			core.AttachGraph(bridge.table.get(), bridge.bytes.get(), bridge.indicator.get());
@@ -949,7 +941,7 @@ namespace VideoProcessorTest
 			s.deterministic = true;
 			core.OnSettings(s);
 			int calls = 0;
-			core.SetAheadSource([&calls](uint64_t, CameraLink::AheadCopy&) { ++calls; return CameraLink::AheadRefusal::NoPair; },
+			core.SetAheadSource([&calls](uint64_t, float, CameraLink::AheadCopy&) { ++calls; return CameraLink::AheadRefusal::NoPair; },
 				CameraLink::PairFactsProvider());
 			core.AttachGraph(bridge.table.get(), bridge.bytes.get(), bridge.indicator.get());
 			Assert::IsFalse(core.AheadActive());
@@ -978,7 +970,7 @@ namespace VideoProcessorTest
 			s.p7Wanted = true;   // camera on, ahead fit off
 			core.OnSettings(s);
 			int calls = 0;
-			core.SetAheadSource([&calls](uint64_t, CameraLink::AheadCopy&) { ++calls; return CameraLink::AheadRefusal::NoPair; },
+			core.SetAheadSource([&calls](uint64_t, float, CameraLink::AheadCopy&) { ++calls; return CameraLink::AheadRefusal::NoPair; },
 				CameraLink::PairFactsProvider());
 			core.AttachGraph(bridge.table.get(), bridge.bytes.get(), bridge.indicator.get());
 			Assert::IsFalse(core.AheadActive());
@@ -1020,7 +1012,7 @@ namespace VideoProcessorTest
 			s.p7Wanted = true;
 			s.aheadFit = true;
 			core.OnSettings(s);
-			core.SetAheadSource([](uint64_t, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
+			core.SetAheadSource([](uint64_t, float, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
 			core.AttachOnTime(SourceOf(onTime), "test lane");
 			core.AttachGraph(bridge.table.get(), bridge.bytes.get(), bridge.indicator.get());
 			CameraLink::FramePhaseFacts f;
@@ -1072,8 +1064,8 @@ namespace VideoProcessorTest
 			core.OnSettings(s);
 			Pair p(960, 540, 2.0);
 			p.Uniform(2.0, 0.0);
-			core.SetAheadSource([&p](uint64_t seq, CameraLink::AheadCopy& out) {
-				return seq <= 10 ? CameraLink::CopyAhead(p.View(seq), seq, out) : CameraLink::AheadRefusal::NoPair;
+			core.SetAheadSource([&p](uint64_t seq, float tol, CameraLink::AheadCopy& out) {
+				return seq <= 10 ? CameraLink::CopyAhead(p.View(seq), seq, tol, out) : CameraLink::AheadRefusal::NoPair;
 			}, CameraLink::PairFactsProvider());
 			core.SetAheadGrid(120, 68);
 			core.AttachOnTime(SourceOf(onTime), "test lane");
@@ -1101,7 +1093,7 @@ namespace VideoProcessorTest
 			s.p7Wanted = true;
 			s.aheadFit = true;
 			core.OnSettings(s);
-			core.SetAheadSource([](uint64_t, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
+			core.SetAheadSource([](uint64_t, float, CameraLink::AheadCopy&) { return CameraLink::AheadRefusal::NoPair; }, CameraLink::PairFactsProvider());
 			core.AttachGraph(bridge.table.get(), bridge.bytes.get(), bridge.indicator.get());
 			CameraLink::FramePhaseFacts f;
 			f.seq = f.renderSeq = 1;

@@ -300,7 +300,7 @@ namespace DetailPulseModel
 			const bool aheadValid = aheadSequence != 0 && sequence != 0 && aheadSequence == sequence + 1 &&
 				aheadW == luma.w && aheadH == luma.h && aheadScale == scale;
 			const double cutCodes = DetailPulse::CutCodes(s.bitrateQuality, s.colorDepth);
-			bool cut = nValid > 0 && fs.cutShare > DetailPulse::kCutShare;
+			bool cut = nValid > 0 && fs.cutShare > VpUnit::CutFadeJudge::TileChange::kCutShare;
 			if (field) cut = cut && fs.untrustedShare > 0.5;
 			bool fade = false;
 			if (nValid >= 2)

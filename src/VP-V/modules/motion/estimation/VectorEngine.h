@@ -459,13 +459,16 @@ namespace VpMotion
 			struct TrustEntry
 			{
 				float tolerance = 0.0f;
+				bool backward = false;   // L-B6: the backward direction's plane (fields swapped)
 				bool ok = false;
 				std::vector<float> trust;
 			};
 			std::atomic<unsigned long long>* computes = nullptr;
 			mutable std::mutex trustMutex;
 			mutable std::list<TrustEntry> trusts;
-			const float* CellTrust(float toleranceEnginePx) const override;
+			const float* CellTrust(float toleranceEnginePx) const override { return Trust(toleranceEnginePx, false); }
+			const float* CellTrustBackward(float toleranceEnginePx) const override { return Trust(toleranceEnginePx, true); }
+			const float* Trust(float toleranceEnginePx, bool backward) const;
 		};
 		mutable std::mutex flowMutex_;
 		mutable std::shared_ptr<FlowLease> flowLease_;
