@@ -11,6 +11,7 @@
 #include <VP-V/core/PassTimerInbox.h>
 #include <VP-V/core/PostPresentSpare.h>
 #include <VP-V/core/ReserveRows.h>
+#include <VP-V/modules/control/skeleton/SlotBudgetFeedHost.h>
 #include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
@@ -344,6 +345,7 @@ namespace Vpv
 			std::string shownWaiting;
 			bool shownBundle = false;
 			uint8_t shownQueueWired = 0xFF;   // the queue-delivery state the cached status text was built for
+			Vpv::Skeleton::SlotBudgetFeed budgetFeed;   // S0: feeds spare.SetBudget once per source frame + Presenter::spareSlotMs (SlotBudgetFeed.h)
 			VpSkeleton::SpareHost spare;       // B3-Z Z2: the post-present spare slot, driven by R12 AfterPresent (OnAfterPresent)
 			uint64_t shownQueueKey = ~uint64_t(0);   // the queue-in-use / starve state the cached status text was built for
 
@@ -1268,6 +1270,7 @@ namespace Vpv
 				}
 				return false;
 			}
+			if (c.phase == RE::FramePhase::Entrance) { if (const std::shared_ptr<HostState> e = hosts_.Find(c.host)) e->budgetFeed.NoteCaptureRate(c.captureRateHz); return false; }   // S0: measured rate for the slot budget
 			if (c.phase != RE::FramePhase::Begin && c.phase != RE::FramePhase::AfterRender)
 				return false;
 			const std::shared_ptr<HostState> st = hosts_.Find(c.host);
@@ -1302,8 +1305,7 @@ namespace Vpv
 				return;
 			const VpSkeleton::SpareTrigger trigger = p.kind == RE::AfterPresentKind::AfterLastExtra ? VpSkeleton::SpareTrigger::AfterLastExtra :
 				p.kind == RE::AfterPresentKind::NoExtras ? VpSkeleton::SpareTrigger::PostPresentNoExtras : VpSkeleton::SpareTrigger::BeforeDequeueWait;
-			st->spare.NotePresented(static_cast<uint64_t>(c.seq), p.cadenceRepeat);
-			st->spare.Fire(trigger);
+			st->budgetFeed.OnAfterPresent(st->spare, Vpv::Skeleton::FactsOf(c, p, trigger, st->timing.lastRenderOnlyMs, st->periodMs), p.presenter);   // S0
 		}
 
 		// The input-queue term of the lane lead. CALL CONTRACT: any thread, any rate (the host calls it once per frame; calls in bursts or several
@@ -1814,6 +1816,7 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 			}
 			else
 				line = std::string("analysis lane ") + mode + ": " + (st.waiting.empty() ? std::string("starting") : st.waiting);
+			full.push_back(st.budgetFeed.StatusLine());   // S0: the spare slot budget, never silent (rule 5)
 			{
 				// Ctrl+I / Ctrl+Alt+D: the queue the lane is built for and the regulator's input, in plain words.
 				const QueueShape& fq = st.queueFed;
