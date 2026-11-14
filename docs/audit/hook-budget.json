@@ -18,7 +18,7 @@
   "src/VideoProcessor-Lib/UnifiedProfileRuntime.cpp": 1,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp": 3,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.h": 1,
-  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 142,
+  "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp": 141,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h": 15,
   "src/VideoProcessor-VPRenderer/LibplaceboPluginExports.cpp": 2
  },
