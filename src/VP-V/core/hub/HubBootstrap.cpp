@@ -12,7 +12,6 @@
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/capture/CaptureExtension.h>
 #include <VP-V/modules/input/capture/SourcePlanes.h>
-#include <VP-V/modules/input/source_analysis/regions/EdgeMapFill.h>
 #include <VP-V/modules/input/queue_timing/IngressPolicy.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraExtension.h>
@@ -48,7 +47,6 @@ namespace
 		Vpv::Skeleton::RegisterSkeletonModule();
 		// L-CORE (P13 source-plane views): after the skeleton module, whose owner registration it uses; an observer of Begin / Entrance.
 		Vpv::Capture::RegisterSourcePlanesModule();
-		Vpv::Regions::RegisterEdgeMapModule();   // L-B5: kEdgeMap owner fill (needs the skeleton + P13 views)
 		Vpv::Camera::RegisterCameraExtension();
 		// The de-judder / per-refresh timeline (M2 P5b): after the vector engine and the camera link, before the
 		// entrance and core segments (doc 59 2.2 list order); its views, PlanOutputs and the QueueFlush steering reset.
