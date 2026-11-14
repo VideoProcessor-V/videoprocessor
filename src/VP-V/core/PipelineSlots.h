@@ -46,7 +46,7 @@ namespace PipelineSlots
 	{
 		InputCapture, InputSignal, InputQueueTiming, InputSourceAnalysis, MotionEstimation,
 		ScalingRebase, RepairEncoding, RepairDeband, RepairTextureRestore, ScalingRoute4k,
-		ScalingRefine, ScalingChromaUpscale, MotionVectorDelivery, MotionConsumers, ScalingGeometry,
+		ScalingRefine, ScalingChromaUpscale, ScalingShared, MotionVectorDelivery, MotionConsumers, ScalingGeometry,
 		ScalingOutput, ColourToneGamut, ColourExtendedRange, ColourSdrToneShape, ColourAppearance,
 		DriveLedMeasure, DriveLedCompensation, DriveBlackLevel, OutputCalibrationLut, OutputDither,
 		OutputPresentation, DriveProjectorControl, ControlNetRuntime, ControlDiagnostics, ControlConfig,
@@ -82,6 +82,7 @@ namespace PipelineSlots
 		{ Id::ScalingRoute4k, "scaling.route_4k", Side::Input, 100, HookPoint::Prepass, Status::Placeholder, Origin::Vp },
 		{ Id::ScalingRefine, "scaling.refine", Side::Input, 110, HookPoint::Prepass, Status::Placeholder, Origin::Vp },
 		{ Id::ScalingChromaUpscale, "scaling.chroma_upscale", Side::Input, 120, HookPoint::Prepass, Status::Placeholder, Origin::Vp },
+		{ Id::ScalingShared, "scaling.shared", Side::Input, 125, HookPoint::Host, Status::Placeholder, Origin::Vp },
 		{ Id::MotionVectorDelivery, "motion.vector_delivery", Side::Processing, 130, HookPoint::Host, Status::Partial, Origin::Vp },
 		{ Id::MotionConsumers, "motion.consumers", Side::Processing, 140, HookPoint::Prepass, Status::Built, Origin::Vp },
 		{ Id::ScalingGeometry, "scaling.geometry", Side::Processing, 150, HookPoint::Libplacebo, Status::Built, Origin::Mixed },

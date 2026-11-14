@@ -422,6 +422,7 @@
         "scaling.route_4k",
         "scaling.refine",
         "scaling.chroma_upscale",
+        "scaling.shared",
         "scaling.geometry",
         "scaling.output"
       ],
