@@ -40,6 +40,29 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(N2.classify_line("int n = flags >> 4;"), [])
         self.assertEqual(N2.classify_line("x = luma >> 3;"), [])
 
+    def test_named_shift_constant_counts_like_the_literal(self):
+        # the 11-14 evasion: `>> 6` renamed to a constant equal to 6 must still be a hit
+        src = "constexpr int kAxisFractionBits = 6;\nauto y = luma_word >> kAxisFractionBits;\n"
+        hits = N2.scan_text("a.cpp", src, {})
+        self.assertEqual([h["pattern"] for h in hits], ["shift"])
+        self.assertEqual(N2.classify_line("v = luma >> kQ", {"kQ"}), ["shift"])
+        self.assertEqual(N2.classify_line("v = luma >> ns::kQ", {"kQ"}), ["shift"])
+        self.assertEqual(N2.classify_line("v = luma >> kQuad", {"kQ"}), [])
+
+    def test_named_constant_defined_in_another_file(self):
+        with tempfile.TemporaryDirectory() as r:
+            _w(r, "src/VP-V/a/Axis.h", "constexpr int kAxisFractionBits = 6;\n")
+            _w(r, "src/VP-V/a/B.cpp", "auto y = luma;\n")
+            self.assertEqual(_run(r, "--write-baseline")[0], 0)
+            _w(r, "src/VP-V/a/B.cpp", "auto y = luma >> kAxisFractionBits;\n")
+            rc, out = _run(r)
+            self.assertEqual(rc, 1)
+            self.assertIn("GREW src/VP-V/a/B.cpp", out)
+
+    def test_named_constants_of_other_values_or_context_are_not_hits(self):
+        src = "constexpr int kMode = 3;\nconstexpr int kBits = 6;\nauto a = luma >> kMode;\nauto b = flags >> kBits;\n"
+        self.assertEqual(N2.scan_text("a.cpp", src, {}), [])
+
     def test_u8(self):
         self.assertEqual(N2.classify_line("std::vector<uint8_t> pixelBuf;"), ["u8"])
         self.assertEqual(N2.classify_line("std::vector<uint8_t> blob;"), [])
