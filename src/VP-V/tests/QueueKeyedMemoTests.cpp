@@ -426,6 +426,58 @@ namespace QueueKeyedMemoTestsNs
 				L"each cause still recorded");
 		}
 
+		// Audit MUST 4: a flush (BumpEpoch, any thread) never turns the admission off. Between the flush and the next Begin the last
+		// seal's window still refuses beyond the queue (NotQueued), beyond the computed depth (NotPlannedAhead) and ahead work while
+		// presents stall (PresentsStalled), and a fill inside it is counted as ahead. When the numbering then restarts (the next seal
+		// goes back), the fresh fill made for the new numbering is kept, not released as "the old numbering".
+		TEST_METHOD(FlushKeepsTheAdmissionUntilTheNextSeal)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 }, generation{ 0 };
+			OwnerFill f;
+			f.fill = [&calls, &generation](const OwnerFillRequest& r, SkeletonMemo&, OwnerFillOutput& out) {
+				calls.fetch_add(1);
+				out.bytes.assign(8, uint8_t(r.seq + 100u * uint32_t(generation.load())));
+				return true;
+			};
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, f);
+			const QueueWindowTerms t = Terms(1, 1, 0, uint16_t(kAheadCeiling + 2u), 0);   // ahead = ceiling + 2, compute = ceiling
+			const uint64_t seal = 10;
+			Render(m, seal, t);
+			const QueueWindow w = DeriveWindow(t, seal, 0);
+			Assert::IsTrue(w.aheadCompute == kAheadCeiling && w.ahead > w.aheadCompute, L"the window has both edges");
+			generation = 1;
+			std::thread queueThread([&m]() { m.BumpEpoch(SkeletonMemo::InvalidateCause::Flush); });
+			queueThread.join();
+			const int before = calls.load();
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, seal + w.ahead + 1u, AcquireForm::Cpu).cause == AcquireCause::NotQueued,
+				L"after the flush, beyond the queue is still NotQueued");
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, seal + w.aheadCompute + 1u, AcquireForm::Cpu).cause == AcquireCause::NotPlannedAhead,
+				L"after the flush, beyond the computed depth is still NotPlannedAhead");
+			Assert::AreEqual(before, calls.load(), L"no refused frame was filled");
+			const AcquireResult inside = m.Acquire(kP10GrainSplit, seal + 2u, AcquireForm::Cpu);
+			Assert::IsTrue(inside.status == AcquireStatus::FilledAtRead && inside.cpu[0] == uint8_t(seal + 2u + 100u), L"inside: the new content");
+			Assert::IsTrue(m.CountersOf(kP10GrainSplit).aheadFilled >= 1u, L"the fill is counted as ahead (the last seal is still known)");
+			// The numbering restarts: the queue thread's new stream fills frame 4 before the first restarted seal (3).
+			const uint64_t restartSeal = 3, fresh = 4;
+			const AcquireResult made = m.Acquire(kP10GrainSplit, fresh, AcquireForm::Cpu);
+			Assert::IsTrue(made.Ok() && made.cpu[0] == uint8_t(fresh + 100u), L"the released numbering was reset: frame 4 filled");
+			const int afterFresh = calls.load();
+			Render(m, restartSeal, t);
+			const AcquireResult kept = m.Acquire(kP10GrainSplit, fresh, AcquireForm::Cpu);
+			Assert::IsTrue(kept.status == AcquireStatus::Reused && kept.cpu[0] == uint8_t(fresh + 100u) && calls.load() == afterFresh,
+				L"the restart seal keeps this epoch's fresh fill");
+			// Stalled presents across a flush: the presented frame lags by more than the queue holds; the bump keeps the refusal.
+			SkeletonMemo s;
+			s.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, f);
+			const uint64_t stalledSeal = 40;
+			const uint16_t lag = uint16_t(w.back + w.ahead + 2u);   // beyond H + R + 1 + ahead
+			Render(s, stalledSeal, Terms(1, lag, 0, uint16_t(kAheadCeiling + 2u), 0));
+			s.BumpEpoch(SkeletonMemo::InvalidateCause::Flush);
+			Assert::IsTrue(s.Acquire(kP10GrainSplit, stalledSeal + 1u, AcquireForm::Cpu).cause == AcquireCause::PresentsStalled,
+				L"after the flush, a stall still stops ahead work");
+		}
+
 		// MEMO-T11 (audit M6): the grant request has one level per ladder step; a grant between two levels yields THAT level, never 0.
 		TEST_METHOD(GrantBetweenLevelsYieldsThatLevel)
 		{
