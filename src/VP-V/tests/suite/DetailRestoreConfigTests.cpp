@@ -443,8 +443,13 @@ namespace DetailRestoreConfigTestsNs
 			// M2 P4 g: the draw (the second RenderOwned lambda, where the entrance hook runs) is Impl::DrawFrame in
 			// segments/EntranceHostMembers.inl; the lambda inside the RenderOwned call returns it, so the entrance still runs
 			// after the planner call (and the monitor read in it).
-			const size_t drawCall = text.find("return DrawFrame(source, destination, parameters, image, sourceSequence,", renderOwned);
-			Assert::IsTrue(drawCall != std::string::npos && drawCall - renderOwned < 4000, L"the render call's draw lambda calls DrawFrame");
+			// HF item 5 (refs/r2-composite-reds-locate2.md part 1 red 3; 3f84ffdb7 turned the inline draw lambda into the named lambda
+			// drawFrame defined BEFORE the render call, which receives it as its last argument): same ordering claim - the named lambda
+			// calls DrawFrame and is the render call's draw callback, so the entrance still runs after the planner call.
+			const size_t drawLambda = renderOwned == std::string::npos ? std::string::npos : text.rfind("return DrawFrame(source, destination, parameters, image, sourceSequence,", renderOwned);
+			const size_t drawArgument = text.find("}, drawFrame);", renderOwned);
+			Assert::IsTrue(drawLambda != std::string::npos && renderOwned - drawLambda < 4000 && drawLambda > planSite &&
+				drawArgument != std::string::npos && drawArgument - renderOwned < 4000, L"the render call's draw callback (the drawFrame lambda) calls DrawFrame");
 			const std::string hostMembers = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntranceHostMembers.inl");
 			Assert::IsFalse(hostMembers.empty(), L"the entrance host members source");
 			const size_t drawFrame = hostMembers.find("bool LibplaceboVideoRenderer::Impl::DrawFrame(");
