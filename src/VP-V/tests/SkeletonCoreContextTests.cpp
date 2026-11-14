@@ -498,6 +498,77 @@ namespace SkeletonCoreContextTestsNs
 			Assert::IsTrue(AnyLineHas(m.StatusLines(), "seal computed reduced 2") && AnyLineHas(m.StatusLines(), "worker reused 1"), L"shown on the status line");
 		}
 
+		TEST_METHOD(EarlierFramesDoNotAskTheLaneEither)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, CpuFill(&calls, 0x11));
+			FakeLane lane;
+			m.SetLaneSource(lane.Source());
+			m.OnSeal(10);
+			m.Acquire(kP10GrainSplit, 9, AcquireForm::Cpu);
+			Assert::IsTrue(lane.asked.load() == 0, L"a frame before the sealed one is not ahead");
+		}
+
+		TEST_METHOD(RanWithAnUnreadableSlotIsLanePendingAndAnEmptyReasonIsStillDeclined)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, CpuFill(&calls, 0x11));
+			FakeLane lane;
+			LaneSlotSource src = lane.Source();
+			src.read = [](ProductId, uint64_t, AcquireForm, LaneSlotSource::Read*) { return LaneSlotSource::State::Absent; };   // never readable
+			m.SetLaneSource(src);
+			m.OnSeal(10);
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, 12, AcquireForm::Cpu).cause == AcquireCause::LanePending, L"told Ran, slot not readable: visible");
+			Assert::IsTrue(m.CountersOf(kP10GrainSplit).laneAheadMade == 0, L"and not counted as made");
+			lane.kind = LaneSlotSource::AheadNow::Declined;
+			lane.why = "";
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, 13, AcquireForm::Cpu).cause == AcquireCause::OwnerDeclined, L"an empty reason is still a visible decline");
+		}
+
+		TEST_METHOD(GpuFormAndNonDefaultVariantNeverAskTheLane)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, CpuFill(&calls, 0x11, VariantKey::kAxisStage));
+			FakeLane lane;
+			m.SetLaneSource(lane.Source());
+			m.OnSeal(10);
+			VariantKey staged;
+			staged.stage = 4;
+			m.Acquire(kP10GrainSplit, 12, AcquireForm::Cpu, staged);
+			m.Acquire(kP10GrainSplit, 12, AcquireForm::Gpu);
+			Assert::IsTrue(lane.asked.load() == 0, L"only the default CPU form asks the lane");
+		}
+
+		TEST_METHOD(NotNodeAsksOnceAndANestedFillDuringTheAskIsNotFilledTwice)
+		{
+			SkeletonMemo m;
+			std::atomic<int> calls{ 0 };
+			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, CpuFill(&calls, 0x11));
+			std::atomic<int> asked{ 0 };
+			bool inside = false;
+			LaneSlotSource src;
+			src.read = [](ProductId, uint64_t, AcquireForm, LaneSlotSource::Read*) { return LaneSlotSource::State::Absent; };
+			src.aheadNow = [&](ProductId, uint64_t seq) {
+				asked.fetch_add(1);
+				if (!inside) {
+					inside = true;
+					// While the memo lock is released for the ask, another reader fills the same key (the race MUST-2 named).
+					m.Acquire(kP10GrainSplit, seq, AcquireForm::Cpu);
+				}
+				LaneSlotSource::AheadNowResult r;
+				r.kind = LaneSlotSource::AheadNow::NotNode;
+				return r;
+			};
+			m.SetLaneSource(src);
+			m.OnSeal(10);
+			const AcquireResult a = m.Acquire(kP10GrainSplit, 12, AcquireForm::Cpu);
+			Assert::IsTrue(a.Ok() && calls.load() == 1, L"the owner fill ran exactly once (computed once)");
+			Assert::IsTrue(asked.load() == 2, L"the outer ask plus the nested reader's ask, no re-ask after the re-entry");
+		}
+
 		static bool AnyLineHas(const std::vector<std::string>& lines, const char* part)
 		{
 			for (const auto& l : lines)
