@@ -298,6 +298,17 @@ struct LaneSlotSource {
     // Off the render thread (L-CORE s5): the CPU form's PUBLISHED bytes copied out through the lane's lease (never a slot
     // pointer: a ring slot is recycled by the render thread). Present = `copy` holds them; NotLaneProduct / Absent otherwise.
     std::function<State(ProductId, uint64_t, std::vector<uint8_t>* copy)> copyPublished;
+    // QKP slice C (R14-73): the render thread asks the lane to make (product, frame) NOW, into the lane's slot for that frame,
+    // for a frame AHEAD of the sealed render frame (the memo then reuses the lane's slot instead of making a second copy).
+    // Ran = the frame is Published in the lane slot (made now, or already made); Claimed = a worker is writing it right now
+    // (LanePending, visible, no wait); NotNode = not a lane product: the memo's own owner fill path; Declined = visible, `why`
+    // names it. Mirrors AnalysisLane::AheadRun (the binder maps it); the memo never includes the lane header.
+    enum class AheadNow : uint8_t { Ran, Claimed, NotNode, Declined };
+    struct AheadNowResult {
+        AheadNow kind = AheadNow::NotNode;
+        const char* why = "";
+    };
+    std::function<AheadNowResult(ProductId, uint64_t)> aheadNow;   // render thread; null = the lane has no ahead claim
     const void* token = nullptr;   // the bound lane (BindLane / UnbindLane by token)
 };
 
@@ -310,6 +321,13 @@ struct AcquireCounters {
     // L-CORE M5 (coordinator ruling on B1-SEAL-VIA-ACQUIRE): the seal's own CPU live fill, counted in the same ledger.
     uint64_t sealComputed = 0;     // the seal computed the frame (no Acquire publication): published as the lane slot
     uint64_t sealReused = 0;       // the seal copied an Acquire publication (computed once, by the owner fill)
+    // QKP slice C (R14-73). COUNTING BASIS of these three: LANE FRAMES of ONE product (a count of (product, frame) events). They are
+    // not the declared history H (DeclaredFillHistory: frames of reader lag) and not the VRAM bytes basis of AheadNeed (gpuOnly).
+    // aheadNow = Ran and the slot readable: made on this request. (A worker publishing between the slot read and the ask also
+    // answers Ran: that frame is then counted here though it was made by the worker; rare, and it is never counted twice.)
+    uint64_t laneAheadMade = 0;
+    uint64_t sealComputedReduced = 0;  // seal live fills that computed nothing because the frame was already made (ahead or published)
+    uint64_t workerReused = 0;         // the lane's worker skipped a frame the render thread had made first (nothing recomputed)
     // Frames COMPUTED for this product (any variant): owner fills that published + seal computes. The compute-once ledger.
     // Queue-keyed products (design s2.4/2.5): fills of a frame AHEAD of the render frame, render-time reuses of such a fill, and
     // the recompute of a frame after an invalidation (counted apart, so the compute-once ledger stays readable).
@@ -323,7 +341,7 @@ struct AcquireCounters {
     uint64_t gpuAllocMade = 0;
     uint64_t gpuAllocBytes = 0;
     uint64_t gpuAllocRefused = 0;
-    uint64_t Computed() const { return filledAtRead + sealComputed - invalidatedRecompute; }
+    uint64_t Computed() const { return filledAtRead + sealComputed + laneAheadMade - invalidatedRecompute; }
     uint64_t released = 0;
     uint64_t unavailable[size_t(AcquireCause::CauseCount)] = {};
     uint64_t Unavailable() const
@@ -404,7 +422,8 @@ public:
         ++laneBinds_;
     }
     // The lane `token` ends: its source and fills are dropped, ONLY if it is still the bound one (a rebuild bound a newer lane
-    // first: nothing happens). Module registrations stay. True = unbound.
+    // first: nothing happens). Module registrations stay. True = unbound. RENDER THREAD ONLY (like BindLane): the Acquire ahead
+    // branch asks the lane with the memo lock released and relies on this never running concurrently with it.
     bool UnbindLane(const void* token)
     {
         std::lock_guard<std::mutex> g(mutex_);
@@ -805,7 +824,8 @@ public:
 
     // ---- G1-G5 ----
 
-    AcquireResult Acquire(ProductId id, uint64_t seq, AcquireForm form, const VariantKey& vIn = VariantKey())
+    // `laneAheadTried` (internal): set by the memo's own re-entry after the lane said NotNode, so the lane is asked once.
+    AcquireResult Acquire(ProductId id, uint64_t seq, AcquireForm form, const VariantKey& vIn = VariantKey(), bool laneAheadTried = false)
     {
         std::unique_lock<std::mutex> lk(mutex_);
         const OwnerFill* ow = OwnerLocked(OwnerKey(id, form));
@@ -927,6 +947,42 @@ public:
         }
         if (renderThread && lane_.dropped && lane_.dropped(id))
             return Fail(c, id, seq, AcquireCause::RegulatorDropped);
+        // QKP slice C: a lane product AHEAD of the render frame (admitted above) is made by the lane's own claim, not twice.
+        if (renderThread && v.IsDefault() && form == AcquireForm::Cpu && !laneAheadTried && lane_.aheadNow && lane_.read && haveSealed_ && seq > lastSeal_) {
+            const auto ahead = lane_.aheadNow;
+            lk.unlock();   // the lane runs its compute outside the memo lock (the lane's inputs may Acquire)
+            const LaneSlotSource::AheadNowResult ar = ahead(id, seq);
+            lk.lock();
+            if (ar.kind == LaneSlotSource::AheadNow::Claimed)
+                return Fail(c, id, seq, AcquireCause::LanePending);
+            if (ar.kind == LaneSlotSource::AheadNow::Declined) {
+                AcquireResult r = Fail(c, id, seq, AcquireCause::OwnerDeclined);
+                if (ar.why != nullptr && ar.why[0] != '\0')
+                    lastCause_[id] += std::string(": ") + ar.why;
+                return r;
+            }
+            if (ar.kind == LaneSlotSource::AheadNow::Ran) {
+                LaneSlotSource::Read rd;
+                // The lock was released: a lane unbind in that window leaves no read (the render thread owns UnbindLane / BindLane).
+                if (lane_.read && lane_.read(id, seq, form, &rd) == LaneSlotSource::State::Present) {
+                    ++c.laneAheadMade;
+                    ++c.reusedLane;
+                    AcquireResult r;
+                    r.status = AcquireStatus::Reused;
+                    r.source = AcquireSource::LaneSlot;
+                    r.cpu = rd.cpu;
+                    r.cpuBytes = rd.cpuBytes;
+                    r.pin = rd.pin;
+                    Served(id);
+                    return r;
+                }
+                return Fail(c, id, seq, AcquireCause::LanePending);   // told Ran but the slot is not readable yet: visible, retried
+            }
+            // NotNode: not a lane product. The lock was released, so the owner and the memo may have changed (an unbind erased the
+            // owner map node; another thread inserted this key): start over through the normal path with the lane not asked again.
+            lk.unlock();
+            return Acquire(id, seq, form, vIn, true);
+        }
         if (ow == nullptr || !ow->fill)
             return Fail(c, id, seq, AcquireCause::NoOwnerFill);
         if ((v.Axes() & ~ow->variantAxes) != 0u || v.precision == kPrecisionFloat16)  // float16 is not 12-bit safe: every owner declines it, visibly (N2)
@@ -1081,6 +1137,18 @@ public:
         std::lock_guard<std::mutex> g(mutex_);
         ++counters_[id].sealReused;
     }
+    // QKP slice C (R14-73): the lane's seal computed nothing for (id) because the frame was already made (ahead claim / published).
+    void NoteSealComputedReduced(ProductId id)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        ++counters_[id].sealComputedReduced;
+    }
+    // QKP slice C (R14-73): the lane's worker skipped a frame of (id) the render thread had made first.
+    void NoteWorkerReused(ProductId id)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        ++counters_[id].workerReused;
+    }
     // The seal's question (SkeletonAcquireLane.h): did a reader publish the default CPU form of (id, seq)? Copies it.
     bool CopyPublished(ProductId id, uint64_t seq, uint8_t* dst, size_t n) const
     {
@@ -1199,6 +1267,9 @@ public:
             if (c.sealComputed != 0 || c.sealReused != 0 || c.reusedLaneCopy != 0)
                 l += "; seal computed " + std::to_string(c.sealComputed) + ", seal reused " + std::to_string(c.sealReused)
                      + ", copied off thread " + std::to_string(c.reusedLaneCopy);
+            if (c.laneAheadMade != 0 || c.sealComputedReduced != 0 || c.workerReused != 0)
+                l += "; lane frames: made ahead " + std::to_string(c.laneAheadMade) + ", seal computed reduced "
+                     + std::to_string(c.sealComputedReduced) + ", worker reused " + std::to_string(c.workerReused);
             for (size_t k = 1; k < size_t(AcquireCause::CauseCount); ++k)
                 if (c.unavailable[k] != 0)
                     l += std::string("; ") + Token(AcquireCause(k)) + " " + std::to_string(c.unavailable[k]);
