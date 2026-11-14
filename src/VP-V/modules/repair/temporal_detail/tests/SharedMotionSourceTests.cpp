@@ -315,20 +315,32 @@ namespace VideoProcessorTest
 			// The producer's extras do not change the trust (forward), and the pair's two directions differ (the test is not vacuous).
 			TemporalDetail::MotionPair a, b, back;
 			source.SetConsistencyPixels(2.0f);
-			// Restored against the engine memo (was fbErrorComputed 0/1/2): each (pair, direction, tolerance) is computed ONCE, by the engine
-			// (its trustComputes counter), none by the adapter; the lease is per pair, so each of these three first asks is one compute.
-			const unsigned long long computes0 = rig.engine.FlowReads().trustComputes;
+			// Engine-side successor of fbErrorComputed 0/1/2 (forward with the producer's extras: planes taken, 0 recomputed; forward without:
+			// recomputed; backward: no producer extra, recomputed). The engine counts the planes it worked out itself (FlowReads()
+			// fbErrorRecomputes / costWeightRecomputes: VectorEngine.cpp FlowLease::Trust). The engine memo is ONE lease at a time, so each of
+			// these three asks is on another pair than the one before it: every ask is a compute after a lease switch (not a first ask of a
+			// remembered pair); the repeat asks below are the memo hits.
+			const VpMotion::VectorEngine::FlowReadCounters r0 = rig.engine.FlowReads();
 			Assert::IsTrue(source.Forward(5, a));
-			Assert::AreEqual<unsigned long long>(computes0 + 1, rig.engine.FlowReads().trustComputes, L"forward, producer extras: one engine compute");
+			const VpMotion::VectorEngine::FlowReadCounters r1 = rig.engine.FlowReads();
+			Assert::AreEqual<unsigned long long>(r0.trustComputes + 1, r1.trustComputes, L"forward, producer extras: one engine compute (after a lease switch)");
+			Assert::AreEqual<unsigned long long>(r0.fbErrorRecomputes + 0, r1.fbErrorRecomputes, L"forward: the producer's error, not recomputed");
+			Assert::AreEqual<unsigned long long>(r0.costWeightRecomputes + 0, r1.costWeightRecomputes, L"forward: the producer's cost weights, not recomputed");
 			Assert::IsTrue(source.Forward(6, b));
-			Assert::AreEqual<unsigned long long>(computes0 + 2, rig.engine.FlowReads().trustComputes, L"forward, no producer extras: one engine compute");
+			const VpMotion::VectorEngine::FlowReadCounters r2 = rig.engine.FlowReads();
+			Assert::AreEqual<unsigned long long>(r1.trustComputes + 1, r2.trustComputes, L"forward, no producer extras: one engine compute (after a lease switch)");
+			Assert::AreEqual<unsigned long long>(r1.fbErrorRecomputes + 1, r2.fbErrorRecomputes, L"no producer error: computed by the engine");
+			Assert::AreEqual<unsigned long long>(r1.costWeightRecomputes + 1, r2.costWeightRecomputes, L"no producer cost weights: computed by the engine");
 			Assert::AreEqual(a.trust.size(), b.trust.size());
 			for (size_t i = 0; i < a.trust.size(); ++i)
 				Assert::AreEqual(b.trust[i], a.trust[i], 0.0f, L"bit-equal to the recompute path");
 			Assert::IsTrue(a.trust == b.trust);
 			Assert::IsTrue(a.vx == b.vx && a.vy == b.vy, L"the vectors are the same pair's, whichever pair carried the extras");
 			Assert::IsTrue(source.Backward(5, back));
-			Assert::AreEqual<unsigned long long>(computes0 + 3, rig.engine.FlowReads().trustComputes, L"backward: one engine compute");
+			const VpMotion::VectorEngine::FlowReadCounters r3 = rig.engine.FlowReads();
+			Assert::AreEqual<unsigned long long>(r2.trustComputes + 1, r3.trustComputes, L"backward: one engine compute (after a lease switch)");
+			Assert::AreEqual<unsigned long long>(r2.fbErrorRecomputes + 1, r3.fbErrorRecomputes, L"backward: no producer extra, error computed");
+			Assert::AreEqual<unsigned long long>(r2.costWeightRecomputes + 1, r3.costWeightRecomputes, L"backward: no producer extra, cost weights computed");
 			Assert::IsTrue(back.trust != a.trust);
 			// Computed once by the engine per pair, direction and tolerance, however often TD asked; none worked out by the adapter.
 			{   // WIP-DIAG (revert): why the second Forward(6) fails

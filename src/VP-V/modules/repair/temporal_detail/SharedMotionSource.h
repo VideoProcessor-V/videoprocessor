@@ -104,7 +104,7 @@ namespace TemporalDetail
 			if (vec.size() < cells * 2 || cost.size() < cells || other.size() < cells * 2)
 				return Absent(m_stats.unfit, "the pair has no vectors or costs");
 			// L-B6 (WAIVER-B6-TD-TRUST): the engine's ONE per-cell trust for this direction, READ from the engine memo (FlowView::CellTrust /
-			// CellTrustBackward: computed once per pair and tolerance by the engine's lease), never worked out here. No engine handle, or
+			// CellTrustBackward: computed once per direction and tolerance for as long as the pair is the engine's current lease; another pair's FlowOf recomputes), never worked out here. No engine handle, or
 			// a memo without the plane: absent (never guessed). Copied here, so the pair outlives the engine's next FlowOf.
 			VpMotion::FlowView view;
 			if (!m_flowOf || !m_flowOf(seq, view))

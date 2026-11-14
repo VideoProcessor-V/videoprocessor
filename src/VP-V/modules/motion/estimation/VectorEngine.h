@@ -339,6 +339,10 @@ namespace VpMotion
 			// conversion of the pair) and the cell-trust computations (FlowView::CellTrust, once per pair and tolerance).
 			unsigned long long conversions = 0;
 			unsigned long long trustComputes = 0;
+			// Of those computations, the planes worked out here instead of taken from the producer's extras (forward with extras: 0 each;
+			// forward without, and every backward: one each). The successor of TD's old fbErrorComputed.
+			unsigned long long fbErrorRecomputes = 0;
+			unsigned long long costWeightRecomputes = 0;
 		};
 		FlowReadCounters FlowReads() const;
 		// Contract: set AND clear on the render thread or under renderMutex (an estimate reads the pointer once and
@@ -464,6 +468,8 @@ namespace VpMotion
 				std::vector<float> trust;
 			};
 			std::atomic<unsigned long long>* computes = nullptr;
+			std::atomic<unsigned long long>* fbErrorRecomputes = nullptr;
+			std::atomic<unsigned long long>* costWeightRecomputes = nullptr;
 			mutable std::mutex trustMutex;
 			mutable std::list<TrustEntry> trusts;
 			const float* CellTrust(float toleranceEnginePx) const override { return Trust(toleranceEnginePx, false); }
@@ -473,6 +479,8 @@ namespace VpMotion
 		mutable std::mutex flowMutex_;
 		mutable std::shared_ptr<FlowLease> flowLease_;
 		mutable FlowReadCounters flowReads_;
+		mutable std::atomic<unsigned long long> flowFbErrorRecomputes_{ 0 };
+		mutable std::atomic<unsigned long long> flowCostWeightRecomputes_{ 0 };
 		mutable std::atomic<unsigned long long> flowTrustComputes_{ 0 };   // W1-C3: FlowLease::CellTrust computations (FlowReads().trustComputes)
 		std::atomic<int> flowSourceWidth_{ 0 };   // the source width the engine size was last made for (ServeStatistics)
 		InvalidateSink invalidateSink_ = nullptr;
