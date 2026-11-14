@@ -191,6 +191,57 @@ namespace AdmissionOverloadTest
 			Assert::IsTrue(r.line.find("reduced tier") != std::string::npos);
 		}
 
+		// Owner answer via lead 11 (2026-11-14): the ahead work is sized to the VRAM grant in order - fewer products early, then fewer frames
+		// ahead, the queue shortened only last and never below the 200 ms floor; nothing evicted, every step on the line.
+		TEST_METHOD(AheadPlanFollowsTheGrantInOrder)
+		{
+			AdmissionFacts f = Facts(60.0, 6.0, 1.0);
+			f.aheadBytes[kP3AnalysisField] = 100;
+			f.aheadBytes[kP5MonitorTiles] = 50;
+			f.aheadWantFrames = 6;
+			f.queueFrames = 16;
+			f.queueBytesPerFrame = 10;
+			f.vramGrantBytes = 2000;
+			Result r = Admit(f);
+			Assert::IsTrue(r.admitted[kP5MonitorTiles]);
+			Assert::IsTrue(r.aheadAdmitted[kP3AnalysisField] && r.aheadAdmitted[kP5MonitorTiles]);
+			Assert::AreEqual(6, r.aheadFrames);
+			Assert::AreEqual(uint64_t(1060), r.aheadNeedBytes);
+
+			f.vramGrantBytes = 1000;   // 1. the optional product moves to render time
+			r = Admit(f);
+			Assert::AreEqual(1u, r.aheadProductsDropped);
+			Assert::IsFalse(r.aheadAdmitted[kP5MonitorTiles]);
+			Assert::IsTrue(r.aheadAdmitted[kP3AnalysisField]);
+			Assert::AreEqual(6, r.aheadFrames);
+			Assert::IsTrue(r.aheadLine.find("fewer products early") != std::string::npos);
+
+			f.vramGrantBytes = 500;    // 2. fewer frames ahead
+			r = Admit(f);
+			Assert::AreEqual(3, r.aheadFrames);
+			Assert::AreEqual(16, r.queueFrames, L"the queue is untouched while fewer frames ahead suffice");
+			Assert::IsTrue(r.aheadLine.find("fewer frames ahead") != std::string::npos);
+
+			f.vramGrantBytes = 225;    // 3. LAST: the queue, down to ceil(200 ms / period) = 12 frames at 60 Hz
+			r = Admit(f);
+			Assert::AreEqual(1, r.aheadFrames);
+			Assert::AreEqual(12, r.queueFrames);
+			Assert::AreEqual(4, r.queueFramesDropped);
+			Assert::IsTrue(r.aheadLine.find("queue shortened") != std::string::npos);
+
+			f.vramGrantBytes = 150;    // over at every floor: nothing early, the queue stays at its floor, visible
+			r = Admit(f);
+			Assert::IsTrue(r.aheadOverGrant);
+			Assert::AreEqual(12, r.queueFrames, L"never below the floor");
+			Assert::IsFalse(r.aheadAdmitted[kP3AnalysisField]);
+			Assert::IsTrue(r.admitted[kP3AnalysisField], L"core still admitted: it fills at its own render (never evicted)");
+			Assert::IsTrue(r.aheadLine.find("ahead work at render") != std::string::npos);
+
+			f.mode = LatencyMode::Games;
+			r = Admit(f);
+			Assert::AreEqual(0, r.aheadFrames, L"games: no look-ahead work");
+		}
+
 		TEST_METHOD(CostMarksFollowControlConfigRule4)
 		{
 			Assert::AreEqual(std::string(""), std::string(CostMark(1.0, false)));
