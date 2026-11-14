@@ -745,13 +745,13 @@
    "name": "one_pole_alpha",
    "known_false_positive": [],
    "blocking": true,
-   "baseline_duplicates": 12
+   "baseline_duplicates": 9
   },
   "U24": {
    "name": "robust_stats",
    "known_false_positive": [],
    "blocking": true,
-   "baseline_duplicates": 73
+   "baseline_duplicates": 60
   },
   "U25": {
    "name": "ramp_clamp_smoothstep",
@@ -763,7 +763,7 @@
    "name": "luma_from_rgb_weights",
    "known_false_positive": [],
    "blocking": true,
-   "baseline_duplicates": 25
+   "baseline_duplicates": 21
   }
  },
  "note": "refs/126 B0 (2026-11-12): all registered units blocking at the measured true count; baselines only shrink. U10 baseline = the matcher D1 global search (X1, file-level owner scope), 0 at refs/126 B6. U7 6 = DetailPulse/TextureRestore private cut/fade shares (X2). U13 14 = SourceResolutionDetector private blockiness (real). U17 is undefined/reserved. U10 = 19 after the audit fix (Dispatch-label lines un-suppressed)."
