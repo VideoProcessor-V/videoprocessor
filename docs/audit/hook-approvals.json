@@ -8,7 +8,7 @@
    "seam": "S6",
    "approver": "coordinator",
    "when": "2026-11-11",
-   "expiry": "P11b",
+   "expiry": "re-graft",
    "note": "owner 19:21 allowance of HELD-CFG-09 as a minimal registered branch in Bill's settings code; DIV-CFG-09. At the re-graft it becomes a take-over point or an accepted upstream fix (refs/110 take-over list)."
   },
   {
@@ -110,7 +110,7 @@
    "seam": "S3",
    "approver": "owner via coordinator",
    "when": "2026-11-11",
-   "expiry": "P11b",
+   "expiry": "re-graft",
    "note": "Expiry extended from P11b to re-graft (owner 2026-11-14 06:29 question window; DECL-to-module conversion belongs to re-graft planning, refs/110 s2.7). P4 f: the frame call site in Impl::Render - nextVectorGuard and temporalEntrance declarations, the CollectFrameHooks call (segments/CoreSegments.inl) and the named draw lambda (P4 g) form one site; transitional S3 (refs/110 addendum 2026-11-11 19:40, P4 Q1; coordinator ruling relayed by Lead 5 2026-11-12); expiry = the DECL-to-module follow-on (refs/117 row 20: P11b)"
   },
   {
@@ -120,7 +120,7 @@
    "seam": "S3",
    "approver": "owner via coordinator",
    "when": "2026-11-11",
-   "expiry": "P11b",
+   "expiry": "re-graft",
    "note": "Expiry extended from P11b to re-graft (owner 2026-11-14 06:29 question window; DECL-to-module conversion belongs to re-graft planning, refs/110 s2.7). P4 g: EntranceHost::FieldOf declaration (defined in segments/EntranceHostMembers.inl); the DrawFrame lambda sits in the HA-P4f-S3 site; transitional S3 (refs/110 addendum 2026-11-11 19:40, P4 Q1; coordinator ruling relayed by Lead 5 2026-11-12); expiry = the DECL-to-module follow-on (refs/117 row 20: P11b)"
   }
  ]
