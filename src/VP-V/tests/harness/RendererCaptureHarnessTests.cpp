@@ -7381,7 +7381,11 @@ namespace Tests
 				// A source the de-judder serves by repeats alone (display rate an integer multiple of the source rate, e.g. 30p on ~60 Hz) or
 				// that is as fast as the display needs no motion estimate; derived from the measured display rate (never from a log string).
 				const double ratio = HarnessMonitorHz() / (double(rate.numerator) / double(rate.denominator));
-				const bool repeatServed = std::fabs(ratio - std::floor(ratio + 0.5)) < 0.02 * ratio || ratio < 1.25;
+				// Video (50 Hz and up, 49 Hz with the 2% tolerance: DejudderPolicy kVideoRateFloorHz) is never de-juddered on any display; a film-like
+				// source on a display that is an integer multiple of it is served by repeats. Both follow from the measured rates, at any display rate.
+				const double sourceHz = double(rate.numerator) / double(rate.denominator);
+				const bool videoClass = sourceHz >= 49.0;
+				const bool repeatServed = videoClass || std::fabs(ratio - std::floor(ratio + 0.5)) < 0.02 * ratio || ratio < 1.25;
 				if (repeatServed)
 				{
 					Assert::IsFalse(VectorsDelivered(s), (name + L": a repeat-served source delivers no vectors\n" + s.Tail()).c_str());
@@ -7391,7 +7395,17 @@ namespace Tests
 				Assert::IsTrue(s.Logged("Vector engine: on"), (name + L": with a starter the vector engine is on\n" + s.Tail()).c_str());
 				Assert::IsTrue(VectorsDelivered(s), (name + L": with a starter vectors are delivered\n" + s.Tail()).c_str());
 			}
-			Assert::IsTrue(positiveLegs >= 1, L"at least one rate reaches the positive starter leg (24p on a ~60 Hz display must)");
+			// Every film-like rate that is not repeat-served on this display must reach the positive leg (24p on a ~60 Hz display does);
+			// on a display that is an integer multiple of every film rate (e.g. 120 Hz) the product serves all of them by repeats and none is due.
+			int expectedPositive = 0;
+			for (const Rate& rate : rates)
+			{
+				const double hz = double(rate.numerator) / double(rate.denominator);
+				const double r = HarnessMonitorHz() / hz;
+				if (!(hz >= 49.0 || std::fabs(r - std::floor(r + 0.5)) < 0.02 * r || r < 1.25))
+					++expectedPositive;
+			}
+			Assert::AreEqual(expectedPositive, positiveLegs, L"every non-repeat-served film-like rate reached the positive starter leg");
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineGamesDepthOneEngagesAtOneAhead)
