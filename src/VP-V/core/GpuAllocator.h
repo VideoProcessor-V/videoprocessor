@@ -46,8 +46,8 @@ inline uint32_t BytesPerTexel(TexFormat f)
     case TexFormat::R8: return 1;  // PRECISION-OK 119#17: byte-size table row, exact for the R8 format
     case TexFormat::R16: return 2;
     case TexFormat::RG16: return 4;
-    case TexFormat::R16F: return 2;  // PRECISION-OK 119#17: byte-size table row, exact for 2 x 16F
-    case TexFormat::RG16F: return 4;  // PRECISION-OK 119#17: byte-size table row, exact for 2 x 2 x 16F
+    case TexFormat::R16F: return 2;  // PRECISION-OK 119#17: byte-size table row, exact for 1 channel x 2 bytes (16F)
+    case TexFormat::RG16F: return 4;  // PRECISION-OK 119#17: byte-size table row, exact for 2 channels x 2 bytes (16F)
     case TexFormat::RGBA16F: return 8;  // PRECISION-OK 119#17: byte-size table row, exact for 4 x 16F
     case TexFormat::R32F: return 4;
     case TexFormat::RG32F: return 8;
