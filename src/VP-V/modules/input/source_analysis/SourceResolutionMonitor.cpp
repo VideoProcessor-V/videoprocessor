@@ -1371,13 +1371,13 @@ if (tile < int(tiles) && g.y < ts) {
 			std::vector<VpUnit::CodingEvidence::TileMeasure> measured;
 			std::string why;
 			// No renderer exists (a standalone monitor: the latch tests, tools): no memo to acquire from, so the pure per-tile measure runs
-				// here exactly as the pre-P16 detector did. With a renderer present a failed acquire stays unavailable and visible.
-				const bool standalone = owners.empty();
-				if (standalone)
-					for (int t = 0; t < j.tiles; ++t)
-						measured.push_back(VpUnit::CodingEvidence::MeasureTile(codingPack->luma.data() + static_cast<size_t>(t) * pixels, T, T, j.codeMaximum));
-				const bool got = standalone || (owners.size() == 1 && VpUnit::CodingEvidence::Hub::Instance().AcquireTiles(owners[0], memoSeq, codingPack, measured, why));
-			if (!got && owners.size() != 1) why = owners.empty() ? "no renderer" : "several renderers";
+			// here exactly as the pre-P16 detector did. With a renderer present a failed acquire stays unavailable and visible.
+			const bool standalone = owners.empty();
+			if (standalone)
+				for (int t = 0; t < j.tiles; ++t)
+					measured.push_back(VpUnit::CodingEvidence::MeasureTile(codingPack->luma.data() + static_cast<size_t>(t) * pixels, T, T, j.codeMaximum));
+			const bool got = standalone || (owners.size() == 1 && VpUnit::CodingEvidence::Hub::Instance().AcquireTiles(owners[0], memoSeq, codingPack, measured, why));
+			if (!got && owners.size() > 1) why = "several renderers";
 			codingUnavailableNow = !got || measured.size() != spectra.size();
 			codingWhyNow = codingUnavailableNow ? (why.empty() ? "tile count" : why) : std::string();
 			if (!codingUnavailableNow)
