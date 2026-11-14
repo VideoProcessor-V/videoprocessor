@@ -158,7 +158,6 @@ namespace TemporalDetail
 			// True when the LAST Apply failed because the scratch arena had no texture (Params::arena set). The frame is
 			// then rendered as it was; the store restarts at the next frame (a skipped frame breaks the sequence anyway).
 			bool ScratchShort() const { return m_scratchShort; }
->>>>
 
 			// The scratch-arena requests of one Apply for an ACTIVE PICTURE of w x h (the module's working size): scope
 			// kArenaScope, owner kArenaOwner, tier T1 (an optional repair: shed before the T0 temporaries), count 3 of one
