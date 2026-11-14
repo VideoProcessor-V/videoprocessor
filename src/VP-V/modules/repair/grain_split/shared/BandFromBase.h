@@ -26,6 +26,8 @@
 #include <string>
 #include <vector>
 
+#include <vprenderer/GrainPreserve.h>   // Bill's low-band law (LowWeight/LowRadius), called UNCHANGED
+
 namespace VpUnit
 {
 namespace BandFromBase
@@ -134,6 +136,32 @@ namespace BandFromBase
 			"    for (int i = -VPU_BAND_FROM_BASE_R; i <= VPU_BAND_FROM_BASE_R; i++)\n"
 			"        acc += vpu_band_from_base_w(i) * texelFetch(src, clamp(q + ivec2(0, i), ivec2(0), hi), 0);\n    return acc;\n}\n";
 		return s;
+	}
+	// CPU reference of the shared low band (B3). Input is the HALF-resolution plane (P1, the shared half_luma_downsample
+	// product, acquired from the skeleton; this unit holds no 2x2 box of its own). Applies Bill's Gaussian law
+	// (GrainPreserve::LowWeight / LowRadius at the FULL-resolution sigma) across then down at half resolution, edges replicated.
+	// Oracle of the skeleton band memo's GPU fill and of every consumer that read a private copy of it.
+	inline std::vector<double> BandFromHalf(const std::vector<double>& box, int hw, int hh, double sigma)
+	{
+		std::vector<double> t(box.size()), o(box.size());
+		const int r = GrainPreserve::LowRadius(sigma);
+		std::vector<double> k(static_cast<size_t>(2 * r + 1));
+		for (int i = -r; i <= r; ++i) k[static_cast<size_t>(i + r)] = GrainPreserve::LowWeight(i, sigma);
+		for (int y = 0; y < hh; ++y)
+			for (int x = 0; x < hw; ++x)
+			{
+				double a = 0.0;
+				for (int i = -r; i <= r; ++i) a += k[static_cast<size_t>(i + r)] * box[static_cast<size_t>(y) * hw + (std::max)(0, (std::min)(hw - 1, x + i))];
+				t[static_cast<size_t>(y) * hw + x] = a;
+			}
+		for (int y = 0; y < hh; ++y)
+			for (int x = 0; x < hw; ++x)
+			{
+				double a = 0.0;
+				for (int i = -r; i <= r; ++i) a += k[static_cast<size_t>(i + r)] * t[static_cast<size_t>((std::max)(0, (std::min)(hh - 1, y + i))) * hw + x];
+				o[static_cast<size_t>(y) * hw + x] = a;
+			}
+		return o;
 	}
 }
 }
