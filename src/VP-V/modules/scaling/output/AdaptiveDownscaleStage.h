@@ -139,7 +139,12 @@ namespace AdaptiveDownscaleStage
 		static constexpr unsigned long long kFailureHoldMs = 5000;
 		FallbackCatalog::Decision Fallback() const
 		{
-			return FallbackCatalog::OutputScaling(requested, failureHeld ? 1u : 0u, ssimMissing);
+			const FallbackCatalog::Decision base = FallbackCatalog::OutputScaling(requested, failureHeld ? 1u : 0u, ssimMissing);
+			// FIX-X5-CUT-P4: the shared cut event (P4) unreadable: the grain term snaps on the first frame only (also on StatusLines()).
+			if (!base.engaged && requested && !module.CutAvailable())
+				return FallbackCatalog::Engaged("output scaling", "adaptive downscale: no cut detection (" + module.CutCause() +
+					"); the grain term snaps on the first frame only");
+			return base;
 		}
 
 		// R1-W1-RES: the read path of the temporal-detail engine's products (confidence, real detail, grain, stability, motion

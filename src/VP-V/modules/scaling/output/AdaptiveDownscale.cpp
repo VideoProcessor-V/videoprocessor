@@ -7,7 +7,6 @@
 #include <libplacebo/shaders/custom.h>
 #include <libplacebo/shaders/sampling.h>
 
-#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 #include <VP-V/modules/drive/led_measure/NativeReadback.h>
@@ -76,7 +75,7 @@ if (q.x < int(region.x) && q.y < int(region.y)) {
     float lap = abs(4.0 * e - b - d - f - h);
     float flat_px = grad < edge_lo ? 1.0 : 0.0;
     float wgt = max(mix(1.0, 2.0 * (1.0 - clamp(e / 255.0, 0.0, 1.0)), shadow_bias), 0.0);
-    v = vec4(lap * wgt * flat_px, flat_px, 1.0 - ed, e);
+    v = vec4(lap * wgt * flat_px, flat_px, 1.0 - ed, 0.0);
 }
 ad_sum[li] = v;
 barrier();
@@ -107,7 +106,8 @@ if (q.x < size.x && q.y < size.y) {
 
 		// One workgroup: the frame's totals, the ramp, the smoothing and the
 		// cut snap, into the persistent state (r grain_scale, g mean(1 - edge),
-		// b mean luma, a initialised).
+		// b unused (0; the frame's mean luma is the P4 APL, read on the CPU), a initialised).
+		// The cut is the shared cut event (cut_in, from P4 through AdaptiveDownscaleCut.h).
 		const char* const FINAL_HEADER = R"GLSL(
 shared vec4 ad_total[256];
 )GLSL";
@@ -129,29 +129,28 @@ if (li == 0u && advance > 0.5) {
     vec4 t = ad_total[0];
     float energy = t.x / max(t.y, 1.0);
     float free_mean = t.z / max(total_pixels, 1.0);
-    float luma_mean = t.w / max(total_pixels, 1.0);
     float target = mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, energy));
     vec4 prev = imageLoad(state_io, ivec2(0));
 )GLSL";
 
-		const char* const FINAL_BODY_B = R"GLSL(    float scale = cut ? target : mix(prev.r, target, smooth_alpha);
+		// A cut: the state was never initialised (first frame) or the shared cut event (P4 through U7) says so.
+		const char* const FINAL_BODY_B = R"GLSL(    bool cut = prev.a < 0.5 || cut_in > 0.5;
+    float scale = cut ? target : mix(prev.r, target, smooth_alpha);
     // a: 1 initialised, 2 = a cut on this frame (the grain map resets too).
-    imageStore(state_io, ivec2(0), vec4(scale, free_mean, luma_mean, cut ? 2.0 : 1.0));
+    imageStore(state_io, ivec2(0), vec4(scale, free_mean, 0.0, cut ? 2.0 : 1.0));
     if (write_stats > 0.5) {
 #ifdef AD_STATS_IMG
-        imageStore(ad_stats_img, ivec2(0), vec4(scale, free_mean, luma_mean, 1.0));
+        imageStore(ad_stats_img, ivec2(0), vec4(scale, free_mean, 0.0, 1.0));
 #else
-        ad_out = vec4(scale, free_mean, luma_mean, 1.0);
+        ad_out = vec4(scale, free_mean, 0.0, 1.0);
 #endif
     }
 }
 )GLSL";
 
-		// The final pass with the cut line of the shared unit U7 (CutFadeJudge::MeanStepCutLine: first frame, or the mean luma
-		// moved more than CutFadeJudge::kMeanStepCutCodes) spliced in; the text is the one the pass always carried.
 		const std::string& FinalBody()
 		{
-			static const std::string body = std::string(FINAL_BODY_A) + VpUnit::CutFadeJudge::MeanStepCutLine() + FINAL_BODY_B;
+			static const std::string body = std::string(FINAL_BODY_A) + FINAL_BODY_B;
 			return body;
 		}
 
@@ -576,6 +575,30 @@ float rs_slope(float y)
 		stats = Stats();
 	}
 
+	// The cut event of the source frame about to advance: the shared one (P4 records acquired through the skeleton memo, judged by U7).
+	// Unavailable (no source, or a product that cannot be read): no cut is made here (the first frame still snaps in the pass), the
+	// cause is kept and counted for the stage's status line and fallback entry.
+	bool Module::ResolveCut()
+	{
+		CutVerdict verdict;
+		if (cutSource)
+			verdict = cutSource(advancedSequence, sequence);
+		else
+			verdict.cause = "no cut source set";
+		if (verdict.state == CutVerdict::State::Known)
+		{
+			cutAvailable = true;
+			cutCause.clear();
+			lastApl = verdict.apl;
+			return verdict.cut;
+		}
+		cutAvailable = false;
+		cutCause = verdict.cause;
+		++cutUnavailableFrames;
+		lastApl = -1.0f;
+		return false;
+	}
+
 	void Module::SetFrame(const Settings& value, uint64_t sourceSequence, float seconds)
 	{
 		settings = value;
@@ -686,7 +709,7 @@ float rs_slope(float y)
 			stats.valid = true;
 			stats.grainScale = values[0];
 			stats.meanW = upscale.on ? upscale.wBase * values[0] : settings.wBase * values[1] * values[0];
-			stats.meanLuma = values[2];
+			stats.meanLuma = lastApl > 0.0f ? lastApl : 0.0f;   // the P4 APL of the newest advanced frame (not a private mean)
 		};
 		if (NativeStatsReadback())
 		{
@@ -914,6 +937,10 @@ float rs_slope(float y)
 		// 3. The frame's grain term into the state (once per source frame).
 		{
 			const float advance = sequence != advancedSequence ? 1.0f : 0.0f;
+			// FIX-X5-CUT-P4: the cut event of this new source frame is the shared one (P4 through U7), asked once per advance.
+			float cutIn = 0.0f;
+			if (advance > 0.5f)
+				cutIn = ResolveCut() ? 1.0f : 0.0f;
 			const bool native = NativeStatsReadback();
 			// Native: a ring slot for this source frame's statistics (none free: skipped, never
 			// waited for); otherwise the one libplacebo buffer when it is free.
@@ -947,9 +974,10 @@ float rs_slope(float y)
 				d[2].memory = PL_MEMORY_COHERENT;
 				numDescriptors = 3;
 			}
-			const pl_shader_var v[7] = {
+			const pl_shader_var v[8] = {
 				{ pl_var_float("write_stats"), &writeStatsF, true },
 				{ pl_var_float("advance"), &advance, true },
+				{ pl_var_float("cut_in"), &cutIn, true },
 				{ pl_var_float("total_pixels"), &total, true },
 				{ pl_var_float("grain_lo"), &settings.grainLo, true },
 				{ pl_var_float("grain_hi"), &settings.grainHi, true },
@@ -957,7 +985,7 @@ float rs_slope(float y)
 				{ pl_var_float("smooth_alpha"), &alpha, true } };
 			static const std::string finalImgHeader = std::string("#define AD_STATS_IMG 1\n") + FINAL_HEADER;
 			if (numDescriptors != 3 || !Compute(p->dispatch, "VideoProcessor adaptive downscale: grain",
-				native ? finalImgHeader.c_str() : FINAL_HEADER, FinalBody().c_str(), d, numDescriptors, v, 7, 1, 1))
+				native ? finalImgHeader.c_str() : FINAL_HEADER, FinalBody().c_str(), d, numDescriptors, v, 8, 1, 1))
 			{
 				if (statsSlot >= 0)
 					statsSchedule.Release(statsSlot);

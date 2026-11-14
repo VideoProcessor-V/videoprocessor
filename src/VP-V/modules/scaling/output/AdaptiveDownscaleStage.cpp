@@ -116,6 +116,9 @@ namespace AdaptiveDownscaleStage
 			if (host.bitrate(quality))
 				adaptiveNow.residualCodingNoiseCodes = static_cast<float>(GrainPreserve::CodingNoiseCodes(quality));
 		}
+		// FIX-X5-CUT-P4: the grain term's cut event is the shared one (P4 through U7); the module asks it once per new source frame.
+		if (!module.HasCutSource())
+			module.SetCutSource(AdaptiveDownscale::P4CutSource());
 		if (upscaleBlend)
 		{
 			module.SetFrame(adaptiveNow, frame.sourceSequence, FramePeriod(frame, host));
@@ -278,6 +281,11 @@ namespace AdaptiveDownscaleStage
 				m == AdaptiveDownscale::MotionState::NoVectors ? "Motion-adapted blend: no vectors on this frame (plain blend)" :
 				"Motion-adapted blend: idle (the blend did not run on the last frame)");
 		}
+		// FIX-X5-CUT-P4: never a silent downgrade. The cut event could not be read from the source analysis (P4): the grain term
+		// snaps on the first frame only, not on later cuts (it eases to its target instead).
+		if (!module.CutAvailable())
+			lines.push_back("Adaptive downscale: cut detection unavailable (" + module.CutCause() +
+				"); the grain term snaps on the first frame only");
 		const std::string td = TdProducts::StatusLine(TdProducts::Consumer::AdaptiveScaler, tdRead);
 		if (!td.empty())
 			lines.push_back(td);
