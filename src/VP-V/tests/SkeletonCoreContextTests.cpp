@@ -309,6 +309,13 @@ namespace SkeletonCoreContextTestsNs
 			VariantKey half;
 			half.precision = kPrecisionFloat16;
 			Assert::IsTrue(m.Acquire(kP10GrainSplit, 1, AcquireForm::Cpu, half).cause == AcquireCause::VariantUndeclared, L"pixel data never at fp16");
+			{
+				// N2 (waiver gate batch 12): a non-pixelData owner that declares the precision axis is declined at fp16 too.
+				std::atomic<int> calls2{ 0 };
+				m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kRegionUnit, CpuFill(&calls2, 0x44, VariantKey::kAxisPrecision));
+				Assert::IsTrue(m.Acquire(kP11RegionBlockStats, 1, AcquireForm::Cpu, half).cause == AcquireCause::VariantUndeclared, L"fp16 refused for every owner, pixelData or not");
+				Assert::IsTrue(calls2.load() == 0, L"and the fill never ran");
+			}
 			VariantKey p0;
 			p0.param0 = 3;
 			Assert::IsTrue(m.Acquire(kP10GrainSplit, 1, AcquireForm::Cpu, p0).cause == AcquireCause::VariantUndeclared, L"an undeclared axis is refused, visibly");
