@@ -78,7 +78,7 @@ namespace VideoProcessorTest
 			using namespace FrameAnalysis;
 			Store store;
 			store.Begin(Id(1), kLuma);
-			store.PublishMeasured(1, kLuma, LumaStats{}, RangeOccupancy{}, GrainEstimate{});
+			store.PublishMeasured(1, kLuma, LumaStats{}, RangeOccupancy{});
 			Record out;
 			Assert::IsTrue(store.Read(1, Use::SingleFrame, kIdentity | kLuma, out) == ReadStatus::Ok, L"existing groups served");
 			Assert::IsTrue(!out.camera, L"camera null");
@@ -105,7 +105,7 @@ namespace VideoProcessorTest
 			using namespace FrameAnalysis;
 			Store store;
 			store.Begin(Id(1), kLuma | kCamera);
-			store.PublishMeasured(1, kLuma, LumaStats{}, RangeOccupancy{}, GrainEstimate{});
+			store.PublishMeasured(1, kLuma, LumaStats{}, RangeOccupancy{});
 			store.PublishCamera(1, Camera(1));
 			store.Begin(Id(2), kLuma);
 			Assert::IsTrue(store.MarkRepeat(2, 1), L"repeat marked");
