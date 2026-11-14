@@ -67,9 +67,11 @@ model. Each decision cites the owner lines of refs/123 N0.
 - `ScalerKernelTableMatchesKernelInverseTaps`: the table's phase taps equal `KernelInverse::Candidates()` bit for bit.
 - `ScalerGpuMigrationIdentityRebaseChromaPasses`: ScalerPass(lanczos, ortho, antiring 0.5, chroma, across first) equals the chroma planes
   `SourceRebase::Module::Apply` makes today, bit for bit.
-- `ScalerGpuMigrationIdentityFaithfulOrtho` (tests/ScalerPassAdaptiveIdentityTests.cpp): ScalerPass(lanczos3, both, down first) equals what the REAL
-  `AdaptiveDownscale::Module` (faithful_ortho, w_base 0) renders through libplacebo, within one 8-bit code (the pipeline writes an 8-bit
-  target). AdaptiveDownscale is only driven, never edited.
+- `ScalerGpuMigrationIdentityFaithfulOrtho` (tests/ScalerPassTests.cpp, class `ScalerPassGpuTests`): ScalerPass(ortho, down first, integer window)
+  equals the faithful ortho branch's libplacebo call sequence of `AdaptiveDownscale` (quoted in the test), rgba32f, bit for bit (`a == b`).
+- `ScalerGpuMigrationIdentityFaithfulOrtho` (tests/ScalerPassAdaptiveIdentityTests.cpp, class `ScalerPassAdaptiveIdentityTests`), ADDITIONAL: ScalerPass(lanczos3,
+  both, down first) equals what the REAL `AdaptiveDownscale::Module` (faithful_ortho, w_base 0) renders through libplacebo, within one 8-bit
+  code (the pipeline writes an 8-bit target). AdaptiveDownscale is only driven, never edited. It does not replace the bit-exact test.
 
 ## Open / not verified in B0
 
