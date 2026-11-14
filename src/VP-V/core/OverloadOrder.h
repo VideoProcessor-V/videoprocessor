@@ -18,12 +18,20 @@
 //  - Up: after 5 s continuously under, ONE stage back, in reverse order (TD tiers come back one per stage).
 //  - Never a presentation action: the arbiter only says what the jobs may do; no present is skipped, repeated or delayed by it (R8).
 //  - Every state has its line (Ctrl+I + Config + Ctrl+Alt+D); None says "no overload".
+//  - FillOff is VISIBLE by name (lead 13 ruling, 2026-11-14; no silent fallbacks): the caller names the optional fills now admitted
+//    (SetOptionalFills, from the admission: every Fill-class job, the grain split P10 included while it is optional fill under the 08:30
+//    ruling / Q4). While FillOff is engaged the state line names each fill it turns off ("overload: optional fill off: grain split, ..."),
+//    FillLine() keeps that list for the deeper stages, and TakeFillNotice() hands the one-time notice once per engagement (re-armed when the
+//    ladder returns to None). The grain split needs no stage of its own: FillOff is its step.
 // Pure C++14.
 
 #include <VP-V/core/SchedulerContract.h>
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace VpSkeleton {
 
@@ -60,6 +68,31 @@ inline double OverloadLoad(const SlotBudget& b)
 class OverloadArbiter {
 public:
     OverloadArbiter() { Reset(); }
+    // State().line may point into this arbiter (the FillOff line names the fills), so it is not copied.
+    OverloadArbiter(const OverloadArbiter&) = delete;
+    OverloadArbiter& operator=(const OverloadArbiter&) = delete;
+
+    // The display names of the optional fills now admitted (Configure / admission refresh). FillOff turns these off and names them.
+    void SetOptionalFills(const char* const* names, size_t count)
+    {
+        m_fills.clear();
+        for (size_t i = 0; i < count; ++i)
+            if (names != nullptr && names[i] != nullptr && names[i][0] != '\0') m_fills.emplace_back(names[i]);
+        BuildFillLine();
+        UpdateLine();
+    }
+
+    // "optional fill off: a, b" while FillOff or deeper is engaged; empty otherwise.
+    const std::string& FillLine() const { return m_engagedFills; }
+
+    // The one-time notice for this FillOff engagement (true once; re-armed after the ladder returns to None).
+    bool TakeFillNotice(std::string* text)
+    {
+        if (!m_noticePending) return false;
+        m_noticePending = false;
+        if (text != nullptr) *text = m_engagedFills;
+        return true;
+    }
 
     // Once per source frame (render thread). tdTier = TD's current full tier (its own ladder's top; 0 = TD not running or already lowest).
     OverloadState Step(double nowMs, const SlotBudget& budget, bool extrasActive, uint8_t tdTier)
@@ -85,7 +118,7 @@ public:
         }
         if (m_state.step == OverloadStep::ExtrasStepDown && !extrasActive) { Shallower(); }   // the extras stage holds only while extras exist
         m_state.tdTier = uint8_t(m_tdFull - m_tdSteps);
-        m_state.line = OverloadStepLine(m_state.step);
+        UpdateLine();
         return m_state;
     }
 
@@ -99,6 +132,8 @@ public:
         m_overSince = m_underSince = -1.0;
         m_tdSteps = 0;
         m_tdFull = 0;
+        m_engagedFills.clear();
+        m_noticePending = false;
     }
 
     // The slot reports a deferred core job (counted on the state while CoreDeferred or deeper is engaged, else only in the total).
@@ -110,10 +145,29 @@ public:
     unsigned long long DeferredTotal() const { return m_deferredTotal; }
 
 private:
+    void BuildFillLine()
+    {
+        m_fillLine = "optional fill off: ";
+        if (m_fills.empty()) m_fillLine += "no optional fill running";
+        for (size_t i = 0; i < m_fills.size(); ++i) { if (i > 0) m_fillLine += ", "; m_fillLine += m_fills[i]; }
+        m_fillStateLine = "overload: " + m_fillLine;
+    }
+
+    void UpdateLine()
+    {
+        const bool engaged = m_state.step != OverloadStep::None;
+        if (engaged && m_engagedFills != m_fillLine) m_engagedFills = m_fillLine;   // the fills off follow the admitted set
+        if (!engaged) m_engagedFills.clear();
+        m_state.line = m_state.step == OverloadStep::FillOff ? m_fillStateLine.c_str() : OverloadStepLine(m_state.step);
+    }
+
     void Deeper(bool extrasActive)
     {
         switch (m_state.step) {
-        case OverloadStep::None: m_state.step = OverloadStep::FillOff; break;
+        case OverloadStep::None:
+            m_state.step = OverloadStep::FillOff;
+            m_noticePending = true;   // one-time notice for this engagement, naming the fills
+            break;
         case OverloadStep::FillOff:
             if (m_tdSteps < m_tdFull) { ++m_tdSteps; m_state.step = OverloadStep::TdStepDown; }
             else if (extrasActive) { m_state.step = OverloadStep::ExtrasStepDown; m_state.extrasLevel = -1; }
@@ -148,12 +202,16 @@ private:
             if (m_tdSteps > 0) --m_tdSteps;
             if (m_tdSteps == 0) m_state.step = OverloadStep::FillOff;
             break;
-        case OverloadStep::FillOff: m_state.step = OverloadStep::None; break;
+        case OverloadStep::FillOff: m_state.step = OverloadStep::None; m_noticePending = false; break;
         }
         ++m_up;
     }
 
     OverloadState m_state;
+    std::vector<std::string> m_fills;
+    std::string m_fillLine = "optional fill off: no optional fill running", m_fillStateLine = "overload: optional fill off: no optional fill running";
+    std::string m_engagedFills;
+    bool m_noticePending = false;
     double m_overSince = -1.0, m_underSince = -1.0, m_lastMs = 0.0;
     uint8_t m_tdSteps = 0, m_tdFull = 0;
     unsigned long long m_down = 0, m_up = 0, m_deferredTotal = 0;
