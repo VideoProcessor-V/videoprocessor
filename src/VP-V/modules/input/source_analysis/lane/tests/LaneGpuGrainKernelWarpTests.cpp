@@ -146,7 +146,7 @@ namespace VideoProcessorTest
 			for (Storage storage : { Storage::Full, Storage::Compact })
 			{
 				VpLaneProducts::GrainSplitKernel kernel(storage);
-				Assert::IsTrue(kernel.Steps(dims) == 6 && kernel.NeedsTap() && kernel.Product() == kP10GrainSplit, L"kernel shape");
+				Assert::IsTrue(kernel.Steps(dims) == 7 && kernel.NeedsTap() && kernel.Product() == kP10GrainSplit, L"kernel shape");
 				Assert::IsTrue(kernel.Granted() == storage, L"R16 unorm at codeUnit 64/65535 grants either storage");
 				const ProductTexLayout layout = kernel.Layout(dims);
 				std::vector<pl_tex> viaKernel = MakeOutputs(gpu, layout, dims);
@@ -228,7 +228,7 @@ namespace VideoProcessorTest
 			job.ringSlot = 0;
 			job.source = &view;
 			const uint32_t steps = VpLaneProducts::StepsFor(kP10GrainSplit, d);
-			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 6u, L"bands + extend + 6");
+			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 7u, L"bands + extend + 7 (WAIVER-P10V5-01: unit 5 REDUCE)");
 			for (uint32_t i = 0; i < steps; ++i)
 				Assert::IsTrue(disp.Dispatch(job, i, steps), L"lane chunk");
 			disp.SetLiveSourceForTesting([&codes, d](uint64_t seq, SourceFrameView* out) {

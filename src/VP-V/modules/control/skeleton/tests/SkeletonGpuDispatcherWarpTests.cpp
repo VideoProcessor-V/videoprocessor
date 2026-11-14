@@ -328,7 +328,7 @@ namespace VideoProcessorTest
 			job.ringSlot = 0;
 			job.source = &view;
 			const uint32_t steps = VpLaneProducts::StepsFor(kP10GrainSplit, d);
-			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 6u && VpLaneProducts::TapBands(d) == 2u, L"2 bands + extend + 6");
+			Assert::IsTrue(steps == VpLaneProducts::TapBands(d) + 1u + 7u && VpLaneProducts::TapBands(d) == 2u, L"2 bands + extend + 7 (WAIVER-P10V5-01: unit 5 REDUCE)");
 			for (uint32_t i = 0; i < steps; ++i)
 				Assert::IsTrue(disp.Dispatch(job, i, steps), L"lane chunk");
 			Assert::IsTrue(kernel->steps == 6 && disp.Stats().tapBands == 2 && disp.Stats().extends == 1, L"lane passes");
