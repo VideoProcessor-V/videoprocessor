@@ -79,7 +79,7 @@ namespace GrainLevelRepeatGateNs
 	public:
 		TEST_METHOD(RepeatLeavesTheSetAndIndependentGrainStays)
 		{
-			Require(GrainLevel::Params().repeatGate, "default on");
+			Require(GrainLevel::Params().repeatGate, "default auto");
 			Setup s;
 			const GrainLevel::NeighbourResult on = Run(s, 2.0, 50, { 51, 50, 52, 53 }, GrainLevel::Params());
 			GrainLevel::Params off; off.repeatGate = false;
@@ -117,20 +117,36 @@ namespace GrainLevelRepeatGateNs
 		TEST_METHOD(SettingParsesWithAVisibleProblem)
 		{
 			bool v = false; std::string problem;
-			Require(GrainLevel::ParseRepeatGate("on", v, problem) && v && problem.empty(), "on");
+			Require(GrainLevel::ParseRepeatGate("auto", v, problem) && v && problem.empty(), "auto");
 			Require(GrainLevel::ParseRepeatGate(" OFF ", v, problem) && !v, "off, case and spaces tolerated");
-			Require(!GrainLevel::ParseRepeatGate("maybe", v, problem) && v && problem.find("maybe") != std::string::npos, "invalid keeps on and names the text");
+			Require(!GrainLevel::ParseRepeatGate("on", v, problem) && v && problem.find("on") != std::string::npos, "unknown text keeps auto and names the text");
+			double t = 0.0;
+			Require(GrainLevel::ParseRepeatThreshold("0.005", t, problem) && t == 0.005, "default threshold");
+			Require(GrainLevel::ParseRepeatThreshold("0.020", t, problem) && t == 0.020 && GrainLevel::ParseRepeatThreshold("0.001", t, problem) && t == 0.001, "range ends accepted");
+			Require(!GrainLevel::ParseRepeatThreshold("0.05", t, problem) && t == 0.005 && !problem.empty(), "0.05 x N is out of range: default kept, problem text");
+			Require(!GrainLevel::ParseRepeatThreshold("abc", t, problem) && t == 0.005, "non-numeric: default kept");
+			Require(GrainLevel::Params().repeatFrac == 0.005, "Params default is the threshold default");
 		}
 
-		TEST_METHOD(FallbackEntryEngagesOnlyWhileARepeatWasDropped)
+		TEST_METHOD(FallbackEntryEngagesWhenOffOrWithoutSignal)
 		{
-			using FallbackCatalog::GrainRepeatGate;
-			Require(!GrainRepeatGate(true, 0, 8, 2).engaged, "nothing dropped: released");
-			Require(!GrainRepeatGate(false, 3, 0, 2).engaged, "setting off: released");
-			const FallbackCatalog::Decision d = GrainRepeatGate(true, 4, 0, 2);
-			Require(d.engaged && d.id == "grain_repeat_gate" && d.reason.find("L1+L2") != std::string::npos, "frozen: engaged, says the L1+L2 gains run");
-			const FallbackCatalog::Decision e = GrainRepeatGate(true, 1, 7, 2);
-			Require(e.engaged && e.reason.find("still average") != std::string::npos, "one dropped, seven left: engaged, the rest average");
+			using FallbackCatalog::GrainSepRepeatGateOff;
+			Require(!GrainSepRepeatGateOff(false, 8, 8).engaged, "auto with a signal: released");
+			Require(!GrainSepRepeatGateOff(false, 0, 0).engaged, "no neighbours offered: nothing to gate, released");
+			const FallbackCatalog::Decision off = GrainSepRepeatGateOff(true, 8, 8);
+			Require(off.engaged && off.id == "grain_sep.repeat_gate_off" && off.reason.find("is off") != std::string::npos, "key off: engaged with the stable id");
+			const FallbackCatalog::Decision none = GrainSepRepeatGateOff(false, 4, 0);
+			Require(none.engaged && none.reason.find("no signal") != std::string::npos, "neighbours offered but none judged: engaged, no signal");
+		}
+
+		TEST_METHOD(JudgedAndOfferedAreCounted)
+		{
+			Setup s;
+			const GrainLevel::NeighbourResult r = Run(s, 2.0, 80, { 81, 80, 82 }, GrainLevel::Params());
+			Require(r.offered == 3 && r.repeatJudged == 3 && r.droppedRepeat == 1, "three offered, three judged, one repeat");
+			GrainLevel::Params off; off.repeatGate = false;
+			const GrainLevel::NeighbourResult q = Run(s, 2.0, 80, { 81, 80, 82 }, off);
+			Require(q.offered == 3 && q.repeatJudged == 0 && q.droppedRepeat == 0, "gate off: nothing judged");
 		}
 	};
 }

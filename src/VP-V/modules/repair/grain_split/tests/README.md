@@ -24,4 +24,4 @@ kernel at 1080p and 2160p (Compact and Full, 20 warm-up + 120 timed frames) plus
 
 `tests/GrainLevelShiftBench.cpp` (B-S0 measurement, synthetic frames, numbers logged only): 2 versus 4 DCT half-shift grids of the neighbour Wiener (error, structure kept, time) over K = 2/4/8/12 neighbours and three grain levels, and 8x8 versus 16x16 block-field warp error on affine motions. `Params::dctShifts` (default 4, bit-identical) is a measurement knob, not a user setting.
 
-`tests/GrainLevelRepeatGateTests.cpp` (P10g C8 repeated-frame gate, new tests only): a repeat leaves the B set, independent grain never fires (0 false fires at three grain levels), a frozen picture takes the L1+L2 gains exactly, `grain_repeat_gate` parse with a visible problem text, the `grain_repeat_gate` fallback entry.
+`tests/GrainLevelRepeatGateTests.cpp` (P10g C8 repeated-frame gate, new tests only): a repeat leaves the B set, independent grain never fires (0 false fires at three grain levels), a frozen picture takes the L1+L2 gains exactly, `grain_sep_repeat_gate` / `grain_sep_repeat_threshold` parse with visible problem texts, the `grain_sep.repeat_gate_off` fallback entry.
