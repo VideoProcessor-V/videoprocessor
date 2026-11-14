@@ -124,6 +124,13 @@
   },
   {
    "kind": "class",
+   "value": "ScalerPassAdaptiveIdentityTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/scaling/shared/tests/ScalerPassAdaptiveIdentityTests.cpp",
+   "note": "WARP unless VP_TEST_GPU=hardware; drives the real AdaptiveDownscale module."
+  },
+  {
+   "kind": "class",
    "value": "BasicChromaGpuTests",
    "category": "GpuWarp",
    "file": "src/VP-V/modules/scaling/chroma_upscale/basic/tests/BasicChromaTests.cpp",
