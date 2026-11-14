@@ -50,6 +50,8 @@ namespace PipelineSlots
 		ScalingOutput, ColourToneGamut, ColourExtendedRange, ColourSdrToneShape, ColourAppearance,
 		DriveLedMeasure, DriveLedCompensation, DriveBlackLevel, OutputCalibrationLut, OutputDither,
 		OutputPresentation, DriveProjectorControl, ControlNetRuntime, ControlDiagnostics, ControlConfig,
+		// Appended (ids are append-only: StageAfter keys use uint8(slot id)); their pipeline position is `order`.
+		ColourDmPre, ColourDmCurve, ColourDmTrims,
 		Count
 	};
 
@@ -100,6 +102,9 @@ namespace PipelineSlots
 		{ Id::ControlNetRuntime, "control.net_runtime", Side::Control, 910, HookPoint::Host, Status::Placeholder, Origin::Vp },
 		{ Id::ControlDiagnostics, "control.diagnostics", Side::Control, 920, HookPoint::Host, Status::Partial, Origin::Mixed },
 		{ Id::ControlConfig, "control.config", Side::Control, 930, HookPoint::Host, Status::Partial, Origin::Mixed },
+		{ Id::ColourDmPre, "colour.dm_pre", Side::Input, 85, HookPoint::Host, Status::Placeholder, Origin::Vp },
+		{ Id::ColourDmCurve, "colour.dm_curve", Side::Processing, 172, HookPoint::Libplacebo, Status::Placeholder, Origin::Vp },
+		{ Id::ColourDmTrims, "colour.dm_trims", Side::Output, 205, HookPoint::PreOutput, Status::Placeholder, Origin::Vp },
 		} };
 		return kSlots;
 	}
@@ -129,6 +134,8 @@ namespace PipelineSlots
 		std::vector<Id> order;
 		for (const Info& info : Slots())
 			order.push_back(info.id);
-		return order;   // the table is in designed order (a test checks it)
+		// Ids are append-only, so the designed order is the `order` field, not the table position.
+		std::stable_sort(order.begin(), order.end(), [](Id a, Id b) { return Get(a).order < Get(b).order; });
+		return order;
 	}
 }

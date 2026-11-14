@@ -615,6 +615,58 @@
       "movable": true
     },
     {
+      "id": "colour.dm_pre",
+      "name": "DV display mapping: pre (RGB input)",
+      "unit": "colour",
+      "side": "input",
+      "order": 85,
+      "status": "placeholder",
+      "hook_point": "HOST",
+      "purpose": "Reserved stage dm.pre of the DV display-mapping split: work on the decoded RGB before libplacebo's colour map.",
+      "contract": {
+        "input": "decoded RGB picture",
+        "output": "same domain",
+        "geometry": "delivered size",
+        "delay_share": "0 frames (placeholder: no component, no hook)",
+        "lookahead": "none"
+      },
+      "settings_keys": [],
+      "planned_keys": [],
+      "tiers": "n/a (placeholder)",
+      "fallback": {
+        "entry": "DV display mapping (pre): off (<reason>)",
+        "behaviour": "Off = pass-through; the slot is a placeholder until its stage lands."
+      },
+      "upstream": [
+        "input.source_analysis"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": [
+          "byte-identical with the slot off",
+          "zero hooks when off"
+        ],
+        "isolation": [],
+        "contract": [
+          "slot off: no pass and no hook, pipeline byte-identical"
+        ],
+        "chain": []
+      },
+      "open_items": [
+        "DV display mapping (docs refs 125): phase P1 reserves the slot; the stage lands in a later phase"
+      ],
+      "decisions": [
+        "VP-V DV display mapping proposal (refs 125)"
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {}
+      },
+      "zone": "host",
+      "movable": false
+    },
+    {
       "id": "repair.texture_restore",
       "name": "Texture restore + breathing add-on",
       "unit": "repair",
@@ -1249,6 +1301,58 @@
       "movable": false
     },
     {
+      "id": "colour.dm_curve",
+      "name": "DV display mapping: curve",
+      "unit": "colour",
+      "side": "processing",
+      "order": 172,
+      "status": "placeholder",
+      "hook_point": "LIBPLACEBO",
+      "purpose": "Reserved stage dm.curve of the DV display-mapping split: the tone curve inside libplacebo's colour map.",
+      "contract": {
+        "input": "libplacebo colour-map input",
+        "output": "same domain",
+        "geometry": "processing size",
+        "delay_share": "0 frames (placeholder: no component, no hook)",
+        "lookahead": "none"
+      },
+      "settings_keys": [],
+      "planned_keys": [],
+      "tiers": "n/a (placeholder)",
+      "fallback": {
+        "entry": "DV display mapping (curve): off (<reason>)",
+        "behaviour": "Off = pass-through; the slot is a placeholder until its stage lands."
+      },
+      "upstream": [
+        "colour.tone_gamut"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": [
+          "byte-identical with the slot off",
+          "zero hooks when off"
+        ],
+        "isolation": [],
+        "contract": [
+          "slot off: no pass and no hook, pipeline byte-identical"
+        ],
+        "chain": []
+      },
+      "open_items": [
+        "DV display mapping (docs refs 125): phase P1 reserves the slot; the stage lands in a later phase"
+      ],
+      "decisions": [
+        "VP-V DV display mapping proposal (refs 125)"
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {}
+      },
+      "zone": "libplacebo",
+      "movable": false
+    },
+    {
       "id": "colour.extended_range",
       "name": "BTB/WTW preservation",
       "unit": "colour",
@@ -1366,6 +1470,58 @@
       },
       "zone": "output_hooks",
       "movable": true
+    },
+    {
+      "id": "colour.dm_trims",
+      "name": "DV display mapping: trims",
+      "unit": "colour",
+      "side": "output",
+      "order": 205,
+      "status": "placeholder",
+      "hook_point": "PRE_OUTPUT",
+      "purpose": "Reserved stage dm.trims of the DV display-mapping split: the Dolby-style trims at PRE_OUTPUT, after the SDR tone shape and before CAM16.",
+      "contract": {
+        "input": "target-light picture at output size",
+        "output": "same domain",
+        "geometry": "output size",
+        "delay_share": "0 frames (placeholder: no component, no hook)",
+        "lookahead": "none"
+      },
+      "settings_keys": [],
+      "planned_keys": [],
+      "tiers": "n/a (placeholder)",
+      "fallback": {
+        "entry": "DV display mapping (trims): off (<reason>)",
+        "behaviour": "Off = pass-through; the slot is a placeholder until its stage lands."
+      },
+      "upstream": [
+        "colour.sdr_tone_shape"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": [
+          "byte-identical with the slot off",
+          "zero hooks when off"
+        ],
+        "isolation": [],
+        "contract": [
+          "slot off: no pass and no hook, pipeline byte-identical"
+        ],
+        "chain": []
+      },
+      "open_items": [
+        "DV display mapping (docs refs 125): phase P1 reserves the slot; the stage lands in a later phase"
+      ],
+      "decisions": [
+        "VP-V DV display mapping proposal (refs 125)"
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {}
+      },
+      "zone": "output_hooks",
+      "movable": false
     },
     {
       "id": "colour.appearance",

@@ -1,0 +1,26 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "colour.dm_pre",
+  "unit": "colour",
+  "order": 85,
+  "status": "placeholder",
+  "code_location": "placeholder (no component; the slot registers no pass and no hook)",
+  "live_files": [],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [],
+    "upstream_modules": [
+      "input.source_analysis"
+    ]
+  },
+  "fallback_when_missing": "Placeholder: registers no pass and no hook; nothing to fall back from.",
+  "fallback_entry": null
+}

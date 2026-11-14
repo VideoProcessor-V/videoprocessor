@@ -684,6 +684,29 @@
       "fallback_when_missing": "VP debander failure renders without it; temporal frames keep libplacebo's deband."
     },
     {
+      "slot": "colour.dm_pre",
+      "order": 85,
+      "status": "placeholder",
+      "code_location": "placeholder (no component; the slot registers no pass and no hook)",
+      "live_files": [],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [],
+        "upstream_modules": [
+          "input.source_analysis"
+        ]
+      },
+      "fallback_when_missing": "Placeholder: registers no pass and no hook; nothing to fall back from."
+    },
+    {
       "slot": "repair.texture_restore",
       "order": 90,
       "status": "built",
@@ -1097,6 +1120,29 @@
       "fallback_when_missing": "Missing/invalid combined LUT -> libplacebo tone mapping."
     },
     {
+      "slot": "colour.dm_curve",
+      "order": 172,
+      "status": "placeholder",
+      "code_location": "placeholder (no component; the slot registers no pass and no hook)",
+      "live_files": [],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [],
+        "upstream_modules": [
+          "colour.tone_gamut"
+        ]
+      },
+      "fallback_when_missing": "Placeholder: registers no pass and no hook; nothing to fall back from."
+    },
+    {
       "slot": "colour.extended_range",
       "order": 175,
       "status": "built",
@@ -1168,6 +1214,29 @@
         ]
       },
       "fallback_when_missing": "A shader failure skips the stage; the Dolby-style curve falls back to bt2390 (+ the luminance trims). SDR tone shape entry: call site in WP-4's silent-fallbacks patch."
+    },
+    {
+      "slot": "colour.dm_trims",
+      "order": 205,
+      "status": "placeholder",
+      "code_location": "placeholder (no component; the slot registers no pass and no hook)",
+      "live_files": [],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [],
+        "upstream_modules": [
+          "colour.sdr_tone_shape"
+        ]
+      },
+      "fallback_when_missing": "Placeholder: registers no pass and no hook; nothing to fall back from."
     },
     {
       "slot": "colour.appearance",
