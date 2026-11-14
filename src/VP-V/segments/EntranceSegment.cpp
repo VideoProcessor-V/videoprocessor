@@ -893,11 +893,14 @@ namespace EntranceSegment
 				*b.detailPulseInactive = detailPulse.LastError();
 				const FallbackCatalog::Decision d = FallbackCatalog::DetailPulseFailed(true, detailPulse.LastError());
 				host.EngageFallback(d.id, d.reason);
+				host.ReleaseFallback("detail pulse scene judge");   // the module did not run: its judge status is stale
 			}
 		}
 		else
+		{
 			host.ReleaseFallback("detail pulse");   // switched off or not applicable: nothing failed
-			{ host.ReleaseFallback("detail pulse scene judge"); }
+			host.ReleaseFallback("detail pulse scene judge");
+		}
 		if (textureRestoreRuns())
 		{
 			pl_frame restored{};
@@ -920,6 +923,7 @@ namespace EntranceSegment
 				*b.textureRestoreInactive = textureRestore.LastError();
 				const FallbackCatalog::Decision d = FallbackCatalog::TextureRestoreFailed(true, textureRestore.LastError());
 				host.EngageFallback(d.id, d.reason);
+				host.ReleaseFallback("texture restore scene judge");   // the module did not run: its judge status is stale
 			}
 		}
 		else

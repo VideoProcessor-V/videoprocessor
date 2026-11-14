@@ -648,5 +648,37 @@ namespace DetailRestoreConfigTestsNs
 			Assert::IsTrue(text.find("motionValidity.Current(dejudderEstimatedEpoch) && sourceSequence != 0)") == std::string::npos,
 				L"the old gate is gone");
 		}
+
+		// L-B6 audit MUST 1: the scene-judge fallback wiring in the entrance segment. The release of "detail pulse scene judge" belongs in
+		// the braced else of "switched off or not applicable" (a brace-less else once ran it every frame and hid the fallback), the engage
+		// follows each successful Apply, and a failed Apply releases the stale status.
+		TEST_METHOD(SceneJudgeFallbackWiringInTheEntranceSegment)
+		{
+			const std::string text = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntranceSegment.cpp");
+			Assert::IsFalse(text.empty(), L"the entrance segment source");
+			for (const char* module : { "detail pulse", "texture restore" })
+			{
+				const std::string name = module;
+				const std::string releaseOff = "host.ReleaseFallback(\"" + name + "\");";
+				const std::string releaseJudge = "host.ReleaseFallback(\"" + name + " scene judge\");";
+				const std::string engage = "FallbackCatalog::SceneJudgeUnavailable(\"" + name + "\"";
+				Assert::IsTrue(text.find(engage) != std::string::npos, L"the judge status is built after Apply");
+				// The last plain release of the module id is in the off branch: a brace must open the else before it, and the judge release
+				// must follow it before the block closes.
+				const size_t off = text.rfind(releaseOff);
+				Assert::IsTrue(off != std::string::npos, L"the off-branch release");
+				const size_t elseAt = text.rfind("else", off);
+				Assert::IsTrue(elseAt != std::string::npos && text.find('{', elseAt) < off, L"the off branch is braced");
+				const size_t judgeAt = text.find(releaseJudge, off);
+				Assert::IsTrue(judgeAt != std::string::npos && text.find('}', off) > judgeAt, L"the judge release is inside that braced off branch");
+				// The failed-Apply branch releases the stale status (engage of the failure comes first).
+				const std::string failed = name == "detail pulse" ? "FallbackCatalog::DetailPulseFailed(true" : "FallbackCatalog::TextureRestoreFailed(true";
+				const size_t failAt = text.find(failed);
+				Assert::IsTrue(failAt != std::string::npos, L"the failure engage");
+				const size_t closeAt = text.find('}', failAt);
+				const size_t staleRelease = text.find(releaseJudge, failAt);
+				Assert::IsTrue(staleRelease != std::string::npos && staleRelease < closeAt, L"a failed Apply releases the scene-judge status");
+			}
+		}
 	};
 }
