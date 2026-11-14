@@ -84,6 +84,21 @@ namespace ScalerPass
 		}
 	}
 
+	// Hermite (cubic B=C=0): 1 - 3x^2 + 2x^3 on [0,1], zero beyond. libplacebo's
+	// ortho sampler turns an all-positive kernel (radius == radius_zero) into
+	// half-as-many hardware-bilinear fetches whose sub-texel fraction is only
+	// ~8-bit, costing ~1 code at 10-bit. This kernel gives the identical
+	// weights but a -1e-12 tail on (1,1.5) (far below fp16/fp32 LUT resolution
+	// and removed by normalisation), so radius > radius_zero and the exact
+	// one-tap-per-texel path runs. Weights are unchanged for every practical purpose.
+	double HermiteExactWeight(const pl_filter_ctx*, double x)
+	{
+		x = x < 0 ? -x : x;
+		if (x < 1.0) return 1.0 - 3.0 * x * x + 2.0 * x * x * x;
+		return x < 1.5 ? -1e-12 : 0.0;
+	}
+	const pl_filter_function kHermiteExact = { "hermite_exact", 2.0f, false, {}, {}, HermiteExactWeight };
+
 	pl_filter_config FilterConfig(const ScalerKernels::Spec& spec)
 	{
 		pl_filter_config c{};
@@ -99,7 +114,10 @@ namespace ScalerPass
 			c.params[0] = static_cast<float>(spec.B);
 			c.params[1] = static_cast<float>(spec.C);
 			break;
-		case ScalerKernels::Kind::Hermite: c = pl_filter_hermite; break;
+		case ScalerKernels::Kind::Hermite:
+			c = pl_filter_hermite;
+			c.kernel = &kHermiteExact;
+			break;
 		case ScalerKernels::Kind::Bilinear: c = pl_filter_bilinear; break;
 		default: c = pl_filter_ewa_lanczossharp; break;
 		}
