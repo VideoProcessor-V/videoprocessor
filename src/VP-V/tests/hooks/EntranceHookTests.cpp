@@ -234,8 +234,15 @@ namespace EntranceHookTest
 			// segments/EntrancePlanner.inl; the renderer keeps ONE call to it directly after the Entrance site.
 			const std::string planner = ReadText(RepositoryRoot() + "\\src\\VP-V\\segments\\EntrancePlanner.inl");
 			Assert::IsFalse(planner.empty(), L"the entrance planner source");
-			Assert::IsTrue(planner.find("// Stage 12 step A: the re-base factor for this frame") != std::string::npos &&
-				planner.find("sourceMonitor.Frame(") != std::string::npos, L"the planner holds the entrance decisions and the monitor feed");
+			// The monitor feed is frameQuiet.Begin(sourceMonitor, ...) (which calls monitor.Frame / FrameBegin in FrameQuiet.h), placed after the step A comment and before the first AutoFactors decision.
+			const std::string feedText = "frameQuiet.Begin(vpv.sourceAnalysis.sourceMonitor,";
+			const size_t stepAComment = planner.find("// Stage 12 step A: the re-base factor for this frame");
+			const size_t feedAt = planner.find(feedText);
+			const std::string frameQuietHeader = ReadText(RepositoryRoot() + "\\src\\VP-V\\modules\\input\\source_analysis\\FrameQuiet.h");
+			Assert::IsTrue(stepAComment != std::string::npos && feedAt != std::string::npos && planner.find(feedText, feedAt + 1) == std::string::npos &&
+				feedAt > stepAComment && feedAt < planner.find("sourceMonitor.AutoFactors(") &&
+				frameQuietHeader.find("monitor.Frame(") != std::string::npos && frameQuietHeader.find("monitor.FrameBegin(") != std::string::npos,
+				L"the planner holds the entrance decisions and the monitor feed");
 			const size_t stepA = text.find("PlanEntrance(renderImage, target, image, sourceSequence,", site);
 			Assert::IsTrue(stepA != std::string::npos && stepA - site < 700, L"right before the entrance-decision block");
 			Assert::IsTrue(text.find("PlanEntrance(renderImage, target, image, sourceSequence,", stepA + 1) == std::string::npos, L"exactly one planner call");
