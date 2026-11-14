@@ -11,8 +11,9 @@
 //   timeline: every present-time read is the spot made ahead (same pointer), 0 FrameReleased at present time, computed once per
 //             frame (the post-flush refill counted apart), the window never shrinks below what is queued;
 //   F-T1 AheadBudgetShortfallStepsDownInOrder (OWNER Q2, amendment 2 S10): S-A (Fill, Derived, Slice), then S-B, then S-C only
-//             when both cannot fit; S-C = the DelayBudget's next lower ladder step (fake), total delay unchanged, never below the mode's
-//             minimum queue, a no-op in Games / Competitive; the 200 ms AVR-safe tier is a CEILING (never a floor); five rates;
+//             when both cannot fit; S-C = the REAL DelayBudget's next lower ladder step, total delay == budgetMs, never below the mode's
+//             minimum queue, a no-op in Games / Competitive; the AVR-safe tier is a CEILING (never a floor); five source rates on
+//             three displays;
 //             every step has its line; no step releases a spot; a larger grant climbs back;
 //   F-T2 StalledPresentsStopAheadNoEviction (audit S3).
 // Slice C (lane claim) and D/E cases are added when those slices land. CPU only, every test bounded.
@@ -22,6 +23,7 @@
 #include <VP-V/core/SkeletonAcquire.h>
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <map>
 #include <string>
@@ -132,107 +134,145 @@ namespace QueueKeyedTimelineTestsNs
 		}
 
 		// F-T1: the shortfall is PLANNED (OWNER Q2; amendment 2 S10): S-A (Fill, Derived, Slice), then S-B, then S-C only when both
-		// cannot fit. S-C is the DelayBudget's next LOWER ladder step (a fake of core/DelayBudget.h here: total delay unchanged by
-		// padding, never below kMinimumDepth, no rounding of a time); its floor is the MODE's own minimum queue (standard: the ladder
-		// floor; Games / Competitive: S-C is a no-op, never a raise). The 200 ms AVR-safe tier is a CEILING: with it selected the
-		// total latency never exceeds 200 ms. Swept at 23.976, 25, 29.97, 50 and 59.94 Hz.
+		// cannot fit. S-C asks the REAL core/DelayBudget.h for its next lower ladder step (NextLowerQueueFrames, wrapped here only to
+		// count the calls): every plan's queue is a DelayBudget plan whose fixed + queue + padding IS the tier's budgetMs (the total
+		// delay unchanged; a wrong padding fails here), its queue never rises and never goes below kMinimumDepth, and the computed
+		// depth follows the shorter queue. Games / Competitive: S-C is a no-op, never a raise. The AVR-safe tier is a CEILING: every
+		// plan's total is <= its budgetMs. Swept at 23.976, 25, 29.97, 50 and 59.94 Hz sources on 50, 59.94 and 120 Hz displays.
 		TEST_METHOD(AheadBudgetShortfallStepsDownInOrder)
 		{
-			const double hz[] = { 23.976, 25.0, 29.97, 50.0, 59.94 };
-			for (double rate : hz)
-				for (double budgetMs : { 250.0, 200.0 /* the AVR-safe tier: a ceiling */ }) {
-					// The delay budget the scheduler holds (the real DelayBudget law): its queue frames are the S-C starting point.
-					DelayBudget::Inputs in;
-					in.budgetMs = budgetMs;
-					in.sourceFps = rate;
-					in.refreshHz = 60.0;
-					const DelayBudget::Plan budget = DelayBudget::Compute(in);
-					if (!budget.feasible)
-						continue;   // nothing to plan at this rate and tier (shown by the delay budget itself)
-					const double periodMs = 1000.0 / rate;
-					const double totalBefore = DelayBudget::FixedCostsMs(in) + budget.queueFrames * periodMs + budget.paddingMs;
-					// The fake: one step down the ladder; the padding grows by the frame it removes, so the TOTAL stays.
-					int fakeSteps = 0;
-					double fakeTotal = totalBefore;
-					LowerQueueStep fake = [&](uint16_t cur, uint16_t* lower) {
-						if (int(cur) - 1 < DelayBudget::kMinimumDepth)
-							return false;
-						*lower = uint16_t(cur - 1u);
-						++fakeSteps;
-						fakeTotal = DelayBudget::FixedCostsMs(in) + double(*lower) * periodMs
-							+ (budget.paddingMs + double(budget.queueFrames - *lower) * periodMs);
-						return true;
-					};
-					for (QueueMode mode : { QueueMode::Normal, QueueMode::Games, QueueMode::Competitive })
-						for (int coreAtFullWindow = 0; coreAtFullWindow < 2; ++coreAtFullWindow) {
-							AheadNeed n;
-							QueueWindowTerms t;
-							t.renderAhead = 1;
-							t.presentLag = 1;
-							t.laneLead = uint16_t(budget.queueFrames);
-							t.lookAheadWalk = 0;
-							t.aheadNeed = uint16_t(budget.queueFrames);
-							t.aheadNeedBy = "fake consumer";
-							t.wired = QueueWindowTerms::kAll;
-							n.window = DeriveWindow(t, 100, 0);
-							n.mode = mode;
-							n.lowerQueueStep = fake;
-							const uint16_t A = n.window.aheadCompute;
-							const JobClass classes[] = { JobClass::Fill, JobClass::Derived, JobClass::Slice, JobClass::Core };
-							for (size_t i = 0; i < 4; ++i) {
-								AheadCost c;
-								c.id = uint16_t(10 + i);
-								c.form = 1;
-								c.bytesPerFrame = 1000;
-								c.cls = classes[i];
-								c.declaredDepth = classes[i] == JobClass::Core ? (coreAtFullWindow ? A : uint16_t(1)) : uint16_t(0);
-								n.costs.push_back(c);
-							}
-							const uint64_t full = 1000ull * 4u * (1u + n.window.back + A);
-							std::vector<AheadStep> seen;
-							uint16_t lastTarget = A;
-							fakeSteps = 0;
-							fakeTotal = totalBefore;
-							for (uint64_t grant = full; ; grant -= 250) {
-								n.grantBytes = grant;
-								const AheadPlan p = PlanAheadLadder(n);
-								Assert::IsFalse(p.line.empty(), L"every step has its line");
-								Assert::IsTrue(p.line.find(Token(p.step)) != std::string::npos, L"the line names the step");
-								uint16_t dFill = 0, dDer = 0, dSlice = 0, dCore = 0;
-								p.Has(10, &dFill);
-								p.Has(11, &dDer);
-								p.Has(12, &dSlice);
-								p.Has(13, &dCore);
-								if (p.step == AheadStep::ReduceEarlyProducts)
-									Assert::IsTrue(dCore == A && (dFill == 0 || dDer == A) && (dDer == 0 || dSlice == A), L"S-A: Fill, then Derived, then Slice");
-								if (p.step == AheadStep::FewerFramesAhead)
-									Assert::IsTrue(dFill == 0 && dDer == 0 && dSlice == 0 && dCore >= 1 && dCore < A, L"S-B: core shrinks, not below its declared depth");
-								if (p.step == AheadStep::ShorterQueue || p.step == AheadStep::AtLatencyFloor)
-									Assert::IsTrue(dFill == 0 && dDer == 0 && dSlice == 0, L"S-C only after S-A and S-B");
-								Assert::IsTrue(p.queueTargetFrames <= lastTarget && p.queueTargetFrames <= A, L"never a raise");
+			const double sourceHz[] = { 23.976, 25.0, 29.97, 50.0, 59.94 };
+			const double refreshHz[] = { 50.0, 59.94, 120.0 };
+			const double tiersMs[] = { 250.0, 200.0 /* the AVR-safe tier: a ceiling */ };
+			int scReached = 0;
+			for (double display : refreshHz)
+				for (double rate : sourceHz)
+					for (double budgetMs : tiersMs) {
+						// The delay budget the scheduler holds (the real DelayBudget law): its queue frames are the S-C starting point.
+						DelayBudget::Inputs in;
+						in.budgetMs = budgetMs;
+						in.sourceFps = rate;
+						in.refreshHz = display;
+						in.processingMs = DelayBudget::kProcessingAllowanceMs;
+						const DelayBudget::Plan budget = DelayBudget::Compute(in);
+						if (!budget.feasible)
+							continue;   // nothing to plan at this rate and tier (shown by the delay budget itself)
+						int lowerCalls = 0;
+						const LowerQueueStep counted = [&lowerCalls](const DelayBudget::Inputs& b, int cur, DelayBudget::Plan* lower) {
+							++lowerCalls;
+							return DelayBudget::NextLowerQueueFrames(b, cur, lower);   // the law itself, never a fake
+						};
+						for (QueueMode mode : { QueueMode::Normal, QueueMode::Games, QueueMode::Competitive })
+							for (int coreAtFullWindow = 0; coreAtFullWindow < 2; ++coreAtFullWindow) {
+								AheadNeed n;
+								QueueWindowTerms t;
+								t.renderAhead = 1;
+								t.presentLag = 1;
+								t.laneLead = uint16_t(budget.queueFrames);
+								t.lookAheadWalk = 0;
+								t.aheadNeed = uint16_t(budget.queueFrames);
+								t.aheadNeedBy = "timeline consumer";
+								t.wired = QueueWindowTerms::kAll;
+								n.window = DeriveWindow(t, 100, 0);
+								n.mode = mode;
+								n.budget = in;
+								n.budgetFed = true;
+								n.lowerQueueStep = counted;
+								const uint16_t A = n.window.aheadCompute;
+								const JobClass classes[] = { JobClass::Fill, JobClass::Derived, JobClass::Slice, JobClass::Core };
+								for (size_t i = 0; i < 4; ++i) {
+									AheadCost c;
+									c.id = uint16_t(10 + i);
+									c.form = 1;
+									c.bytesPerFrame = 1000;
+									c.cls = classes[i];
+									c.declaredDepth = classes[i] == JobClass::Core ? (coreAtFullWindow ? A : uint16_t(1)) : uint16_t(0);
+									n.costs.push_back(c);
+								}
+								const uint64_t full = 1000ull * 4u * (1u + n.window.back + A);
+								std::vector<AheadStep> seen;
+								int lastFrames = budget.queueFrames;
+								double lastPadding = budget.paddingMs;
+								lowerCalls = 0;
+								for (uint64_t grant = full; ; grant -= 250) {
+									n.grantBytes = grant;
+									const AheadPlan p = PlanAheadLadder(n);
+									Assert::IsFalse(p.line.empty(), L"every step has its line");
+									Assert::IsTrue(p.line.find(Token(p.step)) != std::string::npos, L"the line names the step");
+									uint16_t dFill = 0, dDer = 0, dSlice = 0, dCore = 0;
+									p.Has(10, &dFill);
+									p.Has(11, &dDer);
+									p.Has(12, &dSlice);
+									p.Has(13, &dCore);
+									if (p.step == AheadStep::ReduceEarlyProducts)
+										Assert::IsTrue(dCore == A && (dFill == 0 || dDer == A) && (dDer == 0 || dSlice == A), L"S-A: Fill, then Derived, then Slice");
+									if (p.step == AheadStep::FewerFramesAhead)
+										Assert::IsTrue(dFill == 0 && dDer == 0 && dSlice == 0 && dCore >= 1 && dCore < A, L"S-B: core shrinks, not below its declared depth");
+									if (p.step == AheadStep::ShorterQueue || p.step == AheadStep::AtLatencyFloor)
+										Assert::IsTrue(dFill == 0 && dDer == 0 && dSlice == 0, L"S-C only after S-A and S-B");
+									// The queue is the DELAY BUDGET's (never the ladder's own arithmetic).
+									const DelayBudget::Plan& q = p.queue;
+									Assert::IsTrue(q.feasible, L"a fed, feasible budget gives every plan a queue");
+									const double total = q.fixedMs + q.queueMs + q.paddingMs;
+									Assert::IsTrue(std::abs(total - budgetMs) <= 1e-6, L"the total delay unchanged: fixed + queue + padding == budgetMs");
+									Assert::IsTrue(total <= budgetMs + 1e-6, L"the tier is a ceiling: total <= budgetMs");
+									Assert::IsTrue(std::abs(q.fixedMs - DelayBudget::FixedCostsMs(in)) <= 1e-9, L"the fixed costs are the budget's");
+									Assert::IsTrue(q.queueFrames <= lastFrames, L"never a raise");
+									Assert::IsTrue(q.queueFrames >= DelayBudget::kMinimumDepth, L"never below kMinimumDepth");
+									if (q.queueFrames < lastFrames)
+										Assert::IsTrue(q.paddingMs > lastPadding, L"a shorter queue is made up by the padding");
+									const uint16_t cap = AheadComputeAfterShorterQueue(n.window, budget.queueFrames - q.queueFrames);
+									Assert::IsTrue(p.aheadCap == cap && dCore <= cap, L"the computed depth follows the shorter queue");
+									if (mode != QueueMode::Normal)
+										Assert::IsTrue(q.queueFrames == budget.queueFrames && p.step != AheadStep::ShorterQueue, L"Games / Competitive: S-C is a no-op");
+									if (seen.empty() || seen.back() != p.step)
+										seen.push_back(p.step);
+									lastFrames = q.queueFrames;
+									lastPadding = q.paddingMs;
+									if (p.step == AheadStep::AtLatencyFloor || grant <= 250)
+										break;
+								}
+								for (size_t i = 1; i < seen.size(); ++i)
+									Assert::IsTrue(uint8_t(seen[i]) > uint8_t(seen[i - 1]), L"S-A -> S-B -> S-C -> floor, in order");
+								Assert::IsTrue(seen.front() == AheadStep::None && seen.back() == AheadStep::AtLatencyFloor, L"from full depth down to the floor");
 								if (mode != QueueMode::Normal)
-									Assert::IsTrue(p.queueTargetFrames == A && p.step != AheadStep::ShorterQueue, L"Games / Competitive: S-C is a no-op");
-								else
-									Assert::IsTrue(p.queueTargetFrames >= DelayBudget::kMinimumDepth || p.queueTargetFrames == A, L"never below the mode's minimum queue");
-								Assert::IsTrue(fakeTotal <= totalBefore + 1e-6 && fakeTotal >= totalBefore - 1e-6, L"the total delay unchanged by S-C");
-								if (budgetMs == 200.0)
-									Assert::IsTrue(totalBefore <= 200.0 + 1e-6, L"the AVR-safe tier is a ceiling: total <= 200 ms");
-								if (seen.empty() || seen.back() != p.step)
-									seen.push_back(p.step);
-								lastTarget = p.queueTargetFrames;
-								if (p.step == AheadStep::AtLatencyFloor || grant <= 250)
-									break;
+									Assert::AreEqual(0, lowerCalls, L"Games / Competitive never ask for a lower step");
+								if (mode == QueueMode::Normal && coreAtFullWindow && budget.queueFrames > DelayBudget::kMinimumDepth) {
+									Assert::IsTrue(std::find(seen.begin(), seen.end(), AheadStep::ShorterQueue) != seen.end() && lowerCalls > 0,
+										L"S-C reached through the delay budget when S-A and S-B cannot fit");
+									++scReached;
+								}
+								n.grantBytes = full;
+								Assert::IsTrue(PlanAheadLadder(n).step == AheadStep::None, L"step-up climbs back");
 							}
-							for (size_t i = 1; i < seen.size(); ++i)
-								Assert::IsTrue(uint8_t(seen[i]) > uint8_t(seen[i - 1]), L"S-A -> S-B -> S-C -> floor, in order");
-							Assert::IsTrue(seen.front() == AheadStep::None && seen.back() == AheadStep::AtLatencyFloor, L"from full depth down to the floor");
-							if (mode == QueueMode::Normal && coreAtFullWindow && A > DelayBudget::kMinimumDepth)
-								Assert::IsTrue(std::find(seen.begin(), seen.end(), AheadStep::ShorterQueue) != seen.end() && fakeSteps > 0,
-									L"S-C reached through the delay budget when S-A and S-B cannot fit");
-							n.grantBytes = full;
-							Assert::IsTrue(PlanAheadLadder(n).step == AheadStep::None, L"step-up climbs back");
-						}
-				}
+					}
+			Assert::IsTrue(scReached > 0, L"the sweep exercised S-C at least once");
+		}
+
+		// The budget NOT fed: no S-C step, and the floor line says why (no silent cap).
+		TEST_METHOD(AheadLadderWithoutABudgetOffersNoShorterQueue)
+		{
+			AheadNeed n;
+			QueueWindowTerms t;
+			t.renderAhead = 1;
+			t.presentLag = 1;
+			t.laneLead = uint16_t(DelayBudget::kDesignDepth);
+			t.aheadNeed = uint16_t(DelayBudget::kDesignDepth);
+			t.aheadNeedBy = "timeline consumer";
+			t.wired = QueueWindowTerms::kAll;
+			n.window = DeriveWindow(t, 100, 0);
+			AheadCost c;
+			c.id = 13;
+			c.form = 1;
+			c.bytesPerFrame = 1000;
+			c.cls = JobClass::Core;
+			c.declaredDepth = n.window.aheadCompute;
+			n.costs.push_back(c);
+			const std::vector<AheadPlan> states = AheadLadderStates(n);
+			for (const AheadPlan& p : states)
+				Assert::IsTrue(p.step != AheadStep::ShorterQueue && !p.queue.feasible, L"not fed: no S-C step, no invented queue");
+			Assert::IsTrue(states.back().step == AheadStep::AtLatencyFloor
+				&& states.back().line.find("delay budget not fed") != std::string::npos, L"the floor line says the budget was not fed");
 		}
 
 		// F-T2 (audit S3): presents STALL while renders go on: ahead demand stops visibly (PresentsStalled), nothing is evicted, and
