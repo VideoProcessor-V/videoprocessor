@@ -162,9 +162,13 @@ Cost when off: the crash state has no switch, so item 1 always runs. The report 
 - Planned keys: (none)
 - Tiers: n/a
 
+## Design goal, philosophy and decisions
+
+- No silent fallbacks (ADR-0001): libplacebo's latched renderer error flags (FBO, sampling, debanding, blending, overlay, peak detect, film grain, frame mixing, deinterlacing, error diffusion, contrast recovery, blur) were only read for disabled hooks and otherwise rendered a reduced pass silently. `LibplaceboErrors::Latched` turns the flag word into the visible `libplacebo errors` entry; hooks keep their own entries. Visibility only: recovery (renderer recreation or a bounded error reset) is a behaviour change and needs its own decision. (S-12BIT, refs/119 #29/#30/#48/#49/#51; owner decision 2026-11-12 15:07 UTC-5 per lead 8 brief of 2026-11-14)
+
 ## Fallbacks
 
-- "Fallbacks engaged" entry: (n/a)
+- "Fallbacks engaged" entry: `libplacebo errors` (LibplaceboErrors.h)
 - Behaviour: Owns the format: 'Fallbacks engaged: none' when clean.
 
 ## Net fingerprint / upstream

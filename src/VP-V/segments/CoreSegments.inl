@@ -184,6 +184,18 @@ void LibplaceboVideoRenderer::Impl::ReportRenderErrors()
         PublishCustomShaderStatus();
     dynamicDrive.OnHookErrors(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
     extendedRange.NoteDisabledHooks(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
+    // S-12BIT (refs/119 #51): libplacebo's other latched error flags (FBO, sampling, debanding, ...) were silent; they now
+    // show as one visible entry, and the picture precision (float16 on the Stable lane or with fbo_float32 off) with them.
+    static_assert(LibplaceboErrors::kFbo == PL_RENDER_ERR_FBO && LibplaceboErrors::kHooks == PL_RENDER_ERR_HOOKS &&
+        LibplaceboErrors::kBlur == PL_RENDER_ERR_BLUR && LibplaceboErrors::kContrastRecovery == PL_RENDER_ERR_CONTRAST_RECOVERY,
+        "LibplaceboErrors bit values must mirror enum pl_render_error");
+    SyncFallback(LibplaceboErrors::Latched(static_cast<int>(hookErrors.errors)));
+#if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
+    constexpr bool laneHasFloat32Fbo = true;   // Beta lane (API 388)
+#else
+    constexpr bool laneHasFloat32Fbo = false;  // Stable 7.360: no float32 intermediate switch
+#endif
+    SyncFallback(PicturePrecision::Precision(pipelineSlots.OriginalPathway(), laneHasFloat32Fbo, activeSettings.fboFloat32));
     // output.calibration_lut (VP stage, R1): a disabled or failing hook reverts to libplacebo's
     // target LUT for the rest of the session, visibly (skeleton audit item 5).
     {
@@ -705,8 +717,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     // S2: every FBO in rgba32f (exact highlights; +bandwidth). Auto: on everywhere, the
     // low-latency path too (owner 2026-10-16: higher precision is the default; half-float
     // there was never agreed). Off by hand only.
-    frameParams.fbo_float32 = AdaptiveDownscaleStage::FboFloat32(activeSettings.fboFloat32,
-        pipelineSlots.Runs(PipelineSlots::Id::ScalingOutput));
+    frameParams.fbo_float32 = PicturePrecision::FboFloat32(activeSettings.fboFloat32);   // S-12BIT: the setting alone, not the scaling.output slot
 #endif
     // Only a quantiser submitted with this frame replaces libplacebo's dither (audit 2026-10-16:
     // a sigma-delta left out of the frame for its domain still cleared the dither).
