@@ -4,7 +4,7 @@ Unit **repair** | replaces `repair.texture_restore` (order 90) | status **draft*
 
 ## Design goal, philosophy and decisions
 - Goal: temporal detail from the engine's shared motion and trust, never a private estimate of either.
-- Decision (L-B6, WAIVER-B6-TD-TRUST, 2026-11-14): `SharedMotionSource` reads BOTH directions of the cell trust from the engine memo (`FlowView::CellTrust` / `CellTrustBackward`) through a `FlowOf` seam; its own recompute (CostWeights + FbError + CellTrust) is deleted. The old arithmetic remains only as the test-side reference of the migration identity test (both directions, bit-equal). The adapter has no production host wiring yet (tests only); the host passes the engine `FlowOf` when it is wired.
+- Decision (L-B6, WAIVER-B6-TD-TRUST; source: lead 8 brief and lane L-B6 commits 1eb3e66ce..; 2026-11-14T13:25Z): `SharedMotionSource` reads BOTH directions of the cell trust from the engine memo (`FlowView::CellTrust` / `CellTrustBackward`) through a `FlowOf` seam; its own recompute (CostWeights + FbError + CellTrust) is deleted. The old arithmetic remains only as the test-side reference of the migration identity test (both directions, bit-equal). The adapter has no production host wiring yet (tests only); the host passes the engine `FlowOf` when it is wired.
 
 
 ## Purpose

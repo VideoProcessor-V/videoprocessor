@@ -22,8 +22,8 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 
 ## Design goal, philosophy and decisions
 - Goal: one camera model that explains the frame's global motion from the ENGINE's motion, at the engine's own cell grid, with nothing recomputed that the engine already holds.
-- Decision (L-B6, WAIVER-B6-CELLTRUST, 2026-11-14): the cell trust is the engine's memo (`FlowView::CellTrust`), copied on the render thread; the camera holds no trust arithmetic. The retired private recompute lives only as the test-side reference of the migration identity (bit-equal).
-- Decision (coordinator, 2026-11-14): reading P3 (the verified field) for the labels is deferred until P3 is published for real (L-B4); the camera fit worker reads P2/P4 CPU forms through Acquire once the contract lands (CPU forms are pinned by B1; GPU forms stay render-thread).
+- Decision (L-B6, WAIVER-B6-CELLTRUST; source: lead 8 brief and lane L-B6 commits 1eb3e66ce..; 2026-11-14T13:25Z): the cell trust is the engine's memo (`FlowView::CellTrust`), copied on the render thread; the camera holds no trust arithmetic. The retired private recompute lives only as the test-side reference of the migration identity (bit-equal).
+- Decision (coordinator; source: lead brief 130; 2026-11-14T13:25Z): reading P3 (the verified field) for the labels is deferred until P3 is published for real (L-B4); the camera fit worker reads P2/P4 CPU forms through Acquire once the contract lands (CPU forms are pinned by B1; GPU forms stay render-thread).
 - Dependency: the matcher global search (U10 items b, e) waits for L-B4.
 
 ## Skeleton products declared

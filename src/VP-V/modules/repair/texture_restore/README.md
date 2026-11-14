@@ -204,3 +204,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 ## Private GPU textures (skeleton rule)
 
 This module still creates its own GPU textures (see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). Its per-frame half-resolution temporaries (half, tmp, and the foreign-geometry trio) come from the shared scratch arena when Params::arena is set (SA1); its persistent state (low bands, tile statistics, references, gains, output) stays private and migrates in SA6/SA7/SA8/SA12.
+
+## Scene judge (detail pulse and texture restore)
+
+- Decision (L-B6, WAIVER-B6-D8-MODELS; source: lead 9 ruling on D8 and audit-L-B6 SHOULD 8; 2026-11-14T13:25Z): both modules read the shared cut/fade verdict (U7, the frame analysis scene group via `SceneReader`); their private tile-change laws are deleted and kept only as the test reference `TileJudgeReference`. The scene group is read with Peek, so with `frame_analysis_store` off, or a frame whose group is not sealed, there is no verdict: the references restart every frame (visibly: the "<module> scene judge" fallback, Ctrl+I). Detail pulse and texture restore therefore need `frame_analysis_store` on to keep their history. The shared vector veto (P7) is not yet inside U7; the D8 switch stays parked behind it.
