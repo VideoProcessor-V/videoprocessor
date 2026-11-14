@@ -176,5 +176,30 @@ namespace PrivateTextureScanTestsNs
 			Assert::IsFalse(CreatesTexturePrivately("bool EnsureSize(int w, int h);"));
 			Assert::IsFalse(CreatesTexturePrivately("MyEnsure(x);"));
 		}
+
+		// R2 (lead 12): no owner fill captures a pl_gpu of its own. A file that defines or handles an owner fill (names
+		// OwnerFillRequest) takes the device only through OwnerFillRequest::gpu (the sanctioned OwnerGpuContext): it never names
+		// pl_gpu. The memo itself (core/SkeletonAcquire.h, whose comments name the type) is the one exception. The whole VP-V tree
+		// is scanned (tests excluded).
+		TEST_METHOD(OwnerFillsTakeNoPrivateGpu)
+		{
+			std::vector<std::string> files;
+			Walk("src/VP-V", files);
+			Assert::IsTrue(!files.empty(), L"the scan found no source files: repository root is wrong");
+			size_t fillFiles = 0;
+			for (const std::string& rel : files)
+			{
+				const std::string text = SettingsTestSupport::ReadFile(Native(rel));
+				if (text.find("OwnerFillRequest") == std::string::npos)
+					continue;
+				++fillFiles;
+				if (rel == "src/VP-V/core/SkeletonAcquire.h")
+					continue;
+				const std::wstring message = Widen(rel) + L": an owner fill names pl_gpu: take the device through OwnerFillRequest::gpu"
+					L" (core/SkeletonAcquire.h OwnerGpuContext), never a captured pl_gpu";
+				Assert::IsTrue(text.find("pl_gpu") == std::string::npos, message.c_str());
+			}
+			Assert::IsTrue(fillFiles >= 2, L"the scan found the memo and at least one fill");
+		}
 	};
 }
