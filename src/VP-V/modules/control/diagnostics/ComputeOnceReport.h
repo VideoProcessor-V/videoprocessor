@@ -138,7 +138,8 @@ namespace ComputeOnceReport
 	{
 		static const std::vector<Uncounted> list = {
 			{ "U5", "laplacian_ringing", "no implementation in the tree", "the first U5 producer commit" },
-			{ "U13", "coding_evidence", "P16 reserved (fused with the region block statistics pass), no producer", "the P16 fill package" },
+			{ "U13", "coding_evidence", "the P16 owner fill is not on this branch (r2/job1-core); merged, the Acquire fold-in counts it as acquire:coding_evidence",
+				"the L-P16 merge (add VPV_COMPUTE_ONCE(\"U13\") at the fill)" },
 			{ "U14", "trail_compose", "no implementation (TD shared function, not built)", "the TD build package that adds it" },
 			{ "U15", "field_refine", "RefinedFieldProducer unbound (Bound() false), no compute", "the producer binding commit" },
 			{ "U16", "lighting_fit", "no implementation (TD shared function, not built)", "the TD build package that adds it" },
