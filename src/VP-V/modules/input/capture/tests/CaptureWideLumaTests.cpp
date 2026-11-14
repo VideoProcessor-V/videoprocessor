@@ -38,7 +38,7 @@ namespace VideoProcessorTest
 			for (const VideoFrameEncoding encoding : { VideoFrameEncoding::R12B, VideoFrameEncoding::R12L })
 				for (const bool bt2020 : { false, true })
 				{
-					const int width = 104, height = 40;
+					const int width = 104, height = 104;   // PRE-C2 fixture: Bill's DisplayMode check (unchanged) requires height >= 100
 					VideoStateComPtr state = new VideoState();
 					state->valid = true;
 					state->displayMode = std::make_shared<DisplayMode>(width, height, false, 24000, 1001);
