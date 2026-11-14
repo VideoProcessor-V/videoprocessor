@@ -38,8 +38,11 @@ refused. Nothing falls back silently: a failed pass returns false with `LastErro
 
 ## Settings
 
-None. This is a function-only unit with no config key; the settings of its users (`upscale_route`, the hybrid's branch parameters)
-arrive with B1+ and are listed in their own modules.
+| Key | Default | Range | Notes |
+|---|---|---|---|
+| (no keys) | - | - | Function-only unit: every input is a field of `ScalerPass::Settings`, set by the caller. The settings of its users (`upscale_route`, the hybrid's branch parameters) arrive with B1+ and are listed in their own modules. |
+
+`plane` (a tag) and `light` (Linear is refused) do not change behaviour yet; B1 wires or removes them (quality rule 2).
 
 ## Design goal, philosophy and decisions
 
@@ -64,12 +67,13 @@ model. Each decision cites the owner lines of refs/123 N0.
 - `ScalerKernelTableMatchesKernelInverseTaps`: the table's phase taps equal `KernelInverse::Candidates()` bit for bit.
 - `ScalerGpuMigrationIdentityRebaseChromaPasses`: ScalerPass(lanczos, ortho, antiring 0.5, chroma, across first) equals the chroma planes
   `SourceRebase::Module::Apply` makes today, bit for bit.
-- `ScalerGpuMigrationIdentityFaithfulOrtho`: ScalerPass(ortho, down first, integer window) equals the faithful ortho branch's libplacebo
-  call sequence of `AdaptiveDownscale` (quoted in the test; AdaptiveDownscale itself is untouched in this slice).
+- `ScalerGpuMigrationIdentityFaithfulOrtho` (tests/ScalerPassAdaptiveIdentityTests.cpp): ScalerPass(lanczos3, both, down first) equals what the REAL
+  `AdaptiveDownscale::Module` (faithful_ortho, w_base 0) renders through libplacebo, within one 8-bit code (the pipeline writes an 8-bit
+  target). AdaptiveDownscale is only driven, never edited.
 
 ## Open / not verified in B0
 
-Nothing was built or run when this slice was written (code-only): the tests are unrun, the anti-ring and polar unequal-axis semantics of
+Nothing was built or run when this slice was written (code-only; the build + TRX are queued by the dispatcher after audit): the tests are unrun, the anti-ring and polar unequal-axis semantics of
 libplacebo are not modelled by the reference (parity tests use antiring 0 and equal-axis polar checks), and the bench (1080 to 2160 luma)
 has no number yet.
 

@@ -134,7 +134,7 @@ namespace ScalerPass
 		};
 		if (!gpu || !dispatch || !src.tex || !src.tex->params.sampleable) return fail("no sampleable source");
 		if (st.light == Light::Linear) return fail("linear light is not built (B0 scales in the signal domain)");
-		slot = (std::max)(0, (std::min)(slot, kSlots - 1));
+		if (slot < 0 || slot >= kSlots) return fail("slot out of range (0..2)");
 
 		const float sx0 = (src.x1 > src.x0 && src.y1 > src.y0) ? src.x0 : 0.0f;
 		const float sy0 = (src.x1 > src.x0 && src.y1 > src.y0) ? src.y0 : 0.0f;
@@ -220,8 +220,8 @@ namespace ScalerPass
 		note = newNote;
 		char line[200];
 		std::snprintf(line, sizeof line, "ScalerPass: %s %s %s, %.4gx%.4g (derived ratios), %dx%d -> %dx%d, %s", KindName(st.filter.kind),
-			Name(st.axis), st.plane == Plane::Chroma ? "chroma" : "luma", (static_cast<double>(sx1) - sx0) / outW,
-			(static_cast<double>(sy1) - sy0) / outH, src.tex->params.w, src.tex->params.h, outW, outH, fmt->name ? fmt->name : "?");
+			Name(st.axis), st.plane == Plane::Chroma ? "chroma" : "luma", scaleX ? (static_cast<double>(sx1) - sx0) / outW : 1.0,
+			scaleY ? (static_cast<double>(sy1) - sy0) / outH : 1.0, src.tex->params.w, src.tex->params.h, outW, outH, fmt->name ? fmt->name : "?");
 		status = line;
 		return true;
 	}

@@ -61,6 +61,10 @@ namespace ScalerPass
 	pl_filter_config FilterConfig(const ScalerKernels::Spec& spec);
 	const char* Name(Axis a);
 
+	// Threading and lifetime: one Module is used from ONE thread, the thread that owns the pl_gpu / pl_dispatch it is
+	// given (the members are plain, not locked). An output texture is valid only until the next Apply of the same
+	// slot or Release. There is no destructor: the owner MUST call Release(gpu) before the pl_gpu is destroyed, or
+	// the textures and LUT objects leak.
 	class Module
 	{
 	public:

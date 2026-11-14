@@ -14,6 +14,7 @@
     "src/VP-V/modules/scaling/shared/ScalerPass.cpp",
     "src/VP-V/modules/scaling/shared/README.md",
     "src/VP-V/modules/scaling/shared/tests/ScalerPassTests.cpp",
+    "src/VP-V/modules/scaling/shared/tests/ScalerPassAdaptiveIdentityTests.cpp",
     "src/VP-V/modules/scaling/shared/tests/README.md"
   ],
   "forwarding_headers": [],
