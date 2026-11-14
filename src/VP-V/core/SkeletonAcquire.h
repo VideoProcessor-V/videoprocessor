@@ -957,7 +957,7 @@ public:
                 return Fail(c, id, seq, AcquireCause::LanePending);
             if (ar.kind == LaneSlotSource::AheadNow::Declined) {
                 AcquireResult r = Fail(c, id, seq, AcquireCause::OwnerDeclined);
-                if (ar.why != nullptr && ar.why[0] != ' ')
+                if (ar.why != nullptr && ar.why[0] != '\0')
                     lastCause_[id] += std::string(": ") + ar.why;
                 return r;
             }
