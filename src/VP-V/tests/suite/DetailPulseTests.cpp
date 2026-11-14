@@ -919,7 +919,7 @@ namespace DetailPulseTestsNs
 				DetailPulse::Module module;
 				Model model;
 				Settings s;
-				s.sceneReader = &NoCutReader;   // D8: the module reads the shared judge (DefaultSceneReader = NoCutReader here); the model follows the same verdict
+				s.sceneReader = &NoCutReader;   // D8: this test builds its own device, so the module is given the same reader (NoCutReader) explicitly via p.sceneReader; the model follows that verdict
 				double worst = 0.0;
 				for (int k = 0; k < static_cast<int>(c.frames.size()); ++k)
 				{
