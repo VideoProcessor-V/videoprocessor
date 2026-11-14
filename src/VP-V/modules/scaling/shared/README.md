@@ -36,6 +36,10 @@ kernel table.
 A single-axis pass keeps the integer window of the unscaled axis (pass 0 for its size to derive it); a polar filter on a single axis is
 refused. Nothing falls back silently: a failed pass returns false with `LastError()`; the caller keeps its own path.
 
+## Textures and the scratch arena
+
+`ScalerPass.cpp` creates its textures through `pl_tex_recreate`: per slot, the OUTPUT texture (`Apply` returns it to the caller and it is reused while the size and format are unchanged, so it outlives the call) and, for a both-axes pass, the intermediate of the two-pass ortho. The scratch arena (a scope per stage call, sampleable|storable shapes only, planned by the host) cannot own them today: arena textures are neither renderable nor blit sources, the output is kept across frames, and the unit has no caller or plan yet. It is therefore on the PrivateTextureScan allow-list, anchored to this one file, the same reason as `BasicChromaGpu` `m_out`; this migrates in SA6/SA7/SA8/SA12 together with the other private output textures: at B1, when the first caller lands, `Apply` takes caller-supplied out/temp textures from the arena or the product store (arena shapes gain a renderable flag) and the allow-list entry is removed (102b row SCALERPASS-ARENA).
+
 ## Settings
 
 | Key | Default | Range | Notes |
