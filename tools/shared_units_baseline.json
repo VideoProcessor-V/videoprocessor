@@ -274,10 +274,22 @@
      "reason": "the lane hosts the P11 GPU kernel (co-owner of U4) (refs/126 s3, B0)"
     },
     {
-     "file": "src/VP-V/modules/repair/grain_split/",
-     "pattern": "block|e1|BlockMeans",
+     "file": "src/VP-V/modules/repair/grain_split/GrainSplit.h",
+     "pattern": "block means of d1|BlockMeans|region block stats \\(declared\\)",
      "kind": "false_positive",
-     "reason": "P10 own block energies e1/e2/e3: inside the U1 owner, part of the split law (refs/126 s3, B0)"
+     "reason": "P10 own block energies e1/e2/e3: inside the U1 owner, part of the split law (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/grain_split/GrainSplitGpu.cpp",
+     "pattern": "block means of d1",
+     "kind": "false_positive",
+     "reason": "P10 own block energies e1/e2/e3: inside the U1 owner, part of the split law (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
+    },
+    {
+     "file": "src/VP-V/modules/repair/grain_split/GrainSplitGpu.h",
+     "pattern": "block mean of d3",
+     "kind": "false_positive",
+     "reason": "P10 own block energies e1/e2/e3: inside the U1 owner, part of the split law (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
     },
     {
      "file": "src/VP-V/modules/repair/temporal_detail/TemporalDetailModel.h",
@@ -612,10 +624,22 @@
      "reason": "call of the shared siting law (refs/126 s3, B0)"
     },
     {
-     "file": "src/VP-V/modules/input/source_analysis/identity/chain/",
+     "file": "src/VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.cpp",
+     "pattern": "PolyphaseProposer",
+     "kind": "false_positive",
+     "reason": "source-identity polyphase EVIDENCE proposer (detection), not a chroma upsample (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h",
+     "pattern": "PolyphaseProposer\\.h",
+     "kind": "false_positive",
+     "reason": "source-identity polyphase EVIDENCE proposer (detection), not a chroma upsample (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/identity/chain/PolyphaseProposer.h",
      "pattern": "[Pp]olyphase",
      "kind": "false_positive",
-     "reason": "source-identity polyphase EVIDENCE proposer (detection), not a chroma upsample (refs/126 s3, B0)"
+     "reason": "source-identity polyphase EVIDENCE proposer (detection), not a chroma upsample (refs/126 s3, B0); narrowed to the exact file and symbol (S-CHK2 C1)"
     },
     {
      "file": "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
