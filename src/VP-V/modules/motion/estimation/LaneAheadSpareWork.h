@@ -85,7 +85,9 @@ public:
         const double perPair = m_cost.PredictMs();
         return perPair > 0.0 ? perPair * double(m_pairsWanted > 0 ? m_pairsWanted : 1) : 0.0;
     }
-    uint32_t RowsLeft() const override { return m_pairsWanted > 0 ? uint32_t(m_pairsWanted) : 0u; }
+    // Splittable by whole pairs only when more than one pair is wanted: one pair is one matcher call, so a single pair that does not fit is
+    // DEFERRED (R4), never "split" into an overrun (PostPresentSpare's split always runs at least one row).
+    uint32_t RowsLeft() const override { return m_pairsWanted > 1 ? uint32_t(m_pairsWanted) : 0u; }
     double Run(uint32_t rows) override
     {
         if (m_engine == nullptr) return -1.0;
