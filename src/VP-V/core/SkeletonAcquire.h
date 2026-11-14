@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -40,7 +41,10 @@
 // complete yet (SetFenceCompleted) is retired only when it completes: its keep-alive is not dropped under a GPU read.
 // GPU bytes are budgeted against the VRAM ledger grant (SetGpuBudget; reserved BEFORE the fill); CPU bytes are counted.
 //
-// Threads: the memo is thread-safe and fills run outside its lock. A lane-bound memo (SkeletonAcquireLane.h) reads the lane's
+// Threads: the memo is thread-safe and fills run outside its lock (NO lock is held across an owner fill, so a fill may
+// Acquire its prerequisites: nested get-or-compute-and-publish, owner rule 2026-11-13). The re-entrancy guard is PER KEY
+// and cycles are detected BY KEY: a fill asking (directly or through other fills, on this thread or across threads that
+// wait for each other's fills) for a key whose fill is waiting on it is refused as Reentrant, never a deadlock. A lane-bound memo (SkeletonAcquireLane.h) reads the lane's
 // slots, a render-thread operation, so Acquire of a LANE product is render thread.
 namespace VpSkeleton {
 
@@ -154,7 +158,7 @@ enum class AcquireCause : uint8_t {
     LanePending,         // the lane's GPU live fill is recorded but not run yet (deferred to Entrance)
     LaneFailed,          // the lane's deferred GPU live fill failed
     NoGpuHandle,         // the lane holds the GPU product but its texture is not reachable (dispatcher not configured)
-    Reentrant,           // an owner fill asked for its own key (would wait for itself)
+    Reentrant,           // an owner fill asked for its own key, directly or through a cycle of fills (would wait for itself)
     CauseCount
 };
 
@@ -405,7 +409,15 @@ public:
         const auto it = memo_.find(key);
         if (it != memo_.end()) {
             const std::shared_ptr<Entry> e = it->second;
-            cv_.wait(lk, [&e]() { return e->state != Entry::Filling; });
+            if (e->state == Entry::Filling) {
+                // Cycle by key across threads: the fill we would wait for is (transitively) waiting for a fill of ours.
+                if (WaitWouldCycleLocked(e))
+                    return Fail(c, id, seq, AcquireCause::Reentrant);
+                const std::thread::id self = std::this_thread::get_id();
+                waitingOn_[self] = e;
+                cv_.wait(lk, [&e]() { return e->state != Entry::Filling; });
+                waitingOn_.erase(self);
+            }
             if (e->state == Entry::Ready) {
                 ++c.reusedMemo;
                 return ResultOf(e, AcquireStatus::Reused);
@@ -437,6 +449,7 @@ public:
         e->seq = seq;
         e->id = id;
         e->gpuForm = form == AcquireForm::Gpu;
+        e->filler = std::this_thread::get_id();
         e->reserved = reserve;
         gpuBytes_ += reserve;
         memo_[key] = e;
@@ -656,11 +669,28 @@ private:
         bool orphaned = false;     // released from the memo (while filling or after): its bytes are no longer counted
         uint64_t reserved = 0;     // GPU bytes counted in gpuBytes_
         uint64_t readFence = 0;    // NoteGpuRead
+        std::thread::id filler;    // the thread running the fill (cycle detection while Filling)
         std::vector<uint8_t> bytes;
         GpuMemoHandle gpu;
     };
 
     static uint32_t OwnerKey(ProductId id, AcquireForm f) { return (uint32_t(id) << 1) | (f == AcquireForm::Gpu ? 1u : 0u); }
+
+    // Waiting for `e` (Filling) would close a cycle: following "the filler of e waits for the fill of ..." reaches this thread.
+    bool WaitWouldCycleLocked(const std::shared_ptr<Entry>& e) const
+    {
+        const std::thread::id self = std::this_thread::get_id();
+        const Entry* cur = e.get();
+        for (size_t hops = 0; cur != nullptr && cur->state == Entry::Filling && hops <= waitingOn_.size(); ++hops) {
+            if (cur->filler == self)
+                return true;
+            const auto w = waitingOn_.find(cur->filler);
+            if (w == waitingOn_.end())
+                return false;
+            cur = w->second.get();
+        }
+        return false;
+    }
 
     static std::vector<Key>& FillingOnThisThread()
     {
@@ -768,6 +798,7 @@ private:
     std::map<uint32_t, OwnerFill> owners_;
     std::map<Key, std::shared_ptr<Entry>> memo_;
     std::vector<std::shared_ptr<Entry>> retired_;
+    std::map<std::thread::id, std::shared_ptr<Entry>> waitingOn_;   // a thread -> the Filling entry it waits for (cycle detection)
     std::map<ProductId, AcquireCounters> counters_;
     std::map<ProductId, std::string> names_;
     std::map<ProductId, std::string> lastCause_;
