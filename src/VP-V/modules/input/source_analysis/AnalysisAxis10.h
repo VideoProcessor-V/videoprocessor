@@ -98,8 +98,8 @@ namespace Vpv { namespace AnalysisDomain
 		return static_cast<uint32_t>(sum < 0 ? 0 : (sum > 4095 ? 4095 : sum));
 	}
 
-	// GLSL twin of AxisQ6 for 12-bit Scale-law codes (the GPU unpack's matcher luma); generated from the constants above
-	// so the text cannot drift from the CPU law (the parity test pins both). `au_axis_q6_scale(code, code_max)` is
+	// GLSL twin of AxisQ6 for 12-bit Scale-law codes (the GPU unpack's matcher luma); hand-written to mirror the constants above
+	// (65472 = kAxisQ6Max); the parity tests (AnalysisLumaDomainTests glsl check, CaptureWideLumaTests) pin it to the CPU law. `au_axis_q6_scale(code, code_max)` is
 	// integer-exact in 32 bits for code_max <= 4095 (code * 65472 < 2^28).
 	inline const char* AxisGlsl()
 	{
