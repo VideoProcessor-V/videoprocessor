@@ -35,7 +35,18 @@ namespace DetailPulseModel
 		double fieldScale = 1.0;      // field (native) px per plane px down
 		double fieldScaleX = 0.0;     // across (0 = fieldScale)
 		pl_rect2df picture{};         // bug hunt 33 F1: the active picture (DetailPulse::Params::picture)
+		// Null = the RETIRED tile cut / fade law (TileJudgeReference, kept as the test reference); set = the shared judge's verdict
+		// (VpDetailRestore::SceneRestartOf, no record = restart), as the module does since registered fix D8.
+		VpDetailRestore::SceneReaderFn sceneReader = nullptr;
 	};
+
+	// The RETIRED private cut / fade judge of detail_pulse_stabilise (WAIVER-B6-D8-MODELS): the module reads the shared judge now.
+	namespace TileJudgeReference
+	{
+		constexpr double kCutShare = 0.5;     // share of tiles changed beyond CutCodes: a cut
+		constexpr double kFadeCodes8 = 0.25;  // frame mean moved this many 8-bit codes on two consecutive frames, same sign: a fade
+		inline double FadeCodes(int colorDepth) { return kFadeCodes8 * DetailPulse::EightBitStep(colorDepth); }
+	}
 
 	// Bug hunt 33 F1: the active picture's bounds (inclusive px), when it is not the whole plane.
 	struct Picture
@@ -300,15 +311,21 @@ namespace DetailPulseModel
 			const bool aheadValid = aheadSequence != 0 && sequence != 0 && aheadSequence == sequence + 1 &&
 				aheadW == luma.w && aheadH == luma.h && aheadScale == scale;
 			const double cutCodes = DetailPulse::CutCodes(s.bitrateQuality, s.colorDepth);
-			bool cut = nValid > 0 && fs.cutShare > DetailPulse::kCutShare;
-			if (field) cut = cut && fs.untrustedShare > 0.5;
+			bool cut = false;
 			bool fade = false;
-			if (nValid >= 2)
+			if (s.sceneReader)
+				cut = nValid > 0 && VpDetailRestore::SceneRestartOf(sequence, s.sceneReader).restart;   // the shared judge's verdict
+			else
 			{
-				const double p1 = ring[(slot + kRing - 1) % kRing][2], p2 = ring[(slot + kRing - 2) % kRing][2];
-				const double d0 = fs.meanLuma - p1, d1 = p1 - p2;
-				const double fc = DetailPulse::FadeCodes(s.colorDepth);
-				fade = std::fabs(d0) >= fc && std::fabs(d1) >= fc && d0 * d1 > 0.0;
+				cut = nValid > 0 && fs.cutShare > TileJudgeReference::kCutShare;
+				if (field) cut = cut && fs.untrustedShare > 0.5;
+				if (nValid >= 2)
+				{
+					const double p1 = ring[(slot + kRing - 1) % kRing][2], p2 = ring[(slot + kRing - 2) % kRing][2];
+					const double d0 = fs.meanLuma - p1, d1 = p1 - p2;
+					const double fc = TileJudgeReference::FadeCodes(s.colorDepth);
+					fade = std::fabs(d0) >= fc && std::fabs(d1) >= fc && d0 * d1 > 0.0;
+				}
 			}
 			const bool restart = nValid == 0 || cut || fade;
 			double r1 = fs.e1, r2 = fs.e2;

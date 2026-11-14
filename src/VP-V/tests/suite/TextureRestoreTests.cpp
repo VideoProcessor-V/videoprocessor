@@ -893,6 +893,18 @@ namespace TextureRestoreTestsNs
 // ---- GPU (shader against the model; timings). Never run by the agents: WARP or VP_TEST_GPU=hardware. ----
 namespace TextureRestoreTestsNs
 {
+	// The scene readers of the shared cut / fade judge (registered fix D8); the default reader is replaced for the lifetime of a GpuDevice
+	// (no skeleton store in the unit tests): no frame is a cut or a fade.
+	bool NoCutReader(uint64_t, FrameAnalysis::Scene& scene) { scene = FrameAnalysis::Scene(); return true; }
+	bool MissingReader(uint64_t, FrameAnalysis::Scene&) { return false; }
+	uint64_t g_cutAt = 0;
+	bool CutAtReader(uint64_t sequence, FrameAnalysis::Scene& scene)
+	{
+		scene = FrameAnalysis::Scene();
+		scene.cut = sequence == g_cutAt;
+		return true;
+	}
+
 	struct GpuDevice
 	{
 		pl_log log = nullptr;
@@ -900,6 +912,7 @@ namespace TextureRestoreTestsNs
 		pl_dispatch dispatch = nullptr;
 		~GpuDevice()
 		{
+			VpDetailRestore::DefaultSceneReader() = &VpDetailRestore::ReadSceneFromStore;
 			if (dispatch) pl_dispatch_destroy(&dispatch);
 			if (d3d11) pl_d3d11_destroy(&d3d11);
 			if (log) pl_log_destroy(&log);
@@ -915,6 +928,7 @@ namespace TextureRestoreTestsNs
 			d3d11 = pl_d3d11_create(log, &params);
 			if (!d3d11) return false;
 			dispatch = pl_dispatch_create(log, d3d11->gpu);
+			VpDetailRestore::DefaultSceneReader() = &NoCutReader;
 			return dispatch != nullptr;
 		}
 		pl_gpu Gpu() const { return d3d11->gpu; }
@@ -1038,6 +1052,45 @@ namespace TextureRestoreTestsNs
 				module.Release(gpu);
 			}
 			pl_tex_destroy(gpu, &fieldTex);
+		}
+
+		TEST_METHOD(TextureRestoreGpuSceneVerdictRestartsAndMissingIsCounted)
+		{
+			// Registered fix D8: the references restart on the shared judge's verdict (cut) and on a missing scene record (counted), never on a
+			// private judgement; with no verdict the restoration acts on the coarse frame that follows a fine one. The model follows the
+			// reader the same way (Params::sceneReader set) and applies the retired tile law as the test reference otherwise.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			std::mt19937 rng(77u);
+			const Image scene = Scene(kW, kH, rng);
+			const Image fine = Quantised(Dctq(scene, 4.0)), coarse = Quantised(Dctq(scene, 24.0));
+			pl_tex fineTex = UploadLuma(gpu, fine), coarseTex = UploadLuma(gpu, coarse);
+			auto run = [&](VpDetailRestore::SceneReaderFn reader, double& change, unsigned long long& missing) {
+				TextureRestore::Module module;
+				TextureRestore::Params p1 = Frame(1), p2 = Frame(2);
+				p1.sceneReader = p2.sceneReader = reader;
+				pl_frame o1{}, o2{};
+				Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(fineTex), p1, o1), Wide(module.LastError()).c_str());
+				Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(coarseTex), p2, o2), Wide(module.LastError()).c_str());
+				change = MaxAbsDiff(Download(gpu, o2.planes[0].texture), coarse);
+				missing = module.SceneMissing();
+				module.Release(gpu);
+			};
+			double changeNone = 0.0, changeCut = 0.0, changeMissing = 0.0;
+			unsigned long long missNone = 0, missCut = 0, missMissing = 0;
+			run(&NoCutReader, changeNone, missNone);
+			g_cutAt = 2;
+			run(&CutAtReader, changeCut, missCut);
+			run(&MissingReader, changeMissing, missMissing);
+			Assert::IsTrue(changeNone > 0.01, L"no verdict: the restoration acts on the coarse frame");
+			Assert::IsTrue(changeCut < 0.01, L"the shared judge's cut restarts the references: output is the input");
+			Assert::IsTrue(changeMissing < 0.01, L"no scene record: restart, output is the input");
+			Assert::AreEqual(0ull, missNone);
+			Assert::AreEqual(0ull, missCut);
+			Assert::AreEqual(1ull, missMissing, L"the missing record is counted");
+			pl_tex_destroy(gpu, &fineTex);
+			pl_tex_destroy(gpu, &coarseTex);
 		}
 
 		TEST_METHOD(TextureRestoreGpuRepeatOfAnotherPictureKeepsTheReferences)
