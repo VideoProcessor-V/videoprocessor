@@ -245,6 +245,19 @@ namespace AdmissionOverloadTest
 			Assert::IsTrue(r.admitted[kP3AnalysisField], L"core still admitted: it fills at its own render (never evicted)");
 			Assert::IsTrue(r.aheadLine.find("ahead work at render") != std::string::npos);
 
+			f.mode = LatencyMode::AvrSafe;   // the 200 ms AVR-safe tier is a CEILING: the plan only shortens; its S-C floor is kMinimumDepth
+			const int avrQueue = int(200.0 / f.periodMs + 1e-9);   // the tier's queue (DelayBudget owns it); derived from the measured period
+			f.queueFrames = avrQueue;
+			f.queueAheadFrames = avrQueue - 1;
+			f.vramGrantBytes = 2000;
+			r = Admit(f);
+			Assert::AreEqual(avrQueue, r.queueFrames, L"AVR-safe: the plan never lengthens the queue past the 200 ms tier");
+			Assert::IsTrue(r.queueFrames * f.periodMs <= 200.0 + 1e-9);
+			f.vramGrantBytes = 110;
+			r = Admit(f);
+			Assert::AreEqual(DelayBudget::kMinimumDepth, r.queueFrames, L"AVR-safe: S-C floor = the ladder floor");
+			Assert::IsTrue(r.queueFrames <= avrQueue);
+
 			f.mode = LatencyMode::Games;
 			f.queueFrames = 1;
 			r = Admit(f);
