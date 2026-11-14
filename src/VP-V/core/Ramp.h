@@ -8,6 +8,7 @@
 //   * Clamp01 passes NaN through (as the template copies did); Clamp01NanToZero maps NaN to 0 (the vote / step copies).
 //   * Smoothstep's degenerate edge: StepWhenEqual (e0 == e1 is a step at e0; a reversed e1 < e0 ramps downwards)
 //     or StepWhenNotAscending (any e1 <= e0 is a step at e0, the dither-need rule).
+// The two Smoothstep rules are a registered rule-20 VARIANT (unifying changes a reversed edge in the light-level LUT: a FIX, deferred).
 // The temporal-detail Smoothstep (no guard) is owned by L-B2 and is not routed here.
 // The GLSL built-in smoothstep is untouched.
 

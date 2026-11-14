@@ -1,6 +1,6 @@
 # VP-V core: the pipeline skeleton
 
-Header-only and pure: no libplacebo, no Windows, C++14. The renderer and the CPU unit tests
+Header-only and pure: no Windows, C++14; no libplacebo except the two shared-unit headers named below (`LumaWeights.h` includes `<libplacebo/renderer.h>` for the colour-system enums; `OnePole.h` includes Bill's `GeneralRate.h`, read only). The renderer and the CPU unit tests
 (`src/VP-V/tests/PipelineSkeletonTests.cpp`) share these headers.
 
 ## The headers, in reading order
@@ -26,6 +26,7 @@ Header-only and pure: no libplacebo, no Windows, C++14. The renderer and the CPU
 | `RobustStats.h` | Median (Upper / MeanOfMiddle), MAD, MAD-sigma, quantile with explicit rank rules (ND06) |
 | `Ramp.h` | `RampMath`: Clamp01 (NaN pass / to 0), Ramp, Smoothstep (two edge rules), Mix (ND07) |
 | `LumaWeights.h` | BT.709 luma constants, their GLSL text macros, and `LumaCoeff::ForSystem` (ND02) |
+| (provenance) | `OnePole.h`, `RobustStats.h`, `Ramp.h`, `LumaWeights.h` are VP-V files (rule 20, r2/s-neardup, lane S-NEARDUP), each the merge of the private copies listed in docs/audit near-duplicate survey ND02/ND05/ND06/ND07; `RampMath::Smoothstep` keeps TWO edge rules (StepWhenEqual = light-level LUT, StepWhenNotAscending = dither need) as a registered rule-20 variant: unifying them would change a reversed edge (e1 < e0) in the light-level LUT, so it is a deferred FIX, not part of this change |
 | `FrameSeal.h` | `VpSeal::FrameSeal`: the ONE owner of the Indicator seal. On a new era it registers every provider (resync Drive, R2 motion readers, the lane handle, ...) before the first Observe, then seals once per frame and fans (seq, changed) out to subscribers (Drive latch, lane regulator). `AnalysisLane` holds the Indicator by shared handle (`BindIndicator`) and, with `SetExternalSeal(true)`, takes `OnSealed(seq, changed)` instead of sealing; the storm hold reaches its regulator through `SetStormHold` (T0) |
 | `FrameAnalysisValidity.h` | `VpFrameAnalysis::RecordValid(indicator, recordSeq, useSeq, mask)`: per-record temporal validity from the Indicator's stamps (FrameAnalysisStore itself unchanged; no private frame history added) |
 | `Products.h` | Skeleton S0 registry: product declarations (inputs with lag, backend, history, size, honoured counters, tier, residency, variants) the first products P0-P6 (+ P2m matcher pair) and the camera products P7-P9 (`SkeletonProducts()` is the one assembly point); look-ahead inputs (`InputRef::lead`, `AddLead`) with a `shortQueueSubstitute`; component consumer declarations |
