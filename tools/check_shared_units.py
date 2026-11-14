@@ -6,7 +6,7 @@ Usage: python -I tools/check_shared_units.py [--json] [--root PATH] [--strict]
                                              [--write-baseline] [--baseline FILE]
 
 Default run: report only, always exits 0. Every hit of a registered shared
-computation (units U1..U20 of doc 62) gets a role:
+computation (units U1..U22 of doc 62/72; U17 is undefined/reserved) gets a role:
 
   owner               inside the owning unit's folder (counted, not listed)
   declaration         catalogs, manifests, config, diagnostics, comment-only lines
@@ -84,7 +84,9 @@ REGISTRY = [
      "signatures": _c(r"cut[_ ]?(fade|detect|judge)", r"FrameCutJudge",
                       r"fade[_ ]?(detect|judge|gain)", r"scene[_ ]?cut",
                       # the GLSL / CPU laws of the matcher's M4 fade test, M3 trust cut and AdaptiveDownscale's mean-step cut
-                      r"\bfade_on\b", r"f?abs\(1\.0f? - g\)", r"hist_d\s*>\s*cut_hist", r"luma_mean\s*-\s*prev"),
+                      r"\bfade_on\b", r"f?abs\(1\.0f? - g\)", r"hist_d\s*>\s*cut_hist", r"luma_mean\s*-\s*prev",
+                      # refs/126 s4 X2: DetailPulse's and TextureRestore's private tile-change cut / fade judges
+                      r"kCutShare", r"kFadeStepShare"),
      "allow": _c(r"CutFadeJudge::", r"shared/CutFadeJudge\.h")},
     {"id": "U8", "name": "active_picture_rect",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/picture"],
@@ -94,8 +96,12 @@ REGISTRY = [
      "owning_unit": ["src/VP-V/modules/input/source_analysis/light_level"],
      "signatures": [],
      "allow": _c(r"vpu_light_")},
+    # refs/126 B0 / X1: owner scope by FILE. The matcher's own D1 global-motion search (DejudderWarp) sits inside the folder
+    # since the structural move but is a second estimator (the owner is the engine global + the camera fit), so it is excluded.
     {"id": "U10", "name": "global_motion",
      "owning_unit": ["src/VP-V/modules/motion/estimation"],
+     "owner_exclude": ["src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
+                       "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h"],
      "signatures": _c(r"global[_ ]?motion", r"FlowGlobal", r"engineGlobal"),
      "allow": _c(r"MotionValidity::")},
     {"id": "U11", "name": "camera_fit",
@@ -105,6 +111,25 @@ REGISTRY = [
      "owning_unit": ["src/VP-V/modules/input/source_analysis/identity"],
      "signatures": _c(r"snap(shot)?\.bitrateQuality", r"\.bitrateQuality.*(strength|allowance|tier)"),
      "allow": _c(r"SourceQuality::", r"shared/SourceQuality\.h")},
+    # refs/126 B0 (2026-11-12): U13, U14, U16 and U18 of doc 72 s2 (lines 193-198), registered here. U17 was never defined (no doc 62 / 72
+    # row, no code): RESERVED, unused; do not reuse the id. U14 / U16 / U18 are shared FUNCTIONS today whose only reader is TD (refs/126 s2),
+    # so TD is a co-owner until a second module reads them; the day one does, the unit moves to a skeleton spot.
+    {"id": "U13", "name": "coding_evidence",
+     "owning_unit": ["src/VP-V/modules/input/source_analysis/regions"],
+     "signatures": _c(r"blockiness", r"block[_ ]?hash", r"grid[_ ]?phase", r"copy[_ ]?share"),
+     "allow": _c(r"vpu_coding_evidence\w*", r"VpUnit::CodingEvidence::\w+", r"kCodingEvidence")},
+    {"id": "U14", "name": "trail_compose",
+     "owning_unit": ["src/VP-V/modules/motion/estimation", "src/VP-V/modules/repair/temporal_detail"],
+     "signatures": _c(r"compos\w*[_ ]?(motion|vector|field|trail)", r"ComposeField"),
+     "allow": _c(r"vpu_trail_compose\w*")},
+    {"id": "U16", "name": "lighting_fit",
+     "owning_unit": ["src/VP-V/modules/repair/temporal_detail"],
+     "signatures": _c(r"zncc", r"lighting[_ ]?(fit|layer)", r"gain[_ ]?offset"),
+     "allow": _c(r"vpu_lighting_fit\w*")},
+    {"id": "U18", "name": "codec_model",
+     "owning_unit": ["src/VP-V/modules/repair/temporal_detail"],
+     "signatures": _c(r"dead[_ ]?zone", r"quanti[sz]ation[_ ]?(bound|bin|interval)", r"qcs", r"pocs"),
+     "allow": _c(r"vpu_codec_model\w*")},
     # U15 FieldRefine (doc 72 sections 2 and 9): the one DMVR / BDOF / PROF-style refinement of a motion field (error surface over a
     # small offset window). Blocking from birth, baseline 0. refined_field (product id 24) is declared by the W1-RES catalog: consumers
     # read it, they never redeclare it. Matching is case-insensitive (_F); only `prof` is word-bounded (it would hit profile/professional). A hit counts on a code
@@ -154,7 +179,8 @@ REGISTRY = [
 DECLARATION_PATHS = _c(
     r"/core/[^/]*Catalog[^/]*$", r"/core/Products\.h$", r"FallbackCatalog",
     r"MANIFEST", r"/config/", r"/diagnostics?/", r"Diagnostics?[^/]*$",
-    r"Settings?[^/]*Catalog")
+    r"Settings?[^/]*Catalog",
+    r"/products/[^/]*Contracts\.h$")   # refs/126 s3: product contract lists are declarations
 OUTPUT_DOMAIN_PATHS = _c(r"^src/VP-V/modules/drive/led_", r"^src/VP-V/modules/output/")
 ROLES = ("declaration", "consumer", "output_domain", "bill",
          "known_false_positive", "duplicate")
@@ -291,7 +317,8 @@ def scan(root, registry=None, baseline=None):
                     continue
                 owners = entry["owning_unit"] if isinstance(entry["owning_unit"], list) \
                     else [entry["owning_unit"]]
-                if any(_inside(rel, o) for o in owners):
+                excl = entry.get("owner_exclude", [])
+                if any(_inside(rel, o) for o in owners) and not any(_inside(rel, x) for x in excl):
                     res["inside_owner"] += 1
                     continue
                 kfps = units.get(entry["id"], {}).get("known_false_positive", [])

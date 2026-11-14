@@ -65,7 +65,9 @@ class CheckSharedUnitsTest(unittest.TestCase):
 
     def test_every_unit_registered(self):
         ids = [e["id"] for e in csu.REGISTRY]
-        self.assertEqual(ids, ["U%d" % i for i in range(1, 13)] + ["U15", "U19", "U20", "U21", "U22"])   # U21: SID source geometry; U22: SK-W must-land check 2 (one motion engine instance)
+        self.assertEqual(sorted(ids, key=lambda u: int(u[1:])),
+                         ["U%d" % i for i in range(1, 17)] + ["U18", "U19", "U20", "U21", "U22"])
+        self.assertNotIn("U17", ids)   # U17 was never defined: reserved, unused (refs/126 s2)   # U21: SID source geometry; U22: SK-W must-land check 2 (one motion engine instance)
 
     def test_default_run_exits_zero_even_with_duplicates(self):
         rc, out = _run(["--root", self.root])
@@ -265,13 +267,7 @@ class CheckSharedUnitsTest(unittest.TestCase):
     # ---- review fixes -------------------------------------------------------------------------
     def test_star_continuation_counts_only_inside_a_block_comment(self):
         _w(self.root, "src/VP-V/modules/repair/c/Star.h",
-           """double a = 1;
-    * std::exp(-0.5 * x);
-/* note
- * std::exp(-0.5 * y)
- */
-// std::exp(-0.5 * z)
-""")
+           """double a = 1;\n    * std::exp(-0.5 * x);\n/* note\n * std::exp(-0.5 * y)\n */\n// std::exp(-0.5 * z)\n""")
         r = csu.scan(self.root, baseline={"units": {}})
         role = {h["line"]: h["role"] for h in _unit(r, "U2")["hits"] if h["file"].endswith("Star.h")}
         self.assertEqual(role[2], "duplicate")
@@ -285,9 +281,7 @@ class CheckSharedUnitsTest(unittest.TestCase):
 
     def test_accessor_plus_private_signature_is_a_duplicate(self):
         _w(self.root, "src/VP-V/modules/repair/c/Mix.h",
-           """double a = VpUnit::BandFromBase::Weight(1, 2.0, 3);
-double b = VpUnit::BandFromBase::Weight(1, 2.0, 3) + std::exp(-0.5 * k * k);
-""")
+           """double a = VpUnit::BandFromBase::Weight(1, 2.0, 3);\ndouble b = VpUnit::BandFromBase::Weight(1, 2.0, 3) + std::exp(-0.5 * k * k);\n""")
         r = csu.scan(self.root, baseline={"units": {}})
         role = {h["line"]: h["role"] for h in _unit(r, "U2")["hits"] if h["file"].endswith("Mix.h")}
         self.assertEqual(role.get(2), "duplicate")
@@ -318,8 +312,40 @@ double b = VpUnit::BandFromBase::Weight(1, 2.0, 3) + std::exp(-0.5 * k * k);
         self.assertEqual(new["note"], "keep me")
         self.assertEqual(new["units"]["U2"]["baseline_duplicates"], 1)
 
+    # ---- refs/126 B0 --------------------------------------------------------------------------
+    def test_new_units_registered_with_signatures(self):
+        _w(self.root, "src/VP-V/modules/repair/other/N.h",
+           "auto b = blockiness;\nauto z = zncc(a);\nint q = dead_zone;\nauto c = ComposeField(a);\n")
+        r = csu.scan(self.root)
+        for uid, line in (("U13", 1), ("U16", 2), ("U18", 3), ("U14", 4)):
+            self.assertIn(line, [h["line"] for h in _unit(r, uid)["hits"]], uid)
+
+    def test_owner_exclude_makes_the_owner_scope_file_level(self):
+        _w(self.root, "src/VP-V/modules/motion/estimation/Eng.cpp", "global_motion(a);\n")
+        _w(self.root, "src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp", "global_motion(b);\n")
+        g = _unit(csu.scan(self.root), "U10")
+        self.assertEqual([(h["file"].rsplit("/", 1)[-1], h["role"]) for h in g["hits"]],
+                         [("DejudderWarp.cpp", "duplicate")])
+        self.assertEqual(g["inside_owner"], 1)
+
+    def test_cut_share_private_judge_is_a_u7_hit(self):
+        _w(self.root, "src/VP-V/modules/repair/other/Cut.h", "constexpr double kCutShare = 0.5;\n")
+        self.assertEqual(_unit(csu.scan(self.root), "U7")["duplicates"], 1)
+
+    def test_contract_lists_are_declarations(self):
+        _w(self.root, "src/VP-V/modules/repair/temporal_detail/products/TdProductContracts.h", "block_stats\n")
+        self.assertEqual(_unit(csu.scan(self.root), "U4")["duplicates"], 0)
+
+    def test_repo_known_false_positives_each_carry_a_reason(self):
+        for uid, u in csu.load_baseline(ROOT)["units"].items():
+            for k in u.get("known_false_positive", []):
+                self.assertTrue(k.get("reason", "").strip(), "%s %s" % (uid, k.get("file")))
+
     # ---- the real repository ------------------------------------------------------------------
-    FLOOR = {"U2": 11, "U3": 18, "U6": 0, "U7": 0}   # frozen floor: blocking units may only shrink from here
+    # frozen floor (refs/126 B0, 2026-11-12): blocking units may only shrink from here
+    FLOOR = {"U1": 20, "U2": 11, "U3": 16, "U4": 5, "U5": 1, "U6": 0, "U7": 6, "U10": 19, "U13": 14,
+             "U14": 0, "U16": 0, "U18": 0, "U20": 0}
+    RAISED_BY_B0 = {"U7": 6, "U10": 19}   # WAIVER-JOB1-U7 (X2 real copies, 0 -> 6, target 0 at B6, expires at B6); U10 13 -> 19 = X1 Dispatch lines un-suppressed (audit B0, target 0 at B6)
 
     def _reference_baseline(self):
         for ref in ("integ/batch1",):
@@ -349,7 +375,8 @@ double b = VpUnit::BandFromBase::Weight(1, 2.0, 3) + std::exp(-0.5 * k * k);
             for uid, o in old.items():
                 if uid in cur and o.get("blocking"):
                     self.assertTrue(cur[uid]["blocking"], "%s lost blocking" % uid)
-                    self.assertLessEqual(cur[uid]["baseline_duplicates"], o["baseline_duplicates"],
+                    self.assertLessEqual(cur[uid]["baseline_duplicates"],
+                                         max(o["baseline_duplicates"], self.RAISED_BY_B0.get(uid, 0)),
                                          "baseline of %s rose" % uid)
 
 

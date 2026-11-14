@@ -36,6 +36,7 @@
 
 namespace VpMotion { class IVectorEngine; }   // modules/motion/estimation/VectorEngineInterface.h (the P5a engine)
 namespace VpSkeleton { class SpareHost; }   // core/PostPresentSpare.h (B3-Z Z2: the post-present spare slot)
+namespace VpSkeleton { class SkeletonMemo; }   // core/SkeletonAcquire.h (B1: GET-OR-COMPUTE-AND-PUBLISH)
 
 namespace Vpv
 {
@@ -82,6 +83,9 @@ namespace Vpv
 			size_t HostStates() const;
 			// The renderer's lane (null while there is none). Render thread / single-threaded tests only.
 			VpSkeleton::AnalysisLane* LaneOf(const void* host) const;
+			// B1 (refs/126 s1.2): the renderer's GET-OR-COMPUTE-AND-PUBLISH access path (Acquire / RegisterOwnerFill), bound to its lane
+			// (null while there is no lane). Memo spots live for one frame (released at the next seal). Render thread.
+			VpSkeleton::SkeletonMemo* MemoOf(const void* host) const;
 			// The renderer's post-present spare slot (null without host state). Render thread / single-threaded tests only.
 			VpSkeleton::SpareHost* SpareOf(const void* host) const;
 			// Dimensions of the current lane graph (0 x 0 without one).

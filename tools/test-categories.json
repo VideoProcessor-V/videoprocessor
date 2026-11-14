@@ -292,6 +292,13 @@
   },
   {
    "kind": "method",
+   "value": "SkeletonAcquireTests::GpuBudgetGrantAndFenceRetire",
+   "category": "Cpu",
+   "file": "src/VP-V/tests/SkeletonAcquireTests.cpp",
+   "note": "Name mentions the GPU; the body is hardware-free (a fake dispatcher, a fake ledger grant and a fake fence; no device). Reviewed 2026-11-14 (G0 audit S7)."
+  },
+  {
+   "kind": "method",
    "value": "LedDriveDelta1Tests::RawFramesAreMeasuredThroughTheTransferLikeTheGpuPass",
    "category": "Cpu",
    "file": "src/VP-V/tests/suite/LedDriveDelta1Tests.cpp",
