@@ -50,6 +50,7 @@
 #include <utility>
 #include <vector>
 
+#include <VP-V/modules/motion/estimation/composed/WarpSampler.h>
 #include <VP-V/modules/motion/estimation/composed/ComposedVectors.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 
