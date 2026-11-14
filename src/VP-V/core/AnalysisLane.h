@@ -632,6 +632,7 @@ public:
     using InputResolver = std::function<const uint8_t*(ProductId, uint64_t, size_t)>;
     void SetPublishedLookup(PublishedLookup f) { publishedLookup_ = std::move(f); }
     uint64_t SealReusedPublished() const { return sealReusedPublished_; }
+    uint64_t SealComputedReduced() const { return sealComputedReduced_; }   // seal live computes of a missing-input form
     std::vector<ProductId> CpuLiveProducts() const
     {
         std::vector<ProductId> ids;
@@ -674,6 +675,7 @@ public:
         const int idx = st->IndexOf(id);
         if (idx < 0 || !st->bufs[size_t(idx)] || n != st->bufs[size_t(idx)]->Bytes())
             return false;
+        VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(id))).c_str(), seq, ::ComputeOnce::Variant(0));   // compute-once: the Acquire CPU owner form
         return RunCpuLive(*st, st->graph.nodes[size_t(idx)], seq, 0u, dst, n, inputOf);
     }
     // SK-W stage D: products whose frames are PUBLISHED by a producer outside the lane (the vector engine feed for P2m / P3, the camera
@@ -1708,6 +1710,8 @@ private:
                 ++sealReusedPublished_;
                 ok = true;
             } else {
+                if (missing != 0) ++sealComputedReduced_;   // L-CORE gate S2: the missing-input form is a compute, counted
+                VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(n.id))).c_str(), seq, ::ComputeOnce::Variant(0));   // compute-once: the seal live compute
                 ok = RunCpuLive(st, n, seq, missing, dst, bytes, InputResolver());
             }
         } else if (liveFill_) {
@@ -1833,6 +1837,7 @@ private:
     std::map<ProductId, CpuLiveCompute> cpuLive_;
     PublishedLookup publishedLookup_;      // B1: the seal copies an Acquire-published default-variant CPU form (render thread)
     uint64_t sealReusedPublished_ = 0;     // seal live fills served from that publication (never computed twice)
+    uint64_t sealComputedReduced_ = 0;     // seal live fills computed with an input missing (a compute, never a reuse)
     std::vector<ProductId> externalIds_;   // products published outside the lane (SetExternalProducts)
     uint64_t externalDeclined_ = 0;        // seal-time live fills of those products that were declined (nothing published in time)
     std::function<uint64_t(ProductId)> releaseCompleted_;

@@ -361,6 +361,7 @@ private:
             return true;
         }
         st.began = true;
+        VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(st.node->id))).c_str(), job.seq, ::ComputeOnce::Variant(0));   // compute-once: the lane worker compute (one per product, frame)
         if (hdr.chainReduced)   // counted once the job really started (not on a failed Begin)
             st.counters.chainCarryForward.fetch_add(1, std::memory_order_relaxed);
         st.phase = Phase::Running;
