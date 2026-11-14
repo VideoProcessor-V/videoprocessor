@@ -298,6 +298,7 @@ namespace VideoProcessorTest
 			std::mt19937 rng(lagSeed);
 			BoundRun out;
 			std::deque<uint64_t> pending;
+			bool aheadInjected = false;
 			auto lower = [](unsigned long long frames) {
 				SourceResolutionMonitor::Snapshot s;
 				s.reading = true; s.nativeWidth = kW; s.nativeHeight = kH;
@@ -321,9 +322,14 @@ namespace VideoProcessorTest
 				}
 				if (cutAt != 0 && seq + 6 >= cutAt)
 				{
-					Monitor::AheadState a;
-					a.eventSequence = cutAt; a.targetSequence = cutAt + 1; a.ready = true; a.informative = true; a.ratio = aheadRatio;
-					m.SetAheadForTest(a, seq + 6);
+					if (!aheadInjected)   // the event is injected once; later frames only advance the read position and keep the counters (the real worker carries them)
+					{
+						Monitor::AheadState a;
+						a.eventSequence = cutAt; a.targetSequence = cutAt + 1; a.ready = true; a.informative = true; a.ratio = aheadRatio;
+						m.SetAheadForTest(a, seq + 6);
+						aheadInjected = true;
+					}
+					else m.SetAheadForTest(m.Ahead(), seq + 6);
 				}
 				std::string why;
 				double fx = 1.0, fy = 1.0;
