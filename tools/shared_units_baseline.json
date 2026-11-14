@@ -737,7 +737,14 @@
   },
   "U14": {
    "name": "trail_compose",
-   "known_false_positive": [],
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/repair/grain_split/GrainLevel.h",
+     "pattern": "#include <VP-V/modules/motion/estimation/composed/ComposedVectors\\.h>",
+     "kind": "false_positive",
+     "reason": "consumer include of the ECV owner header (WarpFromComposed reads VpComposed::Plane::SampleLanded); no vector composition in grain_split"
+    }
+   ],
    "blocking": true,
    "baseline_duplicates": 0
   },
