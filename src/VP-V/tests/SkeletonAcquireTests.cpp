@@ -26,6 +26,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -546,6 +547,187 @@ namespace SkeletonAcquireTestsNs
 			Assert::IsTrue(r.lane.SealReusedPublished() == 1u, L"only P1 (no missing input) came from the publication");
 			const std::vector<uint8_t> slot = r.SlotBytes(kP5MonitorTiles, 0);
 			Assert::IsTrue(!slot.empty() && slot[0] == 0xAA, L"the missing-input form, computed by the law");
+		}
+	};
+
+	// G0 gate (owner rule 2026-11-13, refs/129 COMMON RULE): RECURSIVE get-or-compute-and-publish. A fill that needs a
+	// prerequisite asks for it through Acquire; the prerequisite's OWNER computes it once and PUBLISHES it; later readers reuse
+	// it. The re-entrancy guard is per key, cycles are detected by key (same thread and across threads), no lock is held across
+	// a nested fill. Every scenario runs bounded on its own thread: a deadlock fails the test instead of hanging the run.
+	template <class F>
+	bool RunsWithin(F f, int ms)
+	{
+		auto done = std::make_shared<std::promise<void>>();
+		std::future<void> fut = done->get_future();
+		std::thread t([f, done]() mutable {
+			f();
+			done->set_value();
+		});
+		if (fut.wait_for(std::chrono::milliseconds(ms)) == std::future_status::ready) {
+			t.join();
+			return true;
+		}
+		t.detach();   // deadlocked: the state is shared_ptr-owned by the thread; the test fails
+		return false;
+	}
+
+	void Fill8(OwnerFillOutput& out, uint8_t v) { out.bytes.assign(8, v); }
+
+	bool WaitFlag(const std::atomic<bool>& f)
+	{
+		for (int i = 0; i < 5000 && !f.load(); ++i)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		return f.load();
+	}
+
+	TEST_CLASS(SkeletonAcquireNestedTests)
+	{
+	public:
+		// B's owner fill needs A: it calls Acquire(A); A is computed by A's owner and PUBLISHED; a second reader of A gets
+		// Reused (the same spot); A computed exactly once for the frame. While A's fill runs (nested inside B's), another
+		// thread's Acquire of a different key completes: no lock is held across the nested fill.
+		TEST_METHOD(NestedFillPublishesThePrerequisite)
+		{
+			struct S {
+				SkeletonMemo m;
+				std::atomic<int> aCalls{ 0 }, aOther{ 0 }, bCalls{ 0 };
+				AcquireStatus inner = AcquireStatus::Unavailable;
+				const uint8_t* innerCpu = nullptr;
+				bool otherKeyProceeded = false;
+				AcquireResult a2, b1, b2;
+			};
+			auto st = std::make_shared<S>();
+			S* p = st.get();
+			OwnerFill fa;
+			fa.fill = [p](const OwnerFillRequest& r, SkeletonMemo& memo, OwnerFillOutput& out) {
+				if (r.seq != 5) {
+					p->aOther.fetch_add(1);
+					Fill8(out, 0x22);
+					return true;
+				}
+				p->aCalls.fetch_add(1);
+				// A different key (A, frame 6) from another thread while this nested fill runs: must not block.
+				SkeletonMemo* mm = &memo;
+				std::future<AcquireResult> other = std::async(std::launch::async, [mm]() { return mm->Acquire(kP10GrainSplit, 6, AcquireForm::Cpu); });
+				p->otherKeyProceeded = other.wait_for(std::chrono::seconds(3)) == std::future_status::ready && other.get().Ok();
+				Fill8(out, 0xA5);
+				return true;
+			};
+			OwnerFill fb;
+			fb.fill = [p](const OwnerFillRequest& r, SkeletonMemo& memo, OwnerFillOutput& out) {
+				p->bCalls.fetch_add(1);
+				const AcquireResult a = memo.Acquire(kP10GrainSplit, r.seq, AcquireForm::Cpu);   // the prerequisite, via Acquire
+				p->inner = a.status;
+				p->innerCpu = a.cpu;
+				if (!a.Ok() || a.cpuBytes != 8u)
+					return false;
+				out.bytes.assign(a.cpu, a.cpu + a.cpuBytes);
+				out.bytes[0] ^= 0xFF;   // B derived from A
+				return true;
+			};
+			Assert::IsTrue(st->m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, fa) == SkeletonMemo::Registration::Registered, L"A owner");
+			Assert::IsTrue(st->m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kRegionUnit, fb) == SkeletonMemo::Registration::Registered, L"B owner");
+			const bool ran = RunsWithin([st]() {
+				st->b1 = st->m.Acquire(kP11RegionBlockStats, 5, AcquireForm::Cpu);
+				st->a2 = st->m.Acquire(kP10GrainSplit, 5, AcquireForm::Cpu);   // a later reader of the prerequisite
+				st->b2 = st->m.Acquire(kP11RegionBlockStats, 5, AcquireForm::Cpu);
+			}, 10000);
+			Assert::IsTrue(ran, L"nested Acquire completes (no lock across the nested fill, no global guard)");
+			Assert::IsTrue(st->b1.status == AcquireStatus::FilledAtRead && st->b1.cpuBytes == 8u && st->b1.cpu[0] == uint8_t(0xA5 ^ 0xFF), L"B filled from A");
+			Assert::IsTrue(st->inner == AcquireStatus::FilledAtRead, L"inside B's fill, A was computed by ITS owner (filled at read)");
+			Assert::IsTrue(st->a2.status == AcquireStatus::Reused && st->a2.source == AcquireSource::Memo, L"the second reader of A reuses the publication");
+			Assert::IsTrue(st->a2.cpu == st->innerCpu && st->a2.cpu[0] == 0xA5, L"the same published spot");
+			Assert::IsTrue(st->b2.status == AcquireStatus::Reused, L"B reused");
+			Assert::AreEqual(1, st->aCalls.load(), L"A computed exactly once for the frame");
+			Assert::AreEqual(1, st->bCalls.load(), L"B computed exactly once for the frame");
+			Assert::IsTrue(st->otherKeyProceeded && st->aOther.load() == 1, L"another key proceeded during the nested fill");
+			const AcquireCounters ca = st->m.CountersOf(kP10GrainSplit);
+			Assert::IsTrue(ca.ownerFillCalls == 2 && ca.filledAtRead == 2 && ca.reusedMemo == 1 && ca.Unavailable() == 0, L"A counted: frames 5 and 6 once each, one reuse");
+		}
+
+		// A -> B -> A on one thread: the inner A is refused (Reentrant, by key), visible; nothing deadlocks; each fill ran once.
+		TEST_METHOD(CycleOnOneThreadIsDetectedByKey)
+		{
+			struct S {
+				SkeletonMemo m;
+				std::atomic<int> aCalls{ 0 }, bCalls{ 0 };
+				AcquireCause innerA = AcquireCause::None;
+				AcquireStatus innerB = AcquireStatus::Unavailable;
+				AcquireResult outer;
+			};
+			auto st = std::make_shared<S>();
+			S* p = st.get();
+			OwnerFill fa;
+			fa.fill = [p](const OwnerFillRequest& r, SkeletonMemo& memo, OwnerFillOutput& out) {
+				p->aCalls.fetch_add(1);
+				p->innerB = memo.Acquire(kP11RegionBlockStats, r.seq, AcquireForm::Cpu).status;
+				Fill8(out, 0x11);
+				return true;
+			};
+			OwnerFill fb;
+			fb.fill = [p](const OwnerFillRequest& r, SkeletonMemo& memo, OwnerFillOutput& out) {
+				p->bCalls.fetch_add(1);
+				p->innerA = memo.Acquire(kP10GrainSplit, r.seq, AcquireForm::Cpu).cause;   // closes the cycle
+				Fill8(out, 0x33);
+				return true;
+			};
+			st->m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, fa);
+			st->m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kRegionUnit, fb);
+			const bool ran = RunsWithin([st]() { st->outer = st->m.Acquire(kP10GrainSplit, 2, AcquireForm::Cpu); }, 10000);
+			Assert::IsTrue(ran, L"A -> B -> A does not deadlock");
+			Assert::IsTrue(st->innerA == AcquireCause::Reentrant, L"the cycle is refused by key");
+			Assert::IsTrue(st->innerB == AcquireStatus::FilledAtRead && st->outer.status == AcquireStatus::FilledAtRead, L"B and A complete");
+			Assert::IsTrue(st->aCalls.load() == 1 && st->bCalls.load() == 1, L"each fill once");
+			Assert::IsTrue(st->m.CountersOf(kP10GrainSplit).unavailable[size_t(AcquireCause::Reentrant)] == 1, L"counted");
+			Assert::IsTrue(AnyLine(st->m.StatusLines(), "owner fill asked for its own product 1"), L"shown");
+		}
+
+		// A -> B on thread 1 while B -> A on thread 2 (both fills in flight): the second waiter sees the cycle by key and is refused
+		// (Reentrant); the first waiter reuses the other's publication. Without by-key cycle detection this deadlocks.
+		TEST_METHOD(CycleAcrossThreadsIsDetectedNotDeadlocked)
+		{
+			struct S {
+				SkeletonMemo m;
+				std::atomic<bool> aStarted{ false }, bStarted{ false };
+				std::atomic<int> aCalls{ 0 }, bCalls{ 0 };
+				AcquireResult innerB, innerA, outerA, outerB;
+			};
+			auto st = std::make_shared<S>();
+			S* p = st.get();
+			OwnerFill fa;
+			fa.fill = [p](const OwnerFillRequest& r, SkeletonMemo& memo, OwnerFillOutput& out) {
+				p->aCalls.fetch_add(1);
+				p->aStarted = true;
+				WaitFlag(p->bStarted);
+				p->innerB = memo.Acquire(kP11RegionBlockStats, r.seq, AcquireForm::Cpu);
+				Fill8(out, 0x44);
+				return true;
+			};
+			OwnerFill fb;
+			fb.fill = [p](const OwnerFillRequest& r, SkeletonMemo& memo, OwnerFillOutput& out) {
+				p->bCalls.fetch_add(1);
+				p->bStarted = true;
+				WaitFlag(p->aStarted);
+				p->innerA = memo.Acquire(kP10GrainSplit, r.seq, AcquireForm::Cpu);
+				Fill8(out, 0x55);
+				return true;
+			};
+			st->m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, fa);
+			st->m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kRegionUnit, fb);
+			const bool ran = RunsWithin([st]() {
+				std::thread t1([st]() { st->outerA = st->m.Acquire(kP10GrainSplit, 3, AcquireForm::Cpu); });
+				std::thread t2([st]() { st->outerB = st->m.Acquire(kP11RegionBlockStats, 3, AcquireForm::Cpu); });
+				t1.join();
+				t2.join();
+			}, 15000);
+			Assert::IsTrue(ran, L"a cross-thread cycle of fills does not deadlock");
+			const bool aRefused = st->innerA.cause == AcquireCause::Reentrant;
+			const bool bRefused = st->innerB.cause == AcquireCause::Reentrant;
+			Assert::IsTrue(aRefused != bRefused, L"exactly one inner request closes the cycle and is refused by key");
+			const AcquireResult& waited = aRefused ? st->innerB : st->innerA;
+			Assert::IsTrue(waited.status == AcquireStatus::Reused && waited.source == AcquireSource::Memo, L"the other waited for the one fill and reused it");
+			Assert::IsTrue(st->outerA.status == AcquireStatus::FilledAtRead && st->outerB.status == AcquireStatus::FilledAtRead, L"both outer fills complete");
+			Assert::IsTrue(st->aCalls.load() == 1 && st->bCalls.load() == 1, L"each computed once");
 		}
 	};
 }

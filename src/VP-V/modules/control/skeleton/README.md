@@ -197,6 +197,9 @@ computes it once and publishes it into the skeleton spot; nobody computes privat
   (`ProductRows`, e.g. P1 / P4 = `input/source_analysis/lane`, P10 = `repair/grain_split`). Another unit, a product not in
   the catalog, or a second registration is refused and counted; a replacement is explicit (`ReplaceOwnerFill`). The lane's
   CPU live computes are the owner fills of their products (the seal's own law, `AnalysisLane::RunCpuLive`).
+- Nested (owner 2026-11-13, recursive rule): an owner fill obtains every prerequisite through `Acquire` (computed by ITS owner
+  and published on the way). No lock is held across a fill; the re-entrancy guard is per key and cycles are detected by
+  key, on one thread or across threads waiting for each other's fills: the closing request is `Reentrant`, never a deadlock.
 - Variants: the owner declares the axes it serves (plane, size, scale, code unit, sigma, precision) and its own form; keys
   are canonical (the owner's own value = default). An undeclared axis is refused: no private "does not fit" variant.
 - Lifetime: per frame. `OnSeal(seq)` (called after the lane's seal) releases the previous frame's spots; a released frame is
