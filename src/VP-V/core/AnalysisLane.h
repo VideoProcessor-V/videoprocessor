@@ -750,13 +750,14 @@ public:
         uint8_t* dst = st->bufs[size_t(idx)]->Ring(size_t(t.slot));
         const size_t bytes = st->bufs[size_t(idx)]->Bytes();
         const uint64_t t0 = nowUs_ ? nowUs_() : 0u;
-        const bool ok = RunCpuLive(*st, n, seq, 0u, dst, bytes, InputResolver());
+        const bool ok = RunCpuLive(*st, n, seq, 0u, dst, bytes, InputResolver(), true);
         const uint64_t t1 = nowUs_ ? nowUs_() : t0;
         if (!ok) {
+            const bool held = st->ring->Find(seq, nullptr);
             pins.Unpin();
             LaneTicket a = t;
             set.Abandon(a);
-            out.why = "the fill refused";
+            out.why = held ? "the fill refused" : "the frame's source is not held";
             return out;
         }
         if (set.LaneContinue(t))
@@ -1817,7 +1818,7 @@ private:
     // inputs read from the slots (a lead reads the published result); an input bit set in `missing` stays null, an input the
     // slots do not hold is asked of `inputOf` when given (Acquire chain). Render thread.
     bool RunCpuLive(const LaneState& st, const Node& n, uint64_t seq, uint32_t missing, uint8_t* dst, size_t bytes,
-                    const InputResolver& inputOf) const
+                    const InputResolver& inputOf, bool holdSource = false) const
     {
         const auto it = cpuLive_.find(n.id);
         if (it == cpuLive_.end())
@@ -1839,7 +1840,10 @@ private:
                 in[k] = inputOf(n.inputs[k].product, aseq, st.bufs[size_t(j)]->Bytes());
         }
         SourceFrameView view;
-        const bool haveView = st.ring->TryGet(seq, &view);   // lock-free, no keepAlive copy: the render holds the frame
+        // holdSource (RunAheadNow, a frame AHEAD of the render frame the render does not hold): the copy under the ring's lock carries the
+        // keepAlive, so a drop of the frame mid-compute cannot free the planes (QKP audit MUST-1). Else the lock-free copy of the frame
+        // the render holds (no keepAlive).
+        const bool haveView = holdSource ? st.ring->Find(seq, &view) : st.ring->TryGet(seq, &view);
         return it->second(n, haveView ? &view : nullptr, in, dst, bytes);
     }
 
