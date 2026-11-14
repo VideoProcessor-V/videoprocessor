@@ -167,32 +167,32 @@ namespace QueueWindowTestsNs
 			const uint16_t compute = uint16_t(kAheadCeiling / 3);
 			QueueWindowTerms t = Terms(3, 3, 1, kAheadCeiling, 0);   // queue ahead = the ceiling, compute asked lower
 			t.aheadNeed = compute;
-			const uint64_t far = 20u + compute + 2u;   // inside the queue, beyond the computed depth
-			std::atomic<int> calls{ 0 };   // computes of frame `far` only
+			const uint64_t farSeq = 20u + compute + 2u;   // inside the queue, beyond the computed depth
+			std::atomic<int> calls{ 0 };   // computes of frame `farSeq` only
 			OwnerFill f;
-			f.fill = [&calls, far](const OwnerFillRequest& r, SkeletonMemo&, OwnerFillOutput& out) {
-				if (r.seq == far)
+			f.fill = [&calls, farSeq](const OwnerFillRequest& r, SkeletonMemo&, OwnerFillOutput& out) {
+				if (r.seq == farSeq)
 					calls.fetch_add(1);
 				out.bytes.assign(8, uint8_t(r.seq));
 				return true;
 			};
 			m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, "repair/grain_split", f);
-			for (uint64_t s = 20; s <= far; ++s) {
+			for (uint64_t s = 20; s <= farSeq; ++s) {
 				const QueueWindow w = DeriveWindow(t, s, 0);
 				m.SetWindow(w);
 				m.OnSeal(s);
-				const AcquireResult a = m.Acquire(kP10GrainSplit, far, AcquireForm::Cpu);
-				if (far > s + compute)
+				const AcquireResult a = m.Acquire(kP10GrainSplit, farSeq, AcquireForm::Cpu);
+				if (farSeq > s + compute)
 					Assert::IsTrue(a.cause == AcquireCause::NotPlannedAhead && calls.load() == 0, L"not at enqueue: refused, not computed");
 				else
 					Assert::IsTrue(a.Ok() && calls.load() == 1, L"computed once on approach");
-				m.Acquire(kP10GrainSplit, s, AcquireForm::Cpu);   // the render of s (frames up to far - 1 are not demanded otherwise)
+				m.Acquire(kP10GrainSplit, s, AcquireForm::Cpu);   // the render of s (frames up to farSeq - 1 are not demanded otherwise)
 			}
 			// QW-T13: the keep window is the full queue back (H + max(R, P)), not the compute depth.
-			const QueueWindow w = DeriveWindow(t, far, 0);
+			const QueueWindow w = DeriveWindow(t, farSeq, 0);
 			const unsigned queueBack = unsigned(t.history) + (std::max)(unsigned(t.renderAhead), unsigned(t.presentLag));
 			Assert::IsTrue(w.back == queueBack && w.back > w.aheadCompute && m.KeepFrames() == w.back, L"keep spans the full queue back");
-			Assert::IsTrue(m.Acquire(kP10GrainSplit, far - w.back, AcquireForm::Cpu).status == AcquireStatus::Reused, L"frame far - back still attached");
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, farSeq - w.back, AcquireForm::Cpu).status == AcquireStatus::Reused, L"frame far - back still attached");
 		}
 
 		// QW-T2b: a window that SHRINKS (the render-ahead plan stopped) never releases a frame that is still waiting to be presented.
