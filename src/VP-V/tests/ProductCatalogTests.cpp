@@ -188,8 +188,8 @@ namespace ProductCatalogTestsNs
 				{ kTdTrailSummary, "temporal detail" },
 			};
 			const Registry reg = SkeletonProducts();
-			Assert::AreEqual(size_t(kSkeletonProductEnd) - 4u, sizeof(expected) / sizeof(expected[0]),
-				L"every product but the matcher pair, the two held-state records (source identity, source geometry) and the causal quality pattern has an expectation");
+			Assert::AreEqual(size_t(kSkeletonProductEnd) - 5u, sizeof(expected) / sizeof(expected[0]),
+				L"every product but the matcher pair, the two held-state records (source identity, source geometry), the causal quality pattern and the band memo (grain.band: a per-frame memo, consumers declared when L-B3 wires them) has an expectation");
 			// The causal quality pattern is a substitute (read as P15 by its declared id): nobody reads it by its own id.
 			Assert::IsNull(LiveFillOwner(kQualityPatternCausal));
 			for (const Expect& e : expected) {
