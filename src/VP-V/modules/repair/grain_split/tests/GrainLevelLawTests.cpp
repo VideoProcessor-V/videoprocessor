@@ -231,7 +231,7 @@ namespace GrainLevelLawTestsNs
 			w = GrainLevel::WindowFor(p, true, false, 10);
 			Require(w.back == 6 && w.ahead == 0, "low latency: 6 back, 0 ahead");
 			w = GrainLevel::WindowFor(p, true, true, 10);
-			Require(w.back == 10 && w.ahead == 0, "low latency with per-pixel composed vectors: 10 back");
+			Require(w.back == 10 && w.ahead == 0, "low latency with the per-pixel vector product: 10 back");
 
 			const Plane y0 = Frame(0.0, 2.0, 81), y1 = Frame(1.0, 2.0, 82);
 			const GrainSplit::Split a = Split(y0), b = Split(y1);
@@ -262,18 +262,92 @@ namespace GrainLevelLawTestsNs
 			Require(r1.fallbackPixels == r1.pixels, "one neighbour is below minNeighbours: L1+L2 gains everywhere");
 		}
 
+		// The 8x8 DCT used by the B Wiener is orthonormal: round trip and Parseval.
+		TEST_METHOD(DctRoundTripAndParseval)
+		{
+			std::mt19937 rng(5);
+			std::normal_distribution<double> nd(0.0, 3.0);
+			double in[64], co[64], back[64], e0 = 0.0, e1 = 0.0, err = 0.0;
+			for (int i = 0; i < 64; ++i) { in[i] = nd(rng); e0 += in[i] * in[i]; }
+			GrainLevel::Dct8x8(in, co);
+			for (int i = 0; i < 64; ++i) e1 += co[i] * co[i];
+			GrainLevel::Idct8x8(co, back);
+			for (int i = 0; i < 64; ++i) err = (std::max)(err, std::fabs(back[i] - in[i]));
+			Require(err < 1e-9, "inverse DCT restores the tile");
+			Require(std::fabs(e1 - e0) < 1e-9 * e0, "orthonormal: energy preserved");
+		}
+
+		// B with K >= 2: planted independent grain on a static structure. The neighbour Wiener must run (not the fallback) and the clean
+		// band must be closer to the true structure band than the raw band is, while keeping the structure energy.
+		TEST_METHOD(NeighbourWienerDenoisesWithManyNeighbours)
+		{
+			const GrainSplit::Split cur = Split(Frame(0.0, 2.0, 200));
+			const Plane truth = GrainLevel::BandD(Split(Frame(0.0, 0.0, 0)));
+			GrainLevel::BlockField f; f.Init(kW, kH, kB, 0.0, 0.0);
+			std::vector<Plane> bands;
+			for (int k = 1; k <= 4; ++k) bands.push_back(GrainLevel::BandD(Split(Frame(0.0, 2.0, 200 + k))));
+			std::vector<GrainLevel::Neighbour> nb(4);
+			for (int k = 0; k < 4; ++k) { nb[k].d = &bands[static_cast<size_t>(k)]; nb[k].field = f; nb[k].epoch = 0; nb[k].offset = -(k + 1); }
+			GrainLevel::Estimator est; GrainLevel::Context c; c.sourceHz = 24.0; c.field = &f;
+			est.Step(Split(Frame(0.0, 2.0, 199)), c);
+			const GrainLevel::Result t1 = est.Step(cur, c);
+			const GrainLevel::Params p;
+			const GrainLevel::NeighbourResult r = GrainLevel::NeighbourWiener(cur, t1, nb, 0, GrainLevel::WindowFor(p, false, false, 0), p);
+			const Plane raw = GrainLevel::BandD(cur);
+			double eRaw = 0.0, eClean = 0.0, eTruth = 0.0, eClean2 = 0.0; long n = 0;
+			for (int y = 2 * kB; y < kH - 2 * kB; ++y)
+				for (int x = 2 * kB; x < kW - 2 * kB; ++x)
+				{
+					const double a = raw.at(x, y) - truth.at(x, y), b = r.cleanD.at(x, y) - truth.at(x, y);
+					eRaw += a * a; eClean += b * b; eTruth += truth.at(x, y) * truth.at(x, y); eClean2 += r.cleanD.at(x, y) * r.cleanD.at(x, y); ++n;
+				}
+			Log("used " + std::to_string(r.usedNeighbours) + " fallback " + std::to_string(r.fallbackPixels) + "/" + std::to_string(r.pixels)
+				+ " meanK " + std::to_string(r.meanKeff) + " white PSD " + std::to_string(r.psdWhite ? 1 : 0)
+				+ " err raw " + std::to_string(eRaw / n) + " err clean " + std::to_string(eClean / n) + " structure kept " + std::to_string(eClean2 / eTruth));
+			Require(r.usedNeighbours == 4, "4 neighbours used");
+			Require(r.fallbackPixels < r.pixels / 4, "most pixels take the neighbour path");
+			Require(r.meanKeff >= 2.0, "at least 2 neighbours kept on average");
+			Require(eClean < 0.5 * eRaw, "clean band is much closer to the true structure than the raw band");
+			Require(eClean2 > 0.5 * eTruth, "structure energy kept");
+		}
+
+		// AR(1) grain (coefficient 0.3 along x) is allowed to LOWER NLF_t; the law reports it and N never rises (brief s5 row).
+		TEST_METHOD(Ar1GrainIsReportedNotHidden)
+		{
+			GrainLevel::BlockField f; f.Init(kW, kH, kB, -1.0, 0.0);
+			GrainLevel::Estimator est; GrainLevel::Context c; c.sourceHz = 24.0; c.field = &f;
+			GrainLevel::Result o; GrainSplit::Split u;
+			for (int t = 0; t <= 6; ++t)
+			{
+				Plane y = Frame(1.0 * t, 0.0, 0);
+				std::mt19937 rng(300 + t);
+				std::normal_distribution<double> nd(0.0, 2.0);
+				for (int yy = 0; yy < kH; ++yy)
+				{
+					double prev = 0.0;
+					for (int x = 0; x < kW; ++x) { prev = 0.3 * prev + nd(rng); y.at(x, yy) += prev; }
+				}
+				u = Split(y); o = est.Step(u, c);
+			}
+			bool lowered = false;
+			for (size_t i = 0; i < u.N.size(); ++i) { Require(o.Nb[i] <= u.N[i] + 1e-12, "N never rises"); if (o.Nb[i] < u.N[i]) lowered = true; }
+			Log("AR(1) 0.3: N lowered by NLF_t = " + std::to_string(lowered ? 1 : 0) + " flag " + std::to_string(o.nlfTLowersN ? 1 : 0));
+			Require(lowered == o.nlfTLowersN, "the lowering is reported exactly");
+		}
+
 		// Cost ledger: every step states its 4K cost; the budget share stays unset until the budget exists.
 		TEST_METHOD(CostLedgerStatesFourKCosts)
 		{
 			int n = 0;
 			const GrainLevel::CostRow* rows = GrainLevel::CostRows(n);
-			Require(n >= 5, "rows present");
+			Require(n >= 7, "rows present (incl. both low-latency rows)");
 			for (int i = 0; i < n; ++i)
 			{
 				Require(rows[i].ms4kHi >= rows[i].ms4kLo && rows[i].source && rows[i].step, "row complete: " + std::string(rows[i].step));
 				Require(GrainLevel::BudgetShare(rows[i], 0.0) < 0.0, "budget share unset without a budget");
 			}
-			Log("share of a 2 ms budget (illustrative only): B window " + std::to_string(GrainLevel::BudgetShare(rows[4], 2.0)));
+			Require(rows[4].ms4kLo == 2.5 && rows[4].ms4kHi == 3.9, "B 8+4 row = design-grain-chain-cost row 8 band");
+			Log("share of the PROPOSED 5.4 ms budget (owner has not set it): B 8+4 upper " + std::to_string(GrainLevel::BudgetShare(rows[4], GrainLevel::kProposedBudget4kMs)));
 		}
 	};
 }

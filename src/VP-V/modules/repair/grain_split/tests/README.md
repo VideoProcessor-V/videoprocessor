@@ -19,3 +19,5 @@ classification from the v3 split against the v2 split agrees on >= 99.5 % of blo
 TD will read the split later; re-check at the TD build).
 `tests/GrainSplitV3CostBench.cpp` (category GpuHardware, logs only): per-pass pl_timer mean / p95 and total mean / p95 / max of the lane
 kernel at 1080p and 2160p (Compact and Full, 20 warm-up + 120 timed frames) plus the dispatcher's live-form wall time.
+
+`tests/GrainLevelLawTests.cpp` and `tests/GrainLevelDetailLossTests.cpp` (CPU only, GrainLevel CPU law v5, brief-S-3c T2): seconds-based half-life at six rates, bit-identical unit-4 fallback per reset/fallback cause with visible reason, histogram reset, skip-copy guard, temporal invariants (N_b <= N, f up, clean + grain = Y), mirror gate (default OFF, only lowers, OFF equals a gate that cannot fire), bicubic cross form phase bias at 0.3 / 1.7 px, DCT orthonormality, the B neighbour Wiener with 4 planted-grain neighbours, AR(1) 0.3 reporting, window sizes, cost rows, frozen-gain detail loss. Numeric thresholds are logged first-run values awaiting the first build.

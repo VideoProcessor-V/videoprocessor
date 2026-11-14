@@ -66,20 +66,56 @@ namespace GrainLevelDetailLossTestsNs
 			const double l4 = GrainLevel::FrozenLeak(u.f, s, 2 * kB), l5 = GrainLevel::FrozenLeak(o.f, s, 2 * kB);
 			Log("detail loss texture: unit-4 " + std::to_string(l4) + " v5 " + std::to_string(l5));
 			Require(l5 <= l4 + 1e-12, "temporal leak <= unit-4 leak");
+			Require(l5 < 0.25, "coherent translating texture keeps its structure (leak < 25 percent)");
 		}
 
-		// Mirror gate off moves no detail: explicit OFF equals the default Params.
-		TEST_METHOD(MirrorOffMovesNothing)
+		// Mirror gate: ON it fires on incoherent (pure-grain) pairs and only lowers the share; OFF it is exactly the same as an ON gate
+		// whose energy threshold can never be met (no detail moves). On coherent translating structure the ON gate costs little detail.
+		TEST_METHOD(MirrorGateMovesOnlyIncoherentRegions)
 		{
 			GrainLevel::BlockField f; f.Init(kW, kH, kB, -1.0, 0.0);
 			GrainLevel::Params pOff; pOff.mirrorGate = false;
-			GrainLevel::Estimator a(pOff), b;
+			GrainLevel::Params pOn; pOn.mirrorGate = true;
+			GrainLevel::Params pNever; pNever.mirrorGate = true; pNever.mirrorMinEnergy = 1e9;
+			GrainLevel::Estimator eOff(pOff), eOn(pOn), eNever(pNever);
 			GrainLevel::Context c; c.sourceHz = 24.0; c.field = &f;
-			a.Step(GrainSplit::Compute(Frame(0.0, 2.0, 101), 1.0, kB), c); b.Step(GrainSplit::Compute(Frame(0.0, 2.0, 101), 1.0, kB), c);
-			GrainLevel::Result ra, rb;
-			for (int t = 1; t <= 4; ++t) { const GrainSplit::Split u = GrainSplit::Compute(Frame(1.0 * t, 2.0, 101 + t), 1.0, kB); ra = a.Step(u, c); rb = b.Step(u, c); }
-			Require(ra.f.v == rb.f.v && ra.clean.v == rb.clean.v, "explicit OFF equals default");
-			Require(ra.mirrorRegions == 0, "no mirror region");
+			GrainLevel::Result rOff, rOn, rNever;
+			// pure grain, no structure: the pair is incoherent (rho ~ 0)
+			for (int t = 0; t <= 4; ++t)
+			{
+				Plane y(kW, kH);
+				std::mt19937 rng(400 + t);
+				std::normal_distribution<double> nd(0.0, 3.0);
+				for (int yy = 0; yy < kH; ++yy) for (int x = 0; x < kW; ++x) y.at(x, yy) = 400.0 + nd(rng);
+				const GrainSplit::Split u = GrainSplit::Compute(y, 1.0, kB);
+				rOff = eOff.Step(u, c); rOn = eOn.Step(u, c); rNever = eNever.Step(u, c);
+			}
+			double moved = 0.0, up = 0.0, neverMoved = 0.0;
+			for (size_t i = 0; i < rOff.f.v.size(); ++i)
+			{
+				moved += rOff.f.v[i] - rOn.f.v[i]; up = (std::max)(up, rOn.f.v[i] - rOff.f.v[i]);
+				neverMoved += std::fabs(rOff.f.v[i] - rNever.f.v[i]);
+			}
+			Log("mirror regions on " + std::to_string(rOn.mirrorRegions) + " total share lowered " + std::to_string(moved));
+			Require(rOn.mirrorRegions > 0, "mirror ON fires on the incoherent pure-grain pair");
+			Require(moved > 0.0, "mirror ON lowers the share on the incoherent pair");
+			Require(rOff.mirrorRegions == 0, "switch off: no region counted");
+			Require(neverMoved == 0.0, "OFF equals an ON gate that cannot fire: no detail moved");
+			Require(up <= 1e-12, "ON never raises the share");
+
+			// coherent translating texture: the ON gate costs little detail
+			GrainLevel::Estimator a(pOff), b(pOn);
+			a.Step(GrainSplit::Compute(Frame(0.0, 2.0, 501), 1.0, kB), c); b.Step(GrainSplit::Compute(Frame(0.0, 2.0, 501), 1.0, kB), c);
+			GrainLevel::Result ra, rb; Plane s;
+			for (int t = 1; t <= 6; ++t)
+			{
+				const GrainSplit::Split u = GrainSplit::Compute(Frame(1.0 * t, 2.0, 501 + t), 1.0, kB);
+				ra = a.Step(u, c); rb = b.Step(u, c);
+				s = GrainLevel::BandD(GrainSplit::Compute(Frame(1.0 * t, 0.0, 0), 1.0, kB));
+			}
+			const double la = GrainLevel::FrozenLeak(ra.f, s, 2 * kB), lb = GrainLevel::FrozenLeak(rb.f, s, 2 * kB);
+			Log("detail loss texture, mirror off " + std::to_string(la) + " on " + std::to_string(lb));
+			Require(lb - la < 0.10, "mirror ON adds < 10 points of leak on coherent structure");
 		}
 	};
 }
