@@ -104,6 +104,11 @@ void LibplaceboVideoRenderer::Impl::PlanEntrance(pl_frame& renderImage, pl_frame
 				(activeSettings.rebaseKernelMatch ? "none identified (the polar filter)" : "off (rebase_kernel_match off)"));
 		}
 	}
+	// Owner REVERT 2026-11-12 (exactly as before P4, 77fe0397e): in Original the monitor feed, its settings, the auto flag, the auto factors and
+	// the kernel identification above ran; they still do. Everything below (re-base, deband, detail pulse, texture restore) is VP-V work that
+	// does nothing in Original (owner E3); ResetEntrancePlan keeps the outputs native.
+	if (pipelineSlots.OriginalPathway())
+		return;
 	const bool temporal = temporalRenderer.Active();
 	// Audit 2026-10-16: a failed re-base renders the native frame while the blend, the SSIM gate
 	// and the debander were set up for the re-based one; after a failure the re-base pauses for
