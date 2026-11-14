@@ -137,6 +137,7 @@ namespace GrainLevel
 		int llBackPerPixel = 10;                         // low latency once the per-pixel vector product exists (+0 ahead)
 		double neighbourKappa = 1.0;                     // Wiener kappa on the neighbour mean ("kappa about 1 on the harness N")
 		double looGate = 4.0;                            // leave-one-out gate: boxmean5x5(r^2) <= looGate (N + V)
+		int dctShifts = 4;                               // tile grids averaged: 4 = half-shifts (0,0) (4,0) (0,4) (4,4); 2 = (0,0) (4,4). MEASUREMENT knob (B-S0), default unchanged, NOT a user setting
 		int minNeighbours = 2;                           // fewer usable neighbours: the L1+L2 gains exactly
 		double psdFlatFactor = 1.5;                      // a tile is flat when mean d^2 <= factor N
 		int psdMinTiles = 4;                             // fewer flat tiles: white PSD shape (counted, visible)
@@ -774,10 +775,14 @@ namespace GrainLevel
 
 		// per-frequency Wiener, 4 half-shifted tile grids, each pixel covered once per grid, averaged
 		Plane acc(w, h, 0.0);
-		const int shifts[4][2] = { {0, 0}, {4, 0}, {0, 4}, {4, 4} };
-		for (int sidx = 0; sidx < 4; ++sidx)
-			for (int ty = -8 + shifts[sidx][1]; ty < h; ty += 8)
-				for (int tx = -8 + shifts[sidx][0]; tx < w; tx += 8)
+		const int shiftTable[4][2] = { {0, 0}, {4, 0}, {0, 4}, {4, 4} };
+		const int shiftTable2[2][2] = { {0, 0}, {4, 4} };
+		const bool two = p.dctShifts == 2;
+		const int nShift = two ? 2 : 4;
+		const double gridW = 1.0 / nShift;
+		for (int sidx = 0; sidx < nShift; ++sidx)
+			for (int ty = -8 + (two ? shiftTable2[sidx][1] : shiftTable[sidx][1]); ty < h; ty += 8)
+				for (int tx = -8 + (two ? shiftTable2[sidx][0] : shiftTable[sidx][0]); tx < w; tx += 8)
 				{
 					double in[64], co[64], rec[64];
 					double kt = 0.0, nt = 0.0; int kc = 0;
@@ -790,7 +795,7 @@ namespace GrainLevel
 							if (keffI[i] >= p.minNeighbours) { kt += keffI[i]; ++kc; }
 							nt += t1.Nb[static_cast<size_t>(yy / B) * bw + static_cast<size_t>(xx / B)];
 						}
-					if (kc == 0) { for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x) { const int xx = tx + x, yy = ty + y; if (xx >= 0 && yy >= 0 && xx < w && yy < h) acc.at(xx, yy) += 0.25 * m.at(xx, yy); } continue; }
+					if (kc == 0) { for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x) { const int xx = tx + x, yy = ty + y; if (xx >= 0 && yy >= 0 && xx < w && yy < h) acc.at(xx, yy) += gridW * m.at(xx, yy); } continue; }
 					kt /= kc; nt /= 64.0;
 					Dct8x8(in, co);
 					for (int k = 0; k < 64; ++k)
@@ -805,7 +810,7 @@ namespace GrainLevel
 						for (int x = 0; x < 8; ++x)
 						{
 							const int xx = tx + x, yy = ty + y;
-							if (xx >= 0 && yy >= 0 && xx < w && yy < h) acc.at(xx, yy) += 0.25 * rec[y * 8 + x];
+							if (xx >= 0 && yy >= 0 && xx < w && yy < h) acc.at(xx, yy) += gridW * rec[y * 8 + x];
 						}
 				}
 
