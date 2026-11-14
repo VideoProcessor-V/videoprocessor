@@ -1573,6 +1573,18 @@ def main(argv=None):
                             "). Ratchet: lower a value when a site is collapsed into a seam; never raise one without a HOOK-APPROVAL "
                             "id (rule 32). A file not listed has a ceiling of 0.",
                    "base_ref": args.base_ref, "generated_at": datetime.date.today().isoformat(), "files": dict(sorted(counts.items()))}
+            # Keep the hand-written `temporary` blocks (HA-xx allowances with a trigger): a file whose count is above its
+            # reverts_to still needs the block, and `files` carries reverts_to, never the temporarily raised count. A block
+            # whose file now counts <= reverts_to is no longer needed and is dropped with its files entry = the count.
+            old_budget = load_json(Tree(args.root), BUDGET_PATH) or {}
+            kept = {}
+            for f, tmp in sorted((old_budget.get("temporary") or {}).items()):
+                if counts.get(f, 0) > int(tmp["reverts_to"]):
+                    kept[f] = tmp
+                    counts[f] = int(tmp["reverts_to"])
+            if kept:
+                doc["files"] = dict(sorted(counts.items()))
+                doc["temporary"] = kept
             os.makedirs(os.path.join(args.root, "docs", "audit"), exist_ok=True)
             with open(os.path.join(args.root, *BUDGET_PATH.split("/")), "w", encoding="utf-8") as fh:
                 json.dump(doc, fh, indent=1)
