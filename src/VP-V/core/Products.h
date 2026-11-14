@@ -89,7 +89,6 @@ enum : ProductId {
     kTdTrailSummary,      // 28 td.trail_summary: per-frame CPU summary for source identity / status
     // Wave S2 (SID lead request, doc 78 section 6): appended after the doc 72 list, never before it.
     kSourceGeometry,      // 29 source_geometry (P14g): HELD-STATE measured + applied source geometry (SourceGeometry unit v1)
-    kEdgeMap,             // 31 edge_map (per-frame memo; consumers AdaptiveDownscale, L-FOCUS); lead 8 allocation 31, 05:2x 11-14
     kSkeletonProductEnd
 };
 
