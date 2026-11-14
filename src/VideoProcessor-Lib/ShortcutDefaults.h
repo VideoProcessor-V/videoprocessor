@@ -114,7 +114,7 @@ std::string GlobalActionsForConfig(TryGet&& tryGet)
 		tryGet("vprenderer", "pipeline_original_pathway", pathway);
 	std::string lower;
 	for (char c : pathway)
-		if (c != ' ' && c != '	')
+		if (c != ' ' && c != '\t')
 			lower += static_cast<char>((c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c);
 	const bool original = known && lower == "on";
 	std::string value;
