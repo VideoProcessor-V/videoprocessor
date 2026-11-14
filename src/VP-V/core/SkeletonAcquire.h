@@ -367,12 +367,12 @@ public:
     }
     // The memo's GPU working set as VRAM ledger LEVELS (amendment A5 / audit M6): one level per step of THE ahead ladder
     // (QueueWindow.h AheadLadderStates over the registered allocating GPU fills and the current window), non-increasing, so a short
-    // grant gives the largest plan that fits, never 0. `mode` / `lower` = the S-C inputs (QueueWindow.h). The top level is the full
-    // window (GpuNeedBytes).
-    std::vector<uint64_t> GpuNeedLevels(QueueMode mode = QueueMode::Normal, LowerQueueStep lower = LowerQueueStep()) const
+    // grant gives the largest plan that fits, never 0. `mode` / `budget` = the S-C inputs (QueueWindow.h; null budget = not fed, no
+    // S-C level). The top level is the full window (GpuNeedBytes).
+    std::vector<uint64_t> GpuNeedLevels(QueueMode mode = QueueMode::Normal, const DelayBudget::Inputs* budget = nullptr) const
     {
         std::lock_guard<std::mutex> g(mutex_);
-        AheadNeed n = AheadNeedLocked(window_, mode, std::move(lower), true);
+        AheadNeed n = AheadNeedLocked(window_, mode, budget, true);
         return AheadLevels(n);
     }
     uint64_t GpuNeedBytes() const
@@ -424,8 +424,15 @@ public:
         keepFrames_ = w.back;
         ahead_ = w.ahead;
         history_ = w.history;
-        presentKnown_ = w.presentKnown;
-        presented_ = w.presented;
+        // presented_ only moves forward (NotePresented feeds the exact value, the window an older peak-based one: audit SHOULD 8),
+        // except when the window's numbering went back (a restart after a discontinuity). A window without present facts leaves
+        // what NotePresented delivered.
+        if (w.presentKnown) {
+            const bool restarted = haveSealed_ && w.current < lastSeal_;
+            if (!presentKnown_ || restarted || w.presented > presented_)
+                presented_ = w.presented;
+            presentKnown_ = true;
+        }
         windowSet_ = true;
         window_ = w;
     }
@@ -475,24 +482,28 @@ public:
     }
     // Any thread (the queue thread's OnQueue, amendment A4 / audit M5): the epoch moves AT ONCE, so an Acquire that follows (on any
     // thread, before the next Begin) never sees a pre-flush spot: an entry of an older epoch is absent. Its bytes are released at the
-    // next seal (OnSeal), never under the caller's lock. Coalesced per Begin interval: Reset then Flush is ONE discontinuity.
+    // next seal (OnSeal), never under the caller's lock. Every bump moves the epoch (a spot filled between two bumps is invalidated
+    // by the second); the COUNT is coalesced per Begin interval: Reset then Flush is ONE discontinuity (audit SHOULD 11).
+    // The admission stays ON across the bump (audit MUST 4): NotQueued, the ahead-compute / plan NotPlannedAhead and PresentsStalled
+    // keep using the last seal's window until the next Begin re-derives it, so a fill between the flush and the next Begin is never
+    // beyond the ceiling or the queue. Only the RELEASED numbering is reset (the numbering may restart after a discontinuity).
     void BumpEpoch(InvalidateCause cause)
     {
         std::lock_guard<std::mutex> g(mutex_);
         if (cause < InvalidateCause::Count)
             ++invalidations_[size_t(cause)];
-        if (bumpedThisInterval_)
-            return;
-        bumpedThisInterval_ = true;
-        ++discontinuities_;
-        invalidatedKeys_.clear();   // only the latest discontinuity's keys are a recompute "after invalidation"
+        if (!bumpedThisInterval_) {
+            bumpedThisInterval_ = true;
+            ++discontinuities_;
+            invalidatedKeys_.clear();   // only this interval's discontinuity keys are a recompute "after invalidation"
+        }
         for (const auto& kv : memo_)
             if (kv.second->state == Entry::Ready && kv.second->epoch == epoch_)
                 invalidatedKeys_.insert(kv.first);
         ++epoch_;
-        haveReleased_ = false;   // the numbering may restart after a discontinuity: nothing older is refused
+        haveReleased_ = false;          // the numbering may restart after a discontinuity: nothing older is refused
         releasedThrough_ = 0;
-        haveSealed_ = false;     // admission waits for the next seal's window
+        numberingMayRestart_ = true;    // the next seal may go back without releasing this epoch's fills
     }
     void Invalidate(InvalidateCause cause) { BumpEpoch(cause); }
     uint64_t Discontinuities() const
@@ -508,13 +519,14 @@ public:
     // The S3 admission link (design s2.7). What the memo's ahead work costs for `w`: one AheadCost per registered GPU fill that
     // allocates (its declared reserve, or the measured bytes of its last result when larger) and per CPU fill that has run (its
     // measured bytes; CPU bytes are not in the VRAM grant, listed for the cost ledger with bytesPerFrame 0 for the VRAM plan).
-    AheadNeed MakeAheadNeed(const QueueWindow& w, QueueMode mode = QueueMode::Normal, LowerQueueStep lower = LowerQueueStep()) const
+    // `budget`: the delay budget the scheduler plans the queue with (null = not fed: the ladder offers no S-C step and says so).
+    AheadNeed MakeAheadNeed(const QueueWindow& w, QueueMode mode = QueueMode::Normal, const DelayBudget::Inputs* budget = nullptr) const
     {
         std::lock_guard<std::mutex> g(mutex_);
-        return AheadNeedLocked(w, mode, std::move(lower), false);
+        return AheadNeedLocked(w, mode, budget, false);
     }
     // `gpuOnly`: the VRAM view (GPU allocating fills, back = max(window back, the fills' declared history)).
-    AheadNeed AheadNeedLocked(const QueueWindow& w, QueueMode mode, LowerQueueStep lower, bool gpuOnly) const
+    AheadNeed AheadNeedLocked(const QueueWindow& w, QueueMode mode, const DelayBudget::Inputs* budget, bool gpuOnly) const
     {
         AheadNeed n;
         n.window = w;
@@ -525,7 +537,10 @@ public:
         n.grantBytes = gpuGranted_ ? gpuBudget_ : 0u;
         n.heldBytes = gpuBytes_;
         n.mode = mode;
-        n.lowerQueueStep = std::move(lower);
+        if (budget != nullptr) {
+            n.budget = *budget;
+            n.budgetFed = true;
+        }
         uint16_t back = n.window.back > keepFrames_ ? n.window.back : uint16_t(keepFrames_);
         std::map<uint32_t, const OwnerFill*> all;
         for (const auto& kv : owners_)
@@ -901,11 +916,12 @@ public:
         std::vector<std::shared_ptr<Entry>> drop;
         {
             std::lock_guard<std::mutex> g(mutex_);
-            if (haveSealed_ && seq < lastSeal_) {
+            if (haveSealed_ && seq < lastSeal_ && !numberingMayRestart_) {
                 ReleaseIfLocked([](const Entry&) { return true; }, drop);   // the old numbering: nothing kept, nothing refused
                 haveReleased_ = false;
                 releasedThrough_ = 0;
             }
+            numberingMayRestart_ = false;   // after a BumpEpoch the older epoch's spots go below; this epoch's fills stay
             haveSealed_ = true;
             lastSeal_ = seq;
             ++seals_;
@@ -1275,6 +1291,7 @@ private:
     uint64_t releasedThrough_ = 0;
     bool haveSealed_ = false;
     uint64_t lastSeal_ = 0;
+    bool numberingMayRestart_ = false;   // a BumpEpoch since the last seal (the released numbering was reset)
 };
 
 }  // namespace VpSkeleton

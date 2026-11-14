@@ -39,6 +39,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <initializer_list>
 #include <string>
 #include <utility>
 #include <vector>
@@ -212,6 +213,8 @@ inline std::string WindowText(const QueueWindowTerms& t, const QueueWindow& w)
 
 // The highest sample over the last `windowUs` (the P term: the same window the lane lead's min-window uses, its length passed by the
 // caller). A sustained fall is taken once the window has passed; a rise at once. One writer (the render thread).
+// Single-threaded (the render thread's Begin). The LAST sample is kept however old: a feed that stops (a stall) keeps its value
+// until a new sample arrives, on purpose (the window must not shrink under a stalled present).
 class WindowPeak {
 public:
     explicit WindowPeak(uint64_t windowUs) : windowUs_(windowUs) {}
@@ -241,7 +244,7 @@ private:
 };
 
 // The per-host snapshot the skeleton writes once per Begin and any thread reads (the vector-engine lease map, the scheduler).
-// A seqlock over plain fields: a reader never sees a torn window.
+// A seqlock over plain fields: a reader never sees a torn window. ONE writer (the render thread's Begin); any number of readers.
 class QueueWindowBoard {
 public:
     void Publish(const QueueWindow& w)
@@ -339,18 +342,11 @@ struct AheadCost {
     uint16_t declaredDepth = 0;     // the ahead depth the consumers declared (Core keeps at least this)
 };
 
-// The delay budget's next LOWER ladder step for S-C (core/DelayBudget.h owns the queue length, ADR-0020): a shorter queue keeps the
-// TOTAL delay (padding makes it up) and loses look-ahead. False = no lower step (at kMinimumDepth, or the budget is not feasible).
-using LowerQueueStep = std::function<bool(uint16_t currentFrames, uint16_t* lowerFrames)>;
-// The default: one frame down the ladder, never below DelayBudget::kMinimumDepth, never a rounding of a time (no ceil).
-inline bool DelayBudgetLowerStep(uint16_t current, uint16_t* lower)
-{
-    if (int(current) - 1 < DelayBudget::kMinimumDepth)
-        return false;
-    if (lower != nullptr)
-        *lower = uint16_t(current - 1u);
-    return true;
-}
+// S-C asks the DELAY BUDGET for its next LOWER ladder step (core/DelayBudget.h is the ONE owner of the queue length, ADR-0020; design
+// s2.7 S10): the same budget, so the TOTAL delay is unchanged (the padding makes it up) and look-ahead is lost; never below
+// DelayBudget::kMinimumDepth. The ladder never does its own queue arithmetic. False = no lower step. The default is
+// DelayBudget::NextLowerQueueFrames; a caller may wrap it (to count or log the steps), never replace the law.
+using LowerQueueStep = std::function<bool(const DelayBudget::Inputs& budget, int currentFrames, DelayBudget::Plan* lower)>;
 
 struct AheadNeed {
     QueueWindow window;
@@ -358,8 +354,21 @@ struct AheadNeed {
     uint64_t heldBytes = 0;           // GPU bytes held now
     std::vector<AheadCost> costs;
     QueueMode mode = QueueMode::Normal;   // Games / Competitive: S-C is a no-op (their queues are already short), never a raise
-    LowerQueueStep lowerQueueStep;        // null = DelayBudgetLowerStep
+    // The delay budget the scheduler plans the queue with (the user's one total delay and the MEASURED rates). Not fed = no S-C
+    // step (the floor line says so). The 200 ms AVR-safe tier is its budgetMs: a ceiling the plan never exceeds, never a floor.
+    DelayBudget::Inputs budget;
+    bool budgetFed = false;
+    LowerQueueStep lowerQueueStep;        // null = DelayBudget::NextLowerQueueFrames
 };
+
+// The frames ahead left when the queue gives up `framesGivenUp` look-ahead frames (S-C): the window's queued-ahead term loses them,
+// so the computed depth is capped by what is still queued. Window arithmetic only; the queue length itself is DelayBudget's.
+inline uint16_t AheadComputeAfterShorterQueue(const QueueWindow& w, int framesGivenUp)
+{
+    const int left = int(w.ahead) - (framesGivenUp > 0 ? framesGivenUp : 0);
+    const uint16_t queued = left > 0 ? uint16_t(left) : uint16_t(0);
+    return w.aheadCompute < queued ? w.aheadCompute : queued;
+}
 
 enum class AheadStep : uint8_t { None, ReduceEarlyProducts, FewerFramesAhead, ShorterQueue, AtLatencyFloor };
 
@@ -378,7 +387,10 @@ inline const char* Token(AheadStep s)
 struct AheadPlan {
     struct Entry { uint16_t id; uint64_t variantHash; uint16_t depth; };   // variantHash 0 = every variant of the product
     std::vector<Entry> depth;
-    uint16_t queueTargetFrames = 0;   // S-C lowers it; == the window's aheadCompute otherwise
+    // The delay-budget plan this ahead plan assumes: DelayBudget::Compute(budget), each S-C step DelayBudget's next lower one (its
+    // queueFrames, paddingMs: the total stays budgetMs). Not feasible (queueFrames 0) when the budget was not fed.
+    DelayBudget::Plan queue;
+    uint16_t aheadCap = 0;            // the computed-depth cap: the window's aheadCompute; S-C lowers it with the queue
     AheadStep step = AheadStep::None;
     uint64_t bytes = 0;               // what the plan needs (one ledger level)
     std::string line;                 // the visible line (Ctrl+I, Config status, Ctrl+Alt+D)
@@ -413,32 +425,39 @@ inline uint64_t AheadBytes(const AheadNeed& n, const std::vector<uint16_t>& dept
 }
 
 // Every state of THE step-down ladder, in order (the first is the full window; each later one takes one more step):
-//   ReduceEarlyProducts  S-A: Fill products lose their ahead depth one at a time (catalog order), then Derived, then Slice; Core keeps
-//                        its declared depth (memory changes how FAR ahead core is made, never WHETHER);
-//   FewerFramesAhead     S-B: the Core depth shrinks from the furthest frame inward, down to its declared depth;
-//   ShorterQueue         S-C, last, Normal mode only: the delay budget's next lower ladder step (total delay unchanged), capping every
-//                        depth; never below DelayBudget::kMinimumDepth, never a raise;
+//   ReduceEarlyProducts  S-A: Fill products lose their ahead depth one at a time (catalog order), then Derived, then Slice; Core and
+//                        Unpack keep their declared depth (memory changes how FAR ahead core is made, never WHETHER);
+//   FewerFramesAhead     S-B: the Core / Unpack depth shrinks from the furthest frame inward, down to its declared depth;
+//   ShorterQueue         S-C, last, Normal mode only, budget fed: DelayBudget's next lower ladder step (total delay unchanged), the
+//                        ahead cap following the shorter queue; never below DelayBudget::kMinimumDepth, never a raise;
 //   AtLatencyFloor       the final state when even the floor does not fit (shown; the refusal safety net then applies).
 inline std::vector<AheadPlan> AheadLadderStates(const AheadNeed& n)
 {
     std::vector<AheadPlan> states;
     const uint16_t A = n.window.aheadCompute;   // amendment 3: the plan starts at the computed depth, never the whole queue
     std::vector<uint16_t> depth(n.costs.size(), A);
-    uint16_t target = A;
+    uint16_t cap = A;
+    DelayBudget::Plan queue = n.budgetFed ? DelayBudget::Compute(n.budget) : DelayBudget::Plan();
+    const int startFrames = queue.queueFrames;
+    std::string why;   // on the floor line: why S-C was not (or no longer) available
     auto push = [&](AheadStep s) {
         AheadPlan p;
         p.step = s;
-        p.queueTargetFrames = target;
+        p.queue = queue;
+        p.aheadCap = cap;
         for (size_t i = 0; i < n.costs.size(); ++i)
             p.depth.push_back(AheadPlan::Entry{ n.costs[i].id, n.costs[i].variant.Hash(), depth[i] });
         p.bytes = AheadBytes(n, depth);
-        p.line = std::string("memo ahead plan: ") + Token(s) + " (queue target " + std::to_string(target)
-                 + " frame(s), ahead compute " + std::to_string(A) + ", need " + std::to_string(p.bytes >> 20) + " MiB of "
-                 + std::to_string(n.grantBytes >> 20) + " MiB)";
+        p.line = std::string("memo ahead plan: ") + Token(s) + " (queue "
+                 + (queue.feasible ? std::to_string(queue.queueFrames) + " frame(s), padding " + std::to_string(int(queue.paddingMs + 0.5)) + " ms"
+                                   : std::string("delay budget not fed"))
+                 + ", ahead compute " + std::to_string(cap) + " of " + std::to_string(A) + ", need " + std::to_string(p.bytes >> 20)
+                 + " MiB of " + std::to_string(n.grantBytes >> 20) + " MiB" + (s == AheadStep::AtLatencyFloor && !why.empty() ? "; " + why : "")
+                 + ")";
         states.push_back(p);
     };
     push(AheadStep::None);
-    for (JobClass cls : { JobClass::Fill, JobClass::Derived, JobClass::Slice })
+    for (JobClass cls : { JobClass::Fill, JobClass::Derived, JobClass::Slice })   // the shed order, written out (never enum values)
         for (size_t i = 0; i < n.costs.size(); ++i)
             if (n.costs[i].cls == cls && depth[i] != 0) {
                 depth[i] = 0;
@@ -454,16 +473,22 @@ inline std::vector<AheadPlan> AheadLadderStates(const AheadNeed& n)
         if (changed)
             push(AheadStep::FewerFramesAhead);
     }
-    if (n.mode == QueueMode::Normal) {
-        const LowerQueueStep lower = n.lowerQueueStep ? n.lowerQueueStep : LowerQueueStep(DelayBudgetLowerStep);
-        uint16_t next = 0;
-        while (lower(target, &next) && next < target) {
-            target = next;
+    if (n.mode != QueueMode::Normal)
+        why = "games / competitive queue: no shorter queue";
+    else if (!n.budgetFed || !queue.feasible)
+        why = "no shorter queue: delay budget not fed";
+    else {
+        const LowerQueueStep lower = n.lowerQueueStep ? n.lowerQueueStep : LowerQueueStep(DelayBudget::NextLowerQueueFrames);
+        DelayBudget::Plan next;
+        while (lower(n.budget, queue.queueFrames, &next) && next.feasible && next.queueFrames < queue.queueFrames) {
+            queue = next;
+            cap = AheadComputeAfterShorterQueue(n.window, startFrames - queue.queueFrames);
             for (uint16_t& d : depth)
-                if (d > target)
-                    d = target;
+                if (d > cap)
+                    d = cap;
             push(AheadStep::ShorterQueue);
         }
+        why = "queue at the delay budget's minimum";
     }
     push(AheadStep::AtLatencyFloor);
     return states;
@@ -477,6 +502,23 @@ inline AheadPlan PlanAheadLadder(const AheadNeed& n)
         if (p.step != AheadStep::AtLatencyFloor && p.bytes <= n.grantBytes)
             return p;
     return states.back();
+}
+
+// The window as the PLAN leaves it (audit SHOULD 7, no silent cap): when the plan computes fewer frames ahead than the window's
+// aheadCompute, aheadCompute is the plan's deepest depth and the binding is Budget ("ahead compute N (...; budget)", shown).
+inline QueueWindow WithAheadPlan(QueueWindow w, const AheadPlan& p)
+{
+    uint16_t deepest = 0;
+    for (const AheadPlan::Entry& e : p.depth)
+        if (e.depth > deepest)
+            deepest = e.depth;
+    if (p.aheadCap < deepest)
+        deepest = p.aheadCap;
+    if (!p.depth.empty() && deepest < w.aheadCompute) {
+        w.aheadCompute = deepest;
+        w.aheadBinding = AheadBinding::Budget;
+    }
+    return w;
 }
 
 // One VRAM ledger level per ladder step (distinct byte needs, non-increasing; the governor grants the largest that fits).

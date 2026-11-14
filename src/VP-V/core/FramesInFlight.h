@@ -23,12 +23,7 @@
 inline size_t FramesInFlight(size_t queueCapacity, size_t lookAheadWalk, size_t history, size_t renderAheadR,
                              size_t laneLeadL)
 {
-    const size_t kU32 = size_t(std::numeric_limits<uint32_t>::max() / 3u);
-    size_t queue = 0;
-    if (renderAheadR <= kU32 && laneLeadL <= kU32 && lookAheadWalk <= kU32)
-        queue = size_t(VpSkeleton::QueueFrames(uint32_t(renderAheadR), uint32_t(laneLeadL), uint32_t(lookAheadWalk)));
-    else
-        return std::numeric_limits<size_t>::max();
+    const size_t queue = VpSkeleton::QueueFramesIn<size_t>(renderAheadR, laneLeadL, lookAheadWalk);   // saturates, never wraps
     const size_t terms[3] = { queueCapacity, history, queue };
     size_t sum = 1;
     for (size_t t : terms) {

@@ -10,6 +10,7 @@
 #include <VP-V/core/GpuAllocator.h>
 #include <VP-V/core/PassTimerInbox.h>
 #include <VP-V/core/PostPresentSpare.h>
+#include <VP-V/core/QueueFrames.h>
 #include <VP-V/core/ReserveRows.h>
 #include <VP-V/core/SkeletonAcquireLane.h>
 #include <VP-V/core/hub/CurrentFrame.h>
@@ -61,8 +62,8 @@ namespace Vpv
 			constexpr uint64_t kEarlyRefreshFrames = 8;
 			constexpr uint64_t kRefreshEvery = 16;
 			constexpr uint64_t kReconfigureMinFrames = 60;
-			constexpr double kLeadWindowSeconds = 0.5;   // source time the lane-lead feed keeps its lowest value over
-			constexpr double kLeadPeakHoldSeconds = 10.0;   // the lane lead's best value is held this long, then decays to the lead in use
+			using VpSkeleton::kLeadWindowSeconds;     // source time the lane-lead feed keeps its lowest value over (core/QueueFrames.h)
+			using VpSkeleton::kLeadPeakHoldSeconds;   // the lane lead's best value is held this long, then decays to the lead in use
 			constexpr size_t kFactsRing = 64;           // engine-field facts kept (frames)
 			constexpr unsigned kFeedRetries = 8;        // publish attempts per field before it is given up (Begin + AfterRender per frame)
 
