@@ -8,6 +8,7 @@
 
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidenceGlsl.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
+#include <VP-V/core/ComputeOnce.h>
 
 #include <algorithm>
 
@@ -96,6 +97,7 @@ namespace VpLaneProducts
 	{
 		if (step != 0)
 			return Fail(c, "P11 has one pass");
+		VPV_COMPUTE_ONCE_AT("U4", c.seq, ::ComputeOnce::Variant(c.dims.width, c.dims.height));
 		if (m_header.empty())
 		{
 			m_header = HeaderGlsl();

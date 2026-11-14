@@ -1,5 +1,6 @@
 #include <pch.h>
 #include <VP-V/modules/input/capture/GpuRgbUnpack.h>
+#include <VP-V/core/GpuAttributionPl.h>
 
 #include <libplacebo/shaders/custom.h>
 
@@ -145,6 +146,7 @@ GpuRgbUnpack::GpuRgbUnpack(pl_log log, pl_gpu gpuIn)
 	: gpu(gpuIn)
 {
 	dispatch = gpu ? pl_dispatch_create(log, gpu) : nullptr;
+	GpuAttribution::Watch(dispatch, "capture_rgb_unpack");
 }
 
 GpuRgbUnpack::~GpuRgbUnpack()

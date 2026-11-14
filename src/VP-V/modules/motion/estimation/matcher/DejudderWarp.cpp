@@ -9,6 +9,7 @@
 #include <VP-V/modules/motion/estimation/GapSeed.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h>
+#include <VP-V/core/GpuAttributionPl.h>
 
 #include <chrono>
 
@@ -2341,6 +2342,7 @@ if (q.x < size.x && q.y < size.y) {
 		: log(logIn), gpu(gpuIn), settings(settingsIn), base(settingsIn)
 	{
 		dispatch = pl_dispatch_create(log, gpu);
+		GpuAttribution::Watch(dispatch, "dejudder");
 	}
 
 	Settings MotionWarp::Scaled(const Settings& given, int inputHeight)

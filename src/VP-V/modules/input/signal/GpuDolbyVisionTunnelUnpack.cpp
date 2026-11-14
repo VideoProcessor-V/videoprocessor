@@ -1,6 +1,7 @@
 #include <pch.h>
 #include <VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.h>
 #include <VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h>
+#include <VP-V/core/GpuAttributionPl.h>
 
 #include <libplacebo/shaders/custom.h>
 
@@ -68,6 +69,7 @@ GpuDolbyVisionTunnelUnpack::GpuDolbyVisionTunnelUnpack(pl_log log, pl_gpu gpuIn)
 	: gpu(gpuIn)
 {
 	dispatch = gpu ? pl_dispatch_create(log, gpu) : nullptr;
+	GpuAttribution::Watch(dispatch, "dv_tunnel_unpack");
 	// Tests: VP_TEST_DV_UNPACK_FAIL=1, read once per unpack object (one per
 	// renderer device), not per frame.
 	// The process environment itself (SetEnvironmentVariable / _putenv both).

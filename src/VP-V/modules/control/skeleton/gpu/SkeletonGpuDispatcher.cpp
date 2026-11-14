@@ -5,6 +5,7 @@
 #define NOMINMAX
 #endif
 #include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
+#include <VP-V/core/GpuAttributionPl.h>
 
 #include <algorithm>
 
@@ -51,6 +52,7 @@ namespace Vpv
 		{
 			if (m_gpu)
 				m_dispatch = pl_dispatch_create(m_gpu->log, m_gpu);
+			GpuAttribution::Watch(m_dispatch, "lane_gpu");
 		}
 
 		SkeletonGpuDispatcher::~SkeletonGpuDispatcher()

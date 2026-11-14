@@ -5,6 +5,7 @@
 #include <vprenderer/NlsPipelinePreparation.h>
 #include <VP-V/modules/scaling/rebase/RebaseWarmup.h>
 #include <VP-V/modules/scaling/rebase/SourceRebase.h>
+#include <VP-V/core/GpuAttributionPl.h>
 
 #include <DebugLog.h>
 
@@ -190,6 +191,7 @@ namespace VpRebaseWarmup
 			pl_gpu_set_cache(gpu, cache);
 			owned.renderer = pl_renderer_create(nullptr, gpu);
 			owned.dispatch = pl_dispatch_create(nullptr, gpu);
+			GpuAttribution::Watch(owned.dispatch, "rebase_warmup");
 			if (!owned.renderer || !owned.dispatch || !base.source.Create(gpu) || !base.target.Create(gpu)) return false;
 
 			owned.module.SetKernel(kernel);

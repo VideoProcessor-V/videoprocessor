@@ -1,6 +1,7 @@
 #include <pch.h>
 #include "FrameInterpolator.h"
 #include <VP-V/core/VramUsers.h>
+#include <VP-V/core/GpuAttributionPl.h>
 
 #include <vprenderer/GrainPreserve.h>
 
@@ -437,6 +438,7 @@ if (q.x < size.x && q.y < size.y) {
 		: log(logIn), gpu(gpuIn), hostReadable(hostReadableIn)
 	{
 		dispatch = gpu ? pl_dispatch_create(log, gpu) : nullptr;
+		GpuAttribution::Watch(dispatch, "frame_interpolator");
 	}
 
 	FrameInterpolator::~FrameInterpolator()

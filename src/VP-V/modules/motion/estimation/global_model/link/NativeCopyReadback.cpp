@@ -1,6 +1,7 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 #include "NativeCopyReadback.h"
+#include <VP-V/core/GpuAttributionPl.h>
 
 #include <libplacebo/shaders/custom.h>
 
@@ -46,6 +47,7 @@ if (p.x < d.x && p.y < d.y) {
 		if (!n->Create(gpu, slots, w, h * planes, DXGI_FORMAT_R32G32B32A32_FLOAT))
 			return false;
 		m_dispatch = pl_dispatch_create(log, gpu);
+		GpuAttribution::Watch(m_dispatch, "camera_native_readback");
 		if (!m_dispatch)
 		{
 			n->Release(gpu);

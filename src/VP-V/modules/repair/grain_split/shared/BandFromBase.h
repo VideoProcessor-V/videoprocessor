@@ -18,6 +18,7 @@
 // Header-only, C++14, no Windows or GPU headers.
 #pragma once
 
+#include <VP-V/core/ComputeOnce.h>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -67,6 +68,7 @@ namespace BandFromBase
 	inline std::vector<double> Blur(const std::vector<double>& in, int w, int h, double sigma)
 	{
 		if (!(sigma > 0.0)) return in;
+		VPV_COMPUTE_ONCE("U2", ::ComputeOnce::Variant(w, h, static_cast<int64_t>(sigma * 1024.0)));
 		const int r = Radius(sigma, 3.0, true, 0.0);
 		std::vector<double> k(static_cast<size_t>(2 * r + 1));
 		double sum = 0.0;
