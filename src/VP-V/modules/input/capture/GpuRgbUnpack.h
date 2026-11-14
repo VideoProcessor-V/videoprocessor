@@ -73,6 +73,7 @@ public:
 	// S-2a: R12 matcher luma as Q6 fractions on the 10-bit axis (AnalysisAxis10.h). Default off = the CPU formatter's
 	// ten-bit law bit for bit (CaptureUnpackHookTests); turning it on from the renderer is a Bill-file call site
 	// (rule 33, reported), so only the unit/tests use it now.
+	// Plain bool: set and read on the render thread only, like the other setters here.
 	void SetWideLuma(bool on) { wideLuma = on; }
 
 private:

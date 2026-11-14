@@ -45,6 +45,8 @@ namespace Tests
 				const int64_t legacy = static_cast<int64_t>(Round12To10(static_cast<uint16_t>(code))) * 64;
 				const int64_t gap = q6 > legacy ? q6 - legacy : legacy - q6;
 				Assert::IsTrue(gap <= 33);
+				// Exact law, independent arithmetic: round(code * 65472 / 4095) in Q6.
+				Assert::AreEqual(static_cast<int64_t>((static_cast<uint64_t>(code) * 65472ull + 2047ull) / 4095ull), q6);
 			}
 			// The GLSL twin carries the same constant as the CPU law.
 			const std::string glsl = AxisGlsl();
@@ -101,6 +103,7 @@ namespace Tests
 			const int width = 64, height = 8;
 			const VideoFrameEncoding containers[] = { VideoFrameEncoding::R210, VideoFrameEncoding::R10b, VideoFrameEncoding::R10l };
 			bool sawFraction = false;
+			size_t samples = 0, fractional = 0;
 			for (const VideoFrameEncoding c : containers)
 			{
 				std::vector<uint8_t> r210(static_cast<size_t>(width) * height * 4), bytes(r210.size());
@@ -118,13 +121,16 @@ namespace Tests
 					for (int fullRange = 0; fullRange < 2; ++fullRange)
 					{
 						const uint32_t q6 = DvTunnelTapLaw::TapAxisQ6(DvTunnelTapLaw::TapCode(pixel, c, 1, fullRange != 0));
-						Assert::AreEqual(static_cast<uint32_t>(DvTunnelTapLaw::Tap16(pixel, c, 1, fullRange != 0)), q6);
+						// Independent expected value: the 12-bit tap code times 16 (literal), not the shared shift.
+						Assert::AreEqual(static_cast<uint32_t>(DvTunnelTapLaw::TapCode(pixel, c, 1, fullRange != 0)) * 16u, q6);
+						++samples;
 						Assert::AreEqual(static_cast<uint32_t>(DvTunnelTapLaw::TapCode(pixel, c, 1, fullRange != 0)) >> 2, Floor10FromQ6(q6));
-						if ((q6 & 63u) != 0u) sawFraction = true;
+						if ((q6 & 63u) != 0u) { sawFraction = true; ++fractional; }
 					}
 				}
 			}
 			Assert::IsTrue(sawFraction);   // the tunnel tap is 12 bits, not the old 10
+			Assert::IsTrue(fractional * 2 > samples);   // random 12-bit codes: about 3/4 carry a fraction
 		}
 	};
 }
