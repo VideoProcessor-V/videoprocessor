@@ -449,6 +449,7 @@ if (tile < int(tiles) && g.y < ts) {
 		out.heldStale = heldStale.load(std::memory_order_relaxed);
 		out.jobsDropped = jobsDropped.load(std::memory_order_relaxed);
 		out.submitSkipped = submitSkipped.load(std::memory_order_relaxed);
+		out.engagedReactive = engagedReactive.load(std::memory_order_relaxed);
 		out.waitsMissed = waitsMissed.load(std::memory_order_relaxed);
 		out.clockStepsBack = clockStepsBack.load(std::memory_order_relaxed);
 		return out;
@@ -2125,7 +2126,8 @@ if (tile < int(tiles) && g.y < ts) {
 				std::lock_guard<std::mutex> lock(aheadMutex);
 				a = ahead;
 			}
-			const bool aheadDue = !bound && renderSequence != 0 && a.eventSequence != 0 && a.ready && renderSequence >= a.eventSequence &&
+			// Frame-bound too (refs/121 decision (i)): the look-ahead lands the engage on the next detected cut.
+			const bool aheadDue = renderSequence != 0 && a.eventSequence != 0 && a.ready && renderSequence >= a.eventSequence &&
 				std::fabs(wanted - autoPending) <= tolerance;
 			if (std::fabs(wanted - autoPending) > tolerance)
 			{
@@ -2168,6 +2170,9 @@ if (tile < int(tiles) && g.y < ts) {
 				{
 					autoApplied = wanted;
 					nextFadeSeconds = trigger == 2 ? CrossfadeSeconds() : 0.0;
+					// Frame-bound: the reactive trigger is the FALLBACK for an absent or stale look-ahead; counted and shown (Ctrl+I, Config status).
+					if (bound && !(renderSequence != 0 && aheadLastSequence > renderSequence))
+						engagedReactive.fetch_add(1, std::memory_order_relaxed);
 				}
 			}
 			else if (s.moments <= autoNotBeforeCuts && autoNotBeforeCuts != 0)
@@ -2419,7 +2424,7 @@ if (tile < int(tiles) && g.y < ts) {
 	{
 		// The look-ahead, while it runs, finds the cut on the frame itself: the tracker's (a tile copy
 		// later) is not used then.
-		const bool aheadLive = !frameBound.load(std::memory_order_acquire) && renderSequence != 0 && aheadLastSequence > renderSequence;
+		const bool aheadLive = renderSequence != 0 && aheadLastSequence > renderSequence;
 		const bool newFrame = s.frames != pendingFrames;
 		// A cut found across a lost tile copy happened somewhere in a longer span: switching on it could
 		// land mid-shot, so it waits for the next moment.
@@ -2551,6 +2556,7 @@ if (tile < int(tiles) && g.y < ts) {
 		jobsDropped.store(0, std::memory_order_relaxed);
 		heldDropped.store(0, std::memory_order_relaxed);
 		submitSkipped.store(0, std::memory_order_relaxed);
+		engagedReactive.store(0, std::memory_order_relaxed);
 		waitsMissed.store(0, std::memory_order_relaxed);
 		frameLead.store(lead, std::memory_order_release);
 		frameBound.store(on, std::memory_order_release);
@@ -2789,6 +2795,8 @@ if (tile < int(tiles) && g.y < ts) {
 		snprintf(bound, sizeof(bound), "; frame-bound D=%u: held %u, dropped %llu, stale %llu, jobs dropped %llu, copies skipped %llu, waits missed %llu, clock steps back %llu",
 			s.frameLead, s.heldNow, s.heldDropped, s.heldStale, s.jobsDropped, s.submitSkipped, s.waitsMissed, s.clockStepsBack);
 		std::string out = text + bound;
+		if (s.engagedReactive != 0)
+			out += "; engaged " + std::to_string(s.engagedReactive) + "x without the look-ahead (reactive fallback: the cut could not be read ahead)";
 		if (s.heldDropped != 0 || s.jobsDropped != 0 || s.submitSkipped != 0 || s.waitsMissed != 0)
 			out += " (analyses were lost to timing: this run is not reproducible)";
 		return out;

@@ -105,6 +105,7 @@ namespace SourceResolutionMonitor
 		unsigned long long waitsMissed = 0;   // NoteWaitMissed(): a deterministic wait ran out
 		unsigned long long clockStepsBack = 0; // source seconds that went backwards (clamped)
 		unsigned long long submitSkipped = 0; // frame-bound: frames not copied because both readback slots were still in flight
+		unsigned long long engagedReactive = 0; // frame-bound: engages made by the reactive trigger because the look-ahead was unavailable or stale (visible fallback)
 	};
 
 	class Monitor
@@ -171,6 +172,7 @@ namespace SourceResolutionMonitor
 		unsigned long long JobsDroppedCount() const { return jobsDropped.load(std::memory_order_relaxed); }
 		// Frame-bound: frames whose tile copy was skipped because the readback slot was still in
 		// flight (GPU timing decides it: such a run is not reproducible). Counted, shown by Describe.
+		unsigned long long EngagedReactive() const { return engagedReactive.load(std::memory_order_relaxed); }
 		unsigned long long SubmitSkipped() const { return submitSkipped.load(std::memory_order_relaxed); }
 		// Frame-bound: true while nothing timing-dependent has dropped or skipped an analysis in this
 		// era (no job-queue drop, no held-queue drop, no skipped copy, no missed bounded wait). The
@@ -497,6 +499,8 @@ namespace SourceResolutionMonitor
 			unsigned long long verified = 0, cancelled = 0;
 		};
 		AheadState Ahead() const;
+		// Tests: the look-ahead's state as its worker would leave it (an event frame found, analysed), and the newest frame it has read.
+		void SetAheadForTest(const AheadState& state, uint64_t lastSequence) { std::lock_guard<std::mutex> lock(aheadMutex); ahead = state; aheadLastSequence = lastSequence; }
 		// Tests without a GPU: one analysed frame from normalised tiles (kTile x kTile each),
 		// through the same path as a captured frame, synchronously.
 		void AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight);
@@ -583,7 +587,7 @@ namespace SourceResolutionMonitor
 		std::atomic<const char*> lastRenderCause{ nullptr };
 		std::atomic<uint64_t> analysedThrough{ 0 };
 		std::atomic<uint64_t> releasedThrough{ 0 };   // the last release point (s - D) of ReleaseHeldFor; a result at or before it is late
-		std::atomic<unsigned long long> waitsMissed{ 0 }, heldDropped{ 0 }, heldStale{ 0 }, jobsDropped{ 0 }, clockStepsBack{ 0 }, submitSkipped{ 0 };
+		std::atomic<unsigned long long> waitsMissed{ 0 }, heldDropped{ 0 }, heldStale{ 0 }, jobsDropped{ 0 }, clockStepsBack{ 0 }, submitSkipped{ 0 }, engagedReactive{ 0 };
 		std::atomic<bool> denseGridApplied{ false };
 		Held held[kHeldCap];            // ring, guarded by `mutex`
 		size_t heldHead = 0, heldCount = 0;
