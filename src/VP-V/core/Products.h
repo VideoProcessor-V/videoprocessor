@@ -115,6 +115,12 @@ constexpr bool IsReservedProduct(ProductId id)
             return true;
     return false;
 }
+// The planned token of a reserved id (shown in the product-graph doc and the Ctrl+Alt+D status line; "" for any other id).
+constexpr const char* ReservedProductName(ProductId id)
+{
+    return id == kBandMemo ? "band_memo" : id == kFocusMap ? "focus_map" : id == kRoomLight ? "room_light"
+         : id == kComposedVectors ? "composed_vectors" : "";
+}
 
 // v1 names of ids 16-18 (kept so existing readers compile; the tokens and contracts are the v2 ones above).
 constexpr ProductId kTdAnalysis = kTdBlocks;

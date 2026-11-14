@@ -761,9 +761,15 @@ inline std::string RenderDoc()
     s += "### Products\n\n";
     s += "| id | token | unit (version) | backend | lane producer | live-fill owner | consumers | stamps | tier | residency | 1080p MB | 4K MB | 8K MB |\n";
     s += "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n";
-    for (const ProductDecl& d : reg.All()) {
-        if (d.id == kNoProduct)
-            continue;   // an absent slot of a reserved id: no row until its product lands
+    for (size_t slot = 0; slot < reg.All().size(); ++slot) {
+        const ProductDecl& d = reg.All()[slot];
+        if (d.id == kNoProduct) {
+            // An absent slot of a reserved id: a named row with no owner until its product lands (no unit, reader or size).
+            s += "| " + std::to_string(slot) + " | " + ReservedProductName(ProductId(slot)) + " | reserved (no owner)"
+                 + " | - | - | - | - | - | - | - | - | - | - |
+";
+            continue;
+        }
         const ProductRow* row = RowOf(d.id);
         const std::vector<const ConsumerRow*> cs = ConsumersOf(d.id);
         const ConsumerRow* owner = LiveFillOwner(d.id);

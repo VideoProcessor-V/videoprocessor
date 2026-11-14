@@ -983,8 +983,12 @@ public:
             lk.unlock();
             return Acquire(id, seq, form, vIn, true);
         }
-        if (ow == nullptr || !ow->fill)
-            return Fail(c, id, seq, AcquireCause::NoOwnerFill);
+        if (ow == nullptr || !ow->fill) {
+            AcquireResult r = Fail(c, id, seq, AcquireCause::NoOwnerFill);
+            if (IsReservedProduct(id))   // a fixed-table id whose product has not landed: say so, not just "no owner fill"
+                lastCause_[id] += std::string(": reserved product id ") + ReservedProductName(id) + " (not landed, no owner)";
+            return r;
+        }
         if ((v.Axes() & ~ow->variantAxes) != 0u || v.precision == kPrecisionFloat16)  // float16 is not 12-bit safe: every owner declines it, visibly (N2)
             return Fail(c, id, seq, AcquireCause::VariantUndeclared);
         if (ow->renderThreadOnly && !renderThread)
@@ -1294,6 +1298,12 @@ public:
         if (!retired_.empty())
             lines.push_back("skeleton acquire: " + std::to_string(retired_.size()) + " released GPU spot(s) held for a pending read fence"
                             + (fenceCompleted_ ? "" : " (no fence completion source: held until teardown)"));
+        {
+            std::string reserved;
+            for (ProductId r : kReservedProductIds)
+                reserved += (reserved.empty() ? "" : ", ") + std::to_string(unsigned(r)) + " " + ReservedProductName(r);
+            lines.push_back("skeleton acquire: reserved product ids (no owner yet): " + reserved);
+        }
         if (refusals_ != 0)
             lines.push_back("skeleton acquire: owner registrations refused " + std::to_string(refusals_) + " (" + refusalText_ + ")");
         return lines;
@@ -1456,6 +1466,8 @@ private:
     std::string NameOfLocked(ProductId id) const
     {
         const auto it = names_.find(id);
+        if (it == names_.end() && IsReservedProduct(id))
+            return std::string(ReservedProductName(id)) + " (reserved)";
         return it != names_.end() ? it->second : "product " + std::to_string(id);
     }
 
